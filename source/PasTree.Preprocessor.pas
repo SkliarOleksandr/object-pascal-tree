@@ -124,10 +124,12 @@ type
     constructor Create(ASourceManager: TPasSourceManager;
       ADefines: TPasDefines; ACompilerVersion: Double = 37.0);
     destructor Destroy; override;
-    { Preprocesses a main file (already loaded & lexed by the caller or via
-      the source manager). Returns the full result; the instance can be
-      reused for another file afterwards. }
+    { Preprocesses a main file loaded via the source manager. The instance
+      can be reused for another file afterwards. }
     function Process(const AFileName: string): TPasPreprocessed;
+    { Same, but with the main file's text supplied directly (tests, LSP
+      buffers). AFileName is used for include resolution and reporting. }
+    function ProcessText(const AFileName, ASource: string): TPasPreprocessed;
   end;
 
 const
@@ -377,6 +379,12 @@ begin
 end;
 
 function TPasPreprocessor.Process(const AFileName: string): TPasPreprocessed;
+begin
+  Result := ProcessText(AFileName, FSourceManager.LoadText(AFileName));
+end;
+
+function TPasPreprocessor.ProcessText(const AFileName,
+  ASource: string): TPasPreprocessed;
 var
   LStream: TPasTokenStream;
   LIdx: Integer;
@@ -395,7 +403,7 @@ begin
   FCondSeenElse.Clear;
   FSwitchStack.Clear;
 
-  LStream := TPasLexer.Tokenize(FSourceManager.LoadText(AFileName));
+  LStream := TPasLexer.Tokenize(ASource);
   FFileNames.Add(AFileName);
   FFiles.Add(LStream);
   FSkipped.Add(TList<TPasSkippedRegion>.Create);
