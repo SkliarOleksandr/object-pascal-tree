@@ -15,6 +15,7 @@ uses
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
   PasTree.Preprocessor in '..\source\PasTree.Preprocessor.pas',
+  PasTree.Platforms in '..\source\PasTree.Platforms.pas',
   PasTree.Ast in '..\source\PasTree.Ast.pas',
   PasTree.Parser in '..\source\PasTree.Parser.pas';
 
@@ -51,6 +52,58 @@ begin
     Writeln('  diags (expected ', AExpectDiags, '):');
     for LIdx := 0 to High(LDiags) do
       Writeln('    @', LDiags[LIdx].VisIndex, ': ', LDiags[LIdx].Msg);
+  end;
+end;
+
+procedure CheckAllPlatforms;
+const
+  SNIPPET =
+    '{$IFDEF MSWINDOWS}W := 1;{$ENDIF}' +
+    '{$IFDEF POSIX}P := 1;{$ENDIF}' +
+    '{$IF SizeOf(Pointer) = 8}B := 64{$ELSE}B := 32{$ENDIF};';
+var
+  LPlatform: TPasPlatform;
+  LInfo: TPasPlatformInfo;
+  LDefines: TPasDefines;
+  LPP: TPasPreprocessor;
+  LPre: TPasPreprocessed;
+  LDiags: TArray<TPasParseDiag>;
+  LTree: TPasTree;
+  LActual, LExpected: string;
+begin
+  for LPlatform := Low(TPasPlatform) to High(TPasPlatform) do
+  begin
+    LInfo := PlatformInfo(LPlatform);
+    LDefines := CreatePlatformDefines(LPlatform);
+    LPP := TPasPreprocessor.Create(GSM, LDefines, 37.0,
+      LInfo.PointerBytes, LInfo.ExtendedBytes);
+    try
+      LPre := LPP.ProcessText('test.pas', SNIPPET);
+      LTree := TPasParser.ParseStatements(LPre, LDiags);
+      LActual := LTree.Dump(0);
+      LExpected := 'Block(';
+      if LInfo.IsWindows then
+        LExpected := LExpected + 'Assign(Ident''W'' IntLit''1'') ';
+      if LInfo.IsPosix then
+        LExpected := LExpected + 'Assign(Ident''P'' IntLit''1'') ';
+      if LInfo.PointerBytes = 8 then
+        LExpected := LExpected + 'Assign(Ident''B'' IntLit''64'')'
+      else
+        LExpected := LExpected + 'Assign(Ident''B'' IntLit''32'')';
+      LExpected := LExpected + ')';
+      if (LActual = LExpected) and (Length(LDiags) = 0) then
+        Inc(GPassed)
+      else
+      begin
+        Inc(GFailed);
+        Writeln('FAIL platform ', LInfo.Name);
+        Writeln('  expected: ', LExpected);
+        Writeln('  actual:   ', LActual);
+      end;
+    finally
+      LPP.Free;
+      LDefines.Free;
+    end;
   end;
 end;
 
@@ -187,6 +240,10 @@ begin
     // ---- 1.3.2 conditional compilation in statements ----
     Check('1.3.2 ifdef', '{$IFDEF MSWINDOWS}A := 1;{$ELSE}A := 2;{$ENDIF}',
       'Block(Assign(Ident''A'' IntLit''1''))');
+
+    // ---- platform presets: iterate ALL target platforms and verify the
+    // define set + SizeOf(Pointer) drive branch selection correctly ----
+    CheckAllPlatforms;
 
     Writeln;
     Writeln(Format('=== ParserSmoke: %d passed, %d failed ===',

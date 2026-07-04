@@ -20,6 +20,7 @@ uses
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
   PasTree.Preprocessor in '..\source\PasTree.Preprocessor.pas',
+  PasTree.Platforms in '..\source\PasTree.Platforms.pas',
   PasTree.Ast in '..\source\PasTree.Ast.pas',
   PasTree.Parser in '..\source\PasTree.Parser.pas';
 
@@ -41,6 +42,8 @@ var
   GLine, GCol: Integer;
   GCtxIdx: Integer;
   GCtx: string;
+  GPlatform: TPasPlatform;
+  GPlatInfo: TPasPlatformInfo;
   GVis: TPasVisibleToken;
   GIssueFiles: TStringList;
   GElapsedSec: Double;
@@ -49,10 +52,23 @@ begin
   try
     if ParamCount < 1 then
     begin
-      Writeln('Usage: PasTreeParse <root-dir> [-v]');
+      Writeln('Usage: PasTreeParse <root-dir> [-v] [-p:<platform>]');
+      Writeln('Platforms: Win32 (default), Win64, WinArm64, OSX64,');
+      Writeln('  OSXARM64, iOSDevice64, iOSSimARM64, Android, Android64,');
+      Writeln('  Linux64');
       ExitCode := 2;
       Exit;
     end;
+    GPlatform := pfWin32;   // most common target in the wild
+    for GIdx := 2 to ParamCount do
+      if ParamStr(GIdx).StartsWith('-p:', True) then
+        if not TryParsePlatformName(Copy(ParamStr(GIdx), 4, MaxInt),
+          GPlatform) then
+        begin
+          Writeln('Unknown platform: ', Copy(ParamStr(GIdx), 4, MaxInt));
+          ExitCode := 2;
+          Exit;
+        end;
     GTotalFiles := 0;
     GTotalNodes := 0;
     GTotalParseDiags := 0;
@@ -62,12 +78,11 @@ begin
 
     GIssueFiles := TStringList.Create;
     GSM := TPasSourceManager.Create([]);
-    GDefines := TPasDefines.Create([
-      'MSWINDOWS', 'WIN64', 'CPUX64', 'CPU64BITS', 'CPUINTEL',
-      'VER370', 'CONDITIONALEXPRESSIONS', 'UNICODE', 'ASSEMBLER',
-      'NATIVECODE', 'UNDERSCOREIMPORTNAME'
-    ]);
-    GPP := TPasPreprocessor.Create(GSM, GDefines, 37.0);
+    GDefines := CreatePlatformDefines(GPlatform);
+    GPlatInfo := PlatformInfo(GPlatform);
+    GPP := TPasPreprocessor.Create(GSM, GDefines, 37.0,
+      GPlatInfo.PointerBytes, GPlatInfo.ExtendedBytes);
+    Writeln('Platform: ', GPlatInfo.Name);
     try
       GSM.BuildIncludeIndex(GRoot);
       GFiles := TDirectory.GetFiles(GRoot, '*.*', TSearchOption.soAllDirectories);

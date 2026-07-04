@@ -109,6 +109,8 @@ type
     FCondThisActive: TList<Boolean>;
     FCondSeenElse: TList<Boolean>;
     FCompilerVersion: Double;
+    FPointerBytes: Integer;
+    FExtendedBytes: Integer;
     function Active: Boolean;
     procedure Diag(ACode: TPasPPDiagCode; AFileId, AStart, ALen: Integer;
       const ADetail: string = '');
@@ -123,8 +125,11 @@ type
     function EvalIfExpression(const AExpr: string; AFileId: Integer;
       const AToken: TPasToken): Boolean;
   public
+    { APointerBytes/AExtendedBytes parameterize SizeOf() in $IF expressions
+      for the target platform (Win32: 4/10; 64-bit targets: 8/8). }
     constructor Create(ASourceManager: TPasSourceManager;
-      ADefines: TPasDefines; ACompilerVersion: Double = 37.0);
+      ADefines: TPasDefines; ACompilerVersion: Double = 37.0;
+      APointerBytes: Integer = 8; AExtendedBytes: Integer = 8);
     destructor Destroy; override;
     { Preprocesses a main file loaded via the source manager. The instance
       can be reused for another file afterwards. }
@@ -284,12 +289,15 @@ end;
 { TPasPreprocessor ----------------------------------------------------------- }
 
 constructor TPasPreprocessor.Create(ASourceManager: TPasSourceManager;
-  ADefines: TPasDefines; ACompilerVersion: Double);
+  ADefines: TPasDefines; ACompilerVersion: Double;
+  APointerBytes: Integer; AExtendedBytes: Integer);
 begin
   inherited Create;
   FSourceManager := ASourceManager;
   FBaseDefines := ADefines;
   FCompilerVersion := ACompilerVersion;
+  FPointerBytes := APointerBytes;
+  FExtendedBytes := AExtendedBytes;
   FSwitchStack := TStack<TPasSwitchState>.Create;
   FFileNames := TList<string>.Create;
   FFiles := TList<TPasTokenStream>.Create;
@@ -760,6 +768,8 @@ type
     HasUnknown: Boolean;  // expression referenced symbols we cannot resolve
     Defines: TPasDefines;
     CompilerVersion: Double;
+    PointerBytes: Integer;
+    ExtendedBytes: Integer;
     procedure SkipWs;
     function Word: string;         // peeks+consumes an identifier
     function TryWord(const AWord: string): Boolean;
@@ -1075,10 +1085,13 @@ begin
         Failed := True;
       Result.Kind := ivNum;
       if SameText(LArg, 'Pointer') or SameText(LArg, 'NativeInt') or
-         SameText(LArg, 'NativeUInt') or SameText(LArg, 'Int64') or
-         SameText(LArg, 'UInt64') or SameText(LArg, 'Double') or
-         SameText(LArg, 'Extended') or SameText(LArg, 'Currency') then
-        Result.Num := 8   // Win64 target assumptions (Extended = Double)
+         SameText(LArg, 'NativeUInt') then
+        Result.Num := PointerBytes
+      else if SameText(LArg, 'Extended') then
+        Result.Num := ExtendedBytes
+      else if SameText(LArg, 'Int64') or SameText(LArg, 'UInt64') or
+        SameText(LArg, 'Double') or SameText(LArg, 'Currency') then
+        Result.Num := 8
       else if SameText(LArg, 'Integer') or SameText(LArg, 'Cardinal') or
         SameText(LArg, 'LongInt') or SameText(LArg, 'LongWord') or
         SameText(LArg, 'Single') then
@@ -1136,6 +1149,8 @@ begin
   LEval.Pos := 1;
   LEval.Defines := FDefines;
   LEval.CompilerVersion := FCompilerVersion;
+  LEval.PointerBytes := FPointerBytes;
+  LEval.ExtendedBytes := FExtendedBytes;
   LValue := LEval.ParseOr;
   // NB: trailing junk after a complete expression is deliberately ignored —
   // dcc tolerates it (System.ObjAuto.pas ships '$IF SizeOf(Extended) >= 10)'

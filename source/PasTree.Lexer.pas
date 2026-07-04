@@ -632,8 +632,11 @@ begin
       Break;
     if (LCh = '(') and (CharAt(FPos + 1) = '*') then
       Break;
-    if ((LCh = 'e') or (LCh = 'E')) and not IsIdentChar(CharAt(FPos - 1)) then
+    if ((LCh = 'e') or (LCh = 'E')) and not IsIdentChar(CharAt(FPos - 1)) and
+       (CharAt(FPos - 1) <> '@') then
     begin
+      // NB: '@' exclusion — BASM labels may be named END: `JS @@END` /
+      // `@@END:` (Vcl.Graphics.pas) must not close the asm block.
       // Possible closing `end` at a word boundary.
       LWordStart := FPos;
       if ((CharAt(LWordStart + 1) = 'n') or (CharAt(LWordStart + 1) = 'N')) and
