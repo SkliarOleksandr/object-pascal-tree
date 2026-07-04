@@ -75,7 +75,67 @@ type
     nkRaiseStmt,      // 18.3.1: [expr [at-expr]]
     nkAsmStmt,        // 6.10: opaque BASM token range
     nkInlineVar,      // 3.1.3: name, [type], [init]
-    nkInlineConst     // 3.1.3 const form
+    nkInlineConst,    // 3.1.3 const form
+
+    // ---- compilation units (spec ch.01) ----
+    nkUnit,           // 1.1.2: name, [uses], interface, implementation, ...
+    nkProgram,        // 1.1.1
+    nkLibrary,        // 1.1.3
+    nkPackage,        // 1.1.3: requires/contains
+    nkUsesClause,     // 1.2.1: items
+    nkUsesItem,       //   name [+ 'in' path string]
+    nkInterfaceSec,
+    nkImplementationSec,
+    nkInitSec, nkFinalSec,
+    nkExportsClause,  // 1.1.3: items
+    nkExportsItem,
+
+    // ---- declaration sections (spec ch.02/03/06) ----
+    nkTypeSec, nkConstSec, nkVarSec, nkLabelSec,
+    nkTypeDecl,       // name [generic params] = [type-mark] TypeExpr;
+                      // Aux = 1 for distinct alias (= type X, 2.5.1)
+    nkConstDecl,      // name [: type] = init [hints]
+    nkVarDecl,        // names... : type [absolute X | = init]; also fields
+    nkAggregate,      // typed-const initializer ( ... ) (3.2.2)
+    nkAggregateField, //   name: value element
+
+    // ---- type expressions (spec ch.02/08/09/10/B.11) ----
+    nkSubrange,       // lo..hi (2.2.5)
+    nkEnumType,       // ( a, b = 1, ... ) (2.2.4)
+    nkEnumValue,      //   name [= const]
+    nkArrayType,      // array [dims] of T; Aux = 1 for array of const (8.x)
+    nkSetType,        // set of T (2.4.1)
+    nkFileType,       // file [of T] (10.2.1)
+    nkPointerType,    // ^T (10.1.1)
+    nkStringType,     // string[N] (7.1.3)
+    nkClassOf,        // class of T (15.2.1)
+    nkProcType,       // procedure/function type (6.6.1);
+                      // Aux: 1 = of object, 2 = reference to
+    nkClassType,      // 11.1.1; Aux: 1 = forward declaration
+    nkRecordType,     // 9.x
+    nkInterfaceType,  // 14.1.1; dispinterface flagged via Aux = 1
+    nkObjectType,     // 11.5 legacy
+    nkHelperType,     // 15.3: class/record helper for T; Aux 1 = record
+    nkGuid,           // 14.1.1: ['{...}']
+
+    // ---- members & routines (spec ch.06/11/13) ----
+    nkVisibility,     // 11.2.1: Aux encodes level; strict via flag
+    nkRoutine,        // procedure/function/constructor/destructor/operator;
+                      // children: name, [generic params], [params], [result
+                      // type], directives..., [body]
+    nkParams, nkParam,
+    nkDirective,      // routine directive (+ optional args as children)
+    nkPropertyDecl,   // 13.1.1: name, [index params], [type], specifiers
+    nkPropSpec,       // read/write/index/stored/default/implements + expr
+    nkMethodResolution, // 14.2.2: IFace.Method = ImplName
+    nkVariantPart,    // 9.1.3: [tag] type + branches
+    nkVariantBranch,  //   labels : ( fields )
+    nkGenericParams,  // 16.1: <T; U: constraints>
+    nkGenericParam,
+    nkConstraint,     // class/record/constructor/typeref
+    nkAttrGroup,      // 19.3.2: [Attr(args), ...]
+    nkAttribute,
+    nkRoutineBody     // local decl sections + compound/asm block
   );
 
   TPasNodeFlag = (

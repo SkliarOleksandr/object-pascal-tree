@@ -93,7 +93,8 @@ type
   TPasPreprocessor = class
   private
     FSourceManager: TPasSourceManager;
-    FDefines: TPasDefines;
+    FBaseDefines: TPasDefines;   // caller-owned project defines
+    FDefines: TPasDefines;       // per-run clone: $DEFINE is unit-local!
     FSwitches: TPasSwitchState;
     FSwitchStack: TStack<TPasSwitchState>;
     FFileNames: TList<string>;
@@ -116,6 +117,7 @@ type
     procedure HandleDirective(AFileId: Integer; const AToken: TPasToken);
     procedure HandleInclude(AFileId: Integer; const AToken: TPasToken;
       const AArg: string);
+    procedure ResetSwitches;
     procedure ApplySwitches(const ABody: string);
     procedure ApplyLongSwitch(const AName, AArg: string);
     function EvalIfExpression(const AExpr: string; AFileId: Integer;
@@ -283,12 +285,10 @@ end;
 
 constructor TPasPreprocessor.Create(ASourceManager: TPasSourceManager;
   ADefines: TPasDefines; ACompilerVersion: Double);
-var
-  LCh: Char;
 begin
   inherited Create;
   FSourceManager := ASourceManager;
-  FDefines := ADefines;
+  FBaseDefines := ADefines;
   FCompilerVersion := ACompilerVersion;
   FSwitchStack := TStack<TPasSwitchState>.Create;
   FFileNames := TList<string>.Create;
@@ -301,7 +301,15 @@ begin
   FCondAnyTaken := TList<Boolean>.Create;
   FCondThisActive := TList<Boolean>.Create;
   FCondSeenElse := TList<Boolean>.Create;
-  // Reasonable defaults for the switch state (release-ish).
+  ResetSwitches;
+end;
+
+procedure TPasPreprocessor.ResetSwitches;
+var
+  LCh: Char;
+begin
+  // Reasonable defaults for the switch state (release-ish). Re-applied per
+  // processed file: switch changes are unit-local, like defines.
   for LCh := 'A' to 'Z' do
     FSwitches[LCh] := False;
   FSwitches['C'] := True;   // assertions
@@ -319,6 +327,7 @@ end;
 
 destructor TPasPreprocessor.Destroy;
 begin
+  FDefines.Free;   // the per-run clone; FBaseDefines is caller-owned
   FCondSeenElse.Free;
   FCondThisActive.Free;
   FCondAnyTaken.Free;
@@ -390,7 +399,14 @@ var
   LIdx: Integer;
   LEof: TPasVisibleToken;
 begin
-  // Reset per-run state.
+  // Reset per-run state. $DEFINE/$UNDEF are LOCAL to the unit being
+  // processed (matching dcc): work on a fresh clone of the project
+  // defines, so one file's defines never leak into the next
+  // (System.ObjAuto.pas mis-branched when an earlier unit's define
+  // survived into its X64ASM chain).
+  FDefines.Free;
+  FDefines := FBaseDefines.Clone;
+  ResetSwitches;
   FFileNames.Clear;
   FFiles.Clear;
   FVisible.Clear;

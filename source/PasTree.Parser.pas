@@ -40,8 +40,17 @@ type
     FLast: Integer;      // High(FSrc.Visible)
     FDiags: TArray<TPasParseDiag>;
     FDiagCount: Integer;
+    FStuckPos: Integer;
+    FStuckCount: Integer;
+    // Watchdogs (see notes on ParseGuard):
+    FFuel: Int64;              // decremented in CurKind; trips at 0
+    FFuelTripped: Boolean;
+    FDepth: Integer;           // recursion depth across Parse* entries
+    FRoutineNameVis: Integer;  // diagnostics: current routine's name token
     // cursor
     function CurKind: TPasTokenKind;
+    function EnterGuard: Boolean;
+    procedure LeaveGuard;
     function PeekKind(AOffset: Integer): TPasTokenKind;
     function CurText: string;
     procedure Next;
@@ -68,8 +77,41 @@ type
     function ParseForStmt: Integer;
     function ParseTryStmt: Integer;
     function ParseInlineVar(AConst: Boolean): Integer;
+    // declarations (spec ch.01/02/03/06/09/11/13/14/15/16)
+    function ParseQualifiedName: Integer;
+    function ParseUsesClause: Integer;
+    function ParseAttrGroups: Integer;
+    procedure ParseHintsOpt(ANode: Integer);
+    function ParseTypeExpr: Integer;
+    function ParseEnumType: Integer;
+    function ParseArrayType: Integer;
+    function ParseProcTypeExpr(ARefTo: Boolean): Integer;
+    function ParseClassLike(AHeadKind: TPasTokenKind): Integer;
+    procedure ParseMemberList(AOwner: Integer);
+    procedure ParseVariantPart(AOwner: Integer);
+    procedure ParseFieldList(AOwner: Integer;
+      const ATerminators: array of TPasTokenKind);
+    function ParseGenericParamsOpt: Integer;
+    function ParseParamList(AClose: TPasTokenKind): Integer;
+    function ParseRoutine(AClassMethod, AAllowBody: Boolean): Integer;
+    function ParseRoutineDirectives(ARoutine: Integer): Boolean; // True=no body
+    function ParseRoutineBody: Integer;
+    function ParseProperty(AClassProp: Boolean): Integer;
+    function ParseTypeSection: Integer;
+    function ParseConstSection: Integer;
+    function ParseVarSection(AClassVar: Boolean): Integer;
+    function ParseConstInitializer(AHasType: Boolean): Integer;
+    function ParseExportsClause: Integer;
+    function IsDirectiveWord: Boolean;
+    function IsVisibilityWord: Boolean;
+    procedure ConsumeTrailingDirectives;
+    procedure ParseDeclSections(AParent: Integer; AAllowBodies: Boolean;
+      const ATerminators: array of TPasTokenKind);
   public
     class function ParseStatements(const ASource: TPasPreprocessed;
+      out ADiags: TArray<TPasParseDiag>): TPasTree; static;
+    { Parses a whole source file (unit/program/library/package). }
+    class function ParseFile(const ASource: TPasPreprocessed;
       out ADiags: TArray<TPasParseDiag>): TPasTree; static;
   end;
 
@@ -86,7 +128,35 @@ const
 
 function TPasParser.CurKind: TPasTokenKind;
 begin
+  // Fuel watchdog: CurKind is evaluated by every parsing loop's condition,
+  // so a step budget here bounds ALL loops — including silent ones that
+  // never consume and never report. Deterministic (per-token budget), so
+  // parse stays a pure function: no timers, no wall-clock, thread-safe.
+  if FFuel > 0 then
+    Dec(FFuel)
+  else if not FFuelTripped then
+  begin
+    FFuelTripped := True;
+    Error('internal: parser step budget exhausted (loop guard)');
+    FPos := FLast; // jump to EOF — every loop terminates naturally
+  end;
   Result := FSrc.VisibleToken(FPos).Kind;
+end;
+
+function TPasParser.EnterGuard: Boolean;
+begin
+  // Recursion-depth watchdog: guards the mutually recursive entry points
+  // against stack overflow on pathological nesting. Callers that get False
+  // must emit an error node WITHOUT recursing further.
+  Inc(FDepth);
+  Result := FDepth <= 512;
+  if not Result then
+    Error('internal: parser recursion limit reached');
+end;
+
+procedure TPasParser.LeaveGuard;
+begin
+  Dec(FDepth);
 end;
 
 function TPasParser.PeekKind(AOffset: Integer): TPasTokenKind;
@@ -140,6 +210,22 @@ begin
   FDiags[FDiagCount].VisIndex := FPos;
   FDiags[FDiagCount].Msg := AMsg;
   Inc(FDiagCount);
+  // Anti-stall guard: repeated errors at one position mean some recovery
+  // path is not consuming — force progress rather than loop forever.
+  if FPos = FStuckPos then
+  begin
+    Inc(FStuckCount);
+    if FStuckCount > 50 then
+    begin
+      FStuckCount := 0;
+      Next;
+    end;
+  end
+  else
+  begin
+    FStuckPos := FPos;
+    FStuckCount := 0;
+  end;
 end;
 
 { TPasParser — expressions --------------------------------------------------- }
@@ -236,6 +322,14 @@ var
   LNode, LChild, LStart: Integer;
 begin
   LStart := FPos;
+  if not EnterGuard then
+  begin
+    Result := FB.AddNode(nkError, NIL_NODE, LStart);
+    Next;
+    LeaveGuard;
+    Exit;
+  end;
+  try
   case CurKind of
     tkPlus, tkMinus, tkNot, tkAt:
       begin
@@ -249,32 +343,37 @@ begin
       end;
     tkIntLiteral:
       begin
+        // Literals take selectors too: 42.ToString (XE3 helpers).
         Result := FB.AddNode(nkIntLit, NIL_NODE, LStart);
         Next;
-        Exit;
+        Exit(ParseSelectors(Result));
       end;
     tkRealLiteral:
       begin
         Result := FB.AddNode(nkRealLit, NIL_NODE, LStart);
         Next;
-        Exit;
+        Exit(ParseSelectors(Result));
       end;
     tkStringLiteral, tkMultilineString, tkControlChar:
       begin
-        // Adjacent string elements concatenate into one literal (B.6.1).
+        // Adjacent string elements concatenate into one literal (B.6.1);
+        // helper calls on literals are legal: '.amazonaws.com'.Length
+        // (Data.Cloud.AmazonAPI.pas).
         Result := FB.AddNode(nkStrLit, NIL_NODE, LStart);
         Next;
         while CurKind in [tkStringLiteral, tkMultilineString, tkControlChar]
         do
           Next;
         FB.SetLast(Result, FPos - 1);
-        Exit;
+        Exit(ParseSelectors(Result));
       end;
     tkNil:
       begin
+        // Even nil takes selectors: GetPaletteEntries(..., nil^)
+        // (Vcl.Imaging.GIFImg.pas).
         Result := FB.AddNode(nkNilLit, NIL_NODE, LStart);
         Next;
-        Exit;
+        Exit(ParseSelectors(Result));
       end;
     tkCaret:
       begin
@@ -354,9 +453,13 @@ begin
           Next;
           LChild := ParseSelectors(LChild);
           FB.Adopt(LNode, LChild);
+          FB.SetLast(LNode, FPos - 1);
+          Exit(LNode);
         end;
         FB.SetLast(LNode, FPos - 1);
-        Exit(LNode);
+        // Bare inherited can be selected directly:
+        // inherited.AsExtended (FMX.Grid.Style.pas).
+        Exit(ParseSelectors(LNode));
       end;
     tkProcedure, tkFunction:
       begin
@@ -384,17 +487,14 @@ begin
           Next;
           FB.Adopt(LNode, ParseTypeRef);
         end;
-        if CurKind = tkBegin then
-        begin
-          LChild := FB.AddNode(nkBlock, NIL_NODE, FPos);
+        // Inline conventions before the body are legal:
+        // function(AResult: HResult): HResult stdcall begin (Vcl.Edge.pas)
+        while IsDirectiveWord do
           Next;
-          ParseBlockUntil(LChild, [tkEnd]);
-          Expect(tkEnd, '"end"');
-          FB.SetLast(LChild, FPos - 1);
-          FB.Adopt(LNode, LChild);
-        end
-        else
-          Error('"begin" expected in anonymous method');
+        // The body is a full routine body: anonymous methods may declare
+        // locals — function(...): TValue var fx: Extended; begin ... end
+        // (System.Bindings.EvalSys.pas) — and even nested routines.
+        FB.Adopt(LNode, ParseRoutineBody);
         FB.SetLast(LNode, FPos - 1);
         Exit(LNode);
       end;
@@ -410,6 +510,9 @@ begin
     Result := FB.AddNode(nkError, NIL_NODE, LStart);
     Next; // always make progress
   end;
+  finally
+    LeaveGuard;
+  end;
 end;
 
 function TPasParser.ParseSelectors(ABase: Integer): Integer;
@@ -424,7 +527,10 @@ begin
           LNode := FB.AddNode(nkMember, NIL_NODE, FPos);
           FB.Adopt(LNode, Result);
           Next;
-          if CurKind = tkIdentifier then
+          // Member position is unambiguous, so dcc accepts RESERVED WORDS
+          // as member names: TAnimationType.In (FMX declares `&In` but
+          // call sites write `.In`). Accept any keyword here.
+          if (CurKind = tkIdentifier) or IsKeyword(CurKind) then
           begin
             LChild := FB.AddNode(nkIdent, NIL_NODE, FPos);
             Next;
@@ -611,7 +717,19 @@ begin
             if LIdx < FLast then
             begin
               LKind := FSrc.VisibleToken(LIdx + 1).Kind;
-              if LKind in [tkLParen, tkDot] then
+              // Follower rule (16.3), inverted for safety: accept generic
+              // args unless the next token could START AN OPERAND. If it
+              // cannot (`;` `then` `=` `do` `and` ...), the comparison
+              // reading `(a < X) >  <follower>` would lack a right operand
+              // — a guaranteed syntax error — so accepting generic never
+              // steals a valid comparison. Covers Value.AsType<T>;,
+              // AsType<char> = #0, AsType<Boolean> then, @Proc<T>;.
+              // '(' is genuinely ambiguous and reads as a call, matching
+              // dcc (TList<Integer>.Create-style continuations).
+              if not (LKind in [tkIdentifier, tkIntLiteral, tkRealLiteral,
+                tkStringLiteral, tkMultilineString, tkControlChar, tkNil,
+                tkNot, tkAt, tkInherited, tkPlus, tkMinus, tkCaret,
+                tkLBracket, tkIf, tkProcedure, tkFunction, tkString]) then
                 Exit(LIdx + 1);
             end;
             Exit(-1);
@@ -897,6 +1015,18 @@ begin
   begin
     FB.Adopt(Result, FB.AddNode(nkIdent, NIL_NODE, FPos));
     Next;
+    // Inline vars may declare several names: var V, S: string; (10.3+)
+    while CurKind = tkComma do
+    begin
+      Next;
+      if CurKind = tkIdentifier then
+      begin
+        FB.Adopt(Result, FB.AddNode(nkIdent, NIL_NODE, FPos));
+        Next;
+      end
+      else
+        Error('name expected');
+    end;
   end
   else
     Error('name expected');
@@ -917,6 +1047,14 @@ function TPasParser.ParseStatement: Integer;
 var
   LNode, LExpr: Integer;
 begin
+  if not EnterGuard then
+  begin
+    Result := FB.AddNode(nkError, NIL_NODE, FPos);
+    Next;
+    LeaveGuard;
+    Exit;
+  end;
+  try
   case CurKind of
     tkBegin:
       begin
@@ -1069,6 +1207,1553 @@ begin
     FB.SetLast(LNode, FPos - 1);
     Result := LNode;
   end;
+  finally
+    LeaveGuard;
+  end;
+end;
+
+{ TPasParser — declarations ------------------------------------------------- }
+
+function TPasParser.ParseQualifiedName: Integer;
+var
+  LNode, LChild: Integer;
+begin
+  Result := FB.AddNode(nkIdent, NIL_NODE, FPos);
+  if CurKind = tkIdentifier then
+    Next
+  else
+    Error('name expected');
+  while CurKind = tkDot do
+  begin
+    LNode := FB.AddNode(nkMember, NIL_NODE, FPos);
+    FB.Adopt(LNode, Result);
+    Next;
+    LChild := FB.AddNode(nkIdent, NIL_NODE, FPos);
+    if CurKind = tkIdentifier then
+      Next
+    else
+      Error('name expected');
+    FB.Adopt(LNode, LChild);
+    FB.SetLast(LNode, FPos - 1);
+    Result := LNode;
+  end;
+end;
+
+function TPasParser.ParseUsesClause: Integer;
+var
+  LItem: Integer;
+begin
+  // 1.2.1; program-level items may carry `in 'path'`.
+  Result := FB.AddNode(nkUsesClause, NIL_NODE, FPos);
+  Next; // uses
+  repeat
+    LItem := FB.AddNode(nkUsesItem, NIL_NODE, FPos);
+    FB.Adopt(LItem, ParseQualifiedName);
+    if CurKind = tkIn then
+    begin
+      Next;
+      if CurKind = tkStringLiteral then
+      begin
+        FB.Adopt(LItem, FB.AddNode(nkStrLit, NIL_NODE, FPos));
+        Next;
+      end
+      else
+        Error('file path string expected');
+    end;
+    FB.SetLast(LItem, FPos - 1);
+    FB.Adopt(Result, LItem);
+    if CurKind = tkComma then
+      Next
+    else
+      Break;
+  until CurKind = tkEndOfFile;
+  Expect(tkSemicolon, '";"');
+  FB.SetLast(Result, FPos - 1);
+end;
+
+function TPasParser.ParseAttrGroups: Integer;
+var
+  LAttr: Integer;
+begin
+  // 19.3.2: one node collecting all adjacent [ ... ] groups.
+  if CurKind <> tkLBracket then
+    Exit(NIL_NODE);
+  Result := FB.AddNode(nkAttrGroup, NIL_NODE, FPos);
+  while CurKind = tkLBracket do
+  begin
+    Next;
+    while (CurKind <> tkRBracket) and (CurKind <> tkEndOfFile) do
+    begin
+      LAttr := FB.AddNode(nkAttribute, NIL_NODE, FPos);
+      FB.Adopt(LAttr, ParseTypeRef);
+      if CurKind = tkLParen then
+        ParseArgList(LAttr);
+      FB.SetLast(LAttr, FPos - 1);
+      FB.Adopt(Result, LAttr);
+      if CurKind = tkComma then
+        Next
+      else
+        Break;
+    end;
+    Expect(tkRBracket, '"]"');
+  end;
+  FB.SetLast(Result, FPos - 1);
+end;
+
+procedure TPasParser.ParseHintsOpt(ANode: Integer);
+begin
+  // 2.5.2 hint directives after a declaration.
+  while True do
+  begin
+    if IsWord('deprecated') then
+    begin
+      Next;
+      if CurKind = tkStringLiteral then
+        Next;
+    end
+    else if IsWord('platform') or IsWord('experimental') or
+      (CurKind = tkLibrary) then
+      Next
+    else
+      Break;
+  end;
+  FB.SetLast(ANode, FPos - 1);
+end;
+
+function TPasParser.ParseTypeExpr: Integer;
+var
+  LNode, LExpr: Integer;
+begin
+  if not EnterGuard then
+  begin
+    Result := FB.AddNode(nkError, NIL_NODE, FPos);
+    Next;
+    LeaveGuard;
+    Exit;
+  end;
+  try
+  case CurKind of
+    tkPacked:
+      begin
+        Next; // packing recorded implicitly by the token span
+        Exit(ParseTypeExpr);
+      end;
+    tkArray:
+      Exit(ParseArrayType);
+    tkSet:
+      begin
+        LNode := FB.AddNode(nkSetType, NIL_NODE, FPos);
+        Next;
+        Expect(tkOf, '"of"');
+        FB.Adopt(LNode, ParseTypeExpr);
+        FB.SetLast(LNode, FPos - 1);
+        Exit(LNode);
+      end;
+    tkFile:
+      begin
+        LNode := FB.AddNode(nkFileType, NIL_NODE, FPos);
+        Next;
+        if CurKind = tkOf then
+        begin
+          Next;
+          FB.Adopt(LNode, ParseTypeExpr);
+        end;
+        FB.SetLast(LNode, FPos - 1);
+        Exit(LNode);
+      end;
+    tkCaret:
+      begin
+        LNode := FB.AddNode(nkPointerType, NIL_NODE, FPos);
+        Next;
+        FB.Adopt(LNode, ParseTypeExpr);
+        FB.SetLast(LNode, FPos - 1);
+        Exit(LNode);
+      end;
+    tkClass:
+      begin
+        if PeekKind(1) = tkOf then
+        begin
+          LNode := FB.AddNode(nkClassOf, NIL_NODE, FPos);
+          Next;
+          Next;
+          FB.Adopt(LNode, ParseTypeRef);
+          FB.SetLast(LNode, FPos - 1);
+          Exit(LNode);
+        end;
+        Exit(ParseClassLike(tkClass));
+      end;
+    tkInterface, tkDispinterface, tkRecord, tkObject:
+      Exit(ParseClassLike(CurKind));
+    tkProcedure, tkFunction:
+      Exit(ParseProcTypeExpr(False));
+    tkLParen:
+      Exit(ParseEnumType);
+    tkString:
+      begin
+        if PeekKind(1) = tkLBracket then
+        begin
+          LNode := FB.AddNode(nkStringType, NIL_NODE, FPos);
+          Next;
+          Next;
+          FB.Adopt(LNode, ParseExpression);
+          Expect(tkRBracket, '"]"');
+          FB.SetLast(LNode, FPos - 1);
+          Exit(LNode);
+        end;
+        LNode := FB.AddNode(nkIdent, NIL_NODE, FPos);
+        Next;
+        Exit(LNode);
+      end;
+    tkIdentifier:
+      begin
+        if IsWord('reference') and (PeekKind(1) = tkTo) and
+          (PeekKind(2) in [tkProcedure, tkFunction]) then
+        begin
+          Next; // reference
+          Next; // to
+          Exit(ParseProcTypeExpr(True));
+        end;
+        // Type-context: generics always bind (16.3); may be a subrange lo.
+        LExpr := ParseTypeRef;
+        // Constant-expression continuations in ordinal positions:
+        // array[Ord(reA)..Ord(reB)] — allow selector chains (calls etc.).
+        if CurKind in [tkLParen, tkLBracket, tkCaret] then
+          LExpr := ParseSelectors(LExpr);
+        if CurKind = tkDotDot then
+        begin
+          LNode := FB.AddNode(nkSubrange, NIL_NODE, FPos);
+          FB.Adopt(LNode, LExpr);
+          Next;
+          FB.Adopt(LNode, ParseExpression);
+          FB.SetLast(LNode, FPos - 1);
+          Exit(LNode);
+        end;
+        Exit(LExpr);
+      end;
+  else
+    // Constant-expression subrange: -1..1, $FF..$100, Ord(x)..Ord(y)...
+    LExpr := ParseExpression;
+    if CurKind = tkDotDot then
+    begin
+      LNode := FB.AddNode(nkSubrange, NIL_NODE, FPos);
+      FB.Adopt(LNode, LExpr);
+      Next;
+      FB.Adopt(LNode, ParseExpression);
+      FB.SetLast(LNode, FPos - 1);
+      Exit(LNode);
+    end;
+    Result := LExpr;
+  end;
+  finally
+    LeaveGuard;
+  end;
+end;
+
+function TPasParser.ParseEnumType: Integer;
+var
+  LValue: Integer;
+begin
+  // 2.2.4: ( name [= const], ... )
+  Result := FB.AddNode(nkEnumType, NIL_NODE, FPos);
+  Next; // (
+  while (CurKind <> tkRParen) and (CurKind <> tkEndOfFile) do
+  begin
+    LValue := FB.AddNode(nkEnumValue, NIL_NODE, FPos);
+    if CurKind = tkIdentifier then
+    begin
+      FB.Adopt(LValue, FB.AddNode(nkIdent, NIL_NODE, FPos));
+      Next;
+    end
+    else
+    begin
+      Error('enum element expected');
+      Next;
+    end;
+    if CurKind = tkEqual then
+    begin
+      Next;
+      FB.Adopt(LValue, ParseExpression);
+    end;
+    FB.SetLast(LValue, FPos - 1);
+    FB.Adopt(Result, LValue);
+    if CurKind = tkComma then
+      Next
+    else
+      Break;
+  end;
+  Expect(tkRParen, '")"');
+  FB.SetLast(Result, FPos - 1);
+end;
+
+function TPasParser.ParseArrayType: Integer;
+begin
+  // 8.1/8.2: array [dims] of (const | T)
+  Result := FB.AddNode(nkArrayType, NIL_NODE, FPos);
+  Next; // array
+  if CurKind = tkLBracket then
+  begin
+    Next;
+    while (CurKind <> tkRBracket) and (CurKind <> tkEndOfFile) do
+    begin
+      FB.Adopt(Result, ParseTypeExpr);
+      if CurKind = tkComma then
+        Next
+      else
+        Break;
+    end;
+    Expect(tkRBracket, '"]"');
+  end;
+  Expect(tkOf, '"of"');
+  if CurKind = tkConst then
+  begin
+    FB.SetAux(Result, 1); // array of const (6.2.6)
+    Next;
+  end
+  else
+    FB.Adopt(Result, ParseTypeExpr);
+  FB.SetLast(Result, FPos - 1);
+end;
+
+function TPasParser.ParseProcTypeExpr(ARefTo: Boolean): Integer;
+begin
+  // 6.6.1 procedural types; of object / reference to variants.
+  Result := FB.AddNode(nkProcType, NIL_NODE, FPos);
+  if ARefTo then
+    FB.SetAux(Result, 2);
+  Next; // procedure/function
+  if CurKind = tkLParen then
+    FB.Adopt(Result, ParseParamList(tkRParen));
+  if CurKind = tkColon then
+  begin
+    Next;
+    FB.Adopt(Result, ParseTypeExpr);
+  end;
+  if (CurKind = tkOf) and (PeekKind(1) = tkObject) then
+  begin
+    FB.SetAux(Result, 1);
+    Next;
+    Next;
+  end;
+  // Inline calling convention without a separating semicolon:
+  // TFoo = procedure stdcall;
+  while IsDirectiveWord do
+    Next;
+  FB.SetLast(Result, FPos - 1);
+end;
+
+function TPasParser.ParseClassLike(AHeadKind: TPasTokenKind): Integer;
+var
+  LKind: TPasNodeKind;
+  LIsHelper: Boolean;
+begin
+  case AHeadKind of
+    tkRecord: LKind := nkRecordType;
+    tkInterface, tkDispinterface: LKind := nkInterfaceType;
+    tkObject: LKind := nkObjectType;
+  else
+    LKind := nkClassType;
+  end;
+  Result := FB.AddNode(LKind, NIL_NODE, FPos);
+  if AHeadKind = tkDispinterface then
+    FB.SetAux(Result, 1);
+  Next; // head keyword
+  // class abstract / class sealed
+  while IsWord('abstract') or IsWord('sealed') do
+    Next;
+  LIsHelper := IsWord('helper');
+  if LIsHelper then
+  begin
+    FB.SetKind(Result, nkHelperType);
+    if AHeadKind = tkRecord then
+      FB.SetAux(Result, 1);
+    Next; // helper
+  end;
+  // Forward declaration: class; / interface;
+  if (CurKind = tkSemicolon) and not LIsHelper then
+  begin
+    FB.SetAux(Result, 1);
+    FB.SetLast(Result, FPos - 1);
+    Exit;
+  end;
+  if CurKind = tkLParen then
+  begin
+    Next;
+    while (CurKind <> tkRParen) and (CurKind <> tkEndOfFile) do
+    begin
+      FB.Adopt(Result, ParseTypeRef);
+      if CurKind = tkComma then
+        Next
+      else
+        Break;
+    end;
+    Expect(tkRParen, '")"');
+  end;
+  if LIsHelper then
+  begin
+    // NB: `for` here is the reserved word tkFor, not an identifier.
+    if CurKind = tkFor then
+      Next
+    else
+      Error('"for" expected');
+    FB.Adopt(Result, ParseTypeRef);
+  end;
+  // Ancestor-only shorthand: TFoo = class(TBar);
+  if CurKind = tkSemicolon then
+  begin
+    FB.SetLast(Result, FPos - 1);
+    Exit;
+  end;
+  // Interface GUID (14.1.1).
+  if (AHeadKind in [tkInterface, tkDispinterface]) and
+     (CurKind = tkLBracket) and (PeekKind(1) = tkStringLiteral) then
+  begin
+    FB.Adopt(Result, FB.AddNode(nkGuid, NIL_NODE, FPos));
+    Next;
+    Next;
+    Expect(tkRBracket, '"]"');
+  end;
+  ParseMemberList(Result);
+  Expect(tkEnd, '"end"');
+  // Semi-documented alignment clause: `record ... end align 16;`
+  // (System.SysUtils.pas). The operand is a constant expression.
+  if IsWord('align') then
+  begin
+    Next;
+    FB.Adopt(Result, ParseExpression);
+  end;
+  ParseHintsOpt(Result);
+  FB.SetLast(Result, FPos - 1);
+end;
+
+procedure TPasParser.ParseMemberList(AOwner: Integer);
+var
+  LVis, LNode: Integer;
+  LStrict: Boolean;
+
+  function VisLevel(const AWord: string): Integer;
+  begin
+    if SameText(AWord, 'private') then Result := 1
+    else if SameText(AWord, 'protected') then Result := 2
+    else if SameText(AWord, 'public') then Result := 3
+    else if SameText(AWord, 'published') then Result := 4
+    else if SameText(AWord, 'automated') then Result := 5
+    else Result := 0;
+  end;
+
+begin
+  while not (CurKind in [tkEnd, tkEndOfFile]) do
+  begin
+    // Visibility sections (11.2.1), incl. strict and legacy automated.
+    // A bare visibility word in member position IS a section marker: a
+    // field genuinely named `private` must be written `&private`, and the
+    // &-escaped token text starts with '&', so SameText misses it — the
+    // disambiguation falls out of the lexer (B.3).
+    LStrict := IsWord('strict') and (FPos < FLast) and
+      (VisLevel(FSrc.VisibleText(FPos + 1)) in [1, 2]);
+    if LStrict or ((CurKind = tkIdentifier) and (VisLevel(CurText) > 0)) then
+    begin
+      LVis := FB.AddNode(nkVisibility, NIL_NODE, FPos);
+      if LStrict then
+      begin
+        FB.AddFlag(LVis, nfNegated); // reuse flag slot: strict marker
+        Next;
+      end;
+      FB.SetAux(LVis, VisLevel(CurText));
+      Next;
+      FB.SetLast(LVis, FPos - 1);
+      FB.Adopt(AOwner, LVis);
+      Continue;
+    end;
+
+    case CurKind of
+      tkSemicolon:
+        Next;
+      tkLBracket:
+        begin
+          LNode := ParseAttrGroups;
+          if LNode <> NIL_NODE then
+            FB.Adopt(AOwner, LNode);
+        end;
+      tkClass:
+        begin
+          // class var/threadvar/method/property/operator (15.x)
+          case PeekKind(1) of
+            tkVar:
+              begin
+                Next;
+                Next;
+                FB.Adopt(AOwner, ParseVarSection(True));
+              end;
+            tkThreadvar:
+              begin
+                Next;
+                Next;
+                FB.Adopt(AOwner, ParseVarSection(True));
+              end;
+            tkProcedure, tkFunction, tkConstructor, tkDestructor:
+              begin
+                Next;
+                FB.Adopt(AOwner, ParseRoutine(True, False));
+              end;
+            tkProperty:
+              begin
+                Next;
+                FB.Adopt(AOwner, ParseProperty(True));
+              end;
+          else
+            if (PeekKind(1) = tkIdentifier) and
+               SameText(FSrc.VisibleText(FPos + 1), 'operator') then
+            begin
+              Next;
+              FB.Adopt(AOwner, ParseRoutine(True, False));
+            end
+            else
+            begin
+              Error('class member expected');
+              Next;
+            end;
+          end;
+        end;
+      tkProcedure, tkFunction, tkConstructor, tkDestructor:
+        FB.Adopt(AOwner, ParseRoutine(False, False));
+      tkProperty:
+        FB.Adopt(AOwner, ParseProperty(False));
+      tkType:
+        FB.Adopt(AOwner, ParseTypeSection);
+      tkConst, tkResourcestring:
+        FB.Adopt(AOwner, ParseConstSection);
+      tkVar, tkThreadvar:
+        begin
+          Next; // section marker inside a class body
+          FB.Adopt(AOwner, ParseVarSection(False));
+        end;
+      tkCase:
+        ParseVariantPart(AOwner);
+      tkIdentifier, tkString:
+        // field declaration(s)
+        ParseFieldList(AOwner, [tkEnd, tkCase]);
+    else
+      Error('member declaration expected, found "' + CurText + '"');
+      Next;
+    end;
+  end;
+end;
+
+procedure TPasParser.ParseFieldList(AOwner: Integer;
+  const ATerminators: array of TPasTokenKind);
+var
+  LDecl: Integer;
+begin
+  // identList : Type [hints] ; ... — stops before terminators or non-fields.
+  while CurKind = tkIdentifier do
+  begin
+    LDecl := FB.AddNode(nkVarDecl, NIL_NODE, FPos);
+    FB.Adopt(LDecl, FB.AddNode(nkIdent, NIL_NODE, FPos));
+    Next;
+    while CurKind = tkComma do
+    begin
+      Next;
+      if CurKind = tkIdentifier then
+      begin
+        FB.Adopt(LDecl, FB.AddNode(nkIdent, NIL_NODE, FPos));
+        Next;
+      end
+      else
+        Error('field name expected');
+    end;
+    Expect(tkColon, '":"');
+    FB.Adopt(LDecl, ParseTypeExpr);
+    ParseHintsOpt(LDecl);
+    FB.SetLast(LDecl, FPos - 1);
+    FB.Adopt(AOwner, LDecl);
+    if CurKind = tkSemicolon then
+      Next
+    else
+      Break;
+    ConsumeTrailingDirectives;
+    if AtAny(ATerminators) then
+      Break;
+    // Non-field successor ends the field run (methods, visibility, ...).
+    if not (CurKind = tkIdentifier) then
+      Break;
+    // A visibility word starts a new section, not a field (see the note in
+    // ParseMemberList: escaped &private would not SameText-match).
+    if SameText(CurText, 'private') or SameText(CurText, 'protected') or
+       SameText(CurText, 'public') or SameText(CurText, 'published') or
+       SameText(CurText, 'strict') or SameText(CurText, 'automated') then
+      Break;
+  end;
+end;
+
+procedure TPasParser.ParseVariantPart(AOwner: Integer);
+var
+  LPart, LBranch: Integer;
+begin
+  // 9.1.3: case [tag:] OrdinalType of const,...: ( fields [variant] ); ...
+  LPart := FB.AddNode(nkVariantPart, NIL_NODE, FPos);
+  Next; // case
+  if (CurKind = tkIdentifier) and (PeekKind(1) = tkColon) then
+  begin
+    FB.Adopt(LPart, FB.AddNode(nkIdent, NIL_NODE, FPos));
+    Next;
+    Next;
+  end;
+  FB.Adopt(LPart, ParseTypeRef);
+  Expect(tkOf, '"of"');
+  while not (CurKind in [tkEnd, tkRParen, tkEndOfFile]) do
+  begin
+    LBranch := FB.AddNode(nkVariantBranch, NIL_NODE, FPos);
+    // labels
+    repeat
+      FB.Adopt(LBranch, ParseExpression);
+      if CurKind = tkComma then
+        Next
+      else
+        Break;
+    until False;
+    Expect(tkColon, '":"');
+    Expect(tkLParen, '"("');
+    while not (CurKind in [tkRParen, tkEndOfFile]) do
+      if CurKind = tkCase then
+        ParseVariantPart(LBranch)
+      else if CurKind = tkIdentifier then
+        ParseFieldList(LBranch, [tkRParen, tkCase])
+      else
+      begin
+        Error('field expected');
+        Next;
+      end;
+    Expect(tkRParen, '")"');
+    FB.SetLast(LBranch, FPos - 1);
+    FB.Adopt(LPart, LBranch);
+    if CurKind = tkSemicolon then
+      Next
+    else
+      Break;
+  end;
+  FB.SetLast(LPart, FPos - 1);
+  FB.Adopt(AOwner, LPart);
+end;
+
+function TPasParser.ParseGenericParamsOpt: Integer;
+var
+  LParam, LCon: Integer;
+begin
+  // 16.1/16.4: <T; TKey, TValue: constraints>
+  if CurKind <> tkLess then
+    Exit(NIL_NODE);
+  Result := FB.AddNode(nkGenericParams, NIL_NODE, FPos);
+  Next;
+  while (CurKind <> tkGreater) and (CurKind <> tkEndOfFile) do
+  begin
+    LParam := FB.AddNode(nkGenericParam, NIL_NODE, FPos);
+    // A "parameter" here is a TypeRef, not a bare ident: implementation
+    // headers of closed generics use type arguments — e.g. the method
+    // resolution `function IEnumerator<string>.GetCurrent = ...`
+    // (System.IOUtils.pas) — and TypeRef also covers plain T.
+    FB.Adopt(LParam, ParseTypeRef);
+    while CurKind = tkComma do
+    begin
+      Next;
+      FB.Adopt(LParam, ParseTypeRef);
+    end;
+    if CurKind = tkColon then
+    begin
+      Next;
+      repeat
+        LCon := FB.AddNode(nkConstraint, NIL_NODE, FPos);
+        case CurKind of
+          tkClass, tkRecord, tkConstructor:
+            Next;
+        else
+          FB.Adopt(LCon, ParseTypeRef);
+        end;
+        FB.SetLast(LCon, FPos - 1);
+        FB.Adopt(LParam, LCon);
+        if CurKind = tkComma then
+          Next
+        else
+          Break;
+      until False;
+    end;
+    FB.SetLast(LParam, FPos - 1);
+    FB.Adopt(Result, LParam);
+    if CurKind = tkSemicolon then
+      Next
+    else
+      Break;
+  end;
+  Expect(tkGreater, '">"');
+  FB.SetLast(Result, FPos - 1);
+end;
+
+function TPasParser.ParseParamList(AClose: TPasTokenKind): Integer;
+var
+  LParam, LAttrs: Integer;
+begin
+  // 6.2: [attrs] [var|const|out] names [: [array of] T] [= default]
+  Result := FB.AddNode(nkParams, NIL_NODE, FPos);
+  Next; // ( or [
+  while (CurKind <> AClose) and (CurKind <> tkEndOfFile) do
+  begin
+    LParam := FB.AddNode(nkParam, NIL_NODE, FPos);
+    LAttrs := ParseAttrGroups;
+    if LAttrs <> NIL_NODE then
+      FB.Adopt(LParam, LAttrs);
+    if CurKind in [tkVar, tkConst] then
+    begin
+      Next;
+      LAttrs := ParseAttrGroups; // const [Ref] X (6.2.3)
+      if LAttrs <> NIL_NODE then
+        FB.Adopt(LParam, LAttrs);
+    end
+    else if IsWord('out') then
+      Next;
+    if CurKind = tkIdentifier then
+    begin
+      FB.Adopt(LParam, FB.AddNode(nkIdent, NIL_NODE, FPos));
+      Next;
+      while CurKind = tkComma do
+      begin
+        Next;
+        // Attributes may precede EACH name in the list:
+        // const [REF] CLSID, [REF] IID: TGUID  (Datasnap.DSIntf.pas)
+        LAttrs := ParseAttrGroups;
+        if LAttrs <> NIL_NODE then
+          FB.Adopt(LParam, LAttrs);
+        if CurKind = tkIdentifier then
+        begin
+          FB.Adopt(LParam, FB.AddNode(nkIdent, NIL_NODE, FPos));
+          Next;
+        end;
+      end;
+    end
+    else
+      Error('parameter name expected');
+    if CurKind = tkColon then
+    begin
+      Next;
+      FB.Adopt(LParam, ParseTypeExpr);
+      if CurKind = tkEqual then
+      begin
+        Next;
+        FB.Adopt(LParam, ParseExpression);
+      end;
+    end;
+    FB.SetLast(LParam, FPos - 1);
+    FB.Adopt(Result, LParam);
+    if CurKind = tkSemicolon then
+      Next
+    else
+      Break;
+  end;
+  Expect(AClose, 'closing bracket');
+  FB.SetLast(Result, FPos - 1);
+end;
+
+function TPasParser.IsDirectiveWord: Boolean;
+const
+  WORDS: array[0..29] of string = (
+    'overload', 'virtual', 'dynamic', 'override', 'abstract', 'final',
+    'reintroduce', 'static', 'assembler', 'cdecl', 'stdcall', 'register',
+    'pascal', 'safecall', 'winapi', 'export', 'local', 'near', 'far',
+    'varargs', 'unsafe', 'noreturn', 'deprecated', 'platform',
+    'experimental', 'forward', 'delayed', 'message', 'dispid', 'external');
+var
+  LWord: string;
+begin
+  if CurKind = tkInline then
+    Exit(True);
+  if CurKind = tkLibrary then
+    Exit(True);
+  if CurKind <> tkIdentifier then
+    Exit(False);
+  for LWord in WORDS do
+    if SameText(CurText, LWord) then
+      Exit(True);
+  Result := False;
+end;
+
+function TPasParser.IsVisibilityWord: Boolean;
+begin
+  // Nested const/type/var sections inside a class body end where the next
+  // visibility section starts (11.2.1). &-escaped names don't match (B.3).
+  Result := (CurKind = tkIdentifier) and
+    (SameText(CurText, 'private') or SameText(CurText, 'protected') or
+     SameText(CurText, 'public') or SameText(CurText, 'published') or
+     SameText(CurText, 'strict') or SameText(CurText, 'automated'));
+end;
+
+procedure TPasParser.ConsumeTrailingDirectives;
+
+  function IsDirectiveWordAt(AIdx: Integer): Boolean;
+  var
+    LSave: Integer;
+  begin
+    LSave := FPos;
+    FPos := AIdx;
+    Result := IsDirectiveWord;
+    FPos := LSave;
+  end;
+
+var
+  LProbe: Integer;
+begin
+  // Post-semicolon directives after procedural-type declarations. Runs of
+  // several directives without separators are legal:
+  //   TFn = function(...): X; stdcall;
+  //   curl_formadd: function(...): CURLFORMcode; cdecl varargs;
+  // The run must terminate with ';' — otherwise the word is the next
+  // declaration's name (e.g. a variable named `index`), and we leave it.
+  while IsDirectiveWord do
+  begin
+    LProbe := FPos;
+    while (LProbe <= FLast) and IsDirectiveWordAt(LProbe) do
+      Inc(LProbe);
+    if (LProbe <= FLast) and
+       (FSrc.VisibleToken(LProbe).Kind = tkStringLiteral) then
+      Inc(LProbe);
+    // Initialized procedural-type variables put the initializer AFTER the
+    // convention: `X: procedure; cdecl = nil;` (IdSSLOpenSSLHeaders.pas).
+    if (LProbe <= FLast) and (FSrc.VisibleToken(LProbe).Kind = tkEqual) then
+    begin
+      while FPos < LProbe do
+        Next;
+      Next; // '='
+      ParseConstInitializer(True);
+      Expect(tkSemicolon, '";"');
+      Continue;
+    end;
+    if (LProbe > FLast) or (FSrc.VisibleToken(LProbe).Kind <> tkSemicolon)
+    then
+      Break;
+    while FPos < LProbe do
+      Next;
+    Expect(tkSemicolon, '";"');
+  end;
+end;
+
+function TPasParser.ParseRoutineDirectives(ARoutine: Integer): Boolean;
+var
+  LDir: Integer;
+  LIsExternal, LIsForward, LIsAbstract: Boolean;
+begin
+  // 6.x: `; directive`* — returns True when the routine has no body.
+  LIsExternal := False;
+  LIsForward := False;
+  LIsAbstract := False;
+  while IsDirectiveWord do
+  begin
+    LDir := FB.AddNode(nkDirective, NIL_NODE, FPos);
+    if IsWord('external') then
+    begin
+      LIsExternal := True;
+      Next;
+      // external [lib] [name expr | index expr | dependency e,e | delayed]
+      while not (CurKind in [tkSemicolon, tkEndOfFile]) do
+      begin
+        if IsWord('name') or IsWord('index') then
+        begin
+          Next;
+          FB.Adopt(LDir, ParseExpression);
+        end
+        else if IsWord('dependency') then
+        begin
+          Next;
+          FB.Adopt(LDir, ParseExpression);
+          while CurKind = tkComma do
+          begin
+            Next;
+            FB.Adopt(LDir, ParseExpression);
+          end;
+        end
+        else if IsWord('delayed') then
+          Next
+        else
+          FB.Adopt(LDir, ParseExpression);
+      end;
+    end
+    else if IsWord('message') or IsWord('dispid') then
+    begin
+      Next;
+      FB.Adopt(LDir, ParseExpression);
+    end
+    else if IsWord('deprecated') then
+    begin
+      Next;
+      if CurKind = tkStringLiteral then
+        Next;
+    end
+    else
+    begin
+      if IsWord('forward') then
+        LIsForward := True
+      else if IsWord('abstract') then
+        LIsAbstract := True;
+      Next;
+    end;
+    FB.SetLast(LDir, FPos - 1);
+    FB.Adopt(ARoutine, LDir);
+    if CurKind = tkSemicolon then
+      Next
+    else
+      Break;
+  end;
+  Result := LIsExternal or LIsForward or LIsAbstract;
+end;
+
+function TPasParser.ParseRoutine(AClassMethod, AAllowBody: Boolean): Integer;
+var
+  LSeg, LGen, LRes: Integer;
+  LIsOperator: Boolean;
+begin
+  // 6.1: [class] procedure|function|constructor|destructor|operator
+  Result := FB.AddNode(nkRoutine, NIL_NODE, FPos);
+  if AClassMethod then
+    FB.SetAux(Result, 1);
+  LIsOperator := IsWord('operator');
+  Next; // routine keyword (or 'operator' identifier)
+  FRoutineNameVis := FPos;
+  // Name: segments with optional generic params (impl headers, 16.3).
+  // Operators may be named by reserved words: class operator In(...)
+  // (FMX.Graphics.pas).
+  if LIsOperator and IsKeyword(CurKind) then
+  begin
+    FB.Adopt(Result, FB.AddNode(nkIdent, NIL_NODE, FPos));
+    Next;
+  end
+  else if CurKind = tkIdentifier then
+  begin
+    LSeg := FB.AddNode(nkIdent, NIL_NODE, FPos);
+    Next;
+    FB.Adopt(Result, LSeg);
+    LGen := ParseGenericParamsOpt;
+    if LGen <> NIL_NODE then
+      FB.Adopt(Result, LGen);
+    while CurKind = tkDot do
+    begin
+      Next;
+      // Operator implementations may end in a reserved word:
+      // class operator TFontStyleExt.In(...) (FMX.Graphics.pas).
+      if (CurKind = tkIdentifier) or (LIsOperator and IsKeyword(CurKind))
+      then
+      begin
+        FB.Adopt(Result, FB.AddNode(nkIdent, NIL_NODE, FPos));
+        Next;
+        LGen := ParseGenericParamsOpt;
+        if LGen <> NIL_NODE then
+          FB.Adopt(Result, LGen);
+      end
+      else
+      begin
+        Error('name expected');
+        Break;
+      end;
+    end;
+  end
+  else
+    Error('routine name expected');
+  // Method resolution clause (14.2.2): function IFoo.M = Impl;
+  if CurKind = tkEqual then
+  begin
+    FB.SetKind(Result, nkMethodResolution);
+    Next;
+    if CurKind = tkIdentifier then
+    begin
+      FB.Adopt(Result, FB.AddNode(nkIdent, NIL_NODE, FPos));
+      Next;
+    end
+    else
+      Error('method name expected');
+    Expect(tkSemicolon, '";"');
+    FB.SetLast(Result, FPos - 1);
+    Exit;
+  end;
+  if CurKind = tkLParen then
+    FB.Adopt(Result, ParseParamList(tkRParen));
+  if CurKind = tkColon then
+  begin
+    Next;
+    LRes := ParseTypeExpr;
+    FB.Adopt(Result, LRes);
+  end;
+  // Calling convention without a separating semicolon:
+  // function Foo(...): Bool stdcall;  (System.SysUtils.pas)
+  while IsDirectiveWord and (PeekKind(1) = tkSemicolon) do
+    Next;
+  Expect(tkSemicolon, '";"');
+  if not ParseRoutineDirectives(Result) then
+    if AAllowBody then
+    begin
+      FB.Adopt(Result, ParseRoutineBody);
+      Expect(tkSemicolon, '";"');
+    end;
+  FB.SetLast(Result, FPos - 1);
+end;
+
+function TPasParser.ParseRoutineBody: Integer;
+var
+  LBlock: Integer;
+begin
+  // 6.x + B.12: local declarations then begin..end or asm..end.
+  // tkEnd in the terminators bounds the damage when a header unexpectedly
+  // has no body (misalignment stops at the enclosing end instead of
+  // swallowing the rest of the unit).
+  Result := FB.AddNode(nkRoutineBody, NIL_NODE, FPos);
+  ParseDeclSections(Result, True, [tkBegin, tkAsm, tkEnd]);
+  if CurKind = tkAsm then
+  begin
+    LBlock := FB.AddNode(nkAsmStmt, NIL_NODE, FPos);
+    Next;
+    while not (CurKind in [tkEnd, tkEndOfFile]) do
+      Next;
+    Expect(tkEnd, '"end"');
+    FB.SetLast(LBlock, FPos - 1);
+    FB.Adopt(Result, LBlock);
+  end
+  else if CurKind = tkBegin then
+  begin
+    LBlock := FB.AddNode(nkBlock, NIL_NODE, FPos);
+    Next;
+    ParseBlockUntil(LBlock, [tkEnd]);
+    Expect(tkEnd, '"end"');
+    FB.SetLast(LBlock, FPos - 1);
+    FB.Adopt(Result, LBlock);
+  end
+  else
+    Error('"begin" expected (routine ' +
+      FSrc.VisibleText(FRoutineNameVis) + ')');
+  FB.SetLast(Result, FPos - 1);
+end;
+
+function TPasParser.ParseProperty(AClassProp: Boolean): Integer;
+var
+  LSpec: Integer;
+  LArgless: Boolean;
+begin
+  // 13.1: property Name[params]: T specifiers; [default;]
+  Result := FB.AddNode(nkPropertyDecl, NIL_NODE, FPos);
+  if AClassProp then
+    FB.SetAux(Result, 1);
+  Next; // property
+  if CurKind = tkIdentifier then
+  begin
+    FB.Adopt(Result, FB.AddNode(nkIdent, NIL_NODE, FPos));
+    Next;
+  end
+  else
+    Error('property name expected');
+  if CurKind = tkLBracket then
+    FB.Adopt(Result, ParseParamList(tkRBracket));
+  if CurKind = tkColon then
+  begin
+    Next;
+    FB.Adopt(Result, ParseTypeExpr);
+  end;
+  // Specifiers until ';' (13.1.x): read write index stored default
+  // nodefault implements readonly writeonly dispid.
+  while not (CurKind in [tkSemicolon, tkEndOfFile]) do
+  begin
+    if CurKind = tkIdentifier then
+    begin
+      LSpec := FB.AddNode(nkPropSpec, NIL_NODE, FPos);
+      LArgless := SameText(CurText, 'nodefault') or
+        SameText(CurText, 'readonly') or SameText(CurText, 'writeonly');
+      Next;
+      if not LArgless and (CurKind <> tkSemicolon) then
+      begin
+        FB.Adopt(LSpec, ParseExpression);
+        // implements I1, I2 (14.4.1)
+        while CurKind = tkComma do
+        begin
+          Next;
+          FB.Adopt(LSpec, ParseExpression);
+        end;
+      end;
+      FB.SetLast(LSpec, FPos - 1);
+      FB.Adopt(Result, LSpec);
+    end
+    else
+    begin
+      Error('property specifier expected');
+      Next;
+    end;
+  end;
+  Expect(tkSemicolon, '";"');
+  // Trailing `default;` = default array property (13.1.4).
+  if IsWord('default') and (PeekKind(1) = tkSemicolon) then
+  begin
+    LSpec := FB.AddNode(nkPropSpec, NIL_NODE, FPos);
+    Next;
+    Next;
+    FB.SetLast(LSpec, FPos - 1);
+    FB.Adopt(Result, LSpec);
+  end;
+  ParseHintsOpt(Result);
+  if CurKind = tkSemicolon then
+    Next;
+  FB.SetLast(Result, FPos - 1);
+end;
+
+function TPasParser.ParseConstInitializer(AHasType: Boolean): Integer;
+var
+  LField: Integer;
+
+  function LooksLikeAggregate: Boolean;
+  var
+    LIdx, LDepth, LSteps: Integer;
+    LKind: TPasTokenKind;
+  begin
+    // Distinguishes `(1, 2, 3)` / `(X: 0; Y: 1)` aggregates from plain
+    // parenthesised const expressions like ((1.0/$10000) / $10000):
+    // an aggregate has ',' ';' or ':' at nesting depth 1.
+    Result := False;
+    LIdx := FPos + 1;
+    LDepth := 1;
+    LSteps := 0;
+    while (LIdx <= FLast) and (LSteps < 4096) do
+    begin
+      LKind := FSrc.VisibleToken(LIdx).Kind;
+      // First-inner-token checks must run BEFORE the depth bookkeeping:
+      // '()' empty aggregate closes depth immediately (OleControls), and
+      // '((' opens a single-element nested aggregate (test_xpParse).
+      if (LIdx = FPos + 1) and (LKind in [tkLParen, tkRParen]) then
+        Exit(True);
+      case LKind of
+        tkLParen, tkLBracket:
+          Inc(LDepth);
+        tkRParen, tkRBracket:
+          begin
+            Dec(LDepth);
+            if LDepth = 0 then
+              Exit(False);
+          end;
+        tkComma, tkSemicolon, tkColon:
+          if LDepth = 1 then
+            Exit(True);
+      end;
+      Inc(LIdx);
+      Inc(LSteps);
+    end;
+  end;
+
+begin
+  if not EnterGuard then
+  begin
+    Result := FB.AddNode(nkError, NIL_NODE, FPos);
+    Next;
+    LeaveGuard;
+    Exit;
+  end;
+  try
+  // 3.2.2: typed constants may use ( ... ) aggregates; only a typed const
+  // can be an aggregate, so '(' after an untyped '=' is a paren expr —
+  // and even for typed consts the parens may be a plain expression.
+  if AHasType and (CurKind = tkLParen) and LooksLikeAggregate then
+  begin
+    Result := FB.AddNode(nkAggregate, NIL_NODE, FPos);
+    Next;
+    while not (CurKind in [tkRParen, tkEndOfFile]) do
+    begin
+      if (CurKind = tkIdentifier) and (PeekKind(1) = tkColon) then
+      begin
+        LField := FB.AddNode(nkAggregateField, NIL_NODE, FPos);
+        FB.Adopt(LField, FB.AddNode(nkIdent, NIL_NODE, FPos));
+        Next;
+        Next;
+        FB.Adopt(LField, ParseConstInitializer(True));
+        FB.SetLast(LField, FPos - 1);
+        FB.Adopt(Result, LField);
+      end
+      else if CurKind = tkLParen then
+        // Nested aggregates are unambiguous in element position.
+        FB.Adopt(Result, ParseConstInitializer(True))
+      else
+        FB.Adopt(Result, ParseExpression);
+      if CurKind in [tkComma, tkSemicolon] then
+        Next
+      else
+        Break;
+    end;
+    Expect(tkRParen, '")"');
+    FB.SetLast(Result, FPos - 1);
+  end
+  else
+    Result := ParseExpression;
+  finally
+    LeaveGuard;
+  end;
+end;
+
+function TPasParser.ParseTypeSection: Integer;
+var
+  LDecl, LGen, LAttrs: Integer;
+begin
+  // 2.x: type name<...> = [type] TypeExpr; ...
+  Result := FB.AddNode(nkTypeSec, NIL_NODE, FPos);
+  Next; // type
+  while (CurKind = tkIdentifier) or (CurKind = tkLBracket) do
+  begin
+    if IsVisibilityWord then
+      Break;
+    LAttrs := ParseAttrGroups;
+    if CurKind <> tkIdentifier then
+    begin
+      if LAttrs <> NIL_NODE then
+        FB.Adopt(Result, LAttrs);
+      Break;
+    end;
+    LDecl := FB.AddNode(nkTypeDecl, NIL_NODE, FPos);
+    if LAttrs <> NIL_NODE then
+      FB.Adopt(LDecl, LAttrs);
+    FB.Adopt(LDecl, FB.AddNode(nkIdent, NIL_NODE, FPos));
+    Next;
+    LGen := ParseGenericParamsOpt;
+    if LGen <> NIL_NODE then
+      FB.Adopt(LDecl, LGen);
+    Expect(tkEqual, '"="');
+    if CurKind = tkType then
+    begin
+      // Distinct alias: T = type Base (2.5.1).
+      FB.SetAux(LDecl, 1);
+      Next;
+    end;
+    FB.Adopt(LDecl, ParseTypeExpr);
+    ParseHintsOpt(LDecl);
+    FB.SetLast(LDecl, FPos - 1);
+    FB.Adopt(Result, LDecl);
+    Expect(tkSemicolon, '";"');
+    ConsumeTrailingDirectives;
+    if IsVisibilityWord then
+      Break;
+  end;
+  FB.SetLast(Result, FPos - 1);
+end;
+
+function TPasParser.ParseConstSection: Integer;
+var
+  LDecl, LAttrs: Integer;
+  LHasType: Boolean;
+begin
+  // 3.2: const/resourcestring entries.
+  Result := FB.AddNode(nkConstSec, NIL_NODE, FPos);
+  Next;
+  while (CurKind = tkIdentifier) or (CurKind = tkLBracket) do
+  begin
+    if IsVisibilityWord then
+      Break;
+    LAttrs := ParseAttrGroups;
+    if CurKind <> tkIdentifier then
+      Break;
+    LDecl := FB.AddNode(nkConstDecl, NIL_NODE, FPos);
+    if LAttrs <> NIL_NODE then
+      FB.Adopt(LDecl, LAttrs);
+    FB.Adopt(LDecl, FB.AddNode(nkIdent, NIL_NODE, FPos));
+    Next;
+    LHasType := CurKind = tkColon;
+    if LHasType then
+    begin
+      Next;
+      FB.Adopt(LDecl, ParseTypeExpr);
+    end;
+    Expect(tkEqual, '"="');
+    FB.Adopt(LDecl, ParseConstInitializer(LHasType));
+    ParseHintsOpt(LDecl);
+    FB.SetLast(LDecl, FPos - 1);
+    FB.Adopt(Result, LDecl);
+    Expect(tkSemicolon, '";"');
+    ConsumeTrailingDirectives;
+    if IsVisibilityWord then
+      Break;
+  end;
+  FB.SetLast(Result, FPos - 1);
+end;
+
+function TPasParser.ParseVarSection(AClassVar: Boolean): Integer;
+var
+  LDecl, LAttrs: Integer;
+begin
+  // 3.1: var/threadvar entries; also used for class var sections.
+  Result := FB.AddNode(nkVarSec, NIL_NODE, FPos);
+  if AClassVar then
+    FB.SetAux(Result, 1)
+  else if CurKind in [tkVar, tkThreadvar] then
+    Next;
+  while (CurKind = tkIdentifier) or (CurKind = tkLBracket) do
+  begin
+    if IsVisibilityWord then
+      Break;
+    LAttrs := ParseAttrGroups;
+    if CurKind <> tkIdentifier then
+      Break;
+    LDecl := FB.AddNode(nkVarDecl, NIL_NODE, FPos);
+    if LAttrs <> NIL_NODE then
+      FB.Adopt(LDecl, LAttrs);
+    FB.Adopt(LDecl, FB.AddNode(nkIdent, NIL_NODE, FPos));
+    Next;
+    while CurKind = tkComma do
+    begin
+      Next;
+      if CurKind = tkIdentifier then
+      begin
+        FB.Adopt(LDecl, FB.AddNode(nkIdent, NIL_NODE, FPos));
+        Next;
+      end
+      else
+        Error('name expected');
+    end;
+    Expect(tkColon, '":"');
+    FB.Adopt(LDecl, ParseTypeExpr);
+    // Hints may sit BETWEEN the type and the initializer:
+    // Default8087CW: Word platform = $033F;  (System.pas)
+    ParseHintsOpt(LDecl);
+    if IsWord('absolute') then
+    begin
+      Next;
+      FB.Adopt(LDecl, ParseExpression);
+    end
+    else if CurKind = tkEqual then
+    begin
+      Next;
+      FB.Adopt(LDecl, ParseConstInitializer(True));
+    end;
+    ParseHintsOpt(LDecl);
+    // Exported-var conventions: `var X: T; cvar; external ...` are C++-ish;
+    // plain hint loop already consumed deprecated/platform.
+    FB.SetLast(LDecl, FPos - 1);
+    FB.Adopt(Result, LDecl);
+    Expect(tkSemicolon, '";"');
+    ConsumeTrailingDirectives;
+    if AClassVar then
+      Break; // a `class var` introduces exactly one decl run in our model
+  end;
+  FB.SetLast(Result, FPos - 1);
+end;
+
+function TPasParser.ParseExportsClause: Integer;
+var
+  LItem: Integer;
+begin
+  // 1.1.3: exports Name [(params)] [index e] [name e] [resident], ...;
+  Result := FB.AddNode(nkExportsClause, NIL_NODE, FPos);
+  Next;
+  repeat
+    LItem := FB.AddNode(nkExportsItem, NIL_NODE, FPos);
+    FB.Adopt(LItem, ParseQualifiedName);
+    if CurKind = tkLParen then
+      FB.Adopt(LItem, ParseParamList(tkRParen));
+    while IsWord('index') or IsWord('name') do
+    begin
+      Next;
+      FB.Adopt(LItem, ParseExpression);
+    end;
+    if IsWord('resident') then
+      Next;
+    FB.SetLast(LItem, FPos - 1);
+    FB.Adopt(Result, LItem);
+    if CurKind = tkComma then
+      Next
+    else
+      Break;
+  until False;
+  Expect(tkSemicolon, '";"');
+  FB.SetLast(Result, FPos - 1);
+end;
+
+procedure TPasParser.ParseDeclSections(AParent: Integer; AAllowBodies: Boolean;
+  const ATerminators: array of TPasTokenKind);
+var
+  LNode: Integer;
+begin
+  while not (AtAny(ATerminators) or (CurKind = tkEndOfFile)) do
+    case CurKind of
+      tkType:
+        FB.Adopt(AParent, ParseTypeSection);
+      tkConst, tkResourcestring:
+        FB.Adopt(AParent, ParseConstSection);
+      tkVar, tkThreadvar:
+        FB.Adopt(AParent, ParseVarSection(False));
+      tkLabel:
+        begin
+          LNode := FB.AddNode(nkLabelSec, NIL_NODE, FPos);
+          Next;
+          while CurKind in [tkIdentifier, tkIntLiteral] do
+          begin
+            Next;
+            if CurKind = tkComma then
+              Next;
+          end;
+          Expect(tkSemicolon, '";"');
+          FB.SetLast(LNode, FPos - 1);
+          FB.Adopt(AParent, LNode);
+        end;
+      tkExports:
+        FB.Adopt(AParent, ParseExportsClause);
+      tkProcedure, tkFunction, tkConstructor, tkDestructor:
+        FB.Adopt(AParent, ParseRoutine(False, AAllowBodies));
+      tkClass:
+        // Implementation of class methods: class procedure TFoo.Bar; ...
+        if PeekKind(1) in [tkProcedure, tkFunction, tkConstructor,
+          tkDestructor] then
+        begin
+          Next;
+          FB.Adopt(AParent, ParseRoutine(True, AAllowBodies));
+        end
+        else if (PeekKind(1) = tkIdentifier) and
+          SameText(FSrc.VisibleText(FPos + 1), 'operator') then
+        begin
+          Next;
+          FB.Adopt(AParent, ParseRoutine(True, AAllowBodies));
+        end
+        else
+        begin
+          Error('declaration expected');
+          Next;
+        end;
+      tkLBracket:
+        begin
+          LNode := ParseAttrGroups;
+          if LNode <> NIL_NODE then
+            FB.Adopt(AParent, LNode);
+        end;
+      tkSemicolon:
+        Next;
+    else
+      Error('declaration expected, found "' + CurText + '"');
+      Next;
+    end;
+end;
+
+class function TPasParser.ParseFile(const ASource: TPasPreprocessed;
+  out ADiags: TArray<TPasParseDiag>): TPasTree;
+var
+  LP: TPasParser;
+  LRoot, LSec: Integer;
+begin
+  LP := Default(TPasParser);
+  LP.FSrc := ASource;
+  LP.FLast := High(ASource.Visible);
+  LP.FFuel := Int64(Length(ASource.Visible)) * 200 + 10000;
+  LP.FB.Init;
+  case LP.CurKind of
+    tkUnit:
+      begin
+        LRoot := LP.FB.AddNode(nkUnit, NIL_NODE, 0);
+        LP.Next;
+        LP.FB.Adopt(LRoot, LP.ParseQualifiedName);
+        LP.ParseHintsOpt(LRoot);
+        LP.Expect(tkSemicolon, '";"');
+        // interface section
+        LSec := LP.FB.AddNode(nkInterfaceSec, NIL_NODE, LP.FPos);
+        LP.Expect(tkInterface, '"interface"');
+        if LP.CurKind = tkUses then
+          LP.FB.Adopt(LSec, LP.ParseUsesClause);
+        LP.ParseDeclSections(LSec, False, [tkImplementation]);
+        LP.FB.SetLast(LSec, LP.FPos - 1);
+        LP.FB.Adopt(LRoot, LSec);
+        // implementation section
+        LSec := LP.FB.AddNode(nkImplementationSec, NIL_NODE, LP.FPos);
+        LP.Expect(tkImplementation, '"implementation"');
+        if LP.CurKind = tkUses then
+          LP.FB.Adopt(LSec, LP.ParseUsesClause);
+        LP.ParseDeclSections(LSec, True,
+          [tkInitialization, tkFinalization, tkBegin, tkEnd]);
+        LP.FB.SetLast(LSec, LP.FPos - 1);
+        LP.FB.Adopt(LRoot, LSec);
+        // initialization / finalization (or legacy begin-as-init)
+        if LP.CurKind in [tkInitialization, tkBegin] then
+        begin
+          LSec := LP.FB.AddNode(nkInitSec, NIL_NODE, LP.FPos);
+          LP.Next;
+          LP.ParseBlockUntil(LSec, [tkFinalization, tkEnd]);
+          LP.FB.SetLast(LSec, LP.FPos - 1);
+          LP.FB.Adopt(LRoot, LSec);
+        end;
+        if LP.CurKind = tkFinalization then
+        begin
+          LSec := LP.FB.AddNode(nkFinalSec, NIL_NODE, LP.FPos);
+          LP.Next;
+          LP.ParseBlockUntil(LSec, [tkEnd]);
+          LP.FB.SetLast(LSec, LP.FPos - 1);
+          LP.FB.Adopt(LRoot, LSec);
+        end;
+        LP.Expect(tkEnd, '"end"');
+        LP.Expect(tkDot, '"."');
+      end;
+    tkProgram, tkLibrary:
+      begin
+        if LP.CurKind = tkProgram then
+          LRoot := LP.FB.AddNode(nkProgram, NIL_NODE, 0)
+        else
+          LRoot := LP.FB.AddNode(nkLibrary, NIL_NODE, 0);
+        LP.Next;
+        LP.FB.Adopt(LRoot, LP.ParseQualifiedName);
+        if LP.CurKind = tkLParen then
+        begin
+          // Legacy program parameters: program X(Input, Output);
+          while not (LP.CurKind in [tkRParen, tkEndOfFile]) do
+            LP.Next;
+          LP.Expect(tkRParen, '")"');
+        end;
+        LP.Expect(tkSemicolon, '";"');
+        if LP.CurKind = tkUses then
+          LP.FB.Adopt(LRoot, LP.ParseUsesClause);
+        // A library may end with a bare `end.` — no main begin-block
+        // (DUnit's testXpgenLib.dpr: exports ...; end.)
+        LP.ParseDeclSections(LRoot, True, [tkBegin, tkEnd]);
+        if LP.CurKind = tkBegin then
+        begin
+          LSec := LP.FB.AddNode(nkBlock, NIL_NODE, LP.FPos);
+          LP.Next;
+          LP.ParseBlockUntil(LSec, [tkEnd]);
+          LP.FB.SetLast(LSec, LP.FPos - 1);
+          LP.FB.Adopt(LRoot, LSec);
+        end;
+        LP.Expect(tkEnd, '"end"');
+        LP.Expect(tkDot, '"."');
+      end;
+  else
+    if LP.IsWord('package') then
+      begin
+        // 'package' is a directive (B.4.2), not a reserved word.
+        LRoot := LP.FB.AddNode(nkPackage, NIL_NODE, 0);
+        LP.Next;
+        LP.FB.Adopt(LRoot, LP.ParseQualifiedName);
+        LP.Expect(tkSemicolon, '";"');
+        while LP.IsWord('requires') or LP.IsWord('contains') do
+        begin
+          LSec := LP.FB.AddNode(nkUsesClause, NIL_NODE, LP.FPos);
+          LP.Next;
+          repeat
+            LP.FB.Adopt(LSec, LP.ParseQualifiedName);
+            if LP.CurKind = tkIn then
+            begin
+              LP.Next;
+              if LP.CurKind = tkStringLiteral then
+                LP.Next;
+            end;
+            if LP.CurKind = tkComma then
+              LP.Next
+            else
+              Break;
+          until False;
+          LP.Expect(tkSemicolon, '";"');
+          LP.FB.SetLast(LSec, LP.FPos - 1);
+          LP.FB.Adopt(LRoot, LSec);
+        end;
+        LP.Expect(tkEnd, '"end"');
+        LP.Expect(tkDot, '"."');
+      end
+    else
+    begin
+      LP.Error('unit, program, library or package expected');
+      LRoot := LP.FB.AddNode(nkError, NIL_NODE, 0);
+    end;
+  end;
+  LP.FB.SetLast(LRoot, LP.FPos);
+  SetLength(LP.FDiags, LP.FDiagCount);
+  ADiags := LP.FDiags;
+  Result := LP.FB.Build(ASource);
 end;
 
 class function TPasParser.ParseStatements(const ASource: TPasPreprocessed;
@@ -1080,6 +2765,7 @@ begin
   LParser := Default(TPasParser);
   LParser.FSrc := ASource;
   LParser.FLast := High(ASource.Visible);
+  LParser.FFuel := Int64(Length(ASource.Visible)) * 200 + 10000;
   LParser.FB.Init;
   LRoot := LParser.FB.AddNode(nkBlock, NIL_NODE, 0);
   LParser.ParseBlockUntil(LRoot, [tkEndOfFile]);
