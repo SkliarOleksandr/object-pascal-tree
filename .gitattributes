@@ -1,0 +1,10 @@
+# Normalize line endings
+* text=auto
+*.pas text
+*.dpr text
+*.dpk text
+*.inc text
+*.md text eol=lf
+LICENSE text eol=lf
+*.dproj text
+*.dfm text

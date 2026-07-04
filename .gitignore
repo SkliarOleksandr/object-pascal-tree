@@ -1,0 +1,38 @@
+# Delphi compiler output
+*.dcu
+*.dcp
+*.bpl
+*.exe
+*.dll
+*.map
+*.drc
+*.rsm
+*.tds
+
+# Delphi IDE local state
+*.local
+*.identcache
+*.projdata
+*.tvsconfig
+*.dsk
+__history/
+__recovery/
+ModelSupport*/
+
+# Build output dirs
+Win32/
+Win64/
+WinArm64/
+Linux64/
+OSX64/
+OSXARM64/
+Android*/
+iOS*/
+
+# Test artifacts
+tests/output/
+*.testresults.xml
+
+# OS junk
+Thumbs.db
+.DS_Store
