@@ -22,7 +22,27 @@ uses
   PasTree.Preprocessor in '..\source\PasTree.Preprocessor.pas',
   PasTree.Platforms in '..\source\PasTree.Platforms.pas',
   PasTree.Ast in '..\source\PasTree.Ast.pas',
-  PasTree.Parser in '..\source\PasTree.Parser.pas';
+  PasTree.Parser in '..\source\PasTree.Parser.pas',
+  PasTree.Project in '..\source\PasTree.Project.pas';
+
+function FilterPascal(const AAll: TArray<string>): TArray<string>;
+var
+  LFile, LExt: string;
+  LCount: Integer;
+begin
+  SetLength(Result, Length(AAll));
+  LCount := 0;
+  for LFile in AAll do
+  begin
+    LExt := LowerCase(TPath.GetExtension(LFile));
+    if (LExt = '.pas') or (LExt = '.dpr') or (LExt = '.dpk') then
+    begin
+      Result[LCount] := LFile;
+      Inc(LCount);
+    end;
+  end;
+  SetLength(Result, LCount);
+end;
 
 var
   GRoot: string;
@@ -44,6 +64,11 @@ var
   GCtx: string;
   GPlatform: TPasPlatform;
   GPlatInfo: TPasPlatformInfo;
+  GParallel: Boolean;
+  GRootArg, GMainSource: string;
+  GProject: TPasProject;
+  GResults: TArray<TPasFileResult>;
+  GRIdx: Integer;
   GVis: TPasVisibleToken;
   GIssueFiles: TStringList;
   GElapsedSec: Double;
@@ -59,9 +84,21 @@ begin
       ExitCode := 2;
       Exit;
     end;
+    GRootArg := ParamStr(1);
+    GParallel := False;
     GPlatform := pfWin32;   // most common target in the wild
+    // A .dproj as the argument sets the platform and the root directory.
+    if SameText(TPath.GetExtension(GRootArg), '.dproj') then
+    begin
+      if not TryReadDProj(GRootArg, GPlatform, GMainSource) then
+        Writeln('Note: no default platform in .dproj, using Win32');
+      Writeln('Project: ', GRootArg, '  MainSource: ', GMainSource);
+      GRootArg := TPath.GetDirectoryName(TPath.GetFullPath(GRootArg));
+    end;
     for GIdx := 2 to ParamCount do
-      if ParamStr(GIdx).StartsWith('-p:', True) then
+      if SameText(ParamStr(GIdx), '-j') then
+        GParallel := True
+      else if ParamStr(GIdx).StartsWith('-p:', True) then
         if not TryParsePlatformName(Copy(ParamStr(GIdx), 4, MaxInt),
           GPlatform) then
         begin
@@ -69,12 +106,15 @@ begin
           ExitCode := 2;
           Exit;
         end;
+    GVerbose := False;
+    for GIdx := 2 to ParamCount do
+      if SameText(ParamStr(GIdx), '-v') then
+        GVerbose := True;
     GTotalFiles := 0;
     GTotalNodes := 0;
     GTotalParseDiags := 0;
     GFilesWithDiags := 0;
-    GRoot := ParamStr(1);
-    GVerbose := SameText(ParamStr(2), '-v');
+    GRoot := GRootArg;
 
     GIssueFiles := TStringList.Create;
     GSM := TPasSourceManager.Create([]);
@@ -84,6 +124,42 @@ begin
       GPlatInfo.PointerBytes, GPlatInfo.ExtendedBytes);
     Writeln('Platform: ', GPlatInfo.Name);
     try
+      if GParallel then
+      begin
+        // Parallel mode: one worker per core over the pure parse function.
+        System.NeverSleepOnMMThreadContention := True;
+        GProject := TPasProject.Create(GPlatform, [], []);
+        try
+          // Keep the serial parts (disk walk, include index) out of the
+          // timed region — we are measuring the parse pipeline.
+          GProject.SourceManager.BuildIncludeIndex(GRoot);
+          GFiles := TDirectory.GetFiles(GRoot, '*.*',
+            TSearchOption.soAllDirectories);
+          GResults := nil;
+          SetLength(GResults, 0);
+          GWatch := TStopwatch.StartNew;
+          GResults := GProject.ParseFiles(FilterPascal(GFiles));
+          GWatch.Stop;
+          for GRIdx := 0 to High(GResults) do
+          begin
+            Inc(GTotalFiles);
+            Inc(GTotalNodes, Length(GResults[GRIdx].Tree.Nodes));
+            Inc(GTotalParseDiags, Length(GResults[GRIdx].ParseDiags));
+            if Length(GResults[GRIdx].ParseDiags) > 0 then
+            begin
+              Inc(GFilesWithDiags);
+              if GIssueFiles.Count < 30 then
+                GIssueFiles.Add(Format('%s (%d diags)',
+                  [GResults[GRIdx].FileName,
+                   Length(GResults[GRIdx].ParseDiags)]));
+            end;
+          end;
+        finally
+          GProject.Free;
+        end;
+      end
+      else
+      begin
       GSM.BuildIncludeIndex(GRoot);
       GFiles := TDirectory.GetFiles(GRoot, '*.*', TSearchOption.soAllDirectories);
       GWatch := TStopwatch.StartNew;
@@ -141,6 +217,7 @@ begin
       end;
 
       GWatch.Stop;
+      end; // sequential branch
       GElapsedSec := GWatch.ElapsedMilliseconds / 1000.0;
 
       Writeln;
