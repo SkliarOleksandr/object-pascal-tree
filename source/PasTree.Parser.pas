@@ -2050,7 +2050,14 @@ begin
       LIsExternal := True;
       Next;
       // external [lib] [name expr | index expr | dependency e,e | delayed]
-      while not (CurKind in [tkSemicolon, tkEndOfFile]) do
+      // The clause stops at ';' OR at anything that starts the next
+      // declaration — dcc tolerates a missing terminator:
+      // `function F; external shell32 name 'X'` + newline + `function ...`
+      // (user corpus, verified against dcc64).
+      while not (CurKind in [tkSemicolon, tkEndOfFile, tkFunction,
+        tkProcedure, tkConstructor, tkDestructor, tkClass, tkType, tkVar,
+        tkConst, tkThreadvar, tkLabel, tkExports, tkBegin, tkEnd,
+        tkImplementation, tkInitialization, tkFinalization]) do
       begin
         if IsWord('name') or IsWord('index') then
         begin
@@ -2096,7 +2103,11 @@ begin
     FB.Adopt(ARoutine, LDir);
     if CurKind = tkSemicolon then
       Next
-    else
+    else if not IsDirectiveWord then
+      // dcc tolerates a missing ';' after the LAST directive in a run —
+      // both between directives (`platform deprecated`) and before the
+      // next declaration or body (`procedure P; platform deprecated`
+      // followed directly by `procedure`/`begin`; user corpus, verified).
       Break;
   end;
   Result := LIsExternal or LIsForward or LIsAbstract;
