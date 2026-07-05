@@ -4,6 +4,8 @@ rem Requires SynEdit + VirtualTreeView sources under C:\Repos\3rdlib13.
 call "C:\Program Files (x86)\Embarcadero\Studio\37.0\bin\rsvars.bat"
 cd /d "%~dp0"
 if not exist out mkdir out
+rem Compile the application manifest (native visual styles + PerMonitorV2 DPI).
+brcc32 PasTreeDemo.rc
 dcc32 -B -Q ^
  -U"%BDS%\lib\win32\release" ^
  -U"..\source" ^

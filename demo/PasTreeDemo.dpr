@@ -17,6 +17,8 @@ uses
   PasTree.Parser in '..\source\PasTree.Parser.pas',
   PasTree.Project in '..\source\PasTree.Project.pas';
 
+{$R PasTreeDemo.res}
+
 begin
   Application.Initialize;
   Application.MainFormOnTaskbar := True;
