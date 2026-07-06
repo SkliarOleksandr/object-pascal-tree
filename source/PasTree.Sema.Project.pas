@@ -40,6 +40,11 @@ type
     function UsesUnitOf(AId, ASym: Integer): Integer;
     function LocalHead(AModel: TPasSemaModel; ANode: Integer): Integer;
     procedure EmitE2003(AModel: TPasSemaModel; ANode: Integer);
+    procedure EmitAt(AModel: TPasSemaModel; ANode: Integer;
+      const ACode, AMsg: string);
+    function RoutineArity(AMid, ASym: Integer; out AReq, ATot: Integer;
+      out AVariadic: Boolean): Boolean;
+    procedure CheckCalls(AId: Integer);
   public
     constructor Create(APlatform: TPasPlatform;
       const ASearchPaths: TArray<string>; const AExtraDefines: TArray<string>);
@@ -252,6 +257,158 @@ begin
     Format(SE2003_UndeclaredIdentifier, [LName]), ANode, LFile, LLine, LCol));
 end;
 
+procedure TPasSemaProject.EmitAt(AModel: TPasSemaModel; ANode: Integer;
+  const ACode, AMsg: string);
+var
+  LVis: TPasVisibleToken;
+  LFile, LLine, LCol, LTok: Integer;
+begin
+  LFile := 0; LLine := 0; LCol := 0;
+  LTok := AModel.Tree.Nodes[ANode].FirstToken;
+  if (LTok >= 0) and (LTok <= High(AModel.Tree.Source.Visible)) then
+  begin
+    LVis := AModel.Tree.Source.Visible[LTok];
+    LFile := LVis.FileId;
+    AModel.Tree.Source.Files[LVis.FileId].OffsetToLineCol(
+      AModel.Tree.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start,
+      LLine, LCol);
+  end;
+  AModel.AddDiag(MakeDiag(ACode, AMsg, ANode, LFile, LLine, LCol));
+end;
+
+// Model-aware parameter arity of a routine symbol. Result=False if the routine
+// has no parameter scope (a builtin) — caller then skips the whole call.
+function TPasSemaProject.RoutineArity(AMid, ASym: Integer;
+  out AReq, ATot: Integer; out AVariadic: Boolean): Boolean;
+var
+  LM: TPasSemaModel;
+  LScope, LS, LChild: Integer;
+  LSawDefault: Boolean;
+begin
+  LM := FModels[AMid];
+  AReq := 0; ATot := 0; AVariadic := False;
+  LScope := LM.Symbols[ASym].MemberScope;
+  if LScope = NIL_SCOPE then
+    Exit(False);
+  LSawDefault := False;
+  for LS in LM.Scopes[LScope].Symbols do
+    if LM.Symbols[LS].Kind = skParam then
+    begin
+      Inc(ATot);
+      if sfHasDefault in LM.Symbols[LS].Flags then
+        LSawDefault := True;
+      if not LSawDefault then
+        Inc(AReq);
+    end;
+  LChild := LM.Tree.Nodes[LM.Scopes[LScope].OwnerNode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if (LM.Tree.Nodes[LChild].Kind = nkDirective) and
+       SameText(LM.Tree.NodeText(LChild), 'varargs') then
+      AVariadic := True;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+  Result := True;
+end;
+
+// Cross-unit argument-count check: gathers a call's candidate routines from the
+// local overload chain PLUS every resolved used unit's interface, then flags
+// E2035/E2034 only if no candidate's arity admits the argument count. Runs only
+// for units with resolved uses (complete candidate visibility).
+procedure TPasSemaProject.CheckCalls(AId: Integer);
+var
+  LModel: TPasSemaModel;
+  LNode, LCallee, LArg, LArgCount, LLocalHead, LUid, LS, LIdx: Integer;
+  LMinReq, LMaxTot: Integer;
+  LAnyFit, LAnyVariadic, LHaveAny, LSkip: Boolean;
+  LName: string;
+
+  procedure Consider(AMid, AHead: Integer);
+  var
+    LCand, LReq, LTot: Integer;
+    LVariadic: Boolean;
+  begin
+    LCand := AHead;
+    while LCand <> NIL_SYM do
+    begin
+      if FModels[AMid].Symbols[LCand].Kind <> skRoutine then
+        Break;
+      if not RoutineArity(AMid, LCand, LReq, LTot, LVariadic) then
+      begin
+        LSkip := True;   // a candidate with no param info (builtin) -> bail
+        Exit;
+      end;
+      LHaveAny := True;
+      if LVariadic then
+        LAnyVariadic := True;
+      if LReq < LMinReq then LMinReq := LReq;
+      if LTot > LMaxTot then LMaxTot := LTot;
+      if LVariadic or ((LArgCount >= LReq) and (LArgCount <= LTot)) then
+        LAnyFit := True;
+      LCand := FModels[AMid].Symbols[LCand].NextOverload;
+    end;
+  end;
+
+begin
+  LModel := FModels[AId];
+  if (Length(LModel.UsesList) = 0) or not LModel.AllUsesResolved then
+    Exit;
+
+  for LNode := 0 to High(LModel.RefMap) do
+  begin
+    if LModel.Tree.Nodes[LNode].Kind <> nkCall then
+      Continue;
+    LCallee := LModel.Tree.Nodes[LNode].FirstChild;
+    if (LCallee = NIL_NODE) or (LModel.Tree.Nodes[LCallee].Kind <> nkIdent) then
+      Continue;   // member/qualified calls (methods) are out of scope
+    LLocalHead := LModel.RefMap[LCallee];
+    if (LLocalHead <> NIL_SYM) and
+       (LModel.Symbols[LLocalHead].Kind in [skType, skBuiltinType]) then
+      Continue;   // a type cast, not a call
+
+    LArgCount := 0;
+    LArg := LModel.Tree.Nodes[LCallee].NextSibling;
+    while LArg <> NIL_NODE do
+    begin
+      Inc(LArgCount);
+      LArg := LModel.Tree.Nodes[LArg].NextSibling;
+    end;
+
+    LMinReq := MaxInt; LMaxTot := -1;
+    LAnyFit := False; LAnyVariadic := False; LHaveAny := False; LSkip := False;
+
+    // Local global-routine overloads.
+    if (LLocalHead <> NIL_SYM) and (LModel.Symbols[LLocalHead].Kind = skRoutine)
+       and (LModel.Scopes[LModel.Symbols[LLocalHead].Scope].Kind in
+            [sckUnit, sckImplementation]) then
+      Consider(AId, LLocalHead);
+
+    // Same-named routines from every resolved used unit.
+    if not LSkip then
+    begin
+      LName := LowerCase(LModel.Tree.NodeText(LCallee));
+      for LIdx := 0 to High(LModel.UsesList) do
+      begin
+        LUid := LModel.UsesList[LIdx].UnitId;
+        if LUid < 0 then
+          Continue;
+        LS := FModels[LUid].Resolve(FModels[LUid].InterfaceScope, LName);
+        if (LS <> NIL_SYM) and (FModels[LUid].Symbols[LS].Kind = skRoutine) then
+          Consider(LUid, LS);
+        if LSkip then
+          Break;
+      end;
+    end;
+
+    if LSkip or not LHaveAny or LAnyVariadic or LAnyFit or (LMaxTot < 0) then
+      Continue;
+    if LArgCount < LMinReq then
+      EmitAt(LModel, LNode, 'E2035', SE2035_NotEnoughActualParams)
+    else if LArgCount > LMaxTot then
+      EmitAt(LModel, LNode, 'E2034', SE2034_TooManyActualParams);
+  end;
+end;
+
 procedure TPasSemaProject.CrossResolve(AId: Integer);
 var
   LModel: TPasSemaModel;
@@ -327,6 +484,7 @@ begin
     Exit;
   ResolveUses(Result);
   CrossResolve(Result);
+  CheckCalls(Result);
 end;
 
 procedure TPasSemaProject.AnalyzeDirectory(const ARoot: string);
@@ -347,6 +505,8 @@ begin
     ResolveUses(LIdx);
   for LIdx := 0 to LN - 1 do
     CrossResolve(LIdx);
+  for LIdx := 0 to LN - 1 do
+    CheckCalls(LIdx);
 end;
 
 end.

@@ -51,6 +51,25 @@ const
     'unit UnitD;'#10'interface'#10'uses NoSuchUnit;'#10'implementation'#10 +
     'procedure Q;'#10'begin'#10'  Whatever := 2;'#10'end;'#10'end.'#10;
 
+  // Cross-unit overloads: F lives in two used units with different arities.
+  UNIT_OVL1 =
+    'unit UnitOvl1;'#10'interface'#10 +
+    'function F(A: Integer): Integer; overload;'#10'implementation'#10 +
+    'function F(A: Integer): Integer; overload; begin Result := A; end;'#10 +
+    'end.'#10;
+  UNIT_OVL2 =
+    'unit UnitOvl2;'#10'interface'#10 +
+    'function F(A, B: string): string; overload;'#10'implementation'#10 +
+    'function F(A, B: string): string; overload; begin Result := A; end;'#10 +
+    'end.'#10;
+  UNIT_OVLUSE =
+    'unit UnitOvlUse;'#10'interface'#10'uses UnitOvl1, UnitOvl2;'#10 +
+    'implementation'#10'procedure T;'#10'var I: Integer;'#10'begin'#10 +
+    '  I := F(1);'#10 +        // fits UnitOvl1.F(Integer)
+    '  F(''a'', ''b'');'#10 +  // fits UnitOvl2.F(string,string) -> no false E2034
+    '  F(1, 2, 3);'#10 +       // fits neither -> E2034
+    'end;'#10'end.'#10;
+
 function ModelByName(const ANameLower: string): TPasSemaModel;
 begin
   Result := nil;
@@ -114,7 +133,7 @@ end;
 
 var
   LDir: string;
-  LA, LB, LC, LD: TPasSemaModel;
+  LA, LB, LC, LD, LOvl: TPasSemaModel;
 begin
   GPassed := 0; GFailed := 0;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_proj');
@@ -125,6 +144,9 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitB.pas'), UNIT_B);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitC.pas'), UNIT_C);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitD.pas'), UNIT_D);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitOvl1.pas'), UNIT_OVL1);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitOvl2.pas'), UNIT_OVL2);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitOvlUse.pas'), UNIT_OVLUSE);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -158,6 +180,14 @@ begin
     // D: an unresolvable use -> E2003 suppressed.
     Ok('D: uses NOT fully resolved', not LD.AllUsesResolved);
     Ok('D: E2003 suppressed', DiagCount(LD, 'E2003') = 0);
+
+    // Cross-unit overload arity: merged candidate set from UnitOvl1 + UnitOvl2.
+    LOvl := ModelByName('unitovluse');
+    Ok('Ovl: use unit loaded', Assigned(LOvl));
+    Ok('Ovl: uses fully resolved', LOvl.AllUsesResolved);
+    Ok('Ovl: E2034 x1 (F(1,2,3) fits neither)', DiagCount(LOvl, 'E2034') = 1);
+    Ok('Ovl: no E2035 (merge covers F(1) and F(a,b))',
+      DiagCount(LOvl, 'E2035') = 0);
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then
