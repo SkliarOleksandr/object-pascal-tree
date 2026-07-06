@@ -25,12 +25,23 @@ unit PasTreeDemo.Highlighter;
   means there is no incremental-state bug class to worry about: every line is
   always answered from a fully fresh, whole-buffer-consistent tokenization.
 
-  Scope: purely lexical (TPasLexer only — no preprocessor, no parser). Weak
-  keywords/directives and predefined identifiers are shown as plain
-  Identifier, exactly as the lexer classifies them (see PasTree.Types) —
-  deliberately NOT overlaid with a static keyword-like word list, so the
-  colors reflect the lexer's actual output, nothing embellished. $IFDEF'd-out
-  regions are not greyed out (that needs the preprocessor, a different tier).
+  Scope: purely lexical (TPasLexer only — no preprocessor, no parser).
+  $IFDEF'd-out regions are not greyed out (that needs the preprocessor, a
+  different tier).
+
+  One deliberate, clearly-scoped exception to "raw lexer output only": true
+  reserved words (spec B.4.1 — begin/end/if/class/...) get their Keyword color
+  straight from TPasTokenKind, no list needed — that part IS the lexer talking.
+  But Object Pascal's "weak keywords" (private/override/virtual/stdcall/...,
+  spec B.4.2) are, by design, plain tkIdentifier at the lexer level — the
+  language only gives them meaning by *position*, which needs the parser. Since
+  every real Delphi IDE colors these like keywords and users expect that, this
+  highlighter ALSO colors them like keywords via a small static word list
+  (WEAK_KEYWORDS below) — purely a cosmetic overlay on top of the identifier
+  token, not a lexer reclassification. A miscolored ordinary identifier that
+  happens to collide with this list (e.g. a variable named `Index`) is a
+  word-list judgment call, NOT a lexer bug — unlike every other color in this
+  highlighter, which IS a lexer-correctness signal.
 
   Demo-only: lives in demo/, not source/, and is created purely at runtime —
   no `Register` procedure, no design-time package.
@@ -41,12 +52,40 @@ interface
 uses
   System.Classes,
   System.SysUtils,
+  System.Generics.Collections,
   Vcl.Graphics,
   SynFunc,
   SynEditTypes,
   SynEditHighlighter,
   PasTree.Types,
   PasTree.Lexer;
+
+const
+  // Object Pascal "weak keywords" (spec B.4.2): lexically plain tkIdentifier,
+  // meaningful only by position, so the raw lexer can't (and shouldn't) tell
+  // them apart from an ordinary identifier — this is a cosmetic-only overlay,
+  // see the unit header comment. Deliberately excludes words too likely to
+  // collide with real identifiers/properties (e.g. Align, Name-as-a-property)
+  // or that are FPC-only / not part of Delphi (constref) / effectively dead
+  // 16-bit legacy (near/far/resident).
+  WEAK_KEYWORDS: array [0..46] of string = (
+    // visibility
+    'private', 'protected', 'public', 'published', 'strict', 'automated',
+    // method binding / behavior
+    'virtual', 'dynamic', 'override', 'overload', 'reintroduce', 'abstract',
+    'sealed', 'final', 'static', 'forward', 'assembler',
+    // calling conventions
+    'register', 'pascal', 'cdecl', 'stdcall', 'safecall', 'winapi', 'local',
+    // external linkage
+    'external', 'name', 'delayed', 'varargs',
+    // parameters / generics / types
+    'out', 'index', 'reference', 'operator', 'helper',
+    // property specifiers
+    'read', 'write', 'stored', 'default', 'nodefault', 'implements',
+    // hints
+    'deprecated', 'platform', 'experimental',
+    // messages / memory
+    'message', 'dispid', 'unsafe', 'weak', 'volatile');
 
 type
   TPasTreeSynHighlighter = class(TSynCustomHighlighter)
@@ -69,6 +108,8 @@ type
     FSymbolAttri: TSynHighlighterAttributes;
     FAsmAttri: TSynHighlighterAttributes;
     FErrorAttri: TSynHighlighterAttributes;
+    FWeakKeywords: TDictionary<string, Boolean>; // lowercased WEAK_KEYWORDS
+    function IsWeakKeyword: Boolean;
     procedure EnsureFresh;
     function LineStartOffset(ALineNumber: Integer): Integer;
     function LocateStartToken(AOffset: Integer): Integer;
@@ -80,6 +121,7 @@ type
       override;
   public
     constructor Create(AOwner: TComponent); override;
+    destructor Destroy; override;
     class function GetLanguageName: string; override;
     class function GetFriendlyLanguageName: string; override;
     function GetEol: Boolean; override;
@@ -151,9 +193,19 @@ begin
 
   SetAttributesOnChange(DefHighlightChange);
 
+  FWeakKeywords := TDictionary<string, Boolean>.Create;
+  for var LWord in WEAK_KEYWORDS do
+    FWeakKeywords.AddOrSetValue(LWord, True); // WEAK_KEYWORDS is already lowercase
+
   FCachedSource := #0; // guarantee the first EnsureFresh call actually tokenizes
   FLineStartAbs := 0;
   FCurTokenIdx := 0;
+end;
+
+destructor TPasTreeSynHighlighter.Destroy;
+begin
+  FWeakKeywords.Free;
+  inherited;
 end;
 
 class function TPasTreeSynHighlighter.GetLanguageName: string;
@@ -213,6 +265,12 @@ function TPasTreeSynHighlighter.LineStartOffset(ALineNumber: Integer): Integer;
 begin
   if Length(FTokenStream.LineStarts) = 0 then
     Exit(0);
+  // SynEdit's real interactive paint path (SynEdit.pas PaintTextLines) passes
+  // a 1-based line number (TBufferCoord.Line convention — also why the
+  // WhitespaceColor reset workaround uses the literal SetLine('', 1) to mean
+  // "line one"), but FTokenStream.LineStarts is 0-based. Off-by-one here
+  // silently shifts every line to the next line's token(s).
+  Dec(ALineNumber);
   if ALineNumber < 0 then
     ALineNumber := 0
   else if ALineNumber > High(FTokenStream.LineStarts) then
@@ -241,6 +299,13 @@ begin
       LLo := LMid + 1;
   end;
   Result := LLo;
+end;
+
+// True when the CURRENT token (an identifier, per FCurKind) case-insensitively
+// matches a weak keyword. Cosmetic overlay only — see the unit header comment.
+function TPasTreeSynHighlighter.IsWeakKeyword: Boolean;
+begin
+  Result := FWeakKeywords.ContainsKey(LowerCase(GetToken));
 end;
 
 procedure TPasTreeSynHighlighter.DoSetLine(const Value: string;
@@ -285,7 +350,10 @@ begin
     tkDirective:
       Result := FDirectiveAttri;
     tkIdentifier:
-      Result := FIdentifierAttri;
+      if IsWeakKeyword then
+        Result := FKeywordAttri
+      else
+        Result := FIdentifierAttri;
     tkIntLiteral, tkRealLiteral, tkControlChar:
       Result := FNumberAttri;
     tkStringLiteral, tkMultilineString:

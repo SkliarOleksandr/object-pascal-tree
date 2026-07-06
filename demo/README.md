@@ -10,7 +10,12 @@ A small Win32 VCL host that drives PasTree interactively:
   Pascal scanner. Every color on screen comes straight from a `TPasTokenKind`
   the lexer assigned, so it doubles as a live correctness visualizer for the
   lexer (a wrong color is a lexer bug). Unterminated strings/comments/
-  directives are flagged in a distinct error style. A file opens in its own
+  directives are flagged in a distinct error style. One cosmetic exception:
+  "weak keywords" (`private`/`override`/`virtual`/`stdcall`/...) are lexically
+  plain identifiers — the language only gives them meaning by position — so
+  they're colored like keywords via a small static word list, matching what a
+  real IDE looks like; that specific coloring is a word-list judgment call,
+  not a lexer signal (see the unit header comment). A file opens in its own
   tab (the `.dpr` opens by default). Two persistent tabs show the analysis of
   the main unit: **AST JSON** (the CST) and **Semantics** (the semantic model —
   scopes, symbols, resolution and cross-unit reference stats).
