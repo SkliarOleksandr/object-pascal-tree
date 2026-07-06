@@ -16,6 +16,7 @@ uses
   PasTree.Ast.Json in '..\source\PasTree.Ast.Json.pas',
   PasTree.Parser in '..\source\PasTree.Parser.pas',
   PasTree.Project in '..\source\PasTree.Project.pas',
+  PasTree.DProj in '..\source\PasTree.DProj.pas',
   PasTree.Sema.Diagnostics in '..\source\PasTree.Sema.Diagnostics.pas',
   PasTree.Sema.Model in '..\source\PasTree.Sema.Model.pas',
   PasTree.Sema.Builtins in '..\source\PasTree.Sema.Builtins.pas',

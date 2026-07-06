@@ -132,6 +132,7 @@
         <DCCReference Include="..\source\PasTree.Ast.Json.pas"/>
         <DCCReference Include="..\source\PasTree.Parser.pas"/>
         <DCCReference Include="..\source\PasTree.Project.pas"/>
+        <DCCReference Include="..\source\PasTree.DProj.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Diagnostics.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Model.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Builtins.pas"/>

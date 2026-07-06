@@ -1,4 +1,4 @@
-unit PasTreeDemo.Main;
+﻿unit PasTreeDemo.Main;
 
 {
   PasTree demo — a small VCL host that opens a Delphi project, analyzes it with
@@ -21,10 +21,10 @@ uses
   SynEdit, SynEditHighlighter, SynHighlighterPas, SynHighlighterJSON,
   VirtualTrees, VirtualTrees.Types,
   PasTree.Platforms, PasTree.Preprocessor, PasTree.Ast, PasTree.Ast.Json,
-  PasTree.Parser, PasTree.Project,
+  PasTree.Parser, PasTree.Project, PasTree.DProj,
   PasTree.Sema.Diagnostics, PasTree.Sema.Model, PasTree.Sema.Builtins,
   PasTree.Sema.Types, PasTree.Sema.Resolver, PasTree.Sema.Project,
-  PasTree.Sema.Dump;
+  PasTree.Sema.Dump, VirtualTrees.BaseAncestorVCL, VirtualTrees.BaseTree, VirtualTrees.AncestorVCL, SynEditCodeFolding;
 
 type
   // VirtualTree node payload: an index into FFileList (unmanaged, so the tree
@@ -48,7 +48,10 @@ type
     edSema: TSynEdit;
     splBottom: TSplitter;
     mmMessages: TMemo;
+    SynPasSyn1: TSynPasSyn;
+    SynJSONSyn1: TSynJSONSyn;
     procedure FormCreate(Sender: TObject);
+    procedure FormDestroy(Sender: TObject);
     procedure btnOpenClick(Sender: TObject);
     procedure btnParseClick(Sender: TObject);
     procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
@@ -56,10 +59,9 @@ type
       Column: TColumnIndex; TextType: TVSTTextType; var CellText: string);
     procedure vstFilesChange(Sender: TBaseVirtualTree; Node: PVirtualNode);
   private
-    FPasHL: TSynPasSyn;      // shared Pascal highlighter (source tabs)
-    FJsonHL: TSynJSONSyn;    // JSON highlighter (AST JSON tab)
     FFileList: TStringList;  // full paths shown in the tree
     FOpenFiles: TStringList; // path -> TTabSheet (Objects)
+    FDProj: TPasDProj;       // Assigned only when a .dproj was opened
     FProjectDir: string;
     FMainSource: string;
     FPlatform: TPasPlatform;
@@ -136,7 +138,13 @@ begin
   // Open the bundled sample by default and analyze it immediately so the
   // Semantics tab is populated on launch.
   OpenProject(TPath.Combine(TPath.Combine(ExeDir, 'Sample'), 'Sample.dpr'));
-  RunParse;
+end;
+
+procedure TfrmMain.FormDestroy(Sender: TObject);
+begin
+  FreeAndNil(FDProj);
+  FOpenFiles.Free;
+  FFileList.Free;
 end;
 
 // Runtime-only control configuration (things awkward to set in the designer:
@@ -148,11 +156,7 @@ begin
   vstFiles.TreeOptions.PaintOptions :=
     vstFiles.TreeOptions.PaintOptions - [toShowTreeLines, toShowRoot];
 
-  FPasHL := TSynPasSyn.Create(Self);
-  FJsonHL := TSynJSONSyn.Create(Self);
-
   edJson.ReadOnly := True;
-  edJson.Highlighter := FJsonHL;
   edJson.Gutter.ShowLineNumbers := True;
   edJson.Font.Name := 'Consolas';
   edJson.UseCodeFolding := True;
@@ -198,17 +202,33 @@ begin
     Log('Project not found: ' + AProjectFile);
     Exit;
   end;
+  FreeAndNil(FDProj);
   LExt := LowerCase(TPath.GetExtension(AProjectFile));
   FPlatform := pfWin32;
   if LExt = '.dproj' then
   begin
-    if not TryReadDProj(AProjectFile, FPlatform, FMainSource) then
-      FPlatform := pfWin32;
-    FProjectDir := TPath.GetDirectoryName(AProjectFile);
-    if (FMainSource <> '') and not TPath.IsPathRooted(FMainSource) then
-      FMainSource := TPath.Combine(FProjectDir, FMainSource);
-    if not TFile.Exists(FMainSource) then
-      FMainSource := TPath.ChangeExtension(AProjectFile, '.dpr');
+    FDProj := TPasDProj.Create;
+    if FDProj.Load(AProjectFile) then
+    begin
+      FPlatform := FDProj.Platform;
+      FMainSource := FDProj.MainSource;
+      FProjectDir := FDProj.Dir;
+      Log(Format('  .dproj: config %s, %d search path(s), %d define(s), ' +
+        '%d unit alias(es)', [FDProj.Config, Length(FDProj.SearchPaths),
+        Length(FDProj.Defines), Length(FDProj.UnitAliases)]));
+    end
+    else
+    begin
+      // Fall back to the lightweight platform/mainsource-only reader.
+      FreeAndNil(FDProj);
+      if not TryReadDProj(AProjectFile, FPlatform, FMainSource) then
+        FPlatform := pfWin32;
+      FProjectDir := TPath.GetDirectoryName(AProjectFile);
+      if (FMainSource <> '') and not TPath.IsPathRooted(FMainSource) then
+        FMainSource := TPath.Combine(FProjectDir, FMainSource);
+      if not TFile.Exists(FMainSource) then
+        FMainSource := TPath.ChangeExtension(AProjectFile, '.dpr');
+    end;
   end
   else
   begin
@@ -239,17 +259,31 @@ var
 begin
   FFileList.Clear;
   vstFiles.Clear;
-  if not TDirectory.Exists(FProjectDir) then
-    Exit;
-  LAll := TDirectory.GetFiles(FProjectDir, '*.*',
-    TSearchOption.soAllDirectories);
-  for LFile in LAll do
+
+  if Assigned(FDProj) and (Length(FDProj.Files) > 0) then
   begin
-    LExt := LowerCase(TPath.GetExtension(LFile));
-    if (LExt = '.pas') or (LExt = '.dpr') or (LExt = '.dpk') or
-       (LExt = '.inc') then
-      FFileList.Add(LFile);
+    // Source of truth: the .dproj's own compiled-unit list (DCCReference),
+    // not a directory scan — this also correctly reaches units that live
+    // outside FProjectDir (e.g. '..\source\*.pas' referenced by the .dproj).
+    for LFile in FDProj.Files do
+      if TFile.Exists(LFile) then
+        FFileList.Add(LFile);
+  end
+  else
+  begin
+    if not TDirectory.Exists(FProjectDir) then
+      Exit;
+    LAll := TDirectory.GetFiles(FProjectDir, '*.*',
+      TSearchOption.soAllDirectories);
+    for LFile in LAll do
+    begin
+      LExt := LowerCase(TPath.GetExtension(LFile));
+      if (LExt = '.pas') or (LExt = '.dpr') or (LExt = '.dpk') or
+         (LExt = '.inc') then
+        FFileList.Add(LFile);
+    end;
   end;
+
   FFileList.Sort;
   vstFiles.BeginUpdate;
   try
@@ -285,7 +319,7 @@ begin
   Result.Align := alClient;
   Result.Gutter.ShowLineNumbers := True;
   Result.Font.Name := 'Consolas';
-  Result.Highlighter := FPasHL;
+  Result.Highlighter := SynPasSyn1;
   Result.UseCodeFolding := True;
   try
     Result.Lines.LoadFromFile(APath);
@@ -304,6 +338,7 @@ var
   LPlatform: TPasPlatform;
   LMain, LDiagTotal, LId, LDIdx: Integer;
   LModel: TPasSemaModel;
+  LSearchPaths, LDefines: TArray<string>;
 begin
   if (FProjectDir = '') or not TDirectory.Exists(FProjectDir) then
   begin
@@ -315,13 +350,30 @@ begin
   else
     LPlatform := pfWin32;
 
+  if Assigned(FDProj) then
+  begin
+    LSearchPaths := [FProjectDir] + FDProj.SearchPaths;
+    LDefines := FDProj.Defines;
+  end
+  else
+  begin
+    LSearchPaths := [FProjectDir];
+    LDefines := [];
+  end;
+
   mmMessages.Clear;
   Log('Analyzing ' + FProjectDir + ' (' + PlatformName(LPlatform) + ')...');
   Screen.Cursor := crHourGlass;
   try
-    LProj := TPasSemaProject.Create(LPlatform, [FProjectDir], []);
+    LProj := TPasSemaProject.Create(LPlatform, LSearchPaths, LDefines);
     try
-      LProj.AnalyzeDirectory(FProjectDir);
+      // A .dproj drives the real uses-graph from its main source (correctly
+      // reaching units outside FProjectDir); a plain .dpr falls back to
+      // "everything under this folder" for simplicity.
+      if Assigned(FDProj) and (FMainSource <> '') then
+        LProj.AnalyzeFile(FMainSource)
+      else
+        LProj.AnalyzeDirectory(FProjectDir);
 
       // Locate the main unit's model, and report every unit's diagnostics.
       LMain := -1;

@@ -1,2 +1,13 @@
 out/
 PasTreeDemo.res
+Sample/
+Win32/
+*.dcu
+*.RES
+*.rsm
+*.local
+*.identcache
+*.dsk
+*.tvsconfig
+__history/
+__recovery/

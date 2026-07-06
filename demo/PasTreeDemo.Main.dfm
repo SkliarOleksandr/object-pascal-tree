@@ -13,8 +13,23 @@ object frmMain: TfrmMain
   KeyPreview = True
   Position = poScreenCenter
   OnCreate = FormCreate
+  OnDestroy = FormDestroy
   OnKeyDown = FormKeyDown
   TextHeight = 15
+  object splLeft: TSplitter
+    Left = 260
+    Top = 41
+    Width = 4
+    Height = 524
+  end
+  object splBottom: TSplitter
+    Left = 0
+    Top = 565
+    Width = 1180
+    Height = 4
+    Cursor = crVSplit
+    Align = alBottom
+  end
   object pnlTop: TPanel
     Left = 0
     Top = 0
@@ -61,15 +76,16 @@ object frmMain: TfrmMain
     Width = 260
     Height = 524
     Align = alLeft
+    DefaultNodeHeight = 19
+    Header.AutoSizeIndex = 0
+    Header.Height = 15
+    Header.MainColumn = -1
     TabOrder = 1
     OnChange = vstFilesChange
     OnGetText = vstFilesGetText
-  end
-  object splLeft: TSplitter
-    Left = 260
-    Top = 41
-    Height = 524
-    Width = 4
+    Touch.InteractiveGestures = [igPan, igPressAndTap]
+    Touch.InteractiveGestureOptions = [igoPanSingleFingerHorizontal, igoPanSingleFingerVertical, igoPanInertia, igoPanGutter, igoParentPassthrough]
+    Columns = <>
   end
   object mmMessages: TMemo
     Left = 0
@@ -82,20 +98,12 @@ object frmMain: TfrmMain
     TabOrder = 2
     WordWrap = False
   end
-  object splBottom: TSplitter
-    Left = 0
-    Top = 565
-    Width = 1180
-    Height = 4
-    Cursor = crVSplit
-    Align = alBottom
-  end
   object pgc: TPageControl
     Left = 264
     Top = 41
     Width = 916
     Height = 524
-    ActivePage = tsSema
+    ActivePage = tsJson
     Align = alClient
     TabOrder = 3
     object tsJson: TTabSheet
@@ -104,9 +112,28 @@ object frmMain: TfrmMain
         Left = 0
         Top = 0
         Width = 908
-        Height = 496
+        Height = 494
         Align = alClient
+        CaseSensitive = True
+        Font.Charset = DEFAULT_CHARSET
+        Font.Color = clWindowText
+        Font.Height = -13
+        Font.Name = 'Consolas'
+        Font.Style = []
+        Font.Quality = fqClearTypeNatural
         TabOrder = 0
+        UseCodeFolding = True
+        Gutter.Font.Charset = DEFAULT_CHARSET
+        Gutter.Font.Color = clWindowText
+        Gutter.Font.Height = -11
+        Gutter.Font.Name = 'Consolas'
+        Gutter.Font.Style = []
+        Gutter.Font.Quality = fqClearTypeNatural
+        Gutter.Bands = <>
+        Highlighter = SynJSONSyn1
+        IndentGuides.Visible = False
+        IndentGuides.StructureHighlight = False
+        ScrollbarAnnotations = <>
       end
     end
     object tsSema: TTabSheet
@@ -116,10 +143,33 @@ object frmMain: TfrmMain
         Left = 0
         Top = 0
         Width = 908
-        Height = 496
+        Height = 494
         Align = alClient
+        Font.Charset = DEFAULT_CHARSET
+        Font.Color = clWindowText
+        Font.Height = -13
+        Font.Name = 'Consolas'
+        Font.Style = []
+        Font.Quality = fqClearTypeNatural
         TabOrder = 0
+        UseCodeFolding = False
+        Gutter.Font.Charset = DEFAULT_CHARSET
+        Gutter.Font.Color = clWindowText
+        Gutter.Font.Height = -11
+        Gutter.Font.Name = 'Consolas'
+        Gutter.Font.Style = []
+        Gutter.Font.Quality = fqClearTypeNatural
+        Gutter.Bands = <>
+        ScrollbarAnnotations = <>
       end
     end
+  end
+  object SynPasSyn1: TSynPasSyn
+    Left = 364
+    Top = 163
+  end
+  object SynJSONSyn1: TSynJSONSyn
+    Left = 532
+    Top = 163
   end
 end
