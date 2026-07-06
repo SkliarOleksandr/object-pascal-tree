@@ -23,7 +23,7 @@ uses
   PasTree.Ast;
 
 const
-  BUILTIN_TYPES: array [0..45] of string = (
+  BUILTIN_TYPES: array [0..48] of string = (
     'Byte', 'ShortInt', 'Word', 'SmallInt', 'Cardinal', 'Integer', 'LongInt',
     'LongWord', 'UInt64', 'Int64', 'NativeInt', 'NativeUInt',
     'Single', 'Double', 'Extended', 'Real', 'Currency', 'Comp',
@@ -34,14 +34,15 @@ const
     'Pointer', 'PChar', 'PAnsiChar', 'PWideChar',
     'Variant', 'OleVariant',
     'TObject', 'TClass', 'Exception', 'IInterface', 'IUnknown',
-    'Text', 'TDateTime', 'TGUID');
+    'Text', 'TDateTime', 'TGUID', 'TArray', 'TBytes', 'PByte');
 
   BUILTIN_CONSTS: array [0..2] of string = ('True', 'False', 'nil');
 
-  BUILTIN_ROUTINES: array [0..19] of string = (
+  BUILTIN_ROUTINES: array [0..24] of string = (
     'Length', 'SetLength', 'High', 'Low', 'Ord', 'Chr', 'Assigned',
     'Inc', 'Dec', 'SizeOf', 'Assert', 'Copy', 'New', 'Dispose',
-    'Include', 'Exclude', 'Write', 'Writeln', 'Read', 'Readln');
+    'Include', 'Exclude', 'Write', 'Writeln', 'Read', 'Readln',
+    'Exit', 'Break', 'Continue', 'Abort', 'TypeInfo');
 
 function SeedSystemScope(AModel: TPasSemaModel): Integer;
 

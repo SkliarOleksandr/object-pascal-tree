@@ -30,7 +30,8 @@ type
     FModel: TPasSemaModel;
     FTree: TPasTree;
     FSys: Integer;
-    FUnit: Integer;
+    FIntf: Integer;   // interface scope (importable)
+    FImpl: Integer;   // implementation scope (parent = FIntf)
     FNodeScope: TArray<Integer>;
     FIsDeclName: TArray<Boolean>;
     // tree helpers
@@ -40,6 +41,8 @@ type
     function NodeText(ANode: Integer): string; inline;
     function SkipAttr(AChild: Integer): Integer;
     function SepAfter(ANode: Integer): string;
+    function QualifiedNameText(ANode: Integer): string;
+    procedure CollectRoot(ARoot: Integer);
     function FindChildKind(ANode: Integer; AKind: TPasNodeKind): Integer;
     procedure NodePos(ANode: Integer; out AFileId, ALine, ACol: Integer);
     // collect
@@ -51,6 +54,7 @@ type
     procedure CollectTypeDecl(ANode, AScope: Integer);
     procedure CollectStruct(ANode, AOuter, ATypeSym: Integer);
     procedure CollectEnum(ANode, AOuter, ATypeSym: Integer);
+    procedure CollectUsesItem(AItem, AScope: Integer);
     procedure CollectRoutine(ANode, AScope: Integer);
     procedure Collect(ANode, AScope: Integer);
     // resolve
@@ -83,6 +87,7 @@ begin
     for var LIdx := 0 to High(LR.FNodeScope) do
       LR.FNodeScope[LIdx] := NIL_SCOPE;   // unvisited => no scope => resolves NIL
     LR.Run;
+    LR.FModel.NodeScope := LR.FNodeScope;
     Result := LR.FModel;
   finally
     LR.Free;
@@ -357,13 +362,64 @@ begin
   end;
 end;
 
+procedure TPasSemaResolver.CollectUsesItem(AItem, AScope: Integer);
+var
+  LNameNode, LLeaf, LStr, LSym: Integer;
+  LU: TPasUsesRef;
+  LIn: string;
+begin
+  LNameNode := FirstChild(AItem);
+  if LNameNode = NIL_NODE then
+    Exit;
+  // Leaf ident of the (possibly dotted) unit name.
+  LLeaf := LNameNode;
+  if KindOf(LNameNode) = nkMember then
+  begin
+    LLeaf := FirstChild(LNameNode);
+    while (LLeaf <> NIL_NODE) and (NextSib(LLeaf) <> NIL_NODE) do
+      LLeaf := NextSib(LLeaf);
+  end;
+  if (LLeaf = NIL_NODE) or (KindOf(LLeaf) <> nkIdent) then
+    Exit;
+
+  // Register the unit ref once (a unit may appear in both uses sections).
+  LSym := FModel.FindLocal(AScope, LowerCase(NodeText(LLeaf)));
+  if LSym = NIL_SYM then
+  begin
+    LSym := DeclareSym(AScope, skUnitRef, NodeText(LLeaf), LLeaf);
+    FModel.Symbols[LSym].Flags :=
+      FModel.Symbols[LSym].Flags + [sfExternalUnresolved];
+  end
+  else
+    MarkDeclName(LLeaf, LSym);
+
+  // Optional `in 'path'`.
+  LIn := '';
+  LStr := NextSib(LNameNode);
+  if (LStr <> NIL_NODE) and (KindOf(LStr) = nkStrLit) then
+  begin
+    LIn := NodeText(LStr);
+    if (Length(LIn) >= 2) and (LIn[1] = '''') then
+      LIn := StringReplace(Copy(LIn, 2, Length(LIn) - 2), '''''', '''',
+        [rfReplaceAll]);
+  end;
+
+  LU.NameFull := QualifiedNameText(LNameNode);
+  LU.InPath := LIn;
+  LU.NameNode := LNameNode;
+  LU.Sym := LSym;
+  LU.UnitId := NIL_SYM;
+  FModel.UsesList := FModel.UsesList + [LU];
+end;
+
 procedure TPasSemaResolver.CollectRoutine(ANode, AScope: Integer);
 var
-  LRoutine, LChild, LNameNode, LSegIdent, LSegLast: Integer;
+  LRoutine, LChild, LNameNode, LSegIdent, LSegLast, LQualIdent: Integer;
   LQualified: Boolean;
 begin
   LRoutine := FModel.AddScope(sckRoutine, AScope, ANode);
   FNodeScope[ANode] := AScope;
+  LQualIdent := NIL_NODE;
 
   // Parse the (possibly dotted, possibly generic) name: each segment is
   // `ident [<...>]`; a '.' after a segment means it is a qualifier (TFoo. /
@@ -386,15 +442,47 @@ begin
       LChild := NextSib(LChild);
     end;
     if SepAfter(LSegLast) = '.' then
-      LQualified := True           // qualifier segment; ident is a type/unit ref
+    begin
+      LQualified := True;          // qualifier segment; ident is a type/unit ref
+      LQualIdent := LSegIdent;     // remember the (last) qualifier = the type
+    end
     else
     begin
       LNameNode := LSegIdent;      // routine name; remaining children follow
       Break;
     end;
   end;
+
+  // For a method implementation (TFoo.Bar), make the routine body see the
+  // struct's members (implicit Self) by joining the type's member scope.
+  if LQualified and (LQualIdent <> NIL_NODE) then
+  begin
+    var LTy := FModel.Resolve(AScope, LowerCase(NodeText(LQualIdent)));
+    if (LTy <> NIL_SYM) and (FModel.Symbols[LTy].Kind = skType) and
+       (FModel.Symbols[LTy].MemberScope <> NIL_SCOPE) then
+      FModel.JoinScope(LRoutine, FModel.Symbols[LTy].MemberScope);
+  end;
   if (LNameNode <> NIL_NODE) and not LQualified then
-    DeclareSym(AScope, skRoutine, NodeText(LNameNode), LNameNode);
+  begin
+    // An unqualified routine WITH a body in the implementation section that
+    // matches an interface declaration is that declaration's implementation —
+    // link to it (mark sfHasBody) instead of adding a phantom overload.
+    var LLink := NIL_SYM;
+    if (AScope = FImpl) and (FindChildKind(ANode, nkRoutineBody) <> NIL_NODE) then
+    begin
+      var LIntfSym := FModel.FindLocal(FIntf, LowerCase(NodeText(LNameNode)));
+      if (LIntfSym <> NIL_SYM) and
+         (FModel.Symbols[LIntfSym].Kind = skRoutine) then
+        LLink := LIntfSym;
+    end;
+    if LLink <> NIL_SYM then
+    begin
+      FModel.Symbols[LLink].Flags := FModel.Symbols[LLink].Flags + [sfHasBody];
+      MarkDeclName(LNameNode, LLink);
+    end
+    else
+      DeclareSym(AScope, skRoutine, NodeText(LNameNode), LNameNode);
+  end;
 
   // Remaining children: parameters, result type, directives, body.
   while LChild <> NIL_NODE do
@@ -432,27 +520,7 @@ begin
         while LChild <> NIL_NODE do
         begin
           if KindOf(LChild) = nkUsesItem then
-          begin
-            // Register the unit under the leaf ident of its (qualified) name.
-            var LNameNode := FirstChild(LChild);
-            var LLeaf := LNameNode;
-            if (LNameNode <> NIL_NODE) and (KindOf(LNameNode) = nkMember) then
-            begin
-              LLeaf := FirstChild(LNameNode);
-              while (LLeaf <> NIL_NODE) and (NextSib(LLeaf) <> NIL_NODE) do
-                LLeaf := NextSib(LLeaf);   // last child = member name
-            end;
-            // A unit can appear in both the interface and implementation uses
-            // (and distinct units can share a leaf name) — register once, no
-            // redeclaration diagnostic.
-            if (LLeaf <> NIL_NODE) and (KindOf(LLeaf) = nkIdent) and
-               (FModel.FindLocal(AScope, LowerCase(NodeText(LLeaf))) = NIL_SYM) then
-            begin
-              var LSym := DeclareSym(AScope, skUnitRef, NodeText(LLeaf), LLeaf);
-              FModel.Symbols[LSym].Flags :=
-                FModel.Symbols[LSym].Flags + [sfExternalUnresolved];
-            end;
-          end;
+            CollectUsesItem(LChild, AScope);
           LChild := NextSib(LChild);
         end;
       end;
@@ -643,12 +711,64 @@ begin
     end;
 end;
 
+function TPasSemaResolver.QualifiedNameText(ANode: Integer): string;
+var
+  LBase, LName: Integer;
+begin
+  if ANode = NIL_NODE then
+    Exit('');
+  case KindOf(ANode) of
+    nkMember:
+      begin
+        LBase := FirstChild(ANode);
+        LName := NextSib(LBase);
+        Result := QualifiedNameText(LBase) + '.' + NodeText(LName);
+      end;
+  else
+    Result := NodeText(ANode);
+  end;
+end;
+
+procedure TPasSemaResolver.CollectRoot(ARoot: Integer);
+var
+  LChild, LNameNode: Integer;
+begin
+  FNodeScope[ARoot] := FImpl;
+  // First child is the compilation unit's own name — a definition, not a
+  // reference. Record it and leave it without a scope so no pass resolves it.
+  LNameNode := FirstChild(ARoot);
+  if (LNameNode <> NIL_NODE) and (KindOf(LNameNode) in [nkIdent, nkMember]) then
+  begin
+    FModel.UnitNameLower := LowerCase(QualifiedNameText(LNameNode));
+    FIsDeclName[LNameNode] := True;
+  end
+  else
+    LNameNode := NIL_NODE;
+
+  LChild := FirstChild(ARoot);
+  while LChild <> NIL_NODE do
+  begin
+    if LChild <> LNameNode then
+      case KindOf(LChild) of
+        nkInterfaceSec:
+          Collect(LChild, FIntf);
+        nkImplementationSec:
+          Collect(LChild, FImpl);
+      else
+        Collect(LChild, FImpl);   // uses / decls / init / finalization / block
+      end;
+    LChild := NextSib(LChild);
+  end;
+end;
+
 procedure TPasSemaResolver.Run;
 begin
   FSys := SeedSystemScope(FModel);
-  FUnit := FModel.AddScope(sckUnit, NIL_SCOPE, 0);
-  FModel.JoinScope(FUnit, FSys);   // implicit 'uses System'
-  Collect(0, FUnit);
+  FIntf := FModel.AddScope(sckUnit, NIL_SCOPE, 0);
+  FModel.JoinScope(FIntf, FSys);            // implicit 'uses System'
+  FImpl := FModel.AddScope(sckImplementation, FIntf, 0);
+  FModel.InterfaceScope := FIntf;
+  CollectRoot(0);
   ResolveNode(0);
   BindTypes;
 end;

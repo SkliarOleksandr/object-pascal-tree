@@ -19,6 +19,8 @@ type
   private
     FSearchPaths: TArray<string>;
     FIncludeIndex: TDictionary<string, string>;  // basename -> full path
+    FUnitIndex: TDictionary<string, string>;      // *.pas/*.dpr basename -> path
+    function TryFile(const ADir, AName: string; out AResolved: string): Boolean;
   public
     constructor Create(const ASearchPaths: TArray<string>);
     destructor Destroy; override;
@@ -30,6 +32,14 @@ type
     { Resolves an include argument (possibly quoted) against the directory
       of the including file, then the search paths, then the index. }
     function ResolveInclude(const AIncludingFile, AName: string;
+      out AResolved: string): Boolean;
+    { Indexes every *.pas/*.dpr under ARoot by basename, for unit-name
+      resolution when there are no real search paths (project-dir fallback). }
+    procedure BuildUnitIndex(const ARoot: string);
+    { Resolves a unit name (e.g. 'System.SysUtils') to a .pas file: tries the
+      explicit `in` path first, then <dotted>.pas and <leaf>.pas relative to
+      the referring file, the search paths, and the unit index. }
+    function ResolveUnit(const AUnitName, AInPath, AFromFile: string;
       out AResolved: string): Boolean;
   end;
 
@@ -50,7 +60,100 @@ end;
 destructor TPasSourceManager.Destroy;
 begin
   FIncludeIndex.Free;
+  FUnitIndex.Free;
   inherited;
+end;
+
+function TPasSourceManager.TryFile(const ADir, AName: string;
+  out AResolved: string): Boolean;
+var
+  LCandidate: string;
+begin
+  Result := False;
+  if (ADir = '') or (AName = '') then
+    Exit;
+  LCandidate := TPath.Combine(ADir, AName);
+  if TFile.Exists(LCandidate) then
+  begin
+    AResolved := TPath.GetFullPath(LCandidate);
+    Result := True;
+  end;
+end;
+
+procedure TPasSourceManager.BuildUnitIndex(const ARoot: string);
+var
+  LFile, LKey, LExt: string;
+begin
+  FreeAndNil(FUnitIndex);
+  FUnitIndex := TDictionary<string, string>.Create;
+  for LFile in TDirectory.GetFiles(ARoot, '*.*', TSearchOption.soAllDirectories) do
+  begin
+    LExt := LowerCase(TPath.GetExtension(LFile));
+    if (LExt = '.pas') or (LExt = '.dpr') then
+    begin
+      LKey := LowerCase(TPath.GetFileName(LFile));
+      if not FUnitIndex.ContainsKey(LKey) then
+        FUnitIndex.Add(LKey, LFile);
+    end;
+  end;
+end;
+
+function TPasSourceManager.ResolveUnit(const AUnitName, AInPath, AFromFile: string;
+  out AResolved: string): Boolean;
+var
+  LDir, LLeaf, LCand: string;
+  LNames: TArray<string>;
+  LName: string;
+  LDot: Integer;
+begin
+  LDir := TPath.GetDirectoryName(AFromFile);
+
+  // 1. Explicit `in 'path'`.
+  if AInPath <> '' then
+  begin
+    if TPath.IsPathRooted(AInPath) and TFile.Exists(AInPath) then
+    begin
+      AResolved := TPath.GetFullPath(AInPath);
+      Exit(True);
+    end;
+    if TryFile(LDir, AInPath, AResolved) then
+      Exit(True);
+    for LDir in FSearchPaths do
+      if TryFile(LDir, AInPath, AResolved) then
+        Exit(True);
+    LDir := TPath.GetDirectoryName(AFromFile);
+  end;
+
+  // Candidate file names: <dotted>.pas then <leaf>.pas.
+  LDot := LastDelimiter('.', AUnitName);
+  if LDot > 0 then
+    LLeaf := Copy(AUnitName, LDot + 1, MaxInt)
+  else
+    LLeaf := AUnitName;
+  LNames := [AUnitName + '.pas'];
+  if not SameText(LLeaf, AUnitName) then
+    LNames := LNames + [LLeaf + '.pas'];
+
+  // 2. Relative to the referring file, then search paths.
+  for LName in LNames do
+  begin
+    if TryFile(LDir, LName, AResolved) then
+      Exit(True);
+    for LCand in FSearchPaths do
+      if TryFile(LCand, LName, AResolved) then
+        Exit(True);
+  end;
+
+  // 3. Unit index (basename fallback).
+  if FUnitIndex <> nil then
+    for LName in LNames do
+      if FUnitIndex.TryGetValue(LowerCase(LName), LCand) then
+      begin
+        AResolved := LCand;
+        Exit(True);
+      end;
+
+  Result := False;
 end;
 
 procedure TPasSourceManager.BuildIncludeIndex(const ARoot: string);

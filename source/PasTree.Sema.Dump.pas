@@ -98,11 +98,14 @@ begin
 
     // Reference resolution stats.
     LResolved := 0; LExternal := 0; LUnresolvedRefs := 0;
+    var LCross := 0;
     for LNode := 0 to High(AModel.RefMap) do
       if AModel.Tree.Nodes[LNode].Kind in [nkIdent, nkMember] then
       begin
         if AModel.RefMap[LNode] <> NIL_SYM then
           Inc(LResolved)
+        else if AModel.ExtRefMap.ContainsKey(LNode) then
+          Inc(LCross)
         else
           Inc(LUnresolvedRefs);
       end;
@@ -110,8 +113,9 @@ begin
       if sfExternalUnresolved in AModel.Symbols[LSymIdx].Flags then
         Inc(LExternal);
 
-    LSB.AppendFormat('refs: %d resolved, %d unresolved; uses: %d'#10,
-      [LResolved, LUnresolvedRefs, LExternal]);
+    LSB.AppendFormat(
+      'refs: %d local, %d cross-unit, %d unresolved; external-uses: %d'#10,
+      [LResolved, LCross, LUnresolvedRefs, LExternal]);
 
     if Length(AModel.Diags) > 0 then
     begin

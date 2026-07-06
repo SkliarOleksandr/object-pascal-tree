@@ -25,8 +25,23 @@ type
     skProperty, skEnumValue, skGenericParam, skLabel, skUnitRef, skBuiltinType);
 
   TSemaSymbolFlag = (sfBuiltin, sfExternalUnresolved, sfStrict, sfOverload,
-    sfClassMember, sfForward);
+    sfClassMember, sfForward, sfHasBody);
   TSemaSymbolFlags = set of TSemaSymbolFlag;
+
+  // A reference resolved to a symbol in another unit's model.
+  TPasExtRef = record
+    UnitId: Integer;   // index into the project's model list
+    Sym: Integer;      // symbol index within that model
+  end;
+
+  // One `uses` entry, recorded by the resolver and completed by the project.
+  TPasUsesRef = record
+    NameFull: string;  // dotted unit name as written
+    InPath: string;    // from `in '...'`, or ''
+    NameNode: Integer; // CST node of the (qualified) name
+    Sym: Integer;      // the skUnitRef symbol in this model
+    UnitId: Integer;   // resolved project model id; NIL_SYM if unresolved
+  end;
 
   TSemaVisibility = (svDefault, svStrictPrivate, svPrivate, svStrictProtected,
     svProtected, svPublic, svPublished);
@@ -69,6 +84,13 @@ type
     Scopes: TObjectList<TSemaScope>;
     RefMap: TArray<Integer>;        // node index -> symbol index; NIL_SYM
     Diags: TArray<TSemaDiag>;
+    // Phase 2: cross-unit state.
+    InterfaceScope: Integer;        // scope importers may read; NIL_SCOPE
+    NodeScope: TArray<Integer>;     // node index -> scope in effect; NIL_SCOPE
+    ExtRefMap: TDictionary<Integer, TPasExtRef>; // node -> external symbol
+    UsesList: TArray<TPasUsesRef>;
+    AllUsesResolved: Boolean;       // gates E2003 (set by the project driver)
+    UnitNameLower: string;          // this unit's own name, lower-cased
     constructor Create(const ATree: TPasTree);
     destructor Destroy; override;
 
@@ -120,6 +142,9 @@ begin
   inherited Create;
   Tree := ATree;
   Scopes := TObjectList<TSemaScope>.Create(True);
+  ExtRefMap := TDictionary<Integer, TPasExtRef>.Create;
+  InterfaceScope := NIL_SCOPE;
+  AllUsesResolved := False;
   SetLength(Symbols, 64);
   FSymCount := 0;
   SetLength(RefMap, Length(ATree.Nodes));
@@ -129,6 +154,7 @@ end;
 
 destructor TPasSemaModel.Destroy;
 begin
+  ExtRefMap.Free;
   Scopes.Free;
   inherited;
 end;
