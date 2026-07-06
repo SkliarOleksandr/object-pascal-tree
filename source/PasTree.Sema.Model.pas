@@ -1,0 +1,220 @@
+unit PasTree.Sema.Model;
+
+{
+  PasTree semantics — the side-model bound to one immutable TPasTree.
+
+  Everything is index-based (mirrors the AST arena): symbols live in a grown
+  array, scopes in an owned list, and RefMap maps a CST node index to the
+  symbol it resolved to (NIL_SYM = -1). The model is a pure product of
+  (tree, builtins) so it can be built one-per-unit in parallel later.
+}
+
+interface
+
+uses
+  System.Generics.Collections,
+  PasTree.Ast,
+  PasTree.Sema.Diagnostics;
+
+const
+  NIL_SYM = -1;
+  NIL_SCOPE = -1;
+
+type
+  TSemaSymbolKind = (skType, skVar, skConst, skField, skRoutine, skParam,
+    skProperty, skEnumValue, skGenericParam, skLabel, skUnitRef, skBuiltinType);
+
+  TSemaSymbolFlag = (sfBuiltin, sfExternalUnresolved, sfStrict, sfOverload,
+    sfClassMember, sfForward);
+  TSemaSymbolFlags = set of TSemaSymbolFlag;
+
+  TSemaVisibility = (svDefault, svStrictPrivate, svPrivate, svStrictProtected,
+    svProtected, svPublic, svPublished);
+
+  TSemaSymbol = record
+    Kind: TSemaSymbolKind;
+    Name: string;          // original spelling
+    NameLower: string;     // case-insensitive key
+    DeclNode: Integer;     // CST index; NIL_NODE for builtins
+    Scope: Integer;        // owning scope index
+    TypeSym: Integer;      // resolved type symbol; NIL_SYM if unbound
+    TypeNode: Integer;     // CST node of the declared type expr; NIL_NODE if none
+    Flags: TSemaSymbolFlags;
+    Visibility: TSemaVisibility;
+    NextOverload: Integer;  // next routine of the same name in scope; NIL_SYM
+    MemberScope: Integer;   // members of a type/unit for A.B lookup; NIL_SCOPE
+  end;
+
+  TSemaScopeKind = (sckSystem, sckUnit, sckImplementation, sckStruct,
+    sckRoutine, sckWith, sckBlock, sckGenericParams, sckEnum);
+
+  TSemaScope = class
+    Kind: TSemaScopeKind;
+    Parent: Integer;                       // scope index; NIL_SCOPE at root
+    OwnerNode: Integer;                    // CST node that opened this scope
+    Names: TDictionary<string, Integer>;   // NameLower -> symbol index (head)
+    Symbols: TList<Integer>;               // declaration order
+    Additional: TArray<Integer>;           // joined scopes (system/with/ancestor)
+    constructor Create(AKind: TSemaScopeKind; AParent, AOwnerNode: Integer);
+    destructor Destroy; override;
+  end;
+
+  TPasSemaModel = class
+  private
+    FSymCount: Integer;
+    procedure GrowSyms;
+  public
+    Tree: TPasTree;                 // referenced, not owned
+    Symbols: TArray<TSemaSymbol>;
+    Scopes: TObjectList<TSemaScope>;
+    RefMap: TArray<Integer>;        // node index -> symbol index; NIL_SYM
+    Diags: TArray<TSemaDiag>;
+    constructor Create(const ATree: TPasTree);
+    destructor Destroy; override;
+
+    function SymCount: Integer;
+    function AddScope(AKind: TSemaScopeKind; AParent, AOwnerNode: Integer):
+      Integer;
+    procedure JoinScope(AScope, AAdditional: Integer);
+    // Adds a symbol to the arena (does not register a name).
+    function AddSymbol(AScope: Integer; AKind: TSemaSymbolKind;
+      const AName: string; ADeclNode: Integer): Integer;
+    // Registers NameLower -> symbol in a scope's dictionary + order list.
+    procedure BindName(AScope, ASym: Integer);
+    // Local lookup in one scope (no chain).
+    function FindLocal(AScope: Integer; const ANameLower: string): Integer;
+    // Full lookup: self -> additional (reverse) -> parent -> ...
+    function Resolve(AScope: Integer; const ANameLower: string): Integer;
+    procedure AddDiag(const ADiag: TSemaDiag);
+  end;
+
+implementation
+
+uses
+  System.SysUtils;
+
+{ TSemaScope }
+
+constructor TSemaScope.Create(AKind: TSemaScopeKind; AParent,
+  AOwnerNode: Integer);
+begin
+  inherited Create;
+  Kind := AKind;
+  Parent := AParent;
+  OwnerNode := AOwnerNode;
+  Names := TDictionary<string, Integer>.Create;
+  Symbols := TList<Integer>.Create;
+end;
+
+destructor TSemaScope.Destroy;
+begin
+  Names.Free;
+  Symbols.Free;
+  inherited;
+end;
+
+{ TPasSemaModel }
+
+constructor TPasSemaModel.Create(const ATree: TPasTree);
+begin
+  inherited Create;
+  Tree := ATree;
+  Scopes := TObjectList<TSemaScope>.Create(True);
+  SetLength(Symbols, 64);
+  FSymCount := 0;
+  SetLength(RefMap, Length(ATree.Nodes));
+  for var LIdx := 0 to High(RefMap) do
+    RefMap[LIdx] := NIL_SYM;
+end;
+
+destructor TPasSemaModel.Destroy;
+begin
+  Scopes.Free;
+  inherited;
+end;
+
+function TPasSemaModel.SymCount: Integer;
+begin
+  Result := FSymCount;
+end;
+
+procedure TPasSemaModel.GrowSyms;
+begin
+  if FSymCount = Length(Symbols) then
+    SetLength(Symbols, Length(Symbols) * 2);
+end;
+
+function TPasSemaModel.AddScope(AKind: TSemaScopeKind; AParent,
+  AOwnerNode: Integer): Integer;
+begin
+  Result := Scopes.Add(TSemaScope.Create(AKind, AParent, AOwnerNode));
+end;
+
+procedure TPasSemaModel.JoinScope(AScope, AAdditional: Integer);
+begin
+  Scopes[AScope].Additional := Scopes[AScope].Additional + [AAdditional];
+end;
+
+function TPasSemaModel.AddSymbol(AScope: Integer; AKind: TSemaSymbolKind;
+  const AName: string; ADeclNode: Integer): Integer;
+begin
+  GrowSyms;
+  Result := FSymCount;
+  Inc(FSymCount);
+  Symbols[Result].Kind := AKind;
+  Symbols[Result].Name := AName;
+  Symbols[Result].NameLower := LowerCase(AName);
+  Symbols[Result].DeclNode := ADeclNode;
+  Symbols[Result].Scope := AScope;
+  Symbols[Result].TypeSym := NIL_SYM;
+  Symbols[Result].TypeNode := NIL_NODE;
+  Symbols[Result].Flags := [];
+  Symbols[Result].Visibility := svDefault;
+  Symbols[Result].NextOverload := NIL_SYM;
+  Symbols[Result].MemberScope := NIL_SCOPE;
+end;
+
+procedure TPasSemaModel.BindName(AScope, ASym: Integer);
+begin
+  Scopes[AScope].Names.AddOrSetValue(Symbols[ASym].NameLower, ASym);
+  Scopes[AScope].Symbols.Add(ASym);
+end;
+
+function TPasSemaModel.FindLocal(AScope: Integer;
+  const ANameLower: string): Integer;
+begin
+  if not Scopes[AScope].Names.TryGetValue(ANameLower, Result) then
+    Result := NIL_SYM;
+end;
+
+function TPasSemaModel.Resolve(AScope: Integer;
+  const ANameLower: string): Integer;
+var
+  LCur, LIdx: Integer;
+  LAdd: TArray<Integer>;
+begin
+  LCur := AScope;
+  while LCur <> NIL_SCOPE do
+  begin
+    Result := FindLocal(LCur, ANameLower);
+    if Result <> NIL_SYM then
+      Exit;
+    // Joined scopes, most-recently-added first (uses/with priority).
+    LAdd := Scopes[LCur].Additional;
+    for LIdx := High(LAdd) downto 0 do
+    begin
+      Result := FindLocal(LAdd[LIdx], ANameLower);
+      if Result <> NIL_SYM then
+        Exit;
+    end;
+    LCur := Scopes[LCur].Parent;
+  end;
+  Result := NIL_SYM;
+end;
+
+procedure TPasSemaModel.AddDiag(const ADiag: TSemaDiag);
+begin
+  Diags := Diags + [ADiag];
+end;
+
+end.
