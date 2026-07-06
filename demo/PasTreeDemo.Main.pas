@@ -18,13 +18,14 @@ uses
   System.JSON,
   Winapi.Windows, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls,
   Vcl.ExtCtrls, Vcl.Dialogs, Vcl.Graphics,
-  SynEdit, SynEditHighlighter, SynHighlighterPas, SynHighlighterJSON,
+  SynEdit, SynEditHighlighter, SynHighlighterJSON,
   VirtualTrees, VirtualTrees.Types,
   PasTree.Platforms, PasTree.Preprocessor, PasTree.Ast, PasTree.Ast.Json,
   PasTree.Parser, PasTree.Project, PasTree.DProj,
   PasTree.Sema.Diagnostics, PasTree.Sema.Model, PasTree.Sema.Builtins,
   PasTree.Sema.Types, PasTree.Sema.Resolver, PasTree.Sema.Project,
-  PasTree.Sema.Dump, VirtualTrees.BaseAncestorVCL, VirtualTrees.BaseTree, VirtualTrees.AncestorVCL, SynEditCodeFolding;
+  PasTree.Sema.Dump, VirtualTrees.BaseAncestorVCL, VirtualTrees.BaseTree, VirtualTrees.AncestorVCL, SynEditCodeFolding,
+  PasTreeDemo.Highlighter;
 
 type
   // VirtualTree node payload: an index into FFileList (unmanaged, so the tree
@@ -48,7 +49,6 @@ type
     edSema: TSynEdit;
     splBottom: TSplitter;
     mmMessages: TMemo;
-    SynPasSyn1: TSynPasSyn;
     SynJSONSyn1: TSynJSONSyn;
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
@@ -301,6 +301,7 @@ function TfrmMain.OpenFileTab(const APath: string): TSynEdit;
 var
   LIdx: Integer;
   LTab: TSourceTab;
+  LHL: TPasTreeSynHighlighter;
 begin
   LIdx := FOpenFiles.IndexOf(APath);
   if LIdx >= 0 then
@@ -319,8 +320,14 @@ begin
   Result.Align := alClient;
   Result.Gutter.ShowLineNumbers := True;
   Result.Font.Name := 'Consolas';
-  Result.Highlighter := SynPasSyn1;
   Result.UseCodeFolding := True;
+
+  // Our own PasTree-lexer-driven highlighter — one instance per tab (it
+  // caches the tokenization of its own attached buffer, so instances can't
+  // be shared across editors).
+  LHL := TPasTreeSynHighlighter.Create(Result);
+  LHL.SourceLines := Result.Lines;
+  Result.Highlighter := LHL;
   try
     Result.Lines.LoadFromFile(APath);
   except

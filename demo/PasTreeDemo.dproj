@@ -123,6 +123,7 @@
         <DCCReference Include="PasTreeDemo.Main.pas">
             <Form>frmMain</Form>
         </DCCReference>
+        <DCCReference Include="PasTreeDemo.Highlighter.pas"/>
         <DCCReference Include="..\source\PasTree.Types.pas"/>
         <DCCReference Include="..\source\PasTree.Lexer.pas"/>
         <DCCReference Include="..\source\PasTree.SourceManager.pas"/>

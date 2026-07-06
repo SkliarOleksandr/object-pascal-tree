@@ -164,10 +164,6 @@ object frmMain: TfrmMain
       end
     end
   end
-  object SynPasSyn1: TSynPasSyn
-    Left = 364
-    Top = 163
-  end
   object SynJSONSyn1: TSynJSONSyn
     Left = 532
     Top = 163
