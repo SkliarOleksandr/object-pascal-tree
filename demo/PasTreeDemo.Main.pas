@@ -1,10 +1,14 @@
 unit PasTreeDemo.Main;
 
 {
-  PasTree demo — a small VCL host that opens a Delphi project, parses it with
-  PasTree, and shows the source (SynEdit tabs), the project files (VirtualTree)
-  and the diagnostics + AST JSON. UI is built at runtime (no designer .dfm) so
-  the third-party controls need no design-time package.
+  PasTree demo — a small VCL host that opens a Delphi project, analyzes it with
+  PasTree (parse + full semantics) and shows the source (SynEdit tabs), the
+  project files (VirtualTree), the AST JSON, the semantic model and diagnostics.
+
+  The static layout lives in the form designer (PasTreeDemo.Main.dfm). Source
+  tabs are created at runtime (one TSynEdit per opened file). Highlighters and
+  the open dialog are created in code (non-visual). RegisterClasses (below) lets
+  the statically-linked build stream the third-party controls from the .dfm.
 }
 
 interface
@@ -31,27 +35,35 @@ type
   PPasNodeData = ^TPasNodeData;
 
   TfrmMain = class(TForm)
+    pnlTop: TPanel;
+    btnOpen: TButton;
+    btnParse: TButton;
+    cbPlatform: TComboBox;
+    splLeft: TSplitter;
+    vstFiles: TVirtualStringTree;
+    pgc: TPageControl;
+    tsJson: TTabSheet;
+    edJson: TSynEdit;
+    tsSema: TTabSheet;
+    edSema: TSynEdit;
+    splBottom: TSplitter;
+    mmMessages: TMemo;
     procedure FormCreate(Sender: TObject);
+    procedure btnOpenClick(Sender: TObject);
+    procedure btnParseClick(Sender: TObject);
+    procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
+    procedure vstFilesGetText(Sender: TBaseVirtualTree; Node: PVirtualNode;
+      Column: TColumnIndex; TextType: TVSTTextType; var CellText: string);
+    procedure vstFilesChange(Sender: TBaseVirtualTree; Node: PVirtualNode);
   private
-    FToolbar: TPanel;
-    FOpenBtn: TButton;
-    FParseBtn: TButton;
-    FPlatformCombo: TComboBox;
-    FTree: TVirtualStringTree;
-    FLeftSplitter: TSplitter;
-    FPages: TPageControl;
-    FBottomSplitter: TSplitter;
-    FMessages: TMemo;
-    FJsonTab: TTabSheet;
-    FJsonEdit: TSynEdit;
-    FSemaTab: TTabSheet;
-    FSemaEdit: TSynEdit;
-    FFileList: TStringList;               // full paths shown in the tree
-    FOpenFiles: TStringList;              // path -> TTabSheet (Objects)
+    FPasHL: TSynPasSyn;      // shared Pascal highlighter (source tabs)
+    FJsonHL: TSynJSONSyn;    // JSON highlighter (AST JSON tab)
+    FFileList: TStringList;  // full paths shown in the tree
+    FOpenFiles: TStringList; // path -> TTabSheet (Objects)
     FProjectDir: string;
     FMainSource: string;
     FPlatform: TPasPlatform;
-    procedure BuildUI;
+    procedure SetupControls;
     procedure EnsureSampleProject;
     function ExeDir: string;
     procedure OpenProject(const AProjectFile: string);
@@ -59,13 +71,6 @@ type
     function OpenFileTab(const APath: string): TSynEdit;
     procedure RunParse;
     procedure Log(const AText: string);
-    // event handlers
-    procedure OpenBtnClick(Sender: TObject);
-    procedure ParseBtnClick(Sender: TObject);
-    procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
-    procedure TreeGetText(Sender: TBaseVirtualTree; Node: PVirtualNode;
-      Column: TColumnIndex; TextType: TVSTTextType; var CellText: string);
-    procedure TreeChange(Sender: TBaseVirtualTree; Node: PVirtualNode);
   end;
 
 var
@@ -76,8 +81,8 @@ implementation
 {$R *.dfm}
 
 type
-  // A source tab that owns its editor (pattern borrowed from the DelphiAST
-  // TestApp), so we can recover the editor from the tab without casts.
+  // A source tab that owns its editor, so we can recover the editor from the
+  // tab without casts.
   TSourceTab = class(TTabSheet)
     Editor: TSynEdit;
   end;
@@ -98,7 +103,7 @@ const
 
 { helpers }
 
-// Re-indent the compact AST JSON for display (2 spaces, like the TestApp).
+// Re-indent the compact AST JSON for display (2 spaces).
 function PrettyJson(const ACompact: string): string;
 var
   LVal: TJSONValue;
@@ -126,108 +131,45 @@ begin
   FFileList := TStringList.Create;
   FOpenFiles := TStringList.Create;
   FPlatform := pfWin32;
-  BuildUI;
+  SetupControls;
   EnsureSampleProject;
-  // Open the bundled sample by default so there is always something to parse,
-  // and analyze it immediately so the Semantics tab is populated on launch.
+  // Open the bundled sample by default and analyze it immediately so the
+  // Semantics tab is populated on launch.
   OpenProject(TPath.Combine(TPath.Combine(ExeDir, 'Sample'), 'Sample.dpr'));
   RunParse;
 end;
 
-procedure TfrmMain.BuildUI;
+// Runtime-only control configuration (things awkward to set in the designer:
+// the VST node payload/options, highlighters and code fonts).
+procedure TfrmMain.SetupControls;
 begin
-  Caption := 'PasTree Demo';
-  KeyPreview := True;
-  OnKeyDown := FormKeyDown;
+  vstFiles.NodeDataSize := SizeOf(TPasNodeData);
+  vstFiles.Header.Options := vstFiles.Header.Options - [hoVisible];
+  vstFiles.TreeOptions.PaintOptions :=
+    vstFiles.TreeOptions.PaintOptions - [toShowTreeLines, toShowRoot];
 
-  // --- toolbar (top) ---
-  FToolbar := TPanel.Create(Self);
-  FToolbar.Parent := Self;
-  FToolbar.Align := alTop;
-  FToolbar.Height := 40;
-  FToolbar.BevelOuter := bvNone;
+  FPasHL := TSynPasSyn.Create(Self);
+  FJsonHL := TSynJSONSyn.Create(Self);
 
-  FOpenBtn := TButton.Create(Self);
-  FOpenBtn.Parent := FToolbar;
-  FOpenBtn.SetBounds(8, 7, 120, 27);
-  FOpenBtn.Caption := 'Open Project...';
-  FOpenBtn.OnClick := OpenBtnClick;
+  edJson.ReadOnly := True;
+  edJson.Highlighter := FJsonHL;
+  edJson.Gutter.ShowLineNumbers := True;
+  edJson.Font.Name := 'Consolas';
+  edJson.UseCodeFolding := True;
 
-  FParseBtn := TButton.Create(Self);
-  FParseBtn.Parent := FToolbar;
-  FParseBtn.SetBounds(136, 7, 120, 27);
-  FParseBtn.Caption := 'Run Parse (F9)';
-  FParseBtn.OnClick := ParseBtnClick;
+  edSema.ReadOnly := True;
+  edSema.Gutter.ShowLineNumbers := True;
+  edSema.Font.Name := 'Consolas';
 
-  FPlatformCombo := TComboBox.Create(Self);
-  FPlatformCombo.Parent := FToolbar;
-  FPlatformCombo.SetBounds(300, 9, 100, 23);
-  FPlatformCombo.Style := csDropDownList;
-  FPlatformCombo.Items.Add('Win32');
-  FPlatformCombo.Items.Add('Win64');
-  FPlatformCombo.ItemIndex := 0;
+  mmMessages.Font.Name := 'Consolas';
+  mmMessages.Font.Size := 9;
 
-  // --- messages (bottom) ---
-  FMessages := TMemo.Create(Self);
-  FMessages.Parent := Self;
-  FMessages.Align := alBottom;
-  FMessages.Height := 150;
-  FMessages.ReadOnly := True;
-  FMessages.ScrollBars := ssBoth;
-  FMessages.WordWrap := False;
-  FMessages.Font.Name := 'Consolas';
-  FMessages.Font.Size := 9;
-
-  FBottomSplitter := TSplitter.Create(Self);
-  FBottomSplitter.Parent := Self;
-  FBottomSplitter.Align := alBottom;
-  FBottomSplitter.Height := 4;
-
-  // --- project tree (left) ---
-  FTree := TVirtualStringTree.Create(Self);
-  FTree.Parent := Self;
-  FTree.Align := alLeft;
-  FTree.Width := 260;
-  FTree.NodeDataSize := SizeOf(TPasNodeData);
-  FTree.Header.Options := FTree.Header.Options - [hoVisible];
-  FTree.TreeOptions.PaintOptions :=
-    FTree.TreeOptions.PaintOptions - [toShowTreeLines, toShowRoot];
-  FTree.OnGetText := TreeGetText;
-  FTree.OnChange := TreeChange;
-
-  FLeftSplitter := TSplitter.Create(Self);
-  FLeftSplitter.Parent := Self;
-  FLeftSplitter.Align := alLeft;
-  FLeftSplitter.Width := 4;
-
-  // --- editor tabs (center) ---
-  FPages := TPageControl.Create(Self);
-  FPages.Parent := Self;
-  FPages.Align := alClient;
-
-  // persistent AST JSON tab
-  FJsonTab := TTabSheet.Create(FPages);
-  FJsonTab.PageControl := FPages;
-  FJsonTab.Caption := 'AST JSON';
-  FJsonEdit := TSynEdit.Create(Self);
-  FJsonEdit.Parent := FJsonTab;
-  FJsonEdit.Align := alClient;
-  FJsonEdit.ReadOnly := True;
-  FJsonEdit.Gutter.ShowLineNumbers := True;
-  FJsonEdit.Font.Name := 'Consolas';
-  FJsonEdit.Highlighter := TSynJSONSyn.Create(Self);
-  FJsonEdit.UseCodeFolding := True;
-
-  // persistent semantic-model tab (scopes / symbols / refs / diagnostics)
-  FSemaTab := TTabSheet.Create(FPages);
-  FSemaTab.PageControl := FPages;
-  FSemaTab.Caption := 'Semantics';
-  FSemaEdit := TSynEdit.Create(Self);
-  FSemaEdit.Parent := FSemaTab;
-  FSemaEdit.Align := alClient;
-  FSemaEdit.ReadOnly := True;
-  FSemaEdit.Gutter.ShowLineNumbers := True;
-  FSemaEdit.Font.Name := 'Consolas';
+  if cbPlatform.Items.Count = 0 then
+  begin
+    cbPlatform.Items.Add('Win32');
+    cbPlatform.Items.Add('Win64');
+  end;
+  cbPlatform.ItemIndex := 0;
 end;
 
 procedure TfrmMain.EnsureSampleProject;
@@ -244,7 +186,7 @@ end;
 
 procedure TfrmMain.Log(const AText: string);
 begin
-  FMessages.Lines.Add(AText);
+  mmMessages.Lines.Add(AText);
 end;
 
 procedure TfrmMain.OpenProject(const AProjectFile: string);
@@ -275,9 +217,9 @@ begin
   end;
 
   case FPlatform of
-    pfWin64: FPlatformCombo.ItemIndex := 1;
+    pfWin64: cbPlatform.ItemIndex := 1;
   else
-    FPlatformCombo.ItemIndex := 0;
+    cbPlatform.ItemIndex := 0;
   end;
 
   Caption := 'PasTree Demo — ' + TPath.GetFileName(AProjectFile);
@@ -296,7 +238,7 @@ var
   LNode: PVirtualNode;
 begin
   FFileList.Clear;
-  FTree.Clear;
+  vstFiles.Clear;
   if not TDirectory.Exists(FProjectDir) then
     Exit;
   LAll := TDirectory.GetFiles(FProjectDir, '*.*',
@@ -309,15 +251,15 @@ begin
       FFileList.Add(LFile);
   end;
   FFileList.Sort;
-  FTree.BeginUpdate;
+  vstFiles.BeginUpdate;
   try
     for var LIndex := 0 to FFileList.Count - 1 do
     begin
-      LNode := FTree.AddChild(nil);
-      PPasNodeData(FTree.GetNodeData(LNode))^.Index := LIndex;
+      LNode := vstFiles.AddChild(nil);
+      PPasNodeData(vstFiles.GetNodeData(LNode))^.Index := LIndex;
     end;
   finally
-    FTree.EndUpdate;
+    vstFiles.EndUpdate;
   end;
 end;
 
@@ -330,12 +272,12 @@ begin
   if LIdx >= 0 then
   begin
     LTab := TSourceTab(FOpenFiles.Objects[LIdx]);
-    FPages.ActivePage := LTab;
+    pgc.ActivePage := LTab;
     Exit(LTab.Editor);
   end;
 
-  LTab := TSourceTab.Create(FPages);
-  LTab.PageControl := FPages;
+  LTab := TSourceTab.Create(pgc);
+  LTab.PageControl := pgc;
   LTab.Caption := TPath.GetFileName(APath);
 
   Result := TSynEdit.Create(LTab);
@@ -343,7 +285,7 @@ begin
   Result.Align := alClient;
   Result.Gutter.ShowLineNumbers := True;
   Result.Font.Name := 'Consolas';
-  Result.Highlighter := TSynPasSyn.Create(Result);
+  Result.Highlighter := FPasHL;
   Result.UseCodeFolding := True;
   try
     Result.Lines.LoadFromFile(APath);
@@ -353,7 +295,7 @@ begin
   end;
   LTab.Editor := Result;
   FOpenFiles.AddObject(APath, LTab);
-  FPages.ActivePage := LTab;
+  pgc.ActivePage := LTab;
 end;
 
 procedure TfrmMain.RunParse;
@@ -368,12 +310,12 @@ begin
     Log('No project open.');
     Exit;
   end;
-  if FPlatformCombo.ItemIndex = 1 then
+  if cbPlatform.ItemIndex = 1 then
     LPlatform := pfWin64
   else
     LPlatform := pfWin32;
 
-  FMessages.Clear;
+  mmMessages.Clear;
   Log('Analyzing ' + FProjectDir + ' (' + PlatformName(LPlatform) + ')...');
   Screen.Cursor := crHourGlass;
   try
@@ -404,9 +346,9 @@ begin
       if LMain >= 0 then
       begin
         LModel := LProj.Model(LMain);
-        FJsonEdit.Text := PrettyJson(AstToJson(LModel.Tree));
-        FSemaEdit.Text := DumpSemaModel(LModel);
-        FPages.ActivePage := FSemaTab;
+        edJson.Text := PrettyJson(AstToJson(LModel.Tree));
+        edSema.Text := DumpSemaModel(LModel);
+        pgc.ActivePage := tsSema;
       end
       else
         Log('Main source not found among analyzed units: ' + FMainSource);
@@ -420,7 +362,7 @@ end;
 
 { event handlers }
 
-procedure TfrmMain.OpenBtnClick(Sender: TObject);
+procedure TfrmMain.btnOpenClick(Sender: TObject);
 var
   LDlg: TOpenDialog;
 begin
@@ -435,7 +377,7 @@ begin
   end;
 end;
 
-procedure TfrmMain.ParseBtnClick(Sender: TObject);
+procedure TfrmMain.btnParseClick(Sender: TObject);
 begin
   RunParse;
 end;
@@ -450,7 +392,7 @@ begin
   end;
 end;
 
-procedure TfrmMain.TreeGetText(Sender: TBaseVirtualTree; Node: PVirtualNode;
+procedure TfrmMain.vstFilesGetText(Sender: TBaseVirtualTree; Node: PVirtualNode;
   Column: TColumnIndex; TextType: TVSTTextType; var CellText: string);
 var
   LData: PPasNodeData;
@@ -463,7 +405,7 @@ begin
     CellText := '';
 end;
 
-procedure TfrmMain.TreeChange(Sender: TBaseVirtualTree; Node: PVirtualNode);
+procedure TfrmMain.vstFilesChange(Sender: TBaseVirtualTree; Node: PVirtualNode);
 var
   LData: PPasNodeData;
 begin
@@ -473,5 +415,10 @@ begin
   if (LData <> nil) and (LData.Index >= 0) and (LData.Index < FFileList.Count) then
     OpenFileTab(FFileList[LData.Index]);
 end;
+
+initialization
+  // The .dfm streams these third-party controls; ensure the statically-linked
+  // build (no design-time packages) can find their classes.
+  RegisterClasses([TSynEdit, TVirtualStringTree]);
 
 end.

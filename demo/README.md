@@ -29,5 +29,11 @@ demo\build.bat
 which calls `rsvars.bat` then `dcc32` with the SynEdit/VirtualTrees unit and
 include paths (see the script). Output goes to `demo\out\PasTreeDemo.exe`.
 
-> The UI is constructed at runtime (the `.dfm` is just an empty form shell), so
-> no design-time packages for the third-party controls are required.
+Alternatively open `PasTreeDemo.dproj` in the IDE (needs the SynEdit +
+VirtualTreeView design packages installed).
+
+> The static layout (toolbar, file tree, page control + JSON/Semantics tabs,
+> messages) lives in the form designer (`PasTreeDemo.Main.dfm`). Source-file
+> tabs are still created at runtime (one editor per opened file). The
+> statically-linked `dcc32` build calls `RegisterClasses([TSynEdit,
+> TVirtualStringTree])` so it can stream those controls without design packages.
