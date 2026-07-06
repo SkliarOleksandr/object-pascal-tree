@@ -25,6 +25,10 @@ const
   SE2003_UndeclaredIdentifier = 'E2003 Undeclared identifier: ''%s''';
   SE2004_IdentifierRedeclared = 'E2004 Identifier redeclared: ''%s''';
   SE2005_NotATypeIdentifier   = 'E2005 ''%s'' is not a type identifier';
+  // E2010 takes two type names (dst, src); E2015 takes the operator lexeme.
+  SE2010_IncompatibleTypes    = 'E2010 Incompatible types: ''%s'' and ''%s''';
+  SE2015_OperatorNotApplicable =
+    'E2015 Operator not applicable to this operand type';
 
 function MakeDiag(const ACode, AMsg: string; ADeclNode, AFileId, ALine,
   ACol: Integer): TSemaDiag;

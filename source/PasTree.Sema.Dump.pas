@@ -117,6 +117,18 @@ begin
       'refs: %d local, %d cross-unit, %d unresolved; external-uses: %d'#10,
       [LResolved, LCross, LUnresolvedRefs, LExternal]);
 
+    // Typed-expression coverage (Phase 3).
+    var LExprTotal := 0; var LTyped := 0;
+    for LNode := 0 to High(AModel.ExprType) do
+      if AModel.Tree.Nodes[LNode].Kind in [nkIdent, nkIntLit, nkRealLit,
+        nkStrLit, nkBinaryOp, nkUnaryOp, nkCall, nkMember] then
+      begin
+        Inc(LExprTotal);
+        if AModel.ExprType[LNode] <> NIL_SYM then
+          Inc(LTyped);
+      end;
+    LSB.AppendFormat('typed exprs: %d/%d'#10, [LTyped, LExprTotal]);
+
     if Length(AModel.Diags) > 0 then
     begin
       LSB.Append('diags:'#10);

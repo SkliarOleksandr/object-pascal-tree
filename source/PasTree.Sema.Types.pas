@@ -1,0 +1,509 @@
+unit PasTree.Sema.Types;
+
+{
+  PasTree semantics — Phase 3a type checker (intra-unit).
+
+  Runs after name resolution: categorizes user-declared types, computes a type
+  symbol for each expression node (ExprType), and emits E2010 (incompatible
+  assignment) / E2015 (operator not applicable). Deliberately conservative —
+  only definite scalar mismatches are flagged; anything with an unknown/external
+  operand or a class/record/enum/set/array/pointer/variant operand (where
+  inheritance or operator overloading could make it legal) is allowed. Overload
+  ranking, argument-count and cross-unit typing are later slices.
+}
+
+interface
+
+uses
+  PasTree.Ast,
+  PasTree.Sema.Model;
+
+type
+  TPasSemaTyper = class
+  private
+    M: TPasSemaModel;
+    T: TPasTree;
+    Int, Ext, Str, Chr, Bool, Ptr, Nul: Integer;   // cached builtin type syms
+    function Kind(N: Integer): TPasNodeKind; inline;
+    function Child(N: Integer): Integer; inline;
+    function Sib(N: Integer): Integer; inline;
+    function Txt(N: Integer): string; inline;
+    function OpText(N: Integer): string;
+    function CatOf(ASym: Integer): TSemaTypeCat;
+    function RankOf(ASym: Integer): Byte;
+    function Head(N: Integer): Integer;
+    function TypeDefNode(ASym: Integer): Integer;
+    function CatFromNode(ADef: Integer): TSemaTypeCat;
+    procedure CategorizeTypes;
+    function WiderNum(A, B: Integer): Integer;
+    function TypeOfIdent(N: Integer): Integer;
+    function BinaryResult(N: Integer): Integer;
+    function UnaryResult(N: Integer): Integer;
+    function CallResult(N: Integer): Integer;
+    function MemberResult(N: Integer): Integer;
+    procedure Diag(const ACode, AMsg: string; ANode: Integer);
+    function Assignable(ADst, ASrc: Integer): Boolean;
+    procedure CheckAssign(N: Integer);
+    function TypeNode(N: Integer): Integer;
+    procedure Run;
+  public
+    class procedure Check(AModel: TPasSemaModel); static;
+  end;
+
+implementation
+
+uses
+  System.SysUtils,
+  PasTree.Preprocessor,
+  PasTree.Sema.Diagnostics;
+
+class procedure TPasSemaTyper.Check(AModel: TPasSemaModel);
+var
+  LT: TPasSemaTyper;
+begin
+  LT := TPasSemaTyper.Create;
+  try
+    LT.M := AModel;
+    LT.T := AModel.Tree;
+    LT.Run;
+  finally
+    LT.Free;
+  end;
+end;
+
+function TPasSemaTyper.Kind(N: Integer): TPasNodeKind;
+begin
+  Result := T.Nodes[N].Kind;
+end;
+
+function TPasSemaTyper.Child(N: Integer): Integer;
+begin
+  Result := T.Nodes[N].FirstChild;
+end;
+
+function TPasSemaTyper.Sib(N: Integer): Integer;
+begin
+  Result := T.Nodes[N].NextSibling;
+end;
+
+function TPasSemaTyper.Txt(N: Integer): string;
+begin
+  Result := T.NodeText(N);
+end;
+
+function TPasSemaTyper.OpText(N: Integer): string;
+begin
+  if T.Nodes[N].Aux >= 0 then
+    Result := LowerCase(T.Source.VisibleText(T.Nodes[N].Aux))
+  else
+    Result := '';
+end;
+
+function TPasSemaTyper.CatOf(ASym: Integer): TSemaTypeCat;
+begin
+  if ASym = NIL_SYM then
+    Result := tcUnknown
+  else
+    Result := M.Symbols[ASym].TypeCat;
+end;
+
+function TPasSemaTyper.RankOf(ASym: Integer): Byte;
+begin
+  if ASym = NIL_SYM then
+    Result := 0
+  else
+    Result := M.Symbols[ASym].NumRank;
+end;
+
+// Symbol a type designator resolved to (reads RefMap).
+function TPasSemaTyper.Head(N: Integer): Integer;
+var
+  LLast: Integer;
+begin
+  case Kind(N) of
+    nkIdent:
+      Result := M.RefMap[N];
+    nkMember:
+      begin
+        LLast := Child(N);
+        while (LLast <> NIL_NODE) and (Sib(LLast) <> NIL_NODE) do
+          LLast := Sib(LLast);
+        if LLast <> NIL_NODE then
+          Result := M.RefMap[LLast]
+        else
+          Result := NIL_SYM;
+      end;
+    nkTypeArgs:
+      Result := Head(Child(N));
+  else
+    Result := NIL_SYM;
+  end;
+end;
+
+// The type-expression node defining a user type symbol.
+function TPasSemaTyper.TypeDefNode(ASym: Integer): Integer;
+var
+  LName, LParent: Integer;
+begin
+  Result := NIL_NODE;
+  LName := M.Symbols[ASym].DeclNode;
+  if LName = NIL_NODE then
+    Exit;
+  LParent := T.Nodes[LName].Parent;
+  if (LParent = NIL_NODE) or (Kind(LParent) <> nkTypeDecl) then
+    Exit;
+  Result := Sib(LName);
+  while (Result <> NIL_NODE) and (Kind(Result) = nkGenericParams) do
+    Result := Sib(Result);
+end;
+
+function TPasSemaTyper.CatFromNode(ADef: Integer): TSemaTypeCat;
+begin
+  case Kind(ADef) of
+    nkRecordType, nkObjectType: Result := tcRecord;
+    nkClassType: Result := tcClass;
+    nkInterfaceType: Result := tcInterface;
+    nkEnumType: Result := tcEnum;
+    nkSetType: Result := tcSet;
+    nkArrayType: Result := tcArray;
+    nkPointerType: Result := tcPointer;
+    nkClassOf: Result := tcClassOf;
+    nkProcType: Result := tcProc;
+    nkStringType: Result := tcString;
+    nkFileType: Result := tcFile;
+    nkSubrange: Result := tcInteger;
+    nkIdent, nkMember, nkTypeArgs:   // alias to another named type
+      Result := CatOf(Head(ADef));   // may be tcUnknown until target computed
+  else
+    Result := tcUnknown;
+  end;
+end;
+
+procedure TPasSemaTyper.CategorizeTypes;
+var
+  LPass, LIdx, LDef: Integer;
+  LChanged: Boolean;
+  LCat: TSemaTypeCat;
+begin
+  for LPass := 1 to 8 do   // fixpoint for alias chains
+  begin
+    LChanged := False;
+    for LIdx := 0 to M.SymCount - 1 do
+      if (M.Symbols[LIdx].Kind = skType) and
+         (M.Symbols[LIdx].TypeCat = tcUnknown) then
+      begin
+        LDef := TypeDefNode(LIdx);
+        if LDef = NIL_NODE then
+          Continue;
+        LCat := CatFromNode(LDef);
+        if LCat <> tcUnknown then
+        begin
+          M.Symbols[LIdx].TypeCat := LCat;
+          LChanged := True;
+        end;
+      end;
+    if not LChanged then
+      Break;
+  end;
+end;
+
+// Wider of two numeric type symbols (float wins over int; higher rank wins).
+function TPasSemaTyper.WiderNum(A, B: Integer): Integer;
+begin
+  if (CatOf(A) = tcFloat) and (CatOf(B) <> tcFloat) then
+    Exit(A);
+  if (CatOf(B) = tcFloat) and (CatOf(A) <> tcFloat) then
+    Exit(B);
+  if RankOf(A) >= RankOf(B) then
+    Result := A
+  else
+    Result := B;
+end;
+
+function TPasSemaTyper.TypeOfIdent(N: Integer): Integer;
+var
+  LSym: Integer;
+begin
+  LSym := M.RefMap[N];
+  if LSym = NIL_SYM then
+    Exit(NIL_SYM);   // external / unresolved
+  case M.Symbols[LSym].Kind of
+    skVar, skConst, skField, skParam, skRoutine:
+      Result := M.Symbols[LSym].TypeSym;   // value / result type
+    skType, skBuiltinType:
+      Result := LSym;                       // type designator (casts)
+  else
+    Result := NIL_SYM;
+  end;
+end;
+
+function TPasSemaTyper.BinaryResult(N: Integer): Integer;
+var
+  LL, LR: Integer;
+  LcL, LcR: TSemaTypeCat;
+  LOp: string;
+
+  function BothNum: Boolean;
+  begin
+    Result := (LcL in [tcInteger, tcFloat]) and (LcR in [tcInteger, tcFloat]);
+  end;
+  function BothInt: Boolean;
+  begin
+    Result := (LcL = tcInteger) and (LcR = tcInteger);
+  end;
+  function BothScalar: Boolean;
+  begin
+    Result := (LcL in [tcInteger, tcFloat, tcBoolean, tcChar, tcString]) and
+              (LcR in [tcInteger, tcFloat, tcBoolean, tcChar, tcString]);
+  end;
+  function Bad: Integer;
+  begin
+    if BothScalar then
+      Diag('E2015', SE2015_OperatorNotApplicable, N);
+    Result := NIL_SYM;
+  end;
+
+begin
+  LL := M.ExprType[Child(N)];
+  LR := M.ExprType[Sib(Child(N))];
+  Result := NIL_SYM;
+  if (LL = NIL_SYM) or (LR = NIL_SYM) then
+    Exit;
+  LcL := CatOf(LL); LcR := CatOf(LR);
+  LOp := OpText(N);
+
+  if (LOp = '=') or (LOp = '<>') or (LOp = '<') or (LOp = '<=') or
+     (LOp = '>') or (LOp = '>=') or (LOp = 'in') or (LOp = 'is') then
+    Exit(Bool);
+
+  if LOp = '+' then
+  begin
+    if BothNum then Exit(WiderNum(LL, LR));
+    // char/string concatenation in any combination -> string
+    if (LcL in [tcChar, tcString]) and (LcR in [tcChar, tcString]) then
+      Exit(Str);
+    Exit(Bad);
+  end;
+  if (LOp = '-') or (LOp = '*') then
+  begin
+    if BothNum then Exit(WiderNum(LL, LR));
+    Exit(Bad);
+  end;
+  if LOp = '/' then
+  begin
+    if BothNum then Exit(Ext);
+    Exit(Bad);
+  end;
+  if (LOp = 'div') or (LOp = 'mod') or (LOp = 'shl') or (LOp = 'shr') then
+  begin
+    if BothInt then Exit(WiderNum(LL, LR));
+    Exit(Bad);
+  end;
+  if (LOp = 'and') or (LOp = 'or') or (LOp = 'xor') then
+  begin
+    if (LcL = tcBoolean) and (LcR = tcBoolean) then Exit(Bool);
+    if BothInt then Exit(WiderNum(LL, LR));
+    Exit(Bad);
+  end;
+end;
+
+function TPasSemaTyper.UnaryResult(N: Integer): Integer;
+var
+  LO: Integer;
+  LOp: string;
+  LCat: TSemaTypeCat;
+begin
+  LO := M.ExprType[Child(N)];
+  Result := NIL_SYM;
+  LOp := OpText(N);
+  if LOp = '@' then
+    Exit(Ptr);
+  if LO = NIL_SYM then
+    Exit;
+  LCat := CatOf(LO);
+  if (LOp = '-') or (LOp = '+') then
+  begin
+    if LCat in [tcInteger, tcFloat] then Exit(LO);
+    if LCat in [tcBoolean, tcChar, tcString] then
+      Diag('E2015', SE2015_OperatorNotApplicable, N);
+    Exit(NIL_SYM);
+  end;
+  if LOp = 'not' then
+  begin
+    if LCat in [tcBoolean, tcInteger] then Exit(LO);
+    if LCat in [tcFloat, tcChar, tcString] then
+      Diag('E2015', SE2015_OperatorNotApplicable, N);
+    Exit(NIL_SYM);
+  end;
+end;
+
+function TPasSemaTyper.CallResult(N: Integer): Integer;
+var
+  LCallee, LHead: Integer;
+begin
+  LCallee := Child(N);
+  Result := NIL_SYM;
+  if LCallee = NIL_NODE then
+    Exit;
+  LHead := Head(LCallee);
+  if LHead = NIL_SYM then
+    Exit;
+  case M.Symbols[LHead].Kind of
+    skType, skBuiltinType:
+      Result := LHead;                       // type cast T(x) -> T
+    skRoutine:
+      Result := M.Symbols[LHead].TypeSym;    // function result type
+  end;
+end;
+
+function TPasSemaTyper.MemberResult(N: Integer): Integer;
+var
+  LName, LMem, LBaseTy, LScope: Integer;
+begin
+  Result := NIL_SYM;
+  LName := Sib(Child(N));
+  if LName = NIL_NODE then
+    Exit;
+  LMem := M.RefMap[LName];                   // resolved intra-unit member?
+  if LMem = NIL_SYM then
+  begin
+    LBaseTy := M.ExprType[Child(N)];
+    if LBaseTy = NIL_SYM then
+      Exit;
+    LScope := M.Symbols[LBaseTy].MemberScope;
+    if LScope = NIL_SCOPE then
+      Exit;
+    LMem := M.FindLocal(LScope, LowerCase(Txt(LName)));
+  end;
+  if LMem <> NIL_SYM then
+    Result := M.Symbols[LMem].TypeSym;
+end;
+
+procedure TPasSemaTyper.Diag(const ACode, AMsg: string; ANode: Integer);
+var
+  LVis: TPasVisibleToken;
+  LFile, LLine, LCol, LTok: Integer;
+begin
+  LFile := 0; LLine := 0; LCol := 0;
+  LTok := T.Nodes[ANode].FirstToken;
+  if (LTok >= 0) and (LTok <= High(T.Source.Visible)) then
+  begin
+    LVis := T.Source.Visible[LTok];
+    LFile := LVis.FileId;
+    T.Source.Files[LVis.FileId].OffsetToLineCol(
+      T.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start, LLine, LCol);
+  end;
+  M.AddDiag(MakeDiag(ACode, AMsg, ANode, LFile, LLine, LCol));
+end;
+
+// Conservative: only reject definite scalar mismatches.
+function TPasSemaTyper.Assignable(ADst, ASrc: Integer): Boolean;
+var
+  D, S: TSemaTypeCat;
+begin
+  D := CatOf(ADst); S := CatOf(ASrc);
+  if (D = tcUnknown) or (S = tcUnknown) then
+    Exit(True);
+  if S = tcNil then
+    Exit(D in [tcPointer, tcClass, tcInterface, tcProc, tcClassOf, tcVariant,
+      tcArray]);
+  case D of
+    tcString:  Result := S in [tcString, tcChar];
+    tcInteger: Result := S = tcInteger;
+    tcFloat:   Result := S in [tcFloat, tcInteger];
+    tcBoolean: Result := S = tcBoolean;
+    tcChar:    Result := S = tcChar;
+  else
+    Result := True;   // non-scalar destination -> allow (later phases)
+  end;
+  // Only a scalar source can turn this into a real rejection.
+  if not Result and
+     not (S in [tcInteger, tcFloat, tcBoolean, tcChar, tcString]) then
+    Result := True;
+end;
+
+procedure TPasSemaTyper.CheckAssign(N: Integer);
+var
+  LDst, LSrc: Integer;
+begin
+  LDst := Child(N);
+  if LDst = NIL_NODE then
+    Exit;
+  LSrc := Sib(LDst);
+  if LSrc = NIL_NODE then
+    Exit;
+  if (M.ExprType[LDst] = NIL_SYM) or (M.ExprType[LSrc] = NIL_SYM) then
+    Exit;
+  // A string literal is char-compatible (C := 'x'); don't flag it.
+  if (CatOf(M.ExprType[LDst]) = tcChar) and (Kind(LSrc) = nkStrLit) then
+    Exit;
+  if not Assignable(M.ExprType[LDst], M.ExprType[LSrc]) then
+    Diag('E2010', Format(SE2010_IncompatibleTypes,
+      [M.Symbols[M.ExprType[LDst]].Name, M.Symbols[M.ExprType[LSrc]].Name]),
+      LSrc);
+end;
+
+function TPasSemaTyper.TypeNode(N: Integer): Integer;
+var
+  LChild, LThen: Integer;
+begin
+  if N = NIL_NODE then
+    Exit(NIL_SYM);
+  LChild := Child(N);
+  while LChild <> NIL_NODE do   // type children first (bottom-up)
+  begin
+    TypeNode(LChild);
+    LChild := Sib(LChild);
+  end;
+
+  case Kind(N) of
+    nkIntLit: Result := Int;
+    nkRealLit: Result := Ext;
+    nkStrLit: Result := Str;
+    nkCaretChar: Result := Chr;
+    nkNilLit: Result := Nul;
+    nkIdent: Result := TypeOfIdent(N);
+    nkParen: Result := M.ExprType[Child(N)];
+    nkUnaryOp: Result := UnaryResult(N);
+    nkBinaryOp: Result := BinaryResult(N);
+    nkCall: Result := CallResult(N);
+    nkMember: Result := MemberResult(N);
+    nkTypeArgs: Result := M.ExprType[Child(N)];
+    nkInlineIf:
+      begin
+        LThen := Sib(Child(N));   // cond, then, else
+        if LThen <> NIL_NODE then
+          Result := M.ExprType[LThen]
+        else
+          Result := NIL_SYM;
+      end;
+  else
+    Result := NIL_SYM;
+  end;
+  M.ExprType[N] := Result;
+
+  if Kind(N) = nkAssign then
+    CheckAssign(N);
+end;
+
+procedure TPasSemaTyper.Run;
+var
+  LIdx: Integer;
+begin
+  Int := NIL_SYM; Ext := NIL_SYM; Str := NIL_SYM; Chr := NIL_SYM;
+  Bool := NIL_SYM; Ptr := NIL_SYM; Nul := NIL_SYM;
+  for LIdx := 0 to M.SymCount - 1 do
+    if M.Symbols[LIdx].Kind = skBuiltinType then
+      if M.Symbols[LIdx].NameLower = 'integer' then Int := LIdx
+      else if M.Symbols[LIdx].NameLower = 'extended' then Ext := LIdx
+      else if M.Symbols[LIdx].NameLower = 'string' then Str := LIdx
+      else if M.Symbols[LIdx].NameLower = 'char' then Chr := LIdx
+      else if M.Symbols[LIdx].NameLower = 'boolean' then Bool := LIdx
+      else if M.Symbols[LIdx].NameLower = 'pointer' then Ptr := LIdx
+      else if M.Symbols[LIdx].NameLower = '_nil' then Nul := LIdx;
+
+  CategorizeTypes;
+  TypeNode(0);
+end;
+
+end.

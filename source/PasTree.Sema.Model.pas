@@ -46,6 +46,12 @@ type
   TSemaVisibility = (svDefault, svStrictPrivate, svPrivate, svStrictProtected,
     svProtected, svPublic, svPublished);
 
+  // Type category (mirrors DelphiAST TDataTypeID groupings) — set on
+  // skType/skBuiltinType symbols; drives assignment/operator checks.
+  TSemaTypeCat = (tcUnknown, tcInteger, tcFloat, tcBoolean, tcChar, tcString,
+    tcPointer, tcNil, tcEnum, tcSet, tcArray, tcRecord, tcClass, tcInterface,
+    tcProc, tcClassOf, tcVariant, tcFile);
+
   TSemaSymbol = record
     Kind: TSemaSymbolKind;
     Name: string;          // original spelling
@@ -58,6 +64,8 @@ type
     Visibility: TSemaVisibility;
     NextOverload: Integer;  // next routine of the same name in scope; NIL_SYM
     MemberScope: Integer;   // members of a type/unit for A.B lookup; NIL_SCOPE
+    TypeCat: TSemaTypeCat;  // category (types only); tcUnknown otherwise
+    NumRank: Byte;          // numeric widening rank (int/float families); 0 else
   end;
 
   TSemaScopeKind = (sckSystem, sckUnit, sckImplementation, sckStruct,
@@ -87,6 +95,7 @@ type
     // Phase 2: cross-unit state.
     InterfaceScope: Integer;        // scope importers may read; NIL_SCOPE
     NodeScope: TArray<Integer>;     // node index -> scope in effect; NIL_SCOPE
+    ExprType: TArray<Integer>;      // node index -> type symbol; NIL_SYM = untyped
     ExtRefMap: TDictionary<Integer, TPasExtRef>; // node -> external symbol
     UsesList: TArray<TPasUsesRef>;
     AllUsesResolved: Boolean;       // gates E2003 (set by the project driver)
@@ -148,8 +157,12 @@ begin
   SetLength(Symbols, 64);
   FSymCount := 0;
   SetLength(RefMap, Length(ATree.Nodes));
+  SetLength(ExprType, Length(ATree.Nodes));
   for var LIdx := 0 to High(RefMap) do
+  begin
     RefMap[LIdx] := NIL_SYM;
+    ExprType[LIdx] := NIL_SYM;
+  end;
 end;
 
 destructor TPasSemaModel.Destroy;
@@ -198,6 +211,8 @@ begin
   Symbols[Result].Visibility := svDefault;
   Symbols[Result].NextOverload := NIL_SYM;
   Symbols[Result].MemberScope := NIL_SCOPE;
+  Symbols[Result].TypeCat := tcUnknown;
+  Symbols[Result].NumRank := 0;
 end;
 
 procedure TPasSemaModel.BindName(AScope, ASym: Integer);

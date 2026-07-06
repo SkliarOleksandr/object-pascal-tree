@@ -72,7 +72,8 @@ uses
   System.SysUtils,
   PasTree.Preprocessor,
   PasTree.Sema.Builtins,
-  PasTree.Sema.Diagnostics;
+  PasTree.Sema.Diagnostics,
+  PasTree.Sema.Types;
 
 class function TPasSemaResolver.Analyze(const ATree: TPasTree): TPasSemaModel;
 var
@@ -415,11 +416,14 @@ end;
 procedure TPasSemaResolver.CollectRoutine(ANode, AScope: Integer);
 var
   LRoutine, LChild, LNameNode, LSegIdent, LSegLast, LQualIdent: Integer;
+  LRoutineSym, LResultNode: Integer;
   LQualified: Boolean;
 begin
   LRoutine := FModel.AddScope(sckRoutine, AScope, ANode);
   FNodeScope[ANode] := AScope;
   LQualIdent := NIL_NODE;
+  LRoutineSym := NIL_SYM;
+  LResultNode := NIL_NODE;
 
   // Parse the (possibly dotted, possibly generic) name: each segment is
   // `ident [<...>]`; a '.' after a segment means it is a qualifier (TFoo. /
@@ -481,7 +485,8 @@ begin
       MarkDeclName(LNameNode, LLink);
     end
     else
-      DeclareSym(AScope, skRoutine, NodeText(LNameNode), LNameNode);
+      LRoutineSym := DeclareSym(AScope, skRoutine, NodeText(LNameNode),
+        LNameNode);
   end;
 
   // Remaining children: parameters, result type, directives, body.
@@ -498,11 +503,22 @@ begin
             LParam := NextSib(LParam);
           end;
         end;
+      nkGenericParams, nkRoutineBody, nkDirective, nkAttrGroup:
+        Collect(LChild, LRoutine);
     else
-      Collect(LChild, LRoutine);   // generic params, result type, body...
+      begin
+        // First non-directive/body/generics child after params is the result
+        // type (function). Record it for result-type binding.
+        if LResultNode = NIL_NODE then
+          LResultNode := LChild;
+        Collect(LChild, LRoutine);
+      end;
     end;
     LChild := NextSib(LChild);
   end;
+
+  if (LRoutineSym <> NIL_SYM) and (LResultNode <> NIL_NODE) then
+    FModel.Symbols[LRoutineSym].TypeNode := LResultNode;
 end;
 
 procedure TPasSemaResolver.Collect(ANode, AScope: Integer);
@@ -771,6 +787,7 @@ begin
   CollectRoot(0);
   ResolveNode(0);
   BindTypes;
+  TPasSemaTyper.Check(FModel);
 end;
 
 end.
