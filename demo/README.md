@@ -5,13 +5,17 @@ A small Win32 VCL host that drives PasTree interactively:
 - **Toolbar** — *Open Project…* (`.dpr`/`.dproj`), *Run Parse* (F9), platform combo.
 - **Left** — project files in a `TVirtualStringTree`; click a file to open it.
 - **Center** — `TSynEdit` tabs (Pascal-highlighted); a file opens in its own tab
-  (the `.dpr` opens by default). A persistent **AST JSON** tab shows the parse
-  result and is activated after a run.
-- **Bottom** — diagnostics (`file(line,col): message`) and a run summary.
+  (the `.dpr` opens by default). Two persistent tabs show the analysis of the
+  main unit: **AST JSON** (the CST) and **Semantics** (the semantic model —
+  scopes, symbols, resolution and cross-unit reference stats).
+- **Bottom** — semantic diagnostics across all units
+  (`file(line,col): E20xx message`) and a run summary.
 
-On first launch it creates a `Sample\` folder next to the executable containing a
-minimal console `Sample.dpr` (hello-world) and opens it, so there is always
-something to parse.
+*Run Parse* / F9 runs the full semantic pipeline (`TPasSemaProject`): parse →
+scopes/symbols → cross-unit resolution → type checks → overload/arity. On first
+launch it creates a `Sample\` folder next to the executable with a minimal
+console `Sample.dpr`, opens it, and analyzes it so the Semantics tab is populated
+immediately.
 
 ## Build
 

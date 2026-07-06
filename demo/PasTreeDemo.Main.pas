@@ -17,7 +17,10 @@ uses
   SynEdit, SynEditHighlighter, SynHighlighterPas, SynHighlighterJSON,
   VirtualTrees, VirtualTrees.Types,
   PasTree.Platforms, PasTree.Preprocessor, PasTree.Ast, PasTree.Ast.Json,
-  PasTree.Parser, PasTree.Project;
+  PasTree.Parser, PasTree.Project,
+  PasTree.Sema.Diagnostics, PasTree.Sema.Model, PasTree.Sema.Builtins,
+  PasTree.Sema.Types, PasTree.Sema.Resolver, PasTree.Sema.Project,
+  PasTree.Sema.Dump;
 
 type
   // VirtualTree node payload: an index into FFileList (unmanaged, so the tree
@@ -41,6 +44,8 @@ type
     FMessages: TMemo;
     FJsonTab: TTabSheet;
     FJsonEdit: TSynEdit;
+    FSemaTab: TTabSheet;
+    FSemaEdit: TSynEdit;
     FFileList: TStringList;               // full paths shown in the tree
     FOpenFiles: TStringList;              // path -> TTabSheet (Objects)
     FProjectDir: string;
@@ -109,22 +114,6 @@ begin
   end;
 end;
 
-// Resolve a diagnostic's visible-stream index to file/line/col (same walk as
-// PasTree.Ast.Json).
-procedure DiagPos(const ATree: TPasTree; AVisIndex: Integer;
-  out AFile: string; out ALine, ACol: Integer);
-var
-  LVis: TPasVisibleToken;
-begin
-  AFile := ''; ALine := 0; ACol := 0;
-  if (AVisIndex < 0) or (AVisIndex > High(ATree.Source.Visible)) then
-    Exit;
-  LVis := ATree.Source.Visible[AVisIndex];
-  AFile := ATree.Source.FileNames[LVis.FileId];
-  ATree.Source.Files[LVis.FileId].OffsetToLineCol(
-    ATree.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start, ALine, ACol);
-end;
-
 { TfrmMain }
 
 function TfrmMain.ExeDir: string;
@@ -139,8 +128,10 @@ begin
   FPlatform := pfWin32;
   BuildUI;
   EnsureSampleProject;
-  // Open the bundled sample by default so there is always something to parse.
+  // Open the bundled sample by default so there is always something to parse,
+  // and analyze it immediately so the Semantics tab is populated on launch.
   OpenProject(TPath.Combine(TPath.Combine(ExeDir, 'Sample'), 'Sample.dpr'));
+  RunParse;
 end;
 
 procedure TfrmMain.BuildUI;
@@ -226,6 +217,17 @@ begin
   FJsonEdit.Font.Name := 'Consolas';
   FJsonEdit.Highlighter := TSynJSONSyn.Create(Self);
   FJsonEdit.UseCodeFolding := True;
+
+  // persistent semantic-model tab (scopes / symbols / refs / diagnostics)
+  FSemaTab := TTabSheet.Create(FPages);
+  FSemaTab.PageControl := FPages;
+  FSemaTab.Caption := 'Semantics';
+  FSemaEdit := TSynEdit.Create(Self);
+  FSemaEdit.Parent := FSemaTab;
+  FSemaEdit.Align := alClient;
+  FSemaEdit.ReadOnly := True;
+  FSemaEdit.Gutter.ShowLineNumbers := True;
+  FSemaEdit.Font.Name := 'Consolas';
 end;
 
 procedure TfrmMain.EnsureSampleProject;
@@ -356,14 +358,10 @@ end;
 
 procedure TfrmMain.RunParse;
 var
-  LProj: TPasProject;
-  LResults: TArray<TPasFileResult>;
-  LRes: TPasFileResult;
-  LFile: string;
-  LLine, LCol, LDiagTotal: Integer;
+  LProj: TPasSemaProject;
   LPlatform: TPasPlatform;
-  LMainTree: TPasTree;
-  LFoundMain: Boolean;
+  LMain, LDiagTotal, LId, LDIdx: Integer;
+  LModel: TPasSemaModel;
 begin
   if (FProjectDir = '') or not TDirectory.Exists(FProjectDir) then
   begin
@@ -376,42 +374,42 @@ begin
     LPlatform := pfWin32;
 
   FMessages.Clear;
-  Log('Parsing ' + FProjectDir + ' (' + PlatformName(LPlatform) + ')...');
+  Log('Analyzing ' + FProjectDir + ' (' + PlatformName(LPlatform) + ')...');
   Screen.Cursor := crHourGlass;
-  LFoundMain := False;
   try
-    LProj := TPasProject.Create(LPlatform, [FProjectDir], []);
+    LProj := TPasSemaProject.Create(LPlatform, [FProjectDir], []);
     try
-      LResults := LProj.ParseDirectory(FProjectDir);
+      LProj.AnalyzeDirectory(FProjectDir);
+
+      // Locate the main unit's model, and report every unit's diagnostics.
+      LMain := -1;
       LDiagTotal := 0;
-      for LRes in LResults do
+      for LId := 0 to LProj.ModelCount - 1 do
       begin
-        for var LIdx := 0 to High(LRes.ParseDiags) do
+        LModel := LProj.Model(LId);
+        if SameText(LProj.ModelFile(LId), FMainSource) then
+          LMain := LId;
+        for LDIdx := 0 to High(LModel.Diags) do
         begin
           Inc(LDiagTotal);
-          DiagPos(LRes.Tree, LRes.ParseDiags[LIdx].VisIndex, LFile, LLine, LCol);
-          if LFile = '' then
-            LFile := LRes.FileName;
           Log(Format('%s(%d,%d): %s',
-            [TPath.GetFileName(LFile), LLine, LCol,
-             LRes.ParseDiags[LIdx].Msg]));
-        end;
-        if SameText(LRes.FileName, FMainSource) then
-        begin
-          LMainTree := LRes.Tree;
-          LFoundMain := True;
+            [TPath.GetFileName(LProj.ModelFile(LId)),
+             LModel.Diags[LDIdx].Line, LModel.Diags[LDIdx].Col,
+             LModel.Diags[LDIdx].Msg]));
         end;
       end;
-      Log(Format('Done: %d files, %d diagnostics.',
-        [Length(LResults), LDiagTotal]));
+      Log(Format('Done: %d units, %d diagnostics.',
+        [LProj.ModelCount, LDiagTotal]));
 
-      if LFoundMain then
+      if LMain >= 0 then
       begin
-        FJsonEdit.Text := PrettyJson(AstToJson(LMainTree));
-        FPages.ActivePage := FJsonTab;
+        LModel := LProj.Model(LMain);
+        FJsonEdit.Text := PrettyJson(AstToJson(LModel.Tree));
+        FSemaEdit.Text := DumpSemaModel(LModel);
+        FPages.ActivePage := FSemaTab;
       end
       else
-        Log('Main source not found among parsed files: ' + FMainSource);
+        Log('Main source not found among analyzed units: ' + FMainSource);
     finally
       LProj.Free;
     end;

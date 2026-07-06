@@ -15,7 +15,14 @@ uses
   PasTree.Ast in '..\source\PasTree.Ast.pas',
   PasTree.Ast.Json in '..\source\PasTree.Ast.Json.pas',
   PasTree.Parser in '..\source\PasTree.Parser.pas',
-  PasTree.Project in '..\source\PasTree.Project.pas';
+  PasTree.Project in '..\source\PasTree.Project.pas',
+  PasTree.Sema.Diagnostics in '..\source\PasTree.Sema.Diagnostics.pas',
+  PasTree.Sema.Model in '..\source\PasTree.Sema.Model.pas',
+  PasTree.Sema.Builtins in '..\source\PasTree.Sema.Builtins.pas',
+  PasTree.Sema.Types in '..\source\PasTree.Sema.Types.pas',
+  PasTree.Sema.Resolver in '..\source\PasTree.Sema.Resolver.pas',
+  PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
+  PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas';
 
 {$R PasTreeDemo.res}
 
