@@ -40,6 +40,11 @@ type
     function BinaryResult(N: Integer): Integer;
     function UnaryResult(N: Integer): Integer;
     function CallResult(N: Integer): Integer;
+    function ParamsOf(AScope: Integer): TArray<Integer>;
+    function ArgCount(ACall: Integer): Integer;
+    function ScoreArgs(ACall, AScope: Integer): Integer;
+    function IsVarargs(AScope: Integer): Boolean;
+    function SelectOverload(ACall, AHead: Integer): Integer;
     function MemberResult(N: Integer): Integer;
     procedure Diag(const ACode, AMsg: string; ANode: Integer);
     function Assignable(ADst, ASrc: Integer): Boolean;
@@ -337,6 +342,148 @@ begin
   end;
 end;
 
+function TPasSemaTyper.ParamsOf(AScope: Integer): TArray<Integer>;
+var
+  LS: Integer;
+begin
+  Result := nil;
+  if AScope = NIL_SCOPE then
+    Exit;
+  for LS in M.Scopes[AScope].Symbols do
+    if M.Symbols[LS].Kind = skParam then
+      Result := Result + [LS];
+end;
+
+function TPasSemaTyper.ArgCount(ACall: Integer): Integer;
+var
+  LArg: Integer;
+begin
+  Result := 0;
+  LArg := Sib(Child(ACall));   // first child is the callee
+  while LArg <> NIL_NODE do
+  begin
+    Inc(Result);
+    LArg := Sib(LArg);
+  end;
+end;
+
+// Sum a conservative match score of the call's args against a param scope.
+function TPasSemaTyper.ScoreArgs(ACall, AScope: Integer): Integer;
+var
+  LParams: TArray<Integer>;
+  LArg, LIdx, LAt, LPt: Integer;
+begin
+  Result := 0;
+  LParams := ParamsOf(AScope);
+  LArg := Sib(Child(ACall));
+  LIdx := 0;
+  while (LArg <> NIL_NODE) and (LIdx <= High(LParams)) do
+  begin
+    LAt := M.ExprType[LArg];
+    LPt := M.Symbols[LParams[LIdx]].TypeSym;
+    if (LAt <> NIL_SYM) and (LPt <> NIL_SYM) then
+      if LAt = LPt then
+        Inc(Result, 2)
+      else if Assignable(LPt, LAt) then
+        Inc(Result, 1);
+    LArg := Sib(LArg);
+    Inc(LIdx);
+  end;
+end;
+
+// A `varargs` directive (cdecl external) accepts any number of trailing args.
+function TPasSemaTyper.IsVarargs(AScope: Integer): Boolean;
+var
+  LRoutine, LChild: Integer;
+begin
+  Result := False;
+  LRoutine := M.Scopes[AScope].OwnerNode;
+  if LRoutine = NIL_NODE then
+    Exit;
+  LChild := Child(LRoutine);
+  while LChild <> NIL_NODE do
+  begin
+    if (Kind(LChild) = nkDirective) and SameText(Txt(LChild), 'varargs') then
+      Exit(True);
+    LChild := Sib(LChild);
+  end;
+end;
+
+// Pick the best overload for typing/navigation; emit an arg-count diagnostic
+// only when it is unambiguous. Returns the chosen routine's result type.
+function TPasSemaTyper.SelectOverload(ACall, AHead: Integer): Integer;
+var
+  LCand, LBest, LArgs, LReq, LTot, LScore, LBestScore: Integer;
+  LMinReq, LMaxTot: Integer;
+  LAnyFit, LAllHaveParams, LAnyVariadic, LVariadic: Boolean;
+  LParams: TArray<Integer>;
+  LP: Integer;
+begin
+  LArgs := ArgCount(ACall);
+  LBest := AHead; LBestScore := -1;
+  LAnyFit := False; LAllHaveParams := True; LAnyVariadic := False;
+  LMinReq := MaxInt; LMaxTot := -1;
+
+  LCand := AHead;
+  while LCand <> NIL_SYM do
+  begin
+    if M.Symbols[LCand].Kind <> skRoutine then
+      Break;
+    if M.Symbols[LCand].MemberScope = NIL_SCOPE then
+      LAllHaveParams := False   // e.g. a builtin — no param info
+    else
+    begin
+      LParams := ParamsOf(M.Symbols[LCand].MemberScope);
+      LTot := Length(LParams);
+      LReq := 0;
+      for LP in LParams do
+        if sfHasDefault in M.Symbols[LP].Flags then
+          Break
+        else
+          Inc(LReq);
+      LVariadic := IsVarargs(M.Symbols[LCand].MemberScope);
+      if LVariadic then
+        LAnyVariadic := True;
+      if LReq < LMinReq then LMinReq := LReq;
+      if LTot > LMaxTot then LMaxTot := LTot;
+      if LVariadic or ((LArgs >= LReq) and (LArgs <= LTot)) then
+      begin
+        LAnyFit := True;
+        LScore := ScoreArgs(ACall, M.Symbols[LCand].MemberScope);
+        if LScore > LBestScore then
+        begin
+          LBestScore := LScore;
+          LBest := LCand;
+        end;
+      end;
+    end;
+    LCand := M.Symbols[LCand].NextOverload;
+  end;
+
+  M.CallTarget.AddOrSetValue(ACall, LBest);
+
+  // Arg-count is only reliable when the candidate set is complete:
+  //  - a plain GLOBAL routine (methods/constructors are inherited/overloaded
+  //    across the class hierarchy, which we don't model), and
+  //  - the unit has NO `uses` (with imports, same-named overloads can live in
+  //    another unit and Delphi merges them — we don't yet; cross-unit overload
+  //    merging is a later slice). This keeps arity zero-false-positive.
+  var LGlobal := (M.Scopes[M.Symbols[AHead].Scope].Kind in
+    [sckUnit, sckImplementation]) and (Length(M.UsesList) = 0);
+
+  // Deterministic arg-count diagnostic (independent of implicit rules).
+  if LGlobal and LAllHaveParams and not LAnyVariadic and not LAnyFit and
+     (LMaxTot >= 0) then
+  begin
+    if LArgs < LMinReq then
+      Diag('E2035', SE2035_NotEnoughActualParams, ACall)
+    else if LArgs > LMaxTot then
+      Diag('E2034', SE2034_TooManyActualParams, ACall);
+  end;
+
+  Result := M.Symbols[LBest].TypeSym;   // result type of the chosen overload
+end;
+
 function TPasSemaTyper.CallResult(N: Integer): Integer;
 var
   LCallee, LHead: Integer;
@@ -350,9 +497,9 @@ begin
     Exit;
   case M.Symbols[LHead].Kind of
     skType, skBuiltinType:
-      Result := LHead;                       // type cast T(x) -> T
+      Result := LHead;                    // type cast T(x) -> T
     skRoutine:
-      Result := M.Symbols[LHead].TypeSym;    // function result type
+      Result := SelectOverload(N, LHead); // choose overload + maybe arg-count
   end;
 end;
 

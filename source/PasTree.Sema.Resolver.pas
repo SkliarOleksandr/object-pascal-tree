@@ -44,6 +44,8 @@ type
     function QualifiedNameText(ANode: Integer): string;
     procedure CollectRoot(ARoot: Integer);
     function FindChildKind(ANode: Integer; AKind: TPasNodeKind): Integer;
+    function CountImplParamNames(ARoutineNode: Integer): Integer;
+    function RoutineParamNameCount(ASym: Integer): Integer;
     procedure NodePos(ANode: Integer; out AFileId, ALine, ACol: Integer);
     // collect
     procedure MarkDeclName(ANode, ASym: Integer);
@@ -148,6 +150,50 @@ begin
   end;
 end;
 
+// Total parameter NAME count of a routine's parameter list; -1 if the list is
+// omitted (external / forward completion that doesn't repeat the params).
+function TPasSemaResolver.CountImplParamNames(ARoutineNode: Integer): Integer;
+var
+  LParams, LParam, LChild: Integer;
+begin
+  LParams := FindChildKind(ARoutineNode, nkParams);
+  if LParams = NIL_NODE then
+    Exit(-1);
+  Result := 0;
+  LParam := FirstChild(LParams);
+  while LParam <> NIL_NODE do
+  begin
+    if KindOf(LParam) = nkParam then
+    begin
+      LChild := SkipAttr(FirstChild(LParam));
+      while (LChild <> NIL_NODE) and (KindOf(LChild) = nkIdent) do
+      begin
+        Inc(Result);
+        if SepAfter(LChild) = ':' then
+          Break;                       // last name; the type follows
+        LChild := NextSib(LChild);     // ',' -> next name
+        if (LChild <> NIL_NODE) and (KindOf(LChild) <> nkIdent) then
+          Break;
+      end;
+    end;
+    LParam := NextSib(LParam);
+  end;
+end;
+
+// Parameter count of an already-collected routine symbol (its param scope).
+function TPasSemaResolver.RoutineParamNameCount(ASym: Integer): Integer;
+var
+  LScope, LS: Integer;
+begin
+  Result := 0;
+  LScope := FModel.Symbols[ASym].MemberScope;
+  if LScope = NIL_SCOPE then
+    Exit;
+  for LS in FModel.Scopes[LScope].Symbols do
+    if FModel.Symbols[LS].Kind = skParam then
+      Inc(Result);
+end;
+
 procedure TPasSemaResolver.NodePos(ANode: Integer;
   out AFileId, ALine, ACol: Integer);
 var
@@ -236,6 +282,11 @@ begin
   end;
   for LIdx := 0 to High(LSyms) do
     FModel.Symbols[LSyms[LIdx]].TypeNode := LType;
+  // A parameter with a value after its type has a default (optional argument).
+  if (AKind = skParam) and (LType <> NIL_NODE) and (NextSib(LType) <> NIL_NODE) then
+    for LIdx := 0 to High(LSyms) do
+      FModel.Symbols[LSyms[LIdx]].Flags :=
+        FModel.Symbols[LSyms[LIdx]].Flags + [sfHasDefault];
   // Collect the type expression and anything after it (init / default /
   // absolute) as nested content in this scope, so every node gets a scope.
   LChild := LType;
@@ -468,25 +519,52 @@ begin
   end;
   if (LNameNode <> NIL_NODE) and not LQualified then
   begin
-    // An unqualified routine WITH a body in the implementation section that
-    // matches an interface declaration is that declaration's implementation —
-    // link to it (mark sfHasBody) instead of adding a phantom overload.
+    // An unqualified implementation-section routine that matches an interface
+    // declaration is that declaration's implementation — link to it (by
+    // parameter count for overloads; a routine that omits its param list is a
+    // forward/external completion of the sole interface decl) instead of adding
+    // a phantom symbol. This is essential: e.g. `function X; external;` in the
+    // implementation must NOT create a spurious 0-param X.
     var LLink := NIL_SYM;
-    if (AScope = FImpl) and (FindChildKind(ANode, nkRoutineBody) <> NIL_NODE) then
+    if AScope = FImpl then
     begin
-      var LIntfSym := FModel.FindLocal(FIntf, LowerCase(NodeText(LNameNode)));
-      if (LIntfSym <> NIL_SYM) and
-         (FModel.Symbols[LIntfSym].Kind = skRoutine) then
-        LLink := LIntfSym;
+      var LIntfHead := FModel.FindLocal(FIntf, LowerCase(NodeText(LNameNode)));
+      if (LIntfHead <> NIL_SYM) and
+         (FModel.Symbols[LIntfHead].Kind = skRoutine) then
+      begin
+        var LImplPC := CountImplParamNames(ANode);
+        if LImplPC < 0 then
+          LLink := LIntfHead                    // params omitted -> completion
+        else
+        begin
+          var LCand := LIntfHead;               // match the overload by arity
+          while LCand <> NIL_SYM do
+          begin
+            if (FModel.Symbols[LCand].Kind = skRoutine) and
+               (RoutineParamNameCount(LCand) = LImplPC) then
+            begin
+              LLink := LCand;
+              Break;
+            end;
+            LCand := FModel.Symbols[LCand].NextOverload;
+          end;
+        end;
+      end;
     end;
     if LLink <> NIL_SYM then
     begin
-      FModel.Symbols[LLink].Flags := FModel.Symbols[LLink].Flags + [sfHasBody];
+      if FindChildKind(ANode, nkRoutineBody) <> NIL_NODE then
+        FModel.Symbols[LLink].Flags := FModel.Symbols[LLink].Flags + [sfHasBody];
       MarkDeclName(LNameNode, LLink);
     end
     else
+    begin
       LRoutineSym := DeclareSym(AScope, skRoutine, NodeText(LNameNode),
         LNameNode);
+      // Parameter scope, so the typer can enumerate this routine's params
+      // for overload selection / arity checks.
+      FModel.Symbols[LRoutineSym].MemberScope := LRoutine;
+    end;
   end;
 
   // Remaining children: parameters, result type, directives, body.

@@ -29,6 +29,8 @@ const
   SE2010_IncompatibleTypes    = 'E2010 Incompatible types: ''%s'' and ''%s''';
   SE2015_OperatorNotApplicable =
     'E2015 Operator not applicable to this operand type';
+  SE2034_TooManyActualParams  = 'E2034 Too many actual parameters';
+  SE2035_NotEnoughActualParams = 'E2035 Not enough actual parameters';
 
 function MakeDiag(const ACode, AMsg: string; ADeclNode, AFileId, ALine,
   ACol: Integer): TSemaDiag;

@@ -25,7 +25,7 @@ type
     skProperty, skEnumValue, skGenericParam, skLabel, skUnitRef, skBuiltinType);
 
   TSemaSymbolFlag = (sfBuiltin, sfExternalUnresolved, sfStrict, sfOverload,
-    sfClassMember, sfForward, sfHasBody);
+    sfClassMember, sfForward, sfHasBody, sfHasDefault);
   TSemaSymbolFlags = set of TSemaSymbolFlag;
 
   // A reference resolved to a symbol in another unit's model.
@@ -97,6 +97,7 @@ type
     NodeScope: TArray<Integer>;     // node index -> scope in effect; NIL_SCOPE
     ExprType: TArray<Integer>;      // node index -> type symbol; NIL_SYM = untyped
     ExtRefMap: TDictionary<Integer, TPasExtRef>; // node -> external symbol
+    CallTarget: TDictionary<Integer, Integer>;   // nkCall node -> chosen routine
     UsesList: TArray<TPasUsesRef>;
     AllUsesResolved: Boolean;       // gates E2003 (set by the project driver)
     UnitNameLower: string;          // this unit's own name, lower-cased
@@ -152,6 +153,7 @@ begin
   Tree := ATree;
   Scopes := TObjectList<TSemaScope>.Create(True);
   ExtRefMap := TDictionary<Integer, TPasExtRef>.Create;
+  CallTarget := TDictionary<Integer, Integer>.Create;
   InterfaceScope := NIL_SCOPE;
   AllUsesResolved := False;
   SetLength(Symbols, 64);
@@ -167,6 +169,7 @@ end;
 
 destructor TPasSemaModel.Destroy;
 begin
+  CallTarget.Free;
   ExtRefMap.Free;
   Scopes.Free;
   inherited;
