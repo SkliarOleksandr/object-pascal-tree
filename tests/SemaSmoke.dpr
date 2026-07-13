@@ -129,6 +129,48 @@ const
     'procedure P(A: Integer); begin end;'#10 +
     'procedure P(A: string); begin end;'#10'end.'#10;
 
+  // Sibling for-loops reusing one inline var name: each `for var` is scoped
+  // to ITS loop (dcc behavior), so this is NOT a redeclaration.
+  SRC_FORVAR =
+    'unit U;'#10'interface'#10'implementation'#10 +
+    'const ARR: array[0..1] of string = (''a'', ''b'');'#10 +
+    'procedure P;'#10'begin'#10 +
+    '  for var W in ARR do Writeln(W);'#10 +
+    '  for var W in ARR do Writeln(W);'#10 +
+    '  for var I := 0 to 1 do Writeln(I);'#10 +
+    '  for var I := 0 to 1 do Writeln(I);'#10 +
+    'end;'#10'end.'#10;
+
+  // Two sibling anonymous functions: each owns its locals AND its implicit
+  // Result (typed by ITS result type, not the enclosing function's).
+  SRC_ANON =
+    'unit U;'#10'interface'#10'implementation'#10 +
+    'type TFn = reference to function: Boolean;'#10 +
+    'function Outer: string;'#10 +
+    'var F, G: TFn;'#10 +
+    'begin'#10 +
+    '  F := function: Boolean var L: Integer; begin L := 1; Result := L > 0; end;'#10 +
+    '  G := function: Boolean var L: Integer; begin L := 2; Result := L > 0; end;'#10 +
+    '  Result := '''';'#10 +
+    'end;'#10'end.'#10;
+
+  // A type declaration legally hides a used unit's leaf name (WinSock2's
+  // `QOS = ...` vs `uses Winapi.Qos`).
+  SRC_UNITHIDE =
+    'unit U;'#10'interface'#10'uses Winapi.Qos;'#10 +
+    'type Qos = record V: Integer; end;'#10 +
+    'implementation'#10'end.'#10;
+
+  // A call no local overload admits: arg-count fires, but the call must stay
+  // UNTYPED (the real callee may be an unseen overload from another unit) —
+  // no bogus E2010 from the local head's result type.
+  SRC_NOFIT =
+    'unit U;'#10'interface'#10'implementation'#10 +
+    'function F(A: Integer): string; begin Result := ''''; end;'#10 +
+    'procedure P;'#10'var I: Integer;'#10'begin'#10 +
+    '  I := F(1, 2);'#10 +
+    'end;'#10'end.'#10;
+
 begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN32']);
@@ -174,6 +216,30 @@ begin
   Analyze(SRC_OVERLOAD);
   Ok('overload: two P routines', SymCountOf('p', skRoutine) = 2);
   Ok('overload: no E2004', DiagCount('E2004') = 0);
+  GModel.Free;
+
+  // 6. sibling `for var` loops reusing a name -> loop-scoped, no E2004
+  Analyze(SRC_FORVAR);
+  Ok('for-var: no E2004', DiagCount('E2004') = 0);
+  Ok('for-var: W referenced in body', RefResolvesTo('W', 'W'));
+  GModel.Free;
+
+  // 7. anonymous methods own their locals and implicit Result
+  Analyze(SRC_ANON);
+  Ok('anon: no E2004 (locals scoped)', DiagCount('E2004') = 0);
+  Ok('anon: no E2010 (own Result)', DiagCount('E2010') = 0);
+  GModel.Free;
+
+  // 8. type declaration hides a used unit's leaf name
+  Analyze(SRC_UNITHIDE);
+  Ok('unit-hide: no E2004', DiagCount('E2004') = 0);
+  Ok('unit-hide: Qos is the type', HasSym('Qos', skType));
+  GModel.Free;
+
+  // 9. call fitting no local overload stays untyped (no bogus E2010)
+  Analyze(SRC_NOFIT);
+  Ok('no-fit: E2034 fired', DiagCount('E2034') = 1);
+  Ok('no-fit: no E2010', DiagCount('E2010') = 0);
   GModel.Free;
 
   Writeln(Format('=== SemaSmoke: %d passed, %d failed ===', [GPassed, GFailed]));

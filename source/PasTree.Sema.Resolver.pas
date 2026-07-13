@@ -240,6 +240,19 @@ begin
     FModel.Symbols[Result].Flags := FModel.Symbols[Result].Flags + [sfOverload];
     FModel.Scopes[AScope].Symbols.Add(Result);
   end
+  else if (AKind = skProperty) and
+          (FModel.Symbols[LExisting].Kind = skProperty) then
+    // Overloaded array properties: `property Item[I: Integer]: T; default;`
+    // + `property Item[I: string]: T; default;` is legal (13.1.4) — keep the
+    // first registered under the name, no redeclaration.
+    FModel.Scopes[AScope].Symbols.Add(Result)
+  else if (FModel.Symbols[LExisting].Kind = skUnitRef) and
+          (AKind <> skUnitRef) then
+    // A declaration legally HIDES a used unit's (leaf) name — e.g.
+    // Winapi.WinSock2 declares `QOS = _QualityOfService` while using
+    // Winapi.Qos. The new symbol takes the bare name; the unit stays
+    // reachable via its fully-qualified name (UsesList keeps NameFull).
+    FModel.BindName(AScope, Result)
   else
   begin
     // genuine redeclaration in the same scope
@@ -632,6 +645,9 @@ begin
 
   case KindOf(ANode) of
     nkUsesClause:
+      // Aux = 1 is a package `requires` clause — references to PACKAGES,
+      // not units; resolving those as units would only poison the graph.
+      if FTree.Nodes[ANode].Aux <> 1 then
       begin
         LChild := FirstChild(ANode);
         while LChild <> NIL_NODE do
@@ -692,13 +708,78 @@ begin
     nkRoutine:
       CollectRoutine(ANode, AScope);
 
+    nkAnonMethod:
+      begin
+        // An anonymous method owns its params/locals — two sibling literals
+        // reusing a local name (both declaring `var LSer: ...`) must not read
+        // as a redeclaration in the enclosing routine. It also owns its
+        // implicit `Result` (typed by the child between the opaque
+        // nkAnonParams and the body): `Result := True` inside a
+        // function(...): Boolean literal must NOT bind to (and type-check
+        // against) the ENCLOSING function's Result.
+        var LAnon := FModel.AddScope(sckRoutine, AScope, ANode);
+        FNodeScope[ANode] := LAnon;
+        LChild := FirstChild(ANode);
+        while LChild <> NIL_NODE do
+        begin
+          if not (KindOf(LChild) in [nkAnonParams, nkRoutineBody]) and
+             (FModel.FindLocal(LAnon, 'result') = NIL_SYM) then
+          begin
+            var LRes := FModel.AddSymbol(LAnon, skVar, 'Result', NIL_NODE);
+            FModel.Symbols[LRes].TypeNode := LChild;
+            FModel.BindName(LAnon, LRes);
+          end;
+          Collect(LChild, LAnon);
+          LChild := NextSib(LChild);
+        end;
+        // A procedure literal has no result type child: still shadow the
+        // enclosing Result so it cannot leak into the anonymous body.
+        if FModel.FindLocal(LAnon, 'result') = NIL_SYM then
+        begin
+          var LRes := FModel.AddSymbol(LAnon, skVar, 'Result', NIL_NODE);
+          FModel.BindName(LAnon, LRes);
+        end;
+      end;
+
+    nkMethodResolution:
+      begin
+        // `function IEnumerable<string>.GetEnumerator = Impl;` — the <...>
+        // segment is a type ARGUMENT of the implemented interface reference,
+        // NOT generic parameter declarations (unlike a qualified method
+        // implementation header). Walk idents as plain references only.
+        LChild := FirstChild(ANode);
+        while LChild <> NIL_NODE do
+        begin
+          if KindOf(LChild) = nkGenericParams then
+          begin
+            var LParam := FirstChild(LChild);
+            while LParam <> NIL_NODE do
+            begin
+              var LP := FirstChild(LParam);   // idents + optional constraint
+              while LP <> NIL_NODE do
+              begin
+                Collect(LP, AScope);
+                LP := NextSib(LP);
+              end;
+              LParam := NextSib(LParam);
+            end;
+          end
+          else
+            Collect(LChild, AScope);
+          LChild := NextSib(LChild);
+        end;
+      end;
+
     nkRecordType, nkClassType, nkInterfaceType, nkObjectType, nkHelperType:
       CollectStruct(ANode, AScope, NIL_SYM);
 
-    nkBlock:
+    nkBlock, nkForStmt, nkForInStmt:
       begin
         // Inline vars are block-scoped: give each begin..end its own scope so
         // the same name in sibling blocks does not read as a redeclaration.
+        // A for statement scopes the same way — its `for var I` counter or
+        // `for var E in` element lives in the LOOP, so two sibling loops
+        // reusing one name are not a redeclaration (dcc behavior).
         var LBlock := FModel.AddScope(sckBlock, AScope, ANode);
         FNodeScope[ANode] := LBlock;
         LChild := FirstChild(ANode);

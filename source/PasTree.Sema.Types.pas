@@ -481,6 +481,13 @@ begin
       Diag('E2034', SE2034_TooManyActualParams, ACall);
   end;
 
+  // When NO local candidate admits the argument count, the real callee is
+  // most likely a same-named overload in another unit (e.g. SysUtils calling
+  // the 3-arg Winapi.Windows.GetEnvironmentVariable while declaring a 1-arg
+  // one itself) — claiming the local head's result type would poison E2010.
+  if LAllHaveParams and not LAnyVariadic and not LAnyFit and (LMaxTot >= 0) then
+    Exit(NIL_SYM);
+
   Result := M.Symbols[LBest].TypeSym;   // result type of the chosen overload
 end;
 

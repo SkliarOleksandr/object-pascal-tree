@@ -927,6 +927,34 @@ var
     end;
   end;
 
+  // True when at least one overload of the routine admits the call's
+  // argument count (or a candidate is variadic / has no param info).
+  function CallArityFits(ACall, AMid, AHead: Integer): Boolean;
+  var
+    LArg, LArgs, LCand, LReq, LTot: Integer;
+    LVariadic: Boolean;
+  begin
+    LArgs := 0;
+    LArg := LM.Tree.Nodes[LM.Tree.Nodes[ACall].FirstChild].NextSibling;
+    while LArg <> NIL_NODE do
+    begin
+      Inc(LArgs);
+      LArg := LM.Tree.Nodes[LArg].NextSibling;
+    end;
+    LCand := AHead;
+    while LCand <> NIL_SYM do
+    begin
+      if FModels[AMid].Symbols[LCand].Kind <> skRoutine then
+        Break;
+      if not RoutineArity(AMid, LCand, LReq, LTot, LVariadic) then
+        Exit(True);   // no param info (builtin) — cannot judge, allow
+      if LVariadic or ((LArgs >= LReq) and (LArgs <= LTot)) then
+        Exit(True);
+      LCand := FModels[AMid].Symbols[LCand].NextOverload;
+    end;
+    Result := False;
+  end;
+
   // The type a member access yields: the member's declared type (routines:
   // result type; constructors: the base type itself, so `TDerived.Create` —
   // parsed as a plain member when argless — types as TDerived), substituted
@@ -1031,9 +1059,12 @@ var
                    (LM.Tree.Nodes[LBase].Kind = nkMember) then
                   // T.Create / TList<Integer>.Create -> the class type itself
                   LX[N] := GetX(LM.Tree.Nodes[LBase].FirstChild)
-                else
+                else if CallArityFits(N, LMemMid, LMemSym) then
                   // The callee's X is already the substituted result type.
                   LX[N] := GetX(LBase);
+                  // else: no local overload admits the arg count — the real
+                  // callee is likely an unseen same-named overload; leave
+                  // the call untyped rather than claim the wrong result.
               skType, skBuiltinType:
                 LX[N] := GetX(LBase);   // a cast (incl. instantiated generic)
             end;

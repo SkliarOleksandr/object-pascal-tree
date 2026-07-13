@@ -2730,16 +2730,28 @@ begin
         LP.Expect(tkSemicolon, '";"');
         while LP.IsWord('requires') or LP.IsWord('contains') do
         begin
+          // Same item shape as a real uses clause (nkUsesItem with the
+          // optional `in 'path'` string adopted), so the semantic layer can
+          // walk a package's contains-graph like a program's uses-graph.
+          // Aux = 1 marks `requires` (references to PACKAGES, not units).
           LSec := LP.FB.AddNode(nkUsesClause, NIL_NODE, LP.FPos);
+          if LP.IsWord('requires') then
+            LP.FB.SetAux(LSec, 1);
           LP.Next;
           repeat
-            LP.FB.Adopt(LSec, LP.ParseQualifiedName);
+            var LItem := LP.FB.AddNode(nkUsesItem, NIL_NODE, LP.FPos);
+            LP.FB.Adopt(LItem, LP.ParseQualifiedName);
             if LP.CurKind = tkIn then
             begin
               LP.Next;
               if LP.CurKind = tkStringLiteral then
+              begin
+                LP.FB.Adopt(LItem, LP.FB.AddNode(nkStrLit, NIL_NODE, LP.FPos));
                 LP.Next;
+              end;
             end;
+            LP.FB.SetLast(LItem, LP.FPos - 1);
+            LP.FB.Adopt(LSec, LItem);
             if LP.CurKind = tkComma then
               LP.Next
             else
