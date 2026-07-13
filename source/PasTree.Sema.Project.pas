@@ -23,6 +23,7 @@ unit PasTree.Sema.Project;
 interface
 
 uses
+  System.SysUtils,
   System.Generics.Collections,
   PasTree.Preprocessor,
   PasTree.Platforms,
@@ -51,9 +52,13 @@ type
     FModels: TObjectList<TPasSemaModel>;
     FFiles: TList<string>;                 // parallel to FModels (full path)
     FByPath: TDictionary<string, Integer>; // full path (lower) -> model id
+    FSingleThreaded: Boolean;
     // Phase 3c: cross-model typing.
     FInstances: TList<TSemaInstance>;
     FInstKeys: TDictionary<string, Integer>;
+    // Runs ABody for 0..AHi — one worker per core, or a plain loop when
+    // SingleThreaded (baseline emulation / timing comparison / debugging).
+    procedure ForEachIndex(AHi: Integer; const ABody: TProc<Integer>);
     function LoadFile(const APath: string): Integer;
     procedure LoadFilesParallel(const APaths: TArray<string>);
     procedure ResolveUses(AId: Integer);
@@ -85,6 +90,10 @@ type
     constructor Create(APlatform: TPasPlatform;
       const ASearchPaths: TArray<string>; const AExtraDefines: TArray<string>);
     destructor Destroy; override;
+    // True = run every stage on the calling thread (emulates the sequential
+    // driver exactly; results are identical either way — the parallel stages
+    // are pure per unit). Default False (one worker per core).
+    property SingleThreaded: Boolean read FSingleThreaded write FSingleThreaded;
     function ModelCount: Integer;
     function Model(AId: Integer): TPasSemaModel;
     function ModelFile(AId: Integer): string;
@@ -101,7 +110,6 @@ type
 implementation
 
 uses
-  System.SysUtils,
   System.IOUtils,
   System.Threading,
   PasTree.Parser,
@@ -140,6 +148,18 @@ begin
   FDefines.Free;
   FSM.Free;
   inherited;
+end;
+
+procedure TPasSemaProject.ForEachIndex(AHi: Integer;
+  const ABody: TProc<Integer>);
+var
+  LIdx: Integer;
+begin
+  if FSingleThreaded then
+    for LIdx := 0 to AHi do
+      ABody(LIdx)
+  else
+    TParallel.&For(0, AHi, ABody);
 end;
 
 function TPasSemaProject.ModelCount: Integer;
@@ -227,7 +247,7 @@ begin
     Exit;
 
   SetLength(LDone, Length(LTodo));
-  TParallel.&For(0, High(LTodo),
+  ForEachIndex(High(LTodo),
     procedure(AIndex: Integer)
     var
       LPP: TPasPreprocessor;
@@ -1193,12 +1213,12 @@ begin
     ResolveUses(LIdx);
   // Cross passes per unit write ONLY their own model and read the others'
   // Phase-1 state (frozen once every unit is loaded) — safe to farm out.
-  TParallel.&For(0, LN - 1,
+  ForEachIndex(LN - 1,
     procedure(AIdx: Integer)
     begin
       CrossResolve(AIdx);
     end);
-  TParallel.&For(0, LN - 1,
+  ForEachIndex(LN - 1,
     procedure(AIdx: Integer)
     begin
       CheckCalls(AIdx);

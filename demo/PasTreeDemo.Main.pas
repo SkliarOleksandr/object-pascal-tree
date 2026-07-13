@@ -15,7 +15,7 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.IOUtils, System.Generics.Collections,
-  System.JSON,
+  System.JSON, System.Diagnostics,
   Winapi.Windows, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls,
   Vcl.ExtCtrls, Vcl.Dialogs, Vcl.Graphics,
   SynEdit, SynEditHighlighter, SynHighlighterJSON, SynHighlighterPas,
@@ -41,6 +41,7 @@ type
     btnParse: TButton;
     cbPlatform: TComboBox;
     cbHighlighter: TComboBox;
+    cbThreading: TComboBox;
     splLeft: TSplitter;
     vstFiles: TVirtualStringTree;
     pgc: TPageControl;
@@ -191,6 +192,13 @@ begin
     cbHighlighter.Items.Add('PasTree');
   end;
   cbHighlighter.ItemIndex := 1; // PasTree by default
+
+  if cbThreading.Items.Count = 0 then
+  begin
+    cbThreading.Items.Add('SingleThread');
+    cbThreading.Items.Add('MultiThread');
+  end;
+  cbThreading.ItemIndex := 1; // MultiThread by default
 end;
 
 // Re-colors SynEdit's built-in highlighter with PasTreeDemo.Highlighter's own
@@ -395,6 +403,7 @@ var
   LMain, LDiagTotal, LId, LDIdx: Integer;
   LModel: TPasSemaModel;
   LSearchPaths, LDefines: TArray<string>;
+  LSW: TStopwatch;
 begin
   if (FProjectDir = '') or not TDirectory.Exists(FProjectDir) then
   begin
@@ -423,13 +432,16 @@ begin
   try
     LProj := TPasSemaProject.Create(LPlatform, LSearchPaths, LDefines);
     try
+      LProj.SingleThreaded := cbThreading.ItemIndex = 0;
       // A .dproj drives the real uses-graph from its main source (correctly
       // reaching units outside FProjectDir); a plain .dpr falls back to
       // "everything under this folder" for simplicity.
+      LSW := TStopwatch.StartNew;
       if Assigned(FDProj) and (FMainSource <> '') then
         LProj.AnalyzeFile(FMainSource)
       else
         LProj.AnalyzeDirectory(FProjectDir);
+      LSW.Stop;
 
       // Locate the main unit's model, and report every unit's diagnostics.
       LMain := -1;
@@ -448,8 +460,9 @@ begin
              LModel.Diags[LDIdx].Msg]));
         end;
       end;
-      Log(Format('Done: %d units, %d diagnostics.',
-        [LProj.ModelCount, LDiagTotal]));
+      Log(Format('Done: %d units, %d diagnostics in %d ms (%s).',
+        [LProj.ModelCount, LDiagTotal, LSW.ElapsedMilliseconds,
+         cbThreading.Text]));
 
       if LMain >= 0 then
       begin

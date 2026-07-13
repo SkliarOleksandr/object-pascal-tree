@@ -8,6 +8,7 @@ program PasTreeSemaProject;
 
 uses
   System.SysUtils,
+  System.Diagnostics,
   System.IOUtils,
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
@@ -29,6 +30,9 @@ var
   GProj: TPasSemaProject;
   GPath: string;
   GIdx: Integer;
+  GSingle: Boolean;
+  GSW: TStopwatch;
+  GMode: string;
 
 begin
   // The driver fans parse+resolve out across cores; without this the default
@@ -37,15 +41,19 @@ begin
   try
     if ParamCount < 1 then
     begin
-      Writeln(ErrOutput, 'Usage: PasTreeSemaProject <file.dpr|dir> [-p:<platform>]');
+      Writeln(ErrOutput,
+        'Usage: PasTreeSemaProject <file.dpr|dir> [-p:<platform>] [-st]');
       ExitCode := 2;
       Exit;
     end;
     GPath := TPath.GetFullPath(ParamStr(1));
     GPlatform := pfWin32;
+    GSingle := False;
     for GIdx := 2 to ParamCount do
       if ParamStr(GIdx).StartsWith('-p:', True) then
-        TryParsePlatformName(Copy(ParamStr(GIdx), 4, MaxInt), GPlatform);
+        TryParsePlatformName(Copy(ParamStr(GIdx), 4, MaxInt), GPlatform)
+      else if SameText(ParamStr(GIdx), '-st') then
+        GSingle := True;   // single-threaded baseline (timing comparison)
 
     if TDirectory.Exists(GPath) then
       GProj := TPasSemaProject.Create(GPlatform, [GPath], [])
@@ -53,15 +61,24 @@ begin
       GProj := TPasSemaProject.Create(GPlatform,
         [TPath.GetDirectoryName(GPath)], []);
     try
+      GProj.SingleThreaded := GSingle;
+      GSW := TStopwatch.StartNew;
       if TDirectory.Exists(GPath) then
         GProj.AnalyzeDirectory(GPath)
       else
         GProj.AnalyzeFile(GPath);
+      GSW.Stop;
       for GIdx := 0 to GProj.ModelCount - 1 do
       begin
         Writeln('=== ', GProj.ModelFile(GIdx), ' ===');
         Write(DumpSemaModel(GProj.Model(GIdx)));
       end;
+      if GSingle then
+        GMode := 'SingleThread'
+      else
+        GMode := 'MultiThread';
+      Writeln(ErrOutput, Format('%d units in %d ms (%s)',
+        [GProj.ModelCount, GSW.ElapsedMilliseconds, GMode]));
     finally
       GProj.Free;
     end;

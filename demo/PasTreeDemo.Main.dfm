@@ -83,6 +83,19 @@ object frmMain: TfrmMain
         'SynEdit'
         'PasTree')
     end
+    object cbThreading: TComboBox
+      Left = 544
+      Top = 9
+      Width = 110
+      Height = 23
+      Style = csDropDownList
+      ItemIndex = 1
+      TabOrder = 4
+      Text = 'MultiThread'
+      Items.Strings = (
+        'SingleThread'
+        'MultiThread')
+    end
   end
   object vstFiles: TVirtualStringTree
     Left = 0
