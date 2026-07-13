@@ -19,6 +19,7 @@ uses
 const
   NIL_SYM = -1;
   NIL_SCOPE = -1;
+  NIL_INST = -1;
 
 type
   TSemaSymbolKind = (skType, skVar, skConst, skField, skRoutine, skParam,
@@ -32,6 +33,16 @@ type
   TPasExtRef = record
     UnitId: Integer;   // index into the project's model list
     Sym: Integer;      // symbol index within that model
+  end;
+
+  // A cross-model type descriptor (Phase 3c): a type symbol in any of the
+  // project's models, optionally a generic INSTANTIATION of it (Inst indexes
+  // the owning TPasSemaProject's instance table; NIL_INST for a plain type).
+  // Only meaningful within the project that produced it.
+  TSemaXType = record
+    UnitId: Integer;   // model id of the type symbol; NIL_SYM = no type
+    Sym: Integer;      // type symbol index within that model
+    Inst: Integer;     // project instance-table index; NIL_INST = plain type
   end;
 
   // One `uses` entry, recorded by the resolver and completed by the project.
@@ -98,6 +109,12 @@ type
     ExprType: TArray<Integer>;      // node index -> type symbol; NIL_SYM = untyped
     ExtRefMap: TDictionary<Integer, TPasExtRef>; // node -> external symbol
     CallTarget: TDictionary<Integer, Integer>;   // nkCall node -> chosen routine
+    // Phase 3c: cross-model typing (filled by the project driver; empty in a
+    // standalone per-unit analysis). Entries exist only where they ADD to the
+    // intra-unit result: a declared type / expression type that lives in
+    // another model, or a generic instantiation of one.
+    SymTypeX: TDictionary<Integer, TSemaXType>;  // symbol -> declared type
+    ExprTypeX: TDictionary<Integer, TSemaXType>; // node -> expression type
     UsesList: TArray<TPasUsesRef>;
     AllUsesResolved: Boolean;       // gates E2003 (set by the project driver)
     UnitNameLower: string;          // this unit's own name, lower-cased
@@ -154,6 +171,8 @@ begin
   Scopes := TObjectList<TSemaScope>.Create(True);
   ExtRefMap := TDictionary<Integer, TPasExtRef>.Create;
   CallTarget := TDictionary<Integer, Integer>.Create;
+  SymTypeX := TDictionary<Integer, TSemaXType>.Create;
+  ExprTypeX := TDictionary<Integer, TSemaXType>.Create;
   InterfaceScope := NIL_SCOPE;
   AllUsesResolved := False;
   SetLength(Symbols, 64);
@@ -169,6 +188,8 @@ end;
 
 destructor TPasSemaModel.Destroy;
 begin
+  ExprTypeX.Free;
+  SymTypeX.Free;
   CallTarget.Free;
   ExtRefMap.Free;
   Scopes.Free;

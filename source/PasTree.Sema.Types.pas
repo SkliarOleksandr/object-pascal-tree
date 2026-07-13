@@ -233,8 +233,8 @@ begin
   if LSym = NIL_SYM then
     Exit(NIL_SYM);   // external / unresolved
   case M.Symbols[LSym].Kind of
-    skVar, skConst, skField, skParam, skRoutine:
-      Result := M.Symbols[LSym].TypeSym;   // value / result type
+    skVar, skConst, skField, skParam, skRoutine, skProperty:
+      Result := M.Symbols[LSym].TypeSym;   // value / result / property type
     skType, skBuiltinType:
       Result := LSym;                       // type designator (casts)
   else

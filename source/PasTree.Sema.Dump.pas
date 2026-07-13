@@ -127,8 +127,9 @@ begin
         if AModel.ExprType[LNode] <> NIL_SYM then
           Inc(LTyped);
       end;
-    LSB.AppendFormat('typed exprs: %d/%d; calls resolved: %d'#10,
-      [LTyped, LExprTotal, AModel.CallTarget.Count]);
+    LSB.AppendFormat(
+      'typed exprs: %d/%d (+%d cross-model); calls resolved: %d'#10,
+      [LTyped, LExprTotal, AModel.ExprTypeX.Count, AModel.CallTarget.Count]);
 
     if Length(AModel.Diags) > 0 then
     begin

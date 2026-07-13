@@ -311,6 +311,10 @@ begin
   begin
     LSym := LExisting;
     MarkDeclName(LName, LSym);
+    // The completing declaration supersedes the forward one (`TFoo = class;`):
+    // DeclNode must reach the real definition so ancestor/generic-param walks
+    // (TypeDefNode and the project's cross typer) see heritage and params.
+    FModel.Symbols[LSym].DeclNode := LName;
   end
   else
     LSym := DeclareSym(AScope, skType, NodeText(LName), LName);
@@ -366,11 +370,18 @@ begin
       nkPropertyDecl:
         begin
           var LN := SkipAttr(FirstChild(LChild));
+          var LPropSym := NIL_SYM;
           if (LN <> NIL_NODE) and (KindOf(LN) = nkIdent) then
-            DeclareSym(LMembers, skProperty, NodeText(LN), LN);
+            LPropSym := DeclareSym(LMembers, skProperty, NodeText(LN), LN);
           var LC := NextSib(LN);
           while LC <> NIL_NODE do
           begin
+            // The property's type is the child after the name / index params
+            // and before the specifiers (see TPasParser.ParseProperty).
+            if (LPropSym <> NIL_SYM) and
+               (FModel.Symbols[LPropSym].TypeNode = NIL_NODE) and
+               not (KindOf(LC) in [nkParams, nkPropSpec]) then
+              FModel.Symbols[LPropSym].TypeNode := LC;
             Collect(LC, LMembers);
             LC := NextSib(LC);
           end;
@@ -597,6 +608,18 @@ begin
 
   if (LRoutineSym <> NIL_SYM) and (LResultNode <> NIL_NODE) then
     FModel.Symbols[LRoutineSym].TypeNode := LResultNode;
+
+  // Functions get the implicit `Result` variable, declared LOCALLY so it
+  // shadows any same-named member of the enclosing class (real dcc behavior —
+  // e.g. TMatch in System.RegularExpressions has a METHOD named Result, yet
+  // `Result := ...` inside its other methods still means the function result).
+  if (LResultNode <> NIL_NODE) and
+     (FModel.FindLocal(LRoutine, 'result') = NIL_SYM) then
+  begin
+    var LRes := FModel.AddSymbol(LRoutine, skVar, 'Result', NIL_NODE);
+    FModel.Symbols[LRes].TypeNode := LResultNode;
+    FModel.BindName(LRoutine, LRes);
+  end;
 end;
 
 procedure TPasSemaResolver.Collect(ANode, AScope: Integer);
