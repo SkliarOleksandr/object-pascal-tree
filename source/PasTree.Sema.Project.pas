@@ -55,6 +55,7 @@ type
     FInstances: TList<TSemaInstance>;
     FInstKeys: TDictionary<string, Integer>;
     function LoadFile(const APath: string): Integer;
+    procedure LoadFilesParallel(const APaths: TArray<string>);
     procedure ResolveUses(AId: Integer);
     procedure CrossResolve(AId: Integer);
     function FindInUses(AId: Integer; const ANameLower: string;
@@ -102,6 +103,7 @@ implementation
 uses
   System.SysUtils,
   System.IOUtils,
+  System.Threading,
   PasTree.Parser,
   PasTree.Sema.Resolver,
   PasTree.Sema.Diagnostics;
@@ -166,7 +168,7 @@ begin
   LFull := TPath.GetFullPath(APath);
   LKey := LowerCase(LFull);
   if FByPath.TryGetValue(LKey, Result) then
-    Exit;
+    Exit;   // includes the -1 negative-cache sentinel for known-bad files
   if not TFile.Exists(LFull) then
     Exit(-1);
   try
@@ -175,11 +177,87 @@ begin
     LModel := TPasSemaResolver.Analyze(LTree);
   except
     on Exception do
-      Exit(-1);   // tolerate a unit that fails to parse; treat as unresolvable
+    begin
+      // Tolerate a unit that fails to parse; treat as unresolvable — and
+      // remember that, so repeated `uses` of it don't re-parse every time.
+      FByPath.Add(LKey, -1);
+      Exit(-1);
+    end;
   end;
   Result := FModels.Add(LModel);
   FFiles.Add(LFull);
   FByPath.Add(LKey, Result);
+end;
+
+// Parse + Phase-1-analyze a batch of files with one worker per core, then
+// register the results IN INPUT ORDER (deterministic model ids). Pure per
+// file: each worker owns its preprocessor (which clones the shared defines
+// per run); the source manager and define set are read-only during the loop —
+// the same no-locks model as TPasProject.ParseFiles.
+procedure TPasSemaProject.LoadFilesParallel(const APaths: TArray<string>);
+var
+  LTodo: TArray<string>;
+  LKeys: TArray<string>;
+  LDone: TArray<TPasSemaModel>;
+  LSeen: TDictionary<string, Boolean>;
+  LIdx, LDummy: Integer;
+  LFull, LKey: string;
+begin
+  // Normalize, drop already-loaded/known-bad paths and in-batch duplicates.
+  LTodo := nil;
+  LKeys := nil;
+  LSeen := TDictionary<string, Boolean>.Create;
+  try
+    for LIdx := 0 to High(APaths) do
+    begin
+      LFull := TPath.GetFullPath(APaths[LIdx]);
+      LKey := LowerCase(LFull);
+      if FByPath.TryGetValue(LKey, LDummy) or LSeen.ContainsKey(LKey) then
+        Continue;
+      if not TFile.Exists(LFull) then
+        Continue;
+      LSeen.Add(LKey, True);
+      LTodo := LTodo + [LFull];
+      LKeys := LKeys + [LKey];
+    end;
+  finally
+    LSeen.Free;
+  end;
+  if LTodo = nil then
+    Exit;
+
+  SetLength(LDone, Length(LTodo));
+  TParallel.&For(0, High(LTodo),
+    procedure(AIndex: Integer)
+    var
+      LPP: TPasPreprocessor;
+      LPre: TPasPreprocessed;
+      LDiags: TArray<TPasParseDiag>;
+    begin
+      LPP := TPasPreprocessor.Create(FSM, FDefines, 37.0, FInfo.PointerBytes,
+        FInfo.ExtendedBytes);
+      try
+        try
+          LPre := LPP.Process(LTodo[AIndex]);
+          LDone[AIndex] :=
+            TPasSemaResolver.Analyze(TPasParser.ParseFile(LPre, LDiags));
+        except
+          on Exception do
+            LDone[AIndex] := nil;   // registered as known-bad below
+        end;
+      finally
+        LPP.Free;
+      end;
+    end);
+
+  for LIdx := 0 to High(LTodo) do
+    if LDone[LIdx] <> nil then
+    begin
+      FByPath.Add(LKeys[LIdx], FModels.Add(LDone[LIdx]));
+      FFiles.Add(LTodo[LIdx]);
+    end
+    else
+      FByPath.Add(LKeys[LIdx], -1);
 end;
 
 procedure TPasSemaProject.ResolveUses(AId: Integer);
@@ -1069,10 +1147,21 @@ end;
 function TPasSemaProject.AnalyzeFile(const AMainFile: string): Integer;
 var
   LIdx: Integer;
+  LPaths: TArray<string>;
+  LPath: string;
 begin
   Result := LoadFile(AMainFile);
   if Result < 0 then
     Exit;
+  // Pre-load the main unit's direct uses in parallel; ResolveUses below then
+  // finds every one already cached (it stays the single source of truth for
+  // UnitId assignment and the AllUsesResolved gate).
+  LPaths := nil;
+  for LIdx := 0 to High(FModels[Result].UsesList) do
+    if FSM.ResolveUnit(FModels[Result].UsesList[LIdx].NameFull,
+      FModels[Result].UsesList[LIdx].InPath, FFiles[Result], LPath) then
+      LPaths := LPaths + [LPath];
+  LoadFilesParallel(LPaths);
   ResolveUses(Result);
   CrossResolve(Result);
   CheckCalls(Result);
@@ -1086,25 +1175,38 @@ end;
 procedure TPasSemaProject.AnalyzeDirectory(const ARoot: string);
 var
   LFile, LExt: string;
+  LPaths: TArray<string>;
   LN, LIdx: Integer;
 begin
   FSM.BuildUnitIndex(ARoot);
+  LPaths := nil;
   for LFile in TDirectory.GetFiles(ARoot, '*.*',
     TSearchOption.soAllDirectories) do
   begin
     LExt := LowerCase(TPath.GetExtension(LFile));
     if (LExt = '.pas') or (LExt = '.dpr') then
-      LoadFile(LFile);
+      LPaths := LPaths + [LFile];
   end;
+  LoadFilesParallel(LPaths);
   LN := FModels.Count;   // snapshot: only the directory's own units get E2003
   for LIdx := 0 to LN - 1 do
     ResolveUses(LIdx);
-  for LIdx := 0 to LN - 1 do
-    CrossResolve(LIdx);
-  for LIdx := 0 to LN - 1 do
-    CheckCalls(LIdx);
-  // Cross typing: declared types for everything loaded (incl. units pulled in
-  // from search paths), expressions for the directory's own units.
+  // Cross passes per unit write ONLY their own model and read the others'
+  // Phase-1 state (frozen once every unit is loaded) — safe to farm out.
+  TParallel.&For(0, LN - 1,
+    procedure(AIdx: Integer)
+    begin
+      CrossResolve(AIdx);
+    end);
+  TParallel.&For(0, LN - 1,
+    procedure(AIdx: Integer)
+    begin
+      CheckCalls(AIdx);
+    end);
+  // Cross typing stays SEQUENTIAL by design: Instantiate mutates the shared
+  // instance table, and CrossType both writes a model's RefMap/ExtRefMap and
+  // reads other models' — parallelizing would need locks on the hot path for
+  // ~5% of the total time (measured on the full RTL).
   for LIdx := 0 to FModels.Count - 1 do
     BindTypesX(LIdx);
   for LIdx := 0 to LN - 1 do

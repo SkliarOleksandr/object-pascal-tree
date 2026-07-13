@@ -29,6 +29,9 @@ uses
 {$R PasTreeDemo.res}
 
 begin
+  // Run Parse fans parse+resolve out across cores (TPasSemaProject); without
+  // this the default memory manager sleeps on allocation contention there.
+  System.NeverSleepOnMMThreadContention := True;
   Application.Initialize;
   Application.MainFormOnTaskbar := True;
   Application.CreateForm(TfrmMain, frmMain);

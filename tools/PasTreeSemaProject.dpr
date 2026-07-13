@@ -31,6 +31,9 @@ var
   GIdx: Integer;
 
 begin
+  // The driver fans parse+resolve out across cores; without this the default
+  // memory manager SLEEPS on allocation contention and eats the whole win.
+  System.NeverSleepOnMMThreadContention := True;
   try
     if ParamCount < 1 then
     begin

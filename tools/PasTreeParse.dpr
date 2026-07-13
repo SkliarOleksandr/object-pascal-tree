@@ -74,6 +74,9 @@ var
   GElapsedSec: Double;
 
 begin
+  // -j fans parsing out across cores; without this the default memory
+  // manager SLEEPS on allocation contention and eats most of the win.
+  System.NeverSleepOnMMThreadContention := True;
   try
     if ParamCount < 1 then
     begin
