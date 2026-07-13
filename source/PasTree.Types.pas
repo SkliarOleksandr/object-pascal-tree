@@ -123,6 +123,52 @@ const
     'type', 'unit', 'until', 'uses', 'var', 'while', 'with', 'xor'
   );
 
+  { Spec B.4.2 — the FULL, exhaustive directive vocabulary (context-sensitive;
+    legal as identifiers elsewhere), verbatim from object-pascal-spec's
+    B-lexical-grammar.md (itself transcribed from the official RAD Studio
+    docs). Lexically these are all plain tkIdentifier — the lexer cannot
+    (and by design must not) special-case them; only the PARSER may, and only
+    where the grammar actually looks for a specific word. This array is a
+    vocabulary reference for consumers that want the complete word list (a
+    syntax highlighter, autocomplete, ...) — it is NOT wired into any single
+    grammar check. Not every word here is yet recognised by name at its
+    grammatical position in TPasParser (e.g. package-level contains/requires,
+    resident, exception-directive on/at) — that reflects unimplemented
+    grammar, not a lexical gap; see ROUTINE_DIRECTIVE_WORDS/VISIBILITY_WORDS
+    below for the narrower, grammar-scoped subsets the parser actually uses. }
+  DIRECTIVE_WORDS: array[0..58] of string = (
+    'absolute', 'abstract', 'assembler', 'at', 'automated', 'cdecl',
+    'contains', 'default', 'delayed', 'dependency', 'deprecated', 'dispid',
+    'dynamic', 'experimental', 'export', 'external', 'far', 'final',
+    'forward', 'helper', 'implements', 'index', 'local', 'message', 'name',
+    'near', 'nodefault', 'noreturn', 'on', 'operator', 'out', 'overload',
+    'override', 'package', 'pascal', 'platform', 'private', 'protected',
+    'public', 'published', 'read', 'readonly', 'reference', 'register',
+    'reintroduce', 'requires', 'resident', 'safecall', 'sealed', 'static',
+    'stdcall', 'stored', 'strict', 'unsafe', 'varargs', 'virtual', 'winapi',
+    'write', 'writeonly'
+  );
+
+  { Grammar-scoped SUBSET of DIRECTIVE_WORDS actually checked by
+    TPasParser.IsDirectiveWord: trailing method/procedure directives
+    (binding, calling convention, hints, external linkage). Deliberately
+    narrower than DIRECTIVE_WORDS — e.g. 'read'/'write'/'index' are real
+    directives (property specifiers) but would be a GRAMMAR BUG if accepted
+    here, since they're not valid trailing routine directives. }
+  ROUTINE_DIRECTIVE_WORDS: array[0..29] of string = (
+    'overload', 'virtual', 'dynamic', 'override', 'abstract', 'final',
+    'reintroduce', 'static', 'assembler', 'cdecl', 'stdcall', 'register',
+    'pascal', 'safecall', 'winapi', 'export', 'local', 'near', 'far',
+    'varargs', 'unsafe', 'noreturn', 'deprecated', 'platform',
+    'experimental', 'forward', 'delayed', 'message', 'dispid', 'external'
+  );
+
+  { Spec 11.2.1 — class-member visibility sections. Also a grammar-scoped
+    subset of DIRECTIVE_WORDS; TPasParser.IsVisibilityWord is the authority. }
+  VISIBILITY_WORDS: array[0..5] of string = (
+    'private', 'protected', 'public', 'published', 'strict', 'automated'
+  );
+
   DIAG_MESSAGES: array[TPasDiagCode] of string = (
     'Invalid character',
     '"&" must be followed by an identifier',

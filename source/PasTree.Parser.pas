@@ -1952,13 +1952,6 @@ begin
 end;
 
 function TPasParser.IsDirectiveWord: Boolean;
-const
-  WORDS: array[0..29] of string = (
-    'overload', 'virtual', 'dynamic', 'override', 'abstract', 'final',
-    'reintroduce', 'static', 'assembler', 'cdecl', 'stdcall', 'register',
-    'pascal', 'safecall', 'winapi', 'export', 'local', 'near', 'far',
-    'varargs', 'unsafe', 'noreturn', 'deprecated', 'platform',
-    'experimental', 'forward', 'delayed', 'message', 'dispid', 'external');
 var
   LWord: string;
 begin
@@ -1968,20 +1961,24 @@ begin
     Exit(True);
   if CurKind <> tkIdentifier then
     Exit(False);
-  for LWord in WORDS do
+  for LWord in PasTree.Types.ROUTINE_DIRECTIVE_WORDS do
     if SameText(CurText, LWord) then
       Exit(True);
   Result := False;
 end;
 
 function TPasParser.IsVisibilityWord: Boolean;
+var
+  LWord: string;
 begin
   // Nested const/type/var sections inside a class body end where the next
   // visibility section starts (11.2.1). &-escaped names don't match (B.3).
-  Result := (CurKind = tkIdentifier) and
-    (SameText(CurText, 'private') or SameText(CurText, 'protected') or
-     SameText(CurText, 'public') or SameText(CurText, 'published') or
-     SameText(CurText, 'strict') or SameText(CurText, 'automated'));
+  if CurKind <> tkIdentifier then
+    Exit(False);
+  for LWord in PasTree.Types.VISIBILITY_WORDS do
+    if SameText(CurText, LWord) then
+      Exit(True);
+  Result := False;
 end;
 
 procedure TPasParser.ConsumeTrailingDirectives;
