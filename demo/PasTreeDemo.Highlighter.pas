@@ -25,23 +25,41 @@ unit PasTreeDemo.Highlighter;
   means there is no incremental-state bug class to worry about: every line is
   always answered from a fully fresh, whole-buffer-consistent tokenization.
 
-  Scope: purely lexical (TPasLexer only — no preprocessor, no parser).
-  $IFDEF'd-out regions are not greyed out (that needs the preprocessor, a
-  different tier).
+  Scope: mostly lexical (TPasLexer output drives every color), but weak
+  keywords (below) are resolved with real POSITION information from the full
+  pipeline (TPasPreprocessor + TPasParser), not just a flat word list.
+  $IFDEF'd-out regions are still not greyed out (a possible future use of the
+  same preprocessor pass, not done here).
 
   One deliberate, clearly-scoped exception to "raw lexer output only": true
   reserved words (spec B.4.1 — begin/end/if/class/...) get their Keyword color
   straight from TPasTokenKind, no list needed — that part IS the lexer talking.
   But Object Pascal's "weak keywords" (private/override/virtual/stdcall/...,
   spec B.4.2) are, by design, plain tkIdentifier at the lexer level — the
-  language only gives them meaning by *position*, which needs the parser. Since
-  every real Delphi IDE colors these like keywords and users expect that, this
-  highlighter ALSO colors them like keywords via a small static word list
-  (WEAK_KEYWORDS below) — purely a cosmetic overlay on top of the identifier
-  token, not a lexer reclassification. A miscolored ordinary identifier that
-  happens to collide with this list (e.g. a variable named `Index`) is a
-  word-list judgment call, NOT a lexer bug — unlike every other color in this
-  highlighter, which IS a lexer-correctness signal.
+  language only gives them meaning by *position* (`var dynamic: Integer;` is a
+  perfectly legal variable named `dynamic`). A flat word-list can't tell that
+  apart from `procedure Foo; dynamic;` — both are just an identifier token
+  spelled "dynamic". Precision needs the PARSER, which already builds
+  dedicated AST nodes for every position where a directive/visibility/
+  property-specifier word actually means something: nkVisibility, nkDirective,
+  nkPropSpec (PasTree.Ast). So EnsureFresh now runs the real pipeline
+  (TPasPreprocessor.ProcessText -> TPasParser.ParseFile) in addition to the
+  lexer, and BuildWeakKeywordSpans walks the resulting TPasTree once, marking
+  exactly the "bare word" token(s) of each such node (a node's own span MINUS
+  its adopted child spans — the child is the getter/setter/arg expression,
+  which must stay Identifier-colored, e.g. `read` colors but `GetFoo` in
+  `read GetFoo` doesn't). This is precise: `var dynamic: Integer;` no longer
+  lights up, because the parser never builds an nkDirective there at all.
+  Fallback: preprocessing/parsing a buffer mid-keystroke can hit an
+  intermediate state the parser doesn't handle gracefully (belt-and-suspenders
+  — PasTree's parser is error-tolerant by design and this hasn't been observed
+  in practice); if EITHER step raises, IsWeakKeyword falls back to the OLD flat
+  PasTree.Types.DIRECTIVE_WORDS + VISIBILITY_WORDS word-list check for that
+  pass, so the highlighter never goes blank or crashes — it just loses
+  precision for one re-tokenize cycle. Either way, this whole mechanism stays a
+  cosmetic overlay on top of the identifier token, not a lexer reclassification
+  — unlike every other color in this highlighter, which IS a lexer-correctness
+  signal straight from TPasTokenKind.
 
   Demo-only: lives in demo/, not source/, and is created purely at runtime —
   no `Register` procedure, no design-time package.
@@ -58,34 +76,27 @@ uses
   SynEditTypes,
   SynEditHighlighter,
   PasTree.Types,
-  PasTree.Lexer;
+  PasTree.Lexer,
+  PasTree.SourceManager,
+  PasTree.Preprocessor,
+  PasTree.Ast,
+  PasTree.Parser,
+  PasTree.Platforms;
 
 const
-  // Object Pascal "weak keywords" (spec B.4.2): lexically plain tkIdentifier,
-  // meaningful only by position, so the raw lexer can't (and shouldn't) tell
-  // them apart from an ordinary identifier — this is a cosmetic-only overlay,
-  // see the unit header comment. Deliberately excludes words too likely to
-  // collide with real identifiers/properties (e.g. Align, Name-as-a-property)
-  // or that are FPC-only / not part of Delphi (constref) / effectively dead
-  // 16-bit legacy (near/far/resident).
-  WEAK_KEYWORDS: array [0..46] of string = (
-    // visibility
-    'private', 'protected', 'public', 'published', 'strict', 'automated',
-    // method binding / behavior
-    'virtual', 'dynamic', 'override', 'overload', 'reintroduce', 'abstract',
-    'sealed', 'final', 'static', 'forward', 'assembler',
-    // calling conventions
-    'register', 'pascal', 'cdecl', 'stdcall', 'safecall', 'winapi', 'local',
-    // external linkage
-    'external', 'name', 'delayed', 'varargs',
-    // parameters / generics / types
-    'out', 'index', 'reference', 'operator', 'helper',
-    // property specifiers
-    'read', 'write', 'stored', 'default', 'nodefault', 'implements',
-    // hints
-    'deprecated', 'platform', 'experimental',
-    // messages / memory
-    'message', 'dispid', 'unsafe', 'weak', 'volatile');
+  { The palette below, named so it can be reused verbatim to re-color
+    SynEdit's own TSynPasSyn (see PasTreeDemo.Main.SetupControls) — makes an
+    apples-to-apples comparison between the two highlighters about
+    RECOGNITION, not incidental color-scheme differences. }
+  PAS_KEYWORD_COLOR = clNavy;
+  PAS_KEYWORD_STYLE = [fsBold];
+  PAS_COMMENT_COLOR = clGreen;
+  PAS_COMMENT_STYLE = [fsItalic];
+  PAS_DIRECTIVE_COLOR = clOlive;
+  PAS_DIRECTIVE_STYLE = [fsItalic, fsBold];
+  PAS_STRING_COLOR = clMaroon;
+  PAS_NUMBER_COLOR = clPurple;
+  PAS_ASM_BACKGROUND = clInfoBk;
 
 type
   TPasTreeSynHighlighter = class(TSynCustomHighlighter)
@@ -96,8 +107,14 @@ type
     FTokenCount: Integer;
     FLineStartAbs: Integer;        // absolute offset of the current line
     FCurTokenIdx: Integer;         // index into FTokenStream.Tokens
+    FCurTokenAbsIdx: Integer;      // raw token index of the token last reported by Next
     FCurKind: TPasTokenKind;       // kind of the token last reported by Next
     FCurUnterminated: Boolean;     // tfUnterminated on that token
+    FSourceManager: TPasSourceManager; // no search paths — single in-memory buffer
+    FDefines: TPasDefines;         // Win32 platform preset (see EnsureFresh)
+    FPreprocessor: TPasPreprocessor;   // reused across EnsureFresh calls
+    FHaveAst: Boolean;             // True when FWeakKeywordToken is AST-precise
+    FWeakKeywordToken: TArray<Boolean>; // AST-precise, indexed by raw token idx
     FWhitespaceAttri: TSynHighlighterAttributes;
     FCommentAttri: TSynHighlighterAttributes;
     FDirectiveAttri: TSynHighlighterAttributes;
@@ -108,8 +125,10 @@ type
     FSymbolAttri: TSynHighlighterAttributes;
     FAsmAttri: TSynHighlighterAttributes;
     FErrorAttri: TSynHighlighterAttributes;
-    FWeakKeywords: TDictionary<string, Boolean>; // lowercased WEAK_KEYWORDS
+    FWeakKeywords: TDictionary<string, Boolean>; // DIRECTIVE_WORDS + VISIBILITY_WORDS
     function IsWeakKeyword: Boolean;
+    procedure BuildWeakKeywordSpans(const ATree: TPasTree;
+      const APreprocessed: TPasPreprocessed);
     procedure EnsureFresh;
     function LineStartOffset(ALineNumber: Integer): Integer;
     function LocateStartToken(AOffset: Integer): Integer;
@@ -154,36 +173,36 @@ begin
   AddAttribute(FWhitespaceAttri);
 
   FCommentAttri := TSynHighlighterAttributes.Create('Comment', 'Comment');
-  FCommentAttri.Foreground := clGreen;
-  FCommentAttri.Style := [fsItalic];
+  FCommentAttri.Foreground := PAS_COMMENT_COLOR;
+  FCommentAttri.Style := PAS_COMMENT_STYLE;
   AddAttribute(FCommentAttri);
 
   FDirectiveAttri := TSynHighlighterAttributes.Create('Directive', 'Compiler directive');
-  FDirectiveAttri.Foreground := clOlive;
-  FDirectiveAttri.Style := [fsItalic, fsBold];
+  FDirectiveAttri.Foreground := PAS_DIRECTIVE_COLOR;
+  FDirectiveAttri.Style := PAS_DIRECTIVE_STYLE;
   AddAttribute(FDirectiveAttri);
 
   FIdentifierAttri := TSynHighlighterAttributes.Create('Identifier', 'Identifier');
   AddAttribute(FIdentifierAttri);
 
   FKeywordAttri := TSynHighlighterAttributes.Create('Keyword', 'Reserved word');
-  FKeywordAttri.Foreground := clNavy;
-  FKeywordAttri.Style := [fsBold];
+  FKeywordAttri.Foreground := PAS_KEYWORD_COLOR;
+  FKeywordAttri.Style := PAS_KEYWORD_STYLE;
   AddAttribute(FKeywordAttri);
 
   FNumberAttri := TSynHighlighterAttributes.Create('Number', 'Number literal');
-  FNumberAttri.Foreground := clPurple;
+  FNumberAttri.Foreground := PAS_NUMBER_COLOR;
   AddAttribute(FNumberAttri);
 
   FStringAttri := TSynHighlighterAttributes.Create('String', 'String literal');
-  FStringAttri.Foreground := clMaroon;
+  FStringAttri.Foreground := PAS_STRING_COLOR;
   AddAttribute(FStringAttri);
 
   FSymbolAttri := TSynHighlighterAttributes.Create('Symbol', 'Punctuation/operator');
   AddAttribute(FSymbolAttri);
 
   FAsmAttri := TSynHighlighterAttributes.Create('Asm', 'Opaque BASM chunk');
-  FAsmAttri.Background := clInfoBk;
+  FAsmAttri.Background := PAS_ASM_BACKGROUND;
   AddAttribute(FAsmAttri);
 
   FErrorAttri := TSynHighlighterAttributes.Create('Error', 'Invalid / unterminated');
@@ -194,8 +213,20 @@ begin
   SetAttributesOnChange(DefHighlightChange);
 
   FWeakKeywords := TDictionary<string, Boolean>.Create;
-  for var LWord in WEAK_KEYWORDS do
-    FWeakKeywords.AddOrSetValue(LWord, True); // WEAK_KEYWORDS is already lowercase
+  for var LWord in PasTree.Types.DIRECTIVE_WORDS do
+    FWeakKeywords.AddOrSetValue(LWord, True);
+  for var LWord in PasTree.Types.VISIBILITY_WORDS do
+    FWeakKeywords.AddOrSetValue(LWord, True);
+
+  // Full pipeline for AST-precise weak-keyword spans (see unit header). No
+  // search paths: a single in-memory editor buffer has no project context, so
+  // $I includes and unit resolution simply won't resolve — same accepted
+  // scope limit as $IFDEF regions not being greyed out. Reused across every
+  // EnsureFresh call (ProcessText resets its own per-run state internally).
+  FSourceManager := TPasSourceManager.Create([]);
+  FDefines := CreatePlatformDefines(pfWin32);
+  FPreprocessor := TPasPreprocessor.Create(FSourceManager, FDefines,
+    37.0, PlatformInfo(pfWin32).PointerBytes, PlatformInfo(pfWin32).ExtendedBytes);
 
   FCachedSource := #0; // guarantee the first EnsureFresh call actually tokenizes
   FLineStartAbs := 0;
@@ -204,6 +235,9 @@ end;
 
 destructor TPasTreeSynHighlighter.Destroy;
 begin
+  FPreprocessor.Free;
+  FDefines.Free;      // caller-owned — TPasPreprocessor only frees its own clone
+  FSourceManager.Free;
   FWeakKeywords.Free;
   inherited;
 end;
@@ -244,12 +278,19 @@ begin
   Result := Length(FTokenStream.Diagnostics);
 end;
 
-// Re-tokenizes the WHOLE attached buffer iff its text changed since last
-// time. Cheap when nothing changed (one string compare); the actual lex only
-// runs once per real edit, regardless of how many lines get re-painted.
+// Re-tokenizes (and re-parses, for weak-keyword precision) the WHOLE attached
+// buffer iff its text changed since last time. Cheap when nothing changed
+// (one string compare); the actual lex+parse only runs once per real edit,
+// regardless of how many lines get re-painted. The whole D13 RTL (1865 files)
+// parses in ~3s, so a single open buffer is a tiny fraction of that — cheap
+// enough to redo on every edit, same reasoning as the original lex-only design.
 procedure TPasTreeSynHighlighter.EnsureFresh;
 var
   LText: string;
+  LPreprocessed: TPasPreprocessed;
+  LTree: TPasTree;
+  LParseDiags: TArray<TPasParseDiag>;
+  LPreprocessedOk: Boolean;
 begin
   if not Assigned(FSourceLines) then
     Exit;
@@ -257,8 +298,91 @@ begin
   if LText = FCachedSource then
     Exit;
   FCachedSource := LText;
-  FTokenStream := TPasLexer.Tokenize(LText);
+  FHaveAst := False;
+  LPreprocessedOk := True;
+
+  try
+    LPreprocessed := FPreprocessor.ProcessText('buffer.pas', LText);
+    FTokenStream := LPreprocessed.Files[0]; // same TPasTokenStream shape as before
+  except
+    // Belt-and-suspenders: fall back to a bare lex so line display keeps
+    // working even if the preprocessor somehow chokes on some intermediate
+    // live-typing buffer state (not observed in practice — see header comment).
+    LPreprocessedOk := False;
+    FTokenStream := TPasLexer.Tokenize(LText);
+  end;
   FTokenCount := Length(FTokenStream.Tokens);
+  // SetLength alone does NOT zero the retained portion when FTokenCount does
+  // not exceed the array's previous length — stale True marks from an
+  // earlier parse (this instance's own previous buffer content, e.g. before
+  // the keystroke that triggered this EnsureFresh) would otherwise survive
+  // at whatever raw indices they occupied, coloring unrelated tokens on the
+  // NEW content as keywords. Explicit clear on every pass, not just on growth.
+  SetLength(FWeakKeywordToken, FTokenCount);
+  if FTokenCount > 0 then
+    FillChar(FWeakKeywordToken[0], FTokenCount * SizeOf(Boolean), 0);
+
+  if LPreprocessedOk then
+    try
+      LTree := TPasParser.ParseFile(LPreprocessed, LParseDiags);
+      BuildWeakKeywordSpans(LTree, LPreprocessed);
+      FHaveAst := True;
+    except
+      FHaveAst := False; // IsWeakKeyword falls back to the flat word list
+    end;
+end;
+
+// Walks the parsed tree once, marking every raw token index that is a "bare"
+// weak-keyword word — i.e. within an nkVisibility/nkDirective/nkPropSpec
+// node's own span but NOT within one of its adopted child spans (a child is
+// always an argument/getter/setter expression, e.g. the `GetFoo` in
+// `read GetFoo`, which must stay Identifier-colored, not Keyword-colored).
+procedure TPasTreeSynHighlighter.BuildWeakKeywordSpans(const ATree: TPasTree;
+  const APreprocessed: TPasPreprocessed);
+
+  // Marks every raw token covered by visible-stream range [AFirst..ALast].
+  procedure MarkVisibleRange(AFirst, ALast: Integer);
+  var
+    LVis, LRaw: Integer;
+  begin
+    for LVis := AFirst to ALast do
+    begin
+      if (LVis < 0) or (LVis > High(APreprocessed.Visible)) then
+        Continue;
+      if APreprocessed.Visible[LVis].FileId <> 0 then
+        Continue; // only the main buffer — no $I includes in a live editor buffer
+      LRaw := APreprocessed.Visible[LVis].TokenIndex;
+      if (LRaw >= 0) and (LRaw < Length(FWeakKeywordToken)) then
+        FWeakKeywordToken[LRaw] := True;
+    end;
+  end;
+
+  // For one directive-ish node: its own span minus every direct child's span.
+  procedure MarkBareWords(ANode: Integer);
+  var
+    LChild, LCursor: Integer;
+  begin
+    LCursor := ATree.Nodes[ANode].FirstToken;
+    LChild := ATree.Nodes[ANode].FirstChild;
+    while LChild <> NIL_NODE do
+    begin
+      if ATree.Nodes[LChild].FirstToken > LCursor then
+        MarkVisibleRange(LCursor, ATree.Nodes[LChild].FirstToken - 1);
+      LCursor := ATree.Nodes[LChild].LastToken + 1;
+      LChild := ATree.Nodes[LChild].NextSibling;
+    end;
+    if LCursor <= ATree.Nodes[ANode].LastToken then
+      MarkVisibleRange(LCursor, ATree.Nodes[ANode].LastToken);
+  end;
+
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to High(ATree.Nodes) do
+    case ATree.Nodes[LIdx].Kind of
+      nkVisibility, nkDirective, nkPropSpec:
+        MarkBareWords(LIdx);
+    end;
 end;
 
 function TPasTreeSynHighlighter.LineStartOffset(ALineNumber: Integer): Integer;
@@ -301,11 +425,20 @@ begin
   Result := LLo;
 end;
 
-// True when the CURRENT token (an identifier, per FCurKind) case-insensitively
-// matches a weak keyword. Cosmetic overlay only — see the unit header comment.
+// True when the CURRENT token (an identifier, per FCurKind) is a weak
+// keyword. AST-precise when available (FHaveAst — see BuildWeakKeywordSpans):
+// this correctly excludes `var dynamic: Integer;`, since the parser never
+// builds an nkDirective there. Falls back to the flat, position-blind
+// word-list check only if this pass's parse failed. Cosmetic overlay only
+// either way — see the unit header comment.
 function TPasTreeSynHighlighter.IsWeakKeyword: Boolean;
 begin
-  Result := FWeakKeywords.ContainsKey(LowerCase(GetToken));
+  if FHaveAst then
+    Result := (FCurTokenAbsIdx >= 0) and
+      (FCurTokenAbsIdx < Length(FWeakKeywordToken)) and
+      FWeakKeywordToken[FCurTokenAbsIdx]
+  else
+    Result := FWeakKeywords.ContainsKey(LowerCase(GetToken));
 end;
 
 procedure TPasTreeSynHighlighter.DoSetLine(const Value: string;
@@ -409,6 +542,7 @@ begin
   Run := LTokEndAbs - FLineStartAbs;
   FCurKind := LTok.Kind;
   FCurUnterminated := tfUnterminated in LTok.Flags;
+  FCurTokenAbsIdx := FCurTokenIdx; // raw index of LTok, before the Inc below
 
   if LTok.EndPos <= LLineEndAbs then
     Inc(FCurTokenIdx)

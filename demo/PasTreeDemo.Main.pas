@@ -18,7 +18,7 @@ uses
   System.JSON,
   Winapi.Windows, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls,
   Vcl.ExtCtrls, Vcl.Dialogs, Vcl.Graphics,
-  SynEdit, SynEditHighlighter, SynHighlighterJSON,
+  SynEdit, SynEditHighlighter, SynHighlighterJSON, SynHighlighterPas,
   VirtualTrees, VirtualTrees.Types,
   PasTree.Platforms, PasTree.Preprocessor, PasTree.Ast, PasTree.Ast.Json,
   PasTree.Parser, PasTree.Project, PasTree.DProj,
@@ -40,6 +40,7 @@ type
     btnOpen: TButton;
     btnParse: TButton;
     cbPlatform: TComboBox;
+    cbHighlighter: TComboBox;
     splLeft: TSplitter;
     vstFiles: TVirtualStringTree;
     pgc: TPageControl;
@@ -58,6 +59,7 @@ type
     procedure vstFilesGetText(Sender: TBaseVirtualTree; Node: PVirtualNode;
       Column: TColumnIndex; TextType: TVSTTextType; var CellText: string);
     procedure vstFilesChange(Sender: TBaseVirtualTree; Node: PVirtualNode);
+    procedure cbHighlighterChange(Sender: TObject);
   private
     FFileList: TStringList;  // full paths shown in the tree
     FOpenFiles: TStringList; // path -> TTabSheet (Objects)
@@ -65,7 +67,9 @@ type
     FProjectDir: string;
     FMainSource: string;
     FPlatform: TPasPlatform;
+    FSynPasHL: TSynPasSyn;   // shared SynEdit built-in highlighter (A/B compare)
     procedure SetupControls;
+    procedure ApplyPasTreePalette(AHL: TSynPasSyn);
     procedure EnsureSampleProject;
     function ExeDir: string;
     procedure OpenProject(const AProjectFile: string);
@@ -87,6 +91,7 @@ type
   // tab without casts.
   TSourceTab = class(TTabSheet)
     Editor: TSynEdit;
+    PasTreeHL: TPasTreeSynHighlighter; // kept even while SynEdit's is active
   end;
 
 const
@@ -174,6 +179,45 @@ begin
     cbPlatform.Items.Add('Win64');
   end;
   cbPlatform.ItemIndex := 0;
+
+  // Shared across every tab when "SynEdit" is selected — TSynPasSyn is a
+  // stateless-per-call highlighter (unlike TPasTreeSynHighlighter, which
+  // caches one buffer's tokenization), so one instance is safe to reuse.
+  FSynPasHL := TSynPasSyn.Create(Self);
+  ApplyPasTreePalette(FSynPasHL);
+  if cbHighlighter.Items.Count = 0 then
+  begin
+    cbHighlighter.Items.Add('SynEdit');
+    cbHighlighter.Items.Add('PasTree');
+  end;
+  cbHighlighter.ItemIndex := 1; // PasTree by default
+end;
+
+// Re-colors SynEdit's built-in highlighter with PasTreeDemo.Highlighter's own
+// palette (PAS_* constants), so switching the combo compares RECOGNITION
+// (which words/tokens get flagged) instead of two unrelated color schemes.
+// TSynPasSyn distinguishes a few things ours doesn't (Float/Hex split from
+// Number, Char split from String, a separate Type attribute for built-in
+// type names) — those are folded into the nearest matching PasTree color so
+// nothing stands out that our highlighter wouldn't also color that way.
+procedure TfrmMain.ApplyPasTreePalette(AHL: TSynPasSyn);
+begin
+  AHL.CommentAttri.Foreground := PAS_COMMENT_COLOR;
+  AHL.CommentAttri.Style := PAS_COMMENT_STYLE;
+  AHL.DirectiveAttri.Foreground := PAS_DIRECTIVE_COLOR;
+  AHL.DirectiveAttri.Style := PAS_DIRECTIVE_STYLE;
+  AHL.KeyAttri.Foreground := PAS_KEYWORD_COLOR;
+  AHL.KeyAttri.Style := PAS_KEYWORD_STYLE;
+  AHL.StringAttri.Foreground := PAS_STRING_COLOR;
+  AHL.CharAttri.Foreground := PAS_STRING_COLOR;
+  AHL.NumberAttri.Foreground := PAS_NUMBER_COLOR;
+  AHL.FloatAttri.Foreground := PAS_NUMBER_COLOR;
+  AHL.HexAttri.Foreground := PAS_NUMBER_COLOR;
+  AHL.AsmAttri.Background := PAS_ASM_BACKGROUND;
+  // Ours never singles out built-in type names — match IdentifierAttri so
+  // TypeAttri doesn't introduce a distinction our highlighter doesn't make.
+  AHL.TypeAttri.Foreground := AHL.IdentifierAttri.Foreground;
+  AHL.TypeAttri.Style := AHL.IdentifierAttri.Style;
 end;
 
 procedure TfrmMain.EnsureSampleProject;
@@ -324,10 +368,14 @@ begin
 
   // Our own PasTree-lexer-driven highlighter — one instance per tab (it
   // caches the tokenization of its own attached buffer, so instances can't
-  // be shared across editors).
+  // be shared across editors). Kept alive even when SynEdit's highlighter is
+  // the active one, so cbHighlighterChange can switch back without recreating it.
   LHL := TPasTreeSynHighlighter.Create(Result);
   LHL.SourceLines := Result.Lines;
-  Result.Highlighter := LHL;
+  if cbHighlighter.ItemIndex = 0 then
+    Result.Highlighter := FSynPasHL
+  else
+    Result.Highlighter := LHL;
   try
     Result.Lines.LoadFromFile(APath);
   except
@@ -335,6 +383,7 @@ begin
       Result.Text := '{ could not load: ' + E.Message + ' }';
   end;
   LTab.Editor := Result;
+  LTab.PasTreeHL := LHL;
   FOpenFiles.AddObject(APath, LTab);
   pgc.ActivePage := LTab;
 end;
@@ -473,6 +522,23 @@ begin
   LData := PPasNodeData(Sender.GetNodeData(Node));
   if (LData <> nil) and (LData.Index >= 0) and (LData.Index < FFileList.Count) then
     OpenFileTab(FFileList[LData.Index]);
+end;
+
+// Swaps the highlighter on every currently-open source tab so an already-open
+// file can be A/B compared without reopening it.
+procedure TfrmMain.cbHighlighterChange(Sender: TObject);
+var
+  LIdx: Integer;
+  LTab: TSourceTab;
+begin
+  for LIdx := 0 to FOpenFiles.Count - 1 do
+  begin
+    LTab := TSourceTab(FOpenFiles.Objects[LIdx]);
+    if cbHighlighter.ItemIndex = 0 then
+      LTab.Editor.Highlighter := FSynPasHL
+    else
+      LTab.Editor.Highlighter := LTab.PasTreeHL;
+  end;
 end;
 
 initialization

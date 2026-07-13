@@ -69,6 +69,20 @@ object frmMain: TfrmMain
         'Win32'
         'Win64')
     end
+    object cbHighlighter: TComboBox
+      Left = 412
+      Top = 9
+      Width = 120
+      Height = 23
+      Style = csDropDownList
+      ItemIndex = 1
+      TabOrder = 3
+      Text = 'PasTree'
+      OnChange = cbHighlighterChange
+      Items.Strings = (
+        'SynEdit'
+        'PasTree')
+    end
   end
   object vstFiles: TVirtualStringTree
     Left = 0
