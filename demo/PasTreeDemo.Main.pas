@@ -15,7 +15,7 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.IOUtils, System.Generics.Collections,
-  System.JSON, System.Diagnostics,
+  System.JSON, System.Diagnostics, System.Win.Registry,
   Winapi.Windows, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls,
   Vcl.ExtCtrls, Vcl.Dialogs, Vcl.Graphics,
   SynEdit, SynEditHighlighter, SynHighlighterJSON, SynHighlighterPas,
@@ -39,6 +39,7 @@ type
     pnlTop: TPanel;
     btnOpen: TButton;
     btnParse: TButton;
+    btnParseRtl: TButton;
     cbPlatform: TComboBox;
     cbHighlighter: TComboBox;
     cbThreading: TComboBox;
@@ -56,6 +57,7 @@ type
     procedure FormDestroy(Sender: TObject);
     procedure btnOpenClick(Sender: TObject);
     procedure btnParseClick(Sender: TObject);
+    procedure btnParseRtlClick(Sender: TObject);
     procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     procedure vstFilesGetText(Sender: TBaseVirtualTree; Node: PVirtualNode;
       Column: TColumnIndex; TextType: TVSTTextType; var CellText: string);
@@ -500,6 +502,76 @@ end;
 
 procedure TfrmMain.btnParseClick(Sender: TObject);
 begin
+  RunParse;
+end;
+
+// Opens and analyzes the installed Studio's Win RTL package project
+// (source\rtl\BuildWinRTL.dproj — its `contains` list is the full Windows
+// RTL, ~310 units) through the regular project flow.
+procedure TfrmMain.btnParseRtlClick(Sender: TObject);
+
+  // %BDS% is set under a RAD Studio command prompt; a normally-launched demo
+  // falls back to the registry (current user first, then machine-wide),
+  // taking the highest installed version.
+  function StudioRoot: string;
+  const
+    ROOTS: array [0 .. 1] of HKEY = (HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE);
+  var
+    LReg: TRegistry;
+    LKeys: TStringList;
+    LIdx: Integer;
+    LBest: Double;
+    LVer: Double;
+    LDir: string;
+  begin
+    Result := GetEnvironmentVariable('BDS');
+    if (Result <> '') and TDirectory.Exists(Result) then
+      Exit;
+    Result := '';
+    LBest := 0;
+    LKeys := TStringList.Create;
+    try
+      for LIdx := Low(ROOTS) to High(ROOTS) do
+      begin
+        LReg := TRegistry.Create(KEY_READ);
+        try
+          LReg.RootKey := ROOTS[LIdx];
+          if not LReg.OpenKeyReadOnly('SOFTWARE\Embarcadero\BDS') then
+            Continue;
+          LKeys.Clear;
+          LReg.GetKeyNames(LKeys);
+          for var LKey in LKeys do
+            if TryStrToFloat(LKey, LVer, TFormatSettings.Invariant) and
+               (LVer > LBest) and
+               LReg.OpenKeyReadOnly('\SOFTWARE\Embarcadero\BDS\' + LKey) then
+            begin
+              LDir := LReg.ReadString('RootDir');
+              if (LDir <> '') and TDirectory.Exists(LDir) then
+              begin
+                LBest := LVer;
+                Result := LDir;
+              end;
+            end;
+        finally
+          LReg.Free;
+        end;
+      end;
+    finally
+      LKeys.Free;
+    end;
+  end;
+
+var
+  LDProj: string;
+begin
+  LDProj := TPath.Combine(StudioRoot, 'source\rtl\BuildWinRTL.dproj');
+  if not TFile.Exists(LDProj) then
+  begin
+    Log('RTL project not found: ' + LDProj);
+    Log('(is RAD Studio installed with sources?)');
+    Exit;
+  end;
+  OpenProject(LDProj);
   RunParse;
 end;
 

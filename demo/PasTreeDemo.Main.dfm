@@ -96,6 +96,15 @@ object frmMain: TfrmMain
         'SingleThread'
         'MultiThread')
     end
+    object btnParseRtl: TButton
+      Left = 662
+      Top = 7
+      Width = 100
+      Height = 27
+      Caption = 'Parse RTL'
+      TabOrder = 5
+      OnClick = btnParseRtlClick
+    end
   end
   object vstFiles: TVirtualStringTree
     Left = 0
