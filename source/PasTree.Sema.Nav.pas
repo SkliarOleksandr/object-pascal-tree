@@ -74,6 +74,8 @@ type
       out ALeaf, ASpanFirstVis, ASpanLastVis: Integer): Boolean;
     function ResolveUnitRefTarget(AMid, ASym: Integer;
       out ATarget: TPasNavTarget): Boolean;
+    function TargetForUnitId(AUid: Integer; const AName: string;
+      out ATarget: TPasNavTarget): Boolean;
   public
     constructor Create(AProject: TPasSemaProject);
     destructor Destroy; override;
@@ -205,6 +207,7 @@ var
   LCache: TNavCache;
   LTS: TPasTokenStream;   // record copy — the arrays inside are shared refs
   LLeaf, LSpanFirstVis, LSpanLastVis, LRawFrom, LRawTo: Integer;
+  LQUid, LMatchNode, LFirst: Integer;
 begin
   Result := False;
   if AMid < 0 then
@@ -257,6 +260,33 @@ begin
     if (LSpanLastVis >= 0) and (LSpanLastVis <= High(LM.Tree.Source.Visible))
        and (LM.Tree.Source.Visible[LSpanLastVis].FileId = 0) then
       LRawTo := LM.Tree.Source.Visible[LSpanLastVis].TokenIndex;
+  end
+  else
+  begin
+    // Not a `uses` name — but LNode may still be a namespace-qualifier
+    // segment of a dotted EXPRESSION (`System`/`SysUtils` in `System.
+    // SysUtils.TBytes`): widen the span to the WHOLE qualifier (never the
+    // trailing member), same "any segment links the same way" UX as a
+    // `uses` clause's dotted name. Node is NOT redirected here (unlike the
+    // `uses` case) — ResolveDecl's qualifier check climbs from wherever it's
+    // given, so the originally-clicked node already works.
+    LQUid := FProj.QualifierUnitAt(AMid, LNode, LMatchNode);
+    if LQUid >= 0 then
+    begin
+      LFirst := LMatchNode;
+      while LM.Tree.Nodes[LFirst].FirstChild <> NIL_NODE do
+        LFirst := LM.Tree.Nodes[LFirst].FirstChild;
+      LSpanFirstVis := LM.Tree.Nodes[LFirst].FirstToken;
+      LSpanLastVis := LM.Tree.Nodes[LMatchNode].LastToken;
+      if (LSpanFirstVis >= 0) and
+         (LSpanFirstVis <= High(LM.Tree.Source.Visible)) and
+         (LM.Tree.Source.Visible[LSpanFirstVis].FileId = 0) then
+        LRawFrom := LM.Tree.Source.Visible[LSpanFirstVis].TokenIndex;
+      if (LSpanLastVis >= 0) and
+         (LSpanLastVis <= High(LM.Tree.Source.Visible)) and
+         (LM.Tree.Source.Visible[LSpanLastVis].FileId = 0) then
+        LRawTo := LM.Tree.Source.Visible[LSpanLastVis].TokenIndex;
+    end;
   end;
 
   AIdent.RawToken := LRawFrom;
@@ -309,13 +339,37 @@ end;
 // "open the file" still works even in that edge case. False when the use
 // never resolved to a real file (ASym.Flags has sfExternalUnresolved and no
 // UsesList entry names a UnitId — nothing to open).
+// A target that just opens AUid's own file, at its own declaration (node 0's
+// FirstChild, per CollectRoot's known shape) — falls back to (1,1) of that
+// file if the name node is somehow unavailable, so "open the file" still
+// works either way. Shared by ResolveUnitRefTarget (a `uses` clause name)
+// and ResolveDecl's qualifier-segment case (System/SysUtils clicked directly
+// in an expression like System.SysUtils.TBytes).
+function TPasNavigator.TargetForUnitId(AUid: Integer; const AName: string;
+  out ATarget: TPasNavTarget): Boolean;
+var
+  LNameNode: Integer;
+begin
+  Result := False;
+  if AUid < 0 then
+    Exit;
+  LNameNode := FProj.Model(AUid).Tree.Nodes[0].FirstChild;
+  if TargetFromNode(AUid, LNameNode, AName, ATarget) then
+    Exit(True);
+  ATarget.UnitId := AUid;
+  ATarget.FilePath := FProj.ModelFile(AUid);
+  ATarget.Line := 1;
+  ATarget.Col := 1;
+  ATarget.Name := AName;
+  Result := True;
+end;
+
 function TPasNavigator.ResolveUnitRefTarget(AMid, ASym: Integer;
   out ATarget: TPasNavTarget): Boolean;
 var
   LM: TPasSemaModel;
-  LIdx, LUid, LNameNode: Integer;
+  LIdx, LUid: Integer;
 begin
-  Result := False;
   LM := FProj.Model(AMid);
   LUid := -1;
   for LIdx := 0 to High(LM.UsesList) do
@@ -324,18 +378,7 @@ begin
       LUid := LM.UsesList[LIdx].UnitId;
       Break;
     end;
-  if LUid < 0 then
-    Exit;   // unresolved use (file not found on any search path)
-
-  LNameNode := FProj.Model(LUid).Tree.Nodes[0].FirstChild;
-  if TargetFromNode(LUid, LNameNode, LM.Symbols[ASym].Name, ATarget) then
-    Exit(True);
-  ATarget.UnitId := LUid;
-  ATarget.FilePath := FProj.ModelFile(LUid);
-  ATarget.Line := 1;
-  ATarget.Col := 1;
-  ATarget.Name := LM.Symbols[ASym].Name;
-  Result := True;
+  Result := TargetForUnitId(LUid, LM.Symbols[ASym].Name, ATarget);
 end;
 
 // TPasSemaProject.ResolveRealDecl handles this: a same-named symbol WITH a
@@ -374,7 +417,7 @@ function TPasNavigator.ResolveDecl(AMid, ANode: Integer;
 var
   LM: TPasSemaModel;
   LExt: TPasExtRef;
-  LTMid, LSym, LFbMid, LFbSym: Integer;
+  LTMid, LSym, LFbMid, LFbSym, LQUid, LMatchNode: Integer;
 begin
   Result := False;
   if (AMid < 0) or (ANode = NIL_NODE) then
@@ -385,7 +428,18 @@ begin
   if LSym = NIL_SYM then
   begin
     if not LM.ExtRefMap.TryGetValue(ANode, LExt) then
+    begin
+      // Not a value/type reference at all — ANode may still be a NAMESPACE
+      // QUALIFIER segment of a bigger dotted expression (`System`/`SysUtils`
+      // in `System.SysUtils.TBytes`, `System` alone in `System.sLineBreak`):
+      // real dcc lets you click/hover the qualifier itself, same as a `uses`
+      // clause name, distinct from the MEMBER (TBytes/sLineBreak), which
+      // resolves via the ordinary ExtRefMap path above/below instead.
+      LQUid := FProj.QualifierUnitAt(AMid, ANode, LMatchNode);
+      if LQUid >= 0 then
+        Exit(TargetForUnitId(LQUid, LM.Tree.NodeText(ANode), ATarget));
       Exit;
+    end;
     LTMid := LExt.UnitId;
     LSym := LExt.Sym;
   end;

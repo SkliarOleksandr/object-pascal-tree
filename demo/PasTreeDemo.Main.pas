@@ -153,8 +153,8 @@ const
   end;
 
   begin
-    S := sLineBreak;
-    Arr := [];
+    S := System.sLineBreak;
+    Arr := [1, 2, 3];
     MyInt := 42;
     Bytes := CreateBytes(CBYTESLEN);
     Writeln('Hello, world!');

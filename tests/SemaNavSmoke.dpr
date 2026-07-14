@@ -64,23 +64,30 @@ const
   // TObject symbol has no MemberScope, so FindMemberX must redirect to
   // THIS real class body to resolve `.Free` at all (see FindMemberX's
   // ResolveRealDecl call for the "builtin, nowhere to go" case).
+  // SYS_MARK exercises a QUALIFIED EXPRESSION into the implicit unit
+  // (`System.SYS_MARK`, not a `uses` item) — distinct from TObject/TArray
+  // above, whose OWN NAME already resolves locally to a compiler-seeded
+  // builtin; SYS_MARK isn't seeded at all, so it's a genuinely unresolved
+  // local reference until CrossResolve's UnitNameOf fallback kicks in.
   UNIT_SYS =
     'unit System;'#10 +                        // 1
     'interface'#10 +                           // 2
-    'type'#10 +                                // 3
-    '  TArray<T> = array of T;'#10 +           // 4  TArray col 3
-    '  TObject = class'#10 +                   // 5  TObject col 3
-    '    constructor Create;'#10 +              // 6
-    '    procedure Free;'#10 +                  // 7  Free col 15
-    '  end;'#10 +                              // 8
-    'implementation'#10 +                      // 9
-    'constructor TObject.Create;'#10 +          // 10
-    'begin'#10 +                               // 11
-    'end;'#10 +                                // 12
-    'procedure TObject.Free;'#10 +              // 13
-    'begin'#10 +                               // 14
-    'end;'#10 +                                // 15
-    'end.'#10;                                 // 16
+    'const'#10 +                               // 3
+    '  SYS_MARK = 777;'#10 +                   // 4  SYS_MARK col 3
+    'type'#10 +                                // 5
+    '  TArray<T> = array of T;'#10 +           // 6  TArray col 3
+    '  TObject = class'#10 +                   // 7  TObject col 3
+    '    constructor Create;'#10 +              // 8
+    '    procedure Free;'#10 +                  // 9  Free col 15
+    '  end;'#10 +                              // 10
+    'implementation'#10 +                      // 11
+    'constructor TObject.Create;'#10 +          // 12
+    'begin'#10 +                               // 13
+    'end;'#10 +                                // 14
+    'procedure TObject.Free;'#10 +              // 15
+    'begin'#10 +                               // 16
+    'end;'#10 +                                // 17
+    'end.'#10;                                 // 18
 
   // A DOTTED (namespaced) unit name, to exercise go-to-declaration on a
   // multi-segment `uses` reference (any segment clicked -> the SAME unit).
@@ -106,12 +113,15 @@ const
     'begin'#10 +                               // 12
     '  L := GT.Value;'#10 +                    // 13  GT col 8, Value col 11
     '  O.Free;'#10 +                           // 14  Free col 5
-    'end;'#10 +                                // 15
-    'function GetLen: Integer;'#10 +           // 16  GetLen col 10
-    'begin'#10 +                               // 17
-    '  Result := 0;'#10 +                      // 18  Result col 3
-    'end;'#10 +                                // 19
-    'end.'#10;                                 // 20
+    '  L := System.SYS_MARK;'#10 +             // 15  System col 8, SYS_MARK col 15
+    '  L := Namespace.NavD.NSD_MARK;'#10 +     // 16  Namespace col 8, NavD col 18,
+                                                //     NSD_MARK col 23
+    'end;'#10 +                                // 17
+    'function GetLen: Integer;'#10 +           // 18  GetLen col 10
+    'begin'#10 +                               // 19
+    '  Result := 0;'#10 +                      // 20  Result col 3
+    'end;'#10 +                                // 21
+    'end.'#10;                                 // 22
 
 var
   GProj: TPasSemaProject;
@@ -128,6 +138,16 @@ begin
     Inc(GFailed);
     Writeln('FAIL: ', AName);
   end;
+end;
+
+function DiagCount(AModel: TPasSemaModel; const ACode: string): Integer;
+var
+  LIdx: Integer;
+begin
+  Result := 0;
+  for LIdx := 0 to High(AModel.Diags) do
+    if AModel.Diags[LIdx].Code = ACode then
+      Inc(Result);
 end;
 
 // IdentAt + ResolveDecl in one step.
@@ -190,15 +210,49 @@ begin
       // Builtin name a used unit actually declares: TBytes -> NavC.
       CheckNav('builtin-in-uses', 9, 6, 'TBytes', 'NavC.pas', 4, 3);
       // Implicit System unit, no `uses System` anywhere: TObject/TArray<T>.
-      CheckNav('implicit System: TObject', 10, 6, 'TObject', 'System.pas', 5, 3);
-      CheckNav('implicit System: TArray', 11, 6, 'TArray', 'System.pas', 4, 3);
+      CheckNav('implicit System: TObject', 10, 6, 'TObject', 'System.pas', 7, 3);
+      CheckNav('implicit System: TArray', 11, 6, 'TArray', 'System.pas', 6, 3);
       // MEMBER access through a builtin: O.Free — the synthetic TObject
       // symbol has no MemberScope; FindMemberX must redirect to the real
       // TObject class body (System.pas) to resolve `.Free` at all.
       CheckNav('member through builtin: O.Free', 14, 5, 'Free', 'System.pas',
-        7, 15);
+        9, 15);
+      // QUALIFIED EXPRESSION into the implicit unit (`System.SYS_MARK`, not
+      // a `uses` item, and SYS_MARK isn't a seeded builtin at all — this is
+      // CrossResolve's UnitNameOf fallback, not ResolveDecl's builtin-decl
+      // redirect). The qualifier `System` itself must NOT get a false E2003.
+      CheckNav('qualified expr: System.SYS_MARK', 15, 15, 'SYS_MARK',
+        'System.pas', 4, 3);
+      // TWO-SEGMENT qualifier naming a used unit (mirrors System.SysUtils.
+      // TBytes exactly): `Namespace.NavD` is never itself a skUnitRef symbol
+      // (it's a sub-expression of a bigger nkMember), only NSD_MARK is the
+      // real member.
+      CheckNav('qualified expr: Namespace.NavD.NSD_MARK (leaf)', 16, 23,
+        'NSD_MARK', 'Namespace.NavD.pas', 3, 7);
+      // Clicking the QUALIFIER ITSELF (not the member) opens THAT unit, same
+      // as a `uses` clause name — `System` in `System.SYS_MARK` is the whole
+      // qualifier (single segment); `Namespace`/`NavD` in `Namespace.NavD.
+      // NSD_MARK` are BOTH part of the SAME 2-segment qualifier and must
+      // resolve to the SAME target regardless of which one was clicked.
+      CheckNav('qualifier click: System', 15, 8, 'System', 'System.pas', 1, 6);
+      CheckNav('qualifier click: Namespace', 16, 8, 'Namespace',
+        'Namespace.NavD.pas', 1, 6);
+      CheckNav('qualifier click: NavD (same 2-seg qualifier)', 16, 18, 'NavD',
+        'Namespace.NavD.pas', 1, 6);
+      // Hover span: `System` alone is a single-token qualifier; `Namespace`/
+      // `NavD` share ONE 3-raw-token span (Namespace . NavD), excluding the
+      // trailing .NSD_MARK member.
+      Ok('qualifier span: System is single-token',
+        GNav.IdentAt(GMidB, 15, 8, {out} LIdent) and
+        (LIdent.RawToken = LIdent.RawTokenTo));
+      Ok('qualifier span: Namespace spans Namespace.NavD only',
+        GNav.IdentAt(GMidB, 16, 8, {out} LIdent) and
+        (LIdent.RawTokenTo - LIdent.RawToken = 2));
+      Ok('qualifier span: NavD spans the SAME Namespace.NavD',
+        GNav.IdentAt(GMidB, 16, 18, {out} LIdent) and
+        (LIdent.RawTokenTo - LIdent.RawToken = 2));
       // Implicit Result -> its enclosing routine's declaration (GetLen).
-      CheckNav('result -> routine', 18, 3, 'Result', 'NavB.pas', 16, 10);
+      CheckNav('result -> routine', 20, 3, 'Result', 'NavB.pas', 18, 10);
 
       // `uses` clause: a plain unqualified unit name opens THAT unit's own
       // file, at its own declaration -- not the (useless) uses-item position
@@ -233,6 +287,13 @@ begin
 
       // Non-identifier position (the ':' of ':=' on line 13 is at col 5).
       Ok('symbol pos -> no ident', not GNav.IdentAt(GMidB, 13, 5, {out} LIdent));
+
+      // The qualifier segments of BOTH qualified expressions above (System;
+      // Namespace, NavD) must NOT be false "undeclared identifier" E2003s —
+      // that was the actual bug report (nav didn't work at all for these,
+      // and the qualifier itself was flagged as undeclared).
+      Ok('qualified expr qualifiers: no false E2003',
+        DiagCount(GProj.Model(GMidB), 'E2003') = 0);
     finally
       GNav.Free;
     end;

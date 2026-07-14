@@ -82,6 +82,8 @@ type
       out AUnit, ASym: Integer): Boolean;
     function UsesUnitOf(AId, ASym: Integer): Integer;
     function LocalHead(AModel: TPasSemaModel; ANode: Integer): Integer;
+    function QualifiedText(AId, ANode: Integer): string;
+    function UnitNameOf(AId, ANode: Integer): Integer;
     procedure EmitE2003(AModel: TPasSemaModel; ANode: Integer);
     procedure EmitAt(AModel: TPasSemaModel; ANode: Integer;
       const ACode, AMsg: string);
@@ -133,6 +135,13 @@ type
       priority), then the implicit System unit as a last resort. }
     function ResolveRealDecl(AMid: Integer; const ANameLower: string;
       out ARMid, ARSym: Integer): Boolean;
+    { ANode's enclosing namespace-qualifier prefix (System/SysUtils in
+      System.SysUtils.TBytes), if any: the unit's model id (-1 if none), with
+      AMatchNode set to the node whose OWN span is exactly the qualifier text
+      (excludes the trailing member). PasTree.Sema.Nav uses this so hovering/
+      clicking the QUALIFIER itself opens that unit, not just its member. }
+    function QualifierUnitAt(AId, ANode: Integer;
+      out AMatchNode: Integer): Integer;
     function ModelCount: Integer;
     function Model(AId: Integer): TPasSemaModel;
     function ModelFile(AId: Integer): string;
@@ -516,6 +525,118 @@ begin
       Result := LocalHead(AModel, AModel.Tree.Nodes[ANode].FirstChild);
   else
     Result := NIL_SYM;
+  end;
+end;
+
+// The dotted spelling of a name designator (nkIdent or nested nkMember), as
+// WRITTEN — e.g. "System.SysUtils" for the nkMember(nkMember(System,
+// SysUtils)) shape. Used to recognize a qualified-expression prefix as a
+// UNIT name (System.sLineBreak, System.SysUtils.TBytes) — distinct from
+// PasTree.Sema.Resolver's private QualifiedNameText, which serves the same
+// purpose but isn't reachable from this unit.
+function TPasSemaProject.QualifiedText(AId, ANode: Integer): string;
+var
+  LM: TPasSemaModel;
+  LBase, LName: Integer;
+begin
+  LM := FModels[AId];
+  if LM.Tree.Nodes[ANode].Kind = nkMember then
+  begin
+    LBase := LM.Tree.Nodes[ANode].FirstChild;
+    LName := LM.Tree.Nodes[LBase].NextSibling;
+    Result := QualifiedText(AId, LBase) + '.' + LM.Tree.NodeText(LName);
+  end
+  else
+    Result := LM.Tree.NodeText(ANode);
+end;
+
+// The model id ANode's qualified text names as a UNIT — literally 'System'
+// (the implicit unit; see EnsureSystemUnit), or a match (full dotted name OR
+// bare leaf, either is legal in real dcc) against AId's OWN `uses` list.
+// -1 when the text doesn't name any unit reachable from AId. This is what
+// lets `System.sLineBreak` / `System.SysUtils.TBytes` resolve even though
+// neither `System` nor a `System.SysUtils`-as-a-whole ever gets a skUnitRef
+// symbol anywhere (System is implicit; SysUtils here is a sub-expression of
+// a bigger nkMember, never itself collected as a uses item).
+function TPasSemaProject.UnitNameOf(AId, ANode: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LText, LLeaf: string;
+  LIdx, LDot: Integer;
+begin
+  Result := -1;
+  LM := FModels[AId];
+  LText := QualifiedText(AId, ANode);
+  if SameText(LText, 'system') then
+    Exit(EnsureSystemUnit);
+  for LIdx := 0 to High(LM.UsesList) do
+  begin
+    if LM.UsesList[LIdx].UnitId < 0 then
+      Continue;
+    if SameText(LM.UsesList[LIdx].NameFull, LText) then
+      Exit(LM.UsesList[LIdx].UnitId);
+    LDot := LastDelimiter('.', LM.UsesList[LIdx].NameFull);
+    LLeaf := Copy(LM.UsesList[LIdx].NameFull, LDot + 1, MaxInt);
+    if SameText(LLeaf, LText) then
+      Exit(LM.UsesList[LIdx].UnitId);
+  end;
+end;
+
+// ANode (an identifier that failed ALL normal local resolution — callers
+// only reach this after that check) may be a namespace-qualifier segment of
+// SOME enclosing dotted expression that names a real unit — `System` in
+// `System.sLineBreak`; either of `System`/`SysUtils` in `System.SysUtils.
+// TBytes`. First climbs to the OUTERMOST node of the WHOLE dotted chain
+// ANode belongs to (regardless of whether ANode sits at a "base" or
+// "member name" position — a caller only ever reaches this for a node that
+// is NOT the chain's actual final/real member, since that one already
+// resolved via RefMap/ExtRefMap before this is ever called, so climbing
+// past ANode is always safe). The outermost node's OWN member-name child is
+// therefore the chain's true final segment (TBytes); the QUALIFIER is
+// exactly its base. From there, tries progressively SHORTER prefixes
+// (drop one trailing segment at a time) so the LONGEST match wins FIRST —
+// mirrors real dcc's greedy namespace resolution (spec 1.2.3): in `System.
+// SysUtils.TBytes`, `System.SysUtils` (a real used unit) must win over bare
+// `System` (the ALSO-valid implicit unit) rather than stopping at the
+// first, shortest candidate. Returns the matched unit's model id (-1 if
+// none), and AMatchNode = the node whose OWN span is exactly the matched
+// qualifier text — e.g. the inner nkMember representing "System.SysUtils"
+// — so a host can highlight/link the WHOLE qualifier when hovering ANY of
+// its segments, same as it would for a `uses` clause's dotted name.
+//
+// Two uses: CrossResolve's E2003 exemption for `System`/`SysUtils` above
+// (a namespace token is never an undeclared-identifier candidate — mirrors
+// the existing "member name of A.B" guard, generalized to the qualifier
+// side of the dot), and PasTree.Sema.Nav (clicking/hovering the qualifier
+// itself opens the referenced unit, same as a `uses` clause name).
+function TPasSemaProject.QualifierUnitAt(AId, ANode: Integer;
+  out AMatchNode: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LOutermost, LCandidate: Integer;
+begin
+  Result := -1;
+  LM := FModels[AId];
+  LOutermost := ANode;
+  while (LM.Tree.Nodes[LOutermost].Parent <> NIL_NODE) and
+        (LM.Tree.Nodes[LM.Tree.Nodes[LOutermost].Parent].Kind = nkMember) do
+    LOutermost := LM.Tree.Nodes[LOutermost].Parent;
+  if LM.Tree.Nodes[LOutermost].Kind <> nkMember then
+    Exit;   // ANode isn't part of any dotted chain at all
+
+  LCandidate := LM.Tree.Nodes[LOutermost].FirstChild;
+  while LCandidate <> NIL_NODE do
+  begin
+    Result := UnitNameOf(AId, LCandidate);
+    if Result >= 0 then
+    begin
+      AMatchNode := LCandidate;
+      Exit;
+    end;
+    if LM.Tree.Nodes[LCandidate].Kind = nkMember then
+      LCandidate := LM.Tree.Nodes[LCandidate].FirstChild
+    else
+      LCandidate := NIL_NODE;
   end;
 end;
 
@@ -1288,7 +1409,7 @@ end;
 procedure TPasSemaProject.CrossResolve(AId: Integer);
 var
   LModel: TPasSemaModel;
-  LNode, LBase, LName, LHead, LUid, LSym: Integer;
+  LNode, LBase, LName, LHead, LUid, LSym, LMatchNode: Integer;
   LExt: TPasExtRef;
   LNameLower: string;
 begin
@@ -1320,6 +1441,28 @@ begin
                 LModel.ExtRefMap.Add(LName, LExt);
               end;
             end;
+          end
+          else if LHead = NIL_SYM then
+          begin
+            // LBase resolved to NOTHING locally (never shadowed by a real
+            // declaration — a genuine local/global always wins and is
+            // handled above via LHead <> NIL_SYM): it may still be a
+            // namespace qualifier that was never collected as a `uses` item
+            // at all — the IMPLICIT System unit (`System.sLineBreak`), or a
+            // multi-segment prefix naming a used unit even though the
+            // PREFIX itself (e.g. `System.SysUtils` as a whole) is never
+            // itself a skUnitRef symbol (`System.SysUtils.TBytes`).
+            LUid := UnitNameOf(AId, LBase);
+            if LUid >= 0 then
+            begin
+              LSym := FModels[LUid].Resolve(FModels[LUid].InterfaceScope,
+                LowerCase(LModel.Tree.NodeText(LName)));
+              if LSym <> NIL_SYM then
+              begin
+                LExt.UnitId := LUid; LExt.Sym := LSym;
+                LModel.ExtRefMap.Add(LName, LExt);
+              end;
+            end;
           end;
         end;
 
@@ -1341,6 +1484,13 @@ begin
           LNameLower := LowerCase(LModel.Tree.NodeText(LNode));
           if (LNameLower = 'result') or (LNameLower = 'self') then
             Continue;   // implicit routine/method names
+          // A qualifier segment of a dotted expression that names a real
+          // unit (`System` in `System.sLineBreak`; `System`/`SysUtils` in
+          // `System.SysUtils.TBytes`) is a namespace token, not an
+          // undeclared-id candidate — same spirit as the member-name guard
+          // above, generalized to the OTHER side of the dot.
+          if QualifierUnitAt(AId, LNode, LMatchNode) >= 0 then
+            Continue;
           if FindInUses(AId, LNameLower, LUid, LSym) then
           begin
             LExt.UnitId := LUid; LExt.Sym := LSym;
