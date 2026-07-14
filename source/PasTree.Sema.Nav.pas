@@ -30,9 +30,17 @@ uses
 
 type
   // The identifier under a position, in a model's MAIN file (FileId 0).
+  // Usually a single token (RawToken = RawTokenTo). A `uses` clause's
+  // qualified unit name (e.g. `System.SysUtils`) is the one exception: Node
+  // is redirected to the name's LEAF segment (whichever segment the cursor
+  // was actually over — the whole name is one logical reference, so
+  // ResolveDecl must see the same node regardless of which word was
+  // clicked), and RawToken..RawTokenTo spans ALL segments + dots, so a host
+  // highlights/links the entire qualified name, not just one word of it.
   TPasNavIdent = record
-    Node: Integer;       // nkIdent CST node index
-    RawToken: Integer;   // raw token index in Files[0] (for highlighters)
+    Node: Integer;       // nkIdent CST node index (leaf, for a uses name)
+    RawToken: Integer;   // first raw token of the span, in Files[0]
+    RawTokenTo: Integer; // last raw token of the span (= RawToken normally)
     Line: Integer;       // 1-based line of the token start
     ColFrom: Integer;    // 1-based first column
     ColTo: Integer;      // 1-based column AFTER the token
@@ -62,6 +70,10 @@ type
     function TargetFromNode(AMid, ANode: Integer; const AName: string;
       out ATarget: TPasNavTarget): Boolean;
     function RoutineNameNodeOfSym(AMid, ASym: Integer): Integer;
+    function UsesQualifierInfo(AMid, ANode: Integer;
+      out ALeaf, ASpanFirstVis, ASpanLastVis: Integer): Boolean;
+    function ResolveUnitRefTarget(AMid, ASym: Integer;
+      out ATarget: TPasNavTarget): Boolean;
   public
     constructor Create(AProject: TPasSemaProject);
     destructor Destroy; override;
@@ -140,6 +152,51 @@ begin
   FCaches.Add(AMid, Result);
 end;
 
+// Walks up from ANode (an nkIdent) through any nested nkMember parents to the
+// outermost one; if THAT node's own parent is nkUsesItem, ANode is a segment
+// of a `uses` clause's (possibly dotted) unit name. Returns the name's LEAF
+// segment (the deepest last-child — e.g. SysUtils in System.SysUtils; ANode
+// itself for a plain undotted name) and the VISIBLE-index span covering every
+// segment and dot (leftmost descendant's FirstToken .. the outermost node's
+// own LastToken — deliberately excludes a trailing `in 'path'` sibling,
+// which is outside the name node entirely). False when ANode is not part of
+// a uses item's name at all (the ordinary case).
+function TPasNavigator.UsesQualifierInfo(AMid, ANode: Integer;
+  out ALeaf, ASpanFirstVis, ASpanLastVis: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LTop, LParent, LLeaf, LFirst: Integer;
+begin
+  Result := False;
+  LM := FProj.Model(AMid);
+  LTop := ANode;
+  LParent := LM.Tree.Nodes[LTop].Parent;
+  while (LParent <> NIL_NODE) and (LM.Tree.Nodes[LParent].Kind = nkMember) do
+  begin
+    LTop := LParent;
+    LParent := LM.Tree.Nodes[LTop].Parent;
+  end;
+  if (LParent = NIL_NODE) or (LM.Tree.Nodes[LParent].Kind <> nkUsesItem) then
+    Exit;
+
+  LLeaf := LTop;
+  while LM.Tree.Nodes[LLeaf].Kind = nkMember do
+  begin
+    LLeaf := LM.Tree.Nodes[LLeaf].FirstChild;
+    while LM.Tree.Nodes[LLeaf].NextSibling <> NIL_NODE do
+      LLeaf := LM.Tree.Nodes[LLeaf].NextSibling;
+  end;
+
+  LFirst := LTop;
+  while LM.Tree.Nodes[LFirst].FirstChild <> NIL_NODE do
+    LFirst := LM.Tree.Nodes[LFirst].FirstChild;
+
+  ALeaf := LLeaf;
+  ASpanFirstVis := LM.Tree.Nodes[LFirst].FirstToken;
+  ASpanLastVis := LM.Tree.Nodes[LTop].LastToken;
+  Result := True;
+end;
+
 function TPasNavigator.IdentAt(AMid, ALine, ACol: Integer;
   out AIdent: TPasNavIdent): Boolean;
 var
@@ -147,6 +204,7 @@ var
   LOffset, LLo, LHi, LMidTok, LRaw, LVis, LNode, LEndCol: Integer;
   LCache: TNavCache;
   LTS: TPasTokenStream;   // record copy — the arrays inside are shared refs
+  LLeaf, LSpanFirstVis, LSpanLastVis, LRawFrom, LRawTo: Integer;
 begin
   Result := False;
   if AMid < 0 then
@@ -183,11 +241,30 @@ begin
     Exit;   // token is $IFDEF'd out, or not an identifier NODE position
 
   AIdent.Node := LNode;
-  AIdent.RawToken := LRaw;
-  LTS.OffsetToLineCol(LTS.Tokens[LRaw].Start, AIdent.Line, AIdent.ColFrom);
-  LTS.OffsetToLineCol(LTS.Tokens[LRaw].EndPos, AIdent.Line, LEndCol);
-  AIdent.ColTo := AIdent.ColFrom + LTS.Tokens[LRaw].Len;
   AIdent.Name := LTS.TokenText(LRaw);
+  LRawFrom := LRaw;
+  LRawTo := LRaw;
+
+  // A `uses` name is ONE logical reference regardless of which segment was
+  // clicked: redirect Node to the leaf (so ResolveDecl always targets the
+  // same unit) and widen the span to cover every segment + dot.
+  if UsesQualifierInfo(AMid, LNode, LLeaf, LSpanFirstVis, LSpanLastVis) then
+  begin
+    AIdent.Node := LLeaf;
+    if (LSpanFirstVis >= 0) and (LSpanFirstVis <= High(LM.Tree.Source.Visible))
+       and (LM.Tree.Source.Visible[LSpanFirstVis].FileId = 0) then
+      LRawFrom := LM.Tree.Source.Visible[LSpanFirstVis].TokenIndex;
+    if (LSpanLastVis >= 0) and (LSpanLastVis <= High(LM.Tree.Source.Visible))
+       and (LM.Tree.Source.Visible[LSpanLastVis].FileId = 0) then
+      LRawTo := LM.Tree.Source.Visible[LSpanLastVis].TokenIndex;
+  end;
+
+  AIdent.RawToken := LRawFrom;
+  AIdent.RawTokenTo := LRawTo;
+  LTS.OffsetToLineCol(LTS.Tokens[LRawFrom].Start, AIdent.Line, AIdent.ColFrom);
+  LTS.OffsetToLineCol(LTS.Tokens[LRawTo].EndPos, AIdent.Line, LEndCol);
+  AIdent.ColTo := AIdent.ColFrom + (LTS.Tokens[LRawTo].EndPos -
+    LTS.Tokens[LRawFrom].Start);
   Result := True;
 end;
 
@@ -197,14 +274,21 @@ function TPasNavigator.TargetFromNode(AMid, ANode: Integer;
   const AName: string; out ATarget: TPasNavTarget): Boolean;
 var
   LM: TPasSemaModel;
-  LVisTok: Integer;
+  LFirst, LVisTok: Integer;
   LVis: TPasVisibleToken;
 begin
   Result := False;
   if ANode = NIL_NODE then
     Exit;
   LM := FProj.Model(AMid);
-  LVisTok := LM.Tree.Nodes[ANode].FirstToken;
+  // An nkMember's OWN FirstToken is the '.' (see PasTree.Ast), not its first
+  // visible character — descend to the leftmost descendant so a dotted
+  // declaration name (`unit Namespace.NavD;`) lands on "Namespace", not on
+  // the dot. A no-op for any childless node (nkIdent has none).
+  LFirst := ANode;
+  while LM.Tree.Nodes[LFirst].FirstChild <> NIL_NODE do
+    LFirst := LM.Tree.Nodes[LFirst].FirstChild;
+  LVisTok := LM.Tree.Nodes[LFirst].FirstToken;
   if (LVisTok < 0) or (LVisTok > High(LM.Tree.Source.Visible)) then
     Exit;
   LVis := LM.Tree.Source.Visible[LVisTok];
@@ -214,6 +298,43 @@ begin
   ATarget.UnitId := AMid;
   ATarget.FilePath := LM.Tree.Source.FileNames[LVis.FileId];
   ATarget.Name := AName;
+  Result := True;
+end;
+
+// A `uses` reference's target isn't its own DeclNode (that's just the
+// clause's own name, in THIS unit — jumping there would just land on
+// itself); it's the FILE that unit resolved to. Falls back to (1,1) of that
+// file if the target unit's own name node isn't available for some reason
+// (never observed — every analyzed model has one, see CollectRoot), so
+// "open the file" still works even in that edge case. False when the use
+// never resolved to a real file (ASym.Flags has sfExternalUnresolved and no
+// UsesList entry names a UnitId — nothing to open).
+function TPasNavigator.ResolveUnitRefTarget(AMid, ASym: Integer;
+  out ATarget: TPasNavTarget): Boolean;
+var
+  LM: TPasSemaModel;
+  LIdx, LUid, LNameNode: Integer;
+begin
+  Result := False;
+  LM := FProj.Model(AMid);
+  LUid := -1;
+  for LIdx := 0 to High(LM.UsesList) do
+    if LM.UsesList[LIdx].Sym = ASym then
+    begin
+      LUid := LM.UsesList[LIdx].UnitId;
+      Break;
+    end;
+  if LUid < 0 then
+    Exit;   // unresolved use (file not found on any search path)
+
+  LNameNode := FProj.Model(LUid).Tree.Nodes[0].FirstChild;
+  if TargetFromNode(LUid, LNameNode, LM.Symbols[ASym].Name, ATarget) then
+    Exit(True);
+  ATarget.UnitId := LUid;
+  ATarget.FilePath := FProj.ModelFile(LUid);
+  ATarget.Line := 1;
+  ATarget.Col := 1;
+  ATarget.Name := LM.Symbols[ASym].Name;
   Result := True;
 end;
 
@@ -268,6 +389,12 @@ begin
     LTMid := LExt.UnitId;
     LSym := LExt.Sym;
   end;
+
+  // A `uses` clause name (skUnitRef): its own DeclNode is just the clause's
+  // own spelling in THIS unit, not a useful jump target — go to the
+  // REFERENCED unit's file instead.
+  if FProj.Model(LTMid).Symbols[LSym].Kind = skUnitRef then
+    Exit(ResolveUnitRefTarget(LTMid, LSym, ATarget));
 
   // A resolved symbol with a real declaration node — the common case.
   if FProj.Model(LTMid).Symbols[LSym].DeclNode <> NIL_NODE then

@@ -82,10 +82,19 @@ const
     'end;'#10 +                                // 15
     'end.'#10;                                 // 16
 
+  // A DOTTED (namespaced) unit name, to exercise go-to-declaration on a
+  // multi-segment `uses` reference (any segment clicked -> the SAME unit).
+  UNIT_NS =
+    'unit Namespace.NavD;'#10 +                // 1  Namespace col 6
+    'interface'#10 +                           // 2
+    'const NSD_MARK = 99;'#10 +                // 3
+    'implementation'#10 +                      // 4
+    'end.'#10;                                 // 5
+
   UNIT_B =
     'unit NavB;'#10 +                          // 1
     'interface'#10 +                           // 2
-    'uses NavA, NavC;'#10 +                    // 3  (NOT System — implicit)
+    'uses NavA, NavC, Namespace.NavD;'#10 +    // 3  (NOT System — implicit)
     'var GT: TThing;'#10 +                     // 4  GT col 5, TThing col 9
     'implementation'#10 +                      // 5
     'procedure P;'#10 +                        // 6
@@ -158,6 +167,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavA.pas'), UNIT_A);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavC.pas'), UNIT_C);
   TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), UNIT_SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Namespace.NavD.pas'), UNIT_NS);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavB.pas'), UNIT_B);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
@@ -189,6 +199,32 @@ begin
         7, 15);
       // Implicit Result -> its enclosing routine's declaration (GetLen).
       CheckNav('result -> routine', 18, 3, 'Result', 'NavB.pas', 16, 10);
+
+      // `uses` clause: a plain unqualified unit name opens THAT unit's own
+      // file, at its own declaration -- not the (useless) uses-item position
+      // in NavB itself.
+      CheckNav('uses: NavA', 3, 6, 'NavA', 'NavA.pas', 1, 6);
+      // A DOTTED unit name: clicking EITHER segment must resolve to the SAME
+      // unit (Namespace.NavD.pas), at ITS OWN (dotted) declaration -- and
+      // TargetFromNode must land on "Namespace", not the '.' (nkMember's own
+      // FirstToken), which is the bug this fixture specifically catches.
+      CheckNav('uses: Namespace (qualifier segment)', 3, 18, 'Namespace',
+        'Namespace.NavD.pas', 1, 6);
+      CheckNav('uses: NavD (leaf segment)', 3, 28, 'NavD',
+        'Namespace.NavD.pas', 1, 6);
+
+      // Ctrl+hover highlight span: a plain name is just its own token: a
+      // DOTTED name spans every segment + dot (Namespace.NavD, 3 raw tokens),
+      // regardless of which segment was actually under the cursor.
+      Ok('uses: NavA span is single-token',
+        GNav.IdentAt(GMidB, 3, 6, {out} LIdent) and
+        (LIdent.RawToken = LIdent.RawTokenTo));
+      Ok('uses: Namespace click spans the WHOLE dotted name',
+        GNav.IdentAt(GMidB, 3, 18, {out} LIdent) and
+        (LIdent.RawTokenTo - LIdent.RawToken = 2));
+      Ok('uses: NavD click spans the SAME whole dotted name',
+        GNav.IdentAt(GMidB, 3, 28, {out} LIdent) and
+        (LIdent.RawTokenTo - LIdent.RawToken = 2));
 
       // Pure builtin: Integer has no source declaration anywhere in uses.
       Ok('builtin: IdentAt', GNav.IdentAt(GMidB, 8, 6, {out} LIdent));

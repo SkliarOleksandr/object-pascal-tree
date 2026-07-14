@@ -97,8 +97,8 @@ type
     procedure Log(const AText: string);
     // go-to-declaration (ctrl+hover link / ctrl+click)
     function ResolveAt(AEditor: TSynEdit; X, Y: Integer;
-      out ARawToken: Integer; out ATarget: TPasNavTarget): Boolean;
-    procedure SetLink(ATab: TObject; ARawToken: Integer);
+      out ARawFrom, ARawTo: Integer; out ATarget: TPasNavTarget): Boolean;
+    procedure SetLink(ATab: TObject; AFrom, ATo: Integer);
     procedure ClearLink;
     procedure EditorMouseMove(Sender: TObject; Shift: TShiftState;
       X, Y: Integer);
@@ -475,7 +475,7 @@ end;
 // The (raw token, declaration target) under pixel (X, Y) of an editor —
 // shared by hover-link display and the actual ctrl+click jump.
 function TfrmMain.ResolveAt(AEditor: TSynEdit; X, Y: Integer;
-  out ARawToken: Integer; out ATarget: TPasNavTarget): Boolean;
+  out ARawFrom, ARawTo: Integer; out ATarget: TPasNavTarget): Boolean;
 var
   LTab: TSourceTab;
   LMid: Integer;
@@ -494,20 +494,21 @@ begin
     Exit;
   if not FNav.ResolveDecl(LMid, LIdent.Node, {out} ATarget) then
     Exit;
-  ARawToken := LIdent.RawToken;
+  ARawFrom := LIdent.RawToken;
+  ARawTo := LIdent.RawTokenTo;
   Result := True;
 end;
 
-procedure TfrmMain.SetLink(ATab: TObject; ARawToken: Integer);
+procedure TfrmMain.SetLink(ATab: TObject; AFrom, ATo: Integer);
 var
   LTab: TSourceTab;
 begin
-  if (FLinkTab = ATab) and
-     (TSourceTab(ATab).PasTreeHL.LinkToken = ARawToken) then
+  if (FLinkTab = ATab) and TSourceTab(ATab).PasTreeHL.LinkRangeEquals(AFrom,
+    ATo) then
     Exit;
   ClearLink;
   LTab := TSourceTab(ATab);
-  LTab.PasTreeHL.LinkToken := ARawToken;
+  LTab.PasTreeHL.SetLinkRange(AFrom, ATo);
   LTab.Editor.Cursor := crHandPoint;
   LTab.Editor.Invalidate;
   FLinkTab := ATab;
@@ -520,7 +521,7 @@ begin
   if FLinkTab = nil then
     Exit;
   LTab := TSourceTab(FLinkTab);
-  LTab.PasTreeHL.LinkToken := -1;
+  LTab.PasTreeHL.SetLinkRange(-1, -1);
   LTab.Editor.Cursor := crIBeam;
   LTab.Editor.Invalidate;
   FLinkTab := nil;
@@ -529,12 +530,13 @@ end;
 procedure TfrmMain.EditorMouseMove(Sender: TObject; Shift: TShiftState;
   X, Y: Integer);
 var
-  LRaw: Integer;
+  LFrom, LTo: Integer;
   LTarget: TPasNavTarget;
 begin
   if (ssCtrl in Shift) and
-     ResolveAt(TSynEdit(Sender), X, Y, {out} LRaw, {out} LTarget) then
-    SetLink(TSynEdit(Sender).Parent, LRaw)
+     ResolveAt(TSynEdit(Sender), X, Y, {out} LFrom, {out} LTo, {out} LTarget)
+  then
+    SetLink(TSynEdit(Sender).Parent, LFrom, LTo)
   else
     ClearLink;
 end;
@@ -544,13 +546,13 @@ procedure TfrmMain.EditorMouseDown(Sender: TObject; Button: TMouseButton;
 var
   LEditor: TSynEdit;
   LSameFile: Boolean;
-  LRaw: Integer;
+  LFrom, LTo: Integer;
   LTarget: TPasNavTarget;
 begin
   if (Button <> mbLeft) or not (ssCtrl in Shift) then
     Exit;
   LEditor := TSynEdit(Sender);
-  if not ResolveAt(LEditor, X, Y, {out} LRaw, {out} LTarget) then
+  if not ResolveAt(LEditor, X, Y, {out} LFrom, {out} LTo, {out} LTarget) then
     Exit;
   ClearLink;
   LSameFile := SameText(LTarget.FilePath, TSourceTab(LEditor.Parent).FilePath);

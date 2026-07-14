@@ -137,7 +137,8 @@ type
     FErrorAttri: TSynHighlighterAttributes;
     FWeakKeywords: TDictionary<string, Boolean>; // DIRECTIVE_WORDS + VISIBILITY_WORDS
     FLinkAttri: TSynHighlighterAttributes;
-    FLinkToken: Integer;           // raw token idx shown as a ctrl+hover link
+    FLinkFrom: Integer;            // raw token idx range shown as a
+    FLinkTo: Integer;              // ctrl+hover link (inclusive); -1 = none
     FInactiveAttri: TSynHighlighterAttributes;
     function IsWeakKeyword: Boolean;
     procedure BuildWeakKeywordSpans(const ATree: TPasTree;
@@ -170,10 +171,15 @@ type
       this exists: without it, EnsureFresh's own change-detection is not
       cheap enough to call on every SetLine/repaint for a large file. }
     procedure MarkDirty;
-    { Raw token index (into this buffer's token stream) rendered as a
-      clickable go-to-declaration link (blue + underline) — IDE-style
-      ctrl+hover. -1 = no link. The HOST invalidates the editor on change. }
-    property LinkToken: Integer read FLinkToken write FLinkToken;
+    { Raw token index RANGE (inclusive, into this buffer's token stream)
+      rendered as a clickable go-to-declaration link (blue + underline) —
+      IDE-style ctrl+hover. A plain identifier is a single-token range; a
+      `uses` clause's dotted unit name (e.g. System.SysUtils) is a multi-
+      token range covering every segment + dot, so hovering ANY part of it
+      links and underlines the WHOLE qualified name, not just one word.
+      AFrom = -1 clears the link. The HOST invalidates the editor on change. }
+    procedure SetLinkRange(AFrom, ATo: Integer);
+    function LinkRangeEquals(AFrom, ATo: Integer): Boolean;
     { Diagnostics from the last tokenize pass (unterminated string/comment/
       directive, invalid char, ...) — handy for a future "N issues" readout. }
     function LexerDiagnosticCount: Integer;
@@ -238,7 +244,8 @@ begin
   FLinkAttri.Foreground := clBlue;
   FLinkAttri.Style := [fsUnderline];
   AddAttribute(FLinkAttri);
-  FLinkToken := -1;
+  FLinkFrom := -1;
+  FLinkTo := -1;
 
   FInactiveAttri := TSynHighlighterAttributes.Create('Inactive',
     'Inactive $IFDEF''d-out code');
@@ -315,6 +322,17 @@ end;
 procedure TPasTreeSynHighlighter.MarkDirty;
 begin
   FDirty := True;
+end;
+
+procedure TPasTreeSynHighlighter.SetLinkRange(AFrom, ATo: Integer);
+begin
+  FLinkFrom := AFrom;
+  FLinkTo := ATo;
+end;
+
+function TPasTreeSynHighlighter.LinkRangeEquals(AFrom, ATo: Integer): Boolean;
+begin
+  Result := (FLinkFrom = AFrom) and (FLinkTo = ATo);
 end;
 
 function TPasTreeSynHighlighter.LexerDiagnosticCount: Integer;
@@ -575,6 +593,12 @@ begin
   if (FCurTokenAbsIdx >= 0) and (FCurTokenAbsIdx < Length(FInactiveToken)) and
      FInactiveToken[FCurTokenAbsIdx] then
     Exit(FInactiveAttri);
+  // Ctrl+hover link: checked for EVERY token kind, not just identifiers —
+  // a `uses` clause's dotted unit name (System.SysUtils) links as ONE span
+  // covering the dot too, so the whole qualified name underlines together.
+  if (FLinkFrom >= 0) and (FCurTokenAbsIdx >= FLinkFrom) and
+     (FCurTokenAbsIdx <= FLinkTo) then
+    Exit(FLinkAttri);
   if FCurUnterminated then
     Exit(FErrorAttri);
   case FCurKind of
@@ -587,9 +611,7 @@ begin
     tkDirective:
       Result := FDirectiveAttri;
     tkIdentifier:
-      if FCurTokenAbsIdx = FLinkToken then
-        Result := FLinkAttri   // ctrl+hover go-to-declaration link
-      else if IsWeakKeyword then
+      if IsWeakKeyword then
         Result := FKeywordAttri
       else
         Result := FIdentifierAttri;
