@@ -53,6 +53,8 @@ type
     FFiles: TList<string>;                 // parallel to FModels (full path)
     FByPath: TDictionary<string, Integer>; // full path (lower) -> model id
     FSingleThreaded: Boolean;
+    FSystemUnitId: Integer;                // memoized EnsureSystemUnit result
+    FSystemUnitResolved: Boolean;
     // Phase 3c: cross-model typing.
     FInstances: TList<TSemaInstance>;
     FInstKeys: TDictionary<string, Integer>;
@@ -98,6 +100,15 @@ type
       the file on disk (for unsaved editor content). Call BEFORE AnalyzeFile/
       AnalyzeDirectory — LoadFile reads at analysis time. }
     procedure SetBuffer(const APath, AText: string);
+    { Resolves and loads the real `System` unit on demand (memoized; -1 if it
+      cannot be found via the configured search paths). EVERY unit implicitly
+      uses System (11.2.1 / 1.2.1) without a `uses` clause naming it, so it
+      never appears in any model's UsesList and the normal cross-unit machinery
+      never reaches it. This exists ONLY so navigation (PasTree.Sema.Nav) has
+      a real declaration to jump to for compiler-seeded builtins that are
+      genuinely declared there (TObject, TArray<T>, IInterface, ...) — it is
+      NOT wired into name resolution, typing, or diagnostics. }
+    function EnsureSystemUnit: Integer;
     function ModelCount: Integer;
     function Model(AId: Integer): TPasSemaModel;
     function ModelFile(AId: Integer): string;
@@ -139,6 +150,8 @@ begin
   FByPath := TDictionary<string, Integer>.Create;
   FInstances := TList<TSemaInstance>.Create;
   FInstKeys := TDictionary<string, Integer>.Create;
+  FSystemUnitId := -1;
+  FSystemUnitResolved := False;
 end;
 
 destructor TPasSemaProject.Destroy;
@@ -169,6 +182,19 @@ end;
 procedure TPasSemaProject.SetBuffer(const APath, AText: string);
 begin
   FSM.SetBuffer(APath, AText);
+end;
+
+function TPasSemaProject.EnsureSystemUnit: Integer;
+var
+  LPath: string;
+begin
+  if not FSystemUnitResolved then
+  begin
+    FSystemUnitResolved := True;
+    if FSM.ResolveUnit('System', '', '', LPath) then
+      FSystemUnitId := LoadFile(LPath);
+  end;
+  Result := FSystemUnitId;
 end;
 
 function TPasSemaProject.ModelCount: Integer;

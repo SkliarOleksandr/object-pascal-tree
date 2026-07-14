@@ -3,8 +3,9 @@ program SemaNavSmoke;
 { Go-to-declaration smoke tests: fixture units in a temp dir, then IdentAt +
   ResolveDecl checks — same-unit locals, cross-unit types, cross-unit MEMBER
   access (Phase-3c discovered refs), a builtin name a used unit actually
-  declares (the TBytes/SysUtils shape), the implicit Result, and pure builtins
-  (no target). }
+  declares (the TBytes/SysUtils shape), the IMPLICIT System unit (TObject/
+  TArray<T> — real declarations, never in any UsesList), the implicit Result,
+  and pure builtins (no target). }
 
 {$APPTYPE CONSOLE}
 
@@ -55,24 +56,44 @@ const
     'implementation'#10 +                      // 7
     'end.'#10;                                 // 8
 
+  // A fixture for the IMPLICIT `System` unit — NEVER named in any `uses`
+  // clause (that's the whole point: every unit uses it without saying so),
+  // yet TObject/TArray<T> below are REAL declarations PasTree.Sema.Nav must
+  // find via TPasSemaProject.EnsureSystemUnit. Mirrors real System.pas.
+  UNIT_SYS =
+    'unit System;'#10 +                        // 1
+    'interface'#10 +                           // 2
+    'type'#10 +                                // 3
+    '  TArray<T> = array of T;'#10 +           // 4  TArray col 3
+    '  TObject = class'#10 +                   // 5  TObject col 3
+    '    constructor Create;'#10 +              // 6
+    '  end;'#10 +                              // 7
+    'implementation'#10 +                      // 8
+    'constructor TObject.Create;'#10 +          // 9
+    'begin'#10 +                               // 10
+    'end;'#10 +                                // 11
+    'end.'#10;                                 // 12
+
   UNIT_B =
     'unit NavB;'#10 +                          // 1
     'interface'#10 +                           // 2
-    'uses NavA, NavC;'#10 +                    // 3
+    'uses NavA, NavC;'#10 +                    // 3  (NOT System — implicit)
     'var GT: TThing;'#10 +                     // 4  GT col 5, TThing col 9
     'implementation'#10 +                      // 5
     'procedure P;'#10 +                        // 6
     'var'#10 +                                 // 7
     '  L: Integer;'#10 +                       // 8  Integer col 6
     '  B: TBytes;'#10 +                        // 9  TBytes col 6
-    'begin'#10 +                               // 10
-    '  L := GT.Value;'#10 +                    // 11  GT col 8, Value col 11
-    'end;'#10 +                                // 12
-    'function GetLen: Integer;'#10 +           // 13  GetLen col 10
-    'begin'#10 +                               // 14
-    '  Result := 0;'#10 +                      // 15  Result col 3
-    'end;'#10 +                                // 16
-    'end.'#10;                                 // 17
+    '  O: TObject;'#10 +                       // 10  TObject col 6
+    '  A: TArray<Integer>;'#10 +               // 11  TArray col 6
+    'begin'#10 +                               // 12
+    '  L := GT.Value;'#10 +                    // 13  GT col 8, Value col 11
+    'end;'#10 +                                // 14
+    'function GetLen: Integer;'#10 +           // 15  GetLen col 10
+    'begin'#10 +                               // 16
+    '  Result := 0;'#10 +                      // 17  Result col 3
+    'end;'#10 +                                // 18
+    'end.'#10;                                 // 19
 
 var
   GProj: TPasSemaProject;
@@ -127,6 +148,7 @@ begin
   TDirectory.CreateDirectory(LDir);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavA.pas'), UNIT_A);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavC.pas'), UNIT_C);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), UNIT_SYS);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavB.pas'), UNIT_B);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
@@ -143,21 +165,24 @@ begin
       // Middle of the token works too (col 12 is inside TThing).
       CheckNav('type ref mid-token', 4, 12, 'TThing', 'NavA.pas', 4, 3);
       // Same-unit var reference: GT in the body -> its decl on line 4.
-      CheckNav('local var', 11, 8, 'GT', 'NavB.pas', 4, 5);
+      CheckNav('local var', 13, 8, 'GT', 'NavB.pas', 4, 5);
       // Cross-unit MEMBER (Phase-3c discovered): GT.Value -> NavA field.
-      CheckNav('cross member', 11, 11, 'Value', 'NavA.pas', 5, 5);
+      CheckNav('cross member', 13, 11, 'Value', 'NavA.pas', 5, 5);
       // Builtin name a used unit actually declares: TBytes -> NavC.
       CheckNav('builtin-in-uses', 9, 6, 'TBytes', 'NavC.pas', 4, 3);
+      // Implicit System unit, no `uses System` anywhere: TObject/TArray<T>.
+      CheckNav('implicit System: TObject', 10, 6, 'TObject', 'System.pas', 5, 3);
+      CheckNav('implicit System: TArray', 11, 6, 'TArray', 'System.pas', 4, 3);
       // Implicit Result -> its enclosing routine's declaration (GetLen).
-      CheckNav('result -> routine', 15, 3, 'Result', 'NavB.pas', 13, 10);
+      CheckNav('result -> routine', 17, 3, 'Result', 'NavB.pas', 15, 10);
 
       // Pure builtin: Integer has no source declaration anywhere in uses.
       Ok('builtin: IdentAt', GNav.IdentAt(GMidB, 8, 6, {out} LIdent));
       Ok('builtin: no target', not GNav.ResolveDecl(GMidB, LIdent.Node,
         {out} LTarget));
 
-      // Non-identifier position (the ':' of ':=' on line 11 is at col 5).
-      Ok('symbol pos -> no ident', not GNav.IdentAt(GMidB, 11, 5, {out} LIdent));
+      // Non-identifier position (the ':' of ':=' on line 13 is at col 5).
+      Ok('symbol pos -> no ident', not GNav.IdentAt(GMidB, 13, 5, {out} LIdent));
     finally
       GNav.Free;
     end;

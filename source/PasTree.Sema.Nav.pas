@@ -217,9 +217,12 @@ begin
 end;
 
 // A same-named symbol WITH a real declaration in one of AMid's used units'
-// interfaces. Handles a name that resolved locally to a compiler-seeded
-// builtin (no DeclNode) but is actually declared in a used unit — e.g.
-// TBytes resolves to the builtin yet is really declared in System.SysUtils.
+// interfaces, or (last resort) the implicit System unit. Handles a name that
+// resolved locally to a compiler-seeded builtin (no DeclNode) but is actually
+// declared somewhere real — e.g. TBytes resolves to the builtin yet is really
+// declared in System.SysUtils; TObject/TArray<T>/IInterface/... are really
+// declared in System, which every unit uses implicitly (never appears in
+// UsesList — see TPasSemaProject.EnsureSystemUnit).
 function TPasNavigator.FindInUsesDecl(AMid: Integer;
   const ANameLower: string; out ATMid, ASym: Integer): Boolean;
 var
@@ -242,6 +245,22 @@ begin
       ATMid := LUid;
       ASym := LS;
       Exit(True);
+    end;
+  end;
+
+  LUid := FProj.EnsureSystemUnit;
+  if (LUid >= 0) and (LUid <> AMid) then
+  begin
+    LUsed := FProj.Model(LUid);
+    if LUsed.InterfaceScope <> NIL_SCOPE then
+    begin
+      LS := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
+      if (LS <> NIL_SYM) and (LUsed.Symbols[LS].DeclNode <> NIL_NODE) then
+      begin
+        ATMid := LUid;
+        ASym := LS;
+        Exit(True);
+      end;
     end;
   end;
 end;

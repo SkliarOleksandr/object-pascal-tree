@@ -126,7 +126,14 @@ var
   LName: string;
   LDot: Integer;
 begin
-  LDir := TPath.GetDirectoryName(AFromFile);
+  // AFromFile = '' is legal: "resolve by search paths only, no anchor file"
+  // (e.g. TPasSemaProject.EnsureSystemUnit, which has no referring unit to
+  // anchor from). TPath.GetDirectoryName raises on '' instead of returning
+  // '', so this must be guarded explicitly rather than passed through.
+  if AFromFile = '' then
+    LDir := ''
+  else
+    LDir := TPath.GetDirectoryName(AFromFile);
 
   // 1. Explicit `in 'path'`.
   if AInPath <> '' then
@@ -141,7 +148,8 @@ begin
     for LDir in FSearchPaths do
       if TryFile(LDir, AInPath, AResolved) then
         Exit(True);
-    LDir := TPath.GetDirectoryName(AFromFile);
+    if AFromFile <> '' then
+      LDir := TPath.GetDirectoryName(AFromFile);
   end;
 
   // Candidate file names: <dotted>.pas then <leaf>.pas.
