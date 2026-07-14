@@ -56,6 +56,11 @@ type
     FByPath: TDictionary<string, Integer>;       // full lower path -> model id
     FCaches: TObjectDictionary<Integer, TNavCache>;
     function CacheOf(AMid: Integer): TNavCache;
+    function TargetFromNode(AMid, ANode: Integer; const AName: string;
+      out ATarget: TPasNavTarget): Boolean;
+    function FindInUsesDecl(AMid: Integer; const ANameLower: string;
+      out ATMid, ASym: Integer): Boolean;
+    function RoutineNameNodeOfSym(AMid, ASym: Integer): Integer;
   public
     constructor Create(AProject: TPasSemaProject);
     destructor Destroy; override;
@@ -185,13 +190,94 @@ begin
   Result := True;
 end;
 
+// Builds a target from a declaration node in model AMid (its first visible
+// token's file/line/col). False when the node has no visible token.
+function TPasNavigator.TargetFromNode(AMid, ANode: Integer;
+  const AName: string; out ATarget: TPasNavTarget): Boolean;
+var
+  LM: TPasSemaModel;
+  LVisTok: Integer;
+  LVis: TPasVisibleToken;
+begin
+  Result := False;
+  if ANode = NIL_NODE then
+    Exit;
+  LM := FProj.Model(AMid);
+  LVisTok := LM.Tree.Nodes[ANode].FirstToken;
+  if (LVisTok < 0) or (LVisTok > High(LM.Tree.Source.Visible)) then
+    Exit;
+  LVis := LM.Tree.Source.Visible[LVisTok];
+  var LTS := LM.Tree.Source.Files[LVis.FileId];
+  LTS.OffsetToLineCol(LTS.Tokens[LVis.TokenIndex].Start,
+    ATarget.Line, ATarget.Col);
+  ATarget.UnitId := AMid;
+  ATarget.FilePath := LM.Tree.Source.FileNames[LVis.FileId];
+  ATarget.Name := AName;
+  Result := True;
+end;
+
+// A same-named symbol WITH a real declaration in one of AMid's used units'
+// interfaces. Handles a name that resolved locally to a compiler-seeded
+// builtin (no DeclNode) but is actually declared in a used unit — e.g.
+// TBytes resolves to the builtin yet is really declared in System.SysUtils.
+function TPasNavigator.FindInUsesDecl(AMid: Integer;
+  const ANameLower: string; out ATMid, ASym: Integer): Boolean;
+var
+  LM, LUsed: TPasSemaModel;
+  LIdx, LUid, LS: Integer;
+begin
+  Result := False;
+  LM := FProj.Model(AMid);
+  for LIdx := High(LM.UsesList) downto 0 do   // last uses wins, like resolution
+  begin
+    LUid := LM.UsesList[LIdx].UnitId;
+    if LUid < 0 then
+      Continue;
+    LUsed := FProj.Model(LUid);
+    if LUsed.InterfaceScope = NIL_SCOPE then
+      Continue;
+    LS := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
+    if (LS <> NIL_SYM) and (LUsed.Symbols[LS].DeclNode <> NIL_NODE) then
+    begin
+      ATMid := LUid;
+      ASym := LS;
+      Exit(True);
+    end;
+  end;
+end;
+
+// The routine-name ident node of the routine/anon scope owning ASym — used to
+// send the implicit Result to its enclosing routine's declaration. Falls back
+// to the scope's owner node itself for an anonymous method (no name).
+function TPasNavigator.RoutineNameNodeOfSym(AMid, ASym: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LScope, LOwner, LChild: Integer;
+begin
+  Result := NIL_NODE;
+  LM := FProj.Model(AMid);
+  LScope := LM.Symbols[ASym].Scope;
+  if (LScope < 0) or (LScope >= LM.Scopes.Count) then
+    Exit;
+  LOwner := LM.Scopes[LScope].OwnerNode;
+  if LOwner = NIL_NODE then
+    Exit;
+  LChild := LM.Tree.Nodes[LOwner].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LChild].Kind = nkIdent then
+      Exit(LChild);
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+  Result := LOwner;
+end;
+
 function TPasNavigator.ResolveDecl(AMid, ANode: Integer;
   out ATarget: TPasNavTarget): Boolean;
 var
-  LM, LTM: TPasSemaModel;
+  LM: TPasSemaModel;
   LExt: TPasExtRef;
-  LTMid, LSym, LDecl, LVisTok: Integer;
-  LVis: TPasVisibleToken;
+  LTMid, LSym, LFbMid, LFbSym: Integer;
 begin
   Result := False;
   if (AMid < 0) or (ANode = NIL_NODE) then
@@ -207,22 +293,22 @@ begin
     LSym := LExt.Sym;
   end;
 
-  LTM := FProj.Model(LTMid);
-  LDecl := LTM.Symbols[LSym].DeclNode;
-  if LDecl = NIL_NODE then
-    Exit;   // a builtin — no source declaration to jump to
+  // A resolved symbol with a real declaration node — the common case.
+  if FProj.Model(LTMid).Symbols[LSym].DeclNode <> NIL_NODE then
+    Exit(TargetFromNode(LTMid, FProj.Model(LTMid).Symbols[LSym].DeclNode,
+      FProj.Model(LTMid).Symbols[LSym].Name, ATarget));
 
-  LVisTok := LTM.Tree.Nodes[LDecl].FirstToken;
-  if (LVisTok < 0) or (LVisTok > High(LTM.Tree.Source.Visible)) then
-    Exit;
-  LVis := LTM.Tree.Source.Visible[LVisTok];
-  var LTS := LTM.Tree.Source.Files[LVis.FileId];
-  LTS.OffsetToLineCol(LTS.Tokens[LVis.TokenIndex].Start,
-    ATarget.Line, ATarget.Col);
-  ATarget.UnitId := LTMid;
-  ATarget.FilePath := LTM.Tree.Source.FileNames[LVis.FileId];
-  ATarget.Name := LTM.Symbols[LSym].Name;
-  Result := True;
+  // No source declaration (a compiler builtin or the implicit Result):
+  // 1) a builtin a used unit actually declares (TBytes -> System.SysUtils);
+  if FindInUsesDecl(AMid, LowerCase(LM.Tree.NodeText(ANode)), LFbMid, LFbSym)
+  then
+    Exit(TargetFromNode(LFbMid, FProj.Model(LFbMid).Symbols[LFbSym].DeclNode,
+      FProj.Model(LFbMid).Symbols[LFbSym].Name, ATarget));
+  // 2) the implicit Result -> its enclosing routine's declaration.
+  if (FProj.Model(LTMid).Symbols[LSym].Kind = skVar) and
+     SameText(FProj.Model(LTMid).Symbols[LSym].Name, 'Result') then
+    Exit(TargetFromNode(LTMid, RoutineNameNodeOfSym(LTMid, LSym), 'Result',
+      ATarget));
 end;
 
 end.

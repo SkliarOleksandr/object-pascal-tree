@@ -94,6 +94,10 @@ type
     // driver exactly; results are identical either way — the parallel stages
     // are pure per unit). Default False (one worker per core).
     property SingleThreaded: Boolean read FSingleThreaded write FSingleThreaded;
+    { Editor-host buffer override: analysis reads AText for APath instead of
+      the file on disk (for unsaved editor content). Call BEFORE AnalyzeFile/
+      AnalyzeDirectory — LoadFile reads at analysis time. }
+    procedure SetBuffer(const APath, AText: string);
     function ModelCount: Integer;
     function Model(AId: Integer): TPasSemaModel;
     function ModelFile(AId: Integer): string;
@@ -160,6 +164,11 @@ begin
       ABody(LIdx)
   else
     TParallel.&For(0, AHi, ABody);
+end;
+
+procedure TPasSemaProject.SetBuffer(const APath, AText: string);
+begin
+  FSM.SetBuffer(APath, AText);
 end;
 
 function TPasSemaProject.ModelCount: Integer;

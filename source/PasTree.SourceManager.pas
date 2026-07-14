@@ -20,10 +20,17 @@ type
     FSearchPaths: TArray<string>;
     FIncludeIndex: TDictionary<string, string>;  // basename -> full path
     FUnitIndex: TDictionary<string, string>;      // *.pas/*.dpr basename -> path
+    FBuffers: TDictionary<string, string>;        // full path (lower) -> text
     function TryFile(const ADir, AName: string; out AResolved: string): Boolean;
   public
     constructor Create(const ASearchPaths: TArray<string>);
     destructor Destroy; override;
+    { In-memory buffer overrides: LoadText returns the given text for APath
+      instead of reading the file. Editor hosts push unsaved buffers here so
+      analysis sees what's on screen (main file AND its $I includes go through
+      LoadText). Keyed by full-path, case-insensitive. Set before analyzing. }
+    procedure SetBuffer(const APath, AText: string);
+    procedure ClearBuffers;
     function LoadText(const APath: string): string;
     { Indexes every *.inc under ARoot by basename as a last-resort include
       resolver (corpus runs without real project search paths). The first
@@ -59,9 +66,22 @@ end;
 
 destructor TPasSourceManager.Destroy;
 begin
+  FBuffers.Free;
   FIncludeIndex.Free;
   FUnitIndex.Free;
   inherited;
+end;
+
+procedure TPasSourceManager.SetBuffer(const APath, AText: string);
+begin
+  if FBuffers = nil then
+    FBuffers := TDictionary<string, string>.Create;
+  FBuffers.AddOrSetValue(LowerCase(TPath.GetFullPath(APath)), AText);
+end;
+
+procedure TPasSourceManager.ClearBuffers;
+begin
+  FreeAndNil(FBuffers);
 end;
 
 function TPasSourceManager.TryFile(const ADir, AName: string;
@@ -175,6 +195,9 @@ function TPasSourceManager.LoadText(const APath: string): string;
 var
   LBytes: TBytes;
 begin
+  if (FBuffers <> nil) and
+     FBuffers.TryGetValue(LowerCase(TPath.GetFullPath(APath)), Result) then
+    Exit;
   try
     Result := TFile.ReadAllText(APath);
   except
