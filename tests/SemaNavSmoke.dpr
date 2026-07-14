@@ -251,6 +251,21 @@ begin
       Ok('qualifier span: NavD spans the SAME Namespace.NavD',
         GNav.IdentAt(GMidB, 16, 18, {out} LIdent) and
         (LIdent.RawTokenTo - LIdent.RawToken = 2));
+      // BUG REGRESSION: clicking the trailing MEMBER of a qualified
+      // expression (SYS_MARK/NSD_MARK — already resolved via ExtRefMap, NOT
+      // a qualifier segment) must highlight ONLY ITSELF, not get its span
+      // stolen by QualifierUnitAt widening it to the qualifier prefix
+      // instead (the exact bug reported: hovering `sLineBreak` in `System.
+      // sLineBreak` colored only `System`).
+      Ok('member span: SYS_MARK is single-token (not widened to System)',
+        GNav.IdentAt(GMidB, 15, 15, {out} LIdent) and
+        (LIdent.Name = 'SYS_MARK') and
+        (LIdent.RawToken = LIdent.RawTokenTo) and
+        (LIdent.ColFrom = 15));  // own column, NOT System's (col 8)
+      Ok('member span: NSD_MARK is single-token (not widened to Namespace.NavD)',
+        GNav.IdentAt(GMidB, 16, 23, {out} LIdent) and
+        (LIdent.Name = 'NSD_MARK') and
+        (LIdent.RawToken = LIdent.RawTokenTo));
       // Implicit Result -> its enclosing routine's declaration (GetLen).
       CheckNav('result -> routine', 20, 3, 'Result', 'NavB.pas', 18, 10);
 

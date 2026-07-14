@@ -270,22 +270,33 @@ begin
     // `uses` clause's dotted name. Node is NOT redirected here (unlike the
     // `uses` case) — ResolveDecl's qualifier check climbs from wherever it's
     // given, so the originally-clicked node already works.
-    LQUid := FProj.QualifierUnitAt(AMid, LNode, LMatchNode);
-    if LQUid >= 0 then
+    // GUARD: only when LNode has NO resolution of its own (RefMap AND
+    // ExtRefMap both miss) — QualifierUnitAt climbs to the outermost member
+    // regardless of which node it's given, so calling it unconditionally
+    // would ALSO fire for the trailing MEMBER itself (e.g. `sLineBreak` in
+    // `System.sLineBreak`, already correctly resolved via ExtRefMap below)
+    // and wrongly steal its span to point at the qualifier instead. Mirrors
+    // the exact gate ResolveDecl already uses before its own QualifierUnitAt
+    // call.
+    if (LM.RefMap[LNode] = NIL_SYM) and not LM.ExtRefMap.ContainsKey(LNode) then
     begin
-      LFirst := LMatchNode;
-      while LM.Tree.Nodes[LFirst].FirstChild <> NIL_NODE do
-        LFirst := LM.Tree.Nodes[LFirst].FirstChild;
-      LSpanFirstVis := LM.Tree.Nodes[LFirst].FirstToken;
-      LSpanLastVis := LM.Tree.Nodes[LMatchNode].LastToken;
-      if (LSpanFirstVis >= 0) and
-         (LSpanFirstVis <= High(LM.Tree.Source.Visible)) and
-         (LM.Tree.Source.Visible[LSpanFirstVis].FileId = 0) then
-        LRawFrom := LM.Tree.Source.Visible[LSpanFirstVis].TokenIndex;
-      if (LSpanLastVis >= 0) and
-         (LSpanLastVis <= High(LM.Tree.Source.Visible)) and
-         (LM.Tree.Source.Visible[LSpanLastVis].FileId = 0) then
-        LRawTo := LM.Tree.Source.Visible[LSpanLastVis].TokenIndex;
+      LQUid := FProj.QualifierUnitAt(AMid, LNode, LMatchNode);
+      if LQUid >= 0 then
+      begin
+        LFirst := LMatchNode;
+        while LM.Tree.Nodes[LFirst].FirstChild <> NIL_NODE do
+          LFirst := LM.Tree.Nodes[LFirst].FirstChild;
+        LSpanFirstVis := LM.Tree.Nodes[LFirst].FirstToken;
+        LSpanLastVis := LM.Tree.Nodes[LMatchNode].LastToken;
+        if (LSpanFirstVis >= 0) and
+           (LSpanFirstVis <= High(LM.Tree.Source.Visible)) and
+           (LM.Tree.Source.Visible[LSpanFirstVis].FileId = 0) then
+          LRawFrom := LM.Tree.Source.Visible[LSpanFirstVis].TokenIndex;
+        if (LSpanLastVis >= 0) and
+           (LSpanLastVis <= High(LM.Tree.Source.Visible)) and
+           (LM.Tree.Source.Visible[LSpanLastVis].FileId = 0) then
+          LRawTo := LM.Tree.Source.Visible[LSpanLastVis].TokenIndex;
+      end;
     end;
   end;
 
