@@ -126,6 +126,8 @@ type
     FAsmAttri: TSynHighlighterAttributes;
     FErrorAttri: TSynHighlighterAttributes;
     FWeakKeywords: TDictionary<string, Boolean>; // DIRECTIVE_WORDS + VISIBILITY_WORDS
+    FLinkAttri: TSynHighlighterAttributes;
+    FLinkToken: Integer;           // raw token idx shown as a ctrl+hover link
     function IsWeakKeyword: Boolean;
     procedure BuildWeakKeywordSpans(const ATree: TPasTree;
       const APreprocessed: TPasPreprocessed);
@@ -150,6 +152,10 @@ type
     { The TStrings this highlighter re-tokenizes on demand (typically the
       TSynEdit.Lines it is attached to). Not owned/freed by this class. }
     property SourceLines: TStrings read FSourceLines write SetSourceLines;
+    { Raw token index (into this buffer's token stream) rendered as a
+      clickable go-to-declaration link (blue + underline) — IDE-style
+      ctrl+hover. -1 = no link. The HOST invalidates the editor on change. }
+    property LinkToken: Integer read FLinkToken write FLinkToken;
     { Diagnostics from the last tokenize pass (unterminated string/comment/
       directive, invalid char, ...) — handy for a future "N issues" readout. }
     function LexerDiagnosticCount: Integer;
@@ -209,6 +215,12 @@ begin
   FErrorAttri.Foreground := clRed;
   FErrorAttri.Style := [fsBold, fsUnderline];
   AddAttribute(FErrorAttri);
+
+  FLinkAttri := TSynHighlighterAttributes.Create('Link', 'Ctrl+hover link');
+  FLinkAttri.Foreground := clBlue;
+  FLinkAttri.Style := [fsUnderline];
+  AddAttribute(FLinkAttri);
+  FLinkToken := -1;
 
   SetAttributesOnChange(DefHighlightChange);
 
@@ -483,7 +495,9 @@ begin
     tkDirective:
       Result := FDirectiveAttri;
     tkIdentifier:
-      if IsWeakKeyword then
+      if FCurTokenAbsIdx = FLinkToken then
+        Result := FLinkAttri   // ctrl+hover go-to-declaration link
+      else if IsWeakKeyword then
         Result := FKeywordAttri
       else
         Result := FIdentifierAttri;

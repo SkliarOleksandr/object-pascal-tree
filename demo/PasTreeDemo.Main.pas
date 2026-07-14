@@ -18,12 +18,14 @@ uses
   System.JSON, System.Diagnostics, System.Win.Registry,
   Winapi.Windows, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls,
   Vcl.ExtCtrls, Vcl.Dialogs, Vcl.Graphics,
-  SynEdit, SynEditHighlighter, SynHighlighterJSON, SynHighlighterPas,
+  SynEdit, SynEditTypes, SynEditHighlighter, SynHighlighterJSON,
+  SynHighlighterPas,
   VirtualTrees, VirtualTrees.Types,
   PasTree.Platforms, PasTree.Preprocessor, PasTree.Ast, PasTree.Ast.Json,
   PasTree.Parser, PasTree.Project, PasTree.DProj,
   PasTree.Sema.Diagnostics, PasTree.Sema.Model, PasTree.Sema.Builtins,
   PasTree.Sema.Types, PasTree.Sema.Resolver, PasTree.Sema.Project,
+  PasTree.Sema.Nav,
   PasTree.Sema.Dump, VirtualTrees.BaseAncestorVCL, VirtualTrees.BaseTree, VirtualTrees.AncestorVCL, SynEditCodeFolding,
   PasTreeDemo.Highlighter;
 
@@ -71,6 +73,9 @@ type
     FMainSource: string;
     FPlatform: TPasPlatform;
     FSynPasHL: TSynPasSyn;   // shared SynEdit built-in highlighter (A/B compare)
+    FSemaProject: TPasSemaProject; // kept alive after RunParse (navigation)
+    FNav: TPasNavigator;           // go-to-declaration over FSemaProject
+    FLinkTab: TObject;             // TSourceTab currently showing a link
     procedure SetupControls;
     procedure ApplyPasTreePalette(AHL: TSynPasSyn);
     procedure EnsureSampleProject;
@@ -80,6 +85,17 @@ type
     function OpenFileTab(const APath: string): TSynEdit;
     procedure RunParse;
     procedure Log(const AText: string);
+    // go-to-declaration (ctrl+hover link / ctrl+click)
+    function ResolveAt(AEditor: TSynEdit; X, Y: Integer;
+      out ARawToken: Integer; out ATarget: TPasNavTarget): Boolean;
+    procedure SetLink(ATab: TObject; ARawToken: Integer);
+    procedure ClearLink;
+    procedure EditorMouseMove(Sender: TObject; Shift: TShiftState;
+      X, Y: Integer);
+    procedure EditorMouseDown(Sender: TObject; Button: TMouseButton;
+      Shift: TShiftState; X, Y: Integer);
+    procedure EditorKeyUp(Sender: TObject; var Key: Word;
+      Shift: TShiftState);
   end;
 
 var
@@ -95,6 +111,8 @@ type
   TSourceTab = class(TTabSheet)
     Editor: TSynEdit;
     PasTreeHL: TPasTreeSynHighlighter; // kept even while SynEdit's is active
+  public
+    FilePath: string;                  // full path of the loaded file
   end;
 
 const
@@ -150,6 +168,8 @@ end;
 
 procedure TfrmMain.FormDestroy(Sender: TObject);
 begin
+  FreeAndNil(FNav);
+  FreeAndNil(FSemaProject);
   FreeAndNil(FDProj);
   FOpenFiles.Free;
   FFileList.Free;
@@ -375,6 +395,10 @@ begin
   Result.Gutter.ShowLineNumbers := True;
   Result.Font.Name := 'Consolas';
   Result.UseCodeFolding := True;
+  // go-to-declaration: ctrl+hover shows a link, ctrl+click jumps.
+  Result.OnMouseMove := EditorMouseMove;
+  Result.OnMouseDown := EditorMouseDown;
+  Result.OnKeyUp := EditorKeyUp;
 
   // Our own PasTree-lexer-driven highlighter — one instance per tab (it
   // caches the tokenization of its own attached buffer, so instances can't
@@ -394,13 +418,114 @@ begin
   end;
   LTab.Editor := Result;
   LTab.PasTreeHL := LHL;
+  LTab.FilePath := TPath.GetFullPath(APath);
   FOpenFiles.AddObject(APath, LTab);
   pgc.ActivePage := LTab;
 end;
 
+{ go-to-declaration }
+
+// The (raw token, declaration target) under pixel (X, Y) of an editor —
+// shared by hover-link display and the actual ctrl+click jump.
+function TfrmMain.ResolveAt(AEditor: TSynEdit; X, Y: Integer;
+  out ARawToken: Integer; out ATarget: TPasNavTarget): Boolean;
+var
+  LTab: TSourceTab;
+  LMid: Integer;
+  LBC: TBufferCoord;
+  LIdent: TPasNavIdent;
+begin
+  Result := False;
+  if FNav = nil then
+    Exit;
+  LTab := TSourceTab(AEditor.Parent);
+  LMid := FNav.ModelIdOf(LTab.FilePath);
+  if LMid < 0 then
+    Exit;   // file not part of the last analysis
+  LBC := AEditor.DisplayToBufferPos(AEditor.PixelsToRowColumn(X, Y));
+  if not FNav.IdentAt(LMid, LBC.Line, LBC.Char, LIdent) then
+    Exit;
+  if not FNav.ResolveDecl(LMid, LIdent.Node, ATarget) then
+    Exit;
+  ARawToken := LIdent.RawToken;
+  Result := True;
+end;
+
+procedure TfrmMain.SetLink(ATab: TObject; ARawToken: Integer);
+var
+  LTab: TSourceTab;
+begin
+  if (FLinkTab = ATab) and
+     (TSourceTab(ATab).PasTreeHL.LinkToken = ARawToken) then
+    Exit;
+  ClearLink;
+  LTab := TSourceTab(ATab);
+  LTab.PasTreeHL.LinkToken := ARawToken;
+  LTab.Editor.Cursor := crHandPoint;
+  LTab.Editor.Invalidate;
+  FLinkTab := ATab;
+end;
+
+procedure TfrmMain.ClearLink;
+var
+  LTab: TSourceTab;
+begin
+  if FLinkTab = nil then
+    Exit;
+  LTab := TSourceTab(FLinkTab);
+  LTab.PasTreeHL.LinkToken := -1;
+  LTab.Editor.Cursor := crIBeam;
+  LTab.Editor.Invalidate;
+  FLinkTab := nil;
+end;
+
+procedure TfrmMain.EditorMouseMove(Sender: TObject; Shift: TShiftState;
+  X, Y: Integer);
+var
+  LRaw: Integer;
+  LTarget: TPasNavTarget;
+begin
+  if (ssCtrl in Shift) and
+     ResolveAt(TSynEdit(Sender), X, Y, LRaw, LTarget) then
+    SetLink(TSynEdit(Sender).Parent, LRaw)
+  else
+    ClearLink;
+end;
+
+procedure TfrmMain.EditorMouseDown(Sender: TObject; Button: TMouseButton;
+  Shift: TShiftState; X, Y: Integer);
+var
+  LEditor, LTargetEd: TSynEdit;
+  LTab: TSourceTab;
+  LRaw: Integer;
+  LTarget: TPasNavTarget;
+begin
+  if (Button <> mbLeft) or not (ssCtrl in Shift) then
+    Exit;
+  LEditor := TSynEdit(Sender);
+  if not ResolveAt(LEditor, X, Y, LRaw, LTarget) then
+    Exit;
+  ClearLink;
+  LTab := TSourceTab(LEditor.Parent);
+  if SameText(LTarget.FilePath, LTab.FilePath) then
+    LTargetEd := LEditor                        // same unit: jump in place
+  else
+    LTargetEd := OpenFileTab(LTarget.FilePath); // other unit: (re)open a tab
+  LTargetEd.CaretXY := BufferCoord(LTarget.Col, LTarget.Line);
+  LTargetEd.EnsureCursorPosVisible;
+  if LTargetEd.CanFocus then
+    LTargetEd.SetFocus;
+end;
+
+procedure TfrmMain.EditorKeyUp(Sender: TObject; var Key: Word;
+  Shift: TShiftState);
+begin
+  if Key = VK_CONTROL then
+    ClearLink;
+end;
+
 procedure TfrmMain.RunParse;
 var
-  LProj: TPasSemaProject;
   LPlatform: TPasPlatform;
   LMain, LDiagTotal, LId, LDIdx: Integer;
   LModel: TPasSemaModel;
@@ -432,52 +557,54 @@ begin
   Log('Analyzing ' + FProjectDir + ' (' + PlatformName(LPlatform) + ')...');
   Screen.Cursor := crHourGlass;
   try
-    LProj := TPasSemaProject.Create(LPlatform, LSearchPaths, LDefines);
-    try
-      LProj.SingleThreaded := cbThreading.ItemIndex = 0;
-      // A .dproj drives the real uses-graph from its main source (correctly
-      // reaching units outside FProjectDir); a plain .dpr falls back to
-      // "everything under this folder" for simplicity.
-      LSW := TStopwatch.StartNew;
-      if Assigned(FDProj) and (FMainSource <> '') then
-        LProj.AnalyzeFile(FMainSource)
-      else
-        LProj.AnalyzeDirectory(FProjectDir);
-      LSW.Stop;
+    // The previous analysis (and its navigator, and any hover link into it)
+    // dies here; the fresh one is KEPT ALIVE for go-to-declaration.
+    ClearLink;
+    FreeAndNil(FNav);
+    FreeAndNil(FSemaProject);
+    FSemaProject := TPasSemaProject.Create(LPlatform, LSearchPaths, LDefines);
+    FSemaProject.SingleThreaded := cbThreading.ItemIndex = 0;
+    // A .dproj drives the real uses-graph from its main source (correctly
+    // reaching units outside FProjectDir); a plain .dpr falls back to
+    // "everything under this folder" for simplicity.
+    LSW := TStopwatch.StartNew;
+    if Assigned(FDProj) and (FMainSource <> '') then
+      FSemaProject.AnalyzeFile(FMainSource)
+    else
+      FSemaProject.AnalyzeDirectory(FProjectDir);
+    LSW.Stop;
+    FNav := TPasNavigator.Create(FSemaProject);
 
-      // Locate the main unit's model, and report every unit's diagnostics.
-      LMain := -1;
-      LDiagTotal := 0;
-      for LId := 0 to LProj.ModelCount - 1 do
+    // Locate the main unit's model, and report every unit's diagnostics.
+    LMain := -1;
+    LDiagTotal := 0;
+    for LId := 0 to FSemaProject.ModelCount - 1 do
+    begin
+      LModel := FSemaProject.Model(LId);
+      if SameText(FSemaProject.ModelFile(LId), FMainSource) then
+        LMain := LId;
+      for LDIdx := 0 to High(LModel.Diags) do
       begin
-        LModel := LProj.Model(LId);
-        if SameText(LProj.ModelFile(LId), FMainSource) then
-          LMain := LId;
-        for LDIdx := 0 to High(LModel.Diags) do
-        begin
-          Inc(LDiagTotal);
-          Log(Format('%s(%d,%d): %s',
-            [TPath.GetFileName(LProj.ModelFile(LId)),
-             LModel.Diags[LDIdx].Line, LModel.Diags[LDIdx].Col,
-             LModel.Diags[LDIdx].Msg]));
-        end;
+        Inc(LDiagTotal);
+        Log(Format('%s(%d,%d): %s',
+          [TPath.GetFileName(FSemaProject.ModelFile(LId)),
+           LModel.Diags[LDIdx].Line, LModel.Diags[LDIdx].Col,
+           LModel.Diags[LDIdx].Msg]));
       end;
-      Log(Format('Done: %d units, %d diagnostics in %d ms (%s).',
-        [LProj.ModelCount, LDiagTotal, LSW.ElapsedMilliseconds,
-         cbThreading.Text]));
-
-      if LMain >= 0 then
-      begin
-        LModel := LProj.Model(LMain);
-        edJson.Text := PrettyJson(AstToJson(LModel.Tree));
-        edSema.Text := DumpSemaModel(LModel);
-        pgc.ActivePage := tsSema;
-      end
-      else
-        Log('Main source not found among analyzed units: ' + FMainSource);
-    finally
-      LProj.Free;
     end;
+    Log(Format('Done: %d units, %d diagnostics in %d ms (%s).',
+      [FSemaProject.ModelCount, LDiagTotal, LSW.ElapsedMilliseconds,
+       cbThreading.Text]));
+
+    if LMain >= 0 then
+    begin
+      LModel := FSemaProject.Model(LMain);
+      edJson.Text := PrettyJson(AstToJson(LModel.Tree));
+      edSema.Text := DumpSemaModel(LModel);
+      pgc.ActivePage := tsSema;
+    end
+    else
+      Log('Main source not found among analyzed units: ' + FMainSource);
   finally
     Screen.Cursor := crDefault;
   end;
