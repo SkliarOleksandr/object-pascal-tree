@@ -103,12 +103,23 @@ type
     { Resolves and loads the real `System` unit on demand (memoized; -1 if it
       cannot be found via the configured search paths). EVERY unit implicitly
       uses System (11.2.1 / 1.2.1) without a `uses` clause naming it, so it
-      never appears in any model's UsesList and the normal cross-unit machinery
-      never reaches it. This exists ONLY so navigation (PasTree.Sema.Nav) has
-      a real declaration to jump to for compiler-seeded builtins that are
-      genuinely declared there (TObject, TArray<T>, IInterface, ...) — it is
-      NOT wired into name resolution, typing, or diagnostics. }
+      never appears in any model's UsesList and the normal name-resolution
+      machinery (Phase 1/2, which decides RefMap/ExtRefMap/diagnostics) never
+      reaches it — that stays exactly as before, no behavior change there.
+      Used by ResolveRealDecl below, itself used by FindMemberX (so member
+      access through a compiler-seeded builtin type, e.g. `Obj.Free` where
+      Obj: TObject, can reach the real class body) and by PasTree.Sema.Nav
+      (go-to-declaration for a builtin name that is really declared
+      somewhere — TBytes/SysUtils, TObject/System, ...). Never emits a
+      diagnostic and never affects RefMap/ExtRefMap for genuinely intra- or
+      cross-unit names — purely additive reach for names that would
+      otherwise dead-end at a DeclNode-less compiler symbol. }
     function EnsureSystemUnit: Integer;
+    { A real (non-builtin) declaration of ANameLower reachable from AMid:
+      first AMid's own `uses` (last-uses-wins, matching normal resolution
+      priority), then the implicit System unit as a last resort. }
+    function ResolveRealDecl(AMid: Integer; const ANameLower: string;
+      out ARMid, ARSym: Integer): Boolean;
     function ModelCount: Integer;
     function Model(AId: Integer): TPasSemaModel;
     function ModelFile(AId: Integer): string;
@@ -195,6 +206,48 @@ begin
       FSystemUnitId := LoadFile(LPath);
   end;
   Result := FSystemUnitId;
+end;
+
+function TPasSemaProject.ResolveRealDecl(AMid: Integer;
+  const ANameLower: string; out ARMid, ARSym: Integer): Boolean;
+var
+  LM, LUsed: TPasSemaModel;
+  LIdx, LUid, LS: Integer;
+begin
+  Result := False;
+  LM := FModels[AMid];
+  for LIdx := High(LM.UsesList) downto 0 do   // last uses wins, like resolution
+  begin
+    LUid := LM.UsesList[LIdx].UnitId;
+    if LUid < 0 then
+      Continue;
+    LUsed := FModels[LUid];
+    if LUsed.InterfaceScope = NIL_SCOPE then
+      Continue;
+    LS := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
+    if (LS <> NIL_SYM) and (LUsed.Symbols[LS].DeclNode <> NIL_NODE) then
+    begin
+      ARMid := LUid;
+      ARSym := LS;
+      Exit(True);
+    end;
+  end;
+
+  LUid := EnsureSystemUnit;
+  if (LUid >= 0) and (LUid <> AMid) then
+  begin
+    LUsed := FModels[LUid];
+    if LUsed.InterfaceScope <> NIL_SCOPE then
+    begin
+      LS := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
+      if (LS <> NIL_SYM) and (LUsed.Symbols[LS].DeclNode <> NIL_NODE) then
+      begin
+        ARMid := LUid;
+        ARSym := LS;
+        Exit(True);
+      end;
+    end;
+  end;
 end;
 
 function TPasSemaProject.ModelCount: Integer;
@@ -809,7 +862,7 @@ function TPasSemaProject.FindMemberX(const ABase: TSemaXType;
 var
   LCur, LNext: TSemaXType;
   LM: TPasSemaModel;
-  LScope, LDef, LChild, LDepth, LFound: Integer;
+  LScope, LDef, LChild, LDepth, LFound, LRMid, LRSym: Integer;
 begin
   Result := False;
   AMemMid := NIL_SYM;
@@ -837,7 +890,23 @@ begin
     end;
     LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
     if LDef = NIL_NODE then
-      Exit;   // a builtin (TObject...) or non-decl type — nowhere to go
+    begin
+      // A compiler-seeded builtin (TObject, Exception, ...) has no source
+      // DeclNode in ITS OWN model, so there is normally nowhere to go — but
+      // it may be a REAL declaration somewhere reachable (System, or a used
+      // unit): redirect there and continue the walk instead of giving up.
+      // This is what lets `Obj.Free` (Obj: TObject) resolve at all: the
+      // synthetic TObject symbol has no MemberScope, but the real TObject
+      // class body (System.pas) does.
+      if ResolveRealDecl(LCur.UnitId, LM.Symbols[LCur.Sym].NameLower, LRMid,
+         LRSym) and ((LRMid <> LCur.UnitId) or (LRSym <> LCur.Sym)) then
+      begin
+        LCur.UnitId := LRMid;
+        LCur.Sym := LRSym;
+        Continue;
+      end;
+      Exit;   // truly nowhere to go
+    end;
     case LM.Tree.Nodes[LDef].Kind of
       nkIdent, nkMember, nkTypeArgs:
         LNext := ResolveTypeExpr(LCur.UnitId, LDef);   // type alias

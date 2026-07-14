@@ -7,7 +7,10 @@ unit PasTree.Sema.Nav;
   under it (IdentAt), and resolves that identifier to its declaration's
   file/line/col (ResolveDecl) through the resolver's RefMap (intra-unit) and
   the project's ExtRefMap (cross-unit — including the member references the
-  Phase-3c cross typer discovers through ancestor chains and generics).
+  Phase-3c cross typer discovers through ancestor chains, generics, AND now
+  through compiler-seeded builtins redirected to their real declaration via
+  TPasSemaProject.ResolveRealDecl/EnsureSystemUnit — e.g. `Obj.Free` where
+  Obj: TObject resolves into System.pas's real TObject class body).
 
   Pure lookups over the immutable models; per-model lookup tables are built
   lazily and cached. Built for editor hosts: the demo today, an LSP later.
@@ -58,8 +61,6 @@ type
     function CacheOf(AMid: Integer): TNavCache;
     function TargetFromNode(AMid, ANode: Integer; const AName: string;
       out ATarget: TPasNavTarget): Boolean;
-    function FindInUsesDecl(AMid: Integer; const ANameLower: string;
-      out ATMid, ASym: Integer): Boolean;
     function RoutineNameNodeOfSym(AMid, ASym: Integer): Integer;
   public
     constructor Create(AProject: TPasSemaProject);
@@ -216,54 +217,10 @@ begin
   Result := True;
 end;
 
-// A same-named symbol WITH a real declaration in one of AMid's used units'
-// interfaces, or (last resort) the implicit System unit. Handles a name that
-// resolved locally to a compiler-seeded builtin (no DeclNode) but is actually
-// declared somewhere real — e.g. TBytes resolves to the builtin yet is really
-// declared in System.SysUtils; TObject/TArray<T>/IInterface/... are really
-// declared in System, which every unit uses implicitly (never appears in
-// UsesList — see TPasSemaProject.EnsureSystemUnit).
-function TPasNavigator.FindInUsesDecl(AMid: Integer;
-  const ANameLower: string; out ATMid, ASym: Integer): Boolean;
-var
-  LM, LUsed: TPasSemaModel;
-  LIdx, LUid, LS: Integer;
-begin
-  Result := False;
-  LM := FProj.Model(AMid);
-  for LIdx := High(LM.UsesList) downto 0 do   // last uses wins, like resolution
-  begin
-    LUid := LM.UsesList[LIdx].UnitId;
-    if LUid < 0 then
-      Continue;
-    LUsed := FProj.Model(LUid);
-    if LUsed.InterfaceScope = NIL_SCOPE then
-      Continue;
-    LS := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
-    if (LS <> NIL_SYM) and (LUsed.Symbols[LS].DeclNode <> NIL_NODE) then
-    begin
-      ATMid := LUid;
-      ASym := LS;
-      Exit(True);
-    end;
-  end;
-
-  LUid := FProj.EnsureSystemUnit;
-  if (LUid >= 0) and (LUid <> AMid) then
-  begin
-    LUsed := FProj.Model(LUid);
-    if LUsed.InterfaceScope <> NIL_SCOPE then
-    begin
-      LS := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
-      if (LS <> NIL_SYM) and (LUsed.Symbols[LS].DeclNode <> NIL_NODE) then
-      begin
-        ATMid := LUid;
-        ASym := LS;
-        Exit(True);
-      end;
-    end;
-  end;
-end;
+// TPasSemaProject.ResolveRealDecl handles this: a same-named symbol WITH a
+// real declaration in AMid's used units, or (last resort) the implicit
+// System unit — e.g. TBytes resolves locally to a builtin yet is really
+// declared in System.SysUtils; TObject/TArray<T>/... in System.
 
 // The routine-name ident node of the routine/anon scope owning ASym — used to
 // send the implicit Result to its enclosing routine's declaration. Falls back
@@ -318,9 +275,10 @@ begin
       FProj.Model(LTMid).Symbols[LSym].Name, ATarget));
 
   // No source declaration (a compiler builtin or the implicit Result):
-  // 1) a builtin a used unit actually declares (TBytes -> System.SysUtils);
-  if FindInUsesDecl(AMid, LowerCase(LM.Tree.NodeText(ANode)), LFbMid, LFbSym)
-  then
+  // 1) a builtin a used unit (or the implicit System unit) actually declares
+  //    (TBytes -> System.SysUtils; TObject/TArray<T> -> System);
+  if FProj.ResolveRealDecl(AMid, LowerCase(LM.Tree.NodeText(ANode)), LFbMid,
+    LFbSym) then
     Exit(TargetFromNode(LFbMid, FProj.Model(LFbMid).Symbols[LFbSym].DeclNode,
       FProj.Model(LFbMid).Symbols[LFbSym].Name, ATarget));
   // 2) the implicit Result -> its enclosing routine's declaration.

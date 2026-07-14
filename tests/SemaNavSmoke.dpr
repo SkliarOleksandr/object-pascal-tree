@@ -60,6 +60,10 @@ const
   // clause (that's the whole point: every unit uses it without saying so),
   // yet TObject/TArray<T> below are REAL declarations PasTree.Sema.Nav must
   // find via TPasSemaProject.EnsureSystemUnit. Mirrors real System.pas.
+  // TObject.Free exercises the MEMBER fallback: the synthetic builtin
+  // TObject symbol has no MemberScope, so FindMemberX must redirect to
+  // THIS real class body to resolve `.Free` at all (see FindMemberX's
+  // ResolveRealDecl call for the "builtin, nowhere to go" case).
   UNIT_SYS =
     'unit System;'#10 +                        // 1
     'interface'#10 +                           // 2
@@ -67,12 +71,16 @@ const
     '  TArray<T> = array of T;'#10 +           // 4  TArray col 3
     '  TObject = class'#10 +                   // 5  TObject col 3
     '    constructor Create;'#10 +              // 6
-    '  end;'#10 +                              // 7
-    'implementation'#10 +                      // 8
-    'constructor TObject.Create;'#10 +          // 9
-    'begin'#10 +                               // 10
-    'end;'#10 +                                // 11
-    'end.'#10;                                 // 12
+    '    procedure Free;'#10 +                  // 7  Free col 15
+    '  end;'#10 +                              // 8
+    'implementation'#10 +                      // 9
+    'constructor TObject.Create;'#10 +          // 10
+    'begin'#10 +                               // 11
+    'end;'#10 +                                // 12
+    'procedure TObject.Free;'#10 +              // 13
+    'begin'#10 +                               // 14
+    'end;'#10 +                                // 15
+    'end.'#10;                                 // 16
 
   UNIT_B =
     'unit NavB;'#10 +                          // 1
@@ -88,12 +96,13 @@ const
     '  A: TArray<Integer>;'#10 +               // 11  TArray col 6
     'begin'#10 +                               // 12
     '  L := GT.Value;'#10 +                    // 13  GT col 8, Value col 11
-    'end;'#10 +                                // 14
-    'function GetLen: Integer;'#10 +           // 15  GetLen col 10
-    'begin'#10 +                               // 16
-    '  Result := 0;'#10 +                      // 17  Result col 3
-    'end;'#10 +                                // 18
-    'end.'#10;                                 // 19
+    '  O.Free;'#10 +                           // 14  Free col 5
+    'end;'#10 +                                // 15
+    'function GetLen: Integer;'#10 +           // 16  GetLen col 10
+    'begin'#10 +                               // 17
+    '  Result := 0;'#10 +                      // 18  Result col 3
+    'end;'#10 +                                // 19
+    'end.'#10;                                 // 20
 
 var
   GProj: TPasSemaProject;
@@ -173,8 +182,13 @@ begin
       // Implicit System unit, no `uses System` anywhere: TObject/TArray<T>.
       CheckNav('implicit System: TObject', 10, 6, 'TObject', 'System.pas', 5, 3);
       CheckNav('implicit System: TArray', 11, 6, 'TArray', 'System.pas', 4, 3);
+      // MEMBER access through a builtin: O.Free — the synthetic TObject
+      // symbol has no MemberScope; FindMemberX must redirect to the real
+      // TObject class body (System.pas) to resolve `.Free` at all.
+      CheckNav('member through builtin: O.Free', 14, 5, 'Free', 'System.pas',
+        7, 15);
       // Implicit Result -> its enclosing routine's declaration (GetLen).
-      CheckNav('result -> routine', 17, 3, 'Result', 'NavB.pas', 15, 10);
+      CheckNav('result -> routine', 18, 3, 'Result', 'NavB.pas', 16, 10);
 
       // Pure builtin: Integer has no source declaration anywhere in uses.
       Ok('builtin: IdentAt', GNav.IdentAt(GMidB, 8, 6, {out} LIdent));
