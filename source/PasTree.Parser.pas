@@ -1301,19 +1301,36 @@ begin
 end;
 
 procedure TPasParser.ParseHintsOpt(ANode: Integer);
+var
+  LHint: Integer;
 begin
-  // 2.5.2 hint directives after a declaration.
+  // 2.5.2 hint directives after a declaration. Each hint is its own
+  // nkDirective child (mirroring ParseRoutineDirectives), so the demo
+  // highlighter's AST-precise BuildWeakKeywordSpans can color it — a hint
+  // consumed by plain Next with no node (the old behavior) is invisible to
+  // that walk and stays uncolored (real bug: `X = 1 deprecated 'msg';`).
   while True do
   begin
     if IsWord('deprecated') then
     begin
+      LHint := FB.AddNode(nkDirective, NIL_NODE, FPos);
       Next;
       if CurKind = tkStringLiteral then
+      begin
+        FB.Adopt(LHint, FB.AddNode(nkStrLit, NIL_NODE, FPos));
         Next;
+      end;
+      FB.SetLast(LHint, FPos - 1);
+      FB.Adopt(ANode, LHint);
     end
     else if IsWord('platform') or IsWord('experimental') or
       (CurKind = tkLibrary) then
-      Next
+    begin
+      LHint := FB.AddNode(nkDirective, NIL_NODE, FPos);
+      Next;
+      FB.SetLast(LHint, FPos - 1);
+      FB.Adopt(ANode, LHint);
+    end
     else
       Break;
   end;
