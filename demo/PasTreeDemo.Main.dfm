@@ -38,6 +38,7 @@ object frmMain: TfrmMain
     Align = alTop
     BevelOuter = bvNone
     TabOrder = 0
+    ExplicitWidth = 1174
     object btnOpen: TButton
       Left = 8
       Top = 7
@@ -133,6 +134,8 @@ object frmMain: TfrmMain
     ScrollBars = ssBoth
     TabOrder = 2
     WordWrap = False
+    ExplicitTop = 552
+    ExplicitWidth = 1174
   end
   object pgc: TPageControl
     Left = 264
@@ -142,6 +145,8 @@ object frmMain: TfrmMain
     ActivePage = tsJson
     Align = alClient
     TabOrder = 3
+    ExplicitWidth = 910
+    ExplicitHeight = 507
     object tsJson: TTabSheet
       Caption = 'AST JSON'
       object edJson: TSynEdit
@@ -170,6 +175,8 @@ object frmMain: TfrmMain
         IndentGuides.Visible = False
         IndentGuides.StructureHighlight = False
         ScrollbarAnnotations = <>
+        ExplicitWidth = 902
+        ExplicitHeight = 477
       end
     end
     object tsSema: TTabSheet

@@ -76,14 +76,23 @@ type
     FSemaProject: TPasSemaProject; // kept alive after RunParse (navigation)
     FNav: TPasNavigator;           // go-to-declaration over FSemaProject
     FLinkTab: TObject;             // TSourceTab currently showing a link
+    FReparseTimer: TTimer;         // debounces re-analysis after edits
+    FLoadingFile: Boolean;         // suppresses OnChange during programmatic load
+    FStudioRoot: string;           // RAD Studio root (for RTL search paths)
     procedure SetupControls;
     procedure ApplyPasTreePalette(AHL: TSynPasSyn);
     procedure EnsureSampleProject;
     function ExeDir: string;
+    function StudioRoot: string;
+    function ExtraSearchPaths: TArray<string>;
     procedure OpenProject(const AProjectFile: string);
     procedure PopulateTree;
     function OpenFileTab(const APath: string): TSynEdit;
+    function Analyze: Boolean;
     procedure RunParse;
+    procedure ReanalyzeForNav;
+    procedure EditorChange(Sender: TObject);
+    procedure ReparseTimerTick(Sender: TObject);
     procedure Log(const AText: string);
     // go-to-declaration (ctrl+hover link / ctrl+click)
     function ResolveAt(AEditor: TSynEdit; X, Y: Integer;
@@ -117,17 +126,36 @@ type
 
 const
   SAMPLE_DPR =
-    'program Sample;'#13#10 +
-    #13#10 +
-    '{$APPTYPE CONSOLE}'#13#10 +
-    #13#10 +
-    'uses'#13#10 +
-    '  System.SysUtils;'#13#10 +
-    #13#10 +
-    'begin'#13#10 +
-    '  Writeln(''Hello, world!'');'#13#10 +
-    '  Readln;'#13#10 +
-    'end.'#13#10;
+  '''
+  program Sample;
+
+  {$APPTYPE CONSOLE}
+
+  uses
+    System.SysUtils;
+
+  type
+    TMyInt = Integer;
+
+  const
+    CBYTESLEN = 8;
+
+  var
+    MyInt: TMyInt;
+    Bytes: TBytes;
+
+  function CreateBytes(ALen: Integer): TBytes;
+  begin
+    SetLength(Result, ALen);
+  end;
+
+  begin
+    MyInt := 42;
+    Bytes := CreateBytes(CBYTESLEN);
+    Writeln('Hello, world!');
+    Readln;
+  end.
+  ''';
 
 { helpers }
 
@@ -159,11 +187,19 @@ begin
   FFileList := TStringList.Create;
   FOpenFiles := TStringList.Create;
   FPlatform := pfWin32;
+  FStudioRoot := StudioRoot;   // resolve once; RTL search paths reuse it
+  // Debounces re-analysis while typing: an edit (re)starts the timer, and only
+  // when it fires (the user paused) do we re-analyze to refresh navigation.
+  FReparseTimer := TTimer.Create(Self);
+  FReparseTimer.Enabled := False;
+  FReparseTimer.Interval := 500;
+  FReparseTimer.OnTimer := ReparseTimerTick;
   SetupControls;
   EnsureSampleProject;
   // Open the bundled sample by default and analyze it immediately so the
-  // Semantics tab is populated on launch.
+  // Semantics tab (and navigation) are populated on launch.
   OpenProject(TPath.Combine(TPath.Combine(ExeDir, 'Sample'), 'Sample.dpr'));
+  RunParse;
 end;
 
 procedure TfrmMain.FormDestroy(Sender: TObject);
@@ -399,6 +435,7 @@ begin
   Result.OnMouseMove := EditorMouseMove;
   Result.OnMouseDown := EditorMouseDown;
   Result.OnKeyUp := EditorKeyUp;
+  Result.OnChange := EditorChange;   // edits debounce a nav re-analysis
 
   // Our own PasTree-lexer-driven highlighter — one instance per tab (it
   // caches the tokenization of its own attached buffer, so instances can't
@@ -410,11 +447,16 @@ begin
     Result.Highlighter := FSynPasHL
   else
     Result.Highlighter := LHL;
+  FLoadingFile := True;   // don't let the programmatic load arm the reparse timer
   try
-    Result.Lines.LoadFromFile(APath);
-  except
-    on E: Exception do
-      Result.Text := '{ could not load: ' + E.Message + ' }';
+    try
+      Result.Lines.LoadFromFile(APath);
+    except
+      on E: Exception do
+        Result.Text := '{ could not load: ' + E.Message + ' }';
+    end;
+  finally
+    FLoadingFile := False;
   end;
   LTab.Editor := Result;
   LTab.PasTreeHL := LHL;
@@ -443,9 +485,9 @@ begin
   if LMid < 0 then
     Exit;   // file not part of the last analysis
   LBC := AEditor.DisplayToBufferPos(AEditor.PixelsToRowColumn(X, Y));
-  if not FNav.IdentAt(LMid, LBC.Line, LBC.Char, LIdent) then
+  if not FNav.IdentAt(LMid, LBC.Line, LBC.Char, {out} LIdent) then
     Exit;
-  if not FNav.ResolveDecl(LMid, LIdent.Node, ATarget) then
+  if not FNav.ResolveDecl(LMid, LIdent.Node, {out} ATarget) then
     Exit;
   ARawToken := LIdent.RawToken;
   Result := True;
@@ -486,7 +528,7 @@ var
   LTarget: TPasNavTarget;
 begin
   if (ssCtrl in Shift) and
-     ResolveAt(TSynEdit(Sender), X, Y, LRaw, LTarget) then
+     ResolveAt(TSynEdit(Sender), X, Y, {out} LRaw, {out} LTarget) then
     SetLink(TSynEdit(Sender).Parent, LRaw)
   else
     ClearLink;
@@ -495,26 +537,37 @@ end;
 procedure TfrmMain.EditorMouseDown(Sender: TObject; Button: TMouseButton;
   Shift: TShiftState; X, Y: Integer);
 var
-  LEditor, LTargetEd: TSynEdit;
-  LTab: TSourceTab;
+  LEditor: TSynEdit;
+  LSameFile: Boolean;
   LRaw: Integer;
   LTarget: TPasNavTarget;
 begin
   if (Button <> mbLeft) or not (ssCtrl in Shift) then
     Exit;
   LEditor := TSynEdit(Sender);
-  if not ResolveAt(LEditor, X, Y, LRaw, LTarget) then
+  if not ResolveAt(LEditor, X, Y, {out} LRaw, {out} LTarget) then
     Exit;
   ClearLink;
-  LTab := TSourceTab(LEditor.Parent);
-  if SameText(LTarget.FilePath, LTab.FilePath) then
-    LTargetEd := LEditor                        // same unit: jump in place
-  else
-    LTargetEd := OpenFileTab(LTarget.FilePath); // other unit: (re)open a tab
-  LTargetEd.CaretXY := BufferCoord(LTarget.Col, LTarget.Line);
-  LTargetEd.EnsureCursorPosVisible;
-  if LTargetEd.CanFocus then
-    LTargetEd.SetFocus;
+  LSameFile := SameText(LTarget.FilePath, TSourceTab(LEditor.Parent).FilePath);
+  // SynEdit's own MouseDown moves the caret to the click position AFTER this
+  // handler returns (inherited MouseDown fires us, THEN MoveDisplayPosAnd-
+  // Selection), clobbering our jump — which is why it previously only "worked"
+  // on a double-click, where SynEdit bails early on ssDouble. Defer the jump so
+  // it runs after SynEdit's caret move, and a single ctrl+click lands correctly.
+  TThread.ForceQueue(nil,
+    procedure
+    var
+      LTargetEd: TSynEdit;
+    begin
+      if LSameFile then
+        LTargetEd := LEditor                        // same unit: jump in place
+      else
+        LTargetEd := OpenFileTab(LTarget.FilePath); // other unit: (re)open a tab
+      LTargetEd.CaretXY := BufferCoord(LTarget.Col, LTarget.Line);
+      LTargetEd.EnsureCursorPosVisible;
+      if LTargetEd.CanFocus then
+        LTargetEd.SetFocus;
+    end);
 end;
 
 procedure TfrmMain.EditorKeyUp(Sender: TObject; var Key: Word;
@@ -524,19 +577,21 @@ begin
     ClearLink;
 end;
 
-procedure TfrmMain.RunParse;
+// Analysis core, shared by the loud RunParse and the quiet ReanalyzeForNav.
+// Recreates FSemaProject/FNav (the previous ones, and any hover link into
+// them, die here) and — crucially — feeds every OPEN editor's current text as
+// a buffer override, so analysis (and thus navigation) matches what's on
+// screen, including unsaved edits. Returns False only if no project is open.
+function TfrmMain.Analyze: Boolean;
 var
   LPlatform: TPasPlatform;
-  LMain, LDiagTotal, LId, LDIdx: Integer;
-  LModel: TPasSemaModel;
   LSearchPaths, LDefines: TArray<string>;
-  LSW: TStopwatch;
+  LIdx: Integer;
+  LTab: TSourceTab;
 begin
+  Result := False;
   if (FProjectDir = '') or not TDirectory.Exists(FProjectDir) then
-  begin
-    Log('No project open.');
     Exit;
-  end;
   if cbPlatform.ItemIndex = 1 then
     LPlatform := pfWin64
   else
@@ -552,28 +607,53 @@ begin
     LSearchPaths := [FProjectDir];
     LDefines := [];
   end;
+  LSearchPaths := LSearchPaths + ExtraSearchPaths;   // System.* -> RTL sources
 
+  ClearLink;
+  FreeAndNil(FNav);
+  FreeAndNil(FSemaProject);
+  FSemaProject := TPasSemaProject.Create(LPlatform, LSearchPaths, LDefines);
+  FSemaProject.SingleThreaded := cbThreading.ItemIndex = 0;
+  for LIdx := 0 to FOpenFiles.Count - 1 do
+  begin
+    LTab := TSourceTab(FOpenFiles.Objects[LIdx]);
+    FSemaProject.SetBuffer(LTab.FilePath, LTab.Editor.Text);
+  end;
+
+  // A .dproj drives the real uses-graph from its main source (correctly
+  // reaching units outside FProjectDir); a plain .dpr falls back to
+  // "everything under this folder" for simplicity.
+  if Assigned(FDProj) and (FMainSource <> '') then
+    FSemaProject.AnalyzeFile(FMainSource)
+  else
+    FSemaProject.AnalyzeDirectory(FProjectDir);
+  FNav := TPasNavigator.Create(FSemaProject);
+  Result := True;
+end;
+
+procedure TfrmMain.RunParse;
+var
+  LMain, LDiagTotal, LId, LDIdx: Integer;
+  LModel: TPasSemaModel;
+  LSW: TStopwatch;
+begin
+  if (FProjectDir = '') or not TDirectory.Exists(FProjectDir) then
+  begin
+    Log('No project open.');
+    Exit;
+  end;
+  FReparseTimer.Enabled := False;   // this analysis supersedes a pending one
   mmMessages.Clear;
-  Log('Analyzing ' + FProjectDir + ' (' + PlatformName(LPlatform) + ')...');
+  Log('Analyzing ' + FProjectDir + ' (' + cbPlatform.Text + ')...');
   Screen.Cursor := crHourGlass;
   try
-    // The previous analysis (and its navigator, and any hover link into it)
-    // dies here; the fresh one is KEPT ALIVE for go-to-declaration.
-    ClearLink;
-    FreeAndNil(FNav);
-    FreeAndNil(FSemaProject);
-    FSemaProject := TPasSemaProject.Create(LPlatform, LSearchPaths, LDefines);
-    FSemaProject.SingleThreaded := cbThreading.ItemIndex = 0;
-    // A .dproj drives the real uses-graph from its main source (correctly
-    // reaching units outside FProjectDir); a plain .dpr falls back to
-    // "everything under this folder" for simplicity.
     LSW := TStopwatch.StartNew;
-    if Assigned(FDProj) and (FMainSource <> '') then
-      FSemaProject.AnalyzeFile(FMainSource)
-    else
-      FSemaProject.AnalyzeDirectory(FProjectDir);
+    if not Analyze then
+    begin
+      Log('Analysis failed.');
+      Exit;
+    end;
     LSW.Stop;
-    FNav := TPasNavigator.Create(FSemaProject);
 
     // Locate the main unit's model, and report every unit's diagnostics.
     LMain := -1;
@@ -610,6 +690,37 @@ begin
   end;
 end;
 
+// Quiet re-analysis after an edit: rebuilds the model + navigator so
+// ctrl+hover/click keep matching the edited buffer, WITHOUT touching the tabs,
+// the AST/Semantics views or the message log (that would fight the typist).
+procedure TfrmMain.ReanalyzeForNav;
+begin
+  if (FProjectDir = '') or not TDirectory.Exists(FProjectDir) then
+    Exit;
+  Screen.Cursor := crHourGlass;
+  try
+    Analyze;
+  finally
+    Screen.Cursor := crDefault;
+  end;
+end;
+
+procedure TfrmMain.ReparseTimerTick(Sender: TObject);
+begin
+  FReparseTimer.Enabled := False;
+  ReanalyzeForNav;
+end;
+
+// Any real edit (re)arms the debounce timer; programmatic loads are excluded.
+procedure TfrmMain.EditorChange(Sender: TObject);
+begin
+  if FLoadingFile then
+    Exit;
+  ClearLink;                        // the stale model no longer matches the text
+  FReparseTimer.Enabled := False;
+  FReparseTimer.Enabled := True;
+end;
+
 { event handlers }
 
 procedure TfrmMain.btnOpenClick(Sender: TObject);
@@ -632,66 +743,87 @@ begin
   RunParse;
 end;
 
+// The RAD Studio installation root: %BDS% (set under a RAD Studio command
+// prompt) if present, else the registry (current user then machine-wide,
+// highest installed version). '' if none found.
+function TfrmMain.StudioRoot: string;
+const
+  ROOTS: array [0 .. 1] of HKEY = (HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE);
+var
+  LReg: TRegistry;
+  LKeys: TStringList;
+  LIdx: Integer;
+  LBest: Double;
+  LVer: Double;
+  LDir: string;
+begin
+  Result := GetEnvironmentVariable('BDS');
+  if (Result <> '') and TDirectory.Exists(Result) then
+    Exit;
+  Result := '';
+  LBest := 0;
+  LKeys := TStringList.Create;
+  try
+    for LIdx := Low(ROOTS) to High(ROOTS) do
+    begin
+      LReg := TRegistry.Create(KEY_READ);
+      try
+        LReg.RootKey := ROOTS[LIdx];
+        if not LReg.OpenKeyReadOnly('SOFTWARE\Embarcadero\BDS') then
+          Continue;
+        LKeys.Clear;
+        LReg.GetKeyNames(LKeys);
+        for var LKey in LKeys do
+          if TryStrToFloat(LKey, LVer, TFormatSettings.Invariant) and
+             (LVer > LBest) and
+             LReg.OpenKeyReadOnly('\SOFTWARE\Embarcadero\BDS\' + LKey) then
+          begin
+            LDir := LReg.ReadString('RootDir');
+            if (LDir <> '') and TDirectory.Exists(LDir) then
+            begin
+              LBest := LVer;
+              Result := LDir;
+            end;
+          end;
+      finally
+        LReg.Free;
+      end;
+    end;
+  finally
+    LKeys.Free;
+  end;
+end;
+
+// RTL source directories to add to every project's search paths, so `uses
+// System.SysUtils` (and other System.* units) resolve and get analyzed —
+// which is what makes cross-unit go-to-declaration into the RTL work (e.g.
+// ctrl+click TBytes -> System.SysUtils). Empty when Studio isn't found; a
+// unit's own $I includes resolve relative to it, so listing the unit dirs
+// (sys/common/win/net) is enough.
+function TfrmMain.ExtraSearchPaths: TArray<string>;
+var
+  LRtl, LDir: string;
+begin
+  Result := [];
+  if FStudioRoot = '' then
+    Exit;
+  LRtl := TPath.Combine(FStudioRoot, 'source\rtl');
+  for var LSub in ['sys', 'common', 'win', 'net'] do
+  begin
+    LDir := TPath.Combine(LRtl, LSub);
+    if TDirectory.Exists(LDir) then
+      Result := Result + [LDir];
+  end;
+end;
+
 // Opens and analyzes the installed Studio's Win RTL package project
 // (source\rtl\BuildWinRTL.dproj — its `contains` list is the full Windows
 // RTL, ~310 units) through the regular project flow.
 procedure TfrmMain.btnParseRtlClick(Sender: TObject);
-
-  // %BDS% is set under a RAD Studio command prompt; a normally-launched demo
-  // falls back to the registry (current user first, then machine-wide),
-  // taking the highest installed version.
-  function StudioRoot: string;
-  const
-    ROOTS: array [0 .. 1] of HKEY = (HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE);
-  var
-    LReg: TRegistry;
-    LKeys: TStringList;
-    LIdx: Integer;
-    LBest: Double;
-    LVer: Double;
-    LDir: string;
-  begin
-    Result := GetEnvironmentVariable('BDS');
-    if (Result <> '') and TDirectory.Exists(Result) then
-      Exit;
-    Result := '';
-    LBest := 0;
-    LKeys := TStringList.Create;
-    try
-      for LIdx := Low(ROOTS) to High(ROOTS) do
-      begin
-        LReg := TRegistry.Create(KEY_READ);
-        try
-          LReg.RootKey := ROOTS[LIdx];
-          if not LReg.OpenKeyReadOnly('SOFTWARE\Embarcadero\BDS') then
-            Continue;
-          LKeys.Clear;
-          LReg.GetKeyNames(LKeys);
-          for var LKey in LKeys do
-            if TryStrToFloat(LKey, LVer, TFormatSettings.Invariant) and
-               (LVer > LBest) and
-               LReg.OpenKeyReadOnly('\SOFTWARE\Embarcadero\BDS\' + LKey) then
-            begin
-              LDir := LReg.ReadString('RootDir');
-              if (LDir <> '') and TDirectory.Exists(LDir) then
-              begin
-                LBest := LVer;
-                Result := LDir;
-              end;
-            end;
-        finally
-          LReg.Free;
-        end;
-      end;
-    finally
-      LKeys.Free;
-    end;
-  end;
-
 var
   LDProj: string;
 begin
-  LDProj := TPath.Combine(StudioRoot, 'source\rtl\BuildWinRTL.dproj');
+  LDProj := TPath.Combine(FStudioRoot, 'source\rtl\BuildWinRTL.dproj');
   if not TFile.Exists(LDProj) then
   begin
     Log('RTL project not found: ' + LDProj);
