@@ -28,8 +28,9 @@ unit PasTreeDemo.Highlighter;
   Scope: mostly lexical (TPasLexer output drives every color), but weak
   keywords (below) are resolved with real POSITION information from the full
   pipeline (TPasPreprocessor + TPasParser), not just a flat word list.
-  $IFDEF'd-out regions are still not greyed out (a possible future use of the
-  same preprocessor pass, not done here).
+  $IFDEF'd-out (not-compiled-under-current-defines) regions ARE greyed out —
+  a single flat PAS_INACTIVE_COLOR overriding every other color uniformly,
+  same as real Delphi IDE — via TPasPreprocessed.Skipped (see MarkInactiveTokens).
 
   One deliberate, clearly-scoped exception to "raw lexer output only": true
   reserved words (spec B.4.1 — begin/end/if/class/...) get their Keyword color
@@ -97,6 +98,12 @@ const
   PAS_STRING_COLOR = clMaroon;
   PAS_NUMBER_COLOR = clPurple;
   PAS_ASM_BACKGROUND = clInfoBk;
+  { $IFDEF'd-out (not compiled under the current defines) source — a flat,
+    unstyled grey, deliberately overriding every OTHER color uniformly (a
+    keyword or a string inside dead code is still just dead code, same as
+    real Delphi IDE behavior: the whole excluded block goes one flat shade,
+    not a de-saturated version of each token's usual color). }
+  PAS_INACTIVE_COLOR = clGrayText;
 
 type
   TPasTreeSynHighlighter = class(TSynCustomHighlighter)
@@ -117,6 +124,7 @@ type
     FPreprocessor: TPasPreprocessor;   // reused across EnsureFresh calls
     FHaveAst: Boolean;             // True when FWeakKeywordToken is AST-precise
     FWeakKeywordToken: TArray<Boolean>; // AST-precise, indexed by raw token idx
+    FInactiveToken: TArray<Boolean>; // True: raw token lies in a skipped $IFDEF region
     FWhitespaceAttri: TSynHighlighterAttributes;
     FCommentAttri: TSynHighlighterAttributes;
     FDirectiveAttri: TSynHighlighterAttributes;
@@ -130,9 +138,11 @@ type
     FWeakKeywords: TDictionary<string, Boolean>; // DIRECTIVE_WORDS + VISIBILITY_WORDS
     FLinkAttri: TSynHighlighterAttributes;
     FLinkToken: Integer;           // raw token idx shown as a ctrl+hover link
+    FInactiveAttri: TSynHighlighterAttributes;
     function IsWeakKeyword: Boolean;
     procedure BuildWeakKeywordSpans(const ATree: TPasTree;
       const APreprocessed: TPasPreprocessed);
+    procedure MarkInactiveTokens(const ASkipped: TArray<TPasSkippedRegion>);
     procedure EnsureFresh;
     function LineStartOffset(ALineNumber: Integer): Integer;
     function LocateStartToken(AOffset: Integer): Integer;
@@ -229,6 +239,11 @@ begin
   FLinkAttri.Style := [fsUnderline];
   AddAttribute(FLinkAttri);
   FLinkToken := -1;
+
+  FInactiveAttri := TSynHighlighterAttributes.Create('Inactive',
+    'Inactive $IFDEF''d-out code');
+  FInactiveAttri.Foreground := PAS_INACTIVE_COLOR;
+  AddAttribute(FInactiveAttri);
 
   SetAttributesOnChange(DefHighlightChange);
 
@@ -365,6 +380,17 @@ begin
   SetLength(FWeakKeywordToken, FTokenCount);
   if FTokenCount > 0 then
     FillChar(FWeakKeywordToken[0], FTokenCount * SizeOf(Boolean), 0);
+  SetLength(FInactiveToken, FTokenCount);
+  if FTokenCount > 0 then
+    FillChar(FInactiveToken[0], FTokenCount * SizeOf(Boolean), 0);
+
+  // Skipped ($IFDEF'd-out) regions are a PREPROCESSOR-only concept, known
+  // whether or not the subsequent parse succeeds — mark them regardless of
+  // FHaveAst below. LPreprocessed.Skipped[0] is the main buffer's own list
+  // (per-file, sorted); a bare-lex fallback (LPreprocessedOk = False) has
+  // no such list, so FInactiveToken correctly stays all-False (just reset).
+  if LPreprocessedOk and (Length(LPreprocessed.Skipped) > 0) then
+    MarkInactiveTokens(LPreprocessed.Skipped[0]);
 
   if LPreprocessedOk then
     try
@@ -374,6 +400,34 @@ begin
     except
       FHaveAst := False; // IsWeakKeyword falls back to the flat word list
     end;
+end;
+
+// Marks every raw token whose start offset falls inside a skipped $IFDEF
+// region as inactive — a single linear merge over both (sorted) lists, same
+// complexity discipline as the rest of this highlighter (see EnsureFresh's
+// header comment on why an O(tokens) pass, not per-token binary search,
+// matters for large real files). Directive tokens themselves ({$IFDEF}/
+// {$ELSE}/{$ENDIF}) are never inside a region (PasTree.Preprocessor.
+// MarkSkipped starts a region AFTER the deactivating directive and ends it
+// AT the reactivating one), so they keep their normal Directive color —
+// matching real Delphi IDE behavior where the markers stay visible and only
+// the body between them greys out.
+procedure TPasTreeSynHighlighter.MarkInactiveTokens(
+  const ASkipped: TArray<TPasSkippedRegion>);
+var
+  LTok, LReg: Integer;
+begin
+  LReg := 0;
+  for LTok := 0 to FTokenCount - 1 do
+  begin
+    while (LReg < Length(ASkipped)) and
+          (FTokenStream.Tokens[LTok].Start >= ASkipped[LReg].EndPos) do
+      Inc(LReg);
+    if LReg >= Length(ASkipped) then
+      Break;
+    if FTokenStream.Tokens[LTok].Start >= ASkipped[LReg].Start then
+      FInactiveToken[LTok] := True;
+  end;
 end;
 
 // Walks the parsed tree once, marking every raw token index that is a "bare"
@@ -515,6 +569,12 @@ end;
 
 function TPasTreeSynHighlighter.GetTokenAttribute: TSynHighlighterAttributes;
 begin
+  // Inactive code overrides EVERYTHING else uniformly — a keyword, string or
+  // "unterminated" token inside a skipped $IFDEF region is not a real error
+  // (dcc never looks at it either); it's just dead text.
+  if (FCurTokenAbsIdx >= 0) and (FCurTokenAbsIdx < Length(FInactiveToken)) and
+     FInactiveToken[FCurTokenAbsIdx] then
+    Exit(FInactiveAttri);
   if FCurUnterminated then
     Exit(FErrorAttri);
   case FCurKind of
