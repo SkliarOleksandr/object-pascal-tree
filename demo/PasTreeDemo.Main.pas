@@ -28,6 +28,7 @@ uses
   PasTree.Sema.Nav,
   PasTree.Sema.Dump, VirtualTrees.BaseAncestorVCL, VirtualTrees.BaseTree, VirtualTrees.AncestorVCL, SynEditCodeFolding,
   PasTreeDemo.Highlighter;
+  // System
 
 type
   // VirtualTree node payload: an index into FFileList (unmanaged, so the tree
@@ -141,8 +142,10 @@ const
     CBYTESLEN = 8;
 
   var
+    S: string;
     MyInt: TMyInt;
     Bytes: TBytes;
+    Arr: TArray<Integer>;
 
   function CreateBytes(ALen: Integer): TBytes;
   begin
@@ -150,6 +153,8 @@ const
   end;
 
   begin
+    S := '';
+    Arr := [];
     MyInt := 42;
     Bytes := CreateBytes(CBYTESLEN);
     Writeln('Hello, world!');
