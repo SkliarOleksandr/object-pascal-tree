@@ -153,7 +153,7 @@ const
   end;
 
   begin
-    S := '';
+    S := sLineBreak;
     Arr := [];
     MyInt := 42;
     Bytes := CreateBytes(CBYTESLEN);
