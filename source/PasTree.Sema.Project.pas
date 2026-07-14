@@ -24,6 +24,7 @@ interface
 
 uses
   System.SysUtils,
+  System.SyncObjs,
   System.Generics.Collections,
   PasTree.Preprocessor,
   PasTree.Platforms,
@@ -55,6 +56,16 @@ type
     FSingleThreaded: Boolean;
     FSystemUnitId: Integer;                // memoized EnsureSystemUnit result
     FSystemUnitResolved: Boolean;
+    // Guards EnsureSystemUnit: unlike ResolveUses (always sequential) and
+    // CrossType/BindTypesX (deliberately sequential — see the Phase 3c
+    // comment above), CrossResolve runs ONE WORKER PER CORE by default
+    // (ForEachIndex) and is the only caller of EnsureSystemUnit that can
+    // race — several units' CrossResolve can hit an unresolved implicit-
+    // System name (e.g. sLineBreak) on different threads at the same
+    // instant, all racing the SAME first-time LoadFile (which mutates the
+    // shared FModels/FByPath, neither thread-safe) — real, not
+    // hypothetical: reproduced via SemaProjectSmoke's UnitE fixture.
+    FSystemUnitLock: TCriticalSection;
     // Phase 3c: cross-model typing.
     FInstances: TList<TSemaInstance>;
     FInstKeys: TDictionary<string, Integer>;
@@ -66,6 +77,8 @@ type
     procedure ResolveUses(AId: Integer);
     procedure CrossResolve(AId: Integer);
     function FindInUses(AId: Integer; const ANameLower: string;
+      out AUnit, ASym: Integer): Boolean;
+    function FindInSystemUnit(const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
     function UsesUnitOf(AId, ASym: Integer): Integer;
     function LocalHead(AModel: TPasSemaModel; ANode: Integer): Integer;
@@ -163,10 +176,12 @@ begin
   FInstKeys := TDictionary<string, Integer>.Create;
   FSystemUnitId := -1;
   FSystemUnitResolved := False;
+  FSystemUnitLock := TCriticalSection.Create;
 end;
 
 destructor TPasSemaProject.Destroy;
 begin
+  FSystemUnitLock.Free;
   FInstKeys.Free;
   FInstances.Free;
   FByPath.Free;
@@ -199,13 +214,23 @@ function TPasSemaProject.EnsureSystemUnit: Integer;
 var
   LPath: string;
 begin
-  if not FSystemUnitResolved then
-  begin
-    FSystemUnitResolved := True;
-    if FSM.ResolveUnit('System', '', '', LPath) then
-      FSystemUnitId := LoadFile(LPath);
+  // Locked unconditionally (no unlocked fast-path read of FSystemUnitResolved)
+  // — this is called only for identifiers that missed local/explicit-uses
+  // resolution, never once per token, so the lock is not a hot-path cost; a
+  // "check outside, lock, check again" version would just reintroduce the
+  // exact race this exists to fix, for a saving that doesn't matter here.
+  FSystemUnitLock.Enter;
+  try
+    if not FSystemUnitResolved then
+    begin
+      FSystemUnitResolved := True;
+      if FSM.ResolveUnit('System', '', '', LPath) then
+        FSystemUnitId := LoadFile(LPath);
+    end;
+    Result := FSystemUnitId;
+  finally
+    FSystemUnitLock.Leave;
   end;
-  Result := FSystemUnitId;
 end;
 
 function TPasSemaProject.ResolveRealDecl(AMid: Integer;
@@ -436,6 +461,35 @@ begin
     end;
   end;
   Result := False;
+end;
+
+// Every unit implicitly uses System (1.2.1 / 11.2.1) without naming it in a
+// `uses` clause, so FindInUses (which only walks the model's OWN UsesList)
+// can never find a name declared ONLY there — sLineBreak, PathDelim, and
+// similar System-only RTL identifiers were false E2003s until this existed.
+// Tried as the LAST resort in CrossResolve, after explicit uses, matching
+// real dcc lookup order; a miss here changes nothing — the normal
+// AllUsesResolved-gated E2003 still applies exactly as before.
+function TPasSemaProject.FindInSystemUnit(const ANameLower: string;
+  out AUnit, ASym: Integer): Boolean;
+var
+  LUid, LSym: Integer;
+  LUsed: TPasSemaModel;
+begin
+  Result := False;
+  LUid := EnsureSystemUnit;
+  if LUid < 0 then
+    Exit;
+  LUsed := FModels[LUid];
+  if LUsed.InterfaceScope = NIL_SCOPE then
+    Exit;
+  LSym := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
+  if LSym <> NIL_SYM then
+  begin
+    AUnit := LUid;
+    ASym := LSym;
+    Result := True;
+  end;
 end;
 
 // The local symbol a designator head resolved to (reads RefMap only).
@@ -1288,6 +1342,11 @@ begin
           if (LNameLower = 'result') or (LNameLower = 'self') then
             Continue;   // implicit routine/method names
           if FindInUses(AId, LNameLower, LUid, LSym) then
+          begin
+            LExt.UnitId := LUid; LExt.Sym := LSym;
+            LModel.ExtRefMap.Add(LNode, LExt);
+          end
+          else if FindInSystemUnit(LNameLower, LUid, LSym) then
           begin
             LExt.UnitId := LUid; LExt.Sym := LSym;
             LModel.ExtRefMap.Add(LNode, LExt);

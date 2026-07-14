@@ -51,6 +51,20 @@ const
     'unit UnitD;'#10'interface'#10'uses NoSuchUnit;'#10'implementation'#10 +
     'procedure Q;'#10'begin'#10'  Whatever := 2;'#10'end;'#10'end.'#10;
 
+  // A fixture for the IMPLICIT `System` unit (mirrors the real sLineBreak
+  // shape) -- every unit uses it without a `uses` clause naming it. UnitE
+  // below references SYS_CONST with NO uses clause at all; CrossResolve's
+  // FindInSystemUnit fallback must resolve it (real dcc always can) instead
+  // of firing a false E2003.
+  UNIT_SYS =
+    'unit System;'#10'interface'#10 +
+    'const SYS_CONST = 42;'#10'implementation'#10'end.'#10;
+
+  UNIT_E =
+    'unit UnitE;'#10'interface'#10'implementation'#10 +
+    'procedure R;'#10'var L: Integer;'#10'begin'#10 +
+    '  L := SYS_CONST;'#10'end;'#10'end.'#10;
+
   // Cross-unit overloads: F lives in two used units with different arities.
   UNIT_OVL1 =
     'unit UnitOvl1;'#10'interface'#10 +
@@ -133,7 +147,7 @@ end;
 
 var
   LDir: string;
-  LA, LB, LC, LD, LOvl: TPasSemaModel;
+  LA, LB, LC, LD, LE, LOvl: TPasSemaModel;
 begin
   GPassed := 0; GFailed := 0;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_proj');
@@ -143,6 +157,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitA.pas'), UNIT_A);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitB.pas'), UNIT_B);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitC.pas'), UNIT_C);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), UNIT_SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitE.pas'), UNIT_E);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitD.pas'), UNIT_D);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitOvl1.pas'), UNIT_OVL1);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitOvl2.pas'), UNIT_OVL2);
@@ -180,6 +196,17 @@ begin
     // D: an unresolvable use -> E2003 suppressed.
     Ok('D: uses NOT fully resolved', not LD.AllUsesResolved);
     Ok('D: E2003 suppressed', DiagCount(LD, 'E2003') = 0);
+
+    // E: NO `uses` clause at all, references a name declared ONLY in the
+    // IMPLICIT System unit (mirrors the real sLineBreak shape) -- real dcc
+    // always resolves this; CrossResolve's FindInSystemUnit fallback must
+    // suppress the E2003 that would otherwise fire here.
+    LE := ModelByName('unite');
+    Ok('E: loaded', Assigned(LE));
+    Ok('E: SYS_CONST resolved via implicit System',
+      CrossRefTo(LE, 'SYS_CONST', 'SYS_CONST'));
+    Ok('E: no E2003 (implicit System, not a false undeclared-id)',
+      DiagCount(LE, 'E2003') = 0);
 
     // Cross-unit overload arity: merged candidate set from UnitOvl1 + UnitOvl2.
     LOvl := ModelByName('unitovluse');
