@@ -716,6 +716,13 @@ procedure TfrmMain.EditorChange(Sender: TObject);
 begin
   if FLoadingFile then
     Exit;
+  // Tell the PasTree highlighter its buffer changed — see EnsureFresh's
+  // header comment: without this it can only detect a change by rebuilding
+  // and comparing the WHOLE buffer on every repainted line, which is what
+  // made opening a large file (e.g. System.SysUtils.pas via go-to-
+  // declaration) hang. PasTreeHL stays assigned even while SynEdit's own
+  // highlighter is the active one, so this is safe regardless of cbHighlighter.
+  TSourceTab(TSynEdit(Sender).Parent).PasTreeHL.MarkDirty;
   ClearLink;                        // the stale model no longer matches the text
   FReparseTimer.Enabled := False;
   FReparseTimer.Enabled := True;

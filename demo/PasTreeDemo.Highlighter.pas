@@ -103,6 +103,8 @@ type
   private
     FSourceLines: TStrings;        // attached editor buffer (not owned)
     FCachedSource: string;         // last text actually tokenized
+    FCachedLineCount: Integer;     // FSourceLines.Count as of FCachedSource
+    FDirty: Boolean;               // True: EnsureFresh must re-check on next call
     FTokenStream: TPasTokenStream;
     FTokenCount: Integer;
     FLineStartAbs: Integer;        // absolute offset of the current line
@@ -152,6 +154,12 @@ type
     { The TStrings this highlighter re-tokenizes on demand (typically the
       TSynEdit.Lines it is attached to). Not owned/freed by this class. }
     property SourceLines: TStrings read FSourceLines write SetSourceLines;
+    { Tells EnsureFresh the attached buffer may have changed since its last
+      real check — call this from the HOST's edit notification (e.g. the
+      owning TSynEdit's OnChange). See EnsureFresh's header comment for why
+      this exists: without it, EnsureFresh's own change-detection is not
+      cheap enough to call on every SetLine/repaint for a large file. }
+    procedure MarkDirty;
     { Raw token index (into this buffer's token stream) rendered as a
       clickable go-to-declaration link (blue + underline) — IDE-style
       ctrl+hover. -1 = no link. The HOST invalidates the editor on change. }
@@ -241,6 +249,8 @@ begin
     37.0, PlatformInfo(pfWin32).PointerBytes, PlatformInfo(pfWin32).ExtendedBytes);
 
   FCachedSource := #0; // guarantee the first EnsureFresh call actually tokenizes
+  FCachedLineCount := -1;
+  FDirty := True;
   FLineStartAbs := 0;
   FCurTokenIdx := 0;
 end;
@@ -283,6 +293,13 @@ procedure TPasTreeSynHighlighter.SetSourceLines(const Value: TStrings);
 begin
   FSourceLines := Value;
   FCachedSource := #0; // force a re-tokenize against the newly attached buffer
+  FCachedLineCount := -1;
+  FDirty := True;
+end;
+
+procedure TPasTreeSynHighlighter.MarkDirty;
+begin
+  FDirty := True;
 end;
 
 function TPasTreeSynHighlighter.LexerDiagnosticCount: Integer;
@@ -291,11 +308,22 @@ begin
 end;
 
 // Re-tokenizes (and re-parses, for weak-keyword precision) the WHOLE attached
-// buffer iff its text changed since last time. Cheap when nothing changed
-// (one string compare); the actual lex+parse only runs once per real edit,
-// regardless of how many lines get re-painted. The whole D13 RTL (1865 files)
-// parses in ~3s, so a single open buffer is a tiny fraction of that — cheap
-// enough to redo on every edit, same reasoning as the original lex-only design.
+// buffer iff its text changed since last time. The actual lex+parse only runs
+// once per real edit, regardless of how many lines get re-painted — but doing
+// so requires detecting "did it change" WITHOUT touching the buffer at all in
+// the common (unchanged) case, which is why this checks FDirty (an O(1) flag
+// the HOST sets via MarkDirty on its own edit notification) before anything
+// else. `DoSetLine` calls this on EVERY line, including the N calls SynEdit
+// makes while painting/scanning an N-line file — for a real RTL unit this N
+// is tens of thousands. The PREVIOUS version's only guard was `FSourceLines.
+// Text = FCachedSource`: fetching `.Text` reconstructs and compares the WHOLE
+// buffer, so doing that on every one of those N calls is O(N * buffer size),
+// not O(buffer size) — a genuine hang on a large file (e.g. opening System.
+// SysUtils.pas, 37.6k lines/1.1MB, via go-to-declaration: ~37,600 full-buffer
+// rebuilds+compares before a single keystroke). FDirty collapses that back to
+// O(1) for every call except the (at most one) real change. FCachedLineCount
+// is a second, still-O(1) guard against a same-line-count edit slipping past
+// a missed/late MarkDirty call — belt-and-suspenders, not the primary check.
 procedure TPasTreeSynHighlighter.EnsureFresh;
 var
   LText: string;
@@ -306,7 +334,11 @@ var
 begin
   if not Assigned(FSourceLines) then
     Exit;
+  if not FDirty and (FSourceLines.Count = FCachedLineCount) then
+    Exit;
   LText := FSourceLines.Text;
+  FDirty := False;
+  FCachedLineCount := FSourceLines.Count;
   if LText = FCachedSource then
     Exit;
   FCachedSource := LText;
