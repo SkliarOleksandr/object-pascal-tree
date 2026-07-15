@@ -84,6 +84,8 @@ type
     function LoadedUnitByName(const AName: string): Integer;
     procedure ResolveUses(AId: Integer);
     procedure CrossResolve(AId: Integer);
+    function StructSymOfNode(AModel: TPasSemaModel; ANode: Integer): Integer;
+    procedure CrossResolveInherited(AId: Integer);
     function FindInUses(AId: Integer; const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
     function FindInSystemUnit(const ANameLower: string;
@@ -1565,6 +1567,15 @@ begin
           // above, generalized to the OTHER side of the dot.
           if QualifierUnitAt(AId, LNode, LMatchNode) >= 0 then
             Continue;
+          // Inside a METHOD body the name may be an INHERITED member from a
+          // cross-unit ancestor (AddAttribute in a TSynCustomHighlighter
+          // descendant), which dcc resolves BEFORE any used unit's globals.
+          // That walk (FindMemberX) reads OTHER models' ExtRefMap — mutated
+          // concurrently by their own CrossResolve workers — so it is
+          // DEFERRED to the sequential CrossResolveInherited pass, wholesale
+          // (uses/System fallback included, to keep dcc's precedence).
+          if StructSymOfNode(LModel, LNode) <> NIL_SYM then
+            Continue;
           if FindInUses(AId, LNameLower, LUid, LSym) then
           begin
             LExt.UnitId := LUid; LExt.Sym := LSym;
@@ -1579,6 +1590,83 @@ begin
             EmitE2003(LModel, LNode);
         end;
     end;
+  end;
+end;
+
+// The struct type symbol of the METHOD implementation enclosing ANode, via
+// the scope chain (a local proc inside a method climbs to the method's
+// scope); NIL_SYM when ANode isn't inside any method body.
+function TPasSemaProject.StructSymOfNode(AModel: TPasSemaModel;
+  ANode: Integer): Integer;
+var
+  LScope: Integer;
+begin
+  Result := NIL_SYM;
+  if (ANode > High(AModel.NodeScope)) then
+    Exit;
+  LScope := AModel.NodeScope[ANode];
+  while LScope <> NIL_SCOPE do
+  begin
+    if AModel.Scopes[LScope].StructSym <> NIL_SYM then
+      Exit(AModel.Scopes[LScope].StructSym);
+    LScope := AModel.Scopes[LScope].Parent;
+  end;
+end;
+
+// SEQUENTIAL companion to CrossResolve for idents inside METHOD bodies,
+// deferred there because the inherited-member walk (FindMemberX) reads other
+// models' ExtRefMap — safe only once every parallel CrossResolve worker is
+// done (heritage idents sit at class-decl scope, so the chain is complete by
+// then). Resolution order matches dcc: inherited members first, then used
+// units, then the implicit System unit; E2003 only after all three miss.
+procedure TPasSemaProject.CrossResolveInherited(AId: Integer);
+var
+  LModel: TPasSemaModel;
+  LNode, LBase, LStruct, LUid, LSym, LCtx, LMatchNode: Integer;
+  LExt: TPasExtRef;
+  LNameLower: string;
+begin
+  LModel := FModels[AId];
+  for LNode := 0 to High(LModel.RefMap) do
+  begin
+    if LModel.Tree.Nodes[LNode].Kind <> nkIdent then
+      Continue;
+    if (LModel.RefMap[LNode] <> NIL_SYM) or
+       LModel.ExtRefMap.ContainsKey(LNode) then
+      Continue;
+    if (LNode > High(LModel.NodeScope)) or
+       (LModel.NodeScope[LNode] = NIL_SCOPE) then
+      Continue;
+    LBase := LModel.Tree.Nodes[LNode].Parent;
+    if (LBase <> NIL_NODE) and
+       (LModel.Tree.Nodes[LBase].Kind = nkMember) and
+       (LModel.Tree.Nodes[LBase].FirstChild <> LNode) then
+      Continue;   // member name of A.B — resolved via A, not as a plain ident
+    LNameLower := LowerCase(LModel.Tree.NodeText(LNode));
+    if (LNameLower = 'result') or (LNameLower = 'self') then
+      Continue;
+    if QualifierUnitAt(AId, LNode, LMatchNode) >= 0 then
+      Continue;
+    LStruct := StructSymOfNode(LModel, LNode);
+    if LStruct = NIL_SYM then
+      Continue;   // CrossResolve already handled non-method-scope idents
+    if FindMemberX(XPlain(AId, LStruct), LNameLower, LUid, LSym, LCtx) then
+    begin
+      LExt.UnitId := LUid; LExt.Sym := LSym;
+      LModel.ExtRefMap.Add(LNode, LExt);
+    end
+    else if FindInUses(AId, LNameLower, LUid, LSym) then
+    begin
+      LExt.UnitId := LUid; LExt.Sym := LSym;
+      LModel.ExtRefMap.Add(LNode, LExt);
+    end
+    else if FindInSystemUnit(LNameLower, LUid, LSym) then
+    begin
+      LExt.UnitId := LUid; LExt.Sym := LSym;
+      LModel.ExtRefMap.Add(LNode, LExt);
+    end
+    else if LModel.AllUsesResolved then
+      EmitE2003(LModel, LNode);
   end;
 end;
 
@@ -1602,6 +1690,7 @@ begin
   LoadFilesParallel(LPaths);
   ResolveUses(Result);
   CrossResolve(Result);
+  CrossResolveInherited(Result);
   CheckCalls(Result);
   // Declared types for EVERY loaded model first (the expression pass reads
   // used units' SymTypeX), then expressions for the requested unit only.
@@ -1656,6 +1745,10 @@ begin
     begin
       CrossResolve(AIdx);
     end);
+  // Sequential: the inherited-member walk reads other models' ExtRefMap,
+  // frozen only now that every CrossResolve worker is done.
+  for LIdx := 0 to LN - 1 do
+    CrossResolveInherited(LIdx);
   ForEachIndex(LN - 1,
     procedure(AIdx: Integer)
     begin
@@ -1694,6 +1787,10 @@ begin
     begin
       CrossResolve(AIdx);
     end);
+  // Sequential: the inherited-member walk reads other models' ExtRefMap,
+  // frozen only now that every CrossResolve worker is done.
+  for LIdx := 0 to LN - 1 do
+    CrossResolveInherited(LIdx);
   ForEachIndex(LN - 1,
     procedure(AIdx: Integer)
     begin

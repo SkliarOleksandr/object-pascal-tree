@@ -463,25 +463,15 @@ begin
       end;
     tkProcedure, tkFunction:
       begin
-        // Anonymous method literal (17.2.1) — v1: opaque params, one block.
+        // Anonymous method literal (17.2.1). Params parse with the same
+        // grammar (and same nkParams/nkParam shape) as a routine's, so the
+        // resolver declares them like any parameter — `AIndex` inside a
+        // `procedure(AIndex: Integer) begin ... end` literal is a real,
+        // resolvable symbol, not opaque trivia (the retired v1 shape).
         LNode := FB.AddNode(nkAnonMethod, NIL_NODE, LStart);
         Next;
         if CurKind = tkLParen then
-        begin
-          LChild := FB.AddNode(nkAnonParams, NIL_NODE, FPos);
-          LStart := 1;
-          Next;
-          while (LStart > 0) and (CurKind <> tkEndOfFile) do
-          begin
-            case CurKind of
-              tkLParen: Inc(LStart);
-              tkRParen: Dec(LStart);
-            end;
-            Next;
-          end;
-          FB.SetLast(LChild, FPos - 1);
-          FB.Adopt(LNode, LChild);
-        end;
+          FB.Adopt(LNode, ParseParamList(tkRParen));
         if CurKind = tkColon then
         begin
           Next;

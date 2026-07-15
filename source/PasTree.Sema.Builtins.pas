@@ -78,16 +78,29 @@ begin
   T('Text', tcFile);
   T('_nil', tcNil);   // synthetic type of the nil literal
 
-  // Constants.
+  // Constants. MaxInt/MaxLongint are compiler-provided too — real System.pas
+  // declares NEITHER ("Predefined ... do not have actual declarations").
   K('True', skConst, LBool);
   K('False', skConst, LBool);
   K('nil', skConst, NIL_SYM);
+  K('MaxInt', skConst, NIL_SYM);
+  K('MaxLongint', skConst, NIL_SYM);
 
-  // Intrinsic routines (result typing deferred).
-  for var LName in ['Length', 'SetLength', 'High', 'Low', 'Ord', 'Chr',
-    'Assigned', 'Inc', 'Dec', 'SizeOf', 'Assert', 'Copy', 'New', 'Dispose',
-    'Include', 'Exclude', 'Write', 'Writeln', 'Read', 'Readln', 'Exit',
-    'Break', 'Continue', 'Abort', 'TypeInfo'] do
+  // Intrinsic routines (result typing deferred) — the documented "Delphi
+  // Intrinsic Routines" set (compiler-magic, no System.pas declaration);
+  // names System.pas DOES declare (Move, GetMem, Halt, ...) are deliberately
+  // NOT here — they resolve through the real unit like any other name.
+  for var LName in ['Length', 'SetLength', 'SetString', 'High', 'Low', 'Ord',
+    'Chr', 'Assigned', 'Inc', 'Dec', 'SizeOf', 'Assert', 'Copy', 'New',
+    'Dispose', 'Include', 'Exclude', 'Write', 'Writeln', 'Read', 'Readln',
+    'Exit', 'Break', 'Continue', 'Abort', 'TypeInfo', 'Delete', 'Insert',
+    'FillChar', 'Odd', 'Pred', 'Succ', 'Default', 'Trunc', 'Round', 'Abs',
+    'Sqr', 'Pi', 'Concat', 'Str', 'Val', 'Swap', 'Hi', 'Lo', 'Addr', 'Ptr',
+    'Slice', 'RunError', 'Initialize', 'Finalize', 'GetTypeKind',
+    'IsManagedType', 'IsConstValue', 'HasWeakRef', 'TypeHandle', 'TypeOf',
+    'ReturnAddress', 'AddressOfReturnAddress', 'AtomicIncrement',
+    'AtomicDecrement', 'AtomicExchange', 'AtomicCmpExchange', 'MulDivInt64',
+    'Fail'] do
     K(LName, skRoutine, NIL_SYM);
 
   Result := LSys;

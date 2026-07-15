@@ -89,6 +89,11 @@ type
     Names: TDictionary<string, Integer>;   // NameLower -> symbol index (head)
     Symbols: TList<Integer>;               // declaration order
     Additional: TArray<Integer>;           // joined scopes (system/with/ancestor)
+    // For a METHOD implementation's routine scope: the (innermost) struct
+    // type symbol the qualified name resolved to (TFoo in TFoo.Bar). NIL_SYM
+    // elsewhere. The project driver's inherited-member pass starts its
+    // cross-unit ancestor walk here.
+    StructSym: Integer;
     constructor Create(AKind: TSemaScopeKind; AParent, AOwnerNode: Integer);
     destructor Destroy; override;
   end;
@@ -151,6 +156,7 @@ begin
   Kind := AKind;
   Parent := AParent;
   OwnerNode := AOwnerNode;
+  StructSym := NIL_SYM;
   Names := TDictionary<string, Integer>.Create;
   Symbols := TList<Integer>.Create;
 end;

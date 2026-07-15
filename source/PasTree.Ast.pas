@@ -49,7 +49,8 @@ type
     nkInlineIf,       // if c then a else b expression (5.4.1)
     nkInherited,      // inherited [name] (12.1.2)
     nkAnonMethod,     // anonymous method literal (17.2.1); minimal v1
-    nkAnonParams,     // raw parameter tokens of an anon method (v1 opaque)
+    nkAnonParams,     // RETIRED (anon methods emit real nkParams now); kept
+                      // so existing kind ordinals stay stable
 
     // ---- statements (spec ch.05, ch.18) ----
     nkBlock,          // begin..end / statement list container

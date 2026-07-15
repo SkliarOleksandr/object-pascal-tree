@@ -98,6 +98,62 @@ const
     'implementation'#10 +                      // 4
     'end.'#10;                                 // 5
 
+  // Inherited-member / intrinsic / anon-param / except-var / nested-class
+  // fixtures (the false-E2003 taxonomy found on the real demo project).
+  UNIT_G =
+    'unit NavG;'#10 +                          // 1
+    'interface'#10 +                           // 2
+    'type'#10 +                                // 3
+    '  TIntProc = reference to procedure(AValue: Integer);'#10 + // 4
+    '  TAncestor = class'#10 +                 // 5
+    '    FStock: Integer;'#10 +                // 6   FStock col 5
+    '    procedure Ping;'#10 +                 // 7   Ping col 15
+    '  end;'#10 +                              // 8
+    '  TOuterX = class'#10 +                   // 9
+    '  type'#10 +                              // 10
+    '    TInnerX = class'#10 +                 // 11
+    '      FIn: Integer;'#10 +                 // 12  FIn col 7
+    '      procedure Zap;'#10 +                // 13
+    '    end;'#10 +                            // 14
+    '  end;'#10 +                              // 15
+    'implementation'#10 +                      // 16
+    'procedure TAncestor.Ping;'#10 +           // 17
+    'begin'#10 +                               // 18
+    'end;'#10 +                                // 19
+    'procedure TOuterX.TInnerX.Zap;'#10 +      // 20
+    'begin'#10 +                               // 21
+    '  FIn := 1;'#10 +                         // 22  FIn col 3
+    'end;'#10 +                                // 23
+    'end.'#10;                                 // 24
+  UNIT_H =
+    'unit NavH;'#10 +                          // 1
+    'interface'#10 +                           // 2
+    'uses NavG;'#10 +                          // 3
+    'type'#10 +                                // 4
+    '  TChild = class(TAncestor)'#10 +         // 5
+    '    procedure Poke;'#10 +                 // 6
+    '  end;'#10 +                              // 7
+    'implementation'#10 +                      // 8
+    'procedure TChild.Poke;'#10 +              // 9
+    'var'#10 +                                 // 10
+    '  L: Integer;'#10 +                       // 11
+    '  F: TIntProc;'#10 +                      // 12
+    'begin'#10 +                               // 13
+    '  FStock := MaxInt;'#10 +                 // 14  FStock col 3, MaxInt col 13
+    '  Ping;'#10 +                             // 15  Ping col 3
+    '  F := procedure(AVal: Integer)'#10 +     // 16  AVal col 18
+    '    begin'#10 +                           // 17
+    '      L := AVal;'#10 +                    // 18  AVal col 12
+    '    end;'#10 +                            // 19
+    '  F(L);'#10 +                             // 20
+    '  try'#10 +                               // 21
+    '    L := 0;'#10 +                         // 22
+    '  except'#10 +                            // 23
+    '    on E: TObject do L := Ord(L);'#10 +   // 24  E col 8
+    '  end;'#10 +                              // 25
+    'end;'#10 +                                // 26
+    'end.'#10;                                 // 27
+
   // AnalyzeProject fixtures: a main program whose closure pulls NavB (and
   // through it everything above) TRANSITIVELY; NavE is reachable only via a
   // unit-scope NAMESPACE (uses NavE + namespaces=['Wide'] -> Wide.NavE.pas);
@@ -209,6 +265,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), UNIT_SYS);
   TFile.WriteAllText(TPath.Combine(LDir, 'Namespace.NavD.pas'), UNIT_NS);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavB.pas'), UNIT_B);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavG.pas'), UNIT_G);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavH.pas'), UNIT_H);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -332,6 +390,33 @@ begin
       // that was the actual bug report (nav didn't work at all for these,
       // and the qualifier itself was flagged as undeclared).
       Ok('qualified expr qualifiers: no false E2003',
+        DiagCount(GProj.Model(GMidB), 'E2003') = 0);
+
+      // ---- The false-E2003 taxonomy from the real demo project ----
+      // Inherited members from a CROSS-UNIT ancestor, unqualified in a
+      // method body (the AddAttribute/fCaseSensitive shape) — resolve, are
+      // not E2003, and NAVIGATE to the ancestor's declaration.
+      GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavH.pas'));
+      Ok('NavH model found', GMidB >= 0);
+      CheckNav('inherited field: FStock', 14, 3, 'FStock', 'NavG.pas', 6, 5);
+      CheckNav('inherited method: Ping', 15, 3, 'Ping', 'NavG.pas', 7, 15);
+      // A compiler intrinsic INSIDE a method body (MaxInt is seeded, so it
+      // resolves in Phase 1; nav falls back to the System unit's header).
+      CheckNav('intrinsic in method: MaxInt', 14, 13, 'MaxInt',
+        'System.pas', 1, 6);
+      // Anonymous-method parameters are REAL declarations now (retired the
+      // v1 opaque-token shape): the body reference resolves + navigates.
+      CheckNav('anon-method param: AVal', 18, 12, 'AVal', 'NavH.pas', 16, 18);
+      // `on E: TObject` declares E, scoped to its handler.
+      CheckNav('except-on var: E', 24, 8, 'E', 'NavH.pas', 24, 8);
+      Ok('NavH: no false E2003',
+        DiagCount(GProj.Model(GMidB), 'E2003') = 0);
+      // Nested-class method impl (TOuterX.TInnerX.Zap): the qualifier CHAIN
+      // resolves, so the inner class's own field is visible in the body.
+      GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavG.pas'));
+      CheckNav('nested-class impl field: FIn', 22, 3, 'FIn',
+        'NavG.pas', 12, 7);
+      Ok('NavG: no false E2003',
         DiagCount(GProj.Model(GMidB), 'E2003') = 0);
     finally
       GNav.Free;

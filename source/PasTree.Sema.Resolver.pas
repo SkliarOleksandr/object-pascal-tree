@@ -490,13 +490,14 @@ end;
 
 procedure TPasSemaResolver.CollectRoutine(ANode, AScope: Integer);
 var
-  LRoutine, LChild, LNameNode, LSegIdent, LSegLast, LQualIdent: Integer;
+  LRoutine, LChild, LNameNode, LSegIdent, LSegLast: Integer;
   LRoutineSym, LResultNode: Integer;
   LQualified: Boolean;
+  LQualIdents: TArray<Integer>;
 begin
   LRoutine := FModel.AddScope(sckRoutine, AScope, ANode);
   FNodeScope[ANode] := AScope;
-  LQualIdent := NIL_NODE;
+  LQualIdents := nil;
   LRoutineSym := NIL_SYM;
   LResultNode := NIL_NODE;
 
@@ -522,8 +523,8 @@ begin
     end;
     if SepAfter(LSegLast) = '.' then
     begin
-      LQualified := True;          // qualifier segment; ident is a type/unit ref
-      LQualIdent := LSegIdent;     // remember the (last) qualifier = the type
+      LQualified := True;          // qualifier segment; ident is a type ref
+      LQualIdents := LQualIdents + [LSegIdent];  // full chain, outer -> inner
     end
     else
     begin
@@ -532,14 +533,36 @@ begin
     end;
   end;
 
-  // For a method implementation (TFoo.Bar), make the routine body see the
-  // struct's members (implicit Self) by joining the type's member scope.
-  if LQualified and (LQualIdent <> NIL_NODE) then
+  // For a method implementation (TFoo.Bar — or nested, TOuter.TInner.Bar),
+  // make the routine body see the struct's members (implicit Self): resolve
+  // the qualifier CHAIN (first segment at AScope, each next one INSIDE the
+  // previous type's member scope) and join every resolved segment's member
+  // scope — outer first, innermost last, so the innermost wins lookups. The
+  // innermost type is remembered as the scope's StructSym: the project
+  // driver's inherited-member pass starts its cross-unit ancestor walk there.
+  if LQualified then
   begin
-    var LTy := FModel.Resolve(AScope, LowerCase(NodeText(LQualIdent)));
-    if (LTy <> NIL_SYM) and (FModel.Symbols[LTy].Kind = skType) and
-       (FModel.Symbols[LTy].MemberScope <> NIL_SCOPE) then
-      FModel.JoinScope(LRoutine, FModel.Symbols[LTy].MemberScope);
+    var LTy := NIL_SYM;
+    for var LSeg in LQualIdents do
+    begin
+      var LCand: Integer;
+      if LTy = NIL_SYM then
+        LCand := FModel.Resolve(AScope, LowerCase(NodeText(LSeg)))
+      else if FModel.Symbols[LTy].MemberScope <> NIL_SCOPE then
+        LCand := FModel.FindLocal(FModel.Symbols[LTy].MemberScope,
+          LowerCase(NodeText(LSeg)))
+      else
+        LCand := NIL_SYM;
+      if (LCand = NIL_SYM) or (FModel.Symbols[LCand].Kind <> skType) then
+      begin
+        LTy := NIL_SYM;
+        Break;
+      end;
+      LTy := LCand;
+      if FModel.Symbols[LTy].MemberScope <> NIL_SCOPE then
+        FModel.JoinScope(LRoutine, FModel.Symbols[LTy].MemberScope);
+    end;
+    FModel.Scopes[LRoutine].StructSym := LTy;
   end;
   if (LNameNode <> NIL_NODE) and not LQualified then
   begin
@@ -713,15 +736,29 @@ begin
         // An anonymous method owns its params/locals — two sibling literals
         // reusing a local name (both declaring `var LSer: ...`) must not read
         // as a redeclaration in the enclosing routine. It also owns its
-        // implicit `Result` (typed by the child between the opaque
-        // nkAnonParams and the body): `Result := True` inside a
-        // function(...): Boolean literal must NOT bind to (and type-check
-        // against) the ENCLOSING function's Result.
+        // implicit `Result` (typed by the child between the params and the
+        // body): `Result := True` inside a function(...): Boolean literal
+        // must NOT bind to (and type-check against) the ENCLOSING function's
+        // Result. Params arrive in the same nkParams shape as a routine's —
+        // declare them the same way.
         var LAnon := FModel.AddScope(sckRoutine, AScope, ANode);
         FNodeScope[ANode] := LAnon;
         LChild := FirstChild(ANode);
         while LChild <> NIL_NODE do
         begin
+          if KindOf(LChild) = nkParams then
+          begin
+            FNodeScope[LChild] := LAnon;
+            var LParam := FirstChild(LChild);
+            while LParam <> NIL_NODE do
+            begin
+              if KindOf(LParam) = nkParam then
+                DeclareNamesAndType(LParam, LAnon, skParam);
+              LParam := NextSib(LParam);
+            end;
+            LChild := NextSib(LChild);
+            Continue;
+          end;
           if not (KindOf(LChild) in [nkAnonParams, nkRoutineBody]) and
              (FModel.FindLocal(LAnon, 'result') = NIL_SYM) then
           begin
@@ -786,6 +823,60 @@ begin
         while LChild <> NIL_NODE do
         begin
           Collect(LChild, LBlock);
+          LChild := NextSib(LChild);
+        end;
+      end;
+
+    nkProcType:
+      begin
+        // 6.6.1 procedural type: its parameter NAMES are declarations of the
+        // signature, not references — declare them in a scope of their own
+        // (nothing outside the signature can see them), so they neither leak
+        // nor read as undeclared identifiers (`TNotifyEvent = procedure(
+        // Sender: TObject)...` must not E2003 on Sender). Everything else
+        // (param types, result type) resolves normally.
+        var LSig := FModel.AddScope(sckRoutine, AScope, ANode);
+        FNodeScope[ANode] := LSig;
+        LChild := FirstChild(ANode);
+        while LChild <> NIL_NODE do
+        begin
+          if KindOf(LChild) = nkParams then
+          begin
+            FNodeScope[LChild] := LSig;
+            var LParam := FirstChild(LChild);
+            while LParam <> NIL_NODE do
+            begin
+              if KindOf(LParam) = nkParam then
+                DeclareNamesAndType(LParam, LSig, skParam);
+              LParam := NextSib(LParam);
+            end;
+          end
+          else
+            Collect(LChild, LSig);
+          LChild := NextSib(LChild);
+        end;
+      end;
+
+    nkExceptOn:
+      begin
+        // 18.1.2 `on [E:] Type do stmt` — the handler variable (named form:
+        // 3 children = ident, type, body) is scoped to THIS handler alone.
+        var LOn := FModel.AddScope(sckBlock, AScope, ANode);
+        FNodeScope[ANode] := LOn;
+        LChild := FirstChild(ANode);
+        if (LChild <> NIL_NODE) and (KindOf(LChild) = nkIdent) and
+           (NextSib(LChild) <> NIL_NODE) and
+           (NextSib(NextSib(LChild)) <> NIL_NODE) then
+        begin
+          var LVar := FModel.AddSymbol(LOn, skVar, NodeText(LChild), LChild);
+          FModel.Symbols[LVar].TypeNode := NextSib(LChild);
+          FModel.BindName(LOn, LVar);
+          MarkDeclName(LChild, LVar);
+          LChild := NextSib(LChild);   // resolve from the TYPE on
+        end;
+        while LChild <> NIL_NODE do
+        begin
+          Collect(LChild, LOn);
           LChild := NextSib(LChild);
         end;
       end;
