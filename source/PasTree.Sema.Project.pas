@@ -43,6 +43,13 @@ type
     Args: TArray<TSemaXType>;
   end;
 
+  // One deferred ExtRefMap write from the inherited-member pass (computed in
+  // parallel, committed sequentially — see CrossResolveInherited).
+  TPasInhPending = record
+    Node: Integer;
+    Ext: TPasExtRef;
+  end;
+
   TPasSemaProject = class
   private
     FPlatform: TPasPlatform;
@@ -59,6 +66,7 @@ type
     // any search path (the demo's own .dproj has no UnitSearchPath at all).
     FByUnitName: TDictionary<string, Integer>;
     FNamespaces: TArray<string>;           // own copy for LoadedUnitByName
+    FStageTimings: string;                 // see StageTimings
     FSingleThreaded: Boolean;
     FSystemUnitId: Integer;                // memoized EnsureSystemUnit result
     FSystemUnitResolved: Boolean;
@@ -75,6 +83,10 @@ type
     // Phase 3c: cross-model typing.
     FInstances: TList<TSemaInstance>;
     FInstKeys: TDictionary<string, Integer>;
+    // Guards ALL FInstances/FInstKeys access: the parallel inherited-member
+    // pass instantiates generics from heritage clauses concurrently (see
+    // Instantiate); a bare TList read during another thread's Add is unsafe.
+    FInstLock: TCriticalSection;
     // Runs ABody for 0..AHi — one worker per core, or a plain loop when
     // SingleThreaded (baseline emulation / timing comparison / debugging).
     procedure ForEachIndex(AHi: Integer; const ABody: TProc<Integer>);
@@ -85,7 +97,9 @@ type
     procedure ResolveUses(AId: Integer);
     procedure CrossResolve(AId: Integer);
     function StructSymOfNode(AModel: TPasSemaModel; ANode: Integer): Integer;
-    procedure CrossResolveInherited(AId: Integer);
+    procedure CrossResolveInherited(AId: Integer;
+      var APending: TArray<TPasInhPending>);
+    procedure RunInheritedPass(ACount: Integer);
     function FindInUses(AId: Integer; const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
     function FindInSystemUnit(const ANameLower: string;
@@ -103,6 +117,7 @@ type
     // Phase 3c: cross-model typing.
     function Instantiate(const ABase: TSemaXType;
       const AArgs: TArray<TSemaXType>): Integer;
+    function InstanceRead(AInst: Integer): TSemaInstance;
     function TypeDefNodeOf(AMid, ASym: Integer): Integer;
     function GenericParamIdents(AMid, ASym: Integer): TArray<Integer>;
     function DeclTypeX(AMid, ASym: Integer): TSemaXType;
@@ -157,6 +172,9 @@ type
       clicking the QUALIFIER itself opens that unit, not just its member. }
     function QualifierUnitAt(AId, ANode: Integer;
       out AMatchNode: Integer): Integer;
+    { Per-stage wall-clock of the LAST AnalyzeProject run ('stage=ms;...') —
+      for perf logging in hosts and probes. Empty for the other drivers. }
+    function StageTimings: string;
     function ModelCount: Integer;
     function Model(AId: Integer): TPasSemaModel;
     function ModelFile(AId: Integer): string;
@@ -183,6 +201,7 @@ implementation
 uses
   System.IOUtils,
   System.Threading,
+  System.Diagnostics,
   PasTree.Parser,
   PasTree.Sema.Resolver,
   PasTree.Sema.Diagnostics;
@@ -206,6 +225,7 @@ begin
   FByPath := TDictionary<string, Integer>.Create;
   FInstances := TList<TSemaInstance>.Create;
   FInstKeys := TDictionary<string, Integer>.Create;
+  FInstLock := TCriticalSection.Create;
   FSystemUnitId := -1;
   FSystemUnitResolved := False;
   FSystemUnitLock := TCriticalSection.Create;
@@ -215,6 +235,7 @@ destructor TPasSemaProject.Destroy;
 begin
   FByUnitName.Free;
   FSystemUnitLock.Free;
+  FInstLock.Free;
   FInstKeys.Free;
   FInstances.Free;
   FByPath.Free;
@@ -911,6 +932,12 @@ begin
 end;
 
 // Dedup-registers one generic instantiation; returns its instance-table index.
+// LOCKED (FInstLock): the parallel inherited-member pass reaches here through
+// FindMemberX -> ResolveTypeExpr on generic heritage (TList<T> = class(
+// TEnumerable<T>)) with one worker per unit — unguarded, concurrent
+// FInstances.Add corrupted the list (AV on the full-RTL scan). Every other
+// FInstances access is locked too (InstanceRead below): a TList read during
+// another thread's Add sees a mid-reallocation array.
 function TPasSemaProject.Instantiate(const ABase: TSemaXType;
   const AArgs: TArray<TSemaXType>): Integer;
 var
@@ -921,13 +948,29 @@ begin
   LKey := Format('%d:%d', [ABase.UnitId, ABase.Sym]);
   for LArg in AArgs do
     LKey := LKey + Format('|%d:%d:%d', [LArg.UnitId, LArg.Sym, LArg.Inst]);
-  if FInstKeys.TryGetValue(LKey, Result) then
-    Exit;
-  LInst.UnitId := ABase.UnitId;
-  LInst.Sym := ABase.Sym;
-  LInst.Args := AArgs;
-  Result := FInstances.Add(LInst);
-  FInstKeys.Add(LKey, Result);
+  FInstLock.Enter;
+  try
+    if FInstKeys.TryGetValue(LKey, Result) then
+      Exit;
+    LInst.UnitId := ABase.UnitId;
+    LInst.Sym := ABase.Sym;
+    LInst.Args := AArgs;
+    Result := FInstances.Add(LInst);
+    FInstKeys.Add(LKey, Result);
+  finally
+    FInstLock.Leave;
+  end;
+end;
+
+// Locked FInstances[AInst] snapshot — see the Instantiate comment.
+function TPasSemaProject.InstanceRead(AInst: Integer): TSemaInstance;
+begin
+  FInstLock.Enter;
+  try
+    Result := FInstances[AInst];
+  finally
+    FInstLock.Leave;
+  end;
 end;
 
 // The type-expression node defining a type symbol (nkTypeDecl's def child).
@@ -1018,7 +1061,7 @@ begin
   Result := AX;
   if (AInst = NIL_INST) or (ADepth > 16) or not XValid(AX) then
     Exit;
-  LInst := FInstances[AInst];
+  LInst := InstanceRead(AInst);
   if (AX.UnitId = LInst.UnitId) and
      (FModels[AX.UnitId].Symbols[AX.Sym].Kind = skGenericParam) then
   begin
@@ -1034,7 +1077,7 @@ begin
   end;
   if AX.Inst <> NIL_INST then
   begin
-    LArgs := Copy(FInstances[AX.Inst].Args);
+    LArgs := Copy(InstanceRead(AX.Inst).Args);
     for LIdx := 0 to High(LArgs) do
       LArgs[LIdx] := SubstX(LArgs[LIdx], AInst, ADepth + 1);
     Result.Inst := Instantiate(XPlain(AX.UnitId, AX.Sym), LArgs);
@@ -1454,29 +1497,36 @@ end;
 
 function TPasSemaProject.InstanceCount: Integer;
 begin
-  Result := FInstances.Count;
+  FInstLock.Enter;
+  try
+    Result := FInstances.Count;
+  finally
+    FInstLock.Leave;
+  end;
 end;
 
 function TPasSemaProject.Instance(AInst: Integer): TSemaInstance;
 begin
-  Result := FInstances[AInst];
+  Result := InstanceRead(AInst);
 end;
 
 function TPasSemaProject.XTypeText(const AX: TSemaXType): string;
 var
   LIdx: Integer;
+  LArgs: TArray<TSemaXType>;
 begin
   if not XValid(AX) then
     Exit('?');
   Result := FModels[AX.UnitId].Symbols[AX.Sym].Name;
   if AX.Inst <> NIL_INST then
   begin
+    LArgs := InstanceRead(AX.Inst).Args;
     Result := Result + '<';
-    for LIdx := 0 to High(FInstances[AX.Inst].Args) do
+    for LIdx := 0 to High(LArgs) do
     begin
       if LIdx > 0 then
         Result := Result + ',';
-      Result := Result + XTypeText(FInstances[AX.Inst].Args[LIdx]);
+      Result := Result + XTypeText(LArgs[LIdx]);
     end;
     Result := Result + '>';
   end;
@@ -1557,6 +1607,17 @@ begin
              (LModel.Tree.Nodes[LBase].Kind = nkMember) and
              (LModel.Tree.Nodes[LBase].FirstChild <> LNode) then
             Continue;
+          // Inside a METHOD body the name may be an INHERITED member from a
+          // cross-unit ancestor (AddAttribute in a TSynCustomHighlighter
+          // descendant), which dcc resolves BEFORE any used unit's globals.
+          // That walk (FindMemberX) reads OTHER models' ExtRefMap — mutated
+          // concurrently by their own CrossResolve workers — so it is
+          // DEFERRED to the sequential CrossResolveInherited pass, wholesale
+          // (uses/System fallback included, to keep dcc's precedence).
+          // Checked FIRST: the cheap scope-climb spares the allocation-heavy
+          // QualifierUnitAt for the bulk of nodes (method bodies).
+          if StructSymOfNode(LModel, LNode) <> NIL_SYM then
+            Continue;
           LNameLower := LowerCase(LModel.Tree.NodeText(LNode));
           if (LNameLower = 'result') or (LNameLower = 'self') then
             Continue;   // implicit routine/method names
@@ -1566,15 +1627,6 @@ begin
           // undeclared-id candidate — same spirit as the member-name guard
           // above, generalized to the OTHER side of the dot.
           if QualifierUnitAt(AId, LNode, LMatchNode) >= 0 then
-            Continue;
-          // Inside a METHOD body the name may be an INHERITED member from a
-          // cross-unit ancestor (AddAttribute in a TSynCustomHighlighter
-          // descendant), which dcc resolves BEFORE any used unit's globals.
-          // That walk (FindMemberX) reads OTHER models' ExtRefMap — mutated
-          // concurrently by their own CrossResolve workers — so it is
-          // DEFERRED to the sequential CrossResolveInherited pass, wholesale
-          // (uses/System fallback included, to keep dcc's precedence).
-          if StructSymOfNode(LModel, LNode) <> NIL_SYM then
             Continue;
           if FindInUses(AId, LNameLower, LUid, LSym) then
           begin
@@ -1613,19 +1665,28 @@ begin
   end;
 end;
 
-// SEQUENTIAL companion to CrossResolve for idents inside METHOD bodies,
-// deferred there because the inherited-member walk (FindMemberX) reads other
-// models' ExtRefMap — safe only once every parallel CrossResolve worker is
-// done (heritage idents sit at class-decl scope, so the chain is complete by
-// then). Resolution order matches dcc: inherited members first, then used
-// units, then the implicit System unit; E2003 only after all three miss.
-procedure TPasSemaProject.CrossResolveInherited(AId: Integer);
+// Companion to CrossResolve for idents inside METHOD bodies, deferred there
+// because the inherited-member walk (FindMemberX) reads other models'
+// ExtRefMap — those must be FROZEN (every parallel CrossResolve worker done)
+// before this runs. Resolution order matches dcc: inherited members first,
+// then used units, then the implicit System unit; E2003 after all three miss.
+//
+// Runs in TWO PHASES (see RunInheritedPass): this COMPUTE step is safe to
+// farm out one-worker-per-unit because every worker only READS ExtRefMaps
+// (its own included) and writes its results to APending / its OWN Diags —
+// the ExtRefMap writes are committed sequentially afterwards. The split is
+// exact: the entries this pass produces are method-BODY nodes, which are
+// never heritage/alias/type nodes, so no worker's FindMemberX result can
+// depend on another worker's pending (uncommitted) entries.
+procedure TPasSemaProject.CrossResolveInherited(AId: Integer;
+  var APending: TArray<TPasInhPending>);
 var
   LModel: TPasSemaModel;
   LNode, LBase, LStruct, LUid, LSym, LCtx, LMatchNode: Integer;
-  LExt: TPasExtRef;
+  LPend: TPasInhPending;
   LNameLower: string;
 begin
+  APending := nil;
   LModel := FModels[AId];
   for LNode := 0 to High(LModel.RefMap) do
   begin
@@ -1642,32 +1703,49 @@ begin
        (LModel.Tree.Nodes[LBase].Kind = nkMember) and
        (LModel.Tree.Nodes[LBase].FirstChild <> LNode) then
       Continue;   // member name of A.B — resolved via A, not as a plain ident
+    // Cheap scope-climb FIRST: everything outside a method body was already
+    // handled (resolved or E2003'd) by CrossResolve — bailing here avoids
+    // re-running the allocation-heavy QualifierUnitAt on every one of those
+    // nodes a second time.
+    LStruct := StructSymOfNode(LModel, LNode);
+    if LStruct = NIL_SYM then
+      Continue;
     LNameLower := LowerCase(LModel.Tree.NodeText(LNode));
     if (LNameLower = 'result') or (LNameLower = 'self') then
       Continue;
     if QualifierUnitAt(AId, LNode, LMatchNode) >= 0 then
       Continue;
-    LStruct := StructSymOfNode(LModel, LNode);
-    if LStruct = NIL_SYM then
-      Continue;   // CrossResolve already handled non-method-scope idents
-    if FindMemberX(XPlain(AId, LStruct), LNameLower, LUid, LSym, LCtx) then
+    if FindMemberX(XPlain(AId, LStruct), LNameLower, LUid, LSym, LCtx) or
+       FindInUses(AId, LNameLower, LUid, LSym) or
+       FindInSystemUnit(LNameLower, LUid, LSym) then
     begin
-      LExt.UnitId := LUid; LExt.Sym := LSym;
-      LModel.ExtRefMap.Add(LNode, LExt);
-    end
-    else if FindInUses(AId, LNameLower, LUid, LSym) then
-    begin
-      LExt.UnitId := LUid; LExt.Sym := LSym;
-      LModel.ExtRefMap.Add(LNode, LExt);
-    end
-    else if FindInSystemUnit(LNameLower, LUid, LSym) then
-    begin
-      LExt.UnitId := LUid; LExt.Sym := LSym;
-      LModel.ExtRefMap.Add(LNode, LExt);
+      LPend.Node := LNode;
+      LPend.Ext.UnitId := LUid;
+      LPend.Ext.Sym := LSym;
+      APending := APending + [LPend];
     end
     else if LModel.AllUsesResolved then
       EmitE2003(LModel, LNode);
   end;
+end;
+
+// Both phases of the inherited-member pass over models 0..ACount-1: parallel
+// compute, then the sequential ExtRefMap commit.
+procedure TPasSemaProject.RunInheritedPass(ACount: Integer);
+var
+  LPending: TArray<TArray<TPasInhPending>>;
+  LIdx, LP: Integer;
+begin
+  SetLength(LPending, ACount);
+  ForEachIndex(ACount - 1,
+    procedure(AIdx: Integer)
+    begin
+      CrossResolveInherited(AIdx, LPending[AIdx]);
+    end);
+  for LIdx := 0 to ACount - 1 do
+    for LP := 0 to High(LPending[LIdx]) do
+      FModels[LIdx].ExtRefMap.Add(LPending[LIdx][LP].Node,
+        LPending[LIdx][LP].Ext);
 end;
 
 function TPasSemaProject.AnalyzeFile(const AMainFile: string): Integer;
@@ -1690,7 +1768,10 @@ begin
   LoadFilesParallel(LPaths);
   ResolveUses(Result);
   CrossResolve(Result);
-  CrossResolveInherited(Result);
+  var LPend: TArray<TPasInhPending>;
+  CrossResolveInherited(Result, LPend);
+  for LIdx := 0 to High(LPend) do
+    FModels[Result].ExtRefMap.Add(LPend[LIdx].Node, LPend[LIdx].Ext);
   CheckCalls(Result);
   // Declared types for EVERY loaded model first (the expression pass reads
   // used units' SymTypeX), then expressions for the requested unit only.
@@ -1699,12 +1780,29 @@ begin
   CrossType(Result);
 end;
 
+function TPasSemaProject.StageTimings: string;
+begin
+  Result := FStageTimings;
+end;
+
 function TPasSemaProject.AnalyzeProject(const AMainFile: string): Integer;
 var
   LDone, LN, LIdx, LU: Integer;
   LPaths: TArray<string>;
   LPath: string;
+  LSW: TStopwatch;
+  LResolveMs, LLoadMs: Int64;
+
+  procedure Stage(const AName: string);
+  begin
+    FStageTimings := FStageTimings +
+      Format('%s=%d;', [AName, LSW.ElapsedMilliseconds]);
+    LSW := TStopwatch.StartNew;
+  end;
+
 begin
+  FStageTimings := '';
+  LSW := TStopwatch.StartNew;
   Result := LoadFile(AMainFile);
   if Result < 0 then
     Exit;
@@ -1714,28 +1812,40 @@ begin
   // works), and so no parallel CrossResolve worker triggers its first-time
   // load mid-flight.
   EnsureSystemUnit;
+  Stage('main+sys');
   // Load the TRANSITIVE closure, breadth-first: resolve every not-yet-
   // processed model's uses, batch-preload the newly discovered files in
   // parallel, then let ResolveUses (sequential, the single source of truth
   // for UnitId assignment) find them all cached. Repeat until no model is
   // left unprocessed. Terminates: each round processes models created
   // before it, and a file loads at most once (FByPath cache).
+  LResolveMs := 0;
+  LLoadMs := 0;
   LDone := 0;
   while LDone < FModels.Count do
   begin
     LN := FModels.Count;
     LPaths := nil;
+    LSW := TStopwatch.StartNew;
     for LIdx := LDone to LN - 1 do
       for LU := 0 to High(FModels[LIdx].UsesList) do
         if FSM.ResolveUnit(FModels[LIdx].UsesList[LU].NameFull,
           FModels[LIdx].UsesList[LU].InPath, FFiles[LIdx], LPath) and
           not FByPath.ContainsKey(LowerCase(LPath)) then
           LPaths := LPaths + [LPath];
+    Inc(LResolveMs, LSW.ElapsedMilliseconds);
+    LSW := TStopwatch.StartNew;
     LoadFilesParallel(LPaths);
+    Inc(LLoadMs, LSW.ElapsedMilliseconds);
+    LSW := TStopwatch.StartNew;
     for LIdx := LDone to LN - 1 do
       ResolveUses(LIdx);
+    Inc(LResolveMs, LSW.ElapsedMilliseconds);
     LDone := LN;
   end;
+  FStageTimings := FStageTimings +
+    Format('resolve=%d;load=%d;', [LResolveMs, LLoadMs]);
+  LSW := TStopwatch.StartNew;
   // Cross passes for EVERY loaded unit — same per-unit write discipline as
   // AnalyzeDirectory (each writes only its own model, reads others' frozen
   // Phase-1 state), so the same parallel farming is safe.
@@ -1745,20 +1855,24 @@ begin
     begin
       CrossResolve(AIdx);
     end);
-  // Sequential: the inherited-member walk reads other models' ExtRefMap,
-  // frozen only now that every CrossResolve worker is done.
-  for LIdx := 0 to LN - 1 do
-    CrossResolveInherited(LIdx);
+  Stage('xresolve');
+  // The inherited-member pass needs every CrossResolve worker done first
+  // (it reads their ExtRefMaps); parallel compute + sequential commit.
+  RunInheritedPass(LN);
+  Stage('inherited');
   ForEachIndex(LN - 1,
     procedure(AIdx: Integer)
     begin
       CheckCalls(AIdx);
     end);
+  Stage('calls');
   // Sequential by design — see AnalyzeDirectory's Phase-3c comment.
   for LIdx := 0 to FModels.Count - 1 do
     BindTypesX(LIdx);
+  Stage('bindx');
   for LIdx := 0 to LN - 1 do
     CrossType(LIdx);
+  Stage('xtype');
 end;
 
 procedure TPasSemaProject.AnalyzeDirectory(const ARoot: string);
@@ -1778,6 +1892,13 @@ begin
   end;
   LoadFilesParallel(LPaths);
   LN := FModels.Count;   // snapshot: only the directory's own units get E2003
+  // Resolve the implicit System unit BEFORE any parallel pass: a worker
+  // hitting it first mid-flight would LoadFile into the shared FModels
+  // while other workers read FModels[i] (the lock serializes the load
+  // itself, not the container reads elsewhere). After the LN snapshot, so a
+  // from-search-paths System stays outside the cross passes — exactly where
+  // the old lazy mid-CrossResolve load would have put it.
+  EnsureSystemUnit;
   for LIdx := 0 to LN - 1 do
     ResolveUses(LIdx);
   // Cross passes per unit write ONLY their own model and read the others'
@@ -1787,10 +1908,9 @@ begin
     begin
       CrossResolve(AIdx);
     end);
-  // Sequential: the inherited-member walk reads other models' ExtRefMap,
-  // frozen only now that every CrossResolve worker is done.
-  for LIdx := 0 to LN - 1 do
-    CrossResolveInherited(LIdx);
+  // The inherited-member pass needs every CrossResolve worker done first
+  // (it reads their ExtRefMaps); parallel compute + sequential commit.
+  RunInheritedPass(LN);
   ForEachIndex(LN - 1,
     procedure(AIdx: Integer)
     begin
