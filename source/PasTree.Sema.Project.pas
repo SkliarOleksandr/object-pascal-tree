@@ -425,6 +425,12 @@ begin
   if LTodo = nil then
     Exit;
 
+  // I/O first, CPU second: pull every file into the source manager's memory
+  // repository with the deep I/O pool, so the per-core parse workers below
+  // never stall on a COLD read (antivirus scan-on-first-touch dominates a
+  // first-run analysis otherwise).
+  FSM.Prefetch(LTodo);
+
   SetLength(LDone, Length(LTodo));
   ForEachIndex(High(LTodo),
     procedure(AIndex: Integer)

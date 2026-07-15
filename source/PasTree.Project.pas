@@ -85,6 +85,9 @@ var
 begin
   SetLength(LResults, Length(AFiles));
   LInfo := PlatformInfo(FPlatform);
+  // I/O first, CPU second — see TPasSourceManager.Prefetch (cold reads are
+  // latency-bound; don't serialize them with parsing inside per-core workers).
+  FSourceManager.Prefetch(AFiles);
   LBaseDefines := CreatePlatformDefines(FPlatform);
   try
     for LName in FExtraDefines do

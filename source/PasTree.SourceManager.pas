@@ -12,6 +12,7 @@ interface
 
 uses
   System.SysUtils,
+  System.Threading,
   System.Generics.Collections;
 
 type
@@ -35,10 +36,18 @@ type
     // 5.5s of a 6.7s real-project analysis before this index, ~0 after.
     FSearchIndex: TDictionary<string, string>;
     FDirIndexes: TObjectDictionary<string, TDictionary<string, string>>;
+    // In-memory file-content repository, filled by Prefetch (below): LoadText
+    // serves from here before touching the disk. Same lifetime as this
+    // manager — one analysis run — so no external-change invalidation is
+    // needed (a fresh run re-reads via the OS cache anyway).
+    FContentCache: TDictionary<string, string>;
+    FIoPool: TThreadPool;   // I/O-depth pool for Prefetch (not per-core)
     function TryFile(const ADir, AName: string; out AResolved: string): Boolean;
     function DirIndex(const ADir: string): TDictionary<string, string>;
     function FindUnitFile(const AUnitName, AFromDir: string;
       out AResolved: string): Boolean;
+    function IoPool: TThreadPool;
+    function ReadFileText(const APath: string): string;
   public
     constructor Create(const ASearchPaths: TArray<string>);
     destructor Destroy; override;
@@ -55,6 +64,15 @@ type
       LoadText). Keyed by full-path, case-insensitive. Set before analyzing. }
     procedure SetBuffer(const APath, AText: string);
     procedure ClearBuffers;
+    { Reads every file of APaths into the in-memory repository CONCURRENTLY,
+      with an I/O-depth pool (32 workers) rather than the per-core parse
+      pool: a COLD read's cost is dominated by per-file latency (antivirus
+      scan-on-first-touch, MFT lookups), not throughput, so it pays to keep
+      many requests in flight while the CPU-bound parse workers stay
+      per-core. Call before a parse batch; LoadText then serves from memory.
+      Failed reads are skipped silently — LoadText's own error path reports
+      them, as before. }
+    procedure Prefetch(const APaths: TArray<string>);
     function LoadText(const APath: string): string;
     { Indexes every *.inc under ARoot by basename as a last-resort include
       resolver (corpus runs without real project search paths). The first
@@ -90,6 +108,8 @@ end;
 
 destructor TPasSourceManager.Destroy;
 begin
+  FIoPool.Free;
+  FContentCache.Free;
   FDirIndexes.Free;
   FSearchIndex.Free;
   FAliases.Free;
@@ -97,6 +117,23 @@ begin
   FIncludeIndex.Free;
   FUnitIndex.Free;
   inherited;
+end;
+
+// Fixed-width I/O pool (32 workers regardless of core count) for Prefetch
+// and the search-index build. Min = Max so the workers spawn immediately —
+// the default pool grows by roughly one thread per second, which would
+// defeat a burst of one-off reads entirely.
+function TPasSourceManager.IoPool: TThreadPool;
+const
+  IO_WORKERS = 32;
+begin
+  if FIoPool = nil then
+  begin
+    FIoPool := TThreadPool.Create;
+    FIoPool.SetMaxWorkerThreads(IO_WORKERS);
+    FIoPool.SetMinWorkerThreads(IO_WORKERS);
+  end;
+  Result := FIoPool;
 end;
 
 // The .pas files of one directory, indexed by lower-cased basename; built on
@@ -183,16 +220,29 @@ end;
 function TPasSourceManager.FindUnitFile(const AUnitName, AFromDir: string;
   out AResolved: string): Boolean;
 var
-  LDir, LFile: string;
+  LFile: string;
+  LListings: TArray<TArray<string>>;
+  LIdx: Integer;
 begin
   if FSearchIndex = nil then
   begin
     FSearchIndex := TDictionary<string, string>.Create;
-    // First path wins — same priority the sequential probing loop had.
-    for LDir in FSearchPaths do
-      if TDirectory.Exists(LDir) then
-        for LFile in TDirectory.GetFiles(LDir, '*.pas') do
-          FSearchIndex.TryAdd(LowerCase(TPath.GetFileName(LFile)), LFile);
+    // Enumerate every search path CONCURRENTLY (a cold directory listing is
+    // latency-bound, like a cold file read — see Prefetch) into per-path
+    // slots, then merge SEQUENTIALLY in path order: first path wins, the
+    // same priority the sequential probing loop had.
+    SetLength(LListings, Length(FSearchPaths));
+    TParallel.&For(0, High(FSearchPaths),
+      procedure(AIndex: Integer)
+      begin
+        if TDirectory.Exists(FSearchPaths[AIndex]) then
+          LListings[AIndex] := TDirectory.GetFiles(FSearchPaths[AIndex], '*.pas')
+        else
+          LListings[AIndex] := nil;
+      end, IoPool);
+    for LIdx := 0 to High(LListings) do
+      for LFile in LListings[LIdx] do
+        FSearchIndex.TryAdd(LowerCase(TPath.GetFileName(LFile)), LFile);
   end;
   if DirIndex(AFromDir).TryGetValue(LowerCase(AUnitName) + '.pas',
      AResolved) then
@@ -299,13 +349,12 @@ begin
   end;
 end;
 
-function TPasSourceManager.LoadText(const APath: string): string;
+// One tolerant disk read (BOM honored; ANSI fallback on decode failure) —
+// shared by LoadText and the Prefetch workers.
+function TPasSourceManager.ReadFileText(const APath: string): string;
 var
   LBytes: TBytes;
 begin
-  if (FBuffers <> nil) and
-     FBuffers.TryGetValue(LowerCase(TPath.GetFullPath(APath)), Result) then
-    Exit;
   try
     Result := TFile.ReadAllText(APath);
   except
@@ -315,6 +364,48 @@ begin
       Result := TEncoding.ANSI.GetString(LBytes);
     end;
   end;
+end;
+
+procedure TPasSourceManager.Prefetch(const APaths: TArray<string>);
+var
+  LTexts: TArray<string>;
+  LOk: TArray<Boolean>;
+  LIdx: Integer;
+begin
+  if APaths = nil then
+    Exit;
+  if FContentCache = nil then
+    FContentCache := TDictionary<string, string>.Create;
+  // Concurrent reads into per-index slots, sequential commit — no locks, and
+  // the dictionary is never mutated while parse workers might read it.
+  SetLength(LTexts, Length(APaths));
+  SetLength(LOk, Length(APaths));
+  TParallel.&For(0, High(APaths),
+    procedure(AIndex: Integer)
+    begin
+      try
+        LTexts[AIndex] := ReadFileText(APaths[AIndex]);
+        LOk[AIndex] := True;
+      except
+        LOk[AIndex] := False;   // unreadable — LoadText's disk path reports it
+      end;
+    end, IoPool);
+  for LIdx := 0 to High(APaths) do
+    if LOk[LIdx] then
+      FContentCache.AddOrSetValue(LowerCase(TPath.GetFullPath(APaths[LIdx])),
+        LTexts[LIdx]);
+end;
+
+function TPasSourceManager.LoadText(const APath: string): string;
+var
+  LKey: string;
+begin
+  LKey := LowerCase(TPath.GetFullPath(APath));
+  if (FBuffers <> nil) and FBuffers.TryGetValue(LKey, Result) then
+    Exit;
+  if (FContentCache <> nil) and FContentCache.TryGetValue(LKey, Result) then
+    Exit;
+  Result := ReadFileText(APath);
 end;
 
 function TPasSourceManager.ResolveInclude(const AIncludingFile, AName: string;
