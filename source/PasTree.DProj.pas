@@ -43,6 +43,7 @@ type
     FFiles: TArray<string>;
     FSearchPaths: TArray<string>;
     FDefines: TArray<string>;
+    FNamespaces: TArray<string>;
     FUnitAliases: TArray<TPasUnitAlias>;
     function ResolvePath(const ARelOrAbs: string): string;
   public
@@ -69,6 +70,8 @@ type
     property SearchPaths: TArray<string> read FSearchPaths;
     { DCC_Define entries for the evaluated config. }
     property Defines: TArray<string> read FDefines;
+    { DCC_Namespace entries (unit-scope namespaces, dcc -NS), in order. }
+    property Namespaces: TArray<string> read FNamespaces;
     { DCC_UnitAlias entries (Alias -> real unit name). }
     property UnitAliases: TArray<TPasUnitAlias> read FUnitAliases;
   end;
@@ -620,7 +623,8 @@ begin
   FDir := ''; FProjectName := ''; FMainSource := ''; FConfig := '';
   FPlatform := pfWin32;
   FConfigurations := nil; FPlatforms := nil; FFiles := nil;
-  FSearchPaths := nil; FDefines := nil; FUnitAliases := nil;
+  FSearchPaths := nil; FDefines := nil; FNamespaces := nil;
+  FUnitAliases := nil;
 
   if not TFile.Exists(APath) then
     Exit;
@@ -764,6 +768,25 @@ begin
           FDefines := LDefs.ToArray;
         finally
           LDefs.Free;
+        end;
+      end;
+
+      if LVars.TryGetValue('DCC_Namespace', LVal) then
+      begin
+        var LNS := TList<string>.Create;
+        try
+          for LName in LVal.Split([';']) do
+          begin
+            var LOne := Trim(LName);
+            // The accumulated chain ends in a literal '$(DCC_Namespace)'
+            // self-reference when the env var is unset — skip macro leftovers.
+            if (LOne <> '') and (Pos('$(', LOne) = 0) and
+               not LNS.Contains(LOne) then
+              LNS.Add(LOne);
+          end;
+          FNamespaces := LNS.ToArray;
+        finally
+          LNS.Free;
         end;
       end;
 

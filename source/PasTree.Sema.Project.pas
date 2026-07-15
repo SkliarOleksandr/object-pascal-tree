@@ -53,6 +53,12 @@ type
     FModels: TObjectList<TPasSemaModel>;
     FFiles: TList<string>;                 // parallel to FModels (full path)
     FByPath: TDictionary<string, Integer>; // full path (lower) -> model id
+    // Declared unit name (lower) -> model id, registered as files load. The
+    // dcc rule this serves: a program's `uses X in 'path'` locates X for the
+    // WHOLE project — other units say just `uses X` with the file nowhere on
+    // any search path (the demo's own .dproj has no UnitSearchPath at all).
+    FByUnitName: TDictionary<string, Integer>;
+    FNamespaces: TArray<string>;           // own copy for LoadedUnitByName
     FSingleThreaded: Boolean;
     FSystemUnitId: Integer;                // memoized EnsureSystemUnit result
     FSystemUnitResolved: Boolean;
@@ -74,6 +80,8 @@ type
     procedure ForEachIndex(AHi: Integer; const ABody: TProc<Integer>);
     function LoadFile(const APath: string): Integer;
     procedure LoadFilesParallel(const APaths: TArray<string>);
+    procedure RegisterUnitName(AId: Integer);
+    function LoadedUnitByName(const AName: string): Integer;
     procedure ResolveUses(AId: Integer);
     procedure CrossResolve(AId: Integer);
     function FindInUses(AId: Integer; const ANameLower: string;
@@ -115,6 +123,11 @@ type
       the file on disk (for unsaved editor content). Call BEFORE AnalyzeFile/
       AnalyzeDirectory — LoadFile reads at analysis time. }
     procedure SetBuffer(const APath, AText: string);
+    { Unit-scope namespaces (dcc -NS / DCC_Namespace) and unit aliases
+      (dcc -A / DCC_UnitAlias), forwarded to the source manager's unit-name
+      resolution. Set BEFORE analyzing. }
+    procedure SetNamespaces(const ANamespaces: TArray<string>);
+    procedure AddUnitAlias(const AAlias, AReal: string);
     { Resolves and loads the real `System` unit on demand (memoized; -1 if it
       cannot be found via the configured search paths). EVERY unit implicitly
       uses System (11.2.1 / 1.2.1) without a `uses` clause naming it, so it
@@ -151,6 +164,14 @@ type
     function XTypeText(const AX: TSemaXType): string;
     // Analyze one unit + its direct uses; returns the main unit's model id.
     function AnalyzeFile(const AMainFile: string): Integer;
+    { Analyze a whole PROJECT from its main source: loads the TRANSITIVE
+      uses closure and runs the cross passes (CrossResolve/CheckCalls/
+      BindTypesX/CrossType) on EVERY loaded unit — not just the main file
+      (AnalyzeFile's narrower contract, kept for tools). This is what an
+      editor host needs for go-to-declaration to work INSIDE dependency
+      units: without it a dependency only gets Phase 1 (no ExtRefMap at
+      all). Returns the main unit's model id. }
+    function AnalyzeProject(const AMainFile: string): Integer;
     // Analyze every .pas/.dpr under a directory (indexed first).
     procedure AnalyzeDirectory(const ARoot: string);
   end;
@@ -190,6 +211,7 @@ end;
 
 destructor TPasSemaProject.Destroy;
 begin
+  FByUnitName.Free;
   FSystemUnitLock.Free;
   FInstKeys.Free;
   FInstances.Free;
@@ -217,6 +239,17 @@ end;
 procedure TPasSemaProject.SetBuffer(const APath, AText: string);
 begin
   FSM.SetBuffer(APath, AText);
+end;
+
+procedure TPasSemaProject.SetNamespaces(const ANamespaces: TArray<string>);
+begin
+  FNamespaces := ANamespaces;
+  FSM.SetNamespaces(ANamespaces);
+end;
+
+procedure TPasSemaProject.AddUnitAlias(const AAlias, AReal: string);
+begin
+  FSM.AddUnitAlias(AAlias, AReal);
 end;
 
 function TPasSemaProject.EnsureSystemUnit: Integer;
@@ -329,6 +362,7 @@ begin
   Result := FModels.Add(LModel);
   FFiles.Add(LFull);
   FByPath.Add(LKey, Result);
+  RegisterUnitName(Result);
 end;
 
 // Parse + Phase-1-analyze a batch of files with one worker per core, then
@@ -397,9 +431,48 @@ begin
     begin
       FByPath.Add(LKeys[LIdx], FModels.Add(LDone[LIdx]));
       FFiles.Add(LTodo[LIdx]);
+      RegisterUnitName(FModels.Count - 1);
     end
     else
       FByPath.Add(LKeys[LIdx], -1);
+end;
+
+// Maps the model's DECLARED unit name (root's name node, dotted included) to
+// its id — first-loaded wins, so a program's own `in 'path'` units (loaded
+// first, from the main source) are authoritative over later stray same-named
+// files. This is the dcc rule that lets OTHER units say plain `uses X` for a
+// unit only the program's `uses X in 'path'` locates (no search-path entry).
+procedure TPasSemaProject.RegisterUnitName(AId: Integer);
+var
+  LName: string;
+  LNameNode: Integer;
+begin
+  if FByUnitName = nil then
+    FByUnitName := TDictionary<string, Integer>.Create;
+  LNameNode := FModels[AId].Tree.Nodes[0].FirstChild;
+  if LNameNode = NIL_NODE then
+    Exit;
+  LName := LowerCase(QualifiedText(AId, LNameNode));
+  if (LName <> '') and not FByUnitName.ContainsKey(LName) then
+    FByUnitName.Add(LName, AId);
+end;
+
+// An already-loaded model whose DECLARED name matches AName (as written or
+// through a unit-scope namespace prefix); -1 when none. See RegisterUnitName.
+function TPasSemaProject.LoadedUnitByName(const AName: string): Integer;
+var
+  LNS: string;
+begin
+  if FByUnitName = nil then
+    Exit(-1);
+  if FByUnitName.TryGetValue(LowerCase(AName), Result) then
+    Exit;
+  if Pos('.', AName) = 0 then
+    for LNS in FNamespaces do
+      if (LNS <> '') and
+         FByUnitName.TryGetValue(LowerCase(LNS + '.' + AName), Result) then
+        Exit;
+  Result := -1;
 end;
 
 procedure TPasSemaProject.ResolveUses(AId: Integer);
@@ -414,18 +487,19 @@ begin
   begin
     if FSM.ResolveUnit(LModel.UsesList[LIdx].NameFull,
       LModel.UsesList[LIdx].InPath, FFiles[AId], LPath) then
+      LUid := LoadFile(LPath)
+    else
+      // No file on any path — but the unit may ALREADY be loaded under this
+      // name via a program's `uses X in 'path'` (dcc: an in-path locates the
+      // unit for the whole project, not just the program file).
+      LUid := LoadedUnitByName(LModel.UsesList[LIdx].NameFull);
+    LModel.UsesList[LIdx].UnitId := LUid;
+    if LUid >= 0 then
     begin
-      LUid := LoadFile(LPath);
-      LModel.UsesList[LIdx].UnitId := LUid;
-      if LUid >= 0 then
-      begin
-        if LModel.UsesList[LIdx].Sym <> NIL_SYM then
-          LModel.Symbols[LModel.UsesList[LIdx].Sym].Flags :=
-            LModel.Symbols[LModel.UsesList[LIdx].Sym].Flags -
-            [sfExternalUnresolved];
-      end
-      else
-        LModel.AllUsesResolved := False;
+      if LModel.UsesList[LIdx].Sym <> NIL_SYM then
+        LModel.Symbols[LModel.UsesList[LIdx].Sym].Flags :=
+          LModel.Symbols[LModel.UsesList[LIdx].Sym].Flags -
+          [sfExternalUnresolved];
     end
     else
       LModel.AllUsesResolved := False;
@@ -1534,6 +1608,64 @@ begin
   for LIdx := 0 to FModels.Count - 1 do
     BindTypesX(LIdx);
   CrossType(Result);
+end;
+
+function TPasSemaProject.AnalyzeProject(const AMainFile: string): Integer;
+var
+  LDone, LN, LIdx, LU: Integer;
+  LPaths: TArray<string>;
+  LPath: string;
+begin
+  Result := LoadFile(AMainFile);
+  if Result < 0 then
+    Exit;
+  // The implicit System unit is part of every unit's closure (1.2.1) yet
+  // never appears in a `uses` clause — pull it in NOW so the closure loop
+  // and the cross passes below cover it too (nav inside an opened System.pas
+  // works), and so no parallel CrossResolve worker triggers its first-time
+  // load mid-flight.
+  EnsureSystemUnit;
+  // Load the TRANSITIVE closure, breadth-first: resolve every not-yet-
+  // processed model's uses, batch-preload the newly discovered files in
+  // parallel, then let ResolveUses (sequential, the single source of truth
+  // for UnitId assignment) find them all cached. Repeat until no model is
+  // left unprocessed. Terminates: each round processes models created
+  // before it, and a file loads at most once (FByPath cache).
+  LDone := 0;
+  while LDone < FModels.Count do
+  begin
+    LN := FModels.Count;
+    LPaths := nil;
+    for LIdx := LDone to LN - 1 do
+      for LU := 0 to High(FModels[LIdx].UsesList) do
+        if FSM.ResolveUnit(FModels[LIdx].UsesList[LU].NameFull,
+          FModels[LIdx].UsesList[LU].InPath, FFiles[LIdx], LPath) and
+          not FByPath.ContainsKey(LowerCase(LPath)) then
+          LPaths := LPaths + [LPath];
+    LoadFilesParallel(LPaths);
+    for LIdx := LDone to LN - 1 do
+      ResolveUses(LIdx);
+    LDone := LN;
+  end;
+  // Cross passes for EVERY loaded unit — same per-unit write discipline as
+  // AnalyzeDirectory (each writes only its own model, reads others' frozen
+  // Phase-1 state), so the same parallel farming is safe.
+  LN := FModels.Count;
+  ForEachIndex(LN - 1,
+    procedure(AIdx: Integer)
+    begin
+      CrossResolve(AIdx);
+    end);
+  ForEachIndex(LN - 1,
+    procedure(AIdx: Integer)
+    begin
+      CheckCalls(AIdx);
+    end);
+  // Sequential by design — see AnalyzeDirectory's Phase-3c comment.
+  for LIdx := 0 to FModels.Count - 1 do
+    BindTypesX(LIdx);
+  for LIdx := 0 to LN - 1 do
+    CrossType(LIdx);
 end;
 
 procedure TPasSemaProject.AnalyzeDirectory(const ARoot: string);

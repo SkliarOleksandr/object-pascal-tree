@@ -478,6 +478,13 @@ begin
      SameText(FProj.Model(LTMid).Symbols[LSym].Name, 'Result') then
     Exit(TargetFromNode(LTMid, RoutineNameNodeOfSym(LTMid, LSym), 'Result',
       ATarget));
+  // 3) a compiler INTRINSIC with no source declaration anywhere (Integer,
+  //    Length, True... — real System.pas literally says "Predefined
+  //    constants, types, procedures, and functions do not have actual
+  //    declarations"): target the real System unit's own header, exactly
+  //    what the RAD Studio IDE does for these.
+  Result := TargetForUnitId(FProj.EnsureSystemUnit,
+    FProj.Model(LTMid).Symbols[LSym].Name, ATarget);
 end;
 
 end.

@@ -98,6 +98,26 @@ const
     'implementation'#10 +                      // 4
     'end.'#10;                                 // 5
 
+  // AnalyzeProject fixtures: a main program whose closure pulls NavB (and
+  // through it everything above) TRANSITIVELY; NavE is reachable only via a
+  // unit-scope NAMESPACE (uses NavE + namespaces=['Wide'] -> Wide.NavE.pas);
+  // OldNavF only via a unit ALIAS (OldNavF=NavF).
+  UNIT_MAIN =
+    'program NavMain;'#10 +                    // 1
+    'uses NavB, NavE, OldNavF;'#10 +           // 2  NavE col 12, OldNavF col 18
+    'begin'#10 +                               // 3
+    'end.'#10;                                 // 4
+  UNIT_E =
+    'unit Wide.NavE;'#10 +                     // 1
+    'interface'#10 +                           // 2
+    'implementation'#10 +                      // 3
+    'end.'#10;                                 // 4
+  UNIT_F =
+    'unit NavF;'#10 +                          // 1
+    'interface'#10 +                           // 2
+    'implementation'#10 +                      // 3
+    'end.'#10;                                 // 4
+
   UNIT_B =
     'unit NavB;'#10 +                          // 1
     'interface'#10 +                           // 2
@@ -295,10 +315,14 @@ begin
         GNav.IdentAt(GMidB, 3, 28, {out} LIdent) and
         (LIdent.RawTokenTo - LIdent.RawToken = 2));
 
-      // Pure builtin: Integer has no source declaration anywhere in uses.
+      // Compiler INTRINSIC with no source declaration anywhere (Integer):
+      // targets the System unit's own header — RAD Studio IDE behavior
+      // (real System.pas: "Predefined ... do not have actual declarations").
       Ok('builtin: IdentAt', GNav.IdentAt(GMidB, 8, 6, {out} LIdent));
-      Ok('builtin: no target', not GNav.ResolveDecl(GMidB, LIdent.Node,
-        {out} LTarget));
+      Ok('intrinsic -> System header',
+        GNav.ResolveDecl(GMidB, LIdent.Node, {out} LTarget) and
+        SameText(TPath.GetFileName(LTarget.FilePath), 'System.pas') and
+        (LTarget.Line = 1) and (LTarget.Col = 6));
 
       // Non-identifier position (the ':' of ':=' on line 13 is at col 5).
       Ok('symbol pos -> no ident', not GNav.IdentAt(GMidB, 13, 5, {out} LIdent));
@@ -309,6 +333,56 @@ begin
       // and the qualifier itself was flagged as undeclared).
       Ok('qualified expr qualifiers: no false E2003',
         DiagCount(GProj.Model(GMidB), 'E2003') = 0);
+    finally
+      GNav.Free;
+    end;
+  finally
+    GProj.Free;
+  end;
+
+  // ---- AnalyzeProject: the TRANSITIVE closure from a main program. ----
+  // NavMain uses only NavB/NavE/OldNavF; NavA, NavC, Namespace.NavD and the
+  // implicit System unit must all load transitively, and the cross passes
+  // must run for DEPENDENCY units too — clicking inside NavB behaves exactly
+  // like the direct-analysis pass above (AnalyzeFile's documented gap).
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavMain.dpr'), UNIT_MAIN);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Wide.NavE.pas'), UNIT_E);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavF.pas'), UNIT_F);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.SetNamespaces(['Wide']);
+    GProj.AddUnitAlias('OldNavF', 'NavF');
+    Ok('project: main model',
+      GProj.AnalyzeProject(TPath.Combine(LDir, 'NavMain.dpr')) >= 0);
+    GNav := TPasNavigator.Create(GProj);
+    try
+      // Transitive reach: NavA came in only through NavB's uses.
+      Ok('project: transitive NavA loaded',
+        GNav.ModelIdOf(TPath.Combine(LDir, 'NavA.pas')) >= 0);
+      Ok('project: implicit System loaded',
+        GNav.ModelIdOf(TPath.Combine(LDir, 'System.pas')) >= 0);
+      // Namespace + alias resolution (uses NavE -> Wide.NavE.pas; uses
+      // OldNavF -> NavF.pas).
+      Ok('project: namespace unit loaded',
+        GNav.ModelIdOf(TPath.Combine(LDir, 'Wide.NavE.pas')) >= 0);
+      Ok('project: aliased unit loaded',
+        GNav.ModelIdOf(TPath.Combine(LDir, 'NavF.pas')) >= 0);
+      // Nav INSIDE the dependency NavB — the reported-bug shape (clicking
+      // TSynCustomHighlighter inside a dependency unit did nothing).
+      GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavB.pas'));
+      Ok('project: NavB model found', GMidB >= 0);
+      CheckNav('project dep: type ref', 4, 9, 'TThing', 'NavA.pas', 4, 3);
+      CheckNav('project dep: cross member', 13, 11, 'Value', 'NavA.pas', 5, 5);
+      CheckNav('project dep: implicit System', 10, 6, 'TObject',
+        'System.pas', 7, 3);
+      CheckNav('project dep: qualifier click', 15, 8, 'System',
+        'System.pas', 1, 6);
+      // `uses` clause nav in the MAIN file across namespace/alias.
+      GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavMain.dpr'));
+      CheckNav('project uses: NavE -> namespaced file', 2, 13, 'NavE',
+        'Wide.NavE.pas', 1, 6);
+      CheckNav('project uses: OldNavF -> aliased file', 2, 19, 'OldNavF',
+        'NavF.pas', 1, 6);
     finally
       GNav.Free;
     end;

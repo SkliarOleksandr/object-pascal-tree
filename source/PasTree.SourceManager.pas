@@ -18,13 +18,24 @@ type
   TPasSourceManager = class
   private
     FSearchPaths: TArray<string>;
+    FNamespaces: TArray<string>;                  // -NS prefixes, in order
+    FAliases: TDictionary<string, string>;        // -A alias(lower) -> real
     FIncludeIndex: TDictionary<string, string>;  // basename -> full path
     FUnitIndex: TDictionary<string, string>;      // *.pas/*.dpr basename -> path
     FBuffers: TDictionary<string, string>;        // full path (lower) -> text
     function TryFile(const ADir, AName: string; out AResolved: string): Boolean;
+    function FindUnitFile(const AUnitName, AFromDir: string;
+      out AResolved: string): Boolean;
   public
     constructor Create(const ASearchPaths: TArray<string>);
     destructor Destroy; override;
+    { Unit-scope namespaces (dcc -NS / DCC_Namespace), tried IN ORDER as
+      prefixes when an unqualified unit name has no file of its own:
+      `uses Generics.Collections` -> System.Generics.Collections.pas. }
+    procedure SetNamespaces(const ANamespaces: TArray<string>);
+    { Unit aliases (dcc -A / DCC_UnitAlias): a whole-name match rewrites the
+      unit name BEFORE resolution (WinTypes -> Winapi.Windows). }
+    procedure AddUnitAlias(const AAlias, AReal: string);
     { In-memory buffer overrides: LoadText returns the given text for APath
       instead of reading the file. Editor hosts push unsaved buffers here so
       analysis sees what's on screen (main file AND its $I includes go through
@@ -66,10 +77,23 @@ end;
 
 destructor TPasSourceManager.Destroy;
 begin
+  FAliases.Free;
   FBuffers.Free;
   FIncludeIndex.Free;
   FUnitIndex.Free;
   inherited;
+end;
+
+procedure TPasSourceManager.SetNamespaces(const ANamespaces: TArray<string>);
+begin
+  FNamespaces := ANamespaces;
+end;
+
+procedure TPasSourceManager.AddUnitAlias(const AAlias, AReal: string);
+begin
+  if FAliases = nil then
+    FAliases := TDictionary<string, string>.Create;
+  FAliases.AddOrSetValue(LowerCase(AAlias), AReal);
 end;
 
 procedure TPasSourceManager.SetBuffer(const APath, AText: string);
@@ -118,10 +142,25 @@ begin
   end;
 end;
 
+// One candidate unit name (as-spelled) against the referring dir, then the
+// search paths — the shared step ResolveUnit runs per candidate spelling.
+function TPasSourceManager.FindUnitFile(const AUnitName, AFromDir: string;
+  out AResolved: string): Boolean;
+var
+  LCand: string;
+begin
+  if TryFile(AFromDir, AUnitName + '.pas', AResolved) then
+    Exit(True);
+  for LCand in FSearchPaths do
+    if TryFile(LCand, AUnitName + '.pas', AResolved) then
+      Exit(True);
+  Result := False;
+end;
+
 function TPasSourceManager.ResolveUnit(const AUnitName, AInPath, AFromFile: string;
   out AResolved: string): Boolean;
 var
-  LDir, LLeaf, LCand: string;
+  LDir, LLeaf, LCand, LUnitName: string;
   LNames: TArray<string>;
   LName: string;
   LDot: Integer;
@@ -152,34 +191,52 @@ begin
       LDir := TPath.GetDirectoryName(AFromFile);
   end;
 
-  // Candidate file names: <dotted>.pas then <leaf>.pas.
-  LDot := LastDelimiter('.', AUnitName);
-  if LDot > 0 then
-    LLeaf := Copy(AUnitName, LDot + 1, MaxInt)
-  else
-    LLeaf := AUnitName;
-  LNames := [AUnitName + '.pas'];
-  if not SameText(LLeaf, AUnitName) then
-    LNames := LNames + [LLeaf + '.pas'];
+  // 2. Unit alias (dcc -A): a whole-name match rewrites the spelling before
+  // any file lookup (WinTypes -> Winapi.Windows), exactly once (dcc does not
+  // chain aliases).
+  LUnitName := AUnitName;
+  if (FAliases <> nil) and FAliases.TryGetValue(LowerCase(AUnitName), LCand) then
+    LUnitName := LCand;
 
-  // 2. Relative to the referring file, then search paths.
-  for LName in LNames do
-  begin
-    if TryFile(LDir, LName, AResolved) then
-      Exit(True);
-    for LCand in FSearchPaths do
-      if TryFile(LCand, LName, AResolved) then
+  // 3. As spelled: <dotted>.pas relative to the referring file, then the
+  // search paths.
+  if FindUnitFile(LUnitName, LDir, AResolved) then
+    Exit(True);
+
+  // 4. Unit-scope namespaces (dcc -NS), IN ORDER, for an UNQUALIFIED name
+  // only (dcc applies namespaces to generic names, not already-dotted ones):
+  // `uses Generics.Collections` -> System.Generics.Collections.pas.
+  LDot := LastDelimiter('.', LUnitName);
+  if LDot = 0 then
+    for LName in FNamespaces do
+      if (LName <> '') and
+         FindUnitFile(LName + '.' + LUnitName, LDir, AResolved) then
         Exit(True);
-  end;
 
-  // 3. Unit index (basename fallback).
+  // 5. Leaf-name tolerance for a dotted name (System.SysUtils -> SysUtils.pas
+  // — pre-namespace-era file layouts).
+  if LDot > 0 then
+  begin
+    LLeaf := Copy(LUnitName, LDot + 1, MaxInt);
+    if FindUnitFile(LLeaf, LDir, AResolved) then
+      Exit(True);
+  end
+  else
+    LLeaf := LUnitName;
+
+  // 6. Unit index (basename fallback).
   if FUnitIndex <> nil then
+  begin
+    LNames := [LUnitName + '.pas'];
+    if not SameText(LLeaf, LUnitName) then
+      LNames := LNames + [LLeaf + '.pas'];
     for LName in LNames do
       if FUnitIndex.TryGetValue(LowerCase(LName), LCand) then
       begin
         AResolved := LCand;
         Exit(True);
       end;
+  end;
 
   Result := False;
 end;
