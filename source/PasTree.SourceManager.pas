@@ -39,8 +39,10 @@ type
     // In-memory file-content repository, filled by Prefetch (below): LoadText
     // serves from here before touching the disk. Same lifetime as this
     // manager — one analysis run — so no external-change invalidation is
-    // needed (a fresh run re-reads via the OS cache anyway).
-    FContentCache: TDictionary<string, string>;
+    // needed (a fresh run re-reads via the OS cache anyway). Holds raw BYTES,
+    // not strings: the I/O workers must stay allocation-light (see Prefetch),
+    // so decoding happens on the consumer's (per-core parse worker's) thread.
+    FContentCache: TDictionary<string, TBytes>;
     FIoPool: TThreadPool;   // I/O-depth pool for Prefetch (not per-core)
     function TryFile(const ADir, AName: string; out AResolved: string): Boolean;
     function DirIndex(const ADir: string): TDictionary<string, string>;
@@ -48,6 +50,7 @@ type
       out AResolved: string): Boolean;
     function IoPool: TThreadPool;
     function ReadFileText(const APath: string): string;
+    function DecodeText(const ABytes: TBytes): string;
   public
     constructor Create(const ASearchPaths: TArray<string>);
     destructor Destroy; override;
@@ -119,13 +122,19 @@ begin
   inherited;
 end;
 
-// Fixed-width I/O pool (32 workers regardless of core count) for Prefetch
+// Fixed-width I/O pool (16 workers regardless of core count) for Prefetch
 // and the search-index build. Min = Max so the workers spawn immediately —
 // the default pool grows by roughly one thread per second, which would
-// defeat a burst of one-off reads entirely.
+// defeat a burst of one-off reads entirely. The width is a compromise: deep
+// enough to hide cold per-file latency (AV scan, MFT), shallow enough that
+// when these threads DO contend on a shared resource (the memory manager
+// under NeverSleepOnMMThreadContention=True SPINS instead of sleeping), a
+// pile-up of threads far beyond the core count cannot spin-convoy the
+// machine. The I/O work itself is kept allocation-light for the same
+// reason — see Prefetch.
 function TPasSourceManager.IoPool: TThreadPool;
 const
-  IO_WORKERS = 32;
+  IO_WORKERS = 16;
 begin
   if FIoPool = nil then
   begin
@@ -349,62 +358,74 @@ begin
   end;
 end;
 
-// One tolerant disk read (BOM honored; ANSI fallback on decode failure) —
-// shared by LoadText and the Prefetch workers.
-function TPasSourceManager.ReadFileText(const APath: string): string;
+// Bytes -> string with the same tolerant semantics TFile.ReadAllText has
+// (honor a BOM, default to ANSI without one, raw-ANSI fallback if strict
+// decoding fails). Runs on the CONSUMER's thread — never on the I/O pool.
+function TPasSourceManager.DecodeText(const ABytes: TBytes): string;
 var
-  LBytes: TBytes;
+  LEnc: TEncoding;
+  LStart: Integer;
 begin
+  LEnc := nil;
+  LStart := TEncoding.GetBufferEncoding(ABytes, LEnc, TEncoding.Default);
   try
-    Result := TFile.ReadAllText(APath);
+    Result := LEnc.GetString(ABytes, LStart, Length(ABytes) - LStart);
   except
     on E: EEncodingError do
-    begin
-      LBytes := TFile.ReadAllBytes(APath);
-      Result := TEncoding.ANSI.GetString(LBytes);
-    end;
+      Result := TEncoding.ANSI.GetString(ABytes);
   end;
+end;
+
+// One tolerant disk read (BOM honored; ANSI fallback on decode failure) —
+// LoadText's direct-from-disk path.
+function TPasSourceManager.ReadFileText(const APath: string): string;
+begin
+  Result := DecodeText(TFile.ReadAllBytes(APath));
 end;
 
 procedure TPasSourceManager.Prefetch(const APaths: TArray<string>);
 var
-  LTexts: TArray<string>;
-  LOk: TArray<Boolean>;
+  LBytes: TArray<TBytes>;
   LIdx: Integer;
 begin
   if APaths = nil then
     Exit;
   if FContentCache = nil then
-    FContentCache := TDictionary<string, string>.Create;
+    FContentCache := TDictionary<string, TBytes>.Create;
   // Concurrent reads into per-index slots, sequential commit — no locks, and
-  // the dictionary is never mutated while parse workers might read it.
-  SetLength(LTexts, Length(APaths));
-  SetLength(LOk, Length(APaths));
+  // the dictionary is never mutated while parse workers might read it. The
+  // workers read raw BYTES only (one allocation per file): decoding to a
+  // UTF-16 string doubles the memory traffic and, under
+  // NeverSleepOnMMThreadContention=True, memory-manager contention across
+  // many threads SPINS — 32 workers decoding multi-MB sources concurrently
+  // spin-convoyed an 185-unit analysis into the 16-second range. Decoding
+  // happens per-core in the parse workers instead (LoadText/DecodeText).
+  SetLength(LBytes, Length(APaths));
   TParallel.&For(0, High(APaths),
     procedure(AIndex: Integer)
     begin
       try
-        LTexts[AIndex] := ReadFileText(APaths[AIndex]);
-        LOk[AIndex] := True;
+        LBytes[AIndex] := TFile.ReadAllBytes(APaths[AIndex]);
       except
-        LOk[AIndex] := False;   // unreadable — LoadText's disk path reports it
+        LBytes[AIndex] := nil;   // unreadable — LoadText's disk path reports it
       end;
     end, IoPool);
   for LIdx := 0 to High(APaths) do
-    if LOk[LIdx] then
+    if LBytes[LIdx] <> nil then
       FContentCache.AddOrSetValue(LowerCase(TPath.GetFullPath(APaths[LIdx])),
-        LTexts[LIdx]);
+        LBytes[LIdx]);
 end;
 
 function TPasSourceManager.LoadText(const APath: string): string;
 var
   LKey: string;
+  LRaw: TBytes;
 begin
   LKey := LowerCase(TPath.GetFullPath(APath));
   if (FBuffers <> nil) and FBuffers.TryGetValue(LKey, Result) then
     Exit;
-  if (FContentCache <> nil) and FContentCache.TryGetValue(LKey, Result) then
-    Exit;
+  if (FContentCache <> nil) and FContentCache.TryGetValue(LKey, LRaw) then
+    Exit(DecodeText(LRaw));
   Result := ReadFileText(APath);
 end;
 
