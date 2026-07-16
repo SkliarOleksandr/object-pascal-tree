@@ -610,6 +610,15 @@ begin
   end;
   if LRaw < 0 then
     Exit;
+  // A position inside a Skipped ($IFDEF'd-out) region has NO visible
+  // mapping at all — not even its real identifier/keyword tokens are
+  // promoted to the Visible stream (the preprocessor drops the whole
+  // inactive branch, so the parser/AST never sees it). Walking backward
+  // from there would cross the ENTIRE inactive region and land on
+  // unrelated ACTIVE code before it — refuse outright instead: a caret
+  // sitting in dead code has no valid nav target, active or otherwise.
+  if LM.Tree.Source.IsSkipped(0, LOffset) then
+    Exit;
   // The raw token containing this position may be whitespace/a comment —
   // real lexical content, but stripped before the Visible stream, so
   // VisOfRaw has no entry for it (e.g. right after `begin`, before the

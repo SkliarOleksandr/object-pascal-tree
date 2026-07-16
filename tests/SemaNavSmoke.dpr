@@ -236,6 +236,44 @@ const
     'end;'#10 +                                              // 23
     'end.'#10;                                              // 24
 
+  // Real bug report: go-to-impl/decl must NEVER cross from/to an INACTIVE
+  // ($IFDEF'd-out) region — mirrors the actual System.SysUtils.CharInSet
+  // shape (two overloads active under $IFNDEF NEXTGEN, two more inactive
+  // under $ELSE, same routine NAME reused in both branches). pfWin32 never
+  // defines NEXTGEN, so lines 4-5/12-19 are ACTIVE and 7-8/21-28 are the
+  // dead $ELSE branch, which the parser never even builds AST nodes for.
+  UNIT_K =
+    'unit NavK;'#10 +                                  // 1
+    'interface'#10 +                                   // 2
+    '{$IFNDEF NEXTGEN}'#10 +                            // 3
+    'function Zig(C: AnsiChar): Boolean; overload; forward;'#10 + // 4  ACTIVE
+    'function Zig(C: WideChar): Boolean; overload; forward;'#10 + // 5  ACTIVE
+    '{$ELSE}'#10 +                                      // 6
+    'function Zig(C: Byte): Boolean; overload; forward;'#10 +    // 7  INACTIVE
+    'function Zig(C: Char): Boolean; overload; forward;'#10 +    // 8  INACTIVE
+    '{$ENDIF}'#10 +                                     // 9
+    'implementation'#10 +                               // 10
+    '{$IFNDEF NEXTGEN}'#10 +                            // 11
+    'function Zig(C: AnsiChar): Boolean;'#10 +          // 12  ACTIVE
+    'begin'#10 +                                        // 13
+    '  Result := True;'#10 +                            // 14  <- AnsiChar target
+    'end;'#10 +                                          // 15
+    'function Zig(C: WideChar): Boolean;'#10 +          // 16  ACTIVE
+    'begin'#10 +                                        // 17
+    '  Result := True;'#10 +                            // 18  <- WideChar target
+    'end;'#10 +                                          // 19
+    '{$ELSE}'#10 +                                       // 20
+    'function Zig(C: Byte): Boolean;'#10 +              // 21  INACTIVE
+    'begin'#10 +                                        // 22
+    '  Result := True;'#10 +                            // 23  dead code
+    'end;'#10 +                                          // 24
+    'function Zig(C: Char): Boolean;'#10 +              // 25  INACTIVE
+    'begin'#10 +                                        // 26
+    '  Result := True;'#10 +                            // 27  dead code
+    'end;'#10 +                                          // 28
+    '{$ENDIF}'#10 +                                      // 29
+    'end.'#10;                                          // 30
+
   // AnalyzeProject fixtures: a main program whose closure pulls NavB (and
   // through it everything above) TRANSITIVELY; NavE is reachable only via a
   // unit-scope NAMESPACE (uses NavE + namespaces=['Wide'] -> Wide.NavE.pas);
@@ -385,6 +423,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavH.pas'), UNIT_H);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavI.pas'), UNIT_I);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavJ.pas'), UNIT_J);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavK.pas'), UNIT_K);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -597,6 +636,33 @@ begin
       CheckDecl('impl->decl: Cmp(S1,S2,CVC) from inside the comment line',
         22, 5, 7);
       Ok('NavJ: no false E2003', DiagCount(GProj.Model(GMidB), 'E2003') = 0);
+
+      // ---- Inactive ($IFDEF'd-out) code must never cross-match ----
+      // (real bug report: CharInSet's $IFNDEF NEXTGEN / $ELSE overload pair)
+      GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavK.pas'));
+      Ok('NavK model found', GMidB >= 0);
+      // The ACTIVE branch works exactly like any other overload pair.
+      CheckImpl('decl->impl: Zig(AnsiChar) ACTIVE', 4, 10, 14);
+      CheckImpl('decl->impl: Zig(WideChar) ACTIVE', 5, 10, 18);
+      CheckDecl('impl->decl: Zig(AnsiChar) body ACTIVE', 14, 3, 4);
+      CheckDecl('impl->decl: Zig(WideChar) body ACTIVE', 18, 3, 5);
+      // BUG: clicking a declaration INSIDE the dead $ELSE branch used to
+      // walk backward past the whole inactive region and land on the
+      // ACTIVE Zig(WideChar) implementation instead of refusing outright.
+      Ok('decl->impl: Zig(Byte) INACTIVE -> no target',
+        not GNav.GotoImplementation(GMidB, 7, 10, {out} LTarget));
+      Ok('decl->impl: Zig(Char) INACTIVE -> no target',
+        not GNav.GotoImplementation(GMidB, 8, 10, {out} LTarget));
+      // Same bug, opposite direction: an implementation body inside the
+      // dead $ELSE branch must not jump back to an ACTIVE declaration.
+      Ok('impl->decl: Zig(Byte) body INACTIVE -> no target',
+        not GNav.GotoDeclaration(GMidB, 23, 3, {out} LTarget));
+      Ok('impl->decl: Zig(Char) body INACTIVE -> no target',
+        not GNav.GotoDeclaration(GMidB, 27, 3, {out} LTarget));
+      // The dead branch has NO AST representation at all (parser never sees
+      // its tokens), so reusing the same routine NAME in both branches must
+      // not trip a duplicate/false E2003 either.
+      Ok('NavK: no false E2003', DiagCount(GProj.Model(GMidB), 'E2003') = 0);
     finally
       GNav.Free;
     end;
