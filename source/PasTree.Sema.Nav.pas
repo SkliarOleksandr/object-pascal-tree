@@ -97,17 +97,22 @@ type
     function RTSepAfter(LM: TPasSemaModel; ANode: Integer): string;
     function RTSegments(LM: TPasSemaModel; ANode: Integer;
       out AQualIdents: TArray<Integer>; out ANameNode: Integer): Boolean;
-    function RTParamCount(LM: TPasSemaModel; ANode: Integer): Integer;
+    function RTSpanText(LM: TPasSemaModel; ANode: Integer): string;
+    function RTParamSignature(LM: TPasSemaModel; ANode: Integer): string;
     function RTEnclosingRoutine(LM: TPasSemaModel; ANode: Integer): Integer;
     function RTEnclosingTypeChain(LM: TPasSemaModel;
       ADeclNode: Integer): TArray<string>;
-    function RTMethodKey(const AChain: TArray<string>; const AName: string;
-      AParamCount: Integer): string;
-    function RTRoutineKey(AContainer: Integer; const AName: string;
-      AParamCount: Integer): string;
+    function RTMethodKey(const AChain: TArray<string>;
+      const AName, ASignature: string): string;
+    function RTMethodKeyLoose(const AChain: TArray<string>;
+      const AName: string): string;
+    function RTRoutineKey(AContainer: Integer;
+      const AName, ASignature: string): string;
+    function RTRoutineKeyLoose(AContainer: Integer; const AName: string):
+      string;
     procedure EnsureRoutinePairs(AMid: Integer; ACache: TNavCache);
-    function RoutineBodyEntryVis(LM: TPasSemaModel; AImplNode: Integer):
-      Integer;
+    function RoutineBodyEntry(AMid: Integer; LM: TPasSemaModel;
+      AImplNode: Integer; out ATarget: TPasNavTarget): Boolean;
   public
     constructor Create(AProject: TPasSemaProject);
     destructor Destroy; override;
@@ -716,16 +721,59 @@ begin
   Result := ANameNode <> NIL_NODE;
 end;
 
-// Total parameter NAME count (mirrors CollectRoutine's own arity-matching
-// logic) — 0 for a parameterless routine or one with no repeated param list
-// at all (a body-less external/forward completion; rare enough here that
-// the loose, arity-blind key covers it).
-function TPasNavigator.RTParamCount(LM: TPasSemaModel; ANode: Integer):
-  Integer;
+// Raw source text spanning ANode's own tokens (leftmost descendant's
+// FirstToken — an nkMember's OWN FirstToken is the dot, see PasTree.Ast —
+// through ANode's LastToken), concatenated with no separators. Used to
+// render a parameter's TYPE EXPRESSION verbatim regardless of shape (a
+// plain `string`/`PChar` ident, or something with its own internal tokens
+// like `TArray<Integer>`), for signature matching below.
+function TPasNavigator.RTSpanText(LM: TPasSemaModel; ANode: Integer): string;
 var
-  LParams, LParam, LChild: Integer;
+  LFirstNode, LFirst, LLast, LIdx: Integer;
 begin
-  Result := 0;
+  Result := '';
+  if ANode = NIL_NODE then
+    Exit;
+  LFirstNode := ANode;
+  while LM.Tree.Nodes[LFirstNode].FirstChild <> NIL_NODE do
+    LFirstNode := LM.Tree.Nodes[LFirstNode].FirstChild;
+  LFirst := LM.Tree.Nodes[LFirstNode].FirstToken;
+  LLast := LM.Tree.Nodes[ANode].LastToken;
+  if (LFirst < 0) or (LLast < 0) or (LFirst > LLast) or
+     (LLast > High(LM.Tree.Source.Visible)) then
+    Exit;
+  for LIdx := LFirst to LLast do
+    Result := Result + LM.Tree.Source.VisibleText(LIdx);
+end;
+
+// Parameter-list SIGNATURE: one lowercased type-text entry per parameter
+// SLOT (`S1, S2: string` contributes "string" TWICE, matching how each
+// name gets its own arity slot), joined with '|'. '' for a parameterless
+// routine or one with no repeated param list at all (a body-less external/
+// forward completion — rare enough here that the loose, signature-blind
+// key covers it).
+//
+// Replaces a plain parameter COUNT (the first version of this feature):
+// two overloads with the SAME arity but different parameter TYPES — e.g.
+// `AnsiCompareFileName(PChar,Integer,PChar,Integer,Boolean)` vs the
+// `(string,Integer,string,Integer,Boolean)` overload, both arity 5 — used
+// to collide on the exact key, and which of the two "won" (first-
+// registered, in the position index's span-size-descending processing
+// order — NOT source order) had no relation to which the user actually
+// clicked. Default values are NOT part of the signature — real Object
+// Pascal only allows them on the declaration side, never repeated in the
+// implementation, so comparing them would always mismatch by design.
+// Parameter MODIFIERS (const/var/out) are not distinguished either: the
+// keyword is consumed by the parser without leaving an AST node of its own
+// (see ParseParamList), so there is nothing here to compare it against —
+// an accepted, narrower gap than the arity-only collision this replaces.
+function TPasNavigator.RTParamSignature(LM: TPasSemaModel;
+  ANode: Integer): string;
+var
+  LParams, LParam, LChild, LType, LNameCount, LI: Integer;
+  LTypeText: string;
+begin
+  Result := '';
   LParams := RTFindChildKind(LM, ANode, nkParams);
   if LParams = NIL_NODE then
     Exit;
@@ -735,16 +783,27 @@ begin
     if LM.Tree.Nodes[LParam].Kind = nkParam then
     begin
       LChild := RTSkipAttr(LM, LM.Tree.Nodes[LParam].FirstChild);
+      LNameCount := 0;
+      LType := NIL_NODE;
       while (LChild <> NIL_NODE) and (LM.Tree.Nodes[LChild].Kind = nkIdent) do
       begin
-        Inc(Result);
+        Inc(LNameCount);
         if RTSepAfter(LM, LChild) = ':' then
+        begin
+          LType := LM.Tree.Nodes[LChild].NextSibling;
           Break;
+        end;
         LChild := LM.Tree.Nodes[LChild].NextSibling;
         if (LChild <> NIL_NODE) and (LM.Tree.Nodes[LChild].Kind <> nkIdent)
         then
           Break;
       end;
+      if LType <> NIL_NODE then
+        LTypeText := LowerCase(RTSpanText(LM, LType))
+      else
+        LTypeText := '?';   // untyped param — rare (`var X` with no type)
+      for LI := 1 to LNameCount do
+        Result := Result + LTypeText + '|';
     end;
     LParam := LM.Tree.Nodes[LParam].NextSibling;
   end;
@@ -801,17 +860,31 @@ begin
 end;
 
 function TPasNavigator.RTMethodKey(const AChain: TArray<string>;
-  const AName: string; AParamCount: Integer): string;
+  const AName, ASignature: string): string;
 begin
-  Result := 'M#' + string.Join('.', AChain) + '#' + AName + '#' +
-    IntToStr(AParamCount);
+  Result := 'M#' + string.Join('.', AChain) + '#' + AName + '#' + ASignature;
 end;
 
-function TPasNavigator.RTRoutineKey(AContainer: Integer; const AName: string;
-  AParamCount: Integer): string;
+// Signature-blind fallback key — a DIFFERENT tag ('ML#'), not just AMethodKey
+// called with an empty signature: a genuinely parameterless routine already
+// has signature '', so reusing that as the "don't care" marker would let a
+// 0-arg routine's exact key collide with another routine's loose key.
+function TPasNavigator.RTMethodKeyLoose(const AChain: TArray<string>;
+  const AName: string): string;
 begin
-  Result := 'U#' + IntToStr(AContainer) + '#' + AName + '#' +
-    IntToStr(AParamCount);
+  Result := 'ML#' + string.Join('.', AChain) + '#' + AName;
+end;
+
+function TPasNavigator.RTRoutineKey(AContainer: Integer;
+  const AName, ASignature: string): string;
+begin
+  Result := 'U#' + IntToStr(AContainer) + '#' + AName + '#' + ASignature;
+end;
+
+function TPasNavigator.RTRoutineKeyLoose(AContainer: Integer;
+  const AName: string): string;
+begin
+  Result := 'UL#' + IntToStr(AContainer) + '#' + AName;
 end;
 
 // Builds RoutineOfVis + the four Decl/Impl key dictionaries for ACache, once
@@ -891,14 +964,14 @@ begin
       else
         // Unqualified but struct-parented: always the class-member decl.
         LChain := RTEnclosingTypeChain(LM, LR);
-      LKey := RTMethodKey(LChain, LName, RTParamCount(LM, LR));
-      LKeyLoose := RTMethodKey(LChain, LName, -1);
+      LKey := RTMethodKey(LChain, LName, RTParamSignature(LM, LR));
+      LKeyLoose := RTMethodKeyLoose(LChain, LName);
     end
     else
     begin
       LKey := RTRoutineKey(RTEnclosingRoutine(LM, LR), LName,
-        RTParamCount(LM, LR));
-      LKeyLoose := RTRoutineKey(RTEnclosingRoutine(LM, LR), LName, -1);
+        RTParamSignature(LM, LR));
+      LKeyLoose := RTRoutineKeyLoose(RTEnclosingRoutine(LM, LR), LName);
     end;
     if LHasBody then
     begin
@@ -917,16 +990,28 @@ begin
   end;
 end;
 
-// The implementation's own body-entry position: the first statement's
-// FirstToken, or (an empty `begin end`) the block's own `end`; for a raw
-// `asm ... end` block (no statement children at all) — the token right
-// after `asm`. -1 if AImplNode somehow has no body (guarded by callers).
-function TPasNavigator.RoutineBodyEntryVis(LM: TPasSemaModel;
-  AImplNode: Integer): Integer;
+// The implementation's own body-entry target: the first statement's own
+// start, OR — for a body with NO statements at all — the line right AFTER
+// the opening `begin`/`asm` keyword, column 1. That covers both a truly
+// empty `begin end` (nothing else to land on but `end`, computed by simply
+// being the next line) AND a body that holds only a COMMENT (PasTree drops
+// comments before the AST entirely, so `begin // note\nend;` looks
+// STRUCTURALLY identical to a bare empty body here) — the caller-visible
+// bug this fixes: it used to jump past a comment straight to the `end`
+// keyword, when "the first line after begin" (which the comment IS
+// sitting on) is what a real IDE shows and what the original feature
+// request literally asked for. Computed directly from the RAW token
+// stream (not the Visible one TargetFromVis uses), since a lone comment
+// has no Visible-stream position to target at all.
+function TPasNavigator.RoutineBodyEntry(AMid: Integer; LM: TPasSemaModel;
+  AImplNode: Integer; out ATarget: TPasNavTarget): Boolean;
 var
-  LBody, LBlockOrAsm, LFirstStmt: Integer;
+  LBody, LBlockOrAsm, LFirstStmt, LOpenVis: Integer;
+  LVis: TPasVisibleToken;
+  LTS: TPasTokenStream;
+  LOpenLine, LOpenCol: Integer;
 begin
-  Result := -1;
+  Result := False;
   LBody := RTFindChildKind(LM, AImplNode, nkRoutineBody);
   if LBody = NIL_NODE then
     Exit;
@@ -936,18 +1021,28 @@ begin
     LBlockOrAsm := LM.Tree.Nodes[LBlockOrAsm].NextSibling;
   if LBlockOrAsm = NIL_NODE then
     Exit;
+  LFirstStmt := NIL_NODE;
   case LM.Tree.Nodes[LBlockOrAsm].Kind of
-    nkBlock:
-      begin
-        LFirstStmt := LM.Tree.Nodes[LBlockOrAsm].FirstChild;
-        if LFirstStmt <> NIL_NODE then
-          Result := LM.Tree.Nodes[LFirstStmt].FirstToken
-        else
-          Result := LM.Tree.Nodes[LBlockOrAsm].LastToken;   // empty `begin end`
-      end;
-    nkAsmStmt:
-      Result := LM.Tree.Nodes[LBlockOrAsm].FirstToken + 1;
+    nkBlock: LFirstStmt := LM.Tree.Nodes[LBlockOrAsm].FirstChild;
+    nkAsmStmt: ;   // never has statement children — always the empty path
+  else
+    Exit;
   end;
+  if LFirstStmt <> NIL_NODE then
+    Exit(TargetFromVis(AMid, LM.Tree.Nodes[LFirstStmt].FirstToken, '',
+      ATarget));
+  LOpenVis := LM.Tree.Nodes[LBlockOrAsm].FirstToken;   // 'begin' or 'asm'
+  if (LOpenVis < 0) or (LOpenVis > High(LM.Tree.Source.Visible)) then
+    Exit;
+  LVis := LM.Tree.Source.Visible[LOpenVis];
+  LTS := LM.Tree.Source.Files[LVis.FileId];
+  LTS.OffsetToLineCol(LTS.Tokens[LVis.TokenIndex].Start, LOpenLine, LOpenCol);
+  ATarget.UnitId := AMid;
+  ATarget.FilePath := LM.Tree.Source.FileNames[LVis.FileId];
+  ATarget.Line := LOpenLine + 1;
+  ATarget.Col := 1;
+  ATarget.Name := '';
+  Result := True;
 end;
 
 function TPasNavigator.GotoImplementation(AMid, ALine, ACol: Integer;
@@ -955,7 +1050,7 @@ function TPasNavigator.GotoImplementation(AMid, ALine, ACol: Integer;
 var
   LM: TPasSemaModel;
   LCache: TNavCache;
-  LVis, LDeclNode, LImplNode, LNameNode, LContainer, LBodyVis: Integer;
+  LVis, LDeclNode, LImplNode, LNameNode, LContainer: Integer;
   LQualIdents: TArray<Integer>;
   LName, LKey, LKeyLoose: string;
   LChain: TArray<string>;
@@ -983,22 +1078,21 @@ begin
   if LIsMethod then
   begin
     LChain := RTEnclosingTypeChain(LM, LDeclNode);
-    LKey := RTMethodKey(LChain, LName, RTParamCount(LM, LDeclNode));
-    LKeyLoose := RTMethodKey(LChain, LName, -1);
+    LKey := RTMethodKey(LChain, LName, RTParamSignature(LM, LDeclNode));
+    LKeyLoose := RTMethodKeyLoose(LChain, LName);
   end
   else
   begin
     LContainer := RTEnclosingRoutine(LM, LDeclNode);
-    LKey := RTRoutineKey(LContainer, LName, RTParamCount(LM, LDeclNode));
-    LKeyLoose := RTRoutineKey(LContainer, LName, -1);
+    LKey := RTRoutineKey(LContainer, LName, RTParamSignature(LM, LDeclNode));
+    LKeyLoose := RTRoutineKeyLoose(LContainer, LName);
   end;
   if not LCache.ImplKey.TryGetValue(LKey, LImplNode) then
     if not LCache.ImplKeyLoose.TryGetValue(LKeyLoose, LImplNode) then
       Exit;
-  LBodyVis := RoutineBodyEntryVis(LM, LImplNode);
-  if LBodyVis < 0 then
-    Exit;
-  Result := TargetFromVis(AMid, LBodyVis, LName, ATarget);
+  Result := RoutineBodyEntry(AMid, LM, LImplNode, ATarget);
+  if Result then
+    ATarget.Name := LName;
 end;
 
 function TPasNavigator.GotoDeclaration(AMid, ALine, ACol: Integer;
@@ -1035,14 +1129,14 @@ begin
     SetLength(LChain, Length(LQualIdents));
     for LIdx := 0 to High(LQualIdents) do
       LChain[LIdx] := LowerCase(LM.Tree.NodeText(LQualIdents[LIdx]));
-    LKey := RTMethodKey(LChain, LName, RTParamCount(LM, LImplNode));
-    LKeyLoose := RTMethodKey(LChain, LName, -1);
+    LKey := RTMethodKey(LChain, LName, RTParamSignature(LM, LImplNode));
+    LKeyLoose := RTMethodKeyLoose(LChain, LName);
   end
   else
   begin
     LContainer := RTEnclosingRoutine(LM, LImplNode);
-    LKey := RTRoutineKey(LContainer, LName, RTParamCount(LM, LImplNode));
-    LKeyLoose := RTRoutineKey(LContainer, LName, -1);
+    LKey := RTRoutineKey(LContainer, LName, RTParamSignature(LM, LImplNode));
+    LKeyLoose := RTRoutineKeyLoose(LContainer, LName);
   end;
   if not LCache.DeclKey.TryGetValue(LKey, LDeclNode) then
     if not LCache.DeclKeyLoose.TryGetValue(LKeyLoose, LDeclNode) then

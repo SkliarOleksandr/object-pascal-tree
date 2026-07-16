@@ -202,6 +202,40 @@ const
     'end;'#10 +                                         // 41
     'end.'#10;                                          // 42
 
+  // Overloads sharing the SAME ARITY but different parameter TYPES — the
+  // real bug report (System.SysUtils.AnsiCompareFileName's actual overload
+  // set): count-only matching collided all three onto one bucket, and
+  // which one "won" depended on the position index's span-size sort order,
+  // not which one the user clicked. Also covers a body containing ONLY A
+  // COMMENT (no statements at all, same as a truly empty body structurally
+  // — PasTree drops comments before the AST) landing on the comment's own
+  // line, not jumping past it to `end`.
+  UNIT_J =
+    'unit NavJ;'#10 +                                       // 1
+    'interface'#10 +                                        // 2
+    'function Cmp(const S1: PChar; L1: Integer; const S2: PChar;'#10 + // 3
+    '  L2: Integer; CVC: Boolean = False): Integer; overload; forward;'#10 + // 4  5 params (PChar)
+    'function Cmp(const S1: string; L1: Integer; const S2: string;'#10 + // 5
+    '  L2: Integer; CVC: Boolean = False): Integer; overload; forward;'#10 + // 6  5 params (string) — SAME arity as above
+    'function Cmp(const S1, S2: string; CVC: Boolean = False): Integer;'#10 + // 7  3 params
+    '  overload; forward;'#10 +                             // 8
+    'implementation'#10 +                                   // 9
+    'function Cmp(const S1: PChar; L1: Integer; const S2: PChar;'#10 + // 10
+    '  L2: Integer; CVC: Boolean): Integer;'#10 +           // 11
+    'begin'#10 +                                             // 12
+    '  Result := 1;'#10 +                                    // 13  <- PChar-overload target
+    'end;'#10 +                                              // 14
+    'function Cmp(const S1: string; L1: Integer; const S2: string;'#10 + // 15
+    '  L2: Integer; CVC: Boolean): Integer;'#10 +           // 16
+    'begin'#10 +                                             // 17
+    '  Result := 2;'#10 +                                    // 18  <- string-overload target
+    'end;'#10 +                                              // 19
+    'function Cmp(const S1, S2: string; CVC: Boolean): Integer;'#10 + // 20
+    'begin'#10 +                                             // 21
+    '  // only a comment, no statement at all'#10 +          // 22  <- lands HERE, not on `end`
+    'end;'#10 +                                              // 23
+    'end.'#10;                                              // 24
+
   // AnalyzeProject fixtures: a main program whose closure pulls NavB (and
   // through it everything above) TRANSITIVELY; NavE is reachable only via a
   // unit-scope NAMESPACE (uses NavE + namespaces=['Wide'] -> Wide.NavE.pas);
@@ -350,6 +384,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavG.pas'), UNIT_G);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavH.pas'), UNIT_H);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavI.pas'), UNIT_I);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavJ.pas'), UNIT_J);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -544,6 +579,24 @@ begin
         not GNav.GotoImplementation(GMidB, 3, 2, {out} LTarget));
       Ok('unrelated position: no declaration',
         not GNav.GotoDeclaration(GMidB, 3, 2, {out} LTarget));
+
+      // ---- Same-arity overloads (real bug report) + comment-only body ----
+      GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavJ.pas'));
+      Ok('NavJ model found', GMidB >= 0);
+      // Both the PChar and the string overload have arity 5 — count-only
+      // matching collided them; the signature must pick the RIGHT one.
+      CheckImpl('decl->impl: Cmp(PChar,...) 5-arg overload', 3, 10, 13);
+      CheckImpl('decl->impl: Cmp(string,...) 5-arg overload', 5, 10, 18);
+      CheckDecl('impl->decl: Cmp(PChar,...) body', 13, 3, 3);
+      CheckDecl('impl->decl: Cmp(string,...) body', 18, 3, 5);
+      // The 3-param overload's body holds ONLY a comment — structurally
+      // empty (comments never reach the AST), so this also exercises the
+      // empty-body fallback; it must land on the COMMENT'S OWN line (22),
+      // not jump past it to `end` (23).
+      CheckImpl('decl->impl: Cmp(S1,S2,CVC) comment-only body', 7, 10, 22);
+      CheckDecl('impl->decl: Cmp(S1,S2,CVC) from inside the comment line',
+        22, 5, 7);
+      Ok('NavJ: no false E2003', DiagCount(GProj.Model(GMidB), 'E2003') = 0);
     finally
       GNav.Free;
     end;
