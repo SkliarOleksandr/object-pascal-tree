@@ -1886,7 +1886,18 @@ var
   LFile, LExt: string;
   LPaths: TArray<string>;
   LN, LIdx: Integer;
+  LSW: TStopwatch;
+
+  procedure Stage(const AName: string);
+  begin
+    FStageTimings := FStageTimings +
+      Format('%s=%d;', [AName, LSW.ElapsedMilliseconds]);
+    LSW := TStopwatch.StartNew;
+  end;
+
 begin
+  FStageTimings := '';
+  LSW := TStopwatch.StartNew;
   FSM.BuildUnitIndex(ARoot);
   LPaths := nil;
   for LFile in TDirectory.GetFiles(ARoot, '*.*',
@@ -1896,7 +1907,9 @@ begin
     if (LExt = '.pas') or (LExt = '.dpr') then
       LPaths := LPaths + [LFile];
   end;
+  Stage('scan');
   LoadFilesParallel(LPaths);
+  Stage('load');
   LN := FModels.Count;   // snapshot: only the directory's own units get E2003
   // Resolve the implicit System unit BEFORE any parallel pass: a worker
   // hitting it first mid-flight would LoadFile into the shared FModels
@@ -1907,6 +1920,7 @@ begin
   EnsureSystemUnit;
   for LIdx := 0 to LN - 1 do
     ResolveUses(LIdx);
+  Stage('main+sys+resolve');
   // Cross passes per unit write ONLY their own model and read the others'
   // Phase-1 state (frozen once every unit is loaded) — safe to farm out.
   ForEachIndex(LN - 1,
@@ -1914,22 +1928,27 @@ begin
     begin
       CrossResolve(AIdx);
     end);
+  Stage('xresolve');
   // The inherited-member pass needs every CrossResolve worker done first
   // (it reads their ExtRefMaps); parallel compute + sequential commit.
   RunInheritedPass(LN);
+  Stage('inherited');
   ForEachIndex(LN - 1,
     procedure(AIdx: Integer)
     begin
       CheckCalls(AIdx);
     end);
+  Stage('calls');
   // Cross typing stays SEQUENTIAL by design: Instantiate mutates the shared
   // instance table, and CrossType both writes a model's RefMap/ExtRefMap and
   // reads other models' — parallelizing would need locks on the hot path for
   // ~5% of the total time (measured on the full RTL).
   for LIdx := 0 to FModels.Count - 1 do
     BindTypesX(LIdx);
+  Stage('bindx');
   for LIdx := 0 to LN - 1 do
     CrossType(LIdx);
+  Stage('xtype');
 end;
 
 end.

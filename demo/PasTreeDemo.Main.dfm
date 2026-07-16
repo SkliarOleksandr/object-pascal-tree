@@ -211,4 +211,41 @@ object frmMain: TfrmMain
     Left = 532
     Top = 163
   end
+  object ActionList1: TActionList
+    Left = 388
+    Top = 155
+    object FindAction: TAction
+      Caption = 'Find'
+      ShortCut = 16454
+      OnExecute = FindActionExecute
+      OnUpdate = FindActionUpdate
+    end
+    object GotoImplAction: TAction
+      Caption = 'Go to Implementation'
+      OnExecute = GotoImplActionExecute
+      OnUpdate = GotoImplActionUpdate
+    end
+    object GotoDeclAction: TAction
+      Caption = 'Go to Declaration'
+      OnExecute = GotoDeclActionExecute
+      OnUpdate = GotoDeclActionUpdate
+    end
+  end
+  object SourcePopupMenu: TPopupMenu
+    Left = 548
+    Top = 339
+    object Find1: TMenuItem
+      Action = FindAction
+    end
+    object GotoImplementation1: TMenuItem
+      Action = GotoImplAction
+    end
+    object GotoDeclaration1: TMenuItem
+      Action = GotoDeclAction
+    end
+  end
+  object SynEditSearch1: TSynEditSearch
+    Left = 340
+    Top = 299
+  end
 end

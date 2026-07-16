@@ -154,6 +154,54 @@ const
     'end;'#10 +                                // 26
     'end.'#10;                                 // 27
 
+  // Declaration <-> implementation toggle fixtures (Ctrl+Shift+Down/Up):
+  // overloaded methods (arity disambiguation), a nested class's qualified
+  // impl, a global forward decl, and a NESTED local proc's forward decl —
+  // matched to its impl WITHIN the same enclosing routine only.
+  UNIT_I =
+    'unit NavI;'#10 +                              // 1
+    'interface'#10 +                               // 2
+    'type'#10 +                                    // 3
+    '  TCalc = class'#10 +                          // 4
+    '    function Add(A: Integer): Integer;'#10 +  // 5  1-param decl
+    '    function Add(A, B: Integer): Integer; overload;'#10 + // 6  2-param
+    '  type'#10 +                                   // 7
+    '    TInner = class'#10 +                       // 8
+    '      procedure Zap;'#10 +                     // 9  nested-class decl
+    '    end;'#10 +                                 // 10
+    '  end;'#10 +                                   // 11
+    'procedure GProc(X: Integer); forward;'#10 +    // 12  global fwd decl
+    'implementation'#10 +                           // 13
+    'function TCalc.Add(A: Integer): Integer;'#10 + // 14
+    'begin'#10 +                                    // 15
+    '  Result := A;'#10 +                            // 16  <- 1-param target
+    'end;'#10 +                                      // 17
+    'function TCalc.Add(A, B: Integer): Integer;'#10 + // 18
+    'begin'#10 +                                       // 19
+    '  Result := A + B;'#10 +                          // 20  <- 2-param target
+    'end;'#10 +                                        // 21
+    'procedure TCalc.TInner.Zap;'#10 +                  // 22  nested-class impl
+    'begin'#10 +                                        // 23  <- empty body:
+    'end;'#10 +                                         // 24     target lands here
+    'procedure GProc(X: Integer);'#10 +                 // 25
+    'begin'#10 +                                        // 26
+    '  X := X + 1;'#10 +                                // 27  <- fwd-decl target
+    'end;'#10 +                                         // 28
+    'procedure Outer;'#10 +                             // 29
+    '  procedure Inner(Y: Integer); forward;'#10 +      // 30  nested fwd decl
+    '  procedure Helper;'#10 +                          // 31  no decl of its own
+    '  begin'#10 +                                      // 32
+    '    Inner(1);'#10 +                                // 33
+    '  end;'#10 +                                       // 34
+    '  procedure Inner(Y: Integer);'#10 +               // 35
+    '  begin'#10 +                                      // 36
+    '    Helper;'#10 +                                  // 37  <- nested target
+    '  end;'#10 +                                       // 38
+    'begin'#10 +                                        // 39
+    '  Helper;'#10 +                                    // 40
+    'end;'#10 +                                         // 41
+    'end.'#10;                                          // 42
+
   // AnalyzeProject fixtures: a main program whose closure pulls NavB (and
   // through it everything above) TRANSITIVELY; NavE is reachable only via a
   // unit-scope NAMESPACE (uses NavE + namespaces=['Wide'] -> Wide.NavE.pas);
@@ -250,6 +298,40 @@ begin
     (LTarget.Line = AWantLine) and (LTarget.Col = AWantCol));
 end;
 
+// Declaration -> implementation: cursor at (ALine,ACol), expect the body's
+// first-statement (or empty-body fallback) at (AWantLine,AWantCol). AWantCol
+// < 0 skips the column check (some callers only care about the line).
+procedure CheckImpl(const ACase: string; ALine, ACol, AWantLine: Integer;
+  AWantCol: Integer = -1);
+var
+  LTarget: TPasNavTarget;
+begin
+  if not GNav.GotoImplementation(GMidB, ALine, ACol, {out} LTarget) then
+  begin
+    Ok(ACase + ': GotoImplementation', False);
+    Exit;
+  end;
+  Ok(ACase + ': target line', LTarget.Line = AWantLine);
+  if AWantCol >= 0 then
+    Ok(ACase + ': target col (lands on the STATEMENT''S OWN START, not ' +
+      'wherever the parser''s FPos happened to be after parsing it)',
+      LTarget.Col = AWantCol);
+end;
+
+// Implementation -> declaration: cursor at (ALine,ACol), expect the
+// declaration's own name at AWantLine.
+procedure CheckDecl(const ACase: string; ALine, ACol, AWantLine: Integer);
+var
+  LTarget: TPasNavTarget;
+begin
+  if not GNav.GotoDeclaration(GMidB, ALine, ACol, {out} LTarget) then
+  begin
+    Ok(ACase + ': GotoDeclaration', False);
+    Exit;
+  end;
+  Ok(ACase + ': target line', LTarget.Line = AWantLine);
+end;
+
 var
   LDir: string;
   LIdent: TPasNavIdent;
@@ -267,6 +349,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavB.pas'), UNIT_B);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavG.pas'), UNIT_G);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavH.pas'), UNIT_H);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavI.pas'), UNIT_I);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -418,6 +501,49 @@ begin
         'NavG.pas', 12, 7);
       Ok('NavG: no false E2003',
         DiagCount(GProj.Model(GMidB), 'E2003') = 0);
+
+      // ---- Declaration <-> implementation toggle (Ctrl+Shift+Down/Up) ----
+      GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavI.pas'));
+      Ok('NavI model found', GMidB >= 0);
+      // Overloaded methods: arity picks the RIGHT implementation both ways.
+      // Column pinned too: regression for a real bug — nkExprStmt/nkAssign
+      // used to get FirstToken from FPos AFTER ParseExpression already
+      // consumed the whole statement, so the target landed at the END of
+      // the line (near the `;`) instead of the statement's own start.
+      CheckImpl('decl->impl: Add(1 param)', 5, 15, 16, 3);
+      CheckImpl('decl->impl: Add(2 params)', 6, 15, 20, 3);
+      CheckDecl('impl->decl: Add(1 param) body', 16, 13, 5);
+      CheckDecl('impl->decl: Add(2 params) body', 20, 13, 6);
+      // Nested class (TCalc.TInner.Zap): qualifier chain must match the
+      // declaration's OWN enclosing-type chain, both ways. Empty `begin
+      // end` body -> the target lands on `end` itself (line 24, not 23).
+      CheckImpl('decl->impl: nested-class Zap', 9, 17, 24);
+      CheckDecl('impl->decl: nested-class Zap (on begin)', 23, 1, 9);
+      // Global routine, forward-declared in the interface section.
+      CheckImpl('decl->impl: GProc (global fwd)', 12, 11, 27, 3);
+      CheckDecl('impl->decl: GProc body', 27, 3, 12);
+      // Regression: a cursor sitting in the GAP right after `begin` (col 6 —
+      // `begin` is 5 chars — before the next real token) used to fail
+      // entirely: that raw position is lexed as trailing whitespace, which
+      // never survives into the Visible stream, so VisAt found no mapping
+      // at all. Must resolve exactly like clicking inside the body proper.
+      CheckDecl('impl->decl: cursor in the gap right after begin', 15, 6, 5);
+      // NESTED local procedure, forward-declared inside Outer's own local
+      // declarations — container-scoped so it can never match some OTHER
+      // outer routine's same-named nested proc.
+      CheckImpl('decl->impl: Inner (nested fwd)', 30, 15, 37, 5);
+      CheckDecl('impl->decl: Inner body', 37, 5, 30);
+      // Negative: Helper has NO separate forward decl (defined directly) —
+      // neither direction should find anything.
+      Ok('Helper body: no declaration to jump to',
+        not GNav.GotoDeclaration(GMidB, 33, 5, {out} LTarget));
+      Ok('Helper header: not decl-only (has its own body)',
+        not GNav.GotoImplementation(GMidB, 31, 15, {out} LTarget));
+      // Negative: an unrelated position (the `type` keyword) is on neither.
+      Ok('unrelated position: no implementation',
+        not GNav.GotoImplementation(GMidB, 3, 2, {out} LTarget));
+      Ok('unrelated position: no declaration',
+        not GNav.GotoDeclaration(GMidB, 3, 2, {out} LTarget));
     finally
       GNav.Free;
     end;

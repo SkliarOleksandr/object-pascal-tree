@@ -43,12 +43,10 @@ type
     // not strings: the I/O workers must stay allocation-light (see Prefetch),
     // so decoding happens on the consumer's (per-core parse worker's) thread.
     FContentCache: TDictionary<string, TBytes>;
-    FIoPool: TThreadPool;   // I/O-depth pool for Prefetch (not per-core)
     function TryFile(const ADir, AName: string; out AResolved: string): Boolean;
     function DirIndex(const ADir: string): TDictionary<string, string>;
     function FindUnitFile(const AUnitName, AFromDir: string;
       out AResolved: string): Boolean;
-    function IoPool: TThreadPool;
     function ReadFileText(const APath: string): string;
     function DecodeText(const ABytes: TBytes): string;
   public
@@ -111,7 +109,6 @@ end;
 
 destructor TPasSourceManager.Destroy;
 begin
-  FIoPool.Free;
   FContentCache.Free;
   FDirIndexes.Free;
   FSearchIndex.Free;
@@ -122,28 +119,19 @@ begin
   inherited;
 end;
 
-// Fixed-width I/O pool (16 workers regardless of core count) for Prefetch
-// and the search-index build. Min = Max so the workers spawn immediately —
-// the default pool grows by roughly one thread per second, which would
-// defeat a burst of one-off reads entirely. The width is a compromise: deep
-// enough to hide cold per-file latency (AV scan, MFT), shallow enough that
-// when these threads DO contend on a shared resource (the memory manager
-// under NeverSleepOnMMThreadContention=True SPINS instead of sleeping), a
-// pile-up of threads far beyond the core count cannot spin-convoy the
-// machine. The I/O work itself is kept allocation-light for the same
-// reason — see Prefetch.
-function TPasSourceManager.IoPool: TThreadPool;
-const
-  IO_WORKERS = 16;
-begin
-  if FIoPool = nil then
-  begin
-    FIoPool := TThreadPool.Create;
-    FIoPool.SetMaxWorkerThreads(IO_WORKERS);
-    FIoPool.SetMinWorkerThreads(IO_WORKERS);
-  end;
-  Result := FIoPool;
-end;
+{ Prefetch and the search-index build run their concurrent I/O on the
+  DEFAULT thread pool — deliberately NOT a private TThreadPool. A private
+  pool was tried (a fixed 16-worker one) and behaved pathologically on a
+  machine with more cores than the dev box: TThreadPool.SetMaxWorkerThreads
+  REJECTS values below the default MinWorkerThreads (= CPU count), so the
+  "16-worker" pool silently became something else entirely there, its
+  phases ran an order of magnitude slower, and destroying it (a fresh
+  source manager per analysis = a pool shutdown per analysis, 16 worker
+  stops with their wait timeouts) burned ~a second of every re-analysis.
+  The default pool is shared, already warm, sized to the machine, and
+  never shut down. The cold-latency win of the prefetch comes from
+  SEPARATING the I/O phase from the CPU phase, not from any particular
+  queue depth. }
 
 // The .pas files of one directory, indexed by lower-cased basename; built on
 // first request, cached. '' and missing dirs yield an empty index.
@@ -248,7 +236,7 @@ begin
           LListings[AIndex] := TDirectory.GetFiles(FSearchPaths[AIndex], '*.pas')
         else
           LListings[AIndex] := nil;
-      end, IoPool);
+      end);
     for LIdx := 0 to High(LListings) do
       for LFile in LListings[LIdx] do
         FSearchIndex.TryAdd(LowerCase(TPath.GetFileName(LFile)), LFile);
@@ -409,7 +397,7 @@ begin
       except
         LBytes[AIndex] := nil;   // unreadable — LoadText's disk path reports it
       end;
-    end, IoPool);
+    end);
   for LIdx := 0 to High(APaths) do
     if LBytes[LIdx] <> nil then
       FContentCache.AddOrSetValue(LowerCase(TPath.GetFullPath(APaths[LIdx])),

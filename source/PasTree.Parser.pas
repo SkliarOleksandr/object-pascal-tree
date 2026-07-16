@@ -1035,7 +1035,7 @@ end;
 
 function TPasParser.ParseStatement: Integer;
 var
-  LNode, LExpr: Integer;
+  LNode, LExpr, LStart: Integer;
 begin
   if not EnterGuard then
   begin
@@ -1179,11 +1179,22 @@ begin
       end;
   end;
 
-  // Expression statement / assignment (5.1).
+  // Expression statement / assignment (5.1). LStart is captured BEFORE
+  // ParseExpression runs — by the time it returns, FPos has already moved
+  // past the whole LHS expression, so creating the wrapper node AT THAT
+  // POINT (as this used to) gave nkAssign/nkExprStmt a FirstToken sitting
+  // near the END of the statement instead of its true start (the same
+  // "wrapper created after its child" trap nkMember's own dot-position
+  // FirstToken is — see PasTree.Ast.pas — except THAT one is a deliberate,
+  // documented, worked-around-in-consumers quirk; this one was a plain
+  // bug with no consumer relying on the wrong position, caught by go-to-
+  // implementation landing the cursor at the end of the first line instead
+  // of its start).
+  LStart := FPos;
   LExpr := ParseExpression;
   if CurKind = tkAssign then
   begin
-    LNode := FB.AddNode(nkAssign, NIL_NODE, FPos);
+    LNode := FB.AddNode(nkAssign, NIL_NODE, LStart);
     FB.Adopt(LNode, LExpr);
     Next;
     FB.Adopt(LNode, ParseExpression);
@@ -1192,7 +1203,7 @@ begin
   end
   else
   begin
-    LNode := FB.AddNode(nkExprStmt, NIL_NODE, FPos);
+    LNode := FB.AddNode(nkExprStmt, NIL_NODE, LStart);
     FB.Adopt(LNode, LExpr);
     FB.SetLast(LNode, FPos - 1);
     Result := LNode;
