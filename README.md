@@ -1,43 +1,50 @@
 # PasTree
 
-**A simple, extensible, multithreaded Object Pascal parser — source in, AST out.**
+**A simple, extensible, multithreaded Object Pascal parser and semantic
+analyzer — source in, AST + symbol table out — with a live editor host
+(SynEdit syntax highlighting, IDE-parity go-to-declaration and
+declaration↔implementation navigation) built on top of it.**
 
 PasTree parses Delphi source files (`.pas`, `.dpr`, `.dpk`, with full `.inc`
-support) into an abstract syntax tree, targeting the language as implemented by
-**Delphi 13.x Florence** and specified by
+support) into an abstract syntax tree, resolves and type-checks it into a
+project-wide symbol model, and exposes both through a small VCL demo that
+behaves like a slice of the real RAD Studio IDE. It targets the language as
+implemented by **Delphi 13.x Florence** and specified by
 [object-pascal-spec](https://github.com/SkliarOleksandr/object-pascal-spec) —
 the companion specification this parser is built from.
 
-> **Status: early development.** The architecture is settled; the lexer is the
-> first milestone.
+> **Status: in progress.** Lexer, preprocessor, parser, and the semantic
+> layer (cross-unit resolution, overloads, generics, `.dproj`-aware project
+> loading) are all working end to end, and the demo already does real
+> go-to-declaration and decl↔impl navigation over real projects (including
+> the Delphi RTL/VCL). See [To do](#to-do) for what's still open.
 
-## Goals
+## What it does
 
-- **Simple & extensible** — homogeneous AST (one node type + kind), so new
-  language syntax means a new node kind and a parse rule, never a new data model.
-- **Full fidelity** — trivia (comments, whitespace, disabled `{$IFDEF}` regions)
-  is preserved; tokens + trivia reconstruct the source byte-for-byte. Built for
-  refactoring tools, not just analysis.
-- **Correct preprocessing** — `{$IFDEF}`/`{$IF}` evaluation, `{$I}` include
-  splicing with a proper include stack (spans always point into the right file),
-  `{$PUSHOPT}`-style option state.
-- **Multithreaded** — parsing a unit is a pure function `(text, defines) → tree`;
-  whole projects parse with one worker per core, no locks on the hot path.
-- **Error-tolerant** — parsing never fails; malformed input produces error nodes
-  with diagnostics (an LSP server parses broken code all day).
-
-Intended consumers: static analysis, refactoring tools, code generation — and,
-down the road, an LSP implementation and possibly a compiler front-end.
+1. **Parses** a unit into a full-fidelity syntax tree — every token and every
+   piece of trivia (comments, whitespace, disabled `{$IFDEF}` regions) is
+   preserved, so tokens + trivia reconstruct the source byte-for-byte. Parsing
+   never fails: malformed input produces error nodes with diagnostics instead
+   of aborting (an editor/LSP has to parse broken code all day).
+2. **Resolves** a whole project's `uses` closure into a symbol model: scopes,
+   declarations, cross-unit references, overload resolution, generic
+   instantiation, and compiler-intrinsic/builtin handling (`Integer`,
+   `TObject`, the implicit `System` unit) — modeled closely enough on `dcc`'s
+   own rules to reproduce its precedence and its diagnostics.
+3. **Drives an editor** (the VCL demo today, an LSP host later) with that
+   model: real syntax highlighting, ctrl+click go-to-declaration, and a
+   declaration↔implementation toggle, all reading the actual AST/symbol
+   table instead of approximating with regex or heuristics.
 
 ## Architecture
 
 ```
 ┌────────────────────────────────────────────────────────────┐
 │ 1. SourceManager   files, encodings/BOM, text cache,        │
-│                    .inc path resolution                     │
+│                    .inc path resolution, .dproj parsing     │
 ├────────────────────────────────────────────────────────────┤
 │ 2. Lexer           text → flat token array                  │
-│                    (incl. directives and trivia)            │
+│                    (incl. directives and trivia)             │
 ├────────────────────────────────────────────────────────────┤
 │ 3. Preprocessor    $IFDEF/$IF branching, $I splicing        │
 │                    (include stack), option-state stack      │
@@ -45,37 +52,144 @@ down the road, an LSP implementation and possibly a compiler front-end.
 ├────────────────────────────────────────────────────────────┤
 │ 4. Parser          recursive descent + Pratt expressions    │
 │                    → homogeneous AST                        │
+├────────────────────────────────────────────────────────────┤
+│ 5. Sema            per-unit scopes/symbols → cross-unit     │
+│                    resolution → type checking → overloads/  │
+│                    generics → project-wide diagnostics      │
+├────────────────────────────────────────────────────────────┤
+│ 6. Nav             pure lookups over the analyzed model:    │
+│                    go-to-declaration, decl↔impl toggle      │
 └────────────────────────────────────────────────────────────┘
 ```
 
 Data model: index-based, allocation-friendly — tokens and nodes are records in
-contiguous per-unit arrays (an arena per unit); references are integer indices,
-not object pointers. Unit trees are immutable once built.
+contiguous per-unit arrays (an arena per unit); references are integer
+indices, not object pointers. Unit trees are immutable once built, which is
+also what makes the parallelism below safe.
+
+## Multithreading
+
+Parsing and analyzing a unit is a pure function `(text, defines) → model`,
+with no shared mutable state on the hot path, so a whole project's `uses`
+closure fans out across cores instead of being processed one file at a time:
+
+- **Parse + Phase 1** (lex → preprocess → parse → per-unit scopes/symbols)
+  run one worker per core (`TParallel.&For`) over every file in the closure;
+  results are registered back **in input order** afterwards, so model IDs stay
+  deterministic regardless of which worker finishes first.
+- **Cross-unit resolution** is split into a parallel *compute* step (every
+  worker only reads other units' already-built reference maps) and a
+  sequential *commit* step, so the one pass that has a true ordering
+  dependency (dcc resolves inherited members before used units, before the
+  implicit `System` unit) still runs safely without locking the hot read
+  path. The few structures that genuinely need a lock (e.g. the shared
+  generic-instance cache) are guarded explicitly; everything else relies on
+  "workers only read, one thread commits."
+- **Cold-start I/O is a separate pool from CPU-bound parsing.** A first
+  analysis run pays for antivirus scan-on-first-touch and MFT lookups per
+  file, which is a latency problem, not a throughput one — so file prefetch
+  and the search-path index build use a deep-queue I/O pool (many reads in
+  flight) that hands back raw bytes only, while decoding to text and parsing
+  stays on the per-core CPU pool. Both pools are the shared default
+  `TParallel` pool (machine-sized, already warm) rather than a private
+  thread pool — an earlier custom pool caused `SetMaxWorkerThreads` to
+  silently no-op below the machine's core count on higher-core machines.
+- A `SingleThreaded` switch runs every stage on the calling thread instead,
+  for baseline timing comparisons and debugging — results are identical
+  either way, since the parallel stages are pure per unit.
+
+## Current features
+
+- **Syntax highlighting for SynEdit** (`TPasTreeSynHighlighter`) — a real
+  `TSynCustomHighlighter` driven by PasTree's own lexer/preprocessor/parser,
+  not a regex approximation: keyword/identifier/number/string/comment/
+  directive/BASM coloring, context-sensitive "weak keyword" coloring (`read`,
+  `deprecated`, visibility words, routine directives...) that only lights up
+  where the AST actually proves them to be directives, `$IFDEF`'d-out code
+  greyed out like the real IDE, and ctrl+hover link rendering.
+- **Go-to-declaration** (ctrl+click) — parity target is "any identifier
+  navigates exactly like the real IDE does," and the current matrix covers:
+  local and cross-unit declarations, member access through inheritance/
+  generics/aliases, the implicit `System` unit, compiler intrinsics with no
+  source declaration (routed to `System.pas`'s header, like the IDE),
+  `Result`, `uses` clause names and qualifiers, the whole project closure
+  (not just the main file), units only reachable via the IDE's own registry-
+  read library/browsing search paths, unit namespaces (`-NS`) and aliases
+  (`-A`).
+- **Declaration ↔ implementation toggle** (Ctrl+Shift+Down / Ctrl+Shift+Up) —
+  jumps from a method or routine's forward declaration to its body's first
+  statement and back to its name, overload-precise (matched by full
+  parameter-type signature, not just arity), correctly handling comment-only
+  bodies and refusing to cross from inactive `$IFDEF`'d-out code into active
+  code.
+- **Semantic diagnostics** — project-wide `E20xx`-style errors from a
+  `.dproj`-aware loader (search paths, namespaces, unit aliases, platforms),
+  validated continuously against the real Delphi RTL/VCL/FMX source tree.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `source/` | the library: `PasTree.Types`, `PasTree.SourceManager`, `PasTree.Lexer`, `PasTree.Preprocessor`, `PasTree.Ast`, `PasTree.Ast.Kinds` (generated from the spec), `PasTree.Parser.*`, `PasTree.Ast.Json`, `PasTree.Project` |
-| `tests/` | DUnitX tests: golden JSON trees per spec feature, byte-for-byte roundtrip, full-corpus runs |
-| `tools/` | the node-kinds generator (spec `*AST:*` blocks → `PasTree.Ast.Kinds.pas`) |
+| `source/` | the library: `PasTree.Types`, `PasTree.SourceManager`, `PasTree.Lexer`, `PasTree.Preprocessor`, `PasTree.Ast`, `PasTree.Parser`, `PasTree.DProj`, `PasTree.Platforms`, `PasTree.Ast.Json`, `PasTree.Project`, and the semantic layer `PasTree.Sema.*` (`Model`, `Resolver`, `Types`, `Project`, `Builtins`, `Nav`, `Diagnostics`, `Dump`) |
+| `demo/` | `PasTreeDemo` — a VCL host (SynEdit + VirtualTreeView) exercising the highlighter and navigation features interactively over real projects |
+| `tests/` | 8 DUnitX-style smoke suites (`ParserSmoke`, `DProjSmoke`, `SemaSmoke`, `SemaTypeSmoke`, `SemaXTypeSmoke`, `SemaOverloadSmoke`, `SemaProjectSmoke`, `SemaNavSmoke`) plus golden JSON trees and full-corpus runs |
+| `tools/` | CLI drivers per pipeline stage (`PasTreeLex`, `PasTreePP`, `PasTreeParse`, `PasTreeJson`, `PasTreeSema`, `PasTreeSemaProject`) and the node-kinds generator |
+| `docs/` | `editor-features.md` — the living IDE-parity spec for the demo's editor features |
 
-## Definition of done (v1)
+## To do
+
+Still open, roughly in the order we're tackling it:
+
+- **Go-to-declaration inside an opened `.inc` tab.** Navigating *into* an
+  include file already works; resolving an identifier typed *inside* an
+  already-open include tab does not yet (`IdentAt` is currently main-file-only).
+- **Zero-diagnostic parity on the real RTL/VCL/FMX.** Analysis is stable and
+  crash-free over the full source tree, but still produces a nonzero, tracked
+  count of `E2003`-style false positives to work down to zero — the v1
+  "definition of done" below.
+- **LSP/LSIF server.** The demo (VCL-hosted) is the only editor integration
+  today; a Language Server Protocol server (live highlighting/navigation/
+  diagnostics/rename/etc. over the same Sema/Nav layer) plus LSIF dump
+  generation (precomputed navigation for code browsing without a live
+  server) are the planned next consumers.
+- **Rename symbol** (Ctrl+E) — rename any identifier and every reference to
+  it project-wide, using the same resolved symbol model go-to-declaration
+  already builds (so a rename only touches the actual declaration's
+  references, not textually-matching names from an unrelated scope).
+- **Generate method body from declaration** (Ctrl+Shift+C) — given a method
+  or routine declaration with no implementation yet, emit an empty matching
+  body (right unit, right place, right signature), the inverse of the
+  existing decl→impl navigation.
+- **Formatter** — reformat source to a configurable style, off the same AST
+  the highlighter and navigation already use rather than a separate
+  regex-based pass.
+- **Error Insight** (live diagnostics, à la Embarcadero's own IDE feature) —
+  today's diagnostics are error-only (`E20xx`) and shown as a flat list after
+  a full analysis run; this extends it to a live, severity-classified feed
+  (errors/warnings/hints) in its own panel, plus squiggly underlines in the
+  editor itself, color-coded by severity, on the offending expression's own
+  span as analysis re-runs on edit.
+- Longer-term / exploratory: a compiler front-end built on the same model.
+
+### Definition of done (v1)
 
 1. Lexes and parses the **entire Delphi 13 source tree** (RTL/VCL/FMX/…) with
    zero errors.
 2. Roundtrip: concatenated tokens + trivia == original source, byte-for-byte.
 3. Golden AST tests keyed to the spec's feature numbering (e.g. test `5.4.1`
    covers the inline-`if` expression).
+4. Semantic analysis over the same tree produces **zero false-positive
+   diagnostics**.
 
 ## Requirements
 
-- Delphi 13.0 Florence or later (the parser is written in the language it parses).
+- Delphi 13.0 Florence or later (the parser is written in the language it
+  parses).
 
 ## License
 
 [MIT](LICENSE) © 2026 Oleksandr Skliar.
 
-PasTree is an independent open-source project, not affiliated with or endorsed
-by Embarcadero Technologies. "Delphi" is a trademark of Embarcadero
+PasTree is an independent open-source project, not affiliated with or
+endorsed by Embarcadero Technologies. "Delphi" is a trademark of Embarcadero
 Technologies, Inc.
