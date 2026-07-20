@@ -172,7 +172,7 @@ var
   LDir: string;
   LBatch, LStaged, LCancelled: TPasSemaProject;
   LMaxTotal, LMaxFull, LProgressCalls: Integer;
-  LSawIntfPhase, LSawFullPhase, LSawDone: Boolean;
+  LSawIntfPhase, LSawFullPhase, LSawCrossPhase, LSawDone: Boolean;
   LMid: Integer;
 begin
   ReportMemoryLeaksOnShutdown := True;
@@ -241,6 +241,7 @@ begin
   LProgressCalls := 0;
   LSawIntfPhase := False;
   LSawFullPhase := False;
+  LSawCrossPhase := False;
   LSawDone := False;
   LStaged := StagedProject(LDir, [],
     nil,
@@ -255,6 +256,8 @@ begin
         LSawIntfPhase := True;
       if AP.Phase = 'full' then
         LSawFullPhase := True;
+      if AP.Phase.StartsWith('cross') then
+        LSawCrossPhase := True;
       if AP.Phase = 'done' then
         LSawDone := True;
     end);
@@ -262,6 +265,7 @@ begin
     Ok('progress: callback fired', LProgressCalls > 0);
     Ok('progress: saw the interface wave', LSawIntfPhase);
     Ok('progress: saw the full wave', LSawFullPhase);
+    Ok('progress: saw the cross sub-phases', LSawCrossPhase);
     Ok('progress: ended with phase=done', LSawDone);
     Ok('progress: total grew to the full closure',
       LMaxTotal = LStaged.ModelCount);

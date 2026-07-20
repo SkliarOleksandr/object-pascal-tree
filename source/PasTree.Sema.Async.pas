@@ -51,8 +51,9 @@ type
     FCancelFlag: Integer;           // Interlocked 0/1
     FDoneFlag: Integer;             // Interlocked 0/1
     FMainResultId: Integer;
-    FLock: TCriticalSection;        // guards FProgress
+    FLock: TCriticalSection;        // guards FProgress and FError
     FProgress: TPasStagedProgress;
+    FError: string;                 // worker exception, if any ('' = none)
     FStarted: Boolean;
     procedure RunBody;
   public
@@ -84,6 +85,11 @@ type
     function IsDone: Boolean;
     { A thread-safe snapshot of the latest progress. }
     function Progress: TPasStagedProgress;
+    { Non-empty if the worker died on an exception — the host should log it
+      (a silently swallowed background failure looks like a hang). The built
+      project may be partial but is internally consistent (same guarantee as
+      a cancellation). }
+    function LastError: string;
     { After IsDone, transfers project ownership to the caller (the session no
       longer frees it); returns nil if not finished yet or already taken. }
     function TakeProject: TPasSemaProject;
@@ -153,20 +159,34 @@ end;
 procedure TPasAsyncSession.RunBody;
 begin
   try
-    FMainResultId := FProject.AnalyzeStaged(FRoots, FPriority,
-      function: Boolean
-      begin
-        Result := TInterlocked.CompareExchange(FCancelFlag, 0, 0) <> 0;
-      end,
-      procedure(AProgress: TPasStagedProgress)
+    try
+      FMainResultId := FProject.AnalyzeStaged(FRoots, FPriority,
+        function: Boolean
+        begin
+          Result := TInterlocked.CompareExchange(FCancelFlag, 0, 0) <> 0;
+        end,
+        procedure(AProgress: TPasStagedProgress)
+        begin
+          FLock.Enter;
+          try
+            FProgress := AProgress;
+          finally
+            FLock.Leave;
+          end;
+        end);
+    except
+      // Never let the worker die silently: capture for the host to log.
+      // The project stays partial-but-consistent (published slots only).
+      on E: Exception do
       begin
         FLock.Enter;
         try
-          FProgress := AProgress;
+          FError := E.ClassName + ': ' + E.Message;
         finally
           FLock.Leave;
         end;
-      end);
+      end;
+    end;
   finally
     TInterlocked.Exchange(FDoneFlag, 1);
   end;
@@ -204,6 +224,16 @@ begin
   FLock.Enter;
   try
     Result := FProgress;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TPasAsyncSession.LastError: string;
+begin
+  FLock.Enter;
+  try
+    Result := FError;
   finally
     FLock.Leave;
   end;

@@ -34,6 +34,7 @@ type
     FImpl: Integer;   // implementation scope (parent = FIntf)
     FNodeScope: TArray<Integer>;
     FIsDeclName: TArray<Boolean>;
+    FSkipTyper: Boolean;   // see Analyze
     // tree helpers
     function KindOf(ANode: Integer): TPasNodeKind; inline;
     function FirstChild(ANode: Integer): Integer; inline;
@@ -65,7 +66,14 @@ type
     procedure BindTypes;
     procedure Run;
   public
-    class function Analyze(const ATree: TPasTree): TPasSemaModel; static;
+    { ASkipTyper skips the final expression type-check (Phase 3a) — for
+      TRANSIENT models only (the async parser's interface-only wave, whose
+      models are replaced by fully-analyzed ones before anyone reads
+      diagnostics or ExprType). Collect/Resolve/BindTypes still run, so
+      scopes, symbols, RefMap and declared-type bindings — everything
+      navigation and cross-unit resolution read — are complete. }
+    class function Analyze(const ATree: TPasTree;
+      ASkipTyper: Boolean = False): TPasSemaModel; static;
   end;
 
 implementation
@@ -77,13 +85,15 @@ uses
   PasTree.Sema.Diagnostics,
   PasTree.Sema.Types;
 
-class function TPasSemaResolver.Analyze(const ATree: TPasTree): TPasSemaModel;
+class function TPasSemaResolver.Analyze(const ATree: TPasTree;
+  ASkipTyper: Boolean = False): TPasSemaModel;
 var
   LR: TPasSemaResolver;
 begin
   LR := TPasSemaResolver.Create;
   try
     LR.FTree := ATree;
+    LR.FSkipTyper := ASkipTyper;
     LR.FModel := TPasSemaModel.Create(ATree);
     SetLength(LR.FNodeScope, Length(ATree.Nodes));
     SetLength(LR.FIsDeclName, Length(ATree.Nodes));
@@ -1060,7 +1070,8 @@ begin
   CollectRoot(0);
   ResolveNode(0);
   BindTypes;
-  TPasSemaTyper.Check(FModel);
+  if not FSkipTyper then
+    TPasSemaTyper.Check(FModel);
 end;
 
 end.

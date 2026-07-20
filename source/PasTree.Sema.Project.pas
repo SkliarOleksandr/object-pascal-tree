@@ -118,11 +118,6 @@ type
     function LoadFile(const APath: string): Integer;
     procedure LoadFilesParallel(const APaths: TArray<string>;
       AInterfaceOnly: Boolean = False);
-    // Reparse the module at AId FULLY and swap in the new snapshot, advancing
-    // it from msIntfReady to msFullReady. Relies on the parser prefix
-    // invariant, so the full model's interface symbol ids match the intf
-    // model's — other units' ExtRefMap into this unit stays valid.
-    procedure UpgradeToFull(AId: Integer);
     procedure RegisterUnitName(AId: Integer);
     function LoadedUnitByName(const AName: string): Integer;
     procedure ResolveUses(AId: Integer);
@@ -203,8 +198,9 @@ type
       clicking the QUALIFIER itself opens that unit, not just its member. }
     function QualifierUnitAt(AId, ANode: Integer;
       out AMatchNode: Integer): Integer;
-    { Per-stage wall-clock of the LAST AnalyzeProject run ('stage=ms;...') —
-      for perf logging in hosts and probes. Empty for the other drivers. }
+    { Per-stage wall-clock of the LAST AnalyzeProject/AnalyzeDirectory/
+      AnalyzeStaged run ('stage=ms;...') — for perf logging in hosts and
+      probes. Empty for AnalyzeFile. }
     function StageTimings: string;
     function ModelCount: Integer;
     function Model(AId: Integer): TPasSemaModel;
@@ -554,8 +550,17 @@ begin
       try
         try
           LPre := LPP.Process(LTodo[AIndex]);
-          LDone[AIndex] := TPasSemaResolver.Analyze(
-            TPasParser.ParseFile(LPre, LDiags, AInterfaceOnly));
+          var LTree := TPasParser.ParseFile(LPre, LDiags, AInterfaceOnly);
+          // A model whose parse really did stop at the interface is
+          // TRANSIENT (replaced by the full wave) — skip the expression
+          // typer, its ExprType/E2010/E2015 output dies with the model.
+          // NOT keyed on AInterfaceOnly alone: a program/library/package
+          // ignores the flag, parses fully, registers msFullReady below and
+          // is never upgraded — skipping ITS typer would permanently lose
+          // its type diagnostics.
+          LDone[AIndex] := TPasSemaResolver.Analyze(LTree,
+            {ASkipTyper} AInterfaceOnly and (Length(LTree.Nodes) > 0) and
+            (LTree.Nodes[0].Kind = nkUnit));
         except
           on Exception do
             LDone[AIndex] := nil;   // registered as known-bad below
@@ -566,44 +571,24 @@ begin
     end);
 
   // Interface-only -> msIntfReady (later upgraded); full parse -> msFullReady.
-  if AInterfaceOnly then
-    LStatus := msIntfReady
-  else
-    LStatus := msFullReady;
+  // Per item, not per batch: program/library/package files IGNORE
+  // AInterfaceOnly (no interface section — ParseFile parses them fully), so
+  // they register as already-full and wave 2 never pays a pointless reparse
+  // for a .dpr/.dpk root.
   for LIdx := 0 to High(LTodo) do
     if LDone[LIdx] <> nil then
     begin
+      if AInterfaceOnly and (Length(LDone[LIdx].Tree.Nodes) > 0) and
+         (LDone[LIdx].Tree.Nodes[0].Kind = nkUnit) then
+        LStatus := msIntfReady
+      else
+        LStatus := msFullReady;
       FByPath.Add(LKeys[LIdx],
         RegisterModel(LDone[LIdx], LTodo[LIdx], LStatus));
       RegisterUnitName(FModels.Count - 1);
     end
     else
       FByPath.Add(LKeys[LIdx], -1);
-end;
-
-procedure TPasSemaProject.UpgradeToFull(AId: Integer);
-var
-  LPre: TPasPreprocessed;
-  LDiags: TArray<TPasParseDiag>;
-  LModel: TPasSemaModel;
-begin
-  if (AId < 0) or (AId >= FModels.Count) then
-    Exit;
-  if FStatus[AId] >= msFullReady then
-    Exit;   // already full (or beyond)
-  try
-    LPre := FPP.Process(FFiles[AId]);
-    LModel := TPasSemaResolver.Analyze(
-      TPasParser.ParseFile(LPre, LDiags, {AInterfaceOnly} False));
-  except
-    on Exception do
-      Exit;   // keep the interface-only snapshot on a full-parse failure
-  end;
-  // Publish the new snapshot. FModels owns its objects, so assigning frees the
-  // previous (interface-only) model. Callers must hold no live reference to it
-  // (the nav cache re-keys on the model identity and rebuilds).
-  FModels[AId] := LModel;
-  FStatus[AId] := msFullReady;
 end;
 
 // Maps the model's DECLARED unit name (root's name node, dotted included) to
@@ -2104,12 +2089,27 @@ end;
 function TPasSemaProject.AnalyzeStaged(const ARoots, APriority: TArray<string>;
   const ACancelled: TFunc<Boolean>;
   const AOnProgress: TProc<TPasStagedProgress>): Integer;
+const
+  // Batch slice: big enough to keep every core busy, small enough that the
+  // progress counter keeps moving and a Cancel never waits longer than one
+  // slice (the first implementation loaded a several-hundred-file discovery
+  // round as ONE silent batch — the counter froze for seconds, and a project
+  // switch blocked the UI in the session drain for just as long).
+  CHUNK = 64;
 var
   LProgress: TPasStagedProgress;
-  LDone, LN, LIdx: Integer;
+  LDone, LN, LIdx, LScanFrom: Integer;
   LNewPaths, LOrdered: TArray<string>;
   LPath, LKey: string;
   LSeen: TDictionary<string, Boolean>;
+  LSW: TStopwatch;
+
+  procedure StageMark(const AName: string);
+  begin
+    FStageTimings := FStageTimings +
+      Format('%s=%d;', [AName, LSW.ElapsedMilliseconds]);
+    LSW := TStopwatch.StartNew;
+  end;
 
   function Cancelled: Boolean;
   begin
@@ -2158,11 +2158,96 @@ var
         end;
   end;
 
+  // Loads APaths in CHUNK slices — progress report and cancellation check
+  // between slices. False = cancelled part-way (loaded slices stay published).
+  function LoadChunked(const APaths: TArray<string>; AIntf: Boolean;
+    const APhase: string): Boolean;
+  var
+    LFrom, LTo: Integer;
+  begin
+    Result := True;
+    LFrom := 0;
+    while LFrom <= High(APaths) do
+    begin
+      if Cancelled then
+        Exit(False);
+      LTo := LFrom + CHUNK - 1;
+      if LTo > High(APaths) then
+        LTo := High(APaths);
+      LoadFilesParallel(Copy(APaths, LFrom, LTo - LFrom + 1), AIntf);
+      Recount;
+      Report(APhase);
+      LFrom := LTo + 1;
+    end;
+  end;
+
+  // Upgrades every msIntfReady module to a full model: the compute (reparse
+  // reusing the intf snapshot's whole-file lex+PP, then Phase 1) farms one
+  // worker per core, the commit (model swap + status) is sequential between
+  // chunks — the same pure-compute/sequential-commit discipline as
+  // LoadFilesParallel. The first implementation upgraded ONE MODULE AT A
+  // TIME on the single worker thread — the dominant perf loss vs the batch
+  // driver on a big project. False = cancelled part-way.
+  function UpgradeChunked: Boolean;
+  var
+    LIds: TArray<Integer>;
+    LNew: TArray<TPasSemaModel>;
+    LI, LFrom, LTo: Integer;
+  begin
+    Result := True;
+    LIds := nil;
+    for LI := 0 to FStatus.Count - 1 do
+      if FStatus[LI] = msIntfReady then
+        LIds := LIds + [LI];
+    LFrom := 0;
+    while LFrom <= High(LIds) do
+    begin
+      if Cancelled then
+        Exit(False);
+      LTo := LFrom + CHUNK - 1;
+      if LTo > High(LIds) then
+        LTo := High(LIds);
+      SetLength(LNew, LTo - LFrom + 1);
+      ForEachIndex(LTo - LFrom,
+        procedure(AIdx: Integer)
+        var
+          LDiags: TArray<TPasParseDiag>;
+        begin
+          try
+            // Tree.Source always covers the WHOLE file (stage 1 stops only
+            // the parser, never the preprocessor) — so the upgrade pays
+            // parse + Phase 1 only, per the plan's §2.2 "reparse reusing
+            // stage-1 artifacts". Re-preprocessing here would double-pay
+            // lex+PP for the entire closure (the single biggest perf
+            // regression of the first implementation), and building from
+            // the SAME token layer also keeps the prefix invariant safe
+            // against a file changing on disk between the waves.
+            LNew[AIdx] := TPasSemaResolver.Analyze(TPasParser.ParseFile(
+              FModels[LIds[LFrom + AIdx]].Tree.Source, LDiags, False));
+          except
+            on Exception do
+              LNew[AIdx] := nil;   // keep the interface snapshot
+          end;
+        end);
+      for LI := 0 to LTo - LFrom do
+        if LNew[LI] <> nil then
+        begin
+          FModels[LIds[LFrom + LI]] := LNew[LI]; // owns-list frees the intf one
+          FStatus[LIds[LFrom + LI]] := msFullReady;
+        end;
+      Recount;
+      Report('full');
+      LFrom := LTo + 1;
+    end;
+  end;
+
 begin
   Result := -1;
+  FStageTimings := '';
   LProgress := Default(TPasStagedProgress);
   LSeen := TDictionary<string, Boolean>.Create;
   try
+    LSW := TStopwatch.StartNew;
     // Front-load the priority set (open module + its uses), then the roots.
     LOrdered := nil;
     for LPath in APriority + ARoots do
@@ -2183,75 +2268,98 @@ begin
 
     // ---- Wave 1: interface-only closure (breadth-first) ----
     Report('intf');
-    LoadFilesParallel(LOrdered, {AInterfaceOnly} True);
-    Recount;
-    Report('intf');
+    if not LoadChunked(LOrdered, {AIntf} True, 'intf') then
+    begin
+      Report('cancelled');
+      Exit;
+    end;
     LDone := 0;
     while LDone < FModels.Count do
     begin
-      if Cancelled then
+      LN := FModels.Count;
+      LNewPaths := DiscoverUses(LDone, LN);
+      if not LoadChunked(LNewPaths, {AIntf} True, 'intf') then
+      begin
+        Report('cancelled');
+        Exit;
+      end;
+      LDone := LN;
+    end;
+    StageMark('intf');
+
+    // ---- Wave 2: upgrade every module to a full parse, discovering any
+    // implementation-only dependencies the interface trees didn't show ----
+    Report('full');
+    // The FIRST discovery round after the upgrades must rescan EVERY model
+    // (implementation uses only just became visible); later rounds only the
+    // newly loaded ones (they arrive as full trees already).
+    LScanFrom := 0;
+    repeat
+      if not UpgradeChunked then
       begin
         Report('cancelled');
         Exit;
       end;
       LN := FModels.Count;
-      LNewPaths := DiscoverUses(LDone, LN);
-      LoadFilesParallel(LNewPaths, {AInterfaceOnly} True);
-      LDone := LN;
-      Recount;
-      Report('intf');
-    end;
-
-    // ---- Wave 2: upgrade every module to a full parse, discovering any
-    // implementation-only dependencies the interface trees didn't show ----
-    Report('full');
-    repeat
-      for LIdx := 0 to FModels.Count - 1 do
-        if FStatus[LIdx] = msIntfReady then
-        begin
-          if Cancelled then
-          begin
-            Report('cancelled');
-            Exit;
-          end;
-          UpgradeToFull(LIdx);
-          Recount;
-          Report('full');
-        end;
-      // Full trees now expose implementation uses — pull in the newcomers
-      // (directly at full parse; they were discovered late).
-      LN := FModels.Count;
-      LNewPaths := DiscoverUses(0, LN);
-      LoadFilesParallel(LNewPaths, {AInterfaceOnly} False);
-      Recount;
+      LNewPaths := DiscoverUses(LScanFrom, LN);
+      LScanFrom := LN;
+      if not LoadChunked(LNewPaths, {AIntf} False, 'full') then
+      begin
+        Report('cancelled');
+        Exit;
+      end;
     until FModels.Count = LN;
+    StageMark('full');
 
-    // ---- Finalizer: cross passes over the whole closure ----
+    // ---- Finalizer: cross passes over the whole closure. Reported as
+    // sub-phases (they take real seconds on a big project — a single silent
+    // 'cross' looked like a hang), with a cancel point between passes. ----
+    LN := FModels.Count;
+    Report('cross:resolve');
+    for LIdx := 0 to LN - 1 do
+      ResolveUses(LIdx);
     if Cancelled then
     begin
       Report('cancelled');
       Exit;
     end;
-    Report('cross');
-    LN := FModels.Count;
-    for LIdx := 0 to LN - 1 do
-      ResolveUses(LIdx);
+    Report('cross:xresolve');
     ForEachIndex(LN - 1,
       procedure(AIdx: Integer)
       begin
         CrossResolve(AIdx);
       end);
+    if Cancelled then
+    begin
+      Report('cancelled');
+      Exit;
+    end;
+    Report('cross:inherited');
     RunInheritedPass(LN);
+    if Cancelled then
+    begin
+      Report('cancelled');
+      Exit;
+    end;
+    Report('cross:calls');
     ForEachIndex(LN - 1,
       procedure(AIdx: Integer)
       begin
         CheckCalls(AIdx);
       end);
+    if Cancelled then
+    begin
+      Report('cancelled');
+      Exit;
+    end;
+    Report('cross:bindx');
     for LIdx := 0 to FModels.Count - 1 do
       BindTypesX(LIdx);
+    Report('cross:xtype');
     for LIdx := 0 to LN - 1 do
       CrossType(LIdx);
     MarkAllCrossReady;
+    StageMark('cross');
     Recount;
     Report('done');
 

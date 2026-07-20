@@ -20,15 +20,21 @@ object frmMain: TfrmMain
     Left = 260
     Top = 41
     Width = 4
-    Height = 524
+    Height = 511
+    Color = clAppWorkSpace
+    ParentColor = False
+    ExplicitHeight = 524
   end
   object splBottom: TSplitter
     Left = 0
-    Top = 565
+    Top = 552
     Width = 1180
     Height = 4
     Cursor = crVSplit
     Align = alBottom
+    Color = clAppWorkSpace
+    ParentColor = False
+    ExplicitTop = 508
   end
   object pnlTop: TPanel
     Left = 0
@@ -38,7 +44,7 @@ object frmMain: TfrmMain
     Align = alTop
     BevelOuter = bvNone
     TabOrder = 0
-    ExplicitWidth = 1174
+    ExplicitTop = -6
     object btnOpen: TButton
       Left = 8
       Top = 7
@@ -106,19 +112,12 @@ object frmMain: TfrmMain
       TabOrder = 5
       OnClick = btnParseRtlClick
     end
-    object lblProgress: TLabel
-      Left = 772
-      Top = 13
-      Width = 3
-      Height = 15
-      Visible = False
-    end
   end
   object vstFiles: TVirtualStringTree
     Left = 0
     Top = 41
     Width = 260
-    Height = 524
+    Height = 511
     Align = alLeft
     DefaultNodeHeight = 19
     Header.AutoSizeIndex = 0
@@ -129,29 +128,17 @@ object frmMain: TfrmMain
     OnGetText = vstFilesGetText
     Touch.InteractiveGestures = [igPan, igPressAndTap]
     Touch.InteractiveGestureOptions = [igoPanSingleFingerHorizontal, igoPanSingleFingerVertical, igoPanInertia, igoPanGutter, igoParentPassthrough]
+    ExplicitHeight = 524
     Columns = <>
-  end
-  object mmMessages: TMemo
-    Left = 0
-    Top = 569
-    Width = 1180
-    Height = 151
-    Align = alBottom
-    ReadOnly = True
-    ScrollBars = ssBoth
-    TabOrder = 2
-    WordWrap = False
-    ExplicitTop = 552
-    ExplicitWidth = 1174
   end
   object pgc: TPageControl
     Left = 264
     Top = 41
     Width = 916
-    Height = 524
+    Height = 511
     ActivePage = tsJson
     Align = alClient
-    TabOrder = 3
+    TabOrder = 2
     ExplicitWidth = 910
     ExplicitHeight = 507
     object tsJson: TTabSheet
@@ -160,7 +147,7 @@ object frmMain: TfrmMain
         Left = 0
         Top = 0
         Width = 908
-        Height = 494
+        Height = 481
         Align = alClient
         CaseSensitive = True
         Font.Charset = DEFAULT_CHARSET
@@ -193,7 +180,7 @@ object frmMain: TfrmMain
         Left = 0
         Top = 0
         Width = 908
-        Height = 494
+        Height = 481
         Align = alClient
         Font.Charset = DEFAULT_CHARSET
         Font.Color = clWindowText
@@ -211,6 +198,51 @@ object frmMain: TfrmMain
         Gutter.Font.Quality = fqClearTypeNatural
         Gutter.Bands = <>
         ScrollbarAnnotations = <>
+        ExplicitHeight = 494
+      end
+    end
+  end
+  object pnlBottom: TPanel
+    Left = 0
+    Top = 556
+    Width = 1180
+    Height = 164
+    Align = alBottom
+    BevelOuter = bvNone
+    ShowCaption = False
+    TabOrder = 3
+    ExplicitTop = 552
+    object mmMessages: TMemo
+      Left = 0
+      Top = 25
+      Width = 1180
+      Height = 139
+      Align = alClient
+      ReadOnly = True
+      ScrollBars = ssBoth
+      TabOrder = 0
+      WordWrap = False
+      ExplicitTop = 28
+    end
+    object Panel1: TPanel
+      Left = 0
+      Top = 0
+      Width = 1180
+      Height = 25
+      Align = alTop
+      BevelOuter = bvNone
+      ShowCaption = False
+      TabOrder = 1
+      object lblProgress: TLabel
+        AlignWithMargins = True
+        Left = 1120
+        Top = 3
+        Width = 57
+        Height = 19
+        Align = alRight
+        Alignment = taRightJustify
+        Caption = '0/0 Parsed'
+        Layout = tlCenter
       end
     end
   end

@@ -25,7 +25,8 @@ uses
   PasTree.Sema.Resolver in '..\source\PasTree.Sema.Resolver.pas',
   PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
   PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas',
-  PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas';
+  PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas',
+  PasTree.Sema.Async in '..\source\PasTree.Sema.Async.pas';
 
 {$R PasTreeDemo.res}
 

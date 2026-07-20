@@ -66,6 +66,8 @@ type
     GotoImplementation1: TMenuItem;
     GotoDeclaration1: TMenuItem;
     SynEditSearch1: TSynEditSearch;
+    pnlBottom: TPanel;
+    Panel1: TPanel;
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
     procedure btnOpenClick(Sender: TObject);
@@ -1092,7 +1094,6 @@ begin
   FAsyncStart := TStopwatch.StartNew;
   FAsyncSession.Start;
   lblProgress.Caption := 'analyzing...';
-  lblProgress.Visible := True;
   FAsyncTimer.Enabled := True;
 end;
 
@@ -1111,6 +1112,7 @@ end;
 procedure TfrmMain.AsyncTimerTick(Sender: TObject);
 var
   LProgress: TPasStagedProgress;
+  LError: string;
 begin
   if not Assigned(FAsyncSession) then
   begin
@@ -1126,6 +1128,7 @@ begin
   // Build finished — swap in the new project/navigator on this (UI) thread.
   FAsyncTimer.Enabled := False;
   FAsyncStart.Stop;
+  LError := FAsyncSession.LastError;
   ClearLink;
   FreeAndNil(FNav);
   FreeAndNil(FSemaProject);
@@ -1133,8 +1136,9 @@ begin
   FreeAndNil(FAsyncSession);
   if Assigned(FSemaProject) then
     FNav := TPasNavigator.Create(FSemaProject);
-  lblProgress.Visible := False;
 
+  if LError <> '' then
+    Log('Background analysis error: ' + LError);
   if FAsyncLoud and Assigned(FSemaProject) then
     ReportProjectResult(FAsyncStart.ElapsedMilliseconds);
 end;
