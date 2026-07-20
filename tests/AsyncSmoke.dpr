@@ -37,7 +37,8 @@ uses
   PasTree.Sema.Builtins in '..\source\PasTree.Sema.Builtins.pas',
   PasTree.Sema.Resolver in '..\source\PasTree.Sema.Resolver.pas',
   PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas',
-  PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas';
+  PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
+  PasTree.Sema.Async in '..\source\PasTree.Sema.Async.pas';
 
 var
   GPassed, GFailed: Integer;
@@ -300,6 +301,57 @@ begin
       not LAnyCross);
   finally
     LCancelled.Free;
+  end;
+
+  // ---- 4. TPasAsyncSession: same engine on a background thread ----
+  // Run to completion on the worker, take the project, and assert its final
+  // state matches the batch build byte-for-byte (order-independent dump).
+  LBatch := BatchProject(LDir);
+  try
+    var LSession := TPasAsyncSession.Create(pfWin32, [LDir], [],
+      [TPath.Combine(LDir, 'App.dpr')], []);
+    try
+      LSession.Start;
+      LSession.WaitFor;
+      Ok('session: reports done after WaitFor', LSession.IsDone);
+      Ok('session: final progress phase is done',
+        LSession.Progress.Phase = 'done');
+      var LTaken := LSession.TakeProject;
+      try
+        Ok('session: TakeProject returns the built project', LTaken <> nil);
+        Ok('session: background build == batch (order-independent)',
+          (LTaken <> nil) and (CanonicalDump(LTaken) = CanonicalDump(LBatch)));
+        Ok('session: main result id resolves to App',
+          (LTaken <> nil) and (LSession.MainResultId >= 0) and
+          SameText(LTaken.Model(LSession.MainResultId).UnitNameLower, 'app'));
+        // A second TakeProject must not double-hand-out (ownership moved).
+        Ok('session: second TakeProject returns nil',
+          LSession.TakeProject = nil);
+      finally
+        LTaken.Free;
+      end;
+    finally
+      LSession.Free;   // project already taken -> frees only the session
+    end;
+  finally
+    LBatch.Free;
+  end;
+
+  // ---- 5. Session cancelled immediately -> drains cleanly, no crash ----
+  begin
+    var LSession := TPasAsyncSession.Create(pfWin32, [LDir], [],
+      [TPath.Combine(LDir, 'App.dpr')], []);
+    try
+      LSession.Cancel;   // before Start: the worker sees it at the first poll
+      LSession.Start;
+      LSession.WaitFor;
+      Ok('session: cancelled-before-start still finishes (drains)',
+        LSession.IsDone);
+      // Whatever it built is owned by the session and freed in Destroy —
+      // no TakeProject here, so Destroy must free the project (leak check).
+    finally
+      LSession.Free;
+    end;
   end;
 
   if TDirectory.Exists(LDir) then
