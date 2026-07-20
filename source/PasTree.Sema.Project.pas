@@ -50,6 +50,17 @@ type
     Ext: TPasExtRef;
   end;
 
+  // Progress of a staged (incremental) analysis, reported to AnalyzeStaged's
+  // callback after each step. Total GROWS as the uses closure is discovered
+  // (a module's dependencies aren't known until it is parsed), so a UI shows
+  // "done/total" with a moving total — as designed.
+  TPasStagedProgress = record
+    Total: Integer;      // modules discovered so far
+    IntfDone: Integer;   // modules that reached at least msIntfReady
+    FullDone: Integer;   // modules that reached at least msFullReady
+    Phase: string;       // 'intf' | 'full' | 'cross' | 'done' | 'cancelled'
+  end;
+
   TPasSemaProject = class
   private
     FPlatform: TPasPlatform;
@@ -105,7 +116,13 @@ type
     // the synchronous drivers once their cross passes have completed).
     procedure MarkAllCrossReady;
     function LoadFile(const APath: string): Integer;
-    procedure LoadFilesParallel(const APaths: TArray<string>);
+    procedure LoadFilesParallel(const APaths: TArray<string>;
+      AInterfaceOnly: Boolean = False);
+    // Reparse the module at AId FULLY and swap in the new snapshot, advancing
+    // it from msIntfReady to msFullReady. Relies on the parser prefix
+    // invariant, so the full model's interface symbol ids match the intf
+    // model's — other units' ExtRefMap into this unit stays valid.
+    procedure UpgradeToFull(AId: Integer);
     procedure RegisterUnitName(AId: Integer);
     function LoadedUnitByName(const AName: string): Integer;
     procedure ResolveUses(AId: Integer);
@@ -219,6 +236,25 @@ type
     function AnalyzeProject(const AMainFile: string): Integer;
     // Analyze every .pas/.dpr under a directory (indexed first).
     procedure AnalyzeDirectory(const ARoot: string);
+    { Incremental analysis of ARoots' transitive uses closure, in two waves —
+      wave 1 parses every reachable module INTERFACE-ONLY (msIntfReady: enough
+      for navigation INTO it), wave 2 upgrades each to a full parse
+      (msFullReady, revealing implementation-only dependencies), then a
+      finalizer runs the cross passes (msCrossReady). APriority names files to
+      front-load (the open editor module + its direct uses) so they reach
+      readiness first. ACancelled is polled between modules/waves — on True the
+      call returns early leaving whatever completed published (partial but
+      consistent). AOnProgress reports a growing done/total after each step.
+      Returns the model id of ARoots[0], or -1.
+
+      The FINAL state (models + diagnostics + cross-refs) is equivalent to
+      AnalyzeProject over the same closure; the interface wave is a transient
+      early-usability optimization. This method carries no threads of its own
+      — TPasAsyncSession runs it on a background thread; a caller using it
+      directly (tests, headless) gets a deterministic staged build. }
+    function AnalyzeStaged(const ARoots, APriority: TArray<string>;
+      const ACancelled: TFunc<Boolean> = nil;
+      const AOnProgress: TProc<TPasStagedProgress> = nil): Integer;
   end;
 
 implementation
@@ -465,7 +501,8 @@ end;
 // file: each worker owns its preprocessor (which clones the shared defines
 // per run); the source manager and define set are read-only during the loop —
 // the same no-locks model as TPasProject.ParseFiles.
-procedure TPasSemaProject.LoadFilesParallel(const APaths: TArray<string>);
+procedure TPasSemaProject.LoadFilesParallel(const APaths: TArray<string>;
+  AInterfaceOnly: Boolean = False);
 var
   LTodo: TArray<string>;
   LKeys: TArray<string>;
@@ -473,6 +510,7 @@ var
   LSeen: TDictionary<string, Boolean>;
   LIdx, LDummy: Integer;
   LFull, LKey: string;
+  LStatus: TPasModuleStatus;
 begin
   // Normalize, drop already-loaded/known-bad paths and in-batch duplicates.
   LTodo := nil;
@@ -516,8 +554,8 @@ begin
       try
         try
           LPre := LPP.Process(LTodo[AIndex]);
-          LDone[AIndex] :=
-            TPasSemaResolver.Analyze(TPasParser.ParseFile(LPre, LDiags));
+          LDone[AIndex] := TPasSemaResolver.Analyze(
+            TPasParser.ParseFile(LPre, LDiags, AInterfaceOnly));
         except
           on Exception do
             LDone[AIndex] := nil;   // registered as known-bad below
@@ -527,16 +565,45 @@ begin
       end;
     end);
 
+  // Interface-only -> msIntfReady (later upgraded); full parse -> msFullReady.
+  if AInterfaceOnly then
+    LStatus := msIntfReady
+  else
+    LStatus := msFullReady;
   for LIdx := 0 to High(LTodo) do
     if LDone[LIdx] <> nil then
     begin
-      // Full parse + Phase 1 -> msFullReady (cross passes bump it later).
       FByPath.Add(LKeys[LIdx],
-        RegisterModel(LDone[LIdx], LTodo[LIdx], msFullReady));
+        RegisterModel(LDone[LIdx], LTodo[LIdx], LStatus));
       RegisterUnitName(FModels.Count - 1);
     end
     else
       FByPath.Add(LKeys[LIdx], -1);
+end;
+
+procedure TPasSemaProject.UpgradeToFull(AId: Integer);
+var
+  LPre: TPasPreprocessed;
+  LDiags: TArray<TPasParseDiag>;
+  LModel: TPasSemaModel;
+begin
+  if (AId < 0) or (AId >= FModels.Count) then
+    Exit;
+  if FStatus[AId] >= msFullReady then
+    Exit;   // already full (or beyond)
+  try
+    LPre := FPP.Process(FFiles[AId]);
+    LModel := TPasSemaResolver.Analyze(
+      TPasParser.ParseFile(LPre, LDiags, {AInterfaceOnly} False));
+  except
+    on Exception do
+      Exit;   // keep the interface-only snapshot on a full-parse failure
+  end;
+  // Publish the new snapshot. FModels owns its objects, so assigning frees the
+  // previous (interface-only) model. Callers must hold no live reference to it
+  // (the nav cache re-keys on the model identity and rebuilds).
+  FModels[AId] := LModel;
+  FStatus[AId] := msFullReady;
 end;
 
 // Maps the model's DECLARED unit name (root's name node, dotted included) to
@@ -2032,6 +2099,167 @@ begin
   // msFullReady, mirroring the E2003 scoping above.
   for LIdx := 0 to LN - 1 do
     SetModuleStatus(LIdx, msCrossReady);
+end;
+
+function TPasSemaProject.AnalyzeStaged(const ARoots, APriority: TArray<string>;
+  const ACancelled: TFunc<Boolean>;
+  const AOnProgress: TProc<TPasStagedProgress>): Integer;
+var
+  LProgress: TPasStagedProgress;
+  LDone, LN, LIdx: Integer;
+  LNewPaths, LOrdered: TArray<string>;
+  LPath, LKey: string;
+  LSeen: TDictionary<string, Boolean>;
+
+  function Cancelled: Boolean;
+  begin
+    Result := Assigned(ACancelled) and ACancelled();
+  end;
+
+  procedure Recount;
+  var
+    LI: Integer;
+  begin
+    LProgress.Total := FModels.Count;
+    LProgress.IntfDone := 0;
+    LProgress.FullDone := 0;
+    for LI := 0 to FStatus.Count - 1 do
+    begin
+      if FStatus[LI] >= msIntfReady then
+        Inc(LProgress.IntfDone);
+      if FStatus[LI] >= msFullReady then
+        Inc(LProgress.FullDone);
+    end;
+  end;
+
+  procedure Report(const APhase: string);
+  begin
+    LProgress.Phase := APhase;
+    if Assigned(AOnProgress) then
+      AOnProgress(LProgress);
+  end;
+
+  // Uses-closure paths not yet loaded, discovered from models [AFrom..AToExcl).
+  function DiscoverUses(AFrom, AToExcl: Integer): TArray<string>;
+  var
+    LI, LK: Integer;
+    LP: string;
+  begin
+    Result := nil;
+    for LI := AFrom to AToExcl - 1 do
+      for LK := 0 to High(FModels[LI].UsesList) do
+        if FSM.ResolveUnit(FModels[LI].UsesList[LK].NameFull,
+          FModels[LI].UsesList[LK].InPath, FFiles[LI], LP) and
+          not FByPath.ContainsKey(LowerCase(LP)) and
+          not LSeen.ContainsKey(LowerCase(LP)) then
+        begin
+          LSeen.Add(LowerCase(LP), True);
+          Result := Result + [LP];
+        end;
+  end;
+
+begin
+  Result := -1;
+  LProgress := Default(TPasStagedProgress);
+  LSeen := TDictionary<string, Boolean>.Create;
+  try
+    // Front-load the priority set (open module + its uses), then the roots.
+    LOrdered := nil;
+    for LPath in APriority + ARoots do
+    begin
+      LKey := LowerCase(TPath.GetFullPath(LPath));
+      if not LSeen.ContainsKey(LKey) then
+      begin
+        LSeen.Add(LKey, True);
+        LOrdered := LOrdered + [LPath];
+      end;
+    end;
+
+    // The implicit System unit is part of every closure (1.2.1) but never
+    // named in a `uses` clause — pull it in up front (full, like
+    // AnalyzeProject) so wave 1's BFS also walks its uses and the finalizer
+    // covers it. Matches AnalyzeProject's early EnsureSystemUnit.
+    EnsureSystemUnit;
+
+    // ---- Wave 1: interface-only closure (breadth-first) ----
+    Report('intf');
+    LoadFilesParallel(LOrdered, {AInterfaceOnly} True);
+    Recount;
+    Report('intf');
+    LDone := 0;
+    while LDone < FModels.Count do
+    begin
+      if Cancelled then
+      begin
+        Report('cancelled');
+        Exit;
+      end;
+      LN := FModels.Count;
+      LNewPaths := DiscoverUses(LDone, LN);
+      LoadFilesParallel(LNewPaths, {AInterfaceOnly} True);
+      LDone := LN;
+      Recount;
+      Report('intf');
+    end;
+
+    // ---- Wave 2: upgrade every module to a full parse, discovering any
+    // implementation-only dependencies the interface trees didn't show ----
+    Report('full');
+    repeat
+      for LIdx := 0 to FModels.Count - 1 do
+        if FStatus[LIdx] = msIntfReady then
+        begin
+          if Cancelled then
+          begin
+            Report('cancelled');
+            Exit;
+          end;
+          UpgradeToFull(LIdx);
+          Recount;
+          Report('full');
+        end;
+      // Full trees now expose implementation uses — pull in the newcomers
+      // (directly at full parse; they were discovered late).
+      LN := FModels.Count;
+      LNewPaths := DiscoverUses(0, LN);
+      LoadFilesParallel(LNewPaths, {AInterfaceOnly} False);
+      Recount;
+    until FModels.Count = LN;
+
+    // ---- Finalizer: cross passes over the whole closure ----
+    if Cancelled then
+    begin
+      Report('cancelled');
+      Exit;
+    end;
+    Report('cross');
+    LN := FModels.Count;
+    for LIdx := 0 to LN - 1 do
+      ResolveUses(LIdx);
+    ForEachIndex(LN - 1,
+      procedure(AIdx: Integer)
+      begin
+        CrossResolve(AIdx);
+      end);
+    RunInheritedPass(LN);
+    ForEachIndex(LN - 1,
+      procedure(AIdx: Integer)
+      begin
+        CheckCalls(AIdx);
+      end);
+    for LIdx := 0 to FModels.Count - 1 do
+      BindTypesX(LIdx);
+    for LIdx := 0 to LN - 1 do
+      CrossType(LIdx);
+    MarkAllCrossReady;
+    Recount;
+    Report('done');
+
+    if Length(ARoots) > 0 then
+      FByPath.TryGetValue(LowerCase(TPath.GetFullPath(ARoots[0])), Result);
+  finally
+    LSeen.Free;
+  end;
 end;
 
 end.
