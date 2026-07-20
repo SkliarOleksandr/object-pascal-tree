@@ -110,9 +110,19 @@ type
   public
     class function ParseStatements(const ASource: TPasPreprocessed;
       out ADiags: TArray<TPasParseDiag>): TPasTree; static;
-    { Parses a whole source file (unit/program/library/package). }
+    { Parses a whole source file (unit/program/library/package).
+      When AInterfaceOnly is True AND the file is a unit, parsing stops right
+      after the interface section (the implementation/init/final/end. are NOT
+      consumed) — enough for cross-unit navigation, and cheap. The flag is
+      IGNORED for program/library/package (they have no interface section).
+      PREFIX INVARIANT (relied on by the async parser's snapshot swap): the
+      resulting tree's nodes [0..N-1] are byte-identical to a full parse of
+      the same source, EXCEPT Nodes[0] (nkUnit root) LastToken and the
+      nkInterfaceSec node's NextSibling (NIL_NODE here vs the impl section in
+      a full parse) — see StagedParseSmoke for the exact, tested delta. }
     class function ParseFile(const ASource: TPasPreprocessed;
-      out ADiags: TArray<TPasParseDiag>): TPasTree; static;
+      out ADiags: TArray<TPasParseDiag>;
+      AInterfaceOnly: Boolean = False): TPasTree; static;
   end;
 
 implementation
@@ -2651,7 +2661,8 @@ begin
 end;
 
 class function TPasParser.ParseFile(const ASource: TPasPreprocessed;
-  out ADiags: TArray<TPasParseDiag>): TPasTree;
+  out ADiags: TArray<TPasParseDiag>;
+  AInterfaceOnly: Boolean = False): TPasTree;
 var
   LP: TPasParser;
   LRoot, LSec: Integer;
@@ -2677,34 +2688,42 @@ begin
         LP.ParseDeclSections(LSec, False, [tkImplementation]);
         LP.FB.SetLast(LSec, LP.FPos - 1);
         LP.FB.Adopt(LRoot, LSec);
-        // implementation section
-        LSec := LP.FB.AddNode(nkImplementationSec, NIL_NODE, LP.FPos);
-        LP.Expect(tkImplementation, '"implementation"');
-        if LP.CurKind = tkUses then
-          LP.FB.Adopt(LSec, LP.ParseUsesClause);
-        LP.ParseDeclSections(LSec, True,
-          [tkInitialization, tkFinalization, tkBegin, tkEnd]);
-        LP.FB.SetLast(LSec, LP.FPos - 1);
-        LP.FB.Adopt(LRoot, LSec);
-        // initialization / finalization (or legacy begin-as-init)
-        if LP.CurKind in [tkInitialization, tkBegin] then
+        // In interface-only mode we stop here: the implementation/init/final/
+        // end. are left unparsed. Everything added above is byte-identical to
+        // a full parse (append-only builder), so a later full reparse keeps
+        // the same interface node indices and symbol ids (the prefix
+        // invariant the async snapshot swap depends on).
+        if not AInterfaceOnly then
         begin
-          LSec := LP.FB.AddNode(nkInitSec, NIL_NODE, LP.FPos);
-          LP.Next;
-          LP.ParseBlockUntil(LSec, [tkFinalization, tkEnd]);
+          // implementation section
+          LSec := LP.FB.AddNode(nkImplementationSec, NIL_NODE, LP.FPos);
+          LP.Expect(tkImplementation, '"implementation"');
+          if LP.CurKind = tkUses then
+            LP.FB.Adopt(LSec, LP.ParseUsesClause);
+          LP.ParseDeclSections(LSec, True,
+            [tkInitialization, tkFinalization, tkBegin, tkEnd]);
           LP.FB.SetLast(LSec, LP.FPos - 1);
           LP.FB.Adopt(LRoot, LSec);
+          // initialization / finalization (or legacy begin-as-init)
+          if LP.CurKind in [tkInitialization, tkBegin] then
+          begin
+            LSec := LP.FB.AddNode(nkInitSec, NIL_NODE, LP.FPos);
+            LP.Next;
+            LP.ParseBlockUntil(LSec, [tkFinalization, tkEnd]);
+            LP.FB.SetLast(LSec, LP.FPos - 1);
+            LP.FB.Adopt(LRoot, LSec);
+          end;
+          if LP.CurKind = tkFinalization then
+          begin
+            LSec := LP.FB.AddNode(nkFinalSec, NIL_NODE, LP.FPos);
+            LP.Next;
+            LP.ParseBlockUntil(LSec, [tkEnd]);
+            LP.FB.SetLast(LSec, LP.FPos - 1);
+            LP.FB.Adopt(LRoot, LSec);
+          end;
+          LP.Expect(tkEnd, '"end"');
+          LP.Expect(tkDot, '"."');
         end;
-        if LP.CurKind = tkFinalization then
-        begin
-          LSec := LP.FB.AddNode(nkFinalSec, NIL_NODE, LP.FPos);
-          LP.Next;
-          LP.ParseBlockUntil(LSec, [tkEnd]);
-          LP.FB.SetLast(LSec, LP.FPos - 1);
-          LP.FB.Adopt(LRoot, LSec);
-        end;
-        LP.Expect(tkEnd, '"end"');
-        LP.Expect(tkDot, '"."');
       end;
     tkProgram, tkLibrary:
       begin
