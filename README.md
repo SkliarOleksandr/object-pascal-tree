@@ -17,7 +17,9 @@ the companion specification this parser is built from.
 > layer (cross-unit resolution, overloads, generics, `.dproj`-aware project
 > loading) are all working end to end, and the demo already does real
 > go-to-declaration and decl↔impl navigation over real projects (including
-> the Delphi RTL/VCL). See [To do](#to-do) for what's still open.
+> the Delphi RTL/VCL) — with analysis now running fully asynchronously, so
+> opening a project or editing a file never blocks the editor. See
+> [To do](#to-do) for what's still open.
 
 ## What it does
 
@@ -98,8 +100,45 @@ closure fans out across cores instead of being processed one file at a time:
   for baseline timing comparisons and debugging — results are identical
   either way, since the parallel stages are pure per unit.
 
+## Asynchronous analysis
+
+Opening a project, or editing a file, never blocks the editor: analysis runs
+on a background worker while the previous (still-valid) model stays live and
+usable.
+
+- **Two-wave staged pipeline** (`TPasSemaProject.AnalyzeStaged`): wave 1
+  parses every unit of the `uses` closure **interface-only**, breadth-first,
+  with the open file's own direct dependencies front-loaded so they're ready
+  first; wave 2 upgrades each unit to a full parse (revealing any
+  implementation-only dependencies wave 1 couldn't see); a finalizer then
+  runs the existing cross-unit passes over the whole closure. Each module
+  tracks its own progress — `msQueued → msIntfReady → msFullReady →
+  msCrossReady` — so a consumer can gate on "just enough" instead of waiting
+  for everything.
+- **Snapshot swap, not mutation.** A module's tree/model is an immutable
+  snapshot; the interface→full upgrade parses a *new* tree — reusing the
+  interface wave's own lexed/preprocessed token stream, not re-lexing — and
+  atomically swaps it in. A reader always sees a complete snapshot, old or
+  new, never a half-built one.
+- **`TPasAsyncSession`** runs the whole pipeline on a background thread with
+  double-buffered ownership: the host polls a lock-guarded progress snapshot
+  (`phase done/total`, with total growing as the closure is discovered) and,
+  once finished, swaps the built project in on its own thread — no shared
+  mutable state between the worker and the UI to race. Cancellation is
+  cooperative, checked between chunks/passes, so switching projects or
+  closing the app never waits on a stale in-flight analysis.
+- On a large real-world project, background analysis now runs at
+  near-parity with the synchronous batch driver (~11s either way) after
+  chunked parallel upgrading and reusing the interface wave's lex/preprocess
+  pass in wave 2 — the two-wave split buys non-blocking, progressively-ready
+  analysis without a meaningful throughput cost.
+
 ## Current features
 
+- **Non-blocking background analysis** — opening a project or editing a file
+  kicks off analysis on a worker thread (see [Asynchronous
+  analysis](#asynchronous-analysis)); the demo shows live `phase done/total`
+  progress and swaps in the finished model without ever freezing the editor.
 - **Syntax highlighting for SynEdit** (`TPasTreeSynHighlighter`) — a real
   `TSynCustomHighlighter` driven by PasTree's own lexer/preprocessor/parser,
   not a regex approximation: keyword/identifier/number/string/comment/
@@ -130,9 +169,9 @@ closure fans out across cores instead of being processed one file at a time:
 
 | Path | Contents |
 |---|---|
-| `source/` | the library: `PasTree.Types`, `PasTree.SourceManager`, `PasTree.Lexer`, `PasTree.Preprocessor`, `PasTree.Ast`, `PasTree.Parser`, `PasTree.DProj`, `PasTree.Platforms`, `PasTree.Ast.Json`, `PasTree.Project`, and the semantic layer `PasTree.Sema.*` (`Model`, `Resolver`, `Types`, `Project`, `Builtins`, `Nav`, `Diagnostics`, `Dump`) |
+| `source/` | the library: `PasTree.Types`, `PasTree.SourceManager`, `PasTree.Lexer`, `PasTree.Preprocessor`, `PasTree.Ast`, `PasTree.Parser`, `PasTree.DProj`, `PasTree.Platforms`, `PasTree.Ast.Json`, `PasTree.Project`, and the semantic layer `PasTree.Sema.*` (`Model`, `Resolver`, `Types`, `Project`, `Builtins`, `Nav`, `Async`, `Diagnostics`, `Dump`) |
 | `demo/` | `PasTreeDemo` — a VCL host (SynEdit + VirtualTreeView) exercising the highlighter and navigation features interactively over real projects |
-| `tests/` | 8 DUnitX-style smoke suites (`ParserSmoke`, `DProjSmoke`, `SemaSmoke`, `SemaTypeSmoke`, `SemaXTypeSmoke`, `SemaOverloadSmoke`, `SemaProjectSmoke`, `SemaNavSmoke`) plus golden JSON trees and full-corpus runs |
+| `tests/` | 10 DUnitX-style smoke suites (`ParserSmoke`, `StagedParseSmoke`, `DProjSmoke`, `SemaSmoke`, `SemaTypeSmoke`, `SemaXTypeSmoke`, `SemaOverloadSmoke`, `SemaProjectSmoke`, `SemaNavSmoke`, `AsyncSmoke`) plus golden JSON trees and full-corpus runs |
 | `tools/` | CLI drivers per pipeline stage (`PasTreeLex`, `PasTreePP`, `PasTreeParse`, `PasTreeJson`, `PasTreeSema`, `PasTreeSemaProject`) and the node-kinds generator |
 | `docs/` | `editor-features.md` — the living IDE-parity spec for the demo's editor features |
 
