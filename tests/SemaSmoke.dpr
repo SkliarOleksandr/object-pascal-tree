@@ -171,6 +171,40 @@ const
     '  I := F(1, 2);'#10 +
     'end;'#10'end.'#10;
 
+  // Interface-only symbol-id stability: the interface section declares types,
+  // fields, a var and routines; the implementation adds bodies (and its own
+  // locals). Because SeedSystemScope runs first (identical) and the interface
+  // is collected before the implementation, every symbol id an interface-only
+  // model assigns must equal the full model's symbol at the SAME id — the
+  // guarantee that keeps other units' cross-references valid across the
+  // intf->full snapshot swap (async parser plan §2.2).
+  SRC_STAGED =
+    'unit Staged;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TFoo = class'#10 +
+    '    FX: Integer;'#10 +
+    '    function Bar(A: Integer): string;'#10 +
+    '    procedure Baz;'#10 +
+    '  end;'#10 +
+    'var GCount: Integer;'#10 +
+    'function Helper(N: Integer): Integer;'#10 +
+    'implementation'#10 +
+    'function TFoo.Bar(A: Integer): string;'#10 +
+    'var LTmp: Integer;'#10 +
+    'begin'#10 +
+    '  LTmp := A;'#10 +
+    '  Result := IntToStr(LTmp);'#10 +
+    'end;'#10 +
+    'procedure TFoo.Baz;'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'function Helper(N: Integer): Integer;'#10 +
+    'begin'#10 +
+    '  Result := N + GCount;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
 begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN32']);
@@ -241,6 +275,58 @@ begin
   Ok('no-fit: E2034 fired', DiagCount('E2034') = 1);
   Ok('no-fit: no E2010', DiagCount('E2010') = 0);
   GModel.Free;
+
+  // 10. interface-only symbol ids are a prefix of the full model's ids
+  begin
+    var LPre := GPP.ProcessText('test.pas', SRC_STAGED);
+    var LD: TArray<TPasParseDiag>;
+    var LIntfTree := TPasParser.ParseFile(LPre, LD, {AInterfaceOnly} True);
+    var LIntfModel := TPasSemaResolver.Analyze(LIntfTree);
+    LPre := GPP.ProcessText('test.pas', SRC_STAGED);
+    var LFullTree := TPasParser.ParseFile(LPre, LD, {AInterfaceOnly} False);
+    var LFullModel := TPasSemaResolver.Analyze(LFullTree);
+    try
+      Ok('staged: intf model has fewer symbols than full',
+        LIntfModel.SymCount < LFullModel.SymCount);
+      // The interface declared these — all must exist in the intf-only model.
+      var LHaveIntfSyms := True;
+      var LNames: TArray<string> := ['TFoo', 'FX', 'Bar', 'Baz', 'GCount',
+        'Helper'];
+      for var LN in LNames do
+      begin
+        var LFound := False;
+        for var LI := 0 to LIntfModel.SymCount - 1 do
+          if SameText(LIntfModel.Symbols[LI].Name, LN) then
+          begin
+            LFound := True;
+            Break;
+          end;
+        if not LFound then
+          LHaveIntfSyms := False;
+      end;
+      Ok('staged: all interface symbols present in intf-only model',
+        LHaveIntfSyms);
+      // The id-stability invariant: every symbol the intf-only model holds
+      // matches the full model's symbol at the SAME id (name + kind + scope).
+      var LStable := True;
+      for var LI := 0 to LIntfModel.SymCount - 1 do
+        if not ((LIntfModel.Symbols[LI].Name = LFullModel.Symbols[LI].Name) and
+          (LIntfModel.Symbols[LI].Kind = LFullModel.Symbols[LI].Kind) and
+          (LIntfModel.Symbols[LI].Scope = LFullModel.Symbols[LI].Scope)) then
+        begin
+          LStable := False;
+          Writeln(Format('  staged: sym %d differs: intf=%s/%d full=%s/%d',
+            [LI, LIntfModel.Symbols[LI].Name,
+             Ord(LIntfModel.Symbols[LI].Kind),
+             LFullModel.Symbols[LI].Name, Ord(LFullModel.Symbols[LI].Kind)]));
+        end;
+      Ok('staged: interface symbol ids are a stable prefix of the full model',
+        LStable);
+    finally
+      LIntfModel.Free;
+      LFullModel.Free;
+    end;
+  end;
 
   Writeln(Format('=== SemaSmoke: %d passed, %d failed ===', [GPassed, GFailed]));
   if GFailed > 0 then
