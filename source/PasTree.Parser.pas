@@ -104,6 +104,7 @@ type
     function ParseExportsClause: Integer;
     function IsDirectiveWord: Boolean;
     function IsVisibilityWord: Boolean;
+    procedure MarkContextKeyword;
     procedure ConsumeTrailingDirectives;
     procedure ParseDeclSections(AParent: Integer; AAllowBodies: Boolean;
       const ATerminators: array of TPasTokenKind);
@@ -1437,6 +1438,7 @@ begin
         if IsWord('reference') and (PeekKind(1) = tkTo) and
           (PeekKind(2) in [tkProcedure, tkFunction]) then
         begin
+          MarkContextKeyword; // color 'reference' (lexed as an identifier)
           Next; // reference
           Next; // to
           Exit(ParseProcTypeExpr(True));
@@ -1585,15 +1587,19 @@ begin
   if AHeadKind = tkDispinterface then
     FB.SetAux(Result, 1);
   Next; // head keyword
-  // class abstract / class sealed
+  // class abstract / class sealed (context keywords, lexed as identifiers)
   while IsWord('abstract') or IsWord('sealed') do
+  begin
+    MarkContextKeyword;   // color 'abstract' / 'sealed'
     Next;
+  end;
   LIsHelper := IsWord('helper');
   if LIsHelper then
   begin
     FB.SetKind(Result, nkHelperType);
     if AHeadKind = tkRecord then
       FB.SetAux(Result, 1);
+    MarkContextKeyword;   // color 'helper'
     Next; // helper
   end;
   // Forward declaration: class; / interface;
@@ -2009,6 +2015,21 @@ begin
   Result := False;
 end;
 
+// A CONTEXT keyword (reference / operator / ...) is lexed as an identifier,
+// not a reserved word, so nothing colors it as a keyword. Emit a standalone
+// nkDirective over the current single token purely so the editor highlighter
+// treats it as one (BuildWeakKeywordSpans marks the span of every nkDirective/
+// nkVisibility/nkPropSpec node). The node is intentionally an ORPHAN — never
+// adopted into the tree: it carries no structure any consumer needs, and
+// staying out of every child chain leaves sema, Nav, Dump, JSON and the
+// routine/type name-finding logic completely unaffected (they all walk from
+// the root via child links; only the highlighter's flat all-nodes walk sees
+// it). Call it BEFORE consuming the token, while FPos still points at it.
+procedure TPasParser.MarkContextKeyword;
+begin
+  FB.AddNode(nkDirective, NIL_NODE, FPos);   // FirstToken = LastToken = FPos
+end;
+
 procedure TPasParser.ConsumeTrailingDirectives;
 
   function IsDirectiveWordAt(AIdx: Integer): Boolean;
@@ -2148,6 +2169,8 @@ begin
   if AClassMethod then
     FB.SetAux(Result, 1);
   LIsOperator := IsWord('operator');
+  if LIsOperator then
+    MarkContextKeyword; // color 'operator' (lexed as an identifier)
   Next; // routine keyword (or 'operator' identifier)
   FRoutineNameVis := FPos;
   // Name: segments with optional generic params (impl headers, 16.3).
