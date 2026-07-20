@@ -59,6 +59,12 @@ type
     FPP: TPasPreprocessor;
     FModels: TObjectList<TPasSemaModel>;
     FFiles: TList<string>;                 // parallel to FModels (full path)
+    // Parallel to FModels: each model's pipeline status. Kept in lockstep by
+    // RegisterModel (the only place a model is appended). The synchronous
+    // drivers register models as msFullReady (LoadFile/LoadFilesParallel do a
+    // full parse + Phase 1) and bump them to msCrossReady once the cross
+    // passes have run. The async driver (later) uses the finer transitions.
+    FStatus: TList<TPasModuleStatus>;
     FByPath: TDictionary<string, Integer>; // full path (lower) -> model id
     // Declared unit name (lower) -> model id, registered as files load. The
     // dcc rule this serves: a program's `uses X in 'path'` locates X for the
@@ -90,6 +96,14 @@ type
     // Runs ABody for 0..AHi — one worker per core, or a plain loop when
     // SingleThreaded (baseline emulation / timing comparison / debugging).
     procedure ForEachIndex(AHi: Integer; const ABody: TProc<Integer>);
+    // Appends a model + its initial status, keeping FModels/FFiles/FStatus in
+    // lockstep. Returns the new model id.
+    function RegisterModel(AModel: TPasSemaModel; const AFullPath: string;
+      AStatus: TPasModuleStatus): Integer;
+    procedure SetModuleStatus(AId: Integer; AStatus: TPasModuleStatus);
+    // Bumps every currently loaded model to at least msCrossReady (called by
+    // the synchronous drivers once their cross passes have completed).
+    procedure MarkAllCrossReady;
     function LoadFile(const APath: string): Integer;
     procedure LoadFilesParallel(const APaths: TArray<string>);
     procedure RegisterUnitName(AId: Integer);
@@ -178,6 +192,17 @@ type
     function ModelCount: Integer;
     function Model(AId: Integer): TPasSemaModel;
     function ModelFile(AId: Integer): string;
+    { A module's current pipeline status (msQueued if AId is out of range). }
+    function ModuleStatus(AId: Integer): TPasModuleStatus;
+    { Non-blocking snapshot fetch for UI/consumers: returns the model at AId
+      only if it has reached at least AMinStatus, else False (AModel := nil).
+      The UI must NEVER block waiting for analysis — it calls this and, on
+      False, disables the action / no-ops the hover. In the synchronous
+      drivers every model is msCrossReady by the time anyone can call this, so
+      it always succeeds; the gate matters once analysis runs in the
+      background. }
+    function TryGetSnapshot(AId: Integer; AMinStatus: TPasModuleStatus;
+      out AModel: TPasSemaModel): Boolean;
     function InstanceCount: Integer;
     function Instance(AInst: Integer): TSemaInstance;
     // 'TList<Integer>'-style rendering of a cross-model type (for dumps/tests).
@@ -222,6 +247,7 @@ begin
     FInfo.ExtendedBytes);
   FModels := TObjectList<TPasSemaModel>.Create(True);
   FFiles := TList<string>.Create;
+  FStatus := TList<TPasModuleStatus>.Create;
   FByPath := TDictionary<string, Integer>.Create;
   FInstances := TList<TSemaInstance>.Create;
   FInstKeys := TDictionary<string, Integer>.Create;
@@ -240,6 +266,7 @@ begin
   FInstances.Free;
   FByPath.Free;
   FFiles.Free;
+  FStatus.Free;
   FModels.Free;
   FPP.Free;
   FDefines.Free;
@@ -355,6 +382,25 @@ begin
   Result := FFiles[AId];
 end;
 
+function TPasSemaProject.ModuleStatus(AId: Integer): TPasModuleStatus;
+begin
+  if (AId >= 0) and (AId < FStatus.Count) then
+    Result := FStatus[AId]
+  else
+    Result := msQueued;
+end;
+
+function TPasSemaProject.TryGetSnapshot(AId: Integer;
+  AMinStatus: TPasModuleStatus; out AModel: TPasSemaModel): Boolean;
+begin
+  Result := (AId >= 0) and (AId < FModels.Count) and
+    (FStatus[AId] >= AMinStatus);
+  if Result then
+    AModel := FModels[AId]
+  else
+    AModel := nil;
+end;
+
 function TPasSemaProject.LoadFile(const APath: string): Integer;
 var
   LFull, LKey: string;
@@ -382,10 +428,36 @@ begin
       Exit(-1);
     end;
   end;
-  Result := FModels.Add(LModel);
-  FFiles.Add(LFull);
+  // Full parse + Phase 1 done -> msFullReady (cross passes bump it later).
+  Result := RegisterModel(LModel, LFull, msFullReady);
   FByPath.Add(LKey, Result);
   RegisterUnitName(Result);
+end;
+
+// Single point where a model is appended: keeps FModels/FFiles/FStatus in
+// lockstep so a model id indexes all three.
+function TPasSemaProject.RegisterModel(AModel: TPasSemaModel;
+  const AFullPath: string; AStatus: TPasModuleStatus): Integer;
+begin
+  Result := FModels.Add(AModel);
+  FFiles.Add(AFullPath);
+  FStatus.Add(AStatus);
+end;
+
+procedure TPasSemaProject.SetModuleStatus(AId: Integer;
+  AStatus: TPasModuleStatus);
+begin
+  if (AId >= 0) and (AId < FStatus.Count) then
+    FStatus[AId] := AStatus;
+end;
+
+procedure TPasSemaProject.MarkAllCrossReady;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to FStatus.Count - 1 do
+    if FStatus[LIdx] < msCrossReady then
+      FStatus[LIdx] := msCrossReady;
 end;
 
 // Parse + Phase-1-analyze a batch of files with one worker per core, then
@@ -458,8 +530,9 @@ begin
   for LIdx := 0 to High(LTodo) do
     if LDone[LIdx] <> nil then
     begin
-      FByPath.Add(LKeys[LIdx], FModels.Add(LDone[LIdx]));
-      FFiles.Add(LTodo[LIdx]);
+      // Full parse + Phase 1 -> msFullReady (cross passes bump it later).
+      FByPath.Add(LKeys[LIdx],
+        RegisterModel(LDone[LIdx], LTodo[LIdx], msFullReady));
       RegisterUnitName(FModels.Count - 1);
     end
     else
@@ -1784,6 +1857,9 @@ begin
   for LIdx := 0 to FModels.Count - 1 do
     BindTypesX(LIdx);
   CrossType(Result);
+  // Only the requested unit gets the full cross treatment here (AnalyzeFile's
+  // narrower contract); its direct uses stay msFullReady.
+  SetModuleStatus(Result, msCrossReady);
 end;
 
 function TPasSemaProject.StageTimings: string;
@@ -1879,6 +1955,8 @@ begin
   for LIdx := 0 to LN - 1 do
     CrossType(LIdx);
   Stage('xtype');
+  // Whole transitive closure went through the cross passes.
+  MarkAllCrossReady;
 end;
 
 procedure TPasSemaProject.AnalyzeDirectory(const ARoot: string);
@@ -1949,6 +2027,11 @@ begin
   for LIdx := 0 to LN - 1 do
     CrossType(LIdx);
   Stage('xtype');
+  // Units [0..LN-1] (the directory's own) went through the cross passes; a
+  // System unit pulled in from search paths after the LN snapshot stays
+  // msFullReady, mirroring the E2003 scoping above.
+  for LIdx := 0 to LN - 1 do
+    SetModuleStatus(LIdx, msCrossReady);
 end;
 
 end.

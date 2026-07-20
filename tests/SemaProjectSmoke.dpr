@@ -215,6 +215,22 @@ begin
     Ok('Ovl: E2034 x1 (F(1,2,3) fits neither)', DiagCount(LOvl, 'E2034') = 1);
     Ok('Ovl: no E2035 (merge covers F(1) and F(a,b))',
       DiagCount(LOvl, 'E2035') = 0);
+
+    // Module status / snapshot API: AnalyzeDirectory takes the directory's
+    // own units all the way to msCrossReady, and TryGetSnapshot gates on the
+    // minimum requested status (never blocks — synchronously everything is
+    // already ready).
+    var LSnap: TPasSemaModel;
+    Ok('status: unita is msCrossReady',
+      GProj.ModuleStatus(0) = msCrossReady);
+    Ok('status: TryGetSnapshot(msIntfReady) succeeds',
+      GProj.TryGetSnapshot(0, msIntfReady, LSnap) and (LSnap = GProj.Model(0)));
+    Ok('status: TryGetSnapshot(msCrossReady) succeeds',
+      GProj.TryGetSnapshot(0, msCrossReady, LSnap));
+    Ok('status: out-of-range id -> msQueued, snapshot fails',
+      (GProj.ModuleStatus(9999) = msQueued) and
+      (not GProj.TryGetSnapshot(9999, msIntfReady, LSnap)) and
+      (LSnap = nil));
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

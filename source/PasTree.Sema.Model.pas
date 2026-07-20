@@ -22,6 +22,14 @@ const
   NIL_INST = -1;
 
 type
+  // A module's progress through the project's analysis pipeline. The async
+  // parser advances a module msQueued -> msIntfReady (interface parsed +
+  // Phase 1) -> msFullReady (full parse + Phase 1) -> msCrossReady (cross
+  // passes done); a consumer waits for / gates on the minimum status it
+  // needs (see TPasSemaProject.TryGetSnapshot). Ordered so `>=` works.
+  // The synchronous drivers take every model straight to msCrossReady.
+  TPasModuleStatus = (msQueued, msIntfReady, msFullReady, msCrossReady);
+
   TSemaSymbolKind = (skType, skVar, skConst, skField, skRoutine, skParam,
     skProperty, skEnumValue, skGenericParam, skLabel, skUnitRef, skBuiltinType);
 

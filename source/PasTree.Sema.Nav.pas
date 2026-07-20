@@ -58,6 +58,12 @@ type
   TPasNavigator = class
   private type
     TNavCache = class
+      // The model snapshot this cache was built from. If the project later
+      // publishes a different snapshot at the same model id (the async
+      // parser's intf->full upgrade, or an edit-reanalysis), CacheOf detects
+      // the mismatch and rebuilds — the cached raw/visible/node indices are
+      // only valid for the exact tree they came from.
+      SourceModel: TPasSemaModel;
       VisOfRaw: TArray<Integer>;                 // raw idx -> visible idx | -1
       NodeOfVis: TDictionary<Integer, Integer>;  // visible idx -> nkIdent node
       // Declaration<->implementation pairing (routine decl<->impl toggle),
@@ -198,10 +204,17 @@ var
   LM: TPasSemaModel;
   LIdx: Integer;
 begin
-  if FCaches.TryGetValue(AMid, Result) then
-    Exit;
-  Result := TNavCache.Create;
   LM := FProj.Model(AMid);
+  if FCaches.TryGetValue(AMid, Result) then
+  begin
+    if Result.SourceModel = LM then
+      Exit;
+    // Stale: the project swapped in a new snapshot at this id. Drop the cache
+    // (doOwnsValues frees it) and rebuild against the current model.
+    FCaches.Remove(AMid);
+  end;
+  Result := TNavCache.Create;
+  Result.SourceModel := LM;
   SetLength(Result.VisOfRaw, Length(LM.Tree.Source.Files[0].Tokens));
   for LIdx := 0 to High(Result.VisOfRaw) do
     Result.VisOfRaw[LIdx] := -1;
