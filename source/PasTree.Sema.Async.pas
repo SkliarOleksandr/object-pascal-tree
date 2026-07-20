@@ -71,6 +71,10 @@ type
     { Configuration forwarded to the project. Call BEFORE Start. }
     procedure SetNamespaces(const ANamespaces: TArray<string>);
     procedure AddUnitAlias(const AAlias, AReal: string);
+    { Forwarded to the inner project: True runs the analysis stages
+      sequentially (the inner parallelism still runs on THIS worker thread
+      either way). Set BEFORE Start. }
+    procedure SetSingleThreadedInner(AValue: Boolean);
     procedure Start;
     { Request cooperative cancellation; the worker stops at the next module/
       wave boundary. Does not block. }
@@ -139,6 +143,11 @@ end;
 procedure TPasAsyncSession.AddUnitAlias(const AAlias, AReal: string);
 begin
   FProject.AddUnitAlias(AAlias, AReal);
+end;
+
+procedure TPasAsyncSession.SetSingleThreadedInner(AValue: Boolean);
+begin
+  FProject.SingleThreaded := AValue;
 end;
 
 procedure TPasAsyncSession.RunBody;

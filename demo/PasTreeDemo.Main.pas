@@ -25,7 +25,7 @@ uses
   PasTree.Parser, PasTree.Project, PasTree.DProj,
   PasTree.Sema.Diagnostics, PasTree.Sema.Model, PasTree.Sema.Builtins,
   PasTree.Sema.Types, PasTree.Sema.Resolver, PasTree.Sema.Project,
-  PasTree.Sema.Nav,
+  PasTree.Sema.Nav, PasTree.Sema.Async,
   PasTree.Sema.Dump, VirtualTrees.BaseAncestorVCL, VirtualTrees.BaseTree, VirtualTrees.AncestorVCL, SynEditCodeFolding,
   PasTreeDemo.Highlighter, Vcl.Menus, System.Actions, Vcl.ActnList, SynEditMiscClasses, SynEditSearch;
   // System
@@ -46,6 +46,7 @@ type
     cbPlatform: TComboBox;
     cbHighlighter: TComboBox;
     cbThreading: TComboBox;
+    lblProgress: TLabel;    // background-analysis "phase done/total"
     splLeft: TSplitter;
     vstFiles: TVirtualStringTree;
     pgc: TPageControl;
@@ -93,6 +94,15 @@ type
     FNav: TPasNavigator;           // go-to-declaration over FSemaProject
     FLinkTab: TObject;             // TSourceTab currently showing a link
     FReparseTimer: TTimer;         // debounces re-analysis after edits
+    // Background (non-blocking) analysis. Opening a project and the edit-
+    // debounce reanalysis run on FAsyncSession's worker thread; FAsyncTimer
+    // polls its progress into lblProgress and, when it finishes, swaps the
+    // built project/navigator in for the current ones (double-buffered — see
+    // TPasAsyncSession). Run Parse stays synchronous and cancels this first.
+    FAsyncSession: TPasAsyncSession;
+    FAsyncTimer: TTimer;
+    FAsyncLoud: Boolean;           // true = report diagnostics + populate views
+    FAsyncStart: TStopwatch;       // wall-clock of the in-flight async build
     FLoadingFile: Boolean;         // suppresses OnChange during programmatic load
     // Guards every FNav/FSemaProject READ (ResolveAt, ActiveRoutineTarget)
     // against a real race: Analyze's own parallel passes (LoadFilesParallel/
@@ -140,9 +150,14 @@ type
     procedure OpenProject(const AProjectFile: string);
     procedure PopulateTree;
     function OpenFileTab(const APath: string): TSynEdit;
+    function BuildConfig(out APlatform: TPasPlatform;
+      out ASearchPaths, ADefines: TArray<string>): Boolean;
     function Analyze: Boolean;
     procedure RunParse;
-    procedure ReanalyzeForNav;
+    procedure ReportProjectResult(AElapsedMs: Int64);
+    procedure StartAsyncAnalyze(const APriorityFile: string; ALoud: Boolean);
+    procedure CancelAsync;
+    procedure AsyncTimerTick(Sender: TObject);
     procedure EditorChange(Sender: TObject);
     procedure ReparseTimerTick(Sender: TObject);
     procedure Log(const AText: string);
@@ -456,16 +471,21 @@ begin
   FReparseTimer.Enabled := False;
   FReparseTimer.Interval := 500;
   FReparseTimer.OnTimer := ReparseTimerTick;
+  // Polls the background analysis (~150ms) for progress + completion.
+  FAsyncTimer := TTimer.Create(Self);
+  FAsyncTimer.Enabled := False;
+  FAsyncTimer.Interval := 150;
+  FAsyncTimer.OnTimer := AsyncTimerTick;
   SetupControls;
   EnsureSampleProject;
-  // Open the bundled sample by default and analyze it immediately so the
-  // Semantics tab (and navigation) are populated on launch.
+  // Open the bundled sample by default; OpenProject kicks off the background
+  // analysis that populates the Semantics tab and navigation when it finishes.
   OpenProject(TPath.Combine(TPath.Combine(ExeDir, 'Sample'), 'Sample.dpr'));
-  RunParse;
 end;
 
 procedure TfrmMain.FormDestroy(Sender: TObject);
 begin
+  CancelAsync;                 // cancel + drain the worker before tearing down
   FreeAndNil(FNav);
   FreeAndNil(FSemaProject);
   FreeAndNil(FDProj);
@@ -639,6 +659,13 @@ begin
   Log('Opened project: ' + LFile +
     '  (platform ' + PlatformName(FPlatform) + ', ' +
     IntToStr(FFileList.Count) + ' files)');
+  // Kick off the background analysis (non-blocking); it populates the
+  // Semantics/AST views and navigation when it finishes. The open main file
+  // is front-loaded so it is ready first.
+  mmMessages.Clear;
+  Log('Analyzing ' + FProjectDir + ' (' + cbPlatform.Text +
+    ') in the background...');
+  StartAsyncAnalyze(FMainSource, {ALoud} True);
 end;
 
 procedure TfrmMain.PopulateTree;
@@ -851,6 +878,33 @@ begin
     ClearLink;
 end;
 
+// Platform + search paths + defines for the current project — shared by the
+// synchronous Analyze and the background StartAsyncAnalyze so they never drift.
+// False if no project is open.
+function TfrmMain.BuildConfig(out APlatform: TPasPlatform;
+  out ASearchPaths, ADefines: TArray<string>): Boolean;
+begin
+  Result := False;
+  if (FProjectDir = '') or not TDirectory.Exists(FProjectDir) then
+    Exit;
+  if cbPlatform.ItemIndex = 1 then
+    APlatform := pfWin64
+  else
+    APlatform := pfWin32;
+  if Assigned(FDProj) then
+  begin
+    ASearchPaths := [FProjectDir] + FDProj.SearchPaths;
+    ADefines := FDProj.Defines;
+  end
+  else
+  begin
+    ASearchPaths := [FProjectDir];
+    ADefines := [];
+  end;
+  ASearchPaths := ASearchPaths + ExtraSearchPaths;   // System.* -> RTL sources
+  Result := True;
+end;
+
 // Analysis core, shared by the loud RunParse and the quiet ReanalyzeForNav.
 // Recreates FSemaProject/FNav (the previous ones, and any hover link into
 // them, die here) and — crucially — feeds every OPEN editor's current text as
@@ -865,29 +919,13 @@ var
   LSW: TStopwatch;
 begin
   Result := False;
-  if (FProjectDir = '') or not TDirectory.Exists(FProjectDir) then
-    Exit;
-  if cbPlatform.ItemIndex = 1 then
-    LPlatform := pfWin64
-  else
-    LPlatform := pfWin32;
-
   // Overhead OUTSIDE the engine's own StageTimings, logged so a perf report
   // can't hide time in the wrapper (this is exactly how the invisible
   // ~1s-per-run ExtraSearchPaths cost was eventually found).
   FAnalyzeOverhead := '';
   LSW := TStopwatch.StartNew;
-  if Assigned(FDProj) then
-  begin
-    LSearchPaths := [FProjectDir] + FDProj.SearchPaths;
-    LDefines := FDProj.Defines;
-  end
-  else
-  begin
-    LSearchPaths := [FProjectDir];
-    LDefines := [];
-  end;
-  LSearchPaths := LSearchPaths + ExtraSearchPaths;   // System.* -> RTL sources
+  if not BuildConfig(LPlatform, LSearchPaths, LDefines) then
+    Exit;
   FAnalyzeOverhead := Format('paths=%d;', [LSW.ElapsedMilliseconds]);
 
   ClearLink;
@@ -933,10 +971,55 @@ begin
   Result := True;
 end;
 
-procedure TfrmMain.RunParse;
+// Reports the CURRENT FSemaProject's diagnostics + Done line and populates the
+// AST/Semantics views for the main unit. Shared by the synchronous RunParse
+// and the background async swap; AElapsedMs is the analysis wall-clock.
+procedure TfrmMain.ReportProjectResult(AElapsedMs: Int64);
 var
   LMain, LDiagTotal, LId, LDIdx: Integer;
   LModel: TPasSemaModel;
+begin
+  // Locate the main unit's model, and report diagnostics. The analyzed
+  // closure now includes the whole RTL/VCL/3rd-party reach (for nav), so
+  // only PROJECT files' diagnostics are LISTED (external ones would bury
+  // the user's own in noise); the total still counts everything.
+  LMain := -1;
+  LDiagTotal := 0;
+  for LId := 0 to FSemaProject.ModelCount - 1 do
+  begin
+    LModel := FSemaProject.Model(LId);
+    if SameText(FSemaProject.ModelFile(LId), FMainSource) then
+      LMain := LId;
+    for LDIdx := 0 to High(LModel.Diags) do
+    begin
+      Inc(LDiagTotal);
+      if FFileList.IndexOf(FSemaProject.ModelFile(LId)) >= 0 then
+        Log(Format('%s(%d,%d): %s',
+          [TPath.GetFileName(FSemaProject.ModelFile(LId)),
+           LModel.Diags[LDIdx].Line, LModel.Diags[LDIdx].Col,
+           LModel.Diags[LDIdx].Msg]));
+    end;
+  end;
+  Log(Format('Done: %d units, %d diagnostics in %d ms (%s).',
+    [FSemaProject.ModelCount, LDiagTotal, AElapsedMs, cbThreading.Text]));
+  if FSemaProject.StageTimings <> '' then
+    Log('  stages: ' + FSemaProject.StageTimings);
+  if FAnalyzeOverhead <> '' then
+    Log('  wrapper: ' + FAnalyzeOverhead);
+
+  if LMain >= 0 then
+  begin
+    LModel := FSemaProject.Model(LMain);
+    edJson.Text := PrettyJson(AstToJson(LModel.Tree));
+    edSema.Text := DumpSemaModel(LModel);
+    pgc.ActivePage := tsSema;
+  end
+  else
+    Log('Main source not found among analyzed units: ' + FMainSource);
+end;
+
+procedure TfrmMain.RunParse;
+var
   LSW: TStopwatch;
 begin
   if (FProjectDir = '') or not TDirectory.Exists(FProjectDir) then
@@ -944,6 +1027,7 @@ begin
     Log('No project open.');
     Exit;
   end;
+  CancelAsync;                      // a synchronous parse supersedes the background one
   FReparseTimer.Enabled := False;   // this analysis supersedes a pending one
   mmMessages.Clear;
   Log('Analyzing ' + FProjectDir + ' (' + cbPlatform.Text + ')...');
@@ -956,69 +1040,116 @@ begin
       Exit;
     end;
     LSW.Stop;
-
-    // Locate the main unit's model, and report diagnostics. The analyzed
-    // closure now includes the whole RTL/VCL/3rd-party reach (for nav), so
-    // only PROJECT files' diagnostics are LISTED (external ones would bury
-    // the user's own in noise); the total still counts everything.
-    LMain := -1;
-    LDiagTotal := 0;
-    for LId := 0 to FSemaProject.ModelCount - 1 do
-    begin
-      LModel := FSemaProject.Model(LId);
-      if SameText(FSemaProject.ModelFile(LId), FMainSource) then
-        LMain := LId;
-      for LDIdx := 0 to High(LModel.Diags) do
-      begin
-        Inc(LDiagTotal);
-        if FFileList.IndexOf(FSemaProject.ModelFile(LId)) >= 0 then
-          Log(Format('%s(%d,%d): %s',
-            [TPath.GetFileName(FSemaProject.ModelFile(LId)),
-             LModel.Diags[LDIdx].Line, LModel.Diags[LDIdx].Col,
-             LModel.Diags[LDIdx].Msg]));
-      end;
-    end;
-    Log(Format('Done: %d units, %d diagnostics in %d ms (%s).',
-      [FSemaProject.ModelCount, LDiagTotal, LSW.ElapsedMilliseconds,
-       cbThreading.Text]));
-    if FSemaProject.StageTimings <> '' then
-      Log('  stages: ' + FSemaProject.StageTimings);
-    if FAnalyzeOverhead <> '' then
-      Log('  wrapper: ' + FAnalyzeOverhead);
-
-    if LMain >= 0 then
-    begin
-      LModel := FSemaProject.Model(LMain);
-      edJson.Text := PrettyJson(AstToJson(LModel.Tree));
-      edSema.Text := DumpSemaModel(LModel);
-      pgc.ActivePage := tsSema;
-    end
-    else
-      Log('Main source not found among analyzed units: ' + FMainSource);
+    ReportProjectResult(LSW.ElapsedMilliseconds);
   finally
     Screen.Cursor := crDefault;
   end;
 end;
 
-// Quiet re-analysis after an edit: rebuilds the model + navigator so
-// ctrl+hover/click keep matching the edited buffer, WITHOUT touching the tabs,
-// the AST/Semantics views or the message log (that would fight the typist).
-procedure TfrmMain.ReanalyzeForNav;
+// Starts (or restarts) the background analysis. The current FSemaProject/FNav
+// stay live and usable until the new build finishes and AsyncTimerTick swaps
+// them in — so opening a project or re-analyzing after an edit never blocks
+// the UI. APriorityFile (the active editor's file) is front-loaded so it is
+// ready first. ALoud = report diagnostics + populate the AST/Semantics views
+// when done (open project); quiet = just refresh navigation (edit debounce).
+procedure TfrmMain.StartAsyncAnalyze(const APriorityFile: string;
+  ALoud: Boolean);
+var
+  LPlatform: TPasPlatform;
+  LSearchPaths, LDefines, LRoots, LPriority: TArray<string>;
+  LIdx: Integer;
+  LTab: TSourceTab;
 begin
-  if (FProjectDir = '') or not TDirectory.Exists(FProjectDir) then
+  CancelAsync;
+  if (FMainSource = '') or not BuildConfig(LPlatform, LSearchPaths, LDefines)
+  then
     Exit;
-  Screen.Cursor := crHourGlass;
-  try
-    Analyze;
-  finally
-    Screen.Cursor := crDefault;
+  LRoots := [FMainSource];
+  if (APriorityFile <> '') and TFile.Exists(APriorityFile) then
+    LPriority := [APriorityFile]
+  else
+    LPriority := [];
+
+  FAsyncSession := TPasAsyncSession.Create(LPlatform, LSearchPaths, LDefines,
+    LRoots, LPriority);
+  FAsyncSession.SetSingleThreadedInner(cbThreading.ItemIndex = 0);
+  if Assigned(FDProj) then
+  begin
+    FAsyncSession.SetNamespaces(FDProj.Namespaces);
+    for var LAlias in FDProj.UnitAliases do
+      FAsyncSession.AddUnitAlias(LAlias.Alias, LAlias.UnitName);
   end;
+  // Snapshot every open editor's current text (main thread) so the background
+  // analysis matches what's on screen, unsaved edits included.
+  for LIdx := 0 to FOpenFiles.Count - 1 do
+  begin
+    LTab := TSourceTab(FOpenFiles.Objects[LIdx]);
+    FAsyncSession.SetBuffer(LTab.FilePath, LTab.Editor.Text);
+  end;
+
+  FAsyncLoud := ALoud;
+  FAnalyzeOverhead := '';      // async build reports no wrapper/stage timings
+  FAsyncStart := TStopwatch.StartNew;
+  FAsyncSession.Start;
+  lblProgress.Caption := 'analyzing...';
+  lblProgress.Visible := True;
+  FAsyncTimer.Enabled := True;
+end;
+
+// Cancels and drains the in-flight background analysis (if any). Called before
+// a new analysis supersedes it, on Run Parse, and on shutdown.
+procedure TfrmMain.CancelAsync;
+begin
+  FAsyncTimer.Enabled := False;
+  if Assigned(FAsyncSession) then
+  begin
+    FAsyncSession.Cancel;
+    FreeAndNil(FAsyncSession);   // Destroy waits for the worker to drain
+  end;
+end;
+
+procedure TfrmMain.AsyncTimerTick(Sender: TObject);
+var
+  LProgress: TPasStagedProgress;
+begin
+  if not Assigned(FAsyncSession) then
+  begin
+    FAsyncTimer.Enabled := False;
+    Exit;
+  end;
+  LProgress := FAsyncSession.Progress;
+  lblProgress.Caption := Format('%s %d/%d',
+    [LProgress.Phase, LProgress.FullDone, LProgress.Total]);
+  if not FAsyncSession.IsDone then
+    Exit;
+
+  // Build finished — swap in the new project/navigator on this (UI) thread.
+  FAsyncTimer.Enabled := False;
+  FAsyncStart.Stop;
+  ClearLink;
+  FreeAndNil(FNav);
+  FreeAndNil(FSemaProject);
+  FSemaProject := FAsyncSession.TakeProject;
+  FreeAndNil(FAsyncSession);
+  if Assigned(FSemaProject) then
+    FNav := TPasNavigator.Create(FSemaProject);
+  lblProgress.Visible := False;
+
+  if FAsyncLoud and Assigned(FSemaProject) then
+    ReportProjectResult(FAsyncStart.ElapsedMilliseconds);
 end;
 
 procedure TfrmMain.ReparseTimerTick(Sender: TObject);
+var
+  LActive: string;
 begin
   FReparseTimer.Enabled := False;
-  ReanalyzeForNav;
+  // Re-analyze in the background (non-blocking, quiet) so navigation keeps
+  // matching the edited buffer; the edited (active) file is front-loaded.
+  LActive := '';
+  if Assigned(pgc.ActivePage) and (pgc.ActivePage is TSourceTab) then
+    LActive := TSourceTab(pgc.ActivePage).FilePath;
+  StartAsyncAnalyze(LActive, {ALoud} False);
 end;
 
 // Any real edit (re)arms the debounce timer; programmatic loads are excluded.

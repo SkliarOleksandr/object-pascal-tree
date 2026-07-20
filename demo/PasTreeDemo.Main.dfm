@@ -106,6 +106,13 @@ object frmMain: TfrmMain
       TabOrder = 5
       OnClick = btnParseRtlClick
     end
+    object lblProgress: TLabel
+      Left = 772
+      Top = 13
+      Width = 3
+      Height = 15
+      Visible = False
+    end
   end
   object vstFiles: TVirtualStringTree
     Left = 0
