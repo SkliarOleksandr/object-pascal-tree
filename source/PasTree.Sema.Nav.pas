@@ -84,6 +84,7 @@ type
     function TargetFromNode(AMid, ANode: Integer; const AName: string;
       out ATarget: TPasNavTarget): Boolean;
     function RoutineNameNodeOfSym(AMid, ASym: Integer): Integer;
+    function CalleeCallOf(LM: TPasSemaModel; ANode: Integer): Integer;
     function UsesQualifierInfo(AMid, ANode: Integer;
       out ALeaf, ASpanFirstVis, ASpanLastVis: Integer): Boolean;
     function ResolveUnitRefTarget(AMid, ASym: Integer;
@@ -498,17 +499,69 @@ begin
   Result := LOwner;
 end;
 
+// The nkCall whose CALLEE the identifier ANode names — either directly
+// (`Pick(...)`: the ident IS the call's first child) or as the member-name
+// segment of the callee designator (`GB.Add(...)`, `XO.Pick(...)`,
+// `TWrap<Integer>.Create(...)`: the ident is the LAST child of an nkMember
+// that is the call's first child). NIL_NODE when ANode is not a callee name
+// (including a qualifier/base segment — `GB` in `GB.Add(7)` is the object,
+// not the routine).
+function TPasNavigator.CalleeCallOf(LM: TPasSemaModel; ANode: Integer): Integer;
+var
+  LP, LPP: Integer;
+begin
+  Result := NIL_NODE;
+  LP := LM.Tree.Nodes[ANode].Parent;
+  if LP = NIL_NODE then
+    Exit;
+  if (LM.Tree.Nodes[LP].Kind = nkCall) and
+     (LM.Tree.Nodes[LP].FirstChild = ANode) then
+    Exit(LP);
+  if (LM.Tree.Nodes[LP].Kind = nkMember) and
+     (LM.Tree.Nodes[LP].FirstChild <> ANode) and
+     (LM.Tree.Nodes[ANode].NextSibling = NIL_NODE) then
+  begin
+    LPP := LM.Tree.Nodes[LP].Parent;
+    if (LPP <> NIL_NODE) and (LM.Tree.Nodes[LPP].Kind = nkCall) and
+       (LM.Tree.Nodes[LPP].FirstChild = LP) then
+      Exit(LPP);
+  end;
+end;
+
 function TPasNavigator.ResolveDecl(AMid, ANode: Integer;
   out ATarget: TPasNavTarget): Boolean;
 var
   LM: TPasSemaModel;
   LExt: TPasExtRef;
-  LTMid, LSym, LFbMid, LFbSym, LQUid, LMatchNode: Integer;
+  LTMid, LSym, LFbMid, LFbSym, LQUid, LMatchNode, LCall: Integer;
 begin
   Result := False;
   if (AMid < 0) or (ANode = NIL_NODE) then
     Exit;
   LM := FProj.Model(AMid);
+
+  // OVERLOAD-PRECISE: the clicked identifier names the callee of a call whose
+  // argument-matched overload was recorded — CallTargetX (CrossType's merged
+  // cross-model selection) first, the intra-unit CallTarget as fallback. Jump
+  // to THAT overload's declaration instead of the name-resolution head: the
+  // real IDE navigates `Pick(2.5)` to the Double overload, not to whichever
+  // overload happens to head the chain. Falls through to the ordinary paths
+  // below when the call has no recorded target (nothing fit / a cast / not a
+  // callee at all).
+  LCall := CalleeCallOf(LM, ANode);
+  if LCall <> NIL_NODE then
+  begin
+    if LM.CallTargetX.TryGetValue(LCall, LExt) and
+       (FProj.Model(LExt.UnitId).Symbols[LExt.Sym].DeclNode <> NIL_NODE) then
+      Exit(TargetFromNode(LExt.UnitId,
+        FProj.Model(LExt.UnitId).Symbols[LExt.Sym].DeclNode,
+        FProj.Model(LExt.UnitId).Symbols[LExt.Sym].Name, ATarget));
+    if LM.CallTarget.TryGetValue(LCall, LSym) and (LSym <> NIL_SYM) and
+       (LM.Symbols[LSym].DeclNode <> NIL_NODE) then
+      Exit(TargetFromNode(AMid, LM.Symbols[LSym].DeclNode,
+        LM.Symbols[LSym].Name, ATarget));
+  end;
+
   LTMid := AMid;
   LSym := LM.RefMap[ANode];
   if LSym = NIL_SYM then

@@ -274,6 +274,44 @@ const
     '{$ENDIF}'#10 +                                      // 29
     'end.'#10;                                          // 30
 
+  // Overload-PRECISE go-to-declaration: clicking the callee of a call must
+  // land on the ARGUMENT-MATCHED overload's declaration (CallTargetX /
+  // CallTarget), not on whichever overload heads the name-resolution chain.
+  UNIT_OVL =
+    'unit NavOvl;'#10 +                                          // 1
+    'interface'#10 +                                             // 2
+    'function Pick(A: Integer): Integer; overload;'#10 +         // 3  Pick col 10
+    'function Pick(A: Double): Double; overload;'#10 +           // 4  Pick col 10
+    'implementation'#10 +                                        // 5
+    'function Pick(A: Integer): Integer; begin Result := A; end;'#10 + // 6
+    'function Pick(A: Double): Double; begin Result := A; end;'#10 +   // 7
+    'end.'#10;                                                   // 8
+  UNIT_OVLUSE =
+    'unit NavOvlUse;'#10 +                                       // 1
+    'interface'#10 +                                             // 2
+    'uses NavOvl;'#10 +                                          // 3
+    'type'#10 +                                                  // 4
+    '  TCup = class'#10 +                                        // 5
+    '    function Fill(A: Integer): Integer; overload;'#10 +     // 6  Fill col 14
+    '    function Fill(A: string): string; overload;'#10 +       // 7  Fill col 14
+    '  end;'#10 +                                                // 8
+    'implementation'#10 +                                        // 9
+    'function TCup.Fill(A: Integer): Integer; begin Result := A; end;'#10 + // 10
+    'function TCup.Fill(A: string): string; begin Result := A; end;'#10 +  // 11
+    'procedure Use;'#10 +                                        // 12
+    'var'#10 +                                                   // 13
+    '  C: TCup;'#10 +                                            // 14  C col 3
+    '  LI: Integer;'#10 +                                        // 15
+    '  LD: Double;'#10 +                                         // 16
+    '  LS: string;'#10 +                                         // 17
+    'begin'#10 +                                                 // 18
+    '  LI := Pick(11);'#10 +                                     // 19  Pick col 9
+    '  LD := Pick(2.5);'#10 +                                    // 20  Pick col 9
+    '  LI := C.Fill(7);'#10 +                                    // 21  Fill col 11
+    '  LS := C.Fill(''x'');'#10 +                                // 22  Fill col 11
+    'end;'#10 +                                                  // 23
+    'end.'#10;                                                   // 24
+
   // AnalyzeProject fixtures: a main program whose closure pulls NavB (and
   // through it everything above) TRANSITIVELY; NavE is reachable only via a
   // unit-scope NAMESPACE (uses NavE + namespaces=['Wide'] -> Wide.NavE.pas);
@@ -424,6 +462,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavI.pas'), UNIT_I);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavJ.pas'), UNIT_J);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavK.pas'), UNIT_K);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavOvl.pas'), UNIT_OVL);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavOvlUse.pas'), UNIT_OVLUSE);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -663,6 +703,26 @@ begin
       // its tokens), so reusing the same routine NAME in both branches must
       // not trip a duplicate/false E2003 either.
       Ok('NavK: no false E2003', DiagCount(GProj.Model(GMidB), 'E2003') = 0);
+
+      // ---- Overload-PRECISE go-to-declaration (CallTargetX/CallTarget) ----
+      GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavOvlUse.pas'));
+      Ok('NavOvlUse model found', GMidB >= 0);
+      // Cross-unit global overloads: the ARGUMENT type picks the overload —
+      // Pick(11) lands on the Integer declaration, Pick(2.5) on the Double
+      // one (the old behavior landed both on the chain head, line 3).
+      CheckNav('ovl-precise: Pick(11) -> Integer overload', 19, 9, 'Pick',
+        'NavOvl.pas', 3, 10);
+      CheckNav('ovl-precise: Pick(2.5) -> Double overload', 20, 9, 'Pick',
+        'NavOvl.pas', 4, 10);
+      // Method overloads: same-unit class, selected by the argument.
+      CheckNav('ovl-precise: C.Fill(7) -> Integer method', 21, 11, 'Fill',
+        'NavOvlUse.pas', 6, 14);
+      CheckNav('ovl-precise: C.Fill(''x'') -> string method', 22, 11, 'Fill',
+        'NavOvlUse.pas', 7, 14);
+      // Negative: the callee's BASE (`C` in C.Fill) is not a callee name —
+      // still navigates to the variable's own declaration.
+      CheckNav('ovl-precise: base C keeps ordinary nav', 21, 9, 'C',
+        'NavOvlUse.pas', 14, 3);
     finally
       GNav.Free;
     end;
