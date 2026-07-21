@@ -152,6 +152,11 @@ type
     function FindMemberX(const ABase: TSemaXType; const ANameLower: string;
       out AMemMid, AMemSym: Integer; out ACtx: Integer): Boolean;
     function IsConstructorSym(AMid, ASym: Integer): Boolean;
+    // Cross-model overload selection (CrossType's call typing):
+    function XCatOf(const AX: TSemaXType): TSemaTypeCat;
+    function XSameType(const A, B: TSemaXType): Boolean;
+    function XAssignableX(const ADst, ASrc: TSemaXType): Boolean;
+    function XParamSyms(AMid, ASym: Integer): TArray<Integer>;
     procedure BindTypesX(AId: Integer);
     procedure CrossType(AId: Integer);
   public
@@ -1382,6 +1387,71 @@ begin
     Result := SameText(LM.Tree.Source.VisibleText(LTok), 'constructor');
 end;
 
+// Type category of a cross-model type — the symbol's own TypeCat, computed by
+// each model's Phase-1 typer categorization. tcUnknown for an invalid X.
+function TPasSemaProject.XCatOf(const AX: TSemaXType): TSemaTypeCat;
+begin
+  if not XValid(AX) then
+    Exit(tcUnknown);
+  Result := FModels[AX.UnitId].Symbols[AX.Sym].TypeCat;
+end;
+
+// Same type across models. Builtin symbol indexes are IDENTICAL in every
+// model (SeedSystemScope runs first, deterministically), so two references to
+// the builtin Integer compare equal even when they live in different models —
+// without this, an exact arg/param match across units would never register.
+function TPasSemaProject.XSameType(const A, B: TSemaXType): Boolean;
+begin
+  Result := XValid(A) and XValid(B) and (A.Sym = B.Sym) and
+    (A.Inst = B.Inst) and ((A.UnitId = B.UnitId) or
+    ((sfBuiltin in FModels[A.UnitId].Symbols[A.Sym].Flags) and
+     (sfBuiltin in FModels[B.UnitId].Symbols[B.Sym].Flags)));
+end;
+
+// Cross-model mirror of TPasSemaTyper.Assignable: conservative, rejects only
+// definite scalar mismatches; anything unknown/non-scalar is allowed.
+function TPasSemaProject.XAssignableX(const ADst, ASrc: TSemaXType): Boolean;
+var
+  D, S: TSemaTypeCat;
+begin
+  D := XCatOf(ADst);
+  S := XCatOf(ASrc);
+  if (D = tcUnknown) or (S = tcUnknown) then
+    Exit(True);
+  if S = tcNil then
+    Exit(D in [tcPointer, tcClass, tcInterface, tcProc, tcClassOf, tcVariant,
+      tcArray]);
+  case D of
+    tcString:  Result := S in [tcString, tcChar];
+    tcInteger: Result := S = tcInteger;
+    tcFloat:   Result := S in [tcFloat, tcInteger];
+    tcBoolean: Result := S = tcBoolean;
+    tcChar:    Result := S = tcChar;
+  else
+    Result := True;
+  end;
+  if not Result and
+     not (S in [tcInteger, tcFloat, tcBoolean, tcChar, tcString]) then
+    Result := True;
+end;
+
+// A routine's parameter symbols in declaration order (its param scope —
+// reused as MemberScope, see the resolver). nil when there is no param info
+// (builtins).
+function TPasSemaProject.XParamSyms(AMid, ASym: Integer): TArray<Integer>;
+var
+  LM: TPasSemaModel;
+  LS: Integer;
+begin
+  Result := nil;
+  LM := FModels[AMid];
+  if LM.Symbols[ASym].MemberScope = NIL_SCOPE then
+    Exit;
+  for LS in LM.Scopes[LM.Symbols[ASym].MemberScope].Symbols do
+    if LM.Symbols[LS].Kind = skParam then
+      Result := Result + [LS];
+end;
+
 // Declared-type pass: for every symbol whose type expression did not bind to
 // a plain local type, resolve it cross-model / as an instantiation.
 procedure TPasSemaProject.BindTypesX(AId: Integer);
@@ -1410,6 +1480,15 @@ procedure TPasSemaProject.CrossType(AId: Integer);
 var
   LM: TPasSemaModel;
   LX: TArray<TSemaXType>;
+  // Instantiation frame a member designator was found in (NIL_INST elsewhere)
+  // — kept per node so the CALL over that member can substitute the chosen
+  // overload's parameter/result types in the same frame (TWrap<Integer>.Get).
+  LCtxOf: TArray<Integer>;
+  // Same-named routine heads from every resolved used unit, memoized per
+  // callee name for this unit's pass (a big unit calls the same few names
+  // thousands of times; one interface Resolve per used unit per NAME, not
+  // per call).
+  LUsesHeads: TDictionary<string, TArray<TPasExtRef>>;
 
   // A node's best-known type: this pass's result, else the intra-unit one.
   function GetX(N: Integer): TSemaXType;
@@ -1456,12 +1535,42 @@ var
     end;
   end;
 
-  // True when at least one overload of the routine admits the call's
-  // argument count (or a candidate is variadic / has no param info).
-  function CallArityFits(ACall, AMid, AHead: Integer): Boolean;
+  // Same-named routine heads from every resolved used unit (memoized).
+  function UsesHeads(const ANameLower: string): TArray<TPasExtRef>;
   var
-    LArg, LArgs, LCand, LReq, LTot: Integer;
+    LIdx, LUid, LS: Integer;
+    LRef: TPasExtRef;
+  begin
+    if LUsesHeads.TryGetValue(ANameLower, Result) then
+      Exit;
+    Result := nil;
+    for LIdx := 0 to High(LM.UsesList) do
+    begin
+      LUid := LM.UsesList[LIdx].UnitId;
+      if LUid < 0 then
+        Continue;
+      LS := FModels[LUid].Resolve(FModels[LUid].InterfaceScope, ANameLower);
+      if (LS <> NIL_SYM) and (FModels[LUid].Symbols[LS].Kind = skRoutine) then
+      begin
+        LRef.UnitId := LUid;
+        LRef.Sym := LS;
+        Result := Result + [LRef];
+      end;
+    end;
+    LUsesHeads.Add(ANameLower, Result);
+  end;
+
+  // Conservative per-candidate match score, mirroring the intra-unit
+  // TPasSemaTyper.ScoreArgs: exact type = 2, assignable = 1 per argument,
+  // parameter types substituted in ACtx (the instantiation frame the callee
+  // member was found in). -1 = the candidate's arity does not admit the call.
+  // A candidate with NO param info (builtin) fits neutrally at 0.
+  function ScoreCandidate(ACall, AMid, ACand, ACtx: Integer): Integer;
+  var
+    LParams: TArray<Integer>;
+    LReq, LTot, LIdx, LArg, LArgs: Integer;
     LVariadic: Boolean;
+    LArgX, LParX: TSemaXType;
   begin
     LArgs := 0;
     LArg := LM.Tree.Nodes[LM.Tree.Nodes[ACall].FirstChild].NextSibling;
@@ -1470,18 +1579,95 @@ var
       Inc(LArgs);
       LArg := LM.Tree.Nodes[LArg].NextSibling;
     end;
-    LCand := AHead;
-    while LCand <> NIL_SYM do
+    if not RoutineArity(AMid, ACand, LReq, LTot, LVariadic) then
+      Exit(0);
+    if not (LVariadic or ((LArgs >= LReq) and (LArgs <= LTot))) then
+      Exit(-1);
+    Result := 0;
+    LParams := XParamSyms(AMid, ACand);
+    LArg := LM.Tree.Nodes[LM.Tree.Nodes[ACall].FirstChild].NextSibling;
+    LIdx := 0;
+    while (LArg <> NIL_NODE) and (LIdx <= High(LParams)) do
     begin
-      if FModels[AMid].Symbols[LCand].Kind <> skRoutine then
-        Break;
-      if not RoutineArity(AMid, LCand, LReq, LTot, LVariadic) then
-        Exit(True);   // no param info (builtin) — cannot judge, allow
-      if LVariadic or ((LArgs >= LReq) and (LArgs <= LTot)) then
-        Exit(True);
-      LCand := FModels[AMid].Symbols[LCand].NextOverload;
+      LArgX := GetX(LArg);
+      LParX := SubstX(DeclTypeX(AMid, LParams[LIdx]), ACtx, 0);
+      if XValid(LArgX) and XValid(LParX) then
+        if XSameType(LParX, LArgX) then
+          Inc(Result, 2)
+        else if XAssignableX(LParX, LArgX) then
+          Inc(Result, 1);
+      LArg := LM.Tree.Nodes[LArg].NextSibling;
+      Inc(LIdx);
     end;
-    Result := False;
+  end;
+
+  // Cross-model overload selection for a call: walks the resolved head's
+  // overload chain and — for a bare-ident callee naming a UNIT-LEVEL routine —
+  // merges same-named heads from every resolved used unit (real dcc merges
+  // the visible overload sets; CheckCalls already does the same for arity).
+  // Picks the arity-fitting candidate with the best argument score (first
+  // wins ties, matching the intra-unit SelectOverload). False = nothing fits.
+  function SelectCallTarget(ACall, ACalleeNode, AHeadMid, AHeadSym,
+    ACtx: Integer; out ABestMid, ABestSym: Integer): Boolean;
+  var
+    LSeen: TArray<TPasExtRef>;
+    LBestScore: Integer;
+
+    procedure ConsiderChain(AMid, AHead: Integer);
+    var
+      LCand, LScore, LIdx: Integer;
+      LDup: Boolean;
+      LRef: TPasExtRef;
+    begin
+      LCand := AHead;
+      while LCand <> NIL_SYM do
+      begin
+        if FModels[AMid].Symbols[LCand].Kind <> skRoutine then
+          Break;
+        LDup := False;
+        for LIdx := 0 to High(LSeen) do
+          if (LSeen[LIdx].UnitId = AMid) and (LSeen[LIdx].Sym = LCand) then
+          begin
+            LDup := True;
+            Break;
+          end;
+        if not LDup then
+        begin
+          LRef.UnitId := AMid;
+          LRef.Sym := LCand;
+          LSeen := LSeen + [LRef];
+          LScore := ScoreCandidate(ACall, AMid, LCand, ACtx);
+          if (LScore >= 0) and (LScore > LBestScore) then
+          begin
+            LBestScore := LScore;
+            ABestMid := AMid;
+            ABestSym := LCand;
+          end;
+        end;
+        LCand := FModels[AMid].Symbols[LCand].NextOverload;
+      end;
+    end;
+
+  var
+    LHeads: TArray<TPasExtRef>;
+    LIdx: Integer;
+  begin
+    LSeen := nil;
+    LBestScore := -1;
+    ABestMid := -1;
+    ABestSym := NIL_SYM;
+    ConsiderChain(AHeadMid, AHeadSym);
+    // Merge used units' candidates only for a bare unit-level routine name —
+    // methods and nested routines have a closed candidate set (their scope).
+    if (LM.Tree.Nodes[ACalleeNode].Kind = nkIdent) and
+       (FModels[AHeadMid].Scopes[FModels[AHeadMid].Symbols[AHeadSym].Scope].
+        Kind in [sckUnit, sckImplementation]) then
+    begin
+      LHeads := UsesHeads(LowerCase(LM.Tree.NodeText(ACalleeNode)));
+      for LIdx := 0 to High(LHeads) do
+        ConsiderChain(LHeads[LIdx].UnitId, LHeads[LIdx].Sym);
+    end;
+    Result := ABestSym <> NIL_SYM;
   end;
 
   // The type a member access yields: the member's declared type (routines:
@@ -1510,6 +1696,7 @@ var
   procedure Walk(N: Integer);
   var
     LChild, LBase, LName, LSym, LMemMid, LMemSym, LCtx: Integer;
+    LBestMid, LBestSym: Integer;
     LExt: TPasExtRef;
     LBX: TSemaXType;
   begin
@@ -1559,9 +1746,15 @@ var
           LBX := GetX(LBase);
           LSym := LM.RefMap[LName];
           if LSym <> NIL_SYM then
-            LX[N] := MemberTypeX(AId, LSym, LBX.Inst, LBX)
+          begin
+            LX[N] := MemberTypeX(AId, LSym, LBX.Inst, LBX);
+            LCtxOf[N] := LBX.Inst;
+          end
           else if LM.ExtRefMap.TryGetValue(LName, LExt) then
-            LX[N] := MemberTypeX(LExt.UnitId, LExt.Sym, LBX.Inst, LBX)
+          begin
+            LX[N] := MemberTypeX(LExt.UnitId, LExt.Sym, LBX.Inst, LBX);
+            LCtxOf[N] := LBX.Inst;
+          end
           else if XValid(LBX) and FindMemberX(LBX,
             LowerCase(LM.Tree.NodeText(LName)), LMemMid, LMemSym, LCtx) then
           begin
@@ -1575,6 +1768,7 @@ var
               LM.ExtRefMap.AddOrSetValue(LName, LExt);
             end;
             LX[N] := MemberTypeX(LMemMid, LMemSym, LCtx, LBX);
+            LCtxOf[N] := LCtx;
           end;
         end;
 
@@ -1584,16 +1778,33 @@ var
           if (LBase <> NIL_NODE) and TargetSym(LBase, LMemMid, LMemSym) then
             case FModels[LMemMid].Symbols[LMemSym].Kind of
               skRoutine:
-                if IsConstructorSym(LMemMid, LMemSym) and
-                   (LM.Tree.Nodes[LBase].Kind = nkMember) then
-                  // T.Create / TList<Integer>.Create -> the class type itself
-                  LX[N] := GetX(LM.Tree.Nodes[LBase].FirstChild)
-                else if CallArityFits(N, LMemMid, LMemSym) then
-                  // The callee's X is already the substituted result type.
-                  LX[N] := GetX(LBase);
-                  // else: no local overload admits the arg count — the real
+                begin
+                  LCtx := LCtxOf[LBase];
+                  if SelectCallTarget(N, LBase, LMemMid, LMemSym, LCtx,
+                    LBestMid, LBestSym) then
+                  begin
+                    // Record the argument-matched overload — the future
+                    // overload-precise navigation jump reads this.
+                    LExt.UnitId := LBestMid;
+                    LExt.Sym := LBestSym;
+                    LM.CallTargetX.AddOrSetValue(N, LExt);
+                    if IsConstructorSym(LBestMid, LBestSym) and
+                       (LM.Tree.Nodes[LBase].Kind = nkMember) then
+                      // T.Create / TList<Integer>.Create -> the class itself
+                      LX[N] := GetX(LM.Tree.Nodes[LBase].FirstChild)
+                    else
+                      LX[N] := SubstX(DeclTypeX(LBestMid, LBestSym), LCtx, 0);
+                  end
+                  else if IsConstructorSym(LMemMid, LMemSym) and
+                     (LM.Tree.Nodes[LBase].Kind = nkMember) then
+                    // No modeled ctor overload admits the args (inherited
+                    // constructors across unseen hierarchy links) — keep the
+                    // long-standing behavior: a ctor call is the class type.
+                    LX[N] := GetX(LM.Tree.Nodes[LBase].FirstChild);
+                  // else: no candidate admits the arg count — the real
                   // callee is likely an unseen same-named overload; leave
                   // the call untyped rather than claim the wrong result.
+                end;
               skType, skBuiltinType:
                 LX[N] := GetX(LBase);   // a cast (incl. instantiated generic)
             end;
@@ -1614,10 +1825,19 @@ var
 begin
   LM := FModels[AId];
   SetLength(LX, Length(LM.Tree.Nodes));
+  SetLength(LCtxOf, Length(LM.Tree.Nodes));
   for LNode := 0 to High(LX) do
+  begin
     LX[LNode] := XNil;
-  if Length(LX) > 0 then
-    Walk(0);
+    LCtxOf[LNode] := NIL_INST;
+  end;
+  LUsesHeads := TDictionary<string, TArray<TPasExtRef>>.Create;
+  try
+    if Length(LX) > 0 then
+      Walk(0);
+  finally
+    LUsesHeads.Free;
+  end;
   // Persist only what ADDS to the intra-unit result: a type for a locally
   // untyped node, an instantiation, or a type living in another model.
   for LNode := 0 to High(LX) do

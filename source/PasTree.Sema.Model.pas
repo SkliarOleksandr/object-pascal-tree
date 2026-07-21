@@ -122,6 +122,12 @@ type
     ExprType: TArray<Integer>;      // node index -> type symbol; NIL_SYM = untyped
     ExtRefMap: TDictionary<Integer, TPasExtRef>; // node -> external symbol
     CallTarget: TDictionary<Integer, Integer>;   // nkCall node -> chosen routine
+    // Cross-model call target (Phase 3c): the overload CrossType selected by
+    // argument types among the merged local + used-units candidate set. Set
+    // only when the winner is meaningful beyond CallTarget (cross-unit callee
+    // or a real overload choice) — the future overload-precise navigation
+    // jump reads this.
+    CallTargetX: TDictionary<Integer, TPasExtRef>;
     // Phase 3c: cross-model typing (filled by the project driver; empty in a
     // standalone per-unit analysis). Entries exist only where they ADD to the
     // intra-unit result: a declared type / expression type that lives in
@@ -185,6 +191,7 @@ begin
   Scopes := TObjectList<TSemaScope>.Create(True);
   ExtRefMap := TDictionary<Integer, TPasExtRef>.Create;
   CallTarget := TDictionary<Integer, Integer>.Create;
+  CallTargetX := TDictionary<Integer, TPasExtRef>.Create;
   SymTypeX := TDictionary<Integer, TSemaXType>.Create;
   ExprTypeX := TDictionary<Integer, TSemaXType>.Create;
   InterfaceScope := NIL_SCOPE;
@@ -204,6 +211,7 @@ destructor TPasSemaModel.Destroy;
 begin
   ExprTypeX.Free;
   SymTypeX.Free;
+  CallTargetX.Free;
   CallTarget.Free;
   ExtRefMap.Free;
   Scopes.Free;

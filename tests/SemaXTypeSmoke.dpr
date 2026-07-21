@@ -96,6 +96,53 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // Cross-unit overload selection by ARGUMENT TYPES: three global overloads
+  // (mirrors System.Math.Min's shape) + method overloads + a generic method
+  // whose parameter needs instantiation-frame substitution before scoring.
+  UNIT_XO =
+    'unit XO;'#10'interface'#10 +
+    'function Pick(A: Integer): Integer; overload;'#10 +
+    'function Pick(A: Double): Double; overload;'#10 +
+    'function Pick(A: string): string; overload;'#10 +
+    'type'#10 +
+    '  TBox = class'#10 +
+    '    function Add(A: Integer): Integer; overload;'#10 +
+    '    function Add(A: string): string; overload;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function Pick(A: Integer): Integer; begin Result := A; end;'#10 +
+    'function Pick(A: Double): Double; begin Result := A; end;'#10 +
+    'function Pick(A: string): string; begin Result := A; end;'#10 +
+    'function TBox.Add(A: Integer): Integer; begin Result := A; end;'#10 +
+    'function TBox.Add(A: string): string; begin Result := A; end;'#10 +
+    'end.'#10;
+
+  UNIT_XV =
+    'unit XV;'#10'interface'#10'uses XO, XG;'#10 +
+    'var'#10 +
+    '  GB: TBox;'#10 +
+    '  GWD: TWrap<Double>;'#10 +
+    // A LOCAL same-named overload: merged with XO''s set, exact match wins.
+    'function Pick(A: Boolean): Boolean; overload;'#10 +
+    'implementation'#10 +
+    'function Pick(A: Boolean): Boolean; begin Result := A; end;'#10 +
+    'procedure UseIt;'#10 +
+    'var'#10 +
+    '  LI: Integer;'#10 +
+    '  LD: Double;'#10 +
+    '  LS: string;'#10 +
+    '  LB: Boolean;'#10 +
+    'begin'#10 +
+    '  LI := Pick(11);'#10 +
+    '  LD := Pick(2.5);'#10 +
+    '  LS := Pick(''s'');'#10 +
+    '  LB := Pick(True);'#10 +
+    '  LI := GB.Add(7);'#10 +
+    '  LS := GB.Add(''x'');'#10 +
+    '  LD := GWD.Get;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
 function ModelByName(const ANameLower: string): TPasSemaModel;
 begin
   Result := nil;
@@ -146,6 +193,21 @@ begin
     end;
 end;
 
+// The unit name of the overload CrossType selected for the call spelled
+// AExpr ('?' when no CallTargetX was recorded) — the future overload-precise
+// navigation jump reads the same map.
+function CallTargetUnitOf(AModel: TPasSemaModel; const AExpr: string): string;
+var
+  LExt: TPasExtRef;
+begin
+  Result := '?';
+  for var LNode := 0 to High(AModel.RefMap) do
+    if (AModel.Tree.Nodes[LNode].Kind = nkCall) and
+       (SpanText(AModel, LNode) = AExpr) and
+       AModel.CallTargetX.TryGetValue(LNode, LExt) then
+      Exit(GProj.Model(LExt.UnitId).UnitNameLower);
+end;
+
 procedure Ok(const AName: string; ACond: Boolean);
 begin
   if ACond then
@@ -170,7 +232,7 @@ end;
 
 var
   LDir: string;
-  LU: TPasSemaModel;
+  LU, LV: TPasSemaModel;
 begin
   GPassed := 0; GFailed := 0;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype');
@@ -180,6 +242,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XA.pas'), UNIT_XA);
   TFile.WriteAllText(TPath.Combine(LDir, 'XG.pas'), UNIT_XG);
   TFile.WriteAllText(TPath.Combine(LDir, 'XU.pas'), UNIT_XU);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XO.pas'), UNIT_XO);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XV.pas'), UNIT_XV);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -210,8 +274,37 @@ begin
       XTypeOf(LU, 'TWrap<Integer>.Create'), 'TWrap<Integer>');
 
     // Instances are deduped: TWrap<Integer> used twice, TWrap<string>,
-    // TWrap<TWrap<string>>, TPairWrap<string,Boolean> -> 4 distinct.
-    Ok('instance table deduped (4)', GProj.InstanceCount = 4);
+    // TWrap<TWrap<string>>, TPairWrap<string,Boolean>, and XV's TWrap<Double>
+    // -> 5 distinct.
+    Ok('instance table deduped (5)', GProj.InstanceCount = 5);
+
+    // ---- Cross-unit overload selection by ARGUMENT TYPES ----
+    LV := ModelByName('xv');
+    Ok('XV loaded', Assigned(LV));
+    Ok('XV: no diags (esp. no false E2010 from the local-overload shadow)',
+      Length(LV.Diags) = 0);
+    // Three same-arity imported overloads (the System.Math.Min shape): the
+    // argument's type picks the overload — and thus the call's result type.
+    Eq('Pick(11) -> Integer overload', XTypeOf(LV, 'Pick(11)'), 'Integer');
+    Eq('Pick(2.5) -> Double overload', XTypeOf(LV, 'Pick(2.5)'), 'Double');
+    Eq('Pick(''s'') -> string overload',
+      XTypeOf(LV, 'Pick(''s'')'), 'string');
+    // The LOCAL same-named overload joins the merged candidate set and wins
+    // on an exact match — dcc's merge semantics.
+    Eq('Pick(True) -> the local Boolean overload',
+      XTypeOf(LV, 'Pick(True)'), 'Boolean');
+    // Method overloads across units.
+    Eq('GB.Add(7) -> Integer method overload',
+      XTypeOf(LV, 'GB.Add(7)'), 'Integer');
+    Eq('GB.Add(''x'') -> string method overload',
+      XTypeOf(LV, 'GB.Add(''x'')'), 'string');
+    // Generic member result substituted in the instantiation frame (control).
+    Eq('GWD.Get -> Double', XTypeOf(LV, 'GWD.Get'), 'Double');
+    // The chosen overload is recorded (mid, sym) for navigation.
+    Eq('CallTargetX: Pick(2.5) selected XO''s overload',
+      CallTargetUnitOf(LV, 'Pick(2.5)'), 'xo');
+    Eq('CallTargetX: Pick(True) selected the local one',
+      CallTargetUnitOf(LV, 'Pick(True)'), 'xv');
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

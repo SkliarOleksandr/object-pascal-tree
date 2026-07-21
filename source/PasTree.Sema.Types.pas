@@ -488,6 +488,25 @@ begin
   if LAllHaveParams and not LAnyVariadic and not LAnyFit and (LMaxTot >= 0) then
     Exit(NIL_SYM);
 
+  // Same caution for argument TYPES: the unit imports something, and the
+  // arity-fitting local candidates showed NO type evidence at all for a call
+  // with typed arguments (best score 0 — not even one loosely-assignable
+  // arg). dcc merges same-named overloads from used units into one candidate
+  // set; we cannot in a pure per-unit pass — so don't claim the local result
+  // type (a local `Pick(Boolean)` would mistype `Pick(11)` that really calls
+  // an imported `Pick(Integer)`, poisoning E2010). The cross-unit pass
+  // (CrossType) retypes the call against the properly MERGED set.
+  if (Length(M.UsesList) > 0) and LAnyFit and (LBestScore = 0) then
+  begin
+    var LArg := Sib(Child(ACall));
+    while LArg <> NIL_NODE do
+    begin
+      if M.ExprType[LArg] <> NIL_SYM then
+        Exit(NIL_SYM);   // a typed arg matched nothing local — stay silent
+      LArg := Sib(LArg);
+    end;
+  end;
+
   Result := M.Symbols[LBest].TypeSym;   // result type of the chosen overload
 end;
 
