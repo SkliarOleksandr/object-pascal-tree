@@ -38,6 +38,27 @@ type
   end;
   PPasNodeData = ^TPasNodeData;
 
+  // One message-window row. mkStatus rows (Opened project, Done: N units...)
+  // are always shown; mkError rows are gated by chkShowErrors and carry a
+  // navigation target (FilePath/Line/Col — resolved from the diagnostic's OWN
+  // FileId at log time, which for an $I-included file is NOT the unit's main
+  // file, so it must be captured here rather than re-derived at double-click
+  // time). Kind will grow mkWarning/mkHint later (same navigation shape).
+  TPasMsgKind = (mkStatus, mkError);
+  TPasMsgRow = record
+    Kind: TPasMsgKind;
+    Text: string;
+    FilePath: string;   // '' for mkStatus
+    Line, Col: Integer; // 0 for mkStatus
+  end;
+  // vtMessages node payload: an index into FMsgVisible (itself indexing the
+  // master FMsgLog) — mirrors TPasNodeData/FFileList's own convention so a
+  // managed field (string) never has to live in VST node data.
+  TPasMsgNodeData = record
+    Index: Integer;
+  end;
+  PPasMsgNodeData = ^TPasMsgNodeData;
+
   TfrmMain = class(TForm)
     pnlTop: TPanel;
     btnOpen: TButton;
@@ -45,8 +66,7 @@ type
     btnParseRtl: TButton;
     cbPlatform: TComboBox;
     cbHighlighter: TComboBox;
-    cbThreading: TComboBox;
-    lblProgress: TLabel;    // background-analysis "phase done/total"
+    cbThreading: TComboBox;    // background-analysis "phase done/total"
     splLeft: TSplitter;
     vstFiles: TVirtualStringTree;
     pgc: TPageControl;
@@ -55,7 +75,6 @@ type
     tsSema: TTabSheet;
     edSema: TSynEdit;
     splBottom: TSplitter;
-    mmMessages: TMemo;
     SynJSONSyn1: TSynJSONSyn;
     ActionList1: TActionList;
     FindAction: TAction;
@@ -68,15 +87,28 @@ type
     SynEditSearch1: TSynEditSearch;
     pnlBottom: TPanel;
     Panel1: TPanel;
+    chkShowErrors: TCheckBox;
+    pnlSrc: TPanel;
+    Panel2: TPanel;
+    btnShowASTJson: TButton;
+    btnShowSemantics: TButton;
+    lblProgress: TLabel;
+    vtMessages: TVirtualStringTree;
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
     procedure btnOpenClick(Sender: TObject);
     procedure btnParseClick(Sender: TObject);
     procedure btnParseRtlClick(Sender: TObject);
+    procedure btnShowASTJsonClick(Sender: TObject);
+    procedure btnShowSemanticsClick(Sender: TObject);
+    procedure chkShowErrorsClick(Sender: TObject);
     procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     procedure vstFilesGetText(Sender: TBaseVirtualTree; Node: PVirtualNode;
       Column: TColumnIndex; TextType: TVSTTextType; var CellText: string);
     procedure vstFilesChange(Sender: TBaseVirtualTree; Node: PVirtualNode);
+    procedure vtMessagesGetText(Sender: TBaseVirtualTree; Node: PVirtualNode;
+      Column: TColumnIndex; TextType: TVSTTextType; var CellText: string);
+    procedure vtMessagesDblClick(Sender: TObject);
     procedure cbHighlighterChange(Sender: TObject);
     procedure FindActionUpdate(Sender: TObject);
     procedure FindActionExecute(Sender: TObject);
@@ -87,6 +119,12 @@ type
   private
     FFileList: TStringList;  // full paths shown in the tree
     FOpenFiles: TStringList; // path -> TTabSheet (Objects)
+    // Message window: FMsgLog is the full chronological history (status +
+    // error rows, never filtered); FMsgVisible indexes the subset currently
+    // shown in vtMessages (status rows always included, error rows gated by
+    // chkShowErrors — see RebuildVisibleMessages/LogRow).
+    FMsgLog: TList<TPasMsgRow>;
+    FMsgVisible: TList<Integer>;
     FDProj: TPasDProj;       // Assigned only when a .dproj was opened
     FProjectDir: string;
     FMainSource: string;
@@ -162,7 +200,15 @@ type
     procedure AsyncTimerTick(Sender: TObject);
     procedure EditorChange(Sender: TObject);
     procedure ReparseTimerTick(Sender: TObject);
+    procedure LogRow(AKind: TPasMsgKind; const AText, AFilePath: string;
+      ALine, ACol: Integer);
     procedure Log(const AText: string);
+    procedure LogError(const AFilePath: string; ALine, ACol: Integer;
+      const AText: string);
+    procedure ClearMessages;
+    procedure RebuildVisibleMessages;
+    procedure ScrollMessagesToEnd;
+    function FindMainModel(out AModel: TPasSemaModel): Boolean;
     // go-to-declaration (ctrl+hover link / ctrl+click)
     function ResolveAt(AEditor: TSynEdit; X, Y: Integer;
       out ARawFrom, ARawTo: Integer; out ATarget: TPasNavTarget): Boolean;
@@ -465,6 +511,8 @@ procedure TfrmMain.FormCreate(Sender: TObject);
 begin
   FFileList := TStringList.Create;
   FOpenFiles := TStringList.Create;
+  FMsgLog := TList<TPasMsgRow>.Create;
+  FMsgVisible := TList<Integer>.Create;
   FPlatform := pfWin32;
   FStudioRoot := StudioRoot;   // resolve once; RTL search paths reuse it
   // Debounces re-analysis while typing: an edit (re)starts the timer, and only
@@ -491,6 +539,8 @@ begin
   FreeAndNil(FNav);
   FreeAndNil(FSemaProject);
   FreeAndNil(FDProj);
+  FMsgVisible.Free;
+  FMsgLog.Free;
   FOpenFiles.Free;
   FFileList.Free;
 end;
@@ -518,8 +568,18 @@ begin
   edSema.Gutter.ShowLineNumbers := True;
   edSema.Font.Name := 'Consolas';
 
-  mmMessages.Font.Name := 'Consolas';
-  mmMessages.Font.Size := 9;
+  // AST JSON / Semantics are lazily populated (see btnShowASTJsonClick/
+  // btnShowSemanticsClick) and hidden until asked for — TabVisible keeps the
+  // page usable as pgc.ActivePage without a header in the strip.
+  tsJson.TabVisible := False;
+  tsSema.TabVisible := False;
+
+  vtMessages.NodeDataSize := SizeOf(TPasMsgNodeData);
+  vtMessages.Header.Options := vtMessages.Header.Options - [hoVisible];
+  vtMessages.TreeOptions.PaintOptions :=
+    vtMessages.TreeOptions.PaintOptions - [toShowTreeLines, toShowRoot];
+  vtMessages.Font.Name := 'Consolas';
+  vtMessages.Font.Size := 9;
 
   if cbPlatform.Items.Count = 0 then
   begin
@@ -587,9 +647,183 @@ begin
     TFile.WriteAllText(LDpr, SAMPLE_DPR, TEncoding.UTF8);
 end;
 
+// Appends one row to the master log and, if it should be visible right now
+// (status rows always; error rows only while chkShowErrors is checked),
+// adds a real VST node for it — mirrors PopulateTree's own AddChild+
+// GetNodeData convention (an Integer index in node data, never a managed
+// string) rather than a virtual RootNodeCount+OnInitNode scheme.
+procedure TfrmMain.LogRow(AKind: TPasMsgKind; const AText, AFilePath: string;
+  ALine, ACol: Integer);
+var
+  LRow: TPasMsgRow;
+  LNode: PVirtualNode;
+begin
+  LRow.Kind := AKind;
+  LRow.Text := AText;
+  LRow.FilePath := AFilePath;
+  LRow.Line := ALine;
+  LRow.Col := ACol;
+  FMsgLog.Add(LRow);
+  if (AKind = mkStatus) or chkShowErrors.Checked then
+  begin
+    FMsgVisible.Add(FMsgLog.Count - 1);
+    LNode := vtMessages.AddChild(nil);
+    PPasMsgNodeData(vtMessages.GetNodeData(LNode))^.Index :=
+      FMsgVisible.Count - 1;
+  end;
+end;
+
 procedure TfrmMain.Log(const AText: string);
 begin
-  mmMessages.Lines.Add(AText);
+  LogRow(mkStatus, AText, '', 0, 0);
+end;
+
+// A diagnostic row — the future hint/warning entry points will call LogRow
+// directly with mkWarning/mkHint once those severities exist.
+procedure TfrmMain.LogError(const AFilePath: string; ALine, ACol: Integer;
+  const AText: string);
+begin
+  LogRow(mkError, AText, AFilePath, ALine, ACol);
+end;
+
+procedure TfrmMain.ClearMessages;
+begin
+  FMsgLog.Clear;
+  FMsgVisible.Clear;
+  vtMessages.Clear;
+end;
+
+// Re-applies the chkShowErrors filter to the ENTIRE history — needed because
+// toggling the checkbox must retroactively show/hide every already-logged
+// error row, not just future ones ("даже если чекбокс нажат после завершения
+// парсинга").
+procedure TfrmMain.RebuildVisibleMessages;
+var
+  LIdx: Integer;
+  LNode: PVirtualNode;
+begin
+  FMsgVisible.Clear;
+  for LIdx := 0 to FMsgLog.Count - 1 do
+    if (FMsgLog[LIdx].Kind = mkStatus) or chkShowErrors.Checked then
+      FMsgVisible.Add(LIdx);
+  vtMessages.BeginUpdate;
+  try
+    vtMessages.Clear;
+    for LIdx := 0 to FMsgVisible.Count - 1 do
+    begin
+      LNode := vtMessages.AddChild(nil);
+      PPasMsgNodeData(vtMessages.GetNodeData(LNode))^.Index := LIdx;
+    end;
+  finally
+    vtMessages.EndUpdate;
+  end;
+  ScrollMessagesToEnd;
+end;
+
+procedure TfrmMain.ScrollMessagesToEnd;
+var
+  LNode: PVirtualNode;
+begin
+  LNode := vtMessages.GetLast;
+  if Assigned(LNode) then
+  begin
+    vtMessages.FocusedNode := LNode;
+    vtMessages.ScrollIntoView(LNode, False);
+  end;
+end;
+
+// The main unit's model in the CURRENT FSemaProject, if any has been
+// analyzed yet — shared by btnShowASTJsonClick/btnShowSemanticsClick (AST
+// JSON/Semantics content is computed lazily FROM THIS at click time, always
+// reflecting the latest analysis, including a quiet background reanalysis
+// the user never saw a "Done" line for).
+function TfrmMain.FindMainModel(out AModel: TPasSemaModel): Boolean;
+var
+  LId: Integer;
+begin
+  Result := False;
+  AModel := nil;
+  if not Assigned(FSemaProject) then
+    Exit;
+  for LId := 0 to FSemaProject.ModelCount - 1 do
+    if SameText(FSemaProject.ModelFile(LId), FMainSource) then
+    begin
+      AModel := FSemaProject.Model(LId);
+      Exit(True);
+    end;
+end;
+
+procedure TfrmMain.btnShowASTJsonClick(Sender: TObject);
+var
+  LModel: TPasSemaModel;
+begin
+  if not FindMainModel(LModel) then
+  begin
+    Log('No analysis available yet.');
+    Exit;
+  end;
+  edJson.Text := PrettyJson(AstToJson(LModel.Tree));
+  tsJson.TabVisible := True;
+  pgc.ActivePage := tsJson;
+end;
+
+procedure TfrmMain.btnShowSemanticsClick(Sender: TObject);
+var
+  LModel: TPasSemaModel;
+begin
+  if not FindMainModel(LModel) then
+  begin
+    Log('No analysis available yet.');
+    Exit;
+  end;
+  edSema.Text := DumpSemaModel(LModel);
+  tsSema.TabVisible := True;
+  pgc.ActivePage := tsSema;
+end;
+
+procedure TfrmMain.chkShowErrorsClick(Sender: TObject);
+begin
+  RebuildVisibleMessages;
+end;
+
+procedure TfrmMain.vtMessagesGetText(Sender: TBaseVirtualTree;
+  Node: PVirtualNode; Column: TColumnIndex; TextType: TVSTTextType;
+  var CellText: string);
+var
+  LData: PPasMsgNodeData;
+begin
+  LData := PPasMsgNodeData(Sender.GetNodeData(Node));
+  if (LData <> nil) and (LData.Index >= 0) and
+     (LData.Index < FMsgVisible.Count) then
+    CellText := FMsgLog[FMsgVisible[LData.Index]].Text
+  else
+    CellText := '';
+end;
+
+// Double-click an error row: open (or focus) its file and land the caret
+// exactly on the diagnostic's own position — a status row, or a row whose
+// file no longer exists (edited/deleted since analysis), does nothing.
+procedure TfrmMain.vtMessagesDblClick(Sender: TObject);
+var
+  LData: PPasMsgNodeData;
+  LRow: TPasMsgRow;
+  LEditor: TSynEdit;
+begin
+  if vtMessages.FocusedNode = nil then
+    Exit;
+  LData := PPasMsgNodeData(vtMessages.GetNodeData(vtMessages.FocusedNode));
+  if (LData = nil) or (LData.Index < 0) or (LData.Index >= FMsgVisible.Count)
+  then
+    Exit;
+  LRow := FMsgLog[FMsgVisible[LData.Index]];
+  if (LRow.Kind <> mkError) or (LRow.FilePath = '') or
+     not TFile.Exists(LRow.FilePath) then
+    Exit;
+  LEditor := OpenFileTab(LRow.FilePath);
+  LEditor.CaretXY := BufferCoord(LRow.Col, LRow.Line);
+  LEditor.EnsureCursorPosVisible;
+  if LEditor.CanFocus then
+    LEditor.SetFocus;
 end;
 
 procedure TfrmMain.OpenProject(const AProjectFile: string);
@@ -601,6 +835,11 @@ begin
     Log('Project not found: ' + AProjectFile);
     Exit;
   end;
+  ClearMessages;
+  // A NEW project starts with a clean slate: no carried-over AST/Semantics
+  // dump from whatever was open before.
+  tsJson.TabVisible := False;
+  tsSema.TabVisible := False;
   LFile := AProjectFile;
   LExt := LowerCase(TPath.GetExtension(LFile));
   // Opening the bare .dpr of a real project should behave exactly like
@@ -661,10 +900,9 @@ begin
   Log('Opened project: ' + LFile +
     '  (platform ' + PlatformName(FPlatform) + ', ' +
     IntToStr(FFileList.Count) + ' files)');
-  // Kick off the background analysis (non-blocking); it populates the
-  // Semantics/AST views and navigation when it finishes. The open main file
-  // is front-loaded so it is ready first.
-  mmMessages.Clear;
+  // Kick off the background analysis (non-blocking); it populates navigation
+  // and (if chkShowErrors is checked) the error list when it finishes. The
+  // open main file is front-loaded so it is ready first.
   Log('Analyzing ' + FProjectDir + ' (' + cbPlatform.Text +
     ') in the background...');
   StartAsyncAnalyze(FMainSource, {ALoud} True);
@@ -978,29 +1216,51 @@ end;
 // and the background async swap; AElapsedMs is the analysis wall-clock.
 procedure TfrmMain.ReportProjectResult(AElapsedMs: Int64);
 var
-  LMain, LDiagTotal, LId, LDIdx: Integer;
+  LMain, LDiagTotal, LId, LDIdx, LFileId: Integer;
   LModel: TPasSemaModel;
+  LDiagFile: string;
 begin
   // Locate the main unit's model, and report diagnostics. The analyzed
   // closure now includes the whole RTL/VCL/3rd-party reach (for nav), so
   // only PROJECT files' diagnostics are LISTED (external ones would bury
-  // the user's own in noise); the total still counts everything.
+  // the user's own in noise); the total still counts everything. AST JSON/
+  // Semantics are NOT computed here anymore — btnShowASTJsonClick/
+  // btnShowSemanticsClick compute them lazily, from whatever is current at
+  // the moment the user actually asks to see them.
   LMain := -1;
   LDiagTotal := 0;
-  for LId := 0 to FSemaProject.ModelCount - 1 do
-  begin
-    LModel := FSemaProject.Model(LId);
-    if SameText(FSemaProject.ModelFile(LId), FMainSource) then
-      LMain := LId;
-    for LDIdx := 0 to High(LModel.Diags) do
+  vtMessages.BeginUpdate;
+  try
+    for LId := 0 to FSemaProject.ModelCount - 1 do
     begin
-      Inc(LDiagTotal);
-      if FFileList.IndexOf(FSemaProject.ModelFile(LId)) >= 0 then
-        Log(Format('%s(%d,%d): %s',
-          [TPath.GetFileName(FSemaProject.ModelFile(LId)),
-           LModel.Diags[LDIdx].Line, LModel.Diags[LDIdx].Col,
-           LModel.Diags[LDIdx].Msg]));
+      LModel := FSemaProject.Model(LId);
+      if SameText(FSemaProject.ModelFile(LId), FMainSource) then
+        LMain := LId;
+      if FFileList.IndexOf(FSemaProject.ModelFile(LId)) < 0 then
+      begin
+        Inc(LDiagTotal, Length(LModel.Diags));
+        Continue;   // external/RTL unit — counted, not listed
+      end;
+      for LDIdx := 0 to High(LModel.Diags) do
+      begin
+        Inc(LDiagTotal);
+        // A diagnostic's FileId is the MODEL'S OWN file table — for one
+        // raised inside an $I-included file this is NOT the unit's main
+        // file, so resolve it properly rather than assuming ModelFile(LId).
+        LFileId := LModel.Diags[LDIdx].FileId;
+        if (LFileId >= 0) and
+           (LFileId <= High(LModel.Tree.Source.FileNames)) then
+          LDiagFile := LModel.Tree.Source.FileNames[LFileId]
+        else
+          LDiagFile := FSemaProject.ModelFile(LId);
+        LogError(LDiagFile, LModel.Diags[LDIdx].Line, LModel.Diags[LDIdx].Col,
+          Format('[Error] %s(%d,%d): %s',
+            [TPath.GetFileName(LDiagFile), LModel.Diags[LDIdx].Line,
+             LModel.Diags[LDIdx].Col, LModel.Diags[LDIdx].Msg]));
+      end;
     end;
+  finally
+    vtMessages.EndUpdate;
   end;
   Log(Format('Done: %d units, %d diagnostics in %d ms (%s).',
     [FSemaProject.ModelCount, LDiagTotal, AElapsedMs, cbThreading.Text]));
@@ -1008,16 +1268,9 @@ begin
     Log('  stages: ' + FSemaProject.StageTimings);
   if FAnalyzeOverhead <> '' then
     Log('  wrapper: ' + FAnalyzeOverhead);
-
-  if LMain >= 0 then
-  begin
-    LModel := FSemaProject.Model(LMain);
-    edJson.Text := PrettyJson(AstToJson(LModel.Tree));
-    edSema.Text := DumpSemaModel(LModel);
-    pgc.ActivePage := tsSema;
-  end
-  else
+  if LMain < 0 then
     Log('Main source not found among analyzed units: ' + FMainSource);
+  ScrollMessagesToEnd;
 end;
 
 procedure TfrmMain.RunParse;
@@ -1031,7 +1284,7 @@ begin
   end;
   CancelAsync;                      // a synchronous parse supersedes the background one
   FReparseTimer.Enabled := False;   // this analysis supersedes a pending one
-  mmMessages.Clear;
+  ClearMessages;
   Log('Analyzing ' + FProjectDir + ' (' + cbPlatform.Text + ')...');
   Screen.Cursor := crHourGlass;
   try

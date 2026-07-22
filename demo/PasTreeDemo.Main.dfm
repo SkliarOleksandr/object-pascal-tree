@@ -44,7 +44,7 @@ object frmMain: TfrmMain
     Align = alTop
     BevelOuter = bvNone
     TabOrder = 0
-    ExplicitTop = -6
+    ExplicitWidth = 1174
     object btnOpen: TButton
       Left = 8
       Top = 7
@@ -128,79 +128,8 @@ object frmMain: TfrmMain
     OnGetText = vstFilesGetText
     Touch.InteractiveGestures = [igPan, igPressAndTap]
     Touch.InteractiveGestureOptions = [igoPanSingleFingerHorizontal, igoPanSingleFingerVertical, igoPanInertia, igoPanGutter, igoParentPassthrough]
-    ExplicitHeight = 524
+    ExplicitTop = 40
     Columns = <>
-  end
-  object pgc: TPageControl
-    Left = 264
-    Top = 41
-    Width = 916
-    Height = 511
-    ActivePage = tsJson
-    Align = alClient
-    TabOrder = 2
-    ExplicitWidth = 910
-    ExplicitHeight = 507
-    object tsJson: TTabSheet
-      Caption = 'AST JSON'
-      object edJson: TSynEdit
-        Left = 0
-        Top = 0
-        Width = 908
-        Height = 481
-        Align = alClient
-        CaseSensitive = True
-        Font.Charset = DEFAULT_CHARSET
-        Font.Color = clWindowText
-        Font.Height = -13
-        Font.Name = 'Consolas'
-        Font.Style = []
-        Font.Quality = fqClearTypeNatural
-        TabOrder = 0
-        UseCodeFolding = True
-        Gutter.Font.Charset = DEFAULT_CHARSET
-        Gutter.Font.Color = clWindowText
-        Gutter.Font.Height = -11
-        Gutter.Font.Name = 'Consolas'
-        Gutter.Font.Style = []
-        Gutter.Font.Quality = fqClearTypeNatural
-        Gutter.Bands = <>
-        Highlighter = SynJSONSyn1
-        IndentGuides.Visible = False
-        IndentGuides.StructureHighlight = False
-        ScrollbarAnnotations = <>
-        ExplicitWidth = 902
-        ExplicitHeight = 477
-      end
-    end
-    object tsSema: TTabSheet
-      Caption = 'Semantics'
-      ImageIndex = 1
-      object edSema: TSynEdit
-        Left = 0
-        Top = 0
-        Width = 908
-        Height = 481
-        Align = alClient
-        Font.Charset = DEFAULT_CHARSET
-        Font.Color = clWindowText
-        Font.Height = -13
-        Font.Name = 'Consolas'
-        Font.Style = []
-        Font.Quality = fqClearTypeNatural
-        TabOrder = 0
-        UseCodeFolding = False
-        Gutter.Font.Charset = DEFAULT_CHARSET
-        Gutter.Font.Color = clWindowText
-        Gutter.Font.Height = -11
-        Gutter.Font.Name = 'Consolas'
-        Gutter.Font.Style = []
-        Gutter.Font.Quality = fqClearTypeNatural
-        Gutter.Bands = <>
-        ScrollbarAnnotations = <>
-        ExplicitHeight = 494
-      end
-    end
   end
   object pnlBottom: TPanel
     Left = 0
@@ -210,20 +139,9 @@ object frmMain: TfrmMain
     Align = alBottom
     BevelOuter = bvNone
     ShowCaption = False
-    TabOrder = 3
-    ExplicitTop = 552
-    object mmMessages: TMemo
-      Left = 0
-      Top = 25
-      Width = 1180
-      Height = 139
-      Align = alClient
-      ReadOnly = True
-      ScrollBars = ssBoth
-      TabOrder = 0
-      WordWrap = False
-      ExplicitTop = 28
-    end
+    TabOrder = 2
+    ExplicitTop = 539
+    ExplicitWidth = 1174
     object Panel1: TPanel
       Left = 0
       Top = 0
@@ -232,17 +150,162 @@ object frmMain: TfrmMain
       Align = alTop
       BevelOuter = bvNone
       ShowCaption = False
+      TabOrder = 0
+      object chkShowErrors: TCheckBox
+        Left = 8
+        Top = 6
+        Width = 97
+        Height = 17
+        Caption = 'Show Errors'
+        TabOrder = 0
+        OnClick = chkShowErrorsClick
+      end
+    end
+    object vtMessages: TVirtualStringTree
+      Left = 0
+      Top = 25
+      Width = 1180
+      Height = 139
+      Align = alClient
+      DefaultNodeHeight = 19
+      Header.AutoSizeIndex = 0
+      Header.Height = 15
+      Header.MainColumn = -1
+      TabOrder = 1
+      OnDblClick = vtMessagesDblClick
+      OnGetText = vtMessagesGetText
+      Touch.InteractiveGestures = [igPan, igPressAndTap]
+      Touch.InteractiveGestureOptions = [igoPanSingleFingerHorizontal, igoPanSingleFingerVertical, igoPanInertia, igoPanGutter, igoParentPassthrough]
+      ExplicitTop = 40
+      ExplicitWidth = 260
+      ExplicitHeight = 511
+      Columns = <>
+    end
+  end
+  object pnlSrc: TPanel
+    Left = 264
+    Top = 41
+    Width = 916
+    Height = 511
+    Align = alClient
+    BevelOuter = bvNone
+    ShowCaption = False
+    TabOrder = 3
+    ExplicitLeft = 0
+    ExplicitTop = 0
+    ExplicitWidth = 1180
+    ExplicitHeight = 201
+    object pgc: TPageControl
+      Left = 0
+      Top = 0
+      Width = 916
+      Height = 478
+      ActivePage = tsJson
+      Align = alClient
+      TabOrder = 0
+      ExplicitLeft = 264
+      ExplicitTop = 242
+      ExplicitHeight = 310
+      object tsJson: TTabSheet
+        Caption = 'AST JSON'
+        TabVisible = False
+        object edJson: TSynEdit
+          Left = 0
+          Top = 0
+          Width = 908
+          Height = 448
+          Align = alClient
+          CaseSensitive = True
+          Font.Charset = DEFAULT_CHARSET
+          Font.Color = clWindowText
+          Font.Height = -13
+          Font.Name = 'Consolas'
+          Font.Style = []
+          Font.Quality = fqClearTypeNatural
+          TabOrder = 0
+          UseCodeFolding = True
+          Gutter.Font.Charset = DEFAULT_CHARSET
+          Gutter.Font.Color = clWindowText
+          Gutter.Font.Height = -11
+          Gutter.Font.Name = 'Consolas'
+          Gutter.Font.Style = []
+          Gutter.Font.Quality = fqClearTypeNatural
+          Gutter.Bands = <>
+          Highlighter = SynJSONSyn1
+          IndentGuides.Visible = False
+          IndentGuides.StructureHighlight = False
+          ScrollbarAnnotations = <>
+          ExplicitHeight = 280
+        end
+      end
+      object tsSema: TTabSheet
+        Caption = 'Semantics'
+        ImageIndex = 1
+        TabVisible = False
+        object edSema: TSynEdit
+          Left = 0
+          Top = 0
+          Width = 908
+          Height = 448
+          Align = alClient
+          Font.Charset = DEFAULT_CHARSET
+          Font.Color = clWindowText
+          Font.Height = -13
+          Font.Name = 'Consolas'
+          Font.Style = []
+          Font.Quality = fqClearTypeNatural
+          TabOrder = 0
+          UseCodeFolding = False
+          Gutter.Font.Charset = DEFAULT_CHARSET
+          Gutter.Font.Color = clWindowText
+          Gutter.Font.Height = -11
+          Gutter.Font.Name = 'Consolas'
+          Gutter.Font.Style = []
+          Gutter.Font.Quality = fqClearTypeNatural
+          Gutter.Bands = <>
+          ScrollbarAnnotations = <>
+          ExplicitHeight = 481
+        end
+      end
+    end
+    object Panel2: TPanel
+      Left = 0
+      Top = 478
+      Width = 916
+      Height = 33
+      Align = alBottom
+      BevelOuter = bvNone
+      ShowCaption = False
       TabOrder = 1
       object lblProgress: TLabel
         AlignWithMargins = True
-        Left = 1120
+        Left = 858
         Top = 3
-        Width = 57
-        Height = 19
+        Width = 55
+        Height = 27
         Align = alRight
         Alignment = taRightJustify
         Caption = '0/0 Parsed'
         Layout = tlCenter
+        ExplicitHeight = 15
+      end
+      object btnShowASTJson: TButton
+        Left = 4
+        Top = 2
+        Width = 101
+        Height = 25
+        Caption = 'Show AST Json'
+        TabOrder = 0
+        OnClick = btnShowASTJsonClick
+      end
+      object btnShowSemantics: TButton
+        Left = 111
+        Top = 2
+        Width = 106
+        Height = 25
+        Caption = 'Show Semantics'
+        TabOrder = 1
+        OnClick = btnShowSemanticsClick
       end
     end
   end
