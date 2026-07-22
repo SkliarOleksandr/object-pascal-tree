@@ -1190,15 +1190,22 @@ begin
       FSemaProject.SetBuffer(LTab.FilePath, LTab.Editor.Text);
     end;
 
-    // A .dproj drives the real uses-graph from its main source (correctly
-    // reaching units outside FProjectDir) — the FULL transitive closure, so
-    // go-to-declaration works inside every dependency unit, not just the
-    // main file; a plain .dpr falls back to "everything under this folder".
+    // Same engine as the background path (AnalyzeStaged, run here to
+    // completion on THIS thread instead of a worker) — its uses-closure walk
+    // from FMainSource covers a plain .dpr just as well as the old
+    // AnalyzeDirectory fallback did (StartAsyncAnalyze has used it
+    // unconditionally, dproj or not, since the async path shipped). The one
+    // real payoff: AOnProgress fires synchronously on the UI thread, so
+    // lblProgress can show live progress during a blocking Run Parse —
+    // Update forces an immediate repaint since we're not pumping messages.
     LSW := TStopwatch.StartNew;
-    if Assigned(FDProj) and (FMainSource <> '') then
-      FSemaProject.AnalyzeProject(FMainSource)
-    else
-      FSemaProject.AnalyzeDirectory(FProjectDir);
+    FSemaProject.AnalyzeStaged([FMainSource], [], nil,
+      procedure(AProgress: TPasStagedProgress)
+      begin
+        lblProgress.Caption := Format('%s %d/%d',
+          [AProgress.Phase, AProgress.FullDone, AProgress.Total]);
+        lblProgress.Update;
+      end);
     FAnalyzeOverhead := FAnalyzeOverhead +
       Format('engine=%d;', [LSW.ElapsedMilliseconds]);
     LSW := TStopwatch.StartNew;
