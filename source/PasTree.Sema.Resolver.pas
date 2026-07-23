@@ -396,6 +396,23 @@ begin
           var LPropSym := NIL_SYM;
           if (LN <> NIL_NODE) and (KindOf(LN) = nkIdent) then
             LPropSym := DeclareSym(LMembers, skProperty, NodeText(LN), LN);
+          // Array-property index parameters (`property Items[Index: Integer]:
+          // T read GetItem;`) arrive as an nkParams child, SAME shape as a
+          // routine's — but the generic Collect() below has no case for
+          // nkParams/nkParam at all (only CollectRoutine/nkProcType/
+          // nkAnonMethod special-case them), so falling through to plain
+          // Collect(LC, LMembers) walks down to the index name's bare nkIdent
+          // and does NOTHING with it: no DeclareSym, no FIsDeclName mark.
+          // Resolve then treats it as an ordinary reference, finds no such
+          // member anywhere in the class, and raises a false E2003 (real bug:
+          // System.Actions.pas's `property ShortCuts[Index: Integer]`). Real
+          // dcc never lets anything reference this name outside the
+          // property's own signature slot (the read/write specifier matches
+          // the getter/setter by position/type, not by this placeholder's
+          // name), so — exactly like nkProcType's own isolated LSig scope —
+          // give it a scope of its own: declared, but reachable from nowhere
+          // else, which is all "not undeclared" requires.
+          var LPropSig := NIL_SCOPE;
           var LC := NextSib(LN);
           while LC <> NIL_NODE do
           begin
@@ -405,7 +422,21 @@ begin
                (FModel.Symbols[LPropSym].TypeNode = NIL_NODE) and
                not (KindOf(LC) in [nkParams, nkPropSpec]) then
               FModel.Symbols[LPropSym].TypeNode := LC;
-            Collect(LC, LMembers);
+            if KindOf(LC) = nkParams then
+            begin
+              if LPropSig = NIL_SCOPE then
+                LPropSig := FModel.AddScope(sckRoutine, LMembers, LChild);
+              FNodeScope[LC] := LPropSig;
+              var LParam := FirstChild(LC);
+              while LParam <> NIL_NODE do
+              begin
+                if KindOf(LParam) = nkParam then
+                  DeclareNamesAndType(LParam, LPropSig, skParam);
+                LParam := NextSib(LParam);
+              end;
+            end
+            else
+              Collect(LC, LMembers);
             LC := NextSib(LC);
           end;
         end;
@@ -573,6 +604,32 @@ begin
         FModel.JoinScope(LRoutine, FModel.Symbols[LTy].MemberScope);
     end;
     FModel.Scopes[LRoutine].StructSym := LTy;
+    // A qualified implementation that OMITS its own parameter list
+    // (`procedure TFoo.Bar;` completing a class-declared `procedure Bar(
+    // Index: Integer);` — legal dcc: the impl header may drop the params
+    // when they exactly match the declaration) has NO nkParams child, so
+    // the "Remaining children" loop below declares nothing into LRoutine —
+    // the body then treats every omitted parameter name as an ordinary
+    // (undeclared) reference: false E2003 (real bug, found analyzing
+    // Vcl.CheckLst.pas: TCustomCheckListBox.ToggleClickCheck declares
+    // `(Index: Integer)` but implements bodilessly as `ToggleClickCheck;`,
+    // using `Index` freely in its body). Mirrors the SAME idiom the
+    // unqualified branch below already honors for global routines — find
+    // the class's own declared method (by name; an overloaded name is left
+    // alone, the same simplification the global-routine path already makes
+    // for LIntfHead) and join ITS param scope in, exactly like the struct's
+    // member scope is joined above.
+    if (LTy <> NIL_SYM) and (LNameNode <> NIL_NODE) and
+       (FModel.Symbols[LTy].MemberScope <> NIL_SCOPE) and
+       (FindChildKind(ANode, nkParams) = NIL_NODE) then
+    begin
+      var LDeclSym := FModel.FindLocal(FModel.Symbols[LTy].MemberScope,
+        LowerCase(NodeText(LNameNode)));
+      if (LDeclSym <> NIL_SYM) and
+         (FModel.Symbols[LDeclSym].Kind = skRoutine) and
+         (FModel.Symbols[LDeclSym].MemberScope <> NIL_SCOPE) then
+        FModel.JoinScope(LRoutine, FModel.Symbols[LDeclSym].MemberScope);
+    end;
   end;
   if (LNameNode <> NIL_NODE) and not LQualified then
   begin
@@ -613,6 +670,12 @@ begin
       if FindChildKind(ANode, nkRoutineBody) <> NIL_NODE then
         FModel.Symbols[LLink].Flags := FModel.Symbols[LLink].Flags + [sfHasBody];
       MarkDeclName(LNameNode, LLink);
+      // Same gap as the qualified branch above, for a global routine: params
+      // omitted here means nothing else ever declares them for THIS body —
+      // join the matched declaration's own param scope in.
+      if (FindChildKind(ANode, nkParams) = NIL_NODE) and
+         (FModel.Symbols[LLink].MemberScope <> NIL_SCOPE) then
+        FModel.JoinScope(LRoutine, FModel.Symbols[LLink].MemberScope);
     end
     else
     begin

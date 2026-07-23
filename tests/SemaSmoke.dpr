@@ -171,6 +171,69 @@ const
     '  I := F(1, 2);'#10 +
     'end;'#10'end.'#10;
 
+  // Real bug report: an ARRAY property's index parameter name (`Index` in
+  // `property Items[Index: Integer]`) is a pure declaration of the
+  // property's own signature slot — nothing in real Object Pascal can ever
+  // reference it — but the resolver fell through to a generic Collect() with
+  // no case for nkParams/nkParam at all, so the name was never declared,
+  // never marked as a declaration, and Resolve treated it as an ordinary
+  // (undeclared) reference: false E2003. Mirrors System.Actions.pas's
+  // TCustomShortCutList.ShortCuts exactly (private getter + one-param array
+  // property reading it). Two properties reusing the SAME index name
+  // ('Index') must NOT collide with each other either (E2004) — each gets
+  // its own isolated scope, same as nkProcType's signature scope.
+  SRC_PROPINDEX =
+    'unit U;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TThing = class'#10 +
+    '  private'#10 +
+    '    function GetItem(Index: Integer): string;'#10 +
+    '    function GetPair(Index: Integer; Key: string): Integer;'#10 +
+    '  public'#10 +
+    '    property Items[Index: Integer]: string read GetItem;'#10 +
+    '    property Pairs[Index: Integer; Key: string]: Integer read GetPair;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TThing.GetItem(Index: Integer): string;'#10 +
+    'begin'#10 +
+    '  Result := '''';'#10 +
+    'end;'#10 +
+    'function TThing.GetPair(Index: Integer; Key: string): Integer;'#10 +
+    'begin'#10 +
+    '  Result := Index;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  // Real bug report: an implementation may OMIT its own parameter list when
+  // it exactly matches the declaration (`procedure Foo;` completing
+  // `procedure Foo(AParam: Integer);` — legal dcc). CollectRoutine only
+  // declares params from the IMPLEMENTATION'S OWN nkParams child, which does
+  // not exist when omitted, so the body treated every such name as an
+  // ordinary (undeclared) reference: false E2003. Mirrors
+  // Vcl.CheckLst.pas's TCustomCheckListBox.ToggleClickCheck exactly (method
+  // case) plus the same gap for a global routine.
+  SRC_OMITPARAMS =
+    'unit U;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TThing = class'#10 +
+    '    procedure Toggle(Index: Integer);'#10 +
+    '  end;'#10 +
+    'procedure GlobalToggle(Index: Integer); forward;'#10 +
+    'implementation'#10 +
+    'procedure TThing.Toggle;'#10 +
+    'begin'#10 +
+    '  if Index > 0 then'#10 +
+    '    Index := Index - 1;'#10 +
+    'end;'#10 +
+    'procedure GlobalToggle;'#10 +
+    'begin'#10 +
+    '  if Index > 0 then'#10 +
+    '    Index := Index - 1;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // Interface-only symbol-id stability: the interface section declares types,
   // fields, a var and routines; the implementation adds bodies (and its own
   // locals). Because SeedSystemScope runs first (identical) and the interface
@@ -274,6 +337,33 @@ begin
   Analyze(SRC_NOFIT);
   Ok('no-fit: E2034 fired', DiagCount('E2034') = 1);
   Ok('no-fit: no E2010', DiagCount('E2010') = 0);
+  GModel.Free;
+
+  // 9b. array-property index parameter name: not a false E2003, and two
+  // properties reusing the SAME index name don't collide (E2004).
+  Analyze(SRC_PROPINDEX);
+  Ok('propindex: Items property declared', HasSym('Items', skProperty));
+  Ok('propindex: Pairs property declared', HasSym('Pairs', skProperty));
+  Ok('propindex: read Items -> GetItem resolves',
+    RefResolvesTo('GetItem', 'GetItem'));
+  Ok('propindex: read Pairs -> GetPair resolves',
+    RefResolvesTo('GetPair', 'GetPair'));
+  // The getter's OWN Index param (a different, ordinary routine-param scope)
+  // still resolves normally inside its body — untouched by this fix.
+  Ok('propindex: GetPair body Index resolves to its own param',
+    RefResolvesTo('Index', 'Index'));
+  Ok('propindex: no false E2003 (the index placeholder names)',
+    DiagCount('E2003') = 0);
+  Ok('propindex: no false E2004 (two properties reuse ''Index'')',
+    DiagCount('E2004') = 0);
+  GModel.Free;
+
+  // 9c. implementation omits its own parameter list (method AND global
+  // routine) — the omitted names must still resolve inside the body.
+  Analyze(SRC_OMITPARAMS);
+  Ok('omitparams: no false E2003', DiagCount('E2003') = 0);
+  Ok('omitparams: method body Index resolves',
+    RefResolvesTo('Index', 'Index'));
   GModel.Free;
 
   // 10. interface-only symbol ids are a prefix of the full model's ids
