@@ -3,15 +3,21 @@ unit PasTree.Sema.Resolver;
 {
   PasTree semantics — Phase 1 resolver (per unit).
 
-  Two sub-passes over the immutable CST:
-    1. Collect  — open scopes (unit / struct / routine / with / block), add a
-                  symbol for every declaration, chain routine overloads, and
-                  flag same-scope duplicates (E2004).
-    2. Resolve  — bind each identifier/member reference to a symbol via the
-                  scope chain, and bind each declaration's declared type to a
-                  type symbol. Unresolved refs (e.g. names from a not-yet-indexed
-                  used unit) are left NIL and flagged sfExternalUnresolved — no
-                  diagnostic in Phase 1.
+  Passes over the immutable CST, in order:
+    1. Collect         — open scopes (unit / struct / routine / block), add a
+                          symbol for every declaration, chain routine
+                          overloads, and flag same-scope duplicates (E2004).
+    2. Resolve         — bind each identifier/member reference to a symbol via
+                          the scope chain. Unresolved refs (e.g. names from a
+                          not-yet-indexed used unit, or a `with`-target's
+                          member, not yet in scope) are left NIL and flagged
+                          sfExternalUnresolved — no diagnostic in Phase 1.
+    3. BindTypes       — bind each declaration's declared type to a type
+                          symbol.
+    4. ResolveWithStmts — NOW that types are bound, open each `with` target's
+                          member scope and retry whatever its body left
+                          unresolved in pass 2 (see its own header comment for
+                          why this can only run this late).
 
   Names vs. type are separated by the ':' token (leading idents joined by ','
   are names; the child after ':' is the type) — see TPasParser.ParseParamList /
@@ -64,6 +70,15 @@ type
     function DesignatorHead(ANode: Integer): Integer;
     procedure ResolveNode(ANode: Integer);
     procedure BindTypes;
+    // with (ch.05 §5.7) — see ResolveWithStmts for why this runs as its own
+    // pass, after BindTypes, rather than inline in Collect/ResolveNode.
+    function FindMemberUpChain(ATypeSym: Integer;
+      const ANameLower: string): Integer;
+    function AncestorTypeSym(ATypeSym: Integer): Integer;
+    function WithTargetTypeSym(ANode: Integer): Integer;
+    procedure RepointScope(ANode, ANewScope: Integer);
+    procedure ResolveOneWithStmt(AWith: Integer);
+    procedure ResolveWithStmts;
     procedure Run;
   public
     { ASkipTyper skips the final expression type-check (Phase 3a) — for
@@ -1073,6 +1088,283 @@ begin
     end;
 end;
 
+{ with (ch.05 §5.7)
+
+  `with A, B do Body` opens an unqualified-name scope over A's and B's own
+  members, right-to-left (B, the LAST target, wins a name both share) —
+  Body sees them BEFORE the enclosing scope. This can only run as a
+  SEPARATE, LATER pass, not inline in Collect/ResolveNode: it needs the
+  TARGET's TYPE to find the member scope to open, and type information
+  (TypeSym, bound by BindTypes from a symbol's own declared type node) is
+  only available once BindTypes has run — which itself runs after
+  ResolveNode. So: Collect/ResolveNode run as normal, unaware of `with`
+  (a with-body's identifiers are Phase-1-unresolved exactly like any
+  identifier from a not-yet-known scope); THEN, once BindTypes has bound
+  declared types, ResolveWithStmts finds each target's type, opens a scope
+  over its members, splices that scope into the with-body's existing scope
+  chain (RepointScope), and re-runs ResolveNode over the body — which,
+  thanks to ResolveNode's existing NIL_SYM guard, only fills in the NAMES
+  that were still unresolved, never touching ones Phase 1 already got right. }
+
+// ATypeSym's DIRECT ancestor's type symbol — same-unit only. CollectStruct
+// never joins an ancestor's MemberScope into the descendant's own (that is
+// the PROJECT-level CrossResolveInherited/FindMemberX pass's job, which also
+// reaches CROSS-unit ancestors); this is a deliberately NARROWER intra-unit
+// climb, giving `with` at least same-unit inherited members (a same-unit
+// struct's own children lead with the heritage clause — ancestor first, any
+// IMPLEMENTED INTERFACES after — CollectStruct's own nkIdent/nkMember/
+// nkTypeArgs case list; the FIRST such child is always the true ancestor,
+// same convention the project-level pass already uses). NIL_SYM (a
+// cross-unit ancestor, or none) is the same graceful "can't fully type
+// this" this whole feature already accepts elsewhere.
+function TPasSemaResolver.AncestorTypeSym(ATypeSym: Integer): Integer;
+var
+  LScope, LChild, LHead: Integer;
+begin
+  Result := NIL_SYM;
+  if ATypeSym = NIL_SYM then
+    Exit;
+  LScope := FModel.Symbols[ATypeSym].MemberScope;
+  if LScope = NIL_SCOPE then
+    Exit;
+  LChild := FirstChild(FModel.Scopes[LScope].OwnerNode);
+  while LChild <> NIL_NODE do
+  begin
+    if KindOf(LChild) in [nkIdent, nkMember, nkTypeArgs] then
+    begin
+      LHead := DesignatorHead(LChild);
+      if (LHead <> NIL_SYM) and (FModel.Symbols[LHead].Kind = skType) then
+        Result := LHead;
+      Exit;
+    end;
+    LChild := NextSib(LChild);
+  end;
+end;
+
+// ANameLower on ATypeSym's OWN member scope, or (same-unit only) an
+// ancestor's — see AncestorTypeSym. Depth-capped defensively; real
+// hierarchies are nowhere near this deep.
+function TPasSemaResolver.FindMemberUpChain(ATypeSym: Integer;
+  const ANameLower: string): Integer;
+var
+  LScope, LDepth: Integer;
+begin
+  Result := NIL_SYM;
+  LDepth := 0;
+  while (ATypeSym <> NIL_SYM) and (LDepth < 32) do
+  begin
+    Inc(LDepth);
+    LScope := FModel.Symbols[ATypeSym].MemberScope;
+    if LScope <> NIL_SCOPE then
+    begin
+      Result := FModel.FindLocal(LScope, ANameLower);
+      if Result <> NIL_SYM then
+        Exit;
+    end;
+    ATypeSym := AncestorTypeSym(ATypeSym);
+  end;
+end;
+
+// The with-TARGET's type, restricted to what BindTypes already established
+// (a symbol's OWN declared type — not full expression-level inference,
+// which is the intra-unit typer's job and runs even later than this pass).
+// Matches the spec's own restriction that with-targets are plain designators
+// (var/field/param/property/routine-result) or a type-cast, not arbitrary
+// expressions — NIL_SYM for anything fancier (e.g. an inline-if) is a
+// deliberate, graceful "leave it unresolved", not a regression.
+//
+// nkMember needs its OWN chain-walk, not a RefMap lookup: Phase 1's
+// ResolveNode only resolves a TYPE-QUALIFIED member (TFoo.Bar) — an
+// INSTANCE member chain (Obj.Field.Method, e.g. `FItems.Add` — the ACTUAL
+// shape of the real bug report, Vcl.ComCtrls.pas's `with FItems.Add do`) is
+// deliberately left NIL there; walking it is normally the PROJECT-level
+// CrossType pass's job (FindMemberX), which runs long after this one unit's
+// Run finishes — too late for `with`. So this recurses on the BASE's own
+// type (via this same function — restricted to the same simple designator
+// shapes) and looks the member up directly, rather than trusting a RefMap
+// entry that was never going to be there.
+function TPasSemaResolver.WithTargetTypeSym(ANode: Integer): Integer;
+var
+  LBase, LName, LHead, LBaseType: Integer;
+begin
+  Result := NIL_SYM;
+  case KindOf(ANode) of
+    nkIdent:
+      begin
+        LHead := FModel.RefMap[ANode];
+        if LHead = NIL_SYM then
+          Exit;
+        case FModel.Symbols[LHead].Kind of
+          skVar, skConst, skField, skParam, skRoutine, skProperty:
+            Result := FModel.Symbols[LHead].TypeSym;
+        end;
+      end;
+    nkMember:
+      begin
+        LBase := FirstChild(ANode);
+        LName := NextSib(LBase);
+        if LName = NIL_NODE then
+          Exit;
+        LHead := FModel.RefMap[LName];
+        if LHead = NIL_SYM then
+        begin
+          LBaseType := WithTargetTypeSym(LBase);
+          if LBaseType = NIL_SYM then
+            Exit;
+          LHead := FindMemberUpChain(LBaseType, LowerCase(NodeText(LName)));
+          if LHead = NIL_SYM then
+            Exit;
+          // Retroactively record it — the same thing CrossType would do
+          // later for navigation purposes; a free correctness improvement
+          // (e.g. ctrl+click on `Add` in `with FItems.Add do` now works
+          // too), and keeps the upcoming ResolveNode(LBody) re-walk (which
+          // recurses back through the targets — see ResolveWithStmts'
+          // header) consistent with what this function already found.
+          FModel.RefMap[LName] := LHead;
+        end;
+        case FModel.Symbols[LHead].Kind of
+          skVar, skConst, skField, skParam, skRoutine, skProperty:
+            Result := FModel.Symbols[LHead].TypeSym;
+        end;
+      end;
+    nkCall:
+      begin
+        LBase := FirstChild(ANode);
+        // A cast T(Expr): the callee is a bare type name — resolves
+        // directly (Phase 1 already gets a plain type-name reference
+        // right, no chain-walk needed).
+        if KindOf(LBase) = nkIdent then
+        begin
+          LHead := FModel.RefMap[LBase];
+          if (LHead <> NIL_SYM) and
+             (FModel.Symbols[LHead].Kind in [skType, skBuiltinType]) then
+            Exit(LHead);
+        end;
+        // Otherwise a routine/property call (bare or parenthesized,
+        // qualified or not) -> its own declared result type — same
+        // designator-typing this function already does for a parenless
+        // access, so just recurse on the callee.
+        Result := WithTargetTypeSym(LBase);
+      end;
+    nkIndex:
+      // Obj[Idx] / Obj.ArrayProp[Idx]: this model already stores an array
+      // PROPERTY's declared type as its per-ELEMENT type (see
+      // CollectStruct's nkPropertyDecl handling — the property symbol's
+      // TypeSym is the element type, not "array of X"), so indexing doesn't
+      // change the type at all — just resolve the indexable head the same
+      // way. (A plain dynamic-array VARIABLE's element type isn't modeled
+      // this way — DesignatorHead can't resolve an nkArrayType expression to
+      // a symbol at all — so that shape gracefully falls out as NIL_SYM,
+      // same as any other with-target this function can't fully type.)
+      Result := WithTargetTypeSym(FirstChild(ANode));
+    nkParen:
+      Result := WithTargetTypeSym(FirstChild(ANode));
+  end;
+end;
+
+// Retroactively routes ANode's name resolution — and, transitively, every
+// descendant that does NOT open its own scope — through ANewScope instead of
+// whatever Collect originally assigned. A descendant that DOES own a scope
+// (block, nested `with`, anon method, ...) only needs THAT scope's own
+// Parent link reparented; everything beneath it already resolves relative to
+// that scope's chain, so recursion stops there — one link fixes the whole
+// subtree. Used to splice a with-target's member scope into an
+// already-Collected body (see ResolveOneWithStmt).
+procedure TPasSemaResolver.RepointScope(ANode, ANewScope: Integer);
+var
+  LChild, LOwnScope: Integer;
+begin
+  if ANode = NIL_NODE then
+    Exit;
+  LOwnScope := FNodeScope[ANode];
+  if (LOwnScope <> NIL_SCOPE) and
+     (FModel.Scopes[LOwnScope].OwnerNode = ANode) then
+  begin
+    FModel.Scopes[LOwnScope].Parent := ANewScope;
+    Exit;
+  end;
+  FNodeScope[ANode] := ANewScope;
+  LChild := FirstChild(ANode);
+  while LChild <> NIL_NODE do
+  begin
+    RepointScope(LChild, ANewScope);
+    LChild := NextSib(LChild);
+  end;
+end;
+
+procedure TPasSemaResolver.ResolveOneWithStmt(AWith: Integer);
+var
+  LTarget, LBody, LWithScope, LTypeSym: Integer;
+  LTargets: TArray<Integer>;
+begin
+  // Children: target1, target2, ..., targetN, body (body = last child;
+  // TPasParser.ParseStatement's tkWith case, 5.7).
+  LTargets := nil;
+  LTarget := FirstChild(AWith);
+  while (LTarget <> NIL_NODE) and (NextSib(LTarget) <> NIL_NODE) do
+  begin
+    LTargets := LTargets + [LTarget];
+    LTarget := NextSib(LTarget);
+  end;
+  LBody := LTarget;
+  if (LBody = NIL_NODE) or (Length(LTargets) = 0) then
+    Exit;
+
+  // One scope per with-statement. Every resolved target's members are
+  // JOINED in LEFT-TO-RIGHT source order — Resolve()'s existing
+  // Additional-scope walk already checks the MOST-RECENTLY-JOINED one first
+  // ("uses/with priority", see TPasSemaModel.Resolve), which is exactly the
+  // spec's right-to-left, last-target-wins precedence, for free. Each
+  // target's OWN same-unit ancestor chain (see AncestorTypeSym) is ALSO
+  // joined, root-most first / leaf last, so an inherited member is visible
+  // too, and the type's OWN member of the same name still correctly shadows
+  // it (its scope ends up "most recently added", checked first).
+  LWithScope := NIL_SCOPE;
+  for LTarget in LTargets do
+  begin
+    LTypeSym := WithTargetTypeSym(LTarget);
+    if LTypeSym = NIL_SYM then
+      Continue;
+    var LChain: TArray<Integer> := nil;
+    var LChainDepth := 0;
+    while (LTypeSym <> NIL_SYM) and (LChainDepth < 32) do
+    begin
+      Inc(LChainDepth);
+      if FModel.Symbols[LTypeSym].MemberScope <> NIL_SCOPE then
+        LChain := LChain + [LTypeSym];
+      LTypeSym := AncestorTypeSym(LTypeSym);
+    end;
+    if Length(LChain) = 0 then
+      Continue;
+    if LWithScope = NIL_SCOPE then
+      LWithScope := FModel.AddScope(sckWith, FNodeScope[AWith], AWith);
+    for var LI := High(LChain) downto 0 do
+      FModel.JoinScope(LWithScope, FModel.Symbols[LChain[LI]].MemberScope);
+  end;
+  if LWithScope = NIL_SCOPE then
+    Exit;   // no target resolved to a real, member-bearing type — leave as-is
+
+  RepointScope(LBody, LWithScope);
+  ResolveNode(LBody);
+end;
+
+procedure TPasSemaResolver.ResolveWithStmts;
+var
+  LIdx: Integer;
+begin
+  // A flat forward scan over all nodes visits an OUTER with-statement before
+  // any with NESTED in its body (node indices are assigned in parse order,
+  // depth-first) — required for correctness: ResolveOneWithStmt's
+  // RepointScope+ResolveNode(LBody) call for the outer one also re-resolves
+  // the INNER with's own target expressions (ResolveNode recurses into
+  // every child generically; nkWithStmt has no special case there), so by
+  // the time this scan reaches the inner with, ITS targets are already
+  // correctly resolved through the outer's scope.
+  for LIdx := 0 to High(FTree.Nodes) do
+    if KindOf(LIdx) = nkWithStmt then
+      ResolveOneWithStmt(LIdx);
+end;
+
 function TPasSemaResolver.QualifiedNameText(ANode: Integer): string;
 var
   LBase, LName: Integer;
@@ -1133,6 +1425,7 @@ begin
   CollectRoot(0);
   ResolveNode(0);
   BindTypes;
+  ResolveWithStmts;   // needs BindTypes' declared types — see its own header
   if not FSkipTyper then
     TPasSemaTyper.Check(FModel);
 end;

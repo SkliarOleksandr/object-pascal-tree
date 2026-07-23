@@ -234,6 +234,117 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // Real bug report: `with` statement member resolution was NOT IMPLEMENTED
+  // at all (found via Vcl.ComCtrls.pas: `with FItems.Add do begin Caption :=
+  // S; Result := Index; end;` — Caption/Index are members of the with-
+  // target's OWN class, never declared as locals). `Result` here is the
+  // ENCLOSING FUNCTION's own Result, not a with-target member — must not be
+  // shadowed by the with-scope.
+  SRC_WITHSTMT =
+    'unit U;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TItem = class'#10 +
+    '    Caption: string;'#10 +
+    '    Index: Integer;'#10 +
+    '  end;'#10 +
+    '  TItems = class'#10 +
+    '    function Add: TItem;'#10 +
+    '  end;'#10 +
+    '  TThing = class'#10 +
+    '    FItems: TItems;'#10 +
+    '    function DoIt(const S: string): Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TItems.Add: TItem;'#10 +
+    'begin'#10 +
+    '  Result := nil;'#10 +
+    'end;'#10 +
+    'function TThing.DoIt(const S: string): Integer;'#10 +
+    'begin'#10 +
+    '  with FItems.Add do'#10 +
+    '  begin'#10 +
+    '    Caption := S;'#10 +
+    '    Result := Index;'#10 +
+    '  end;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  // Multi-target precedence (ch.05 §5.7): `with A, B do` resolves a shared
+  // name against the LAST target first. TA.X is Integer, TB.X is string —
+  // if precedence were wrong (picked TA.X), `S := X` would be an
+  // Integer->string assignment and fire E2010; correct precedence (TB.X)
+  // assigns string->string, no diagnostic.
+  SRC_WITHMULTI =
+    'unit U;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TA = class X: Integer; end;'#10 +
+    '  TB = class X: string; end;'#10 +
+    'implementation'#10 +
+    'procedure UseIt(A: TA; B: TB);'#10 +
+    'var S: string;'#10 +
+    'begin'#10 +
+    '  with A, B do'#10 +
+    '    S := X;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  // Nested `with`: the inner target (B, a field of A) must resolve THROUGH
+  // the outer with's scope, and the inner body sees both (innermost/last
+  // wins on a shared name — here there is none, just confirming reach).
+  SRC_WITHNESTED =
+    'unit U;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TInner = class Y: Integer; end;'#10 +
+    '  TOuter = class B: TInner; end;'#10 +
+    'implementation'#10 +
+    'procedure UseIt(A: TOuter);'#10 +
+    'var I: Integer;'#10 +
+    'begin'#10 +
+    '  with A do'#10 +
+    '    with B do'#10 +
+    '      I := Y;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  // Same-unit INHERITED member through a with-target (real bug report:
+  // Vcl.ComCtrls.pas's TComboExItems.Add returns TComboExItem, whose
+  // Caption/Index are declared on its ANCESTOR TListControlItem, not on
+  // TComboExItem itself). CollectStruct never joins an ancestor's
+  // MemberScope into the descendant's own — AncestorTypeSym/
+  // FindMemberUpChain climb it (same-unit only) instead. TDerived's OWN
+  // Index must still shadow anything of the same name an ancestor might
+  // have (none here, but exercises the "own scope checked first" ordering).
+  SRC_WITHINHERIT =
+    'unit U;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TBase = class'#10 +
+    '    Caption: string;'#10 +
+    '  end;'#10 +
+    '  TDerived = class(TBase)'#10 +
+    '    Index: Integer;'#10 +
+    '  end;'#10 +
+    '  TItems = class'#10 +
+    '    function Add: TDerived;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TItems.Add: TDerived;'#10 +
+    'begin'#10 +
+    '  Result := nil;'#10 +
+    'end;'#10 +
+    'procedure UseIt(G: TItems; const S: string);'#10 +
+    'begin'#10 +
+    '  with G.Add do'#10 +
+    '  begin'#10 +
+    '    Caption := S;'#10 +
+    '    Index := 1;'#10 +
+    '  end;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // Interface-only symbol-id stability: the interface section declares types,
   // fields, a var and routines; the implementation adds bodies (and its own
   // locals). Because SeedSystemScope runs first (identical) and the interface
@@ -363,6 +474,37 @@ begin
   Analyze(SRC_OMITPARAMS);
   Ok('omitparams: no false E2003', DiagCount('E2003') = 0);
   Ok('omitparams: method body Index resolves',
+    RefResolvesTo('Index', 'Index'));
+  GModel.Free;
+
+  // 9d. `with` statement member resolution.
+  Analyze(SRC_WITHSTMT);
+  Ok('with: no false E2003 (Caption/Index via the with-target)',
+    DiagCount('E2003') = 0);
+  Ok('with: Caption resolves to the with-target''s field',
+    RefResolvesTo('Caption', 'Caption'));
+  Ok('with: Index resolves to the with-target''s field',
+    RefResolvesTo('Index', 'Index'));
+  GModel.Free;
+
+  Analyze(SRC_WITHMULTI);
+  Ok('with-multi: no diags at all', Length(GModel.Diags) = 0);
+  Ok('with-multi: last target (TB.X, string) wins over TA.X (Integer) — '
+    + 'no E2010 from a wrong Integer->string assign',
+    DiagCount('E2010') = 0);
+  GModel.Free;
+
+  Analyze(SRC_WITHNESTED);
+  Ok('with-nested: no false E2003 (Y via nested with B, itself via A)',
+    DiagCount('E2003') = 0);
+  Ok('with-nested: Y resolves', RefResolvesTo('Y', 'Y'));
+  GModel.Free;
+
+  Analyze(SRC_WITHINHERIT);
+  Ok('with-inherit: no diags at all', Length(GModel.Diags) = 0);
+  Ok('with-inherit: Caption resolves (inherited from TBase)',
+    RefResolvesTo('Caption', 'Caption'));
+  Ok('with-inherit: Index resolves (TDerived''s own)',
     RefResolvesTo('Index', 'Index'));
   GModel.Free;
 
