@@ -31,6 +31,14 @@ uses
   PasTree.Sema.Model;
 
 type
+  // A structured typed-const/var initializer (3.2.2, `X: TPoint = (X: 0;
+  // Y: 0)`) noted during Collect, resolved once BindTypes has run — see
+  // ResolveAggregates for why this can't happen any earlier.
+  TPasPendingAggr = record
+    AggrNode: Integer;   // the nkAggregate node
+    TypeNode: Integer;   // the declaration's OWN type-expression node
+  end;
+
   TPasSemaResolver = class
   private
     FModel: TPasSemaModel;
@@ -40,6 +48,7 @@ type
     FImpl: Integer;   // implementation scope (parent = FIntf)
     FNodeScope: TArray<Integer>;
     FIsDeclName: TArray<Boolean>;
+    FPendingAggr: TArray<TPasPendingAggr>;
     FSkipTyper: Boolean;   // see Analyze
     // tree helpers
     function KindOf(ANode: Integer): TPasNodeKind; inline;
@@ -49,6 +58,7 @@ type
     function SkipAttr(AChild: Integer): Integer;
     function IsAttributeTypeRef(ANode: Integer): Boolean;
     function EnumJoinTarget(AScope: Integer): Integer;
+    procedure NotePendingAggregate(ATypeNode: Integer);
     function SepAfter(ANode: Integer): string;
     function QualifiedNameText(ANode: Integer): string;
     procedure CollectRoot(ARoot: Integer);
@@ -72,6 +82,11 @@ type
     function DesignatorHead(ANode: Integer): Integer;
     procedure ResolveNode(ANode: Integer);
     procedure BindTypes;
+    // structured typed-const/var initializers (3.2.2) — see ResolveAggregates
+    // for why this also runs as its own pass, after BindTypes.
+    function StructMemberScope(ATypeSym: Integer): Integer;
+    procedure ResolveAggregateAgainst(AAggrNode, AStructScope: Integer);
+    procedure ResolveAggregates;
     // with (ch.05 §5.7) — see ResolveWithStmts for why this runs as its own
     // pass, after BindTypes, rather than inline in Collect/ResolveNode.
     function FindMemberUpChain(ATypeSym: Integer;
@@ -151,6 +166,27 @@ begin
   Result := AChild;
   if (Result <> NIL_NODE) and (KindOf(Result) = nkAttrGroup) then
     Result := NextSib(Result);
+end;
+
+// ATypeNode is a var/const/field declaration's OWN type-expression node
+// (`TWndClass` in `UtilWindowClass: TWndClass = (style: 0; ...)`); if it is
+// immediately followed by a structured aggregate initializer (3.2.2), note
+// it for ResolveAggregates — which needs ATypeNode's designator RESOLVED
+// (RefMap, filled by ResolveNode) to find the target type, so field-name
+// resolution can't happen inline here, in Collect.
+procedure TPasSemaResolver.NotePendingAggregate(ATypeNode: Integer);
+var
+  LInit: Integer;
+begin
+  if ATypeNode = NIL_NODE then
+    Exit;
+  LInit := NextSib(ATypeNode);
+  if (LInit <> NIL_NODE) and (KindOf(LInit) = nkAggregate) then
+  begin
+    SetLength(FPendingAggr, Length(FPendingAggr) + 1);
+    FPendingAggr[High(FPendingAggr)].AggrNode := LInit;
+    FPendingAggr[High(FPendingAggr)].TypeNode := ATypeNode;
+  end;
 end;
 
 // ANode is an attribute usage's TypeRef (`[Table]` in `[Table] TFoo = class`)
@@ -342,6 +378,7 @@ begin
     for LIdx := 0 to High(LSyms) do
       FModel.Symbols[LSyms[LIdx]].Flags :=
         FModel.Symbols[LSyms[LIdx]].Flags + [sfHasDefault];
+  NotePendingAggregate(LType);
   // Collect the type expression and anything after it (init / default /
   // absolute) as nested content in this scope, so every node gets a scope.
   LChild := LType;
@@ -827,7 +864,10 @@ begin
           var LNext := NextSib(LName);
           // optional ': Type' before '='
           if (LNext <> NIL_NODE) and (SepAfter(LName) = ':') then
+          begin
             FModel.Symbols[LSym].TypeNode := LNext;
+            NotePendingAggregate(LNext);
+          end;
           while LNext <> NIL_NODE do
           begin
             Collect(LNext, AScope);
@@ -847,7 +887,10 @@ begin
           var LSym := DeclareSym(AScope, LKind, NodeText(LName), LName);
           var LNext := NextSib(LName);
           if (LNext <> NIL_NODE) and (SepAfter(LName) = ':') then
+          begin
             FModel.Symbols[LSym].TypeNode := LNext;
+            NotePendingAggregate(LNext);
+          end;
           while LNext <> NIL_NODE do
           begin
             Collect(LNext, AScope);
@@ -1036,6 +1079,22 @@ begin
         end;
       end;
 
+    nkAggregateField:
+      begin
+        // FirstChild is a FIELD NAME (`style` in `(style: 0; ...)`), never
+        // an ordinary value reference — resolved directly against the
+        // aggregate's target type once BindTypes has run (see
+        // ResolveAggregates), same spirit as nkMember's own member name
+        // (ResolveNode: "resolved via A's scope, never as a plain
+        // identifier"). Left UNVISITED here (NIL_SCOPE stays), so it is
+        // never an undeclared-identifier candidate regardless of whether
+        // that later pass finds a match — a typo'd field name silently
+        // stays unresolved rather than false-E2003ing, the same trade-off
+        // the array-property index param fix already makes. Only the VALUE
+        // needs ordinary Collect.
+        Collect(NextSib(FirstChild(ANode)), AScope);
+      end;
+
   else
     begin
       LChild := FirstChild(ANode);
@@ -1131,6 +1190,100 @@ begin
          (FModel.Symbols[LHead].Kind in [skType, skBuiltinType, skGenericParam]) then
         FModel.Symbols[LIdx].TypeSym := LHead;
     end;
+end;
+
+{ structured typed-const/var initializers (3.2.2)
+
+  `X: TWndClass = (style: 0; lpfnWndProc: ...)` — the parser already builds
+  nkAggregate/nkAggregateField nodes (TPasParser.ParseConstInitializer) but
+  nothing downstream resolved a field NAME against the target type; Collect
+  left it deliberately unvisited (see the nkAggregateField case) rather than
+  treat it as an ordinary value reference, so this pass is the only place
+  that can still fill in the right answer — same two-phase shape as `with`
+  above: type binding (BindTypes) must run first, so this runs right after. }
+
+// ATypeSym's own struct member scope, chasing through however many alias
+// links sit in between (`TWndClass = TWndClassW = tagWNDCLASSW = record
+// ... end;` — only tagWNDCLASSW's OWN symbol gets a MemberScope from
+// CollectStruct; every alias in the chain has NIL_SCOPE). Depth-capped like
+// AncestorTypeSym: real alias chains are shallow; this only guards a
+// malformed/circular one.
+function TPasSemaResolver.StructMemberScope(ATypeSym: Integer): Integer;
+var
+  LSym, LDef, LDepth: Integer;
+begin
+  Result := NIL_SCOPE;
+  LSym := ATypeSym;
+  LDepth := 0;
+  while (LSym <> NIL_SYM) and (LDepth < 32) do
+  begin
+    Inc(LDepth);
+    if FModel.Symbols[LSym].MemberScope <> NIL_SCOPE then
+      Exit(FModel.Symbols[LSym].MemberScope);
+    if FModel.Symbols[LSym].DeclNode = NIL_NODE then
+      Exit;
+    LDef := NextSib(FModel.Symbols[LSym].DeclNode);
+    while (LDef <> NIL_NODE) and (KindOf(LDef) = nkGenericParams) do
+      LDef := NextSib(LDef);
+    if (LDef <> NIL_NODE) and (KindOf(LDef) in [nkIdent, nkMember, nkTypeArgs])
+    then
+      LSym := DesignatorHead(LDef)
+    else
+      Exit;
+  end;
+end;
+
+// Resolves every nkAggregateField name directly under AAggrNode against
+// AStructScope (the target type's member scope — NIL_SCOPE if the type
+// wasn't a struct at all, e.g. an array/set aggregate, in which case this
+// is a no-op: those have no field names to resolve in the first place),
+// recursing into a nested aggregate for a record-typed field. Plain
+// (unnamed) elements sitting alongside field entries — an array-of-scalar
+// or set aggregate — are untouched: ordinary expressions Collect/ResolveNode
+// already resolve normally, nothing new needed there.
+procedure TPasSemaResolver.ResolveAggregateAgainst(AAggrNode,
+  AStructScope: Integer);
+var
+  LChild, LNameNode, LValue, LFieldSym: Integer;
+begin
+  if (AAggrNode = NIL_NODE) or (AStructScope = NIL_SCOPE) then
+    Exit;
+  LChild := FirstChild(AAggrNode);
+  while LChild <> NIL_NODE do
+  begin
+    if KindOf(LChild) = nkAggregateField then
+    begin
+      LNameNode := FirstChild(LChild);
+      if (LNameNode <> NIL_NODE) and (KindOf(LNameNode) = nkIdent) then
+      begin
+        LFieldSym := FModel.FindLocal(AStructScope,
+          LowerCase(NodeText(LNameNode)));
+        if LFieldSym <> NIL_SYM then
+        begin
+          FModel.RefMap[LNameNode] := LFieldSym;
+          LValue := NextSib(LNameNode);
+          if (LValue <> NIL_NODE) and (KindOf(LValue) = nkAggregate) then
+            ResolveAggregateAgainst(LValue,
+              StructMemberScope(FModel.Symbols[LFieldSym].TypeSym));
+        end;
+      end;
+    end;
+    LChild := NextSib(LChild);
+  end;
+end;
+
+procedure TPasSemaResolver.ResolveAggregates;
+var
+  LIdx, LTypeSym: Integer;
+begin
+  for LIdx := 0 to High(FPendingAggr) do
+  begin
+    LTypeSym := DesignatorHead(FPendingAggr[LIdx].TypeNode);
+    if LTypeSym = NIL_SYM then
+      Continue;
+    ResolveAggregateAgainst(FPendingAggr[LIdx].AggrNode,
+      StructMemberScope(LTypeSym));
+  end;
 end;
 
 { with (ch.05 §5.7)
@@ -1470,6 +1623,7 @@ begin
   CollectRoot(0);
   ResolveNode(0);
   BindTypes;
+  ResolveAggregates;  // needs BindTypes' declared types — see its own header
   ResolveWithStmts;   // needs BindTypes' declared types — see its own header
   if not FSkipTyper then
     TPasSemaTyper.Check(FModel);
