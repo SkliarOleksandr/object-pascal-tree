@@ -17,7 +17,7 @@ uses
   System.SysUtils, System.Classes, System.IOUtils, System.Generics.Collections,
   System.JSON, System.Diagnostics, System.Win.Registry,
   Winapi.Windows, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls,
-  Vcl.ExtCtrls, Vcl.Dialogs, Vcl.Graphics,
+  Vcl.ExtCtrls, Vcl.Dialogs, Vcl.Graphics, Vcl.Clipbrd,
   SynEdit, SynEditTypes, SynEditHighlighter, SynHighlighterJSON,
   SynHighlighterPas,
   VirtualTrees, VirtualTrees.Types,
@@ -80,10 +80,13 @@ type
     FindAction: TAction;
     GotoImplAction: TAction;
     GotoDeclAction: TAction;
+    CopyMessageAction: TAction;
     SourcePopupMenu: TPopupMenu;
     Find1: TMenuItem;
     GotoImplementation1: TMenuItem;
     GotoDeclaration1: TMenuItem;
+    MessagesPopupMenu: TPopupMenu;
+    CopyMessage1: TMenuItem;
     SynEditSearch1: TSynEditSearch;
     pnlBottom: TPanel;
     Panel1: TPanel;
@@ -116,6 +119,8 @@ type
     procedure GotoImplActionExecute(Sender: TObject);
     procedure GotoDeclActionUpdate(Sender: TObject);
     procedure GotoDeclActionExecute(Sender: TObject);
+    procedure CopyMessageActionUpdate(Sender: TObject);
+    procedure CopyMessageActionExecute(Sender: TObject);
   private
     FFileList: TStringList;  // full paths shown in the tree
     FOpenFiles: TStringList; // path -> TTabSheet (Objects)
@@ -507,6 +512,29 @@ begin
   TAction(Sender).Enabled := ActiveRoutineTarget(False, {out} LTarget);
 end;
 
+procedure TfrmMain.CopyMessageActionExecute(Sender: TObject);
+var
+  LData: PPasMsgNodeData;
+begin
+  if vtMessages.FocusedNode = nil then
+    Exit;
+  LData := PPasMsgNodeData(vtMessages.GetNodeData(vtMessages.FocusedNode));
+  if (LData = nil) or (LData.Index < 0) or (LData.Index >= FMsgVisible.Count)
+  then
+    Exit;
+  Clipboard.AsText := FMsgLog[FMsgVisible[LData.Index]].Text;
+end;
+
+// Only enabled while vtMessages itself has focus — Ctrl+C must not steal
+// "copy" away from a focused SynEdit tab (which handles it natively as a
+// text-edit shortcut) just because a message row happens to still be
+// focused from an earlier click.
+procedure TfrmMain.CopyMessageActionUpdate(Sender: TObject);
+begin
+  TAction(Sender).Enabled := vtMessages.Focused and
+    Assigned(vtMessages.FocusedNode);
+end;
+
 procedure TfrmMain.FormCreate(Sender: TObject);
 begin
   FFileList := TStringList.Create;
@@ -553,6 +581,7 @@ begin
   // Menus.ShortCut computes the correct encoding from the actual keys.
   GotoImplAction.ShortCut := Vcl.Menus.ShortCut(VK_DOWN, [ssCtrl, ssShift]);
   GotoDeclAction.ShortCut := Vcl.Menus.ShortCut(VK_UP, [ssCtrl, ssShift]);
+  CopyMessageAction.ShortCut := Vcl.Menus.ShortCut(Ord('C'), [ssCtrl]);
 
   vstFiles.NodeDataSize := SizeOf(TPasNodeData);
   vstFiles.Header.Options := vstFiles.Header.Options - [hoVisible];

@@ -172,6 +172,7 @@ object frmMain: TfrmMain
       Header.Height = 15
       Header.MainColumn = -1
       TabOrder = 1
+      PopupMenu = MessagesPopupMenu
       OnDblClick = vtMessagesDblClick
       OnGetText = vtMessagesGetText
       Touch.InteractiveGestures = [igPan, igPressAndTap]
@@ -332,6 +333,11 @@ object frmMain: TfrmMain
       OnExecute = GotoDeclActionExecute
       OnUpdate = GotoDeclActionUpdate
     end
+    object CopyMessageAction: TAction
+      Caption = 'Copy Message'
+      OnExecute = CopyMessageActionExecute
+      OnUpdate = CopyMessageActionUpdate
+    end
   end
   object SourcePopupMenu: TPopupMenu
     Left = 548
@@ -344,6 +350,13 @@ object frmMain: TfrmMain
     end
     object GotoDeclaration1: TMenuItem
       Action = GotoDeclAction
+    end
+  end
+  object MessagesPopupMenu: TPopupMenu
+    Left = 548
+    Top = 400
+    object CopyMessage1: TMenuItem
+      Action = CopyMessageAction
     end
   end
   object SynEditSearch1: TSynEditSearch
