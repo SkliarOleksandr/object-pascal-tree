@@ -87,10 +87,14 @@ type
     FSingleThreaded: Boolean;
     FSystemUnitId: Integer;                // memoized EnsureSystemUnit result
     FSystemUnitResolved: Boolean;
-    // Guards EnsureSystemUnit: unlike ResolveUses (always sequential) and
+    FSysInitUnitId: Integer;               // memoized EnsureSysInitUnit result
+    FSysInitUnitResolved: Boolean;
+    // Guards EnsureSystemUnit AND EnsureSysInitUnit (both mutate the same
+    // shared FModels/FByPath via LoadFile, so must exclude each other too,
+    // not just themselves): unlike ResolveUses (always sequential) and
     // CrossType/BindTypesX (deliberately sequential — see the Phase 3c
     // comment above), CrossResolve runs ONE WORKER PER CORE by default
-    // (ForEachIndex) and is the only caller of EnsureSystemUnit that can
+    // (ForEachIndex) and is the only caller of either Ensure*Unit that can
     // race — several units' CrossResolve can hit an unresolved implicit-
     // System name (e.g. sLineBreak) on different threads at the same
     // instant, all racing the SAME first-time LoadFile (which mutates the
@@ -129,6 +133,8 @@ type
     function FindInUses(AId: Integer; const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
     function FindInSystemUnit(const ANameLower: string;
+      out AUnit, ASym: Integer): Boolean;
+    function FindInSysInitUnit(const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
     function IsAttributeTypeRef(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function UsesUnitOf(AId, ASym: Integer): Integer;
@@ -192,6 +198,13 @@ type
       cross-unit names — purely additive reach for names that would
       otherwise dead-end at a DeclNode-less compiler symbol. }
     function EnsureSystemUnit: Integer;
+    { SysInit is, like System, implicitly visible to every OTHER unit with no
+      `uses` entry at all (dcc-verified: a unit with an EMPTY uses clause
+      still resolves bare `HInstance`/`ModuleIsLib` — SysInit-only globals,
+      not System's). Same memoize-and-lock shape as EnsureSystemUnit, same
+      race (see FSystemUnitLock), reusing that lock rather than a second
+      one since both mutate the same shared FModels/FByPath. }
+    function EnsureSysInitUnit: Integer;
     { A real (non-builtin) declaration of ANameLower reachable from AMid:
       first AMid's own `uses` (last-uses-wins, matching normal resolution
       priority), then the implicit System unit as a last resort. }
@@ -292,6 +305,8 @@ begin
   FInstLock := TCriticalSection.Create;
   FSystemUnitId := -1;
   FSystemUnitResolved := False;
+  FSysInitUnitId := -1;
+  FSysInitUnitResolved := False;
   FSystemUnitLock := TCriticalSection.Create;
 end;
 
@@ -363,6 +378,24 @@ begin
   end;
 end;
 
+function TPasSemaProject.EnsureSysInitUnit: Integer;
+var
+  LPath: string;
+begin
+  FSystemUnitLock.Enter;
+  try
+    if not FSysInitUnitResolved then
+    begin
+      FSysInitUnitResolved := True;
+      if FSM.ResolveUnit('SysInit', '', '', LPath) then
+        FSysInitUnitId := LoadFile(LPath);
+    end;
+    Result := FSysInitUnitId;
+  finally
+    FSystemUnitLock.Leave;
+  end;
+end;
+
 function TPasSemaProject.ResolveRealDecl(AMid: Integer;
   const ANameLower: string; out ARMid, ARSym: Integer): Boolean;
 var
@@ -389,6 +422,22 @@ begin
   end;
 
   LUid := EnsureSystemUnit;
+  if (LUid >= 0) and (LUid <> AMid) then
+  begin
+    LUsed := FModels[LUid];
+    if LUsed.InterfaceScope <> NIL_SCOPE then
+    begin
+      LS := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
+      if (LS <> NIL_SYM) and (LUsed.Symbols[LS].DeclNode <> NIL_NODE) then
+      begin
+        ARMid := LUid;
+        ARSym := LS;
+        Exit(True);
+      end;
+    end;
+  end;
+
+  LUid := EnsureSysInitUnit;
   if (LUid >= 0) and (LUid <> AMid) then
   begin
     LUsed := FModels[LUid];
@@ -735,6 +784,31 @@ begin
   end;
 end;
 
+// Companion to FindInSystemUnit for the OTHER implicit unit (see
+// EnsureSysInitUnit) — tried right after it, same last-resort spot in
+// CrossResolve, so a miss here changes nothing either.
+function TPasSemaProject.FindInSysInitUnit(const ANameLower: string;
+  out AUnit, ASym: Integer): Boolean;
+var
+  LUid, LSym: Integer;
+  LUsed: TPasSemaModel;
+begin
+  Result := False;
+  LUid := EnsureSysInitUnit;
+  if LUid < 0 then
+    Exit;
+  LUsed := FModels[LUid];
+  if LUsed.InterfaceScope = NIL_SCOPE then
+    Exit;
+  LSym := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
+  if LSym <> NIL_SYM then
+  begin
+    AUnit := LUid;
+    ASym := LSym;
+    Result := True;
+  end;
+end;
+
 // ANode is an attribute usage's TypeRef (`[Unsafe]` in `[Unsafe] FField:
 // TFoo;`) if its parent is the nkAttribute node AND it sits in that node's
 // TypeRef position (FirstChild) rather than among its `(...)` argument
@@ -823,6 +897,8 @@ begin
   LText := QualifiedText(AId, ANode);
   if SameText(LText, 'system') then
     Exit(EnsureSystemUnit);
+  if SameText(LText, 'sysinit') then
+    Exit(EnsureSysInitUnit);
   for LIdx := 0 to High(LM.UsesList) do
   begin
     if LM.UsesList[LIdx].UnitId < 0 then
@@ -2010,6 +2086,11 @@ begin
             LExt.UnitId := LUid; LExt.Sym := LSym;
             LModel.ExtRefMap.Add(LNode, LExt);
           end
+          else if FindInSysInitUnit(LNameLower, LUid, LSym) then
+          begin
+            LExt.UnitId := LUid; LExt.Sym := LSym;
+            LModel.ExtRefMap.Add(LNode, LExt);
+          end
           else if IsAttributeTypeRef(LModel, LNode) and
                   (FindInUses(AId, LNameLower + 'attribute', LUid, LSym) or
                    FindInSystemUnit(LNameLower + 'attribute', LUid, LSym)) then
@@ -2096,7 +2177,8 @@ begin
       Continue;
     if FindMemberX(XPlain(AId, LStruct), LNameLower, LUid, LSym, LCtx) or
        FindInUses(AId, LNameLower, LUid, LSym) or
-       FindInSystemUnit(LNameLower, LUid, LSym) then
+       FindInSystemUnit(LNameLower, LUid, LSym) or
+       FindInSysInitUnit(LNameLower, LUid, LSym) then
     begin
       LPend.Node := LNode;
       LPend.Ext.UnitId := LUid;
@@ -2192,8 +2274,9 @@ begin
   // never appears in a `uses` clause — pull it in NOW so the closure loop
   // and the cross passes below cover it too (nav inside an opened System.pas
   // works), and so no parallel CrossResolve worker triggers its first-time
-  // load mid-flight.
+  // load mid-flight. SysInit is the same story (bare HInstance/ModuleIsLib).
   EnsureSystemUnit;
+  EnsureSysInitUnit;
   Stage('main+sys');
   // Load the TRANSITIVE closure, breadth-first: resolve every not-yet-
   // processed model's uses, batch-preload the newly discovered files in
@@ -2294,8 +2377,9 @@ begin
   // while other workers read FModels[i] (the lock serializes the load
   // itself, not the container reads elsewhere). After the LN snapshot, so a
   // from-search-paths System stays outside the cross passes — exactly where
-  // the old lazy mid-CrossResolve load would have put it.
+  // the old lazy mid-CrossResolve load would have put it. SysInit: same deal.
   EnsureSystemUnit;
+  EnsureSysInitUnit;
   for LIdx := 0 to LN - 1 do
     ResolveUses(LIdx);
   Stage('main+sys+resolve');
@@ -2511,8 +2595,10 @@ begin
     // The implicit System unit is part of every closure (1.2.1) but never
     // named in a `uses` clause — pull it in up front (full, like
     // AnalyzeProject) so wave 1's BFS also walks its uses and the finalizer
-    // covers it. Matches AnalyzeProject's early EnsureSystemUnit.
+    // covers it. Matches AnalyzeProject's early EnsureSystemUnit. SysInit
+    // rides along the same way.
     EnsureSystemUnit;
+    EnsureSysInitUnit;
 
     // ---- Wave 1: interface-only closure (breadth-first) ----
     Report('intf');
