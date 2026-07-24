@@ -130,6 +130,7 @@ type
       out AUnit, ASym: Integer): Boolean;
     function FindInSystemUnit(const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
+    function IsAttributeTypeRef(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function UsesUnitOf(AId, ASym: Integer): Integer;
     function LocalHead(AModel: TPasSemaModel; ANode: Integer): Integer;
     function QualifiedText(AId, ANode: Integer): string;
@@ -732,6 +733,26 @@ begin
     ASym := LSym;
     Result := True;
   end;
+end;
+
+// ANode is an attribute usage's TypeRef (`[Unsafe]` in `[Unsafe] FField:
+// TFoo;`) if its parent is the nkAttribute node AND it sits in that node's
+// TypeRef position (FirstChild) rather than among its `(...)` argument
+// expressions. 19.3.1: the `Attribute` suffix may be omitted at the use
+// site (`[Weak]` names `WeakAttribute`) — real dcc tries the bare name
+// first, then retries with the suffix; a name this project resolves plainly
+// (SOME OTHER `TFooAttribute` declared under its own short alias) must not
+// pay the suffix-retry cost or risk resolving to the wrong symbol, so this
+// is only consulted after a normal-name lookup already failed.
+function TPasSemaProject.IsAttributeTypeRef(AModel: TPasSemaModel;
+  ANode: Integer): Boolean;
+var
+  LParent: Integer;
+begin
+  LParent := AModel.Tree.Nodes[ANode].Parent;
+  Result := (LParent <> NIL_NODE) and
+    (AModel.Tree.Nodes[LParent].Kind = nkAttribute) and
+    (AModel.Tree.Nodes[LParent].FirstChild = ANode);
 end;
 
 // The local symbol a designator head resolved to (reads RefMap only).
@@ -1985,6 +2006,13 @@ begin
             LModel.ExtRefMap.Add(LNode, LExt);
           end
           else if FindInSystemUnit(LNameLower, LUid, LSym) then
+          begin
+            LExt.UnitId := LUid; LExt.Sym := LSym;
+            LModel.ExtRefMap.Add(LNode, LExt);
+          end
+          else if IsAttributeTypeRef(LModel, LNode) and
+                  (FindInUses(AId, LNameLower + 'attribute', LUid, LSym) or
+                   FindInSystemUnit(LNameLower + 'attribute', LUid, LSym)) then
           begin
             LExt.UnitId := LUid; LExt.Sym := LSym;
             LModel.ExtRefMap.Add(LNode, LExt);

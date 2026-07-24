@@ -47,6 +47,7 @@ type
     function NextSib(ANode: Integer): Integer; inline;
     function NodeText(ANode: Integer): string; inline;
     function SkipAttr(AChild: Integer): Integer;
+    function IsAttributeTypeRef(ANode: Integer): Boolean;
     function SepAfter(ANode: Integer): string;
     function QualifiedNameText(ANode: Integer): string;
     procedure CollectRoot(ARoot: Integer);
@@ -149,6 +150,21 @@ begin
   Result := AChild;
   if (Result <> NIL_NODE) and (KindOf(Result) = nkAttrGroup) then
     Result := NextSib(Result);
+end;
+
+// ANode is an attribute usage's TypeRef (`[Table]` in `[Table] TFoo = class`)
+// if its parent is the nkAttribute node AND it sits in that node's TypeRef
+// position (FirstChild) rather than among its `(...)` argument expressions.
+// See PasTree.Sema.Project.IsAttributeTypeRef (same check, project-level
+// tree) for why this matters: 19.3.1 lets the `Attribute` suffix be omitted
+// at the use site.
+function TPasSemaResolver.IsAttributeTypeRef(ANode: Integer): Boolean;
+var
+  LParent: Integer;
+begin
+  LParent := FTree.Nodes[ANode].Parent;
+  Result := (LParent <> NIL_NODE) and (KindOf(LParent) = nkAttribute) and
+    (FirstChild(LParent) = ANode);
 end;
 
 // Text of the visible token immediately after ANode's last token ('','','':'').
@@ -1045,8 +1061,13 @@ begin
   case KindOf(ANode) of
     nkIdent:
       if not FIsDeclName[ANode] and (FModel.RefMap[ANode] = NIL_SYM) then
+      begin
         FModel.RefMap[ANode] :=
           FModel.Resolve(FNodeScope[ANode], LowerCase(NodeText(ANode)));
+        if (FModel.RefMap[ANode] = NIL_SYM) and IsAttributeTypeRef(ANode) then
+          FModel.RefMap[ANode] := FModel.Resolve(FNodeScope[ANode],
+            LowerCase(NodeText(ANode)) + 'attribute');
+      end;
 
     nkMember:
       begin
