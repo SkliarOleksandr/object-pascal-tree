@@ -151,6 +151,14 @@ type
     procedure BindName(AScope, ASym: Integer);
     // Local lookup in one scope (no chain).
     function FindLocal(AScope: Integer; const ANameLower: string): Integer;
+    // AScope's own names, then its Additional (joined) scopes, most-recently
+    // -added first, EACH CHECKED THE SAME WAY (so a joined scope's own
+    // joins are reachable too — e.g. a class's member scope has a nested
+    // enum's values joined into IT; a routine implementing that class's
+    // method joins the class's member scope in turn, and must still see the
+    // enum values two joins deep). FindLocal alone is one level only; this
+    // is what Resolve actually needs at each scope of its PARENT climb.
+    function FindLocalDeep(AScope: Integer; const ANameLower: string): Integer;
     // Full lookup: self -> additional (reverse) -> parent -> ...
     function Resolve(AScope: Integer; const ANameLower: string): Integer;
     procedure AddDiag(const ADiag: TSemaDiag);
@@ -274,26 +282,39 @@ begin
     Result := NIL_SYM;
 end;
 
+function TPasSemaModel.FindLocalDeep(AScope: Integer;
+  const ANameLower: string): Integer;
+var
+  LAdd: TArray<Integer>;
+  LIdx: Integer;
+begin
+  Result := FindLocal(AScope, ANameLower);
+  if Result <> NIL_SYM then
+    Exit;
+  // Joined scopes, most-recently-added first (uses/with priority) — each
+  // recursed into the SAME way, not just FindLocal'd, so a joined scope's
+  // own joins are reachable too.
+  LAdd := Scopes[AScope].Additional;
+  for LIdx := High(LAdd) downto 0 do
+  begin
+    Result := FindLocalDeep(LAdd[LIdx], ANameLower);
+    if Result <> NIL_SYM then
+      Exit;
+  end;
+  Result := NIL_SYM;
+end;
+
 function TPasSemaModel.Resolve(AScope: Integer;
   const ANameLower: string): Integer;
 var
-  LCur, LIdx: Integer;
-  LAdd: TArray<Integer>;
+  LCur: Integer;
 begin
   LCur := AScope;
   while LCur <> NIL_SCOPE do
   begin
-    Result := FindLocal(LCur, ANameLower);
+    Result := FindLocalDeep(LCur, ANameLower);
     if Result <> NIL_SYM then
       Exit;
-    // Joined scopes, most-recently-added first (uses/with priority).
-    LAdd := Scopes[LCur].Additional;
-    for LIdx := High(LAdd) downto 0 do
-    begin
-      Result := FindLocal(LAdd[LIdx], ANameLower);
-      if Result <> NIL_SYM then
-        Exit;
-    end;
     LCur := Scopes[LCur].Parent;
   end;
   Result := NIL_SYM;

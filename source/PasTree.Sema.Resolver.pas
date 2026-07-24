@@ -48,6 +48,7 @@ type
     function NodeText(ANode: Integer): string; inline;
     function SkipAttr(AChild: Integer): Integer;
     function IsAttributeTypeRef(ANode: Integer): Boolean;
+    function EnumJoinTarget(AScope: Integer): Integer;
     function SepAfter(ANode: Integer): string;
     function QualifiedNameText(ANode: Integer): string;
     procedure CollectRoot(ARoot: Integer);
@@ -478,19 +479,42 @@ begin
   end;
 end;
 
+// The nearest ancestor of AScope that is NOT itself a struct (class/record/
+// interface/object/helper) member scope — climbing past however many
+// classes/records the point in question is nested inside. A non-scoped
+// enum's element names inject as if the enum sat AT THAT SCOPE directly:
+// nesting an enum inside a class only namespaces the TYPE name (`TFoo.
+// TInner`), never the VALUES — dcc-verified: TWO unrelated classes A/B in
+// one unit, A's own `private type` nested enum's literal resolves bare
+// inside B's method too, and the same literal resolves bare from a
+// DIFFERENT unit that merely `uses` this one, as long as the nesting chain
+// up to the enum sits entirely in the INTERFACE section (an enum nested
+// inside an IMPLEMENTATION-section type stays unit-local, same as any other
+// implementation declaration — real dcc E2003s a cross-unit bare reference
+// to one). A routine-LOCAL nested type's enum, by contrast, stays properly
+// routine-scoped (dcc-verified: real E2003 outside the declaring routine)
+// — AScope is already non-struct there, so this is a no-op.
+function TPasSemaResolver.EnumJoinTarget(AScope: Integer): Integer;
+begin
+  Result := AScope;
+  while (Result <> NIL_SCOPE) and (FModel.Scopes[Result].Kind = sckStruct) do
+    Result := FModel.Scopes[Result].Parent;
+end;
+
 procedure TPasSemaResolver.CollectEnum(ANode, AOuter, ATypeSym: Integer);
 var
   LEnum, LChild, LName, LVal: Integer;
 begin
   // Each enum gets its own scope, so values of different enums never share a
-  // scope (no false redeclaration). The scope is also joined into the enclosing
-  // one so unqualified values resolve (non-scoped enums); qualified access
-  // (Enum.Value) works via the type symbol's member scope.
+  // scope (no false redeclaration). The scope is also joined into the
+  // enclosing one (see EnumJoinTarget) so unqualified values resolve
+  // (non-scoped enums); qualified access (Enum.Value) works via the type
+  // symbol's member scope.
   LEnum := FModel.AddScope(sckEnum, AOuter, ANode);
   FNodeScope[ANode] := LEnum;
   if ATypeSym <> NIL_SYM then
     FModel.Symbols[ATypeSym].MemberScope := LEnum;
-  FModel.JoinScope(AOuter, LEnum);
+  FModel.JoinScope(EnumJoinTarget(AOuter), LEnum);
   LChild := FirstChild(ANode);
   while LChild <> NIL_NODE do
   begin
