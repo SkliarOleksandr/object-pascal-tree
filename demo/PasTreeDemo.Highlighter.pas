@@ -140,6 +140,12 @@ type
     FLinkFrom: Integer;            // raw token idx range shown as a
     FLinkTo: Integer;              // ctrl+hover link (inclusive); -1 = none
     FInactiveAttri: TSynHighlighterAttributes;
+    { "Highlight other occurrences of the selected identifier" — plain NAME
+      match (no semantic resolution), see SetSameIdentHighlight. }
+    FSameIdentAttri: TSynHighlighterAttributes;
+    FSameIdentName: string;        // '' = feature off for this buffer
+    FSameIdentSkipFrom: Integer;   // raw token idx range EXCLUDED from the
+    FSameIdentSkipTo: Integer;     // highlight (the selection itself)
     function IsWeakKeyword: Boolean;
     procedure BuildWeakKeywordSpans(const ATree: TPasTree;
       const APreprocessed: TPasPreprocessed);
@@ -183,6 +189,25 @@ type
     { Diagnostics from the last tokenize pass (unterminated string/comment/
       directive, invalid char, ...) — handy for a future "N issues" readout. }
     function LexerDiagnosticCount: Integer;
+    { Raw token index (into this buffer's token stream) covering buffer
+      position (ALine, ACol) — SynEdit's own 1-based BufferCoord convention,
+      same as LineStartOffset/DoSetLine. Used by the host to find the
+      selection's OWN token, so SetSameIdentHighlight can exclude it. }
+    function RawTokenAt(ALine, ACol: Integer): Integer;
+    { Background-highlights every OTHER occurrence of AName (plain,
+      case-insensitive identifier-text match — no semantic resolution) in
+      this buffer; the occurrence at raw token [ASkipFrom, ASkipTo]
+      (typically the user's own selection) is excluded, so it isn't
+      double-highlighted under the editor's own selection color. Empty
+      AName turns the feature off for this buffer. The HOST invalidates the
+      editor on change (same convention as SetLinkRange). }
+    procedure SetSameIdentHighlight(const AName: string;
+      ASkipFrom, ASkipTo: Integer);
+    { The background color SetSameIdentHighlight paints with — set once
+      from the main form's color combo, shared across every open tab (each
+      has its own highlighter instance, so the host broadcasts this to all
+      of them on change; see PasTreeDemo.Main.cbHighlightColorChange). }
+    procedure SetSameIdentColor(AColor: TColor);
   end;
 
 implementation
@@ -251,6 +276,13 @@ begin
     'Inactive $IFDEF''d-out code');
   FInactiveAttri.Foreground := PAS_INACTIVE_COLOR;
   AddAttribute(FInactiveAttri);
+
+  FSameIdentAttri := TSynHighlighterAttributes.Create('SameIdent',
+    'Other occurrence of the selected identifier');
+  FSameIdentAttri.Background := clSkyBlue; // overwritten by SetSameIdentColor
+  AddAttribute(FSameIdentAttri);
+  FSameIdentSkipFrom := -1;
+  FSameIdentSkipTo := -1;
 
   SetAttributesOnChange(DefHighlightChange);
 
@@ -333,6 +365,25 @@ end;
 function TPasTreeSynHighlighter.LinkRangeEquals(AFrom, ATo: Integer): Boolean;
 begin
   Result := (FLinkFrom = AFrom) and (FLinkTo = ATo);
+end;
+
+function TPasTreeSynHighlighter.RawTokenAt(ALine, ACol: Integer): Integer;
+begin
+  EnsureFresh;
+  Result := LocateStartToken(LineStartOffset(ALine) + (ACol - 1));
+end;
+
+procedure TPasTreeSynHighlighter.SetSameIdentHighlight(const AName: string;
+  ASkipFrom, ASkipTo: Integer);
+begin
+  FSameIdentName := AName;
+  FSameIdentSkipFrom := ASkipFrom;
+  FSameIdentSkipTo := ASkipTo;
+end;
+
+procedure TPasTreeSynHighlighter.SetSameIdentColor(AColor: TColor);
+begin
+  FSameIdentAttri.Background := AColor;
 end;
 
 function TPasTreeSynHighlighter.LexerDiagnosticCount: Integer;
@@ -611,10 +662,26 @@ begin
     tkDirective:
       Result := FDirectiveAttri;
     tkIdentifier:
-      if IsWeakKeyword then
-        Result := FKeywordAttri
-      else
-        Result := FIdentifierAttri;
+      begin
+        if IsWeakKeyword then
+          Result := FKeywordAttri
+        else
+          Result := FIdentifierAttri;
+        // "Other occurrences of the selected identifier": a plain name
+        // match, excluding the selection's OWN token (see
+        // SetSameIdentHighlight) so it isn't double-highlighted under the
+        // editor's own selection color. Keeps Result's foreground/style
+        // (weak-keyword coloring, if any) — only the background changes.
+        if (FSameIdentName <> '') and
+           not ((FCurTokenAbsIdx >= FSameIdentSkipFrom) and
+                (FCurTokenAbsIdx <= FSameIdentSkipTo)) and
+           SameText(GetToken, FSameIdentName) then
+        begin
+          FSameIdentAttri.Foreground := Result.Foreground;
+          FSameIdentAttri.Style := Result.Style;
+          Result := FSameIdentAttri;
+        end;
+      end;
     tkIntLiteral, tkRealLiteral, tkControlChar:
       Result := FNumberAttri;
     tkStringLiteral, tkMultilineString:

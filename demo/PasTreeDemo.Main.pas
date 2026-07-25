@@ -67,6 +67,7 @@ type
     cbPlatform: TComboBox;
     cbHighlighter: TComboBox;
     cbThreading: TComboBox;    // background-analysis "phase done/total"
+    cbHighlightColor: TColorBox; // background color for "same identifier" highlight
     splLeft: TSplitter;
     vstFiles: TVirtualStringTree;
     pgc: TPageControl;
@@ -113,6 +114,8 @@ type
       Column: TColumnIndex; TextType: TVSTTextType; var CellText: string);
     procedure vtMessagesDblClick(Sender: TObject);
     procedure cbHighlighterChange(Sender: TObject);
+    procedure cbHighlightColorChange(Sender: TObject);
+    procedure cbHighlightColorGetColors(Sender: TCustomColorBox; Items: TStrings);
     procedure FindActionUpdate(Sender: TObject);
     procedure FindActionExecute(Sender: TObject);
     procedure GotoImplActionUpdate(Sender: TObject);
@@ -138,6 +141,11 @@ type
     FSemaProject: TPasSemaProject; // kept alive after RunParse (navigation)
     FNav: TPasNavigator;           // go-to-declaration over FSemaProject
     FLinkTab: TObject;             // TSourceTab currently showing a link
+    // "Highlight other occurrences of the selected identifier" — the
+    // background color, shared by every tab's own highlighter instance
+    // (each set from cbHighlightColor; new tabs pick up the current value —
+    // see OpenFileTab).
+    FIdentHighlightColor: TColor;
     FReparseTimer: TTimer;         // debounces re-analysis after edits
     // Background (non-blocking) analysis. Opening a project and the edit-
     // debounce reanalysis run on FAsyncSession's worker thread; FAsyncTimer
@@ -225,6 +233,9 @@ type
       Shift: TShiftState; X, Y: Integer);
     procedure EditorKeyUp(Sender: TObject; var Key: Word;
       Shift: TShiftState);
+    // "same identifier" highlight (plain name match, see
+    // PasTreeDemo.Highlighter.SetSameIdentHighlight)
+    procedure EditorStatusChange(Sender: TObject; Changes: TSynStatusChanges);
   end;
 
 var
@@ -242,6 +253,11 @@ type
     PasTreeHL: TPasTreeSynHighlighter; // kept even while SynEdit's is active
   public
     FilePath: string;                  // full path of the loaded file
+  end;
+
+  TNamedColor = record
+    Name: string;
+    Color: TColor;
   end;
 
   // Floating "Find" toolbar: non-modal (Show, not ShowModal) and always on
@@ -265,6 +281,40 @@ type
     // when the box is still empty — repeated Ctrl+F keeps your last search.
     procedure PopUp(const AInitialText: string);
   end;
+
+const
+  // Pastel-ish background swatches (readable under normal black text) for
+  // the "same identifier" highlight combo (cbHighlightColor) — SandyBrown
+  // first/default, per request.
+  IDENT_HIGHLIGHT_COLORS: array[0..9] of TNamedColor = (
+    (Name: 'SandyBrown';   Color: $0060A4F4),
+    (Name: 'Khaki';        Color: $008CE6F0),
+    (Name: 'LightSkyBlue'; Color: $00FACE87),
+    (Name: 'PaleGreen';    Color: $0098FB98),
+    (Name: 'Plum';         Color: $00DDA0DD),
+    (Name: 'Gold';         Color: $0000D7FF),
+    (Name: 'Salmon';       Color: $007280FA),
+    (Name: 'Thistle';      Color: $00D8BFD8),
+    (Name: 'PowderBlue';   Color: $00E6E0B0),
+    (Name: 'Wheat';        Color: $00B3DEF5)
+  );
+
+// Pascal identifier lexeme: letter/underscore, then letters/digits/
+// underscores. Gates whether a text SELECTION is even eligible for the
+// "same identifier" highlight — a multi-word or punctuation selection never
+// matches any whole identifier token anyway (the highlighter compares the
+// FULL token text), but this avoids bothering it with obvious non-identifier
+// selections (whitespace, an expression, ...).
+function IsPlainIdentifier(const S: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := (S <> '') and CharInSet(S[1], ['A'..'Z', 'a'..'z', '_']);
+  if Result then
+    for I := 2 to Length(S) do
+      if not CharInSet(S[I], ['A'..'Z', 'a'..'z', '0'..'9', '_']) then
+        Exit(False);
+end;
 
 constructor TFindBar.CreateFor(AOwnerForm: TfrmMain);
 begin
@@ -635,6 +685,9 @@ begin
     cbThreading.Items.Add('MultiThread');
   end;
   cbThreading.ItemIndex := 1; // MultiThread by default
+
+  FIdentHighlightColor := IDENT_HIGHLIGHT_COLORS[0].Color; // SandyBrown
+  cbHighlightColor.Selected := FIdentHighlightColor;
 end;
 
 // Re-colors SynEdit's built-in highlighter with PasTreeDemo.Highlighter's own
@@ -1002,6 +1055,7 @@ begin
   Result.OnMouseDown := EditorMouseDown;
   Result.OnKeyUp := EditorKeyUp;
   Result.OnChange := EditorChange;   // edits debounce a nav re-analysis
+  Result.OnStatusChange := EditorStatusChange; // "same identifier" highlight
   Result.PopupMenu := SourcePopupMenu;
   Result.SearchEngine := SynEditSearch1;
 
@@ -1011,6 +1065,7 @@ begin
   // the active one, so cbHighlighterChange can switch back without recreating it.
   LHL := TPasTreeSynHighlighter.Create(Result);
   LHL.SourceLines := Result.Lines;
+  LHL.SetSameIdentColor(FIdentHighlightColor);
   if cbHighlighter.ItemIndex = 0 then
     Result.Highlighter := FSynPasHL
   else
@@ -1734,6 +1789,76 @@ begin
     else
       LTab.Editor.Highlighter := LTab.PasTreeHL;
   end;
+end;
+
+{ "same identifier" highlight }
+
+// TColorBox's own [cbCustomColors] style calls this to populate the
+// dropdown — the standard VCL color-picker combo, restricted to exactly our
+// curated palette (no standard/extended/system colors mixed in). Swatch +
+// name drawing, custom-color entry, keyboard nav etc. all come from the
+// component itself; nothing to hand-roll here.
+procedure TfrmMain.cbHighlightColorGetColors(Sender: TCustomColorBox;
+  Items: TStrings);
+var
+  LColor: TNamedColor;
+begin
+  for LColor in IDENT_HIGHLIGHT_COLORS do
+    Items.AddObject(LColor.Name, TObject(LColor.Color));
+end;
+
+// Broadcasts the newly picked background color to every open tab's OWN
+// highlighter instance (each caches its own buffer, so there is no single
+// shared highlighter to update — see TSourceTab/OpenFileTab) and repaints
+// them. New tabs opened afterward pick up FIdentHighlightColor at creation
+// (see OpenFileTab).
+procedure TfrmMain.cbHighlightColorChange(Sender: TObject);
+var
+  LIdx: Integer;
+  LTab: TSourceTab;
+begin
+  FIdentHighlightColor := cbHighlightColor.Selected;
+  for LIdx := 0 to FOpenFiles.Count - 1 do
+  begin
+    LTab := TSourceTab(FOpenFiles.Objects[LIdx]);
+    LTab.PasTreeHL.SetSameIdentColor(FIdentHighlightColor);
+    LTab.Editor.Invalidate;
+  end;
+end;
+
+// SynEdit's own selection-change notification — fires for any selection
+// change regardless of input method (mouse drag, double-click word-select,
+// Shift+arrow, Ctrl+A, ...). A plain identifier selection arms the "same
+// identifier" highlight on THIS tab's own highlighter instance; anything
+// else (no selection, a multi-word/punctuation selection) clears it. Plain
+// NAME match, no semantic resolution — see PasTreeDemo.Highlighter.
+// SetSameIdentHighlight's own header comment.
+procedure TfrmMain.EditorStatusChange(Sender: TObject;
+  Changes: TSynStatusChanges);
+var
+  LEditor: TSynEdit;
+  LTab: TSourceTab;
+  LText: string;
+  LTok: Integer;
+begin
+  // FLoadingFile: LTab.PasTreeHL isn't assigned until AFTER OpenFileTab's own
+  // Result.Lines.LoadFromFile call returns (see its own comments) — loading
+  // text can itself fire a selection-change notification, which would
+  // otherwise dereference a still-nil PasTreeHL below.
+  if FLoadingFile or not (scSelection in Changes) then
+    Exit;
+  LEditor := TSynEdit(Sender);
+  LTab := TSourceTab(LEditor.Parent);
+  LText := LEditor.SelText;
+  if LEditor.SelAvail and IsPlainIdentifier(LText) then
+  begin
+    LTok := LTab.PasTreeHL.RawTokenAt(LEditor.BlockBegin.Line,
+      LEditor.BlockBegin.Char);
+    LTab.PasTreeHL.SetSameIdentHighlight(LText, LTok, LTok);
+  end
+  else
+    LTab.PasTreeHL.SetSameIdentHighlight('', -1, -1);
+  LEditor.Invalidate;
 end;
 
 initialization

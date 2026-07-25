@@ -44,7 +44,6 @@ object frmMain: TfrmMain
     Align = alTop
     BevelOuter = bvNone
     TabOrder = 0
-    ExplicitWidth = 1174
     object btnOpen: TButton
       Left = 8
       Top = 7
@@ -112,6 +111,16 @@ object frmMain: TfrmMain
       TabOrder = 5
       OnClick = btnParseRtlClick
     end
+    object cbHighlightColor: TColorBox
+      Left = 770
+      Top = 9
+      Width = 140
+      Height = 22
+      Style = [cbCustomColors]
+      TabOrder = 6
+      OnChange = cbHighlightColorChange
+      OnGetColors = cbHighlightColorGetColors
+    end
   end
   object vstFiles: TVirtualStringTree
     Left = 0
@@ -128,7 +137,6 @@ object frmMain: TfrmMain
     OnGetText = vstFilesGetText
     Touch.InteractiveGestures = [igPan, igPressAndTap]
     Touch.InteractiveGestureOptions = [igoPanSingleFingerHorizontal, igoPanSingleFingerVertical, igoPanInertia, igoPanGutter, igoParentPassthrough]
-    ExplicitTop = 40
     Columns = <>
   end
   object pnlBottom: TPanel
@@ -140,8 +148,6 @@ object frmMain: TfrmMain
     BevelOuter = bvNone
     ShowCaption = False
     TabOrder = 2
-    ExplicitTop = 539
-    ExplicitWidth = 1174
     object Panel1: TPanel
       Left = 0
       Top = 0
@@ -171,15 +177,13 @@ object frmMain: TfrmMain
       Header.AutoSizeIndex = 0
       Header.Height = 15
       Header.MainColumn = -1
-      TabOrder = 1
       PopupMenu = MessagesPopupMenu
+      TabOrder = 1
+      TreeOptions.SelectionOptions = [toRightClickSelect, toSelectNextNodeOnRemoval]
       OnDblClick = vtMessagesDblClick
       OnGetText = vtMessagesGetText
       Touch.InteractiveGestures = [igPan, igPressAndTap]
       Touch.InteractiveGestureOptions = [igoPanSingleFingerHorizontal, igoPanSingleFingerVertical, igoPanInertia, igoPanGutter, igoParentPassthrough]
-      ExplicitTop = 40
-      ExplicitWidth = 260
-      ExplicitHeight = 511
       Columns = <>
     end
   end
@@ -192,10 +196,6 @@ object frmMain: TfrmMain
     BevelOuter = bvNone
     ShowCaption = False
     TabOrder = 3
-    ExplicitLeft = 0
-    ExplicitTop = 0
-    ExplicitWidth = 1180
-    ExplicitHeight = 201
     object pgc: TPageControl
       Left = 0
       Top = 0
@@ -204,9 +204,6 @@ object frmMain: TfrmMain
       ActivePage = tsJson
       Align = alClient
       TabOrder = 0
-      ExplicitLeft = 264
-      ExplicitTop = 242
-      ExplicitHeight = 310
       object tsJson: TTabSheet
         Caption = 'AST JSON'
         TabVisible = False
@@ -214,7 +211,7 @@ object frmMain: TfrmMain
           Left = 0
           Top = 0
           Width = 908
-          Height = 448
+          Height = 468
           Align = alClient
           CaseSensitive = True
           Font.Charset = DEFAULT_CHARSET
@@ -236,7 +233,6 @@ object frmMain: TfrmMain
           IndentGuides.Visible = False
           IndentGuides.StructureHighlight = False
           ScrollbarAnnotations = <>
-          ExplicitHeight = 280
         end
       end
       object tsSema: TTabSheet
@@ -247,7 +243,7 @@ object frmMain: TfrmMain
           Left = 0
           Top = 0
           Width = 908
-          Height = 448
+          Height = 468
           Align = alClient
           Font.Charset = DEFAULT_CHARSET
           Font.Color = clWindowText
@@ -265,7 +261,6 @@ object frmMain: TfrmMain
           Gutter.Font.Quality = fqClearTypeNatural
           Gutter.Bands = <>
           ScrollbarAnnotations = <>
-          ExplicitHeight = 481
         end
       end
     end
