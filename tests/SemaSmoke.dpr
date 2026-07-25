@@ -71,6 +71,26 @@ begin
     end;
 end;
 
+// True when EVERY bare reference spelled ARefText resolved to something (and
+// there was at least one). Unlike RefResolvesTo this needs no target name, so
+// it also covers symbols with no DeclNode at all — exactly the seeded
+// builtins/intrinsics case.
+function AllRefsResolved(const ARefText: string): Boolean;
+var
+  LNode, LSeen: Integer;
+begin
+  LSeen := 0;
+  for LNode := 0 to High(GModel.RefMap) do
+    if (GTree.Nodes[LNode].Kind = nkIdent) and
+       SameText(GTree.NodeText(LNode), ARefText) then
+    begin
+      Inc(LSeen);
+      if GModel.RefMap[LNode] = NIL_SYM then
+        Exit(False);
+    end;
+  Result := LSeen > 0;
+end;
+
 function DiagCount(const ACode: string): Integer;
 begin
   Result := 0;
@@ -345,6 +365,53 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // Compiler intrinsics with NO declaration anywhere (spec B.4.3): the whole
+  // classic file-I/O family, raw memory, Halt/GetDir, the Variant four,
+  // CompilerVersion and the OpenString type. Every one of these must resolve
+  // straight out of the seeded System scope — nothing else CAN resolve them
+  // (real bug: the RTL's own System.Classes.pas got a false E2003 on GetMem).
+  // The negative half matters just as much: `Abort` looks like a flow
+  // intrinsic but is an ordinary System.SysUtils routine, so a unit that does
+  // not use SysUtils must leave it UNRESOLVED.
+  SRC_INTRINSICS =
+    'unit U;'#10 +
+    'interface'#10 +
+    'implementation'#10 +
+    'procedure P(var OS: OpenString);'#10 +
+    'var'#10 +
+    '  P1: Pointer;'#10 +
+    '  F: file;'#10 +
+    '  T: Text;'#10 +
+    '  N: Integer;'#10 +
+    '  D: string;'#10 +
+    '  V1, V2: Variant;'#10 +
+    'begin'#10 +
+    '  GetMem(P1, 16); ReallocMem(P1, 32); FreeMem(P1);'#10 +
+    '  AssignFile(T, ''x''); Reset(T); Eof(T); Eoln(T);'#10 +
+    '  SeekEof(T); SeekEoln(T); Append(T); CloseFile(T);'#10 +
+    '  Assign(F, ''y''); Rewrite(F); Seek(F, 0);'#10 +
+    '  FilePos(F); FileSize(F); Truncate(F); Close(F);'#10 +
+    '  BlockRead(F, P1, 1); BlockWrite(F, P1, 1);'#10 +
+    '  Erase(F); Rename(F, ''z'');'#10 +
+    '  GetDir(0, D);'#10 +
+    '  VarClear(V1); VarCopy(V1, V2); VarCast(V1, V2, 0);'#10 +
+    '  VarArrayRedim(V1, 4);'#10 +
+    '  N := Trunc(CompilerVersion);'#10 +
+    '  if N = 0 then Halt(1);'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  // Companion negative case — see SRC_INTRINSICS.
+  SRC_NOTINTRINSIC =
+    'unit U;'#10 +
+    'interface'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'begin'#10 +
+    '  Abort;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // Interface-only symbol-id stability: the interface section declares types,
   // fields, a var and routines; the implementation adds bodies (and its own
   // locals). Because SeedSystemScope runs first (identical) and the interface
@@ -506,6 +573,23 @@ begin
     RefResolvesTo('Caption', 'Caption'));
   Ok('with-inherit: Index resolves (TDerived''s own)',
     RefResolvesTo('Index', 'Index'));
+  GModel.Free;
+
+  // 9e. declaration-less compiler intrinsics (spec B.4.3) resolve from the
+  // seeded System scope — and `Abort`, which is NOT one, still does not.
+  Analyze(SRC_INTRINSICS);
+  Ok('intrinsics: no diags at all', Length(GModel.Diags) = 0);
+  for var LName in ['GetMem', 'FreeMem', 'ReallocMem', 'Assign', 'AssignFile',
+    'Reset', 'Rewrite', 'Append', 'Close', 'CloseFile', 'Seek', 'Eof', 'Eoln',
+    'SeekEof', 'SeekEoln', 'FilePos', 'FileSize', 'Truncate', 'Erase',
+    'Rename', 'BlockRead', 'BlockWrite', 'GetDir', 'VarClear', 'VarCopy',
+    'VarCast', 'VarArrayRedim', 'Halt', 'CompilerVersion', 'OpenString'] do
+    Ok('intrinsics: ' + LName + ' resolves', AllRefsResolved(LName));
+  GModel.Free;
+
+  Analyze(SRC_NOTINTRINSIC);
+  Ok('intrinsics: Abort is NOT seeded (needs System.SysUtils)',
+    not AllRefsResolved('Abort'));
   GModel.Free;
 
   // 10. interface-only symbol ids are a prefix of the full model's ids

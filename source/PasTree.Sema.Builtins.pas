@@ -72,6 +72,12 @@ begin
   T('PWideChar', tcPointer); T('PByte', tcPointer);
   // Variants / structured / misc.
   T('Variant', tcVariant); T('OleVariant', tcVariant);
+  // Classic open-string parameter type (B.4.3): compiler-provided, NOT
+  // declared in System.pas. dcc only accepts it in a `var` parameter's type
+  // slot (`procedure P(var S: OpenString)`); anywhere else it is E2005 'not a
+  // type identifier'. That positional rule is beyond what resolution needs —
+  // registering the NAME is what keeps it from reading as undeclared.
+  T('OpenString', tcString);
   T('TObject', tcClass); T('Exception', tcClass); T('TClass', tcClassOf);
   T('IInterface', tcInterface); T('IUnknown', tcInterface);
   T('TGUID', tcRecord); T('TArray', tcArray); T('TBytes', tcArray);
@@ -85,22 +91,58 @@ begin
   K('nil', skConst, NIL_SYM);
   K('MaxInt', skConst, NIL_SYM);
   K('MaxLongint', skConst, NIL_SYM);
+  // System.pas's own `CompilerVersion = 0.0` sits inside a (* ... *) COMMENT
+  // ("assigned a value by the compiler when the system unit is compiled") —
+  // so, unlike RTLVersion (a real const), nothing declares it and it must be
+  // seeded here. A grep-based audit is fooled by that commented-out block;
+  // dcc resolves it with no uses clause, which is the check that matters.
+  K('CompilerVersion', skConst, NIL_SYM);
 
   // Intrinsic routines (result typing deferred) — the documented "Delphi
-  // Intrinsic Routines" set (compiler-magic, no System.pas declaration);
-  // names System.pas DOES declare (Move, GetMem, Halt, ...) are deliberately
-  // NOT here — they resolve through the real unit like any other name.
+  // Intrinsic Routines" set, i.e. spec B.4.3's catalog: compiler-magic names
+  // with NO declaration anywhere, so nothing else can ever resolve them.
+  // Names the RTL DOES declare (Move, Pos, Sqrt, Flush, ChDir/MkDir/RmDir,
+  // Mark/Release, ...) are deliberately NOT here — they resolve through the
+  // real System unit like any other name. The dividing line was verified
+  // per-name against dcc (does a unit with NO uses clause resolve it?) plus
+  // this project's own dump of System.pas's interface scope; grepping the
+  // source alone is not enough, since some names appear only as record
+  // FIELDS (TMemoryManager.GetMem, TVariantManager.VarClear) or inside a
+  // comment (CompilerVersion) and so read as "declared" when they are not.
   for var LName in ['Length', 'SetLength', 'SetString', 'High', 'Low', 'Ord',
     'Chr', 'Assigned', 'Inc', 'Dec', 'SizeOf', 'Assert', 'Copy', 'New',
     'Dispose', 'Include', 'Exclude', 'Write', 'Writeln', 'Read', 'Readln',
-    'Exit', 'Break', 'Continue', 'Abort', 'TypeInfo', 'Delete', 'Insert',
+    'Exit', 'Break', 'Continue', 'TypeInfo', 'Delete', 'Insert',
     'FillChar', 'Odd', 'Pred', 'Succ', 'Default', 'Trunc', 'Round', 'Abs',
     'Sqr', 'Pi', 'Concat', 'Str', 'Val', 'Swap', 'Hi', 'Lo', 'Addr', 'Ptr',
     'Slice', 'RunError', 'Initialize', 'Finalize', 'GetTypeKind',
     'IsManagedType', 'IsConstValue', 'HasWeakRef', 'TypeHandle', 'TypeOf',
     'ReturnAddress', 'AddressOfReturnAddress', 'AtomicIncrement',
     'AtomicDecrement', 'AtomicExchange', 'AtomicCmpExchange', 'MulDivInt64',
-    'Fail'] do
+    'Fail',
+    // Flow. (`Abort` is NOT one of these — it is a real System.SysUtils
+    // routine, so code using it without that unit must still get E2003;
+    // it was previously in this list, wrongly making us accept such code.)
+    'Halt',
+    // Memory (by-ref). None of these three is declared in System.pas — the
+    // only GetMem/FreeMem/ReallocMem there are FIELDS of the deprecated
+    // TMemoryManager record, which is why a source grep suggests otherwise.
+    'GetMem', 'FreeMem', 'ReallocMem',
+    // Classic file I/O (by-ref file var) — the whole Turbo-era family is
+    // compiler-magic, none of it declared: real dcc resolves every one of
+    // these in a unit with an empty uses clause.
+    'Assign', 'AssignFile', 'Reset', 'Rewrite', 'Append', 'Close',
+    'CloseFile', 'Seek', 'Eof', 'Eoln', 'SeekEof', 'SeekEoln', 'FilePos',
+    'FileSize', 'Truncate', 'Erase', 'Rename', 'BlockRead', 'BlockWrite',
+    // Directory: only GetDir is intrinsic — ChDir/MkDir/RmDir ARE declared
+    // in System.pas (verified), so they must not be seeded here.
+    'GetDir',
+    // Variants. Again fields of TVariantManager, not declarations; only
+    // these four resolve bare (VarCastOle/VarCopyNoInd/VarArrayGet/
+    // VarArrayPut do NOT — real dcc E2003s them).
+    'VarClear', 'VarCast', 'VarCopy', 'VarArrayRedim',
+    // 13.0 (see ch.04 §4.11.1).
+    'NameOf'] do
     K(LName, skRoutine, NIL_SYM);
 
   Result := LSys;
