@@ -365,6 +365,49 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // Record variant parts (9.1.3), all four tag shapes plus nesting. The
+  // optional TAG NAME is a real, storage-occupying, accessible field (dcc-
+  // verified: R.data := 1 compiles; naming the tag grows SizeOf) -- nothing
+  // used to declare it, so it read as an undeclared REFERENCE (real bug:
+  // System.Curl.pas's `case data: Integer of`, plus 7 more tag names across
+  // the RTL). The tag TYPE is an ordinal type, not just a type name: an
+  // INLINE ANONYMOUS ENUM (spec 9.1.3's own example) used to derail the
+  // parser entirely, turning branch LABELS into fields and `(Radius: Double)`
+  // into an enum type. Every shape below is accepted by real dcc.
+  SRC_VARIANT =
+    'unit U;'#10'interface'#10 +
+    'type'#10 +
+    '  TAll = record'#10 +
+    '    Head: Integer;'#10 +
+    '    case data: Integer of'#10 +
+    '      0: (whatever: Pointer);'#10 +
+    '      1: (inner: Byte;'#10 +
+    '          case sub: Boolean of'#10 +          // nested, itself tagged
+    '            True:  (deep: Word);'#10 +
+    '            False: (other: ShortInt));'#10 +
+    '  end;'#10 +
+    '  TShape = record'#10 +
+    '    case Kind: (skCircle, skRect) of'#10 +    // inline anonymous enum
+    '      skCircle: (Radius: Double);'#10 +
+    '      skRect:   (W, H: Double);'#10 +
+    '  end;'#10 +
+    '  TSub = record'#10 +
+    '    case Tag: 0..9 of'#10 +                   // subrange
+    '      0: (A: Integer);'#10 +
+    '  end;'#10 +
+    '  TAnon = record'#10 +
+    '    case Integer of'#10 +                     // anonymous: NO tag field
+    '      0: (thing: Pointer);'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var R: TAll; S: TShape;'#10 +
+    'begin'#10 +
+    '  R.data := 1; R.whatever := nil; R.inner := 2;'#10 +
+    '  R.sub := True; R.deep := 3;'#10 +
+    '  S.Kind := skCircle; S.Radius := 1.0;'#10 +
+    'end;'#10'end.'#10;
+
   // Compiler intrinsics with NO declaration anywhere (spec B.4.3): the whole
   // classic file-I/O family, raw memory, Halt/GetDir, the Variant four,
   // CompilerVersion and the OpenString type. Every one of these must resolve
@@ -574,6 +617,29 @@ begin
   Ok('with-inherit: Index resolves (TDerived''s own)',
     RefResolvesTo('Index', 'Index'));
   GModel.Free;
+
+  // 9f. record variant parts: tag names are real fields, every tag-type form
+  // parses, and an anonymous tag declares nothing.
+  Analyze(SRC_VARIANT);
+  Ok('variant: no diags at all', Length(GModel.Diags) = 0);
+  for var LName in ['data', 'sub', 'Kind', 'Tag'] do
+    Ok('variant: tag ' + LName + ' is a field', HasSym(LName, skField));
+  for var LName in ['Head', 'whatever', 'inner', 'deep', 'other', 'thing',
+    'Radius', 'W', 'H', 'A'] do
+    Ok('variant: branch field ' + LName, HasSym(LName, skField));
+  // The inline-enum tag type must yield real enum VALUES (they used to come
+  // out as fields, with `(Radius: Double)` mis-parsed into an enum type).
+  Ok('variant: inline enum tag values are enum values, not fields',
+    HasSym('skCircle', skEnumValue) and HasSym('skRect', skEnumValue) and
+    not HasSym('skCircle', skField));
+  Ok('variant: Radius is a Double field, not an enum value',
+    (TypeOf('radius', skField) = 'Double') and
+    not HasSym('Radius', skEnumValue));
+  Ok('variant: named tag binds its type (data : Integer)',
+    TypeOf('data', skField) = 'Integer');
+  // `case Integer of` must NOT invent a field named after the type.
+  Ok('variant: anonymous tag declares no field',
+    not HasSym('Integer', skField));
 
   // 9e. declaration-less compiler intrinsics (spec B.4.3) resolve from the
   // seeded System scope — and `Abort`, which is NOT one, still does not.

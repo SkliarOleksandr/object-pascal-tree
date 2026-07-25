@@ -1832,7 +1832,15 @@ begin
     Next;
     Next;
   end;
-  FB.Adopt(LPart, ParseTypeRef);
+  // The tag type is an ORDINAL TYPE (9.1.3 grammar), not just a type NAME:
+  // besides a named ref it may be an INLINE ANONYMOUS ENUM — `case Kind:
+  // (skCircle, skRect) of`, the spec's own 9.1.3 example — or a subrange
+  // (`case Tag: 0..9 of`). ParseTypeRef accepts only identifiers, so it
+  // errored on the '(' and every following token shifted, turning the branch
+  // LABELS into fields and `(Radius: Double)` into an enum type. ParseTypeExpr
+  // covers all three forms and, unlike its tkSet/tkFile branches, never
+  // consumes the `of` that terminates the tag type here.
+  FB.Adopt(LPart, ParseTypeExpr);
   Expect(tkOf, '"of"');
   while not (CurKind in [tkEnd, tkRParen, tkEndOfFile]) do
   begin

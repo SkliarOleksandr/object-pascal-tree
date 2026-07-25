@@ -75,6 +75,7 @@ type
     procedure CollectTypeDecl(ANode, AScope: Integer);
     procedure CollectStruct(ANode, AOuter, ATypeSym: Integer);
     procedure CollectEnum(ANode, AOuter, ATypeSym: Integer);
+    procedure CollectVariantPart(ANode, AScope: Integer);
     procedure CollectUsesItem(AItem, AScope: Integer);
     procedure CollectRoutine(ANode, AScope: Integer);
     procedure Collect(ANode, AScope: Integer);
@@ -571,6 +572,51 @@ begin
   end;
 end;
 
+// 9.1.3 `case [Tag:] OrdinalType of <labels>: (fields) ...` inside a record.
+//
+// The optional TAG NAME is a REAL field of the record — it occupies storage
+// and is freely readable/assignable, not a cosmetic annotation on the type.
+// dcc-verified both ways: `R.data := 2` compiles, and naming the tag grows
+// SizeOf by the tag type's width (12 vs 8 for the same record with an
+// anonymous `case Integer of`). Nothing here declared it, so the generic
+// Collect fallthrough walked the name as an ordinary REFERENCE and it read as
+// undeclared (real bug: System.Curl.pas's `case data: Integer of`).
+//
+// Presence of the tag is decided by the ':' AFTER the first child, not by its
+// node kind: an anonymous tag (`case Integer of`) also leads with an nkIdent
+// — the type name — so the kinds are identical in both shapes.
+//
+// Everything after the tag name (the tag type, then each nkVariantBranch)
+// collects into the SAME scope: a branch's fields are the record's own
+// members (all branches overlay one another in storage), and a branch may
+// end with a NESTED variant part, which lands back here through Collect.
+procedure TPasSemaResolver.CollectVariantPart(ANode, AScope: Integer);
+var
+  LChild, LSym: Integer;
+  LKind: TSemaSymbolKind;
+begin
+  LChild := FirstChild(ANode);
+  if (LChild <> NIL_NODE) and (KindOf(LChild) = nkIdent) and
+     (SepAfter(LChild) = ':') then
+  begin
+    // Mirrors the nkVarDecl case's own scope test, so a variant part reached
+    // outside a struct body still declares something sane rather than a field
+    // in a non-struct scope.
+    if FModel.Scopes[AScope].Kind = sckStruct then
+      LKind := skField
+    else
+      LKind := skVar;
+    LSym := DeclareSym(AScope, LKind, NodeText(LChild), LChild);
+    FModel.Symbols[LSym].TypeNode := NextSib(LChild);   // the tag type
+    LChild := NextSib(LChild);
+  end;
+  while LChild <> NIL_NODE do
+  begin
+    Collect(LChild, AScope);
+    LChild := NextSib(LChild);
+  end;
+end;
+
 procedure TPasSemaResolver.CollectUsesItem(AItem, AScope: Integer);
 var
   LNameNode, LLeaf, LStr, LSym: Integer;
@@ -854,6 +900,11 @@ begin
         DeclareNamesAndType(ANode, AScope, skField)
       else
         DeclareNamesAndType(ANode, AScope, skVar);
+
+    // Reached both from CollectStruct's own fallthrough (a record's top-level
+    // `case` part) and, recursively, from a branch that ends with a nested one.
+    nkVariantPart:
+      CollectVariantPart(ANode, AScope);
 
     nkConstDecl:
       begin
