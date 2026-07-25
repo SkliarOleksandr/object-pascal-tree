@@ -146,6 +146,8 @@ type
       const ACode, AMsg: string);
     function RoutineArity(AMid, ASym: Integer; out AReq, ATot: Integer;
       out AVariadic: Boolean): Boolean;
+    function CalleeShadowsUses(AModel: TPasSemaModel;
+      ACallee, ALocalSym: Integer): Boolean;
     procedure CheckCalls(AId: Integer);
     // Phase 3c: cross-model typing.
     function Instantiate(const ABase: TSemaXType;
@@ -1045,6 +1047,50 @@ begin
   Result := True;
 end;
 
+// True when ACallee (a call's callee identifier) is already bound to a
+// declaration NEARER than any used unit's globals — so those globals are
+// shadowed and must NOT be gathered as arity candidates for this call.
+// Covers: a method reached through implicit Self (same-unit, via RefMap's
+// struct-scoped symbol; or inherited from a CROSS-unit ancestor, which lands
+// in ExtRefMap via the inherited-member pass), a nested routine, and a
+// local/param/field/property of procedural type called through its value.
+//
+// dcc-verified: inside `TStrings.IndexOfObject`, unqualified
+// `GetObject(Result)` means `TStrings.GetObject(Index)` — Winapi.Windows'
+// 3-parameter GDI `GetObject`, though perfectly visible through
+// System.Classes' own `uses`, simply is not a candidate. Gathering it anyway
+// made a 1-argument call look like it was missing two (real bug: E2035 on
+// System.Classes.pas:7230).
+//
+// sckSystem is deliberately NOT treated as shadowing: a used unit's global
+// DOES override a compiler builtin of the same name, so for a builtin
+// binding the sweep is still the right thing.
+function TPasSemaProject.CalleeShadowsUses(AModel: TPasSemaModel;
+  ACallee, ALocalSym: Integer): Boolean;
+var
+  LExt: TPasExtRef;
+  LScope: Integer;
+begin
+  if ALocalSym <> NIL_SYM then
+  begin
+    LScope := AModel.Symbols[ALocalSym].Scope;
+    Result := (LScope <> NIL_SCOPE) and
+      not (AModel.Scopes[LScope].Kind in
+        [sckUnit, sckImplementation, sckSystem]);
+    Exit;
+  end;
+  // Not locally bound. An inherited MEMBER found by CrossResolveInherited
+  // still shadows; a used unit's own unit-level global — the very thing the
+  // sweep exists to check — does not.
+  Result := False;
+  if AModel.ExtRefMap.TryGetValue(ACallee, LExt) then
+  begin
+    LScope := FModels[LExt.UnitId].Symbols[LExt.Sym].Scope;
+    Result := (LScope <> NIL_SCOPE) and
+      (FModels[LExt.UnitId].Scopes[LScope].Kind = sckStruct);
+  end;
+end;
+
 // Cross-unit argument-count check: gathers a call's candidate routines from the
 // local overload chain PLUS every resolved used unit's interface, then flags
 // E2035/E2034 only if no candidate's arity admits the argument count. Runs only
@@ -1099,6 +1145,11 @@ begin
     if (LLocalHead <> NIL_SYM) and
        (LModel.Symbols[LLocalHead].Kind in [skType, skBuiltinType]) then
       Continue;   // a type cast, not a call
+    // Whatever this call means, it is NOT one of the used units' globals —
+    // so the sweep below would only gather irrelevant same-named candidates
+    // and arity-check against them. See CalleeShadowsUses.
+    if CalleeShadowsUses(LModel, LCallee, LLocalHead) then
+      Continue;
 
     LArgCount := 0;
     LArg := LModel.Tree.Nodes[LCallee].NextSibling;

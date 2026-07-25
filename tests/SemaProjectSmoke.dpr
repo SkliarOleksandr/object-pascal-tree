@@ -84,6 +84,73 @@ const
     '  F(1, 2, 3);'#10 +       // fits neither -> E2034
     'end;'#10'end.'#10;
 
+  // Arity candidates must respect SHADOWING: a used unit's global is NOT a
+  // candidate for an unqualified call that already binds to something nearer.
+  // UnitGdi plays Winapi.Windows (a 3-parameter GetObject); UnitShadow calls
+  // `GetObject(I)` with ONE argument in four positions where dcc binds it
+  // elsewhere -- an own method, an inherited method from a CROSS-unit
+  // ancestor, a nested routine, and a procedural-type field. Real bug: the
+  // RTL's own System.Classes.pas:7230 (TStrings.IndexOfObject) plus 45 more
+  // across 8 units, all this one cause.
+  UNIT_GDI =
+    'unit UnitGdi;'#10'interface'#10 +
+    'function GetObject(P1, P2, P3: Integer): Integer;'#10 +
+    'procedure Fire(S: TObject);'#10'implementation'#10 +
+    'function GetObject(P1, P2, P3: Integer): Integer; begin Result := 0; end;'#10 +
+    'procedure Fire(S: TObject); begin end;'#10'end.'#10;
+
+  UNIT_ANCESTOR =
+    'unit UnitAncestor;'#10'interface'#10 +
+    'type'#10 +
+    '  TBase = class'#10 +
+    '    function GetObject(Index: Integer): TObject; virtual;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TBase.GetObject(Index: Integer): TObject;'#10 +
+    'begin Result := nil; end;'#10'end.'#10;
+
+  UNIT_SHADOW =
+    'unit UnitShadow;'#10'interface'#10'uses UnitGdi, UnitAncestor;'#10 +
+    'type'#10 +
+    '  TProc1 = procedure(S: TObject) of object;'#10 +
+    '  TOwn = class'#10 +
+    '    function GetObject(Index: Integer): TObject; virtual;'#10 +
+    '    function Find(O: TObject): Integer;'#10 +
+    '  end;'#10 +
+    '  TDeriv = class(TBase)'#10 +
+    '    function Find(O: TObject): Integer;'#10 +
+    '  end;'#10 +
+    '  THold = class'#10 +
+    '    GetObject: TProc1;'#10 +
+    '    procedure Go(S: TObject);'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TOwn.GetObject(Index: Integer): TObject;'#10 +
+    'begin Result := nil; end;'#10 +
+    // own method wins over UnitGdi.GetObject
+    'function TOwn.Find(O: TObject): Integer;'#10 +
+    'begin Result := 0; if GetObject(1) = O then Result := 1; end;'#10 +
+    // method inherited from a CROSS-unit ancestor also wins
+    'function TDeriv.Find(O: TObject): Integer;'#10 +
+    'begin Result := 0; if GetObject(1) = O then Result := 1; end;'#10 +
+    // a procedural-type FIELD, called through its value
+    'procedure THold.Go(S: TObject);'#10 +
+    'begin GetObject(S); end;'#10 +
+    // a NESTED routine shadows it too
+    'procedure UseNested;'#10 +
+    '  function GetObject(Index: Integer): TObject;'#10 +
+    '  begin Result := nil; end;'#10 +
+    'begin'#10 +
+    '  if GetObject(0) = nil then Exit;'#10 +
+    'end;'#10 +
+    // ...but a genuinely cross-unit call with the wrong arity MUST still be
+    // caught. At UNIT level nothing shadows GetObject (THold's field lives in
+    // the struct scope, TOwn's in its own), so this binds to UnitGdi's
+    // 3-parameter global and one argument really is too few.
+    'procedure Genuine;'#10 +
+    'begin GetObject(1); end;'#10 +
+    'end.'#10;
+
 function ModelByName(const ANameLower: string): TPasSemaModel;
 begin
   Result := nil;
@@ -163,6 +230,9 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitOvl1.pas'), UNIT_OVL1);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitOvl2.pas'), UNIT_OVL2);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitOvlUse.pas'), UNIT_OVLUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitGdi.pas'), UNIT_GDI);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitAncestor.pas'), UNIT_ANCESTOR);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitShadow.pas'), UNIT_SHADOW);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -215,6 +285,17 @@ begin
     Ok('Ovl: E2034 x1 (F(1,2,3) fits neither)', DiagCount(LOvl, 'E2034') = 1);
     Ok('Ovl: no E2035 (merge covers F(1) and F(a,b))',
       DiagCount(LOvl, 'E2035') = 0);
+
+    // Shadowing beats used-unit arity candidates (see UNIT_SHADOW).
+    var LShadow := ModelByName('unitshadow');
+    Ok('Shadow: use unit loaded', Assigned(LShadow));
+    Ok('Shadow: uses fully resolved', LShadow.AllUsesResolved);
+    Ok('Shadow: no E2034 at all', DiagCount(LShadow, 'E2034') = 0);
+    // Exactly ONE E2035: the genuine `Fire;` (0 args, needs 1). The four
+    // shadowed GetObject(1) calls must contribute none.
+    Ok('Shadow: exactly 1 E2035 — the genuine cross-unit arity error only, '
+      + 'none from the four shadowed GetObject calls',
+      DiagCount(LShadow, 'E2035') = 1);
 
     // Module status / snapshot API: AnalyzeDirectory takes the directory's
     // own units all the way to msCrossReady, and TryGetSnapshot gates on the
