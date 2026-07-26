@@ -127,9 +127,18 @@ type
     procedure ResolveUses(AId: Integer);
     procedure CrossResolve(AId: Integer);
     function StructSymOfNode(AModel: TPasSemaModel; ANode: Integer): Integer;
+    // `with` over a target whose TYPE lives in another unit (ch.05 §5.7) —
+    // see FindInEnclosingWith.
+    function WithTargetTypeX(AId, ANode: Integer): TSemaXType;
+    function InsideWithBody(AModel: TPasSemaModel; ANode: Integer): Boolean;
+    function FindInEnclosingWith(AId, ANode: Integer;
+      const ANameLower: string; out AUid, ASym: Integer): Boolean;
     procedure CrossResolveInherited(AId: Integer;
       var APending: TArray<TPasInhPending>);
     procedure RunInheritedPass(ACount: Integer);
+    procedure CrossResolveWith(AId: Integer;
+      var APending: TArray<TPasInhPending>);
+    procedure RunWithPass(ACount: Integer);
     function FindInUses(AId: Integer; const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
     function FindInSystemUnit(const ANameLower: string;
@@ -2117,6 +2126,11 @@ begin
           // QualifierUnitAt for the bulk of nodes (method bodies).
           if StructSymOfNode(LModel, LNode) <> NIL_SYM then
             Continue;
+          // Same reason, for a `with` body whose target type is cross-unit:
+          // resolving it needs FindMemberX over OTHER models, so it waits for
+          // the frozen-ExtRefMap pass too (see FindInEnclosingWith).
+          if InsideWithBody(LModel, LNode) then
+            Continue;
           LNameLower := LowerCase(LModel.Tree.NodeText(LNode));
           if (LNameLower = 'result') or (LNameLower = 'self') then
             Continue;   // implicit routine/method names
@@ -2176,6 +2190,162 @@ begin
   end;
 end;
 
+{ `with` over a CROSS-UNIT target type (ch.05 §5.7)
+
+  PasTree.Sema.Resolver.ResolveWithStmts already opens a with-target's member
+  scope — but only when the target's type is resolvable INTRA-unit, because it
+  works by joining the type's MemberScope, and a scope index only means
+  anything inside its own model. In real code the target's type usually comes
+  from another unit (`with LTZ.StandardDate do` where LTZ: TTimeZoneInformation
+  from Winapi.Windows — System.DateUtils.pas:2612), and the whole body then
+  stayed unresolved and got a false E2003 per member.
+
+  Cross-unit member references cannot use scope joining at all; the project
+  records them in ExtRefMap instead, exactly as the inherited-member pass
+  does. So this mirrors that pass: CrossResolve DEFERS an unresolved ident
+  sitting in a with body (InsideWithBody), and CrossResolveInherited — which
+  already runs late enough for every model's ExtRefMap to be frozen —
+  resolves it here. }
+
+// The cross-model TYPE of a with-target expression, deliberately computed
+// WITHOUT the Phase-3c tables: SymTypeX/ExprTypeX are filled by BindTypesX/
+// CrossType, which run AFTER the pass that has to decide E2003, so this walks
+// RefMap/ExtRefMap and declared type NODES directly (ResolveTypeExpr does the
+// same and is likewise table-free).
+function TPasSemaProject.WithTargetTypeX(AId, ANode: Integer): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LBase, LName, LSym, LMemMid, LMemSym, LCtx: Integer;
+  LExt: TPasExtRef;
+  LBX: TSemaXType;
+begin
+  Result := XNil;
+  if ANode = NIL_NODE then
+    Exit;
+  LM := FModels[AId];
+  case LM.Tree.Nodes[ANode].Kind of
+    nkParen:
+      Result := WithTargetTypeX(AId, LM.Tree.Nodes[ANode].FirstChild);
+
+    // `with GetRec do` — a parameterless call; a routine symbol's TypeNode IS
+    // its result type, so the callee resolves through the nkIdent case below.
+    nkCall:
+      Result := WithTargetTypeX(AId, LM.Tree.Nodes[ANode].FirstChild);
+
+    nkIdent:
+      begin
+        LSym := LM.RefMap[ANode];
+        if LSym <> NIL_SYM then
+          Result := ResolveTypeExpr(AId, LM.Symbols[LSym].TypeNode)
+        else if LM.ExtRefMap.TryGetValue(ANode, LExt) then
+          Result := ResolveTypeExpr(LExt.UnitId,
+            FModels[LExt.UnitId].Symbols[LExt.Sym].TypeNode);
+      end;
+
+    nkMember:
+      begin
+        LBase := LM.Tree.Nodes[ANode].FirstChild;
+        if LBase = NIL_NODE then
+          Exit;
+        LName := LM.Tree.Nodes[LBase].NextSibling;
+        if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) then
+          Exit;
+        // The member may already be bound (same-unit field, or a cross-unit
+        // one the earlier passes reached); otherwise find it in the base's
+        // type. Both paths end at the MEMBER's own declared type.
+        LSym := LM.RefMap[LName];
+        if LSym <> NIL_SYM then
+          Exit(ResolveTypeExpr(AId, LM.Symbols[LSym].TypeNode));
+        if LM.ExtRefMap.TryGetValue(LName, LExt) then
+          Exit(ResolveTypeExpr(LExt.UnitId,
+            FModels[LExt.UnitId].Symbols[LExt.Sym].TypeNode));
+        LBX := WithTargetTypeX(AId, LBase);
+        if XValid(LBX) and FindMemberX(LBX,
+             LowerCase(LM.Tree.NodeText(LName)), LMemMid, LMemSym, LCtx) then
+          Result := ResolveTypeExpr(LMemMid,
+            FModels[LMemMid].Symbols[LMemSym].TypeNode);
+      end;
+  end;
+end;
+
+// True when ANode sits in the BODY of some enclosing `with`. An identifier
+// inside a with's own TARGET expression is NOT in its scope (the target is
+// evaluated in the enclosing one), hence the last-child test.
+function TPasSemaProject.InsideWithBody(AModel: TPasSemaModel;
+  ANode: Integer): Boolean;
+var
+  LCur, LParent, LLast: Integer;
+begin
+  Result := False;
+  LCur := ANode;
+  LParent := AModel.Tree.Nodes[LCur].Parent;
+  while LParent <> NIL_NODE do
+  begin
+    if AModel.Tree.Nodes[LParent].Kind = nkWithStmt then
+    begin
+      LLast := AModel.Tree.Nodes[LParent].FirstChild;
+      while (LLast <> NIL_NODE) and
+            (AModel.Tree.Nodes[LLast].NextSibling <> NIL_NODE) do
+        LLast := AModel.Tree.Nodes[LLast].NextSibling;
+      if LCur = LLast then
+        Exit(True);
+    end;
+    LCur := LParent;
+    LParent := AModel.Tree.Nodes[LCur].Parent;
+  end;
+end;
+
+// Resolves ANameLower as a member of an enclosing with-target's type.
+// Precedence follows 5.7: the INNERMOST `with` first (the outward climb gives
+// that for free), and within one `with` its targets RIGHT-TO-LEFT, so the
+// last target wins a name they share — the same rule the intra-unit pass gets
+// out of Resolve()'s reverse Additional-scope walk.
+//
+// Only reached for names the intra-unit pass could NOT bind, so a `with`
+// whose targets are a mix of same-unit and cross-unit types keeps working:
+// the same-unit ones are already open, and this fills in the rest.
+function TPasSemaProject.FindInEnclosingWith(AId, ANode: Integer;
+  const ANameLower: string; out AUid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LCur, LParent, LLast, LChild, LIdx, LCtx: Integer;
+  LTargets: TArray<Integer>;
+  LX: TSemaXType;
+begin
+  Result := False;
+  LM := FModels[AId];
+  LCur := ANode;
+  LParent := LM.Tree.Nodes[LCur].Parent;
+  while LParent <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LParent].Kind = nkWithStmt then
+    begin
+      // Children are target1..targetN then the body (last).
+      LTargets := nil;
+      LChild := LM.Tree.Nodes[LParent].FirstChild;
+      LLast := LChild;
+      while (LLast <> NIL_NODE) and
+            (LM.Tree.Nodes[LLast].NextSibling <> NIL_NODE) do
+        LLast := LM.Tree.Nodes[LLast].NextSibling;
+      while (LChild <> NIL_NODE) and (LChild <> LLast) do
+      begin
+        LTargets := LTargets + [LChild];
+        LChild := LM.Tree.Nodes[LChild].NextSibling;
+      end;
+      if LCur = LLast then
+        for LIdx := High(LTargets) downto 0 do
+        begin
+          LX := WithTargetTypeX(AId, LTargets[LIdx]);
+          if XValid(LX) and
+             FindMemberX(LX, ANameLower, AUid, ASym, LCtx) then
+            Exit(True);
+        end;
+    end;
+    LCur := LParent;
+    LParent := LM.Tree.Nodes[LCur].Parent;
+  end;
+end;
+
 // Companion to CrossResolve for idents inside METHOD bodies, deferred there
 // because the inherited-member walk (FindMemberX) reads other models'
 // ExtRefMap — those must be FROZEN (every parallel CrossResolve worker done)
@@ -2218,6 +2388,14 @@ begin
     // handled (resolved or E2003'd) by CrossResolve — bailing here avoids
     // re-running the allocation-heavy QualifierUnitAt on every one of those
     // nodes a second time.
+    // A with body is left to the LATER with pass (RunWithPass), never handled
+    // here: deciding it needs the with-target's TYPE node, and for a `with`
+    // inside a METHOD that type node is itself a method-body node THIS pass
+    // is still producing — it would be read while still uncommitted and come
+    // back unresolved. Bailing keeps this pass's stated invariant intact (see
+    // the header: its own entries are never type nodes another worker needs).
+    if InsideWithBody(LModel, LNode) then
+      Continue;
     LStruct := StructSymOfNode(LModel, LNode);
     if LStruct = NIL_SYM then
       Continue;
@@ -2253,6 +2431,85 @@ begin
     procedure(AIdx: Integer)
     begin
       CrossResolveInherited(AIdx, LPending[AIdx]);
+    end);
+  for LIdx := 0 to ACount - 1 do
+    for LP := 0 to High(LPending[LIdx]) do
+      FModels[LIdx].ExtRefMap.Add(LPending[LIdx][LP].Node,
+        LPending[LIdx][LP].Ext);
+end;
+
+// The deferred `with`-body pass: everything CrossResolve and
+// CrossResolveInherited both stepped over (see FindInEnclosingWith). Must run
+// AFTER RunInheritedPass has COMMITTED, because a with-target's type node
+// inside a method body is exactly what that pass produces.
+//
+// Same two-phase shape as the inherited pass, and safe for the same reason:
+// each worker only READS ExtRefMaps and writes its own APending/Diags. This
+// pass's own entries are with-BODY statement nodes, never type/heritage
+// nodes, so no worker depends on another's uncommitted entry.
+procedure TPasSemaProject.CrossResolveWith(AId: Integer;
+  var APending: TArray<TPasInhPending>);
+var
+  LModel: TPasSemaModel;
+  LNode, LBase, LStruct, LUid, LSym, LCtx, LMatchNode: Integer;
+  LPend: TPasInhPending;
+  LNameLower: string;
+begin
+  APending := nil;
+  LModel := FModels[AId];
+  for LNode := 0 to High(LModel.RefMap) do
+  begin
+    if LModel.Tree.Nodes[LNode].Kind <> nkIdent then
+      Continue;
+    if (LModel.RefMap[LNode] <> NIL_SYM) or
+       LModel.ExtRefMap.ContainsKey(LNode) then
+      Continue;
+    if (LNode > High(LModel.NodeScope)) or
+       (LModel.NodeScope[LNode] = NIL_SCOPE) then
+      Continue;
+    LBase := LModel.Tree.Nodes[LNode].Parent;
+    if (LBase <> NIL_NODE) and
+       (LModel.Tree.Nodes[LBase].Kind = nkMember) and
+       (LModel.Tree.Nodes[LBase].FirstChild <> LNode) then
+      Continue;   // member name of A.B — resolved via A, not as a plain ident
+    if not InsideWithBody(LModel, LNode) then
+      Continue;   // handled (resolved or E2003'd) by the two earlier passes
+    LNameLower := LowerCase(LModel.Tree.NodeText(LNode));
+    if (LNameLower = 'result') or (LNameLower = 'self') then
+      Continue;
+    if QualifierUnitAt(AId, LNode, LMatchNode) >= 0 then
+      Continue;
+    // dcc's order here: the `with` scope is opened INSIDE the enclosing body,
+    // so its members shadow the enclosing method's own; then used units, then
+    // the implicit System/SysInit units; E2003 only after every one misses.
+    LStruct := StructSymOfNode(LModel, LNode);
+    if FindInEnclosingWith(AId, LNode, LNameLower, LUid, LSym) or
+       ((LStruct <> NIL_SYM) and
+        FindMemberX(XPlain(AId, LStruct), LNameLower, LUid, LSym, LCtx)) or
+       FindInUses(AId, LNameLower, LUid, LSym) or
+       FindInSystemUnit(LNameLower, LUid, LSym) or
+       FindInSysInitUnit(LNameLower, LUid, LSym) then
+    begin
+      LPend.Node := LNode;
+      LPend.Ext.UnitId := LUid;
+      LPend.Ext.Sym := LSym;
+      APending := APending + [LPend];
+    end
+    else if LModel.AllUsesResolved then
+      EmitE2003(LModel, LNode);
+  end;
+end;
+
+procedure TPasSemaProject.RunWithPass(ACount: Integer);
+var
+  LPending: TArray<TArray<TPasInhPending>>;
+  LIdx, LP: Integer;
+begin
+  SetLength(LPending, ACount);
+  ForEachIndex(ACount - 1,
+    procedure(AIdx: Integer)
+    begin
+      CrossResolveWith(AIdx, LPending[AIdx]);
     end);
   for LIdx := 0 to ACount - 1 do
     for LP := 0 to High(LPending[LIdx]) do
@@ -2375,6 +2632,9 @@ begin
   // The inherited-member pass needs every CrossResolve worker done first
   // (it reads their ExtRefMaps); parallel compute + sequential commit.
   RunInheritedPass(LN);
+  // Then the with-body pass, which reads type nodes the inherited pass just
+  // COMMITTED (see CrossResolveWith) — order matters, not just grouping.
+  RunWithPass(LN);
   Stage('inherited');
   ForEachIndex(LN - 1,
     procedure(AIdx: Integer)
@@ -2445,6 +2705,9 @@ begin
   // The inherited-member pass needs every CrossResolve worker done first
   // (it reads their ExtRefMaps); parallel compute + sequential commit.
   RunInheritedPass(LN);
+  // Then the with-body pass, which reads type nodes the inherited pass just
+  // COMMITTED (see CrossResolveWith) — order matters, not just grouping.
+  RunWithPass(LN);
   Stage('inherited');
   ForEachIndex(LN - 1,
     procedure(AIdx: Integer)
@@ -2721,6 +2984,10 @@ begin
     end;
     Report('cross:inherited');
     RunInheritedPass(LN);
+    // Reads type nodes the inherited pass just COMMITTED — see
+    // CrossResolveWith. Kept inside the same reported step (it is the same
+    // "resolve what the parallel pass deferred" phase, just a later slice).
+    RunWithPass(LN);
     if Cancelled then
     begin
       Report('cancelled');

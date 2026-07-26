@@ -151,6 +151,48 @@ const
     'begin GetObject(1); end;'#10 +
     'end.'#10;
 
+  // `with` over a target whose TYPE lives in ANOTHER unit (5.7). The
+  // intra-unit pass opens a with scope by JOINING the type's member scope,
+  // which only works same-unit — so every cross-unit case fell through to a
+  // false E2003 per member (real bug: System.DateUtils.pas:2612's
+  // `with LTZ.StandardDate do`, 464 diagnostics across the RTL).
+  UNIT_WTYPES =
+    'unit UnitWTypes;'#10'interface'#10 +
+    'type'#10 +
+    '  TInner = record Deep: Integer; end;'#10 +
+    '  TOuter = record Nest: TInner; Top: Integer; end;'#10 +
+    '  TA = record Shared: Integer; OnlyA: Integer; end;'#10 +
+    '  TB = record Shared: Integer; OnlyB: Integer; end;'#10 +
+    'implementation'#10'end.'#10;
+
+  UNIT_WITH =
+    'unit UnitWith;'#10'interface'#10'uses UnitWTypes;'#10 +
+    'type'#10 +
+    '  TCls = class'#10 +
+    '    procedure M;'#10 +
+    '  end;'#10 +
+    'procedure Plain;'#10 +
+    'implementation'#10 +
+    'procedure Plain;'#10 +
+    'var O: TOuter; A: TA; B: TB;'#10 +
+    'begin'#10 +
+    '  with A do OnlyA := 1;'#10 +               // plain var target
+    '  with O.Nest do Deep := 1;'#10 +          // MEMBER target (the RTL shape)
+    '  with A, B do OnlyB := OnlyA;'#10 +       // multiple targets
+    '  with O do'#10 +
+    '    with O.Nest do Deep := Top;'#10 +      // nested: both levels visible
+    'end;'#10 +
+    // inside a METHOD the with-target's own type node is itself resolved by
+    // the deferred inherited pass, so this only works once the with pass runs
+    // after that pass has COMMITTED.
+    'procedure TCls.M;'#10 +
+    'var A: TA;'#10 +
+    'begin'#10 +
+    '  with A do OnlyA := 1;'#10 +
+    '  with A do NoSuchMember := 1;'#10 +       // genuine error, MUST still fire
+    'end;'#10 +
+    'end.'#10;
+
 function ModelByName(const ANameLower: string): TPasSemaModel;
 begin
   Result := nil;
@@ -233,6 +275,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitGdi.pas'), UNIT_GDI);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitAncestor.pas'), UNIT_ANCESTOR);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitShadow.pas'), UNIT_SHADOW);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitWTypes.pas'), UNIT_WTYPES);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitWith.pas'), UNIT_WITH);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -296,6 +340,19 @@ begin
     Ok('Shadow: exactly 1 E2035 — the genuine cross-unit arity error only, '
       + 'none from the four shadowed GetObject calls',
       DiagCount(LShadow, 'E2035') = 1);
+
+    // `with` over a cross-unit target type (see UNIT_WITH).
+    var LWith := ModelByName('unitwith');
+    Ok('With: use unit loaded', Assigned(LWith));
+    Ok('With: uses fully resolved', LWith.AllUsesResolved);
+    // Exactly ONE E2003: the genuine NoSuchMember. Every real member across
+    // all five with-shapes (plain var, member target, multi-target, nested,
+    // and inside a method) must resolve.
+    Ok('With: exactly 1 E2003 — the genuine NoSuchMember only',
+      DiagCount(LWith, 'E2003') = 1);
+    for var LName in ['OnlyA', 'OnlyB', 'Deep', 'Top'] do
+      Ok('With: ' + LName + ' resolves cross-unit',
+        CrossRefTo(LWith, LName, LName));
 
     // Module status / snapshot API: AnalyzeDirectory takes the directory's
     // own units all the way to msCrossReady, and TryGetSnapshot gates on the
