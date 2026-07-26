@@ -137,6 +137,17 @@ type
     UsesList: TArray<TPasUsesRef>;
     AllUsesResolved: Boolean;       // gates E2003 (set by the project driver)
     UnitNameLower: string;          // this unit's own name, lower-cased
+    // nkWithStmt nodes whose target type could NOT be resolved intra-unit, so
+    // their member scope was never opened (PasTree.Sema.Resolver.
+    // ResolveOneWithStmt). Inside such a body ANY unqualified name might be a
+    // member of the target — a member that shadows everything else (ch.05
+    // §5.7, dcc-verified against a class field, a local, a parameter, a
+    // same-unit global, and even an inline var declared in the body itself).
+    // So Phase 1's binding there is a best-effort GUESS: the project's
+    // with pass revises it once the cross-unit type is known, and until then
+    // any type derived from it is unreliable — which is why the typer stays
+    // quiet over these nodes (see InUnopenedWithBody / TPasSemaTyper.Diag).
+    WithUnopened: TArray<Integer>;
     constructor Create(const ATree: TPasTree);
     destructor Destroy; override;
 
@@ -161,6 +172,12 @@ type
     function FindLocalDeep(AScope: Integer; const ANameLower: string): Integer;
     // Full lookup: self -> additional (reverse) -> parent -> ...
     function Resolve(AScope: Integer; const ANameLower: string): Integer;
+    { True when ANode sits in the BODY of a `with` listed in WithUnopened —
+      see that field. An identifier inside a with's own TARGET expression is
+      NOT in its scope (the target is evaluated in the enclosing one), hence
+      the last-child test. WithUnopened is empty for the overwhelming
+      majority of units, so this costs one length check on the hot path. }
+    function InUnopenedWithBody(ANode: Integer): Boolean;
     procedure AddDiag(const ADiag: TSemaDiag);
   end;
 
@@ -318,6 +335,35 @@ begin
     LCur := Scopes[LCur].Parent;
   end;
   Result := NIL_SYM;
+end;
+
+function TPasSemaModel.InUnopenedWithBody(ANode: Integer): Boolean;
+var
+  LCur, LParent, LLast, LIdx: Integer;
+begin
+  Result := False;
+  if (Length(WithUnopened) = 0) or (ANode = NIL_NODE) then
+    Exit;
+  LCur := ANode;
+  LParent := Tree.Nodes[LCur].Parent;
+  while LParent <> NIL_NODE do
+  begin
+    if Tree.Nodes[LParent].Kind = nkWithStmt then
+      for LIdx := 0 to High(WithUnopened) do
+        if WithUnopened[LIdx] = LParent then
+        begin
+          // Children are target1..targetN then the body (last one).
+          LLast := Tree.Nodes[LParent].FirstChild;
+          while (LLast <> NIL_NODE) and
+                (Tree.Nodes[LLast].NextSibling <> NIL_NODE) do
+            LLast := Tree.Nodes[LLast].NextSibling;
+          if LCur = LLast then
+            Exit(True);
+          Break;
+        end;
+    LCur := LParent;
+    LParent := Tree.Nodes[LCur].Parent;
+  end;
 end;
 
 procedure TPasSemaModel.AddDiag(const ADiag: TSemaDiag);

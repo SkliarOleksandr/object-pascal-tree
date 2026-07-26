@@ -2454,6 +2454,7 @@ var
   LNode, LBase, LStruct, LUid, LSym, LCtx, LMatchNode: Integer;
   LPend: TPasInhPending;
   LNameLower: string;
+  LBound: Boolean;
 begin
   APending := nil;
   LModel := FModels[AId];
@@ -2461,8 +2462,22 @@ begin
   begin
     if LModel.Tree.Nodes[LNode].Kind <> nkIdent then
       Continue;
-    if (LModel.RefMap[LNode] <> NIL_SYM) or
-       LModel.ExtRefMap.ContainsKey(LNode) then
+    LBound := (LModel.RefMap[LNode] <> NIL_SYM) or
+              LModel.ExtRefMap.ContainsKey(LNode);
+    // An already-bound name is finished — EXCEPT in a `with` body whose target
+    // type Phase 1 could not resolve. There its binding is only a guess, and a
+    // member of that target outranks whatever it guessed (5.7): such nodes are
+    // revisited here and OVERRIDDEN on a hit. That is the difference between
+    // filling a gap and fixing a wrong answer — `with GR do Shared := 'x'`
+    // must mean GR.Shared even when the enclosing class, a local, a parameter
+    // or a unit global also offers a `Shared`.
+    if LBound and not LModel.InUnopenedWithBody(LNode) then
+      Continue;
+    // Never re-point a DECLARATION's own name node: MarkDeclName records
+    // declarations in RefMap too, and an inline `var Shared: Integer` inside
+    // the body stays a declaration — only REFERENCES bind to the member.
+    if (LModel.RefMap[LNode] <> NIL_SYM) and
+       (LModel.Symbols[LModel.RefMap[LNode]].DeclNode = LNode) then
       Continue;
     if (LNode > High(LModel.NodeScope)) or
        (LModel.NodeScope[LNode] = NIL_SCOPE) then
@@ -2483,12 +2498,24 @@ begin
     // so its members shadow the enclosing method's own; then used units, then
     // the implicit System/SysInit units; E2003 only after every one misses.
     LStruct := StructSymOfNode(LModel, LNode);
-    if FindInEnclosingWith(AId, LNode, LNameLower, LUid, LSym) or
-       ((LStruct <> NIL_SYM) and
-        FindMemberX(XPlain(AId, LStruct), LNameLower, LUid, LSym, LCtx)) or
-       FindInUses(AId, LNameLower, LUid, LSym) or
-       FindInSystemUnit(LNameLower, LUid, LSym) or
-       FindInSysInitUnit(LNameLower, LUid, LSym) then
+    if FindInEnclosingWith(AId, LNode, LNameLower, LUid, LSym) then
+    begin
+      // Already exactly this symbol (the intra-unit pass opened the scope and
+      // got it right) — nothing to rewrite.
+      if (LUid = AId) and (LModel.RefMap[LNode] = LSym) then
+        Continue;
+      LPend.Node := LNode;
+      LPend.Ext.UnitId := LUid;
+      LPend.Ext.Sym := LSym;
+      APending := APending + [LPend];
+    end
+    else if LBound then
+      Continue   // no with member by that name: Phase 1's binding stands
+    else if ((LStruct <> NIL_SYM) and
+             FindMemberX(XPlain(AId, LStruct), LNameLower, LUid, LSym, LCtx)) or
+            FindInUses(AId, LNameLower, LUid, LSym) or
+            FindInSystemUnit(LNameLower, LUid, LSym) or
+            FindInSysInitUnit(LNameLower, LUid, LSym) then
     begin
       LPend.Node := LNode;
       LPend.Ext.UnitId := LUid;
@@ -2503,7 +2530,7 @@ end;
 procedure TPasSemaProject.RunWithPass(ACount: Integer);
 var
   LPending: TArray<TArray<TPasInhPending>>;
-  LIdx, LP: Integer;
+  LIdx, LP, LNode: Integer;
 begin
   SetLength(LPending, ACount);
   ForEachIndex(ACount - 1,
@@ -2513,8 +2540,15 @@ begin
     end);
   for LIdx := 0 to ACount - 1 do
     for LP := 0 to High(LPending[LIdx]) do
-      FModels[LIdx].ExtRefMap.Add(LPending[LIdx][LP].Node,
-        LPending[LIdx][LP].Ext);
+    begin
+      LNode := LPending[LIdx][LP].Node;
+      // RefMap must be CLEARED, not just shadowed: every consumer checks it
+      // FIRST and only falls back to ExtRefMap (see CrossType's nkIdent), so
+      // an override that merely added an ExtRefMap entry would be ignored.
+      // Harmless for the gap-filling entries — those were NIL_SYM already.
+      FModels[LIdx].RefMap[LNode] := NIL_SYM;
+      FModels[LIdx].ExtRefMap.AddOrSetValue(LNode, LPending[LIdx][LP].Ext);
+    end;
 end;
 
 function TPasSemaProject.AnalyzeFile(const AMainFile: string): Integer;

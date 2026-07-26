@@ -1545,6 +1545,7 @@ procedure TPasSemaResolver.ResolveOneWithStmt(AWith: Integer);
 var
   LTarget, LBody, LWithScope, LTypeSym: Integer;
   LTargets: TArray<Integer>;
+  LAnyUnopened: Boolean;
 begin
   // Children: target1, target2, ..., targetN, body (body = last child;
   // TPasParser.ParseStatement's tkWith case, 5.7).
@@ -1569,11 +1570,15 @@ begin
   // too, and the type's OWN member of the same name still correctly shadows
   // it (its scope ends up "most recently added", checked first).
   LWithScope := NIL_SCOPE;
+  LAnyUnopened := False;
   for LTarget in LTargets do
   begin
     LTypeSym := WithTargetTypeSym(LTarget);
     if LTypeSym = NIL_SYM then
+    begin
+      LAnyUnopened := True;   // type not nameable intra-unit (usually: another unit)
       Continue;
+    end;
     var LChain: TArray<Integer> := nil;
     var LChainDepth := 0;
     while (LTypeSym <> NIL_SYM) and (LChainDepth < 32) do
@@ -1584,12 +1589,25 @@ begin
       LTypeSym := AncestorTypeSym(LTypeSym);
     end;
     if Length(LChain) = 0 then
+    begin
+      LAnyUnopened := True;   // named a type, but its members live elsewhere
       Continue;
+    end;
     if LWithScope = NIL_SCOPE then
       LWithScope := FModel.AddScope(sckWith, FNodeScope[AWith], AWith);
     for var LI := High(LChain) downto 0 do
       FModel.JoinScope(LWithScope, FModel.Symbols[LChain[LI]].MemberScope);
   end;
+
+  // A target this pass could not open leaves every Phase-1 binding in the body
+  // TENTATIVE: one of that target's members may still shadow whatever the name
+  // bound to instead (5.7 — and a with member outranks EVERYTHING, verified
+  // against a class field, local, parameter, same-unit global and even an
+  // inline var declared inside the body). Recorded so the typer withholds
+  // judgement here and the project's with pass can revise the binding.
+  if LAnyUnopened then
+    FModel.WithUnopened := FModel.WithUnopened + [AWith];
+
   if LWithScope = NIL_SCOPE then
     Exit;   // no target resolved to a real, member-bearing type — leave as-is
 

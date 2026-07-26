@@ -193,6 +193,50 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // A with-target member SHADOWS everything else (5.7). dcc-verified: all five
+  // bodies below compile, so `Shared` means UWRec.TRec.Shared (string) in every
+  // one — never the class field, the local, the parameter, the unit global, or
+  // even the inline var declared inside the body. The intra-unit pass cannot
+  // know that (TRec is cross-unit, so it never opens the scope) and binds each
+  // to the nearest same-unit `Shared` instead; the project's with pass has to
+  // OVERRIDE those bindings, not merely fill gaps.
+  UNIT_WREC =
+    'unit UWRec;'#10'interface'#10 +
+    'type TRec = record Shared: string; end;'#10 +
+    'implementation'#10'end.'#10;
+
+  UNIT_WSHADOW =
+    'unit UWShadow;'#10'interface'#10'uses UWRec;'#10 +
+    'type'#10 +
+    '  TCls = class'#10 +
+    '    Shared: Integer;'#10 +                     // (a) class field
+    '    procedure MClass;'#10 +
+    '    procedure MLocal;'#10 +
+    '    procedure MParam(Shared: Integer);'#10 +   // (c) parameter
+    '    procedure MInline;'#10 +
+    '  end;'#10 +
+    'var'#10 +
+    '  Shared: Integer;'#10 +                       // (d) unit global
+    'procedure MGlobal;'#10 +
+    'implementation'#10 +
+    'var GR: TRec;'#10 +
+    'procedure TCls.MClass; begin with GR do Shared := ''x''; end;'#10 +
+    'procedure TCls.MLocal;'#10 +
+    'var Shared: Integer;'#10 +                     // (b) local
+    'begin with GR do Shared := ''x''; end;'#10 +
+    'procedure TCls.MParam(Shared: Integer);'#10 +
+    'begin with GR do Shared := ''x''; end;'#10 +
+    'procedure TCls.MInline;'#10 +
+    'begin'#10 +
+    '  with GR do'#10 +
+    '  begin'#10 +
+    '    var Shared: Integer;'#10 +                 // (e) inline var in the body
+    '    Shared := ''x'';'#10 +
+    '  end;'#10 +
+    'end;'#10 +
+    'procedure MGlobal; begin with GR do Shared := ''x''; end;'#10 +
+    'end.'#10;
+
 function ModelByName(const ANameLower: string): TPasSemaModel;
 begin
   Result := nil;
@@ -214,6 +258,42 @@ begin
        AModel.ExtRefMap.TryGetValue(LNode, LExt) then
       if SameText(GProj.Model(LExt.UnitId).Symbols[LExt.Sym].Name, ATarget) then
         Exit(True);
+end;
+
+// How many references spelled ARefText resolved cross-unit to a symbol named
+// ATarget declared in unit AUnitLower. Unlike CrossRefTo this pins the OWNING
+// UNIT, which is the whole point when the same name exists on both sides of
+// the shadowing question (a `with` target's member vs the enclosing class's).
+function CrossRefCountInUnit(AModel: TPasSemaModel;
+  const ARefText, ATarget, AUnitLower: string): Integer;
+var
+  LExt: TPasExtRef;
+begin
+  Result := 0;
+  for var LNode := 0 to High(AModel.RefMap) do
+    if (AModel.Tree.Nodes[LNode].Kind = nkIdent) and
+       SameText(AModel.Tree.NodeText(LNode), ARefText) and
+       AModel.ExtRefMap.TryGetValue(LNode, LExt) then
+      if SameText(GProj.Model(LExt.UnitId).Symbols[LExt.Sym].Name, ATarget) and
+         SameText(GProj.Model(LExt.UnitId).UnitNameLower, AUnitLower) then
+        Inc(Result);
+end;
+
+// References spelled ARefText still bound LOCALLY (RefMap) to a symbol that is
+// not their own declaration — i.e. genuine local references left over.
+function LocalRefCount(AModel: TPasSemaModel; const ARefText: string): Integer;
+var
+  LSym: Integer;
+begin
+  Result := 0;
+  for var LNode := 0 to High(AModel.RefMap) do
+    if (AModel.Tree.Nodes[LNode].Kind = nkIdent) and
+       SameText(AModel.Tree.NodeText(LNode), ARefText) then
+    begin
+      LSym := AModel.RefMap[LNode];
+      if (LSym <> NIL_SYM) and (AModel.Symbols[LSym].DeclNode <> LNode) then
+        Inc(Result);
+    end;
 end;
 
 function DiagCount(AModel: TPasSemaModel; const ACode: string): Integer;
@@ -277,6 +357,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitShadow.pas'), UNIT_SHADOW);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWTypes.pas'), UNIT_WTYPES);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWith.pas'), UNIT_WITH);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UWRec.pas'), UNIT_WREC);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UWShadow.pas'), UNIT_WSHADOW);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -353,6 +435,22 @@ begin
     for var LName in ['OnlyA', 'OnlyB', 'Deep', 'Top'] do
       Ok('With: ' + LName + ' resolves cross-unit',
         CrossRefTo(LWith, LName, LName));
+
+    // A with-target member SHADOWS the class field / local / parameter /
+    // unit global / inline var of the same name (see UNIT_WSHADOW). All five
+    // `Shared` REFERENCES must point at UWRec's record field; none may stay
+    // bound to a UWShadow symbol.
+    var LWSh := ModelByName('uwshadow');
+    Ok('WithShadow: unit loaded', Assigned(LWSh));
+    Ok('WithShadow: no diagnostics at all', Length(LWSh.Diags) = 0);
+    Ok('WithShadow: all 5 Shared refs bind to UWRec.TRec.Shared',
+      CrossRefCountInUnit(LWSh, 'Shared', 'Shared', 'uwrec') = 5);
+    Ok('WithShadow: no Shared reference stays bound locally',
+      LocalRefCount(LWSh, 'Shared') = 0);
+    // The five same-named DECLARATIONS must survive untouched — only
+    // references get re-pointed.
+    Ok('WithShadow: the local Shared declarations are still declared',
+      SymCountOf(LWSh, 'shared', skField) = 1);
 
     // Module status / snapshot API: AnalyzeDirectory takes the directory's
     // own units all the way to msCrossReady, and TryGetSnapshot gates on the

@@ -557,6 +557,14 @@ var
   LVis: TPasVisibleToken;
   LFile, LLine, LCol, LTok: Integer;
 begin
+  // Inside a `with` whose target type could not be resolved intra-unit, a
+  // name's binding — and therefore its TYPE — is only a guess: a cross-unit
+  // member of the target outranks it and the project's with pass may rebind
+  // it (see TPasSemaModel.WithUnopened). Type-checking a guess produces
+  // confident nonsense, e.g. E2010 'Double' vs 'string' where the real member
+  // is a string, so withhold every diagnostic over such a node instead.
+  if M.InUnopenedWithBody(ANode) then
+    Exit;
   LFile := 0; LLine := 0; LCol := 0;
   LTok := T.Nodes[ANode].FirstToken;
   if (LTok >= 0) and (LTok <= High(T.Source.Visible)) then
