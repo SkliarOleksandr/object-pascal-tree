@@ -191,10 +191,51 @@ Still open, roughly in the order we're tackling it:
   diagnostics/rename/etc. over the same Sema/Nav layer) plus LSIF dump
   generation (precomputed navigation for code browsing without a live
   server) are the planned next consumers.
+- **Find References** — for any identifier, list every place it's actually
+  USED (by resolved symbol identity via `RefMap`/`ExtRefMap`/`CallTargetX`,
+  not a text search — two same-named locals in different scopes must not
+  cross-pollute, and an overload-precise call site must land on the actual
+  overload, not just any same-named routine), in its own results window
+  (module / line / a trimmed source snippet around the identifier), double-
+  click to navigate — same shape as the existing message window, but with
+  REAL columns (the message window today is a single flat text column;
+  this needs `Header.MainColumn`/actual `TVirtualStringTree.Columns`, a
+  first for this codebase's VST usage). Walks every loaded model's
+  RefMap/ExtRefMap/CallTargetX for a match against the target (unitId, sym)
+  pair — cross-unit by construction, no new resolution needed, just a new
+  consumer of data already computed. This is also the direct PREREQUISITE
+  for Rename Symbol below (rename = find references + apply edits) — build
+  this first.
 - **Rename symbol** (Ctrl+E) — rename any identifier and every reference to
-  it project-wide, using the same resolved symbol model go-to-declaration
-  already builds (so a rename only touches the actual declaration's
+  it project-wide, using the same resolved symbol model Find References
+  above already walks (so a rename only touches the actual declaration's
   references, not textually-matching names from an unrelated scope).
+- **Show Defines** — for the identifier/position under the cursor, list
+  every preprocessor define ACTIVE there (module where `$DEFINE`d / project-
+  or platform-level, line, the define name), in its own results window,
+  click to navigate to the `$DEFINE` site. Needs NEW preprocessor
+  infrastructure, not just a UI: `TPasDefines` is a live flag set
+  (`Define`/`Undefine`/`IsDefined`) with no positional history — nothing
+  today records WHERE in the token stream a define turned on/off, so
+  "what's active at offset N" can't be answered from the current model.
+  Requires logging (position, name, on/off) events during preprocessing
+  and replaying them up to a query position; also needs to decide how
+  project/platform-level defines (`MSWINDOWS`, `WIN32`, ...) are attributed
+  in the module column (no real `$DEFINE` site — "project settings" or
+  similar sentinel).
+- **Show Units Dependency** — a dependency tree (TreeView, root = the open
+  project's main source, children = each unit it `uses`, recursively) in
+  its own window, off `TPasSemaModel.UsesList`/`UnitId` (the same graph
+  `AnalyzeProject`/`AnalyzeStaged`'s BFS closure walk already has, just not
+  currently exposed anywhere) — real dcc disallows genuine `uses` cycles so
+  this is a DAG, though a diamond dependency (two units sharing a common
+  base) will naturally repeat in a plain tree view, same as a real IDE's
+  own uses-browser. The SAME window should also offer a flat INITIALIZATION
+  ORDER list (dependencies-first) — this is NOT just "the order units were
+  discovered" (`TPasSemaProject`'s model list is BFS-discovery order, which
+  does not guarantee a unit's own dependencies were already fully
+  discovered first); it needs an actual topological sort over the uses
+  graph to match how dcc really sequences unit `initialization` sections.
 - **Generate method body from declaration** (Ctrl+Shift+C) — given a method
   or routine declaration with no implementation yet, emit an empty matching
   body (right unit, right place, right signature), the inverse of the
