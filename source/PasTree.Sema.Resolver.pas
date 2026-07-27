@@ -39,6 +39,16 @@ type
     TypeNode: Integer;   // the declaration's OWN type-expression node
   end;
 
+  // A `class/record helper for T` (15.3) noted during Collect: the helper's
+  // nkHelperType node and its OWN type symbol. The extended type T cannot be
+  // looked up while collecting (a helper may be declared before the type it
+  // extends), so the two member scopes are wired together in a pass of its
+  // own — see JoinHelperScopes.
+  TPasPendingHelper = record
+    Node: Integer;       // the nkHelperType node
+    HelperSym: Integer;  // the helper's own skType symbol
+  end;
+
   TPasSemaResolver = class
   private
     FModel: TPasSemaModel;
@@ -49,6 +59,7 @@ type
     FNodeScope: TArray<Integer>;
     FIsDeclName: TArray<Boolean>;
     FPendingAggr: TArray<TPasPendingAggr>;
+    FPendingHelpers: TArray<TPasPendingHelper>;
     FSkipTyper: Boolean;   // see Analyze
     // tree helpers
     function KindOf(ANode: Integer): TPasNodeKind; inline;
@@ -79,6 +90,10 @@ type
     procedure CollectUsesItem(AItem, AScope: Integer);
     procedure CollectRoutine(ANode, AScope: Integer);
     procedure Collect(ANode, AScope: Integer);
+    // helpers (ch.15 §15.3) — see JoinHelperScopes for why this is its own
+    // pass rather than something CollectStruct could do inline.
+    function HelperForTypeRef(ANode: Integer): Integer;
+    procedure JoinHelperScopes;
     // resolve
     function DesignatorHead(ANode: Integer): Integer;
     procedure ResolveNode(ANode: Integer);
@@ -445,7 +460,15 @@ begin
   LMembers := FModel.AddScope(sckStruct, AOuter, ANode);
   FNodeScope[ANode] := LMembers;
   if ATypeSym <> NIL_SYM then
+  begin
     FModel.Symbols[ATypeSym].MemberScope := LMembers;
+    if KindOf(ANode) = nkHelperType then
+    begin
+      SetLength(FPendingHelpers, Length(FPendingHelpers) + 1);
+      FPendingHelpers[High(FPendingHelpers)].Node := ANode;
+      FPendingHelpers[High(FPendingHelpers)].HelperSym := ATypeSym;
+    end;
+  end;
 
   LChild := FirstChild(ANode);
   while LChild <> NIL_NODE do
@@ -1175,6 +1198,106 @@ begin
   end;
 end;
 
+{ helpers (ch.15 §15.3)
+
+  A `class/record helper for T` declares members that behave, at every use
+  site, as if they were T's own: a method of T sees the helper's members bare
+  (`Result := Identity` inside TMatrix.CreateRotation, where Identity is a
+  const of `TMatrixConstants = record helper for TMatrix` — System.Math.
+  Vectors, the bug that prompted this), a qualified `T.Member` finds them, and
+  — the other direction — the helper's OWN method bodies see T's members
+  through their implicit Self (`FValue` inside a TThingHelper method).
+
+  None of that could happen from CollectStruct: a helper may be declared
+  before the type it extends, so the `for T` target is not necessarily a
+  declared symbol yet while collecting. Hence a pass of its own, run once
+  Collect has declared every type in the unit but before Resolve binds any
+  name — the joins have to be in place before the first lookup.
+
+  INTRA-UNIT ONLY. A helper whose target lives in another unit (a qualified
+  `for Some.Unit.T`) is skipped: cross-model member injection belongs to the
+  project driver's cross passes, not here. Skipping only costs reach, never
+  correctness — an unresolved name is never itself a diagnostic. }
+
+// The `for T` target of a helper: the LAST of the leading run of type
+// references under the nkHelperType node. A class helper may also name a
+// helper ANCESTOR (`class helper (TBase) for T`), which the parser adopts
+// FIRST, so only the last reference is the extended type; members follow and
+// are never bare type references, which is where the run ends.
+function TPasSemaResolver.HelperForTypeRef(ANode: Integer): Integer;
+var
+  LChild: Integer;
+begin
+  Result := NIL_NODE;
+  LChild := SkipAttr(FirstChild(ANode));
+  while (LChild <> NIL_NODE) and
+        (KindOf(LChild) in [nkIdent, nkMember, nkTypeArgs]) do
+  begin
+    Result := LChild;
+    LChild := NextSib(LChild);
+  end;
+end;
+
+procedure TPasSemaResolver.JoinHelperScopes;
+var
+  LIdx, LScope, LRef, LExtSym: Integer;
+  LExtScopes: TArray<Integer>;   // parallel to FPendingHelpers; NIL_SCOPE = skip
+  LAny: Boolean;
+begin
+  if Length(FPendingHelpers) = 0 then
+    Exit;
+  SetLength(LExtScopes, Length(FPendingHelpers));
+  LAny := False;
+  for LIdx := 0 to High(FPendingHelpers) do
+  begin
+    LExtScopes[LIdx] := NIL_SCOPE;
+    var LHelperScope := FModel.Symbols[FPendingHelpers[LIdx].HelperSym].MemberScope;
+    if LHelperScope = NIL_SCOPE then
+      Continue;
+    LRef := HelperForTypeRef(FPendingHelpers[LIdx].Node);
+    // Only a bare name is resolvable here (see the INTRA-UNIT note above).
+    if (LRef = NIL_NODE) or (KindOf(LRef) <> nkIdent) then
+      Continue;
+    LExtSym := FModel.Resolve(FNodeScope[LRef], LowerCase(NodeText(LRef)));
+    if (LExtSym = NIL_SYM) or (FModel.Symbols[LExtSym].Kind <> skType) then
+      Continue;
+    var LExtScope := FModel.Symbols[LExtSym].MemberScope;
+    if LExtScope = NIL_SCOPE then
+      Continue;
+    // `TFoo = record helper for TFoo` is malformed but parses, and the name
+    // resolves right back to the helper itself — joining a scope INTO ITSELF
+    // would make FindLocalDeep recurse forever on every failed lookup. The
+    // one shape that can do that, refused explicitly; every other join here
+    // points from an extended type to a DIFFERENT helper, so the Additional
+    // graph stays acyclic.
+    if LExtScope = LHelperScope then
+      Continue;
+    // Direction 1: T's members now include the helper's, so both a bare
+    // reference from inside T's own methods (which join T's member scope)
+    // and a qualified T.Member (ResolveNode's nkMember, via FindLocalDeep)
+    // find them. LAST helper joined wins the lookup — FindLocalDeep walks
+    // Additional most-recently-added first, which is dcc's own rule when two
+    // helpers for one type are in scope.
+    FModel.JoinScope(LExtScope, LHelperScope);
+    LExtScopes[LIdx] := LExtScope;
+    LAny := True;
+  end;
+  if not LAny then
+    Exit;
+  // Direction 2: the helper's own method BODIES see T's members through the
+  // implicit Self. Those bodies are separate routine scopes (a method is
+  // implemented outside the type), each tagged by CollectRoutine with the
+  // struct it belongs to — so the tag is what identifies them. Joined into
+  // the ROUTINE scope, deliberately NOT into the helper's member scope: the
+  // latter would pair with direction 1 into a two-node cycle.
+  for LScope := 0 to FModel.Scopes.Count - 1 do
+    if FModel.Scopes[LScope].Kind = sckRoutine then
+      for LIdx := 0 to High(FPendingHelpers) do
+        if (LExtScopes[LIdx] <> NIL_SCOPE) and
+           (FModel.Scopes[LScope].StructSym = FPendingHelpers[LIdx].HelperSym) then
+          FModel.JoinScope(LScope, LExtScopes[LIdx]);
+end;
+
 { resolve }
 
 // The symbol a designator (nkIdent / nkMember / nkTypeArgs) resolved to.
@@ -1229,9 +1352,13 @@ begin
         if (LName <> NIL_NODE) and (LHead <> NIL_SYM) then
         begin
           LMemScope := FModel.Symbols[LHead].MemberScope;
+          // FindLocalDeep, not FindLocal: a struct's member scope carries a
+          // joined scope only where one was deliberately injected into it —
+          // today that is a helper's members (JoinHelperScopes), which a
+          // qualified `TMatrix.Identity` must find exactly like a bare one.
           if LMemScope <> NIL_SCOPE then
             FModel.RefMap[LName] :=
-              FModel.FindLocal(LMemScope, LowerCase(NodeText(LName)));
+              FModel.FindLocalDeep(LMemScope, LowerCase(NodeText(LName)));
         end;
         // LName resolved (or left NIL) here; do not recurse into it as an ident
         Exit;
@@ -1707,6 +1834,7 @@ begin
   FImpl := FModel.AddScope(sckImplementation, FIntf, 0);
   FModel.InterfaceScope := FIntf;
   CollectRoot(0);
+  JoinHelperScopes;   // must precede Resolve — see its own header
   ResolveNode(0);
   BindTypes;
   ResolveAggregates;  // needs BindTypes' declared types — see its own header

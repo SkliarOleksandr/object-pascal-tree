@@ -254,6 +254,74 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // Real bug report: a `class/record helper for T` (15.3) injected nothing.
+  // Its members were collected into a member scope of its OWN, unconnected to
+  // T's, so a method of T referencing a helper member bare (`Result :=
+  // Identity` in System.Math.Vectors' TMatrix.CreateRotation, where Identity
+  // is a const of `TMatrixConstants = record helper for TMatrix`) was a false
+  // E2003 — as was the reverse direction, the helper's own body reaching T's
+  // fields through the implicit Self. Note `Double` here: a bare helper
+  // METHOD whose name collides with a builtin type must reach the helper,
+  // not System's Double (that one never E2003'd — it silently mis-resolved).
+  SRC_HELPERS =
+    'unit U;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TMatrix = record'#10 +
+    '    class function CreateRotation(const A: Single): TMatrix; static;'#10 +
+    '    m11: Single;'#10 +
+    '  end;'#10 +
+    '  TMatrixConstants = record helper for TMatrix'#10 +
+    '    const Identity: TMatrix = (m11: 1);'#10 +
+    '  end;'#10 +
+    '  TThing = class'#10 +
+    '    FValue: Integer;'#10 +
+    '    procedure Bump;'#10 +
+    '  end;'#10 +
+    '  TThingHelper = class helper for TThing'#10 +
+    '    const Step = 2;'#10 +
+    '    procedure Double;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'class function TMatrix.CreateRotation(const A: Single): TMatrix;'#10 +
+    'begin'#10 +
+    '  Result := Identity;'#10 +
+    '  Result.m11 := A;'#10 +
+    'end;'#10 +
+    'procedure TThing.Bump;'#10 +
+    'begin'#10 +
+    '  FValue := FValue + Step;'#10 +
+    '  Double;'#10 +
+    'end;'#10 +
+    'procedure TThingHelper.Double;'#10 +
+    'begin'#10 +
+    '  FValue := FValue * 2;'#10 +
+    'end;'#10 +
+    'function Qualified: TMatrix;'#10 +
+    'begin'#10 +
+    '  Result := TMatrix.Identity;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  // `TFoo = record helper for TFoo` is malformed but parses, and the `for`
+  // name resolves right back to the helper — the join must refuse it, or
+  // FindLocalDeep recurses forever on the first failed lookup (hence the
+  // deliberately undeclared name in the body: it forces a full miss).
+  // Completing the analysis at all is the assertion.
+  SRC_HELPER_SELF =
+    'unit U;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TFoo = record helper for TFoo'#10 +
+    '    const K = 1;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'begin'#10 +
+    '  WriteLn(NoSuchNameAnywhere);'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // Real bug report: a `label` section declared NOTHING (the parser emitted
   // nkLabelSec as a bare token span with no children, and Collect had no case
   // for it), while a labeled statement DID emit an nkIdent for its own name —
@@ -623,6 +691,31 @@ begin
   Ok('omitparams: no false E2003', DiagCount('E2003') = 0);
   Ok('omitparams: method body Index resolves',
     RefResolvesTo('Index', 'Index'));
+  GModel.Free;
+
+  // 9c-ter. class/record helper member injection, both directions.
+  Analyze(SRC_HELPERS);
+  Ok('helper: no false E2003', DiagCount('E2003') = 0);
+  Ok('helper: bare const from the EXTENDED type''s own method',
+    RefResolvesTo('Identity', 'Identity'));
+  Ok('helper: qualified TMatrix.Identity resolves too',
+    AllRefsResolved('Identity'));
+  Ok('helper: bare const from a class method (Step)',
+    RefResolvesTo('Step', 'Step'));
+  Ok('helper: extended type''s field from the HELPER''s own body (FValue)',
+    RefResolvesTo('FValue', 'FValue'));
+  Ok('helper: bare helper method beats the same-named builtin (Double)',
+    RefResolvesTo('Double', 'Double'));
+  GModel.Free;
+
+  // A helper for itself must not build a self-referential scope join.
+  Analyze(SRC_HELPER_SELF);
+  // Reaching this line at all IS the assertion: a self-join would have hung
+  // (or blown the stack) inside Analyze above, never returning here.
+  Ok('helper-self: analysis terminates (no scope-join cycle)', True);
+  Ok('helper-self: the undeclared name is left unresolved, not bound',
+    not AllRefsResolved('NoSuchNameAnywhere'));
+  Ok('helper-self: K still declared in the helper', HasSym('K', skConst));
   GModel.Free;
 
   // 9c-bis. `label` sections declare their names; labeled statements and
