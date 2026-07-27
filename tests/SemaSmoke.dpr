@@ -254,6 +254,47 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // Real bug report: two with-target shapes the type-of-target walk did not
+  // know. A CAST (`with TVarData(X) do`) and a DEREFERENCE (`with P^ do`) —
+  // System.ObjAuto and System.Variants respectively, both writing to a
+  // `VType` field that then read as undeclared. The cast branch existed in
+  // Phase 1 but not in the cross-unit twin; nkDeref existed in NEITHER.
+  // `with GetRec do` is the control: a parameterless CALL still has to type
+  // to the routine's RESULT, not to the callee itself.
+  SRC_WITHSHAPES =
+    'unit U;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TVarLike = record'#10 +
+    '    VType: Word;'#10 +
+    '    VPtr: Pointer;'#10 +
+    '  end;'#10 +
+    '  PVarLike = ^TVarLike;'#10 +
+    '  PAlias = PVarLike;'#10 +   // alias chain: the walk must chase it
+    '  TRec = record F: Integer; end;'#10 +
+    'implementation'#10 +
+    'function GetRec: TRec; begin Result.F := 1; end;'#10 +
+    'function GetPtr: PVarLike; begin Result := nil; end;'#10 +
+    'procedure P;'#10 +
+    'var'#10 +
+    '  Buf: array[0..3] of Integer;'#10 +
+    '  LP: PVarLike;'#10 +
+    '  LA: PAlias;'#10 +
+    '  LI: Integer;'#10 +
+    'begin'#10 +
+    '  with TVarLike(Buf) do'#10 +          // cast
+    '    VType := 1;'#10 +
+    '  with LP^ do'#10 +                    // deref of a variable
+    '    VType := 2;'#10 +
+    '  with LA^ do'#10 +                    // deref through an alias chain
+    '    VType := 3;'#10 +
+    '  with GetPtr^ do'#10 +                // deref of a call result
+    '    VType := 4;'#10 +
+    '  with GetRec do'#10 +                 // control: call -> result type
+    '    LI := F;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // Real bug report: a `class/record helper for T` (15.3) injected nothing.
   // Its members were collected into a member scope of its OWN, unconnected to
   // T's, so a method of T referencing a helper member bare (`Result :=
@@ -691,6 +732,16 @@ begin
   Ok('omitparams: no false E2003', DiagCount('E2003') = 0);
   Ok('omitparams: method body Index resolves',
     RefResolvesTo('Index', 'Index'));
+  GModel.Free;
+
+  // 9c-quater. with-target shapes: cast, deref (plain / aliased / of a call).
+  Analyze(SRC_WITHSHAPES);
+  Ok('withshapes: no false E2003', DiagCount('E2003') = 0);
+  Ok('withshapes: no diags at all', Length(GModel.Diags) = 0);
+  Ok('withshapes: every VType reference resolves to the field',
+    AllRefsResolved('VType') and RefResolvesTo('VType', 'VType'));
+  Ok('withshapes: the call-target control still resolves (F)',
+    RefResolvesTo('F', 'F'));
   GModel.Free;
 
   // 9c-ter. class/record helper member injection, both directions.

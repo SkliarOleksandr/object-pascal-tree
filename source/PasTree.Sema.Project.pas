@@ -129,6 +129,7 @@ type
     function StructSymOfNode(AModel: TPasSemaModel; ANode: Integer): Integer;
     // `with` over a target whose TYPE lives in another unit (ch.05 §5.7) —
     // see FindInEnclosingWith.
+    function PointeeX(const AX: TSemaXType): TSemaXType;
     function WithTargetTypeX(AId, ANode: Integer): TSemaXType;
     function InsideWithBody(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function FindInEnclosingWith(AId, ANode: Integer;
@@ -2220,6 +2221,36 @@ end;
 // CrossType, which run AFTER the pass that has to decide E2003, so this walks
 // RefMap/ExtRefMap and declared type NODES directly (ResolveTypeExpr does the
 // same and is likewise table-free).
+{ The type a cross-model POINTER type points at: PVarData = ^TVarData ->
+  TVarData, chasing through however many alias links sit in between. The
+  cross-model twin of TPasSemaResolver.PointeeTypeSym, depth-capped for the
+  same reason. XNil when AX is not a pointer type. }
+function TPasSemaProject.PointeeX(const AX: TSemaXType): TSemaXType;
+var
+  LCur: TSemaXType;
+  LDef, LDepth: Integer;
+begin
+  Result := XNil;
+  LCur := AX;
+  for LDepth := 1 to 32 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if LDef = NIL_NODE then
+      Exit;
+    case FModels[LCur.UnitId].Tree.Nodes[LDef].Kind of
+      nkPointerType:
+        Exit(ResolveTypeExpr(LCur.UnitId,
+          FModels[LCur.UnitId].Tree.Nodes[LDef].FirstChild));
+      nkIdent, nkMember, nkTypeArgs:
+        LCur := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
+    else
+      Exit;
+    end;
+  end;
+end;
+
 function TPasSemaProject.WithTargetTypeX(AId, ANode: Integer): TSemaXType;
 var
   LM: TPasSemaModel;
@@ -2235,10 +2266,39 @@ begin
     nkParen:
       Result := WithTargetTypeX(AId, LM.Tree.Nodes[ANode].FirstChild);
 
-    // `with GetRec do` — a parameterless call; a routine symbol's TypeNode IS
-    // its result type, so the callee resolves through the nkIdent case below.
+    // `with SomePointer^ do` — the target's type is the POINTEE. Mirrors
+    // TPasSemaResolver.WithTargetTypeSym's own nkDeref branch, for a pointer
+    // (or a pointee) declared in another unit: System.Variants' `with
+    // LVarData^ do VType := ...` and `with FindVarData(V)^ do`, where both
+    // PVarData and TVarData come from the implicit System unit. The second
+    // shape composes with the cast/call branch above — the call types to
+    // PVarData, this dereferences it to TVarData.
+    nkDeref:
+      Result := PointeeX(WithTargetTypeX(AId,
+        LM.Tree.Nodes[ANode].FirstChild));
+
     nkCall:
-      Result := WithTargetTypeX(AId, LM.Tree.Nodes[ANode].FirstChild);
+      begin
+        LBase := LM.Tree.Nodes[ANode].FirstChild;
+        // A CAST `T(Expr)`: the callee is a TYPE name, so the with-target's
+        // type is that type ITSELF — not the callee's declared type, which is
+        // what the recursion below would read. ResolveTypeExpr yields XNil for
+        // anything that is not a type, so a genuine parameterless call
+        // (`with GetRec do`) still falls through to it and picks up the
+        // routine's own RESULT type, as before.
+        //
+        // TPasSemaResolver.WithTargetTypeSym has had this branch all along;
+        // it was missing HERE, so a cast to a type declared in ANOTHER unit
+        // never typed at all. Real bug: System.ObjAuto's `with TVarData(
+        // ParamValues[...]) do VType := ...` — TVarData lives in the implicit
+        // System unit, so Phase 1 cannot bind it and this pass is the only
+        // one that can. Unlike the Phase 1 branch this also covers a
+        // QUALIFIED cast (`System.TVarData(X)`) and a generic one, since
+        // ResolveTypeExpr handles nkMember/nkTypeArgs too.
+        Result := ResolveTypeExpr(AId, LBase);
+        if not XValid(Result) then
+          Result := WithTargetTypeX(AId, LBase);
+      end;
 
     nkIdent:
       begin

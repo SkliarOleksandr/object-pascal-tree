@@ -109,6 +109,7 @@ type
       const ANameLower: string): Integer;
     function AncestorTypeSym(ATypeSym: Integer): Integer;
     function WithTargetTypeSym(ANode: Integer): Integer;
+    function PointeeTypeSym(ATypeSym: Integer): Integer;
     procedure RepointScope(ANode, ANewScope: Integer);
     procedure ResolveOneWithStmt(AWith: Integer);
     procedure ResolveWithStmts;
@@ -1650,8 +1651,44 @@ begin
       // a symbol at all — so that shape gracefully falls out as NIL_SYM,
       // same as any other with-target this function can't fully type.)
       Result := WithTargetTypeSym(FirstChild(ANode));
+    nkDeref:
+      // `with SomePointer^ do` — the target's type is what the pointer POINTS
+      // AT (System.Variants: `with LVarData^ do VType := ...`, LVarData being
+      // a PVarData). Without this the whole with-body stayed unresolved.
+      Result := PointeeTypeSym(WithTargetTypeSym(FirstChild(ANode)));
     nkParen:
       Result := WithTargetTypeSym(FirstChild(ANode));
+  end;
+end;
+
+// The type a POINTER type points at: PVarData = ^TVarData -> TVarData,
+// chasing through however many alias links sit in between (PFoo = PVarData),
+// exactly like StructMemberScope does for member scopes. Depth-capped for the
+// same reason — real chains are shallow, this only guards a malformed or
+// circular one. NIL_SYM when ATypeSym is not a pointer type at all.
+function TPasSemaResolver.PointeeTypeSym(ATypeSym: Integer): Integer;
+var
+  LSym, LDef, LDepth: Integer;
+begin
+  Result := NIL_SYM;
+  LSym := ATypeSym;
+  for LDepth := 1 to 32 do
+  begin
+    if (LSym = NIL_SYM) or (FModel.Symbols[LSym].DeclNode = NIL_NODE) then
+      Exit;
+    LDef := NextSib(FModel.Symbols[LSym].DeclNode);
+    while (LDef <> NIL_NODE) and (KindOf(LDef) = nkGenericParams) do
+      LDef := NextSib(LDef);
+    if LDef = NIL_NODE then
+      Exit;
+    case KindOf(LDef) of
+      nkPointerType:
+        Exit(DesignatorHead(FirstChild(LDef)));
+      nkIdent, nkMember, nkTypeArgs:
+        LSym := DesignatorHead(LDef);   // alias link — keep chasing
+    else
+      Exit;                             // not a pointer, and never will be
+    end;
   end;
 end;
 

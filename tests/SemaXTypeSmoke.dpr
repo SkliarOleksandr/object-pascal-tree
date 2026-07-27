@@ -96,9 +96,6 @@ const
     'end;'#10 +
     'end.'#10;
 
-  // Cross-unit overload selection by ARGUMENT TYPES: three global overloads
-  // (mirrors System.Math.Min's shape) + method overloads + a generic method
-  // whose parameter needs instantiation-frame substitution before scoring.
   // A helper declared ALONGSIDE the type it extends (15.3.4): its members
   // must be reachable from a DIFFERENT unit, since the join lives inside XH's
   // own model and FindMemberX walks into it. Nested inside another class on
@@ -135,6 +132,48 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // with-targets whose TYPE lives in another unit — the shapes Phase 1 cannot
+  // resolve on its own, so only the cross-unit pass can. Mirrors
+  // System.ObjAuto (`with TVarData(X) do`) and System.Variants (`with P^ do`,
+  // `with FindVarData(V)^ do`), where TVarData/PVarData come from System.
+  UNIT_XW =
+    'unit XW;'#10'interface'#10 +
+    'type'#10 +
+    '  TVarLike = record'#10 +
+    '    VType: Word;'#10 +
+    '  end;'#10 +
+    '  PVarLike = ^TVarLike;'#10 +
+    '  PAlias = PVarLike;'#10 +
+    'function FindVar: PVarLike;'#10 +
+    'implementation'#10 +
+    'function FindVar: PVarLike; begin Result := nil; end;'#10 +
+    'end.'#10;
+
+  UNIT_XY =
+    'unit XY;'#10'interface'#10'uses XW;'#10 +
+    'implementation'#10 +
+    'procedure UseWith;'#10 +
+    'var'#10 +
+    '  Buf: array[0..3] of Integer;'#10 +
+    '  LP: PVarLike;'#10 +
+    '  LA: PAlias;'#10 +
+    'begin'#10 +
+    '  with TVarLike(Buf) do'#10 +
+    '    VType := 1;'#10 +
+    '  with LP^ do'#10 +
+    '    VType := 2;'#10 +
+    '  with LA^ do'#10 +
+    '    VType := 3;'#10 +
+    '  with FindVar^ do'#10 +
+    '    VType := 4;'#10 +
+    '  with XW.TVarLike(Buf) do'#10 +   // qualified cast
+    '    VType := 5;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  // Cross-unit overload selection by ARGUMENT TYPES: three global overloads
+  // (mirrors System.Math.Min's shape) + method overloads + a generic method
+  // whose parameter needs instantiation-frame substitution before scoring.
   UNIT_XO =
     'unit XO;'#10'interface'#10 +
     'function Pick(A: Integer): Integer; overload;'#10 +
@@ -268,7 +307,7 @@ end;
 
 var
   LDir: string;
-  LU, LV, LH: TPasSemaModel;
+  LU, LV, LH, LW: TPasSemaModel;
 begin
   GPassed := 0; GFailed := 0;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype');
@@ -282,6 +321,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XV.pas'), UNIT_XV);
   TFile.WriteAllText(TPath.Combine(LDir, 'XH.pas'), UNIT_XH);
   TFile.WriteAllText(TPath.Combine(LDir, 'XI.pas'), UNIT_XI);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XW.pas'), UNIT_XW);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XY.pas'), UNIT_XY);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -354,6 +395,19 @@ begin
       XTypeOf(LH, 'GM.m11'), 'Integer');
     Eq('GM.Twice is Integer (nested strict-private helper, cross-unit)',
       XTypeOf(LH, 'GM.Twice'), 'Integer');
+
+    // ---- with-targets whose type lives in another unit ----
+    // Cast, deref of a variable, deref through an alias chain, deref of a
+    // call result, and a qualified cast. Every VType write below must bind to
+    // XW's field; a miss leaves the with-body unresolved and E2003s.
+    LW := ModelByName('xy');
+    Ok('XY loaded', Assigned(LW));
+    Ok('XY: no diags at all (cast / deref with-targets)',
+      Length(LW.Diags) = 0);
+    // Positive, so the check cannot pass merely by staying silent: the
+    // with-body's VType must actually TYPE to XW's field type.
+    Eq('with-target member types through to the field',
+      XTypeOf(LW, 'VType'), 'Word');
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then
