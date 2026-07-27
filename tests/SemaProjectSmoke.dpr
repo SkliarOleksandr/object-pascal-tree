@@ -97,6 +97,44 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // A private nested type of the ANCESTOR OF A MIDDLE QUALIFIER SEGMENT.
+  // TFlagSet belongs to TState; the method being implemented is
+  // TPar.TState32.TFlag32.Check, so the type is reachable only by walking
+  // TState32's ancestry — not TFlag32's, which is all the inherited pass used
+  // to search. Mirrors System.Threading's TParallel.TLoopState32.
+  // TLoopStateFlag32.ShouldExit over TLoopState's TLoopStateFlagSet (16 of
+  // the RTL's false E2003s). TFlag32's OWN ancestry is exercised too, via
+  // Tag, so the innermost segment keeps working and keeps its precedence.
+  UNIT_QUAL =
+    'unit UnitQual;'#10'interface'#10 +
+    'type'#10 +
+    '  TPar = class sealed'#10 +
+    '  public type'#10 +
+    '    TState = class'#10 +
+    '    private type'#10 +
+    '      TFlags = (Alpha, Beta);'#10 +
+    '      TFlagSet = set of TFlags;'#10 +
+    '      TFlag = class'#10 +
+    '        Tag: Integer;'#10 +
+    '      end;'#10 +
+    '    end;'#10 +
+    '    TState32 = class sealed(TState)'#10 +
+    '    public type'#10 +
+    '      TFlag32 = class(TState.TFlag)'#10 +
+    '        function Check: Boolean;'#10 +
+    '      end;'#10 +
+    '    end;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TPar.TState32.TFlag32.Check: Boolean;'#10 +
+    'var'#10 +
+    '  F: TFlagSet;'#10 +          // ancestor-of-middle-segment nested type
+    'begin'#10 +
+    '  F := [TFlags.Alpha];'#10 +  // ditto, and its values
+    '  Result := (F <> []) and (Tag > 0);'#10 +   // own ancestry still works
+    'end;'#10 +
+    'end.'#10;
+
   UNIT_E =
     'unit UnitE;'#10'interface'#10'implementation'#10 +
     'procedure R;'#10'var L: Integer;'#10'begin'#10 +
@@ -397,6 +435,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UWRec.pas'), UNIT_WREC);
   TFile.WriteAllText(TPath.Combine(LDir, 'UWShadow.pas'), UNIT_WSHADOW);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitTObj.pas'), UNIT_TOBJ);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitQual.pas'), UNIT_QUAL);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -520,6 +559,13 @@ begin
       CrossRefCountInUnit(LTObj, 'ClassName', 'ClassName', 'system') = 2);
     Ok('tobject: Free resolves into System''s TObject',
       CrossRefCountInUnit(LTObj, 'Free', 'Free', 'system') = 1);
+
+    // A nested type of the ANCESTOR of a MIDDLE qualifier segment.
+    var LQual := ModelByName('unitqual');
+    Ok('qualsegs: UnitQual loaded', Assigned(LQual));
+    Ok('qualsegs: no diags at all', Length(LQual.Diags) = 0);
+    Ok('qualsegs: TFlagSet/TFlags found via the middle segment''s ancestor',
+      DiagCount(LQual, 'E2003') = 0);
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

@@ -128,6 +128,8 @@ type
     procedure CrossResolve(AId: Integer);
     function StructSymOfNode(AModel: TPasSemaModel; ANode: Integer): Integer;
     function InPropertySpecifier(AModel: TPasSemaModel; ANode: Integer): Boolean;
+    function OuterStructsOfNode(AModel: TPasSemaModel;
+      ANode, AInnermost: Integer): TArray<Integer>;
     // `with` over a target whose TYPE lives in another unit (ch.05 §5.7) —
     // see FindInEnclosingWith.
     function PointeeX(const AX: TSemaXType): TSemaXType;
@@ -2246,6 +2248,53 @@ begin
   end;
 end;
 
+{ The OUTER qualifier segments of the method enclosing ANode — everything
+  StructSymOfNode does not return, innermost first.
+
+  `procedure TParallel.TLoopState32.TLoopStateFlag32.ShouldExit` uses
+  TLoopStateFlagSet, a private nested type of TLoopState — which is the
+  ANCESTOR of the MIDDLE segment, TLoopState32. The innermost segment's own
+  ancestry (all the inherited pass ever searched) does not contain it, so
+  every such use was a false E2003 — 16 of them in System.Threading alone.
+
+  CollectRoutine joins each resolved segment's member scope into the routine
+  scope, and CollectStruct tags every struct scope with its own type, so the
+  chain is readable straight off Additional. Join order is outer-to-inner, so
+  it is walked backwards to keep dcc's innermost-first precedence. Scopes of
+  other kinds joined in there (a matched declaration's parameter scope) are
+  skipped — only structs have an ancestry to search. }
+function TPasSemaProject.OuterStructsOfNode(AModel: TPasSemaModel;
+  ANode, AInnermost: Integer): TArray<Integer>;
+var
+  LScope, LIdx, LSym: Integer;
+  LAdd: TArray<Integer>;
+begin
+  Result := nil;
+  if ANode > High(AModel.NodeScope) then
+    Exit;
+  LScope := AModel.NodeScope[ANode];
+  while LScope <> NIL_SCOPE do
+  begin
+    if AModel.Scopes[LScope].StructSym <> NIL_SYM then
+    begin
+      // Only a method body carries qualifier segments; a struct scope (a type
+      // declaration) has none, and StructSymOfNode already covers it.
+      if AModel.Scopes[LScope].Kind = sckStruct then
+        Exit;
+      LAdd := AModel.Scopes[LScope].Additional;
+      for LIdx := High(LAdd) downto 0 do
+        if AModel.Scopes[LAdd[LIdx]].Kind = sckStruct then
+        begin
+          LSym := AModel.Scopes[LAdd[LIdx]].StructSym;
+          if (LSym <> NIL_SYM) and (LSym <> AInnermost) then
+            Result := Result + [LSym];
+        end;
+      Exit;
+    end;
+    LScope := AModel.Scopes[LScope].Parent;
+  end;
+end;
+
 // True when ANode sits inside a property's read/write/stored/... specifier
 // (nkPropSpec). Walks CST parents, stopping at the property declaration —
 // nothing above it can be a specifier, so the walk is short.
@@ -2503,6 +2552,7 @@ var
   LModel: TPasSemaModel;
   LNode, LBase, LStruct, LUid, LSym, LCtx, LMatchNode: Integer;
   LPend: TPasInhPending;
+  LFound: Boolean;
   LNameLower: string;
 begin
   APending := nil;
@@ -2542,7 +2592,18 @@ begin
       Continue;
     if QualifierUnitAt(AId, LNode, LMatchNode) >= 0 then
       Continue;
-    if FindMemberX(XPlain(AId, LStruct), LNameLower, LUid, LSym, LCtx) or
+    // Innermost enclosing struct's ancestry, then the OUTER segments of a
+    // qualified method name (see OuterStructsOfNode), then the ordinary
+    // uses/System fallbacks — dcc's own precedence order.
+    LFound := FindMemberX(XPlain(AId, LStruct), LNameLower, LUid, LSym, LCtx);
+    if not LFound then
+      for var LOuter in OuterStructsOfNode(LModel, LNode, LStruct) do
+        if FindMemberX(XPlain(AId, LOuter), LNameLower, LUid, LSym, LCtx) then
+        begin
+          LFound := True;
+          Break;
+        end;
+    if LFound or
        FindInUses(AId, LNameLower, LUid, LSym) or
        FindInSystemUnit(LNameLower, LUid, LSym) or
        FindInSysInitUnit(LNameLower, LUid, LSym) then
