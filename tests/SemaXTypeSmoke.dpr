@@ -99,6 +99,42 @@ const
   // Cross-unit overload selection by ARGUMENT TYPES: three global overloads
   // (mirrors System.Math.Min's shape) + method overloads + a generic method
   // whose parameter needs instantiation-frame substitution before scoring.
+  // A helper declared ALONGSIDE the type it extends (15.3.4): its members
+  // must be reachable from a DIFFERENT unit, since the join lives inside XH's
+  // own model and FindMemberX walks into it. Nested inside another class on
+  // purpose — dcc-verified that nesting only namespaces the helper's TYPE
+  // name and never confines its activation (spec 15.3.4).
+  UNIT_XH =
+    'unit XH;'#10'interface'#10 +
+    'type'#10 +
+    '  TMat = record'#10 +
+    '    m11: Integer;'#10 +
+    '  end;'#10 +
+    '  TOwner = class'#10 +
+    '  strict private'#10 +
+    '    type'#10 +
+    '      TMatHelper = record helper for TMat'#10 +
+    '        function Twice: Integer;'#10 +
+    '      end;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TOwner.TMatHelper.Twice: Integer; begin Result := m11 * 2; end;'#10 +
+    'end.'#10;
+
+  UNIT_XI =
+    'unit XI;'#10'interface'#10'uses XH;'#10 +
+    'var'#10 +
+    '  GM: TMat;'#10 +
+    'implementation'#10 +
+    'procedure UseHelper;'#10 +
+    'var'#10 +
+    '  LI: Integer;'#10 +
+    'begin'#10 +
+    '  LI := GM.m11;'#10 +
+    '  LI := GM.Twice;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   UNIT_XO =
     'unit XO;'#10'interface'#10 +
     'function Pick(A: Integer): Integer; overload;'#10 +
@@ -232,7 +268,7 @@ end;
 
 var
   LDir: string;
-  LU, LV: TPasSemaModel;
+  LU, LV, LH: TPasSemaModel;
 begin
   GPassed := 0; GFailed := 0;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype');
@@ -244,6 +280,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XU.pas'), UNIT_XU);
   TFile.WriteAllText(TPath.Combine(LDir, 'XO.pas'), UNIT_XO);
   TFile.WriteAllText(TPath.Combine(LDir, 'XV.pas'), UNIT_XV);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XH.pas'), UNIT_XH);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XI.pas'), UNIT_XI);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -305,6 +343,17 @@ begin
       CallTargetUnitOf(LV, 'Pick(2.5)'), 'xo');
     Eq('CallTargetX: Pick(True) selected the local one',
       CallTargetUnitOf(LV, 'Pick(True)'), 'xv');
+
+    // ---- Helper members reachable ACROSS units (15.3.4) ----
+    // The helper is declared in XH beside TMat and nested inside a class,
+    // strict private; XI never names TOwner. Both must type identically.
+    LH := ModelByName('xi');
+    Ok('XI loaded', Assigned(LH));
+    Ok('XI: no diags at all', Length(LH.Diags) = 0);
+    Eq('GM.m11 is Integer (plain field, control)',
+      XTypeOf(LH, 'GM.m11'), 'Integer');
+    Eq('GM.Twice is Integer (nested strict-private helper, cross-unit)',
+      XTypeOf(LH, 'GM.Twice'), 'Integer');
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

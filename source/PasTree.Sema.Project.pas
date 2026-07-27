@@ -1466,7 +1466,15 @@ begin
     LScope := LM.Symbols[LCur.Sym].MemberScope;
     if LScope <> NIL_SCOPE then
     begin
-      LFound := LM.FindLocal(LScope, ANameLower);
+      // FindLocalDeep, mirroring ResolveNode's own nkMember lookup: a struct
+      // member scope carries a joined scope only where one was deliberately
+      // injected, and the sole injector is PasTree.Sema.Resolver's
+      // JoinHelperScopes. So this is what lets a helper declared ALONGSIDE
+      // its extended type be seen from any OTHER unit — `M.Twice` in unit B
+      // where both TMatrix and its helper live in unit A. The converse (a
+      // helper in B for a type in A) is genuinely cross-model injection and
+      // is NOT handled anywhere yet — see the README's To do.
+      LFound := LM.FindLocalDeep(LScope, ANameLower);
       if LFound <> NIL_SYM then
       begin
         AMemMid := LCur.UnitId;
