@@ -2,7 +2,13 @@ program PasTreeSemaProject;
 
 { Project-level (Phase 2) semantic dump: resolves uses across units and shows
   each unit's model, cross-unit refs and diagnostics.
-  Usage: PasTreeSemaProject <file.dpr|dir> [-p:<platform>] }
+  Usage: PasTreeSemaProject <file.dpr|dir> [-p:<platform>] [-st] [-proj]
+
+  -proj analyzes a FILE as a whole project (AnalyzeProject): the transitive
+  uses closure, with the cross passes run on EVERY unit. Without it a file
+  goes through AnalyzeFile, whose narrower contract cross-analyzes only the
+  main file itself — so a package/program with no code of its own reports NO
+  project-wide diagnostics at all, which reads misleadingly like "clean". }
 
 {$APPTYPE CONSOLE}
 
@@ -31,6 +37,7 @@ var
   GPath: string;
   GIdx: Integer;
   GSingle: Boolean;
+  GWholeProject: Boolean;
   GSW: TStopwatch;
   GMode: string;
 
@@ -42,18 +49,21 @@ begin
     if ParamCount < 1 then
     begin
       Writeln(ErrOutput,
-        'Usage: PasTreeSemaProject <file.dpr|dir> [-p:<platform>] [-st]');
+        'Usage: PasTreeSemaProject <file.dpr|dir> [-p:<platform>] [-st] [-proj]');
       ExitCode := 2;
       Exit;
     end;
     GPath := TPath.GetFullPath(ParamStr(1));
     GPlatform := pfWin32;
     GSingle := False;
+    GWholeProject := False;
     for GIdx := 2 to ParamCount do
       if ParamStr(GIdx).StartsWith('-p:', True) then
         TryParsePlatformName(Copy(ParamStr(GIdx), 4, MaxInt), GPlatform)
       else if SameText(ParamStr(GIdx), '-st') then
-        GSingle := True;   // single-threaded baseline (timing comparison)
+        GSingle := True    // single-threaded baseline (timing comparison)
+      else if SameText(ParamStr(GIdx), '-proj') then
+        GWholeProject := True;
 
     if TDirectory.Exists(GPath) then
       GProj := TPasSemaProject.Create(GPlatform, [GPath], [])
@@ -65,6 +75,8 @@ begin
       GSW := TStopwatch.StartNew;
       if TDirectory.Exists(GPath) then
         GProj.AnalyzeDirectory(GPath)
+      else if GWholeProject then
+        GProj.AnalyzeProject(GPath)
       else
         GProj.AnalyzeFile(GPath);
       GSW.Stop;

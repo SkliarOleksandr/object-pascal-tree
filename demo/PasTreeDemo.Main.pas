@@ -98,6 +98,8 @@ type
     btnShowSemantics: TButton;
     lblProgress: TLabel;
     vtMessages: TVirtualStringTree;
+    btnParseVcl: TButton;
+    btnParseFmx: TButton;
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
     procedure btnOpenClick(Sender: TObject);
@@ -124,6 +126,8 @@ type
     procedure GotoDeclActionExecute(Sender: TObject);
     procedure CopyMessageActionUpdate(Sender: TObject);
     procedure CopyMessageActionExecute(Sender: TObject);
+    procedure btnParseVclClick(Sender: TObject);
+    procedure btnParseFmxClick(Sender: TObject);
   private
     FFileList: TStringList;  // full paths shown in the tree
     FOpenFiles: TStringList; // path -> TTabSheet (Objects)
@@ -218,6 +222,8 @@ type
     procedure Log(const AText: string);
     procedure LogError(const AFilePath: string; ALine, ACol: Integer;
       const AText: string);
+    procedure RefreshFileNodes;
+    procedure AdoptProjectMembers(AMainId: Integer);
     procedure ClearMessages;
     procedure RebuildVisibleMessages;
     procedure ScrollMessagesToEnd;
@@ -236,6 +242,11 @@ type
     // "same identifier" highlight (plain name match, see
     // PasTreeDemo.Highlighter.SetSameIdentHighlight)
     procedure EditorStatusChange(Sender: TObject; Changes: TSynStatusChanges);
+    function Win32UnitIndex: TDictionary<string, Boolean>;
+    function IsNonWindowsUnitName(const AUnitName: string): Boolean;
+    function WriteBuildPackage(const APackageFile, APackageName,
+      ASourceSubDir: string): Boolean;
+    procedure ParseGeneratedPackage(const APackageName, ASourceSubDir: string);
   end;
 
 var
@@ -993,10 +1004,8 @@ end;
 procedure TfrmMain.PopulateTree;
 var
   LFile: string;
-  LNode: PVirtualNode;
 begin
-  FFileList.Clear;
-  vstFiles.Clear;
+  FFileList.Clear;   // RefreshFileNodes below clears the tree to match
 
   if Assigned(FDProj) and (Length(FDProj.Files) > 0) then
   begin
@@ -1009,13 +1018,24 @@ begin
   end
   else if (FMainSource <> '') and TFile.Exists(FMainSource) then
     // No .dproj for this project (OpenProject already redirects to a sibling
-    // .dproj when one exists — see there): a rare case, not worth a directory
-    // scan or a `uses`-clause parse. Show just the main file itself.
+    // .dproj when one exists — see there). Start with just the main file:
+    // its own members are only knowable once it has been parsed, so
+    // AdoptProjectMembers adds them when the analysis lands.
     FFileList.Add(FMainSource);
 
+  RefreshFileNodes;
+end;
+
+// Sorts FFileList and rebuilds the file tree's nodes from it. Shared by
+// PopulateTree and AdoptProjectMembers (which grows the list after analysis).
+procedure TfrmMain.RefreshFileNodes;
+var
+  LNode: PVirtualNode;
+begin
   FFileList.Sort;
   vstFiles.BeginUpdate;
   try
+    vstFiles.Clear;
     for var LIndex := 0 to FFileList.Count - 1 do
     begin
       LNode := vstFiles.AddChild(nil);
@@ -1024,6 +1044,50 @@ begin
   finally
     vstFiles.EndUpdate;
   end;
+end;
+
+{ Adds the main source's OWN units to the project file list.
+
+  A bare .dpr/.dpk with no sibling .dproj leaves FFileList holding nothing but
+  the main file, because at PopulateTree time nothing has parsed it yet. That
+  is not just a thin tree: ReportProjectResult LISTS diagnostics only for
+  FFileList members (everything else is RTL reach, counted but not listed), so
+  the message window stayed empty while the Done line honestly reported
+  hundreds — the count and the list disagreeing for a real reason, but looking
+  exactly like a lie.
+
+  The main source's uses/contains entries carrying an `in 'path'` clause ARE
+  the project's own unit list. That is Delphi's own convention — the IDE
+  writes `in` for a project member and a bare name for a library unit — and it
+  is how the shipped BuildWinRTL.dpk names all ~310 of its units, as well as
+  how the demo's generated VCL/FMX packages name theirs. }
+procedure TfrmMain.AdoptProjectMembers(AMainId: Integer);
+var
+  LModel: TPasSemaModel;
+  LPath: string;
+  LAdded: Boolean;
+begin
+  // A .dproj's DCCReference list is authoritative; never second-guess it.
+  if Assigned(FDProj) and (Length(FDProj.Files) > 0) then
+    Exit;
+  if (AMainId < 0) or (AMainId >= FSemaProject.ModelCount) then
+    Exit;
+  LModel := FSemaProject.Model(AMainId);
+  LAdded := False;
+  for var LIdx := 0 to High(LModel.UsesList) do
+  begin
+    if (LModel.UsesList[LIdx].InPath = '') or
+       (LModel.UsesList[LIdx].UnitId < 0) then
+      Continue;   // a library unit, or one that did not resolve
+    LPath := FSemaProject.ModelFile(LModel.UsesList[LIdx].UnitId);
+    if (LPath <> '') and (FFileList.IndexOf(LPath) < 0) then
+    begin
+      FFileList.Add(LPath);
+      LAdded := True;
+    end;
+  end;
+  if LAdded then
+    RefreshFileNodes;
 end;
 
 function TfrmMain.OpenFileTab(const APath: string): TSynEdit;
@@ -1307,9 +1371,10 @@ end;
 // and the background async swap; AElapsedMs is the analysis wall-clock.
 procedure TfrmMain.ReportProjectResult(AElapsedMs: Int64);
 var
-  LMain, LDiagTotal, LId, LDIdx, LFileId: Integer;
+  LMain, LDiagTotal, LDiagListed, LId, LDIdx, LFileId: Integer;
+  LTotalLines, LTotalChars, LTotalFiles: Int64;
   LModel: TPasSemaModel;
-  LDiagFile: string;
+  LDiagFile, LVolume: string;
 begin
   // Locate the main unit's model, and report diagnostics. The analyzed
   // closure now includes the whole RTL/VCL/3rd-party reach (for nav), so
@@ -1320,13 +1385,34 @@ begin
   // the moment the user actually asks to see them.
   LMain := -1;
   LDiagTotal := 0;
+  LDiagListed := 0;
+  LTotalLines := 0;
+  LTotalChars := 0;
+  LTotalFiles := 0;
+  // Locate the main unit BEFORE the diagnostics loop: the loop's own listing
+  // filter reads FFileList, and for a .dproj-less project that list is not
+  // complete until the main unit's members have been adopted into it.
+  for LId := 0 to FSemaProject.ModelCount - 1 do
+    if SameText(FSemaProject.ModelFile(LId), FMainSource) then
+    begin
+      LMain := LId;
+      Break;
+    end;
+  AdoptProjectMembers(LMain);
   vtMessages.BeginUpdate;
   try
     for LId := 0 to FSemaProject.ModelCount - 1 do
     begin
       LModel := FSemaProject.Model(LId);
-      if SameText(FSemaProject.ModelFile(LId), FMainSource) then
-        LMain := LId;
+      // Source volume, accumulated BEFORE the listing filter below: this
+      // measures what the PARSER chewed through, which is the whole closure,
+      // not just the project's own files.
+      for LFileId := 0 to High(LModel.Tree.Source.Files) do
+      begin
+        Inc(LTotalFiles);
+        Inc(LTotalLines, Length(LModel.Tree.Source.Files[LFileId].LineStarts));
+        Inc(LTotalChars, Length(LModel.Tree.Source.Files[LFileId].Source));
+      end;
       if FFileList.IndexOf(FSemaProject.ModelFile(LId)) < 0 then
       begin
         Inc(LDiagTotal, Length(LModel.Diags));
@@ -1335,6 +1421,7 @@ begin
       for LDIdx := 0 to High(LModel.Diags) do
       begin
         Inc(LDiagTotal);
+        Inc(LDiagListed);
         // A diagnostic's FileId is the MODEL'S OWN file table — for one
         // raised inside an $I-included file this is NOT the unit's main
         // file, so resolve it properly rather than assuming ModelFile(LId).
@@ -1353,8 +1440,34 @@ begin
   finally
     vtMessages.EndUpdate;
   end;
-  Log(Format('Done: %d units, %d diagnostics in %d ms (%s).',
-    [FSemaProject.ModelCount, LDiagTotal, AElapsedMs, cbThreading.Text]));
+  // Say WHERE the diagnostics are, not just how many. The total spans the
+  // whole analyzed closure while only project files are listed, so a bare
+  // total next to an empty message window reads as the tool contradicting
+  // itself — which is exactly how the .dproj-less case used to look.
+  if LDiagListed = LDiagTotal then
+    Log(Format('Done: %d units, %d diagnostics in %d ms (%s).',
+      [FSemaProject.ModelCount, LDiagTotal, AElapsedMs, cbThreading.Text]))
+  else
+    Log(Format('Done: %d units, %d diagnostics in %d ms (%s) — %d listed ' +
+      'below; %d more in library units outside this project (not listed).',
+      [FSemaProject.ModelCount, LDiagTotal, AElapsedMs, cbThreading.Text,
+       LDiagListed, LDiagTotal - LDiagListed]));
+  // Volume the parser actually processed. An $I include is counted once per
+  // INCLUDING unit, because that is how many times it was really lexed and
+  // parsed — the figure is work done, not distinct bytes on disk. Chars, not
+  // bytes: the source is UTF-16 in memory, and for (essentially ASCII)
+  // Pascal source one char is one byte on disk, so this also reads as the
+  // on-disk size.
+  if LTotalLines > 0 then
+  begin
+    LVolume := Format('  source: %s lines, %.1f MB, %s file(s)',
+      [FormatFloat('#,##0', LTotalLines), LTotalChars / (1024 * 1024),
+       FormatFloat('#,##0', LTotalFiles)]);
+    if AElapsedMs > 0 then
+      LVolume := LVolume + Format(' — %s lines/s',
+        [FormatFloat('#,##0', LTotalLines * 1000 / AElapsedMs)]);
+    Log(LVolume);
+  end;
   if FSemaProject.StageTimings <> '' then
     Log('  stages: ' + FSemaProject.StageTimings);
   if FAnalyzeOverhead <> '' then
@@ -1738,6 +1851,203 @@ begin
   end;
   OpenProject(LDProj);
   RunParse;
+end;
+
+const
+  CDPKTemplate = '''
+package %s;
+
+{$R *.res}
+{$IFDEF IMPLICITBUILDING This IFDEF should not be used by users}
+{$ALIGN 8}
+{$ASSERTIONS ON}
+{$BOOLEVAL OFF}
+{$DEBUGINFO OFF}
+{$EXTENDEDSYNTAX ON}
+{$IMPORTEDDATA ON}
+{$IOCHECKS ON}
+{$LOCALSYMBOLS ON}
+{$LONGSTRINGS ON}
+{$OPENSTRINGS ON}
+{$OPTIMIZATION ON}
+{$OVERFLOWCHECKS OFF}
+{$RANGECHECKS OFF}
+{$REFERENCEINFO OFF}
+{$SAFEDIVIDE OFF}
+{$STACKFRAMES OFF}
+{$TYPEDADDRESS OFF}
+{$VARSTRINGCHECKS ON}
+{$WRITEABLECONST OFF}
+{$MINENUMSIZE 1}
+{$IMAGEBASE $400000}
+{$DEFINE RELEASE}
+{$ENDIF IMPLICITBUILDING}
+{$RUNONLY}
+{$IMPLICITBUILD OFF}
+
+requires
+  rtl;
+
+contains
+%s;
+end.
+''';
+
+const
+  { Dot-delimited name SEGMENTS marking a unit as belonging to a non-Windows
+    platform. Matched as whole segments, never as substrings, so a name like
+    'FMX.Macros' cannot read as a Mac unit. This is only the FALLBACK filter
+    for a Studio install with no compiled lib directory — Win32UnitIndex below
+    is the real one, and is strictly better (see its own comment). }
+  CNonWindowsSegments: array[0..9] of string = (
+    'mac', 'osx', 'ios', 'android', 'linux', 'posix', 'cocoa', 'gles',
+    'metal', 'jni');
+
+{ Basenames (lower-cased, extension-less) of every unit the installed Studio
+  actually COMPILES for Win32: exactly those with a .dcu under
+  lib\win32\release. This is Embarcadero's own answer to "is this unit part of
+  the Win32 build", which beats any name-based guess — measured against
+  Studio 37.0's source tree it additionally excludes:
+    - FMX.BiometricAuth and FMX.Media.AVFoundation — Apple-only, but with no
+      platform word anywhere in the name;
+    - the IDE's own timestamped backup files left in the source tree
+      ('FMX.ScrollBox-2025-10-02 14.17.14.pas'), which are not compilable
+      units at all;
+  while KEEPING Win32 units a 'Vcl.*'-style mask would have dropped
+  (CtlConsts, CtlPanel, StdMain). Empty when the lib directory is missing (a
+  sources-only install); the caller then falls back to the name filter. }
+function TfrmMain.Win32UnitIndex: TDictionary<string, Boolean>;
+var
+  LLibDir: string;
+begin
+  Result := TDictionary<string, Boolean>.Create;
+  if FStudioRoot = '' then
+    Exit;
+  LLibDir := TPath.Combine(FStudioRoot, 'lib\win32\release');
+  if not TDirectory.Exists(LLibDir) then
+    Exit;
+  for var LDcu in TDirectory.GetFiles(LLibDir, '*.dcu') do
+    Result.AddOrSetValue(
+      LowerCase(TPath.GetFileNameWithoutExtension(LDcu)), True);
+end;
+
+function TfrmMain.IsNonWindowsUnitName(const AUnitName: string): Boolean;
+begin
+  Result := False;
+  for var LSegment in AUnitName.Split(['.']) do
+    for var LBad in CNonWindowsSegments do
+      if SameText(LSegment, LBad) then
+        Exit(True);
+end;
+
+{ Writes a package whose `contains` list is every unit of ASourceSubDir that
+  belongs to the Win32 build. The parser reads a package's `contains` as a
+  uses graph (see TPasParser's package branch), so analyzing this one file
+  pulls in the whole closure — the same trick the Parse RTL button gets for
+  free from the shipped BuildWinRTL.dproj, which is why VCL/FMX need one
+  generated: Studio ships no equivalent for them.
+
+  Unit paths are ABSOLUTE on purpose: the generated package lives next to the
+  demo, not in the (read-only) Studio source tree, so a bare `in 'X.pas'`
+  would resolve against the wrong directory. }
+function TfrmMain.WriteBuildPackage(const APackageFile, APackageName,
+  ASourceSubDir: string): Boolean;
+var
+  LIndex: TDictionary<string, Boolean>;
+  LUnits: TStringBuilder;
+  LSourceDir, LUnitName: string;
+  LKept, LSkipped: Integer;
+begin
+  Result := False;
+  LSourceDir := TPath.Combine(FStudioRoot, ASourceSubDir);
+  if not TDirectory.Exists(LSourceDir) then
+  begin
+    Log('Source directory not found: ' + LSourceDir);
+    Log('(is RAD Studio installed with sources?)');
+    Exit;
+  end;
+  LKept := 0;
+  LSkipped := 0;
+  LIndex := Win32UnitIndex;
+  LUnits := TStringBuilder.Create;
+  try
+    for var LFileName in TDirectory.GetFiles(LSourceDir, '*.pas') do
+    begin
+      LUnitName := TPath.GetFileNameWithoutExtension(LFileName);
+      if LIndex.Count > 0 then
+      begin
+        if not LIndex.ContainsKey(LowerCase(LUnitName)) then
+        begin
+          Inc(LSkipped);
+          Continue;
+        end;
+      end
+      else if IsNonWindowsUnitName(LUnitName) then
+      begin
+        Inc(LSkipped);
+        Continue;
+      end;
+      if LKept > 0 then
+        LUnits.Append(',').AppendLine;
+      LUnits.Append(Format('  %s in ''%s''', [LUnitName, LFileName]));
+      Inc(LKept);
+    end;
+    if LKept = 0 then
+    begin
+      Log('No Win32 units found under ' + LSourceDir);
+      Exit;
+    end;
+    TFile.WriteAllText(APackageFile,
+      Format(CDPKTemplate, [APackageName, LUnits.ToString]));
+    Result := True;
+    if LIndex.Count > 0 then
+      Log(Format('%s: %d unit(s); %d skipped (no Win32 .dcu — not part of ' +
+        'this platform''s build)', [APackageName, LKept, LSkipped]))
+    else
+      Log(Format('%s: %d unit(s); %d skipped by name (no compiled lib dir — ' +
+        'using the fallback filter)', [APackageName, LKept, LSkipped]));
+  finally
+    LUnits.Free;
+    LIndex.Free;
+  end;
+end;
+
+{ Regenerates the package and opens it through the regular project flow.
+  Always regenerates rather than reusing a previous file: the unit list is a
+  function of the installed Studio and its compiled lib set, and a stale one
+  would silently analyze the wrong thing. A directory listing is cheap next
+  to the analysis it feeds. }
+procedure TfrmMain.ParseGeneratedPackage(const APackageName,
+  ASourceSubDir: string);
+var
+  LDir, LPackageFile: string;
+begin
+  if FStudioRoot = '' then
+  begin
+    Log('RAD Studio installation not found.');
+    Exit;
+  end;
+  LDir := TPath.Combine(ExeDir, 'Sample');
+  if not TDirectory.Exists(LDir) then
+    TDirectory.CreateDirectory(LDir);
+  LPackageFile := TPath.Combine(LDir, APackageName + '.dpk');
+  // Gate on the WRITE, not on the file existing: a previous run leaves one
+  // behind, so an existence check would silently reopen a stale package if
+  // regeneration failed (Studio sources removed, say).
+  if not WriteBuildPackage(LPackageFile, APackageName, ASourceSubDir) then
+    Exit;   // WriteBuildPackage already logged why
+  OpenProject(LPackageFile);
+  RunParse;
+end;
+
+procedure TfrmMain.btnParseVclClick(Sender: TObject);
+begin
+  ParseGeneratedPackage('BuildWinVCL', 'source\vcl');
+end;
+
+procedure TfrmMain.btnParseFmxClick(Sender: TObject);
+begin
+  ParseGeneratedPackage('BuildWinFMX', 'source\fmx');
 end;
 
 procedure TfrmMain.FormKeyDown(Sender: TObject; var Key: Word;

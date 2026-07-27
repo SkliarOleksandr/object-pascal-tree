@@ -40,7 +40,7 @@ object frmMain: TfrmMain
     Left = 0
     Top = 0
     Width = 1180
-    Height = 41
+    Height = 73
     Align = alTop
     BevelOuter = bvNone
     TabOrder = 0
@@ -121,12 +121,30 @@ object frmMain: TfrmMain
       OnChange = cbHighlightColorChange
       OnGetColors = cbHighlightColorGetColors
     end
+    object btnParseVcl: TButton
+      Left = 662
+      Top = 40
+      Width = 100
+      Height = 27
+      Caption = 'Parse VCL'
+      TabOrder = 7
+      OnClick = btnParseVclClick
+    end
+    object btnParseFmx: TButton
+      Left = 768
+      Top = 40
+      Width = 100
+      Height = 27
+      Caption = 'Parse FMX'
+      TabOrder = 8
+      OnClick = btnParseFmxClick
+    end
   end
   object vstFiles: TVirtualStringTree
     Left = 0
-    Top = 41
+    Top = 73
     Width = 260
-    Height = 511
+    Height = 479
     Align = alLeft
     DefaultNodeHeight = 19
     Header.AutoSizeIndex = 0
@@ -189,9 +207,9 @@ object frmMain: TfrmMain
   end
   object pnlSrc: TPanel
     Left = 264
-    Top = 41
+    Top = 73
     Width = 916
-    Height = 511
+    Height = 479
     Align = alClient
     BevelOuter = bvNone
     ShowCaption = False
@@ -200,7 +218,7 @@ object frmMain: TfrmMain
       Left = 0
       Top = 0
       Width = 916
-      Height = 478
+      Height = 446
       ActivePage = tsJson
       Align = alClient
       TabOrder = 0
@@ -211,7 +229,7 @@ object frmMain: TfrmMain
           Left = 0
           Top = 0
           Width = 908
-          Height = 468
+          Height = 436
           Align = alClient
           CaseSensitive = True
           Font.Charset = DEFAULT_CHARSET
@@ -243,7 +261,7 @@ object frmMain: TfrmMain
           Left = 0
           Top = 0
           Width = 908
-          Height = 468
+          Height = 436
           Align = alClient
           Font.Charset = DEFAULT_CHARSET
           Font.Color = clWindowText
@@ -266,7 +284,7 @@ object frmMain: TfrmMain
     end
     object Panel2: TPanel
       Left = 0
-      Top = 478
+      Top = 446
       Width = 916
       Height = 33
       Align = alBottom
