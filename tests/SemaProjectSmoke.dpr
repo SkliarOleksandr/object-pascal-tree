@@ -56,9 +56,46 @@ const
   // below references SYS_CONST with NO uses clause at all; CrossResolve's
   // FindInSystemUnit fallback must resolve it (real dcc always can) instead
   // of firing a false E2003.
+  // TObject lives here too, because a class with NO heritage clause still
+  // inherits from it (11.1.1) — see UNIT_TOBJ below.
   UNIT_SYS =
     'unit System;'#10'interface'#10 +
-    'const SYS_CONST = 42;'#10'implementation'#10'end.'#10;
+    'const SYS_CONST = 42;'#10 +
+    'type'#10 +
+    '  TObject = class'#10 +
+    '    function ClassName: string;'#10 +
+    '    procedure Free;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TObject.ClassName: string; begin Result := ''''; end;'#10 +
+    'procedure TObject.Free; begin end;'#10 +
+    'end.'#10;
+
+  // A bare member of the IMPLICIT TObject ancestor. Neither class below
+  // names a heritage, so the ancestor walk used to stop at the class itself
+  // and report ClassName/Free as undeclared. TSub also checks the walk
+  // reaches TObject THROUGH an explicit ancestor that itself has none.
+  UNIT_TOBJ =
+    'unit UnitTObj;'#10'interface'#10 +
+    'type'#10 +
+    '  TPlain = class'#10 +
+    '    procedure Go;'#10 +
+    '  end;'#10 +
+    '  TSub = class(TPlain)'#10 +
+    '    procedure Deeper;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TPlain.Go;'#10 +
+    'begin'#10 +
+    '  if ClassName = '''' then'#10 +
+    '    Free;'#10 +
+    'end;'#10 +
+    'procedure TSub.Deeper;'#10 +
+    'begin'#10 +
+    '  if ClassName = '''' then'#10 +
+    '    Exit;'#10 +
+    'end;'#10 +
+    'end.'#10;
 
   UNIT_E =
     'unit UnitE;'#10'interface'#10'implementation'#10 +
@@ -359,6 +396,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWith.pas'), UNIT_WITH);
   TFile.WriteAllText(TPath.Combine(LDir, 'UWRec.pas'), UNIT_WREC);
   TFile.WriteAllText(TPath.Combine(LDir, 'UWShadow.pas'), UNIT_WSHADOW);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitTObj.pas'), UNIT_TOBJ);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -467,6 +505,21 @@ begin
       (GProj.ModuleStatus(9999) = msQueued) and
       (not GProj.TryGetSnapshot(9999, msIntfReady, LSnap)) and
       (LSnap = nil));
+
+    // Members of the IMPLICIT TObject ancestor, reached bare from a class
+    // with no heritage clause of its own — and from one whose explicit
+    // ancestor has none either. The walk used to stop where the clause is
+    // absent, making every such name a false E2003 (the RTL's `ClassName`).
+    var LTObj := ModelByName('unittobj');
+    Ok('tobject: UnitTObj loaded', Assigned(LTObj));
+    Ok('tobject: no diags at all', Length(LTObj.Diags) = 0);
+    // Positive and unit-pinned: both uses of ClassName (TPlain's own, and
+    // TSub's one level further down) must land on System's TObject, so this
+    // cannot pass by merely staying quiet.
+    Ok('tobject: both ClassName uses resolve into System''s TObject',
+      CrossRefCountInUnit(LTObj, 'ClassName', 'ClassName', 'system') = 2);
+    Ok('tobject: Free resolves into System''s TObject',
+      CrossRefCountInUnit(LTObj, 'Free', 'Free', 'system') = 1);
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

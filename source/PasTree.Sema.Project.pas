@@ -1518,7 +1518,33 @@ begin
             [nkIdent, nkMember, nkTypeArgs]) do
             LChild := LM.Tree.Nodes[LChild].NextSibling;
           if LChild = NIL_NODE then
+          begin
+            // No heritage clause — but a CLASS still has an ancestor: the
+            // implicit TObject (11.1.1), whose members are reachable bare
+            // inside the class's own methods (`ClassName`, `Free`,
+            // `InitInstance`). The walk used to stop here, so those were
+            // false E2003s. Routed through ResolveRealDecl, the same helper
+            // the DeclNode-less branch above uses, so it finds the REAL
+            // TObject (System.pas) rather than a compiler-seeded stub.
+            //
+            // Classes only. A record/object type genuinely has no implicit
+            // ancestor, and an interface's implicit IInterface is left alone
+            // on the same reasoning as the implemented-interface entries
+            // above: its members have to be implemented by the class anyway.
+            // The (LRMid, LRSym) <> (current) guard is what stops TObject
+            // itself — which of course has no heritage clause either — from
+            // walking into itself forever.
+            if (LM.Tree.Nodes[LDef].Kind = nkClassType) and
+               ResolveRealDecl(LCur.UnitId, 'tobject', LRMid, LRSym) and
+               ((LRMid <> LCur.UnitId) or (LRSym <> LCur.Sym)) then
+            begin
+              LCur.UnitId := LRMid;
+              LCur.Sym := LRSym;
+              LCur.Inst := NIL_INST;   // TObject is not generic
+              Continue;
+            end;
             Exit;
+          end;
           LNext := ResolveTypeExpr(LCur.UnitId, LChild);
         end;
     else
