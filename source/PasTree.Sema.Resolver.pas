@@ -953,23 +953,51 @@ begin
 
     nkInlineVar, nkInlineConst:
       begin
+        // 3.1.3: an inline var may declare SEVERAL names — `var V, S: string;`
+        // (10.3+, dcc-verified) — and the parser already emits one nkIdent per
+        // name. Only the FIRST was ever declared, so every other name read as
+        // an undeclared identifier and the shared type bound to none of them
+        // (real bug: System.SysUtils' `var V, S: string`, System.TypInfo's
+        // `var sType, sEnum: string`).
+        //
+        // Same names-then-':'-then-type walk DeclareNamesAndType does for a
+        // var section, deliberately NOT reusing it: an inline var's tail may
+        // be an INITIALIZER with no type at all (`var Name := Expr;`), and
+        // that routine anchors its tail walk on the type node, so the
+        // initializer would go uncollected.
+        var LKind := skVar;
+        if KindOf(ANode) = nkInlineConst then
+          LKind := skConst;
+        var LSyms: TArray<Integer> := nil;
+        var LType := NIL_NODE;
         LName := FirstChild(ANode);
-        if (LName <> NIL_NODE) and (KindOf(LName) = nkIdent) then
+        while (LName <> NIL_NODE) and (KindOf(LName) = nkIdent) do
         begin
-          var LKind := skVar;
-          if KindOf(ANode) = nkInlineConst then
-            LKind := skConst;
-          var LSym := DeclareSym(AScope, LKind, NodeText(LName), LName);
-          var LNext := NextSib(LName);
-          if (LNext <> NIL_NODE) and (SepAfter(LName) = ':') then
+          var LSep := SepAfter(LName);
+          LSyms := LSyms + [DeclareSym(AScope, LKind, NodeText(LName), LName)];
+          if LSep = ',' then
+            LName := NextSib(LName)
+          else
           begin
-            FModel.Symbols[LSym].TypeNode := LNext;
-            NotePendingAggregate(LNext);
+            // ':' -> the shared type follows; ':=' (one token, never ':') or
+            // anything else -> no type, the tail is an initializer.
+            if LSep = ':' then
+              LType := NextSib(LName);
+            Break;
           end;
-          while LNext <> NIL_NODE do
+        end;
+        for var LIdx := 0 to High(LSyms) do
+          FModel.Symbols[LSyms[LIdx]].TypeNode := LType;
+        NotePendingAggregate(LType);
+        // Everything after the last NAME — the type expression and/or the
+        // initializer — is ordinary content of this scope.
+        if LName <> NIL_NODE then
+        begin
+          var LRest := NextSib(LName);
+          while LRest <> NIL_NODE do
           begin
-            Collect(LNext, AScope);
-            LNext := NextSib(LNext);
+            Collect(LRest, AScope);
+            LRest := NextSib(LRest);
           end;
         end;
       end;

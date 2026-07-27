@@ -254,6 +254,33 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // Real bug report: an inline var declaring SEVERAL names (`var V, S:
+  // string;`, 10.3+, dcc-verified) declared only the FIRST — every other name
+  // was then an undeclared identifier, and the shared type bound to none of
+  // them. Mirrors System.SysUtils' `var V, S: string` and System.TypInfo's
+  // `var sType, sEnum: string`. The single-name and no-type-with-initializer
+  // forms are the controls: an inline var's tail may be an initializer with
+  // no type at all, and it still has to be collected.
+  SRC_INLINEVARS =
+    'unit U;'#10 +
+    'interface'#10 +
+    'implementation'#10 +
+    'function F(const A: string): Boolean;'#10 +
+    'begin'#10 +
+    '  var V, S: string;'#10 +          // two names, shared type
+    '  var I, J: Integer;'#10 +         // ditto, another type
+    '  var Solo: string;'#10 +          // control: single name + type
+    '  var Init := A;'#10 +             // control: no type, initializer
+    '  var Typed: string := A;'#10 +    // control: type AND initializer
+    '  V := A;'#10 +
+    '  S := V;'#10 +
+    '  I := 1;'#10 +
+    '  J := I;'#10 +
+    '  Solo := S;'#10 +
+    '  Result := (Init = Typed) and (Solo = V) and (I = J);'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // Real bug report: two with-target shapes the type-of-target walk did not
   // know. A CAST (`with TVarData(X) do`) and a DEREFERENCE (`with P^ do`) —
   // System.ObjAuto and System.Variants respectively, both writing to a
@@ -732,6 +759,24 @@ begin
   Ok('omitparams: no false E2003', DiagCount('E2003') = 0);
   Ok('omitparams: method body Index resolves',
     RefResolvesTo('Index', 'Index'));
+  GModel.Free;
+
+  // 9c-quinquies. inline vars declaring several names at once.
+  Analyze(SRC_INLINEVARS);
+  Ok('inlinevars: no false E2003', DiagCount('E2003') = 0);
+  Ok('inlinevars: no diags at all', Length(GModel.Diags) = 0);
+  Ok('inlinevars: BOTH names of `var V, S: string` are declared',
+    HasSym('V', skVar) and HasSym('S', skVar));
+  Ok('inlinevars: BOTH names of `var I, J: Integer` are declared',
+    HasSym('I', skVar) and HasSym('J', skVar));
+  Ok('inlinevars: the shared type binds to the SECOND name too',
+    (TypeOf('s', skVar) = 'string') and (TypeOf('j', skVar) = 'Integer'));
+  Ok('inlinevars: the shared type still binds to the first',
+    (TypeOf('v', skVar) = 'string') and (TypeOf('i', skVar) = 'Integer'));
+  Ok('inlinevars: single-name control keeps its type',
+    TypeOf('solo', skVar) = 'string');
+  Ok('inlinevars: a type-less initializer is still resolved',
+    RefResolvesTo('A', 'A'));
   GModel.Free;
 
   // 9c-quater. with-target shapes: cast, deref (plain / aliased / of a call).
