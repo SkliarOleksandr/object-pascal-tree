@@ -63,6 +63,19 @@ type
     EndPos: Integer;
   end;
 
+  // One {$SCOPEDENUMS ON/OFF} state change, positioned in the VISIBLE stream:
+  // the new value applies to every visible token at index >= VisIndex. This
+  // is the first positional directive-state record (the "Show Defines" plan
+  // needs the same shape for $DEFINE later): the resolver needs to know the
+  // state AT AN ENUM'S DECLARATION SITE, which a single final flag cannot
+  // answer — System.Threading turns it ON for the whole unit while most of
+  // the RTL never does, and one unit routinely toggles it around a group of
+  // declarations.
+  TPasScopedEnumsEvent = record
+    VisIndex: Integer;
+    Value: Boolean;
+  end;
+
   TPasPreprocessed = record
   public
     FileNames: TArray<string>;              // [0] = main file
@@ -70,9 +83,15 @@ type
     Visible: TArray<TPasVisibleToken>;
     Skipped: TArray<TArray<TPasSkippedRegion>>;  // per file, sorted
     Diagnostics: TArray<TPasPPDiagnostic>;
+    // {$SCOPEDENUMS} state changes, ascending by VisIndex; empty for the
+    // overwhelming majority of units (the switch defaults to OFF).
+    ScopedEnumsEvents: TArray<TPasScopedEnumsEvent>;
     function VisibleToken(AIndex: Integer): TPasToken;
     function VisibleText(AIndex: Integer): string;
     function IsSkipped(AFileId, AOffset: Integer): Boolean;
+    // The SCOPEDENUMS state in effect at visible-stream position AVisIndex
+    // (False = unscoped, the default). Binary search over the event list.
+    function ScopedEnumsAt(AVisIndex: Integer): Boolean;
   end;
 
   TPasDefines = class
@@ -90,13 +109,23 @@ type
 
   TPasSwitchState = array['A'..'Z'] of Boolean;
 
+  // Everything {$PUSHOPT} must save: the single-letter switches PLUS the
+  // long-form-only options tracked individually (real dcc's PUSHOPT/POPOPT
+  // covers all compiler options, SCOPEDENUMS included).
+  TPasOptState = record
+    Switches: TPasSwitchState;
+    ScopedEnums: Boolean;
+  end;
+
   TPasPreprocessor = class
   private
     FSourceManager: TPasSourceManager;
     FBaseDefines: TPasDefines;   // caller-owned project defines
     FDefines: TPasDefines;       // per-run clone: $DEFINE is unit-local!
     FSwitches: TPasSwitchState;
-    FSwitchStack: TStack<TPasSwitchState>;
+    FScopedEnums: Boolean;
+    FScopedEnumsEvents: TList<TPasScopedEnumsEvent>;
+    FSwitchStack: TStack<TPasOptState>;
     FFileNames: TList<string>;
     FFiles: TList<TPasTokenStream>;
     FVisible: TList<TPasVisibleToken>;
@@ -122,6 +151,7 @@ type
     procedure ResetSwitches;
     procedure ApplySwitches(const ABody: string);
     procedure ApplyLongSwitch(const AName, AArg: string);
+    procedure SetScopedEnums(AValue: Boolean);
     function EvalIfExpression(const AExpr: string; AFileId: Integer;
       const AToken: TPasToken): Boolean;
   public
@@ -239,6 +269,27 @@ begin
   end;
 end;
 
+function TPasPreprocessed.ScopedEnumsAt(AVisIndex: Integer): Boolean;
+var
+  LLo, LHi, LMid: Integer;
+begin
+  // Greatest event with VisIndex <= AVisIndex; none -> the OFF default.
+  Result := False;
+  LLo := 0;
+  LHi := High(ScopedEnumsEvents);
+  while LLo <= LHi do
+  begin
+    LMid := (LLo + LHi) div 2;
+    if ScopedEnumsEvents[LMid].VisIndex <= AVisIndex then
+    begin
+      Result := ScopedEnumsEvents[LMid].Value;
+      LLo := LMid + 1;
+    end
+    else
+      LHi := LMid - 1;
+  end;
+end;
+
 { TPasDefines ---------------------------------------------------------------- }
 
 constructor TPasDefines.Create;
@@ -298,7 +349,8 @@ begin
   FCompilerVersion := ACompilerVersion;
   FPointerBytes := APointerBytes;
   FExtendedBytes := AExtendedBytes;
-  FSwitchStack := TStack<TPasSwitchState>.Create;
+  FSwitchStack := TStack<TPasOptState>.Create;
+  FScopedEnumsEvents := TList<TPasScopedEnumsEvent>.Create;
   FFileNames := TList<string>.Create;
   FFiles := TList<TPasTokenStream>.Create;
   FVisible := TList<TPasVisibleToken>.Create;
@@ -346,6 +398,7 @@ begin
   FVisible.Free;
   FFiles.Free;
   FFileNames.Free;
+  FScopedEnumsEvents.Free;
   FSwitchStack.Free;
   inherited;
 end;
@@ -426,6 +479,8 @@ begin
   FCondThisActive.Clear;
   FCondSeenElse.Clear;
   FSwitchStack.Clear;
+  FScopedEnums := False;         // dcc default; unit-local like the switches
+  FScopedEnumsEvents.Clear;
 
   LStream := TPasLexer.Tokenize(ASource);
   FFileNames.Add(AFileName);
@@ -450,6 +505,7 @@ begin
   Result.Files := FFiles.ToArray;
   Result.Visible := FVisible.ToArray;
   Result.Diagnostics := FDiags.ToArray;
+  Result.ScopedEnumsEvents := FScopedEnumsEvents.ToArray;
   SetLength(Result.Skipped, FSkipped.Count);
   for LIdx := 0 to FSkipped.Count - 1 do
     Result.Skipped[LIdx] := FSkipped[LIdx].ToArray;
@@ -624,11 +680,20 @@ begin
       HandleInclude(AFileId, AToken, LArg);
   end
   else if LName = 'PUSHOPT' then
-    FSwitchStack.Push(FSwitches)
+  begin
+    var LOpt: TPasOptState;
+    LOpt.Switches := FSwitches;
+    LOpt.ScopedEnums := FScopedEnums;
+    FSwitchStack.Push(LOpt);
+  end
   else if LName = 'POPOPT' then
   begin
     if FSwitchStack.Count > 0 then
-      FSwitches := FSwitchStack.Pop
+    begin
+      var LOpt := FSwitchStack.Pop;
+      FSwitches := LOpt.Switches;
+      SetScopedEnums(LOpt.ScopedEnums);
+    end
     else
       Diag(ppPopWithoutPush, AFileId, AToken.Start, AToken.Len);
   end
@@ -734,8 +799,33 @@ begin
   else if AName = 'LOCALSYMBOLS' then SetSwitch('L')
   else if AName = 'REFERENCEINFO' then SetSwitch('Y')
   else if AName = 'IMPORTEDDATA' then SetSwitch('G')
-  else if AName = 'VARSTRINGCHECKS' then SetSwitch('V');
+  else if AName = 'VARSTRINGCHECKS' then SetSwitch('V')
+  else if AName = 'SCOPEDENUMS' then
+  begin
+    // Long-form only (no single-letter twin). Positional: the resolver reads
+    // the state at each enum's declaration site — see TPasScopedEnumsEvent.
+    if SameText(AArg, 'ON') then
+      SetScopedEnums(True)
+    else if SameText(AArg, 'OFF') then
+      SetScopedEnums(False);
+  end;
   // Unknown names: passthrough (WARN, HINTS, REGION, HPPEMIT, RTTI, ...)
+end;
+
+// Flips the {$SCOPEDENUMS} state and journals the change at the CURRENT end
+// of the visible stream: the directive token itself is trivia (never visible),
+// so the new state holds from the next visible token on. No-op (and no event)
+// when the value does not actually change, so the journal stays minimal.
+procedure TPasPreprocessor.SetScopedEnums(AValue: Boolean);
+var
+  LEvent: TPasScopedEnumsEvent;
+begin
+  if FScopedEnums = AValue then
+    Exit;
+  FScopedEnums := AValue;
+  LEvent.VisIndex := FVisible.Count;
+  LEvent.Value := AValue;
+  FScopedEnumsEvents.Add(LEvent);
 end;
 
 { ---- $IF expression evaluator ---------------------------------------------

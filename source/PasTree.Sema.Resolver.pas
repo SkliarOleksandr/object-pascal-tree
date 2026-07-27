@@ -589,7 +589,19 @@ begin
   FNodeScope[ANode] := LEnum;
   if ATypeSym <> NIL_SYM then
     FModel.Symbols[ATypeSym].MemberScope := LEnum;
-  FModel.JoinScope(EnumJoinTarget(AOuter), LEnum);
+  // {$SCOPEDENUMS ON} (2.2.4): values do NOT inject into the enclosing scope
+  // — qualified access (TEnum.Value) via the member scope above is the ONLY
+  // way in. The state is positional (read at this enum's own declaration
+  // site, via the preprocessor's event journal), because one unit routinely
+  // toggles it around a group of declarations. Real bug when this was
+  // ignored: System.Threading ({$SCOPEDENUMS ON} for the whole unit) has
+  // `TLoopStateFlags = (Exception, Broken, ...)` — the leaked `Exception`
+  // VALUE shadowed the `Exception` TYPE for every declaration below it, so
+  // `EAggregateException = class(Exception)`'s heritage resolved to an enum
+  // value, the ancestor walk died at the first hop, and every inherited
+  // member (`Message`) was a false E2003.
+  if not FTree.Source.ScopedEnumsAt(FTree.Nodes[ANode].FirstToken) then
+    FModel.JoinScope(EnumJoinTarget(AOuter), LEnum);
   LChild := FirstChild(ANode);
   while LChild <> NIL_NODE do
   begin

@@ -254,6 +254,51 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // Real bug report: {$SCOPEDENUMS ON} (2.2.4) was IGNORED — CollectEnum
+  // always injected enum values into the enclosing scope. The killer is not
+  // the missing E2003 on a bare value; it is SHADOWING: System.Threading
+  // (whole unit under SCOPEDENUMS ON) declares `TLoopStateFlags = (Exception,
+  // ...)`, the leaked VALUE shadowed the `Exception` TYPE, heritage
+  // `class(Exception)` resolved to an enum value, the ancestor walk died and
+  // every inherited member below was a false E2003. TVal here plays
+  // Exception; Ping plays Message. State is POSITIONAL: TOpen after
+  // {$SCOPEDENUMS OFF} injects again, and the PUSHOPT/POPOPT pair must
+  // restore ON for TAfterPop.
+  // NB the shadowing mechanics, because the fixture depends on them: a type
+  // in the unit's OWN scope cannot be shadowed by a leaked value (FindLocal-
+  // Deep checks own Names before Additional). Threading's Exception was
+  // shadowed precisely because it comes from a JOINED scope (the builtin
+  // system scope) and the enum join is more recent — so the fixture names
+  // its value `Exception`, the builtin, exactly like the real bug.
+  SRC_SCOPEDENUMS =
+    'unit U;'#10 +
+    'interface'#10 +
+    '{$SCOPEDENUMS ON}'#10 +
+    'type'#10 +
+    '  TFlags = (Exception, Broken);'#10 + // value named like the BUILTIN type
+    '{$PUSHOPT}'#10 +
+    '{$SCOPEDENUMS OFF}'#10 +
+    'type'#10 +
+    '  TOpen = (Alpha, Beta);'#10 +        // unscoped again: values inject
+    '{$POPOPT}'#10 +
+    'type'#10 +
+    '  TAfterPop = (Gamma, Delta);'#10 +   // POPOPT restored ON: scoped
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var'#10 +
+    '  E: Exception;'#10 +                 // must bind the TYPE, not the value
+    '  F: TFlags;'#10 +
+    '  O: TOpen;'#10 +
+    '  A: TAfterPop;'#10 +
+    'begin'#10 +
+    '  E := nil;'#10 +
+    '  F := TFlags.Exception;'#10 +        // qualified access always works
+    '  F := TFlags.Broken;'#10 +
+    '  O := Alpha;'#10 +                   // injected (unscoped)
+    '  A := TAfterPop.Gamma;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // Real bug report: an inline var declaring SEVERAL names (`var V, S:
   // string;`, 10.3+, dcc-verified) declared only the FIRST — every other name
   // was then an undeclared identifier, and the shared type bound to none of
@@ -759,6 +804,21 @@ begin
   Ok('omitparams: no false E2003', DiagCount('E2003') = 0);
   Ok('omitparams: method body Index resolves',
     RefResolvesTo('Index', 'Index'));
+  GModel.Free;
+
+  // 9c-sexies. {$SCOPEDENUMS} honored positionally.
+  Analyze(SRC_SCOPEDENUMS);
+  Ok('scopedenums: no diags at all', Length(GModel.Diags) = 0);
+  // With the bug, `E: Exception` bound to the leaked enum VALUE, BindTypes
+  // rejected it (not a type) and the declared type stayed empty.
+  Ok('scopedenums: the builtin TYPE is not shadowed by the scoped value',
+    TypeOf('e', skVar) = 'Exception');
+  Ok('scopedenums: qualified TFlags.Broken resolves',
+    AllRefsResolved('Broken'));
+  Ok('scopedenums: unscoped TOpen still injects (bare Alpha)',
+    RefResolvesTo('Alpha', 'Alpha'));
+  Ok('scopedenums: POPOPT restored ON (TAfterPop.Gamma qualified works)',
+    AllRefsResolved('Gamma'));
   GModel.Free;
 
   // 9c-quinquies. inline vars declaring several names at once.
