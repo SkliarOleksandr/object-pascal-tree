@@ -463,6 +463,19 @@ begin
   if ATypeSym <> NIL_SYM then
   begin
     FModel.Symbols[ATypeSym].MemberScope := LMembers;
+    // Tag the member scope with its OWN type, not just method-implementation
+    // routine scopes (CollectRoutine). The project driver partitions its two
+    // cross-unit passes on exactly this tag — CrossResolve defers a node when
+    // StructSymOfNode finds one, CrossResolveInherited then walks the
+    // ancestors for it — so anything inside a type DECLARATION was invisible
+    // to the ancestor walk and got a straight E2003 instead. That is what a
+    // property specifier naming an INHERITED accessor hits: `property Flag:
+    // Boolean read GetWordBoolProp` where GetWordBoolProp is declared in an
+    // ancestor in ANOTHER unit (System.Win.InternetExplorer over
+    // System.Win.OleControls' TOleControl — 47 of the RTL's remaining false
+    // E2003s). Setting it here flips both passes coherently, since they read
+    // the same predicate.
+    FModel.Scopes[LMembers].StructSym := ATypeSym;
     if KindOf(ANode) = nkHelperType then
     begin
       SetLength(FPendingHelpers, Length(FPendingHelpers) + 1);

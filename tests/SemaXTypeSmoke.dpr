@@ -132,6 +132,62 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // A property specifier naming an accessor INHERITED from another unit:
+  // `read GetWordProp` where GetWordProp is TBase's, in XP. The ancestor walk
+  // only ever ran for nodes inside a METHOD BODY, so a specifier — which sits
+  // in the type declaration — got a straight E2003 (System.Win.
+  // InternetExplorer over OleControls' TOleControl, 47 of the RTL's).
+  // The bare-inherited-member uses in Work are the control: they already
+  // worked, and deferring the WHOLE declaration to the inherited pass (rather
+  // than just specifiers) breaks them, because the ancestor reference
+  // `class(TBase)` would then be resolved in the same round as the lookups
+  // that read it. TNested exists to cover exactly that shape.
+  UNIT_XP =
+    'unit XP;'#10'interface'#10 +
+    'type'#10 +
+    '  TBase = class'#10 +
+    '  protected'#10 +
+    '    FCount: Integer;'#10 +
+    '    function GetWordProp(Index: Integer): Boolean;'#10 +
+    '    procedure SetWordProp(Index: Integer; Value: Boolean);'#10 +
+    '  public'#10 +
+    '    procedure Bump;'#10 +
+    '    property Count: Integer read FCount;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TBase.GetWordProp(Index: Integer): Boolean; begin Result := False; end;'#10 +
+    'procedure TBase.SetWordProp(Index: Integer; Value: Boolean); begin end;'#10 +
+    'procedure TBase.Bump; begin Inc(FCount); end;'#10 +
+    'end.'#10;
+
+  UNIT_XQ =
+    'unit XQ;'#10'interface'#10'uses XP;'#10 +
+    'type'#10 +
+    '  TDerived = class(TBase)'#10 +
+    '  public'#10 +
+    '    property Flag: Boolean index 204 read GetWordProp write SetWordProp;'#10 +
+    '    procedure Work;'#10 +
+    '  end;'#10 +
+    '  TOuter = class'#10 +
+    '  public type'#10 +
+    '    TNested = class(TBase)'#10 +
+    '      procedure Deep;'#10 +
+    '    end;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TDerived.Work;'#10 +
+    'begin'#10 +
+    '  Bump;'#10 +
+    '  FCount := FCount + 1;'#10 +
+    '  if Count > 0 then Exit;'#10 +
+    'end;'#10 +
+    'procedure TOuter.TNested.Deep;'#10 +
+    'begin'#10 +
+    '  Bump;'#10 +               // nested class, ancestor method across units
+    '  FCount := 0;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // with-targets whose TYPE lives in another unit — the shapes Phase 1 cannot
   // resolve on its own, so only the cross-unit pass can. Mirrors
   // System.ObjAuto (`with TVarData(X) do`) and System.Variants (`with P^ do`,
@@ -307,7 +363,7 @@ end;
 
 var
   LDir: string;
-  LU, LV, LH, LW: TPasSemaModel;
+  LU, LV, LH, LW, LQ: TPasSemaModel;
 begin
   GPassed := 0; GFailed := 0;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype');
@@ -323,6 +379,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XI.pas'), UNIT_XI);
   TFile.WriteAllText(TPath.Combine(LDir, 'XW.pas'), UNIT_XW);
   TFile.WriteAllText(TPath.Combine(LDir, 'XY.pas'), UNIT_XY);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XP.pas'), UNIT_XP);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XQ.pas'), UNIT_XQ);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -395,6 +453,17 @@ begin
       XTypeOf(LH, 'GM.m11'), 'Integer');
     Eq('GM.Twice is Integer (nested strict-private helper, cross-unit)',
       XTypeOf(LH, 'GM.Twice'), 'Integer');
+
+    // ---- inherited members reached from another unit ----
+    LQ := ModelByName('xq');
+    Ok('XQ loaded', Assigned(LQ));
+    Ok('XQ: no diags (inherited accessors in property specifiers, and bare '
+      + 'inherited members in nested-class method bodies)',
+      Length(LQ.Diags) = 0);
+    // Positive: the specifier's accessor must type to its declared result,
+    // so this cannot pass by merely staying quiet.
+    Eq('a property specifier binds to the ANCESTOR''s accessor',
+      XTypeOf(LQ, 'GetWordProp'), 'Boolean');
 
     // ---- with-targets whose type lives in another unit ----
     // Cast, deref of a variable, deref through an alias chain, deref of a

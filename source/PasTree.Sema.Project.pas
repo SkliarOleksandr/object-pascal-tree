@@ -127,6 +127,7 @@ type
     procedure ResolveUses(AId: Integer);
     procedure CrossResolve(AId: Integer);
     function StructSymOfNode(AModel: TPasSemaModel; ANode: Integer): Integer;
+    function InPropertySpecifier(AModel: TPasSemaModel; ANode: Integer): Boolean;
     // `with` over a target whose TYPE lives in another unit (ch.05 §5.7) —
     // see FindInEnclosingWith.
     function PointeeX(const AX: TSemaXType): TSemaXType;
@@ -2194,8 +2195,51 @@ begin
   while LScope <> NIL_SCOPE do
   begin
     if AModel.Scopes[LScope].StructSym <> NIL_SYM then
-      Exit(AModel.Scopes[LScope].StructSym);
+    begin
+      // A method body (or a local proc inside one): the original case.
+      if AModel.Scopes[LScope].Kind <> sckStruct then
+        Exit(AModel.Scopes[LScope].StructSym);
+      // A node in the type DECLARATION itself. Only a PROPERTY SPECIFIER is
+      // deferred to the inherited pass, never the whole declaration, and the
+      // reason is an ordering hazard rather than taste: that pass resolves a
+      // member by walking the struct's ancestors, which means reading the
+      // heritage reference (`class(TThread)`) out of this very declaration.
+      // Deferring heritage references TOO puts them in the same round as the
+      // lookups that depend on them — they are still uncommitted when the
+      // walk reads them, and the ancestor is simply not found. Measured, not
+      // theorised: deferring the whole declaration fixed the 47 property
+      // specifiers and broke 74 previously-fine inherited members in nested
+      // classes (TThreadPool.TBaseWorkerThread's `Terminate` and friends).
+      // Same invariant CrossResolveInherited's own header states for `with`:
+      // its entries must never be type nodes another worker needs.
+      if InPropertySpecifier(AModel, ANode) then
+        Exit(AModel.Scopes[LScope].StructSym);
+      Exit(NIL_SYM);
+    end;
     LScope := AModel.Scopes[LScope].Parent;
+  end;
+end;
+
+// True when ANode sits inside a property's read/write/stored/... specifier
+// (nkPropSpec). Walks CST parents, stopping at the property declaration —
+// nothing above it can be a specifier, so the walk is short.
+function TPasSemaProject.InPropertySpecifier(AModel: TPasSemaModel;
+  ANode: Integer): Boolean;
+var
+  LCur: Integer;
+begin
+  Result := False;
+  LCur := ANode;
+  while LCur <> NIL_NODE do
+  begin
+    case AModel.Tree.Nodes[LCur].Kind of
+      nkPropSpec:
+        Exit(True);
+      nkPropertyDecl, nkRoutine, nkClassType, nkRecordType, nkInterfaceType,
+      nkObjectType, nkHelperType:
+        Exit(False);
+    end;
+    LCur := AModel.Tree.Nodes[LCur].Parent;
   end;
 end;
 
