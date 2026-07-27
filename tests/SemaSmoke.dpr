@@ -254,6 +254,44 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // Real bug report: a `label` section declared NOTHING (the parser emitted
+  // nkLabelSec as a bare token span with no children, and Collect had no case
+  // for it), while a labeled statement DID emit an nkIdent for its own name —
+  // so `notAscii:` resolved to nothing and Phase 2 reported a false E2003.
+  // Mirrors System.Generics.Defaults.AnsiIdentHash exactly. Numeric labels
+  // (`goto 1`) declare no name and must stay diagnostic-free too.
+  SRC_LABELS =
+    'unit U;'#10 +
+    'interface'#10 +
+    'implementation'#10 +
+    'function Hash(const S: string): Integer;'#10 +
+    'label'#10 +
+    '  notAscii, again;'#10 +
+    'var'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  Result := 0;'#10 +
+    '  I := 0;'#10 +
+    'again:'#10 +
+    '  Inc(I);'#10 +
+    '  if I > 10 then'#10 +
+    '    goto notAscii;'#10 +
+    '  goto again;'#10 +
+    'notAscii:'#10 +
+    '  begin'#10 +
+    '    Result := Length(S);'#10 +
+    '  end;'#10 +
+    'end;'#10 +
+    'procedure Numeric;'#10 +
+    'label 1, 2;'#10 +
+    'begin'#10 +
+    '1:'#10 +
+    '  goto 2;'#10 +
+    '2:'#10 +
+    '  Exit;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // Real bug report: `with` statement member resolution was NOT IMPLEMENTED
   // at all (found via Vcl.ComCtrls.pas: `with FItems.Add do begin Caption :=
   // S; Result := Index; end;` — Caption/Index are members of the with-
@@ -585,6 +623,20 @@ begin
   Ok('omitparams: no false E2003', DiagCount('E2003') = 0);
   Ok('omitparams: method body Index resolves',
     RefResolvesTo('Index', 'Index'));
+  GModel.Free;
+
+  // 9c-bis. `label` sections declare their names; labeled statements and
+  // `goto` bind to them. Numeric labels declare nothing and stay silent.
+  Analyze(SRC_LABELS);
+  Ok('labels: no false E2003', DiagCount('E2003') = 0);
+  Ok('labels: no diags at all', Length(GModel.Diags) = 0);
+  Ok('labels: notAscii declared as skLabel', HasSym('notAscii', skLabel));
+  Ok('labels: again declared as skLabel', HasSym('again', skLabel));
+  Ok('labels: every notAscii reference resolves',
+    AllRefsResolved('notAscii'));
+  Ok('labels: every again reference resolves', AllRefsResolved('again'));
+  Ok('labels: numeric labels declare no symbol',
+    (SymCountOf('1', skLabel) = 0) and (SymCountOf('2', skLabel) = 0));
   GModel.Free;
 
   // 9d. `with` statement member resolution.

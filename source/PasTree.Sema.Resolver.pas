@@ -950,6 +950,23 @@ begin
         end;
       end;
 
+    nkLabelSec:
+      begin
+        // 5.6.4 `label Foo, Bar;` — declare each identifier label in the
+        // enclosing (routine/program) scope. Without this nothing ever
+        // produced a skLabel symbol, so the labeled statement's OWN `Foo:`
+        // ident — which the parser does emit — resolved to nothing and Phase 2
+        // reported a false E2003 (found on System.Generics.Defaults'
+        // AnsiIdentHash, which jumps to a `notAscii` label).
+        LChild := FirstChild(ANode);
+        while LChild <> NIL_NODE do
+        begin
+          if KindOf(LChild) = nkIdent then
+            DeclareSym(AScope, skLabel, NodeText(LChild), LChild);
+          LChild := NextSib(LChild);
+        end;
+      end;
+
     nkRoutine:
       CollectRoutine(ANode, AScope);
 

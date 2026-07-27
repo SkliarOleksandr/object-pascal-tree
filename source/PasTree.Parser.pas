@@ -1122,7 +1122,16 @@ begin
       begin
         LNode := FB.AddNode(nkGotoStmt, NIL_NODE, FPos);
         Next;
-        if CurKind in [tkIdentifier, tkIntLiteral] then
+        // 5.6.4: an IDENTIFIER label is a reference to a `label`-section
+        // declaration, so it gets a node the resolver can bind. A numeric
+        // label declares no name at all — it stays a bare token, exactly as
+        // the numeric form of nkLabeledStmt below does.
+        if CurKind = tkIdentifier then
+        begin
+          FB.Adopt(LNode, FB.AddNode(nkIdent, NIL_NODE, FPos));
+          Next;
+        end
+        else if CurKind = tkIntLiteral then
           Next
         else
           Error('label expected');
@@ -2646,6 +2655,12 @@ begin
           Next;
           while CurKind in [tkIdentifier, tkIntLiteral] do
           begin
+            // 5.6.4: each identifier label DECLARES a name in the enclosing
+            // routine's scope — emit a node so the resolver can declare it
+            // (skLabel) and the `Foo:` / `goto Foo` references bind to it.
+            // Numeric labels declare no name; they stay bare tokens.
+            if CurKind = tkIdentifier then
+              FB.Adopt(LNode, FB.AddNode(nkIdent, NIL_NODE, FPos));
             Next;
             if CurKind = tkComma then
               Next;

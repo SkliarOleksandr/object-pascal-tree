@@ -207,6 +207,20 @@ begin
     Check('5.5.4 repeat', 'repeat Step until Done;',
       'Block(RepeatStmt(Block(ExprStmt(Ident''Step'')) Ident''Done''))');
 
+    // ---- 5.6.4 goto / labels ----
+    // An IDENTIFIER label is a reference to a `label`-section declaration, so
+    // it gets its own Ident node the resolver can bind (without it the
+    // labeled statement's name was the only node, and it resolved to nothing:
+    // false E2003 on System.Generics.Defaults). A NUMERIC label declares no
+    // name at all and stays a bare token in both positions.
+    Check('5.6.4 goto ident label', 'goto Done;',
+      'Block(GotoStmt(Ident''Done''))');
+    Check('5.6.4 labeled stmt + goto', 'Again: Step; goto Again;',
+      'Block(LabeledStmt(Ident''Again'' ExprStmt(Ident''Step'')) ' +
+      'GotoStmt(Ident''Again''))');
+    Check('5.6.4 numeric label declares no ident node', '1: goto 2;',
+      'Block(LabeledStmt(GotoStmt))');
+
     // ---- 5.7 with ----
     Check('5.7 with', 'with A, B do X := 1;',
       'Block(WithStmt(Ident''A'' Ident''B'' Assign(Ident''X'' ' +
