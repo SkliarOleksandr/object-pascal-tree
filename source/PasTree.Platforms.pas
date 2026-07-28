@@ -39,6 +39,12 @@ type
     pfLinux64         // Intel x64
   );
 
+  { One dcc -A entry: the spelling written in `uses`, and what it really names. }
+  TPasUnitAliasDef = record
+    Alias: string;
+    UnitName: string;
+  end;
+
   TPasPlatformInfo = record
     Name: string;             // canonical name, matches .dproj Platform values
     Defines: TArray<string>;  // platform-specific predefined symbols
@@ -89,6 +95,24 @@ function PlatformName(APlatform: TPasPlatform): string;
   already fully qualified and needs no prefix. }
 function PasDefaultNamespaces(APlatform: TPasPlatform): TArray<string>;
 
+{ The IDE's DEFAULT unit aliases (dcc -A) — the sibling of the list above, and
+  read straight out of CodeGear.Common.Targets, which builds them in the same
+  two groups:
+
+    <UnitAliases>Generics.Collections=System.Generics.Collections;
+                 Generics.Defaults=System.Generics.Defaults</UnitAliases>
+    <UnitAliases Condition="Win32 Or Win64 Or WinArm64EC Or ...">
+      $(UnitAliases);WinTypes=Winapi.Windows;WinProcs=Winapi.Windows;
+      DbiTypes=BDE;DbiProcs=BDE;DbiErrs=BDE</UnitAliases>
+
+  One difference from the namespaces matters: the next line there is
+  `<UnitAliases Condition="'$(DCC_UnitAlias)'!=''">$(DCC_UnitAlias)$(UnitAliases)`
+  — the project's own aliases are PREPENDED, not substituted. So these defaults
+  apply even to a project that declares its own, and a host must add them first
+  and let the project's entries override on collision, never skip them. }
+function PasDefaultUnitAliases(
+  APlatform: TPasPlatform): TArray<TPasUnitAliasDef>;
+
 implementation
 
 uses
@@ -112,6 +136,37 @@ begin
       Result := Result + [LName];
   for var LName in NS_BASE do
     Result := Result + [LName];
+end;
+
+function PasDefaultUnitAliases(
+  APlatform: TPasPlatform): TArray<TPasUnitAliasDef>;
+
+  procedure Add(const AAlias, AUnit: string);
+  var
+    LDef: TPasUnitAliasDef;
+  begin
+    LDef.Alias := AAlias;
+    LDef.UnitName := AUnit;
+    Result := Result + [LDef];
+  end;
+
+begin
+  Result := nil;
+  Add('Generics.Collections', 'System.Generics.Collections');
+  Add('Generics.Defaults', 'System.Generics.Defaults');
+  if PlatformInfo(APlatform).IsWindows then
+  begin
+    Add('WinTypes', 'Winapi.Windows');
+    Add('WinProcs', 'Winapi.Windows');
+    // BDE ships no source with Studio, so these three normally end up as an
+    // honest F1027 rather than a resolution. Listed anyway: dropping them would
+    // silently turn `uses DbiTypes` into "unit not found: DbiTypes", naming a
+    // unit that does not exist even in principle instead of the one dcc looks
+    // for.
+    Add('DbiTypes', 'BDE');
+    Add('DbiProcs', 'BDE');
+    Add('DbiErrs', 'BDE');
+  end;
 end;
 
 function PlatformInfo(APlatform: TPasPlatform): TPasPlatformInfo;

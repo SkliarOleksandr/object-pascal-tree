@@ -1483,6 +1483,11 @@ begin
     FSemaProject := TPasSemaProject.Create(LPlatform, LSearchPaths, LDefines);
     FSemaProject.SingleThreaded := cbThreading.ItemIndex = 0;
     FSemaProject.SetNamespaces(EffectiveNamespaces(LPlatform)); // Forms -> Vcl.Forms
+    // Defaults ALWAYS, then the project's on top: the IDE prepends a project's
+    // own aliases to the defaults rather than replacing them, and AddUnitAlias
+    // is last-wins, so this order gives the project precedence on a collision.
+    for var LDef in PasDefaultUnitAliases(LPlatform) do
+      FSemaProject.AddUnitAlias(LDef.Alias, LDef.UnitName);
     if Assigned(FDProj) then
       for var LAlias in FDProj.UnitAliases do
         FSemaProject.AddUnitAlias(LAlias.Alias, LAlias.UnitName);
@@ -1747,6 +1752,8 @@ begin
     LRoots, LPriority);
   FAsyncSession.SetSingleThreadedInner(cbThreading.ItemIndex = 0);
   FAsyncSession.SetNamespaces(EffectiveNamespaces(LPlatform));
+  for var LDef in PasDefaultUnitAliases(LPlatform) do  // defaults, then project
+    FAsyncSession.AddUnitAlias(LDef.Alias, LDef.UnitName);
   if Assigned(FDProj) then
     for var LAlias in FDProj.UnitAliases do
       FAsyncSession.AddUnitAlias(LAlias.Alias, LAlias.UnitName);

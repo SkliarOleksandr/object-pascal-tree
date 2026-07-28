@@ -849,6 +849,11 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NSLegacy.pas'),
     'unit NSLegacy;'#10'interface'#10'uses Windows, Graphics;'#10 +
     'implementation'#10'end.'#10);
+  // The alias defaults (dcc -A) are the sibling case: `uses WinTypes` names no
+  // file at all, only the alias makes it Winapi.Windows.
+  TFile.WriteAllText(TPath.Combine(LDir, 'NSAlias.pas'),
+    'unit NSAlias;'#10'interface'#10'uses WinTypes, WinProcs;'#10 +
+    'implementation'#10'end.'#10);
   // The Windows group must be Windows-only, and the base group everywhere.
   Ok('defaults: Win32 carries the Winapi group',
     TArray.IndexOf<string>(PasDefaultNamespaces(pfWin32), 'Winapi') >= 0);
@@ -861,6 +866,23 @@ begin
   Ok('defaults: Winapi precedes Vcl',
     TArray.IndexOf<string>(PasDefaultNamespaces(pfWin32), 'Winapi') <
     TArray.IndexOf<string>(PasDefaultNamespaces(pfWin32), 'Vcl'));
+  // Aliases split the same way: Generics.* everywhere, WinTypes/Dbi* only on
+  // Windows (CodeGear.Common.Targets conditions them on the Win platforms).
+  var LAliasNames := '';
+  for var LDef in PasDefaultUnitAliases(pfWin32) do
+    LAliasNames := LAliasNames + LDef.Alias + '=' + LDef.UnitName + ';';
+  Ok('alias defaults: WinTypes -> Winapi.Windows on Win32',
+    LAliasNames.Contains('WinTypes=Winapi.Windows;'));
+  Ok('alias defaults: Generics.Collections is fully qualified',
+    LAliasNames.Contains('Generics.Collections=System.Generics.Collections;'));
+  var LPosixAliases := '';
+  for var LDef in PasDefaultUnitAliases(pfLinux64) do
+    LPosixAliases := LPosixAliases + LDef.Alias + ';';
+  Ok('alias defaults: no WinTypes/Dbi* off Windows',
+    not LPosixAliases.Contains('WinTypes') and
+    not LPosixAliases.Contains('Dbi'));
+  Ok('alias defaults: Generics.* still there off Windows',
+    LPosixAliases.Contains('Generics.Collections'));
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -869,18 +891,25 @@ begin
     GProj.AnalyzeDirectory(LDir);
     Ok('defaults: without -NS, legacy imports FAIL',
       DiagCount(ModelByName('nslegacy'), 'F1027') = 2);
+    Ok('defaults: without -A, WinTypes/WinProcs FAIL',
+      DiagCount(ModelByName('nsalias'), 'F1027') = 2);
   finally
     GProj.Free;
   end;
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
     GProj.SetNamespaces(PasDefaultNamespaces(pfWin32));
+    for var LDef in PasDefaultUnitAliases(pfWin32) do
+      GProj.AddUnitAlias(LDef.Alias, LDef.UnitName);
     GProj.AnalyzeDirectory(LDir);
     var LLeg := ModelByName('nslegacy');
     Ok('defaults: NSLegacy loaded', Assigned(LLeg));
     Ok('defaults: `uses Windows` -> Winapi.Windows, `Graphics` -> Vcl.Graphics',
       DiagCount(LLeg, 'F1027') = 0);
     Ok('defaults: and its uses closure is complete', LLeg.AllUsesResolved);
+    var LAl := ModelByName('nsalias');
+    Ok('defaults: `uses WinTypes, WinProcs` both alias to Winapi.Windows',
+      Assigned(LAl) and (DiagCount(LAl, 'F1027') = 0) and LAl.AllUsesResolved);
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

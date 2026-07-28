@@ -212,6 +212,10 @@ begin
         GProj.SetNamespaces(LD.Namespaces)
       else
         GProj.SetNamespaces(PasDefaultNamespaces(LD.Platform));
+      // Defaults always, project's on top (the IDE prepends rather than
+      // replaces; AddUnitAlias is last-wins, so this gives the project priority).
+      for var LDef in PasDefaultUnitAliases(LD.Platform) do
+        GProj.AddUnitAlias(LDef.Alias, LDef.UnitName);
       for var LA in LD.UnitAliases do
         GProj.AddUnitAlias(LA.Alias, LA.UnitName);
 
@@ -384,6 +388,8 @@ begin
       // no project to state its prefixes, and zero prefixes is not what the IDE
       // would use.
       GProj.SetNamespaces(PasDefaultNamespaces(GPlatform));
+      for var LDef in PasDefaultUnitAliases(GPlatform) do
+        GProj.AddUnitAlias(LDef.Alias, LDef.UnitName);
       GSW := TStopwatch.StartNew;
       if TDirectory.Exists(GPath) then
         GProj.AnalyzeDirectory(GPath)
