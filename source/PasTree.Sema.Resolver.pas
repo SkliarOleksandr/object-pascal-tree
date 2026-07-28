@@ -742,8 +742,19 @@ begin
     LSegIdent := LChild;
     LSegLast := LChild;
     LChild := NextSib(LChild);
+    // A following nkGenericParams/nkTypeArgs belongs to THIS segment only when
+    // the segment ident is immediately followed by '<' — `TThreadList<T>.` or
+    // `Foo<T>(...)`. Without the separator check, `function LockList:
+    // TList<T>;` had its RESULT TYPE eaten as segment generic-args: nkTypeArgs
+    // follows the name ident either way, only the ':' between them tells the
+    // two shapes apart. The result node then never registered, the routine
+    // symbol's TypeNode stayed NIL, and every consumer of the result type —
+    // most visibly `with FThreads.LockList do Count` (System.Threading) —
+    // dead-ended. Every function returning a generic instantiation was
+    // affected.
     while (LChild <> NIL_NODE) and
-          (KindOf(LChild) in [nkGenericParams, nkTypeArgs]) do
+          (KindOf(LChild) in [nkGenericParams, nkTypeArgs]) and
+          (SepAfter(LSegLast) = '<') do
     begin
       Collect(LChild, LRoutine);   // generic params -> routine scope; args refs
       LSegLast := LChild;

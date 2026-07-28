@@ -227,6 +227,37 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // `with` over a call whose result is a generic INSTANTIATION from another
+  // unit — System.Threading's `with FThreads.LockList do Count`, the largest
+  // single with-bucket shape. Two things must both work: the method's result
+  // type must exist at all (see SemaSmoke's genresult case for the parsing
+  // bug that ate it), and the member's declared type must be substituted in
+  // the base's instantiation frame (TWrap<T>.Get -> Integer, not T).
+  UNIT_XZ =
+    'unit XZ;'#10'interface'#10'uses XG;'#10 +
+    'type'#10 +
+    '  TPool<T> = class'#10 +
+    '    FList: TWrap<T>;'#10 +
+    '    function Lock: TWrap<T>;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TPool<T>.Lock: TWrap<T>; begin Result := FList; end;'#10 +
+    'end.'#10;
+
+  UNIT_XR =
+    'unit XR;'#10'interface'#10'uses XG, XZ;'#10 +
+    'var'#10 +
+    '  GPool: TPool<Integer>;'#10 +
+    'implementation'#10 +
+    'procedure UseIt;'#10 +
+    'var'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  with GPool.Lock do'#10 +
+    '    I := FValue;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // Cross-unit overload selection by ARGUMENT TYPES: three global overloads
   // (mirrors System.Math.Min's shape) + method overloads + a generic method
   // whose parameter needs instantiation-frame substitution before scoring.
@@ -363,7 +394,7 @@ end;
 
 var
   LDir: string;
-  LU, LV, LH, LW, LQ: TPasSemaModel;
+  LU, LV, LH, LW, LQ, LR: TPasSemaModel;
 begin
   GPassed := 0; GFailed := 0;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype');
@@ -379,6 +410,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XI.pas'), UNIT_XI);
   TFile.WriteAllText(TPath.Combine(LDir, 'XW.pas'), UNIT_XW);
   TFile.WriteAllText(TPath.Combine(LDir, 'XY.pas'), UNIT_XY);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XZ.pas'), UNIT_XZ);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XR.pas'), UNIT_XR);
   TFile.WriteAllText(TPath.Combine(LDir, 'XP.pas'), UNIT_XP);
   TFile.WriteAllText(TPath.Combine(LDir, 'XQ.pas'), UNIT_XQ);
 
@@ -410,10 +443,17 @@ begin
     Eq('TWrap<Integer>.Create is TWrap<Integer>',
       XTypeOf(LU, 'TWrap<Integer>.Create'), 'TWrap<Integer>');
 
-    // Instances are deduped: TWrap<Integer> used twice, TWrap<string>,
-    // TWrap<TWrap<string>>, TPairWrap<string,Boolean>, and XV's TWrap<Double>
-    // -> 5 distinct.
-    Ok('instance table deduped (5)', GProj.InstanceCount = 5);
+    // Instances are deduped WITHIN one referring model: XU's TWrap<Integer>
+    // used twice -> one entry; plus TWrap<string>, TWrap<TWrap<string>>,
+    // TPairWrap<string,Boolean>, XV's TWrap<Double>. The with-over-generic
+    // fixtures add TPool<Integer>, an open TWrap<T> per DISTINCT parameter
+    // symbol (TPool's T and TWrap's own T are different types — two
+    // entries), and a second TWrap<Integer>: XR's Integer arg is ITS model's
+    // builtin symbol, not XU's, so the key differs — dedup is per-model for
+    // builtin args by construction (each model seeds its own builtins; see
+    // PasTree.Sema.Builtins). Cross-model canonicalization of builtin args
+    // would shrink this to 8; until then the count documents the behavior.
+    Ok('instance table deduped (9; see comment)', GProj.InstanceCount = 9);
 
     // ---- Cross-unit overload selection by ARGUMENT TYPES ----
     LV := ModelByName('xv');
@@ -477,6 +517,15 @@ begin
     // with-body's VType must actually TYPE to XW's field type.
     Eq('with-target member types through to the field',
       XTypeOf(LW, 'VType'), 'Word');
+
+    // ---- with over a generic-instantiation call result ----
+    LR := ModelByName('xr');
+    Ok('XR loaded', Assigned(LR));
+    Ok('XR: no diags (with GPool.Lock do FValue)', Length(LR.Diags) = 0);
+    // Substitution, not just membership: FValue must come back as Integer
+    // (the instantiation frame applied), not as the open parameter T.
+    Eq('with-body member substituted in the instantiation frame',
+      XTypeOf(LR, 'FValue'), 'Integer');
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

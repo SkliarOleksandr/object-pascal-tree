@@ -48,6 +48,14 @@ type
   TPasInhPending = record
     Node: Integer;
     Ext: TPasExtRef;
+    // Filled by the WITH pass only (XNil from the inherited pass): the
+    // member's declared type ALREADY SUBSTITUTED in the with-target's
+    // instantiation frame. It has to travel with the pending entry because
+    // the frame is only known while the target is being typed — by the time
+    // CrossType sees the bare ident there is no with-target context left, so
+    // it would type `FValue` as the open parameter T instead of Integer
+    // (`with FThreads.LockList do` — a TList<TBaseWorkerThread>).
+    X: TSemaXType;
   end;
 
   // Progress of a staged (incremental) analysis, reported to AnalyzeStaged's
@@ -136,7 +144,8 @@ type
     function WithTargetTypeX(AId, ANode: Integer): TSemaXType;
     function InsideWithBody(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function FindInEnclosingWith(AId, ANode: Integer;
-      const ANameLower: string; out AUid, ASym: Integer): Boolean;
+      const ANameLower: string; out AUid, ASym: Integer;
+      out AX: TSemaXType): Boolean;
     procedure CrossResolveInherited(AId: Integer;
       var APending: TArray<TPasInhPending>);
     procedure RunInheritedPass(ACount: Integer);
@@ -2035,10 +2044,16 @@ begin
   end;
   // Persist only what ADDS to the intra-unit result: a type for a locally
   // untyped node, an instantiation, or a type living in another model.
+  // An entry ALREADY present is left alone: at this point the only earlier
+  // writer is the with pass, whose entries carry the with-target's
+  // instantiation frame (TPasInhPending.X) — this walk has no with-target
+  // context, so for exactly those nodes its answer is the OPEN generic
+  // parameter, strictly worse.
   for LNode := 0 to High(LX) do
     if XValid(LX[LNode]) and ((LM.ExprType[LNode] = NIL_SYM) or
        (LX[LNode].Inst <> NIL_INST) or (LX[LNode].UnitId <> AId)) then
-      LM.ExprTypeX.AddOrSetValue(LNode, LX[LNode]);
+      if not LM.ExprTypeX.ContainsKey(LNode) then
+        LM.ExprTypeX.Add(LNode, LX[LNode]);
 end;
 
 function TPasSemaProject.InstanceCount: Integer;
@@ -2449,8 +2464,14 @@ begin
         LBX := WithTargetTypeX(AId, LBase);
         if XValid(LBX) and FindMemberX(LBX,
              LowerCase(LM.Tree.NodeText(LName)), LMemMid, LMemSym, LCtx) then
-          Result := ResolveTypeExpr(LMemMid,
-            FModels[LMemMid].Symbols[LMemSym].TypeNode);
+          // SubstX closes the member's declared type over the base's
+          // instantiation frame: FThreads: TThreadList<TBaseWorkerThread>
+          // makes LockList's declared TList<T> a TList<TBaseWorkerThread>,
+          // exactly as CrossType's own member typing does. Without it the
+          // with-body would look members up in an OPEN TList<T> — right
+          // members, imprecise element types.
+          Result := SubstX(ResolveTypeExpr(LMemMid,
+            FModels[LMemMid].Symbols[LMemSym].TypeNode), LCtx, 0);
       end;
   end;
 end;
@@ -2492,7 +2513,8 @@ end;
 // whose targets are a mix of same-unit and cross-unit types keeps working:
 // the same-unit ones are already open, and this fills in the rest.
 function TPasSemaProject.FindInEnclosingWith(AId, ANode: Integer;
-  const ANameLower: string; out AUid, ASym: Integer): Boolean;
+  const ANameLower: string; out AUid, ASym: Integer;
+  out AX: TSemaXType): Boolean;
 var
   LM: TPasSemaModel;
   LCur, LParent, LLast, LChild, LIdx, LCtx: Integer;
@@ -2500,6 +2522,7 @@ var
   LX: TSemaXType;
 begin
   Result := False;
+  AX := XNil;
   LM := FModels[AId];
   LCur := ANode;
   LParent := LM.Tree.Nodes[LCur].Parent;
@@ -2525,7 +2548,14 @@ begin
           LX := WithTargetTypeX(AId, LTargets[LIdx]);
           if XValid(LX) and
              FindMemberX(LX, ANameLower, AUid, ASym, LCtx) then
+          begin
+            // The member's declared type, closed over the instantiation
+            // frame FindMemberX reported — travels back with the hit (see
+            // TPasInhPending.X for why it cannot be recovered later).
+            AX := SubstX(ResolveTypeExpr(AUid,
+              FModels[AUid].Symbols[ASym].TypeNode), LCtx, 0);
             Exit(True);
+          end;
         end;
     end;
     LCur := LParent;
@@ -2611,6 +2641,7 @@ begin
       LPend.Node := LNode;
       LPend.Ext.UnitId := LUid;
       LPend.Ext.Sym := LSym;
+      LPend.X := XNil;   // only the with pass carries a member type
       APending := APending + [LPend];
     end
     else if LModel.AllUsesResolved then
@@ -2654,6 +2685,7 @@ var
   LPend: TPasInhPending;
   LNameLower: string;
   LBound: Boolean;
+  LMemX: TSemaXType;
 begin
   APending := nil;
   LModel := FModels[AId];
@@ -2697,7 +2729,7 @@ begin
     // so its members shadow the enclosing method's own; then used units, then
     // the implicit System/SysInit units; E2003 only after every one misses.
     LStruct := StructSymOfNode(LModel, LNode);
-    if FindInEnclosingWith(AId, LNode, LNameLower, LUid, LSym) then
+    if FindInEnclosingWith(AId, LNode, LNameLower, LUid, LSym, LMemX) then
     begin
       // Already exactly this symbol (the intra-unit pass opened the scope and
       // got it right) — nothing to rewrite.
@@ -2706,6 +2738,7 @@ begin
       LPend.Node := LNode;
       LPend.Ext.UnitId := LUid;
       LPend.Ext.Sym := LSym;
+      LPend.X := LMemX;
       APending := APending + [LPend];
     end
     else if LBound then
@@ -2719,6 +2752,7 @@ begin
       LPend.Node := LNode;
       LPend.Ext.UnitId := LUid;
       LPend.Ext.Sym := LSym;
+      LPend.X := XNil;
       APending := APending + [LPend];
     end
     else if LModel.AllUsesResolved then
@@ -2747,6 +2781,11 @@ begin
       // Harmless for the gap-filling entries — those were NIL_SYM already.
       FModels[LIdx].RefMap[LNode] := NIL_SYM;
       FModels[LIdx].ExtRefMap.AddOrSetValue(LNode, LPending[LIdx][LP].Ext);
+      // The frame-substituted member type, when the compute step had one.
+      // Committed here so it EXISTS before CrossType runs; CrossType's
+      // persist loop leaves existing entries alone (see there).
+      if XValid(LPending[LIdx][LP].X) then
+        FModels[LIdx].ExprTypeX.AddOrSetValue(LNode, LPending[LIdx][LP].X);
     end;
 end;
 

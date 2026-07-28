@@ -306,6 +306,26 @@ const
   // `var sType, sEnum: string`. The single-name and no-type-with-initializer
   // forms are the controls: an inline var's tail may be an initializer with
   // no type at all, and it still has to be collected.
+  // Real bug report: a function whose RESULT TYPE is a generic instantiation
+  // (`function LockList: TList<T>;` — System.Generics.Collections) lost its
+  // result type entirely: CollectRoutine's name-segment loop consumed the
+  // nkTypeArgs following the name ident as the SEGMENT's generic args, though
+  // the ':' separator marks it as the result type. Only the separator tells
+  // `Foo<T>` apart from `Foo: T<...>`. MakeNum is the control (plain result).
+  SRC_GENRESULT =
+    'unit U;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TBox<T> = class'#10 +
+    '    FV: T;'#10 +
+    '  end;'#10 +
+    'function MakeBox: TBox<Integer>;'#10 +
+    'function MakeNum: Integer;'#10 +
+    'implementation'#10 +
+    'function MakeBox: TBox<Integer>; begin Result := nil; end;'#10 +
+    'function MakeNum: Integer; begin Result := 0; end;'#10 +
+    'end.'#10;
+
   SRC_INLINEVARS =
     'unit U;'#10 +
     'interface'#10 +
@@ -804,6 +824,15 @@ begin
   Ok('omitparams: no false E2003', DiagCount('E2003') = 0);
   Ok('omitparams: method body Index resolves',
     RefResolvesTo('Index', 'Index'));
+  GModel.Free;
+
+  // 9c-septies. generic-instantiation result types survive name parsing.
+  Analyze(SRC_GENRESULT);
+  Ok('genresult: no diags at all', Length(GModel.Diags) = 0);
+  Ok('genresult: TBox<Integer> result binds (was lost to the name loop)',
+    TypeOf('makebox', skRoutine) = 'TBox');
+  Ok('genresult: plain result still binds (control)',
+    TypeOf('makenum', skRoutine) = 'Integer');
   GModel.Free;
 
   // 9c-sexies. {$SCOPEDENUMS} honored positionally.
