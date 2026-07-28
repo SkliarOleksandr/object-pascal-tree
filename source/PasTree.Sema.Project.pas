@@ -229,6 +229,8 @@ type
     function XSameType(const A, B: TSemaXType): Boolean;
     function XAssignableX(const ADst, ASrc: TSemaXType): Boolean;
     function XParamSyms(AMid, ASym: Integer): TArray<Integer>;
+    function InferMethodFrame(AMid, ASym: Integer;
+      const AArgTypes: TArray<TSemaXType>; ACtx: Integer): Integer;
     procedure BindTypesX(AId: Integer);
     procedure CrossType(AId: Integer);
   public
@@ -1363,8 +1365,13 @@ begin
   LName := LM.Symbols[ASym].DeclNode;
   if LName = NIL_NODE then
     Exit;
+  // A generic TYPE hangs its parameters off the nkTypeDecl; a generic METHOD
+  // (16.2.1, `function Wrap<T>(...)`) off its nkRoutine. Both are read the
+  // same way from there, which is what lets ONE substitution frame serve
+  // either — see InferMethodFrame.
   LParent := LM.Tree.Nodes[LName].Parent;
-  if (LParent = NIL_NODE) or (LM.Tree.Nodes[LParent].Kind <> nkTypeDecl) then
+  if (LParent = NIL_NODE) or not (LM.Tree.Nodes[LParent].Kind in
+     [nkTypeDecl, nkRoutine]) then
     Exit;
   LGen := LM.Tree.Nodes[LParent].FirstChild;
   while (LGen <> NIL_NODE) and (LM.Tree.Nodes[LGen].Kind <> nkGenericParams) do
@@ -1985,6 +1992,69 @@ begin
       Result := Result + [LS];
 end;
 
+{ 16.5.1 — a generic METHOD's own type parameters, inferred from the ARGUMENT
+  types at a call site: `Take(7)` binds T to Integer without anyone writing
+  `Take<Integer>(7)`. Returns a substitution frame (an instance-table index) to
+  apply to the call's result type, or NIL_INST when nothing can be inferred.
+
+  Only the direct shape is inferred: a parameter whose declared type IS one of
+  the routine's own generic parameters. Delphi's real algorithm also matches
+  through structure (`A: TArray<T>` against `TArray<Integer>`), which is a
+  later slice — an unbound parameter makes the whole frame fail rather than
+  guess, so the call stays typed exactly as it is today.
+
+  NB the frame is keyed on the ROUTINE symbol, so an instance-table entry may
+  name a routine rather than a type. It is only ever a substitution frame,
+  never used AS a type; GenericParamIdents reads a routine's parameters for
+  exactly this reason. There is deliberately no inference for generic TYPES
+  (16.5.1: `TList.Create` cannot infer T). }
+function TPasSemaProject.InferMethodFrame(AMid, ASym: Integer;
+  const AArgTypes: TArray<TSemaXType>; ACtx: Integer): Integer;
+var
+  LIdents, LParams: TArray<Integer>;
+  LArgs: TArray<TSemaXType>;
+  LM: TPasSemaModel;
+  LPIdx, LGIdx: Integer;
+  LPX: TSemaXType;
+begin
+  Result := NIL_INST;
+  LIdents := GenericParamIdents(AMid, ASym);
+  if Length(LIdents) = 0 then
+    Exit;   // not a generic method — nothing to infer
+  LM := FModels[AMid];
+  LParams := XParamSyms(AMid, ASym);
+  SetLength(LArgs, Length(LIdents));
+  for LGIdx := 0 to High(LArgs) do
+    LArgs[LGIdx] := XNil;
+  for LPIdx := 0 to High(LParams) do
+  begin
+    if LPIdx > High(AArgTypes) then
+      Break;
+    if not XValid(AArgTypes[LPIdx]) then
+      Continue;   // untyped argument — cannot bind from it
+    LPX := DeclTypeX(AMid, LParams[LPIdx]);
+    if not XValid(LPX) then
+      Continue;
+    if (LPX.UnitId <> AMid) or
+       (LM.Symbols[LPX.Sym].Kind <> skGenericParam) then
+      Continue;   // a concrete parameter type binds nothing
+    for LGIdx := 0 to High(LIdents) do
+      if LIdents[LGIdx] = LM.Symbols[LPX.Sym].DeclNode then
+      begin
+        if not XValid(LArgs[LGIdx]) then
+          // First binding wins. A later argument contradicting it is a real
+          // dcc error (E2010 on the call); this pass emits no diagnostics, so
+          // it just keeps the first.
+          LArgs[LGIdx] := SubstX(AArgTypes[LPIdx], ACtx, 0);
+        Break;
+      end;
+  end;
+  for LGIdx := 0 to High(LArgs) do
+    if not XValid(LArgs[LGIdx]) then
+      Exit;   // some parameter stayed open — do not guess a partial frame
+  Result := Instantiate(XPlain(AMid, ASym), LArgs);
+end;
+
 // Declared-type pass: for every symbol whose type expression did not bind to
 // a plain local type, resolve it cross-model / as an instantiation.
 procedure TPasSemaProject.BindTypesX(AId: Integer);
@@ -2326,7 +2396,25 @@ var
                       // T.Create / TList<Integer>.Create -> the class itself
                       LX[N] := GetX(LM.Tree.Nodes[LBase].FirstChild)
                     else
+                    begin
                       LX[N] := SubstX(DeclTypeX(LBestMid, LBestSym), LCtx, 0);
+                      // 16.5.1: then close over the GENERIC METHOD's own
+                      // parameters, inferred from the argument types, so
+                      // `Take(7)` types like `Take<Integer>(7)`. Applied after
+                      // the enclosing type's frame (LCtx) because a method
+                      // parameter is never substituted by it.
+                      var LArgTypes: TArray<TSemaXType> := nil;
+                      var LArgN := LM.Tree.Nodes[LBase].NextSibling;
+                      while LArgN <> NIL_NODE do
+                      begin
+                        LArgTypes := LArgTypes + [GetX(LArgN)];
+                        LArgN := LM.Tree.Nodes[LArgN].NextSibling;
+                      end;
+                      var LFrame := InferMethodFrame(LBestMid, LBestSym,
+                        LArgTypes, LCtx);
+                      if LFrame <> NIL_INST then
+                        LX[N] := SubstX(LX[N], LFrame, 0);
+                    end;
                   end
                   else if IsConstructorSym(LMemMid, LMemSym) and
                      (LM.Tree.Nodes[LBase].Kind = nkMember) then

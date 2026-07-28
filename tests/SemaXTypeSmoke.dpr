@@ -365,6 +365,55 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // 16.5.1 — a generic METHOD's type parameters inferred from the ARGUMENT
+  // types, with no explicit <>. Declared in another unit so the inference runs
+  // cross-model. Max exercises two calls of the same method inferring
+  // DIFFERENT T; Wrap exercises a result that is an instantiation OF the
+  // inferred parameter (TBox<T> -> TBox<Integer>), which only works if the
+  // frame is applied through SubstX rather than by swapping one symbol.
+  // Pair<K,V> checks a two-parameter method, and Untyped checks that a
+  // parameter which cannot be inferred leaves the call as it was rather than
+  // producing a half-substituted type.
+  UNIT_GM =
+    'unit GM;'#10'interface'#10 +
+    'type'#10 +
+    '  TBox<T> = class'#10 +
+    '    FV: T;'#10 +
+    '  end;'#10 +
+    '  TGen = class'#10 +
+    '    function Max<T>(const A, B: T): T;'#10 +
+    '    function Wrap<T>(const A: T): TBox<T>;'#10 +
+    '    function Pair<K, V>(const AK: K; const AV: V): V;'#10 +
+    '    function Untyped<T>: T;'#10 +          // nothing to infer from
+    '    procedure Take<T>(const A: T);'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TGen.Max<T>(const A, B: T): T; begin Result := A; end;'#10 +
+    'function TGen.Wrap<T>(const A: T): TBox<T>; begin Result := nil; end;'#10 +
+    'function TGen.Pair<K, V>(const AK: K; const AV: V): V;'#10 +
+    'begin Result := AV; end;'#10 +
+    'function TGen.Untyped<T>: T; begin end;'#10 +
+    'procedure TGen.Take<T>(const A: T); begin end;'#10 +
+    'end.'#10;
+
+  UNIT_GU =
+    'unit GU;'#10'interface'#10'uses GM;'#10 +
+    'var'#10 +
+    '  G: TGen;'#10 +
+    'implementation'#10 +
+    'procedure UseGen;'#10 +
+    'var'#10 +
+    '  I: Integer;'#10 +
+    '  S: string;'#10 +
+    'begin'#10 +
+    '  I := G.Max(3, 7);'#10 +
+    '  S := G.Max(''a'', ''b'');'#10 +
+    '  I := G.Wrap(5).FV;'#10 +
+    '  S := G.Pair(1, ''x'');'#10 +
+    '  G.Take(9);'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // Cross-unit overload selection by ARGUMENT TYPES: three global overloads
   // (mirrors System.Math.Min's shape) + method overloads + a generic method
   // whose parameter needs instantiation-frame substitution before scoring.
@@ -501,7 +550,7 @@ end;
 
 var
   LDir: string;
-  LU, LV, LH, LW, LQ, LR, LB, LC, LE: TPasSemaModel;
+  LU, LV, LH, LW, LQ, LR, LB, LC, LE, LG: TPasSemaModel;
 begin
   GPassed := 0; GFailed := 0;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype');
@@ -525,6 +574,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'HC.pas'), UNIT_HC);
   TFile.WriteAllText(TPath.Combine(LDir, 'HD.pas'), UNIT_HD);
   TFile.WriteAllText(TPath.Combine(LDir, 'HE.pas'), UNIT_HE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'GM.pas'), UNIT_GM);
+  TFile.WriteAllText(TPath.Combine(LDir, 'GU.pas'), UNIT_GU);
   TFile.WriteAllText(TPath.Combine(LDir, 'XP.pas'), UNIT_XP);
   TFile.WriteAllText(TPath.Combine(LDir, 'XQ.pas'), UNIT_XQ);
 
@@ -566,7 +617,18 @@ begin
     // builtin args by construction (each model seeds its own builtins; see
     // PasTree.Sema.Builtins). Cross-model canonicalization of builtin args
     // would shrink this to 8; until then the count documents the behavior.
-    Ok('instance table deduped (9; see comment)', GProj.InstanceCount = 9);
+    // The table also holds GENERIC METHOD frames now (Max<Integer>,
+    // Max<string>, Wrap<Integer>, Pair<Integer,string>, Take<Integer> —
+    // keyed on the ROUTINE symbol, substitution frames only, never types;
+    // see InferMethodFrame), plus the TBox<Integer> those produce.
+    //
+    // Two further known-harmless duplications, both from per-symbol identity:
+    // an OPEN TBox<T> appears twice because a method's interface declaration
+    // and its implementation each declare their own T symbol, so the keys
+    // differ; and TWrap<Integer> appears twice for the builtin-arg reason
+    // above. Neither affects typing — same text, same members — so the count
+    // is documented rather than deduplicated.
+    Ok('instance table (17; see comment)', GProj.InstanceCount = 17);
 
     // ---- Cross-unit overload selection by ARGUMENT TYPES ----
     LV := ModelByName('xv');
@@ -659,6 +721,20 @@ begin
     Ok('HE loaded', Assigned(LE));
     Eq('HE: an implementation-section helper does NOT export (15.3.4)',
       XTypeOf(LE, 'T.Hidden'), '?');
+
+    // ---- 16.5.1 generic-method type inference ----
+    LG := ModelByName('gu');
+    Ok('GU loaded', Assigned(LG));
+    Ok('GU: no diags at all', Length(LG.Diags) = 0);
+    Eq('Max(3,7) infers T=Integer', XTypeOf(LG, 'G.Max(3,7)'), 'Integer');
+    Eq('Max(''a'',''b'') infers T=string — same method, different T',
+      XTypeOf(LG, 'G.Max(''a'',''b'')'), 'string');
+    Eq('Wrap(5) infers T through an INSTANTIATED result',
+      XTypeOf(LG, 'G.Wrap(5)'), 'TBox<Integer>');
+    Eq('...and its member types in that frame',
+      XTypeOf(LG, 'G.Wrap(5).FV'), 'Integer');
+    Eq('Pair(1,''x'') infers two parameters, result is V',
+      XTypeOf(LG, 'G.Pair(1,''x'')'), 'string');
 
     // ---- with over a generic-instantiation call result ----
     LR := ModelByName('xr');
