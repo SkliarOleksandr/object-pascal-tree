@@ -48,8 +48,18 @@ type
   TPasMsgRow = record
     Kind: TPasMsgKind;
     Text: string;
-    FilePath: string;   // '' for mkStatus
-    Line, Col: Integer; // 0 for mkStatus
+    FilePath: string;   // '' when the row names no source position
+    Line, Col: Integer; // 0 when FilePath is ''
+  end;
+  { One missing unit in the closure-health summary: how many places import it,
+    plus the FIRST place we did (lowest model id = discovery order, so this is
+    literally where the analyzer first met the name). The summary row is
+    double-clickable because of these three fields — a count alone tells you a
+    library is missing but not which of your units asked for it. }
+  TPasMissingUnit = record
+    Count: Integer;
+    FirstFile: string;
+    FirstLine, FirstCol: Integer;
   end;
   // vtMessages node payload: an index into FMsgVisible (itself indexing the
   // master FMsgLog) — mirrors TPasNodeData/FFileList's own convention so a
@@ -209,7 +219,7 @@ type
     procedure EnsureSampleProject;
     function ExeDir: string;
     function ElapsedText(AMs: Int64): string;
-    procedure LogMissingUnits(AMissing: TDictionary<string, Integer>);
+    procedure LogMissingUnits(AMissing: TDictionary<string, TPasMissingUnit>);
     function StudioRoot: string;
     function ExtraSearchPaths: TArray<string>;
     procedure OpenProject(const AProjectFile: string);
@@ -628,12 +638,21 @@ end;
 
 { The most-imported missing units, busiest first — the shortest description of
   a broken search-path setup there is. Sorted by import count because that is
-  the order in which fixing them buys back closure. }
-procedure TfrmMain.LogMissingUnits(AMissing: TDictionary<string, Integer>);
+  the order in which fixing them buys back closure.
+
+  Each row carries the FIRST import site and is double-clickable, which is the
+  whole point: the name says WHAT is missing, and the jump says who asked for
+  it. Without it a single-site entry like `System.Internal.HelperHlpr` is a
+  dead end — the F1027 rows only cover PROJECT files, and the unit that
+  imported it is usually a library unit that is never listed. }
+procedure TfrmMain.LogMissingUnits(AMissing: TDictionary<string,
+  TPasMissingUnit>);
 const
   MAX_SHOWN = 10;
 var
   LNames: TStringList;
+  LInfo: TPasMissingUnit;
+  LText: string;
 begin
   if AMissing.Count = 0 then
     Exit;
@@ -642,7 +661,7 @@ begin
     for var LPair in AMissing do
       // Zero-padded count as a sort key: TStringList sorts as TEXT, so '0009'
       // must not land after '0010'.
-      LNames.Add(Format('%.6d|%s', [LPair.Value, LPair.Key]));
+      LNames.Add(Format('%.6d|%s', [LPair.Value.Count, LPair.Key]));
     LNames.Sort;
     var LShown := 0;
     for var LI := LNames.Count - 1 downto 0 do
@@ -654,8 +673,17 @@ begin
         Break;
       end;
       var LParts := LNames[LI].Split(['|']);
-      Log(Format('    %s import site(s): %s',
-        [LParts[0].TrimLeft(['0']), LParts[1]]));
+      LText := Format('    %s import site(s): %s',
+        [LParts[0].TrimLeft(['0']), LParts[1]]);
+      if AMissing.TryGetValue(LParts[1], LInfo) and (LInfo.FirstFile <> '') then
+        // Say the position in the text too, not only in the (invisible) row
+        // payload — the line has to be readable when it is COPIED out of the
+        // message window, where no amount of double-clicking is available.
+        LogRow(mkStatus, LText + Format(', first at %s(%d,%d)',
+          [TPath.GetFileName(LInfo.FirstFile), LInfo.FirstLine, LInfo.FirstCol]),
+          LInfo.FirstFile, LInfo.FirstLine, LInfo.FirstCol)
+      else
+        Log(LText);
       Inc(LShown);
     end;
   finally
@@ -967,9 +995,12 @@ begin
     CellText := '';
 end;
 
-// Double-click an error row: open (or focus) its file and land the caret
-// exactly on the diagnostic's own position — a status row, or a row whose
-// file no longer exists (edited/deleted since analysis), does nothing.
+// Double-click a row that NAMES A POSITION: open (or focus) its file and land
+// the caret exactly there. Gated on the position, not on Kind — the
+// closure-health summary rows are mkStatus yet do carry the first import site
+// of a unit we could not find, and jumping to it is the only way to see who
+// asked for that unit. A row with no position, or one whose file no longer
+// exists (edited/deleted since analysis), does nothing.
 procedure TfrmMain.vtMessagesDblClick(Sender: TObject);
 var
   LData: PPasMsgNodeData;
@@ -983,8 +1014,7 @@ begin
   then
     Exit;
   LRow := FMsgLog[FMsgVisible[LData.Index]];
-  if (LRow.Kind <> mkError) or (LRow.FilePath = '') or
-     not TFile.Exists(LRow.FilePath) then
+  if (LRow.FilePath = '') or not TFile.Exists(LRow.FilePath) then
     Exit;
   LEditor := OpenFileTab(LRow.FilePath);
   LEditor.CaretXY := BufferCoord(LRow.Col, LRow.Line);
@@ -1470,7 +1500,7 @@ var
   LMain, LDiagTotal, LDiagListed, LId, LDIdx, LFileId: Integer;
   LTotalLines, LTotalChars, LTotalFiles: Int64;
   LUnresUses, LUnitsGated: Integer;
-  LMissing: TDictionary<string, Integer>;
+  LMissing: TDictionary<string, TPasMissingUnit>;
   LModel: TPasSemaModel;
   LDiagFile, LVolume: string;
 begin
@@ -1489,7 +1519,7 @@ begin
   LTotalFiles := 0;
   LUnresUses := 0;
   LUnitsGated := 0;
-  LMissing := TDictionary<string, Integer>.Create;
+  LMissing := TDictionary<string, TPasMissingUnit>.Create;
   try
   // Locate the main unit BEFORE the diagnostics loop: the loop's own listing
   // filter reads FFileList, and for a .dproj-less project that list is not
@@ -1530,13 +1560,23 @@ begin
           Inc(LUnresUses);
           // Group by NAME: thousands of import sites are usually a handful of
           // libraries missing from the search path, and the name list says
-          // which. The per-site F1027 rows answer "where"; this answers "what".
-          var LSeenCount: Integer;
-          if not LMissing.TryGetValue(LModel.UsesList[LDIdx].NameFull,
-               LSeenCount) then
-            LSeenCount := 0;
-          LMissing.AddOrSetValue(LModel.UsesList[LDIdx].NameFull,
-            LSeenCount + 1);
+          // which. The per-site F1027 rows answer "where"; this answers "what"
+          // — and keeps the FIRST site so the summary row can answer "where"
+          // as well, for the (common) case where the importer is a library
+          // unit whose F1027 is never listed.
+          var LMiss: TPasMissingUnit;
+          if not LMissing.TryGetValue(LModel.UsesList[LDIdx].NameFull, LMiss)
+          then
+          begin
+            // First sighting wins: models are numbered in discovery order, and
+            // UsesList is in source order within a model, so this really is the
+            // earliest place the analyzer saw the name.
+            LMiss := Default(TPasMissingUnit);
+            FSemaProject.NodeSite(LId, LModel.UsesList[LDIdx].NameNode,
+              {out} LMiss.FirstFile, {out} LMiss.FirstLine, {out} LMiss.FirstCol);
+          end;
+          Inc(LMiss.Count);
+          LMissing.AddOrSetValue(LModel.UsesList[LDIdx].NameFull, LMiss);
         end;
       if not LModel.AllUsesResolved then
         Inc(LUnitsGated);

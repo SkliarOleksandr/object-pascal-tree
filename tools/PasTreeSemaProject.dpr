@@ -103,12 +103,19 @@ begin
   ACounts.AddOrSetValue(AName, LN + 1);
 end;
 
-// Descending by count, then by name so equal counts print stably.
+{ Descending by count, then by name so equal counts print stably.
+
+  ASites (optional) annotates each row with a 'file(line,col)' site — for the
+  missing-unit histogram, the FIRST place the name was imported. A count says
+  a library is absent; the site says which of your units asked for it, which is
+  the part you actually act on. }
 procedure ReportHistogram(const ATitle: string;
-  ACounts: TDictionary<string, Integer>; ATop: Integer);
+  ACounts: TDictionary<string, Integer>; ATop: Integer;
+  ASites: TDictionary<string, string> = nil);
 var
   LRows: TArray<TCount>;
   LRow: TCount;
+  LSite: string;
 begin
   Writeln(ErrOutput, ATitle);
   if ACounts.Count = 0 then
@@ -131,7 +138,13 @@ begin
         Result := CompareText(A.Name, B.Name);
     end));
   for var LI := 0 to Min(ATop, Length(LRows)) - 1 do
-    Writeln(ErrOutput, Format('    %5d  %s', [LRows[LI].N, LRows[LI].Name]));
+  begin
+    if (ASites <> nil) and ASites.TryGetValue(LRows[LI].Name, LSite) then
+      Writeln(ErrOutput, Format('    %5d  %-40s first at %s',
+        [LRows[LI].N, LRows[LI].Name, LSite]))
+    else
+      Writeln(ErrOutput, Format('    %5d  %s', [LRows[LI].N, LRows[LI].Name]));
+  end;
   if Length(LRows) > ATop then
     Writeln(ErrOutput, Format('    ... %d more distinct name(s)',
       [Length(LRows) - ATop]));
@@ -144,11 +157,12 @@ var
   LPaths: TArray<string>;
   LOwn: TDictionary<string, Boolean>;   // project-file paths, lower-cased
   LInProj, LOutProj, LMissing: TDictionary<string, Integer>;
+  LSites: TDictionary<string, string>;   // missing name -> FIRST import site
   LM: TPasSemaModel;
   LTotalLines, LTotalChars, LTotalFiles: Int64;
   LListed, LOther, LMid, LDIdx, LFileId, LQuote: Integer;
-  LUnresUses, LUnitsGated: Integer;
-  LName, LFile: string;
+  LUnresUses, LUnitsGated, LSiteLine, LSiteCol: Integer;
+  LName, LFile, LSiteFile: string;
   LIsOwn: Boolean;
 begin
   LD := TPasDProj.Create;
@@ -156,6 +170,7 @@ begin
   LInProj := TDictionary<string, Integer>.Create;
   LOutProj := TDictionary<string, Integer>.Create;
   LMissing := TDictionary<string, Integer>.Create;
+  LSites := TDictionary<string, string>.Create;
   try
     if not LD.Load(APath, PlatformName(GPlatform)) then
     begin
@@ -221,6 +236,15 @@ begin
           begin
             Inc(LUnresUses);
             Bump(LMissing, LM.UsesList[LU].NameFull);
+            // First sighting only: models are numbered in discovery order and
+            // UsesList is in source order, so the first write is the earliest
+            // place the analyzer met the name.
+            if not LSites.ContainsKey(LM.UsesList[LU].NameFull) then
+              if GProj.NodeSite(LMid, LM.UsesList[LU].NameNode,
+                   {out} LSiteFile, {out} LSiteLine, {out} LSiteCol) then
+                LSites.Add(LM.UsesList[LU].NameFull,
+                  Format('%s(%d,%d)', [TPath.GetFileName(LSiteFile), LSiteLine,
+                    LSiteCol]));
           end;
         if not LM.AllUsesResolved then
           Inc(LUnitsGated);
@@ -284,7 +308,7 @@ begin
         'diagnostics: %d total — %d in project files, %d in library units',
         [LListed + LOther, LListed, LOther]));
       ReportHistogram('--- unresolvable `uses` names, by import count ---',
-        LMissing, 25);
+        LMissing, 25, LSites);
       ReportHistogram('--- project files, by identifier/code ---', LInProj, 25);
       ReportHistogram('--- library units, by identifier/code ---', LOutProj, 25);
     finally
@@ -292,6 +316,7 @@ begin
     end;
   finally
     LMissing.Free;
+    LSites.Free;
     LOutProj.Free;
     LInProj.Free;
     LOwn.Free;

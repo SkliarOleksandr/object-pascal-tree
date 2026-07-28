@@ -486,6 +486,14 @@ begin
       Exit(GProj.Model(LId));
 end;
 
+function MidByName(const ANameLower: string): Integer;
+begin
+  Result := -1;
+  for var LId := 0 to GProj.ModelCount - 1 do
+    if GProj.Model(LId).UnitNameLower = ANameLower then
+      Exit(LId);
+end;
+
 // A reference of the given text resolved cross-unit to a symbol named ATarget.
 function CrossRefTo(AModel: TPasSemaModel; const ARefText, ATarget: string):
   Boolean;
@@ -648,6 +656,27 @@ begin
     // Units whose imports all resolve must stay silent — F1027 is not a
     // per-uses-clause remark, it fires only on an actual failure.
     Ok('B: no F1027 when every uses resolves', DiagCount(LB, 'F1027') = 0);
+    // NodeSite over the very `uses` item that failed: hosts need the IMPORT
+    // SITE of a unit they could not find, so a closure-health summary row can
+    // be clicked through to whoever asked for the unit. `uses NoSuchUnit;` is
+    // UnitD line 3, and the name starts at column 6.
+    var LSFile: string;
+    var LSLine, LSCol: Integer;
+    Ok('NodeSite: the failed uses item has a position',
+      GProj.NodeSite(MidByName('unitd'), LD.UsesList[0].NameNode,
+        {out} LSFile, {out} LSLine, {out} LSCol));
+    Ok('NodeSite: line/col of `uses NoSuchUnit`',
+      (LSLine = 3) and (LSCol = 6));
+    Ok('NodeSite: names UnitD''s own file',
+      SameText(TPath.GetFileName(LSFile), 'UnitD.pas'));
+    // Out-of-range is a False, never an exception — a host may hold a node id
+    // from a model that has since been replaced.
+    Ok('NodeSite: bad model id is False',
+      not GProj.NodeSite(GProj.ModelCount, 0,
+        {out} LSFile, {out} LSLine, {out} LSCol));
+    Ok('NodeSite: bad node id is False',
+      not GProj.NodeSite(MidByName('unitd'), MaxInt,
+        {out} LSFile, {out} LSLine, {out} LSCol));
 
     // E: NO `uses` clause at all, references a name declared ONLY in the
     // IMPLICIT System unit (mirrors the real sLineBreak shape) -- real dcc

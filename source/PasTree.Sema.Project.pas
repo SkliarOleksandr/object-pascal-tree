@@ -296,6 +296,15 @@ type
     function ModelCount: Integer;
     function Model(AId: Integer): TPasSemaModel;
     function ModelFile(AId: Integer): string;
+    { Source position of ANY node in AId, as a clickable site: the file the
+      node's FIRST token really came from (NOT ModelFile — an $I-included file
+      is a different path), 1-based line/col. False if AId/ANode is out of
+      range or the node carries no token. This is the same mapping EmitAt uses
+      for a diagnostic, exposed because hosts also need to point at nodes that
+      never produced one — e.g. the `uses` item that first imported a unit
+      whose source could not be found. }
+    function NodeSite(AId, ANode: Integer; out AFilePath: string;
+      out ALine, ACol: Integer): Boolean;
     { A module's current pipeline status (msQueued if AId is out of range). }
     function ModuleStatus(AId: Integer): TPasModuleStatus;
     { Non-blocking snapshot fetch for UI/consumers: returns the model at AId
@@ -540,6 +549,31 @@ end;
 function TPasSemaProject.ModelFile(AId: Integer): string;
 begin
   Result := FFiles[AId];
+end;
+
+function TPasSemaProject.NodeSite(AId, ANode: Integer; out AFilePath: string;
+  out ALine, ACol: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LVis: TPasVisibleToken;
+  LTok: Integer;
+begin
+  AFilePath := ''; ALine := 0; ACol := 0;
+  Result := False;
+  if (AId < 0) or (AId >= FModels.Count) then
+    Exit;
+  LM := FModels[AId];
+  if (LM = nil) or (ANode < 0) or (ANode > High(LM.Tree.Nodes)) then
+    Exit;
+  LTok := LM.Tree.Nodes[ANode].FirstToken;
+  if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
+    Exit;
+  LVis := LM.Tree.Source.Visible[LTok];
+  AFilePath := LM.Tree.Source.FileNames[LVis.FileId];
+  LM.Tree.Source.Files[LVis.FileId].OffsetToLineCol(
+    LM.Tree.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start,
+    ALine, ACol);
+  Result := True;
 end;
 
 function TPasSemaProject.ModuleStatus(AId: Integer): TPasModuleStatus;
