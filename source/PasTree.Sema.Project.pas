@@ -174,6 +174,9 @@ type
     // `with` over a target whose TYPE lives in another unit (ch.05 §5.7) —
     // see FindInEnclosingWith.
     function PointeeX(const AX: TSemaXType): TSemaXType;
+    function DesignatorSymX(AId, ANode: Integer;
+      out AMid, ASym: Integer): Boolean;
+    function ElementX(AId, ABaseNode: Integer): TSemaXType;
     function WithTargetTypeX(AId, ANode: Integer): TSemaXType;
     function InsideWithBody(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function FindInEnclosingWith(AId, ANode: Integer;
@@ -958,6 +961,13 @@ begin
   Result := -1;
   LM := FModels[AId];
   LText := QualifiedText(AId, ANode);
+  // A unit may qualify with its OWN name — Winapi.Windows.pas calls
+  // `Winapi.Windows.DrawText(...)` from an overload of DrawText to reach the
+  // other one unambiguously. It is not in its own UsesList, so the loop below
+  // can never find it; checked here, before the implicit units, since a unit
+  // legitimately named System would mean itself too.
+  if SameText(LText, LM.UnitNameLower) then
+    Exit(AId);
   if SameText(LText, 'system') then
     Exit(EnsureSystemUnit);
   if SameText(LText, 'sysinit') then
@@ -1436,7 +1446,7 @@ end;
 function TPasSemaProject.ResolveTypeExpr(AId, ANode: Integer): TSemaXType;
 var
   LM: TPasSemaModel;
-  LName, LSym, LArgNode: Integer;
+  LName, LSym, LArgNode, LRMid, LRSym: Integer;
   LExt: TPasExtRef;
   LBase, LArg: TSemaXType;
   LArgs: TArray<TSemaXType>;
@@ -1472,6 +1482,23 @@ begin
         LBase := ResolveTypeExpr(AId, LM.Tree.Nodes[ANode].FirstChild);
         if not XValid(LBase) then
           Exit;
+        // A compiler-seeded builtin has no source declaration, so no generic
+        // parameter list — and the count check below would then refuse to
+        // instantiate, silently degrading `TArray<TElem>` to the OPEN TArray.
+        // TArray is seeded (PasTree.Sema.Builtins) and the RTL uses TArray<T>
+        // everywhere, so this hit every one of them: the element type came
+        // back as the unsubstituted parameter T. Redirect to the real
+        // declaration first, exactly as FindMemberX does for a DeclNode-less
+        // builtin.
+        if (TypeDefNodeOf(LBase.UnitId, LBase.Sym) = NIL_NODE) and
+           ResolveRealDecl(LBase.UnitId,
+             FModels[LBase.UnitId].Symbols[LBase.Sym].NameLower,
+             LRMid, LRSym) and
+           ((LRMid <> LBase.UnitId) or (LRSym <> LBase.Sym)) then
+        begin
+          LBase.UnitId := LRMid;
+          LBase.Sym := LRSym;
+        end;
         LArgs := nil;
         LArgNode := LM.Tree.Nodes[LM.Tree.Nodes[ANode].FirstChild].NextSibling;
         while LArgNode <> NIL_NODE do
@@ -1783,6 +1810,14 @@ begin
     case LM.Tree.Nodes[LDef].Kind of
       nkIdent, nkMember, nkTypeArgs:
         LNext := ResolveTypeExpr(LCur.UnitId, LDef);   // type alias
+      nkPointerType:
+        // Implicit dereference in member access: Object Pascal lets `P.Field`
+        // stand for `P^.Field` when P is a pointer to a record, and the RTL
+        // leans on it constantly (`Entry.Aliases` where Entry:
+        // PEnumAliasEntry — System.TypInfo). Follow the pointee and keep
+        // looking, so a member lookup on a pointer type behaves like one on
+        // what it points at.
+        LNext := PointeeX(LCur);
       nkClassType, nkInterfaceType, nkRecordType, nkObjectType:
         begin
           // Leading nkIdent/nkMember/nkTypeArgs children are the heritage
@@ -2679,6 +2714,120 @@ begin
   end;
 end;
 
+{ The declaring (model, symbol) of a designator's head, across models: what
+  RefMap/ExtRefMap say about the last segment. Needed because a variable's
+  declared type NODE is sometimes the only place an array type exists (an
+  inline `array[...] of T` resolves to no symbol at all). }
+function TPasSemaProject.DesignatorSymX(AId, ANode: Integer;
+  out AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LName: Integer;
+  LExt: TPasExtRef;
+begin
+  Result := False;
+  AMid := NIL_SYM;
+  ASym := NIL_SYM;
+  if ANode = NIL_NODE then
+    Exit;
+  LM := FModels[AId];
+  LName := ANode;
+  case LM.Tree.Nodes[ANode].Kind of
+    nkMember:
+      begin
+        LName := LM.Tree.Nodes[ANode].FirstChild;
+        while (LName <> NIL_NODE) and
+              (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
+          LName := LM.Tree.Nodes[LName].NextSibling;
+      end;
+    nkParen, nkDeref, nkIndex:
+      Exit(DesignatorSymX(AId, LM.Tree.Nodes[ANode].FirstChild, AMid, ASym));
+    nkIdent: ;
+  else
+    Exit;
+  end;
+  if LName = NIL_NODE then
+    Exit;
+  if LM.RefMap[LName] <> NIL_SYM then
+  begin
+    AMid := AId;
+    ASym := LM.RefMap[LName];
+    Exit(True);
+  end;
+  if LM.ExtRefMap.TryGetValue(LName, LExt) then
+  begin
+    AMid := LExt.UnitId;
+    ASym := LExt.Sym;
+    Exit(True);
+  end;
+end;
+
+{ The ELEMENT type of an indexable designator, or XNil when it is not an array
+  (the caller reads that as "leave the type alone" — see the nkIndex branch).
+  Cross-model twin of TPasSemaResolver.ElementTypeOf, and it needs the same two
+  sources: the base's own declared type NODE may BE an inline array, which no
+  symbol lookup can reach, so that is tried before the named type it resolves
+  to. Alias links chased in both, depth-capped like PointeeX. }
+function TPasSemaProject.ElementX(AId, ABaseNode: Integer): TSemaXType;
+
+  // Element child of an nkArrayType: its LAST child. For a multi-dimensional
+  // `array[a, b] of T` this reaches T rather than the intermediate row type —
+  // over-eager by one level in a shape too rare to model, and it can only find
+  // members of T instead of failing.
+  function ElemOf(AMid, ANode: Integer): TSemaXType;
+  var
+    LChild, LLast: Integer;
+  begin
+    Result := XNil;
+    if (ANode = NIL_NODE) or
+       (FModels[AMid].Tree.Nodes[ANode].Kind <> nkArrayType) or
+       (FModels[AMid].Tree.Nodes[ANode].Aux = 1) then   // array of const
+      Exit;
+    LChild := FModels[AMid].Tree.Nodes[ANode].FirstChild;
+    LLast := NIL_NODE;
+    while LChild <> NIL_NODE do
+    begin
+      LLast := LChild;
+      LChild := FModels[AMid].Tree.Nodes[LChild].NextSibling;
+    end;
+    Result := ResolveTypeExpr(AMid, LLast);
+  end;
+
+var
+  LMid, LSym, LDef, LDepth: Integer;
+  LCur: TSemaXType;
+begin
+  // 1. The base's own declared type node (inline-array case).
+  if DesignatorSymX(AId, ABaseNode, LMid, LSym) then
+  begin
+    Result := ElemOf(LMid, FModels[LMid].Symbols[LSym].TypeNode);
+    if XValid(Result) then
+      Exit;
+  end;
+  // 2. The named type it resolves to, chasing aliases to a definition.
+  LCur := WithTargetTypeX(AId, ABaseNode);
+  for LDepth := 1 to 32 do
+  begin
+    if not XValid(LCur) then
+      Exit(XNil);
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if LDef = NIL_NODE then
+      Exit(XNil);
+    case FModels[LCur.UnitId].Tree.Nodes[LDef].Kind of
+      nkArrayType:
+        // Close the element type over the ARRAY's instantiation frame:
+        // TArray<TElementAlias> is `array of T`, so the raw element is the
+        // open parameter T and only SubstX turns it into TElementAlias.
+        Exit(SubstX(ElemOf(LCur.UnitId, LDef), LCur.Inst, 0));
+      nkIdent, nkMember, nkTypeArgs:
+        LCur := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
+    else
+      Exit(XNil);
+    end;
+  end;
+  Result := XNil;
+end;
+
 function TPasSemaProject.WithTargetTypeX(AId, ANode: Integer): TSemaXType;
 var
   LM: TPasSemaModel;
@@ -2705,6 +2854,33 @@ begin
       Result := PointeeX(WithTargetTypeX(AId,
         LM.Tree.Nodes[ANode].FirstChild));
 
+    // `with Arr[I] do` — the ELEMENT type; the single most common with-target
+    // shape in the RTL (`with NetResources^[I] do` over a Winapi record,
+    // `with LVarBounds[I] do`, `with FList[Index] do`). ElementX returns XNil
+    // for a non-array, which is the array-PROPERTY case: such a property's
+    // declared type is ALREADY its element type, so indexing must not peel a
+    // level — hence the pass-through fallback.
+    nkIndex:
+      begin
+        LBase := LM.Tree.Nodes[ANode].FirstChild;
+        Result := ElementX(AId, LBase);
+        if not XValid(Result) then
+          Result := WithTargetTypeX(AId, LBase);
+      end;
+
+    // `with Obj as TSomething do` (System.Net.Socket) — the CAST's type, the
+    // right operand. Only `as`; any other binary operator yields a value no
+    // with can open anyway.
+    nkBinaryOp:
+      if (LM.Tree.Nodes[ANode].Aux >= 0) and
+         SameText(LM.Tree.Source.VisibleText(LM.Tree.Nodes[ANode].Aux), 'as')
+      then
+      begin
+        LBase := LM.Tree.Nodes[ANode].FirstChild;
+        if LBase <> NIL_NODE then
+          Result := ResolveTypeExpr(AId, LM.Tree.Nodes[LBase].NextSibling);
+      end;
+
     nkCall:
       begin
         LBase := LM.Tree.Nodes[ANode].FirstChild;
@@ -2724,8 +2900,22 @@ begin
         // QUALIFIED cast (`System.TVarData(X)`) and a generic one, since
         // ResolveTypeExpr handles nkMember/nkTypeArgs too.
         Result := ResolveTypeExpr(AId, LBase);
-        if not XValid(Result) then
-          Result := WithTargetTypeX(AId, LBase);
+        if XValid(Result) then
+          Exit;
+        // `with TApartmentThread.Create(...) do` (System.Win.VCLCom) — a
+        // CONSTRUCTOR call yields the CLASS. Its routine symbol has no result
+        // type, so the plain recursion below would type the whole thing as
+        // nothing. Mirrors what CrossType already does for a ctor call.
+        if (LBase <> NIL_NODE) and
+           (LM.Tree.Nodes[LBase].Kind = nkMember) and
+           DesignatorSymX(AId, LBase, LMemMid, LMemSym) and
+           IsConstructorSym(LMemMid, LMemSym) then
+        begin
+          Result := ResolveTypeExpr(AId, LM.Tree.Nodes[LBase].FirstChild);
+          if XValid(Result) then
+            Exit;
+        end;
+        Result := WithTargetTypeX(AId, LBase);
       end;
 
     nkIdent:
@@ -2746,10 +2936,20 @@ begin
         LName := LM.Tree.Nodes[LBase].NextSibling;
         if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) then
           Exit;
+        // A CONSTRUCTOR yields the class, not its (absent) result type — and
+        // a parameterless one needs no parentheses, so `with TThing.Create do`
+        // arrives here as a plain nkMember, not as the nkCall the branch above
+        // handles (System.Win.VCLCom writes it with arguments, the paren-less
+        // form is just as legal).
+        LSym := LM.RefMap[LName];
+        if (LSym <> NIL_SYM) and IsConstructorSym(AId, LSym) then
+          Exit(ResolveTypeExpr(AId, LBase));
+        if LM.ExtRefMap.TryGetValue(LName, LExt) and
+           IsConstructorSym(LExt.UnitId, LExt.Sym) then
+          Exit(ResolveTypeExpr(AId, LBase));
         // The member may already be bound (same-unit field, or a cross-unit
         // one the earlier passes reached); otherwise find it in the base's
         // type. Both paths end at the MEMBER's own declared type.
-        LSym := LM.RefMap[LName];
         if LSym <> NIL_SYM then
           Exit(ResolveTypeExpr(AId, LM.Symbols[LSym].TypeNode));
         if LM.ExtRefMap.TryGetValue(LName, LExt) then

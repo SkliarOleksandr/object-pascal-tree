@@ -1029,8 +1029,8 @@ begin
   // Kick off the background analysis (non-blocking); it populates navigation
   // and (if chkShowErrors is checked) the error list when it finishes. The
   // open main file is front-loaded so it is ready first.
-  Log('Analyzing ' + FProjectDir + ' (' + cbPlatform.Text +
-    ') in the background...');
+  Log('Analyzing ' + TPath.GetFileName(FMainSource) + ' in ' + FProjectDir +
+    ' (' + cbPlatform.Text + ') in the background...');
   StartAsyncAnalyze(FMainSource, {ALoud} True);
 end;
 
@@ -1523,7 +1523,10 @@ begin
   CancelAsync;                      // a synchronous parse supersedes the background one
   FReparseTimer.Enabled := False;   // this analysis supersedes a pending one
   ClearMessages;
-  Log('Analyzing ' + FProjectDir + ' (' + cbPlatform.Text + ')...');
+  // Name the MAIN SOURCE, not just the directory: with several projects in one
+  // tree the directory alone does not say which one is being analyzed.
+  Log('Analyzing ' + TPath.GetFileName(FMainSource) + ' in ' + FProjectDir +
+    ' (' + cbPlatform.Text + ')...');
   Screen.Cursor := crHourGlass;
   try
     LSW := TStopwatch.StartNew;

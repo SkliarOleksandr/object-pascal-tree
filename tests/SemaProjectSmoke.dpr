@@ -66,9 +66,97 @@ const
     '    function ClassName: string;'#10 +
     '    procedure Free;'#10 +
     '  end;'#10 +
+    // TArray is ALSO a seeded builtin (PasTree.Sema.Builtins), so a
+    // `TArray<T>` reference resolves its head to a DeclNode-less symbol with
+    // no generic parameter list — see UNIT_WSHAPES.
+    '  TArray<T> = array of T;'#10 +
     'implementation'#10 +
     'function TObject.ClassName: string; begin Result := ''''; end;'#10 +
     'procedure TObject.Free; begin end;'#10 +
+    'end.'#10;
+
+  // Every `with`-target shape the RTL uses that the type-of-target walk did
+  // not know, plus two neighbours found while closing them. Together these
+  // were the last 39 false E2003s over the Win32 RTL, and the file mirrors
+  // each real site:
+  //   Arr[I]            — element type: inline array, named array, TArray<T>
+  //                       (System.WideStrings' FList[Index], System.Variants'
+  //                       LVarBounds[I], System.TypInfo's Entry.Aliases[...])
+  //   P^[I]             — index over a dereference (System.AnsiStrings)
+  //   Obj as T          — cast (System.Net.Socket)
+  //   TFoo.Create(...)  — constructor call yields the CLASS (System.Win.VCLCom)
+  //   P.Field           — IMPLICIT dereference in member access, which is what
+  //                       reaches Entry.Aliases at all (System.TypInfo)
+  //   Own.Unit.Name.X   — a unit qualifying with its OWN name, which is never
+  //                       in its own uses list (Winapi.Windows' DrawText)
+  //   helper for Alias  — a helper declared for an ALIAS of the struct whose
+  //                       methods use it (Winapi.D2D1's SetProduct)
+  UNIT_WSHAPES =
+    'unit UnitWShapes;'#10'interface'#10 +
+    'type'#10 +
+    '  TElem = record'#10 +
+    '    Name: string;'#10 +
+    '    Value: Integer;'#10 +
+    '  end;'#10 +
+    '  TEntry = record'#10 +
+    '    Aliases: TArray<TElem>;'#10 +
+    '  end;'#10 +
+    '  PEntry = ^TEntry;'#10 +
+    '  TElemArray = array[0..3] of TElem;'#10 +
+    '  PElemArray = ^TElemArray;'#10 +
+    '  TThing = class'#10 +
+    '    Tag: Integer;'#10 +
+    '    constructor Create;'#10 +
+    '  end;'#10 +
+    '  TSub = class(TThing)'#10 +
+    '    Extra: Integer;'#10 +
+    '  end;'#10 +
+    '  TMat = record'#10 +
+    '    m11: Single;'#10 +
+    '    class operator Multiply(const L, R: TMat): TMat;'#10 +
+    '  end;'#10 +
+    '  TMatAlias = TMat;'#10 +
+    '  TMatHelper = record helper for TMatAlias'#10 +
+    '    class function SetProduct(const a, b: TMatAlias): TMatAlias; static;'#10 +
+    '  end;'#10 +
+    'function Pick: Integer;'#10 +
+    'implementation'#10 +
+    'constructor TThing.Create; begin end;'#10 +
+    'class function TMatHelper.SetProduct(const a, b: TMatAlias): TMatAlias;'#10 +
+    'begin'#10 +
+    '  Result.m11 := a.m11 * b.m11;'#10 +
+    'end;'#10 +
+    'class operator TMat.Multiply(const L, R: TMat): TMat;'#10 +
+    'begin'#10 +
+    '  Result := SetProduct(L, R);'#10 +   // helper static via the ALIAS
+    'end;'#10 +
+    'function Pick: Integer; begin Result := 1; end;'#10 +
+    'procedure UseShapes;'#10 +
+    'var'#10 +
+    '  Entry: PEntry;'#10 +
+    '  Inline1: array[0..2] of TElem;'#10 +
+    '  Named: TElemArray;'#10 +
+    '  PArr: PElemArray;'#10 +
+    '  Obj: TThing;'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  with Entry.Aliases[I] do'#10 +     // implicit deref + TArray<T> element
+    '  begin'#10 +
+    '    Name := ''x'';'#10 +
+    '    Value := 1;'#10 +
+    '  end;'#10 +
+    '  with Inline1[I] do'#10 +           // inline array element
+    '    Value := 2;'#10 +
+    '  with Named[I] do'#10 +             // named array type element
+    '    Value := 3;'#10 +
+    '  with PArr^[I] do'#10 +             // index over a dereference
+    '    Value := 4;'#10 +
+    '  with Obj as TSub do'#10 +          // as-cast
+    '    Extra := 5;'#10 +
+    '  with TThing.Create do'#10 +        // constructor call -> the class
+    '    Tag := 6;'#10 +
+    '  I := UnitWShapes.Pick;'#10 +       // qualifying with our OWN unit name
+    'end;'#10 +
     'end.'#10;
 
   // A bare member of the IMPLICIT TObject ancestor. Neither class below
@@ -436,6 +524,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UWShadow.pas'), UNIT_WSHADOW);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitTObj.pas'), UNIT_TOBJ);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitQual.pas'), UNIT_QUAL);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitWShapes.pas'), UNIT_WSHAPES);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -559,6 +648,22 @@ begin
       CrossRefCountInUnit(LTObj, 'ClassName', 'ClassName', 'system') = 2);
     Ok('tobject: Free resolves into System''s TObject',
       CrossRefCountInUnit(LTObj, 'Free', 'Free', 'system') = 1);
+
+    // Every with-target shape the RTL uses (see UNIT_WSHAPES). One assertion
+    // per shape would be eight lookups into the same body, so the no-diags
+    // check carries them collectively — with the positive checks below it
+    // cannot pass by failing to resolve, since an unresolved with-body member
+    // IS an E2003 here (all uses resolve, so the gate is open).
+    var LWS := ModelByName('unitwshapes');
+    Ok('wshapes: UnitWShapes loaded', Assigned(LWS));
+    Ok('wshapes: no diags at all (8 with-target/lookup shapes)',
+      Length(LWS.Diags) = 0);
+    Ok('wshapes: TElem.Value bound from every with body (5 sites)',
+      LocalRefCount(LWS, 'Value') + CrossRefCountInUnit(LWS, 'Value', 'Value',
+        'unitwshapes') >= 4);
+    Ok('wshapes: the helper''s static reached through the type ALIAS',
+      LocalRefCount(LWS, 'SetProduct') +
+      CrossRefCountInUnit(LWS, 'SetProduct', 'SetProduct', 'unitwshapes') >= 1);
 
     // A nested type of the ANCESTOR of a MIDDLE qualifier segment.
     var LQual := ModelByName('unitqual');

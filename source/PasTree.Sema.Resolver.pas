@@ -110,6 +110,7 @@ type
     function AncestorTypeSym(ATypeSym: Integer): Integer;
     function WithTargetTypeSym(ANode: Integer): Integer;
     function PointeeTypeSym(ATypeSym: Integer): Integer;
+    function ElementTypeOf(ABaseNode: Integer): Integer;
     procedure RepointScope(ANode, ANewScope: Integer);
     procedure ResolveOneWithStmt(AWith: Integer);
     procedure ResolveWithStmts;
@@ -1308,6 +1309,33 @@ var
   LIdx, LScope, LRef, LExtSym: Integer;
   LExtScopes: TArray<Integer>;   // parallel to FPendingHelpers; NIL_SCOPE = skip
   LAny: Boolean;
+
+  // The member scope of ASym or of whatever it aliases, resolving each link by
+  // NAME (see the call site for why RefMap is unavailable here). Depth-capped
+  // like StructMemberScope, for the same malformed/circular-chain reason.
+  function AliasedMemberScope(ASym: Integer): Integer;
+  var
+    LSym, LDef, LDepth: Integer;
+  begin
+    Result := NIL_SCOPE;
+    LSym := ASym;
+    for LDepth := 1 to 32 do
+    begin
+      if LSym = NIL_SYM then
+        Exit;
+      if FModel.Symbols[LSym].MemberScope <> NIL_SCOPE then
+        Exit(FModel.Symbols[LSym].MemberScope);
+      if FModel.Symbols[LSym].DeclNode = NIL_NODE then
+        Exit;
+      LDef := NextSib(FModel.Symbols[LSym].DeclNode);
+      while (LDef <> NIL_NODE) and (KindOf(LDef) = nkGenericParams) do
+        LDef := NextSib(LDef);
+      if (LDef = NIL_NODE) or (KindOf(LDef) <> nkIdent) then
+        Exit;
+      LSym := FModel.Resolve(FNodeScope[LDef], LowerCase(NodeText(LDef)));
+    end;
+  end;
+
 begin
   if Length(FPendingHelpers) = 0 then
     Exit;
@@ -1326,7 +1354,16 @@ begin
     LExtSym := FModel.Resolve(FNodeScope[LRef], LowerCase(NodeText(LRef)));
     if (LExtSym = NIL_SYM) or (FModel.Symbols[LExtSym].Kind <> skType) then
       Continue;
-    var LExtScope := FModel.Symbols[LExtSym].MemberScope;
+    // Chase alias links, because the `for` target is often an ALIAS of the
+    // real struct and only the struct's own symbol carries a member scope
+    // (`TD2DMatrix3x2F = D2D_MATRIX_3X2_F`, helper declared for the alias
+    // while the operator methods are on the underlying record —
+    // Winapi.D2D1). NOT StructMemberScope: that chases via DesignatorHead,
+    // i.e. RefMap, and this pass runs BEFORE ResolveNode has filled it (it
+    // must — Resolve is what binds the names this join exists to serve). So
+    // resolve each link by NAME instead. Bare names only, matching the
+    // INTRA-UNIT guard on the `for` target above.
+    var LExtScope := AliasedMemberScope(LExtSym);
     if LExtScope = NIL_SCOPE then
       Continue;
     // `TFoo = record helper for TFoo` is malformed but parses, and the name
@@ -1705,16 +1742,42 @@ begin
         Result := WithTargetTypeSym(LBase);
       end;
     nkIndex:
-      // Obj[Idx] / Obj.ArrayProp[Idx]: this model already stores an array
-      // PROPERTY's declared type as its per-ELEMENT type (see
-      // CollectStruct's nkPropertyDecl handling — the property symbol's
-      // TypeSym is the element type, not "array of X"), so indexing doesn't
-      // change the type at all — just resolve the indexable head the same
-      // way. (A plain dynamic-array VARIABLE's element type isn't modeled
-      // this way — DesignatorHead can't resolve an nkArrayType expression to
-      // a symbol at all — so that shape gracefully falls out as NIL_SYM,
-      // same as any other with-target this function can't fully type.)
-      Result := WithTargetTypeSym(FirstChild(ANode));
+      // `with Arr[I] do` — the ELEMENT type. By far the most common with-target
+      // shape in the RTL: `with FList[Index] do` (System.WideStrings),
+      // `with LVarBounds[I] do` (System.Variants), `with Entry.Aliases[High(
+      // Entry.Aliases)] do` (System.TypInfo), `with NetResources^[I] do`
+      // (System.AnsiStrings, index over a deref) — 27 false E2003s between
+      // them.
+      //
+      // ElementTypeOf returns NIL_SYM when the base is NOT an array, which is
+      // exactly the array-PROPERTY case: this model stores such a property's
+      // declared type as its per-ELEMENT type already (CollectStruct's
+      // nkPropertyDecl handling), so indexing must NOT peel a level there.
+      // Hence the fallback to the pass-through.
+      begin
+        Result := ElementTypeOf(FirstChild(ANode));
+        if Result = NIL_SYM then
+          Result := WithTargetTypeSym(FirstChild(ANode));
+      end;
+    nkBinaryOp:
+      // `with Obj as TSomething do` (System.Net.Socket) — the CAST's type, i.e.
+      // the right operand. Only `as` qualifies; every other binary operator
+      // yields a value whose type is not a with-openable struct anyway.
+      if SameText(NodeText(FTree.Nodes[ANode].Aux), 'as') then
+      begin
+        LBase := FirstChild(ANode);
+        if LBase <> NIL_NODE then
+        begin
+          LName := NextSib(LBase);
+          if LName <> NIL_NODE then
+          begin
+            LHead := DesignatorHead(LName);
+            if (LHead <> NIL_SYM) and
+               (FModel.Symbols[LHead].Kind in [skType, skBuiltinType]) then
+              Result := LHead;
+          end;
+        end;
+      end;
     nkDeref:
       // `with SomePointer^ do` — the target's type is what the pointer POINTS
       // AT (System.Variants: `with LVarData^ do VType := ...`, LVarData being
@@ -1723,6 +1786,74 @@ begin
     nkParen:
       Result := WithTargetTypeSym(FirstChild(ANode));
   end;
+end;
+
+{ The ELEMENT type of an indexable designator, or NIL_SYM when it is not an
+  array at all (which the caller reads as "leave the type alone").
+
+  Two sources, because an array is often not a named type: the base's own
+  declared type NODE may BE an inline `array[...] of T` (`LVarBounds:
+  array[0..3] of TVarBound;`), which no symbol lookup can reach — nothing
+  resolves an nkArrayType expression to a symbol. So try the declared node
+  first, then the named type it resolves to. Alias links are chased in both
+  (TArr = TInner = array of T), depth-capped like PointeeTypeSym. }
+function TPasSemaResolver.ElementTypeOf(ABaseNode: Integer): Integer;
+
+  // Element child of an nkArrayType node: the LAST child (`array[dims] of T`).
+  // NB for a multi-dimensional `array[a, b] of T` this jumps straight to T
+  // rather than to the intermediate row type — over-eager by one level in a
+  // shape too rare to model, and it can only ever find members of T instead
+  // of failing.
+  function ElemOfArrayNode(ANode: Integer): Integer;
+  var
+    LChild, LLast: Integer;
+  begin
+    Result := NIL_SYM;
+    if (ANode = NIL_NODE) or (KindOf(ANode) <> nkArrayType) or
+       (FTree.Nodes[ANode].Aux = 1) then
+      Exit;   // Aux = 1: `array of const`, no element type node at all
+    LChild := FirstChild(ANode);
+    LLast := NIL_NODE;
+    while LChild <> NIL_NODE do
+    begin
+      LLast := LChild;
+      LChild := NextSib(LChild);
+    end;
+    Result := DesignatorHead(LLast);
+  end;
+
+var
+  LSym, LDef, LDepth: Integer;
+begin
+  // 1. The base designator's own declared type node (inline array case).
+  LSym := DesignatorHead(ABaseNode);
+  if (LSym <> NIL_SYM) and (FModel.Symbols[LSym].TypeNode <> NIL_NODE) then
+  begin
+    Result := ElemOfArrayNode(FModel.Symbols[LSym].TypeNode);
+    if Result <> NIL_SYM then
+      Exit;
+  end;
+  // 2. The named type it resolves to, chasing aliases to a definition.
+  LSym := WithTargetTypeSym(ABaseNode);
+  for LDepth := 1 to 32 do
+  begin
+    if (LSym = NIL_SYM) or (FModel.Symbols[LSym].DeclNode = NIL_NODE) then
+      Exit(NIL_SYM);
+    LDef := NextSib(FModel.Symbols[LSym].DeclNode);
+    while (LDef <> NIL_NODE) and (KindOf(LDef) = nkGenericParams) do
+      LDef := NextSib(LDef);
+    if LDef = NIL_NODE then
+      Exit(NIL_SYM);
+    case KindOf(LDef) of
+      nkArrayType:
+        Exit(ElemOfArrayNode(LDef));
+      nkIdent, nkMember, nkTypeArgs:
+        LSym := DesignatorHead(LDef);   // alias link — keep chasing
+    else
+      Exit(NIL_SYM);                    // not an array, and never will be
+    end;
+  end;
+  Result := NIL_SYM;
 end;
 
 // The type a POINTER type points at: PVarData = ^TVarData -> TVarData,
