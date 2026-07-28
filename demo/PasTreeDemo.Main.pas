@@ -142,6 +142,9 @@ type
     FMsgVisible: TList<Integer>;
     FDProj: TPasDProj;       // Assigned only when a .dproj was opened
     FProjectDir: string;
+    // The .dproj summary line, held back so it can be logged UNDER "Opened
+    // project" rather than before it (the open may still fail after parsing).
+    FDProjSummary: string;
     FMainSource: string;
     FPlatform: TPasPlatform;
     FSynPasHL: TSynPasSyn;   // shared SynEdit built-in highlighter (A/B compare)
@@ -981,6 +984,7 @@ begin
     end;
   end;
   FreeAndNil(FDProj);
+  FDProjSummary := '';   // a previous project's summary must not leak forward
   FPlatform := pfWin32;
   if LExt = '.dproj' then
   begin
@@ -990,9 +994,12 @@ begin
       FPlatform := FDProj.Platform;
       FMainSource := FDProj.MainSource;
       FProjectDir := FDProj.Dir;
-      Log(Format('  .dproj: config %s, %d search path(s), %d define(s), ' +
+      // Deferred: this belongs UNDER the "Opened project" line, which is only
+      // logged once the whole open has succeeded.
+      FDProjSummary := Format(
+        '  .dproj: config %s, %d search path(s), %d define(s), ' +
         '%d unit alias(es)', [FDProj.Config, Length(FDProj.SearchPaths),
-        Length(FDProj.Defines), Length(FDProj.UnitAliases)]));
+        Length(FDProj.Defines), Length(FDProj.UnitAliases)]);
     end
     else
     begin
@@ -1026,11 +1033,29 @@ begin
   Log('Opened project: ' + LFile +
     '  (platform ' + PlatformName(FPlatform) + ', ' +
     IntToStr(FFileList.Count) + ' files)');
+  if FDProjSummary <> '' then
+    Log(FDProjSummary);
   // Kick off the background analysis (non-blocking); it populates navigation
   // and (if chkShowErrors is checked) the error list when it finishes. The
   // open main file is front-loaded so it is ready first.
   Log('Analyzing ' + TPath.GetFileName(FMainSource) + ' in ' + FProjectDir +
     ' (' + cbPlatform.Text + ') in the background...');
+  // The TOTAL search-path set, not just the .dproj's own: the rest comes from
+  // the IDE's registry library/browsing paths (ExtraSearchPaths), and that set
+  // is what decides how much of the `uses` graph resolves — so how many units
+  // the closure ends up with, and hence the run time. Two runs of the same
+  // project differing in unit count differ HERE, and without this line there
+  // was no way to tell from a log.
+  var LDbgPlat: TPasPlatform;
+  var LDbgPaths, LDbgDefines: TArray<string>;
+  var LFromDProj := 0;
+  if Assigned(FDProj) then
+    LFromDProj := Length(FDProj.SearchPaths);
+  if BuildConfig(LDbgPlat, LDbgPaths, LDbgDefines) then
+    Log(Format('  search paths: %d total = 1 project dir + %d from .dproj + ' +
+      '%d from the IDE registry; %d define(s)',
+      [Length(LDbgPaths), LFromDProj, Length(ExtraSearchPaths),
+       Length(LDbgDefines)]));
   StartAsyncAnalyze(FMainSource, {ALoud} True);
 end;
 
