@@ -2080,6 +2080,22 @@ begin
   LAnyUnopened := False;
   for LTarget in LTargets do
   begin
+    // A target after the first is resolved INSIDE the ones before it — that is
+    // the whole point of the multi-target form: `with DIB, dsbm, dsbmih do`
+    // works because dsbm is a field of DIB and dsbmih a field of dsbm
+    // (Vcl.Graphics does exactly this, and Vcl.Controls does
+    // `with TDragDockObject(ADragObject), FDockRect do`). Resolving every
+    // target in the ENCLOSING scope left the later ones unbound, and with them
+    // every member of theirs in the body.
+    //
+    // Safe to do incrementally: the scope only ever GAINS the targets already
+    // processed, and ResolveNode's NIL_SYM guard means a target Phase 1 already
+    // bound correctly is left alone.
+    if LWithScope <> NIL_SCOPE then
+    begin
+      RepointScope(LTarget, LWithScope);
+      ResolveNode(LTarget);
+    end;
     LTypeSym := WithTargetTypeSym(LTarget);
     if LTypeSym = NIL_SYM then
     begin

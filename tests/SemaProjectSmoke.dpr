@@ -109,8 +109,12 @@ const
     '    Tag: Integer;'#10 +
     '    constructor Create;'#10 +
     '  end;'#10 +
+    '  TInner = record W: Integer; end;'#10 +
+    '  TMid = record inner: TInner; end;'#10 +
+    '  TOuter = record mid: TMid; end;'#10 +
     '  TSub = class(TThing)'#10 +
     '    Extra: Integer;'#10 +
+    '    Box: TInner;'#10 +
     '  end;'#10 +
     '  TMat = record'#10 +
     '    m11: Single;'#10 +
@@ -139,6 +143,7 @@ const
     '  Named: TElemArray;'#10 +
     '  PArr: PElemArray;'#10 +
     '  Obj: TThing;'#10 +
+    '  Outer: TOuter;'#10 +
     '  I: Integer;'#10 +
     'begin'#10 +
     '  with Entry.Aliases[I] do'#10 +     // implicit deref + TArray<T> element
@@ -156,6 +161,16 @@ const
     '    Extra := 5;'#10 +
     '  with TThing.Create do'#10 +        // constructor call -> the class
     '    Tag := 6;'#10 +
+    // MULTI-TARGET: every target after the first is resolved INSIDE the ones
+    // before it, so `mid` is only findable through Outer and `inner` only
+    // through mid. This is Vcl.Graphics' `with DIB, dsbm, dsbmih do` and
+    // Vcl.Controls' `with TDragDockObject(ADragObject), FDockRect do`; both
+    // used to leave the later targets — and then every member reached through
+    // them in the body — undeclared.
+    '  with Outer, mid, inner do'#10 +
+    '    W := 7;'#10 +
+    '  with TSub(Obj), Box do'#10 +       // cast first, then a field OF the cast
+    '    W := 8;'#10 +
     '  I := UnitWShapes.Pick;'#10 +       // qualifying with our OWN unit name
     'end;'#10 +
     'end.'#10;
@@ -815,6 +830,12 @@ begin
     Ok('wshapes: TElem.Value bound from every with body (5 sites)',
       LocalRefCount(LWS, 'Value') + CrossRefCountInUnit(LWS, 'Value', 'Value',
         'unitwshapes') >= 4);
+    // The multi-target chain specifically: `W` is reachable ONLY through
+    // Outer.mid.inner / TSub(Obj).Box, so two bindings prove both later
+    // targets were opened (the no-diags check above proves they are not E2003).
+    Ok('wshapes: multi-target `with Outer, mid, inner` binds W',
+      LocalRefCount(LWS, 'W') + CrossRefCountInUnit(LWS, 'W', 'W',
+        'unitwshapes') >= 2);
     Ok('wshapes: the helper''s static reached through the type ALIAS',
       LocalRefCount(LWS, 'SetProduct') +
       CrossRefCountInUnit(LWS, 'SetProduct', 'SetProduct', 'unitwshapes') >= 1);

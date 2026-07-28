@@ -3410,7 +3410,7 @@ function TPasSemaProject.FindInEnclosingWith(AId, ANode: Integer;
   out AX: TSemaXType): Boolean;
 var
   LM: TPasSemaModel;
-  LCur, LParent, LLast, LChild, LIdx, LCtx: Integer;
+  LCur, LParent, LLast, LChild, LIdx, LCtx, LFrom: Integer;
   LTargets: TArray<Integer>;
   LX: TSemaXType;
 begin
@@ -3435,8 +3435,25 @@ begin
         LTargets := LTargets + [LChild];
         LChild := LM.Tree.Nodes[LChild].NextSibling;
       end;
+      // WHICH targets are open at LCur. In the body, all of them. But a target
+      // is itself resolved inside the ones BEFORE it — `with DIB, dsbm, dsbmih
+      // do` is legal precisely because dsbm is a field of DIB and dsbmih a
+      // field of dsbm (Vcl.Graphics does exactly this). Treating a target like
+      // ordinary enclosing code, which is what only testing `LCur = LLast`
+      // did, left every such target unresolved and then every member of it in
+      // the body too.
+      LFrom := -1;
       if LCur = LLast then
-        for LIdx := High(LTargets) downto 0 do
+        LFrom := High(LTargets)
+      else
+        for LIdx := 0 to High(LTargets) do
+          if LTargets[LIdx] = LCur then
+          begin
+            LFrom := LIdx - 1;   // target k sees 0..k-1, never itself
+            Break;
+          end;
+      if LFrom >= 0 then
+        for LIdx := LFrom downto 0 do
         begin
           LX := WithTargetTypeX(AId, LTargets[LIdx]);
           if XValid(LX) and
