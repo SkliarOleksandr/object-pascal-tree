@@ -318,11 +318,21 @@ const
   // OldNavF only via a unit ALIAS (OldNavF=NavF).
   UNIT_MAIN =
     'program NavMain;'#10 +                    // 1
-    'uses NavB, NavE, OldNavF;'#10 +           // 2  NavE col 12, OldNavF col 18
+    'uses NavB, NavE, OldNavF, Deep.NavX;'#10 + // 2  NavE col 12, OldNavF col
+                                                //    18, Deep col 27
     'begin'#10 +                               // 3
     'end.'#10;                                 // 4
   UNIT_E =
     'unit Wide.NavE;'#10 +                     // 1
+    'interface'#10 +                           // 2
+    'implementation'#10 +                      // 3
+    'end.'#10;                                 // 4
+  // A namespace prefix applied to an ALREADY-DOTTED name: `uses Deep.NavX`
+  // with -NS Wide must find Wide.Deep.NavX.pas. dcc-verified (a real program
+  // `uses Generics.Collections` compiles with -NSSystem, and there is no
+  // Generics.Collections.pas to find any other way).
+  UNIT_X =
+    'unit Wide.Deep.NavX;'#10 +                // 1
     'interface'#10 +                           // 2
     'implementation'#10 +                      // 3
     'end.'#10;                                 // 4
@@ -737,6 +747,7 @@ begin
   // like the direct-analysis pass above (AnalyzeFile's documented gap).
   TFile.WriteAllText(TPath.Combine(LDir, 'NavMain.dpr'), UNIT_MAIN);
   TFile.WriteAllText(TPath.Combine(LDir, 'Wide.NavE.pas'), UNIT_E);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Wide.Deep.NavX.pas'), UNIT_X);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavF.pas'), UNIT_F);
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -757,6 +768,15 @@ begin
         GNav.ModelIdOf(TPath.Combine(LDir, 'Wide.NavE.pas')) >= 0);
       Ok('project: aliased unit loaded',
         GNav.ModelIdOf(TPath.Combine(LDir, 'NavF.pas')) >= 0);
+      // BUG REGRESSION: the namespace prefix used to be tried for UNQUALIFIED
+      // names only, so `uses Deep.NavX` never found Wide.Deep.NavX.pas and
+      // came out as a false F1027 (22 of 27 unresolvable imports on a real
+      // 3789-unit project were exactly this).
+      Ok('project: namespace prefix on a DOTTED name',
+        GNav.ModelIdOf(TPath.Combine(LDir, 'Wide.Deep.NavX.pas')) >= 0);
+      Ok('project: no false F1027 for the dotted namespaced name',
+        DiagCount(GProj.Model(GNav.ModelIdOf(
+          TPath.Combine(LDir, 'NavMain.dpr'))), 'F1027') = 0);
       // Nav INSIDE the dependency NavB — the reported-bug shape (clicking
       // TSynCustomHighlighter inside a dependency unit did nothing).
       GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavB.pas'));
@@ -773,6 +793,11 @@ begin
         'Wide.NavE.pas', 1, 6);
       CheckNav('project uses: OldNavF -> aliased file', 2, 19, 'OldNavF',
         'NavF.pas', 1, 6);
+      // Either segment of the dotted, namespace-prefixed name opens the file.
+      CheckNav('project uses: Deep.NavX -> namespace-prefixed file', 2, 27,
+        'Deep', 'Wide.Deep.NavX.pas', 1, 6);
+      CheckNav('project uses: NavX leaf -> same file', 2, 32, 'NavX',
+        'Wide.Deep.NavX.pas', 1, 6);
     finally
       GNav.Free;
     end;

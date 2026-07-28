@@ -293,15 +293,22 @@ begin
   if FindUnitFile(LUnitName, LDir, AResolved) then
     Exit(True);
 
-  // 4. Unit-scope namespaces (dcc -NS), IN ORDER, for an UNQUALIFIED name
-  // only (dcc applies namespaces to generic names, not already-dotted ones):
-  // `uses Generics.Collections` -> System.Generics.Collections.pas.
+  // 4. Unit-scope namespaces (dcc -NS), IN ORDER, applied to the name AS
+  // SPELLED — dotted or not. `uses Generics.Collections` with -NS System
+  // resolves to System.Generics.Collections.pas, and there is no
+  // Generics.Collections.pas anywhere, so the prefix is the ONLY way to find
+  // it: dcc-verified, compiles with -NSSystem and cannot be explained by any
+  // other rule here. This used to be gated on an unqualified name, which
+  // refused exactly the example the comment cited. Real cost: 16 of the 27
+  // unresolvable imports left on a 3789-unit project were this one line.
+  //
+  // Tried only AFTER the as-spelled lookup above, so a name that names a real
+  // file (Vcl.Forms) can never be captured by a prefix.
+  for LName in FNamespaces do
+    if (LName <> '') and
+       FindUnitFile(LName + '.' + LUnitName, LDir, AResolved) then
+      Exit(True);
   LDot := LastDelimiter('.', LUnitName);
-  if LDot = 0 then
-    for LName in FNamespaces do
-      if (LName <> '') and
-         FindUnitFile(LName + '.' + LUnitName, LDir, AResolved) then
-        Exit(True);
 
   // 5. Leaf-name tolerance for a dotted name (System.SysUtils -> SysUtils.pas
   // — pre-namespace-era file layouts).
