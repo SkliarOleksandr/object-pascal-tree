@@ -82,6 +82,7 @@ type
     GotoImplAction: TAction;
     GotoDeclAction: TAction;
     CopyMessageAction: TAction;
+    CopyAllMessagesAction: TAction;
     SourcePopupMenu: TPopupMenu;
     Find1: TMenuItem;
     GotoImplementation1: TMenuItem;
@@ -126,6 +127,8 @@ type
     procedure GotoDeclActionExecute(Sender: TObject);
     procedure CopyMessageActionUpdate(Sender: TObject);
     procedure CopyMessageActionExecute(Sender: TObject);
+    procedure CopyAllMessagesActionUpdate(Sender: TObject);
+    procedure CopyAllMessagesActionExecute(Sender: TObject);
     procedure btnParseVclClick(Sender: TObject);
     procedure btnParseFmxClick(Sender: TObject);
   private
@@ -202,6 +205,7 @@ type
     procedure ApplyPasTreePalette(AHL: TSynPasSyn);
     procedure EnsureSampleProject;
     function ExeDir: string;
+    function ElapsedText(AMs: Int64): string;
     function StudioRoot: string;
     function ExtraSearchPaths: TArray<string>;
     procedure OpenProject(const AProjectFile: string);
@@ -594,6 +598,35 @@ procedure TfrmMain.CopyMessageActionUpdate(Sender: TObject);
 begin
   TAction(Sender).Enabled := vtMessages.Focused and
     Assigned(vtMessages.FocusedNode);
+end;
+
+// The WHOLE visible history, in one go — for pasting a run's log somewhere
+// else. Copies what is actually on screen (FMsgVisible, i.e. honoring the
+// Show Errors filter) rather than FMsgLog, so what you paste is what you see.
+procedure TfrmMain.CopyAllMessagesActionExecute(Sender: TObject);
+var
+  LSB: TStringBuilder;
+begin
+  LSB := TStringBuilder.Create;
+  try
+    for var LIdx := 0 to FMsgVisible.Count - 1 do
+      LSB.AppendLine(FMsgLog[FMsgVisible[LIdx]].Text);
+    Clipboard.AsText := LSB.ToString;
+  finally
+    LSB.Free;
+  end;
+end;
+
+procedure TfrmMain.CopyAllMessagesActionUpdate(Sender: TObject);
+begin
+  TAction(Sender).Enabled := FMsgVisible.Count > 0;
+end;
+
+// Seconds with one decimal — a five-digit millisecond count is not something
+// anyone reads comfortably.
+function TfrmMain.ElapsedText(AMs: Int64): string;
+begin
+  Result := Format('%.1f s', [AMs / 1000]);
 end;
 
 procedure TfrmMain.FormCreate(Sender: TObject);
@@ -1445,13 +1478,14 @@ begin
   // total next to an empty message window reads as the tool contradicting
   // itself — which is exactly how the .dproj-less case used to look.
   if LDiagListed = LDiagTotal then
-    Log(Format('Done: %d units, %d diagnostics in %d ms (%s).',
-      [FSemaProject.ModelCount, LDiagTotal, AElapsedMs, cbThreading.Text]))
+    Log(Format('Done: %d units, %d diagnostics in %s (%s).',
+      [FSemaProject.ModelCount, LDiagTotal, ElapsedText(AElapsedMs),
+       cbThreading.Text]))
   else
-    Log(Format('Done: %d units, %d diagnostics in %d ms (%s) — %d listed ' +
+    Log(Format('Done: %d units, %d diagnostics in %s (%s) — %d listed ' +
       'below; %d more in library units outside this project (not listed).',
-      [FSemaProject.ModelCount, LDiagTotal, AElapsedMs, cbThreading.Text,
-       LDiagListed, LDiagTotal - LDiagListed]));
+      [FSemaProject.ModelCount, LDiagTotal, ElapsedText(AElapsedMs),
+       cbThreading.Text, LDiagListed, LDiagTotal - LDiagListed]));
   // Volume the parser actually processed. An $I include is counted once per
   // INCLUDING unit, because that is how many times it was really lexed and
   // parsed — the figure is work done, not distinct bytes on disk. Chars, not

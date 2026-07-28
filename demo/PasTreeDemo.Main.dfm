@@ -351,6 +351,11 @@ object frmMain: TfrmMain
       OnExecute = CopyMessageActionExecute
       OnUpdate = CopyMessageActionUpdate
     end
+    object CopyAllMessagesAction: TAction
+      Caption = 'Copy All'
+      OnExecute = CopyAllMessagesActionExecute
+      OnUpdate = CopyAllMessagesActionUpdate
+    end
   end
   object SourcePopupMenu: TPopupMenu
     Left = 548
@@ -370,6 +375,9 @@ object frmMain: TfrmMain
     Top = 400
     object CopyMessage1: TMenuItem
       Action = CopyMessageAction
+    end
+    object CopyAllMessages1: TMenuItem
+      Action = CopyAllMessagesAction
     end
   end
   object SynEditSearch1: TSynEditSearch
