@@ -147,6 +147,7 @@ var
   LM: TPasSemaModel;
   LTotalLines, LTotalChars, LTotalFiles: Int64;
   LListed, LOther, LMid, LDIdx, LFileId, LQuote: Integer;
+  LUnresUses, LUnitsGated: Integer;
   LName, LFile: string;
   LIsOwn: Boolean;
 begin
@@ -198,6 +199,7 @@ begin
 
       LTotalLines := 0; LTotalChars := 0; LTotalFiles := 0;
       LListed := 0; LOther := 0;
+      LUnresUses := 0; LUnitsGated := 0;
       for LMid := 0 to GProj.ModelCount - 1 do
       begin
         LM := GProj.Model(LMid);
@@ -207,6 +209,17 @@ begin
           Inc(LTotalLines, Length(LM.Tree.Source.Files[LFileId].LineStarts));
           Inc(LTotalChars, Length(LM.Tree.Source.Files[LFileId].Source));
         end;
+        // Closure HEALTH. A `uses` name that did not resolve means a subtree
+        // the compiler would have compiled is simply absent here — so the unit
+        // count is an UNDER-count, and E2003 is suppressed for that unit
+        // (AllUsesResolved gates it), which makes the diagnostics an
+        // under-count too. dcc treats an unresolvable uses as fatal (F1027),
+        // so on a project that really builds, a healthy run has zero.
+        for var LU := 0 to High(LM.UsesList) do
+          if LM.UsesList[LU].UnitId < 0 then
+            Inc(LUnresUses);
+        if not LM.AllUsesResolved then
+          Inc(LUnitsGated);
         LIsOwn := LOwn.ContainsKey(LowerCase(GProj.ModelFile(LMid)));
         for LDIdx := 0 to High(LM.Diags) do
         begin
@@ -259,6 +272,10 @@ begin
            FormatFloat('#,##0', LTotalFiles),
            FormatFloat('#,##0', LTotalLines * 1000 /
              Max(1, GSW.ElapsedMilliseconds))]));
+      Writeln(ErrOutput, Format(
+        'closure: %d unresolved `uses` name(s); %d of %d unit(s) have E2003 '
+        + 'GATED because of them',
+        [LUnresUses, LUnitsGated, GProj.ModelCount]));
       Writeln(ErrOutput, Format(
         'diagnostics: %d total — %d in project files, %d in library units',
         [LListed + LOther, LListed, LOther]));

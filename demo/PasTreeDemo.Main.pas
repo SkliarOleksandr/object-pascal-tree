@@ -1431,6 +1431,7 @@ procedure TfrmMain.ReportProjectResult(AElapsedMs: Int64);
 var
   LMain, LDiagTotal, LDiagListed, LId, LDIdx, LFileId: Integer;
   LTotalLines, LTotalChars, LTotalFiles: Int64;
+  LUnresUses, LUnitsGated: Integer;
   LModel: TPasSemaModel;
   LDiagFile, LVolume: string;
 begin
@@ -1447,6 +1448,8 @@ begin
   LTotalLines := 0;
   LTotalChars := 0;
   LTotalFiles := 0;
+  LUnresUses := 0;
+  LUnitsGated := 0;
   // Locate the main unit BEFORE the diagnostics loop: the loop's own listing
   // filter reads FFileList, and for a .dproj-less project that list is not
   // complete until the main unit's members have been adopted into it.
@@ -1471,6 +1474,20 @@ begin
         Inc(LTotalLines, Length(LModel.Tree.Source.Files[LFileId].LineStarts));
         Inc(LTotalChars, Length(LModel.Tree.Source.Files[LFileId].Source));
       end;
+      // Closure HEALTH, the number that says whether the unit count above can
+      // be trusted. A `uses` name that did not resolve means a whole subtree
+      // the compiler WOULD compile is missing here — so the unit count is an
+      // under-count — and it also GATES E2003 for that unit, so the diagnostic
+      // count is an under-count too. dcc treats an unresolvable uses as fatal
+      // (F1027), so on a project that really builds, a healthy run is zero.
+      // This is what distinguishes "the project got smaller" from "we resolved
+      // less of it": without it, a run with too few search paths looks fast and
+      // clean instead of incomplete.
+      for LDIdx := 0 to High(LModel.UsesList) do
+        if LModel.UsesList[LDIdx].UnitId < 0 then
+          Inc(LUnresUses);
+      if not LModel.AllUsesResolved then
+        Inc(LUnitsGated);
       if FFileList.IndexOf(FSemaProject.ModelFile(LId)) < 0 then
       begin
         Inc(LDiagTotal, Length(LModel.Diags));
@@ -1527,6 +1544,14 @@ begin
         [FormatFloat('#,##0', LTotalLines * 1000 / AElapsedMs)]);
     Log(LVolume);
   end;
+  if LUnresUses = 0 then
+    Log(Format('  closure: complete — every `uses` resolved across %d unit(s)',
+      [FSemaProject.ModelCount]))
+  else
+    Log(Format('  closure: INCOMPLETE — %d unresolved `uses` name(s); %d of ' +
+      '%d unit(s) have their E2003 suppressed. Unit and diagnostic counts ' +
+      'are both under-counts; check the search paths above.',
+      [LUnresUses, LUnitsGated, FSemaProject.ModelCount]));
   if FSemaProject.StageTimings <> '' then
     Log('  stages: ' + FSemaProject.StageTimings);
   if FAnalyzeOverhead <> '' then
