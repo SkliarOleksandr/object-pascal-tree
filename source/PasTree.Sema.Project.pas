@@ -1710,7 +1710,7 @@ end;
 function TPasSemaProject.ResolveTypeExpr(AId, ANode: Integer): TSemaXType;
 var
   LM: TPasSemaModel;
-  LName, LSym, LArgNode: Integer;
+  LName, LSym, LArgNode, LArgCount: Integer;
   LExt: TPasExtRef;
   LBase, LArg: TSemaXType;
   LArgs: TArray<TSemaXType>;
@@ -1748,6 +1748,33 @@ begin
           Exit;
         LBase := RealGenericBase(LBase);
         LArgs := nil;
+        LArgCount := 0;
+        LArgNode := LM.Tree.Nodes[LM.Tree.Nodes[ANode].FirstChild].NextSibling;
+        while LArgNode <> NIL_NODE do
+        begin
+          Inc(LArgCount);
+          LArgNode := LM.Tree.Nodes[LArgNode].NextSibling;
+        end;
+        // 16.1.2: one name may be declared at several ARITIES, chained on
+        // NextOverload by CollectTypeDecl. Only the head is registered under
+        // the name, so pick the declaration whose parameter count matches the
+        // arguments actually written. Walking the chain is safe for a type
+        // symbol: every other NextOverload consumer reaches the chain through
+        // a ROUTINE head.
+        if Length(GenericParamIdents(LBase.UnitId, LBase.Sym)) <> LArgCount then
+        begin
+          LSym := FModels[LBase.UnitId].Symbols[LBase.Sym].NextOverload;
+          while LSym <> NIL_SYM do
+          begin
+            if (FModels[LBase.UnitId].Symbols[LSym].Kind = skType) and
+               (Length(GenericParamIdents(LBase.UnitId, LSym)) = LArgCount) then
+            begin
+              LBase.Sym := LSym;
+              Break;
+            end;
+            LSym := FModels[LBase.UnitId].Symbols[LSym].NextOverload;
+          end;
+        end;
         LArgNode := LM.Tree.Nodes[LM.Tree.Nodes[ANode].FirstChild].NextSibling;
         while LArgNode <> NIL_NODE do
         begin

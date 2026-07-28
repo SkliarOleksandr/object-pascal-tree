@@ -196,6 +196,47 @@ const
     '  Ok7: TFree<string>;'#10 +
     'implementation'#10'end.'#10;
 
+  // 16.1.2 — one generic name declared at several ARITIES. These are two
+  // distinct types; CollectTypeDecl used to reuse the first symbol for the
+  // second declaration (the forward-completion path) and overwrite its member
+  // scope, orphaning the first type's members. TFwd is the control that
+  // matters: the forward-completion path must keep working, and must NOT start
+  // reporting a redeclaration now that the arities are compared.
+  UNIT_ARITY =
+    'unit UnitArity;'#10'interface'#10 +
+    'type'#10 +
+    '  TBox<T> = class'#10 +
+    '    FV: T;'#10 +
+    '    function Get: T;'#10 +
+    '  end;'#10 +
+    '  TBox<TKey, TVal> = class'#10 +
+    '    FK: TKey;'#10 +
+    '    FV: TVal;'#10 +
+    '    function GetKey: TKey;'#10 +
+    '  end;'#10 +
+    '  TFwd = class;'#10 +
+    '  TFwd = class'#10 +
+    '    Z: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TBox<T>.Get: T; begin Result := FV; end;'#10 +
+    'function TBox<TKey, TVal>.GetKey: TKey; begin Result := FK; end;'#10 +
+    'procedure Use;'#10 +
+    'var'#10 +
+    '  B1: TBox<Integer>;'#10 +
+    '  B2: TBox<string, Integer>;'#10 +
+    '  I: Integer;'#10 +
+    '  S: string;'#10 +
+    '  F: TFwd;'#10 +
+    'begin'#10 +
+    '  I := B1.Get;'#10 +      // arity-1 member and its result
+    '  I := B1.FV;'#10 +
+    '  S := B2.GetKey;'#10 +   // arity-2 member, whose T is the FIRST param
+    '  I := B2.FV;'#10 +       // same field NAME, different type per arity
+    '  I := F.Z;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // A bare member of the IMPLICIT TObject ancestor. Neither class below
   // names a heritage, so the ancestor walk used to stop at the class itself
   // and report ClassName/Free as undeclared. TSub also checks the walk
@@ -564,6 +605,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWShapes.pas'), UNIT_WSHAPES);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitCon.pas'), UNIT_CON);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitConUse.pas'), UNIT_CONUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitArity.pas'), UNIT_ARITY);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -687,6 +729,23 @@ begin
       CrossRefCountInUnit(LTObj, 'ClassName', 'ClassName', 'system') = 2);
     Ok('tobject: Free resolves into System''s TObject',
       CrossRefCountInUnit(LTObj, 'Free', 'Free', 'system') = 1);
+
+    // 16.1.2 — one generic name at two arities (see UNIT_ARITY).
+    var LAR := ModelByName('unitarity');
+    Ok('arity: UnitArity loaded', Assigned(LAR));
+    Ok('arity: no diags — and in particular no E2004 for the second TBox '
+      + 'nor for the forward-completed TFwd',
+      Length(LAR.Diags) = 0);
+    Ok('arity: TBox is TWO distinct type symbols, not one',
+      SymCountOf(LAR, 'tbox', skType) = 2);
+    Ok('arity: TFwd stays ONE symbol (forward completion, not an overload)',
+      SymCountOf(LAR, 'tfwd', skType) = 1);
+    // Positive: each arity's OWN member must be reachable. Before, the second
+    // declaration overwrote the first's member scope, so Get was orphaned.
+    Ok('arity: the 1-parameter type''s member resolves (Get)',
+      LocalRefCount(LAR, 'Get') >= 1);
+    Ok('arity: the 2-parameter type''s member resolves (GetKey/FK)',
+      (LocalRefCount(LAR, 'GetKey') >= 1) and (LocalRefCount(LAR, 'FK') >= 1));
 
     // 16.4.1 constraints, checked cross-model (see UNIT_CON/UNIT_CONUSE).
     var LCU := ModelByName('unitconuse');

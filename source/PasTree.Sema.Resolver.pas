@@ -79,8 +79,15 @@ type
     procedure NodePos(ANode: Integer; out AFileId, ALine, ACol: Integer);
     // collect
     procedure MarkDeclName(ANode, ASym: Integer);
+    { AOverloadOnClash chains onto a same-named, same-kind symbol instead of
+      reporting a redeclaration — for the one non-routine case that is legal,
+      a generic type name declared at several ARITIES (16.1.2). }
     function DeclareSym(AScope: Integer; AKind: TSemaSymbolKind;
-      const AName: string; ADeclNode: Integer): Integer;
+      const AName: string; ADeclNode: Integer;
+      AOverloadOnClash: Boolean = False): Integer;
+    function GenericArityOfParamsNode(ANode: Integer): Integer;
+    function GenericArityOfDecl(ATypeDeclNode: Integer): Integer;
+    function GenericArityOfSym(ASym: Integer): Integer;
     procedure DeclareNamesAndType(ADecl, AScope: Integer;
       AKind: TSemaSymbolKind);
     procedure CollectTypeDecl(ANode, AScope: Integer);
@@ -318,7 +325,8 @@ begin
 end;
 
 function TPasSemaResolver.DeclareSym(AScope: Integer; AKind: TSemaSymbolKind;
-  const AName: string; ADeclNode: Integer): Integer;
+  const AName: string; ADeclNode: Integer;
+  AOverloadOnClash: Boolean): Integer;
 var
   LExisting, LTail, LFileId, LLine, LCol: Integer;
 begin
@@ -326,7 +334,9 @@ begin
   Result := FModel.AddSymbol(AScope, AKind, AName, ADeclNode);
   if LExisting = NIL_SYM then
     FModel.BindName(AScope, Result)
-  else if (AKind = skRoutine) and (FModel.Symbols[LExisting].Kind = skRoutine) then
+  else if ((AKind = skRoutine) and
+           (FModel.Symbols[LExisting].Kind = skRoutine)) or
+          (AOverloadOnClash and (FModel.Symbols[LExisting].Kind = AKind)) then
   begin
     // overload: chain onto the head, keep the head registered under the name
     LTail := LExisting;
@@ -407,6 +417,90 @@ begin
   end;
 end;
 
+{ Type-parameter count of an nkGenericParams / nkTypeArgs node. For
+  nkGenericParams it counts the declared NAMES, so `<T; U: class>` is 2 and
+  `<T, U>` is also 2; for nkTypeArgs, the arguments written. }
+function TPasSemaResolver.GenericArityOfParamsNode(ANode: Integer): Integer;
+var
+  LParam, LP: Integer;
+begin
+  Result := 0;
+  if ANode = NIL_NODE then
+    Exit;
+  if KindOf(ANode) = nkTypeArgs then
+  begin
+    // Head then one child per argument.
+    LP := FirstChild(ANode);
+    if LP <> NIL_NODE then
+      LP := NextSib(LP);
+    while LP <> NIL_NODE do
+    begin
+      Inc(Result);
+      LP := NextSib(LP);
+    end;
+    Exit;
+  end;
+  if KindOf(ANode) <> nkGenericParams then
+    Exit;
+  LParam := FirstChild(ANode);
+  while LParam <> NIL_NODE do
+  begin
+    if KindOf(LParam) = nkGenericParam then
+    begin
+      LP := FirstChild(LParam);
+      while (LP <> NIL_NODE) and (KindOf(LP) = nkIdent) do
+      begin
+        Inc(Result);
+        LP := NextSib(LP);
+      end;
+    end;
+    LParam := NextSib(LParam);
+  end;
+end;
+
+// Number of type parameters an nkTypeDecl declares; 0 for a plain type.
+function TPasSemaResolver.GenericArityOfDecl(ATypeDeclNode: Integer): Integer;
+var
+  LGen, LParam, LP: Integer;
+begin
+  Result := 0;
+  if ATypeDeclNode = NIL_NODE then
+    Exit;
+  LGen := FindChildKind(ATypeDeclNode, nkGenericParams);
+  if LGen = NIL_NODE then
+    Exit;
+  LParam := FirstChild(LGen);
+  while LParam <> NIL_NODE do
+  begin
+    if KindOf(LParam) = nkGenericParam then
+    begin
+      LP := FirstChild(LParam);
+      while (LP <> NIL_NODE) and (KindOf(LP) = nkIdent) do
+      begin
+        Inc(Result);
+        LP := NextSib(LP);
+      end;
+    end;
+    LParam := NextSib(LParam);
+  end;
+end;
+
+// Same, for an already-declared type symbol (via its declaration's nkTypeDecl).
+function TPasSemaResolver.GenericArityOfSym(ASym: Integer): Integer;
+var
+  LDecl, LParent: Integer;
+begin
+  Result := 0;
+  if ASym = NIL_SYM then
+    Exit;
+  LDecl := FModel.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LParent := FTree.Nodes[LDecl].Parent;
+  if (LParent <> NIL_NODE) and (KindOf(LParent) = nkTypeDecl) then
+    Result := GenericArityOfDecl(LParent);
+end;
+
 procedure TPasSemaResolver.CollectTypeDecl(ANode, AScope: Integer);
 var
   LName, LChild, LSym, LExisting, LGen, LBody: Integer;
@@ -417,7 +511,8 @@ begin
   // Forward-declared types (`TFoo = class;`) complete later under the same
   // name — reuse the existing symbol rather than flagging a redeclaration.
   LExisting := FModel.FindLocal(AScope, LowerCase(NodeText(LName)));
-  if (LExisting <> NIL_SYM) and (FModel.Symbols[LExisting].Kind = skType) then
+  if (LExisting <> NIL_SYM) and (FModel.Symbols[LExisting].Kind = skType) and
+     (GenericArityOfDecl(ANode) = GenericArityOfSym(LExisting)) then
   begin
     LSym := LExisting;
     MarkDeclName(LName, LSym);
@@ -426,6 +521,16 @@ begin
     // (TypeDefNode and the project's cross typer) see heritage and params.
     FModel.Symbols[LSym].DeclNode := LName;
   end
+  else if (LExisting <> NIL_SYM) and
+          (FModel.Symbols[LExisting].Kind = skType) then
+    // Same name, DIFFERENT generic arity — `TBox<T>` and `TBox<TKey, TVal>`
+    // are two distinct types (16.1.2), not a redeclaration and not a forward
+    // completion. Chained like routine overloads so ResolveTypeExpr can pick
+    // by argument count; without this the second declaration reused the
+    // first's symbol and silently overwrote its member scope, orphaning the
+    // first type's members.
+    LSym := DeclareSym(AScope, skType, NodeText(LName), LName,
+      {AOverloadOnClash} True)
   else
     LSym := DeclareSym(AScope, skType, NodeText(LName), LName);
 
@@ -722,11 +827,12 @@ var
   LRoutine, LChild, LNameNode, LSegIdent, LSegLast: Integer;
   LRoutineSym, LResultNode: Integer;
   LQualified: Boolean;
-  LQualIdents: TArray<Integer>;
+  LQualIdents, LQualArity: TArray<Integer>;
 begin
   LRoutine := FModel.AddScope(sckRoutine, AScope, ANode);
   FNodeScope[ANode] := AScope;
   LQualIdents := nil;
+  LQualArity := nil;
   LRoutineSym := NIL_SYM;
   LResultNode := NIL_NODE;
 
@@ -765,6 +871,14 @@ begin
     begin
       LQualified := True;          // qualifier segment; ident is a type ref
       LQualIdents := LQualIdents + [LSegIdent];  // full chain, outer -> inner
+      // The segment's own type-parameter count, so an arity-overloaded name
+      // (16.1.2) picks the right declaration: `TBox<TKey, TVal>.GetKey` must
+      // reach the two-parameter TBox, not the one-parameter one that happens
+      // to be registered under the name. 0 when the segment is not generic.
+      if LSegLast <> LSegIdent then
+        LQualArity := LQualArity + [GenericArityOfParamsNode(LSegLast)]
+      else
+        LQualArity := LQualArity + [0];
     end
     else
     begin
@@ -783,8 +897,9 @@ begin
   if LQualified then
   begin
     var LTy := NIL_SYM;
-    for var LSeg in LQualIdents do
+    for var LSegIdx := 0 to High(LQualIdents) do
     begin
+      var LSeg := LQualIdents[LSegIdx];
       var LCand: Integer;
       if LTy = NIL_SYM then
         LCand := FModel.Resolve(AScope, LowerCase(NodeText(LSeg)))
@@ -797,6 +912,22 @@ begin
       begin
         LTy := NIL_SYM;
         Break;
+      end;
+      // Only the FIRST of an arity-overloaded set is registered under the
+      // name, so walk the chain for the one this segment actually declares.
+      if GenericArityOfSym(LCand) <> LQualArity[LSegIdx] then
+      begin
+        var LAlt := FModel.Symbols[LCand].NextOverload;
+        while LAlt <> NIL_SYM do
+        begin
+          if (FModel.Symbols[LAlt].Kind = skType) and
+             (GenericArityOfSym(LAlt) = LQualArity[LSegIdx]) then
+          begin
+            LCand := LAlt;
+            Break;
+          end;
+          LAlt := FModel.Symbols[LAlt].NextOverload;
+        end;
       end;
       LTy := LCand;
       if FModel.Symbols[LTy].MemberScope <> NIL_SCOPE then
