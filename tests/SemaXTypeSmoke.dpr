@@ -227,6 +227,113 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // ---- cross-unit helper injection (15.3, README's former To do) ----
+  // HA: the extended types. HB: helpers in ANOTHER unit — the common
+  // real-world arrangement (TGUIDHelper in SysUtils for System's TGUID).
+  // Lo's body reads D1 BARE (direction 2: helper body sees T through the
+  // implicit Self — the RTL's own `Move(D1, ...)` false E2003). Mark exists
+  // on BOTH the type and the helper with different types: dcc-verified, the
+  // HELPER member hides the type's own. TStrHelper extends the intrinsic
+  // string — the by-name ('~') canonical-key path. HB2 declares a competing
+  // Version; HC lists HB LAST, so HB's must win (dcc-verified
+  // last-uses-wins). HD's helper lives in the IMPLEMENTATION section and
+  // must stay invisible to HE (dcc-verified, 15.3.4).
+  UNIT_HA =
+    'unit HA;'#10'interface'#10 +
+    'type'#10 +
+    '  TGuidLike = record'#10 +
+    '    D1: Cardinal;'#10 +
+    '  end;'#10 +
+    '  TTag = class'#10 +
+    '    function Mark: string;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TTag.Mark: string; begin Result := ''own''; end;'#10 +
+    'end.'#10;
+
+  UNIT_HB =
+    'unit HB;'#10'interface'#10'uses HA;'#10 +
+    'type'#10 +
+    '  TGuidHelper = record helper for TGuidLike'#10 +
+    '    function Lo: Cardinal;'#10 +
+    '  end;'#10 +
+    '  TTagHelperA = class helper for TTag'#10 +
+    '    function Version: string;'#10 +
+    '    function Mark: Integer;'#10 +
+    '  end;'#10 +
+    '  TStrHelper = record helper for string'#10 +
+    '    function Doubled: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TGuidHelper.Lo: Cardinal;'#10 +
+    'begin'#10 +
+    '  Result := D1;'#10 +               // direction 2, the D1 shape
+    'end;'#10 +
+    'function TTagHelperA.Version: string; begin Result := ''A''; end;'#10 +
+    'function TTagHelperA.Mark: Integer; begin Result := 1; end;'#10 +
+    'function TStrHelper.Doubled: Integer; begin Result := 2; end;'#10 +
+    'end.'#10;
+
+  UNIT_HB2 =
+    'unit HB2;'#10'interface'#10'uses HA;'#10 +
+    'type'#10 +
+    '  TTagHelperB = class helper for TTag'#10 +
+    '    function Version: Integer;'#10 +   // competing; loses to HB in HC
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TTagHelperB.Version: Integer; begin Result := 2; end;'#10 +
+    'end.'#10;
+
+  UNIT_HC =
+    'unit HC;'#10'interface'#10'uses HA, HB2, HB;'#10 +   // HB LAST -> wins
+    'var'#10 +
+    '  GT: TTag;'#10 +
+    '  GG: TGuidLike;'#10 +
+    '  GS: string;'#10 +
+    'implementation'#10 +
+    'procedure UseIt;'#10 +
+    'var'#10 +
+    '  S: string;'#10 +
+    '  I: Integer;'#10 +
+    '  C: Cardinal;'#10 +
+    'begin'#10 +
+    '  S := GT.Version;'#10 +   // HB''s (string), not HB2''s (Integer)
+    '  I := GT.Mark;'#10 +      // helper hides the type''s own Mark: string
+    '  C := GG.Lo;'#10 +        // direction 1, qualified
+    '  I := GS.Doubled;'#10 +   // intrinsic-type helper (builtin key)
+    'end;'#10 +
+    'end.'#10;
+
+  UNIT_HD =
+    'unit HD;'#10'interface'#10'uses HA;'#10 +
+    'procedure Poke;'#10 +
+    'implementation'#10 +
+    'type'#10 +
+    '  TTagLocal = class helper for TTag'#10 +
+    '    function Hidden: Integer;'#10 +
+    '  end;'#10 +
+    'function TTagLocal.Hidden: Integer; begin Result := 9; end;'#10 +
+    'procedure Poke;'#10 +
+    'var'#10 +
+    '  T: TTag;'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  I := T.Hidden;'#10 +     // legal HERE (own unit)
+    'end;'#10 +
+    'end.'#10;
+
+  UNIT_HE =
+    'unit HE;'#10'interface'#10'uses HA, HD;'#10 +
+    'implementation'#10 +
+    'procedure TryIt;'#10 +
+    'var'#10 +
+    '  T: TTag;'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  I := T.Hidden;'#10 +     // must NOT resolve: HD''s helper is impl-local
+    'end;'#10 +
+    'end.'#10;
+
   // `with` over a call whose result is a generic INSTANTIATION from another
   // unit — System.Threading's `with FThreads.LockList do Count`, the largest
   // single with-bucket shape. Two things must both work: the method's result
@@ -394,7 +501,7 @@ end;
 
 var
   LDir: string;
-  LU, LV, LH, LW, LQ, LR: TPasSemaModel;
+  LU, LV, LH, LW, LQ, LR, LB, LC, LE: TPasSemaModel;
 begin
   GPassed := 0; GFailed := 0;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype');
@@ -412,6 +519,12 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XY.pas'), UNIT_XY);
   TFile.WriteAllText(TPath.Combine(LDir, 'XZ.pas'), UNIT_XZ);
   TFile.WriteAllText(TPath.Combine(LDir, 'XR.pas'), UNIT_XR);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HA.pas'), UNIT_HA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HB.pas'), UNIT_HB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HB2.pas'), UNIT_HB2);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HC.pas'), UNIT_HC);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HD.pas'), UNIT_HD);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HE.pas'), UNIT_HE);
   TFile.WriteAllText(TPath.Combine(LDir, 'XP.pas'), UNIT_XP);
   TFile.WriteAllText(TPath.Combine(LDir, 'XQ.pas'), UNIT_XQ);
 
@@ -517,6 +630,35 @@ begin
     // with-body's VType must actually TYPE to XW's field type.
     Eq('with-target member types through to the field',
       XTypeOf(LW, 'VType'), 'Word');
+
+    // ---- cross-unit helper injection ----
+    LB := ModelByName('hb');
+    Ok('HB loaded', Assigned(LB));
+    Ok('HB: no diags (helper body reads the target''s D1 bare — direction 2)',
+      Length(LB.Diags) = 0);
+    Eq('helper body: bare D1 types to the target''s field',
+      XTypeOf(LB, 'D1'), 'Cardinal');
+    LC := ModelByName('hc');
+    Ok('HC loaded', Assigned(LC));
+    Ok('HC: no diags at all', Length(LC.Diags) = 0);
+    Eq('direction 1: qualified GG.Lo via the cross-unit helper',
+      XTypeOf(LC, 'GG.Lo'), 'Cardinal');
+    Eq('last-uses-wins: HB''s Version (string) beats HB2''s (Integer)',
+      XTypeOf(LC, 'GT.Version'), 'string');
+    Eq('a helper member HIDES the type''s own (Mark -> Integer, dcc-verified)',
+      XTypeOf(LC, 'GT.Mark'), 'Integer');
+    Eq('intrinsic-type helper (record helper for string, ''~'' key path)',
+      XTypeOf(LC, 'GS.Doubled'), 'Integer');
+    LE := ModelByName('hd');
+    Ok('HD loaded', Assigned(LE));
+    Ok('HD: no diags (its own impl-section helper works locally)',
+      Length(LE.Diags) = 0);
+    Eq('HD: T.Hidden resolves in the declaring unit',
+      XTypeOf(LE, 'T.Hidden'), 'Integer');
+    LE := ModelByName('he');
+    Ok('HE loaded', Assigned(LE));
+    Eq('HE: an implementation-section helper does NOT export (15.3.4)',
+      XTypeOf(LE, 'T.Hidden'), '?');
 
     // ---- with over a generic-instantiation call result ----
     LR := ModelByName('xr');

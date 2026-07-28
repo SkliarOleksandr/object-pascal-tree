@@ -186,19 +186,16 @@ Still open, roughly in the order we're tackling it:
   crash-free over the full source tree, but still produces a nonzero, tracked
   count of `E2003`-style false positives to work down to zero — the v1
   "definition of done" below.
-- **Cross-unit helper injection.** A `class/record helper for T` (spec 15.3.4)
-  currently injects its members only when the helper and `T` live in the SAME
-  unit — that join lives inside one model, so it is visible from other units
-  too (`FindMemberX` walks into the declaring model). The other arrangement,
-  a helper in unit B for a type from unit A — `TStringsHelper = class helper
-  for TStrings` — is the common real-world one and is NOT handled: it needs a
-  project-wide (extended XType → helper member scopes) map consulted by
-  `FindMemberX`, plus the bare-name path for the helper's OWN method bodies
-  reaching `T`'s members through the implicit Self. Two design points to
-  settle first: which helper wins across units (15.3.3 makes it `uses`-order
-  dependent, so it is per-referring-unit, not a global property of `T`), and
-  how the map is rebuilt as the async staged pipeline grows the closure —
-  a unit's active helper set changes when a new module arrives.
+- **Helper precedence inside the same-unit join.** Cross-unit helper
+  injection is done (`BuildHelperMap`/`ActiveHelperFor`/`FindMemberX`,
+  dcc-verified rules: per-referring-unit last-uses-wins, helper member hides
+  the type's own, implementation-section helpers stay unit-local) — but the
+  SAME-unit path still resolves through `JoinHelperScopes`' scope join, which
+  checks the type's OWN names before the joined helper scope. When a
+  same-unit helper deliberately shadows a member of its own extended type,
+  Phase 1 binds the type's member where dcc binds the helper's. Confined to
+  same-unit shadow pairs; fixing it means teaching the join (or
+  `FindLocalDeep`) an ordering exception.
 - **LSP/LSIF server.** The demo (VCL-hosted) is the only editor integration
   today; a Language Server Protocol server (live highlighting/navigation/
   diagnostics/rename/etc. over the same Sema/Nav layer) plus LSIF dump
