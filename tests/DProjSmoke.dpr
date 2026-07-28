@@ -74,9 +74,19 @@ const
     '    <DCC_Define>DEBUG;$(DCC_Define)</DCC_Define>'#10 +
     '  </PropertyGroup>'#10 +
     '  <PropertyGroup Condition="''$(Base)''!=''''">'#10 +
+    // A build event in CDATA, placed BEFORE the search path in the same group
+    // and containing '>' and '"' — the exact shape Embarcadero emits for any
+    // project with build events. Mishandled, it eats to the first '>' inside
+    // the payload and desynchronizes the whole document: this group's later
+    // children and every following ItemGroup are lost, silently (Load still
+    // succeeds). Measured on a real 2500-unit project: 0 search paths and a
+    // 1-entry file list, which is why the demo showed an empty file tree.
+    '    <PreBuildEvent><![CDATA[echo "a &gt; b" > out.txt'#10 +
+    'more $(Base)]]></PreBuildEvent>'#10 +
     '    <DCC_UnitSearchPath>..\common;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>'#10 +
     '    <DCC_UnitAlias>WinTypes=Windows;WinProcs=Windows;$(DCC_UnitAlias)</DCC_UnitAlias>'#10 +
     '  </PropertyGroup>'#10 +
+    '  <!-- a comment, for the sibling branch -->'#10 +
     '  <ItemGroup>'#10 +
     '    <DCCReference Include="UnitA.pas"/>'#10 +
     '    <DCCReference Include="sub\UnitB.pas"/>'#10 +

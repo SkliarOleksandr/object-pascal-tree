@@ -10,8 +10,10 @@ unit PasTree.DProj;
   configurations and target platforms, and the resolved main source.
 
   Scope: a purpose-built reader for this one XML shape, not a general XML
-  library. It hand-parses (elements/attributes/text; dproj files never carry
-  CDATA or namespaced tags) and evaluates each PropertyGroup/element
+  library. It hand-parses elements/attributes/text, plus comments and CDATA
+  (both appear in real files — see the CDATA branch in ParseElement for what
+  ignoring them silently costs); namespaced tags are still assumed absent.
+  It evaluates each PropertyGroup/element
   `Condition` attribute with a tiny boolean-expression evaluator (parentheses,
   and/or, '$(Name)'==/!='literal') — exactly the grammar Embarcadero's
   generator emits. Walking the file top-to-bottom and letting each matching
@@ -287,6 +289,28 @@ begin
           Inc(FPos, 4);
           while (FPos <= FLen) and (Copy(FText, FPos, 3) <> '-->') do
             Inc(FPos);
+          Inc(FPos, 3);
+        end
+        else if (FPos + 8 <= FLen) and (Copy(FText, FPos, 9) = '<![CDATA[') then
+        begin
+          // Real .dproj files DO carry CDATA — Embarcadero emits
+          // <PreBuildEvent><![CDATA[...]]></PreBuildEvent> for any project
+          // with build events. The body is literal TEXT and routinely holds
+          // '>' and '"', so falling through to ParseElement (as this used to)
+          // consumed up to the first '>' INSIDE the payload and desynchronized
+          // the rest of the document. Measured on a real 2500-unit project:
+          // the PropertyGroup holding it lost its remaining children — no
+          // DCC_UnitSearchPath, hence zero search paths — and every later
+          // ItemGroup vanished, hence an empty DCCReference file list. Both
+          // failures are silent: Load still returns True.
+          // NB the payload joins LText and is entity-decoded with it below.
+          // Harmless here (only DCC_* properties are ever read, never build
+          // events) but wrong in general, so do not start trusting it.
+          Inc(FPos, 9);
+          LStart := FPos;
+          while (FPos <= FLen) and (Copy(FText, FPos, 3) <> ']]>') do
+            Inc(FPos);
+          LText := LText + Copy(FText, LStart, FPos - LStart);
           Inc(FPos, 3);
         end
         else
