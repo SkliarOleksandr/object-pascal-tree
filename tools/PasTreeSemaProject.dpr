@@ -205,7 +205,13 @@ begin
     GProj := TPasSemaProject.Create(LD.Platform, LPaths, LD.Defines);
     try
       GProj.SingleThreaded := GSingle;
-      GProj.SetNamespaces(LD.Namespaces);
+      // No -NS list in the .dproj means we could not read the option, not that
+      // the project wants zero prefixes — dcc has none built in, so zero would
+      // turn every legacy unqualified import into an F1027.
+      if Length(LD.Namespaces) > 0 then
+        GProj.SetNamespaces(LD.Namespaces)
+      else
+        GProj.SetNamespaces(PasDefaultNamespaces(LD.Platform));
       for var LA in LD.UnitAliases do
         GProj.AddUnitAlias(LA.Alias, LA.UnitName);
 
@@ -374,6 +380,10 @@ begin
         [TPath.GetDirectoryName(GPath)], []);
     try
       GProj.SingleThreaded := GSingle;
+      // Same reasoning as the -dproj driver: a directory or bare-file run has
+      // no project to state its prefixes, and zero prefixes is not what the IDE
+      // would use.
+      GProj.SetNamespaces(PasDefaultNamespaces(GPlatform));
       GSW := TStopwatch.StartNew;
       if TDirectory.Exists(GPath) then
         GProj.AnalyzeDirectory(GPath)

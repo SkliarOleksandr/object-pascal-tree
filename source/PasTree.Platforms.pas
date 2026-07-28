@@ -66,10 +66,53 @@ function TryParsePlatformName(const AName: string;
 
 function PlatformName(APlatform: TPasPlatform): string;
 
+{ The IDE's DEFAULT `Unit scope names` (Project Options > Delphi Compiler, dcc
+  -NS) — what a project inherits when its .dproj says nothing extra.
+
+  A host needs this when there IS no .dproj: a bare .dpr/.dpk or a directory
+  scan. Without it every legacy unqualified import fails, because dcc itself
+  has NO built-in namespaces (verified: dcc32 with --no-config cannot even find
+  `System`) -- the list comes from the project template, not the compiler. That
+  is what made a package of untouched VCL sources report `uses Windows,
+  SysUtils, Classes, Graphics` as four F1027s.
+
+  Both groups are read out of a real IDE-written .dproj (demo/PasTreeDemo.dproj,
+  a VCL Windows app): the Winapi/*.Win group sits in a Windows-conditioned
+  property group, the rest in the platform-neutral base -- so the split here is
+  the .dproj's own, not an invention. Concatenated they are exactly the string
+  the IDE shows for a Win64 target.
+
+  The Vcl* entries are kept on every platform: a prefix that names no real file
+  costs one failed lookup and nothing else, whereas dropping it would break a
+  Windows-only unit reached from a cross-platform scan. NB the FireMonkey
+  templates add their own entries — not listed here, because every FMX unit is
+  already fully qualified and needs no prefix. }
+function PasDefaultNamespaces(APlatform: TPasPlatform): TArray<string>;
+
 implementation
 
 uses
   System.SysUtils;
+
+const
+  // Windows-conditioned group, first because the IDE puts it first.
+  NS_WINDOWS: array[0..6] of string =
+    ('Winapi', 'System.Win', 'Data.Win', 'Datasnap.Win', 'Web.Win', 'Soap.Win',
+     'Xml.Win');
+  // Platform-neutral base group.
+  NS_BASE: array[0..10] of string =
+    ('Vcl', 'Vcl.Imaging', 'Vcl.Touch', 'Vcl.Samples', 'Vcl.Shell', 'System',
+     'Xml', 'Data', 'Datasnap', 'Web', 'Soap');
+
+function PasDefaultNamespaces(APlatform: TPasPlatform): TArray<string>;
+begin
+  Result := nil;
+  if PlatformInfo(APlatform).IsWindows then
+    for var LName in NS_WINDOWS do
+      Result := Result + [LName];
+  for var LName in NS_BASE do
+    Result := Result + [LName];
+end;
 
 function PlatformInfo(APlatform: TPasPlatform): TPasPlatformInfo;
 begin

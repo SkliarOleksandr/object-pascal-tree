@@ -9,6 +9,7 @@ program SemaProjectSmoke;
 uses
   System.SysUtils,
   System.IOUtils,
+  System.Generics.Collections,
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
@@ -824,6 +825,62 @@ begin
     Ok('qualsegs: no diags at all', Length(LQual.Diags) = 0);
     Ok('qualsegs: TFlagSet/TFlags found via the middle segment''s ancestor',
       DiagCount(LQual, 'E2003') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  { ---- The IDE's DEFAULT unit scope names (PasDefaultNamespaces) ----
+    A bare .dpk/.dpr states no -NS list and dcc has none built in, so a host
+    analyzing one must supply the IDE's defaults or every legacy unqualified
+    import fails. The shape below is CtlPanel.pas's real one: `uses Windows,
+    SysUtils, Graphics` against files that only exist fully qualified. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_ns');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Winapi.Windows.pas'),
+    'unit Winapi.Windows;'#10'interface'#10'const WIN_MARK = 1;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Vcl.Graphics.pas'),
+    'unit Vcl.Graphics;'#10'interface'#10'const GFX_MARK = 2;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NSLegacy.pas'),
+    'unit NSLegacy;'#10'interface'#10'uses Windows, Graphics;'#10 +
+    'implementation'#10'end.'#10);
+  // The Windows group must be Windows-only, and the base group everywhere.
+  Ok('defaults: Win32 carries the Winapi group',
+    TArray.IndexOf<string>(PasDefaultNamespaces(pfWin32), 'Winapi') >= 0);
+  Ok('defaults: Linux64 does NOT carry the Winapi group',
+    TArray.IndexOf<string>(PasDefaultNamespaces(pfLinux64), 'Winapi') < 0);
+  Ok('defaults: System is present on every platform',
+    (TArray.IndexOf<string>(PasDefaultNamespaces(pfWin32), 'System') >= 0) and
+    (TArray.IndexOf<string>(PasDefaultNamespaces(pfLinux64), 'System') >= 0));
+  // Windows-conditioned entries come FIRST, as the IDE writes them.
+  Ok('defaults: Winapi precedes Vcl',
+    TArray.IndexOf<string>(PasDefaultNamespaces(pfWin32), 'Winapi') <
+    TArray.IndexOf<string>(PasDefaultNamespaces(pfWin32), 'Vcl'));
+
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    // NEGATIVE first: without the list this is two F1027s -- the state the
+    // demo was actually in, so the positive below cannot pass vacuously.
+    GProj.AnalyzeDirectory(LDir);
+    Ok('defaults: without -NS, legacy imports FAIL',
+      DiagCount(ModelByName('nslegacy'), 'F1027') = 2);
+  finally
+    GProj.Free;
+  end;
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.SetNamespaces(PasDefaultNamespaces(pfWin32));
+    GProj.AnalyzeDirectory(LDir);
+    var LLeg := ModelByName('nslegacy');
+    Ok('defaults: NSLegacy loaded', Assigned(LLeg));
+    Ok('defaults: `uses Windows` -> Winapi.Windows, `Graphics` -> Vcl.Graphics',
+      DiagCount(LLeg, 'F1027') = 0);
+    Ok('defaults: and its uses closure is complete', LLeg.AllUsesResolved);
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

@@ -220,6 +220,7 @@ type
     function ExeDir: string;
     function ElapsedText(AMs: Int64): string;
     procedure LogMissingUnits(AMissing: TDictionary<string, TPasMissingUnit>);
+    function EffectiveNamespaces(APlatform: TPasPlatform): TArray<string>;
     function StudioRoot: string;
     function ExtraSearchPaths: TArray<string>;
     procedure OpenProject(const AProjectFile: string);
@@ -691,6 +692,23 @@ begin
   end;
 end;
 
+{ The -NS prefix list to analyze with: the .dproj's own when we have one,
+  otherwise the IDE's default (PasDefaultNamespaces).
+
+  A bare .dpr/.dpk states no namespaces, and dcc has none built in, so without
+  the fallback every legacy unqualified import in untouched RTL/VCL sources is
+  an F1027 -- `uses Windows, SysUtils, Classes, Graphics` in CtlPanel.pas was
+  four of them, and the IDE compiles that file without complaint. An EMPTY list
+  from a .dproj counts as absent too: it means we failed to read the option, not
+  that the project genuinely wants zero prefixes (a real project always has
+  some, or it could not compile its own RTL imports). }
+function TfrmMain.EffectiveNamespaces(APlatform: TPasPlatform): TArray<string>;
+begin
+  if Assigned(FDProj) and (Length(FDProj.Namespaces) > 0) then
+    Exit(FDProj.Namespaces);
+  Result := PasDefaultNamespaces(APlatform);
+end;
+
 // Seconds with one decimal — a five-digit millisecond count is not something
 // anyone reads comfortably.
 function TfrmMain.ElapsedText(AMs: Int64): string;
@@ -1120,10 +1138,22 @@ begin
   if Assigned(FDProj) then
     LFromDProj := Length(FDProj.SearchPaths);
   if BuildConfig(LDbgPlat, LDbgPaths, LDbgDefines) then
+  begin
     Log(Format('  search paths: %d total = 1 project dir + %d from .dproj + ' +
       '%d from the IDE registry; %d define(s)',
       [Length(LDbgPaths), LFromDProj, Length(ExtraSearchPaths),
        Length(LDbgDefines)]));
+    // WHERE the -NS list came from. A wrong or missing prefix list shows up as
+    // F1027 on units that obviously exist, so the log must not leave it
+    // implicit.
+    if Assigned(FDProj) and (Length(FDProj.Namespaces) > 0) then
+      Log(Format('  unit scope names: %d from .dproj — %s',
+        [Length(FDProj.Namespaces), string.Join(';', FDProj.Namespaces)]))
+    else
+      Log(Format('  unit scope names: %d IDE defaults (no .dproj list) — %s',
+        [Length(EffectiveNamespaces(LDbgPlat)),
+         string.Join(';', EffectiveNamespaces(LDbgPlat))]));
+  end;
   StartAsyncAnalyze(FMainSource, {ALoud} True);
 end;
 
@@ -1452,12 +1482,10 @@ begin
       Format('destroy=%d;', [LSW.ElapsedMilliseconds]);
     FSemaProject := TPasSemaProject.Create(LPlatform, LSearchPaths, LDefines);
     FSemaProject.SingleThreaded := cbThreading.ItemIndex = 0;
+    FSemaProject.SetNamespaces(EffectiveNamespaces(LPlatform)); // Forms -> Vcl.Forms
     if Assigned(FDProj) then
-    begin
-      FSemaProject.SetNamespaces(FDProj.Namespaces); // `uses Forms` -> Vcl.Forms
       for var LAlias in FDProj.UnitAliases do
         FSemaProject.AddUnitAlias(LAlias.Alias, LAlias.UnitName);
-    end;
     for LIdx := 0 to FOpenFiles.Count - 1 do
     begin
       LTab := TSourceTab(FOpenFiles.Objects[LIdx]);
@@ -1718,12 +1746,10 @@ begin
   FAsyncSession := TPasAsyncSession.Create(LPlatform, LSearchPaths, LDefines,
     LRoots, LPriority);
   FAsyncSession.SetSingleThreadedInner(cbThreading.ItemIndex = 0);
+  FAsyncSession.SetNamespaces(EffectiveNamespaces(LPlatform));
   if Assigned(FDProj) then
-  begin
-    FAsyncSession.SetNamespaces(FDProj.Namespaces);
     for var LAlias in FDProj.UnitAliases do
       FAsyncSession.AddUnitAlias(LAlias.Alias, LAlias.UnitName);
-  end;
   // Snapshot every open editor's current text (main thread) so the background
   // analysis matches what's on screen, unsaved edits included.
   for LIdx := 0 to FOpenFiles.Count - 1 do
