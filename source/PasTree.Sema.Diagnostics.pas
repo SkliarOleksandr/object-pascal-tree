@@ -29,6 +29,13 @@ const
   SE2010_IncompatibleTypes    = 'E2010 Incompatible types: ''%s'' and ''%s''';
   SE2015_OperatorNotApplicable =
     'E2015 Operator not applicable to this operand type';
+  // A `uses` name with no SOURCE on any search path. dcc's own code, but its
+  // wording is "Unit not found: 'X' or binary equivalents (.dcu)" because the
+  // compiler accepts a precompiled unit; a source analyzer cannot, so the
+  // message says source explicitly. That difference is real and not cosmetic:
+  // a library shipped as .dcu only builds fine and is still unanalyzable here.
+  SF1027_UnitSourceNotFound =
+    'F1027 Unit not found: ''%s'' (no source on the search path)';
   SE2034_TooManyActualParams  = 'E2034 Too many actual parameters';
   SE2035_NotEnoughActualParams = 'E2035 Not enough actual parameters';
   // Generic type-parameter constraints (16.4.1). Wording and codes verified

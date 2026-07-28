@@ -784,7 +784,16 @@ begin
           [sfExternalUnresolved];
     end
     else
+    begin
       LModel.AllUsesResolved := False;
+      // Report it. This used to be silent, which hid TWO things at once: that
+      // an import was missing, and — because AllUsesResolved gates E2003 —
+      // that every undeclared identifier in this unit was being suppressed as
+      // a consequence. A unit could look clean when it had simply not been
+      // checked. Anchored on the `uses` name node so a host can navigate to it.
+      EmitAt(LModel, LModel.UsesList[LIdx].NameNode, 'F1027',
+        Format(SF1027_UnitSourceNotFound, [LModel.UsesList[LIdx].NameFull]));
+    end;
   end;
 end;
 

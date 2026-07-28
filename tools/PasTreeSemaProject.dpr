@@ -143,7 +143,7 @@ var
   LD: TPasDProj;
   LPaths: TArray<string>;
   LOwn: TDictionary<string, Boolean>;   // project-file paths, lower-cased
-  LInProj, LOutProj: TDictionary<string, Integer>;
+  LInProj, LOutProj, LMissing: TDictionary<string, Integer>;
   LM: TPasSemaModel;
   LTotalLines, LTotalChars, LTotalFiles: Int64;
   LListed, LOther, LMid, LDIdx, LFileId, LQuote: Integer;
@@ -155,6 +155,7 @@ begin
   LOwn := TDictionary<string, Boolean>.Create;
   LInProj := TDictionary<string, Integer>.Create;
   LOutProj := TDictionary<string, Integer>.Create;
+  LMissing := TDictionary<string, Integer>.Create;
   try
     if not LD.Load(APath, PlatformName(GPlatform)) then
     begin
@@ -217,7 +218,10 @@ begin
         // so on a project that really builds, a healthy run has zero.
         for var LU := 0 to High(LM.UsesList) do
           if LM.UsesList[LU].UnitId < 0 then
+          begin
             Inc(LUnresUses);
+            Bump(LMissing, LM.UsesList[LU].NameFull);
+          end;
         if not LM.AllUsesResolved then
           Inc(LUnitsGated);
         LIsOwn := LOwn.ContainsKey(LowerCase(GProj.ModelFile(LMid)));
@@ -279,12 +283,15 @@ begin
       Writeln(ErrOutput, Format(
         'diagnostics: %d total — %d in project files, %d in library units',
         [LListed + LOther, LListed, LOther]));
+      ReportHistogram('--- unresolvable `uses` names, by import count ---',
+        LMissing, 25);
       ReportHistogram('--- project files, by identifier/code ---', LInProj, 25);
       ReportHistogram('--- library units, by identifier/code ---', LOutProj, 25);
     finally
       GProj.Free;
     end;
   finally
+    LMissing.Free;
     LOutProj.Free;
     LInProj.Free;
     LOwn.Free;

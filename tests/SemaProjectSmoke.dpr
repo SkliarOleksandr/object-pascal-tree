@@ -636,9 +636,18 @@ begin
     Ok('C: uses fully resolved', LC.AllUsesResolved);
     Ok('C: E2003 for Nonexistent', DiagCount(LC, 'E2003') >= 1);
 
-    // D: an unresolvable use -> E2003 suppressed.
+    // D: an unresolvable use -> E2003 suppressed, and the missing import
+    // REPORTED. Both halves matter together: suppressing E2003 without saying
+    // why made a unit look checked and clean when it was neither.
     Ok('D: uses NOT fully resolved', not LD.AllUsesResolved);
     Ok('D: E2003 suppressed', DiagCount(LD, 'E2003') = 0);
+    Ok('D: the missing unit is reported as F1027',
+      DiagCount(LD, 'F1027') = 1);
+    Ok('D: F1027 names the unit that could not be found',
+      (Length(LD.Diags) = 1) and LD.Diags[0].Msg.Contains('NoSuchUnit'));
+    // Units whose imports all resolve must stay silent — F1027 is not a
+    // per-uses-clause remark, it fires only on an actual failure.
+    Ok('B: no F1027 when every uses resolves', DiagCount(LB, 'F1027') = 0);
 
     // E: NO `uses` clause at all, references a name declared ONLY in the
     // IMPLICIT System unit (mirrors the real sLineBreak shape) -- real dcc

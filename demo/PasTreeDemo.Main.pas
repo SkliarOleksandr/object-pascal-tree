@@ -209,6 +209,7 @@ type
     procedure EnsureSampleProject;
     function ExeDir: string;
     function ElapsedText(AMs: Int64): string;
+    procedure LogMissingUnits(AMissing: TDictionary<string, Integer>);
     function StudioRoot: string;
     function ExtraSearchPaths: TArray<string>;
     procedure OpenProject(const AProjectFile: string);
@@ -623,6 +624,43 @@ end;
 procedure TfrmMain.CopyAllMessagesActionUpdate(Sender: TObject);
 begin
   TAction(Sender).Enabled := FMsgVisible.Count > 0;
+end;
+
+{ The most-imported missing units, busiest first — the shortest description of
+  a broken search-path setup there is. Sorted by import count because that is
+  the order in which fixing them buys back closure. }
+procedure TfrmMain.LogMissingUnits(AMissing: TDictionary<string, Integer>);
+const
+  MAX_SHOWN = 10;
+var
+  LNames: TStringList;
+begin
+  if AMissing.Count = 0 then
+    Exit;
+  LNames := TStringList.Create;
+  try
+    for var LPair in AMissing do
+      // Zero-padded count as a sort key: TStringList sorts as TEXT, so '0009'
+      // must not land after '0010'.
+      LNames.Add(Format('%.6d|%s', [LPair.Value, LPair.Key]));
+    LNames.Sort;
+    var LShown := 0;
+    for var LI := LNames.Count - 1 downto 0 do
+    begin
+      if LShown >= MAX_SHOWN then
+      begin
+        Log(Format('    ... and %d more distinct unit(s)',
+          [LNames.Count - LShown]));
+        Break;
+      end;
+      var LParts := LNames[LI].Split(['|']);
+      Log(Format('    %s import site(s): %s',
+        [LParts[0].TrimLeft(['0']), LParts[1]]));
+      Inc(LShown);
+    end;
+  finally
+    LNames.Free;
+  end;
 end;
 
 // Seconds with one decimal — a five-digit millisecond count is not something
@@ -1432,6 +1470,7 @@ var
   LMain, LDiagTotal, LDiagListed, LId, LDIdx, LFileId: Integer;
   LTotalLines, LTotalChars, LTotalFiles: Int64;
   LUnresUses, LUnitsGated: Integer;
+  LMissing: TDictionary<string, Integer>;
   LModel: TPasSemaModel;
   LDiagFile, LVolume: string;
 begin
@@ -1450,6 +1489,8 @@ begin
   LTotalFiles := 0;
   LUnresUses := 0;
   LUnitsGated := 0;
+  LMissing := TDictionary<string, Integer>.Create;
+  try
   // Locate the main unit BEFORE the diagnostics loop: the loop's own listing
   // filter reads FFileList, and for a .dproj-less project that list is not
   // complete until the main unit's members have been adopted into it.
@@ -1485,7 +1526,18 @@ begin
       // clean instead of incomplete.
       for LDIdx := 0 to High(LModel.UsesList) do
         if LModel.UsesList[LDIdx].UnitId < 0 then
+        begin
           Inc(LUnresUses);
+          // Group by NAME: thousands of import sites are usually a handful of
+          // libraries missing from the search path, and the name list says
+          // which. The per-site F1027 rows answer "where"; this answers "what".
+          var LSeenCount: Integer;
+          if not LMissing.TryGetValue(LModel.UsesList[LDIdx].NameFull,
+               LSeenCount) then
+            LSeenCount := 0;
+          LMissing.AddOrSetValue(LModel.UsesList[LDIdx].NameFull,
+            LSeenCount + 1);
+        end;
       if not LModel.AllUsesResolved then
         Inc(LUnitsGated);
       if FFileList.IndexOf(FSemaProject.ModelFile(LId)) < 0 then
@@ -1548,10 +1600,14 @@ begin
     Log(Format('  closure: complete — every `uses` resolved across %d unit(s)',
       [FSemaProject.ModelCount]))
   else
-    Log(Format('  closure: INCOMPLETE — %d unresolved `uses` name(s); %d of ' +
-      '%d unit(s) have their E2003 suppressed. Unit and diagnostic counts ' +
-      'are both under-counts; check the search paths above.',
-      [LUnresUses, LUnitsGated, FSemaProject.ModelCount]));
+  begin
+    Log(Format('  closure: INCOMPLETE — %d unresolved `uses` name(s) over %d ' +
+      'distinct unit(s); %d of %d unit(s) have their E2003 suppressed. Unit ' +
+      'and diagnostic counts are both under-counts; check the search paths ' +
+      'above. Each site is an F1027 in the list below.',
+      [LUnresUses, LMissing.Count, LUnitsGated, FSemaProject.ModelCount]));
+    LogMissingUnits(LMissing);
+  end;
   if FSemaProject.StageTimings <> '' then
     Log('  stages: ' + FSemaProject.StageTimings);
   if FAnalyzeOverhead <> '' then
@@ -1559,6 +1615,9 @@ begin
   if LMain < 0 then
     Log('Main source not found among analyzed units: ' + FMainSource);
   ScrollMessagesToEnd;
+  finally
+    LMissing.Free;
+  end;
 end;
 
 procedure TfrmMain.RunParse;
