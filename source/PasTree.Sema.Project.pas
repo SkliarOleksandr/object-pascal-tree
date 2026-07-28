@@ -213,6 +213,11 @@ type
     function InstanceRead(AInst: Integer): TSemaInstance;
     function TypeDefNodeOf(AMid, ASym: Integer): Integer;
     function GenericParamIdents(AMid, ASym: Integer): TArray<Integer>;
+    function GenericParamConstraints(AMid,
+      ASym: Integer): TArray<TArray<Integer>>;
+    function RealGenericBase(const AX: TSemaXType): TSemaXType;
+    function XDescendsFrom(const ADesc, ABase: TSemaXType): Boolean;
+    procedure CheckConstraints(AId: Integer);
     function DeclTypeX(AMid, ASym: Integer): TSemaXType;
     function SubstX(const AX: TSemaXType; AInst, ADepth: Integer): TSemaXType;
     function ResolveTypeExpr(AId, ANode: Integer): TSemaXType;
@@ -1395,6 +1400,234 @@ begin
   end;
 end;
 
+{ Parallel to GenericParamIdents: each parameter's CONSTRAINT nodes. One entry
+  per parameter, in the same order, so index i of both describes one parameter.
+  Constraints are declared per GROUP (`<T; U: class, constructor>`), so every
+  ident in a group shares that group's list. }
+function TPasSemaProject.GenericParamConstraints(AMid,
+  ASym: Integer): TArray<TArray<Integer>>;
+var
+  LM: TPasSemaModel;
+  LName, LParent, LGen, LParam, LP: Integer;
+  LGroup: TArray<Integer>;
+  LCount: Integer;
+begin
+  Result := nil;
+  LM := FModels[AMid];
+  LName := LM.Symbols[ASym].DeclNode;
+  if LName = NIL_NODE then
+    Exit;
+  LParent := LM.Tree.Nodes[LName].Parent;
+  if (LParent = NIL_NODE) or not (LM.Tree.Nodes[LParent].Kind in
+     [nkTypeDecl, nkRoutine]) then
+    Exit;
+  LGen := LM.Tree.Nodes[LParent].FirstChild;
+  while (LGen <> NIL_NODE) and (LM.Tree.Nodes[LGen].Kind <> nkGenericParams) do
+    LGen := LM.Tree.Nodes[LGen].NextSibling;
+  if LGen = NIL_NODE then
+    Exit;
+  LParam := LM.Tree.Nodes[LGen].FirstChild;
+  while LParam <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LParam].Kind = nkGenericParam then
+    begin
+      // Leading idents are the names; the nkConstraint nodes follow them.
+      LGroup := nil;
+      LCount := 0;
+      LP := LM.Tree.Nodes[LParam].FirstChild;
+      while (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkIdent) do
+      begin
+        Inc(LCount);
+        LP := LM.Tree.Nodes[LP].NextSibling;
+      end;
+      while LP <> NIL_NODE do
+      begin
+        if LM.Tree.Nodes[LP].Kind = nkConstraint then
+          LGroup := LGroup + [LP];
+        LP := LM.Tree.Nodes[LP].NextSibling;
+      end;
+      while LCount > 0 do
+      begin
+        Result := Result + [LGroup];
+        Dec(LCount);
+      end;
+    end;
+    LParam := LM.Tree.Nodes[LParam].NextSibling;
+  end;
+end;
+
+{ Class-inheritance test across models: is ADesc ABase, or a descendant of it?
+  Follows the FIRST heritage entry (the ancestor) and the implicit TObject,
+  the same walk FindMemberX uses, depth-capped for the same reason. }
+function TPasSemaProject.XDescendsFrom(const ADesc,
+  ABase: TSemaXType): Boolean;
+var
+  LCur, LNext: TSemaXType;
+  LM: TPasSemaModel;
+  LDef, LChild, LDepth, LRMid, LRSym: Integer;
+begin
+  Result := False;
+  LCur := ADesc;
+  for LDepth := 1 to 32 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    if (LCur.UnitId = ABase.UnitId) and (LCur.Sym = ABase.Sym) then
+      Exit(True);
+    LM := FModels[LCur.UnitId];
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if LDef = NIL_NODE then
+    begin
+      if ResolveRealDecl(LCur.UnitId, LM.Symbols[LCur.Sym].NameLower,
+           LRMid, LRSym) and
+         ((LRMid <> LCur.UnitId) or (LRSym <> LCur.Sym)) then
+      begin
+        LCur.UnitId := LRMid;
+        LCur.Sym := LRSym;
+        LCur.Inst := NIL_INST;
+        Continue;
+      end;
+      Exit;
+    end;
+    case LM.Tree.Nodes[LDef].Kind of
+      nkIdent, nkMember, nkTypeArgs:
+        LNext := ResolveTypeExpr(LCur.UnitId, LDef);   // alias
+      nkClassType:
+        begin
+          LChild := LM.Tree.Nodes[LDef].FirstChild;
+          while (LChild <> NIL_NODE) and not (LM.Tree.Nodes[LChild].Kind in
+            [nkIdent, nkMember, nkTypeArgs]) do
+            LChild := LM.Tree.Nodes[LChild].NextSibling;
+          if LChild = NIL_NODE then
+          begin
+            // No heritage clause: the implicit TObject (11.1.1).
+            if ResolveRealDecl(LCur.UnitId, 'tobject', LRMid, LRSym) and
+               ((LRMid <> LCur.UnitId) or (LRSym <> LCur.Sym)) then
+            begin
+              LCur.UnitId := LRMid;
+              LCur.Sym := LRSym;
+              LCur.Inst := NIL_INST;
+              Continue;
+            end;
+            Exit;
+          end;
+          LNext := ResolveTypeExpr(LCur.UnitId, LChild);
+        end;
+    else
+      Exit;
+    end;
+    if XValid(LNext) and (LNext.UnitId = LCur.UnitId) and
+       (LNext.Sym = LCur.Sym) then
+      Exit;   // self-referential alias
+    LCur := LNext;
+  end;
+end;
+
+{ 16.4.1 — type-parameter constraints, checked at each instantiation site.
+
+  A DIAGNOSTIC pass, so it is deliberately conservative: every uncertainty
+  skips silently. dcc32 37.0 was probed for the exact accepted sets before any
+  of this was written, because guessing here means false positives in a
+  codebase that currently has none:
+
+    T: class       accepts classes ONLY. Rejects interfaces, `reference to`
+                   procedure types, metaclasses (TClass!), and ordinals.
+    T: record      accepts records (INCLUDING ones with managed fields),
+                   integers, floats, chars, booleans, enums and sets. Rejects
+                   string, pointers, Variant, ARRAYS (static and dynamic) and
+                   procedural types.
+    T: SomeClass   accepts that class and its descendants.
+
+  Not checked, and each for a stated reason:
+    T: SomeInterface  needs the implemented-interface list, including the ones
+                      inherited from ancestors — a traversal nothing here does
+                      yet (FindMemberX deliberately follows only the FIRST
+                      heritage entry). Silence is correct until it exists.
+    constructor       satisfied by essentially every class, since TObject
+                      declares a parameterless constructor. Checking it would
+                      cost a member walk to find approximately no bugs. }
+procedure TPasSemaProject.CheckConstraints(AId: Integer);
+const
+  // dcc-verified accepted categories for `T: record`.
+  VALUE_CATS = [tcRecord, tcInteger, tcFloat, tcBoolean, tcChar, tcEnum,
+    tcSet];
+var
+  LM: TPasSemaModel;
+  LNode, LHead, LArgNode, LIdx, LTok: Integer;
+  LBase, LArgX, LConX: TSemaXType;
+  LIdents: TArray<Integer>;
+  LCons: TArray<TArray<Integer>>;
+  LWord, LParamName: string;
+  LCat: TSemaTypeCat;
+begin
+  LM := FModels[AId];
+  for LNode := 0 to High(LM.Tree.Nodes) do
+  begin
+    if LM.Tree.Nodes[LNode].Kind <> nkTypeArgs then
+      Continue;
+    LHead := LM.Tree.Nodes[LNode].FirstChild;
+    if LHead = NIL_NODE then
+      Continue;
+    LBase := RealGenericBase(ResolveTypeExpr(AId, LHead));
+    if not XValid(LBase) then
+      Continue;
+    LIdents := GenericParamIdents(LBase.UnitId, LBase.Sym);
+    LCons := GenericParamConstraints(LBase.UnitId, LBase.Sym);
+    if (Length(LIdents) = 0) or (Length(LCons) <> Length(LIdents)) then
+      Continue;
+    LArgNode := LM.Tree.Nodes[LHead].NextSibling;
+    LIdx := 0;
+    while (LArgNode <> NIL_NODE) and (LIdx <= High(LIdents)) do
+    begin
+      LArgX := ResolveTypeExpr(AId, LArgNode);
+      // An argument that is itself an open parameter (an instantiation inside
+      // another generic's body) constrains nothing until it is closed.
+      if XValid(LArgX) and (FModels[LArgX.UnitId].Symbols[LArgX.Sym].Kind <>
+         skGenericParam) then
+      begin
+        LParamName := FModels[LBase.UnitId].Tree.NodeText(LIdents[LIdx]);
+        LCat := XCatOf(LArgX);
+        for var LC in LCons[LIdx] do
+        begin
+          // Every LC index belongs to the DECLARING model, never to LM.
+          if FModels[LBase.UnitId].Tree.Nodes[LC].FirstChild <> NIL_NODE then
+          begin
+            // A TYPE constraint. Only a class one is checked (see header).
+            // The constraint node lives in the DECLARING model, so it must be
+            // resolved there — not in AId, where that node index means
+            // something else entirely.
+            LConX := ResolveTypeExpr(LBase.UnitId,
+              FModels[LBase.UnitId].Tree.Nodes[LC].FirstChild);
+            if XValid(LConX) and (XCatOf(LConX) = tcClass) and
+               (LCat = tcClass) and not XDescendsFrom(LArgX, LConX) then
+              EmitAt(LM, LArgNode, 'E2515',
+                Format(SE2515_NotCompatibleWith,
+                  [LParamName, XTypeText(LConX)]));
+            Continue;
+          end;
+          // A keyword constraint: class / record / constructor.
+          LTok := FModels[LBase.UnitId].Tree.Nodes[LC].FirstToken;
+          if (LTok < 0) or
+             (LTok > High(FModels[LBase.UnitId].Tree.Source.Visible)) then
+            Continue;
+          LWord := LowerCase(
+            FModels[LBase.UnitId].Tree.Source.VisibleText(LTok));
+          if LCat = tcUnknown then
+            Continue;   // category not modeled — say nothing
+          if (LWord = 'class') and (LCat <> tcClass) then
+            EmitAt(LM, LArgNode, 'E2511',
+              Format(SE2511_MustBeClass, [LParamName]))
+          else if (LWord = 'record') and not (LCat in VALUE_CATS) then
+            EmitAt(LM, LArgNode, 'E2512',
+              Format(SE2512_MustBeValueType, [LParamName]));
+        end;
+      end;
+      Inc(LIdx);
+      LArgNode := LM.Tree.Nodes[LArgNode].NextSibling;
+    end;
+  end;
+end;
+
 // The declared type of any symbol as a cross-model descriptor: the model's
 // SymTypeX refinement when present, else its locally-bound TypeSym.
 function TPasSemaProject.DeclTypeX(AMid, ASym: Integer): TSemaXType;
@@ -1446,6 +1679,30 @@ begin
   end;
 end;
 
+{ The real declaration behind a generic base, when the head of a `Foo<...>`
+  resolved to a compiler-seeded BUILTIN. Such a symbol has no source
+  declaration and therefore no generic parameter list, so an arity check
+  against it always fails and the instantiation degrades to the OPEN generic —
+  which is what silently happened to every `TArray<T>` in the codebase, TArray
+  being seeded (PasTree.Sema.Builtins). Same redirect FindMemberX does for a
+  DeclNode-less builtin. Returns AX unchanged when there is nothing to fix. }
+function TPasSemaProject.RealGenericBase(const AX: TSemaXType): TSemaXType;
+var
+  LRMid, LRSym: Integer;
+begin
+  Result := AX;
+  if not XValid(AX) then
+    Exit;
+  if TypeDefNodeOf(AX.UnitId, AX.Sym) <> NIL_NODE then
+    Exit;
+  if ResolveRealDecl(AX.UnitId, FModels[AX.UnitId].Symbols[AX.Sym].NameLower,
+       LRMid, LRSym) and ((LRMid <> AX.UnitId) or (LRSym <> AX.Sym)) then
+  begin
+    Result.UnitId := LRMid;
+    Result.Sym := LRSym;
+  end;
+end;
+
 // A type designator (nkIdent / nkMember / nkTypeArgs) as a cross-model type,
 // reading the resolver's RefMap first, then the project's ExtRefMap. For
 // nkTypeArgs the args are resolved too and the instantiation is registered;
@@ -1453,7 +1710,7 @@ end;
 function TPasSemaProject.ResolveTypeExpr(AId, ANode: Integer): TSemaXType;
 var
   LM: TPasSemaModel;
-  LName, LSym, LArgNode, LRMid, LRSym: Integer;
+  LName, LSym, LArgNode: Integer;
   LExt: TPasExtRef;
   LBase, LArg: TSemaXType;
   LArgs: TArray<TSemaXType>;
@@ -1489,23 +1746,7 @@ begin
         LBase := ResolveTypeExpr(AId, LM.Tree.Nodes[ANode].FirstChild);
         if not XValid(LBase) then
           Exit;
-        // A compiler-seeded builtin has no source declaration, so no generic
-        // parameter list — and the count check below would then refuse to
-        // instantiate, silently degrading `TArray<TElem>` to the OPEN TArray.
-        // TArray is seeded (PasTree.Sema.Builtins) and the RTL uses TArray<T>
-        // everywhere, so this hit every one of them: the element type came
-        // back as the unsubstituted parameter T. Redirect to the real
-        // declaration first, exactly as FindMemberX does for a DeclNode-less
-        // builtin.
-        if (TypeDefNodeOf(LBase.UnitId, LBase.Sym) = NIL_NODE) and
-           ResolveRealDecl(LBase.UnitId,
-             FModels[LBase.UnitId].Symbols[LBase.Sym].NameLower,
-             LRMid, LRSym) and
-           ((LRMid <> LBase.UnitId) or (LRSym <> LBase.Sym)) then
-        begin
-          LBase.UnitId := LRMid;
-          LBase.Sym := LRSym;
-        end;
+        LBase := RealGenericBase(LBase);
         LArgs := nil;
         LArgNode := LM.Tree.Nodes[LM.Tree.Nodes[ANode].FirstChild].NextSibling;
         while LArgNode <> NIL_NODE do
@@ -3401,6 +3642,7 @@ begin
   for LIdx := 0 to High(LPend) do
     FModels[Result].ExtRefMap.Add(LPend[LIdx].Node, LPend[LIdx].Ext);
   CheckCalls(Result);
+  CheckConstraints(Result);
   // Declared types for EVERY loaded model first (the expression pass reads
   // used units' SymTypeX), then expressions for the requested unit only.
   for LIdx := 0 to FModels.Count - 1 do
@@ -3499,6 +3741,7 @@ begin
     procedure(AIdx: Integer)
     begin
       CheckCalls(AIdx);
+      CheckConstraints(AIdx);
     end);
   Stage('calls');
   // Sequential by design — see AnalyzeDirectory's Phase-3c comment.
@@ -3572,6 +3815,7 @@ begin
     procedure(AIdx: Integer)
     begin
       CheckCalls(AIdx);
+      CheckConstraints(AIdx);
     end);
   Stage('calls');
   // Cross typing stays SEQUENTIAL by design: Instantiate mutates the shared
@@ -3857,6 +4101,7 @@ begin
       procedure(AIdx: Integer)
       begin
         CheckCalls(AIdx);
+        CheckConstraints(AIdx);
       end);
     if Cancelled then
     begin

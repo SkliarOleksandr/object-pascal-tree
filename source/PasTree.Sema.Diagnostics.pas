@@ -31,6 +31,14 @@ const
     'E2015 Operator not applicable to this operand type';
   SE2034_TooManyActualParams  = 'E2034 Too many actual parameters';
   SE2035_NotEnoughActualParams = 'E2035 Not enough actual parameters';
+  // Generic type-parameter constraints (16.4.1). Wording and codes verified
+  // against dcc32 37.0; the single %s is the PARAMETER name (E2515 takes the
+  // constraint type name second).
+  SE2511_MustBeClass = 'E2511 Type parameter ''%s'' must be a class type';
+  SE2512_MustBeValueType =
+    'E2512 Type parameter ''%s'' must be a non-nullable value type';
+  SE2515_NotCompatibleWith =
+    'E2515 Type parameter ''%s'' is not compatible with type ''%s''';
 
 function MakeDiag(const ACode, AMsg: string; ADeclNode, AFileId, ALine,
   ACol: Integer): TSemaDiag;

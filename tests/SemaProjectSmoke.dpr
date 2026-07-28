@@ -159,6 +159,43 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // 16.4.1 — type-parameter constraints. The generics live in UnitCon and the
+  // instantiations in UnitConUse, so the whole check runs CROSS-MODEL: the
+  // constraint nodes belong to the declaring model while the arguments belong
+  // to the using one, and reading either in the wrong model is the mistake
+  // this fixture exists to catch. Accepted sets are dcc32 37.0-verified — see
+  // CheckConstraints. TFree is the control: no constraint, anything goes.
+  UNIT_CON =
+    'unit UnitCon;'#10'interface'#10 +
+    'type'#10 +
+    '  TBase = class end;'#10 +
+    '  TDeriv = class(TBase) end;'#10 +
+    '  TOther = class end;'#10 +
+    '  TRec = record X: Integer; end;'#10 +
+    '  TEnum = (eA, eB);'#10 +
+    '  TDyn = array of Integer;'#10 +
+    '  TNeedClass<T: class> = class end;'#10 +
+    '  TNeedRecord<T: record> = class end;'#10 +
+    '  TNeedBase<T: TBase> = class end;'#10 +
+    '  TFree<T> = class end;'#10 +
+    'implementation'#10'end.'#10;
+
+  UNIT_CONUSE =
+    'unit UnitConUse;'#10'interface'#10'uses UnitCon;'#10 +
+    'var'#10 +
+    '  Bad1: TNeedClass<Integer>;'#10 +      // E2511
+    '  Bad2: TNeedRecord<string>;'#10 +      // E2512 (managed)
+    '  Bad3: TNeedRecord<TDyn>;'#10 +        // E2512 (array)
+    '  Bad4: TNeedBase<TOther>;'#10 +        // E2515 (unrelated class)
+    '  Ok1: TNeedClass<TBase>;'#10 +
+    '  Ok2: TNeedRecord<TRec>;'#10 +
+    '  Ok3: TNeedRecord<TEnum>;'#10 +
+    '  Ok4: TNeedRecord<Integer>;'#10 +
+    '  Ok5: TNeedBase<TDeriv>;'#10 +         // descendant
+    '  Ok6: TNeedBase<TBase>;'#10 +          // the constraint type itself
+    '  Ok7: TFree<string>;'#10 +
+    'implementation'#10'end.'#10;
+
   // A bare member of the IMPLICIT TObject ancestor. Neither class below
   // names a heritage, so the ancestor walk used to stop at the class itself
   // and report ClassName/Free as undeclared. TSub also checks the walk
@@ -525,6 +562,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitTObj.pas'), UNIT_TOBJ);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitQual.pas'), UNIT_QUAL);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWShapes.pas'), UNIT_WSHAPES);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitCon.pas'), UNIT_CON);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitConUse.pas'), UNIT_CONUSE);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -648,6 +687,23 @@ begin
       CrossRefCountInUnit(LTObj, 'ClassName', 'ClassName', 'system') = 2);
     Ok('tobject: Free resolves into System''s TObject',
       CrossRefCountInUnit(LTObj, 'Free', 'Free', 'system') = 1);
+
+    // 16.4.1 constraints, checked cross-model (see UNIT_CON/UNIT_CONUSE).
+    var LCU := ModelByName('unitconuse');
+    Ok('constraints: UnitConUse loaded', Assigned(LCU));
+    Ok('constraints: exactly 4 violations, no more',
+      Length(LCU.Diags) = 4);
+    Ok('constraints: E2511 for a non-class under `T: class`',
+      DiagCount(LCU, 'E2511') = 1);
+    Ok('constraints: E2512 twice — managed string and a dynamic array',
+      DiagCount(LCU, 'E2512') = 2);
+    Ok('constraints: E2515 for an unrelated class under `T: TBase`',
+      DiagCount(LCU, 'E2515') = 1);
+    // The declaring unit itself must stay clean: a constraint is not a
+    // violation of itself, and the open parameter T inside the generic's own
+    // body constrains nothing.
+    var LCD := ModelByName('unitcon');
+    Ok('constraints: the declaring unit has no diags', Length(LCD.Diags) = 0);
 
     // Every with-target shape the RTL uses (see UNIT_WSHAPES). One assertion
     // per shape would be eight lookups into the same body, so the no-diags
