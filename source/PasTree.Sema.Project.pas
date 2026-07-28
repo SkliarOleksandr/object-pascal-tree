@@ -1,4 +1,4 @@
-unit PasTree.Sema.Project;
+﻿unit PasTree.Sema.Project;
 
 {
   PasTree semantics — Phase 2 project driver: resolves `uses` to real units,
@@ -43,14 +43,21 @@ type
     Args: TArray<TSemaXType>;
   end;
 
-  // One `class/record helper for T` (15.3) declared in some model: the
-  // helper's own skType symbol plus the canonical key of the EXTENDED type
-  // (see HelperTargetKey). Exported = declared in (or nested under) the
-  // interface section; an implementation-section helper is unit-local
-  // (dcc-verified, spec 15.3.4).
+  // One `class/record helper for T` (15.3) declared in some model.
+  //
+  // Extended-type identity: a concrete type is (declaring model, symbol),
+  // stable across every referring unit. A BUILTIN target keeps its NAME
+  // instead — every model seeds its own string/TObject/... symbols, so the
+  // identity must be re-resolved per referring model (BuildHelperMap phase B).
+  //
+  // Exported = declared in (or nested under) the interface section; an
+  // implementation-section helper is unit-local (dcc-verified, spec 15.3.4).
   TPasHelperReg = record
-    Key: string;
-    Sym: Integer;
+    TargetUnit: Integer;      // NIL_SYM => builtin target, use TargetName
+    TargetSym: Integer;
+    TargetName: string;       // lower-case; builtin targets only
+    HelperMid: Integer;       // model the helper is declared in
+    Sym: Integer;             // the helper's own skType symbol
     Exported: Boolean;
   end;
 
@@ -123,17 +130,21 @@ type
     // Phase 3c: cross-model typing.
     FInstances: TList<TSemaInstance>;
     FInstKeys: TDictionary<string, Integer>;
-    // Cross-unit helper injection (15.3): per-model registry of declared
-    // helpers, keyed by their extended type (BuildHelperMap), plus a
-    // (referring unit, target) -> active helper cache. The ACTIVE helper is
-    // a property of the REFERRING unit, not of the type — 15.3.3's
-    // last-in-scope rule, dcc-verified as ordinary last-uses-wins.
+    // Cross-unit helper injection (15.3). FModelHelpers is the raw per-model
+    // list of DECLARED helpers; FHelperIdx is what the hot path reads: per
+    // REFERRING model, extended-type key -> the single ACTIVE helper, with
+    // precedence already applied. Per model because the active helper is a
+    // property of the referring unit, not of the type (15.3.3, dcc-verified
+    // as ordinary last-uses-wins).
+    //
+    // Both are built SEQUENTIALLY by BuildHelperMap and read-only afterwards,
+    // so the parallel inherited/with workers need NO lock. An earlier
+    // revision instead memoized on demand behind a critical section, keyed by
+    // built-up strings: that cost 16% of total analysis time on a 665-unit
+    // corpus, all of it hot-path allocation and lock traffic (the scan itself
+    // measured 4 ms).
     FModelHelpers: TArray<TArray<TPasHelperReg>>;
-    FActiveHelperCache: TDictionary<string, TPasExtRef>;
-    // Guards FActiveHelperCache: ActiveHelperFor is called from the parallel
-    // inherited/with compute workers. FModelHelpers itself is read-only once
-    // BuildHelperMap (sequential) has run.
-    FHelperLock: TCriticalSection;
+    FHelperIdx: TArray<TDictionary<Int64, TPasExtRef>>;   // nil = sees none
     // Guards ALL FInstances/FInstKeys access: the parallel inherited-member
     // pass instantiates generics from heritage clauses concurrently (see
     // Instantiate); a bare TList read during another thread's Add is unsafe.
@@ -202,10 +213,8 @@ type
     function DeclTypeX(AMid, ASym: Integer): TSemaXType;
     function SubstX(const AX: TSemaXType; AInst, ADepth: Integer): TSemaXType;
     function ResolveTypeExpr(AId, ANode: Integer): TSemaXType;
-    function HelperTargetKey(const AX: TSemaXType): string;
     procedure BuildHelperMap;
-    function ActiveHelperFor(AFromMid: Integer; const AKey: string;
-      out AExt: TPasExtRef): Boolean;
+    procedure ClearHelperIdx;
     function HelperMemberHit(AFromMid: Integer; const ACur: TSemaXType;
       const ANameLower: string; out AMemMid, AMemSym: Integer): Boolean;
     function FindMemberX(AFromMid: Integer; const ABase: TSemaXType;
@@ -356,8 +365,6 @@ begin
   FInstances := TList<TSemaInstance>.Create;
   FInstKeys := TDictionary<string, Integer>.Create;
   FInstLock := TCriticalSection.Create;
-  FActiveHelperCache := TDictionary<string, TPasExtRef>.Create;
-  FHelperLock := TCriticalSection.Create;
   FSystemUnitId := -1;
   FSystemUnitResolved := False;
   FSysInitUnitId := -1;
@@ -369,8 +376,7 @@ destructor TPasSemaProject.Destroy;
 begin
   FByUnitName.Free;
   FSystemUnitLock.Free;
-  FHelperLock.Free;
-  FActiveHelperCache.Free;
+  ClearHelperIdx;
   FInstLock.Free;
   FInstKeys.Free;
   FInstances.Free;
@@ -1509,36 +1515,72 @@ end;
   - An implementation-section helper is unit-local; interface-section ones
     (however deeply nested — 15.3.4) export. }
 
-function TPasSemaProject.HelperTargetKey(const AX: TSemaXType): string;
-begin
-  // Canonical identity of an extended type across models. Builtins are keyed
-  // BY NAME: every model seeds its own TObject/string/... symbols, so
-  // (unit, sym) identity would make a helper registered against one model's
-  // builtin invisible from every other model.
-  Result := '';
-  if not XValid(AX) then
-    Exit;
-  if FModels[AX.UnitId].Symbols[AX.Sym].Kind = skBuiltinType then
-    Result := '~' + FModels[AX.UnitId].Symbols[AX.Sym].NameLower
-  else
-    Result := IntToStr(AX.UnitId) + ':' + IntToStr(AX.Sym);
-end;
+{ Scans every model for helper DECLARATIONS (phase A), then resolves the one
+  ACTIVE helper per (referring model, extended type) into FHelperIdx (phase
+  B). Sequential by contract: the parallel FindMemberX consumers only READ
+  FHelperIdx, so the hot path needs no lock. Rebuilt per cross run, which is
+  also how the staged pipeline's growing closure is handled — its finalizer
+  simply re-scans.
 
-// Scans every model for helper declarations. Sequential (called from the
-// cross-pass drivers before the parallel passes); rebuilt per cross run, so
-// the staged pipeline's growing closure is simply re-scanned by its
-// finalizer. Requires CrossResolve to have run: the `for T` target is
-// resolved via ResolveTypeExpr, i.e. through RefMap/ExtRefMap.
+  Requires CrossResolve to have run: a `for T` target resolves through
+  ResolveTypeExpr, i.e. via RefMap/ExtRefMap. }
 procedure TPasSemaProject.BuildHelperMap;
 var
-  LMid, LSym, LDef, LRef, LLast, LScope: Integer;
+  LCount, LMid, LSym, LDef, LRef, LLast, LScope: Integer;
   LM: TPasSemaModel;
   LRegs: TArray<TPasHelperReg>;
   LReg: TPasHelperReg;
   LExported: Boolean;
+  LX: TSemaXType;
+
+  // Registers AReg as AMid's active helper under every key AMid could reach
+  // the extended type by. Callers go weakest-precedence first, so a later
+  // write simply wins.
+  procedure Publish(AMid: Integer; const AReg: TPasHelperReg);
+  var
+    LExt: TPasExtRef;
+    LBSym, LRMid, LRSym: Integer;
+
+    procedure Put(AUnit, ASym: Integer);
+    begin
+      if (AUnit < 0) or (ASym < 0) then
+        Exit;
+      if FHelperIdx[AMid] = nil then
+        FHelperIdx[AMid] := TDictionary<Int64, TPasExtRef>.Create;
+      FHelperIdx[AMid].AddOrSetValue(
+        (Int64(AUnit) shl 32) or Cardinal(ASym), LExt);
+    end;
+
+  begin
+    LExt.UnitId := AReg.HelperMid;
+    LExt.Sym := AReg.Sym;
+    if AReg.TargetUnit <> NIL_SYM then
+    begin
+      Put(AReg.TargetUnit, AReg.TargetSym);   // concrete type: one identity
+      Exit;
+    end;
+    // Builtin target: re-resolve the NAME in the REFERRING model — its own
+    // seeded symbol, plus the real declaration the walk may redirect to
+    // (ResolveRealDecl — System.pas's TObject for a seeded TObject). Doing
+    // both here is what removes the old hot-path by-name fallback probe.
+    LBSym := FModels[AMid].Resolve(FModels[AMid].InterfaceScope,
+      AReg.TargetName);
+    if LBSym <> NIL_SYM then
+      Put(AMid, LBSym);
+    if ResolveRealDecl(AMid, AReg.TargetName, LRMid, LRSym) then
+      Put(LRMid, LRSym);
+  end;
+
 begin
-  SetLength(FModelHelpers, FModels.Count);
-  for LMid := 0 to FModels.Count - 1 do
+  ClearHelperIdx;
+  // ResolveRealDecl in Publish may load System on demand and APPEND a model,
+  // so index only the models present now — a late arrival simply sees no
+  // helpers, exactly as the previous revision's out-of-range guard did.
+  LCount := FModels.Count;
+  SetLength(FModelHelpers, LCount);
+  SetLength(FHelperIdx, LCount);
+  // ---- phase A: collect declarations ----
+  for LMid := 0 to LCount - 1 do
   begin
     LM := FModels[LMid];
     LRegs := nil;
@@ -1562,9 +1604,21 @@ begin
       end;
       if LLast = NIL_NODE then
         Continue;
-      LReg.Key := HelperTargetKey(ResolveTypeExpr(LMid, LLast));
-      if LReg.Key = '' then
+      LX := ResolveTypeExpr(LMid, LLast);
+      if not XValid(LX) then
         Continue;   // target didn't resolve — nothing to inject
+      if FModels[LX.UnitId].Symbols[LX.Sym].Kind = skBuiltinType then
+      begin
+        LReg.TargetUnit := NIL_SYM;
+        LReg.TargetSym := NIL_SYM;
+        LReg.TargetName := FModels[LX.UnitId].Symbols[LX.Sym].NameLower;
+      end
+      else
+      begin
+        LReg.TargetUnit := LX.UnitId;
+        LReg.TargetSym := LX.Sym;
+        LReg.TargetName := '';
+      end;
       // Interface-section helpers export, however deeply nested (15.3.4);
       // an implementation-section one stays unit-local. The scope chain
       // passes through the sckImplementation scope exactly for the latter.
@@ -1579,104 +1633,65 @@ begin
         end;
         LScope := LM.Scopes[LScope].Parent;
       end;
+      LReg.HelperMid := LMid;
       LReg.Sym := LSym;
       LReg.Exported := LExported;
       LRegs := LRegs + [LReg];
     end;
     FModelHelpers[LMid] := LRegs;
   end;
-  FHelperLock.Enter;
-  try
-    FActiveHelperCache.Clear;
-  finally
-    FHelperLock.Leave;
-  end;
-end;
-
-function TPasSemaProject.ActiveHelperFor(AFromMid: Integer;
-  const AKey: string; out AExt: TPasExtRef): Boolean;
-var
-  LCacheKey: string;
-  LIdx, LUid: Integer;
-
-  function ScanModel(AMid: Integer; ANeedExported: Boolean): Boolean;
+  // ---- phase B: apply precedence, per referring model ----
+  // Weakest first so a later write wins: used units in `uses` order (a
+  // later-listed unit beats an earlier one — dcc-verified last-uses-wins),
+  // then the referring unit's OWN helpers (nearest; impl-section ones count
+  // here). Within one unit, declaration order, later winning.
+  for LMid := 0 to LCount - 1 do
   begin
-    Result := False;
-    if AMid > High(FModelHelpers) then
-      Exit;   // model loaded after the map was built (System on demand)
-    // Backwards: a LATER declaration in one unit wins (15.3.3).
-    for var LI := High(FModelHelpers[AMid]) downto 0 do
-      if (FModelHelpers[AMid][LI].Key = AKey) and
-         (FModelHelpers[AMid][LI].Exported or not ANeedExported) then
-      begin
-        AExt.UnitId := AMid;
-        AExt.Sym := FModelHelpers[AMid][LI].Sym;
-        Exit(True);
-      end;
-  end;
-
-begin
-  Result := False;
-  AExt.UnitId := NIL_SYM;
-  AExt.Sym := NIL_SYM;
-  if (AKey = '') or (AFromMid < 0) or (Length(FModelHelpers) = 0) then
-    Exit;
-  LCacheKey := IntToStr(AFromMid) + '|' + AKey;
-  FHelperLock.Enter;
-  try
-    if FActiveHelperCache.TryGetValue(LCacheKey, AExt) then
-      Exit(AExt.Sym <> NIL_SYM);
-  finally
-    FHelperLock.Leave;
-  end;
-  // Own unit first (impl-section helpers count here), then uses last-first.
-  Result := ScanModel(AFromMid, False);
-  if not Result and (AFromMid <= High(FModelHelpers)) then
-    for LIdx := High(FModels[AFromMid].UsesList) downto 0 do
+    for var LU := 0 to High(FModels[LMid].UsesList) do
     begin
-      LUid := FModels[AFromMid].UsesList[LIdx].UnitId;
-      if (LUid >= 0) and ScanModel(LUid, True) then
-      begin
-        Result := True;
-        Break;
-      end;
+      var LUid := FModels[LMid].UsesList[LU].UnitId;
+      if (LUid < 0) or (LUid >= LCount) then
+        Continue;
+      for var LI := 0 to High(FModelHelpers[LUid]) do
+        if FModelHelpers[LUid][LI].Exported then
+          Publish(LMid, FModelHelpers[LUid][LI]);
     end;
-  FHelperLock.Enter;
-  try
-    FActiveHelperCache.AddOrSetValue(LCacheKey, AExt);
-  finally
-    FHelperLock.Leave;
+    for var LI := 0 to High(FModelHelpers[LMid]) do
+      Publish(LMid, FModelHelpers[LMid][LI]);
   end;
 end;
 
-// The active helper's member scope, consulted at one FindMemberX hop. Only
-// the helper's OWN member scope is read (FindLocalDeep) — never a recursive
-// FindMemberX — so a malformed helper graph cannot cycle. A helper ANCESTOR's
-// members (`class helper (X) for T`) are reached via the nkHelperType branch
-// of the main walk instead, which only ever fires when the walk STARTS at a
-// helper (a helper is never another type's heritage).
+procedure TPasSemaProject.ClearHelperIdx;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to High(FHelperIdx) do
+    FHelperIdx[LIdx].Free;
+  FHelperIdx := nil;
+end;
+
+// The active helper's member scope, consulted at one FindMemberX hop. HOT
+// PATH: a single integer-keyed lookup in a prebuilt read-only dictionary —
+// no allocation, no lock. Only the helper's OWN member scope is read
+// (FindLocalDeep), never a recursive FindMemberX, so a malformed helper graph
+// cannot cycle; a helper ANCESTOR's members (`class helper (X) for T`) are
+// reached by the nkHelperType branch of the main walk instead, which only
+// fires when the walk STARTS at a helper (a helper is never another type's
+// heritage).
 function TPasSemaProject.HelperMemberHit(AFromMid: Integer;
   const ACur: TSemaXType; const ANameLower: string;
   out AMemMid, AMemSym: Integer): Boolean;
 var
   LExt: TPasExtRef;
-  LKey: string;
   LScope, LFound: Integer;
 begin
   Result := False;
-  LKey := HelperTargetKey(ACur);
-  if not ActiveHelperFor(AFromMid, LKey, LExt) then
-  begin
-    // Asymmetry guard: a helper whose `for T` resolved to a per-model
-    // BUILTIN registered under '~name', while THIS walk reached the real
-    // declaration (or vice versa after a ResolveRealDecl redirect). One
-    // extra by-name probe covers it.
-    if (LKey = '') or (LKey[1] = '~') then
-      Exit;
-    if not ActiveHelperFor(AFromMid,
-        '~' + FModels[ACur.UnitId].Symbols[ACur.Sym].NameLower, LExt) then
-      Exit;
-  end;
+  if (AFromMid < 0) or (AFromMid > High(FHelperIdx)) or
+     (FHelperIdx[AFromMid] = nil) then
+    Exit;
+  if not FHelperIdx[AFromMid].TryGetValue(
+       (Int64(ACur.UnitId) shl 32) or Cardinal(ACur.Sym), LExt) then
+    Exit;
   LScope := FModels[LExt.UnitId].Symbols[LExt.Sym].MemberScope;
   if LScope = NIL_SCOPE then
     Exit;
