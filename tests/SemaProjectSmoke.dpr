@@ -234,6 +234,9 @@ const
     '  TItemLike = class'#10 +
     '    Tag: Integer;'#10 +
     '  end;'#10 +
+    '  TCanvasBaseKin = class'#10 +
+    '    Mark: Integer;'#10 +
+    '  end;'#10 +
     '  TCollBase = class'#10 +
     '  private'#10 +
     '    function GetItem(const Index: Integer): TItemLike;'#10 +
@@ -250,9 +253,19 @@ const
     '  public'#10 +
     '    property N: Integer read FN default 7;'#10 +
     '  end;'#10 +
+    // A CONSTRUCTOR as the with target, in both spellings. Its own class is the
+    // target type; Mark is inherited, so it only resolves if the walk reached
+    // the class rather than the constructor's (absent) result type.
+    '  TCanvasKin = class(TCanvasBaseKin)'#10 +
+    '    Owner: TObject;'#10 +
+    '    constructor Create; overload;'#10 +
+    '    constructor Create(AOwner: TObject); overload;'#10 +
+    '  end;'#10 +
     'implementation'#10 +
     'function TCollBase.GetItem(const Index: Integer): TItemLike;'#10 +
     'begin Result := nil; end;'#10 +
+    'constructor TCanvasKin.Create; begin end;'#10 +
+    'constructor TCanvasKin.Create(AOwner: TObject); begin end;'#10 +
     'end.'#10;
   UNIT_MTUSE =
     'unit UnitMTUse;'#10'interface'#10 +
@@ -297,6 +310,16 @@ const
     '    Tag := 3;'#10 +
     '  with V do'#10 +                     // 37 control: a default VALUE spec
     '    if N = 0 then Exit;'#10 +         //    is not a default array property
+    'end;'#10 +
+    // A CONSTRUCTOR call as the with target — the cross-unit case, where the
+    // constructor is NOT bound yet when the with pass asks (CrossType records
+    // that, and it runs later). Both spellings: paren-less and with arguments.
+    'procedure Ctors;'#10 +
+    'begin'#10 +
+    '  with TCanvasKin.Create do'#10 +     // 44 paren-less
+    '    Mark := 1;'#10 +
+    '  with TCanvasKin.Create(nil) do'#10 + // 46 with arguments
+    '    Owner := nil;'#10 +
     'end;'#10 +
     'end.'#10;
 
@@ -1038,6 +1061,12 @@ begin
       CrossRefTo(LMT, 'Count', 'Count'));
     Ok('default array prop: a default VALUE spec is not mistaken for one',
       CrossRefTo(LMT, 'N', 'N'));
+    // A constructor target must yield its CLASS. Mark is inherited, so binding
+    // it proves the walk reached the class and not the (absent) result type.
+    Ok('ctor target: inherited Mark through a paren-less constructor',
+      CrossRefTo(LMT, 'Mark', 'Mark'));
+    Ok('ctor target: Owner through a constructor WITH arguments',
+      CrossRefTo(LMT, 'Owner', 'Owner'));
 
     // NESTED with whose INNER target is an inherited cross-unit property (see
     // UNIT_NWUSE for the Vcl.ColorGrd shape this reproduces). Both halves

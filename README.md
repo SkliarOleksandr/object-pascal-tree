@@ -220,6 +220,28 @@ usable.
 
 Still open, roughly in the order we're tackling it:
 
+- **One cross-model expression typer, not two.** There are currently two:
+  `CrossType`'s `Walk`, which types every expression node, and
+  `WithTargetTypeX`, a hand-rolled subset that types a `with` target. The
+  duplication is real and it is why `with` needed a run of shape-by-shape
+  fixes — a `with` target is simply *an expression whose type must be a
+  structured type*, and it deserves the general typer rather than a case list.
+  What blocks the naive merge is pass ORDER, and the cycle is genuine: the with
+  pass must commit its bindings before `CrossType` runs, because `CrossType`
+  types with-*body* expressions using exactly those bindings — so the with pass
+  cannot call `CrossType` for its target. Unifying them means making the two one
+  iterated pass (the with pass already runs to a fixpoint, so the machinery
+  exists). That is a refactor of the largest procedure in the codebase for
+  maintainability, not for diagnostics, and it wants the byte-identical-dump
+  check (`-st` vs parallel, plus both corpora) as its safety net.
+
+  Worth recording *why* the shape list grew, because it was not really about
+  shapes: three of the four `with` defects fixed on 2026-07-29 had one root
+  cause — code asking `RefMap`/`ExtRefMap` for a binding that a LATER pass
+  produces. At with-pass time those maps are legitimately incomplete, and the
+  rule is "derive from types, never read the ref maps". That rule now lives in
+  one place (`DesignatorSymX`'s fallback); the remaining special cases should be
+  converted to go through it rather than grown.
 - **Go-to-declaration inside an opened `.inc` tab.** Navigating *into* an
   include file already works; resolving an identifier typed *inside* an
   already-open include tab does not yet (`IdentAt` is currently main-file-only).

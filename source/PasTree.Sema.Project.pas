@@ -3356,7 +3356,13 @@ begin
     TRect field in the body was undeclared. }
   if LM.Tree.Nodes[ANode].Kind = nkMember then
   begin
-    var LBX := WithTargetTypeX(AId, LM.Tree.Nodes[ANode].FirstChild);
+    var LBase := LM.Tree.Nodes[ANode].FirstChild;
+    // The base may denote a VALUE (LB.Items) or a TYPE (THintAction.Create).
+    // Both are member containers and both occur as with targets, so try the
+    // value reading first and fall back to reading it as a type reference.
+    var LBX := WithTargetTypeX(AId, LBase);
+    if not XValid(LBX) then
+      LBX := ResolveTypeExpr(AId, LBase);
     var LMemMid, LMemSym, LCtx: Integer;
     if XValid(LBX) and FindMemberX(AId, LBX, LM.Tree.NodeNameLower(LName),
          LMemMid, LMemSym, LCtx) then
@@ -3657,12 +3663,17 @@ begin
         // arrives here as a plain nkMember, not as the nkCall the branch above
         // handles (System.Win.VCLCom writes it with arguments, the paren-less
         // form is just as legal).
+        // Asked through DesignatorSymX, NOT by probing the maps here: for a
+        // cross-unit class the constructor is not bound yet at with-pass time
+        // (CrossType records that, and it runs later), and DesignatorSymX is
+        // the one place that knows to fall back to walking the base's type.
+        // Probing the maps directly was the bug — `with TControlCanvas.Create
+        // do` (Vcl.ComCtrls) then fell through to the generic member path,
+        // which typed the target as the constructor's own (absent) result type.
+        if DesignatorSymX(AId, ANode, LMemMid, LMemSym) and
+           IsConstructorSym(LMemMid, LMemSym) then
+          Exit(ResolveTypeExpr(AId, LBase));
         LSym := LM.RefMap[LName];
-        if (LSym <> NIL_SYM) and IsConstructorSym(AId, LSym) then
-          Exit(ResolveTypeExpr(AId, LBase));
-        if LM.ExtRefMap.TryGetValue(LName, LExt) and
-           IsConstructorSym(LExt.UnitId, LExt.Sym) then
-          Exit(ResolveTypeExpr(AId, LBase));
         // The member may already be bound (same-unit field, or a cross-unit
         // one the earlier passes reached); otherwise find it in the base's
         // type. Both paths end at the MEMBER's own declared type.
