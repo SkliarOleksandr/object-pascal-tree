@@ -307,6 +307,13 @@ type
     { Per-stage wall-clock of the LAST AnalyzeProject/AnalyzeDirectory/
       AnalyzeStaged run ('stage=ms;...') — for perf logging in hosts and
       probes. Empty for AnalyzeFile. }
+    { Width of the default thread pool for every parallel pass, pinned once per
+      process. 0 = physical-core width, which is where measurement puts the
+      optimum; letting the pool grow costs ~30% of total analysis time. Call
+      BEFORE the first TPasSemaProject is created to override; later calls and
+      calls after the first are ignored. See the implementation for the numbers
+      and for why a library is touching the process-wide pool at all. }
+    class procedure ConfigureThreadPool(AWorkers: Integer);
     function StageTimings: string;
     { Units that could not be parsed at all, as 'file: EClass: message'.
       A unit in here is treated as unresolvable, so its importers report F1027 —
@@ -380,9 +387,56 @@ uses
   System.IOUtils,
   System.Threading,
   System.Diagnostics,
+  System.Math,
   PasTree.Parser,
   PasTree.Sema.Resolver,
   PasTree.Sema.Diagnostics;
+
+var
+  // Process-wide, set once — see TPasSemaProject.ConfigureThreadPool.
+  GPoolConfigured: Boolean = False;
+
+{ Pin the default thread pool's width instead of letting it grow.
+
+  Every parallel pass here is allocation-heavy — a token stream, a tree and a
+  model per unit — and Delphi's memory manager SPINS on contention rather than
+  sleeping. TThreadPool grows its worker count when it thinks workers are
+  blocked, and it cannot tell spinning from blocking, so it adds threads, which
+  adds contention, which looks like more blocking. Measured on the 665-unit
+  corpus, that spiral is the single most expensive thing in the analysis:
+
+    workers   total    load    CPU spent in parse+Phase 1
+    pool grows (old)   2643 ms 1540 ms  ~20.5 s
+    16                 2033    1061     ~11.0 s
+    8                  1853     937      ~5.8 s
+    4                  1891     926      ~3.4 s
+    1                  5352    2300      ~1.6 s
+
+  Same work, an order of magnitude more CPU at the wide end, and WORSE wall
+  time. Physical-core width (logical div 2 on an SMT machine) sits at the
+  optimum and is what 0 selects. The 4-vs-8 difference is inside the noise here,
+  so the rule is deliberately coarse.
+
+  NB this configures the PROCESS-WIDE default pool, which a library should not do
+  silently — hence a public knob to override it, and a documented default. A
+  private pool was tried before and behaved pathologically (see the note in
+  PasTree.SourceManager): SetMaxWorkerThreads REFUSES values below the pool's
+  MinWorkerThreads, which defaults to the CPU count, so Min must come down
+  first. }
+class procedure TPasSemaProject.ConfigureThreadPool(AWorkers: Integer);
+var
+  LWant: Integer;
+begin
+  if GPoolConfigured then
+    Exit;
+  GPoolConfigured := True;
+  LWant := AWorkers;
+  if LWant <= 0 then
+    LWant := Max(2, CPUCount div 2);
+  // Min first: Max refuses anything below the current Min.
+  TThreadPool.Default.SetMinWorkerThreads(LWant);
+  TThreadPool.Default.SetMaxWorkerThreads(LWant);
+end;
 
 constructor TPasSemaProject.Create(APlatform: TPasPlatform;
   const ASearchPaths: TArray<string>; const AExtraDefines: TArray<string>);
@@ -390,6 +444,7 @@ var
   LName: string;
 begin
   inherited Create;
+  ConfigureThreadPool(0);
   FPlatform := APlatform;
   FInfo := PlatformInfo(APlatform);
   FSM := TPasSourceManager.Create(ASearchPaths);

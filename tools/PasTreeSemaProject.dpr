@@ -39,6 +39,7 @@ uses
   System.SysUtils,
   System.Math,
   System.Diagnostics,
+  System.Threading,
   System.IOUtils,
   System.Generics.Collections,
   System.Generics.Defaults,
@@ -368,6 +369,9 @@ begin
         TryParsePlatformName(Copy(ParamStr(GIdx), 4, MaxInt), GPlatform)
       else if ParamStr(GIdx).StartsWith('-studio:', True) then
         GStudio := Copy(ParamStr(GIdx), 9, MaxInt)
+      else if ParamStr(GIdx).StartsWith('-threads:', True) then
+        TThreadPool.Default.SetMaxWorkerThreads(
+          StrToIntDef(Copy(ParamStr(GIdx), 10, MaxInt), 0))
       else if SameText(ParamStr(GIdx), '-st') then
         GSingle := True    // single-threaded baseline (timing comparison)
       else if SameText(ParamStr(GIdx), '-proj') then
