@@ -66,6 +66,7 @@ type
     function FirstChild(ANode: Integer): Integer; inline;
     function NextSib(ANode: Integer): Integer; inline;
     function NodeText(ANode: Integer): string; inline;
+    function NodeNameLower(ANode: Integer): string; inline;
     function SkipAttr(AChild: Integer): Integer;
     function IsAttributeTypeRef(ANode: Integer): Boolean;
     function EnumJoinTarget(AScope: Integer): Integer;
@@ -184,6 +185,11 @@ end;
 function TPasSemaResolver.NodeText(ANode: Integer): string;
 begin
   Result := FTree.NodeText(ANode);
+end;
+
+function TPasSemaResolver.NodeNameLower(ANode: Integer): string;
+begin
+  Result := FTree.NodeNameLower(ANode);
 end;
 
 function TPasSemaResolver.SkipAttr(AChild: Integer): Integer;
@@ -330,7 +336,7 @@ function TPasSemaResolver.DeclareSym(AScope: Integer; AKind: TSemaSymbolKind;
 var
   LExisting, LTail, LFileId, LLine, LCol: Integer;
 begin
-  LExisting := FModel.FindLocal(AScope, LowerCase(AName));
+  LExisting := FModel.FindLocal(AScope, PasNameKey(AName));
   Result := FModel.AddSymbol(AScope, AKind, AName, ADeclNode);
   if LExisting = NIL_SYM then
     FModel.BindName(AScope, Result)
@@ -510,7 +516,7 @@ begin
     Exit;
   // Forward-declared types (`TFoo = class;`) complete later under the same
   // name — reuse the existing symbol rather than flagging a redeclaration.
-  LExisting := FModel.FindLocal(AScope, LowerCase(NodeText(LName)));
+  LExisting := FModel.FindLocal(AScope, NodeNameLower(LName));
   if (LExisting <> NIL_SYM) and (FModel.Symbols[LExisting].Kind = skType) and
      (GenericArityOfDecl(ANode) = GenericArityOfSym(LExisting)) then
   begin
@@ -793,7 +799,7 @@ begin
     Exit;
 
   // Register the unit ref once (a unit may appear in both uses sections).
-  LSym := FModel.FindLocal(AScope, LowerCase(NodeText(LLeaf)));
+  LSym := FModel.FindLocal(AScope, NodeNameLower(LLeaf));
   if LSym = NIL_SYM then
   begin
     LSym := DeclareSym(AScope, skUnitRef, NodeText(LLeaf), LLeaf);
@@ -902,10 +908,10 @@ begin
       var LSeg := LQualIdents[LSegIdx];
       var LCand: Integer;
       if LTy = NIL_SYM then
-        LCand := FModel.Resolve(AScope, LowerCase(NodeText(LSeg)))
+        LCand := FModel.Resolve(AScope, NodeNameLower(LSeg))
       else if FModel.Symbols[LTy].MemberScope <> NIL_SCOPE then
         LCand := FModel.FindLocal(FModel.Symbols[LTy].MemberScope,
-          LowerCase(NodeText(LSeg)))
+          NodeNameLower(LSeg))
       else
         LCand := NIL_SYM;
       if (LCand = NIL_SYM) or (FModel.Symbols[LCand].Kind <> skType) then
@@ -954,7 +960,7 @@ begin
        (FindChildKind(ANode, nkParams) = NIL_NODE) then
     begin
       var LDeclSym := FModel.FindLocal(FModel.Symbols[LTy].MemberScope,
-        LowerCase(NodeText(LNameNode)));
+        NodeNameLower(LNameNode));
       if (LDeclSym <> NIL_SYM) and
          (FModel.Symbols[LDeclSym].Kind = skRoutine) and
          (FModel.Symbols[LDeclSym].MemberScope <> NIL_SCOPE) then
@@ -972,7 +978,7 @@ begin
     var LLink := NIL_SYM;
     if AScope = FImpl then
     begin
-      var LIntfHead := FModel.FindLocal(FIntf, LowerCase(NodeText(LNameNode)));
+      var LIntfHead := FModel.FindLocal(FIntf, NodeNameLower(LNameNode));
       if (LIntfHead <> NIL_SYM) and
          (FModel.Symbols[LIntfHead].Kind = skRoutine) then
       begin
@@ -1463,7 +1469,7 @@ var
         LDef := NextSib(LDef);
       if (LDef = NIL_NODE) or (KindOf(LDef) <> nkIdent) then
         Exit;
-      LSym := FModel.Resolve(FNodeScope[LDef], LowerCase(NodeText(LDef)));
+      LSym := FModel.Resolve(FNodeScope[LDef], NodeNameLower(LDef));
     end;
   end;
 
@@ -1482,7 +1488,7 @@ begin
     // Only a bare name is resolvable here (see the INTRA-UNIT note above).
     if (LRef = NIL_NODE) or (KindOf(LRef) <> nkIdent) then
       Continue;
-    LExtSym := FModel.Resolve(FNodeScope[LRef], LowerCase(NodeText(LRef)));
+    LExtSym := FModel.Resolve(FNodeScope[LRef], NodeNameLower(LRef));
     if (LExtSym = NIL_SYM) or (FModel.Symbols[LExtSym].Kind <> skType) then
       Continue;
     // Chase alias links, because the `for` target is often an ALIAS of the
@@ -1570,10 +1576,10 @@ begin
       if not FIsDeclName[ANode] and (FModel.RefMap[ANode] = NIL_SYM) then
       begin
         FModel.RefMap[ANode] :=
-          FModel.Resolve(FNodeScope[ANode], LowerCase(NodeText(ANode)));
+          FModel.Resolve(FNodeScope[ANode], NodeNameLower(ANode));
         if (FModel.RefMap[ANode] = NIL_SYM) and IsAttributeTypeRef(ANode) then
           FModel.RefMap[ANode] := FModel.Resolve(FNodeScope[ANode],
-            LowerCase(NodeText(ANode)) + 'attribute');
+            NodeNameLower(ANode) + 'attribute');
       end;
 
     nkMember:
@@ -1591,7 +1597,7 @@ begin
           // qualified `TMatrix.Identity` must find exactly like a bare one.
           if LMemScope <> NIL_SCOPE then
             FModel.RefMap[LName] :=
-              FModel.FindLocalDeep(LMemScope, LowerCase(NodeText(LName)));
+              FModel.FindLocalDeep(LMemScope, NodeNameLower(LName));
         end;
         // LName resolved (or left NIL) here; do not recurse into it as an ident
         Exit;
@@ -1685,7 +1691,7 @@ begin
       if (LNameNode <> NIL_NODE) and (KindOf(LNameNode) = nkIdent) then
       begin
         LFieldSym := FModel.FindLocal(AStructScope,
-          LowerCase(NodeText(LNameNode)));
+          NodeNameLower(LNameNode));
         if LFieldSym <> NIL_SYM then
         begin
           FModel.RefMap[LNameNode] := LFieldSym;
@@ -1837,7 +1843,7 @@ begin
           LBaseType := WithTargetTypeSym(LBase);
           if LBaseType = NIL_SYM then
             Exit;
-          LHead := FindMemberUpChain(LBaseType, LowerCase(NodeText(LName)));
+          LHead := FindMemberUpChain(LBaseType, NodeNameLower(LName));
           if LHead = NIL_SYM then
             Exit;
           // Retroactively record it — the same thing CrossType would do

@@ -597,7 +597,7 @@ begin
   // No source declaration (a compiler builtin or the implicit Result):
   // 1) a builtin a used unit (or the implicit System unit) actually declares
   //    (TBytes -> System.SysUtils; TObject/TArray<T> -> System);
-  if FProj.ResolveRealDecl(AMid, LowerCase(LM.Tree.NodeText(ANode)), LFbMid,
+  if FProj.ResolveRealDecl(AMid, LM.Tree.NodeNameLower(ANode), LFbMid,
     LFbSym) then
     Exit(TargetFromNode(LFbMid, FProj.Model(LFbMid).Symbols[LFbSym].DeclNode,
       FProj.Model(LFbMid).Symbols[LFbSym].Name, ATarget));
@@ -923,7 +923,7 @@ begin
     if (LNameNode = NIL_NODE) or (LM.Tree.Nodes[LNameNode].Kind <> nkIdent)
     then
       Break;
-    Result := [LowerCase(LM.Tree.NodeText(LNameNode))] + Result;
+    Result := [LM.Tree.NodeNameLower(LNameNode)] + Result;
     LCur := LM.Tree.Nodes[LTypeDecl].Parent;
     // A `type` SECTION nested inside a class body (`type TInner = class ...
     // end; end;`) wraps its nkTypeDecl children in an nkTypeSec — one more
@@ -1022,7 +1022,7 @@ begin
   begin
     if not RTSegments(LM, LR, LQualIdents, LNameNode) then
       Continue;
-    LName := LowerCase(LM.Tree.NodeText(LNameNode));
+    LName := LM.Tree.NodeNameLower(LNameNode);
     LParent := LM.Tree.Nodes[LR].Parent;
     LIsMethod := (LQualIdents <> nil) or
       ((LParent <> NIL_NODE) and RTIsStructKind(LM.Tree.Nodes[LParent].Kind));
@@ -1034,7 +1034,7 @@ begin
         // The qualified side is always the implementation.
         SetLength(LChain, Length(LQualIdents));
         for LIdx := 0 to High(LQualIdents) do
-          LChain[LIdx] := LowerCase(LM.Tree.NodeText(LQualIdents[LIdx]));
+          LChain[LIdx] := LM.Tree.NodeNameLower(LQualIdents[LIdx]);
       end
       else
         // Unqualified but struct-parented: always the class-member decl.
@@ -1147,7 +1147,7 @@ begin
     Exit;   // cursor is already on/in an implementation
   if not RTSegments(LM, LDeclNode, LQualIdents, LNameNode) then
     Exit;
-  LName := LowerCase(LM.Tree.NodeText(LNameNode));
+  LName := LM.Tree.NodeNameLower(LNameNode);
   LIsMethod := (LM.Tree.Nodes[LDeclNode].Parent <> NIL_NODE) and
     RTIsStructKind(LM.Tree.Nodes[LM.Tree.Nodes[LDeclNode].Parent].Kind);
   if LIsMethod then
@@ -1197,13 +1197,13 @@ begin
     Exit;   // cursor is already on/in a declaration
   if not RTSegments(LM, LImplNode, LQualIdents, LNameNode) then
     Exit;
-  LName := LowerCase(LM.Tree.NodeText(LNameNode));
+  LName := LM.Tree.NodeNameLower(LNameNode);
   LIsMethod := LQualIdents <> nil;
   if LIsMethod then
   begin
     SetLength(LChain, Length(LQualIdents));
     for LIdx := 0 to High(LQualIdents) do
-      LChain[LIdx] := LowerCase(LM.Tree.NodeText(LQualIdents[LIdx]));
+      LChain[LIdx] := LM.Tree.NodeNameLower(LQualIdents[LIdx]);
     LKey := RTMethodKey(LChain, LName, RTParamSignature(LM, LImplNode));
     LKeyLoose := RTMethodKeyLoose(LChain, LName);
   end

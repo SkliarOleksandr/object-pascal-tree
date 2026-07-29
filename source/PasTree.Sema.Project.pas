@@ -1325,7 +1325,7 @@ begin
     // Same-named routines from every resolved used unit.
     if not LSkip then
     begin
-      LName := LowerCase(LModel.Tree.NodeText(LCallee));
+      LName := LModel.Tree.NodeNameLower(LCallee);
       for LIdx := 0 to High(LModel.UsesList) do
       begin
         LUid := LModel.UsesList[LIdx].UnitId;
@@ -2610,7 +2610,7 @@ var
        (FModels[AHeadMid].Scopes[FModels[AHeadMid].Symbols[AHeadSym].Scope].
         Kind in [sckUnit, sckImplementation]) then
     begin
-      LHeads := UsesHeads(LowerCase(LM.Tree.NodeText(ACalleeNode)));
+      LHeads := UsesHeads(LM.Tree.NodeNameLower(ACalleeNode));
       for LIdx := 0 to High(LHeads) do
         ConsiderChain(LHeads[LIdx].UnitId, LHeads[LIdx].Sym);
     end;
@@ -2703,7 +2703,7 @@ var
             LCtxOf[N] := LBX.Inst;
           end
           else if XValid(LBX) and FindMemberX(AId, LBX,
-            LowerCase(LM.Tree.NodeText(LName)), LMemMid, LMemSym, LCtx) then
+            LM.Tree.NodeNameLower(LName), LMemMid, LMemSym, LCtx) then
           begin
             // Record the discovered member reference for navigation.
             if LMemMid = AId then
@@ -2882,7 +2882,7 @@ begin
             if LUid >= 0 then
             begin
               LSym := FModels[LUid].Resolve(FModels[LUid].InterfaceScope,
-                LowerCase(LModel.Tree.NodeText(LName)));
+                LModel.Tree.NodeNameLower(LName));
               if LSym <> NIL_SYM then
               begin
                 LExt.UnitId := LUid; LExt.Sym := LSym;
@@ -2904,7 +2904,7 @@ begin
             if LUid >= 0 then
             begin
               LSym := FModels[LUid].Resolve(FModels[LUid].InterfaceScope,
-                LowerCase(LModel.Tree.NodeText(LName)));
+                LModel.Tree.NodeNameLower(LName));
               if LSym <> NIL_SYM then
               begin
                 LExt.UnitId := LUid; LExt.Sym := LSym;
@@ -2945,7 +2945,7 @@ begin
           // the frozen-ExtRefMap pass too (see FindInEnclosingWith).
           if InsideWithBody(LModel, LNode) then
             Continue;
-          LNameLower := LowerCase(LModel.Tree.NodeText(LNode));
+          LNameLower := LModel.Tree.NodeNameLower(LNode);
           if (LNameLower = 'result') or (LNameLower = 'self') then
             Continue;   // implicit routine/method names
           // A qualifier segment of a dotted expression that names a real
@@ -3389,7 +3389,7 @@ begin
             FModels[LExt.UnitId].Symbols[LExt.Sym].TypeNode));
         LBX := WithTargetTypeX(AId, LBase);
         if XValid(LBX) and FindMemberX(AId, LBX,
-             LowerCase(LM.Tree.NodeText(LName)), LMemMid, LMemSym, LCtx) then
+             LM.Tree.NodeNameLower(LName), LMemMid, LMemSym, LCtx) then
           // SubstX closes the member's declared type over the base's
           // instantiation frame: FThreads: TThreadList<TBaseWorkerThread>
           // makes LockList's declared TList<T> a TList<TBaseWorkerThread>,
@@ -3560,7 +3560,7 @@ begin
     LStruct := StructSymOfNode(LModel, LNode);
     if LStruct = NIL_SYM then
       Continue;
-    LNameLower := LowerCase(LModel.Tree.NodeText(LNode));
+    LNameLower := LModel.Tree.NodeNameLower(LNode);
     if (LNameLower = 'result') or (LNameLower = 'self') then
       Continue;
     if QualifierUnitAt(AId, LNode, LMatchNode) >= 0 then
@@ -3667,7 +3667,7 @@ begin
       Continue;   // member name of A.B — resolved via A, not as a plain ident
     if not InsideWithBody(LModel, LNode) then
       Continue;   // handled (resolved or E2003'd) by the two earlier passes
-    LNameLower := LowerCase(LModel.Tree.NodeText(LNode));
+    LNameLower := LModel.Tree.NodeNameLower(LNode);
     if (LNameLower = 'result') or (LNameLower = 'self') then
       Continue;
     if QualifierUnitAt(AId, LNode, LMatchNode) >= 0 then

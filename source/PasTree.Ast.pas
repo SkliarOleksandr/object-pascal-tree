@@ -164,6 +164,9 @@ type
     Nodes: TArray<TPasNode>;
     function KindName(AKind: TPasNodeKind): string;
     function NodeText(AIndex: Integer): string;    // first-token slice
+    { The same slice as a NAME KEY: lower-cased, leading '&' stripped. Use this
+      for every declaration and lookup key — see the implementation. }
+    function NodeNameLower(AIndex: Integer): string;
     { Compact S-expression dump for golden tests:
       Kind or Kind'text' or Kind(children...). }
     function Dump(AIndex: Integer): string;
@@ -203,6 +206,27 @@ function TPasTree.KindName(AKind: TPasNodeKind): string;
 begin
   Result := GetEnumName(TypeInfo(TPasNodeKind), Ord(AKind));
   Delete(Result, 1, 2); // strip 'nk'
+end;
+
+{ An identifier node's NAME KEY: its text, lower-cased, with a leading '&'
+  removed.
+
+  `&Foo` and `Foo` are the SAME identifier — the ampersand only stops the word
+  being read as a keyword, it is not part of the name. dcc-verified in BOTH
+  directions: a parameter declared `var Message` can be written `&Message` in
+  the body, one declared `var &Message` can be written `Message`, and `&begin`
+  declares an identifier named `begin`. Vcl.Controls mixes the two spellings of
+  the same parameter inside a single routine.
+
+  So NodeText (full fidelity, ampersand included — right for spans, hovers and
+  round-tripping) must never be used directly as a lookup or declaration key;
+  this is what to use instead. }
+function TPasTree.NodeNameLower(AIndex: Integer): string;
+begin
+  Result := NodeText(AIndex);
+  if (Result <> '') and (Result[1] = '&') then
+    Delete(Result, 1, 1);
+  Result := LowerCase(Result);
 end;
 
 function TPasTree.NodeText(AIndex: Integer): string;

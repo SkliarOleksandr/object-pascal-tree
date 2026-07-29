@@ -181,6 +181,10 @@ type
     procedure AddDiag(const ADiag: TSemaDiag);
   end;
 
+{ Any name -> its lookup key: lower-cased, leading '&' stripped. `&Foo` and
+  `Foo` name the same thing — see the implementation. }
+function PasNameKey(const AName: string): string;
+
 implementation
 
 uses
@@ -265,6 +269,22 @@ begin
   Scopes[AScope].Additional := Scopes[AScope].Additional + [AAdditional];
 end;
 
+{ Any name -> its lookup key: lower-cased, leading '&' stripped.
+
+  `&Foo` and `Foo` name the SAME thing (see TPasTree.NodeNameLower for the
+  dcc-verified detail). Callers pass a symbol's DISPLAY name here, ampersand and
+  all, because that is what the source said — the key must not keep it. Applied
+  at both ends on purpose: AddSymbol/DeclareSym for what gets declared, and
+  FindLocal for what gets looked up, so no future call site can reintroduce the
+  mismatch by building a key its own way. }
+function PasNameKey(const AName: string): string;
+begin
+  Result := AName;
+  if (Result <> '') and (Result[1] = '&') then
+    Delete(Result, 1, 1);
+  Result := LowerCase(Result);
+end;
+
 function TPasSemaModel.AddSymbol(AScope: Integer; AKind: TSemaSymbolKind;
   const AName: string; ADeclNode: Integer): Integer;
 begin
@@ -273,7 +293,7 @@ begin
   Inc(FSymCount);
   Symbols[Result].Kind := AKind;
   Symbols[Result].Name := AName;
-  Symbols[Result].NameLower := LowerCase(AName);
+  Symbols[Result].NameLower := PasNameKey(AName);
   Symbols[Result].DeclNode := ADeclNode;
   Symbols[Result].Scope := AScope;
   Symbols[Result].TypeSym := NIL_SYM;
@@ -295,7 +315,9 @@ end;
 function TPasSemaModel.FindLocal(AScope: Integer;
   const ANameLower: string): Integer;
 begin
-  if not Scopes[AScope].Names.TryGetValue(ANameLower, Result) then
+  // Safety net: normalized here too, so a caller that builds a key by hand
+  // cannot reintroduce the '&' mismatch. Idempotent for an already-clean key.
+  if not Scopes[AScope].Names.TryGetValue(PasNameKey(ANameLower), Result) then
     Result := NIL_SYM;
 end;
 

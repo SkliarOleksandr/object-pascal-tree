@@ -408,6 +408,35 @@ const
   // fields through the implicit Self. Note `Double` here: a bare helper
   // METHOD whose name collides with a builtin type must reach the helper,
   // not System's Double (that one never E2003'd — it silently mis-resolved).
+  // B.3 — an &-escaped identifier is the SAME identifier as the bare one; the
+  // ampersand only stops the word being read as a keyword. Real bug report:
+  // Vcl.Controls declares `var Message: TWMKeyDown` and then writes BOTH
+  // `&Message.CmdType` and `Broadcast(Message)` in one routine, so the two
+  // spellings must land on one symbol. dcc-verified in both directions, plus
+  // `&begin` declaring an identifier literally named `begin`.
+  SRC_AMPERSAND =
+    'unit U;'#10 +
+    'interface'#10 +
+    'implementation'#10 +
+    // declared PLAIN, referenced ESCAPED
+    'procedure P1(var Message: Integer);'#10 +
+    'begin'#10 +
+    '  &Message := 1;'#10 +
+    'end;'#10 +
+    // declared ESCAPED, referenced PLAIN
+    'procedure P2(var &Handled: Integer);'#10 +
+    'begin'#10 +
+    '  Handled := 2;'#10 +
+    'end;'#10 +
+    // escaping a genuine reserved word: the name IS `begin`
+    'procedure P3;'#10 +
+    'var'#10 +
+    '  &begin: Integer;'#10 +
+    'begin'#10 +
+    '  &begin := 3;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   SRC_HELPERS =
     'unit U;'#10 +
     'interface'#10 +
@@ -891,6 +920,24 @@ begin
     AllRefsResolved('Tag') and RefResolvesTo('Tag', 'Tag'));
   Ok('withshapes: the call-target control still resolves (F)',
     RefResolvesTo('F', 'F'));
+  GModel.Free;
+
+  // 9c-quinquies. &-escaped identifiers (B.3) — same symbol as the bare form.
+  Analyze(SRC_AMPERSAND);
+  Ok('ampersand: no diags at all', Length(GModel.Diags) = 0);
+  Ok('ampersand: no false E2003', DiagCount('E2003') = 0);
+  // Declared plain, written `&Message` — the reference must reach the parameter.
+  Ok('ampersand: &Message resolves to the plain-declared Message',
+    RefResolvesTo('&Message', 'Message'));
+  // Declared `&Handled`, written plain — the DECLARATION key must be stripped,
+  // so the symbol is named `Handled` and the bare reference finds it.
+  Ok('ampersand: plain Handled resolves to the &-declared parameter',
+    RefResolvesTo('Handled', '&Handled'));
+  Ok('ampersand: the &-declared symbol is keyed WITHOUT the ampersand',
+    HasSym('Handled', skParam) and not HasSym('&Handled', skParam));
+  // A genuine reserved word escaped into an identifier.
+  Ok('ampersand: &begin declares and resolves an identifier named begin',
+    RefResolvesTo('&begin', '&begin'));
   GModel.Free;
 
   // 9c-ter. class/record helper member injection, both directions.
