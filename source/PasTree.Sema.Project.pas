@@ -3341,6 +3341,28 @@ begin
     ASym := LExt.Sym;
     Exit(True);
   end;
+  { Neither map has it yet. That is the normal state for a member inside a with
+    TARGET: the pass that records cross-unit member references is CrossType,
+    which runs AFTER the with pass that is asking. So find the member the same
+    way WithTargetTypeX does — through the base's type.
+
+    `with Params^.rgrc[0] do` (Vcl.Forms) needs exactly this: rgrc's declared
+    type is an INLINE `array[..] of TRect`, so ElementX can only reach the
+    element through the member SYMBOL's own type node, and it gets that symbol
+    from here. Without the fallback the whole chain came back untyped and every
+    TRect field in the body was undeclared. }
+  if LM.Tree.Nodes[ANode].Kind = nkMember then
+  begin
+    var LBX := WithTargetTypeX(AId, LM.Tree.Nodes[ANode].FirstChild);
+    var LMemMid, LMemSym, LCtx: Integer;
+    if XValid(LBX) and FindMemberX(AId, LBX, LM.Tree.NodeNameLower(LName),
+         LMemMid, LMemSym, LCtx) then
+    begin
+      AMid := LMemMid;
+      ASym := LMemSym;
+      Exit(True);
+    end;
+  end;
 end;
 
 { The ELEMENT type of an indexable designator, or XNil when it is not an array

@@ -219,6 +219,14 @@ const
     'type'#10 +
     '  TInnerRec = record W, H: Integer; end;'#10 +
     '  TOuterRec = record inner: TInnerRec; Flag: Integer; end;'#10 +
+    // For the deref/member/index target shapes below. rgrc's type is an INLINE
+    // array, which is the part that made it hard: the element type is reachable
+    // only through the member SYMBOL's own type node.
+    '  TParamsLike = record'#10 +
+    '    rgrc: array[0..2] of TInnerRec;'#10 +
+    '    Count: Integer;'#10 +
+    '  end;'#10 +
+    '  PParamsLike = ^TParamsLike;'#10 +
     'implementation'#10'end.'#10;
   UNIT_MTUSE =
     'unit UnitMTUse;'#10'interface'#10 +
@@ -234,6 +242,22 @@ const
     '    W := 1;'#10 +                     // 12 reached only through inner
     '    H := D.Flag;'#10 +                // 13 and the target still works bare
     '  end;'#10 +
+    'end;'#10 +
+    // Target-expression shapes over CROSS-UNIT types, the Vcl.Forms
+    // `with Params^.rgrc[0] do` family. A member whose declared type is an
+    // inline array, indexed — DesignatorSymX has to find that member through
+    // the base's TYPE, because the pass that records cross-unit member
+    // references (CrossType) runs after the with pass that needs it.
+    'procedure Shapes(P: PParamsLike);'#10 +
+    'var'#10 +
+    '  V: TParamsLike;'#10 +
+    'begin'#10 +
+    '  with P^ do'#10 +                    // 21 deref
+    '    Count := 1;'#10 +
+    '  with V.rgrc[0] do'#10 +             // 23 member + index
+    '    W := 1;'#10 +
+    '  with P^.rgrc[0] do'#10 +            // 25 deref + member + index
+    '    H := 1;'#10 +
     'end;'#10 +
     'end.'#10;
 
@@ -959,6 +983,13 @@ begin
       CrossRefTo(LMT, 'inner', 'inner'));
     Ok('multi-target xunit: W reached through it',
       CrossRefTo(LMT, 'W', 'W'));
+    // The target-expression shapes in the same unit: deref, member+index over
+    // an inline-array member, and the two combined. Collectively covered by the
+    // no-diags check above; asserted here so a partial regression is named.
+    Ok('target shapes: Count through a deref target',
+      CrossRefTo(LMT, 'Count', 'Count'));
+    Ok('target shapes: H through deref+member+index',
+      CrossRefTo(LMT, 'H', 'H'));
 
     // NESTED with whose INNER target is an inherited cross-unit property (see
     // UNIT_NWUSE for the Vcl.ColorGrd shape this reproduces). Both halves
