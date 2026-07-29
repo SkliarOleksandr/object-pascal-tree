@@ -181,6 +181,76 @@ const
   // to the using one, and reading either in the wrong model is the mistake
   // this fixture exists to catch. Accepted sets are dcc32 37.0-verified — see
   // CheckConstraints. TFree is the control: no constraint, anything goes.
+  { 5.7 — a NESTED `with` whose INNER target is an inherited CROSS-UNIT
+    property. Vcl.ColorGrd's real shape:
+
+      else with CellRect do
+      begin
+        ...
+        end else with Canvas do
+        begin
+          Pen.Color := clBlack;
+          Rectangle(Left, Top, Right, Bottom);   // Left/Top from the OUTER with
+        end;
+
+    The inner target `Canvas` is a body node of the OUTER with, which is exactly
+    the position the two earlier cross passes skip (deciding such a node needs a
+    with-target type they are still producing). Only the with pass resolves it —
+    and its bindings used to be committed after the whole round, so the body's
+    `Pen` looked it up while still unbound, the inner with never opened, and
+    every member of it became a false E2003. `Rectangle` was worse than
+    undeclared: it bound to the 5-argument global instead, turning into a bogus
+    E2035.
+
+    Three units because both hops must be CROSS-model: the property is declared
+    in the ancestor's unit, its type in a third. }
+  UNIT_NWCANVAS =
+    'unit UnitNWCanvas;'#10'interface'#10 +
+    'type'#10 +
+    '  TCanvasLike = class'#10 +
+    '  private'#10 +
+    '    FPen: Integer;'#10 +
+    '  public'#10 +
+    '    property Pen: Integer read FPen write FPen;'#10 +
+    '    procedure Rectangle(a, b, c, d: Integer);'#10 +
+    '  end;'#10 +
+    'procedure Rectangle(dc, a, b, c, d: Integer);'#10 +  // the 5-arg global
+    'implementation'#10 +
+    'procedure TCanvasLike.Rectangle(a, b, c, d: Integer); begin end;'#10 +
+    'procedure Rectangle(dc, a, b, c, d: Integer); begin end;'#10 +
+    'end.'#10;
+  UNIT_NWBASE =
+    'unit UnitNWBase;'#10'interface'#10 +
+    'uses UnitNWCanvas;'#10 +
+    'type'#10 +
+    '  TBase = class'#10 +
+    '  private'#10 +
+    '    FCanvas: TCanvasLike;'#10 +
+    '  protected'#10 +
+    '    property Canvas: TCanvasLike read FCanvas;'#10 +
+    '  end;'#10 +
+    'implementation'#10'end.'#10;
+  UNIT_NWUSE =
+    'unit UnitNWUse;'#10'interface'#10 +
+    'uses UnitNWBase;'#10 +
+    'type'#10 +
+    '  TRectLike = record Left, Top: Integer; end;'#10 +
+    '  TDerived = class(TBase)'#10 +
+    '    Cell: TRectLike;'#10 +
+    '    procedure Paint;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TDerived.Paint;'#10 +
+    'begin'#10 +
+    '  with Cell do'#10 +                    // 13
+    '    with Canvas do'#10 +                // 14  inherited, CROSS-unit
+    '    begin'#10 +
+    '      Pen := Left;'#10 +                // 16  Pen: inner, Left: outer
+    '      Rectangle(Left, Top, 3, 4);'#10 + // 17  the 4-arg METHOD, not global
+    '    end;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   UNIT_CON =
     'unit UnitCon;'#10'interface'#10 +
     'type'#10 +
@@ -627,6 +697,9 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitTObj.pas'), UNIT_TOBJ);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitQual.pas'), UNIT_QUAL);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWShapes.pas'), UNIT_WSHAPES);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitNWCanvas.pas'), UNIT_NWCANVAS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitNWBase.pas'), UNIT_NWBASE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitNWUse.pas'), UNIT_NWUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitCon.pas'), UNIT_CON);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitConUse.pas'), UNIT_CONUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArity.pas'), UNIT_ARITY);
@@ -839,6 +912,24 @@ begin
     Ok('wshapes: the helper''s static reached through the type ALIAS',
       LocalRefCount(LWS, 'SetProduct') +
       CrossRefCountInUnit(LWS, 'SetProduct', 'SetProduct', 'unitwshapes') >= 1);
+
+    // NESTED with whose INNER target is an inherited cross-unit property (see
+    // UNIT_NWUSE for the Vcl.ColorGrd shape this reproduces). Both halves
+    // matter: Pen must resolve at all, and `Rectangle` must pick the target's
+    // 4-arg METHOD rather than the 5-arg global — binding the global is how
+    // the old behaviour turned a missed with-scope into a bogus E2035.
+    var LNW := ModelByName('unitnwuse');
+    Ok('nested-with: UnitNWUse loaded', Assigned(LNW));
+    Ok('nested-with: no diags at all', Length(LNW.Diags) = 0);
+    Ok('nested-with: inner target''s Pen resolved (not E2003)',
+      DiagCount(LNW, 'E2003') = 0);
+    Ok('nested-with: Rectangle took the 4-arg method, no bogus E2035',
+      DiagCount(LNW, 'E2035') = 0);
+    Ok('nested-with: Pen binds cross-unit to UnitNWCanvas',
+      CrossRefTo(LNW, 'Pen', 'Pen'));
+    Ok('nested-with: Left still comes from the OUTER with',
+      CrossRefCountInUnit(LNW, 'Left', 'Left', 'unitnwuse') +
+      LocalRefCount(LNW, 'Left') >= 2);
 
     // A nested type of the ANCESTOR of a MIDDLE qualifier segment.
     var LQual := ModelByName('unitqual');

@@ -185,8 +185,10 @@ type
     procedure CrossResolveInherited(AId: Integer;
       var APending: TArray<TPasInhPending>);
     procedure RunInheritedPass(ACount: Integer);
+    { AEmit=False computes bindings only; E2003 is left to the final round —
+      see RunWithPass, which iterates this to a fixpoint. }
     procedure CrossResolveWith(AId: Integer;
-      var APending: TArray<TPasInhPending>);
+      var APending: TArray<TPasInhPending>; AEmit: Boolean);
     procedure RunWithPass(ACount: Integer);
     function FindInUses(AId: Integer; const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
@@ -3592,7 +3594,7 @@ end;
 // pass's own entries are with-BODY statement nodes, never type/heritage
 // nodes, so no worker depends on another's uncommitted entry.
 procedure TPasSemaProject.CrossResolveWith(AId: Integer;
-  var APending: TArray<TPasInhPending>);
+  var APending: TArray<TPasInhPending>; AEmit: Boolean);
 var
   LModel: TPasSemaModel;
   LNode, LBase, LStruct, LUid, LSym, LCtx, LMatchNode: Integer;
@@ -3669,38 +3671,78 @@ begin
       LPend.X := XNil;
       APending := APending + [LPend];
     end
-    else if LModel.AllUsesResolved then
+    else if AEmit and LModel.AllUsesResolved then
       EmitE2003(LModel, LNode);
   end;
 end;
 
+{ Runs to a FIXPOINT, because one round cannot resolve a nested `with` whose
+  inner target is itself only resolvable by this pass.
+
+  `else with CellRect do ... else with Canvas do begin Pen.Color := ... end`
+  (Vcl.ColorGrd) is the shape: `Canvas` is an inherited cross-unit property, so
+  the earlier passes skip it (it sits in the OUTER with's body, and deciding
+  such a node needs a with-target type this very pass is still producing), and
+  this pass does resolve it — but only into APending, committed after every
+  worker has finished. So within one round `Pen`'s lookup still sees `Canvas`
+  unbound, the inner with never opens, and every member of it is a false E2003.
+
+  Iterating is the cheap correct answer: each round is a full parallel compute +
+  sequential commit, so the pass's concurrency invariant (workers only ever READ
+  committed maps) is untouched, and round N+1 sees round N's bindings. Real
+  nesting is 2-3 deep, so this converges in a handful of rounds; the cap is a
+  runaway guard, not a limit anybody reaches.
+
+  E2003 is emitted ONLY in the final round. Emitting earlier would report every
+  name that a later round goes on to resolve. }
 procedure TPasSemaProject.RunWithPass(ACount: Integer);
+const
+  MAX_ROUNDS = 8;
 var
   LPending: TArray<TArray<TPasInhPending>>;
-  LIdx, LP, LNode: Integer;
+  LIdx, LP, LNode, LRound, LNew: Integer;
+  LEmit: Boolean;
 begin
   SetLength(LPending, ACount);
-  ForEachIndex(ACount - 1,
-    procedure(AIdx: Integer)
-    begin
-      CrossResolveWith(AIdx, LPending[AIdx]);
-    end);
-  for LIdx := 0 to ACount - 1 do
-    for LP := 0 to High(LPending[LIdx]) do
-    begin
-      LNode := LPending[LIdx][LP].Node;
-      // RefMap must be CLEARED, not just shadowed: every consumer checks it
-      // FIRST and only falls back to ExtRefMap (see CrossType's nkIdent), so
-      // an override that merely added an ExtRefMap entry would be ignored.
-      // Harmless for the gap-filling entries — those were NIL_SYM already.
-      FModels[LIdx].RefMap[LNode] := NIL_SYM;
-      FModels[LIdx].ExtRefMap.AddOrSetValue(LNode, LPending[LIdx][LP].Ext);
-      // The frame-substituted member type, when the compute step had one.
-      // Committed here so it EXISTS before CrossType runs; CrossType's
-      // persist loop leaves existing entries alone (see there).
-      if XValid(LPending[LIdx][LP].X) then
-        FModels[LIdx].ExprTypeX.AddOrSetValue(LNode, LPending[LIdx][LP].X);
-    end;
+  LRound := 0;
+  LEmit := False;
+  while True do
+  begin
+    Inc(LRound);
+    for LIdx := 0 to ACount - 1 do
+      LPending[LIdx] := nil;
+    ForEachIndex(ACount - 1,
+      procedure(AIdx: Integer)
+      begin
+        CrossResolveWith(AIdx, LPending[AIdx], LEmit);
+      end);
+    LNew := 0;
+    for LIdx := 0 to ACount - 1 do
+      Inc(LNew, Length(LPending[LIdx]));
+    for LIdx := 0 to ACount - 1 do
+      for LP := 0 to High(LPending[LIdx]) do
+      begin
+        LNode := LPending[LIdx][LP].Node;
+        // RefMap must be CLEARED, not just shadowed: every consumer checks it
+        // FIRST and only falls back to ExtRefMap (see CrossType's nkIdent), so
+        // an override that merely added an ExtRefMap entry would be ignored.
+        // Harmless for the gap-filling entries — those were NIL_SYM already.
+        FModels[LIdx].RefMap[LNode] := NIL_SYM;
+        FModels[LIdx].ExtRefMap.AddOrSetValue(LNode, LPending[LIdx][LP].Ext);
+        // The frame-substituted member type, when the compute step had one.
+        // Committed here so it EXISTS before CrossType runs; CrossType's
+        // persist loop leaves existing entries alone (see there).
+        if XValid(LPending[LIdx][LP].X) then
+          FModels[LIdx].ExprTypeX.AddOrSetValue(LNode, LPending[LIdx][LP].X);
+      end;
+    if LEmit then
+      Break;   // the emitting round is always the last one
+    // Converged (or out of rounds): repeat once more WITH emission. That round
+    // sees exactly this state, so the names it cannot resolve are the stable
+    // ones — and it re-commits nothing, since it finds nothing new.
+    if (LNew = 0) or (LRound >= MAX_ROUNDS) then
+      LEmit := True;
+  end;
 end;
 
 function TPasSemaProject.AnalyzeFile(const AMainFile: string): Integer;
