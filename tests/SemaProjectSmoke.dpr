@@ -204,6 +204,39 @@ const
 
     Three units because both hops must be CROSS-model: the property is declared
     in the ancestor's unit, its type in a third. }
+  { 5.7 — a MULTI-TARGET `with` whose first target's type lives in ANOTHER unit.
+    Vcl.Graphics' real shape, `with DIB, dsbm, dsbmih do`, where DIB is a
+    TDIBSection from Winapi.Windows and each later target is a field of the one
+    before it.
+
+    Distinct from the same-unit case in UNIT_WSHAPES, and it stayed broken after
+    that one was fixed: a later TARGET is not inside any with BODY, so the cross
+    passes classified it as an ordinary identifier, handed it to the inherited
+    pass — which knows nothing about with scopes — and emitted E2003 for it.
+    FindInEnclosingWith could already resolve it; nothing routed it there. }
+  UNIT_MTREC =
+    'unit UnitMTRec;'#10'interface'#10 +
+    'type'#10 +
+    '  TInnerRec = record W, H: Integer; end;'#10 +
+    '  TOuterRec = record inner: TInnerRec; Flag: Integer; end;'#10 +
+    'implementation'#10'end.'#10;
+  UNIT_MTUSE =
+    'unit UnitMTUse;'#10'interface'#10 +
+    'uses UnitMTRec;'#10 +
+    'procedure Go;'#10 +
+    'implementation'#10 +
+    'procedure Go;'#10 +
+    'var'#10 +
+    '  D: TOuterRec;'#10 +                 // 8  type from another unit
+    'begin'#10 +
+    '  with D, inner do'#10 +              // 10 `inner` is a field of D
+    '  begin'#10 +
+    '    W := 1;'#10 +                     // 12 reached only through inner
+    '    H := D.Flag;'#10 +                // 13 and the target still works bare
+    '  end;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   UNIT_NWCANVAS =
     'unit UnitNWCanvas;'#10'interface'#10 +
     'type'#10 +
@@ -697,6 +730,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitTObj.pas'), UNIT_TOBJ);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitQual.pas'), UNIT_QUAL);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWShapes.pas'), UNIT_WSHAPES);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitMTRec.pas'), UNIT_MTREC);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitMTUse.pas'), UNIT_MTUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNWCanvas.pas'), UNIT_NWCANVAS);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNWBase.pas'), UNIT_NWBASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNWUse.pas'), UNIT_NWUSE);
@@ -912,6 +947,18 @@ begin
     Ok('wshapes: the helper''s static reached through the type ALIAS',
       LocalRefCount(LWS, 'SetProduct') +
       CrossRefCountInUnit(LWS, 'SetProduct', 'SetProduct', 'unitwshapes') >= 1);
+
+    // MULTI-TARGET with over a CROSS-UNIT record (see UNIT_MTUSE). Three things
+    // must hold together: the later target resolves at all, the members reached
+    // only through it resolve, and no pass reports the target as undeclared
+    // while a later one binds it.
+    var LMT := ModelByName('unitmtuse');
+    Ok('multi-target xunit: UnitMTUse loaded', Assigned(LMT));
+    Ok('multi-target xunit: no diags at all', Length(LMT.Diags) = 0);
+    Ok('multi-target xunit: the later target `inner` itself resolved',
+      CrossRefTo(LMT, 'inner', 'inner'));
+    Ok('multi-target xunit: W reached through it',
+      CrossRefTo(LMT, 'W', 'W'));
 
     // NESTED with whose INNER target is an inherited cross-unit property (see
     // UNIT_NWUSE for the Vcl.ColorGrd shape this reproduces). Both halves

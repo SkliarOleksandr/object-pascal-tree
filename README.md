@@ -99,6 +99,47 @@ closure fans out across cores instead of being processed one file at a time:
 - A `SingleThreaded` switch runs every stage on the calling thread instead,
   for baseline timing comparisons and debugging — results are identical
   either way, since the parallel stages are pure per unit.
+- **The thread pool's width is pinned** (`TPasSemaProject.ConfigureThreadPool`,
+  physical-core width by default). Left to grow, `TThreadPool` adds workers when
+  it believes they are blocked — and it cannot tell blocking from the memory
+  manager *spinning* on allocation contention, which every one of these passes
+  produces in quantity. Measured, it added threads until the same work cost an
+  order of magnitude more CPU **and** more wall time (2643 ms vs 1853 ms, ~20.5 s
+  of CPU vs ~5.8 s). Wider is not faster here.
+
+## Performance discipline
+
+Every change ships with a timing run, not just a correctness run. This is not
+advice; it is a rule the project learned twice the hard way, both times reported
+by the user rather than caught by a measurement:
+
+- a lock + string keys memoizing a member lookup cost **+16%** while the scan it
+  memoized cost 4 ms;
+- a defensive `PasNameKey` call added inside `FindLocal` — the hottest function
+  in the analyzer — cost **3.3x total analysis time**.
+
+Both passed every test. Diagnostic counts do not detect a slowdown.
+
+**Before/after protocol**
+
+1. `tools\out\PasTreeSemaProject.exe <corpus-dir>` over a flattened corpus, and
+   read the `stages:` line — a total alone cannot tell you which phase moved.
+2. Take the **best of 5** runs, never a single one. Machine noise on the
+   665-unit corpus is roughly ±150 ms.
+3. Compare against the *preceding commit*, rebuilt and run in the same session.
+   A number from yesterday is not a baseline: it may itself contain a regression
+   (one such stale figure sent an entire investigation at the wrong phase).
+4. If a corpus count moves, confirm the analysis did not otherwise change:
+   the tool's full dump should be byte-identical unless the change was meant to
+   alter resolutions (`-st` versus parallel is the cheapest such check).
+5. Say the honest size in the commit message, including when a change is
+   *inside the noise* — a stage-level win that does not move the total should be
+   described that way, so the next person does not over-credit it.
+
+Build the suites with `-$R+ -$Q+` when anything looks flaky: the tool builds ship
+without range checks, so an out-of-range index reads adjacent memory instead of
+failing, which once presented as *non-determinism* (three different outcomes in
+eight runs) rather than as the one-line bug it was.
 
 ## Asynchronous analysis
 

@@ -189,6 +189,8 @@ type
     function ElementX(AId, ABaseNode: Integer): TSemaXType;
     function WithTargetTypeX(AId, ANode: Integer): TSemaXType;
     function InsideWithBody(AModel: TPasSemaModel; ANode: Integer): Boolean;
+    function InsideLaterWithTarget(AModel: TPasSemaModel;
+      ANode: Integer): Boolean;
     function FindInEnclosingWith(AId, ANode: Integer;
       const ANameLower: string; out AUid, ASym: Integer;
       out AX: TSemaXType): Boolean;
@@ -3084,8 +3086,13 @@ begin
             Continue;
           // Same reason, for a `with` body whose target type is cross-unit:
           // resolving it needs FindMemberX over OTHER models, so it waits for
-          // the frozen-ExtRefMap pass too (see FindInEnclosingWith).
-          if InsideWithBody(LModel, LNode) then
+          // the frozen-ExtRefMap pass too (see FindInEnclosingWith). A LATER
+          // with TARGET waits for exactly the same reason — it is resolved
+          // inside the earlier targets, whose types are just as likely to live
+          // in another unit. Emitting here instead meant the with pass went on
+          // to bind the name correctly while this pass's E2003 for it stood.
+          if InsideWithBody(LModel, LNode) or
+             InsideLaterWithTarget(LModel, LNode) then
             Continue;
           LNameLower := LModel.Tree.NodeNameLower(LNode);
           if (LNameLower = 'result') or (LNameLower = 'self') then
@@ -3571,6 +3578,40 @@ begin
   end;
 end;
 
+{ True when ANode sits inside a with TARGET that is not the FIRST one.
+
+  Such a node needs the with pass just as much as a body node does, because a
+  later target is resolved inside the earlier ones — `with DIB, dsbm, dsbmih do`
+  (Vcl.Graphics), where dsbm is a field of DIB. It is NOT in any with body, so
+  testing only InsideWithBody left it to the inherited pass, which knows nothing
+  about with scopes: the target came out undeclared and every member reached
+  through it in the body followed. FindInEnclosingWith has handled the
+  target-sees-earlier-targets case since the multi-target fix; this is what
+  actually routes those nodes to it. }
+function TPasSemaProject.InsideLaterWithTarget(AModel: TPasSemaModel;
+  ANode: Integer): Boolean;
+var
+  LCur, LParent, LChild: Integer;
+begin
+  Result := False;
+  LCur := ANode;
+  LParent := AModel.Tree.Nodes[LCur].Parent;
+  while LParent <> NIL_NODE do
+  begin
+    if AModel.Tree.Nodes[LParent].Kind = nkWithStmt then
+    begin
+      // LCur is one of the with's children. It qualifies when it is a target
+      // (i.e. has a next sibling — the body is last) and not the first one.
+      LChild := AModel.Tree.Nodes[LParent].FirstChild;
+      if (LChild <> LCur) and (LCur <> NIL_NODE) and
+         (AModel.Tree.Nodes[LCur].NextSibling <> NIL_NODE) then
+        Exit(True);
+    end;
+    LCur := LParent;
+    LParent := AModel.Tree.Nodes[LCur].Parent;
+  end;
+end;
+
 // Resolves ANameLower as a member of an enclosing with-target's type.
 // Precedence follows 5.7: the INNERMOST `with` first (the outward climb gives
 // that for free), and within one `with` its targets RIGHT-TO-LEFT, so the
@@ -3721,7 +3762,7 @@ begin
     if (LBase <> NIL_NODE) and (LM.Tree.Nodes[LBase].Kind = nkMember) and
        (LM.Tree.Nodes[LBase].FirstChild <> LNode) then
       Continue;
-    if InsideWithBody(LM, LNode) then
+    if InsideWithBody(LM, LNode) or InsideLaterWithTarget(LM, LNode) then
     begin
       // NOT filtered on bound-ness: the with pass revisits an already-bound
       // name when its with target went unopened, to OVERRIDE a wrong guess.
