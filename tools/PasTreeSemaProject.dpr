@@ -419,6 +419,9 @@ begin
         GMode := 'MultiThread';
       Writeln(ErrOutput, Format('%d units in %d ms (%s)',
         [GProj.ModelCount, GSW.ElapsedMilliseconds, GMode]));
+      // Per-stage breakdown: without it a slow run says only THAT it is slow.
+      if GProj.StageTimings <> '' then
+        Writeln(ErrOutput, 'stages: ' + GProj.StageTimings);
     finally
       GProj.Free;
     end;

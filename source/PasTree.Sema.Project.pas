@@ -111,6 +111,11 @@ type
     FNamespaces: TArray<string>;           // own copy for LoadedUnitByName
     FStageTimings: string;                 // see StageTimings
     FLoadFailures: TArray<string>;         // see LoadFailures
+    { Candidate node lists for the two body passes — see EnsureCrossWork. One
+      slot per model; a worker only ever touches its OWN slot. }
+    FInhWork: TArray<TArray<Integer>>;
+    FWithWork: TArray<TArray<Integer>>;
+    FWorkBuilt: TArray<Boolean>;
     FSingleThreaded: Boolean;
     FSystemUnitId: Integer;                // memoized EnsureSystemUnit result
     FSystemUnitResolved: Boolean;
@@ -185,6 +190,8 @@ type
       out AX: TSemaXType): Boolean;
     procedure CrossResolveInherited(AId: Integer;
       var APending: TArray<TPasInhPending>);
+    procedure EnsureCrossWork(AId: Integer);
+    procedure SizeCrossWork(ACount: Integer);
     procedure RunInheritedPass(ACount: Integer);
     { AEmit=False computes bindings only; E2003 is left to the final round —
       see RunWithPass, which iterates this to a fixpoint. }
@@ -1951,6 +1958,13 @@ var
 
 begin
   ClearHelperIdx;
+  // Same lifetime as the helper index, and for the same reason: every driver
+  // that runs the body passes calls this first, and a staged run REPLACES
+  // interface-only models with full ones — a worklist held over from a previous
+  // run would name nodes of a tree that no longer exists.
+  SetLength(FWorkBuilt, 0);
+  SetLength(FInhWork, 0);
+  SetLength(FWithWork, 0);
   // ResolveRealDecl in Publish may load System on demand and APPEND a model,
   // so index only the models present now — a late arrival simply sees no
   // helpers, exactly as the previous revision's out-of-range guard did.
@@ -3519,44 +3533,113 @@ end;
 // exact: the entries this pass produces are method-BODY nodes, which are
 // never heritage/alias/type nodes, so no worker's FindMemberX result can
 // depend on another worker's pending (uncommitted) entries.
+procedure TPasSemaProject.SizeCrossWork(ACount: Integer);
+begin
+  // Never shrinks within a run: BuildHelperMap resets the whole thing between
+  // runs, and a driver may call the with pass with a count the inherited pass
+  // did not see.
+  if Length(FWorkBuilt) < ACount then
+  begin
+    SetLength(FInhWork, ACount);
+    SetLength(FWithWork, ACount);
+    SetLength(FWorkBuilt, ACount);
+  end;
+end;
+
+{ ONE scan of a model's nodes producing the candidate lists for BOTH body
+  passes, which want complementary sets: the inherited pass takes idents
+  OUTSIDE any with body, the with pass those INSIDE one.
+
+  The scan those passes used to do each was the expensive part of them, not the
+  work: per node it probed ExtRefMap (a dictionary) and, for the with pass, ran
+  InsideWithBody (a walk up the parent chain) — and RunWithPass iterates to a
+  fixpoint, so it paid that for every node of every model on every round. Here
+  each node is classified once.
+
+  The lists are a SUPERSET of what each pass acts on: every guard those passes
+  apply is still applied per node inside them. That matters for the with pass in
+  particular, whose bound/unbound test legitimately changes between rounds, so
+  it must stay in the loop and not be baked into the list.
+
+  Honest sizing, measured on the 665-unit corpus: this takes the two passes from
+  617 ms to 480 ms, but on TOTAL analysis time that is inside the noise band
+  (2904 -> 2882 ms best-of-5). The commit's actual win is the convergence fix in
+  CrossResolveWith. Kept because the per-round rescan it removes scales with
+  fixpoint depth, and depth grows with project size — not because it moved the
+  number today. }
+procedure TPasSemaProject.EnsureCrossWork(AId: Integer);
+var
+  LM: TPasSemaModel;
+  LNode, LBase, LInhN, LWithN: Integer;
+  LInh, LWith: TArray<Integer>;
+begin
+  if FWorkBuilt[AId] then
+    Exit;
+  LM := FModels[AId];
+  // High(RefMap) is the node count; both lists are far smaller, but sizing to
+  // it once beats growing them incrementally.
+  SetLength(LInh, Length(LM.RefMap));
+  SetLength(LWith, Length(LM.RefMap));
+  LInhN := 0;
+  LWithN := 0;
+  for LNode := 0 to High(LM.RefMap) do
+  begin
+    if LM.Tree.Nodes[LNode].Kind <> nkIdent then
+      Continue;
+    if (LNode > High(LM.NodeScope)) or (LM.NodeScope[LNode] = NIL_SCOPE) then
+      Continue;
+    // The member name of A.B is resolved through A, never as a plain ident.
+    LBase := LM.Tree.Nodes[LNode].Parent;
+    if (LBase <> NIL_NODE) and (LM.Tree.Nodes[LBase].Kind = nkMember) and
+       (LM.Tree.Nodes[LBase].FirstChild <> LNode) then
+      Continue;
+    if InsideWithBody(LM, LNode) then
+    begin
+      // NOT filtered on bound-ness: the with pass revisits an already-bound
+      // name when its with target went unopened, to OVERRIDE a wrong guess.
+      LWith[LWithN] := LNode;
+      Inc(LWithN);
+    end
+    else if (LM.RefMap[LNode] = NIL_SYM) and
+            not LM.ExtRefMap.ContainsKey(LNode) then
+    begin
+      // Safe to bake in here: CrossResolve has finished, and nothing between
+      // this scan and the inherited pass can bind one of these.
+      LInh[LInhN] := LNode;
+      Inc(LInhN);
+    end;
+  end;
+  SetLength(LInh, LInhN);
+  SetLength(LWith, LWithN);
+  FInhWork[AId] := LInh;
+  FWithWork[AId] := LWith;
+  FWorkBuilt[AId] := True;
+end;
+
 procedure TPasSemaProject.CrossResolveInherited(AId: Integer;
   var APending: TArray<TPasInhPending>);
 var
   LModel: TPasSemaModel;
-  LNode, LBase, LStruct, LUid, LSym, LCtx, LMatchNode: Integer;
+  LNode, LStruct, LUid, LSym, LCtx, LMatchNode, LWIdx: Integer;
   LPend: TPasInhPending;
   LFound: Boolean;
   LNameLower: string;
 begin
   APending := nil;
   LModel := FModels[AId];
-  for LNode := 0 to High(LModel.RefMap) do
+  EnsureCrossWork(AId);
+  // Candidates only — kind, scope, A.B-member and not-in-a-with-body were all
+  // decided by that single scan (see EnsureCrossWork).
+  for LWIdx := 0 to High(FInhWork[AId]) do
   begin
-    if LModel.Tree.Nodes[LNode].Kind <> nkIdent then
-      Continue;
-    if (LModel.RefMap[LNode] <> NIL_SYM) or
-       LModel.ExtRefMap.ContainsKey(LNode) then
-      Continue;
-    if (LNode > High(LModel.NodeScope)) or
-       (LModel.NodeScope[LNode] = NIL_SCOPE) then
-      Continue;
-    LBase := LModel.Tree.Nodes[LNode].Parent;
-    if (LBase <> NIL_NODE) and
-       (LModel.Tree.Nodes[LBase].Kind = nkMember) and
-       (LModel.Tree.Nodes[LBase].FirstChild <> LNode) then
-      Continue;   // member name of A.B — resolved via A, not as a plain ident
-    // Cheap scope-climb FIRST: everything outside a method body was already
-    // handled (resolved or E2003'd) by CrossResolve — bailing here avoids
-    // re-running the allocation-heavy QualifierUnitAt on every one of those
-    // nodes a second time.
-    // A with body is left to the LATER with pass (RunWithPass), never handled
-    // here: deciding it needs the with-target's TYPE node, and for a `with`
-    // inside a METHOD that type node is itself a method-body node THIS pass
-    // is still producing — it would be read while still uncommitted and come
-    // back unresolved. Bailing keeps this pass's stated invariant intact (see
-    // the header: its own entries are never type nodes another worker needs).
-    if InsideWithBody(LModel, LNode) then
-      Continue;
+    LNode := FInhWork[AId][LWIdx];
+    // NB a with BODY is deliberately absent from this list and handled by the
+    // LATER with pass: deciding such a node needs the with-target's TYPE node,
+    // and for a `with` inside a METHOD that type node is itself a method-body
+    // node THIS pass is still producing — it would be read while still
+    // uncommitted and come back unresolved. Keeping them out preserves this
+    // pass's stated invariant (see the header: its own entries are never type
+    // nodes another worker needs).
     LStruct := StructSymOfNode(LModel, LNode);
     if LStruct = NIL_SYM then
       Continue;
@@ -3603,6 +3686,7 @@ begin
   // the helper registry must be complete and read-only by the time the
   // workers below start (see BuildHelperMap / ActiveHelperFor).
   BuildHelperMap;
+  SizeCrossWork(ACount);   // slots must exist before workers write their own
   SetLength(LPending, ACount);
   ForEachIndex(ACount - 1,
     procedure(AIdx: Integer)
@@ -3628,18 +3712,22 @@ procedure TPasSemaProject.CrossResolveWith(AId: Integer;
   var APending: TArray<TPasInhPending>; AEmit: Boolean);
 var
   LModel: TPasSemaModel;
-  LNode, LBase, LStruct, LUid, LSym, LCtx, LMatchNode: Integer;
+  LNode, LStruct, LUid, LSym, LCtx, LMatchNode, LWIdx: Integer;
   LPend: TPasInhPending;
   LNameLower: string;
   LBound: Boolean;
   LMemX: TSemaXType;
+  LCurExt: TPasExtRef;
 begin
   APending := nil;
   LModel := FModels[AId];
-  for LNode := 0 to High(LModel.RefMap) do
+  EnsureCrossWork(AId);
+  // Idents inside a with body, from the one classifying scan. Bound-ness is
+  // NOT part of that list and is tested below per round, because a round can
+  // bind a name the next round must then leave alone.
+  for LWIdx := 0 to High(FWithWork[AId]) do
   begin
-    if LModel.Tree.Nodes[LNode].Kind <> nkIdent then
-      Continue;
+    LNode := FWithWork[AId][LWIdx];
     LBound := (LModel.RefMap[LNode] <> NIL_SYM) or
               LModel.ExtRefMap.ContainsKey(LNode);
     // An already-bound name is finished — EXCEPT in a `with` body whose target
@@ -3657,16 +3745,8 @@ begin
     if (LModel.RefMap[LNode] <> NIL_SYM) and
        (LModel.Symbols[LModel.RefMap[LNode]].DeclNode = LNode) then
       Continue;
-    if (LNode > High(LModel.NodeScope)) or
-       (LModel.NodeScope[LNode] = NIL_SCOPE) then
-      Continue;
-    LBase := LModel.Tree.Nodes[LNode].Parent;
-    if (LBase <> NIL_NODE) and
-       (LModel.Tree.Nodes[LBase].Kind = nkMember) and
-       (LModel.Tree.Nodes[LBase].FirstChild <> LNode) then
-      Continue;   // member name of A.B — resolved via A, not as a plain ident
-    if not InsideWithBody(LModel, LNode) then
-      Continue;   // handled (resolved or E2003'd) by the two earlier passes
+    // Scope, the A.B-member case and "is inside a with body" were all settled
+    // by EnsureCrossWork's single scan.
     LNameLower := LModel.Tree.NodeNameLower(LNode);
     if (LNameLower = 'result') or (LNameLower = 'self') then
       Continue;
@@ -3678,9 +3758,16 @@ begin
     LStruct := StructSymOfNode(LModel, LNode);
     if FindInEnclosingWith(AId, LNode, LNameLower, LUid, LSym, LMemX) then
     begin
-      // Already exactly this symbol (the intra-unit pass opened the scope and
-      // got it right) — nothing to rewrite.
+      // Already exactly this symbol — nothing to rewrite. BOTH maps have to be
+      // consulted, and missing the second one is what made the fixpoint spin:
+      // a commit CLEARS RefMap and writes ExtRefMap, so a node bound by an
+      // earlier ROUND looked unbound-here-but-still-in-an-unopened-with-body,
+      // got re-found, and was re-reported as a change every single round. The
+      // loop then never converged and always ran the full MAX_ROUNDS.
       if (LUid = AId) and (LModel.RefMap[LNode] = LSym) then
+        Continue;
+      if LModel.ExtRefMap.TryGetValue(LNode, LCurExt) and
+         (LCurExt.UnitId = LUid) and (LCurExt.Sym = LSym) then
         Continue;
       LPend.Node := LNode;
       LPend.Ext.UnitId := LUid;
@@ -3735,6 +3822,7 @@ var
   LEmit: Boolean;
 begin
   SetLength(LPending, ACount);
+  SizeCrossWork(ACount);   // AnalyzeFile reaches this pass without the other
   LRound := 0;
   LEmit := False;
   while True do
@@ -3898,10 +3986,13 @@ begin
   // The inherited-member pass needs every CrossResolve worker done first
   // (it reads their ExtRefMaps); parallel compute + sequential commit.
   RunInheritedPass(LN);
-  // Then the with-body pass, which reads type nodes the inherited pass just
-  // COMMITTED (see CrossResolveWith) — order matters, not just grouping.
-  RunWithPass(LN);
   Stage('inherited');
+  // Then the with-body pass, which reads type nodes the inherited pass just
+  // COMMITTED (see CrossResolveWith) — order matters, not just grouping. Timed
+  // apart because it iterates to a fixpoint: its cost is the one that is not
+  // obvious from reading the code.
+  RunWithPass(LN);
+  Stage('with');
   ForEachIndex(LN - 1,
     procedure(AIdx: Integer)
     begin
@@ -3972,10 +4063,13 @@ begin
   // The inherited-member pass needs every CrossResolve worker done first
   // (it reads their ExtRefMaps); parallel compute + sequential commit.
   RunInheritedPass(LN);
-  // Then the with-body pass, which reads type nodes the inherited pass just
-  // COMMITTED (see CrossResolveWith) — order matters, not just grouping.
-  RunWithPass(LN);
   Stage('inherited');
+  // Then the with-body pass, which reads type nodes the inherited pass just
+  // COMMITTED (see CrossResolveWith) — order matters, not just grouping. Timed
+  // apart because it iterates to a fixpoint: its cost is the one that is not
+  // obvious from reading the code.
+  RunWithPass(LN);
+  Stage('with');
   ForEachIndex(LN - 1,
     procedure(AIdx: Integer)
     begin
