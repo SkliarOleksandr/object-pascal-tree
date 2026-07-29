@@ -2767,55 +2767,10 @@ var
 
       nkParen:
         if LM.Tree.Nodes[N].FirstChild <> NIL_NODE then
-        begin
           LX[N] := GetX(LM.Tree.Nodes[N].FirstChild);
-          LCtxOf[N] := LCtxOf[LM.Tree.Nodes[N].FirstChild];
-        end;
 
       nkTypeArgs:
         LX[N] := ResolveTypeExpr(AId, N);
-
-      { The three designator forms this walk did not type. They are NOT new
-        logic: ElementX, PointeeX and ResolveTypeExpr are the same primitives
-        WithTargetTypeX uses for them, so there is now one implementation of
-        "element of", "pointee of" and "the type an as-cast yields" instead of a
-        shape known to one typer and not the other. }
-      nkIndex:
-        begin
-          LBase := LM.Tree.Nodes[N].FirstChild;
-          if LBase <> NIL_NODE then
-          begin
-            LX[N] := ElementX(AId, LBase);
-            // XNil here is the indexed-PROPERTY case: such a property's
-            // declared type is ALREADY its element type, so indexing must not
-            // peel a level (same reasoning as WithTargetTypeX's own fallback).
-            if not XValid(LX[N]) then
-              LX[N] := GetX(LBase);
-            LCtxOf[N] := LCtxOf[LBase];
-          end;
-        end;
-
-      nkDeref:
-        begin
-          LBase := LM.Tree.Nodes[N].FirstChild;
-          if LBase <> NIL_NODE then
-          begin
-            LX[N] := PointeeX(GetX(LBase));
-            LCtxOf[N] := LCtxOf[LBase];
-          end;
-        end;
-
-      nkBinaryOp:
-        // Only `as` yields a type worth propagating; every other operator
-        // produces a value this pass has no business typing here.
-        if (LM.Tree.Nodes[N].Aux >= 0) and
-           (LM.Tree.Nodes[N].Aux <= High(LM.Tree.Source.Visible)) and
-           SameText(LM.Tree.Source.VisibleText(LM.Tree.Nodes[N].Aux), 'as') then
-        begin
-          LBase := LM.Tree.Nodes[N].FirstChild;
-          if LBase <> NIL_NODE then
-            LX[N] := ResolveTypeExpr(AId, LM.Tree.Nodes[LBase].NextSibling);
-        end;
 
       nkMember:
         begin
@@ -4436,16 +4391,10 @@ begin
       CheckConstraints(AIdx);
     end);
   Stage('calls');
-  { BindTypesX must stay HERE, after the body passes — MEASURED, not assumed.
-    Moving it before them (so the with pass could ask DeclTypeX instead of
-    re-deriving types from type nodes, which would have let the two cross-model
-    typers share one primitive) costs 181k of 874k cross-model expression types
-    on the 665-unit corpus. Diagnostic counts do not move, so this degradation
-    is invisible to E2003/E2035 and only shows in `typed exprs (+N cross-model)`
-    in the dump. Whatever the body passes commit, BindTypesX consumes.
-
-    Cross typing then stays SEQUENTIAL for Instantiate's shared table; see
-    RunCrossTypePass for how the parallel part got there. }
+  // Cross typing stays SEQUENTIAL by design: Instantiate mutates the shared
+  // instance table, and CrossType both writes a model's RefMap/ExtRefMap and
+  // reads other models' — parallelizing would need locks on the hot path for
+  // ~5% of the total time (measured on the full RTL).
   for LIdx := 0 to FModels.Count - 1 do
     BindTypesX(LIdx);
   Stage('bindx');

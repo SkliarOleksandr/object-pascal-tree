@@ -220,40 +220,44 @@ usable.
 
 Still open, roughly in the order we're tackling it:
 
-- **One cross-model expression typer, not two.** There are two: `CrossType`'s
-  `Walk`, which types every expression node, and `WithTargetTypeX`, which types
-  a `with` target. A `with` target is simply *an expression whose type must be a
-  structured type*, so it deserves the general typer rather than a parallel case
-  list. Partly done, and the remainder is blocked for a reason that was measured
-  rather than guessed:
+- ~~**One cross-model expression typer, not two.**~~ **Tried on 2026-07-29 and
+  rejected on measurement — do not repeat it hoping for a different answer.**
 
-  - **Done:** the two no longer disagree about *shapes*. They were not
-    subset-and-superset — each was missing kinds the other had (`Walk` had no
-    `nkIndex`/`nkDeref`/`nkBinaryOp`, `WithTargetTypeX` no `nkTypeArgs`/
-    `nkInlineIf`), so a shape fixed in one stayed broken in the other. `Walk`
-    now covers the designator kinds through the SAME primitives
-    (`ElementX`/`PointeeX`/`ResolveTypeExpr`), which is +35k cross-model
-    expression types on the 665-unit corpus, no diagnostic change, +4% total
-    time.
-  - **Blocked:** sharing the *ident* primitive. `Walk` asks `DeclTypeX`, which
-    reads the `SymTypeX` map that `BindTypesX` fills; `WithTargetTypeX` cannot,
-    because `BindTypesX` runs after it and the map is still empty. Moving
-    `BindTypesX` before the body passes looks obviously right — type references
-    live in declarations, and the body passes state that their own entries are
-    never type nodes — but doing it **loses 181k of 874k cross-model types**.
-    Diagnostic counts do not move, so that degradation is invisible unless you
-    read `typed exprs (+N cross-model)` in the dump. Something the body passes
-    commit is consumed by `BindTypesX`; until that dependency is named exactly,
-    the reorder is not safe, and without the reorder the two cannot share the
-    primitive.
+  There are two: `CrossType`'s `Walk`, which types every expression node, and
+  `WithTargetTypeX`, which types a `with` target. They are not
+  subset-and-superset — each lacks kinds the other has (`Walk` no `nkIndex`/
+  `nkDeref`/`nkBinaryOp`, `WithTargetTypeX` no `nkTypeArgs`/`nkInlineIf`) — so
+  the duplication is real and a shape fixed in one can stay broken in the other.
+  Unifying them still lost on the only test that matters here, *simple and fast*:
 
-  Worth recording *why* the shape list grew, because it was not really about
-  shapes: three of the four `with` defects fixed on 2026-07-29 had one root
-  cause — code asking `RefMap`/`ExtRefMap` for a binding that a LATER pass
-  produces. At with-pass time those maps are legitimately incomplete, and the
-  rule is "derive from types, never read the ref maps". That rule now lives in
-  one place (`DesignatorSymX`'s fallback); the remaining special cases should be
-  converted to go through it rather than grown.
+  | step | total | what it bought |
+  |---|---|---|
+  | baseline | 1893 ms | — |
+  | `Walk` gains the designator kinds | 1952 ms | +35k typed exprs, 0 diagnostics |
+  | + split `BindTypesX`, share `DeclTypeX` | 1999 ms | one shared primitive |
+
+  **+5.6% wall time, zero diagnostic change, and MORE code** — an `AInBodies`
+  parameter, a two-phase ordering protocol, four extra call sites, a fallback
+  chain. The 35k extra expression types produced nothing observable. Reverted.
+
+  What the attempt *did* establish, and what makes it cheap to retry only if a
+  real need appears:
+
+  - The two cannot share the ident primitive without `BindTypesX` running before
+    the body passes, and that reorder is **not** free: of 53,643 symbols
+    untypeable right after `CrossResolve`, 43,470 are declared inside a method
+    body, and the inherited pass unlocks 42,039 of them (the with pass a further
+    4). Moving all of `BindTypesX` early loses 181k of 874k cross-model types
+    with diagnostic counts completely unmoved. Splitting it by declaration site
+    works to within 17 symbols, so the dependency is precisely *method locals* —
+    not "the body passes" in general.
+  - Three of the four `with` defects fixed that day had one root cause, and it
+    was never the shape list: code asking `RefMap`/`ExtRefMap` for a binding that
+    a LATER pass produces. At with-pass time those maps are legitimately
+    incomplete; the rule is "derive from types, never read the ref maps". That
+    rule lives in one place (`DesignatorSymX`'s fallback), and new special cases
+    should be routed through it rather than grown. **That** is the cheap
+    generalization; merging the typers is not.
 - **Go-to-declaration inside an opened `.inc` tab.** Navigating *into* an
   include file already works; resolving an identifier typed *inside* an
   already-open include tab does not yet (`IdentAt` is currently main-file-only).
