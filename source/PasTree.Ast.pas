@@ -207,6 +207,15 @@ end;
 
 function TPasTree.NodeText(AIndex: Integer): string;
 begin
+  // Backstop, not a licence: every caller is expected to pass a real node id.
+  // It exists because the alternative is worse than a wrong answer — without
+  // range checks an out-of-range index reads whatever memory follows Nodes, so
+  // a caller bug became NON-DETERMINISTIC behaviour rather than a failure
+  // (found exactly that way: a token index passed here, see
+  // TPasSemaResolver.WithTargetTypeSym's nkBinaryOp case). An analyzer must not
+  // read past its own arrays whatever it is fed.
+  if (AIndex < 0) or (AIndex > High(Nodes)) then
+    Exit('');
   if (Nodes[AIndex].FirstToken >= 0) and
      (Nodes[AIndex].FirstToken <= High(Source.Visible)) then
     Result := Source.VisibleText(Nodes[AIndex].FirstToken)

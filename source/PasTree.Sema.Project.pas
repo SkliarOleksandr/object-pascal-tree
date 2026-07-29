@@ -110,6 +110,7 @@ type
     FByUnitName: TDictionary<string, Integer>;
     FNamespaces: TArray<string>;           // own copy for LoadedUnitByName
     FStageTimings: string;                 // see StageTimings
+    FLoadFailures: TArray<string>;         // see LoadFailures
     FSingleThreaded: Boolean;
     FSystemUnitId: Integer;                // memoized EnsureSystemUnit result
     FSystemUnitResolved: Boolean;
@@ -295,6 +296,12 @@ type
       AnalyzeStaged run ('stage=ms;...') — for perf logging in hosts and
       probes. Empty for AnalyzeFile. }
     function StageTimings: string;
+    { Units that could not be parsed at all, as 'file: EClass: message'.
+      A unit in here is treated as unresolvable, so its importers report F1027 —
+      which is why the list must be surfaced: F1027 says "no source on the
+      search path", and for these the source IS there and WE failed on it.
+      Non-empty means an analyzer defect, not a project problem. }
+    function LoadFailures: TArray<string>;
     function ModelCount: Integer;
     function Model(AId: Integer): TPasSemaModel;
     function ModelFile(AId: Integer): string;
@@ -671,6 +678,7 @@ var
   LIdx, LDummy: Integer;
   LFull, LKey: string;
   LStatus: TPasModuleStatus;
+  LFailLock: TCriticalSection;
 begin
   // Normalize, drop already-loaded/known-bad paths and in-batch duplicates.
   LTodo := nil;
@@ -694,6 +702,8 @@ begin
   end;
   if LTodo = nil then
     Exit;
+  LFailLock := TCriticalSection.Create;
+  try
 
   // I/O first, CPU second: pull every file into the source manager's memory
   // repository with the deep I/O pool, so the per-core parse workers below
@@ -726,8 +736,26 @@ begin
             {ASkipTyper} AInterfaceOnly and (Length(LTree.Nodes) > 0) and
             (LTree.Nodes[0].Kind = nkUnit));
         except
-          on Exception do
+          on E: Exception do
+          begin
             LDone[AIndex] := nil;   // registered as known-bad below
+            // Keep WHY. Swallowing this made an internal defect indistinguish-
+            // able from a missing file: the unit ended up cached as known-bad,
+            // and its importers then reported F1027 "no source on the search
+            // path" for a file sitting right there. That cost a day of chasing
+            // a phantom search-path problem before a trace showed the real
+            // cause (an ERangeError inside Phase 1). Tolerating the failure is
+            // still right — one bad unit must not sink an analysis — but it has
+            // to be tolerated OUT LOUD.
+            LFailLock.Enter;
+            try
+              FLoadFailures := FLoadFailures +
+                [Format('%s: %s: %s', [TPath.GetFileName(LTodo[AIndex]),
+                  E.ClassName, E.Message])];
+            finally
+              LFailLock.Leave;
+            end;
+          end;
         end;
       finally
         LPP.Free;
@@ -753,6 +781,9 @@ begin
     end
     else
       FByPath.Add(LKeys[LIdx], -1);
+  finally
+    LFailLock.Free;
+  end;
 end;
 
 // Maps the model's DECLARED unit name (root's name node, dotted included) to
@@ -3785,6 +3816,11 @@ end;
 function TPasSemaProject.StageTimings: string;
 begin
   Result := FStageTimings;
+end;
+
+function TPasSemaProject.LoadFailures: TArray<string>;
+begin
+  Result := FLoadFailures;
 end;
 
 function TPasSemaProject.AnalyzeProject(const AMainFile: string): Integer;

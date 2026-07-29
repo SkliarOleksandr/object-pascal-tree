@@ -317,6 +317,16 @@ begin
       Writeln(ErrOutput, Format(
         'diagnostics: %d total — %d in project files, %d in library units',
         [LListed + LOther, LListed, LOther]));
+      // OUR failures, kept distinct from F1027: the file is present and we
+      // broke on it. Silence here once let an internal ERangeError look like a
+      // missing unit for a whole day.
+      if Length(GProj.LoadFailures) > 0 then
+      begin
+        Writeln(ErrOutput, Format('INTERNAL: %d unit(s) failed to parse — ' +
+          'analyzer defect, not a missing file:', [Length(GProj.LoadFailures)]));
+        for var LFail in GProj.LoadFailures do
+          Writeln(ErrOutput, '    ' + LFail);
+      end;
       ReportHistogram('--- unresolvable `uses` names, by import count ---',
         LMissing, 25, LSites);
       ReportHistogram('--- project files, by identifier/code ---', LInProj, 25);

@@ -364,6 +364,8 @@ const
     '  PVarLike = ^TVarLike;'#10 +
     '  PAlias = PVarLike;'#10 +   // alias chain: the walk must chase it
     '  TRec = record F: Integer; end;'#10 +
+    '  TAncestor = class Base: Integer; end;'#10 +
+    '  TChild = class(TAncestor) Tag: Integer; end;'#10 +
     'implementation'#10 +
     'function GetRec: TRec; begin Result.F := 1; end;'#10 +
     'function GetPtr: PVarLike; begin Result := nil; end;'#10 +
@@ -373,7 +375,17 @@ const
     '  LP: PVarLike;'#10 +
     '  LA: PAlias;'#10 +
     '  LI: Integer;'#10 +
+    '  LO: TAncestor;'#10 +
     'begin'#10 +
+    // An `as`-CAST target. Phase 1 reads the operator lexeme off nkBinaryOp's
+    // Aux, which is a TOKEN index — passing it to NodeText (a NODE index) read
+    // past the end of Nodes, so the comparison against 'as' usually came out
+    // False on garbage and this target silently never opened. Invisible from
+    // the project-level suites: the cross-model twin reads Aux correctly and
+    // opened it there, masking the intra-unit failure. Only a single-model test
+    // like this one can see it.
+    '  with LO as TChild do'#10 +
+    '    Tag := 9;'#10 +
     '  with TVarLike(Buf) do'#10 +          // cast
     '    VType := 1;'#10 +
     '  with LP^ do'#10 +                    // deref of a variable
@@ -874,6 +886,9 @@ begin
   Ok('withshapes: no diags at all', Length(GModel.Diags) = 0);
   Ok('withshapes: every VType reference resolves to the field',
     AllRefsResolved('VType') and RefResolvesTo('VType', 'VType'));
+  // `with LO as TChild do Tag := 9` — the as-cast target, INTRA-UNIT.
+  Ok('withshapes: as-cast target opens (Tag resolves)',
+    AllRefsResolved('Tag') and RefResolvesTo('Tag', 'Tag'));
   Ok('withshapes: the call-target control still resolves (F)',
     RefResolvesTo('F', 'F'));
   GModel.Free;

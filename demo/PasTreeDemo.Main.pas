@@ -1681,6 +1681,18 @@ begin
       [LUnresUses, LMissing.Count, LUnitsGated, FSemaProject.ModelCount]));
     LogMissingUnits(LMissing);
   end;
+  // Units WE failed to parse. Distinct from F1027 on purpose: the source is
+  // right there and the analyzer is what broke, so this is our bug, not a
+  // project misconfiguration. It used to be silent, which let an internal
+  // ERangeError present itself as "no source on the search path".
+  if Length(FSemaProject.LoadFailures) > 0 then
+  begin
+    Log(Format('  INTERNAL: %d unit(s) failed to parse — analyzer defect, not a ' +
+      'missing file. Their importers report F1027 as a consequence.',
+      [Length(FSemaProject.LoadFailures)]));
+    for var LFail in FSemaProject.LoadFailures do
+      Log('    ' + LFail);
+  end;
   if FSemaProject.StageTimings <> '' then
     Log('  stages: ' + FSemaProject.StageTimings);
   if FAnalyzeOverhead <> '' then

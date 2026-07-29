@@ -1894,7 +1894,19 @@ begin
       // `with Obj as TSomething do` (System.Net.Socket) — the CAST's type, i.e.
       // the right operand. Only `as` qualifies; every other binary operator
       // yields a value whose type is not a with-openable struct anyway.
-      if SameText(NodeText(FTree.Nodes[ANode].Aux), 'as') then
+      //
+      // Aux on nkBinaryOp is a TOKEN index, so it must be read through
+      // Source.VisibleText — NOT NodeText, which takes a NODE index. Token
+      // indices run well past the node count, so passing one to NodeText read
+      // memory past the end of Nodes: garbage without range checks (this
+      // comparison then usually said False, silently losing the cast, and the
+      // junk it read varied per run — that was the source of the analyzer's
+      // run-to-run non-determinism), ERangeError with them (whole unit
+      // discarded as unparseable, reported as a missing unit). Every other
+      // reader of Aux in the codebase already uses VisibleText.
+      if (FTree.Nodes[ANode].Aux >= 0) and
+         (FTree.Nodes[ANode].Aux <= High(FTree.Source.Visible)) and
+         SameText(FTree.Source.VisibleText(FTree.Nodes[ANode].Aux), 'as') then
       begin
         LBase := FirstChild(ANode);
         if LBase <> NIL_NODE then
