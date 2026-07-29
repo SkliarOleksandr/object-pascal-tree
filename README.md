@@ -107,6 +107,34 @@ closure fans out across cores instead of being processed one file at a time:
   order of magnitude more CPU **and** more wall time (2643 ms vs 1853 ms, ~20.5 s
   of CPU vs ~5.8 s). Wider is not faster here.
 
+## Start from the spec
+
+[object-pascal-spec](https://github.com/SkliarOleksandr/object-pascal-spec) is
+the reference this parser is written against, not documentation written after the
+fact. **Before fixing or adding anything, read the section that governs it and
+work from there.** In order:
+
+1. **Find the rule.** If the spec already states it, the fix follows its wording.
+   A fix that needs *more cases than the spec has rules* is a signal you are
+   patching symptoms — §5.7 says a `with` target is a structured-typed
+   designator, one rule, while the implementation grew a case per shape.
+2. **If the spec is silent, ask dcc, then write it down.** A probe compiled
+   against `dcc32` settles it; the answer belongs in the spec in the same
+   session, with the probe's shape as evidence. Otherwise the next person
+   re-derives it.
+3. **If the spec and the code disagree, do not assume the spec is right.** It is
+   evidence, not scripture: §1.2.2 once cited `Generics.Collections` as the
+   example for a rule that excluded dotted names — the example was right and the
+   rule was wrong, and only dcc could say which. Correct whichever loses.
+4. **Check before you write.** §13.1.4 already described default array
+   properties, including the `default;` versus `default 0;` distinction, and was
+   nearly duplicated by someone who fixed it first and read it after.
+
+Reading first is usually *faster*, not slower: several fixes here were
+re-derivations of something the spec already said in one line, and one of them
+(`&Foo` and `Foo` being the same identifier, §B.3) would have gone straight to
+the both-ends conclusion instead of half of it.
+
 ## Performance discipline
 
 Every change ships with a timing run, not just a correctness run. This is not
