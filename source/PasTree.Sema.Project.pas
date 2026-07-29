@@ -116,6 +116,10 @@ type
     FInhWork: TArray<TArray<Integer>>;
     FWithWork: TArray<TArray<Integer>>;
     FWorkBuilt: TArray<Boolean>;
+    { Per-model overlay of the member references CrossType discovers, so the
+      parallel walks never mutate a dictionary another walk is reading — see
+      RunCrossTypePass. Owned here; merged and freed there. }
+    FXNewExt: TArray<TDictionary<Integer, TPasExtRef>>;
     FSingleThreaded: Boolean;
     FSystemUnitId: Integer;                // memoized EnsureSystemUnit result
     FSystemUnitResolved: Boolean;
@@ -248,6 +252,7 @@ type
       const AArgTypes: TArray<TSemaXType>; ACtx: Integer): Integer;
     procedure BindTypesX(AId: Integer);
     procedure CrossType(AId: Integer);
+    procedure RunCrossTypePass(ACount: Integer);
   public
     constructor Create(APlatform: TPasPlatform;
       const ASearchPaths: TArray<string>; const AExtraDefines: TArray<string>);
@@ -2450,6 +2455,18 @@ var
   // thousands of times; one interface Resolve per used unit per NAME, not
   // per call).
   LUsesHeads: TDictionary<string, TArray<TPasExtRef>>;
+  // Cross-unit member references this walk discovers, held OUT of the model's
+  // own ExtRefMap until the pass is over — see the overlay note in the header.
+  LNewExt: TDictionary<Integer, TPasExtRef>;
+
+  { A node's cross-unit binding: this walk's own finds first, then the committed
+    map. The two must be read together everywhere, because within one walk a
+    later node's overload selection depends on a member reference an earlier
+    node discovered (see TargetSym). }
+  function ExtOf(N: Integer; out AExt: TPasExtRef): Boolean;
+  begin
+    Result := LNewExt.TryGetValue(N, AExt) or LM.ExtRefMap.TryGetValue(N, AExt);
+  end;
 
   // A node's best-known type: this pass's result, else the intra-unit one.
   function GetX(N: Integer): TSemaXType;
@@ -2488,7 +2505,7 @@ var
     ASym := LM.RefMap[LName];
     if ASym <> NIL_SYM then
       Exit(True);
-    if LM.ExtRefMap.TryGetValue(LName, LExt) then
+    if ExtOf(LName, LExt) then
     begin
       AMid := LExt.UnitId;
       ASym := LExt.Sym;
@@ -2679,7 +2696,7 @@ var
               skType, skBuiltinType, skGenericParam:
                 LX[N] := XPlain(AId, LSym);
             end
-          else if LM.ExtRefMap.TryGetValue(N, LExt) then
+          else if ExtOf(N, LExt) then
             case FModels[LExt.UnitId].Symbols[LExt.Sym].Kind of
               skVar, skConst, skField, skParam, skProperty, skRoutine:
                 LX[N] := DeclTypeX(LExt.UnitId, LExt.Sym);
@@ -2711,7 +2728,7 @@ var
             LX[N] := MemberTypeX(AId, LSym, LBX.Inst, LBX);
             LCtxOf[N] := LBX.Inst;
           end
-          else if LM.ExtRefMap.TryGetValue(LName, LExt) then
+          else if ExtOf(LName, LExt) then
           begin
             LX[N] := MemberTypeX(LExt.UnitId, LExt.Sym, LBX.Inst, LBX);
             LCtxOf[N] := LBX.Inst;
@@ -2726,7 +2743,7 @@ var
             begin
               LExt.UnitId := LMemMid;
               LExt.Sym := LMemSym;
-              LM.ExtRefMap.AddOrSetValue(LName, LExt);
+              LNewExt.AddOrSetValue(LName, LExt);
             end;
             LX[N] := MemberTypeX(LMemMid, LMemSym, LCtx, LBX);
             LCtxOf[N] := LCtx;
@@ -2810,12 +2827,25 @@ begin
     LX[LNode] := XNil;
     LCtxOf[LNode] := NIL_INST;
   end;
+  // Provided by RunCrossTypePass, which owns it across the parallel phase and
+  // merges it afterwards; a direct caller (AnalyzeFile) gets a private one.
+  if (AId <= High(FXNewExt)) and (FXNewExt[AId] <> nil) then
+    LNewExt := FXNewExt[AId]
+  else
+    LNewExt := TDictionary<Integer, TPasExtRef>.Create;
   LUsesHeads := TDictionary<string, TArray<TPasExtRef>>.Create;
   try
     if Length(LX) > 0 then
       Walk(0);
   finally
     LUsesHeads.Free;
+    if (AId > High(FXNewExt)) or (FXNewExt[AId] = nil) then
+    begin
+      // Unmanaged case: commit and drop it here.
+      for var LPair in LNewExt do
+        LM.ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
+      LNewExt.Free;
+    end;
   end;
   // Persist only what ADDS to the intra-unit result: a type for a locally
   // untyped node, an instantiation, or a type living in another model.
@@ -2829,6 +2859,49 @@ begin
        (LX[LNode].Inst <> NIL_INST) or (LX[LNode].UnitId <> AId)) then
       if not LM.ExprTypeX.ContainsKey(LNode) then
         LM.ExprTypeX.Add(LNode, LX[LNode]);
+end;
+
+{ CrossType for every unit, in PARALLEL, with the one shared-write hazard
+  removed rather than locked.
+
+  The walk reads other models freely (Symbols/Tree/SymTypeX — all frozen by
+  now) but used to also WRITE its own model's ExtRefMap mid-walk, recording each
+  cross-unit member reference it discovered. That is the hazard: another walk
+  reads that same dictionary through ResolveTypeExpr(thatModel, ...), and
+  TDictionary.AddOrSetValue can rehash under a concurrent TryGetValue. RefMap is
+  a pre-sized array of Integer, so element writes there are benign; the
+  dictionary is not.
+
+  So each walk now records into a private overlay, read back through ExtOf so
+  the walk still sees its own finds (overload selection within one unit depends
+  on that), and the overlays are merged here, sequentially, once every walk has
+  finished. ExprTypeX needs no such treatment: nothing reads another model's.
+
+  Instantiate stays locked — measured at 77k calls for the whole 665-unit corpus
+  against 126k InstanceRead calls, so ~200k uncontended acquisitions in total;
+  that is single-digit milliseconds, not a reason to redesign the instance
+  table. }
+procedure TPasSemaProject.RunCrossTypePass(ACount: Integer);
+var
+  LIdx: Integer;
+begin
+  SetLength(FXNewExt, ACount);
+  for LIdx := 0 to ACount - 1 do
+    FXNewExt[LIdx] := TDictionary<Integer, TPasExtRef>.Create;
+  try
+    ForEachIndex(ACount - 1,
+      procedure(AIdx: Integer)
+      begin
+        CrossType(AIdx);
+      end);
+    for LIdx := 0 to ACount - 1 do
+      for var LPair in FXNewExt[LIdx] do
+        FModels[LIdx].ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
+  finally
+    for LIdx := 0 to ACount - 1 do
+      FXNewExt[LIdx].Free;
+    SetLength(FXNewExt, 0);
+  end;
 end;
 
 function TPasSemaProject.InstanceCount: Integer;
@@ -4004,8 +4077,7 @@ begin
   for LIdx := 0 to FModels.Count - 1 do
     BindTypesX(LIdx);
   Stage('bindx');
-  for LIdx := 0 to LN - 1 do
-    CrossType(LIdx);
+  RunCrossTypePass(LN);
   Stage('xtype');
   // Whole transitive closure went through the cross passes.
   MarkAllCrossReady;
@@ -4084,8 +4156,7 @@ begin
   for LIdx := 0 to FModels.Count - 1 do
     BindTypesX(LIdx);
   Stage('bindx');
-  for LIdx := 0 to LN - 1 do
-    CrossType(LIdx);
+  RunCrossTypePass(LN);
   Stage('xtype');
   // Units [0..LN-1] (the directory's own) went through the cross passes; a
   // System unit pulled in from search paths after the LN snapshot stays
@@ -4371,8 +4442,7 @@ begin
     for LIdx := 0 to FModels.Count - 1 do
       BindTypesX(LIdx);
     Report('cross:xtype');
-    for LIdx := 0 to LN - 1 do
-      CrossType(LIdx);
+    RunCrossTypePass(LN);
     MarkAllCrossReady;
     StageMark('cross');
     Recount;
