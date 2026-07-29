@@ -315,9 +315,13 @@ end;
 function TPasSemaModel.FindLocal(AScope: Integer;
   const ANameLower: string): Integer;
 begin
-  // Safety net: normalized here too, so a caller that builds a key by hand
-  // cannot reintroduce the '&' mismatch. Idempotent for an already-clean key.
-  if not Scopes[AScope].Names.TryGetValue(PasNameKey(ANameLower), Result) then
+  // ANameLower must ALREADY be a key (PasNameKey / TPasTree.NodeNameLower).
+  // Normalizing defensively here instead cost 3.3x total analysis time: this is
+  // the hottest function in the analyzer, and PasNameKey allocates a string per
+  // call. Cheap-looking belt-and-braces on a hot path is not cheap — the
+  // boundary that BUILDS the key is the only place that can normalize for free,
+  // because it is already producing a string there.
+  if not Scopes[AScope].Names.TryGetValue(ANameLower, Result) then
     Result := NIL_SYM;
 end;
 
