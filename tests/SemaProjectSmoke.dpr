@@ -227,7 +227,33 @@ const
     '    Count: Integer;'#10 +
     '  end;'#10 +
     '  PParamsLike = ^TParamsLike;'#10 +
-    'implementation'#10'end.'#10;
+    // 13.1.4 default ARRAY property, inherited one level down — the
+    // `with ActionManager.ActionBars[I] do` shape. TValueProp is the control:
+    // a default VALUE spec on an ordinary property spells the same word and
+    // must NOT be mistaken for it.
+    '  TItemLike = class'#10 +
+    '    Tag: Integer;'#10 +
+    '  end;'#10 +
+    '  TCollBase = class'#10 +
+    '  private'#10 +
+    '    function GetItem(const Index: Integer): TItemLike;'#10 +
+    '  public'#10 +
+    '    property Items[const Index: Integer]: TItemLike'#10 +
+    '      read GetItem; default;'#10 +
+    '  end;'#10 +
+    '  TCollLike = class(TCollBase)'#10 +
+    '    Count: Integer;'#10 +
+    '  end;'#10 +
+    '  TValueProp = class'#10 +
+    '  private'#10 +
+    '    FN: Integer;'#10 +
+    '  public'#10 +
+    '    property N: Integer read FN default 7;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TCollBase.GetItem(const Index: Integer): TItemLike;'#10 +
+    'begin Result := nil; end;'#10 +
+    'end.'#10;
   UNIT_MTUSE =
     'unit UnitMTUse;'#10'interface'#10 +
     'uses UnitMTRec;'#10 +
@@ -258,6 +284,19 @@ const
     '    W := 1;'#10 +
     '  with P^.rgrc[0] do'#10 +            // 25 deref + member + index
     '    H := 1;'#10 +
+    'end;'#10 +
+    // Indexing a CLASS through its INHERITED default array property, unnamed —
+    // the element type is the property's, not the collection's.
+    'procedure Coll(C: TCollLike; V: TValueProp);'#10 +
+    'begin'#10 +
+    '  with C do'#10 +                     // 31 control: the collection itself
+    '    Count := 1;'#10 +
+    '  with C[0] do'#10 +                  // 33 default array property, unnamed
+    '    Tag := 2;'#10 +
+    '  with C.Items[0] do'#10 +            // 35 the same property, named
+    '    Tag := 3;'#10 +
+    '  with V do'#10 +                     // 37 control: a default VALUE spec
+    '    if N = 0 then Exit;'#10 +         //    is not a default array property
     'end;'#10 +
     'end.'#10;
 
@@ -990,6 +1029,15 @@ begin
       CrossRefTo(LMT, 'Count', 'Count'));
     Ok('target shapes: H through deref+member+index',
       CrossRefTo(LMT, 'H', 'H'));
+    // Indexing a class through its inherited default array property. Tag can
+    // ONLY be reached that way, so binding it proves the element type came from
+    // the property and not from the collection.
+    Ok('default array prop: Tag through the UNNAMED index',
+      CrossRefTo(LMT, 'Tag', 'Tag'));
+    Ok('default array prop: the collection''s own member still resolves',
+      CrossRefTo(LMT, 'Count', 'Count'));
+    Ok('default array prop: a default VALUE spec is not mistaken for one',
+      CrossRefTo(LMT, 'N', 'N'));
 
     // NESTED with whose INNER target is an inherited cross-unit property (see
     // UNIT_NWUSE for the Vcl.ColorGrd shape this reproduces). Both halves

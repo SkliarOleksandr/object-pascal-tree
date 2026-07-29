@@ -186,6 +186,9 @@ type
     function PointeeX(const AX: TSemaXType): TSemaXType;
     function DesignatorSymX(AId, ANode: Integer;
       out AMid, ASym: Integer): Boolean;
+    function IsDefaultArrayProp(AMid, ASym: Integer): Boolean;
+    function DefaultArrayPropX(const AX: TSemaXType;
+      out AMid, ASym: Integer): Boolean;
     function ElementX(AId, ABaseNode: Integer): TSemaXType;
     function WithTargetTypeX(AId, ANode: Integer): TSemaXType;
     function InsideWithBody(AModel: TPasSemaModel; ANode: Integer): Boolean;
@@ -3371,6 +3374,111 @@ end;
   sources: the base's own declared type NODE may BE an inline array, which no
   symbol lookup can reach, so that is tried before the named type it resolves
   to. Alias links chased in both, depth-capped like PointeeX. }
+{ True when ASym is a DEFAULT ARRAY property (13.1.4) — `property Items[Index:
+  Integer]: T read GetItem; default;`.
+
+  Two different specifiers spell `default` and both land as an nkPropSpec whose
+  first token is that word: this one, and the default-VALUE of an ordinary
+  property (`property Align: TAlign read FAlign default alLeft;`). They are told
+  apart by the index parameters — a value-default property has none, and only an
+  ARRAY property can be the default one. }
+function TPasSemaProject.IsDefaultArrayProp(AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LDecl, LChild: Integer;
+  LHasParams, LHasDefault: Boolean;
+begin
+  Result := False;
+  LM := FModels[AMid];
+  if LM.Symbols[ASym].Kind <> skProperty then
+    Exit;
+  // The symbol's DeclNode is the property's NAME node; the specifiers are
+  // siblings of it under the nkPropertyDecl.
+  LDecl := LM.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LDecl := LM.Tree.Nodes[LDecl].Parent;
+  if (LDecl = NIL_NODE) or (LM.Tree.Nodes[LDecl].Kind <> nkPropertyDecl) then
+    Exit;
+  LHasParams := False;
+  LHasDefault := False;
+  LChild := LM.Tree.Nodes[LDecl].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LChild].Kind = nkParams then
+      LHasParams := True
+    else if (LM.Tree.Nodes[LChild].Kind = nkPropSpec) and
+            (LM.Tree.NodeNameLower(LChild) = 'default') then
+      LHasDefault := True;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+  Result := LHasParams and LHasDefault;
+end;
+
+{ The default array property of AX's type or of an ancestor.
+
+  `with ActionManager.ActionBars[I] do` (Vcl.CustomizeDlg) indexes a value whose
+  type is a CLASS, not an array: TActionBars declares `property ActionBars[const
+  Index: Integer]: TActionBarItem ... default`, and the element type is that
+  property's. Naming the property explicitly always worked — `Coll.Items[0]`
+  types through the member — so it was only the unnamed form that fell back to
+  the collection type itself and looked for the item's members on it.
+
+  Walk shape and alias chasing mirror XDescendsFrom: a default property is
+  frequently INHERITED (TCollection.Items, TStrings.Strings). }
+function TPasSemaProject.DefaultArrayPropX(const AX: TSemaXType;
+  out AMid, ASym: Integer): Boolean;
+var
+  LCur: TSemaXType;
+  LM: TPasSemaModel;
+  LDef, LScope, LIdx, LSym, LChild, LDepth: Integer;
+begin
+  Result := False;
+  AMid := NIL_SYM;
+  ASym := NIL_SYM;
+  LCur := AX;
+  for LDepth := 1 to 32 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LM := FModels[LCur.UnitId];
+    LScope := LM.Symbols[LCur.Sym].MemberScope;
+    if LScope <> NIL_SCOPE then
+      for LIdx := 0 to LM.Scopes[LScope].Symbols.Count - 1 do
+      begin
+        LSym := LM.Scopes[LScope].Symbols[LIdx];
+        if IsDefaultArrayProp(LCur.UnitId, LSym) then
+        begin
+          AMid := LCur.UnitId;
+          ASym := LSym;
+          Exit(True);
+        end;
+      end;
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if LDef = NIL_NODE then
+      Exit;
+    case LM.Tree.Nodes[LDef].Kind of
+      nkIdent, nkMember, nkTypeArgs:
+        LCur := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
+      nkClassType, nkInterfaceType:
+        begin
+          // The heritage clause leads the struct's children; its FIRST type
+          // reference is the ancestor (the same convention CollectStruct and
+          // XDescendsFrom both use).
+          LChild := LM.Tree.Nodes[LDef].FirstChild;
+          while (LChild <> NIL_NODE) and not (LM.Tree.Nodes[LChild].Kind in
+            [nkIdent, nkMember, nkTypeArgs]) do
+            LChild := LM.Tree.Nodes[LChild].NextSibling;
+          if LChild = NIL_NODE then
+            Exit;
+          LCur := ResolveTypeExpr(LCur.UnitId, LChild);
+        end;
+    else
+      Exit;
+    end;
+  end;
+end;
+
 function TPasSemaProject.ElementX(AId, ABaseNode: Integer): TSemaXType;
 
   // Element child of an nkArrayType: its LAST child. For a multi-dimensional
@@ -3425,9 +3533,14 @@ begin
       nkIdent, nkMember, nkTypeArgs:
         LCur := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
     else
-      Exit(XNil);
+      Break;   // not an array — a default array property may still index it
     end;
   end;
+  // A CLASS/interface being indexed: the element type is its default array
+  // property's (see DefaultArrayPropX).
+  if XValid(LCur) and DefaultArrayPropX(LCur, LMid, LSym) then
+    Exit(SubstX(ResolveTypeExpr(LMid, FModels[LMid].Symbols[LSym].TypeNode),
+      LCur.Inst, 0));
   Result := XNil;
 end;
 
