@@ -66,6 +66,7 @@ type
     function ParseSelectors(ABase: Integer): Integer;
     function ParseTypeRef: Integer;
     function ScanGenericArgs(AFrom: Integer): Integer;
+    function MaybeNamedArg(AArg: Integer): Integer;
     function ParseArgList(ACall: Integer): Integer;
     // statements
     function ParseStatement: Integer;
@@ -555,7 +556,9 @@ begin
           Next;
           while (CurKind <> tkRBracket) and (CurKind <> tkEndOfFile) do
           begin
-            FB.Adopt(LNode, ParseExpression);
+            // A Variant's INDEXED property takes named arguments too — see
+            // MaybeNamedArg.
+            FB.Adopt(LNode, MaybeNamedArg(ParseExpression));
             if CurKind = tkComma then
               Next
             else
@@ -599,6 +602,41 @@ begin
     end;
 end;
 
+{ Wraps AArg as an OLE-automation NAMED ARGUMENT when the next token is ':='
+  (4.11.3), otherwise returns it unchanged.
+
+  `Meth(Source := X)` on a Variant call passes a DISPATCH parameter name, not an
+  identifier of this program — dcc resolves nothing there, and the compiler names
+  the feature itself in `E2166 Unnamed arguments must precede named arguments in
+  OLE Automation call`. Without this the argument ended at the name and the ':='
+  read as an assignment whose TARGET was the whole call: two parse errors plus a
+  false E2003 per site (~20 in one real project's Excel code).
+
+  Needed in BOTH bracketed forms, because a Variant's INDEXED property takes them
+  too (`V.Range[Source := 1] := 5`, dcc-verified) — that one was still a false
+  E2003 after the parenthesised call was fixed.
+
+  Only a bare identifier qualifies, which is all the syntax admits; anything else
+  stays the syntax error it always was. NB this is deliberately more permissive
+  than dcc in one direction: it does not check that the callee is Variant-typed
+  (nothing knows that at parse time), so `Foo(A := 1)` on a real routine — an
+  E2003 for dcc, even when the parameter really is named A — is silently
+  accepted. A lost diagnostic, never a false one. }
+function TPasParser.MaybeNamedArg(AArg: Integer): Integer;
+var
+  LWrap: Integer;
+begin
+  Result := AArg;
+  if (CurKind <> tkAssign) or (FB.Kind(AArg) <> nkIdent) then
+    Exit;
+  LWrap := FB.AddNode(nkNamedArg, NIL_NODE, FPos);
+  FB.Adopt(LWrap, AArg);
+  Next;
+  FB.Adopt(LWrap, ParseExpression);
+  FB.SetLast(LWrap, FPos - 1);
+  Result := LWrap;
+end;
+
 function TPasParser.ParseArgList(ACall: Integer): Integer;
 var
   LArg, LWrap: Integer;
@@ -623,23 +661,8 @@ begin
       FB.SetLast(LWrap, FPos - 1);
       LArg := LWrap;
     end
-    else if (CurKind = tkAssign) and (FB.Kind(LArg) = nkIdent) then
-    begin
-      // OLE-automation NAMED ARGUMENT (4.10.1): `Meth(Source := X)`. Legal only
-      // on a late-bound (Variant) call, and the NAME is a dispatch parameter
-      // name that resolves to nothing — see the resolver's nkNamedArg handling.
-      // Without this the arg list ended at the name and the ':=' turned the
-      // whole call into an assignment TARGET: two parse errors and a false
-      // E2003 on the name, ~20 sites across one real project's Excel automation
-      // code. Restricted to a bare identifier on the left, which is all the
-      // syntax admits; anything else stays the syntax error it was.
-      LWrap := FB.AddNode(nkNamedArg, NIL_NODE, FPos);
-      FB.Adopt(LWrap, LArg);
-      Next;
-      FB.Adopt(LWrap, ParseExpression);
-      FB.SetLast(LWrap, FPos - 1);
-      LArg := LWrap;
-    end;
+    else
+      LArg := MaybeNamedArg(LArg);
     FB.Adopt(ACall, LArg);
     if CurKind = tkComma then
       Next

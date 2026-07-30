@@ -308,6 +308,15 @@ Still open, roughly in the order we're tackling it:
   - `with (R) do X := 1`. Parentheses demote the target to a VALUE: dcc opens
     the scope but reports `E2064 Left side cannot be assigned to`. We have no
     assignability model for with members, so the write is accepted.
+- **OLE named arguments are exempted syntactically, not by callee type.** 4.11.3:
+  `Name := Value` is an argument only when the callee is `Variant`/`OleVariant`
+  — on a class method, an interface, a statically typed `dispinterface`, or a
+  plain routine (even one whose parameter really is named `Name`) dcc reports
+  `E2003` on the name. Nothing knows the callee's type at parse time, so the
+  parser accepts the form anywhere and the resolver never looks the name up. A
+  lost diagnostic, never a false one. Closing it means deferring the decision to
+  the typer, which knows whether the callee is `Variant`. We also do not
+  implement `E2166` (named arguments must follow positional ones).
 - **Arity check in the intra-unit typer ignores inherited members.** The
   cross-unit check (`CheckCalls`) now yields to an inherited member before
   reporting, but `PasTree.Sema.Types.SelectOverload` has its own arity

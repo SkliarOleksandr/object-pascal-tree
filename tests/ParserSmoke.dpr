@@ -135,6 +135,12 @@ begin
       'Block(ExprStmt(Call(Member(Ident''Charts'' Ident''Add'') ' +
       'NamedArg(Ident''Source'' Ident''R'') ' +
       'NamedArg(Ident''Gap'' IntLit''1''))))');
+    // A Variant's INDEXED property takes them too (dcc-verified) — the bracket
+    // loop needed the same rule, and was still a false E2003 without it.
+    Check('4.10.1 named argument in an index',
+      'V.Range[Source := 1] := 5;',
+      'Block(Assign(Index(Member(Ident''V'' Ident''Range'') ' +
+      'NamedArg(Ident''Source'' IntLit''1'')) IntLit''5''))');
     // Only a bare identifier makes a named argument; anything else stays the
     // syntax error it always was (an assignment is not an expression).
     Check('4.10.1 named argument needs a bare name',
