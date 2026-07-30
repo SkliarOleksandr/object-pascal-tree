@@ -303,6 +303,14 @@ Still open, roughly in the order we're tackling it:
   Phase 1 binds the type's member where dcc binds the helper's. Confined to
   same-unit shadow pairs; fixing it means teaching the join (or
   `FindLocalDeep`) an ordering exception.
+- **Declaration-site precedence: inherited member vs used-unit global.** A name
+  written inside a class DECLARATION is now found in the enclosing classes'
+  ancestries (`CrossResolveDecl`), but only *after* the used units — dcc has it
+  the other way round, so a used unit's global with the same name as an
+  inherited member wins where it should lose. Closing it means deferring EVERY
+  declaration-site name that does not resolve locally — that is every cross-unit
+  type reference in every class in the closure, each through `FindMemberX`.
+  Deliberately not paid for a collision nobody has hit yet.
 - **LSP/LSIF server.** The demo (VCL-hosted) is the only editor integration
   today; a Language Server Protocol server (live highlighting/navigation/
   diagnostics/rename/etc. over the same Sema/Nav layer) plus LSIF dump

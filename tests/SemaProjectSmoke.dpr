@@ -641,6 +641,51 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { A nested type whose ANCESTOR is a nested type of the ENCLOSING class's own
+    ancestor — and that ancestor lives in ANOTHER unit, so only the cross pass
+    can see it. Vcl.Skia/FMX.Skia's shape:
+
+      TSkAnimatedPaintBox = class(TSkCustomAnimatedControl)
+        TAnimation = class(TAnimationBase)   // ancestor's nested type, bare
+
+    Six false E2003 per Skia unit came out of this one name, because the
+    failure CASCADES: with the heritage unresolved the nested class has no
+    ancestry at all, so its property specifiers (`read GetDuration`) and its
+    methods' inherited consts (`Epsilon`) read as undeclared too. All three
+    layers are asserted below, deliberately. }
+  UNIT_NHBASE =
+    'unit UnitNHBase;'#10'interface'#10 +
+    'type'#10 +
+    '  TAnim = class'#10 +
+    '  protected const'#10 +
+    '    Epsilon = 1;'#10 +
+    '  protected'#10 +
+    '    function GetSpan: Integer;'#10 +
+    '    procedure SetSpan(const AValue: Integer);'#10 +
+    '  end;'#10 +
+    '  TCustomCtl = class'#10 +
+    '  public type'#10 +
+    '    TAnimationBase = class(TAnim)'#10 +
+    '    end;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TAnim.GetSpan: Integer; begin Result := Epsilon; end;'#10 +
+    'procedure TAnim.SetSpan(const AValue: Integer); begin end;'#10 +
+    'end.'#10;
+
+  UNIT_NHUSE =
+    'unit UnitNHUse;'#10'interface'#10'uses UnitNHBase;'#10 +
+    'type'#10 +
+    '  TPaintBox = class(TCustomCtl)'#10 +
+    '  public type'#10 +
+    '    TAnimation = class(TAnimationBase)'#10 +   // enclosing's ancestor's
+    '    published'#10 +
+    '      property Span: Integer read GetSpan write SetSpan;'#10 +
+    '    end;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
   UNIT_E =
     'unit UnitE;'#10'interface'#10'implementation'#10 +
     'procedure R;'#10'var L: Integer;'#10'begin'#10 +
@@ -950,6 +995,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UWShadow.pas'), UNIT_WSHADOW);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitTObj.pas'), UNIT_TOBJ);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitQual.pas'), UNIT_QUAL);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitNHBase.pas'), UNIT_NHBASE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitNHUse.pas'), UNIT_NHUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWShapes.pas'), UNIT_WSHAPES);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitMRIface.pas'), UNIT_MRIFACE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitMRUse.pas'), UNIT_MRUSE);
@@ -1272,6 +1319,20 @@ begin
     Ok('nested-with: Left still comes from the OUTER with',
       CrossRefCountInUnit(LNW, 'Left', 'Left', 'unitnwuse') +
       LocalRefCount(LNW, 'Left') >= 2);
+
+    // A nested type inheriting from the ENCLOSING class's ancestor's nested
+    // type, cross-unit (the Skia shape — see UNIT_NHUSE). Each Ok is one layer
+    // of the cascade: the heritage name itself, then what only resolves once
+    // the nested class HAS an ancestry.
+    var LNH := ModelByName('unitnhuse');
+    Ok('nested-heritage: UnitNHUse loaded', Assigned(LNH));
+    Ok('nested-heritage: no diags at all', Length(LNH.Diags) = 0);
+    Ok('nested-heritage: TAnimationBase binds to the enclosing class''s ' +
+      'ancestor''s nested type', CrossRefTo(LNH, 'TAnimationBase',
+      'TAnimationBase'));
+    Ok('nested-heritage: the property specifiers see the new ancestry',
+      CrossRefTo(LNH, 'GetSpan', 'GetSpan') and
+      CrossRefTo(LNH, 'SetSpan', 'SetSpan'));
 
     // A nested type of the ANCESTOR of a MIDDLE qualifier segment.
     var LQual := ModelByName('unitqual');

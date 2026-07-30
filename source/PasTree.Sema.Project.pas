@@ -116,6 +116,10 @@ type
     FInhWork: TArray<TArray<Integer>>;
     FWithWork: TArray<TArray<Integer>>;
     FWorkBuilt: TArray<Boolean>;
+    { Declaration-site idents CrossResolve could bind NOWHERE — see
+      CrossResolveDecl. Filled by the CrossResolve workers (own slot only),
+      drained by the decl pass. }
+    FDeclWork: TArray<TArray<Integer>>;
     { Per-model overlay of the member references CrossType discovers, so the
       parallel walks never mutate a dictionary another walk is reading — see
       RunCrossTypePass. Owned here; merged and freed there. }
@@ -181,6 +185,8 @@ type
     function InPropertySpecifier(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function OuterStructsOfNode(AModel: TPasSemaModel;
       ANode, AInnermost: Integer): TArray<Integer>;
+    function DeclStructsOfNode(AModel: TPasSemaModel;
+      ANode: Integer): TArray<Integer>;
     // `with` over a target whose TYPE lives in another unit (ch.05 §5.7) —
     // see FindInEnclosingWith.
     function PointeeX(const AX: TSemaXType): TSemaXType;
@@ -205,6 +211,10 @@ type
       var APending: TArray<TPasInhPending>);
     procedure EnsureCrossWork(AId: Integer);
     procedure SizeCrossWork(ACount: Integer);
+    procedure PrepareDeclWork(ACount: Integer);
+    procedure CrossResolveDecl(AId: Integer;
+      var APending: TArray<TPasInhPending>; AEmit: Boolean);
+    procedure RunDeclPass(ACount: Integer);
     procedure RunInheritedPass(ACount: Integer);
     { AEmit=False computes bindings only; E2003 is left to the final round —
       see RunWithPass, which iterates this to a fixpoint. }
@@ -3143,6 +3153,13 @@ begin
             LExt.UnitId := LUid; LExt.Sym := LSym;
             LModel.ExtRefMap.Add(LNode, LExt);
           end
+          // Nothing local, nothing in a used unit — but a name written INSIDE a
+          // type declaration may still be an INHERITED member of that type or of
+          // one it is nested in (11.4.1). That walk is FindMemberX, which reads
+          // other models' ExtRefMap while their own workers are still writing,
+          // so it waits for the frozen-map pass: queue, don't judge.
+          else if DeclStructsOfNode(LModel, LNode) <> nil then
+            FDeclWork[AId] := FDeclWork[AId] + [LNode]
           else if LModel.AllUsesResolved then
             EmitE2003(LModel, LNode);
         end;
@@ -3232,6 +3249,48 @@ begin
             Result := Result + [LSym];
         end;
       Exit;
+    end;
+    LScope := AModel.Scopes[LScope].Parent;
+  end;
+end;
+
+{ The enclosing TYPE-DECLARATION scopes around ANode, innermost first — the
+  chain StructSymOfNode deliberately refuses to serve (it answers for method
+  BODIES only). Empty for a node that is not inside a type declaration, and for
+  one inside a method body, so it doubles as the "is this a declaration site?"
+  test CrossResolve needs.
+
+  What it buys: a name written inside a class declaration sees the members of
+  that class AND of every class it is NESTED in — each one's ANCESTORS included
+  (dcc-verified: a nested `TSub = class(TInner)` resolves both `TInner`, a
+  nested type of the enclosing class's GRANDPARENT, and a const of that same
+  grandparent used as an array bound). Vcl.Skia's
+
+    TSkAnimatedPaintBox = class(TSkCustomAnimatedControl)
+      TAnimation = class(TAnimationBase)          // ancestor's nested type
+
+  is the shape, and the six false E2003 it produced per Skia unit cascade: with
+  the heritage unresolved, TAnimation has no ancestry at all, so its property
+  specifiers (`read GetDuration`) and its methods' inherited consts
+  (`TimeEpsilon`) all read as undeclared too. }
+function TPasSemaProject.DeclStructsOfNode(AModel: TPasSemaModel;
+  ANode: Integer): TArray<Integer>;
+var
+  LScope: Integer;
+begin
+  Result := nil;
+  if ANode > High(AModel.NodeScope) then
+    Exit;
+  LScope := AModel.NodeScope[ANode];
+  while LScope <> NIL_SCOPE do
+  begin
+    if AModel.Scopes[LScope].StructSym <> NIL_SYM then
+    begin
+      // A method body (or a local proc in one) — StructSymOfNode's territory,
+      // and the inherited pass already searches exactly this chain there.
+      if AModel.Scopes[LScope].Kind <> sckStruct then
+        Exit(nil);
+      Result := Result + [AModel.Scopes[LScope].StructSym];
     end;
     LScope := AModel.Scopes[LScope].Parent;
   end;
@@ -4056,6 +4115,123 @@ begin
   FWorkBuilt[AId] := True;
 end;
 
+// One empty slot per model, BEFORE the parallel CrossResolve workers start
+// filling their own (see FDeclWork). Cleared every run: a list held over would
+// name nodes of a tree a staged run has since replaced.
+procedure TPasSemaProject.PrepareDeclWork(ACount: Integer);
+var
+  LIdx: Integer;
+begin
+  SetLength(FDeclWork, ACount);
+  for LIdx := 0 to ACount - 1 do
+    FDeclWork[LIdx] := nil;
+end;
+
+{ The DECLARATION-site companion to CrossResolveInherited: the names inside a
+  type declaration that CrossResolve could bind nowhere, retried against the
+  ancestry of every class they are declared inside (see DeclStructsOfNode).
+
+  Runs BEFORE the inherited pass, and that order is the whole point — the
+  entries it produces are HERITAGE references, which is precisely what the
+  inherited and with passes read when they walk a struct's ancestors. Feeding
+  them into the same round as their consumers is the ordering hazard
+  StructSymOfNode's own comment records (deferring whole declarations there once
+  fixed 47 property specifiers and broke 74 inherited members); a separately
+  committed earlier pass has no such problem.
+
+  Only the total failures reach here, never every declaration-site name, which
+  keeps this off the hot path: the expensive FindMemberX walk runs on the
+  handful of nodes that were about to be reported as errors anyway.
+
+  Known precedence gap that costs: a used unit's global still outranks an
+  inherited member for these, where dcc has it the other way round. Closing it
+  means deferring EVERY unresolved-locally declaration-site name — that is every
+  cross-unit type reference in every class in the closure, all of them through
+  FindMemberX. Not worth it for a collision nobody has hit; noted in the README
+  To-do instead. }
+procedure TPasSemaProject.CrossResolveDecl(AId: Integer;
+  var APending: TArray<TPasInhPending>; AEmit: Boolean);
+var
+  LModel: TPasSemaModel;
+  LNode, LUid, LSym, LCtx, LWIdx: Integer;
+  LPend: TPasInhPending;
+  LNameLower: string;
+  LFound: Boolean;
+begin
+  APending := nil;
+  if AId > High(FDeclWork) then
+    Exit;
+  LModel := FModels[AId];
+  for LWIdx := 0 to High(FDeclWork[AId]) do
+  begin
+    LNode := FDeclWork[AId][LWIdx];
+    // An earlier ROUND may have bound it — that is what the rounds are for.
+    if (LModel.RefMap[LNode] <> NIL_SYM) or
+       LModel.ExtRefMap.ContainsKey(LNode) then
+      Continue;
+    LNameLower := LModel.Tree.NodeNameLower(LNode);
+    LFound := False;
+    // Innermost declaration first, matching dcc's precedence — and matching
+    // what the method-body side already does with OuterStructsOfNode.
+    for var LStruct in DeclStructsOfNode(LModel, LNode) do
+      if FindMemberX(AId, XPlain(AId, LStruct), LNameLower, LUid, LSym,
+        LCtx) then
+      begin
+        LFound := True;
+        Break;
+      end;
+    if LFound then
+    begin
+      LPend.Node := LNode;
+      LPend.Ext.UnitId := LUid;
+      LPend.Ext.Sym := LSym;
+      LPend.X := XNil;
+      APending := APending + [LPend];
+    end
+    else if AEmit and LModel.AllUsesResolved then
+      EmitE2003(LModel, LNode);   // CrossResolve's verdict, just deferred
+  end;
+end;
+
+{ Parallel compute + sequential commit, iterated: one nested class's heritage
+  can be another's, and round N+1 sees round N's bindings. Same shape and same
+  reasoning as RunWithPass — including E2003 only in the final round, so a name
+  a later round resolves is never reported. Depth here is nesting depth, so two
+  rounds is already generous; the cap is a runaway guard. }
+procedure TPasSemaProject.RunDeclPass(ACount: Integer);
+const
+  MAX_ROUNDS = 4;
+var
+  LPending: TArray<TArray<TPasInhPending>>;
+  LIdx, LP, LRound, LNew: Integer;
+  LEmit: Boolean;
+begin
+  SetLength(LPending, ACount);
+  LRound := 0;
+  LEmit := False;
+  while True do
+  begin
+    Inc(LRound);
+    for LIdx := 0 to ACount - 1 do
+      LPending[LIdx] := nil;
+    ForEachIndex(ACount - 1,
+      procedure(AIdx: Integer)
+      begin
+        CrossResolveDecl(AIdx, LPending[AIdx], LEmit);
+      end);
+    LNew := 0;
+    for LIdx := 0 to ACount - 1 do
+      Inc(LNew, Length(LPending[LIdx]));
+    for LIdx := 0 to ACount - 1 do
+      for LP := 0 to High(LPending[LIdx]) do
+        FModels[LIdx].ExtRefMap.AddOrSetValue(LPending[LIdx][LP].Node,
+          LPending[LIdx][LP].Ext);
+    if LEmit then
+      Break;
+    LEmit := (LNew = 0) or (LRound >= MAX_ROUNDS - 1);
+  end;
+end;
+
 procedure TPasSemaProject.CrossResolveInherited(AId: Integer;
   var APending: TArray<TPasInhPending>);
 var
@@ -4126,6 +4302,11 @@ begin
   // the helper registry must be complete and read-only by the time the
   // workers below start (see BuildHelperMap / ActiveHelperFor).
   BuildHelperMap;
+  // Heritage references this pass is about to WALK are resolved (and
+  // committed) first — see CrossResolveDecl for why it cannot be folded in
+  // here. Placed inside this pass, not beside it, so it inherits the same
+  // "helper map is built" precondition rather than rebuilding it.
+  RunDeclPass(ACount);
   SizeCrossWork(ACount);   // slots must exist before workers write their own
   SetLength(LPending, ACount);
   ForEachIndex(ACount - 1,
@@ -4323,8 +4504,12 @@ begin
       LPaths := LPaths + [LPath];
   LoadFilesParallel(LPaths);
   ResolveUses(Result);
+  PrepareDeclWork(FModels.Count);
   CrossResolve(Result);
   BuildHelperMap;   // needs CrossResolve's ExtRefMap; feeds FindMemberX below
+  // Heritage first, for the same reason the parallel drivers do it — the
+  // inherited walk below reads what it binds (see CrossResolveDecl).
+  RunDeclPass(FModels.Count);
   var LPend: TArray<TPasInhPending>;
   CrossResolveInherited(Result, LPend);
   for LIdx := 0 to High(LPend) do
@@ -4417,6 +4602,7 @@ begin
   // AnalyzeDirectory (each writes only its own model, reads others' frozen
   // Phase-1 state), so the same parallel farming is safe.
   LN := FModels.Count;
+  PrepareDeclWork(LN);
   ForEachIndex(LN - 1,
     procedure(AIdx: Integer)
     begin
@@ -4493,6 +4679,7 @@ begin
   Stage('main+sys+resolve');
   // Cross passes per unit write ONLY their own model and read the others'
   // Phase-1 state (frozen once every unit is loaded) — safe to farm out.
+  PrepareDeclWork(LN);
   ForEachIndex(LN - 1,
     procedure(AIdx: Integer)
     begin
@@ -4772,6 +4959,7 @@ begin
       Exit;
     end;
     Report('cross:xresolve');
+    PrepareDeclWork(LN);
     ForEachIndex(LN - 1,
       procedure(AIdx: Integer)
       begin
