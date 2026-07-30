@@ -943,6 +943,77 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { An explicit `Self` as the with target's base. Nothing DECLARES Self (11.3.3),
+    so RefMap is empty for it and the qualifier typed as nothing — losing the
+    whole with scope, and with it every member in the body. Inside a method its
+    type is the enclosing struct. Real shape: `with Self.TreeViewControl do`. }
+  UNIT_SELFBASE =
+    'unit UnitSelfBase;'#10'interface'#10 +
+    'type'#10 +
+    '  TImages = class'#10 +
+    '  public'#10 +
+    '    Width: Integer;'#10 +
+    '  end;'#10 +
+    '  TTree = class'#10 +
+    '  private'#10 +
+    '    FCheckImages: TImages;'#10 +
+    '  public'#10 +
+    '    property CheckImages: TImages read FCheckImages;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
+  UNIT_SELFUSE =
+    'unit UnitSelfUse;'#10'interface'#10'uses UnitSelfBase;'#10 +
+    'type'#10 +
+    '  THeader = class'#10 +
+    '  private'#10 +
+    '    FTree: TTree;'#10 +
+    '  public'#10 +
+    '    property TreeViewControl: TTree read FTree;'#10 +
+    '    procedure Recalc;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure THeader.Recalc;'#10 +
+    'var'#10 +
+    '  W: Integer;'#10 +
+    'begin'#10 +
+    '  with Self.TreeViewControl do'#10 +
+    '    if Assigned(CheckImages) then'#10 +
+    '      W := CheckImages.Width;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  { A unit-level VAR of PROCEDURAL type shadowing an imported routine of the
+    same name. Only a ROUTINE can join a used unit's same-named routines in an
+    overload set; anything else shadows outright, so gathering the imported
+    2-parameter function and arity-checking a 3-argument call against it is
+    comparing against candidates that were never in the running. dcc-verified. }
+  UNIT_PROCVARBASE =
+    'unit UnitProcVarBase;'#10'interface'#10 +
+    'function Compare(const S1, S2: string): Integer;'#10 +
+    'implementation'#10 +
+    'function Compare(const S1, S2: string): Integer;'#10 +
+    'begin'#10 +
+    '  Result := 0;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  UNIT_PROCVARUSE =
+    'unit UnitProcVarUse;'#10'interface'#10'uses UnitProcVarBase;'#10 +
+    'type'#10 +
+    '  TCompareFunc = function (const W1, W2: string;'#10 +
+    '    Locale: Integer): Integer;'#10 +
+    'var'#10 +
+    '  Compare: TCompareFunc;'#10 +
+    'function Use(const A, B: string): Boolean;'#10 +
+    'implementation'#10 +
+    'function Use(const A, B: string): Boolean;'#10 +
+    'begin'#10 +
+    '  Result := Compare(A, B, 1) = 0;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   { A MEMBER whose name is a compiler-seeded BUILTIN. A class with
     `property Word: string` makes bare `Word` in a descendant's method mean the
     PROPERTY, not the type — dcc-verified; an inherited member outranks a
@@ -1337,6 +1408,11 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNABase.pas'), UNIT_NABASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNAUse.pas'), UNIT_NAUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitDlg.pas'), UNIT_DLG);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitSelfBase.pas'), UNIT_SELFBASE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitSelfUse.pas'), UNIT_SELFUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitProcVarBase.pas'),
+    UNIT_PROCVARBASE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitProcVarUse.pas'), UNIT_PROCVARUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitShadowBuiltin.pas'),
     UNIT_SHADOWBUILTIN);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitShadowUse.pas'), UNIT_SHADOWUSE);
@@ -1689,6 +1765,19 @@ begin
     Ok('callee-precedence: the call re-points to the inherited METHOD',
       CrossRefCountInUnit(LDlg, 'GetFileNames', 'GetFileNames',
         'unitdlg') >= 1);
+
+    // An explicit Self as the with target's base.
+    var LSlf := ModelByName('unitselfuse');
+    Ok('self-target: UnitSelfUse loaded', Assigned(LSlf));
+    Ok('self-target: no diags at all', Length(LSlf.Diags) = 0);
+    Ok('self-target: the with body opens over Self.TreeViewControl',
+      CrossRefTo(LSlf, 'CheckImages', 'CheckImages'));
+
+    // A unit-level procedural-type VAR shadowing an imported routine.
+    var LPv := ModelByName('unitprocvaruse');
+    Ok('procvar-shadow: UnitProcVarUse loaded', Assigned(LPv));
+    Ok('procvar-shadow: no bogus arity error against the imported routine',
+      (DiagCount(LPv, 'E2034') = 0) and (DiagCount(LPv, 'E2035') = 0));
 
     // A member named like a builtin TYPE, inherited and cross-unit.
     var LShB := ModelByName('unitshadowuse');

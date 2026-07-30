@@ -1320,6 +1320,16 @@ var
 begin
   if ALocalSym <> NIL_SYM then
   begin
+    // A NON-routine binding shadows outright, wherever it sits. Only a ROUTINE
+    // can join a used unit's same-named routines in an overload set, so for
+    // anything else the sweep would be comparing the call against candidates
+    // that were never in the running. dcc-verified: a unit-level
+    // `Compare: TCompareFunc` (a procedural-type VAR) shadows an imported
+    // 2-parameter `Compare`, and a 3-argument call through it compiles. Testing
+    // only the SCOPE KIND missed exactly that — the var is at unit level, so it
+    // looked like a candidate for merging.
+    if AModel.Symbols[ALocalSym].Kind <> skRoutine then
+      Exit(True);
     LScope := AModel.Symbols[ALocalSym].Scope;
     Result := (LScope <> NIL_SCOPE) and
       not (AModel.Scopes[LScope].Kind in
@@ -4116,7 +4126,18 @@ begin
         if LSym <> NIL_SYM then
           Result := SymDeclTypeX(AId, LSym)
         else if LM.ExtRefMap.TryGetValue(ANode, LExt) then
-          Result := SymDeclTypeX(LExt.UnitId, LExt.Sym);
+          Result := SymDeclTypeX(LExt.UnitId, LExt.Sym)
+        // `Self` has no symbol — nothing declares it (11.3.3), so RefMap is
+        // empty for it and the recursion above dead-ends. Inside a method body
+        // its type is the enclosing struct, which is exactly what
+        // StructSymOfNode answers. Real shape: `with Self.TreeViewControl do`,
+        // where dropping the qualifier's type loses the whole with scope.
+        else if SameText(LM.Tree.NodeText(ANode), 'Self') then
+        begin
+          LSym := StructSymOfNode(LM, ANode);
+          if LSym <> NIL_SYM then
+            Result := XPlain(AId, LSym);
+        end;
       end;
 
     nkMember:
