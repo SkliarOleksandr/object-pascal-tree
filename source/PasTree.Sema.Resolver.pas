@@ -712,7 +712,16 @@ begin
   // `EAggregateException = class(Exception)`'s heritage resolved to an enum
   // value, the ancestor walk died at the first hop, and every inherited
   // member (`Message`) was a false E2003.
-  if not FTree.Source.ScopedEnumsAt(FTree.Nodes[ANode].FirstToken) then
+  //
+  // ANONYMOUS enums are exempt, and necessarily so: `TNeededToDo = set of
+  // (SetChecked, CallClick)` (FMX.StdCtrls, a {$SCOPEDENUMS ON} unit) has no
+  // enum type NAME to qualify with, so scoping the values would make them
+  // unreachable by any spelling. dcc-verified: both bare values compile there,
+  // while a NAMED enum's do not. ATypeSym = NIL_SYM is exactly that case — an
+  // enum reached through the generic Collect fallthrough rather than as a named
+  // type declaration's own definition.
+  if (ATypeSym = NIL_SYM) or
+     not FTree.Source.ScopedEnumsAt(FTree.Nodes[ANode].FirstToken) then
     FModel.JoinScope(EnumJoinTarget(AOuter), LEnum);
   LChild := FirstChild(ANode);
   while LChild <> NIL_NODE do

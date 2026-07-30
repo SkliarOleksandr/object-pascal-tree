@@ -746,6 +746,82 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { An ancestor named through its OUTER type, cross-unit:
+    `TMemoTextSettings = class(TTextSettingsInfo.TCustomTextSettings)` (FMX.Memo,
+    and the same line in 8 sibling units). Nothing binds that last segment before
+    the passes that decide E2003, and as a HERITAGE reference the miss is silent
+    and expensive — the class is left with no ancestry, so every inherited member
+    its methods use goes undeclared. 12 false E2003 across FMX came from this one
+    form. HorzAlign is the control: redeclared here, so it resolved even while
+    the ancestry was broken, which is why only SOME members of each such class
+    were reported. }
+  UNIT_NABASE =
+    'unit UnitNABase;'#10'interface'#10 +
+    'type'#10 +
+    '  TInfo = class'#10 +
+    '  public type'#10 +
+    '    TCustomSettings = class'#10 +
+    '    private'#10 +
+    '      FWordWrap: Boolean;'#10 +
+    '      FHorzAlign: Integer;'#10 +
+    '    public'#10 +
+    '      property WordWrap: Boolean read FWordWrap write FWordWrap;'#10 +
+    '      property HorzAlign: Integer read FHorzAlign write FHorzAlign;'#10 +
+    '    end;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
+  UNIT_NAUSE =
+    'unit UnitNAUse;'#10'interface'#10'uses UnitNABase;'#10 +
+    'type'#10 +
+    '  TMemoSettings = class(TInfo.TCustomSettings)'#10 +
+    '  public'#10 +
+    '    constructor Create;'#10 +
+    '  published'#10 +
+    '    property HorzAlign;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'constructor TMemoSettings.Create;'#10 +
+    'begin'#10 +
+    '  HorzAlign := 1;'#10 +
+    '  WordWrap := False;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  { An INHERITED method outranks a unit-level global of the same name, even one
+    in this unit's own implementation section — dcc-verified. CollectStruct never
+    joins an ancestor's scope, so Phase 1 bound the 4-parameter procedure and the
+    1-argument call looked short by three: `GetFileNames(FShellItems)` inside
+    TCustomFileOpenDialog.GetResults (FMX.Dialogs.Win), the corpus's last E2035.
+    The `uses` clause is load-bearing — the arity check that fires on this shape
+    is the cross-unit one, and it only runs for a unit that has imports. }
+  UNIT_DLG =
+    'unit UnitDlg;'#10'interface'#10'uses UnitA;'#10 +
+    'type'#10 +
+    '  TBaseDlg = class'#10 +
+    '  protected'#10 +
+    '    function GetFileNames(Items: Integer): Integer; dynamic;'#10 +
+    '  end;'#10 +
+    '  TOpenDlg = class(TBaseDlg)'#10 +
+    '  public'#10 +
+    '    function GetResults: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TBaseDlg.GetFileNames(Items: Integer): Integer;'#10 +
+    'begin'#10 +
+    '  Result := Items;'#10 +
+    'end;'#10 +
+    'procedure GetFileNames(var A, B, C: Integer; D: Integer); forward;'#10 +
+    'function TOpenDlg.GetResults: Integer;'#10 +
+    'begin'#10 +
+    '  Result := GetFileNames(1);'#10 +
+    'end;'#10 +
+    'procedure GetFileNames(var A, B, C: Integer; D: Integer);'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   UNIT_E =
     'unit UnitE;'#10'interface'#10'implementation'#10 +
     'procedure R;'#10'var L: Integer;'#10'begin'#10 +
@@ -1055,6 +1131,9 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UWShadow.pas'), UNIT_WSHADOW);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitTObj.pas'), UNIT_TOBJ);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitQual.pas'), UNIT_QUAL);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitNABase.pas'), UNIT_NABASE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitNAUse.pas'), UNIT_NAUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitDlg.pas'), UNIT_DLG);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWX.pas'), UNIT_WX);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWXUse.pas'), UNIT_WXUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNHBase.pas'), UNIT_NHBASE);
@@ -1381,6 +1460,23 @@ begin
     Ok('nested-with: Left still comes from the OUTER with',
       CrossRefCountInUnit(LNW, 'Left', 'Left', 'unitnwuse') +
       LocalRefCount(LNW, 'Left') >= 2);
+
+    // An ancestor named through its OUTER type, cross-unit (the FMX shape).
+    var LNA := ModelByName('unitnause');
+    Ok('nested-ancestor: UnitNAUse loaded', Assigned(LNA));
+    Ok('nested-ancestor: no diags at all', Length(LNA.Diags) = 0);
+    Ok('nested-ancestor: the inherited WordWrap is found through it',
+      CrossRefTo(LNA, 'WordWrap', 'WordWrap'));
+
+    // An inherited method outranks a unit-level global of the same name.
+    var LDlg := ModelByName('unitdlg');
+    Ok('callee-precedence: UnitDlg loaded', Assigned(LDlg));
+    Ok('callee-precedence: no bogus E2035 against the 4-param global',
+      DiagCount(LDlg, 'E2035') = 0);
+    Ok('callee-precedence: no diags at all', Length(LDlg.Diags) = 0);
+    Ok('callee-precedence: the call re-points to the inherited METHOD',
+      CrossRefCountInUnit(LDlg, 'GetFileNames', 'GetFileNames',
+        'unitdlg') >= 1);
 
     // Three cross-unit with-target shapes, one Ok each — see UNIT_WXUSE for
     // which real VCL unit every one of them comes from.

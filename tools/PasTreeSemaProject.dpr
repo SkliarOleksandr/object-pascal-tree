@@ -78,13 +78,15 @@ var
   the header: the demo reads the IDE's registry paths, this does not. }
 function StudioSearchPaths(const ARoot: string): TArray<string>;
 const
-  // winrt and databinding/engine earn their place from the VCL package closure:
-  // without them Vcl.Clipbrd/Vcl.Bind.* stay unresolved, and an unresolved unit
-  // silences its IMPORTERS' diagnostics (the AllUsesResolved gate) — which reads
-  // as "clean" instead of "not analyzed".
-  SUBS: array[0..7] of string = ('source\rtl\sys', 'source\rtl\common',
+  // winrt, databinding\engine and xml earn their place from the VCL/FMX package
+  // closures: without them Vcl.Clipbrd, Vcl.Bind.* and FMX's Xml.XMLDoc importers
+  // stay unresolved, and an unresolved unit silences its IMPORTERS' diagnostics
+  // (the AllUsesResolved gate) — which reads as "clean" instead of "not
+  // analyzed". Sanity check for any host doing this: the UNIT COUNT must match
+  // what the IDE reports (271 for BuildWinVCL, 353 for BuildWinFMX).
+  SUBS: array[0..8] of string = ('source\rtl\sys', 'source\rtl\common',
     'source\rtl\win', 'source\rtl\win\winrt', 'source\rtl\net',
-    'source\databinding\engine', 'source\vcl', 'source\fmx');
+    'source\databinding\engine', 'source\xml', 'source\vcl', 'source\fmx');
 var
   LDir: string;
 begin

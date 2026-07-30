@@ -299,6 +299,42 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // The exception to SCOPEDENUMS, and it is forced rather than chosen: an
+  // ANONYMOUS enum has no type NAME to qualify its values with, so scoping them
+  // would make them unreachable by any spelling. dcc-verified under
+  // {$SCOPEDENUMS ON}: `Include(S, SetChecked)` on `set of (SetChecked,
+  // CallClick)` compiles, while the bare value of a NAMED enum does not.
+  // FMX.StdCtrls (a SCOPEDENUMS unit) is the real case — TCustomSwitch's
+  // `TNeededToDo = set of (SetChecked, CallClick)`, 8 false E2003.
+  SRC_ANONENUM =
+    'unit U;'#10 +
+    'interface'#10 +
+    '{$SCOPEDENUMS ON}'#10 +
+    'type'#10 +
+    '  TSwitch = class'#10 +
+    '  private type'#10 +
+    '    TNeededToDo = set of (SetChecked, CallClick);'#10 +   // nested
+    '  private'#10 +
+    '    FNeeded: TNeededToDo;'#10 +
+    '  public'#10 +
+    '    procedure Click;'#10 +
+    '  end;'#10 +
+    '  TTop = set of (Alpha, Beta);'#10 +                      // unit level
+    '  TNamed = (Gamma, Delta);'#10 +                          // the control
+    'var'#10 +
+    '  GTop: TTop;'#10 +
+    'implementation'#10 +
+    'procedure TSwitch.Click;'#10 +
+    'var'#10 +
+    '  N: TNamed;'#10 +
+    'begin'#10 +
+    '  Include(FNeeded, SetChecked);'#10 +
+    '  Exclude(FNeeded, CallClick);'#10 +
+    '  Include(GTop, Alpha);'#10 +
+    '  N := TNamed.Gamma;'#10 +          // the control: still QUALIFIED only
+    'end;'#10 +
+    'end.'#10;
+
   // Real bug report: an inline var declaring SEVERAL names (`var V, S:
   // string;`, 10.3+, dcc-verified) declared only the FIRST — every other name
   // was then an undeclared identifier, and the shared type bound to none of
@@ -888,6 +924,21 @@ begin
   Ok('scopedenums: unscoped TOpen still injects (bare Alpha)',
     RefResolvesTo('Alpha', 'Alpha'));
   Ok('scopedenums: POPOPT restored ON (TAfterPop.Gamma qualified works)',
+    AllRefsResolved('Gamma'));
+  GModel.Free;
+
+  // ANONYMOUS enums are exempt from SCOPEDENUMS — there is no name to qualify.
+  Analyze(SRC_ANONENUM);
+  Ok('anonenum: no diags at all', Length(GModel.Diags) = 0);
+  Ok('anonenum: a nested `set of (...)` injects its values',
+    RefResolvesTo('SetChecked', 'SetChecked') and
+    RefResolvesTo('CallClick', 'CallClick'));
+  Ok('anonenum: a unit-level `set of (...)` does too',
+    RefResolvesTo('Alpha', 'Alpha'));
+  // Control: the exemption is keyed on ANONYMITY, so a named enum in the very
+  // same unit must still be qualified-only (SRC_SCOPEDENUMS covers the bare-use
+  // half; here it is enough that the qualified form is what compiles).
+  Ok('anonenum: a NAMED enum in the same unit is still reached qualified',
     AllRefsResolved('Gamma'));
   GModel.Free;
 

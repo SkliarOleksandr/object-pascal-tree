@@ -289,10 +289,22 @@ Still open, roughly in the order we're tackling it:
 - **Go-to-declaration inside an opened `.inc` tab.** Navigating *into* an
   include file already works; resolving an identifier typed *inside* an
   already-open include tab does not yet (`IdentAt` is currently main-file-only).
-- **Zero-diagnostic parity on the real RTL/VCL/FMX.** Analysis is stable and
-  crash-free over the full source tree, but still produces a nonzero, tracked
-  count of `E2003`-style false positives to work down to zero — the v1
-  "definition of done" below.
+- ~~**Zero-diagnostic parity on the real RTL/VCL/FMX.**~~ **Reached on
+  2026-07-30.** The flattened RTL+VCL+FMX corpus (726 files) reports ZERO
+  `E2003`/`E2034`/`E2035`; the only diagnostics left are honest `F1027`s for
+  units genuinely absent from the flat directory. `BuildWinVCL.dpk` (271 units)
+  and `BuildWinFMX.dpk` (362 units) are both clean end to end. Stable run to run
+  and identical single-threaded. This is a floor to HOLD, not a finished job —
+  the next corpus is the real project (see the AVImark note below), and the two
+  precedence gaps below are known places where the binding is right-ish for the
+  wrong reason.
+- **Arity check in the intra-unit typer ignores inherited members.** The
+  cross-unit check (`CheckCalls`) now yields to an inherited member before
+  reporting, but `PasTree.Sema.Types.SelectOverload` has its own arity
+  diagnostic and does not. It is gated to units with NO `uses` clause at all, so
+  nothing in the RTL/VCL/FMX corpus reaches it — but a bare unit with an
+  inherited method shadowed by a same-named global still gets a false `E2035`.
+  Fixing it means the typer needs the ancestor walk the resolver already has.
 - **Helper precedence inside the same-unit join.** Cross-unit helper
   injection is done (`BuildHelperMap`/`ActiveHelperFor`/`FindMemberX`,
   dcc-verified rules: per-referring-unit last-uses-wins, helper member hides
@@ -384,7 +396,9 @@ Still open, roughly in the order we're tackling it:
 3. Golden AST tests keyed to the spec's feature numbering (e.g. test `5.4.1`
    covers the inline-`if` expression).
 4. Semantic analysis over the same tree produces **zero false-positive
-   diagnostics**.
+   diagnostics**. ✅ Reached 2026-07-30 on the flattened RTL+VCL+FMX corpus and
+   on the `BuildWinVCL`/`BuildWinFMX` packages — see the To-do for what holding
+   it now depends on.
 
 ## Requirements
 

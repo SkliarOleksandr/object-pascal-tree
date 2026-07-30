@@ -1333,6 +1333,10 @@ begin
   end;
 end;
 
+// Defined with the rest of the Phase-3c helpers just below; CheckCalls needs it
+// for its inherited-member gate.
+function XPlain(AMid, ASym: Integer): TSemaXType; forward;
+
 // Cross-unit argument-count check: gathers a call's candidate routines from the
 // local overload chain PLUS every resolved used unit's interface, then flags
 // E2035/E2034 only if no candidate's arity admits the argument count. Runs only
@@ -1341,9 +1345,10 @@ procedure TPasSemaProject.CheckCalls(AId: Integer);
 var
   LModel: TPasSemaModel;
   LNode, LCallee, LArg, LArgCount, LLocalHead, LUid, LS, LIdx: Integer;
-  LMinReq, LMaxTot: Integer;
+  LMinReq, LMaxTot, LStruct: Integer;
   LAnyFit, LAnyVariadic, LHaveAny, LSkip: Boolean;
   LName: string;
+  LExt: TPasExtRef;
 
   procedure Consider(AMid, AHead: Integer);
   var
@@ -1429,6 +1434,33 @@ begin
 
     if LSkip or not LHaveAny or LAnyVariadic or LAnyFit or (LMaxTot < 0) then
       Continue;
+    // Last gate before reporting: an INHERITED member of the enclosing struct
+    // outranks a unit-level global of the same name, so none of the candidates
+    // gathered above was ever the callee. This is CalleeShadowsUses' rule for a
+    // member the intra-unit pass could not see — CollectStruct never joins an
+    // ancestor's scope, so `GetFileNames(FShellItems)` inside
+    // TCustomFileOpenDialog.GetResults (FMX.Dialogs.Win) bound the 4-parameter
+    // implementation-section procedure instead of TCustomFileDialog's
+    // 1-parameter method, and a 1-argument call then looked short by three.
+    // dcc-verified: that unit compiles, so the method wins.
+    //
+    // Deliberately HERE and not beside CalleeShadowsUses: this walks ancestors
+    // (FindMemberX), and on the error path it runs for a handful of calls
+    // instead of every call in the closure.
+    LStruct := StructSymOfNode(LModel, LCallee);
+    if (LStruct <> NIL_SYM) and
+       FindMemberX(AId, XPlain(AId, LStruct),
+         LModel.Tree.NodeNameLower(LCallee), LUid, LS, LIdx) then
+    begin
+      // Re-point while we are here: the binding was wrong, not just the arity,
+      // and everything downstream (typing, navigation) reads these maps. Own
+      // model only — the same write discipline every parallel pass here follows.
+      LModel.RefMap[LCallee] := NIL_SYM;
+      LExt.UnitId := LUid;
+      LExt.Sym := LS;
+      LModel.ExtRefMap.AddOrSetValue(LCallee, LExt);
+      Continue;
+    end;
     if LArgCount < LMinReq then
       EmitAt(LModel, LNode, 'E2035', SE2035_NotEnoughActualParams)
     else if LArgCount > LMaxTot then
@@ -1958,22 +1990,32 @@ begin
 end;
 
 { ResolveTypeExpr plus the one lookup it deliberately does not do: a NESTED type
-  named through its OUTER type, cross-unit — `with TScrollBarStyleHook.
-  TScrollWindow(FMDIScrollSizeBox) do SizeBox := True` (Vcl.Forms, over a nested
-  class of Vcl.StdCtrls). ResolveTypeExpr reads the maps, and nothing has bound
-  that last segment yet: Phase 1 resolves a type-qualified member only within its
-  own unit, and the cross-unit member pass (CrossType) runs long after the with
-  pass has to decide E2003.
+  named through its OUTER type (11.4.1), cross-unit. Two real shapes, and the
+  second is why this is not a with-only concern:
+
+    with TScrollBarStyleHook.TScrollWindow(FMDIScrollSizeBox) do ...  // Vcl.Forms
+    TMemoTextSettings = class(TTextSettingsInfo.TCustomTextSettings)   // FMX.Memo
+
+  ResolveTypeExpr reads the maps, and nothing has bound that last segment: Phase 1
+  resolves a type-qualified member only within its own unit, and the cross-unit
+  member pass (CrossType) runs long after the passes that decide E2003. As a
+  HERITAGE reference the miss is silent and expensive — the class is left with no
+  ancestry, so every inherited member used in its methods reads as undeclared
+  (12 diagnostics across 9 FMX units from this one form, all of them the
+  `WordWrap`/`HorzAlign`/`VertAlign` family).
 
   Kept OUT of ResolveTypeExpr itself, which is on the BindTypesX/CrossType hot
-  path — a FindMemberX walk per failed type reference there would be paid for
-  every genuinely unresolvable name in the closure. Here it is reached only from
-  the with-target paths, and only after the plain lookup has already missed. }
+  path: callers reach this only after the plain lookup has already missed.
+
+  The lookup is the qualifier's OWN members, deliberately NOT FindMemberX. This
+  is called FROM FindMemberX's ancestor walk, and `TFoo = class(TFoo.TBar)` would
+  then recurse until the stack ran out. A nested type inherited through the
+  qualifier's ancestor is the declaration-site case CrossResolveDecl covers. }
 function TPasSemaProject.ResolveTypeExprNested(AId, ANode: Integer): TSemaXType;
 var
-  LM: TPasSemaModel;
-  LBase, LName, LMemMid, LMemSym, LCtx: Integer;
-  LBX: TSemaXType;
+  LM, LQM: TPasSemaModel;
+  LBase, LName, LScope, LFound, LDef, LDepth: Integer;
+  LQ: TSemaXType;
 begin
   Result := ResolveTypeExpr(AId, ANode);
   if XValid(Result) or (ANode = NIL_NODE) then
@@ -1986,16 +2028,32 @@ begin
     Exit;
   LName := LM.Tree.Nodes[LBase].NextSibling;
   // Qualifier and ONE trailing segment; a longer chain nests nkMember nodes, so
-  // the recursion below covers `A.B.C` without a flat-list case here.
+  // the recursion below covers `A.B.C` without a flat-list case here. That
+  // recursion walks to a strictly SMALLER node, so it is bounded by the chain.
   if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) or
      (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) then
     Exit;
-  LBX := ResolveTypeExprNested(AId, LBase);
-  if not XValid(LBX) then
-    Exit;
-  if FindMemberX(AId, LBX, LM.Tree.NodeNameLower(LName), LMemMid, LMemSym,
-       LCtx) and (FModels[LMemMid].Symbols[LMemSym].Kind = skType) then
-    Result := XPlain(LMemMid, LMemSym);
+  LQ := ResolveTypeExprNested(AId, LBase);
+  // Alias hops chased like everywhere else here, depth-capped for a malformed
+  // chain rather than a real one.
+  for LDepth := 1 to 32 do
+  begin
+    if not XValid(LQ) then
+      Exit;
+    LQM := FModels[LQ.UnitId];
+    LScope := LQM.Symbols[LQ.Sym].MemberScope;
+    if LScope <> NIL_SCOPE then
+    begin
+      LFound := LQM.FindLocalDeep(LScope, LM.Tree.NodeNameLower(LName));
+      if (LFound <> NIL_SYM) and (LQM.Symbols[LFound].Kind = skType) then
+        Exit(XPlain(LQ.UnitId, LFound));
+    end;
+    LDef := TypeDefNodeOf(LQ.UnitId, LQ.Sym);
+    if (LDef = NIL_NODE) or not (LQM.Tree.Nodes[LDef].Kind in
+       [nkIdent, nkMember, nkTypeArgs]) then
+      Exit;
+    LQ := ResolveTypeExpr(LQ.UnitId, LDef);
+  end;
 end;
 
 { Cross-unit helper injection (15.3) ---------------------------------------
@@ -2353,7 +2411,10 @@ begin
             end;
             Exit;
           end;
-          LNext := ResolveTypeExpr(LCur.UnitId, LChild);
+          // Nested: the ancestor may be named through its OUTER type
+          // (`TTextSettingsInfo.TCustomTextSettings`, FMX) — nothing binds that
+          // segment this early, and the miss costs the whole ancestry.
+          LNext := ResolveTypeExprNested(LCur.UnitId, LChild);
         end;
       nkHelperType:
         begin
@@ -3556,7 +3617,9 @@ begin
           [nkIdent, nkMember, nkTypeArgs]) do
           LChild := LM.Tree.Nodes[LChild].NextSibling;
         if LChild <> NIL_NODE then
-          Result := ResolveTypeExpr(AX.UnitId, LChild);
+          // Nested ancestor (`Outer.Inner`) reached the same way FindMemberX's
+          // own heritage hop does — see ResolveTypeExprNested.
+          Result := ResolveTypeExprNested(AX.UnitId, LChild);
       end;
   end;
 end;
