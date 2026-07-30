@@ -190,6 +190,7 @@ type
     // `with` over a target whose TYPE lives in another unit (ch.05 §5.7) —
     // see FindInEnclosingWith.
     function PointeeX(const AX: TSemaXType): TSemaXType;
+    function PointeeOfDeclX(AId, ABaseNode: Integer): TSemaXType;
     function DesignatorSymX(AId, ANode: Integer;
       out AMid, ASym: Integer): Boolean;
     function AncestorOfX(const AX: TSemaXType): TSemaXType;
@@ -254,6 +255,7 @@ type
     function DeclTypeX(AMid, ASym: Integer): TSemaXType;
     function SubstX(const AX: TSemaXType; AInst, ADepth: Integer): TSemaXType;
     function ResolveTypeExpr(AId, ANode: Integer): TSemaXType;
+    function ResolveTypeExprNested(AId, ANode: Integer): TSemaXType;
     procedure BuildHelperMap;
     procedure ClearHelperIdx;
     function HelperMemberHit(AFromMid: Integer; const ACur: TSemaXType;
@@ -1955,6 +1957,47 @@ begin
   end;
 end;
 
+{ ResolveTypeExpr plus the one lookup it deliberately does not do: a NESTED type
+  named through its OUTER type, cross-unit — `with TScrollBarStyleHook.
+  TScrollWindow(FMDIScrollSizeBox) do SizeBox := True` (Vcl.Forms, over a nested
+  class of Vcl.StdCtrls). ResolveTypeExpr reads the maps, and nothing has bound
+  that last segment yet: Phase 1 resolves a type-qualified member only within its
+  own unit, and the cross-unit member pass (CrossType) runs long after the with
+  pass has to decide E2003.
+
+  Kept OUT of ResolveTypeExpr itself, which is on the BindTypesX/CrossType hot
+  path — a FindMemberX walk per failed type reference there would be paid for
+  every genuinely unresolvable name in the closure. Here it is reached only from
+  the with-target paths, and only after the plain lookup has already missed. }
+function TPasSemaProject.ResolveTypeExprNested(AId, ANode: Integer): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LBase, LName, LMemMid, LMemSym, LCtx: Integer;
+  LBX: TSemaXType;
+begin
+  Result := ResolveTypeExpr(AId, ANode);
+  if XValid(Result) or (ANode = NIL_NODE) then
+    Exit;
+  LM := FModels[AId];
+  if LM.Tree.Nodes[ANode].Kind <> nkMember then
+    Exit;
+  LBase := LM.Tree.Nodes[ANode].FirstChild;
+  if LBase = NIL_NODE then
+    Exit;
+  LName := LM.Tree.Nodes[LBase].NextSibling;
+  // Qualifier and ONE trailing segment; a longer chain nests nkMember nodes, so
+  // the recursion below covers `A.B.C` without a flat-list case here.
+  if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) or
+     (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) then
+    Exit;
+  LBX := ResolveTypeExprNested(AId, LBase);
+  if not XValid(LBX) then
+    Exit;
+  if FindMemberX(AId, LBX, LM.Tree.NodeNameLower(LName), LMemMid, LMemSym,
+       LCtx) and (FModels[LMemMid].Symbols[LMemSym].Kind = skType) then
+    Result := XPlain(LMemMid, LMemSym);
+end;
+
 { Cross-unit helper injection (15.3) ---------------------------------------
 
   A `class/record helper for T` declared in unit B applies wherever B is in
@@ -3371,6 +3414,29 @@ begin
   end;
 end;
 
+{ The pointee of an ANONYMOUS pointer type written INLINE on the base
+  designator's own declaration — `PExtLogPen: ^TExtLogPen` as a local var, then
+  `with Result, PExtLogPen^ do` (Vcl.Graphics.GetPenData). There is no pointer
+  type SYMBOL anywhere in that shape, so PointeeX has nothing to chase: the
+  declaration's type NODE is the only place the pointer type exists at all.
+
+  Exactly the reason ElementX starts from the declared type node for an inline
+  `array[...] of T` — same gap, the other type constructor. XNil whenever the
+  base does have a named type, which is the ordinary path. }
+function TPasSemaProject.PointeeOfDeclX(AId, ABaseNode: Integer): TSemaXType;
+var
+  LMid, LSym, LNode: Integer;
+begin
+  Result := XNil;
+  if not DesignatorSymX(AId, ABaseNode, LMid, LSym) then
+    Exit;
+  LNode := FModels[LMid].Symbols[LSym].TypeNode;
+  if (LNode = NIL_NODE) or
+     (FModels[LMid].Tree.Nodes[LNode].Kind <> nkPointerType) then
+    Exit;
+  Result := ResolveTypeExpr(LMid, FModels[LMid].Tree.Nodes[LNode].FirstChild);
+end;
+
 { The declaring (model, symbol) of a designator's head, across models: what
   RefMap/ExtRefMap say about the last segment. Needed because a variable's
   declared type NODE is sometimes the only place an array type exists (an
@@ -3740,8 +3806,14 @@ begin
     // shape composes with the cast/call branch above — the call types to
     // PVarData, this dereferences it to TVarData.
     nkDeref:
-      Result := PointeeX(WithTargetTypeX(AId,
-        LM.Tree.Nodes[ANode].FirstChild));
+      begin
+        LBase := LM.Tree.Nodes[ANode].FirstChild;
+        // An inline `^T` on the base's own declaration first — that pointer type
+        // has no symbol for PointeeX to chase (see PointeeOfDeclX).
+        Result := PointeeOfDeclX(AId, LBase);
+        if not XValid(Result) then
+          Result := PointeeX(WithTargetTypeX(AId, LBase));
+      end;
 
     // `with Arr[I] do` — the ELEMENT type; the single most common with-target
     // shape in the RTL (`with NetResources^[I] do` over a Winapi record,
@@ -3767,7 +3839,8 @@ begin
       begin
         LBase := LM.Tree.Nodes[ANode].FirstChild;
         if LBase <> NIL_NODE then
-          Result := ResolveTypeExpr(AId, LM.Tree.Nodes[LBase].NextSibling);
+          Result := ResolveTypeExprNested(AId,
+            LM.Tree.Nodes[LBase].NextSibling);
       end;
 
     nkCall:
@@ -3787,8 +3860,11 @@ begin
         // System unit, so Phase 1 cannot bind it and this pass is the only
         // one that can. Unlike the Phase 1 branch this also covers a
         // QUALIFIED cast (`System.TVarData(X)`) and a generic one, since
-        // ResolveTypeExpr handles nkMember/nkTypeArgs too.
-        Result := ResolveTypeExpr(AId, LBase);
+        // ResolveTypeExpr handles nkMember/nkTypeArgs too — and the Nested
+        // variant also reaches a cross-unit NESTED type named through its outer
+        // one (`TScrollBarStyleHook.TScrollWindow(X)`), which nothing has bound
+        // this early.
+        Result := ResolveTypeExprNested(AId, LBase);
         if XValid(Result) then
           Exit;
         // `with TApartmentThread.Create(...) do` (System.Win.VCLCom) — a
@@ -4358,7 +4434,18 @@ begin
     // filling a gap and fixing a wrong answer — `with GR do Shared := 'x'`
     // must mean GR.Shared even when the enclosing class, a local, a parameter
     // or a unit global also offers a `Shared`.
-    if LBound and not LModel.InUnopenedWithBody(LNode) then
+    // A LATER TARGET is revisited for the same reason, and its Phase-1 binding
+    // is even less trustworthy: `with ZStream, ZLIB do` (Vcl.Imaging.pngimage),
+    // where ZLIB is a FIELD of ZStream and also the name of a used unit
+    // (System.ZLib). Phase 1 bound the unit reference — a bare unit name is not
+    // a legal with target at all (5.7) — and, being "bound", the node was never
+    // reconsidered, so the second target never opened and its members
+    // (next_out/avail_out) were false E2003. 5.7 is explicit on both halves: a
+    // target after the first is resolved INSIDE the ones before it, and a target
+    // member outranks everything else in scope, so an earlier best-effort
+    // binding must be OVERRIDDEN rather than gap-filled.
+    if LBound and not LModel.InUnopenedWithBody(LNode) and
+       not InsideLaterWithTarget(LModel, LNode) then
       Continue;
     // Never re-point a DECLARATION's own name node: MarkDeclName records
     // declarations in RefMap too, and an inline `var Shared: Integer` inside

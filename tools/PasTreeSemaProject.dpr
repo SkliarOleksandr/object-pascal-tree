@@ -78,8 +78,13 @@ var
   the header: the demo reads the IDE's registry paths, this does not. }
 function StudioSearchPaths(const ARoot: string): TArray<string>;
 const
-  SUBS: array[0..5] of string = ('source\rtl\sys', 'source\rtl\common',
-    'source\rtl\win', 'source\rtl\net', 'source\vcl', 'source\fmx');
+  // winrt and databinding/engine earn their place from the VCL package closure:
+  // without them Vcl.Clipbrd/Vcl.Bind.* stay unresolved, and an unresolved unit
+  // silences its IMPORTERS' diagnostics (the AllUsesResolved gate) — which reads
+  // as "clean" instead of "not analyzed".
+  SUBS: array[0..7] of string = ('source\rtl\sys', 'source\rtl\common',
+    'source\rtl\win', 'source\rtl\win\winrt', 'source\rtl\net',
+    'source\databinding\engine', 'source\vcl', 'source\fmx');
 var
   LDir: string;
 begin
@@ -392,10 +397,17 @@ begin
     end;
 
     if TDirectory.Exists(GPath) then
+      // A DIRECTORY run is a closed corpus by design: whatever is in the
+      // directory is the whole world, so its F1027s are meaningful and its
+      // counts are comparable run to run. Adding the Studio trees here would
+      // silently change what is being measured.
       GProj := TPasSemaProject.Create(GPlatform, [GPath], [])
     else
+      // A FILE target (`-proj` over a .dpk/.dpr) states nothing about where the
+      // RTL lives, and without it every `uses System.X` is an F1027 and no
+      // E2003 can be trusted. Same Studio SOURCE trees the -dproj driver adds.
       GProj := TPasSemaProject.Create(GPlatform,
-        [TPath.GetDirectoryName(GPath)], []);
+        [TPath.GetDirectoryName(GPath)] + StudioSearchPaths(GStudio), []);
     try
       GProj.SingleThreaded := GSingle;
       // Same reasoning as the -dproj driver: a directory or bare-file run has

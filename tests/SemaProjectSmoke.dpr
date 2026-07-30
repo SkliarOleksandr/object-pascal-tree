@@ -686,6 +686,66 @@ const
     'implementation'#10 +
     'end.'#10;
 
+  { 5.7 — three CROSS-UNIT with-target shapes, each a different mechanism and
+    each a real VCL false E2003:
+
+    - `with P^ do` where P is declared with an INLINE anonymous pointer type
+      (`P: ^TExtPen`). No pointer type SYMBOL exists anywhere, so the pointee can
+      only come from the declaration's type NODE. Vcl.Graphics.GetPenData's
+      `PExtLogPen: ^TExtLogPen` + `with Result, PExtLogPen^ do`.
+    - `with AZ, UnitWX do` where the later target names a FIELD of the earlier
+      one AND a used UNIT. Phase 1 binds the unit reference — never a legal with
+      target — and a "bound" node used not to be reconsidered, so the second
+      target never opened. Vcl.Imaging.pngimage's `with ZStream, ZLIB do` against
+      System.ZLib.
+    - `with THook.TScrollWindow(X) do`: a cast to a NESTED type named through its
+      outer one, in another unit. Nothing binds that segment before the with pass
+      runs. Vcl.Forms' `with TScrollBarStyleHook.TScrollWindow(FMDIScrollSizeBox)
+      do SizeBox := True`. }
+  UNIT_WX =
+    'unit UnitWX;'#10'interface'#10 +
+    'type'#10 +
+    '  TExtPen = record'#10 +
+    '    elpColor: Integer;'#10 +
+    '  end;'#10 +
+    '  TZRec = record'#10 +
+    '    next_out: Integer;'#10 +
+    '  end;'#10 +
+    '  TZRec2 = record'#10 +
+    '    UnitWX: TZRec;'#10 +          // a field named like the USED UNIT
+    '    Data: Integer;'#10 +
+    '  end;'#10 +
+    '  TObjBase = class'#10 +
+    '  end;'#10 +
+    '  THook = class'#10 +
+    '  public type'#10 +
+    '    TScrollWindow = class(TObjBase)'#10 +
+    '    private'#10 +
+    '      FSizeBox: Boolean;'#10 +
+    '    public'#10 +
+    '      property SizeBox: Boolean read FSizeBox write FSizeBox;'#10 +
+    '    end;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
+  UNIT_WXUSE =
+    'unit UnitWXUse;'#10'interface'#10'uses UnitWX;'#10 +
+    'implementation'#10 +
+    'procedure UseWX(var AZ: TZRec2; AWnd: TObjBase);'#10 +
+    'var'#10 +
+    '  P: ^TExtPen;'#10 +               // INLINE anonymous pointer type
+    'begin'#10 +
+    '  New(P);'#10 +
+    '  with P^ do'#10 +
+    '    elpColor := 1;'#10 +
+    '  with AZ, UnitWX do'#10 +         // later target = field, shadows the unit
+    '    next_out := Data;'#10 +
+    '  with THook.TScrollWindow(AWnd) do'#10 +   // cast to a nested type
+    '    SizeBox := True;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   UNIT_E =
     'unit UnitE;'#10'interface'#10'implementation'#10 +
     'procedure R;'#10'var L: Integer;'#10'begin'#10 +
@@ -995,6 +1055,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UWShadow.pas'), UNIT_WSHADOW);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitTObj.pas'), UNIT_TOBJ);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitQual.pas'), UNIT_QUAL);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitWX.pas'), UNIT_WX);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitWXUse.pas'), UNIT_WXUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNHBase.pas'), UNIT_NHBASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNHUse.pas'), UNIT_NHUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWShapes.pas'), UNIT_WSHAPES);
@@ -1319,6 +1381,18 @@ begin
     Ok('nested-with: Left still comes from the OUTER with',
       CrossRefCountInUnit(LNW, 'Left', 'Left', 'unitnwuse') +
       LocalRefCount(LNW, 'Left') >= 2);
+
+    // Three cross-unit with-target shapes, one Ok each — see UNIT_WXUSE for
+    // which real VCL unit every one of them comes from.
+    var LWX := ModelByName('unitwxuse');
+    Ok('wx: UnitWXUse loaded', Assigned(LWX));
+    Ok('wx: no diags at all', Length(LWX.Diags) = 0);
+    Ok('wx: `with P^` over an INLINE ^T declaration opens the pointee',
+      CrossRefTo(LWX, 'elpColor', 'elpColor'));
+    Ok('wx: a later target that is a field wins over the same-named used unit',
+      CrossRefTo(LWX, 'next_out', 'next_out'));
+    Ok('wx: a cast to a cross-unit NESTED type opens it',
+      CrossRefTo(LWX, 'SizeBox', 'SizeBox'));
 
     // A nested type inheriting from the ENCLOSING class's ancestor's nested
     // type, cross-unit (the Skia shape — see UNIT_NHUSE). Each Ok is one layer
