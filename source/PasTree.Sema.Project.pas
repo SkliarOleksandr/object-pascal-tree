@@ -4560,11 +4560,21 @@ begin
       LWith[LWithN] := LNode;
       Inc(LWithN);
     end
-    else if (LM.RefMap[LNode] = NIL_SYM) and
-            not LM.ExtRefMap.ContainsKey(LNode) then
+    else if ((LM.RefMap[LNode] = NIL_SYM) and
+             not LM.ExtRefMap.ContainsKey(LNode)) or
+            ((LM.RefMap[LNode] <> NIL_SYM) and
+             (LM.Symbols[LM.RefMap[LNode]].Kind = skUnitRef)) then
     begin
       // Safe to bake in here: CrossResolve has finished, and nothing between
       // this scan and the inherited pass can bind one of these.
+      //
+      // A UNIT-REFERENCE binding joins them: a bare unit name is never a value,
+      // and an inherited member outranks it. A dotted `uses` registers the unit
+      // under its LAST segment, so that segment used bare in a class which also
+      // has a member of that name binds to the unit. Cheap where the same trick
+      // for BUILTIN bindings was not -- unit refs are bounded by the uses
+      // clause, while every Integer and Length is builtin-bound, and queueing
+      // those measured +3.6%.
       LInh[LInhN] := LNode;
       Inc(LInhN);
     end;
@@ -4723,8 +4733,6 @@ begin
     LNameLower := LModel.Tree.NodeNameLower(LNode);
     if (LNameLower = 'result') or (LNameLower = 'self') then
       Continue;
-    if QualifierUnitAt(AId, LNode, LMatchNode) >= 0 then
-      Continue;
     // Innermost enclosing struct's ancestry, then the OUTER segments of a
     // qualified method name (see OuterStructsOfNode), then the ordinary
     // uses/System fallbacks — dcc's own precedence order.
@@ -4736,6 +4744,32 @@ begin
           LFound := True;
           Break;
         end;
+    // The namespace-token exemption runs AFTER the member walk, not before it:
+    // an inherited MEMBER outranks a unit name. `uses VirtualTrees.Header`
+    // registers the unit under its LAST segment, so in a class that also has a
+    // `Header` property the qualifier test says "this is a namespace token" and
+    // skipped the very node that had a member to find — leaving `Header.Columns`
+    // typed as nothing and its whole with body undeclared. Tested first, it also
+    // suppressed the override below, which is why that change alone did nothing.
+    if not LFound and (QualifierUnitAt(AId, LNode, LMatchNode) >= 0) then
+      Continue;
+    // A UNIT-REFERENCE binding is here to be OVERRIDDEN, not gap-filled: it has
+    // a binding already, the uses/System fallbacks would only re-find the same
+    // unit, and with no inherited member Phase 1's answer simply stands. No
+    // diagnostic either way.
+    if (LModel.RefMap[LNode] <> NIL_SYM) and
+       (LModel.Symbols[LModel.RefMap[LNode]].Kind = skUnitRef) then
+    begin
+      if LFound then
+      begin
+        LPend.Node := LNode;
+        LPend.Ext.UnitId := LUid;
+        LPend.Ext.Sym := LSym;
+        LPend.X := XNil;
+        APending := APending + [LPend];
+      end;
+      Continue;
+    end;
     if LFound or
        FindInUses(AId, LNameLower, LUid, LSym) or
        FindInSystemUnit(LNameLower, LUid, LSym) or
@@ -4777,8 +4811,11 @@ begin
     end);
   for LIdx := 0 to ACount - 1 do
     for LP := 0 to High(LPending[LIdx]) do
-      FModels[LIdx].ExtRefMap.Add(LPending[LIdx][LP].Node,
+    begin
+      FModels[LIdx].RefMap[LPending[LIdx][LP].Node] := NIL_SYM;
+      FModels[LIdx].ExtRefMap.AddOrSetValue(LPending[LIdx][LP].Node,
         LPending[LIdx][LP].Ext);
+    end;
 end;
 
 // The deferred `with`-body pass: everything CrossResolve and

@@ -897,6 +897,70 @@ const
     The first fix searched the used units with the ordinary last-uses-wins
     lookup, which returns the generic again and stops; arity is part of the
     identity, so a generic candidate must not END the search. dcc-verified. }
+  { A dotted `uses` registers the unit under its LAST segment, so that segment
+    used BARE binds to the unit -- and in a class that also has a member of that
+    name, the member must win: a bare unit name is never a value (5.7 / 12.1.1).
+
+    `with Header.Columns, PaintInfo do` is the shape, in a unit that imports
+    `Something.Header` and derives from a class with a `Header` property. The
+    target's base typed as nothing, so the with scope never opened and every
+    member in the body was a false E2003.
+
+    TWO guards had to move, and finding the second one is what took the time:
+    queueing the unit-ref-bound node for the inherited pass did nothing on its
+    own, because the pass's namespace-token exemption (QualifierUnitAt) ran
+    BEFORE the member walk and skipped the node first. A member outranks a unit
+    name, so the exemption belongs after the walk, not before it. }
+  UNIT_HDR =
+    'unit UnitPfx.Hdr;'#10'interface'#10 +
+    'type'#10 +
+    '  TColumns = class'#10 +
+    '  public'#10 +
+    '    function NextVisible(A: Integer): Integer;'#10 +
+    '  end;'#10 +
+    '  THdr = class'#10 +
+    '  private'#10 +
+    '    FColumns: TColumns;'#10 +
+    '  public'#10 +
+    '    property Columns: TColumns read FColumns;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TColumns.NextVisible(A: Integer): Integer;'#10 +
+    'begin'#10 +
+    '  Result := A;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  UNIT_HDRBASE =
+    'unit UnitHdrBase;'#10'interface'#10'uses UnitPfx.Hdr;'#10 +
+    'type'#10 +
+    '  TBaseTree = class'#10 +
+    '  private'#10 +
+    '    FHeader: THdr;'#10 +
+    '  public'#10 +
+    '    property Header: THdr read FHeader;'#10 +   // same name as the UNIT's
+    '  end;'#10 +                                    // last segment
+    'implementation'#10 +
+    'end.'#10;
+
+  UNIT_HDRUSE =
+    'unit UnitHdrUse;'#10'interface'#10 +
+    'uses UnitPfx.Hdr, UnitHdrBase;'#10 +
+    'type'#10 +
+    '  TTree = class(TBaseTree)'#10 +
+    '  public'#10 +
+    '    procedure Adjust;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TTree.Adjust;'#10 +
+    'var'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  with Header.Columns do'#10 +
+    '    I := NextVisible(0);'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   UNIT_ARPLAIN =
     'unit UnitArPlain;'#10'interface'#10 +
     'type'#10 +
@@ -1539,6 +1603,9 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitShadowUse.pas'), UNIT_SHADOWUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitCRef.pas'), UNIT_CREF);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitCRefUse.pas'), UNIT_CREFUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitPfx.Hdr.pas'), UNIT_HDR);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitHdrBase.pas'), UNIT_HDRBASE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitHdrUse.pas'), UNIT_HDRUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArPlain.pas'), UNIT_ARPLAIN);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArGen.pas'), UNIT_ARGEN);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArUses.pas'), UNIT_ARUSES);
@@ -1931,6 +1998,13 @@ begin
     Ok('arity1-uses: no diags at all', Length(LArg.Diags) = 0);
     Ok('arity1-uses: the arity-1 reference reaches the GENERIC import',
       CrossRefTo(LArg, 'Peek', 'Peek'));
+
+    // A member outranking a same-named UNIT reference.
+    var LHdr := ModelByName('unithdruse');
+    Ok('unitref-shadow: UnitHdrUse loaded', Assigned(LHdr));
+    Ok('unitref-shadow: no diags at all', Length(LHdr.Diags) = 0);
+    Ok('unitref-shadow: the with target opens over the inherited property',
+      CrossRefTo(LHdr, 'NextVisible', 'NextVisible'));
 
     // Same rule, both candidates coming from USED units.
     var LAru := ModelByName('unitaruses');
