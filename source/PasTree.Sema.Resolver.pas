@@ -511,17 +511,42 @@ end;
 procedure TPasSemaResolver.CollectTypeDecl(ANode, AScope: Integer);
 var
   LName, LChild, LSym, LExisting, LGen, LBody: Integer;
+  LMatch, LProbe, LDepth: Integer;
 begin
   LName := SkipAttr(FirstChild(ANode));
   if (LName = NIL_NODE) or (KindOf(LName) <> nkIdent) then
     Exit;
   // Forward-declared types (`TFoo = class;`) complete later under the same
   // name — reuse the existing symbol rather than flagging a redeclaration.
+  //
+  // The match must be searched along the WHOLE NextOverload chain, not just at
+  // its head: one name can carry several declarations at different arities
+  // (16.1.2), and FindLocal returns whichever came first. JclArrayLists.pas
+  // declares a non-generic `TJclArrayIterator`, then `TJclArrayIterator<T> =
+  // class;`, then the real `TJclArrayIterator<T>`. Testing only the head found
+  // the arity-0 class, read the arity mismatch as "a different type", and
+  // declared a THIRD symbol — so the forward stayed the arity-1 winner with an
+  // empty member scope, and every method body of the real class lost its own
+  // fields and its inherited members. ~60 false E2003 in that one unit, and it
+  // did not reproduce until the fixture also had the non-generic sibling.
   LExisting := FModel.FindLocal(AScope, NodeNameLower(LName));
-  if (LExisting <> NIL_SYM) and (FModel.Symbols[LExisting].Kind = skType) and
-     (GenericArityOfDecl(ANode) = GenericArityOfSym(LExisting)) then
+  LMatch := NIL_SYM;
+  LProbe := LExisting;
+  for LDepth := 1 to 64 do
   begin
-    LSym := LExisting;
+    if LProbe = NIL_SYM then
+      Break;
+    if (FModel.Symbols[LProbe].Kind = skType) and
+       (GenericArityOfDecl(ANode) = GenericArityOfSym(LProbe)) then
+    begin
+      LMatch := LProbe;
+      Break;
+    end;
+    LProbe := FModel.Symbols[LProbe].NextOverload;
+  end;
+  if LMatch <> NIL_SYM then
+  begin
+    LSym := LMatch;
     MarkDeclName(LName, LSym);
     // The completing declaration supersedes the forward one (`TFoo = class;`):
     // DeclNode must reach the real definition so ancestor/generic-param walks

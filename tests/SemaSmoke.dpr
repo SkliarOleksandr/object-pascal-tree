@@ -373,6 +373,46 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { A forward-declared GENERIC completing under a name that ALSO has a
+    non-generic declaration. JclArrayLists.pas has all three, in this order:
+    `TJclArrayIterator` (arity 0), `TJclArrayIterator<T> = class;` (the
+    forward), then the real `TJclArrayIterator<T>`. FindLocal returns the HEAD
+    of the name's overload chain — the arity-0 class — so the arity test read
+    "a different type", the completion declared a THIRD symbol, and the empty
+    forward stayed the arity-1 winner. Every method body of the real class then
+    lost its own fields AND its inherited members: ~60 false E2003 in that one
+    unit. The completion has to be searched along the whole chain.
+
+    The non-generic sibling is load-bearing here — without it the shape does not
+    reproduce at all, which is exactly why it took a real corpus to surface. }
+  SRC_FWDGENERIC =
+    'unit U;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TIter = class'#10 +                // arity 0, FIRST
+    '  private'#10 +
+    '    FTag: Integer;'#10 +
+    '  public'#10 +
+    '    function Get: Integer;'#10 +
+    '  end;'#10 +
+    '  TIter<T> = class;'#10 +            // the forward, arity 1
+    '  TIter<T> = class'#10 +             // the real one, arity 1
+    '  private'#10 +
+    '    FCursor: Integer;'#10 +
+    '  public'#10 +
+    '    function Next: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TIter.Get: Integer;'#10 +
+    'begin'#10 +
+    '  Result := FTag;'#10 +
+    'end;'#10 +
+    'function TIter<T>.Next: Integer;'#10 +
+    'begin'#10 +
+    '  Result := FCursor;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   { A directive WORD used as the name of the next declaration. Directives are
     context-sensitive identifiers, and `unsafe` is one — so ConsumeTrailingDirectives
     read DevExpress dxCore.pas's `Unsafe = class` as the `cdecl = nil` shape (a
@@ -1118,6 +1158,15 @@ begin
     DiagCount('E2003') = 0);
   Ok('aviclusters: the value beside it still resolves',
     RefResolvesTo('Counter', 'Counter'));
+  GModel.Free;
+
+  // A forward generic completing next to a non-generic sibling (the JCL shape).
+  Analyze(SRC_FWDGENERIC);
+  Ok('fwdgeneric: no diags at all', Length(GModel.Diags) = 0);
+  Ok('fwdgeneric: the generic method body sees its own field',
+    DiagCount('E2003') = 0);
+  Ok('fwdgeneric: the non-generic sibling still has its own',
+    RefResolvesTo('FTag', 'FTag') and RefResolvesTo('FCursor', 'FCursor'));
   GModel.Free;
 
   // A directive word naming the next declaration (the DevExpress dxCore shape).
