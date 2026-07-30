@@ -294,6 +294,13 @@ const
     '  TCanvasBaseKin = class'#10 +
     '    Mark: Integer;'#10 +
     '  end;'#10 +
+    // 15.2.1 — a CLASS REFERENCE. `with TEngineClass(SomeEngine) do` reaches the
+    // referenced class's members (Vcl.Themes does this for its class vars), so a
+    // member walk must hop from `class of T` to T.
+    '  TEngineKin = class'#10 +
+    '    class var Registry: Integer;'#10 +
+    '  end;'#10 +
+    '  TEngineKinClass = class of TEngineKin;'#10 +
     '  TCollBase = class'#10 +
     '  private'#10 +
     '    function GetItem(const Index: Integer): TItemLike;'#10 +
@@ -430,6 +437,24 @@ const
     '    Mark := 1;'#10 +
     '  with TCanvasKin.Create(nil) do'#10 + // 46 with arguments
     '    Owner := nil;'#10 +
+    'end;'#10 +
+    // A cast to a CLASS REFERENCE as the with target (15.2.1).
+    'procedure Meta(E: TObject);'#10 +
+    'begin'#10 +
+    '  with TEngineKinClass(E) do'#10 +
+    '    Registry := 1;'#10 +
+    'end;'#10 +
+    // 12.1.2 — `inherited Name` heads a designator naming an ANCESTOR member, so
+    // its type comes from the ancestor. Vcl.ExtCtrls uses `with inherited Canvas
+    // do`, where resolving the name against the class itself finds nothing.
+    'type'#10 +
+    '  TDerivedKin = class(TCanvasKin)'#10 +
+    '    procedure Paint;'#10 +
+    '  end;'#10 +
+    'procedure TDerivedKin.Paint;'#10 +
+    'begin'#10 +
+    '  with inherited Owner do'#10 +       // the ancestor''s member
+    '    ClassName;'#10 +
     'end;'#10 +
     'end.'#10;
 
@@ -1206,6 +1231,14 @@ begin
       CrossRefTo(LMT, 'Mark', 'Mark'));
     Ok('ctor target: Owner through a constructor WITH arguments',
       CrossRefTo(LMT, 'Owner', 'Owner'));
+    // A cast to `class of T` as the with target: Registry is a class var of T,
+    // reachable only if the walk hopped from the class reference to T.
+    Ok('class reference: a class var through TEngineKinClass(E)',
+      CrossRefTo(LMT, 'Registry', 'Registry'));
+    // `with inherited Owner do` — the ancestor's member, and ClassName then comes
+    // from the type it yields. Both only bind if nkInherited types at all.
+    Ok('inherited target: ClassName through `with inherited Owner do`',
+      CrossRefTo(LMT, 'ClassName', 'ClassName'));
     // `array of const` indexed: VType/VInteger are TVarRec fields reachable ONLY
     // through the with scope, so binding them proves the element type resolved
     // to System.TVarRec rather than to nothing.

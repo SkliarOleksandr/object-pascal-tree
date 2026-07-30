@@ -2252,6 +2252,16 @@ begin
         // looking, so a member lookup on a pointer type behaves like one on
         // what it points at.
         LNext := PointeeX(LCur);
+      nkClassOf:
+        // A CLASS REFERENCE (15.2.1, `class of T`): its members are T's, which
+        // is how `with TCustomStyleEngineClass(TStyleManager.Engine) do` reaches
+        // TCustomStyleEngine's class vars (Vcl.Themes). Same shape as the
+        // pointer hop — redirect to the referenced type and keep looking.
+        // Visibility is not filtered here, so an INSTANCE member is reachable
+        // through a class reference too; that is a known imprecision of this
+        // walk, not specific to this hop.
+        LNext := ResolveTypeExpr(LCur.UnitId,
+          LM.Tree.Nodes[LDef].FirstChild);
       nkClassType, nkInterfaceType, nkRecordType, nkObjectType:
         begin
           // Leading nkIdent/nkMember/nkTypeArgs children are the heritage
@@ -3534,7 +3544,7 @@ function TPasSemaProject.DefaultArrayPropX(const AX: TSemaXType;
 var
   LCur: TSemaXType;
   LM: TPasSemaModel;
-  LDef, LScope, LIdx, LSym, LChild, LDepth: Integer;
+  LScope, LIdx, LSym, LDepth: Integer;
 begin
   Result := False;
   AMid := NIL_SYM;
@@ -3736,6 +3746,27 @@ begin
             Exit;
         end;
         Result := WithTargetTypeX(AId, LBase);
+      end;
+
+    nkInherited:
+      begin
+        // `with inherited Canvas do` (Vcl.ExtCtrls). 12.1.2: `inherited` heads a
+        // designator, and `inherited Name` names a member of the ANCESTOR — so
+        // the target's type is that member's, looked up from the ancestor of the
+        // struct whose method body this is, never from the struct itself.
+        // Without it the target had no type, the body's Pen/Brush went
+        // undeclared, and StretchDraw's bare name matched a GLOBAL instead of the
+        // canvas method — which is where that E2035 came from.
+        LName := LM.Tree.Nodes[ANode].FirstChild;
+        if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) then
+          Exit;
+        LSym := StructSymOfNode(LM, ANode);
+        if LSym = NIL_SYM then
+          Exit;
+        LBX := AncestorOfX(XPlain(AId, LSym));
+        if XValid(LBX) and FindMemberX(AId, LBX,
+             LM.Tree.NodeNameLower(LName), LMemMid, LMemSym, LCtx) then
+          Result := SubstX(SymDeclTypeX(LMemMid, LMemSym), LCtx, 0);
       end;
 
     nkIdent:
