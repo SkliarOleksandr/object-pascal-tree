@@ -342,6 +342,38 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { An ANONYMOUS structured type, written inline in a declaration's type slot
+    rather than given a name: `array[0..1] of record offset, minimum: Cardinal;
+    end`. CollectStruct always gave it a member SCOPE, but no SYMBOL owned that
+    scope -- and every cross-model type is a (unit, symbol) pair, so the element
+    type could not be named at all and `with TAB[I] do` opened over nothing.
+    A synthetic unnamed type symbol carries the scope; nothing can resolve to it
+    by name, so it cannot collide or shadow. }
+  SRC_ANONSTRUCT =
+    'unit U;'#10 +
+    'interface'#10 +
+    'procedure Use;'#10 +
+    'implementation'#10 +
+    'const'#10 +
+    '  TAB: packed array[0..1] of record'#10 +
+    '    offset, minimum: Cardinal;'#10 +
+    '  end = ('#10 +
+    '    (offset: 1; minimum: 2),'#10 +
+    '    (offset: 3; minimum: 4));'#10 +
+    'procedure Use;'#10 +
+    'var'#10 +
+    '  I: Integer;'#10 +
+    '  C: Cardinal;'#10 +
+    'begin'#10 +
+    '  I := 0;'#10 +
+    '  with TAB[I] do'#10 +
+    '  begin'#10 +
+    '    C := offset;'#10 +
+    '    if C < minimum then Exit;'#10 +
+    '  end;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   { Two clusters from the first run over a real 3790-unit project (AVImark).
 
     Real48 (2.5.1) is compiler-provided like Comp: System.pas names it only in a
@@ -1190,6 +1222,13 @@ begin
     RefResolvesTo('Pen', 'Pen'));
   Ok('withforms: `with AI do` reaches the interface method',
     RefResolvesTo('Go', 'Go'));
+  GModel.Free;
+
+  // An ANONYMOUS structured type in a declaration's type slot.
+  Analyze(SRC_ANONSTRUCT);
+  Ok('anonstruct: no diags at all', Length(GModel.Diags) = 0);
+  Ok('anonstruct: the with body sees the inline record''s fields',
+    RefResolvesTo('offset', 'offset') and RefResolvesTo('minimum', 'minimum'));
   GModel.Free;
 
   // ANONYMOUS enums are exempt from SCOPEDENUMS — there is no name to qualify.

@@ -1560,6 +1560,11 @@ begin
   LName := LM.Symbols[ASym].DeclNode;
   if LName = NIL_NODE then
     Exit;
+  // An ANONYMOUS struct's symbol has the struct node ITSELF as its declaration
+  // — there is no name node and no nkTypeDecl above it (see DeclareAnonStruct).
+  if LM.Tree.Nodes[LName].Kind in [nkRecordType, nkClassType, nkInterfaceType,
+     nkObjectType, nkHelperType] then
+    Exit(LName);
   LParent := LM.Tree.Nodes[LName].Parent;
   if (LParent = NIL_NODE) or (LM.Tree.Nodes[LParent].Kind <> nkTypeDecl) then
     Exit;
@@ -2089,6 +2094,16 @@ begin
         // a name with a type is wrong. The type-position fallback lives in
         // SymDeclTypeX, which is only ever given a declaration's type slot.
       end;
+    // An ANONYMOUS structured type written inline in a type slot. It has no
+    // name, so there is nothing in RefMap — but CollectStruct gave it a member
+    // scope and DeclareAnonStruct gave that scope a symbol, and the node is the
+    // way back to both.
+    nkRecordType, nkClassType, nkInterfaceType, nkObjectType:
+      if (ANode <= High(LM.NodeScope)) and
+         (LM.NodeScope[ANode] <> NIL_SCOPE) and
+         (LM.Scopes[LM.NodeScope[ANode]].StructSym <> NIL_SYM) then
+        Result := XPlain(AId, LM.Scopes[LM.NodeScope[ANode]].StructSym);
+
     nkTypeArgs:
       begin
         // ABare=False: the base of `T<...>` is SUPPOSED to be the generic, and

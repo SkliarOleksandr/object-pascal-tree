@@ -92,6 +92,7 @@ type
     procedure DeclareNamesAndType(ADecl, AScope: Integer;
       AKind: TSemaSymbolKind);
     procedure CollectTypeDecl(ANode, AScope: Integer);
+    function DeclareAnonStruct(AScope, ANode: Integer): Integer;
     procedure CollectStruct(ANode, AOuter, ATypeSym: Integer);
     procedure CollectEnum(ANode, AOuter, ATypeSym: Integer);
     procedure CollectVariantPart(ANode, AScope: Integer);
@@ -594,6 +595,16 @@ begin
       end;
     LChild := NextSib(LChild);
   end;
+end;
+
+{ A type symbol for an ANONYMOUS structured type, so it can be named as a
+  (unit, symbol) pair like every other type. Added to the scope but NOT bound to
+  a name: nothing may find it by lookup, and it cannot collide or shadow. The
+  declaration node is the struct node itself, which is what TypeDefNodeOf and
+  the ancestor/member walks need. }
+function TPasSemaResolver.DeclareAnonStruct(AScope, ANode: Integer): Integer;
+begin
+  Result := FModel.AddSymbol(AScope, skType, '', ANode);
 end;
 
 procedure TPasSemaResolver.CollectStruct(ANode, AOuter, ATypeSym: Integer);
@@ -1337,7 +1348,15 @@ begin
       end;
 
     nkRecordType, nkClassType, nkInterfaceType, nkObjectType, nkHelperType:
-      CollectStruct(ANode, AScope, NIL_SYM);
+      // An ANONYMOUS structured type — written inline in a declaration's type
+      // slot rather than given a name, e.g. `TAB: array[0..1] of record
+      // offset, minimum: Cardinal; end = (...)`. It gets a member scope like
+      // any other struct, but until now no SYMBOL owned that scope, and every
+      // cross-model type is a (unit, symbol) pair — so `with TAB[I] do` could
+      // name the element type at all, and its fields read as undeclared. The
+      // synthetic symbol is deliberately unnamed: nothing may resolve TO it by
+      // name, it exists only to carry the member scope.
+      CollectStruct(ANode, AScope, DeclareAnonStruct(AScope, ANode));
 
     nkBlock, nkForStmt, nkForInStmt:
       begin
@@ -2105,6 +2124,17 @@ function TPasSemaResolver.ElementTypeOf(ABaseNode: Integer): Integer;
     begin
       LLast := LChild;
       LChild := NextSib(LChild);
+    end;
+    // An ANONYMOUS element type (`array[...] of record ... end`) is a struct
+    // NODE, not a designator, so DesignatorHead has nothing to read. Its
+    // synthetic symbol is reachable through the member scope CollectStruct
+    // hung off that node — see DeclareAnonStruct.
+    if (LLast <> NIL_NODE) and (KindOf(LLast) in [nkRecordType, nkClassType,
+       nkInterfaceType, nkObjectType]) then
+    begin
+      if (LLast <= High(FNodeScope)) and (FNodeScope[LLast] <> NIL_SCOPE) then
+        Result := FModel.Scopes[FNodeScope[LLast]].StructSym;
+      Exit;
     end;
     Result := DesignatorHead(LLast);
   end;
