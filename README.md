@@ -333,6 +333,62 @@ Still open, roughly in the order we're tackling it:
   declaration-site name that does not resolve locally — that is every cross-unit
   type reference in every class in the closure, each through `FindMemberX`.
   Deliberately not paid for a collision nobody has hit yet.
+- **An AST printer, and the two very different tests it enables.** Item 2 of the
+  definition of done is a *token*-level roundtrip (concatenated tokens + trivia
+  == source, byte-for-byte), which proves the LEXER lossless and says nothing
+  about the tree. A printer that regenerates source from the AST is the next
+  rung, and it is worth being precise about what each variant actually tests:
+  - **Verbatim printing → parser/AST fidelity.** Print the tree and diff against
+    the original. Every mismatch is a node that DROPPED information — a directive
+    the parser swallowed, an operand order it normalized, a construct it folded.
+    This is a strong, cheap, fully automatable check over the whole RTL, and it
+    is the one to build first. It does NOT test the semantic layer: the tree is
+    the same tree whether or not a single name resolved.
+  - **Qualified printing → the semantic layer, end to end.** Print every
+    unqualified reference in its FULLY QUALIFIED form (`Unit.Type.Member`,
+    each `with` body member rewritten to `target.member` — literally what §5.7's
+    parser guidance suggests keeping the tree shaped for). Now the output encodes
+    every binding decision, so a diff against a known-good rendering is a total
+    test of resolution, not of parsing. Better still, the result must still
+    COMPILE under dcc32 and must produce byte-identical `.dcu`s — which makes
+    dcc the oracle and removes the need for a hand-maintained expectation file.
+    This is the "жир": a wrong binding stops being invisible and becomes a
+    compile error or a binary difference.
+- **Units with no source (`.dcu`-only third-party libraries).** The blocker for
+  real projects: AVImark pulls in DevExpress, JCL, Orpheus, RaveReport and
+  friends, and where only `.dcu` ships, every importer gets an `F1027` and — far
+  worse — its diagnostics are then gated off entirely by the `AllUsesResolved`
+  rule, so the unit reads as clean when it was never analyzed. Target design:
+  produce a **virtual, in-memory interface-only `.pas`** for such a unit and feed
+  it to the ordinary pipeline, so nothing downstream needs to know the
+  declarations did not come from a file. Navigation then opens that generated
+  buffer as a read-only tab — the mechanism already exists for `$I` includes,
+  which likewise resolve to a path that is not the model's own file.
+  Staged, cheapest-first, because the last stage is the expensive one:
+  1. **Stub search path.** Accept a directory of hand- or tool-written
+     interface-only `.pas` files that stand in for missing units. No new format
+     work at all, unblocks a real project immediately, and it is the same
+     ingestion path every later stage feeds. Do this first regardless.
+  2. **Whatever the vendor already ships.** `.hpp` headers (C++Builder
+     export) and `.int` files where they exist are already declaration-only text.
+  3. **A `.dcu` reader.** ⚠️ *Do not budget this as a small job.* The format is
+     undocumented, proprietary, and changes with essentially every compiler
+     release — a version magic at the head and per-version tag tables. The
+     public knowledge is reverse-engineered (`dcu32int`, IDR), lags current
+     releases, and nothing published covers 37.0. It cannot be written from
+     documentation; it has to be reverse-engineered against samples.
+     The one big lever: the RTL ships **source and `.dcu` side by side for ~700
+     units**, which is a labelled training corpus almost nobody else has — take a
+     unit whose interface we already parse correctly, and the `.dcu` is the
+     answer key for what the encoding must mean. Scope the reader to what the
+     analyzer actually needs (unit name, uses list, exported type/const/var/
+     routine declarations with signatures) and stop there — code, debug info and
+     line tables are out of scope.
+     Resist one shortcut: scraping identifier NAMES out of the `.dcu` string
+     table and treating "name is present" as resolution. It suppresses `E2003`
+     without types, so every member access through such a name silently
+     degrades, and real errors get hidden along with the false ones. A stub with
+     honest types (stage 1) beats a name list.
 - **LSP/LSIF server.** The demo (VCL-hosted) is the only editor integration
   today; a Language Server Protocol server (live highlighting/navigation/
   diagnostics/rename/etc. over the same Sema/Nav layer) plus LSIF dump
