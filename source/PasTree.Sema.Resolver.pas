@@ -120,6 +120,7 @@ type
     function PointeeTypeSym(ATypeSym: Integer): Integer;
     function ElementTypeOf(ABaseNode: Integer): Integer;
     procedure RepointScope(ANode, ANewScope: Integer);
+    procedure UnbindShadowedByWith(ANode, AWithScope: Integer);
     procedure ResolveOneWithStmt(AWith: Integer);
     procedure ResolveWithStmts;
     procedure Run;
@@ -1881,10 +1882,35 @@ end;
 // entry that was never going to be there.
 function TPasSemaResolver.WithTargetTypeSym(ANode: Integer): Integer;
 var
-  LBase, LName, LHead, LBaseType: Integer;
+  LBase, LName, LHead, LBaseType, LScope: Integer;
 begin
   Result := NIL_SYM;
   case KindOf(ANode) of
+    // `with inherited Canvas do` (Vcl.ExtCtrls). 12.1.2: `inherited Name` names
+    // a member of the ANCESTOR, so the target's type is that member's, looked up
+    // from the ancestor of the struct whose method body this is. The project
+    // typer has had this branch since the nkInherited fix; without it here the
+    // SAME-unit case never opened its scope intra-unit — no false diagnostic
+    // (the project pass covers it) but no navigation either.
+    nkInherited:
+      begin
+        LName := FirstChild(ANode);
+        if (LName = NIL_NODE) or (KindOf(LName) <> nkIdent) then
+          Exit;
+        LScope := FNodeScope[ANode];
+        while (LScope <> NIL_SCOPE) and
+              (FModel.Scopes[LScope].StructSym = NIL_SYM) do
+          LScope := FModel.Scopes[LScope].Parent;
+        if LScope = NIL_SCOPE then
+          Exit;
+        LHead := AncestorTypeSym(FModel.Scopes[LScope].StructSym);
+        if LHead = NIL_SYM then
+          Exit;
+        LHead := FindMemberUpChain(LHead, NodeNameLower(LName));
+        if LHead <> NIL_SYM then
+          Result := FModel.Symbols[LHead].TypeSym;
+      end;
+
     nkIdent:
       begin
         LHead := FModel.RefMap[ANode];
@@ -1893,6 +1919,13 @@ begin
         case FModel.Symbols[LHead].Kind of
           skVar, skConst, skField, skParam, skRoutine, skProperty:
             Result := FModel.Symbols[LHead].TypeSym;
+          // A bare class TYPE NAME is a legal target (5.7, dcc-verified:
+          // `with TCanvas do Tick` reaches its class methods and class vars —
+          // the same reach a `class of` reference gives). The target's type is
+          // the type ITSELF; asking for its declared type, as the value kinds
+          // above do, yields nothing.
+          skType, skBuiltinType:
+            Result := LHead;
         end;
       end;
     nkMember:
@@ -2130,6 +2163,46 @@ begin
   end;
 end;
 
+{ Unbinds every body name that the with scope ALSO offers, so ResolveNode's
+  "only fill NIL_SYM" rule cannot leave a Phase-1 guess standing in front of a
+  member. 5.7: a target member outranks EVERYTHING — dcc-verified against a
+  local, a parameter, a unit-level global and an inline `var` declared inside
+  the body itself.
+
+  Without this the override only ever happened for targets this pass could NOT
+  open (WithUnopened, revised later by the project's with pass); a target whose
+  type IS same-unit resolvable opened its scope and then quietly kept the older
+  binding. `with R do Shared := 'x'` with a local `Shared: Integer` in scope
+  was a false E2010 — the shape the 5.7 bullet describes, and the one the RTL
+  corpus happens never to contain.
+
+  Skips the two node classes that are not bare references: a DECLARATION's own
+  name (an inline `var Shared` in the body still declares Shared — only its USES
+  bind to the member, which is exactly why dcc rejects that program), and the
+  member name of `A.B`, which is resolved through A. }
+procedure TPasSemaResolver.UnbindShadowedByWith(ANode, AWithScope: Integer);
+var
+  LChild, LParent: Integer;
+begin
+  if ANode = NIL_NODE then
+    Exit;
+  if (KindOf(ANode) = nkIdent) and not FIsDeclName[ANode] and
+     (FModel.RefMap[ANode] <> NIL_SYM) then
+  begin
+    LParent := FTree.Nodes[ANode].Parent;
+    if (LParent = NIL_NODE) or (KindOf(LParent) <> nkMember) or
+       (FirstChild(LParent) = ANode) then
+      if FModel.FindLocalDeep(AWithScope, NodeNameLower(ANode)) <> NIL_SYM then
+        FModel.RefMap[ANode] := NIL_SYM;
+  end;
+  LChild := FirstChild(ANode);
+  while LChild <> NIL_NODE do
+  begin
+    UnbindShadowedByWith(LChild, AWithScope);
+    LChild := NextSib(LChild);
+  end;
+end;
+
 procedure TPasSemaResolver.ResolveOneWithStmt(AWith: Integer);
 var
   LTarget, LBody, LWithScope, LTypeSym: Integer;
@@ -2216,6 +2289,7 @@ begin
   if LWithScope = NIL_SCOPE then
     Exit;   // no target resolved to a real, member-bearing type — leave as-is
 
+  UnbindShadowedByWith(LBody, LWithScope);
   RepointScope(LBody, LWithScope);
   ResolveNode(LBody);
 end;

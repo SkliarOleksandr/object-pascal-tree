@@ -298,6 +298,16 @@ Still open, roughly in the order we're tackling it:
   the next corpus is the real project (see the AVImark note below), and the two
   precedence gaps below are known places where the binding is right-ish for the
   wrong reason.
+- **Two `with`-target diagnostics we accept where dcc refuses**, both found by
+  auditing 5.7 against the implementation rather than by the corpus, and both
+  missing-diagnostic rather than false-positive:
+  - `with P do` over a pointer. The implicit dereference that makes `P.Field`
+    legal does NOT extend to a with target — dcc says `E2018 Record, object or
+    class type required` and then `E2003` on every member. `FindMemberX`'s
+    pointer hop is shared with member access, so we open the scope happily.
+  - `with (R) do X := 1`. Parentheses demote the target to a VALUE: dcc opens
+    the scope but reports `E2064 Left side cannot be assigned to`. We have no
+    assignability model for with members, so the write is accepted.
 - **Arity check in the intra-unit typer ignores inherited members.** The
   cross-unit check (`CheckCalls`) now yields to an inherited member before
   reporting, but `PasTree.Sema.Types.SelectOverload` has its own arity

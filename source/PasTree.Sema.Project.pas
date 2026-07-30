@@ -3969,6 +3969,13 @@ begin
 
     nkIdent:
       begin
+        // A bare class TYPE NAME is itself a legal target (5.7) — its class
+        // methods and class vars are what the body sees, exactly as for a
+        // `class of` reference. ResolveTypeExpr yields XNil for anything that
+        // is not a type, so a value designator falls through unchanged.
+        Result := ResolveTypeExpr(AId, ANode);
+        if XValid(Result) then
+          Exit;
         LSym := LM.RefMap[ANode];
         if LSym <> NIL_SYM then
           Result := SymDeclTypeX(AId, LSym)

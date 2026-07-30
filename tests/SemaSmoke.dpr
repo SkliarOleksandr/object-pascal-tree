@@ -299,6 +299,104 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { 5.7 — "a target member outranks EVERYTHING else in scope" applied to names
+    Phase 1 ALREADY BOUND. The rule was stated and dcc-verified in the spec, and
+    the implementation only honoured it for targets it could not open: a target
+    whose type IS same-unit resolvable opened its scope and then kept the older
+    binding, because ResolveNode only fills NIL_SYM.
+
+    Every member here is a `string` and every shadowed name an `Integer`, so a
+    wrong binding is not silent — it surfaces as E2010 on the assignment. All
+    four shadow kinds from the 5.7 bullet, plus the implicit `Result`, which the
+    bullet did not mention and dcc also lets the member win (W_res probe:
+    `with R do Result := 'x'` compiles inside a function returning Integer). }
+  SRC_WITHSHADOW =
+    'unit U;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TRec = record'#10 +
+    '    Loc: string;'#10 +
+    '    Par: string;'#10 +
+    '    Glob: string;'#10 +
+    '    Result: string;'#10 +
+    '  end;'#10 +
+    'var'#10 +
+    '  Glob: Integer;'#10 +               // unit-level global
+    'function F(Par: Integer): Integer;'#10 +
+    'implementation'#10 +
+    'function F(Par: Integer): Integer;'#10 +   // parameter
+    'var'#10 +
+    '  R: TRec;'#10 +
+    '  Loc: Integer;'#10 +                // local
+    'begin'#10 +
+    '  Loc := 1;'#10 +
+    '  Glob := 2;'#10 +
+    '  with R do'#10 +
+    '  begin'#10 +
+    '    Loc := ''a'';'#10 +
+    '    Par := ''b'';'#10 +
+    '    Glob := ''c'';'#10 +
+    '    Result := ''d'';'#10 +
+    '  end;'#10 +
+    '  Result := Loc;'#10 +               // outside: the INTEGER local again
+    'end;'#10 +
+    'end.'#10;
+
+  { 5.7 — four target FORMS from the section's table that nothing else covers.
+    All four compile under dcc 37.0; `with TCanvas do` was the one that did not
+    work here, because the nkIdent path asked for the symbol's DECLARED type and
+    a type symbol has none — for a bare class name the target's type is the type
+    ITSELF, the same reach a `class of` reference gives. }
+  SRC_WITHFORMS =
+    'unit U;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TPen = class'#10 +
+    '    Color: Integer;'#10 +
+    '  end;'#10 +
+    '  TCanvas = class'#10 +
+    '  private'#10 +
+    '    FPen: TPen;'#10 +
+    '  public'#10 +
+    '    class var Shared: Integer;'#10 +
+    '    class procedure Tick;'#10 +
+    '    property Pen: TPen read FPen;'#10 +
+    '  end;'#10 +
+    '  TCanvasClass = class of TCanvas;'#10 +
+    '  IThing = interface'#10 +
+    '    procedure Go;'#10 +
+    '  end;'#10 +
+    '  TBaseCtl = class'#10 +
+    '  private'#10 +
+    '    FCanvas: TCanvas;'#10 +
+    '  public'#10 +
+    '    property Canvas: TCanvas read FCanvas;'#10 +
+    '  end;'#10 +
+    '  TCtl = class(TBaseCtl)'#10 +
+    '    procedure Paint;'#10 +
+    '  end;'#10 +
+    'procedure UseAll(AC: TCanvasClass; AI: IThing);'#10 +
+    'implementation'#10 +
+    'class procedure TCanvas.Tick;'#10 +
+    'begin'#10 +
+    '  Inc(Shared);'#10 +
+    'end;'#10 +
+    'procedure TCtl.Paint;'#10 +
+    'begin'#10 +
+    '  with inherited Canvas do'#10 +      // an INHERITED property
+    '    Pen.Color := 1;'#10 +
+    'end;'#10 +
+    'procedure UseAll(AC: TCanvasClass; AI: IThing);'#10 +
+    'begin'#10 +
+    '  with AC do'#10 +                    // a class REFERENCE
+    '    Tick;'#10 +
+    '  with TCanvas do'#10 +               // a bare class TYPE NAME
+    '    Tick;'#10 +
+    '  with AI do'#10 +                    // an INTERFACE-typed designator
+    '    Go;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // The exception to SCOPEDENUMS, and it is forced rather than chosen: an
   // ANONYMOUS enum has no type NAME to qualify its values with, so scoping them
   // would make them unreachable by any spelling. dcc-verified under
@@ -925,6 +1023,27 @@ begin
     RefResolvesTo('Alpha', 'Alpha'));
   Ok('scopedenums: POPOPT restored ON (TAfterPop.Gamma qualified works)',
     AllRefsResolved('Gamma'));
+  GModel.Free;
+
+  // 5.7 — a with member outranks a name Phase 1 already bound.
+  Analyze(SRC_WITHSHADOW);
+  Ok('withshadow: no diags at all', Length(GModel.Diags) = 0);
+  // Each assignment is string-to-string ONLY if the member won; if the
+  // local/param/global/implicit-Result binding survived it is Integer := string.
+  Ok('withshadow: the member beats a local, a param, a global and Result',
+    DiagCount('E2010') = 0);
+  GModel.Free;
+
+  // 5.7 — target forms: inherited property, class reference, bare class type
+  // name, interface.
+  Analyze(SRC_WITHFORMS);
+  Ok('withforms: no diags at all', Length(GModel.Diags) = 0);
+  Ok('withforms: `with TCanvas do` reaches the class method',
+    RefResolvesTo('Tick', 'Tick'));
+  Ok('withforms: `with inherited Canvas do` reaches the property',
+    RefResolvesTo('Pen', 'Pen'));
+  Ok('withforms: `with AI do` reaches the interface method',
+    RefResolvesTo('Go', 'Go'));
   GModel.Free;
 
   // ANONYMOUS enums are exempt from SCOPEDENUMS — there is no name to qualify.
