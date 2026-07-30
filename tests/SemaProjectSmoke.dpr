@@ -253,6 +253,21 @@ const
     '  TCollLike = class(TCollBase)'#10 +
     '    Count: Integer;'#10 +
     '  end;'#10 +
+    // 13.1 — a bare property REDECLARATION: no type, no specifiers, it only
+    // promotes visibility. Vcl.StdCtrls declares `Items: TStrings` on
+    // TCustomListBox and republishes it on TListBox exactly like this, which is
+    // why `with CatList.Items do` (Vcl.CustomizeDlg) typed to nothing: the
+    // redeclaration is a real symbol with NO TypeNode of its own.
+    '  TBoxBase = class'#10 +
+    '  private'#10 +
+    '    FItems: TCollLike;'#10 +
+    '  protected'#10 +
+    '    property Items: TCollLike read FItems;'#10 +
+    '  end;'#10 +
+    '  TBoxLike = class(TBoxBase)'#10 +
+    '  published'#10 +
+    '    property Items;'#10 +          // the redeclaration
+    '  end;'#10 +
     '  TValueProp = class'#10 +
     '  private'#10 +
     '    FN: Integer;'#10 +
@@ -321,6 +336,13 @@ const
     // opens over TVarRec's fields. OmniThreadLibrary's GpStuff/OtlCommon do
     // exactly this (`with aValues[i] do case VType of ...`), 56 sites.
     // 10.3 — `TextFile` is predefined and has no declaration to fall back on.
+    // The redeclaration as a with TARGET, reached through a bare field of the
+    // enclosing class — the Vcl.CustomizeDlg shape exactly.
+    'type'#10 +
+    '  TFormLike = class'#10 +
+    '    CatList: TBoxLike;'#10 +
+    '    procedure Fill;'#10 +
+    '  end;'#10 +
     'procedure Consts(aValues: array of const; var F: textfile);'#10 +
     'var'#10 +
     '  I: Integer;'#10 +
@@ -329,6 +351,16 @@ const
     '    with aValues[I] do'#10 +          // 47 element type is TVarRec
     '      if VType = 0 then'#10 +         // 48 a TVarRec field, bare
     '        I := VInteger;'#10 +
+    'end;'#10 +
+    // The property redeclaration as a with target, base = a bare field of the
+    // enclosing class. Count is reachable ONLY through the with scope, so
+    // binding it proves the redeclaration got the INHERITED declaration's type.
+    'procedure TFormLike.Fill;'#10 +
+    'var'#10 +
+    '  N: Integer;'#10 +
+    'begin'#10 +
+    '  with CatList.Items do'#10 +
+    '    N := Count;'#10 +
     'end;'#10 +
     // A CONSTRUCTOR call as the with target — the cross-unit case, where the
     // constructor is NOT bound yet when the with pass asks (CrossType records
@@ -1096,6 +1128,11 @@ begin
     // `textfile` is a seeded predefined type — no declaration to resolve to.
     Ok('predefined: textfile resolves (a var of it is not E2003)',
       DiagCount(LMT, 'E2003') = 0);
+    // A bare property REDECLARATION as the with target: `property Items;` has no
+    // type of its own, so Count binds only if the inherited declaration's type
+    // was found. Count is also a member of the collection reached ONLY that way.
+    Ok('property redeclaration: with over it opens the inherited type',
+      CrossRefTo(LMT, 'Count', 'Count'));
 
     // NESTED with whose INNER target is an inherited cross-unit property (see
     // UNIT_NWUSE for the Vcl.ColorGrd shape this reproduces). Both halves

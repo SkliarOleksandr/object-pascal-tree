@@ -186,6 +186,10 @@ type
     function PointeeX(const AX: TSemaXType): TSemaXType;
     function DesignatorSymX(AId, ANode: Integer;
       out AMid, ASym: Integer): Boolean;
+    function AncestorOfX(const AX: TSemaXType): TSemaXType;
+    { The single answer to "what type is this member?" — see the implementation
+      for why a bare property redeclaration makes it necessary. }
+    function SymDeclTypeX(AMid, ASym: Integer): TSemaXType;
     function IsDefaultArrayProp(AMid, ASym: Integer): Boolean;
     function DefaultArrayPropX(const AX: TSemaXType;
       out AMid, ASym: Integer): Boolean;
@@ -2490,7 +2494,7 @@ begin
   for LSym := 0 to LM.SymCount - 1 do
     if LM.Symbols[LSym].TypeNode <> NIL_NODE then
     begin
-      LX := ResolveTypeExpr(AId, LM.Symbols[LSym].TypeNode);
+      LX := SymDeclTypeX(AId, LSym);
       if XValid(LX) and ((LM.Symbols[LSym].TypeSym = NIL_SYM) or
          (LX.Inst <> NIL_INST)) then
         LM.SymTypeX.AddOrSetValue(LSym, LX);
@@ -3388,6 +3392,99 @@ end;
   property (`property Align: TAlign read FAlign default alLeft;`). They are told
   apart by the index parameters — a value-default property has none, and only an
   ARRAY property can be the default one. }
+{ One step up the inheritance chain: AX's ancestor, or XNil at the root.
+
+  Chases a type alias transparently, and takes the heritage clause's FIRST type
+  reference as the ancestor — the same convention CollectStruct and XDescendsFrom
+  use. Extracted because three callers now climb (XDescendsFrom's own compare
+  loop aside): the default-array-property search and the property-redeclaration
+  type search below, and it is exactly the kind of step that should exist once. }
+function TPasSemaProject.AncestorOfX(const AX: TSemaXType): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LDef, LChild: Integer;
+begin
+  Result := XNil;
+  if not XValid(AX) then
+    Exit;
+  LM := FModels[AX.UnitId];
+  LDef := TypeDefNodeOf(AX.UnitId, AX.Sym);
+  if LDef = NIL_NODE then
+    Exit;
+  case LM.Tree.Nodes[LDef].Kind of
+    nkIdent, nkMember, nkTypeArgs:
+      Result := ResolveTypeExpr(AX.UnitId, LDef);   // alias link
+    nkClassType, nkInterfaceType:
+      begin
+        LChild := LM.Tree.Nodes[LDef].FirstChild;
+        while (LChild <> NIL_NODE) and not (LM.Tree.Nodes[LChild].Kind in
+          [nkIdent, nkMember, nkTypeArgs]) do
+          LChild := LM.Tree.Nodes[LChild].NextSibling;
+        if LChild <> NIL_NODE then
+          Result := ResolveTypeExpr(AX.UnitId, LChild);
+      end;
+  end;
+end;
+
+{ The declared type of ONE symbol, resolved in its own model — the single place
+  that answers "what type is this member?".
+
+  It exists because of the bare property REDECLARATION: `property Items;` with no
+  type and no specifiers, which only promotes visibility. Vcl.StdCtrls declares
+  `Items: TStrings` on TCustomListBox and then republishes it on TListBox exactly
+  that way, so `with CatList.Items do` (Vcl.CustomizeDlg) finds the
+  redeclaration — a real symbol, with NO TypeNode — and used to type to nothing,
+  leaving the whole with body undeclared.
+
+  Such a symbol's type is the inherited declaration's, so the walk continues up
+  the ancestor chain looking for a same-named property that has one. Everything
+  that needs a member's type goes through here rather than reading TypeNode
+  directly, which is the rule this codebase already follows for ref-map lookups:
+  one funnel, not a case per caller. }
+function TPasSemaProject.SymDeclTypeX(AMid, ASym: Integer): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LOwner, LScope, LIdx, LCand, LDepth: Integer;
+  LNameLower: string;
+  LCur: TSemaXType;
+begin
+  Result := XNil;
+  if (AMid < 0) or (ASym = NIL_SYM) then
+    Exit;
+  LM := FModels[AMid];
+  if LM.Symbols[ASym].TypeNode <> NIL_NODE then
+    Exit(ResolveTypeExpr(AMid, LM.Symbols[ASym].TypeNode));
+  // No type of its own. Only a property redeclaration is expected here; any
+  // other typeless symbol simply has no type and XNil is the right answer.
+  if LM.Symbols[ASym].Kind <> skProperty then
+    Exit;
+  LScope := LM.Symbols[ASym].Scope;
+  if LScope = NIL_SCOPE then
+    Exit;
+  LOwner := LM.Scopes[LScope].StructSym;
+  if LOwner = NIL_SYM then
+    Exit;
+  LNameLower := LM.Symbols[ASym].NameLower;
+  LCur := AncestorOfX(XPlain(AMid, LOwner));
+  for LDepth := 1 to 32 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LScope := FModels[LCur.UnitId].Symbols[LCur.Sym].MemberScope;
+    if LScope <> NIL_SCOPE then
+      for LIdx := 0 to FModels[LCur.UnitId].Scopes[LScope].Symbols.Count - 1 do
+      begin
+        LCand := FModels[LCur.UnitId].Scopes[LScope].Symbols[LIdx];
+        if (FModels[LCur.UnitId].Symbols[LCand].Kind = skProperty) and
+           (FModels[LCur.UnitId].Symbols[LCand].NameLower = LNameLower) and
+           (FModels[LCur.UnitId].Symbols[LCand].TypeNode <> NIL_NODE) then
+          Exit(SubstX(ResolveTypeExpr(LCur.UnitId,
+            FModels[LCur.UnitId].Symbols[LCand].TypeNode), LCur.Inst, 0));
+      end;
+    LCur := AncestorOfX(LCur);
+  end;
+end;
+
 function TPasSemaProject.IsDefaultArrayProp(AMid, ASym: Integer): Boolean;
 var
   LM: TPasSemaModel;
@@ -3460,28 +3557,7 @@ begin
           Exit(True);
         end;
       end;
-    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
-    if LDef = NIL_NODE then
-      Exit;
-    case LM.Tree.Nodes[LDef].Kind of
-      nkIdent, nkMember, nkTypeArgs:
-        LCur := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
-      nkClassType, nkInterfaceType:
-        begin
-          // The heritage clause leads the struct's children; its FIRST type
-          // reference is the ancestor (the same convention CollectStruct and
-          // XDescendsFrom both use).
-          LChild := LM.Tree.Nodes[LDef].FirstChild;
-          while (LChild <> NIL_NODE) and not (LM.Tree.Nodes[LChild].Kind in
-            [nkIdent, nkMember, nkTypeArgs]) do
-            LChild := LM.Tree.Nodes[LChild].NextSibling;
-          if LChild = NIL_NODE then
-            Exit;
-          LCur := ResolveTypeExpr(LCur.UnitId, LChild);
-        end;
-    else
-      Exit;
-    end;
+    LCur := AncestorOfX(LCur);
   end;
 end;
 
@@ -3655,10 +3731,9 @@ begin
       begin
         LSym := LM.RefMap[ANode];
         if LSym <> NIL_SYM then
-          Result := ResolveTypeExpr(AId, LM.Symbols[LSym].TypeNode)
+          Result := SymDeclTypeX(AId, LSym)
         else if LM.ExtRefMap.TryGetValue(ANode, LExt) then
-          Result := ResolveTypeExpr(LExt.UnitId,
-            FModels[LExt.UnitId].Symbols[LExt.Sym].TypeNode);
+          Result := SymDeclTypeX(LExt.UnitId, LExt.Sym);
       end;
 
     nkMember:
@@ -3689,10 +3764,9 @@ begin
         // one the earlier passes reached); otherwise find it in the base's
         // type. Both paths end at the MEMBER's own declared type.
         if LSym <> NIL_SYM then
-          Exit(ResolveTypeExpr(AId, LM.Symbols[LSym].TypeNode));
+          Exit(SymDeclTypeX(AId, LSym));
         if LM.ExtRefMap.TryGetValue(LName, LExt) then
-          Exit(ResolveTypeExpr(LExt.UnitId,
-            FModels[LExt.UnitId].Symbols[LExt.Sym].TypeNode));
+          Exit(SymDeclTypeX(LExt.UnitId, LExt.Sym));
         LBX := WithTargetTypeX(AId, LBase);
         if XValid(LBX) and FindMemberX(AId, LBX,
              LM.Tree.NodeNameLower(LName), LMemMid, LMemSym, LCtx) then
@@ -3702,8 +3776,7 @@ begin
           // exactly as CrossType's own member typing does. Without it the
           // with-body would look members up in an OPEN TList<T> — right
           // members, imprecise element types.
-          Result := SubstX(ResolveTypeExpr(LMemMid,
-            FModels[LMemMid].Symbols[LMemSym].TypeNode), LCtx, 0);
+          Result := SubstX(SymDeclTypeX(LMemMid, LMemSym), LCtx, 0);
       end;
   end;
 end;
@@ -3835,8 +3908,7 @@ begin
             // The member's declared type, closed over the instantiation
             // frame FindMemberX reported — travels back with the hit (see
             // TPasInhPending.X for why it cannot be recovered later).
-            AX := SubstX(ResolveTypeExpr(AUid,
-              FModels[AUid].Symbols[ASym].TypeNode), LCtx, 0);
+            AX := SubstX(SymDeclTypeX(AUid, ASym), LCtx, 0);
             Exit(True);
           end;
         end;
