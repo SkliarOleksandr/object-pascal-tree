@@ -943,6 +943,47 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { A constructor called through a CLASS REFERENCE that is a function RESULT —
+    the virtual-constructor factory shape, `with GetPainterClass.Create(...) do`.
+    dcc-verified. The qualifier is not a type NAME, so the with-target typer's
+    constructor branch had nothing to resolve: it must type the qualifier and
+    unwrap `class of T` (15.2.1) instead. Cross-unit, because the class-reference
+    ALIAS is what has to be chased and a same-unit fixture hides that. }
+  UNIT_CREF =
+    'unit UnitCRef;'#10'interface'#10 +
+    'type'#10 +
+    '  TPainter = class'#10 +
+    '  public'#10 +
+    '    constructor Create(ATag: Integer);'#10 +
+    '    procedure MainPaint;'#10 +
+    '  end;'#10 +
+    '  TPainterClass = class of TPainter;'#10 +
+    'implementation'#10 +
+    'constructor TPainter.Create(ATag: Integer); begin end;'#10 +
+    'procedure TPainter.MainPaint; begin end;'#10 +
+    'end.'#10;
+
+  UNIT_CREFUSE =
+    'unit UnitCRefUse;'#10'interface'#10'uses UnitCRef;'#10 +
+    'type'#10 +
+    '  TView = class'#10 +
+    '  protected'#10 +
+    '    function GetPainterClass: TPainterClass;'#10 +
+    '  public'#10 +
+    '    procedure Paint;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TView.GetPainterClass: TPainterClass;'#10 +
+    'begin'#10 +
+    '  Result := TPainter;'#10 +
+    'end;'#10 +
+    'procedure TView.Paint;'#10 +
+    'begin'#10 +
+    '  with GetPainterClass.Create(1) do'#10 +
+    '    MainPaint;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   UNIT_E =
     'unit UnitE;'#10'interface'#10'implementation'#10 +
     'procedure R;'#10'var L: Integer;'#10'begin'#10 +
@@ -1255,6 +1296,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNABase.pas'), UNIT_NABASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNAUse.pas'), UNIT_NAUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitDlg.pas'), UNIT_DLG);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitCRef.pas'), UNIT_CREF);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitCRefUse.pas'), UNIT_CREFUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArBase.pas'), UNIT_ARBASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArUse.pas'), UNIT_ARUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitGenList.pas'), UNIT_GENLIST);
@@ -1602,6 +1645,13 @@ begin
     Ok('callee-precedence: the call re-points to the inherited METHOD',
       CrossRefCountInUnit(LDlg, 'GetFileNames', 'GetFileNames',
         'unitdlg') >= 1);
+
+    // A constructor through a class reference that is a function RESULT.
+    var LCRf := ModelByName('unitcrefuse');
+    Ok('classref-ctor: UnitCRefUse loaded', Assigned(LCRf));
+    Ok('classref-ctor: no diags at all', Length(LCRf.Diags) = 0);
+    Ok('classref-ctor: the with body opens over the REFERENCED class',
+      CrossRefTo(LCRf, 'MainPaint', 'MainPaint'));
 
     // 16.1.2 — a bare reference means the ARITY-0 declaration, even when a
     // same-named generic is nearer in scope (the DevExpress shape).

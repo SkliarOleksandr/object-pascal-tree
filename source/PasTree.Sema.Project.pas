@@ -259,6 +259,7 @@ type
     function PreferNonGeneric(AId, AMid, ASym,
       ANameNode: Integer): TSemaXType;
     function IsGenericTypeSym(AMid, ASym: Integer): Boolean;
+    function ClassRefTargetX(const AX: TSemaXType): TSemaXType;
     function ResolveTypeExprNested(AId, ANode: Integer): TSemaXType;
     procedure BuildHelperMap;
     procedure ClearHelperIdx;
@@ -1954,6 +1955,38 @@ begin
      (FModels[LUid].Symbols[LFound].Kind = skType) and
      not IsGenericTypeSym(LUid, LFound) then
     Result := XPlain(LUid, LFound);
+end;
+
+{ T for a `class of T` (15.2.1), XNil for anything else — chasing alias links,
+  since a class-reference type is usually reached through one
+  (`TPainterClass = class of TPainter`, then a function returning it). The
+  member walk already hops through nkClassOf inline; this is the same step for
+  callers that need the referenced CLASS as a value type rather than a place to
+  look a member up. }
+function TPasSemaProject.ClassRefTargetX(const AX: TSemaXType): TSemaXType;
+var
+  LCur: TSemaXType;
+  LDef, LDepth: Integer;
+begin
+  Result := XNil;
+  LCur := AX;
+  for LDepth := 1 to 32 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if LDef = NIL_NODE then
+      Exit;
+    case FModels[LCur.UnitId].Tree.Nodes[LDef].Kind of
+      nkClassOf:
+        Exit(ResolveTypeExpr(LCur.UnitId,
+          FModels[LCur.UnitId].Tree.Nodes[LDef].FirstChild));
+      nkIdent, nkMember, nkTypeArgs:
+        LCur := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
+    else
+      Exit;
+    end;
+  end;
 end;
 
 // True when ASym is a GENERIC type. Read straight off the flag CollectTypeDecl
@@ -4036,6 +4069,15 @@ begin
           Result := ResolveTypeExpr(AId, LM.Tree.Nodes[LBase].FirstChild);
           if XValid(Result) then
             Exit;
+          // The qualifier need not be a type NAME: a constructor called through
+          // a CLASS REFERENCE constructs the referenced class (15.2.1), and the
+          // reference is routinely a function result —
+          // `with GetPainterClass.Create(...) do MainPaint`, a virtual-
+          // constructor factory. Type the qualifier and unwrap `class of T`.
+          Result := ClassRefTargetX(
+            WithTargetTypeX(AId, LM.Tree.Nodes[LBase].FirstChild));
+          if XValid(Result) then
+            Exit;
         end;
         Result := WithTargetTypeX(AId, LBase);
       end;
@@ -4099,7 +4141,13 @@ begin
         // which typed the target as the constructor's own (absent) result type.
         if DesignatorSymX(AId, ANode, LMemMid, LMemSym) and
            IsConstructorSym(LMemMid, LMemSym) then
-          Exit(ResolveTypeExpr(AId, LBase));
+        begin
+          Result := ResolveTypeExpr(AId, LBase);
+          if not XValid(Result) then
+            // Paren-less form of the class-reference case above.
+            Result := ClassRefTargetX(WithTargetTypeX(AId, LBase));
+          Exit;
+        end;
         LSym := LM.RefMap[LName];
         // The member may already be bound (same-unit field, or a cross-unit
         // one the earlier passes reached); otherwise find it in the base's
