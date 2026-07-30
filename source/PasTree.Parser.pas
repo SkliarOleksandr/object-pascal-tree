@@ -622,6 +622,23 @@ begin
       end;
       FB.SetLast(LWrap, FPos - 1);
       LArg := LWrap;
+    end
+    else if (CurKind = tkAssign) and (FB.Kind(LArg) = nkIdent) then
+    begin
+      // OLE-automation NAMED ARGUMENT (4.10.1): `Meth(Source := X)`. Legal only
+      // on a late-bound (Variant) call, and the NAME is a dispatch parameter
+      // name that resolves to nothing — see the resolver's nkNamedArg handling.
+      // Without this the arg list ended at the name and the ':=' turned the
+      // whole call into an assignment TARGET: two parse errors and a false
+      // E2003 on the name, ~20 sites across one real project's Excel automation
+      // code. Restricted to a bare identifier on the left, which is all the
+      // syntax admits; anything else stays the syntax error it was.
+      LWrap := FB.AddNode(nkNamedArg, NIL_NODE, FPos);
+      FB.Adopt(LWrap, LArg);
+      Next;
+      FB.Adopt(LWrap, ParseExpression);
+      FB.SetLast(LWrap, FPos - 1);
+      LArg := LWrap;
     end;
     FB.Adopt(ACall, LArg);
     if CurKind = tkComma then

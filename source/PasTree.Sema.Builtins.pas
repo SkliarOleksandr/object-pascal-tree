@@ -58,6 +58,11 @@ begin
   T('Single', tcFloat, 1); T('Double', tcFloat, 2); T('Extended', tcFloat, 3);
   T('Real', tcFloat, 2); T('Currency', tcFloat, 2); T('Comp', tcFloat, 2);
   T('TDateTime', tcFloat, 2);
+  // The legacy 6-byte float (2.5.1). Compiler-provided like Comp: System.pas
+  // mentions it only in a `{$NODEFINE Real48}` line and inside comments, so a
+  // source grep says "declared" and dcc says otherwise — the same trap the
+  // intrinsic-routine list below documents. 11 false E2003 on one real project.
+  T('Real48', tcFloat, 2);
   // Booleans.
   LBool := T('Boolean', tcBoolean);
   T('ByteBool', tcBoolean); T('WordBool', tcBoolean); T('LongBool', tcBoolean);

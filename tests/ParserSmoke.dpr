@@ -127,6 +127,20 @@ begin
       'Block(ExprStmt(Call(Ident''DoWork'' Ident''Input'' IntLit''10'')))');
     Check('5.1.2 bare call', 'Application.Run;',
       'Block(ExprStmt(Member(Ident''Application'' Ident''Run'')))');
+    // 4.10.1 OLE-automation NAMED ARGUMENTS. Without the nkNamedArg wrap the
+    // argument list ended at the name and ':=' turned the whole call into an
+    // assignment TARGET — two parse diags and a false E2003 on the name.
+    Check('4.10.1 named argument',
+      'Charts.Add(Source := R, Gap := 1);',
+      'Block(ExprStmt(Call(Member(Ident''Charts'' Ident''Add'') ' +
+      'NamedArg(Ident''Source'' Ident''R'') ' +
+      'NamedArg(Ident''Gap'' IntLit''1''))))');
+    // Only a bare identifier makes a named argument; anything else stays the
+    // syntax error it always was (an assignment is not an expression).
+    Check('4.10.1 named argument needs a bare name',
+      'Charts.Add(A.B := R);',
+      'Block(Assign(Call(Member(Ident''Charts'' Ident''Add'') ' +
+      'Member(Ident''A'' Ident''B'')) Ident''R''))', 2);
 
     // ---- 4.x expressions & precedence ----
     Check('4.2 precedence', 'X := A + B * C;',

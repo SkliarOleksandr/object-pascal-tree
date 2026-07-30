@@ -69,6 +69,7 @@ var
   GPlatform: TPasPlatform;
   GProj: TPasSemaProject;
   GPath, GStudio: string;
+  GExtraPaths: TArray<string>;   // -L<dir>, repeatable; see the arg loop
   GIdx: Integer;
   GSingle, GWholeProject, GDProjMode, GList: Boolean;
   GSW: TStopwatch;
@@ -194,7 +195,8 @@ begin
     end;
     // Same assembly order the demo's BuildConfig uses: project dir, the
     // .dproj's own search paths, then the Studio trees.
-    LPaths := [LD.Dir] + LD.SearchPaths + StudioSearchPaths(GStudio);
+    LPaths := [LD.Dir] + LD.SearchPaths + StudioSearchPaths(GStudio) +
+      GExtraPaths;
     for var LF in LD.Files do
       LOwn.AddOrSetValue(LowerCase(LF), True);
 
@@ -376,6 +378,16 @@ begin
         TryParsePlatformName(Copy(ParamStr(GIdx), 4, MaxInt), GPlatform)
       else if ParamStr(GIdx).StartsWith('-studio:', True) then
         GStudio := Copy(ParamStr(GIdx), 9, MaxInt)
+      // -L<dir>: one extra search path, repeatable. The demo folds in the IDE's
+      // registry Library/Browsing paths, which is where a real project's
+      // third-party components live (DevExpress, Orpheus, ...). This is how a
+      // headless run reaches the same closure without teaching the tool to read
+      // the registry — and the closure line in the report is the check that it
+      // did: a short unit count means paths are still missing, and a missing
+      // unit GATES its importers' diagnostics rather than reporting them.
+      else if ParamStr(GIdx).StartsWith('-L', True) and
+              (Length(ParamStr(GIdx)) > 2) then
+        GExtraPaths := GExtraPaths + [Copy(ParamStr(GIdx), 3, MaxInt)]
       else if ParamStr(GIdx).StartsWith('-threads:', True) then
         TThreadPool.Default.SetMaxWorkerThreads(
           StrToIntDef(Copy(ParamStr(GIdx), 10, MaxInt), 0))
@@ -409,7 +421,8 @@ begin
       // RTL lives, and without it every `uses System.X` is an F1027 and no
       // E2003 can be trusted. Same Studio SOURCE trees the -dproj driver adds.
       GProj := TPasSemaProject.Create(GPlatform,
-        [TPath.GetDirectoryName(GPath)] + StudioSearchPaths(GStudio), []);
+        [TPath.GetDirectoryName(GPath)] + StudioSearchPaths(GStudio) +
+        GExtraPaths, []);
     try
       GProj.SingleThreaded := GSingle;
       // Same reasoning as the -dproj driver: a directory or bare-file run has

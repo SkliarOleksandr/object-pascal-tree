@@ -136,7 +136,12 @@ type
     nkConstraint,     // class/record/constructor/typeref
     nkAttrGroup,      // 19.3.2: [Attr(args), ...]
     nkAttribute,
-    nkRoutineBody     // local decl sections + compound/asm block
+    nkRoutineBody,    // local decl sections + compound/asm block
+    // Appended, not inserted: existing ordinals stay stable (see nkAnonParams).
+    nkNamedArg        // OLE-automation named argument `Name := Expr` in a call
+                      // argument list (4.10.1): name = child 0, value = child 1.
+                      // The NAME is a dispatch parameter name, NOT a reference —
+                      // nothing resolves it.
   );
 
   TPasNodeFlag = (

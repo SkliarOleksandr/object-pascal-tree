@@ -342,6 +342,37 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { Two clusters from the first run over a real 3790-unit project (AVImark).
+
+    Real48 (2.5.1) is compiler-provided like Comp: System.pas names it only in a
+    NODEFINE directive and in comments, so a source grep says "declared" and dcc
+    says otherwise — exactly the trap the intrinsic-routine list in
+    Sema.Builtins documents. 11 false E2003.
+
+    Meth(Source := X) is an OLE-automation NAMED ARGUMENT (4.10.1), legal on a
+    late-bound Variant call. dcc name-checks nothing on the left --
+    V.Add(Nonexistent := 1) compiles -- and fully checks the right:
+    V.Add(Source := Undeclared1) is E2003 on the value. Both dcc-verified, both
+    asserted below. ~20 sites in that project's Excel automation code, each
+    costing two parse diagnostics as well. }
+  SRC_AVICLUSTERS =
+    'unit U;'#10 +
+    'interface'#10 +
+    'procedure P;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var'#10 +
+    '  R: Real48;'#10 +                  // compiler-provided, not in System.pas
+    '  MSExcel: Variant;'#10 +
+    '  Counter: Integer;'#10 +
+    'begin'#10 +
+    '  Counter := 1;'#10 +
+    '  R := 0;'#10 +
+    '  MSExcel.Charts[1].SeriesCollection.Add(Source :='#10 +
+    '    MSExcel.Worksheets[1].Range[Counter]);'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   { 5.7 — four target FORMS from the section's table that nothing else covers.
     All four compile under dcc 37.0; `with TCanvas do` was the one that did not
     work here, because the nkIdent path asked for the symbol's DECLARED type and
@@ -1032,6 +1063,18 @@ begin
   // local/param/global/implicit-Result binding survived it is Integer := string.
   Ok('withshadow: the member beats a local, a param, a global and Result',
     DiagCount('E2010') = 0);
+  GModel.Free;
+
+  // Real48 and OLE named arguments — both from the first AVImark run.
+  Analyze(SRC_AVICLUSTERS);
+  Ok('aviclusters: no diags at all', Length(GModel.Diags) = 0);
+  Ok('aviclusters: Real48 is a seeded builtin', TypeOf('r', skVar) = 'Real48');
+  // The named argument's NAME resolves to nothing and must not be a candidate;
+  // the VALUE beside it is an ordinary expression and still binds.
+  Ok('aviclusters: the named-arg NAME is not an undeclared-identifier candidate',
+    DiagCount('E2003') = 0);
+  Ok('aviclusters: the value beside it still resolves',
+    RefResolvesTo('Counter', 'Counter'));
   GModel.Free;
 
   // 5.7 — target forms: inherited property, class reference, bare class type

@@ -1424,6 +1424,18 @@ begin
         Collect(NextSib(FirstChild(ANode)), AScope);
       end;
 
+    nkNamedArg:
+      begin
+        // `Meth(Source := X)` on a late-bound (Variant) call, 4.10.1. FirstChild
+        // is a DISPATCH PARAMETER NAME resolved by the automation server at run
+        // time — dcc name-checks nothing there (`V.Add(Nonexistent := 1)`
+        // compiles), so leaving it unvisited, NIL_SCOPE and all, is exactly
+        // right: every undeclared-identifier path already skips scopeless nodes.
+        // The VALUE is an ordinary expression and IS checked (dcc-verified:
+        // `V.Add(Source := Undeclared1)` is E2003 on the value).
+        Collect(NextSib(FirstChild(ANode)), AScope);
+      end;
+
   else
     begin
       LChild := FirstChild(ANode);

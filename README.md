@@ -371,6 +371,11 @@ Still open, roughly in the order we're tackling it:
      ingestion path every later stage feeds. Do this first regardless.
   2. **Whatever the vendor already ships.** `.hpp` headers (C++Builder
      export) and `.int` files where they exist are already declaration-only text.
+     Not hypothetical: the first real project run hit exactly this — AVImark's
+     last 5 `F1027` are `VclTee.*`, and TeeChart ships `lib\win32\release\
+     VclTee.Chart.dcu` plus `include\windows\vcl\VCLTee.Chart.hpp` with **no
+     `.pas` anywhere** in the Studio tree. A `.hpp` reader would close that
+     cluster without touching the `.dcu` format at all.
   3. **A `.dcu` reader.** ⚠️ *Do not budget this as a small job.* The format is
      undocumented, proprietary, and changes with essentially every compiler
      release — a version magic at the head and per-version tag tables. The
@@ -389,6 +394,33 @@ Still open, roughly in the order we're tackling it:
      without types, so every member access through such a name silently
      degrades, and real errors get hidden along with the false ones. A stub with
      honest types (stage 1) beats a name list.
+- **`.groupproj` (project groups), and a project TREE in the demo.** Today the
+  demo opens one `.dproj` and shows its units as a FLAT list, which stops being
+  readable at AVImark's 1542 files and cannot represent a group at all. Two
+  halves, and the second is the one with design in it:
+  - *Reading `.groupproj`.* MSBuild XML like `.dproj`, so `PasTree.DProj` is the
+    place — an `ItemGroup` of `<Projects Include="...">` plus per-project
+    `<Dependencies>`. Straightforward, but note the analyzer already has the
+    hard part: several projects in a group share most of their closure, and
+    `TPasSemaProject` caches by full path (`FByPath`), so ONE project instance
+    across the whole group parses each shared unit once. Building a project
+    instance per group member would multiply the 7.4M-line closure by the
+    member count for no gain.
+  - *The tree.* Group → project → the .dproj's own grouping (Contains /
+    Requires for a package, unit vs form vs resource), and separately the
+    closure a project actually pulls in, which is where the units NOT listed in
+    any `.dproj` live (3790 analyzed vs 1542 listed for AVImark — the other
+    2248 are library units nothing in the UI currently surfaces). Worth keeping
+    those two axes distinct in the model rather than merging them into one list:
+    "files the project declares" and "units the analysis reached" answer
+    different questions, and the second is what the diagnostics are keyed to.
+- **A 64-bit build of `PasTreeSemaProject`, and of the demo.** Already needed:
+  the Win32 tool dies with `EOutOfMemory` on AVImark once the registry search
+  paths are supplied (2631+ units, 168 MB of source), and the demo will hit the
+  same wall as projects grow. Nothing in the library is 32-bit-specific — it is
+  purely address space. Build the tool with
+  `dcc64 -U"%BDS%\lib\win64\release" -U..\source -NSSystem;System.Win;Winapi;Data;Xml -N0out64 -Eout64 PasTreeSemaProject.dpr`;
+  what is missing is making that the default rather than a manual step.
 - **LSP/LSIF server.** The demo (VCL-hosted) is the only editor integration
   today; a Language Server Protocol server (live highlighting/navigation/
   diagnostics/rename/etc. over the same Sema/Nav layer) plus LSIF dump
