@@ -81,7 +81,10 @@ begin
   T('TObject', tcClass); T('Exception', tcClass); T('TClass', tcClassOf);
   T('IInterface', tcInterface); T('IUnknown', tcInterface);
   T('TGUID', tcRecord); T('TArray', tcArray); T('TBytes', tcArray);
-  T('Text', tcFile);
+  // 10.3: `Text` AND `TextFile` are both predefined, and neither has a source
+  // declaration in System.pas to fall back on — so a missing seed here is a
+  // guaranteed false E2003 (`var f: textfile` in DSiWin32).
+  T('Text', tcFile); T('TextFile', tcFile);
   T('_nil', tcNil);   // synthetic type of the nil literal
 
   // Constants. MaxInt/MaxLongint are compiler-provided too — real System.pas

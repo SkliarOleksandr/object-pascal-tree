@@ -3493,13 +3493,24 @@ function TPasSemaProject.ElementX(AId, ABaseNode: Integer): TSemaXType;
   // members of T instead of failing.
   function ElemOf(AMid, ANode: Integer): TSemaXType;
   var
-    LChild, LLast: Integer;
+    LChild, LLast, LSysUid, LSysSym: Integer;
   begin
     Result := XNil;
     if (ANode = NIL_NODE) or
-       (FModels[AMid].Tree.Nodes[ANode].Kind <> nkArrayType) or
-       (FModels[AMid].Tree.Nodes[ANode].Aux = 1) then   // array of const
+       (FModels[AMid].Tree.Nodes[ANode].Kind <> nkArrayType) then
       Exit;
+    // `array of const` (Aux=1) has no element type NODE to resolve, but it does
+    // have an element TYPE: 6.2.6 — "array of const builds a TVarRec array". So
+    // indexing one yields System.TVarRec, and `with aValues[i] do VType ...`
+    // over an `array of const` parameter opens over its fields. Bailing here
+    // instead left every one of them undeclared (56 of 57 diagnostics on
+    // OmniThreadLibrary were this single shape, in GpStuff and OtlCommon).
+    if FModels[AMid].Tree.Nodes[ANode].Aux = 1 then
+    begin
+      if FindInSystemUnit('tvarrec', LSysUid, LSysSym) then
+        Result := XPlain(LSysUid, LSysSym);
+      Exit;
+    end;
     LChild := FModels[AMid].Tree.Nodes[ANode].FirstChild;
     LLast := NIL_NODE;
     while LChild <> NIL_NODE do

@@ -71,6 +71,12 @@ const
     // `TArray<T>` reference resolves its head to a DeclNode-less symbol with
     // no generic parameter list — see UNIT_WSHAPES.
     '  TArray<T> = array of T;'#10 +
+    // The element type of `array of const` (6.2.6). Real System.pas declares it
+    // as a variant record; two fields are enough to prove the with scope opened.
+    '  TVarRec = record'#10 +
+    '    VType: Byte;'#10 +
+    '    VInteger: Integer;'#10 +
+    '  end;'#10 +
     'implementation'#10 +
     'function TObject.ClassName: string; begin Result := ''''; end;'#10 +
     'procedure TObject.Free; begin end;'#10 +
@@ -310,6 +316,19 @@ const
     '    Tag := 3;'#10 +
     '  with V do'#10 +                     // 37 control: a default VALUE spec
     '    if N = 0 then Exit;'#10 +         //    is not a default array property
+    'end;'#10 +
+    // 6.2.6 — `array of const` IS an array of System.TVarRec, so indexing one
+    // opens over TVarRec's fields. OmniThreadLibrary's GpStuff/OtlCommon do
+    // exactly this (`with aValues[i] do case VType of ...`), 56 sites.
+    // 10.3 — `TextFile` is predefined and has no declaration to fall back on.
+    'procedure Consts(aValues: array of const; var F: textfile);'#10 +
+    'var'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  for I := Low(aValues) to High(aValues) do'#10 +
+    '    with aValues[I] do'#10 +          // 47 element type is TVarRec
+    '      if VType = 0 then'#10 +         // 48 a TVarRec field, bare
+    '        I := VInteger;'#10 +
     'end;'#10 +
     // A CONSTRUCTOR call as the with target — the cross-unit case, where the
     // constructor is NOT bound yet when the with pass asks (CrossType records
@@ -1067,6 +1086,16 @@ begin
       CrossRefTo(LMT, 'Mark', 'Mark'));
     Ok('ctor target: Owner through a constructor WITH arguments',
       CrossRefTo(LMT, 'Owner', 'Owner'));
+    // `array of const` indexed: VType/VInteger are TVarRec fields reachable ONLY
+    // through the with scope, so binding them proves the element type resolved
+    // to System.TVarRec rather than to nothing.
+    Ok('array of const: VType binds to System.TVarRec',
+      CrossRefTo(LMT, 'VType', 'VType'));
+    Ok('array of const: VInteger too',
+      CrossRefTo(LMT, 'VInteger', 'VInteger'));
+    // `textfile` is a seeded predefined type — no declaration to resolve to.
+    Ok('predefined: textfile resolves (a var of it is not E2003)',
+      DiagCount(LMT, 'E2003') = 0);
 
     // NESTED with whose INNER target is an inherited cross-unit property (see
     // UNIT_NWUSE for the Vcl.ColorGrd shape this reproduces). Both halves
