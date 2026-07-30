@@ -403,6 +403,37 @@ Still open, roughly in the order we're tackling it:
      without types, so every member access through such a name silently
      degrades, and real errors get hidden along with the false ones. A stub with
      honest types (stage 1) beats a name list.
+- **Navigation history (Back / Forward).** Ctrl+click jumps; nothing remembers
+  where it jumped FROM, so getting back is manual. A stack of visited positions
+  with Back (and Forward, which is nearly free once Back exists) — conventional
+  bindings are Alt+Left/Alt+Right plus the mouse's XButton1/XButton2, which
+  `TSynEdit.OnMouseDown` already receives.
+  Two things decide whether this works or rots:
+  - *Store file path + line/col, never node or symbol indices.* Every
+    re-analysis (`ReanalyzeForNav`, armed by any edit) rebuilds `FSemaProject`
+    from scratch, so every index into it is invalidated — a history holding them
+    would jump to garbage after the first keystroke. A path and a caret position
+    survive.
+  - *Push the ORIGIN at jump time*, in `EditorMouseDown`'s deferred block, next
+    to where the target caret is set — that block is the single place a jump
+    actually happens. Collapse consecutive entries pointing at the same line so
+    repeated clicks in one spot do not bury the history.
+  Open question worth deciding rather than discovering: a jump into a unit that
+  had no tab OPENS one, so Back may leave a trail of tabs the user never chose
+  to open. Either close a tab Back retreats out of (if the jump opened it), or
+  leave it and accept the clutter — but pick one deliberately.
+- **Recent projects on `Open Project...` (split button).** The single most-worn
+  path in the demo today: browse to the same `.dproj` by hand, every time. A
+  drop-down of the last ~10, most-recent-first, deduped by full path,
+  clicked-entry-moves-to-top.
+  Persistence has no home yet — the demo currently reads the registry only for
+  the IDE's own library paths (`ReadIdePaths`) and saves nothing of its own. So
+  this needs the first piece of demo state, and it is worth putting the file
+  where the next settings will also fit (platform, threading mode, highlighter
+  choice, colour — all currently reset on every launch) rather than adding one
+  registry value for one list. Prune entries whose file no longer exists at
+  display time, not at save time, so a temporarily disconnected network path
+  does not silently drop out of the list.
 - **`.groupproj` (project groups), and a project TREE in the demo.** Today the
   demo opens one `.dproj` and shows its units as a FLAT list, which stops being
   readable at AVImark's 1542 files and cannot represent a group at all. Two
