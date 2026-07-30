@@ -1536,6 +1536,7 @@ var
   LMissing: TDictionary<string, TPasMissingUnit>;
   LModel: TPasSemaModel;
   LDiagFile, LVolume: string;
+  LOwnFile: Boolean;
 begin
   // Locate the main unit's model, and report diagnostics. The analyzed
   // closure now includes the whole RTL/VCL/3rd-party reach (for nav), so
@@ -1613,15 +1614,18 @@ begin
         end;
       if not LModel.AllUsesResolved then
         Inc(LUnitsGated);
-      if FFileList.IndexOf(FSemaProject.ModelFile(LId)) < 0 then
-      begin
-        Inc(LDiagTotal, Length(LModel.Diags));
-        Continue;   // external/RTL unit — counted, not listed
-      end;
+      // EVERY diagnostic is listed, project file or library unit. Counting one
+      // silently was the wrong trade twice over: the Done line said 906 and the
+      // window showed 5, which reads as the tool contradicting itself — and the
+      // 901 it hid were OUR OWN false positives in third-party code (283 of
+      // them turned out to be a single parser bug in one DevExpress unit). A
+      // diagnostic nobody can see is a bug nobody can report.
+      LOwnFile := FFileList.IndexOf(FSemaProject.ModelFile(LId)) >= 0;
       for LDIdx := 0 to High(LModel.Diags) do
       begin
         Inc(LDiagTotal);
-        Inc(LDiagListed);
+        if LOwnFile then
+          Inc(LDiagListed);
         // A diagnostic's FileId is the MODEL'S OWN file table — for one
         // raised inside an $I-included file this is NOT the unit's main
         // file, so resolve it properly rather than assuming ModelFile(LId).
@@ -1649,8 +1653,8 @@ begin
       [FSemaProject.ModelCount, LDiagTotal, ElapsedText(AElapsedMs),
        cbThreading.Text]))
   else
-    Log(Format('Done: %d units, %d diagnostics in %s (%s) — %d listed ' +
-      'below; %d more in library units outside this project (not listed).',
+    Log(Format('Done: %d units, %d diagnostics in %s (%s) — %d in project ' +
+      'files, %d in library units. ALL are listed below.',
       [FSemaProject.ModelCount, LDiagTotal, ElapsedText(AElapsedMs),
        cbThreading.Text, LDiagListed, LDiagTotal - LDiagListed]));
   // Volume the parser actually processed. An $I include is counted once per

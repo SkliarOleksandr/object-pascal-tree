@@ -373,6 +373,49 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { A directive WORD used as the name of the next declaration. Directives are
+    context-sensitive identifiers, and `unsafe` is one — so ConsumeTrailingDirectives
+    read DevExpress dxCore.pas's `Unsafe = class` as the `cdecl = nil` shape (a
+    procedural VARIABLE whose initializer follows its calling convention) and
+    swallowed the type declaration, everything the interface declared after it,
+    and every use of any of it across the library: 283 false E2003 from one line.
+    Only a VAR section can legitimately reach an '=' there.
+
+    TSecond exists to prove the damage was not limited to the swallowed name —
+    it is what "everything after it" means. The procedural-var shape the '='
+    branch exists for is asserted alongside, so the fix cannot silently undo it. }
+  SRC_DIRECTIVENAME =
+    'unit U;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TFirst = class'#10 +
+    '    class function Cast(A: TObject): TObject; static;'#10 +
+    '  end;'#10 +
+    '  Unsafe = class'#10 +               // a ROUTINE_DIRECTIVE_WORD as a name
+    '    class function Cast(A: TObject): TObject; static;'#10 +
+    '  end;'#10 +
+    '  TSecond = class'#10 +              // and everything after it
+    '    Tag: Integer;'#10 +
+    '  end;'#10 +
+    'const'#10 +
+    '  Alpha = 1;'#10 +
+    '  Index = 2;'#10 +                   // ditto in a const section
+    'var'#10 +
+    '  Hook: procedure; cdecl = nil;'#10 +   // the shape the branch exists for
+    'procedure P;'#10 +
+    'implementation'#10 +
+    'class function TFirst.Cast(A: TObject): TObject; begin Result := nil; end;'#10 +
+    'class function Unsafe.Cast(A: TObject): TObject; begin Result := nil; end;'#10 +
+    'procedure P;'#10 +
+    'var'#10 +
+    '  S: TSecond;'#10 +
+    'begin'#10 +
+    '  S := nil;'#10 +
+    '  if Unsafe.Cast(S) = nil then'#10 +
+    '    S.Tag := Alpha + Index;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   { 5.7 — four target FORMS from the section's table that nothing else covers.
     All four compile under dcc 37.0; `with TCanvas do` was the one that did not
     work here, because the nkIdent path asked for the symbol's DECLARED type and
@@ -1075,6 +1118,17 @@ begin
     DiagCount('E2003') = 0);
   Ok('aviclusters: the value beside it still resolves',
     RefResolvesTo('Counter', 'Counter'));
+  GModel.Free;
+
+  // A directive word naming the next declaration (the DevExpress dxCore shape).
+  Analyze(SRC_DIRECTIVENAME);
+  Ok('directivename: no diags at all', Length(GModel.Diags) = 0);
+  Ok('directivename: the type named `Unsafe` is declared',
+    HasSym('Unsafe', skType));
+  Ok('directivename: and so is everything after it',
+    HasSym('TSecond', skType) and HasSym('Index', skConst));
+  Ok('directivename: the procedural var with `cdecl = nil` still parses',
+    HasSym('Hook', skVar));
   GModel.Free;
 
   // 5.7 — target forms: inherited property, class reference, bare class type

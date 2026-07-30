@@ -103,10 +103,11 @@ type
     function ParseVarSection(AClassVar: Boolean): Integer;
     function ParseConstInitializer(AHasType: Boolean): Integer;
     function ParseExportsClause: Integer;
+    function DirectiveNameStartsDecl: Boolean;
     function IsDirectiveWord: Boolean;
     function IsVisibilityWord: Boolean;
     procedure MarkContextKeyword;
-    procedure ConsumeTrailingDirectives;
+    procedure ConsumeTrailingDirectives(AAllowInitializer: Boolean);
     procedure ParseDeclSections(AParent: Integer; AAllowBodies: Boolean;
       const ATerminators: array of TPasTokenKind);
   public
@@ -1853,7 +1854,7 @@ begin
       Next
     else
       Break;
-    ConsumeTrailingDirectives;
+    ConsumeTrailingDirectives(False);
     if AtAny(ATerminators) then
       Break;
     // Non-field successor ends the field run (methods, visibility, ...).
@@ -2042,6 +2043,29 @@ begin
   FB.SetLast(Result, FPos - 1);
 end;
 
+{ True when the directive-looking word at FPos is really the NAME of the next
+  declaration rather than a directive of the one just parsed.
+
+  Directives are context-sensitive identifiers: a real directive is followed by
+  ';', by another directive, or by its own argument — NEVER by '=' or ':'. So
+  `Unsafe = class` is a type declaration and `Index: Integer` is a field, even
+  though both words are in ROUTINE_DIRECTIVE_WORDS.
+
+  Not hypothetical, and the damage is out of all proportion to the shape:
+  DevExpress' dxCore.pas declares `Unsafe = class` right after a method, the
+  name was swallowed as that method's directive, and the type declaration —
+  plus everything the interface declared AFTER it — was lost. 156 `Unsafe` and
+  127 `EdxException` false E2003 across one component library, from one word.
+
+  ParseTypeDirectives already applies the same discipline by a different route
+  ("the run must terminate with ';' — otherwise the word is the next
+  declaration's name"); this is the routine-directive side of it. }
+function TPasParser.DirectiveNameStartsDecl: Boolean;
+begin
+  Result := (CurKind = tkIdentifier) and (FPos < FLast) and
+    (FSrc.VisibleToken(FPos + 1).Kind in [tkEqual, tkColon]);
+end;
+
 function TPasParser.IsDirectiveWord: Boolean;
 var
   LWord: string;
@@ -2087,7 +2111,7 @@ begin
   FB.AddNode(nkDirective, NIL_NODE, FPos);   // FirstToken = LastToken = FPos
 end;
 
-procedure TPasParser.ConsumeTrailingDirectives;
+procedure TPasParser.ConsumeTrailingDirectives(AAllowInitializer: Boolean);
 
   function IsDirectiveWordAt(AIdx: Integer): Boolean;
   var
@@ -2118,7 +2142,17 @@ begin
       Inc(LProbe);
     // Initialized procedural-type variables put the initializer AFTER the
     // convention: `X: procedure; cdecl = nil;` (IdSSLOpenSSLHeaders.pas).
-    if (LProbe <= FLast) and (FSrc.VisibleToken(LProbe).Kind = tkEqual) then
+    //
+    // AAllowInitializer gates it, and the gate is the whole point: in a TYPE or
+    // CONST section an identifier followed by '=' is the NEXT DECLARATION, not
+    // an initializer — and if that identifier happens to be a directive word,
+    // this branch swallowed the entire declaration. DevExpress' dxCore.pas
+    // declares `Unsafe = class`, so `Unsafe`, everything the interface declared
+    // after it, and every use of any of it across the library became a false
+    // E2003 — 283 of them from this one branch. Only a VAR section can
+    // legitimately reach an '=' here.
+    if AAllowInitializer and
+       (LProbe <= FLast) and (FSrc.VisibleToken(LProbe).Kind = tkEqual) then
     begin
       while FPos < LProbe do
         Next;
@@ -2145,7 +2179,7 @@ begin
   LIsExternal := False;
   LIsForward := False;
   LIsAbstract := False;
-  while IsDirectiveWord do
+  while IsDirectiveWord and not DirectiveNameStartsDecl do
   begin
     LDir := FB.AddNode(nkDirective, NIL_NODE, FPos);
     if IsWord('external') then
@@ -2539,7 +2573,7 @@ begin
     FB.SetLast(LDecl, FPos - 1);
     FB.Adopt(Result, LDecl);
     Expect(tkSemicolon, '";"');
-    ConsumeTrailingDirectives;
+    ConsumeTrailingDirectives(False);   // a type decl name may BE a directive word
     if IsVisibilityWord then
       Break;
   end;
@@ -2578,7 +2612,7 @@ begin
     FB.SetLast(LDecl, FPos - 1);
     FB.Adopt(Result, LDecl);
     Expect(tkSemicolon, '";"');
-    ConsumeTrailingDirectives;
+    ConsumeTrailingDirectives(False);   // ditto for a const name
     if IsVisibilityWord then
       Break;
   end;
@@ -2639,7 +2673,7 @@ begin
     FB.SetLast(LDecl, FPos - 1);
     FB.Adopt(Result, LDecl);
     Expect(tkSemicolon, '";"');
-    ConsumeTrailingDirectives;
+    ConsumeTrailingDirectives(True);
     if AClassVar then
       Break; // a `class var` introduces exactly one decl run in our model
   end;
