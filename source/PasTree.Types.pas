@@ -295,50 +295,51 @@ begin
   Result := tkIdentifier;
 end;
 
+{ ONE pass over the source, not two.
+
+  This used to count the lines and then record them, walking every character
+  twice — and it is not a minor cost: measured over the flattened RTL+VCL+FMX
+  corpus (665 files, 69.3M chars), stubbing this function out took lexing from
+  404 ms to 304 ms. A quarter of lexing was here, more than all keyword
+  recognition ever cost.
+
+  Guessing the size instead is a good trade because a wrong guess costs a
+  reallocation, not another pass over 69 MB. One line per ~20 characters fits
+  Pascal source; the array grows geometrically from there and is trimmed once.
+
+  B.1: CRLF, LF and CR EACH end a line, and CRLF is one break, not two. Every
+  recorded value is the 0-based offset of the first character AFTER the break. }
 function BuildLineStarts(const ASource: string): TArray<Integer>;
 var
-  LCount, LPos, LLen: Integer;
+  LCount, LCap, LPos, LLen: Integer;
+  LCh: Char;
 begin
   LLen := Length(ASource);
-  // First pass: count lines.
-  LCount := 1;
-  LPos := 1;
-  while LPos <= LLen do
-  begin
-    case ASource[LPos] of
-      #10: Inc(LCount);
-      #13:
-        begin
-          Inc(LCount);
-          if (LPos < LLen) and (ASource[LPos + 1] = #10) then
-            Inc(LPos);
-        end;
-    end;
-    Inc(LPos);
-  end;
-  SetLength(Result, LCount);
-  // Second pass: record starts (0-based offsets).
+  LCap := LLen div 20 + 8;
+  SetLength(Result, LCap);
   Result[0] := 0;
   LCount := 1;
   LPos := 1;
   while LPos <= LLen do
   begin
-    case ASource[LPos] of
-      #10:
-        begin
-          Result[LCount] := LPos;  // char AFTER the LF, as 0-based offset
-          Inc(LCount);
-        end;
-      #13:
-        begin
-          if (LPos < LLen) and (ASource[LPos + 1] = #10) then
-            Inc(LPos);
-          Result[LCount] := LPos;
-          Inc(LCount);
-        end;
+    LCh := ASource[LPos];
+    // Two direct compares rather than a `case` over every character: this loop
+    // sees every char of every file, and only these two start a line.
+    if (LCh = #10) or (LCh = #13) then
+    begin
+      if (LCh = #13) and (LPos < LLen) and (ASource[LPos + 1] = #10) then
+        Inc(LPos);   // CRLF — one break
+      if LCount = LCap then
+      begin
+        LCap := LCap * 2;
+        SetLength(Result, LCap);
+      end;
+      Result[LCount] := LPos;
+      Inc(LCount);
     end;
     Inc(LPos);
   end;
+  SetLength(Result, LCount);
 end;
 
 { TPasToken }
