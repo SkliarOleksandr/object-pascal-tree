@@ -418,22 +418,32 @@ Still open, roughly in the order we're tackling it:
     to where the target caret is set — that block is the single place a jump
     actually happens. Collapse consecutive entries pointing at the same line so
     repeated clicks in one spot do not bury the history.
-  Open question worth deciding rather than discovering: a jump into a unit that
-  had no tab OPENS one, so Back may leave a trail of tabs the user never chose
-  to open. Either close a tab Back retreats out of (if the jump opened it), or
-  leave it and accept the clutter — but pick one deliberately.
+  Two decisions already taken, so they do not get re-opened during
+  implementation:
+  - *A jump may open a unit that was closed, and Back never closes anything.*
+    Tabs are the user's to close.
+  - *An edit makes recorded positions in that file drift; jump to them anyway.*
+    They land near-enough, and "near-enough" beats both alternatives: purging
+    the file's entries throws away history that is nowhere near the edit, and
+    recomputing offsets from the edit deltas is real work for a problem measured
+    in a few lines. Recomputation is **deliberately deferred, not rejected** —
+    if it ever becomes worth doing, the information is there (the demo knows
+    which buffer changed and by how much). Worth checking first whether
+    SynEdit's own bookmark machinery already tracks positions across edits; if
+    it does, that is a cheaper middle path than any offset arithmetic of ours.
 - **Recent projects on `Open Project...` (split button).** The single most-worn
   path in the demo today: browse to the same `.dproj` by hand, every time. A
   drop-down of the last ~10, most-recent-first, deduped by full path,
   clicked-entry-moves-to-top.
   Persistence has no home yet — the demo currently reads the registry only for
-  the IDE's own library paths (`ReadIdePaths`) and saves nothing of its own. So
-  this needs the first piece of demo state, and it is worth putting the file
-  where the next settings will also fit (platform, threading mode, highlighter
-  choice, colour — all currently reset on every launch) rather than adding one
-  registry value for one list. Prune entries whose file no longer exists at
-  display time, not at save time, so a temporarily disconnected network path
-  does not silently drop out of the list.
+  the IDE's own library paths (`ReadIdePaths`) and saves nothing of its own.
+  **Decided: a plain `.ini`**, and it carries ALL demo settings, not just this
+  list — platform, threading mode, highlighter choice, colour are equally reset
+  on every launch today. `TIniFile`/`TMemIniFile` from `System.IniFiles`, one
+  `[Recent]` section plus a `[Settings]` one; no registry, so the file travels
+  with the checkout and can be inspected and hand-edited. Prune entries whose
+  file no longer exists at display time, not at save time, so a temporarily
+  disconnected network path does not silently drop out of the list.
 - **`.groupproj` (project groups), and a project TREE in the demo.** Today the
   demo opens one `.dproj` and shows its units as a FLAT list, which stops being
   readable at AVImark's 1542 files and cannot represent a group at all. Two
