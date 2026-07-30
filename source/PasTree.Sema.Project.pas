@@ -224,6 +224,8 @@ type
     procedure RunWithPass(ACount: Integer);
     function FindInUses(AId: Integer; const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
+    function FindNonGenericTypeInUses(AId: Integer; const ANameLower: string;
+      out AUnit, ASym: Integer): Boolean;
     function FindInSystemUnit(const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
     function FindInSysInitUnit(const ANameLower: string;
@@ -996,6 +998,44 @@ begin
     end;
   end;
   Result := False;
+end;
+
+{ FindInUses, restricted to a NON-GENERIC type — see PreferNonGeneric for why a
+  generic candidate must not end the search. Same last-uses-wins order among the
+  candidates that do qualify, then the implicit System unit. }
+function TPasSemaProject.FindNonGenericTypeInUses(AId: Integer;
+  const ANameLower: string; out AUnit, ASym: Integer): Boolean;
+var
+  LModel, LUsed: TPasSemaModel;
+  LIdx, LUid, LSym: Integer;
+begin
+  Result := False;
+  LModel := FModels[AId];
+  for LIdx := High(LModel.UsesList) downto 0 do
+  begin
+    LUid := LModel.UsesList[LIdx].UnitId;
+    if LUid < 0 then
+      Continue;
+    LUsed := FModels[LUid];
+    if LUsed.InterfaceScope = NIL_SCOPE then
+      Continue;
+    LSym := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
+    if (LSym <> NIL_SYM) and (LUsed.Symbols[LSym].Kind = skType) and
+       not IsGenericTypeSym(LUid, LSym) then
+    begin
+      AUnit := LUid;
+      ASym := LSym;
+      Exit(True);
+    end;
+  end;
+  if FindInSystemUnit(ANameLower, LUid, LSym) and
+     (FModels[LUid].Symbols[LSym].Kind = skType) and
+     not IsGenericTypeSym(LUid, LSym) then
+  begin
+    AUnit := LUid;
+    ASym := LSym;
+    Result := True;
+  end;
 end;
 
 // Every unit implicitly uses System (1.2.1 / 11.2.1) without naming it in a
@@ -1967,9 +2007,15 @@ begin
       Exit(XPlain(AMid, LProbe));
     LProbe := FModels[AMid].Symbols[LProbe].NextOverload;
   end;
-  if FindInUses(AId, LNameLower, LUid, LFound) and
-     (FModels[LUid].Symbols[LFound].Kind = skType) and
-     not IsGenericTypeSym(LUid, LFound) then
+  // Scan the used units for a NON-generic of that name, rather than asking
+  // FindInUses for "the" one. FindInUses answers with last-uses-wins, which is
+  // the right rule between equals — but arity is part of the identity, so a
+  // generic is not an equal here and must not end the search. `TObjectList` is
+  // the case that proves it: non-generic in one RTL unit, generic in another,
+  // and a unit importing BOTH gets whichever it happened to import later. Four
+  // classes in one debug library then inherited from the wrong TObjectList and
+  // lost every member of the real one.
+  if FindNonGenericTypeInUses(AId, LNameLower, LUid, LFound) then
     Result := XPlain(LUid, LFound);
 end;
 

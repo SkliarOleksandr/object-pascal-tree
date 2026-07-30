@@ -887,6 +887,61 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { The same rule where BOTH declarations come from USED units, which is where
+    it actually bites: `TObjectList` is a plain class in one RTL unit and a
+    generic in another, and a unit importing both got whichever it imported
+    LAST. Four classes in one debug library then inherited from the wrong
+    TObjectList and lost every member of the real one — including TList.Get,
+    reported three hops from the mistake.
+
+    The first fix searched the used units with the ordinary last-uses-wins
+    lookup, which returns the generic again and stops; arity is part of the
+    identity, so a generic candidate must not END the search. dcc-verified. }
+  UNIT_ARPLAIN =
+    'unit UnitArPlain;'#10'interface'#10 +
+    'type'#10 +
+    '  TObjList = class'#10 +
+    '  protected'#10 +
+    '    function Get(Index: Integer): Pointer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TObjList.Get(Index: Integer): Pointer;'#10 +
+    'begin'#10 +
+    '  Result := nil;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  UNIT_ARGEN =
+    'unit UnitArGen;'#10'interface'#10 +
+    'type'#10 +
+    '  TObjList<T: class> = class'#10 +
+    '  public'#10 +
+    '    function Peek: T;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TObjList<T>.Peek: T;'#10 +
+    'begin'#10 +
+    '  Result := nil;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  UNIT_ARUSES =
+    'unit UnitArUses;'#10'interface'#10 +
+    'uses UnitArPlain, UnitArGen;'#10 +   // generic imported LAST
+    'type'#10 +
+    '  TInfo = class'#10 +
+    '  end;'#10 +
+    '  TInfoList = class(TObjList)'#10 +      // bare -> the NON-generic one
+    '  public'#10 +
+    '    function GetItems(Index: Integer): TInfo;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TInfoList.GetItems(Index: Integer): TInfo;'#10 +
+    'begin'#10 +
+    '  Result := TInfo(Get(Index));'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   { 16.1.2 — a reference supplying NO type arguments names the ARITY-0
     declaration, even when a same-named GENERIC is nearer in scope. dcc-verified.
 
@@ -1462,6 +1517,9 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitShadowUse.pas'), UNIT_SHADOWUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitCRef.pas'), UNIT_CREF);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitCRefUse.pas'), UNIT_CREFUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitArPlain.pas'), UNIT_ARPLAIN);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitArGen.pas'), UNIT_ARGEN);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitArUses.pas'), UNIT_ARUSES);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArBase.pas'), UNIT_ARBASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArUse.pas'), UNIT_ARUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitGenList.pas'), UNIT_GENLIST);
@@ -1843,6 +1901,13 @@ begin
     Ok('classref-ctor: no diags at all', Length(LCRf.Diags) = 0);
     Ok('classref-ctor: the with body opens over the REFERENCED class',
       CrossRefTo(LCRf, 'MainPaint', 'MainPaint'));
+
+    // Same rule, both candidates coming from USED units.
+    var LAru := ModelByName('unitaruses');
+    Ok('arity0-uses: UnitArUses loaded', Assigned(LAru));
+    Ok('arity0-uses: no diags at all', Length(LAru.Diags) = 0);
+    Ok('arity0-uses: the bare heritage skips the generic import',
+      CrossRefTo(LAru, 'Get', 'Get'));
 
     // 16.1.2 — a bare reference means the ARITY-0 declaration, even when a
     // same-named generic is nearer in scope (the DevExpress shape).
