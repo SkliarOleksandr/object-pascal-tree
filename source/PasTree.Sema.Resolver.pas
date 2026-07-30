@@ -1245,10 +1245,28 @@ begin
 
     nkMethodResolution:
       begin
-        // `function IEnumerable<string>.GetEnumerator = Impl;` — the <...>
-        // segment is a type ARGUMENT of the implemented interface reference,
-        // NOT generic parameter declarations (unlike a qualified method
-        // implementation header). Walk idents as plain references only.
+        { 14.2.2 `function IPersistStreamInit.Load = PersistStreamLoad;`.
+
+          The name segments arrive as a FLAT sibling list (the routine-header
+          convention, not an nkMember), and their roles are NOT the ones a
+          qualified implementation header has:
+
+            [interface] [<type args>]? [the INTERFACE's method] [class method]
+
+          Only the first and last are names in THIS scope. The middle segment
+          names a member of the interface, so resolving it here as an ordinary
+          unqualified reference is guaranteed to fail — that was 6 false E2003 in
+          Vcl.AxCtrls alone (`IPersistStorage.Load`, `.Save`, ...).
+
+          It is left WITHOUT A SCOPE, the same device the unit's own name node
+          uses, so no pass — intra-unit or cross — tries to resolve or report it.
+          ResolveNode binds it against the interface's member scope where it can,
+          which is the navigable case.
+
+          The <...> segment is a type ARGUMENT of the implemented interface, not
+          a generic parameter declaration (§14.2.2's own warning), so its idents
+          stay plain references. }
+        var LIdents: TArray<Integer> := nil;
         LChild := FirstChild(ANode);
         while LChild <> NIL_NODE do
         begin
@@ -1266,10 +1284,17 @@ begin
               LParam := NextSib(LParam);
             end;
           end
+          else if KindOf(LChild) = nkIdent then
+            LIdents := LIdents + [LChild]
           else
             Collect(LChild, AScope);
           LChild := NextSib(LChild);
         end;
+        for var LI := 0 to High(LIdents) do
+          // First = the interface, last = this class's method: both are names in
+          // AScope. Anything between belongs to the interface.
+          if (LI = 0) or (LI = High(LIdents)) or (Length(LIdents) < 3) then
+            Collect(LIdents[LI], AScope);
       end;
 
     nkRecordType, nkClassType, nkInterfaceType, nkObjectType, nkHelperType:
@@ -1580,6 +1605,36 @@ begin
         if (FModel.RefMap[ANode] = NIL_SYM) and IsAttributeTypeRef(ANode) then
           FModel.RefMap[ANode] := FModel.Resolve(FNodeScope[ANode],
             NodeNameLower(ANode) + 'attribute');
+      end;
+
+    nkMethodResolution:
+      begin
+        // Segments are flat siblings; see Collect's own case for the roles. The
+        // middle one has no scope, so the generic child walk below would leave
+        // it unbound — bind it against the interface's members when the
+        // interface is same-unit, which is what makes it navigable.
+        var LSegs: TArray<Integer> := nil;
+        LChild := FirstChild(ANode);
+        while LChild <> NIL_NODE do
+        begin
+          if KindOf(LChild) = nkIdent then
+            LSegs := LSegs + [LChild]
+          else
+            ResolveNode(LChild);
+          LChild := NextSib(LChild);
+        end;
+        for var LI := 0 to High(LSegs) do
+          if (LI = 0) or (LI = High(LSegs)) or (Length(LSegs) < 3) then
+            ResolveNode(LSegs[LI]);
+        if Length(LSegs) >= 3 then
+        begin
+          LHead := FModel.RefMap[LSegs[0]];
+          if (LHead <> NIL_SYM) and
+             (FModel.Symbols[LHead].MemberScope <> NIL_SCOPE) then
+            for var LI := 1 to High(LSegs) - 1 do
+              FModel.RefMap[LSegs[LI]] := FModel.FindLocalDeep(
+                FModel.Symbols[LHead].MemberScope, NodeNameLower(LSegs[LI]));
+        end;
       end;
 
     nkMember:

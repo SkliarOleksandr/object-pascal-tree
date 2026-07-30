@@ -220,6 +220,51 @@ const
     passes classified it as an ordinary identifier, handed it to the inherited
     pass — which knows nothing about with scopes — and emitted E2003 for it.
     FindInEnclosingWith could already resolve it; nothing routed it there. }
+  { 14.2.2 — METHOD RESOLUTION CLAUSES. `function IPersistStreamInit.Load =
+    PersistStreamLoad;` maps an interface method to a differently-named class
+    method. The segments arrive as a flat sibling list, so resolving them all as
+    names in the CLASS scope reports the interface's own method as undeclared:
+    6 sites in Vcl.AxCtrls, 49 across the corpus.
+
+    Both interfaces declare `Load`, which is the point of the construct — and the
+    control that a fix cannot cheat by picking the first match. }
+  UNIT_MRIFACE =
+    'unit UnitMRIface;'#10'interface'#10 +
+    'type'#10 +
+    '  IReaderLike = interface'#10 +
+    '    function Load: Integer;'#10 +
+    '  end;'#10 +
+    '  IWriterLike = interface'#10 +
+    '    function Load: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10'end.'#10;
+  UNIT_MRUSE =
+    'unit UnitMRUse;'#10'interface'#10 +
+    'uses UnitMRIface;'#10 +
+    'type'#10 +
+    '  TImplX = class(TObject, IReaderLike, IWriterLike)'#10 +
+    '  protected'#10 +
+    '    function IReaderLike.Load = ReaderLoad;'#10 +   // 7  cross-unit iface
+    '    function IWriterLike.Load = WriterLoad;'#10 +   // 8  clashing name
+    '    function ReaderLoad: Integer;'#10 +
+    '    function WriterLoad: Integer;'#10 +
+    '  end;'#10 +
+    // Same-unit interface: the segment IS bindable, so this also covers the
+    // navigable half of the fix.
+    '  ILocalLike = interface'#10 +
+    '    procedure Store;'#10 +
+    '  end;'#10 +
+    '  TImplY = class(TObject, ILocalLike)'#10 +
+    '  protected'#10 +
+    '    procedure ILocalLike.Store = DoStore;'#10 +     // 17 same-unit iface
+    '    procedure DoStore;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TImplX.ReaderLoad: Integer; begin Result := 1; end;'#10 +
+    'function TImplX.WriterLoad: Integer; begin Result := 2; end;'#10 +
+    'procedure TImplY.DoStore; begin end;'#10 +
+    'end.'#10;
+
   UNIT_MTREC =
     'unit UnitMTRec;'#10'interface'#10 +
     'type'#10 +
@@ -867,6 +912,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitTObj.pas'), UNIT_TOBJ);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitQual.pas'), UNIT_QUAL);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWShapes.pas'), UNIT_WSHAPES);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitMRIface.pas'), UNIT_MRIFACE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitMRUse.pas'), UNIT_MRUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitMTRec.pas'), UNIT_MTREC);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitMTUse.pas'), UNIT_MTUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNWCanvas.pas'), UNIT_NWCANVAS);
@@ -1084,6 +1131,21 @@ begin
     Ok('wshapes: the helper''s static reached through the type ALIAS',
       LocalRefCount(LWS, 'SetProduct') +
       CrossRefCountInUnit(LWS, 'SetProduct', 'SetProduct', 'unitwshapes') >= 1);
+
+    // METHOD RESOLUTION CLAUSES (see UNIT_MRUSE). The interface's own method
+    // name must not be looked up in the class scope, and the class method after
+    // `=` must still resolve there.
+    var LMR := ModelByName('unitmruse');
+    Ok('method resolution: UnitMRUse loaded', Assigned(LMR));
+    Ok('method resolution: no diags at all', Length(LMR.Diags) = 0);
+    Ok('method resolution: the interface method is not reported undeclared',
+      DiagCount(LMR, 'E2003') = 0);
+    Ok('method resolution: the impl methods still resolve',
+      CrossRefTo(LMR, 'ReaderLoad', 'ReaderLoad') or
+      (LocalRefCount(LMR, 'ReaderLoad') > 0));
+    // Same-unit interface: the segment is bindable, so it navigates.
+    Ok('method resolution: a same-unit interface method binds',
+      LocalRefCount(LMR, 'Store') > 0);
 
     // MULTI-TARGET with over a CROSS-UNIT record (see UNIT_MTUSE). Three things
     // must hold together: the later target resolves at all, the members reached
