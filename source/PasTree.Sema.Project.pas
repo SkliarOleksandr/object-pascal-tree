@@ -254,7 +254,11 @@ type
     procedure CheckConstraints(AId: Integer);
     function DeclTypeX(AMid, ASym: Integer): TSemaXType;
     function SubstX(const AX: TSemaXType; AInst, ADepth: Integer): TSemaXType;
-    function ResolveTypeExpr(AId, ANode: Integer): TSemaXType;
+    function ResolveTypeExpr(AId, ANode: Integer;
+      ABare: Boolean = True): TSemaXType;
+    function PreferNonGeneric(AId, AMid, ASym,
+      ANameNode: Integer): TSemaXType;
+    function IsGenericTypeSym(AMid, ASym: Integer): Boolean;
     function ResolveTypeExprNested(AId, ANode: Integer): TSemaXType;
     procedure BuildHelperMap;
     procedure ClearHelperIdx;
@@ -1903,7 +1907,64 @@ end;
 // reading the resolver's RefMap first, then the project's ExtRefMap. For
 // nkTypeArgs the args are resolved too and the instantiation is registered;
 // an unresolved arg degrades to the plain (open) generic.
-function TPasSemaProject.ResolveTypeExpr(AId, ANode: Integer): TSemaXType;
+{ A type reference that supplies NO type arguments names the arity-0
+  declaration (16.1.2) — even when a same-named GENERIC is closer in scope.
+  dcc-verified: with `TBase` in unit A and `TBase<T> = class(TBase)` in unit B,
+  B's own `TDerived = class(TBase)` means A's.
+
+  DevExpress leans on it: `TdxBarAccessibilityHelper` is a plain class in
+  dxBar.pas and `TdxBarAccessibilityHelper<T: TWinControl>` a generic in
+  dxBarAccessibility.pas, and the latter unit then writes both spellings. Taking
+  the nearer (generic) one is not merely imprecise — the generic's OWN heritage
+  is that same bare name, so the walk resolves it to ITSELF and the
+  self-reference guard in FindMemberX stops the ancestry dead. 100+ false E2003
+  in that library, on names declared three hops up.
+
+  Two places to look, in dcc's own order: the same scope's overload chain
+  (16.1.2's arity overloading), then the used units — the cross-UNIT case is
+  ordinary shadowing rather than an overload chain, so nothing links the two.
+  The generic test is deliberately structural and allocation-free: a generic
+  type's member scope hangs off an sckGenericParams scope (CollectTypeDecl), so
+  it costs two indexed reads on a path that runs for every type reference. }
+function TPasSemaProject.PreferNonGeneric(AId, AMid, ASym,
+  ANameNode: Integer): TSemaXType;
+var
+  LProbe, LDepth, LUid, LFound: Integer;
+  LNameLower: string;
+begin
+  Result := XPlain(AMid, ASym);
+  // Reached only for a BARE reference to a GENERIC type — both conditions are
+  // tested INLINE by the callers, because this body allocates (NodeNameLower)
+  // and every type reference in the closure would otherwise pass through it.
+  // Taking the name eagerly measured +7% (1886 -> 2021 ms) on the 665-unit
+  // corpus; deriving "is generic" here instead of reading sfGeneric cost a
+  // further +1.7%. Same shape as the PasNameKey-on-FindLocal trap.
+  LNameLower := FModels[AId].Tree.NodeNameLower(ANameNode);
+  LProbe := FModels[AMid].Symbols[ASym].NextOverload;
+  for LDepth := 1 to 32 do
+  begin
+    if LProbe = NIL_SYM then
+      Break;
+    if (FModels[AMid].Symbols[LProbe].Kind = skType) and
+       not IsGenericTypeSym(AMid, LProbe) then
+      Exit(XPlain(AMid, LProbe));
+    LProbe := FModels[AMid].Symbols[LProbe].NextOverload;
+  end;
+  if FindInUses(AId, LNameLower, LUid, LFound) and
+     (FModels[LUid].Symbols[LFound].Kind = skType) and
+     not IsGenericTypeSym(LUid, LFound) then
+    Result := XPlain(LUid, LFound);
+end;
+
+// True when ASym is a GENERIC type. Read straight off the flag CollectTypeDecl
+// set — see sfGeneric for why this is not derived here.
+function TPasSemaProject.IsGenericTypeSym(AMid, ASym: Integer): Boolean;
+begin
+  Result := sfGeneric in FModels[AMid].Symbols[ASym].Flags;
+end;
+
+function TPasSemaProject.ResolveTypeExpr(AId, ANode: Integer;
+  ABare: Boolean = True): TSemaXType;
 var
   LM: TPasSemaModel;
   LName, LSym, LArgNode, LArgCount: Integer;
@@ -1929,17 +1990,30 @@ begin
             Exit;
         end;
         LSym := LM.RefMap[LName];
+        // The generic test is inline so the overwhelmingly common case — a
+        // non-generic type reference — costs one set membership and no call.
         if (LSym <> NIL_SYM) and (LM.Symbols[LSym].Kind in
            [skType, skBuiltinType, skGenericParam]) then
+        begin
+          if ABare and (sfGeneric in LM.Symbols[LSym].Flags) then
+            Exit(PreferNonGeneric(AId, AId, LSym, LName));
           Exit(XPlain(AId, LSym));
+        end;
         if LM.ExtRefMap.TryGetValue(LName, LExt) and
            (FModels[LExt.UnitId].Symbols[LExt.Sym].Kind in
             [skType, skBuiltinType, skGenericParam]) then
+        begin
+          if ABare and
+             (sfGeneric in FModels[LExt.UnitId].Symbols[LExt.Sym].Flags) then
+            Exit(PreferNonGeneric(AId, LExt.UnitId, LExt.Sym, LName));
           Exit(XPlain(LExt.UnitId, LExt.Sym));
+        end;
       end;
     nkTypeArgs:
       begin
-        LBase := ResolveTypeExpr(AId, LM.Tree.Nodes[ANode].FirstChild);
+        // ABare=False: the base of `T<...>` is SUPPOSED to be the generic, and
+        // this branch does its own arity matching just below.
+        LBase := ResolveTypeExpr(AId, LM.Tree.Nodes[ANode].FirstChild, False);
         if not XValid(LBase) then
           Exit;
         LBase := RealGenericBase(LBase);

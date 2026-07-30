@@ -572,6 +572,10 @@ begin
   LGen := FindChildKind(ANode, nkGenericParams);
   if LGen <> NIL_NODE then
   begin
+    // Recorded on the SYMBOL: the project's type-reference resolution needs
+    // "is this generic?" for every reference it binds, and deriving it there
+    // is measurably expensive (see sfGeneric).
+    FModel.Symbols[LSym].Flags := FModel.Symbols[LSym].Flags + [sfGeneric];
     LBody := FModel.AddScope(sckGenericParams, AScope, ANode);
     Collect(LGen, LBody);
   end;

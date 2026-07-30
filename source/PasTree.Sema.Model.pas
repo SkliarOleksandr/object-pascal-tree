@@ -33,8 +33,14 @@ type
   TSemaSymbolKind = (skType, skVar, skConst, skField, skRoutine, skParam,
     skProperty, skEnumValue, skGenericParam, skLabel, skUnitRef, skBuiltinType);
 
+  // sfGeneric: a TYPE declared with parameters (`TFoo<T>`). Set once at collect
+  // time because the alternative — deriving it at lookup — sits on the hottest
+  // path there is: a bare type reference must prefer the arity-0 declaration
+  // (16.1.2), so EVERY type reference in the closure asks the question. Reading
+  // it off the declaration there cost +1.7% even in its cheapest structural
+  // form; a set membership test costs nothing.
   TSemaSymbolFlag = (sfBuiltin, sfExternalUnresolved, sfStrict, sfOverload,
-    sfClassMember, sfForward, sfHasBody, sfHasDefault);
+    sfClassMember, sfForward, sfHasBody, sfHasDefault, sfGeneric);
   TSemaSymbolFlags = set of TSemaSymbolFlag;
 
   // A reference resolved to a symbol in another unit's model.

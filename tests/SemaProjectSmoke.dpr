@@ -887,6 +887,62 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { 16.1.2 — a reference supplying NO type arguments names the ARITY-0
+    declaration, even when a same-named GENERIC is nearer in scope. dcc-verified.
+
+    DevExpress's shape: `TdxBarAccessibilityHelper` is a plain class in dxBar.pas
+    and `TdxBarAccessibilityHelper<T: TWinControl>` a generic in
+    dxBarAccessibility.pas, which then writes both spellings. Taking the nearer
+    (generic) one is not merely imprecise: the generic's OWN heritage is that
+    same bare name, so it resolves to ITSELF and the self-reference guard stops
+    the ancestor walk dead — 100+ false E2003 on members declared three hops up.
+
+    TLocal is the control: an arity-1 reference must still mean the generic, and
+    the fix must not "correct" the base of `T<...>` on its way through. }
+  UNIT_ARBASE =
+    'unit UnitArBase;'#10'interface'#10 +
+    'type'#10 +
+    '  TProv = class'#10 +
+    '  private'#10 +
+    '    FParent: Integer;'#10 +
+    '  public'#10 +
+    '    property Parent: Integer read FParent;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
+  UNIT_ARUSE =
+    'unit UnitArUse;'#10'interface'#10'uses UnitArBase;'#10 +
+    'type'#10 +
+    '  TProv<T: class> = class(TProv)'#10 +   // same NAME, arity 1, heritage bare
+    '  private'#10 +
+    '    function GetElem: T;'#10 +
+    '  public'#10 +
+    '    property Elem: T read GetElem;'#10 +
+    '  end;'#10 +
+    '  TDerived = class(TProv)'#10 +          // zero args -> UnitArBase.TProv
+    '  public'#10 +
+    '    function Check: Boolean;'#10 +
+    '  end;'#10 +
+    '  TLocal = class(TProv<TObject>)'#10 +   // one arg -> the LOCAL generic
+    '  public'#10 +
+    '    function Peek: TObject;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TProv<T>.GetElem: T;'#10 +
+    'begin'#10 +
+    '  Result := nil;'#10 +
+    'end;'#10 +
+    'function TDerived.Check: Boolean;'#10 +
+    'begin'#10 +
+    '  Result := Parent > 0;'#10 +
+    'end;'#10 +
+    'function TLocal.Peek: TObject;'#10 +
+    'begin'#10 +
+    '  Result := Elem;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   UNIT_E =
     'unit UnitE;'#10'interface'#10'implementation'#10 +
     'procedure R;'#10'var L: Integer;'#10'begin'#10 +
@@ -1199,6 +1255,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNABase.pas'), UNIT_NABASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNAUse.pas'), UNIT_NAUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitDlg.pas'), UNIT_DLG);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitArBase.pas'), UNIT_ARBASE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitArUse.pas'), UNIT_ARUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitGenList.pas'), UNIT_GENLIST);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitGenListUse.pas'), UNIT_GENLISTUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWX.pas'), UNIT_WX);
@@ -1544,6 +1602,17 @@ begin
     Ok('callee-precedence: the call re-points to the inherited METHOD',
       CrossRefCountInUnit(LDlg, 'GetFileNames', 'GetFileNames',
         'unitdlg') >= 1);
+
+    // 16.1.2 — a bare reference means the ARITY-0 declaration, even when a
+    // same-named generic is nearer in scope (the DevExpress shape).
+    var LAr0 := ModelByName('unitaruse');
+    Ok('arity0: UnitArUse loaded', Assigned(LAr0));
+    Ok('arity0: no diags at all', Length(LAr0.Diags) = 0);
+    Ok('arity0: the bare heritage reaches the imported arity-0 class',
+      CrossRefTo(LAr0, 'Parent', 'Parent'));
+    Ok('arity0: an arity-1 reference still means the LOCAL generic',
+      (LocalRefCount(LAr0, 'Elem') +
+       CrossRefCountInUnit(LAr0, 'Elem', 'Elem', 'unitaruse')) >= 1);
 
     // A default array property inherited from a GENERIC ancestor, cross-unit.
     var LGL := ModelByName('unitgenlistuse');
