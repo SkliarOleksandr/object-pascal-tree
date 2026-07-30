@@ -3625,6 +3625,17 @@ begin
         Exit(SubstX(ElemOf(LCur.UnitId, LDef), LCur.Inst, 0));
       nkIdent, nkMember, nkTypeArgs:
         LCur := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
+      nkPointerType:
+        // Indexing a POINTER to an array: `ImageData[i]` where
+        // `pPixelLine = ^TPixelLine` and `TPixelLine = array[Word] of TRGBQuad`
+        // (Vcl.Imaging.pngimage, 23 sites; Vcl.Imaging.GIFImg the same). The `^`
+        // may be omitted before `[`, and no POINTERMATH directive is needed —
+        // dcc-verified, both as an expression and as a with target.
+        //
+        // Deref and let the loop continue, so pointer -> alias -> array composes
+        // instead of needing a case per combination. FindMemberX already applies
+        // the same implicit deref for `P.Field`; this is its sibling.
+        LCur := PointeeX(LCur);
     else
       Break;   // not an array — a default array property may still index it
     end;

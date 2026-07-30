@@ -278,6 +278,12 @@ const
     '    Count: Integer;'#10 +
     '  end;'#10 +
     '  PParamsLike = ^TParamsLike;'#10 +
+    // Indexing a POINTER to an array, `^` omitted before `[` and no POINTERMATH
+    // — Vcl.Imaging.pngimage's pPixelLine/TPixelLine shape, 23 sites there and
+    // 6 more in GIFImg. dcc-verified as both an expression and a with target.
+    '  TQuadLike = record R, G, B: Byte; end;'#10 +
+    '  TLineLike = array[0..255] of TQuadLike;'#10 +
+    '  PLineLike = ^TLineLike;'#10 +
     // 13.1.4 default ARRAY property, inherited one level down — the
     // `with ActionManager.ActionBars[I] do` shape. TValueProp is the control:
     // a default VALUE spec on an ordinary property spells the same word and
@@ -363,6 +369,14 @@ const
     '    W := 1;'#10 +
     '  with P^.rgrc[0] do'#10 +            // 25 deref + member + index
     '    H := 1;'#10 +
+    'end;'#10 +
+    // Indexing a pointer-to-array with the `^` omitted, as an expression and as
+    // a with target. R is reachable only through the element type.
+    'procedure Lines(L: PLineLike);'#10 +
+    'begin'#10 +
+    '  L[0].R := 1;'#10 +                  // expression form
+    '  with L[1] do'#10 +                  // with-target form
+    '    G := 2;'#10 +
     'end;'#10 +
     // Indexing a CLASS through its INHERITED default array property, unnamed —
     // the element type is the property's, not the collection's.
@@ -1165,6 +1179,18 @@ begin
       CrossRefTo(LMT, 'Count', 'Count'));
     Ok('target shapes: H through deref+member+index',
       CrossRefTo(LMT, 'H', 'H'));
+    // Indexing a POINTER to an array, `^` omitted. G is a field of the element
+    // type, so it binds only if the pointer was dereferenced on the way.
+    Ok('pointer index: G through `with L[1] do`',
+      CrossRefTo(LMT, 'G', 'G'));
+    { KNOWN GAP, deliberately not asserted: the EXPRESSION form `L[0].R` across a
+      unit boundary does not bind R, because CrossType's own walk has no nkIndex
+      case and so cannot type `L[0]`. Giving it one was measured (+4% wall time,
+      zero diagnostic change) and reverted — see the README To-do. It costs
+      typing precision, not diagnostics: the corpus shows no E2003 from this
+      form, since the intra-unit typer covers the same-unit case, which is what
+      Vcl.Imaging.pngimage actually uses. }
+
     // Indexing a class through its inherited default array property. Tag can
     // ONLY be reached that way, so binding it proves the element type came from
     // the property and not from the collection.
