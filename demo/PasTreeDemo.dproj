@@ -3,7 +3,7 @@
         <ProjectGuid>{E53A0087-9F0D-4E7A-890B-ADFF80FD7DB0}</ProjectGuid>
         <MainSource>PasTreeDemo.dpr</MainSource>
         <Base>True</Base>
-        <Config Condition="'$(Config)'==''">Debug</Config>
+        <Config Condition="'$(Config)'==''">Release</Config>
         <ProjectName Condition="'$(ProjectName)'==''">PasTreeDemo</ProjectName>
         <TargetedPlatforms>3</TargetedPlatforms>
         <AppType>Application</AppType>
