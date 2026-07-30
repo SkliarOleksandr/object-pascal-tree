@@ -925,6 +925,28 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { The MIRROR of the same rule: a reference WITH type arguments must skip an
+    imported NON-generic of that name. It hides better than the bare case,
+    because `Name<T>` reads as unambiguous — but the ordinary lookup still
+    returns whichever declaration was imported last, and a plain class of that
+    name in another unit takes a whole ancestry with it. }
+  UNIT_ARGENUSE =
+    'unit UnitArGenUse;'#10'interface'#10 +
+    'uses UnitArGen, UnitArPlain;'#10 +   // the NON-generic imported last
+    'type'#10 +
+    '  TItem = class'#10 +
+    '  end;'#10 +
+    '  TItemList = class(TObjList<TItem>)'#10 +   // one arg -> the GENERIC
+    '  public'#10 +
+    '    function Top: TItem;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TItemList.Top: TItem;'#10 +
+    'begin'#10 +
+    '  Result := Peek;'#10 +   // declared only on the generic
+    'end;'#10 +
+    'end.'#10;
+
   UNIT_ARUSES =
     'unit UnitArUses;'#10'interface'#10 +
     'uses UnitArPlain, UnitArGen;'#10 +   // generic imported LAST
@@ -1520,6 +1542,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArPlain.pas'), UNIT_ARPLAIN);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArGen.pas'), UNIT_ARGEN);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArUses.pas'), UNIT_ARUSES);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitArGenUse.pas'), UNIT_ARGENUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArBase.pas'), UNIT_ARBASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArUse.pas'), UNIT_ARUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitGenList.pas'), UNIT_GENLIST);
@@ -1901,6 +1924,13 @@ begin
     Ok('classref-ctor: no diags at all', Length(LCRf.Diags) = 0);
     Ok('classref-ctor: the with body opens over the REFERENCED class',
       CrossRefTo(LCRf, 'MainPaint', 'MainPaint'));
+
+    // The MIRROR: an arity-1 reference must skip an imported NON-generic.
+    var LArg := ModelByName('unitargenuse');
+    Ok('arity1-uses: UnitArGenUse loaded', Assigned(LArg));
+    Ok('arity1-uses: no diags at all', Length(LArg.Diags) = 0);
+    Ok('arity1-uses: the arity-1 reference reaches the GENERIC import',
+      CrossRefTo(LArg, 'Peek', 'Peek'));
 
     // Same rule, both candidates coming from USED units.
     var LAru := ModelByName('unitaruses');

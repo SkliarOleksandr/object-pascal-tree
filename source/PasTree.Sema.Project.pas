@@ -224,8 +224,9 @@ type
     procedure RunWithPass(ACount: Integer);
     function FindInUses(AId: Integer; const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
-    function FindNonGenericTypeInUses(AId: Integer; const ANameLower: string;
-      out AUnit, ASym: Integer): Boolean;
+    function ArityOfTypeSym(AMid, ASym: Integer): Integer;
+    function FindTypeInUsesArity(AId: Integer; const ANameLower: string;
+      AArity: Integer; out AUnit, ASym: Integer): Boolean;
     function FindInSystemUnit(const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
     function FindInSysInitUnit(const ANameLower: string;
@@ -1000,11 +1001,30 @@ begin
   Result := False;
 end;
 
-{ FindInUses, restricted to a NON-GENERIC type — see PreferNonGeneric for why a
-  generic candidate must not end the search. Same last-uses-wins order among the
-  candidates that do qualify, then the implicit System unit. }
-function TPasSemaProject.FindNonGenericTypeInUses(AId: Integer;
-  const ANameLower: string; out AUnit, ASym: Integer): Boolean;
+// The generic ARITY of a type symbol: 0 for a plain type, else its parameter
+// count. The zero case is the cheap flag; only a generic pays the walk.
+function TPasSemaProject.ArityOfTypeSym(AMid, ASym: Integer): Integer;
+begin
+  if not IsGenericTypeSym(AMid, ASym) then
+    Result := 0
+  else
+    Result := Length(GenericParamIdents(AMid, ASym));
+end;
+
+{ FindInUses, restricted to a type of a GIVEN generic arity — see
+  PreferNonGeneric for why a wrong-arity candidate must not end the search. Same
+  last-uses-wins order among the candidates that do qualify, then the implicit
+  System unit.
+
+  BOTH directions of the mistake are real, and both are set by the RTL's or a
+  component library's own naming: a BARE name that has to skip an imported
+  GENERIC, and a `Name<T>` that has to skip an imported NON-generic. The second
+  hides better, because the reference looks unambiguous — `TdxPDFObjectList<T>`
+  reads like it can only mean the generic, but the plain class of that name in
+  another unit is what the ordinary lookup returns. }
+function TPasSemaProject.FindTypeInUsesArity(AId: Integer;
+  const ANameLower: string; AArity: Integer;
+  out AUnit, ASym: Integer): Boolean;
 var
   LModel, LUsed: TPasSemaModel;
   LIdx, LUid, LSym: Integer;
@@ -1021,7 +1041,7 @@ begin
       Continue;
     LSym := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
     if (LSym <> NIL_SYM) and (LUsed.Symbols[LSym].Kind = skType) and
-       not IsGenericTypeSym(LUid, LSym) then
+       (ArityOfTypeSym(LUid, LSym) = AArity) then
     begin
       AUnit := LUid;
       ASym := LSym;
@@ -1030,7 +1050,7 @@ begin
   end;
   if FindInSystemUnit(ANameLower, LUid, LSym) and
      (FModels[LUid].Symbols[LSym].Kind = skType) and
-     not IsGenericTypeSym(LUid, LSym) then
+     (ArityOfTypeSym(LUid, LSym) = AArity) then
   begin
     AUnit := LUid;
     ASym := LSym;
@@ -2015,7 +2035,7 @@ begin
   // and a unit importing BOTH gets whichever it happened to import later. Four
   // classes in one debug library then inherited from the wrong TObjectList and
   // lost every member of the real one.
-  if FindNonGenericTypeInUses(AId, LNameLower, LUid, LFound) then
+  if FindTypeInUsesArity(AId, LNameLower, 0, LUid, LFound) then
     Result := XPlain(LUid, LFound);
 end;
 
@@ -2093,7 +2113,7 @@ function TPasSemaProject.ResolveTypeExpr(AId, ANode: Integer;
   ABare: Boolean = True): TSemaXType;
 var
   LM: TPasSemaModel;
-  LName, LSym, LArgNode, LArgCount: Integer;
+  LName, LSym, LArgNode, LArgCount, LUid: Integer;
   LExt: TPasExtRef;
   LBase, LArg: TSemaXType;
   LArgs: TArray<TSemaXType>;
@@ -2172,18 +2192,38 @@ begin
         // arguments actually written. Walking the chain is safe for a type
         // symbol: every other NextOverload consumer reaches the chain through
         // a ROUTINE head.
-        if Length(GenericParamIdents(LBase.UnitId, LBase.Sym)) <> LArgCount then
+        if ArityOfTypeSym(LBase.UnitId, LBase.Sym) <> LArgCount then
         begin
           LSym := FModels[LBase.UnitId].Symbols[LBase.Sym].NextOverload;
           while LSym <> NIL_SYM do
           begin
             if (FModels[LBase.UnitId].Symbols[LSym].Kind = skType) and
-               (Length(GenericParamIdents(LBase.UnitId, LSym)) = LArgCount) then
+               (ArityOfTypeSym(LBase.UnitId, LSym) = LArgCount) then
             begin
               LBase.Sym := LSym;
               Break;
             end;
             LSym := FModels[LBase.UnitId].Symbols[LSym].NextOverload;
+          end;
+          // The chain only links declarations in ONE model. When the arities
+          // live in DIFFERENT used units there is nothing to chain, and the
+          // ordinary lookup returned whichever was imported last — so
+          // `TdxPDFObjectList<T>` can land on a plain class of that name in
+          // another unit and take a whole ancestry with it. Mirror of the bare
+          // case in PreferNonGeneric; searched only after the chain misses, so
+          // the common single-declaration name never reaches it.
+          // BUILTINS excluded, and that guard is load-bearing for the clock:
+          // a seeded type carries no parameter list, so `TArray<T>` and friends
+          // "mismatch" on every single use and would each pay a full scan of
+          // the referring unit's imports. Measured at +1.8% before the guard.
+          if (ArityOfTypeSym(LBase.UnitId, LBase.Sym) <> LArgCount) and
+             not (sfBuiltin in FModels[LBase.UnitId].Symbols[LBase.Sym].Flags) and
+             FindTypeInUsesArity(AId,
+               LM.Tree.NodeNameLower(LM.Tree.Nodes[ANode].FirstChild),
+               LArgCount, LUid, LSym) then
+          begin
+            LBase.UnitId := LUid;
+            LBase.Sym := LSym;
           end;
         end;
         LArgNode := LM.Tree.Nodes[LM.Tree.Nodes[ANode].FirstChild].NextSibling;
