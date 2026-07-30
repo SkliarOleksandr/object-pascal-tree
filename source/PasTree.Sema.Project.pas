@@ -199,7 +199,7 @@ type
     function SymDeclTypeX(AMid, ASym: Integer): TSemaXType;
     function IsDefaultArrayProp(AMid, ASym: Integer): Boolean;
     function DefaultArrayPropX(const AX: TSemaXType;
-      out AMid, ASym: Integer): Boolean;
+      out AMid, ASym: Integer; out AOwner: TSemaXType): Boolean;
     function ElementX(AId, ABaseNode: Integer): TSemaXType;
     function WithTargetTypeX(AId, ANode: Integer): TSemaXType;
     function InsideWithBody(AModel: TPasSemaModel; ANode: Integer): Boolean;
@@ -3622,6 +3622,13 @@ begin
           Result := ResolveTypeExprNested(AX.UnitId, LChild);
       end;
   end;
+  // Compose the frames, exactly as FindMemberX's own walk does one hop at a
+  // time: the ancestor reference is written in the DESCENDANT's parameters, so
+  // `TObjectList<T> = class(TList<T>)` reached from `TObjectList<TAttr>` must
+  // come back as TList<TAttr>, not as the open TList<T>. Without this the frame
+  // was silently dropped at every hop and only a DIRECT generic ancestor ever
+  // carried one.
+  Result := SubstX(Result, AX.Inst, 0);
 end;
 
 { The declared type of ONE symbol, resolved in its own model — the single place
@@ -3727,8 +3734,16 @@ end;
 
   Walk shape and alias chasing mirror XDescendsFrom: a default property is
   frequently INHERITED (TCollection.Items, TStrings.Strings). }
+{ AOwner is the hop the property was FOUND at, instantiation frame included, and
+  it is not the same thing as AX: the walk climbs ancestors, and an ancestor is
+  where the frame usually comes from. `TAttrList = class(TObjectList<TAttr>)`
+  has no frame of its own — `Items: T` lives two hops up in `TList<T>`, and only
+  TObjectList<TAttr>'s frame turns that `T` into TAttr. Substituting with AX's
+  own frame (empty here) left the element type as the OPEN parameter, so
+  `with L[I] do` opened over nothing and every member in the body was a false
+  E2003 (~250 across one HTML component library). }
 function TPasSemaProject.DefaultArrayPropX(const AX: TSemaXType;
-  out AMid, ASym: Integer): Boolean;
+  out AMid, ASym: Integer; out AOwner: TSemaXType): Boolean;
 var
   LCur: TSemaXType;
   LM: TPasSemaModel;
@@ -3737,6 +3752,7 @@ begin
   Result := False;
   AMid := NIL_SYM;
   ASym := NIL_SYM;
+  AOwner := XNil;
   LCur := AX;
   for LDepth := 1 to 32 do
   begin
@@ -3752,6 +3768,7 @@ begin
         begin
           AMid := LCur.UnitId;
           ASym := LSym;
+          AOwner := LCur;
           Exit(True);
         end;
       end;
@@ -3797,7 +3814,7 @@ function TPasSemaProject.ElementX(AId, ABaseNode: Integer): TSemaXType;
 
 var
   LMid, LSym, LDef, LDepth: Integer;
-  LCur: TSemaXType;
+  LCur, LOwner: TSemaXType;
 begin
   // 1. The base's own declared type node (inline-array case).
   if DesignatorSymX(AId, ABaseNode, LMid, LSym) then
@@ -3840,9 +3857,12 @@ begin
   end;
   // A CLASS/interface being indexed: the element type is its default array
   // property's (see DefaultArrayPropX).
-  if XValid(LCur) and DefaultArrayPropX(LCur, LMid, LSym) then
+  // Substituted over the frame of the hop the property was FOUND at, not over
+  // LCur's own — see DefaultArrayPropX. For `TAttrList = class(TObjectList
+  // <TAttr>)` LCur has no frame at all and the element type would stay `T`.
+  if XValid(LCur) and DefaultArrayPropX(LCur, LMid, LSym, LOwner) then
     Exit(SubstX(ResolveTypeExpr(LMid, FModels[LMid].Symbols[LSym].TypeNode),
-      LCur.Inst, 0));
+      LOwner.Inst, 0));
   Result := XNil;
 end;
 

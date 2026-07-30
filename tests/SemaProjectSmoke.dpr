@@ -822,6 +822,71 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { A default array property INHERITED FROM A GENERIC ANCESTOR, two hops up and
+    cross-unit. HTMLViewer's shape: `TAttributeList = class(TObjectList<TAttribute>)`
+    with no `Items` of its own, then `with L[I] do case Which of ...`. `Items: T`
+    lives in `TList<T>`, and only TObjectList<TAttribute>'s frame turns that `T`
+    into TAttribute.
+
+    Two frame bugs met here, and either alone leaves the element type as the OPEN
+    parameter — so the with scope opens over nothing and every member in the body
+    is a false E2003 (~250 across that one library):
+      - AncestorOfX resolved each heritage reference WITHOUT composing the
+        descendant's frame, so a frame survived only one hop;
+      - ElementX substituted with the frame of the type it STARTED at rather than
+        the hop the property was found at, which for TAttrList is empty.
+
+    Two units, because the intra-unit resolver handles the same-unit case on its
+    own and hides the defect completely. }
+  UNIT_GENLIST =
+    'unit UnitGenList;'#10'interface'#10 +
+    'type'#10 +
+    // The ancestor chain is written out rather than using
+    // System.Generics.Collections: this suite analyses a temp DIRECTORY, whose
+    // only search path is that directory, so an RTL import would not resolve and
+    // the fixture would pass for the wrong reason. Same two-hop shape.
+    '  TBaseList<T> = class'#10 +
+    '  private'#10 +
+    '    function GetItem(AIndex: Integer): T;'#10 +
+    '  public'#10 +
+    '    function Count: Integer;'#10 +
+    '    property Items[AIndex: Integer]: T read GetItem; default;'#10 +
+    '  end;'#10 +
+    '  TObjList<T> = class(TBaseList<T>)'#10 +       // middle hop, no default
+    '  end;'#10 +
+    '  TAttr = class'#10 +
+    '  public'#10 +
+    '    Which: Integer;'#10 +
+    '    Name: string;'#10 +
+    '  end;'#10 +
+    '  TAttrList = class(TObjList<TAttr>)'#10 +      // Items is TWO hops up
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TBaseList<T>.GetItem(AIndex: Integer): T;'#10 +
+    'begin'#10 +
+    '  Result := Default(T);'#10 +
+    'end;'#10 +
+    'function TBaseList<T>.Count: Integer;'#10 +
+    'begin'#10 +
+    '  Result := 0;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  UNIT_GENLISTUSE =
+    'unit UnitGenListUse;'#10'interface'#10'uses UnitGenList;'#10 +
+    'procedure Use(L: TAttrList);'#10 +
+    'implementation'#10 +
+    'procedure Use(L: TAttrList);'#10 +
+    'var'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  for I := 0 to L.Count - 1 do'#10 +
+    '    with L[I] do'#10 +
+    '      if Which = 0 then'#10 +
+    '        Name := ''x'';'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   UNIT_E =
     'unit UnitE;'#10'interface'#10'implementation'#10 +
     'procedure R;'#10'var L: Integer;'#10'begin'#10 +
@@ -1134,6 +1199,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNABase.pas'), UNIT_NABASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNAUse.pas'), UNIT_NAUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitDlg.pas'), UNIT_DLG);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitGenList.pas'), UNIT_GENLIST);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitGenListUse.pas'), UNIT_GENLISTUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWX.pas'), UNIT_WX);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWXUse.pas'), UNIT_WXUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNHBase.pas'), UNIT_NHBASE);
@@ -1477,6 +1544,13 @@ begin
     Ok('callee-precedence: the call re-points to the inherited METHOD',
       CrossRefCountInUnit(LDlg, 'GetFileNames', 'GetFileNames',
         'unitdlg') >= 1);
+
+    // A default array property inherited from a GENERIC ancestor, cross-unit.
+    var LGL := ModelByName('unitgenlistuse');
+    Ok('genlist: UnitGenListUse loaded', Assigned(LGL));
+    Ok('genlist: no diags at all', Length(LGL.Diags) = 0);
+    Ok('genlist: the with body sees the ELEMENT type, not the open parameter',
+      CrossRefTo(LGL, 'Which', 'Which') and CrossRefTo(LGL, 'Name', 'Name'));
 
     // Three cross-unit with-target shapes, one Ok each — see UNIT_WXUSE for
     // which real VCL unit every one of them comes from.
