@@ -258,6 +258,7 @@ type
       ABare: Boolean = True): TSemaXType;
     function PreferNonGeneric(AId, AMid, ASym,
       ANameNode: Integer): TSemaXType;
+    function TypeSlotByNameX(AMid, ANode: Integer): TSemaXType;
     function IsGenericTypeSym(AMid, ASym: Integer): Boolean;
     function ClassRefTargetX(const AX: TSemaXType): TSemaXType;
     function ResolveTypeExprNested(AId, ANode: Integer): TSemaXType;
@@ -1999,6 +2000,37 @@ begin
   end;
 end;
 
+{ The TYPE named by a declaration's type SLOT, looked up by name: the unit's own
+  interface scope first, then its used units, then the implicit System unit.
+
+  Only reached from SymDeclTypeX after the normal resolution of that slot came
+  back empty, so it is on the error path and its cost does not matter. It must
+  NOT be folded into ResolveTypeExpr: that function is also asked "is this
+  designator a bare type NAME?" (WithTargetTypeX), and answering yes for a VALUE
+  that merely shares a name with a type broke 238 previously-clean units when
+  tried that way. }
+function TPasSemaProject.TypeSlotByNameX(AMid, ANode: Integer): TSemaXType;
+var
+  LSym, LUid, LFound, LAId: Integer;
+  ANameLower: string;
+begin
+  Result := XNil;
+  // Only a plain NAME has anything to look up; a structural slot (array,
+  // pointer, inline record, ...) is not this shape.
+  if FModels[AMid].Tree.Nodes[ANode].Kind <> nkIdent then
+    Exit;
+  ANameLower := FModels[AMid].Tree.NodeNameLower(ANode);
+  LAId := AMid;
+  LSym := FModels[LAId].Resolve(FModels[LAId].InterfaceScope, ANameLower);
+  if (LSym <> NIL_SYM) and
+     (FModels[LAId].Symbols[LSym].Kind in [skType, skBuiltinType]) then
+    Exit(XPlain(LAId, LSym));
+  if (FindInUses(LAId, ANameLower, LUid, LFound) or
+      FindInSystemUnit(ANameLower, LUid, LFound)) and
+     (FModels[LUid].Symbols[LFound].Kind in [skType, skBuiltinType]) then
+    Result := XPlain(LUid, LFound);
+end;
+
 // True when ASym is a GENERIC type. Read straight off the flag CollectTypeDecl
 // set — see sfGeneric for why this is not derived here.
 function TPasSemaProject.IsGenericTypeSym(AMid, ASym: Integer): Boolean;
@@ -2051,6 +2083,11 @@ begin
             Exit(PreferNonGeneric(AId, LExt.UnitId, LExt.Sym, LName));
           Exit(XPlain(LExt.UnitId, LExt.Sym));
         end;
+        // Deliberately NOT falling back to a by-name type lookup here:
+        // ResolveTypeExpr is also asked "is this designator a bare type name?"
+        // (WithTargetTypeX), where answering yes for a VALUE that merely shares
+        // a name with a type is wrong. The type-position fallback lives in
+        // SymDeclTypeX, which is only ever given a declaration's type slot.
       end;
     nkTypeArgs:
       begin
@@ -3775,7 +3812,21 @@ begin
     Exit;
   LM := FModels[AMid];
   if LM.Symbols[ASym].TypeNode <> NIL_NODE then
-    Exit(ResolveTypeExpr(AMid, LM.Symbols[ASym].TypeNode));
+  begin
+    Result := ResolveTypeExpr(AMid, LM.Symbols[ASym].TypeNode);
+    if XValid(Result) then
+      Exit;
+    // A declaration's type slot that resolved to NOTHING, in a position where
+    // only a type is legal. The ordinary cause is a member whose name equals
+    // its own type's — `property Params: Params`, routine in imported
+    // type-library interfaces. Phase 1 resolves that slot inside the struct's
+    // member scope, finds the PROPERTY, and the declared type comes back empty;
+    // every member reached through it is then a false E2003 (11 sites in one
+    // database layer). dcc resolves the TYPE there, so look one up by name —
+    // only here, where the node is known to be a type slot, and only after the
+    // normal path has failed.
+    Exit(TypeSlotByNameX(AMid, LM.Symbols[ASym].TypeNode));
+  end;
   // No type of its own. Only a property redeclaration is expected here; any
   // other typeless symbol simply has no type and XNil is the right answer.
   if LM.Symbols[ASym].Kind <> skProperty then

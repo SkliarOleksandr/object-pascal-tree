@@ -943,6 +943,47 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { A member whose name equals its OWN TYPE's — `property Params: Params`, the
+    routine shape in imported type-library interfaces. Phase 1 resolves that
+    type slot inside the struct's member scope, finds the PROPERTY, and the
+    declared type comes back empty; every member reached through it is then a
+    false E2003. dcc resolves the TYPE there (verified).
+
+    The fallback belongs in the DECLARATION-SLOT path only: folding a by-name
+    type lookup into general type-expression resolution answers "yes, a type"
+    for a VALUE that merely shares a name with one, and that broke 238
+    previously-clean units when tried. }
+  UNIT_SELFTYPED =
+    'unit UnitSelfTyped;'#10'interface'#10 +
+    'type'#10 +
+    '  IElem = interface'#10 +
+    '    function GetT: Integer;'#10 +
+    '    property T: Integer read GetT;'#10 +
+    '  end;'#10 +
+    '  Params = interface'#10 +
+    '    function Get_Item(Index: Integer): IElem;'#10 +
+    '    property Item[Index: Integer]: IElem read Get_Item; default;'#10 +
+    '  end;'#10 +
+    '  IHost = interface'#10 +
+    '    function Get_Params: Params;'#10 +
+    '    property Params: Params read Get_Params;'#10 +   // name = its own type
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
+  UNIT_SELFTYPEDUSE =
+    'unit UnitSelfTypedUse;'#10'interface'#10'uses UnitSelfTyped;'#10 +
+    'procedure Use(const H: IHost);'#10 +
+    'implementation'#10 +
+    'procedure Use(const H: IHost);'#10 +
+    'var'#10 +
+    '  V: Integer;'#10 +
+    'begin'#10 +
+    '  with H.Params[0] do'#10 +
+    '    V := T;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   { An explicit `Self` as the with target's base. Nothing DECLARES Self (11.3.3),
     so RefMap is empty for it and the qualifier typed as nothing — losing the
     whole with scope, and with it every member in the body. Inside a method its
@@ -1408,6 +1449,9 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNABase.pas'), UNIT_NABASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNAUse.pas'), UNIT_NAUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitDlg.pas'), UNIT_DLG);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitSelfTyped.pas'), UNIT_SELFTYPED);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitSelfTypedUse.pas'),
+    UNIT_SELFTYPEDUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitSelfBase.pas'), UNIT_SELFBASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitSelfUse.pas'), UNIT_SELFUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitProcVarBase.pas'),
@@ -1765,6 +1809,13 @@ begin
     Ok('callee-precedence: the call re-points to the inherited METHOD',
       CrossRefCountInUnit(LDlg, 'GetFileNames', 'GetFileNames',
         'unitdlg') >= 1);
+
+    // A member whose name equals its own type's.
+    var LSt := ModelByName('unitselftypeduse');
+    Ok('selftyped: UnitSelfTypedUse loaded', Assigned(LSt));
+    Ok('selftyped: no diags at all', Length(LSt.Diags) = 0);
+    Ok('selftyped: the member types to the TYPE, not to itself',
+      CrossRefTo(LSt, 'T', 'T'));
 
     // An explicit Self as the with target's base.
     var LSlf := ModelByName('unitselfuse');
