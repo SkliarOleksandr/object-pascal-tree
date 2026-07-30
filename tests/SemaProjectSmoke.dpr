@@ -943,6 +943,47 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { A MEMBER whose name is a compiler-seeded BUILTIN. A class with
+    `property Word: string` makes bare `Word` in a descendant's method mean the
+    PROPERTY, not the type — dcc-verified; an inherited member outranks a
+    predefined name exactly as it outranks a unit-level one (12.1.1).
+
+    Phase 1 cannot see it: the member is INHERITED and cross-unit, so only the
+    project's later pass can reach it, and by then the intra-unit TYPER has
+    already judged `ATestWord := Word` as string-vs-Word and emitted E2010. A
+    later pass cannot unsay a diagnostic, so the typer withholds judgement when
+    an operand resolved to a TYPE NAME — that is a mis-binding, not a type
+    mismatch, and dcc has its own errors for a type used as a value. 12 false
+    E2010 on one real code base, every one of them a member named Word. }
+  UNIT_SHADOWBUILTIN =
+    'unit UnitShadowBuiltin;'#10'interface'#10 +
+    'type'#10 +
+    '  TStrategy = class'#10 +
+    '  private'#10 +
+    '    FWord: string;'#10 +
+    '  protected'#10 +
+    '    property Word: string read FWord;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
+  UNIT_SHADOWUSE =
+    'unit UnitShadowUse;'#10'interface'#10'uses UnitShadowBuiltin;'#10 +
+    'type'#10 +
+    '  TNearMiss = class(TStrategy)'#10 +
+    '  public'#10 +
+    '    procedure CheckChangeOneLetter;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TNearMiss.CheckChangeOneLetter;'#10 +
+    'var'#10 +
+    '  ATestWord: string;'#10 +
+    'begin'#10 +
+    '  ATestWord := Word;'#10 +
+    '  if ATestWord = '''' then Exit;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   { A constructor called through a CLASS REFERENCE that is a function RESULT —
     the virtual-constructor factory shape, `with GetPainterClass.Create(...) do`.
     dcc-verified. The qualifier is not a type NAME, so the with-target typer's
@@ -1296,6 +1337,9 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNABase.pas'), UNIT_NABASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNAUse.pas'), UNIT_NAUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitDlg.pas'), UNIT_DLG);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitShadowBuiltin.pas'),
+    UNIT_SHADOWBUILTIN);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitShadowUse.pas'), UNIT_SHADOWUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitCRef.pas'), UNIT_CREF);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitCRefUse.pas'), UNIT_CREFUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArBase.pas'), UNIT_ARBASE);
@@ -1645,6 +1689,13 @@ begin
     Ok('callee-precedence: the call re-points to the inherited METHOD',
       CrossRefCountInUnit(LDlg, 'GetFileNames', 'GetFileNames',
         'unitdlg') >= 1);
+
+    // A member named like a builtin TYPE, inherited and cross-unit.
+    var LShB := ModelByName('unitshadowuse');
+    Ok('shadow-builtin: UnitShadowUse loaded', Assigned(LShB));
+    Ok('shadow-builtin: no bogus E2010 for a member named Word',
+      DiagCount(LShB, 'E2010') = 0);
+    Ok('shadow-builtin: no diags at all', Length(LShB.Diags) = 0);
 
     // A constructor through a class reference that is a function RESULT.
     var LCRf := ModelByName('unitcrefuse');

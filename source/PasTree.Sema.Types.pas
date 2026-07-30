@@ -48,6 +48,7 @@ type
     function MemberResult(N: Integer): Integer;
     procedure Diag(const ACode, AMsg: string; ANode: Integer);
     function Assignable(ADst, ASrc: Integer): Boolean;
+    function IsTypeNameOperand(N: Integer): Boolean;
     procedure CheckAssign(N: Integer);
     function TypeNode(N: Integer): Integer;
     procedure Run;
@@ -603,6 +604,21 @@ begin
     Result := True;
 end;
 
+// True when N is a bare designator that resolved to a TYPE rather than to a
+// value. Deliberately narrow: only an nkIdent bound straight to a type symbol,
+// so a genuine cast (`Byte(I)`, an nkCall) is untouched.
+function TPasSemaTyper.IsTypeNameOperand(N: Integer): Boolean;
+var
+  LSym: Integer;
+begin
+  Result := False;
+  if Kind(N) <> nkIdent then
+    Exit;
+  LSym := M.RefMap[N];
+  Result := (LSym <> NIL_SYM) and
+    (M.Symbols[LSym].Kind in [skType, skBuiltinType]);
+end;
+
 procedure TPasSemaTyper.CheckAssign(N: Integer);
 var
   LDst, LSrc: Integer;
@@ -617,6 +633,18 @@ begin
     Exit;
   // A string literal is char-compatible (C := 'x'); don't flag it.
   if (CatOf(M.ExprType[LDst]) = tcChar) and (Kind(LSrc) = nkStrLit) then
+    Exit;
+  // An operand that resolved to a TYPE NAME is a mis-binding, not a type
+  // mismatch, so this is the wrong diagnostic for it and the numbers say so:
+  // dcc has its own errors for a type used as a value. It happens when a
+  // MEMBER shadows a builtin type name — a class with `property Word: string`
+  // makes bare `Word` in a descendant's method mean the property (dcc-verified),
+  // but Phase 1 sees only the seeded type, because the member is INHERITED and
+  // cross-unit and only the project's later pass can reach it. That pass cannot
+  // unsay a diagnostic this one already emitted, so the judgement has to be
+  // withheld here. 12 false E2010 on one real code base, all of them a member
+  // named `Word`.
+  if IsTypeNameOperand(LDst) or IsTypeNameOperand(LSrc) then
     Exit;
   if not Assignable(M.ExprType[LDst], M.ExprType[LSrc]) then
     Diag('E2010', Format(SE2010_IncompatibleTypes,
