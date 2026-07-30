@@ -71,6 +71,7 @@ interface
 uses
   System.Classes,
   System.SysUtils,
+  System.IOUtils,
   System.Generics.Collections,
   Vcl.Graphics,
   SynFunc,
@@ -119,7 +120,8 @@ type
     FCurTokenAbsIdx: Integer;      // raw token index of the token last reported by Next
     FCurKind: TPasTokenKind;       // kind of the token last reported by Next
     FCurUnterminated: Boolean;     // tfUnterminated on that token
-    FSourceManager: TPasSourceManager; // no search paths — single in-memory buffer
+    FSourceManager: TPasSourceManager; // see SetContext
+    FContextPath: string;          // real path of the displayed file ('' = none)
     FDefines: TPasDefines;         // Win32 platform preset (see EnsureFresh)
     FPreprocessor: TPasPreprocessor;   // reused across EnsureFresh calls
     FHaveAst: Boolean;             // True when FWeakKeywordToken is AST-precise
@@ -207,6 +209,17 @@ type
       from the main form's color combo, shared across every open tab (each
       has its own highlighter instance, so the host broadcasts this to all
       of them on change; see PasTreeDemo.Main.cbHighlightColorChange). }
+    // The real file this buffer came from, plus the project's search paths and
+    // platform. Without them an include directive cannot resolve, and an
+    // include that DEFINES symbols then silently changes which branches look
+    // live: JclBase.pas greyed out SizeInt = Integer under IFDEF CPU32, because
+    // CPU32 comes from jedi.inc, reached through JclBase's own include of
+    // jcl.inc. That disagrees with navigation, which runs on the real analysis
+    // and jumps to that very line -- the editor calling a line dead code right
+    // after navigating to it. Call on tab creation and when the project
+    // changes.
+    procedure SetContext(const AFilePath: string;
+      const ASearchPaths: TArray<string>; APlatform: TPasPlatform);
     procedure SetSameIdentColor(AColor: TColor);
   end;
 
@@ -292,10 +305,10 @@ begin
   for var LWord in PasTree.Types.VISIBILITY_WORDS do
     FWeakKeywords.AddOrSetValue(LWord, True);
 
-  // Full pipeline for AST-precise weak-keyword spans (see unit header). No
-  // search paths: a single in-memory editor buffer has no project context, so
-  // $I includes and unit resolution simply won't resolve — same accepted
-  // scope limit as $IFDEF regions not being greyed out. Reused across every
+  // Full pipeline for AST-precise weak-keyword spans (see unit header).
+  // Starts with NO search paths and a placeholder file name; a host that knows
+  // where the buffer came from calls SetContext and gets working {$I} handling,
+  // and with it correct inactive-region shading. Reused across every
   // EnsureFresh call (ProcessText resets its own per-run state internally).
   FSourceManager := TPasSourceManager.Create([]);
   FDefines := CreatePlatformDefines(pfWin32);
@@ -381,6 +394,31 @@ begin
   FSameIdentSkipTo := ASkipTo;
 end;
 
+procedure TPasTreeSynHighlighter.SetContext(const AFilePath: string;
+  const ASearchPaths: TArray<string>; APlatform: TPasPlatform);
+var
+  LPaths: TArray<string>;
+begin
+  FContextPath := AFilePath;
+  // The file's OWN directory first: an `{$I jcl.inc}` is resolved relative to
+  // the including file before any search path, and that alone fixes the common
+  // case of a unit sitting next to its include.
+  LPaths := ASearchPaths;
+  if AFilePath <> '' then
+    LPaths := [TPath.GetDirectoryName(AFilePath)] + LPaths;
+  FPreprocessor.Free;
+  FSourceManager.Free;
+  FDefines.Free;
+  FSourceManager := TPasSourceManager.Create(LPaths);
+  FDefines := CreatePlatformDefines(APlatform);
+  FPreprocessor := TPasPreprocessor.Create(FSourceManager, FDefines, 37.0,
+    PlatformInfo(APlatform).PointerBytes, PlatformInfo(APlatform).ExtendedBytes);
+  // The cached tokenization was produced under the OLD context; the text has
+  // not changed, so EnsureFresh's text compare would keep it.
+  FCachedSource := #0;
+  FDirty := True;
+end;
+
 procedure TPasTreeSynHighlighter.SetSameIdentColor(AColor: TColor);
 begin
   FSameIdentAttri.Background := AColor;
@@ -430,7 +468,13 @@ begin
   LPreprocessedOk := True;
 
   try
-    LPreprocessed := FPreprocessor.ProcessText('buffer.pas', LText);
+    // The REAL path when the host supplied one (SetContext): `{$I ...}` is
+    // resolved relative to the including file, so a placeholder name silently
+    // loses every include — and with it every symbol an include defines.
+    if FContextPath <> '' then
+      LPreprocessed := FPreprocessor.ProcessText(FContextPath, LText)
+    else
+      LPreprocessed := FPreprocessor.ProcessText('buffer.pas', LText);
     FTokenStream := LPreprocessed.Files[0]; // same TPasTokenStream shape as before
   except
     // Belt-and-suspenders: fall back to a bare lex so line display keeps

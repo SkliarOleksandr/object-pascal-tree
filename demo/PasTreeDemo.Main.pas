@@ -1285,6 +1285,18 @@ begin
   // the active one, so cbHighlighterChange can switch back without recreating it.
   LHL := TPasTreeSynHighlighter.Create(Result);
   LHL.SourceLines := Result.Lines;
+  // Give it the same context the ANALYSIS runs under. Without it the
+  // highlighter preprocesses the buffer under a placeholder name and no search
+  // paths, so every `{$I ...}` fails — and an include that DEFINES symbols then
+  // flips which branches look live. JclBase.pas greyed out `SizeInt = Integer`
+  // under `{$IFDEF CPU32}` (CPU32 comes from jedi.inc via its own
+  // `{$I jcl.inc}`) while ctrl+click navigated to that very line, because
+  // navigation reads the real analysis. Two sources of truth, visibly
+  // disagreeing on the same line.
+  var LHLPlat: TPasPlatform;
+  var LHLPaths, LHLDefines: TArray<string>;
+  if BuildConfig(LHLPlat, LHLPaths, LHLDefines) then
+    LHL.SetContext(APath, LHLPaths, LHLPlat);
   LHL.SetSameIdentColor(FIdentHighlightColor);
   if cbHighlighter.ItemIndex = 0 then
     Result.Highlighter := FSynPasHL

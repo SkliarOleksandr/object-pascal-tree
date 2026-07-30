@@ -11,6 +11,7 @@ program ParserSmoke;
 
 uses
   System.SysUtils,
+  System.IOUtils,
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
@@ -104,6 +105,90 @@ begin
       LPP.Free;
       LDefines.Free;
     end;
+  end;
+end;
+
+{ An include that lives in ANOTHER directory and DEFINES a symbol, guarding a
+  declaration. JclBase.pas's shape exactly: it includes jcl.inc, which sits in
+  source/include rather than beside the unit, and which (through jedi.inc)
+  defines CPU32 -- the symbol guarding SizeInt = Integer.
+
+  Both halves of the context matter, and the test pins both: with NO search path
+  the include cannot resolve and the guarded region is reported SKIPPED — which
+  is what made the demo's highlighter grey out a line its own navigation had
+  just jumped to. With the search path supplied, the region is live.
+
+  The file NAME matters too: an include is resolved relative to the including
+  file, so preprocessing real content under a placeholder name loses even an
+  include sitting right beside it. }
+procedure CheckIncludeContext;
+var
+  LDir, LSub: string;
+  LSM: TPasSourceManager;
+  LDefines: TPasDefines;
+  LPP: TPasPreprocessor;
+  LPre: TPasPreprocessed;
+  LUnitPath: string;
+  LSkippedWith, LSkippedWithout: Boolean;
+
+  // True when the GUARDED line ('SizeInt = Integer') fell in a skipped region.
+  function GuardSkipped(const APaths: TArray<string>;
+    const AName: string): Boolean;
+  var
+    LText: string;
+    LAt: Integer;
+  begin
+    LSM := TPasSourceManager.Create(APaths);
+    LDefines := CreatePlatformDefines(pfWin32);
+    LPP := TPasPreprocessor.Create(LSM, LDefines);
+    try
+      LText := TFile.ReadAllText(LUnitPath);
+      LPre := LPP.ProcessText(AName, LText);
+      LAt := Pos('SizeInt = Integer', LText) - 1;   // 0-based offset
+      Result := LPre.IsSkipped(0, LAt);
+    finally
+      LPP.Free;
+      LDefines.Free;
+      LSM.Free;
+    end;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_incctx');
+  LSub := TPath.Combine(LDir, 'include');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LSub);
+  try
+    TFile.WriteAllText(TPath.Combine(LSub, 'cfg.inc'), '{$DEFINE MYCPU32}'#10);
+    LUnitPath := TPath.Combine(LDir, 'U.pas');
+    TFile.WriteAllText(LUnitPath,
+      'unit U;'#10 +
+      '{$I cfg.inc}'#10 +          // NOT next to U.pas: needs the search path
+      'interface'#10 +
+      'type'#10 +
+      '{$IFDEF MYCPU32}'#10 +
+      '  SizeInt = Integer;'#10 +
+      '{$ENDIF}'#10 +
+      'implementation'#10 +
+      'end.'#10);
+
+    LSkippedWithout := GuardSkipped([], 'buffer.pas');
+    LSkippedWith := GuardSkipped([LSub], LUnitPath);
+
+    if LSkippedWithout and not LSkippedWith then
+      Inc(GPassed)
+    else
+    begin
+      Inc(GFailed);
+      Writeln('FAIL include context drives inactive regions');
+      Writeln('  expected: skipped without context, live with it');
+      Writeln(Format('  actual:   without=%s with=%s',
+        [BoolToStr(LSkippedWithout, True), BoolToStr(LSkippedWith, True)]));
+    end;
+  finally
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
   end;
 end;
 
@@ -278,6 +363,7 @@ begin
     // ---- platform presets: iterate ALL target platforms and verify the
     // define set + SizeOf(Pointer) drive branch selection correctly ----
     CheckAllPlatforms;
+    CheckIncludeContext;
 
     Writeln;
     Writeln(Format('=== ParserSmoke: %d passed, %d failed ===',
