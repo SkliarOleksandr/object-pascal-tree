@@ -203,8 +203,13 @@ begin
       LOwn.AddOrSetValue(LowerCase(LF), True);
 
     Writeln(ErrOutput, '=== ', TPath.GetFileName(APath), ' ===');
-    Writeln(ErrOutput, Format('  platform %s, config %s',
-      [PlatformName(LD.Platform), LD.Config]));
+    // The configuration is not just a label: it decides the defines, the
+    // search paths and (through per-config DCCReference conditions) the file
+    // list. Naming the alternatives makes "why does this project analyze
+    // differently in the IDE" answerable from the report alone.
+    Writeln(ErrOutput, Format('  platform %s, config %s (of %s)',
+      [PlatformName(LD.Platform), LD.Config,
+       string.Join(', ', LD.Configurations)]));
     Writeln(ErrOutput, Format(
       '  %d search path(s), %d define(s), %d namespace(s), %d alias(es)',
       [Length(LPaths), Length(LD.Defines), Length(LD.Namespaces),

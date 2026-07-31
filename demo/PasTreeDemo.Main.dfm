@@ -75,6 +75,15 @@ object frmMain: TfrmMain
         'Win32'
         'Win64')
     end
+    object cbConfig: TComboBox
+      Left = 300
+      Top = 40
+      Width = 100
+      Height = 23
+      Style = csDropDownList
+      TabOrder = 9
+      OnChange = cbConfigChange
+    end
     object cbHighlighter: TComboBox
       Left = 412
       Top = 9

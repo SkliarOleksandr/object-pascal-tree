@@ -75,6 +75,7 @@ type
     btnParse: TButton;
     btnParseRtl: TButton;
     cbPlatform: TComboBox;
+    cbConfig: TComboBox;       // build configuration (Debug/Release/...)
     cbHighlighter: TComboBox;
     cbThreading: TComboBox;    // background-analysis "phase done/total"
     cbHighlightColor: TColorBox; // background color for "same identifier" highlight
@@ -126,6 +127,7 @@ type
     procedure vtMessagesGetText(Sender: TBaseVirtualTree; Node: PVirtualNode;
       Column: TColumnIndex; TextType: TVSTTextType; var CellText: string);
     procedure vtMessagesDblClick(Sender: TObject);
+    procedure cbConfigChange(Sender: TObject);
     procedure cbHighlighterChange(Sender: TObject);
     procedure cbHighlightColorChange(Sender: TObject);
     procedure cbHighlightColorGetColors(Sender: TCustomColorBox; Items: TStrings);
@@ -156,6 +158,12 @@ type
     // project" rather than before it (the open may still fail after parsing).
     FDProjSummary: string;
     FMainSource: string;
+    // The project as OPENED (after the .dpr -> .dproj redirect), so changing
+    // the build configuration can re-open the same thing.
+    FProjectFile: string;
+    // Build configuration chosen in cbConfig; '' = the project's own default.
+    // Reset on every new project, since the names are per-project.
+    FConfigOverride: string;
     FPlatform: TPasPlatform;
     FSynPasHL: TSynPasSyn;   // shared SynEdit built-in highlighter (A/B compare)
     FSemaProject: TPasSemaProject; // kept alive after RunParse (navigation)
@@ -210,6 +218,8 @@ type
     FSettings: TDemoSettings;
     FRecentMenu: TPopupMenu;       // the Open Project split button's drop-down
     FFindBar: TForm;                // floating find toolbar (TFindBar); lazy
+    procedure PopulateConfigCombo;
+    function SelectedConfig: string;
     procedure SetupRecentMenu;
     procedure RecentMenuPopup(Sender: TObject);
     procedure RecentItemClick(Sender: TObject);
@@ -1073,6 +1083,13 @@ begin
     Log('Project not found: ' + AProjectFile);
     Exit;
   end;
+  // A DIFFERENT project drops the chosen configuration: the names are the
+  // project's own, so carrying "Release" into a project that has no such
+  // configuration would silently fall back to its default anyway. Compared
+  // before FProjectFile is reassigned, and against the path as OPENED, so the
+  // re-open cbConfigChange performs keeps the choice it just made.
+  if not SameText(TPath.GetFullPath(AProjectFile), FProjectFile) then
+    FConfigOverride := '';
   ClearMessages;
   // A NEW project starts with a clean slate: no carried-over AST/Semantics
   // dump from whatever was open before.
@@ -1098,7 +1115,9 @@ begin
   if LExt = '.dproj' then
   begin
     FDProj := TPasDProj.Create;
-    if FDProj.Load(LFile) then
+    // FConfigOverride is '' for a fresh open (the project's own default) and
+    // set only when cbConfig re-opens the SAME project — see cbConfigChange.
+    if FDProj.Load(LFile, '', FConfigOverride) then
     begin
       FPlatform := FDProj.Platform;
       FMainSource := FDProj.MainSource;
@@ -1134,6 +1153,8 @@ begin
   else
     cbPlatform.ItemIndex := 0;
   end;
+  FProjectFile := LFile;
+  PopulateConfigCombo;
 
   Caption := 'PasTree Demo — ' + TPath.GetFileName(LFile);
   // Remembered here, at the one point every route into a project passes
@@ -1152,8 +1173,12 @@ begin
   // Kick off the background analysis (non-blocking); it populates navigation
   // and (if chkShowErrors is checked) the error list when it finishes. The
   // open main file is front-loaded so it is ready first.
+  // The configuration is named here and not only in the .dproj summary line,
+  // because a bare .dpr has no summary line and still has a configuration —
+  // it is what decides whether DEBUG is defined.
   Log('Analyzing ' + TPath.GetFileName(FMainSource) + ' in ' + FProjectDir +
-    ' (' + cbPlatform.Text + ') in the background...');
+    ' (' + cbPlatform.Text + ', ' + SelectedConfig +
+    ') in the background...');
   // The TOTAL search-path set, not just the .dproj's own: the rest comes from
   // the IDE's registry library/browsing paths (ExtraSearchPaths), and that set
   // is what decides how much of the `uses` graph resolves — so how many units
@@ -1483,7 +1508,15 @@ begin
   else
   begin
     ASearchPaths := [FProjectDir];
-    ADefines := [];
+    // No .dproj to read the configuration's defines from, so synthesize the
+    // one that matters: the IDE's stock Debug configuration defines DEBUG and
+    // Release does not, and real code branches on it (`{$IFDEF DEBUG}
+    // FastMM4,` in a project's own uses clause). Without this the combo would
+    // be decoration for a bare .dpr.
+    if SameText(SelectedConfig, 'Debug') then
+      ADefines := ['DEBUG']
+    else
+      ADefines := [];
   end;
   ASearchPaths := ASearchPaths + ExtraSearchPaths;   // System.* -> RTL sources
   Result := True;
@@ -1903,6 +1936,73 @@ begin
   ClearLink;                        // the stale model no longer matches the text
   FReparseTimer.Enabled := False;
   FReparseTimer.Enabled := True;
+end;
+
+{ build configuration }
+
+const
+  // What the IDE's own project template offers, and the only two names that
+  // mean anything without a .dproj to read them from.
+  DEFAULT_CONFIGS: array[0..1] of string = ('Debug', 'Release');
+
+{ Fills cbConfig for the project just opened and selects the active one.
+
+  With a .dproj, the names come from the project — a real one rarely stops at
+  Debug/Release, and a name we invented would silently evaluate to the
+  project's fallback instead. `Base` is dropped: it is the shared parent every
+  configuration inherits from, not something you build. }
+procedure TfrmMain.PopulateConfigCombo;
+var
+  LName: string;
+  LIdx: Integer;
+begin
+  cbConfig.Items.BeginUpdate;
+  try
+    cbConfig.Items.Clear;
+    if Assigned(FDProj) and (Length(FDProj.Configurations) > 0) then
+    begin
+      for LName in FDProj.Configurations do
+        if not SameText(LName, 'Base') then
+          cbConfig.Items.Add(LName);
+    end;
+    // No .dproj, or one that declares nothing usable.
+    if cbConfig.Items.Count = 0 then
+      for LName in DEFAULT_CONFIGS do
+        cbConfig.Items.Add(LName);
+  finally
+    cbConfig.Items.EndUpdate;
+  end;
+  // The one actually in effect: what the .dproj resolved to, else Debug.
+  LIdx := -1;
+  if Assigned(FDProj) and (FDProj.Config <> '') then
+    LIdx := cbConfig.Items.IndexOf(FDProj.Config);
+  if LIdx < 0 then
+    LIdx := cbConfig.Items.IndexOf(DEFAULT_CONFIGS[0]);
+  if LIdx < 0 then
+    LIdx := 0;
+  // Assigning ItemIndex does NOT fire OnChange, so this cannot re-enter
+  // OpenProject through the handler below.
+  cbConfig.ItemIndex := LIdx;
+end;
+
+// The active configuration name, whatever the project turned out to be.
+function TfrmMain.SelectedConfig: string;
+begin
+  if cbConfig.ItemIndex >= 0 then
+    Result := cbConfig.Items[cbConfig.ItemIndex]
+  else
+    Result := DEFAULT_CONFIGS[0];
+end;
+
+procedure TfrmMain.cbConfigChange(Sender: TObject);
+begin
+  if FProjectFile = '' then
+    Exit;
+  // Re-OPEN rather than just re-analyze: a configuration changes the defines,
+  // the search paths and — through per-config DCCReference conditions — the
+  // file list itself, so nothing short of reading the .dproj again is honest.
+  FConfigOverride := SelectedConfig;
+  OpenProject(FProjectFile);
 end;
 
 { recent projects — the Open Project split button's drop-down }
