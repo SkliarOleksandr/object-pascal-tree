@@ -1675,11 +1675,16 @@ begin
     nkIdent:
       if not FIsDeclName[ANode] and (FModel.RefMap[ANode] = NIL_SYM) then
       begin
-        FModel.RefMap[ANode] :=
-          FModel.Resolve(FNodeScope[ANode], NodeNameLower(ANode));
+        // ResolveAt, not Resolve: this is a REFERENCE, and an inline
+        // `var`/`const` is visible only from its own declaration onward
+        // (3.1.3). See TPasSemaModel.ResolveAt — the position is only
+        // consulted for block scopes, so a routine's classic `var` section and
+        // everything above it stay order-independent.
+        FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],
+          NodeNameLower(ANode), FTree.Nodes[ANode].FirstToken);
         if (FModel.RefMap[ANode] = NIL_SYM) and IsAttributeTypeRef(ANode) then
-          FModel.RefMap[ANode] := FModel.Resolve(FNodeScope[ANode],
-            NodeNameLower(ANode) + 'attribute');
+          FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],
+            NodeNameLower(ANode) + 'attribute', FTree.Nodes[ANode].FirstToken);
       end;
 
     nkMethodResolution:

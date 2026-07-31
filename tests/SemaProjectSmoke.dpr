@@ -897,6 +897,35 @@ const
     take it (TFallback, used by a field afterwards). The third asks the
     question the other way round. Answering a flat False, as the first pass
     must, gets the first two wrong and the last two right. }
+  { Inline var visibility is POSITIONAL (3.1.3): visible from its declaration
+    to the end of the enclosing block, and NOT above it.
+
+    Written so a wrong binding is a TYPE error rather than nothing: the outer
+    `GName` is a string and the inline one an Integer, so binding the earlier
+    reference to the inline declaration — which is what a plain block scope
+    does — silently loses the E2010 that dcc reports there. That asymmetry is
+    the only observable difference; a wrong binding costs no diagnostic of its
+    own, which is exactly why this survived a zero-false-positive corpus.
+
+    The second half is the rule that must NOT break: a routine's classic `var`
+    section stays order-independent, so `LI` is visible above its own
+    declaration in the sense that matters (it is declared before the body). }
+  UNIT_INLINEPOS =
+    'unit UnitInlinePos;'#10'interface'#10 +
+    'procedure Use;'#10 +
+    'implementation'#10 +
+    'var'#10 +
+    '  GName: string;'#10 +
+    'procedure Use;'#10 +
+    'var'#10 +
+    '  LI: Integer;'#10 +
+    'begin'#10 +
+    '  LI := GName;'#10 +              // the unit-level STRING -> E2010
+    '  var GName: Integer := 0;'#10 +
+    '  LI := GName;'#10 +              // the inline INTEGER -> fine
+    'end;'#10 +
+    'end.'#10;
+
   { An interface's IMPLICIT ancestor (14.1.1). A heritage-less interface still
     descends from IInterface, so QueryInterface/_AddRef/_Release are reachable
     on any value of that type — the member walk has to make that hop the way it
@@ -1916,6 +1945,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitPOUse.pas'), UNIT_POUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitSABase.pas'), UNIT_SABASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitSAUse.pas'), UNIT_SAUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitInlinePos.pas'), UNIT_INLINEPOS);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitIfaceBase.pas'), UNIT_IFACEBASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitIfaceRoot.pas'), UNIT_IFACEROOT);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitDclBase.pas'), UNIT_DCLBASE);
@@ -2366,6 +2396,15 @@ begin
     Ok('selfarity: no diags at all', Length(LSA.Diags) = 0);
     Ok('selfarity: an impl-section alias does not shadow its own generic',
       CrossRefTo(LSA, 'Control', 'Control'));
+
+    // Inline var visibility is positional: the reference ABOVE the inline
+    // declaration must still see the unit-level string.
+    var LIP := ModelByName('unitinlinepos');
+    Ok('inlinepos: UnitInlinePos loaded', Assigned(LIP));
+    Ok('inlinepos: the reference above the inline decl binds the OUTER name',
+      DiagCount(LIP, 'E2010') = 1);
+    Ok('inlinepos: no undeclared identifiers', DiagCount(LIP, 'E2003') = 0);
+    Ok('inlinepos: and no false redeclaration', DiagCount(LIP, 'E2004') = 0);
 
     // A heritage-less interface still reaches IInterface's own members.
     var LIR := ModelByName('unitifaceroot');

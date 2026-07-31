@@ -183,6 +183,11 @@ type
     function FindLocalDeep(AScope: Integer; const ANameLower: string): Integer;
     // Full lookup: self -> additional (reverse) -> parent -> ...
     function Resolve(AScope: Integer; const ANameLower: string): Integer;
+    { Resolve honouring block-scope POSITION — see the implementation. Only a
+      reference lookup passes a real AAtToken; everything else passes -1. }
+    function ResolveAt(AScope: Integer; const ANameLower: string;
+      AAtToken: Integer): Integer;
+    function DeclaredAfter(ASym, AAtToken: Integer): Boolean;
     { True when ANode sits in the BODY of a `with` listed in WithUnopened —
       see that field. An identifier inside a with's own TARGET expression is
       NOT in its scope (the target is evaluated in the enclosing one), hence
@@ -361,6 +366,26 @@ end;
 
 function TPasSemaModel.Resolve(AScope: Integer;
   const ANameLower: string): Integer;
+begin
+  Result := ResolveAt(AScope, ANameLower, -1);
+end;
+
+{ Resolve, but honouring the one scope kind whose names are visible only from
+  their declaration onward: a BLOCK, where inline `var`/`const` live (3.1.3 —
+  "visible from its declaration to the end of the enclosing block").
+
+  Everything else stays order-independent, and deliberately: a routine's classic
+  `var` section, a unit section and a struct's members are all visible
+  throughout regardless of where the reference sits.
+
+  AAtToken is the referring node's own first VISIBLE-stream index, which is
+  monotonic in source order across include boundaries — that is what the
+  visible stream is for — so comparing it against the declaration's is the
+  whole test. Pass -1 to skip the check, which is what every lookup that is not
+  resolving a reference does (a declaration completing a forward, a qualified
+  segment, the aggregate walk). }
+function TPasSemaModel.ResolveAt(AScope: Integer; const ANameLower: string;
+  AAtToken: Integer): Integer;
 var
   LCur: Integer;
 begin
@@ -369,10 +394,32 @@ begin
   begin
     Result := FindLocalDeep(LCur, ANameLower);
     if Result <> NIL_SYM then
-      Exit;
+    begin
+      if (AAtToken < 0) or (Scopes[LCur].Kind <> sckBlock) or
+         not DeclaredAfter(Result, AAtToken) then
+        Exit;
+      // Declared BELOW the reference: not in scope yet, so keep walking
+      // outward. Without this the inline declaration captured references
+      // above it — a WRONG binding rather than a missing one, so it cost no
+      // diagnostic and sent go-to-declaration to the wrong line.
+    end;
     LCur := Scopes[LCur].Parent;
   end;
   Result := NIL_SYM;
+end;
+
+// Is ASym's declaration positioned after AAtToken in the visible stream?
+function TPasSemaModel.DeclaredAfter(ASym, AAtToken: Integer): Boolean;
+var
+  LDecl: Integer;
+begin
+  Result := False;
+  if (ASym = NIL_SYM) or (ASym > High(Symbols)) then
+    Exit;
+  LDecl := Symbols[ASym].DeclNode;
+  if (LDecl = NIL_NODE) or (LDecl > High(Tree.Nodes)) then
+    Exit;
+  Result := Tree.Nodes[LDecl].FirstToken > AAtToken;
 end;
 
 function TPasSemaModel.InUnopenedWithBody(ANode: Integer): Boolean;
