@@ -241,10 +241,23 @@ begin
       for LFile in LListings[LIdx] do
         FSearchIndex.TryAdd(LowerCase(TPath.GetFileName(LFile)), LFile);
   end;
-  if DirIndex(AFromDir).TryGetValue(LowerCase(AUnitName) + '.pas',
-     AResolved) then
+  // SEARCH PATHS FIRST, referring directory only as a fallback. dcc-verified,
+  // and the order matters more than it looks: with `b.pas` and `c.pas` sitting
+  // together in one directory and ANOTHER `c.pas` earlier on the search path,
+  // dcc compiles b against the search-path one — the importer's own directory
+  // carries no priority at all. This is how a project SHADOWS a third-party
+  // unit: it drops a patched copy into its own tree and puts that directory
+  // first. Probing the referring directory first quietly undid that, and the
+  // patched member then read as undeclared at every use — reported, of course,
+  // in the patched file itself, three units away from the actual mistake.
+  //
+  // The fallback stays because it is strictly more tolerant than dcc: a unit
+  // reached from a directory NOBODY listed is an F1027 for dcc, and an F1027
+  // here GATES its importers' diagnostics rather than reporting them.
+  if FSearchIndex.TryGetValue(LowerCase(AUnitName) + '.pas', AResolved) then
     Exit(True);
-  Result := FSearchIndex.TryGetValue(LowerCase(AUnitName) + '.pas', AResolved);
+  Result := DirIndex(AFromDir).TryGetValue(LowerCase(AUnitName) + '.pas',
+    AResolved);
 end;
 
 function TPasSourceManager.ResolveUnit(const AUnitName, AInPath, AFromFile: string;
@@ -288,8 +301,8 @@ begin
   if (FAliases <> nil) and FAliases.TryGetValue(LowerCase(AUnitName), LCand) then
     LUnitName := LCand;
 
-  // 3. As spelled: <dotted>.pas relative to the referring file, then the
-  // search paths.
+  // 3. As spelled: <dotted>.pas on the search paths, then — beyond what dcc
+  // accepts — relative to the referring file. See FindUnitFile for the order.
   if FindUnitFile(LUnitName, LDir, AResolved) then
     Exit(True);
 
