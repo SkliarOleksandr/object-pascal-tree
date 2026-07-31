@@ -218,8 +218,17 @@ type
     // and jumps to that very line -- the editor calling a line dead code right
     // after navigating to it. Call on tab creation and when the project
     // changes.
+    //
+    // ADefines is the same list: the PROJECT's own DCC_Define set for the
+    // active build configuration, on top of the platform preset. Without it
+    // the platform symbols are all the highlighter knows, so `{$IFDEF DEBUG}
+    // FastMM4,` in a project's own uses clause greys out while the analysis —
+    // which HAS the project's defines — treats it as live. Same two-sources-
+    // of-truth disagreement as the include case above, from the other
+    // direction, and just as visible: the greyed line is the second one on
+    // screen when the project opens.
     procedure SetContext(const AFilePath: string;
-      const ASearchPaths: TArray<string>; APlatform: TPasPlatform);
+      const ASearchPaths, ADefines: TArray<string>; APlatform: TPasPlatform);
     procedure SetSameIdentColor(AColor: TColor);
   end;
 
@@ -395,9 +404,10 @@ begin
 end;
 
 procedure TPasTreeSynHighlighter.SetContext(const AFilePath: string;
-  const ASearchPaths: TArray<string>; APlatform: TPasPlatform);
+  const ASearchPaths, ADefines: TArray<string>; APlatform: TPasPlatform);
 var
   LPaths: TArray<string>;
+  LName: string;
 begin
   FContextPath := AFilePath;
   // The file's OWN directory first: an `{$I jcl.inc}` is resolved relative to
@@ -411,6 +421,10 @@ begin
   FDefines.Free;
   FSourceManager := TPasSourceManager.Create(LPaths);
   FDefines := CreatePlatformDefines(APlatform);
+  // Added, not substituted: the project's defines sit ON TOP of the platform
+  // preset, which is the order TPasSemaProject uses too.
+  for LName in ADefines do
+    FDefines.Define(LName);
   FPreprocessor := TPasPreprocessor.Create(FSourceManager, FDefines, 37.0,
     PlatformInfo(APlatform).PointerBytes, PlatformInfo(APlatform).ExtendedBytes);
   // The cached tokenization was produced under the OLD context; the text has

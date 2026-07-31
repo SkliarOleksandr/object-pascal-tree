@@ -214,6 +214,11 @@ begin
       '  %d search path(s), %d define(s), %d namespace(s), %d alias(es)',
       [Length(LPaths), Length(LD.Defines), Length(LD.Namespaces),
        Length(LD.UnitAliases)]));
+    // NAMED, not just counted. These decide which branches are live, so "4
+    // define(s)" is exactly the wrong amount of detail when a line is greying
+    // out and you want to know whether DEBUG is among them. Short by nature.
+    if Length(LD.Defines) > 0 then
+      Writeln(ErrOutput, '    defines: ', string.Join(';', LD.Defines));
     Writeln(ErrOutput, Format('  %d project file(s)', [Length(LD.Files)]));
     if GStudio = '' then
       Writeln(ErrOutput,

@@ -218,6 +218,9 @@ type
     FSettings: TDemoSettings;
     FRecentMenu: TPopupMenu;       // the Open Project split button's drop-down
     FFindBar: TForm;                // floating find toolbar (TFindBar); lazy
+    procedure ApplyHighlighterContext(AHL: TPasTreeSynHighlighter;
+      const APath: string);
+    procedure CloseAllTabs;
     procedure PopulateConfigCombo;
     function SelectedConfig: string;
     procedure SetupRecentMenu;
@@ -1091,6 +1094,10 @@ begin
   if not SameText(TPath.GetFullPath(AProjectFile), FProjectFile) then
     FConfigOverride := '';
   ClearMessages;
+  // Including the tabs: a source tab belongs to the project it was opened
+  // under, both in what it shows and in the context it paints with. See
+  // CloseAllTabs.
+  CloseAllTabs;
   // A NEW project starts with a clean slate: no carried-over AST/Semantics
   // dump from whatever was open before.
   tsJson.TabVisible := False;
@@ -1346,10 +1353,7 @@ begin
   // `{$I jcl.inc}`) while ctrl+click navigated to that very line, because
   // navigation reads the real analysis. Two sources of truth, visibly
   // disagreeing on the same line.
-  var LHLPlat: TPasPlatform;
-  var LHLPaths, LHLDefines: TArray<string>;
-  if BuildConfig(LHLPlat, LHLPaths, LHLDefines) then
-    LHL.SetContext(APath, LHLPaths, LHLPlat);
+  ApplyHighlighterContext(LHL, APath);
   LHL.SetSameIdentColor(FIdentHighlightColor);
   if cbHighlighter.ItemIndex = 0 then
     Result.Highlighter := FSynPasHL
@@ -1936,6 +1940,39 @@ begin
   ClearLink;                        // the stale model no longer matches the text
   FReparseTimer.Enabled := False;
   FReparseTimer.Enabled := True;
+end;
+
+{ highlighter context }
+
+// The context a tab's highlighter must preprocess under: exactly what the
+// ANALYSIS runs with, from the one function that computes it.
+procedure TfrmMain.ApplyHighlighterContext(AHL: TPasTreeSynHighlighter;
+  const APath: string);
+var
+  LPlat: TPasPlatform;
+  LPaths, LDefines: TArray<string>;
+begin
+  if BuildConfig(LPlat, LPaths, LDefines) then
+    AHL.SetContext(APath, LPaths, LDefines, LPlat);
+end;
+
+{ Closes every source tab.
+
+  Called when a project is (re-)opened, and that is the whole reason it exists:
+  a tab carries a preprocessing context — search paths, defines, platform —
+  fixed when it was created. Keeping tabs across an open leaves them painting
+  under the PREVIOUS project's context, or the previous build configuration's,
+  which is visible as the wrong branches greyed out. Re-applying the context to
+  survivors would fix the colours and still leave files from a project that is
+  no longer open sitting in the tab strip. }
+procedure TfrmMain.CloseAllTabs;
+var
+  LIdx: Integer;
+begin
+  ClearLink;   // FLinkTab is about to be freed
+  for LIdx := FOpenFiles.Count - 1 downto 0 do
+    TSourceTab(FOpenFiles.Objects[LIdx]).Free;
+  FOpenFiles.Clear;
 end;
 
 { build configuration }
