@@ -248,6 +248,31 @@ usable.
 
 Still open, roughly in the order we're tackling it:
 
+- **An interface's implicit `IInterface` ancestor is not walked — a FALSE
+  POSITIVE.** The only one either audit pass has produced, so it goes first.
+  14 §14.1.1 already states the rule ("Default ancestor is `IInterface`
+  (≡ `IUnknown`)"); `FindMemberX`'s `nkInterfaceType` path deliberately stops at
+  an interface with no heritage clause, on the reasoning that an interface's
+  members "have to be implemented by the class anyway". That is true of a
+  CLASS's implemented-interface list, which is the entry beside it, and false
+  of a value of interface TYPE.
+
+  dcc-verified: `IFoo = interface procedure Go; end;` then
+  `with I do QueryInterface(G, O)` compiles for dcc and is `E2003
+  Undeclared identifier: 'QueryInterface'` for us. Same for `_AddRef` /
+  `_Release`, and it costs navigation to those members everywhere, not just the
+  `with` form. Invisible on the corpora because the RTL calls them through
+  `Supports`/`as` rather than by name. The fix is the hop the branch above it
+  already makes for `TObject` — redirect to the real `IInterface` and continue
+  — with the same self-reference guard so `IInterface` itself terminates.
+- **Unresolved MEMBERS after a dot are never reported.** `O.Read` where the
+  class has no `Read` is `E2003` for dcc and silence for us; only unresolved
+  BARE identifiers are diagnosed. That is defensible while the member walk is
+  still gaining branches — a false E2003 on a member is worse than a missing
+  one — but it means the corpora say nothing about member-lookup completeness,
+  which is precisely where the audit found the `IInterface` hole. Worth
+  enabling behind a flag first and measuring against the corpora before it
+  becomes a real diagnostic.
 - **Inline `var`/`const` visibility is not POSITIONAL** — found by the
   spec↔code audit of 2026-07-31, and the only *wrong-binding* defect it turned
   up. 3 §3.1.3: an inline variable is visible "from its declaration to the end
@@ -300,13 +325,33 @@ Still open, roughly in the order we're tackling it:
   - multiline-string indentation (B §B.6.3): the lexer finds the terminator but
     does not treat the closing line's indentation as the base, so an
     under-indented content line is not an error.
+- **Three rules the CODE implements that the SPEC never states** — pass 2's
+  yield. Each is a branch that exists because a real corpus needed it, so each
+  is a language fact the spec is currently missing; none is a defect in the
+  code. Writing them up is the fix:
+  - *Helper inheritance* (15 §15.4). `FindMemberX` walks a helper's ancestor
+    helpers, and the chapter never mentions that a helper may have one. It also
+    never states the asymmetry, which is dcc-verified: a CLASS helper may name
+    an ancestor (`class helper(TBaseH) for TThing`), a RECORD helper may not —
+    `record helper(TBaseH) for TThing` is `E2029 ',' or ':' expected`.
+  - *Nested inline dynamic arrays* (8 §8.2.1). §8.1.2 states the
+    `array[A, B]` ≡ `array[A] of array[B]` sugar and the `M[i, j]` ≡ `M[i][j]`
+    normalisation for STATIC arrays only. Both hold for `array of array of T`
+    too — dcc-verified, `A[0][1]` and `A[1, 2]` alike — and the element walk
+    has a branch for exactly that.
+  - *A member whose name equals its own type's name* (13 §13.1.1 / 3 §3.1.1).
+    `Params: Params` resolves the type slot to the TYPE even though a member of
+    that name is nearer; dcc-verified. The code needs `TypeSlotByNameX` for it
+    and it fixed 11 real sites in one database layer, but no chapter says a
+    declaration's type slot is resolved differently from an ordinary reference.
 - **Audit coverage, so the next pass knows where to start.** The 2026-07-31
-  sweep ran pass 1 of the three in the audit-method note — spec → code, for
-  every chapter — plus targeted `dcc` probes where a rule looked unimplemented.
-  Pass 2 (code → spec: for each BRANCH the code has, check the spec names it)
-  was run for §5.7 only, back on 2026-07-30. It is the pass that found seven
-  undocumented `with` facts, so it is the one most likely to pay again;
-  chapters 11–16 have the most branches and the least of it.
+  sweep ran pass 1 (spec → code) over every chapter and pass 2 (code → spec)
+  over the member-lookup, property, interface, helper, array and generic
+  machinery, with `dcc` probes for anything either side left unstated. What
+  pass 2 has still NOT covered: the parser's own branch set (appendix B and the
+  statement/declaration grammar), the preprocessor's, and the typer's —
+  `PasTree.Sema.Types` in particular has never been read against ch.02 §2.6.1,
+  which is where the assignment-compatibility contract lives.
 
 - ~~**One cross-model expression typer, not two.**~~ **Tried on 2026-07-29 and
   rejected on measurement — do not repeat it hoping for a different answer.**
