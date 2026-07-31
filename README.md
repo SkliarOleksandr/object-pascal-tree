@@ -248,6 +248,66 @@ usable.
 
 Still open, roughly in the order we're tackling it:
 
+- **Inline `var`/`const` visibility is not POSITIONAL** — found by the
+  spec↔code audit of 2026-07-31, and the only *wrong-binding* defect it turned
+  up. 3 §3.1.3: an inline variable is visible "from its declaration to the end
+  of the enclosing block", so the resolver "must track declaration order, not
+  just the block". `TPasSemaResolver.Collect`'s `nkBlock` case gives each
+  `begin..end` its own scope — which correctly stops sibling blocks colliding —
+  but inside one block a name is visible ABOVE its own declaration.
+
+  dcc-verified probe: a unit-level `GName: string`, then in a body
+  `LI := GName;` followed by `var GName: Integer := 0;`. dcc binds the first
+  reference to the unit-level string and reports `E2010`; we bind it to the
+  inline `Integer` and report nothing.
+
+  It is worth fixing despite costing no false positive, for the reason the
+  audit-method note gives: a WRONG binding is invisible to a diagnostic count.
+  Here it also sends ctrl+click to the wrong declaration, which is a headline
+  feature of the demo. The fix needs a position on the symbol and a
+  position-aware lookup for `sckBlock` scopes only — the for-header exception
+  (§5.5.1) must keep working, and classic `var` sections must stay
+  order-independent.
+- **Member visibility is parsed, never recorded, never enforced.**
+  `TSemaSymbol.Visibility` exists and is only ever assigned `svDefault`; the
+  resolver's `Collect` skips `nkVisibility` with `; // no names`. So the whole
+  of 11 §11.2.1 is unimplemented: the unit-level "friend" rule, `strict
+  private`/`strict protected`, and with them every `E2361 Cannot access private
+  symbol`. `FindMemberX` says so in a comment ("Visibility is not filtered
+  here").
+
+  Costs no false positives, and two rules currently come out RIGHT by accident
+  because of it — the enum-value leak out of a `private` nested type (2 §2.2.4)
+  and helper activation ignoring `strict private` (15 §15.4). Both would have
+  to be preserved as deliberate exceptions by whoever implements this, not
+  rediscovered. Recording the visibility (cheap, one field at collect time) is
+  worth doing on its own even before anything enforces it: navigation and a
+  future Find References both want it.
+- **Missing semantic CHECKS the spec names, none of which can produce a false
+  positive** — collected here rather than as separate items because they share
+  a shape: we accept code dcc rejects. In rough order of how often the shape
+  occurs:
+  - no "ordinal type required" check anywhere (2 §2.1.1/§2.2.5): a sparse
+    (explicit-valued) enum as an array index type, `set of` base, `case`
+    selector or `for` counter is accepted;
+  - `set of` base-type limit of 256 values / ordinals in `0..255` (2 §2.4.1);
+  - conditions are not required to be Boolean (2 §2.2.2) — no rejection of an
+    integer in an `if`/`while`/`until` guard;
+  - assigning to a `for` counter inside the body (5 §5.5.1, dcc `E2081`);
+  - bare `raise` outside an exception handler (18 §18.3.1) — needs handler
+    context, which nothing tracks;
+  - `Slice` outside an open-array argument position (4 §4.11);
+  - multiline-string indentation (B §B.6.3): the lexer finds the terminator but
+    does not treat the closing line's indentation as the base, so an
+    under-indented content line is not an error.
+- **Audit coverage, so the next pass knows where to start.** The 2026-07-31
+  sweep ran pass 1 of the three in the audit-method note — spec → code, for
+  every chapter — plus targeted `dcc` probes where a rule looked unimplemented.
+  Pass 2 (code → spec: for each BRANCH the code has, check the spec names it)
+  was run for §5.7 only, back on 2026-07-30. It is the pass that found seven
+  undocumented `with` facts, so it is the one most likely to pay again;
+  chapters 11–16 have the most branches and the least of it.
+
 - ~~**One cross-model expression typer, not two.**~~ **Tried on 2026-07-29 and
   rejected on measurement — do not repeat it hoping for a different answer.**
 
