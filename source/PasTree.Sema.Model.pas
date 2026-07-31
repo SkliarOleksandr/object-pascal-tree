@@ -68,8 +68,9 @@ type
     UnitId: Integer;   // resolved project model id; NIL_SYM if unresolved
   end;
 
+  // Appended, never reordered: svAutomated last so existing ordinals hold.
   TSemaVisibility = (svDefault, svStrictPrivate, svPrivate, svStrictProtected,
-    svProtected, svPublic, svPublished);
+    svProtected, svPublic, svPublished, svAutomated);
 
   // Type category (mirrors DelphiAST TDataTypeID groupings) — set on
   // skType/skBuiltinType symbols; drives assignment/operator checks.

@@ -48,6 +48,15 @@ begin
       Inc(Result);
 end;
 
+// The recorded visibility of the first symbol with that lower-cased name.
+function VisOf(const ANameLower: string): TSemaVisibility;
+begin
+  Result := svDefault;
+  for var LIdx := 0 to GModel.SymCount - 1 do
+    if GModel.Symbols[LIdx].NameLower = ANameLower then
+      Exit(GModel.Symbols[LIdx].Visibility);
+end;
+
 function HasSym(const AName: string; AKind: TSemaSymbolKind): Boolean;
 begin
   Result := SymCountOf(LowerCase(AName), AKind) > 0;
@@ -1498,6 +1507,63 @@ begin
     end;
   end;
 
+
+  // ---- member visibility is RECORDED (11.2.1) ----
+  // Recording only: nothing enforces it yet, so this pins the data and, just
+  // as importantly, the two rules that currently come out RIGHT because the
+  // resolver ignores visibility and must keep doing so.
+  Analyze(
+    'unit u;'#10'interface'#10'type'#10 +
+    '  TThing = class'#10 +
+    '    FBeforeAny: Integer;'#10 +          // no section marker yet
+    '  strict private'#10 +
+    '    FStrictPriv: Integer;'#10 +
+    '  private'#10 +
+    '    FPriv: Integer;'#10 +
+    '    type TInner = (ivOne, ivTwo);'#10 + // enum VALUES must still leak out
+    '  strict protected'#10 +
+    '    FStrictProt: Integer;'#10 +
+    '  protected'#10 +
+    '    FProt: Integer;'#10 +
+    '  public'#10 +
+    '    FPub, FPub2: Integer;'#10 +         // one child, two symbols
+    '    procedure M;'#10 +
+    '  published'#10 +
+    '    property P: Integer read FPriv;'#10 +
+    '  automated'#10 +
+    '    FAuto: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure Use;'#10 +
+    'var'#10 +
+    '  E: Integer;'#10 +
+    'begin'#10 +
+    '  E := Ord(ivOne);'#10 +                // bare value from a PRIVATE nested type
+    'end;'#10 +
+    'procedure TThing.M; begin end;'#10 +
+    'end.'#10);
+  Ok('vis: before any section marker stays svDefault',
+    VisOf('fbeforeany') = svDefault);
+  Ok('vis: strict private', VisOf('fstrictpriv') = svStrictPrivate);
+  Ok('vis: private', VisOf('fpriv') = svPrivate);
+  Ok('vis: strict protected', VisOf('fstrictprot') = svStrictProtected);
+  Ok('vis: protected', VisOf('fprot') = svProtected);
+  Ok('vis: public', VisOf('fpub') = svPublic);
+  Ok('vis: every name of a multi-name field group, not just the first',
+    VisOf('fpub2') = svPublic);
+  Ok('vis: a method too', VisOf('m') = svPublic);
+  Ok('vis: published property', VisOf('p') = svPublished);
+  Ok('vis: legacy automated is kept distinct from published',
+    VisOf('fauto') = svAutomated);
+  // The two accidental-correct rules. Enforcement must preserve both: 2.2.4
+  // says a nested enum's VALUES leak into the enclosing section regardless of
+  // the enum's or its container's visibility (dcc-verified), and the nested
+  // TYPE name is itself private.
+  Ok('vis: the nested type name carries its section''s visibility',
+    VisOf('tinner') = svPrivate);
+  Ok('vis: ...but its VALUES still resolve bare from outside the class',
+    RefResolvesTo('ivOne', 'ivOne') and (DiagCount('E2003') = 0));
+  GModel.Free;
   Writeln(Format('=== SemaSmoke: %d passed, %d failed ===', [GPassed, GFailed]));
   if GFailed > 0 then
     ExitCode := 1;

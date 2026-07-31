@@ -96,6 +96,7 @@ type
     procedure CollectTypeDecl(ANode, AScope: Integer);
     function DeclareAnonStruct(AScope, ANode: Integer): Integer;
     procedure CollectStruct(ANode, AOuter, ATypeSym: Integer);
+    function VisibilityOf(ANode: Integer): TSemaVisibility;
     procedure CollectEnum(ANode, AOuter, ATypeSym: Integer);
     procedure CollectVariantPart(ANode, AScope: Integer);
     procedure CollectUsesItem(AItem, AScope: Integer);
@@ -614,7 +615,8 @@ end;
 
 procedure TPasSemaResolver.CollectStruct(ANode, AOuter, ATypeSym: Integer);
 var
-  LMembers, LChild: Integer;
+  LMembers, LChild, LFirstNew: Integer;
+  LVis: TSemaVisibility;
 begin
   LMembers := FModel.AddScope(sckStruct, AOuter, ANode);
   FNodeScope[ANode] := LMembers;
@@ -643,14 +645,27 @@ begin
   end;
 
   LChild := FirstChild(ANode);
+  // Members before any section marker keep svDefault rather than a guess: the
+  // real default is `published` under {$M+} (a TPersistent descendant) and
+  // `public` otherwise (11.2.1), which is directive- AND ancestry-dependent.
+  // Recording "not stated" is the honest answer and leaves the decision to
+  // whoever implements enforcement.
+  LVis := svDefault;
   while LChild <> NIL_NODE do
   begin
+    // Every symbol the child adds to the member scope gets the section's
+    // visibility. Counted rather than returned, because a single child can
+    // declare several (a `A, B: Integer` field group, a property's accessors,
+    // a nested type and its enum values).
+    LFirstNew := FModel.Scopes[LMembers].Symbols.Count;
     case KindOf(LChild) of
       // ancestor / implemented-interface references: resolve in the outer scope
       nkIdent, nkMember, nkTypeArgs:
         Collect(LChild, AOuter);
-      nkGuid, nkVisibility:
+      nkGuid:
         ; // no names
+      nkVisibility:
+        LVis := VisibilityOf(LChild);
       nkVarDecl:
         DeclareNamesAndType(LChild, LMembers, skField);
       nkRoutine:
@@ -708,7 +723,32 @@ begin
     else
       Collect(LChild, LMembers);   // var/const/type sections, variant parts...
     end;
+    if LVis <> svDefault then
+      for var LNew := LFirstNew to FModel.Scopes[LMembers].Symbols.Count - 1 do
+        FModel.Symbols[FModel.Scopes[LMembers].Symbols[LNew]].Visibility := LVis;
     LChild := NextSib(LChild);
+  end;
+end;
+
+{ The visibility an nkVisibility node states. The parser puts the level in Aux
+  (1..5, the order the words are listed in 11.2.1) and marks `strict` with the
+  spare nfNegated flag. }
+function TPasSemaResolver.VisibilityOf(ANode: Integer): TSemaVisibility;
+var
+  LStrict: Boolean;
+begin
+  LStrict := nfNegated in FTree.Nodes[ANode].Flags;
+  case FTree.Nodes[ANode].Aux of
+    1: if LStrict then Result := svStrictPrivate else Result := svPrivate;
+    2: if LStrict then Result := svStrictProtected else Result := svProtected;
+    3: Result := svPublic;
+    4: Result := svPublished;
+    // `automated` (11.2.1) is the legacy OLE-Automation section: published
+    // plus dispatch info. Kept distinct rather than folded into svPublished so
+    // a later pass can tell them apart without re-reading the tree.
+    5: Result := svAutomated;
+  else
+    Result := svDefault;
   end;
 end;
 

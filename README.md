@@ -293,21 +293,26 @@ Still open, roughly in the order we're tackling it:
   position-aware lookup for `sckBlock` scopes only — the for-header exception
   (§5.5.1) must keep working, and classic `var` sections must stay
   order-independent.
-- **Member visibility is parsed, never recorded, never enforced.**
-  `TSemaSymbol.Visibility` exists and is only ever assigned `svDefault`; the
-  resolver's `Collect` skips `nkVisibility` with `; // no names`. So the whole
-  of 11 §11.2.1 is unimplemented: the unit-level "friend" rule, `strict
-  private`/`strict protected`, and with them every `E2361 Cannot access private
-  symbol`. `FindMemberX` says so in a comment ("Visibility is not filtered
-  here").
+- **Member visibility is recorded but not ENFORCED.** Recording landed on
+  2026-07-31 — `CollectStruct` tracks the section as it walks and stamps every
+  symbol a child declares, `automated` included (kept distinct from
+  `published`). Members before any section marker stay `svDefault` rather than
+  taking a guess: the real default is `published` under `{$M+}` and `public`
+  otherwise, which depends on a directive AND on the ancestry.
 
-  Costs no false positives, and two rules currently come out RIGHT by accident
-  because of it — the enum-value leak out of a `private` nested type (2 §2.2.4)
-  and helper activation ignoring `strict private` (15 §15.4). Both would have
-  to be preserved as deliberate exceptions by whoever implements this, not
-  rediscovered. Recording the visibility (cheap, one field at collect time) is
-  worth doing on its own even before anything enforces it: navigation and a
-  future Find References both want it.
+  What is still open is the enforcement half of 11 §11.2.1 — the unit-level
+  "friend" rule, `strict private`/`strict protected`, and with them every
+  `E2361 Cannot access private symbol`. `FindMemberX` still says so in a
+  comment ("Visibility is not filtered here").
+
+  It is deliberately separate, because enforcement can only ADD diagnostics and
+  every one of them is a false-positive risk against corpora currently at zero
+  — it needs its own measured pass, not a ride on the recording change. Two
+  rules also come out RIGHT today *because* the walk ignores visibility, and
+  both must survive: a nested enum's VALUES leak out of a `private` type
+  (2 §2.2.4) and a `strict private` nested helper still activates (15 §15.4).
+  Both are pinned by tests now, so enforcement will trip over them rather than
+  quietly "fix" them.
 - **Missing semantic CHECKS the spec names, none of which can produce a false
   positive** — collected here rather than as separate items because they share
   a shape: we accept code dcc rejects. In rough order of how often the shape
