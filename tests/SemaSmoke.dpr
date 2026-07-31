@@ -342,6 +342,40 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { NESTED inline arrays -- `array of array of T`, one nkArrayType inside
+    another, indexed with a single `[I, J]`. Peeling one level lands on the
+    intermediate row type, which is ANONYMOUS and has no symbol, so the element
+    type could not be named and `with AMatrix[I, J] do` opened over nothing.
+
+    Descending to the innermost element is the same deliberate over-eagerness
+    already accepted for the comma-dimension spelling `array[a, b] of T`: exact
+    when the index count matches the nesting, one level too deep otherwise --
+    where it can only find members of T instead of failing. }
+  SRC_NESTEDARRAY =
+    'unit U;'#10 +
+    'interface'#10 +
+    'function Calc: Integer;'#10 +
+    'implementation'#10 +
+    'type'#10 +
+    '  TMatrixItem = record'#10 +
+    '    Weight: Integer;'#10 +
+    '    Direction: Byte;'#10 +
+    '  end;'#10 +
+    'function Calc: Integer;'#10 +
+    'var'#10 +
+    '  AMatrix: array of array of TMatrixItem;'#10 +
+    '  I, J: Integer;'#10 +
+    'begin'#10 +
+    '  I := 1; J := 1;'#10 +
+    '  with AMatrix[I, J] do'#10 +
+    '  begin'#10 +
+    '    Weight := 1;'#10 +
+    '    Direction := 2;'#10 +
+    '  end;'#10 +
+    '  Result := 0;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   { An ANONYMOUS structured type, written inline in a declaration's type slot
     rather than given a name: `array[0..1] of record offset, minimum: Cardinal;
     end`. CollectStruct always gave it a member SCOPE, but no SYMBOL owned that
@@ -1222,6 +1256,13 @@ begin
     RefResolvesTo('Pen', 'Pen'));
   Ok('withforms: `with AI do` reaches the interface method',
     RefResolvesTo('Go', 'Go'));
+  GModel.Free;
+
+  // Nested inline arrays indexed in one step.
+  Analyze(SRC_NESTEDARRAY);
+  Ok('nestedarray: no diags at all', Length(GModel.Diags) = 0);
+  Ok('nestedarray: the with body sees the innermost element''s fields',
+    RefResolvesTo('Weight', 'Weight') and RefResolvesTo('Direction', 'Direction'));
   GModel.Free;
 
   // An ANONYMOUS structured type in a declaration's type slot.

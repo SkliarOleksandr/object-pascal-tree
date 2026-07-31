@@ -2125,6 +2125,20 @@ function TPasSemaResolver.ElementTypeOf(ABaseNode: Integer): Integer;
       LLast := LChild;
       LChild := NextSib(LChild);
     end;
+    // NESTED inline arrays (`array of array of T`) — descend to the innermost
+    // element. Same accepted over-eagerness as the comma-dimension spelling
+    // documented above, and the intermediate row type is anonymous anyway.
+    while (LLast <> NIL_NODE) and (KindOf(LLast) = nkArrayType) and
+          (FTree.Nodes[LLast].Aux <> 1) do
+    begin
+      LChild := FirstChild(LLast);
+      LLast := NIL_NODE;
+      while LChild <> NIL_NODE do
+      begin
+        LLast := LChild;
+        LChild := NextSib(LChild);
+      end;
+    end;
     // An ANONYMOUS element type (`array[...] of record ... end`) is a struct
     // NODE, not a designator, so DesignatorHead has nothing to read. Its
     // synthetic symbol is reachable through the member scope CollectStruct

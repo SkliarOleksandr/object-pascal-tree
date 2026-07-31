@@ -4097,6 +4097,26 @@ function TPasSemaProject.ElementX(AId, ABaseNode: Integer): TSemaXType;
       LLast := LChild;
       LChild := FModels[AMid].Tree.Nodes[LChild].NextSibling;
     end;
+    // NESTED inline arrays — `array of array of T`, written as one nkArrayType
+    // inside another. Descend to the innermost element, which is the same
+    // deliberate over-eagerness the header already documents for the
+    // comma-dimension spelling `array[a, b] of T`: right when the index count
+    // matches the nesting (`AMatrix[I, J]`, the only shape that occurs), and
+    // one level too deep otherwise, where it can only find members of T
+    // instead of failing. The intermediate row type is ANONYMOUS and has no
+    // symbol, so it could not be named as a type in any case.
+    while (LLast <> NIL_NODE) and
+          (FModels[AMid].Tree.Nodes[LLast].Kind = nkArrayType) and
+          (FModels[AMid].Tree.Nodes[LLast].Aux <> 1) do
+    begin
+      LChild := FModels[AMid].Tree.Nodes[LLast].FirstChild;
+      LLast := NIL_NODE;
+      while LChild <> NIL_NODE do
+      begin
+        LLast := LChild;
+        LChild := FModels[AMid].Tree.Nodes[LChild].NextSibling;
+      end;
+    end;
     Result := ResolveTypeExpr(AMid, LLast);
   end;
 
