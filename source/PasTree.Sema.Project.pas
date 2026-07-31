@@ -94,6 +94,11 @@ type
     FSM: TPasSourceManager;
     FDefines: TPasDefines;
     FPP: TPasPreprocessor;
+    // A model that exists only to hold the seeded compiler-provided names, so
+    // SeedDeclaredQuery can answer before any real unit is loaded. Same
+    // SeedSystemScope call as every other model, so the two cannot drift.
+    FSeedModel: TPasSemaModel;
+    FSeedScope: Integer;
     FModels: TObjectList<TPasSemaModel>;
     FFiles: TList<string>;                 // parallel to FModels (full path)
     // Parallel to FModels: each model's pipeline status. Kept in lockstep by
@@ -180,6 +185,9 @@ type
     procedure RegisterUnitName(AId: Integer);
     function LoadedUnitByName(const AName: string): Integer;
     procedure ResolveUses(AId: Integer);
+    function SeedDeclaredQuery: TPasDeclaredQuery;
+    function DeclaredQueryFor(AId: Integer): TPasDeclaredQuery;
+    procedure RunDeclaredPass(ACount: Integer);
     procedure CrossResolve(AId: Integer);
     function StructSymOfNode(AModel: TPasSemaModel; ANode: Integer): Integer;
     function InPropertySpecifier(AModel: TPasSemaModel; ANode: Integer): Boolean;
@@ -425,6 +433,7 @@ uses
   System.Diagnostics,
   System.Math,
   PasTree.Parser,
+  PasTree.Sema.Builtins,
   PasTree.Sema.Resolver,
   PasTree.Sema.Diagnostics;
 
@@ -489,6 +498,8 @@ begin
     FDefines.Define(LName);
   FPP := TPasPreprocessor.Create(FSM, FDefines, 37.0, FInfo.PointerBytes,
     FInfo.ExtendedBytes);
+  FSeedModel := TPasSemaModel.Create(Default(TPasTree));
+  FSeedScope := SeedSystemScope(FSeedModel, APlatform);
   FModels := TObjectList<TPasSemaModel>.Create(True);
   FFiles := TList<string>.Create;
   FStatus := TList<TPasModuleStatus>.Create;
@@ -516,6 +527,7 @@ begin
   FStatus.Free;
   FModels.Free;
   FPP.Free;
+  FSeedModel.Free;
   FDefines.Free;
   FSM.Free;
   inherited;
@@ -722,6 +734,7 @@ begin
   if not TFile.Exists(LFull) then
     Exit(-1);
   try
+    FPP.OnDeclared := SeedDeclaredQuery();
     LPre := FPP.Process(LFull);
     LTree := TPasParser.ParseFile(LPre, LDiags);
     LModel := TPasSemaResolver.Analyze(LTree, False, FPlatform);
@@ -738,6 +751,159 @@ begin
   Result := RegisterModel(LModel, LFull, msFullReady);
   FByPath.Add(LKey, Result);
   RegisterUnitName(Result);
+end;
+
+{ The FIRST-pass answer: compiler-provided names only, so it needs no models
+  and can run while units are still being loaded, in parallel, before anything
+  is linked.
+
+  Only a POSITIVE is definitive. A seeded name is in scope everywhere, so True
+  is final; a name the seed does not have may still come from an import, so
+  that case answers "do not know" and the name is recorded for the second pass.
+
+  This is what keeps the second pass small, and the effect is not marginal: a
+  `$IF DECLARED(AnsiChar)` guard in the platform header unit and one over
+  `UInt64` in a compatibility unit are the two commonest spellings, and the
+  units carrying them are among the largest in the RTL. Answering them here
+  took the second pass from 7 units to 2 on the 665-unit corpus, and with it a
+  +4% regression down to noise. }
+function TPasSemaProject.SeedDeclaredQuery: TPasDeclaredQuery;
+begin
+  Result :=
+    function(const AName: string; out ADeclared: Boolean): Boolean
+    begin
+      ADeclared := FSeedModel.FindLocal(FSeedScope, LowerCase(AName)) <> NIL_SYM;
+      Result := ADeclared;
+    end;
+end;
+
+{ Answers a `$IF Declared(X)` guard on behalf of unit AId.
+
+  Deliberately NOT the unit's own declarations, only what it can see from
+  outside: its own imports, the implicit System and SysInit units, and the
+  compiler-provided seed. Including the unit's own scope would make the answer
+  depend on the branch the previous pass took, which is exactly what this pass
+  is re-deciding — `TSomething = QWord` inside the guarded text would report
+  TSomething as declared, flip the branch, remove the declaration, and the two
+  readings would trade places forever.
+
+  The seed is consulted through SystemScope rather than InterfaceScope for the
+  same reason: InterfaceScope JOINS the seed, so asking it would drag the
+  unit's own names back in. And each lookup rejects a hit in AId itself, which
+  is how System.pas asking `Declared(RTLVersion132)` about its OWN const stops
+  being self-referential — FindInSystemUnit reaches exactly that scope. }
+function TPasSemaProject.DeclaredQueryFor(AId: Integer): TPasDeclaredQuery;
+begin
+  Result :=
+    function(const AName: string; out ADeclared: Boolean): Boolean
+    var
+      LLower: string;
+      LUid, LSym: Integer;
+    begin
+      LLower := LowerCase(AName);
+      ADeclared :=
+        (FindInUses(AId, LLower, LUid, LSym) and (LUid <> AId)) or
+        (FindInSystemUnit(LLower, LUid, LSym) and (LUid <> AId)) or
+        (FindInSysInitUnit(LLower, LUid, LSym) and (LUid <> AId)) or
+        ((FModels[AId].SystemScope <> NIL_SCOPE) and
+         (FModels[AId].Resolve(FModels[AId].SystemScope, LLower) <> NIL_SYM));
+      Result := True;   // this one always has an answer
+    end;
+end;
+
+{ The second preprocessing pass, for units whose `$IF Declared(X)` the FIRST
+  pass could not answer (1.3: the guard needs a symbol table, and the symbol
+  table is built from the stream the guard decides). Cheap because it is
+  candidate-driven: a unit only qualifies if it actually asked, which across
+  the RTL+VCL+FMX corpus is a few dozen units out of hundreds.
+
+  Placed after `uses` are linked and before any cross pass, and that is the
+  only window where it is safe: the imports it must consult have models, while
+  nothing yet holds a (unit, symbol) reference INTO the models being replaced.
+
+  ONE round, by design. A re-decided unit can in principle change its own
+  interface, which would change the answer for a unit that imports it; chasing
+  that to a fixpoint would mean re-parsing on every round for a shape nobody
+  writes (the guards ask about RTL names, not about each other). Units the new
+  branch newly imports ARE loaded, though — otherwise the unit would end up
+  with an unresolved `uses`, which gates its diagnostics entirely. }
+procedure TPasSemaProject.RunDeclaredPass(ACount: Integer);
+var
+  LCand: TArray<Integer>;
+  LDone: TArray<TPasSemaModel>;
+  LIdx, LU: Integer;
+  LPaths: TArray<string>;
+  LPath, LName: string;
+  LQuery: TPasDeclaredQuery;
+  LAnswer: Boolean;
+begin
+  // Candidates are not "asked a question" but "would get a DIFFERENT answer".
+  // The first pass answered every Declared() False, so a unit whose names all
+  // still answer False would re-preprocess to a byte-identical stream — and
+  // paying a re-parse for that is not free: doing it unfiltered measured +4%
+  // on the 665-unit corpus, for zero diagnostic change there. The test itself
+  // is a few dictionary lookups per recorded name.
+  LCand := nil;
+  for LIdx := 0 to ACount - 1 do
+    if Length(FModels[LIdx].Tree.Source.UnresolvedDeclared) > 0 then
+    begin
+      LQuery := DeclaredQueryFor(LIdx);
+      for LName in FModels[LIdx].Tree.Source.UnresolvedDeclared do
+        if LQuery(LName, LAnswer) and LAnswer then
+        begin
+          LCand := LCand + [LIdx];
+          Break;
+        end;
+    end;
+  if LCand = nil then
+    Exit;
+  // Ask first, in PARALLEL and without touching anything: a worker reads other
+  // models' frozen interface scopes and writes only its own slot.
+  SetLength(LDone, Length(LCand));
+  ForEachIndex(High(LCand),
+    procedure(AIndex: Integer)
+    var
+      LPP: TPasPreprocessor;
+      LDiags: TArray<TPasParseDiag>;
+    begin
+      LDone[AIndex] := nil;
+      LPP := TPasPreprocessor.Create(FSM, FDefines, 37.0, FInfo.PointerBytes,
+        FInfo.ExtendedBytes);
+      try
+        try
+          LPP.OnDeclared := DeclaredQueryFor(LCand[AIndex]);
+          LDone[AIndex] := TPasSemaResolver.Analyze(
+            TPasParser.ParseFile(LPP.Process(FFiles[LCand[AIndex]]), LDiags),
+            False, FPlatform);
+        except
+          // Keep the first-pass model. A unit that parsed once and throws now
+          // is a defect, but the wrong branch is still better than no unit at
+          // all — an unloadable unit gates every importer.
+          on Exception do
+            LDone[AIndex] := nil;
+        end;
+      finally
+        LPP.Free;
+      end;
+    end);
+  // Then commit, sequentially. FModels OWNS its items, so the assignment is
+  // what frees the first-pass model — freeing it here as well is a double free.
+  for LIdx := 0 to High(LCand) do
+    if LDone[LIdx] <> nil then
+      FModels[LCand[LIdx]] := LDone[LIdx];
+  LPaths := nil;
+  for LIdx := 0 to High(LCand) do
+    if LDone[LIdx] <> nil then
+      for LU := 0 to High(FModels[LCand[LIdx]].UsesList) do
+        if FSM.ResolveUnit(FModels[LCand[LIdx]].UsesList[LU].NameFull,
+             FModels[LCand[LIdx]].UsesList[LU].InPath, FFiles[LCand[LIdx]],
+             LPath) and not FByPath.ContainsKey(LowerCase(LPath)) then
+          LPaths := LPaths + [LPath];
+  if LPaths <> nil then
+    LoadFilesParallel(LPaths);
+  for LIdx := 0 to High(LCand) do
+    if LDone[LIdx] <> nil then
+      ResolveUses(LCand[LIdx]);
 end;
 
 // Single point where a model is appended: keeps FModels/FFiles/FStatus in
@@ -826,6 +992,9 @@ begin
         FInfo.ExtendedBytes);
       try
         try
+          // The compiler-provided names are answerable already; anything
+          // else a Declared() guard asks is recorded for RunDeclaredPass.
+          LPP.OnDeclared := SeedDeclaredQuery();
           LPre := LPP.Process(LTodo[AIndex]);
           var LTree := TPasParser.ParseFile(LPre, LDiags, AInterfaceOnly);
           // A model whose parse really did stop at the interface is
@@ -5357,6 +5526,9 @@ begin
   FStageTimings := FStageTimings +
     Format('resolve=%d;load=%d;', [LResolveMs, LLoadMs]);
   LSW := TStopwatch.StartNew;
+  // A Declared() guard can only be answered now — see RunDeclaredPass. It may
+  // load units the re-decided branch newly imports, so LN is taken after it.
+  RunDeclaredPass(FModels.Count);
   // Cross passes for EVERY loaded unit — same per-unit write discipline as
   // AnalyzeDirectory (each writes only its own model, reads others' frozen
   // Phase-1 state), so the same parallel farming is safe.
@@ -5435,6 +5607,9 @@ begin
   EnsureSysInitUnit;
   for LIdx := 0 to LN - 1 do
     ResolveUses(LIdx);
+  // See RunDeclaredPass. LN stays the directory snapshot: anything it pulls in
+  // from the search paths belongs outside the E2003 set, like System itself.
+  RunDeclaredPass(LN);
   Stage('main+sys+resolve');
   // Cross passes per unit write ONLY their own model and read the others'
   // Phase-1 state (frozen once every unit is loaded) — safe to farm out.
@@ -5719,6 +5894,8 @@ begin
       Report('cancelled');
       Exit;
     end;
+    RunDeclaredPass(LN);   // see there; must precede every cross pass
+    LN := FModels.Count;   // it may have loaded newly-imported units
     Report('cross:xresolve');
     PrepareDeclWork(LN);
     ForEachIndex(LN - 1,

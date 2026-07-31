@@ -298,14 +298,14 @@ Still open, roughly in the order we're tackling it:
   and the two precedence gaps below are known places where the binding is
   right-ish for the wrong reason.
 
-  **The next corpus, a real 3747-unit / 7.2M-line application, is effectively
-  clean too as of 2026-07-31: 8 diagnostics, none of them a defect we can fix
-  here.** Five are `F1027` for a charting library that ships `.dcu` + `.hpp` and
-  no `.pas` (the source-less-units item below); two are a CONFIRMED true
-  positive — a method-resolution clause whose right-hand side is declared
-  nowhere in the shipped sources, which `dcc` reports identically on a reduced
-  probe; one is the `{$IF Declared(X)}` item below. Down from 899 on
-  2026-07-28.
+  **Two real applications are clean too as of 2026-07-31.** The 3747-unit /
+  7.2M-line client reports 7 diagnostics, not one of them a defect we can fix
+  here: five `F1027` for a charting library that ships `.dcu` + `.hpp` and no
+  `.pas` (the source-less-units item below), and two a CONFIRMED true positive
+  — a method-resolution clause whose right-hand side is declared nowhere in the
+  shipped sources, which `dcc` reports identically on a reduced probe. Down
+  from 899 on 2026-07-28. Its 2121-unit Win64 server reports **zero**, down
+  from 94 the same day.
 - **Two `with`-target diagnostics we accept where dcc refuses**, both found by
   auditing 5.7 against the implementation rather than by the corpus, and both
   missing-diagnostic rather than false-positive:
@@ -383,24 +383,23 @@ Still open, roughly in the order we're tackling it:
   declaration-site name that does not resolve locally — that is every cross-unit
   type reference in every class in the closure, each through `FindMemberX`.
   Deliberately not paid for a collision nobody has hit yet.
-- **`{$IF Declared(X)}` cannot be answered, and the wrong branch is taken.**
-  `Declared()` asks whether an identifier is in scope; the symbol table that
-  knows sits behind the token stream this very decision produces, so the
-  preprocessor has nothing to answer with. It evaluates False and now at least
-  FLAGS the expression (`ppIfNeedsSemantics`) instead of reporting a confident
-  answer — previously it was silent. 81 sites in the RTL+VCL+FMX corpus, so the
-  wrongly-taken branches are already being parsed; one produced a real false
-  `E2003` (`{$IF not declared(UInt64)} UInt64 = QWord;`, where `QWord` is an FPC
-  name that only that dead branch mentions).
+- ~~**`{$IF Declared(X)}` cannot be answered, and the wrong branch is taken.**~~
+  **Done on 2026-07-31.** `Declared()` asks whether an identifier is in scope,
+  and the symbol table that knows sits behind the token stream this very
+  decision produces — so it is answered in **two stages** instead of guessed:
+  - the first pass answers the compiler-provided names, which need no models at
+    all, and RECORDS every other name it was asked about;
+  - `RunDeclaredPass` then re-preprocesses only the units whose recorded names
+    now answer differently, once their imports have models and before any cross
+    pass — the one window where the imports exist and nothing yet holds a
+    reference into the models being replaced.
 
-  A table of the compiler-provided names we already seed would answer
-  `UInt64`/`AnsiChar`/`ReturnAddress` and *look* like a fix, but the names
-  actually asked about are mostly ordinary RTL symbols in used units
-  (`tkMRecord` 67 times, `LoadLibraryEx`, `UTF8ToWideString`,
-  `IOTAAboutBoxServices`) — a handful covered out of 81. The real shape is a
-  second preprocessing pass for units whose `$IF`s were flagged, run once their
-  imports have models. Worth doing only when something depends on it; nothing
-  does today.
+  The two-stage split is what makes it affordable: the commonest guards
+  (`DECLARED(AnsiChar)`, `declared(UInt64)`) sit in the largest RTL units, and
+  answering them in stage one took the second pass from 7 units to 2 and a +4%
+  regression to nothing. ONE round, deliberately — see the code for what that
+  gives up. The query also excludes the unit's OWN declarations, without which
+  the idiom it exists for (`{$IF not declared(X)} X = ...`) would oscillate.
 - **An AST printer, and the two very different tests it enables.** Item 2 of the
   definition of done is a *token*-level roundtrip (concatenated tokens + trivia
   == source, byte-for-byte), which proves the LEXER lossless and says nothing

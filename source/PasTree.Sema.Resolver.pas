@@ -2454,6 +2454,7 @@ end;
 procedure TPasSemaResolver.Run;
 begin
   FSys := SeedSystemScope(FModel, FPlatform);
+  FModel.SystemScope := FSys;
   FIntf := FModel.AddScope(sckUnit, NIL_SCOPE, 0);
   FModel.JoinScope(FIntf, FSys);            // implicit 'uses System'
   FImpl := FModel.AddScope(sckImplementation, FIntf, 0);

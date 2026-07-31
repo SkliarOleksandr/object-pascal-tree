@@ -86,6 +86,11 @@ type
     // {$SCOPEDENUMS} state changes, ascending by VisIndex; empty for the
     // overwhelming majority of units (the switch defaults to OFF).
     ScopedEnumsEvents: TArray<TPasScopedEnumsEvent>;
+    // Names a `$IF Declared(X)` guard asked about that no one could answer,
+    // in source order, deduplicated. Empty unless the unit uses that guard AND
+    // the run had no OnDeclared to ask — which is the signal a caller with a
+    // symbol table uses to decide the unit is worth preprocessing again.
+    UnresolvedDeclared: TArray<string>;
     function VisibleToken(AIndex: Integer): TPasToken;
     function VisibleText(AIndex: Integer): string;
     function IsSkipped(AFileId, AOffset: Integer): Boolean;
@@ -106,6 +111,22 @@ type
     function IsDefined(const AName: string): Boolean;
     function Clone: TPasDefines;
   end;
+
+  { Answers a `$IF Declared(X)` guard. The preprocessor cannot: the symbol
+    table it would need is built from the token stream this very decision
+    produces. So the question is handed OUT to whoever has one — see
+    TPasSemaProject.RunDeclaredPass, which supplies it on a second pass once
+    every unit has a model. Nil means "nobody can answer", the ordinary
+    first-pass state.
+
+    A three-state answer, because "I do not know" is a real and common case:
+    the RESULT says whether the query could answer at all, ADeclared is the
+    answer when it could. A query that knows only the compiler-provided names
+    can run on the FIRST pass — it needs no models — and takes the big RTL
+    units out of the second pass entirely, which is most of what that pass
+    would otherwise cost. }
+  TPasDeclaredQuery = reference to function(const AName: string;
+    out ADeclared: Boolean): Boolean;
 
   TPasSwitchState = array['A'..'Z'] of Boolean;
 
@@ -140,6 +161,8 @@ type
     FCompilerVersion: Double;
     FPointerBytes: Integer;
     FExtendedBytes: Integer;
+    FOnDeclared: TPasDeclaredQuery;
+    FUnresolvedDeclared: TList<string>;
     function Active: Boolean;
     procedure Diag(ACode: TPasPPDiagCode; AFileId, AStart, ALen: Integer;
       const ADetail: string = '');
@@ -167,6 +190,10 @@ type
     { Same, but with the main file's text supplied directly (tests, LSP
       buffers). AFileName is used for include resolution and reporting. }
     function ProcessText(const AFileName, ASource: string): TPasPreprocessed;
+    { Set to answer a `$IF Declared(X)` guard — see TPasDeclaredQuery. While
+      set the expression is no longer flagged as needing semantics, because it
+      no longer does. }
+    property OnDeclared: TPasDeclaredQuery read FOnDeclared write FOnDeclared;
   end;
 
 const
@@ -357,6 +384,7 @@ begin
   FSkipped := TObjectList<TList<TPasSkippedRegion>>.Create(True);
   FDiags := TList<TPasPPDiagnostic>.Create;
   FIncludePathStack := TList<string>.Create;
+  FUnresolvedDeclared := TList<string>.Create;
   FCondParentActive := TList<Boolean>.Create;
   FCondAnyTaken := TList<Boolean>.Create;
   FCondThisActive := TList<Boolean>.Create;
@@ -393,6 +421,7 @@ begin
   FCondAnyTaken.Free;
   FCondParentActive.Free;
   FIncludePathStack.Free;
+  FUnresolvedDeclared.Free;
   FDiags.Free;
   FSkipped.Free;
   FVisible.Free;
@@ -474,6 +503,7 @@ begin
   FSkipped.Clear;
   FDiags.Clear;
   FIncludePathStack.Clear;
+  FUnresolvedDeclared.Clear;
   FCondParentActive.Clear;
   FCondAnyTaken.Clear;
   FCondThisActive.Clear;
@@ -506,6 +536,7 @@ begin
   Result.Visible := FVisible.ToArray;
   Result.Diagnostics := FDiags.ToArray;
   Result.ScopedEnumsEvents := FScopedEnumsEvents.ToArray;
+  Result.UnresolvedDeclared := FUnresolvedDeclared.ToArray;
   SetLength(Result.Skipped, FSkipped.Count);
   for LIdx := 0 to FSkipped.Count - 1 do
     Result.Skipped[LIdx] := FSkipped[LIdx].ToArray;
@@ -857,6 +888,8 @@ type
     Failed: Boolean;
     HasUnknown: Boolean;  // expression referenced symbols we cannot resolve
     Defines: TPasDefines;
+    OnDeclared: TPasDeclaredQuery;      // nil = nobody can answer Declared()
+    UnknownDeclared: TArray<string>;    // ...and these are what it asked
     CompilerVersion: Double;
     PointerBytes: Integer;
     ExtendedBytes: Integer;
@@ -1054,6 +1087,7 @@ var
   LWord, LArg: string;
   LStart: Integer;
   LNum: string;
+  LKnown: Boolean;
 begin
   Result.Kind := ivBool;
   Result.Bool := False;
@@ -1138,6 +1172,14 @@ begin
     begin
       Inc(Pos);
       LArg := Word;
+      // Declared() takes a DESIGNATOR, not a bare identifier — the RTL writes
+      // `Declared(System.Embedded)`. Stopping at the dot asks about `System`,
+      // which is a unit name and answers True, taking the opposite branch.
+      while (Pos <= Length(Text)) and (Text[Pos] = '.') do
+      begin
+        Inc(Pos);
+        LArg := LArg + '.' + Word;
+      end;
       SkipWs;
       if (Pos <= Length(Text)) and (Text[Pos] = ')') then
         Inc(Pos)
@@ -1146,22 +1188,20 @@ begin
       Result.Kind := ivBool;
       if SameText(LWord, 'Defined') then
         Result.Bool := Defines.IsDefined(LArg)
+      else if Assigned(OnDeclared) and OnDeclared(LArg, LKnown) then
+        // Somebody with a symbol table answered — see TPasDeclaredQuery. Not
+        // flagged and not recorded, because it is not a guess.
+        Result.Bool := LKnown
       else
       begin
-        // Declared() asks whether an IDENTIFIER is in scope, which needs the
-        // symbol table — and the symbol table needs the token stream this
-        // very decision produces. So the honest answer here is "unknown", and
-        // it is flagged as such (ppIfNeedsSemantics) rather than reported as a
-        // confident False, which is what it used to be.
-        //
-        // False is still the branch taken, because there is no safer default:
-        // the guarded text is by construction the one that does NOT compile
-        // when the name IS declared. 81 sites in the RTL+VCL+FMX corpus, and
-        // the names asked about are mostly ordinary RTL symbols in used units
-        // (`tkMRecord`, `LoadLibraryEx`, `UTF8ToWideString`), not just
-        // compiler-provided ones — so a table of seeded builtin names would
-        // answer only a handful of them and would read like a fix. See the
-        // README To-do.
+        // Nobody can answer yet: Declared() asks whether an IDENTIFIER is in
+        // scope, and the symbol table that knows is built from the token
+        // stream this very decision produces. False is the branch taken —
+        // there is no safer default, since the guarded text is by
+        // construction the text that does NOT compile when the name IS
+        // declared — but the NAME is recorded so a caller that does have a
+        // symbol table can come back and ask properly.
+        UnknownDeclared := UnknownDeclared + [LArg];
         HasUnknown := True;
         Result.Bool := False;
       end;
@@ -1253,10 +1293,17 @@ begin
   LEval.Text := AExpr;
   LEval.Pos := 1;
   LEval.Defines := FDefines;
+  LEval.OnDeclared := FOnDeclared;
   LEval.CompilerVersion := FCompilerVersion;
   LEval.PointerBytes := FPointerBytes;
   LEval.ExtendedBytes := FExtendedBytes;
   LValue := LEval.ParseOr;
+  // Recorded even for an expression that FAILED to parse: the caller's only
+  // use for these is deciding whether a second pass could learn anything, and
+  // a half-parsed expression that mentioned a name is still such a case.
+  for var LName in LEval.UnknownDeclared do
+    if FUnresolvedDeclared.IndexOf(LName) < 0 then
+      FUnresolvedDeclared.Add(LName);
   // NB: trailing junk after a complete expression is deliberately ignored —
   // dcc tolerates it (System.ObjAuto.pas ships '$IF SizeOf(Extended) >= 10)'
   // with a stray closing paren).

@@ -124,6 +124,11 @@ type
     Diags: TArray<TSemaDiag>;
     // Phase 2: cross-unit state.
     InterfaceScope: Integer;        // scope importers may read; NIL_SCOPE
+    // The implicit System scope seeded with the compiler-provided names
+    // (PasTree.Sema.Builtins). Kept separately from InterfaceScope, which
+    // JOINS it: answering "is this name compiler-provided?" must NOT also see
+    // the unit's own declarations.
+    SystemScope: Integer;
     NodeScope: TArray<Integer>;     // node index -> scope in effect; NIL_SCOPE
     ExprType: TArray<Integer>;      // node index -> type symbol; NIL_SYM = untyped
     ExtRefMap: TDictionary<Integer, TPasExtRef>; // node -> external symbol
@@ -230,6 +235,7 @@ begin
   SymTypeX := TDictionary<Integer, TSemaXType>.Create;
   ExprTypeX := TDictionary<Integer, TSemaXType>.Create;
   InterfaceScope := NIL_SCOPE;
+  SystemScope := NIL_SCOPE;
   AllUsesResolved := False;
   SetLength(Symbols, 64);
   FSymCount := 0;

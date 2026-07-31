@@ -887,6 +887,47 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { `$IF Declared(X)` — the portability guard, answered on a SECOND
+    preprocessing pass (RunDeclaredPass) once every unit has a model.
+
+    Both directions have to be checked, because getting one right by accident
+    is easy: a guard whose name IS declared must skip its text (the first two
+    below name a compiler-provided type and an imported class, and the text
+    they guard is deliberate nonsense), and a guard whose name is NOT must
+    take it (TFallback, used by a field afterwards). The third asks the
+    question the other way round. Answering a flat False, as the first pass
+    must, gets the first two wrong and the last two right. }
+  UNIT_DCLBASE =
+    'unit UnitDclBase;'#10'interface'#10 +
+    'type'#10 +
+    '  TKnownThing = class'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
+  UNIT_DCLUSE =
+    'unit UnitDclUse;'#10'interface'#10'uses UnitDclBase;'#10 +
+    'type'#10 +
+    '  {$IF not declared(UInt64)}'#10 +      // compiler-provided: skip
+    '  UInt64 = ZzFpcOnlyWord;'#10 +
+    '  {$IFEND}'#10 +
+    '  {$IF not declared(TKnownThing)}'#10 + // imported: skip
+    '  TKnownThing = ZzAlsoNotAThing;'#10 +
+    '  {$IFEND}'#10 +
+    '  {$IF declared(TNeverDeclaredAnywhere)}'#10 +   // absent: skip
+    '  TAlias = ZzThirdNonThing;'#10 +
+    '  {$IFEND}'#10 +
+    '  {$IF not declared(TDefinitelyMissing)}'#10 +   // absent: TAKE
+    '  TFallback = Integer;'#10 +
+    '  {$IFEND}'#10 +
+    '  TUse = class'#10 +
+    '    A: UInt64;'#10 +
+    '    B: TKnownThing;'#10 +
+    '    C: TFallback;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
   { A NESTED type of a generic, returned by one of its own members: the frame
     has to travel WITH the type, because that type has no arguments of its own
     yet its definition is written in the enclosing generic's parameters.
@@ -1825,6 +1866,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitPOUse.pas'), UNIT_POUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitSABase.pas'), UNIT_SABASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitSAUse.pas'), UNIT_SAUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitDclBase.pas'), UNIT_DCLBASE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitDclUse.pas'), UNIT_DCLUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNGBase.pas'), UNIT_NGBASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNGUse.pas'), UNIT_NGUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWX.pas'), UNIT_WX);
@@ -2271,6 +2314,14 @@ begin
     Ok('selfarity: no diags at all', Length(LSA.Diags) = 0);
     Ok('selfarity: an impl-section alias does not shadow its own generic',
       CrossRefTo(LSA, 'Control', 'Control'));
+
+    // `$IF Declared(X)` answered on the second preprocessing pass.
+    var LDC := ModelByName('unitdcluse');
+    Ok('declared: UnitDclUse loaded', Assigned(LDC));
+    Ok('declared: a guard whose name IS declared skips its text',
+      Length(LDC.Diags) = 0);
+    Ok('declared: a guard whose name is NOT declared still takes its text',
+      SymCountOf(LDC, 'tfallback', skType) = 1);
 
     // A NESTED type of a generic carries the frame it was reached through.
     var LNG := ModelByName('unitnguse');
