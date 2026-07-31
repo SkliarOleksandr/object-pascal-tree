@@ -375,6 +375,24 @@ Still open, roughly in the order we're tackling it:
   declaration-site name that does not resolve locally — that is every cross-unit
   type reference in every class in the closure, each through `FindMemberX`.
   Deliberately not paid for a collision nobody has hit yet.
+- **`{$IF Declared(X)}` cannot be answered, and the wrong branch is taken.**
+  `Declared()` asks whether an identifier is in scope; the symbol table that
+  knows sits behind the token stream this very decision produces, so the
+  preprocessor has nothing to answer with. It evaluates False and now at least
+  FLAGS the expression (`ppIfNeedsSemantics`) instead of reporting a confident
+  answer — previously it was silent. 81 sites in the RTL+VCL+FMX corpus, so the
+  wrongly-taken branches are already being parsed; one produced a real false
+  `E2003` (`{$IF not declared(UInt64)} UInt64 = QWord;`, where `QWord` is an FPC
+  name that only that dead branch mentions).
+
+  A table of the compiler-provided names we already seed would answer
+  `UInt64`/`AnsiChar`/`ReturnAddress` and *look* like a fix, but the names
+  actually asked about are mostly ordinary RTL symbols in used units
+  (`tkMRecord` 67 times, `LoadLibraryEx`, `UTF8ToWideString`,
+  `IOTAAboutBoxServices`) — a handful covered out of 81. The real shape is a
+  second preprocessing pass for units whose `$IF`s were flagged, run once their
+  imports have models. Worth doing only when something depends on it; nothing
+  does today.
 - **An AST printer, and the two very different tests it enables.** Item 2 of the
   definition of done is a *token*-level roundtrip (concatenated tokens + trivia
   == source, byte-for-byte), which proves the LEXER lossless and says nothing

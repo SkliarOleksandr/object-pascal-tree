@@ -1147,9 +1147,24 @@ begin
       if SameText(LWord, 'Defined') then
         Result.Bool := Defines.IsDefined(LArg)
       else
-        // Declared() needs a symbol table; approximate with the define set
-        // (covers the RTL's Declared(SOME_SYMBOL) guards poorly but safely).
+      begin
+        // Declared() asks whether an IDENTIFIER is in scope, which needs the
+        // symbol table — and the symbol table needs the token stream this
+        // very decision produces. So the honest answer here is "unknown", and
+        // it is flagged as such (ppIfNeedsSemantics) rather than reported as a
+        // confident False, which is what it used to be.
+        //
+        // False is still the branch taken, because there is no safer default:
+        // the guarded text is by construction the one that does NOT compile
+        // when the name IS declared. 81 sites in the RTL+VCL+FMX corpus, and
+        // the names asked about are mostly ordinary RTL symbols in used units
+        // (`tkMRecord`, `LoadLibraryEx`, `UTF8ToWideString`), not just
+        // compiler-provided ones — so a table of seeded builtin names would
+        // answer only a handful of them and would read like a fix. See the
+        // README To-do.
+        HasUnknown := True;
         Result.Bool := False;
+      end;
     end
     else
       Failed := True;
