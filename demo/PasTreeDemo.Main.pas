@@ -18,7 +18,7 @@ uses
   System.JSON, System.Diagnostics, System.Math, System.Win.Registry,
   Winapi.Windows, Winapi.Messages, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls,
   Vcl.ExtCtrls, Vcl.Dialogs, Vcl.Graphics, Vcl.Clipbrd,
-  SynEdit, SynEditTypes, SynEditHighlighter, SynHighlighterJSON,
+  SynEdit, SynEditTypes, SynEditHighlighter, SynHighlighterJSON, SynFunc,
   SynHighlighterPas,
   VirtualTrees, VirtualTrees.Types,
   PasTree.Platforms, PasTree.Preprocessor, PasTree.Ast, PasTree.Ast.Json,
@@ -27,7 +27,8 @@ uses
   PasTree.Sema.Types, PasTree.Sema.Resolver, PasTree.Sema.Project,
   PasTree.Sema.Nav, PasTree.Sema.Async,
   PasTree.Sema.Dump, VirtualTrees.BaseAncestorVCL, VirtualTrees.BaseTree, VirtualTrees.AncestorVCL, SynEditCodeFolding,
-  PasTreeDemo.Highlighter, PasTreeDemo.Settings, Vcl.Menus, System.Actions, Vcl.ActnList, SynEditMiscClasses, SynEditSearch;
+  PasTreeDemo.Highlighter, PasTreeDemo.Settings, PasTreeDemo.NavHistory,
+  Vcl.Menus, System.Actions, Vcl.ActnList, SynEditMiscClasses, SynEditSearch;
   // System
 
 type
@@ -68,18 +69,6 @@ type
     Index: Integer;
   end;
   PPasMsgNodeData = ^TPasMsgNodeData;
-
-  { One visited position, for Back/Forward.
-
-    A PATH and a caret position, never a node or symbol index: every
-    re-analysis (ReanalyzeForNav, armed by any edit) rebuilds the project from
-    scratch and invalidates every index into it, so a history holding them
-    would jump to garbage after the first keystroke. This survives. }
-  TNavHistoryEntry = record
-    FilePath: string;
-    Line: Integer;
-    Col: Integer;
-  end;
 
   TfrmMain = class(TForm)
     pnlTop: TPanel;
@@ -192,12 +181,9 @@ type
     FSemaProject: TPasSemaProject; // kept alive after RunParse (navigation)
     FNav: TPasNavigator;           // go-to-declaration over FSemaProject
     FLinkTab: TObject;             // TSourceTab currently showing a link
-    // Back/Forward. FNavHistory is every visited position in order and
-    // FNavIndex is where we are IN it — so Back is a step left, Forward a step
-    // right, and a fresh jump discards whatever was to the right. FNavBusy
-    // suppresses recording while Back/Forward is itself doing the jumping.
-    FNavHistory: TList<TNavHistoryEntry>;
-    FNavIndex: Integer;
+    // Back/Forward. The list and its rules live in PasTreeDemo.NavHistory;
+    // FNavBusy suppresses RECORDING while Back/Forward is itself jumping.
+    FNavHistory: TNavHistory;
     FNavBusy: Boolean;
     // "Highlight other occurrences of the selected identifier" — the
     // background color, shared by every tab's own highlighter instance
@@ -253,10 +239,11 @@ type
     procedure CloseAllTabs;
     // Navigation history — see NavigateTo.
     function CurrentNavPos(out AEntry: TNavHistoryEntry): Boolean;
-    procedure PushNavEntry(const AEntry: TNavHistoryEntry);
     procedure NavigateTo(const APath: string; ALine, ACol: Integer);
-    procedure GoToNavIndex(AIndex: Integer);
-    procedure ClearNavHistory;
+    procedure GoToNavEntry(const AEntry: TNavHistoryEntry);
+    // Called from TNavHistoryPlugin — see there and ShiftNavHistory.
+    procedure ShiftNavHistory(const APath: string;
+      AFirstLine, ACount: Integer; AInserted: Boolean);
     procedure AppMessage(var AMsg: TMsg; var AHandled: Boolean);
     procedure PopulateConfigCombo;
     function SelectedConfig: string;
@@ -342,6 +329,38 @@ type
     PasTreeHL: TPasTreeSynHighlighter; // kept even while SynEdit's is active
   public
     FilePath: string;                  // full path of the loaded file
+  end;
+
+  { Keeps the navigation history's recorded LINES pointing at the same text
+    when an editor gains or loses lines.
+
+    SynEdit already does this arithmetic for its own gutter marks, its
+    indicators and its selections, and exposes the same two notifications to
+    plugins — so this rides on machinery that is already correct and already
+    called from the one place that knows (TCustomSynEdit.DoLinesInserted /
+    DoLinesDeleted, driven by the string list's own notifications).
+
+    A plugin rather than a TSynEditMark per entry: our history is a flat list
+    of records with no per-entry object to hang a mark on, entries are dropped
+    wholesale when a jump truncates the forward tail, and a mark exists to be
+    DRAWN in the gutter. This wants the notification, not the object.
+
+    The rules are copied from TSynIndicators, not from the mark shifting: the
+    two disagree, and the indicator one is right. SynEdit's own comment states
+    the convention — FirstLine is 0-based, a Line is 1-based — and indicators
+    shift on `Line > FirstLine` while marks shift on `Mark.Line >= FirstLine`,
+    which moves the line ABOVE an insertion point along with the text below it.
+    Owned by the editor (TCustomSynEdit.FPlugins is an owning list). }
+  TNavHistoryPlugin = class(TSynEditPlugin)
+  private
+    FForm: TObject;      // TfrmMain; typed loosely to avoid a forward class
+    FFilePath: string;
+  protected
+    procedure LinesInserted(FirstLine, Count: TSynNativeInt); override;
+    procedure LinesDeleted(FirstLine, Count: TSynNativeInt); override;
+  public
+    constructor Create(AOwner: TCustomSynEdit; AForm: TObject;
+      const AFilePath: string); reintroduce;
   end;
 
   TNamedColor = record
@@ -775,8 +794,7 @@ begin
   FOpenFiles := TStringList.Create;
   FMsgLog := TList<TPasMsgRow>.Create;
   FMsgVisible := TList<Integer>.Create;
-  FNavHistory := TList<TNavHistoryEntry>.Create;
-  FNavIndex := -1;
+  FNavHistory := TNavHistory.Create;
   // The mouse's back/forward buttons never reach a control's OnMouseDown —
   // see AppMessage.
   Application.OnMessage := AppMessage;
@@ -1134,7 +1152,7 @@ begin
   // under, both in what it shows and in the context it paints with. See
   // CloseAllTabs.
   CloseAllTabs;
-  ClearNavHistory;   // its entries point into the tabs just closed
+  FNavHistory.Clear;   // its entries point into the tabs just closed
   // A NEW project starts with a clean slate: no carried-over AST/Semantics
   // dump from whatever was open before.
   tsJson.TabVisible := False;
@@ -1410,6 +1428,10 @@ begin
   LTab.Editor := Result;
   LTab.PasTreeHL := LHL;
   LTab.FilePath := TPath.GetFullPath(APath);
+  // Keeps recorded positions in THIS file pointing at the same text as it is
+  // edited. Created after FilePath is known and after the initial load, and
+  // owned by the editor — see TNavHistoryPlugin.
+  TNavHistoryPlugin.Create(Result, Self, LTab.FilePath);
   FOpenFiles.AddObject(APath, LTab);
   pgc.ActivePage := LTab;
 end;
@@ -1973,7 +1995,39 @@ begin
   FReparseTimer.Enabled := True;
 end;
 
+{ TNavHistoryPlugin }
+
+constructor TNavHistoryPlugin.Create(AOwner: TCustomSynEdit; AForm: TObject;
+  const AFilePath: string);
+begin
+  // Only the two handlers we act on: a plugin registered for everything is
+  // called back on every paint and every line PUT as well.
+  inherited Create(AOwner, [phLinesInserted, phLinesDeleted]);
+  FForm := AForm;
+  FFilePath := AFilePath;
+end;
+
+procedure TNavHistoryPlugin.LinesInserted(FirstLine, Count: TSynNativeInt);
+begin
+  TfrmMain(FForm).ShiftNavHistory(FFilePath, FirstLine, Count, True);
+end;
+
+procedure TNavHistoryPlugin.LinesDeleted(FirstLine, Count: TSynNativeInt);
+begin
+  TfrmMain(FForm).ShiftNavHistory(FFilePath, FirstLine, Count, False);
+end;
+
 { navigation history — Back / Forward }
+
+// Loading a file REPLACES its whole text, which arrives as one enormous
+// insertion — nothing has moved as far as the history is concerned. The rules
+// themselves are TNavHistory.Shift's.
+procedure TfrmMain.ShiftNavHistory(const APath: string;
+  AFirstLine, ACount: Integer; AInserted: Boolean);
+begin
+  if not FLoadingFile then
+    FNavHistory.Shift(APath, AFirstLine, ACount, AInserted);
+end;
 
 // Where the caret is now, as a history entry. False if no source tab is open.
 function TfrmMain.CurrentNavPos(out AEntry: TNavHistoryEntry): Boolean;
@@ -1990,18 +2044,6 @@ begin
   Result := AEntry.FilePath <> '';
 end;
 
-// Appends, unless it would repeat the line already at the top. Repeated
-// ctrl+clicks around one spot would otherwise bury the history under entries
-// that are all the same place.
-procedure TfrmMain.PushNavEntry(const AEntry: TNavHistoryEntry);
-begin
-  if (FNavHistory.Count > 0) and
-     SameText(FNavHistory[FNavHistory.Count - 1].FilePath, AEntry.FilePath) and
-     (FNavHistory[FNavHistory.Count - 1].Line = AEntry.Line) then
-    Exit;
-  FNavHistory.Add(AEntry);
-end;
-
 { THE jump. Every navigation goes through here — ctrl+click, the Goto
   Declaration/Implementation pair, and a double-click in the message window —
   so "where did I come from" is recorded in one place instead of three that
@@ -2013,19 +2055,13 @@ end;
 procedure TfrmMain.NavigateTo(const APath: string; ALine, ACol: Integer);
 var
   LOrigin, LTarget: TNavHistoryEntry;
+  LHasOrigin: Boolean;
   LEditor: TSynEdit;
 begin
-  if not FNavBusy then
-  begin
-    // Anything to the RIGHT of where we are is a path not taken any more —
-    // the conventional browser rule, and the only one that keeps Forward
-    // meaning something.
-    while FNavHistory.Count > FNavIndex + 1 do
-      FNavHistory.Delete(FNavHistory.Count - 1);
-    if CurrentNavPos({out} LOrigin) then
-      PushNavEntry(LOrigin);
-  end;
-  LEditor := OpenFileTab(APath);   // same tab if it is already open
+  // Read BEFORE the jump, obviously — but also before OpenFileTab, which can
+  // change the active page and with it what "here" means.
+  LHasOrigin := not FNavBusy and CurrentNavPos({out} LOrigin);
+  LEditor := OpenFileTab(APath);   // the existing tab if it is already open
   if LEditor = nil then
     Exit;
   LEditor.CaretXY := BufferCoord(ACol, ALine);
@@ -2033,45 +2069,23 @@ begin
   if LEditor.CanFocus then
     LEditor.SetFocus;
   if FNavBusy then
-    Exit;
+    Exit;   // Back/Forward is moving the index itself
   LTarget.FilePath := APath;
   LTarget.Line := ALine;
   LTarget.Col := ACol;
-  PushNavEntry(LTarget);
-  FNavIndex := FNavHistory.Count - 1;
+  FNavHistory.RecordJump(LOrigin, LHasOrigin, LTarget);
 end;
 
-{ Moves to a recorded position without recording anything.
-
-  The entry we are LEAVING is refreshed from the live caret first, so a Back
-  followed by a Forward returns to where the caret actually ended up rather
-  than to where the jump originally landed. }
-procedure TfrmMain.GoToNavIndex(AIndex: Integer);
-var
-  LHere: TNavHistoryEntry;
+// Moves to a recorded position without recording anything, refreshing the
+// entry being LEFT from the live caret first — see TNavHistory.UpdateCurrent.
+procedure TfrmMain.GoToNavEntry(const AEntry: TNavHistoryEntry);
 begin
-  if (AIndex < 0) or (AIndex >= FNavHistory.Count) then
-    Exit;
-  if (FNavIndex >= 0) and (FNavIndex < FNavHistory.Count) and
-     CurrentNavPos({out} LHere) and
-     SameText(LHere.FilePath, FNavHistory[FNavIndex].FilePath) then
-    FNavHistory[FNavIndex] := LHere;
   FNavBusy := True;
   try
-    FNavIndex := AIndex;
-    NavigateTo(FNavHistory[AIndex].FilePath, FNavHistory[AIndex].Line,
-      FNavHistory[AIndex].Col);
+    NavigateTo(AEntry.FilePath, AEntry.Line, AEntry.Col);
   finally
     FNavBusy := False;
   end;
-end;
-
-// A project change invalidates every entry: the tabs are gone (see
-// CloseAllTabs) and the files may not even belong to the new project.
-procedure TfrmMain.ClearNavHistory;
-begin
-  FNavHistory.Clear;
-  FNavIndex := -1;
 end;
 
 { The mouse's back/forward buttons.
@@ -2107,23 +2121,33 @@ begin
 end;
 
 procedure TfrmMain.NavBackActionExecute(Sender: TObject);
+var
+  LHere, LEntry: TNavHistoryEntry;
 begin
-  GoToNavIndex(FNavIndex - 1);
+  if CurrentNavPos({out} LHere) then
+    FNavHistory.UpdateCurrent(LHere);
+  if FNavHistory.GoBack({out} LEntry) then
+    GoToNavEntry(LEntry);
 end;
 
 procedure TfrmMain.NavBackActionUpdate(Sender: TObject);
 begin
-  TAction(Sender).Enabled := FNavIndex > 0;
+  TAction(Sender).Enabled := FNavHistory.CanGoBack;
 end;
 
 procedure TfrmMain.NavForwardActionExecute(Sender: TObject);
+var
+  LHere, LEntry: TNavHistoryEntry;
 begin
-  GoToNavIndex(FNavIndex + 1);
+  if CurrentNavPos({out} LHere) then
+    FNavHistory.UpdateCurrent(LHere);
+  if FNavHistory.GoForward({out} LEntry) then
+    GoToNavEntry(LEntry);
 end;
 
 procedure TfrmMain.NavForwardActionUpdate(Sender: TObject);
 begin
-  TAction(Sender).Enabled := FNavIndex < FNavHistory.Count - 1;
+  TAction(Sender).Enabled := FNavHistory.CanGoForward;
 end;
 
 { highlighter context }

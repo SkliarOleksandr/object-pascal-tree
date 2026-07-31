@@ -478,11 +478,30 @@ Still open, roughly in the order we're tackling it:
     focused control, so `Application.OnMessage` is the one place that sees it
     without subclassing every editor as it is created.
 
-  The two decisions taken in advance both held: a jump may open a closed unit
-  and Back never closes anything, and recorded positions drift after an edit
-  and are jumped to anyway. Positions also die with the project — opening one
-  closes every tab, so keeping entries that point into them would be pointing
-  at nothing.
+  One decision taken in advance held: a jump may open a closed unit and Back
+  never closes anything. Positions also die with the project — opening one
+  closes every tab, so entries pointing into them would point at nothing.
+
+  The other, "recorded positions drift after an edit and are jumped to
+  anyway", turned out **not** to be necessary. The plan's own suggestion was
+  right: SynEdit already does this arithmetic, for its gutter marks, its
+  indicators and its selections, and offers the same two notifications to
+  plugins — so `TNavHistoryPlugin` (one per editor, `phLinesInserted` +
+  `phLinesDeleted`) shifts the recorded lines and there is no drift to accept.
+  Two things worth knowing before reusing it:
+  - *the convention is asymmetric and stated only in passing:* `FirstLine` is
+    **0-based** while a mark/indicator `Line` is **1-based**
+    (`TSynIndicators.LinesInserted`'s comment is where SynEdit says so);
+  - *SynEdit's two implementations disagree by one.* Indicators shift on
+    `Line > FirstLine`, gutter marks on `Mark.Line >= FirstLine` — which drags
+    the line ABOVE an insertion point down with the text below it. The
+    indicator rule is the correct one; `NavHistorySmoke` pins that boundary,
+    and swapping in the mark rule fails exactly that test.
+
+  The list rules and the arithmetic live in `PasTreeDemo.NavHistory`, apart
+  from the form, because none of it is observable in the running program: a
+  wrong rule shows up as Back landing somewhere slightly unexpected several
+  clicks later, by which time the history that would explain it is gone.
 - ~~**Recent projects on `Open Project...` (split button).**~~ **Done on
   2026-07-31** (`PasTreeDemo.Settings`). `Open Project...` is a real
   `bsSplitButton`, so its primary half still browses and Windows handles the
