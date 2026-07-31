@@ -15,7 +15,7 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.IOUtils, System.Generics.Collections,
-  System.JSON, System.Diagnostics, System.Win.Registry,
+  System.JSON, System.Diagnostics, System.Math, System.Win.Registry,
   Winapi.Windows, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls,
   Vcl.ExtCtrls, Vcl.Dialogs, Vcl.Graphics, Vcl.Clipbrd,
   SynEdit, SynEditTypes, SynEditHighlighter, SynHighlighterJSON,
@@ -27,7 +27,7 @@ uses
   PasTree.Sema.Types, PasTree.Sema.Resolver, PasTree.Sema.Project,
   PasTree.Sema.Nav, PasTree.Sema.Async,
   PasTree.Sema.Dump, VirtualTrees.BaseAncestorVCL, VirtualTrees.BaseTree, VirtualTrees.AncestorVCL, SynEditCodeFolding,
-  PasTreeDemo.Highlighter, Vcl.Menus, System.Actions, Vcl.ActnList, SynEditMiscClasses, SynEditSearch;
+  PasTreeDemo.Highlighter, PasTreeDemo.Settings, Vcl.Menus, System.Actions, Vcl.ActnList, SynEditMiscClasses, SynEditSearch;
   // System
 
 type
@@ -205,7 +205,16 @@ type
     FExtraSearchPathsBuilt: Boolean;
     FAnalyzeOverhead: string;         // wrapper timings around the engine run
     FStudioRoot: string;           // RAD Studio root (for RTL search paths)
+    // Persisted demo settings (recent projects + the sticky combos), in an .ini
+    // beside the executable. See PasTreeDemo.Settings.
+    FSettings: TDemoSettings;
+    FRecentMenu: TPopupMenu;       // the Open Project split button's drop-down
     FFindBar: TForm;                // floating find toolbar (TFindBar); lazy
+    procedure SetupRecentMenu;
+    procedure RecentMenuPopup(Sender: TObject);
+    procedure RecentItemClick(Sender: TObject);
+    procedure LoadSettings;
+    procedure StoreSettings;
     procedure DoFindNext(const AText: string);
     // Shared by the Goto*Action Update/Execute pairs: the active source
     // tab's model + caret position, and (if AWantImpl) the implementation
@@ -735,7 +744,12 @@ begin
   FAsyncTimer.Enabled := False;
   FAsyncTimer.Interval := 150;
   FAsyncTimer.OnTimer := AsyncTimerTick;
+  FSettings := TDemoSettings.Create(DefaultSettingsFile);
   SetupControls;
+  SetupRecentMenu;
+  // After SetupControls, which fills the combos and picks their defaults —
+  // the stored values are an override of those defaults, not a substitute.
+  LoadSettings;
   EnsureSampleProject;
   // Open the bundled sample by default; OpenProject kicks off the background
   // analysis that populates the Semantics tab and navigation when it finishes.
@@ -744,6 +758,15 @@ end;
 
 procedure TfrmMain.FormDestroy(Sender: TObject);
 begin
+  // Before anything is torn down, and tolerant of failure: a read-only
+  // directory must not turn closing the demo into an exception dialog.
+  try
+    StoreSettings;
+    FSettings.Save;
+  except
+    on Exception do ;
+  end;
+  FreeAndNil(FSettings);
   CancelAsync;                 // cancel + drain the worker before tearing down
   FreeAndNil(FNav);
   FreeAndNil(FSemaProject);
@@ -1113,6 +1136,11 @@ begin
   end;
 
   Caption := 'PasTree Demo — ' + TPath.GetFileName(LFile);
+  // Remembered here, at the one point every route into a project passes
+  // through, and with LFile — the .dproj the .dpr was redirected to, not the
+  // .dpr the caller happened to name.
+  if Assigned(FSettings) then
+    FSettings.AddRecent(LFile);
   PopulateTree;
   if TFile.Exists(FMainSource) then
     OpenFileTab(FMainSource);
@@ -1875,6 +1903,103 @@ begin
   ClearLink;                        // the stale model no longer matches the text
   FReparseTimer.Enabled := False;
   FReparseTimer.Enabled := True;
+end;
+
+{ recent projects — the Open Project split button's drop-down }
+
+// Turns the plain button into a split button whose arrow drops the list. A
+// real bsSplitButton rather than a second button next to it: the primary click
+// must keep doing exactly what it always did (browse), and Windows draws and
+// keyboard-handles the arrow half for us.
+procedure TfrmMain.SetupRecentMenu;
+begin
+  FRecentMenu := TPopupMenu.Create(Self);
+  FRecentMenu.OnPopup := RecentMenuPopup;
+  btnOpen.Style := bsSplitButton;
+  btnOpen.DropDownMenu := FRecentMenu;
+end;
+
+// Rebuilt on every drop, not kept in sync as projects are opened: the list is
+// at most ten items, and the alternative is remembering to touch the menu
+// everywhere a project can be opened (the browse dialog, the .dpk buttons, the
+// RTL/VCL/FMX shortcuts, the startup sample).
+procedure TfrmMain.RecentMenuPopup(Sender: TObject);
+var
+  LItem: TMenuItem;
+  LPaths: TArray<string>;
+  LIdx: Integer;
+begin
+  FRecentMenu.Items.Clear;
+  LPaths := FSettings.ExistingRecent;
+  if Length(LPaths) = 0 then
+  begin
+    // An empty menu drops an empty grey box, which reads as a glitch. Say why.
+    LItem := TMenuItem.Create(FRecentMenu);
+    LItem.Caption := '(no recent projects)';
+    LItem.Enabled := False;
+    FRecentMenu.Items.Add(LItem);
+    Exit;
+  end;
+  for LIdx := 0 to High(LPaths) do
+  begin
+    LItem := TMenuItem.Create(FRecentMenu);
+    // File name first, directory after: ten full paths into a component tree
+    // are unreadable, and the leaf is what tells them apart.
+    LItem.Caption := Format('&%d  %s', [(LIdx + 1) mod 10,
+      TPath.GetFileName(LPaths[LIdx])]) + '   ' +
+      TPath.GetDirectoryName(LPaths[LIdx]);
+    LItem.Hint := LPaths[LIdx];
+    LItem.Tag := LIdx;
+    LItem.OnClick := RecentItemClick;
+    FRecentMenu.Items.Add(LItem);
+  end;
+end;
+
+procedure TfrmMain.RecentItemClick(Sender: TObject);
+var
+  LPaths: TArray<string>;
+  LIdx: Integer;
+begin
+  // Re-read rather than trusting the Tag against a stale list: the menu was
+  // built at drop time and a file can have gone since.
+  LPaths := FSettings.ExistingRecent;
+  LIdx := TMenuItem(Sender).Tag;
+  if (LIdx >= 0) and (LIdx <= High(LPaths)) then
+    OpenProject(LPaths[LIdx]);
+end;
+
+{ persisted settings }
+
+const
+  // Key names, so a hand-edited .ini and the code agree.
+  SET_HIGHLIGHTER = 'Highlighter';
+  SET_THREADING = 'Threading';
+  SET_HIGHLIGHTCOLOR = 'HighlightColor';
+
+procedure TfrmMain.LoadSettings;
+begin
+  // Clamped to the items actually present: a hand-edited or stale .ini must
+  // not leave a combo with an out-of-range ItemIndex (-1, blank).
+  cbHighlighter.ItemIndex := EnsureRange(
+    FSettings.ReadInt(SET_HIGHLIGHTER, cbHighlighter.ItemIndex),
+    0, cbHighlighter.Items.Count - 1);
+  cbThreading.ItemIndex := EnsureRange(
+    FSettings.ReadInt(SET_THREADING, cbThreading.ItemIndex),
+    0, cbThreading.Items.Count - 1);
+  FIdentHighlightColor := TColor(FSettings.ReadInt(SET_HIGHLIGHTCOLOR,
+    Integer(FIdentHighlightColor)));
+  cbHighlightColor.Selected := FIdentHighlightColor;
+  // NB the target PLATFORM is deliberately NOT persisted. OpenProject sets it
+  // from the .dproj being opened, so a stored value would be overwritten
+  // before it was ever visible — remembering it would be a setting that does
+  // nothing.
+end;
+
+procedure TfrmMain.StoreSettings;
+begin
+  FSettings.WriteInt(SET_HIGHLIGHTER, cbHighlighter.ItemIndex);
+  FSettings.WriteInt(SET_THREADING, cbThreading.ItemIndex);
+  FSettings.WriteInt(SET_HIGHLIGHTCOLOR, Integer(FIdentHighlightColor));
 end;
 
 { event handlers }

@@ -11,3 +11,4 @@ Win32/
 *.tvsconfig
 __history/
 __recovery/
+out/PasTreeDemo.ini

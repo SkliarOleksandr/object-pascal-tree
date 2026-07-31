@@ -489,19 +489,21 @@ Still open, roughly in the order we're tackling it:
     which buffer changed and by how much). Worth checking first whether
     SynEdit's own bookmark machinery already tracks positions across edits; if
     it does, that is a cheaper middle path than any offset arithmetic of ours.
-- **Recent projects on `Open Project...` (split button).** The single most-worn
-  path in the demo today: browse to the same `.dproj` by hand, every time. A
-  drop-down of the last ~10, most-recent-first, deduped by full path,
-  clicked-entry-moves-to-top.
-  Persistence has no home yet — the demo currently reads the registry only for
-  the IDE's own library paths (`ReadIdePaths`) and saves nothing of its own.
-  **Decided: a plain `.ini`**, and it carries ALL demo settings, not just this
-  list — platform, threading mode, highlighter choice, colour are equally reset
-  on every launch today. `TIniFile`/`TMemIniFile` from `System.IniFiles`, one
-  `[Recent]` section plus a `[Settings]` one; no registry, so the file travels
-  with the checkout and can be inspected and hand-edited. Prune entries whose
-  file no longer exists at display time, not at save time, so a temporarily
-  disconnected network path does not silently drop out of the list.
+- ~~**Recent projects on `Open Project...` (split button).**~~ **Done on
+  2026-07-31** (`PasTreeDemo.Settings`). `Open Project...` is a real
+  `bsSplitButton`, so its primary half still browses and Windows handles the
+  arrow; the drop-down lists the last 10, most-recent-first, deduped by full
+  path. The `.ini` sits beside the executable and carries the sticky settings
+  too (highlighter, threading, highlight colour) — but NOT the platform, which
+  `OpenProject` sets from the `.dproj` and would overwrite before it was ever
+  seen. A missing file stays REMEMBERED and is only left out of the menu, so a
+  disconnected share does not silently drop off the list.
+
+  Tested in `DemoSettingsSmoke`, which is worth the suite for one reason: none
+  of this shows itself until a drop-down opens, and the rules that make the
+  list useful (order, one entry per project however it was spelled, a cap that
+  shrinks the FILE and not just the list) are exactly the ones that break
+  quietly.
 - **`.groupproj` (project groups), and a project TREE in the demo.** Today the
   demo opens one `.dproj` and shows its units as a FLAT list, which stops being
   readable at AVImark's 1542 files and cannot represent a group at all. Two
