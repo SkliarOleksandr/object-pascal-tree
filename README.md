@@ -330,25 +330,11 @@ Still open, roughly in the order we're tackling it:
   - multiline-string indentation (B §B.6.3): the lexer finds the terminator but
     does not treat the closing line's indentation as the base, so an
     under-indented content line is not an error.
-- **Three rules the CODE implements that the SPEC never states** — pass 2's
-  yield. Each is a branch that exists because a real corpus needed it, so each
-  is a language fact the spec is currently missing; none is a defect in the
-  code. Writing them up is the fix:
-  - *Helper inheritance* (15 §15.4). `FindMemberX` walks a helper's ancestor
-    helpers, and the chapter never mentions that a helper may have one. It also
-    never states the asymmetry, which is dcc-verified: a CLASS helper may name
-    an ancestor (`class helper(TBaseH) for TThing`), a RECORD helper may not —
-    `record helper(TBaseH) for TThing` is `E2029 ',' or ':' expected`.
-  - *Nested inline dynamic arrays* (8 §8.2.1). §8.1.2 states the
-    `array[A, B]` ≡ `array[A] of array[B]` sugar and the `M[i, j]` ≡ `M[i][j]`
-    normalisation for STATIC arrays only. Both hold for `array of array of T`
-    too — dcc-verified, `A[0][1]` and `A[1, 2]` alike — and the element walk
-    has a branch for exactly that.
-  - *A member whose name equals its own type's name* (13 §13.1.1 / 3 §3.1.1).
-    `Params: Params` resolves the type slot to the TYPE even though a member of
-    that name is nearer; dcc-verified. The code needs `TypeSlotByNameX` for it
-    and it fixed 11 real sites in one database layer, but no chapter says a
-    declaration's type slot is resolved differently from an ordinary reference.
+- ~~**Three rules the CODE implements that the SPEC never states.**~~ **Written
+  up on 2026-07-31**: helper inheritance and its class-vs-record asymmetry
+  (§15.3.1), the dynamic `array of array of T` indexing sugar (§8.2.1), and a
+  `TypeRef` position resolving to a TYPE over a nearer same-named non-type
+  (§B.11). Behaviour unchanged — the code already did all three.
 - **Audit coverage, so the next pass knows where to start.** The 2026-07-31
   sweep ran pass 1 (spec → code) over every chapter and pass 2 (code → spec)
   over the member-lookup, property, interface, helper, array and generic
