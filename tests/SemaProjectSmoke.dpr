@@ -887,6 +887,36 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { The same generic ancestry, reached the other way round: not `L[I]` on a
+    variable from outside, but `Items[I]` INSIDE the descendant's own method,
+    naming the inherited property explicitly. HTMLSubs' shape:
+    `TFloatingObjList = class(TObjectList<TFloatingObj>)` doing
+    `with Items[I] do if StartCurs > N then ...`.
+
+    A different code path and a separate bug: here `Items` is a bare ident the
+    INHERITED pass binds, and that pass recorded only (unit, symbol) — no
+    instantiation frame. So the with pass read `Items`' declared type straight
+    off TBaseList<T> and got the OPEN `T`, indexed nothing, and every name in
+    the body went undeclared. The frame is unrecoverable later: nothing
+    downstream knows which hop the member came from. }
+  UNIT_GENSELF =
+    'unit UnitGenSelf;'#10'interface'#10'uses UnitGenList;'#10 +
+    'type'#10 +
+    '  TAttrList2 = class(TObjList<TAttr>)'#10 +
+    '    procedure Decrement(N: Integer);'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TAttrList2.Decrement(N: Integer);'#10 +
+    'var'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  for I := 0 to Count - 1 do'#10 +
+    '    with Items[I] do'#10 +
+    '      if Which > N then'#10 +
+    '        Name := ''y'';'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   { The same rule where BOTH declarations come from USED units, which is where
     it actually bites: `TObjectList` is a plain class in one RTL unit and a
     generic in another, and a unit importing both got whichever it imported
@@ -1647,6 +1677,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArUse.pas'), UNIT_ARUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitGenList.pas'), UNIT_GENLIST);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitGenListUse.pas'), UNIT_GENLISTUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitGenSelf.pas'), UNIT_GENSELF);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWX.pas'), UNIT_WX);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWXUse.pas'), UNIT_WXUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNHBase.pas'), UNIT_NHBASE);
@@ -2070,6 +2101,13 @@ begin
     Ok('genlist: no diags at all', Length(LGL.Diags) = 0);
     Ok('genlist: the with body sees the ELEMENT type, not the open parameter',
       CrossRefTo(LGL, 'Which', 'Which') and CrossRefTo(LGL, 'Name', 'Name'));
+
+    // The same ancestry named from INSIDE the descendant: `with Items[I] do`.
+    var LGS := ModelByName('unitgenself');
+    Ok('genself: UnitGenSelf loaded', Assigned(LGS));
+    Ok('genself: no diags at all', Length(LGS.Diags) = 0);
+    Ok('genself: an inherited property carries its ancestor''s frame',
+      CrossRefTo(LGS, 'Which', 'Which') and CrossRefTo(LGS, 'Name', 'Name'));
 
     // Three cross-unit with-target shapes, one Ok each — see UNIT_WXUSE for
     // which real VCL unit every one of them comes from.

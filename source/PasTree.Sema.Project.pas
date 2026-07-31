@@ -4316,6 +4316,15 @@ begin
         LSym := LM.RefMap[ANode];
         if LSym <> NIL_SYM then
           Result := SymDeclTypeX(AId, LSym)
+        // A type ALREADY recorded for this ident outranks re-deriving one from
+        // the symbol, because it is the only reading that can carry a frame.
+        // The inherited pass writes it for a member it reached through a
+        // GENERIC ancestor: `Items` on a `class(TObjectList<TFloatingObj>)` is
+        // declared `T` on TList<T>, and SymDeclTypeX alone returns that OPEN
+        // parameter — so `with Items[I] do` indexed nothing and the whole body
+        // went undeclared (HTMLSubs.TFloatingObjList.Decrement).
+        else if LM.ExprTypeX.TryGetValue(ANode, LBX) and XValid(LBX) then
+          Result := LBX
         else if LM.ExtRefMap.TryGetValue(ANode, LExt) then
           Result := SymDeclTypeX(LExt.UnitId, LExt.Sym)
         // `Self` has no symbol — nothing declares it (11.3.3), so RefMap is
@@ -4817,7 +4826,18 @@ begin
       LPend.Node := LNode;
       LPend.Ext.UnitId := LUid;
       LPend.Ext.Sym := LSym;
-      LPend.X := XNil;   // only the with pass carries a member type
+      // The member's type, closed over the instantiation frame FindMemberX
+      // reported — but ONLY when there is one. A member reached through a
+      // GENERIC ancestor is declared in the open parameters (`Items: T` on
+      // TList<T>), and the frame is the only thing that turns that `T` into the
+      // actual element type. It cannot be recovered later: nothing downstream
+      // knows which hop the member came from. Without it `with Items[I] do`
+      // over a `class(TObjectList<TFloatingObj>)` indexed the OPEN T and opened
+      // over nothing.
+      if LFound and (LCtx <> NIL_INST) then
+        LPend.X := SubstX(SymDeclTypeX(LUid, LSym), LCtx, 0)
+      else
+        LPend.X := XNil;
       APending := APending + [LPend];
     end
     else if LModel.AllUsesResolved then
@@ -4854,6 +4874,11 @@ begin
       FModels[LIdx].RefMap[LPending[LIdx][LP].Node] := NIL_SYM;
       FModels[LIdx].ExtRefMap.AddOrSetValue(LPending[LIdx][LP].Node,
         LPending[LIdx][LP].Ext);
+      // Same as the with pass's commit: the frame-substituted member type,
+      // when the compute step had a frame at all.
+      if XValid(LPending[LIdx][LP].X) then
+        FModels[LIdx].ExprTypeX.AddOrSetValue(LPending[LIdx][LP].Node,
+          LPending[LIdx][LP].X);
     end;
 end;
 
