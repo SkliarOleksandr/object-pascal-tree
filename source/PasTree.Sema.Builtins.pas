@@ -142,6 +142,10 @@ begin
     'Assign', 'AssignFile', 'Reset', 'Rewrite', 'Append', 'Close',
     'CloseFile', 'Seek', 'Eof', 'Eoln', 'SeekEof', 'SeekEoln', 'FilePos',
     'FileSize', 'Truncate', 'Erase', 'Rename', 'BlockRead', 'BlockWrite',
+    // dcc-verified absent from System.pas, unlike its neighbours IOResult,
+    // Flush, SetLineBreakStyle and TextOpen, which are all really declared
+    // there and so must NOT be seeded.
+    'SetTextBuf',
     // Directory: only GetDir is intrinsic — ChDir/MkDir/RmDir ARE declared
     // in System.pas (verified), so they must not be seeded here.
     'GetDir',
