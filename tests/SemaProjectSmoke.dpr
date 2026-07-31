@@ -887,6 +887,98 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { `with F do` where F has OVERLOADS and the parameterless one is inherited.
+    A ribbon library's accessibility helper: the class overrides
+    `GetScreenBounds(out ABounds: TRect): Boolean` and inherits a parameterless
+    `GetScreenBounds: TRect`, then writes `with GetScreenBounds do Left + Right`.
+    A bare with target has no argument list, so 6.3.1 picks the arity-0 one;
+    the member walk answers with the nearest same-named member instead and the
+    with opened over a Boolean. }
+  UNIT_POBASE =
+    'unit UnitPOBase;'#10'interface'#10 +
+    'type'#10 +
+    '  TBnds = record'#10 +
+    '    Left, Right: Integer;'#10 +
+    '  end;'#10 +
+    '  TPOBase = class'#10 +
+    '  public'#10 +
+    '    function GetBounds(out ABounds: TBnds): Boolean; overload; virtual;'#10 +
+    '    function GetBounds: TBnds; overload;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TPOBase.GetBounds(out ABounds: TBnds): Boolean;'#10 +
+    'begin'#10 +
+    '  Result := False;'#10 +
+    'end;'#10 +
+    'function TPOBase.GetBounds: TBnds;'#10 +
+    'begin'#10 +
+    '  GetBounds(Result);'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  UNIT_POUSE =
+    'unit UnitPOUse;'#10'interface'#10'uses UnitPOBase;'#10 +
+    'type'#10 +
+    '  TPODer = class(TPOBase)'#10 +
+    '  public'#10 +
+    '    function GetBounds(out ABounds: TBnds): Boolean; override;'#10 +
+    '    function Mid: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TPODer.GetBounds(out ABounds: TBnds): Boolean;'#10 +
+    'begin'#10 +
+    '  Result := True;'#10 +
+    'end;'#10 +
+    'function TPODer.Mid: Integer;'#10 +
+    'begin'#10 +
+    '  with GetBounds do'#10 +
+    '    Result := (Left + Right) div 2;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  { Two ARITIES of one name in the SAME unit, split across its sections: the
+    generic in the interface, a plain instantiation alias in the
+    implementation. An editor library writes exactly this to give the common
+    instantiation a short name. The alias is the nearer declaration, so its own
+    heritage reference `TSelfAr<TSCtl>` resolved to the alias ITSELF — leaving
+    it with no ancestor and every inherited member in the generic's method
+    bodies a false E2003. }
+  UNIT_SABASE =
+    'unit UnitSABase;'#10'interface'#10 +
+    'type'#10 +
+    '  TSCtl = class'#10 +
+    '  public'#10 +
+    '    Caption: string;'#10 +
+    '  end;'#10 +
+    '  TSAProv<T: TSCtl> = class'#10 +
+    '  strict private'#10 +
+    '    function GetControl: T;'#10 +
+    '  public'#10 +
+    '    property Control: T read GetControl;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TSAProv<T>.GetControl: T;'#10 +
+    'begin'#10 +
+    '  Result := nil;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  UNIT_SAUSE =
+    'unit UnitSAUse;'#10'interface'#10'uses UnitSABase;'#10 +
+    'type'#10 +
+    '  TSelfAr<C: TSCtl> = class(TSAProv<C>)'#10 +
+    '  public'#10 +
+    '    function GetName: string;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'type'#10 +
+    '  TSelfAr = class(TSelfAr<TSCtl>);'#10 +   // same name, arity 0, IMPL section
+    'function TSelfAr<C>.GetName: string;'#10 +
+    'begin'#10 +
+    '  Result := Control.Caption;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   { The same generic ancestry, reached the other way round: not `L[I]` on a
     variable from outside, but `Items[I]` INSIDE the descendant's own method,
     naming the inherited property explicitly. HTMLSubs' shape:
@@ -1678,6 +1770,10 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitGenList.pas'), UNIT_GENLIST);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitGenListUse.pas'), UNIT_GENLISTUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitGenSelf.pas'), UNIT_GENSELF);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitPOBase.pas'), UNIT_POBASE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitPOUse.pas'), UNIT_POUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitSABase.pas'), UNIT_SABASE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitSAUse.pas'), UNIT_SAUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWX.pas'), UNIT_WX);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWXUse.pas'), UNIT_WXUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNHBase.pas'), UNIT_NHBASE);
@@ -2108,6 +2204,20 @@ begin
     Ok('genself: no diags at all', Length(LGS.Diags) = 0);
     Ok('genself: an inherited property carries its ancestor''s frame',
       CrossRefTo(LGS, 'Which', 'Which') and CrossRefTo(LGS, 'Name', 'Name'));
+
+    // A bare `with F do` selects the PARAMETERLESS overload, inherited or not.
+    var LPO := ModelByName('unitpouse');
+    Ok('paramless: UnitPOUse loaded', Assigned(LPO));
+    Ok('paramless: no diags at all', Length(LPO.Diags) = 0);
+    Ok('paramless: the with target is the arity-0 overload''s result type',
+      CrossRefTo(LPO, 'Left', 'Left') and CrossRefTo(LPO, 'Right', 'Right'));
+
+    // Two arities of one name in one unit, split across its sections.
+    var LSA := ModelByName('unitsause');
+    Ok('selfarity: UnitSAUse loaded', Assigned(LSA));
+    Ok('selfarity: no diags at all', Length(LSA.Diags) = 0);
+    Ok('selfarity: an impl-section alias does not shadow its own generic',
+      CrossRefTo(LSA, 'Control', 'Control'));
 
     // Three cross-unit with-target shapes, one Ok each — see UNIT_WXUSE for
     // which real VCL unit every one of them comes from.

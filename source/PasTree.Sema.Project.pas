@@ -200,6 +200,9 @@ type
     function IsDefaultArrayProp(AMid, ASym: Integer): Boolean;
     function DefaultArrayPropX(const AX: TSemaXType;
       out AMid, ASym: Integer; out AOwner: TSemaXType): Boolean;
+    function RoutineHasParams(AMid, ASym: Integer): Boolean;
+    function ParamlessOverloadX(const AX: TSemaXType;
+      const ANameLower: string; out AMid, ASym, ACtx: Integer): Boolean;
     function ElementX(AId, ABaseNode: Integer): TSemaXType;
     function WithTargetTypeX(AId, ANode: Integer): TSemaXType;
     function InsideWithBody(AModel: TPasSemaModel; ANode: Integer): Boolean;
@@ -225,6 +228,8 @@ type
     function FindInUses(AId: Integer; const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
     function ArityOfTypeSym(AMid, ASym: Integer): Integer;
+    function FindTypeInSelfArity(AId: Integer; const ANameLower: string;
+      AArity: Integer; out ASym: Integer): Boolean;
     function FindTypeInUsesArity(AId: Integer; const ANameLower: string;
       AArity: Integer; out AUnit, ASym: Integer): Boolean;
     function FindInSystemUnit(const ANameLower: string;
@@ -1009,6 +1014,40 @@ begin
     Result := 0
   else
     Result := Length(GenericParamIdents(AMid, ASym));
+end;
+
+{ The same arity search, but in the referring unit's OWN interface scope.
+
+  The NextOverload chain links arities declared in one SCOPE, and the uses
+  search covers OTHER units — between them sits the case that has neither: the
+  two arities are declared in the same unit but in different sections. One
+  editor library writes exactly that, and the shape is idiomatic rather than
+  odd — a generic in the interface plus
+
+      TSomeProvider = class(TSomeProvider<TSomeControl>);
+
+  in the IMPLEMENTATION, to give the common instantiation a plain name. The
+  implementation declaration is the nearer one, so the heritage reference inside
+  it resolved to the class ITSELF, that class then had no ancestor at all, and
+  every inherited member named from the generic's own method bodies was a false
+  E2003. }
+function TPasSemaProject.FindTypeInSelfArity(AId: Integer;
+  const ANameLower: string; AArity: Integer; out ASym: Integer): Boolean;
+var
+  LModel: TPasSemaModel;
+  LSym: Integer;
+begin
+  Result := False;
+  LModel := FModels[AId];
+  if LModel.InterfaceScope = NIL_SCOPE then
+    Exit;
+  LSym := LModel.Resolve(LModel.InterfaceScope, ANameLower);
+  if (LSym <> NIL_SYM) and (LModel.Symbols[LSym].Kind = skType) and
+     (ArityOfTypeSym(AId, LSym) = AArity) then
+  begin
+    ASym := LSym;
+    Result := True;
+  end;
 end;
 
 { FindInUses, restricted to a type of a GIVEN generic arity — see
@@ -2236,13 +2275,24 @@ begin
           // "mismatch" on every single use and would each pay a full scan of
           // the referring unit's imports. Measured at +1.8% before the guard.
           if (ArityOfTypeSym(LBase.UnitId, LBase.Sym) <> LArgCount) and
-             not (sfBuiltin in FModels[LBase.UnitId].Symbols[LBase.Sym].Flags) and
-             FindTypeInUsesArity(AId,
-               LM.Tree.NodeNameLower(LM.Tree.Nodes[ANode].FirstChild),
-               LArgCount, LUid, LSym) then
+             not (sfBuiltin in FModels[LBase.UnitId].Symbols[LBase.Sym].Flags) then
           begin
-            LBase.UnitId := LUid;
-            LBase.Sym := LSym;
+            // The referring unit's own interface section first — see
+            // FindTypeInSelfArity; then the used units.
+            if FindTypeInSelfArity(AId,
+                 LM.Tree.NodeNameLower(LM.Tree.Nodes[ANode].FirstChild),
+                 LArgCount, LSym) then
+            begin
+              LBase.UnitId := AId;
+              LBase.Sym := LSym;
+            end
+            else if FindTypeInUsesArity(AId,
+                 LM.Tree.NodeNameLower(LM.Tree.Nodes[ANode].FirstChild),
+                 LArgCount, LUid, LSym) then
+            begin
+              LBase.UnitId := LUid;
+              LBase.Sym := LSym;
+            end;
           end;
         end;
         LArgNode := LM.Tree.Nodes[LM.Tree.Nodes[ANode].FirstChild].NextSibling;
@@ -4011,6 +4061,79 @@ begin
   Result := LHasParams and LHasDefault;
 end;
 
+// Does this routine declare a parameter list? Its DeclNode is the NAME node
+// and the nkParams sits beside it under the nkRoutine, same shape as a
+// property's specifiers.
+function TPasSemaProject.RoutineHasParams(AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LDecl, LChild: Integer;
+begin
+  Result := False;
+  LM := FModels[AMid];
+  if LM.Symbols[ASym].Kind <> skRoutine then
+    Exit;
+  LDecl := LM.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LDecl := LM.Tree.Nodes[LDecl].Parent;
+  if (LDecl = NIL_NODE) or (LM.Tree.Nodes[LDecl].Kind <> nkRoutine) then
+    Exit;
+  LChild := LM.Tree.Nodes[LDecl].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LChild].Kind = nkParams then
+      Exit(True);
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+{ A PARAMETERLESS routine of that name on AX or an ancestor.
+
+  `with GetScreenBounds do X := (Left + Right) div 2` in one ribbon library: the
+  class OVERRIDES `GetScreenBounds(out ABounds: TRect): Boolean` and inherits a
+  parameterless `GetScreenBounds: TRect` overload from two classes up. A bare
+  with target carries no arguments, so 6.3.1 selects the arity-0 one — but the
+  ordinary member walk answers with the NEAREST member of that name, which is
+  the Boolean override, and the with then opened over a Boolean.
+
+  Only the with target needs this. A real call site goes through SelectOverload,
+  which has an argument list to select on; here the empty list is implied by the
+  syntax and there is nothing to hand it. }
+function TPasSemaProject.ParamlessOverloadX(const AX: TSemaXType;
+  const ANameLower: string; out AMid, ASym, ACtx: Integer): Boolean;
+var
+  LCur: TSemaXType;
+  LScope, LIdx, LCand, LDepth: Integer;
+begin
+  Result := False;
+  AMid := -1;
+  ASym := NIL_SYM;
+  ACtx := NIL_INST;
+  LCur := AX;
+  for LDepth := 1 to 32 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LScope := FModels[LCur.UnitId].Symbols[LCur.Sym].MemberScope;
+    if LScope <> NIL_SCOPE then
+      for LIdx := 0 to FModels[LCur.UnitId].Scopes[LScope].Symbols.Count - 1 do
+      begin
+        LCand := FModels[LCur.UnitId].Scopes[LScope].Symbols[LIdx];
+        if (FModels[LCur.UnitId].Symbols[LCand].Kind = skRoutine) and
+           (FModels[LCur.UnitId].Symbols[LCand].NameLower = ANameLower) and
+           not RoutineHasParams(LCur.UnitId, LCand) then
+        begin
+          AMid := LCur.UnitId;
+          ASym := LCand;
+          ACtx := LCur.Inst;
+          Exit(True);
+        end;
+      end;
+    LCur := AncestorOfX(LCur);
+  end;
+end;
+
 { The default array property of AX's type or of an ancestor.
 
   `with ActionManager.ActionBars[I] do` (Vcl.CustomizeDlg) indexes a value whose
@@ -4313,6 +4436,33 @@ begin
         Result := ResolveTypeExpr(AId, ANode);
         if XValid(Result) then
           Exit;
+        // A routine that REQUIRES arguments is not what a bare `with Name do`
+        // calls — see ParamlessOverloadX. Tried before the ordinary reading,
+        // which would hand back that routine's own result type.
+        LSym := LM.RefMap[ANode];
+        if LSym <> NIL_SYM then
+        begin
+          LMemMid := AId;
+          LMemSym := LSym;
+        end
+        else if LM.ExtRefMap.TryGetValue(ANode, LExt) then
+        begin
+          LMemMid := LExt.UnitId;
+          LMemSym := LExt.Sym;
+        end
+        else
+          LMemSym := NIL_SYM;
+        if (LMemSym <> NIL_SYM) and RoutineHasParams(LMemMid, LMemSym) then
+        begin
+          LSym := StructSymOfNode(LM, ANode);
+          if (LSym <> NIL_SYM) and ParamlessOverloadX(XPlain(AId, LSym),
+               LM.Tree.NodeNameLower(ANode), LMemMid, LMemSym, LCtx) then
+          begin
+            Result := SubstX(SymDeclTypeX(LMemMid, LMemSym), LCtx, 0);
+            if XValid(Result) then
+              Exit;
+          end;
+        end;
         LSym := LM.RefMap[ANode];
         if LSym <> NIL_SYM then
           Result := SymDeclTypeX(AId, LSym)

@@ -167,6 +167,7 @@ var
   LOwn: TDictionary<string, Boolean>;   // project-file paths, lower-cased
   LInProj, LOutProj, LMissing: TDictionary<string, Integer>;
   LSites: TDictionary<string, string>;   // missing name -> FIRST import site
+  LLibSites: TDictionary<string, string>;   // library diag name -> FIRST site
   LM: TPasSemaModel;
   LTotalLines, LTotalChars, LTotalFiles: Int64;
   LListed, LOther, LMid, LDIdx, LFileId, LQuote: Integer;
@@ -180,6 +181,7 @@ begin
   LOutProj := TDictionary<string, Integer>.Create;
   LMissing := TDictionary<string, Integer>.Create;
   LSites := TDictionary<string, string>.Create;
+  LLibSites := TDictionary<string, string>.Create;
   try
     if not LD.Load(APath, PlatformName(GPlatform)) then
     begin
@@ -301,6 +303,22 @@ begin
           begin
             Inc(LOther);
             Bump(LOutProj, LName);
+            // Library diagnostics are counted, not listed — but a bare count
+            // is not actionable: working the tail down means opening the site,
+            // and finding it by grepping a 3790-unit closure for a name like
+            // `Left` is hopeless. One site per NAME, the first one met.
+            if not LLibSites.ContainsKey(LName) then
+            begin
+              LFileId := LM.Diags[LDIdx].FileId;
+              if (LFileId >= 0) and
+                 (LFileId <= High(LM.Tree.Source.FileNames)) then
+                LFile := LM.Tree.Source.FileNames[LFileId]
+              else
+                LFile := GProj.ModelFile(LMid);
+              LLibSites.Add(LName, Format('%s(%d,%d)',
+                [TPath.GetFileName(LFile), LM.Diags[LDIdx].Line,
+                 LM.Diags[LDIdx].Col]));
+            end;
           end;
         end;
       end;
@@ -340,13 +358,15 @@ begin
       ReportHistogram('--- unresolvable `uses` names, by import count ---',
         LMissing, 25, LSites);
       ReportHistogram('--- project files, by identifier/code ---', LInProj, 25);
-      ReportHistogram('--- library units, by identifier/code ---', LOutProj, 25);
+      ReportHistogram('--- library units, by identifier/code ---', LOutProj, 25,
+        LLibSites);
     finally
       GProj.Free;
     end;
   finally
     LMissing.Free;
     LSites.Free;
+    LLibSites.Free;
     LOutProj.Free;
     LInProj.Free;
     LOwn.Free;
