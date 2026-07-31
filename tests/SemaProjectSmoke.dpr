@@ -961,6 +961,38 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { 6.4 — an overload declared ONLY in the IMPLEMENTATION section joins the
+    interface section's set for the same unit. The two are separate symbols in
+    separate scopes, deliberately: chaining them would export an
+    implementation-only overload to every importer. So a call written inside the
+    implementation resolves to the nearer (impl) head and must still be measured
+    against the interface ones.
+
+    dcc-verified. Without it the call to the INTERFACE overload looks short of
+    arguments -- 4 sites in one encoding unit, all on a 3-parameter interface
+    overload sitting beside a 4-parameter implementation-only one. }
+  UNIT_IMPLOVL =
+    'unit UnitImplOvl;'#10'interface'#10'uses UnitA;'#10 +
+    'function Conv(A, B, C: Integer): Integer; overload;'#10 +
+    'implementation'#10 +
+    'function Conv(A, B, C, D: Integer): Integer; overload;'#10 +
+    'begin'#10 +
+    '  Result := A;'#10 +
+    'end;'#10 +
+    'function Conv(A, B, C: Integer): Integer;'#10 +
+    'begin'#10 +
+    '  Result := B;'#10 +
+    'end;'#10 +
+    'procedure Use;'#10 +
+    'var'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  I := Conv(1, 2, 3);'#10 +      // the INTERFACE overload
+    '  I := Conv(1, 2, 3, 4);'#10 +   // the implementation-only one
+    '  if I = 0 then Exit;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   UNIT_ARPLAIN =
     'unit UnitArPlain;'#10'interface'#10 +
     'type'#10 +
@@ -1606,6 +1638,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitPfx.Hdr.pas'), UNIT_HDR);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitHdrBase.pas'), UNIT_HDRBASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitHdrUse.pas'), UNIT_HDRUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitImplOvl.pas'), UNIT_IMPLOVL);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArPlain.pas'), UNIT_ARPLAIN);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArGen.pas'), UNIT_ARGEN);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArUses.pas'), UNIT_ARUSES);
@@ -1998,6 +2031,13 @@ begin
     Ok('arity1-uses: no diags at all', Length(LArg.Diags) = 0);
     Ok('arity1-uses: the arity-1 reference reaches the GENERIC import',
       CrossRefTo(LArg, 'Peek', 'Peek'));
+
+    // An implementation-only overload joining the interface set.
+    var LIo := ModelByName('unitimplovl');
+    Ok('impl-overload: UnitImplOvl loaded', Assigned(LIo));
+    Ok('impl-overload: neither call is reported as wrong-arity',
+      (DiagCount(LIo, 'E2035') = 0) and (DiagCount(LIo, 'E2034') = 0));
+    Ok('impl-overload: no diags at all', Length(LIo.Diags) = 0);
 
     // A member outranking a same-named UNIT reference.
     var LHdr := ModelByName('unithdruse');

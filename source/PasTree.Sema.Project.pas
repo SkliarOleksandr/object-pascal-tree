@@ -1489,7 +1489,26 @@ begin
     if (LLocalHead <> NIL_SYM) and (LModel.Symbols[LLocalHead].Kind = skRoutine)
        and (LModel.Scopes[LModel.Symbols[LLocalHead].Scope].Kind in
             [sckUnit, sckImplementation]) then
+    begin
       Consider(AId, LLocalHead);
+      // 6.4: an IMPLEMENTATION-section overload joins the interface section's
+      // set for the same unit, but the two are separate symbols in separate
+      // scopes — deliberately, since chaining them would export an
+      // implementation-only overload to every importer. So a call written
+      // inside the implementation resolves to the nearer (impl) head and must
+      // still be measured against the interface ones. dcc-verified; without it
+      // a call to the INTERFACE overload looks short of arguments (4 sites in
+      // one encoding unit, on a 3-parameter interface overload sitting beside a
+      // 4-parameter implementation-only one).
+      if LModel.Scopes[LModel.Symbols[LLocalHead].Scope].Kind =
+           sckImplementation then
+      begin
+        LS := LModel.FindLocal(LModel.InterfaceScope,
+          LModel.Symbols[LLocalHead].NameLower);
+        if (LS <> NIL_SYM) and (LModel.Symbols[LS].Kind = skRoutine) then
+          Consider(AId, LS);
+      end;
+    end;
 
     // Same-named routines from every resolved used unit.
     if not LSkip then

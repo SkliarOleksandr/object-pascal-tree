@@ -48,6 +48,7 @@ type
     function MemberResult(N: Integer): Integer;
     procedure Diag(const ACode, AMsg: string; ANode: Integer);
     function Assignable(ADst, ASrc: Integer): Boolean;
+    function InterfaceCounterpart(AHead: Integer): Integer;
     function IsTypeNameOperand(N: Integer): Boolean;
     procedure CheckAssign(N: Integer);
     function TypeNode(N: Integer): Integer;
@@ -412,19 +413,41 @@ end;
 
 // Pick the best overload for typing/navigation; emit an arg-count diagnostic
 // only when it is unambiguous. Returns the chosen routine's result type.
+{ The INTERFACE-section counterpart of an implementation-section routine head,
+  or NIL_SYM.
+
+  6.4: overloads declared in the IMPLEMENTATION section join the interface
+  section's set for the same unit. They are separate SYMBOLS in separate scopes,
+  deliberately -- chaining them would export an implementation-only overload to
+  every importer -- so each consumer that reasons over "all the overloads" has
+  to consult both chains. dcc-verified: a 3-parameter `Conv` in the interface
+  and a 4-parameter `Conv` in the implementation, and both calls compile.
+  Missing it makes the call to the INTERFACE one look short of arguments. }
+function TPasSemaTyper.InterfaceCounterpart(AHead: Integer): Integer;
+begin
+  Result := NIL_SYM;
+  if (AHead = NIL_SYM) or (M.Symbols[AHead].Scope = NIL_SCOPE) or
+     (M.Scopes[M.Symbols[AHead].Scope].Kind <> sckImplementation) then
+    Exit;
+  Result := M.FindLocal(M.InterfaceScope, M.Symbols[AHead].NameLower);
+  if (Result <> NIL_SYM) and (M.Symbols[Result].Kind <> skRoutine) then
+    Result := NIL_SYM;
+end;
+
 function TPasSemaTyper.SelectOverload(ACall, AHead: Integer): Integer;
 var
   LCand, LBest, LArgs, LReq, LTot, LScore, LBestScore: Integer;
   LMinReq, LMaxTot: Integer;
   LAnyFit, LAllHaveParams, LAnyVariadic, LVariadic: Boolean;
   LParams: TArray<Integer>;
-  LP: Integer;
+  LP, LIfaceHead: Integer;
 begin
   LArgs := ArgCount(ACall);
   LBest := AHead; LBestScore := -1;
   LAnyFit := False; LAllHaveParams := True; LAnyVariadic := False;
   LMinReq := MaxInt; LMaxTot := -1;
 
+  LIfaceHead := InterfaceCounterpart(AHead);
   LCand := AHead;
   while LCand <> NIL_SYM do
   begin
@@ -459,6 +482,14 @@ begin
       end;
     end;
     LCand := M.Symbols[LCand].NextOverload;
+    // 6.4: the interface section's overloads of the same name are part of the
+    // set, and they are a separate chain in a separate scope — see
+    // InterfaceCounterpart.
+    if LCand = NIL_SYM then
+    begin
+      LCand := LIfaceHead;
+      LIfaceHead := NIL_SYM;
+    end;
   end;
 
   M.CallTarget.AddOrSetValue(ACall, LBest);
