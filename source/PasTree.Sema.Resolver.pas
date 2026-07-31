@@ -28,6 +28,7 @@ interface
 
 uses
   PasTree.Ast,
+  PasTree.Platforms,
   PasTree.Sema.Model;
 
 type
@@ -61,6 +62,7 @@ type
     FPendingAggr: TArray<TPasPendingAggr>;
     FPendingHelpers: TArray<TPasPendingHelper>;
     FSkipTyper: Boolean;   // see Analyze
+    FPlatform: TPasPlatform;   // only the builtin seed is platform-dependent
     // tree helpers
     function KindOf(ANode: Integer): TPasNodeKind; inline;
     function FirstChild(ANode: Integer): Integer; inline;
@@ -133,7 +135,8 @@ type
       scopes, symbols, RefMap and declared-type bindings — everything
       navigation and cross-unit resolution read — are complete. }
     class function Analyze(const ATree: TPasTree;
-      ASkipTyper: Boolean = False): TPasSemaModel; static;
+      ASkipTyper: Boolean = False;
+      APlatform: TPasPlatform = pfWin32): TPasSemaModel; static;
   end;
 
 implementation
@@ -146,7 +149,8 @@ uses
   PasTree.Sema.Types;
 
 class function TPasSemaResolver.Analyze(const ATree: TPasTree;
-  ASkipTyper: Boolean = False): TPasSemaModel;
+  ASkipTyper: Boolean = False;
+  APlatform: TPasPlatform = pfWin32): TPasSemaModel;
 var
   LR: TPasSemaResolver;
 begin
@@ -154,6 +158,7 @@ begin
   try
     LR.FTree := ATree;
     LR.FSkipTyper := ASkipTyper;
+    LR.FPlatform := APlatform;
     LR.FModel := TPasSemaModel.Create(ATree);
     SetLength(LR.FNodeScope, Length(ATree.Nodes));
     SetLength(LR.FIsDeclName, Length(ATree.Nodes));
@@ -2448,7 +2453,7 @@ end;
 
 procedure TPasSemaResolver.Run;
 begin
-  FSys := SeedSystemScope(FModel);
+  FSys := SeedSystemScope(FModel, FPlatform);
   FIntf := FModel.AddScope(sckUnit, NIL_SCOPE, 0);
   FModel.JoinScope(FIntf, FSys);            // implicit 'uses System'
   FImpl := FModel.AddScope(sckImplementation, FIntf, 0);

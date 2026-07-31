@@ -13,17 +13,21 @@ unit PasTree.Sema.Builtins;
 interface
 
 uses
+  PasTree.Platforms,
   PasTree.Sema.Model;
 
 // Creates and populates the system scope; returns its scope index.
-function SeedSystemScope(AModel: TPasSemaModel): Integer;
+// APlatform gates the few intrinsics that exist on 64-bit targets only.
+function SeedSystemScope(AModel: TPasSemaModel;
+  APlatform: TPasPlatform = pfWin32): Integer;
 
 implementation
 
 uses
   PasTree.Ast;
 
-function SeedSystemScope(AModel: TPasSemaModel): Integer;
+function SeedSystemScope(AModel: TPasSemaModel;
+  APlatform: TPasPlatform = pfWin32): Integer;
 var
   LSys, LBool: Integer;
 
@@ -156,6 +160,28 @@ begin
     // 13.0 (see ch.04 §4.11.1).
     'NameOf'] do
     K(LName, skRoutine, NIL_SYM);
+
+  // 64-BIT ONLY. The first platform-conditional entries in this seed, and the
+  // condition is not a nicety: dcc32 reports `E2003 Undeclared identifier` for
+  // every one of these while dcc64 accepts them, so seeding them everywhere
+  // would make a Win32 analysis accept code the Win32 compiler rejects.
+  //
+  // The varargs family is the same System.pas trap as CompilerVersion: its
+  // only mention there is four COMMENTED-OUT signatures, so a source grep says
+  // "declared" and dcc says otherwise. Verified per name with the usual probe
+  // (does a unit with an EMPTY uses clause resolve it?) — dcc64 answers with
+  // `E2029 '(' expected`, which means the name is known and only the call
+  // syntax is wrong; a genuinely undeclared control name answers E2003.
+  //
+  // The gate is Is64Bit because that is what the two probes support (Win32 no,
+  // Win64 yes); whether a 32-bit ARM target would agree is untested.
+  if PlatformInfo(APlatform).Is64Bit then
+    for var LName in ['VarArgStart', 'VarArgEnd', 'VarArgCopy',
+      'VarArgGetValue',
+      // Sibling of AtomicCmpExchange above, but a SEPARATE name and 64-bit
+      // only — the 128-bit compare-and-swap the RTL's lock-free paths use.
+      'AtomicCmpExchange128'] do
+      K(LName, skRoutine, NIL_SYM);
 
   Result := LSys;
 end;
