@@ -75,6 +75,26 @@ object frmMain: TfrmMain
         'Win32'
         'Win64')
     end
+    object btnNavBack: TButton
+      Left = 8
+      Top = 40
+      Width = 120
+      Height = 27
+      Action = NavBackAction
+      Hint = 'Back (Alt+Left, or the mouse'#39's back button)'
+      ShowHint = True
+      TabOrder = 10
+    end
+    object btnNavForward: TButton
+      Left = 136
+      Top = 40
+      Width = 120
+      Height = 27
+      Action = NavForwardAction
+      Hint = 'Forward (Alt+Right, or the mouse'#39's forward button)'
+      ShowHint = True
+      TabOrder = 11
+    end
     object cbConfig: TComboBox
       Left = 300
       Top = 40

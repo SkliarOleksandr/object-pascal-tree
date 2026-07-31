@@ -102,6 +102,8 @@ type
     SynJSONSyn1: TSynJSONSyn;
     ActionList1: TActionList;
     FindAction: TAction;
+    btnNavBack: TButton;
+    btnNavForward: TButton;
     NavBackAction: TAction;
     NavForwardAction: TAction;
     NavSep1: TMenuItem;
