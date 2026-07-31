@@ -887,6 +887,57 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { A NESTED type of a generic, returned by one of its own members: the frame
+    has to travel WITH the type, because that type has no arguments of its own
+    yet its definition is written in the enclosing generic's parameters.
+
+    `TList<T>` declares `arrayofT = array of T` and returns it from
+    `property List`; the RTL's own container does exactly this, so
+    `with FSelections.List[I] do` is ordinary code. Substituting the member
+    type over the T := TSelection frame handed back the bare nested-type symbol
+    with that frame dropped, indexing it produced the OPEN `T`, and the scope
+    opened over nothing — 78 of 94 diagnostics on one project, across two units
+    of the same editor component. }
+  UNIT_NGBASE =
+    'unit UnitNGBase;'#10'interface'#10 +
+    'type'#10 +
+    '  TMyList<T> = class'#10 +
+    '  public type'#10 +
+    '    arrayofT = array of T;'#10 +
+    '  private'#10 +
+    '    FItems: arrayofT;'#10 +
+    '    function GetList: arrayofT;'#10 +
+    '  public'#10 +
+    '    property List: arrayofT read GetList;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TMyList<T>.GetList: arrayofT;'#10 +
+    'begin'#10 +
+    '  Result := FItems;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  UNIT_NGUSE =
+    'unit UnitNGUse;'#10'interface'#10'uses UnitNGBase;'#10 +
+    'type'#10 +
+    '  TSel = record'#10 +
+    '    Line: Integer;'#10 +
+    '    Ch: Integer;'#10 +
+    '  end;'#10 +
+    '  TOwner = class'#10 +
+    '  private'#10 +
+    '    FSel: TMyList<TSel>;'#10 +
+    '  public'#10 +
+    '    procedure Bump(I: Integer);'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TOwner.Bump(I: Integer);'#10 +
+    'begin'#10 +
+    '  with FSel.List[I] do'#10 +
+    '    if Line > 0 then Inc(Ch);'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   { `with F do` where F has OVERLOADS and the parameterless one is inherited.
     A ribbon library's accessibility helper: the class overrides
     `GetScreenBounds(out ABounds: TRect): Boolean` and inherits a parameterless
@@ -1774,6 +1825,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitPOUse.pas'), UNIT_POUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitSABase.pas'), UNIT_SABASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitSAUse.pas'), UNIT_SAUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitNGBase.pas'), UNIT_NGBASE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitNGUse.pas'), UNIT_NGUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWX.pas'), UNIT_WX);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWXUse.pas'), UNIT_WXUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNHBase.pas'), UNIT_NHBASE);
@@ -2218,6 +2271,15 @@ begin
     Ok('selfarity: no diags at all', Length(LSA.Diags) = 0);
     Ok('selfarity: an impl-section alias does not shadow its own generic',
       CrossRefTo(LSA, 'Control', 'Control'));
+
+    // A NESTED type of a generic carries the frame it was reached through.
+    var LNG := ModelByName('unitnguse');
+    Ok('nestedgen: UnitNGUse loaded', Assigned(LNG));
+    Ok('nestedgen: no diags at all', Length(LNG.Diags) = 0);
+    // The with pass records its bindings in ExtRefMap and clears RefMap, so
+    // this is a CrossRefTo even though the record is declared in this unit.
+    Ok('nestedgen: indexing `List` yields the ARGUMENT, not the open parameter',
+      CrossRefTo(LNG, 'Line', 'Line') and CrossRefTo(LNG, 'Ch', 'Ch'));
 
     // Three cross-unit with-target shapes, one Ok each — see UNIT_WXUSE for
     // which real VCL unit every one of them comes from.

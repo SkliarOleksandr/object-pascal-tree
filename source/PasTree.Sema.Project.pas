@@ -262,6 +262,7 @@ type
     procedure CheckConstraints(AId: Integer);
     function DeclTypeX(AMid, ASym: Integer): TSemaXType;
     function SubstX(const AX: TSemaXType; AInst, ADepth: Integer): TSemaXType;
+    function DeclaredWithinX(AMid, ASym, AOwnerMid, AOwnerSym: Integer): Boolean;
     function ResolveTypeExpr(AId, ANode: Integer;
       ABare: Boolean = True): TSemaXType;
     function PreferNonGeneric(AId, AMid, ASym,
@@ -723,7 +724,7 @@ begin
   try
     LPre := FPP.Process(LFull);
     LTree := TPasParser.ParseFile(LPre, LDiags);
-    LModel := TPasSemaResolver.Analyze(LTree);
+    LModel := TPasSemaResolver.Analyze(LTree, False, FPlatform);
   except
     on Exception do
     begin
@@ -836,7 +837,7 @@ begin
           // its type diagnostics.
           LDone[AIndex] := TPasSemaResolver.Analyze(LTree,
             {ASkipTyper} AInterfaceOnly and (Length(LTree.Nodes) > 0) and
-            (LTree.Nodes[0].Kind = nkUnit));
+            (LTree.Nodes[0].Kind = nkUnit), FPlatform);
         except
           on E: Exception do
           begin
@@ -2011,6 +2012,41 @@ begin
     for LIdx := 0 to High(LArgs) do
       LArgs[LIdx] := SubstX(LArgs[LIdx], AInst, ADepth + 1);
     Result.Inst := Instantiate(XPlain(AX.UnitId, AX.Sym), LArgs);
+  end
+  // A type DECLARED INSIDE the generic this frame instantiates has no
+  // arguments of its own, yet its definition is written in that generic's
+  // parameters — so the frame must travel WITH it, or it is lost at exactly
+  // the point it is about to be needed.
+  //
+  // `TList<T>` declares `arrayofT = array of T` as a nested type and returns it
+  // from `property List`. `with FSelections.List[I] do` then substitutes the
+  // member type over {T := TSelection}, gets back the bare nested-type symbol,
+  // indexes it — and the element is the OPEN `T`, because by then nothing knows
+  // which instantiation it came from. 78 of 94 diagnostics on one project were
+  // that single shape, in two units of the same editor component.
+  else if DeclaredWithinX(AX.UnitId, AX.Sym, LInst.UnitId, LInst.Sym) then
+    Result.Inst := AInst;
+end;
+
+// Is ASym declared inside AOwnerSym's scope, at any nesting depth? Used only by
+// SubstX, to tell a nested type of the generic being instantiated from an
+// unrelated type that merely happens to be its member's declared type.
+function TPasSemaProject.DeclaredWithinX(AMid, ASym,
+  AOwnerMid, AOwnerSym: Integer): Boolean;
+var
+  LScope, LDepth: Integer;
+begin
+  Result := False;
+  if (AMid <> AOwnerMid) or (ASym = NIL_SYM) or (AOwnerSym = NIL_SYM) then
+    Exit;
+  LScope := FModels[AMid].Symbols[ASym].Scope;
+  for LDepth := 1 to 16 do
+  begin
+    if LScope = NIL_SCOPE then
+      Exit;
+    if FModels[AMid].Scopes[LScope].StructSym = AOwnerSym then
+      Exit(True);
+    LScope := FModels[AMid].Scopes[LScope].Parent;
   end;
 end;
 
@@ -5578,8 +5614,10 @@ var
             // regression of the first implementation), and building from
             // the SAME token layer also keeps the prefix invariant safe
             // against a file changing on disk between the waves.
-            LNew[AIdx] := TPasSemaResolver.Analyze(TPasParser.ParseFile(
-              FModels[LIds[LFrom + AIdx]].Tree.Source, LDiags, False));
+            LNew[AIdx] := TPasSemaResolver.Analyze(
+              TPasParser.ParseFile(
+                FModels[LIds[LFrom + AIdx]].Tree.Source, LDiags, False),
+              False, FPlatform);
           except
             on Exception do
               LNew[AIdx] := nil;   // keep the interface snapshot
