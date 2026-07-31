@@ -295,9 +295,17 @@ Still open, roughly in the order we're tackling it:
   units genuinely absent from the flat directory. `BuildWinVCL.dpk` (271 units)
   and `BuildWinFMX.dpk` (362 units) are both clean end to end. Stable run to run
   and identical single-threaded. This is a floor to HOLD, not a finished job —
-  the next corpus is the real project (see the AVImark note below), and the two
-  precedence gaps below are known places where the binding is right-ish for the
-  wrong reason.
+  and the two precedence gaps below are known places where the binding is
+  right-ish for the wrong reason.
+
+  **The next corpus, a real 3747-unit / 7.2M-line application, is effectively
+  clean too as of 2026-07-31: 8 diagnostics, none of them a defect we can fix
+  here.** Five are `F1027` for a charting library that ships `.dcu` + `.hpp` and
+  no `.pas` (the source-less-units item below); two are a CONFIRMED true
+  positive — a method-resolution clause whose right-hand side is declared
+  nowhere in the shipped sources, which `dcc` reports identically on a reduced
+  probe; one is the `{$IF Declared(X)}` item below. Down from 899 on
+  2026-07-28.
 - **Two `with`-target diagnostics we accept where dcc refuses**, both found by
   auditing 5.7 against the implementation rather than by the corpus, and both
   missing-diagnostic rather than false-positive:
@@ -510,8 +518,8 @@ Still open, roughly in the order we're tackling it:
   - *The tree.* Group → project → the .dproj's own grouping (Contains /
     Requires for a package, unit vs form vs resource), and separately the
     closure a project actually pulls in, which is where the units NOT listed in
-    any `.dproj` live (3790 analyzed vs 1542 listed for AVImark — the other
-    2248 are library units nothing in the UI currently surfaces). Worth keeping
+    any `.dproj` live (3747 analyzed vs 1542 listed for AVImark — the other
+    2205 are library units nothing in the UI currently surfaces). Worth keeping
     those two axes distinct in the model rather than merging them into one list:
     "files the project declares" and "units the analysis reached" answer
     different questions, and the second is what the diagnostics are keyed to.
