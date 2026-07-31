@@ -897,6 +897,56 @@ const
     take it (TFallback, used by a field afterwards). The third asks the
     question the other way round. Answering a flat False, as the first pass
     must, gets the first two wrong and the last two right. }
+  { An interface's IMPLICIT ancestor (14.1.1). A heritage-less interface still
+    descends from IInterface, so QueryInterface/_AddRef/_Release are reachable
+    on any value of that type — the member walk has to make that hop the way it
+    already makes the TObject one for a heritage-less class.
+
+    Written as a `with` body on purpose: an unresolved MEMBER after a dot is not
+    reported at all today, so `I.QueryInterface` would pass whether the hop
+    works or not. Inside a `with` the same name is a BARE identifier and a miss
+    is a real E2003 — which is how the defect was found. (The first probe used
+    a name that happened to resolve anyway, and a silent analyzer and a correct
+    one looked identical until a deliberately undeclared control name proved
+    the diagnostic fires there at all.)
+
+    IInterface is DECLARED in a fixture unit rather than taken from the RTL:
+    this suite analyses a temp directory whose only search path is itself, so a
+    real System.pas is not reachable. It has to be a SEPARATE unit — the hop
+    goes through ResolveRealDecl, which searches used units and the System unit
+    and deliberately not the current one — which also makes this the same
+    cross-unit shape the real IInterface has. }
+  UNIT_IFACEBASE =
+    'unit UnitIfaceBase;'#10'interface'#10 +
+    'type'#10 +
+    '  IInterface = interface'#10 +
+    '    function QueryInterface(const IID: TGUID; out Obj): Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
+  UNIT_IFACEROOT =
+    'unit UnitIfaceRoot;'#10'interface'#10'uses UnitIfaceBase;'#10 +
+    'type'#10 +
+    '  IFoo = interface'#10 +          // no heritage clause of its own
+    '    procedure Go;'#10 +
+    '  end;'#10 +
+    'procedure Use(I: IFoo);'#10 +
+    'implementation'#10 +
+    'procedure Use(I: IFoo);'#10 +
+    'var'#10 +
+    '  R: Integer;'#10 +
+    '  G: TGUID;'#10 +
+    '  O: Pointer;'#10 +
+    'begin'#10 +
+    '  with I do'#10 +
+    '  begin'#10 +
+    '    Go;'#10 +
+    '    R := QueryInterface(G, O);'#10 +
+    '  end;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   UNIT_DCLBASE =
     'unit UnitDclBase;'#10'interface'#10 +
     'type'#10 +
@@ -1866,6 +1916,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitPOUse.pas'), UNIT_POUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitSABase.pas'), UNIT_SABASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitSAUse.pas'), UNIT_SAUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitIfaceBase.pas'), UNIT_IFACEBASE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitIfaceRoot.pas'), UNIT_IFACEROOT);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitDclBase.pas'), UNIT_DCLBASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitDclUse.pas'), UNIT_DCLUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNGBase.pas'), UNIT_NGBASE);
@@ -2314,6 +2366,13 @@ begin
     Ok('selfarity: no diags at all', Length(LSA.Diags) = 0);
     Ok('selfarity: an impl-section alias does not shadow its own generic',
       CrossRefTo(LSA, 'Control', 'Control'));
+
+    // A heritage-less interface still reaches IInterface's own members.
+    var LIR := ModelByName('unitifaceroot');
+    Ok('ifaceroot: UnitIfaceRoot loaded', Assigned(LIR));
+    Ok('ifaceroot: no diags at all', Length(LIR.Diags) = 0);
+    Ok('ifaceroot: QueryInterface resolves through the implicit IInterface',
+      CrossRefTo(LIR, 'QueryInterface', 'QueryInterface'));
 
     // `$IF Declared(X)` answered on the second preprocessing pass.
     var LDC := ModelByName('unitdcluse');

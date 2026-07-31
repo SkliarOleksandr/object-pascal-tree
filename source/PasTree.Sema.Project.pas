@@ -2819,6 +2819,7 @@ var
   LCur, LNext: TSemaXType;
   LM: TPasSemaModel;
   LScope, LDef, LChild, LDepth, LFound, LRMid, LRSym: Integer;
+  LRootName: string;   // the implicit ancestor for a heritage-less struct
 begin
   Result := False;
   AMemMid := NIL_SYM;
@@ -2922,20 +2923,39 @@ begin
             // the DeclNode-less branch above uses, so it finds the REAL
             // TObject (System.pas) rather than a compiler-seeded stub.
             //
-            // Classes only. A record/object type genuinely has no implicit
-            // ancestor, and an interface's implicit IInterface is left alone
-            // on the same reasoning as the implemented-interface entries
-            // above: its members have to be implemented by the class anyway.
-            // The (LRMid, LRSym) <> (current) guard is what stops TObject
-            // itself — which of course has no heritage clause either — from
-            // walking into itself forever.
-            if (LM.Tree.Nodes[LDef].Kind = nkClassType) and
-               ResolveRealDecl(LCur.UnitId, 'tobject', LRMid, LRSym) and
+            // An INTERFACE has one too — `IInterface` (14.1.1), or `IDispatch`
+            // for a dispinterface, which descends from IInterface and so
+            // covers strictly more. This was originally left out on the
+            // reasoning quoted for the implemented-interface entries above
+            // ("their members have to be implemented by the class anyway"),
+            // which is true THERE and false here: a value of interface type
+            // reaches QueryInterface/_AddRef/_Release through this hop and
+            // nothing else. dcc compiles `with I do QueryInterface(G, O)` for
+            // a heritage-less `IFoo`; we reported E2003 on it. Found by
+            // auditing the spec against the code, not by the corpora — the RTL
+            // reaches those three through `Supports`/`as`, never by name.
+            //
+            // A record/object type genuinely has no implicit ancestor.
+            // The (LRMid, LRSym) <> (current) guard is what stops TObject or
+            // IInterface itself — which of course have no heritage clause
+            // either — from walking into themselves forever.
+            LRootName := '';
+            case LM.Tree.Nodes[LDef].Kind of
+              nkClassType:
+                LRootName := 'tobject';
+              nkInterfaceType:
+                if LM.Tree.Nodes[LDef].Aux = 1 then
+                  LRootName := 'idispatch'   // dispinterface
+                else
+                  LRootName := 'iinterface';
+            end;
+            if (LRootName <> '') and
+               ResolveRealDecl(LCur.UnitId, LRootName, LRMid, LRSym) and
                ((LRMid <> LCur.UnitId) or (LRSym <> LCur.Sym)) then
             begin
               LCur.UnitId := LRMid;
               LCur.Sym := LRSym;
-              LCur.Inst := NIL_INST;   // TObject is not generic
+              LCur.Inst := NIL_INST;   // neither root is generic
               Continue;
             end;
             Exit;
