@@ -16,7 +16,7 @@ interface
 uses
   System.SysUtils, System.Classes, System.IOUtils, System.Generics.Collections,
   System.JSON, System.Diagnostics, System.Math, System.Win.Registry,
-  Winapi.Windows, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls,
+  Winapi.Windows, Winapi.Messages, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls,
   Vcl.ExtCtrls, Vcl.Dialogs, Vcl.Graphics, Vcl.Clipbrd,
   SynEdit, SynEditTypes, SynEditHighlighter, SynHighlighterJSON,
   SynHighlighterPas,
@@ -69,6 +69,18 @@ type
   end;
   PPasMsgNodeData = ^TPasMsgNodeData;
 
+  { One visited position, for Back/Forward.
+
+    A PATH and a caret position, never a node or symbol index: every
+    re-analysis (ReanalyzeForNav, armed by any edit) rebuilds the project from
+    scratch and invalidates every index into it, so a history holding them
+    would jump to garbage after the first keystroke. This survives. }
+  TNavHistoryEntry = record
+    FilePath: string;
+    Line: Integer;
+    Col: Integer;
+  end;
+
   TfrmMain = class(TForm)
     pnlTop: TPanel;
     btnOpen: TButton;
@@ -90,6 +102,11 @@ type
     SynJSONSyn1: TSynJSONSyn;
     ActionList1: TActionList;
     FindAction: TAction;
+    NavBackAction: TAction;
+    NavForwardAction: TAction;
+    NavSep1: TMenuItem;
+    NavBack1: TMenuItem;
+    NavForward1: TMenuItem;
     GotoImplAction: TAction;
     GotoDeclAction: TAction;
     CopyMessageAction: TAction;
@@ -135,6 +152,10 @@ type
     procedure FindActionExecute(Sender: TObject);
     procedure GotoImplActionUpdate(Sender: TObject);
     procedure GotoImplActionExecute(Sender: TObject);
+    procedure NavBackActionExecute(Sender: TObject);
+    procedure NavBackActionUpdate(Sender: TObject);
+    procedure NavForwardActionExecute(Sender: TObject);
+    procedure NavForwardActionUpdate(Sender: TObject);
     procedure GotoDeclActionUpdate(Sender: TObject);
     procedure GotoDeclActionExecute(Sender: TObject);
     procedure CopyMessageActionUpdate(Sender: TObject);
@@ -169,6 +190,13 @@ type
     FSemaProject: TPasSemaProject; // kept alive after RunParse (navigation)
     FNav: TPasNavigator;           // go-to-declaration over FSemaProject
     FLinkTab: TObject;             // TSourceTab currently showing a link
+    // Back/Forward. FNavHistory is every visited position in order and
+    // FNavIndex is where we are IN it — so Back is a step left, Forward a step
+    // right, and a fresh jump discards whatever was to the right. FNavBusy
+    // suppresses recording while Back/Forward is itself doing the jumping.
+    FNavHistory: TList<TNavHistoryEntry>;
+    FNavIndex: Integer;
+    FNavBusy: Boolean;
     // "Highlight other occurrences of the selected identifier" — the
     // background color, shared by every tab's own highlighter instance
     // (each set from cbHighlightColor; new tabs pick up the current value —
@@ -221,6 +249,13 @@ type
     procedure ApplyHighlighterContext(AHL: TPasTreeSynHighlighter;
       const APath: string);
     procedure CloseAllTabs;
+    // Navigation history — see NavigateTo.
+    function CurrentNavPos(out AEntry: TNavHistoryEntry): Boolean;
+    procedure PushNavEntry(const AEntry: TNavHistoryEntry);
+    procedure NavigateTo(const APath: string; ALine, ACol: Integer);
+    procedure GoToNavIndex(AIndex: Integer);
+    procedure ClearNavHistory;
+    procedure AppMessage(var AMsg: TMsg; var AHandled: Boolean);
     procedure PopulateConfigCombo;
     function SelectedConfig: string;
     procedure SetupRecentMenu;
@@ -578,13 +613,10 @@ end;
 procedure TfrmMain.GotoImplActionExecute(Sender: TObject);
 var
   LTarget: TPasNavTarget;
-  LTab: TSourceTab;
 begin
   if not ActiveRoutineTarget(True, {out} LTarget) then
     Exit;
-  LTab := TSourceTab(pgc.ActivePage);
-  LTab.Editor.CaretXY := BufferCoord(LTarget.Col, LTarget.Line);
-  LTab.Editor.EnsureCursorPosVisible;
+  NavigateTo(LTarget.FilePath, LTarget.Line, LTarget.Col);
 end;
 
 procedure TfrmMain.GotoImplActionUpdate(Sender: TObject);
@@ -598,13 +630,10 @@ end;
 procedure TfrmMain.GotoDeclActionExecute(Sender: TObject);
 var
   LTarget: TPasNavTarget;
-  LTab: TSourceTab;
 begin
   if not ActiveRoutineTarget(False, {out} LTarget) then
     Exit;
-  LTab := TSourceTab(pgc.ActivePage);
-  LTab.Editor.CaretXY := BufferCoord(LTarget.Col, LTarget.Line);
-  LTab.Editor.EnsureCursorPosVisible;
+  NavigateTo(LTarget.FilePath, LTarget.Line, LTarget.Col);
 end;
 
 procedure TfrmMain.GotoDeclActionUpdate(Sender: TObject);
@@ -744,6 +773,11 @@ begin
   FOpenFiles := TStringList.Create;
   FMsgLog := TList<TPasMsgRow>.Create;
   FMsgVisible := TList<Integer>.Create;
+  FNavHistory := TList<TNavHistoryEntry>.Create;
+  FNavIndex := -1;
+  // The mouse's back/forward buttons never reach a control's OnMouseDown —
+  // see AppMessage.
+  Application.OnMessage := AppMessage;
   FPlatform := pfWin32;
   FStudioRoot := StudioRoot;   // resolve once; RTL search paths reuse it
   // Debounces re-analysis while typing: an edit (re)starts the timer, and only
@@ -784,6 +818,8 @@ begin
   FreeAndNil(FNav);
   FreeAndNil(FSemaProject);
   FreeAndNil(FDProj);
+  Application.OnMessage := nil;   // before the form it dispatches to goes
+  FNavHistory.Free;
   FMsgVisible.Free;
   FMsgLog.Free;
   FOpenFiles.Free;
@@ -799,6 +835,9 @@ begin
   GotoImplAction.ShortCut := Vcl.Menus.ShortCut(VK_DOWN, [ssCtrl, ssShift]);
   GotoDeclAction.ShortCut := Vcl.Menus.ShortCut(VK_UP, [ssCtrl, ssShift]);
   CopyMessageAction.ShortCut := Vcl.Menus.ShortCut(Ord('C'), [ssCtrl]);
+  // The conventional pair, matching every browser and IDE.
+  NavBackAction.ShortCut := Vcl.Menus.ShortCut(VK_LEFT, [ssAlt]);
+  NavForwardAction.ShortCut := Vcl.Menus.ShortCut(VK_RIGHT, [ssAlt]);
 
   vstFiles.NodeDataSize := SizeOf(TPasNodeData);
   vstFiles.Header.Options := vstFiles.Header.Options - [hoVisible];
@@ -1059,7 +1098,6 @@ procedure TfrmMain.vtMessagesDblClick(Sender: TObject);
 var
   LData: PPasMsgNodeData;
   LRow: TPasMsgRow;
-  LEditor: TSynEdit;
 begin
   if vtMessages.FocusedNode = nil then
     Exit;
@@ -1070,11 +1108,7 @@ begin
   LRow := FMsgLog[FMsgVisible[LData.Index]];
   if (LRow.FilePath = '') or not TFile.Exists(LRow.FilePath) then
     Exit;
-  LEditor := OpenFileTab(LRow.FilePath);
-  LEditor.CaretXY := BufferCoord(LRow.Col, LRow.Line);
-  LEditor.EnsureCursorPosVisible;
-  if LEditor.CanFocus then
-    LEditor.SetFocus;
+  NavigateTo(LRow.FilePath, LRow.Line, LRow.Col);
 end;
 
 procedure TfrmMain.OpenProject(const AProjectFile: string);
@@ -1098,6 +1132,7 @@ begin
   // under, both in what it shows and in the context it paints with. See
   // CloseAllTabs.
   CloseAllTabs;
+  ClearNavHistory;   // its entries point into the tabs just closed
   // A NEW project starts with a clean slate: no carried-over AST/Semantics
   // dump from whatever was open before.
   tsJson.TabVisible := False;
@@ -1452,7 +1487,6 @@ procedure TfrmMain.EditorMouseDown(Sender: TObject; Button: TMouseButton;
   Shift: TShiftState; X, Y: Integer);
 var
   LEditor: TSynEdit;
-  LSameFile: Boolean;
   LFrom, LTo: Integer;
   LTarget: TPasNavTarget;
 begin
@@ -1462,7 +1496,6 @@ begin
   if not ResolveAt(LEditor, X, Y, {out} LFrom, {out} LTo, {out} LTarget) then
     Exit;
   ClearLink;
-  LSameFile := SameText(LTarget.FilePath, TSourceTab(LEditor.Parent).FilePath);
   // SynEdit's own MouseDown moves the caret to the click position AFTER this
   // handler returns (inherited MouseDown fires us, THEN MoveDisplayPosAnd-
   // Selection), clobbering our jump — which is why it previously only "worked"
@@ -1470,17 +1503,13 @@ begin
   // it runs after SynEdit's caret move, and a single ctrl+click lands correctly.
   TThread.ForceQueue(nil,
     procedure
-    var
-      LTargetEd: TSynEdit;
     begin
-      if LSameFile then
-        LTargetEd := LEditor                        // same unit: jump in place
-      else
-        LTargetEd := OpenFileTab(LTarget.FilePath); // other unit: (re)open a tab
-      LTargetEd.CaretXY := BufferCoord(LTarget.Col, LTarget.Line);
-      LTargetEd.EnsureCursorPosVisible;
-      if LTargetEd.CanFocus then
-        LTargetEd.SetFocus;
+      // NavigateTo opens the tab when the target is in another unit and finds
+      // the existing one when it is not, so the same-file case needs no
+      // special path here — but the ORIGIN it records must be this editor's
+      // caret, which SynEdit has by now moved to the click. That is the right
+      // origin: it is where the user was looking.
+      NavigateTo(LTarget.FilePath, LTarget.Line, LTarget.Col);
     end);
 end;
 
@@ -1940,6 +1969,159 @@ begin
   ClearLink;                        // the stale model no longer matches the text
   FReparseTimer.Enabled := False;
   FReparseTimer.Enabled := True;
+end;
+
+{ navigation history — Back / Forward }
+
+// Where the caret is now, as a history entry. False if no source tab is open.
+function TfrmMain.CurrentNavPos(out AEntry: TNavHistoryEntry): Boolean;
+var
+  LTab: TSourceTab;
+begin
+  Result := False;
+  if not (pgc.ActivePage is TSourceTab) then
+    Exit;
+  LTab := TSourceTab(pgc.ActivePage);
+  AEntry.FilePath := LTab.FilePath;
+  AEntry.Line := LTab.Editor.CaretY;
+  AEntry.Col := LTab.Editor.CaretX;
+  Result := AEntry.FilePath <> '';
+end;
+
+// Appends, unless it would repeat the line already at the top. Repeated
+// ctrl+clicks around one spot would otherwise bury the history under entries
+// that are all the same place.
+procedure TfrmMain.PushNavEntry(const AEntry: TNavHistoryEntry);
+begin
+  if (FNavHistory.Count > 0) and
+     SameText(FNavHistory[FNavHistory.Count - 1].FilePath, AEntry.FilePath) and
+     (FNavHistory[FNavHistory.Count - 1].Line = AEntry.Line) then
+    Exit;
+  FNavHistory.Add(AEntry);
+end;
+
+{ THE jump. Every navigation goes through here — ctrl+click, the Goto
+  Declaration/Implementation pair, and a double-click in the message window —
+  so "where did I come from" is recorded in one place instead of three that
+  drift apart. (The To-do called the ctrl+click handler "the single place a
+  jump happens"; it was not, once the Goto actions and the message window
+  existed. This makes the statement true rather than working around it.)
+
+  The ORIGIN is pushed before the target: it is what Back returns to. }
+procedure TfrmMain.NavigateTo(const APath: string; ALine, ACol: Integer);
+var
+  LOrigin, LTarget: TNavHistoryEntry;
+  LEditor: TSynEdit;
+begin
+  if not FNavBusy then
+  begin
+    // Anything to the RIGHT of where we are is a path not taken any more —
+    // the conventional browser rule, and the only one that keeps Forward
+    // meaning something.
+    while FNavHistory.Count > FNavIndex + 1 do
+      FNavHistory.Delete(FNavHistory.Count - 1);
+    if CurrentNavPos({out} LOrigin) then
+      PushNavEntry(LOrigin);
+  end;
+  LEditor := OpenFileTab(APath);   // same tab if it is already open
+  if LEditor = nil then
+    Exit;
+  LEditor.CaretXY := BufferCoord(ACol, ALine);
+  LEditor.EnsureCursorPosVisible;
+  if LEditor.CanFocus then
+    LEditor.SetFocus;
+  if FNavBusy then
+    Exit;
+  LTarget.FilePath := APath;
+  LTarget.Line := ALine;
+  LTarget.Col := ACol;
+  PushNavEntry(LTarget);
+  FNavIndex := FNavHistory.Count - 1;
+end;
+
+{ Moves to a recorded position without recording anything.
+
+  The entry we are LEAVING is refreshed from the live caret first, so a Back
+  followed by a Forward returns to where the caret actually ended up rather
+  than to where the jump originally landed. }
+procedure TfrmMain.GoToNavIndex(AIndex: Integer);
+var
+  LHere: TNavHistoryEntry;
+begin
+  if (AIndex < 0) or (AIndex >= FNavHistory.Count) then
+    Exit;
+  if (FNavIndex >= 0) and (FNavIndex < FNavHistory.Count) and
+     CurrentNavPos({out} LHere) and
+     SameText(LHere.FilePath, FNavHistory[FNavIndex].FilePath) then
+    FNavHistory[FNavIndex] := LHere;
+  FNavBusy := True;
+  try
+    FNavIndex := AIndex;
+    NavigateTo(FNavHistory[AIndex].FilePath, FNavHistory[AIndex].Line,
+      FNavHistory[AIndex].Col);
+  finally
+    FNavBusy := False;
+  end;
+end;
+
+// A project change invalidates every entry: the tabs are gone (see
+// CloseAllTabs) and the files may not even belong to the new project.
+procedure TfrmMain.ClearNavHistory;
+begin
+  FNavHistory.Clear;
+  FNavIndex := -1;
+end;
+
+{ The mouse's back/forward buttons.
+
+  Not through TSynEdit.OnMouseDown: VCL's `TMouseButton` is (mbLeft, mbRight,
+  mbMiddle) and never reports an X button, so the handler is never called for
+  them. WM_XBUTTONDOWN goes to the focused control, which is the editor, so
+  Application.OnMessage is the one place that sees it without subclassing every
+  editor as it is created. Kept to an integer compare — this runs for every
+  message in the application. }
+procedure TfrmMain.AppMessage(var AMsg: TMsg; var AHandled: Boolean);
+const
+  // winuser.h; Winapi.Windows declares the VK_ forms but not these.
+  XBUTTON_BACK = 1;
+  XBUTTON_FORWARD = 2;
+begin
+  if AMsg.message <> WM_XBUTTONDOWN then
+    Exit;
+  case HiWord(AMsg.wParam) of
+    XBUTTON_BACK:
+      if NavBackAction.Enabled then
+      begin
+        NavBackAction.Execute;
+        AHandled := True;
+      end;
+    XBUTTON_FORWARD:
+      if NavForwardAction.Enabled then
+      begin
+        NavForwardAction.Execute;
+        AHandled := True;
+      end;
+  end;
+end;
+
+procedure TfrmMain.NavBackActionExecute(Sender: TObject);
+begin
+  GoToNavIndex(FNavIndex - 1);
+end;
+
+procedure TfrmMain.NavBackActionUpdate(Sender: TObject);
+begin
+  TAction(Sender).Enabled := FNavIndex > 0;
+end;
+
+procedure TfrmMain.NavForwardActionExecute(Sender: TObject);
+begin
+  GoToNavIndex(FNavIndex + 1);
+end;
+
+procedure TfrmMain.NavForwardActionUpdate(Sender: TObject);
+begin
+  TAction(Sender).Enabled := FNavIndex < FNavHistory.Count - 1;
 end;
 
 { highlighter context }

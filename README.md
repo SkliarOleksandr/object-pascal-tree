@@ -461,34 +461,28 @@ Still open, roughly in the order we're tackling it:
      without types, so every member access through such a name silently
      degrades, and real errors get hidden along with the false ones. A stub with
      honest types (stage 1) beats a name list.
-- **Navigation history (Back / Forward).** Ctrl+click jumps; nothing remembers
-  where it jumped FROM, so getting back is manual. A stack of visited positions
-  with Back (and Forward, which is nearly free once Back exists) — conventional
-  bindings are Alt+Left/Alt+Right plus the mouse's XButton1/XButton2, which
-  `TSynEdit.OnMouseDown` already receives.
-  Two things decide whether this works or rots:
-  - *Store file path + line/col, never node or symbol indices.* Every
-    re-analysis (`ReanalyzeForNav`, armed by any edit) rebuilds `FSemaProject`
-    from scratch, so every index into it is invalidated — a history holding them
-    would jump to garbage after the first keystroke. A path and a caret position
-    survive.
-  - *Push the ORIGIN at jump time*, in `EditorMouseDown`'s deferred block, next
-    to where the target caret is set — that block is the single place a jump
-    actually happens. Collapse consecutive entries pointing at the same line so
-    repeated clicks in one spot do not bury the history.
-  Two decisions already taken, so they do not get re-opened during
-  implementation:
-  - *A jump may open a unit that was closed, and Back never closes anything.*
-    Tabs are the user's to close.
-  - *An edit makes recorded positions in that file drift; jump to them anyway.*
-    They land near-enough, and "near-enough" beats both alternatives: purging
-    the file's entries throws away history that is nowhere near the edit, and
-    recomputing offsets from the edit deltas is real work for a problem measured
-    in a few lines. Recomputation is **deliberately deferred, not rejected** —
-    if it ever becomes worth doing, the information is there (the demo knows
-    which buffer changed and by how much). Worth checking first whether
-    SynEdit's own bookmark machinery already tracks positions across edits; if
-    it does, that is a cheaper middle path than any offset arithmetic of ours.
+- ~~**Navigation history (Back / Forward).**~~ **Done on 2026-07-31.**
+  Alt+Left / Alt+Right, the mouse's back/forward buttons, and two items on the
+  editor's context menu. Entries are file path + line/col, never node or symbol
+  indices: every re-analysis (`ReanalyzeForNav`, armed by any edit) rebuilds
+  `FSemaProject` from scratch and invalidates every index into it.
+
+  Two things the plan above got wrong, both found by building it:
+  - *`EditorMouseDown` was not "the single place a jump happens"* — the Goto
+    Declaration/Implementation actions and the message window's double-click
+    jump too, and a history fed from one of four sites is worse than none. All
+    four now go through `NavigateTo`, which is what the plan wanted to be true.
+  - *`TSynEdit.OnMouseDown` does NOT receive the X buttons.* VCL's
+    `TMouseButton` is `(mbLeft, mbRight, mbMiddle)` and has no XButton member at
+    all, so the handler is never called for them. `WM_XBUTTONDOWN` goes to the
+    focused control, so `Application.OnMessage` is the one place that sees it
+    without subclassing every editor as it is created.
+
+  The two decisions taken in advance both held: a jump may open a closed unit
+  and Back never closes anything, and recorded positions drift after an edit
+  and are jumped to anyway. Positions also die with the project — opening one
+  closes every tab, so keeping entries that point into them would be pointing
+  at nothing.
 - ~~**Recent projects on `Open Project...` (split button).**~~ **Done on
   2026-07-31** (`PasTreeDemo.Settings`). `Open Project...` is a real
   `bsSplitButton`, so its primary half still browses and Windows handles the

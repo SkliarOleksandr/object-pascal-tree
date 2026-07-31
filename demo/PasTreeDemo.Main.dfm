@@ -350,6 +350,16 @@ object frmMain: TfrmMain
       OnExecute = GotoImplActionExecute
       OnUpdate = GotoImplActionUpdate
     end
+    object NavBackAction: TAction
+      Caption = 'Back'
+      OnExecute = NavBackActionExecute
+      OnUpdate = NavBackActionUpdate
+    end
+    object NavForwardAction: TAction
+      Caption = 'Forward'
+      OnExecute = NavForwardActionExecute
+      OnUpdate = NavForwardActionUpdate
+    end
     object GotoDeclAction: TAction
       Caption = 'Go to Declaration'
       OnExecute = GotoDeclActionExecute
@@ -377,6 +387,15 @@ object frmMain: TfrmMain
     end
     object GotoDeclaration1: TMenuItem
       Action = GotoDeclAction
+    end
+    object NavSep1: TMenuItem
+      Caption = '-'
+    end
+    object NavBack1: TMenuItem
+      Action = NavBackAction
+    end
+    object NavForward1: TMenuItem
+      Action = NavForwardAction
     end
   end
   object MessagesPopupMenu: TPopupMenu
