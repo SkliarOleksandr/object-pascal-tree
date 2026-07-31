@@ -127,6 +127,7 @@ type
     procedure UnbindShadowedByWith(ANode, AWithScope: Integer);
     procedure ResolveOneWithStmt(AWith: Integer);
     procedure ResolveWithStmts;
+    procedure CheckForCounters;
     procedure Run;
   public
     { ASkipTyper skips the final expression type-check (Phase 3a) — for
@@ -2496,6 +2497,125 @@ begin
   end;
 end;
 
+{ 5.5.1: the counter of a `for` loop is read-only in the body — dcc reports
+  `E2081 Assignment to FOR-Loop variable 'X'`. Three shapes, all dcc-verified
+  and all reported: a direct `I := ...`, a var-param mutation (`Inc(I)`,
+  `Dec(I)`), and the same two against an inline `for var K` counter.
+
+  Runs after ResolveNode because it works on BINDINGS, not names: the point is
+  that the assignment target is the same SYMBOL the header declared or named,
+  which is what makes a shadowed name in a nested scope not a false hit.
+
+  Intra-unit by construction — a for counter is a local or an inline
+  declaration, never reachable from another unit — so this needs none of the
+  cross-unit machinery and cannot be gated on AllUsesResolved. }
+procedure TPasSemaResolver.CheckForCounters;
+var
+  // Indexed by node, not a list: the test is per-node and this is a walk over
+  // every node in the unit.
+  LFlagged: TArray<Boolean>;
+  LIdx, LSym, LBody, LChild: Integer;
+
+  // The symbol the loop header's counter denotes: a declaration for the
+  // `for var K` form, an ordinary reference otherwise.
+  function CounterSym(AFor: Integer): Integer;
+  var
+    LFirst, LName: Integer;
+  begin
+    Result := NIL_SYM;
+    LFirst := FirstChild(AFor);
+    if LFirst = NIL_NODE then
+      Exit;
+    if KindOf(LFirst) = nkInlineVar then
+    begin
+      LName := FirstChild(LFirst);
+      if (LName <> NIL_NODE) and (KindOf(LName) = nkIdent) then
+        Result := FModel.RefMap[LName];
+    end
+    else if KindOf(LFirst) = nkIdent then
+      Result := FModel.RefMap[LFirst];
+  end;
+
+  procedure Flag(ANode: Integer; const AName: string);
+  var
+    LFileId, LLine, LCol: Integer;
+  begin
+    // One report per offending node: nested loops mean the same assignment is
+    // reached by more than one enclosing walk, and dcc reports it once.
+    if LFlagged[ANode] then
+      Exit;
+    LFlagged[ANode] := True;
+    NodePos(ANode, LFileId, LLine, LCol);
+    FModel.AddDiag(MakeDiag('E2081',
+      Format(SE2081_AssignToForLoopVar, [AName]), ANode, LFileId, LLine, LCol));
+  end;
+
+  // Walks a loop BODY looking for writes to ACounter.
+  procedure Scan(ANode, ACounter: Integer; const AName: string);
+  var
+    LChild, LTarget, LCallee, LArg: Integer;
+  begin
+    if ANode = NIL_NODE then
+      Exit;
+    case KindOf(ANode) of
+      nkAssign:
+        begin
+          LTarget := FirstChild(ANode);
+          if (LTarget <> NIL_NODE) and (KindOf(LTarget) = nkIdent) and
+             (FModel.RefMap[LTarget] = ACounter) then
+            Flag(LTarget, AName);
+        end;
+      nkCall:
+        begin
+          // Inc/Dec take their first argument by reference (4.11), so they
+          // mutate the counter exactly as an assignment does. Matched by NAME
+          // rather than by symbol: both are compiler intrinsics with no
+          // declaration to point at, and a user routine that shadows either
+          // name would not be an intrinsic call at all — but it would also
+          // have to take a var parameter to matter, which is a precision this
+          // check does not claim.
+          LCallee := FirstChild(ANode);
+          if (LCallee <> NIL_NODE) and (KindOf(LCallee) = nkIdent) and
+             (SameText(NodeText(LCallee), 'Inc') or
+              SameText(NodeText(LCallee), 'Dec')) then
+          begin
+            LArg := NextSib(LCallee);
+            if (LArg <> NIL_NODE) and (KindOf(LArg) = nkIdent) and
+               (FModel.RefMap[LArg] = ACounter) then
+              Flag(LArg, AName);
+          end;
+        end;
+    end;
+    LChild := FirstChild(ANode);
+    while LChild <> NIL_NODE do
+    begin
+      Scan(LChild, ACounter, AName);
+      LChild := NextSib(LChild);
+    end;
+  end;
+
+begin
+  SetLength(LFlagged, Length(FTree.Nodes));
+  for LIdx := 0 to High(FTree.Nodes) do
+  begin
+    if not (KindOf(LIdx) in [nkForStmt, nkForInStmt]) then
+      Continue;
+    LSym := CounterSym(LIdx);
+    if LSym = NIL_SYM then
+      Continue;
+    // The body is the LAST child: counter, bounds/collection, then the
+    // statement. Scanning only it keeps the header's own `I := 1` out.
+    LBody := NIL_NODE;
+    LChild := FirstChild(LIdx);
+    while LChild <> NIL_NODE do
+    begin
+      LBody := LChild;
+      LChild := NextSib(LChild);
+    end;
+    Scan(LBody, LSym, FModel.Symbols[LSym].Name);
+  end;
+end;
+
 procedure TPasSemaResolver.Run;
 begin
   FSys := SeedSystemScope(FModel, FPlatform);
@@ -2510,6 +2630,7 @@ begin
   BindTypes;
   ResolveAggregates;  // needs BindTypes' declared types — see its own header
   ResolveWithStmts;   // needs BindTypes' declared types — see its own header
+  CheckForCounters;   // needs RefMap — see its own header
   if not FSkipTyper then
     TPasSemaTyper.Check(FModel);
 end;

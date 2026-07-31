@@ -411,12 +411,14 @@ const
     '  end;'#10 +
     'procedure Consts(aValues: array of const; var F: textfile);'#10 +
     'var'#10 +
-    '  I: Integer;'#10 +
+    '  I, N: Integer;'#10 +
     'begin'#10 +
     '  for I := Low(aValues) to High(aValues) do'#10 +
     '    with aValues[I] do'#10 +          // 47 element type is TVarRec
     '      if VType = 0 then'#10 +         // 48 a TVarRec field, bare
-    '        I := VInteger;'#10 +
+    // N, not I: assigning to the loop counter is E2081 (5.5.1) and dcc would
+    // reject this fixture too. It went unnoticed until the check existed.
+    '        N := VInteger;'#10 +
     'end;'#10 +
     // The property redeclaration as a with target, base = a bare field of the
     // enclosing class. Count is reachable ONLY through the with scope, so

@@ -108,6 +108,16 @@ begin
       Inc(Result);
 end;
 
+// Does any diagnostic with that code contain ASubstr in its message?
+function DiagHasText(const ACode, ASubstr: string): Boolean;
+begin
+  Result := False;
+  for var LIdx := 0 to High(GModel.Diags) do
+    if (GModel.Diags[LIdx].Code = ACode) and
+       GModel.Diags[LIdx].Msg.Contains(ASubstr) then
+      Exit(True);
+end;
+
 // A declaration symbol's bound type name (or '' if unbound / missing).
 function TypeOf(const ANameLower: string; AKind: TSemaSymbolKind): string;
 begin
@@ -1563,6 +1573,51 @@ begin
     VisOf('tinner') = svPrivate);
   Ok('vis: ...but its VALUES still resolve bare from outside the class',
     RefResolvesTo('ivOne', 'ivOne') and (DiagCount('E2003') = 0));
+  GModel.Free;
+
+  // ---- E2081: the for counter is read-only in the body (5.5.1) ----
+  // All three shapes dcc reports, and the three that must stay silent.
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'procedure P;'#10 +
+    'var I, J, N: Integer;'#10 +
+    'begin'#10 +
+    '  for I := 1 to 3 do'#10 +
+    '    I := 5;'#10 +                    // 1: direct assignment
+    '  for J := 1 to 3 do'#10 +
+    '    Inc(J);'#10 +                    // 2: var-param mutation
+    '  for N := 1 to 3 do'#10 +
+    '  begin'#10 +
+    '    I := N;'#10 +                    // reading the counter is fine
+    '    Inc(I);'#10 +                    // mutating something else is fine
+    '  end;'#10 +
+    '  I := 9;'#10 +                      // after the loop is fine
+    'end;'#10 +
+    'procedure Q;'#10 +
+    'begin'#10 +
+    '  for var K := 1 to 3 do'#10 +
+    '    K := 5;'#10 +                    // 3: inline counter
+    'end;'#10 +
+    'end.'#10);
+  Ok('e2081: three reports, one per shape', DiagCount('E2081') = 3);
+  Ok('e2081: names the variable', DiagHasText('E2081', '''I'''));
+  Ok('e2081: and the inline one', DiagHasText('E2081', '''K'''));
+  Ok('e2081: nothing else fires', DiagCount('E2003') = 0);
+  GModel.Free;
+
+  // A NESTED loop reusing the outer counter reports the write once, not once
+  // per enclosing walk.
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'procedure P;'#10 +
+    'var I, J: Integer;'#10 +
+    'begin'#10 +
+    '  for I := 1 to 3 do'#10 +
+    '    for J := 1 to 3 do'#10 +
+    '      I := 0;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Ok('e2081: reported once from inside a nested loop', DiagCount('E2081') = 1);
   GModel.Free;
   Writeln(Format('=== SemaSmoke: %d passed, %d failed ===', [GPassed, GFailed]));
   if GFailed > 0 then

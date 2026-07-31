@@ -323,7 +323,10 @@ Still open, roughly in the order we're tackling it:
   - `set of` base-type limit of 256 values / ordinals in `0..255` (2 §2.4.1);
   - conditions are not required to be Boolean (2 §2.2.2) — no rejection of an
     integer in an `if`/`while`/`until` guard;
-  - assigning to a `for` counter inside the body (5 §5.5.1, dcc `E2081`);
+  - ~~assigning to a `for` counter inside the body~~ — **done 2026-07-31**
+    (`E2081`, all three shapes dcc reports: a direct assignment, `Inc`/`Dec`,
+    and an inline `for var` counter). Zero new diagnostics across ~12 000
+    corpus units, which is the bar every remaining entry here has to clear;
   - bare `raise` outside an exception handler (18 §18.3.1) — needs handler
     context, which nothing tracks;
   - `Slice` outside an open-array argument position (4 §4.11);
