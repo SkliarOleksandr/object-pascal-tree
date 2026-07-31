@@ -317,6 +317,39 @@ Still open, roughly in the order we're tackling it:
   lost diagnostic, never a false one. Closing it means deferring the decision to
   the typer, which knows whether the callee is `Variant`. We also do not
   implement `E2166` (named arguments must follow positional ones).
+- **Invert the overload chain: `PrevOverload`, nearest-declaration-wins.**
+  Today `DeclareSym` keeps the FIRST declaration registered under the name and
+  chains later ones forward through `NextOverload`. Object Pascal's rule is the
+  opposite — the NEAREST declaration wins and shadows what came before — so
+  every place that needs "what does this name mean here?" has to work against
+  the grain, and every place that needs "all the overloads" has to know where
+  the chain starts. Suggested from a previous parser where the inverted link
+  handled every case; the evidence here agrees:
+  - We already hand-rolled nearest-wins once, as a special case: a declaration
+    that HIDES a used unit's leaf name re-binds the name to the newer symbol
+    (`DeclareSym`'s `skUnitRef` branch). With `PrevOverload` that is just the
+    normal path.
+  - An implementation-section overload joining the interface set needed the
+    same fix written twice, in `CheckCalls` and in `SelectOverload`, because the
+    two declarations live in different SCOPES and nothing linked them. A prev
+    link established at declaration time — looking UP the scope chain, not only
+    in the current scope — carries that relation once, and every consumer that
+    walks "what I shadow" gets it for free.
+  - Walking outward is also the order resolution actually wants: nearest scope,
+    then enclosing, then interface, then imports.
+  Surface is small: 19 `NextOverload` references across four units.
+  ⚠️ *What it does NOT solve, so the work is not mistaken for more than it is:*
+  the CROSS-UNIT cases. Whether one unit's `TObjectList` shadows another's
+  depends on the REFERRING unit's `uses` order, so the relation differs per
+  importer and cannot be a single per-symbol link — `FindTypeInUsesArity` and
+  friends stay either way. Of the three overload/shadowing defects fixed on
+  2026-07-30 and -31, this design would have prevented one.
+  ⚠️ *Migration risk is the symbol IDENTITY change:* whatever `FindLocal`
+  returns becomes the newest rather than the oldest declaration, and
+  navigation, dumps and several tests assert on which symbol that is. Hold it to
+  the same test as any other refactor here (README's own rule, and the
+  merged-typers episode above): fewer special cases AND no slower, measured —
+  not "cleaner".
 - **Arity check in the intra-unit typer ignores inherited members.** The
   cross-unit check (`CheckCalls`) now yields to an inherited member before
   reporting, but `PasTree.Sema.Types.SelectOverload` has its own arity
