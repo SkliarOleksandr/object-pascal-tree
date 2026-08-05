@@ -2127,6 +2127,86 @@ begin
     RefBindKind('TOnly', 0) = 'generic');
   GModel.Free;
 
+  // The OTHER direction, and spring4d's other trap: `Nullable` (arity 0, with a
+  // string class var `HasValue`) beside `Nullable<T>` (with a Boolean property
+  // of that name). A reference WITH type arguments must select the generic, or
+  // `other.HasValue` finds the string and `not other.HasValue` is E2015.
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10 +
+    '  Nul = record'#10 +
+    '    class var HasValue: string;'#10 +
+    '  end;'#10 +
+    '  Nul<T> = record'#10 +
+    '    function GetHasValue: Boolean;'#10 +
+    '    function Equals(const other: Nul<T>): Boolean;'#10 +
+    '    property HasValue: Boolean read GetHasValue;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function Nul<T>.GetHasValue: Boolean;'#10 +
+    'begin'#10 +
+    '  Result := True;'#10 +
+    'end;'#10 +
+    'function Nul<T>.Equals(const other: Nul<T>): Boolean;'#10 +
+    'begin'#10 +
+    '  if not HasValue then'#10 +
+    '    Exit(not other.HasValue);'#10 +
+    '  Result := True;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Ok('arity: `Name<T>` skips the same-named NON-generic',
+    RefBindKind('Nul', 0) = 'generic');
+  Ok('arity: ...so a member on it is the generic''s, not the other record''s',
+    DiagCount('E2015') = 0);
+  GModel.Free;
+
+  // ---- `&&`-prefixed names (B.3) ----
+  // One '&' escapes and the rest belong to the NAME, so `&&op_Equality` is a
+  // different member from `op_Equality` — dcc accepts both in one record and
+  // rejects `&op_Equality` beside `op_Equality`. Before this, the stray '&'
+  // token derailed the class body and its parameters were declared into the
+  // enclosing scope (5 false E2004 in spring4d's TValue).
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10 +
+    '  TVal = record'#10 +
+    '    class function &&op_Equality(const l, r: TVal): Boolean; static;'#10 +
+    '    class function &&op_Inequality(const l, r: TVal): Boolean; static;'#10 +
+    '    class function op_Equality(const l, r: TVal): Boolean; static;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'class function TVal.&&op_Equality(const l, r: TVal): Boolean;'#10 +
+    'begin'#10 +
+    '  Result := True;'#10 +
+    'end;'#10 +
+    'class function TVal.&&op_Inequality(const l, r: TVal): Boolean;'#10 +
+    'begin'#10 +
+    '  Result := False;'#10 +
+    'end;'#10 +
+    'class function TVal.op_Equality(const l, r: TVal): Boolean;'#10 +
+    'begin'#10 +
+    '  Result := True;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Ok('amp: the class body survives, so no parameter is redeclared',
+    DiagCount('E2004') = 0);
+  Ok('amp: `&&op_Equality` and `op_Equality` are DIFFERENT members',
+    (SymCountOf('&op_equality', skRoutine) = 1) and
+    (SymCountOf('op_equality', skRoutine) = 1));
+  GModel.Free;
+
+  // MemoryBarrier is compiler-provided (dcc resolves it with an empty uses
+  // clause) and was the last unseeded intrinsic spring4d needed.
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'procedure P;'#10 +
+    'begin'#10 +
+    '  MemoryBarrier;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Ok('MemoryBarrier is seeded', DiagCount('E2003') = 0);
+  GModel.Free;
+
   // A 64-bit ordinal base is dcc's OTHER code, and the two platform-sized names
   // follow the target: dcc32 E2028, dcc64 E2001 for the same source.
   Analyze(

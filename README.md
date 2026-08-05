@@ -265,11 +265,20 @@ Still open, roughly in the order we're tackling it:
   `Supports`/`as` rather than by name. The fix is the hop the branch above it
   already makes for `TObject` — redirect to the real `IInterface` and continue
   — with the same self-reference guard so `IInterface` itself terminates.
-- **spring4d is a corpus now.** Run it like any `.dproj`
-  (`Packages\Delphi12\Spring.Base.dproj` and `Spring.Core.dproj`, 73 and 121
-  units). Its value is density — a compiling project of ordinary size that
+- ~~**spring4d is a corpus now.**~~ **Clean since 2026-08-05.** Run it like any
+  `.dproj` (`Packages\Delphi12\Spring.Base.dproj` and `Spring.Core.dproj`, 73 and
+  121 units). Its value was density — a compiling project of ordinary size that
   reported more than the 3747-unit AVImark client does: **27 false diagnostics in
-  `Spring.Base`, now 8**, and 34 in `Spring.Core`, now 15.
+  `Spring.Base`, now ZERO**, and 34 in `Spring.Core`, now 2 — both of those the
+  same honest `F1027`, and an instructive one. `Spring.Core.dproj` sets
+  `DCC_UnitSearchPath=..\..\Source` (not recursive) and reaches
+  `Spring.Patterns.Specification` through `requires Spring.Base.dcp`; the source
+  DOES exist in the repo, under `Source\Base\Patterns`. So a host that followed
+  the `requires` closure to the required PACKAGE's own search paths would resolve
+  it — the one concrete lead the source-less-units item below has.
+
+  Four causes, all four fixed, and three of the four were "a name that is also
+  something else" again:
 
   ~~The 19 `E2010 Incompatible types: 'Pointer' and '_nil'`~~ — **fixed
   2026-08-05, all 19 with one rule.** They were one cause, traced to its
@@ -280,24 +289,42 @@ Still open, roughly in the order we're tackling it:
   project pass already knew it for CROSS-unit references
   (`PreferNonGeneric`/`FindTypeInUsesArity`) — the resolver's own binding did
   not, so `RefMap` was wrong before any of that ran, which also sent ctrl+click
-  to the generic. Now a bare name that lands on a generic type keeps looking
-  (`TPasSemaModel.ResolveNonGenericAt`): the same-scope chain, then joined
-  scopes, then outward — which is what reaches the SEEDED `Pointer`, a case
-  §16.1.2 did not mention and now does. Both guards are tested inline in that
+  to the generic. Now a name that lands on the WRONG arity keeps looking
+  (`TPasSemaModel.ResolveByArityAt`): the same-scope chain, then joined scopes,
+  then outward — the joined step being what reaches the SEEDED `Pointer`, a case
+  §16.1.2 did not mention and now does. The guards are tested inline in that
   order, for the reason `PreferNonGeneric` documents: the common case pays one
   set membership and no call.
 
-  Two deliberate limits: with only a generic in scope the binding is KEPT (dcc
-  errors there, but dropping the reference would cost navigation for nothing),
-  and an identifier inside `<...>` is treated as bare, since `TDict<Pointer,
-  TList>` means the arity-0 `Pointer`.
+  ~~The 2 `E2015` on `not HasValue`~~ — **the same rule the other way round.**
+  `Spring.pas` also declares `Nullable = record class var HasValue: string; end`
+  beside `Nullable<T>`, whose `HasValue` is a Boolean property — so a parameter
+  typed `Nullable<T>` was resolving to the arity-0 record and `not
+  other.HasValue` became `not <string>`. §16.1.2 states both directions and the
+  project pass had both (`FindTypeInUsesArity` takes an arity); the resolver now
+  does too, which is why one function serves both.
 
-  The remaining 8: 5 `E2004 Identifier redeclared` around
-  `class function &&op_Equality(...)` — the `&&`-prefixed operator names Delphi
-  accepts, where the parser loses the declaration and declares its parameters,
-  result type and `static` instead; 2 `E2015` on `not HasValue`; 1 `E2003
-  MemoryBarrier`, which looks like an unseeded compiler intrinsic (probe dcc
-  before adding it — the seed list documents why a source grep is not evidence).
+  Two deliberate limits: with only the other arity in scope the binding is KEPT
+  (dcc errors there, but dropping the reference would cost navigation for
+  nothing), and an identifier inside `<...>` counts as bare, since
+  `TDict<Pointer, TList>` means the arity-0 `Pointer`.
+
+  ~~The 5 `E2004 Identifier redeclared`~~ — **a LEXER gap.** `class function
+  &&op_Equality(...)` is how spring4d's `TValue` declares its comparison
+  operators, and only the FIRST `&` escapes (B.3): the rest belong to the name,
+  so `&&op_Equality` names `&op_Equality`, a different member from
+  `op_Equality`. dcc-verified in both directions — it accepts the two in one
+  record, and rejects `&op_Equality` beside `op_Equality` as a redeclaration, and
+  it accepts `&&&op` too, so the escape is one `&` and not a pair. We emitted a
+  stray `tkUnknown` for the second `&`, which derailed the whole class body: its
+  parameters, result type and `static` were declared into the enclosing scope,
+  and the next such declaration collided with them. `PasNameKey` already strips
+  exactly one leading `&`, so the name key came out right the moment the token
+  did. Across `3rdlib13` this removed 34 unknown tokens.
+
+  ~~The 1 `E2003 MemoryBarrier`~~ — an unseeded compiler intrinsic, dcc-probed
+  the way that seed list demands (a unit with an EMPTY uses clause resolves it),
+  and a sibling of the `Atomic*` family already there.
 - **Unresolved MEMBERS after a dot are reported only behind a FLAG**, and the
   first measurement says why it stays there. `O.Read` where the class has no
   `Read` is `E2003` for dcc and silence for us; only unresolved BARE identifiers

@@ -132,6 +132,11 @@ begin
     'ReturnAddress', 'AddressOfReturnAddress', 'AtomicIncrement',
     'AtomicDecrement', 'AtomicExchange', 'AtomicCmpExchange', 'MulDivInt64',
     'Fail',
+    // Sibling of the Atomic* family and equally undeclared: System.pas does not
+    // declare MemoryBarrier anywhere, and a unit with an EMPTY uses clause
+    // resolves it under dcc32 37.0. Found by spring4d's Spring.Reflection,
+    // which calls it inside a critical section.
+    'MemoryBarrier',
     // Flow. (`Abort` is NOT one of these — it is a real System.SysUtils
     // routine, so code using it without that unit must still get E2003;
     // it was previously in this list, wrongly making us accept such code.)

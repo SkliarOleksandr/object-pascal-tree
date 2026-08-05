@@ -1741,28 +1741,33 @@ begin
         // everything above it stay order-independent.
         FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],
           NodeNameLower(ANode), FTree.Nodes[ANode].FirstToken);
-        // ARITY is part of a type's identity, so a BARE name must not bind to a
-        // same-named GENERIC: `Pointer<T> = record` in spring4d's Spring.pas
-        // does not shadow the builtin `Pointer`, and every `Pointer(X) := nil`
-        // in that unit was a false E2010 until this ran. The project pass has
-        // had the rule for CROSS-unit references (PreferNonGeneric); this is the
-        // same rule where RefMap is actually written, which is also what
-        // ctrl+click reads.
+        // ARITY is part of a type's identity (16.1.2), and BOTH directions of
+        // ignoring that are real — spring4d's Spring.pas sets both traps:
+        // `Pointer<T>` beside the builtin `Pointer` (a BARE name must skip the
+        // generic) and `Nullable` beside `Nullable<T>` (a `Name<T>` must skip
+        // the non-generic). The project pass has had the rule for CROSS-unit
+        // references (PreferNonGeneric / FindTypeInUsesArity); this is the same
+        // rule where RefMap is actually written, which is also what ctrl+click
+        // reads.
         //
-        // Both conditions are tested INLINE and in this order for the reason
+        // The conditions are tested INLINE and in this order for the reason
         // PreferNonGeneric gives: the common case must cost one set membership
-        // and no call. A generic hit is rare; a bare one among those, rarer.
+        // and no call. A type hit is common, a MISMATCHED one is not.
         if (FModel.RefMap[ANode] <> NIL_SYM) and
-           (FModel.Symbols[FModel.RefMap[ANode]].Kind = skType) and
-           (sfGeneric in FModel.Symbols[FModel.RefMap[ANode]].Flags) and
-           IsBareTypeUse(ANode) then
+           (FModel.Symbols[FModel.RefMap[ANode]].Kind = skType) then
         begin
-          LHead := FModel.ResolveNonGenericAt(FNodeScope[ANode],
-            NodeNameLower(ANode), FTree.Nodes[ANode].FirstToken);
-          // NIL_SYM = only a generic is in scope, which is dcc's error and not
-          // a reason to drop the binding we have.
-          if LHead <> NIL_SYM then
-            FModel.RefMap[ANode] := LHead;
+          var LWantGeneric := not IsBareTypeUse(ANode);
+          if (sfGeneric in FModel.Symbols[FModel.RefMap[ANode]].Flags) <>
+             LWantGeneric then
+          begin
+            LHead := FModel.ResolveByArityAt(FNodeScope[ANode],
+              NodeNameLower(ANode), FTree.Nodes[ANode].FirstToken,
+              LWantGeneric);
+            // NIL_SYM = only the other arity is in scope, which is dcc's error
+            // and not a reason to drop the binding we have.
+            if LHead <> NIL_SYM then
+              FModel.RefMap[ANode] := LHead;
+          end;
         end;
         if (FModel.RefMap[ANode] = NIL_SYM) and IsAttributeTypeRef(ANode) then
           FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],

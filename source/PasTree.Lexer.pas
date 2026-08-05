@@ -42,6 +42,7 @@ type
       AFlags: TPasTokenFlags = []);
     procedure Diag(ACode: TPasDiagCode; AStart, ALen: Integer);
     function CharAt(AIndex: Integer): Char; inline;
+    function IsIdentRun(AIndex: Integer): Boolean;
     procedure LexWhitespace;
     procedure LexLineComment;
     procedure LexBraceCommentOrDirective;
@@ -133,6 +134,19 @@ begin
     Result := #0;
 end;
 
+{ True when AIndex begins a run of '&' followed by an identifier start — i.e. the
+  `&&op_Equality` shape, where only the FIRST '&' of the whole token escapes and
+  the rest are name characters. }
+function TPasLexer.IsIdentRun(AIndex: Integer): Boolean;
+var
+  LIdx: Integer;
+begin
+  LIdx := AIndex;
+  while CharAt(LIdx) = '&' do
+    Inc(LIdx);
+  Result := IsIdentStart(CharAt(LIdx));
+end;
+
 procedure TPasLexer.Emit(AKind: TPasTokenKind; AStart: Integer;
   AFlags: TPasTokenFlags);
 begin
@@ -188,7 +202,15 @@ begin
         '$': LexHexNumber;
         '%': LexBinNumber;
         '&':
-          if IsIdentStart(CharAt(FPos + 1)) then
+          // One '&' escapes (B.3), and any FURTHER '&'s belong to the name:
+          // `&&op_Equality` names `&op_Equality`, which is a different member
+          // from `op_Equality` — dcc32 37.0 accepts both in one record, and
+          // rejects `&op_Equality` beside `op_Equality` as a redeclaration, so
+          // exactly one leading '&' is the escape. spring4d's TValue declares
+          // its comparison operators this way and the stray-'&' token that used
+          // to come out here derailed the whole class body (5 false E2004).
+          if IsIdentStart(CharAt(FPos + 1)) or
+             ((CharAt(FPos + 1) = '&') and IsIdentRun(FPos + 1)) then
             LexIdentOrKeyword(True)
           else if IsDigit(CharAt(FPos + 1)) then
           begin
@@ -603,7 +625,12 @@ var
 begin
   LStart := FPos;
   if AAmpersand then
-    Inc(FPos); // '&'
+  begin
+    Inc(FPos); // the escaping '&'
+    // Any further '&'s are part of the NAME (see the dispatch in Run).
+    while CharAt(FPos) = '&' do
+      Inc(FPos);
+  end;
   LNameStart := FPos;
   repeat
     Inc(FPos);
