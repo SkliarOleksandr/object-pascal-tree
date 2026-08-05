@@ -112,6 +112,7 @@ type
     pnlBottom: TPanel;
     Panel1: TPanel;
     chkShowErrors: TCheckBox;
+    chkMemberErrors: TCheckBox;
     pnlSrc: TPanel;
     Panel2: TPanel;
     btnShowASTJson: TButton;
@@ -128,6 +129,7 @@ type
     procedure btnShowASTJsonClick(Sender: TObject);
     procedure btnShowSemanticsClick(Sender: TObject);
     procedure chkShowErrorsClick(Sender: TObject);
+    procedure chkMemberErrorsClick(Sender: TObject);
     procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     procedure vstFilesGetText(Sender: TBaseVirtualTree; Node: PVirtualNode;
       Column: TColumnIndex; TextType: TVSTTextType; var CellText: string);
@@ -1094,6 +1096,19 @@ begin
   RebuildVisibleMessages;
 end;
 
+{ Unlike chkShowErrors, this one does NOT filter the message list — it changes
+  what the ANALYSIS produces (TPasSemaProject.ReportUnresolvedMembers), so the
+  project has to be analyzed again or the checkbox would appear to do nothing
+  until the next parse. Error-tolerant is the default and the natural mode for
+  an editor; this switch is the compiler-front-end one, where every unresolved
+  name has to be visible. }
+procedure TfrmMain.chkMemberErrorsClick(Sender: TObject);
+begin
+  if FMainSource = '' then
+    Exit;   // nothing open yet: the new setting applies to the first parse
+  RunParse;
+end;
+
 procedure TfrmMain.vtMessagesGetText(Sender: TBaseVirtualTree;
   Node: PVirtualNode; Column: TColumnIndex; TextType: TVSTTextType;
   var CellText: string);
@@ -1612,6 +1627,7 @@ begin
       Format('destroy=%d;', [LSW.ElapsedMilliseconds]);
     FSemaProject := TPasSemaProject.Create(LPlatform, LSearchPaths, LDefines);
     FSemaProject.SingleThreaded := cbThreading.ItemIndex = 0;
+    FSemaProject.ReportUnresolvedMembers := chkMemberErrors.Checked;
     FSemaProject.SetNamespaces(EffectiveNamespaces(LPlatform)); // Forms -> Vcl.Forms
     // Defaults ALWAYS, then the project's on top: the IDE prepends a project's
     // own aliases to the defaults rather than replacing them, and AddUnitAlias
@@ -1897,6 +1913,7 @@ begin
   FAsyncSession := TPasAsyncSession.Create(LPlatform, LSearchPaths, LDefines,
     LRoots, LPriority);
   FAsyncSession.SetSingleThreadedInner(cbThreading.ItemIndex = 0);
+  FAsyncSession.SetReportUnresolvedMembers(chkMemberErrors.Checked);
   FAsyncSession.SetNamespaces(EffectiveNamespaces(LPlatform));
   for var LDef in PasDefaultUnitAliases(LPlatform) do  // defaults, then project
     FAsyncSession.AddUnitAlias(LDef.Alias, LDef.UnitName);
@@ -2320,6 +2337,10 @@ const
   SET_HIGHLIGHTER = 'Highlighter';
   SET_THREADING = 'Threading';
   SET_HIGHLIGHTCOLOR = 'HighlightColor';
+  // Worth remembering, unlike the platform below: it selects which MODE the
+  // analyzer runs in (error-tolerant editor vs compiler front end), which is a
+  // property of how someone uses the tool, not of the project they opened.
+  SET_MEMBERERRORS = 'ReportUnresolvedMembers';
 
 procedure TfrmMain.LoadSettings;
 begin
@@ -2334,6 +2355,7 @@ begin
   FIdentHighlightColor := TColor(FSettings.ReadInt(SET_HIGHLIGHTCOLOR,
     Integer(FIdentHighlightColor)));
   cbHighlightColor.Selected := FIdentHighlightColor;
+  chkMemberErrors.Checked := FSettings.ReadInt(SET_MEMBERERRORS, 0) <> 0;
   // NB the target PLATFORM is deliberately NOT persisted. OpenProject sets it
   // from the .dproj being opened, so a stored value would be overwritten
   // before it was ever visible — remembering it would be a setting that does
@@ -2345,6 +2367,7 @@ begin
   FSettings.WriteInt(SET_HIGHLIGHTER, cbHighlighter.ItemIndex);
   FSettings.WriteInt(SET_THREADING, cbThreading.ItemIndex);
   FSettings.WriteInt(SET_HIGHLIGHTCOLOR, Integer(FIdentHighlightColor));
+  FSettings.WriteInt(SET_MEMBERERRORS, Ord(chkMemberErrors.Checked));
 end;
 
 { event handlers }

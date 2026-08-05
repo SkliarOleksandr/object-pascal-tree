@@ -76,6 +76,11 @@ type
       sequentially (the inner parallelism still runs on THIS worker thread
       either way). Set BEFORE Start. }
     procedure SetSingleThreadedInner(AValue: Boolean);
+    { Forwarded to the inner project: report a member after a dot that no lookup
+      resolved. OFF is the error-TOLERANT mode an editor wants; ON is what a
+      compiler front end needs. Set BEFORE Start — it changes what the analysis
+      produces, not how the result is displayed. }
+    procedure SetReportUnresolvedMembers(AValue: Boolean);
     procedure Start;
     { Request cooperative cancellation; the worker stops at the next module/
       wave boundary. Does not block. }
@@ -154,6 +159,11 @@ end;
 procedure TPasAsyncSession.SetSingleThreadedInner(AValue: Boolean);
 begin
   FProject.SingleThreaded := AValue;
+end;
+
+procedure TPasAsyncSession.SetReportUnresolvedMembers(AValue: Boolean);
+begin
+  FProject.ReportUnresolvedMembers := AValue;
 end;
 
 procedure TPasAsyncSession.RunBody;

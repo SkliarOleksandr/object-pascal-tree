@@ -2555,6 +2555,54 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { ReportUnresolvedMembers — the opt-in "member after a dot" diagnostic.
+    Error-tolerant (OFF) is the editor's mode and the default; ON is the
+    compiler-front-end one. Both directions are pinned, because the value of the
+    switch is that the OFF state stays silent. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_members');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'MemHost.pas'),
+    'unit MemHost;'#10'interface'#10 +
+    'type'#10 +
+    '  TThing = class'#10 +
+    '    Good: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10'end.'#10);
+  // One good member and one that does not exist, on a type from ANOTHER unit —
+  // the cross-unit path, which is where the check lives.
+  TFile.WriteAllText(TPath.Combine(LDir, 'MemUser.pas'),
+    'unit MemUser;'#10'interface'#10'uses MemHost;'#10 +
+    'procedure P;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var LT: TThing;'#10 +
+    'begin'#10 +
+    '  LT.Good := 1;'#10 +
+    '  LT.Nope := 2;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    Ok('members: OFF by default, so an unresolved member is silent',
+      DiagCount(ModelByName('memuser'), 'E2003') = 0);
+  finally
+    GProj.Free;
+  end;
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    Ok('members: ON reports it once, and only the bad one',
+      DiagCount(ModelByName('memuser'), 'E2003') = 1);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   Writeln(Format('=== SemaProjectSmoke: %d passed, %d failed ===',
     [GPassed, GFailed]));
   if GFailed > 0 then

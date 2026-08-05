@@ -213,6 +213,20 @@ object frmMain: TfrmMain
         TabOrder = 0
         OnClick = chkShowErrorsClick
       end
+      object chkMemberErrors: TCheckBox
+        Left = 111
+        Top = 6
+        Width = 210
+        Height = 17
+        Hint =
+          'Front-end mode: also report a member after a dot that no lookup c' +
+          'ould resolve. Re-analyzes the project.'
+        Caption = 'Report unresolved members'
+        ParentShowHint = False
+        ShowHint = True
+        TabOrder = 1
+        OnClick = chkMemberErrorsClick
+      end
     end
     object vtMessages: TVirtualStringTree
       Left = 0

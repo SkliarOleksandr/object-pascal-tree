@@ -294,8 +294,15 @@ Still open, roughly in the order we're tackling it:
 - **Unresolved MEMBERS after a dot are reported only behind a FLAG**, and the
   first measurement says why it stays there. `O.Read` where the class has no
   `Read` is `E2003` for dcc and silence for us; only unresolved BARE identifiers
-  are diagnosed by default. `TPasSemaProject.ReportUnresolvedMembers` (CLI:
-  `PasTreeSemaProject -members`) turns it on, at the single place a member
+  are diagnosed by default — and that default is deliberate: **error-tolerant is
+  the analyzer's primary mode**, because that is what an editor needs, while a
+  compiler FRONT END needs every unresolved name visible. The switch is what
+  makes both modes available: `TPasSemaProject.ReportUnresolvedMembers`
+  (`TPasAsyncSession.SetReportUnresolvedMembers` on the background path, CLI
+  `PasTreeSemaProject -members`, and the demo's **Report unresolved members**
+  box beside *Show Errors* — which re-analyzes on click, since unlike *Show
+  Errors* it changes what the analysis produces rather than what is displayed,
+  and is remembered across sessions). It reports at the single place a member
   reference is finally given up on — `CrossType`'s `nkMember` branch, after
   `RefMap`, `ExtRefMap` and `FindMemberX` have all failed, and only when the
   container type is KNOWN, the unit's `uses` all resolved, and the site is not in
