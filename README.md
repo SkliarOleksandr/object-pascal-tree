@@ -327,8 +327,13 @@ Still open, roughly in the order we're tackling it:
     (`E2081`, all three shapes dcc reports: a direct assignment, `Inc`/`Dec`,
     and an inline `for var` counter). Zero new diagnostics across ~12 000
     corpus units, which is the bar every remaining entry here has to clear;
-  - bare `raise` outside an exception handler (18 §18.3.1) — needs handler
-    context, which nothing tracks;
+  - ~~bare `raise` outside an exception handler~~ — **done 2026-08-05**
+    (`E2145`). The context turned out to be purely lexical and decided by the
+    NEAREST enclosing part of a `try` statement, so a `finally` or a `try` block
+    resets what an outer handler established, while an anonymous method body
+    does not — all dcc-verified, and now written into §18.3.1, which had said
+    only "the analyzer must track handler context". Zero new diagnostics across
+    all four corpora;
   - `Slice` outside an open-array argument position (4 §4.11);
   - multiline-string indentation (B §B.6.3): the lexer finds the terminator but
     does not treat the closing line's indentation as the base, so an
@@ -338,16 +343,16 @@ Still open, roughly in the order we're tackling it:
   (§15.3.1), the dynamic `array of array of T` indexing sugar (§8.2.1), and a
   `TypeRef` position resolving to a TYPE over a nearer same-named non-type
   (§B.11). Behaviour unchanged — the code already did all three.
-- **Where the audit stands (2026-07-31).** Six of its items are closed — both
+- **Where the audit stands (2026-08-05).** Seven of its items are closed — both
   false-positive/wrong-binding defects (`IInterface`, inline-var position),
-  visibility recording, the three spec write-ups, and `E2081`. What is left is
-  in this list above and below, and every remaining piece has the same shape:
-  it can only ADD diagnostics. So they share one acceptance bar, met by
-  `E2081` and worth restating rather than re-deriving — **zero new diagnostics
-  across rtlflat, bigflat and both AVImark projects (~12 000 units), plus a
-  probe whose output matches `dcc` line for line.** Suggested order, cheapest
-  and safest first: bare `raise` outside a handler and `Slice` position (both
-  structural, like `E2081`), then the ordinal/Boolean/set-limit family (needs
+  visibility recording, the three spec write-ups, `E2081` and `E2145`. What is
+  left is in this list above and below, and every remaining piece has the same
+  shape: it can only ADD diagnostics. So they share one acceptance bar, met by
+  `E2081` and `E2145` and worth restating rather than re-deriving — **zero new
+  diagnostics across rtlflat, bigflat and both AVImark projects (~12 000 units),
+  plus a probe whose output matches `dcc` line for line.** Suggested order,
+  cheapest and safest first: `Slice` position (structural, like the two done),
+  then the ordinal/Boolean/set-limit family (needs
   the typer), then member-lookup reporting behind a flag, then visibility
   enforcement last — it is the only one that can reject code the corpora
   currently accept for a reason other than a missing check.

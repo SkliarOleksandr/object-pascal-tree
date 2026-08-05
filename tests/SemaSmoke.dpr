@@ -1619,6 +1619,84 @@ begin
     'end.'#10);
   Ok('e2081: reported once from inside a nested loop', DiagCount('E2081') = 1);
   GModel.Free;
+
+  // ---- E2145: a bare `raise` needs a handler (18.3.1) ----
+  // The five shapes dcc rejects. Counted, not located, because the whole
+  // fixture is one line.
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'procedure P;'#10 +
+    'begin'#10 +
+    '  raise;'#10 +                              // 1: plain body
+    '  try raise; except end;'#10 +              // 2: the guarded block
+    '  try finally raise; end;'#10 +             // 3: a finally part
+    '  try except try finally raise; end; end;'#10 + // 4: finally in a handler
+    '  try except try raise; except end; end;'#10 +  // 5: try body in a handler
+    'end;'#10 +
+    'procedure Q;'#10 +
+    'begin'#10 +
+    '  raise;'#10 +                              // 6: a second routine
+    'end;'#10 +
+    'end.'#10);
+  Ok('e2145: one report per offending raise', DiagCount('E2145') = 6);
+  Ok('e2145: dcc''s wording',
+    DiagHasText('E2145', 'only allowed in exception handler'));
+  GModel.Free;
+
+  // Everything dcc accepts, including the two that surprise: a handler nested
+  // inside a `finally` is a handler again, and an anonymous method body does
+  // NOT reset the context the way a try part does.
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'type TProc = reference to procedure;'#10 +
+    'type EMy = class end;'#10 +
+    'procedure P;'#10 +
+    'var LProc: TProc;'#10 +
+    'begin'#10 +
+    '  try except raise; end;'#10 +              // catch-all handler
+    '  try except on E: EMy do raise; end;'#10 + // an on-handler
+    '  try except on E: EMy do ; else raise; end;'#10 + // the else branch
+    '  try finally try except raise; end; end;'#10 +    // handler in a finally
+    '  try try except raise; end; finally end;'#10 +    // handler in a try body
+    '  try except LProc := procedure begin raise; end; end;'#10 + // anon method
+    'end;'#10 +
+    'end.'#10);
+  Ok('e2145: silent on every shape dcc accepts', DiagCount('E2145') = 0);
+  GModel.Free;
+
+  // A named nested routine is not lexically inside the handler, so its body
+  // starts with no context — dcc rejects it and so must we.
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'procedure P;'#10 +
+    '  procedure Inner;'#10 +
+    '  begin'#10 +
+    '    raise;'#10 +
+    '  end;'#10 +
+    'begin'#10 +
+    '  try except Inner; end;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Ok('e2145: a nested routine called FROM a handler is still not in one',
+    DiagCount('E2145') = 1);
+  GModel.Free;
+
+  // `raise E` is never this diagnostic, wherever it sits.
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'type EMy = class constructor Create(const AMsg: string); end;'#10 +
+    'constructor EMy.Create(const AMsg: string);'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'procedure P;'#10 +
+    'begin'#10 +
+    '  raise EMy.Create(''boom'');'#10 +
+    '  try finally raise EMy.Create(''x''); end;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Ok('e2145: a raise WITH an operand is not a re-raise',
+    DiagCount('E2145') = 0);
+  GModel.Free;
   Writeln(Format('=== SemaSmoke: %d passed, %d failed ===', [GPassed, GFailed]));
   if GFailed > 0 then
     ExitCode := 1;

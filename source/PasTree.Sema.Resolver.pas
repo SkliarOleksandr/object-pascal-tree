@@ -128,6 +128,7 @@ type
     procedure ResolveOneWithStmt(AWith: Integer);
     procedure ResolveWithStmts;
     procedure CheckForCounters;
+    procedure CheckBareRaises;
     procedure Run;
   public
     { ASkipTyper skips the final expression type-check (Phase 3a) — for
@@ -2616,6 +2617,84 @@ begin
   end;
 end;
 
+{ 18 §18.3.1: a bare `raise` re-raises the in-flight exception and is only
+  valid inside an exception handler — dcc reports `E2145 Re-raising an
+  exception only allowed in exception handler`.
+
+  The spec says "the analyzer must track handler context" without saying what
+  that context is, so dcc32 37.0 was asked. It is purely LEXICAL, and the part
+  of a `try` statement the `raise` sits in is what decides — the NEAREST one,
+  not any enclosing one:
+
+    try except try finally raise end end   error  (nearest part is `finally`)
+    try finally try except raise end end   legal  (nearest part is `except`)
+    try except try raise except end end    error  (nearest part is a try body)
+    try try except raise end finally end   legal
+
+  So a `finally` or a `try` body RESETS the context that an enclosing handler
+  established. An anonymous method body does NOT — `raise` inside a
+  `procedure begin ... end` written in a handler is accepted, which makes the
+  boundary the try-statement part and nothing else. A named nested routine
+  needs no rule of its own: its body is never lexically inside a statement, so
+  the walk reaches it with no part in effect and rejects, exactly as dcc does.
+
+  All eight shapes above plus the `on ... do` and `else` branches are pinned in
+  SemaSmoke, and the probe's output matches dcc line for line.
+
+  Structural, like CheckForCounters, but unlike it needs no bindings at all —
+  it runs on the tree alone. }
+procedure TPasSemaResolver.CheckBareRaises;
+
+  procedure Walk(ANode: Integer; AInHandler: Boolean);
+  var
+    LChild, LPart: Integer;
+    LFileId, LLine, LCol: Integer;
+  begin
+    case KindOf(ANode) of
+      nkRaiseStmt:
+        // No children = bare (an operand, and its optional `at` address, are
+        // the children the parser adds).
+        if (FirstChild(ANode) = NIL_NODE) and not AInHandler then
+        begin
+          NodePos(ANode, LFileId, LLine, LCol);
+          FModel.AddDiag(MakeDiag('E2145', SE2145_ReRaiseOutsideHandler,
+            ANode, LFileId, LLine, LCol));
+          Exit;
+        end;
+      nkTryStmt:
+        begin
+          // Children: the guarded block, then exactly one part. The block is
+          // walked with the context CLEARED whichever part follows it.
+          LChild := FirstChild(ANode);
+          if LChild = NIL_NODE then
+            Exit;
+          Walk(LChild, False);
+          LPart := NextSib(LChild);
+          while LPart <> NIL_NODE do
+          begin
+            LChild := FirstChild(LPart);
+            while LChild <> NIL_NODE do
+            begin
+              Walk(LChild, KindOf(LPart) = nkExceptPart);
+              LChild := NextSib(LChild);
+            end;
+            LPart := NextSib(LPart);
+          end;
+          Exit;
+        end;
+    end;
+    LChild := FirstChild(ANode);
+    while LChild <> NIL_NODE do
+    begin
+      Walk(LChild, AInHandler);
+      LChild := NextSib(LChild);
+    end;
+  end;
+
+begin
+  Walk(0, False);
+end;
+
 procedure TPasSemaResolver.Run;
 begin
   FSys := SeedSystemScope(FModel, FPlatform);
@@ -2631,6 +2710,7 @@ begin
   ResolveAggregates;  // needs BindTypes' declared types — see its own header
   ResolveWithStmts;   // needs BindTypes' declared types — see its own header
   CheckForCounters;   // needs RefMap — see its own header
+  CheckBareRaises;    // structural only — see its own header
   if not FSkipTyper then
     TPasSemaTyper.Check(FModel);
 end;
