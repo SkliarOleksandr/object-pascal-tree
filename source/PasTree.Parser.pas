@@ -1999,8 +1999,20 @@ begin
       if LAttrs <> NIL_NODE then
         FB.Adopt(LParam, LAttrs);
     end
-    else if IsWord('out') then
+    else if IsWord('out') and
+            (PeekKind(1) in [tkIdentifier, tkLBracket]) then
+    begin
+      // `out` is a DIRECTIVE word, not a reserved one, so it is also a legal
+      // parameter NAME: dcc accepts `procedure P(out: Integer)` and treats the
+      // word as the name. The lookahead is what tells the two apart — a
+      // modifier is followed by the name (or by an attribute group, as
+      // `const [Ref] X` is), a name by ':' or ',' or ')'.
+      //
+      // Recorded rather than just consumed, because a highlighter cannot colour
+      // a directive word from the token alone — see nkParam's Aux.
+      FB.SetAux(LParam, FPos);
       Next;
+    end;
     if CurKind = tkIdentifier then
     begin
       FB.Adopt(LParam, FB.AddNode(nkIdent, NIL_NODE, FPos));

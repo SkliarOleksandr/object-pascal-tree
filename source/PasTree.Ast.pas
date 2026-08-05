@@ -124,7 +124,13 @@ type
     nkRoutine,        // procedure/function/constructor/destructor/operator;
                       // children: name, [generic params], [params], [result
                       // type], directives..., [body]
-    nkParams, nkParam,
+    nkParams,
+    // 6.2. Aux = the visible-token index of an `out` modifier, -1 otherwise.
+    // `var` and `const` need no such mark: they are reserved words and a lexer
+    // already knows them, while `out` is a context-sensitive directive word
+    // (B.4.2) — legal as an identifier elsewhere — so the only thing that can
+    // prove this one MEANS the modifier is the parser, here.
+    nkParam,
     nkDirective,      // routine directive (+ optional args as children)
     nkPropertyDecl,   // 13.1.1: name, [index params], [type], specifiers
     nkPropSpec,       // read/write/index/stored/default/implements + expr

@@ -607,6 +607,14 @@ begin
     case ATree.Nodes[LIdx].Kind of
       nkVisibility, nkDirective, nkPropSpec:
         MarkBareWords(LIdx);
+      nkParam:
+        // A parameter's `out`, which is a directive word and not a reserved one
+        // — `var`/`const` are lexer keywords and colour themselves, `out` does
+        // not, and nothing in the node's SPAN distinguishes it from the
+        // parameter name that follows. So the parser records its token index
+        // and this marks exactly that token.
+        if ATree.Nodes[LIdx].Aux >= 0 then
+          MarkVisibleRange(ATree.Nodes[LIdx].Aux, ATree.Nodes[LIdx].Aux);
     end;
 end;
 

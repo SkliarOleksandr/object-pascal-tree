@@ -144,6 +144,51 @@ begin
     dcInconsistentIndentChars, '3');
 end;
 
+{ A parameter's `out` is recorded on its nkParam as a visible-token index
+  (nkParam.Aux), because `out` is a DIRECTIVE word: legal as an identifier
+  elsewhere, so nothing but the parser can prove that this one is the modifier.
+  The demo's highlighter reads exactly this to colour it, which is why the check
+  asserts the token TEXT and not merely that Aux moved. }
+procedure CheckOutParamAux;
+const
+  SRC =
+    'unit u;'#13#10'interface'#13#10 +
+    'procedure P1(out target);'#13#10 +
+    'procedure P2(var a; const b: Integer; out c: string);'#13#10 +
+    'procedure P3(plain: Integer);'#13#10 +
+    // `out` as an ordinary identifier: it must NOT be recorded here.
+    'procedure P4(out: Integer);'#13#10 +
+    'implementation'#13#10'end.'#13#10;
+var
+  LPre: TPasPreprocessed;
+  LDiags: TArray<TPasParseDiag>;
+  LTree: TPasTree;
+  LIdx, LMarked, LWrongText: Integer;
+begin
+  LPre := GPP.ProcessText('outparams.pas', SRC);
+  LTree := TPasParser.ParseFile(LPre, LDiags);
+  LMarked := 0;
+  LWrongText := 0;
+  for LIdx := 0 to High(LTree.Nodes) do
+    if (LTree.Nodes[LIdx].Kind = nkParam) and (LTree.Nodes[LIdx].Aux >= 0) then
+    begin
+      Inc(LMarked);
+      if not SameText(LPre.VisibleText(LTree.Nodes[LIdx].Aux), 'out') then
+        Inc(LWrongText);
+    end;
+  // Two `out` parameters across P1 and P2; P3 has none and P4's `out` is the
+  // parameter's NAME.
+  if (LMarked = 2) and (LWrongText = 0) and (Length(LDiags) = 0) then
+    Inc(GPassed)
+  else
+  begin
+    Inc(GFailed);
+    Writeln('FAIL 6.2 out-parameter Aux');
+    Writeln('  marked: ', LMarked, ' (expected 2), wrong text: ', LWrongText,
+      ', parse diags: ', Length(LDiags));
+  end;
+end;
+
 procedure CheckAllPlatforms;
 const
   SNIPPET =
@@ -453,6 +498,7 @@ begin
     CheckAllPlatforms;
     CheckIncludeContext;
     CheckMultilineIndent;
+    CheckOutParamAux;
 
     Writeln;
     Writeln(Format('=== ParserSmoke: %d passed, %d failed ===',
