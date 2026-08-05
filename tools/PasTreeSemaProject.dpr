@@ -31,7 +31,12 @@ program PasTreeSemaProject;
 
   -list  with -dproj, also dumps every project-file diagnostic (file:line:col)
          instead of only the histogram. Suppresses the per-unit model dump,
-         which is what stdout normally carries. }
+         which is what stdout normally carries.
+
+  -members  turns ON the opt-in "unresolved member after a dot" diagnostic
+         (TPasSemaProject.ReportUnresolvedMembers). Off by default because a
+         FALSE E2003 on a member is worse than a missing one; this is how the
+         corpora get measured for it. }
 
 {$APPTYPE CONSOLE}
 
@@ -71,7 +76,7 @@ var
   GPath, GStudio: string;
   GExtraPaths: TArray<string>;   // -L<dir>, repeatable; see the arg loop
   GIdx: Integer;
-  GSingle, GWholeProject, GDProjMode, GList: Boolean;
+  GSingle, GWholeProject, GDProjMode, GList, GMembers: Boolean;
   GSW: TStopwatch;
   GMode: string;
 
@@ -227,6 +232,7 @@ begin
     GProj := TPasSemaProject.Create(LD.Platform, LPaths, LD.Defines);
     try
       GProj.SingleThreaded := GSingle;
+      GProj.ReportUnresolvedMembers := GMembers;
       // No -NS list in the .dproj means we could not read the option, not that
       // the project wants zero prefixes — dcc has none built in, so zero would
       // turn every legacy unqualified import into an F1027.
@@ -402,9 +408,25 @@ begin
     GWholeProject := False;
     GDProjMode := False;
     GList := False;
+    GMembers := False;
     GStudio := GetEnvironmentVariable('BDS');
     for GIdx := 2 to ParamCount do
-      if ParamStr(GIdx).StartsWith('-p:', True) then
+      // The exact-match flags come FIRST, because `-L` below is a
+      // case-insensitive PREFIX and `-list` starts with `-l`: it was being
+      // swallowed as a search path named "ist", so the flag silently did
+      // nothing and every run with it carried one bogus path (the report's
+      // search-path count is where that showed).
+      if SameText(ParamStr(GIdx), '-st') then
+        GSingle := True    // single-threaded baseline (timing comparison)
+      else if SameText(ParamStr(GIdx), '-proj') then
+        GWholeProject := True
+      else if SameText(ParamStr(GIdx), '-dproj') then
+        GDProjMode := True
+      else if SameText(ParamStr(GIdx), '-list') then
+        GList := True
+      else if SameText(ParamStr(GIdx), '-members') then
+        GMembers := True
+      else if ParamStr(GIdx).StartsWith('-p:', True) then
         TryParsePlatformName(Copy(ParamStr(GIdx), 4, MaxInt), GPlatform)
       else if ParamStr(GIdx).StartsWith('-studio:', True) then
         GStudio := Copy(ParamStr(GIdx), 9, MaxInt)
@@ -420,15 +442,7 @@ begin
         GExtraPaths := GExtraPaths + [Copy(ParamStr(GIdx), 3, MaxInt)]
       else if ParamStr(GIdx).StartsWith('-threads:', True) then
         TThreadPool.Default.SetMaxWorkerThreads(
-          StrToIntDef(Copy(ParamStr(GIdx), 10, MaxInt), 0))
-      else if SameText(ParamStr(GIdx), '-st') then
-        GSingle := True    // single-threaded baseline (timing comparison)
-      else if SameText(ParamStr(GIdx), '-proj') then
-        GWholeProject := True
-      else if SameText(ParamStr(GIdx), '-dproj') then
-        GDProjMode := True
-      else if SameText(ParamStr(GIdx), '-list') then
-        GList := True;
+          StrToIntDef(Copy(ParamStr(GIdx), 10, MaxInt), 0));
     // A .dproj argument means -dproj; asking for it explicitly is redundant
     // but harmless.
     if SameText(TPath.GetExtension(GPath), '.dproj') then
@@ -455,6 +469,7 @@ begin
         GExtraPaths, []);
     try
       GProj.SingleThreaded := GSingle;
+      GProj.ReportUnresolvedMembers := GMembers;
       // Same reasoning as the -dproj driver: a directory or bare-file run has
       // no project to state its prefixes, and zero prefixes is not what the IDE
       // would use.

@@ -265,14 +265,75 @@ Still open, roughly in the order we're tackling it:
   `Supports`/`as` rather than by name. The fix is the hop the branch above it
   already makes for `TObject` — redirect to the real `IInterface` and continue
   — with the same self-reference guard so `IInterface` itself terminates.
-- **Unresolved MEMBERS after a dot are never reported.** `O.Read` where the
-  class has no `Read` is `E2003` for dcc and silence for us; only unresolved
-  BARE identifiers are diagnosed. That is defensible while the member walk is
-  still gaining branches — a false E2003 on a member is worse than a missing
-  one — but it means the corpora say nothing about member-lookup completeness,
-  which is precisely where the audit found the `IInterface` hole. Worth
-  enabling behind a flag first and measuring against the corpora before it
-  becomes a real diagnostic.
+- **spring4d is a corpus now, and it is NOT clean: 27 false diagnostics in
+  `Spring.Base`, 19 of them one bug.** Run it like any `.dproj`
+  (`Packages\Delphi12\Spring.Base.dproj` and `Spring.Core.dproj`, 73 and 121
+  units). Its value is density — a compiling project of ordinary size that
+  reports more than the 3747-unit AVImark client does.
+
+  The 19 `E2010 Incompatible types: 'Pointer' and '_nil'` are all one cause,
+  traced to its declaration site: `Spring.pas` declares a GENERIC record named
+  `Pointer<T>`, and a bare reference to `Pointer` binds to it instead of to the
+  builtin, so every `Pointer(X) := nil` and `Result := nil` in a
+  `Pointer`-returning routine becomes a type error. **Arity is part of a type's
+  identity** and the project pass already knows it — `PreferNonGeneric` /
+  `FindTypeInUsesArity` implement exactly this rule for cross-unit type
+  references — but the RESOLVER's own binding does not, so `RefMap` is wrong
+  before any of that runs, which also sends ctrl+click to the generic. That is
+  the fix: a bare type reference must skip a same-named GENERIC and keep looking,
+  including into the system seed, which is where the non-generic `Pointer` lives.
+  It is the "a name that is also something else" family again, this time
+  *a generic of another arity*.
+
+  The remaining 8: 5 `E2004 Identifier redeclared` around
+  `class function &&op_Equality(...)` — the `&&`-prefixed operator names Delphi
+  accepts, where the parser loses the declaration and declares its parameters,
+  result type and `static` instead; 2 `E2015` on `not HasValue`; 1 `E2003
+  MemoryBarrier`, which looks like an unseeded compiler intrinsic (probe dcc
+  before adding it — the seed list documents why a source grep is not evidence).
+- **Unresolved MEMBERS after a dot are reported only behind a FLAG**, and the
+  first measurement says why it stays there. `O.Read` where the class has no
+  `Read` is `E2003` for dcc and silence for us; only unresolved BARE identifiers
+  are diagnosed by default. `TPasSemaProject.ReportUnresolvedMembers` (CLI:
+  `PasTreeSemaProject -members`) turns it on, at the single place a member
+  reference is finally given up on — `CrossType`'s `nkMember` branch, after
+  `RefMap`, `ExtRefMap` and `FindMemberX` have all failed, and only when the
+  container type is KNOWN, the unit's `uses` all resolved, and the site is not in
+  an unopened `with`. Off, the analysis is byte-identical.
+
+  On, 2026-08-05, it is a **flood, and the shape of the flood is the finding**:
+
+  | corpus | reports | dominated by |
+  |---|---|---|
+  | rtlflat (403) | 8 348 | WinRT generic-import statics |
+  | bigflat (726) | 8 638 | the same |
+  | AVImark client (3747) | 3 609 | string/Char helpers, DevExpress properties |
+  | Spring.Base (73) | 70 | `TValue`/RTTI helpers, `fPair`, vtable consts |
+
+  Three mechanisms account for nearly all of it, and each is one gap rather than
+  hundreds:
+
+  - **a generic ANCESTOR's member typed by its parameter.** 535 `CreateInstance`
+    + 134 `CreateInstanceWithOwner` + hundreds of `get_XxxProperty` in the WinRT
+    units are all `Statics.X` where `Statics` comes from
+    `TWinRTGenericImportS<T>` and its type IS `T` — so the walk must instantiate
+    the ancestor's frame before it can look inside. Same machinery as the
+    `arrayofT` fix, one level up.
+  - **helpers on a builtin-typed value.** `Trim`, `StartsWith`, `PadRight`,
+    `ToString`, `IsDigit`, `IsEmpty` — `TStringHelper`/`TCharHelper` members
+    reached through a member chain rather than a bare name.
+  - **`_AddRef` / `_Release` / `QueryInterface`** — 30 in rtlflat, exactly the
+    `IInterface` hole the audit named above and the flag's first confirmation
+    that the hole is real in ordinary code, not just in a probe.
+
+  One refinement the flag earned immediately: **a member on a `Variant` is never
+  reported**, because late binding makes any name compile and dcc checks nothing
+  — 312 `ActiveWorkbook` and 94 `Worksheets` on one real project, 740 reports in
+  total, all from OLE automation. That rule is in the check now.
+
+  So the flag has done its job: it converted "the corpora say nothing about
+  member-lookup completeness" into three named mechanisms and a number to beat.
+  It should NOT become a default diagnostic until those numbers are near zero.
 - **Inline `var`/`const` visibility is not POSITIONAL** — found by the
   spec↔code audit of 2026-07-31, and the only *wrong-binding* defect it turned
   up. 3 §3.1.3: an inline variable is visible "from its declaration to the end
@@ -425,7 +486,8 @@ Still open, roughly in the order we're tackling it:
   and enforcement — and both have the same
   shape: they can only ADD diagnostics. So they share one acceptance bar, met by
   every check added so far and worth restating rather than re-deriving — **zero
-  new diagnostics across rtlflat, bigflat and both AVImark projects (~12 000
+  new diagnostics across rtlflat, bigflat, both AVImark projects and spring4d's
+  `Spring.Base`/`Spring.Core` (~12 000
   units), plus a probe whose output matches `dcc` line for line.** It has earned
   its keep once already: `E2012` passed every suite and both flat corpora while
   wrongly rejecting six `if AFunctionReference then` conditions, and only the

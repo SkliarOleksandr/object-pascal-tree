@@ -196,6 +196,11 @@ type
       majority of units, so this costs one length check on the hot path. }
     function InUnopenedWithBody(ANode: Integer): Boolean;
     procedure AddDiag(const ADiag: TSemaDiag);
+    { Is a diagnostic already anchored at this CST node? For a pass that can
+      reach the same failure twice (the cross-type pass runs per driver path and
+      a node can be visited from more than one expression) and wants dcc's one
+      report per site. Linear, so only for the error path. }
+    function HasDiagAt(ANode: Integer): Boolean;
   end;
 
 { Any name -> its lookup key: lower-cased, leading '&' stripped. `&Foo` and
@@ -455,6 +460,14 @@ end;
 procedure TPasSemaModel.AddDiag(const ADiag: TSemaDiag);
 begin
   Diags := Diags + [ADiag];
+end;
+
+function TPasSemaModel.HasDiagAt(ANode: Integer): Boolean;
+begin
+  for var LIdx := 0 to High(Diags) do
+    if Diags[LIdx].DeclNode = ANode then
+      Exit(True);
+  Result := False;
 end;
 
 end.

@@ -130,6 +130,7 @@ type
       RunCrossTypePass. Owned here; merged and freed there. }
     FXNewExt: TArray<TDictionary<Integer, TPasExtRef>>;
     FSingleThreaded: Boolean;
+    FReportMembers: Boolean;   // see ReportUnresolvedMembers
     FSystemUnitId: Integer;                // memoized EnsureSystemUnit result
     FSystemUnitResolved: Boolean;
     FSysInitUnitId: Integer;               // memoized EnsureSysInitUnit result
@@ -305,6 +306,16 @@ type
     // driver exactly; results are identical either way — the parallel stages
     // are pure per unit). Default False (one worker per core).
     property SingleThreaded: Boolean read FSingleThreaded write FSingleThreaded;
+    { OPT-IN diagnostic, default OFF: report a member after a dot that no
+      lookup could resolve, as `E2003` on the member's own name. dcc reports
+      such a name and we do not, so this is a real gap — but the member walk
+      keeps gaining branches (the audit found the `IInterface` hole exactly
+      here), and a FALSE E2003 on a member is worse than a missing one, so it
+      stays behind this switch until a corpus run says otherwise. What that run
+      says today is in the README; the point of the flag is that anyone can
+      repeat it. }
+    property ReportUnresolvedMembers: Boolean read FReportMembers
+      write FReportMembers;
     { Editor-host buffer override: analysis reads AText for APath instead of
       the file on disk (for unsaved editor content). Call BEFORE AnalyzeFile/
       AnalyzeDirectory — LoadFile reads at analysis time. }
@@ -3484,7 +3495,22 @@ var
             end;
             LX[N] := MemberTypeX(LMemMid, LMemSym, LCtx, LBX);
             LCtxOf[N] := LCtx;
-          end;
+          end
+          else if FReportMembers and XValid(LBX) and LM.AllUsesResolved and
+                  // A member on a VARIANT is late-bound: any name compiles and
+                  // dcc checks nothing (`Excel.ActiveWorkbook.Worksheets[1]`).
+                  // 312 `ActiveWorkbook` reports on one real project made this
+                  // the first refinement the flag earned.
+                  (XCatOf(LBX) <> tcVariant) and
+                  not LM.InUnopenedWithBody(LName) and
+                  not LM.HasDiagAt(LName) then
+            // The one place a member reference is finally given up on: RefMap
+            // and ExtRefMap are both empty and the member walk failed, with a
+            // KNOWN container type (XValid) — without that last part we would
+            // be reporting our own inability to type the qualifier. Gated on
+            // AllUsesResolved for the same reason bare-name E2003 is: a missing
+            // unit can hide the declaration. See ReportUnresolvedMembers.
+            EmitE2003(LM, LName);
         end;
 
       nkCall:
