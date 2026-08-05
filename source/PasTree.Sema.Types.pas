@@ -38,6 +38,8 @@ type
     function CatOfTypeNode(ANode: Integer): TSemaTypeCat;
     procedure CheckOrdinalTypePositions;
     procedure CheckConditionTypes;
+    function OrdLiteral(ANode: Integer; out AValue: Int64): Boolean;
+    procedure CheckSetCardinality;
     function WiderNum(A, B: Integer): Integer;
     function TypeOfIdent(N: Integer): Integer;
     function BinaryResult(N: Integer): Integer;
@@ -372,6 +374,162 @@ begin
     if (LCond <> NIL_NODE) and (CatOf(M.ExprType[LCond]) in CNotBoolean) then
       Diag('E2012', SE2012_MustBeBoolean, LCond);
   end;
+end;
+
+{ The ordinal value of a LITERAL bound, and only of a literal: a decimal or `$`
+  hex integer, either of those negated, or a one-character string literal. Named
+  constants and `Ord(...)` expressions deliberately answer False — the set check
+  below reports nothing it cannot compute exactly, and constant folding is not
+  this pass's job. }
+function TPasSemaTyper.OrdLiteral(ANode: Integer; out AValue: Int64): Boolean;
+var
+  LTxt: string;
+  LNeg: Int64;
+begin
+  Result := False;
+  AValue := 0;
+  if ANode = NIL_NODE then
+    Exit;
+  if (Kind(ANode) = nkUnaryOp) and (OpText(ANode) = '-') then
+  begin
+    if OrdLiteral(Child(ANode), LNeg) then
+    begin
+      AValue := -LNeg;
+      Result := True;
+    end;
+    Exit;
+  end;
+  LTxt := Txt(ANode);
+  case Kind(ANode) of
+    nkIntLit:
+      begin
+        // Digit separators are legal in a literal (B.5.1) and carry no value.
+        LTxt := StringReplace(LTxt, '_', '', [rfReplaceAll]);
+        if LTxt.StartsWith('$') then
+          Result := TryStrToInt64('$' + LTxt.Substring(1), AValue)
+        else
+          Result := TryStrToInt64(LTxt, AValue);
+      end;
+    nkStrLit:
+      // A single-character literal is a Char constant (B.6.1). Three characters
+      // because the quotes are part of the text; '''' (an escaped quote) is
+      // four and so is skipped, which costs nothing.
+      if (Length(LTxt) = 3) and (LTxt[1] = '''') and (LTxt[3] = '''') then
+      begin
+        AValue := Ord(LTxt[2]);
+        Result := True;
+      end;
+  end;
+end;
+
+{ 2 §2.4.1: a set's base type may have at most 256 values and those values must
+  lie in `0..255` — one code for both, `E2028 Sets may have at most 256
+  elements`, which dcc32 37.0 also uses for a NEGATIVE lower bound (`set of
+  -5..5`) rather than a separate message.
+
+  Two of its answers are surprises and both are honoured here by staying silent:
+  `set of Char` is only a WARNING (`W1050 WideChar reduced to byte char`), not an
+  error, and `set of Int64` is `E2001 Ordinal type required` rather than E2028
+  even though `Int64` is an ordinal.
+
+  Reports only a cardinality it can compute exactly:
+
+  - a named builtin whose range is fixed and platform-independent. `NativeInt`,
+    the 64-bit types and the `*Bool` interop types are left out — their answer
+    depends on the target or was not probed, and a missed report is the cheaper
+    error.
+  - a subrange with two LITERAL bounds (`OrdLiteral`, so no folded constants).
+  - an enum whose element values are literals or implicit, tracked in order so
+    that `(a = 250, b, c, d, e, f)` is caught as well as an explicit 256. One
+    non-literal explicit value abandons the whole enum.
+
+  A named base type is followed one definition at a time (`TNeg = -5..5;
+  set of TNeg`), which is also how an alias chain is handled. }
+procedure TPasSemaTyper.CheckSetCardinality;
+const
+  // 0..255 exactly, so a set over the whole type is legal.
+  CFits: array[0..2] of string = ('byte', 'boolean', 'ansichar');
+  // More than 256 values, on every target. Deliberately excludes the 64-bit
+  // and platform-sized names — see the header.
+  CTooMany: array[0..8] of string = ('shortint', 'word', 'smallint', 'integer',
+    'cardinal', 'longint', 'longword', 'fixedint', 'fixeduint');
+
+  // The base is out of range, and we know it for certain.
+  function BaseTooLarge(ANode: Integer): Boolean;
+  var
+    LDepth, LSym, LElem, LValue, LIdx: Integer;
+    LLo, LHi, LCur: Int64;
+    LName: string;
+  begin
+    Result := False;
+    LDepth := 0;
+    while (ANode <> NIL_NODE) and (LDepth < 8) do
+    begin
+      Inc(LDepth);
+      case Kind(ANode) of
+        nkIdent, nkMember, nkTypeArgs:
+          begin
+            LSym := Head(ANode);
+            if LSym = NIL_SYM then
+              Exit;
+            LName := M.Symbols[LSym].NameLower;
+            if M.Symbols[LSym].Kind = skBuiltinType then
+            begin
+              for LIdx := Low(CFits) to High(CFits) do
+                if LName = CFits[LIdx] then
+                  Exit;
+              for LIdx := Low(CTooMany) to High(CTooMany) do
+                if LName = CTooMany[LIdx] then
+                  Exit(True);
+              Exit;   // char, 64-bit, NativeInt, *Bool: not our business
+            end;
+            if M.Symbols[LSym].Kind <> skType then
+              Exit;
+            ANode := TypeDefNode(LSym);   // follow the alias / named subrange
+          end;
+        nkSubrange:
+          begin
+            if not OrdLiteral(Child(ANode), LLo) then
+              Exit;
+            if not OrdLiteral(Sib(Child(ANode)), LHi) then
+              Exit;
+            Exit((LLo < 0) or (LHi > 255));
+          end;
+        nkEnumType:
+          begin
+            LCur := -1;
+            LElem := Child(ANode);
+            while LElem <> NIL_NODE do
+            begin
+              if Kind(LElem) = nkEnumValue then
+              begin
+                // nkEnumValue children: the name, then an optional value.
+                LValue := Child(LElem);
+                if LValue <> NIL_NODE then
+                  LValue := Sib(LValue);
+                if LValue = NIL_NODE then
+                  Inc(LCur)
+                else if not OrdLiteral(LValue, LCur) then
+                  Exit;   // a named constant or an expression: give up
+                if (LCur < 0) or (LCur > 255) then
+                  Exit(True);
+              end;
+              LElem := Sib(LElem);
+            end;
+            Exit;
+          end;
+      else
+        Exit;   // a non-ordinal base is E2001's business, not this one
+      end;
+    end;
+  end;
+
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to High(T.Nodes) do
+    if (Kind(LIdx) = nkSetType) and BaseTooLarge(Child(LIdx)) then
+      Diag('E2028', SE2028_SetTooLarge, Child(LIdx));
 end;
 
 // Wider of two numeric type symbols (float wins over int; higher rank wins).
@@ -904,6 +1062,7 @@ begin
 
   CategorizeTypes;
   CheckOrdinalTypePositions;   // needs CategorizeTypes — see its own header
+  CheckSetCardinality;         // needs RefMap only — see its own header
   TypeNode(0);
   CheckConditionTypes;         // needs ExprType — see its own header
 end;

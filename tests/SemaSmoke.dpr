@@ -1927,6 +1927,57 @@ begin
   Ok('e2001: one per non-ordinal case selector, records included',
     DiagCount('E2001') = 4);
   GModel.Free;
+
+  // ---- E2028: a set base holds at most 256 values, all in 0..255 (2.4.1) ----
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10 +
+    '  TNeg = -5..5;'#10 +
+    '  TBigEnum = (beA = 0, beB = 256);'#10 +
+    // Implicit successors after an explicit value creep past 255 — dcc-verified
+    // that six of them (ending at 255) are legal and seven are not.
+    '  TCreep = (cA = 250, cB, cC, cD, cE, cF, cG);'#10 +
+    '  S1 = set of Word;'#10 +
+    '  S2 = set of Integer;'#10 +
+    '  S3 = set of ShortInt;'#10 +
+    '  S4 = set of 0..256;'#10 +
+    '  S5 = set of -1..10;'#10 +
+    '  S6 = set of TNeg;'#10 +              // through a named subrange
+    '  S7 = set of TBigEnum;'#10 +
+    '  S8 = set of TCreep;'#10 +
+    '  S9 = set of $00..$100;'#10 +         // hex bounds
+    'implementation'#10'end.'#10);
+  Ok('e2028: one per oversized or out-of-range base',
+    DiagCount('E2028') = 9);
+  Ok('e2028: dcc''s wording',
+    DiagHasText('E2028', 'Sets may have at most 256 elements'));
+  GModel.Free;
+
+  // Legal bases, plus the two dcc does NOT make an error and the ones this
+  // check cannot compute and so must leave alone.
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'const CHi = 300;'#10 +
+    'type'#10 +
+    '  TSparse = (spA = 0, spB = 10, spC = 99);'#10 +
+    '  TDense = (dA, dB, dC);'#10 +
+    '  T255 = 0..255;'#10 +
+    '  S1 = set of Byte;'#10 +
+    '  S2 = set of Boolean;'#10 +
+    '  S3 = set of AnsiChar;'#10 +
+    '  S4 = set of 0..255;'#10 +
+    '  S5 = set of T255;'#10 +
+    '  S6 = set of TSparse;'#10 +
+    '  S7 = set of TDense;'#10 +
+    '  S8 = set of ''a''..''z'';'#10 +      // W1050 in dcc, not an error
+    '  S9 = set of Char;'#10 +              // likewise
+    '  S12 = set of (fA = 250, fB, fC, fD, fE, fF);'#10 +   // ends at 255
+    '  S10 = set of Int64;'#10 +            // E2001 in dcc, and not E2028
+    '  S11 = set of 0..CHi;'#10 +           // a named constant: not computed
+    'implementation'#10'end.'#10);
+  Ok('e2028: silent on every legal base, on `set of Char`, and on bounds it'
+    + ' cannot fold', DiagCount('E2028') = 0);
+  GModel.Free;
   Writeln(Format('=== SemaSmoke: %d passed, %d failed ===', [GPassed, GFailed]));
   if GFailed > 0 then
     ExitCode := 1;

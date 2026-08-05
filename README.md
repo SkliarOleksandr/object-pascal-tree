@@ -317,9 +317,10 @@ Still open, roughly in the order we're tackling it:
   positive** — collected here rather than as separate items because they share
   a shape: we accept code dcc rejects. In rough order of how often the shape
   occurs:
-  - ~~no "ordinal type required" check anywhere~~ — **half done 2026-08-05**
-    (`E2001` for an array index type and a `set of` base, `E2032` for a `for`
-    counter). The other half of the old entry here was a SPEC BUG, not a missing
+  - ~~no "ordinal type required" check anywhere~~ — **done 2026-08-05**
+    (`E2001` for an array index type, a `set of` base and a `case` selector,
+    `E2032` for a `for` counter). Half of the old entry here was a SPEC BUG, not
+    a missing
     check: dcc accepts a sparse (explicit-valued) enum in every one of those
     positions, so the code was right to accept it, and §2.1.1/§2.2.4 have been
     corrected. dcc also splits the rule per POSITION — `Variant` is an error as
@@ -327,10 +328,17 @@ Still open, roughly in the order we're tackling it:
     which is now a table in §2.1.1. The `case` selector followed the same day,
     once the guard check below gave it the typer's result to work from. Still
     open: `set of Int64`, which dcc calls `E2001` even though `Int64` is ordinal;
-  - `set of` base-type limit of 256 values / ordinals in `0..255` (2 §2.4.1) —
-    one code, `E2028`, for both halves including a negative lower bound; needs
-    the cardinality of the base, i.e. constant-folded subrange bounds and enum
-    values, which is the only part of this family that needs arithmetic;
+  - ~~`set of` base-type limit of 256 values / ordinals in `0..255`~~ — **done
+    2026-08-05** (`E2028`, one code for both halves, including a negative lower
+    bound). Reported only for a cardinality it can compute exactly: a builtin
+    whose range is fixed on every target (so not `NativeInt`, the 64-bit types
+    or the `*Bool` ones), a subrange with two LITERAL bounds, or an enum whose
+    values are literals or implicit — tracked in order, so `(cA = 250, cB, cC,
+    cD, cE, cF, cG)` is caught and its six-element sibling is not, both
+    dcc-verified. A named constant as a bound is left alone rather than folded.
+    Two dcc answers are honoured by staying silent: `set of Char` (and
+    `set of 'a'..'z'`) is only `W1050`, a warning, and `set of Int64` is
+    `E2001`;
   - ~~conditions are not required to be Boolean~~ — **done 2026-08-05**
     (`E2012`, plus `E2001` for the `case` selector, which needs the same
     expression types). Three exemptions, each dcc-verified and each necessary:
@@ -376,22 +384,27 @@ Still open, roughly in the order we're tackling it:
   (§15.3.1), the dynamic `array of array of T` indexing sugar (§8.2.1), and a
   `TypeRef` position resolving to a TYPE over a nearer same-named non-type
   (§B.11). Behaviour unchanged — the code already did all three.
-- **Where the audit stands (2026-08-05).** Eight of its items are closed — both
+- **Where the audit stands (2026-08-05).** Eleven of its items are closed — both
   false-positive/wrong-binding defects (`IInterface`, inline-var position),
   visibility recording, the three spec write-ups, `E2081`, `E2145` and the
-  checkable half of `E2193`. What is left is in this list above and below, and
-  every remaining piece has the same
+  checkable half of `E2193`, and the whole ordinal/Boolean/set-limit family
+  (`E2001`, `E2012`, `E2028`, `E2032`) — where one of the items turned out to be
+  a wrong spec rule rather than a missing check. What is left is in this list
+  above and below, and every remaining piece has the same
   shape: it can only ADD diagnostics. So they share one acceptance bar, met by
-  all three checks and worth restating rather than re-deriving — **zero new
-  diagnostics across rtlflat, bigflat and both AVImark projects (~12 000 units),
-  plus a probe whose output matches `dcc` line for line.** Suggested order,
-  cheapest and safest first: the ordinal/Boolean/set-limit family (needs
-  the typer, and would also close `Slice`'s two remaining shapes — a
-  non-open-array parameter needs per-argument overload selection, a dynamic-array
-  first argument needs the typer), then member-lookup reporting behind a flag,
-  then visibility
-  enforcement last — it is the only one that can reject code the corpora
-  currently accept for a reason other than a missing check.
+  every check added so far and worth restating rather than re-deriving — **zero
+  new diagnostics across rtlflat, bigflat and both AVImark projects (~12 000
+  units), plus a probe whose output matches `dcc` line for line.** It has earned
+  its keep once already: `E2012` passed every suite and both flat corpora while
+  wrongly rejecting six `if AFunctionReference then` conditions, and only the
+  3747-unit third-party closure showed it.
+
+  Remaining, cheapest and safest first: multiline-string indentation (a lexer
+  rule, self-contained), then the two `Slice` shapes and `set of Int64` — all
+  three want the same thing, a type for an argument at a given position — then
+  member-lookup reporting behind a flag, then visibility enforcement last, since
+  it is the only one that can reject code the corpora currently accept for a
+  reason other than a missing check.
 - **Audit coverage, so the next pass knows where to start.** The 2026-07-31
   sweep ran pass 1 (spec → code) over every chapter and pass 2 (code → spec)
   over the member-lookup, property, interface, helper, array and generic

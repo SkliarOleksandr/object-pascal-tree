@@ -35,6 +35,7 @@ const
   // argument — dcc names neither the type nor the position.
   SE2001_OrdinalTypeRequired = 'E2001 Ordinal type required';
   SE2012_MustBeBoolean = 'E2012 Type of expression must be BOOLEAN';
+  SE2028_SetTooLarge = 'E2028 Sets may have at most 256 elements';
   SE2032_ForCounterNotOrdinal =
     'E2032 For loop control variable must have ordinal type';
   SE2005_NotATypeIdentifier   = 'E2005 ''%s'' is not a type identifier';
