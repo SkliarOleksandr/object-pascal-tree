@@ -129,6 +129,7 @@ type
     procedure ResolveWithStmts;
     procedure CheckForCounters;
     procedure CheckBareRaises;
+    procedure CheckSlicePositions;
     procedure Run;
   public
     { ASkipTyper skips the final expression type-check (Phase 3a) — for
@@ -2695,6 +2696,98 @@ begin
   Walk(0, False);
 end;
 
+{ 4 §4.11: `Slice(A, Count)` is valid only as an actual argument to an open-array
+  parameter — dcc reports `E2193 Slice standard function only allowed as open
+  array argument` anywhere else.
+
+  dcc32 37.0 turned out to be STRICTER than the spec's wording, and in a way
+  that decides how much of the rule is checkable here: an argument of a
+  COMPILER INTRINSIC is never a valid position, even when that intrinsic's
+  parameter really is an open array. `Insert(const Values: array of T; var
+  Dest; Index)` is the strongest case and it is rejected, as are `Concat` and
+  `Writeln` — so "open-array argument" means an argument of an ordinary call,
+  and Slice's own arguments are excluded too (Slice is itself an intrinsic).
+
+  What this reports, therefore, is every Slice call that is not an argument of a
+  non-intrinsic call: an assignment RHS, a statement, an index base, an operand,
+  an element of an array constructor, an argument of any intrinsic. All are
+  dcc-verified.
+
+  What it deliberately does NOT report is a Slice passed to an ordinary routine
+  whose parameter at that position is NOT an open array (`TakesInt(Slice(A,3))`,
+  `TakesDynArray(Slice(A,3))` — both E2193 under dcc). Deciding that needs the
+  parameter of the SELECTED overload for a given argument index, which nothing
+  here computes; CheckCalls only measures arity, and across units it bails on
+  any candidate without param info. Claiming it from a single unbound guess is
+  how a check like this acquires false positives, so the gap is left open and
+  named rather than approximated.
+
+  Needs RefMap, and only for the identity test: `Slice` is the seeded intrinsic
+  (`sfBuiltin`) and not a user routine of that name, which would resolve
+  elsewhere and be an ordinary call. }
+procedure TPasSemaResolver.CheckSlicePositions;
+
+  // Is ANode a call to the INTRINSIC of that name (not a same-named routine)?
+  function IsIntrinsicCall(ANode: Integer; const ANameLower: string): Boolean;
+  var
+    LCallee, LSym: Integer;
+  begin
+    Result := False;
+    if KindOf(ANode) <> nkCall then
+      Exit;
+    LCallee := FirstChild(ANode);
+    if (LCallee = NIL_NODE) or (KindOf(LCallee) <> nkIdent) then
+      Exit;
+    LSym := FModel.RefMap[LCallee];
+    if LSym = NIL_SYM then
+      Exit;
+    Result := (sfBuiltin in FModel.Symbols[LSym].Flags) and
+      ((ANameLower = '') or (FModel.Symbols[LSym].NameLower = ANameLower));
+  end;
+
+  procedure Walk(ANode: Integer; ASliceOk: Boolean);
+  var
+    LChild, LCallee: Integer;
+    LFileId, LLine, LCol: Integer;
+    LArgsOk: Boolean;
+  begin
+    if IsIntrinsicCall(ANode, 'slice') and not ASliceOk then
+    begin
+      // On the CALLEE, not the call: that is the `Slice` token, and it is where
+      // dcc points.
+      LCallee := FirstChild(ANode);
+      NodePos(LCallee, LFileId, LLine, LCol);
+      FModel.AddDiag(MakeDiag('E2193', SE2193_SliceOutsideOpenArray,
+        LCallee, LFileId, LLine, LCol));
+    end;
+    LChild := FirstChild(ANode);
+    if KindOf(ANode) = nkCall then
+    begin
+      // The callee is never an argument; the arguments are one only if this
+      // call is an ordinary routine call.
+      if LChild = NIL_NODE then
+        Exit;
+      LArgsOk := not IsIntrinsicCall(ANode, '');
+      Walk(LChild, False);
+      LChild := NextSib(LChild);
+      while LChild <> NIL_NODE do
+      begin
+        Walk(LChild, LArgsOk);
+        LChild := NextSib(LChild);
+      end;
+      Exit;
+    end;
+    while LChild <> NIL_NODE do
+    begin
+      Walk(LChild, False);
+      LChild := NextSib(LChild);
+    end;
+  end;
+
+begin
+  Walk(0, False);
+end;
+
 procedure TPasSemaResolver.Run;
 begin
   FSys := SeedSystemScope(FModel, FPlatform);
@@ -2711,6 +2804,7 @@ begin
   ResolveWithStmts;   // needs BindTypes' declared types — see its own header
   CheckForCounters;   // needs RefMap — see its own header
   CheckBareRaises;    // structural only — see its own header
+  CheckSlicePositions; // needs RefMap — see its own header
   if not FSkipTyper then
     TPasSemaTyper.Check(FModel);
 end;

@@ -28,6 +28,9 @@ const
   // Takes no argument: a bare `raise` has nothing to name (18 §18.3.1).
   SE2145_ReRaiseOutsideHandler =
     'E2145 Re-raising an exception only allowed in exception handler';
+  // Likewise argument-free; dcc's wording says "standard function" (4 §4.11).
+  SE2193_SliceOutsideOpenArray =
+    'E2193 Slice standard function only allowed as open array argument';
   SE2005_NotATypeIdentifier   = 'E2005 ''%s'' is not a type identifier';
   // E2010 takes two type names (dst, src); E2015 takes the operator lexeme.
   SE2010_IncompatibleTypes    = 'E2010 Incompatible types: ''%s'' and ''%s''';

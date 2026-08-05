@@ -334,7 +334,20 @@ Still open, roughly in the order we're tackling it:
     does not — all dcc-verified, and now written into §18.3.1, which had said
     only "the analyzer must track handler context". Zero new diagnostics across
     all four corpora;
-  - `Slice` outside an open-array argument position (4 §4.11);
+  - `Slice` outside an open-array argument position (4 §4.11) — **mostly done
+    2026-08-05** (`E2193`), and dcc turned out to be stricter than §4.11 said:
+    an argument of an INTRINSIC is never a valid position either, not even
+    `Insert`'s, whose parameter really is an open array. Reported for every
+    position that needs no parameter types — assignment RHS, statement, index
+    base, array-constructor element, any intrinsic's argument, `Slice` of a
+    `Slice`. **Still open, and named rather than approximated:** a `Slice`
+    passed to an ordinary routine whose parameter at that index is NOT an open
+    array (`TakesInteger(Slice(A, 3))`). That needs the parameter of the
+    SELECTED overload for an argument index, which nothing computes — `CheckCalls`
+    measures arity only, and cross-unit it bails on any candidate without param
+    info. Also found and written into §4.11 but not implemented: `Slice`'s first
+    argument may not be a DYNAMIC array (`E2016 Array type required`), which
+    needs the typer;
   - multiline-string indentation (B §B.6.3): the lexer finds the terminator but
     does not treat the closing line's indentation as the base, so an
     under-indented content line is not an error.
@@ -343,17 +356,20 @@ Still open, roughly in the order we're tackling it:
   (§15.3.1), the dynamic `array of array of T` indexing sugar (§8.2.1), and a
   `TypeRef` position resolving to a TYPE over a nearer same-named non-type
   (§B.11). Behaviour unchanged — the code already did all three.
-- **Where the audit stands (2026-08-05).** Seven of its items are closed — both
+- **Where the audit stands (2026-08-05).** Eight of its items are closed — both
   false-positive/wrong-binding defects (`IInterface`, inline-var position),
-  visibility recording, the three spec write-ups, `E2081` and `E2145`. What is
-  left is in this list above and below, and every remaining piece has the same
+  visibility recording, the three spec write-ups, `E2081`, `E2145` and the
+  checkable half of `E2193`. What is left is in this list above and below, and
+  every remaining piece has the same
   shape: it can only ADD diagnostics. So they share one acceptance bar, met by
-  `E2081` and `E2145` and worth restating rather than re-deriving — **zero new
+  all three checks and worth restating rather than re-deriving — **zero new
   diagnostics across rtlflat, bigflat and both AVImark projects (~12 000 units),
   plus a probe whose output matches `dcc` line for line.** Suggested order,
-  cheapest and safest first: `Slice` position (structural, like the two done),
-  then the ordinal/Boolean/set-limit family (needs
-  the typer), then member-lookup reporting behind a flag, then visibility
+  cheapest and safest first: the ordinal/Boolean/set-limit family (needs
+  the typer, and would also close `Slice`'s two remaining shapes — a
+  non-open-array parameter needs per-argument overload selection, a dynamic-array
+  first argument needs the typer), then member-lookup reporting behind a flag,
+  then visibility
   enforcement last — it is the only one that can reject code the corpora
   currently accept for a reason other than a missing check.
 - **Audit coverage, so the next pass knows where to start.** The 2026-07-31

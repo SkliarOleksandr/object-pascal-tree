@@ -1697,6 +1697,67 @@ begin
   Ok('e2145: a raise WITH an operand is not a re-raise',
     DiagCount('E2145') = 0);
   GModel.Free;
+
+  // ---- E2193: Slice only in an open-array argument position (4.11) ----
+  // Every shape dcc rejects that does not need parameter types: the two
+  // intrinsic ones are the surprise (`Insert`'s first parameter IS an open
+  // array, and dcc rejects it anyway).
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'type TDyn = array of Integer;'#10 +
+    'procedure TakesOpen(const A: array of Integer); begin end;'#10 +
+    'procedure P;'#10 +
+    'var LArr: array[0..9] of Integer; LD: TDyn; LI: Integer;'#10 +
+    'begin'#10 +
+    '  LD := Slice(LArr, 3);'#10 +                 // assignment RHS
+    '  LI := Length(Slice(LArr, 3));'#10 +         // argument of an intrinsic
+    '  Insert(Slice(LArr, 3), LD, 0);'#10 +        // ...even this one
+    '  Slice(LArr, 3);'#10 +                       // a statement
+    '  TakesOpen([Slice(LArr, 3)]);'#10 +          // an array constructor
+    '  TakesOpen(Slice(Slice(LArr, 5), 3));'#10 +  // Slice of a Slice
+    '  if Slice(LArr, 3)[0] = LI then Exit;'#10 +  // an index base
+    'end;'#10 +
+    'end.'#10);
+  Ok('e2193: one report per bad position', DiagCount('E2193') = 7);
+  Ok('e2193: dcc''s wording',
+    DiagHasText('E2193', 'only allowed as open array argument'));
+  GModel.Free;
+
+  // The sanctioned position, in all three forms dcc accepts — including a
+  // Slice of an open-array parameter, which is how the RTL uses it.
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'procedure TakesOpen(const A: array of Integer); begin end;'#10 +
+    'procedure TakesOpenVar(var A: array of Integer); begin end;'#10 +
+    'procedure Q(const A: array of Integer);'#10 +
+    'begin'#10 +
+    '  TakesOpen(Slice(A, 2));'#10 +
+    'end;'#10 +
+    'procedure P;'#10 +
+    'var LArr: array[0..9] of Integer;'#10 +
+    'begin'#10 +
+    '  TakesOpen(Slice(LArr, 3));'#10 +
+    '  TakesOpenVar(Slice(LArr, 3));'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Ok('e2193: silent in an argument position', DiagCount('E2193') = 0);
+  GModel.Free;
+
+  // A user routine that happens to be called Slice is an ordinary call, so
+  // neither it nor its arguments are this rule's business.
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'type TDyn = array of Integer;'#10 +
+    'function Slice(const A: TDyn; N: Integer): TDyn; begin end;'#10 +
+    'procedure P;'#10 +
+    'var LD: TDyn;'#10 +
+    'begin'#10 +
+    '  LD := Slice(LD, 3);'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Ok('e2193: a user routine of that name is not the intrinsic',
+    DiagCount('E2193') = 0);
+  GModel.Free;
   Writeln(Format('=== SemaSmoke: %d passed, %d failed ===', [GPassed, GFailed]));
   if GFailed > 0 then
     ExitCode := 1;
