@@ -36,6 +36,9 @@ const
   SE2001_OrdinalTypeRequired = 'E2001 Ordinal type required';
   SE2012_MustBeBoolean = 'E2012 Type of expression must be BOOLEAN';
   SE2028_SetTooLarge = 'E2028 Sets may have at most 256 elements';
+  // 11 §11.2.1. The single %s is the QUALIFIED member name, `TType.Member`,
+  // which is how dcc spells it.
+  SE2361_CannotAccessPrivate = 'E2361 Cannot access private symbol %s';
   SE2032_ForCounterNotOrdinal =
     'E2032 For loop control variable must have ordinal type';
   SE2005_NotATypeIdentifier   = 'E2005 ''%s'' is not a type identifier';

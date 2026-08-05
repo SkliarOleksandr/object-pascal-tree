@@ -77,6 +77,7 @@ var
   GExtraPaths: TArray<string>;   // -L<dir>, repeatable; see the arg loop
   GIdx: Integer;
   GSingle, GWholeProject, GDProjMode, GList, GMembers: Boolean;
+  GVisibility: Boolean;
   GSW: TStopwatch;
   GMode: string;
 
@@ -233,6 +234,7 @@ begin
     try
       GProj.SingleThreaded := GSingle;
       GProj.ReportUnresolvedMembers := GMembers;
+      GProj.ReportVisibility := GVisibility;
       // No -NS list in the .dproj means we could not read the option, not that
       // the project wants zero prefixes — dcc has none built in, so zero would
       // turn every legacy unqualified import into an F1027.
@@ -409,6 +411,7 @@ begin
     GDProjMode := False;
     GList := False;
     GMembers := False;
+    GVisibility := False;
     GStudio := GetEnvironmentVariable('BDS');
     for GIdx := 2 to ParamCount do
       // The exact-match flags come FIRST, because `-L` below is a
@@ -426,6 +429,8 @@ begin
         GList := True
       else if SameText(ParamStr(GIdx), '-members') then
         GMembers := True
+      else if SameText(ParamStr(GIdx), '-visibility') then
+        GVisibility := True
       else if ParamStr(GIdx).StartsWith('-p:', True) then
         TryParsePlatformName(Copy(ParamStr(GIdx), 4, MaxInt), GPlatform)
       else if ParamStr(GIdx).StartsWith('-studio:', True) then
@@ -470,6 +475,7 @@ begin
     try
       GProj.SingleThreaded := GSingle;
       GProj.ReportUnresolvedMembers := GMembers;
+      GProj.ReportVisibility := GVisibility;
       // Same reasoning as the -dproj driver: a directory or bare-file run has
       // no project to state its prefixes, and zero prefixes is not what the IDE
       // would use.

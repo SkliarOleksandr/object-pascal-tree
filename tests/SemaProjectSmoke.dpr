@@ -1857,6 +1857,17 @@ begin
       Inc(Result);
 end;
 
+// Does any ACode diagnostic in AModel mention ASubstr?
+function DiagHasText(AModel: TPasSemaModel; const ACode, ASubstr: string):
+  Boolean;
+begin
+  Result := False;
+  for var LIdx := 0 to High(AModel.Diags) do
+    if (AModel.Diags[LIdx].Code = ACode) and
+       AModel.Diags[LIdx].Msg.Contains(ASubstr) then
+      Exit(True);
+end;
+
 function SymCountOf(AModel: TPasSemaModel; const ANameLower: string;
   AKind: TSemaSymbolKind): Integer;
 begin
@@ -2597,6 +2608,83 @@ begin
     GProj.AnalyzeDirectory(LDir);
     Ok('members: ON reports it once, and only the bad one',
       DiagCount(ModelByName('memuser'), 'E2003') = 1);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  { ReportVisibility — the enforcement half of 11.2.1, also opt-in. Every rule
+    below is dcc32 37.0-probed, and the SILENT ones carry the weight: `private`
+    is visible to the whole declaring UNIT (the friend rule), so enforcing it
+    per-type would reject correct code everywhere. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_vis');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'VisHost.pas'),
+    'unit VisHost;'#10'interface'#10 +
+    'type'#10 +
+    '  TThing = class'#10 +
+    '  private'#10 +
+    '    FPriv: Integer;'#10 +
+    '  strict private'#10 +
+    '    FStrict: Integer;'#10 +
+    '  public'#10 +
+    '    FPub: Integer;'#10 +
+    '    procedure Own;'#10 +
+    '  end;'#10 +
+    '  TFriend = class'#10 +
+    '    procedure Touch(A: TThing);'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TThing.Own;'#10 +
+    'begin'#10 +
+    '  Self.FStrict := 1;'#10 +      // its own strict private: legal
+    'end;'#10 +
+    'procedure TFriend.Touch(A: TThing);'#10 +
+    'begin'#10 +
+    '  A.FPriv := 1;'#10 +           // same unit: the friend rule, legal
+    '  A.FPub := 2;'#10 +
+    '  A.FStrict := 3;'#10 +         // strict: an error even here
+    'end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'VisUser.pas'),
+    'unit VisUser;'#10'interface'#10'uses VisHost;'#10 +
+    'type'#10 +
+    '  TOutside = class'#10 +
+    '    procedure Touch(A: TThing);'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TOutside.Touch(A: TThing);'#10 +
+    'begin'#10 +
+    '  A.FPriv := 1;'#10 +           // another unit: an error
+    '  A.FStrict := 2;'#10 +         // likewise
+    '  A.FPub := 3;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    Ok('visibility: OFF by default, so nothing is refused',
+      (DiagCount(ModelByName('vishost'), 'E2361') = 0) and
+      (DiagCount(ModelByName('visuser'), 'E2361') = 0));
+  finally
+    GProj.Free;
+  end;
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportVisibility := True;
+    GProj.AnalyzeDirectory(LDir);
+    // Same unit: only the STRICT one is refused — the friend rule keeps
+    // `A.FPriv` legal, and a type's own strict member stays reachable.
+    Ok('visibility: strict private is refused even in the declaring unit',
+      DiagCount(ModelByName('vishost'), 'E2361') = 1);
+    Ok('visibility: ...and names the member the way dcc does',
+      DiagHasText(ModelByName('vishost'), 'E2361', 'TThing.FStrict'));
+    // Another unit: both private forms are refused, the public one is not.
+    Ok('visibility: across units private and strict private both go',
+      DiagCount(ModelByName('visuser'), 'E2361') = 2);
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

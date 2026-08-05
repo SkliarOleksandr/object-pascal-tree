@@ -131,6 +131,7 @@ type
     FXNewExt: TArray<TDictionary<Integer, TPasExtRef>>;
     FSingleThreaded: Boolean;
     FReportMembers: Boolean;   // see ReportUnresolvedMembers
+    FReportVisibility: Boolean;   // see ReportVisibility
     FSystemUnitId: Integer;                // memoized EnsureSystemUnit result
     FSystemUnitResolved: Boolean;
     FSysInitUnitId: Integer;               // memoized EnsureSysInitUnit result
@@ -191,6 +192,7 @@ type
     procedure RunDeclaredPass(ACount: Integer);
     procedure CrossResolve(AId: Integer);
     function StructSymOfNode(AModel: TPasSemaModel; ANode: Integer): Integer;
+    procedure CheckVisibility(AId, ANameNode, AMemMid, AMemSym: Integer);
     function InPropertySpecifier(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function OuterStructsOfNode(AModel: TPasSemaModel;
       ANode, AInnermost: Integer): TArray<Integer>;
@@ -316,6 +318,14 @@ type
       repeat it. }
     property ReportUnresolvedMembers: Boolean read FReportMembers
       write FReportMembers;
+    { OPT-IN, default OFF: enforce member VISIBILITY on a QUALIFIED access —
+      `E2361 Cannot access private symbol TType.Member` (11 §11.2.1). Recording
+      landed first and deliberately; this is the enforcement half, and it is the
+      only check here that can reject code the corpora currently ACCEPT for a
+      reason other than a missing check, which is why it is a switch and not a
+      default. What it covers and what it does not is in the README. }
+    property ReportVisibility: Boolean read FReportVisibility
+      write FReportVisibility;
     { Editor-host buffer override: analysis reads AText for APath instead of
       the file on disk (for unsaved editor content). Call BEFORE AnalyzeFile/
       AnalyzeDirectory — LoadFile reads at analysis time. }
@@ -3475,11 +3485,13 @@ var
           begin
             LX[N] := MemberTypeX(AId, LSym, LBX.Inst, LBX);
             LCtxOf[N] := LBX.Inst;
+            CheckVisibility(AId, LName, AId, LSym);
           end
           else if ExtOf(LName, LExt) then
           begin
             LX[N] := MemberTypeX(LExt.UnitId, LExt.Sym, LBX.Inst, LBX);
             LCtxOf[N] := LBX.Inst;
+            CheckVisibility(AId, LName, LExt.UnitId, LExt.Sym);
           end
           else if XValid(LBX) and FindMemberX(AId, LBX,
             LM.Tree.NodeNameLower(LName), LMemMid, LMemSym, LCtx) then
@@ -3495,6 +3507,7 @@ var
             end;
             LX[N] := MemberTypeX(LMemMid, LMemSym, LCtx, LBX);
             LCtxOf[N] := LCtx;
+            CheckVisibility(AId, LName, LMemMid, LMemSym);
           end
           else if FReportMembers and XValid(LBX) and LM.AllUsesResolved and
                   // A member on a VARIANT is late-bound: any name compiles and
@@ -3849,6 +3862,69 @@ end;
 // The struct type symbol of the METHOD implementation enclosing ANode, via
 // the scope chain (a local proc inside a method climbs to the method's
 // scope); NIL_SYM when ANode isn't inside any method body.
+{ 11 §11.2.1, enforcement half: a QUALIFIED access to a private member, reported
+  as dcc does — `E2361 Cannot access private symbol TType.Member`.
+
+  OFF unless ReportVisibility says otherwise. This is the only check here that
+  can reject code the corpora ACCEPT, so it ships as a switch.
+
+  The rules, dcc32 37.0-probed rather than assumed:
+
+  - `private` is visible to the whole DECLARING UNIT, not just the type — the
+    "friend" rule. So it is an error only across units, which is why the test is
+    a unit-id comparison and not a struct one.
+  - `strict private` is visible only inside the declaring type, in its own unit
+    too: `A.FStrict` from a sibling class one line below is already an error.
+  - `protected` gets its own code (`E2362`) and needs an ancestry walk to answer,
+    so it is deliberately NOT enforced here; the README names it.
+  - A BARE name in a descendant is a different diagnostic entirely — dcc says
+    `E2003 Undeclared identifier`, because an inaccessible member is not in scope
+    rather than in scope and refused. Also named, also not done here: this
+    routine sees qualified accesses only.
+
+  Two things must keep working and are the reason the walk is written this way
+  rather than as "the member's struct must be the accessing struct": a nested
+  enum's VALUES are reachable from outside a private type (2 §2.2.4), and a
+  strict private nested helper still activates (15 §15.4). Neither is a member
+  ACCESS, so neither reaches here. }
+procedure TPasSemaProject.CheckVisibility(AId, ANameNode, AMemMid,
+  AMemSym: Integer);
+var
+  LMemM, LM: TPasSemaModel;
+  LVis: TSemaVisibility;
+  LOwner, LHere: Integer;
+begin
+  if not FReportVisibility or (AMemSym = NIL_SYM) then
+    Exit;
+  LMemM := FModels[AMemMid];
+  LVis := LMemM.Symbols[AMemSym].Visibility;
+  if not (LVis in [svPrivate, svStrictPrivate]) then
+    Exit;
+  // The declaring struct: the member's own scope, which for a class member is
+  // that class's member scope.
+  LOwner := NIL_SYM;
+  if LMemM.Symbols[AMemSym].Scope <> NIL_SCOPE then
+    LOwner := LMemM.Scopes[LMemM.Symbols[AMemSym].Scope].StructSym;
+  if LOwner = NIL_SYM then
+    Exit;   // not a struct member after all: nothing to enforce
+  LM := FModels[AId];
+  LHere := StructSymOfNode(LM, ANameNode);
+  if LVis = svPrivate then
+  begin
+    if AMemMid = AId then
+      Exit;   // the friend rule: same unit, always legal
+  end
+  else
+    // strict private: only from inside the declaring type itself, which also
+    // means the accessing site must be in the same unit as the declaration.
+    if (AMemMid = AId) and (LHere = LOwner) then
+      Exit;
+  if LM.HasDiagAt(ANameNode) then
+    Exit;   // one report per site, like every other pass here
+  EmitAt(LM, ANameNode, 'E2361', Format(SE2361_CannotAccessPrivate,
+    [LMemM.Symbols[LOwner].Name + '.' + LMemM.Symbols[AMemSym].Name]));
+end;
+
 function TPasSemaProject.StructSymOfNode(AModel: TPasSemaModel;
   ANode: Integer): Integer;
 var

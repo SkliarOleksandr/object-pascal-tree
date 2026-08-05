@@ -416,19 +416,42 @@ Still open, roughly in the order we're tackling it:
   taking a guess: the real default is `published` under `{$M+}` and `public`
   otherwise, which depends on a directive AND on the ancestry.
 
-  What is still open is the enforcement half of 11 §11.2.1 — the unit-level
-  "friend" rule, `strict private`/`strict protected`, and with them every
-  `E2361 Cannot access private symbol`. `FindMemberX` still says so in a
-  comment ("Visibility is not filtered here").
+  **Enforcement landed 2026-08-05 as an opt-in** —
+  `TPasSemaProject.ReportVisibility`, CLI `-visibility`, default OFF, with the
+  analysis byte-identical when off. It covers a QUALIFIED access to a `private`
+  or `strict private` member, reported as dcc spells it: `E2361 Cannot access
+  private symbol TType.Member`. Every rule was probed, and the two that keep
+  code LEGAL matter most: `private` is visible to the whole declaring UNIT (the
+  "friend" rule), so `A.FPriv` from a sibling class one line below is fine and
+  enforcing per-type would reject correct code everywhere; `strict private` is
+  refused even there. Both directions are pinned in `SemaProjectSmoke`.
 
-  It is deliberately separate, because enforcement can only ADD diagnostics and
-  every one of them is a false-positive risk against corpora currently at zero
-  — it needs its own measured pass, not a ride on the recording change. Two
-  rules also come out RIGHT today *because* the walk ignores visibility, and
+  **And its first measurement is the reason it stays off: 546 reports on
+  rtlflat, 998 on bigflat, 161 on Spring.Base — all one mechanism, and not a
+  visibility mechanism at all.** The top names give it away: `Exception.Create`
+  (475 on bigflat), `TMonitor.Enter`/`Exit`, `TThread.Synchronize`. Each of those
+  types declares a PRIVATE member of that name beside the PUBLIC one people
+  actually call — `Exception` has a private `class constructor Create` at the top
+  of its private section and the public `constructor Create(const Msg: string)`
+  fifteen lines below. Member binding returns the first match in the member
+  scope, arity and class-vs-instance not considered, so the visibility check
+  faithfully refuses a symbol that was never the call's target. So **visibility
+  enforcement is blocked on overload-aware member binding**, not on the
+  visibility rules — which is the third time in this session a strict check has
+  turned out to expose a binding imprecision rather than a real error.
+
+  Still not covered, and each named rather than approximated: `protected` /
+  `strict protected` (`E2362`, needs an ancestry walk to answer "is the accessing
+  type a descendant"), and a BARE name in a descendant, where dcc reports
+  `E2003 Undeclared identifier` instead — an inaccessible member is not in scope
+  rather than in scope and refused, so that half belongs in the member WALK, not
+  in a check after it.
+
+  Two rules also come out RIGHT today *because* the walk ignores visibility, and
   both must survive: a nested enum's VALUES leak out of a `private` type
   (2 §2.2.4) and a `strict private` nested helper still activates (15 §15.4).
-  Both are pinned by tests now, so enforcement will trip over them rather than
-  quietly "fix" them.
+  Both are pinned by tests, and neither is a member ACCESS, so neither reaches
+  the new check.
 - **Missing semantic CHECKS the spec names, none of which can produce a false
   positive** — collected here rather than as separate items because they share
   a shape: we accept code dcc rejects. In rough order of how often the shape
