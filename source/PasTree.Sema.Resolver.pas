@@ -62,7 +62,8 @@ type
     FPendingAggr: TArray<TPasPendingAggr>;
     FPendingHelpers: TArray<TPasPendingHelper>;
     FSkipTyper: Boolean;   // see Analyze
-    FPlatform: TPasPlatform;   // only the builtin seed is platform-dependent
+    // Two consumers: the builtin seed, and one `set of` rule in the typer.
+    FPlatform: TPasPlatform;
     // tree helpers
     function KindOf(ANode: Integer): TPasNodeKind; inline;
     function FirstChild(ANode: Integer): Integer; inline;
@@ -2745,9 +2746,58 @@ procedure TPasSemaResolver.CheckSlicePositions;
       ((ANameLower = '') or (FModel.Symbols[LSym].NameLower = ANameLower));
   end;
 
+  { Does argument AIndex of ACall land on an OPEN-ARRAY parameter? True also
+    when the answer cannot be established, so that only a certain "no" reports.
+
+    Certainty here means a single candidate: the callee is a plain name bound to
+    a routine symbol with NO further overload and with its parameters visible in
+    this unit. That deliberately skips overload sets rather than ranking them —
+    picking the wrong candidate would invent a diagnostic, and `Slice` is rare
+    enough that the precision is not worth the risk. Everything cross-unit
+    (params in another model), every method call through a qualifier, and every
+    call through a procedural variable also fall through to True. }
+  function ParamTakesSlice(ACall, AIndex: Integer): Boolean;
+  var
+    LCallee, LSym, LScope, LParam, LSeen, LType: Integer;
+  begin
+    Result := True;
+    LCallee := FirstChild(ACall);
+    if (LCallee = NIL_NODE) or (KindOf(LCallee) <> nkIdent) then
+      Exit;
+    LSym := FModel.RefMap[LCallee];
+    if (LSym = NIL_SYM) or (FModel.Symbols[LSym].Kind <> skRoutine) or
+       (FModel.Symbols[LSym].NextOverload <> NIL_SYM) then
+      Exit;
+    LScope := FModel.Symbols[LSym].MemberScope;
+    if LScope = NIL_SCOPE then
+      Exit;   // a builtin, or params not recorded
+    LSeen := 0;
+    for LParam in FModel.Scopes[LScope].Symbols do
+    begin
+      if FModel.Symbols[LParam].Kind <> skParam then
+        Continue;
+      if LSeen = AIndex then
+      begin
+        // `array of T` written in a parameter is an OPEN array: an nkArrayType
+        // with no dimension children, the single child being the element type.
+        // `array of const` (Aux = 1) has none at all and is one too.
+        LType := FModel.Symbols[LParam].TypeNode;
+        if (LType = NIL_NODE) or (KindOf(LType) <> nkArrayType) then
+          Exit(False);
+        if FTree.Nodes[LType].Aux = 1 then
+          Exit(True);
+        Result := (FirstChild(LType) <> NIL_NODE) and
+          (NextSib(FirstChild(LType)) = NIL_NODE);
+        Exit;
+      end;
+      Inc(LSeen);
+    end;
+    // Fewer parameters than arguments: an arity error, not this rule's.
+  end;
+
   procedure Walk(ANode: Integer; ASliceOk: Boolean);
   var
-    LChild, LCallee: Integer;
+    LChild, LCallee, LArgIdx: Integer;
     LFileId, LLine, LCol: Integer;
     LArgsOk: Boolean;
   begin
@@ -2770,9 +2820,11 @@ procedure TPasSemaResolver.CheckSlicePositions;
       LArgsOk := not IsIntrinsicCall(ANode, '');
       Walk(LChild, False);
       LChild := NextSib(LChild);
+      LArgIdx := 0;
       while LChild <> NIL_NODE do
       begin
-        Walk(LChild, LArgsOk);
+        Walk(LChild, LArgsOk and ParamTakesSlice(ANode, LArgIdx));
+        Inc(LArgIdx);
         LChild := NextSib(LChild);
       end;
       Exit;
@@ -2806,7 +2858,10 @@ begin
   CheckBareRaises;    // structural only — see its own header
   CheckSlicePositions; // needs RefMap — see its own header
   if not FSkipTyper then
-    TPasSemaTyper.Check(FModel);
+    // The platform reaches the typer for one rule only: a 64-bit ordinal
+    // `set of` base is E2001 where a 32-bit one is E2028, and NativeInt is
+    // whichever the target makes it.
+    TPasSemaTyper.Check(FModel, FPlatform);
 end;
 
 end.

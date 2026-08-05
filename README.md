@@ -326,8 +326,8 @@ Still open, roughly in the order we're tackling it:
     corrected. dcc also splits the rule per POSITION — `Variant` is an error as
     an index/base/counter and legal as a `case` selector or an `if` condition —
     which is now a table in §2.1.1. The `case` selector followed the same day,
-    once the guard check below gave it the typer's result to work from. Still
-    open: `set of Int64`, which dcc calls `E2001` even though `Int64` is ordinal;
+    once the guard check below gave it the typer's result to work from, and so
+    did the 64-bit `set of` base — see the entry below;
   - ~~`set of` base-type limit of 256 values / ordinals in `0..255`~~ — **done
     2026-08-05** (`E2028`, one code for both halves, including a negative lower
     bound). Reported only for a cardinality it can compute exactly: a builtin
@@ -336,9 +336,15 @@ Still open, roughly in the order we're tackling it:
     values are literals or implicit — tracked in order, so `(cA = 250, cB, cC,
     cD, cE, cF, cG)` is caught and its six-element sibling is not, both
     dcc-verified. A named constant as a bound is left alone rather than folded.
-    Two dcc answers are honoured by staying silent: `set of Char` (and
-    `set of 'a'..'z'`) is only `W1050`, a warning, and `set of Int64` is
-    `E2001`;
+    `set of Char` (and `set of 'a'..'z'`) is honoured by staying silent, since
+    dcc makes it `W1050`, a warning. A **64-bit ordinal base is dcc's other
+    code**, `E2001` — and `NativeInt`/`NativeUInt` are 64-bit only where the
+    target says so, which is why the typer now takes a platform: the same
+    `set of NativeInt` is `E2028` under `dcc32` and `E2001` under `dcc64`, both
+    verified. `ByteBool` is `E2028` despite being one byte, while `Boolean` is
+    fine. Not reported: `FixedInt` and `UCS4Char`, which have real declarations
+    in `System.pas` rather than seeds, so their category is cross-unit and
+    unknown intra-unit;
   - ~~conditions are not required to be Boolean~~ — **done 2026-08-05**
     (`E2012`, plus `E2001` for the `case` selector, which needs the same
     expression types). Three exemptions, each dcc-verified and each necessary:
@@ -362,20 +368,22 @@ Still open, roughly in the order we're tackling it:
     does not — all dcc-verified, and now written into §18.3.1, which had said
     only "the analyzer must track handler context". Zero new diagnostics across
     all four corpora;
-  - `Slice` outside an open-array argument position (4 §4.11) — **mostly done
+  - ~~`Slice` outside an open-array argument position (4 §4.11)~~ — **done
     2026-08-05** (`E2193`), and dcc turned out to be stricter than §4.11 said:
     an argument of an INTRINSIC is never a valid position either, not even
     `Insert`'s, whose parameter really is an open array. Reported for every
-    position that needs no parameter types — assignment RHS, statement, index
-    base, array-constructor element, any intrinsic's argument, `Slice` of a
-    `Slice`. **Still open, and named rather than approximated:** a `Slice`
-    passed to an ordinary routine whose parameter at that index is NOT an open
-    array (`TakesInteger(Slice(A, 3))`). That needs the parameter of the
-    SELECTED overload for an argument index, which nothing computes — `CheckCalls`
-    measures arity only, and cross-unit it bails on any candidate without param
-    info. Also found and written into §4.11 but not implemented: `Slice`'s first
-    argument may not be a DYNAMIC array (`E2016 Array type required`), which
-    needs the typer;
+    position — assignment RHS, statement, index base, array-constructor element,
+    any intrinsic's argument, `Slice` of a `Slice`, and a non-open-array
+    PARAMETER of an ordinary call. That last one needs the parameter at an
+    argument index, and it is taken only from a SINGLE unambiguous candidate: a
+    plain callee name bound to a routine with no further overload and with its
+    params visible in this unit. An overload set is deliberately not ranked —
+    picking the wrong candidate would invent a diagnostic, and `Slice` is far too
+    rare for that trade. So `Over(Slice(A, 3))` against an overloaded `Over`
+    stays silent, as does any cross-unit callee. Still not implemented and now
+    the only gap: `Slice`'s first argument may not be a DYNAMIC array
+    (`E2016 Array type required`), which is a different check on a different
+    argument;
   - ~~multiline-string indentation (B §B.6.3)~~ — **done 2026-08-05**
     (`dcInconsistentIndentChars`, dcc's `E2657 Inconsistent indent characters`).
     The lexer already found the terminator; it now compares the closing run's
@@ -405,15 +413,17 @@ Still open, roughly in the order we're tackling it:
   (§15.3.1), the dynamic `array of array of T` indexing sugar (§8.2.1), and a
   `TypeRef` position resolving to a TYPE over a nearer same-named non-type
   (§B.11). Behaviour unchanged — the code already did all three.
-- **Where the audit stands (2026-08-05).** Twelve of its items are closed — both
+- **Where the audit stands (2026-08-05).** Thirteen of its items are closed — both
   false-positive/wrong-binding defects (`IInterface`, inline-var position),
-  visibility recording, the three spec write-ups, `E2081`, `E2145` and the
-  checkable half of `E2193`, and the whole ordinal/Boolean/set-limit family
-  (`E2001`, `E2012`, `E2028`, `E2032`) — where one of the items turned out to be
-  a wrong spec rule rather than a missing check — and multiline-string
-  indentation. What is left is in this list
-  above and below, and every remaining piece has the same
-  shape: it can only ADD diagnostics. So they share one acceptance bar, met by
+  visibility recording, the three spec write-ups, `E2081`, `E2145`, `E2193`, the
+  whole ordinal/Boolean/set-limit family (`E2001`, `E2012`, `E2028`, `E2032`) —
+  where one of the items turned out to be a wrong spec rule rather than a missing
+  check — and multiline-string indentation. **That is every "missing check" the
+  audit named**, bar the two one-line residues noted in this list (`Slice`'s
+  first argument may not be a dynamic array; `FixedInt`/`UCS4Char` set bases are
+  invisible intra-unit). What is left below is the other two items — reporting
+  and enforcement — and both have the same
+  shape: they can only ADD diagnostics. So they share one acceptance bar, met by
   every check added so far and worth restating rather than re-deriving — **zero
   new diagnostics across rtlflat, bigflat and both AVImark projects (~12 000
   units), plus a probe whose output matches `dcc` line for line.** It has earned
@@ -421,9 +431,7 @@ Still open, roughly in the order we're tackling it:
   wrongly rejecting six `if AFunctionReference then` conditions, and only the
   3747-unit third-party closure showed it.
 
-  Remaining, cheapest and safest first: the two `Slice` shapes and
-  `set of Int64` — all three want the same thing, a type for an argument at a
-  given position — then
+  Remaining, cheapest and safest first:
   member-lookup reporting behind a flag, then visibility enforcement last, since
   it is the only one that can reject code the corpora currently accept for a
   reason other than a missing check.

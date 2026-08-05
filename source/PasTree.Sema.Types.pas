@@ -16,6 +16,7 @@ interface
 
 uses
   PasTree.Ast,
+  PasTree.Platforms,
   PasTree.Sema.Model;
 
 type
@@ -23,6 +24,10 @@ type
   private
     M: TPasSemaModel;
     T: TPasTree;
+    // Only ONE rule needs it: a 64-bit ordinal `set of` base is E2001 while a
+    // 32-bit one is E2028, and `NativeInt` is whichever the target says
+    // (dcc32 E2028, dcc64 E2001 for the same source).
+    FPlatform: TPasPlatform;
     Int, Ext, Str, Chr, Bool, Ptr, Nul: Integer;   // cached builtin type syms
     function Kind(N: Integer): TPasNodeKind; inline;
     function Child(N: Integer): Integer; inline;
@@ -59,7 +64,8 @@ type
     function TypeNode(N: Integer): Integer;
     procedure Run;
   public
-    class procedure Check(AModel: TPasSemaModel); static;
+    class procedure Check(AModel: TPasSemaModel;
+      APlatform: TPasPlatform = pfWin32); static;
   end;
 
 implementation
@@ -69,7 +75,8 @@ uses
   PasTree.Preprocessor,
   PasTree.Sema.Diagnostics;
 
-class procedure TPasSemaTyper.Check(AModel: TPasSemaModel);
+class procedure TPasSemaTyper.Check(AModel: TPasSemaModel;
+  APlatform: TPasPlatform = pfWin32);
 var
   LT: TPasSemaTyper;
 begin
@@ -77,6 +84,7 @@ begin
   try
     LT.M := AModel;
     LT.T := AModel.Tree;
+    LT.FPlatform := APlatform;
     LT.Run;
   finally
     LT.Free;
@@ -427,17 +435,21 @@ end;
   elements`, which dcc32 37.0 also uses for a NEGATIVE lower bound (`set of
   -5..5`) rather than a separate message.
 
-  Two of its answers are surprises and both are honoured here by staying silent:
-  `set of Char` is only a WARNING (`W1050 WideChar reduced to byte char`), not an
-  error, and `set of Int64` is `E2001 Ordinal type required` rather than E2028
-  even though `Int64` is an ordinal.
+  A 64-BIT ordinal base is the exception, and not a small one: dcc answers
+  `E2001 Ordinal type required` there rather than E2028, even though `Int64` is
+  perfectly ordinal. `NativeInt`/`NativeUInt` follow the TARGET — dcc32 says
+  E2028 for `set of NativeInt` and dcc64 says E2001 for the same line — which is
+  the one thing in this typer that needs to know the platform.
+
+  `set of Char` (and `WideChar`) is only a WARNING, `W1050 WideChar reduced to
+  byte char`, so it is passed over. The `*Bool` interop types are NOT: dcc
+  reports E2028 for `set of ByteBool` although it is a single byte, while
+  `set of Boolean` is fine.
 
   Reports only a cardinality it can compute exactly:
 
-  - a named builtin whose range is fixed and platform-independent. `NativeInt`,
-    the 64-bit types and the `*Bool` interop types are left out — their answer
-    depends on the target or was not probed, and a missed report is the cheaper
-    error.
+  - a named builtin, each answer probed against dcc (both compilers for the two
+    platform-sized ones).
   - a subrange with two LITERAL bounds (`OrdLiteral`, so no folded constants).
   - an enum whose element values are literals or implicit, tracked in order so
     that `(a = 250, b, c, d, e, f)` is caught as well as an explicit 256. One
@@ -449,19 +461,23 @@ procedure TPasSemaTyper.CheckSetCardinality;
 const
   // 0..255 exactly, so a set over the whole type is legal.
   CFits: array[0..2] of string = ('byte', 'boolean', 'ansichar');
-  // More than 256 values, on every target. Deliberately excludes the 64-bit
-  // and platform-sized names — see the header.
-  CTooMany: array[0..8] of string = ('shortint', 'word', 'smallint', 'integer',
-    'cardinal', 'longint', 'longword', 'fixedint', 'fixeduint');
+  // More than 256 values but not 64-bit. `ShortInt` is here for its NEGATIVE
+  // half, and the three `*Bool`s because dcc says so — `ByteBool` is one byte
+  // and still E2028, while `Boolean` above is fine.
+  CTooMany: array[0..11] of string = ('shortint', 'word', 'smallint', 'integer',
+    'cardinal', 'longint', 'longword', 'fixedint', 'fixeduint',
+    'bytebool', 'wordbool', 'longbool');
+  // 64-bit ordinals, which dcc rejects with the OTHER code.
+  CSixtyFour: array[0..1] of string = ('int64', 'uint64');
 
-  // The base is out of range, and we know it for certain.
-  function BaseTooLarge(ANode: Integer): Boolean;
+  // '' when the base is fine or not decidable here, else the code dcc reports.
+  function BaseVerdict(ANode: Integer): string;
   var
     LDepth, LSym, LElem, LValue, LIdx: Integer;
     LLo, LHi, LCur: Int64;
     LName: string;
   begin
-    Result := False;
+    Result := '';
     LDepth := 0;
     while (ANode <> NIL_NODE) and (LDepth < 8) do
     begin
@@ -480,8 +496,18 @@ const
                   Exit;
               for LIdx := Low(CTooMany) to High(CTooMany) do
                 if LName = CTooMany[LIdx] then
-                  Exit(True);
-              Exit;   // char, 64-bit, NativeInt, *Bool: not our business
+                  Exit('E2028');
+              for LIdx := Low(CSixtyFour) to High(CSixtyFour) do
+                if LName = CSixtyFour[LIdx] then
+                  Exit('E2001');
+              // The two platform-sized names are 64-bit only where the target
+              // is, and dcc's code follows the width, not the spelling.
+              if (LName = 'nativeint') or (LName = 'nativeuint') then
+                if PlatformInfo(FPlatform).Is64Bit then
+                  Exit('E2001')
+                else
+                  Exit('E2028');
+              Exit;   // Char and WideChar are W1050, a warning: not ours
             end;
             if M.Symbols[LSym].Kind <> skType then
               Exit;
@@ -493,7 +519,10 @@ const
               Exit;
             if not OrdLiteral(Sib(Child(ANode)), LHi) then
               Exit;
-            Exit((LLo < 0) or (LHi > 255));
+            if (LLo < 0) or (LHi > 255) then
+              Exit('E2028')
+            else
+              Exit;
           end;
         nkEnumType:
           begin
@@ -512,7 +541,7 @@ const
                 else if not OrdLiteral(LValue, LCur) then
                   Exit;   // a named constant or an expression: give up
                 if (LCur < 0) or (LCur > 255) then
-                  Exit(True);
+                  Exit('E2028');
               end;
               LElem := Sib(LElem);
             end;
@@ -526,10 +555,17 @@ const
 
 var
   LIdx: Integer;
+  LCode: string;
 begin
   for LIdx := 0 to High(T.Nodes) do
-    if (Kind(LIdx) = nkSetType) and BaseTooLarge(Child(LIdx)) then
-      Diag('E2028', SE2028_SetTooLarge, Child(LIdx));
+    if Kind(LIdx) = nkSetType then
+    begin
+      LCode := BaseVerdict(Child(LIdx));
+      if LCode = 'E2028' then
+        Diag(LCode, SE2028_SetTooLarge, Child(LIdx))
+      else if LCode = 'E2001' then
+        Diag(LCode, SE2001_OrdinalTypeRequired, Child(LIdx));
+    end;
 end;
 
 // Wider of two numeric type symbols (float wins over int; higher rank wins).

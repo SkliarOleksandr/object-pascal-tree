@@ -39,6 +39,18 @@ begin
   GModel := TPasSemaResolver.Analyze(GTree);
 end;
 
+{ As Analyze, for the handful of rules whose answer depends on the TARGET — the
+  builtin seed's 64-bit intrinsics, and `set of NativeInt`. }
+procedure AnalyzeOn(APlatform: TPasPlatform; const ASource: string);
+var
+  LPre: TPasPreprocessed;
+  LDiags: TArray<TPasParseDiag>;
+begin
+  LPre := GPP.ProcessText('test.pas', ASource);
+  GTree := TPasParser.ParseFile(LPre, LDiags);
+  GModel := TPasSemaResolver.Analyze(GTree, False, APlatform);
+end;
+
 function SymCountOf(const ANameLower: string; AKind: TSemaSymbolKind): Integer;
 begin
   Result := 0;
@@ -1759,6 +1771,32 @@ begin
     DiagCount('E2193') = 0);
   GModel.Free;
 
+  // An ordinary call whose parameter at that index is NOT an open array. Needs
+  // a single unambiguous candidate, so the overloaded pair below must stay
+  // silent even though dcc rejects it.
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'type TDyn = array of Integer;'#10 +
+    'procedure TakesInt(A: Integer); begin end;'#10 +
+    'procedure TakesDyn(const A: TDyn); begin end;'#10 +
+    'procedure TakesTwo(N: Integer; const A: array of Integer); begin end;'#10 +
+    'procedure TakesConst(const A: array of const); begin end;'#10 +
+    'procedure Over(A: Integer); overload; begin end;'#10 +
+    'procedure Over(const A: array of Integer); overload; begin end;'#10 +
+    'procedure P;'#10 +
+    'var LArr: array[0..9] of Integer;'#10 +
+    'begin'#10 +
+    '  TakesInt(Slice(LArr, 3));'#10 +          // reported
+    '  TakesDyn(Slice(LArr, 3));'#10 +          // reported
+    '  TakesTwo(1, Slice(LArr, 3));'#10 +       // the SECOND parameter is open
+    '  TakesTwo(Slice(LArr, 3), LArr);'#10 +    // ...the first is not: reported
+    '  TakesConst(Slice(LArr, 3));'#10 +        // `array of const` is open too
+    '  Over(Slice(LArr, 3));'#10 +              // overloaded: not ranked here
+    'end;'#10 +
+    'end.'#10);
+  Ok('e2193: a non-open-array parameter position', DiagCount('E2193') = 3);
+  GModel.Free;
+
   // ---- E2001/E2032: only ordinal types index, base a set, count a loop ----
   Analyze(
     'unit u;'#10'interface'#10 +
@@ -1972,11 +2010,36 @@ begin
     '  S8 = set of ''a''..''z'';'#10 +      // W1050 in dcc, not an error
     '  S9 = set of Char;'#10 +              // likewise
     '  S12 = set of (fA = 250, fB, fC, fD, fE, fF);'#10 +   // ends at 255
-    '  S10 = set of Int64;'#10 +            // E2001 in dcc, and not E2028
     '  S11 = set of 0..CHi;'#10 +           // a named constant: not computed
     'implementation'#10'end.'#10);
   Ok('e2028: silent on every legal base, on `set of Char`, and on bounds it'
     + ' cannot fold', DiagCount('E2028') = 0);
+  GModel.Free;
+
+  // A 64-bit ordinal base is dcc's OTHER code, and the two platform-sized names
+  // follow the target: dcc32 E2028, dcc64 E2001 for the same source.
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10 +
+    '  S1 = set of Int64;'#10 +
+    '  S2 = set of UInt64;'#10 +
+    '  S3 = set of NativeInt;'#10 +
+    '  S4 = set of NativeUInt;'#10 +
+    '  S5 = set of ByteBool;'#10 +      // one byte, and still E2028
+    '  S6 = set of Boolean;'#10 +       // ...unlike Boolean
+    'implementation'#10'end.'#10);
+  Ok('e2001: Int64 and UInt64 bases, plus 32-bit NativeInt as E2028',
+    (DiagCount('E2001') = 2) and (DiagCount('E2028') = 3));
+  GModel.Free;
+  AnalyzeOn(pfWin64,
+    'unit u;'#10'interface'#10 +
+    'type'#10 +
+    '  S1 = set of Int64;'#10 +
+    '  S3 = set of NativeInt;'#10 +
+    '  S4 = set of NativeUInt;'#10 +
+    'implementation'#10'end.'#10);
+  Ok('e2001: ...and all three as E2001 on a 64-bit target',
+    (DiagCount('E2001') = 3) and (DiagCount('E2028') = 0));
   GModel.Free;
   Writeln(Format('=== SemaSmoke: %d passed, %d failed ===', [GPassed, GFailed]));
   if GFailed > 0 then
