@@ -552,17 +552,17 @@ Still open, roughly in the order we're tackling it:
   (§15.3.1), the dynamic `array of array of T` indexing sugar (§8.2.1), and a
   `TypeRef` position resolving to a TYPE over a nearer same-named non-type
   (§B.11). Behaviour unchanged — the code already did all three.
-- **Where the audit stands (2026-08-05).** Thirteen of its items are closed — both
-  false-positive/wrong-binding defects (`IInterface`, inline-var position),
+- **Where the audit stands (2026-08-05).** ALL FIFTEEN of its items are closed —
+  both false-positive/wrong-binding defects (`IInterface`, inline-var position),
   visibility recording, the three spec write-ups, `E2081`, `E2145`, `E2193`, the
   whole ordinal/Boolean/set-limit family (`E2001`, `E2012`, `E2028`, `E2032`) —
   where one of the items turned out to be a wrong spec rule rather than a missing
   check — and multiline-string indentation. **That is every "missing check" the
   audit named**, bar the two one-line residues noted in this list (`Slice`'s
   first argument may not be a dynamic array; `FixedInt`/`UCS4Char` set bases are
-  invisible intra-unit). What is left below is the other two items — reporting
-  and enforcement — and both have the same
-  shape: they can only ADD diagnostics. So they share one acceptance bar, met by
+  invisible intra-unit). The last two — member-lookup reporting and visibility
+  enforcement — shipped as OPT-IN switches, since both
+  can only ADD diagnostics. They shared one acceptance bar, met by
   every check added so far and worth restating rather than re-deriving — **zero
   new diagnostics across rtlflat, bigflat, both AVImark projects and spring4d's
   `Spring.Base`/`Spring.Core` (~12 000
@@ -571,10 +571,21 @@ Still open, roughly in the order we're tackling it:
   wrongly rejecting six `if AFunctionReference then` conditions, and only the
   3747-unit third-party closure showed it.
 
-  Remaining, cheapest and safest first:
-  member-lookup reporting behind a flag, then visibility enforcement last, since
-  it is the only one that can reject code the corpora currently accept for a
-  reason other than a missing check.
+  What replaces this list is one
+  finding the last three checks produced independently, and it is worth carrying
+  forward as the next objective rather than as three anecdotes: **where this
+  analyzer is
+  imprecise, it is imprecise in BINDING, and every check that trusts a binding
+  inherits that.** The member flag's 8 348 reports are generic-ancestor frames and
+  builtin-type helpers; `E2012`'s six false rejections were parameterless function
+  references; `-visibility`'s 998 are constructor overloads picked first out of a
+  member scope. Three checks, three binding gaps, no rule wrong in any of them.
+
+  So the work the switches are waiting on, in the order that unlocks the most:
+  **overload-aware member binding** (arity and class-vs-instance at bind time —
+  it alone unblocks visibility enforcement and would cut the member flood),
+  then **generic-ancestor frames** in the member walk, then **helpers on
+  builtin-typed values**.
 - **Audit coverage, so the next pass knows where to start.** The 2026-07-31
   sweep ran pass 1 (spec → code) over every chapter and pass 2 (code → spec)
   over the member-lookup, property, interface, helper, array and generic
