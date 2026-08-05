@@ -35,6 +35,8 @@ type
     function TypeDefNode(ASym: Integer): Integer;
     function CatFromNode(ADef: Integer): TSemaTypeCat;
     procedure CategorizeTypes;
+    function CatOfTypeNode(ANode: Integer): TSemaTypeCat;
+    procedure CheckOrdinalTypePositions;
     function WiderNum(A, B: Integer): Integer;
     function TypeOfIdent(N: Integer): Integer;
     function BinaryResult(N: Integer): Integer;
@@ -212,6 +214,97 @@ begin
     if not LChanged then
       Break;
   end;
+end;
+
+{ The category a type EXPRESSION node denotes — CatFromNode plus the named-type
+  case, which CatFromNode delegates through Head. Separate because the ordinal
+  checks below ask about type nodes written in a position (an array's index, a
+  set's base), not about type symbols. }
+function TPasSemaTyper.CatOfTypeNode(ANode: Integer): TSemaTypeCat;
+begin
+  if ANode = NIL_NODE then
+    Result := tcUnknown
+  else
+    Result := CatFromNode(ANode);
+end;
+
+{ 2 §2.1.1 / §2.4.1: only an ORDINAL type may be an array's index type or a
+  set's base type — dcc reports `E2001 Ordinal type required`. Same rule, same
+  code, for the `for` counter's declared type, except that dcc has a dedicated
+  message there: `E2032 For loop control variable must have ordinal type`.
+
+  Verified against dcc32 37.0, and two of the answers are not guessable:
+
+  - `Variant` is NOT ordinal in these positions (`array[Variant]`, `set of
+    Variant`, `for V := 1 to 3` are all errors) even though it IS accepted as a
+    `case` selector and as an `if` condition. Per-position, not per-type.
+  - a SPARSE (explicitly-valued) enum is fine everywhere — as an index, a set
+    base, a `case` selector and a `for` counter. §2.1.1/§2.2.4 claimed the
+    opposite; the spec was corrected rather than the code, since dcc accepts
+    `array[(spA = 0, spB = 10, spC = 99)]` and `set of` it without a murmur.
+
+  Reports only a category that is DEFINITELY not ordinal. `tcUnknown` covers
+  every cross-unit type (an imported enum's category is not computed intra-unit)
+  and every generic parameter, so those stay silent — a missed report, never a
+  false one. Records are included deliberately: an `Implicit` operator to an
+  ordinal does NOT rescue any of these positions (dcc-verified for `case`, which
+  is the one place a conversion could plausibly have applied). }
+procedure TPasSemaTyper.CheckOrdinalTypePositions;
+const
+  // Everything that is not ordinal AND not "we do not know" — tcNil cannot
+  // appear in a type position at all.
+  CNotOrdinal = [tcFloat, tcString, tcPointer, tcSet, tcArray, tcRecord,
+    tcClass, tcInterface, tcProc, tcClassOf, tcVariant, tcFile];
+var
+  LIdx, LChild, LLast, LSym, LType: Integer;
+begin
+  for LIdx := 0 to High(T.Nodes) do
+    case Kind(LIdx) of
+      nkArrayType:
+        begin
+          // Children are the index types followed by the element type — except
+          // for `array of const`, which has no element child (Aux = 1). A
+          // dynamic array's single child is the element type, so it has none of
+          // its own to check.
+          LLast := NIL_NODE;
+          if T.Nodes[LIdx].Aux <> 1 then
+          begin
+            LLast := Child(LIdx);
+            while (LLast <> NIL_NODE) and (Sib(LLast) <> NIL_NODE) do
+              LLast := Sib(LLast);
+          end;
+          LChild := Child(LIdx);
+          while (LChild <> NIL_NODE) and (LChild <> LLast) do
+          begin
+            if CatOfTypeNode(LChild) in CNotOrdinal then
+              Diag('E2001', SE2001_OrdinalTypeRequired, LChild);
+            LChild := Sib(LChild);
+          end;
+        end;
+      nkSetType:
+        if CatOfTypeNode(Child(LIdx)) in CNotOrdinal then
+          Diag('E2001', SE2001_OrdinalTypeRequired, Child(LIdx));
+      nkForStmt:
+        begin
+          // The counter: an inline `for var K` declaration's name, or an
+          // ordinary reference. Its declared TYPE is what must be ordinal, so
+          // an inline counter with no type annotation (inferred from the bound)
+          // has nothing to check here.
+          LChild := Child(LIdx);
+          if LChild = NIL_NODE then
+            Continue;
+          if Kind(LChild) = nkInlineVar then
+            LChild := Child(LChild);
+          if (LChild = NIL_NODE) or (Kind(LChild) <> nkIdent) then
+            Continue;
+          LSym := M.RefMap[LChild];
+          if LSym = NIL_SYM then
+            Continue;
+          LType := M.Symbols[LSym].TypeSym;
+          if (LType <> NIL_SYM) and (CatOf(LType) in CNotOrdinal) then
+            Diag('E2032', SE2032_ForCounterNotOrdinal, LChild);
+        end;
+    end;
 end;
 
 // Wider of two numeric type symbols (float wins over int; higher rank wins).
@@ -743,6 +836,7 @@ begin
       else if M.Symbols[LIdx].NameLower = '_nil' then Nul := LIdx;
 
   CategorizeTypes;
+  CheckOrdinalTypePositions;   // needs CategorizeTypes — see its own header
   TypeNode(0);
 end;
 

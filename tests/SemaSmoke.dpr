@@ -1758,6 +1758,85 @@ begin
   Ok('e2193: a user routine of that name is not the intrinsic',
     DiagCount('E2193') = 0);
   GModel.Free;
+
+  // ---- E2001/E2032: only ordinal types index, base a set, count a loop ----
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10 +
+    '  TRec = record X: Integer; end;'#10 +
+    '  TCls = class end;'#10 +
+    '  TIntf = interface end;'#10 +
+    '  TDyn = array of Integer;'#10 +
+    '  TSetB = set of 0..7;'#10 +
+    '  TProcT = procedure;'#10 +
+    '  A1 = array[Double] of Integer;'#10 +
+    '  A2 = array[string] of Integer;'#10 +
+    '  A3 = array[TRec] of Integer;'#10 +
+    '  A4 = array[TCls] of Integer;'#10 +
+    '  A5 = array[TIntf] of Integer;'#10 +
+    '  A6 = array[TDyn] of Integer;'#10 +
+    '  A7 = array[TSetB] of Integer;'#10 +
+    '  A8 = array[TProcT] of Integer;'#10 +
+    '  A9 = array[Variant] of Integer;'#10 +   // NOT ordinal here (dcc)
+    '  A10 = array[Pointer] of Integer;'#10 +
+    '  S1 = set of Double;'#10 +
+    '  S2 = set of string;'#10 +
+    '  S3 = set of TRec;'#10 +
+    '  S4 = set of Variant;'#10 +
+    'implementation'#10'end.'#10);
+  Ok('e2001: every definitely-non-ordinal index and base',
+    DiagCount('E2001') = 14);
+  Ok('e2001: dcc''s wording', DiagHasText('E2001', 'Ordinal type required'));
+  GModel.Free;
+
+  // The ordinal ones, including a SPARSE enum — which dcc accepts everywhere,
+  // against what 2.1.1/2.2.4 used to claim.
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10 +
+    '  TSparse = (spA = 0, spB = 10, spC = 99);'#10 +
+    '  TDense = (dA, dB, dC);'#10 +
+    '  TSub = 1..10;'#10 +
+    '  TNeg = -5..5;'#10 +
+    '  B1 = array[TSparse] of Integer;'#10 +
+    '  B2 = array[TDense] of Integer;'#10 +
+    '  B3 = array[TSub] of Integer;'#10 +
+    '  B4 = array[TNeg] of Integer;'#10 +
+    '  B5 = array[Boolean] of Integer;'#10 +
+    '  B6 = array[Char] of Integer;'#10 +
+    '  B7 = array[0..9, TDense] of Integer;'#10 +
+    '  B8 = array of TSub;'#10 +             // dynamic: no index to check
+    '  C1 = set of TSparse;'#10 +
+    '  C2 = set of TSub;'#10 +
+    '  C3 = set of Boolean;'#10 +
+    'implementation'#10'end.'#10);
+  Ok('e2001: silent on every ordinal index and base, sparse enum included',
+    DiagCount('E2001') = 0);
+  GModel.Free;
+
+  // E2032 — the same rule for a `for` counter, with dcc's own message. Variant
+  // is an error HERE and legal as a `case` selector: per position, not per type.
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'type TRec = record X: Integer; end;'#10 +
+    'procedure P;'#10 +
+    'var LD: Double; LS: string; LR: TRec; LV: Variant;'#10 +
+    '  LE: (eA, eB); LB: Boolean; LC: Char; LI: Integer;'#10 +
+    'begin'#10 +
+    '  for LD := 1 to 3 do LI := 0;'#10 +
+    '  for LS := ''a'' to ''c'' do LI := 0;'#10 +
+    '  for LR := 1 to 3 do LI := 0;'#10 +
+    '  for LV := 1 to 3 do LI := 0;'#10 +
+    '  for LE := eA to eB do LI := 0;'#10 +   // ordinal from here down
+    '  for LB := False to True do LI := 0;'#10 +
+    '  for LC := ''a'' to ''z'' do LI := 0;'#10 +
+    '  for LI := 1 to 3 do LB := True;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Ok('e2032: one per non-ordinal counter', DiagCount('E2032') = 4);
+  Ok('e2032: dcc''s wording',
+    DiagHasText('E2032', 'For loop control variable must have ordinal type'));
+  GModel.Free;
   Writeln(Format('=== SemaSmoke: %d passed, %d failed ===', [GPassed, GFailed]));
   if GFailed > 0 then
     ExitCode := 1;

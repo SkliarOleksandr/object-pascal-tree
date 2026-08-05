@@ -317,12 +317,26 @@ Still open, roughly in the order we're tackling it:
   positive** — collected here rather than as separate items because they share
   a shape: we accept code dcc rejects. In rough order of how often the shape
   occurs:
-  - no "ordinal type required" check anywhere (2 §2.1.1/§2.2.5): a sparse
-    (explicit-valued) enum as an array index type, `set of` base, `case`
-    selector or `for` counter is accepted;
-  - `set of` base-type limit of 256 values / ordinals in `0..255` (2 §2.4.1);
+  - ~~no "ordinal type required" check anywhere~~ — **half done 2026-08-05**
+    (`E2001` for an array index type and a `set of` base, `E2032` for a `for`
+    counter). The other half of the old entry here was a SPEC BUG, not a missing
+    check: dcc accepts a sparse (explicit-valued) enum in every one of those
+    positions, so the code was right to accept it, and §2.1.1/§2.2.4 have been
+    corrected. dcc also splits the rule per POSITION — `Variant` is an error as
+    an index/base/counter and legal as a `case` selector or an `if` condition —
+    which is now a table in §2.1.1. Still open: the `case` selector (an
+    expression position, so it needs the typer's result rather than a declared
+    type) and `set of Int64`, which dcc calls `E2001` even though `Int64` is
+    ordinal;
+  - `set of` base-type limit of 256 values / ordinals in `0..255` (2 §2.4.1) —
+    one code, `E2028`, for both halves including a negative lower bound; needs
+    the cardinality of the base, i.e. constant-folded subrange bounds and enum
+    values, which is the only part of this family that needs arithmetic;
   - conditions are not required to be Boolean (2 §2.2.2) — no rejection of an
-    integer in an `if`/`while`/`until` guard;
+    integer in an `if`/`while`/`until` guard (`E2012`). Needs expression types,
+    and must exempt `Variant` (legal) and records (an `Implicit` operator to
+    `Boolean` makes them legal — the same record with `Implicit` to `Integer` is
+    an error), both dcc-verified;
   - ~~assigning to a `for` counter inside the body~~ — **done 2026-07-31**
     (`E2081`, all three shapes dcc reports: a direct assignment, `Inc`/`Dec`,
     and an inline `for var` counter). Zero new diagnostics across ~12 000

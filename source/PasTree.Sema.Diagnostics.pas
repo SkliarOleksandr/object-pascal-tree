@@ -31,6 +31,12 @@ const
   // Likewise argument-free; dcc's wording says "standard function" (4 §4.11).
   SE2193_SliceOutsideOpenArray =
     'E2193 Slice standard function only allowed as open array argument';
+  // The ordinal/Boolean family (2 §2.1.1, §2.2.2, §2.4.1). None takes an
+  // argument — dcc names neither the type nor the position.
+  SE2001_OrdinalTypeRequired = 'E2001 Ordinal type required';
+  SE2012_MustBeBoolean = 'E2012 Type of expression must be BOOLEAN';
+  SE2032_ForCounterNotOrdinal =
+    'E2032 For loop control variable must have ordinal type';
   SE2005_NotATypeIdentifier   = 'E2005 ''%s'' is not a type identifier';
   // E2010 takes two type names (dst, src); E2015 takes the operator lexeme.
   SE2010_IncompatibleTypes    = 'E2010 Incompatible types: ''%s'' and ''%s''';
