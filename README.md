@@ -324,19 +324,25 @@ Still open, roughly in the order we're tackling it:
     positions, so the code was right to accept it, and §2.1.1/§2.2.4 have been
     corrected. dcc also splits the rule per POSITION — `Variant` is an error as
     an index/base/counter and legal as a `case` selector or an `if` condition —
-    which is now a table in §2.1.1. Still open: the `case` selector (an
-    expression position, so it needs the typer's result rather than a declared
-    type) and `set of Int64`, which dcc calls `E2001` even though `Int64` is
-    ordinal;
+    which is now a table in §2.1.1. The `case` selector followed the same day,
+    once the guard check below gave it the typer's result to work from. Still
+    open: `set of Int64`, which dcc calls `E2001` even though `Int64` is ordinal;
   - `set of` base-type limit of 256 values / ordinals in `0..255` (2 §2.4.1) —
     one code, `E2028`, for both halves including a negative lower bound; needs
     the cardinality of the base, i.e. constant-folded subrange bounds and enum
     values, which is the only part of this family that needs arithmetic;
-  - conditions are not required to be Boolean (2 §2.2.2) — no rejection of an
-    integer in an `if`/`while`/`until` guard (`E2012`). Needs expression types,
-    and must exempt `Variant` (legal) and records (an `Implicit` operator to
-    `Boolean` makes them legal — the same record with `Implicit` to `Integer` is
-    an error), both dcc-verified;
+  - ~~conditions are not required to be Boolean~~ — **done 2026-08-05**
+    (`E2012`, plus `E2001` for the `case` selector, which needs the same
+    expression types). Three exemptions, each dcc-verified and each necessary:
+    `Variant` (legal as a guard AND a selector), records as guards only (an
+    `Implicit` operator to `Boolean` makes one legal, to `Integer` illegal — the
+    answer is in its operators, so guards exempt records and selectors do not),
+    and procedural types in both, because a parameterless function reference in
+    a value position is CALLED and the guard's type is its RESULT. That last one
+    was found by the corpora and not by reasoning: six `if AShouldStop then`
+    conditions in DevExpress, all `reference to function: Boolean`, after the
+    suites and both flat corpora were green. Still not reported: a record guard
+    with no Boolean conversion, which is the exemption above;
   - ~~assigning to a `for` counter inside the body~~ — **done 2026-07-31**
     (`E2081`, all three shapes dcc reports: a direct assignment, `Inc`/`Dec`,
     and an inline `for var` counter). Zero new diagnostics across ~12 000

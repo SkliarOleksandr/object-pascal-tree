@@ -37,6 +37,7 @@ type
     procedure CategorizeTypes;
     function CatOfTypeNode(ANode: Integer): TSemaTypeCat;
     procedure CheckOrdinalTypePositions;
+    procedure CheckConditionTypes;
     function WiderNum(A, B: Integer): Integer;
     function TypeOfIdent(N: Integer): Integer;
     function BinaryResult(N: Integer): Integer;
@@ -305,6 +306,72 @@ begin
             Diag('E2032', SE2032_ForCounterNotOrdinal, LChild);
         end;
     end;
+end;
+
+{ The two EXPRESSION positions of the same family (2 §2.2.2, §2.1.1), so this one
+  runs after TypeNode has filled ExprType rather than beside CategorizeTypes:
+
+  - an `if`/`while`/`until` condition must be Boolean — `E2012 Type of expression
+    must be BOOLEAN`;
+  - a `case` selector must be ordinal — `E2001`, the same code as the type
+    positions above.
+
+  The two exempt sets differ, and dcc32 37.0 is the only reason to know how:
+
+  - `Variant` is accepted in BOTH a condition and a `case` selector, though it is
+    an error as an array index, a set base or a `for` counter.
+  - a RECORD is accepted as a condition when it has an `Implicit` operator to
+    Boolean, and rejected when it has one to Integer — so whether a record
+    condition is legal depends on its operators, which is not a question asked
+    here. Records are therefore exempt in conditions and NOT exempt as `case`
+    selectors, where dcc rejects one even with `Implicit` to an ordinal.
+  - a PROCEDURAL type is exempt in both, because a parameterless function
+    reference in a value position is CALLED: `if AShouldStop then` where the
+    parameter is `reference to function: Boolean` is ordinary, correct code, and
+    the type of the condition is the function's RESULT. Found the honest way —
+    six such conditions in DevExpress's cxShellCommon lit up on the AVImark
+    corpus the first time this check ran. In a TYPE position (an array index, a
+    set base) a procedural type stays an error, since nothing is called there.
+
+  Everything else is reported only when the category is definite; an unknown
+  expression type (a cross-unit member, an untyped intrinsic result, a deref)
+  says nothing. `Diag` additionally withholds anything inside an unresolved
+  `with` body, where a binding — and so a type — is only a guess. }
+procedure TPasSemaTyper.CheckConditionTypes;
+const
+  // Not Boolean and not "we do not know". tcRecord, tcVariant and tcProc are
+  // absent deliberately — see the header.
+  CNotBoolean = [tcInteger, tcFloat, tcChar, tcString, tcEnum, tcSet, tcArray,
+    tcClass, tcInterface, tcClassOf, tcPointer, tcFile];
+  // Not ordinal and not "we do not know". Variant is legal HERE; a record is
+  // not, whatever operators it has.
+  CNotSelector = [tcFloat, tcString, tcPointer, tcSet, tcArray, tcRecord,
+    tcClass, tcInterface, tcClassOf, tcFile];
+var
+  LIdx, LCond: Integer;
+begin
+  for LIdx := 0 to High(T.Nodes) do
+  begin
+    LCond := NIL_NODE;
+    case Kind(LIdx) of
+      nkIfStmt, nkWhileStmt:
+        LCond := Child(LIdx);
+      nkRepeatStmt:
+        // body block, then the `until` expression.
+        if Child(LIdx) <> NIL_NODE then
+          LCond := Sib(Child(LIdx));
+      nkCaseStmt:
+        begin
+          LCond := Child(LIdx);
+          if (LCond <> NIL_NODE) and (CatOf(M.ExprType[LCond]) in CNotSelector)
+          then
+            Diag('E2001', SE2001_OrdinalTypeRequired, LCond);
+          Continue;
+        end;
+    end;
+    if (LCond <> NIL_NODE) and (CatOf(M.ExprType[LCond]) in CNotBoolean) then
+      Diag('E2012', SE2012_MustBeBoolean, LCond);
+  end;
 end;
 
 // Wider of two numeric type symbols (float wins over int; higher rank wins).
@@ -838,6 +905,7 @@ begin
   CategorizeTypes;
   CheckOrdinalTypePositions;   // needs CategorizeTypes — see its own header
   TypeNode(0);
+  CheckConditionTypes;         // needs ExprType — see its own header
 end;
 
 end.

@@ -1837,6 +1837,96 @@ begin
   Ok('e2032: dcc''s wording',
     DiagHasText('E2032', 'For loop control variable must have ordinal type'));
   GModel.Free;
+
+  // ---- E2012 / E2001 in the two EXPRESSION positions (2.2.2, 2.1.1) ----
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'type'#10 +
+    '  TCls = class end;'#10 +
+    '  TIntf = interface end;'#10 +
+    '  TSetB = set of 0..7;'#10 +
+    '  TDyn = array of Integer;'#10 +
+    'procedure P;'#10 +
+    'var LI: Integer; LD: Double; LCh: Char; LS: string;'#10 +
+    '  LE: (eA, eB); LSet: TSetB; LA: TDyn; LC: TCls; LIf: TIntf;'#10 +
+    '  LB: Boolean;'#10 +
+    'begin'#10 +
+    '  if LI then LB := True;'#10 +
+    '  while LD do LB := True;'#10 +
+    '  repeat until LS;'#10 +
+    '  if LCh then LB := True;'#10 +
+    '  if LSet then LB := True;'#10 +
+    '  if LA then LB := True;'#10 +
+    '  if LC then LB := True;'#10 +
+    '  if LIf then LB := True;'#10 +
+    '  if LB then LB := False;'#10 +          // legal from here down
+    '  while LB and (LI > 0) do LB := False;'#10 +
+    '  repeat until LI = 0;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Ok('e2012: one per definitely-non-Boolean guard', DiagCount('E2012') = 8);
+  Ok('e2012: dcc''s wording',
+    DiagHasText('E2012', 'Type of expression must be BOOLEAN'));
+  GModel.Free;
+
+  // The two exemptions dcc forces, and the one that cost six false positives on
+  // the AVImark corpus before it was understood: a parameterless function
+  // reference in a value position is CALLED, so its RESULT is the condition's
+  // type. A Variant guard is legal too.
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'type'#10 +
+    '  TPred = reference to function: Boolean;'#10 +
+    '  TRecB = record'#10 +
+    '    class operator Implicit(const A: TRecB): Boolean;'#10 +
+    '  end;'#10 +
+    'class operator TRecB.Implicit(const A: TRecB): Boolean;'#10 +
+    'begin'#10 +
+    '  Result := True;'#10 +
+    'end;'#10 +
+    'procedure P(const AStop: TPred);'#10 +
+    'var LV: Variant; LR: TRecB; LB: Boolean;'#10 +
+    'begin'#10 +
+    '  if AStop then LB := True;'#10 +
+    '  if LV then LB := True;'#10 +
+    '  if LR then LB := True;'#10 +
+    '  case LV of 1: LB := True; end;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Ok('e2012: silent on a function reference, a Variant and a Boolean-convertible'
+    + ' record', DiagCount('E2012') = 0);
+  Ok('e2001: a Variant case selector is legal', DiagCount('E2001') = 0);
+  GModel.Free;
+
+  // The `case` selector: same code as the type positions, different exemptions
+  // — a record is an error here even with an Implicit operator to an ordinal.
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'type'#10 +
+    '  TCls = class end;'#10 +
+    '  TRecI = record'#10 +
+    '    class operator Implicit(const A: TRecI): Integer;'#10 +
+    '  end;'#10 +
+    'class operator TRecI.Implicit(const A: TRecI): Integer;'#10 +
+    'begin'#10 +
+    '  Result := 0;'#10 +
+    'end;'#10 +
+    'procedure P;'#10 +
+    'var LD: Double; LS: string; LC: TCls; LR: TRecI;'#10 +
+    '  LI: Integer; LB: Boolean; LCh: Char;'#10 +
+    'begin'#10 +
+    '  case LD of 1: LB := True; end;'#10 +
+    '  case LS of ''a'': LB := True; end;'#10 +
+    '  case LC of  end;'#10 +
+    '  case LR of 1: LB := True; end;'#10 +
+    '  case LI of 1: LB := True; end;'#10 +      // ordinal from here down
+    '  case LB of True: LI := 0; end;'#10 +
+    '  case LCh of ''a'': LI := 0; end;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Ok('e2001: one per non-ordinal case selector, records included',
+    DiagCount('E2001') = 4);
+  GModel.Free;
   Writeln(Format('=== SemaSmoke: %d passed, %d failed ===', [GPassed, GFailed]));
   if GFailed > 0 then
     ExitCode := 1;
