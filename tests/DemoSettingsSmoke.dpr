@@ -14,11 +14,37 @@ program DemoSettingsSmoke;
 uses
   System.SysUtils,
   System.IOUtils,
-  PasTreeDemo.Settings in '..\demo\PasTreeDemo.Settings.pas';
+  PasTreeDemo.Settings in '..\demo\PasTreeDemo.Settings.pas',
+  PasTreeDemo.Includes in '..\demo\PasTreeDemo.Includes.pas';
 
 var
   GPassed, GFailed: Integer;
   GDir: string;
+
+procedure Ok(const AName: string; ACond: Boolean); forward;
+
+{ The include-argument span, asserted as the TEXT it selects — an expected ''
+  means "column ACol is not inside an $I argument". Comparing text rather than
+  two column numbers is what makes a failure readable. }
+procedure CheckSpan(const AName, ALine: string; ACol: Integer;
+  const AExpected: string);
+var
+  LFrom, LTo: Integer;
+  LGot: string;
+begin
+  if TryIncludeArgSpan(ALine, ACol, LFrom, LTo) then
+    LGot := Copy(ALine, LFrom, LTo - LFrom + 1)
+  else
+    LGot := '';
+  if LGot = AExpected then
+    Ok(AName, True)
+  else
+  begin
+    Ok(AName, False);
+    Writeln('    line "', ALine, '" col ', ACol, ': expected "', AExpected,
+      '", got "', LGot, '"');
+  end;
+end;
 
 procedure Ok(const AName: string; ACond: Boolean);
 begin
@@ -132,6 +158,39 @@ begin
   end;
 
   TDirectory.Delete(GDir, True);
+
+  { The $I file-name span behind ctrl+click and Open File at Cursor on an
+    include. Here rather than in the form for the same reason the rest of this
+    suite exists: a running program cannot show you that the span is right, only
+    that the jump felt right on the one line you tried. }
+  CheckSpan('plain include', '{$I jcl.inc}', 6, 'jcl.inc');
+  CheckSpan('...indented and followed by code', '  {$I jcl.inc} // x', 9,
+    'jcl.inc');
+  CheckSpan('the long spelling', '{$INCLUDE jcl.inc}', 12, 'jcl.inc');
+  CheckSpan('lower case', '{$i jcl.inc}', 6, 'jcl.inc');
+  CheckSpan('the parenthesis-star form', '(*$I jcl.inc*)', 7, 'jcl.inc');
+  CheckSpan('a quoted path keeps the path, not the quotes',
+    '{$I ''..\lib\a b.inc''}', 8, '..\lib\a b.inc');
+  CheckSpan('a relative path', '{$I ..\include\jcl.inc}', 8,
+    '..\include\jcl.inc');
+  // The caret one PAST the name is still the name — that is where a
+  // double-click leaves it.
+  CheckSpan('caret just past the last character', '{$I jcl.inc}', 12,
+    'jcl.inc');
+  CheckSpan('caret on the first character', '{$I jcl.inc}', 5, 'jcl.inc');
+  // Not includes, and each one would otherwise open something.
+  CheckSpan('$I+ is I/O checking', '{$I+}', 4, '');
+  CheckSpan('$I- likewise', '{$I-}', 4, '');
+  CheckSpan('$I% is an environment string', '{$I%DATE%}', 5, '');
+  CheckSpan('$IFDEF is not $I', '{$IFDEF DEBUG}', 9, '');
+  CheckSpan('$IFNDEF is not $I either', '{$IFNDEF X}', 10, '');
+  CheckSpan('an ordinary comment is not a directive', '{ jcl.inc }', 4, '');
+  CheckSpan('outside the directive', 'uses A; {$I jcl.inc}', 3, '');
+  // Two directives on one line: the caret picks its own.
+  CheckSpan('the second of two directives', '{$I a.inc}{$I b.inc}', 15,
+    'b.inc');
+  CheckSpan('...and the first', '{$I a.inc}{$I b.inc}', 6, 'a.inc');
+
   Writeln(Format('=== DemoSettingsSmoke: %d passed, %d failed ===',
     [GPassed, GFailed]));
   if GFailed > 0 then

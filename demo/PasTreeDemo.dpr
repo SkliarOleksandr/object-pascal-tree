@@ -10,6 +10,7 @@ uses
   PasTreeDemo.Highlighter in 'PasTreeDemo.Highlighter.pas',
   PasTreeDemo.Settings in 'PasTreeDemo.Settings.pas',
   PasTreeDemo.NavHistory in 'PasTreeDemo.NavHistory.pas',
+  PasTreeDemo.Includes in 'PasTreeDemo.Includes.pas',
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',

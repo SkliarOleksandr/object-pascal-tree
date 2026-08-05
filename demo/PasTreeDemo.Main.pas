@@ -28,6 +28,7 @@ uses
   PasTree.Sema.Nav, PasTree.Sema.Async,
   PasTree.Sema.Dump, VirtualTrees.BaseAncestorVCL, VirtualTrees.BaseTree, VirtualTrees.AncestorVCL, SynEditCodeFolding,
   PasTreeDemo.Highlighter, PasTreeDemo.Settings, PasTreeDemo.NavHistory,
+  PasTreeDemo.Includes,
   Vcl.Menus, System.Actions, Vcl.ActnList, SynEditMiscClasses, SynEditSearch;
   // System
 
@@ -157,6 +158,9 @@ type
     function ActiveEditor: TSynEdit;
     function NameAtCaret(AEditor: TSynEdit): string;
     function FileForName(const AName: string): string;
+    function FindFileForName(const AName: string): string;
+    function IncludeTargetAt(AEditor: TSynEdit; X, Y: Integer;
+      out ARawFrom, ARawTo: Integer; out ATarget: TPasNavTarget): Boolean;
     procedure OpenFileAtCursorActionUpdate(Sender: TObject);
     procedure OpenFileAtCursorActionExecute(Sender: TObject);
     procedure CopyMessageActionUpdate(Sender: TObject);
@@ -243,6 +247,11 @@ type
     // them per keystroke is the ~1s-per-run cost the overhead log exists to
     // catch.
     FLastSearchPaths: TArray<string>;
+    // One-entry memo for FileForName. It exists for ctrl+HOVER: the mouse moves
+    // many times over one `{$I ...}`, and the lookup behind it walks every
+    // model's file list — 3747 of them on the real project. One entry is all the
+    // pattern needs, since a hover asks the same question repeatedly.
+    FNameCacheKey, FNameCacheFile: string;
     FStudioRoot: string;           // RAD Studio root (for RTL search paths)
     // Persisted demo settings (recent projects + the sticky combos), in an .ini
     // beside the executable. See PasTreeDemo.Settings.
@@ -745,6 +754,15 @@ end;
   then the filesystem, relative to the current file and to the project's search
   paths, which is what still works for a file the analysis never reached. }
 function TfrmMain.FileForName(const AName: string): string;
+begin
+  if (AName <> '') and SameText(AName, FNameCacheKey) then
+    Exit(FNameCacheFile);   // see the field: this is the ctrl+hover path
+  Result := FindFileForName(AName);
+  FNameCacheKey := AName;
+  FNameCacheFile := Result;
+end;
+
+function TfrmMain.FindFileForName(const AName: string): string;
 var
   LDir, LBase, LCand: string;
   LMid, LFid: Integer;
@@ -1655,6 +1673,52 @@ begin
   Result := True;
 end;
 
+{ The file named by an $I / $INCLUDE directive under pixel (X, Y), as a
+  navigation target — the include half of ctrl+click.
+
+  It cannot go through TPasNav at all: a directive is TRIVIA, it has no
+  identifier and no AST node, so nothing the resolver produced knows about it.
+  What it does have is a single raw token covering the whole directive, which is
+  exactly the link range to underline, and a file name that FileForName already
+  knows how to resolve. So this is a line-level scan plus that lookup, and it
+  works in a file the analysis never reached.
+
+  Deliberately NOT the reverse direction: an identifier typed inside an opened
+  .inc still resolves to nothing, for the model-keyed reason in the README's
+  To-do. This is the direction that matters — getting INTO the include from the
+  unit that includes it. }
+function TfrmMain.IncludeTargetAt(AEditor: TSynEdit; X, Y: Integer;
+  out ARawFrom, ARawTo: Integer; out ATarget: TPasNavTarget): Boolean;
+var
+  LTab: TSourceTab;
+  LBC: TBufferCoord;
+  LLine, LName, LFile: string;
+  LFrom, LTo: Integer;
+begin
+  Result := False;
+  if not (AEditor.Parent is TSourceTab) then
+    Exit;
+  LTab := TSourceTab(AEditor.Parent);
+  LBC := AEditor.DisplayToBufferPos(AEditor.PixelsToRowColumn(X, Y));
+  if (LBC.Line < 1) or (LBC.Line > AEditor.Lines.Count) then
+    Exit;
+  LLine := AEditor.Lines[LBC.Line - 1];
+  if not TryIncludeArgSpan(LLine, LBC.Char, {out} LFrom, {out} LTo) then
+    Exit;
+  LName := Copy(LLine, LFrom, LTo - LFrom + 1);
+  LFile := FileForName(LName);
+  if LFile = '' then
+    Exit;
+  // The whole directive is ONE raw token, so one index underlines it.
+  ARawFrom := LTab.PasTreeHL.RawTokenAt(LBC.Line, LFrom);
+  ARawTo := ARawFrom;
+  ATarget := Default(TPasNavTarget);
+  ATarget.FilePath := LFile;
+  ATarget.Line := 1;
+  ATarget.Col := 1;
+  Result := ARawFrom >= 0;
+end;
+
 procedure TfrmMain.SetLink(ATab: TObject; AFrom, ATo: Integer);
 var
   LTab: TSourceTab;
@@ -1689,9 +1753,14 @@ var
   LFrom, LTo: Integer;
   LTarget: TPasNavTarget;
 begin
+  // The include branch is tried SECOND: an identifier is the overwhelmingly
+  // common case and the one that must stay fast, and the two cannot both match
+  // (a directive carries no identifier).
   if (ssCtrl in Shift) and
-     ResolveAt(TSynEdit(Sender), X, Y, {out} LFrom, {out} LTo, {out} LTarget)
-  then
+     (ResolveAt(TSynEdit(Sender), X, Y, {out} LFrom, {out} LTo,
+        {out} LTarget) or
+      IncludeTargetAt(TSynEdit(Sender), X, Y, {out} LFrom, {out} LTo,
+        {out} LTarget)) then
     SetLink(TSynEdit(Sender).Parent, LFrom, LTo)
   else
     ClearLink;
@@ -1707,7 +1776,9 @@ begin
   if (Button <> mbLeft) or not (ssCtrl in Shift) then
     Exit;
   LEditor := TSynEdit(Sender);
-  if not ResolveAt(LEditor, X, Y, {out} LFrom, {out} LTo, {out} LTarget) then
+  if not ResolveAt(LEditor, X, Y, {out} LFrom, {out} LTo, {out} LTarget) and
+     not IncludeTargetAt(LEditor, X, Y, {out} LFrom, {out} LTo, {out} LTarget)
+  then
     Exit;
   ClearLink;
   // SynEdit's own MouseDown moves the caret to the click position AFTER this

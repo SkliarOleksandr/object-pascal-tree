@@ -224,11 +224,20 @@ usable.
   (not just the main file), units only reachable via the IDE's own registry-
   read library/browsing search paths, unit namespaces (`-NS`) and aliases
   (`-A`).
-- **Open File at Cursor** (Ctrl+Enter) — Delphi's own command, and the one that
-  reaches where go-to-declaration cannot: it opens the file NAMED at the caret,
-  from any tab including an `.inc`, asking the analysis's resolved paths before
-  the filesystem. See the To-do entry on include-file navigation for why the two
-  commands are complementary rather than redundant.
+- **Include files open like anything else** — ctrl+click (and ctrl+hover's link)
+  on the file name in an `$I` / `$INCLUDE` directive jumps into it, and
+  **Open File at Cursor** (Ctrl+Enter, Delphi's own command, first in the
+  editor's context menu) opens whatever the caret names: a `uses` item, an `$I`
+  argument, a quoted path. Both ask the ANALYSIS before the filesystem, which is
+  what picks the right `jcl.inc` when three copies sit on different search paths
+  and what makes `uses Forms` open `Vcl.Forms.pas` through the namespace and
+  alias rules; the filesystem fallback (the current file's directory, then the
+  last analysis's search paths, then the name as written) still opens a file the
+  analysis never reached. An `$I` argument is TRIVIA with no identifier and no
+  AST node, so neither goes through the resolver — the span is a line scan
+  (`PasTreeDemo.Includes`, 18 shapes pinned in `DemoSettingsSmoke`, including the
+  three that must NOT match: `$I+`, `$I-` and `$I%`), and the link range is the
+  directive's own raw token.
 - **Declaration ↔ implementation toggle** (Ctrl+Shift+Down / Ctrl+Shift+Up) —
   jumps from a method or routine's forward declaration to its body's first
   statement and back to its name, overload-precise (matched by full
@@ -590,31 +599,20 @@ Still open, roughly in the order we're tackling it:
     rule lives in one place (`DesignatorSymX`'s fallback), and new special cases
     should be routed through it rather than grown. **That** is the cheap
     generalization; merging the typers is not.
-- **Go-to-declaration inside an opened `.inc` tab.** Navigating *into* an
-  include file already works; ctrl+click on an identifier *inside* an
-  already-open include tab does nothing, and the mechanism is worth naming
-  because it is not a missing branch but a shape: navigation is keyed by MODEL,
-  and an include is not a module — `TPasNav.ModelIdOf(<the .inc path>)` returns
-  -1, so the host exits before any lookup. Under it, `IdentAt(AMid, ALine, ACol)`
-  takes no `FileId` and the ident index is deliberately built for `FileId = 0`
-  only (the filter appears at four places in `PasTree.Sema.Nav`), because line
-  numbers in an included file collide with the main file's. So the fix is a
-  `FileId` threaded through both, plus a path→(model, FileId) lookup — and it has
-  a design question attached, not just work: one `.inc` is typically included by
-  MANY units, so "which model" is a real choice (Delphi answers it with the
-  context you opened the file from).
-
-  Until then **Open File at Cursor** (ctrl+enter, first in the editor's context
-  menu) covers the case that actually hurts — it works from any file, including
-  an `.inc`, and needs no model at all. It resolves the name at the caret the way
-  Delphi's command does (a `uses` item, an $I argument, a path in a string), and
-  it asks the ANALYSIS before the filesystem: the closure already knows the
-  resolved path of every unit *and* every included file, which is what picks the
-  right `jcl.inc` when three copies sit on different search paths, and what makes
-  `uses Forms` open `Vcl.Forms.pas` through the namespace and alias rules. The
-  filesystem fallback (current file's directory, then the last analysis's search
-  paths, then the name as written) is what still opens a file the analysis never
-  reached.
+- **Go-to-declaration inside an opened `.inc` tab** — the one direction still
+  missing, and deliberately so. Getting *into* an include from the unit that
+  includes it works both ways now (ctrl+click on the `$I` argument, and
+  ctrl+enter); resolving an identifier typed *inside* an already-open include tab
+  does not, and the mechanism is worth naming because it is not a missing branch
+  but a shape: navigation is keyed by MODEL, and an include is not a module —
+  `TPasNav.ModelIdOf(<the .inc path>)` returns -1, so the host exits before any
+  lookup. Under it, `IdentAt(AMid, ALine, ACol)` takes no `FileId` and the ident
+  index is deliberately built for `FileId = 0` only (the filter appears at four
+  places in `PasTree.Sema.Nav`), because line numbers in an included file collide
+  with the main file's. So the fix is a `FileId` threaded through both, plus a
+  path→(model, FileId) lookup — and it has a design question attached, not just
+  work: one `.inc` is typically included by MANY units, so "which model" is a real
+  choice (Delphi answers it with the context you opened the file from).
 - ~~**Zero-diagnostic parity on the real RTL/VCL/FMX.**~~ **Reached on
   2026-07-30.** The flattened RTL+VCL+FMX corpus (726 files) reports ZERO
   `E2003`/`E2034`/`E2035`; the only diagnostics left are honest `F1027`s for
