@@ -72,6 +72,7 @@ type
     function NodeNameLower(ANode: Integer): string; inline;
     function SkipAttr(AChild: Integer): Integer;
     function IsAttributeTypeRef(ANode: Integer): Boolean;
+    function IsBareTypeUse(ANode: Integer): Boolean;
     function EnumJoinTarget(AScope: Integer): Integer;
     procedure NotePendingAggregate(ATypeNode: Integer);
     function SepAfter(ANode: Integer): string;
@@ -245,6 +246,20 @@ begin
   LParent := FTree.Nodes[ANode].Parent;
   Result := (LParent <> NIL_NODE) and (KindOf(LParent) = nkAttribute) and
     (FirstChild(LParent) = ANode);
+end;
+
+{ True when ANode is a name written WITHOUT type arguments — i.e. not the head of
+  an `nkTypeArgs` (`TFoo<T>`). Only the head matters: an ident that is an
+  ARGUMENT inside `<...>` is itself a bare reference (`TDict<Pointer, TList>`
+  means the builtin Pointer), and the parser puts arguments after the head under
+  the same node, so the first-child test tells the two apart. }
+function TPasSemaResolver.IsBareTypeUse(ANode: Integer): Boolean;
+var
+  LParent: Integer;
+begin
+  LParent := FTree.Nodes[ANode].Parent;
+  Result := (LParent = NIL_NODE) or (KindOf(LParent) <> nkTypeArgs) or
+    (FirstChild(LParent) <> ANode);
 end;
 
 // Text of the visible token immediately after ANode's last token ('','','':'').
@@ -1726,6 +1741,29 @@ begin
         // everything above it stay order-independent.
         FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],
           NodeNameLower(ANode), FTree.Nodes[ANode].FirstToken);
+        // ARITY is part of a type's identity, so a BARE name must not bind to a
+        // same-named GENERIC: `Pointer<T> = record` in spring4d's Spring.pas
+        // does not shadow the builtin `Pointer`, and every `Pointer(X) := nil`
+        // in that unit was a false E2010 until this ran. The project pass has
+        // had the rule for CROSS-unit references (PreferNonGeneric); this is the
+        // same rule where RefMap is actually written, which is also what
+        // ctrl+click reads.
+        //
+        // Both conditions are tested INLINE and in this order for the reason
+        // PreferNonGeneric gives: the common case must cost one set membership
+        // and no call. A generic hit is rare; a bare one among those, rarer.
+        if (FModel.RefMap[ANode] <> NIL_SYM) and
+           (FModel.Symbols[FModel.RefMap[ANode]].Kind = skType) and
+           (sfGeneric in FModel.Symbols[FModel.RefMap[ANode]].Flags) and
+           IsBareTypeUse(ANode) then
+        begin
+          LHead := FModel.ResolveNonGenericAt(FNodeScope[ANode],
+            NodeNameLower(ANode), FTree.Nodes[ANode].FirstToken);
+          // NIL_SYM = only a generic is in scope, which is dcc's error and not
+          // a reason to drop the binding we have.
+          if LHead <> NIL_SYM then
+            FModel.RefMap[ANode] := LHead;
+        end;
         if (FModel.RefMap[ANode] = NIL_SYM) and IsAttributeTypeRef(ANode) then
           FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],
             NodeNameLower(ANode) + 'attribute', FTree.Nodes[ANode].FirstToken);

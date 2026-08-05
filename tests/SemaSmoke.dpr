@@ -92,6 +92,37 @@ begin
     end;
 end;
 
+{ Describes what the AOccurrence-th reference (0-based, source order) spelled
+  ARefText bound to: 'builtin', 'generic', 'type', 'unbound' or 'missing'. For
+  the arity rule, where both candidates share a NAME and only the kind and the
+  generic flag tell them apart. }
+function RefBindKind(const ARefText: string; AOccurrence: Integer): string;
+var
+  LNode, LSym, LSeen: Integer;
+begin
+  LSeen := 0;
+  for LNode := 0 to High(GModel.RefMap) do
+    if (GTree.Nodes[LNode].Kind = nkIdent) and
+       SameText(GTree.NodeText(LNode), ARefText) then
+    begin
+      LSym := GModel.RefMap[LNode];
+      if (LSym <> NIL_SYM) and (LNode = GModel.Symbols[LSym].DeclNode) then
+        Continue;   // the declaration itself is not a reference
+      if LSeen = AOccurrence then
+      begin
+        if LSym = NIL_SYM then
+          Exit('unbound');
+        if GModel.Symbols[LSym].Kind = skBuiltinType then
+          Exit('builtin');
+        if sfGeneric in GModel.Symbols[LSym].Flags then
+          Exit('generic');
+        Exit('type');
+      end;
+      Inc(LSeen);
+    end;
+  Result := 'missing';
+end;
+
 // True when EVERY bare reference spelled ARefText resolved to something (and
 // there was at least one). Unlike RefResolvesTo this needs no target name, so
 // it also covers symbols with no DeclNode at all — exactly the seeded
@@ -2014,6 +2045,86 @@ begin
     'implementation'#10'end.'#10);
   Ok('e2028: silent on every legal base, on `set of Char`, and on bounds it'
     + ' cannot fold', DiagCount('E2028') = 0);
+  GModel.Free;
+
+  // ---- ARITY is part of a type's identity (16.3) ----
+  // spring4d's Spring.pas shape exactly: a GENERIC record named `Pointer<T>`
+  // beside the builtin. A bare `Pointer` means the builtin however much nearer
+  // the generic is, so none of this is a type error.
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10 +
+    '  Pointer<T> = record'#10 +
+    '    type P = ^T;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure P(out Obj);'#10 +
+    'begin'#10 +
+    '  Pointer(Obj) := nil;'#10 +
+    'end;'#10 +
+    'function Q: Pointer;'#10 +
+    'begin'#10 +
+    '  Result := nil;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Ok('arity: a bare name binds to the BUILTIN, not the same-named generic',
+    RefBindKind('Pointer', 0) = 'builtin');
+  Ok('arity: ...and the return type too', RefBindKind('Pointer', 1) = 'builtin');
+  Ok('arity: so `Pointer(X) := nil` is not a type error',
+    DiagCount('E2010') = 0);
+  GModel.Free;
+
+  // The other direction: WITH type arguments the generic is what is meant.
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10 +
+    '  Pointer<T> = record'#10 +
+    '    V: T;'#10 +
+    '  end;'#10 +
+    '  TUse = Pointer<Integer>;'#10 +
+    'implementation'#10'end.'#10);
+  Ok('arity: `Name<T>` still binds to the generic',
+    RefBindKind('Pointer', 0) = 'generic');
+  GModel.Free;
+
+  // A non-generic of that name declared in the SAME unit beside the generic —
+  // the same-scope chain rather than the system seed.
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10 +
+    '  TBox<T> = record'#10 +
+    '    V: T;'#10 +
+    '  end;'#10 +
+    '  TBox = class'#10 +
+    '    F: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var LB: TBox;'#10 +
+    'begin'#10 +
+    '  LB := nil;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Ok('arity: a bare name prefers the non-generic in its OWN scope',
+    RefBindKind('TBox', 0) = 'type');
+  GModel.Free;
+
+  // And with NO non-generic anywhere the binding is kept rather than dropped:
+  // dcc calls that an error, but losing the reference would cost navigation.
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10 +
+    '  TOnly<T> = record'#10 +
+    '    V: T;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var LO: TOnly;'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Ok('arity: with only a generic in scope the generic binding is kept',
+    RefBindKind('TOnly', 0) = 'generic');
   GModel.Free;
 
   // A 64-bit ordinal base is dcc's OTHER code, and the two platform-sized names

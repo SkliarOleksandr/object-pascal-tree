@@ -265,25 +265,32 @@ Still open, roughly in the order we're tackling it:
   `Supports`/`as` rather than by name. The fix is the hop the branch above it
   already makes for `TObject` — redirect to the real `IInterface` and continue
   — with the same self-reference guard so `IInterface` itself terminates.
-- **spring4d is a corpus now, and it is NOT clean: 27 false diagnostics in
-  `Spring.Base`, 19 of them one bug.** Run it like any `.dproj`
+- **spring4d is a corpus now.** Run it like any `.dproj`
   (`Packages\Delphi12\Spring.Base.dproj` and `Spring.Core.dproj`, 73 and 121
   units). Its value is density — a compiling project of ordinary size that
-  reports more than the 3747-unit AVImark client does.
+  reported more than the 3747-unit AVImark client does: **27 false diagnostics in
+  `Spring.Base`, now 8**, and 34 in `Spring.Core`, now 15.
 
-  The 19 `E2010 Incompatible types: 'Pointer' and '_nil'` are all one cause,
-  traced to its declaration site: `Spring.pas` declares a GENERIC record named
-  `Pointer<T>`, and a bare reference to `Pointer` binds to it instead of to the
-  builtin, so every `Pointer(X) := nil` and `Result := nil` in a
-  `Pointer`-returning routine becomes a type error. **Arity is part of a type's
-  identity** and the project pass already knows it — `PreferNonGeneric` /
-  `FindTypeInUsesArity` implement exactly this rule for cross-unit type
-  references — but the RESOLVER's own binding does not, so `RefMap` is wrong
-  before any of that runs, which also sends ctrl+click to the generic. That is
-  the fix: a bare type reference must skip a same-named GENERIC and keep looking,
-  including into the system seed, which is where the non-generic `Pointer` lives.
-  It is the "a name that is also something else" family again, this time
-  *a generic of another arity*.
+  ~~The 19 `E2010 Incompatible types: 'Pointer' and '_nil'`~~ — **fixed
+  2026-08-05, all 19 with one rule.** They were one cause, traced to its
+  declaration site: `Spring.pas` declares a GENERIC record named `Pointer<T>`,
+  and a bare reference to `Pointer` bound to it instead of to the builtin, so
+  every `Pointer(X) := nil` and `Result := nil` in a `Pointer`-returning routine
+  became a type error. **Arity is part of a type's identity** (§16.1.2), and the
+  project pass already knew it for CROSS-unit references
+  (`PreferNonGeneric`/`FindTypeInUsesArity`) — the resolver's own binding did
+  not, so `RefMap` was wrong before any of that ran, which also sent ctrl+click
+  to the generic. Now a bare name that lands on a generic type keeps looking
+  (`TPasSemaModel.ResolveNonGenericAt`): the same-scope chain, then joined
+  scopes, then outward — which is what reaches the SEEDED `Pointer`, a case
+  §16.1.2 did not mention and now does. Both guards are tested inline in that
+  order, for the reason `PreferNonGeneric` documents: the common case pays one
+  set membership and no call.
+
+  Two deliberate limits: with only a generic in scope the binding is KEPT (dcc
+  errors there, but dropping the reference would cost navigation for nothing),
+  and an identifier inside `<...>` is treated as bare, since `TDict<Pointer,
+  TList>` means the arity-0 `Pointer`.
 
   The remaining 8: 5 `E2004 Identifier redeclared` around
   `class function &&op_Equality(...)` — the `&&`-prefixed operator names Delphi

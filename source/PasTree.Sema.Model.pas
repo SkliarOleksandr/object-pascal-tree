@@ -188,6 +188,12 @@ type
       reference lookup passes a real AAtToken; everything else passes -1. }
     function ResolveAt(AScope: Integer; const ANameLower: string;
       AAtToken: Integer): Integer;
+    { ResolveAt that never answers with a GENERIC type — for a BARE reference,
+      where arity is part of the identity. See the implementation. }
+    function ResolveNonGenericAt(AScope: Integer; const ANameLower: string;
+      AAtToken: Integer): Integer;
+    function FindNonGenericDeep(AScope: Integer;
+      const ANameLower: string): Integer;
     function DeclaredAfter(ASym, AAtToken: Integer): Boolean;
     { True when ANode sits in the BODY of a `with` listed in WithUnopened —
       see that field. An identifier inside a with's own TARGET expression is
@@ -374,6 +380,68 @@ function TPasSemaModel.Resolve(AScope: Integer;
   const ANameLower: string): Integer;
 begin
   Result := ResolveAt(AScope, ANameLower, -1);
+end;
+
+// FindLocalDeep, skipping GENERIC types — the same-name chain first, then the
+// joined scopes. See ResolveNonGenericAt.
+function TPasSemaModel.FindNonGenericDeep(AScope: Integer;
+  const ANameLower: string): Integer;
+var
+  LAdd: TArray<Integer>;
+  LIdx, LSym, LDepth: Integer;
+begin
+  LSym := FindLocal(AScope, ANameLower);
+  // Same name, same scope: types chain through NextOverload like routines do,
+  // so a non-generic declared beside the generic is found here. Depth-capped
+  // for a malformed chain, like every other walk in this model.
+  LDepth := 0;
+  while (LSym <> NIL_SYM) and (LDepth < 32) do
+  begin
+    if not ((Symbols[LSym].Kind = skType) and
+            (sfGeneric in Symbols[LSym].Flags)) then
+      Exit(LSym);
+    LSym := Symbols[LSym].NextOverload;
+    Inc(LDepth);
+  end;
+  LAdd := Scopes[AScope].Additional;
+  for LIdx := High(LAdd) downto 0 do
+  begin
+    Result := FindNonGenericDeep(LAdd[LIdx], ANameLower);
+    if Result <> NIL_SYM then
+      Exit;
+  end;
+  Result := NIL_SYM;
+end;
+
+{ ResolveAt, but never answering with a GENERIC type.
+
+  ARITY is part of a type's identity: `Pointer<T> = record ... end` does not
+  shadow the builtin `Pointer`, and a bare `Pointer` means the builtin however
+  much nearer the generic is. spring4d's `Spring.pas` declares exactly that pair
+  and every `Pointer(X) := nil` in it was a type error for us until this existed.
+
+  Called ONLY when the ordinary lookup already answered with a generic type and
+  the reference is bare — both tested at the call site, because this walk is not
+  free and every name in the closure would otherwise pay for it. NIL_SYM means
+  "no non-generic anywhere", and the caller then keeps the generic binding
+  rather than losing the reference: a bare name with only a generic in scope is
+  dcc's error, not a reason to unbind. }
+function TPasSemaModel.ResolveNonGenericAt(AScope: Integer;
+  const ANameLower: string; AAtToken: Integer): Integer;
+var
+  LCur: Integer;
+begin
+  LCur := AScope;
+  while LCur <> NIL_SCOPE do
+  begin
+    Result := FindNonGenericDeep(LCur, ANameLower);
+    if Result <> NIL_SYM then
+      if (AAtToken < 0) or (Scopes[LCur].Kind <> sckBlock) or
+         not DeclaredAfter(Result, AAtToken) then
+        Exit;
+    LCur := Scopes[LCur].Parent;
+  end;
+  Result := NIL_SYM;
 end;
 
 { Resolve, but honouring the one scope kind whose names are visible only from
