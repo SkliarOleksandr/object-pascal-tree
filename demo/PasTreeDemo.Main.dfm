@@ -399,6 +399,14 @@ object frmMain: TfrmMain
       OnExecute = GotoDeclActionExecute
       OnUpdate = GotoDeclActionUpdate
     end
+    object OpenFileAtCursorAction: TAction
+      Caption = 'Open File at Cursor'
+      Hint =
+        'Opens the unit or include file named at the caret — a `uses` item, ' +
+        'an {$I ...} directive, or a path in a string'
+      OnExecute = OpenFileAtCursorActionExecute
+      OnUpdate = OpenFileAtCursorActionUpdate
+    end
     object CopyMessageAction: TAction
       Caption = 'Copy Message'
       OnExecute = CopyMessageActionExecute
@@ -413,6 +421,12 @@ object frmMain: TfrmMain
   object SourcePopupMenu: TPopupMenu
     Left = 548
     Top = 339
+    object OpenFileAtCursor1: TMenuItem
+      Action = OpenFileAtCursorAction
+    end
+    object OpenSep1: TMenuItem
+      Caption = '-'
+    end
     object Find1: TMenuItem
       Action = FindAction
     end

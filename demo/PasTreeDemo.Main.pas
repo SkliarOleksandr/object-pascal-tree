@@ -100,6 +100,9 @@ type
     NavForward1: TMenuItem;
     GotoImplAction: TAction;
     GotoDeclAction: TAction;
+    OpenFileAtCursorAction: TAction;
+    OpenFileAtCursor1: TMenuItem;
+    OpenSep1: TMenuItem;
     CopyMessageAction: TAction;
     CopyAllMessagesAction: TAction;
     SourcePopupMenu: TPopupMenu;
@@ -151,6 +154,11 @@ type
     procedure NavForwardActionUpdate(Sender: TObject);
     procedure GotoDeclActionUpdate(Sender: TObject);
     procedure GotoDeclActionExecute(Sender: TObject);
+    function ActiveEditor: TSynEdit;
+    function NameAtCaret(AEditor: TSynEdit): string;
+    function FileForName(const AName: string): string;
+    procedure OpenFileAtCursorActionUpdate(Sender: TObject);
+    procedure OpenFileAtCursorActionExecute(Sender: TObject);
     procedure CopyMessageActionUpdate(Sender: TObject);
     procedure CopyMessageActionExecute(Sender: TObject);
     procedure CopyAllMessagesActionUpdate(Sender: TObject);
@@ -230,6 +238,11 @@ type
     FExtraSearchPathsPlat: Integer;   // cbPlatform.ItemIndex it was built for
     FExtraSearchPathsBuilt: Boolean;
     FAnalyzeOverhead: string;         // wrapper timings around the engine run
+    // The search paths the LAST analysis ran with. Kept because Open File at
+    // Cursor has to resolve a name the analysis never reached, and rebuilding
+    // them per keystroke is the ~1s-per-run cost the overhead log exists to
+    // catch.
+    FLastSearchPaths: TArray<string>;
     FStudioRoot: string;           // RAD Studio root (for RTL search paths)
     // Persisted demo settings (recent projects + the sticky combos), in an .ini
     // beside the executable. See PasTreeDemo.Settings.
@@ -666,6 +679,164 @@ begin
   TAction(Sender).Enabled := ActiveRoutineTarget(False, {out} LTarget);
 end;
 
+{ The word under the caret, taken as a FILE or UNIT name: the maximal run of
+  characters either can contain. Deliberately wider than an identifier —
+  a unit name is dotted (`Vcl.Forms`), an include is `jcl.inc`, and a path in a
+  string has separators — and deliberately stops at quotes, braces and
+  whitespace, which is what keeps an $I directive's argument and a quoted
+  '..\lib\x.inc' down to their file part. }
+function TfrmMain.ActiveEditor: TSynEdit;
+begin
+  if Assigned(pgc.ActivePage) and (pgc.ActivePage is TSourceTab) then
+    Result := TSourceTab(pgc.ActivePage).Editor
+  else
+    Result := nil;
+end;
+
+function TfrmMain.NameAtCaret(AEditor: TSynEdit): string;
+const
+  EXTRA = ['.', '_', '\', '/', ':', '-', '&', '~'];
+
+  function Ok(ACh: Char): Boolean;
+  begin
+    Result := CharInSet(ACh, ['a'..'z', 'A'..'Z', '0'..'9']) or
+      CharInSet(ACh, EXTRA);
+  end;
+
+var
+  LLine: string;
+  LFrom, LTo, LCaret: Integer;
+begin
+  Result := '';
+  LLine := AEditor.LineText;
+  if LLine = '' then
+    Exit;
+  // The caret sits BETWEEN characters; a caret just past the last character of
+  // a name still means that name, so start the scan one to the left.
+  LCaret := Min(Max(AEditor.CaretX, 1), Length(LLine) + 1);
+  if (LCaret > Length(LLine)) or not Ok(LLine[LCaret]) then
+    Dec(LCaret);
+  if (LCaret < 1) or (LCaret > Length(LLine)) or not Ok(LLine[LCaret]) then
+    Exit;
+  LFrom := LCaret;
+  while (LFrom > 1) and Ok(LLine[LFrom - 1]) do
+    Dec(LFrom);
+  LTo := LCaret;
+  while (LTo < Length(LLine)) and Ok(LLine[LTo + 1]) do
+    Inc(LTo);
+  Result := Copy(LLine, LFrom, LTo - LFrom + 1);
+  // A name cannot END in a dot, a dash or a tilde, and a stray one is what a
+  // caret next to punctuation picks up.
+  // Only the TAIL is trimmed. A leading dot is not noise: `..\lib\x.inc` is a
+  // perfectly good relative path and trimming it would break exactly the case
+  // an include directive is written in.
+  while (Result <> '') and CharInSet(Result[Length(Result)], ['.', '-', '~']) do
+    Delete(Result, Length(Result), 1);
+end;
+
+{ Delphi's Open File at Cursor, and the same three sources it accepts: a `uses`
+  item, an `$I` argument and a path in a string.
+
+  Resolution order matters and is the reverse of what looks natural: the
+  ANALYSIS is asked first, because it already knows the resolved path of every
+  unit AND of every included file in the closure — which is how an $I argument
+  opens the right jcl.inc when three copies exist on different search paths, and
+  how `uses Forms` opens Vcl.Forms.pas through the namespace/alias rules. Only
+  then the filesystem, relative to the current file and to the project's search
+  paths, which is what still works for a file the analysis never reached. }
+function TfrmMain.FileForName(const AName: string): string;
+var
+  LDir, LBase, LCand: string;
+  LMid, LFid: Integer;
+  LM: TPasSemaModel;
+
+  // Does APath's file name match AName, with or without an extension?
+  function Matches(const APath: string): Boolean;
+  begin
+    Result := SameText(TPath.GetFileName(APath), AName) or
+      SameText(TPath.GetFileNameWithoutExtension(APath), AName);
+  end;
+
+begin
+  Result := '';
+  if AName = '' then
+    Exit;
+  // 1. Anything the analysis loaded: the models' own files first, then every
+  // file their token streams came from (that second list is where includes
+  // live — see TPasSemaProject.NodeSite on why an $I file is a different path).
+  if Assigned(FSemaProject) then
+  begin
+    for LMid := 0 to FSemaProject.ModelCount - 1 do
+      if Matches(FSemaProject.ModelFile(LMid)) then
+        Exit(FSemaProject.ModelFile(LMid));
+    for LMid := 0 to FSemaProject.ModelCount - 1 do
+    begin
+      LM := FSemaProject.Model(LMid);
+      if LM = nil then
+        Continue;
+      for LFid := 0 to High(LM.Tree.Source.FileNames) do
+        if Matches(LM.Tree.Source.FileNames[LFid]) then
+          Exit(LM.Tree.Source.FileNames[LFid]);
+    end;
+  end;
+  // 2. The filesystem. A bare name gets the extensions a Pascal project can
+  // mean, in the order it is likely to mean them.
+  LDir := '';
+  if pgc.ActivePage is TSourceTab then
+    LDir := TPath.GetDirectoryName(TSourceTab(pgc.ActivePage).FilePath);
+  LBase := AName;
+  for var LPath in [LDir] + FLastSearchPaths do
+  begin
+    if LPath = '' then
+      Continue;
+    if TPath.HasExtension(LBase) then
+    begin
+      LCand := TPath.Combine(LPath, LBase);
+      if TFile.Exists(LCand) then
+        Exit(TPath.GetFullPath(LCand));
+    end
+    else
+      for var LExt in ['.pas', '.inc', '.dpr', '.dpk', '.dproj'] do
+      begin
+        LCand := TPath.Combine(LPath, LBase + LExt);
+        if TFile.Exists(LCand) then
+          Exit(TPath.GetFullPath(LCand));
+      end;
+  end;
+  // 3. An absolute or already-relative path that resolves as written.
+  if TFile.Exists(LBase) then
+    Result := TPath.GetFullPath(LBase);
+end;
+
+procedure TfrmMain.OpenFileAtCursorActionExecute(Sender: TObject);
+var
+  LEditor: TSynEdit;
+  LName, LFile: string;
+begin
+  LEditor := ActiveEditor;
+  if LEditor = nil then
+    Exit;
+  LName := NameAtCaret(LEditor);
+  LFile := FileForName(LName);
+  if LFile = '' then
+  begin
+    // Said out loud rather than silently doing nothing: the caret is often one
+    // character off the name, and a no-op looks like a broken command.
+    LogRow(mkStatus, Format('Open File at Cursor: no file for "%s"', [LName]),
+      '', 0, 0);
+    Exit;
+  end;
+  NavigateTo(LFile, 1, 1);
+end;
+
+procedure TfrmMain.OpenFileAtCursorActionUpdate(Sender: TObject);
+begin
+  // Enabled on a NAME, not on a resolvable file: resolving walks the closure
+  // and this runs on every idle. The execute path reports a miss instead.
+  TAction(Sender).Enabled := (ActiveEditor <> nil) and
+    (NameAtCaret(ActiveEditor) <> '');
+end;
+
 procedure TfrmMain.CopyMessageActionExecute(Sender: TObject);
 var
   LData: PPasMsgNodeData;
@@ -857,6 +1028,10 @@ begin
   GotoImplAction.ShortCut := Vcl.Menus.ShortCut(VK_DOWN, [ssCtrl, ssShift]);
   GotoDeclAction.ShortCut := Vcl.Menus.ShortCut(VK_UP, [ssCtrl, ssShift]);
   CopyMessageAction.ShortCut := Vcl.Menus.ShortCut(Ord('C'), [ssCtrl]);
+  // Delphi's own key for it, and worth matching exactly: it is the command
+  // people reach for when ctrl+click cannot help — an include file, or a unit
+  // whose source the analysis never loaded.
+  OpenFileAtCursorAction.ShortCut := Vcl.Menus.ShortCut(VK_RETURN, [ssCtrl]);
   // The conventional pair, matching every browser and IDE.
   NavBackAction.ShortCut := Vcl.Menus.ShortCut(VK_LEFT, [ssAlt]);
   NavForwardAction.ShortCut := Vcl.Menus.ShortCut(VK_RIGHT, [ssAlt]);
@@ -1420,7 +1595,7 @@ begin
   // paths, so every `{$I ...}` fails — and an include that DEFINES symbols then
   // flips which branches look live. JclBase.pas greyed out `SizeInt = Integer`
   // under `{$IFDEF CPU32}` (CPU32 comes from jedi.inc via its own
-  // `{$I jcl.inc}`) while ctrl+click navigated to that very line, because
+  // `an $I directive`) while ctrl+click navigated to that very line, because
   // navigation reads the real analysis. Two sources of truth, visibly
   // disagreeing on the same line.
   ApplyHighlighterContext(LHL, APath);
@@ -1616,6 +1791,7 @@ begin
   if not BuildConfig(LPlatform, LSearchPaths, LDefines) then
     Exit;
   FAnalyzeOverhead := Format('paths=%d;', [LSW.ElapsedMilliseconds]);
+  FLastSearchPaths := LSearchPaths;   // see the field
 
   ClearLink;
   FAnalyzing := True;
@@ -1910,6 +2086,7 @@ begin
   else
     LPriority := [];
 
+  FLastSearchPaths := LSearchPaths;   // see the field
   FAsyncSession := TPasAsyncSession.Create(LPlatform, LSearchPaths, LDefines,
     LRoots, LPriority);
   FAsyncSession.SetSingleThreadedInner(cbThreading.ItemIndex = 0);
