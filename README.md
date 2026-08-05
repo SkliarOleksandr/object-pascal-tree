@@ -376,20 +376,39 @@ Still open, roughly in the order we're tackling it:
     info. Also found and written into §4.11 but not implemented: `Slice`'s first
     argument may not be a DYNAMIC array (`E2016 Array type required`), which
     needs the typer;
-  - multiline-string indentation (B §B.6.3): the lexer finds the terminator but
-    does not treat the closing line's indentation as the base, so an
-    under-indented content line is not an error.
+  - ~~multiline-string indentation (B §B.6.3)~~ — **done 2026-08-05**
+    (`dcInconsistentIndentChars`, dcc's `E2657 Inconsistent indent characters`).
+    The lexer already found the terminator; it now compares the closing run's
+    indentation against every content line. dcc compares CHARACTERS, not widths,
+    and stops at the end of a short line — one rule that explains all six probed
+    shapes: a tab where the closer has spaces is an error, a whitespace-only line
+    shorter than the closer is not, and anything past the matched prefix is free.
+    §B.6.3 said "less indented", which predicts neither of those; it now has the
+    table. One report per offending line, dcc-verified.
+
+    Two things about the measurement, since they matter more here than usual: the
+    diagnostic is a LEXER one, so it does not reach the sema report and the bar
+    had to be met with `PasTreeLex` instead (zero across ~16 000 files: both flat
+    corpora, both AVImark trees, `3rdlib13` and the whole Studio source tree) —
+    and **not one file in any of them contains a multiline literal**, since the
+    feature is Delphi 12 and this code predates it. So the corpora prove no
+    regression (full sema dumps byte-identical, lexer throughput 94.6 vs
+    93.5 MB/s) and the dcc-matched probes are the only evidence that the rule
+    itself is right. Still not implemented, and now the only known gap in B.6.3:
+    the token's VALUE is raw source text, not de-indented — harmless today
+    because nothing folds string constants.
 - ~~**Three rules the CODE implements that the SPEC never states.**~~ **Written
   up on 2026-07-31**: helper inheritance and its class-vs-record asymmetry
   (§15.3.1), the dynamic `array of array of T` indexing sugar (§8.2.1), and a
   `TypeRef` position resolving to a TYPE over a nearer same-named non-type
   (§B.11). Behaviour unchanged — the code already did all three.
-- **Where the audit stands (2026-08-05).** Eleven of its items are closed — both
+- **Where the audit stands (2026-08-05).** Twelve of its items are closed — both
   false-positive/wrong-binding defects (`IInterface`, inline-var position),
   visibility recording, the three spec write-ups, `E2081`, `E2145` and the
   checkable half of `E2193`, and the whole ordinal/Boolean/set-limit family
   (`E2001`, `E2012`, `E2028`, `E2032`) — where one of the items turned out to be
-  a wrong spec rule rather than a missing check. What is left is in this list
+  a wrong spec rule rather than a missing check — and multiline-string
+  indentation. What is left is in this list
   above and below, and every remaining piece has the same
   shape: it can only ADD diagnostics. So they share one acceptance bar, met by
   every check added so far and worth restating rather than re-deriving — **zero
@@ -399,9 +418,9 @@ Still open, roughly in the order we're tackling it:
   wrongly rejecting six `if AFunctionReference then` conditions, and only the
   3747-unit third-party closure showed it.
 
-  Remaining, cheapest and safest first: multiline-string indentation (a lexer
-  rule, self-contained), then the two `Slice` shapes and `set of Int64` — all
-  three want the same thing, a type for an argument at a given position — then
+  Remaining, cheapest and safest first: the two `Slice` shapes and
+  `set of Int64` — all three want the same thing, a type for an argument at a
+  given position — then
   member-lookup reporting behind a flag, then visibility enforcement last, since
   it is the only one that can reject code the corpora currently accept for a
   reason other than a missing check.

@@ -56,6 +56,94 @@ begin
   end;
 end;
 
+{ Lexer-level check: the LINES on which ASource produces ACode, as a
+  comma-separated list, so a case reads the way dcc's own output does. Used for
+  the multiline-string indentation rule (B.6.3), whose diagnostics never reach
+  the parser. }
+procedure CheckLexDiagLines(const AName, ASource: string;
+  ACode: TPasDiagCode; const AExpected: string);
+var
+  LStream: TPasTokenStream;
+  LIdx, LLine, LCol: Integer;
+  LActual: string;
+begin
+  LStream := TPasLexer.Tokenize(ASource);
+  LActual := '';
+  for LIdx := 0 to High(LStream.Diagnostics) do
+    if LStream.Diagnostics[LIdx].Code = ACode then
+    begin
+      LStream.OffsetToLineCol(LStream.Diagnostics[LIdx].Start, LLine, LCol);
+      if LActual <> '' then
+        LActual := LActual + ',';
+      LActual := LActual + IntToStr(LLine);
+    end;
+  if LActual = AExpected then
+    Inc(GPassed)
+  else
+  begin
+    Inc(GFailed);
+    Writeln('FAIL ', AName);
+    Writeln('  expected lines: "', AExpected, '"');
+    Writeln('  actual lines:   "', LActual, '"');
+  end;
+end;
+
+{ B.6.3 indentation, every shape dcc32 37.0 was probed with. The rule compares
+  the closing run's indent CHARACTER BY CHARACTER against each content line: a
+  mismatch is the error, running out of line is not. Line numbers are 1-based
+  and the sources start with a `const` line, so content starts at line 3. }
+procedure CheckMultilineIndent;
+const
+  // One apostrophe, so a quote RUN can be composed instead of spelled — an
+  // eight-apostrophe literal is unreadable and was wrong the first time.
+  Q = '''';
+  R3 = Q + Q + Q;      // '''
+  R5 = R3 + Q + Q;     // '''''
+  NL = #13#10;
+var
+  LUnder, LOver, LTab, LBlank, LTabBlank, LTwo, LFlush, LFive: string;
+begin
+  // Two spaces where the closer has four: the mismatch is at the 'u'.
+  LUnder := 'const A =' + NL + '    ' + R3 + NL + '  under' + NL +
+    '    ' + R3 + ';';
+  // Deeper than the closer, then deeper still: legal.
+  LOver := 'const A =' + NL + '    ' + R3 + NL + '    ok' + NL +
+    '      more' + NL + '    ' + R3 + ';';
+  // A tab where the closer has spaces — the same WIDTH is not the rule.
+  LTab := 'const A =' + NL + '    ' + R3 + NL + #9'tabbed' + NL +
+    '    ' + R3 + ';';
+  // Whitespace-only lines: empty, and shorter than the closer. Both legal.
+  LBlank := 'const A =' + NL + '    ' + R3 + NL + NL + '  ' + NL +
+    '    ok' + NL + '    ' + R3 + ';';
+  // A tab-only line, though, mismatches on its first character.
+  LTabBlank := 'const A =' + NL + '    ' + R3 + NL + #9 + NL + '    ok' + NL +
+    '    ' + R3 + ';';
+  // Two offenders: one report each, not one per literal.
+  LTwo := 'const A =' + NL + '    ' + R3 + NL + '  one' + NL + '  two' + NL +
+    '    ' + R3 + ';';
+  // A closer at column 1 imposes nothing.
+  LFlush := 'const A =' + NL + R3 + NL + 'anything' + NL + R3 + ';';
+  // The same rule inside a longer odd run.
+  LFive := 'const A =' + NL + '    ' + R5 + NL + '  bad' + NL +
+    '    ' + R5 + ';';
+  CheckLexDiagLines('B.6.3 under-indented content line', LUnder,
+    dcInconsistentIndentChars, '3');
+  CheckLexDiagLines('B.6.3 deeper than the closer is fine', LOver,
+    dcInconsistentIndentChars, '');
+  CheckLexDiagLines('B.6.3 a tab where the closer has spaces', LTab,
+    dcInconsistentIndentChars, '3');
+  CheckLexDiagLines('B.6.3 empty and short whitespace-only lines are fine',
+    LBlank, dcInconsistentIndentChars, '');
+  CheckLexDiagLines('B.6.3 ...but a tab-only line still mismatches',
+    LTabBlank, dcInconsistentIndentChars, '3');
+  CheckLexDiagLines('B.6.3 one report per offending line', LTwo,
+    dcInconsistentIndentChars, '3,4');
+  CheckLexDiagLines('B.6.3 a closer at column 1 imposes nothing', LFlush,
+    dcInconsistentIndentChars, '');
+  CheckLexDiagLines('B.6.3 the rule holds for a five-quote run', LFive,
+    dcInconsistentIndentChars, '3');
+end;
+
 procedure CheckAllPlatforms;
 const
   SNIPPET =
@@ -364,6 +452,7 @@ begin
     // define set + SizeOf(Pointer) drive branch selection correctly ----
     CheckAllPlatforms;
     CheckIncludeContext;
+    CheckMultilineIndent;
 
     Writeln;
     Writeln(Format('=== ParserSmoke: %d passed, %d failed ===',

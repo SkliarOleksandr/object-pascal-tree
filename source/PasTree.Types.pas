@@ -86,7 +86,10 @@ type
     dcUnterminatedComment,
     dcUnterminatedDirective,
     dcUnterminatedMultilineString,
-    dcUnterminatedAsm
+    dcUnterminatedAsm,
+    // B.6.3: a content line of a multiline string whose indentation does not
+    // start with the closing line's. dcc's E2657.
+    dcInconsistentIndentChars
   );
 
   TPasDiagnostic = record
@@ -179,7 +182,8 @@ const
     'Unterminated comment',
     'Unterminated compiler directive',
     'Unterminated multiline string literal',
-    'Unterminated asm block'
+    'Unterminated asm block',
+    'Inconsistent indent characters'
   );
 
 { True for trivia kinds — tokens the parser's visible stream skips. }

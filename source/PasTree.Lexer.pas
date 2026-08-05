@@ -361,9 +361,61 @@ end;
 
 procedure TPasLexer.LexMultilineString(AQuoteRun: Integer);
 var
-  LStart, LLineStart, LProbe, LRun: Integer;
+  LStart, LLineStart, LProbe, LRun, LFirstContent: Integer;
+
+  { B.6.3: the closing run's indentation is the base, and every content line
+    must BEGIN with it — dcc reports `E2657 Inconsistent indent characters`, one
+    per offending line, and the message names the real rule better than "under-
+    indented" does. Verified against dcc32 37.0, comparing characters and not
+    widths:
+
+      closer '    ' (4 spaces), line '  under indented'   error at the 'u'
+      closer '    ', line #9 (a tab)                      error at the tab
+      closer '    ', line '  ' (whitespace only, shorter) OK
+      closer '    ', line '' (empty)                      OK
+      closer '    ', line '     '#9'x' (more, then a tab) OK
+      closer '' (column 1)                                anything goes
+
+    One rule covers all six: walk the closer's indent character by character; a
+    MISMATCH is the error, and running out of line is not. That is why a short
+    whitespace-only line passes while a tab-indented one fails, which no
+    width-based reading of the spec predicts.
+
+    ACloser is the closing line's start and ALen its indentation length. }
+  procedure CheckIndent(AFrom, ACloser, ALen: Integer);
+  var
+    LLine, LEnd, LIdx: Integer;
+  begin
+    if (ALen <= 0) or (AFrom < 0) then
+      Exit;
+    LLine := AFrom;
+    while LLine < ACloser do
+    begin
+      LEnd := LLine;
+      while (LEnd < ACloser) and (FBase[LEnd] <> #13) and (FBase[LEnd] <> #10) do
+        Inc(LEnd);
+      LIdx := 0;
+      while (LIdx < ALen) and (LLine + LIdx < LEnd) do
+      begin
+        if FBase[LLine + LIdx] <> FBase[ACloser + LIdx] then
+        begin
+          Diag(dcInconsistentIndentChars, LLine + LIdx, 1);
+          Break;
+        end;
+        Inc(LIdx);
+      end;
+      // Past the line break, whichever form it takes.
+      if (LEnd < ACloser) and (FBase[LEnd] = #13) and
+         (CharAt(LEnd + 1) = #10) then
+        LLine := LEnd + 2
+      else
+        LLine := LEnd + 1;
+    end;
+  end;
+
 begin
   LStart := FPos;
+  LFirstContent := -1;
   Inc(FPos, AQuoteRun);
   // Scan line by line for a closing run of the same length on its own line.
   while FPos < FLen do
@@ -378,6 +430,8 @@ begin
     else
       Inc(FPos);
     LLineStart := FPos;
+    if LFirstContent < 0 then
+      LFirstContent := LLineStart;   // content starts on the line after the run
     // Optional indentation before the closing quote run.
     LProbe := LLineStart;
     while (CharAt(LProbe) = ' ') or (CharAt(LProbe) = #9) do
@@ -387,6 +441,7 @@ begin
       Inc(LRun);
     if LRun = AQuoteRun then
     begin
+      CheckIndent(LFirstContent, LLineStart, LProbe - LLineStart);
       FPos := LProbe + LRun;
       Emit(tkMultilineString, LStart);
       Exit;
