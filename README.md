@@ -390,11 +390,14 @@ Still open, roughly in the order we're tackling it:
     diagnostic is a LEXER one, so it does not reach the sema report and the bar
     had to be met with `PasTreeLex` instead (zero across ~16 000 files: both flat
     corpora, both AVImark trees, `3rdlib13` and the whole Studio source tree) —
-    and **not one file in any of them contains a multiline literal**, since the
-    feature is Delphi 12 and this code predates it. So the corpora prove no
-    regression (full sema dumps byte-identical, lexer throughput 94.6 vs
-    93.5 MB/s) and the dcc-matched probes are the only evidence that the rule
-    itself is right. Still not implemented, and now the only known gap in B.6.3:
+    and that corpus is **thin for this feature specifically**: the whole ~16 000
+    files hold exactly ONE multiline literal (an embedded JS function in
+    `AVImark.Integration.RefLab.HL7I.pas`, which is in the client's analysis
+    closure and lexes clean), the feature being Delphi 12 and most of this code
+    older. So the corpora prove no regression (full sema dumps byte-identical,
+    lexer throughput 94.6 vs 93.5 MB/s) plus that one accepted literal, and the
+    dcc-matched probes carry the rest of the weight.
+    Still not implemented, and now the only known gap in B.6.3:
     the token's VALUE is raw source text, not de-indented — harmless today
     because nothing folds string constants.
 - ~~**Three rules the CODE implements that the SPEC never states.**~~ **Written
