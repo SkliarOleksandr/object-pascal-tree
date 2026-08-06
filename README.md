@@ -380,9 +380,23 @@ Still open, roughly in the order we're tackling it:
   - **a generic ANCESTOR's member typed by its parameter.** 535 `CreateInstance`
     + 134 `CreateInstanceWithOwner` + hundreds of `get_XxxProperty` in the WinRT
     units are all `Statics.X` where `Statics` comes from
-    `TWinRTGenericImportS<T>` and its type IS `T` — so the walk must instantiate
-    the ancestor's frame before it can look inside. Same machinery as the
-    `arrayofT` fix, one level up.
+    `TWinRTGenericImportS<S>` and its type IS `S` — so the walk must instantiate
+    the ancestor's frame before it can look inside.
+
+    Narrowed on 2026-08-05, and narrower than "frames are missing": the frame
+    composition already exists — `AncestorOfX` closes each hop's result over the
+    descendant's own frame (`SubstX(Result, AX.Inst, 0)`) and its comment says
+    `FindMemberX`'s walk does the same one hop at a time. So the gap is somewhere
+    more specific, and the shape to reproduce is exactly this, CROSS-UNIT:
+    `TWinRTGenericImportS<S: IInspectable> = class(TWinRTImport)` with
+    `class property Statics: S read GetStatics` lives in `System.Win.WinRT.pas`,
+    while `TGpio_GpioController = class(TWinRTGenericImportS<Gpio_IGpioControllerStatics>)`
+    and the failing `Result := Statics.GetDefault` are in `WinAPI.Devices.pas`
+    (line 10188). A two-unit fixture of that shape is the first thing to write;
+    the trace method that cracked `Pointer<T>` (a temporary `Writeln(ErrOutput)`
+    keyed to one name, then the declaration site) is the one that fits here too.
+    Measure with `PasTreeSemaProject <rtlflat> -list -members` and count
+    `CreateInstance`.
   - **helpers on a builtin-typed value.** `Trim`, `StartsWith`, `PadRight`,
     `ToString`, `IsDigit`, `IsEmpty` — `TStringHelper`/`TCharHelper` members
     reached through a member chain rather than a bare name.
