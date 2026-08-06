@@ -1099,6 +1099,34 @@ Still open, roughly in the order we're tackling it:
   diagnostics/rename/etc. over the same Sema/Nav layer) plus LSIF dump
   generation (precomputed navigation for code browsing without a live
   server) are the planned next consumers.
+- **ToolTip Insight** — hover any identifier and get a popup hint saying where
+  it is DECLARED: `<module>: <line>`, plus enough of the declaration to be worth
+  reading (kind and name at minimum — `property TTextLayout.Text: string`).
+  Cheapest of the wish-list items and the one with the best ratio, because the
+  answer is already computed and already reachable: ctrl+click resolves exactly
+  this, so the hint is the same `(unitId, sym)` lookup rendered as text instead
+  of as a jump. Build it on the SAME entry point the click uses, never a second
+  resolution path — two of them would drift, and a hint that disagrees with
+  where the click lands is worse than no hint.
+
+  Three things to decide, and each has a right answer already visible elsewhere
+  in this codebase:
+  - *what to show when the click has nowhere to go.* Compiler intrinsics have no
+    source declaration (go-to-declaration routes them to `System.pas`'s header);
+    the hint should say what they ARE — "compiler intrinsic", not a made-up
+    line. Same for `Result`, for a `uses` name (show the resolved FILE), and for
+    the dynamic-array `Create` this session added, which is bound to nothing on
+    purpose.
+  - *when a hint is WRONG rather than missing.* The seed-shadowing bug fixed on
+    2026-08-06 is the cautionary one: `Text` resolved, to the predefined file
+    type instead of the class's property, and nothing reported it. A hint makes
+    every such binding visible to the user for the first time — which is a
+    feature (it is a free audit of the binding tables) and a risk (the tail in
+    the To-do above is exactly what it will surface).
+  - *hover timing and cancellation.* The analysis is asynchronous and a hover is
+    not a click: the hint must never block the UI thread and must be dropped if
+    the caret moves or a re-analysis lands. `TPasAsyncSession` already owns that
+    discipline for the message window; reuse it rather than re-deriving it.
 - **Find References** — for any identifier, list every place it's actually
   USED (by resolved symbol identity via `RefMap`/`ExtRefMap`/`CallTargetX`,
   not a text search — two same-named locals in different scopes must not
