@@ -2614,6 +2614,60 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { A constrained parameter used inside a method BODY. 16 §16.4.1 puts the
+    constraints on the declaration and dcc forbids repeating them on the
+    implementation header — `procedure TListBase<T>.Add;` — so the body's own
+    `<T>` carries none, and that is where nearly every use of a constrained
+    parameter lives (the whole `TAcceptValueListBase<T: TAcceptValueItem,
+    constructor>` family in System.Net.Mime was this one shape).
+
+    The constraint group is asserted too: a `constructor` constraint beside the
+    type one must not hide the type. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_bodycon');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'BCItem.pas'),
+    'unit BCItem;'#10'interface'#10 +
+    'type'#10 +
+    '  TItem = class'#10 +
+    '    FWeight: Integer;'#10 +
+    '    procedure Parse;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TItem.Parse;'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'BCList.pas'),
+    'unit BCList;'#10'interface'#10'uses BCItem;'#10 +
+    'type'#10 +
+    '  TList<T: TItem, constructor> = class'#10 +
+    '    procedure Use(const A: T);'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TList<T>.Use(const A: T);'#10 +   // no constraints here, ever
+    'begin'#10 +
+    '  A.FWeight := 1;'#10 +
+    '  A.Parse;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    var LBC := ModelByName('bclist');
+    Ok('bodycon: BCList loaded', Assigned(LBC));
+    Ok('bodycon: a body''s parameter reaches the DECLARATION''s constraint',
+      DiagCount(LBC, 'E2003') = 0);
+    Ok('bodycon: field and method both bind to the constraint type',
+      CrossRefTo(LBC, 'FWeight', 'FWeight') and CrossRefTo(LBC, 'Parse', 'Parse'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   { A helper on a BUILTIN-typed value whose type came from ANOTHER model. Every
     model seeds its own `string` symbol, so `S.Trim` on a local (this model's
     seed) and `Give(S).Trim` on a third unit's function result (that unit's

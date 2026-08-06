@@ -359,12 +359,13 @@ Still open, roughly in the order we're tackling it:
   finding** — three mechanisms, not hundreds of cases. **All three are closed
   now**, and what is left is a short tail of unrelated shapes:
 
-  | corpus | 2026-08-05 | frames | + builtin helpers | what is left |
-  |---|---|---|---|---|
-  | rtlflat (403) | 8 348 | 104 | **51** | `Create`, `Free`, private fields |
-  | bigflat (726) | 8 638 | 387 | **194** | the same, plus `Text.IsEmpty` (below) |
-  | AVImark client (3747) | 3 609 | not re-measured | | string/Char helpers, DevExpress properties |
-  | Spring.Base (73) | 70 | 60 | **60** | `fPair`, `TValue`/RTTI helpers |
+  | corpus | 2026-08-05 | frames | + builtin helpers | + body constraints | what is left |
+  |---|---|---|---|---|---|
+  | rtlflat (403) | 8 348 | 104 | 51 | **23** | `Create`, `Free`, singletons |
+  | bigflat (726) | 8 638 | 387 | 194 | **162** | the same, plus `Text.IsEmpty` (below) |
+  | BuildWinRTL (317) | — | — | 51 | **23** | the rtlflat tail, one package |
+  | AVImark client (3747) | 3 609 | not re-measured | | | string/Char helpers, DevExpress properties |
+  | Spring.Base (73) | 70 | 60 | 60 | **60** | `fPair`, `TValue`/RTTI helpers |
 
   The three mechanisms, and each was one gap rather than hundreds:
 
@@ -434,8 +435,26 @@ Still open, roughly in the order we're tackling it:
     CONSTRAINT guarantees — and from `IInspectable` the existing interface hop
     reaches `IInterface` and those three names. 48 reports gone (all `_AddRef`
     and `_Release`, 39 of 40 `QueryInterface`), the frame is deliberately dropped
-    on the hop because a constraint is written in the DECLARING scope, and the
-    surviving `QueryInterface` is a different shape still to look at.
+    on the hop because a constraint is written in the DECLARING scope.
+
+    ~~The surviving `QueryInterface` is a different shape still to look at.~~
+    **It was the same rule, one scope out — fixed 2026-08-06, rtlflat 51 → 23
+    and the whole `System.Net.Mime` cluster with it.** The constraint hop read
+    the parameter's OWN `nkGenericParam` group, and a method BODY's `<T>` has no
+    constraints in it: 16 §16.4.1 puts them on the declaration and dcc REFUSES
+    them on the implementation header (`procedure TListBase<T>.Add;`). So the
+    hop worked exactly where constrained parameters are rarely used and failed
+    where they always are — `TAcceptValueListBase<T: TAcceptValueItem,
+    constructor>` accounted for 26 of the RTL package's 51 reports on its own,
+    every one of them `LItem.FWeight` / `LItem.Parse` / `T.Create` inside a
+    method body.
+
+    `ConstraintOfParamX` now falls back to the DECLARING type's same-named
+    parameter. Two details are load-bearing: the link is the parameter SYMBOL's
+    scope chain and not the node's (a header's generic-parameter idents are
+    declared into the routine scope but never stamped into `NodeScope`, so
+    `StructSymOfNode` had nothing to walk), and parameters are matched by NAME,
+    so a body that renames them finds nothing rather than the wrong constraint.
 
   One refinement the flag earned immediately: **a member on a `Variant` is never
   reported**, because late binding makes any name compile and dcc checks nothing
@@ -450,11 +469,11 @@ Still open, roughly in the order we're tackling it:
   off until those numbers are near zero, because an editor embedding PasTree
   should not inherit a work list as diagnostics.
 
-  What is left is no longer one shape. On rtlflat: 13 `Create`, 6 `Free`, then
-  private fields (`FWeight`, `FOrder`, `FParams` — all in one FMX family) and
-  singletons. Those want diagnosing one at a time, starting with the two
-  constructor/destructor names, which are the same pair `-visibility`'s own tail
-  is stuck on.
+  What is left is no longer one shape. On rtlflat: 12 `Create`, 5 `Free`, then
+  `HasName`, `FromBytes`, `ToString`, `Wrap` — singletons and pairs. Those want
+  diagnosing one at a time, starting with `Create`/`Free`, which are the same
+  pair `-visibility`'s own tail is stuck on and therefore likely one cause for
+  both checks.
 - **Inline `var`/`const` visibility is not POSITIONAL** — found by the
   spec↔code audit of 2026-07-31, and the only *wrong-binding* defect it turned
   up. 3 §3.1.3: an inline variable is visible "from its declaration to the end
@@ -693,13 +712,18 @@ Still open, roughly in the order we're tackling it:
   (rtlflat 104 → 51: a builtin type is seeded PER MODEL, so the helper index was
   keyed on one `string` and asked about another).
 
-  All three named buckets are therefore closed, and the ordering above has run
-  out of items — which is the point at which the next objective has to come from
-  a fresh measurement rather than from this list. Two candidates the last two
-  sessions produced on their way past: `ScoreCandidate` never rejecting a
-  type-mismatched overload (above), and a seeded builtin name beating a class's
-  own member (`Text.IsEmpty` in FMX) — a WRONG binding, which is the kind this
-  README keeps insisting a diagnostic count cannot see.
+  All three named buckets are therefore closed, and a fourth that only became
+  visible once they were: a constrained parameter used in a method BODY
+  (rtlflat 51 → 23). The list is out of named items, so the next objective comes
+  from reading the tail rather than from here. What the tail says today:
+
+  - `Create` (12 on rtlflat) and `Free` (5) — also the pair `-visibility`'s own
+    tail is stuck on, so one cause probably answers both checks;
+  - a seeded builtin name beating a class's own member — `Text.IsEmpty` in the
+    FMX canvases, where `Text` is the predefined FILE type. A WRONG binding,
+    which is the kind this README keeps insisting a diagnostic count cannot see;
+  - `ScoreCandidate` never REJECTING a type-mismatched overload (above), which
+    is a selection change and wants its own measurement.
 - **Audit coverage, so the next pass knows where to start.** The 2026-07-31
   sweep ran pass 1 (spec → code) over every chapter and pass 2 (code → spec)
   over the member-lookup, property, interface, helper, array and generic

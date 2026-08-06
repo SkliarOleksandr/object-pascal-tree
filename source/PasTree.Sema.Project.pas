@@ -1995,27 +1995,27 @@ end;
   The parameter symbol's DeclNode is its name inside the `nkGenericParam` group,
   so the constraints are that group's `nkConstraint` children; the first one that
   resolves to a type wins, which matches dcc's own "the members you may use are
-  the ones the constraint guarantees". }
+  the ones the constraint guarantees".
+
+  A method BODY's parameter has no constraints of its own, and that is not a
+  parse gap but the language: `procedure TList<T>.Sort;` may not repeat them
+  (16 §16.4.1 puts them on the declaration, once). The body is also where nearly
+  every use of a constrained parameter lives, so the group is searched first and
+  the DECLARING type's same-named parameter second. }
 function TPasSemaProject.ConstraintOfParamX(
   const AParam: TSemaXType): TSemaXType;
 var
   LM: TPasSemaModel;
-  LDecl, LGroup, LNode, LRef: Integer;
-begin
-  Result := XNil;
-  if not XValid(AParam) then
-    Exit;
-  LM := FModels[AParam.UnitId];
-  LDecl := LM.Symbols[AParam.Sym].DeclNode;
-  if LDecl = NIL_NODE then
-    Exit;
-  LGroup := LM.Tree.Nodes[LDecl].Parent;
-  if (LGroup = NIL_NODE) or (LM.Tree.Nodes[LGroup].Kind <> nkGenericParam) then
-    Exit;
-  LNode := LM.Tree.Nodes[LGroup].FirstChild;
-  while LNode <> NIL_NODE do
+  LDecl, LGroup, LStruct, LIdx, LScope: Integer;
+  LIdents: TArray<Integer>;
+  LCons: TArray<TArray<Integer>>;
+
+  // The first of AGroup's constraints that names a type.
+  function FirstTypeConstraint(const ANodes: TArray<Integer>): TSemaXType;
+  var
+    LNode, LRef: Integer;
   begin
-    if LM.Tree.Nodes[LNode].Kind = nkConstraint then
+    for LNode in ANodes do
     begin
       LRef := LM.Tree.Nodes[LNode].FirstChild;
       while LRef <> NIL_NODE do
@@ -2029,8 +2029,67 @@ begin
         LRef := LM.Tree.Nodes[LRef].NextSibling;
       end;
     end;
-    LNode := LM.Tree.Nodes[LNode].NextSibling;
+    Result := XNil;
   end;
+
+  function OwnConstraints(AGroup: Integer): TArray<Integer>;
+  var
+    LNode: Integer;
+  begin
+    Result := nil;
+    LNode := LM.Tree.Nodes[AGroup].FirstChild;
+    while LNode <> NIL_NODE do
+    begin
+      if LM.Tree.Nodes[LNode].Kind = nkConstraint then
+        Result := Result + [LNode];
+      LNode := LM.Tree.Nodes[LNode].NextSibling;
+    end;
+  end;
+
+begin
+  Result := XNil;
+  if not XValid(AParam) then
+    Exit;
+  LM := FModels[AParam.UnitId];
+  LDecl := LM.Symbols[AParam.Sym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LGroup := LM.Tree.Nodes[LDecl].Parent;
+  if (LGroup = NIL_NODE) or (LM.Tree.Nodes[LGroup].Kind <> nkGenericParam) then
+    Exit;
+  Result := FirstTypeConstraint(OwnConstraints(LGroup));
+  if XValid(Result) then
+    Exit;
+  // Nothing here: this is a method body's `<T>`, and the constraint is on the
+  // type. Match by NAME rather than by position — the body may spell the
+  // parameters differently from the declaration, and dcc binds them positionally
+  // but names them here, so a same-named parameter is the honest link and a
+  // renamed one simply finds nothing rather than the wrong constraint.
+  // Through the SYMBOL's scope, not the node's: a header's generic-parameter
+  // idents are declared into the routine scope but never stamped into
+  // NodeScope, so StructSymOfNode has nothing to walk. The routine scope of a
+  // QUALIFIED implementation carries StructSym (the resolver sets it there when
+  // it binds `TFoo<T>.Bar` to its class), which is exactly the link wanted.
+  LStruct := NIL_SYM;
+  LScope := LM.Symbols[AParam.Sym].Scope;
+  while LScope <> NIL_SCOPE do
+  begin
+    if LM.Scopes[LScope].StructSym <> NIL_SYM then
+    begin
+      LStruct := LM.Scopes[LScope].StructSym;
+      Break;
+    end;
+    LScope := LM.Scopes[LScope].Parent;
+  end;
+  if LStruct = NIL_SYM then
+    Exit;
+  LIdents := GenericParamIdents(AParam.UnitId, LStruct);
+  LCons := GenericParamConstraints(AParam.UnitId, LStruct);
+  for LIdx := 0 to High(LIdents) do
+    if (LIdx <= High(LCons)) and
+       (LM.Tree.NodeNameLower(LIdents[LIdx]) =
+        LM.Symbols[AParam.Sym].NameLower) then
+      Exit(FirstTypeConstraint(LCons[LIdx]));
   Result := XNil;
 end;
 
