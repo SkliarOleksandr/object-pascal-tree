@@ -2672,10 +2672,48 @@ begin
   finally
     GProj.Free;
   end;
+  // The overload shape that made this check unusable: a PRIVATE member sharing
+  // its name with the PUBLIC one people call. `Exception` does exactly this — a
+  // private `class constructor Create` above the public `constructor
+  // Create(const Msg: string)` — and binding used to answer with the chain head,
+  // so every `Create('x')` was refused. The call's selected target is what must
+  // be judged.
+  TFile.WriteAllText(TPath.Combine(LDir, 'VisOver.pas'),
+    'unit VisOver;'#10'interface'#10 +
+    'type'#10 +
+    '  TThing2 = class'#10 +
+    '  private'#10 +
+    '    class constructor Create;'#10 +
+    '  public'#10 +
+    '    constructor Create(AValue: Integer); overload;'#10 +
+    '    procedure Go;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'class constructor TThing2.Create;'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'constructor TThing2.Create(AValue: Integer);'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'procedure TThing2.Go;'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'VisOverUse.pas'),
+    'unit VisOverUse;'#10'interface'#10'uses VisOver;'#10 +
+    'procedure P;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'begin'#10 +
+    '  TThing2.Create(7).Go;'#10 +   // the PUBLIC overload, by argument count
+    'end;'#10 +
+    'end.'#10);
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
     GProj.ReportVisibility := True;
     GProj.AnalyzeDirectory(LDir);
+    Ok('visibility: judged on the SELECTED overload, not the chain head',
+      DiagCount(ModelByName('visoveruse'), 'E2361') = 0);
     // Same unit: only the STRICT one is refused — the friend rule keeps
     // `A.FPriv` legal, and a type's own strict member stays reachable.
     Ok('visibility: strict private is refused even in the declaring unit',

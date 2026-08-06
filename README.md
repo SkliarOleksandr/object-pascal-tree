@@ -438,19 +438,40 @@ Still open, roughly in the order we're tackling it:
   enforcing per-type would reject correct code everywhere; `strict private` is
   refused even there. Both directions are pinned in `SemaProjectSmoke`.
 
-  **And its first measurement is the reason it stays off: 546 reports on
-  rtlflat, 998 on bigflat, 161 on Spring.Base — all one mechanism, and not a
-  visibility mechanism at all.** The top names give it away: `Exception.Create`
-  (475 on bigflat), `TMonitor.Enter`/`Exit`, `TThread.Synchronize`. Each of those
-  types declares a PRIVATE member of that name beside the PUBLIC one people
-  actually call — `Exception` has a private `class constructor Create` at the top
-  of its private section and the public `constructor Create(const Msg: string)`
-  fifteen lines below. Member binding returns the first match in the member
-  scope, arity and class-vs-instance not considered, so the visibility check
-  faithfully refuses a symbol that was never the call's target. So **visibility
-  enforcement is blocked on overload-aware member binding**, not on the
-  visibility rules — which is the third time in this session a strict check has
-  turned out to expose a binding imprecision rather than a real error.
+  **Its first measurement found a BINDING bug rather than visibility errors —
+  546 reports on rtlflat, 998 on bigflat — and fixing that took it to 170 and
+  261.** The top names gave it away: `Exception.Create` (475 on bigflat),
+  `TMonitor.Enter`/`Exit`, `TThread.Synchronize` — each of those types declares a
+  PRIVATE member of that name beside the PUBLIC one people call (`Exception` has a
+  private `class constructor Create` at the top of its private section and the
+  public `constructor Create(const Msg: string)` fifteen lines below). The
+  argument-matched overload was already being SELECTED for every call and recorded
+  in `CallTargetX` for navigation — but `RefMap`/`ExtRefMap` still held the chain
+  HEAD, so anything reading a binding saw the first candidate. Two changes, both
+  2026-08-05:
+
+  - **the callee's binding is re-pointed to the selected overload**
+    (`RepointCallee`, same discipline as `CheckCalls`' own re-point: own model's
+    `RefMap` directly, another model's through the deferred dictionary). The maps
+    now agree with `CallTargetX` instead of contradicting it, which fixes every
+    binding consumer at once and not just this check.
+  - **the visibility check moved out of the cross pass into its own pass after
+    it** (`RunVisibilityPass`). A member's binding is not final while that pass
+    runs — the nkMember node is visited before the enclosing nkCall selects — so a
+    check running inline necessarily judged the head. Any future check that
+    inspects a binding rather than producing one belongs there too.
+
+  Measured effect on the corpora: the only dump lines that move are the `refs:`
+  summaries (bindings shifting between local and cross-unit), the total
+  UNRESOLVED count is identical, and no symbol line changes — 139 572 unresolved
+  before and after on rtlflat. AVImark client still the known 7, server zero.
+
+  What still reports, and it is the honest remainder of the same objective:
+  `TMonitor.Enter` (150 on bigflat) and `TThread.Synchronize` (41), where the
+  private and public members have the SAME arity and only class-vs-instance plus
+  argument TYPES tell them apart — `ScoreCandidate` does not weigh either yet.
+  Plus a tail of field accesses (`TEditButton.FEditControl`, 10) which are not
+  calls at all and so have no selection to read; those need diagnosing one by one.
 
   Still not covered, and each named rather than approximated: `protected` /
   `strict protected` (`E2362`, needs an ancestry walk to answer "is the accessing
@@ -593,11 +614,14 @@ Still open, roughly in the order we're tackling it:
   references; `-visibility`'s 998 are constructor overloads picked first out of a
   member scope. Three checks, three binding gaps, no rule wrong in any of them.
 
-  So the work the switches are waiting on, in the order that unlocks the most:
-  **overload-aware member binding** (arity and class-vs-instance at bind time —
-  it alone unblocks visibility enforcement and would cut the member flood),
-  then **generic-ancestor frames** in the member walk, then **helpers on
-  builtin-typed values**.
+  So the work the switches are waiting on, in the order that unlocks the most.
+  The first item is **half done**: a call's callee is now re-pointed to the
+  argument-matched overload (see the visibility entry — 998 reports became 261),
+  so **arity** is honoured at bind time. What remains of it is
+  **class-vs-instance and argument TYPES in `ScoreCandidate`**, which is what
+  `TMonitor.Enter` needs — its private and public members have the same arity.
+  Then **generic-ancestor frames** in the member walk (the 8 348-report bucket),
+  then **helpers on builtin-typed values**.
 - **Audit coverage, so the next pass knows where to start.** The 2026-07-31
   sweep ran pass 1 (spec → code) over every chapter and pass 2 (code → spec)
   over the member-lookup, property, interface, helper, array and generic

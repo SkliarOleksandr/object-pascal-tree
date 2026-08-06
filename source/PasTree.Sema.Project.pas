@@ -193,6 +193,10 @@ type
     procedure CrossResolve(AId: Integer);
     function StructSymOfNode(AModel: TPasSemaModel; ANode: Integer): Integer;
     procedure CheckVisibility(AId, ANameNode, AMemMid, AMemSym: Integer);
+    procedure RepointCallee(AModel: TPasSemaModel;
+      ACalleeNode, AMid, ASym: Integer;
+      ANewExt: TDictionary<Integer, TPasExtRef>);
+    procedure RunVisibilityPass(AId: Integer);
     function InPropertySpecifier(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function OuterStructsOfNode(AModel: TPasSemaModel;
       ANode, AInnermost: Integer): TArray<Integer>;
@@ -3485,13 +3489,11 @@ var
           begin
             LX[N] := MemberTypeX(AId, LSym, LBX.Inst, LBX);
             LCtxOf[N] := LBX.Inst;
-            CheckVisibility(AId, LName, AId, LSym);
           end
           else if ExtOf(LName, LExt) then
           begin
             LX[N] := MemberTypeX(LExt.UnitId, LExt.Sym, LBX.Inst, LBX);
             LCtxOf[N] := LBX.Inst;
-            CheckVisibility(AId, LName, LExt.UnitId, LExt.Sym);
           end
           else if XValid(LBX) and FindMemberX(AId, LBX,
             LM.Tree.NodeNameLower(LName), LMemMid, LMemSym, LCtx) then
@@ -3507,7 +3509,6 @@ var
             end;
             LX[N] := MemberTypeX(LMemMid, LMemSym, LCtx, LBX);
             LCtxOf[N] := LCtx;
-            CheckVisibility(AId, LName, LMemMid, LMemSym);
           end
           else if FReportMembers and XValid(LBX) and LM.AllUsesResolved and
                   // A member on a VARIANT is late-bound: any name compiles and
@@ -3537,11 +3538,22 @@ var
                   if SelectCallTarget(N, LBase, LMemMid, LMemSym, LCtx,
                     LBestMid, LBestSym) then
                   begin
-                    // Record the argument-matched overload — the future
+                    // Record the argument-matched overload — the
                     // overload-precise navigation jump reads this.
                     LExt.UnitId := LBestMid;
                     LExt.Sym := LBestSym;
                     LM.CallTargetX.AddOrSetValue(N, LExt);
+                    // ...and RE-POINT the callee NAME at it, so the maps agree
+                    // with the selection instead of still holding the chain
+                    // HEAD. Everything that reads a binding rather than
+                    // CallTargetX was otherwise looking at the first candidate:
+                    // `Exception.Create` bound to the PRIVATE `class constructor
+                    // Create` at the top of that class's private section, which
+                    // is how visibility enforcement got 475 false reports on one
+                    // corpus. Same discipline as CheckCalls' own re-point — own
+                    // model's RefMap directly, another model's through the
+                    // deferred dictionary.
+                    RepointCallee(LM, LBase, LBestMid, LBestSym, LNewExt);
                     if IsConstructorSym(LBestMid, LBestSym) and
                        (LM.Tree.Nodes[LBase].Kind = nkMember) then
                       // T.Create / TList<Integer>.Create -> the class itself
@@ -3673,6 +3685,14 @@ begin
     for LIdx := 0 to ACount - 1 do
       for var LPair in FXNewExt[LIdx] do
         FModels[LIdx].ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
+    // Only now are the bindings final — see RunVisibilityPass. No-op unless
+    // ReportVisibility asked for it.
+    if FReportVisibility then
+      ForEachIndex(ACount - 1,
+        procedure(AIdx: Integer)
+        begin
+          RunVisibilityPass(AIdx);
+        end);
   finally
     for LIdx := 0 to ACount - 1 do
       FXNewExt[LIdx].Free;
@@ -3862,6 +3882,42 @@ end;
 // The struct type symbol of the METHOD implementation enclosing ANode, via
 // the scope chain (a local proc inside a method climbs to the method's
 // scope); NIL_SYM when ANode isn't inside any method body.
+{ Points a callee NAME node at ASym — the node RefMap/ExtRefMap are keyed by,
+  which for `A.Create` is the trailing segment and for a bare `Foo` the ident
+  itself. AId's own model is written directly; another model's binding goes into
+  the caller's deferred dictionary, because the cross pass runs one worker per
+  model and only the owner may touch a model's ExtRefMap during it. }
+procedure TPasSemaProject.RepointCallee(AModel: TPasSemaModel;
+  ACalleeNode, AMid, ASym: Integer;
+  ANewExt: TDictionary<Integer, TPasExtRef>);
+var
+  LName: Integer;
+  LExt: TPasExtRef;
+begin
+  LName := ACalleeNode;
+  if AModel.Tree.Nodes[LName].Kind = nkMember then
+  begin
+    LName := AModel.Tree.Nodes[LName].FirstChild;
+    while (LName <> NIL_NODE) and
+          (AModel.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
+      LName := AModel.Tree.Nodes[LName].NextSibling;
+  end;
+  if (LName = NIL_NODE) or (AModel.Tree.Nodes[LName].Kind <> nkIdent) then
+    Exit;
+  if AModel = FModels[AMid] then
+  begin
+    AModel.RefMap[LName] := ASym;
+    Exit;
+  end;
+  AModel.RefMap[LName] := NIL_SYM;
+  LExt.UnitId := AMid;
+  LExt.Sym := ASym;
+  if ANewExt <> nil then
+    ANewExt.AddOrSetValue(LName, LExt)
+  else
+    AModel.ExtRefMap.AddOrSetValue(LName, LExt);
+end;
+
 { 11 §11.2.1, enforcement half: a QUALIFIED access to a private member, reported
   as dcc does — `E2361 Cannot access private symbol TType.Member`.
 
@@ -3887,6 +3943,44 @@ end;
   enum's VALUES are reachable from outside a private type (2 §2.2.4), and a
   strict private nested helper still activates (15 §15.4). Neither is a member
   ACCESS, so neither reaches here. }
+{ Visibility over one model's finished bindings.
+
+  A separate pass, and AFTER the cross-type one on purpose: a member's binding is
+  not final while that pass runs. `Exception.Create` binds to the chain HEAD when
+  the nkMember node is visited and is re-pointed to the argument-matched overload
+  only when the enclosing nkCall is — so a check that ran inline saw the private
+  `class constructor Create` and reported 475 times on one corpus. Reading the
+  maps once everything has settled is the fix, and it is also why this is the only
+  right shape for any check that inspects a BINDING rather than producing one. }
+procedure TPasSemaProject.RunVisibilityPass(AId: Integer);
+var
+  LM: TPasSemaModel;
+  LNode, LBase, LName, LSym: Integer;
+  LExt: TPasExtRef;
+begin
+  if not FReportVisibility then
+    Exit;
+  LM := FModels[AId];
+  if not LM.AllUsesResolved then
+    Exit;   // a missing unit can hide the declaration — the E2003 gate's reason
+  for LNode := 0 to High(LM.Tree.Nodes) do
+  begin
+    if LM.Tree.Nodes[LNode].Kind <> nkMember then
+      Continue;
+    LBase := LM.Tree.Nodes[LNode].FirstChild;
+    if LBase = NIL_NODE then
+      Continue;
+    LName := LM.Tree.Nodes[LBase].NextSibling;
+    if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) then
+      Continue;
+    LSym := LM.RefMap[LName];
+    if LSym <> NIL_SYM then
+      CheckVisibility(AId, LName, AId, LSym)
+    else if LM.ExtRefMap.TryGetValue(LName, LExt) then
+      CheckVisibility(AId, LName, LExt.UnitId, LExt.Sym);
+  end;
+end;
+
 procedure TPasSemaProject.CheckVisibility(AId, ANameNode, AMemMid,
   AMemSym: Integer);
 var
