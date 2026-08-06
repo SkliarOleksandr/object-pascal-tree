@@ -262,23 +262,13 @@ usable.
 
 Still open, roughly in the order we're tackling it:
 
-- **An interface's implicit `IInterface` ancestor is not walked — a FALSE
-  POSITIVE.** The only one either audit pass has produced, so it goes first.
-  14 §14.1.1 already states the rule ("Default ancestor is `IInterface`
-  (≡ `IUnknown`)"); `FindMemberX`'s `nkInterfaceType` path deliberately stops at
-  an interface with no heritage clause, on the reasoning that an interface's
-  members "have to be implemented by the class anyway". That is true of a
-  CLASS's implemented-interface list, which is the entry beside it, and false
-  of a value of interface TYPE.
-
-  dcc-verified: `IFoo = interface procedure Go; end;` then
-  `with I do QueryInterface(G, O)` compiles for dcc and is `E2003
-  Undeclared identifier: 'QueryInterface'` for us. Same for `_AddRef` /
-  `_Release`, and it costs navigation to those members everywhere, not just the
-  `with` form. Invisible on the corpora because the RTL calls them through
-  `Supports`/`as` rather than by name. The fix is the hop the branch above it
-  already makes for `TObject` — redirect to the real `IInterface` and continue
-  — with the same self-reference guard so `IInterface` itself terminates.
+- ~~**An interface's implicit `IInterface` ancestor is not walked.**~~ **Done
+  2026-08-06** — `FindMemberX` makes the same hop for a heritage-less interface
+  that it already made for a heritage-less class (14 §14.1.1: the default
+  ancestor is `IInterface`, or `IDispatch` for a dispinterface), so
+  `with I do QueryInterface(G, O)` resolves. Worth recording that the audit
+  predicted this hop would also clear the WinRT `_AddRef`/`_Release` flood and
+  was WRONG about that — see the constraint entry below for what actually did.
 - ~~**spring4d is a corpus now.**~~ **Clean since 2026-08-05.** Run it like any
   `.dproj` (`Packages\Delphi12\Spring.Base.dproj` and `Spring.Core.dproj`, 73 and
   121 units). Its value was density — a compiling project of ordinary size that
@@ -365,57 +355,56 @@ Still open, roughly in the order we're tackling it:
   container type is KNOWN, the unit's `uses` all resolved, and the site is not in
   an unopened `with`. Off, the analysis is byte-identical.
 
-  On, 2026-08-05, it is a **flood, and the shape of the flood is the finding**:
+  On, 2026-08-05, it was a **flood, and the shape of the flood was the
+  finding** — three mechanisms, not hundreds of cases. Two of the three are
+  closed now, and the remaining reports are dominated by the third:
 
-  | corpus | reports | dominated by |
-  |---|---|---|
-  | rtlflat (403) | 8 348 | WinRT generic-import statics |
-  | bigflat (726) | 8 638 | the same |
-  | AVImark client (3747) | 3 609 | string/Char helpers, DevExpress properties |
-  | Spring.Base (73) | 70 | `TValue`/RTTI helpers, `fPair`, vtable consts |
+  | corpus | 2026-08-05 | 2026-08-06 | now dominated by |
+  |---|---|---|---|
+  | rtlflat (403) | 8 348 | **104** | `Trim`/`ToString`/`Insert` — builtin helpers |
+  | bigflat (726) | 8 638 | **387** | `Length`/`IsEmpty`/`Trim` — the same |
+  | AVImark client (3747) | 3 609 | not re-measured | string/Char helpers, DevExpress properties |
+  | Spring.Base (73) | 70 | **60** | `fPair`, `TValue`/RTTI helpers |
 
-  Three mechanisms account for nearly all of it, and each is one gap rather than
-  hundreds:
+  The three mechanisms, and each is one gap rather than hundreds:
 
-  - **a generic ANCESTOR's member typed by its parameter.** 535 `CreateInstance`
-    + 134 `CreateInstanceWithOwner` + hundreds of `get_XxxProperty` in the WinRT
-    units are all `Statics.X` where `Statics` comes from
-    `TWinRTGenericImportS<S>` and its type IS `S` — so the walk must instantiate
-    the ancestor's frame before it can look inside.
+  - ~~**a generic ANCESTOR's member typed by its parameter.**~~ **Fixed
+    2026-08-06 — and it took the two flat corpora from 8 300 / 8 590 reports to
+    104 / 387.** 535 `CreateInstance` + 134 `CreateInstanceWithOwner` + hundreds
+    of `get_XxxProperty` in the WinRT units are all `Statics.X` where `Statics`
+    comes from `TWinRTGenericImportS<S>` and its type IS `S`.
 
-    Narrowed twice, and it is NOT "frames are missing" — two separate mechanisms
-    were checked and both are present:
+    Both mechanisms the diagnosis had suspected really were present, as the
+    previous session's narrowing said: `AncestorOfX` composes frames,
+    `ResolveTypeExpr`'s `nkTypeArgs` branch creates one for a heritage
+    reference, and the two-unit fixture proved it end to end — the inherited
+    pass typed bare `Statics` as the ARGUMENT (`IController`), frame and all.
+    **The loss was one node later.** `CrossType`'s `nkIdent` branch types an
+    identifier from `RefMap`/`ExtRefMap` — the member's DECLARED type, which for
+    this shape is the open `S` — and never looked at `ExprTypeX`, where the
+    inherited pass had already parked the frame-substituted answer. So the next
+    dot searched an open parameter and gave up. The branch now prefers that
+    answer, gated on what it computed being an open parameter (or nothing), so
+    the common identifier still costs no dictionary lookup on that hot path.
 
-    1. **frame composition** — `AncestorOfX` closes each hop's result over the
-       descendant's own frame (`SubstX(Result, AX.Inst, 0)`), and its comment
-       says `FindMemberX`'s walk does the same one hop at a time;
-    2. **frame CREATION for a heritage reference** — `ResolveTypeExpr`'s
-       `nkTypeArgs` branch calls `Instantiate`, gated on the supplied argument
-       count matching `GenericParamIdents`. `TWinRTGenericImportS<S: IInspectable>`
-       supplies one arg for one parameter, so that gate should pass.
+    The general lesson is the one `TPasInhPending.X` already states and this
+    walk did not honour: **a frame cannot be recovered downstream** — nothing at
+    a node says which hop its member came from — so wherever one pass computed a
+    type WITH a frame, a later pass must read that type rather than re-derive it
+    from the declaration.
 
-    So the next session starts by finding which of those two is not happening in
-    practice, and the two leads are: does `GenericParamIdents` count a parameter
-    GROUP with a constraint (`<S: IInspectable>` — one ident plus an
-    `nkConstraint`) as ONE, and does the constraint hop added on 2026-08-06 now
-    fire BEFORE a frame would have substituted the parameter, masking it? The
-    hop only runs when the walk arrives at a still-open parameter, so it should
-    not — but it is the newest thing in that path and therefore the first to
-    rule out.
-
-    The shape to reproduce is this, CROSS-UNIT:
-    `TWinRTGenericImportS<S: IInspectable> = class(TWinRTImport)` with
-    `class property Statics: S read GetStatics` lives in `System.Win.WinRT.pas`,
-    while `TGpio_GpioController = class(TWinRTGenericImportS<Gpio_IGpioControllerStatics>)`
-    and the failing `Result := Statics.GetDefault` are in `WinAPI.Devices.pas`
-    (line 10188). A two-unit fixture of that shape is the first thing to write;
-    the trace method that cracked `Pointer<T>` (a temporary `Writeln(ErrOutput)`
-    keyed to one name, then the declaration site) is the one that fits here too.
-    Measure with `PasTreeSemaProject <rtlflat> -list -members` and count
-    `CreateInstance`.
-  - **helpers on a builtin-typed value.** `Trim`, `StartsWith`, `PadRight`,
+    Measured: no honest diagnostic moves (rtlflat 0, bigflat its 9 known
+    `F1027`s, Spring.Base 0, suites 859), the only dump lines that change are
+    the `refs:`/`typed exprs:` summaries, unresolved references drop by 8 203 on
+    rtlflat and 8 236 on bigflat, and the clock is unchanged (966–1 000 ms
+    rtlflat, ~1 960 ms bigflat, both before and after).
+  - **helpers on a builtin-typed value** — the one still open, and now the
+    largest single bucket in what is left. `Trim`, `StartsWith`, `PadRight`,
     `ToString`, `IsDigit`, `IsEmpty` — `TStringHelper`/`TCharHelper` members
-    reached through a member chain rather than a bare name.
+    reached through a member chain rather than a bare name. `HelperMemberHit`
+    already runs per hop inside `FindMemberX` and builtin targets are keyed
+    `'~name'` (see the cross-unit helper work), so the question to answer first
+    is whether a builtin-typed base even reaches that lookup with the right key.
   - ~~**`_AddRef` / `_Release` / `QueryInterface`**~~ — **fixed 2026-08-06, and
     NOT by the `IInterface` hop the audit predicted** (that hop was already
     there). The real cause is one line up: `System.Win.WinRT` declares
@@ -670,8 +659,11 @@ Still open, roughly in the order we're tackling it:
   do is REJECT a candidate whose argument types definitely do not fit (a mismatch
   scores 0 rather than -1), which is the next refinement there and wants its own
   measurement, since it can change a selection rather than only break a tie.
-  After that: **generic-ancestor frames** in the member walk (the 8 348-report
-  bucket), then **helpers on builtin-typed values**.
+  The second item, **generic-ancestor frames** in the member walk, is done too
+  (2026-08-06: 8 300 → 104 on rtlflat, and the gap was a later pass re-deriving
+  a type instead of reading the frame-substituted one an earlier pass had
+  already computed). That leaves **helpers on builtin-typed values**, which the
+  measurement now puts at the head of the remaining member reports.
 - **Audit coverage, so the next pass knows where to start.** The 2026-07-31
   sweep ran pass 1 (spec → code) over every chapter and pass 2 (code → spec)
   over the member-lookup, property, interface, helper, array and generic

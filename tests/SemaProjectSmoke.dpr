@@ -2614,6 +2614,75 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { A member reached through a GENERIC ANCESTOR and typed by that ancestor's own
+    parameter — `class property Statics: S` on `TGenericImport<S>`, which is the
+    WinRT shape (`TWinRTGenericImportS<S: IInspectable>` in System.Win.WinRT,
+    used by every `Statics.CreateInstance` in the Winapi.* units).
+
+    Bare `Statics` is found by the inherited pass, which closes its type over the
+    instantiation frame; the next dot has to READ that answer instead of the open
+    `S`. Run with the member check ON, since a member miss is otherwise silent —
+    the binding assertion is the real subject and the diagnostic count is what
+    makes a regression loud. Cross-unit on purpose: that is the failing shape,
+    and it is the ancestor's frame rather than this unit's that matters. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_genanc');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'GABase.pas'),
+    'unit GABase;'#10'interface'#10 +
+    'type'#10 +
+    '  IThing = interface'#10 +
+    '    procedure Go;'#10 +
+    '  end;'#10 +
+    '  TImportBase = class'#10 +
+    '  end;'#10 +
+    '  TGenericImport<S: IThing> = class(TImportBase)'#10 +
+    '    class function GetStatics: S; static;'#10 +
+    '    class property Statics: S read GetStatics;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'class function TGenericImport<S>.GetStatics: S;'#10 +
+    'begin'#10 +
+    '  Result := nil;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'GAUse.pas'),
+    'unit GAUse;'#10'interface'#10'uses GABase;'#10 +
+    'type'#10 +
+    '  IController = interface(IThing)'#10 +
+    '    function GetDefault: Integer;'#10 +
+    '  end;'#10 +
+    '  TController = class(TGenericImport<IController>)'#10 +
+    '    class function Make: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'class function TController.Make: Integer;'#10 +
+    'begin'#10 +
+    '  Result := Statics.GetDefault;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    var LGA := ModelByName('gause');
+    Ok('genanc: GAUse loaded', Assigned(LGA));
+    Ok('genanc: a member of the ancestor''s parameter-typed property resolves',
+      DiagCount(LGA, 'E2003') = 0);
+    Ok('genanc: the property itself comes from the generic ancestor',
+      CrossRefTo(LGA, 'Statics', 'Statics'));
+    // The member is declared in THIS unit (IController is), so the binding the
+    // instantiation argument earns is a LOCAL one — which is exactly the point:
+    // the open `S` could never have led here.
+    Ok('genanc: and its member binds through the instantiation argument',
+      LocalRefCount(LGA, 'GetDefault') = 1);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   { ReportVisibility — the enforcement half of 11.2.1, also opt-in. Every rule
     below is dcc32 37.0-probed, and the SILENT ones carry the weight: `private`
     is visible to the whole declaring UNIT (the friend rule), so enforcing it

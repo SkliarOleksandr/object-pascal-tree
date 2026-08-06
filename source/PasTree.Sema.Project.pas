@@ -3578,6 +3578,24 @@ var
               skType, skBuiltinType:
                 LX[N] := XPlain(LExt.UnitId, LExt.Sym);
             end;
+          // A bare name reached through a GENERIC ancestor is declared in that
+          // ancestor's OPEN parameters — `class property Statics: S` on
+          // `TWinRTGenericImportS<S>` — so the declared type read above IS that
+          // bare `S`. The inherited pass already closed it over the
+          // instantiation frame it found the member in (TPasInhPending.X) and
+          // parked the answer in ExprTypeX; that frame cannot be recovered
+          // here, because nothing at this node says which hop the member came
+          // from. So take that answer when there is one — without it
+          // `Statics.GetDefault` looks its member up in the OPEN parameter and
+          // gives up (535 `CreateInstance` reports in the WinRT units alone).
+          //
+          // Gated on what we computed being an open parameter (or nothing)
+          // rather than probing ExprTypeX for every identifier: that lookup is
+          // on this walk's hot path and the common ident is neither.
+          if (not XValid(LX[N])) or
+             (FModels[LX[N].UnitId].Symbols[LX[N].Sym].Kind = skGenericParam) then
+            if LM.ExprTypeX.TryGetValue(N, LBX) and XValid(LBX) then
+              LX[N] := LBX;
         end;
 
       nkParen:
