@@ -2614,6 +2614,66 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { A helper on a BUILTIN-typed value whose type came from ANOTHER model. Every
+    model seeds its own `string` symbol, so `S.Trim` on a local (this model's
+    seed) and `Give(S).Trim` on a third unit's function result (that unit's
+    seed) are different keys into the helper index — and only the first was
+    registered. Three units because two cannot tell the two keys apart: the
+    helper and the function have to live in DIFFERENT units, neither of them the
+    referring one. The local is asserted beside it so a fix that canonicalized
+    everything to nothing would still fail. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_bihelp');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'BHHelp.pas'),
+    'unit BHHelp;'#10'interface'#10 +
+    'type'#10 +
+    '  TStrHelp = record helper for string'#10 +
+    '    function Trimmed: string;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TStrHelp.Trimmed: string;'#10 +
+    'begin'#10 +
+    '  Result := Self;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'BHMaker.pas'),
+    'unit BHMaker;'#10'interface'#10 +
+    'function Give(const A: string): string;'#10 +
+    'implementation'#10 +
+    'function Give(const A: string): string;'#10 +
+    'begin'#10 +
+    '  Result := A;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'BHUse.pas'),
+    'unit BHUse;'#10'interface'#10'uses BHHelp, BHMaker;'#10 +
+    'procedure P;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var LS: string;'#10 +
+    'begin'#10 +
+    '  LS := LS.Trimmed;'#10 +          // this model's own seed
+    '  LS := Give(LS).Trimmed;'#10 +    // BHMaker's seed
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    var LBH := ModelByName('bhuse');
+    Ok('bihelp: BHUse loaded', Assigned(LBH));
+    Ok('bihelp: a helper answers for a builtin type seeded in ANOTHER model',
+      DiagCount(LBH, 'E2003') = 0);
+    Ok('bihelp: both call sites bind to the helper member',
+      CrossRefCountInUnit(LBH, 'Trimmed', 'Trimmed', 'bhhelp') = 2);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   { A member reached through a GENERIC ANCESTOR and typed by that ancestor's own
     parameter — `class property Statics: S` on `TGenericImport<S>`, which is the
     WinRT shape (`TWinRTGenericImportS<S: IInspectable>` in System.Win.WinRT,

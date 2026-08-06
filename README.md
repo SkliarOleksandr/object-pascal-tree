@@ -356,17 +356,17 @@ Still open, roughly in the order we're tackling it:
   an unopened `with`. Off, the analysis is byte-identical.
 
   On, 2026-08-05, it was a **flood, and the shape of the flood was the
-  finding** — three mechanisms, not hundreds of cases. Two of the three are
-  closed now, and the remaining reports are dominated by the third:
+  finding** — three mechanisms, not hundreds of cases. **All three are closed
+  now**, and what is left is a short tail of unrelated shapes:
 
-  | corpus | 2026-08-05 | 2026-08-06 | now dominated by |
-  |---|---|---|---|
-  | rtlflat (403) | 8 348 | **104** | `Trim`/`ToString`/`Insert` — builtin helpers |
-  | bigflat (726) | 8 638 | **387** | `Length`/`IsEmpty`/`Trim` — the same |
-  | AVImark client (3747) | 3 609 | not re-measured | string/Char helpers, DevExpress properties |
-  | Spring.Base (73) | 70 | **60** | `fPair`, `TValue`/RTTI helpers |
+  | corpus | 2026-08-05 | frames | + builtin helpers | what is left |
+  |---|---|---|---|---|
+  | rtlflat (403) | 8 348 | 104 | **51** | `Create`, `Free`, private fields |
+  | bigflat (726) | 8 638 | 387 | **194** | the same, plus `Text.IsEmpty` (below) |
+  | AVImark client (3747) | 3 609 | not re-measured | | string/Char helpers, DevExpress properties |
+  | Spring.Base (73) | 70 | 60 | **60** | `fPair`, `TValue`/RTTI helpers |
 
-  The three mechanisms, and each is one gap rather than hundreds:
+  The three mechanisms, and each was one gap rather than hundreds:
 
   - ~~**a generic ANCESTOR's member typed by its parameter.**~~ **Fixed
     2026-08-06 — and it took the two flat corpora from 8 300 / 8 590 reports to
@@ -398,13 +398,33 @@ Still open, roughly in the order we're tackling it:
     the `refs:`/`typed exprs:` summaries, unresolved references drop by 8 203 on
     rtlflat and 8 236 on bigflat, and the clock is unchanged (966–1 000 ms
     rtlflat, ~1 960 ms bigflat, both before and after).
-  - **helpers on a builtin-typed value** — the one still open, and now the
-    largest single bucket in what is left. `Trim`, `StartsWith`, `PadRight`,
-    `ToString`, `IsDigit`, `IsEmpty` — `TStringHelper`/`TCharHelper` members
-    reached through a member chain rather than a bare name. `HelperMemberHit`
-    already runs per hop inside `FindMemberX` and builtin targets are keyed
-    `'~name'` (see the cross-unit helper work), so the question to answer first
-    is whether a builtin-typed base even reaches that lookup with the right key.
+  - ~~**helpers on a builtin-typed value.**~~ **Fixed 2026-08-06 — rtlflat 104 →
+    51, bigflat 387 → 194.** `Trim`, `StartsWith`, `ToLower`, `IsEmpty`,
+    `Length`: `TStringHelper`/`TCharHelper` members reached through a chain.
+
+    **A builtin type has no single identity** — every model SEEDS its own
+    `string`, so which symbol a value carries depends on where its type was
+    read. `S.Trim` on a local worked (this model's seed, which is exactly what
+    `BuildHelperMap`'s `Publish` indexes), while `UpperCase(S).Trim` carried
+    System.SysUtils' seed and `Give(S).Trim` a third unit's, and both missed a
+    helper that was active, correctly registered and looked up by the right
+    name. Four probe lines in one program separated those cases in a minute,
+    which is worth more than the fix: the corpus reports named `Trim` and
+    `ToLower` and said nothing about WHICH `string`.
+
+    `HelperMemberHit` now canonicalizes to the referring model's own seed and
+    probes once more. Both guards keep it off the hot path — the retry runs only
+    for a `skBuiltinType` that came from ANOTHER model, and only after the
+    ordinary integer-keyed probe missed. Registering every model's seed up front
+    was the alternative and is quadratic; this pays a name lookup on a miss
+    instead. Clock unchanged (1 962–1 971 ms on bigflat over three runs).
+
+    What the leftovers turned out to be is worth the next session's attention:
+    `Text.IsEmpty` in the FMX canvas units is **not** a helper gap at all —
+    `Text` is a seeded builtin (the FILE type, 10.3) and it beat the enclosing
+    class's own `Text` property, so the base is typed as a file. That is the
+    "a name that is also something else" family again, and this time it is a
+    WRONG BINDING rather than a missing one.
   - ~~**`_AddRef` / `_Release` / `QueryInterface`**~~ — **fixed 2026-08-06, and
     NOT by the `IInterface` hop the audit predicted** (that hop was already
     there). The real cause is one line up: `System.Win.WinRT` declares
@@ -422,12 +442,19 @@ Still open, roughly in the order we're tackling it:
   — 312 `ActiveWorkbook` and 94 `Worksheets` on one real project, 740 reports in
   total, all from OLE automation. That rule is in the check now.
 
-  So the flag has done its job: it converted "the corpora say nothing about
-  member-lookup completeness" into three named mechanisms and a number to beat.
-  The demo now runs with it on for exactly that reason — the number is the work
-  list, and a host that hides it cannot show the list shrinking. The LIBRARY
-  default stays off until those numbers are near zero, because an editor
-  embedding PasTree should not inherit a work list as diagnostics.
+  So the flag did its job: it converted "the corpora say nothing about
+  member-lookup completeness" into three named mechanisms and a number to beat,
+  and two days later all three are closed and the number is 51 / 194. The demo
+  runs with it on for exactly that reason — the number is the work list, and a
+  host that hides it cannot show the list shrinking. The LIBRARY default stays
+  off until those numbers are near zero, because an editor embedding PasTree
+  should not inherit a work list as diagnostics.
+
+  What is left is no longer one shape. On rtlflat: 13 `Create`, 6 `Free`, then
+  private fields (`FWeight`, `FOrder`, `FParams` — all in one FMX family) and
+  singletons. Those want diagnosing one at a time, starting with the two
+  constructor/destructor names, which are the same pair `-visibility`'s own tail
+  is stuck on.
 - **Inline `var`/`const` visibility is not POSITIONAL** — found by the
   spec↔code audit of 2026-07-31, and the only *wrong-binding* defect it turned
   up. 3 §3.1.3: an inline variable is visible "from its declaration to the end
@@ -662,8 +689,17 @@ Still open, roughly in the order we're tackling it:
   The second item, **generic-ancestor frames** in the member walk, is done too
   (2026-08-06: 8 300 → 104 on rtlflat, and the gap was a later pass re-deriving
   a type instead of reading the frame-substituted one an earlier pass had
-  already computed). That leaves **helpers on builtin-typed values**, which the
-  measurement now puts at the head of the remaining member reports.
+  already computed). So is the third, **helpers on builtin-typed values**
+  (rtlflat 104 → 51: a builtin type is seeded PER MODEL, so the helper index was
+  keyed on one `string` and asked about another).
+
+  All three named buckets are therefore closed, and the ordering above has run
+  out of items — which is the point at which the next objective has to come from
+  a fresh measurement rather than from this list. Two candidates the last two
+  sessions produced on their way past: `ScoreCandidate` never rejecting a
+  type-mismatched overload (above), and a seeded builtin name beating a class's
+  own member (`Text.IsEmpty` in FMX) — a WRONG binding, which is the kind this
+  README keeps insisting a diagnostic count cannot see.
 - **Audit coverage, so the next pass knows where to start.** The 2026-07-31
   sweep ran pass 1 (spec → code) over every chapter and pass 2 (code → spec)
   over the member-lookup, property, interface, helper, array and generic

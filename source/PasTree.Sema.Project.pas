@@ -2857,7 +2857,7 @@ function TPasSemaProject.HelperMemberHit(AFromMid: Integer;
   out AMemMid, AMemSym: Integer): Boolean;
 var
   LExt: TPasExtRef;
-  LScope, LFound: Integer;
+  LScope, LFound, LOwn: Integer;
 begin
   Result := False;
   if (AFromMid < 0) or (AFromMid > High(FHelperIdx)) or
@@ -2865,7 +2865,30 @@ begin
     Exit;
   if not FHelperIdx[AFromMid].TryGetValue(
        (Int64(ACur.UnitId) shl 32) or Cardinal(ACur.Sym), LExt) then
-    Exit;
+  begin
+    // A BUILTIN type has no single identity: every model SEEDS its own
+    // `string`/`Integer`/`Char` symbol (PasTree.Sema.Builtins), so which one a
+    // value carries depends on where its type was READ. `S.Trim` on a local
+    // works because the local's type is this model's seed and Publish indexed
+    // exactly that — but `UpperCase(S).Trim` carries System.SysUtils' seed and
+    // `Give(S).Trim` a third unit's, and both missed. That is the whole
+    // `TStringHelper`/`TCharHelper` bucket of the member flag: the helper is
+    // active, the name is right, and the KEY was a different `string`.
+    //
+    // So canonicalize to the referring model's own seed and probe once more.
+    // Both guards keep this off the hot path: the retry costs a name lookup,
+    // and it runs only for a builtin that came from ANOTHER model, after the
+    // ordinary probe has already missed.
+    if (ACur.UnitId = AFromMid) or
+       (FModels[ACur.UnitId].Symbols[ACur.Sym].Kind <> skBuiltinType) then
+      Exit;
+    LOwn := FModels[AFromMid].Resolve(FModels[AFromMid].SystemScope,
+      FModels[ACur.UnitId].Symbols[ACur.Sym].NameLower);
+    if (LOwn = NIL_SYM) or
+       not FHelperIdx[AFromMid].TryGetValue(
+         (Int64(AFromMid) shl 32) or Cardinal(LOwn), LExt) then
+      Exit;
+  end;
   LScope := FModels[LExt.UnitId].Symbols[LExt.Sym].MemberScope;
   if LScope = NIL_SCOPE then
     Exit;
