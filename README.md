@@ -342,15 +342,24 @@ Still open, roughly in the order we're tackling it:
 - **Unresolved MEMBERS after a dot are reported only behind a FLAG**, and the
   first measurement says why it stays there. `O.Read` where the class has no
   `Read` is `E2003` for dcc and silence for us; only unresolved BARE identifiers
-  are diagnosed by default — and that default is deliberate: **error-tolerant is
-  the analyzer's primary mode**, because that is what an editor needs, while a
-  compiler FRONT END needs every unresolved name visible. The switch is what
-  makes both modes available: `TPasSemaProject.ReportUnresolvedMembers`
+  are diagnosed by the LIBRARY by default — and that default is deliberate:
+  **error-tolerant is the analyzer's primary mode**, because that is what an
+  editor embedding it needs, while a compiler FRONT END needs every unresolved
+  name visible. The switch is what makes both modes available:
+  `TPasSemaProject.ReportUnresolvedMembers`
   (`TPasAsyncSession.SetReportUnresolvedMembers` on the background path, CLI
-  `PasTreeSemaProject -members`, and the demo's **Report unresolved members**
-  box beside *Show Errors* — which re-analyzes on click, since unlike *Show
-  Errors* it changes what the analysis produces rather than what is displayed,
-  and is remembered across sessions). It reports at the single place a member
+  `PasTreeSemaProject -members`).
+
+  **The demo turns it on unconditionally**, and there is no checkbox for it: this
+  host's job is to show what the analyzer still gets wrong, and a switch that
+  hides a real gap also hides progress towards closing it. *Show Errors* then
+  means all of them, and stays a pure DISPLAY filter — toggling it re-filters the
+  list instead of costing a re-analysis, which is what a control that changed the
+  analysis would have cost (15 s on the AVImark client). Until member binding is
+  overload- and generic-aware, expect that list to be long and mostly binding
+  gaps; the counts and their three causes are below.
+
+  It reports at the single place a member
   reference is finally given up on — `CrossType`'s `nkMember` branch, after
   `RefMap`, `ExtRefMap` and `FindMemberX` have all failed, and only when the
   container type is KNOWN, the unit's `uses` all resolved, and the site is not in
@@ -388,7 +397,10 @@ Still open, roughly in the order we're tackling it:
 
   So the flag has done its job: it converted "the corpora say nothing about
   member-lookup completeness" into three named mechanisms and a number to beat.
-  It should NOT become a default diagnostic until those numbers are near zero.
+  The demo now runs with it on for exactly that reason — the number is the work
+  list, and a host that hides it cannot show the list shrinking. The LIBRARY
+  default stays off until those numbers are near zero, because an editor
+  embedding PasTree should not inherit a work list as diagnostics.
 - **Inline `var`/`const` visibility is not POSITIONAL** — found by the
   spec↔code audit of 2026-07-31, and the only *wrong-binding* defect it turned
   up. 3 §3.1.3: an inline variable is visible "from its declaration to the end

@@ -209,23 +209,15 @@ object frmMain: TfrmMain
         Top = 6
         Width = 97
         Height = 17
-        Caption = 'Show Errors'
-        TabOrder = 0
-        OnClick = chkShowErrorsClick
-      end
-      object chkMemberErrors: TCheckBox
-        Left = 111
-        Top = 6
-        Width = 210
-        Height = 17
         Hint =
-          'Front-end mode: also report a member after a dot that no lookup c' +
-          'ould resolve. Re-analyzes the project.'
-        Caption = 'Report unresolved members'
+          'Show every diagnostic the analysis produced, including an unresolv' +
+          'ed member after a dot. Filters this list only — nothing is re-anal' +
+          'yzed.'
+        Caption = 'Show Errors'
         ParentShowHint = False
         ShowHint = True
-        TabOrder = 1
-        OnClick = chkMemberErrorsClick
+        TabOrder = 0
+        OnClick = chkShowErrorsClick
       end
     end
     object vtMessages: TVirtualStringTree
