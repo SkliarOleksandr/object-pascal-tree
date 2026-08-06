@@ -1111,12 +1111,17 @@ Still open, roughly in the order we're tackling it:
 
   Three things to decide, and each has a right answer already visible elsewhere
   in this codebase:
-  - *what to show when the click has nowhere to go.* Compiler intrinsics have no
-    source declaration (go-to-declaration routes them to `System.pas`'s header);
-    the hint should say what they ARE — "compiler intrinsic", not a made-up
-    line. Same for `Result`, for a `uses` name (show the resolved FILE), and for
-    the dynamic-array `Create` this session added, which is bound to nothing on
-    purpose.
+  - *what to show when the click has nowhere to go — and the answer is always a
+    WORD, never a blank hint or a made-up line.* An intrinsic says so:
+    `Length — compiler intrinsic`, because it has no source declaration at all
+    (go-to-declaration routes those to `System.pas`'s header, which is a
+    navigation convenience and not where they are declared). An identifier
+    nothing resolves says `<unknown id>`, spelled exactly that way — the user's
+    own wording, and the honest one: this analyzer is error-tolerant by design,
+    so "we could not bind this" is a normal state and worth showing plainly
+    rather than hiding. `Result`, a `uses` name (show the resolved FILE) and the
+    dynamic-array `Create` this session added (bound to nothing on purpose) each
+    need their own word for the same reason.
   - *when a hint is WRONG rather than missing.* The seed-shadowing bug fixed on
     2026-08-06 is the cautionary one: `Text` resolved, to the predefined file
     type instead of the class's property, and nothing reported it. A hint makes
