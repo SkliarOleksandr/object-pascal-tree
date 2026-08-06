@@ -3352,6 +3352,26 @@ var
   var
     LSeen: TArray<TPasExtRef>;
     LBestScore: Integer;
+    LTypeQualified: Boolean;
+
+    // A `class` method — the parser marks the declaration with Aux = 1 (6.1), so
+    // this reads the fact rather than re-deriving it. A CONSTRUCTOR counts too:
+    // `TFoo.Create(...)` is the ordinary way to call one.
+    function CallableOnType(AMid, ACand: Integer): Boolean;
+    var
+      LDecl, LParent: Integer;
+    begin
+      if IsConstructorSym(AMid, ACand) then
+        Exit(True);
+      Result := False;
+      LDecl := FModels[AMid].Symbols[ACand].DeclNode;
+      if LDecl = NIL_NODE then
+        Exit;
+      LParent := FModels[AMid].Tree.Nodes[LDecl].Parent;
+      Result := (LParent <> NIL_NODE) and
+        (FModels[AMid].Tree.Nodes[LParent].Kind = nkRoutine) and
+        (FModels[AMid].Tree.Nodes[LParent].Aux = 1);
+    end;
 
     procedure ConsiderChain(AMid, AHead: Integer);
     var
@@ -3376,7 +3396,10 @@ var
           LRef.UnitId := AMid;
           LRef.Sym := LCand;
           LSeen := LSeen + [LRef];
-          LScore := ScoreCandidate(ACall, AMid, LCand, ACtx);
+          if LTypeQualified and not CallableOnType(AMid, LCand) then
+            LScore := -1   // an instance method, reached through the TYPE
+          else
+            LScore := ScoreCandidate(ACall, AMid, LCand, ACtx);
           if (LScore >= 0) and (LScore > LBestScore) then
           begin
             LBestScore := LScore;
@@ -3390,12 +3413,35 @@ var
 
   var
     LHeads: TArray<TPasExtRef>;
-    LIdx: Integer;
+    LIdx, LQBase, LQSym: Integer;
+    LQExt: TPasExtRef;
   begin
     LSeen := nil;
     LBestScore := -1;
     ABestMid := -1;
     ABestSym := NIL_SYM;
+    // Is the callee qualified by a TYPE (`TMonitor.Enter(X)`) rather than by a
+    // value? Then an INSTANCE method is not a candidate at all, and that is the
+    // only thing separating some overload pairs: System's TMonitor declares a
+    // PRIVATE instance `function Enter(Timeout: Cardinal): Boolean` beside the
+    // public `class procedure Enter(const AObject: TObject)`, same arity, so
+    // argument scores decide nothing whenever the argument's own type is
+    // unknown — and the first candidate, the private one, used to win. 150
+    // false E2361 on bigflat came from this pair alone.
+    LTypeQualified := False;
+    if LM.Tree.Nodes[ACalleeNode].Kind = nkMember then
+    begin
+      LQBase := LM.Tree.Nodes[ACalleeNode].FirstChild;
+      if LQBase <> NIL_NODE then
+      begin
+        LQSym := LM.RefMap[LQBase];
+        if LQSym <> NIL_SYM then
+          LTypeQualified := LM.Symbols[LQSym].Kind in [skType, skBuiltinType]
+        else if LM.ExtRefMap.TryGetValue(LQBase, LQExt) then
+          LTypeQualified := FModels[LQExt.UnitId].Symbols[LQExt.Sym].Kind in
+            [skType, skBuiltinType];
+      end;
+    end;
     ConsiderChain(AHeadMid, AHeadSym);
     // Merge used units' candidates only for a bare unit-level routine name —
     // methods and nested routines have a closed candidate set (their scope).

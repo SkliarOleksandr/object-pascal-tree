@@ -466,12 +466,22 @@ Still open, roughly in the order we're tackling it:
   UNRESOLVED count is identical, and no symbol line changes — 139 572 unresolved
   before and after on rtlflat. AVImark client still the known 7, server zero.
 
-  What still reports, and it is the honest remainder of the same objective:
-  `TMonitor.Enter` (150 on bigflat) and `TThread.Synchronize` (41), where the
-  private and public members have the SAME arity and only class-vs-instance plus
-  argument TYPES tell them apart — `ScoreCandidate` does not weigh either yet.
-  Plus a tail of field accesses (`TEditButton.FEditControl`, 10) which are not
-  calls at all and so have no selection to read; those need diagnosing one by one.
+  **Then class-vs-instance took it to 52 and 111.** A callee qualified by a TYPE
+  (`TMonitor.Enter(X)`) cannot mean an INSTANCE method, and that alone separated
+  the pair arity and argument scores could not: System's `TMonitor` declares a
+  private instance `function Enter(Timeout: Cardinal): Boolean` beside the public
+  `class procedure Enter(const AObject: TObject)` — same arity, so whenever the
+  argument's own cross-type is unknown both score zero and the first candidate,
+  the private one, won. `TMonitor.Enter` went from 150 reports to 2. The test is
+  cheap and needs no new bookkeeping: the parser already marks a `class` method
+  with `Aux = 1` on its `nkRoutine` (6.1), and a CONSTRUCTOR counts as callable
+  on the type because `TFoo.Create(...)` is how one is called.
+
+  What still reports: `TThread.Synchronize` (41 on bigflat) plus a tail of FIELD
+  accesses (`TEditButton.FEditControl`, 10) and constructor cases
+  (`TButton.Create`, 7). A field is not a call, so there is no selection to read
+  — those need diagnosing one at a time, and they are what a future session should
+  start from rather than from a new rule.
 
   Still not covered, and each named rather than approximated: `protected` /
   `strict protected` (`E2362`, needs an ancestry walk to answer "is the accessing
@@ -615,13 +625,15 @@ Still open, roughly in the order we're tackling it:
   member scope. Three checks, three binding gaps, no rule wrong in any of them.
 
   So the work the switches are waiting on, in the order that unlocks the most.
-  The first item is **half done**: a call's callee is now re-pointed to the
-  argument-matched overload (see the visibility entry — 998 reports became 261),
-  so **arity** is honoured at bind time. What remains of it is
-  **class-vs-instance and argument TYPES in `ScoreCandidate`**, which is what
-  `TMonitor.Enter` needs — its private and public members have the same arity.
-  Then **generic-ancestor frames** in the member walk (the 8 348-report bucket),
-  then **helpers on builtin-typed values**.
+  The first item is **done**: a call's callee is re-pointed to the
+  argument-matched overload, and a type-qualified callee no longer considers
+  instance methods — 998 visibility reports on bigflat became 111 in two steps.
+  Argument TYPES were already weighed by `ScoreCandidate`; what it still does not
+  do is REJECT a candidate whose argument types definitely do not fit (a mismatch
+  scores 0 rather than -1), which is the next refinement there and wants its own
+  measurement, since it can change a selection rather than only break a tie.
+  After that: **generic-ancestor frames** in the member walk (the 8 348-report
+  bucket), then **helpers on builtin-typed values**.
 - **Audit coverage, so the next pass knows where to start.** The 2026-07-31
   sweep ran pass 1 (spec → code) over every chapter and pass 2 (code → spec)
   over the member-lookup, property, interface, helper, array and generic
