@@ -359,13 +359,13 @@ Still open, roughly in the order we're tackling it:
   finding** — three mechanisms, not hundreds of cases. **All three are closed
   now**, and what is left is a short tail of unrelated shapes:
 
-  | corpus | 2026-08-05 | frames | + builtin helpers | + body constraints | what is left |
-  |---|---|---|---|---|---|
-  | rtlflat (403) | 8 348 | 104 | 51 | **23** | `Create`, `Free`, singletons |
-  | bigflat (726) | 8 638 | 387 | 194 | **162** | the same, plus `Text.IsEmpty` (below) |
-  | BuildWinRTL (317) | — | — | 51 | **23** | the rtlflat tail, one package |
-  | AVImark client (3747) | 3 609 | not re-measured | | | string/Char helpers, DevExpress properties |
-  | Spring.Base (73) | 70 | 60 | 60 | **60** | `fPair`, `TValue`/RTTI helpers |
+  | corpus | 2026-08-05 | frames | + builtin helpers | + body constraints | + `Create`/`Free` | what is left |
+  |---|---|---|---|---|---|---|
+  | rtlflat (403) | 8 348 | 104 | 51 | 23 | **6** | `HasName` ×2, `FromBytes` ×2, 2 singletons |
+  | bigflat (726) | 8 638 | 387 | 194 | 162 | **136** | `Index`, `Length`, `Text.IsEmpty` (below) |
+  | BuildWinRTL (317) | — | — | 51 | 23 | **5** | the rtlflat tail, one package |
+  | AVImark client (3747) | 3 609 | not re-measured | | | | string/Char helpers, DevExpress properties |
+  | Spring.Base (73) | 70 | 60 | 60 | 60 | **60** | `fPair`, `TValue`/RTTI helpers |
 
   The three mechanisms, and each was one gap rather than hundreds:
 
@@ -455,6 +455,26 @@ Still open, roughly in the order we're tackling it:
     declared into the routine scope but never stamped into `NodeScope`, so
     `StructSymOfNode` had nothing to walk), and parameters are matched by NAME,
     so a body that renames them finds nothing rather than the wrong constraint.
+  - ~~**`Create` and `Free`, the tail after those three.**~~ **Fixed 2026-08-06 —
+    rtlflat 23 → 6, the RTL package 23 → 5.** Two unrelated rules wearing one
+    pair of names, and the spec had neither, so both were settled by dcc probes
+    and both are now written down (§8.2.3 is new; §16.4.1 grew the table):
+
+    - **`T: class` guarantees TObject's members.** §16.4.1 listed the constraint
+      KINDS and never said which members each makes reachable, which is the only
+      question a member lookup asks. `V.Free` compiles under a bare `T: class`
+      and is `E2003` under `T: record` or a lone `T: constructor` — so exactly
+      one kind keyword answers a type, and `TObjectList<T: class>.Notify`'s
+      `Value.Free` was the RTL's whole `Free` bucket.
+    - **A dynamic array type has a `Create` pseudo-constructor.** `TBytes
+      .Create($EF, $BB, $BF)` builds the array and no `Create` is declared
+      anywhere — there is no member to bind, so this is typed (as the array,
+      like any constructor) and deliberately left unbound. The two negatives are
+      what make it safe, and both are dcc's: a STATIC array and a VARIABLE
+      qualifier are `E2671`. Aliases hide the shape (`TBytes` is `TArray<Byte>`
+      is `array of T`), and the seeded `TBytes`/`TArray` have no declaration at
+      all, so the test follows the alias chain and answers from the seed's
+      category when it runs out.
 
   One refinement the flag earned immediately: **a member on a `Variant` is never
   reported**, because late binding makes any name compile and dcc checks nothing
@@ -469,11 +489,10 @@ Still open, roughly in the order we're tackling it:
   off until those numbers are near zero, because an editor embedding PasTree
   should not inherit a work list as diagnostics.
 
-  What is left is no longer one shape. On rtlflat: 12 `Create`, 5 `Free`, then
-  `HasName`, `FromBytes`, `ToString`, `Wrap` — singletons and pairs. Those want
-  diagnosing one at a time, starting with `Create`/`Free`, which are the same
-  pair `-visibility`'s own tail is stuck on and therefore likely one cause for
-  both checks.
+  What is left on rtlflat is six reports: `HasName` ×2, `FromBytes` ×2,
+  `ToString`, `Wrap`. bigflat's 136 are a longer tail of the same kind, led by
+  `Index` (20), `Length` (15) and the `Text` binding bug below. There is no
+  bucket left to name — from here it is one site at a time.
 - **Inline `var`/`const` visibility is not POSITIONAL** — found by the
   spec↔code audit of 2026-07-31, and the only *wrong-binding* defect it turned
   up. 3 §3.1.3: an inline variable is visible "from its declaration to the end
@@ -717,13 +736,20 @@ Still open, roughly in the order we're tackling it:
   (rtlflat 51 → 23). The list is out of named items, so the next objective comes
   from reading the tail rather than from here. What the tail says today:
 
-  - `Create` (12 on rtlflat) and `Free` (5) — also the pair `-visibility`'s own
-    tail is stuck on, so one cause probably answers both checks;
+  - ~~`Create` (12 on rtlflat) and `Free` (5)~~ — **done the same day, and they
+    were two unrelated rules sharing a pair of names** (rtlflat 23 → 6): a
+    `class` constraint guarantees TObject's members, and a dynamic array type
+    has a `Create` pseudo-constructor. Both were spec gaps, now filled — this is
+    the first tail item where the spec had to be WRITTEN before the code could
+    be, and both probes are in it;
   - a seeded builtin name beating a class's own member — `Text.IsEmpty` in the
     FMX canvases, where `Text` is the predefined FILE type. A WRONG binding,
     which is the kind this README keeps insisting a diagnostic count cannot see;
   - `ScoreCandidate` never REJECTING a type-mismatched overload (above), which
-    is a selection change and wants its own measurement.
+    is a selection change and wants its own measurement;
+  - on rtlflat there are exactly six member reports left, so that corpus can no
+    longer drive this — `bigflat`'s 136 and the AVImark client are the ones with
+    anything to say.
 - **Audit coverage, so the next pass knows where to start.** The 2026-07-31
   sweep ran pass 1 (spec → code) over every chapter and pass 2 (code → spec)
   over the member-lookup, property, interface, helper, array and generic

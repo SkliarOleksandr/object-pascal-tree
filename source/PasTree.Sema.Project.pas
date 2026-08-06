@@ -286,6 +286,7 @@ type
     function TypeSlotByNameX(AMid, ANode: Integer): TSemaXType;
     function IsGenericTypeSym(AMid, ASym: Integer): Boolean;
     function ClassRefTargetX(const AX: TSemaXType): TSemaXType;
+    function IsDynArrayTypeX(const AX: TSemaXType): Boolean;
     function ResolveTypeExprNested(AId, ANode: Integer): TSemaXType;
     procedure BuildHelperMap;
     procedure ClearHelperIdx;
@@ -1988,9 +1989,11 @@ begin
 end;
 
 { The TYPE a generic parameter is constrained to, or XNil when it has no type
-  constraint — `F: IInspectable` answers IInspectable, `T: class` and
-  `T: constructor` answer nothing, since neither names a type whose members
-  could be reached.
+  constraint — `F: IInspectable` answers IInspectable, and `T: class` answers
+  TObject, because "a reference type" (16 §16.4.1) means one, and dcc agrees:
+  `V.Free` and `V.ClassName` compile under a bare `T: class`. The other two kind
+  constraints answer nothing, and that is dcc's line too — under `T: record` or
+  a lone `T: constructor` the same `V.Free` is `E2003`, all three probed.
 
   The parameter symbol's DeclNode is its name inside the `nkGenericParam` group,
   so the constraints are that group's `nkConstraint` children; the first one that
@@ -2032,6 +2035,23 @@ var
     Result := XNil;
   end;
 
+  { The `class` KIND constraint, as TObject. A kind constraint adopts no child
+    (the parser consumes the keyword), so the node's own text is what tells the
+    three apart — and only `class` names a type at all. Routed through
+    ResolveRealDecl like every other implicit-TObject hop, so it finds the real
+    System.pas declaration rather than a seeded stub. }
+  function ClassConstraintX(const ANodes: TArray<Integer>): TSemaXType;
+  var
+    LNode, LRMid, LRSym: Integer;
+  begin
+    Result := XNil;
+    for LNode in ANodes do
+      if (LM.Tree.Nodes[LNode].FirstChild = NIL_NODE) and
+         SameText(LM.Tree.NodeText(LNode), 'class') and
+         ResolveRealDecl(AParam.UnitId, 'tobject', LRMid, LRSym) then
+        Exit(XPlain(LRMid, LRSym));
+  end;
+
   function OwnConstraints(AGroup: Integer): TArray<Integer>;
   var
     LNode: Integer;
@@ -2057,7 +2077,12 @@ begin
   LGroup := LM.Tree.Nodes[LDecl].Parent;
   if (LGroup = NIL_NODE) or (LM.Tree.Nodes[LGroup].Kind <> nkGenericParam) then
     Exit;
-  Result := FirstTypeConstraint(OwnConstraints(LGroup));
+  var LOwn := OwnConstraints(LGroup);
+  // A named type outranks the `class` keyword: `T: TItem, class` guarantees
+  // TItem's members, which are a superset of TObject's.
+  Result := FirstTypeConstraint(LOwn);
+  if not XValid(Result) then
+    Result := ClassConstraintX(LOwn);
   if XValid(Result) then
     Exit;
   // Nothing here: this is a method body's `<T>`, and the constraint is on the
@@ -2089,7 +2114,12 @@ begin
     if (LIdx <= High(LCons)) and
        (LM.Tree.NodeNameLower(LIdents[LIdx]) =
         LM.Symbols[AParam.Sym].NameLower) then
-      Exit(FirstTypeConstraint(LCons[LIdx]));
+    begin
+      Result := FirstTypeConstraint(LCons[LIdx]);
+      if not XValid(Result) then
+        Result := ClassConstraintX(LCons[LIdx]);
+      Exit;
+    end;
   Result := XNil;
 end;
 
@@ -2460,6 +2490,69 @@ begin
           FModels[LCur.UnitId].Tree.Nodes[LDef].FirstChild));
       nkIdent, nkMember, nkTypeArgs:
         LCur := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
+    else
+      Exit;
+    end;
+  end;
+end;
+
+{ Is AX a DYNAMIC array, after following aliases? `TBytes` is `TArray<Byte>` is
+  `array of T`, so the answer takes a walk rather than a TypeCat test — and the
+  distinction from a STATIC array is the whole point: only the dynamic one has
+  the pseudo-constructor below. A dimension list makes the array static, so the
+  test is "exactly one child, the element type"; `array of const` (Aux = 1) has
+  no child at all and is not one either. }
+function TPasSemaProject.IsDynArrayTypeX(const AX: TSemaXType): Boolean;
+var
+  LCur: TSemaXType;
+  LDef, LChild, LCount, LDepth, LRMid, LRSym: Integer;
+  LM: TPasSemaModel;
+begin
+  Result := False;
+  LCur := AX;
+  for LDepth := 1 to 8 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LM := FModels[LCur.UnitId];
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if LDef = NIL_NODE then
+    begin
+      // A SEEDED array type (`TArray`, `TBytes` — PasTree.Sema.Builtins) has no
+      // declaration to walk, and every seed of that category is a dynamic
+      // array. Answering from the category is also what makes this work in a
+      // model that never used System.SysUtils, where the real TBytes is not
+      // reachable at all. The redirect below is still tried first for anything
+      // else with no def node, the same hop FindMemberX makes for TObject.
+      if LM.Symbols[LCur.Sym].TypeCat = tcArray then
+        Exit(True);
+      if ResolveRealDecl(LCur.UnitId, LM.Symbols[LCur.Sym].NameLower,
+           LRMid, LRSym) and
+         ((LRMid <> LCur.UnitId) or (LRSym <> LCur.Sym)) then
+      begin
+        LCur.UnitId := LRMid;
+        LCur.Sym := LRSym;
+        LCur.Inst := NIL_INST;
+        Continue;
+      end;
+      Exit;
+    end;
+    case LM.Tree.Nodes[LDef].Kind of
+      nkIdent, nkMember, nkTypeArgs:
+        LCur := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
+      nkArrayType:
+        begin
+          if LM.Tree.Nodes[LDef].Aux = 1 then
+            Exit;
+          LCount := 0;
+          LChild := LM.Tree.Nodes[LDef].FirstChild;
+          while LChild <> NIL_NODE do
+          begin
+            Inc(LCount);
+            LChild := LM.Tree.Nodes[LChild].NextSibling;
+          end;
+          Exit(LCount = 1);
+        end;
     else
       Exit;
     end;
@@ -3379,6 +3472,24 @@ var
     Result := LNewExt.TryGetValue(N, AExt) or LM.ExtRefMap.TryGetValue(N, AExt);
   end;
 
+  // Does N name a TYPE rather than a value? Same question SelectCallTarget's
+  // own class-vs-instance test asks, and the same two maps answer it.
+  function IsTypeDesignator(N: Integer): Boolean;
+  var
+    LSym: Integer;
+    LExt: TPasExtRef;
+  begin
+    // `TArray<TGUID>` names a type by construction and binds no symbol of its
+    // own — neither map has anything for the nkTypeArgs node itself.
+    if LM.Tree.Nodes[N].Kind = nkTypeArgs then
+      Exit(True);
+    LSym := LM.RefMap[N];
+    if LSym <> NIL_SYM then
+      Exit(LM.Symbols[LSym].Kind in [skType, skBuiltinType]);
+    Result := ExtOf(N, LExt) and
+      (FModels[LExt.UnitId].Symbols[LExt.Sym].Kind in [skType, skBuiltinType]);
+  end;
+
   // A node's best-known type: this pass's result, else the intra-unit one.
   function GetX(N: Integer): TSemaXType;
   begin
@@ -3722,6 +3833,25 @@ var
             end;
             LX[N] := MemberTypeX(LMemMid, LMemSym, LCtx, LBX);
             LCtxOf[N] := LCtx;
+          end
+          // A DYNAMIC ARRAY's pseudo-constructor: `TBytes.Create($EF, $BB)`
+          // builds the array, and there is no member symbol anywhere to bind
+          // — the compiler makes it up. dcc-probed in both directions: legal
+          // with arguments and with none, `E2671 Record, object, class type,
+          // or type helper required` for a STATIC array and for a VARIABLE
+          // qualifier, which is why the type test and the type-QUALIFIER test
+          // are both here. 11 of the RTL package's remaining reports were this
+          // one form (`TBytes`, `TCharArray`, `TArray<TGUID>`).
+          //
+          // Typed like any other constructor — as the type itself — so the
+          // expression is not merely un-reported but right: `Length(TBytes
+          // .Create(...))` needs an array, not nothing. No binding is recorded,
+          // since there is nothing to navigate to.
+          else if XValid(LBX) and SameText(LM.Tree.NodeText(LName), 'create') and
+                  IsTypeDesignator(LBase) and IsDynArrayTypeX(LBX) then
+          begin
+            LX[N] := LBX;
+            LCtxOf[N] := LBX.Inst;
           end
           else if FReportMembers and XValid(LBX) and LM.AllUsesResolved and
                   // A member on a VARIANT is late-bound: any name compiles and

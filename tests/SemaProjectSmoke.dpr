@@ -2614,6 +2614,89 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { The two shapes the RTL's `Create`/`Free` tail turned out to be, both
+    dcc32 37.0-probed and both stated by the probe rather than by the spec:
+
+    - `T: class` guarantees TObject's members (`V.Free`, `V.ClassName` compile);
+      `T: record` and a lone `T: constructor` do NOT — the same `V.Free` is
+      `E2003` under either, so only the `class` keyword answers a type here;
+    - a DYNAMIC array type has a pseudo-constructor (`TBytes.Create($20, $20)`,
+      also with no arguments at all). A STATIC array and a VARIABLE qualifier
+      are both `E2671`, which is why the negative cases are asserted too — and
+      the seeded `TBytes` is exercised beside a locally-declared array, since
+      the seed has no declaration to walk.
+
+    The negatives are silence, so each is paired with a live report in the same
+    unit: without one, a rule that suppressed everything would pass. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_ctorfree');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  // TObject in a fixture unit, for the reason UnitIfaceBase gives: this suite
+  // analyses a temp directory whose only search path is itself, and the hop
+  // goes through ResolveRealDecl, which searches USED units — never this one.
+  TFile.WriteAllText(TPath.Combine(LDir, 'CFSys.pas'),
+    'unit CFSys;'#10'interface'#10 +
+    'type'#10 +
+    '  TObject = class'#10 +
+    '    procedure Free;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TObject.Free;'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CFUse.pas'),
+    'unit CFUse;'#10'interface'#10'uses CFSys;'#10 +
+    'type'#10 +
+    '  TMyArr = array of Byte;'#10 +
+    '  TStat = array[0..1] of Byte;'#10 +
+    '  TClassOnly<T: class> = class'#10 +
+    '    procedure Use(const V: T);'#10 +
+    '  end;'#10 +
+    '  TRecOnly<T: record> = class'#10 +
+    '    procedure Use(const V: T);'#10 +
+    '  end;'#10 +
+    'procedure P;'#10 +
+    'implementation'#10 +
+    'procedure TClassOnly<T>.Use(const V: T);'#10 +
+    'begin'#10 +
+    '  V.Free;'#10 +                     // TObject through `class`
+    'end;'#10 +
+    'procedure TRecOnly<T>.Use(const V: T);'#10 +
+    'begin'#10 +
+    '  V.Free;'#10 +                     // dcc: E2003 — and so do we
+    'end;'#10 +
+    'procedure P;'#10 +
+    'var'#10 +
+    '  LA: TMyArr;'#10 +
+    '  LB: TBytes;'#10 +
+    '  LS: TStat;'#10 +
+    'begin'#10 +
+    '  LA := TMyArr.Create(1, 2);'#10 +  // a declared dynamic array
+    '  LB := TBytes.Create(1);'#10 +     // the SEEDED one
+    '  LA := TMyArr.Create();'#10 +      // no arguments
+    '  LS := TStat.Create(1, 2);'#10 +   // dcc: E2671 — we report the member
+    '  LA := LA.Create(1);'#10 +         // a VARIABLE qualifier, likewise
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    var LCF := ModelByName('cfuse');
+    Ok('ctorfree: CFUse loaded', Assigned(LCF));
+    // Three left: the record-constrained Free and the two illegal Creates.
+    Ok('ctorfree: `class` answers TObject and the other kinds do not',
+      DiagCount(LCF, 'E2003') = 3);
+    Ok('ctorfree: the surviving report is the record-constrained Free',
+      DiagHasText(LCF, 'E2003', 'Free'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   { A constrained parameter used inside a method BODY. 16 §16.4.1 puts the
     constraints on the declaration and dcc forbids repeating them on the
     implementation header — `procedure TListBase<T>.Add;` — so the body's own
