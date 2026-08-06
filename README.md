@@ -383,11 +383,27 @@ Still open, roughly in the order we're tackling it:
     `TWinRTGenericImportS<S>` and its type IS `S` — so the walk must instantiate
     the ancestor's frame before it can look inside.
 
-    Narrowed on 2026-08-05, and narrower than "frames are missing": the frame
-    composition already exists — `AncestorOfX` closes each hop's result over the
-    descendant's own frame (`SubstX(Result, AX.Inst, 0)`) and its comment says
-    `FindMemberX`'s walk does the same one hop at a time. So the gap is somewhere
-    more specific, and the shape to reproduce is exactly this, CROSS-UNIT:
+    Narrowed twice, and it is NOT "frames are missing" — two separate mechanisms
+    were checked and both are present:
+
+    1. **frame composition** — `AncestorOfX` closes each hop's result over the
+       descendant's own frame (`SubstX(Result, AX.Inst, 0)`), and its comment
+       says `FindMemberX`'s walk does the same one hop at a time;
+    2. **frame CREATION for a heritage reference** — `ResolveTypeExpr`'s
+       `nkTypeArgs` branch calls `Instantiate`, gated on the supplied argument
+       count matching `GenericParamIdents`. `TWinRTGenericImportS<S: IInspectable>`
+       supplies one arg for one parameter, so that gate should pass.
+
+    So the next session starts by finding which of those two is not happening in
+    practice, and the two leads are: does `GenericParamIdents` count a parameter
+    GROUP with a constraint (`<S: IInspectable>` — one ident plus an
+    `nkConstraint`) as ONE, and does the constraint hop added on 2026-08-06 now
+    fire BEFORE a frame would have substituted the parameter, masking it? The
+    hop only runs when the walk arrives at a still-open parameter, so it should
+    not — but it is the newest thing in that path and therefore the first to
+    rule out.
+
+    The shape to reproduce is this, CROSS-UNIT:
     `TWinRTGenericImportS<S: IInspectable> = class(TWinRTImport)` with
     `class property Statics: S read GetStatics` lives in `System.Win.WinRT.pas`,
     while `TGpio_GpioController = class(TWinRTGenericImportS<Gpio_IGpioControllerStatics>)`
