@@ -273,6 +273,7 @@ type
     function GenericParamConstraints(AMid,
       ASym: Integer): TArray<TArray<Integer>>;
     function RealGenericBase(const AX: TSemaXType): TSemaXType;
+    function ConstraintOfParamX(const AParam: TSemaXType): TSemaXType;
     function XDescendsFrom(const ADesc, ABase: TSemaXType): Boolean;
     procedure CheckConstraints(AId: Integer);
     function DeclTypeX(AMid, ASym: Integer): TSemaXType;
@@ -1986,6 +1987,53 @@ begin
   end;
 end;
 
+{ The TYPE a generic parameter is constrained to, or XNil when it has no type
+  constraint — `F: IInspectable` answers IInspectable, `T: class` and
+  `T: constructor` answer nothing, since neither names a type whose members
+  could be reached.
+
+  The parameter symbol's DeclNode is its name inside the `nkGenericParam` group,
+  so the constraints are that group's `nkConstraint` children; the first one that
+  resolves to a type wins, which matches dcc's own "the members you may use are
+  the ones the constraint guarantees". }
+function TPasSemaProject.ConstraintOfParamX(
+  const AParam: TSemaXType): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LDecl, LGroup, LNode, LRef: Integer;
+begin
+  Result := XNil;
+  if not XValid(AParam) then
+    Exit;
+  LM := FModels[AParam.UnitId];
+  LDecl := LM.Symbols[AParam.Sym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LGroup := LM.Tree.Nodes[LDecl].Parent;
+  if (LGroup = NIL_NODE) or (LM.Tree.Nodes[LGroup].Kind <> nkGenericParam) then
+    Exit;
+  LNode := LM.Tree.Nodes[LGroup].FirstChild;
+  while LNode <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LNode].Kind = nkConstraint then
+    begin
+      LRef := LM.Tree.Nodes[LNode].FirstChild;
+      while LRef <> NIL_NODE do
+      begin
+        if LM.Tree.Nodes[LRef].Kind in [nkIdent, nkMember, nkTypeArgs] then
+        begin
+          Result := ResolveTypeExpr(AParam.UnitId, LRef);
+          if XValid(Result) then
+            Exit;
+        end;
+        LRef := LM.Tree.Nodes[LRef].NextSibling;
+      end;
+    end;
+    LNode := LM.Tree.Nodes[LNode].NextSibling;
+  end;
+  Result := XNil;
+end;
+
 { Class-inheritance test across models: is ADesc ABase, or a descendant of it?
   Follows the FIRST heritage entry (the ancestor) and the implicit TObject,
   the same walk FindMemberX uses, depth-capped for the same reason. }
@@ -2856,6 +2904,25 @@ begin
     if not XValid(LCur) then
       Exit;
     LM := FModels[LCur.UnitId];
+    if LM.Symbols[LCur.Sym].Kind = skGenericParam then
+    begin
+      // A value whose type is an UNBOUND type parameter still has the members
+      // its CONSTRAINT guarantees (16 §16.4.1): `class var FFactory: F` with
+      // `F: IInspectable` reaches `_AddRef` through IInspectable's own
+      // IInterface ancestor and through nothing else. The walk used to stop at
+      // the parameter, which is 40 false E2003 in System.Win.WinRT alone —
+      // every `_AddRef`/`QueryInterface` on one of those factory fields.
+      //
+      // The parameter's own frame is dropped deliberately: a constraint is
+      // written in the DECLARING scope, so the instantiation that bound this
+      // parameter says nothing about it.
+      LNext := ConstraintOfParamX(LCur);
+      if not XValid(LNext) or
+         ((LNext.UnitId = LCur.UnitId) and (LNext.Sym = LCur.Sym)) then
+        Exit;
+      LCur := LNext;
+      LM := FModels[LCur.UnitId];
+    end;
     if not (LM.Symbols[LCur.Sym].Kind in [skType, skBuiltinType]) then
       Exit;
     // The ACTIVE helper for the current hop's type, before the type's own

@@ -400,9 +400,17 @@ Still open, roughly in the order we're tackling it:
   - **helpers on a builtin-typed value.** `Trim`, `StartsWith`, `PadRight`,
     `ToString`, `IsDigit`, `IsEmpty` — `TStringHelper`/`TCharHelper` members
     reached through a member chain rather than a bare name.
-  - **`_AddRef` / `_Release` / `QueryInterface`** — 30 in rtlflat, exactly the
-    `IInterface` hole the audit named above and the flag's first confirmation
-    that the hole is real in ordinary code, not just in a probe.
+  - ~~**`_AddRef` / `_Release` / `QueryInterface`**~~ — **fixed 2026-08-06, and
+    NOT by the `IInterface` hop the audit predicted** (that hop was already
+    there). The real cause is one line up: `System.Win.WinRT` declares
+    `class var FFactory: F` with `F: IInspectable`, so the walk arrived at a
+    generic PARAMETER and stopped, having no rule for one. 16 §16.4.1 says what
+    it should do — a value typed by an unbound parameter has the members its
+    CONSTRAINT guarantees — and from `IInspectable` the existing interface hop
+    reaches `IInterface` and those three names. 48 reports gone (all `_AddRef`
+    and `_Release`, 39 of 40 `QueryInterface`), the frame is deliberately dropped
+    on the hop because a constraint is written in the DECLARING scope, and the
+    surviving `QueryInterface` is a different shape still to look at.
 
   One refinement the flag earned immediately: **a member on a `Variant` is never
   reported**, because late binding makes any name compile and dcc checks nothing

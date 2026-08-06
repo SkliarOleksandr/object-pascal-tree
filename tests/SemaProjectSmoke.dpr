@@ -2729,6 +2729,49 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { 16.4.1: a value typed by an unbound type PARAMETER has the members its
+    CONSTRAINT guarantees. System.Win.WinRT's `class var FFactory: F` with
+    `F: IInspectable` is the shape — every `FFactory._AddRef` there was a false
+    E2003 until the walk hopped to the constraint. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_constraint');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ConHost.pas'),
+    'unit ConHost;'#10'interface'#10 +
+    'type'#10 +
+    '  IThing = interface'#10 +
+    '    procedure Go;'#10 +
+    '  end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ConUse.pas'),
+    'unit ConUse;'#10'interface'#10'uses ConHost;'#10 +
+    'type'#10 +
+    '  TBox<T: IThing> = class'#10 +
+    '    class var FIt: T;'#10 +
+    '    class procedure Run;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'class procedure TBox<T>.Run;'#10 +
+    'begin'#10 +
+    '  FIt.Go;'#10 +          // the constraint's member
+    '  FIt.Nope;'#10 +        // not on the constraint either
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    Ok('constraint: a parameter-typed value reaches its constraint''s members',
+      DiagCount(ModelByName('conuse'), 'E2003') = 1);
+    Ok('constraint: ...and only those', DiagHasText(ModelByName('conuse'),
+      'E2003', 'Nope'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   Writeln(Format('=== SemaProjectSmoke: %d passed, %d failed ===',
     [GPassed, GFailed]));
   if GFailed > 0 then
