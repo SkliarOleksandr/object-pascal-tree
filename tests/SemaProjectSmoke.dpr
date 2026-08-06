@@ -2614,6 +2614,64 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { A compiler-SEEDED name shadowed by an INHERITED member. dcc-probed both
+    ways: a class with a `Text` property compiles `Text.IsEmpty` in a method
+    body — the member beats the predefined FILE type — and `var F: Text;` in
+    that same body is `E2007`, so the member wins in a type position too.
+
+    This is a WRONG binding rather than a missing one, so the assertion that
+    matters is where `Text` POINTS, not the diagnostic count: with the seed
+    winning, `Text` still "resolved" and only the member after the dot failed.
+    The control is a seeded name with no member of that name in sight, which
+    must still bind to the seed. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_seedshadow');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SSBase.pas'),
+    'unit SSBase;'#10'interface'#10 +
+    'type'#10 +
+    '  TBase = class'#10 +
+    '  private'#10 +
+    '    FText: TObject;'#10 +
+    '  public'#10 +
+    '    property Text: TObject read FText;'#10 +   // shadows the FILE seed
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SSUse.pas'),
+    'unit SSUse;'#10'interface'#10'uses SSBase;'#10 +
+    'type'#10 +
+    '  TDesc = class(TBase)'#10 +
+    '    function Use: TObject;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TDesc.Use: TObject;'#10 +
+    'var'#10 +
+    '  LI: Integer;'#10 +                           // a seed with no rival
+    'begin'#10 +
+    '  LI := 0;'#10 +
+    '  Result := Text;'#10 +
+    '  if LI = 0 then Result := nil;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    var LSS := ModelByName('ssuse');
+    Ok('seedshadow: SSUse loaded', Assigned(LSS));
+    Ok('seedshadow: the inherited property beats the predefined `Text`',
+      CrossRefTo(LSS, 'Text', 'Text'));
+    Ok('seedshadow: a seed with no member of that name is left alone',
+      LocalRefCount(LSS, 'Integer') = 1);
+    Ok('seedshadow: and nothing new is reported', DiagCount(LSS, 'E2003') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   { The two shapes the RTL's `Create`/`Free` tail turned out to be, both
     dcc32 37.0-probed and both stated by the probe rather than by the spec:
 

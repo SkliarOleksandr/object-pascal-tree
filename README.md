@@ -359,13 +359,18 @@ Still open, roughly in the order we're tackling it:
   finding** — three mechanisms, not hundreds of cases. **All three are closed
   now**, and what is left is a short tail of unrelated shapes:
 
-  | corpus | 2026-08-05 | frames | + builtin helpers | + body constraints | + `Create`/`Free` | what is left |
-  |---|---|---|---|---|---|---|
-  | rtlflat (403) | 8 348 | 104 | 51 | 23 | **6** | `HasName` ×2, `FromBytes` ×2, 2 singletons |
-  | bigflat (726) | 8 638 | 387 | 194 | 162 | **136** | `Index`, `Length`, `Text.IsEmpty` (below) |
-  | BuildWinRTL (317) | — | — | 51 | 23 | **5** | the rtlflat tail, one package |
-  | AVImark client (3747) | 3 609 | not re-measured | | | | string/Char helpers, DevExpress properties |
-  | Spring.Base (73) | 70 | 60 | 60 | 60 | **60** | `fPair`, `TValue`/RTTI helpers |
+  | corpus | 2026-08-05 | frames | + builtin helpers | + body constraints | + `Create`/`Free` | + seed shadowing | what is left |
+  |---|---|---|---|---|---|---|---|
+  | rtlflat (403) | 8 348 | 104 | 51 | 23 | 6 | **6** | `HasName` ×2, `FromBytes` ×2, 2 singletons |
+  | bigflat (726) | 8 638 | 387 | 194 | 162 | 136 | **110** | `Index`, `Coord`, `Length` |
+  | BuildWinRTL (317) | — | — | 51 | 23 | 5 | **5** | the rtlflat tail, one package |
+  | AVImark client (3747) | 3 609 | not re-measured | | | | | string/Char helpers, DevExpress properties |
+  | Spring.Base (73) | 70 | 60 | 60 | 60 | 60 | **60** | `fPair`, `TValue`/RTTI helpers |
+
+  rtlflat's last column is the one to read carefully: the seed-shadowing fix
+  changed 14 of its dump lines and none of its six reports. A wrong binding
+  costs no diagnostic — that is the whole reason this table cannot be the only
+  measurement.
 
   The three mechanisms, and each was one gap rather than hundreds:
 
@@ -742,13 +747,36 @@ Still open, roughly in the order we're tackling it:
     has a `Create` pseudo-constructor. Both were spec gaps, now filled — this is
     the first tail item where the spec had to be WRITTEN before the code could
     be, and both probes are in it;
-  - a seeded builtin name beating a class's own member — `Text.IsEmpty` in the
-    FMX canvases, where `Text` is the predefined FILE type. A WRONG binding,
-    which is the kind this README keeps insisting a diagnostic count cannot see;
+  - ~~a seeded builtin name beating a class's own member~~ — **done 2026-08-06,
+    bigflat 136 → 110, and the point of it is the reports it did NOT change.**
+    `Text` is a predefined FILE type (10 §10.3) and also an inherited property
+    on FMX's `TTextLayout`; dcc gives the member precedence throughout the
+    method body (`Text.IsEmpty` compiles, and `var F: Text;` there is `E2007` —
+    it wins in a TYPE position too, both probed and now in 11 §11.4). We bound
+    the seed, so the name RESOLVED and only the member after the dot failed:
+    a wrong binding produces no diagnostic of its own, which is why the fix
+    shows up in the dumps (14 unit summaries move on rtlflat, whose report count
+    does not budge) rather than in a count.
+
+    The inherited pass already re-decided nodes that arrive bound — that is how
+    a unit reference loses to a member — so this is one more kind admitted to
+    that queue. The reason it was not there already is written in the old
+    comment: queueing every seed-bound identifier measured **+3.6%**, since
+    `Length` and `Integer` are seed-bound in every method body. Two attempts to
+    filter by NAME were both net losses (RTL member names overlap the intrinsics
+    heavily, and the name test itself allocated); what worked is memoizing the
+    MISSES per worker on an integer key — `(struct, the symbol it is bound to)`,
+    no string built, no lock — which is **+1.2%**, and the difference from the
+    +16% memo this file's history records is exactly that key.
+
+    Known and deliberate imprecision: the walk ignores visibility, so a
+    `private` ancestor member in another unit — invisible to dcc — can win here.
+    That is the same imprecision `-visibility` exists to measure, not a new one,
+    and its numbers did not move (52 / 111).
   - `ScoreCandidate` never REJECTING a type-mismatched overload (above), which
     is a selection change and wants its own measurement;
   - on rtlflat there are exactly six member reports left, so that corpus can no
-    longer drive this — `bigflat`'s 136 and the AVImark client are the ones with
+    longer drive this — `bigflat`'s 110 and the AVImark client are the ones with
     anything to say.
 - **Audit coverage, so the next pass knows where to start.** The 2026-07-31
   sweep ran pass 1 (spec → code) over every chapter and pass 2 (code → spec)

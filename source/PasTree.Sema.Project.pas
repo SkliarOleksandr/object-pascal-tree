@@ -5525,7 +5525,9 @@ begin
     else if ((LM.RefMap[LNode] = NIL_SYM) and
              not LM.ExtRefMap.ContainsKey(LNode)) or
             ((LM.RefMap[LNode] <> NIL_SYM) and
-             (LM.Symbols[LM.RefMap[LNode]].Kind = skUnitRef)) then
+             ((LM.Symbols[LM.RefMap[LNode]].Kind = skUnitRef) or
+              ((sfBuiltin in LM.Symbols[LM.RefMap[LNode]].Flags) and
+               (StructSymOfNode(LM, LNode) <> NIL_SYM)))) then
     begin
       // Safe to bake in here: CrossResolve has finished, and nothing between
       // this scan and the inherited pass can bind one of these.
@@ -5669,14 +5671,18 @@ procedure TPasSemaProject.CrossResolveInherited(AId: Integer;
   var APending: TArray<TPasInhPending>);
 var
   LModel: TPasSemaModel;
-  LNode, LStruct, LUid, LSym, LCtx, LMatchNode, LWIdx: Integer;
+  LNode, LStruct, LUid, LSym, LCtx, LMatchNode, LWIdx, LBound: Integer;
   LPend: TPasInhPending;
   LFound: Boolean;
   LNameLower: string;
+  LMiss: TDictionary<Int64, Byte>;
+  LKey: Int64;
 begin
   APending := nil;
   LModel := FModels[AId];
   EnsureCrossWork(AId);
+  LMiss := TDictionary<Int64, Byte>.Create;
+  try
   // Candidates only — kind, scope, A.B-member and not-in-a-with-body were all
   // decided by that single scan (see EnsureCrossWork).
   for LWIdx := 0 to High(FInhWork[AId]) do
@@ -5692,6 +5698,21 @@ begin
     LStruct := StructSymOfNode(LModel, LNode);
     if LStruct = NIL_SYM then
       Continue;
+    // A node that ARRIVES BOUND is here for the shadowing retry, and its
+    // answer is almost always "no, the binding stands" — `Length`, `Copy` and
+    // every other intrinsic used in a method body asks the same question over
+    // and over. Remember the misses, keyed by (struct, the symbol it is bound
+    // to): two integers, so no string is built and nothing is allocated, which
+    // is the whole difference from the memo this file's history records at
+    // +16%. Per worker, and one worker owns one model, so no lock either.
+    LBound := LModel.RefMap[LNode];
+    LKey := 0;
+    if LBound <> NIL_SYM then
+    begin
+      LKey := (Int64(LStruct) shl 32) or Cardinal(LBound);
+      if LMiss.ContainsKey(LKey) then
+        Continue;
+    end;
     LNameLower := LModel.Tree.NodeNameLower(LNode);
     if (LNameLower = 'result') or (LNameLower = 'self') then
       Continue;
@@ -5715,12 +5736,22 @@ begin
     // suppressed the override below, which is why that change alone did nothing.
     if not LFound and (QualifierUnitAt(AId, LNode, LMatchNode) >= 0) then
       Continue;
-    // A UNIT-REFERENCE binding is here to be OVERRIDDEN, not gap-filled: it has
-    // a binding already, the uses/System fallbacks would only re-find the same
-    // unit, and with no inherited member Phase 1's answer simply stands. No
-    // diagnostic either way.
-    if (LModel.RefMap[LNode] <> NIL_SYM) and
-       (LModel.Symbols[LModel.RefMap[LNode]].Kind = skUnitRef) then
+    // An ALREADY-BOUND node is here to be OVERRIDDEN, not gap-filled: the
+    // uses/System fallbacks would only re-find what Phase 1 already found, and
+    // with no inherited member its answer simply stands. No diagnostic either
+    // way. Two kinds reach this pass bound (see EnsureCrossWork):
+    //
+    // - a UNIT reference, because a bare unit name is never a value and an
+    //   inherited member outranks it (`uses VirtualTrees.Header` in a class
+    //   that also has a `Header` property);
+    // - a compiler SEED, for the same reason one step further out. dcc-probed:
+    //   a class with a `Text` property compiles `Text.IsEmpty` in its method
+    //   body — the member beats the predefined FILE type — and `var F: Text;`
+    //   in that same body is `E2007`, so the member wins in a TYPE position
+    //   too. FMX's canvases are full of the first form (`TTextLayout.Text`),
+    //   and binding the seed there is a WRONG binding, not a missing one: it
+    //   sends ctrl+click to nothing and types the expression as a file.
+    if LBound <> NIL_SYM then
     begin
       if LFound then
       begin
@@ -5729,7 +5760,9 @@ begin
         LPend.Ext.Sym := LSym;
         LPend.X := XNil;
         APending := APending + [LPend];
-      end;
+      end
+      else
+        LMiss.AddOrSetValue(LKey, 0);
       Continue;
     end;
     if LFound or
@@ -5756,6 +5789,9 @@ begin
     end
     else if LModel.AllUsesResolved then
       EmitE2003(LModel, LNode);
+    end;
+  finally
+    LMiss.Free;
   end;
 end;
 
