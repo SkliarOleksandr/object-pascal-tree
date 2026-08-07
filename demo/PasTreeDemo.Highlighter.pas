@@ -615,6 +615,24 @@ begin
         // and this marks exactly that token.
         if ATree.Nodes[LIdx].Aux >= 0 then
           MarkVisibleRange(ATree.Nodes[LIdx].Aux, ATree.Nodes[LIdx].Aux);
+      nkPackage:
+        // A `.dpk`'s three head words are directives too (B.4.2), not reserved
+        // ones, so the lexer hands them over as identifiers and they were the
+        // only part of a package file left uncoloured. `package` is this node's
+        // own first token...
+        MarkVisibleRange(ATree.Nodes[LIdx].FirstToken,
+          ATree.Nodes[LIdx].FirstToken);
+      nkUsesClause:
+        // ...and `requires`/`contains` are the first token of the clause the
+        // parser builds for each (the same node kind a unit's `uses` gets,
+        // which is why the parent decides). In a UNIT this would land on the
+        // reserved `uses`, where marking changes nothing — IsWeakKeyword is
+        // consulted for identifier tokens only — but the test keeps the intent
+        // readable rather than relying on that.
+        if (ATree.Nodes[LIdx].Parent <> NIL_NODE) and
+           (ATree.Nodes[ATree.Nodes[LIdx].Parent].Kind = nkPackage) then
+          MarkVisibleRange(ATree.Nodes[LIdx].FirstToken,
+            ATree.Nodes[LIdx].FirstToken);
     end;
 end;
 

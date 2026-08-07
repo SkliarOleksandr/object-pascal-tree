@@ -212,9 +212,10 @@ usable.
   `TSynCustomHighlighter` driven by PasTree's own lexer/preprocessor/parser,
   not a regex approximation: keyword/identifier/number/string/comment/
   directive/BASM coloring, context-sensitive "weak keyword" coloring (`read`,
-  `deprecated`, visibility words, routine directives...) that only lights up
-  where the AST actually proves them to be directives, `$IFDEF`'d-out code
-  greyed out like the real IDE, and ctrl+hover link rendering.
+  `deprecated`, visibility words, routine directives, a package's `package` /
+  `requires` / `contains`...) that only lights up where the AST actually proves
+  them to be directives, `$IFDEF`'d-out code greyed out like the real IDE, and
+  ctrl+hover link rendering.
 - **Go-to-declaration** (ctrl+click) — parity target is "any identifier
   navigates exactly like the real IDE does," and the current matrix covers:
   local and cross-unit declarations, member access through inheritance/

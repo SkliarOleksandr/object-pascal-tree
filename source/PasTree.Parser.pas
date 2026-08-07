@@ -2892,8 +2892,11 @@ begin
   else
     if LP.IsWord('package') then
       begin
-        // 'package' is a directive (B.4.2), not a reserved word.
-        LRoot := LP.FB.AddNode(nkPackage, NIL_NODE, 0);
+        // 'package' is a directive (B.4.2), not a reserved word. Its own token
+        // index, not 0: a consumer that colours weak keywords marks the node's
+        // FIRST token, and 0 only happens to be right while nothing may precede
+        // the word.
+        LRoot := LP.FB.AddNode(nkPackage, NIL_NODE, LP.FPos);
         LP.Next;
         LP.FB.Adopt(LRoot, LP.ParseQualifiedName);
         LP.Expect(tkSemicolon, '";"');

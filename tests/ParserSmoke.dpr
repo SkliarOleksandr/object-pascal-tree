@@ -189,6 +189,57 @@ begin
   end;
 end;
 
+{ A package's three head words are DIRECTIVES (B.4.2), not reserved ones, so
+  the lexer hands them over as identifiers and only the tree says they are
+  keywords here. What a highlighter needs is their token INDEX: the nkPackage
+  node's own first token for `package`, and each clause's first token for
+  `requires`/`contains`. Asserted as the token TEXT at those indices, which is
+  what makes a wrong index readable instead of merely unequal — and `package`
+  used to be recorded as token 0, right only while nothing precedes the word. }
+procedure CheckPackageHeadTokens;
+const
+  SRC =
+    '{ a comment ahead of the head word }'#13#10 +
+    'package MyPack;'#13#10 +
+    'requires rtl, vcl;'#13#10 +
+    'contains UnitA in ''UnitA.pas'', UnitB;'#13#10 +
+    'end.'#13#10;
+var
+  LPre: TPasPreprocessed;
+  LDiags: TArray<TPasParseDiag>;
+  LTree: TPasTree;
+  LIdx: Integer;
+  LPkg, LReq, LCon: Boolean;
+begin
+  LPre := GPP.ProcessText('mypack.dpk', SRC);
+  LTree := TPasParser.ParseFile(LPre, LDiags);
+  LPkg := False;
+  LReq := False;
+  LCon := False;
+  for LIdx := 0 to High(LTree.Nodes) do
+    case LTree.Nodes[LIdx].Kind of
+      nkPackage:
+        LPkg := SameText(LPre.VisibleText(LTree.Nodes[LIdx].FirstToken),
+          'package');
+      nkUsesClause:
+        if SameText(LPre.VisibleText(LTree.Nodes[LIdx].FirstToken),
+             'requires') then
+          LReq := LTree.Nodes[LIdx].Aux = 1   // Aux marks requires, not contains
+        else if SameText(LPre.VisibleText(LTree.Nodes[LIdx].FirstToken),
+             'contains') then
+          LCon := LTree.Nodes[LIdx].Aux <> 1;
+    end;
+  if LPkg and LReq and LCon and (Length(LDiags) = 0) then
+    Inc(GPassed)
+  else
+  begin
+    Inc(GFailed);
+    Writeln('FAIL package head tokens');
+    Writeln('  package: ', LPkg, ', requires: ', LReq, ', contains: ', LCon,
+      ', parse diags: ', Length(LDiags));
+  end;
+end;
+
 procedure CheckAllPlatforms;
 const
   SNIPPET =
@@ -499,6 +550,7 @@ begin
     CheckIncludeContext;
     CheckMultilineIndent;
     CheckOutParamAux;
+    CheckPackageHeadTokens;
 
     Writeln;
     Writeln(Format('=== ParserSmoke: %d passed, %d failed ===',
