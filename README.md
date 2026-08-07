@@ -498,26 +498,26 @@ Still open, roughly in the order we're tackling it:
   `ToString`, `Wrap`. bigflat's 136 are a longer tail of the same kind, led by
   `Index` (20), `Length` (15) and the `Text` binding bug below. There is no
   bucket left to name — from here it is one site at a time.
-- **Inline `var`/`const` visibility is not POSITIONAL** — found by the
-  spec↔code audit of 2026-07-31, and the only *wrong-binding* defect it turned
-  up. 3 §3.1.3: an inline variable is visible "from its declaration to the end
-  of the enclosing block", so the resolver "must track declaration order, not
-  just the block". `TPasSemaResolver.Collect`'s `nkBlock` case gives each
-  `begin..end` its own scope — which correctly stops sibling blocks colliding —
-  but inside one block a name is visible ABOVE its own declaration.
+- ~~**Inline `var`/`const` visibility is not POSITIONAL.**~~ **Done 2026-07-31**
+  (`TPasSemaModel.ResolveAt`/`DeclaredAfter`) — the entry outlived the fix and is
+  corrected here on 2026-08-07, the second one in this list to do that. 3 §3.1.3
+  scopes an inline variable "from its declaration to the end of the enclosing
+  block", and only a REFERENCE lookup consults the position, for `sckBlock`
+  scopes alone, so everything the language keeps order-independent stays that
+  way. The comparison is on the visible-stream token index, monotonic in source
+  order across include boundaries.
 
-  dcc-verified probe: a unit-level `GName: string`, then in a body
-  `LI := GName;` followed by `var GName: Integer := 0;`. dcc binds the first
-  reference to the unit-level string and reports `E2010`; we bind it to the
-  inline `Integer` and report nothing.
+  Re-probed against dcc32 37.0 on 2026-08-07, five shapes, and we match on all
+  five: a reference above the declaration binds OUTWARD (`E2010`), an inline
+  var's own INITIALIZER still sees the outer name (`var GX: Integer := GX + 1`
+  compiles), a nested block's inline name does not leak out, inline `const`
+  follows the same rule, and with no outer name at all the earlier reference is
+  `E2003`.
 
-  It is worth fixing despite costing no false positive, for the reason the
-  audit-method note gives: a WRONG binding is invisible to a diagnostic count.
-  Here it also sends ctrl+click to the wrong declaration, which is a headline
-  feature of the demo. The fix needs a position on the symbol and a
-  position-aware lookup for `sckBlock` scopes only — the for-header exception
-  (§5.5.1) must keep working, and classic `var` sections must stay
-  order-independent.
+  One dcc diagnostic we do NOT emit, and it is a missing check rather than a
+  wrong binding: dcc adds `E2004 Identifier redeclared` at the inline
+  declaration when a reference above it already resolved the name in that block.
+  Belongs with the other missing checks below if it is ever worth having.
 - **Member visibility is recorded but not ENFORCED.** Recording landed on
   2026-07-31 — `CollectStruct` tracks the section as it walks and stamps every
   symbol a child declares, `automated` included (kept distinct from
