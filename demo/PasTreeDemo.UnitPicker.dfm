@@ -2,8 +2,8 @@ object frmUnitPicker: TfrmUnitPicker
   Left = 0
   Top = 0
   Caption = 'View Unit'
-  ClientHeight = 800
-  ClientWidth = 800
+  ClientHeight = 561
+  ClientWidth = 484
   Color = clBtnFace
   Font.Charset = DEFAULT_CHARSET
   Font.Color = clWindowText
@@ -16,13 +16,13 @@ object frmUnitPicker: TfrmUnitPicker
   TextHeight = 15
   object sbStatus: TStatusBar
     Left = 0
-    Top = 781
-    Width = 800
+    Top = 542
+    Width = 484
     Height = 19
     Panels = <
       item
         Text = 'units'
-        Width = 220
+        Width = 150
       end
       item
         Text = 'project'
@@ -31,25 +31,28 @@ object frmUnitPicker: TfrmUnitPicker
   end
   object pnlButtons: TPanel
     Left = 0
-    Top = 736
-    Width = 800
-    Height = 45
+    Top = 506
+    Width = 484
+    Height = 36
     Align = alBottom
     BevelOuter = bvNone
     ShowCaption = False
     TabOrder = 2
+    DesignSize = (
+      484
+      36)
     object chkUses: TCheckBox
       Left = 8
-      Top = 13
-      Width = 140
+      Top = 9
+      Width = 81
       Height = 21
       Caption = 'Uses Units'
       TabOrder = 0
       OnClick = chkUsesClick
     end
     object btnOK: TButton
-      Left = 584
-      Top = 9
+      Left = 274
+      Top = 3
       Width = 100
       Height = 27
       Anchors = [akTop, akRight]
@@ -59,8 +62,8 @@ object frmUnitPicker: TfrmUnitPicker
       OnClick = btnOKClick
     end
     object btnCancel: TButton
-      Left = 692
-      Top = 9
+      Left = 380
+      Top = 3
       Width = 100
       Height = 27
       Anchors = [akTop, akRight]
@@ -72,14 +75,14 @@ object frmUnitPicker: TfrmUnitPicker
   end
   object edFilter: TEdit
     AlignWithMargins = True
-    Left = 8
-    Top = 8
-    Width = 784
+    Left = 4
+    Top = 4
+    Width = 476
     Height = 23
-    Margins.Left = 8
-    Margins.Top = 8
-    Margins.Right = 8
-    Margins.Bottom = 4
+    Margins.Left = 4
+    Margins.Top = 4
+    Margins.Right = 4
+    Margins.Bottom = 2
     Align = alTop
     TabOrder = 0
     TextHint = 'Filter'
@@ -88,17 +91,17 @@ object frmUnitPicker: TfrmUnitPicker
   end
   object lbUnits: TListBox
     AlignWithMargins = True
-    Left = 8
-    Top = 39
-    Width = 784
-    Height = 693
-    Margins.Left = 8
-    Margins.Top = 4
-    Margins.Right = 8
-    Margins.Bottom = 4
+    Left = 4
+    Top = 31
+    Width = 476
+    Height = 473
+    Margins.Left = 4
+    Margins.Top = 2
+    Margins.Right = 4
+    Margins.Bottom = 2
+    Style = lbOwnerDrawFixed
     Align = alClient
     ItemHeight = 38
-    Style = lbOwnerDrawFixed
     TabOrder = 1
     OnClick = lbUnitsClick
     OnDblClick = lbUnitsDblClick
