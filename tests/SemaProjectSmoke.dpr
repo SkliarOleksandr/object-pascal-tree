@@ -2809,6 +2809,92 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { The four shapes FMX's member tail turned out to be, all in one fixture
+    because all four are about a name whose meaning the QUALIFIER decides:
+
+    - a NESTED type as a type ARGUMENT (`TMsg<TModel.TInfo>`). Nothing binds
+      that last segment cross-unit this early, and losing one argument loses
+      the whole instantiation FRAME — with it every member of a field typed by
+      the parameter. 82 of the FMX package's 89 reports were
+      `Message.Value.<anything>` through exactly this.
+    - a NESTED type as a member QUALIFIER (`TModel.TItems.Create(1, 2)`, where
+      `TItems = TArray<Integer>`). A dotted name binds on its last segment, so
+      the "is this a type?" test read nothing and the dynamic-array
+      pseudo-constructor did not apply.
+    - the RE-EXPORT idiom, `X = X` inside a class: the right side means the
+      OUTER X, since a declaration cannot alias itself. dcc-probed. Bound to
+      itself, the alias is a type whose definition is itself, and its members
+      are therefore nothing.
+    - a member NAME that collides with a compiler SEED (`Model.Text`, where
+      `Text` is the predefined FILE type). A seed is never anyone's member, so
+      a binding that says otherwise is to be corrected rather than trusted. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_qualified');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'QHost.pas'),
+    'unit QHost;'#10'interface'#10 +
+    'type'#10 +
+    '  TMode = (None, AllLocal);'#10 +
+    '  TModel = class'#10 +
+    '  public type'#10 +
+    '    TInfo = record'#10 +
+    '      Index: Integer;'#10 +
+    '    end;'#10 +
+    '    TItems = TArray<Integer>;'#10 +
+    '    TMode = TMode;'#10 +          // the re-export idiom
+    '  public'#10 +
+    '    Text: string;'#10 +           // collides with the seeded FILE type
+    '  end;'#10 +
+    '  TMsg<T> = record'#10 +
+    '    Value: T;'#10 +
+    '  end;'#10 +
+    // The suite analyses a bare temp directory, so System.SysUtils is not
+    // there and TStringHelper with it: the string helper the last assertion
+    // needs has to be declared here, or `IsEmpty` would have nowhere to
+    // resolve for a reason that has nothing to do with the rule.
+    '  TStrHelp = record helper for string'#10 +
+    '    function IsEmpty: Boolean;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TStrHelp.IsEmpty: Boolean;'#10 +
+    'begin Result := Self = ''''; end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'QUse.pas'),
+    'unit QUse;'#10'interface'#10'uses QHost;'#10 +
+    'procedure P(var M: TMsg<TModel.TInfo>; const AModel: TModel);'#10 +
+    'implementation'#10 +
+    'procedure P(var M: TMsg<TModel.TInfo>; const AModel: TModel);'#10 +
+    'var'#10 +
+    '  LItems: TModel.TItems;'#10 +
+    '  LMode: TModel.TMode;'#10 +
+    'begin'#10 +
+    '  M.Value.Index := 1;'#10 +               // through the instantiation frame
+    '  LItems := TModel.TItems.Create(1, 2);'#10 +  // dyn-array pseudo-ctor
+    '  LMode := TModel.TMode.AllLocal;'#10 +   // the re-exported enum's value
+    '  if AModel.Text.IsEmpty then'#10 +       // the seed-named member's helper
+    '    Exit;'#10 +
+    '  if Length(LItems) = 0 then Exit;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    var LQ := ModelByName('quse');
+    Ok('qualified: QUse loaded', Assigned(LQ));
+    Ok('qualified: all four qualifier shapes resolve',
+      DiagCount(LQ, 'E2003') = 0);
+    Ok('qualified: the frame reaches the nested type''s own member',
+      CrossRefTo(LQ, 'Index', 'Index'));
+    Ok('qualified: the re-exported alias yields the OUTER enum''s value',
+      CrossRefTo(LQ, 'AllLocal', 'AllLocal'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   { A PARAMETERLESS function reference is CALLED when its name is written, so
     `.Member` after it belongs to the RESULT: `ValueFunc.GetValue` where
     `ValueFunc: TFunc<IValue>` means `ValueFunc().GetValue`

@@ -2801,6 +2801,19 @@ begin
         while LArgNode <> NIL_NODE do
         begin
           LArg := ResolveTypeExpr(AId, LArgNode);
+          // A type ARGUMENT may be a NESTED type named through its outer type
+          // (`TDispatchMessageWithValue<TCustomMemoModel.TLineInfo>`, FMX), and
+          // nothing binds that last segment this early — the same gap the
+          // HERITAGE case has, and the same helper answers it. Reached only
+          // after the plain lookup missed, so the common argument pays nothing.
+          //
+          // Losing one argument loses the whole FRAME (Exit(LBase) below), and
+          // with it every member of a field typed by the parameter: 82 of the
+          // FMX package's 89 member reports were `Message.Value.<anything>`
+          // through exactly this.
+          if not XValid(LArg) and
+             (LM.Tree.Nodes[LArgNode].Kind = nkMember) then
+            LArg := ResolveTypeExprNested(AId, LArgNode);
           if not XValid(LArg) then
             Exit(LBase);
           LArgs := LArgs + [LArg];
@@ -3709,6 +3722,20 @@ var
     // own — neither map has anything for the nkTypeArgs node itself.
     if LM.Tree.Nodes[N].Kind = nkTypeArgs then
       Exit(True);
+    // A DOTTED name binds on its last segment, never on the nkMember node —
+    // `TObjectAppearance.TDataMembers.Create(...)` (FMX.ListView.Appearances,
+    // where that nested name is an alias of `TArray<TDataMember>`) reads as a
+    // value qualifier without this, and the dynamic-array pseudo-constructor
+    // then does not apply. Same shape SelectCallTarget's own qualifier test
+    // had to learn for `System.TMonitor.Enter`.
+    if LM.Tree.Nodes[N].Kind = nkMember then
+    begin
+      N := LM.Tree.Nodes[N].FirstChild;
+      while (N <> NIL_NODE) and (LM.Tree.Nodes[N].NextSibling <> NIL_NODE) do
+        N := LM.Tree.Nodes[N].NextSibling;
+      if N = NIL_NODE then
+        Exit(False);
+    end;
     LSym := LM.RefMap[N];
     if LSym <> NIL_SYM then
       Exit(LM.Symbols[LSym].Kind in [skType, skBuiltinType]);
@@ -4113,12 +4140,27 @@ var
             Exit;
           LBX := GetX(LBase);
           LSym := LM.RefMap[LName];
+          // A compiler SEED is never anyone's member, so a member name bound to
+          // one is a Phase-1 mistake to be corrected here rather than trusted:
+          // `Model.Text.IsEmpty` (FMX.Text.Deprecated) had `Text` bound to the
+          // predefined FILE type, which typed the whole chain as a file and
+          // lost the string helper after it. The bare-name side of this was
+          // fixed by routing seed-bound identifiers through the inherited
+          // pass; a MEMBER name never reaches that pass (it is resolved through
+          // its qualifier, by design), so it needs the rule here.
+          //
+          // Dropping the binding is enough: the FindMemberX branch below then
+          // runs and re-points the name at what it finds.
+          if (LSym <> NIL_SYM) and (sfBuiltin in LM.Symbols[LSym].Flags) then
+            LSym := NIL_SYM;
           if LSym <> NIL_SYM then
           begin
             LX[N] := MemberTypeX(AId, LSym, LBX.Inst, LBX);
             LCtxOf[N] := LBX.Inst;
           end
-          else if ExtOf(LName, LExt) then
+          else if ExtOf(LName, LExt) and
+                  not (sfBuiltin in
+                       FModels[LExt.UnitId].Symbols[LExt.Sym].Flags) then
           begin
             LX[N] := MemberTypeX(LExt.UnitId, LExt.Sym, LBX.Inst, LBX);
             LCtxOf[N] := LBX.Inst;

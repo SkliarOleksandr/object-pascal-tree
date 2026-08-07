@@ -378,25 +378,49 @@ Still open, roughly in the order we're tackling it:
   | rtlflat (403) | 8 348 | 104 | 51 | 23 | 6 | 6 | **0** | — |
   | BuildWinRTL (317) | — | — | 51 | 23 | 5 | 5 | **0** | — |
   | BuildWinVCL (271) | — | — | | | | | **0** | — |
-  | bigflat (726) | 8 638 | 387 | 194 | 162 | 136 | 110 | **89** | `Index` (20), `Coord` (9), `Text` (8) |
-  | BuildWinFMX (362) | — | — | | | | | **89** | the same list — bigflat's tail IS FMX |
+  | bigflat (726) | 8 638 | 387 | 194 | 162 | 136 | 110 | **0** | — |
+  | BuildWinFMX (362) | — | — | | | | 89 | **0** | — |
   | AVImark client (3747) | 3 609 | not re-measured | | | | | | string/Char helpers, DevExpress properties |
   | Spring.Base (73) | 70 | 60 | 60 | 60 | 60 | 60 | **60** | `fPair`, `TValue`/RTTI helpers |
 
-  **The RTL and the VCL both report nothing under the member flag as of
-  2026-08-07** — the flattened corpus, `BuildWinRTL.dpk` and `BuildWinVCL.dpk`.
-  The VCL's last two were one rule: **writing the name of a parameterless
-  function reference CALLS it**, so `ValueFunc.GetValue` on a
-  `TFunc<IValue>` asks IValue for the member, not the closure
-  (`System.Bindings.Outputs`, 6 §6.6.1 — which said the syntax and not this).
-  The hop carries the instantiation frame, since `TFunc<TResult>` declares its
-  result as a PARAMETER; a proc type with parameters and a `procedure` type
-  both end the walk instead, and both are pinned by the test.
+  **Every RTL/VCL/FMX corpus reports NOTHING under the member flag as of
+  2026-08-07** — `rtlflat`, `bigflat`, and all three real packages. That is the
+  same bar definition-of-done item 4 sets for `E2003`, now met by the opt-in
+  check written to find what those corpora could not see.
 
-  Zero here is the same bar definition-of-done item 4 sets for `E2003`, now met
-  by the opt-in check written to find what the corpora could not see. What is
-  left is FMX: 89 on `BuildWinFMX.dpk`, and the same 89 on bigflat — that
-  corpus's tail IS the FMX one, so the two measurements are one.
+  The VCL's last two were one rule: **writing the name of a parameterless
+  function reference CALLS it**, so `ValueFunc.GetValue` on a `TFunc<IValue>`
+  asks IValue for the member, not the closure (`System.Bindings.Outputs`,
+  6 §6.6.1 — which stated the syntax and not this). The hop carries the
+  instantiation frame, since `TFunc<TResult>` declares its result as a
+  PARAMETER; a proc type with parameters and a `procedure` type both end the
+  walk instead.
+
+  FMX's 89 were four shapes, and all four are about **what a QUALIFIER means**:
+
+  - **a NESTED type as a type ARGUMENT** — `TDispatchMessageWithValue<
+    TCustomMemoModel.TLineInfo>`, where nothing binds that last segment
+    cross-unit this early (the same gap a HERITAGE reference has, and the same
+    helper answers it). Losing one argument loses the whole instantiation
+    FRAME, and with it every member of a field typed by the parameter: **82 of
+    the 89** were `Message.Value.<anything>` through this one miss.
+  - **a NESTED type as a member QUALIFIER** — `TObjectAppearance.TDataMembers
+    .Create(...)`, where that nested name is an alias of `TArray<TDataMember>`.
+    A dotted name binds on its LAST SEGMENT, so the "is this a type?" test read
+    nothing off the `nkMember` node and the dynamic-array pseudo-constructor did
+    not apply. Third time that particular lesson has been learnt this week.
+  - **the re-export idiom, `X = X`** (2 §2.5.1, written up from this): the right
+    side means the OUTER X, since a declaration cannot alias itself. Bound to
+    itself instead, the alias is a type whose definition is itself — no
+    diagnostic, and every member reached through it simply absent. FMX does this
+    twice, and the resolver now resolves such a right side with the symbol being
+    declared excluded.
+  - **a member NAME that collides with a compiler SEED** — `Model.Text`, where
+    `Text` is the predefined FILE type. A seed is never anyone's member, so a
+    binding that says otherwise is corrected rather than trusted. This is the
+    member-side twin of the seed-shadowing fix above, and it needed its own rule
+    because a member name is resolved through its qualifier and so never reaches
+    the pass that fixed the bare-name side.
 
   The seed-shadowing column is the one to read carefully: it changed 14 of
   rtlflat's dump lines and none of its six reports. A wrong binding costs no

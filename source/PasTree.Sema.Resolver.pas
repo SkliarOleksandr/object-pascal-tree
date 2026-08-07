@@ -96,6 +96,8 @@ type
     procedure DeclareNamesAndType(ADecl, AScope: Integer;
       AKind: TSemaSymbolKind);
     procedure CollectTypeDecl(ANode, AScope: Integer);
+    function ResolveSkipping(AScope: Integer; const ANameLower: string;
+      ASkipSym: Integer): Integer;
     function DeclareAnonStruct(AScope, ANode: Integer): Integer;
     procedure CollectStruct(ANode, AOuter, ATypeSym: Integer);
     function VisibilityOf(ANode: Integer): TSemaVisibility;
@@ -616,10 +618,49 @@ begin
         nkEnumType:
           CollectEnum(LChild, LBody, LSym);
       else
-        Collect(LChild, LBody);  // alias target, array, pointer…
+        begin
+          // `X = X` is the RE-EXPORT idiom, and its right side means the OUTER
+          // X — the name being declared cannot alias itself. FMX writes it
+          // twice inside classes: `TOverlayMode = TOverlayMode deprecated ...`
+          // (FMX.MultiView.Types) and `TItemAppearanceObjectsClass =
+          // TItemAppearanceObjectsClass` (FMX.ListView.Appearances), and
+          // dcc32 37.0-probed, `THost.TMode.AllLocal` through such an alias
+          // compiles.
+          //
+          // Bound HERE because the declared symbol is already in scope by now,
+          // so the ordinary reference pass would resolve the name to the alias
+          // itself: a type that is its own definition, whose members are
+          // therefore nothing. ResolveNode leaves an already-bound node alone,
+          // which is what makes writing it here enough.
+          if (KindOf(LChild) = nkIdent) and
+             (NodeNameLower(LChild) = NodeNameLower(LName)) then
+            FModel.RefMap[LChild] := ResolveSkipping(LBody,
+              NodeNameLower(LChild), LSym);
+          Collect(LChild, LBody);  // alias target, array, pointer…
+        end;
       end;
     LChild := NextSib(LChild);
   end;
+end;
+
+{ Resolve ANameLower from AScope outward, ignoring ASkipSym and everything
+  declared beside it in the SAME scope. Only the self-alias above needs this:
+  the skipped symbol is the one being declared, and a same-scope sibling of that
+  name would be a redeclaration rather than a candidate. }
+function TPasSemaResolver.ResolveSkipping(AScope: Integer;
+  const ANameLower: string; ASkipSym: Integer): Integer;
+var
+  LScope, LFound: Integer;
+begin
+  LScope := AScope;
+  while LScope <> NIL_SCOPE do
+  begin
+    LFound := FModel.FindLocalDeep(LScope, ANameLower);
+    if (LFound <> NIL_SYM) and (LFound <> ASkipSym) then
+      Exit(LFound);
+    LScope := FModel.Scopes[LScope].Parent;
+  end;
+  Result := NIL_SYM;
 end;
 
 { A type symbol for an ANONYMOUS structured type, so it can be named as a
