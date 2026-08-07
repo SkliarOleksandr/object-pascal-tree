@@ -377,14 +377,26 @@ Still open, roughly in the order we're tackling it:
   |---|---|---|---|---|---|---|---|---|
   | rtlflat (403) | 8 348 | 104 | 51 | 23 | 6 | 6 | **0** | — |
   | BuildWinRTL (317) | — | — | 51 | 23 | 5 | 5 | **0** | — |
+  | BuildWinVCL (271) | — | — | | | | | **0** | — |
   | bigflat (726) | 8 638 | 387 | 194 | 162 | 136 | 110 | **89** | `Index` (20), `Coord` (9), `Text` (8) |
+  | BuildWinFMX (362) | — | — | | | | | **89** | the same list — bigflat's tail IS FMX |
   | AVImark client (3747) | 3 609 | not re-measured | | | | | | string/Char helpers, DevExpress properties |
   | Spring.Base (73) | 70 | 60 | 60 | 60 | 60 | 60 | **60** | `fPair`, `TValue`/RTTI helpers |
 
-  **The RTL reports nothing under the member flag as of 2026-08-07** — the
-  flattened corpus and the real `BuildWinRTL.dpk` both. That is the same bar
-  definition-of-done item 4 sets for E2003, now met by the opt-in check that was
-  written to find what the corpora could not see.
+  **The RTL and the VCL both report nothing under the member flag as of
+  2026-08-07** — the flattened corpus, `BuildWinRTL.dpk` and `BuildWinVCL.dpk`.
+  The VCL's last two were one rule: **writing the name of a parameterless
+  function reference CALLS it**, so `ValueFunc.GetValue` on a
+  `TFunc<IValue>` asks IValue for the member, not the closure
+  (`System.Bindings.Outputs`, 6 §6.6.1 — which said the syntax and not this).
+  The hop carries the instantiation frame, since `TFunc<TResult>` declares its
+  result as a PARAMETER; a proc type with parameters and a `procedure` type
+  both end the walk instead, and both are pinned by the test.
+
+  Zero here is the same bar definition-of-done item 4 sets for `E2003`, now met
+  by the opt-in check written to find what the corpora could not see. What is
+  left is FMX: 89 on `BuildWinFMX.dpk`, and the same 89 on bigflat — that
+  corpus's tail IS the FMX one, so the two measurements are one.
 
   The seed-shadowing column is the one to read carefully: it changed 14 of
   rtlflat's dump lines and none of its six reports. A wrong binding costs no

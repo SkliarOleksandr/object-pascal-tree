@@ -2809,6 +2809,64 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { A PARAMETERLESS function reference is CALLED when its name is written, so
+    `.Member` after it belongs to the RESULT: `ValueFunc.GetValue` where
+    `ValueFunc: TFunc<IValue>` means `ValueFunc().GetValue`
+    (System.Bindings.Outputs, and the whole VCL package's member tail).
+
+    The generic is the point rather than decoration — `TFunc<TResult> =
+    reference to function: TResult` declares its result as a type PARAMETER, so
+    only the instantiation makes it IValue, and a hop that forgot the frame
+    would land on the open TResult and find nothing.
+
+    Both negatives are asserted beside it, since they are what keeps the hop
+    from inventing members: a proc type that takes PARAMETERS cannot be called
+    by writing its name, and a `procedure` type has no result at all. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_procres');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PRHost.pas'),
+    'unit PRHost;'#10'interface'#10 +
+    'type'#10 +
+    '  IValue = interface'#10 +
+    '    function GetValue: Integer;'#10 +
+    '  end;'#10 +
+    '  TFunc<TResult> = reference to function: TResult;'#10 +
+    '  TTakesArg = reference to function(A: Integer): IValue;'#10 +
+    '  TPlainProc = procedure of object;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PRUse.pas'),
+    'unit PRUse;'#10'interface'#10'uses PRHost;'#10 +
+    'procedure P(const AFunc: TFunc<IValue>; const AArg: TTakesArg;'#10 +
+    '  const AProc: TPlainProc);'#10 +
+    'implementation'#10 +
+    'procedure P(const AFunc: TFunc<IValue>; const AArg: TTakesArg;'#10 +
+    '  const AProc: TPlainProc);'#10 +
+    'var'#10 +
+    '  LI: Integer;'#10 +
+    'begin'#10 +
+    '  LI := AFunc.GetValue;'#10 +      // the implicit call, then IValue's member
+    '  LI := AArg.GetValue;'#10 +       // takes a parameter: not callable so
+    '  LI := AProc.GetValue;'#10 +      // no result at all
+    '  if LI = 0 then Exit;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    var LPR := ModelByName('pruse');
+    Ok('procres: a parameterless function reference yields its RESULT''s members',
+      CrossRefTo(LPR, 'GetValue', 'GetValue'));
+    Ok('procres: ...and the two shapes that cannot be called still report',
+      DiagCount(LPR, 'E2003') = 2);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   { Builtin ALIAS identity, and the distinct type that must not be caught by it.
     dcc32 37.0-probed: a `record helper for Cardinal` applies to values declared
     `Cardinal`, `LongWord` and `UInt32` (System.pas: `UInt32 = Cardinal`) alike,

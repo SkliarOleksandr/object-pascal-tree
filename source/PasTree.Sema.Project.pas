@@ -206,6 +206,7 @@ type
     // `with` over a target whose TYPE lives in another unit (ch.05 §5.7) —
     // see FindInEnclosingWith.
     function PointeeX(const AX: TSemaXType): TSemaXType;
+    function ProcResultX(const AX: TSemaXType): TSemaXType;
     function PointeeOfDeclX(AId, ABaseNode: Integer): TSemaXType;
     function DesignatorSymX(AId, ANode: Integer;
       out AMid, ASym: Integer): Boolean;
@@ -3292,6 +3293,23 @@ begin
         // looking, so a member lookup on a pointer type behaves like one on
         // what it points at.
         LNext := PointeeX(LCur);
+      nkProcType:
+        // A PARAMETERLESS FUNCTION reference in a value position is CALLED,
+        // and `.Member` then applies to its RESULT: `ValueFunc.GetValue` where
+        // `ValueFunc: TFunc<IValue>` means `ValueFunc().GetValue`
+        // (System.Bindings.Outputs — the whole VCL package's member tail). The
+        // same rule the E2012 guard entry already leans on from the other
+        // side, where it exempts procedural types because the guard's type is
+        // the RESULT.
+        //
+        // The frame matters and is why this is a hop rather than a lookup:
+        // `TFunc<TResult> = reference to function: TResult` declares the result
+        // as a PARAMETER, so it is the instantiation that makes it IValue.
+        //
+        // A proc type WITH parameters, and a plain `procedure` type with no
+        // result, both end the walk instead: neither can be called by writing
+        // its name, so neither has members to reach this way.
+        LNext := ProcResultX(LCur);
       nkClassOf:
         // A CLASS REFERENCE (15.2.1, `class of T`): its members are T's, which
         // is how `with TCustomStyleEngineClass(TStyleManager.Engine) do` reaches
@@ -4876,6 +4894,53 @@ end;
   TVarData, chasing through however many alias links sit in between. The
   cross-model twin of TPasSemaResolver.PointeeTypeSym, depth-capped for the
   same reason. XNil when AX is not a pointer type. }
+{ The RESULT type of a PARAMETERLESS function/procedural type, closed over AX's
+  own instantiation — XNil for anything else.
+
+  "Parameterless" is the whole rule: `ValueFunc.GetValue` is only a member of
+  the result because writing the name of a parameterless function reference
+  CALLS it (6 §6.6.1). One that takes parameters cannot be called that way, and
+  a `procedure` type has no result to take a member from, so both answer XNil
+  and the member walk ends where it did before.
+
+  The frame is why the substitution is here rather than at the call site:
+  `TFunc<TResult> = reference to function: TResult` declares its result as a
+  type PARAMETER, so `TFunc<IValue>` only yields IValue once AX's own
+  instantiation is applied. }
+function TPasSemaProject.ProcResultX(const AX: TSemaXType): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LCur: TSemaXType;
+  LDef, LChild, LDepth: Integer;
+begin
+  Result := XNil;
+  LCur := AX;
+  for LDepth := 1 to 8 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LM := FModels[LCur.UnitId];
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if LDef = NIL_NODE then
+      Exit;
+    case LM.Tree.Nodes[LDef].Kind of
+      nkIdent, nkMember, nkTypeArgs:
+        LCur := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
+      nkProcType:
+        begin
+          LChild := LM.Tree.Nodes[LDef].FirstChild;
+          if LChild = NIL_NODE then
+            Exit;   // `procedure` with neither parameters nor a result
+          if LM.Tree.Nodes[LChild].Kind = nkParams then
+            Exit;   // takes parameters: no implicit call, so no members
+          Exit(SubstX(ResolveTypeExpr(LCur.UnitId, LChild), LCur.Inst, 0));
+        end;
+    else
+      Exit;
+    end;
+  end;
+end;
+
 function TPasSemaProject.PointeeX(const AX: TSemaXType): TSemaXType;
 var
   LCur: TSemaXType;
