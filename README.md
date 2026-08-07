@@ -343,8 +343,11 @@ Still open, roughly in the order we're tackling it:
   ~~The 1 `E2003 MemoryBarrier`~~ — an unseeded compiler intrinsic, dcc-probed
   the way that seed list demands (a unit with an EMPTY uses clause resolves it),
   and a sibling of the `Atomic*` family already there.
-- **Unresolved MEMBERS after a dot are reported only behind a FLAG**, and the
-  first measurement says why it stays there. `O.Read` where the class has no
+- ~~**Unresolved MEMBERS after a dot are reported only behind a FLAG.**~~
+  **Its work list is EMPTY as of 2026-08-07** — every RTL/VCL/FMX corpus reports
+  zero, from 8 348 when the flag was new. The flag itself stays (see below: the
+  LIBRARY default is off on purpose), and this entry stays with it because what
+  the floods turned out to be is the useful part. `O.Read` where the class has no
   `Read` is `E2003` for dcc and silence for us; only unresolved BARE identifiers
   are diagnosed by the LIBRARY by default — and that default is deliberate:
   **error-tolerant is the analyzer's primary mode**, because that is what an
@@ -599,7 +602,13 @@ Still open, roughly in the order we're tackling it:
   wrong binding: dcc adds `E2004 Identifier redeclared` at the inline
   declaration when a reference above it already resolved the name in that block.
   Belongs with the other missing checks below if it is ever worth having.
-- **Member visibility is recorded but not ENFORCED.** Recording landed on
+- ~~**Member visibility is recorded but not ENFORCED.**~~ **Both halves are done
+  — recording 2026-07-31, enforcement 2026-08-05, and its tail worked down to
+  TWO reports on 2026-08-07** (from 546 / 998). What is still deliberately
+  absent is named at the end of this entry: `protected` (`E2362`, needs an
+  ancestry walk) and the BARE-name half, which dcc reports as `E2003` and which
+  therefore belongs in the member walk rather than in a check after it.
+  Recording landed on
   2026-07-31 — `CollectStruct` tracks the section as it walks and stamps every
   symbol a child declares, `automated` included (kept distinct from
   `published`). Members before any section marker stay `svDefault` rather than
@@ -999,6 +1008,12 @@ Still open, roughly in the order we're tackling it:
   and identical single-threaded. This is a floor to HOLD, not a finished job —
   and the two precedence gaps below are known places where the binding is
   right-ish for the wrong reason.
+
+  **Held, and raised on 2026-08-07:** the same five corpora also report zero
+  under `-members`, which is the stricter bar — it asks about every member
+  after a dot, not only bare names. The gaps that bar found were all bindings,
+  and the "right-ish for the wrong reason" worry above is exactly what it was
+  measuring.
 
   **Two real applications are clean too as of 2026-07-31.** The 3747-unit /
   7.2M-line client reports 7 diagnostics, not one of them a defect we can fix
