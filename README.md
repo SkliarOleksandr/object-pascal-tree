@@ -261,6 +261,10 @@ usable.
 - **Semantic diagnostics** — project-wide `E20xx`-style errors from a
   `.dproj`-aware loader (search paths, namespaces, unit aliases, platforms),
   validated continuously against the real Delphi RTL/VCL/FMX source tree.
+  Opens a program or a **package**: `.dpr`, `.dpk` or `.dproj`, with a bare main
+  source redirected to its sibling `.dproj` when there is one, so naming either
+  file opens the same project. The packages this analyzer is measured against
+  (`BuildWinRTL/VCL/FMX.dpk`) are the reason the `.dpk` half is not decoration.
 
 ## Layout
 

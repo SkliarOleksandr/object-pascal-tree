@@ -1358,10 +1358,16 @@ begin
   tsSema.TabVisible := False;
   LFile := AProjectFile;
   LExt := LowerCase(TPath.GetExtension(LFile));
-  // Opening the bare .dpr of a real project should behave exactly like
+  // Opening the bare main source of a real project should behave exactly like
   // opening its .dproj (same search paths/defines/full file list) — a real
   // IDE does this too. Redirect BEFORE anything else reads LExt/LFile.
-  if LExt = '.dpr' then
+  //
+  // A PACKAGE is the same arrangement with a different main source: `.dpk`
+  // beside its own `.dproj`, and the RTL/VCL/FMX packages this analyzer is
+  // measured against are exactly that. Both extensions redirect, since
+  // everything downstream cares about the .dproj, not about which file named
+  // it.
+  if (LExt = '.dpr') or (LExt = '.dpk') then
   begin
     LSiblingDProj := TPath.ChangeExtension(LFile, '.dproj');
     if TFile.Exists(LSiblingDProj) then
@@ -1399,8 +1405,15 @@ begin
       FProjectDir := TPath.GetDirectoryName(LFile);
       if (FMainSource <> '') and not TPath.IsPathRooted(FMainSource) then
         FMainSource := TPath.Combine(FProjectDir, FMainSource);
+      // Last resort when the .dproj named no main source we could find: the
+      // sibling of the same name. A PACKAGE's is a `.dpk`, so both are tried
+      // rather than assuming a program.
       if not TFile.Exists(FMainSource) then
+      begin
         FMainSource := TPath.ChangeExtension(LFile, '.dpr');
+        if not TFile.Exists(FMainSource) then
+          FMainSource := TPath.ChangeExtension(LFile, '.dpk');
+      end;
     end;
   end
   else
@@ -2617,7 +2630,9 @@ var
 begin
   LDlg := TOpenDialog.Create(Self);
   try
-    LDlg.Filter := 'Delphi project (*.dpr;*.dproj)|*.dpr;*.dproj|All files|*.*';
+    LDlg.Filter :=
+      'Delphi project (*.dpr;*.dpk;*.dproj)|*.dpr;*.dpk;*.dproj|' +
+      'All files|*.*';
     LDlg.Options := LDlg.Options + [ofFileMustExist];
     if LDlg.Execute then
       OpenProject(LDlg.FileName);
