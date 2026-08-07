@@ -249,8 +249,9 @@ usable.
   deduplicated (a project copy wins over a library one — the same precedence
   the analysis itself applied), and the box is enabled from a LIVE query rather
   than a snapshot, since a background analysis can finish while the dialog is
-  open. The list and filter rules live in `PasTreeDemo.UnitList`, apart from the
-  form and tested there (`UnitListSmoke`).
+  open. A status bar carries the counts and the project's name. The list and
+  filter rules live in `PasTreeDemo.UnitList`, apart from the form and tested
+  there (`UnitListSmoke`).
 - **Declaration ↔ implementation toggle** (Ctrl+Shift+Down / Ctrl+Shift+Up) —
   jumps from a method or routine's forward declaration to its body's first
   statement and back to its name, overload-precise (matched by full

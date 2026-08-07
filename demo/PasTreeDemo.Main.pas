@@ -3078,6 +3078,9 @@ var
   LSource: TPasUnitPickerSource;
   LPath: string;
 begin
+  LSource.ProjectName := TPath.GetFileName(FProjectFile);
+  if LSource.ProjectName = '' then
+    LSource.ProjectName := TPath.GetFileName(FMainSource);
   LSource.ProjectFiles :=
     function: TArray<string>
     begin
