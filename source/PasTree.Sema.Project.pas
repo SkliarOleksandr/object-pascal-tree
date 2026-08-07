@@ -193,6 +193,7 @@ type
     procedure CrossResolve(AId: Integer);
     function StructSymOfNode(AModel: TPasSemaModel; ANode: Integer): Integer;
     procedure CheckVisibility(AId, ANameNode, AMemMid, AMemSym: Integer);
+    function StructEncloses(AMid, AOuter, AInner: Integer): Boolean;
     procedure RepointCallee(AModel: TPasSemaModel;
       ACalleeNode, AMid, ASym: Integer;
       ANewExt: TDictionary<Integer, TPasExtRef>);
@@ -296,6 +297,7 @@ type
       const ANameLower: string;
       out AMemMid, AMemSym: Integer; out ACtx: Integer): Boolean;
     function IsConstructorSym(AMid, ASym: Integer): Boolean;
+    function IsClassCtorDtorSym(AMid, ASym: Integer): Boolean;
     // Cross-model overload selection (CrossType's call typing):
     function XCatOf(const AX: TSemaXType): TSemaTypeCat;
     function XSameType(const A, B: TSemaXType): Boolean;
@@ -3122,6 +3124,17 @@ begin
       // where both TMatrix and its helper live in unit A. The converse (a
       // helper in B for a type in A) goes through HelperMemberHit above.
       LFound := LM.FindLocalDeep(LScope, ANameLower);
+      // A `class constructor` is never what a NAME means: it runs once,
+      // automatically, and cannot be called (15 §15.1.5). It is registered
+      // under its name like any routine, though, so `TRegistry.Create` — with
+      // a private class constructor declared fourteen lines above the public
+      // parameterless one — found it and stopped. Advance along the overload
+      // chain instead. Gated on there BEING a chain, so the overwhelmingly
+      // common single-declaration member never pays the token test.
+      if (LFound <> NIL_SYM) and
+         (LM.Symbols[LFound].NextOverload <> NIL_SYM) then
+        while (LFound <> NIL_SYM) and IsClassCtorDtorSym(LCur.UnitId, LFound) do
+          LFound := LM.Symbols[LFound].NextOverload;
       if LFound <> NIL_SYM then
       begin
         AMemMid := LCur.UnitId;
@@ -3292,6 +3305,41 @@ begin
   LTok := LM.Tree.Nodes[LRoutine].FirstToken;
   if (LTok >= 0) and (LTok <= High(LM.Tree.Source.Visible)) then
     Result := SameText(LM.Tree.Source.VisibleText(LTok), 'constructor');
+end;
+
+{ A `class constructor` / `class destructor` — which is NOT callable at all
+  (15 §15.1.5: they run once, automatically, at unit initialization and
+  finalization). So they are never overload candidates, and saying so is what
+  keeps `TRegistry.Create` off the private `class constructor Create` that sits
+  fourteen lines above the public parameterless one it means.
+
+  The `class` keyword is NOT in the routine node's token span — the struct-body
+  parser consumes it and then calls ParseRoutine, which records the fact as
+  `Aux = 1` instead. So a class constructor's first token is `constructor`, the
+  same as an instance one's, and `IsConstructorSym` answers True for both:
+  the pair (that answer, Aux) is what separates them, and reading the tokens for
+  the `class` would find `constructor` and be wrong. }
+function TPasSemaProject.IsClassCtorDtorSym(AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LName, LRoutine, LTok: Integer;
+begin
+  Result := False;
+  LM := FModels[AMid];
+  if LM.Symbols[ASym].Kind <> skRoutine then
+    Exit;
+  LName := LM.Symbols[ASym].DeclNode;
+  if LName = NIL_NODE then
+    Exit;
+  LRoutine := LM.Tree.Nodes[LName].Parent;
+  if (LRoutine = NIL_NODE) or (LM.Tree.Nodes[LRoutine].Kind <> nkRoutine) or
+     (LM.Tree.Nodes[LRoutine].Aux <> 1) then
+    Exit;   // not a `class` routine at all — the cheap half of the test first
+  LTok := LM.Tree.Nodes[LRoutine].FirstToken;
+  if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
+    Exit;
+  Result := SameText(LM.Tree.Source.VisibleText(LTok), 'constructor') or
+            SameText(LM.Tree.Source.VisibleText(LTok), 'destructor');
 end;
 
 // Type category of a cross-model type — the symbol's own TypeCat, computed by
@@ -3591,6 +3639,27 @@ var
     begin
       LArgX := GetX(LArg);
       LParX := SubstX(DeclTypeX(AMid, LParams[LIdx]), ACtx, 0);
+      // An ANONYMOUS METHOD LITERAL rejects the candidate outright, and it is
+      // the only mismatch that does. `TThread.Synchronize(nil, procedure ...
+      // end)` fits BOTH the public `(const AThread: TThread; AThreadProc:
+      // TThreadProcedure)` and the PRIVATE `(ASyncRec: PSynchronizeRecord;
+      // QueueEvent: Boolean = False; ForceQueue: Boolean = False)` on arity,
+      // `nil` scores the same against either first parameter, and the first
+      // candidate — the private one — won the tie. 41 of bigflat's 111 false
+      // E2361 came from that single pair.
+      //
+      // Deliberately SYNTACTIC and not a general type-mismatch rejection. A
+      // written-out `procedure ... end` is a value of procedural type and
+      // nothing else, so this is provable at the node; a general "the types do
+      // not fit" rule is not, and would have to answer for record `Implicit`
+      // operators, Variant, untyped parameters, and the rule that a
+      // PARAMETERLESS function reference in a value position is CALLED (which
+      // is why a tcProc argument in general may legitimately meet a Boolean
+      // parameter — see the E2012 entry). A literal cannot be called that way.
+      if (LM.Tree.Nodes[LArg].Kind = nkAnonMethod) and XValid(LParX) and
+         not (XCatOf(LParX) in [tcProc, tcVariant, tcUnknown]) and
+         (FModels[LParX.UnitId].Symbols[LParX.Sym].Kind <> skGenericParam) then
+        Exit(-1);
       if XValid(LArgX) and XValid(LParX) then
         if XSameType(LParX, LArgX) then
           Inc(Result, 2)
@@ -3644,6 +3713,16 @@ var
       begin
         if FModels[AMid].Symbols[LCand].Kind <> skRoutine then
           Break;
+        // Never a candidate, whatever it scores: a class constructor runs
+        // automatically and cannot be called (15 §15.1.5). `TRegistry.Create`
+        // is the shape — a private `class constructor Create` declared above
+        // the public parameterless `constructor Create`, both fitting zero
+        // arguments, and the first candidate winning the tie.
+        if IsClassCtorDtorSym(AMid, LCand) then
+        begin
+          LCand := FModels[AMid].Symbols[LCand].NextOverload;
+          Continue;
+        end;
         LDup := False;
         for LIdx := 0 to High(LSeen) do
           if (LSeen[LIdx].UnitId = AMid) and (LSeen[LIdx].Sym = LCand) then
@@ -3712,6 +3791,35 @@ var
       LHeads := UsesHeads(LM.Tree.NodeNameLower(ACalleeNode));
       for LIdx := 0 to High(LHeads) do
         ConsiderChain(LHeads[LIdx].UnitId, LHeads[LIdx].Sym);
+    end;
+    // Nothing in the type's OWN chain fits, so the call means an INHERITED
+    // routine of that name — `TButton.Create(Self)`, where Vcl.StdCtrls'
+    // TButton declares only a parameterless `class constructor Create` and the
+    // one being called is TComponent's `constructor Create(AOwner:
+    // TComponent)`. A binding stops at the first declaration of the name, so
+    // the ancestor's overloads were never candidates and the head stood: the
+    // maps then said `TButton.Create`, and the visibility check believed them
+    // (7 false E2361 on bigflat, plus TRegistry/TEdit/TBluetoothManager).
+    //
+    // Only when nothing fit, which keeps it off the common path entirely: one
+    // FindMemberX from the owner's ANCESTOR, which walks the whole ancestry
+    // itself. A class constructor is not callable at all (15 §15.1.5), so this
+    // is also what stops the analyzer from believing it is.
+    if (ABestSym = NIL_SYM) and (FModels[AHeadMid].Symbols[AHeadSym].Scope <>
+       NIL_SCOPE) then
+    begin
+      LQBase := FModels[AHeadMid].Scopes[
+        FModels[AHeadMid].Symbols[AHeadSym].Scope].StructSym;
+      if LQBase <> NIL_SYM then
+      begin
+        var LAnc := AncestorOfX(XPlain(AHeadMid, LQBase));
+        var LAMid, LASym, LACtx: Integer;
+        if XValid(LAnc) and FindMemberX(AId, LAnc,
+             FModels[AHeadMid].Symbols[AHeadSym].NameLower,
+             LAMid, LASym, LACtx) and
+           (FModels[LAMid].Symbols[LASym].Kind = skRoutine) then
+          ConsiderChain(LAMid, LASym);
+      end;
     end;
     Result := ABestSym <> NIL_SYM;
   end;
@@ -4324,6 +4432,35 @@ begin
   end;
 end;
 
+{ Is AInner the same type as AOuter, or one NESTED inside it (at any depth)?
+
+  A nested type's symbol is declared into the enclosing type's member scope, so
+  the chain to walk is symbol -> its scope -> that scope's StructSym, upward.
+  Depth-capped like every other walk here; nesting cannot legally cycle, and the
+  cap is a runaway guard rather than a rule. }
+function TPasSemaProject.StructEncloses(AMid, AOuter, AInner: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LCur, LScope, LDepth: Integer;
+begin
+  Result := False;
+  if (AOuter = NIL_SYM) or (AInner = NIL_SYM) then
+    Exit;
+  LM := FModels[AMid];
+  LCur := AInner;
+  for LDepth := 1 to 16 do
+  begin
+    if LCur = AOuter then
+      Exit(True);
+    LScope := LM.Symbols[LCur].Scope;
+    if LScope = NIL_SCOPE then
+      Exit;
+    LCur := LM.Scopes[LScope].StructSym;
+    if LCur = NIL_SYM then
+      Exit;
+  end;
+end;
+
 procedure TPasSemaProject.CheckVisibility(AId, ANameNode, AMemMid,
   AMemSym: Integer);
 var
@@ -4352,9 +4489,17 @@ begin
       Exit;   // the friend rule: same unit, always legal
   end
   else
-    // strict private: only from inside the declaring type itself, which also
-    // means the accessing site must be in the same unit as the declaration.
-    if (AMemMid = AId) and (LHere = LOwner) then
+    // strict private: only from inside the declaring type itself — or from a
+    // type NESTED in it, which is dcc's rule and an asymmetric one. Probed both
+    // ways: a nested class reaching the OUTER class's strict private field
+    // compiles, and the outer class reaching a NESTED class's strict private
+    // field is `E2361` — the same code we emit, so the enclosing type is not
+    // "inside" its own nested one. System.JSON.Builders is the shape:
+    // `TJSONCollectionBuilder.TBaseCollection.WriteBuilder` reads the outer
+    // class's strict private `FJSONWriter`.
+    //
+    // Same-unit is still required, because nesting cannot cross a unit.
+    if (AMemMid = AId) and StructEncloses(AId, LOwner, LHere) then
       Exit;
   if LM.HasDiagAt(ANameNode) then
     Exit;   // one report per site, like every other pass here

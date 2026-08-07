@@ -3053,6 +3053,148 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { The three rules the `-visibility` tail turned out to need, all dcc32
+    37.0-probed and all of them BINDING rules rather than visibility ones —
+    which is what the flag has said about every one of its floods so far:
+
+    - `strict private` reaches a NESTED type, and the relation is asymmetric.
+      A nested class reading the OUTER class's strict private field compiles;
+      the outer class reading a NESTED class's is dcc's own `E2361`.
+      (`TJSONCollectionBuilder.TBaseCollection` reads the outer `FJSONWriter`.)
+    - a `class constructor` is never what a name means — it runs once,
+      automatically, and cannot be called (15 §15.1.5). `TRegistry` declares a
+      private one fourteen lines above the public parameterless `Create`.
+    - when NOTHING in a type's own chain fits the arguments, the call means an
+      INHERITED routine: `TButton.Create(Self)` is TComponent's.
+
+    Every assertion here is a count on a unit that also contains a live report,
+    so a rule that simply stopped reporting could not pass. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_vistail');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'VTHost.pas'),
+    'unit VTHost;'#10'interface'#10 +
+    'type'#10 +
+    '  TOuter = class'#10 +
+    '  strict private'#10 +
+    '    FVal: Integer;'#10 +
+    '  public type'#10 +
+    '    TInner = class'#10 +
+    '    strict private'#10 +
+    '      FIn: Integer;'#10 +
+    '    public'#10 +
+    '      procedure Poke(const A: TOuter);'#10 +
+    '    end;'#10 +
+    '  public'#10 +
+    '    procedure Reach(const A: TInner);'#10 +
+    '  end;'#10 +
+    '  TReg = class'#10 +
+    '  private'#10 +
+    '    class constructor Create;'#10 +      // never callable (15.1.5)
+    '  public'#10 +
+    '    constructor Create; overload;'#10 +
+    '    constructor Create(A: Integer); overload;'#10 +
+    '  end;'#10 +
+    '  TBase = class'#10 +
+    '    constructor Create(A: Integer);'#10 +
+    '  end;'#10 +
+    '  TDesc = class(TBase)'#10 +
+    '  private'#10 +
+    '    class constructor Create;'#10 +      // hides nothing: not callable
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TOuter.TInner.Poke(const A: TOuter);'#10 +
+    'begin'#10 +
+    '  A.FVal := 1;'#10 +                     // nested -> outer strict: legal
+    'end;'#10 +
+    'procedure TOuter.Reach(const A: TInner);'#10 +
+    'begin'#10 +
+    '  A.FIn := 1;'#10 +                      // outer -> nested strict: E2361
+    'end;'#10 +
+    'class constructor TReg.Create;'#10'begin end;'#10 +
+    'constructor TReg.Create;'#10'begin end;'#10 +
+    'constructor TReg.Create(A: Integer);'#10'begin end;'#10 +
+    'constructor TBase.Create(A: Integer);'#10'begin end;'#10 +
+    'class constructor TDesc.Create;'#10'begin end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'VTUse.pas'),
+    'unit VTUse;'#10'interface'#10'uses VTHost;'#10 +
+    'procedure P;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var'#10 +
+    '  LR: TReg;'#10 +
+    '  LD: TDesc;'#10 +
+    'begin'#10 +
+    '  LR := TReg.Create;'#10 +               // the public parameterless one
+    '  LD := TDesc.Create(7);'#10 +           // the INHERITED TBase.Create
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportVisibility := True;
+    GProj.AnalyzeDirectory(LDir);
+    Ok('vistail: strict private reaches a NESTED type, and only inward',
+      DiagCount(ModelByName('vthost'), 'E2361') = 1);
+    Ok('vistail: ...and the one refused is the outer reading the nested one',
+      DiagHasText(ModelByName('vthost'), 'E2361', 'FIn'));
+    Ok('vistail: a class constructor is never the meaning of a name',
+      DiagCount(ModelByName('vtuse'), 'E2361') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  { An ANONYMOUS METHOD literal cannot bind to a non-procedural parameter, so it
+    rejects that candidate outright. `TThread.Synchronize(nil, procedure ... end)`
+    fits the PRIVATE `(ASyncRec: PSynchronizeRecord; QueueEvent: Boolean = False)`
+    on arity and `nil` scores the same against either first parameter — 41 of
+    bigflat's 111 false E2361 came from that one pair. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_anonpick');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'APHost.pas'),
+    'unit APHost;'#10'interface'#10 +
+    'type'#10 +
+    '  TProcRef = reference to procedure;'#10 +
+    '  TSync = class'#10 +
+    '  private'#10 +
+    '    class procedure Run(ARec: Pointer; AQueue: Boolean = False); overload;'#10 +
+    '  public'#10 +
+    '    class procedure Run(const AObj: TObject; AProc: TProcRef); overload;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'class procedure TSync.Run(ARec: Pointer; AQueue: Boolean);'#10'begin end;'#10 +
+    'class procedure TSync.Run(const AObj: TObject; AProc: TProcRef);'#10'begin end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'APUse.pas'),
+    'unit APUse;'#10'interface'#10'uses APHost;'#10 +
+    'procedure P;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'begin'#10 +
+    '  TSync.Run(nil, procedure'#10 +
+    '    begin'#10 +
+    '    end);'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportVisibility := True;
+    GProj.AnalyzeDirectory(LDir);
+    Ok('anonpick: an anonymous method rejects a non-procedural parameter',
+      DiagCount(ModelByName('apuse'), 'E2361') = 0);
+    Ok('anonpick: ...and the call binds to the PUBLIC overload',
+      CrossRefTo(ModelByName('apuse'), 'Run', 'Run'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   { 16.4.1: a value typed by an unbound type PARAMETER has the members its
     CONSTRAINT guarantees. System.Win.WinRT's `class var FFactory: F` with
     `F: IInspectable` is the shape — every `FFactory._AddRef` there was a false

@@ -574,11 +574,45 @@ Still open, roughly in the order we're tackling it:
   with `Aux = 1` on its `nkRoutine` (6.1), and a CONSTRUCTOR counts as callable
   on the type because `TFoo.Create(...)` is how one is called.
 
-  What still reports: `TThread.Synchronize` (41 on bigflat) plus a tail of FIELD
-  accesses (`TEditButton.FEditControl`, 10) and constructor cases
-  (`TButton.Create`, 7). A field is not a call, so there is no selection to read
-  — those need diagnosing one at a time, and they are what a future session should
-  start from rather than from a new rule.
+  **Then the tail, worked one site at a time on 2026-08-07: 52 → 6 on rtlflat
+  and 111 → 12 on bigflat.** Four causes, and not one of them was a visibility
+  rule — the flag has now said the same thing about every flood it has produced:
+
+  - **an anonymous method LITERAL rejects a candidate outright** (41 of
+    bigflat's 111). `TThread.Synchronize(nil, procedure ... end)` fits the
+    private `(ASyncRec: PSynchronizeRecord; QueueEvent: Boolean = False;
+    ForceQueue: Boolean = False)` on arity, `nil` scores the same against either
+    first parameter, and the first candidate won the tie. This is the
+    "`ScoreCandidate` never REJECTS" gap named below, deliberately taken in its
+    narrowest SYNTACTIC form: a written-out `procedure ... end` is a value of
+    procedural type and nothing else. The general rule cannot be had so cheaply
+    — it would have to answer for record `Implicit` operators, `Variant`,
+    untyped parameters, and the rule that a parameterless function reference in
+    a value position is CALLED (which is exactly why a `tcProc` ARGUMENT may
+    legitimately meet a `Boolean` parameter, see `E2012`). A literal cannot be
+    called that way, so it is provable at the node.
+  - **`strict private` reaches a NESTED type** (the `FJSONWriter`/`FParentTypes`
+    family, and the FIELD accesses that had no selection to read). dcc-probed
+    both ways and the relation is asymmetric: a nested class may read the outer
+    class's strict private member, and the outer class may NOT read a nested
+    one's — that direction is dcc's own `E2361`. Now in 11 §11.2.1.
+  - **a `class constructor` is never what a name means** (15 §15.1.5 said "not
+    callable" and stopped there). `TRegistry` declares a private one fourteen
+    lines above the public parameterless `constructor Create`, so the member
+    walk stopped at it. Two traps on the way: the `class` keyword is NOT in the
+    routine node's token span (the struct-body parser consumes it and records
+    `Aux = 1`), so `IsConstructorSym` answers True for these and only the PAIR
+    separates them; and the name is not fixed — `class constructor Init;`
+    compiles.
+  - **when nothing in a type's own chain fits, the call means an INHERITED
+    routine** (`TButton.Create(Self)` is TComponent's). A binding stops at the
+    first declaration of the name, so the ancestor's overloads were never
+    candidates. One `FindMemberX` from the owner's ancestor, run only when
+    nothing fit, which keeps it off the common path.
+
+  What still reports, 12 on bigflat: `TMonitor.Enter` (4), `TThread.Synchronize`
+  (3), `TStringHelper.IndexOfAny` (2), three singletons. Small enough to read
+  end to end, which is where the next session on this should start.
 
   Still not covered, and each named rather than approximated: `protected` /
   `strict protected` (`E2362`, needs an ancestry walk to answer "is the accessing
@@ -773,8 +807,13 @@ Still open, roughly in the order we're tackling it:
     `private` ancestor member in another unit — invisible to dcc — can win here.
     That is the same imprecision `-visibility` exists to measure, not a new one,
     and its numbers did not move (52 / 111).
-  - `ScoreCandidate` never REJECTING a type-mismatched overload (above), which
-    is a selection change and wants its own measurement;
+  - `ScoreCandidate` never REJECTING a type-mismatched overload — **taken on
+    2026-08-07 in its narrowest form only**: an anonymous method LITERAL rejects
+    a non-procedural parameter, which is provable at the node and was 41 of the
+    111 false `E2361`. The GENERAL rule is still open and still wants its own
+    measurement, because "these types do not fit" has to answer for record
+    `Implicit` operators, `Variant`, untyped parameters and implicit calls of
+    parameterless function references;
   - on rtlflat there are exactly six member reports left, so that corpus can no
     longer drive this — `bigflat`'s 110 and the AVImark client are the ones with
     anything to say.
