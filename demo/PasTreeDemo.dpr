@@ -11,6 +11,8 @@ uses
   PasTreeDemo.Settings in 'PasTreeDemo.Settings.pas',
   PasTreeDemo.NavHistory in 'PasTreeDemo.NavHistory.pas',
   PasTreeDemo.Includes in 'PasTreeDemo.Includes.pas',
+  PasTreeDemo.UnitList in 'PasTreeDemo.UnitList.pas',
+  PasTreeDemo.UnitPicker in 'PasTreeDemo.UnitPicker.pas',
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',

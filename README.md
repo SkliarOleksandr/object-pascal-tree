@@ -239,6 +239,18 @@ usable.
   (`PasTreeDemo.Includes`, 18 shapes pinned in `DemoSettingsSmoke`, including the
   three that must NOT match: `$I+`, `$I-` and `$I%`), and the link range is the
   directive's own raw token.
+- **View Unit** (Ctrl+F12, the top toolbar, or the file tree's context menu) —
+  a modal picker over the project's units: type to filter (substring, case-
+  insensitive), Up/Down while the caret stays in the filter box, Enter or a
+  double-click opens. Each row is two lines, the name over its directory,
+  because the name alone stops being an identifier the moment the list widens:
+  its **Uses Units** box adds everything the finished analysis reached, and a
+  real closure holds both `System.Types.pas` and `Vcl.Types.pas`. Names are
+  deduplicated (a project copy wins over a library one — the same precedence
+  the analysis itself applied), and the box is enabled from a LIVE query rather
+  than a snapshot, since a background analysis can finish while the dialog is
+  open. The list and filter rules live in `PasTreeDemo.UnitList`, apart from the
+  form and tested there (`UnitListSmoke`).
 - **Declaration ↔ implementation toggle** (Ctrl+Shift+Down / Ctrl+Shift+Up) —
   jumps from a method or routine's forward declaration to its body's first
   statement and back to its name, overload-precise (matched by full

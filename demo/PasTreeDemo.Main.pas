@@ -28,7 +28,7 @@ uses
   PasTree.Sema.Nav, PasTree.Sema.Async,
   PasTree.Sema.Dump, VirtualTrees.BaseAncestorVCL, VirtualTrees.BaseTree, VirtualTrees.AncestorVCL, SynEditCodeFolding,
   PasTreeDemo.Highlighter, PasTreeDemo.Settings, PasTreeDemo.NavHistory,
-  PasTreeDemo.Includes,
+  PasTreeDemo.Includes, PasTreeDemo.UnitList, PasTreeDemo.UnitPicker,
   Vcl.Menus, System.Actions, Vcl.ActnList, SynEditMiscClasses, SynEditSearch;
   // System
 
@@ -124,6 +124,10 @@ type
     vtMessages: TVirtualStringTree;
     btnParseVcl: TButton;
     btnParseFmx: TButton;
+    ViewUnitAction: TAction;
+    btnViewUnit: TButton;
+    FilesPopupMenu: TPopupMenu;
+    ViewUnit1: TMenuItem;
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
     procedure btnOpenClick(Sender: TObject);
@@ -167,6 +171,8 @@ type
     procedure CopyAllMessagesActionExecute(Sender: TObject);
     procedure btnParseVclClick(Sender: TObject);
     procedure btnParseFmxClick(Sender: TObject);
+    procedure ViewUnitActionUpdate(Sender: TObject);
+    procedure ViewUnitActionExecute(Sender: TObject);
   private
     FFileList: TStringList;  // full paths shown in the tree
     FOpenFiles: TStringList; // path -> TTabSheet (Objects)
@@ -3055,6 +3061,53 @@ begin
   LData := PPasNodeData(Sender.GetNodeData(Node));
   if (LData <> nil) and (LData.Index >= 0) and (LData.Index < FFileList.Count) then
     OpenFileTab(FFileList[LData.Index]);
+end;
+
+{ View Unit (Ctrl+F12) — a modal picker over the project's units.
+
+  Enabled whenever the project has files to show; the picker's own "Uses Units"
+  box is what depends on an analysis, and it asks for that state itself while
+  it is open (see TfrmUnitPicker) rather than being told once. }
+procedure TfrmMain.ViewUnitActionUpdate(Sender: TObject);
+begin
+  ViewUnitAction.Enabled := FFileList.Count > 0;
+end;
+
+procedure TfrmMain.ViewUnitActionExecute(Sender: TObject);
+var
+  LSource: TPasUnitPickerSource;
+  LPath: string;
+begin
+  LSource.ProjectFiles :=
+    function: TArray<string>
+    begin
+      Result := FFileList.ToStringArray;
+    end;
+  // The analysed CLOSURE, which is a superset of the project's own files and
+  // includes every RTL/VCL unit reached. Read on the UI thread only, and only
+  // when UsesReady said yes — the same FAnalyzing/FAsyncSession guard every
+  // other FSemaProject reader here uses, for the reason FAnalyzing documents.
+  LSource.UsesFiles :=
+    function: TArray<string>
+    var
+      LIdx: Integer;
+    begin
+      Result := nil;
+      if not Assigned(FSemaProject) then
+        Exit;
+      SetLength(Result, FSemaProject.ModelCount);
+      for LIdx := 0 to FSemaProject.ModelCount - 1 do
+        Result[LIdx] := FSemaProject.ModelFile(LIdx);
+    end;
+  LSource.UsesReady :=
+    function: Boolean
+    begin
+      Result := Assigned(FSemaProject) and not Assigned(FAsyncSession) and
+        not FAnalyzing;
+    end;
+  LPath := PickUnit(Self, LSource);
+  if LPath <> '' then
+    OpenFileTab(LPath);   // the same call the file tree's own click makes
 end;
 
 // Swaps the highlighter on every currently-open source tab so an already-open

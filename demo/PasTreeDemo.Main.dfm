@@ -168,6 +168,16 @@ object frmMain: TfrmMain
       TabOrder = 8
       OnClick = btnParseFmxClick
     end
+    object btnViewUnit: TButton
+      Left = 918
+      Top = 7
+      Width = 120
+      Height = 27
+      Action = ViewUnitAction
+      Hint = 'View Unit (Ctrl+F12)'
+      ShowHint = True
+      TabOrder = 12
+    end
   end
   object vstFiles: TVirtualStringTree
     Left = 0
@@ -182,6 +192,7 @@ object frmMain: TfrmMain
     TabOrder = 1
     OnChange = vstFilesChange
     OnGetText = vstFilesGetText
+    PopupMenu = FilesPopupMenu
     Touch.InteractiveGestures = [igPan, igPressAndTap]
     Touch.InteractiveGestureOptions = [igoPanSingleFingerHorizontal, igoPanSingleFingerVertical, igoPanInertia, igoPanGutter, igoParentPassthrough]
     Columns = <>
@@ -391,6 +402,12 @@ object frmMain: TfrmMain
       OnExecute = GotoDeclActionExecute
       OnUpdate = GotoDeclActionUpdate
     end
+    object ViewUnitAction: TAction
+      Caption = 'View Unit...'
+      ShortCut = 16507
+      OnExecute = ViewUnitActionExecute
+      OnUpdate = ViewUnitActionUpdate
+    end
     object OpenFileAtCursorAction: TAction
       Caption = 'Open File at Cursor'
       Hint =
@@ -436,6 +453,13 @@ object frmMain: TfrmMain
     end
     object NavForward1: TMenuItem
       Action = NavForwardAction
+    end
+  end
+  object FilesPopupMenu: TPopupMenu
+    Left = 120
+    Top = 400
+    object ViewUnit1: TMenuItem
+      Action = ViewUnitAction
     end
   end
   object MessagesPopupMenu: TPopupMenu
