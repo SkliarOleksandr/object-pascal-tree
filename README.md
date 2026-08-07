@@ -244,8 +244,8 @@ usable.
   insensitive), Up/Down while the caret stays in the filter box, Enter or a
   double-click opens. Each row is two lines, the name over its directory,
   because the name alone stops being an identifier the moment the list widens:
-  its **Uses Units** box adds everything the finished analysis reached, and a
-  real closure holds both `System.Types.pas` and `Vcl.Types.pas`. Names are
+  its **Implicit Units** box adds everything the finished analysis reached, and
+  a real closure holds both `System.Types.pas` and `Vcl.Types.pas`. Names are
   deduplicated (a project copy wins over a library one — the same precedence
   the analysis itself applied), and the box is enabled from a LIVE query rather
   than a snapshot, since a background analysis can finish while the dialog is
@@ -1226,8 +1226,14 @@ Still open, roughly in the order we're tackling it:
 - ~~**Recent projects on `Open Project...` (split button).**~~ **Done on
   2026-07-31** (`PasTreeDemo.Settings`). `Open Project...` is a real
   `bsSplitButton`, so its primary half still browses and Windows handles the
-  arrow; the drop-down lists the last 10, most-recent-first, deduped by full
-  path. The `.ini` sits beside the executable and carries the sticky settings
+  arrow; the drop-down lists the last **20** (2026-08-07; ten before),
+  most-recent-first, deduped by full path and numbered 1..N in that order. The
+  numbers used to be `(index + 1) mod 10`, which was reaching for a
+  single-digit accelerator and, past ten entries, printed 1..9, 0, 1..9 again —
+  numbers that repeat and appear to run backwards at the tenth row. The
+  accelerator is kept only where it is unambiguous, the first nine: `&10` binds
+  the key `1`, which row 1 already owns, and Windows resolves that by cycling
+  rather than choosing. The `.ini` sits beside the executable and carries the sticky settings
   too (highlighter, threading, highlight colour) — but NOT the platform, which
   `OpenProject` sets from the `.dproj` and would overwrite before it was ever
   seen. A missing file stays REMEMBERED and is only left out of the menu, so a

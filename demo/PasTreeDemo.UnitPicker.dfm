@@ -41,14 +41,14 @@ object frmUnitPicker: TfrmUnitPicker
     DesignSize = (
       484
       36)
-    object chkUses: TCheckBox
+    object chkImplicits: TCheckBox
       Left = 8
       Top = 9
-      Width = 81
+      Width = 97
       Height = 21
-      Caption = 'Uses Units'
+      Caption = 'Implicit Units'
       TabOrder = 0
-      OnClick = chkUsesClick
+      OnClick = chkImplicitsClick
     end
     object btnOK: TButton
       Left = 274

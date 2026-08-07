@@ -1,4 +1,4 @@
-unit PasTreeDemo.Settings;
+﻿unit PasTreeDemo.Settings;
 
 {
   PasTree demo — persisted settings, in a plain .ini next to the executable.
@@ -34,9 +34,11 @@ uses
   System.SysUtils, System.Classes, System.IniFiles;
 
 const
-  // Ten is what fits a drop-down without scrolling and covers a working week
-  // of projects; the cap is applied on ADD, so the file never grows unbounded.
-  RECENT_MAX = 10;
+  // Twenty still fits a drop-down without scrolling on any usable screen, and
+  // covers more than the working week ten did — the list is the fastest way
+  // back into a project that was open two days ago. The cap is applied on ADD,
+  // so the file never grows unbounded whatever this is set to.
+  RECENT_MAX = 20;
 
 type
   TDemoSettings = class

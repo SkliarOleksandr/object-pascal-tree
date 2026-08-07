@@ -12,18 +12,18 @@ object frmMain: TfrmMain
   Font.Style = []
   KeyPreview = True
   Position = poScreenCenter
+  ShowHint = True
   OnCreate = FormCreate
   OnDestroy = FormDestroy
   OnKeyDown = FormKeyDown
   TextHeight = 15
   object splLeft: TSplitter
     Left = 260
-    Top = 41
+    Top = 73
     Width = 4
-    Height = 511
+    Height = 479
     Color = clAppWorkSpace
     ParentColor = False
-    ExplicitHeight = 524
   end
   object splBottom: TSplitter
     Left = 0
@@ -34,7 +34,6 @@ object frmMain: TfrmMain
     Align = alBottom
     Color = clAppWorkSpace
     ParentColor = False
-    ExplicitTop = 508
   end
   object pnlTop: TPanel
     Left = 0
@@ -50,6 +49,7 @@ object frmMain: TfrmMain
       Width = 120
       Height = 27
       Caption = 'Open Project...'
+      Style = bsSplitButton
       TabOrder = 0
       OnClick = btnOpenClick
     end
@@ -80,9 +80,8 @@ object frmMain: TfrmMain
       Top = 40
       Width = 120
       Height = 27
-      Action = NavBackAction
       Hint = 'Back (Alt+Left, or the mouse'#39's back button)'
-      ShowHint = True
+      Action = NavBackAction
       TabOrder = 10
     end
     object btnNavForward: TButton
@@ -90,9 +89,8 @@ object frmMain: TfrmMain
       Top = 40
       Width = 120
       Height = 27
-      Action = NavForwardAction
       Hint = 'Forward (Alt+Right, or the mouse'#39's forward button)'
-      ShowHint = True
+      Action = NavForwardAction
       TabOrder = 11
     end
     object cbConfig: TComboBox
@@ -145,6 +143,7 @@ object frmMain: TfrmMain
       Top = 9
       Width = 140
       Height = 22
+      Selected = clScrollBar
       Style = [cbCustomColors]
       TabOrder = 6
       OnChange = cbHighlightColorChange
@@ -173,8 +172,8 @@ object frmMain: TfrmMain
       Top = 7
       Width = 120
       Height = 27
-      Action = ViewUnitAction
       Hint = 'View Unit (Ctrl+F12)'
+      Action = ViewUnitAction
       ShowHint = True
       TabOrder = 12
     end
@@ -189,10 +188,10 @@ object frmMain: TfrmMain
     Header.AutoSizeIndex = 0
     Header.Height = 15
     Header.MainColumn = -1
+    PopupMenu = FilesPopupMenu
     TabOrder = 1
     OnChange = vstFilesChange
     OnGetText = vstFilesGetText
-    PopupMenu = FilesPopupMenu
     Touch.InteractiveGestures = [igPan, igPressAndTap]
     Touch.InteractiveGestureOptions = [igoPanSingleFingerHorizontal, igoPanSingleFingerVertical, igoPanInertia, igoPanGutter, igoParentPassthrough]
     Columns = <>
@@ -222,7 +221,7 @@ object frmMain: TfrmMain
         Height = 17
         Hint =
           'Show every diagnostic the analysis produced, including an unresolv' +
-          'ed member after a dot. Filters this list only — nothing is re-anal' +
+          'ed member after a dot. Filters this list only - nothing is re-anal' +
           'yzed.'
         Caption = 'Show Errors'
         ParentShowHint = False
@@ -411,7 +410,7 @@ object frmMain: TfrmMain
     object OpenFileAtCursorAction: TAction
       Caption = 'Open File at Cursor'
       Hint =
-        'Opens the unit or include file named at the caret — a `uses` item, ' +
+        'Opens the unit or include file named at the caret - a `uses` item, ' +
         'an {$I ...} directive, or a path in a string'
       OnExecute = OpenFileAtCursorActionExecute
       OnUpdate = OpenFileAtCursorActionUpdate

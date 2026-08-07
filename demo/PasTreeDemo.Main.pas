@@ -2535,14 +2535,13 @@ procedure TfrmMain.SetupRecentMenu;
 begin
   FRecentMenu := TPopupMenu.Create(Self);
   FRecentMenu.OnPopup := RecentMenuPopup;
-  btnOpen.Style := bsSplitButton;
   btnOpen.DropDownMenu := FRecentMenu;
 end;
 
 // Rebuilt on every drop, not kept in sync as projects are opened: the list is
-// at most ten items, and the alternative is remembering to touch the menu
-// everywhere a project can be opened (the browse dialog, the .dpk buttons, the
-// RTL/VCL/FMX shortcuts, the startup sample).
+// RECENT_MAX items at most, and the alternative is remembering to touch the
+// menu everywhere a project can be opened (the browse dialog, the .dpk
+// buttons, the RTL/VCL/FMX shortcuts, the startup sample).
 procedure TfrmMain.RecentMenuPopup(Sender: TObject);
 var
   LItem: TMenuItem;
@@ -2563,10 +2562,26 @@ begin
   for LIdx := 0 to High(LPaths) do
   begin
     LItem := TMenuItem.Create(FRecentMenu);
-    // File name first, directory after: ten full paths into a component tree
-    // are unreadable, and the leaf is what tells them apart.
-    LItem.Caption := Format('&%d  %s', [(LIdx + 1) mod 10,
-      TPath.GetFileName(LPaths[LIdx])]) + '   ' +
+    // Numbered 1..N in list order, plainly. It used to be `(LIdx + 1) mod 10`,
+    // which was reaching for a single-digit ACCELERATOR and, once the list
+    // grew past ten, printed 1..9, 0, then 1..9 again: numbers that repeat and
+    // appear to run backwards at the tenth row.
+    //
+    // The accelerator is what the `&` was for, so it is kept exactly where it
+    // is unambiguous — the first nine. `&10` would bind the key `1`, which
+    // item 1 already owns, and Windows resolves such a clash by cycling rather
+    // than choosing: a shortcut that opens the wrong project half the time is
+    // worse than no shortcut on that row.
+    //
+    // File name first, directory after: twenty full paths into a component
+    // tree are unreadable, and the leaf is what tells them apart.
+    if LIdx < 9 then
+      LItem.Caption := Format('&%d  %s', [LIdx + 1,
+        TPath.GetFileName(LPaths[LIdx])])
+    else
+      LItem.Caption := Format('%d  %s', [LIdx + 1,
+        TPath.GetFileName(LPaths[LIdx])]);
+    LItem.Caption := LItem.Caption + '   ' +
       TPath.GetDirectoryName(LPaths[LIdx]);
     LItem.Hint := LPaths[LIdx];
     LItem.Tag := LIdx;

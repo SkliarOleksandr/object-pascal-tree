@@ -1,4 +1,4 @@
-unit PasTreeDemo.UnitPicker;
+﻿unit PasTreeDemo.UnitPicker;
 
 {
   PasTree demo — the View Unit dialog (Ctrl+F12).
@@ -50,7 +50,7 @@ type
     edFilter: TEdit;
     lbUnits: TListBox;
     pnlButtons: TPanel;
-    chkUses: TCheckBox;
+    chkImplicits: TCheckBox;
     btnOK: TButton;
     btnCancel: TButton;
     sbStatus: TStatusBar;
@@ -62,7 +62,7 @@ type
     procedure lbUnitsDblClick(Sender: TObject);
     procedure lbUnitsDrawItem(AControl: TWinControl; AIndex: Integer;
       ARect: TRect; AState: TOwnerDrawState);
-    procedure chkUsesClick(Sender: TObject);
+    procedure chkImplicitsClick(Sender: TObject);
     procedure btnOKClick(Sender: TObject);
   private
     FTimer: TTimer;
@@ -139,9 +139,9 @@ begin
   LUses := nil;
   if Assigned(FSource.ProjectFiles) then
     LProject := FSource.ProjectFiles();
-  if chkUses.Checked and Assigned(FSource.UsesFiles) then
+  if chkImplicits.Checked and Assigned(FSource.UsesFiles) then
     LUses := FSource.UsesFiles();
-  FAll := BuildUnitList(LProject, LUses, chkUses.Checked);
+  FAll := BuildUnitList(LProject, LUses, chkImplicits.Checked);
   Refilter;
 end;
 
@@ -250,7 +250,7 @@ begin
   LCanvas.TextOut(ARect.Left + 6, LTop, FShown[AIndex].Directory);
 end;
 
-procedure TfrmUnitPicker.chkUsesClick(Sender: TObject);
+procedure TfrmUnitPicker.chkImplicitsClick(Sender: TObject);
 begin
   Rebuild;
 end;
@@ -260,13 +260,13 @@ var
   LReady: Boolean;
 begin
   LReady := Assigned(FSource.UsesReady) and FSource.UsesReady();
-  if chkUses.Enabled = LReady then
+  if chkImplicits.Enabled = LReady then
     Exit;
-  chkUses.Enabled := LReady;
+  chkImplicits.Enabled := LReady;
   if LReady then
-    chkUses.Hint := ''
+    chkImplicits.Hint := ''
   else
-    chkUses.Hint := 'Available once the project analysis has finished';
+    chkImplicits.Hint := 'Available once the project analysis has finished';
   // A finished analysis while the box was ticked-and-disabled cannot happen
   // (it can only be ticked while enabled), so there is nothing to rebuild.
 end;
