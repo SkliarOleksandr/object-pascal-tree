@@ -3129,12 +3129,16 @@ begin
       // under its name like any routine, though, so `TRegistry.Create` — with
       // a private class constructor declared fourteen lines above the public
       // parameterless one — found it and stopped. Advance along the overload
-      // chain instead. Gated on there BEING a chain, so the overwhelmingly
-      // common single-declaration member never pays the token test.
-      if (LFound <> NIL_SYM) and
-         (LM.Symbols[LFound].NextOverload <> NIL_SYM) then
-        while (LFound <> NIL_SYM) and IsClassCtorDtorSym(LCur.UnitId, LFound) do
-          LFound := LM.Symbols[LFound].NextOverload;
+      // chain instead, and when the chain holds nothing else, fall through to
+      // the ANCESTOR walk rather than returning it: with a class constructor as
+      // a class's only own `Create`, the name means the inherited constructor
+      // (`FEngineClass.Create` on TCustomStyleEngine, whose only `Create` is a
+      // strict private class one — dcc-probed, it resolves to TObject's).
+      //
+      // The cost is one Aux read for a member hit that is a routine; the token
+      // text is only reached for a `class` routine, which is rare enough.
+      while (LFound <> NIL_SYM) and IsClassCtorDtorSym(LCur.UnitId, LFound) do
+        LFound := LM.Symbols[LFound].NextOverload;
       if LFound <> NIL_SYM then
       begin
         AMemMid := LCur.UnitId;
@@ -3520,6 +3524,47 @@ var
     Result := LNewExt.TryGetValue(N, AExt) or LM.ExtRefMap.TryGetValue(N, AExt);
   end;
 
+  { Is N a bare designator naming a PROCEDURE — a routine with no result?
+
+    Such an argument is a method VALUE and nothing else. It cannot be the
+    implicit call that lets a procedural argument meet an ordinary parameter
+    (that rule needs a FUNCTION and its result), so it rejects a non-procedural
+    parameter exactly as an anonymous-method literal does. `TThread
+    .Synchronize(nil, DoProvide)` in System.Net.URLClient is the shape: without
+    this, the private `(ASyncRec: PSynchronizeRecord; QueueEvent: Boolean =
+    False; ...)` still ties on arity with the public `(const AThread: TThread;
+    AMethod: TThreadMethod)`.
+
+    A CALL is not a designator — `F(X)` has an nkCall parent — so the test is on
+    the node kind first, and a routine symbol with a TypeNode (a function) is
+    excluded. }
+  function IsProcedureDesignator(N: Integer): Boolean;
+  var
+    LSym, LName: Integer;
+    LExt: TPasExtRef;
+  begin
+    Result := False;
+    if not (LM.Tree.Nodes[N].Kind in [nkIdent, nkMember]) then
+      Exit;
+    LName := N;
+    if LM.Tree.Nodes[N].Kind = nkMember then
+    begin
+      LName := LM.Tree.Nodes[N].FirstChild;
+      while (LName <> NIL_NODE) and
+            (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
+        LName := LM.Tree.Nodes[LName].NextSibling;
+      if LName = NIL_NODE then
+        Exit;
+    end;
+    LSym := LM.RefMap[LName];
+    if LSym <> NIL_SYM then
+      Result := (LM.Symbols[LSym].Kind = skRoutine) and
+                (LM.Symbols[LSym].TypeNode = NIL_NODE)
+    else if ExtOf(LName, LExt) then
+      Result := (FModels[LExt.UnitId].Symbols[LExt.Sym].Kind = skRoutine) and
+                (FModels[LExt.UnitId].Symbols[LExt.Sym].TypeNode = NIL_NODE);
+  end;
+
   // Does N name a TYPE rather than a value? Same question SelectCallTarget's
   // own class-vs-instance test asks, and the same two maps answer it.
   function IsTypeDesignator(N: Integer): Boolean;
@@ -3656,9 +3701,11 @@ var
       // PARAMETERLESS function reference in a value position is CALLED (which
       // is why a tcProc argument in general may legitimately meet a Boolean
       // parameter — see the E2012 entry). A literal cannot be called that way.
-      if (LM.Tree.Nodes[LArg].Kind = nkAnonMethod) and XValid(LParX) and
+      if XValid(LParX) and
          not (XCatOf(LParX) in [tcProc, tcVariant, tcUnknown]) and
-         (FModels[LParX.UnitId].Symbols[LParX.Sym].Kind <> skGenericParam) then
+         (FModels[LParX.UnitId].Symbols[LParX.Sym].Kind <> skGenericParam) and
+         ((LM.Tree.Nodes[LArg].Kind = nkAnonMethod) or
+          IsProcedureDesignator(LArg)) then
         Exit(-1);
       if XValid(LArgX) and XValid(LParX) then
         if XSameType(LParX, LArgX) then
@@ -3771,6 +3818,22 @@ var
     if LM.Tree.Nodes[ACalleeNode].Kind = nkMember then
     begin
       LQBase := LM.Tree.Nodes[ACalleeNode].FirstChild;
+      // A qualifier may itself be dotted — `System.TMonitor.Enter(X)` writes the
+      // type as UNIT.TYPE, so the base is another nkMember and neither map has
+      // anything for that node. Its LAST segment is the type name, and reading
+      // it is what keeps the class-vs-instance rule working there: without this
+      // the private instance `function Enter(Timeout: Cardinal): Boolean` was a
+      // candidate again, and its arity tied with the public class procedure.
+      // System.Types and Vcl.Controls both spell it that way.
+      if (LQBase <> NIL_NODE) and (LM.Tree.Nodes[LQBase].Kind = nkMember) then
+      begin
+        LQSym := LM.Tree.Nodes[LQBase].FirstChild;
+        while (LQSym <> NIL_NODE) and
+              (LM.Tree.Nodes[LQSym].NextSibling <> NIL_NODE) do
+          LQSym := LM.Tree.Nodes[LQSym].NextSibling;
+        if LQSym <> NIL_NODE then
+          LQBase := LQSym;
+      end;
       if LQBase <> NIL_NODE then
       begin
         LQSym := LM.RefMap[LQBase];
@@ -4483,6 +4546,22 @@ begin
     Exit;   // not a struct member after all: nothing to enforce
   LM := FModels[AId];
   LHere := StructSymOfNode(LM, ANameNode);
+  if LHere = NIL_SYM then
+  begin
+    // The site may be in a type DECLARATION rather than a method body, and
+    // StructSymOfNode deliberately answers NIL there (its own comment gives the
+    // ordering reason). A field declared with its own class's strict private
+    // NESTED type is exactly that shape — `FGlow: TSystemTitlebarButton
+    // .TGlowWindow` inside TSystemTitlebarButton (Vcl.TitleBarCtrls) — and
+    // refusing it was this check reporting a class for using its own member.
+    // DeclStructsOfNode answers the same question for declaration sites,
+    // innermost first, which is the one wanted here.
+    for var LDeclStruct in DeclStructsOfNode(LM, ANameNode) do
+    begin
+      LHere := LDeclStruct;
+      Break;
+    end;
+  end;
   if LVis = svPrivate then
   begin
     if AMemMid = AId then

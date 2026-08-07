@@ -3131,6 +3131,74 @@ begin
     '  LD := TDesc.Create(7);'#10 +           // the INHERITED TBase.Create
     'end;'#10 +
     'end.'#10);
+  { The four the LAST twelve reports turned out to be, read one site at a time.
+    Same lesson as the round before: all four are binding, none is visibility. }
+  TFile.WriteAllText(TPath.Combine(LDir, 'VTMore.pas'),
+    'unit VTMore;'#10'interface'#10 +
+    'type'#10 +
+    '  TMon = class'#10 +
+    '  private'#10 +
+    '    function Take(ATimeout: Cardinal): Boolean; overload;'#10 +
+    '  public'#10 +
+    '    class procedure Take(const AObj: TObject); overload;'#10 +
+    '  end;'#10 +
+    '  TSelf = class'#10 +
+    '  strict private type'#10 +
+    '    TGlow = class'#10 +
+    '    end;'#10 +
+    '  private'#10 +
+    '    FGlow: TSelf.TGlow;'#10 +      // own strict private nested type
+    '  end;'#10 +
+    '  TOnlyClassCtor = class(TObject)'#10 +
+    '  strict private'#10 +
+    '    class constructor Create;'#10 +  // its ONLY own Create
+    '  end;'#10 +
+    '  TSyncer = class'#10 +
+    '  private'#10 +
+    '    class procedure Go(ARec: Pointer; AQ: Boolean = False); overload;'#10 +
+    '  public'#10 +
+    '    class procedure Go(const AObj: TObject; AProc: TProc); overload;'#10 +
+    '  end;'#10 +
+    '  TProc = procedure of object;'#10 +
+    'implementation'#10 +
+    'function TMon.Take(ATimeout: Cardinal): Boolean;'#10'begin Result := False; end;'#10 +
+    'class procedure TMon.Take(const AObj: TObject);'#10'begin end;'#10 +
+    'class constructor TOnlyClassCtor.Create;'#10'begin end;'#10 +
+    'class procedure TSyncer.Go(ARec: Pointer; AQ: Boolean);'#10'begin end;'#10 +
+    'class procedure TSyncer.Go(const AObj: TObject; AProc: TProc);'#10'begin end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'VTMoreUse.pas'),
+    'unit VTMoreUse;'#10'interface'#10'uses VTMore;'#10 +
+    'type'#10 +
+    '  TDriver = class'#10 +
+    '    FKlass: class of TOnlyClassCtor;'#10 +
+    '    procedure Run;'#10 +
+    '    procedure Step;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TDriver.Step;'#10'begin end;'#10 +
+    'procedure TDriver.Run;'#10 +
+    'var'#10 +
+    '  LO: TObject;'#10 +
+    'begin'#10 +
+    '  LO := nil;'#10 +
+    '  VTMore.TMon.Take(LO);'#10 +      // a UNIT-qualified type qualifier
+    '  LO := FKlass.Create;'#10 +       // class ref, own Create not callable
+    '  TSyncer.Go(nil, Step);'#10 +     // a PROCEDURE designator, not a literal
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportVisibility := True;
+    GProj.AnalyzeDirectory(LDir);
+    Ok('vistail: a UNIT-qualified type still rejects an instance method',
+      DiagCount(ModelByName('vtmoreuse'), 'E2361') = 0);
+    Ok('vistail: a class''s OWN strict private nested type is reachable',
+      DiagCount(ModelByName('vtmore'), 'E2361') = 0);
+  finally
+    GProj.Free;
+  end;
+
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
     GProj.ReportVisibility := True;

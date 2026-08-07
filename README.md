@@ -574,9 +574,10 @@ Still open, roughly in the order we're tackling it:
   with `Aux = 1` on its `nkRoutine` (6.1), and a CONSTRUCTOR counts as callable
   on the type because `TFoo.Create(...)` is how one is called.
 
-  **Then the tail, worked one site at a time on 2026-08-07: 52 → 6 on rtlflat
-  and 111 → 12 on bigflat.** Four causes, and not one of them was a visibility
-  rule — the flag has now said the same thing about every flood it has produced:
+  **Then the tail, worked one site at a time on 2026-08-07: 546 → 2 on rtlflat
+  and 998 → 2 on bigflat, in two rounds.** Eight causes between them, and not
+  one was a visibility rule — the flag has now said the same thing about every
+  flood it has produced. The first four:
 
   - **an anonymous method LITERAL rejects a candidate outright** (41 of
     bigflat's 111). `TThread.Synchronize(nil, procedure ... end)` fits the
@@ -610,9 +611,40 @@ Still open, roughly in the order we're tackling it:
     candidates. One `FindMemberX` from the owner's ancestor, run only when
     nothing fit, which keeps it off the common path.
 
-  What still reports, 12 on bigflat: `TMonitor.Enter` (4), `TThread.Synchronize`
-  (3), `TStringHelper.IndexOfAny` (2), three singletons. Small enough to read
-  end to end, which is where the next session on this should start.
+  **The last twelve, read end to end the same day: 6 → 2 on rtlflat and 12 → 2
+  on bigflat.** Four more causes, four more binding gaps:
+
+  - **a UNIT-QUALIFIED type is still a type qualifier.** `System.TMonitor
+    .Enter(X)` writes the type as `UNIT.TYPE`, so the callee's qualifier is
+    itself an `nkMember` and neither map holds anything for that node — the
+    class-vs-instance test read nothing and let the private INSTANCE `Enter`
+    back in. Its last segment is the type name.
+  - **a `class constructor` that is a class's ONLY own `Create` must not end the
+    member walk.** The overload-chain skip added an hour earlier only helped
+    where there WAS a chain; `FEngineClass.Create` (Vcl.Themes, through a class
+    reference) has one strict private class constructor and nothing else, so the
+    walk has to carry on to the ancestor — dcc-probed, that call is TObject's.
+  - **a declaration site is inside its own type.** `FGlow: TSystemTitlebarButton
+    .TGlowWindow` declared IN `TSystemTitlebarButton`, whose `TGlowWindow` is
+    `strict private type` — `StructSymOfNode` deliberately answers NIL for a
+    node in a type declaration, so the check thought the class was an outsider
+    to itself. `DeclStructsOfNode` answers for declaration sites.
+  - **a PROCEDURE designator rejects a non-procedural parameter**, the same rule
+    as the anonymous-method literal and for the same reason one step on:
+    `TThread.Synchronize(nil, DoProvide)` passes a method VALUE, and the implicit
+    call that lets a procedural argument meet an ordinary parameter needs a
+    FUNCTION and its result. A procedure has none.
+
+  What still reports is **two sites, the same one twice**:
+  `AURIStr.IndexOfAny(['@', '/', '\', '?', '#'], Pos, Limit + 1 - Pos)`, where
+  `TStringHelper` declares `IndexOfAny(const Values: array of string; var Index:
+  Integer; StartIndex: Integer)` beside the public `(const AnyOf: array of Char;
+  StartIndex, Count: Integer)`. Same arity, and both parameters accept what is
+  written — a one-character literal is assignment-compatible with `string` too,
+  so this is dcc PREFERRING the exact element type, not rejecting the other. It
+  therefore needs the bracket constructor's ELEMENTS typed and the open-array
+  parameter's element type scored, which is the general typing work the entry
+  below names and not another special case.
 
   Still not covered, and each named rather than approximated: `protected` /
   `strict protected` (`E2362`, needs an ancestry walk to answer "is the accessing
