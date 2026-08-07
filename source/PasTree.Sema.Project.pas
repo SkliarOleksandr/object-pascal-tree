@@ -275,6 +275,7 @@ type
       ASym: Integer): TArray<TArray<Integer>>;
     function RealGenericBase(const AX: TSemaXType): TSemaXType;
     function ConstraintOfParamX(const AParam: TSemaXType): TSemaXType;
+    function RoutineNameOfParam(AMid, ANode: Integer): string;
     function XDescendsFrom(const ADesc, ABase: TSemaXType): Boolean;
     procedure CheckConstraints(AId: Integer);
     function DeclTypeX(AMid, ASym: Integer): TSemaXType;
@@ -2011,7 +2012,7 @@ function TPasSemaProject.ConstraintOfParamX(
   const AParam: TSemaXType): TSemaXType;
 var
   LM: TPasSemaModel;
-  LDecl, LGroup, LStruct, LIdx, LScope: Integer;
+  LDecl, LGroup, LStruct, LIdx, LScope, LMethod: Integer;
   LIdents: TArray<Integer>;
   LCons: TArray<TArray<Integer>>;
 
@@ -2122,7 +2123,75 @@ begin
         Result := ClassConstraintX(LCons[LIdx]);
       Exit;
     end;
+  // Still nothing: the parameter belongs to a generic METHOD rather than to the
+  // type (16 §16.2.1), so the constraints are on the method's own declaration —
+  // `function GetNamedObject<T: TRttiNamedObject>(...)` in System.Rtti's
+  // TRttiType, whose body writes a bare `<T>` and then calls `Obj.HasName`.
+  // Find the declaration by NAME in the struct's member scope and read its
+  // parameters the same way; GenericParamIdents already reads a routine's.
+  LMethod := LM.FindLocal(LM.Symbols[LStruct].MemberScope,
+    RoutineNameOfParam(AParam.UnitId, LDecl));
+  while LMethod <> NIL_SYM do
+  begin
+    if LM.Symbols[LMethod].Kind = skRoutine then
+    begin
+      LIdents := GenericParamIdents(AParam.UnitId, LMethod);
+      LCons := GenericParamConstraints(AParam.UnitId, LMethod);
+      for LIdx := 0 to High(LIdents) do
+        if (LIdx <= High(LCons)) and
+           (LM.Tree.NodeNameLower(LIdents[LIdx]) =
+            LM.Symbols[AParam.Sym].NameLower) then
+        begin
+          Result := FirstTypeConstraint(LCons[LIdx]);
+          if not XValid(Result) then
+            Result := ClassConstraintX(LCons[LIdx]);
+          Exit;
+        end;
+    end;
+    LMethod := LM.Symbols[LMethod].NextOverload;
+  end;
   Result := XNil;
+end;
+
+{ The NAME of the routine whose generic-parameter list ANode sits in, lowered.
+  ANode is the parameter's own ident, so the walk is group -> list -> routine,
+  and the routine's name may be qualified (`TRttiType.GetNamedObject`) — the
+  LAST segment is the method's own name. '' when the shape is anything else. }
+function TPasSemaProject.RoutineNameOfParam(AMid, ANode: Integer): string;
+var
+  LM: TPasSemaModel;
+  LGroup, LList, LRoutine, LChild, LName: Integer;
+begin
+  Result := '';
+  LM := FModels[AMid];
+  LGroup := LM.Tree.Nodes[ANode].Parent;
+  if LGroup = NIL_NODE then
+    Exit;
+  LList := LM.Tree.Nodes[LGroup].Parent;
+  if (LList = NIL_NODE) or
+     (LM.Tree.Nodes[LList].Kind <> nkGenericParams) then
+    Exit;
+  LRoutine := LM.Tree.Nodes[LList].Parent;
+  if (LRoutine = NIL_NODE) or (LM.Tree.Nodes[LRoutine].Kind <> nkRoutine) then
+    Exit;
+  // A qualified implementation name is a FLAT run of nkIdent children —
+  // `TFoo`, `Bar` — and each segment may carry its OWN nkGenericParams right
+  // after it (`TList<T>.Sort`, `TFinder.Pick<T>`). So the owner of this list is
+  // the ident immediately before it, not the first or the last segment: taking
+  // the first answered `TFinder` and looked up a method by the class's name.
+  LName := NIL_NODE;
+  LChild := LM.Tree.Nodes[LRoutine].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LChild = LList then
+      Break;
+    if LM.Tree.Nodes[LChild].Kind = nkIdent then
+      LName := LChild;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+  if (LChild <> LList) or (LName = NIL_NODE) then
+    Exit;
+  Result := LM.Tree.NodeNameLower(LName);
 end;
 
 { Class-inheritance test across models: is ADesc ABase, or a descendant of it?
@@ -2875,21 +2944,31 @@ var
   begin
     LExt.UnitId := AReg.HelperMid;
     LExt.Sym := AReg.Sym;
+    // A concrete type is one identity — but it may ALSO be an alias of a
+    // builtin, and then it is that builtin's identity too (`TUInt32Helper =
+    // record helper for UInt32` in System.Classes, applied to a value declared
+    // `Cardinal`; System.pas says `UInt32 = Cardinal`). So both keys go in, and
+    // TargetName carries the builtin the alias chain ended at.
     if AReg.TargetUnit <> NIL_SYM then
-    begin
-      Put(AReg.TargetUnit, AReg.TargetSym);   // concrete type: one identity
+      Put(AReg.TargetUnit, AReg.TargetSym);
+    if AReg.TargetName = '' then
       Exit;
-    end;
     // Builtin target: re-resolve the NAME in the REFERRING model — its own
     // seeded symbol, plus the real declaration the walk may redirect to
     // (ResolveRealDecl — System.pas's TObject for a seeded TObject). Doing
     // both here is what removes the old hot-path by-name fallback probe.
-    LBSym := FModels[AMid].Resolve(FModels[AMid].InterfaceScope,
-      AReg.TargetName);
-    if LBSym <> NIL_SYM then
-      Put(AMid, LBSym);
-    if ResolveRealDecl(AMid, AReg.TargetName, LRMid, LRSym) then
-      Put(LRMid, LRSym);
+    //
+    // Every name in the ALIAS GROUP, because the seeds are distinct symbols
+    // for one type: a helper for Cardinal must answer for a `LongWord` value
+    // too, and dcc says so (see PasBuiltinAliasGroup).
+    for var LAlias in PasBuiltinAliasGroup(AReg.TargetName) do
+    begin
+      LBSym := FModels[AMid].Resolve(FModels[AMid].InterfaceScope, LAlias);
+      if LBSym <> NIL_SYM then
+        Put(AMid, LBSym);
+      if ResolveRealDecl(AMid, LAlias, LRMid, LRSym) then
+        Put(LRMid, LRSym);
+    end;
   end;
 
 begin
@@ -2945,7 +3024,43 @@ begin
       begin
         LReg.TargetUnit := LX.UnitId;
         LReg.TargetSym := LX.Sym;
+        // ...and, if that named type is an ALIAS chain ending at a builtin,
+        // the builtin's name as well: `helper for UInt32` extends Cardinal
+        // values, since that is the same type and not a compatible one.
         LReg.TargetName := '';
+        var LCanon := LX;
+        for var LHop := 1 to 8 do
+        begin
+          var LCDef := TypeDefNodeOf(LCanon.UnitId, LCanon.Sym);
+          if LCDef = NIL_NODE then
+            Break;
+          if not (FModels[LCanon.UnitId].Tree.Nodes[LCDef].Kind in
+             [nkIdent, nkMember]) then
+            Break;
+          // `T = type Base` (2 §2.5.1) declares a DISTINCT type, and a helper
+          // for it is NOT a helper for Base. The parser marks the nkTypeDecl
+          // with Aux = 1, which is the whole difference between the two forms
+          // here. Missing it cost 17 false reports in one measurement:
+          // `TEditMask = type string` with its own helper claimed the `string`
+          // key in FMX.MaskEdit and hid TStringHelper, so ordinary
+          // `NewText.Substring` stopped resolving — a helper made INACTIVE by
+          // registering another one too widely.
+          var LCParent := FModels[LCanon.UnitId].Tree.Nodes[LCDef].Parent;
+          if (LCParent <> NIL_NODE) and
+             (FModels[LCanon.UnitId].Tree.Nodes[LCParent].Kind = nkTypeDecl) and
+             (FModels[LCanon.UnitId].Tree.Nodes[LCParent].Aux = 1) then
+            Break;
+          LCanon := ResolveTypeExpr(LCanon.UnitId, LCDef);
+          if not XValid(LCanon) then
+            Break;
+          if FModels[LCanon.UnitId].Symbols[LCanon.Sym].Kind =
+             skBuiltinType then
+          begin
+            LReg.TargetName :=
+              FModels[LCanon.UnitId].Symbols[LCanon.Sym].NameLower;
+            Break;
+          end;
+        end;
       end;
       // Interface-section helpers export, however deeply nested (15.3.4);
       // an implementation-section one stays unit-local. The scope chain

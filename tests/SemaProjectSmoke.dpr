@@ -2809,6 +2809,112 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { Builtin ALIAS identity, and the distinct type that must not be caught by it.
+    dcc32 37.0-probed: a `record helper for Cardinal` applies to values declared
+    `Cardinal`, `LongWord` and `UInt32` (System.pas: `UInt32 = Cardinal`) alike,
+    and is `E2671` on an `Integer` — identity, not compatibility. But
+    `TEditMask = type string` (System.MaskUtils) declares a DISTINCT type, so
+    ITS helper is not a string helper: registering it as one hid TStringHelper
+    in FMX.MaskEdit and cost 17 false reports in the measurement that caught it.
+
+    The negative is the whole point here, so it is asserted as a live binding
+    rather than as silence. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_alias');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ALHelp.pas'),
+    'unit ALHelp;'#10'interface'#10 +
+    'type'#10 +
+    '  TMyStr = type string;'#10 +          // DISTINCT: not string
+    '  TCardHelp = record helper for Cardinal'#10 +
+    '    function Twice: Cardinal;'#10 +
+    '  end;'#10 +
+    '  TStrHelp = record helper for string'#10 +
+    '    function Doubled: string;'#10 +
+    '  end;'#10 +
+    '  TMyStrHelp = record helper for TMyStr'#10 +
+    '    function Mine: string;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TCardHelp.Twice: Cardinal;'#10'begin Result := Self; end;'#10 +
+    'function TStrHelp.Doubled: string;'#10'begin Result := Self; end;'#10 +
+    'function TMyStrHelp.Mine: string;'#10'begin Result := ''''; end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ALUse.pas'),
+    'unit ALUse;'#10'interface'#10'uses ALHelp;'#10 +
+    'procedure P;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var'#10 +
+    '  LW: LongWord;'#10 +
+    '  LS: string;'#10 +
+    'begin'#10 +
+    '  LW := LW.Twice;'#10 +            // Cardinal helper on a LongWord value
+    '  LS := LS.Doubled;'#10 +          // the string helper must still apply
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    var LAL := ModelByName('aluse');
+    Ok('alias: a builtin helper answers for every name of the same type',
+      DiagCount(LAL, 'E2003') = 0);
+    Ok('alias: ...and the `type string` helper did NOT claim string',
+      CrossRefTo(LAL, 'Doubled', 'Doubled'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  { 16.2.1: a generic METHOD's constraints live on its own declaration, and the
+    body repeats a bare `<T>` — the same rule as a generic TYPE's, one level in.
+    System.Rtti's `GetNamedObject<T: TRttiNamedObject>` is the shape; its body
+    calls `Obj.HasName`, the last two member reports the RTL package had.
+
+    The qualified implementation name is a FLAT run of idents, each able to
+    carry its own parameter list, so the owner of a list is the ident right
+    BEFORE it — the first segment would answer with the class's name. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_genmethod');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'GMHost.pas'),
+    'unit GMHost;'#10'interface'#10 +
+    'type'#10 +
+    '  TNamed = class'#10 +
+    '    function HasName(const A: string): Boolean;'#10 +
+    '  end;'#10 +
+    '  TFinder = class'#10 +
+    '    function Pick<T: TNamed>(const A: string): T;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TNamed.HasName(const A: string): Boolean;'#10 +
+    'begin Result := A = ''''; end;'#10 +
+    'function TFinder.Pick<T>(const A: string): T;'#10 +
+    'var'#10 +
+    '  Obj: T;'#10 +
+    'begin'#10 +
+    '  Obj := nil;'#10 +
+    '  if Obj.HasName(A) then'#10 +
+    '    Exit(Obj);'#10 +
+    '  Result := nil;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    Ok('genmethod: a generic METHOD''s body reaches its own constraint',
+      DiagCount(ModelByName('gmhost'), 'E2003') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   { A helper on a BUILTIN-typed value whose type came from ANOTHER model. Every
     model seeds its own `string` symbol, so `S.Trim` on a local (this model's
     seed) and `Give(S).Trim` on a third unit's function result (that unit's

@@ -21,10 +21,42 @@ uses
 function SeedSystemScope(AModel: TPasSemaModel;
   APlatform: TPasPlatform = pfWin32): Integer;
 
+{ The seeded names that denote ONE type, as a group — `Cardinal`, `LongWord` and
+  (through System.pas's `UInt32 = Cardinal`) `UInt32` are the same type, not
+  three compatible ones. Returns the group for a name that is in one, and just
+  the name otherwise; the caller therefore never needs to know which.
+
+  dcc32 37.0-probed with a `record helper for Cardinal`: it applies to values
+  declared `Cardinal`, `LongWord` and `UInt32` alike, and is `E2671` on an
+  `Integer` — so this is identity, not assignment compatibility, and the four
+  groups below are exactly the ones a helper crosses. The same probe run for
+  `Integer`/`LongInt`/`Int32`, `Char`/`WideChar` and `string`/`UnicodeString`;
+  `Word` against the Integer helper is the negative that pins the boundary. }
+function PasBuiltinAliasGroup(const ANameLower: string): TArray<string>;
+
 implementation
 
 uses
   PasTree.Ast;
+
+function PasBuiltinAliasGroup(const ANameLower: string): TArray<string>;
+const
+  // Only the SEEDED names need to be here: a real declaration like System.pas's
+  // `UInt32 = Cardinal` is an alias the type walk already follows.
+  CGroups: array[0..3] of TArray<string> = (
+    ['integer', 'longint'],
+    ['cardinal', 'longword'],
+    ['char', 'widechar'],
+    ['string', 'unicodestring']);
+var
+  LIdx, LName: Integer;
+begin
+  for LIdx := 0 to High(CGroups) do
+    for LName := 0 to High(CGroups[LIdx]) do
+      if CGroups[LIdx][LName] = ANameLower then
+        Exit(CGroups[LIdx]);
+  Result := [ANameLower];
+end;
 
 function SeedSystemScope(AModel: TPasSemaModel;
   APlatform: TPasPlatform = pfWin32): Integer;

@@ -359,20 +359,51 @@ Still open, roughly in the order we're tackling it:
   finding** — three mechanisms, not hundreds of cases. **All three are closed
   now**, and what is left is a short tail of unrelated shapes:
 
-  | corpus | 2026-08-05 | frames | + builtin helpers | + body constraints | + `Create`/`Free` | + seed shadowing | what is left |
-  |---|---|---|---|---|---|---|---|
-  | rtlflat (403) | 8 348 | 104 | 51 | 23 | 6 | **6** | `HasName` ×2, `FromBytes` ×2, 2 singletons |
-  | bigflat (726) | 8 638 | 387 | 194 | 162 | 136 | **110** | `Index`, `Coord`, `Length` |
-  | BuildWinRTL (317) | — | — | 51 | 23 | 5 | **5** | the rtlflat tail, one package |
-  | AVImark client (3747) | 3 609 | not re-measured | | | | | string/Char helpers, DevExpress properties |
-  | Spring.Base (73) | 70 | 60 | 60 | 60 | 60 | **60** | `fPair`, `TValue`/RTTI helpers |
+  | corpus | 2026-08-05 | frames | + builtin helpers | + body constraints | + `Create`/`Free` | + seed shadowing | + alias identity | what is left |
+  |---|---|---|---|---|---|---|---|---|
+  | rtlflat (403) | 8 348 | 104 | 51 | 23 | 6 | 6 | **0** | — |
+  | BuildWinRTL (317) | — | — | 51 | 23 | 5 | 5 | **0** | — |
+  | bigflat (726) | 8 638 | 387 | 194 | 162 | 136 | 110 | **89** | `Index` (20), `Coord` (9), `Text` (8) |
+  | AVImark client (3747) | 3 609 | not re-measured | | | | | | string/Char helpers, DevExpress properties |
+  | Spring.Base (73) | 70 | 60 | 60 | 60 | 60 | 60 | **60** | `fPair`, `TValue`/RTTI helpers |
 
-  rtlflat's last column is the one to read carefully: the seed-shadowing fix
-  changed 14 of its dump lines and none of its six reports. A wrong binding
-  costs no diagnostic — that is the whole reason this table cannot be the only
+  **The RTL reports nothing under the member flag as of 2026-08-07** — the
+  flattened corpus and the real `BuildWinRTL.dpk` both. That is the same bar
+  definition-of-done item 4 sets for E2003, now met by the opt-in check that was
+  written to find what the corpora could not see.
+
+  The seed-shadowing column is the one to read carefully: it changed 14 of
+  rtlflat's dump lines and none of its six reports. A wrong binding costs no
+  diagnostic — that is the whole reason this table cannot be the only
   measurement.
 
-  The three mechanisms, and each was one gap rather than hundreds:
+  The last two causes, both found by running the RTL package once the tail was
+  short enough to read:
+
+  - **a builtin type has several NAMES, and a helper targets the type.**
+    `TUInt32Helper = record helper for UInt32` (System.Classes) must answer for
+    a value declared `Cardinal`; dcc-probed, a Cardinal helper applies to
+    `Cardinal`, `LongWord` and `UInt32` alike and is `E2671` on an `Integer`.
+    Two halves: follow a plain alias (`UInt32 = Cardinal`) to what it names, and
+    group the separately-seeded names by hand (`PasBuiltinAliasGroup`).
+
+    The measurement earned its keep immediately: the first version registered
+    `TEditMask = type string`'s helper under `string` too and **added 17 false
+    reports** while removing 14, because `= type` declares a DISTINCT type and
+    at most one helper is active per type (15 §15.3.3) — so it HID
+    TStringHelper across FMX.MaskEdit. The parser marks that form with `Aux = 1`
+    on the `nkTypeDecl`, which is the whole difference between the two.
+  - **a generic METHOD's constraints are on its own declaration** (16 §16.2.1),
+    where the body repeats a bare `<T>` exactly as a generic type's does.
+    `System.Rtti.GetNamedObject<T: TRttiNamedObject>` calls `Obj.HasName` in its
+    body — the RTL's last two member reports. The parsing detail that decides
+    it: an implementation name is a FLAT run of segments, each able to carry its
+    own parameter list, so the owner of a list is the segment immediately before
+    it. Taking the first segment answers with the CLASS's name, which is what
+    the first attempt did.
+
+  The three mechanisms named when the flag was new, each one gap rather than
+  hundreds:
 
   - ~~**a generic ANCESTOR's member typed by its parameter.**~~ **Fixed
     2026-08-06 — and it took the two flat corpora from 8 300 / 8 590 reports to
