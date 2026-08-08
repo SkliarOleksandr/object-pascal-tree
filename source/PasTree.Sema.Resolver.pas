@@ -1815,6 +1815,38 @@ begin
             if LHead <> NIL_SYM then
               FModel.RefMap[ANode] := LHead;
           end;
+          // Generic-vs-not is only half of 16.1.2: the COUNT is part of the
+          // identity too, and a name declared at two generic arities registers
+          // only its head. `TNodes<T>` and `TNodes<TKey, TValue>` (spring4d's
+          // Spring.Collections.Trees) both declare a nested
+          // `PRedBlackTreeNode`, so binding the qualifier to the wrong arity
+          // silently resolved the wrong nested type — and the only visible
+          // difference was that its node record has `fKey` where the other has
+          // `fPair`. Same walk the qualified-implementation-name case does
+          // above; reached only for a name written WITH type arguments whose
+          // count does not match, so the ordinary reference pays nothing.
+          if not IsBareTypeUse(ANode) then
+          begin
+            var LWantArity := GenericArityOfParamsNode(
+              FTree.Nodes[ANode].Parent);
+            var LBound := FModel.RefMap[ANode];
+            if (LBound <> NIL_SYM) and (LWantArity > 0) and
+               (FModel.Symbols[LBound].Kind = skType) and
+               (GenericArityOfSym(LBound) <> LWantArity) then
+            begin
+              var LAlt := FModel.Symbols[LBound].NextOverload;
+              while LAlt <> NIL_SYM do
+              begin
+                if (FModel.Symbols[LAlt].Kind = skType) and
+                   (GenericArityOfSym(LAlt) = LWantArity) then
+                begin
+                  FModel.RefMap[ANode] := LAlt;
+                  Break;
+                end;
+                LAlt := FModel.Symbols[LAlt].NextOverload;
+              end;
+            end;
+          end;
         end;
         if (FModel.RefMap[ANode] = NIL_SYM) and IsAttributeTypeRef(ANode) then
           FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],

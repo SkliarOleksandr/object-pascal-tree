@@ -629,6 +629,103 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // Two things spring4d needs and nothing else in the corpora does.
+  //
+  // 1. `class helper (X) for T` — the derived helper is the ACTIVE one (at most
+  //    one is, per type), so its ANCESTOR's members are only reachable through
+  //    it. Spring.Reflection declares `TRttiMethodHelper = class helper(Spring
+  //    .TRttiMethodHelper) for TRttiMethod`, and a unit using BOTH units lost
+  //    `ReturnTypeHandle`/`IsAbstract` — a unit using only Spring kept them.
+  // 2. 16.1.2 by COUNT, not just generic-vs-not: `TNodes<T>` and
+  //    `TNodes<TKey, TValue>` both declare a nested `PRedBlackTreeNode`, so
+  //    binding the qualifier to the wrong arity silently resolved the wrong
+  //    nested type — the node records differ only in `fKey` vs `fPair`
+  //    (Spring.Collections.Trees, 16 reports).
+  UNIT_SP_A =
+    'unit SPA;'#10'interface'#10 +
+    'type'#10 +
+    '  TThing = class'#10 +
+    '    Own: Integer;'#10 +
+    '  end;'#10 +
+    '  TThingHelperBase = class helper for TThing'#10 +
+    '    function FromBase: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TThingHelperBase.FromBase: Integer; begin Result := Own; end;'#10 +
+    'end.'#10;
+
+  UNIT_SP_B =
+    'unit SPB;'#10'interface'#10'uses SPA;'#10 +
+    'type'#10 +
+    '  TThingHelperMore = class helper(SPA.TThingHelperBase) for TThing'#10 +
+    '    function FromDerived: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TThingHelperMore.FromDerived: Integer; begin Result := 1; end;'#10 +
+    'end.'#10;
+
+  UNIT_SP_C =
+    'unit SPC;'#10'interface'#10'uses SPA, SPB;'#10 +   // BOTH: SPB's is active
+    'procedure Poke(AThing: TThing);'#10 +
+    'implementation'#10 +
+    'procedure Poke(AThing: TThing);'#10 +
+    'var'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  I := AThing.FromDerived;'#10 +   // the active helper''s own
+    '  I := AThing.FromBase;'#10 +      // ...and its helper ANCESTOR''s
+    '  I := AThing.Own;'#10 +           // ...and the type''s own, still
+    'end;'#10 +
+    'end.'#10;
+
+  UNIT_SP_N =
+    'unit SPN;'#10'interface'#10 +
+    'type'#10 +
+    '  TNodes<T> = record'#10 +
+    '  strict private type'#10 +
+    '    PNode = ^TNode;'#10 +
+    '    TNode = record'#10 +
+    '    private'#10 +
+    '      fKey: T;'#10 +
+    '    end;'#10 +
+    '  public type'#10 +
+    '    PPublicNode = PNode;'#10 +
+    '  end;'#10 +
+    '  TNodes<TKey, TValue> = record'#10 +
+    '  strict private type'#10 +
+    '    PNode = ^TNode;'#10 +
+    '    TNode = record'#10 +
+    '    private'#10 +
+    '      fKeyed: TKey;'#10 +          // the arity-2 side''s DIFFERENT field
+    '    end;'#10 +
+    '  public type'#10 +
+    '    PPublicNode = PNode;'#10 +
+    '  end;'#10 +
+    '  TTree<T> = class'#10 +
+    '  private type'#10 +
+    '    PNode = TNodes<T>.PPublicNode;'#10 +
+    '  protected'#10 +
+    '    function Make1(const key: T): PNode;'#10 +
+    '  end;'#10 +
+    '  TTree<TKey, TValue> = class'#10 +
+    '  private type'#10 +
+    '    PNode = TNodes<TKey, TValue>.PPublicNode;'#10 +
+    '  protected'#10 +
+    '    function Make2(const key: TKey): PNode;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TTree<T>.Make1(const key: T): PNode;'#10 +
+    'begin'#10 +
+    '  Result := nil;'#10 +
+    '  Result.fKey := key;'#10 +
+    'end;'#10 +
+    'function TTree<TKey, TValue>.Make2(const key: TKey): PNode;'#10 +
+    'begin'#10 +
+    '  Result := nil;'#10 +
+    '  Result.fKeyed := key;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // Overload selection between RECORD parameters of one arity, where the two
   // sides name the same type through DIFFERENT symbols. `AL2.TSpot` is an
   // alias of `AL1.TSpot`, so a symbol comparison matches neither candidate,
@@ -916,6 +1013,10 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'HE.pas'), UNIT_HE);
   TFile.WriteAllText(TPath.Combine(LDir, 'GM.pas'), UNIT_GM);
   TFile.WriteAllText(TPath.Combine(LDir, 'GU.pas'), UNIT_GU);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SPA.pas'), UNIT_SP_A);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SPB.pas'), UNIT_SP_B);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SPC.pas'), UNIT_SP_C);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SPN.pas'), UNIT_SP_N);
   TFile.WriteAllText(TPath.Combine(LDir, 'OV.pas'), UNIT_OV);
   TFile.WriteAllText(TPath.Combine(LDir, 'SH.pas'), UNIT_SH);
   TFile.WriteAllText(TPath.Combine(LDir, 'NS.Params.pas'), UNIT_NS_P);
@@ -985,8 +1086,9 @@ begin
     // 19 since GY: the two calls written `Cast<TThing>` / `Fetch<TThing>` add
     // one EXPLICIT method frame each (ExplicitMethodFrame keys them on the
     // routine symbol, exactly as the inferred ones are). 20 since NS.Test:
-    // `TRunner<TMyParams>` is one more instantiation.
-    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '20');
+    // `TRunner<TMyParams>` is one more instantiation. 22 since SPN: the two
+    // `TNodes<...>` arities are two.
+    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '22');
 
     // ---- Cross-unit overload selection by ARGUMENT TYPES ----
     LV := ModelByName('xv');
@@ -1122,6 +1224,25 @@ begin
     // `Alignment: string`, so `.FHorz` had nowhere to resolve.
     Eq('`inherited Alignment` is the ANCESTOR''s (its FHorz resolves)',
       XTypeOf(LE, 'Alignment.FHorz'), 'Integer');
+
+    // ---- a helper's ANCESTOR helper, and arity by COUNT ----
+    LE := ModelByName('spc');
+    Ok('SPC loaded', Assigned(LE));
+    Ok('SPC: no diags at all', Length(LE.Diags) = 0);
+    Eq('the ACTIVE (derived) helper''s own member',
+      XTypeOf(LE, 'AThing.FromDerived'), 'Integer');
+    Eq('...and its helper ANCESTOR''s, reachable only through it (15.3)',
+      XTypeOf(LE, 'AThing.FromBase'), 'Integer');
+    Eq('...and the extended type''s own is still there',
+      XTypeOf(LE, 'AThing.Own'), 'Integer');
+    LE := ModelByName('spn');
+    Ok('SPN loaded', Assigned(LE));
+    Ok('SPN: no diags at all — both arities pick their OWN nested type',
+      Length(LE.Diags) = 0);
+    Eq('arity 1 reaches TNodes<T>''s node record', XTypeOf(LE, 'Result.fKey'),
+      'T');
+    Eq('arity 2 reaches TNodes<TKey,TValue>''s — a DIFFERENT nested type',
+      XTypeOf(LE, 'Result.fKeyed'), 'TKey');
 
     // ---- overload selection across an alias identity ----
     LE := ModelByName('ov');

@@ -301,6 +301,7 @@ type
     function ResolveTypeExprNested(AId, ANode: Integer): TSemaXType;
     procedure BuildHelperMap;
     procedure ClearHelperIdx;
+    function HelperAncestorX(AMid, ASym: Integer): TSemaXType;
     function HelperMemberHit(AFromMid: Integer; const ACur: TSemaXType;
       const ANameLower: string; out AMemMid, AMemSym: Integer): Boolean;
     { ADepth guards the CONSTRAINT hop, which is the one place this function
@@ -3200,6 +3201,7 @@ function TPasSemaProject.HelperMemberHit(AFromMid: Integer;
 var
   LExt: TPasExtRef;
   LScope, LFound, LOwn: Integer;
+  LAnc: TSemaXType;
 begin
   Result := False;
   if (AFromMid < 0) or (AFromMid > High(FHelperIdx)) or
@@ -3231,16 +3233,66 @@ begin
          (Int64(AFromMid) shl 32) or Cardinal(LOwn), LExt) then
       Exit;
   end;
-  LScope := FModels[LExt.UnitId].Symbols[LExt.Sym].MemberScope;
-  if LScope = NIL_SCOPE then
-    Exit;
-  LFound := FModels[LExt.UnitId].FindLocalDeep(LScope, ANameLower);
-  if LFound <> NIL_SYM then
+  // The active helper, then ITS OWN ANCESTOR helpers: `class helper (X) for T`
+  // (15.3) inherits X's members, and since at most one helper is active per
+  // type, the derived one is the ONLY way its ancestor's members can still be
+  // reached. spring4d is exactly this: Spring.Reflection declares
+  // `TRttiMethodHelper = class helper(Spring.TRttiMethodHelper) for
+  // TRttiMethod`, so in any unit that uses BOTH, the active helper is the
+  // derived one and `ReturnTypeHandle`/`IsAbstract` live on its ancestor. A
+  // unit using only Spring resolved them and one using both did not.
+  //
+  // Still no recursive FindMemberX — only helper member scopes are read, and
+  // the walk is depth-capped, so a malformed helper graph cannot cycle.
+  for var LHop := 1 to 8 do
   begin
-    AMemMid := LExt.UnitId;
-    AMemSym := LFound;
-    Result := True;
+    LScope := FModels[LExt.UnitId].Symbols[LExt.Sym].MemberScope;
+    if LScope = NIL_SCOPE then
+      Exit;
+    LFound := FModels[LExt.UnitId].FindLocalDeep(LScope, ANameLower);
+    if LFound <> NIL_SYM then
+    begin
+      AMemMid := LExt.UnitId;
+      AMemSym := LFound;
+      Exit(True);
+    end;
+    LAnc := HelperAncestorX(LExt.UnitId, LExt.Sym);
+    if not XValid(LAnc) or
+       ((LAnc.UnitId = LExt.UnitId) and (LAnc.Sym = LExt.Sym)) then
+      Exit;
+    LExt.UnitId := LAnc.UnitId;
+    LExt.Sym := LAnc.Sym;
   end;
+end;
+
+{ The ANCESTOR helper of a `class helper (X) for T` declaration, XNil when the
+  helper names none. The parser adopts the leading run of type references in
+  source order, so with two of them the FIRST is the ancestor and the LAST is
+  the extended type — the same run BuildHelperMap reads from the other end. }
+function TPasSemaProject.HelperAncestorX(AMid, ASym: Integer): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LDef, LRef, LFirst, LLast: Integer;
+begin
+  Result := XNil;
+  LM := FModels[AMid];
+  LDef := TypeDefNodeOf(AMid, ASym);
+  if (LDef = NIL_NODE) or (LM.Tree.Nodes[LDef].Kind <> nkHelperType) then
+    Exit;
+  LFirst := NIL_NODE;
+  LLast := NIL_NODE;
+  LRef := LM.Tree.Nodes[LDef].FirstChild;
+  while (LRef <> NIL_NODE) and
+        (LM.Tree.Nodes[LRef].Kind in [nkIdent, nkMember, nkTypeArgs]) do
+  begin
+    if LFirst = NIL_NODE then
+      LFirst := LRef;
+    LLast := LRef;
+    LRef := LM.Tree.Nodes[LRef].NextSibling;
+  end;
+  if (LFirst = NIL_NODE) or (LFirst = LLast) then
+    Exit;   // only the `for T` target — no helper ancestor
+  Result := ResolveTypeExprNested(AMid, LFirst);
 end;
 
 // Member lookup by name on a type, following type aliases and the first

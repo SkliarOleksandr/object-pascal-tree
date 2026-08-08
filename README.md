@@ -389,7 +389,9 @@ Still open, roughly in the order we're tackling it:
   | BuildWinFMX (362) | — | — | | | | 89 | **0** | — |
   | AVImark client (3747) | 3 609 | | | | | 824 | **7** | 5 VclTee `F1027` + 2 true positives |
   | AVImarkServer (2121) | | | | | | 56 | **0** | — |
-  | Spring.Base (73) | 70 | 60 | 60 | 60 | 60 | 60 | **60** | `fPair`, `TValue`/RTTI helpers |
+  | Spring.Base (73) | 70 | 60 | 60 | 60 | 60 | 19 | **0** | — |
+  | Spring.Core (121) | | | | | | 27 | **3** | 2 honest `F1027` + 1 `AsType` |
+  | Spring.Data (71) | | | | | | 20 | **1** | the same honest `F1027` |
 
   **Every RTL/VCL/FMX corpus reports NOTHING under the member flag as of
   2026-08-07** — `rtlflat`, `bigflat`, and all three real packages. That is the
@@ -518,6 +520,33 @@ Still open, roughly in the order we're tackling it:
   decidable where the general rule is not: distinct records are not assignable,
   and the one thing that could make them so, a `class operator Implicit` or
   `Explicit`, is a MEMBER and can be looked for.
+
+  **spring4d, 2026-08-08: Base 19 -> 0, Core 27 -> 3, Data 20 -> 1.** Two
+  causes, and both are rules that were right for the shape they were written
+  against and had never met a second one:
+
+  - **16.1.2 by COUNT, not just generic-vs-not** (16 of the 20 on
+    `Spring.Data`). The intra-unit arity rule asked one question — is the name
+    written with type arguments or not — and `TNodes<T>` and `TNodes<TKey,
+    TValue>` are BOTH generic. Only a name's head is registered, so
+    `TNodes<TKey, TValue>.PRedBlackTreeNode` bound the arity-1 declaration's
+    nested type, and both arities declare that name. The wrong node record
+    differs from the right one in exactly one field (`fKey` where the other has
+    `fPair`), which is the whole reason it went unnoticed for so long: nothing
+    fails until a field is read. Same NextOverload walk the
+    qualified-implementation-name case already did.
+  - **a helper's ANCESTOR helper** (3 across `Spring.Core`). `class helper (X)
+    for T` (15.3) inherits X's members, and since at most ONE helper is active
+    per type, the derived one is the only route to them. `Spring.Reflection`
+    declares `TRttiMethodHelper = class helper(Spring.TRttiMethodHelper) for
+    TRttiMethod`; a unit using only `Spring` resolved `ReturnTypeHandle` and one
+    using both did not. `HelperMemberHit` now walks that chain — still reading
+    helper member scopes only, so a malformed helper graph cannot cycle.
+
+  The one left on `Spring.Core` is `TValue.AsType(TypeInfo(T), Result)` inside
+  an anonymous method in a generic method (`Spring.Container.Resolvers`). It
+  reproduces only with the whole real unit — a 25-line reduction of the same
+  shape is clean — so it needs that file bisected.
 
   FMX's 89 were four shapes, and all four are about **what a QUALIFIER means**:
 
