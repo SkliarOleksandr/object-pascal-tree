@@ -2036,7 +2036,7 @@ var
   { EVERY constraint of AGroup that names a type, in source order. All of
     them, not the first: `TKey: IComparable<TKey>, IEquatable<TKey>,
     IHashable` guarantees the members of all three at once (16 §16.4.1), and
-    JclHashMaps calls `AKey.GetHashCode` (the third) and `A.Equals(B)` (the
+    a utility library calls `AKey.GetHashCode` (the third) and `A.Equals(B)` (the
     second) in adjacent methods. }
   function AllTypeConstraints(
     const ANodes: TArray<Integer>): TArray<TSemaXType>;
@@ -2069,7 +2069,7 @@ var
     formality: only a CLASS can satisfy it (16 §16.4.1 — a record has no
     constructor to require), so a `T: constructor` parameter is a class
     parameter that additionally promises a parameterless `Create`.
-    `Atomic<I; T: constructor>` in OmniThreadLibrary writes exactly that and
+    `Atomic<I; T: constructor>` in a threading library writes exactly that and
     then `T.Create`, and with only `class` recognised the walk stopped at the
     parameter. `record` is the one kind that must NOT land here.
 
@@ -2525,9 +2525,9 @@ end;
   dcc-verified: with `TBase` in unit A and `TBase<T> = class(TBase)` in unit B,
   B's own `TDerived = class(TBase)` means A's.
 
-  DevExpress leans on it: `TdxBarAccessibilityHelper` is a plain class in
-  dxBar.pas and `TdxBarAccessibilityHelper<T: TWinControl>` a generic in
-  dxBarAccessibility.pas, and the latter unit then writes both spellings. Taking
+  A component suite leans on it: `TBarAccessibilityHelper` is a plain class in
+  one unit and `TBarAccessibilityHelper<T: TWinControl>` a generic in
+  another, and the latter unit then writes both spellings. Taking
   the nearer (generic) one is not merely imprecise — the generic's OWN heritage
   is that same bare name, so the walk resolves it to ITSELF and the
   self-reference guard in FindMemberX stops the ancestry dead. 100+ false E2003
@@ -3236,7 +3236,7 @@ begin
   // The active helper, then ITS OWN ANCESTOR helpers: `class helper (X) for T`
   // (15.3) inherits X's members, and since at most one helper is active per
   // type, the derived one is the ONLY way its ancestor's members can still be
-  // reached. spring4d is exactly this: Spring.Reflection declares
+  // reached. A third-party library is exactly this: one of its units declares
   // `TRttiMethodHelper = class helper(Spring.TRttiMethodHelper) for
   // TRttiMethod`, so in any unit that uses BOTH, the active helper is the
   // derived one and `ReturnTypeHandle`/`IsAbstract` live on its ancestor. A
@@ -3336,7 +3336,7 @@ begin
       //
       // A parameter may carry SEVERAL constraints, and it guarantees the
       // members of ALL of them: `TKey: IComparable<TKey>, IEquatable<TKey>,
-      // IHashable` in JclHashMaps means `AKey.GetHashCode` (IHashable) and
+      // IHashable` in a utility library means `AKey.GetHashCode` (IHashable) and
       // `A.Equals(B)` (IEquatable) both compile, though neither is on the
       // FIRST constraint. So the extra ones are tried too — after the first,
       // which keeps the single-constraint case (all but a handful) walking
@@ -3794,7 +3794,7 @@ end;
   them off the ARGUMENTS, which cannot work here at all: `Cast<T: class>
   (AObject: TObject): T` declares every parameter concretely, so nothing binds
   T and the frame fails — leaving the call typed as the OPEN parameter, and
-  every member after it undeclared. dxCore's `Unsafe` trio (Cast /
+  every member after it undeclared. A suite's `Unsafe` trio (Cast /
   CastWithNilCheck / AccessProtected) is the shape at scale, and `TJSONObject
   .GetValue<TJSONObject>(...)` is the same thing in the RTL.
 
@@ -4128,7 +4128,7 @@ var
           // symbol, all three scored 0, and the FIRST — TSize — won the tie.
           // The call then typed as TSize: a wrong binding that costs no
           // diagnostic until something reads a member off it (`.ToRectF` in
-          // dxRichEdit.Ruler). Canonicalized only after the cheap test has
+          // a suite's ruler unit). Canonicalized only after the cheap test has
           // already failed.
           var LCanonPar := CanonTypeX(LParX);
           var LCanonArg := CanonTypeX(LArgX);
@@ -4144,6 +4144,23 @@ var
                   (XCatOf(LCanonArg) = tcRecord) and
                   not HasConversionOperator(LCanonPar) and
                   not HasConversionOperator(LCanonArg) then
+            Exit(-1)
+          // An ARRAY parameter against a record/class/interface argument (or
+          // the reverse) is the same kind of decidable mismatch, and it matters
+          // because a binding stops at the FIRST declaration of a name: a
+          // derived interface that declares only the `TArray<T>` overload of a
+          // method and INHERITS the single-item one leaves the array overload
+          // as the only candidate, fitting on arity, typing the call as
+          // `TArray<...>`. Rejecting it is what lets the "nothing in the
+          // type's own chain fits, so this means an INHERITED routine"
+          // fallback do its job. `nil` and untyped arguments never reach here
+          // — they are tcNil/tcUnknown, not these three.
+          else if ((XCatOf(LCanonPar) = tcArray) and
+                   (XCatOf(LCanonArg) in [tcRecord, tcClass, tcInterface]) and
+                   not HasConversionOperator(LCanonArg)) or
+                  ((XCatOf(LCanonArg) = tcArray) and
+                   (XCatOf(LCanonPar) in [tcRecord, tcClass, tcInterface]) and
+                   not HasConversionOperator(LCanonPar)) then
             Exit(-1)
           else if XAssignableX(LParX, LArgX) then
             Inc(Result, 1);
@@ -4519,7 +4536,7 @@ var
           // inherited pass only retries names that bound NOWHERE, so a
           // REDECLARED name never reached it — it bound to the class's own
           // member and typed as that. `inherited Alignment.Horz` in
-          // cxMemo/cxCheckBox is the shape at its sharpest: the derived
+          // two editor units of one suite are the shape at its sharpest: the derived
           // `Alignment` is a TAlignment (an enum) while the ancestor's is a
           // TcxEditAlignment object, so the chain after it lost every member.
           //
@@ -4533,7 +4550,7 @@ var
           // A bare name used as a QUALIFIER is a value, so an overloaded
           // routine of that name means the PARAMETERLESS overload — writing
           // its name calls it (6 §6.6.1). A binding stops at the first
-          // declaration, and uRODL declares `function Add(anEntity): Integer`
+          // declaration, and an RPC library declares `function Add(anEntity): Integer`
           // ahead of `function Add: TRODLEntity`, so `Add.Assign(...)` typed
           // as Integer and lost the member. Restricted to a qualifier
           // position: as a CALLEE the name is the whole overload set and
@@ -5486,7 +5503,7 @@ begin
           // name be written bare, and dcc calls it then:
           // `TVTStyleServicesFunc = function(AControl: TControl = nil):
           // TCustomStyleServices` is called as `VTStyleServicesFunc.
-          // GetSystemColor(...)` in VirtualTrees.StyleHooks. So the rule is
+          // GetSystemColor(...)` in a tree component's style hooks. So the rule is
           // "no parameter the caller MUST supply", not "no parameters".
           if (LM.Tree.Nodes[LChild].Kind = nkParams) and
              not AllParamsDefaulted(LCur.UnitId, LChild) then
@@ -5939,7 +5956,7 @@ function TPasSemaProject.ElementX(AId, ABaseNode: Integer): TSemaXType;
     // indexing one yields System.TVarRec, and `with aValues[i] do VType ...`
     // over an `array of const` parameter opens over its fields. Bailing here
     // instead left every one of them undeclared (56 of 57 diagnostics on
-    // OmniThreadLibrary were this single shape, in GpStuff and OtlCommon).
+    // a threading library were this single shape, in two of its units).
     if FModels[AMid].Tree.Nodes[ANode].Aux = 1 then
     begin
       if FindInSystemUnit('tvarrec', LSysUid, LSysSym) then
@@ -6697,7 +6714,7 @@ begin
           Break;
         end;
     // The namespace-token exemption runs AFTER the member walk, not before it:
-    // an inherited MEMBER outranks a unit name. `uses VirtualTrees.Header`
+    // an inherited MEMBER outranks a unit name. `uses SomeLib.Header`
     // registers the unit under its LAST segment, so in a class that also has a
     // `Header` property the qualifier test says "this is a namespace token" and
     // skipped the very node that had a member to find — leaving `Header.Columns`
@@ -6711,7 +6728,7 @@ begin
     // way. Two kinds reach this pass bound (see EnsureCrossWork):
     //
     // - a UNIT reference, because a bare unit name is never a value and an
-    //   inherited member outranks it (`uses VirtualTrees.Header` in a class
+    //   inherited member outranks it (`uses SomeLib.Header` in a class
     //   that also has a `Header` property);
     // - a compiler SEED, for the same reason one step further out. dcc-probed:
     //   a class with a `Text` property compiles `Text.IsEmpty` in its method
@@ -6731,7 +6748,7 @@ begin
         // branch below states at length: it cannot be recovered downstream.
         // Dropping it here was invisible until a name was BOTH the last
         // segment of a dotted `uses` AND a member declared in a generic
-        // ancestor's open parameters — `Params` in AVImark's UI tests, where
+        // ancestor's open parameters — `Params` in a real project's UI tests, where
         // `uses UITest.Params` registers the unit under `Params` and
         // `TUITest<TParams>.Params: TParams` is the member that outranks it.
         // The override then typed every one of them as the open TParams,

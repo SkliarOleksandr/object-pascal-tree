@@ -437,7 +437,7 @@ begin
         GStudio := Copy(ParamStr(GIdx), 9, MaxInt)
       // -L<dir>: one extra search path, repeatable. The demo folds in the IDE's
       // registry Library/Browsing paths, which is where a real project's
-      // third-party components live (DevExpress, Orpheus, ...). This is how a
+      // third-party components live (large component suites). This is how a
       // headless run reaches the same closure without teaching the tool to read
       // the registry — and the closure line in the report is the check that it
       // did: a short unit count means paths are still missing, and a missing

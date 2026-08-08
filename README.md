@@ -230,7 +230,7 @@ usable.
   **Open File at Cursor** (Ctrl+Enter, Delphi's own command, first in the
   editor's context menu) opens whatever the caret names: a `uses` item, an `$I`
   argument, a quoted path. Both ask the ANALYSIS before the filesystem, which is
-  what picks the right `jcl.inc` when three copies sit on different search paths
+  what picks the right `common.inc` when three copies sit on different search paths
   and what makes `uses Forms` open `Vcl.Forms.pas` through the namespace and
   alias rules; the filesystem fallback (the current file's directory, then the
   last analysis's search paths, then the name as written) still opens a file the
@@ -287,24 +287,24 @@ Still open, roughly in the order we're tackling it:
   `with I do QueryInterface(G, O)` resolves. Worth recording that the audit
   predicted this hop would also clear the WinRT `_AddRef`/`_Release` flood and
   was WRONG about that — see the constraint entry below for what actually did.
-- ~~**spring4d is a corpus now.**~~ **Clean since 2026-08-05.** Run it like any
-  `.dproj` (`Packages\Delphi12\Spring.Base.dproj` and `Spring.Core.dproj`, 73 and
-  121 units). Its value was density — a compiling project of ordinary size that
-  reported more than the 3747-unit AVImark client does: **27 false diagnostics in
-  `Spring.Base`, now ZERO**, and 34 in `Spring.Core`, now 2 — both of those the
-  same honest `F1027`, and an instructive one. `Spring.Core.dproj` sets
-  `DCC_UnitSearchPath=..\..\Source` (not recursive) and reaches
-  `Spring.Patterns.Specification` through `requires Spring.Base.dcp`; the source
-  DOES exist in the repo, under `Source\Base\Patterns`. So a host that followed
-  the `requires` closure to the required PACKAGE's own search paths would resolve
-  it — the one concrete lead the source-less-units item below has.
+- ~~**A third-party collections/DI library is a corpus now.**~~ **Clean since
+  2026-08-05.** Three package projects of 73, 121 and 71 units, run like any
+  `.dproj`. Its value was density — compiling projects of ordinary size that
+  reported more than the 3747-unit client project does: **27 false diagnostics
+  in the base package, now ZERO**, and 34 in the core package, now 2 — both of
+  those the same honest `F1027`, and an instructive one. The core package sets
+  `DCC_UnitSearchPath=..\..\Source` (not recursive) and reaches a unit one
+  directory deeper through its `requires` of the base package; the source DOES
+  exist in that tree. So a host that followed the `requires` closure to the
+  required PACKAGE's own search paths would resolve it — the one concrete lead
+  the source-less-units item below has.
 
   Four causes, all four fixed, and three of the four were "a name that is also
   something else" again:
 
   ~~The 19 `E2010 Incompatible types: 'Pointer' and '_nil'`~~ — **fixed
   2026-08-05, all 19 with one rule.** They were one cause, traced to its
-  declaration site: `Spring.pas` declares a GENERIC record named `Pointer<T>`,
+  declaration site: its base unit declares a GENERIC record named `Pointer<T>`,
   and a bare reference to `Pointer` bound to it instead of to the builtin, so
   every `Pointer(X) := nil` and `Result := nil` in a `Pointer`-returning routine
   became a type error. **Arity is part of a type's identity** (§16.1.2), and the
@@ -319,7 +319,7 @@ Still open, roughly in the order we're tackling it:
   set membership and no call.
 
   ~~The 2 `E2015` on `not HasValue`~~ — **the same rule the other way round.**
-  `Spring.pas` also declares `Nullable = record class var HasValue: string; end`
+  That base unit also declares `Nullable = record class var HasValue: string; end`
   beside `Nullable<T>`, whose `HasValue` is a Boolean property — so a parameter
   typed `Nullable<T>` was resolving to the arity-0 record and `not
   other.HasValue` became `not <string>`. §16.1.2 states both directions and the
@@ -332,7 +332,7 @@ Still open, roughly in the order we're tackling it:
   `TDict<Pointer, TList>` means the arity-0 `Pointer`.
 
   ~~The 5 `E2004 Identifier redeclared`~~ — **a LEXER gap.** `class function
-  &&op_Equality(...)` is how spring4d's `TValue` declares its comparison
+  &&op_Equality(...)` is how that library's `TValue` declares its comparison
   operators, and only the FIRST `&` escapes (B.3): the rest belong to the name,
   so `&&op_Equality` names `&op_Equality`, a different member from
   `op_Equality`. dcc-verified in both directions — it accepts the two in one
@@ -366,7 +366,7 @@ Still open, roughly in the order we're tackling it:
   hides a real gap also hides progress towards closing it. *Show Errors* then
   means all of them, and stays a pure DISPLAY filter — toggling it re-filters the
   list instead of costing a re-analysis, which is what a control that changed the
-  analysis would have cost (15 s on the AVImark client). Until member binding is
+  analysis would have cost (15 s on the client project). Until member binding is
   overload- and generic-aware, expect that list to be long and mostly binding
   gaps; the counts and their three causes are below.
 
@@ -387,11 +387,11 @@ Still open, roughly in the order we're tackling it:
   | BuildWinVCL (271) | — | — | | | | | **0** | — |
   | bigflat (726) | 8 638 | 387 | 194 | 162 | 136 | 110 | **0** | — |
   | BuildWinFMX (362) | — | — | | | | 89 | **0** | — |
-  | AVImark client (3747) | 3 609 | | | | | 824 | **7** | 5 VclTee `F1027` + 2 true positives |
-  | AVImarkServer (2121) | | | | | | 56 | **0** | — |
-  | Spring.Base (73) | 70 | 60 | 60 | 60 | 60 | 19 | **0** | — |
-  | Spring.Core (121) | | | | | | 27 | **3** | 2 honest `F1027` + 1 `AsType` |
-  | Spring.Data (71) | | | | | | 20 | **1** | the same honest `F1027` |
+  | client project (3747) | 3 609 | | | | | 824 | **7** | 5 charting-component `F1027` + 2 true positives |
+  | server project (2121) | | | | | | 56 | **0** | — |
+  | library, base (73) | 70 | 60 | 60 | 60 | 60 | 19 | **0** | — |
+  | library, core (121) | | | | | | 27 | **3** | 2 honest `F1027` + 1 `AsType` |
+  | library, data (71) | | | | | | 20 | **1** | the same honest `F1027` |
 
   **Every RTL/VCL/FMX corpus reports NOTHING under the member flag as of
   2026-08-07** — `rtlflat`, `bigflat`, and all three real packages. That is the
@@ -406,7 +406,7 @@ Still open, roughly in the order we're tackling it:
   PARAMETER; a proc type with parameters and a `procedure` type both end the
   walk instead.
 
-  **AVImarkServer, 2026-08-08: 56 -> ZERO.** Nine causes over two passes. The
+  **The server project, 2026-08-08: 56 -> ZERO.** Nine causes over two passes. The
   first four took it to 9, and the first of THOSE was not in the analyzer at
   all:
 
@@ -415,12 +415,12 @@ Still open, roughly in the order we're tackling it:
     `ExtraSearchPaths` matched it against the same value passed through
     `ExcludeTrailingPathDelimiter`. The two never compared equal, so every
     BDS version was skipped and the whole `Library`/`Browsing` set was lost —
-    `Vcl.Forms`, `cxControls`, `Jcl*` and `FastMM4` came back as `F1027` on a
+    `Vcl.Forms` and every third-party unit came back as `F1027` on a
     project that compiles. A missing unit GATES its importers' diagnostics, so
     this one bug both invented reports and hid them.
   - **explicit generic-method type arguments** (~30 of the 56):
-    `Unsafe.Cast<TcxCustomTextEdit>(Edit).ActiveProperties`. `InferMethodFrame`
-    reads the frame off the ARGUMENTS, and dxCore's `Cast<T: class>(AObject:
+    `Unsafe.Cast<TSomeEdit>(Edit).ActiveProperties`. `InferMethodFrame`
+    reads the frame off the ARGUMENTS, and a component suite's `Cast<T: class>(AObject:
     TObject): T` declares every parameter concretely — nothing to infer from,
     so the call stayed typed as the open `T`. `ExplicitMethodFrame` uses the
     written list, which 16.5.1 says wins outright; inference supplies only what
@@ -428,14 +428,14 @@ Still open, roughly in the order we're tackling it:
     NON-generic of that name, or `TJSONObject.GetValue(Name)` swallows
     `TJSONValue.GetValue<T>(APath)` and the chain after it loses everything.
   - **a helper indexed under only one of its target's identities** (10):
-    SynFunc writes `record helper for TRect` with `Winapi.Windows` last in its
-    uses, so it registered Winapi's ALIAS; `SynEditScrollBars` declares
-    `R: TRect` with `System.Types` in its implementation uses, so the local
-    carries the canonical symbol. Same type, different key, helper invisible.
+    An editor component's helper unit writes `record helper for TRect` with
+    `Winapi.Windows` last in its uses, so it registered Winapi's ALIAS, while
+    another of its units declares `R: TRect` with `System.Types` in its
+    implementation uses. Same type, different key, helper invisible.
     `BuildHelperMap.Publish` now indexes the whole plain-alias chain — the
     non-builtin twin of the per-model seed rule above.
   - **`inherited Name` where the class REDECLARES that name** (7):
-    `inherited Alignment.Horz` in cxMemo/cxCheckBox, where the derived
+    `inherited Alignment.Horz` in two of a suite's editor units, where the derived
     `Alignment` is an enum and the ancestor's is an object. The inherited pass
     only retries names that bound NOWHERE, so a redeclared one never reached
     it; the head of an inherited chain is now resolved from the ancestor in
@@ -457,10 +457,10 @@ Still open, roughly in the order we're tackling it:
   - **`T.Create` under a bare `constructor` constraint** (1). Only a class can
     satisfy it — a record has no constructor to require — so it is a class
     constraint that additionally promises `Create`. Only `class` was
-    recognised (`Atomic<I; T: constructor>`, OmniThreadLibrary).
+    recognised (`Atomic<I; T: constructor>`, a threading library).
   - **several constraints on one parameter** (2). `TKey: IComparable<TKey>,
     IEquatable<TKey>, IHashable` guarantees the members of ALL of them
-    (16 §16.4.1); the hop took the FIRST, and JclHashMaps calls `AKey
+    (16 §16.4.1); the hop took the FIRST, and a utility library calls `AKey
     .GetHashCode` (the third) and `A.Equals(B)` (the second) in adjacent
     methods.
   - **a parameterless-except-for-defaults function reference** (1).
@@ -468,7 +468,7 @@ Still open, roughly in the order we're tackling it:
     TCustomStyleServices` is called by writing its name, so the rule is "no
     parameter the caller MUST supply", not "no parameters".
   - **a bare name used as a QUALIFIER** (1) means the PARAMETERLESS overload:
-    uRODL declares `function Add(anEntity): Integer` ahead of `function Add:
+    an RPC library declares `function Add(anEntity): Integer` ahead of `function Add:
     TRODLEntity`, and `Add.Assign(...)` typed as Integer.
 
   Plus two last binding gaps: a bare reference to a same-named GENERIC keeps
@@ -480,8 +480,8 @@ Still open, roughly in the order we're tackling it:
   nothing binds the last segment of a dotted nested name — `ResolveTypeExpr
   Nested` is the answer there, for the fourth time in a different function.
 
-  **AVImark client, 2026-08-08: 824 -> 8, and only ONE of those eight is
-  unexplained.** Five are the VclTee `F1027`s (TeeChart ships no `.pas`
+  **The client project, 2026-08-08: 824 -> 8, and only ONE of those eight is
+  unexplained.** Five are the charting component's `F1027`s (it ships no `.pas`
   anywhere) and two are `InnerGetParentByType`, a confirmed true positive dcc
   reports too. Two causes covered 732 of the 816:
 
@@ -492,7 +492,7 @@ Still open, roughly in the order we're tackling it:
     to be overridden (a unit reference or a compiler seed), and that branch
     parked `XNil`. Invisible until a name was BOTH: `uses UITest.Params`
     registers the unit under `Params`, and `TUITest<TParams>.Params: TParams`
-    is the member that outranks it — so every `Params.field` in AVImark's UI
+    is the member that outranks it — so every `Params.field` in the client project's UI
     tests typed as the OPEN parameter, fell back to its CONSTRAINT, and
     resolved the base params class's fields while failing on the actual one's.
     The symptom was only ever *which* field name was undeclared.
@@ -502,12 +502,12 @@ Still open, roughly in the order we're tackling it:
     `FindLocalDeep` found the type's own first. Scopes grew a `Shadowing` list
     searched BEFORE their own names, and helper injection is its only user —
     everything else joined there (uses, with, ancestors, enums) is genuinely a
-    fallback. dxRichEdit is what needs it: `TdxTagBaseInnerHelper = class
-    helper for TdxTagBase` redeclares `Importer` at the DERIVED importer type,
+    fallback. A suite's rich-edit units are what need it: a `class
+    helper for TTagBase` there redeclares `Importer` at the DERIVED importer type,
     and the whole HTML importer reads members off that.
 
   The last one closed the same day and was **not** the helper it looked like.
-  `dxDocumentLayoutUnitConverter` declares `LayoutUnitsToPixels` for TSize,
+  A component suite's layout-unit converter declares `LayoutUnitsToPixels` for TSize,
   TPoint and TRect at one arity; `XSameType` compares SYMBOLS, and the
   argument's `TRect` and the parameter's `TRect` are read in different units,
   so all three candidates scored 0 and the FIRST — TSize — won the tie. The
@@ -521,32 +521,37 @@ Still open, roughly in the order we're tackling it:
   and the one thing that could make them so, a `class operator Implicit` or
   `Explicit`, is a MEMBER and can be looked for.
 
-  **spring4d, 2026-08-08: Base 19 -> 0, Core 27 -> 3, Data 20 -> 1.** Two
-  causes, and both are rules that were right for the shape they were written
-  against and had never met a second one:
+  **The third-party library, 2026-08-08: base 19 -> 0, core 27 -> 2, data
+  20 -> 1 — and all three left are the honest `F1027` above.** Three causes,
+  every one a rule that was right for the single shape it was written against
+  and had never met a second:
 
-  - **16.1.2 by COUNT, not just generic-vs-not** (16 of the 20 on
-    `Spring.Data`). The intra-unit arity rule asked one question — is the name
+  - **16.1.2 by COUNT, not just generic-vs-not** (16 of the data package's 20).
+    The intra-unit arity rule asked one question — is the name
     written with type arguments or not — and `TNodes<T>` and `TNodes<TKey,
     TValue>` are BOTH generic. Only a name's head is registered, so
-    `TNodes<TKey, TValue>.PRedBlackTreeNode` bound the arity-1 declaration's
+    `TNodes<TKey, TValue>.PNestedRef` bound the arity-1 declaration's
     nested type, and both arities declare that name. The wrong node record
     differs from the right one in exactly one field (`fKey` where the other has
     `fPair`), which is the whole reason it went unnoticed for so long: nothing
     fails until a field is read. Same NextOverload walk the
     qualified-implementation-name case already did.
-  - **a helper's ANCESTOR helper** (3 across `Spring.Core`). `class helper (X)
+  - **a helper's ANCESTOR helper** (2 in the core package). `class helper (X)
     for T` (15.3) inherits X's members, and since at most ONE helper is active
-    per type, the derived one is the only route to them. `Spring.Reflection`
-    declares `TRttiMethodHelper = class helper(Spring.TRttiMethodHelper) for
-    TRttiMethod`; a unit using only `Spring` resolved `ReturnTypeHandle` and one
-    using both did not. `HelperMemberHit` now walks that chain — still reading
-    helper member scopes only, so a malformed helper graph cannot cycle.
-
-  The one left on `Spring.Core` is `TValue.AsType(TypeInfo(T), Result)` inside
-  an anonymous method in a generic method (`Spring.Container.Resolvers`). It
-  reproduces only with the whole real unit — a 25-line reduction of the same
-  shape is clean — so it needs that file bisected.
+    per type, the derived one is the only route to them. One of its units
+    declares `TRttiMethodHelper = class helper(<its base unit's own helper>) for
+    TRttiMethod`; a unit using only the base resolved `ReturnTypeHandle` and one
+    using both did not — **adding a used unit REMOVED members.**
+    `HelperMemberHit` now walks that chain, still reading helper member scopes
+    only, so a malformed helper graph cannot cycle.
+  - **an ARRAY parameter meeting a record/class/interface argument** now rejects
+    the candidate — the third narrow bite out of "`ScoreCandidate` never
+    REJECTS". A binding stops at the FIRST declaration of a name, and there a
+    derived interface declares only the `TArray<T>` overload of a method while
+    INHERITING the single-item one: the array overload was the only candidate,
+    fitted on arity, and typed the call as `TArray<...>`. Rejecting it is what
+    lets the existing "nothing in the type's own chain fits, so this means an
+    INHERITED routine" fallback do its job.
 
   FMX's 89 were four shapes, and all four are about **what a QUALIFIER means**:
 
@@ -633,7 +638,7 @@ Still open, roughly in the order we're tackling it:
     from the declaration.
 
     Measured: no honest diagnostic moves (rtlflat 0, bigflat its 9 known
-    `F1027`s, Spring.Base 0, suites 859), the only dump lines that change are
+    `F1027`s, that library's base package 0, suites 859), the only dump lines that change are
     the `refs:`/`typed exprs:` summaries, unresolved references drop by 8 203 on
     rtlflat and 8 236 on bigflat, and the clock is unchanged (966–1 000 ms
     rtlflat, ~1 960 ms bigflat, both before and after).
@@ -800,7 +805,7 @@ Still open, roughly in the order we're tackling it:
   Measured effect on the corpora: the only dump lines that move are the `refs:`
   summaries (bindings shifting between local and cross-unit), the total
   UNRESOLVED count is identical, and no symbol line changes — 139 572 unresolved
-  before and after on rtlflat. AVImark client still the known 7, server zero.
+  before and after on rtlflat. client project still the known 7, server zero.
 
   **Then class-vs-instance took it to 52 and 111.** A callee qualified by a TYPE
   (`TMonitor.Enter(X)`) cannot mean an INSTANCE method, and that alone separated
@@ -938,7 +943,7 @@ Still open, roughly in the order we're tackling it:
     and procedural types in both, because a parameterless function reference in
     a value position is CALLED and the guard's type is its RESULT. That last one
     was found by the corpora and not by reasoning: six `if AShouldStop then`
-    conditions in DevExpress, all `reference to function: Boolean`, after the
+    conditions in a component suite, all `reference to function: Boolean`, after the
     suites and both flat corpora were green. Still not reported: a record guard
     with no Boolean conversion, which is the exemption above;
   - ~~assigning to a `for` counter inside the body~~ — **done 2026-07-31**
@@ -981,10 +986,10 @@ Still open, roughly in the order we're tackling it:
     Two things about the measurement, since they matter more here than usual: the
     diagnostic is a LEXER one, so it does not reach the sema report and the bar
     had to be met with `PasTreeLex` instead (zero across ~16 000 files: both flat
-    corpora, both AVImark trees, `3rdlib13` and the whole Studio source tree) —
+    corpora, both real project trees, `3rdlib13` and the whole Studio source tree) —
     and that corpus is **thin for this feature specifically**: the whole ~16 000
     files hold exactly ONE multiline literal (an embedded JS function in
-    `AVImark.Integration.RefLab.HL7I.pas`, which is in the client's analysis
+    one client-project unit, which is in that project's analysis
     closure and lexes clean), the feature being Delphi 12 and most of this code
     older. So the corpora prove no regression (full sema dumps byte-identical,
     lexer throughput 94.6 vs 93.5 MB/s) plus that one accepted literal, and the
@@ -1009,8 +1014,8 @@ Still open, roughly in the order we're tackling it:
   enforcement — shipped as OPT-IN switches, since both
   can only ADD diagnostics. They shared one acceptance bar, met by
   every check added so far and worth restating rather than re-deriving — **zero
-  new diagnostics across rtlflat, bigflat, both AVImark projects and spring4d's
-  `Spring.Base`/`Spring.Core` (~12 000
+  new diagnostics across rtlflat, bigflat, both real projects and a third-party
+  library's base and core packages (~12 000
   units), plus a probe whose output matches `dcc` line for line.** It has earned
   its keep once already: `E2012` passed every suite and both flat corpora while
   wrongly rejecting six `if AFunctionReference then` conditions, and only the
@@ -1092,7 +1097,7 @@ Still open, roughly in the order we're tackling it:
     for `Variant`, untyped parameters and implicit calls of parameterless
     function references;
   - on rtlflat there are exactly six member reports left, so that corpus can no
-    longer drive this — `bigflat`'s 110 and the AVImark client are the ones with
+    longer drive this — `bigflat`'s 110 and the client project are the ones with
     anything to say.
 - **Audit coverage, so the next pass knows where to start.** The 2026-07-31
   sweep ran pass 1 (spec → code) over every chapter and pass 2 (code → spec)
@@ -1228,7 +1233,7 @@ Still open, roughly in the order we're tackling it:
   scope, searched by `FindLocalDeep` BEFORE the scope's own names, and
   `JoinHelperScopes` is its only user. Everything else joined onto a scope
   (uses, with, ancestors, enums) is a fallback and stays in `Additional`. It
-  was worth ~60 reports on the AVImark client, all in dxRichEdit's HTML
+  was worth ~60 reports on the client project, all in a suite's HTML
   importer, where a helper redeclares `Importer` at a derived type.
 - **Declaration-site precedence: inherited member vs used-unit global.** A name
   written inside a class DECLARATION is now found in the enclosing classes'
@@ -1277,8 +1282,8 @@ Still open, roughly in the order we're tackling it:
     This is the "жир": a wrong binding stops being invisible and becomes a
     compile error or a binary difference.
 - **Units with no source (`.dcu`-only third-party libraries).** The blocker for
-  real projects: AVImark pulls in DevExpress, JCL, Orpheus, RaveReport and
-  friends, and where only `.dcu` ships, every importer gets an `F1027` and — far
+  real projects: the client project pulls in several large third-party component
+  suites, and where only `.dcu` ships, every importer gets an `F1027` and — far
   worse — its diagnostics are then gated off entirely by the `AllUsesResolved`
   rule, so the unit reads as clean when it was never analyzed. Target design:
   produce a **virtual, in-memory interface-only `.pas`** for such a unit and feed
@@ -1293,9 +1298,9 @@ Still open, roughly in the order we're tackling it:
      ingestion path every later stage feeds. Do this first regardless.
   2. **Whatever the vendor already ships.** `.hpp` headers (C++Builder
      export) and `.int` files where they exist are already declaration-only text.
-     Not hypothetical: the first real project run hit exactly this — AVImark's
-     last 5 `F1027` are `VclTee.*`, and TeeChart ships `lib\win32\release\
-     VclTee.Chart.dcu` plus `include\windows\vcl\VCLTee.Chart.hpp` with **no
+     Not hypothetical: the first real project run hit exactly this — the client project's
+     last 5 `F1027` are one charting component's, which ships `lib\win32\release\
+     its `.dcu` plus a C++ `.hpp` with **no
      `.pas` anywhere** in the Studio tree. A `.hpp` reader would close that
      cluster without touching the `.dcu` format at all.
   3. **A `.dcu` reader.** ⚠️ *Do not budget this as a small job.* The format is
@@ -1380,7 +1385,7 @@ Still open, roughly in the order we're tackling it:
   quietly.
 - **`.groupproj` (project groups), and a project TREE in the demo.** Today the
   demo opens one `.dproj` and shows its units as a FLAT list, which stops being
-  readable at AVImark's 1542 files and cannot represent a group at all. Two
+  readable at the client project's 1542 files and cannot represent a group at all. Two
   halves, and the second is the one with design in it:
   - *Reading `.groupproj`.* MSBuild XML like `.dproj`, so `PasTree.DProj` is the
     place — an `ItemGroup` of `<Projects Include="...">` plus per-project
@@ -1393,13 +1398,13 @@ Still open, roughly in the order we're tackling it:
   - *The tree.* Group → project → the .dproj's own grouping (Contains /
     Requires for a package, unit vs form vs resource), and separately the
     closure a project actually pulls in, which is where the units NOT listed in
-    any `.dproj` live (3747 analyzed vs 1542 listed for AVImark — the other
+    any `.dproj` live (3747 analyzed vs 1542 listed for the client project — the other
     2205 are library units nothing in the UI currently surfaces). Worth keeping
     those two axes distinct in the model rather than merging them into one list:
     "files the project declares" and "units the analysis reached" answer
     different questions, and the second is what the diagnostics are keyed to.
 - **A 64-bit build of `PasTreeSemaProject`, and of the demo.** Already needed:
-  the Win32 tool dies with `EOutOfMemory` on AVImark once the registry search
+  the Win32 tool dies with `EOutOfMemory` on the client project once the registry search
   paths are supplied (2631+ units, 168 MB of source), and the demo will hit the
   same wall as projects grow. Nothing in the library is 32-bit-specific — it is
   purely address space. Build the tool with

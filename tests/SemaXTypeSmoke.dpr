@@ -418,7 +418,7 @@ const
   // here can be inferred from the arguments — `Cast<T>(AObject: TObject): T`
   // declares every parameter concretely — so the written list is the only
   // source, and a call typed without it loses every member after the dot
-  // (dxCore's `Unsafe.Cast<TFoo>(X).Bar`, ~30 reports on one real project).
+  // (a suite's `Unsafe.Cast<TFoo>(X).Bar`, ~30 reports on one project).
   //
   // `Fetch` is the OTHER half of the same shape: a non-generic member of the
   // same name on the DERIVED class must not swallow a call written with type
@@ -508,7 +508,7 @@ const
     'end.'#10;
 
   // 12.1.2: `inherited Name` is the ANCESTOR's member even when the class
-  // REDECLARES that name — and cxMemo/cxCheckBox redeclare it at a different
+  // REDECLARES that name — and two suite editor units redeclare it at a different
   // TYPE, so the whole chain after it depends on getting this right.
   UNIT_IN1 =
     'unit IN1;'#10'interface'#10 +
@@ -540,20 +540,20 @@ const
     'end;'#10 +
     'end.'#10;
 
-  // Five shapes that took AVImarkServer's member-flag tail to zero, all in one
+  // Five shapes that took a real project's member-flag tail to zero, in one
   // unit because each is a couple of declarations:
   //
   //   1. `with Values[I] do` over a class with a DEFAULT array property —
   //      the brackets mean that property, so the body opens the ELEMENT. The
   //      collection ALSO has a `Values` member, so opening it instead was a
-  //      wrong binding, not a missing one (cxFilterControl).
+  //      wrong binding, not a missing one (a suite's filter control).
   //   2. `T.Create` under a bare `constructor` constraint — only a class can
-  //      satisfy it (OmniThreadLibrary's `Atomic<I; T: constructor>`).
+  //      satisfy it (a threading library's `Atomic<I; T: constructor>`).
   //   3. a parameter with SEVERAL constraints guarantees the members of all
-  //      of them, not the first (JclHashMaps' `TKey: IComparable<TKey>,
+  //      of them, not the first (a utility library's `TKey: IComparable<TKey>,
   //      IEquatable<TKey>, IHashable`).
   //   4. a bare name used as a QUALIFIER means the PARAMETERLESS overload
-  //      (uRODL's `Add.Assign(...)`).
+  //      (an RPC library's `Add.Assign(...)`).
   //   5. a function reference whose every parameter has a DEFAULT is still
   //      called by writing its name (VirtualTrees' TVTStyleServicesFunc).
   UNIT_TL1 =
@@ -629,7 +629,7 @@ const
     'end;'#10 +
     'end.'#10;
 
-  // Two things spring4d needs and nothing else in the corpora does.
+  // Two things one third-party library needs and nothing else in the corpora does.
   //
   // 1. `class helper (X) for T` — the derived helper is the ACTIVE one (at most
   //    one is, per type), so its ANCESTOR's members are only reachable through
@@ -743,29 +743,39 @@ const
     // through AL2's alias, the argument through AL1's own declaration.
     '  TSpotAlias = AL2.TSpot;'#10 +
     '  TSpotDirect = AL1.TSpot;'#10 +
+    '  IBase = interface'#10 +
+    '    function Take(const A: TSpotDirect): Integer;'#10 +
+    '  end;'#10 +
+    // Declares ONLY the array overload and INHERITS the single-item one, so
+    // the derived interface's own has to be rejected on argument types for the
+    // ancestor's to be looked for at all.
+    '  IMore = interface(IBase)'#10 +
+    '    function Take(const A: TArray<TSpotDirect>): string;'#10 +
+    '  end;'#10 +
     '  TConv = class'#10 +
     '    function Conv(const A: TOther; const B, C: Integer): TOther; overload;'#10 +
     '    function Conv(const A: TSpotAlias; const B, C: Integer): TSpotAlias;'#10 +
     '      overload;'#10 +
     '  end;'#10 +
-    'procedure Run(AConv: TConv; const S: TSpotDirect);'#10 +
+    'procedure Run(AConv: TConv; const AMore: IMore; const S: TSpotDirect);'#10 +
     'implementation'#10 +
     'function TConv.Conv(const A: TOther; const B, C: Integer): TOther;'#10 +
     'begin Result := A; end;'#10 +
     'function TConv.Conv(const A: TSpotAlias; const B, C: Integer): TSpotAlias;'#10 +
     'begin Result := A; end;'#10 +
-    'procedure Run(AConv: TConv; const S: TSpotDirect);'#10 +
+    'procedure Run(AConv: TConv; const AMore: IMore; const S: TSpotDirect);'#10 +
     'var'#10 +
     '  I: Integer;'#10 +
     'begin'#10 +
     '  I := AConv.Conv(S, 1, 1).X;'#10 +   // X is on TSpot, not on TOther
+    '  I := AMore.Take(S);'#10 +           // the ANCESTOR''s overload
     'end;'#10 +
     'end.'#10;
 
   // 15.3.3 the SAME-UNIT way: a helper declared beside (here: below) its
   // extended type still HIDES that type's own member of the same name. The
   // cross-unit direction was always right; this one bound own-first, and
-  // dxRichEdit leans on it — `TdxTagBaseInnerHelper = class helper for
+  // A suite's rich-edit units lean on it — `TTagBaseInnerHelper = class helper for
   // TdxTagBase` redeclares `Importer` at the DERIVED importer type, so every
   // `Importer.TagsStack` in that unit reads the helper's (60+ reports).
   UNIT_SH =
@@ -807,7 +817,7 @@ const
   // makes the ident arrive at the inherited pass already BOUND (to the unit),
   // and that override path used to drop the instantiation frame — so `Params`
   // typed as the open TParams, fell back to its CONSTRAINT, and only the
-  // CONSTRAINT's members resolved. AVImark's UI tests are this shape ~700
+  // CONSTRAINT's members resolved. A real project's UI tests are this shape ~700
   // times over, and `uses UITest.Params` is what made it visible.
   UNIT_NS_P =
     'unit NS.Params;'#10'interface'#10 +
@@ -1253,6 +1263,10 @@ begin
     // are declared through different symbols for the one type.
     Eq('the record overload matching through an ALIAS wins the tie',
       XTypeOf(LE, 'AConv.Conv(S,1,1)'), 'TSpotAlias');
+    // The derived interface's own overload takes an ARRAY, so it has to be
+    // rejected on argument types before the ancestor's is even looked for.
+    Eq('an array parameter rejects a record argument, reaching the ancestor''s',
+      XTypeOf(LE, 'AMore.Take(S)'), 'Integer');
 
     // ---- a SAME-UNIT helper hides the type's own member (15.3.3) ----
     LE := ModelByName('sh');
@@ -1270,7 +1284,7 @@ begin
     Eq('`Params.Mine` — the frame survives, not just the constraint',
       XTypeOf(LE, 'Params.Mine'), 'Integer');
 
-    // ---- the AVImarkServer tail: five shapes, one unit ----
+    // ---- a real project's tail: five shapes, one unit ----
     LE := ModelByName('tl1');
     Ok('TL1 loaded', Assigned(LE));
     Ok('TL1: no diags at all', Length(LE.Diags) = 0);
@@ -1281,7 +1295,7 @@ begin
     // NB no `T.Create` case here: the `constructor` constraint resolves
     // through TObject, and this corpus is a bare directory with no System
     // unit to resolve it in. It is covered by the corpus measurement instead
-    // (AVImarkServer's OtlSync report) — the same reason the RTL-shaped
+    // (a real project's threading-library report) — the same reason the RTL
     // helper cases below assert types rather than absence.
     Eq('a member on the SECOND of several constraints (16.4.1)',
       XTypeOf(LE, 'AKey.Hash'), 'Integer');

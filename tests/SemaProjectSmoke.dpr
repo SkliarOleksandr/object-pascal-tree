@@ -399,7 +399,7 @@ const
     '    if N = 0 then Exit;'#10 +         //    is not a default array property
     'end;'#10 +
     // 6.2.6 — `array of const` IS an array of System.TVarRec, so indexing one
-    // opens over TVarRec's fields. OmniThreadLibrary's GpStuff/OtlCommon do
+    // opens over TVarRec's fields. A threading library's own units do
     // exactly this (`with aValues[i] do case VType of ...`), 56 sites.
     // 10.3 — `TextFile` is predefined and has no declaration to fall back on.
     // The redeclaration as a with TARGET, reached through a bare field of the
@@ -1358,9 +1358,9 @@ const
   { 16.1.2 — a reference supplying NO type arguments names the ARITY-0
     declaration, even when a same-named GENERIC is nearer in scope. dcc-verified.
 
-    DevExpress's shape: `TdxBarAccessibilityHelper` is a plain class in dxBar.pas
-    and `TdxBarAccessibilityHelper<T: TWinControl>` a generic in
-    dxBarAccessibility.pas, which then writes both spellings. Taking the nearer
+    A component suite's shape: `TBarAccessibilityHelper` is a plain class in one unit
+    and `TBarAccessibilityHelper<T: TWinControl>` a generic in
+    another, which then writes both spellings. Taking the nearer
     (generic) one is not merely imprecise: the generic's OWN heritage is that
     same bare name, so it resolves to ITSELF and the self-reference guard stops
     the ancestor walk dead — 100+ false E2003 on members declared three hops up.
@@ -2372,7 +2372,7 @@ begin
       CrossRefTo(LAru, 'Get', 'Get'));
 
     // 16.1.2 — a bare reference means the ARITY-0 declaration, even when a
-    // same-named generic is nearer in scope (the DevExpress shape).
+    // same-named generic is nearer in scope (a component suite's shape).
     var LAr0 := ModelByName('unitaruse');
     Ok('arity0: UnitArUse loaded', Assigned(LAr0));
     Ok('arity0: no diags at all', Length(LAr0.Diags) = 0);

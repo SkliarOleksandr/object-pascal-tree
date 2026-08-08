@@ -2064,7 +2064,7 @@ end;
   though both words are in ROUTINE_DIRECTIVE_WORDS.
 
   Not hypothetical, and the damage is out of all proportion to the shape:
-  DevExpress' dxCore.pas declares `Unsafe = class` right after a method, the
+  A component suite's core unit declares `Unsafe = class` right after a method, the
   name was swallowed as that method's directive, and the type declaration —
   plus everything the interface declared AFTER it — was lost. 156 `Unsafe` and
   127 `EdxException` false E2003 across one component library, from one word.
@@ -2158,7 +2158,7 @@ begin
     // AAllowInitializer gates it, and the gate is the whole point: in a TYPE or
     // CONST section an identifier followed by '=' is the NEXT DECLARATION, not
     // an initializer — and if that identifier happens to be a directive word,
-    // this branch swallowed the entire declaration. DevExpress' dxCore.pas
+    // this branch swallowed the entire declaration. That same core unit
     // declares `Unsafe = class`, so `Unsafe`, everything the interface declared
     // after it, and every use of any of it across the library became a false
     // E2003 — 283 of them from this one branch. Only a VAR section can

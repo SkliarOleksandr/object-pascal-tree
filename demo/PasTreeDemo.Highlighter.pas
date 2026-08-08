@@ -212,9 +212,9 @@ type
     // The real file this buffer came from, plus the project's search paths and
     // platform. Without them an include directive cannot resolve, and an
     // include that DEFINES symbols then silently changes which branches look
-    // live: JclBase.pas greyed out SizeInt = Integer under IFDEF CPU32, because
-    // CPU32 comes from jedi.inc, reached through JclBase's own include of
-    // jcl.inc. That disagrees with navigation, which runs on the real analysis
+    // live: one library unit greyed out SizeInt = Integer under IFDEF CPU32,
+    // because CPU32 comes from a config include, reached through that unit's
+    // own include of another. That disagrees with navigation, which runs on the real analysis
     // and jumps to that very line -- the editor calling a line dead code right
     // after navigating to it. Call on tab creation and when the project
     // changes.
@@ -410,7 +410,7 @@ var
   LName: string;
 begin
   FContextPath := AFilePath;
-  // The file's OWN directory first: an `{$I jcl.inc}` is resolved relative to
+  // The file's OWN directory first: an `{$I common.inc}` is resolved relative to
   // the including file before any search path, and that alone fixes the common
   // case of a unit sitting next to its include.
   LPaths := ASearchPaths;

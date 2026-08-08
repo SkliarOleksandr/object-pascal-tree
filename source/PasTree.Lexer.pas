@@ -206,7 +206,7 @@ begin
           // `&&op_Equality` names `&op_Equality`, which is a different member
           // from `op_Equality` — dcc32 37.0 accepts both in one record, and
           // rejects `&op_Equality` beside `op_Equality` as a redeclaration, so
-          // exactly one leading '&' is the escape. spring4d's TValue declares
+          // exactly one leading '&' is the escape. a third-party library's TValue declares
           // its comparison operators this way and the stray-'&' token that used
           // to come out here derailed the whole class body (5 false E2004).
           if IsIdentStart(CharAt(FPos + 1)) or

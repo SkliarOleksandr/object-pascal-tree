@@ -339,7 +339,7 @@ end;
     reference in a value position is CALLED: `if AShouldStop then` where the
     parameter is `reference to function: Boolean` is ordinary, correct code, and
     the type of the condition is the function's RESULT. Found the honest way —
-    six such conditions in DevExpress's cxShellCommon lit up on the AVImark
+    six such conditions in one component suite lit up on a real
     corpus the first time this check ran. In a TYPE position (an array index, a
     set base) a procedural type stays an error, since nothing is called there.
 

@@ -470,7 +470,7 @@ const
     'end;'#10 +
     'end.'#10;
 
-  { Two clusters from the first run over a real 3790-unit project (AVImark).
+  { Two clusters from the first run over a real 3790-unit project.
 
     Real48 (2.5.1) is compiler-provided like Comp: System.pas names it only in a
     NODEFINE directive and in comments, so a source grep says "declared" and dcc
@@ -502,7 +502,7 @@ const
     'end.'#10;
 
   { A forward-declared GENERIC completing under a name that ALSO has a
-    non-generic declaration. JclArrayLists.pas has all three, in this order:
+    non-generic declaration. One library unit has all three, in this order:
     `TJclArrayIterator` (arity 0), `TJclArrayIterator<T> = class;` (the
     forward), then the real `TJclArrayIterator<T>`. FindLocal returns the HEAD
     of the name's overload chain — the arity-0 class — so the arity test read
@@ -543,7 +543,7 @@ const
 
   { A directive WORD used as the name of the next declaration. Directives are
     context-sensitive identifiers, and `unsafe` is one — so ConsumeTrailingDirectives
-    read DevExpress dxCore.pas's `Unsafe = class` as the `cdecl = nil` shape (a
+    read a component suite's `Unsafe = class` as the `cdecl = nil` shape (a
     procedural VARIABLE whose initializer follows its calling convention) and
     swallowed the type declaration, everything the interface declared after it,
     and every use of any of it across the library: 283 false E2003 from one line.
@@ -1276,7 +1276,7 @@ begin
     DiagCount('E2010') = 0);
   GModel.Free;
 
-  // Real48 and OLE named arguments — both from the first AVImark run.
+  // Real48 and OLE named arguments — both from that project's first run.
   Analyze(SRC_AVICLUSTERS);
   Ok('aviclusters: no diags at all', Length(GModel.Diags) = 0);
   Ok('aviclusters: Real48 is a seeded builtin', TypeOf('r', skVar) = 'Real48');
@@ -1288,7 +1288,7 @@ begin
     RefResolvesTo('Counter', 'Counter'));
   GModel.Free;
 
-  // A forward generic completing next to a non-generic sibling (the JCL shape).
+  // A forward generic completing next to a non-generic sibling (a utility library's shape).
   Analyze(SRC_FWDGENERIC);
   Ok('fwdgeneric: no diags at all', Length(GModel.Diags) = 0);
   Ok('fwdgeneric: the generic method body sees its own field',
@@ -1297,7 +1297,7 @@ begin
     RefResolvesTo('FTag', 'FTag') and RefResolvesTo('FCursor', 'FCursor'));
   GModel.Free;
 
-  // A directive word naming the next declaration (the DevExpress dxCore shape).
+  // A directive word naming the next declaration (a component suite's shape).
   Analyze(SRC_DIRECTIVENAME);
   Ok('directivename: no diags at all', Length(GModel.Diags) = 0);
   Ok('directivename: the type named `Unsafe` is declared',
@@ -1939,7 +1939,7 @@ begin
   GModel.Free;
 
   // The two exemptions dcc forces, and the one that cost six false positives on
-  // the AVImark corpus before it was understood: a parameterless function
+  // a real-project corpus before it was understood: a parameterless function
   // reference in a value position is CALLED, so its RESULT is the condition's
   // type. A Variant guard is legal too.
   Analyze(
@@ -2048,7 +2048,7 @@ begin
   GModel.Free;
 
   // ---- ARITY is part of a type's identity (16.3) ----
-  // spring4d's Spring.pas shape exactly: a GENERIC record named `Pointer<T>`
+  // One third-party library's base unit, exactly: a GENERIC record named `Pointer<T>`
   // beside the builtin. A bare `Pointer` means the builtin however much nearer
   // the generic is, so none of this is a type error.
   Analyze(
@@ -2127,7 +2127,7 @@ begin
     RefBindKind('TOnly', 0) = 'generic');
   GModel.Free;
 
-  // The OTHER direction, and spring4d's other trap: `Nullable` (arity 0, with a
+  // The OTHER direction, and that library's other trap: `Nullable` (arity 0, with a
   // string class var `HasValue`) beside `Nullable<T>` (with a Boolean property
   // of that name). A reference WITH type arguments must select the generic, or
   // `other.HasValue` finds the string and `not other.HasValue` is E2015.
@@ -2165,7 +2165,7 @@ begin
   // different member from `op_Equality` — dcc accepts both in one record and
   // rejects `&op_Equality` beside `op_Equality`. Before this, the stray '&'
   // token derailed the class body and its parameters were declared into the
-  // enclosing scope (5 false E2004 in spring4d's TValue).
+  // enclosing scope (5 false E2004 in its TValue).
   Analyze(
     'unit u;'#10'interface'#10 +
     'type'#10 +
@@ -2196,7 +2196,7 @@ begin
   GModel.Free;
 
   // MemoryBarrier is compiler-provided (dcc resolves it with an empty uses
-  // clause) and was the last unseeded intrinsic spring4d needed.
+  // clause) and was the last unseeded intrinsic that library needed.
   Analyze(
     'unit u;'#10'interface'#10'implementation'#10 +
     'procedure P;'#10 +

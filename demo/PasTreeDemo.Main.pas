@@ -694,7 +694,7 @@ end;
 
 { The word under the caret, taken as a FILE or UNIT name: the maximal run of
   characters either can contain. Deliberately wider than an identifier —
-  a unit name is dotted (`Vcl.Forms`), an include is `jcl.inc`, and a path in a
+  a unit name is dotted (`Vcl.Forms`), an include is `common.inc`, and a path in a
   string has separators — and deliberately stops at quotes, braces and
   whitespace, which is what keeps an $I directive's argument and a quoted
   '..\lib\x.inc' down to their file part. }
@@ -753,7 +753,7 @@ end;
   Resolution order matters and is the reverse of what looks natural: the
   ANALYSIS is asked first, because it already knows the resolved path of every
   unit AND of every included file in the closure — which is how an $I argument
-  opens the right jcl.inc when three copies exist on different search paths, and
+  opens the right common.inc when three copies exist on different search paths, and
   how `uses Forms` opens Vcl.Forms.pas through the namespace/alias rules. Only
   then the filesystem, relative to the current file and to the project's search
   paths, which is what still works for a file the analysis never reached. }
@@ -1615,9 +1615,9 @@ begin
   // Give it the same context the ANALYSIS runs under. Without it the
   // highlighter preprocesses the buffer under a placeholder name and no search
   // paths, so every `{$I ...}` fails — and an include that DEFINES symbols then
-  // flips which branches look live. JclBase.pas greyed out `SizeInt = Integer`
-  // under `{$IFDEF CPU32}` (CPU32 comes from jedi.inc via its own
-  // `an $I directive`) while ctrl+click navigated to that very line, because
+  // flips which branches look live. One library unit greyed out `SizeInt = Integer`
+  // under `{$IFDEF CPU32}` (CPU32 comes from a config include reached through
+  // its own `$I`) while ctrl+click navigated to that very line, because
   // navigation reads the real analysis. Two sources of truth, visibly
   // disagreeing on the same line.
   ApplyHighlighterContext(LHL, APath);
@@ -2021,7 +2021,7 @@ begin
       // silently was the wrong trade twice over: the Done line said 906 and the
       // window showed 5, which reads as the tool contradicting itself — and the
       // 901 it hid were OUR OWN false positives in third-party code (283 of
-      // them turned out to be a single parser bug in one DevExpress unit). A
+      // them turned out to be a single parser bug in one third-party unit). A
       // diagnostic nobody can see is a bug nobody can report.
       LOwnFile := FFileList.IndexOf(FSemaProject.ModelFile(LId)) >= 0;
       for LDIdx := 0 to High(LModel.Diags) do
@@ -2706,7 +2706,7 @@ begin
               // survived here the two never compared equal — so EVERY
               // version was skipped and the whole IDE library/browsing set
               // was silently lost, leaving only the four bare-RTL fallback
-              // dirs. That is what turned Vcl.Forms, cxControls, Jcl*, and
+              // dirs. That is what turned Vcl.Forms and every third-party
               // FastMM4 into F1027 on a project that compiles.
               Result := ExcludeTrailingPathDelimiter(LDir);
             end;
@@ -2722,7 +2722,7 @@ end;
 
 // Source directories the IDE ITSELF uses to resolve go-to-declaration
 // beyond the project's own paths: the registry Library `Search Path` (for
-// the active platform — third-party sources like SynEdit/DevExpress land
+// the active platform — third-party component sources land
 // here) and the `Browsing Path` ($(BDS)\SOURCE\VCL, rtl\sys/common/win,
 // fmx, ...). Macros ($(BDS), $(Platform), and user-defined ones like
 // $(avi3rdlib) from the `Environment Variables` key) are expanded; only

@@ -376,7 +376,7 @@ var
 begin
   // SHADOWING joins first, before the scope's own names: 15.3.3 — a helper
   // member hides the extended type's own member of the same name.
-  // dcc-verified, and DevExpress leans on it hard: dxRichEdit's
+  // dcc-verified, and a component suite leans on it hard: its rich-edit
   // `TdxTagBaseInnerHelper = class helper for TdxTagBase` redeclares
   // `Importer` at the DERIVED importer type, and every `Importer.TagsStack`
   // in that unit needs the helper's, not the class's own. Empty for all but a
@@ -458,7 +458,7 @@ end;
 { ResolveAt restricted to one side of the generic split (16 §16.1.2).
 
   ARITY is part of a type's identity, and BOTH directions of ignoring that are
-  real, both set by spring4d's `Spring.pas`:
+  real, both set by one third-party library's base unit:
 
   - a BARE name must not bind to a generic. `Pointer<T> = record ... end` does
     not shadow the builtin `Pointer`, however much nearer it is — every

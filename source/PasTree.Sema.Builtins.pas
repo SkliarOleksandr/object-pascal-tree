@@ -166,7 +166,7 @@ begin
     'Fail',
     // Sibling of the Atomic* family and equally undeclared: System.pas does not
     // declare MemoryBarrier anywhere, and a unit with an EMPTY uses clause
-    // resolves it under dcc32 37.0. Found by spring4d's Spring.Reflection,
+    // resolves it under dcc32 37.0. Found by a third-party library's reflection unit,
     // which calls it inside a critical section.
     'MemoryBarrier',
     // Flow. (`Abort` is NOT one of these — it is a real System.SysUtils

@@ -293,7 +293,7 @@ begin
 end;
 
 { An include that lives in ANOTHER directory and DEFINES a symbol, guarding a
-  declaration. JclBase.pas's shape exactly: it includes jcl.inc, which sits in
+  declaration. A utility library unit's shape exactly: it includes common.inc, which sits in
   source/include rather than beside the unit, and which (through jedi.inc)
   defines CPU32 -- the symbol guarding SizeInt = Integer.
 

@@ -33,6 +33,11 @@ iOS*/
 tests/output/
 *.testresults.xml
 
+# Working notes: current steps, corpus paths, in-flight plans. Deliberately
+# untracked — this repository is public and the projects measured against it
+# are not. Keep anything that names one of them here.
+local/
+
 # OS junk
 Thumbs.db
 .DS_Store

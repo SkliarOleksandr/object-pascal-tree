@@ -551,7 +551,7 @@ begin
   //
   // The match must be searched along the WHOLE NextOverload chain, not just at
   // its head: one name can carry several declarations at different arities
-  // (16.1.2), and FindLocal returns whichever came first. JclArrayLists.pas
+  // (16.1.2), and FindLocal returns whichever came first. One library unit
   // declares a non-generic `TJclArrayIterator`, then `TJclArrayIterator<T> =
   // class;`, then the real `TJclArrayIterator<T>`. Testing only the head found
   // the arity-0 class, read the arity mismatch as "a different type", and
@@ -1789,7 +1789,7 @@ begin
         FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],
           NodeNameLower(ANode), FTree.Nodes[ANode].FirstToken);
         // ARITY is part of a type's identity (16.1.2), and BOTH directions of
-        // ignoring that are real — spring4d's Spring.pas sets both traps:
+        // ignoring that are real — one third-party library's base unit sets both traps:
         // `Pointer<T>` beside the builtin `Pointer` (a BARE name must skip the
         // generic) and `Nullable` beside `Nullable<T>` (a `Name<T>` must skip
         // the non-generic). The project pass has had the rule for CROSS-unit
@@ -1817,7 +1817,7 @@ begin
           end;
           // Generic-vs-not is only half of 16.1.2: the COUNT is part of the
           // identity too, and a name declared at two generic arities registers
-          // only its head. `TNodes<T>` and `TNodes<TKey, TValue>` (spring4d's
+          // only its head. `TNodes<T>` and `TNodes<TKey, TValue>` (a third-party
           // Spring.Collections.Trees) both declare a nested
           // `PRedBlackTreeNode`, so binding the qualifier to the wrong arity
           // silently resolved the wrong nested type — and the only visible
@@ -2308,7 +2308,7 @@ begin
         // indexable all the same, and then the element type is that
         // property's — `with Values[I - 1] do`, where Values is a
         // TcxValuesViewInfo and `property Values[Index]: TcxValueInfo ...
-        // default` is what the brackets mean (cxFilterControl). The
+        // default` is what the brackets mean (a suite's filter control). The
         // pass-through below would open the COLLECTION instead, and the
         // damage is not a missing member but a WRONG binding: the collection
         // has a member named `Values` too, so the body's `Values.Separator`

@@ -163,29 +163,29 @@ begin
     include. Here rather than in the form for the same reason the rest of this
     suite exists: a running program cannot show you that the span is right, only
     that the jump felt right on the one line you tried. }
-  CheckSpan('plain include', '{$I jcl.inc}', 6, 'jcl.inc');
-  CheckSpan('...indented and followed by code', '  {$I jcl.inc} // x', 9,
-    'jcl.inc');
-  CheckSpan('the long spelling', '{$INCLUDE jcl.inc}', 12, 'jcl.inc');
-  CheckSpan('lower case', '{$i jcl.inc}', 6, 'jcl.inc');
-  CheckSpan('the parenthesis-star form', '(*$I jcl.inc*)', 7, 'jcl.inc');
+  CheckSpan('plain include', '{$I common.inc}', 6, 'common.inc');
+  CheckSpan('...indented and followed by code', '  {$I common.inc} // x', 9,
+    'common.inc');
+  CheckSpan('the long spelling', '{$INCLUDE common.inc}', 12, 'common.inc');
+  CheckSpan('lower case', '{$i common.inc}', 6, 'common.inc');
+  CheckSpan('the parenthesis-star form', '(*$I common.inc*)', 7, 'common.inc');
   CheckSpan('a quoted path keeps the path, not the quotes',
     '{$I ''..\lib\a b.inc''}', 8, '..\lib\a b.inc');
-  CheckSpan('a relative path', '{$I ..\include\jcl.inc}', 8,
-    '..\include\jcl.inc');
+  CheckSpan('a relative path', '{$I ..\include\common.inc}', 8,
+    '..\include\common.inc');
   // The caret one PAST the name is still the name — that is where a
   // double-click leaves it.
-  CheckSpan('caret just past the last character', '{$I jcl.inc}', 12,
-    'jcl.inc');
-  CheckSpan('caret on the first character', '{$I jcl.inc}', 5, 'jcl.inc');
+  CheckSpan('caret just past the last character', '{$I common.inc}', 12,
+    'common.inc');
+  CheckSpan('caret on the first character', '{$I common.inc}', 5, 'common.inc');
   // Not includes, and each one would otherwise open something.
   CheckSpan('$I+ is I/O checking', '{$I+}', 4, '');
   CheckSpan('$I- likewise', '{$I-}', 4, '');
   CheckSpan('$I% is an environment string', '{$I%DATE%}', 5, '');
   CheckSpan('$IFDEF is not $I', '{$IFDEF DEBUG}', 9, '');
   CheckSpan('$IFNDEF is not $I either', '{$IFNDEF X}', 10, '');
-  CheckSpan('an ordinary comment is not a directive', '{ jcl.inc }', 4, '');
-  CheckSpan('outside the directive', 'uses A; {$I jcl.inc}', 3, '');
+  CheckSpan('an ordinary comment is not a directive', '{ common.inc }', 4, '');
+  CheckSpan('outside the directive', 'uses A; {$I common.inc}', 3, '');
   // Two directives on one line: the caret picks its own.
   CheckSpan('the second of two directives', '{$I a.inc}{$I b.inc}', 15,
     'b.inc');
