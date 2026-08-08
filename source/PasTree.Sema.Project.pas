@@ -314,6 +314,7 @@ type
     function IsClassCtorDtorSym(AMid, ASym: Integer): Boolean;
     // Cross-model overload selection (CrossType's call typing):
     function XCatOf(const AX: TSemaXType): TSemaTypeCat;
+    function CanonTypeX(const AX: TSemaXType): TSemaXType;
     function XSameType(const A, B: TSemaXType): Boolean;
     function XAssignableX(const ADst, ASrc: TSemaXType): Boolean;
     function XParamSyms(AMid, ASym: Integer): TArray<Integer>;
@@ -3578,6 +3579,45 @@ begin
   Result := FModels[AX.UnitId].Symbols[AX.Sym].TypeCat;
 end;
 
+{ AX with its plain ALIAS links followed to the declaration that actually
+  defines the type. `Winapi.Windows.TRect = System.Types.TRect` is one type
+  under two symbols, and which one a value carries depends on the unit its
+  declaration was read in — the same fact the helper index has to canonicalize
+  for. XSameType compares SYMBOLS, so without this an argument typed through
+  one name never matches a parameter declared through the other, and a
+  three-way overload set (TSize / TPoint / TRect at one arity) is decided by
+  declaration order instead of by the argument.
+
+  `T = type Base` is NOT followed: 2 §2.5.1 makes it a distinct type, and the
+  parser marks it with Aux = 1 on the nkTypeDecl — the same test BuildHelperMap
+  applies for the same reason. }
+function TPasSemaProject.CanonTypeX(const AX: TSemaXType): TSemaXType;
+var
+  LDef, LParent, LDepth: Integer;
+  LNext: TSemaXType;
+begin
+  Result := AX;
+  for LDepth := 1 to 8 do
+  begin
+    if not XValid(Result) then
+      Exit;
+    LDef := TypeDefNodeOf(Result.UnitId, Result.Sym);
+    if (LDef = NIL_NODE) or not (FModels[Result.UnitId].Tree.Nodes[LDef].Kind in
+       [nkIdent, nkMember]) then
+      Exit;
+    LParent := FModels[Result.UnitId].Tree.Nodes[LDef].Parent;
+    if (LParent <> NIL_NODE) and
+       (FModels[Result.UnitId].Tree.Nodes[LParent].Kind = nkTypeDecl) and
+       (FModels[Result.UnitId].Tree.Nodes[LParent].Aux = 1) then
+      Exit;   // `type Base` — a distinct type, not an alias
+    LNext := ResolveTypeExprNested(Result.UnitId, LDef);
+    if not XValid(LNext) or
+       ((LNext.UnitId = Result.UnitId) and (LNext.Sym = Result.Sym)) then
+      Exit;
+    Result := LNext;
+  end;
+end;
+
 // Same type across models. Builtin symbol indexes are IDENTICAL in every
 // model (SeedSystemScope runs first, deterministically), so two references to
 // the builtin Integer compare equal even when they live in different models —
@@ -3956,6 +3996,24 @@ var
   // parameter types substituted in ACtx (the instantiation frame the callee
   // member was found in). -1 = the candidate's arity does not admit the call.
   // A candidate with NO param info (builtin) fits neutrally at 0.
+  { Does AX's type declare a conversion operator — the one thing that can make
+    a value of another record type acceptable where AX is wanted (`class
+    operator Implicit`/`Explicit`, 6 §6.7)? Only the type's OWN members are
+    read: an operator is not inherited. }
+  function HasConversionOperator(const AX: TSemaXType): Boolean;
+  var
+    LScope: Integer;
+  begin
+    Result := False;
+    if not XValid(AX) then
+      Exit;
+    LScope := FModels[AX.UnitId].Symbols[AX.Sym].MemberScope;
+    if LScope = NIL_SCOPE then
+      Exit;
+    Result := (FModels[AX.UnitId].FindLocal(LScope, 'implicit') <> NIL_SYM) or
+              (FModels[AX.UnitId].FindLocal(LScope, 'explicit') <> NIL_SYM);
+  end;
+
   function ScoreCandidate(ACall, AMid, ACand, ACtx: Integer): Integer;
   var
     LParams: TArray<Integer>;
@@ -4008,8 +4066,36 @@ var
       if XValid(LArgX) and XValid(LParX) then
         if XSameType(LParX, LArgX) then
           Inc(Result, 2)
-        else if XAssignableX(LParX, LArgX) then
-          Inc(Result, 1);
+        else
+        begin
+          // Not the same SYMBOL — but it may still be the same TYPE reached
+          // through an alias, and the two sides are read in different units
+          // by construction. `LayoutUnitsToPixels` in
+          // dxDocumentLayoutUnitConverter is declared for TSize, TPoint and
+          // TRect at one arity; a TRect argument matched none of them by
+          // symbol, all three scored 0, and the FIRST — TSize — won the tie.
+          // The call then typed as TSize: a wrong binding that costs no
+          // diagnostic until something reads a member off it (`.ToRectF` in
+          // dxRichEdit.Ruler). Canonicalized only after the cheap test has
+          // already failed.
+          var LCanonPar := CanonTypeX(LParX);
+          var LCanonArg := CanonTypeX(LArgX);
+          if XSameType(LCanonPar, LCanonArg) then
+            Inc(Result, 2)
+          // Two DIFFERENT record types REJECT the candidate. The general
+          // "the types do not fit" rule is still not attempted (see the note
+          // above), but this corner of it is decidable: distinct records are
+          // not assignable to one another, and the one thing that could make
+          // them so — a `class operator Implicit`/`Explicit` on either side —
+          // is a MEMBER, so it can be looked for.
+          else if (XCatOf(LCanonPar) = tcRecord) and
+                  (XCatOf(LCanonArg) = tcRecord) and
+                  not HasConversionOperator(LCanonPar) and
+                  not HasConversionOperator(LCanonArg) then
+            Exit(-1)
+          else if XAssignableX(LParX, LArgX) then
+            Inc(Result, 1);
+        end;
       LArg := LM.Tree.Nodes[LArg].NextSibling;
       Inc(LIdx);
     end;

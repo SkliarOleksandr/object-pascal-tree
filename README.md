@@ -387,7 +387,7 @@ Still open, roughly in the order we're tackling it:
   | BuildWinVCL (271) | — | — | | | | | **0** | — |
   | bigflat (726) | 8 638 | 387 | 194 | 162 | 136 | 110 | **0** | — |
   | BuildWinFMX (362) | — | — | | | | 89 | **0** | — |
-  | AVImark client (3747) | 3 609 | | | | | 824 | **8** | 5 VclTee `F1027` + 2 true positives + 1 |
+  | AVImark client (3747) | 3 609 | | | | | 824 | **7** | 5 VclTee `F1027` + 2 true positives |
   | AVImarkServer (2121) | | | | | | 56 | **0** | — |
   | Spring.Base (73) | 70 | 60 | 60 | 60 | 60 | 60 | **60** | `fPair`, `TValue`/RTTI helpers |
 
@@ -504,9 +504,20 @@ Still open, roughly in the order we're tackling it:
     helper for TdxTagBase` redeclares `Importer` at the DERIVED importer type,
     and the whole HTML importer reads members off that.
 
-  The one left is `dxRichEdit.Ruler`'s `...LayoutUnitsToPixels(R, X, Y)
-  .ToRectF` — a `TRect` record helper on a call result, where the overload
-  that admits three arguments is declared in another unit.
+  The last one closed the same day and was **not** the helper it looked like.
+  `dxDocumentLayoutUnitConverter` declares `LayoutUnitsToPixels` for TSize,
+  TPoint and TRect at one arity; `XSameType` compares SYMBOLS, and the
+  argument's `TRect` and the parameter's `TRect` are read in different units,
+  so all three candidates scored 0 and the FIRST — TSize — won the tie. The
+  call then typed as TSize, and nothing said so until `.ToRectF` was read off
+  it two units away. Two changes: argument and parameter types are
+  canonicalized through their plain alias links before comparison
+  (`CanonTypeX`, the non-builtin twin of the seed canonicalization the helper
+  index does), and — the first crack in "ScoreCandidate never REJECTS" — two
+  DIFFERENT record types now reject the candidate outright. That corner is
+  decidable where the general rule is not: distinct records are not assignable,
+  and the one thing that could make them so, a `class operator Implicit` or
+  `Explicit`, is a MEMBER and can be looked for.
 
   FMX's 89 were four shapes, and all four are about **what a QUALIFIER means**:
 
@@ -1038,13 +1049,19 @@ Still open, roughly in the order we're tackling it:
     `private` ancestor member in another unit — invisible to dcc — can win here.
     That is the same imprecision `-visibility` exists to measure, not a new one,
     and its numbers did not move (52 / 111).
-  - `ScoreCandidate` never REJECTING a type-mismatched overload — **taken on
-    2026-08-07 in its narrowest form only**: an anonymous method LITERAL rejects
-    a non-procedural parameter, which is provable at the node and was 41 of the
-    111 false `E2361`. The GENERAL rule is still open and still wants its own
-    measurement, because "these types do not fit" has to answer for record
-    `Implicit` operators, `Variant`, untyped parameters and implicit calls of
-    parameterless function references;
+  - `ScoreCandidate` never REJECTING a type-mismatched overload — taken in two
+    narrow forms so far. **2026-08-07:** an anonymous method LITERAL rejects a
+    non-procedural parameter, provable at the node, 41 of the 111 false
+    `E2361`. **2026-08-08:** two DIFFERENT RECORD types reject each other,
+    which is decidable because distinct records are not assignable and the one
+    thing that could make them so is a `class operator Implicit`/`Explicit` —
+    a MEMBER, so it can be looked for. That one also needed argument and
+    parameter types canonicalized through their alias links first
+    (`CanonTypeX`), since the two sides are read in different units and
+    `XSameType` compares symbols. The GENERAL rule is still open and still
+    wants its own measurement, because "these types do not fit" has to answer
+    for `Variant`, untyped parameters and implicit calls of parameterless
+    function references;
   - on rtlflat there are exactly six member reports left, so that corpus can no
     longer drive this — `bigflat`'s 110 and the AVImark client are the ones with
     anything to say.

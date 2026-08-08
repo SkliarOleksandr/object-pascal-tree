@@ -629,6 +629,42 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // Overload selection between RECORD parameters of one arity, where the two
+  // sides name the same type through DIFFERENT symbols. `AL2.TSpot` is an
+  // alias of `AL1.TSpot`, so a symbol comparison matches neither candidate,
+  // both score 0, and declaration order decides — which is how
+  // `LayoutUnitsToPixels(TRect, Single, Single)` lost to the TSize overload
+  // declared above it (dxDocumentLayoutUnitConverter), typed the call as
+  // TSize, and left `.ToRectF` undeclared two units away.
+  UNIT_OV =
+    'unit OV;'#10'interface'#10'uses AL1, AL2;'#10 +
+    'type'#10 +
+    '  TOther = record'#10 +
+    '    Y: Integer;'#10 +
+    '  end;'#10 +
+    // TWO different symbols for the one type: the parameter is declared
+    // through AL2's alias, the argument through AL1's own declaration.
+    '  TSpotAlias = AL2.TSpot;'#10 +
+    '  TSpotDirect = AL1.TSpot;'#10 +
+    '  TConv = class'#10 +
+    '    function Conv(const A: TOther; const B, C: Integer): TOther; overload;'#10 +
+    '    function Conv(const A: TSpotAlias; const B, C: Integer): TSpotAlias;'#10 +
+    '      overload;'#10 +
+    '  end;'#10 +
+    'procedure Run(AConv: TConv; const S: TSpotDirect);'#10 +
+    'implementation'#10 +
+    'function TConv.Conv(const A: TOther; const B, C: Integer): TOther;'#10 +
+    'begin Result := A; end;'#10 +
+    'function TConv.Conv(const A: TSpotAlias; const B, C: Integer): TSpotAlias;'#10 +
+    'begin Result := A; end;'#10 +
+    'procedure Run(AConv: TConv; const S: TSpotDirect);'#10 +
+    'var'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  I := AConv.Conv(S, 1, 1).X;'#10 +   // X is on TSpot, not on TOther
+    'end;'#10 +
+    'end.'#10;
+
   // 15.3.3 the SAME-UNIT way: a helper declared beside (here: below) its
   // extended type still HIDES that type's own member of the same name. The
   // cross-unit direction was always right; this one bound own-first, and
@@ -880,6 +916,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'HE.pas'), UNIT_HE);
   TFile.WriteAllText(TPath.Combine(LDir, 'GM.pas'), UNIT_GM);
   TFile.WriteAllText(TPath.Combine(LDir, 'GU.pas'), UNIT_GU);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OV.pas'), UNIT_OV);
   TFile.WriteAllText(TPath.Combine(LDir, 'SH.pas'), UNIT_SH);
   TFile.WriteAllText(TPath.Combine(LDir, 'NS.Params.pas'), UNIT_NS_P);
   TFile.WriteAllText(TPath.Combine(LDir, 'NS.Runner.pas'), UNIT_NS_R);
@@ -1085,6 +1122,16 @@ begin
     // `Alignment: string`, so `.FHorz` had nowhere to resolve.
     Eq('`inherited Alignment` is the ANCESTOR''s (its FHorz resolves)',
       XTypeOf(LE, 'Alignment.FHorz'), 'Integer');
+
+    // ---- overload selection across an alias identity ----
+    LE := ModelByName('ov');
+    Ok('OV loaded', Assigned(LE));
+    Ok('OV: no diags at all', Length(LE.Diags) = 0);
+    // `X` is TSpot's; reaching it means the TSpot overload won, and it could
+    // only win by canonicalizing the alias — the argument and the parameter
+    // are declared through different symbols for the one type.
+    Eq('the record overload matching through an ALIAS wins the tie',
+      XTypeOf(LE, 'AConv.Conv(S,1,1)'), 'TSpotAlias');
 
     // ---- a SAME-UNIT helper hides the type's own member (15.3.3) ----
     LE := ModelByName('sh');
