@@ -1719,7 +1719,11 @@ begin
     // find them. LAST helper joined wins the lookup — FindLocalDeep walks
     // Additional most-recently-added first, which is dcc's own rule when two
     // helpers for one type are in scope.
-    FModel.JoinScope(LExtScope, LHelperScope);
+    // SHADOWING, not an ordinary join: a helper member hides the extended
+    // type's own of the same name (15.3.3). That precedence was the long
+    // standing same-unit gap — the cross-unit side (HelperMemberHit, checked
+    // before the type's members at every hop) has always had it right.
+    FModel.JoinScopeShadowing(LExtScope, LHelperScope);
     LExtScopes[LIdx] := LExtScope;
     LAny := True;
   end;

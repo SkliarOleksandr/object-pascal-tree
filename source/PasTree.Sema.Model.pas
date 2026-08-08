@@ -104,6 +104,12 @@ type
     Names: TDictionary<string, Integer>;   // NameLower -> symbol index (head)
     Symbols: TList<Integer>;               // declaration order
     Additional: TArray<Integer>;           // joined scopes (system/with/ancestor)
+    // Joined scopes checked BEFORE this scope's own names. Exactly one thing
+    // needs that order and the spec is explicit about it (15.3.3): a HELPER
+    // member hides the extended type's own member of the same name. Everything
+    // else joined here — uses, with, ancestors, enums — is a fallback and
+    // belongs in Additional. See JoinScopeShadowing.
+    Shadowing: TArray<Integer>;
     // For a METHOD implementation's routine scope: the (innermost) struct
     // type symbol the qualified name resolved to (TFoo in TFoo.Bar). NIL_SYM
     // elsewhere. The project driver's inherited-member pass starts its
@@ -167,6 +173,9 @@ type
     function AddScope(AKind: TSemaScopeKind; AParent, AOwnerNode: Integer):
       Integer;
     procedure JoinScope(AScope, AAdditional: Integer);
+    { Joins AShadowing so it is searched BEFORE AScope's own names — the one
+      precedence a plain JoinScope cannot express. See TSemaScope.Shadowing. }
+    procedure JoinScopeShadowing(AScope, AShadowing: Integer);
     // Adds a symbol to the arena (does not register a name).
     function AddSymbol(AScope: Integer; AKind: TSemaSymbolKind;
       const AName: string; ADeclNode: Integer): Integer;
@@ -298,6 +307,11 @@ begin
   Scopes[AScope].Additional := Scopes[AScope].Additional + [AAdditional];
 end;
 
+procedure TPasSemaModel.JoinScopeShadowing(AScope, AShadowing: Integer);
+begin
+  Scopes[AScope].Shadowing := Scopes[AScope].Shadowing + [AShadowing];
+end;
+
 { Any name -> its lookup key: lower-cased, leading '&' stripped.
 
   `&Foo` and `Foo` name the SAME thing (see TPasTree.NodeNameLower for the
@@ -360,6 +374,20 @@ var
   LAdd: TArray<Integer>;
   LIdx: Integer;
 begin
+  // SHADOWING joins first, before the scope's own names: 15.3.3 — a helper
+  // member hides the extended type's own member of the same name.
+  // dcc-verified, and DevExpress leans on it hard: dxRichEdit's
+  // `TdxTagBaseInnerHelper = class helper for TdxTagBase` redeclares
+  // `Importer` at the DERIVED importer type, and every `Importer.TagsStack`
+  // in that unit needs the helper's, not the class's own. Empty for all but a
+  // handful of scopes, so the common lookup pays one length test.
+  LAdd := Scopes[AScope].Shadowing;
+  for LIdx := High(LAdd) downto 0 do
+  begin
+    Result := FindLocalDeep(LAdd[LIdx], ANameLower);
+    if Result <> NIL_SYM then
+      Exit;
+  end;
   Result := FindLocal(AScope, ANameLower);
   if Result <> NIL_SYM then
     Exit;

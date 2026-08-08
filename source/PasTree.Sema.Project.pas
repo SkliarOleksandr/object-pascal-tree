@@ -2951,8 +2951,8 @@ end;
     to an earlier-in-scope helper (15.3.3).
   - A helper MEMBER hides the type's own member of the same name — so the
     helper is consulted BEFORE the member scope at every hop. NB the
-    same-unit join (JoinHelperScopes) still checks own names first; that
-    known precedence imprecision is confined to same-unit shadow pairs.
+    same-unit join (JoinHelperScopes) enforces the same order, through a
+    scope's Shadowing list — searched before its own names.
   - An implementation-section helper is unit-local; interface-section ones
     (however deeply nested — 15.3.4) export. }
 
@@ -6589,7 +6589,21 @@ begin
         LPend.Node := LNode;
         LPend.Ext.UnitId := LUid;
         LPend.Ext.Sym := LSym;
-        LPend.X := XNil;
+        // The frame travels with the OVERRIDE too, for the reason the unbound
+        // branch below states at length: it cannot be recovered downstream.
+        // Dropping it here was invisible until a name was BOTH the last
+        // segment of a dotted `uses` AND a member declared in a generic
+        // ancestor's open parameters — `Params` in AVImark's UI tests, where
+        // `uses UITest.Params` registers the unit under `Params` and
+        // `TUITest<TParams>.Params: TParams` is the member that outranks it.
+        // The override then typed every one of them as the open TParams,
+        // which falls to the CONSTRAINT, so the base class's fields resolved
+        // and the actual parameter class's did not: ~700 reports, and the
+        // only visible symptom was which field name was undeclared.
+        if LFound and (LCtx <> NIL_INST) then
+          LPend.X := SubstX(SymDeclTypeX(LUid, LSym), LCtx, 0)
+        else
+          LPend.X := XNil;
         APending := APending + [LPend];
       end
       else

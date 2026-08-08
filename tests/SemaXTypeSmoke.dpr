@@ -629,6 +629,95 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // 15.3.3 the SAME-UNIT way: a helper declared beside (here: below) its
+  // extended type still HIDES that type's own member of the same name. The
+  // cross-unit direction was always right; this one bound own-first, and
+  // dxRichEdit leans on it — `TdxTagBaseInnerHelper = class helper for
+  // TdxTagBase` redeclares `Importer` at the DERIVED importer type, so every
+  // `Importer.TagsStack` in that unit reads the helper's (60+ reports).
+  UNIT_SH =
+    'unit SH;'#10'interface'#10 +
+    'type'#10 +
+    '  TBaseImp = class'#10 +
+    '    Common: Integer;'#10 +
+    '  end;'#10 +
+    '  TRealImp = class(TBaseImp)'#10 +
+    '    Stack: Integer;'#10 +           // only on the DERIVED one
+    '  end;'#10 +
+    '  TTag = class'#10 +
+    '  private'#10 +
+    '    FImp: TBaseImp;'#10 +
+    '  public'#10 +
+    '    property Imp: TBaseImp read FImp;'#10 +
+    '    function Probe: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'type'#10 +
+    '  TTagInner = class helper for TTag'#10 +
+    '  private'#10 +
+    '    function GetImp: TRealImp;'#10 +
+    '  public'#10 +
+    '    property Imp: TRealImp read GetImp;'#10 +   // hides TTag.Imp
+    '  end;'#10 +
+    'function TTagInner.GetImp: TRealImp;'#10 +
+    'begin'#10 +
+    '  Result := TRealImp(inherited Imp);'#10 +
+    'end;'#10 +
+    'function TTag.Probe: Integer;'#10 +
+    'begin'#10 +
+    '  Result := Imp.Stack;'#10 +        // the HELPER's Imp, or Stack is lost
+    'end;'#10 +
+    'end.'#10;
+
+  // A member reached through a GENERIC ancestor whose bare name is ALSO the
+  // last segment of a dotted `uses`. Both halves are needed: the unit name
+  // makes the ident arrive at the inherited pass already BOUND (to the unit),
+  // and that override path used to drop the instantiation frame — so `Params`
+  // typed as the open TParams, fell back to its CONSTRAINT, and only the
+  // CONSTRAINT's members resolved. AVImark's UI tests are this shape ~700
+  // times over, and `uses UITest.Params` is what made it visible.
+  UNIT_NS_P =
+    'unit NS.Params;'#10'interface'#10 +
+    'type'#10 +
+    '  TParamsBase = class'#10 +
+    '    Shared: Integer;'#10 +          // reachable via the CONSTRAINT too
+    '  end;'#10 +
+    '  TMyParams = class(TParamsBase)'#10 +
+    '    Mine: Integer;'#10 +            // ONLY via the instantiation frame
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
+  UNIT_NS_R =
+    'unit NS.Runner;'#10'interface'#10'uses NS.Params;'#10 +
+    'type'#10 +
+    '  TRunner = class'#10 +
+    '    function Params: TParamsBase;'#10 +
+    '  end;'#10 +
+    '  TRunner<TP: TParamsBase> = class(TRunner)'#10 +
+    '    function Params: TP;'#10 +
+    '    procedure Execute; virtual; abstract;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TRunner.Params: TParamsBase; begin Result := nil; end;'#10 +
+    'function TRunner<TP>.Params: TP; begin Result := nil; end;'#10 +
+    'end.'#10;
+
+  UNIT_NS_T =
+    'unit NS.Test;'#10'interface'#10'uses NS.Runner, NS.Params;'#10 +
+    'type'#10 +
+    '  TMyTest = class(TRunner<TMyParams>)'#10 +
+    '    procedure Execute; override;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TMyTest.Execute;'#10 +
+    'var'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  I := Params.Mine;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // Cross-unit overload selection by ARGUMENT TYPES: three global overloads
   // (mirrors System.Math.Min's shape) + method overloads + a generic method
   // whose parameter needs instantiation-frame substitution before scoring.
@@ -791,6 +880,10 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'HE.pas'), UNIT_HE);
   TFile.WriteAllText(TPath.Combine(LDir, 'GM.pas'), UNIT_GM);
   TFile.WriteAllText(TPath.Combine(LDir, 'GU.pas'), UNIT_GU);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SH.pas'), UNIT_SH);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NS.Params.pas'), UNIT_NS_P);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NS.Runner.pas'), UNIT_NS_R);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NS.Test.pas'), UNIT_NS_T);
   TFile.WriteAllText(TPath.Combine(LDir, 'TL1.pas'), UNIT_TL1);
   TFile.WriteAllText(TPath.Combine(LDir, 'GX.pas'), UNIT_GX);
   TFile.WriteAllText(TPath.Combine(LDir, 'GY.pas'), UNIT_GY);
@@ -854,8 +947,9 @@ begin
     // is documented rather than deduplicated.
     // 19 since GY: the two calls written `Cast<TThing>` / `Fetch<TThing>` add
     // one EXPLICIT method frame each (ExplicitMethodFrame keys them on the
-    // routine symbol, exactly as the inferred ones are).
-    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '19');
+    // routine symbol, exactly as the inferred ones are). 20 since NS.Test:
+    // `TRunner<TMyParams>` is one more instantiation.
+    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '20');
 
     // ---- Cross-unit overload selection by ARGUMENT TYPES ----
     LV := ModelByName('xv');
@@ -991,6 +1085,22 @@ begin
     // `Alignment: string`, so `.FHorz` had nowhere to resolve.
     Eq('`inherited Alignment` is the ANCESTOR''s (its FHorz resolves)',
       XTypeOf(LE, 'Alignment.FHorz'), 'Integer');
+
+    // ---- a SAME-UNIT helper hides the type's own member (15.3.3) ----
+    LE := ModelByName('sh');
+    Ok('SH loaded', Assigned(LE));
+    Ok('SH: no diags at all', Length(LE.Diags) = 0);
+    Eq('the helper''s Imp wins over the class''s own, so Stack resolves',
+      XTypeOf(LE, 'Imp.Stack'), 'Integer');
+
+    // ---- generic-ancestor frame survives a unit-name override ----
+    LE := ModelByName('ns.test');
+    Ok('NS.Test loaded', Assigned(LE));
+    Ok('NS.Test: no diags at all', Length(LE.Diags) = 0);
+    // `Mine` exists only on the ARGUMENT: reaching it proves the frame was
+    // carried through the override, not that the constraint was searched.
+    Eq('`Params.Mine` — the frame survives, not just the constraint',
+      XTypeOf(LE, 'Params.Mine'), 'Integer');
 
     // ---- the AVImarkServer tail: five shapes, one unit ----
     LE := ModelByName('tl1');

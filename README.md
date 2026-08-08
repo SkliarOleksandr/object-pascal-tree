@@ -387,7 +387,7 @@ Still open, roughly in the order we're tackling it:
   | BuildWinVCL (271) | — | — | | | | | **0** | — |
   | bigflat (726) | 8 638 | 387 | 194 | 162 | 136 | 110 | **0** | — |
   | BuildWinFMX (362) | — | — | | | | 89 | **0** | — |
-  | AVImark client (3747) | 3 609 | | | | | 824 | **740** | late-bound UI-test names, `dxRichEdit` |
+  | AVImark client (3747) | 3 609 | | | | | 824 | **8** | 5 VclTee `F1027` + 2 true positives + 1 |
   | AVImarkServer (2121) | | | | | | 56 | **0** | — |
   | Spring.Base (73) | 70 | 60 | 60 | 60 | 60 | 60 | **60** | `fPair`, `TValue`/RTTI helpers |
 
@@ -477,6 +477,36 @@ Still open, roughly in the order we're tackling it:
   (`TNotify = TRESTComponentAdapter.TNotify`) had no definition at all, because
   nothing binds the last segment of a dotted nested name — `ResolveTypeExpr
   Nested` is the answer there, for the fourth time in a different function.
+
+  **AVImark client, 2026-08-08: 824 -> 8, and only ONE of those eight is
+  unexplained.** Five are the VclTee `F1027`s (TeeChart ships no `.pas`
+  anywhere) and two are `InnerGetParentByType`, a confirmed true positive dcc
+  reports too. Two causes covered 732 of the 816:
+
+  - **the instantiation frame was dropped on the OVERRIDE path** (~700). The
+    inherited pass carries a member's substituted type with it, because
+    nothing downstream can recover which hop it came from — but only on the
+    branch for names that arrived UNBOUND. A name that arrives BOUND is there
+    to be overridden (a unit reference or a compiler seed), and that branch
+    parked `XNil`. Invisible until a name was BOTH: `uses UITest.Params`
+    registers the unit under `Params`, and `TUITest<TParams>.Params: TParams`
+    is the member that outranks it — so every `Params.field` in AVImark's UI
+    tests typed as the OPEN parameter, fell back to its CONSTRAINT, and
+    resolved the base params class's fields while failing on the actual one's.
+    The symptom was only ever *which* field name was undeclared.
+  - **a SAME-UNIT helper now hides the extended type's own member** (~60), the
+    long-standing precedence gap this To-do listed. 15.3.3 says the helper
+    wins; `JoinHelperScopes` joined it as an ordinary fallback, so
+    `FindLocalDeep` found the type's own first. Scopes grew a `Shadowing` list
+    searched BEFORE their own names, and helper injection is its only user —
+    everything else joined there (uses, with, ancestors, enums) is genuinely a
+    fallback. dxRichEdit is what needs it: `TdxTagBaseInnerHelper = class
+    helper for TdxTagBase` redeclares `Importer` at the DERIVED importer type,
+    and the whole HTML importer reads members off that.
+
+  The one left is `dxRichEdit.Ruler`'s `...LayoutUnitsToPixels(R, X, Y)
+  .ToRectF` — a `TRect` record helper on a call result, where the overload
+  that admits three arguments is declared in another unit.
 
   FMX's 89 were four shapes, and all four are about **what a QUALIFIER means**:
 
@@ -1147,16 +1177,13 @@ Still open, roughly in the order we're tackling it:
   nothing in the RTL/VCL/FMX corpus reaches it — but a bare unit with an
   inherited method shadowed by a same-named global still gets a false `E2035`.
   Fixing it means the typer needs the ancestor walk the resolver already has.
-- **Helper precedence inside the same-unit join.** Cross-unit helper
-  injection is done (`BuildHelperMap`/`ActiveHelperFor`/`FindMemberX`,
-  dcc-verified rules: per-referring-unit last-uses-wins, helper member hides
-  the type's own, implementation-section helpers stay unit-local) — but the
-  SAME-unit path still resolves through `JoinHelperScopes`' scope join, which
-  checks the type's OWN names before the joined helper scope. When a
-  same-unit helper deliberately shadows a member of its own extended type,
-  Phase 1 binds the type's member where dcc binds the helper's. Confined to
-  same-unit shadow pairs; fixing it means teaching the join (or
-  `FindLocalDeep`) an ordering exception.
+- ~~**Helper precedence inside the same-unit join.**~~ **Fixed on 2026-08-08**
+  — the ordering exception this item asked for is a `Shadowing` list on a
+  scope, searched by `FindLocalDeep` BEFORE the scope's own names, and
+  `JoinHelperScopes` is its only user. Everything else joined onto a scope
+  (uses, with, ancestors, enums) is a fallback and stays in `Additional`. It
+  was worth ~60 reports on the AVImark client, all in dxRichEdit's HTML
+  importer, where a helper redeclares `Importer` at a derived type.
 - **Declaration-site precedence: inherited member vs used-unit global.** A name
   written inside a class DECLARATION is now found in the enclosing classes'
   ancestries (`CrossResolveDecl`), but only *after* the used units — dcc has it
