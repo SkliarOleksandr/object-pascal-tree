@@ -540,6 +540,95 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // Five shapes that took AVImarkServer's member-flag tail to zero, all in one
+  // unit because each is a couple of declarations:
+  //
+  //   1. `with Values[I] do` over a class with a DEFAULT array property —
+  //      the brackets mean that property, so the body opens the ELEMENT. The
+  //      collection ALSO has a `Values` member, so opening it instead was a
+  //      wrong binding, not a missing one (cxFilterControl).
+  //   2. `T.Create` under a bare `constructor` constraint — only a class can
+  //      satisfy it (OmniThreadLibrary's `Atomic<I; T: constructor>`).
+  //   3. a parameter with SEVERAL constraints guarantees the members of all
+  //      of them, not the first (JclHashMaps' `TKey: IComparable<TKey>,
+  //      IEquatable<TKey>, IHashable`).
+  //   4. a bare name used as a QUALIFIER means the PARAMETERLESS overload
+  //      (uRODL's `Add.Assign(...)`).
+  //   5. a function reference whose every parameter has a DEFAULT is still
+  //      called by writing its name (VirtualTrees' TVTStyleServicesFunc).
+  UNIT_TL1 =
+    'unit TL1;'#10'interface'#10 +
+    'type'#10 +
+    '  IHashy = interface'#10 +
+    '    function Hash: Integer;'#10 +
+    '  end;'#10 +
+    '  ICompy = interface'#10 +
+    '    function Cmp: Integer;'#10 +
+    '  end;'#10 +
+    '  TItem = class'#10 +
+    '    Tag: Integer;'#10 +
+    '  end;'#10 +
+    '  TItems = class'#10 +
+    '  private'#10 +
+    '    FSep: string;'#10 +
+    '    function GetItem(Index: Integer): TItem;'#10 +
+    '  public'#10 +
+    '    property Separator: string read FSep;'#10 +
+    '    property Values[Index: Integer]: TItem read GetItem; default;'#10 +
+    '  end;'#10 +
+    '  TRow = class'#10 +
+    '  private'#10 +
+    '    FValues: TItems;'#10 +
+    '  public'#10 +
+    '    property Values: TItems read FValues;'#10 +
+    '  end;'#10 +
+    '  TMaker<T: constructor> = class'#10 +
+    '    class function Make: TObject;'#10 +
+    '  end;'#10 +
+    '  TKeyed<K: ICompy, IHashy> = class'#10 +
+    '    function HashOf(const AKey: K): Integer;'#10 +
+    '  end;'#10 +
+    '  TAdder = class'#10 +
+    '    function Add(AItem: TItem): Integer; overload;'#10 +
+    '    function Add: TItem; overload;'#10 +
+    '    procedure Poke;'#10 +
+    '  end;'#10 +
+    '  TStyler = class'#10 +
+    '    function Color: Integer;'#10 +
+    '  end;'#10 +
+    '  TStylerFunc = function(AOwner: TObject = nil): TStyler;'#10 +
+    'var'#10 +
+    '  GStylerFunc: TStylerFunc;'#10 +
+    'procedure DrawRow(ARow: TRow);'#10 +
+    'implementation'#10 +
+    'function TItems.GetItem(Index: Integer): TItem; begin Result := nil; end;'#10 +
+    'class function TMaker<T>.Make: TObject; begin Result := T.Create; end;'#10 +
+    'function TKeyed<K>.HashOf(const AKey: K): Integer;'#10 +
+    'begin'#10 +
+    '  Result := AKey.Hash;'#10 +          // the SECOND constraint
+    'end;'#10 +
+    'function TAdder.Add(AItem: TItem): Integer; begin Result := 0; end;'#10 +
+    'function TAdder.Add: TItem; begin Result := nil; end;'#10 +
+    'procedure TAdder.Poke;'#10 +
+    'begin'#10 +
+    '  Add.Tag := 1;'#10 +                 // the PARAMETERLESS overload
+    'end;'#10 +
+    'function TStyler.Color: Integer; begin Result := 0; end;'#10 +
+    'procedure DrawRow(ARow: TRow);'#10 +
+    'var'#10 +
+    '  I, N: Integer;'#10 +
+    '  S: string;'#10 +
+    'begin'#10 +
+    '  with ARow do'#10 +
+    '    with Values[0] do'#10 +
+    '    begin'#10 +
+    '      I := Tag;'#10 +                 // the ELEMENT is open...
+    '      S := Values.Separator;'#10 +    // ...and the outer Values still is
+    '    end;'#10 +
+    '  N := GStylerFunc.Color;'#10 +       // all-defaulted function reference
+    'end;'#10 +
+    'end.'#10;
+
   // Cross-unit overload selection by ARGUMENT TYPES: three global overloads
   // (mirrors System.Math.Min's shape) + method overloads + a generic method
   // whose parameter needs instantiation-frame substitution before scoring.
@@ -702,6 +791,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'HE.pas'), UNIT_HE);
   TFile.WriteAllText(TPath.Combine(LDir, 'GM.pas'), UNIT_GM);
   TFile.WriteAllText(TPath.Combine(LDir, 'GU.pas'), UNIT_GU);
+  TFile.WriteAllText(TPath.Combine(LDir, 'TL1.pas'), UNIT_TL1);
   TFile.WriteAllText(TPath.Combine(LDir, 'GX.pas'), UNIT_GX);
   TFile.WriteAllText(TPath.Combine(LDir, 'GY.pas'), UNIT_GY);
   TFile.WriteAllText(TPath.Combine(LDir, 'AL1.pas'), UNIT_AL1);
@@ -901,6 +991,26 @@ begin
     // `Alignment: string`, so `.FHorz` had nowhere to resolve.
     Eq('`inherited Alignment` is the ANCESTOR''s (its FHorz resolves)',
       XTypeOf(LE, 'Alignment.FHorz'), 'Integer');
+
+    // ---- the AVImarkServer tail: five shapes, one unit ----
+    LE := ModelByName('tl1');
+    Ok('TL1 loaded', Assigned(LE));
+    Ok('TL1: no diags at all', Length(LE.Diags) = 0);
+    Eq('a default array property decides what `with Values[0]` opens',
+      XTypeOf(LE, 'Tag'), 'Integer');
+    Eq('...and the ENCLOSING with still answers for the collection',
+      XTypeOf(LE, 'Values.Separator'), 'string');
+    // NB no `T.Create` case here: the `constructor` constraint resolves
+    // through TObject, and this corpus is a bare directory with no System
+    // unit to resolve it in. It is covered by the corpus measurement instead
+    // (AVImarkServer's OtlSync report) — the same reason the RTL-shaped
+    // helper cases below assert types rather than absence.
+    Eq('a member on the SECOND of several constraints (16.4.1)',
+      XTypeOf(LE, 'AKey.Hash'), 'Integer');
+    Eq('a bare QUALIFIER means the parameterless overload',
+      XTypeOf(LE, 'Add.Tag'), 'Integer');
+    Eq('an all-defaulted function reference is still called by its name',
+      XTypeOf(LE, 'GStylerFunc.Color'), 'Integer');
 
     // ---- with over a generic-instantiation call result ----
     LR := ModelByName('xr');

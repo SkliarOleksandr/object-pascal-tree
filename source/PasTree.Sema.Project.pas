@@ -212,6 +212,7 @@ type
     // `with` over a target whose TYPE lives in another unit (ch.05 §5.7) —
     // see FindInEnclosingWith.
     function PointeeX(const AX: TSemaXType): TSemaXType;
+    function AllParamsDefaulted(AMid, AParams: Integer): Boolean;
     function ProcResultX(const AX: TSemaXType): TSemaXType;
     function PointeeOfDeclX(AId, ABaseNode: Integer): TSemaXType;
     function DesignatorSymX(AId, ANode: Integer;
@@ -281,7 +282,8 @@ type
     function GenericParamConstraints(AMid,
       ASym: Integer): TArray<TArray<Integer>>;
     function RealGenericBase(const AX: TSemaXType): TSemaXType;
-    function ConstraintOfParamX(const AParam: TSemaXType): TSemaXType;
+    function ConstraintsOfParamX(
+      const AParam: TSemaXType): TArray<TSemaXType>;
     function RoutineNameOfParam(AMid, ANode: Integer): string;
     function XDescendsFrom(const ADesc, ABase: TSemaXType): Boolean;
     procedure CheckConstraints(AId: Integer);
@@ -301,9 +303,13 @@ type
     procedure ClearHelperIdx;
     function HelperMemberHit(AFromMid: Integer; const ACur: TSemaXType;
       const ANameLower: string; out AMemMid, AMemSym: Integer): Boolean;
+    { ADepth guards the CONSTRAINT hop, which is the one place this function
+      re-enters itself: a type parameter may carry several constraints and the
+      member may be on ANY of them (16 §16.4.1), so each is walked in turn. }
     function FindMemberX(AFromMid: Integer; const ABase: TSemaXType;
       const ANameLower: string;
-      out AMemMid, AMemSym: Integer; out ACtx: Integer): Boolean;
+      out AMemMid, AMemSym: Integer; out ACtx: Integer;
+      ADepth: Integer = 0): Boolean;
     function IsConstructorSym(AMid, ASym: Integer): Boolean;
     function IsClassCtorDtorSym(AMid, ASym: Integer): Boolean;
     // Cross-model overload selection (CrossType's call typing):
@@ -2017,19 +2023,26 @@ end;
   (16 §16.4.1 puts them on the declaration, once). The body is also where nearly
   every use of a constrained parameter lives, so the group is searched first and
   the DECLARING type's same-named parameter second. }
-function TPasSemaProject.ConstraintOfParamX(
-  const AParam: TSemaXType): TSemaXType;
+function TPasSemaProject.ConstraintsOfParamX(
+  const AParam: TSemaXType): TArray<TSemaXType>;
 var
   LM: TPasSemaModel;
   LDecl, LGroup, LStruct, LIdx, LScope, LMethod: Integer;
   LIdents: TArray<Integer>;
   LCons: TArray<TArray<Integer>>;
 
-  // The first of AGroup's constraints that names a type.
-  function FirstTypeConstraint(const ANodes: TArray<Integer>): TSemaXType;
+  { EVERY constraint of AGroup that names a type, in source order. All of
+    them, not the first: `TKey: IComparable<TKey>, IEquatable<TKey>,
+    IHashable` guarantees the members of all three at once (16 §16.4.1), and
+    JclHashMaps calls `AKey.GetHashCode` (the third) and `A.Equals(B)` (the
+    second) in adjacent methods. }
+  function AllTypeConstraints(
+    const ANodes: TArray<Integer>): TArray<TSemaXType>;
   var
     LNode, LRef: Integer;
+    LX: TSemaXType;
   begin
+    Result := nil;
     for LNode in ANodes do
     begin
       LRef := LM.Tree.Nodes[LNode].FirstChild;
@@ -2037,21 +2050,29 @@ var
       begin
         if LM.Tree.Nodes[LRef].Kind in [nkIdent, nkMember, nkTypeArgs] then
         begin
-          Result := ResolveTypeExpr(AParam.UnitId, LRef);
-          if XValid(Result) then
-            Exit;
+          LX := ResolveTypeExpr(AParam.UnitId, LRef);
+          if XValid(LX) then
+            Result := Result + [LX];
         end;
         LRef := LM.Tree.Nodes[LRef].NextSibling;
       end;
     end;
-    Result := XNil;
   end;
 
-  { The `class` KIND constraint, as TObject. A kind constraint adopts no child
-    (the parser consumes the keyword), so the node's own text is what tells the
-    three apart — and only `class` names a type at all. Routed through
-    ResolveRealDecl like every other implicit-TObject hop, so it finds the real
-    System.pas declaration rather than a seeded stub. }
+  { A KIND constraint that means "a class", as TObject. A kind constraint
+    adopts no child (the parser consumes the keyword), so the node's own text
+    is what tells the three apart.
+
+    `constructor` counts for the same reason `class` does, and it is not a
+    formality: only a CLASS can satisfy it (16 §16.4.1 — a record has no
+    constructor to require), so a `T: constructor` parameter is a class
+    parameter that additionally promises a parameterless `Create`.
+    `Atomic<I; T: constructor>` in OmniThreadLibrary writes exactly that and
+    then `T.Create`, and with only `class` recognised the walk stopped at the
+    parameter. `record` is the one kind that must NOT land here.
+
+    Routed through ResolveRealDecl like every other implicit-TObject hop, so
+    it finds the real System.pas declaration rather than a seeded stub. }
   function ClassConstraintX(const ANodes: TArray<Integer>): TSemaXType;
   var
     LNode, LRMid, LRSym: Integer;
@@ -2059,9 +2080,23 @@ var
     Result := XNil;
     for LNode in ANodes do
       if (LM.Tree.Nodes[LNode].FirstChild = NIL_NODE) and
-         SameText(LM.Tree.NodeText(LNode), 'class') and
+         (SameText(LM.Tree.NodeText(LNode), 'class') or
+          SameText(LM.Tree.NodeText(LNode), 'constructor')) and
          ResolveRealDecl(AParam.UnitId, 'tobject', LRMid, LRSym) then
         Exit(XPlain(LRMid, LRSym));
+  end;
+
+  { The named constraints, then TObject when a KIND constraint asks for a
+    class. Last, not first: a named type's members are a superset of
+    TObject's, so trying it earlier can only find the same names later. }
+  function ConstraintList(const ANodes: TArray<Integer>): TArray<TSemaXType>;
+  var
+    LClass: TSemaXType;
+  begin
+    Result := AllTypeConstraints(ANodes);
+    LClass := ClassConstraintX(ANodes);
+    if XValid(LClass) then
+      Result := Result + [LClass];
   end;
 
   function OwnConstraints(AGroup: Integer): TArray<Integer>;
@@ -2079,7 +2114,7 @@ var
   end;
 
 begin
-  Result := XNil;
+  Result := nil;
   if not XValid(AParam) then
     Exit;
   LM := FModels[AParam.UnitId];
@@ -2092,10 +2127,8 @@ begin
   var LOwn := OwnConstraints(LGroup);
   // A named type outranks the `class` keyword: `T: TItem, class` guarantees
   // TItem's members, which are a superset of TObject's.
-  Result := FirstTypeConstraint(LOwn);
-  if not XValid(Result) then
-    Result := ClassConstraintX(LOwn);
-  if XValid(Result) then
+  Result := ConstraintList(LOwn);
+  if Length(Result) > 0 then
     Exit;
   // Nothing here: this is a method body's `<T>`, and the constraint is on the
   // type. Match by NAME rather than by position — the body may spell the
@@ -2127,9 +2160,7 @@ begin
        (LM.Tree.NodeNameLower(LIdents[LIdx]) =
         LM.Symbols[AParam.Sym].NameLower) then
     begin
-      Result := FirstTypeConstraint(LCons[LIdx]);
-      if not XValid(Result) then
-        Result := ClassConstraintX(LCons[LIdx]);
+      Result := ConstraintList(LCons[LIdx]);
       Exit;
     end;
   // Still nothing: the parameter belongs to a generic METHOD rather than to the
@@ -2151,15 +2182,13 @@ begin
            (LM.Tree.NodeNameLower(LIdents[LIdx]) =
             LM.Symbols[AParam.Sym].NameLower) then
         begin
-          Result := FirstTypeConstraint(LCons[LIdx]);
-          if not XValid(Result) then
-            Result := ClassConstraintX(LCons[LIdx]);
+          Result := ConstraintList(LCons[LIdx]);
           Exit;
         end;
     end;
     LMethod := LM.Symbols[LMethod].NextOverload;
   end;
-  Result := XNil;
+  Result := nil;
 end;
 
 { The NAME of the routine whose generic-parameter list ANode sits in, lowered.
@@ -3222,7 +3251,7 @@ end;
 function TPasSemaProject.FindMemberX(AFromMid: Integer;
   const ABase: TSemaXType;
   const ANameLower: string; out AMemMid, AMemSym: Integer;
-  out ACtx: Integer): Boolean;
+  out ACtx: Integer; ADepth: Integer): Boolean;
 var
   LCur, LNext: TSemaXType;
   LM: TPasSemaModel;
@@ -3251,12 +3280,24 @@ begin
       // The parameter's own frame is dropped deliberately: a constraint is
       // written in the DECLARING scope, so the instantiation that bound this
       // parameter says nothing about it.
-      LNext := ConstraintOfParamX(LCur);
-      if not XValid(LNext) or
-         ((LNext.UnitId = LCur.UnitId) and (LNext.Sym = LCur.Sym)) then
-        Exit;
-      LCur := LNext;
-      LM := FModels[LCur.UnitId];
+      //
+      // A parameter may carry SEVERAL constraints, and it guarantees the
+      // members of ALL of them: `TKey: IComparable<TKey>, IEquatable<TKey>,
+      // IHashable` in JclHashMaps means `AKey.GetHashCode` (IHashable) and
+      // `A.Equals(B)` (IEquatable) both compile, though neither is on the
+      // FIRST constraint. So the extra ones are tried too — after the first,
+      // which keeps the single-constraint case (all but a handful) walking
+      // exactly as before, and only on a MISS, so the answer is still the
+      // first constraint that HAS the name.
+      if ADepth >= 4 then
+        Exit;   // a constraint naming a parameter naming a constraint...
+      for LNext in ConstraintsOfParamX(LCur) do
+        if XValid(LNext) and
+           not ((LNext.UnitId = LCur.UnitId) and (LNext.Sym = LCur.Sym)) and
+           FindMemberX(AFromMid, LNext, ANameLower, AMemMid, AMemSym, ACtx,
+             ADepth + 1) then
+          Exit(True);
+      Exit;
     end;
     if not (LM.Symbols[LCur.Sym].Kind in [skType, skBuiltinType]) then
       Exit;
@@ -3326,7 +3367,14 @@ begin
     end;
     case LM.Tree.Nodes[LDef].Kind of
       nkIdent, nkMember, nkTypeArgs:
-        LNext := ResolveTypeExpr(LCur.UnitId, LDef);   // type alias
+        // Nested-aware, because an alias to another class's NESTED type is
+        // written as a dotted name and nothing binds its last segment: no
+        // used unit declares `TNotify` — TRESTComponentAdapter does
+        // (REST.BindSource), and REST.Client's `TNotify = TRESTComponentAdapter
+        // .TNotify` then has no definition at all, so `TNotify.Create` had no
+        // members to search. Costs nothing on the common path:
+        // ResolveTypeExprNested IS ResolveTypeExpr until that one fails.
+        LNext := ResolveTypeExprNested(LCur.UnitId, LDef);   // type alias
       nkPointerType:
         // Implicit dereference in member access: Object Pascal lets `P.Field`
         // stand for `P^.Field` when P is a pointer to a record, and the RTL
@@ -3713,7 +3761,18 @@ begin
     begin
       LX := SymDeclTypeX(AId, LSym);
       if XValid(LX) and ((LM.Symbols[LSym].TypeSym = NIL_SYM) or
-         (LX.Inst <> NIL_INST)) then
+         (LX.Inst <> NIL_INST) or
+         // A same-unit binding to a GENERIC, from a BARE reference, is the one
+         // intra-unit answer worth overriding: arity is part of a type's
+         // identity (16.1.2), and the resolver's own arity rule can only see
+         // this unit — the non-generic of that name usually lives in a USED
+         // one, which is where PreferNonGeneric has already looked by now.
+         // `FCollectionEnumerator: TCollectionEnumerator` declared INSIDE
+         // `TCollectionEnumerator<T>` is the shape (Data.Bind.Components): it
+         // bound to the enclosing generic, and `.GetCurrent` — System.Classes'
+         // — went undeclared.
+         (IsGenericTypeSym(AId, LM.Symbols[LSym].TypeSym) and
+          not ((LX.UnitId = AId) and (LX.Sym = LM.Symbols[LSym].TypeSym)))) then
         LM.SymTypeX.AddOrSetValue(LSym, LX);
     end;
 end;
@@ -4176,6 +4235,53 @@ var
     end;
   end;
 
+  { Is N the BASE of a member access — `Add` in `Add.Assign(X)`? Then its
+    value is what the dot applies to. A callee (`Add(X)`) is an nkCall child,
+    not an nkMember base, so it is excluded by construction. }
+  function IsValueQualifier(N: Integer): Boolean;
+  var
+    LParent: Integer;
+  begin
+    LParent := LM.Tree.Nodes[N].Parent;
+    Result := (LParent <> NIL_NODE) and
+              (LM.Tree.Nodes[LParent].Kind = nkMember) and
+              (LM.Tree.Nodes[LParent].FirstChild = N);
+  end;
+
+  { Re-points N from an overload that TAKES parameters to the parameterless
+    one of the same name on the enclosing struct's chain, when there is one.
+    A no-op otherwise — including for every ordinary name, which is what keeps
+    this off the hot path: the bound symbol must already be a routine with
+    parameters before anything is searched. }
+  procedure PreferParamlessOverload(N: Integer);
+  var
+    LBound, LStruct, LMemMid, LMemSym, LCtx: Integer;
+    LExt: TPasExtRef;
+  begin
+    LBound := LM.RefMap[N];
+    if LBound = NIL_SYM then
+      Exit;
+    if (LM.Symbols[LBound].Kind <> skRoutine) or
+       not RoutineHasParams(AId, LBound) then
+      Exit;
+    LStruct := StructSymOfNode(LM, N);
+    if LStruct = NIL_SYM then
+      Exit;
+    if not ParamlessOverloadX(XPlain(AId, LStruct),
+         LM.Symbols[LBound].NameLower, LMemMid, LMemSym, LCtx) then
+      Exit;
+    if LMemMid = AId then
+      LM.RefMap[N] := LMemSym
+    else
+    begin
+      LM.RefMap[N] := NIL_SYM;
+      LExt.UnitId := LMemMid;
+      LExt.Sym := LMemSym;
+      LNewExt.AddOrSetValue(N, LExt);
+    end;
+    LCtxOf[N] := LCtx;
+  end;
+
   { Is N the NAME an `inherited` designator starts with — the `Alignment` of
     `inherited Alignment.Horz`, the `Create` of `inherited Create(X)`? The
     parser hangs the whole selector chain under one nkInherited (see
@@ -4286,6 +4392,16 @@ var
           // corrects bindings, it does not invent diagnostics).
           if IsInheritedHead(N) then
             ResolveInheritedHead(N);
+          // A bare name used as a QUALIFIER is a value, so an overloaded
+          // routine of that name means the PARAMETERLESS overload — writing
+          // its name calls it (6 §6.6.1). A binding stops at the first
+          // declaration, and uRODL declares `function Add(anEntity): Integer`
+          // ahead of `function Add: TRODLEntity`, so `Add.Assign(...)` typed
+          // as Integer and lost the member. Restricted to a qualifier
+          // position: as a CALLEE the name is the whole overload set and
+          // SelectCallTarget picks from it by arguments.
+          if IsValueQualifier(N) then
+            PreferParamlessOverload(N);
           LSym := LM.RefMap[N];
           if LSym <> NIL_SYM then
             case LM.Symbols[LSym].Kind of
@@ -5167,6 +5283,43 @@ end;
   `TFunc<TResult> = reference to function: TResult` declares its result as a
   type PARAMETER, so `TFunc<IValue>` only yields IValue once AX's own
   instantiation is applied. }
+{ Does every parameter in AParams carry a default value, so that the routine
+  can be called with no arguments at all? Read off the TOKENS rather than the
+  node shape: a default is the only thing that can put an `=` inside a
+  parameter declaration (a type expression never contains one), while the node
+  shape cannot tell `X: TFoo` from `X: TFoo = nil` without knowing which
+  trailing child is a type and which an expression — and both can be an
+  nkIdent. An empty list answers True, which is the same "callable bare" the
+  no-list case already gets. }
+function TPasSemaProject.AllParamsDefaulted(AMid, AParams: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LParam, LTok: Integer;
+  LHasDefault: Boolean;
+begin
+  LM := FModels[AMid];
+  LParam := LM.Tree.Nodes[AParams].FirstChild;
+  while LParam <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LParam].Kind = nkParam then
+    begin
+      LHasDefault := False;
+      for LTok := LM.Tree.Nodes[LParam].FirstToken to
+                  LM.Tree.Nodes[LParam].LastToken do
+        if (LTok >= 0) and (LTok <= High(LM.Tree.Source.Visible)) and
+           (LM.Tree.Source.VisibleText(LTok) = '=') then
+        begin
+          LHasDefault := True;
+          Break;
+        end;
+      if not LHasDefault then
+        Exit(False);
+    end;
+    LParam := LM.Tree.Nodes[LParam].NextSibling;
+  end;
+  Result := True;
+end;
+
 function TPasSemaProject.ProcResultX(const AX: TSemaXType): TSemaXType;
 var
   LM: TPasSemaModel;
@@ -5191,8 +5344,22 @@ begin
           LChild := LM.Tree.Nodes[LDef].FirstChild;
           if LChild = NIL_NODE then
             Exit;   // `procedure` with neither parameters nor a result
+          // Takes parameters — but a parameter with a DEFAULT still lets the
+          // name be written bare, and dcc calls it then:
+          // `TVTStyleServicesFunc = function(AControl: TControl = nil):
+          // TCustomStyleServices` is called as `VTStyleServicesFunc.
+          // GetSystemColor(...)` in VirtualTrees.StyleHooks. So the rule is
+          // "no parameter the caller MUST supply", not "no parameters".
+          if (LM.Tree.Nodes[LChild].Kind = nkParams) and
+             not AllParamsDefaulted(LCur.UnitId, LChild) then
+            Exit;
           if LM.Tree.Nodes[LChild].Kind = nkParams then
-            Exit;   // takes parameters: no implicit call, so no members
+          begin
+            // Skip the list; the result type is the next child.
+            LChild := LM.Tree.Nodes[LChild].NextSibling;
+            if LChild = NIL_NODE then
+              Exit;   // a `procedure(...)` type: no result to take a member of
+          end;
           Exit(SubstX(ResolveTypeExpr(LCur.UnitId, LChild), LCur.Inst, 0));
         end;
     else

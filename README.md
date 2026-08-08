@@ -387,8 +387,8 @@ Still open, roughly in the order we're tackling it:
   | BuildWinVCL (271) | — | — | | | | | **0** | — |
   | bigflat (726) | 8 638 | 387 | 194 | 162 | 136 | 110 | **0** | — |
   | BuildWinFMX (362) | — | — | | | | 89 | **0** | — |
-  | AVImark client (3747) | 3 609 | | | | | 824 | **750** | late-bound UI-test names, `dxRichEdit` |
-  | AVImarkServer (2121) | | | | | | 56 | **9** | see below — 0 in project files |
+  | AVImark client (3747) | 3 609 | | | | | 824 | **740** | late-bound UI-test names, `dxRichEdit` |
+  | AVImarkServer (2121) | | | | | | 56 | **0** | — |
   | Spring.Base (73) | 70 | 60 | 60 | 60 | 60 | 60 | **60** | `fPair`, `TValue`/RTTI helpers |
 
   **Every RTL/VCL/FMX corpus reports NOTHING under the member flag as of
@@ -404,8 +404,9 @@ Still open, roughly in the order we're tackling it:
   PARAMETER; a proc type with parameters and a `procedure` type both end the
   walk instead.
 
-  **AVImarkServer, 2026-08-08: 56 -> 9, and ZERO in project files.** Four
-  causes, and the first of them was not in the analyzer at all:
+  **AVImarkServer, 2026-08-08: 56 -> ZERO.** Nine causes over two passes. The
+  first four took it to 9, and the first of THOSE was not in the analyzer at
+  all:
 
   - **the demo saw four IDE search paths instead of 141** — `StudioRoot`
     returned the registry's `RootDir` verbatim, trailing `\` and all, while
@@ -438,12 +439,44 @@ Still open, roughly in the order we're tackling it:
     it; the head of an inherited chain is now resolved from the ancestor in
     `CrossType` regardless of what it already bound to (12.1.2).
 
-  The 9 left are all in library units and all singletons or pairs: a
-  parameterless-except-for-defaults function reference (`TVTStyleServicesFunc =
-  function(AControl: TControl = nil): TCustomStyleServices` — the rule above
-  ends the walk at "takes parameters", and dcc calls it anyway because every
-  parameter has a default), `T.Create` on a constrained parameter, a `with`
-  target shadowing an outer name of its own, and three more.
+  The remaining 9 were five more, each a singleton or a pair, and four of the
+  five are one theme — **a rule stated for the common case and never widened**:
+
+  - **a `with` target indexed through a DEFAULT array property** (2, and a
+    2447-report near-miss). `with Values[I - 1] do` over a TcxValuesViewInfo
+    means its `property Values[Index]: TcxValueInfo ... default`, so the body
+    opens the ELEMENT — the intra-unit resolver opened the COLLECTION, which
+    also has a `Values` member, so `Values.Separator` bound to the element and
+    lost `Separator` with no diagnostic anywhere near the cause. The
+    pass-through it replaced is still right when the base designator IS an
+    array property (its declared type is per-element already); getting that
+    distinction wrong first cost 2447 reports from a single `.inc`, which is
+    the amplification pattern in its purest form.
+  - **`T.Create` under a bare `constructor` constraint** (1). Only a class can
+    satisfy it — a record has no constructor to require — so it is a class
+    constraint that additionally promises `Create`. Only `class` was
+    recognised (`Atomic<I; T: constructor>`, OmniThreadLibrary).
+  - **several constraints on one parameter** (2). `TKey: IComparable<TKey>,
+    IEquatable<TKey>, IHashable` guarantees the members of ALL of them
+    (16 §16.4.1); the hop took the FIRST, and JclHashMaps calls `AKey
+    .GetHashCode` (the third) and `A.Equals(B)` (the second) in adjacent
+    methods.
+  - **a parameterless-except-for-defaults function reference** (1).
+    `TVTStyleServicesFunc = function(AControl: TControl = nil):
+    TCustomStyleServices` is called by writing its name, so the rule is "no
+    parameter the caller MUST supply", not "no parameters".
+  - **a bare name used as a QUALIFIER** (1) means the PARAMETERLESS overload:
+    uRODL declares `function Add(anEntity): Integer` ahead of `function Add:
+    TRODLEntity`, and `Add.Assign(...)` typed as Integer.
+
+  Plus two last binding gaps: a bare reference to a same-named GENERIC keeps
+  the intra-unit binding even when the arity says otherwise (`FCollection
+  Enumerator: TCollectionEnumerator` declared inside `TCollectionEnumerator<T>`
+  — the non-generic is System.Classes', and the resolver's own arity rule can
+  only see one unit), and an alias to another class's NESTED type
+  (`TNotify = TRESTComponentAdapter.TNotify`) had no definition at all, because
+  nothing binds the last segment of a dotted nested name — `ResolveTypeExpr
+  Nested` is the answer there, for the fourth time in a different function.
 
   FMX's 89 were four shapes, and all four are about **what a QUALIFIER means**:
 

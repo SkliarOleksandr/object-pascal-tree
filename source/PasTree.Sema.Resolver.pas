@@ -124,6 +124,8 @@ type
     function FindMemberUpChain(ATypeSym: Integer;
       const ANameLower: string): Integer;
     function AncestorTypeSym(ATypeSym: Integer): Integer;
+    function IsArrayPropDesignator(ABaseNode: Integer): Boolean;
+    function DefaultArrayPropTypeSym(ATypeSym: Integer): Integer;
     function WithTargetTypeSym(ANode: Integer): Integer;
     function PointeeTypeSym(ATypeSym: Integer): Integer;
     function ElementTypeOf(ABaseNode: Integer): Integer;
@@ -2078,6 +2080,84 @@ end;
 // type (via this same function — restricted to the same simple designator
 // shapes) and looks the member up directly, rather than trusting a RefMap
 // entry that was never going to be there.
+{ Does ABaseNode name an ARRAY PROPERTY — a property that declares parameters?
+  Then the brackets after it are ITS index list, the model already stores its
+  declared type per-element, and nothing further may be peeled. Anything else
+  (a field, a variable, a plain property) is a value being indexed, and if its
+  type is a class the brackets mean that class's DEFAULT array property. }
+function TPasSemaResolver.IsArrayPropDesignator(ABaseNode: Integer): Boolean;
+var
+  LSym, LDecl, LChild: Integer;
+begin
+  Result := False;
+  LSym := DesignatorHead(ABaseNode);
+  if (LSym = NIL_SYM) or (FModel.Symbols[LSym].Kind <> skProperty) then
+    Exit;
+  LDecl := FModel.Symbols[LSym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LDecl := FTree.Nodes[LDecl].Parent;
+  if (LDecl = NIL_NODE) or (KindOf(LDecl) <> nkPropertyDecl) then
+    Exit;
+  LChild := FirstChild(LDecl);
+  while LChild <> NIL_NODE do
+  begin
+    if KindOf(LChild) = nkParams then
+      Exit(True);
+    LChild := NextSib(LChild);
+  end;
+end;
+
+{ The declared type of ATypeSym's DEFAULT array property — the one indexing an
+  instance of it means (13.1.2) — searched up the same-unit ancestor chain,
+  NIL_SYM when the type has none. A property qualifies when it declares
+  PARAMETERS and carries the `default` specifier, exactly as the project
+  typer's IsDefaultArrayProp reads it; the model stores such a property's
+  declared type per-ELEMENT already, so the type symbol IS the element's. }
+function TPasSemaResolver.DefaultArrayPropTypeSym(ATypeSym: Integer): Integer;
+var
+  LScope, LDepth, LSym, LDecl, LChild: Integer;
+  LHasParams, LHasDefault: Boolean;
+begin
+  Result := NIL_SYM;
+  LDepth := 0;
+  while (ATypeSym <> NIL_SYM) and (LDepth < 32) do
+  begin
+    Inc(LDepth);
+    LScope := FModel.Symbols[ATypeSym].MemberScope;
+    if LScope <> NIL_SCOPE then
+      // The scope's OWN declaration list, not a scan of every symbol in the
+      // unit: this runs per with-target, and a whole-model scan on a shared
+      // path is the perf trap this codebase has hit three times.
+      for LSym in FModel.Scopes[LScope].Symbols do
+      begin
+        if FModel.Symbols[LSym].Kind <> skProperty then
+          Continue;
+        LDecl := FModel.Symbols[LSym].DeclNode;
+        if LDecl = NIL_NODE then
+          Continue;
+        LDecl := FTree.Nodes[LDecl].Parent;
+        if (LDecl = NIL_NODE) or (KindOf(LDecl) <> nkPropertyDecl) then
+          Continue;
+        LHasParams := False;
+        LHasDefault := False;
+        LChild := FirstChild(LDecl);
+        while LChild <> NIL_NODE do
+        begin
+          if KindOf(LChild) = nkParams then
+            LHasParams := True
+          else if (KindOf(LChild) = nkPropSpec) and
+                  (NodeNameLower(LChild) = 'default') then
+            LHasDefault := True;
+          LChild := NextSib(LChild);
+        end;
+        if LHasParams and LHasDefault then
+          Exit(FModel.Symbols[LSym].TypeSym);
+      end;
+    ATypeSym := AncestorTypeSym(ATypeSym);
+  end;
+end;
+
 function TPasSemaResolver.WithTargetTypeSym(ANode: Integer): Integer;
 var
   LBase, LName, LHead, LBaseType, LScope: Integer;
@@ -2188,6 +2268,26 @@ begin
       // Hence the fallback to the pass-through.
       begin
         Result := ElementTypeOf(FirstChild(ANode));
+        // Not an array, but a CLASS/record with a DEFAULT array property is
+        // indexable all the same, and then the element type is that
+        // property's — `with Values[I - 1] do`, where Values is a
+        // TcxValuesViewInfo and `property Values[Index]: TcxValueInfo ...
+        // default` is what the brackets mean (cxFilterControl). The
+        // pass-through below would open the COLLECTION instead, and the
+        // damage is not a missing member but a WRONG binding: the collection
+        // has a member named `Values` too, so the body's `Values.Separator`
+        // bound to the element and lost Separator, with no diagnostic
+        // anywhere near the cause. Tried before the pass-through, which
+        // exists for the case where the base designator IS the array
+        // property (its declared type is already per-element).
+        // ...but ONLY when the base is not itself an array property, whose
+        // stored type is per-element already — peeling a second level there
+        // is how `with TaviFileList.Singleton.Files[Hospital_file] do` lost
+        // its whole body (2447 reports on one project, from one `.inc`).
+        if (Result = NIL_SYM) and
+           not IsArrayPropDesignator(FirstChild(ANode)) then
+          Result := DefaultArrayPropTypeSym(
+            WithTargetTypeSym(FirstChild(ANode)));
         if Result = NIL_SYM then
           Result := WithTargetTypeSym(FirstChild(ANode));
       end;
