@@ -1188,6 +1188,22 @@ Still open, roughly in the order we're tackling it:
   lost diagnostic, never a false one. Closing it means deferring the decision to
   the typer, which knows whether the callee is `Variant`. We also do not
   implement `E2166` (named arguments must follow positional ones).
+- **Two over-permissive bindings, both found on 2026-08-08 and both left in
+  deliberately** — they can only ADD a binding, never invent a diagnostic, and
+  each would cost precision elsewhere to fix properly:
+  - *A lone `constructor` constraint unlocks all of TObject, where dcc unlocks
+    only `T.Create`.* 16 §16.4.1 is explicit and probed: under `T: constructor`
+    alone, `V.Free` on a VALUE of that type is `E2003`, while `T.Create` on the
+    type is legal. `ConstraintOfParamX` maps the kind constraint to TObject
+    wholesale, so both resolve. Doing it exactly means splitting the
+    type-designator use from the value use at the constraint hop.
+  - *An inherited overload set is merged whether or not the declarations say
+    `overload`.* dcc-verified this day, in both directions: with `IMore =
+    interface(IBase)` redeclaring a name, the ancestor's signature is callable
+    when both carry `overload` and `E2010 Incompatible types` when neither
+    does — the derived declaration hides. Our "nothing in the type's own chain
+    fits, so this means an INHERITED routine" fallback does not read the
+    directive, so it accepts the hidden call too. Now in the spec (6 §6.3.1).
 - **Invert the overload chain: `PrevOverload`, nearest-declaration-wins.**
   Today `DeclareSym` keeps the FIRST declaration registered under the name and
   chains later ones forward through `NextOverload`. Object Pascal's rule is the
@@ -1281,6 +1297,15 @@ Still open, roughly in the order we're tackling it:
     dcc the oracle and removes the need for a hand-maintained expectation file.
     This is the "жир": a wrong binding stops being invisible and becomes a
     compile error or a binary difference.
+- **Follow a package's `requires` closure to the required package's search
+  paths.** Small, and it is the whole of the last honest `F1027` we still
+  report: a `.dpk` whose own `DCC_UnitSearchPath` is one non-recursive
+  directory reaches units that live a level deeper only because it `requires`
+  another package whose paths do cover them. dcc resolves it through the
+  required `.dcp`; a host reading `.dproj`/`.dpk` files can resolve it by
+  reading the required project's paths. Worth doing before the source-less-unit
+  work below, because it costs a `.dpk` parse and removes a whole class of
+  reports that look like ours and are not.
 - **Units with no source (`.dcu`-only third-party libraries).** The blocker for
   real projects: the client project pulls in several large third-party component
   suites, and where only `.dcu` ships, every importer gets an `F1027` and — far
@@ -1298,11 +1323,12 @@ Still open, roughly in the order we're tackling it:
      ingestion path every later stage feeds. Do this first regardless.
   2. **Whatever the vendor already ships.** `.hpp` headers (C++Builder
      export) and `.int` files where they exist are already declaration-only text.
-     Not hypothetical: the first real project run hit exactly this — the client project's
-     last 5 `F1027` are one charting component's, which ships `lib\win32\release\
-     its `.dcu` plus a C++ `.hpp` with **no
-     `.pas` anywhere** in the Studio tree. A `.hpp` reader would close that
-     cluster without touching the `.dcu` format at all.
+     Not hypothetical: the first real project run hit exactly this — the client
+     project's last 5 `F1027` are one charting component's, which ships its
+     `.dcu` under `lib\win32\release` plus a C++Builder `.hpp` with **no `.pas`
+     anywhere** in the Studio tree. A `.hpp` reader would close that cluster
+     without touching the `.dcu` format at all — and those 5 are now the only
+     project-file diagnostics that corpus has.
   3. **A `.dcu` reader.** ⚠️ *Do not budget this as a small job.* The format is
      undocumented, proprietary, and changes with essentially every compiler
      release — a version magic at the head and per-version tag tables. The
@@ -1517,8 +1543,12 @@ Still open, roughly in the order we're tackling it:
    covers the inline-`if` expression).
 4. Semantic analysis over the same tree produces **zero false-positive
    diagnostics**. ✅ Reached 2026-07-30 on the flattened RTL+VCL+FMX corpus and
-   on the `BuildWinVCL`/`BuildWinFMX` packages — see the To-do for what holding
-   it now depends on.
+   on the `BuildWinVCL`/`BuildWinFMX` packages, and **extended on 2026-08-08 to
+   every corpus we measure**: two real applications (3747 and 2121 units) and a
+   third-party library's three packages report no false `E2003` under the
+   opt-in member flag either. What is left anywhere is a unit whose source
+   genuinely is not on the search path, plus one confirmed true positive. See
+   the To-do for what holding that now depends on.
 
 ## Requirements
 

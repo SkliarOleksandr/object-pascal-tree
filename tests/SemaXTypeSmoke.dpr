@@ -744,13 +744,16 @@ const
     '  TSpotAlias = AL2.TSpot;'#10 +
     '  TSpotDirect = AL1.TSpot;'#10 +
     '  IBase = interface'#10 +
-    '    function Take(const A: TSpotDirect): Integer;'#10 +
+    '    function Take(const A: TSpotDirect): Integer; overload;'#10 +
     '  end;'#10 +
     // Declares ONLY the array overload and INHERITS the single-item one, so
     // the derived interface's own has to be rejected on argument types for the
-    // ancestor's to be looked for at all.
+    // ancestor's to be looked for at all. Both carry `overload` because that
+    // is what makes the set span the ancestry — dcc-verified: drop the
+    // directive and the derived declaration HIDES the ancestor's, and the
+    // same call is `E2010 Incompatible types`.
     '  IMore = interface(IBase)'#10 +
-    '    function Take(const A: TArray<TSpotDirect>): string;'#10 +
+    '    function Take(const A: TArray<TSpotDirect>): string; overload;'#10 +
     '  end;'#10 +
     '  TConv = class'#10 +
     '    function Conv(const A: TOther; const B, C: Integer): TOther; overload;'#10 +
