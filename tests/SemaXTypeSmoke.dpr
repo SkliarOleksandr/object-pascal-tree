@@ -414,6 +414,132 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // 16.5.1's other half: the type arguments WRITTEN at the call site. Nothing
+  // here can be inferred from the arguments — `Cast<T>(AObject: TObject): T`
+  // declares every parameter concretely — so the written list is the only
+  // source, and a call typed without it loses every member after the dot
+  // (dxCore's `Unsafe.Cast<TFoo>(X).Bar`, ~30 reports on one real project).
+  //
+  // `Fetch` is the OTHER half of the same shape: a non-generic member of the
+  // same name on the DERIVED class must not swallow a call written with type
+  // arguments (System.JSON: `TJSONObject.GetValue(Name)` beside
+  // `TJSONValue.GetValue<T>(APath)`).
+  UNIT_GX =
+    'unit GX;'#10'interface'#10 +
+    'type'#10 +
+    '  TThing = class'#10 +
+    '    function Ping: Integer;'#10 +
+    '  end;'#10 +
+    '  TCastBase = class'#10 +
+    '    function Fetch<T>(const AName: string): T; overload;'#10 +
+    '  end;'#10 +
+    '  TCastBag = class(TCastBase)'#10 +
+    '    function Fetch(const AName: string): TObject; overload;'#10 +
+    '  end;'#10 +
+    '  Unsafe = class'#10 +
+    '    class function Cast<T: class>(AObject: TObject): T; static;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TThing.Ping: Integer; begin Result := 1; end;'#10 +
+    'function TCastBase.Fetch<T>(const AName: string): T; begin end;'#10 +
+    'function TCastBag.Fetch(const AName: string): TObject;'#10 +
+    'begin Result := nil; end;'#10 +
+    'class function Unsafe.Cast<T>(AObject: TObject): T; begin Result := nil;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  UNIT_GY =
+    'unit GY;'#10'interface'#10'uses GX;'#10 +
+    'var'#10 +
+    '  GBag: TCastBag;'#10 +
+    '  GObj: TObject;'#10 +
+    'implementation'#10 +
+    'procedure UseCast;'#10 +
+    'var'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  I := Unsafe.Cast<TThing>(GObj).Ping;'#10 +
+    '  I := GBag.Fetch<TThing>(''x'').Ping;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  // A helper whose target NAME is an alias of the type: `UA.TSpot` is another
+  // symbol for `UB.TSpot`, and which one a value carries depends on the unit
+  // its declaration was read in. The helper must answer for both (SynEdit's
+  // TRectHelper, written against Winapi.Windows' TRect, applied to a local
+  // declared through System.Types').
+  UNIT_AL1 =
+    'unit AL1;'#10'interface'#10 +
+    'type'#10 +
+    '  TSpot = record'#10 +
+    '    X: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
+  UNIT_AL2 =
+    'unit AL2;'#10'interface'#10'uses AL1;'#10 +
+    'type'#10 +
+    '  TSpot = AL1.TSpot;'#10 +          // a plain alias: the SAME type
+    'implementation'#10 +
+    'end.'#10;
+
+  UNIT_AL3 =
+    'unit AL3;'#10'interface'#10'uses AL1, AL2;'#10 +
+    'type'#10 +
+    '  TSpotHelper = record helper for TSpot'#10 +   // binds AL2's alias
+    '    function Doubled: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TSpotHelper.Doubled: Integer; begin Result := X * 2; end;'#10 +
+    'end.'#10;
+
+  UNIT_AL4 =
+    'unit AL4;'#10'interface'#10'uses AL1, AL3;'#10 +   // AL1's TSpot, not AL2's
+    'var'#10 +
+    '  GSpot: TSpot;'#10 +
+    'implementation'#10 +
+    'procedure UseSpot;'#10 +
+    'var'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  I := GSpot.Doubled;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  // 12.1.2: `inherited Name` is the ANCESTOR's member even when the class
+  // REDECLARES that name — and cxMemo/cxCheckBox redeclare it at a different
+  // TYPE, so the whole chain after it depends on getting this right.
+  UNIT_IN1 =
+    'unit IN1;'#10'interface'#10 +
+    'type'#10 +
+    '  TAlign = class'#10 +
+    '    FHorz: Integer;'#10 +
+    '  end;'#10 +
+    '  TBaseProps = class'#10 +
+    '    function GetAlignment: TAlign;'#10 +
+    '    property Alignment: TAlign read GetAlignment;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TBaseProps.GetAlignment: TAlign; begin Result := nil; end;'#10 +
+    'end.'#10;
+
+  UNIT_IN2 =
+    'unit IN2;'#10'interface'#10'uses IN1;'#10 +
+    'type'#10 +
+    '  TMemoProps = class(TBaseProps)'#10 +
+    '    function GetOwn: string;'#10 +
+    '    function Probe: Integer;'#10 +
+    '    property Alignment: string read GetOwn;'#10 +   // shadows, other type
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TMemoProps.GetOwn: string; begin Result := ''''; end;'#10 +
+    'function TMemoProps.Probe: Integer;'#10 +
+    'begin'#10 +
+    '  Result := inherited Alignment.FHorz;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // Cross-unit overload selection by ARGUMENT TYPES: three global overloads
   // (mirrors System.Math.Min's shape) + method overloads + a generic method
   // whose parameter needs instantiation-frame substitution before scoring.
@@ -576,6 +702,14 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'HE.pas'), UNIT_HE);
   TFile.WriteAllText(TPath.Combine(LDir, 'GM.pas'), UNIT_GM);
   TFile.WriteAllText(TPath.Combine(LDir, 'GU.pas'), UNIT_GU);
+  TFile.WriteAllText(TPath.Combine(LDir, 'GX.pas'), UNIT_GX);
+  TFile.WriteAllText(TPath.Combine(LDir, 'GY.pas'), UNIT_GY);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AL1.pas'), UNIT_AL1);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AL2.pas'), UNIT_AL2);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AL3.pas'), UNIT_AL3);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AL4.pas'), UNIT_AL4);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IN1.pas'), UNIT_IN1);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IN2.pas'), UNIT_IN2);
   TFile.WriteAllText(TPath.Combine(LDir, 'XP.pas'), UNIT_XP);
   TFile.WriteAllText(TPath.Combine(LDir, 'XQ.pas'), UNIT_XQ);
 
@@ -628,7 +762,10 @@ begin
     // differ; and TWrap<Integer> appears twice for the builtin-arg reason
     // above. Neither affects typing — same text, same members — so the count
     // is documented rather than deduplicated.
-    Ok('instance table (17; see comment)', GProj.InstanceCount = 17);
+    // 19 since GY: the two calls written `Cast<TThing>` / `Fetch<TThing>` add
+    // one EXPLICIT method frame each (ExplicitMethodFrame keys them on the
+    // routine symbol, exactly as the inferred ones are).
+    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '19');
 
     // ---- Cross-unit overload selection by ARGUMENT TYPES ----
     LV := ModelByName('xv');
@@ -735,6 +872,35 @@ begin
       XTypeOf(LG, 'G.Wrap(5).FV'), 'Integer');
     Eq('Pair(1,''x'') infers two parameters, result is V',
       XTypeOf(LG, 'G.Pair(1,''x'')'), 'string');
+
+    // ---- 16.5.1 EXPLICIT type arguments at the call site ----
+    LG := ModelByName('gy');
+    Ok('GY loaded', Assigned(LG));
+    Ok('GY: no diags at all', Length(LG.Diags) = 0);
+    Eq('Cast<TThing>(X) types as the WRITTEN argument, not the open T',
+      XTypeOf(LG, 'Unsafe.Cast<TThing>(GObj)'), 'TThing');
+    Eq('...so the member after it resolves',
+      XTypeOf(LG, 'Unsafe.Cast<TThing>(GObj).Ping'), 'Integer');
+    Eq('a call written with <T> skips the derived NON-generic of that name',
+      XTypeOf(LG, 'GBag.Fetch<TThing>(''x'')'), 'TThing');
+
+    // ---- a helper reached through the target's alias identity ----
+    LE := ModelByName('al4');
+    Ok('AL4 loaded', Assigned(LE));
+    Ok('AL4: no diags at all', Length(LE.Diags) = 0);
+    Eq('helper written against an ALIAS answers for the aliased type too',
+      XTypeOf(LE, 'GSpot.Doubled'), 'Integer');
+
+    // ---- 12.1.2 inherited head vs a redeclared name ----
+    LE := ModelByName('in2');
+    Ok('IN2 loaded', Assigned(LE));
+    Ok('IN2: no diags at all', Length(LE.Diags) = 0);
+    // NB not `XTypeOf(LE, 'Alignment')` — that text matches the class's own
+    // property DECLARATION first. The chain is the unambiguous probe, and it
+    // is also the thing that was broken: the head bound to the class's own
+    // `Alignment: string`, so `.FHorz` had nowhere to resolve.
+    Eq('`inherited Alignment` is the ANCESTOR''s (its FHorz resolves)',
+      XTypeOf(LE, 'Alignment.FHorz'), 'Integer');
 
     // ---- with over a generic-instantiation call result ----
     LR := ModelByName('xr');

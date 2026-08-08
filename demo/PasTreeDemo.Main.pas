@@ -2677,7 +2677,7 @@ var
 begin
   Result := GetEnvironmentVariable('BDS');
   if (Result <> '') and TDirectory.Exists(Result) then
-    Exit;
+    Exit(ExcludeTrailingPathDelimiter(Result));
   Result := '';
   LBest := 0;
   LKeys := TStringList.Create;
@@ -2700,7 +2700,15 @@ begin
             if (LDir <> '') and TDirectory.Exists(LDir) then
             begin
               LBest := LVer;
-              Result := LDir;
+              // WITHOUT the trailing '\' the registry writes ('...\23.0\'):
+              // ReadIdePaths matches this value against the same RootDir
+              // through ExcludeTrailingPathDelimiter, and while the slash
+              // survived here the two never compared equal — so EVERY
+              // version was skipped and the whole IDE library/browsing set
+              // was silently lost, leaving only the four bare-RTL fallback
+              // dirs. That is what turned Vcl.Forms, cxControls, Jcl*, and
+              // FastMM4 into F1027 on a project that compiles.
+              Result := ExcludeTrailingPathDelimiter(LDir);
             end;
           end;
       finally

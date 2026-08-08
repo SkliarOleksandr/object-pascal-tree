@@ -56,6 +56,12 @@ type
     TargetUnit: Integer;      // NIL_SYM => builtin target, use TargetName
     TargetSym: Integer;
     TargetName: string;       // lower-case; builtin targets only
+    // Every FURTHER identity of the extended type: the plain-alias chain
+    // behind TargetUnit/TargetSym (`Winapi.Windows.TRect = System.Types
+    // .TRect`). One type, several symbols, and which one a VALUE carries
+    // depends on the unit its declaration was read in — so the helper is
+    // indexed under all of them. See Publish.
+    Aliases: TArray<TPasExtRef>;
     HelperMid: Integer;       // model the helper is declared in
     Sym: Integer;             // the helper's own skType symbol
     Exported: Boolean;
@@ -307,6 +313,8 @@ type
     function XParamSyms(AMid, ASym: Integer): TArray<Integer>;
     function InferMethodFrame(AMid, ASym: Integer;
       const AArgTypes: TArray<TSemaXType>; ACtx: Integer): Integer;
+    function ExplicitMethodFrame(AId, AMid, ASym, ATypeArgs,
+      ACtx: Integer): Integer;
     procedure BindTypesX(AId: Integer);
     procedure CrossType(AId: Integer);
     procedure RunCrossTypePass(ACount: Integer);
@@ -2965,6 +2973,15 @@ var
     // TargetName carries the builtin the alias chain ended at.
     if AReg.TargetUnit <> NIL_SYM then
       Put(AReg.TargetUnit, AReg.TargetSym);
+    // ...and under the rest of the alias chain, because the NAME the helper
+    // was written against is only one of the type's symbols. SynFunc declares
+    // `record helper for TRect` with Winapi.Windows last in its uses, so it
+    // registered Winapi's alias; SynEditScrollBars declares `R: TRect` with
+    // System.Types in its IMPLEMENTATION uses, so the local carries the
+    // canonical symbol — a different key, and every `R.SetTop` came back
+    // undeclared while the helper sat right there in scope.
+    for var LAlias in AReg.Aliases do
+      Put(LAlias.UnitId, LAlias.Sym);
     if AReg.TargetName = '' then
       Exit;
     // Builtin target: re-resolve the NAME in the REFERRING model — its own
@@ -3028,6 +3045,7 @@ begin
       LX := ResolveTypeExpr(LMid, LLast);
       if not XValid(LX) then
         Continue;   // target didn't resolve — nothing to inject
+      LReg.Aliases := nil;
       if FModels[LX.UnitId].Symbols[LX.Sym].Kind = skBuiltinType then
       begin
         LReg.TargetUnit := NIL_SYM;
@@ -3067,6 +3085,17 @@ begin
           LCanon := ResolveTypeExpr(LCanon.UnitId, LCDef);
           if not XValid(LCanon) then
             Break;
+          // Same type, another symbol — index the helper under it too. Only
+          // reached for a PLAIN alias: the `type Base` test above has already
+          // broken out of the walk for a distinct type.
+          if FModels[LCanon.UnitId].Symbols[LCanon.Sym].Kind <> skBuiltinType
+          then
+          begin
+            var LAliasRef: TPasExtRef;
+            LAliasRef.UnitId := LCanon.UnitId;
+            LAliasRef.Sym := LCanon.Sym;
+            LReg.Aliases := LReg.Aliases + [LAliasRef];
+          end;
           if FModels[LCanon.UnitId].Symbols[LCanon.Sym].Kind =
              skBuiltinType then
           begin
@@ -3620,6 +3649,56 @@ begin
   Result := Instantiate(XPlain(AMid, ASym), LArgs);
 end;
 
+{ 16.5.1's other half — a generic method whose type arguments are WRITTEN at
+  the call site: `Unsafe.Cast<TcxCustomTextEdit>(Edit)`. InferMethodFrame reads
+  them off the ARGUMENTS, which cannot work here at all: `Cast<T: class>
+  (AObject: TObject): T` declares every parameter concretely, so nothing binds
+  T and the frame fails — leaving the call typed as the OPEN parameter, and
+  every member after it undeclared. dxCore's `Unsafe` trio (Cast /
+  CastWithNilCheck / AccessProtected) is the shape at scale, and `TJSONObject
+  .GetValue<TJSONObject>(...)` is the same thing in the RTL.
+
+  The written list wins outright when it is present and complete — inference
+  exists only to supply what was NOT written, and 16.5.1 does not mix the two:
+  a partial list is an error at the call, not a hint. So a count mismatch
+  returns NIL_INST and the caller falls back, rather than instantiating a frame
+  that is positionally wrong.
+
+  Type arguments are resolved in the CALLER's model (AId), where they are
+  written; the frame is keyed on the callee's routine symbol, exactly as
+  InferMethodFrame's is. }
+function TPasSemaProject.ExplicitMethodFrame(AId, AMid, ASym, ATypeArgs,
+  ACtx: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LIdents: TArray<Integer>;
+  LArgs: TArray<TSemaXType>;
+  LNode: Integer;
+  LX: TSemaXType;
+begin
+  Result := NIL_INST;
+  LIdents := GenericParamIdents(AMid, ASym);
+  if Length(LIdents) = 0 then
+    Exit;   // not a generic method
+  LM := FModels[AId];
+  // The first child is the callee designator; the rest are the arguments.
+  LNode := LM.Tree.Nodes[LM.Tree.Nodes[ATypeArgs].FirstChild].NextSibling;
+  while LNode <> NIL_NODE do
+  begin
+    LX := ResolveTypeExpr(AId, LNode);
+    if not XValid(LX) then
+      Exit;   // an unresolvable argument makes the whole frame a guess
+    // Written inside a generic's own body the argument can itself be an open
+    // parameter (`Cast<T>` in a method of `TFoo<T>`); close it over the
+    // enclosing frame first, the same order InferMethodFrame uses.
+    LArgs := LArgs + [SubstX(LX, ACtx, 0)];
+    LNode := LM.Tree.Nodes[LNode].NextSibling;
+  end;
+  if Length(LArgs) <> Length(LIdents) then
+    Exit;
+  Result := Instantiate(XPlain(AMid, ASym), LArgs);
+end;
+
 // Declared-type pass: for every symbol whose type expression did not bind to
 // a plain local type, resolve it cross-model / as an instantiation.
 procedure TPasSemaProject.BindTypesX(AId: Integer);
@@ -4047,6 +4126,110 @@ var
     Result := ABestSym <> NIL_SYM;
   end;
 
+  { Moves (AMid, ASym) off a routine that cannot be what `Name<...>` means —
+    one whose own generic-parameter count does not match the ARGUMENTS
+    written — onto the ancestor's declaration that does. Walks up the owner's
+    ancestry, since the member lookup that produced ASym stopped at the first
+    hit; leaves the pair untouched when the ancestry offers nothing better,
+    which keeps a genuinely unmatched call typed exactly as it was. }
+  procedure RetargetToGeneric(ATypeArgs: Integer; var AMid, ASym: Integer);
+  var
+    LWanted, LOwner, LMemMid, LMemSym, LCtx, LNode: Integer;
+    LCur: TSemaXType;
+    LNameLower: string;
+  begin
+    LWanted := 0;
+    LNode := LM.Tree.Nodes[LM.Tree.Nodes[ATypeArgs].FirstChild].NextSibling;
+    while LNode <> NIL_NODE do
+    begin
+      Inc(LWanted);
+      LNode := LM.Tree.Nodes[LNode].NextSibling;
+    end;
+    if Length(GenericParamIdents(AMid, ASym)) = LWanted then
+      Exit;
+    LNameLower := FModels[AMid].Symbols[ASym].NameLower;
+    // The candidate moves; AMid/ASym only change once something MATCHES, so a
+    // walk that ends in nothing leaves the call exactly as it found it.
+    LMemMid := AMid;
+    LMemSym := ASym;
+    for var LHop := 1 to 8 do
+    begin
+      if FModels[LMemMid].Symbols[LMemSym].Scope = NIL_SCOPE then
+        Exit;
+      LOwner := FModels[LMemMid].Scopes[
+        FModels[LMemMid].Symbols[LMemSym].Scope].StructSym;
+      if LOwner = NIL_SYM then
+        Exit;
+      LCur := AncestorOfX(XPlain(LMemMid, LOwner));
+      if not XValid(LCur) then
+        Exit;
+      if not FindMemberX(AId, LCur, LNameLower, LMemMid, LMemSym, LCtx) then
+        Exit;
+      if FModels[LMemMid].Symbols[LMemSym].Kind <> skRoutine then
+        Exit;
+      if Length(GenericParamIdents(LMemMid, LMemSym)) = LWanted then
+      begin
+        AMid := LMemMid;
+        ASym := LMemSym;
+        Exit;
+      end;
+    end;
+  end;
+
+  { Is N the NAME an `inherited` designator starts with — the `Alignment` of
+    `inherited Alignment.Horz`, the `Create` of `inherited Create(X)`? The
+    parser hangs the whole selector chain under one nkInherited (see
+    ParseSelectors at tkInherited), so the head is reached by walking up the
+    base-child links and finding nkInherited at the top. }
+  function IsInheritedHead(N: Integer): Boolean;
+  var
+    LParent: Integer;
+  begin
+    LParent := LM.Tree.Nodes[N].Parent;
+    while (LParent <> NIL_NODE) and
+          (LM.Tree.Nodes[LParent].Kind in [nkMember, nkCall, nkIndex]) and
+          (LM.Tree.Nodes[LParent].FirstChild = N) do
+    begin
+      N := LParent;
+      LParent := LM.Tree.Nodes[LParent].Parent;
+    end;
+    Result := (LParent <> NIL_NODE) and
+              (LM.Tree.Nodes[LParent].Kind = nkInherited) and
+              (LM.Tree.Nodes[LParent].FirstChild = N);
+  end;
+
+  { Re-points an inherited head at the ANCESTOR's member of that name. Leaves
+    the node alone when the enclosing struct has no ancestry, or the ancestry
+    has no such name — the existing binding is then still the best guess. }
+  procedure ResolveInheritedHead(N: Integer);
+  var
+    LStruct, LMemMid, LMemSym, LCtx: Integer;
+    LAnc: TSemaXType;
+    LExt: TPasExtRef;
+  begin
+    LStruct := StructSymOfNode(LM, N);
+    if LStruct = NIL_SYM then
+      Exit;
+    LAnc := AncestorOfX(XPlain(AId, LStruct));
+    if not XValid(LAnc) then
+      Exit;
+    if not FindMemberX(AId, LAnc, LM.Tree.NodeNameLower(N),
+         LMemMid, LMemSym, LCtx) then
+      Exit;
+    if LMemMid = AId then
+      LM.RefMap[N] := LMemSym
+    else
+    begin
+      // The cross-model binding is the one that must be READ, so the local
+      // one has to go: the typing below prefers RefMap over ExtRefMap.
+      LM.RefMap[N] := NIL_SYM;
+      LExt.UnitId := LMemMid;
+      LExt.Sym := LMemSym;
+      LNewExt.AddOrSetValue(N, LExt);
+    end;
+    LCtxOf[N] := LCtx;
+  end;
+
   // The type a member access yields: the member's declared type (routines:
   // result type; constructors: the base type itself, so `TDerived.Create` —
   // parsed as a plain member when argless — types as TDerived), substituted
@@ -4087,6 +4270,22 @@ var
     case LM.Tree.Nodes[N].Kind of
       nkIdent:
         begin
+          // 12.1.2: the name at the head of an `inherited` designator is a
+          // member of the ANCESTOR, whatever the class itself declares. The
+          // inherited pass only retries names that bound NOWHERE, so a
+          // REDECLARED name never reached it — it bound to the class's own
+          // member and typed as that. `inherited Alignment.Horz` in
+          // cxMemo/cxCheckBox is the shape at its sharpest: the derived
+          // `Alignment` is a TAlignment (an enum) while the ancestor's is a
+          // TcxEditAlignment object, so the chain after it lost every member.
+          //
+          // Off the hot path by construction — the test is one parent-kind
+          // check per identifier, and the ancestor walk runs only for the head
+          // of an actual inherited chain. A name the ancestry does NOT have
+          // keeps whatever it already bound to (error-tolerant: this pass
+          // corrects bindings, it does not invent diagnostics).
+          if IsInheritedHead(N) then
+            ResolveInheritedHead(N);
           LSym := LM.RefMap[N];
           if LSym <> NIL_SYM then
             case LM.Symbols[LSym].Kind of
@@ -4224,6 +4423,17 @@ var
               skRoutine:
                 begin
                   LCtx := LCtxOf[LBase];
+                  // A callee written `Name<...>` cannot mean a NON-generic
+                  // routine of that name (16.1.2, the same arity rule types
+                  // already get) — and the member walk stops at the FIRST
+                  // declaration, so a derived class redeclaring the name
+                  // plainly hid the ancestor's generic. System.JSON is the
+                  // shape: `TJSONObject.GetValue(Name): TJSONValue` sits in
+                  // front of `TJSONValue.GetValue<T>(APath): T`, so
+                  // `Obj.GetValue<TJSONObject>('c').Get(...)` typed as
+                  // TJSONValue and lost `Get`.
+                  if LM.Tree.Nodes[LBase].Kind = nkTypeArgs then
+                    RetargetToGeneric(LBase, LMemMid, LMemSym);
                   if SelectCallTarget(N, LBase, LMemMid, LMemSym, LCtx,
                     LBestMid, LBestSym) then
                   begin
@@ -4262,8 +4472,16 @@ var
                         LArgTypes := LArgTypes + [GetX(LArgN)];
                         LArgN := LM.Tree.Nodes[LArgN].NextSibling;
                       end;
-                      var LFrame := InferMethodFrame(LBestMid, LBestSym,
-                        LArgTypes, LCtx);
+                      // ...unless the type arguments were WRITTEN, in which
+                      // case they are the answer and inference is not
+                      // consulted at all — see ExplicitMethodFrame.
+                      var LFrame := NIL_INST;
+                      if LM.Tree.Nodes[LBase].Kind = nkTypeArgs then
+                        LFrame := ExplicitMethodFrame(AId, LBestMid, LBestSym,
+                          LBase, LCtx);
+                      if LFrame = NIL_INST then
+                        LFrame := InferMethodFrame(LBestMid, LBestSym,
+                          LArgTypes, LCtx);
                       if LFrame <> NIL_INST then
                         LX[N] := SubstX(LX[N], LFrame, 0);
                     end;

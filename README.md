@@ -387,7 +387,8 @@ Still open, roughly in the order we're tackling it:
   | BuildWinVCL (271) | — | — | | | | | **0** | — |
   | bigflat (726) | 8 638 | 387 | 194 | 162 | 136 | 110 | **0** | — |
   | BuildWinFMX (362) | — | — | | | | 89 | **0** | — |
-  | AVImark client (3747) | 3 609 | not re-measured | | | | | | string/Char helpers, DevExpress properties |
+  | AVImark client (3747) | 3 609 | | | | | 824 | **750** | late-bound UI-test names, `dxRichEdit` |
+  | AVImarkServer (2121) | | | | | | 56 | **9** | see below — 0 in project files |
   | Spring.Base (73) | 70 | 60 | 60 | 60 | 60 | 60 | **60** | `fPair`, `TValue`/RTTI helpers |
 
   **Every RTL/VCL/FMX corpus reports NOTHING under the member flag as of
@@ -402,6 +403,47 @@ Still open, roughly in the order we're tackling it:
   instantiation frame, since `TFunc<TResult>` declares its result as a
   PARAMETER; a proc type with parameters and a `procedure` type both end the
   walk instead.
+
+  **AVImarkServer, 2026-08-08: 56 -> 9, and ZERO in project files.** Four
+  causes, and the first of them was not in the analyzer at all:
+
+  - **the demo saw four IDE search paths instead of 141** — `StudioRoot`
+    returned the registry's `RootDir` verbatim, trailing `\` and all, while
+    `ExtraSearchPaths` matched it against the same value passed through
+    `ExcludeTrailingPathDelimiter`. The two never compared equal, so every
+    BDS version was skipped and the whole `Library`/`Browsing` set was lost —
+    `Vcl.Forms`, `cxControls`, `Jcl*` and `FastMM4` came back as `F1027` on a
+    project that compiles. A missing unit GATES its importers' diagnostics, so
+    this one bug both invented reports and hid them.
+  - **explicit generic-method type arguments** (~30 of the 56):
+    `Unsafe.Cast<TcxCustomTextEdit>(Edit).ActiveProperties`. `InferMethodFrame`
+    reads the frame off the ARGUMENTS, and dxCore's `Cast<T: class>(AObject:
+    TObject): T` declares every parameter concretely — nothing to infer from,
+    so the call stayed typed as the open `T`. `ExplicitMethodFrame` uses the
+    written list, which 16.5.1 says wins outright; inference supplies only what
+    was not written. Its other half: a call written `Name<...>` must skip a
+    NON-generic of that name, or `TJSONObject.GetValue(Name)` swallows
+    `TJSONValue.GetValue<T>(APath)` and the chain after it loses everything.
+  - **a helper indexed under only one of its target's identities** (10):
+    SynFunc writes `record helper for TRect` with `Winapi.Windows` last in its
+    uses, so it registered Winapi's ALIAS; `SynEditScrollBars` declares
+    `R: TRect` with `System.Types` in its implementation uses, so the local
+    carries the canonical symbol. Same type, different key, helper invisible.
+    `BuildHelperMap.Publish` now indexes the whole plain-alias chain — the
+    non-builtin twin of the per-model seed rule above.
+  - **`inherited Name` where the class REDECLARES that name** (7):
+    `inherited Alignment.Horz` in cxMemo/cxCheckBox, where the derived
+    `Alignment` is an enum and the ancestor's is an object. The inherited pass
+    only retries names that bound NOWHERE, so a redeclared one never reached
+    it; the head of an inherited chain is now resolved from the ancestor in
+    `CrossType` regardless of what it already bound to (12.1.2).
+
+  The 9 left are all in library units and all singletons or pairs: a
+  parameterless-except-for-defaults function reference (`TVTStyleServicesFunc =
+  function(AControl: TControl = nil): TCustomStyleServices` — the rule above
+  ends the walk at "takes parameters", and dcc calls it anyway because every
+  parameter has a default), `T.Create` on a constrained parameter, a `with`
+  target shadowing an outer name of its own, and three more.
 
   FMX's 89 were four shapes, and all four are about **what a QUALIFIER means**:
 
@@ -990,20 +1032,6 @@ Still open, roughly in the order we're tackling it:
     rule lives in one place (`DesignatorSymX`'s fallback), and new special cases
     should be routed through it rather than grown. **That** is the cheap
     generalization; merging the typers is not.
-- **Go-to-declaration inside an opened `.inc` tab** — the one direction still
-  missing, and deliberately so. Getting *into* an include from the unit that
-  includes it works both ways now (ctrl+click on the `$I` argument, and
-  ctrl+enter); resolving an identifier typed *inside* an already-open include tab
-  does not, and the mechanism is worth naming because it is not a missing branch
-  but a shape: navigation is keyed by MODEL, and an include is not a module —
-  `TPasNav.ModelIdOf(<the .inc path>)` returns -1, so the host exits before any
-  lookup. Under it, `IdentAt(AMid, ALine, ACol)` takes no `FileId` and the ident
-  index is deliberately built for `FileId = 0` only (the filter appears at four
-  places in `PasTree.Sema.Nav`), because line numbers in an included file collide
-  with the main file's. So the fix is a `FileId` threaded through both, plus a
-  path→(model, FileId) lookup — and it has a design question attached, not just
-  work: one `.inc` is typically included by MANY units, so "which model" is a real
-  choice (Delphi answers it with the context you opened the file from).
 - ~~**Zero-diagnostic parity on the real RTL/VCL/FMX.**~~ **Reached on
   2026-07-30.** The flattened RTL+VCL+FMX corpus (726 files) reports ZERO
   `E2003`/`E2034`/`E2035`; the only diagnostics left are honest `F1027`s for
