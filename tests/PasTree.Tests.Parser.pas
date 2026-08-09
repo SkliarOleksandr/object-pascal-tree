@@ -29,7 +29,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..55] of TPasCaseRow = (
+  STMT_CASES: array[0..69] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -328,10 +328,116 @@ const
      Expected: 'Block(Assign(Ident''A'' BinaryOp''<=''(Ident''B'' ' +
        'Ident''C'')) Assign(Ident''D'' BinaryOp''>=''(Ident''E'' ' +
        'Ident''F'')) Assign(Ident''G'' BinaryOp''<>''(Ident''H'' ' +
-       'Ident''I'')))'; ExpectDiags: 0)
+       'Ident''I'')))'; ExpectDiags: 0),
+
+    // ==== test-coverage plan step 3 batch 4 ====================
+
+    // ---- 1.2.3 qualified (multi-segment dotted) name resolution ----
+    (Section: '1.2.3'; Name: 'multi-segment dotted name';
+     Source: 'X := A.B.C;';
+     Expected: 'Block(Assign(Ident''X'' Member(Member(Ident''A'' ' +
+       'Ident''B'') Ident''C'')))'; ExpectDiags: 0),
+
+    // ---- 1.3.5 a compiler-version conditional, same shape as 1.3.2's
+    // ifdef but keyed to CompilerVersion instead of a define ----
+    (Section: '1.3.5'; Name: 'compiler-version conditional';
+     Source: '{$IF CompilerVersion >= 18}A := 1;{$ELSE}A := 2;{$ENDIF}';
+     Expected: 'Block(Assign(Ident''A'' IntLit''1''))'; ExpectDiags: 0),
+
+    // ---- 4.4 shl/shr: the only bitwise operators without their own
+    // parse shape already -- and/or/xor/not already covered at 4.3, since
+    // bitwise vs logical is a TYPING distinction, not a different node ----
+    (Section: '4.4'; Name: 'shl and shr';
+     Source: 'A := B shl 1; C := D shr 1;';
+     Expected: 'Block(Assign(Ident''A'' BinaryOp''shl''(Ident''B'' ' +
+       'IntLit''1'')) Assign(Ident''C'' BinaryOp''shr''(Ident''D'' ' +
+       'IntLit''1'')))'; ExpectDiags: 0),
+
+    // ---- 4.5 `=` as the equality operator -- tested everywhere as `:=`
+    // but never as a bare relational `=` before ----
+    (Section: '4.5'; Name: 'equality operator';
+     Source: 'B := X = Y;';
+     Expected: 'Block(Assign(Ident''B'' BinaryOp''=''(Ident''X'' ' +
+       'Ident''Y'')))'; ExpectDiags: 0),
+
+    // ---- 4.6 set difference and intersection (union already covered at
+    // 8.2.2 by `+`; same BinaryOp shape, different operator token) ----
+    (Section: '4.6'; Name: 'set difference and intersection';
+     Source: 'S3 := S1 - S2; S4 := S1 * S2;';
+     Expected: 'Block(Assign(Ident''S3'' BinaryOp''-''(Ident''S1'' ' +
+       'Ident''S2'')) Assign(Ident''S4'' BinaryOp''*''(Ident''S1'' ' +
+       'Ident''S2'')))'; ExpectDiags: 0),
+
+    // ---- 5.2.1 an explicit begin..end block nested inside another
+    // statement -- ParseStatements' own top level is already a Block, so
+    // this is the first case where nesting one is the POINT ----
+    (Section: '5.2.1'; Name: 'nested begin-end block';
+     Source: 'if A then begin X := 1; Y := 2; end;';
+     Expected: 'Block(IfStmt(Ident''A'' Block(Assign(Ident''X'' ' +
+       'IntLit''1'') Assign(Ident''Y'' IntLit''2''))))'; ExpectDiags: 0),
+
+    // ---- 10.1.3 / 20.7.1 manual allocation intrinsics: one shared shape,
+    // two spec sections (ch.10's pointer chapter and ch.20's memory-
+    // management chapter both name it) ----
+    (Section: '10.1.3'; Name: 'manual allocation intrinsics';
+     Source: 'New(P); GetMem(Q, 10); FreeMem(Q); Dispose(P);';
+     Expected: 'Block(ExprStmt(Call(Ident''New'' Ident''P'')) ' +
+       'ExprStmt(Call(Ident''GetMem'' Ident''Q'' IntLit''10'')) ' +
+       'ExprStmt(Call(Ident''FreeMem'' Ident''Q'')) ' +
+       'ExprStmt(Call(Ident''Dispose'' Ident''P'')))'; ExpectDiags: 0),
+    (Section: '20.7.1'; Name: 'manual allocation intrinsics';
+     Source: 'New(P); GetMem(Q, 10); FreeMem(Q); Dispose(P);';
+     Expected: 'Block(ExprStmt(Call(Ident''New'' Ident''P'')) ' +
+       'ExprStmt(Call(Ident''GetMem'' Ident''Q'' IntLit''10'')) ' +
+       'ExprStmt(Call(Ident''FreeMem'' Ident''Q'')) ' +
+       'ExprStmt(Call(Ident''Dispose'' Ident''P'')))'; ExpectDiags: 0),
+
+    // ---- 11.3.3 the Self identifier: an ordinary reference, not a
+    // dedicated node -- resolved by the SEMA layer, not the parser ----
+    (Section: '11.3.3'; Name: 'Self identifier';
+     Source: 'Self.DoIt;';
+     Expected: 'Block(ExprStmt(Member(Ident''Self'' Ident''DoIt'')))';
+     ExpectDiags: 0),
+
+    // ---- 12.4.1 a hard cast to a CLASS type -- same Call shape 4.10
+    // already pins for a builtin type (Byte(I)); different spec section ----
+    (Section: '12.4.1'; Name: 'hard cast to a class type';
+     Source: 'B := TButton(Sender);';
+     Expected: 'Block(Assign(Ident''B'' Call(Ident''TButton'' ' +
+       'Ident''Sender'')))'; ExpectDiags: 0),
+
+    // ---- 18.1.1 a bare try-except with no on-do filter (18.1.2 already
+    // covers the filtered form) ----
+    (Section: '18.1.1'; Name: 'bare try-except';
+     Source: 'try P except Q; end;';
+     Expected: 'Block(TryStmt(Block(ExprStmt(Ident''P'')) ExceptPart(' +
+       'Block(ExprStmt(Ident''Q'')))))'; ExpectDiags: 0),
+
+    // ---- 18.4.1 raising the Exception base class directly ----
+    (Section: '18.4.1'; Name: 'raise Exception.Create';
+     Source: 'raise Exception.Create(''oops'');';
+     Expected: 'Block(RaiseStmt(Call(Member(Ident''Exception'' ' +
+       'Ident''Create'') StrLit''''oops'''')))'; ExpectDiags: 0),
+
+    // ---- B.4.1 a genuinely RESERVED word (not a context-sensitive
+    // directive, B.4.2's territory) escaped into identifier position ----
+    (Section: 'B.4.1'; Name: 'escaped reserved word as an identifier';
+     Source: '&Begin := 1;';
+     Expected: 'Block(Assign(Ident''&Begin'' IntLit''1''))'; ExpectDiags: 0),
+
+    // ---- 8.3.1 array-of-const at its CALL SITE -- a bracket literal
+    // passed where the callee expects `array of const` (6.2.6 pins the
+    // PARAMETER declaration; this is the argument, an ordinary SetCtor
+    // like every other bracket literal -- what it MEANS is the callee's
+    // parameter type, a typing question, not a parse-shape one) ----
+    (Section: '8.3.1'; Name: 'array-of-const literal at a call site';
+     Source: 'Writeln(Format(''%d %s'', [1, ''x'']));';
+     Expected: 'Block(ExprStmt(Call(Ident''Writeln'' Call(Ident''Format'' ' +
+       'StrLit''''%d %s'''' SetCtor(IntLit''1'' StrLit''''x'''')))))';
+     ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..76] of TPasCaseRow = (
+  DECL_CASES: array[0..105] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -858,7 +964,225 @@ const
      Source: 'type TBox<T: IInterface> = class end;';
      Expected: 'TypeSec(TypeDecl(Ident''TBox'' GenericParams(' +
        'GenericParam(Ident''T'' Constraint(Ident''IInterface''))) ' +
-       'ClassType))'; ExpectDiags: 0)
+       'ClassType))'; ExpectDiags: 0),
+
+    // ==== test-coverage plan step 3 batch 4 ====================
+
+    // ---- 2.2.1 / 2.2.2 / 2.2.3 / 2.3.1 the builtin type FAMILIES: only
+    // ONE representative of each had ever appeared (Integer/Boolean/Char/
+    // string), never the rest of the family ----
+    (Section: '2.2.1'; Name: 'the integer type family';
+     Source: 'type'#13#10'  T1 = ShortInt;'#13#10'  T2 = SmallInt;'#13#10 +
+       '  T3 = Int64;'#13#10'  T4 = Cardinal;';
+     Expected: 'TypeSec(TypeDecl(Ident''T1'' Ident''ShortInt'') ' +
+       'TypeDecl(Ident''T2'' Ident''SmallInt'') TypeDecl(Ident''T3'' ' +
+       'Ident''Int64'') TypeDecl(Ident''T4'' Ident''Cardinal''))';
+     ExpectDiags: 0),
+    (Section: '2.2.2'; Name: 'the boolean type family';
+     Source: 'type T1 = ByteBool; T2 = LongBool;';
+     Expected: 'TypeSec(TypeDecl(Ident''T1'' Ident''ByteBool'') ' +
+       'TypeDecl(Ident''T2'' Ident''LongBool''))'; ExpectDiags: 0),
+    (Section: '2.2.3'; Name: 'the character type family';
+     Source: 'type T1 = AnsiChar; T2 = WideChar;';
+     Expected: 'TypeSec(TypeDecl(Ident''T1'' Ident''AnsiChar'') ' +
+       'TypeDecl(Ident''T2'' Ident''WideChar''))'; ExpectDiags: 0),
+    (Section: '2.3.1'; Name: 'the predefined real type family';
+     Source: 'type'#13#10'  T1 = Single;'#13#10'  T2 = Double;'#13#10 +
+       '  T3 = Extended;'#13#10'  T4 = Currency;'#13#10'  T5 = Comp;';
+     Expected: 'TypeSec(TypeDecl(Ident''T1'' Ident''Single'') ' +
+       'TypeDecl(Ident''T2'' Ident''Double'') TypeDecl(Ident''T3'' ' +
+       'Ident''Extended'') TypeDecl(Ident''T4'' Ident''Currency'') ' +
+       'TypeDecl(Ident''T5'' Ident''Comp''))'; ExpectDiags: 0),
+
+    // ---- 3.1.1 / 3.1.2 a plain (non-inline, non-absolute) var section,
+    // uninitialized and initialized ----
+    (Section: '3.1.1'; Name: 'plain var declaration';
+     Source: 'var X: Integer;';
+     Expected: 'VarSec''var''(VarDecl(Ident''X'' Ident''Integer''))';
+     ExpectDiags: 0),
+    (Section: '3.1.2'; Name: 'initialized global variable';
+     Source: 'var X: Integer = 5;';
+     Expected: 'VarSec''var''(VarDecl(Ident''X'' Ident''Integer'' ' +
+       'IntLit''5''))'; ExpectDiags: 0),
+
+    // ---- 3.2.1 / 3.2.2 a true (untyped) constant vs. a TYPED constant ----
+    (Section: '3.2.1'; Name: 'true constant';
+     Source: 'const K = 5;';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''K'' IntLit''5''))';
+     ExpectDiags: 0),
+    (Section: '3.2.2'; Name: 'typed constant';
+     Source: 'const K: Integer = 5;';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''K'' Ident''Integer'' ' +
+       'IntLit''5''))'; ExpectDiags: 0),
+
+    // ---- 6.2.2 / 6.2.3 var and const parameters standing alone (6.2.1's
+    // batch-3 case combines all four modes in one signature; these give
+    // each of the two REFERENCE modes its own minimal, dedicated case).
+    // 6.2.3 also covers `const [Ref]`, the attributed form the spec names
+    // for this section specifically ----
+    (Section: '6.2.2'; Name: 'a lone var parameter';
+     Source: 'procedure P(var A: Integer);';
+     Expected: 'Routine''procedure''(Ident''P'' Params(Param(Ident''A'' ' +
+       'Ident''Integer'')))'; ExpectDiags: 0),
+    (Section: '6.2.3'; Name: 'const [Ref] parameter';
+     Source: 'procedure P(const [Ref] A: Integer);';
+     Expected: 'Routine''procedure''(Ident''P'' Params(Param(AttrGroup(' +
+       'Attribute(Ident''Ref'')) Ident''A'' Ident''Integer'')))';
+     ExpectDiags: 0),
+    (Section: '6.2.4'; Name: 'a lone out parameter';
+     Source: 'procedure P(out A: Integer);';
+     Expected: 'Routine''procedure''(Ident''P'' Params(Param#out(' +
+       'Ident''A'' Ident''Integer'')))'; ExpectDiags: 0),
+
+    // ---- 7.1.2 / 7.1.4 AnsiString and WideString ----
+    (Section: '7.1.2'; Name: 'AnsiString';
+     Source: 'type TA = AnsiString;';
+     Expected: 'TypeSec(TypeDecl(Ident''TA'' Ident''AnsiString''))';
+     ExpectDiags: 0),
+    (Section: '7.1.4'; Name: 'WideString';
+     Source: 'type TW = WideString;';
+     Expected: 'TypeSec(TypeDecl(Ident''TW'' Ident''WideString''))';
+     ExpectDiags: 0),
+
+    // ---- 9.1.1 a simple record, no methods/properties/class members
+    // (9.2.1's batch-1 case already covers those richer member kinds) ----
+    (Section: '9.1.1'; Name: 'simple record';
+     Source: 'type TPoint = record X, Y: Integer; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TPoint'' RecordType(VarDecl(' +
+       'Ident''X'' Ident''Y'' Ident''Integer''))))'; ExpectDiags: 0),
+
+    // ---- 9.4.1 the three record lifecycle operators the spec names --
+    // same class-operator SHAPE 9.3.1 already pins (a different name),
+    // but with their real signatures: `out`/`var`/`const [Ref]` params ----
+    (Section: '9.4.1'; Name: 'Initialize, Finalize and Assign operators';
+     Source: 'type TR = record'#13#10 +
+       '    class operator Initialize(out Dest: TR);'#13#10 +
+       '    class operator Finalize(var Dest: TR);'#13#10 +
+       '    class operator Assign(var Dest: TR; const [Ref] Src: TR);'#13#10 +
+       '  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(' +
+       'Routine''operator''#class(Ident''Initialize'' Params(Param#out(' +
+       'Ident''Dest'' Ident''TR''))) Routine''operator''#class(' +
+       'Ident''Finalize'' Params(Param(Ident''Dest'' Ident''TR''))) ' +
+       'Routine''operator''#class(Ident''Assign'' Params(Param(' +
+       'Ident''Dest'' Ident''TR'') Param(AttrGroup(Attribute(' +
+       'Ident''Ref'')) Ident''Src'' Ident''TR''))))))'; ExpectDiags: 0),
+
+    // ---- 12.1.1 single inheritance, standing alone ----
+    (Section: '12.1.1'; Name: 'single inheritance';
+     Source: 'type TSub = class(TBase) end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TSub'' ClassType(' +
+       'Ident''TBase'')))'; ExpectDiags: 0),
+
+    // ---- 13.1.1 the most basic property declaration (9.2.1's batch-1
+    // case shows one too, but bundled with methods/class members) ----
+    (Section: '13.1.1'; Name: 'basic property declaration';
+     Source: 'type TC = class'#13#10 +
+       '    property X: Integer read FX write FX;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(PropertyDecl(' +
+       'Ident''X'' Ident''Integer'' PropSpec''read''(Ident''FX'') ' +
+       'PropSpec''write''(Ident''FX'')))))'; ExpectDiags: 0),
+
+    // ---- 13.2.1 a property under `published` visibility specifically --
+    // 11.2.1's visibility case has a published FIELD, not a property ----
+    (Section: '13.2.1'; Name: 'published property';
+     Source: 'type TC = class'#13#10'  published'#13#10 +
+       '    property X: Integer read FX write FX;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(' +
+       'Visibility''published'' PropertyDecl(Ident''X'' Ident''Integer'' ' +
+       'PropSpec''read''(Ident''FX'') PropSpec''write''(Ident''FX'')))))';
+     ExpectDiags: 0),
+
+    // ---- 14.2.1 a class implementing more than one interface ----
+    (Section: '14.2.1'; Name: 'class implementing two interfaces';
+     Source: 'type TC = class(TObject, IFoo, IBar) end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(Ident''TObject'' ' +
+       'Ident''IFoo'' Ident''IBar'')))'; ExpectDiags: 0),
+
+    // ---- 15.1.1 / 15.1.2 / 15.1.3 class-level members on a CLASS
+    // specifically (9.2.1's batch-1 case shows the same shapes on a
+    // RECORD, whose AST is identical -- these close the CLASS-tagged gap) ----
+    (Section: '15.1.1'; Name: 'class method';
+     Source: 'type TC = class'#13#10'    class procedure P;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(' +
+       'Routine''procedure''#class(Ident''P''))))'; ExpectDiags: 0),
+    (Section: '15.1.2'; Name: 'class var';
+     Source: 'type TC = class'#13#10 +
+       '    class var Count: Integer;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(VarSec#class(' +
+       'VarDecl(Ident''Count'' Ident''Integer'')))))'; ExpectDiags: 0),
+    (Section: '15.1.3'; Name: 'class property';
+     Source: 'type TC = class'#13#10 +
+       '    class property X: Integer read FX write FX;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(' +
+       'PropertyDecl#class(Ident''X'' Ident''Integer'' PropSpec''read''(' +
+       'Ident''FX'') PropSpec''write''(Ident''FX'')))))'; ExpectDiags: 0),
+
+    // ---- 15.3.2 a record helper for a NON-INTRINSIC record type (15.3.1's
+    // batch-1 case already covers a class helper and a helper for the
+    // intrinsic Integer) ----
+    (Section: '15.3.2'; Name: 'record helper for a non-intrinsic type';
+     Source: 'type'#13#10'  TPoint = record X, Y: Integer; end;'#13#10 +
+       '  TPointHelper = record helper for TPoint'#13#10 +
+       '    procedure Offset(DX, DY: Integer);'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TPoint'' RecordType(VarDecl(' +
+       'Ident''X'' Ident''Y'' Ident''Integer''))) TypeDecl(' +
+       'Ident''TPointHelper'' HelperType#record(Ident''TPoint'' ' +
+       'Routine''procedure''(Ident''Offset'' Params(Param(Ident''DX'' ' +
+       'Ident''DY'' Ident''Integer''))))))'; ExpectDiags: 0),
+
+    // ---- 16.1.2 overloading a generic NAME by arity: two declarations,
+    // same name, different parameter-list length ----
+    (Section: '16.1.2'; Name: 'generic overloaded by arity';
+     Source: 'type'#13#10'  TBox<T> = class end;'#13#10 +
+       '  TBox<T1, T2> = class end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TBox'' GenericParams(' +
+       'GenericParam(Ident''T'')) ClassType) TypeDecl(Ident''TBox'' ' +
+       'GenericParams(GenericParam(Ident''T1'' Ident''T2'')) ClassType))';
+     ExpectDiags: 0),
+
+    // ---- 16.2.1 a generic (parameterized) METHOD, whose own <T> is
+    // distinct from any enclosing type's ----
+    (Section: '16.2.1'; Name: 'generic method';
+     Source: 'type TC = class'#13#10 +
+       '    procedure P<T>(A: T);'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(' +
+       'Routine''procedure''(Ident''P'' GenericParams(GenericParam(' +
+       'Ident''T'')) Params(Param(Ident''A'' Ident''T''))))))';
+     ExpectDiags: 0),
+
+    // ---- 16.3.1 generic instantiation syntax at the TYPE level (16.3's
+    // batch-1 case already covers one inside an EXPRESSION) ----
+    (Section: '16.3.1'; Name: 'generic instantiation as a type alias';
+     Source: 'type TIntList = TList<Integer>;';
+     Expected: 'TypeSec(TypeDecl(Ident''TIntList'' TypeArgs(' +
+       'Ident''TList'' Ident''Integer'')))'; ExpectDiags: 0),
+
+    // ---- 17.1.1 the anonymous-method reference TYPE on its own (6.6.1's
+    // batch-1 case shows the identical shape, tagged for procedural types
+    // generally rather than this chapter's own topic) ----
+    (Section: '17.1.1'; Name: 'anonymous-method reference type';
+     Source: 'type TProc = reference to procedure;';
+     Expected: 'TypeSec(TypeDecl(Ident''TProc'' ProcType#reference))';
+     ExpectDiags: 0),
+
+    // ---- 20.6.1 [weak]/[unsafe] tagged for ch.20's OWN section too
+    // (14.3.2's batch-1 case already pins the identical attribute-group
+    // shape from the interfaces chapter's point of view) ----
+    (Section: '20.6.1'; Name: 'weak attribute, ch.20''s own tag';
+     Source: 'type'#13#10'  TC = class'#13#10 +
+       '    [weak] FFoo: IFoo;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(AttrGroup(' +
+       'Attribute(Ident''weak'')) VarDecl(Ident''FFoo'' Ident''IFoo''))))';
+     ExpectDiags: 0),
+
+    // ---- B.10 a constant expression: the parser accepts the SHAPE, folds
+    // nothing -- evaluation is a sema/typing concern ----
+    (Section: 'B.10'; Name: 'constant expression in a const decl';
+     Source: 'const K = 1 + 2 * 3;';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''K'' BinaryOp''+''(' +
+       'IntLit''1'' BinaryOp''*''(IntLit''2'' IntLit''3''))))';
+     ExpectDiags: 0)
   );
 
 { Builds every case that is not a plain dump comparison: the platform matrix
@@ -939,7 +1263,7 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
     loses even an include sitting right beside it. }
   function IncludeContextCase: TPasCustomCase;
   begin
-    Result.Section := '';
+    Result.Section := '1.3.3';
     Result.Name := 'include context drives inactive regions';
     Result.Run :=
       function: TPasCheckResult
@@ -1215,10 +1539,113 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
       end;
   end;
 
+  { 1.1.1: the PROGRAM file's own top-level shape -- a `program` head, its
+    uses clause, and the body block -- never dumped as a whole before
+    (every other case wraps a fragment inside a unit's interface section). }
+  function ProgramFileCase: TPasCustomCase;
+  begin
+    Result.Section := '1.1.1';
+    Result.Name := 'program file shape';
+    Result.Run :=
+      function: TPasCheckResult
+      const
+        SRC =
+          'program Sample;'#13#10 +
+          'uses SysUtils;'#13#10 +
+          'begin'#13#10'  X := 1;'#13#10'end.'#13#10;
+      var
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+      begin
+        LPre := GPP.ProcessText('sample.dpr', SRC);
+        LTree := TPasParser.ParseFile(LPre, LDiags);
+        Result := CheckDump(SRC, 'Program(Ident''Sample'' UsesClause(' +
+          'UsesItem(Ident''SysUtils'')) Block(Assign(Ident''X'' ' +
+          'IntLit''1'')))', LTree.Dump(0), LDiags, 0);
+      end;
+  end;
+
+  { 1.1.2: the UNIT file's own top-level shape -- name, interface and
+    implementation sections both present as children of the root. }
+  function UnitFileCase: TPasCustomCase;
+  begin
+    Result.Section := '1.1.2';
+    Result.Name := 'unit file shape';
+    Result.Run :=
+      function: TPasCheckResult
+      const
+        SRC = 'unit U;'#13#10'interface'#13#10'implementation'#13#10'end.'#13#10;
+      var
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+      begin
+        LPre := GPP.ProcessText('u.pas', SRC);
+        LTree := TPasParser.ParseFile(LPre, LDiags);
+        Result := CheckDump(SRC, 'Unit(Ident''U'' InterfaceSec ' +
+          'ImplementationSec)', LTree.Dump(0), LDiags, 0);
+      end;
+  end;
+
+  { 6.9: a routine nested inside another routine's body -- only reachable
+    from an IMPLEMENTATION section's local declarations, so every other
+    case (CheckDecl, wrapping content in the INTERFACE section) structurally
+    cannot reach this shape at all. Dumps just the OUTER routine's own
+    subtree, found by name, so the expected string stays about the nesting
+    and says nothing about the surrounding unit. }
+  function NestedRoutineCase: TPasCustomCase;
+  begin
+    Result.Section := '6.9';
+    Result.Name := 'nested routine';
+    Result.Run :=
+      function: TPasCheckResult
+      const
+        SRC =
+          'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+          'procedure Outer;'#13#10 +
+          '  procedure Inner;'#13#10 +
+          '  begin'#13#10'  end;'#13#10 +
+          'begin'#13#10'  Inner;'#13#10'end;'#13#10 +
+          'end.'#13#10;
+      var
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+        LIdx, LOuter: Integer;
+      begin
+        LPre := GPP.ProcessText('u.pas', SRC);
+        LTree := TPasParser.ParseFile(LPre, LDiags);
+        // A routine's own FirstToken is the `procedure`/`function` keyword,
+        // not its name -- the name is the FIRST CHILD (an nkIdent).
+        LOuter := NIL_NODE;
+        for LIdx := 0 to High(LTree.Nodes) do
+          if (LTree.Nodes[LIdx].Kind = nkRoutine) and
+             (LTree.Nodes[LIdx].FirstChild <> NIL_NODE) and
+             SameText(LTree.NodeText(LTree.Nodes[LIdx].FirstChild),
+               'Outer') then
+          begin
+            LOuter := LIdx;
+            Break;
+          end;
+        if LOuter = NIL_NODE then
+        begin
+          Result.Passed := False;
+          Result.Message := '  no routine named ''Outer'' found' + sLineBreak;
+          Exit;
+        end;
+        Result := CheckDump(SRC, 'Routine''procedure''(Ident''Outer'' ' +
+          'RoutineBody(Routine''procedure''(Ident''Inner'' RoutineBody(' +
+          'Block)) Block(ExprStmt(Ident''Inner''))))', LTree.Dump(LOuter),
+          LDiags, 0);
+      end;
+  end;
+
 var
   LPlatform: TPasPlatform;
 begin
   Result := [];
+  Result := Result + [ProgramFileCase, UnitFileCase, NestedRoutineCase];
   for LPlatform := Low(TPasPlatform) to High(TPasPlatform) do
     Result := Result + [PlatformCase(LPlatform)];
   Result := Result + [IncludeContextCase];
