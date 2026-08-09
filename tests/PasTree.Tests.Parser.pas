@@ -29,7 +29,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..42] of TPasCaseRow = (
+  STMT_CASES: array[0..50] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -222,10 +222,77 @@ const
     // ---- 1.3.2 conditional compilation in statements ----
     (Section: '1.3.2'; Name: 'ifdef';
      Source: '{$IFDEF MSWINDOWS}A := 1;{$ELSE}A := 2;{$ENDIF}';
-     Expected: 'Block(Assign(Ident''A'' IntLit''1''))'; ExpectDiags: 0)
+     Expected: 'Block(Assign(Ident''A'' IntLit''1''))'; ExpectDiags: 0),
+
+    // ---- B.5.2 real literals -- no fixture anywhere had one ----
+    (Section: 'B.5.2'; Name: 'real literal forms';
+     Source: 'X := 1.0e-3; Y := 1E+10; Z := 3.14;';
+     Expected: 'Block(Assign(Ident''X'' RealLit''1.0e-3'') Assign(Ident''Y'' ' +
+       'RealLit''1E+10'') Assign(Ident''Z'' RealLit''3.14''))';
+     ExpectDiags: 0),
+
+    // ---- 5.6.1 / 5.6.2 Break / Continue: plain identifiers, no dedicated
+    // node -- nothing had ever exercised them as STATEMENTS (only inside
+    // real loops in sema fixtures, never asserted on the parse shape) ----
+    (Section: '5.6.1'; Name: 'break';
+     Source: 'while True do Break;';
+     Expected: 'Block(WhileStmt(Ident''True'' ExprStmt(Ident''Break'')))';
+     ExpectDiags: 0),
+    (Section: '5.6.2'; Name: 'continue';
+     Source: 'while True do Continue;';
+     Expected: 'Block(WhileStmt(Ident''True'' ExprStmt(Ident''Continue'')))';
+     ExpectDiags: 0),
+
+    // ---- 4.11.1 NameOf: ordinary call syntax, not a dedicated production ----
+    (Section: '4.11.1'; Name: 'NameOf';
+     Source: 'S := NameOf(X);';
+     Expected: 'Block(Assign(Ident''S'' Call(Ident''NameOf'' Ident''X'')))';
+     ExpectDiags: 0),
+
+    // ---- 7.2.1 string element indexing: same Index node as an array ----
+    (Section: '7.2.1'; Name: 'string element indexing';
+     Source: 'C := S[1];';
+     Expected: 'Block(Assign(Ident''C'' Index(Ident''S'' IntLit''1'')))';
+     ExpectDiags: 0),
+
+    // ---- 17.2.1 an anonymous method LITERAL used as a VALUE, not merely
+    // named by a `reference to` TYPE (which 6.6.1 already covers) ----
+    (Section: '17.2.1'; Name: 'anonymous procedure literal';
+     Source: 'F := procedure begin DoIt; end;';
+     Expected: 'Block(Assign(Ident''F'' AnonMethod(RoutineBody(Block(' +
+       'ExprStmt(Ident''DoIt''))))))'; ExpectDiags: 0),
+    (Section: '17.2.1'; Name: 'anonymous function literal with params';
+     Source: 'G := function(A: Integer): Integer begin Result := A; end;';
+     Expected: 'Block(Assign(Ident''G'' AnonMethod(Params(Param(Ident''A'' ' +
+       'Ident''Integer'')) Ident''Integer'' RoutineBody(Block(Assign(' +
+       'Ident''Result'' Ident''A''))))))'; ExpectDiags: 0),
+
+    // ---- B.4.2 directive words are ordinary identifiers everywhere outside
+    // their own grammar production -- the FULL list (PasTree.Types.
+    // DIRECTIVE_WORDS) was untested; this samples across every family
+    // (routine directives, property specifiers, hints, calling conventions)
+    // since the "Unsafe = class" bug was exactly this shape missed once ----
+    (Section: 'B.4.2'; Name: 'directive words as plain identifiers';
+     Source: 'static := 1; unsafe := 2; message := 3; sealed := 4; ' +
+       'strict := 5; read := 6; write := 7; index := 8; name := 9; ' +
+       'at := 10; operator := 11; out := 12; default := 13; stored := 14;';
+     Expected: 'Block(Assign(Ident''static'' IntLit''1'') ' +
+       'Assign(Ident''unsafe'' IntLit''2'') ' +
+       'Assign(Ident''message'' IntLit''3'') ' +
+       'Assign(Ident''sealed'' IntLit''4'') ' +
+       'Assign(Ident''strict'' IntLit''5'') ' +
+       'Assign(Ident''read'' IntLit''6'') ' +
+       'Assign(Ident''write'' IntLit''7'') ' +
+       'Assign(Ident''index'' IntLit''8'') ' +
+       'Assign(Ident''name'' IntLit''9'') ' +
+       'Assign(Ident''at'' IntLit''10'') ' +
+       'Assign(Ident''operator'' IntLit''11'') ' +
+       'Assign(Ident''out'' IntLit''12'') ' +
+       'Assign(Ident''default'' IntLit''13'') ' +
+       'Assign(Ident''stored'' IntLit''14''))'; ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..19] of TPasCaseRow = (
+  DECL_CASES: array[0..32] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -368,6 +435,85 @@ const
      Source: 'type TH = record helper for Integer procedure P; end;';
      Expected: 'TypeSec(TypeDecl(Ident''TH'' HelperType#record(' +
        'Ident''Integer'' Routine''procedure''(Ident''P''))))';
+     ExpectDiags: 0),
+
+    // ---- 2.5.2 hint directives on a TYPE decl -- each hint is its own
+    // nkDirective child of the TypeDecl (mirrors a routine's directives) ----
+    (Section: '2.5.2'; Name: 'deprecated hint';
+     Source: 'type TFoo = Integer deprecated;';
+     Expected: 'TypeSec(TypeDecl(Ident''TFoo'' Ident''Integer'' ' +
+       'Directive''deprecated''))'; ExpectDiags: 0),
+    (Section: '2.5.2'; Name: 'deprecated hint with message';
+     Source: 'type TFoo = Integer deprecated ''do not use'';';
+     Expected: 'TypeSec(TypeDecl(Ident''TFoo'' Ident''Integer'' ' +
+       'Directive''deprecated''(StrLit''''do not use'''')))'; ExpectDiags: 0),
+    (Section: '2.5.2'; Name: 'platform hint';
+     Source: 'type TFoo = Integer platform;';
+     Expected: 'TypeSec(TypeDecl(Ident''TFoo'' Ident''Integer'' ' +
+       'Directive''platform''))'; ExpectDiags: 0),
+
+    // ---- 7.1.x string types: only AnsiString/WideString had ever appeared ----
+    (Section: '7.1.1'; Name: 'UnicodeString';
+     Source: 'type TS = UnicodeString;';
+     Expected: 'TypeSec(TypeDecl(Ident''TS'' Ident''UnicodeString''))';
+     ExpectDiags: 0),
+    (Section: '7.1.3'; Name: 'short string with a capacity';
+     Source: 'type TS = string[10];';
+     Expected: 'TypeSec(TypeDecl(Ident''TS'' StringType(IntLit''10'')))';
+     ExpectDiags: 0),
+    (Section: '7.1.5'; Name: 'RawByteString and UTF8String';
+     Source: 'type'#13#10'  TA = RawByteString;'#13#10 +
+       '  TB = UTF8String;';
+     Expected: 'TypeSec(TypeDecl(Ident''TA'' Ident''RawByteString'') ' +
+       'TypeDecl(Ident''TB'' Ident''UTF8String''))'; ExpectDiags: 0),
+
+    // ---- 6.2.7 untyped parameters: a name with no ':' type at all ----
+    (Section: '6.2.7'; Name: 'untyped var parameter';
+     Source: 'procedure P(var X);';
+     Expected: 'Routine''procedure''(Ident''P'' Params(Param(Ident''X'')))';
+     ExpectDiags: 0),
+
+    // ---- 6.7.1 external, never exercised at all (varargs alone was) ----
+    (Section: '6.7.1'; Name: 'external plain';
+     Source: 'procedure P; external ''user32.dll'';';
+     Expected: 'Routine''procedure''(Ident''P'' Directive''external''(' +
+       'StrLit''''user32.dll''''))'; ExpectDiags: 0),
+    (Section: '6.7.1'; Name: 'external name';
+     Source: 'procedure P; external ''user32.dll'' name ''RealP'';';
+     Expected: 'Routine''procedure''(Ident''P'' Directive''external''(' +
+       'StrLit''''user32.dll'''' StrLit''''RealP''''))'; ExpectDiags: 0),
+    (Section: '6.7.1'; Name: 'external index';
+     Source: 'function F: Integer; external ''k32.dll'' index 5;';
+     Expected: 'Routine''function''(Ident''F'' Ident''Integer'' ' +
+       'Directive''external''(StrLit''''k32.dll'''' IntLit''5''))';
+     ExpectDiags: 0),
+    (Section: '6.7.1'; Name: 'external delayed';
+     Source: 'procedure P; external ''x.dll'' delayed;';
+     // `delayed` is consumed but adopts no child of its own -- only name/
+     // index/dependency arguments become children (ParseRoutineDirectives).
+     Expected: 'Routine''procedure''(Ident''P'' Directive''external''(' +
+       'StrLit''''x.dll''''))'; ExpectDiags: 0),
+
+    // ---- 14.3.2 [weak]/[unsafe] on an interface-typed field: an attribute
+    // group in member position -- pin the CURRENT shape, since the parser
+    // adopts it onto the class, a SIBLING of the field, not onto the field
+    // itself (ParseMemberList's tkLBracket branch) ----
+    (Section: '14.3.2'; Name: 'weak attribute on an interface field';
+     Source: 'type'#13#10'  TC = class'#13#10 +
+       '    [weak] FFoo: IFoo;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(AttrGroup(' +
+       'Attribute(Ident''weak'')) VarDecl(Ident''FFoo'' Ident''IFoo''))))';
+     ExpectDiags: 0),
+
+    // ---- 19.3.2 an attribute WITH ARGUMENTS -- attributes appear in NO
+    // fixture at all per the audit, args included ----
+    // The attribute must sit AFTER the `type` keyword, right before the
+    // NAME it decorates -- one written before `type` itself lands as its
+    // own sibling declaration in the enclosing section instead (probed).
+    (Section: '19.3.2'; Name: 'attribute with arguments on a type';
+     Source: 'type'#13#10'  [MyAttr(1, ''s'')] TFoo = class end;';
+     Expected: 'TypeSec(TypeDecl(AttrGroup(Attribute(Ident''MyAttr'' ' +
+       'IntLit''1'' StrLit''''s'''')) Ident''TFoo'' ClassType))';
      ExpectDiags: 0)
   );
 
