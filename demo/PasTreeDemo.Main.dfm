@@ -326,6 +326,34 @@ object frmMain: TfrmMain
           ScrollbarAnnotations = <>
         end
       end
+      object tsCoverage: TTabSheet
+        Caption = 'Coverage'
+        ImageIndex = 2
+        TabVisible = False
+        object edCoverage: TSynEdit
+          Left = 0
+          Top = 0
+          Width = 908
+          Height = 436
+          Align = alClient
+          Font.Charset = DEFAULT_CHARSET
+          Font.Color = clWindowText
+          Font.Height = -13
+          Font.Name = 'Consolas'
+          Font.Style = []
+          Font.Quality = fqClearTypeNatural
+          TabOrder = 0
+          UseCodeFolding = False
+          Gutter.Font.Charset = DEFAULT_CHARSET
+          Gutter.Font.Color = clWindowText
+          Gutter.Font.Height = -11
+          Gutter.Font.Name = 'Consolas'
+          Gutter.Font.Style = []
+          Gutter.Font.Quality = fqClearTypeNatural
+          Gutter.Bands = <>
+          ScrollbarAnnotations = <>
+        end
+      end
     end
     object Panel2: TPanel
       Left = 0
@@ -365,6 +393,15 @@ object frmMain: TfrmMain
         Caption = 'Show Semantics'
         TabOrder = 1
         OnClick = btnShowSemanticsClick
+      end
+      object btnShowCoverage: TButton
+        Left = 223
+        Top = 2
+        Width = 106
+        Height = 25
+        Caption = 'Test Coverage'
+        TabOrder = 2
+        OnClick = btnShowCoverageClick
       end
     end
   end

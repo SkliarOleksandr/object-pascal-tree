@@ -54,6 +54,8 @@ type
     // Values, with the caller's default when the key is absent or unparsable.
     function ReadInt(const AName: string; ADefault: Integer): Integer;
     procedure WriteInt(const AName: string; AValue: Integer);
+    function ReadString(const AName, ADefault: string): string;
+    procedure WriteString(const AName, AValue: string);
 
     { Moves AProjectFile to the front, or inserts it there. Existence is NOT
       checked here: a project on a disconnected network share is still the last
@@ -141,6 +143,16 @@ end;
 procedure TDemoSettings.WriteInt(const AName: string; AValue: Integer);
 begin
   FIni.WriteInteger(SEC_SETTINGS, AName, AValue);
+end;
+
+function TDemoSettings.ReadString(const AName, ADefault: string): string;
+begin
+  Result := FIni.ReadString(SEC_SETTINGS, AName, ADefault);
+end;
+
+procedure TDemoSettings.WriteString(const AName, AValue: string);
+begin
+  FIni.WriteString(SEC_SETTINGS, AName, AValue);
 end;
 
 procedure TDemoSettings.AddRecent(const AProjectFile: string);

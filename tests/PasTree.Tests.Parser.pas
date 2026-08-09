@@ -47,10 +47,10 @@ const
     (Section: '5.1.2'; Name: 'bare call'; Source: 'Application.Run;';
      Expected: 'Block(ExprStmt(Member(Ident''Application'' Ident''Run'')))';
      ExpectDiags: 0),
-    // 4.10.1 OLE-automation NAMED ARGUMENTS. Without the nkNamedArg wrap the
+    // 4.11.3 OLE-automation NAMED ARGUMENTS. Without the nkNamedArg wrap the
     // argument list ended at the name and ':=' turned the whole call into an
     // assignment TARGET -- two parse diags and a false E2003 on the name.
-    (Section: '4.10.1'; Name: 'named argument';
+    (Section: '4.11.3'; Name: 'named argument';
      Source: 'Charts.Add(Source := R, Gap := 1);';
      Expected: 'Block(ExprStmt(Call(Member(Ident''Charts'' Ident''Add'') ' +
        'NamedArg(Ident''Source'' Ident''R'') ' +
@@ -58,14 +58,14 @@ const
     // A Variant's INDEXED property takes them too (dcc-verified) -- the
     // bracket loop needed the same rule, and was still a false E2003 without
     // it.
-    (Section: '4.10.1'; Name: 'named argument in an index';
+    (Section: '4.11.3'; Name: 'named argument in an index';
      Source: 'V.Range[Source := 1] := 5;';
      Expected: 'Block(Assign(Index(Member(Ident''V'' Ident''Range'') ' +
        'NamedArg(Ident''Source'' IntLit''1'')) IntLit''5''))';
      ExpectDiags: 0),
     // Only a bare identifier makes a named argument; anything else stays the
     // syntax error it always was (an assignment is not an expression).
-    (Section: '4.10.1'; Name: 'named argument needs a bare name';
+    (Section: '4.11.3'; Name: 'named argument needs a bare name';
      Source: 'Charts.Add(A.B := R);';
      Expected: 'Block(Assign(Call(Member(Ident''Charts'' Ident''Add'') ' +
        'Member(Ident''A'' Ident''B'')) Ident''R''))'; ExpectDiags: 2),

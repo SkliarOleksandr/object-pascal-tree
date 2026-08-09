@@ -29,6 +29,7 @@ uses
   PasTree.Sema.Dump, VirtualTrees.BaseAncestorVCL, VirtualTrees.BaseTree, VirtualTrees.AncestorVCL, SynEditCodeFolding,
   PasTreeDemo.Highlighter, PasTreeDemo.Settings, PasTreeDemo.NavHistory,
   PasTreeDemo.Includes, PasTreeDemo.UnitList, PasTreeDemo.UnitPicker,
+  PasTreeDemo.Coverage,
   Vcl.Menus, System.Actions, Vcl.ActnList, SynEditMiscClasses, SynEditSearch;
   // System
 
@@ -88,6 +89,8 @@ type
     edJson: TSynEdit;
     tsSema: TTabSheet;
     edSema: TSynEdit;
+    tsCoverage: TTabSheet;
+    edCoverage: TSynEdit;
     splBottom: TSplitter;
     SynJSONSyn1: TSynJSONSyn;
     ActionList1: TActionList;
@@ -120,6 +123,7 @@ type
     Panel2: TPanel;
     btnShowASTJson: TButton;
     btnShowSemantics: TButton;
+    btnShowCoverage: TButton;
     lblProgress: TLabel;
     vtMessages: TVirtualStringTree;
     btnParseVcl: TButton;
@@ -135,6 +139,7 @@ type
     procedure btnParseRtlClick(Sender: TObject);
     procedure btnShowASTJsonClick(Sender: TObject);
     procedure btnShowSemanticsClick(Sender: TObject);
+    procedure btnShowCoverageClick(Sender: TObject);
     procedure chkShowErrorsClick(Sender: TObject);
     procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     procedure vstFilesGetText(Sender: TBaseVirtualTree; Node: PVirtualNode;
@@ -1286,6 +1291,29 @@ begin
   edSema.Text := DumpSemaModel(LModel);
   tsSema.TabVisible := True;
   pgc.ActivePage := tsSema;
+end;
+
+// Test-coverage plan step 5 (demo part): needs no open project at all --
+// unlike AST JSON/Semantics, this reads PasTree.Tests.Parser's own compiled-
+// in tables plus (best-effort) the sibling checkouts, not the currently
+// open unit.
+procedure TfrmMain.btnShowCoverageClick(Sender: TObject);
+var
+  LSpecDir, LTestsDir: string;
+begin
+  LSpecDir := FSettings.ReadString('SpecDir', '');
+  if (LSpecDir <> '') and not TDirectory.Exists(LSpecDir) then
+    LSpecDir := '';
+  if LSpecDir = '' then
+    LSpecDir := GuessSpecDir;
+  LTestsDir := FSettings.ReadString('TestsDir', '');
+  if (LTestsDir <> '') and not TDirectory.Exists(LTestsDir) then
+    LTestsDir := '';
+  if LTestsDir = '' then
+    LTestsDir := GuessTestsDir;
+  edCoverage.Text := BuildCoverageReport(LSpecDir, LTestsDir);
+  tsCoverage.TabVisible := True;
+  pgc.ActivePage := tsCoverage;
 end;
 
 procedure TfrmMain.chkShowErrorsClick(Sender: TObject);
