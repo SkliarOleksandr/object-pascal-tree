@@ -29,7 +29,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..71] of TPasCaseRow = (
+  STMT_CASES: array[0..73] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -453,10 +453,27 @@ const
     (Section: '4.7'; Name: 'string concatenation between variables';
      Source: 'S3 := S1 + S2;';
      Expected: 'Block(Assign(Ident''S3'' BinaryOp''+''(Ident''S1'' ' +
-       'Ident''S2'')))'; ExpectDiags: 0)
+       'Ident''S2'')))'; ExpectDiags: 0),
+
+    // ---- 10.1.2 the `nil` pointer LITERAL -- its own dedicated AST node
+    // (nkNilLit, not an nkIdent -- a resolver-side probe this same batch
+    // found the hard way), never pinned as its own case before, even
+    // though `nil` appears incidentally all over the sema suites ----
+    (Section: '10.1.2'; Name: 'the nil literal';
+     Source: 'P := nil;';
+     Expected: 'Block(Assign(Ident''P'' NilLit))'; ExpectDiags: 0),
+
+    // ---- B.8 every designator FORM chained in one expression -- bare
+    // name, member, index, dereference, call -- each shown separately
+    // dozens of times, never all five links of the same chain together
+    // the way B.8 itself enumerates them ----
+    (Section: 'B.8'; Name: 'every designator form chained together';
+     Source: 'A.B[C]^.D(E);';
+     Expected: 'Block(ExprStmt(Call(Member(Deref(Index(Member(Ident''A'' ' +
+       'Ident''B'') Ident''C'')) Ident''D'') Ident''E'')))'; ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..108] of TPasCaseRow = (
+  DECL_CASES: array[0..109] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1224,7 +1241,19 @@ const
     (Section: '11.1.3'; Name: 'a class with only a method';
      Source: 'type TC = class'#13#10'    procedure P;'#13#10'  end;';
      Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(' +
-       'Routine''procedure''(Ident''P''))))'; ExpectDiags: 0)
+       'Routine''procedure''(Ident''P''))))'; ExpectDiags: 0),
+
+    // ==== test-coverage plan step 3 batch 7 ====================
+
+    // ---- B.11 a type reference combining THREE forms at once -- dotted
+    // (qualified), generic instantiation, and pointer-to -- each shown
+    // separately in some other case (1.2.2, 16.3, 10.1.1), never together
+    // the way a real reference to a unit's generic type usually reads ----
+    (Section: 'B.11'; Name: 'a dotted, generic, pointer type reference';
+     Source: 'type TP = ^Generics.Collections.TList<Integer>;';
+     Expected: 'TypeSec(TypeDecl(Ident''TP'' PointerType(TypeArgs(' +
+       'Member(Member(Ident''Generics'' Ident''Collections'') ' +
+       'Ident''TList'') Ident''Integer''))))'; ExpectDiags: 0)
   );
 
 { Builds every case that is not a plain dump comparison: the platform matrix

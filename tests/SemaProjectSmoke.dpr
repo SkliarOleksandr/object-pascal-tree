@@ -3118,9 +3118,9 @@ begin
     GProj.AnalyzeDirectory(LDir);
     var LBH := ModelByName('bhuse');
     Ok('bihelp: BHUse loaded', Assigned(LBH));
-    Ok('bihelp: a helper answers for a builtin type seeded in ANOTHER model',
-      DiagCount(LBH, 'E2003') = 0);
-    Ok('bihelp: both call sites bind to the helper member',
+    Ok('7.4.1: a string intrinsic-helper method answers for a builtin ' +
+      'type seeded in ANOTHER model', DiagCount(LBH, 'E2003') = 0);
+    Ok('7.4.1: both call sites bind to the helper member',
       CrossRefCountInUnit(LBH, 'Trimmed', 'Trimmed', 'bhhelp') = 2);
   finally
     GProj.Free;

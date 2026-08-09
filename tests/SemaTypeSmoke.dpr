@@ -112,7 +112,7 @@ begin
 
   Analyze(SRC);
 
-  Ok('4 x E2010', DiagCount('E2010') = 4);
+  Ok('2.6.1: 4 x E2010 (assignment-incompatible pairs)', DiagCount('E2010') = 4);
   Ok('1 x E2015', DiagCount('E2015') = 1);
   Ok('comparison typed Boolean', SameText(BinOpType('<'), 'Boolean'));
   Ok('division typed Extended', SameText(BinOpType('/'), 'Extended'));

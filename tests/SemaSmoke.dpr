@@ -1191,8 +1191,9 @@ begin
 
   // 6. sibling `for var` loops reusing a name -> loop-scoped, no E2004
   Analyze(SRC_FORVAR);
-  Ok('for-var: no E2004', DiagCount('E2004') = 0);
-  Ok('for-var: W referenced in body', RefResolvesTo('W', 'W'));
+  Ok('3.3.1: for-var no E2004 -- sibling loops each scope their own counter',
+    DiagCount('E2004') = 0);
+  Ok('3.3.1: for-var W referenced in body', RefResolvesTo('W', 'W'));
   GModel.Free;
 
   // 7. anonymous methods own their locals and implicit Result
@@ -2316,6 +2317,28 @@ begin
     'implementation'#10'end.'#10);
   Ok('19.3.1: an exact-name attribute class wins over the suffix fallback',
     RefResolvesTo('Table', 'Table'));
+  GModel.Free;
+
+  // ---- test-coverage plan step 3 batch 7: B.4.3 predefined (compiler-
+  // known) identifiers -- the third naming category alongside reserved
+  // words and directives: no declaration ANYWHERE, seeded straight into
+  // the builtin scope (PasTree.Sema.Builtins: True/False are skConst).
+  // Every prior fixture uses these incidentally; none ever asserted that
+  // a bare reference to one actually resolves. `nil`, despite reading like
+  // the same kind of thing, is NOT one of these -- it is a RESERVED WORD
+  // (B.4.1) with its own token and its own AST node (nkNilLit), never an
+  // nkIdent, so it never reaches RefMap at all. Probed first: the original
+  // draft of this case asserted AllRefsResolved('nil') too and failed,
+  // which is what surfaced the distinction. ----
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'procedure P;'#10'var B: Boolean;'#10 +
+    'begin'#10'  B := True;'#10'  B := False;'#10'end;'#10 +
+    'end.'#10);
+  Ok('B.4.3: True resolves with no declaration anywhere',
+    AllRefsResolved('True'));
+  Ok('B.4.3: False resolves with no declaration anywhere',
+    AllRefsResolved('False'));
   GModel.Free;
 
   if GCounter.Finish('SemaSmoke') then
