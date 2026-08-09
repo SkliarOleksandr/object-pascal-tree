@@ -1813,6 +1813,21 @@ begin
       Exit(LId);
 end;
 
+// A type NAMED ANameLower, declared in AUnitLower's interface, as the
+// cross-model descriptor GProj.IsManagedTypeX (20.3.1) takes.
+function TypeXOf(const AUnitLower, ANameLower: string): TSemaXType;
+var
+  LModel: TPasSemaModel;
+begin
+  Result.UnitId := MidByName(AUnitLower);
+  Result.Inst := NIL_INST;
+  Result.Sym := NIL_SYM;
+  if Result.UnitId < 0 then
+    Exit;
+  LModel := GProj.Model(Result.UnitId);
+  Result.Sym := LModel.Resolve(LModel.InterfaceScope, ANameLower);
+end;
+
 // A reference of the given text resolved cross-unit to a symbol named ATarget.
 function CrossRefTo(AModel: TPasSemaModel; const ARefText, ATarget: string):
   Boolean;
@@ -3701,6 +3716,99 @@ begin
     Ok('19.3.1: cross-unit -- a descendant declared in ANOTHER unit is not '
       + 'flagged either',
       Assigned(LUse) and (DiagCount(LUse, 'E2010') = 0));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- test-coverage plan, ownership-tracking batch: 20.3.1 "is this type
+  // managed" -- a real type-system query with zero prior modeling (grep for
+  // "Managed"/"IsManagedType" across source/*.pas before this batch found
+  // only the seeded INTRINSIC NAME, never evaluated, and one unrelated
+  // "unmanaged" comment about ownership of a dictionary, not a language
+  // type at all). Kept as a pure PUBLIC query (GProj.IsManagedTypeX), not a
+  // diagnostic -- the spec itself frames managedness as something a
+  // type-checker COMPUTES, not something dcc warns about: probed dcc32
+  // 37.0 with GetMem/FreeMem of a managed-field record (20.7.1's own
+  // suggested check) and it gives no diagnostic at all, so that is not a
+  // real check to add. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_managed');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitMg.pas'),
+    'unit UnitMg;'#10'interface'#10 +
+    'type'#10 +
+    // Long strings: managed. ShortString: the one NOT managed (20.3.1
+    // explicitly calls out "long strings"; ShortString is the Turbo-era
+    // fixed-size exception the spec's own wording excludes).
+    '  TLongStr = UnicodeString;'#10 +
+    '  TShortStr = ShortString;'#10 +
+    // Arrays: dynamic is ALWAYS managed; static is managed only through its
+    // element (an Integer array isn't, a string array is).
+    '  TDynArr = array of Integer;'#10 +
+    '  TStaticArr = array[0..9] of Integer;'#10 +
+    '  TStaticStrArr = array[0..2] of UnicodeString;'#10 +
+    // Interface, Variant: always managed.
+    '  IFoo = interface end;'#10 +
+    '  TVar = Variant;'#10 +
+    // Procedural types: only `reference to` is managed -- `of object` and a
+    // plain procedural pointer are not.
+    '  TRefProc = reference to procedure;'#10 +
+    '  TObjProc = procedure of object;'#10 +
+    '  TPlainProc = procedure;'#10 +
+    // Records: managed via a lifecycle operator even with NO managed
+    // fields, via a managed FIELD even with no operator, or neither.
+    '  TPlainRec = record X: Integer; end;'#10 +
+    '  TFieldRec = record S: UnicodeString; end;'#10 +
+    '  TOpRec = record'#10 +
+    '    class operator Initialize(out Dest: TOpRec);'#10 +
+    '    class operator Finalize(var Dest: TOpRec);'#10 +
+    '  end;'#10 +
+    // A NESTED case: a static array of a managed record, and a record whose
+    // only managed field is itself a static array of a managed type --
+    // proves the recursion actually chains, not just one level.
+    '  TArrOfFieldRec = array[0..1] of TFieldRec;'#10 +
+    '  TWrapRec = record A: TStaticStrArr; end;'#10 +
+    'implementation'#10 +
+    'class operator TOpRec.Initialize(out Dest: TOpRec); begin end;'#10 +
+    'class operator TOpRec.Finalize(var Dest: TOpRec); begin end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+
+    Ok('20.3.1: a long string is managed',
+      GProj.IsManagedTypeX(TypeXOf('unitmg', 'tlongstr')));
+    Ok('20.3.1: ShortString is NOT managed',
+      not GProj.IsManagedTypeX(TypeXOf('unitmg', 'tshortstr')));
+    Ok('20.3.1: a dynamic array is managed regardless of element',
+      GProj.IsManagedTypeX(TypeXOf('unitmg', 'tdynarr')));
+    Ok('20.3.1: a static array of a plain type is NOT managed',
+      not GProj.IsManagedTypeX(TypeXOf('unitmg', 'tstaticarr')));
+    Ok('20.3.1: a static array IS managed through a managed element',
+      GProj.IsManagedTypeX(TypeXOf('unitmg', 'tstaticstrarr')));
+    Ok('20.3.1: an interface type is managed',
+      GProj.IsManagedTypeX(TypeXOf('unitmg', 'ifoo')));
+    Ok('20.3.1: Variant is managed',
+      GProj.IsManagedTypeX(TypeXOf('unitmg', 'tvar')));
+    Ok('20.3.1: `reference to procedure` is managed',
+      GProj.IsManagedTypeX(TypeXOf('unitmg', 'trefproc')));
+    Ok('20.3.1: `procedure of object` is NOT managed',
+      not GProj.IsManagedTypeX(TypeXOf('unitmg', 'tobjproc')));
+    Ok('20.3.1: a plain procedural type is NOT managed',
+      not GProj.IsManagedTypeX(TypeXOf('unitmg', 'tplainproc')));
+    Ok('20.3.1: a record with no managed field and no lifecycle op is NOT '
+      + 'managed', not GProj.IsManagedTypeX(TypeXOf('unitmg', 'tplainrec')));
+    Ok('20.3.1: a record with a managed FIELD is managed',
+      GProj.IsManagedTypeX(TypeXOf('unitmg', 'tfieldrec')));
+    Ok('20.3.1: a record with a lifecycle OPERATOR is managed even with no '
+      + 'managed field', GProj.IsManagedTypeX(TypeXOf('unitmg', 'toprec')));
+    Ok('20.3.1: recursion chains through a static array of a managed record',
+      GProj.IsManagedTypeX(TypeXOf('unitmg', 'tarroffieldrec')));
+    Ok('20.3.1: recursion chains through a record wrapping a managed array',
+      GProj.IsManagedTypeX(TypeXOf('unitmg', 'twraprec')));
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

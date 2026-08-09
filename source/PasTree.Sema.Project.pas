@@ -289,6 +289,7 @@ type
     procedure CheckConstraints(AId: Integer);
     function ResolveCustomAttributeX(AId: Integer): TSemaXType;
     procedure CheckAttributes(AId: Integer);
+    function RecordHasLifecycleOp(AMid, ADefNode: Integer): Boolean;
     function DeclTypeX(AMid, ASym: Integer): TSemaXType;
     function SubstX(const AX: TSemaXType; AInst, ADepth: Integer): TSemaXType;
     function DeclaredWithinX(AMid, ASym, AOwnerMid, AOwnerSym: Integer): Boolean;
@@ -417,6 +418,18 @@ type
     function ModelCount: Integer;
     function Model(AId: Integer): TPasSemaModel;
     function ModelFile(AId: Integer): string;
+    { 20.3.1 — is AX one of the compiler-MANAGED types (automatic init/
+      finalize/copy: long strings, dynamic arrays, interfaces, Variant,
+      `reference to` procedural types, and records that either declare a
+      lifecycle operator or transitively contain a managed field)? A pure
+      query, exposed publicly (like XCatOf/XTypeText's own callers use them)
+      rather than tied to a diagnostic — the spec itself frames this as a
+      type-system question a type-checker computes, not a rule dcc enforces
+      or warns about (probed: dcc32 37.0 gives no diagnostic at all for
+      GetMem/FreeMem of a managed-field record, so THAT is not a real check
+      to add). ADepth guards the record-field/static-array recursion the
+      same way every other cross-model walk in this file caps itself. }
+    function IsManagedTypeX(const AX: TSemaXType; ADepth: Integer = 0): Boolean;
     { Source position of ANY node in AId, as a clickable site: the file the
       node's FIRST token really came from (NOT ModelFile — an $I-included file
       is a different path), 1-based line/col. False if AId/ANode is out of
@@ -3693,6 +3706,138 @@ begin
   if not XValid(AX) then
     Exit(tcUnknown);
   Result := FModels[AX.UnitId].Symbols[AX.Sym].TypeCat;
+end;
+
+// Does the struct definition node ADefNode declare its own `class operator
+// Initialize`/`Finalize` (9.4.1's custom managed-record lifecycle, 10.4) —
+// walked over the AST directly (head word = 'operator', name = the
+// operator's own first child) rather than through the symbol table, since
+// Initialize/Finalize are ALSO seeded as global builtin intrinsic routine
+// names (PasTree.Sema.Builtins) and this must mean the record's OWN member,
+// not that unrelated seed.
+function TPasSemaProject.RecordHasLifecycleOp(AMid, ADefNode: Integer):
+  Boolean;
+var
+  LM: TPasSemaModel;
+  LChild, LNameChild: Integer;
+  LName: string;
+begin
+  Result := False;
+  LM := FModels[AMid];
+  LChild := LM.Tree.Nodes[ADefNode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if (LM.Tree.Nodes[LChild].Kind = nkRoutine) and
+       SameText(LM.Tree.NodeText(LChild), 'operator') then
+    begin
+      LNameChild := LM.Tree.Nodes[LChild].FirstChild;
+      if LNameChild <> NIL_NODE then
+      begin
+        LName := LM.Tree.NodeNameLower(LNameChild);
+        if (LName = 'initialize') or (LName = 'finalize') then
+          Exit(True);
+      end;
+    end;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+function TPasSemaProject.IsManagedTypeX(const AX: TSemaXType;
+  ADepth: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LCanon: TSemaXType;
+  LDef, LChild, LLast, LIdx, LScope: Integer;
+  LElemX: TSemaXType;
+begin
+  Result := False;
+  if not XValid(AX) or (ADepth > 8) then
+    Exit;
+  // A plain alias (`type TShortStr = ShortString;`) is its OWN skType
+  // symbol with its own name, not the same symbol as its target -- follow
+  // it first, or every check below sees the ALIAS's name/shape instead of
+  // the real one (caught by TShortStr failing to read as non-managed: its
+  // own NameLower is 'tshortstr', not 'shortstring'). CanonTypeX does not
+  // follow a `= type X` DISTINCT alias (2.5.1) -- deliberately, for overload
+  // identity -- but a distinct alias has the exact same storage/managedness
+  // as its target regardless, so that is a harmless, narrow gap here, not a
+  // wrong answer worth a second alias-walk just for this.
+  LCanon := CanonTypeX(AX);
+  if not XValid(LCanon) then
+    LCanon := AX;
+  LM := FModels[LCanon.UnitId];
+  case XCatOf(LCanon) of
+    tcString:
+      // The one non-managed string: a Turbo-era fixed-size ShortString.
+      // Every other seeded string name (string/UnicodeString/AnsiString/
+      // WideString/RawByteString/UTF8String) is a real refcounted long
+      // string.
+      Exit(LM.Symbols[LCanon.Sym].NameLower <> 'shortstring');
+    tcInterface, tcVariant:
+      Exit(True);
+    tcArray:
+      begin
+        // TArray<T>/TBytes are builtin-seeded dynamic-array ALIASES with no
+        // DeclNode of their own (PasTree.Sema.Builtins) -- always managed,
+        // and the only builtin names seeded as tcArray, so no name check
+        // needed beyond "is this the builtin seed at all".
+        if sfBuiltin in LM.Symbols[LCanon.Sym].Flags then
+          Exit(True);
+        LDef := TypeDefNodeOf(LCanon.UnitId, LCanon.Sym);
+        if (LDef = NIL_NODE) or (LM.Tree.Nodes[LDef].Kind <> nkArrayType) or
+           (LM.Tree.Nodes[LDef].Aux = 1) then
+          Exit;   // Aux=1: `array of const` (6.2.6) -- not a variable type
+        LChild := LM.Tree.Nodes[LDef].FirstChild;
+        if LChild = NIL_NODE then
+          Exit;
+        LLast := LChild;
+        while LM.Tree.Nodes[LLast].NextSibling <> NIL_NODE do
+          LLast := LM.Tree.Nodes[LLast].NextSibling;
+        if LLast = LChild then
+          // Exactly one child: no dimension bound, so DYNAMIC -- the array
+          // value itself is always refcounted, regardless of its element.
+          Exit(True);
+        // A STATIC array: not refcounted itself, but "managed fields force
+        // the enclosing... array to also get finalize codegen" (20.3.1) --
+        // so it counts as managed iff its ELEMENT (the last child) is.
+        LElemX := ResolveTypeExpr(LCanon.UnitId, LLast);
+        Exit(IsManagedTypeX(LElemX, ADepth + 1));
+      end;
+    tcProc:
+      begin
+        LDef := TypeDefNodeOf(LCanon.UnitId, LCanon.Sym);
+        // Aux=2: `reference to` (17.1). A plain procedural type/pointer
+        // (Aux=0) or `of object` (Aux=1) is NOT compiler-managed.
+        Exit((LDef <> NIL_NODE) and
+          (LM.Tree.Nodes[LDef].Kind = nkProcType) and
+          (LM.Tree.Nodes[LDef].Aux = 2));
+      end;
+    tcRecord:
+      begin
+        LDef := TypeDefNodeOf(LCanon.UnitId, LCanon.Sym);
+        if (LDef = NIL_NODE) or (LM.Tree.Nodes[LDef].Kind <> nkRecordType)
+        then
+          Exit;
+        if RecordHasLifecycleOp(LCanon.UnitId, LDef) then
+          Exit(True);
+        // No lifecycle operator of its own -- managed iff any OWN field
+        // (not inherited; records don't have ancestors) is, recursively.
+        // Records don't nest deep enough in practice for ADepth's cap to
+        // ever matter here, but a self-referential alias chain elsewhere
+        // in the recursion (the array/proc cases above) still needs it.
+        LScope := LM.Symbols[LCanon.Sym].MemberScope;
+        if LScope = NIL_SCOPE then
+          Exit;
+        for LIdx := 0 to LM.SymCount - 1 do
+          if (LM.Symbols[LIdx].Scope = LScope) and
+             (LM.Symbols[LIdx].Kind = skField) then
+          begin
+            LElemX := DeclTypeX(LCanon.UnitId, LIdx);
+            if IsManagedTypeX(LElemX, ADepth + 1) then
+              Exit(True);
+          end;
+      end;
+  end;
 end;
 
 { AX with its plain ALIAS links followed to the declaration that actually
