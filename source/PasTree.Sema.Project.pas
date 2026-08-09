@@ -287,6 +287,8 @@ type
     function RoutineNameOfParam(AMid, ANode: Integer): string;
     function XDescendsFrom(const ADesc, ABase: TSemaXType): Boolean;
     procedure CheckConstraints(AId: Integer);
+    function ResolveCustomAttributeX(AId: Integer): TSemaXType;
+    procedure CheckAttributes(AId: Integer);
     function DeclTypeX(AMid, ASym: Integer): TSemaXType;
     function SubstX(const AX: TSemaXType; AInst, ADepth: Integer): TSemaXType;
     function DeclaredWithinX(AMid, ASym, AOwnerMid, AOwnerSym: Integer): Boolean;
@@ -2403,6 +2405,68 @@ begin
       Inc(LIdx);
       LArgNode := LM.Tree.Nodes[LArgNode].NextSibling;
     end;
+  end;
+end;
+
+// TCustomAttribute itself, resolved from AId's own point of view (its uses
+// list, or the implicit System unit -- ResolveRealDecl already tries both,
+// same as every other implicit-name lookup in this file). XNil (silently)
+// when it cannot be found at all, e.g. a unit with no System unit visible
+// on the search paths -- CheckAttributes treats that as "cannot judge",
+// not as "everything fails".
+function TPasSemaProject.ResolveCustomAttributeX(AId: Integer): TSemaXType;
+var
+  LRMid, LRSym: Integer;
+begin
+  if ResolveRealDecl(AId, 'tcustomattribute', LRMid, LRSym) then
+    Result := XPlain(LRMid, LRSym)
+  else
+    Result := XNil;
+end;
+
+{ 19.3.1/19.3.3 — an attribute's TypeRef must resolve to a class descending
+  from TCustomAttribute. dcc32 37.0 probed first (never guess a diagnostic
+  code): `[TObject] TFoo = class end;` and a from-scratch `TNotAnAttr =
+  class end; [TNotAnAttr] ...` both give
+  `E2010 Incompatible types: '<name>' and 'TCustomAttribute'` — the exact
+  SE2010_IncompatibleTypes shape 2.6.1's assignment-compatibility checks
+  already use, just fired from a declaration site instead of an assignment.
+
+  Conservative like CheckConstraints, for the same reason: a diagnostic
+  pass says nothing the moment it is unsure, rather than guess.
+  - TCustomAttribute itself must resolve (ResolveCustomAttributeX) — a unit
+    that genuinely cannot see it says nothing at all.
+  - The TypeRef must resolve to an actual class (XCatOf = tcClass) — an
+    unresolved name already gets its own E2003 elsewhere (or, for a name
+    this pass cannot judge at all, nothing), and this must never pile a
+    second diagnostic on top of a first one, or invent one for something
+    that isn't a class to begin with (an enum, a routine written by
+    mistake, ...). }
+procedure TPasSemaProject.CheckAttributes(AId: Integer);
+var
+  LM: TPasSemaModel;
+  LCustomAttrX, LAttrX: TSemaXType;
+  LNode, LRef: Integer;
+begin
+  LCustomAttrX := ResolveCustomAttributeX(AId);
+  if not XValid(LCustomAttrX) then
+    Exit;
+  LM := FModels[AId];
+  for LNode := 0 to High(LM.Tree.Nodes) do
+  begin
+    if LM.Tree.Nodes[LNode].Kind <> nkAttribute then
+      Continue;
+    LRef := LM.Tree.Nodes[LNode].FirstChild;
+    if LRef = NIL_NODE then
+      Continue;
+    LAttrX := ResolveTypeExpr(AId, LRef);
+    if not XValid(LAttrX) then
+      Continue;
+    if XCatOf(LAttrX) <> tcClass then
+      Continue;
+    if not XDescendsFrom(LAttrX, LCustomAttrX) then
+      EmitAt(LM, LRef, 'E2010', Format(SE2010_IncompatibleTypes,
+        [XTypeText(LAttrX), 'TCustomAttribute']));
   end;
 end;
 
@@ -7039,6 +7103,7 @@ begin
     FModels[Result].ExtRefMap.Add(LPend[LIdx].Node, LPend[LIdx].Ext);
   CheckCalls(Result);
   CheckConstraints(Result);
+  CheckAttributes(Result);
   // Declared types for EVERY loaded model first (the expression pass reads
   // used units' SymTypeX), then expressions for the requested unit only.
   for LIdx := 0 to FModels.Count - 1 do
@@ -7150,6 +7215,7 @@ begin
     begin
       CheckCalls(AIdx);
       CheckConstraints(AIdx);
+      CheckAttributes(AIdx);
     end);
   Stage('calls');
   // Sequential by design — see AnalyzeDirectory's Phase-3c comment.
@@ -7230,6 +7296,7 @@ begin
     begin
       CheckCalls(AIdx);
       CheckConstraints(AIdx);
+      CheckAttributes(AIdx);
     end);
   Stage('calls');
   // Cross typing stays SEQUENTIAL by design: Instantiate mutates the shared
@@ -7520,6 +7587,7 @@ begin
       begin
         CheckCalls(AIdx);
         CheckConstraints(AIdx);
+        CheckAttributes(AIdx);
       end);
     if Cancelled then
     begin

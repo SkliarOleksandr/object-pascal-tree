@@ -3626,6 +3626,87 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  // ---- test-coverage plan, RTTI-seeding batch 2: 19.3.1's own ancestry
+  // rule -- "an ordinary class descending from TCustomAttribute" was
+  // previously only tested for its PARSE/suffix-fallback shape (does
+  // `[Table]` find `TableAttribute`); the ancestry constraint itself had
+  // NO check anywhere (confirmed by grep: `TCustomAttribute` appeared
+  // nowhere outside comments before this). dcc32 37.0 probed first, never
+  // guessed: `[TObject] TFoo = class end;` and a from-scratch
+  // `TNotAnAttr = class end; [TNotAnAttr] ...` both give
+  // `E2010 Incompatible types: '<name>' and 'TCustomAttribute'` -- exactly
+  // SE2010_IncompatibleTypes's existing shape (2.6.1 already uses it for
+  // assignment-compatibility), just fired from CheckAttributes at a
+  // declaration site instead of from the type-checker at an assignment.
+  // Needs the PROJECT harness even for same-unit cases: CheckAttributes
+  // uses XDescendsFrom, a cross-model primitive, and ResolveCustomAttributeX
+  // resolves TCustomAttribute the same way `tobject` resolves elsewhere in
+  // this file -- through a real System unit on the search path, so this
+  // fixture (unlike 14.5.1's just above) DOES need its own System.pas stub;
+  // no stub means ResolveCustomAttributeX finds nothing and the whole check
+  // says nothing, by design (see CheckAttributes' own comment). ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_attr_anc');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10 +
+    'type'#10 +
+    '  TObject = class end;'#10 +
+    '  TCustomAttribute = class(TObject) end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitAttrAnc.pas'),
+    'unit UnitAttrAnc;'#10'interface'#10 +
+    'type'#10 +
+    // A real attribute class -- must NOT be flagged.
+    '  TGoodAttr = class(TCustomAttribute) end;'#10 +
+    // An ordinary class with no such ancestor -- must BE flagged, the exact
+    // AttrProbe2.dpr shape probed against dcc directly.
+    '  TNotAnAttr = class end;'#10 +
+    // 19.3.1's own pre-existing suffix-fallback case, now with an ancestry
+    // consequence: `[Table]` resolves to `TableAttribute` (no bare `Table`
+    // exists here to compete), and THAT class does not descend either --
+    // the check must fire on the RESOLVED name, not the name as written.
+    '  TableAttribute = class end;'#10 +
+    '  [TGoodAttr]'#10'  TFooGood = class end;'#10 +
+    '  [TNotAnAttr]'#10'  TFooBad = class end;'#10 +
+    '  [Table]'#10'  TFooTable = class end;'#10 +
+    'implementation'#10'end.'#10);
+  // Cross-unit: the attribute class and its use site are in DIFFERENT
+  // units, proving XDescendsFrom's cross-model walk, not just a same-unit
+  // heritage read.
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitAttrLib.pas'),
+    'unit UnitAttrLib;'#10'interface'#10 +
+    'type'#10'  TLibAttr = class(TCustomAttribute) end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitAttrUse.pas'),
+    'unit UnitAttrUse;'#10'interface'#10 +
+    'uses UnitAttrLib;'#10 +
+    'type'#10'  [TLibAttr]'#10'  TFooCross = class end;'#10 +
+    'implementation'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    var LAnc := ModelByName('unitattranc');
+    Ok('19.3.1: a real TCustomAttribute descendant is NOT flagged',
+      not DiagHasText(LAnc, 'E2010', 'TGoodAttr'));
+    Ok('19.3.1: a class with no such ancestor IS flagged, dcc''s own message',
+      DiagHasText(LAnc, 'E2010',
+        'Incompatible types: ''TNotAnAttr'' and ''TCustomAttribute'''));
+    Ok('19.3.1: the check fires on the RESOLVED name after the suffix '
+      + 'fallback, not the name as written',
+      DiagHasText(LAnc, 'E2010',
+        'Incompatible types: ''TableAttribute'' and ''TCustomAttribute'''));
+    var LUse := ModelByName('unitattruse');
+    Ok('19.3.1: cross-unit -- a descendant declared in ANOTHER unit is not '
+      + 'flagged either',
+      Assigned(LUse) and (DiagCount(LUse, 'E2010') = 0));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
 end.
