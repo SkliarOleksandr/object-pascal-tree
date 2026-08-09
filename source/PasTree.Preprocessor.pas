@@ -130,12 +130,32 @@ type
 
   TPasSwitchState = array['A'..'Z'] of Boolean;
 
+  // {$RTTI mode METHODS(set) PROPERTIES(set) FIELDS(set)} (19.2.1) -- unlike
+  // the single-letter switches this has real grammar to parse, not just an
+  // ON/OFF flag: a mode word plus up to three category clauses, each an
+  // explicit visibility set (or a AA..BB range). HasXxx tells "was this
+  // category clause present at all" apart from "present with an empty set".
+  TPasRttiVisibility = (rvPrivate, rvProtected, rvPublic, rvPublished);
+  TPasRttiVisibilitySet = set of TPasRttiVisibility;
+  TPasRttiMode = (rmInherit, rmExplicit);
+
+  TPasRttiState = record
+    Mode: TPasRttiMode;               // dcc default: INHERIT
+    HasMethods: Boolean;
+    Methods: TPasRttiVisibilitySet;
+    HasFields: Boolean;
+    Fields: TPasRttiVisibilitySet;
+    HasProperties: Boolean;
+    Properties: TPasRttiVisibilitySet;
+  end;
+
   // Everything {$PUSHOPT} must save: the single-letter switches PLUS the
   // long-form-only options tracked individually (real dcc's PUSHOPT/POPOPT
-  // covers all compiler options, SCOPEDENUMS included).
+  // covers all compiler options, SCOPEDENUMS and RTTI included).
   TPasOptState = record
     Switches: TPasSwitchState;
     ScopedEnums: Boolean;
+    Rtti: TPasRttiState;
   end;
 
   TPasPreprocessor = class
@@ -146,6 +166,7 @@ type
     FSwitches: TPasSwitchState;
     FScopedEnums: Boolean;
     FScopedEnumsEvents: TList<TPasScopedEnumsEvent>;
+    FRttiState: TPasRttiState;
     FSwitchStack: TStack<TPasOptState>;
     FFileNames: TList<string>;
     FFiles: TList<TPasTokenStream>;
@@ -175,6 +196,7 @@ type
     procedure ApplySwitches(const ABody: string);
     procedure ApplyLongSwitch(const AName, AArg: string);
     procedure SetScopedEnums(AValue: Boolean);
+    procedure ApplyRtti(const AArg: string);
     function EvalIfExpression(const AExpr: string; AFileId: Integer;
       const AToken: TPasToken): Boolean;
   public
@@ -206,6 +228,12 @@ type
       TPasPreprocessed.ScopedEnumsEvents/ScopedEnumsAt -- this is just the
       value at END OF FILE, the one a PUSHOPT/POPOPT round-trip case needs. }
     function ScopedEnumsFinal: Boolean;
+    { The `RTTI` directive state as of the end of the last Process/ProcessText call --
+      reset per file, same "where did the unit leave it" contract as
+      SwitchState/ScopedEnumsFinal. 19.2.1: unlike a plain switch this has
+      structured content (mode + three optional visibility-set clauses), so
+      it is a record, not a Boolean. }
+    function RttiState: TPasRttiState;
   end;
 
 const
@@ -414,6 +442,11 @@ begin
   Result := FScopedEnums;
 end;
 
+function TPasPreprocessor.RttiState: TPasRttiState;
+begin
+  Result := FRttiState;
+end;
+
 procedure TPasPreprocessor.ResetSwitches;
 var
   LCh: Char;
@@ -533,6 +566,7 @@ begin
   FSwitchStack.Clear;
   FScopedEnums := False;         // dcc default; unit-local like the switches
   FScopedEnumsEvents.Clear;
+  FRttiState := Default(TPasRttiState);   // Mode = rmInherit, the dcc default
 
   LStream := TPasLexer.Tokenize(ASource);
   FFileNames.Add(AFileName);
@@ -737,6 +771,7 @@ begin
     var LOpt: TPasOptState;
     LOpt.Switches := FSwitches;
     LOpt.ScopedEnums := FScopedEnums;
+    LOpt.Rtti := FRttiState;
     FSwitchStack.Push(LOpt);
   end
   else if LName = 'POPOPT' then
@@ -746,6 +781,7 @@ begin
       var LOpt := FSwitchStack.Pop;
       FSwitches := LOpt.Switches;
       SetScopedEnums(LOpt.ScopedEnums);
+      FRttiState := LOpt.Rtti;
     end
     else
       Diag(ppPopWithoutPush, AFileId, AToken.Start, AToken.Len);
@@ -861,8 +897,154 @@ begin
       SetScopedEnums(True)
     else if SameText(AArg, 'OFF') then
       SetScopedEnums(False);
+  end
+  else if AName = 'RTTI' then
+    ApplyRtti(AArg);
+  // Unknown names: passthrough (WARN, HINTS, REGION, HPPEMIT, ...)
+end;
+
+// {$RTTI mode METHODS(set) FIELDS(set) PROPERTIES(set)} (19.2.1). Real
+// grammar, not an ON/OFF flag -- AArg is everything after the word RTTI,
+// e.g. 'EXPLICIT METHODS([vcPublic,vcPublished]) FIELDS([vcPrivate..vcPublic])'.
+// A malformed clause simply stops the scan (leaving whatever was parsed so
+// far) rather than raising a diagnostic -- this mirrors ApplySwitches'
+// existing "no boolean state to track, just stop" tolerance, since a
+// misparsed RTTI directive must never cascade into an unrelated E-code the
+// way the brace-comment/`{$SCOPEDENUMS}` lesson (test-coverage-plan batch 5)
+// warns about for directive text in general.
+procedure TPasPreprocessor.ApplyRtti(const AArg: string);
+var
+  LPos: Integer;
+
+  procedure SkipWs;
+  begin
+    while (LPos <= Length(AArg)) and CharInSet(AArg[LPos], [' ', #9]) do
+      Inc(LPos);
   end;
-  // Unknown names: passthrough (WARN, HINTS, REGION, HPPEMIT, RTTI, ...)
+
+  function ReadIdent: string;
+  var
+    LStart: Integer;
+  begin
+    SkipWs;
+    LStart := LPos;
+    while (LPos <= Length(AArg)) and
+      CharInSet(AArg[LPos], ['A'..'Z', 'a'..'z']) do
+      Inc(LPos);
+    Result := UpperCase(Copy(AArg, LStart, LPos - LStart));
+  end;
+
+  function ReadVisibility(out AVis: TPasRttiVisibility): Boolean;
+  var
+    LName: string;
+  begin
+    LName := ReadIdent;
+    if LName = 'VCPRIVATE' then AVis := rvPrivate
+    else if LName = 'VCPROTECTED' then AVis := rvProtected
+    else if LName = 'VCPUBLIC' then AVis := rvPublic
+    else if LName = 'VCPUBLISHED' then AVis := rvPublished
+    else Exit(False);
+    Result := True;
+  end;
+
+  function ReadVisibilitySet(out ASet: TPasRttiVisibilitySet): Boolean;
+  var
+    LFrom, LTo, LV: TPasRttiVisibility;
+  begin
+    ASet := [];
+    SkipWs;
+    if (LPos > Length(AArg)) or (AArg[LPos] <> '[') then
+      Exit(False);
+    Inc(LPos); // '['
+    SkipWs;
+    while (LPos <= Length(AArg)) and (AArg[LPos] <> ']') do
+    begin
+      if not ReadVisibility(LFrom) then
+        Exit(False);
+      LTo := LFrom;
+      SkipWs;
+      if (LPos + 1 <= Length(AArg)) and (AArg[LPos] = '.') and
+        (AArg[LPos + 1] = '.') then
+      begin
+        Inc(LPos, 2);
+        if not ReadVisibility(LTo) then
+          Exit(False);
+      end;
+      for LV := LFrom to LTo do
+        Include(ASet, LV);
+      SkipWs;
+      if (LPos <= Length(AArg)) and (AArg[LPos] = ',') then
+      begin
+        Inc(LPos);
+        SkipWs;
+      end;
+    end;
+    if (LPos > Length(AArg)) or (AArg[LPos] <> ']') then
+      Exit(False);
+    Inc(LPos); // ']'
+    Result := True;
+  end;
+
+  // METHODS/FIELDS/PROPERTIES ( [set] ) -- AName already read.
+  function ReadCategory(const AName: string; out ASet: TPasRttiVisibilitySet)
+    : Boolean;
+  begin
+    Result := False;
+    SkipWs;
+    if (LPos > Length(AArg)) or (AArg[LPos] <> '(') then
+      Exit;
+    Inc(LPos); // '('
+    if not ReadVisibilitySet(ASet) then
+      Exit;
+    SkipWs;
+    if (LPos > Length(AArg)) or (AArg[LPos] <> ')') then
+      Exit;
+    Inc(LPos); // ')'
+    Result := True;
+  end;
+
+var
+  LWord: string;
+  LSet: TPasRttiVisibilitySet;
+begin
+  LPos := 1;
+  LWord := ReadIdent;
+  if LWord = 'EXPLICIT' then
+    FRttiState.Mode := rmExplicit
+  else if LWord = 'INHERIT' then
+    FRttiState.Mode := rmInherit
+  else
+    Exit; // no recognizable mode word -- nothing else to trust either
+
+  while True do
+  begin
+    SkipWs;
+    if LPos > Length(AArg) then
+      Exit;
+    LWord := ReadIdent;
+    if LWord = '' then
+      Exit;
+    if LWord = 'METHODS' then
+    begin
+      if not ReadCategory(LWord, LSet) then Exit;
+      FRttiState.HasMethods := True;
+      FRttiState.Methods := LSet;
+    end
+    else if LWord = 'FIELDS' then
+    begin
+      if not ReadCategory(LWord, LSet) then Exit;
+      FRttiState.HasFields := True;
+      FRttiState.Fields := LSet;
+    end
+    else if LWord = 'PROPERTIES' then
+    begin
+      if not ReadCategory(LWord, LSet) then Exit;
+      FRttiState.HasProperties := True;
+      FRttiState.Properties := LSet;
+    end
+    else
+      Exit; // unrecognized clause -- stop rather than guess
+  end;
 end;
 
 // Flips the {$SCOPEDENUMS} state and journals the change at the CURRENT end

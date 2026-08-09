@@ -31,7 +31,59 @@ implementation
 uses
   System.SysUtils;
 
+// 19.2.1 ({$RTTI}): renders TPasRttiState the way CheckDump expects a
+// golden string -- mode plus each category's set, `-` when the category
+// clause was never written at all (distinct from an empty `[]`, which this
+// repo's fixtures never exercise but the record still distinguishes). Unit-
+// scope, not nested inside BuildPreprocessorCases: a nested FUNCTION (as
+// opposed to a captured variable) cannot be called from an anonymous method
+// nested alongside it (E2555), only from ordinary nested procedures.
+function DumpRttiState(const AState: TPasRttiState): string;
+const
+  VIS_NAMES: array[TPasRttiVisibility] of string =
+    ('Private', 'Protected', 'Public', 'Published');
+  MODE_NAMES: array[TPasRttiMode] of string = ('Inherit', 'Explicit');
+
+  function DumpSet(AHas: Boolean; const ASet: TPasRttiVisibilitySet): string;
+  var
+    LV: TPasRttiVisibility;
+    LNames: TArray<string>;
+  begin
+    if not AHas then
+      Exit('-');
+    LNames := [];
+    for LV := Low(TPasRttiVisibility) to High(TPasRttiVisibility) do
+      if LV in ASet then
+        LNames := LNames + [VIS_NAMES[LV]];
+    Result := '[' + string.Join(',', LNames) + ']';
+  end;
+
+begin
+  Result := MODE_NAMES[AState.Mode] +
+    ' Methods=' + DumpSet(AState.HasMethods, AState.Methods) +
+    ' Fields=' + DumpSet(AState.HasFields, AState.Fields) +
+    ' Properties=' + DumpSet(AState.HasProperties, AState.Properties);
+end;
+
 function BuildPreprocessorCases(APP: TPasPreprocessor): TPasCustomCases;
+
+  // A {$RTTI ...} directive (plus, optionally, more source after it) read
+  // back via TPasPreprocessor.RttiState and rendered through DumpRttiState
+  // -- CheckDump gives this the same source/expected/actual failure format
+  // as every dump-comparison case, even though there is no AST dump here.
+  function RttiCase(const ASection, AName, ASource, AExpected: string):
+    TPasCustomCase;
+  begin
+    Result.Section := ASection;
+    Result.Name := AName;
+    Result.Run :=
+      function: TPasCheckResult
+      begin
+        APP.ProcessText('test.pas', ASource);
+        Result := CheckDump(ASource, AExpected,
+          DumpRttiState(APP.RttiState), [], 0);
+      end;
+  end;
 
   { $IFOPT reading back what a plain switch directive just set -- the other
     half of 1.3.1: not just that SwitchState answers right (the rows below
@@ -112,7 +164,49 @@ begin
     SwitchCase('1.3.4', '$PUSHOPT/$POPOPT round-trips SCOPEDENUMS too',
       '{$SCOPEDENUMS ON}{$PUSHOPT}{$SCOPEDENUMS OFF}{$POPOPT}', #0, True,
       APP),
-    PopWithoutPushCase
+    PopWithoutPushCase,
+
+    // ---- 19.1.1 (classic TObject RTTI / `M`): the spec frames this as pure
+    // directive-STATE, same shape as 1.3.1 -- and it turns out ApplySwitches
+    // already tracks any letter A..Z generically (it never special-cased
+    // which letters are "real" switches), so `M` was ALREADY answered
+    // correctly by SwitchState with zero source change. Probed before
+    // trusting that, same as every other batch: this is the confirmation. ----
+    SwitchCase('19.1.1', '{$M+} sets the option', '{$M+}', 'M', True, APP),
+    SwitchCase('19.1.1', '{$M-} after {$M+} clears it',
+      '{$M+}{$M-}', 'M', False, APP),
+    SwitchCase('19.1.1', 'M is off by default, unlike C/D/O/...',
+      '', 'M', False, APP),
+
+    // ---- 19.2.1 ({$RTTI mode METHODS(set) FIELDS(set) PROPERTIES(set)}):
+    // unlike a plain switch this has real grammar (ApplyRtti, added for this
+    // batch) -- mode word plus up to three category clauses, each an
+    // explicit set or a range. RttiCase/DumpRttiState above render the
+    // structured result the same way a dump comparison would. ----
+    RttiCase('19.2.1', 'no {$RTTI} at all -- INHERIT, no category clauses',
+      '', 'Inherit Methods=- Fields=- Properties=-'),
+    RttiCase('19.2.1', 'EXPLICIT with one category',
+      '{$RTTI EXPLICIT METHODS([vcPublic,vcPublished])}',
+      'Explicit Methods=[Public,Published] Fields=- Properties=-'),
+    RttiCase('19.2.1', 'EXPLICIT with all three categories -- the real-world '
+      + 'RTL shape',
+      '{$RTTI EXPLICIT METHODS([vcPublic,vcPublished]) ' +
+      'FIELDS([vcPrivate,vcProtected,vcPublic,vcPublished]) ' +
+      'PROPERTIES([vcPublic,vcPublished])}',
+      'Explicit Methods=[Public,Published] ' +
+      'Fields=[Private,Protected,Public,Published] ' +
+      'Properties=[Public,Published]'),
+    RttiCase('19.2.1', 'a visibility RANGE (vcPrivate..vcPublished) expands',
+      '{$RTTI EXPLICIT FIELDS([vcPrivate..vcPublished])}',
+      'Explicit Methods=- Fields=[Private,Protected,Public,Published] ' +
+      'Properties=-'),
+    RttiCase('19.2.1', 'INHERIT is still a real mode, not just "absent"',
+      '{$RTTI INHERIT METHODS([vcPublic])}',
+      'Inherit Methods=[Public] Fields=- Properties=-'),
+    RttiCase('1.3.4', '$PUSHOPT/$POPOPT round-trips RTTI too',
+      '{$RTTI EXPLICIT METHODS([vcPublic])}{$PUSHOPT}' +
+      '{$RTTI INHERIT}{$POPOPT}',
+      'Explicit Methods=[Public] Fields=- Properties=-')
   ];
 end;
 

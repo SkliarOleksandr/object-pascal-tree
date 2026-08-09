@@ -24,6 +24,19 @@ uses
 const
   NIL_NODE = -1;
 
+  // nkAttribute.Aux (19.3.3): a handful of attribute names are COMPILER-
+  // RECOGNIZED -- a real compiler matches them by the identity of the
+  // resolved TCustomAttribute descendant, but the spec explicitly allows a
+  // lightweight parser to match by NAME instead, which is what
+  // PasAttrMagicAux (below) does. Their real semantics live elsewhere
+  // (6.2.3 [Ref] on a const param, 14.3.2/20.6.1 [weak]/[unsafe]); this Aux
+  // value only records WHICH one was written, nothing more.
+  amaNone = -1;      // an ordinary, non-magic attribute (the default)
+  amaRef = 1;
+  amaVolatile = 2;
+  amaWeak = 3;
+  amaUnsafe = 4;
+
 type
   TPasNodeKind = (
     nkError,          // parse error recovery node
@@ -141,7 +154,10 @@ type
     nkGenericParam,
     nkConstraint,     // class/record/constructor/typeref
     nkAttrGroup,      // 19.3.2: [Attr(args), ...]
-    nkAttribute,
+    nkAttribute,      // 19.3.2; Aux (19.3.3) = amaNone/amaRef/amaVolatile/
+                      // amaWeak/amaUnsafe, set by the parser -- see the
+                      // ama* constants above
+
     nkRoutineBody,    // local decl sections + compound/asm block
     // Appended, not inserted: existing ordinals stay stable (see nkAnonParams).
     nkNamedArg        // OLE-automation named argument `Name := Expr` in a call
@@ -205,11 +221,34 @@ type
     function Build(const ASource: TPasPreprocessed): TPasTree;
   end;
 
+  { nkAttribute.Aux (19.3.3): amaNone/amaRef/amaVolatile/amaWeak/amaUnsafe
+    for the attribute name ANameLower (already lower-cased, `Attribute`
+    suffix not yet stripped by the caller -- both the bare and suffixed
+    spellings are matched here, the same either-spelling tolerance 19.3.1's
+    own suffix fallback already gives every OTHER attribute). Free function,
+    not a TPasTree method: the parser calls it before any node/tree exists
+    yet (ParseAttrGroups, right after reading the identifier). }
+  function PasAttrMagicAux(const ANameLower: string): Integer;
+
 implementation
 
 uses
   System.SysUtils,
   System.TypInfo;
+
+function PasAttrMagicAux(const ANameLower: string): Integer;
+begin
+  if (ANameLower = 'ref') or (ANameLower = 'refattribute') then
+    Result := amaRef
+  else if (ANameLower = 'volatile') or (ANameLower = 'volatileattribute') then
+    Result := amaVolatile
+  else if (ANameLower = 'weak') or (ANameLower = 'weakattribute') then
+    Result := amaWeak
+  else if (ANameLower = 'unsafe') or (ANameLower = 'unsafeattribute') then
+    Result := amaUnsafe
+  else
+    Result := amaNone;
+end;
 
 { TPasTree }
 
@@ -356,6 +395,15 @@ begin
     nkParam:
       if Nodes[AIndex].Aux >= 0 then
         Result := Result + '#out';
+    // 19.3.3: which compiler-recognized attribute this is, if any -- see
+    // the ama* constants and PasAttrMagicAux.
+    nkAttribute:
+      case Nodes[AIndex].Aux of
+        amaRef: Result := Result + '#ref';
+        amaVolatile: Result := Result + '#volatile';
+        amaWeak: Result := Result + '#weak';
+        amaUnsafe: Result := Result + '#unsafe';
+      end;
   end;
   LChildren := '';
   LChild := Nodes[AIndex].FirstChild;

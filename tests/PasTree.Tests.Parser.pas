@@ -473,7 +473,7 @@ const
        'Ident''B'') Ident''C'')) Ident''D'') Ident''E'')))'; ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..109] of TPasCaseRow = (
+  DECL_CASES: array[0..112] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -683,7 +683,7 @@ const
      Source: 'type'#13#10'  TC = class'#13#10 +
        '    [weak] FFoo: IFoo;'#13#10'  end;';
      Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(AttrGroup(' +
-       'Attribute(Ident''weak'')) VarDecl(Ident''FFoo'' Ident''IFoo''))))';
+       'Attribute#weak(Ident''weak'')) VarDecl(Ident''FFoo'' Ident''IFoo''))))';
      ExpectDiags: 0),
 
     // ---- 19.3.2 an attribute WITH ARGUMENTS -- attributes appear in NO
@@ -695,6 +695,33 @@ const
      Source: 'type'#13#10'  [MyAttr(1, ''s'')] TFoo = class end;';
      Expected: 'TypeSec(TypeDecl(AttrGroup(Attribute(Ident''MyAttr'' ' +
        'IntLit''1'' StrLit''''s'''')) Ident''TFoo'' ClassType))';
+     ExpectDiags: 0),
+
+    // ---- 19.3.3 compiler-recognized ("magic") attributes -- matched by
+    // NAME (PasAttrMagicAux), per the spec's own "lightweight parser"
+    // allowance; real semantics are 6.2.3/14.3.2/20.6.1's concern, this is
+    // only the RECOGNITION step. [Volatile] and [unsafe] had no fixture at
+    // all before this ([Ref]/[weak] did, retagged above); the ordinary
+    // `[MyAttr]` case right above is the discriminating half -- an
+    // attribute the compiler does NOT recognize gets no `#` tag. ----
+    (Section: '19.3.3'; Name: '[Volatile] on a field';
+     Source: 'type TC = class [Volatile] F: Integer; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(AttrGroup(' +
+       'Attribute#volatile(Ident''Volatile'')) VarDecl(Ident''F'' ' +
+       'Ident''Integer''))))';
+     ExpectDiags: 0),
+    (Section: '19.3.3'; Name: '[unsafe] as an ATTRIBUTE, not the directive '
+      + 'word';
+     Source: 'type TC = class [unsafe] F: TObject; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(AttrGroup(' +
+       'Attribute#unsafe(Ident''unsafe'')) VarDecl(Ident''F'' ' +
+       'Ident''TObject''))))';
+     ExpectDiags: 0),
+    (Section: '19.3.3'; Name: 'the Attribute suffix is recognized too';
+     Source: 'type TC = class [WeakAttribute] F: IInterface; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(AttrGroup(' +
+       'Attribute#weak(Ident''WeakAttribute'')) VarDecl(Ident''F'' ' +
+       'Ident''IInterface''))))';
      ExpectDiags: 0),
 
     // ==== test-coverage plan step 3 batch 3 ====================
@@ -1063,7 +1090,7 @@ const
     (Section: '6.2.3'; Name: 'const [Ref] parameter';
      Source: 'procedure P(const [Ref] A: Integer);';
      Expected: 'Routine''procedure''(Ident''P'' Params(Param(AttrGroup(' +
-       'Attribute(Ident''Ref'')) Ident''A'' Ident''Integer'')))';
+       'Attribute#ref(Ident''Ref'')) Ident''A'' Ident''Integer'')))';
      ExpectDiags: 0),
     (Section: '6.2.4'; Name: 'a lone out parameter';
      Source: 'procedure P(out A: Integer);';
@@ -1101,7 +1128,7 @@ const
        'Ident''Dest'' Ident''TR''))) Routine''operator''#class(' +
        'Ident''Finalize'' Params(Param(Ident''Dest'' Ident''TR''))) ' +
        'Routine''operator''#class(Ident''Assign'' Params(Param(' +
-       'Ident''Dest'' Ident''TR'') Param(AttrGroup(Attribute(' +
+       'Ident''Dest'' Ident''TR'') Param(AttrGroup(Attribute#ref(' +
        'Ident''Ref'')) Ident''Src'' Ident''TR''))))))'; ExpectDiags: 0),
 
     // ---- 12.1.1 single inheritance, standing alone ----
@@ -1209,7 +1236,7 @@ const
      Source: 'type'#13#10'  TC = class'#13#10 +
        '    [weak] FFoo: IFoo;'#13#10'  end;';
      Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(AttrGroup(' +
-       'Attribute(Ident''weak'')) VarDecl(Ident''FFoo'' Ident''IFoo''))))';
+       'Attribute#weak(Ident''weak'')) VarDecl(Ident''FFoo'' Ident''IFoo''))))';
      ExpectDiags: 0),
 
     // ---- B.10 a constant expression: the parser accepts the SHAPE, folds

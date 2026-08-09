@@ -1336,6 +1336,7 @@ end;
 function TPasParser.ParseAttrGroups: Integer;
 var
   LAttr: Integer;
+  LNameLower: string;
 begin
   // 19.3.2: one node collecting all adjacent [ ... ] groups.
   if CurKind <> tkLBracket then
@@ -1347,9 +1348,17 @@ begin
     while (CurKind <> tkRBracket) and (CurKind <> tkEndOfFile) do
     begin
       LAttr := FB.AddNode(nkAttribute, NIL_NODE, FPos);
+      // 19.3.3: captured BEFORE ParseTypeRef consumes it -- simple-name
+      // only (none of the compiler-recognized names is ever realistically
+      // written dotted-qualified, so a qualified spelling just misses the
+      // tag rather than mis-tagging something else).
+      LNameLower := '';
+      if CurKind = tkIdentifier then
+        LNameLower := LowerCase(CurText);
       FB.Adopt(LAttr, ParseTypeRef);
       if CurKind = tkLParen then
         ParseArgList(LAttr);
+      FB.SetAux(LAttr, PasAttrMagicAux(LNameLower));
       FB.SetLast(LAttr, FPos - 1);
       FB.Adopt(Result, LAttr);
       if CurKind = tkComma then
