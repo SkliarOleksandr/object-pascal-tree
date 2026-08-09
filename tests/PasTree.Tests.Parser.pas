@@ -29,7 +29,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..69] of TPasCaseRow = (
+  STMT_CASES: array[0..71] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -434,10 +434,29 @@ const
      Source: 'Writeln(Format(''%d %s'', [1, ''x'']));';
      Expected: 'Block(ExprStmt(Call(Ident''Writeln'' Call(Ident''Format'' ' +
        'StrLit''''%d %s'''' SetCtor(IntLit''1'' StrLit''''x'''')))))';
-     ExpectDiags: 0)
+     ExpectDiags: 0),
+
+    // ==== test-coverage plan step 3 batch 6 ====================
+
+    // ---- 4.1 operator precedence, the full chain in one expression: unary
+    // NOT binds tightest, then AND, then OR, then relational lowest -- 4.2's
+    // batch-1 case only shows +/* against each other, one level ----
+    (Section: '4.1'; Name: 'the full precedence chain in one expression';
+     Source: 'B := not A and C or D = E;';
+     Expected: 'Block(Assign(Ident''B'' BinaryOp''=''(BinaryOp''or''(' +
+       'BinaryOp''and''(UnaryOp''not''(Ident''A'') Ident''C'') ' +
+       'Ident''D'') Ident''E'')))'; ExpectDiags: 0),
+
+    // ---- 4.7 the string `+` operator BETWEEN VARIABLES -- B.6.1's case
+    // only shows adjacent STRING LITERALS, which the lexer merges into one
+    // token before the parser ever sees an operator at all ----
+    (Section: '4.7'; Name: 'string concatenation between variables';
+     Source: 'S3 := S1 + S2;';
+     Expected: 'Block(Assign(Ident''S3'' BinaryOp''+''(Ident''S1'' ' +
+       'Ident''S2'')))'; ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..105] of TPasCaseRow = (
+  DECL_CASES: array[0..108] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1182,7 +1201,30 @@ const
      Source: 'const K = 1 + 2 * 3;';
      Expected: 'ConstSec''const''(ConstDecl(Ident''K'' BinaryOp''+''(' +
        'IntLit''1'' BinaryOp''*''(IntLit''2'' IntLit''3''))))';
-     ExpectDiags: 0)
+     ExpectDiags: 0),
+
+    // ==== test-coverage plan step 3 batch 6 ====================
+
+    // ---- 6.1.1 a procedure and a function side by side -- the one
+    // difference between them (a result type) had never been shown as
+    // the DELIBERATE point of a case before, only as an incidental detail
+    // of some richer one ----
+    (Section: '6.1.1'; Name: 'a procedure and a function side by side';
+     Source: 'procedure P;'#13#10'function F: Integer;';
+     Expected: 'Routine''procedure''(Ident''P'') ' +
+       'Routine''function''(Ident''F'' Ident''Integer'')'; ExpectDiags: 0),
+
+    // ---- 11.1.2 / 11.1.3 fields and methods, each standing alone with
+    // nothing else in the class (every prior class case bundles them with
+    // something richer -- visibility, directives, generics) ----
+    (Section: '11.1.2'; Name: 'a class with only fields';
+     Source: 'type TC = class'#13#10'    FX, FY: Integer;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(VarDecl(' +
+       'Ident''FX'' Ident''FY'' Ident''Integer''))))'; ExpectDiags: 0),
+    (Section: '11.1.3'; Name: 'a class with only a method';
+     Source: 'type TC = class'#13#10'    procedure P;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(' +
+       'Routine''procedure''(Ident''P''))))'; ExpectDiags: 0)
   );
 
 { Builds every case that is not a plain dump comparison: the platform matrix
@@ -1641,11 +1683,67 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
       end;
   end;
 
+  { B.12: a block is its local declaration sections (label/const/type/var,
+    in whatever order and however many) followed by the statement part --
+    each section kind has appeared ALONE in some other case; this is the
+    only one with every kind present together, the shape B.12 itself
+    describes. Only reachable inside a routine BODY, so -- like 6.9 --
+    CheckDecl (interface-section only) cannot reach it; dumps the found
+    routine's own subtree, same technique NestedRoutineCase uses. }
+  function FullBlockCase: TPasCustomCase;
+  begin
+    Result.Section := 'B.12';
+    Result.Name := 'every local declaration section kind, together';
+    Result.Run :=
+      function: TPasCheckResult
+      const
+        SRC =
+          'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+          'procedure P;'#13#10 +
+          'label'#13#10'  1;'#13#10 +
+          'const'#13#10'  K = 1;'#13#10 +
+          'type'#13#10'  TLocal = Integer;'#13#10 +
+          'var'#13#10'  X: TLocal;'#13#10 +
+          'begin'#13#10'  1: X := K;'#13#10'end;'#13#10 +
+          'end.'#13#10;
+      var
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+        LIdx, LRoutine: Integer;
+      begin
+        LPre := GPP.ProcessText('u.pas', SRC);
+        LTree := TPasParser.ParseFile(LPre, LDiags);
+        LRoutine := NIL_NODE;
+        for LIdx := 0 to High(LTree.Nodes) do
+          if (LTree.Nodes[LIdx].Kind = nkRoutine) and
+             (LTree.Nodes[LIdx].FirstChild <> NIL_NODE) and
+             SameText(LTree.NodeText(LTree.Nodes[LIdx].FirstChild), 'P') then
+          begin
+            LRoutine := LIdx;
+            Break;
+          end;
+        if LRoutine = NIL_NODE then
+        begin
+          Result.Passed := False;
+          Result.Message := '  no routine named ''P'' found' + sLineBreak;
+          Exit;
+        end;
+        Result := CheckDump(SRC, 'Routine''procedure''(Ident''P'' ' +
+          'RoutineBody(LabelSec ConstSec''const''(ConstDecl(Ident''K'' ' +
+          'IntLit''1'')) TypeSec(TypeDecl(Ident''TLocal'' ' +
+          'Ident''Integer'')) VarSec''var''(VarDecl(Ident''X'' ' +
+          'Ident''TLocal'')) Block(LabeledStmt(Assign(Ident''X'' ' +
+          'Ident''K'')))))', LTree.Dump(LRoutine), LDiags, 0);
+      end;
+  end;
+
 var
   LPlatform: TPasPlatform;
 begin
   Result := [];
-  Result := Result + [ProgramFileCase, UnitFileCase, NestedRoutineCase];
+  Result := Result + [ProgramFileCase, UnitFileCase, NestedRoutineCase,
+    FullBlockCase];
   for LPlatform := Low(TPasPlatform) to High(TPasPlatform) do
     Result := Result + [PlatformCase(LPlatform)];
   Result := Result + [IncludeContextCase];

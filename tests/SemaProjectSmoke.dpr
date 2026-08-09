@@ -2329,7 +2329,7 @@ begin
     var LSlf := ModelByName('unitselfuse');
     Ok('self-target: UnitSelfUse loaded', Assigned(LSlf));
     Ok('self-target: no diags at all', Length(LSlf.Diags) = 0);
-    Ok('self-target: the with body opens over Self.TreeViewControl',
+    Ok('11.3.3: the with body opens over Self.TreeViewControl',
       CrossRefTo(LSlf, 'CheckImages', 'CheckImages'));
 
     // A unit-level procedural-type VAR shadowing an imported routine.
@@ -3583,6 +3583,43 @@ begin
       DiagCount(ModelByName('unitsysinituse'), 'E2003') = 0);
     Ok('1.2.4: HInstance resolved via the implicit SysInit unit',
       CrossRefTo(ModelByName('unitsysinituse'), 'HInstance', 'HInstance'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- test-coverage plan step 3 batch 6: 14.5.1 an interface reference
+  // held POLYMORPHICALLY -- an interface-typed variable assigned a class
+  // instance, with a member called through the INTERFACE reference rather
+  // than the concrete class. Nothing had ever assigned a class to an
+  // interface-typed var before this (every prior interface fixture only
+  // ever declared the shape, never used one as a value). Needs the PROJECT
+  // pipeline, not bare Analyze: a variable's member-scope hookup runs in
+  // the cross/inherited passes, not Phase 1 (SemaSmoke tried this first and
+  // came back with 7 unresolved refs -- moved here once that was clear). ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_iface_poly');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitIfacePoly.pas'),
+    'unit UnitIfacePoly;'#10'interface'#10 +
+    'type'#10 +
+    '  IFoo = interface'#10'    function Ping: Integer;'#10'  end;'#10 +
+    '  TImpl = class(TObject, IFoo)'#10 +
+    '    function Ping: Integer;'#10'  end;'#10 +
+    'implementation'#10 +
+    'function TImpl.Ping: Integer; begin Result := 1; end;'#10 +
+    'procedure P;'#10'var F: IFoo;'#10 +
+    'begin'#10'  F := TImpl.Create;'#10'  F.Ping;'#10'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    Ok('14.5.1: no E2003 assigning a class through its interface reference',
+      DiagCount(ModelByName('unitifacepoly'), 'E2003') = 0);
+    Ok('14.5.1: F.Ping resolves through the interface reference''s own member',
+      LocalRefCount(ModelByName('unitifacepoly'), 'Ping') >= 1);
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

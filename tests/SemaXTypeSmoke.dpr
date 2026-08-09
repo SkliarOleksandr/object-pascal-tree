@@ -1132,7 +1132,7 @@ begin
     Ok('XI: no diags at all', Length(LH.Diags) = 0);
     Eq('GM.m11 is Integer (plain field, control)',
       XTypeOf(LH, 'GM.m11'), 'Integer');
-    Eq('GM.Twice is Integer (nested strict-private helper, cross-unit)',
+    Eq('15.3.4: GM.Twice is Integer (nested strict-private helper, cross-unit)',
       XTypeOf(LH, 'GM.Twice'), 'Integer');
 
     // ---- inherited members reached from another unit ----
@@ -1171,9 +1171,9 @@ begin
     Ok('HC: no diags at all', Length(LC.Diags) = 0);
     Eq('direction 1: qualified GG.Lo via the cross-unit helper',
       XTypeOf(LC, 'GG.Lo'), 'Cardinal');
-    Eq('last-uses-wins: HB''s Version (string) beats HB2''s (Integer)',
+    Eq('15.3.3: last-uses-wins -- HB''s Version (string) beats HB2''s (Integer)',
       XTypeOf(LC, 'GT.Version'), 'string');
-    Eq('a helper member HIDES the type''s own (Mark -> Integer, dcc-verified)',
+    Eq('15.3.3: a helper member HIDES the type''s own (Mark -> Integer, dcc-verified)',
       XTypeOf(LC, 'GT.Mark'), 'Integer');
     Eq('intrinsic-type helper (record helper for string, ''~'' key path)',
       XTypeOf(LC, 'GS.Doubled'), 'Integer');
@@ -1185,33 +1185,34 @@ begin
       XTypeOf(LE, 'T.Hidden'), 'Integer');
     LE := ModelByName('he');
     Ok('HE loaded', Assigned(LE));
-    Eq('HE: an implementation-section helper does NOT export (15.3.4)',
+    Eq('15.3.4: an implementation-section helper does NOT export',
       XTypeOf(LE, 'T.Hidden'), '?');
 
     // ---- 16.5.1 generic-method type inference ----
     LG := ModelByName('gu');
     Ok('GU loaded', Assigned(LG));
     Ok('GU: no diags at all', Length(LG.Diags) = 0);
-    Eq('Max(3,7) infers T=Integer', XTypeOf(LG, 'G.Max(3,7)'), 'Integer');
-    Eq('Max(''a'',''b'') infers T=string — same method, different T',
+    Eq('16.5.1: Max(3,7) infers T=Integer', XTypeOf(LG, 'G.Max(3,7)'),
+      'Integer');
+    Eq('16.5.1: Max(''a'',''b'') infers T=string — same method, different T',
       XTypeOf(LG, 'G.Max(''a'',''b'')'), 'string');
-    Eq('Wrap(5) infers T through an INSTANTIATED result',
+    Eq('16.5.1: Wrap(5) infers T through an INSTANTIATED result',
       XTypeOf(LG, 'G.Wrap(5)'), 'TBox<Integer>');
-    Eq('...and its member types in that frame',
+    Eq('16.5.1: ...and its member types in that frame',
       XTypeOf(LG, 'G.Wrap(5).FV'), 'Integer');
-    Eq('Pair(1,''x'') infers two parameters, result is V',
+    Eq('16.5.1: Pair(1,''x'') infers two parameters, result is V',
       XTypeOf(LG, 'G.Pair(1,''x'')'), 'string');
 
     // ---- 16.5.1 EXPLICIT type arguments at the call site ----
     LG := ModelByName('gy');
     Ok('GY loaded', Assigned(LG));
     Ok('GY: no diags at all', Length(LG.Diags) = 0);
-    Eq('Cast<TThing>(X) types as the WRITTEN argument, not the open T',
+    Eq('16.5.1: Cast<TThing>(X) types as the WRITTEN argument, not the open T',
       XTypeOf(LG, 'Unsafe.Cast<TThing>(GObj)'), 'TThing');
-    Eq('...so the member after it resolves',
+    Eq('16.5.1: ...so the member after it resolves',
       XTypeOf(LG, 'Unsafe.Cast<TThing>(GObj).Ping'), 'Integer');
-    Eq('a call written with <T> skips the derived NON-generic of that name',
-      XTypeOf(LG, 'GBag.Fetch<TThing>(''x'')'), 'TThing');
+    Eq('16.5.1: a call written with <T> skips the derived NON-generic of ' +
+      'that name', XTypeOf(LG, 'GBag.Fetch<TThing>(''x'')'), 'TThing');
 
     // ---- a helper reached through the target's alias identity ----
     LE := ModelByName('al4');
@@ -1245,9 +1246,9 @@ begin
     Ok('SPN loaded', Assigned(LE));
     Ok('SPN: no diags at all — both arities pick their OWN nested type',
       Length(LE.Diags) = 0);
-    Eq('arity 1 reaches TNodes<T>''s node record', XTypeOf(LE, 'Result.fKey'),
-      'T');
-    Eq('arity 2 reaches TNodes<TKey,TValue>''s — a DIFFERENT nested type',
+    Eq('16.1.2: arity 1 reaches TNodes<T>''s node record',
+      XTypeOf(LE, 'Result.fKey'), 'T');
+    Eq('16.1.2: arity 2 reaches TNodes<TKey,TValue>''s — a DIFFERENT nested type',
       XTypeOf(LE, 'Result.fKeyed'), 'TKey');
 
     // ---- overload selection across an alias identity ----
@@ -1268,7 +1269,7 @@ begin
     LE := ModelByName('sh');
     Ok('SH loaded', Assigned(LE));
     Ok('SH: no diags at all', Length(LE.Diags) = 0);
-    Eq('the helper''s Imp wins over the class''s own, so Stack resolves',
+    Eq('15.3.3: the helper''s Imp wins over the class''s own, so Stack resolves',
       XTypeOf(LE, 'Imp.Stack'), 'Integer');
 
     // ---- generic-ancestor frame survives a unit-name override ----
