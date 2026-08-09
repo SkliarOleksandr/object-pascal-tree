@@ -25,23 +25,18 @@ uses
   PasTree.Preprocessor in '..\source\PasTree.Preprocessor.pas',
   PasTree.Platforms in '..\source\PasTree.Platforms.pas',
   PasTree.Ast in '..\source\PasTree.Ast.pas',
-  PasTree.Parser in '..\source\PasTree.Parser.pas';
+  PasTree.Parser in '..\source\PasTree.Parser.pas',
+  PasTree.TestKit in 'PasTree.TestKit.pas';
 
 var
   GSM: TPasSourceManager;
   GDefines: TPasDefines;
   GPP: TPasPreprocessor;
-  GPassed, GFailed: Integer;
+  GCounter: TPasSuiteCounter;
 
 procedure Ok(const AName: string; ACond: Boolean);
 begin
-  if ACond then
-    Inc(GPassed)
-  else
-  begin
-    Inc(GFailed);
-    Writeln('FAIL: ', AName);
-  end;
+  GCounter.Ok(AName, ACond);
 end;
 
 // Index of the (single) nkInterfaceSec child of the root, or NIL_NODE.
@@ -248,8 +243,7 @@ begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN64']);
   GPP := TPasPreprocessor.Create(GSM, GDefines);
-  GPassed := 0;
-  GFailed := 0;
+  GCounter.Init;
   try
     // ---- Prefix invariant: unit variants ----
     ParseBoth(UNIT_BASIC, LIntf, LFull);
@@ -294,8 +288,6 @@ begin
     GSM.Free;
   end;
 
-  Writeln(Format('=== StagedParseSmoke: %d passed, %d failed ===',
-    [GPassed, GFailed]));
-  if GFailed > 0 then
+  if GCounter.Finish('StagedParseSmoke') then
     ExitCode := 1;
 end.

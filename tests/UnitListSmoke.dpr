@@ -13,20 +13,15 @@ program UnitListSmoke;
 
 uses
   System.SysUtils,
-  PasTreeDemo.UnitList in '..\demo\PasTreeDemo.UnitList.pas';
+  PasTreeDemo.UnitList in '..\demo\PasTreeDemo.UnitList.pas',
+  PasTree.TestKit in 'PasTree.TestKit.pas';
 
 var
-  GPassed, GFailed: Integer;
+  GCounter: TPasSuiteCounter;
 
 procedure Ok(const AName: string; ACond: Boolean);
 begin
-  if ACond then
-    Inc(GPassed)
-  else
-  begin
-    Inc(GFailed);
-    Writeln('FAIL: ', AName);
-  end;
+  GCounter.Ok(AName, ACond);
 end;
 
 // The list's names, joined — one string is a readable failure, six index
@@ -130,9 +125,7 @@ begin
     TestBuild;
     TestFilter;
     Writeln;
-    Writeln(Format('=== UnitListSmoke: %d passed, %d failed ===',
-      [GPassed, GFailed]));
-    if GFailed > 0 then
+    if GCounter.Finish('UnitListSmoke') then
       ExitCode := 1;
   except
     on E: Exception do

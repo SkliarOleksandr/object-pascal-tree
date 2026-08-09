@@ -26,7 +26,8 @@ uses
   PasTree.Sema.Resolver in '..\source\PasTree.Sema.Resolver.pas',
   PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas',
   PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
-  PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas';
+  PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas',
+  PasTree.TestKit in 'PasTree.TestKit.pas';
 
 const
   // Line/col layout matters: the checks below address exact positions.
@@ -370,18 +371,12 @@ const
 var
   GProj: TPasSemaProject;
   GNav: TPasNavigator;
-  GPassed, GFailed: Integer;
+  GCounter: TPasSuiteCounter;
   GMidB: Integer;
 
 procedure Ok(const AName: string; ACond: Boolean);
 begin
-  if ACond then
-    Inc(GPassed)
-  else
-  begin
-    Inc(GFailed);
-    Writeln('FAIL: ', AName);
-  end;
+  GCounter.Ok(AName, ACond);
 end;
 
 function DiagCount(AModel: TPasSemaModel; const ACode: string): Integer;
@@ -457,7 +452,7 @@ var
   LIdent: TPasNavIdent;
   LTarget: TPasNavTarget;
 begin
-  GPassed := 0; GFailed := 0;
+  GCounter.Init;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_nav');
   if TDirectory.Exists(LDir) then
     TDirectory.Delete(LDir, True);
@@ -807,8 +802,6 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
-  Writeln(Format('=== SemaNavSmoke: %d passed, %d failed ===',
-    [GPassed, GFailed]));
-  if GFailed > 0 then
+  if GCounter.Finish('SemaNavSmoke') then
     ExitCode := 1;
 end.

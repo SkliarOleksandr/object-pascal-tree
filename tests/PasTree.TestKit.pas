@@ -60,6 +60,29 @@ type
   TPasCaseRows = array of TPasCaseRow;
   TPasCustomCases = array of TPasCustomCase;
 
+  { Shared pass/fail bookkeeping for the OTHER suites (SemaSmoke,
+    SemaProjectSmoke, ...): a fixture is built ONCE (a source string, a temp
+    project directory) and several `Ok` calls assert different things
+    against that one piece of state, which doesn't decompose into
+    independent (source, expected) rows or zero-arg closures without either
+    re-running the fixture per assertion or renaming every case. Twelve
+    suites carried an IDENTICAL ~10-line `Ok`/counters/summary-footer copy
+    before this existed; this is that copy, written once. A suite keeps its
+    own case bodies and every `Ok('name', cond)` call site UNTOUCHED --
+    only the counter declaration, the `Ok` PROCEDURE BODY, and the closing
+    summary line change to route through this instead. }
+  TPasSuiteCounter = record
+    Passed, Failed: Integer;
+    procedure Init;
+    { AOnFail, given, runs AFTER the FAIL line -- e.g. SemaSmoke's own
+      Ok dumping DumpSemaModel(GModel), context only that suite's state can
+      provide. }
+    procedure Ok(const AName: string; ACond: Boolean; AOnFail: TProc = nil);
+    { Prints '=== <name>: N passed, M failed ===' and returns True when the
+      caller should set ExitCode := 1. }
+    function Finish(const ASuiteName: string): Boolean;
+  end;
+
 { Runs ARow.Source through ParseStatements and compares the whole tree's dump.
   The statement-level counterpart of RunDeclCase; see the unit comment. }
 function RunStmtCase(APP: TPasPreprocessor; const ARow: TPasCaseRow):
@@ -107,6 +130,33 @@ procedure RunSuite(const ASuiteName: string; APP: TPasPreprocessor;
   const ACustom: array of TPasCustomCase; out APassed, AFailed: Integer);
 
 implementation
+
+procedure TPasSuiteCounter.Init;
+begin
+  Passed := 0;
+  Failed := 0;
+end;
+
+procedure TPasSuiteCounter.Ok(const AName: string; ACond: Boolean;
+  AOnFail: TProc);
+begin
+  if ACond then
+  begin
+    Inc(Passed);
+    Exit;
+  end;
+  Inc(Failed);
+  Writeln('FAIL: ', AName);
+  if Assigned(AOnFail) then
+    AOnFail();
+end;
+
+function TPasSuiteCounter.Finish(const ASuiteName: string): Boolean;
+begin
+  Writeln(Format('=== %s: %d passed, %d failed ===',
+    [ASuiteName, Passed, Failed]));
+  Result := Failed > 0;
+end;
 
 function CheckDump(const ASource, AExpected, AActual: string;
   const ADiags: TArray<TPasParseDiag>; AExpectDiags: Integer): TPasCheckResult;

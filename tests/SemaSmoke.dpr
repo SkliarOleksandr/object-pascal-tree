@@ -19,13 +19,14 @@ uses
   PasTree.Sema.Model in '..\source\PasTree.Sema.Model.pas',
   PasTree.Sema.Builtins in '..\source\PasTree.Sema.Builtins.pas',
   PasTree.Sema.Resolver in '..\source\PasTree.Sema.Resolver.pas',
-  PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas';
+  PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas',
+  PasTree.TestKit in 'PasTree.TestKit.pas';
 
 var
   GSM: TPasSourceManager;
   GDefines: TPasDefines;
   GPP: TPasPreprocessor;
-  GPassed, GFailed: Integer;
+  GCounter: TPasSuiteCounter;
   GModel: TPasSemaModel;
   GTree: TPasTree;
 
@@ -177,14 +178,11 @@ end;
 
 procedure Ok(const AName: string; ACond: Boolean);
 begin
-  if ACond then
-    Inc(GPassed)
-  else
-  begin
-    Inc(GFailed);
-    Writeln('FAIL: ', AName);
-    Writeln(DumpSemaModel(GModel));
-  end;
+  GCounter.Ok(AName, ACond,
+    procedure
+    begin
+      Writeln(DumpSemaModel(GModel));
+    end);
 end;
 
 const
@@ -1149,8 +1147,7 @@ begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN32']);
   GPP := TPasPreprocessor.Create(GSM, GDefines);
-  GPassed := 0;
-  GFailed := 0;
+  GCounter.Init;
 
   // 1. record + fields + var; type binding to a user type and a builtin
   Analyze(SRC_RECORD);
@@ -2321,8 +2318,7 @@ begin
     RefResolvesTo('Table', 'Table'));
   GModel.Free;
 
-  Writeln(Format('=== SemaSmoke: %d passed, %d failed ===', [GPassed, GFailed]));
-  if GFailed > 0 then
+  if GCounter.Finish('SemaSmoke') then
     ExitCode := 1;
   GPP.Free;
   GDefines.Free;

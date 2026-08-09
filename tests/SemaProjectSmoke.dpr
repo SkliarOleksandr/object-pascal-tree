@@ -23,11 +23,12 @@ uses
   PasTree.Sema.Builtins in '..\source\PasTree.Sema.Builtins.pas',
   PasTree.Sema.Resolver in '..\source\PasTree.Sema.Resolver.pas',
   PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas',
-  PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas';
+  PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
+  PasTree.TestKit in 'PasTree.TestKit.pas';
 
 var
   GProj: TPasSemaProject;
-  GPassed, GFailed: Integer;
+  GCounter: TPasSuiteCounter;
 
 const
   UNIT_A =
@@ -1903,20 +1904,14 @@ end;
 
 procedure Ok(const AName: string; ACond: Boolean);
 begin
-  if ACond then
-    Inc(GPassed)
-  else
-  begin
-    Inc(GFailed);
-    Writeln('FAIL: ', AName);
-  end;
+  GCounter.Ok(AName, ACond);
 end;
 
 var
   LDir: string;
   LA, LB, LC, LD, LE, LOvl: TPasSemaModel;
 begin
-  GPassed := 0; GFailed := 0;
+  GCounter.Init;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_proj');
   if TDirectory.Exists(LDir) then
     TDirectory.Delete(LDir, True);
@@ -3594,8 +3589,6 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
-  Writeln(Format('=== SemaProjectSmoke: %d passed, %d failed ===',
-    [GPassed, GFailed]));
-  if GFailed > 0 then
+  if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
 end.

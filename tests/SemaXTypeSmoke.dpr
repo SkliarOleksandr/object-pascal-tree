@@ -23,11 +23,12 @@ uses
   PasTree.Sema.Builtins in '..\source\PasTree.Sema.Builtins.pas',
   PasTree.Sema.Resolver in '..\source\PasTree.Sema.Resolver.pas',
   PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas',
-  PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas';
+  PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
+  PasTree.TestKit in 'PasTree.TestKit.pas';
 
 var
   GProj: TPasSemaProject;
-  GPassed, GFailed: Integer;
+  GCounter: TPasSuiteCounter;
 
 const
   UNIT_XA =
@@ -978,31 +979,23 @@ end;
 
 procedure Ok(const AName: string; ACond: Boolean);
 begin
-  if ACond then
-    Inc(GPassed)
-  else
-  begin
-    Inc(GFailed);
-    Writeln('FAIL: ', AName);
-  end;
+  GCounter.Ok(AName, ACond);
 end;
 
 procedure Eq(const AName, AGot, AWant: string);
 begin
-  if AGot = AWant then
-    Inc(GPassed)
-  else
-  begin
-    Inc(GFailed);
-    Writeln('FAIL: ', AName, ' — got "', AGot, '", want "', AWant, '"');
-  end;
+  GCounter.Ok(AName, AGot = AWant,
+    procedure
+    begin
+      Writeln('  got "', AGot, '", want "', AWant, '"');
+    end);
 end;
 
 var
   LDir: string;
   LU, LV, LH, LW, LQ, LR, LB, LC, LE, LG: TPasSemaModel;
 begin
-  GPassed := 0; GFailed := 0;
+  GCounter.Init;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype');
   if TDirectory.Exists(LDir) then
     TDirectory.Delete(LDir, True);
@@ -1321,8 +1314,6 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
-  Writeln(Format('=== SemaXTypeSmoke: %d passed, %d failed ===',
-    [GPassed, GFailed]));
-  if GFailed > 0 then
+  if GCounter.Finish('SemaXTypeSmoke') then
     ExitCode := 1;
 end.

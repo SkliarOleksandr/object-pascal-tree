@@ -38,20 +38,15 @@ uses
   PasTree.Sema.Resolver in '..\source\PasTree.Sema.Resolver.pas',
   PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas',
   PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
-  PasTree.Sema.Async in '..\source\PasTree.Sema.Async.pas';
+  PasTree.Sema.Async in '..\source\PasTree.Sema.Async.pas',
+  PasTree.TestKit in 'PasTree.TestKit.pas';
 
 var
-  GPassed, GFailed: Integer;
+  GCounter: TPasSuiteCounter;
 
 procedure Ok(const AName: string; ACond: Boolean);
 begin
-  if ACond then
-    Inc(GPassed)
-  else
-  begin
-    Inc(GFailed);
-    Writeln('FAIL: ', AName);
-  end;
+  GCounter.Ok(AName, ACond);
 end;
 
 // Order-independent canonical summary of a project's final state: every unit
@@ -176,8 +171,7 @@ var
   LMid: Integer;
 begin
   ReportMemoryLeaksOnShutdown := True;
-  GPassed := 0;
-  GFailed := 0;
+  GCounter.Init;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_async');
   if TDirectory.Exists(LDir) then
     TDirectory.Delete(LDir, True);
@@ -361,8 +355,6 @@ begin
   if TDirectory.Exists(LDir) then
     TDirectory.Delete(LDir, True);
 
-  Writeln(Format('=== AsyncSmoke: %d passed, %d failed ===',
-    [GPassed, GFailed]));
-  if GFailed > 0 then
+  if GCounter.Finish('AsyncSmoke') then
     ExitCode := 1;
 end.

@@ -11,20 +11,15 @@ uses
   System.SysUtils,
   System.IOUtils,
   PasTree.Platforms in '..\source\PasTree.Platforms.pas',
-  PasTree.DProj in '..\source\PasTree.DProj.pas';
+  PasTree.DProj in '..\source\PasTree.DProj.pas',
+  PasTree.TestKit in 'PasTree.TestKit.pas';
 
 var
-  GPassed, GFailed: Integer;
+  GCounter: TPasSuiteCounter;
 
 procedure Ok(const AName: string; ACond: Boolean);
 begin
-  if ACond then
-    Inc(GPassed)
-  else
-  begin
-    Inc(GFailed);
-    Writeln('FAIL: ', AName);
-  end;
+  GCounter.Ok(AName, ACond);
 end;
 
 function Contains(const AArr: TArray<string>; const AItem: string): Boolean;
@@ -109,7 +104,7 @@ var
   LDir, LPath: string;
   LDProj: TPasDProj;
 begin
-  GPassed := 0; GFailed := 0;
+  GCounter.Init;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_dproj_smoke');
   if TDirectory.Exists(LDir) then
     TDirectory.Delete(LDir, True);
@@ -202,7 +197,6 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
-  Writeln(Format('=== DProjSmoke: %d passed, %d failed ===', [GPassed, GFailed]));
-  if GFailed > 0 then
+  if GCounter.Finish('DProjSmoke') then
     ExitCode := 1;
 end.

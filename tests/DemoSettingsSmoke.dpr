@@ -15,10 +15,11 @@ uses
   System.SysUtils,
   System.IOUtils,
   PasTreeDemo.Settings in '..\demo\PasTreeDemo.Settings.pas',
-  PasTreeDemo.Includes in '..\demo\PasTreeDemo.Includes.pas';
+  PasTreeDemo.Includes in '..\demo\PasTreeDemo.Includes.pas',
+  PasTree.TestKit in 'PasTree.TestKit.pas';
 
 var
-  GPassed, GFailed: Integer;
+  GCounter: TPasSuiteCounter;
   GDir: string;
 
 procedure Ok(const AName: string; ACond: Boolean); forward;
@@ -48,13 +49,7 @@ end;
 
 procedure Ok(const AName: string; ACond: Boolean);
 begin
-  if ACond then
-    Inc(GPassed)
-  else
-  begin
-    Inc(GFailed);
-    Writeln('FAIL: ', AName);
-  end;
+  GCounter.Ok(AName, ACond);
 end;
 
 // A real file on disk, so AddRecent's existence-insensitivity and
@@ -82,7 +77,7 @@ var
   LIni, LA, LB, LC, LGone: string;
   LIdx: Integer;
 begin
-  GPassed := 0; GFailed := 0;
+  GCounter.Init;
   GDir := TPath.Combine(TPath.GetTempPath, 'PasTreeDemoSettings');
   TDirectory.CreateDirectory(GDir);
   LIni := TPath.Combine(GDir, 'demo.ini');
@@ -191,8 +186,6 @@ begin
     'b.inc');
   CheckSpan('...and the first', '{$I a.inc}{$I b.inc}', 6, 'a.inc');
 
-  Writeln(Format('=== DemoSettingsSmoke: %d passed, %d failed ===',
-    [GPassed, GFailed]));
-  if GFailed > 0 then
+  if GCounter.Finish('DemoSettingsSmoke') then
     ExitCode := 1;
 end.

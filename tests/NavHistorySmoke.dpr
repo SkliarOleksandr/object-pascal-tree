@@ -12,21 +12,16 @@ program NavHistorySmoke;
 
 uses
   System.SysUtils,
-  PasTreeDemo.NavHistory in '..\demo\PasTreeDemo.NavHistory.pas';
+  PasTreeDemo.NavHistory in '..\demo\PasTreeDemo.NavHistory.pas',
+  PasTree.TestKit in 'PasTree.TestKit.pas';
 
 var
-  GPassed, GFailed: Integer;
+  GCounter: TPasSuiteCounter;
   GHist: TNavHistory;
 
 procedure Ok(const AName: string; ACond: Boolean);
 begin
-  if ACond then
-    Inc(GPassed)
-  else
-  begin
-    Inc(GFailed);
-    Writeln('FAIL: ', AName);
-  end;
+  GCounter.Ok(AName, ACond);
 end;
 
 function E(const APath: string; ALine: Integer; ACol: Integer = 1):
@@ -66,7 +61,7 @@ begin
 end;
 
 begin
-  GPassed := 0; GFailed := 0;
+  GCounter.Init;
   GHist := TNavHistory.Create;
   try
     // ---- empty ----
@@ -162,8 +157,6 @@ begin
     GHist.Free;
   end;
 
-  Writeln(Format('=== NavHistorySmoke: %d passed, %d failed ===',
-    [GPassed, GFailed]));
-  if GFailed > 0 then
+  if GCounter.Finish('NavHistorySmoke') then
     ExitCode := 1;
 end.

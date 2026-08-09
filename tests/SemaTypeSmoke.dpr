@@ -17,13 +17,14 @@ uses
   PasTree.Sema.Model in '..\source\PasTree.Sema.Model.pas',
   PasTree.Sema.Builtins in '..\source\PasTree.Sema.Builtins.pas',
   PasTree.Sema.Types in '..\source\PasTree.Sema.Types.pas',
-  PasTree.Sema.Resolver in '..\source\PasTree.Sema.Resolver.pas';
+  PasTree.Sema.Resolver in '..\source\PasTree.Sema.Resolver.pas',
+  PasTree.TestKit in 'PasTree.TestKit.pas';
 
 var
   GSM: TPasSourceManager;
   GDefines: TPasDefines;
   GPP: TPasPreprocessor;
-  GPassed, GFailed: Integer;
+  GCounter: TPasSuiteCounter;
   GModel: TPasSemaModel;
   GTree: TPasTree;
 
@@ -79,13 +80,7 @@ end;
 
 procedure Ok(const AName: string; ACond: Boolean);
 begin
-  if ACond then
-    Inc(GPassed)
-  else
-  begin
-    Inc(GFailed);
-    Writeln('FAIL: ', AName);
-  end;
+  GCounter.Ok(AName, ACond);
 end;
 
 const
@@ -113,7 +108,7 @@ begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN32']);
   GPP := TPasPreprocessor.Create(GSM, GDefines);
-  GPassed := 0; GFailed := 0;
+  GCounter.Init;
 
   Analyze(SRC);
 
@@ -125,9 +120,7 @@ begin
   Ok('member R.X typed Integer', SameText(MemberType('X'), 'Integer'));
   GModel.Free;
 
-  Writeln(Format('=== SemaTypeSmoke: %d passed, %d failed ===',
-    [GPassed, GFailed]));
-  if GFailed > 0 then
+  if GCounter.Finish('SemaTypeSmoke') then
     ExitCode := 1;
   GPP.Free;
   GDefines.Free;
