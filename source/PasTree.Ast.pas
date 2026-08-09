@@ -308,6 +308,14 @@ begin
       end;
     nkConstSec, nkDirective, nkPropSpec:
       Result := Result + '''' + LowerCase(NodeText(AIndex)) + '''';
+    // 16.4.1: a `class`/`record`/`constructor` constraint is a bare
+    // keyword with no child of its own (ParseGenericParamsOpt just
+    // Nexts past it); a SPECIFIC-type constraint (`T: IInterface`) adopts
+    // the type ref as a child instead, so printing the head word there
+    // too would just repeat the child's own Ident text.
+    nkConstraint:
+      if Nodes[AIndex].FirstChild = NIL_NODE then
+        Result := Result + '''' + LowerCase(NodeText(AIndex)) + '''';
     // Nodes whose distinction is a flag in Aux (see the kind comments): a
     // marker reads better in an expected string than a number would.
     nkTypeDecl:

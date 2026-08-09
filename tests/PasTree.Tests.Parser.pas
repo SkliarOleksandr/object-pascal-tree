@@ -29,7 +29,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..50] of TPasCaseRow = (
+  STMT_CASES: array[0..55] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -289,10 +289,49 @@ const
        'Assign(Ident''operator'' IntLit''11'') ' +
        'Assign(Ident''out'' IntLit''12'') ' +
        'Assign(Ident''default'' IntLit''13'') ' +
-       'Assign(Ident''stored'' IntLit''14''))'; ExpectDiags: 0)
+       'Assign(Ident''stored'' IntLit''14''))'; ExpectDiags: 0),
+
+    // ---- 5.6.3 Exit / Exit(value): bare Exit already appears incidentally
+    // elsewhere, but never Exit(value), and never as its own named case ----
+    (Section: '5.6.3'; Name: 'bare Exit';
+     Source: 'Exit;';
+     Expected: 'Block(ExprStmt(Ident''Exit''))'; ExpectDiags: 0),
+    (Section: '5.6.3'; Name: 'Exit with a value';
+     Source: 'Exit(42);';
+     Expected: 'Block(ExprStmt(Call(Ident''Exit'' IntLit''42'')))';
+     ExpectDiags: 0),
+
+    // ---- 8.2.2 dynamic array concatenation & literal (bracket) init --
+    // the literal is the same SetCtor node a set constructor uses (B.9);
+    // which one it MEANS is a typing question, not a parse-shape one ----
+    (Section: '8.2.2'; Name: 'array literal init and concatenation';
+     Source: 'A := [1, 2, 3]; B := A + C;';
+     Expected: 'Block(Assign(Ident''A'' SetCtor(IntLit''1'' IntLit''2'' ' +
+       'IntLit''3'')) Assign(Ident''B'' BinaryOp''+''(Ident''A'' ' +
+       'Ident''C'')))'; ExpectDiags: 0),
+
+    // ---- 8.2.3 the dynamic-array pseudo-constructor T.Create(...) --
+    // ordinary call syntax; nothing marks it as a pseudo-constructor at
+    // parse time, that is a sema/typing question ----
+    (Section: '8.2.3'; Name: 'TBytes.Create pseudo-constructor';
+     Source: 'B := TBytes.Create(1, 2, 3);';
+     Expected: 'Block(Assign(Ident''B'' Call(Member(Ident''TBytes'' ' +
+       'Ident''Create'') IntLit''1'' IntLit''2'' IntLit''3'')))';
+     ExpectDiags: 0),
+
+    // ---- B.7 relational punctuation tokens, each of which had only ever
+    // appeared in isolation before -- `..` itself is already pinned at
+    // 2.2.5 (subrange) and B.9 (set constructor); Delphi has no array-
+    // SLICE syntax, so `K[L..M]` is not a shape to add here ----
+    (Section: 'B.7'; Name: 'relational punctuation';
+     Source: 'A := B <= C; D := E >= F; G := H <> I;';
+     Expected: 'Block(Assign(Ident''A'' BinaryOp''<=''(Ident''B'' ' +
+       'Ident''C'')) Assign(Ident''D'' BinaryOp''>=''(Ident''E'' ' +
+       'Ident''F'')) Assign(Ident''G'' BinaryOp''<>''(Ident''H'' ' +
+       'Ident''I'')))'; ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..32] of TPasCaseRow = (
+  DECL_CASES: array[0..76] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -514,7 +553,312 @@ const
      Source: 'type'#13#10'  [MyAttr(1, ''s'')] TFoo = class end;';
      Expected: 'TypeSec(TypeDecl(AttrGroup(Attribute(Ident''MyAttr'' ' +
        'IntLit''1'' StrLit''''s'''')) Ident''TFoo'' ClassType))';
-     ExpectDiags: 0)
+     ExpectDiags: 0),
+
+    // ==== test-coverage plan step 3 batch 3 ====================
+
+    // ---- 1.2.1 / 1.2.2 the uses clause, plain and dotted (namespaced) ----
+    (Section: '1.2.1'; Name: 'uses clause';
+     Source: 'uses SysUtils, Classes;';
+     Expected: 'UsesClause(UsesItem(Ident''SysUtils'') ' +
+       'UsesItem(Ident''Classes''))'; ExpectDiags: 0),
+    (Section: '1.2.2'; Name: 'dotted unit name';
+     Source: 'uses System.SysUtils;';
+     Expected: 'UsesClause(UsesItem(Member(Ident''System'' ' +
+       'Ident''SysUtils'')))'; ExpectDiags: 0),
+
+    // ---- 2.2.4 enumerated types, plain and with explicit ordinal values ----
+    (Section: '2.2.4'; Name: 'enum type';
+     Source: 'type TColor = (Red, Green, Blue);';
+     Expected: 'TypeSec(TypeDecl(Ident''TColor'' EnumType(' +
+       'EnumValue(Ident''Red'') EnumValue(Ident''Green'') ' +
+       'EnumValue(Ident''Blue''))))'; ExpectDiags: 0),
+    (Section: '2.2.4'; Name: 'enum with explicit values';
+     Source: 'type TE = (A, B = 5, C);';
+     Expected: 'TypeSec(TypeDecl(Ident''TE'' EnumType(EnumValue(' +
+       'Ident''A'') EnumValue(Ident''B'' IntLit''5'') ' +
+       'EnumValue(Ident''C''))))'; ExpectDiags: 0),
+
+    // ---- 2.2.5 subrange types ----
+    (Section: '2.2.5'; Name: 'subrange type';
+     Source: 'type TDigit = 0..9;';
+     Expected: 'TypeSec(TypeDecl(Ident''TDigit'' Subrange(IntLit''0'' ' +
+       'IntLit''9'')))'; ExpectDiags: 0),
+
+    // ---- 2.4.1 set of ordinal ----
+    (Section: '2.4.1'; Name: 'set of a builtin ordinal type';
+     Source: 'type TFlags = set of Byte;';
+     Expected: 'TypeSec(TypeDecl(Ident''TFlags'' SetType(Ident''Byte'')))';
+     ExpectDiags: 0),
+
+    // ---- 6.1.2 forward declarations ----
+    (Section: '6.1.2'; Name: 'forward declaration';
+     Source: 'procedure P; forward;';
+     Expected: 'Routine''procedure''(Ident''P'' Directive''forward'')';
+     ExpectDiags: 0),
+
+    // ---- 6.2.1-6.2.4 every parameter passing mode in one signature ----
+    (Section: '6.2.1'; Name: 'value, var, const, out parameters';
+     Source: 'procedure P(A: Integer; var B: Integer; const C: Integer; ' +
+       'out D: Integer);';
+     Expected: 'Routine''procedure''(Ident''P'' Params(Param(Ident''A'' ' +
+       'Ident''Integer'') Param(Ident''B'' Ident''Integer'') ' +
+       'Param(Ident''C'' Ident''Integer'') Param#out(Ident''D'' ' +
+       'Ident''Integer'')))'; ExpectDiags: 0),
+
+    // ---- 6.2.5 default (optional) parameters ----
+    (Section: '6.2.5'; Name: 'default parameter value';
+     Source: 'procedure P(A: Integer = 5);';
+     Expected: 'Routine''procedure''(Ident''P'' Params(Param(Ident''A'' ' +
+       'Ident''Integer'' IntLit''5'')))'; ExpectDiags: 0),
+
+    // ---- 6.2.6 open array and array-of-const parameters ----
+    (Section: '6.2.6'; Name: 'open array and array of const parameters';
+     Source: 'procedure P(const A: array of Integer; const B: array of const);';
+     Expected: 'Routine''procedure''(Ident''P'' Params(Param(Ident''A'' ' +
+       'ArrayType(Ident''Integer'')) Param(Ident''B'' ArrayType#ofconst)))';
+     ExpectDiags: 0),
+
+    // ---- 6.3.1 / 6.4.1 / 6.5.1 / 6.8 routine directives never exercised on
+    // a plain (non-external, non-message) routine before ----
+    (Section: '6.3.1'; Name: 'overload directive';
+     Source: 'procedure P(A: Integer); overload;';
+     Expected: 'Routine''procedure''(Ident''P'' Params(Param(Ident''A'' ' +
+       'Ident''Integer'')) Directive''overload'')'; ExpectDiags: 0),
+    (Section: '6.4.1'; Name: 'inline directive';
+     Source: 'procedure P; inline;';
+     Expected: 'Routine''procedure''(Ident''P'' Directive''inline'')';
+     ExpectDiags: 0),
+    (Section: '6.5.1'; Name: 'calling convention directives';
+     Source: 'procedure P; stdcall;'#13#10'procedure Q; cdecl;';
+     Expected: 'Routine''procedure''(Ident''P'' Directive''stdcall'') ' +
+       'Routine''procedure''(Ident''Q'' Directive''cdecl'')';
+     ExpectDiags: 0),
+    (Section: '6.8'; Name: 'noreturn directive';
+     Source: 'procedure P; noreturn;';
+     Expected: 'Routine''procedure''(Ident''P'' Directive''noreturn'')';
+     ExpectDiags: 0),
+
+    // ---- 7.1.6 PChar and pointer-to-char types ----
+    (Section: '7.1.6'; Name: 'PChar alias';
+     Source: 'type TP = PChar;';
+     Expected: 'TypeSec(TypeDecl(Ident''TP'' Ident''PChar''))';
+     ExpectDiags: 0),
+
+    // ---- 8.1.1 / 8.1.2 static arrays, single and multi-dimensional ----
+    (Section: '8.1.1'; Name: 'single-dimension static array';
+     Source: 'type TArr = array[0..9] of Integer;';
+     Expected: 'TypeSec(TypeDecl(Ident''TArr'' ArrayType(Subrange(' +
+       'IntLit''0'' IntLit''9'') Ident''Integer'')))'; ExpectDiags: 0),
+    (Section: '8.1.2'; Name: 'multidimensional static array';
+     Source: 'type TGrid = array[0..1, 0..1] of Integer;';
+     Expected: 'TypeSec(TypeDecl(Ident''TGrid'' ArrayType(Subrange(' +
+       'IntLit''0'' IntLit''1'') Subrange(IntLit''0'' IntLit''1'') ' +
+       'Ident''Integer'')))'; ExpectDiags: 0),
+
+    // ---- 8.2.1 dynamic array types ----
+    (Section: '8.2.1'; Name: 'dynamic array type';
+     Source: 'type TArr = array of Integer;';
+     Expected: 'TypeSec(TypeDecl(Ident''TArr'' ArrayType(Ident''Integer'')))';
+     ExpectDiags: 0),
+
+    // ---- 9.1.2 packed records ----
+    (Section: '9.1.2'; Name: 'packed record';
+     Source: 'type TR = packed record X: Byte; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(VarDecl(' +
+       'Ident''X'' Ident''Byte''))))'; ExpectDiags: 0),
+
+    // ---- 9.1.3 variant records (the `case` part) ----
+    (Section: '9.1.3'; Name: 'variant record';
+     Source: 'type'#13#10'  TR = record'#13#10 +
+       '    case Integer of'#13#10 +
+       '      0: (X: Integer);'#13#10 +
+       '      1: (Y: Single);'#13#10 +
+       '  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(VariantPart(' +
+       'Ident''Integer'' VariantBranch(IntLit''0'' VarDecl(Ident''X'' ' +
+       'Ident''Integer'')) VariantBranch(IntLit''1'' VarDecl(Ident''Y'' ' +
+       'Ident''Single''))))))'; ExpectDiags: 0),
+
+    // ---- 9.3.1 class operator declarations ----
+    (Section: '9.3.1'; Name: 'class operator';
+     Source: 'type TVec = record'#13#10 +
+       '    class operator Add(A, B: TVec): TVec;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TVec'' RecordType(' +
+       'Routine''operator''#class(Ident''Add'' Params(Param(Ident''A'' ' +
+       'Ident''B'' Ident''TVec'')) Ident''TVec''))))'; ExpectDiags: 0),
+
+    // ---- 10.1.1 / 10.1.2 typed and untyped pointers ----
+    (Section: '10.1.1'; Name: 'typed pointer';
+     Source: 'type PInt = ^Integer;';
+     Expected: 'TypeSec(TypeDecl(Ident''PInt'' PointerType(' +
+       'Ident''Integer'')))'; ExpectDiags: 0),
+    (Section: '10.1.2'; Name: 'untyped Pointer variable';
+     Source: 'var P: Pointer;';
+     Expected: 'VarSec''var''(VarDecl(Ident''P'' Ident''Pointer''))';
+     ExpectDiags: 0),
+
+    // ---- 10.2.1 typed, text, and untyped files ----
+    (Section: '10.2.1'; Name: 'typed, text and untyped file types';
+     Source: 'type'#13#10'  TTypedFile = file of Integer;'#13#10 +
+       '  TUntypedFile = file;'#13#10'  TTextFile = TextFile;';
+     Expected: 'TypeSec(TypeDecl(Ident''TTypedFile'' FileType(' +
+       'Ident''Integer'')) TypeDecl(Ident''TUntypedFile'' FileType) ' +
+       'TypeDecl(Ident''TTextFile'' Ident''TextFile''))'; ExpectDiags: 0),
+
+    // ---- 11.3.1 / 11.3.2 class constructors and destructors (9.2.2 already
+    // pins a RECORD constructor; a class needs its own case since the
+    // ancestor and `override` shape differ) ----
+    (Section: '11.3.1'; Name: 'class constructor declaration';
+     Source: 'type TC = class(TObject)'#13#10 +
+       '    constructor Create(A: Integer);'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(Ident''TObject'' ' +
+       'Routine''constructor''(Ident''Create'' Params(Param(Ident''A'' ' +
+       'Ident''Integer''))))))'; ExpectDiags: 0),
+    (Section: '11.3.2'; Name: 'class destructor declaration';
+     Source: 'type TC = class(TObject)'#13#10 +
+       '    destructor Destroy; override;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(Ident''TObject'' ' +
+       'Routine''destructor''(Ident''Destroy'' Directive''override''))))';
+     ExpectDiags: 0),
+
+    // ---- 11.4.1 nested type and const declarations inside a class ----
+    (Section: '11.4.1'; Name: 'nested type and const';
+     Source: 'type'#13#10'  TOuter = class'#13#10 +
+       '  type'#13#10'    TInner = record end;'#13#10 +
+       '  const'#13#10'    KMax = 10;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TOuter'' ClassType(TypeSec(' +
+       'TypeDecl(Ident''TInner'' RecordType)) ConstSec''const''(' +
+       'ConstDecl(Ident''KMax'' IntLit''10'')))))'; ExpectDiags: 0),
+
+    // ---- 11.5 legacy object types ----
+    (Section: '11.5'; Name: 'legacy object type';
+     Source: 'type TObj = object'#13#10'    X: Integer;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TObj'' ObjectType(VarDecl(' +
+       'Ident''X'' Ident''Integer''))))'; ExpectDiags: 0),
+
+    // ---- 12.2.1 / 12.2.2 / 12.2.4 / 12.2.5 method-binding directives ----
+    (Section: '12.2.1'; Name: 'virtual and override';
+     Source: 'type'#13#10'  TBase = class'#13#10 +
+       '    procedure P; virtual;'#13#10'  end;'#13#10 +
+       '  TSub = class(TBase)'#13#10 +
+       '    procedure P; override;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TBase'' ClassType(' +
+       'Routine''procedure''(Ident''P'' Directive''virtual''))) ' +
+       'TypeDecl(Ident''TSub'' ClassType(Ident''TBase'' ' +
+       'Routine''procedure''(Ident''P'' Directive''override''))))';
+     ExpectDiags: 0),
+    (Section: '12.2.2'; Name: 'dynamic directive';
+     Source: 'type TC = class'#13#10'    procedure P; dynamic;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(' +
+       'Routine''procedure''(Ident''P'' Directive''dynamic''))))';
+     ExpectDiags: 0),
+    (Section: '12.2.4'; Name: 'abstract method';
+     Source: 'type TC = class'#13#10 +
+       '    procedure P; virtual; abstract;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(' +
+       'Routine''procedure''(Ident''P'' Directive''virtual'' ' +
+       'Directive''abstract''))))'; ExpectDiags: 0),
+    (Section: '12.2.5'; Name: 'sealed class and final method';
+     Source: 'type TC = class sealed'#13#10 +
+       '    procedure P; virtual; final;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(' +
+       'Routine''procedure''(Ident''P'' Directive''virtual'' ' +
+       'Directive''final''))))'; ExpectDiags: 0),
+
+    // ---- 12.3.1 message methods ----
+    (Section: '12.3.1'; Name: 'message method';
+     Source: 'type TC = class'#13#10 +
+       '    procedure WMPaint(var Msg: TMessage); message WM_PAINT;'#13#10 +
+       '  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(' +
+       'Routine''procedure''(Ident''WMPaint'' Params(Param(Ident''Msg'' ' +
+       'Ident''TMessage'')) Directive''message''(Ident''WM_PAINT'')))))';
+     ExpectDiags: 0),
+
+    // ---- 13.1.2 / 13.1.3 / 13.1.4 / 13.1.5 / 13.3.1 property shapes ----
+    (Section: '13.1.2'; Name: 'array property';
+     Source: 'type TC = class'#13#10 +
+       '    property Items[Idx: Integer]: string read GetItem write SetItem;'#13#10 +
+       '  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(PropertyDecl(' +
+       'Ident''Items'' Params(Param(Ident''Idx'' Ident''Integer'')) ' +
+       'Ident''string'' PropSpec''read''(Ident''GetItem'') ' +
+       'PropSpec''write''(Ident''SetItem'')))))'; ExpectDiags: 0),
+    (Section: '13.1.3'; Name: 'indexed property (index directive)';
+     Source: 'type TC = class'#13#10 +
+       '    property Value: Integer index 1 read GetValue write SetValue;'#13#10 +
+       '  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(PropertyDecl(' +
+       'Ident''Value'' Ident''Integer'' PropSpec''index''(IntLit''1'') ' +
+       'PropSpec''read''(Ident''GetValue'') PropSpec''write''(' +
+       'Ident''SetValue'')))))'; ExpectDiags: 0),
+    (Section: '13.1.4'; Name: 'default array property';
+     Source: 'type TC = class'#13#10 +
+       '    property Items[I: Integer]: string read GetItem; default;'#13#10 +
+       '  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(PropertyDecl(' +
+       'Ident''Items'' Params(Param(Ident''I'' Ident''Integer'')) ' +
+       'Ident''string'' PropSpec''read''(Ident''GetItem'') ' +
+       'PropSpec''default''))))'; ExpectDiags: 0),
+    (Section: '13.1.5'; Name: 'default, nodefault and stored specifiers';
+     Source: 'type TC = class'#13#10 +
+       '    property X: Integer read FX write FX default 0;'#13#10 +
+       '    property Y: Integer read FY write FY stored False;'#13#10 +
+       '  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(PropertyDecl(' +
+       'Ident''X'' Ident''Integer'' PropSpec''read''(Ident''FX'') ' +
+       'PropSpec''write''(Ident''FX'') PropSpec''default''(IntLit''0'')) ' +
+       'PropertyDecl(Ident''Y'' Ident''Integer'' PropSpec''read''(' +
+       'Ident''FY'') PropSpec''write''(Ident''FY'') PropSpec''stored''(' +
+       'Ident''False'')))))'; ExpectDiags: 0),
+    (Section: '13.3.1'; Name: 'event (method-pointer) property';
+     Source: 'type TC = class'#13#10 +
+       '    property OnClick: TNotifyEvent read FOnClick write FOnClick;'#13#10 +
+       '  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(PropertyDecl(' +
+       'Ident''OnClick'' Ident''TNotifyEvent'' PropSpec''read''(' +
+       'Ident''FOnClick'') PropSpec''write''(Ident''FOnClick'')))))';
+     ExpectDiags: 0),
+
+    // ---- 15.1.4 / 15.1.5 / 15.2.1 class mechanics not yet exercised ----
+    (Section: '15.1.4'; Name: 'static class method';
+     Source: 'type TC = class'#13#10 +
+       '    class procedure P; static;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(' +
+       'Routine''procedure''#class(Ident''P'' Directive''static''))))';
+     ExpectDiags: 0),
+    (Section: '15.1.5'; Name: 'class constructor and destructor';
+     Source: 'type TC = class'#13#10 +
+       '    class constructor Create;'#13#10 +
+       '    class destructor Destroy;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(' +
+       'Routine''constructor''#class(Ident''Create'') ' +
+       'Routine''destructor''#class(Ident''Destroy''))))'; ExpectDiags: 0),
+    (Section: '15.2.1'; Name: 'class of type';
+     Source: 'type TClassRef = class of TObject;';
+     Expected: 'TypeSec(TypeDecl(Ident''TClassRef'' ClassOf(' +
+       'Ident''TObject'')))'; ExpectDiags: 0),
+
+    // ---- 16.1.1 / 16.4.1 generics never pinned at the DECLARATION level
+    // (16.3 already covers a generic reference in an EXPRESSION) ----
+    (Section: '16.1.1'; Name: 'generic class declaration';
+     Source: 'type TBox<T> = class'#13#10'    FValue: T;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TBox'' GenericParams(' +
+       'GenericParam(Ident''T'')) ClassType(VarDecl(Ident''FValue'' ' +
+       'Ident''T''))))'; ExpectDiags: 0),
+    (Section: '16.4.1'; Name: 'generic type-parameter constraints';
+     Source: 'type TBox<T: class, constructor> = class end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TBox'' GenericParams(' +
+       'GenericParam(Ident''T'' Constraint''class'' ' +
+       'Constraint''constructor'')) ClassType))'; ExpectDiags: 0),
+    // ...and a SPECIFIC-type constraint keeps its child instead of a head
+    // word (the constraint IS the type ref, not a fixed keyword).
+    (Section: '16.4.1'; Name: 'a specific-type constraint keeps its child';
+     Source: 'type TBox<T: IInterface> = class end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TBox'' GenericParams(' +
+       'GenericParam(Ident''T'' Constraint(Ident''IInterface''))) ' +
+       'ClassType))'; ExpectDiags: 0)
   );
 
 { Builds every case that is not a plain dump comparison: the platform matrix
