@@ -21,7 +21,8 @@ uses
   PasTree.Ast in '..\source\PasTree.Ast.pas',
   PasTree.Parser in '..\source\PasTree.Parser.pas',
   PasTree.TestKit in 'PasTree.TestKit.pas',
-  PasTree.Tests.Parser in 'PasTree.Tests.Parser.pas';
+  PasTree.Tests.Parser in 'PasTree.Tests.Parser.pas',
+  PasTree.Tests.Roundtrip in 'PasTree.Tests.Roundtrip.pas';
 
 var
   GSM: TPasSourceManager;
@@ -34,7 +35,7 @@ begin
   GPP := TPasPreprocessor.Create(GSM, GDefines);
   try
     RunSuite('ParserSmoke', GPP, STMT_CASES, DECL_CASES,
-      BuildCustomCases(GPP, GSM), GPassed, GFailed);
+      BuildCustomCases(GPP, GSM) + BuildRoundtripCases, GPassed, GFailed);
     if GFailed > 0 then
       ExitCode := 1;
   finally

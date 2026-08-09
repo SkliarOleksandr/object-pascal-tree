@@ -21,7 +21,9 @@ interface
 
 uses
   System.SysUtils,
+  System.Math,
   PasTree.Types,
+  PasTree.Lexer,
   PasTree.Ast,
   PasTree.Preprocessor,
   PasTree.Parser;
@@ -79,6 +81,24 @@ function RunDeclCase(APP: TPasPreprocessor; const ARow: TPasCaseRow):
 function CheckDump(const ASource, AExpected, AActual: string;
   const ADiags: TArray<TPasParseDiag>; AExpectDiags: Integer): TPasCheckResult;
 
+{ Definition-of-done item 2: the lexer is FULL-FIDELITY -- every character of
+  ASource comes out as part of exactly one token (trivia included), so
+  concatenating every token's text reproduces ASource byte-for-byte, even for
+  malformed input (an unterminated string, an invalid character) that also
+  raises a diagnostic. This tokenizes ASource itself and concatenates the
+  TEXT, rather than trusting Start/Len bookkeeping never to lie, so a bug
+  that still tiled the offsets right but sliced the wrong text would still
+  be caught. AFirstMismatch is the 0-based offset of the first differing
+  character, -1 when it holds. }
+function RoundtripHolds(const ASource: string; out AFirstMismatch: Integer):
+  Boolean;
+
+{ Wraps RoundtripHolds as a TPasCustomCase, formatting a failure with the
+  offset and a short window of context around it -- the direct counterpart of
+  CheckDump for the one property that is not a dump comparison at all. }
+function RoundtripCase(const ASection, AName, ASource: string):
+  TPasCustomCase;
+
 { Runs every row/case, printing PASS/FAIL to stdout exactly like the suites
   did before this unit existed, and prints the '=== <name>: N passed, M
   failed ===' footer. This is the whole body of a thin .dpr host now. }
@@ -112,6 +132,61 @@ begin
         ADiags[LIdx].Msg + sLineBreak;
   end;
   Result.Message := LMsg;
+end;
+
+function RoundtripHolds(const ASource: string; out AFirstMismatch: Integer):
+  Boolean;
+var
+  LStream: TPasTokenStream;
+  LSB: TStringBuilder;
+  LIdx: Integer;
+  LBuilt: string;
+begin
+  LStream := TPasLexer.Tokenize(ASource);
+  LSB := TStringBuilder.Create(Length(ASource));
+  try
+    for LIdx := 0 to High(LStream.Tokens) do
+      LSB.Append(LStream.TokenText(LIdx));
+    LBuilt := LSB.ToString;
+  finally
+    LSB.Free;
+  end;
+  Result := LBuilt = ASource;
+  if Result then
+  begin
+    AFirstMismatch := -1;
+    Exit;
+  end;
+  AFirstMismatch := 0;
+  while (AFirstMismatch < Length(ASource)) and
+        (AFirstMismatch < Length(LBuilt)) and
+        (ASource[AFirstMismatch + 1] = LBuilt[AFirstMismatch + 1]) do
+    Inc(AFirstMismatch);
+end;
+
+function RoundtripCase(const ASection, AName, ASource: string):
+  TPasCustomCase;
+begin
+  Result.Section := ASection;
+  Result.Name := AName;
+  Result.Run :=
+    function: TPasCheckResult
+    var
+      LAt, LFrom, LTo: Integer;
+    begin
+      Result.Passed := RoundtripHolds(ASource, LAt);
+      if Result.Passed then
+      begin
+        Result.Message := '';
+        Exit;
+      end;
+      LFrom := Max(0, LAt - 20);
+      LTo := Min(Length(ASource), LAt + 20);
+      Result.Message := '  mismatch at offset ' + IntToStr(LAt) +
+        ' of ' + IntToStr(Length(ASource)) + sLineBreak +
+        '  source around it: ' +
+        QuotedStr(Copy(ASource, LFrom + 1, LTo - LFrom)) + sLineBreak;
+    end;
 end;
 
 function RunStmtCase(APP: TPasPreprocessor; const ARow: TPasCaseRow):
