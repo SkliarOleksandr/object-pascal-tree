@@ -194,6 +194,18 @@ type
       set the expression is no longer flagged as needing semantics, because it
       no longer does. }
     property OnDeclared: TPasDeclaredQuery read FOnDeclared write FOnDeclared;
+    { The single-letter switch state as of the end of the last Process/
+      ProcessText call -- reset per file (like $DEFINE), so this answers
+      "where did the unit leave it", exactly what $IFOPT itself reads.
+      1.3.1/1.3.4 (switch directives, $PUSHOPT/$POPOPT) have no AST shape
+      of their own to dump -- this is their observation surface, direct
+      rather than round-tripped through a conditional's taken/not-taken
+      branch (though that path is also tested — see 1.3.1's own case). }
+    function SwitchState(ASwitch: Char): Boolean;
+    { Same idea for `SCOPEDENUMS`, whose positional history is already on
+      TPasPreprocessed.ScopedEnumsEvents/ScopedEnumsAt -- this is just the
+      value at END OF FILE, the one a PUSHOPT/POPOPT round-trip case needs. }
+    function ScopedEnumsFinal: Boolean;
   end;
 
 const
@@ -390,6 +402,16 @@ begin
   FCondThisActive := TList<Boolean>.Create;
   FCondSeenElse := TList<Boolean>.Create;
   ResetSwitches;
+end;
+
+function TPasPreprocessor.SwitchState(ASwitch: Char): Boolean;
+begin
+  Result := FSwitches[UpCase(ASwitch)];
+end;
+
+function TPasPreprocessor.ScopedEnumsFinal: Boolean;
+begin
+  Result := FScopedEnums;
 end;
 
 procedure TPasPreprocessor.ResetSwitches;

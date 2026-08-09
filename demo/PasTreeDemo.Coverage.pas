@@ -37,7 +37,8 @@ uses
   System.SysUtils, System.IOUtils, System.RegularExpressions,
   System.Generics.Collections,
   PasTree.SourceManager, PasTree.Preprocessor,
-  PasTree.TestKit, PasTree.Tests.Parser, PasTree.Tests.Roundtrip;
+  PasTree.TestKit, PasTree.Tests.Parser, PasTree.Tests.Roundtrip,
+  PasTree.Tests.Preprocessor;
 
 type
   TPasSpecSection = record
@@ -227,6 +228,8 @@ begin
   LGPP := TPasPreprocessor.Create(LGSM, LGDefines);
   try
     for LCustom in BuildCustomCases(LGPP, LGSM) do
+      Add(LCustom.Section, Trim(LCustom.Name) + ' [ParserSmoke]');
+    for LCustom in BuildPreprocessorCases(LGPP) do
       Add(LCustom.Section, Trim(LCustom.Name) + ' [ParserSmoke]');
   finally
     LGPP.Free;

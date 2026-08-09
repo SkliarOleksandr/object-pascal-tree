@@ -22,7 +22,8 @@ uses
   PasTree.Parser in '..\source\PasTree.Parser.pas',
   PasTree.TestKit in 'PasTree.TestKit.pas',
   PasTree.Tests.Parser in 'PasTree.Tests.Parser.pas',
-  PasTree.Tests.Roundtrip in 'PasTree.Tests.Roundtrip.pas';
+  PasTree.Tests.Roundtrip in 'PasTree.Tests.Roundtrip.pas',
+  PasTree.Tests.Preprocessor in 'PasTree.Tests.Preprocessor.pas';
 
 var
   GSM: TPasSourceManager;
@@ -35,7 +36,8 @@ begin
   GPP := TPasPreprocessor.Create(GSM, GDefines);
   try
     RunSuite('ParserSmoke', GPP, STMT_CASES, DECL_CASES,
-      BuildCustomCases(GPP, GSM) + BuildRoundtripCases, GPassed, GFailed);
+      BuildCustomCases(GPP, GSM) + BuildRoundtripCases +
+      BuildPreprocessorCases(GPP), GPassed, GFailed);
     if GFailed > 0 then
       ExitCode := 1;
   finally

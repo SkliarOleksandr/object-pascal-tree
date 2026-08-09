@@ -17,6 +17,7 @@ uses
   PasTree.TestKit in '..\tests\PasTree.TestKit.pas',
   PasTree.Tests.Parser in '..\tests\PasTree.Tests.Parser.pas',
   PasTree.Tests.Roundtrip in '..\tests\PasTree.Tests.Roundtrip.pas',
+  PasTree.Tests.Preprocessor in '..\tests\PasTree.Tests.Preprocessor.pas',
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',

@@ -122,6 +122,17 @@ function RoundtripHolds(const ASource: string; out AFirstMismatch: Integer):
 function RoundtripCase(const ASection, AName, ASource: string):
   TPasCustomCase;
 
+{ test-coverage plan step 3 batch 5: a compiler-OPTION-state case (1.3.1
+  switch directives, 1.3.4 $PUSHOPT/$POPOPT) -- neither has an AST shape to
+  dump, so this is their observation surface: process ASource, then read
+  APP.SwitchState(ASwitch) (or APP.ScopedEnumsFinal when ASwitch = #0, the
+  one option $PUSHOPT/$POPOPT also saves that isn't a single letter) and
+  compare against AExpected. The direct counterpart of CheckDump/
+  RoundtripHolds for the one property that is COMPILER STATE, not a tree or
+  a token stream. }
+function SwitchCase(const ASection, AName, ASource: string; ASwitch: Char;
+  AExpected: Boolean; APP: TPasPreprocessor): TPasCustomCase;
+
 { Runs every row/case, printing PASS/FAIL to stdout exactly like the suites
   did before this unit existed, and prints the '=== <name>: N passed, M
   failed ===' footer. This is the whole body of a thin .dpr host now. }
@@ -236,6 +247,41 @@ begin
         ' of ' + IntToStr(Length(ASource)) + sLineBreak +
         '  source around it: ' +
         QuotedStr(Copy(ASource, LFrom + 1, LTo - LFrom)) + sLineBreak;
+    end;
+end;
+
+function SwitchCase(const ASection, AName, ASource: string; ASwitch: Char;
+  AExpected: Boolean; APP: TPasPreprocessor): TPasCustomCase;
+begin
+  Result.Section := ASection;
+  Result.Name := AName;
+  Result.Run :=
+    function: TPasCheckResult
+    var
+      LActual: Boolean;
+      LLabel: string;
+    begin
+      APP.ProcessText('test.pas', ASource);
+      if ASwitch = #0 then
+      begin
+        LActual := APP.ScopedEnumsFinal;
+        LLabel := 'SCOPEDENUMS';
+      end
+      else
+      begin
+        LActual := APP.SwitchState(ASwitch);
+        LLabel := ASwitch;
+      end;
+      Result.Passed := LActual = AExpected;
+      if Result.Passed then
+      begin
+        Result.Message := '';
+        Exit;
+      end;
+      Result.Message := '  source:   ' + ASource + sLineBreak +
+        '  switch:   ' + LLabel + sLineBreak +
+        '  expected: ' + BoolToStr(AExpected, True) + sLineBreak +
+        '  actual:   ' + BoolToStr(LActual, True) + sLineBreak;
     end;
 end;
 
