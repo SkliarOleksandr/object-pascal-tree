@@ -276,6 +276,78 @@ begin
         if nfNegated in Nodes[AIndex].Flags then
           Result := Result + '!';
       end;
+    // Nodes whose HEAD WORD is the whole distinction: `threadvar` from `var`,
+    // `resourcestring` from `const`, which visibility, which directive, which
+    // property specifier. All of them are one token at FirstToken, and without
+    // it a declaration dump cannot tell those pairs apart.
+    nkVarSec:
+      // A `class var` run has no head word of its own (the struct-body parser
+      // has already eaten both keywords, so FirstToken is the first NAME);
+      // Aux marks it instead.
+      if Nodes[AIndex].Aux = 1 then
+        Result := Result + '#class'
+      else
+        Result := Result + '''' + LowerCase(NodeText(AIndex)) + '''';
+    nkVisibility:
+      begin
+        // The LEVEL is in Aux, not at FirstToken: `strict private` starts on
+        // `strict`, so the head word alone cannot tell the two strict forms
+        // apart. nfNegated is the parser's strict marker.
+        case Nodes[AIndex].Aux of
+          1: LText := 'private';
+          2: LText := 'protected';
+          3: LText := 'public';
+          4: LText := 'published';
+          5: LText := 'automated';
+        else
+          LText := '?';
+        end;
+        Result := Result + '''' + LText + '''';
+        if nfNegated in Nodes[AIndex].Flags then
+          Result := Result + '#strict';
+      end;
+    nkConstSec, nkDirective, nkPropSpec:
+      Result := Result + '''' + LowerCase(NodeText(AIndex)) + '''';
+    // Nodes whose distinction is a flag in Aux (see the kind comments): a
+    // marker reads better in an expected string than a number would.
+    nkTypeDecl:
+      if Nodes[AIndex].Aux = 1 then
+        Result := Result + '#distinct';
+    nkInterfaceType:
+      if Nodes[AIndex].Aux = 1 then
+        Result := Result + '#disp';
+    nkClassType:
+      if Nodes[AIndex].Aux = 1 then
+        Result := Result + '#forward';
+    nkHelperType:
+      if Nodes[AIndex].Aux = 1 then
+        Result := Result + '#record';
+    nkArrayType:
+      if Nodes[AIndex].Aux = 1 then
+        Result := Result + '#ofconst';
+    nkProcType:
+      case Nodes[AIndex].Aux of
+        1: Result := Result + '#ofobject';
+        2: Result := Result + '#reference';
+      end;
+    // A routine needs BOTH: the head word says procedure/function/constructor/
+    // destructor/operator, Aux says whether `class` preceded it (that keyword
+    // is not in the node's own token span — the struct-body parser eats it).
+    nkRoutine:
+      begin
+        Result := Result + '''' + LowerCase(NodeText(AIndex)) + '''';
+        if Nodes[AIndex].Aux = 1 then
+          Result := Result + '#class';
+      end;
+    nkPropertyDecl:
+      if Nodes[AIndex].Aux = 1 then
+        Result := Result + '#class';
+    nkVarDecl:
+      if Nodes[AIndex].Aux = 1 then
+        Result := Result + '#absolute';
+    nkParam:
+      if Nodes[AIndex].Aux >= 0 then
+        Result := Result + '#out';
   end;
   LChildren := '';
   LChild := Nodes[AIndex].FirstChild;

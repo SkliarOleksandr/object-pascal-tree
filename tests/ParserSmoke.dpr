@@ -56,6 +56,59 @@ begin
   end;
 end;
 
+{ Declaration-level golden check, the counterpart of Check for everything
+  ParseStatements cannot take: a type, const, var or routine section. ASource is
+  a declaration FRAGMENT; it is wrapped in a minimal unit, run through the same
+  pipeline via ParseFile, and only the interface section's own children are
+  dumped and joined — so the expected string stays about the declaration and
+  says nothing about the wrapper. }
+procedure CheckDecl(const AName, ASource, AExpected: string;
+  AExpectDiags: Integer = 0);
+const
+  NL = #13#10;
+var
+  LPre: TPasPreprocessed;
+  LDiags: TArray<TPasParseDiag>;
+  LTree: TPasTree;
+  LActual: string;
+  LIdx, LChild: Integer;
+begin
+  LPre := GPP.ProcessText('test.pas',
+    'unit Test;' + NL + 'interface' + NL + ASource + NL +
+    'implementation' + NL + 'end.' + NL);
+  LTree := TPasParser.ParseFile(LPre, LDiags);
+  LActual := '';
+  for LIdx := 0 to High(LTree.Nodes) do
+    if LTree.Nodes[LIdx].Kind = nkInterfaceSec then
+    begin
+      LChild := LTree.Nodes[LIdx].FirstChild;
+      while LChild <> NIL_NODE do
+      begin
+        if LActual <> '' then
+          LActual := LActual + ' ';
+        LActual := LActual + LTree.Dump(LChild);
+        LChild := LTree.Nodes[LChild].NextSibling;
+      end;
+      Break;
+    end;
+  if (LActual = AExpected) and (Length(LDiags) = AExpectDiags) then
+  begin
+    Inc(GPassed);
+    Exit;
+  end;
+  Inc(GFailed);
+  Writeln('FAIL ', AName);
+  Writeln('  source:   ', ASource);
+  Writeln('  expected: ', AExpected);
+  Writeln('  actual:   ', LActual);
+  if Length(LDiags) <> AExpectDiags then
+  begin
+    Writeln('  diags (expected ', AExpectDiags, '):');
+    for LIdx := 0 to High(LDiags) do
+      Writeln('    @', LDiags[LIdx].VisIndex, ': ', LDiags[LIdx].Msg);
+  end;
+end;
+
 { Lexer-level check: the LINES on which ASource produces ACode, as a
   comma-separated list, so a case reads the way dcc's own output does. Used for
   the multiline-string indentation rule (B.6.3), whose diagnostics never reach
@@ -543,6 +596,137 @@ begin
     // ---- 1.3.2 conditional compilation in statements ----
     Check('1.3.2 ifdef', '{$IFDEF MSWINDOWS}A := 1;{$ELSE}A := 2;{$ENDIF}',
       'Block(Assign(Ident''A'' IntLit''1''))');
+
+    // ---- declaration-level golden cases (CheckDecl) ----
+
+    // ---- 3.1 variables ----
+    // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
+    // child slot an initializer would — only the mark separates them.
+    CheckDecl('3.1.4 absolute', 'var A: Integer absolute B;',
+      'VarSec''var''(VarDecl#absolute(Ident''A'' Ident''Integer'' ' +
+      'Ident''B''))');
+    CheckDecl('3.1.4 initializer is not absolute', 'var A: Integer = 1;',
+      'VarSec''var''(VarDecl(Ident''A'' Ident''Integer'' IntLit''1''))');
+    // 3.1.5: same section shape as `var`; the head word is the whole
+    // difference, so the dump has to carry it.
+    CheckDecl('3.1.5 threadvar', 'threadvar T: Integer;',
+      'VarSec''threadvar''(VarDecl(Ident''T'' Ident''Integer''))');
+
+    // ---- 3.2 constants ----
+    // 3.2.3: a resourcestring section parses as a const section.
+    CheckDecl('3.2.3 resourcestring', 'resourcestring SHi = ''hi'';',
+      'ConstSec''resourcestring''(ConstDecl(Ident''SHi'' StrLit''''hi''''))');
+
+    // ---- 2.5.1 distinct alias ----
+    CheckDecl('2.5.1 plain alias', 'type TId = Integer;',
+      'TypeSec(TypeDecl(Ident''TId'' Ident''Integer''))');
+    CheckDecl('2.5.1 distinct alias', 'type TId = type Integer;',
+      'TypeSec(TypeDecl#distinct(Ident''TId'' Ident''Integer''))');
+
+    // ---- 6.6.1 procedural types ----
+    CheckDecl('6.6.1 procedure type',
+      'type TProc = procedure(A: Integer);',
+      'TypeSec(TypeDecl(Ident''TProc'' ProcType(Params(Param(Ident''A'' ' +
+      'Ident''Integer'')))))');
+    CheckDecl('6.6.1 method pointer',
+      'type TEvent = procedure(Sender: TObject) of object;',
+      'TypeSec(TypeDecl(Ident''TEvent'' ProcType#ofobject(Params(Param(' +
+      'Ident''Sender'' Ident''TObject'')))))');
+    CheckDecl('6.6.1 reference to',
+      'type TFn = reference to function: Integer;',
+      'TypeSec(TypeDecl(Ident''TFn'' ProcType#reference(Ident''Integer'')))');
+
+    // ---- 9.2 record members ----
+    // 9.2.1 / 9.2.2: a record takes methods, properties and class members, and
+    // a record CONSTRUCTOR is a constructor — which the head word is the only
+    // thing that says.
+    CheckDecl('9.2.1 record members',
+      'type'#13#10'  TR = record'#13#10 +
+      '    FX: Integer;'#13#10 +
+      '    class var Count: Integer;'#13#10 +
+      '    procedure Go;'#13#10 +
+      '    class function Make: TR; static;'#13#10 +
+      '    property X: Integer read FX write FX;'#13#10 +
+      '  end;',
+      'TypeSec(TypeDecl(Ident''TR'' RecordType(' +
+      'VarDecl(Ident''FX'' Ident''Integer'') ' +
+      'VarSec#class(VarDecl(Ident''Count'' Ident''Integer'')) ' +
+      'Routine''procedure''(Ident''Go'') ' +
+      'Routine''function''#class(Ident''Make'' Ident''TR'' ' +
+      'Directive''static'') ' +
+      'PropertyDecl(Ident''X'' Ident''Integer'' PropSpec''read''(' +
+      'Ident''FX'') PropSpec''write''(Ident''FX'')))))');
+    CheckDecl('9.2.2 record constructor',
+      'type TR = record constructor Create(A: Integer); end;',
+      'TypeSec(TypeDecl(Ident''TR'' RecordType(Routine''constructor''(' +
+      'Ident''Create'' Params(Param(Ident''A'' Ident''Integer''))))))');
+
+    // ---- 11.x classes ----
+    CheckDecl('11.1.1 forward declaration', 'type TC = class;',
+      'TypeSec(TypeDecl(Ident''TC'' ClassType#forward))');
+    // 11.2.1: which visibility a section introduces is its head word, and
+    // `strict` makes it a different one again.
+    CheckDecl('11.2.1 visibility sections',
+      'type'#13#10'  TC = class'#13#10 +
+      '  strict private'#13#10'    FA: Integer;'#13#10 +
+      '  protected'#13#10'    FB: Integer;'#13#10 +
+      '  published'#13#10'    FC: Integer;'#13#10 +
+      '  end;',
+      'TypeSec(TypeDecl(Ident''TC'' ClassType(' +
+      'Visibility''private''#strict VarDecl(Ident''FA'' Ident''Integer'') ' +
+      'Visibility''protected'' VarDecl(Ident''FB'' Ident''Integer'') ' +
+      'Visibility''published'' VarDecl(Ident''FC'' Ident''Integer''))))');
+    // 12.2.3 reintroduce, and 12.2.1 virtual/override — directives are nodes,
+    // and which directive it is is the head word.
+    CheckDecl('12.2.3 reintroduce',
+      'type'#13#10'  TC = class(TObject)'#13#10 +
+      '    procedure P; virtual;'#13#10 +
+      '    procedure Q; reintroduce; overload;'#13#10'  end;',
+      'TypeSec(TypeDecl(Ident''TC'' ClassType(Ident''TObject'' ' +
+      'Routine''procedure''(Ident''P'' Directive''virtual'') ' +
+      'Routine''procedure''(Ident''Q'' Directive''reintroduce'' ' +
+      'Directive''overload''))))');
+
+    // ---- 14.x interfaces ----
+    CheckDecl('14.1.2 dispinterface',
+      'type'#13#10'  ID = dispinterface'#13#10 +
+      '    [''{11111111-2222-3333-4444-555555555555}'']'#13#10 +
+      '    procedure P;'#13#10'  end;',
+      'TypeSec(TypeDecl(Ident''ID'' InterfaceType#disp(Guid ' +
+      'Routine''procedure''(Ident''P''))))');
+    CheckDecl('14.1.1 interface is not a dispinterface',
+      'type IFoo = interface procedure P; end;',
+      'TypeSec(TypeDecl(Ident''IFoo'' InterfaceType(' +
+      'Routine''procedure''(Ident''P''))))');
+    // 14.4.1: `implements` is a property SPECIFIER, so the delegation target
+    // sits where `read`/`write` targets do and only the head word separates
+    // them.
+    CheckDecl('14.4.1 implements',
+      'type'#13#10'  TC = class(TObject, IFoo)'#13#10 +
+      '    property Impl: IFoo read FImpl implements IFoo;'#13#10'  end;',
+      'TypeSec(TypeDecl(Ident''TC'' ClassType(Ident''TObject'' ' +
+      'Ident''IFoo'' PropertyDecl(Ident''Impl'' Ident''IFoo'' ' +
+      'PropSpec''read''(Ident''FImpl'') ' +
+      'PropSpec''implements''(Ident''IFoo'')))))');
+    // 14.2.2 method resolution clause.
+    CheckDecl('14.2.2 method resolution',
+      'type'#13#10'  TC = class(TObject, IFoo)'#13#10 +
+      '    procedure IFoo.P = MyP;'#13#10'  end;',
+      'TypeSec(TypeDecl(Ident''TC'' ClassType(Ident''TObject'' ' +
+      // The clause's three names are FLAT children — interface, its method,
+      // the implementing name — not a Member designator.
+      'Ident''IFoo'' MethodResolution(Ident''IFoo'' Ident''P'' ' +
+      'Ident''MyP''))))');
+
+    // ---- 15.3.1 helpers ----
+    CheckDecl('15.3.1 class helper',
+      'type TH = class helper for TObject procedure P; end;',
+      'TypeSec(TypeDecl(Ident''TH'' HelperType(Ident''TObject'' ' +
+      'Routine''procedure''(Ident''P''))))');
+    CheckDecl('15.3.1 record helper',
+      'type TH = record helper for Integer procedure P; end;',
+      'TypeSec(TypeDecl(Ident''TH'' HelperType#record(Ident''Integer'' ' +
+      'Routine''procedure''(Ident''P''))))');
 
     // ---- platform presets: iterate ALL target platforms and verify the
     // define set + SizeOf(Pointer) drive branch selection correctly ----

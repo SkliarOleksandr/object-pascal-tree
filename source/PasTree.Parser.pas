@@ -2671,6 +2671,10 @@ begin
     ParseHintsOpt(LDecl);
     if IsWord('absolute') then
     begin
+      // 3.1.4. The expression is an ALIAS, not an initial value, and the two
+      // land in the same child slot — so without this mark nothing downstream
+      // (nor a golden dump) can tell `absolute B` from `= B`.
+      FB.SetAux(LDecl, 1);
       Next;
       FB.Adopt(LDecl, ParseExpression);
     end
