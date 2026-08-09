@@ -543,6 +543,16 @@ var
   LName, LChild, LSym, LExisting, LGen, LBody: Integer;
   LMatch, LProbe, LDepth: Integer;
 begin
+  LChild := FirstChild(ANode);
+  if (LChild <> NIL_NODE) and (KindOf(LChild) = nkAttrGroup) then
+    // 19.3.1: an attribute name may omit the `Attribute` suffix its class
+    // carries (IsAttributeTypeRef's fallback in ResolveNode), but that
+    // fallback needs FNodeScope set on the ident inside -- SkipAttr just
+    // jumps past the group without visiting it, so without this the group
+    // was never Collect()ed at all and every attribute on a TYPE stayed
+    // NIL_SCOPE, unresolvable no matter how the class was named. Mirrors
+    // CollectRoutine's own `nkAttrGroup: Collect(LChild, LRoutine)` case.
+    Collect(LChild, AScope);
   LName := SkipAttr(FirstChild(ANode));
   if (LName = NIL_NODE) or (KindOf(LName) <> nkIdent) then
     Exit;

@@ -1782,6 +1782,20 @@ const
     'procedure MGlobal; begin with GR do Shared := ''x''; end;'#10 +
     'end.'#10;
 
+  // 1.2.4: SysInit is implicitly visible to every OTHER unit, exactly like
+  // System, via EnsureSysInitUnit's own ResolveUnit('SysInit', ...) lookup --
+  // never tested at all before this (mirrors UNIT_SYS/UNIT_E's proof of the
+  // implicit System unit, below).
+  UNIT_SYSINIT =
+    'unit SysInit;'#10'interface'#10 +
+    'var HInstance: Integer;'#10 +
+    'implementation'#10'end.'#10;
+
+  UNIT_SYSINIT_USE =
+    'unit UnitSysInitUse;'#10'interface'#10'implementation'#10 +
+    'procedure R;'#10'var L: Integer;'#10'begin'#10 +
+    '  L := HInstance;'#10'end;'#10'end.'#10;
+
 function ModelByName(const ANameLower: string): TPasSemaModel;
 begin
   Result := nil;
@@ -3550,6 +3564,30 @@ begin
       DiagCount(ModelByName('conuse'), 'E2003') = 1);
     Ok('constraint: ...and only those', DiagHasText(ModelByName('conuse'),
       'E2003', 'Nope'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- test-coverage plan step 3 batch 2: 1.2.4 the implicit SysInit unit
+  // ---- own directory, so it stays isolated from every OTHER unit named
+  // System/SysInit above (EnsureSysInitUnit is a per-project singleton, same
+  // as EnsureSystemUnit already is for UNIT_SYS).
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_sysinit');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SysInit.pas'), UNIT_SYSINIT);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitSysInitUse.pas'),
+    UNIT_SYSINIT_USE);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    Ok('1.2.4: no E2003 on a bare SysInit-only global',
+      DiagCount(ModelByName('unitsysinituse'), 'E2003') = 0);
+    Ok('1.2.4: HInstance resolved via the implicit SysInit unit',
+      CrossRefTo(ModelByName('unitsysinituse'), 'HInstance', 'HInstance'));
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

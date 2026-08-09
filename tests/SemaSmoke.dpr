@@ -2232,6 +2232,95 @@ begin
   Ok('e2001: ...and all three as E2001 on a 64-bit target',
     (DiagCount('E2001') = 3) and (DiagCount('E2028') = 0));
   GModel.Free;
+
+  // ---- test-coverage plan step 3 batch 2: resolver-level hard gaps ----
+
+  // 17.3.1 variable capture: SRC_ANON (above) already proves an anon method
+  // owns its OWN locals/Result; nothing had ever proven the other half --
+  // that a reference INSIDE the literal to a variable declared in the
+  // ENCLOSING routine binds OUTWARD through the anon's scope (parented onto
+  // the enclosing one in nkAnonMethod's Collect case) instead of reading as
+  // undeclared. LTotal appears nowhere but inside the literal, so both
+  // occurrences (read and write) are the capture being tested, not some
+  // other binding.
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'type TProc = reference to procedure;'#10 +
+    'procedure P;'#10 +
+    'var'#10'  LTotal: Integer;'#10'  LFn: TProc;'#10 +
+    'begin'#10 +
+    '  LFn := procedure begin LTotal := LTotal + 1; end;'#10 +
+    '  LFn;'#10 +
+    'end;'#10'end.'#10);
+  Ok('17.3.1: no E2003 capturing an outer local', DiagCount('E2003') = 0);
+  Ok('17.3.1: every LTotal inside the literal resolves (capture)',
+    AllRefsResolved('LTotal'));
+  GModel.Free;
+
+  // ...and the same hop reaches a PARAMETER, not just a local -- declared as
+  // skParam rather than skVar, so it is worth its own case rather than
+  // assuming the scope-chain walk treats every symbol kind alike.
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'type TProc = reference to procedure;'#10 +
+    'procedure Q(AStep: Integer);'#10 +
+    'var LFn: TProc;'#10 +
+    'begin'#10 +
+    '  LFn := procedure begin AStep := AStep + 1; end;'#10 +
+    '  LFn;'#10 +
+    'end;'#10'end.'#10);
+  Ok('17.3.1: no E2003 capturing an outer PARAMETER', DiagCount('E2003') = 0);
+  GModel.Free;
+
+  // 5.5.2 for-in: ParserSmoke has pinned the parse SHAPE since the previous
+  // batch, but nothing had run one through the RESOLVER -- the loop variable
+  // is an ORDINARY reference (5.5.2, unlike `for var X in`), so it must
+  // already be declared, and the collection expression is just a normal
+  // reference too. Both binding to something they were never checked
+  // against is the actual gap the audit named.
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'procedure P;'#10 +
+    'var'#10'  MyList: array of Integer;'#10'  Item: Integer;'#10 +
+    'begin'#10 +
+    '  for Item in MyList do Writeln(Item);'#10 +
+    'end;'#10'end.'#10);
+  Ok('5.5.2: no E2003 in a for-in loop', DiagCount('E2003') = 0);
+  Ok('5.5.2: the loop variable itself resolves to its declaration',
+    RefBindKind('Item', 0) = 'type');
+  Ok('5.5.2: the iterated collection resolves',
+    RefResolvesTo('MyList', 'MyList'));
+  GModel.Free;
+
+  // 19.3.1 attribute declarations: `[Table]` may omit the `Attribute` suffix
+  // that the CLASS itself must carry (IsAttributeTypeRef's fallback, only
+  // tried when the bare name does not already resolve). Nothing had ever
+  // used an attribute whose declaring class name differs from its use site.
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10'  TableAttribute = class end;'#10 +
+    '  [Table]'#10'  TFoo = class end;'#10 +
+    'implementation'#10'end.'#10);
+  Ok('19.3.1: no E2003 on the suffix-omitted attribute name',
+    DiagCount('E2003') = 0);
+  Ok('19.3.1: [Table] falls back to TableAttribute',
+    RefResolvesTo('Table', 'TableAttribute'));
+  GModel.Free;
+
+  // ...and an EXACT match must win over the fallback, not just be tolerated
+  // alongside it -- the gate in IsAttributeTypeRef's caller only fires the
+  // +Attribute lookup when the bare name resolved to NOTHING, so declaring
+  // both must not make `[Table]` ambiguous or prefer the wrong one.
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10'  Table = class end;'#10 +
+    '  TableAttribute = class end;'#10 +
+    '  [Table]'#10'  TFoo = class end;'#10 +
+    'implementation'#10'end.'#10);
+  Ok('19.3.1: an exact-name attribute class wins over the suffix fallback',
+    RefResolvesTo('Table', 'Table'));
+  GModel.Free;
+
   Writeln(Format('=== SemaSmoke: %d passed, %d failed ===', [GPassed, GFailed]));
   if GFailed > 0 then
     ExitCode := 1;
