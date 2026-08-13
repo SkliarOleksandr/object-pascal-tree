@@ -156,6 +156,7 @@ type
     Switches: TPasSwitchState;
     ScopedEnums: Boolean;
     Rtti: TPasRttiState;
+    VarPropSetter: Boolean;
   end;
 
   TPasPreprocessor = class
@@ -167,6 +168,7 @@ type
     FScopedEnums: Boolean;
     FScopedEnumsEvents: TList<TPasScopedEnumsEvent>;
     FRttiState: TPasRttiState;
+    FVarPropSetter: Boolean;
     FSwitchStack: TStack<TPasOptState>;
     FFileNames: TList<string>;
     FFiles: TList<TPasTokenStream>;
@@ -234,6 +236,17 @@ type
       structured content (mode + three optional visibility-set clauses), so
       it is a record, not a Boolean. }
     function RttiState: TPasRttiState;
+    { 13.1.6 `VARPROPSETTER` -- long-form-only ON/OFF, OFF by default, and the
+      gate on whether a property SETTER may take a `var` parameter (dcc32
+      37.0: without it that declaration is a hard
+      `E2282 Property setters cannot take var parameters`, reported at the
+      PROPERTY declaration rather than at the setter's own; with it the same
+      code compiles). Tracked as state only -- PasTree emits no E2282 of its
+      own, so nothing here can turn a legal unit into a reported one. A real
+      E2282 check would want this POSITIONALLY (the state at each property's
+      declaration site, the way `TPasScopedEnumsEvent` does for enums), not
+      just the end-of-file value this accessor answers. }
+    function VarPropSetterFinal: Boolean;
   end;
 
 const
@@ -447,6 +460,11 @@ begin
   Result := FRttiState;
 end;
 
+function TPasPreprocessor.VarPropSetterFinal: Boolean;
+begin
+  Result := FVarPropSetter;
+end;
+
 procedure TPasPreprocessor.ResetSwitches;
 var
   LCh: Char;
@@ -567,6 +585,7 @@ begin
   FScopedEnums := False;         // dcc default; unit-local like the switches
   FScopedEnumsEvents.Clear;
   FRttiState := Default(TPasRttiState);   // Mode = rmInherit, the dcc default
+  FVarPropSetter := False;                // dcc default: OFF (13.1.6)
 
   LStream := TPasLexer.Tokenize(ASource);
   FFileNames.Add(AFileName);
@@ -772,6 +791,7 @@ begin
     LOpt.Switches := FSwitches;
     LOpt.ScopedEnums := FScopedEnums;
     LOpt.Rtti := FRttiState;
+    LOpt.VarPropSetter := FVarPropSetter;
     FSwitchStack.Push(LOpt);
   end
   else if LName = 'POPOPT' then
@@ -782,6 +802,7 @@ begin
       FSwitches := LOpt.Switches;
       SetScopedEnums(LOpt.ScopedEnums);
       FRttiState := LOpt.Rtti;
+      FVarPropSetter := LOpt.VarPropSetter;
     end
     else
       Diag(ppPopWithoutPush, AFileId, AToken.Start, AToken.Len);
@@ -899,7 +920,16 @@ begin
       SetScopedEnums(False);
   end
   else if AName = 'RTTI' then
-    ApplyRtti(AArg);
+    ApplyRtti(AArg)
+  else if AName = 'VARPROPSETTER' then
+  begin
+    // 13.1.6. Long-form-only ON/OFF like SCOPEDENUMS, but NOT positional:
+    // nothing reads it per-declaration yet, because PasTree emits no E2282.
+    if SameText(AArg, 'ON') then
+      FVarPropSetter := True
+    else if SameText(AArg, 'OFF') then
+      FVarPropSetter := False;
+  end;
   // Unknown names: passthrough (WARN, HINTS, REGION, HPPEMIT, ...)
 end;
 

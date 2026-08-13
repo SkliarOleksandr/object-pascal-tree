@@ -29,7 +29,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..73] of TPasCaseRow = (
+  STMT_CASES: array[0..75] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -241,6 +241,20 @@ const
     (Section: '5.6.2'; Name: 'continue';
      Source: 'while True do Continue;';
      Expected: 'Block(WhileStmt(Ident''True'' ExprStmt(Ident''Continue'')))';
+     ExpectDiags: 0),
+
+    // ---- 5.6.5 Halt: same intrinsic-call shape as Break/Continue/Exit
+    // above, in BOTH arities -- bare, and with the optional Integer exit
+    // code. dcc32 37.0 probe-verified both forms compile before these rows
+    // were written. Already a seeded intrinsic (PasTree.Sema.Builtins), so
+    // the parse shape is the whole of what there is to pin. ----
+    (Section: '5.6.5'; Name: 'Halt, bare';
+     Source: 'if Fatal then Halt;';
+     Expected: 'Block(IfStmt(Ident''Fatal'' ExprStmt(Ident''Halt'')))';
+     ExpectDiags: 0),
+    (Section: '5.6.5'; Name: 'Halt with an exit code';
+     Source: 'Halt(3);';
+     Expected: 'Block(ExprStmt(Call(Ident''Halt'' IntLit''3'')))';
      ExpectDiags: 0),
 
     // ---- 4.11.1 NameOf: ordinary call syntax, not a dedicated production ----
@@ -473,7 +487,7 @@ const
        'Ident''B'') Ident''C'')) Ident''D'') Ident''E'')))'; ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..113] of TPasCaseRow = (
+  DECL_CASES: array[0..114] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -647,6 +661,24 @@ const
        '  TB = UTF8String;';
      Expected: 'TypeSec(TypeDecl(Ident''TA'' Ident''RawByteString'') ' +
        'TypeDecl(Ident''TB'' Ident''UTF8String''))'; ExpectDiags: 0),
+
+    // ---- 7.1.7 UCS4Char / UCS4String, same row shape as its six siblings
+    // above. Deliberately NOT seeded into PasTree.Sema.Builtins: the spec is
+    // explicit that both are REAL System.pas declarations (`UCS4Char =
+    // Cardinal`, `UCS4String = array of UCS4Char`), and that seed list is
+    // only for names with no declaration anywhere -- seeding a declared name
+    // is exactly the mistake its own comment warns about at length. So they
+    // resolve through the real System unit like any other imported type, and
+    // there is nothing string-specific to model: `UCS4String` being a plain
+    // dynamic array means 8.2's rules (and 20.3.1's managedness) already
+    // cover it unchanged. dcc32 37.0 probe-verified: both resolve with no
+    // uses clause, and `UnicodeStringToUCS4String('Hello')` really returns 6
+    // elements with S[0] = 72, exactly as the spec documents. ----
+    (Section: '7.1.7'; Name: 'UCS4Char and UCS4String';
+     Source: 'type'#13#10'  TC4 = UCS4Char;'#13#10 +
+       '  TS4 = UCS4String;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC4'' Ident''UCS4Char'') ' +
+       'TypeDecl(Ident''TS4'' Ident''UCS4String''))'; ExpectDiags: 0),
 
     // ---- 6.2.7 untyped parameters: a name with no ':' type at all ----
     (Section: '6.2.7'; Name: 'untyped var parameter';

@@ -67,6 +67,32 @@ end;
 
 function BuildPreprocessorCases(APP: TPasPreprocessor): TPasCustomCases;
 
+  // 13.1.6: the VARPROPSETTER gate, read back off the preprocessor the same
+  // way SwitchCase reads a single-letter option -- it needs its own builder
+  // rather than SwitchCase's `#0 means SCOPEDENUMS` shortcut, which does not
+  // generalise to a second long-form-only option.
+  function VarPropSetterCase(const AName, ASource: string;
+    AExpected: Boolean): TPasCustomCase;
+  begin
+    Result.Section := '13.1.6';
+    Result.Name := AName;
+    Result.Run :=
+      function: TPasCheckResult
+      var
+        LActual: Boolean;
+      begin
+        APP.ProcessText('test.pas', ASource);
+        LActual := APP.VarPropSetterFinal;
+        Result.Passed := LActual = AExpected;
+        if Result.Passed then
+          Result.Message := ''
+        else
+          Result.Message := '  source:   ' + ASource + sLineBreak +
+            '  expected: ' + BoolToStr(AExpected, True) + sLineBreak +
+            '  actual:   ' + BoolToStr(LActual, True) + sLineBreak;
+      end;
+  end;
+
   // A {$RTTI ...} directive (plus, optionally, more source after it) read
   // back via TPasPreprocessor.RttiState and rendered through DumpRttiState
   // -- CheckDump gives this the same source/expected/actual failure format
@@ -206,7 +232,26 @@ begin
     RttiCase('1.3.4', '$PUSHOPT/$POPOPT round-trips RTTI too',
       '{$RTTI EXPLICIT METHODS([vcPublic])}{$PUSHOPT}' +
       '{$RTTI INHERIT}{$POPOPT}',
-      'Explicit Methods=[Public] Fields=- Properties=-')
+      'Explicit Methods=[Public] Fields=- Properties=-'),
+
+    // ---- 13.1.6 {$VARPROPSETTER}: the gate that decides whether a property
+    // SETTER may take a `var` parameter. dcc32 37.0 probed both ways before
+    // this was written -- OFF (the default) makes that declaration a hard
+    // `E2282 Property setters cannot take var parameters`, reported at the
+    // PROPERTY declaration rather than at the setter's own; ON compiles the
+    // identical code. PasTree tracks the STATE only and emits no E2282, so
+    // nothing here can turn a legal unit into a reported one; a real E2282
+    // check would want this positionally (per property site), the way
+    // TPasScopedEnumsEvent does for enums. ----
+    VarPropSetterCase('OFF by default -- a var setter is E2282 territory',
+      '', False),
+    VarPropSetterCase('{$VARPROPSETTER ON} opens the gate',
+      '{$VARPROPSETTER ON}', True),
+    VarPropSetterCase('and OFF closes it again',
+      '{$VARPROPSETTER ON}{$VARPROPSETTER OFF}', False),
+    VarPropSetterCase('$PUSHOPT/$POPOPT round-trips it too, like every '
+      + 'other compiler option',
+      '{$VARPROPSETTER ON}{$PUSHOPT}{$VARPROPSETTER OFF}{$POPOPT}', True)
   ];
 end;
 
