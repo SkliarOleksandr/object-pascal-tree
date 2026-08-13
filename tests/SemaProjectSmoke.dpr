@@ -4056,9 +4056,10 @@ begin
     '  TBigEnum = (beA, beB);'#10 +   // same unit, forced to 4 by the state
     '{$MINENUMSIZE 1}'#10 +
     '  TPair = record A, B: Pointer; end;'#10 +
-    // A SET field is what the layout walk still refuses; mixed field sizes,
-    // arrays and strings are all computed for real -- see the layout fixture.
-    '  TMixedOra = record A: Byte; F: set of Byte; end;'#10 +
+    // An inline anonymous ENUM field is what the layout walk still refuses;
+    // mixed field sizes, arrays, strings, sets, variants and file types are
+    // all computed for real now -- see the layout fixture.
+    '  TMixedOra = record A: Byte; F: (r0, r1); end;'#10 +
     'var'#10 +
     '  GTable: array[0..2] of Integer;'#10 +
     '{$IF KAlias}'#10 +
@@ -4163,8 +4164,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitExotic.pas'),
     'unit UnitExotic;'#10'interface'#10 +
     'type'#10 +
-    // A set field: the one layout shape the walk still refuses to model.
-    '  TMixed = record A: Byte; F: set of Byte; end;'#10 +
+    // A `class var` section: a layout shape the walk still refuses to model.
+    '  TMixed = record class var Q: Integer; A: Byte; end;'#10 +
     'const'#10 +
     '  KStr = ''text'';'#10 +
     'implementation'#10 +
@@ -4279,10 +4280,47 @@ begin
     '  TC02 = record A: Byte; F: array[0..2] of Byte; end;'#10 +     // 4
     '  TC03 = record A: Byte; F: array[0..0] of Int64; end;'#10 +    // 16
     '  TC04 = record A: Byte; F: array[0..2] of TRec3; end;'#10 +    // 10
-    // Still NOT modelled: a set field. It must REFUSE, not guess -- the guard
-    // is written so that a wrong answer of any kind declares the type.
-    '  TArrF = record A: Byte; F: set of Byte; end;'#10 +
-    '  TStrF = record A: Byte; F: file of Byte; end;'#10 +
+    // SETS. The storage is the byte SPAN from the base type's Lo to its Hi,
+    // rounded up to a power of two while it still fits in a machine word and
+    // exact above that -- so on Win32 (4-byte word) span 3 becomes 4 while
+    // span 5 stays 5. Always byte-aligned, which the field cases pin.
+    '  TE8 = (z0,z1,z2,z3,z4,z5,z6,z7);'#10 +
+    '  TE9 = (y0,y1,y2,y3,y4,y5,y6,y7,y8);'#10 +
+    '  TG01 = set of 0..7;'#10 +          // span 1 -> 1
+    '  TG02 = set of 0..8;'#10 +          // span 2 -> 2
+    '  TG03 = set of 0..16;'#10 +         // span 3 -> 4, rounded
+    '  TG04 = set of 0..39;'#10 +         // span 5 -> 5, exact (Win32)
+    '  TG05 = set of Byte;'#10 +          // 32
+    '  TG06 = set of 8..15;'#10 +         // an OFFSET base: span 1 -> 1
+    '  TG07 = set of 200..255;'#10 +      // span 7 -> 7 (Win32)
+    '  TG08 = set of TE9;'#10 +           // 9 members -> span 2
+    '  TH01 = record A: Byte; F: TG03; end;'#10 +   // 5: the set aligns to 1
+    '  THO2 = record A: Byte; F: TG05; end;'#10 +   // 33
+    // VARIANT parts. A named tag is stored and aligned but does NOT raise the
+    // record`s own alignment; every branch starts at the same offset, aligned
+    // to the largest alignment among the fields at THAT level only.
+    '  TV01 = record A: Byte; case Integer of 0: (X: Int64); 1: (Y: Byte); end;'#10 +
+    '  TV02 = record case Integer of 0: (A: Integer); 1: (B: array[0..7] of Byte); end;'#10 +
+    '  TV03 = packed record A: Byte; case Integer of 0: (X: Int64); end;'#10 +
+    '  TV04 = record A: Byte; case T: Word of 0: (X: Byte); end;'#10 +
+    '  TV05 = record A: Byte; case T: Int64 of 0: (X: Byte); end;'#10 +
+    '  TV06 = record A: Byte; case Integer of 0: (X: Byte; case Integer of 0: (Q: Int64)); end;'#10 +
+    '  TV07 = record A: Byte; case Integer of 0: (P: Byte; Q: Int64); end;'#10 +
+    '  TV08 = record A: Byte; case Integer of 0: (X: array[0..2] of Byte); 1: (Y: Word); end;'#10 +
+    '  TV09 = record A: Byte; F: TV02; end;'#10 +
+    // FILE types. Both `file` and `file of T` are System`s TFileRec whatever
+    // the element -- so the size is looked up, not hard-coded. The replica
+    // below stands in for it here (a closed corpus has no System.pas), and
+    // the field case pins the rule that matters: TFileRec is PACKED, so its
+    // own alignment is 1, but a file VARIABLE is pointer-aligned anyway.
+    '  TFileRec = packed record H: NativeUInt; M: Word; Fl: Word;'#10 +
+    '    case Byte of 0: (R: Cardinal); 1: (B: array[0..15] of Byte); end;'#10 +
+    '  TKFile = file of Byte;'#10 +                        // 24, like TFileRec
+    '  TKFld = record A: Byte; F: file of Byte; end;'#10 + // 28, aligned to 4
+    // Still NOT modelled. These must REFUSE, not guess -- each guard is
+    // written so that a wrong answer of any kind declares the type.
+    '  TArrF = record A: Byte; F: (r0, r1); end;'#10 +     // inline anon enum
+    '  TStrF = record class var Q: Integer; A: Byte; end;'#10 +
     '{$IF SizeOf(TR01) = 16}type M01 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TR03) = 8}type M03 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TR05) = 6}type M05 = class end;{$IFEND}'#10 +
@@ -4320,6 +4358,27 @@ begin
     '{$IF SizeOf(TC02) = 4}type MC02 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TC03) = 16}type MC03 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TC04) = 10}type MC04 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TG01) = 1}type MG01 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TG02) = 2}type MG02 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TG03) = 4}type MG03 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TG04) = 5}type MG04 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TG05) = 32}type MG05 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TG06) = 1}type MG06 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TG07) = 7}type MG07 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TG08) = 2}type MG08 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TH01) = 5}type MH01 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(THO2) = 33}type MH02 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TV01) = 16}type MV01 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TV02) = 8}type MV02 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TV03) = 9}type MV03 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TV04) = 5}type MV04 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TV05) = 17}type MV05 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TV06) = 16}type MV06 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TV07) = 24}type MV07 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TV08) = 6}type MV08 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TV09) = 12}type MV09 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TKFile) = 24}type MKF = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TKFld) = 28}type MKFld = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TArrF) <> 0}type MArr = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TStrF) <> 0}type MStr = class end;{$IFEND}'#10 +
     'implementation'#10'end.'#10);
@@ -4351,10 +4410,30 @@ begin
     Ok('1.3.2 layout: static arrays -- subrange, Byte/enum/subrange-type and ' +
       'char-literal indices, both multi-dim spellings, record elements, and ' +
       'as fields (missing:' + LMissing + ')', LMissing = '');
-    Ok('1.3.2 layout: a SET field still refuses rather than guessing',
+    LMissing := '';
+    for var LM in ['mg01', 'mg02', 'mg03', 'mg04', 'mg05', 'mg06', 'mg07',
+                   'mg08', 'mh01', 'mh02'] do
+      if SymCountOf(LLay, LM, skType) <> 1 then
+        LMissing := LMissing + ' ' + LM;
+    Ok('1.3.2 layout: SET sizes -- byte span, rounded to a power of two only ' +
+      'while it fits a machine word, offset bases, and byte alignment ' +
+      '(missing:' + LMissing + ')', LMissing = '');
+    LMissing := '';
+    for var LM in ['mv01', 'mv02', 'mv03', 'mv04', 'mv05', 'mv06', 'mv07',
+                   'mv08', 'mv09'] do
+      if SymCountOf(LLay, LM, skType) <> 1 then
+        LMissing := LMissing + ' ' + LM;
+    Ok('1.3.2 layout: VARIANT parts -- branch start, max-branch extent, a ' +
+      'stored tag that does not raise the alignment, nesting and packing ' +
+      '(missing:' + LMissing + ')', LMissing = '');
+    Ok('1.3.2 layout: a FILE type is its TFileRec, and a file FIELD is '
+      + 'pointer-aligned even though that record is packed',
+      (SymCountOf(LLay, 'mkf', skType) = 1) and
+      (SymCountOf(LLay, 'mkfld', skType) = 1));
+    Ok('1.3.2 layout: an inline anonymous ENUM field still refuses',
       (SymCountOf(LLay, 'marr', skType) = 0) and
       DiagHasText(LLay, 'PPIF', 'SizeOf(TArrF)'));
-    Ok('1.3.2 layout: a FILE field refuses too',
+    Ok('1.3.2 layout: a `class var` section refuses too',
       (SymCountOf(LLay, 'mstr', skType) = 0) and
       DiagHasText(LLay, 'PPIF', 'SizeOf(TStrF)'));
     Ok('1.3.2 layout: the two refusals are the ONLY residuals',

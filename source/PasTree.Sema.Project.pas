@@ -314,6 +314,10 @@ type
       out ANum: Double): Boolean;
     function OracleOrdinalCount(AMid, ANode, ADepth: Integer;
       out ACount: Double): Boolean;
+    function OracleOrdinalRange(AMid, ANode, ADepth: Integer;
+      out ALo, AHi: Double): Boolean;
+    function OracleVariantLayout(AMid, APartNode, ADepth, ACap,
+      AStart: Integer; out AEnd, AAlign: Integer): Boolean;
     function OracleLength(AMid, ASym: Integer; out ALen: Double): Boolean;
     function SymbolQueryFor(AId: Integer): TPasCondSymbolQuery;
     function DeclTypeX(AMid, ASym: Integer): TSemaXType;
@@ -1283,11 +1287,20 @@ begin
           end;
           Inc(LFields, LCount);
         end;
+      nkVariantPart:
+        begin
+          if not OracleVariantLayout(AMid, LChild, ADepth, LCap, LOffset,
+               LOffset, LOneAlign) then
+            Exit;
+          if LOneAlign > LMaxAlign then
+            LMaxAlign := LOneAlign;
+          Inc(LFields);
+        end;
       nkVisibility, nkRoutine, nkPropertyDecl, nkAttrGroup,
       nkConstSec, nkTypeSec:
         ;   // no instance storage
     else
-      Exit;   // variant parts, class-var sections, anything else
+      Exit;   // class-var sections, anything else
     end;
     LChild := LM.Tree.Nodes[LChild].NextSibling;
   end;
@@ -1295,6 +1308,155 @@ begin
     Exit;
   ABytes := ((LOffset + LMaxAlign - 1) div LMaxAlign) * LMaxAlign;
   AAlign := LMaxAlign;
+  Result := True;
+end;
+
+{ A `case … of` variant part, laid out from AStart. Three rules, all measured
+  by printing real field OFFSETS rather than inferring them from sizes:
+
+  1. a NAMED tag occupies storage, placed with its own alignment — but it does
+     NOT contribute to the record's alignment. `record A: Byte;
+     case T: Int64 of 0: (X: Byte); end` puts T at 8, X at 16 and is 17 bytes
+     long: an odd size, so nothing rounded it. An UNNAMED tag
+     (`case Integer of`) occupies nothing at all.
+  2. every branch starts at the SAME offset, aligned to the largest alignment
+     among the fields declared directly at this level — not counting a nested
+     variant's fields. That is what separates `case of 0: (P: Byte; Q: Int64)`
+     (both at this level, so the part starts at 8) from
+     `case of 0: (X: Byte; case of 0: (Q: Int64))` (X alone here, so the part
+     starts at 1 and the NESTED one starts at 8).
+  3. the part's extent is the furthest any branch reaches. }
+function TPasSemaProject.OracleVariantLayout(AMid, APartNode, ADepth, ACap,
+  AStart: Integer; out AEnd, AAlign: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LChild, LTagType, LBranch, LSub, LCount, LBase, LPos, LNested: Integer;
+  LSize: Double;
+  LOneAlign, LUse, LNestEnd, LNestAlign: Integer;
+
+  // The fields declared DIRECTLY in a branch (a nested variant's are not).
+  function LevelAlignOf: Integer;
+  var
+    LB, LF, LT: Integer;
+    LS: Double;
+    LA: Integer;
+  begin
+    Result := 1;
+    LB := LM.Tree.Nodes[APartNode].FirstChild;
+    while LB <> NIL_NODE do
+    begin
+      if LM.Tree.Nodes[LB].Kind = nkVariantBranch then
+      begin
+        LF := LM.Tree.Nodes[LB].FirstChild;
+        while LF <> NIL_NODE do
+        begin
+          if LM.Tree.Nodes[LF].Kind = nkVarDecl then
+          begin
+            LT := LM.Tree.Nodes[LF].FirstChild;
+            if LT <> NIL_NODE then
+            begin
+              while LM.Tree.Nodes[LT].NextSibling <> NIL_NODE do
+                LT := LM.Tree.Nodes[LT].NextSibling;
+              if OracleFieldLayout(AMid, LT, ADepth, LS, LA) then
+              begin
+                if Min(LA, ACap) > Result then
+                  Result := Min(LA, ACap);
+              end
+              else
+                Exit(-1);   // a field we cannot size: refuse the whole part
+            end;
+          end;
+          LF := LM.Tree.Nodes[LF].NextSibling;
+        end;
+      end;
+      LB := LM.Tree.Nodes[LB].NextSibling;
+    end;
+  end;
+
+begin
+  AEnd := AStart;
+  AAlign := 1;
+  Result := False;
+  if ADepth > 16 then
+    Exit;
+  LM := FModels[AMid];
+  LChild := LM.Tree.Nodes[APartNode].FirstChild;
+  if LChild = NIL_NODE then
+    Exit;
+  // Children are [tag name] tag-type branch... — the name is there only when
+  // the SECOND child is not already a branch.
+  LTagType := LChild;
+  if (LM.Tree.Nodes[LChild].Kind = nkIdent) and
+     (LM.Tree.Nodes[LChild].NextSibling <> NIL_NODE) and
+     (LM.Tree.Nodes[LM.Tree.Nodes[LChild].NextSibling].Kind <>
+      nkVariantBranch) then
+  begin
+    // A NAMED tag: it is a real field. Place it, but keep it out of AAlign.
+    LTagType := LM.Tree.Nodes[LChild].NextSibling;
+    if not OracleFieldLayout(AMid, LTagType, ADepth, LSize, LOneAlign) then
+      Exit;
+    LUse := Min(LOneAlign, ACap);
+    AEnd := ((AEnd + LUse - 1) div LUse) * LUse + Trunc(LSize);
+  end;
+
+  LOneAlign := LevelAlignOf;
+  if LOneAlign < 0 then
+    Exit;
+  AAlign := LOneAlign;
+  LBase := ((AEnd + LOneAlign - 1) div LOneAlign) * LOneAlign;
+  AEnd := LBase;
+
+  LBranch := LM.Tree.Nodes[APartNode].FirstChild;
+  while LBranch <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LBranch].Kind = nkVariantBranch then
+    begin
+      LPos := LBase;
+      LSub := LM.Tree.Nodes[LBranch].FirstChild;
+      while LSub <> NIL_NODE do
+      begin
+        case LM.Tree.Nodes[LSub].Kind of
+          nkVarDecl:
+            begin
+              LCount := 0;
+              LNested := LM.Tree.Nodes[LSub].FirstChild;
+              if LNested = NIL_NODE then
+                Exit;
+              while LM.Tree.Nodes[LNested].NextSibling <> NIL_NODE do
+              begin
+                Inc(LCount);
+                LNested := LM.Tree.Nodes[LNested].NextSibling;
+              end;
+              if (LCount = 0) or
+                 not OracleFieldLayout(AMid, LNested, ADepth, LSize,
+                   LOneAlign) then
+                Exit;
+              LUse := Min(LOneAlign, ACap);
+              for var LN := 1 to LCount do
+              begin
+                LPos := ((LPos + LUse - 1) div LUse) * LUse;
+                LPos := LPos + Trunc(LSize);
+              end;
+            end;
+          nkVariantPart:
+            begin
+              if not OracleVariantLayout(AMid, LSub, ADepth + 1, ACap, LPos,
+                   LNestEnd, LNestAlign) then
+                Exit;
+              LPos := LNestEnd;
+              if LNestAlign > AAlign then
+                AAlign := LNestAlign;
+            end;
+        else
+          ;   // branch LABELS are ordinary expressions; skip them
+        end;
+        LSub := LM.Tree.Nodes[LSub].NextSibling;
+      end;
+      if LPos > AEnd then
+        AEnd := LPos;
+    end;
+    LBranch := LM.Tree.Nodes[LBranch].NextSibling;
+  end;
   Result := True;
 end;
 
@@ -1353,45 +1515,89 @@ end;
 function TPasSemaProject.OracleOrdinalCount(AMid, ANode, ADepth: Integer;
   out ACount: Double): Boolean;
 var
+  LLo, LHi: Double;
+begin
+  Result := OracleOrdinalRange(AMid, ANode, ADepth, LLo, LHi);
+  if Result then
+    ACount := LHi - LLo + 1
+  else
+    ACount := 0;
+end;
+
+{ The ordinal BOUNDS of a type used as an array index or a set base. An array
+  only needs the count, but a set needs the bounds themselves: its storage is
+  the byte SPAN from Lo to Hi, so `set of 8..15` is one byte while
+  `set of 0..8` is two. }
+function TPasSemaProject.OracleOrdinalRange(AMid, ANode, ADepth: Integer;
+  out ALo, AHi: Double): Boolean;
+
+  function EnumRange(AEMid, ADefNode: Integer): Boolean;
+  var
+    LChild: Integer;
+  begin
+    // Implicit values only — an explicit one moves the RANGE, and the range
+    // is exactly what both callers need.
+    ALo := 0;
+    AHi := -1;
+    LChild := FModels[AEMid].Tree.Nodes[ADefNode].FirstChild;
+    while LChild <> NIL_NODE do
+    begin
+      if (FModels[AEMid].Tree.Nodes[LChild].Kind <> nkEnumValue) or
+         (FModels[AEMid].Tree.Nodes[LChild].FirstChild = NIL_NODE) or
+         (FModels[AEMid].Tree.Nodes[
+           FModels[AEMid].Tree.Nodes[LChild].FirstChild].NextSibling
+            <> NIL_NODE) then
+        Exit(False);
+      AHi := AHi + 1;
+      LChild := FModels[AEMid].Tree.Nodes[LChild].NextSibling;
+    end;
+    Result := AHi >= 0;
+  end;
+
+var
   LM: TPasSemaModel;
-  LLo, LHi, LMid2, LSym, LDef, LChild: Integer;
-  LLoV, LHiV: Double;
+  LLo, LHi, LMid2, LSym, LDef: Integer;
   LName: string;
 begin
-  ACount := 0;
-  LM := FModels[AMid];
-  if LM.Tree.Nodes[ANode].Kind = nkSubrange then
-  begin
-    LLo := LM.Tree.Nodes[ANode].FirstChild;
-    if LLo = NIL_NODE then
-      Exit(False);
-    LHi := LM.Tree.Nodes[LLo].NextSibling;
-    if LHi = NIL_NODE then
-      Exit(False);
-    if not OracleConstExpr(AMid, LLo, ADepth, LLoV) or
-       not OracleConstExpr(AMid, LHi, ADepth, LHiV) then
-      Exit(False);
-    ACount := LHiV - LLoV + 1;
-    Exit(True);
-  end;
-  if LM.Tree.Nodes[ANode].Kind <> nkIdent then
+  ALo := 0;
+  AHi := 0;
+  if ADepth > 8 then
     Exit(False);
+  LM := FModels[AMid];
+  case LM.Tree.Nodes[ANode].Kind of
+    nkSubrange:
+      begin
+        LLo := LM.Tree.Nodes[ANode].FirstChild;
+        if LLo = NIL_NODE then
+          Exit(False);
+        LHi := LM.Tree.Nodes[LLo].NextSibling;
+        Result := (LHi <> NIL_NODE) and
+          OracleConstExpr(AMid, LLo, ADepth, ALo) and
+          OracleConstExpr(AMid, LHi, ADepth, AHi);
+        Exit;
+      end;
+    nkEnumType:
+      Exit(EnumRange(AMid, ANode));   // an INLINE enum, as a set base
+    nkIdent: ;
+  else
+    Exit(False);
+  end;
   LName := LM.Tree.NodeText(ANode);
-  // The ordinal builtins that actually appear as an index.
+  // The ordinal builtins that actually appear as an index or a set base.
   if SameText(LName, 'Byte') or SameText(LName, 'AnsiChar') then
   begin
-    ACount := 256;
+    AHi := 255;
     Exit(True);
   end;
   if SameText(LName, 'Char') or SameText(LName, 'WideChar') or
      SameText(LName, 'Word') then
   begin
-    ACount := 65536;
+    AHi := 65535;
     Exit(True);
   end;
   if SameText(LName, 'Boolean') or SameText(LName, 'ByteBool') then
   begin
-    ACount := 2;
+    AHi := 1;
     Exit(True);
   end;
   // A named enum or subrange type.
@@ -1401,27 +1607,9 @@ begin
   if LDef = NIL_NODE then
     Exit(False);
   case FModels[LMid2].Tree.Nodes[LDef].Kind of
-    nkEnumType:
-      begin
-        // Implicit values only — an explicit one moves the RANGE, and the
-        // range is what an index spans.
-        ACount := 0;
-        LChild := FModels[LMid2].Tree.Nodes[LDef].FirstChild;
-        while LChild <> NIL_NODE do
-        begin
-          if (FModels[LMid2].Tree.Nodes[LChild].Kind <> nkEnumValue) or
-             (FModels[LMid2].Tree.Nodes[LChild].FirstChild = NIL_NODE) or
-             (FModels[LMid2].Tree.Nodes[
-               FModels[LMid2].Tree.Nodes[LChild].FirstChild].NextSibling
-                <> NIL_NODE) then
-            Exit(False);
-          ACount := ACount + 1;
-          LChild := FModels[LMid2].Tree.Nodes[LChild].NextSibling;
-        end;
-        Result := ACount > 0;
-      end;
+    nkEnumType: Result := EnumRange(LMid2, LDef);
     nkSubrange, nkIdent:
-      Result := OracleOrdinalCount(LMid2, LDef, ADepth + 1, ACount);
+      Result := OracleOrdinalRange(LMid2, LDef, ADepth + 1, ALo, AHi);
   else
     Result := False;
   end;
@@ -1583,10 +1771,50 @@ begin
         AAlign := Trunc(ABytes);
         Exit(True);
       end;
+    nkSetType:
+      begin
+        // A set stores the byte SPAN from its base type's Lo to its Hi --
+        // `set of 8..15` is one byte, `set of 0..8` is two. Below a machine
+        // word that span is rounded up to a power of two, above it it is
+        // exact: dcc-probed, span 3 is 4 bytes on both platforms, while span
+        // 5, 6 and 7 are 5, 6 and 7 on Win32 but all 8 on Win64. Always
+        // byte-aligned, whatever the size.
+        LLo := LM.Tree.Nodes[ATypeNode].FirstChild;
+        if (LLo = NIL_NODE) or
+           not OracleOrdinalRange(AMid, LLo, ADepth, LNum, LNum2) then
+          Exit(False);
+        // dcc caps a set base at 0..255; anything else is an error there, not
+        // a size we should invent.
+        if (LNum < 0) or (LNum2 > 255) or (LNum2 < LNum) then
+          Exit(False);
+        LLen := Trunc(LNum2) div 8 - Trunc(LNum) div 8 + 1;
+        if LLen <= FInfo.PointerBytes then
+          while (LLen and (LLen - 1)) <> 0 do
+            Inc(LLen);
+        ABytes := LLen;
+        AAlign := 1;
+        Exit(True);
+      end;
+    nkFileType:
+      begin
+        // `file` and `file of T` are both the same System record whatever T
+        // is (dcc-probed: identical sizes), so the honest answer is that
+        // record's -- looked up rather than hard-coded, since its size is an
+        // RTL fact that has moved between releases.
+        Result := OracleResolve(AMid, 'tfilerec', LRMid, LRSym) and
+          OracleLayout(LRMid, LRSym, ADepth + 1, ABytes, AAlign);
+        // Its SIZE only. TFileRec is declared `packed`, so laying it out
+        // gives an alignment of 1 -- but dcc aligns a file VARIABLE to a
+        // pointer regardless (a Byte before a `file of Byte` field is 596 on
+        // Win32, not 593). The packing describes the record's own offsets,
+        // not how the compiler's file type is placed.
+        AAlign := FInfo.PointerBytes;
+        Exit;
+      end;
   else
-    // A set, a file, a variant part — not modelled, refuse. (Set sizes round
-    // the byte span up to a power of two: 17 bits is 4 bytes, 200..255 is 8;
-    // the rule is probed but not pinned at every boundary, so it stays out.)
+    // A variant part reaches OracleRecordLayout, never here; anything else is
+    // a shape we do not model, and refusing keeps the caller's residual-$IF
+    // diagnostic honest.
     Exit(False);
   end;
   if LName = '' then
@@ -1594,6 +1822,16 @@ begin
   if PasBuiltinLayout(LName, FInfo.PointerBytes, FInfo.ExtendedBytes,
     ABytes, AAlign) then
     Exit(True);
+  // `Text` is a compiler intrinsic with no size in the table, and `TextFile`
+  // is System's alias for it. Both are that unit's TTextRec — looked up, not
+  // hard-coded, for the same reason TFileRec is.
+  if SameText(LName, 'Text') or SameText(LName, 'TextFile') then
+    if OracleResolve(AMid, 'ttextrec', LRMid, LRSym) and
+       OracleLayout(LRMid, LRSym, ADepth + 1, ABytes, AAlign) then
+    begin
+      AAlign := FInfo.PointerBytes;   // see the nkFileType branch above
+      Exit(True);
+    end;
   if OracleQualified(AMid, LName, LRMid, LRSym) then
     Exit(OracleLayout(LRMid, LRSym, ADepth + 1, ABytes, AAlign));
   // `System.X` where X is a builtin: System is the implicit unit and is not
