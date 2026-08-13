@@ -4056,7 +4056,9 @@ begin
     '  TBigEnum = (beA, beB);'#10 +   // same unit, forced to 4 by the state
     '{$MINENUMSIZE 1}'#10 +
     '  TPair = record A, B: Pointer; end;'#10 +
-    '  TMixedOra = record A: Byte; B: Int64; end;'#10 +   // sizes: refused
+    // An inline ARRAY field is what the layout walk still refuses (a mixed
+    // FIELD-SIZE record is computed for real now -- see the layout fixture).
+    '  TMixedOra = record A: Byte; Arr: array[0..2] of Integer; end;'#10 +
     'var'#10 +
     '  GTable: array[0..2] of Integer;'#10 +
     '{$IF KAlias}'#10 +
@@ -4091,7 +4093,7 @@ begin
     '{$IF KStr <> ''NOPE''}'#10 +
     'type TTookStrCase = class end;'#10 +
     '{$ENDIF}'#10 +
-    // The residual the flag test below needs: a record layout tier 1 refuses
+    // The residual the flag test below needs: a layout shape the walk refuses
     // to guess, so this guard is still open after the second pass.
     '{$IF SizeOf(TMixedOra) > 8}'#10 +
     'type TTookMixed = class end;'#10 +
@@ -4161,7 +4163,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitExotic.pas'),
     'unit UnitExotic;'#10'interface'#10 +
     'type'#10 +
-    '  TMixed = record A: Byte; B: Int64; end;'#10 +   // mixed sizes: refused
+    // An inline array field: a layout shape the walk refuses to model.
+    '  TMixed = record A: Byte; Arr: array[0..2] of Integer; end;'#10 +
     'const'#10 +
     '  KStr = ''text'';'#10 +
     'implementation'#10 +
@@ -4200,6 +4203,90 @@ begin
       (DiagSeverityLabel('PPIF') = 'Warning') and
       (DiagSeverityLabel('PPBAD') = 'Error') and
       (DiagSeverityLabel('E2003') = 'Error'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- RECORD LAYOUT. Every number below was produced by compiling a .dpr
+  // full of these shapes for WIN32 and printing SizeOf at run time -- this
+  // fixture is that output transcribed, not a model checked against itself.
+  // Each guard declares a marker type, so a refusal (or a wrong size) shows up
+  // as a missing symbol rather than a silent pass. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_iflayout');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitLayout.pas'),
+    'unit UnitLayout;'#10'interface'#10 +
+    'type'#10 +
+    '  TInner8 = record X: Int64; end;'#10 +
+    '  TMeth = record Code, Data: Pointer; end;'#10 +
+    '  TR01 = record A: Byte; B: Int64; end;'#10 +          // 16: padded to 8
+    '  TR03 = record A: Integer; B: Byte; end;'#10 +        // 8: TRAILING pad
+    '  TR05 = record A: Word; B: Byte; C: Word; end;'#10 +  // 6
+    '  TR06 = record A: Pointer; B: Byte; end;'#10 +        // 8 on Win32
+    '  TR07 = packed record A: Byte; B: Int64; end;'#10 +   // 9: no padding
+    '  TR08 = record A: Byte; N: TInner8; end;'#10 +        // 16: nested align
+    '  TR12 = record A: Byte; B: Extended; end;'#10 +       // 24: size 10/al 8
+    '  TR13 = record A: Char; B: AnsiChar; end;'#10 +       // 4
+    '  TR16 = record A: Byte; M: TMeth; end;'#10 +          // 12
+    '  TR19 = record A, B: Byte; C: Integer; end;'#10 +     // 8: shared decl
+    '  TR20 = record A: Currency; B: Byte; end;'#10 +       // 16
+    '{$A1}'#10 +
+    '  TA1 = record A: Byte; B: Int64; end;'#10 +           // 9
+    '{$A2}'#10 +
+    '  TA2 = record A: Byte; B: Int64; end;'#10 +           // 10
+    '{$A4}'#10 +
+    '  TA4 = record A: Byte; B: Int64; end;'#10 +           // 12
+    '{$A16}'#10 +
+    '  TA16 = record A: Byte; B: Int64; end;'#10 +          // 16: caps at 8
+    '{$A8}'#10 +
+    '  TNest1 = record A: Byte; N: TA1; end;'#10 +          // 10: TA1 aligns 1
+    // Two shapes the walk does NOT model. They must REFUSE, not guess: the
+    // guard is written so that a wrong answer of any kind declares the type.
+    '  TArrF = record A: Byte; Arr: array[0..2] of Integer; end;'#10 +
+    '  TStrF = record A: Byte; S: string; end;'#10 +
+    '{$IF SizeOf(TR01) = 16}type M01 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TR03) = 8}type M03 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TR05) = 6}type M05 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TR06) = 8}type M06 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TR07) = 9}type M07 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TR08) = 16}type M08 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TR12) = 24}type M12 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TR13) = 4}type M13 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TR16) = 12}type M16 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TR19) = 8}type M19 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TR20) = 16}type M20 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TA1) = 9}type MA1 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TA2) = 10}type MA2 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TA4) = 12}type MA4 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TA16) = 16}type MA16 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TNest1) = 10}type MNest = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TArrF) <> 0}type MArr = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TStrF) <> 0}type MStr = class end;{$IFEND}'#10 +
+    'implementation'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportGuessedIfs := True;
+    GProj.AnalyzeDirectory(LDir);
+    var LLay := ModelByName('unitlayout');
+    var LMissing := '';
+    for var LM in ['m01', 'm03', 'm05', 'm06', 'm07', 'm08', 'm12', 'm13',
+                   'm16', 'm19', 'm20', 'ma1', 'ma2', 'ma4', 'ma16', 'mnest'] do
+      if SymCountOf(LLay, LM, skType) <> 1 then
+        LMissing := LMissing + ' ' + LM;
+    Ok('1.3.2 layout: all 16 dcc-measured record sizes reproduce (missing:' +
+      LMissing + ')', LMissing = '');
+    Ok('1.3.2 layout: an inline ARRAY field refuses rather than guessing',
+      (SymCountOf(LLay, 'marr', skType) = 0) and
+      DiagHasText(LLay, 'PPIF', 'SizeOf(TArrF)'));
+    Ok('1.3.2 layout: a `string` field refuses too -- a managed field is not '
+      + 'in the size table', (SymCountOf(LLay, 'mstr', skType) = 0) and
+      DiagHasText(LLay, 'PPIF', 'SizeOf(TStrF)'));
+    Ok('1.3.2 layout: the two refusals are the ONLY residuals',
+      DiagCount(LLay, 'PPIF') = 2);
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

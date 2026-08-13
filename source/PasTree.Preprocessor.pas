@@ -105,6 +105,20 @@ type
     Bytes: Integer;   // 1, 2 or 4
   end;
 
+  // One {$A}/{$ALIGN} state change, positioned exactly like the two above and
+  // for the same reason: a record's SIZE depends on the alignment cap at ITS
+  // declaration site, and a unit routinely brackets one type with it.
+  //
+  // The value is the CAP on any single field's alignment, not a forced
+  // alignment: dcc-probed, `{$ALIGN 16}` and `{$ALIGN 8}` produce identical
+  // layouts because no builtin's natural alignment exceeds 8, while
+  // {$ALIGN 4/2/1} really do shrink it. {$A-} is {$A1} and {$A+} is {$A8},
+  // dcc's own equivalences.
+  TPasAlignEvent = record
+    VisIndex: Integer;
+    Bytes: Integer;   // 1, 2, 4, 8 or 16
+  end;
+
   // What an oracle hands back for a symbol question. A constant is not always
   // a number: the version-guard idiom compares STRINGS -- Indy's
   // `$IF gsIdVersion >= '10.5.5'` -- and a numeric-only answer has to refuse
@@ -151,6 +165,9 @@ type
     // {$Z}/{$MINENUMSIZE} state changes, ascending by VisIndex; empty for
     // the overwhelming majority of units (the default is 1).
     MinEnumEvents: TArray<TPasMinEnumEvent>;
+    // {$A}/{$ALIGN} state changes, ascending by VisIndex; empty for the
+    // overwhelming majority of units (the default is 8).
+    AlignEvents: TArray<TPasAlignEvent>;
     function VisibleToken(AIndex: Integer): TPasToken;
     function VisibleText(AIndex: Integer): string;
     function IsSkipped(AFileId, AOffset: Integer): Boolean;
@@ -159,6 +176,8 @@ type
     function ScopedEnumsAt(AVisIndex: Integer): Boolean;
     // The minimum-enum-size in effect at AVisIndex (1 = the default).
     function MinEnumSizeAt(AVisIndex: Integer): Integer;
+    // The record field-alignment CAP in effect at AVisIndex (8 = the default).
+    function AlignAt(AVisIndex: Integer): Integer;
   end;
 
   TPasDefines = class
@@ -220,6 +239,7 @@ type
     Rtti: TPasRttiState;
     VarPropSetter: Boolean;
     MinEnumSize: Integer;
+    Align: Integer;
   end;
 
   TPasPreprocessor = class
@@ -234,6 +254,8 @@ type
     FVarPropSetter: Boolean;
     FMinEnumSize: Integer;
     FMinEnumEvents: TList<TPasMinEnumEvent>;
+    FAlign: Integer;
+    FAlignEvents: TList<TPasAlignEvent>;
     FSwitchStack: TStack<TPasOptState>;
     FFileNames: TList<string>;
     FFiles: TList<TPasTokenStream>;
@@ -269,6 +291,7 @@ type
     procedure ApplyLongSwitch(const AName, AArg: string);
     procedure SetScopedEnums(AValue: Boolean);
     procedure SetMinEnumSize(AValue: Integer);
+    procedure SetAlign(AValue: Integer);
     procedure ApplyRtti(const AArg: string);
     function EvalIfExpression(const AExpr: string; AFileId: Integer;
       const AToken: TPasToken): Boolean;
@@ -472,6 +495,27 @@ begin
   end;
 end;
 
+function TPasPreprocessed.AlignAt(AVisIndex: Integer): Integer;
+var
+  LLo, LHi, LMid: Integer;
+begin
+  // Greatest event with VisIndex <= AVisIndex; none -> the {$A8} default.
+  Result := 8;
+  LLo := 0;
+  LHi := High(AlignEvents);
+  while LLo <= LHi do
+  begin
+    LMid := (LLo + LHi) div 2;
+    if AlignEvents[LMid].VisIndex <= AVisIndex then
+    begin
+      Result := AlignEvents[LMid].Bytes;
+      LLo := LMid + 1;
+    end
+    else
+      LHi := LMid - 1;
+  end;
+end;
+
 { TPasDefines ---------------------------------------------------------------- }
 
 constructor TPasDefines.Create;
@@ -534,6 +578,7 @@ begin
   FSwitchStack := TStack<TPasOptState>.Create;
   FScopedEnumsEvents := TList<TPasScopedEnumsEvent>.Create;
   FMinEnumEvents := TList<TPasMinEnumEvent>.Create;
+  FAlignEvents := TList<TPasAlignEvent>.Create;
   FFileNames := TList<string>.Create;
   FFiles := TList<TPasTokenStream>.Create;
   FVisible := TList<TPasVisibleToken>.Create;
@@ -607,6 +652,7 @@ begin
   FFileNames.Free;
   FScopedEnumsEvents.Free;
   FMinEnumEvents.Free;
+  FAlignEvents.Free;
   FSwitchStack.Free;
   inherited;
 end;
@@ -701,6 +747,8 @@ begin
   FScopedEnumsEvents.Clear;
   FMinEnumSize := 1;             // dcc default ({$Z1}); unit-local likewise
   FMinEnumEvents.Clear;
+  FAlign := 8;                   // dcc default ({$A8}); unit-local likewise
+  FAlignEvents.Clear;
   FRttiState := Default(TPasRttiState);   // Mode = rmInherit, the dcc default
   FVarPropSetter := False;                // dcc default: OFF (13.1.6)
 
@@ -731,6 +779,7 @@ begin
   Result.UnresolvedDeclared := FUnresolvedDeclared.ToArray;
   Result.UnresolvedSymbols := FUnresolvedSymbols.ToArray;
   Result.MinEnumEvents := FMinEnumEvents.ToArray;
+  Result.AlignEvents := FAlignEvents.ToArray;
   SetLength(Result.Skipped, FSkipped.Count);
   for LIdx := 0 to FSkipped.Count - 1 do
     Result.Skipped[LIdx] := FSkipped[LIdx].ToArray;
@@ -912,6 +961,7 @@ begin
     LOpt.Rtti := FRttiState;
     LOpt.VarPropSetter := FVarPropSetter;
     LOpt.MinEnumSize := FMinEnumSize;
+    LOpt.Align := FAlign;
     FSwitchStack.Push(LOpt);
   end
   else if LName = 'POPOPT' then
@@ -924,6 +974,7 @@ begin
       FRttiState := LOpt.Rtti;
       FVarPropSetter := LOpt.VarPropSetter;
       SetMinEnumSize(LOpt.MinEnumSize);
+      SetAlign(LOpt.Align);
     end
     else
       Diag(ppPopWithoutPush, AFileId, AToken.Start, AToken.Len);
@@ -999,6 +1050,12 @@ begin
           SetMinEnumSize(4)
         else
           SetMinEnumSize(1);
+      // {$A+} is {$A8} and {$A-} is {$A1}, the same shape one switch over.
+      if LSwitch = 'A' then
+        if ABody[LIdx + 1] = '+' then
+          SetAlign(8)
+        else
+          SetAlign(1);
       LIdx := LIdx + 2;
       // Comma-separated list: {$O+,W-}
       while (LIdx <= Length(ABody)) and
@@ -1016,8 +1073,30 @@ begin
         CharInSet(ABody[LIdx], [',', ' ', #9]) do
         Inc(LIdx);
     end
+    else if (LSwitch = 'A') and (LIdx + 1 <= Length(ABody)) and
+            CharInSet(ABody[LIdx + 1], ['1', '2', '4', '8']) then
+    begin
+      // {$A1/2/4/8/16}: the record field-alignment cap, tracked positionally
+      // (see TPasAlignEvent). Two digits only for 16, and 16 caps nothing a
+      // builtin can exceed — it lands on the same layout as 8, but it is
+      // recorded as written rather than normalized.
+      if (ABody[LIdx + 1] = '1') and (LIdx + 2 <= Length(ABody)) and
+         (ABody[LIdx + 2] = '6') then
+      begin
+        SetAlign(16);
+        LIdx := LIdx + 3;
+      end
+      else
+      begin
+        SetAlign(Ord(ABody[LIdx + 1]) - Ord('0'));
+        LIdx := LIdx + 2;
+      end;
+      while (LIdx <= Length(ABody)) and
+        CharInSet(ABody[LIdx], [',', ' ', #9]) do
+        Inc(LIdx);
+    end
     else
-      Exit; // {$R *.res}, {$A8} etc. — no state to track
+      Exit; // {$R *.res} etc. — no state to track
   end;
 end;
 
@@ -1067,6 +1146,20 @@ begin
     // TPasMinEnumEvent.
     if (Length(AArg) = 1) and CharInSet(AArg[1], ['1', '2', '4']) then
       SetMinEnumSize(Ord(AArg[1]) - Ord('0'));
+  end
+  else if AName = 'ALIGN' then
+  begin
+    // The long form of {$A1/2/4/8/16}, plus ON/OFF for {$A+}/{$A-}.
+    // Positional — see TPasAlignEvent. dcc rejects any other value (E1030 on
+    // `{$ALIGN 32}`), so an unrecognized argument changes nothing rather than
+    // inventing a cap.
+    if SameText(AArg, 'ON') then
+      SetAlign(8)
+    else if SameText(AArg, 'OFF') then
+      SetAlign(1)
+    else if (AArg = '1') or (AArg = '2') or (AArg = '4') or (AArg = '8') or
+            (AArg = '16') then
+      SetAlign(StrToInt(AArg));
   end
   else if AName = 'VARPROPSETTER' then
   begin
@@ -1251,6 +1344,19 @@ begin
   LEvent.VisIndex := FVisible.Count;
   LEvent.Bytes := AValue;
   FMinEnumEvents.Add(LEvent);
+end;
+
+// Same journaling contract again, for {$A}/{$ALIGN}. See TPasAlignEvent.
+procedure TPasPreprocessor.SetAlign(AValue: Integer);
+var
+  LEvent: TPasAlignEvent;
+begin
+  if FAlign = AValue then
+    Exit;
+  FAlign := AValue;
+  LEvent.VisIndex := FVisible.Count;
+  LEvent.Bytes := AValue;
+  FAlignEvents.Add(LEvent);
 end;
 
 // The `$IF`/`$ELSEIF` expression: parsed by the REAL parser and evaluated by
