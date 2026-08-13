@@ -4780,7 +4780,23 @@ var
                 LX[N] := DeclTypeX(LExt.UnitId, LExt.Sym);
               skType, skBuiltinType:
                 LX[N] := XPlain(LExt.UnitId, LExt.Sym);
-            end;
+            end
+          // `Self` (11.3.3) has NO symbol — nothing declares it, so both maps
+          // above are empty for it and its type has to come from the enclosing
+          // struct instead, exactly as WithTargetTypeX already does for
+          // `with Self.X do`. Without this the nkMember branch below sees an
+          // invalid qualifier type, never runs FindMemberX, and the member in
+          // `Self.FX` stays unbound — navigation and every RefMap consumer
+          // lose it, even though the bare `FX` spelling right beside it binds
+          // fine. Costs nothing on the hot path: guarded by RefMap and
+          // ExtRefMap both having missed, which for an ordinary identifier
+          // they do not.
+          else if SameText(LM.Tree.NodeText(N), 'Self') then
+          begin
+            LSym := StructSymOfNode(LM, N);
+            if LSym <> NIL_SYM then
+              LX[N] := XPlain(AId, LSym);
+          end;
           // A bare name reached through a GENERIC ancestor is declared in that
           // ancestor's OPEN parameters — `class property Statics: S` on
           // `TWinRTGenericImportS<S>` — so the declared type read above IS that

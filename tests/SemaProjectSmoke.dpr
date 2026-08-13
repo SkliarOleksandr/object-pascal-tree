@@ -3815,6 +3815,83 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  // ---- 9.4.2 (13.0), the half SemaSmoke's own case cannot reach: the
+  // EXPLICIT `Self.FX` spelling inside a PARAMETERLESS operator. Needs the
+  // project pipeline, and for a reason already written down (batch 6): a
+  // qualifier's member scope is populated by the cross/inherited passes,
+  // never by Phase 1 -- bare Analyze leaves `Self.FX`'s FX unresolved even
+  // for an ordinary class method, so asserting it there would pin a
+  // limitation instead of the rule.
+  //
+  // `Self` itself is asserted only through E2003's SILENCE, never through
+  // RefMap: nothing declares it (11.3.3), so it deliberately has no symbol
+  // at all and is name-exempted from E2003 -- its TYPE comes from
+  // StructSymOfNode. So "does Self work" can only be observed HERE, through
+  // whether the member hanging off it resolves. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_implicitself');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitSelfOp.pas'),
+    'unit UnitSelfOp;'#10'interface'#10 +
+    'type'#10 +
+    '  TG = record'#10 +
+    '    FX: Integer;'#10 +
+    '    class operator Initialize;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'class operator TG.Initialize;'#10 +
+    'begin'#10 +
+    '  FX := 0;'#10 +          // implicit Self, the bare spelling
+    '  Self.FX := 1;'#10 +     // the EXPLICIT one -- the point of this case
+    'end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitSelfCmp.pas'),
+    'unit UnitSelfCmp;'#10'interface'#10 +
+    'type'#10 +
+    '  TH = record'#10'    FY: Integer;'#10'    procedure Bar;'#10'  end;'#10 +
+    '  TCls = class'#10'    FZ: Integer;'#10'    procedure Baz;'#10'  end;'#10 +
+    'implementation'#10 +
+    'procedure TH.Bar;'#10'var V: TH;'#10 +
+    'begin'#10'  V.FY := 1;'#10'  Self.FY := 2;'#10'end;'#10 +
+    'procedure TCls.Baz;'#10'var C: TCls;'#10 +
+    'begin'#10'  C.FZ := 1;'#10'  Self.FZ := 2;'#10'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    var LSelfOp := ModelByName('unitselfop');
+    Ok('9.4.2: no E2003 for Self in a parameterless operator body -- it has '
+      + 'no symbol by design, so silence is the assertion',
+      DiagCount(LSelfOp, 'E2003') = 0);
+    Ok('9.4.2: FX binds through the implicit Self in BOTH spellings -- bare '
+      + 'and Self.FX', LocalRefCount(LSelfOp, 'FX') = 2);
+
+    // ---- 11.3.3, the general rule the 9.4.2 case above sits on and the
+    // reason it can assert 2 rather than 1: `Self.Member` now BINDS.
+    // Found while probing 9.4.2 -- `Self` has no symbol (nothing declares
+    // it), so CrossType's qualifier-type lookup dead-ended and the member
+    // hanging off it was never bound, while the bare spelling right beside
+    // it bound fine. It was never a false E2003 (the member-report branch
+    // is gated on a KNOWN qualifier type, which is exactly what was
+    // missing), just a silently absent binding -- so the cost was
+    // navigation and every other RefMap consumer, on every `Self.X` in
+    // every method. Both control spellings (`V.FY` through an ordinary
+    // record variable, `C.FZ` through a class one) already bound before
+    // the fix and are here so the case cannot pass vacuously. ----
+    var LCmp := ModelByName('unitselfcmp');
+    Ok('11.3.3: in a RECORD method, both V.FY and Self.FY bind',
+      LocalRefCount(LCmp, 'FY') = 2);
+    Ok('11.3.3: in a CLASS method, both C.FZ and Self.FZ bind',
+      LocalRefCount(LCmp, 'FZ') = 2);
+    Ok('11.3.3: and Self itself still raises no E2003 -- it has no symbol '
+      + 'by design', DiagCount(LCmp, 'E2003') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
 end.

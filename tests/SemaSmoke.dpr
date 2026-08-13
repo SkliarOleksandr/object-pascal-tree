@@ -2341,6 +2341,42 @@ begin
     AllRefsResolved('False'));
   GModel.Free;
 
+  // ---- 9.4.2 (13.0) the PARAMETERLESS Initialize/Finalize's semantic half:
+  // with no `(var X: T)` parameter there is nothing NAMING the instance, so
+  // the body reaches the record's own members purely through the IMPLICIT
+  // Self -- i.e. through the member-scope join CollectRoutine does off the
+  // `TG.` qualifier, which owes nothing to the parameter list. That is
+  // exactly the claim worth pinning: dropping the parameter (13.0's whole
+  // change) must not cost the body its members. ParserSmoke's own 9.4.2 row
+  // pins the parse shape; this is the resolver half.
+  //
+  // Probe-verified against dcc32 37.0 FIRST (bare `FX` and `Self.FX` both
+  // compile clean inside a parameterless `class operator TG.Initialize`),
+  // then isolated here against an ordinary record method and a class method
+  // to confirm the operator is not a special case -- it is not.
+  //
+  // `Self` ITSELF is deliberately NOT asserted via AllRefsResolved: nothing
+  // declares it (11.3.3), so it never lands in RefMap at all and is
+  // explicitly exempted from E2003 -- see PasTree.Sema.Project's own
+  // "`Self` has no symbol" comment, where its TYPE is answered by
+  // StructSymOfNode instead. Same shape as batch 7's `nil` finding: a name
+  // the resolver models WITHOUT a symbol needs a different instrument. The
+  // `Self.FX` spelling is asserted in SemaProjectSmoke, where a member
+  // access through a qualifier actually has its scope populated.
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10'  TG = record'#10'    FX: Integer;'#10 +
+    '    class operator Initialize;'#10 +
+    '    procedure Bar;'#10'  end;'#10 +
+    'implementation'#10 +
+    'class operator TG.Initialize;'#10'begin'#10'  FX := 0;'#10'end;'#10 +
+    'procedure TG.Bar;'#10'begin'#10'  FX := 1;'#10'end;'#10 +
+    'end.'#10);
+  Ok('9.4.2: a PARAMETERLESS operator''s body still sees the record''s own '
+    + 'members through the implicit Self', AllRefsResolved('FX'));
+  Ok('9.4.2: no E2003 in a parameterless Initialize body',
+    DiagCount('E2003') = 0);
+
   if GCounter.Finish('SemaSmoke') then
     ExitCode := 1;
   GPP.Free;

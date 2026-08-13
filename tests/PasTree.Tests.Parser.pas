@@ -473,7 +473,7 @@ const
        'Ident''B'') Ident''C'')) Ident''D'') Ident''E'')))'; ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..112] of TPasCaseRow = (
+  DECL_CASES: array[0..113] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1130,6 +1130,24 @@ const
        'Routine''operator''#class(Ident''Assign'' Params(Param(' +
        'Ident''Dest'' Ident''TR'') Param(AttrGroup(Attribute#ref(' +
        'Ident''Ref'')) Ident''Src'' Ident''TR''))))))'; ExpectDiags: 0),
+
+    // ---- 9.4.2 (13.0) the PARAMETERLESS Initialize/Finalize: before 13.0
+    // the explicit `(var X: T)` parameter was REQUIRED, from 13.0 it is
+    // optional and Self is implied. The spec asks a parser for exactly one
+    // thing here -- accept BOTH arities -- so this row is only half the
+    // rule; 9.4.1's row right above is the other half (same two operators
+    // WITH their parameters), and the pair is what pins it. dcc32 37.0
+    // probe-verified to accept this form before the row was written; the
+    // parser needed no change, a Routine simply has no Params child. ----
+    (Section: '9.4.2'; Name: 'parameterless Initialize/Finalize (implicit Self)';
+     Source: 'type TG = record'#13#10 +
+       '    class operator Initialize;'#13#10 +
+       '    class operator Finalize;'#13#10 +
+       '  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TG'' RecordType(' +
+       'Routine''operator''#class(Ident''Initialize'') ' +
+       'Routine''operator''#class(Ident''Finalize''))))';
+     ExpectDiags: 0),
 
     // ---- 12.1.1 single inheritance, standing alone ----
     (Section: '12.1.1'; Name: 'single inheritance';
