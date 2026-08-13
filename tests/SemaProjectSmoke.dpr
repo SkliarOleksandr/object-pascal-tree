@@ -3892,6 +3892,119 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  // ---- 18.5.1 inner-exception chaining, and 18.5.2 the RaisingException
+  // hook. The spec calls both "not new syntax" -- 18.5.1 is RTL members
+  // (`InnerException`/`BaseException`/`ToString`) reached by ordinary member
+  // access on an Exception-typed expression, 18.5.2 an ordinary virtual
+  // override -- so what an analyzer can actually assert is that the whole
+  // chain RESOLVES, which is exactly what nothing had ever pointed at.
+  //
+  // The load-bearing assertion is `Message` x3: it is reached once directly
+  // on the handler variable and twice THROUGH a link of the chain
+  // (`E.InnerException.Message`), so it only counts 3 if the intermediate
+  // property's own Exception type was carried through the member walk. One
+  // or two would mean the chain typed out halfway -- which is why the count
+  // is pinned rather than a bare "does Message resolve".
+  //
+  // Verified against dcc32 37.0 as a REAL program first (real System.SysUtils,
+  // not this stub): it compiles AND running it prints 'wrapped' then 'inner',
+  // confirming both that the shapes below are legal and the spec's own note
+  // that `ToString` concatenates the whole chain rather than one Message.
+  // The stub only has to declare enough for resolution; the semantics are
+  // runtime and out of a static analyzer's reach either way.
+  //
+  // 18.6.1 (a failing `Create` still runs `Destroy`) is deliberately NOT
+  // tested: by the spec's own words "not new syntax -- no parser impact;
+  // this is a runtime/codegen guarantee", so a test would assert nothing
+  // real. Same call as 19.4.1/19.4.2/20.5.1. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_excchain');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10 +
+    'type'#10 +
+    '  TObject = class end;'#10 +
+    '  PExceptionRecord = Pointer;'#10 +
+    '  Exception = class(TObject)'#10 +
+    '  private'#10'    FMessage: string;'#10 +
+    '  public'#10 +
+    '    constructor Create(const Msg: string);'#10 +
+    '    function ToString: string;'#10 +
+    '    class procedure RaiseOuterException(E: Exception);'#10 +
+    '    procedure RaisingException(P: PExceptionRecord); virtual;'#10 +
+    '    property Message: string read FMessage;'#10 +
+    '    property InnerException: Exception read FMessage;'#10 +
+    '    property BaseException: Exception read FMessage;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'constructor Exception.Create(const Msg: string); begin end;'#10 +
+    'function Exception.ToString: string; begin Result := ''''; end;'#10 +
+    'class procedure Exception.RaiseOuterException(E: Exception);'#10 +
+    'begin end;'#10 +
+    'procedure Exception.RaisingException(P: PExceptionRecord);'#10 +
+    'begin end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitChain.pas'),
+    'unit UnitChain;'#10'interface'#10 +
+    'type'#10 +
+    // 18.5.2: the RaisingException hook, an ordinary virtual override.
+    '  ECustom = class(Exception)'#10 +
+    '  protected'#10 +
+    '    procedure RaisingException(P: PExceptionRecord); override;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure ECustom.RaisingException(P: PExceptionRecord);'#10 +
+    'begin'#10 +
+    '  inherited RaisingException(P);'#10 +
+    'end;'#10 +
+    'procedure Consume;'#10'var S: string;'#10 +
+    'begin'#10 +
+    '  try'#10 +
+    '    Consume;'#10 +
+    '  except'#10 +
+    // 18.5.1's own raising API: a CLASS method reached on the type itself.
+    '    Exception.RaiseOuterException(ECustom.Create(''wrapped''));'#10 +
+    '  end;'#10 +
+    '  try'#10 +
+    '    Consume;'#10 +
+    '  except'#10 +
+    '    on E: Exception do'#10 +
+    '    begin'#10 +
+    '      S := E.Message;'#10 +
+    '      S := E.InnerException.Message;'#10 +
+    '      S := E.BaseException.Message;'#10 +
+    '      S := E.ToString;'#10 +
+    '    end;'#10 +
+    '  end;'#10 +
+    'end;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    var LCh := ModelByName('unitchain');
+    Ok('18.5.1: no E2003 anywhere in an inner-exception chain fixture',
+      DiagCount(LCh, 'E2003') = 0);
+    Ok('18.5.1: InnerException resolves on an Exception-typed handler variable',
+      CrossRefTo(LCh, 'InnerException', 'InnerException'));
+    Ok('18.5.1: BaseException resolves too -- the spec''s own distinction '
+      + 'from InnerException, and a separate member',
+      CrossRefTo(LCh, 'BaseException', 'BaseException'));
+    Ok('18.5.1: ToString resolves as a member, not the intrinsic',
+      CrossRefTo(LCh, 'ToString', 'ToString'));
+    Ok('18.5.1: Message resolves through EVERY link -- directly on the '
+      + 'handler AND through both chain properties',
+      CrossRefCountInUnit(LCh, 'Message', 'Message', 'system') = 3);
+    Ok('18.5.1: RaiseOuterException resolves as a class method on the TYPE',
+      CrossRefTo(LCh, 'RaiseOuterException', 'RaiseOuterException'));
+    Ok('18.5.2: an `inherited RaisingException(P)` in the override binds to '
+      + 'the ancestor''s virtual, cross-unit',
+      CrossRefTo(LCh, 'RaisingException', 'RaisingException'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
 end.
