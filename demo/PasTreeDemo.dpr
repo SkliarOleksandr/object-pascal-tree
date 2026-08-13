@@ -2,7 +2,11 @@ program PasTreeDemo;
 
 // PasTree demo host (VCL). Opens a Delphi project, parses it with PasTree and
 // shows source (SynEdit), the file tree (VirtualTrees), diagnostics and AST
-// JSON. Build with demo\build.bat (Win32; needs SynEdit + VirtualTreeView).
+// JSON. Build with demo\build.bat — WIN64 ONLY (needs SynEdit +
+// VirtualTreeView). A real project's closure does not fit 32 bits: see
+// demo\README.md for the measurement and for why a Win32 OOM disguises
+// itself as an analyzer defect. Every unit added to source\ must be listed
+// here AND in PasTreeDemo.dproj's DCCReference list.
 
 uses
   Vcl.Forms,
@@ -22,6 +26,7 @@ uses
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
   PasTree.Preprocessor in '..\source\PasTree.Preprocessor.pas',
+  PasTree.CondEval in '..\source\PasTree.CondEval.pas',
   PasTree.Platforms in '..\source\PasTree.Platforms.pas',
   PasTree.Ast in '..\source\PasTree.Ast.pas',
   PasTree.Ast.Json in '..\source\PasTree.Ast.Json.pas',

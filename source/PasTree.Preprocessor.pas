@@ -1,4 +1,4 @@
-unit PasTree.Preprocessor;
+﻿unit PasTree.Preprocessor;
 
 {
   PasTree — the preprocessor (spec: object-pascal-spec 1.3, B.2.2).

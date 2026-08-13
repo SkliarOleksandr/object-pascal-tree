@@ -228,7 +228,13 @@ var
   LState: TMemoryManagerState;
   LIdx: Integer;
 begin
+  // W1002 "specific to a platform": GetMemoryManagerState is the Windows
+  // FastMM-shaped accounting, which is the only target this repo builds for.
+  // Silenced locally rather than project-wide so a real portability warning
+  // elsewhere still shows.
+  {$WARN SYMBOL_PLATFORM OFF}
   GetMemoryManagerState(LState);
+  {$WARN SYMBOL_PLATFORM ON}
   Result := UInt64(LState.TotalAllocatedMediumBlockSize) +
             UInt64(LState.TotalAllocatedLargeBlockSize);
   for LIdx := 0 to High(LState.SmallBlockTypeStates) do

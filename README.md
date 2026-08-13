@@ -1429,13 +1429,26 @@ Still open, roughly in the order we're tackling it:
     those two axes distinct in the model rather than merging them into one list:
     "files the project declares" and "units the analysis reached" answer
     different questions, and the second is what the diagnostics are keyed to.
-- **A 64-bit build of `PasTreeSemaProject`, and of the demo.** Already needed:
-  the Win32 tool dies with `EOutOfMemory` on the client project once the registry search
-  paths are supplied (2631+ units, 168 MB of source), and the demo will hit the
-  same wall as projects grow. Nothing in the library is 32-bit-specific — it is
-  purely address space. Build the tool with
-  `dcc64 -U"%BDS%\lib\win64\release" -U..\source -NSSystem;System.Win;Winapi;Data;Xml -N0out64 -Eout64 PasTreeSemaProject.dpr`;
-  what is missing is making that the default rather than a manual step.
+- **A 64-bit build of `PasTreeSemaProject`.** ~~and of the demo~~ — **the demo
+  is Win64-only as of 2026-08-13** (`demo\build.bat` calls `dcc64`; see
+  `demo\README.md`, which records the requirement and why it is not a
+  preference). Nothing in the library is 32-bit-specific — it is purely
+  address space, and the figure is now measured rather than assumed: the
+  client project's closure (3750 units) **holds 3.5 GB**, printed on the
+  demo's `Done:` line and in the tool's report via
+  `PasTree.Types.AllocatedBytes`. That also rules out `LARGEADDRESSAWARE` as
+  a workaround (3.5 GB against a 4 GB ceiling).
+
+  A Win32 OOM is worth recognising by its *shape*, because it does not look
+  like what it is: every unit that fails to load gates its importers, so the
+  run reports tens of thousands of unresolved `uses`, suppresses every unit's
+  `E2003`, prints `0 diagnostics`, and files the OOM under
+  `INTERNAL: N unit(s) failed to parse — analyzer defect`. One cause, many
+  costumes.
+
+  Still open for the TOOL: build it with
+  `dcc64 -U"%BDS%\lib\win64\release" -U..\source -NSSystem;System.Win;Winapi;Data;Xml -N0out64 -Eout64 PasTreeSemaProject.dpr`
+  — what is missing is making that the default rather than a manual step.
 - **LSP/LSIF server.** The demo (VCL-hosted) is the only editor integration
   today; a Language Server Protocol server (live highlighting/navigation/
   diagnostics/rename/etc. over the same Sema/Nav layer) plus LSIF dump
