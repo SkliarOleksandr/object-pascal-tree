@@ -105,12 +105,30 @@ type
     Bytes: Integer;   // 1, 2 or 4
   end;
 
+  // What an oracle hands back for a symbol question. A constant is not always
+  // a number: the version-guard idiom compares STRINGS -- Indy's
+  // `$IF gsIdVersion >= '10.5.5'` -- and a numeric-only answer has to refuse
+  // those, which turns a decidable guard into a residual guess.
+  TPasSymbolValue = record
+    IsStr: Boolean;
+    Num: Double;
+    Str: string;
+    // Set when the oracle returned False because the NAME EXISTS NOWHERE, as
+    // opposed to "it exists but I cannot fold its value". The two are
+    // different questions: the first has a determined dcc answer to copy (see
+    // PasTree.CondEval's abort rules), the second is a genuine open question
+    // and the only one worth reporting. Only meaningful when the query
+    // returned False, and only trustworthy when the asking unit's imports all
+    // resolved -- a missing `uses` can hide a declaration.
+    NoSymbol: Boolean;
+  end;
+
   { Answers symbol questions from a `$IF` expression — the widened sibling of
     TPasDeclaredQuery, same three-state contract: the RESULT says whether the
-    oracle could answer at all, ANum is the answer when it could. Nil on the
+    oracle could answer at all, AValue is the answer when it could. Nil on the
     first pass; TPasSemaProject.SymbolQueryFor supplies it on the second. }
   TPasCondSymbolQuery = reference to function(AQuery: TPasSymbolQuery;
-    const AName: string; out ANum: Double): Boolean;
+    const AName: string; out AValue: TPasSymbolValue): Boolean;
 
   TPasPreprocessed = record
   public

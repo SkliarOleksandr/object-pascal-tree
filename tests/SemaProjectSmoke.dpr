@@ -4056,6 +4056,7 @@ begin
     '  TBigEnum = (beA, beB);'#10 +   // same unit, forced to 4 by the state
     '{$MINENUMSIZE 1}'#10 +
     '  TPair = record A, B: Pointer; end;'#10 +
+    '  TMixedOra = record A: Byte; B: Int64; end;'#10 +   // sizes: refused
     'var'#10 +
     '  GTable: array[0..2] of Integer;'#10 +
     '{$IF KAlias}'#10 +
@@ -4076,15 +4077,24 @@ begin
     '{$IF Length(GTable) = 3}'#10 +
     'type TTookLen = class end;'#10 +
     '{$ENDIF}'#10 +
-    // Strings are REFUSED on purpose (tier 1). A bare string guard is the
-    // shape that pins it: the first-pass guess is False (branch untaken),
-    // and an oracle that ANSWERED would flip it True ('nope' <> '') — so
-    // the type staying absent proves refusal, and if strings ever get
-    // answered this goes red and forces a conscious decision. (An equality
-    // guard would NOT pin it: `KStr = 'nope'` evaluates True under the
-    // GUESS too — 0 = 0 numerically — old evaluator parity.)
-    '{$IF KStr}'#10 +
+    // Strings ARE answered now, and this is the shape that pins it. dcc
+    // orders string constants for real and does it CASE-SENSITIVELY (probed:
+    // `$IF 'ABC' = 'abc'` takes the ELSE branch), which is what the
+    // version-guard idiom in the wild depends on — Indy's
+    // `$IF gsIdVersion >= '10.5.5'`. Both guards below are False under the
+    // first-pass guess and True only if the oracle really supplied the
+    // string, so the types cannot appear vacuously. The case guard is the
+    // one that would go red if the old SameText comparison came back.
+    '{$IF KStr >= ''10.5.5''}'#10 +
     'type TTookStr = class end;'#10 +
+    '{$ENDIF}'#10 +
+    '{$IF KStr <> ''NOPE''}'#10 +
+    'type TTookStrCase = class end;'#10 +
+    '{$ENDIF}'#10 +
+    // The residual the flag test below needs: a record layout tier 1 refuses
+    // to guess, so this guard is still open after the second pass.
+    '{$IF SizeOf(TMixedOra) > 8}'#10 +
+    'type TTookMixed = class end;'#10 +
     '{$ENDIF}'#10 +
     'implementation'#10'end.'#10);
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
@@ -4103,16 +4113,18 @@ begin
       SymCountOf(LOr, 'ttookxunit', skType) = 1);
     Ok('1.3.2 oracle: Length of a bounded array answers hi-lo+1',
       SymCountOf(LOr, 'ttooklen', skType) = 1);
-    Ok('1.3.2 oracle: a STRING const is refused, not guessed -- the branch '
-      + 'stays untaken', SymCountOf(LOr, 'ttookstr', skType) = 0);
-    // ReportGuessedIfs is OFF by default: the KStr residual above must NOT
-    // have produced a diagnostic -- the analysis is byte-identical.
+    Ok('1.3.2 oracle: a STRING const answers and ORDERS, like dcc',
+      SymCountOf(LOr, 'ttookstr', skType) = 1);
+    Ok('1.3.2 oracle: ...and compares CASE-SENSITIVELY, like dcc',
+      SymCountOf(LOr, 'ttookstrcase', skType) = 1);
+    // ReportGuessedIfs is OFF by default: the TMixedOra residual above must
+    // NOT have produced a diagnostic -- the analysis is byte-identical.
     Ok('1.3.2: ReportGuessedIfs off -- no PPIF diagnostics by default',
       DiagCount(LOr, 'PPIF') = 0);
   finally
     GProj.Free;
   end;
-  // Same fixture, flag ON: the one residual guess (the KStr guard) surfaces
+  // Same fixture, flag ON: the one residual guess (the TMixedOra guard) surfaces
   // as a PPIF diagnostic whose message carries the expression text -- the
   // exotica detector for foreign projects. The oracle-answered guards must
   // NOT appear: their units were re-decided and the second pass's flags are
@@ -4125,7 +4137,7 @@ begin
     Ok('1.3.2: ReportGuessedIfs on -- exactly the ONE residual guess reports',
       DiagCount(LOrOn, 'PPIF') = 1);
     Ok('1.3.2: ...and the message carries the expression text',
-      DiagHasText(LOrOn, 'PPIF', 'KStr'));
+      DiagHasText(LOrOn, 'PPIF', 'TMixedOra'));
     Ok('1.3.2: oracle-answered guards do NOT report -- the flag shows '
       + 'guesses, not questions', not DiagHasText(LOrOn, 'PPIF', 'KAlias'));
   finally
@@ -4139,7 +4151,7 @@ begin
   // is CONFIRMED, not open, and must stay silent -- `$IF Declared(X)` where X
   // is declared nowhere is ordinary platform-conditional code (SysInit's
   // TlsStart; 31 such sites on the RTL, every one of them normal). What must
-  // still report is anything genuinely undecidable, and the four shapes below
+  // still report is anything genuinely undecidable, and the shapes below
   // are the reachability proof: without them the filter could be silencing
   // everything and look identical on a clean corpus. ----
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_ifexotic');
@@ -4159,12 +4171,10 @@ begin
     '{$ENDIF}'#10 +
     // (b) SizeOf of a layout tier 1 refuses.
     '{$IF SizeOf(TMixed) > 8}'#10'procedure PB; begin end;'#10'{$ENDIF}'#10 +
-    // (c) a string-valued const in a boolean position.
-    '{$IF KStr}'#10'procedure PC; begin end;'#10'{$ENDIF}'#10 +
-    // (d) a function CondEval has no case for at all -- the callee is named
+    // (c) a function CondEval has no case for at all -- the callee is named
     //     so the report can say what it choked on.
-    '{$IF Ord(KStr[1]) > 64}'#10'procedure PD; begin end;'#10'{$ENDIF}'#10 +
-    // (e) an expression that does not parse: PPBAD, the source's own bug.
+    '{$IF Ord(KStr[1]) > 64}'#10'procedure PC; begin end;'#10'{$ENDIF}'#10 +
+    // (d) an expression that does not parse: PPBAD, the source's own bug.
     '{$IF 3 +}'#10'procedure PE; begin end;'#10'{$ENDIF}'#10 +
     'end.'#10);
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
@@ -4177,21 +4187,93 @@ begin
       not DiagHasText(LEx, 'PPIF', 'NeverAnywhere'));
     Ok('1.3.2 filter: SizeOf of a mixed-size record reports, naming it',
       DiagHasText(LEx, 'PPIF', 'SizeOf(TMixed)'));
-    Ok('1.3.2 filter: a string-valued const reports',
-      DiagHasText(LEx, 'PPIF', 'KStr'));
     Ok('1.3.2 filter: an unrecognized FUNCTION reports, naming the callee -- '
       + 'it records no question, so a naive "nothing open" test would have '
       + 'silenced it', DiagHasText(LEx, 'PPIF', 'Ord()'));
     Ok('1.3.2 filter: a malformed conditional is PPBAD, not PPIF',
       DiagHasText(LEx, 'PPBAD', '3 +') and (DiagCount(LEx, 'PPBAD') = 1));
-    Ok('1.3.2 filter: exactly the three undecidable guards report, no more',
-      DiagCount(LEx, 'PPIF') = 3);
+    Ok('1.3.2 filter: exactly the two undecidable guards report, no more',
+      DiagCount(LEx, 'PPIF') = 2);
     // Severity: ours-vs-theirs, so a host does not call our own limitation
     // an error in the user's code.
     Ok('1.3.2: PPIF labels as Warning, PPBAD as Error',
       (DiagSeverityLabel('PPIF') = 'Warning') and
       (DiagSeverityLabel('PPBAD') = 'Error') and
       (DiagSeverityLabel('E2003') = 'Error'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- dcc's ABORT RULES for a name that resolves NOWHERE (1.3.2 in the
+  // spec). Every guard below is a direct transcription of a probe: the .dpr
+  // was compiled with both branches printing a marker and RUN, on dcc64 36.0
+  // and 37.0 alike. The verdict is NOT "False because we could not tell" --
+  // dcc has a determined answer and these pin that we copy it. Each guard is
+  // asserted by the EXISTENCE of the type it guards, so none can pass
+  // vacuously, and the whole fixture must stay silent under ReportGuessedIfs:
+  // a copied verdict is parity, not a finding. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_ifabort');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitAbort.pas'),
+    'unit UnitAbort;'#10'interface'#10 +
+    // --- TRUE: the name sits in a numeric position, so dcc abandons the
+    //     whole expression with True and everything wrapped around it is
+    //     ignored.
+    '{$IF NOWHERE > 1}'#10'type TAbortRel = class end;'#10'{$ENDIF}'#10 +
+    '{$IF not (NOWHERE > 1)}'#10'type TAbortNot = class end;'#10'{$ENDIF}'#10 +
+    '{$IF (NOWHERE > 1) and False}'#10 +
+    'type TAbortAnd = class end;'#10'{$ENDIF}'#10 +
+    '{$IF NOWHERE + 1 = 1}'#10'type TAbortAdd = class end;'#10'{$ENDIF}'#10 +
+    '{$IF 1 shl NOWHERE = 2}'#10'type TAbortShl = class end;'#10'{$ENDIF}'#10 +
+    // --- FALSE: a boolean position, a string comparison, or a dotted name.
+    '{$IF NOWHERE}'#10'type TBareNo = class end;'#10'{$ENDIF}'#10 +
+    '{$IF not NOWHERE}'#10'type TNotNo = class end;'#10'{$ENDIF}'#10 +
+    '{$IF NOWHERE >= ''1.0''}'#10'type TStrNo = class end;'#10'{$ENDIF}'#10 +
+    '{$IF NOWHERE.Member > 1}'#10'type TDotNo = class end;'#10'{$ENDIF}'#10 +
+    // --- FALSE by SHORT-CIRCUIT: dcc goes left to right and never reaches
+    //     the name, so the abort never happens. This is the guard that would
+    //     break if the abort were applied bottom-up instead of in order.
+    '{$IF Defined(NOPEDEF) and (NOWHERE > 1)}'#10 +
+    'type TShortNo = class end;'#10'{$ENDIF}'#10 +
+    'implementation'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportGuessedIfs := True;
+    GProj.AnalyzeDirectory(LDir);
+    var LAb := ModelByName('unitabort');
+    Ok('1.3.2 abort: a nowhere-name in a RELATIONAL position takes the TRUE '
+      + 'branch, like dcc', SymCountOf(LAb, 'tabortrel', skType) = 1);
+    Ok('1.3.2 abort: ...and an enclosing `not` does not flip it',
+      SymCountOf(LAb, 'tabortnot', skType) = 1);
+    Ok('1.3.2 abort: ...nor does an `and False` after it',
+      SymCountOf(LAb, 'tabortand', skType) = 1);
+    Ok('1.3.2 abort: ARITHMETIC aborts to True too',
+      (SymCountOf(LAb, 'tabortadd', skType) = 1) and
+      (SymCountOf(LAb, 'tabortshl', skType) = 1));
+    Ok('1.3.2 abort: a BARE boolean position stays False',
+      (SymCountOf(LAb, 'tbareno', skType) = 0) and
+      (SymCountOf(LAb, 'tnotno', skType) = 0));
+    Ok('1.3.2 abort: a STRING comparison stays False',
+      SymCountOf(LAb, 'tstrno', skType) = 0);
+    Ok('1.3.2 abort: a DOTTED name stays False, never aborts',
+      SymCountOf(LAb, 'tdotno', skType) = 0);
+    Ok('1.3.2 abort: SHORT-CIRCUIT wins -- dcc never reaches the name, so no '
+      + 'abort happens', SymCountOf(LAb, 'tshortno', skType) = 0);
+    // A copied dcc verdict is parity, not a finding: eight of the nine guards
+    // above go silent. The DOTTED one is the deliberate exception. dcc's own
+    // answer there is either False (unknown prefix) or a hard E2003 (known
+    // unit, missing member), so we could copy False -- but only if our
+    // qualified-name resolution is right, and when it is wrong the cost is a
+    // silently mis-taken branch instead of a visible question. Reporting is
+    // the safer half of that trade, so the dot stays a finding on purpose.
+    Ok('1.3.2 abort: copied verdicts are silent -- only the dotted name, kept '
+      + 'as an honest unknown, still reports',
+      (DiagCount(LAb, 'PPIF') = 1) and
+      DiagHasText(LAb, 'PPIF', 'NOWHERE.Member'));
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

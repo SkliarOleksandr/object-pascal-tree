@@ -322,6 +322,25 @@ begin
           begin
             Inc(LOther);
             Bump(LOutProj, LName);
+            // The one exception to counted-not-listed below: the residual-$IF
+            // codes are what -ifs exists to show, they live almost entirely in
+            // LIBRARY units (FastMM4, Indy, third-party suites), and there are
+            // a handful of them — so "one site per name" would hide all but
+            // the first. Listing them needs -list as well, like everything
+            // else that prints per site.
+            if GList and GIfs and ((LM.Diags[LDIdx].Code = 'PPIF') or
+               (LM.Diags[LDIdx].Code = 'PPBAD')) then
+            begin
+              LFileId := LM.Diags[LDIdx].FileId;
+              if (LFileId >= 0) and
+                 (LFileId <= High(LM.Tree.Source.FileNames)) then
+                LFile := LM.Tree.Source.FileNames[LFileId]
+              else
+                LFile := GProj.ModelFile(LMid);
+              Writeln(Format('%s(%d,%d): %s %s',
+                [LFile, LM.Diags[LDIdx].Line, LM.Diags[LDIdx].Col,
+                 LM.Diags[LDIdx].Code, LM.Diags[LDIdx].Msg]));
+            end;
             // Library diagnostics are counted, not listed — but a bare count
             // is not actionable: working the tail down means opening the site,
             // and finding it by grepping a 3790-unit closure for a name like

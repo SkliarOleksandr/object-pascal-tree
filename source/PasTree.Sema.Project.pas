@@ -294,8 +294,12 @@ type
     function RecordHasLifecycleOp(AMid, ADefNode: Integer): Boolean;
     function OracleResolve(AId: Integer; const ANameLower: string;
       out AMid, ASym: Integer): Boolean;
+    function OracleConstVal(AMid, ASym, ADepth: Integer;
+      out AValue: TPasSymbolValue): Boolean;
     function OracleConstNum(AMid, ASym, ADepth: Integer;
       out ANum: Double): Boolean;
+    function OracleQualified(AId: Integer; const AName: string;
+      out AMid, ASym: Integer): Boolean;
     function OracleSizeOf(AMid, ASym, ADepth: Integer;
       out ABytes: Double): Boolean;
     function OracleLength(AMid, ASym: Integer; out ALen: Double): Boolean;
@@ -953,8 +957,8 @@ end;
 // The recursive const-evaluation context: resolves further plain names in
 // AMid as constants (GenericVariants = GenericVarUtils = False chains),
 // depth-capped like every other walk in this file.
-function TPasSemaProject.OracleConstNum(AMid, ASym, ADepth: Integer;
-  out ANum: Double): Boolean;
+function TPasSemaProject.OracleConstVal(AMid, ASym, ADepth: Integer;
+  out AValue: TPasSymbolValue): Boolean;
 var
   LM: TPasSemaModel;
   LDecl, LParent, LChild, LInit: Integer;
@@ -962,7 +966,7 @@ var
   LVal: TPasCondValue;
 begin
   Result := False;
-  ANum := 0;
+  AValue := Default(TPasSymbolValue);
   if ADepth > 8 then
     Exit;
   LM := FModels[AMid];
@@ -996,21 +1000,103 @@ begin
   LCtx.ExtendedBytes := FInfo.ExtendedBytes;
   LCtx.OnSymbol :=
     function(AQuery: TPasSymbolQuery; const AName: string;
-      out AN: Double): Boolean
+      out AV: TPasSymbolValue): Boolean
     var
       LRMid, LRSym: Integer;
     begin
-      Result := (AQuery = sqConstValue) and not AName.Contains('.') and
-        OracleResolve(AMid, LowerCase(AName), LRMid, LRSym) and
-        OracleConstNum(LRMid, LRSym, ADepth + 1, AN);
-      if not Result then
-        AN := 0;
+      AV := Default(TPasSymbolValue);
+      Result := (AQuery = sqConstValue) and
+        OracleQualified(AMid, AName, LRMid, LRSym) and
+        OracleConstVal(LRMid, LRSym, ADepth + 1, AV);
     end;
   LVal := EvalCondNode(LM.Tree, LInit, LCtx);
-  if LVal.Guessed or (LVal.Kind = cvStr) then
+  if LVal.Guessed then
     Exit;
-  ANum := CondAsNum(LVal);
+  AValue.IsStr := LVal.Kind = cvStr;
+  AValue.Str := LVal.Str;
+  AValue.Num := CondAsNum(LVal);
   Result := True;
+end;
+
+// The numeric-only face of OracleConstVal, for the callers that need a bound
+// or a size rather than a value (array lengths, enum ranges): a string
+// constant is not an answer there, so it refuses rather than coercing.
+function TPasSemaProject.OracleConstNum(AMid, ASym, ADepth: Integer;
+  out ANum: Double): Boolean;
+var
+  LVal: TPasSymbolValue;
+begin
+  ANum := 0;
+  Result := OracleConstVal(AMid, ASym, ADepth, LVal) and not LVal.IsStr;
+  if Result then
+    ANum := LVal.Num;
+end;
+
+{ Resolves a name that MAY be qualified. dcc resolves `Unit.Const` in a `$IF`
+  exactly like a plain one (probed: a `$IF UConst.QC > 1` guard evaluates for
+  real, and a known unit with an unknown member is a hard E2003, not a
+  fallback), and the version-guard idiom in the wild writes it that way —
+  `$IF IdGlobal.gsIdVersion > '10.6.2'`. Refusing dots turned every such guard
+  into a residual guess.
+
+  Only the LAST dot is split: the prefix is a unit name, which may itself be
+  dotted (`Winapi.Windows.SomeConst`). The prefix is matched against the
+  asking unit's imports, so an unrelated unit's constant cannot leak in. }
+function TPasSemaProject.OracleQualified(AId: Integer; const AName: string;
+  out AMid, ASym: Integer): Boolean;
+
+  // `Winapi.Windows` is also referred to as `Windows`; match either spelling.
+  function UnitNameMatches(const AFullLower, AWantedLower: string): Boolean;
+  var
+    LDot: Integer;
+  begin
+    if AFullLower = AWantedLower then
+      Exit(True);
+    LDot := AFullLower.LastIndexOf('.');
+    Result := (LDot >= 0) and
+      (Copy(AFullLower, LDot + 2, MaxInt) = AWantedLower);
+  end;
+
+var
+  LDot, LIdx, LUid: Integer;
+  LUnit, LMember: string;
+begin
+  LDot := AName.LastIndexOf('.');
+  if LDot < 0 then
+    Exit(OracleResolve(AId, LowerCase(AName), AMid, ASym));
+  LUnit := Copy(AName, 1, LDot);
+  LMember := Copy(AName, LDot + 2, MaxInt);
+  if (LUnit = '') or (LMember = '') then
+    Exit(False);
+  LUnit := LowerCase(LUnit);
+  LMember := LowerCase(LMember);
+  AMid := NIL_SYM;
+  ASym := NIL_SYM;
+  // The asking unit may qualify with its OWN name.
+  if SameText(FModels[AId].UnitNameLower, LUnit) then
+  begin
+    AMid := AId;
+    ASym := FModels[AId].Resolve(FModels[AId].InterfaceScope, LMember);
+    Exit(ASym <> NIL_SYM);
+  end;
+  for LIdx := High(FModels[AId].UsesList) downto 0 do
+  begin
+    LUid := FModels[AId].UsesList[LIdx].UnitId;
+    if (LUid < 0) or (FModels[LUid].InterfaceScope = NIL_SCOPE) then
+      Continue;
+    // Match on the unit's OWN name, not on the text of the `uses` clause: a
+    // unit imported unqualified through a scope-name prefix (`uses Windows`
+    // reaching Winapi.Windows) is still referred to by either spelling.
+    if not UnitNameMatches(FModels[LUid].UnitNameLower, LUnit) then
+      Continue;
+    ASym := FModels[LUid].Resolve(FModels[LUid].InterfaceScope, LMember);
+    if ASym <> NIL_SYM then
+    begin
+      AMid := LUid;
+      Exit(True);
+    end;
+  end;
+  Result := False;
 end;
 
 function TPasSemaProject.OracleSizeOf(AMid, ASym, ADepth: Integer;
@@ -1129,6 +1215,32 @@ begin
         ABytes := LFields * LFieldSize;
         Result := True;
       end;
+    nkPointerType, nkClassOf:
+      begin
+        // `^T` and `class of T` are one machine pointer whatever T is — no
+        // need to resolve the target, and resolving it would recurse forever
+        // on the linked-list shapes these appear in (FastMM4's
+        // PSmallBlockPoolHeader points back at the record that contains it).
+        ABytes := FInfo.PointerBytes;
+        Result := True;
+      end;
+    nkClassType, nkInterfaceType:
+      begin
+        // A class/interface VARIABLE is a reference: pointer-sized.
+        ABytes := FInfo.PointerBytes;
+        Result := True;
+      end;
+    nkProcType:
+      begin
+        // A plain procedural type is one pointer; `of object` carries the
+        // Self pointer too (dcc's TMethod). `reference to` is an interface
+        // reference, one pointer again.
+        if LM.Tree.Nodes[LDef].Aux = 1 then
+          ABytes := FInfo.PointerBytes * 2
+        else
+          ABytes := FInfo.PointerBytes;
+        Result := True;
+      end;
     nkIdent:
       begin
         // A plain alias: follow it. (`= type X` distinct aliases share the
@@ -1195,15 +1307,14 @@ begin
   LCtx.ExtendedBytes := FInfo.ExtendedBytes;
   LCtx.OnSymbol :=
     function(AQuery: TPasSymbolQuery; const AName: string;
-      out AN: Double): Boolean
+      out AV: TPasSymbolValue): Boolean
     var
       LRMid, LRSym: Integer;
     begin
-      Result := (AQuery = sqConstValue) and not AName.Contains('.') and
-        OracleResolve(AMid, LowerCase(AName), LRMid, LRSym) and
-        OracleConstNum(LRMid, LRSym, 0, AN);
-      if not Result then
-        AN := 0;
+      AV := Default(TPasSymbolValue);
+      Result := (AQuery = sqConstValue) and
+        OracleQualified(AMid, AName, LRMid, LRSym) and
+        OracleConstNum(LRMid, LRSym, 0, AV.Num);
     end;
   LLoVal := EvalCondNode(LM.Tree, LLo, LCtx);
   LHiVal := EvalCondNode(LM.Tree, LHi, LCtx);
@@ -1218,22 +1329,31 @@ function TPasSemaProject.SymbolQueryFor(AId: Integer): TPasCondSymbolQuery;
 begin
   Result :=
     function(AQuery: TPasSymbolQuery; const AName: string;
-      out ANum: Double): Boolean
+      out AValue: TPasSymbolValue): Boolean
     var
       LMid, LSym: Integer;
     begin
       Result := False;
-      ANum := 0;
-      // Plain names only — every measured site is one; `Unit.Const` stays a
-      // recorded guess until someone needs it.
-      if AName.Contains('.') then
+      AValue := Default(TPasSymbolValue);
+      // Qualified names resolve too — dcc evaluates a `$IF Unit.Const > 1`
+      // guard for real, so refusing the dot invented a residual guess where
+      // the compiler had a plain answer (see OracleQualified).
+      if not OracleQualified(AId, AName, LMid, LSym) then
+      begin
+        // "Exists nowhere" is a stronger claim than "I could not resolve it",
+        // and CondEval copies dcc's abort verdict from it — so only make it
+        // when the claim is sound. A unit with an unresolved import has a
+        // hole in its symbol table exactly where a declaration could be
+        // hiding, and a DOTTED name is dcc's own fallback-to-False shape
+        // rather than an abort, so neither earns the flag.
+        AValue.NoSymbol := FModels[AId].AllUsesResolved and
+          not AName.Contains('.');
         Exit;
-      if not OracleResolve(AId, LowerCase(AName), LMid, LSym) then
-        Exit;
+      end;
       case AQuery of
-        sqConstValue: Result := OracleConstNum(LMid, LSym, 0, ANum);
-        sqSizeOfType: Result := OracleSizeOf(LMid, LSym, 0, ANum);
-        sqLengthOf: Result := OracleLength(LMid, LSym, ANum);
+        sqConstValue: Result := OracleConstVal(LMid, LSym, 0, AValue);
+        sqSizeOfType: Result := OracleSizeOf(LMid, LSym, 0, AValue.Num);
+        sqLengthOf: Result := OracleLength(LMid, LSym, AValue.Num);
       end;
     end;
 end;
@@ -1265,7 +1385,7 @@ var
   LSymQuery: TPasCondSymbolQuery;
   LUnsym: TPasUnresolvedSymbol;
   LAnswer, LIsCand: Boolean;
-  LNum: Double;
+  LNum: TPasSymbolValue;
 begin
   // Candidates are not "asked a question" but "would get a DIFFERENT answer".
   // The first pass answered every Declared() False, so a unit whose names all
@@ -1299,7 +1419,12 @@ begin
     begin
       LSymQuery := SymbolQueryFor(LIdx);
       for LUnsym in FModels[LIdx].Tree.Source.UnresolvedSymbols do
-        if LSymQuery(LUnsym.Query, LUnsym.Name, LNum) then
+        // Either kind of answer earns the re-run. "Here is the value" is the
+        // obvious one; "this name exists NOWHERE" is the other, because that
+        // is what lets CondEval apply dcc's abort rules instead of leaving the
+        // first pass's False guess standing — a different verdict, not a
+        // byte-identical one.
+        if LSymQuery(LUnsym.Query, LUnsym.Name, LNum) or LNum.NoSymbol then
         begin
           LIsCand := True;
           Break;
@@ -1398,7 +1523,7 @@ var
   LPPCode: TPasPPDiagCode;
   LOpen: TArray<string>;
   LName: string;
-  LNum: Double;
+  LNum: TPasSymbolValue;
   LDeclAnswer: Boolean;
 begin
   if not FReportGuessedIfs then

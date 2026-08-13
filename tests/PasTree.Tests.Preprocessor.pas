@@ -225,9 +225,10 @@ function BuildPreprocessorCases(APP: TPasPreprocessor): TPasCustomCases;
         try
           LPP.OnSymbol :=
             function(AQuery: TPasSymbolQuery; const AName: string;
-              out ANum: Double): Boolean
+              out AValue: TPasSymbolValue): Boolean
             begin
-              ANum := 1;
+              AValue := Default(TPasSymbolValue);
+              AValue.Num := 1;
               Result := (AQuery = sqConstValue) and SameText(AName, 'KNOWN');
             end;
           LPre := LPP.ProcessText('test.pas',

@@ -34,16 +34,28 @@ unit PasTree.CondEval;
   same verdict here, and no needs-semantics flag, because no second pass
   could change it).
 
-  One dcc divergence, probed and deliberate: when dcc actually EVALUATES an
-  identifier that is declared nowhere, it abandons the whole expression
-  with a fixed verdict — True if the unknown sat in a relational or
-  arithmetic position (`(UNDECL > 3) and Defined(NOPE)` takes the TRUE
-  branch, the `and False` ignored; so do `not (UNDECL > 3)` and nested
-  parens), False in a bare boolean position (`$IF UNDECL`,
-  `$IF not UNDECL`). We compute with the False guess instead: for names
-  that ARE declared somewhere the second pass supplies the real value and
-  the quirk never matters, and code relying on the abort-True of a
-  genuinely undeclared name would be fragile under dcc itself.
+  dcc's ABORT RULES, reproduced here rather than diverged from. When dcc
+  actually EVALUATES an identifier that resolves nowhere it abandons the whole
+  expression with a fixed verdict, and the verdict depends on the position the
+  name sat in (probed by executing both branches on dcc64 36.0 and 37.0 —
+  identical, so this is long-standing, not a beta quirk; the full table is in
+  the language spec, 1.3.2):
+
+    - arithmetic or relational-against-a-number  -> the whole $IF is TRUE,
+      and the abort survives everything outside it: `not (UNDECL > 3)`,
+      `((UNDECL > 3))` and `(UNDECL > 3) and False` all take the TRUE branch.
+    - bare boolean (`$IF UNDECL`, `$IF not UNDECL`), compared against a
+      string/char/Boolean literal, or any dotted name with an unknown prefix
+      -> FALSE, which is what the plain guess already produced.
+
+  Short-circuit comes first, because dcc evaluates strictly left to right and
+  never reaches the name: `Defined(NOPE) and (UNDECL > 3)` is False.
+
+  The abort is gated on KNOWING the name resolves nowhere, which only a full
+  symbol table can say (TPasSymbolValue.NoSymbol, second pass). On the first
+  pass, and for a name that exists but whose value we cannot fold, the False
+  guess stands and the taint below records the open question — the two cases
+  must not be confused: the first is dcc parity, the second is a finding.
 }
 
 interface
@@ -66,6 +78,13 @@ type
     // needs-semantics diagnostic, i.e. "could a second pass change this
     // verdict", and a Kleene-decided verdict it could not.
     Guessed: Boolean;
+    // This leaf is a name that a FULL symbol table says exists nowhere. Not a
+    // guess: dcc's verdict for it is determined, and the two flags below carry
+    // it. See the dcc abort rules in the unit comment.
+    Undef: Boolean;
+    // dcc abandoned the whole expression with True. Propagates to the top
+    // through every operator, `not` and parens included.
+    AbortTrue: Boolean;
   end;
 
   TPasCondContext = record
@@ -135,8 +154,35 @@ begin
   Result.Guessed := True;
 end;
 
+// True when this value can settle a branch on its own — no guess in it, and
+// no dcc abort riding on it either.
+function CondIsClean(const AValue: TPasCondValue): Boolean;
+begin
+  Result := not AValue.Guessed and not AValue.Undef and not AValue.AbortTrue;
+end;
+
+// The leaf for a name a full symbol table says exists nowhere. It reads as
+// False (dcc's verdict in a bare boolean position) until an operator puts it
+// in a numeric position, where MkAbortTrue takes over.
+function MkUndef: TPasCondValue;
+begin
+  Result := Default(TPasCondValue);
+  Result.Kind := cvBool;
+  Result.Undef := True;
+end;
+
+function MkAbortTrue: TPasCondValue;
+begin
+  Result := Default(TPasCondValue);
+  Result.Kind := cvBool;
+  Result.Bool := True;
+  Result.AbortTrue := True;
+end;
+
 function CondAsBool(const AValue: TPasCondValue): Boolean;
 begin
+  if AValue.AbortTrue then
+    Exit(True);
   case AValue.Kind of
     cvBool: Result := AValue.Bool;
     cvNum: Result := AValue.Num <> 0;
@@ -285,6 +331,98 @@ begin
   end;
 end;
 
+// A shift count dcc would accept: a clean (unguessed) whole number in 0..63.
+// Anything else refuses, which leaves the expression a guess rather than
+// inventing a value.
+function CondShiftCount(const AValue: TPasCondValue; out ACount: Integer):
+  Boolean;
+var
+  LNum: Double;
+begin
+  ACount := 0;
+  if AValue.Guessed or (AValue.Kind = cvStr) then
+    Exit(False);
+  LNum := CondAsNum(AValue);
+  Result := (LNum >= 0) and (LNum <= 63) and (Frac(LNum) = 0);
+  if Result then
+    ACount := Trunc(LNum);
+end;
+
+{ An ordinal type-cast in a constant expression — `Byte(UnsignedBit shl 5)`,
+  `NativeUInt(1)`, FastMM4's whole const block. dcc folds these; without them a
+  cast reads as an unknown function call and poisons every constant downstream
+  of it. Only the INTEGRAL builtins cast here: they are the ones whose result
+  is a number a `$IF` can compare. Truncation is real (a cast to Byte wraps),
+  so the folded value matches dcc rather than approximating it. }
+function PasBuiltinCast(const AName: string; APointerBytes: Integer;
+  const AValue: TPasCondValue; out ANum: Double): Boolean;
+var
+  LBytes, LBits: Integer;
+  LSigned: Boolean;
+  LRaw: Int64;
+  LMask: UInt64;
+begin
+  ANum := 0;
+  Result := False;
+  if AValue.Kind = cvStr then
+    Exit;
+  LSigned := False;
+  if SameText(AName, 'Byte') or SameText(AName, 'AnsiChar') then
+    LBytes := 1
+  else if SameText(AName, 'ShortInt') then
+  begin
+    LBytes := 1;
+    LSigned := True;
+  end
+  else if SameText(AName, 'Word') or SameText(AName, 'WideChar') or
+          SameText(AName, 'Char') then
+    LBytes := 2
+  else if SameText(AName, 'SmallInt') then
+  begin
+    LBytes := 2;
+    LSigned := True;
+  end
+  else if SameText(AName, 'Cardinal') or SameText(AName, 'LongWord') then
+    LBytes := 4
+  else if SameText(AName, 'Integer') or SameText(AName, 'LongInt') then
+  begin
+    LBytes := 4;
+    LSigned := True;
+  end
+  else if SameText(AName, 'UInt64') then
+    LBytes := 8
+  else if SameText(AName, 'Int64') then
+  begin
+    LBytes := 8;
+    LSigned := True;
+  end
+  else if SameText(AName, 'NativeUInt') then
+    LBytes := APointerBytes
+  else if SameText(AName, 'NativeInt') then
+  begin
+    LBytes := APointerBytes;
+    LSigned := True;
+  end
+  else
+    Exit;
+
+  LRaw := Trunc(CondAsNum(AValue));
+  LBits := LBytes * 8;
+  if LBits >= 64 then
+    ANum := LRaw
+  else
+  begin
+    LMask := (UInt64(1) shl LBits) - 1;
+    LRaw := Int64(UInt64(LRaw) and LMask);
+    // Sign-extend from the cast width, exactly as the narrower signed type
+    // would read the bits back.
+    if LSigned and ((UInt64(LRaw) and (UInt64(1) shl (LBits - 1))) <> 0) then
+      LRaw := LRaw - Int64(LMask) - 1;
+    ANum := LRaw;
+  end;
+  Result := True;
+end;
+
 function EvalCondNode(const ATree: TPasTree; ANode: Integer;
   var ACtx: TPasCondContext): TPasCondValue;
 
@@ -307,10 +445,27 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
   function AskSymbol(AQuery: TPasSymbolQuery; const AName: string;
     const AGuess: TPasCondValue): TPasCondValue;
   var
-    LNum: Double;
+    LAns: TPasSymbolValue;
   begin
-    if Assigned(ACtx.OnSymbol) and ACtx.OnSymbol(AQuery, AName, LNum) then
-      Exit(MkNum(LNum));
+    LAns := Default(TPasSymbolValue);
+    if Assigned(ACtx.OnSymbol) then
+    begin
+      if ACtx.OnSymbol(AQuery, AName, LAns) then
+      begin
+        if not LAns.IsStr then
+          Exit(MkNum(LAns.Num));
+        Result := Default(TPasCondValue);
+        Result.Kind := cvStr;
+        Result.Str := LAns.Str;
+        Exit;
+      end;
+      // The name exists NOWHERE: not an open question but a determined dcc
+      // verdict, so it is neither guessed nor recorded — it is copied. Only
+      // the const-value query can say this; a SizeOf/Length question about a
+      // missing name is still a question.
+      if LAns.NoSymbol and (AQuery = sqConstValue) then
+        Exit(MkUndef);
+    end;
     AddUnknown(AQuery, AName);
     Result := AGuess;
     Result.Guessed := True;
@@ -322,6 +477,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     LName, LArgName: string;
     LKnown: Boolean;
     LSize: Double;
+    LArgVal: TPasCondValue;
   begin
     Result := MkGuess;
     LCallee := ATree.Nodes[ACallNode].FirstChild;
@@ -388,26 +544,59 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
         Result := AskSymbol(sqLengthOf, LArgName, MkNum(0));
     end
     else
+    begin
+      // An ordinal type-cast folds like dcc does — but ONLY when its operand
+      // is clean. A cast wrapped around a guess would turn the guess into a
+      // confident-looking number and hide the open question.
+      LArgVal := EvalCondNode(ATree, LArg, ACtx);
+      if not LArgVal.Guessed and
+         PasBuiltinCast(LName, ACtx.PointerBytes, LArgVal, LSize) then
+        Exit(MkNum(LSize));
       // Anything else (Ord(x), a unit function, ...) stays a guess — but the
       // CALLEE is recorded so a reporter can say what it choked on. Without
       // this the guess carries no question at all, and a filter that trusts
       // "no open questions" would call it verified.
       AddUnknown(sqConstValue, LName + '()');
+    end;
   end;
 
   function EvalRel(const AOp: string; const L, R: TPasCondValue):
     TPasCondValue;
+  var
+    LCmp: Integer;
   begin
+    // dcc's abort, and the ONE place its direction is decided. A name that
+    // exists nowhere aborts the whole $IF to True when it is compared against
+    // a NUMBER (or against another such name); against a string, a char or a
+    // Boolean literal it stays the error token that reads as False.
+    if L.AbortTrue or R.AbortTrue then
+      Exit(MkAbortTrue);
+    if L.Undef or R.Undef then
+    begin
+      if (L.Undef or (L.Kind = cvNum)) and (R.Undef or (R.Kind = cvNum)) then
+        Exit(MkAbortTrue);
+      Exit(MkBool(False));
+    end;
     if (L.Kind = cvStr) and (R.Kind = cvStr) then
     begin
-      // Case-insensitive on purpose — ported behavior; version strings in
-      // the wild compare like define names.
+      // dcc-probed, and both of these used to be wrong: string comparison is
+      // case-SENSITIVE (`$IF 'ABC' = 'abc'` takes the ELSE branch), and the
+      // ORDERING operators really order — they are the whole point of the
+      // version-guard idiom (`$IF gsIdVersion >= '10.5.5'`), which a blanket
+      // False answered by taking the wrong branch every time.
+      LCmp := CompareStr(L.Str, R.Str);
       if AOp = '=' then
-        Result := MkBool(SameText(L.Str, R.Str))
+        Result := MkBool(LCmp = 0)
       else if AOp = '<>' then
-        Result := MkBool(not SameText(L.Str, R.Str))
+        Result := MkBool(LCmp <> 0)
+      else if AOp = '<' then
+        Result := MkBool(LCmp < 0)
+      else if AOp = '>' then
+        Result := MkBool(LCmp > 0)
+      else if AOp = '<=' then
+        Result := MkBool(LCmp <= 0)
       else
-        Result := MkBool(False);
+        Result := MkBool(LCmp >= 0);
     end
     else if AOp = '=' then
       Result := MkBool(CondAsNum(L) = CondAsNum(R))
@@ -429,6 +618,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     LLeftNode, LRightNode: Integer;
     LOp: string;
     L, R: TPasCondValue;
+    LShift: Integer;
   begin
     Result := MkGuess;
     LLeftNode := ATree.Nodes[ABinNode].FirstChild;
@@ -449,26 +639,42 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     // part turns out to be, so no second pass needs to look at it. This is
     // dcc's own left-to-right short-circuit, applied symmetrically (see the
     // unit comment for the probed divergence on undeclared names).
+    // Short-circuit is checked BEFORE any abort, and in dcc's own left-to-
+    // right order: `Defined(NOPE) and (UNDECL > 3)` is False because dcc never
+    // reaches the name, while `(UNDECL > 3) and False` is True because it
+    // aborted before it could look at the right-hand side.
     if LOp = 'and' then
     begin
-      if (not L.Guessed and not CondAsBool(L)) or
-         (not R.Guessed and not CondAsBool(R)) then
+      if CondIsClean(L) and not CondAsBool(L) then
         Exit(MkBool(False));
+      if L.AbortTrue then
+        Exit(MkAbortTrue);
+      if CondIsClean(R) and not CondAsBool(R) then
+        Exit(MkBool(False));
+      if R.AbortTrue then
+        Exit(MkAbortTrue);
       Result := MkBool(CondAsBool(L) and CondAsBool(R));
       Result.Guessed := L.Guessed or R.Guessed;
       Exit;
     end;
     if LOp = 'or' then
     begin
-      if (not L.Guessed and CondAsBool(L)) or
-         (not R.Guessed and CondAsBool(R)) then
+      if CondIsClean(L) and CondAsBool(L) then
         Exit(MkBool(True));
+      if L.AbortTrue then
+        Exit(MkAbortTrue);
+      if CondIsClean(R) and CondAsBool(R) then
+        Exit(MkBool(True));
+      if R.AbortTrue then
+        Exit(MkAbortTrue);
       Result := MkBool(CondAsBool(L) or CondAsBool(R));
       Result.Guessed := L.Guessed or R.Guessed;
       Exit;
     end;
     if LOp = 'xor' then
     begin
+      if L.AbortTrue or R.AbortTrue then
+        Exit(MkAbortTrue);
       Result := MkBool(CondAsBool(L) xor CondAsBool(R));
       Result.Guessed := L.Guessed or R.Guessed;
       Exit;
@@ -477,6 +683,11 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     if (LOp = '=') or (LOp = '<>') or (LOp = '<') or (LOp = '>') or
        (LOp = '<=') or (LOp = '>=') then
       Exit(EvalRel(LOp, L, R));
+
+    // Arithmetic on a name that exists nowhere is the other half of the abort
+    // rule: `UNDECL + 1 = 1` and `1 shl UNDECL = 2` both take the TRUE branch.
+    if L.Undef or R.Undef or L.AbortTrue or R.AbortTrue then
+      Exit(MkAbortTrue);
 
     if LOp = '+' then
       Result := MkNum(CondAsNum(L) + CondAsNum(R))
@@ -490,8 +701,12 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       Result := MkNum(Trunc(CondAsNum(L)) div Trunc(CondAsNum(R)))
     else if (LOp = 'mod') and (Trunc(CondAsNum(R)) <> 0) then
       Result := MkNum(Trunc(CondAsNum(L)) mod Trunc(CondAsNum(R)))
+    else if (LOp = 'shl') and CondShiftCount(R, LShift) then
+      Result := MkNum(Trunc(CondAsNum(L)) shl LShift)
+    else if (LOp = 'shr') and CondShiftCount(R, LShift) then
+      Result := MkNum(Trunc(CondAsNum(L)) shr LShift)
     else
-      // shl/shr/in/division by zero — nothing in a real $IF; a guess,
+      // `in`, division by zero, an out-of-range shift count — a guess,
       // never a crash.
       Exit;
     Result.Guessed := L.Guessed or R.Guessed;
@@ -555,6 +770,14 @@ begin
           Exit;
         LText := LowerCase(ATree.Source.VisibleText(ATree.Nodes[ANode].Aux));
         LVal := EvalCondNode(ATree, LChild, ACtx);
+        // An abort ignores the operator entirely — `not (UNDECL > 3)` is True,
+        // not False. A bare unresolvable name under `not` stays False (dcc's
+        // boolean-position verdict), but under unary minus it is arithmetic,
+        // so it aborts.
+        if LVal.AbortTrue or (LVal.Undef and (LText = '-')) then
+          Exit(MkAbortTrue);
+        if LVal.Undef then
+          Exit(MkBool(False));
         if LText = 'not' then
           Result := MkBool(not CondAsBool(LVal))
         else if LText = '-' then
