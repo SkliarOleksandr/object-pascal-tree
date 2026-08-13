@@ -464,6 +464,56 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // 16.6.1 — "generic methods returning a derived type". The spec is explicit
+  // that this is a PATTERN, not a feature: it falls out of generic methods
+  // plus constraints, and the section exists to answer "does Object Pascal
+  // have return-type covariance?" with "not directly, write this instead".
+  //
+  // So the one thing worth asserting is what makes the pattern WORK, and it
+  // is not what 16.5.1's `Cast<T: class>` case already covers: there the
+  // constraint is a KEYWORD, with no type to collapse to. Here the constraint
+  // is a TYPE BOUND (`T: TAnimal`), so the plausible wrong answer is real --
+  // type the result as the BOUND (TAnimal) rather than as the written
+  // argument (TDog). `Fetch` exists ONLY on TDog, so the member-after-the-call
+  // assertion cannot pass unless the result really carried TDog: that is the
+  // whole covariance claim, and it self-discriminates.
+  //
+  // dcc32 37.0-verified as a real program first: it compiles AND running it
+  // prints `ball dog`, i.e. a TDog-only member really is reachable on the
+  // result.
+  UNIT_CV1 =
+    'unit CV1;'#10'interface'#10 +
+    'type'#10 +
+    '  TAnimal = class'#10 +
+    '    constructor Create;'#10 +
+    '    function Name: string; virtual;'#10 +
+    '  end;'#10 +
+    '  TDog = class(TAnimal)'#10 +
+    '    function Fetch: string;'#10 +   // TDog ONLY -- the discriminator
+    '  end;'#10 +
+    '  TFactory = class'#10 +
+    '    class function Clone<T: TAnimal, constructor>(Src: T): T; static;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'constructor TAnimal.Create; begin end;'#10 +
+    'function TAnimal.Name: string; begin Result := ''''; end;'#10 +
+    'function TDog.Fetch: string; begin Result := ''''; end;'#10 +
+    'class function TFactory.Clone<T>(Src: T): T; begin Result := T.Create;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  UNIT_CV2 =
+    'unit CV2;'#10'interface'#10'uses CV1;'#10 +
+    'var'#10'  GDog: TDog;'#10 +
+    'implementation'#10 +
+    'procedure UseClone;'#10 +
+    'var S: string;'#10 +
+    'begin'#10 +
+    '  S := TFactory.Clone<TDog>(GDog).Fetch;'#10 +
+    '  S := TFactory.Clone<TDog>(GDog).Name;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // A helper whose target NAME is an alias of the type: `UA.TSpot` is another
   // symbol for `UB.TSpot`, and which one a value carries depends on the unit
   // its declaration was read in. The helper must answer for both (SynEdit's
@@ -1031,6 +1081,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'TL1.pas'), UNIT_TL1);
   TFile.WriteAllText(TPath.Combine(LDir, 'GX.pas'), UNIT_GX);
   TFile.WriteAllText(TPath.Combine(LDir, 'GY.pas'), UNIT_GY);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CV1.pas'), UNIT_CV1);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CV2.pas'), UNIT_CV2);
   TFile.WriteAllText(TPath.Combine(LDir, 'AL1.pas'), UNIT_AL1);
   TFile.WriteAllText(TPath.Combine(LDir, 'AL2.pas'), UNIT_AL2);
   TFile.WriteAllText(TPath.Combine(LDir, 'AL3.pas'), UNIT_AL3);
@@ -1093,8 +1145,12 @@ begin
     // one EXPLICIT method frame each (ExplicitMethodFrame keys them on the
     // routine symbol, exactly as the inferred ones are). 20 since NS.Test:
     // `TRunner<TMyParams>` is one more instantiation. 22 since SPN: the two
-    // `TNodes<...>` arities are two.
-    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '22');
+    // `TNodes<...>` arities are two. 23 since CV2 (16.6.1): `Clone<TDog>` is
+    // ONE more explicit method frame, not two, even though it is written at
+    // two call sites — both share the routine symbol and the type argument, so
+    // Instantiate's dedup collapses them, which is the contract rather than a
+    // coincidence.
+    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '23');
 
     // ---- Cross-unit overload selection by ARGUMENT TYPES ----
     LV := ModelByName('xv');
@@ -1213,6 +1269,21 @@ begin
       XTypeOf(LG, 'Unsafe.Cast<TThing>(GObj).Ping'), 'Integer');
     Eq('16.5.1: a call written with <T> skips the derived NON-generic of ' +
       'that name', XTypeOf(LG, 'GBag.Fetch<TThing>(''x'')'), 'TThing');
+
+    // ---- 16.6.1 the "generic method returning a derived type" pattern: the
+    // result must carry the WRITTEN type argument, not the constraint's BOUND.
+    // See UNIT_CV1's comment for why this is not 16.5.1's case again. ----
+    LG := ModelByName('cv2');
+    Ok('16.6.1: CV2 loaded', Assigned(LG));
+    Ok('16.6.1: no diags at all', Length(LG.Diags) = 0);
+    Eq('16.6.1: a constrained generic method''s result is the ARGUMENT ' +
+      '(TDog), not the constraint bound (TAnimal)',
+      XTypeOf(LG, 'TFactory.Clone<TDog>(GDog)'), 'TDog');
+    Eq('16.6.1: so a member existing ONLY on the derived type resolves off ' +
+      'the result -- the whole point of the pattern',
+      XTypeOf(LG, 'TFactory.Clone<TDog>(GDog).Fetch'), 'string');
+    Eq('16.6.1: and an INHERITED member still resolves through it too',
+      XTypeOf(LG, 'TFactory.Clone<TDog>(GDog).Name'), 'string');
 
     // ---- a helper reached through the target's alias identity ----
     LE := ModelByName('al4');
