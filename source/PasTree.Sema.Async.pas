@@ -81,6 +81,9 @@ type
       compiler front end needs. Set BEFORE Start — it changes what the analysis
       produces, not how the result is displayed. }
     procedure SetReportUnresolvedMembers(AValue: Boolean);
+    { Same contract for ReportGuessedIfs — the residual-$IF exotica detector
+      (PPIF/PPBAD diagnostics); see TPasSemaProject.ReportGuessedIfs. }
+    procedure SetReportGuessedIfs(AValue: Boolean);
     procedure Start;
     { Request cooperative cancellation; the worker stops at the next module/
       wave boundary. Does not block. }
@@ -164,6 +167,11 @@ end;
 procedure TPasAsyncSession.SetReportUnresolvedMembers(AValue: Boolean);
 begin
   FProject.ReportUnresolvedMembers := AValue;
+end;
+
+procedure TPasAsyncSession.SetReportGuessedIfs(AValue: Boolean);
+begin
+  FProject.ReportGuessedIfs := AValue;
 end;
 
 procedure TPasAsyncSession.RunBody;

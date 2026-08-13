@@ -1913,6 +1913,7 @@ begin
     // the error-tolerant mode. chkShowErrors then filters DISPLAY only, so
     // toggling it stays instant instead of costing a re-analysis.
     FSemaProject.ReportUnresolvedMembers := True;
+    FSemaProject.ReportGuessedIfs := True;   // same philosophy: show the guesses
     FSemaProject.SetNamespaces(EffectiveNamespaces(LPlatform)); // Forms -> Vcl.Forms
     // Defaults ALWAYS, then the project's on top: the IDE prepends a project's
     // own aliases to the defaults rather than replacing them, and AddUnitAlias
@@ -2200,6 +2201,7 @@ begin
     LRoots, LPriority);
   FAsyncSession.SetSingleThreadedInner(cbThreading.ItemIndex = 0);
   FAsyncSession.SetReportUnresolvedMembers(True);   // see the synchronous path
+  FAsyncSession.SetReportGuessedIfs(True);
   FAsyncSession.SetNamespaces(EffectiveNamespaces(LPlatform));
   for var LDef in PasDefaultUnitAliases(LPlatform) do  // defaults, then project
     FAsyncSession.AddUnitAlias(LDef.Alias, LDef.UnitName);

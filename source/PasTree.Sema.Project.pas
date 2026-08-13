@@ -137,6 +137,7 @@ type
     FXNewExt: TArray<TDictionary<Integer, TPasExtRef>>;
     FSingleThreaded: Boolean;
     FReportMembers: Boolean;   // see ReportUnresolvedMembers
+    FReportGuessedIfs: Boolean;   // see ReportGuessedIfs
     FReportVisibility: Boolean;   // see ReportVisibility
     FSystemUnitId: Integer;                // memoized EnsureSystemUnit result
     FSystemUnitResolved: Boolean;
@@ -196,6 +197,7 @@ type
     function SeedDeclaredQuery: TPasDeclaredQuery;
     function DeclaredQueryFor(AId: Integer): TPasDeclaredQuery;
     procedure RunDeclaredPass(ACount: Integer);
+    procedure InjectGuessedIfDiags(ACount: Integer);
     procedure CrossResolve(AId: Integer);
     function StructSymOfNode(AModel: TPasSemaModel; ANode: Integer): Integer;
     procedure CheckVisibility(AId, ANameNode, AMemMid, AMemSym: Integer);
@@ -355,6 +357,19 @@ type
       repeat it. }
     property ReportUnresolvedMembers: Boolean read FReportMembers
       write FReportMembers;
+    { OPT-IN, default OFF: surface every `$IF`/`$ELSEIF` whose branch still
+      rests on a GUESS after the second pass (code PPIF), and every
+      conditional expression that did not parse at all (PPBAD) — as ordinary
+      model diagnostics, so they flow through -list, the histograms and the
+      demo with no new plumbing. The exotica detector for foreign projects:
+      the message carries the expression text verbatim. NB a Declared(X)-only
+      guard whose name is declared NOWHERE is a CONFIRMED-correct guess (the
+      second pass checked and skipped the re-run) yet still listed — the
+      expression text makes those easy to eyeball, and hiding them would also
+      hide a misspelled name that WAS meant to exist. Off, the analysis is
+      byte-identical. }
+    property ReportGuessedIfs: Boolean read FReportGuessedIfs
+      write FReportGuessedIfs;
     { OPT-IN, default OFF: enforce member VISIBILITY on a QUALIFIED access —
       `E2361 Cannot access private symbol TType.Member` (11 §11.2.1). Recording
       landed first and deliberately; this is the enforcement half, and it is the
@@ -1343,6 +1358,48 @@ begin
   for LIdx := 0 to High(LCand) do
     if LDone[LIdx] <> nil then
       ResolveUses(LCand[LIdx]);
+end;
+
+{ ReportGuessedIfs' worker: lifts the RESIDUAL preprocessor flags — the
+  `$IF`s still guessed after RunDeclaredPass had its chance, and the ones
+  whose expression never parsed — out of each model's retained preprocess
+  data and into its ordinary diagnostics, where -list/histograms/the demo
+  already know how to show them. Runs right after RunDeclaredPass in each
+  driver: a re-decided model carries the SECOND pass's flags (the oracle
+  already subtracted what it answered), an untouched one its first-pass
+  flags. Same ACount snapshot as every other diagnostic gate — units pulled
+  in later from search paths stay out, like their E2003s do. }
+procedure TPasSemaProject.InjectGuessedIfDiags(ACount: Integer);
+var
+  LIdx, LDIdx: Integer;
+  LM: TPasSemaModel;
+  LDiag: TSemaDiag;
+begin
+  if not FReportGuessedIfs then
+    Exit;
+  for LIdx := 0 to ACount - 1 do
+  begin
+    LM := FModels[LIdx];
+    for LDIdx := 0 to High(LM.Tree.Source.Diagnostics) do
+      case LM.Tree.Source.Diagnostics[LDIdx].Code of
+        ppIfNeedsSemantics, ppBadIfExpression:
+          begin
+            if LM.Tree.Source.Diagnostics[LDIdx].Code = ppIfNeedsSemantics
+            then
+              LDiag.Code := 'PPIF'
+            else
+              LDiag.Code := 'PPBAD';
+            LDiag.Msg := LDiag.Code + ' ' +
+              PP_DIAG_MESSAGES[LM.Tree.Source.Diagnostics[LDIdx].Code] +
+              ': [' + LM.Tree.Source.Diagnostics[LDIdx].Detail + ']';
+            LDiag.DeclNode := NIL_NODE;
+            LDiag.FileId := LM.Tree.Source.Diagnostics[LDIdx].FileId;
+            LM.Tree.Source.Files[LDiag.FileId].OffsetToLineCol(
+              LM.Tree.Source.Diagnostics[LDIdx].Start, LDiag.Line, LDiag.Col);
+            LM.AddDiag(LDiag);
+          end;
+      end;
+  end;
 end;
 
 // Single point where a model is appended: keeps FModels/FFiles/FStatus in
@@ -7727,6 +7784,7 @@ begin
   // A Declared() guard can only be answered now — see RunDeclaredPass. It may
   // load units the re-decided branch newly imports, so LN is taken after it.
   RunDeclaredPass(FModels.Count);
+  InjectGuessedIfDiags(FModels.Count);
   // Cross passes for EVERY loaded unit — same per-unit write discipline as
   // AnalyzeDirectory (each writes only its own model, reads others' frozen
   // Phase-1 state), so the same parallel farming is safe.
@@ -7809,6 +7867,7 @@ begin
   // See RunDeclaredPass. LN stays the directory snapshot: anything it pulls in
   // from the search paths belongs outside the E2003 set, like System itself.
   RunDeclaredPass(LN);
+  InjectGuessedIfDiags(LN);
   Stage('main+sys+resolve');
   // Cross passes per unit write ONLY their own model and read the others'
   // Phase-1 state (frozen once every unit is loaded) — safe to farm out.
@@ -8095,6 +8154,7 @@ begin
       Exit;
     end;
     RunDeclaredPass(LN);   // see there; must precede every cross pass
+    InjectGuessedIfDiags(LN);
     LN := FModels.Count;   // it may have loaded newly-imported units
     Report('cross:xresolve');
     PrepareDeclWork(LN);

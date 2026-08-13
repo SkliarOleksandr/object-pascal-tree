@@ -76,7 +76,7 @@ var
   GPath, GStudio: string;
   GExtraPaths: TArray<string>;   // -L<dir>, repeatable; see the arg loop
   GIdx: Integer;
-  GSingle, GWholeProject, GDProjMode, GList, GMembers: Boolean;
+  GSingle, GWholeProject, GDProjMode, GList, GMembers, GIfs: Boolean;
   GVisibility: Boolean;
   GSW: TStopwatch;
   GMode: string;
@@ -235,6 +235,7 @@ begin
       GProj.SingleThreaded := GSingle;
       GProj.ReportUnresolvedMembers := GMembers;
       GProj.ReportVisibility := GVisibility;
+      GProj.ReportGuessedIfs := GIfs;
       // No -NS list in the .dproj means we could not read the option, not that
       // the project wants zero prefixes — dcc has none built in, so zero would
       // turn every legacy unqualified import into an F1027.
@@ -411,6 +412,7 @@ begin
     GDProjMode := False;
     GList := False;
     GMembers := False;
+    GIfs := False;
     GVisibility := False;
     GStudio := GetEnvironmentVariable('BDS');
     for GIdx := 2 to ParamCount do
@@ -429,6 +431,11 @@ begin
         GList := True
       else if SameText(ParamStr(GIdx), '-members') then
         GMembers := True
+      else if SameText(ParamStr(GIdx), '-ifs') then
+        // Residual- exotica: every guard still GUESSED after the second
+        // pass (PPIF) and every malformed conditional (PPBAD), as ordinary
+        // diagnostics -- flows through -list and the histograms.
+        GIfs := True
       else if SameText(ParamStr(GIdx), '-visibility') then
         GVisibility := True
       else if ParamStr(GIdx).StartsWith('-p:', True) then
@@ -476,6 +483,7 @@ begin
       GProj.SingleThreaded := GSingle;
       GProj.ReportUnresolvedMembers := GMembers;
       GProj.ReportVisibility := GVisibility;
+      GProj.ReportGuessedIfs := GIfs;
       // Same reasoning as the -dproj driver: a directory or bare-file run has
       // no project to state its prefixes, and zero prefixes is not what the IDE
       // would use.

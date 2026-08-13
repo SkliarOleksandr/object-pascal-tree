@@ -4088,6 +4088,29 @@ begin
       SymCountOf(LOr, 'ttooklen', skType) = 1);
     Ok('1.3.2 oracle: a STRING const is refused, not guessed -- the branch '
       + 'stays untaken', SymCountOf(LOr, 'ttookstr', skType) = 0);
+    // ReportGuessedIfs is OFF by default: the KStr residual above must NOT
+    // have produced a diagnostic -- the analysis is byte-identical.
+    Ok('1.3.2: ReportGuessedIfs off -- no PPIF diagnostics by default',
+      DiagCount(LOr, 'PPIF') = 0);
+  finally
+    GProj.Free;
+  end;
+  // Same fixture, flag ON: the one residual guess (the KStr guard) surfaces
+  // as a PPIF diagnostic whose message carries the expression text -- the
+  // exotica detector for foreign projects. The oracle-answered guards must
+  // NOT appear: their units were re-decided and the second pass's flags are
+  // what survives.
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportGuessedIfs := True;
+    GProj.AnalyzeDirectory(LDir);
+    var LOrOn := ModelByName('unitoracle');
+    Ok('1.3.2: ReportGuessedIfs on -- exactly the ONE residual guess reports',
+      DiagCount(LOrOn, 'PPIF') = 1);
+    Ok('1.3.2: ...and the message carries the expression text',
+      DiagHasText(LOrOn, 'PPIF', 'KStr'));
+    Ok('1.3.2: oracle-answered guards do NOT report -- the flag shows '
+      + 'guesses, not questions', not DiagHasText(LOrOn, 'PPIF', 'KAlias'));
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then
