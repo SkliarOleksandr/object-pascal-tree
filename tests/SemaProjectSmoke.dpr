@@ -4056,9 +4056,9 @@ begin
     '  TBigEnum = (beA, beB);'#10 +   // same unit, forced to 4 by the state
     '{$MINENUMSIZE 1}'#10 +
     '  TPair = record A, B: Pointer; end;'#10 +
-    // An inline ARRAY field is what the layout walk still refuses (a mixed
-    // FIELD-SIZE record is computed for real now -- see the layout fixture).
-    '  TMixedOra = record A: Byte; Arr: array[0..2] of Integer; end;'#10 +
+    // A SET field is what the layout walk still refuses; mixed field sizes,
+    // arrays and strings are all computed for real -- see the layout fixture.
+    '  TMixedOra = record A: Byte; F: set of Byte; end;'#10 +
     'var'#10 +
     '  GTable: array[0..2] of Integer;'#10 +
     '{$IF KAlias}'#10 +
@@ -4163,8 +4163,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitExotic.pas'),
     'unit UnitExotic;'#10'interface'#10 +
     'type'#10 +
-    // An inline array field: a layout shape the walk refuses to model.
-    '  TMixed = record A: Byte; Arr: array[0..2] of Integer; end;'#10 +
+    // A set field: the one layout shape the walk still refuses to model.
+    '  TMixed = record A: Byte; F: set of Byte; end;'#10 +
     'const'#10 +
     '  KStr = ''text'';'#10 +
     'implementation'#10 +
@@ -4244,10 +4244,45 @@ begin
     '  TA16 = record A: Byte; B: Int64; end;'#10 +          // 16: caps at 8
     '{$A8}'#10 +
     '  TNest1 = record A: Byte; N: TA1; end;'#10 +          // 10: TA1 aligns 1
-    // Two shapes the walk does NOT model. They must REFUSE, not guess: the
-    // guard is written so that a wrong answer of any kind declares the type.
-    '  TArrF = record A: Byte; Arr: array[0..2] of Integer; end;'#10 +
-    '  TStrF = record A: Byte; S: string; end;'#10 +
+    // Reference-counted and pointer-like FIELDS. Every one is one machine
+    // pointer, pointer-aligned, so after a Byte they all land on 8 (Win32) --
+    // and SizeOf of a CLASS type is the reference, not the instance.
+    '  IMy = interface end;'#10 +
+    '  TCls = class Fa, Fb, Fc: Integer; end;'#10 +
+    '  TDyn = array of Integer;'#10 +
+    '  TS01 = record A: Byte; F: string; end;'#10 +          // 8
+    '  TS02 = record A: Byte; F: ShortString; end;'#10 +     // 257: align 1!
+    '  TS03 = record A: Byte; F: string[10]; end;'#10 +      // 12
+    '  TS04 = record A: Byte; F: Variant; end;'#10 +         // 24: align 8
+    '  TS05 = record A: Byte; F: IMy; end;'#10 +             // 8
+    '  TS06 = record A: Byte; F: TCls; end;'#10 +            // 8
+    '  TS07 = record A: Byte; F: TDyn; end;'#10 +            // 8
+    // A method pointer aligns as a SCALAR of its own size, not as a pointer:
+    // 8 bytes aligned to 8 on Win32, where a hand-written two-pointer record
+    // (TMeth above, TR16) aligns to 4. The two together pin the difference.
+    '  TProcOO = procedure(A: Integer) of object;'#10 +
+    '  TS08 = record A: Byte; F: TProcOO; end;'#10 +         // 16, not 12
+    // Static arrays, standalone and as fields. The last two pin that the
+    // array's alignment is its ELEMENT's, not its size.
+    '  TE5 = (q0, q1, q2, q3, q4);'#10 +
+    '  TSub = 5..9;'#10 +
+    '  TRec3 = record A, B, C: Byte; end;'#10 +
+    '  TB01 = array[0..2] of Integer;'#10 +                  // 12
+    '  TB02 = array[Byte] of Integer;'#10 +                  // 1024
+    '  TB03 = array[TE5] of Integer;'#10 +                   // 20
+    '  TB04 = array[TSub] of Integer;'#10 +                  // 20
+    '  TB05 = array[0..1, 0..2] of Integer;'#10 +            // 24
+    '  TB06 = array[0..1] of array[0..2] of Integer;'#10 +   // 24
+    '  TB07 = array[''a''..''e''] of Byte;'#10 +             // 5
+    '  TB08 = array[0..2] of TRec3;'#10 +                    // 9
+    '  TC01 = record A: Byte; F: array[0..2] of Integer; end;'#10 +  // 16
+    '  TC02 = record A: Byte; F: array[0..2] of Byte; end;'#10 +     // 4
+    '  TC03 = record A: Byte; F: array[0..0] of Int64; end;'#10 +    // 16
+    '  TC04 = record A: Byte; F: array[0..2] of TRec3; end;'#10 +    // 10
+    // Still NOT modelled: a set field. It must REFUSE, not guess -- the guard
+    // is written so that a wrong answer of any kind declares the type.
+    '  TArrF = record A: Byte; F: set of Byte; end;'#10 +
+    '  TStrF = record A: Byte; F: file of Byte; end;'#10 +
     '{$IF SizeOf(TR01) = 16}type M01 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TR03) = 8}type M03 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TR05) = 6}type M05 = class end;{$IFEND}'#10 +
@@ -4264,6 +4299,27 @@ begin
     '{$IF SizeOf(TA4) = 12}type MA4 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TA16) = 16}type MA16 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TNest1) = 10}type MNest = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TS01) = 8}type MS01 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TS02) = 257}type MS02 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TS03) = 12}type MS03 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TS04) = 24}type MS04 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TS05) = 8}type MS05 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TS06) = 8}type MS06 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TS07) = 8}type MS07 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TS08) = 16}type MS08 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TSub) = 1}type MSub = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TB01) = 12}type MB01 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TB02) = 1024}type MB02 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TB03) = 20}type MB03 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TB04) = 20}type MB04 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TB05) = 24}type MB05 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TB06) = 24}type MB06 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TB07) = 5}type MB07 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TB08) = 9}type MB08 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TC01) = 16}type MC01 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TC02) = 4}type MC02 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TC03) = 16}type MC03 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TC04) = 10}type MC04 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TArrF) <> 0}type MArr = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TStrF) <> 0}type MStr = class end;{$IFEND}'#10 +
     'implementation'#10'end.'#10);
@@ -4279,11 +4335,27 @@ begin
         LMissing := LMissing + ' ' + LM;
     Ok('1.3.2 layout: all 16 dcc-measured record sizes reproduce (missing:' +
       LMissing + ')', LMissing = '');
-    Ok('1.3.2 layout: an inline ARRAY field refuses rather than guessing',
+    LMissing := '';
+    for var LM in ['ms01', 'ms02', 'ms03', 'ms04', 'ms05', 'ms06', 'ms07',
+                   'ms08', 'msub'] do
+      if SymCountOf(LLay, LM, skType) <> 1 then
+        LMissing := LMissing + ' ' + LM;
+    Ok('1.3.2 layout: string/ShortString/string[N]/Variant/interface/class/' +
+      'dynarray/method-pointer fields and a subrange type all size and ALIGN ' +
+      'as measured (missing:' + LMissing + ')', LMissing = '');
+    LMissing := '';
+    for var LM in ['mb01', 'mb02', 'mb03', 'mb04', 'mb05', 'mb06', 'mb07',
+                   'mb08', 'mc01', 'mc02', 'mc03', 'mc04'] do
+      if SymCountOf(LLay, LM, skType) <> 1 then
+        LMissing := LMissing + ' ' + LM;
+    Ok('1.3.2 layout: static arrays -- subrange, Byte/enum/subrange-type and ' +
+      'char-literal indices, both multi-dim spellings, record elements, and ' +
+      'as fields (missing:' + LMissing + ')', LMissing = '');
+    Ok('1.3.2 layout: a SET field still refuses rather than guessing',
       (SymCountOf(LLay, 'marr', skType) = 0) and
       DiagHasText(LLay, 'PPIF', 'SizeOf(TArrF)'));
-    Ok('1.3.2 layout: a `string` field refuses too -- a managed field is not '
-      + 'in the size table', (SymCountOf(LLay, 'mstr', skType) = 0) and
+    Ok('1.3.2 layout: a FILE field refuses too',
+      (SymCountOf(LLay, 'mstr', skType) = 0) and
       DiagHasText(LLay, 'PPIF', 'SizeOf(TStrF)'));
     Ok('1.3.2 layout: the two refusals are the ONLY residuals',
       DiagCount(LLay, 'PPIF') = 2);

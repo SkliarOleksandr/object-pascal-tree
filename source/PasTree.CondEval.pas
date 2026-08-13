@@ -125,10 +125,18 @@ function CondAsNum(const AValue: TPasCondValue): Double;
 function PasBuiltinSizeOf(const AName: string; APointerBytes,
   AExtendedBytes: Integer; out ASize: Double): Boolean;
 
+{ The same table, with ALIGNMENT — which is NOT derivable from the size.
+  ShortString is 256 bytes aligned to 1, a set is up to 32 bytes aligned to 1,
+  and Extended is 10 bytes aligned to 8 (Win32). Anything that lays out a
+  record must ask this rather than clipping the size to 8. }
+function PasBuiltinLayout(const AName: string; APointerBytes,
+  AExtendedBytes: Integer; out ASize: Double; out AAlign: Integer): Boolean;
+
 implementation
 
 uses
   System.SysUtils,
+  System.Math,
   PasTree.Parser;
 
 function MkBool(AValue: Boolean): TPasCondValue;
@@ -304,7 +312,49 @@ end;
 
 function PasBuiltinSizeOf(const AName: string; APointerBytes,
   AExtendedBytes: Integer; out ASize: Double): Boolean;
+var
+  LAlign: Integer;
 begin
+  Result := PasBuiltinLayout(AName, APointerBytes, AExtendedBytes, ASize,
+    LAlign);
+end;
+
+function PasBuiltinLayout(const AName: string; APointerBytes,
+  AExtendedBytes: Integer; out ASize: Double; out AAlign: Integer): Boolean;
+begin
+  // The reference-counted and pointer-like intrinsics: one machine pointer,
+  // aligned as one. `string` and friends are reserved words or compiler
+  // intrinsics, so nothing in a unit can shadow them with a different size.
+  if SameText(AName, 'string') or SameText(AName, 'UnicodeString') or
+     SameText(AName, 'AnsiString') or SameText(AName, 'WideString') or
+     SameText(AName, 'UTF8String') or SameText(AName, 'RawByteString') or
+     SameText(AName, 'PChar') or SameText(AName, 'PAnsiChar') or
+     SameText(AName, 'PWideChar') then
+  begin
+    ASize := APointerBytes;
+    AAlign := APointerBytes;
+    Exit(True);
+  end;
+  // 256 bytes of storage, but byte-aligned — the case that makes alignment a
+  // separate question from size.
+  if SameText(AName, 'ShortString') then
+  begin
+    ASize := 256;
+    AAlign := 1;
+    Exit(True);
+  end;
+  // TVarData: 16 bytes on a 32-bit target, 24 on 64-bit, aligned to 8 on
+  // BOTH (dcc-probed: `record A: Byte; V: Variant; end` is 24 on Win32).
+  if SameText(AName, 'Variant') or SameText(AName, 'OleVariant') then
+  begin
+    if APointerBytes = 4 then
+      ASize := 16
+    else
+      ASize := 24;
+    AAlign := 8;
+    Exit(True);
+  end;
+
   Result := True;
   if SameText(AName, 'Pointer') or SameText(AName, 'NativeInt') or
      SameText(AName, 'NativeUInt') then
@@ -329,6 +379,13 @@ begin
     ASize := 0;
     Result := False;
   end;
+  // Every remaining builtin is a scalar, and a scalar aligns to its own size
+  // capped at 8 — Extended (10 bytes on Win32) is the only one where that
+  // clipping does real work.
+  if Result then
+    AAlign := Min(Trunc(ASize), 8)
+  else
+    AAlign := 1;
 end;
 
 // A shift count dcc would accept: a clean (unguessed) whole number in 0..63.
