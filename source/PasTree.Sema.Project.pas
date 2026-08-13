@@ -1360,45 +1360,117 @@ begin
       ResolveUses(LCand[LIdx]);
 end;
 
-{ ReportGuessedIfs' worker: lifts the RESIDUAL preprocessor flags — the
-  `$IF`s still guessed after RunDeclaredPass had its chance, and the ones
-  whose expression never parsed — out of each model's retained preprocess
-  data and into its ordinary diagnostics, where -list/histograms/the demo
-  already know how to show them. Runs right after RunDeclaredPass in each
-  driver: a re-decided model carries the SECOND pass's flags (the oracle
-  already subtracted what it answered), an untouched one its first-pass
-  flags. Same ACount snapshot as every other diagnostic gate — units pulled
-  in later from search paths stay out, like their E2003s do. }
+{ ReportGuessedIfs' worker: lifts the preprocessor's conditional flags out of
+  each model's retained preprocess data and into its ordinary diagnostics,
+  where -list/histograms/the demo already know how to show them. Runs right
+  after RunDeclaredPass in each driver, and gated on ACount like every other
+  diagnostic — units pulled in later from search paths stay out, as their
+  E2003s do.
+
+  THE FILTER IS THE POINT. A flag means "the verdict rested on a guess", and
+  most such guesses are provably CORRECT by the time we get here: a
+  `$IF Declared(TlsStart)` in SysInit guards a name that exists on another
+  platform only, and DeclaredQueryFor answers that definitively ("declared
+  nowhere in this closure") — the guard is ordinary platform-conditional
+  code, not a finding. RunDeclaredPass therefore did not even re-run the
+  unit, which is exactly why its first-pass flag is still sitting there. So
+  the flag alone cannot be the report criterion; re-asking is.
+
+  Each flag carries the questions its evaluation could not answer
+  (TPasPPDiagnostic.Unanswered). We ask them again with the FULL project
+  oracle, and report only when something is STILL unanswerable — the genuine
+  exotica: SizeOf of a type whose layout tier 1 refuses, a string-valued
+  constant, Ord(), a dotted name. A `Declared` question is always answerable
+  now, so a Declared-only guard never reports.
+
+  (An earlier version reported every flag and argued that hiding a confirmed
+  guess would also hide a misspelled name meant to exist. That was wrong: a
+  misspelling is indistinguishable from a legitimate platform guard, and the
+  guards outnumber it 31 to 0 on the RTL alone — so the argument bought
+  nothing and cost a flood of normal code reported as findings.) }
 procedure TPasSemaProject.InjectGuessedIfDiags(ACount: Integer);
 var
-  LIdx, LDIdx: Integer;
+  LIdx, LDIdx, LQIdx: Integer;
   LM: TPasSemaModel;
   LDiag: TSemaDiag;
+  LDeclQuery: TPasDeclaredQuery;
+  LSymQuery: TPasCondSymbolQuery;
+  LPPCode: TPasPPDiagCode;
+  LOpen: TArray<string>;
+  LName: string;
+  LNum: Double;
+  LDeclAnswer: Boolean;
 begin
   if not FReportGuessedIfs then
     Exit;
   for LIdx := 0 to ACount - 1 do
   begin
     LM := FModels[LIdx];
+    LDeclQuery := nil;
+    LSymQuery := nil;
     for LDIdx := 0 to High(LM.Tree.Source.Diagnostics) do
-      case LM.Tree.Source.Diagnostics[LDIdx].Code of
-        ppIfNeedsSemantics, ppBadIfExpression:
+    begin
+      LPPCode := LM.Tree.Source.Diagnostics[LDIdx].Code;
+      if not (LPPCode in [ppIfNeedsSemantics, ppBadIfExpression]) then
+        Continue;
+      LOpen := nil;
+      if LPPCode = ppIfNeedsSemantics then
+      begin
+        // Build the oracles lazily: most units have no conditional flags at
+        // all, and each closure captures a model id.
+        if not Assigned(LDeclQuery) then
+        begin
+          LDeclQuery := DeclaredQueryFor(LIdx);
+          LSymQuery := SymbolQueryFor(LIdx);
+        end;
+        for LQIdx := 0 to High(LM.Tree.Source.Diagnostics[LDIdx].Unanswered) do
+        begin
+          LName := LM.Tree.Source.Diagnostics[LDIdx].Unanswered[LQIdx].Name;
+          if LM.Tree.Source.Diagnostics[LDIdx].Unanswered[LQIdx].Query =
+             sqDeclared then
           begin
-            if LM.Tree.Source.Diagnostics[LDIdx].Code = ppIfNeedsSemantics
-            then
-              LDiag.Code := 'PPIF'
+            if not LDeclQuery(LName, LDeclAnswer) then
+              LOpen := LOpen + ['Declared(' + LName + ')'];
+          end
+          else if not LSymQuery(
+            LM.Tree.Source.Diagnostics[LDIdx].Unanswered[LQIdx].Query,
+            LName, LNum) then
+            case LM.Tree.Source.Diagnostics[LDIdx].Unanswered[LQIdx].Query of
+              sqSizeOfType: LOpen := LOpen + ['SizeOf(' + LName + ')'];
+              sqLengthOf: LOpen := LOpen + ['Length(' + LName + ')'];
             else
-              LDiag.Code := 'PPBAD';
-            LDiag.Msg := LDiag.Code + ' ' +
-              PP_DIAG_MESSAGES[LM.Tree.Source.Diagnostics[LDIdx].Code] +
-              ': [' + LM.Tree.Source.Diagnostics[LDIdx].Detail + ']';
-            LDiag.DeclNode := NIL_NODE;
-            LDiag.FileId := LM.Tree.Source.Diagnostics[LDIdx].FileId;
-            LM.Tree.Source.Files[LDiag.FileId].OffsetToLineCol(
-              LM.Tree.Source.Diagnostics[LDIdx].Start, LDiag.Line, LDiag.Col);
-            LM.AddDiag(LDiag);
-          end;
+              LOpen := LOpen + [LName];
+            end;
+        end;
+        // No questions recorded at all means the evaluation guessed at
+        // something it could not even NAME (an indexed designator, a shape
+        // CondEval has no case for) — the most unknown thing there is, so it
+        // reports rather than passing the "nothing open" test vacuously.
+        if (LOpen = nil) and
+           (Length(LM.Tree.Source.Diagnostics[LDIdx].Unanswered) > 0) then
+          Continue;   // every question answerable now: a CONFIRMED guess
+        if LOpen = nil then
+          LOpen := ['an unrecognized expression form'];
       end;
+      if LPPCode = ppIfNeedsSemantics then
+      begin
+        LDiag.Code := 'PPIF';
+        LDiag.Msg := Format('PPIF conditional still undecidable: [%s] — ' +
+          'cannot resolve %s', [LM.Tree.Source.Diagnostics[LDIdx].Detail,
+          string.Join(', ', LOpen)]);
+      end
+      else
+      begin
+        LDiag.Code := 'PPBAD';
+        LDiag.Msg := 'PPBAD malformed conditional expression: [' +
+          LM.Tree.Source.Diagnostics[LDIdx].Detail + ']';
+      end;
+      LDiag.DeclNode := NIL_NODE;
+      LDiag.FileId := LM.Tree.Source.Diagnostics[LDIdx].FileId;
+      LM.Tree.Source.Files[LDiag.FileId].OffsetToLineCol(
+        LM.Tree.Source.Diagnostics[LDIdx].Start, LDiag.Line, LDiag.Col);
+      LM.AddDiag(LDiag);
+    end;
   end;
 end;
 

@@ -50,12 +50,31 @@ type
     ppPopWithoutPush
   );
 
+  TPasSymbolQuery = (sqConstValue, sqSizeOfType, sqLengthOf, sqDeclared);
+
+  // A symbol question nobody could answer — recorded (deduplicated, source
+  // order) exactly like UnresolvedDeclared, and consumed by the same second
+  // pass to decide whether re-preprocessing could learn anything.
+  TPasUnresolvedSymbol = record
+    Query: TPasSymbolQuery;
+    Name: string;
+  end;
+
   TPasPPDiagnostic = record
     Code: TPasPPDiagCode;
     FileId: Integer;
     Start: Integer;
     Len: Integer;
     Detail: string;
+    // For ppIfNeedsSemantics: exactly what this evaluation could not answer.
+    // The distinction a later pass needs is UNVERIFIED versus CONFIRMED: a
+    // `Declared(X)` guess becomes provably correct the moment a full symbol
+    // table says X is declared nowhere (the overwhelmingly common
+    // platform-guard case), whereas `SizeOf(SomeExoticType)` may stay
+    // unanswerable forever. Without this list the two are indistinguishable
+    // and reporting both floods normal code — see
+    // TPasSemaProject.ReportGuessedIfs.
+    Unanswered: TArray<TPasUnresolvedSymbol>;
   end;
 
   TPasSkippedRegion = record
@@ -86,26 +105,12 @@ type
     Bytes: Integer;   // 1, 2 or 4
   end;
 
-  // What a `$IF` expression may ask a symbol oracle (PasTree.CondEval):
-  // the value of a constant, SizeOf of a non-builtin type, Length of an
-  // array constant/variable. Numeric answers only — every real site is a
-  // number or a Boolean (0/1); a string constant simply stays unanswered.
-  TPasSymbolQuery = (sqConstValue, sqSizeOfType, sqLengthOf);
-
   { Answers symbol questions from a `$IF` expression — the widened sibling of
     TPasDeclaredQuery, same three-state contract: the RESULT says whether the
     oracle could answer at all, ANum is the answer when it could. Nil on the
     first pass; TPasSemaProject.SymbolQueryFor supplies it on the second. }
   TPasCondSymbolQuery = reference to function(AQuery: TPasSymbolQuery;
     const AName: string; out ANum: Double): Boolean;
-
-  // A symbol question nobody could answer — recorded (deduplicated, source
-  // order) exactly like UnresolvedDeclared, and consumed by the same second
-  // pass to decide whether re-preprocessing could learn anything.
-  TPasUnresolvedSymbol = record
-    Query: TPasSymbolQuery;
-    Name: string;
-  end;
 
   TPasPreprocessed = record
   public
@@ -233,6 +238,9 @@ type
     function Active: Boolean;
     procedure Diag(ACode: TPasPPDiagCode; AFileId, AStart, ALen: Integer;
       const ADetail: string = '');
+    procedure DiagUn(ACode: TPasPPDiagCode; AFileId, AStart, ALen: Integer;
+      const ADetail: string;
+      const AUnanswered: TArray<TPasUnresolvedSymbol>);
     procedure MarkSkipped(AFileId, AStart, AEnd: Integer);
     procedure ProcessFile(AFileId: Integer);
     procedure HandleDirective(AFileId: Integer; const AToken: TPasToken);
@@ -593,6 +601,13 @@ end;
 
 procedure TPasPreprocessor.Diag(ACode: TPasPPDiagCode; AFileId, AStart,
   ALen: Integer; const ADetail: string);
+begin
+  DiagUn(ACode, AFileId, AStart, ALen, ADetail, nil);
+end;
+
+procedure TPasPreprocessor.DiagUn(ACode: TPasPPDiagCode; AFileId, AStart,
+  ALen: Integer; const ADetail: string;
+  const AUnanswered: TArray<TPasUnresolvedSymbol>);
 var
   LDiag: TPasPPDiagnostic;
 begin
@@ -601,6 +616,7 @@ begin
   LDiag.Start := AStart;
   LDiag.Len := ALen;
   LDiag.Detail := ADetail;
+  LDiag.Unanswered := AUnanswered;
   FDiags.Add(LDiag);
 end;
 
@@ -1280,7 +1296,8 @@ begin
   // 30301)` decides False on the left side alone, exactly as dcc's
   // short-circuit does, and a second pass could not change it.
   if LValue.Guessed then
-    Diag(ppIfNeedsSemantics, AFileId, AToken.Start, AToken.Len, AExpr);
+    DiagUn(ppIfNeedsSemantics, AFileId, AToken.Start, AToken.Len, AExpr,
+      LCtx.UnknownSymbols);
   Result := CondAsBool(LValue);
 end;
 

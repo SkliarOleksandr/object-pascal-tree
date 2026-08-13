@@ -67,7 +67,19 @@ const
 function MakeDiag(const ACode, AMsg: string; ADeclNode, AFileId, ALine,
   ACol: Integer): TSemaDiag;
 
+{ How a host should LABEL a diagnostic. Not every code is an error, and a host
+  that says "Error" for all of them overstates the ones that report OUR
+  limitation rather than the source's: `PPIF` means an `$IF` we could not
+  decide, so the branch taken may be the wrong one — worth seeing, not a
+  defect in the code being analyzed. Codes are classified by their letter, the
+  way dcc's own numbering already works (E/F fatal-ish, W/H advisory), with
+  the PP* pair spelled out. }
+function DiagSeverityLabel(const ACode: string): string;
+
 implementation
+
+uses
+  System.SysUtils;
 
 function MakeDiag(const ACode, AMsg: string; ADeclNode, AFileId, ALine,
   ACol: Integer): TSemaDiag;
@@ -78,6 +90,22 @@ begin
   Result.FileId := AFileId;
   Result.Line := ALine;
   Result.Col := ACol;
+end;
+
+function DiagSeverityLabel(const ACode: string): string;
+begin
+  if ACode = 'PPIF' then
+    // Ours, not the source's: an $IF we could not decide. The chosen branch
+    // may be wrong, which is worth surfacing without calling it an error.
+    Result := 'Warning'
+  else if ACode = 'PPBAD' then
+    // The source's: a conditional expression that does not parse. dcc would
+    // reject it too wherever that branch is live.
+    Result := 'Error'
+  else if (ACode <> '') and CharInSet(UpCase(ACode[1]), ['W', 'H']) then
+    Result := 'Warning'
+  else
+    Result := 'Error';
 end;
 
 end.

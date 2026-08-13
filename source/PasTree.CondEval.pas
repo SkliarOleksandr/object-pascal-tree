@@ -288,6 +288,19 @@ end;
 function EvalCondNode(const ATree: TPasTree; ANode: Integer;
   var ACtx: TPasCondContext): TPasCondValue;
 
+  // Records one unanswerable question. sqDeclared additionally feeds
+  // UnknownDeclared, which RunDeclaredPass's candidate filter reads.
+  procedure AddUnknown(AQuery: TPasSymbolQuery; const AName: string);
+  var
+    LSym: TPasUnresolvedSymbol;
+  begin
+    LSym.Query := AQuery;
+    LSym.Name := AName;
+    ACtx.UnknownSymbols := ACtx.UnknownSymbols + [LSym];
+    if AQuery = sqDeclared then
+      ACtx.UnknownDeclared := ACtx.UnknownDeclared + [AName];
+  end;
+
   // A symbol question: ask the oracle when there is one, otherwise record
   // the question (kind + name) for the second pass and return the guess —
   // exactly the Declared() contract, widened.
@@ -295,13 +308,10 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     const AGuess: TPasCondValue): TPasCondValue;
   var
     LNum: Double;
-    LSym: TPasUnresolvedSymbol;
   begin
     if Assigned(ACtx.OnSymbol) and ACtx.OnSymbol(AQuery, AName, LNum) then
       Exit(MkNum(LNum));
-    LSym.Query := AQuery;
-    LSym.Name := AName;
-    ACtx.UnknownSymbols := ACtx.UnknownSymbols + [LSym];
+    AddUnknown(AQuery, AName);
     Result := AGuess;
     Result.Guessed := True;
   end;
@@ -342,8 +352,12 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
         // the guarded text is by construction the text that does NOT compile
         // when the name IS declared, and `not Declared(X)` fallbacks then
         // come out True, keeping the name resolvable. The NAME is recorded
-        // so a caller with a symbol table can come back and ask properly.
-        ACtx.UnknownDeclared := ACtx.UnknownDeclared + [LArgName];
+        // so a caller with a symbol table can come back and ask properly —
+        // twice over: UnknownDeclared drives RunDeclaredPass's candidate
+        // filter, UnknownSymbols rides on the diagnostic so a reporter can
+        // tell an UNVERIFIED guess from one a full symbol table later
+        // CONFIRMED (see TPasPPDiagnostic.Unanswered).
+        AddUnknown(sqDeclared, LArgName);
     end
     else if SameText(LName, 'SizeOf') then
     begin
@@ -372,8 +386,13 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       LArgName := DottedNameOf(ATree, LArg);
       if LArgName <> '' then
         Result := AskSymbol(sqLengthOf, LArgName, MkNum(0));
-    end;
-    // Anything else (Ord(x), a unit function, ...) stays a guess.
+    end
+    else
+      // Anything else (Ord(x), a unit function, ...) stays a guess — but the
+      // CALLEE is recorded so a reporter can say what it choked on. Without
+      // this the guess carries no question at all, and a filter that trusts
+      // "no open questions" would call it verified.
+      AddUnknown(sqConstValue, LName + '()');
   end;
 
   function EvalRel(const AOp: string; const L, R: TPasCondValue):

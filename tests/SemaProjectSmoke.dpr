@@ -4117,6 +4117,70 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  // ---- ReportGuessedIfs' FILTER, the part that decides whether the flag is
+  // a finding at all. A guess whose questions the full oracle can now answer
+  // is CONFIRMED, not open, and must stay silent -- `$IF Declared(X)` where X
+  // is declared nowhere is ordinary platform-conditional code (SysInit's
+  // TlsStart; 31 such sites on the RTL, every one of them normal). What must
+  // still report is anything genuinely undecidable, and the four shapes below
+  // are the reachability proof: without them the filter could be silencing
+  // everything and look identical on a clean corpus. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_ifexotic');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitExotic.pas'),
+    'unit UnitExotic;'#10'interface'#10 +
+    'type'#10 +
+    '  TMixed = record A: Byte; B: Int64; end;'#10 +   // mixed sizes: refused
+    'const'#10 +
+    '  KStr = ''text'';'#10 +
+    'implementation'#10 +
+    // (a) a platform-style guard on a name declared NOWHERE: confirmed
+    //     correct by the oracle, so it must NOT report.
+    '{$IF Declared(NeverAnywhere)}'#10'procedure PA; begin end;'#10 +
+    '{$ENDIF}'#10 +
+    // (b) SizeOf of a layout tier 1 refuses.
+    '{$IF SizeOf(TMixed) > 8}'#10'procedure PB; begin end;'#10'{$ENDIF}'#10 +
+    // (c) a string-valued const in a boolean position.
+    '{$IF KStr}'#10'procedure PC; begin end;'#10'{$ENDIF}'#10 +
+    // (d) a function CondEval has no case for at all -- the callee is named
+    //     so the report can say what it choked on.
+    '{$IF Ord(KStr[1]) > 64}'#10'procedure PD; begin end;'#10'{$ENDIF}'#10 +
+    // (e) an expression that does not parse: PPBAD, the source's own bug.
+    '{$IF 3 +}'#10'procedure PE; begin end;'#10'{$ENDIF}'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportGuessedIfs := True;
+    GProj.AnalyzeDirectory(LDir);
+    var LEx := ModelByName('unitexotic');
+    Ok('1.3.2 filter: a CONFIRMED guess stays silent -- Declared(X) for an X '
+      + 'declared nowhere is normal platform code, not a finding',
+      not DiagHasText(LEx, 'PPIF', 'NeverAnywhere'));
+    Ok('1.3.2 filter: SizeOf of a mixed-size record reports, naming it',
+      DiagHasText(LEx, 'PPIF', 'SizeOf(TMixed)'));
+    Ok('1.3.2 filter: a string-valued const reports',
+      DiagHasText(LEx, 'PPIF', 'KStr'));
+    Ok('1.3.2 filter: an unrecognized FUNCTION reports, naming the callee -- '
+      + 'it records no question, so a naive "nothing open" test would have '
+      + 'silenced it', DiagHasText(LEx, 'PPIF', 'Ord()'));
+    Ok('1.3.2 filter: a malformed conditional is PPBAD, not PPIF',
+      DiagHasText(LEx, 'PPBAD', '3 +') and (DiagCount(LEx, 'PPBAD') = 1));
+    Ok('1.3.2 filter: exactly the three undecidable guards report, no more',
+      DiagCount(LEx, 'PPIF') = 3);
+    // Severity: ours-vs-theirs, so a host does not call our own limitation
+    // an error in the user's code.
+    Ok('1.3.2: PPIF labels as Warning, PPBAD as Error',
+      (DiagSeverityLabel('PPIF') = 'Warning') and
+      (DiagSeverityLabel('PPBAD') = 'Error') and
+      (DiagSeverityLabel('E2003') = 'Error'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
 end.

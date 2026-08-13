@@ -2067,9 +2067,13 @@ begin
           LDiagFile := LModel.Tree.Source.FileNames[LFileId]
         else
           LDiagFile := FSemaProject.ModelFile(LId);
+        // The label comes from the CODE, not a hardcoded "Error": a PPIF
+        // reports our own inability to decide an $IF, and calling that an
+        // error in the user's code is a lie (see DiagSeverityLabel).
         LogError(LDiagFile, LModel.Diags[LDIdx].Line, LModel.Diags[LDIdx].Col,
-          Format('[Error] %s(%d,%d): %s',
-            [TPath.GetFileName(LDiagFile), LModel.Diags[LDIdx].Line,
+          Format('[%s] %s(%d,%d): %s',
+            [DiagSeverityLabel(LModel.Diags[LDIdx].Code),
+             TPath.GetFileName(LDiagFile), LModel.Diags[LDIdx].Line,
              LModel.Diags[LDIdx].Col, LModel.Diags[LDIdx].Msg]));
       end;
     end;
