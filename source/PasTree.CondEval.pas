@@ -70,13 +70,18 @@ type
 
   TPasCondContext = record
     // Inputs.
-    Defines: TPasDefines;            // required
+    Defines: TPasDefines;            // nil tolerated (tree-eval of const
+                                     // initializers has no define set; a
+                                     // Defined() there just guesses)
     OnDeclared: TPasDeclaredQuery;   // nil = nobody can answer Declared()
+    OnSymbol: TPasCondSymbolQuery;   // nil = nobody can answer const/SizeOf/
+                                     // Length questions (the first pass)
     CompilerVersion: Double;         // answers RTLVersion too (equal since XE2)
     PointerBytes: Integer;
     ExtendedBytes: Integer;
     // Outputs.
     UnknownDeclared: TArray<string>; // Declared() names nobody answered
+    UnknownSymbols: TArray<TPasUnresolvedSymbol>; // ...and symbol questions
   end;
 
 { Evaluates the expression rooted at ANode. Never raises; anything it cannot
@@ -94,6 +99,12 @@ function EvalCondText(const AExpr: string; var ACtx: TPasCondContext;
 
 { The branch verdict. }
 function CondAsBool(const AValue: TPasCondValue): Boolean;
+function CondAsNum(const AValue: TPasCondValue): Double;
+
+{ SizeOf(X) for the SEEDED builtin types only, parameterized by target.
+  Public because the projects symbol oracle sizes record FIELDS with it. }
+function PasBuiltinSizeOf(const AName: string; APointerBytes,
+  AExtendedBytes: Integer; out ASize: Double): Boolean;
 
 implementation
 
@@ -245,10 +256,7 @@ begin
   end;
 end;
 
-// SizeOf(X) for the SEEDED builtin types only, parameterized by target like
-// the old evaluator (a USER type's size is the semantic layer's answer, and
-// arrives through the second pass). Ported verbatim from TIfEval.
-function BuiltinSizeOf(const AName: string; APointerBytes,
+function PasBuiltinSizeOf(const AName: string; APointerBytes,
   AExtendedBytes: Integer; out ASize: Double): Boolean;
 begin
   Result := True;
@@ -280,6 +288,24 @@ end;
 function EvalCondNode(const ATree: TPasTree; ANode: Integer;
   var ACtx: TPasCondContext): TPasCondValue;
 
+  // A symbol question: ask the oracle when there is one, otherwise record
+  // the question (kind + name) for the second pass and return the guess —
+  // exactly the Declared() contract, widened.
+  function AskSymbol(AQuery: TPasSymbolQuery; const AName: string;
+    const AGuess: TPasCondValue): TPasCondValue;
+  var
+    LNum: Double;
+    LSym: TPasUnresolvedSymbol;
+  begin
+    if Assigned(ACtx.OnSymbol) and ACtx.OnSymbol(AQuery, AName, LNum) then
+      Exit(MkNum(LNum));
+    LSym.Query := AQuery;
+    LSym.Name := AName;
+    ACtx.UnknownSymbols := ACtx.UnknownSymbols + [LSym];
+    Result := AGuess;
+    Result.Guessed := True;
+  end;
+
   function EvalCall(ACallNode: Integer): TPasCondValue;
   var
     LCallee, LArg: Integer;
@@ -298,7 +324,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
 
     if SameText(LName, 'Defined') then
     begin
-      if ATree.Nodes[LArg].Kind = nkIdent then
+      if (ATree.Nodes[LArg].Kind = nkIdent) and Assigned(ACtx.Defines) then
         Result := MkBool(ACtx.Defines.IsDefined(ATree.NodeText(LArg)));
     end
     else if SameText(LName, 'Declared') then
@@ -322,15 +348,30 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     else if SameText(LName, 'SizeOf') then
     begin
       if (ATree.Nodes[LArg].Kind = nkIdent) and
-         BuiltinSizeOf(ATree.NodeText(LArg), ACtx.PointerBytes,
+         PasBuiltinSizeOf(ATree.NodeText(LArg), ACtx.PointerBytes,
            ACtx.ExtendedBytes, LSize) then
         Result := MkNum(LSize)
       else
       begin
-        // A user type's size: guessed 0, like the old evaluator.
-        Result := MkNum(0);
-        Result.Guessed := True;
+        // A user type's size: the oracle's question; guessed 0 (like the
+        // old evaluator) when nobody answers.
+        LArgName := DottedNameOf(ATree, LArg);
+        if LArgName <> '' then
+          Result := AskSymbol(sqSizeOfType, LArgName, MkNum(0))
+        else
+        begin
+          Result := MkNum(0);
+          Result.Guessed := True;
+        end;
       end;
+    end
+    else if SameText(LName, 'Length') then
+    begin
+      // Length(X) of an array constant/variable — System.pas guards on
+      // `Length(RegisteredTypeInfoTable)`. Guess 0 when unanswered.
+      LArgName := DottedNameOf(ATree, LArg);
+      if LArgName <> '' then
+        Result := AskSymbol(sqLengthOf, LArgName, MkNum(0));
     end;
     // Anything else (Ord(x), a unit function, ...) stays a guess.
   end;
@@ -465,10 +506,22 @@ begin
           Result := MkBool(False)
         else if SameText(LText, 'CompilerVersion') or
                 SameText(LText, 'RTLVersion') then
-          Result := MkNum(ACtx.CompilerVersion);
-        // Any other bare name is a symbol only semantics could resolve —
-        // guessed False (`$ELSEIF CPUX64` in the RTL is a DEFINE used bare;
-        // dcc evaluates the undeclared name by its quirk, we by the guess).
+          Result := MkNum(ACtx.CompilerVersion)
+        else
+          // Any other bare name is a CONSTANT only semantics could resolve
+          // (`$IF GenericVariants`, System.VarUtils) — the oracle's
+          // question; guessed False when nobody answers (`$ELSEIF CPUX64`
+          // in the RTL is a DEFINE used bare; dcc evaluates the undeclared
+          // name by its quirk, we by the guess).
+          Result := AskSymbol(sqConstValue, LText, MkBool(False));
+      end;
+    nkMember:
+      begin
+        // A dotted constant reference (`Unit.Const`) — same oracle question
+        // with the dotted name; a shape we cannot name stays a guess.
+        LText := DottedNameOf(ATree, ANode);
+        if LText <> '' then
+          Result := AskSymbol(sqConstValue, LText, MkBool(False));
       end;
     nkParen:
       begin
@@ -495,8 +548,7 @@ begin
       Result := EvalBinary(ANode);
     nkCall:
       Result := EvalCall(ANode);
-    // nkMember and everything else: a designator only semantics could
-    // resolve — a guess.
+    // Everything else: a designator only semantics could resolve — a guess.
   end;
 end;
 

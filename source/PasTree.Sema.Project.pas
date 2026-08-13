@@ -290,6 +290,14 @@ type
     function ResolveCustomAttributeX(AId: Integer): TSemaXType;
     procedure CheckAttributes(AId: Integer);
     function RecordHasLifecycleOp(AMid, ADefNode: Integer): Boolean;
+    function OracleResolve(AId: Integer; const ANameLower: string;
+      out AMid, ASym: Integer): Boolean;
+    function OracleConstNum(AMid, ASym, ADepth: Integer;
+      out ANum: Double): Boolean;
+    function OracleSizeOf(AMid, ASym, ADepth: Integer;
+      out ABytes: Double): Boolean;
+    function OracleLength(AMid, ASym: Integer; out ALen: Double): Boolean;
+    function SymbolQueryFor(AId: Integer): TPasCondSymbolQuery;
     function DeclTypeX(AMid, ASym: Integer): TSemaXType;
     function SubstX(const AX: TSemaXType; AInst, ADepth: Integer): TSemaXType;
     function DeclaredWithinX(AMid, ASym, AOwnerMid, AOwnerSym: Integer): Boolean;
@@ -495,6 +503,7 @@ uses
   System.Diagnostics,
   System.Math,
   PasTree.Parser,
+  PasTree.CondEval,
   PasTree.Sema.Builtins,
   PasTree.Sema.Resolver,
   PasTree.Sema.Diagnostics;
@@ -873,6 +882,347 @@ begin
     end;
 end;
 
+{ The `$IF` symbol oracle (const values / SizeOf / Length — see
+  TPasCondSymbolQuery), RunDeclaredPass's second half. Unlike DeclaredQueryFor
+  it DOES answer from the asking unit's own model: a constant's VALUE cannot
+  self-fulfil the way a Declared() guard around a fallback declaration can
+  (the value exists whichever branch the $IF takes), and same-unit
+  declarations are exactly what the measured RTL sites reference
+  (System.VarUtils' Generic* consts, System.Classes' TValueType, System.pas'
+  RegisteredTypeInfoTable). Two documented approximations, both inherited
+  from the pass's one-round design: declarations are read from the
+  FIRST-pass model (a value whose own declaration sits inside a branch the
+  second pass flips would be stale for that round), and position is not
+  checked (dcc answers a $IF only from declarations ABOVE it; a $IF
+  referencing a constant declared BELOW reads here as declared — code that
+  fragile hits dcc's undeclared-abort quirk anyway and exists in no corpus).
+
+  Everything is three-state and proof-or-refuse: an initializer that does not
+  fold to a clean number/bool, an enum with explicit values, a record with
+  mixed field sizes, a dotted name — all answer "cannot", which leaves the
+  first-pass guess standing, exactly today's behavior. }
+
+function TPasSemaProject.OracleResolve(AId: Integer; const ANameLower: string;
+  out AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LScope, LIdx: Integer;
+begin
+  AMid := AId;
+  ASym := NIL_SYM;
+  LM := FModels[AId];
+  // The unit's own scopes first: the implementation scope's parent chain
+  // covers the interface and system scopes, so one Resolve from there sees
+  // everything the unit itself declares.
+  LScope := NIL_SCOPE;
+  for LIdx := 0 to LM.Scopes.Count - 1 do
+    if LM.Scopes[LIdx].Kind = sckImplementation then
+    begin
+      LScope := LIdx;
+      Break;
+    end;
+  if LScope = NIL_SCOPE then
+    LScope := LM.InterfaceScope;
+  if LScope <> NIL_SCOPE then
+  begin
+    ASym := LM.Resolve(LScope, ANameLower);
+    if ASym <> NIL_SYM then
+      Exit(True);
+  end;
+  // Then the uses closure and the implicit System unit, the same route every
+  // other cross-unit fallback takes (System.Rtti's SizeOf(TMethod) reaches
+  // System.pas through here).
+  Result := ResolveRealDecl(AId, ANameLower, AMid, ASym);
+end;
+
+// The recursive const-evaluation context: resolves further plain names in
+// AMid as constants (GenericVariants = GenericVarUtils = False chains),
+// depth-capped like every other walk in this file.
+function TPasSemaProject.OracleConstNum(AMid, ASym, ADepth: Integer;
+  out ANum: Double): Boolean;
+var
+  LM: TPasSemaModel;
+  LDecl, LParent, LChild, LInit: Integer;
+  LCtx: TPasCondContext;
+  LVal: TPasCondValue;
+begin
+  Result := False;
+  ANum := 0;
+  if ADepth > 8 then
+    Exit;
+  LM := FModels[AMid];
+  if LM.Symbols[ASym].Kind <> skConst then
+    Exit;
+  LDecl := LM.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;   // seeded consts (True/False/MaxInt) never reach here
+  LParent := LM.Tree.Nodes[LDecl].Parent;
+  if (LParent = NIL_NODE) or (LM.Tree.Nodes[LParent].Kind <> nkConstDecl) then
+    Exit;
+  // The initializer is the LAST expression-kind child: children are the name
+  // ident, an optional type ref, the initializer, then optional nkDirective
+  // hints — so "last expression child that is not child #0" is exactly it.
+  LInit := NIL_NODE;
+  LChild := LM.Tree.Nodes[LParent].FirstChild;
+  if LChild <> NIL_NODE then
+    LChild := LM.Tree.Nodes[LChild].NextSibling;   // never the name itself
+  while LChild <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LChild].Kind in [nkIdent, nkMember, nkIntLit, nkRealLit,
+       nkStrLit, nkUnaryOp, nkBinaryOp, nkParen, nkCall] then
+      LInit := LChild;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+  if LInit = NIL_NODE then
+    Exit;
+  LCtx := Default(TPasCondContext);
+  LCtx.CompilerVersion := 37.0;
+  LCtx.PointerBytes := FInfo.PointerBytes;
+  LCtx.ExtendedBytes := FInfo.ExtendedBytes;
+  LCtx.OnSymbol :=
+    function(AQuery: TPasSymbolQuery; const AName: string;
+      out AN: Double): Boolean
+    var
+      LRMid, LRSym: Integer;
+    begin
+      Result := (AQuery = sqConstValue) and not AName.Contains('.') and
+        OracleResolve(AMid, LowerCase(AName), LRMid, LRSym) and
+        OracleConstNum(LRMid, LRSym, ADepth + 1, AN);
+      if not Result then
+        AN := 0;
+    end;
+  LVal := EvalCondNode(LM.Tree, LInit, LCtx);
+  if LVal.Guessed or (LVal.Kind = cvStr) then
+    Exit;
+  ANum := CondAsNum(LVal);
+  Result := True;
+end;
+
+function TPasSemaProject.OracleSizeOf(AMid, ASym, ADepth: Integer;
+  out ABytes: Double): Boolean;
+var
+  LM: TPasSemaModel;
+  LDef, LChild, LSub, LCount, LFields: Integer;
+  LFieldSize, LOneSize: Double;
+  LNatural, LMinimum: Integer;
+begin
+  Result := False;
+  ABytes := 0;
+  if ADepth > 8 then
+    Exit;
+  LM := FModels[AMid];
+  case LM.Symbols[ASym].Kind of
+    skBuiltinType:
+      Exit(PasBuiltinSizeOf(LM.Symbols[ASym].Name, FInfo.PointerBytes,
+        FInfo.ExtendedBytes, ABytes));
+    skType: ;   // fall through to the definition walk below
+  else
+    Exit;
+  end;
+  LDef := TypeDefNodeOf(AMid, ASym);
+  if LDef = NIL_NODE then
+    Exit;
+  case LM.Tree.Nodes[LDef].Kind of
+    nkEnumType:
+      begin
+        // All-implicit enums only: an explicit value moves the ordinal RANGE,
+        // and the range is what sizes the storage — refuse rather than guess.
+        LCount := 0;
+        LChild := LM.Tree.Nodes[LDef].FirstChild;
+        while LChild <> NIL_NODE do
+        begin
+          if (LM.Tree.Nodes[LChild].Kind <> nkEnumValue) or
+             (LM.Tree.Nodes[LChild].FirstChild = NIL_NODE) or
+             (LM.Tree.Nodes[LM.Tree.Nodes[LChild].FirstChild].NextSibling
+              <> NIL_NODE) then
+            Exit;
+          Inc(LCount);
+          LChild := LM.Tree.Nodes[LChild].NextSibling;
+        end;
+        if LCount = 0 then
+          Exit;
+        if LCount <= 256 then
+          LNatural := 1
+        else if LCount <= 65536 then
+          LNatural := 2
+        else
+          LNatural := 4;
+        // {$Z}/{$MINENUMSIZE} state AT THE DECLARATION SITE — positional,
+        // because System.pas flips it mid-file (see TPasMinEnumEvent).
+        LMinimum := LM.Tree.Source.MinEnumSizeAt(
+          LM.Tree.Nodes[LDef].FirstToken);
+        if LMinimum > LNatural then
+          ABytes := LMinimum
+        else
+          ABytes := LNatural;
+        Result := True;
+      end;
+    nkRecordType:
+      begin
+        // Minimal layout: every field the same size means padding cannot
+        // exist, so size = count * fieldsize (TMethod: two pointers).
+        // Anything richer (mixed sizes, variant parts, class vars) refuses —
+        // alignment is dcc's business, not a guess to hazard.
+        LFields := 0;
+        LFieldSize := 0;
+        LChild := LM.Tree.Nodes[LDef].FirstChild;
+        while LChild <> NIL_NODE do
+        begin
+          case LM.Tree.Nodes[LChild].Kind of
+            nkVarDecl:
+              begin
+                // Children: name idents then ONE type node (records carry no
+                // initializers/absolute).
+                LCount := 0;
+                LSub := LM.Tree.Nodes[LChild].FirstChild;
+                if LSub = NIL_NODE then
+                  Exit;
+                while LM.Tree.Nodes[LSub].NextSibling <> NIL_NODE do
+                begin
+                  Inc(LCount);
+                  LSub := LM.Tree.Nodes[LSub].NextSibling;
+                end;
+                if (LCount = 0) or (LM.Tree.Nodes[LSub].Kind <> nkIdent) then
+                  Exit;
+                if not PasBuiltinSizeOf(LM.Tree.NodeText(LSub),
+                  FInfo.PointerBytes, FInfo.ExtendedBytes, LOneSize) then
+                begin
+                  // A named type: resolve and recurse (same-size rule still
+                  // applies across the whole record).
+                  var LRMid, LRSym: Integer;
+                  if not OracleResolve(AMid, LM.Tree.NodeNameLower(LSub),
+                       LRMid, LRSym) or
+                     not OracleSizeOf(LRMid, LRSym, ADepth + 1, LOneSize) then
+                    Exit;
+                end;
+                if LFields = 0 then
+                  LFieldSize := LOneSize
+                else if LOneSize <> LFieldSize then
+                  Exit;
+                Inc(LFields, LCount);
+              end;
+            nkVisibility, nkRoutine, nkPropertyDecl, nkAttrGroup,
+            nkConstSec, nkTypeSec:
+              ;   // no instance storage
+          else
+            Exit;   // variant parts, class-var sections, anything else
+          end;
+          LChild := LM.Tree.Nodes[LChild].NextSibling;
+        end;
+        if LFields = 0 then
+          Exit;
+        ABytes := LFields * LFieldSize;
+        Result := True;
+      end;
+    nkIdent:
+      begin
+        // A plain alias: follow it. (`= type X` distinct aliases share the
+        // target's storage, so following is right for SIZE either way.)
+        if PasBuiltinSizeOf(LM.Tree.NodeText(LDef), FInfo.PointerBytes,
+          FInfo.ExtendedBytes, ABytes) then
+          Exit(True);
+        var LRMid, LRSym: Integer;
+        Result := OracleResolve(AMid, LM.Tree.NodeNameLower(LDef),
+          LRMid, LRSym) and OracleSizeOf(LRMid, LRSym, ADepth + 1, ABytes);
+      end;
+  end;
+end;
+
+function TPasSemaProject.OracleLength(AMid, ASym: Integer;
+  out ALen: Double): Boolean;
+var
+  LM: TPasSemaModel;
+  LDecl, LParent, LChild, LArr, LSub, LLo, LHi: Integer;
+  LCtx: TPasCondContext;
+  LLoVal, LHiVal: TPasCondValue;
+begin
+  Result := False;
+  ALen := 0;
+  LM := FModels[AMid];
+  if not (LM.Symbols[ASym].Kind in [skConst, skVar]) then
+    Exit;
+  LDecl := LM.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LParent := LM.Tree.Nodes[LDecl].Parent;
+  if (LParent = NIL_NODE) or
+     not (LM.Tree.Nodes[LParent].Kind in [nkVarDecl, nkConstDecl]) then
+    Exit;
+  // The first nkArrayType child is the declared type; its FIRST dimension is
+  // what Length answers (dcc's rule for multidimensional arrays too).
+  LArr := NIL_NODE;
+  LChild := LM.Tree.Nodes[LParent].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LChild].Kind = nkArrayType then
+    begin
+      LArr := LChild;
+      Break;
+    end;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+  if LArr = NIL_NODE then
+    Exit;
+  LSub := LM.Tree.Nodes[LArr].FirstChild;
+  if (LSub = NIL_NODE) or (LM.Tree.Nodes[LSub].Kind <> nkSubrange) then
+    Exit;   // a dynamic array's Length is runtime state, not a bound
+  LLo := LM.Tree.Nodes[LSub].FirstChild;
+  if LLo = NIL_NODE then
+    Exit;
+  LHi := LM.Tree.Nodes[LLo].NextSibling;
+  if LHi = NIL_NODE then
+    Exit;
+  // Bounds may themselves be constants — evaluate with the same recursive
+  // const context OracleConstNum builds.
+  LCtx := Default(TPasCondContext);
+  LCtx.CompilerVersion := 37.0;
+  LCtx.PointerBytes := FInfo.PointerBytes;
+  LCtx.ExtendedBytes := FInfo.ExtendedBytes;
+  LCtx.OnSymbol :=
+    function(AQuery: TPasSymbolQuery; const AName: string;
+      out AN: Double): Boolean
+    var
+      LRMid, LRSym: Integer;
+    begin
+      Result := (AQuery = sqConstValue) and not AName.Contains('.') and
+        OracleResolve(AMid, LowerCase(AName), LRMid, LRSym) and
+        OracleConstNum(LRMid, LRSym, 0, AN);
+      if not Result then
+        AN := 0;
+    end;
+  LLoVal := EvalCondNode(LM.Tree, LLo, LCtx);
+  LHiVal := EvalCondNode(LM.Tree, LHi, LCtx);
+  if LLoVal.Guessed or LHiVal.Guessed or (LLoVal.Kind <> cvNum) or
+     (LHiVal.Kind <> cvNum) then
+    Exit;
+  ALen := LHiVal.Num - LLoVal.Num + 1;
+  Result := True;
+end;
+
+function TPasSemaProject.SymbolQueryFor(AId: Integer): TPasCondSymbolQuery;
+begin
+  Result :=
+    function(AQuery: TPasSymbolQuery; const AName: string;
+      out ANum: Double): Boolean
+    var
+      LMid, LSym: Integer;
+    begin
+      Result := False;
+      ANum := 0;
+      // Plain names only — every measured site is one; `Unit.Const` stays a
+      // recorded guess until someone needs it.
+      if AName.Contains('.') then
+        Exit;
+      if not OracleResolve(AId, LowerCase(AName), LMid, LSym) then
+        Exit;
+      case AQuery of
+        sqConstValue: Result := OracleConstNum(LMid, LSym, 0, ANum);
+        sqSizeOfType: Result := OracleSizeOf(LMid, LSym, 0, ANum);
+        sqLengthOf: Result := OracleLength(LMid, LSym, ANum);
+      end;
+    end;
+end;
+
 { The second preprocessing pass, for units whose `$IF Declared(X)` the FIRST
   pass could not answer (1.3: the guard needs a symbol table, and the symbol
   table is built from the stream the guard decides). Cheap because it is
@@ -897,7 +1247,10 @@ var
   LPaths: TArray<string>;
   LPath, LName: string;
   LQuery: TPasDeclaredQuery;
-  LAnswer: Boolean;
+  LSymQuery: TPasCondSymbolQuery;
+  LUnsym: TPasUnresolvedSymbol;
+  LAnswer, LIsCand: Boolean;
+  LNum: Double;
 begin
   // Candidates are not "asked a question" but "would get a DIFFERENT answer".
   // The first pass answered every Declared() False, so a unit whose names all
@@ -905,18 +1258,41 @@ begin
   // paying a re-parse for that is not free: doing it unfiltered measured +4%
   // on the 665-unit corpus, for zero diagnostic change there. The test itself
   // is a few dictionary lookups per recorded name.
+  //
+  // Symbol questions (const values / SizeOf / Length — see TPasCondSymbolQuery)
+  // use the looser "would get an ANSWER" criterion: unlike Declared, whose
+  // False guess only ever flips on a True answer, a const's real value may
+  // happen to reproduce the guessed verdict — comparing would need the define
+  // state at the directive, so the re-run eats that instead. Bounded by how
+  // rare the questions are (a dozen units on the whole RTL).
   LCand := nil;
   for LIdx := 0 to ACount - 1 do
+  begin
+    LIsCand := False;
     if Length(FModels[LIdx].Tree.Source.UnresolvedDeclared) > 0 then
     begin
       LQuery := DeclaredQueryFor(LIdx);
       for LName in FModels[LIdx].Tree.Source.UnresolvedDeclared do
         if LQuery(LName, LAnswer) and LAnswer then
         begin
-          LCand := LCand + [LIdx];
+          LIsCand := True;
           Break;
         end;
     end;
+    if not LIsCand and
+       (Length(FModels[LIdx].Tree.Source.UnresolvedSymbols) > 0) then
+    begin
+      LSymQuery := SymbolQueryFor(LIdx);
+      for LUnsym in FModels[LIdx].Tree.Source.UnresolvedSymbols do
+        if LSymQuery(LUnsym.Query, LUnsym.Name, LNum) then
+        begin
+          LIsCand := True;
+          Break;
+        end;
+    end;
+    if LIsCand then
+      LCand := LCand + [LIdx];
+  end;
   if LCand = nil then
     Exit;
   // Ask first, in PARALLEL and without touching anything: a worker reads other
@@ -934,6 +1310,7 @@ begin
       try
         try
           LPP.OnDeclared := DeclaredQueryFor(LCand[AIndex]);
+          LPP.OnSymbol := SymbolQueryFor(LCand[AIndex]);
           LDone[AIndex] := TPasSemaResolver.Analyze(
             TPasParser.ParseFile(LPP.Process(FFiles[LCand[AIndex]]), LDiags),
             False, FPlatform);

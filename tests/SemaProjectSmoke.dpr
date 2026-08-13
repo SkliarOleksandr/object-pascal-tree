@@ -4005,6 +4005,95 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  // ---- 1.3.2, the $IF symbol oracle (RunDeclaredPass widened beyond
+  // Declared): const values, SizeOf of enums (with positional {$Z}/
+  // MINENUMSIZE state), SizeOf of a same-size-fields record, Length of a
+  // bounded array — the four shapes measured on the RTL (System.VarUtils'
+  // Generic*, System.Classes' TValueType, System.Rtti's TMethod, System.pas'
+  // RegisteredTypeInfoTable). Each guard below is TRUE under the oracle but
+  // guessed False on the first pass, so the declaration it guards EXISTS
+  // only if the second pass really re-decided the unit — the assertion is
+  // the symbol's existence, which cannot pass vacuously.
+  //
+  // The STRING-const guard is the deliberate negative: tier-1 answers
+  // numbers and booleans only, so that one stays guessed-False and its type
+  // must NOT exist — pinning that the oracle refuses rather than guesses.
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_iforacle');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitOracleLib.pas'),
+    'unit UnitOracleLib;'#10'interface'#10 +
+    'type'#10'  TDuo = record P, Q: Pointer; end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitOracle.pas'),
+    'unit UnitOracle;'#10'interface'#10 +
+    'uses UnitOracleLib;'#10 +
+    'const'#10 +
+    '  KBase = True;'#10 +
+    '  KAlias = KBase;'#10 +          // a const CHAIN, like GenericVariants
+    '  KStr = ''nope'';'#10 +
+    'type'#10 +
+    '  TSmallEnum = (seA, seB, seC);'#10 +
+    '{$MINENUMSIZE 4}'#10 +
+    '  TBigEnum = (beA, beB);'#10 +   // same unit, forced to 4 by the state
+    '{$MINENUMSIZE 1}'#10 +
+    '  TPair = record A, B: Pointer; end;'#10 +
+    'var'#10 +
+    '  GTable: array[0..2] of Integer;'#10 +
+    '{$IF KAlias}'#10 +
+    'type TTookConst = class end;'#10 +
+    '{$ENDIF}'#10 +
+    '{$IF SizeOf(TSmallEnum) = 1}'#10 +
+    'type TTookEnum = class end;'#10 +
+    '{$ENDIF}'#10 +
+    '{$IF SizeOf(TBigEnum) = 4}'#10 +
+    'type TTookEnumZ = class end;'#10 +
+    '{$ENDIF}'#10 +
+    '{$IF SizeOf(TPair) = 8}'#10 +    // 2 x Pointer = 8 on Win32
+    'type TTookRec = class end;'#10 +
+    '{$ENDIF}'#10 +
+    '{$IF SizeOf(TDuo) = 8}'#10 +     // the CROSS-UNIT route (TMethod shape)
+    'type TTookXUnit = class end;'#10 +
+    '{$ENDIF}'#10 +
+    '{$IF Length(GTable) = 3}'#10 +
+    'type TTookLen = class end;'#10 +
+    '{$ENDIF}'#10 +
+    // Strings are REFUSED on purpose (tier 1). A bare string guard is the
+    // shape that pins it: the first-pass guess is False (branch untaken),
+    // and an oracle that ANSWERED would flip it True ('nope' <> '') — so
+    // the type staying absent proves refusal, and if strings ever get
+    // answered this goes red and forces a conscious decision. (An equality
+    // guard would NOT pin it: `KStr = 'nope'` evaluates True under the
+    // GUESS too — 0 = 0 numerically — old evaluator parity.)
+    '{$IF KStr}'#10 +
+    'type TTookStr = class end;'#10 +
+    '{$ENDIF}'#10 +
+    'implementation'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    var LOr := ModelByName('unitoracle');
+    Ok('1.3.2 oracle: a const CHAIN answers and the guard flips True',
+      SymCountOf(LOr, 'ttookconst', skType) = 1);
+    Ok('1.3.2 oracle: SizeOf of an implicit enum answers 1',
+      SymCountOf(LOr, 'ttookenum', skType) = 1);
+    Ok('1.3.2 oracle: ...and respects the POSITIONAL {$MINENUMSIZE} state',
+      SymCountOf(LOr, 'ttookenumz', skType) = 1);
+    Ok('1.3.2 oracle: SizeOf of a same-size-fields record answers',
+      SymCountOf(LOr, 'ttookrec', skType) = 1);
+    Ok('1.3.2 oracle: SizeOf reaches a record in a USED unit too',
+      SymCountOf(LOr, 'ttookxunit', skType) = 1);
+    Ok('1.3.2 oracle: Length of a bounded array answers hi-lo+1',
+      SymCountOf(LOr, 'ttooklen', skType) = 1);
+    Ok('1.3.2 oracle: a STRING const is refused, not guessed -- the branch '
+      + 'stays untaken', SymCountOf(LOr, 'ttookstr', skType) = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
 end.

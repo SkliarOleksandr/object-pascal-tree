@@ -21,8 +21,8 @@ unit PasTree.Tests.Preprocessor;
 interface
 
 uses
-  PasTree.Types, PasTree.Ast, PasTree.Parser, PasTree.Preprocessor,
-  PasTree.TestKit;
+  PasTree.Types, PasTree.Ast, PasTree.Parser, PasTree.SourceManager,
+  PasTree.Preprocessor, PasTree.TestKit;
 
 function BuildPreprocessorCases(APP: TPasPreprocessor): TPasCustomCases;
 
@@ -173,6 +173,87 @@ function BuildPreprocessorCases(APP: TPasPreprocessor): TPasCustomCases;
         else
           Result.Message := '  expected UnresolvedDeclared = [CouldMatter], '
             + 'got [' + LList + ']' + sLineBreak;
+      end;
+  end;
+
+  // {$Z}/{$MINENUMSIZE} is POSITIONAL state (TPasMinEnumEvent) -- the enum
+  // SizeOf oracle reads it at each declaration site, so the case asserts
+  // MinEnumSizeAt at a given visible index, not just a final value.
+  function MinEnumCase(const AName, ASource: string;
+    AVisIndex, AExpected: Integer): TPasCustomCase;
+  begin
+    Result.Section := '1.3.1';
+    Result.Name := AName;
+    Result.Run :=
+      function: TPasCheckResult
+      var
+        LPre: TPasPreprocessed;
+        LActual: Integer;
+      begin
+        LPre := APP.ProcessText('test.pas', ASource);
+        LActual := LPre.MinEnumSizeAt(AVisIndex);
+        Result.Passed := LActual = AExpected;
+        if Result.Passed then
+          Result.Message := ''
+        else
+          Result.Message := '  source:   ' + ASource + sLineBreak +
+            Format('  MinEnumSizeAt(%d): expected %d, got %d',
+              [AVisIndex, AExpected, LActual]) + sLineBreak;
+      end;
+  end;
+
+  // The OnSymbol oracle contract at the preprocessor level, both directions:
+  // an ANSWERED const decides the branch with no flag; an unanswered one is
+  // recorded (kind + name) for the second pass.
+  function OnSymbolCase: TPasCustomCase;
+  begin
+    Result.Section := '1.3.2';
+    Result.Name := 'OnSymbol answers a const; unanswered ones are recorded';
+    Result.Run :=
+      function: TPasCheckResult
+      var
+        LSM: TPasSourceManager;
+        LDefines: TPasDefines;
+        LPP: TPasPreprocessor;
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+      begin
+        LSM := TPasSourceManager.Create([]);
+        LDefines := TPasDefines.Create([]);
+        LPP := TPasPreprocessor.Create(LSM, LDefines);
+        try
+          LPP.OnSymbol :=
+            function(AQuery: TPasSymbolQuery; const AName: string;
+              out ANum: Double): Boolean
+            begin
+              ANum := 1;
+              Result := (AQuery = sqConstValue) and SameText(AName, 'KNOWN');
+            end;
+          LPre := LPP.ProcessText('test.pas',
+            '{$IF KNOWN}A := 1;{$ELSE}A := 2;{$ENDIF}' +
+            '{$IF MYSTERY}B := 1;{$ENDIF}');
+          LTree := TPasParser.ParseStatements(LPre, LDiags);
+          Result := CheckDump('(OnSymbol fixture)',
+            'Block(Assign(Ident''A'' IntLit''1''))',
+            LTree.Dump(0), LDiags, 0);
+          if not Result.Passed then
+            Exit;
+          if (Length(LPre.UnresolvedSymbols) <> 1) or
+             (LPre.UnresolvedSymbols[0].Query <> sqConstValue) or
+             not SameText(LPre.UnresolvedSymbols[0].Name, 'MYSTERY') then
+          begin
+            Result.Passed := False;
+            Result.Message := '  expected UnresolvedSymbols = ' +
+              '[sqConstValue:MYSTERY], got ' +
+              IntToStr(Length(LPre.UnresolvedSymbols)) + ' entrie(s)' +
+              sLineBreak;
+          end;
+        finally
+          LPP.Free;
+          LDefines.Free;
+          LSM.Free;
+        end;
       end;
   end;
 
@@ -362,7 +443,24 @@ begin
       + 'as dcc does (System.ObjAuto ships a stray closing paren)',
       '{$IF True)}A := 1;{$ELSE}A := 2;{$ENDIF}',
       'Block(Assign(Ident''A'' IntLit''1''))', False),
-    DeclaredRecordingCase
+    DeclaredRecordingCase,
+
+    // ---- {$Z}/{$MINENUMSIZE}: positional minimum-enum-size state, the
+    // input to the SizeOf-of-an-enum oracle. {$Z+} is {$Z4}, {$Z-} is
+    // {$Z1} -- dcc's own equivalences. ----
+    MinEnumCase('the default is 1', 'A := 1;', 0, 1),
+    MinEnumCase('{$Z4} sets 4', '{$Z4}A := 1;', 0, 4),
+    MinEnumCase('{$MINENUMSIZE 2} is the long form', '{$MINENUMSIZE 2}A := 1;',
+      0, 2),
+    MinEnumCase('{$Z+} means {$Z4}', '{$Z+}A := 1;', 0, 4),
+    MinEnumCase('{$Z-} means {$Z1}', '{$Z4}{$Z-}A := 1;', 0, 1),
+    MinEnumCase('POSITIONAL: tokens before a {$Z1} keep the earlier state',
+      '{$Z2}A := 1;{$Z1}B := 2;', 3, 2),
+    MinEnumCase('...and tokens after it see the new one',
+      '{$Z2}A := 1;{$Z1}B := 2;', 4, 1),
+    MinEnumCase('$PUSHOPT/$POPOPT round-trips it like every other option',
+      '{$Z4}{$PUSHOPT}{$Z1}{$POPOPT}A := 1;', 0, 4),
+    OnSymbolCase
   ];
 end;
 

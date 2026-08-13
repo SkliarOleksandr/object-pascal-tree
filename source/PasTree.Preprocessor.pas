@@ -76,6 +76,37 @@ type
     Value: Boolean;
   end;
 
+  // One {$Z1/2/4} / {$MINENUMSIZE} state change, positioned like the
+  // SCOPEDENUMS events above and for the same reason: an enum's SIZE (what
+  // `$IF SizeOf(TEnum)` needs on the second pass) depends on the state AT
+  // ITS DECLARATION SITE, and System.pas flips the switch mid-file.
+  // {$Z+} is {$Z4} and {$Z-} is {$Z1}, dcc's own equivalences.
+  TPasMinEnumEvent = record
+    VisIndex: Integer;
+    Bytes: Integer;   // 1, 2 or 4
+  end;
+
+  // What a `$IF` expression may ask a symbol oracle (PasTree.CondEval):
+  // the value of a constant, SizeOf of a non-builtin type, Length of an
+  // array constant/variable. Numeric answers only — every real site is a
+  // number or a Boolean (0/1); a string constant simply stays unanswered.
+  TPasSymbolQuery = (sqConstValue, sqSizeOfType, sqLengthOf);
+
+  { Answers symbol questions from a `$IF` expression — the widened sibling of
+    TPasDeclaredQuery, same three-state contract: the RESULT says whether the
+    oracle could answer at all, ANum is the answer when it could. Nil on the
+    first pass; TPasSemaProject.SymbolQueryFor supplies it on the second. }
+  TPasCondSymbolQuery = reference to function(AQuery: TPasSymbolQuery;
+    const AName: string; out ANum: Double): Boolean;
+
+  // A symbol question nobody could answer — recorded (deduplicated, source
+  // order) exactly like UnresolvedDeclared, and consumed by the same second
+  // pass to decide whether re-preprocessing could learn anything.
+  TPasUnresolvedSymbol = record
+    Query: TPasSymbolQuery;
+    Name: string;
+  end;
+
   TPasPreprocessed = record
   public
     FileNames: TArray<string>;              // [0] = main file
@@ -91,12 +122,20 @@ type
     // the run had no OnDeclared to ask — which is the signal a caller with a
     // symbol table uses to decide the unit is worth preprocessing again.
     UnresolvedDeclared: TArray<string>;
+    // Same contract for the symbol questions (const values, SizeOf, Length)
+    // no OnSymbol could answer — see TPasUnresolvedSymbol.
+    UnresolvedSymbols: TArray<TPasUnresolvedSymbol>;
+    // {$Z}/{$MINENUMSIZE} state changes, ascending by VisIndex; empty for
+    // the overwhelming majority of units (the default is 1).
+    MinEnumEvents: TArray<TPasMinEnumEvent>;
     function VisibleToken(AIndex: Integer): TPasToken;
     function VisibleText(AIndex: Integer): string;
     function IsSkipped(AFileId, AOffset: Integer): Boolean;
     // The SCOPEDENUMS state in effect at visible-stream position AVisIndex
     // (False = unscoped, the default). Binary search over the event list.
     function ScopedEnumsAt(AVisIndex: Integer): Boolean;
+    // The minimum-enum-size in effect at AVisIndex (1 = the default).
+    function MinEnumSizeAt(AVisIndex: Integer): Integer;
   end;
 
   TPasDefines = class
@@ -157,6 +196,7 @@ type
     ScopedEnums: Boolean;
     Rtti: TPasRttiState;
     VarPropSetter: Boolean;
+    MinEnumSize: Integer;
   end;
 
   TPasPreprocessor = class
@@ -169,6 +209,8 @@ type
     FScopedEnumsEvents: TList<TPasScopedEnumsEvent>;
     FRttiState: TPasRttiState;
     FVarPropSetter: Boolean;
+    FMinEnumSize: Integer;
+    FMinEnumEvents: TList<TPasMinEnumEvent>;
     FSwitchStack: TStack<TPasOptState>;
     FFileNames: TList<string>;
     FFiles: TList<TPasTokenStream>;
@@ -185,7 +227,9 @@ type
     FPointerBytes: Integer;
     FExtendedBytes: Integer;
     FOnDeclared: TPasDeclaredQuery;
+    FOnSymbol: TPasCondSymbolQuery;
     FUnresolvedDeclared: TList<string>;
+    FUnresolvedSymbols: TList<TPasUnresolvedSymbol>;
     function Active: Boolean;
     procedure Diag(ACode: TPasPPDiagCode; AFileId, AStart, ALen: Integer;
       const ADetail: string = '');
@@ -198,6 +242,7 @@ type
     procedure ApplySwitches(const ABody: string);
     procedure ApplyLongSwitch(const AName, AArg: string);
     procedure SetScopedEnums(AValue: Boolean);
+    procedure SetMinEnumSize(AValue: Integer);
     procedure ApplyRtti(const AArg: string);
     function EvalIfExpression(const AExpr: string; AFileId: Integer;
       const AToken: TPasToken): Boolean;
@@ -218,6 +263,10 @@ type
       set the expression is no longer flagged as needing semantics, because it
       no longer does. }
     property OnDeclared: TPasDeclaredQuery read FOnDeclared write FOnDeclared;
+    { The symbol oracle for `$IF` const/SizeOf/Length questions — nil on the
+      first pass, supplied by the project's second pass exactly like
+      OnDeclared. See TPasCondSymbolQuery. }
+    property OnSymbol: TPasCondSymbolQuery read FOnSymbol write FOnSymbol;
     { The single-letter switch state as of the end of the last Process/
       ProcessText call -- reset per file (like $DEFINE), so this answers
       "where did the unit leave it", exactly what $IFOPT itself reads.
@@ -376,6 +425,27 @@ begin
   end;
 end;
 
+function TPasPreprocessed.MinEnumSizeAt(AVisIndex: Integer): Integer;
+var
+  LLo, LHi, LMid: Integer;
+begin
+  // Greatest event with VisIndex <= AVisIndex; none -> the {$Z1} default.
+  Result := 1;
+  LLo := 0;
+  LHi := High(MinEnumEvents);
+  while LLo <= LHi do
+  begin
+    LMid := (LLo + LHi) div 2;
+    if MinEnumEvents[LMid].VisIndex <= AVisIndex then
+    begin
+      Result := MinEnumEvents[LMid].Bytes;
+      LLo := LMid + 1;
+    end
+    else
+      LHi := LMid - 1;
+  end;
+end;
+
 { TPasDefines ---------------------------------------------------------------- }
 
 constructor TPasDefines.Create;
@@ -437,6 +507,7 @@ begin
   FExtendedBytes := AExtendedBytes;
   FSwitchStack := TStack<TPasOptState>.Create;
   FScopedEnumsEvents := TList<TPasScopedEnumsEvent>.Create;
+  FMinEnumEvents := TList<TPasMinEnumEvent>.Create;
   FFileNames := TList<string>.Create;
   FFiles := TList<TPasTokenStream>.Create;
   FVisible := TList<TPasVisibleToken>.Create;
@@ -444,6 +515,7 @@ begin
   FDiags := TList<TPasPPDiagnostic>.Create;
   FIncludePathStack := TList<string>.Create;
   FUnresolvedDeclared := TList<string>.Create;
+  FUnresolvedSymbols := TList<TPasUnresolvedSymbol>.Create;
   FCondParentActive := TList<Boolean>.Create;
   FCondAnyTaken := TList<Boolean>.Create;
   FCondThisActive := TList<Boolean>.Create;
@@ -501,12 +573,14 @@ begin
   FCondParentActive.Free;
   FIncludePathStack.Free;
   FUnresolvedDeclared.Free;
+  FUnresolvedSymbols.Free;
   FDiags.Free;
   FSkipped.Free;
   FVisible.Free;
   FFiles.Free;
   FFileNames.Free;
   FScopedEnumsEvents.Free;
+  FMinEnumEvents.Free;
   FSwitchStack.Free;
   inherited;
 end;
@@ -583,6 +657,7 @@ begin
   FDiags.Clear;
   FIncludePathStack.Clear;
   FUnresolvedDeclared.Clear;
+  FUnresolvedSymbols.Clear;
   FCondParentActive.Clear;
   FCondAnyTaken.Clear;
   FCondThisActive.Clear;
@@ -590,6 +665,8 @@ begin
   FSwitchStack.Clear;
   FScopedEnums := False;         // dcc default; unit-local like the switches
   FScopedEnumsEvents.Clear;
+  FMinEnumSize := 1;             // dcc default ({$Z1}); unit-local likewise
+  FMinEnumEvents.Clear;
   FRttiState := Default(TPasRttiState);   // Mode = rmInherit, the dcc default
   FVarPropSetter := False;                // dcc default: OFF (13.1.6)
 
@@ -618,6 +695,8 @@ begin
   Result.Diagnostics := FDiags.ToArray;
   Result.ScopedEnumsEvents := FScopedEnumsEvents.ToArray;
   Result.UnresolvedDeclared := FUnresolvedDeclared.ToArray;
+  Result.UnresolvedSymbols := FUnresolvedSymbols.ToArray;
+  Result.MinEnumEvents := FMinEnumEvents.ToArray;
   SetLength(Result.Skipped, FSkipped.Count);
   for LIdx := 0 to FSkipped.Count - 1 do
     Result.Skipped[LIdx] := FSkipped[LIdx].ToArray;
@@ -798,6 +877,7 @@ begin
     LOpt.ScopedEnums := FScopedEnums;
     LOpt.Rtti := FRttiState;
     LOpt.VarPropSetter := FVarPropSetter;
+    LOpt.MinEnumSize := FMinEnumSize;
     FSwitchStack.Push(LOpt);
   end
   else if LName = 'POPOPT' then
@@ -809,6 +889,7 @@ begin
       SetScopedEnums(LOpt.ScopedEnums);
       FRttiState := LOpt.Rtti;
       FVarPropSetter := LOpt.VarPropSetter;
+      SetMinEnumSize(LOpt.MinEnumSize);
     end
     else
       Diag(ppPopWithoutPush, AFileId, AToken.Start, AToken.Len);
@@ -876,14 +957,33 @@ begin
        CharInSet(ABody[LIdx + 1], ['+', '-']) then
     begin
       FSwitches[LSwitch] := ABody[LIdx + 1] = '+';
+      // {$Z+} is {$Z4} and {$Z-} is {$Z1} — dcc's own equivalences; the
+      // boolean table above keeps its generic entry ($IFOPT Z reads it),
+      // the SIZE is what SizeOf-of-an-enum needs.
+      if LSwitch = 'Z' then
+        if ABody[LIdx + 1] = '+' then
+          SetMinEnumSize(4)
+        else
+          SetMinEnumSize(1);
       LIdx := LIdx + 2;
       // Comma-separated list: {$O+,W-}
       while (LIdx <= Length(ABody)) and
         CharInSet(ABody[LIdx], [',', ' ', #9]) do
         Inc(LIdx);
     end
+    else if (LSwitch = 'Z') and (LIdx + 1 <= Length(ABody)) and
+            CharInSet(ABody[LIdx + 1], ['1', '2', '4']) then
+    begin
+      // {$Z1/2/4}: minimum enum size, tracked positionally (see
+      // TPasMinEnumEvent). The only numeric switch with state we consume.
+      SetMinEnumSize(Ord(ABody[LIdx + 1]) - Ord('0'));
+      LIdx := LIdx + 2;
+      while (LIdx <= Length(ABody)) and
+        CharInSet(ABody[LIdx], [',', ' ', #9]) do
+        Inc(LIdx);
+    end
     else
-      Exit; // {$Z4}, {$R *.res}, {$A8} etc. — no boolean state to track
+      Exit; // {$R *.res}, {$A8} etc. — no state to track
   end;
 end;
 
@@ -927,6 +1027,13 @@ begin
   end
   else if AName = 'RTTI' then
     ApplyRtti(AArg)
+  else if AName = 'MINENUMSIZE' then
+  begin
+    // The long form of {$Z1/2/4} (13.0 docs list both). Positional — see
+    // TPasMinEnumEvent.
+    if (Length(AArg) = 1) and CharInSet(AArg[1], ['1', '2', '4']) then
+      SetMinEnumSize(Ord(AArg[1]) - Ord('0'));
+  end
   else if AName = 'VARPROPSETTER' then
   begin
     // 13.1.6. Long-form-only ON/OFF like SCOPEDENUMS, but NOT positional:
@@ -1099,6 +1206,19 @@ begin
   FScopedEnumsEvents.Add(LEvent);
 end;
 
+// Same journaling contract as SetScopedEnums, for {$Z}/{$MINENUMSIZE}.
+procedure TPasPreprocessor.SetMinEnumSize(AValue: Integer);
+var
+  LEvent: TPasMinEnumEvent;
+begin
+  if FMinEnumSize = AValue then
+    Exit;
+  FMinEnumSize := AValue;
+  LEvent.VisIndex := FVisible.Count;
+  LEvent.Bytes := AValue;
+  FMinEnumEvents.Add(LEvent);
+end;
+
 // The `$IF`/`$ELSEIF` expression: parsed by the REAL parser and evaluated by
 // PasTree.CondEval (tri-state; see its unit comment for grammar ownership,
 // Kleene and/or, and the dcc-probed divergence on genuinely undeclared
@@ -1111,27 +1231,45 @@ function TPasPreprocessor.EvalIfExpression(const AExpr: string;
 var
   LCtx: TPasCondContext;
   LValue: TPasCondValue;
-  LBad: Boolean;
+  LBad, LSeen: Boolean;
   LName: string;
+  LSym: TPasUnresolvedSymbol;
+  LIdx: Integer;
 begin
   LCtx := Default(TPasCondContext);
   LCtx.Defines := FDefines;
   LCtx.OnDeclared := FOnDeclared;
+  LCtx.OnSymbol := FOnSymbol;
   LCtx.CompilerVersion := FCompilerVersion;
   LCtx.PointerBytes := FPointerBytes;
   LCtx.ExtendedBytes := FExtendedBytes;
   LValue := EvalCondText(AExpr, LCtx, LBad);
-  // Unanswered Declared() names feed the second pass (RunDeclaredPass) — but
-  // only when they could still CHANGE anything: a verdict settled by a clean
-  // side alone (`False and Declared(X)`) is final no matter what X turns out
-  // to be, so recording X would only buy a wasted re-parse. A FAILED
-  // expression still records, the old evaluator's deliberate behavior — a
-  // half-parsed expression that mentioned a name is still a case worth a
-  // second look.
+  // Unanswered Declared() names and symbol questions feed the second pass
+  // (RunDeclaredPass) — but only when they could still CHANGE anything: a
+  // verdict settled by a clean side alone (`False and Declared(X)`) is final
+  // no matter what X turns out to be, so recording X would only buy a wasted
+  // re-parse. A FAILED expression still records, the old evaluator's
+  // deliberate behavior — a half-parsed expression that mentioned a name is
+  // still a case worth a second look.
   if LBad or LValue.Guessed then
+  begin
     for LName in LCtx.UnknownDeclared do
       if FUnresolvedDeclared.IndexOf(LName) < 0 then
         FUnresolvedDeclared.Add(LName);
+    for LSym in LCtx.UnknownSymbols do
+    begin
+      LSeen := False;
+      for LIdx := 0 to FUnresolvedSymbols.Count - 1 do
+        if (FUnresolvedSymbols[LIdx].Query = LSym.Query) and
+           SameText(FUnresolvedSymbols[LIdx].Name, LSym.Name) then
+        begin
+          LSeen := True;
+          Break;
+        end;
+      if not LSeen then
+        FUnresolvedSymbols.Add(LSym);
+    end;
+  end;
   if LBad then
   begin
     Diag(ppBadIfExpression, AFileId, AToken.Start, AToken.Len, AExpr);
