@@ -21,7 +21,8 @@ uses
   SynEdit, SynEditTypes, SynEditHighlighter, SynHighlighterJSON, SynFunc,
   SynHighlighterPas,
   VirtualTrees, VirtualTrees.Types,
-  PasTree.Platforms, PasTree.Preprocessor, PasTree.Ast, PasTree.Ast.Json,
+  PasTree.Types, PasTree.Platforms, PasTree.Preprocessor, PasTree.Ast,
+  PasTree.Ast.Json,
   PasTree.Parser, PasTree.Project, PasTree.DProj,
   PasTree.Sema.Diagnostics, PasTree.Sema.Model, PasTree.Sema.Builtins,
   PasTree.Sema.Types, PasTree.Sema.Resolver, PasTree.Sema.Project,
@@ -2084,15 +2085,21 @@ begin
   // whole analyzed closure while only project files are listed, so a bare
   // total next to an empty message window reads as the tool contradicting
   // itself — which is exactly how the .dproj-less case used to look.
+  // Memory beside the time, and for the same reason: on a 32-bit host the
+  // address space is the binding constraint on a large project long before
+  // speed is, and an EOutOfMemory reads as an analyzer defect unless the
+  // figure that explains it is on screen. AllocatedBytes is what the analysis
+  // HOLDS (models, token streams, node arenas) — see its own comment.
   if LDiagListed = LDiagTotal then
-    Log(Format('Done: %d units, %d diagnostics in %s (%s).',
+    Log(Format('Done: %d units, %d diagnostics in %s, %s held (%s).',
       [FSemaProject.ModelCount, LDiagTotal, ElapsedText(AElapsedMs),
-       cbThreading.Text]))
+       MemoryText(AllocatedBytes), cbThreading.Text]))
   else
-    Log(Format('Done: %d units, %d diagnostics in %s (%s) — %d in project ' +
-      'files, %d in library units. ALL are listed below.',
+    Log(Format('Done: %d units, %d diagnostics in %s, %s held (%s) — %d in ' +
+      'project files, %d in library units. ALL are listed below.',
       [FSemaProject.ModelCount, LDiagTotal, ElapsedText(AElapsedMs),
-       cbThreading.Text, LDiagListed, LDiagTotal - LDiagListed]));
+       MemoryText(AllocatedBytes), cbThreading.Text, LDiagListed,
+       LDiagTotal - LDiagListed]));
   // Volume the parser actually processed. An $I include is counted once per
   // INCLUDING unit, because that is how many times it was really lexed and
   // parsed — the figure is work done, not distinct bytes on disk. Chars, not

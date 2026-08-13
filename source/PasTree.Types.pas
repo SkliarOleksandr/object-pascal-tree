@@ -200,7 +200,50 @@ function KeywordKind(AText: PChar; ALen: Integer): TPasTokenKind;
 { Builds the line-start offsets table for a source string. }
 function BuildLineStarts(const ASource: string): TArray<Integer>;
 
+{ Bytes currently ALLOCATED through the memory manager — token streams, node
+  arenas, models, everything the analysis holds. Walked out of
+  GetMemoryManagerState, so it is the process's own accounting rather than an
+  OS working-set figure: it excludes the reserved-but-unused slack a working
+  set includes, which is what makes it comparable run to run.
+
+  Cheap enough to call at a report boundary (it sums ~60 small-block counters)
+  and NOT on any hot path. A 32-bit host is the reason this is worth
+  surfacing at all: the address space runs out around 2 GB (4 with
+  LARGEADDRESSAWARE) long before a large project's closure is loaded, and an
+  `EOutOfMemory` from that limit reads exactly like an analyzer defect unless
+  the number is on screen next to it. }
+function AllocatedBytes: UInt64;
+
+{ AllocatedBytes as a human-readable string: 'MB' below a gigabyte, 'GB'
+  above, one decimal either way. }
+function MemoryText(ABytes: UInt64): string;
+
 implementation
+
+uses
+  System.SysUtils;
+
+function AllocatedBytes: UInt64;
+var
+  LState: TMemoryManagerState;
+  LIdx: Integer;
+begin
+  GetMemoryManagerState(LState);
+  Result := UInt64(LState.TotalAllocatedMediumBlockSize) +
+            UInt64(LState.TotalAllocatedLargeBlockSize);
+  for LIdx := 0 to High(LState.SmallBlockTypeStates) do
+    Result := Result +
+      UInt64(LState.SmallBlockTypeStates[LIdx].UseableBlockSize) *
+      UInt64(LState.SmallBlockTypeStates[LIdx].AllocatedBlockCount);
+end;
+
+function MemoryText(ABytes: UInt64): string;
+begin
+  if ABytes >= UInt64(1024) * 1024 * 1024 then
+    Result := FormatFloat('0.0', ABytes / (1024 * 1024 * 1024)) + ' GB'
+  else
+    Result := FormatFloat('0.0', ABytes / (1024 * 1024)) + ' MB';
+end;
 
 function IsTrivia(AKind: TPasTokenKind): Boolean;
 begin

@@ -3683,9 +3683,15 @@ begin
     // exists here to compete), and THAT class does not descend either --
     // the check must fire on the RESOLVED name, not the name as written.
     '  TableAttribute = class end;'#10 +
+    // 19.3.3's trap, mirroring a real component suite: an ordinary class
+    // whose NAME is a compiler-recognized attribute. Ordinary resolution
+    // finds it, so without the magic-attribute exemption `[unsafe]` below
+    // would report it as a non-TCustomAttribute.
+    '  Unsafe = class end;'#10 +
     '  [TGoodAttr]'#10'  TFooGood = class end;'#10 +
     '  [TNotAnAttr]'#10'  TFooBad = class end;'#10 +
     '  [Table]'#10'  TFooTable = class end;'#10 +
+    '  TFooMagic = class'#10'    [unsafe] FRef: TObject;'#10'  end;'#10 +
     'implementation'#10'end.'#10);
   // Cross-unit: the attribute class and its use site are in DIFFERENT
   // units, proving XDescendsFrom's cross-model walk, not just a same-unit
@@ -3716,6 +3722,17 @@ begin
     Ok('19.3.1: cross-unit -- a descendant declared in ANOTHER unit is not '
       + 'flagged either',
       Assigned(LUse) and (DiagCount(LUse, 'E2010') = 0));
+    // 19.3.3: a COMPILER-RECOGNIZED attribute is exempt from the ancestry
+    // check, and the fixture makes that non-vacuous the way the real world
+    // did -- a class literally named `Unsafe` that is NOT a TCustomAttribute
+    // descendant is in scope, so ordinary resolution finds it and the check
+    // would fire. Cost 3 false E2010 on a real project (a component suite
+    // ships `Unsafe = class // for internal use`), because exact-name-wins
+    // means 19.3.1's `+Attribute` fallback never reaches System.pas's real
+    // UnsafeAttribute.
+    Ok('19.3.3: [unsafe] is exempt even when a non-attribute class named '
+      + 'Unsafe is in scope -- dcc matches magic attributes by name, not by '
+      + 'lookup', not DiagHasText(LAnc, 'E2010', 'Unsafe'));
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

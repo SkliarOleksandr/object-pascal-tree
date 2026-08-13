@@ -2975,6 +2975,21 @@ begin
   begin
     if LM.Tree.Nodes[LNode].Kind <> nkAttribute then
       Continue;
+    // A COMPILER-RECOGNIZED attribute (19.3.3) is exempt: dcc matches
+    // `[weak]`/`[unsafe]`/`[Ref]`/`[Volatile]` specially rather than looking
+    // the name up in scope, so ordinary resolution here means nothing. The
+    // parser already tagged them (nkAttribute.Aux, PasAttrMagicAux).
+    //
+    // Not a nicety — this was 3 false E2010 on a real project. A component
+    // suite declares `Unsafe = class // for internal use` (dxCore.pas), so
+    // the bare name in `[unsafe] FField: IPalette;` resolves to THAT class;
+    // 19.3.1's `+Attribute` fallback never fires, because it only fires when
+    // the bare name misses entirely, and System.pas's real
+    // `UnsafeAttribute = class(TCustomAttribute)` is therefore never
+    // consulted. Exact-name-wins (pinned by 19.3.1's own test) and a
+    // magic-attribute name reused as an ordinary class collide exactly here.
+    if LM.Tree.Nodes[LNode].Aux <> amaNone then
+      Continue;
     LRef := LM.Tree.Nodes[LNode].FirstChild;
     if LRef = NIL_NODE then
       Continue;

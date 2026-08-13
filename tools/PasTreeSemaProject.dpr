@@ -346,8 +346,9 @@ begin
         GMode := 'SingleThread'
       else
         GMode := 'MultiThread';
-      Writeln(ErrOutput, Format('analysis: %d units in %.1f s (%s)',
-        [GProj.ModelCount, GSW.ElapsedMilliseconds / 1000, GMode]));
+      Writeln(ErrOutput, Format('analysis: %d units in %.1f s, %s held (%s)',
+        [GProj.ModelCount, GSW.ElapsedMilliseconds / 1000,
+         MemoryText(AllocatedBytes), GMode]));
       if GProj.StageTimings <> '' then
         Writeln(ErrOutput, '  stages: ', GProj.StageTimings);
       if LTotalLines > 0 then
@@ -507,8 +508,9 @@ begin
         GMode := 'SingleThread'
       else
         GMode := 'MultiThread';
-      Writeln(ErrOutput, Format('%d units in %d ms (%s)',
-        [GProj.ModelCount, GSW.ElapsedMilliseconds, GMode]));
+      Writeln(ErrOutput, Format('%d units in %d ms, %s held (%s)',
+        [GProj.ModelCount, GSW.ElapsedMilliseconds,
+         MemoryText(AllocatedBytes), GMode]));
       // Per-stage breakdown: without it a slow run says only THAT it is slow.
       if GProj.StageTimings <> '' then
         Writeln(ErrOutput, 'stages: ' + GProj.StageTimings);
