@@ -4056,10 +4056,12 @@ begin
     '  TBigEnum = (beA, beB);'#10 +   // same unit, forced to 4 by the state
     '{$MINENUMSIZE 1}'#10 +
     '  TPair = record A, B: Pointer; end;'#10 +
-    // An inline anonymous ENUM field is what the layout walk still refuses;
-    // mixed field sizes, arrays, strings, sets, variants and file types are
-    // all computed for real now -- see the layout fixture.
-    '  TMixedOra = record A: Byte; F: (r0, r1); end;'#10 +
+    // An old-style `object` field is what the layout walk still refuses;
+    // mixed field sizes, arrays, strings, sets, variants, file types, inline
+    // enums and class-var sections are all computed for real now -- see the
+    // layout fixture.
+    '  TObjOra = object X: Integer; end;'#10 +
+    '  TMixedOra = record A: Byte; F: TObjOra; end;'#10 +
     'var'#10 +
     '  GTable: array[0..2] of Integer;'#10 +
     '{$IF KAlias}'#10 +
@@ -4164,8 +4166,9 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitExotic.pas'),
     'unit UnitExotic;'#10'interface'#10 +
     'type'#10 +
-    // A `class var` section: a layout shape the walk still refuses to model.
-    '  TMixed = record class var Q: Integer; A: Byte; end;'#10 +
+    // An old-style `object` field: a layout shape the walk refuses to model.
+    '  TObjEx = object X: Integer; end;'#10 +
+    '  TMixed = record A: Byte; F: TObjEx; end;'#10 +
     'const'#10 +
     '  KStr = ''text'';'#10 +
     'implementation'#10 +
@@ -4317,10 +4320,21 @@ begin
     '    case Byte of 0: (R: Cardinal); 1: (B: array[0..15] of Byte); end;'#10 +
     '  TKFile = file of Byte;'#10 +                        // 24, like TFileRec
     '  TKFld = record A: Byte; F: file of Byte; end;'#10 + // 28, aligned to 4
+    // Inline anonymous ENUM fields, and CLASS VAR sections -- which run on,
+    // so `A` below is per-type storage too and the record is 0 bytes.
+    '  TE01 = record A: Byte; F: (r0, r1); end;'#10 +              // 2
+    '  TE02 = record A: Byte; F: (v0 = 5, v1 = 9); end;'#10 +      // 2
+    '  TE03 = record A: Byte; F: (p0 = 200, p1 = 300); end;'#10 +  // 4
+    '  TW01 = record class var Q: Integer; end;'#10 +              // 0
+    '  TW02 = record class var Q: Integer; A: Byte; end;'#10 +     // 0, runs on
+    '  TW03 = record class var Q: Int64; var A: Byte; end;'#10 +   // 1
+    '  TW04 = record A: Byte; class var Q: Int64; var B: Byte; end;'#10 + // 2
     // Still NOT modelled. These must REFUSE, not guess -- each guard is
     // written so that a wrong answer of any kind declares the type.
-    '  TArrF = record A: Byte; F: (r0, r1); end;'#10 +     // inline anon enum
-    '  TStrF = record class var Q: Integer; A: Byte; end;'#10 +
+    '  TGen<T> = record V: T; end;'#10 +
+    '  TArrF = record A: Byte; F: TGen<Integer>; end;'#10 +  // generic inst
+    '  TObjOld = object X: Integer; end;'#10 +
+    '  TStrF = record A: Byte; F: TObjOld; end;'#10 +        // old-style object
     '{$IF SizeOf(TR01) = 16}type M01 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TR03) = 8}type M03 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TR05) = 6}type M05 = class end;{$IFEND}'#10 +
@@ -4379,6 +4393,13 @@ begin
     '{$IF SizeOf(TV09) = 12}type MV09 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TKFile) = 24}type MKF = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TKFld) = 28}type MKFld = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TE01) = 2}type ME01 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TE02) = 2}type ME02 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TE03) = 4}type ME03 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TW01) = 0}type MC01x = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TW02) = 0}type MC02x = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TW03) = 1}type MC03x = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TW04) = 2}type MC04x = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TArrF) <> 0}type MArr = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TStrF) <> 0}type MStr = class end;{$IFEND}'#10 +
     'implementation'#10'end.'#10);
@@ -4430,10 +4451,18 @@ begin
       + 'pointer-aligned even though that record is packed',
       (SymCountOf(LLay, 'mkf', skType) = 1) and
       (SymCountOf(LLay, 'mkfld', skType) = 1));
-    Ok('1.3.2 layout: an inline anonymous ENUM field still refuses',
+    LMissing := '';
+    for var LM in ['me01', 'me02', 'me03', 'mc01x', 'mc02x', 'mc03x',
+                   'mc04x'] do
+      if SymCountOf(LLay, LM, skType) <> 1 then
+        LMissing := LMissing + ' ' + LM;
+    Ok('1.3.2 layout: inline anonymous ENUMS (explicit values sized by the ' +
+      'largest) and CLASS VAR sections, which run on and contribute neither ' +
+      'size nor alignment (missing:' + LMissing + ')', LMissing = '');
+    Ok('1.3.2 layout: a GENERIC INSTANTIATION field still refuses',
       (SymCountOf(LLay, 'marr', skType) = 0) and
       DiagHasText(LLay, 'PPIF', 'SizeOf(TArrF)'));
-    Ok('1.3.2 layout: a `class var` section refuses too',
+    Ok('1.3.2 layout: an old-style `object` field refuses too',
       (SymCountOf(LLay, 'mstr', skType) = 0) and
       DiagHasText(LLay, 'PPIF', 'SizeOf(TStrF)'));
     Ok('1.3.2 layout: the two refusals are the ONLY residuals',

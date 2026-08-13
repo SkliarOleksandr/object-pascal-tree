@@ -316,6 +316,10 @@ type
       out ACount: Double): Boolean;
     function OracleOrdinalRange(AMid, ANode, ADepth: Integer;
       out ALo, AHi: Double): Boolean;
+    function OracleEnumRange(AMid, ADefNode, ADepth: Integer;
+      out ALo, AHi: Double): Boolean;
+    function OracleEnumLayout(AMid, ADefNode, ADepth: Integer;
+      out ABytes: Double; out AAlign: Integer): Boolean;
     function OracleVariantLayout(AMid, APartNode, ADepth, ACap,
       AStart: Integer; out AEnd, AAlign: Integer): Boolean;
     function OracleLength(AMid, ASym: Integer; out ALen: Double): Boolean;
@@ -1150,9 +1154,7 @@ function TPasSemaProject.OracleLayout(AMid, ASym, ADepth: Integer;
   out ABytes: Double; out AAlign: Integer): Boolean;
 var
   LM: TPasSemaModel;
-  LDef, LChild, LSub, LCount, LFields: Integer;
-  LOneSize: Double;
-  LNatural, LMinimum, LCap, LUse, LMaxAlign, LOneAlign, LOffset: Integer;
+  LDef: Integer;
 begin
   Result := False;
   ABytes := 0;
@@ -1178,40 +1180,7 @@ begin
     Exit;
   case LM.Tree.Nodes[LDef].Kind of
     nkEnumType:
-      begin
-        // All-implicit enums only: an explicit value moves the ordinal RANGE,
-        // and the range is what sizes the storage — refuse rather than guess.
-        LCount := 0;
-        LChild := LM.Tree.Nodes[LDef].FirstChild;
-        while LChild <> NIL_NODE do
-        begin
-          if (LM.Tree.Nodes[LChild].Kind <> nkEnumValue) or
-             (LM.Tree.Nodes[LChild].FirstChild = NIL_NODE) or
-             (LM.Tree.Nodes[LM.Tree.Nodes[LChild].FirstChild].NextSibling
-              <> NIL_NODE) then
-            Exit;
-          Inc(LCount);
-          LChild := LM.Tree.Nodes[LChild].NextSibling;
-        end;
-        if LCount = 0 then
-          Exit;
-        if LCount <= 256 then
-          LNatural := 1
-        else if LCount <= 65536 then
-          LNatural := 2
-        else
-          LNatural := 4;
-        // {$Z}/{$MINENUMSIZE} state AT THE DECLARATION SITE — positional,
-        // because System.pas flips it mid-file (see TPasMinEnumEvent).
-        LMinimum := LM.Tree.Source.MinEnumSizeAt(
-          LM.Tree.Nodes[LDef].FirstToken);
-        if LMinimum > LNatural then
-          ABytes := LMinimum
-        else
-          ABytes := LNatural;
-        AAlign := Trunc(ABytes);
-        Result := True;
-      end;
+      Result := OracleEnumLayout(AMid, LDef, ADepth, ABytes, AAlign);
   else
     // Everything else — a record, an array, `string[N]`, a pointer, a class,
     // an alias — is the same question a FIELD asks, so one dispatcher answers
@@ -1236,9 +1205,58 @@ function TPasSemaProject.OracleRecordLayout(AMid, ADefNode, ADepth: Integer;
   out ABytes: Double; out AAlign: Integer): Boolean;
 var
   LM: TPasSemaModel;
-  LChild, LSub, LCount, LFields: Integer;
-  LOneSize: Double;
-  LCap, LUse, LMaxAlign, LOneAlign, LOffset: Integer;
+  LChild, LCap, LMaxAlign, LOffset: Integer;
+
+  // One `A, B: T;` declaration, placed at LOffset. Shared by the record body
+  // and by a plain `var` section inside it, so the two cannot drift.
+  function PlaceOneDecl(ADecl: Integer): Boolean;
+  var
+    LSub, LCount, LUse, LOneAlign: Integer;
+    LOneSize: Double;
+  begin
+    // Children: name idents then ONE type node (records carry no
+    // initializers/absolute).
+    LCount := 0;
+    LSub := LM.Tree.Nodes[ADecl].FirstChild;
+    if LSub = NIL_NODE then
+      Exit(False);
+    while LM.Tree.Nodes[LSub].NextSibling <> NIL_NODE do
+    begin
+      Inc(LCount);
+      LSub := LM.Tree.Nodes[LSub].NextSibling;
+    end;
+    if (LCount = 0) or
+       not OracleFieldLayout(AMid, LSub, ADepth, LOneSize, LOneAlign) then
+      Exit(False);
+    LUse := Min(LOneAlign, LCap);
+    if LUse > LMaxAlign then
+      LMaxAlign := LUse;
+    // `A, B: Integer` is LCount separately placed fields; after the first the
+    // offset is already a multiple of LUse, so the rounding is a no-op.
+    for var LN := 1 to LCount do
+    begin
+      LOffset := ((LOffset + LUse - 1) div LUse) * LUse;
+      LOffset := LOffset + Trunc(LOneSize);
+    end;
+    Result := True;
+  end;
+
+  // Every declaration in a `var` section.
+  function PlaceFieldsOf(ASec: Integer): Boolean;
+  var
+    LF: Integer;
+  begin
+    LF := LM.Tree.Nodes[ASec].FirstChild;
+    while LF <> NIL_NODE do
+    begin
+      if LM.Tree.Nodes[LF].Kind = nkVarDecl then
+        if not PlaceOneDecl(LF) then
+          Exit(False);
+      LF := LM.Tree.Nodes[LF].NextSibling;
+    end;
+    Result := True;
+  end;
+
 begin
   Result := False;
   ABytes := 0;
@@ -1251,7 +1269,6 @@ begin
      SameText(LM.Tree.Source.VisibleText(
        LM.Tree.Nodes[ADefNode].FirstToken - 1), 'packed') then
     LCap := 1;
-  LFields := 0;
   LOffset := 0;
   LMaxAlign := 1;
   LChild := LM.Tree.Nodes[ADefNode].FirstChild;
@@ -1259,53 +1276,41 @@ begin
   begin
     case LM.Tree.Nodes[LChild].Kind of
       nkVarDecl:
-        begin
-          // Children: name idents then ONE type node (records carry no
-          // initializers/absolute).
-          LCount := 0;
-          LSub := LM.Tree.Nodes[LChild].FirstChild;
-          if LSub = NIL_NODE then
-            Exit;
-          while LM.Tree.Nodes[LSub].NextSibling <> NIL_NODE do
-          begin
-            Inc(LCount);
-            LSub := LM.Tree.Nodes[LSub].NextSibling;
-          end;
-          if (LCount = 0) or
-             not OracleFieldLayout(AMid, LSub, ADepth, LOneSize, LOneAlign) then
-            Exit;
-          LUse := Min(LOneAlign, LCap);
-          if LUse > LMaxAlign then
-            LMaxAlign := LUse;
-          // `A, B: Integer` is LCount separately placed fields; after the
-          // first the offset is already a multiple of LUse, so the rounding is
-          // a no-op for the rest.
-          for var LN := 1 to LCount do
-          begin
-            LOffset := ((LOffset + LUse - 1) div LUse) * LUse;
-            LOffset := LOffset + Trunc(LOneSize);
-          end;
-          Inc(LFields, LCount);
-        end;
+        if not PlaceOneDecl(LChild) then
+          Exit;
       nkVariantPart:
         begin
+          var LVarAlign: Integer;
           if not OracleVariantLayout(AMid, LChild, ADepth, LCap, LOffset,
-               LOffset, LOneAlign) then
+               LOffset, LVarAlign) then
             Exit;
-          if LOneAlign > LMaxAlign then
-            LMaxAlign := LOneAlign;
-          Inc(LFields);
+          if LVarAlign > LMaxAlign then
+            LMaxAlign := LVarAlign;
         end;
+      nkVarSec:
+        // A `var` or `class var` section. Aux = 1 marks the class one, whose
+        // members are per-TYPE storage and contribute neither size nor
+        // alignment -- dcc-probed: `record A: Byte; class var Q: Int64;
+        // var B: Byte; end` is 2 bytes, so the Int64 did not even align
+        // anything. Note the section RUNS ON: a plain field written after
+        // `class var` is still a class var (`record class var Q: Integer;
+        // A: Byte; end` is 0 bytes), and the parser already nests it here,
+        // so honouring the node is enough.
+        if LM.Tree.Nodes[LChild].Aux <> 1 then
+          if not PlaceFieldsOf(LChild) then
+            Exit;
       nkVisibility, nkRoutine, nkPropertyDecl, nkAttrGroup,
       nkConstSec, nkTypeSec:
         ;   // no instance storage
     else
-      Exit;   // class-var sections, anything else
+      Exit;   // anything we do not recognise stays a refusal
     end;
     LChild := LM.Tree.Nodes[LChild].NextSibling;
   end;
-  if LFields = 0 then
-    Exit;
+  // ZERO instance fields is a real answer, not a failure: a record whose only
+  // members are class vars, methods or constants is 0 bytes (dcc-probed).
+  // Every unrecognised child above exits, so reaching here means the walk
+  // really did understand the whole body.
   ABytes := ((LOffset + LMaxAlign - 1) div LMaxAlign) * LMaxAlign;
   AAlign := LMaxAlign;
   Result := True;
@@ -1524,35 +1529,96 @@ begin
     ACount := 0;
 end;
 
+{ The ordinal values an enum spans. Explicit values are honoured, and so is
+  the rule that an implicit one continues from the last explicit: `(g1,
+  g2 = 300)` is 0..300, not 0..1. A negative value is not something dcc
+  accepts here, so it refuses rather than inventing a signed range. }
+function TPasSemaProject.OracleEnumRange(AMid, ADefNode, ADepth: Integer;
+  out ALo, AHi: Double): Boolean;
+var
+  LM: TPasSemaModel;
+  LChild, LName, LValue: Integer;
+  LNext, LThis: Double;
+  LAny: Boolean;
+begin
+  ALo := 0;
+  AHi := 0;
+  LM := FModels[AMid];
+  LNext := 0;
+  LAny := False;
+  LChild := LM.Tree.Nodes[ADefNode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LChild].Kind <> nkEnumValue then
+      Exit(False);
+    LName := LM.Tree.Nodes[LChild].FirstChild;
+    if LName = NIL_NODE then
+      Exit(False);
+    LValue := LM.Tree.Nodes[LName].NextSibling;
+    if LValue = NIL_NODE then
+      LThis := LNext
+    else if not OracleConstExpr(AMid, LValue, ADepth, LThis) then
+      Exit(False);
+    if (LThis < 0) or (Frac(LThis) <> 0) then
+      Exit(False);
+    if not LAny then
+    begin
+      ALo := LThis;
+      AHi := LThis;
+      LAny := True;
+    end
+    else
+    begin
+      if LThis < ALo then
+        ALo := LThis;
+      if LThis > AHi then
+        AHi := LThis;
+    end;
+    LNext := LThis + 1;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+  Result := LAny;
+end;
+
+{ An enum's storage: the smallest of 1/2/4 bytes that holds its LARGEST value
+  (dcc-probed — `(c1 = 5, c2 = 9)` is one byte, `(f1 = 200, f2 = 300)` is
+  two), then raised to the `$Z`/`$MINENUMSIZE` state AT THE DECLARATION SITE,
+  which is positional because System.pas flips it mid-file (see
+  TPasMinEnumEvent). An enum aligns to its size. }
+function TPasSemaProject.OracleEnumLayout(AMid, ADefNode, ADepth: Integer;
+  out ABytes: Double; out AAlign: Integer): Boolean;
+var
+  LLo, LHi: Double;
+  LNatural, LMinimum: Integer;
+begin
+  ABytes := 0;
+  AAlign := 1;
+  if not OracleEnumRange(AMid, ADefNode, ADepth, LLo, LHi) then
+    Exit(False);
+  if LHi <= 255 then
+    LNatural := 1
+  else if LHi <= 65535 then
+    LNatural := 2
+  else if LHi <= 2147483647 then
+    LNatural := 4
+  else
+    Exit(False);
+  LMinimum := FModels[AMid].Tree.Source.MinEnumSizeAt(
+    FModels[AMid].Tree.Nodes[ADefNode].FirstToken);
+  if LMinimum > LNatural then
+    ABytes := LMinimum
+  else
+    ABytes := LNatural;
+  AAlign := Trunc(ABytes);
+  Result := True;
+end;
+
 { The ordinal BOUNDS of a type used as an array index or a set base. An array
   only needs the count, but a set needs the bounds themselves: its storage is
   the byte SPAN from Lo to Hi, so `set of 8..15` is one byte while
   `set of 0..8` is two. }
 function TPasSemaProject.OracleOrdinalRange(AMid, ANode, ADepth: Integer;
   out ALo, AHi: Double): Boolean;
-
-  function EnumRange(AEMid, ADefNode: Integer): Boolean;
-  var
-    LChild: Integer;
-  begin
-    // Implicit values only — an explicit one moves the RANGE, and the range
-    // is exactly what both callers need.
-    ALo := 0;
-    AHi := -1;
-    LChild := FModels[AEMid].Tree.Nodes[ADefNode].FirstChild;
-    while LChild <> NIL_NODE do
-    begin
-      if (FModels[AEMid].Tree.Nodes[LChild].Kind <> nkEnumValue) or
-         (FModels[AEMid].Tree.Nodes[LChild].FirstChild = NIL_NODE) or
-         (FModels[AEMid].Tree.Nodes[
-           FModels[AEMid].Tree.Nodes[LChild].FirstChild].NextSibling
-            <> NIL_NODE) then
-        Exit(False);
-      AHi := AHi + 1;
-      LChild := FModels[AEMid].Tree.Nodes[LChild].NextSibling;
-    end;
-    Result := AHi >= 0;
-  end;
 
 var
   LM: TPasSemaModel;
@@ -1577,7 +1643,7 @@ begin
         Exit;
       end;
     nkEnumType:
-      Exit(EnumRange(AMid, ANode));   // an INLINE enum, as a set base
+      Exit(OracleEnumRange(AMid, ANode, ADepth, ALo, AHi));   // inline, as a set base
     nkIdent: ;
   else
     Exit(False);
@@ -1607,7 +1673,7 @@ begin
   if LDef = NIL_NODE then
     Exit(False);
   case FModels[LMid2].Tree.Nodes[LDef].Kind of
-    nkEnumType: Result := EnumRange(LMid2, LDef);
+    nkEnumType: Result := OracleEnumRange(LMid2, LDef, ADepth, ALo, AHi);
     nkSubrange, nkIdent:
       Result := OracleOrdinalRange(LMid2, LDef, ADepth + 1, ALo, AHi);
   else
@@ -1771,6 +1837,11 @@ begin
         AAlign := Trunc(ABytes);
         Exit(True);
       end;
+    nkEnumType:
+      // An INLINE anonymous enum as a field or array element:
+      // `record A: Byte; F: (r0, r1); end`. Same sizing as a named one, and
+      // the same positional {$Z} state.
+      Exit(OracleEnumLayout(AMid, ATypeNode, ADepth, ABytes, AAlign));
     nkSetType:
       begin
         // A set stores the byte SPAN from its base type's Lo to its Hi --

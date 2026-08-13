@@ -2658,6 +2658,14 @@ var
   LDecl, LAttrs: Integer;
 begin
   // 3.1: var/threadvar entries; also used for class var sections.
+  //
+  // A `class var` section RUNS ON exactly like a `var` one: it ends at the
+  // next visibility word, section keyword or member, not after its first
+  // declaration. dcc-verified — in
+  //   TR = record class var Q: Integer; A: Byte; end;
+  // `TR.A := 2` compiles (so A is per-TYPE storage) and SizeOf(TR) is 0 (so
+  // it is not an instance field). Ending the section early made A an ordinary
+  // field: a wrong member kind, and a record one byte too large.
   Result := FB.AddNode(nkVarSec, NIL_NODE, FPos);
   if AClassVar then
     FB.SetAux(Result, 1)
@@ -2712,8 +2720,6 @@ begin
     FB.Adopt(Result, LDecl);
     Expect(tkSemicolon, '";"');
     ConsumeTrailingDirectives(True);
-    if AClassVar then
-      Break; // a `class var` introduces exactly one decl run in our model
   end;
   FB.SetLast(Result, FPos - 1);
 end;
