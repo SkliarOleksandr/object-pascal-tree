@@ -126,12 +126,25 @@ type
     class function ParseFile(const ASource: TPasPreprocessed;
       out ADiags: TArray<TPasParseDiag>;
       AInterfaceOnly: Boolean = False): TPasTree; static;
+    { Parses ONE expression out of a bare text fragment (no unit around it):
+      lexes AText, wraps the tokens in a minimal single-file visible stream,
+      and runs the expression grammar once. ARoot is the expression's root
+      node (NOT necessarily node 0 — the arena allocates leaves first, so the
+      topmost operator has the HIGHEST index of its subtree). Tokens left
+      over after the expression are deliberately ignored: the first consumer
+      is the preprocessor's `$IF` evaluation (PasTree.CondEval), and dcc
+      tolerates trailing junk there (System.ObjAuto ships
+      `$IF SizeOf(Extended) >= 10)` with a stray paren). }
+    class function ParseExpressionText(const AText: string;
+      out ARoot: Integer;
+      out ADiags: TArray<TPasParseDiag>): TPasTree; static;
   end;
 
 implementation
 
 uses
-  System.SysUtils;
+  System.SysUtils,
+  PasTree.Lexer;
 
 const
   STMT_TERMINATORS: array[0..4] of TPasTokenKind =
@@ -2978,6 +2991,47 @@ begin
   SetLength(LParser.FDiags, LParser.FDiagCount);
   ADiags := LParser.FDiags;
   Result := LParser.FB.Build(ASource);
+end;
+
+class function TPasParser.ParseExpressionText(const AText: string;
+  out ARoot: Integer; out ADiags: TArray<TPasParseDiag>): TPasTree;
+var
+  LParser: TPasParser;
+  LStream: TPasTokenStream;
+  LPre: TPasPreprocessed;
+  LVisible: TArray<TPasVisibleToken>;
+  LIdx, LCount: Integer;
+begin
+  // The same wrapping ProcessText does, minus everything a bare expression
+  // cannot contain (directives, includes, conditional state): one file,
+  // every non-trivia token visible, the lexer's own EOF as the sentinel.
+  LStream := TPasLexer.Tokenize(AText);
+  LPre := Default(TPasPreprocessed);
+  LPre.FileNames := ['$expr'];
+  LPre.Files := [LStream];
+  SetLength(LPre.Skipped, 1);
+  SetLength(LVisible, Length(LStream.Tokens));
+  LCount := 0;
+  for LIdx := 0 to High(LStream.Tokens) do
+    if (LStream.Tokens[LIdx].Kind = tkEndOfFile) or
+       not IsTrivia(LStream.Tokens[LIdx].Kind) then
+    begin
+      LVisible[LCount].FileId := 0;
+      LVisible[LCount].TokenIndex := LIdx;
+      Inc(LCount);
+    end;
+  SetLength(LVisible, LCount);
+  LPre.Visible := LVisible;
+
+  LParser := Default(TPasParser);
+  LParser.FSrc := LPre;
+  LParser.FLast := High(LPre.Visible);
+  LParser.FFuel := Int64(Length(LPre.Visible)) * 200 + 10000;
+  LParser.FB.Init;
+  ARoot := LParser.ParseExpression;
+  SetLength(LParser.FDiags, LParser.FDiagCount);
+  ADiags := LParser.FDiags;
+  Result := LParser.FB.Build(LPre);
 end;
 
 end.

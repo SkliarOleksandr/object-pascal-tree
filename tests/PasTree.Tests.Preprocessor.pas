@@ -111,6 +111,71 @@ function BuildPreprocessorCases(APP: TPasPreprocessor): TPasCustomCases;
       end;
   end;
 
+  // 1.3.2, the CondEval rewrite: which branch a $IF takes (CheckDump over
+  // the statements that survived preprocessing), AND whether the
+  // needs-semantics flag fired -- the flag is the pass-2 trigger, so a case
+  // that pins the branch without pinning the flag misses half the contract.
+  function IfBranchCase(const AName, ASource, AExpected: string;
+    AExpectNeedsSem: Boolean): TPasCustomCase;
+  begin
+    Result.Section := '1.3.2';
+    Result.Name := AName;
+    Result.Run :=
+      function: TPasCheckResult
+      var
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+        LIdx: Integer;
+        LHasSem: Boolean;
+      begin
+        LPre := APP.ProcessText('test.pas', ASource);
+        LTree := TPasParser.ParseStatements(LPre, LDiags);
+        Result := CheckDump(ASource, AExpected, LTree.Dump(0), LDiags, 0);
+        if not Result.Passed then
+          Exit;
+        LHasSem := False;
+        for LIdx := 0 to High(LPre.Diagnostics) do
+          if LPre.Diagnostics[LIdx].Code = ppIfNeedsSemantics then
+            LHasSem := True;
+        if LHasSem <> AExpectNeedsSem then
+        begin
+          Result.Passed := False;
+          Result.Message := '  source:   ' + ASource + sLineBreak +
+            '  needs-semantics flag: expected ' +
+            BoolToStr(AExpectNeedsSem, True) + ', got ' +
+            BoolToStr(LHasSem, True) + sLineBreak;
+        end;
+      end;
+  end;
+
+  // The UnresolvedDeclared recording contract, both directions: a Declared()
+  // whose answer could still change the verdict is recorded for the second
+  // pass; one on the dead side of a Kleene-decided verdict is NOT -- pass 2
+  // could not change anything, so recording it would only buy a re-parse.
+  function DeclaredRecordingCase: TPasCustomCase;
+  begin
+    Result.Section := '1.3.2';
+    Result.Name := 'UnresolvedDeclared records deciders, skips dead branches';
+    Result.Run :=
+      function: TPasCheckResult
+      var
+        LPre: TPasPreprocessed;
+        LList: string;
+      begin
+        LPre := APP.ProcessText('test.pas',
+          '{$IF Declared(CouldMatter)}A := 1;{$ENDIF}' +
+          '{$IF False and Declared(CannotMatter)}B := 1;{$ENDIF}');
+        LList := string.Join(',', LPre.UnresolvedDeclared);
+        Result.Passed := (LList = 'CouldMatter');
+        if Result.Passed then
+          Result.Message := ''
+        else
+          Result.Message := '  expected UnresolvedDeclared = [CouldMatter], '
+            + 'got [' + LList + ']' + sLineBreak;
+      end;
+  end;
+
   { $IFOPT reading back what a plain switch directive just set -- the other
     half of 1.3.1: not just that SwitchState answers right (the rows below
     already cover that), but that conditional compilation actually ACTS on
@@ -251,7 +316,53 @@ begin
       '{$VARPROPSETTER ON}{$VARPROPSETTER OFF}', False),
     VarPropSetterCase('$PUSHOPT/$POPOPT round-trips it too, like every '
       + 'other compiler option',
-      '{$VARPROPSETTER ON}{$PUSHOPT}{$VARPROPSETTER OFF}{$POPOPT}', True)
+      '{$VARPROPSETTER ON}{$PUSHOPT}{$VARPROPSETTER OFF}{$POPOPT}', True),
+
+    // ---- 1.3.2, the CondEval rewrite: $IF expressions are parsed by the
+    // REAL parser (grammar owned by TPasParser, never duplicated) and
+    // evaluated with leaf-level guesses plus a Guessed taint
+    // (PasTree.CondEval). An and/or settled by a CLEAN side alone drops the
+    // taint and is NOT flagged for the second pass. Every dcc claim here was
+    // probed against dcc32 37.0 before being pinned (the SC1..SC14 probe
+    // set); the one deliberate divergence is noted on its own case. ----
+    IfBranchCase('False and GUESSED decides False, no flag -- the RTL''s '
+      + 'own Skia shape, dcc short-circuits it identically',
+      '{$IF Defined(NOPE_XYZ) and (UNKNOWN_K > 3)}A := 1;{$ELSE}A := 2;'
+      + '{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''2''))', False),
+    IfBranchCase('True or GUESSED decides True, no flag',
+      '{$IF True or (UNKNOWN_K > 3)}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''1''))', False),
+    IfBranchCase('GUESSED and False decides False -- symmetric, '
+      + 'DELIBERATELY diverging from dcc''s abort-True quirk on genuinely '
+      + 'undeclared names (see PasTree.CondEval''s unit comment)',
+      '{$IF (UNKNOWN_K > 3) and Defined(NOPE_XYZ)}A := 1;{$ELSE}A := 2;'
+      + '{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''2''))', False),
+    IfBranchCase('a guess that DOES reach the verdict is flagged and '
+      + 'computed as False',
+      '{$IF UNKNOWN_K > 3}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''2''))', True),
+    // THE load-bearing leaf-guess case, found by a corpus stream-diff when a
+    // Kleene draft of CondEval propagated unknown to the top instead: the
+    // RTL's `$IF not Declared(X)` FALLBACK idiom must take the fallback
+    // branch (not False = True), or socklen_t/WideString-style fallback
+    // declarations vanish and their users go undeclared -- and the second
+    // pass CANNOT repair that side, because RunDeclaredPass only re-runs
+    // units whose recorded name turns out DECLARED.
+    IfBranchCase('not Declared(X) takes the FALLBACK branch -- the guess '
+      + 'sits at the leaf, so the not applies to it',
+      '{$IF not Declared(NothingHere)}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''1''))', True),
+    IfBranchCase('hex literals evaluate now -- the real lexer''s tokens, '
+      + 'not the old digit-walk (which called this a bad expression)',
+      '{$IF $10 > 15}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''1''))', False),
+    IfBranchCase('trailing junk after a complete expression is tolerated, '
+      + 'as dcc does (System.ObjAuto ships a stray closing paren)',
+      '{$IF True)}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''1''))', False),
+    DeclaredRecordingCase
   ];
 end;
 

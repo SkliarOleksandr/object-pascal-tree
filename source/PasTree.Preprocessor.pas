@@ -266,7 +266,13 @@ const
 implementation
 
 uses
-  PasTree.Lexer;
+  PasTree.Lexer,
+  // Legal circularity, deliberate: Parser interface-uses THIS unit (for
+  // TPasPreprocessed), and CondEval implementation-uses Parser — the `$IF`
+  // grammar is the language's own expression grammar, parsed by the one
+  // real parser instead of a private re-implementation. Only the EVALUATION
+  // lives in CondEval; see its unit comment.
+  PasTree.CondEval;
 
 const
   MAX_INCLUDE_DEPTH = 32;
@@ -1093,462 +1099,51 @@ begin
   FScopedEnumsEvents.Add(LEvent);
 end;
 
-{ ---- $IF expression evaluator ---------------------------------------------
-
-  Grammar, subset sufficient for real-world sources — star = repetition,
-  brackets = optional. NB: no EBNF braces here, they would end this comment:
-    OrExpr  = AndExpr (("or"/"xor") AndExpr)*
-    AndExpr = RelExpr ("and" RelExpr)*
-    RelExpr = AddExpr [relop AddExpr]         relop: = <> < > <= >=
-    AddExpr = Term (("+"/"-") Term)*
-    Term    = "not" Term / "(" OrExpr ")" / Value
-    Value   = Defined(X) / Declared(X) / True / False
-            / CompilerVersion / RTLVersion / SizeOf(X) / number / 'string'
-  Unknown identifiers evaluate to False rather than failing. }
-
-type
-  TIfValueKind = (ivBool, ivNum, ivStr);
-
-  TIfValue = record
-    Kind: TIfValueKind;
-    Bool: Boolean;
-    Num: Double;
-    Str: string;
-  end;
-
-  TIfEval = record
-    Text: string;
-    Pos: Integer;      // 1-based
-    Failed: Boolean;
-    HasUnknown: Boolean;  // expression referenced symbols we cannot resolve
-    Defines: TPasDefines;
-    OnDeclared: TPasDeclaredQuery;      // nil = nobody can answer Declared()
-    UnknownDeclared: TArray<string>;    // ...and these are what it asked
-    CompilerVersion: Double;
-    PointerBytes: Integer;
-    ExtendedBytes: Integer;
-    procedure SkipWs;
-    function Word: string;         // peeks+consumes an identifier
-    function TryWord(const AWord: string): Boolean;
-    function ParseOr: TIfValue;
-    function ParseAnd: TIfValue;
-    function ParseRel: TIfValue;
-    function ParseAdd: TIfValue;
-    function ParseTerm: TIfValue;
-    function AsBool(const AValue: TIfValue): Boolean;
-    function AsNum(const AValue: TIfValue): Double;
-  end;
-
-procedure TIfEval.SkipWs;
-begin
-  while (Pos <= Length(Text)) and CharInSet(Text[Pos], [' ', #9, #13, #10]) do
-    Inc(Pos);
-end;
-
-function TIfEval.Word: string;
-var
-  LStart: Integer;
-begin
-  SkipWs;
-  LStart := Pos;
-  while (Pos <= Length(Text)) and
-    CharInSet(Text[Pos], ['A'..'Z', 'a'..'z', '0'..'9', '_', '.']) do
-    Inc(Pos);
-  Result := Copy(Text, LStart, Pos - LStart);
-end;
-
-function TIfEval.TryWord(const AWord: string): Boolean;
-var
-  LSave: Integer;
-  LWord: string;
-begin
-  LSave := Pos;
-  LWord := Word;
-  Result := SameText(LWord, AWord);
-  if not Result then
-    Pos := LSave;
-end;
-
-function TIfEval.AsBool(const AValue: TIfValue): Boolean;
-begin
-  case AValue.Kind of
-    ivBool: Result := AValue.Bool;
-    ivNum: Result := AValue.Num <> 0;
-  else
-    Result := AValue.Str <> '';
-  end;
-end;
-
-function TIfEval.AsNum(const AValue: TIfValue): Double;
-begin
-  case AValue.Kind of
-    ivNum: Result := AValue.Num;
-    ivBool: Result := Ord(AValue.Bool);
-  else
-    Result := 0;
-  end;
-end;
-
-function TIfEval.ParseOr: TIfValue;
-var
-  LRight: TIfValue;
-  LIsXor: Boolean;
-begin
-  Result := ParseAnd;
-  while True do
-  begin
-    LIsXor := False;
-    if TryWord('or') then
-      // fallthrough
-    else if TryWord('xor') then
-      LIsXor := True
-    else
-      Break;
-    LRight := ParseAnd;
-    Result.Kind := ivBool;
-    if LIsXor then
-      Result.Bool := AsBool(Result) xor AsBool(LRight)
-    else
-      Result.Bool := AsBool(Result) or AsBool(LRight);
-  end;
-end;
-
-function TIfEval.ParseAnd: TIfValue;
-var
-  LRight: TIfValue;
-begin
-  Result := ParseRel;
-  while TryWord('and') do
-  begin
-    LRight := ParseRel;
-    Result.Kind := ivBool;
-    Result.Bool := AsBool(Result) and AsBool(LRight);
-  end;
-end;
-
-function TIfEval.ParseRel: TIfValue;
-var
-  LRight: TIfValue;
-  LOp: string;
-begin
-  Result := ParseAdd;
-  SkipWs;
-  if Pos > Length(Text) then
-    Exit;
-  LOp := '';
-  case Text[Pos] of
-    '=': begin LOp := '='; Inc(Pos); end;
-    '<':
-      begin
-        Inc(Pos);
-        if (Pos <= Length(Text)) and (Text[Pos] = '>') then
-        begin
-          LOp := '<>'; Inc(Pos);
-        end
-        else if (Pos <= Length(Text)) and (Text[Pos] = '=') then
-        begin
-          LOp := '<='; Inc(Pos);
-        end
-        else
-          LOp := '<';
-      end;
-    '>':
-      begin
-        Inc(Pos);
-        if (Pos <= Length(Text)) and (Text[Pos] = '=') then
-        begin
-          LOp := '>='; Inc(Pos);
-        end
-        else
-          LOp := '>';
-      end;
-  end;
-  if LOp = '' then
-    Exit;
-  LRight := ParseAdd;
-  if (Result.Kind = ivStr) and (LRight.Kind = ivStr) then
-  begin
-    if LOp = '=' then
-      Result.Bool := SameText(Result.Str, LRight.Str)
-    else if LOp = '<>' then
-      Result.Bool := not SameText(Result.Str, LRight.Str)
-    else
-      Result.Bool := False;
-  end
-  else if LOp = '=' then
-    Result.Bool := AsNum(Result) = AsNum(LRight)
-  else if LOp = '<>' then
-    Result.Bool := AsNum(Result) <> AsNum(LRight)
-  else if LOp = '<' then
-    Result.Bool := AsNum(Result) < AsNum(LRight)
-  else if LOp = '>' then
-    Result.Bool := AsNum(Result) > AsNum(LRight)
-  else if LOp = '<=' then
-    Result.Bool := AsNum(Result) <= AsNum(LRight)
-  else
-    Result.Bool := AsNum(Result) >= AsNum(LRight);
-  Result.Kind := ivBool;
-end;
-
-function TIfEval.ParseAdd: TIfValue;
-var
-  LRight: TIfValue;
-  LMinus: Boolean;
-begin
-  Result := ParseTerm;
-  while True do
-  begin
-    SkipWs;
-    if (Pos <= Length(Text)) and (Text[Pos] = '+') then
-      LMinus := False
-    else if (Pos <= Length(Text)) and (Text[Pos] = '-') then
-      LMinus := True
-    else
-      Break;
-    Inc(Pos);
-    LRight := ParseTerm;
-    Result.Num := AsNum(Result);
-    if LMinus then
-      Result.Num := Result.Num - AsNum(LRight)
-    else
-      Result.Num := Result.Num + AsNum(LRight);
-    Result.Kind := ivNum;
-  end;
-end;
-
-function TIfEval.ParseTerm: TIfValue;
-var
-  LWord, LArg: string;
-  LStart: Integer;
-  LNum: string;
-  LKnown: Boolean;
-begin
-  Result.Kind := ivBool;
-  Result.Bool := False;
-  Result.Num := 0;
-  Result.Str := '';
-  SkipWs;
-  if Pos > Length(Text) then
-  begin
-    Failed := True;
-    Exit;
-  end;
-
-  // not X
-  if TryWord('not') then
-  begin
-    Result := ParseTerm;
-    Result.Bool := not AsBool(Result);
-    Result.Kind := ivBool;
-    Exit;
-  end;
-
-  case Text[Pos] of
-    '(':
-      begin
-        Inc(Pos);
-        Result := ParseOr;
-        SkipWs;
-        if (Pos <= Length(Text)) and (Text[Pos] = ')') then
-          Inc(Pos)
-        else
-          Failed := True;
-        Exit;
-      end;
-    '''':
-      begin
-        Inc(Pos);
-        LStart := Pos;
-        while (Pos <= Length(Text)) and (Text[Pos] <> '''') do
-          Inc(Pos);
-        Result.Kind := ivStr;
-        Result.Str := Copy(Text, LStart, Pos - LStart);
-        if Pos <= Length(Text) then
-          Inc(Pos)
-        else
-          Failed := True;
-        Exit;
-      end;
-    '0'..'9':
-      begin
-        LStart := Pos;
-        while (Pos <= Length(Text)) and
-          CharInSet(Text[Pos], ['0'..'9', '.', '_']) do
-          Inc(Pos);
-        LNum := Copy(Text, LStart, Pos - LStart).Replace('_', '');
-        Result.Kind := ivNum;
-        Result.Num := StrToFloatDef(LNum, 0,
-          TFormatSettings.Invariant);
-        Exit;
-      end;
-  end;
-
-  LWord := Word;
-  if LWord = '' then
-  begin
-    Failed := True;
-    Exit;
-  end;
-  if SameText(LWord, 'True') then
-  begin
-    Result.Kind := ivBool;
-    Result.Bool := True;
-  end
-  else if SameText(LWord, 'False') then
-  begin
-    Result.Kind := ivBool;
-    Result.Bool := False;
-  end
-  else if SameText(LWord, 'Defined') or SameText(LWord, 'Declared') then
-  begin
-    SkipWs;
-    if (Pos <= Length(Text)) and (Text[Pos] = '(') then
-    begin
-      Inc(Pos);
-      LArg := Word;
-      // Declared() takes a DESIGNATOR, not a bare identifier — the RTL writes
-      // `Declared(System.Embedded)`. Stopping at the dot asks about `System`,
-      // which is a unit name and answers True, taking the opposite branch.
-      while (Pos <= Length(Text)) and (Text[Pos] = '.') do
-      begin
-        Inc(Pos);
-        LArg := LArg + '.' + Word;
-      end;
-      SkipWs;
-      if (Pos <= Length(Text)) and (Text[Pos] = ')') then
-        Inc(Pos)
-      else
-        Failed := True;
-      Result.Kind := ivBool;
-      if SameText(LWord, 'Defined') then
-        Result.Bool := Defines.IsDefined(LArg)
-      else if Assigned(OnDeclared) and OnDeclared(LArg, LKnown) then
-        // Somebody with a symbol table answered — see TPasDeclaredQuery. Not
-        // flagged and not recorded, because it is not a guess.
-        Result.Bool := LKnown
-      else
-      begin
-        // Nobody can answer yet: Declared() asks whether an IDENTIFIER is in
-        // scope, and the symbol table that knows is built from the token
-        // stream this very decision produces. False is the branch taken —
-        // there is no safer default, since the guarded text is by
-        // construction the text that does NOT compile when the name IS
-        // declared — but the NAME is recorded so a caller that does have a
-        // symbol table can come back and ask properly.
-        UnknownDeclared := UnknownDeclared + [LArg];
-        HasUnknown := True;
-        Result.Bool := False;
-      end;
-    end
-    else
-      Failed := True;
-  end
-  else if SameText(LWord, 'CompilerVersion') or SameText(LWord, 'RTLVersion')
-  then
-  begin
-    Result.Kind := ivNum;
-    Result.Num := CompilerVersion;
-  end
-  else if SameText(LWord, 'SizeOf') then
-  begin
-    // SizeOf(X) in $IF: assume 64-bit target defaults.
-    SkipWs;
-    if (Pos <= Length(Text)) and (Text[Pos] = '(') then
-    begin
-      Inc(Pos);
-      LArg := Word;
-      SkipWs;
-      if (Pos <= Length(Text)) and (Text[Pos] = ')') then
-        Inc(Pos)
-      else
-        Failed := True;
-      Result.Kind := ivNum;
-      if SameText(LArg, 'Pointer') or SameText(LArg, 'NativeInt') or
-         SameText(LArg, 'NativeUInt') then
-        Result.Num := PointerBytes
-      else if SameText(LArg, 'Extended') then
-        Result.Num := ExtendedBytes
-      else if SameText(LArg, 'Int64') or SameText(LArg, 'UInt64') or
-        SameText(LArg, 'Double') or SameText(LArg, 'Currency') then
-        Result.Num := 8
-      else if SameText(LArg, 'Integer') or SameText(LArg, 'Cardinal') or
-        SameText(LArg, 'LongInt') or SameText(LArg, 'LongWord') or
-        SameText(LArg, 'Single') then
-        Result.Num := 4
-      else if SameText(LArg, 'Char') or SameText(LArg, 'WideChar') or
-        SameText(LArg, 'Word') or SameText(LArg, 'SmallInt') then
-        Result.Num := 2
-      else if SameText(LArg, 'AnsiChar') or SameText(LArg, 'Byte') or
-        SameText(LArg, 'ShortInt') or SameText(LArg, 'Boolean') then
-        Result.Num := 1
-      else
-      begin
-        HasUnknown := True;
-        Result.Num := 0;
-      end;
-    end
-    else
-      Failed := True;
-  end
-  else
-  begin
-    // Unknown identifier or pseudo-function (Ord(x), unit constants, ...):
-    // only the semantic phase could resolve these. Consume a balanced
-    // argument list if present, mark the expression, evaluate as False.
-    HasUnknown := True;
-    SkipWs;
-    if (Pos <= Length(Text)) and (Text[Pos] = '(') then
-    begin
-      LStart := 1; // nesting depth
-      Inc(Pos);
-      while (Pos <= Length(Text)) and (LStart > 0) do
-      begin
-        case Text[Pos] of
-          '(': Inc(LStart);
-          ')': Dec(LStart);
-        end;
-        Inc(Pos);
-      end;
-      if LStart > 0 then
-        Failed := True;
-    end;
-    Result.Kind := ivBool;
-    Result.Bool := False;
-  end;
-end;
-
+// The `$IF`/`$ELSEIF` expression: parsed by the REAL parser and evaluated by
+// PasTree.CondEval (tri-state; see its unit comment for grammar ownership,
+// Kleene and/or, and the dcc-probed divergence on genuinely undeclared
+// names). Trailing junk after a complete expression is tolerated by
+// construction — the parser consumes one expression and ignores the rest,
+// which is dcc's own behavior (System.ObjAuto.pas ships
+// '$IF SizeOf(Extended) >= 10)' with a stray closing paren).
 function TPasPreprocessor.EvalIfExpression(const AExpr: string;
   AFileId: Integer; const AToken: TPasToken): Boolean;
 var
-  LEval: TIfEval;
-  LValue: TIfValue;
+  LCtx: TPasCondContext;
+  LValue: TPasCondValue;
+  LBad: Boolean;
+  LName: string;
 begin
-  LEval := Default(TIfEval);
-  LEval.Text := AExpr;
-  LEval.Pos := 1;
-  LEval.Defines := FDefines;
-  LEval.OnDeclared := FOnDeclared;
-  LEval.CompilerVersion := FCompilerVersion;
-  LEval.PointerBytes := FPointerBytes;
-  LEval.ExtendedBytes := FExtendedBytes;
-  LValue := LEval.ParseOr;
-  // Recorded even for an expression that FAILED to parse: the caller's only
-  // use for these is deciding whether a second pass could learn anything, and
-  // a half-parsed expression that mentioned a name is still such a case.
-  for var LName in LEval.UnknownDeclared do
-    if FUnresolvedDeclared.IndexOf(LName) < 0 then
-      FUnresolvedDeclared.Add(LName);
-  // NB: trailing junk after a complete expression is deliberately ignored —
-  // dcc tolerates it (System.ObjAuto.pas ships '$IF SizeOf(Extended) >= 10)'
-  // with a stray closing paren).
-  if LEval.Failed then
+  LCtx := Default(TPasCondContext);
+  LCtx.Defines := FDefines;
+  LCtx.OnDeclared := FOnDeclared;
+  LCtx.CompilerVersion := FCompilerVersion;
+  LCtx.PointerBytes := FPointerBytes;
+  LCtx.ExtendedBytes := FExtendedBytes;
+  LValue := EvalCondText(AExpr, LCtx, LBad);
+  // Unanswered Declared() names feed the second pass (RunDeclaredPass) — but
+  // only when they could still CHANGE anything: a verdict settled by a clean
+  // side alone (`False and Declared(X)`) is final no matter what X turns out
+  // to be, so recording X would only buy a wasted re-parse. A FAILED
+  // expression still records, the old evaluator's deliberate behavior — a
+  // half-parsed expression that mentioned a name is still a case worth a
+  // second look.
+  if LBad or LValue.Guessed then
+    for LName in LCtx.UnknownDeclared do
+      if FUnresolvedDeclared.IndexOf(LName) < 0 then
+        FUnresolvedDeclared.Add(LName);
+  if LBad then
   begin
     Diag(ppBadIfExpression, AFileId, AToken.Start, AToken.Len, AExpr);
     Exit(False);
   end;
-  if LEval.HasUnknown then
+  // Flagged only when a guess actually REACHED the verdict, not whenever an
+  // unknown name was merely touched: `Defined(FPC) and (FPC_FULLVERSION <
+  // 30301)` decides False on the left side alone, exactly as dcc's
+  // short-circuit does, and a second pass could not change it.
+  if LValue.Guessed then
     Diag(ppIfNeedsSemantics, AFileId, AToken.Start, AToken.Len, AExpr);
-  Result := LEval.AsBool(LValue);
+  Result := CondAsBool(LValue);
 end;
 
 end.
