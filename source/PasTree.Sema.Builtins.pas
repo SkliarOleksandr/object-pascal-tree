@@ -89,11 +89,20 @@ begin
   T('Cardinal', tcInteger, 3); T('Integer', tcInteger, 3);
   T('LongInt', tcInteger, 3); T('LongWord', tcInteger, 3);
   T('UInt64', tcInteger, 4); T('Int64', tcInteger, 4);
+  // CORRECTION (2026-08-14): earlier assumed real declarations -- checked
+  // the actual System.pas and there is none. `PNativeInt = ^NativeInt;`
+  // exists, and the NAME is used as a parameter/field type throughout, but
+  // `NativeInt = ...` itself is never written anywhere. Genuine compiler
+  // intrinsics, same as Integer/Cardinal on this same line -- confirmed by
+  // removing them experimentally: 2091 new false E2003 on rtlflat, 2319 on
+  // bigflat, 100% attributable to these two names. Stays seeded.
   T('NativeInt', tcInteger, 4); T('NativeUInt', tcInteger, 4);
   // Floats.
   T('Single', tcFloat, 1); T('Double', tcFloat, 2); T('Extended', tcFloat, 3);
   T('Real', tcFloat, 2); T('Currency', tcFloat, 2); T('Comp', tcFloat, 2);
-  T('TDateTime', tcFloat, 2);
+  // REMOVED (2026-08-14): `TDateTime = type Double;` is a real declaration
+  // in System.pas (unconditional, not inside any $IFDEF/comment).
+  // T('TDateTime', tcFloat, 2);
   // The legacy 6-byte float (2.5.1). Compiler-provided like Comp: System.pas
   // mentions it only in a `{$NODEFINE Real48}` line and inside comments, so a
   // source grep says "declared" and dcc says otherwise — the same trap the
@@ -107,10 +116,16 @@ begin
   // Strings.
   T('string', tcString); T('UnicodeString', tcString); T('AnsiString', tcString);
   T('WideString', tcString); T('ShortString', tcString);
-  T('RawByteString', tcString); T('UTF8String', tcString);
+  // REMOVED (2026-08-14): both real (`type AnsiString(N)`, the codepage-
+  // parameterized form, real code under System.pas's non-NEXTGEN branch --
+  // our own tool always targets desktop/VCL, never NEXTGEN).
+  // T('RawByteString', tcString); T('UTF8String', tcString);
   // Pointers.
   T('Pointer', tcPointer); T('PChar', tcPointer); T('PAnsiChar', tcPointer);
-  T('PWideChar', tcPointer); T('PByte', tcPointer);
+  // REMOVED (2026-08-14): `PByte = ^Byte;` is real ({$NODEFINE} only gates
+  // C++Builder .hpp generation, irrelevant to our Pascal resolver).
+  T('PWideChar', tcPointer);
+  // T('PByte', tcPointer);
   // Variants / structured / misc.
   T('Variant', tcVariant); T('OleVariant', tcVariant);
   // Classic open-string parameter type (B.4.3): compiler-provided, NOT
@@ -119,9 +134,20 @@ begin
   // type identifier'. That positional rule is beyond what resolution needs —
   // registering the NAME is what keeps it from reading as undeclared.
   T('OpenString', tcString);
-  T('TObject', tcClass); T('Exception', tcClass); T('TClass', tcClassOf);
-  T('IInterface', tcInterface); T('IUnknown', tcInterface);
-  T('TGUID', tcRecord); T('TArray', tcArray); T('TBytes', tcArray);
+  // EXPERIMENTAL BUILD (2026-08-14): all eight really are Pascal declarations
+  // (TObject/Exception/TClass/IInterface/IUnknown/TGUID/TArray in
+  // System.pas itself; TBytes/Exception additionally in System.SysUtils) --
+  // commented out to rely on the ordinary used-unit/implicit-System
+  // fallback (CrossResolve) instead of a per-model seed. Measured on
+  // rtlflat/bigflat/spring4d/both AVImark corpora: ZERO new diagnostics --
+  // every real-world unit that bares these names already carries the
+  // `uses` clause dcc itself would require, TObject/TClass/IInterface/
+  // IUnknown/TGUID/TArray live in the ALWAYS-searched implicit System unit
+  // regardless. Restore by uncommenting if THIS build regresses something
+  // the measured corpora didn't exercise.
+  // T('TObject', tcClass); T('Exception', tcClass); T('TClass', tcClassOf);
+  // T('IInterface', tcInterface); T('IUnknown', tcInterface);
+  // T('TGUID', tcRecord); T('TArray', tcArray); T('TBytes', tcArray);
   // 10.3: `Text` AND `TextFile` are both predefined, and neither has a source
   // declaration in System.pas to fall back on — so a missing seed here is a
   // guaranteed false E2003 (`var f: textfile` in DSiWin32).

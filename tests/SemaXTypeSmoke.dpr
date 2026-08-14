@@ -1103,6 +1103,17 @@ begin
   if TDirectory.Exists(LDir) then
     TDirectory.Delete(LDir, True);
   TDirectory.CreateDirectory(LDir);
+  // TObject/TArray<T>: real declarations (PasTree.Sema.Builtins no longer
+  // seeds either) -- named System.pas so every fixture below reaches them
+  // via the IMPLICIT unit, with no `uses` clause of its own to change.
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10 +
+    'type'#10 +
+    '  TObject = class'#10 +
+    '  end;'#10 +
+    '  TArray<T> = array of T;'#10 +
+    'implementation'#10 +
+    'end.'#10);
   TFile.WriteAllText(TPath.Combine(LDir, 'XA.pas'), UNIT_XA);
   TFile.WriteAllText(TPath.Combine(LDir, 'XG.pas'), UNIT_XG);
   TFile.WriteAllText(TPath.Combine(LDir, 'XU.pas'), UNIT_XU);
@@ -1204,8 +1215,12 @@ begin
     // ONE more explicit method frame, not two, even though it is written at
     // two call sites — both share the routine symbol and the type argument, so
     // Instantiate's dedup collapses them, which is the contract rather than a
-    // coincidence.
-    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '23');
+    // coincidence. 24 since PasTree.Sema.Builtins stopped seeding TArray
+    // (2026-08-14): the shared System.pas fixture now declares `TArray<T> =
+    // array of T;` for real, so `TArray<TSpotDirect>` in UNIT_OV genuinely
+    // instantiates — the seeded stub had no generic parameter list to
+    // instantiate against at all.
+    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '24');
 
     // ---- Cross-unit overload selection by ARGUMENT TYPES ----
     LV := ModelByName('xv');

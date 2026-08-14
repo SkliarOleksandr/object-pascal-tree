@@ -64,6 +64,15 @@ const
     'unit System;'#10'interface'#10 +
     'const SYS_CONST = 42;'#10 +
     'type'#10 +
+    // TGUID/IInterface: real declarations (PasTree.Sema.Builtins no longer
+    // seeds either — both are genuine System.pas types), needed by
+    // UNIT_IFACEROOT's heritage-less interface reaching QueryInterface.
+    '  TGUID = record'#10 +
+    '    D1: Cardinal;'#10 +
+    '  end;'#10 +
+    '  IInterface = interface'#10 +
+    '    function QueryInterface(const IID: TGUID; out Obj): Integer;'#10 +
+    '  end;'#10 +
     '  TObject = class'#10 +
     '    function ClassName: string;'#10 +
     '    procedure Free;'#10 +
@@ -1843,23 +1852,41 @@ begin
         Exit(True);
 end;
 
-// How many references spelled ARefText resolved cross-unit to a symbol named
-// ATarget declared in unit AUnitLower. Unlike CrossRefTo this pins the OWNING
-// UNIT, which is the whole point when the same name exists on both sides of
-// the shadowing question (a `with` target's member vs the enclosing class's).
+// How many references spelled ARefText resolved to a symbol named ATarget
+// declared in unit AUnitLower — via ExtRefMap (a genuinely cross-unit hit)
+// OR via RefMap (a SAME-unit one: RepointCallee's own-model branch writes
+// RefMap directly and needs no ExtRefMap entry at all — see its own comment
+// on why a stale one there would be a bug, not a feature). Unlike CrossRefTo
+// this pins the OWNING UNIT, which is the whole point when the same name
+// exists on both sides of the shadowing question (a `with` target's member
+// vs the enclosing class's).
 function CrossRefCountInUnit(AModel: TPasSemaModel;
   const ARefText, ATarget, AUnitLower: string): Integer;
 var
   LExt: TPasExtRef;
+  LSym: Integer;
 begin
   Result := 0;
   for var LNode := 0 to High(AModel.RefMap) do
     if (AModel.Tree.Nodes[LNode].Kind = nkIdent) and
-       SameText(AModel.Tree.NodeText(LNode), ARefText) and
-       AModel.ExtRefMap.TryGetValue(LNode, LExt) then
-      if SameText(GProj.Model(LExt.UnitId).Symbols[LExt.Sym].Name, ATarget) and
-         SameText(GProj.Model(LExt.UnitId).UnitNameLower, AUnitLower) then
-        Inc(Result);
+       SameText(AModel.Tree.NodeText(LNode), ARefText) then
+    begin
+      if AModel.ExtRefMap.TryGetValue(LNode, LExt) then
+      begin
+        if SameText(GProj.Model(LExt.UnitId).Symbols[LExt.Sym].Name,
+             ATarget) and
+           SameText(GProj.Model(LExt.UnitId).UnitNameLower, AUnitLower) then
+          Inc(Result);
+      end
+      else
+      begin
+        LSym := AModel.RefMap[LNode];
+        if (LSym <> NIL_SYM) and (AModel.Symbols[LSym].DeclNode <> LNode) and
+           SameText(AModel.Symbols[LSym].Name, ATarget) and
+           SameText(AModel.UnitNameLower, AUnitLower) then
+          Inc(Result);
+      end;
+    end;
 end;
 
 // References spelled ARefText still bound LOCALLY (RefMap) to a symbol that is
@@ -2652,6 +2679,17 @@ begin
   if TDirectory.Exists(LDir) then
     TDirectory.Delete(LDir, True);
   TDirectory.CreateDirectory(LDir);
+  // TObject: real (PasTree.Sema.Builtins no longer seeds it) -- named
+  // System.pas, not just any fixture unit, so SSBase/SSUse reach it through
+  // the IMPLICIT unit exactly as real code does, with no `uses` clause of
+  // their own to change (same convention as the file-level UNIT_SYS).
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10 +
+    'type'#10 +
+    '  TObject = class'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10);
   TFile.WriteAllText(TPath.Combine(LDir, 'SSBase.pas'),
     'unit SSBase;'#10'interface'#10 +
     'type'#10 +
@@ -2705,8 +2743,10 @@ begin
     - a DYNAMIC array type has a pseudo-constructor (`TBytes.Create($20, $20)`,
       also with no arguments at all). A STATIC array and a VARIABLE qualifier
       are both `E2671`, which is why the negative cases are asserted too — and
-      the seeded `TBytes` is exercised beside a locally-declared array, since
-      the seed has no declaration to walk.
+      `TBytes` (a real declaration in CFSys now — PasTree.Sema.Builtins no
+      longer seeds it) is exercised beside a locally-declared array, to prove
+      the pseudo-constructor walk does not care which kind of DeclNode a
+      dynamic array type has.
 
     The negatives are silence, so each is paired with a live report in the same
     unit: without one, a rule that suppressed everything would pass. }
@@ -2723,6 +2763,9 @@ begin
     '  TObject = class'#10 +
     '    procedure Free;'#10 +
     '  end;'#10 +
+    // TBytes: real (PasTree.Sema.Builtins no longer seeds it) -- see the
+    // header comment on why this fixture exercises it beside TMyArr.
+    '  TBytes = array of Byte;'#10 +
     'implementation'#10 +
     'procedure TObject.Free;'#10 +
     'begin'#10 +
@@ -2859,6 +2902,9 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'QHost.pas'),
     'unit QHost;'#10'interface'#10 +
     'type'#10 +
+    // TArray: real (PasTree.Sema.Builtins no longer seeds it) -- this suite
+    // analyses a bare temp directory, so it needs declaring here.
+    '  TArray<T> = array of T;'#10 +
     '  TMode = (None, AllLocal);'#10 +
     '  TModel = class'#10 +
     '  public type'#10 +
@@ -3617,6 +3663,15 @@ begin
   if TDirectory.Exists(LDir) then
     TDirectory.Delete(LDir, True);
   TDirectory.CreateDirectory(LDir);
+  // TObject: real (PasTree.Sema.Builtins no longer seeds it) -- named
+  // System.pas so the bare heritage below reaches it via the IMPLICIT unit.
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10 +
+    'type'#10 +
+    '  TObject = class'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitIfacePoly.pas'),
     'unit UnitIfacePoly;'#10'interface'#10 +
     'type'#10 +

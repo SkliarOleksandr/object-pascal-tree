@@ -335,7 +335,13 @@ const
     'interface'#10 +
     '{$SCOPEDENUMS ON}'#10 +
     'type'#10 +
-    '  TFlags = (Exception, Broken);'#10 + // value named like the BUILTIN type
+    // Value named like a BUILTIN TYPE -- Integer, not Exception (PasTree.
+    // Sema.Builtins no longer seeds Exception, and this suite's bare
+    // single-unit Analyze() has no project/second unit to declare a real
+    // one in, unlike the project-level suites; Integer is a genuine
+    // compiler intrinsic with no source declaration ANYWHERE, so it stays
+    // seeded regardless and keeps testing the same shadowing rule).
+    '  TFlags = (Integer, Broken);'#10 +
     '{$PUSHOPT}'#10 +
     '{$SCOPEDENUMS OFF}'#10 +
     'type'#10 +
@@ -346,13 +352,13 @@ const
     'implementation'#10 +
     'procedure P;'#10 +
     'var'#10 +
-    '  E: Exception;'#10 +                 // must bind the TYPE, not the value
+    '  E: Integer;'#10 +                   // must bind the TYPE, not the value
     '  F: TFlags;'#10 +
     '  O: TOpen;'#10 +
     '  A: TAfterPop;'#10 +
     'begin'#10 +
-    '  E := nil;'#10 +
-    '  F := TFlags.Exception;'#10 +        // qualified access always works
+    '  E := 0;'#10 +
+    '  F := TFlags.Integer;'#10 +          // qualified access always works
     '  F := TFlags.Broken;'#10 +
     '  O := Alpha;'#10 +                   // injected (unscoped)
     '  A := TAfterPop.Gamma;'#10 +
@@ -1253,10 +1259,10 @@ begin
   // 9c-sexies. {$SCOPEDENUMS} honored positionally.
   Analyze(SRC_SCOPEDENUMS);
   Ok('scopedenums: no diags at all', Length(GModel.Diags) = 0);
-  // With the bug, `E: Exception` bound to the leaked enum VALUE, BindTypes
+  // With the bug, `E: Integer` bound to the leaked enum VALUE, BindTypes
   // rejected it (not a type) and the declared type stayed empty.
   Ok('scopedenums: the builtin TYPE is not shadowed by the scoped value',
-    TypeOf('e', skVar) = 'Exception');
+    TypeOf('e', skVar) = 'Integer');
   Ok('scopedenums: qualified TFlags.Broken resolves',
     AllRefsResolved('Broken'));
   Ok('scopedenums: unscoped TOpen still injects (bare Alpha)',
