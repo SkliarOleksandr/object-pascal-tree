@@ -148,6 +148,10 @@ type
       RunCrossTypePass. Owned here; merged and freed there. }
     FXNewExt: TArray<TDictionary<Integer, TPasExtRef>>;
     FSingleThreaded: Boolean;
+    // Pass failures that had no model to hang off — see NoteInternalError.
+    // The lock also guards AddDiag on a shared model from a parallel body.
+    FInternalDiags: TArray<string>;
+    FInternalLock: TObject;
     FReportMembers: Boolean;   // see ReportUnresolvedMembers
     FReportGuessedIfs: Boolean;   // see ReportGuessedIfs
     FReportVisibility: Boolean;   // see ReportVisibility
@@ -191,7 +195,11 @@ type
     FInstLock: TCriticalSection;
     // Runs ABody for 0..AHi — one worker per core, or a plain loop when
     // SingleThreaded (baseline emulation / timing comparison / debugging).
-    procedure ForEachIndex(AHi: Integer; const ABody: TProc<Integer>);
+    procedure ForEachIndex(AHi: Integer; const APass: string;
+      const ABody: TProc<Integer>;
+      const AMidOf: TFunc<Integer, Integer> = nil);
+    procedure NoteInternalError(AMid: Integer; const APass: string;
+      E: Exception);
     // Appends a model + its initial status, keeping FModels/FFiles/FStatus in
     // lockstep. Returns the new model id.
     function RegisterModel(AModel: TPasSemaModel; const AFullPath: string;
@@ -210,6 +218,7 @@ type
     function DeclaredQueryFor(AId: Integer): TPasDeclaredQuery;
     procedure RunDeclaredPass(ACount: Integer);
     procedure InjectGuessedIfDiags(ACount: Integer);
+    procedure InjectEncodingDiags(ACount: Integer);
     procedure CrossResolve(AId: Integer);
     function StructSymOfNode(AModel: TPasSemaModel; ANode: Integer): Integer;
     procedure CheckVisibility(AId, ANameNode, AMemMid, AMemSym: Integer);
@@ -624,6 +633,7 @@ var
 begin
   inherited Create;
   ConfigureThreadPool(0);
+  FInternalLock := TObject.Create;
   FPlatform := APlatform;
   FInfo := PlatformInfo(APlatform);
   FSM := TPasSourceManager.Create(ASearchPaths);
@@ -657,6 +667,7 @@ begin
   FInstKeys.Free;
   FInstances.Free;
   FByPath.Free;
+  FInternalLock.Free;
   FFiles.Free;
   FStatus.Free;
   FModels.Free;
@@ -667,16 +678,73 @@ begin
   inherited;
 end;
 
-procedure TPasSemaProject.ForEachIndex(AHi: Integer;
-  const ABody: TProc<Integer>);
+{ Every parallel pass runs through here, so this is where the safety net goes:
+  an exception escaping a pass body is recorded as a PPINT diagnostic on the
+  unit it was working on and the run CONTINUES.
+
+  Without it the failure is invisible in the worst possible way — the unit ends
+  up half-analyzed, so the names it should declare are missing and its
+  importers report a flood of "undeclared identifier" that points everywhere
+  except at the cause. (An unhandled exception in a TParallel body also
+  re-raises out of the whole &For, which loses every other worker's result.)
+
+  APass names the pass for the message. AMidOf maps a body index to the model
+  it belongs to: for most passes that is the index itself, but the
+  candidate-driven ones iterate a subset and must map back, or the report
+  would blame an unrelated unit. }
+procedure TPasSemaProject.ForEachIndex(AHi: Integer; const APass: string;
+  const ABody: TProc<Integer>; const AMidOf: TFunc<Integer, Integer>);
 var
   LIdx: Integer;
+  LRun: TProc<Integer>;
 begin
+  // An anonymous method, not a nested procedure: TParallel.&For takes a
+  // TProc<Integer> and a nested one cannot be captured (E2555).
+  LRun :=
+    procedure(AIndex: Integer)
+    var
+      LMid: Integer;
+    begin
+      try
+        ABody(AIndex);
+      except
+        on E: Exception do
+        begin
+          if Assigned(AMidOf) then
+            LMid := AMidOf(AIndex)
+          else
+            LMid := AIndex;
+          NoteInternalError(LMid, APass, E);
+        end;
+      end;
+    end;
   if FSingleThreaded then
     for LIdx := 0 to AHi do
-      ABody(LIdx)
+      LRun(LIdx)
   else
-    TParallel.&For(0, AHi, ABody);
+    TParallel.&For(0, AHi, LRun);
+end;
+
+{ Records a pass failure against AMid. Anchored on the unit's ROOT node, which
+  every model has, so the host gets a file and a line rather than nothing. If
+  the model itself is missing — the failure happened while building it — the
+  note goes to the project-level list, which the report prints alongside. }
+procedure TPasSemaProject.NoteInternalError(AMid: Integer; const APass: string;
+  E: Exception);
+var
+  LMsg: string;
+begin
+  LMsg := Format(SPPINT_PassFailed, [APass, E.ClassName, E.Message]);
+  TMonitor.Enter(FInternalLock);
+  try
+    if (AMid >= 0) and (AMid < FModels.Count) and (FModels[AMid] <> nil) and
+       (FModels[AMid].Tree.Nodes <> nil) then
+      FModels[AMid].AddDiag(MakeDiag('PPINT', LMsg, 0, 0, 0, 0))
+    else
+      FInternalDiags := FInternalDiags + [LMsg];
+  finally
+    TMonitor.Exit(FInternalLock);
+  end;
 end;
 
 procedure TPasSemaProject.SetBuffer(const APath, AText: string);
@@ -2373,7 +2441,7 @@ begin
   // Ask first, in PARALLEL and without touching anything: a worker reads other
   // models' frozen interface scopes and writes only its own slot.
   SetLength(LDone, Length(LCand));
-  ForEachIndex(High(LCand),
+  ForEachIndex(High(LCand), 'declared-pass',
     procedure(AIndex: Integer)
     var
       LPP: TPasPreprocessor;
@@ -2399,6 +2467,11 @@ begin
       finally
         LPP.Free;
       end;
+    end,
+    // This pass walks a CANDIDATE list, so the body index is not a unit id.
+    function(AIndex: Integer): Integer
+    begin
+      Result := LCand[AIndex];
     end);
   // Then commit, sequentially. FModels OWNS its items, so the assignment is
   // what frees the first-pass model — freeing it here as well is a double free.
@@ -2448,6 +2521,40 @@ end;
   misspelling is indistinguishable from a legitimate platform guard, and the
   guards outnumber it 31 to 0 on the RTL alone — so the argument bought
   nothing and cost a flood of normal code reported as findings.) }
+{ One PPENC per file that had to be RECOVERED to be read — see
+  TPasSourceManager.DecodeText. Every file of the unit is checked, includes as
+  well, since a `.inc` is where such a byte is most likely to hide.
+
+  Unlike the residual-$IF report this is NOT opt-in. A recovered file may not
+  say what its author wrote, and the failure mode when it goes wrong is not
+  subtle: it silently cost ~1700 downstream "undeclared identifier" reports on
+  the Alcinoe package with nothing in the log pointing back. }
+procedure TPasSemaProject.InjectEncodingDiags(ACount: Integer);
+var
+  LIdx, LF: Integer;
+  LM: TPasSemaModel;
+  LNote: string;
+  LParts: TArray<string>;
+begin
+  for LIdx := 0 to ACount - 1 do
+  begin
+    LM := FModels[LIdx];
+    if (LM = nil) or (LM.Tree.Source.FileNames = nil) then
+      Continue;
+    for LF := 0 to High(LM.Tree.Source.FileNames) do
+    begin
+      LNote := FSM.RecoveryNote(LM.Tree.Source.FileNames[LF]);
+      if LNote = '' then
+        Continue;
+      LParts := LNote.Split(['|']);
+      if Length(LParts) < 2 then
+        Continue;
+      LM.AddDiag(MakeDiag('PPENC',
+        Format(SPPENC_Recovered, [LParts[0], LParts[1]]), 0, LF, 1, 1));
+    end;
+  end;
+end;
+
 procedure TPasSemaProject.InjectGuessedIfDiags(ACount: Integer);
 var
   LIdx, LDIdx, LQIdx: Integer;
@@ -2609,7 +2716,7 @@ begin
   FSM.Prefetch(LTodo);
 
   SetLength(LDone, Length(LTodo));
-  ForEachIndex(High(LTodo),
+  ForEachIndex(High(LTodo), 'load',
     procedure(AIndex: Integer)
     var
       LPP: TPasPreprocessor;
@@ -2660,6 +2767,12 @@ begin
       finally
         LPP.Free;
       end;
+    end,
+    // This pass walks FILE PATHS — the models do not exist yet — so there is
+    // no unit to blame; -1 sends the note to the project-level list.
+    function(AIndex: Integer): Integer
+    begin
+      Result := -1;
     end);
 
   // Interface-only -> msIntfReady (later upgraded); full parse -> msFullReady.
@@ -6661,8 +6774,7 @@ begin
   for LIdx := 0 to ACount - 1 do
     FXNewExt[LIdx] := TDictionary<Integer, TPasExtRef>.Create;
   try
-    ForEachIndex(ACount - 1,
-      procedure(AIdx: Integer)
+    ForEachIndex(ACount - 1, 'cross-type',      procedure(AIdx: Integer)
       begin
         CrossType(AIdx);
       end);
@@ -6672,8 +6784,7 @@ begin
     // Only now are the bindings final — see RunVisibilityPass. No-op unless
     // ReportVisibility asked for it.
     if FReportVisibility then
-      ForEachIndex(ACount - 1,
-        procedure(AIdx: Integer)
+      ForEachIndex(ACount - 1, 'visibility',        procedure(AIdx: Integer)
         begin
           RunVisibilityPass(AIdx);
         end);
@@ -8496,8 +8607,7 @@ begin
     Inc(LRound);
     for LIdx := 0 to ACount - 1 do
       LPending[LIdx] := nil;
-    ForEachIndex(ACount - 1,
-      procedure(AIdx: Integer)
+    ForEachIndex(ACount - 1, 'declarations',      procedure(AIdx: Integer)
       begin
         CrossResolveDecl(AIdx, LPending[AIdx], LEmit);
       end);
@@ -8674,8 +8784,7 @@ begin
   RunDeclPass(ACount);
   SizeCrossWork(ACount);   // slots must exist before workers write their own
   SetLength(LPending, ACount);
-  ForEachIndex(ACount - 1,
-    procedure(AIdx: Integer)
+  ForEachIndex(ACount - 1, 'inherited',    procedure(AIdx: Integer)
     begin
       CrossResolveInherited(AIdx, LPending[AIdx]);
     end);
@@ -8835,8 +8944,7 @@ begin
     Inc(LRound);
     for LIdx := 0 to ACount - 1 do
       LPending[LIdx] := nil;
-    ForEachIndex(ACount - 1,
-      procedure(AIdx: Integer)
+    ForEachIndex(ACount - 1, 'with',      procedure(AIdx: Integer)
       begin
         CrossResolveWith(AIdx, LPending[AIdx], LEmit);
       end);
@@ -8986,14 +9094,14 @@ begin
   // A Declared() guard can only be answered now — see RunDeclaredPass. It may
   // load units the re-decided branch newly imports, so LN is taken after it.
   RunDeclaredPass(FModels.Count);
+  InjectEncodingDiags(FModels.Count);
   InjectGuessedIfDiags(FModels.Count);
   // Cross passes for EVERY loaded unit — same per-unit write discipline as
   // AnalyzeDirectory (each writes only its own model, reads others' frozen
   // Phase-1 state), so the same parallel farming is safe.
   LN := FModels.Count;
   PrepareDeclWork(LN);
-  ForEachIndex(LN - 1,
-    procedure(AIdx: Integer)
+  ForEachIndex(LN - 1, 'resolve',    procedure(AIdx: Integer)
     begin
       CrossResolve(AIdx);
     end);
@@ -9008,8 +9116,7 @@ begin
   // obvious from reading the code.
   RunWithPass(LN);
   Stage('with');
-  ForEachIndex(LN - 1,
-    procedure(AIdx: Integer)
+  ForEachIndex(LN - 1, 'cross-resolve',    procedure(AIdx: Integer)
     begin
       CheckCalls(AIdx);
       CheckConstraints(AIdx);
@@ -9069,13 +9176,13 @@ begin
   // See RunDeclaredPass. LN stays the directory snapshot: anything it pulls in
   // from the search paths belongs outside the E2003 set, like System itself.
   RunDeclaredPass(LN);
+  InjectEncodingDiags(LN);
   InjectGuessedIfDiags(LN);
   Stage('main+sys+resolve');
   // Cross passes per unit write ONLY their own model and read the others'
   // Phase-1 state (frozen once every unit is loaded) — safe to farm out.
   PrepareDeclWork(LN);
-  ForEachIndex(LN - 1,
-    procedure(AIdx: Integer)
+  ForEachIndex(LN - 1, 'resolve',    procedure(AIdx: Integer)
     begin
       CrossResolve(AIdx);
     end);
@@ -9090,8 +9197,7 @@ begin
   // obvious from reading the code.
   RunWithPass(LN);
   Stage('with');
-  ForEachIndex(LN - 1,
-    procedure(AIdx: Integer)
+  ForEachIndex(LN - 1, 'cross-resolve',    procedure(AIdx: Integer)
     begin
       CheckCalls(AIdx);
       CheckConstraints(AIdx);
@@ -9236,7 +9342,7 @@ var
       if LTo > High(LIds) then
         LTo := High(LIds);
       SetLength(LNew, LTo - LFrom + 1);
-      ForEachIndex(LTo - LFrom,
+      ForEachIndex(LTo - LFrom, 'full-parse',
         procedure(AIdx: Integer)
         var
           LDiags: TArray<TPasParseDiag>;
@@ -9255,9 +9361,20 @@ var
                 FModels[LIds[LFrom + AIdx]].Tree.Source, LDiags, False),
               False, FPlatform);
           except
-            on Exception do
-              LNew[AIdx] := nil;   // keep the interface snapshot
+            on E: Exception do
+            begin
+              // Keep the interface snapshot rather than losing the unit — but
+              // SAY SO. This used to swallow the exception outright, so a unit
+              // silently stayed interface-only and every body in it went
+              // unanalyzed with nothing in the log to explain why.
+              LNew[AIdx] := nil;
+              NoteInternalError(LIds[LFrom + AIdx], 'full-parse', E);
+            end;
           end;
+        end,
+        function(AIndex: Integer): Integer
+        begin
+          Result := LIds[LFrom + AIndex];
         end);
       for LI := 0 to LTo - LFrom do
         if LNew[LI] <> nil then
@@ -9356,12 +9473,12 @@ begin
       Exit;
     end;
     RunDeclaredPass(LN);   // see there; must precede every cross pass
+    InjectEncodingDiags(LN);
     InjectGuessedIfDiags(LN);
     LN := FModels.Count;   // it may have loaded newly-imported units
     Report('cross:xresolve');
     PrepareDeclWork(LN);
-    ForEachIndex(LN - 1,
-      procedure(AIdx: Integer)
+    ForEachIndex(LN - 1, 'resolve',      procedure(AIdx: Integer)
       begin
         CrossResolve(AIdx);
       end);
@@ -9382,8 +9499,7 @@ begin
       Exit;
     end;
     Report('cross:calls');
-    ForEachIndex(LN - 1,
-      procedure(AIdx: Integer)
+    ForEachIndex(LN - 1, 'cross-resolve',      procedure(AIdx: Integer)
       begin
         CheckCalls(AIdx);
         CheckConstraints(AIdx);

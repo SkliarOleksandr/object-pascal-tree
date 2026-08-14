@@ -64,6 +64,26 @@ const
   SE2515_NotCompatibleWith =
     'E2515 Type parameter ''%s'' is not compatible with type ''%s''';
 
+  { OUR OWN failures, not the source's — the two ways an analysis can go wrong
+    quietly and leave a host staring at a flood of downstream nonsense.
+
+    PPINT is an exception escaping a pass. Whatever it was working on is
+    incomplete, so every name that unit declared is missing and its importers
+    report rubbish; the one thing that must not happen is for that to be
+    silent.
+
+    PPENC is a file whose bytes did not decode under its own declared
+    encoding. We recover (see TPasSourceManager.DecodeText) rather than reject
+    it, because dcc accepts such files — but the recovered text is not
+    necessarily what the author wrote, so it is worth saying so. This is the
+    one that was missing: a malformed byte in a comment cost ~1700 false
+    reports across the Alcinoe package and nothing in the log pointed at it. }
+  SPPINT_PassFailed = 'Internal failure in the %s pass: %s: %s. This unit''s ' +
+    'analysis is incomplete, so diagnostics in units that import it may be ' +
+    'wrong.';
+  SPPENC_Recovered = 'File did not decode as %s and was recovered %s. Text ' +
+    'after the bad byte may differ from the source.';
+
 function MakeDiag(const ACode, AMsg: string; ADeclNode, AFileId, ALine,
   ACol: Integer): TSemaDiag;
 
@@ -102,6 +122,14 @@ begin
     // The source's: a conditional expression that does not parse. dcc would
     // reject it too wherever that branch is live.
     Result := 'Error'
+  else if ACode = 'PPINT' then
+    // Ours, and the loudest thing we can say: a pass failed, so this unit is
+    // only partly analyzed and its importers cannot be trusted.
+    Result := 'Error'
+  else if ACode = 'PPENC' then
+    // Ours: the file was recovered, not rejected. Worth seeing precisely
+    // because the alternative is silence.
+    Result := 'Warning'
   else if (ACode <> '') and CharInSet(UpCase(ACode[1]), ['W', 'H']) then
     Result := 'Warning'
   else

@@ -4680,6 +4680,14 @@ begin
     Ok('encoding: a malformed UTF-8 byte does not destroy the unit -- the '
       + 'declaration after it is still there',
       SymCountOf(LBad, 'tkept', skType) = 1);
+    // ...and it SAYS SO. Recovering quietly is what turned one bad byte into
+    // ~1700 downstream reports with nothing in the log pointing back.
+    Ok('encoding: the recovery is reported as PPENC, naming the encoding',
+      (DiagCount(LBad, 'PPENC') = 1) and DiagHasText(LBad, 'PPENC', 'UTF-8'));
+    Ok('encoding: PPENC labels as Warning (ours, recovered) while an internal '
+      + 'pass failure labels as Error',
+      (DiagSeverityLabel('PPENC') = 'Warning') and
+      (DiagSeverityLabel('PPINT') = 'Error'));
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

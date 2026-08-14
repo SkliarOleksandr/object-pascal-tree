@@ -45,12 +45,18 @@ type
     // not strings: the I/O workers must stay allocation-light (see Prefetch),
     // so decoding happens on the consumer's (per-core parse worker's) thread.
     FContentCache: TDictionary<string, TBytes>;
+    // Files whose bytes did not decode under their declared encoding and had
+    // to be recovered (path -> how). Guarded because decoding runs on the
+    // parse workers. Empty for every ordinary corpus.
+    FRecovered: TDictionary<string, string>;
+    FRecoveredLock: TObject;
     function TryFile(const ADir, AName: string; out AResolved: string): Boolean;
     function DirIndex(const ADir: string): TDictionary<string, string>;
     function FindUnitFile(const AUnitName, AFromDir: string;
       out AResolved: string): Boolean;
     function ReadFileText(const APath: string): string;
-    function DecodeText(const ABytes: TBytes): string;
+    function DecodeText(const ABytes: TBytes; const APath: string): string;
+    procedure NoteRecovered(const APath, AHow: string);
   public
     constructor Create(const ASearchPaths: TArray<string>);
     destructor Destroy; override;
@@ -93,6 +99,11 @@ type
       the referring file, the search paths, and the unit index. }
     function ResolveUnit(const AUnitName, AInPath, AFromFile: string;
       out AResolved: string): Boolean;
+    { How APath had to be RECOVERED to be read at all, or '' when it decoded
+      cleanly. A caller turns this into a diagnostic (PPENC): the text after
+      the bad byte may not be what the author wrote, and staying silent about
+      it once cost ~1700 downstream false reports. }
+    function RecoveryNote(const APath: string): string;
   end;
 
 implementation
@@ -107,10 +118,13 @@ constructor TPasSourceManager.Create(const ASearchPaths: TArray<string>);
 begin
   inherited Create;
   FSearchPaths := ASearchPaths;
+  FRecoveredLock := TObject.Create;
 end;
 
 destructor TPasSourceManager.Destroy;
 begin
+  FRecovered.Free;
+  FRecoveredLock.Free;
   FContentCache.Free;
   FDirIndexes.Free;
   FSearchIndex.Free;
@@ -387,7 +401,8 @@ end;
   parser produced a single node, the model came out EMPTY — and every unit
   that imported it lost every name it declared. One byte in a comment cost
   ~1700 false "undeclared identifier" reports on the Alcinoe package. }
-function TPasSourceManager.DecodeText(const ABytes: TBytes): string;
+function TPasSourceManager.DecodeText(const ABytes: TBytes;
+  const APath: string): string;
 var
   LEnc, LLenient: TEncoding;
   LStart: Integer;
@@ -407,10 +422,41 @@ begin
         finally
           LLenient.Free;
         end;
+        NoteRecovered(APath, 'UTF-8|leniently, substituting U+FFFD');
       end
       else
+      begin
         Result := TEncoding.ANSI.GetString(ABytes, LStart,
           Length(ABytes) - LStart);
+        NoteRecovered(APath, LEnc.EncodingName + '|by re-reading it as ANSI');
+      end;
+  end;
+end;
+
+procedure TPasSourceManager.NoteRecovered(const APath, AHow: string);
+begin
+  if FRecoveredLock = nil then
+    Exit;   // never nil after Create; the guard keeps a torn-down manager safe
+  TMonitor.Enter(FRecoveredLock);
+  try
+    if FRecovered = nil then
+      FRecovered := TDictionary<string, string>.Create;
+    FRecovered.AddOrSetValue(LowerCase(TPath.GetFullPath(APath)), AHow);
+  finally
+    TMonitor.Exit(FRecoveredLock);
+  end;
+end;
+
+function TPasSourceManager.RecoveryNote(const APath: string): string;
+begin
+  Result := '';
+  if (FRecovered = nil) or (FRecoveredLock = nil) then
+    Exit;
+  TMonitor.Enter(FRecoveredLock);
+  try
+    FRecovered.TryGetValue(LowerCase(TPath.GetFullPath(APath)), Result);
+  finally
+    TMonitor.Exit(FRecoveredLock);
   end;
 end;
 
@@ -418,7 +464,7 @@ end;
 // LoadText's direct-from-disk path.
 function TPasSourceManager.ReadFileText(const APath: string): string;
 begin
-  Result := DecodeText(TFile.ReadAllBytes(APath));
+  Result := DecodeText(TFile.ReadAllBytes(APath), APath);
 end;
 
 procedure TPasSourceManager.Prefetch(const APaths: TArray<string>);
@@ -463,7 +509,7 @@ begin
   if (FBuffers <> nil) and FBuffers.TryGetValue(LKey, Result) then
     Exit;
   if (FContentCache <> nil) and FContentCache.TryGetValue(LKey, LRaw) then
-    Exit(DecodeText(LRaw));
+    Exit(DecodeText(LRaw, APath));
   Result := ReadFileText(APath);
 end;
 
