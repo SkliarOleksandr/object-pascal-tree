@@ -368,7 +368,8 @@ type
     function IsGenericTypeSym(AMid, ASym: Integer): Boolean;
     function ClassRefTargetX(const AX: TSemaXType): TSemaXType;
     function IsDynArrayTypeX(const AX: TSemaXType): Boolean;
-    function ResolveTypeExprNested(AId, ANode: Integer): TSemaXType;
+    function ResolveTypeExprNested(AId, ANode: Integer;
+      ADepth: Integer = 0): TSemaXType;
     procedure BuildHelperMap;
     procedure ClearHelperIdx;
     function HelperAncestorX(AMid, ASym: Integer): TSemaXType;
@@ -4656,14 +4657,29 @@ end;
   Kept OUT of ResolveTypeExpr itself, which is on the BindTypesX/CrossType hot
   path: callers reach this only after the plain lookup has already missed.
 
-  The lookup is the qualifier's OWN members, deliberately NOT FindMemberX. This
-  is called FROM FindMemberX's ancestor walk, and `TFoo = class(TFoo.TBar)` would
-  then recurse until the stack ran out. A nested type inherited through the
-  qualifier's ancestor is the declaration-site case CrossResolveDecl covers. }
-function TPasSemaProject.ResolveTypeExprNested(AId, ANode: Integer): TSemaXType;
+  The lookup is the qualifier's own members and then its ANCESTORS' — a nested
+  type is inherited like any other member (11.4.1), and the qualifier need not be
+  the class that declares it:
+
+    TTextSettings = class(TALBaseEdit.TDisabledStateStyle.TTextSettings)  // Alcinoe
+
+  where TDisabledStateStyle declares no TTextSettings at all — it comes from its
+  own ancestor TBaseStateStyle. Costing three false E2003 on `Create`, because a
+  heritage miss leaves the DESCENDANT with no ancestry: TObject's constructor is
+  then out of reach and every member the class inherits reads as undeclared.
+
+  Still deliberately NOT FindMemberX: this is called FROM FindMemberX's ancestor
+  walk, so `TFoo = class(TFoo.TBar)` — where finding TBar needs TFoo's ancestry,
+  which is the very clause being resolved — would recurse until the stack ran
+  out. ADepth caps the ancestor hops instead, and only that hop spends it: the
+  qualifier recursion below walks to a strictly smaller node and is bounded by
+  the chain. }
+function TPasSemaProject.ResolveTypeExprNested(AId, ANode: Integer;
+  ADepth: Integer): TSemaXType;
 var
   LM, LQM: TPasSemaModel;
-  LBase, LName, LScope, LFound, LDef, LDepth: Integer;
+  LBase, LName, LScope, LFound, LDef, LDepth, LChild: Integer;
+  LNameLower: string;
   LQ: TSemaXType;
 begin
   Result := ResolveTypeExpr(AId, ANode);
@@ -4682,9 +4698,10 @@ begin
   if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) or
      (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) then
     Exit;
-  LQ := ResolveTypeExprNested(AId, LBase);
-  // Alias hops chased like everywhere else here, depth-capped for a malformed
-  // chain rather than a real one.
+  LQ := ResolveTypeExprNested(AId, LBase, ADepth);
+  LNameLower := LM.Tree.NodeNameLower(LName);
+  // Alias and ancestor hops chased like everywhere else here, depth-capped for a
+  // malformed chain rather than a real one.
   for LDepth := 1 to 32 do
   begin
     if not XValid(LQ) then
@@ -4693,15 +4710,36 @@ begin
     LScope := LQM.Symbols[LQ.Sym].MemberScope;
     if LScope <> NIL_SCOPE then
     begin
-      LFound := LQM.FindLocalDeep(LScope, LM.Tree.NodeNameLower(LName));
+      LFound := LQM.FindLocalDeep(LScope, LNameLower);
       if (LFound <> NIL_SYM) and (LQM.Symbols[LFound].Kind = skType) then
         Exit(XPlain(LQ.UnitId, LFound));
     end;
     LDef := TypeDefNodeOf(LQ.UnitId, LQ.Sym);
-    if (LDef = NIL_NODE) or not (LQM.Tree.Nodes[LDef].Kind in
-       [nkIdent, nkMember, nkTypeArgs]) then
+    if LDef = NIL_NODE then
       Exit;
-    LQ := ResolveTypeExpr(LQ.UnitId, LDef);
+    case LQM.Tree.Nodes[LDef].Kind of
+      nkIdent, nkMember, nkTypeArgs:
+        LQ := ResolveTypeExpr(LQ.UnitId, LDef);   // alias link
+      nkClassType, nkInterfaceType, nkRecordType, nkObjectType:
+        begin
+          // Up to the qualifier's ANCESTOR and ask again. The heritage clause is
+          // the leading run of type references and the FIRST is the ancestor —
+          // the same convention AncestorOfX and FindMemberX use. No heritage
+          // clause ends the walk: the implicit TObject/IInterface declare no
+          // nested types, so there is nothing there to find.
+          if ADepth >= 4 then
+            Exit;
+          LChild := LQM.Tree.Nodes[LDef].FirstChild;
+          while (LChild <> NIL_NODE) and not (LQM.Tree.Nodes[LChild].Kind in
+            [nkIdent, nkMember, nkTypeArgs]) do
+            LChild := LQM.Tree.Nodes[LChild].NextSibling;
+          if LChild = NIL_NODE then
+            Exit;
+          LQ := ResolveTypeExprNested(LQ.UnitId, LChild, ADepth + 1);
+        end;
+    else
+      Exit;
+    end;
   end;
 end;
 

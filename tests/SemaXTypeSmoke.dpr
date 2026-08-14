@@ -189,6 +189,59 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // A nested type named through an OUTER type that does not declare it — it is
+  // INHERITED by the qualifier (11.4.1). Alcinoe's
+  // `class(TALBaseEdit.TDisabledStateStyle.TTextSettings)`, where
+  // TDisabledStateStyle declares no TTextSettings and its ancestor
+  // TBaseStateStyle does. ResolveTypeExprNested searched the qualifier's OWN
+  // members only, so the heritage reference resolved to nothing and the
+  // descendant was left with NO ancestry — three false E2003 on `Create`, all
+  // of them a dot away from the actual cause. TNqCtl is the control: same
+  // shape with the segment declared ON the qualifier, which always worked.
+  UNIT_NQ1 =
+    'unit NQ1;'#10'interface'#10 +
+    'type'#10 +
+    '  TNqBase = class'#10 +
+    '  public'#10 +
+    '    type'#10 +
+    '      TNqInner = class'#10 +
+    '      public'#10 +
+    '        type'#10 +
+    '          TNqDeep = class'#10 +
+    '          public'#10 +
+    '            FTag: Integer;'#10 +
+    '            constructor Create(const P: Integer);'#10 +
+    '          end;'#10 +
+    '      end;'#10 +
+    '      TNqSub = class(TNqInner)'#10 +   // declares no TNqDeep of its own
+    '      end;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'constructor TNqBase.TNqInner.TNqDeep.Create(const P: Integer);'#10 +
+    'begin FTag := P; end;'#10 +
+    'end.'#10;
+
+  UNIT_NQ2 =
+    'unit NQ2;'#10'interface'#10'uses NQ1;'#10 +
+    'type'#10 +
+    '  TNqMine = class(TNqBase.TNqSub.TNqDeep)'#10 +
+    '  end;'#10 +
+    '  TNqCtl = class(TNqBase.TNqInner.TNqDeep)'#10 +
+    '  end;'#10 +
+    'var'#10 +
+    '  GNqMine: TNqMine;'#10 +
+    '  GNqCtl: TNqCtl;'#10 +
+    'implementation'#10 +
+    'procedure UseNq;'#10 +
+    'var'#10 +
+    '  LI: Integer;'#10 +
+    'begin'#10 +
+    '  LI := GNqMine.FTag;'#10 +
+    '  LI := GNqCtl.FTag;'#10 +
+    '  GNqMine := TNqMine.Create(LI);'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // with-targets whose TYPE lives in another unit — the shapes Phase 1 cannot
   // resolve on its own, so only the cross-unit pass can. Mirrors
   // System.ObjAuto (`with TVarData(X) do`) and System.Variants (`with P^ do`,
@@ -1043,7 +1096,7 @@ end;
 
 var
   LDir: string;
-  LU, LV, LH, LW, LQ, LR, LB, LC, LE, LG: TPasSemaModel;
+  LU, LV, LH, LW, LQ, LR, LB, LC, LE, LG, LN: TPasSemaModel;
 begin
   GCounter.Init;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype');
@@ -1091,6 +1144,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'IN2.pas'), UNIT_IN2);
   TFile.WriteAllText(TPath.Combine(LDir, 'XP.pas'), UNIT_XP);
   TFile.WriteAllText(TPath.Combine(LDir, 'XQ.pas'), UNIT_XQ);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NQ1.pas'), UNIT_NQ1);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NQ2.pas'), UNIT_NQ2);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -1201,6 +1256,20 @@ begin
     // so this cannot pass by merely staying quiet.
     Eq('a property specifier binds to the ANCESTOR''s accessor',
       XTypeOf(LQ, 'GetWordProp'), 'Boolean');
+
+    // ---- a nested type named through a qualifier that INHERITS it ----
+    LN := ModelByName('nq2');
+    Ok('NQ2 loaded', Assigned(LN));
+    Ok('NQ2: no diags at all', Length(LN.Diags) = 0);
+    // Positive both ways, so neither can pass by staying silent: the field is
+    // reached only if the heritage resolved, and the constructor call only if
+    // the resulting class has the ancestry that declares Create.
+    Eq('11.4.1: a nested type through the qualifier''s ANCESTOR',
+      XTypeOf(LN, 'GNqMine.FTag'), 'Integer');
+    Eq('...and the class it produces has its ancestor''s constructor',
+      XTypeOf(LN, 'TNqMine.Create'), 'TNqMine');
+    Eq('control: the qualifier DECLARES the segment',
+      XTypeOf(LN, 'GNqCtl.FTag'), 'Integer');
 
     // ---- with-targets whose type lives in another unit ----
     // Cast, deref of a variable, deref through an alias chain, deref of a
