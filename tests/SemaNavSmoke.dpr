@@ -1,4 +1,4 @@
-program SemaNavSmoke;
+﻿program SemaNavSmoke;
 
 { Go-to-declaration smoke tests: fixture units in a temp dir, then IdentAt +
   ResolveDecl checks — same-unit locals, cross-unit types, cross-unit MEMBER

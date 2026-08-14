@@ -104,6 +104,16 @@ type
       the bad byte may not be what the author wrote, and staying silent about
       it once cost ~1700 downstream false reports. }
     function RecoveryNote(const APath: string): string;
+    { The decode itself, without an instance. Exposed because a HOST must show
+      the reader exactly the text the analysis ran on: a separate loader is a
+      second source of truth, and the two disagree precisely on the files that
+      are hardest to read. `TStrings.LoadFromFile` raises on a malformed byte
+      (`No mapping for the Unicode character exists in the target multi-byte
+      code page`), so the demo used to display that message INSTEAD of the
+      unit — the one file where seeing the source actually mattered. }
+    class function DecodeBytes(const ABytes: TBytes;
+      out AHow: string): string; static;
+    class function LoadFileTolerant(const APath: string): string; static;
   end;
 
 implementation
@@ -401,12 +411,13 @@ end;
   parser produced a single node, the model came out EMPTY — and every unit
   that imported it lost every name it declared. One byte in a comment cost
   ~1700 false "undeclared identifier" reports on the Alcinoe package. }
-function TPasSourceManager.DecodeText(const ABytes: TBytes;
-  const APath: string): string;
+class function TPasSourceManager.DecodeBytes(const ABytes: TBytes;
+  out AHow: string): string;
 var
   LEnc, LLenient: TEncoding;
   LStart: Integer;
 begin
+  AHow := '';
   LEnc := nil;
   LStart := TEncoding.GetBufferEncoding(ABytes, LEnc, TEncoding.Default);
   try
@@ -422,15 +433,32 @@ begin
         finally
           LLenient.Free;
         end;
-        NoteRecovered(APath, 'UTF-8|leniently, substituting U+FFFD');
+        AHow := 'UTF-8|leniently, substituting U+FFFD';
       end
       else
       begin
         Result := TEncoding.ANSI.GetString(ABytes, LStart,
           Length(ABytes) - LStart);
-        NoteRecovered(APath, LEnc.EncodingName + '|by re-reading it as ANSI');
+        AHow := LEnc.EncodingName + '|by re-reading it as ANSI';
       end;
   end;
+end;
+
+class function TPasSourceManager.LoadFileTolerant(const APath: string): string;
+var
+  LHow: string;
+begin
+  Result := DecodeBytes(TFile.ReadAllBytes(APath), LHow);
+end;
+
+function TPasSourceManager.DecodeText(const ABytes: TBytes;
+  const APath: string): string;
+var
+  LHow: string;
+begin
+  Result := DecodeBytes(ABytes, LHow);
+  if LHow <> '' then
+    NoteRecovered(APath, LHow);
 end;
 
 procedure TPasSourceManager.NoteRecovered(const APath, AHow: string);

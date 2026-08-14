@@ -21,7 +21,8 @@ uses
   SynEdit, SynEditTypes, SynEditHighlighter, SynHighlighterJSON, SynFunc,
   SynHighlighterPas,
   VirtualTrees, VirtualTrees.Types,
-  PasTree.Types, PasTree.Platforms, PasTree.Preprocessor, PasTree.Ast,
+  PasTree.Types, PasTree.Platforms, PasTree.SourceManager, PasTree.Preprocessor,
+  PasTree.Ast,
   PasTree.Ast.Json,
   PasTree.Parser, PasTree.Project, PasTree.DProj,
   PasTree.Sema.Diagnostics, PasTree.Sema.Model, PasTree.Sema.Builtins,
@@ -1658,7 +1659,16 @@ begin
   FLoadingFile := True;   // don't let the programmatic load arm the reparse timer
   try
     try
-      Result.Lines.LoadFromFile(APath);
+      // The ANALYSIS's own loader, not TStrings.LoadFromFile — for the same
+      // reason ApplyHighlighterContext exists a few lines up: two loaders are
+      // two sources of truth, and they disagree exactly on the files that are
+      // hardest to read. LoadFromFile RAISES on a malformed byte ("No mapping
+      // for the Unicode character exists in the target multi-byte code page"),
+      // so this tab used to show that message instead of the unit — on the one
+      // file where reading the source mattered most. Now the editor shows the
+      // recovered text character-for-character as the analyzer sees it, which
+      // also keeps every reported line/column pointing at the right place.
+      Result.Text := TPasSourceManager.LoadFileTolerant(APath);
     except
       on E: Exception do
         Result.Text := '{ could not load: ' + E.Message + ' }';
