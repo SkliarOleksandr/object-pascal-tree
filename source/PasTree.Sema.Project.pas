@@ -1489,7 +1489,6 @@ begin
     Exit;
   // Children are [tag name] tag-type branch... — the name is there only when
   // the SECOND child is not already a branch.
-  LTagType := LChild;
   if (LM.Tree.Nodes[LChild].Kind = nkIdent) and
      (LM.Tree.Nodes[LChild].NextSibling <> NIL_NODE) and
      (LM.Tree.Nodes[LM.Tree.Nodes[LChild].NextSibling].Kind <>
@@ -7019,7 +7018,24 @@ end;
   which for `A.Create` is the trailing segment and for a bare `Foo` the ident
   itself. AId's own model is written directly; another model's binding goes into
   the caller's deferred dictionary, because the cross pass runs one worker per
-  model and only the owner may touch a model's ExtRefMap during it. }
+  model and only the owner may touch a model's ExtRefMap during it.
+
+  The same-model branch also REMOVES any ExtRefMap entry already sitting at
+  LName — needed because a bare call to an INHERITED member (`Seek(0, soEnd)`
+  in TMemoryStream.SetSize, System.Classes.pas) is bound TWICE, by two passes
+  that run in a fixed order and neither knows about the other's node: first
+  CrossResolveInherited's FindMemberX, which matches by NAME only (no argument
+  types) and commits straight to ExtRefMap even for a same-unit hit (its own
+  commit clears RefMap first, so nothing is wrong on ITS side); then, only if
+  the callee is a routine, CrossType's OWN overload-precise SelectCallTarget
+  runs on the SAME node and calls RepointCallee — which used to write RefMap
+  and stop, leaving the FIRST pass's ExtRefMap entry standing right beside it.
+  With one overload the two passes agree, so both maps end up holding the
+  identical (unit, symbol) — invisible to every consumer that reads "RefMap,
+  falling back to ExtRefMap" (a single answer either way), but a project-wide
+  scan that reads BOTH maps as independent evidence (Find References) counted
+  the one real reference twice. Removing the stale entry restores the
+  invariant every other caller already assumed held: one node, one map. }
 procedure TPasSemaProject.RepointCallee(AModel: TPasSemaModel;
   ACalleeNode, AMid, ASym: Integer;
   ANewExt: TDictionary<Integer, TPasExtRef>);
@@ -7040,6 +7056,7 @@ begin
   if AModel = FModels[AMid] then
   begin
     AModel.RefMap[LName] := ASym;
+    AModel.ExtRefMap.Remove(LName);
     Exit;
   end;
   AModel.RefMap[LName] := NIL_SYM;
