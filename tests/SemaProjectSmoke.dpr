@@ -4056,12 +4056,14 @@ begin
     '  TBigEnum = (beA, beB);'#10 +   // same unit, forced to 4 by the state
     '{$MINENUMSIZE 1}'#10 +
     '  TPair = record A, B: Pointer; end;'#10 +
-    // An old-style `object` field is what the layout walk still refuses;
-    // mixed field sizes, arrays, strings, sets, variants, file types, inline
-    // enums and class-var sections are all computed for real now -- see the
-    // layout fixture.
-    '  TObjOra = object X: Integer; end;'#10 +
-    '  TMixedOra = record A: Byte; F: TObjOra; end;'#10 +
+    // A generic actual that MENTIONS an open parameter inside a compound is
+    // what the layout walk still refuses; records, arrays, strings, sets,
+    // variants, file types, inline enums, class-var sections, plain generic
+    // instantiations and old-style objects are all computed for real now --
+    // see the layout fixture.
+    '  TGOra<T> = record V: T; end;'#10 +
+    '  TOpenOra<T> = record V: TGOra<TGOra<T>>; end;'#10 +
+    '  TMixedOra = TOpenOra<Integer>;'#10 +
     'var'#10 +
     '  GTable: array[0..2] of Integer;'#10 +
     '{$IF KAlias}'#10 +
@@ -4166,9 +4168,10 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitExotic.pas'),
     'unit UnitExotic;'#10'interface'#10 +
     'type'#10 +
-    // An old-style `object` field: a layout shape the walk refuses to model.
-    '  TObjEx = object X: Integer; end;'#10 +
-    '  TMixed = record A: Byte; F: TObjEx; end;'#10 +
+    // A generic actual over an OPEN parameter: the shape the walk refuses.
+    '  TGEx<T> = record V: T; end;'#10 +
+    '  TOpenEx<T> = record V: TGEx<TGEx<T>>; end;'#10 +
+    '  TMixed = TOpenEx<Integer>;'#10 +
     'const'#10 +
     '  KStr = ''text'';'#10 +
     'implementation'#10 +
@@ -4329,12 +4332,34 @@ begin
     '  TW02 = record class var Q: Integer; A: Byte; end;'#10 +     // 0, runs on
     '  TW03 = record class var Q: Int64; var A: Byte; end;'#10 +   // 1
     '  TW04 = record A: Byte; class var Q: Int64; var B: Byte; end;'#10 + // 2
-    // Still NOT modelled. These must REFUSE, not guess -- each guard is
-    // written so that a wrong answer of any kind declares the type.
-    '  TGen<T> = record V: T; end;'#10 +
-    '  TArrF = record A: Byte; F: TGen<Integer>; end;'#10 +  // generic inst
-    '  TObjOld = object X: Integer; end;'#10 +
-    '  TStrF = record A: Byte; F: TObjOld; end;'#10 +        // old-style object
+    // GENERIC instantiations: the body is laid out with the parameters bound
+    // to the actuals, so a parameter in any position -- a field, an array
+    // element, a nested instantiation -- resolves.
+    '  TGA<T> = record V: T; end;'#10 +
+    '  TGB<T, U> = record V: T; W: U; end;'#10 +           // ONE group, 2 names
+    '  TGC<T> = record V: array[0..2] of T; end;'#10 +
+    '  TGD<T> = record V: TGA<T>; end;'#10 +               // nested, open arg
+    '  TN01 = TGA<Integer>;'#10 +                          // 4
+    '  TN02 = TGB<Byte, Int64>;'#10 +                      // 16
+    '  TN03 = TGC<Integer>;'#10 +                          // 12
+    '  TN04 = TGD<Int64>;'#10 +                            // 8
+    '  TN05 = record X: Byte; F: TGA<Int64>; end;'#10 +    // 16
+    // Old-style OBJECT types: fields lay out like a record from where the
+    // ancestor ended, and a VMT pointer is appended -- pointer-aligned, but
+    // without raising the type`s own alignment -- only where a virtual member
+    // is INTRODUCED.
+    '  TO01 = object A: Integer; end;'#10 +                // 4
+    '  TO02 = object A: Byte; B: Int64; end;'#10 +         // 16
+    '  TO03 = object(TO01) B: Integer; end;'#10 +          // 8
+    '  TO04 = packed object A: Byte; B: Int64; end;'#10 +  // 9
+    '  TO05 = object end;'#10 +                            // 0
+    '  TO06 = record X: Byte; F: TO02; end;'#10 +          // 24
+    // Still NOT modelled, and the guard is written so that a wrong answer of
+    // any kind declares the type. An actual that IS an enclosing parameter is
+    // carried through (TGD above); one that merely MENTIONS one inside a
+    // compound is refused rather than half-substituted.
+    '  TOpenG<T> = record V: TGA<TGA<T>>; end;'#10 +
+    '  TArrF = TOpenG<Integer>;'#10 +
     '{$IF SizeOf(TR01) = 16}type M01 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TR03) = 8}type M03 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TR05) = 6}type M05 = class end;{$IFEND}'#10 +
@@ -4400,8 +4425,18 @@ begin
     '{$IF SizeOf(TW02) = 0}type MC02x = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TW03) = 1}type MC03x = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TW04) = 2}type MC04x = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TN01) = 4}type MN01 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TN02) = 16}type MN02 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TN03) = 12}type MN03 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TN04) = 8}type MN04 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TN05) = 16}type MN05 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TO01) = 4}type MO01 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TO02) = 16}type MO02 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TO03) = 8}type MO03 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TO04) = 9}type MO04 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TO05) = 0}type MO05 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TO06) = 24}type MO06 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TArrF) <> 0}type MArr = class end;{$IFEND}'#10 +
-    '{$IF SizeOf(TStrF) <> 0}type MStr = class end;{$IFEND}'#10 +
     'implementation'#10'end.'#10);
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -4459,14 +4494,25 @@ begin
     Ok('1.3.2 layout: inline anonymous ENUMS (explicit values sized by the ' +
       'largest) and CLASS VAR sections, which run on and contribute neither ' +
       'size nor alignment (missing:' + LMissing + ')', LMissing = '');
-    Ok('1.3.2 layout: a GENERIC INSTANTIATION field still refuses',
+    LMissing := '';
+    for var LM in ['mn01', 'mn02', 'mn03', 'mn04', 'mn05'] do
+      if SymCountOf(LLay, LM, skType) <> 1 then
+        LMissing := LMissing + ' ' + LM;
+    Ok('1.3.2 layout: GENERIC instantiations -- a parameter as a field, as an ' +
+      'array element, across a two-name group, and passed on to a nested ' +
+      'instantiation (missing:' + LMissing + ')', LMissing = '');
+    LMissing := '';
+    for var LM in ['mo01', 'mo02', 'mo03', 'mo04', 'mo05', 'mo06'] do
+      if SymCountOf(LLay, LM, skType) <> 1 then
+        LMissing := LMissing + ' ' + LM;
+    Ok('1.3.2 layout: old-style OBJECT types -- ancestor storage, packing, ' +
+      'an empty one, and as a field (missing:' + LMissing + ')',
+      LMissing = '');
+    Ok('1.3.2 layout: a compound actual over an OPEN parameter still refuses',
       (SymCountOf(LLay, 'marr', skType) = 0) and
       DiagHasText(LLay, 'PPIF', 'SizeOf(TArrF)'));
-    Ok('1.3.2 layout: an old-style `object` field refuses too',
-      (SymCountOf(LLay, 'mstr', skType) = 0) and
-      DiagHasText(LLay, 'PPIF', 'SizeOf(TStrF)'));
-    Ok('1.3.2 layout: the two refusals are the ONLY residuals',
-      DiagCount(LLay, 'PPIF') = 2);
+    Ok('1.3.2 layout: that refusal is the ONLY residual -- everything else in '
+      + 'this fixture sized for real', DiagCount(LLay, 'PPIF') = 1);
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

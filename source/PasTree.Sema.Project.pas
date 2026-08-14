@@ -33,6 +33,18 @@ uses
   PasTree.Sema.Model;
 
 type
+  // One generic type PARAMETER bound to an actual, for the SizeOf layout walk
+  // only (the general instantiation machinery is TSemaInstance below). The
+  // argument is kept as a (model, type-node) pair rather than a resolved
+  // symbol because an argument may be any type expression — `TG<array[0..2]
+  // of Byte>` — and the walk already knows how to size a node.
+  TPasSubstEntry = record
+    Name: string;     // lower-case parameter name
+    Mid: Integer;     // model the argument node lives in
+    Node: Integer;    // the argument's type node
+  end;
+  TPasSubst = TArray<TPasSubstEntry>;
+
   // One generic instantiation: a generic type symbol + positional actual
   // args. Args may themselves reference skGenericParam symbols (an "open"
   // instantiation inside another generic's body, e.g. TEnumerator<T> inside
@@ -302,14 +314,17 @@ type
       out AMid, ASym: Integer): Boolean;
     function OracleSizeOf(AMid, ASym, ADepth: Integer;
       out ABytes: Double): Boolean;
-    function OracleLayout(AMid, ASym, ADepth: Integer; out ABytes: Double;
-      out AAlign: Integer): Boolean;
-    function OracleFieldLayout(AMid, ATypeNode, ADepth: Integer;
+    function OracleLayout(AMid, ASym, ADepth: Integer; const ASubst: TPasSubst;
       out ABytes: Double; out AAlign: Integer): Boolean;
+    function OracleFieldLayout(AMid, ATypeNode, ADepth: Integer;
+      const ASubst: TPasSubst; out ABytes: Double;
+      out AAlign: Integer): Boolean;
     function OracleRecordLayout(AMid, ADefNode, ADepth: Integer;
+      const ASubst: TPasSubst; AStart, AStartAlign: Integer;
       out ABytes: Double; out AAlign: Integer): Boolean;
     function OracleArrayLayout(AMid, ADefNode, ADepth: Integer;
-      out ABytes: Double; out AAlign: Integer): Boolean;
+      const ASubst: TPasSubst; out ABytes: Double;
+      out AAlign: Integer): Boolean;
     function OracleConstExpr(AMid, ANode, ADepth: Integer;
       out ANum: Double): Boolean;
     function OracleOrdinalCount(AMid, ANode, ADepth: Integer;
@@ -321,7 +336,15 @@ type
     function OracleEnumLayout(AMid, ADefNode, ADepth: Integer;
       out ABytes: Double; out AAlign: Integer): Boolean;
     function OracleVariantLayout(AMid, APartNode, ADepth, ACap,
-      AStart: Integer; out AEnd, AAlign: Integer): Boolean;
+      AStart: Integer; const ASubst: TPasSubst;
+      out AEnd, AAlign: Integer): Boolean;
+    function OracleObjectLayout(AMid, ADefNode, ADepth: Integer;
+      const ASubst: TPasSubst; out ABytes: Double;
+      out AAlign: Integer): Boolean;
+    function OracleObjectHasVmt(AMid, ADefNode, ADepth: Integer): Boolean;
+    function OracleGenericLayout(AMid, AArgsNode, ADepth: Integer;
+      const ASubst: TPasSubst; out ABytes: Double;
+      out AAlign: Integer): Boolean;
     function OracleLength(AMid, ASym: Integer; out ALen: Double): Boolean;
     function SymbolQueryFor(AId: Integer): TPasCondSymbolQuery;
     function DeclTypeX(AMid, ASym: Integer): TSemaXType;
@@ -1139,7 +1162,7 @@ function TPasSemaProject.OracleSizeOf(AMid, ASym, ADepth: Integer;
 var
   LAlign: Integer;
 begin
-  Result := OracleLayout(AMid, ASym, ADepth, ABytes, LAlign);
+  Result := OracleLayout(AMid, ASym, ADepth, nil, ABytes, LAlign);
 end;
 
 { The size AND alignment of a named type. Alignment has to travel with size
@@ -1151,7 +1174,7 @@ end;
   type's own size up to 8, and Extended is the one that separates the two
   (10 bytes on Win32, aligned to 8). }
 function TPasSemaProject.OracleLayout(AMid, ASym, ADepth: Integer;
-  out ABytes: Double; out AAlign: Integer): Boolean;
+  const ASubst: TPasSubst; out ABytes: Double; out AAlign: Integer): Boolean;
 var
   LM: TPasSemaModel;
   LDef: Integer;
@@ -1185,7 +1208,7 @@ begin
     // Everything else — a record, an array, `string[N]`, a pointer, a class,
     // an alias — is the same question a FIELD asks, so one dispatcher answers
     // both and the two cannot drift apart.
-    Result := OracleFieldLayout(AMid, LDef, ADepth, ABytes, AAlign);
+    Result := OracleFieldLayout(AMid, LDef, ADepth, ASubst, ABytes, AAlign);
   end;
 end;
 
@@ -1202,6 +1225,7 @@ end;
   REFUSES rather than guessing, which leaves the caller's residual-$IF
   diagnostic standing. }
 function TPasSemaProject.OracleRecordLayout(AMid, ADefNode, ADepth: Integer;
+  const ASubst: TPasSubst; AStart, AStartAlign: Integer;
   out ABytes: Double; out AAlign: Integer): Boolean;
 var
   LM: TPasSemaModel;
@@ -1226,7 +1250,7 @@ var
       LSub := LM.Tree.Nodes[LSub].NextSibling;
     end;
     if (LCount = 0) or
-       not OracleFieldLayout(AMid, LSub, ADepth, LOneSize, LOneAlign) then
+       not OracleFieldLayout(AMid, LSub, ADepth, ASubst, LOneSize, LOneAlign) then
       Exit(False);
     LUse := Min(LOneAlign, LCap);
     if LUse > LMaxAlign then
@@ -1269,19 +1293,23 @@ begin
      SameText(LM.Tree.Source.VisibleText(
        LM.Tree.Nodes[ADefNode].FirstToken - 1), 'packed') then
     LCap := 1;
-  LOffset := 0;
-  LMaxAlign := 1;
+  // An old-style `object` starts where its ANCESTOR's storage ended and
+  // inherits its alignment; a record always starts at zero.
+  LOffset := AStart;
+  LMaxAlign := AStartAlign;
   LChild := LM.Tree.Nodes[ADefNode].FirstChild;
   while LChild <> NIL_NODE do
   begin
     case LM.Tree.Nodes[LChild].Kind of
+      nkIdent, nkMember, nkTypeArgs:
+        ;   // an object's ancestor reference; the caller already placed it
       nkVarDecl:
         if not PlaceOneDecl(LChild) then
           Exit;
       nkVariantPart:
         begin
           var LVarAlign: Integer;
-          if not OracleVariantLayout(AMid, LChild, ADepth, LCap, LOffset,
+          if not OracleVariantLayout(AMid, LChild, ADepth, LCap, LOffset, ASubst,
                LOffset, LVarAlign) then
             Exit;
           if LVarAlign > LMaxAlign then
@@ -1332,7 +1360,8 @@ end;
      starts at 1 and the NESTED one starts at 8).
   3. the part's extent is the furthest any branch reaches. }
 function TPasSemaProject.OracleVariantLayout(AMid, APartNode, ADepth, ACap,
-  AStart: Integer; out AEnd, AAlign: Integer): Boolean;
+  AStart: Integer; const ASubst: TPasSubst;
+  out AEnd, AAlign: Integer): Boolean;
 var
   LM: TPasSemaModel;
   LChild, LTagType, LBranch, LSub, LCount, LBase, LPos, LNested: Integer;
@@ -1362,7 +1391,7 @@ var
             begin
               while LM.Tree.Nodes[LT].NextSibling <> NIL_NODE do
                 LT := LM.Tree.Nodes[LT].NextSibling;
-              if OracleFieldLayout(AMid, LT, ADepth, LS, LA) then
+              if OracleFieldLayout(AMid, LT, ADepth, ASubst, LS, LA) then
               begin
                 if Min(LA, ACap) > Result then
                   Result := Min(LA, ACap);
@@ -1398,7 +1427,7 @@ begin
   begin
     // A NAMED tag: it is a real field. Place it, but keep it out of AAlign.
     LTagType := LM.Tree.Nodes[LChild].NextSibling;
-    if not OracleFieldLayout(AMid, LTagType, ADepth, LSize, LOneAlign) then
+    if not OracleFieldLayout(AMid, LTagType, ADepth, ASubst, LSize, LOneAlign) then
       Exit;
     LUse := Min(LOneAlign, ACap);
     AEnd := ((AEnd + LUse - 1) div LUse) * LUse + Trunc(LSize);
@@ -1433,7 +1462,7 @@ begin
                 LNested := LM.Tree.Nodes[LNested].NextSibling;
               end;
               if (LCount = 0) or
-                 not OracleFieldLayout(AMid, LNested, ADepth, LSize,
+                 not OracleFieldLayout(AMid, LNested, ADepth, ASubst, LSize,
                    LOneAlign) then
                 Exit;
               LUse := Min(LOneAlign, ACap);
@@ -1445,7 +1474,7 @@ begin
             end;
           nkVariantPart:
             begin
-              if not OracleVariantLayout(AMid, LSub, ADepth + 1, ACap, LPos,
+              if not OracleVariantLayout(AMid, LSub, ADepth + 1, ACap, LPos, ASubst,
                    LNestEnd, LNestAlign) then
                 Exit;
               LPos := LNestEnd;
@@ -1474,7 +1503,7 @@ end;
   `array[0..1, 0..2] of Integer` and `array[0..1] of array[0..2] of Integer`
   fall out of the same walk — both measured at 24. }
 function TPasSemaProject.OracleArrayLayout(AMid, ADefNode, ADepth: Integer;
-  out ABytes: Double; out AAlign: Integer): Boolean;
+  const ASubst: TPasSubst; out ABytes: Double; out AAlign: Integer): Boolean;
 var
   LM: TPasSemaModel;
   LChild, LElem: Integer;
@@ -1499,7 +1528,7 @@ begin
     AAlign := FInfo.PointerBytes;
     Exit(True);
   end;
-  if not OracleFieldLayout(AMid, LElem, ADepth + 1, LElemSize, AAlign) then
+  if not OracleFieldLayout(AMid, LElem, ADepth + 1, ASubst, LElemSize, AAlign) then
     Exit;
   LTotal := 1;
   LChild := LM.Tree.Nodes[ADefNode].FirstChild;
@@ -1734,7 +1763,7 @@ end;
   anything else resolves and recurses. Kept apart from OracleLayout so the two
   callers cannot drift: a field and an alias must size identically. }
 function TPasSemaProject.OracleFieldLayout(AMid, ATypeNode, ADepth: Integer;
-  out ABytes: Double; out AAlign: Integer): Boolean;
+  const ASubst: TPasSubst; out ABytes: Double; out AAlign: Integer): Boolean;
 
   // `System.ShortInt`, `Winapi.Windows.DWORD` — a type name written with its
   // unit. FastMM4 aliases one (TSynchronizationVariable), and refusing the dot
@@ -1771,9 +1800,9 @@ begin
     nkIdent: LName := LM.Tree.NodeText(ATypeNode);
     nkMember: LName := DottedText(ATypeNode);
     nkRecordType:
-      Exit(OracleRecordLayout(AMid, ATypeNode, ADepth + 1, ABytes, AAlign));
+      Exit(OracleRecordLayout(AMid, ATypeNode, ADepth + 1, ASubst, 0, 1, ABytes, AAlign));
     nkArrayType:
-      Exit(OracleArrayLayout(AMid, ATypeNode, ADepth + 1, ABytes, AAlign));
+      Exit(OracleArrayLayout(AMid, ATypeNode, ADepth + 1, ASubst, ABytes, AAlign));
     nkStringType:
       begin
         // `string[N]` is N characters plus the leading length byte, and it is
@@ -1842,6 +1871,12 @@ begin
       // `record A: Byte; F: (r0, r1); end`. Same sizing as a named one, and
       // the same positional {$Z} state.
       Exit(OracleEnumLayout(AMid, ATypeNode, ADepth, ABytes, AAlign));
+    nkObjectType:
+      Exit(OracleObjectLayout(AMid, ATypeNode, ADepth, ASubst, ABytes,
+        AAlign));
+    nkTypeArgs:
+      Exit(OracleGenericLayout(AMid, ATypeNode, ADepth, ASubst, ABytes,
+        AAlign));
     nkSetType:
       begin
         // A set stores the byte SPAN from its base type's Lo to its Hi --
@@ -1873,7 +1908,7 @@ begin
         // record's -- looked up rather than hard-coded, since its size is an
         // RTL fact that has moved between releases.
         Result := OracleResolve(AMid, 'tfilerec', LRMid, LRSym) and
-          OracleLayout(LRMid, LRSym, ADepth + 1, ABytes, AAlign);
+          OracleLayout(LRMid, LRSym, ADepth + 1, nil, ABytes, AAlign);
         // Its SIZE only. TFileRec is declared `packed`, so laying it out
         // gives an alignment of 1 -- but dcc aligns a file VARIABLE to a
         // pointer regardless (a Byte before a `file of Byte` field is 596 on
@@ -1890,6 +1925,13 @@ begin
   end;
   if LName = '' then
     Exit(False);
+  // A generic PARAMETER bound by the enclosing instantiation resolves to its
+  // actual, which lives in the REFERRING model. Checked before the builtin
+  // table so a parameter named like one cannot be mistaken for it.
+  for var LSIdx := 0 to High(ASubst) do
+    if ASubst[LSIdx].Name = LowerCase(LName) then
+      Exit(OracleFieldLayout(ASubst[LSIdx].Mid, ASubst[LSIdx].Node,
+        ADepth + 1, nil, ABytes, AAlign));
   if PasBuiltinLayout(LName, FInfo.PointerBytes, FInfo.ExtendedBytes,
     ABytes, AAlign) then
     Exit(True);
@@ -1898,13 +1940,13 @@ begin
   // hard-coded, for the same reason TFileRec is.
   if SameText(LName, 'Text') or SameText(LName, 'TextFile') then
     if OracleResolve(AMid, 'ttextrec', LRMid, LRSym) and
-       OracleLayout(LRMid, LRSym, ADepth + 1, ABytes, AAlign) then
+       OracleLayout(LRMid, LRSym, ADepth + 1, nil, ABytes, AAlign) then
     begin
       AAlign := FInfo.PointerBytes;   // see the nkFileType branch above
       Exit(True);
     end;
   if OracleQualified(AMid, LName, LRMid, LRSym) then
-    Exit(OracleLayout(LRMid, LRSym, ADepth + 1, ABytes, AAlign));
+    Exit(OracleLayout(LRMid, LRSym, ADepth + 1, nil, ABytes, AAlign));
   // `System.X` where X is a builtin: System is the implicit unit and is not
   // in anyone's `uses`, so the lookup above cannot reach it. Restricted to
   // that one prefix — for any other unit, an unresolved member must refuse
@@ -1913,6 +1955,238 @@ begin
   Result := (LDot >= 0) and SameText(Copy(LName, 1, LDot), 'System') and
     PasBuiltinLayout(Copy(LName, LDot + 2, MaxInt), FInfo.PointerBytes,
       FInfo.ExtendedBytes, ABytes, AAlign);
+end;
+
+{ An old-style `object` (11.5). Its fields lay out exactly like a record's,
+  starting where the ANCESTOR's storage ended, plus one rule that has to be
+  measured: introducing a VIRTUAL member appends a VMT pointer AFTER the
+  fields, pointer-aligned — and that pointer does NOT raise the type's own
+  alignment, so `object A: Integer; procedure P; virtual; end` is 16 bytes on
+  Win64 yet still aligns to 4 (a Byte before such a field gives 20, not 24).
+  A derived object whose ancestor already has a VMT does not get a second one:
+  `object(that) C: Byte; end` is 20, not 28. A variant part is not legal in an
+  object, so there is none to model. }
+function TPasSemaProject.OracleObjectLayout(AMid, ADefNode, ADepth: Integer;
+  const ASubst: TPasSubst; out ABytes: Double;
+  out AAlign: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LChild, LStart, LStartAlign, LPtr, LRMid, LRSym, LBaseDef: Integer;
+  LBaseSize: Double;
+  LBaseHasVmt: Boolean;
+begin
+  ABytes := 0;
+  AAlign := 1;
+  if ADepth > 8 then
+    Exit(False);
+  LM := FModels[AMid];
+  LStart := 0;
+  LStartAlign := 1;
+  LBaseHasVmt := False;
+  LChild := LM.Tree.Nodes[ADefNode].FirstChild;
+  // The heritage, when present, is the FIRST child and is a type reference;
+  // members are declaration nodes.
+  if (LChild <> NIL_NODE) and
+     (LM.Tree.Nodes[LChild].Kind in [nkIdent, nkMember, nkTypeArgs]) then
+  begin
+    if not OracleFieldLayout(AMid, LChild, ADepth + 1, ASubst, LBaseSize,
+         LStartAlign) then
+      Exit(False);
+    LStart := Trunc(LBaseSize);
+    // Whether the ANCESTOR already carries a VMT — asked of its own
+    // definition, not ours, because that is what decides if we introduce one.
+    if (LM.Tree.Nodes[LChild].Kind = nkIdent) and
+       OracleQualified(AMid, LM.Tree.NodeText(LChild), LRMid, LRSym) then
+    begin
+      LBaseDef := TypeDefNodeOf(LRMid, LRSym);
+      LBaseHasVmt := (LBaseDef <> NIL_NODE) and
+        (FModels[LRMid].Tree.Nodes[LBaseDef].Kind = nkObjectType) and
+        OracleObjectHasVmt(LRMid, LBaseDef, ADepth + 1);
+    end;
+  end;
+  if not OracleRecordLayout(AMid, ADefNode, ADepth, ASubst, LStart,
+       LStartAlign, ABytes, AAlign) then
+    Exit(False);
+  // A VMT slot, only where it is INTRODUCED.
+  if not LBaseHasVmt and OracleObjectHasVmt(AMid, ADefNode, ADepth + 1) then
+  begin
+    LPtr := FInfo.PointerBytes;
+    ABytes := ((Trunc(ABytes) + LPtr - 1) div LPtr) * LPtr + LPtr;
+    // ...and the pointer does not raise the alignment, so round again to the
+    // alignment the FIELDS established.
+    ABytes := ((Trunc(ABytes) + AAlign - 1) div AAlign) * AAlign;
+  end;
+  Result := True;
+end;
+
+{ Does this object introduce or inherit a VMT — that is, does it or any
+  ancestor declare a `virtual` (or `dynamic`) member? Called with ADepth+1 for
+  the type's own members and with ADepth for its ancestor chain, so the two
+  questions stay separable. }
+function TPasSemaProject.OracleObjectHasVmt(AMid, ADefNode,
+  ADepth: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LChild, LDir, LRMid, LRSym, LBase: Integer;
+begin
+  Result := False;
+  if ADepth > 8 then
+    Exit;
+  LM := FModels[AMid];
+  LChild := LM.Tree.Nodes[ADefNode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LChild].Kind = nkRoutine then
+    begin
+      LDir := LM.Tree.Nodes[LChild].FirstChild;
+      while LDir <> NIL_NODE do
+      begin
+        if (LM.Tree.Nodes[LDir].Kind = nkDirective) and
+           (SameText(LM.Tree.NodeText(LDir), 'virtual') or
+            SameText(LM.Tree.NodeText(LDir), 'dynamic')) then
+          Exit(True);
+        LDir := LM.Tree.Nodes[LDir].NextSibling;
+      end;
+    end;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+  // Not here — ask the ancestor.
+  LBase := LM.Tree.Nodes[ADefNode].FirstChild;
+  if (LBase <> NIL_NODE) and (LM.Tree.Nodes[LBase].Kind = nkIdent) and
+     OracleQualified(AMid, LM.Tree.NodeText(LBase), LRMid, LRSym) then
+  begin
+    LBase := TypeDefNodeOf(LRMid, LRSym);
+    if (LBase <> NIL_NODE) and
+       (FModels[LRMid].Tree.Nodes[LBase].Kind = nkObjectType) then
+      Result := OracleObjectHasVmt(LRMid, LBase, ADepth + 1);
+  end;
+end;
+
+{ A generic INSTANTIATION used as a type — `TG<Integer>`, the nkTypeArgs node.
+  The generic's own declaration is laid out with its parameters bound to the
+  actuals, which live in the REFERRING model and are therefore carried as
+  (model, node) pairs.
+
+  An argument that is itself a bare parameter of the ENCLOSING instantiation
+  is passed through by copying that binding, which is what makes
+  `TOuter<T> = record V: TInner<T>; end` work when TOuter is instantiated. An
+  argument that MENTIONS an enclosing parameter without being one outright
+  (`TOuter<T> = record V: TInner<TPair<T>>; end`) is refused rather than
+  half-substituted. }
+function TPasSemaProject.OracleGenericLayout(AMid, AArgsNode, ADepth: Integer;
+  const ASubst: TPasSubst; out ABytes: Double;
+  out AAlign: Integer): Boolean;
+
+  // Does this subtree name any parameter of the enclosing instantiation?
+  function MentionsParam(ANode: Integer): Boolean;
+  var
+    LKid: Integer;
+  begin
+    if FModels[AMid].Tree.Nodes[ANode].Kind = nkIdent then
+      for var LI := 0 to High(ASubst) do
+        if ASubst[LI].Name = FModels[AMid].Tree.NodeNameLower(ANode) then
+          Exit(True);
+    LKid := FModels[AMid].Tree.Nodes[ANode].FirstChild;
+    while LKid <> NIL_NODE do
+    begin
+      if MentionsParam(LKid) then
+        Exit(True);
+      LKid := FModels[AMid].Tree.Nodes[LKid].NextSibling;
+    end;
+    Result := False;
+  end;
+
+var
+  LM: TPasSemaModel;
+  LBase, LArg, LGMid, LGSym, LDecl, LParams, LP, LName: Integer;
+  LInner: TPasSubst;
+  LNames: TArray<string>;
+begin
+  ABytes := 0;
+  AAlign := 1;
+  if ADepth > 8 then
+    Exit(False);
+  LM := FModels[AMid];
+  LBase := LM.Tree.Nodes[AArgsNode].FirstChild;
+  // A plain name only. `SomeUnit.TG<Integer>` would need the dotted route and
+  // appears nowhere measured, so it refuses rather than half-resolving.
+  if (LBase = NIL_NODE) or (LM.Tree.Nodes[LBase].Kind <> nkIdent) then
+    Exit(False);
+  if not OracleQualified(AMid, LM.Tree.NodeText(LBase), LGMid, LGSym) then
+    Exit(False);
+  // The parameter NAMES come from the declaration's <...> list.
+  LDecl := FModels[LGMid].Symbols[LGSym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit(False);
+  LDecl := FModels[LGMid].Tree.Nodes[LDecl].Parent;
+  if LDecl = NIL_NODE then
+    Exit(False);
+  LParams := FModels[LGMid].Tree.Nodes[LDecl].FirstChild;
+  LNames := nil;
+  while LParams <> NIL_NODE do
+  begin
+    if FModels[LGMid].Tree.Nodes[LParams].Kind = nkGenericParams then
+    begin
+      LP := FModels[LGMid].Tree.Nodes[LParams].FirstChild;
+      while LP <> NIL_NODE do
+      begin
+        if FModels[LGMid].Tree.Nodes[LP].Kind = nkGenericParam then
+        begin
+          // `<T, U>` is ONE group carrying BOTH names (the `;` is what
+          // separates groups), so every ident child is a parameter. The
+          // nkConstraint children that may follow are not.
+          LName := FModels[LGMid].Tree.Nodes[LP].FirstChild;
+          if (LName = NIL_NODE) or
+             (FModels[LGMid].Tree.Nodes[LName].Kind <> nkIdent) then
+            Exit(False);
+          while (LName <> NIL_NODE) and
+                (FModels[LGMid].Tree.Nodes[LName].Kind = nkIdent) do
+          begin
+            LNames := LNames + [FModels[LGMid].Tree.NodeNameLower(LName)];
+            LName := FModels[LGMid].Tree.Nodes[LName].NextSibling;
+          end;
+        end;
+        LP := FModels[LGMid].Tree.Nodes[LP].NextSibling;
+      end;
+      Break;
+    end;
+    LParams := FModels[LGMid].Tree.Nodes[LParams].NextSibling;
+  end;
+  if LNames = nil then
+    Exit(False);
+  // Bind them positionally to the actuals.
+  LInner := nil;
+  LArg := LM.Tree.Nodes[LBase].NextSibling;
+  for var LI := 0 to High(LNames) do
+  begin
+    if LArg = NIL_NODE then
+      Exit(False);
+    var LEntry: TPasSubstEntry;
+    LEntry.Name := LNames[LI];
+    if (LM.Tree.Nodes[LArg].Kind = nkIdent) and MentionsParam(LArg) then
+    begin
+      // The actual IS an enclosing parameter: carry its binding through.
+      for var LJ := 0 to High(ASubst) do
+        if ASubst[LJ].Name = LM.Tree.NodeNameLower(LArg) then
+        begin
+          LEntry.Mid := ASubst[LJ].Mid;
+          LEntry.Node := ASubst[LJ].Node;
+          Break;
+        end;
+    end
+    else if MentionsParam(LArg) then
+      Exit(False)   // a compound actual over an open parameter: refuse
+    else
+    begin
+      LEntry.Mid := AMid;
+      LEntry.Node := LArg;
+    end;
+    LInner := LInner + [LEntry];
+    LArg := LM.Tree.Nodes[LArg].NextSibling;
+  end;
+  if LArg <> NIL_NODE then
+    Exit(False);   // more actuals than parameters
+  Result := OracleLayout(LGMid, LGSym, ADepth + 1, LInner, ABytes, AAlign);
 end;
 
 function TPasSemaProject.OracleLength(AMid, ASym: Integer;
