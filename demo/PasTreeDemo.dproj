@@ -5,7 +5,7 @@
         <Base>True</Base>
         <Config Condition="'$(Config)'==''">Release</Config>
         <ProjectName Condition="'$(ProjectName)'==''">PasTreeDemo</ProjectName>
-        <TargetedPlatforms>3</TargetedPlatforms>
+        <TargetedPlatforms>2</TargetedPlatforms>
         <AppType>Application</AppType>
         <FrameworkType>VCL</FrameworkType>
         <ProjectVersion>20.5</ProjectVersion>
@@ -131,6 +131,18 @@
             <Form>frmMain</Form>
         </DCCReference>
         <DCCReference Include="PasTreeDemo.Highlighter.pas"/>
+        <DCCReference Include="PasTreeDemo.Settings.pas"/>
+        <DCCReference Include="PasTreeDemo.NavHistory.pas"/>
+        <DCCReference Include="PasTreeDemo.Includes.pas"/>
+        <DCCReference Include="PasTreeDemo.UnitList.pas"/>
+        <DCCReference Include="PasTreeDemo.UnitPicker.pas">
+            <Form>frmUnitPicker</Form>
+        </DCCReference>
+        <DCCReference Include="PasTreeDemo.Coverage.pas"/>
+        <DCCReference Include="..\tests\PasTree.TestKit.pas"/>
+        <DCCReference Include="..\tests\PasTree.Tests.Parser.pas"/>
+        <DCCReference Include="..\tests\PasTree.Tests.Roundtrip.pas"/>
+        <DCCReference Include="..\tests\PasTree.Tests.Preprocessor.pas"/>
         <DCCReference Include="..\source\PasTree.Types.pas"/>
         <DCCReference Include="..\source\PasTree.Lexer.pas"/>
         <DCCReference Include="..\source\PasTree.SourceManager.pas"/>
@@ -177,7 +189,7 @@
                 </Excluded_Packages>
             </Delphi.Personality>
             <Platforms>
-                <Platform value="Win32">True</Platform>
+                <Platform value="Win32">False</Platform>
                 <Platform value="Win64">True</Platform>
                 <Platform value="WinARM64EC">False</Platform>
             </Platforms>

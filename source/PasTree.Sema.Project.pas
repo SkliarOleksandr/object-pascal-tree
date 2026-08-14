@@ -243,6 +243,7 @@ type
       const ANameLower: string; out AMid, ASym, ACtx: Integer): Boolean;
     function ElementX(AId, ABaseNode: Integer): TSemaXType;
     function WithTargetTypeX(AId, ANode: Integer): TSemaXType;
+    function InlineVarInitTypeX(AMid, ASym, ADepth: Integer): TSemaXType;
     function InsideWithBody(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function InsideLaterWithTarget(AModel: TPasSemaModel;
       ANode: Integer): Boolean;
@@ -7852,6 +7853,52 @@ begin
   Result := XNil;
 end;
 
+{ The type of an inline `var` that declared no type of its own — 3.1.3's
+  `var L := Expr;`, inferred from the INITIALIZER. Nothing records such a type:
+  the resolver leaves TypeNode empty by design, so SymDeclTypeX answers XNil
+  and every consumer that asks the symbol comes away empty-handed.
+
+  For member binding that is merely silent (an unknown base type cannot be
+  said to lack a member), which is why this went unnoticed. `with` is where it
+  bites: the target types as nothing, the with-scope never opens, and every
+  bare name in the body becomes a hard E2003 — 24 of them in one JSON writer
+  off a single `var LNodeList := InternalGetChildNodes;`.
+
+  The initializer is typed by the same walk the target itself uses, so calls,
+  casts, `as`, indexing and dereferences all come along; the depth cap is for
+  one inferred var initialised from another. }
+function TPasSemaProject.InlineVarInitTypeX(AMid, ASym,
+  ADepth: Integer): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LDecl, LParent, LInit: Integer;
+begin
+  Result := XNil;
+  if (ADepth > 4) or (AMid < 0) or (ASym = NIL_SYM) then
+    Exit;
+  LM := FModels[AMid];
+  if LM.Symbols[ASym].TypeNode <> NIL_NODE then
+    Exit;   // it has a written type; not our case
+  LDecl := LM.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LParent := LM.Tree.Nodes[LDecl].Parent;
+  if (LParent = NIL_NODE) or
+     not (LM.Tree.Nodes[LParent].Kind in [nkInlineVar, nkInlineConst]) then
+    Exit;
+  // Everything after the names is the initializer, and with no type node
+  // that is exactly the LAST child. Equal to the name itself means there is
+  // no initializer at all.
+  LInit := LM.Tree.Nodes[LParent].FirstChild;
+  if LInit = NIL_NODE then
+    Exit;
+  while LM.Tree.Nodes[LInit].NextSibling <> NIL_NODE do
+    LInit := LM.Tree.Nodes[LInit].NextSibling;
+  if LInit = LDecl then
+    Exit;
+  Result := WithTargetTypeX(AMid, LInit);
+end;
+
 function TPasSemaProject.WithTargetTypeX(AId, ANode: Integer): TSemaXType;
 var
   LM: TPasSemaModel;
@@ -8020,17 +8067,26 @@ begin
         end;
         LSym := LM.RefMap[ANode];
         if LSym <> NIL_SYM then
-          Result := SymDeclTypeX(AId, LSym)
-        // A type ALREADY recorded for this ident outranks re-deriving one from
-        // the symbol, because it is the only reading that can carry a frame.
-        // The inherited pass writes it for a member it reached through a
-        // GENERIC ancestor: `Items` on a `class(TObjectList<TFloatingObj>)` is
-        // declared `T` on TList<T>, and SymDeclTypeX alone returns that OPEN
-        // parameter — so `with Items[I] do` indexed nothing and the whole body
-        // went undeclared (HTMLSubs.TFloatingObjList.Decrement).
-        else if LM.ExprTypeX.TryGetValue(ANode, LBX) and XValid(LBX) then
-          Result := LBX
-        else if LM.ExtRefMap.TryGetValue(ANode, LExt) then
+          Result := SymDeclTypeX(AId, LSym);
+        // A type ALREADY recorded for this ident, when the symbol did not
+        // yield one. Two shapes need it, and the second is why this is a
+        // FALLBACK rather than an else-branch:
+        //
+        // - the inherited pass writes it for a member reached through a
+        //   GENERIC ancestor: `Items` on a `class(TObjectList<TFloatingObj>)`
+        //   is declared `T` on TList<T> (HTMLSubs.TFloatingObjList.Decrement);
+        // - an INLINE VAR WITH AN INFERRED TYPE — `var L := GetChildNodes;`
+        //   then `with L do ... Count` — has a symbol but no type NODE, so
+        //   SymDeclTypeX answers nothing and the old else-chain stopped there.
+        //   A plain `L.Count` typed fine, which is what made it look like a
+        //   member-binding problem rather than a with-target one
+        //   (Alcinoe.JSONDoc, 24 reports).
+        if not XValid(Result) and
+           LM.ExprTypeX.TryGetValue(ANode, LBX) and XValid(LBX) then
+          Result := LBX;
+        if not XValid(Result) and (LSym <> NIL_SYM) then
+          Result := InlineVarInitTypeX(AId, LSym, 0);
+        if not XValid(Result) and LM.ExtRefMap.TryGetValue(ANode, LExt) then
           Result := SymDeclTypeX(LExt.UnitId, LExt.Sym)
         // `Self` has no symbol — nothing declares it (11.3.3), so RefMap is
         // empty for it and the recursion above dead-ends. Inside a method body

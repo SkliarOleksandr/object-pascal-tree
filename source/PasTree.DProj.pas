@@ -747,21 +747,7 @@ begin
       if LVars.TryGetValue('MainSource', LVal) and (LVal <> '') then
         FMainSource := ResolvePath(LVal);
 
-      var LAllFiles := TList<string>.Create;
-      try
-        if FMainSource <> '' then
-          LAllFiles.Add(FMainSource);
-        for LName in LRawFiles do
-        begin
-          LVal := ResolvePath(LName);
-          if (LVal <> '') and not LAllFiles.Contains(LVal) then
-            LAllFiles.Add(LVal);
-        end;
-        FFiles := LAllFiles.ToArray;
-      finally
-        LAllFiles.Free;
-      end;
-
+      // Search paths FIRST: the file list below needs them (see there).
       if LVars.TryGetValue('DCC_UnitSearchPath', LVal) then
       begin
         var LSP := TList<string>.Create;
@@ -777,6 +763,40 @@ begin
         finally
           LSP.Free;
         end;
+      end;
+
+      { A DCCReference is not always relative to the project directory. A
+        package whose sources live one level up lists them by BARE NAME —
+        `<DCCReference Include="Alcinoe.Cipher.pas"/>` with
+        `DCC_UnitSearchPath=..\` — and the IDE finds them on the search path.
+        Combining with the project dir alone yielded a list of paths that do
+        not exist, so the host's file tree showed only the two entries that
+        happened to sit beside the .dproj, and every unit in the package was
+        classified as a LIBRARY unit rather than one of the project's own. }
+      var LAllFiles := TList<string>.Create;
+      try
+        if FMainSource <> '' then
+          LAllFiles.Add(FMainSource);
+        for LName in LRawFiles do
+        begin
+          LVal := ResolvePath(LName);
+          if (LVal <> '') and not TFile.Exists(LVal) and
+             not TPath.IsPathRooted(LName) then
+            for var LDir in FSearchPaths do
+            begin
+              var LTry := TPath.Combine(LDir, LName);
+              if TFile.Exists(LTry) then
+              begin
+                LVal := LTry;
+                Break;
+              end;
+            end;
+          if (LVal <> '') and not LAllFiles.Contains(LVal) then
+            LAllFiles.Add(LVal);
+        end;
+        FFiles := LAllFiles.ToArray;
+      finally
+        LAllFiles.Free;
       end;
 
       if LVars.TryGetValue('DCC_Define', LVal) then

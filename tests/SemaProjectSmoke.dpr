@@ -4593,6 +4593,99 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  // ---- A `with` whose target is an INLINE VAR with an INFERRED type. The
+  // symbol exists but carries no type node, so asking it yields nothing and
+  // the with-scope never opened: every bare name in the body then reported as
+  // undeclared. A plain `L.Count` stays SILENT in the same situation (an
+  // unknown base type cannot be said to lack a member), which is what made
+  // this look like a member-binding bug (Alcinoe.JSONDoc, 24 reports off one
+  // `var LNodeList := InternalGetChildNodes;`). ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_inlinevar');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitInline.pas'),
+    'unit UnitInline;'#10'interface'#10 +
+    'type'#10 +
+    '  TNodeList = class'#10 +
+    '  public'#10 +
+    '    FCount: Integer;'#10 +
+    '    function Count: Integer;'#10 +
+    '  end;'#10 +
+    '  TOwner = class'#10 +
+    '  public'#10 +
+    '    function GetList: TNodeList;'#10 +
+    '    procedure PInferred;'#10 +
+    '    procedure PWritten;'#10 +
+    '    procedure PCast;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TNodeList.Count: Integer; begin Result := FCount; end;'#10 +
+    'function TOwner.GetList: TNodeList; begin Result := nil; end;'#10 +
+    // The regression: no written type, so the type comes from the initializer.
+    'procedure TOwner.PInferred;'#10'begin'#10 +
+    '  var L := GetList;'#10 +
+    '  with L do if Count > 0 then ;'#10'end;'#10 +
+    // The same shape with the type spelled out -- worked before, must stay.
+    'procedure TOwner.PWritten;'#10'begin'#10 +
+    '  var L: TNodeList := GetList;'#10 +
+    '  with L do if Count > 0 then ;'#10'end;'#10 +
+    // An inferred var initialised by a CAST rather than a call: the
+    // initializer goes through the same walk, so this comes along.
+    'procedure TOwner.PCast;'#10'begin'#10 +
+    '  var L := TNodeList(GetList);'#10 +
+    '  with L do if Count > 0 then ;'#10'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    var LIv := ModelByName('unitinline');
+    Ok('with-target: an inline var with an INFERRED type opens its scope',
+      DiagCount(LIv, 'E2003') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- A source file that fails STRICT decoding. Delphi's TEncoding.UTF8
+  // raises on a malformed sequence, and real sources carry them: one
+  // Windows-1252 apostrophe sits in a `///` comment in Alcinoe's
+  // Dynamic.Objects.pas and dcc compiles it without a murmur. The old
+  // fallback re-decoded the whole buffer as ANSI FROM OFFSET ZERO, so the
+  // BOM became text, the file no longer began with `unit`, and the model came
+  // out EMPTY -- ~1700 false E2003 across every unit that imported it. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_badbyte');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  begin
+    var LSrc :=
+      'unit UnitBad;'#10'interface'#10 +
+      '/// the image@s EXIF orientation'#10 +
+      'type TKept = class end;'#10 +
+      'implementation'#10'end.'#10;
+    var LBytes := TEncoding.UTF8.GetBytes(LSrc);
+    // UTF-8 BOM in front, and the '@' turned into a lone $92 -- invalid UTF-8.
+    for var LI := 0 to High(LBytes) do
+      if LBytes[LI] = Ord('@') then
+        LBytes[LI] := $92;
+    TFile.WriteAllBytes(TPath.Combine(LDir, 'UnitBad.pas'),
+      TBytes.Create($EF, $BB, $BF) + LBytes);
+  end;
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    var LBad := ModelByName('unitbad');
+    Ok('encoding: a malformed UTF-8 byte does not destroy the unit -- the '
+      + 'declaration after it is still there',
+      SymCountOf(LBad, 'tkept', skType) = 1);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
 end.

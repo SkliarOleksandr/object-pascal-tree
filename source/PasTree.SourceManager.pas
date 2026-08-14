@@ -3,9 +3,11 @@ unit PasTree.SourceManager;
 {
   PasTree — source file loading and include resolution.
 
-  Loading is tolerant: BOMs are honored; files without a BOM that fail
-  strict decoding fall back to a raw ANSI decode (token boundaries are what
-  matter to the lexer; only string/comment payloads could mis-decode).
+  Loading is tolerant: BOMs are honored, and a file that fails STRICT decoding
+  is decoded again leniently rather than rejected — a UTF-8 file keeps its
+  encoding and gets U+FFFD for the bad sequence, anything else falls back to
+  ANSI. Both fallbacks skip the preamble. See DecodeText: dcc accepts such
+  files, and treating one malformed byte as fatal loses the whole unit.
 }
 
 interface
@@ -366,12 +368,28 @@ begin
   end;
 end;
 
-// Bytes -> string with the same tolerant semantics TFile.ReadAllText has
-// (honor a BOM, default to ANSI without one, raw-ANSI fallback if strict
-// decoding fails). Runs on the CONSUMER's thread — never on the I/O pool.
+{ Bytes -> string, tolerantly. A BOM is honored and files without one default
+  to ANSI; the interesting part is what happens when strict decoding FAILS.
+
+  Delphi's TEncoding.UTF8 raises EEncodingError on a malformed sequence, and
+  real sources contain them: one Windows-1252 apostrophe survives in a `///`
+  comment in Alcinoe.FMX.Dynamic.Objects.pas, and dcc compiles that file
+  without complaint. Two things must therefore hold.
+
+  First, a file that DECLARED itself UTF-8 with a BOM is still UTF-8 — one bad
+  byte is not a reason to reinterpret the whole thing as ANSI. It is decoded
+  again with a LENIENT UTF-8 that substitutes U+FFFD for the bad sequence and
+  leaves everything else intact.
+
+  Second, and this was the actual bug: the fallback must skip the PREAMBLE.
+  Decoding from offset 0 turned the three BOM bytes into text, so the file
+  began with garbage instead of `unit`. The lexer rejected it at line 1, the
+  parser produced a single node, the model came out EMPTY — and every unit
+  that imported it lost every name it declared. One byte in a comment cost
+  ~1700 false "undeclared identifier" reports on the Alcinoe package. }
 function TPasSourceManager.DecodeText(const ABytes: TBytes): string;
 var
-  LEnc: TEncoding;
+  LEnc, LLenient: TEncoding;
   LStart: Integer;
 begin
   LEnc := nil;
@@ -380,7 +398,19 @@ begin
     Result := LEnc.GetString(ABytes, LStart, Length(ABytes) - LStart);
   except
     on E: EEncodingError do
-      Result := TEncoding.ANSI.GetString(ABytes);
+      if LEnc.CodePage = CP_UTF8 then
+      begin
+        // Same encoding, no error flags: substitute rather than raise.
+        LLenient := TUTF8Encoding.Create(CP_UTF8, 0, 0);
+        try
+          Result := LLenient.GetString(ABytes, LStart, Length(ABytes) - LStart);
+        finally
+          LLenient.Free;
+        end;
+      end
+      else
+        Result := TEncoding.ANSI.GetString(ABytes, LStart,
+          Length(ABytes) - LStart);
   end;
 end;
 

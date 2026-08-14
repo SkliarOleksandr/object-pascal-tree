@@ -1,4 +1,4 @@
-program PasTreeDemo;
+﻿program PasTreeDemo;
 
 // PasTree demo host (VCL). Opens a Delphi project, parses it with PasTree and
 // shows source (SynEdit), the file tree (VirtualTrees), diagnostics and AST

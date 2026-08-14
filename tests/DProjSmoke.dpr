@@ -22,6 +22,19 @@ begin
   GCounter.Ok(AName, ACond);
 end;
 
+// The DIRECTORY a resolved file entry ended up in, by file name ('' if the
+// name is not in the list). Contains() only ever compares the leaf, so it
+// cannot tell WHERE a bare DCCReference was found.
+function DirOfFile(const AArr: TArray<string>; const AName: string): string;
+var
+  S: string;
+begin
+  for S in AArr do
+    if SameText(ExtractFileName(S), AName) then
+      Exit(ExtractFileName(ExcludeTrailingPathDelimiter(ExtractFilePath(S))));
+  Result := '';
+end;
+
 function Contains(const AArr: TArray<string>; const AItem: string): Boolean;
 var
   S: string;
@@ -85,6 +98,12 @@ const
     '  <ItemGroup>'#10 +
     '    <DCCReference Include="UnitA.pas"/>'#10 +
     '    <DCCReference Include="sub\UnitB.pas"/>'#10 +
+    // A BARE name that does NOT sit beside the .dproj: it must be looked up
+    // on the project's own search paths, which is how a package whose sources
+    // live elsewhere lists them (Alcinoe: `Include="Alcinoe.Cipher.pas"` with
+    // `DCC_UnitSearchPath=..\`). Under the Win64 default `Win64Only` is on
+    // that path and this resolves; the count assertions below pin both.
+    '    <DCCReference Include="UnitC.pas"/>'#10 +
     '    <BuildConfiguration Include="Base"><Key>Base</Key></BuildConfiguration>'#10 +
     '    <BuildConfiguration Include="Release"><Key>Cfg_1</Key></BuildConfiguration>'#10 +
     '    <BuildConfiguration Include="Debug"><Key>Cfg_2</Key></BuildConfiguration>'#10 +
@@ -115,6 +134,9 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitA.pas'), 'unit UnitA;'#10'interface'#10'implementation'#10'end.'#10);
   TDirectory.CreateDirectory(TPath.Combine(LDir, 'sub'));
   TFile.WriteAllText(TPath.Combine(LDir, 'sub\UnitB.pas'), 'unit UnitB;'#10'interface'#10'implementation'#10'end.'#10);
+  // Reachable only through the Win64 search path — see the DCCReference note.
+  TDirectory.CreateDirectory(TPath.Combine(LDir, 'Win64Only'));
+  TFile.WriteAllText(TPath.Combine(LDir, 'Win64Only\UnitC.pas'), 'unit UnitC;'#10'interface'#10'implementation'#10'end.'#10);
 
   try
     // ---- default (no override): dproj's own fallback = Config=Debug, Platform=Win64 ----
@@ -124,9 +146,12 @@ begin
       Ok('default: platform = Win64', LDProj.Platform = pfWin64);
       Ok('default: config = Debug', SameText(LDProj.Config, 'Debug'));
       Ok('default: MainSource resolved', SameText(ExtractFileName(LDProj.MainSource), 'Fixture.dpr'));
-      Ok('default: 3 files (Main+2 DCCReference)', Length(LDProj.Files) = 3);
+      Ok('default: 4 files (Main+3 DCCReference)', Length(LDProj.Files) = 4);
       Ok('default: UnitA.pas present', Contains(LDProj.Files, 'UnitA.pas'));
       Ok('default: sub\UnitB.pas present', Contains(LDProj.Files, 'UnitB.pas'));
+      Ok('default: a bare DCCReference resolves through the SEARCH PATHS, '
+        + 'not just the project dir',
+        SameText(DirOfFile(LDProj.Files, 'UnitC.pas'), 'Win64Only'));
       // Debug -> Cfg_2 (per THIS fixture's numbering) -> DEBUG define, no RELEASE
       Ok('default: DCC_Define has DEBUG', Contains(LDProj.Defines, 'DEBUG'));
       Ok('default: DCC_Define lacks RELEASE', not Contains(LDProj.Defines, 'RELEASE'));
