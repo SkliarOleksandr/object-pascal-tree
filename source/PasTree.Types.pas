@@ -109,6 +109,7 @@ type
     function TokenText(AIndex: Integer): string; overload;
     function TokenText(const AToken: TPasToken): string; overload;
     procedure OffsetToLineCol(AOffset: Integer; out ALine, ACol: Integer);
+    function LineText(ALine: Integer): string;
   end;
 
 const
@@ -432,6 +433,25 @@ begin
   end;
   ALine := LLo + 1;                          // 1-based line
   ACol := AOffset - LineStarts[LLo] + 1;     // 1-based column
+end;
+
+// The raw text of one 1-based line, trailing CR/LF (whichever break BuildLine
+// Starts recorded) stripped by TrimRight — Find References' snippet, and
+// deliberately generic rather than folded into that one caller: nothing here
+// is specific to what the text is used for.
+function TPasTokenStream.LineText(ALine: Integer): string;
+var
+  LFrom, LToExcl: Integer;
+begin
+  Result := '';
+  if (ALine < 1) or (ALine - 1 > High(LineStarts)) then
+    Exit;
+  LFrom := LineStarts[ALine - 1];
+  if ALine <= High(LineStarts) then
+    LToExcl := LineStarts[ALine]
+  else
+    LToExcl := Length(Source);
+  Result := TrimRight(Copy(Source, LFrom + 1, LToExcl - LFrom));
 end;
 
 initialization

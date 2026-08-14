@@ -205,49 +205,62 @@ object frmMain: TfrmMain
     BevelOuter = bvNone
     ShowCaption = False
     TabOrder = 2
-    object Panel1: TPanel
+    object pgcBottom: TPageControl
       Left = 0
       Top = 0
       Width = 1180
-      Height = 25
-      Align = alTop
-      BevelOuter = bvNone
-      ShowCaption = False
-      TabOrder = 0
-      object chkShowErrors: TCheckBox
-        Left = 8
-        Top = 6
-        Width = 97
-        Height = 17
-        Hint =
-          'Show every diagnostic the analysis produced, including an unresolv' +
-          'ed member after a dot. Filters this list only - nothing is re-anal' +
-          'yzed.'
-        Caption = 'Show Errors'
-        ParentShowHint = False
-        ShowHint = True
-        TabOrder = 0
-        OnClick = chkShowErrorsClick
-      end
-    end
-    object vtMessages: TVirtualStringTree
-      Left = 0
-      Top = 25
-      Width = 1180
-      Height = 139
+      Height = 164
       Align = alClient
-      DefaultNodeHeight = 19
-      Header.AutoSizeIndex = 0
-      Header.Height = 15
-      Header.MainColumn = -1
-      PopupMenu = MessagesPopupMenu
-      TabOrder = 1
-      TreeOptions.SelectionOptions = [toRightClickSelect, toSelectNextNodeOnRemoval]
-      OnDblClick = vtMessagesDblClick
-      OnGetText = vtMessagesGetText
-      Touch.InteractiveGestures = [igPan, igPressAndTap]
-      Touch.InteractiveGestureOptions = [igoPanSingleFingerHorizontal, igoPanSingleFingerVertical, igoPanInertia, igoPanGutter, igoParentPassthrough]
-      Columns = <>
+      TabOrder = 0
+      PopupMenu = BottomTabsPopupMenu
+      OnMouseDown = pgcBottomMouseDown
+      object tsMessages: TTabSheet
+        Caption = 'Messages'
+        object Panel1: TPanel
+          Left = 0
+          Top = 0
+          Width = 1172
+          Height = 25
+          Align = alTop
+          BevelOuter = bvNone
+          ShowCaption = False
+          TabOrder = 0
+          object chkShowErrors: TCheckBox
+            Left = 8
+            Top = 6
+            Width = 97
+            Height = 17
+            Hint =
+              'Show every diagnostic the analysis produced, including an unresolv' +
+              'ed member after a dot. Filters this list only - nothing is re-anal' +
+              'yzed.'
+            Caption = 'Show Errors'
+            ParentShowHint = False
+            ShowHint = True
+            TabOrder = 0
+            OnClick = chkShowErrorsClick
+          end
+        end
+        object vtMessages: TVirtualStringTree
+          Left = 0
+          Top = 25
+          Width = 1172
+          Height = 108
+          Align = alClient
+          DefaultNodeHeight = 19
+          Header.AutoSizeIndex = 0
+          Header.Height = 15
+          Header.MainColumn = -1
+          PopupMenu = MessagesPopupMenu
+          TabOrder = 1
+          TreeOptions.SelectionOptions = [toRightClickSelect, toSelectNextNodeOnRemoval]
+          OnDblClick = vtMessagesDblClick
+          OnGetText = vtMessagesGetText
+          Touch.InteractiveGestures = [igPan, igPressAndTap]
+          Touch.InteractiveGestureOptions = [igoPanSingleFingerHorizontal, igoPanSingleFingerVertical, igoPanInertia, igoPanGutter, igoParentPassthrough]
+          Columns = <>
+        end
+      end
     end
   end
   object pnlSrc: TPanel
@@ -462,6 +475,11 @@ object frmMain: TfrmMain
       OnExecute = CopyAllMessagesActionExecute
       OnUpdate = CopyAllMessagesActionUpdate
     end
+    object FindReferencesAction: TAction
+      Caption = 'Find References'
+      OnExecute = FindReferencesActionExecute
+      OnUpdate = FindReferencesActionUpdate
+    end
   end
   object SourcePopupMenu: TPopupMenu
     Left = 548
@@ -480,6 +498,9 @@ object frmMain: TfrmMain
     end
     object GotoDeclaration1: TMenuItem
       Action = GotoDeclAction
+    end
+    object FindReferences1: TMenuItem
+      Action = FindReferencesAction
     end
     object NavSep1: TMenuItem
       Caption = '-'
@@ -506,6 +527,18 @@ object frmMain: TfrmMain
     end
     object CopyAllMessages1: TMenuItem
       Action = CopyAllMessagesAction
+    end
+  end
+  object BottomTabsPopupMenu: TPopupMenu
+    Left = 616
+    Top = 400
+    object CloseSearchTab1: TMenuItem
+      Caption = 'Close'
+      OnClick = CloseSearchTabClick
+    end
+    object CloseAllSearchTabs1: TMenuItem
+      Caption = 'Close All Search Tabs'
+      OnClick = CloseAllSearchTabsClick
     end
   end
   object SynEditSearch1: TSynEditSearch

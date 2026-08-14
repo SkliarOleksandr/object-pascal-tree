@@ -74,6 +74,70 @@ type
   end;
   PPasMsgNodeData = ^TPasMsgNodeData;
 
+  { Find References results, one tab per search (see FindReferencesAction).
+
+    The tree has THREE row shapes: one flat DECL row at the very top (where
+    the symbol is defined — never counted in the tab caption, which is a USE
+    count), then a GROUP node per file ("<name> [<count>]", the Delphi Search
+    Results panel this mirrors), a HIT node per reference underneath each.
+    All three share one node-data shape — never a managed field in it, same
+    discipline TPasMsgNodeData's own comment states (VST's raw node-data
+    blocks are never finalized) — so every row's string text lives on the
+    TAB object instead, indexed by Index. }
+  TPasRefNodeKind = (rnDecl, rnGroup, rnHit);
+  TPasRefNodeData = record
+    Kind: TPasRefNodeKind;
+    Index: Integer;   // Groups[Index] or Hits[Index] — unused for rnDecl,
+                       // there is at most one
+  end;
+  PPasRefNodeData = ^TPasRefNodeData;
+
+  TFindRefGroup = record
+    FilePath: string;
+    FirstHit, Count: Integer;   // Hits is sorted (FilePath, Line) already
+  end;
+
+  // Display-ready form of one TPasRefHit: "Line N: " prefixed, leading
+  // snippet whitespace trimmed off, HiFrom/HiTo shifted to match both —
+  // computed once at tab-population time so FindRefTreeGetText and
+  // FindRefTreeDrawText can never disagree about what those two steps did
+  // to the offsets. PrefixLen marks where the "Line N: " run ends and the
+  // CODE run begins, for DrawText's own coloring (see FindRefTreeDrawText);
+  // HiFrom is always >= PrefixLen, since the match is always somewhere in
+  // the code, never inside the line-number prefix.
+  TFindRefDisplay = record
+    Text: string;
+    PrefixLen, HiFrom, HiTo: Integer;
+  end;
+
+  // One colored/styled run of text, painted left to right by DrawRefRuns —
+  // the one thing FindRefTreeDrawText needs for all three row shapes, each
+  // of which just builds a different short run list.
+  TPasRefRun = record
+    Text: string;
+    Color: TColor;
+    Bold, Underline: Boolean;
+  end;
+
+  TFindRefTab = class(TTabSheet)
+  public
+    Tree: TVirtualStringTree;
+    // The identity this tab searches for — how a repeated search finds and
+    // refreshes this SAME tab instead of opening a duplicate (see
+    // FindReferencesActionExecute). SymSym = -1 means SymMid is a UNIT
+    // target (FNav.UnitAt), not a symbol; SymSym = -2 means this is a
+    // BUILTIN-name search (FNav.BuiltinNameAt) and SymBuiltinName is what
+    // actually gets compared, SymMid being meaningless there.
+    SymMid, SymSym: Integer;
+    SymBuiltinName: string;
+    Hits: TArray<TPasRefHit>;
+    Groups: TArray<TFindRefGroup>;
+    Display: TArray<TFindRefDisplay>;
+    HasDecl: Boolean;
+    DeclHit: TPasRefHit;         // raw position, for double-click navigation
+    DeclDisplay: TFindRefDisplay;
+  end;
+
   TfrmMain = class(TForm)
     pnlTop: TPanel;
     btnOpen: TButton;
@@ -134,6 +198,13 @@ type
     btnViewUnit: TButton;
     FilesPopupMenu: TPopupMenu;
     ViewUnit1: TMenuItem;
+    pgcBottom: TPageControl;
+    tsMessages: TTabSheet;
+    BottomTabsPopupMenu: TPopupMenu;
+    CloseSearchTab1: TMenuItem;
+    CloseAllSearchTabs1: TMenuItem;
+    FindReferencesAction: TAction;
+    FindReferences1: TMenuItem;
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
     procedure btnOpenClick(Sender: TObject);
@@ -180,6 +251,19 @@ type
     procedure btnParseFmxClick(Sender: TObject);
     procedure ViewUnitActionUpdate(Sender: TObject);
     procedure ViewUnitActionExecute(Sender: TObject);
+    procedure FindReferencesActionUpdate(Sender: TObject);
+    procedure FindReferencesActionExecute(Sender: TObject);
+    procedure pgcBottomMouseDown(Sender: TObject; Button: TMouseButton;
+      Shift: TShiftState; X, Y: Integer);
+    procedure CloseSearchTabClick(Sender: TObject);
+    procedure CloseAllSearchTabsClick(Sender: TObject);
+    procedure FindRefTreeGetText(Sender: TBaseVirtualTree;
+      Node: PVirtualNode; Column: TColumnIndex; TextType: TVSTTextType;
+      var CellText: string);
+    procedure FindRefTreeDblClick(Sender: TObject);
+    procedure FindRefTreeDrawText(Sender: TBaseVirtualTree;
+      TargetCanvas: TCanvas; Node: PVirtualNode; Column: TColumnIndex;
+      const Text: string; const CellRect: TRect; var DefaultDraw: Boolean);
   private
     FFileList: TStringList;  // full paths shown in the tree
     FOpenFiles: TStringList; // path -> TTabSheet (Objects)
@@ -295,6 +379,31 @@ type
     // is built once and cached; repeating the call in Execute is cheap).
     function ActiveRoutineTarget(AWantImpl: Boolean;
       out ATarget: TPasNavTarget): Boolean;
+    // Same shape, for Find References: the active tab's caret (or the
+    // START of a selection — see the implementation) resolved to a symbol
+    // identity (FNav.SymbolAt) rather than a navigation target. TSourceTab
+    // itself is declared in the implementation section (below), so this
+    // returns the two pieces callers actually need rather than the tab.
+    function ActiveEditorPos(out AFilePath: string; out AEditor: TSynEdit;
+      out ALine, ACol: Integer): Boolean;
+    function ActiveSymbolTarget(out ATMid, ASym: Integer;
+      out AName: string): Boolean;
+    function ActiveUnitTarget(out ATargetMid: Integer;
+      out AName: string): Boolean;
+    // The third identity: a compiler-seeded builtin with no declaration
+    // anywhere (FNav.BuiltinNameAt) -- a NAME, not a (unit, symbol) pair.
+    function ActiveBuiltinTarget(out AName: string): Boolean;
+    function FindExistingSearchTab(ATMid, ASym: Integer;
+      const ABuiltinName: string = ''): TFindRefTab;
+    function MakeFindRefDisplay(const AHit: TPasRefHit;
+      const APrefix: string): TFindRefDisplay;
+    procedure PopulateFindRefTab(LTab: TFindRefTab; const AName: string;
+      const AHits: TArray<TPasRefHit>; AHasDecl: Boolean;
+      const ADeclHit: TPasRefHit);
+    function MakeRun(const AText: string; AColor: TColor;
+      ABold, AUnderline: Boolean): TPasRefRun;
+    procedure DrawRefRuns(ACanvas: TCanvas; const ACellRect: TRect;
+      const ARuns: TArray<TPasRefRun>);
     procedure SetupControls;
     procedure ApplyPasTreePalette(AHL: TSynPasSyn);
     procedure EnsureSampleProject;
@@ -697,6 +806,476 @@ var
   LTarget: TPasNavTarget;
 begin
   TAction(Sender).Enabled := ActiveRoutineTarget(False, {out} LTarget);
+end;
+
+// The active source tab plus the position Find References/SymbolAt should
+// query: a SELECTED identifier's own START (double-click, shift+arrow,
+// drag) — the caret itself sits at whichever END the selection was made
+// TOWARD, often one character past the identifier's last letter, which
+// IdentAt (an exact-token hit test) refuses — or, with no selection, the
+// plain caret. Returns False (leaving LTab/ALine/ACol untouched) when
+// there's nothing to query at all, so both ActiveSymbolTarget and
+// ActiveUnitTarget share one Exit path for that.
+function TfrmMain.ActiveEditorPos(out AFilePath: string; out AEditor: TSynEdit;
+  out ALine, ACol: Integer): Boolean;
+var
+  LTab: TSourceTab;
+begin
+  Result := not FAnalyzing and Assigned(FNav) and Assigned(pgc.ActivePage) and
+    (pgc.ActivePage is TSourceTab);
+  if not Result then
+    Exit;
+  LTab := TSourceTab(pgc.ActivePage);
+  AFilePath := LTab.FilePath;
+  AEditor := LTab.Editor;
+  if AEditor.SelAvail then
+  begin
+    ALine := AEditor.BlockBegin.Line;
+    ACol := AEditor.BlockBegin.Char;
+  end
+  else
+  begin
+    ALine := AEditor.CaretY;
+    ACol := AEditor.CaretX;
+  end;
+end;
+
+function TfrmMain.ActiveSymbolTarget(out ATMid, ASym: Integer;
+  out AName: string): Boolean;
+var
+  LFilePath: string;
+  LEditor: TSynEdit;
+  LMid, LLine, LCol: Integer;
+begin
+  Result := False;
+  if not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
+    Exit;
+  LMid := FNav.ModelIdOf(LFilePath);
+  if LMid < 0 then
+    Exit;
+  Result := FNav.SymbolAt(LMid, LLine, LCol, ATMid, ASym, AName);
+end;
+
+// The unit counterpart: a click on THIS file's own header name, or on a
+// `uses` clause item — see FNav.UnitAt for what counts as which.
+function TfrmMain.ActiveUnitTarget(out ATargetMid: Integer;
+  out AName: string): Boolean;
+var
+  LFilePath: string;
+  LEditor: TSynEdit;
+  LMid, LLine, LCol: Integer;
+begin
+  Result := False;
+  if not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
+    Exit;
+  LMid := FNav.ModelIdOf(LFilePath);
+  if LMid < 0 then
+    Exit;
+  Result := FNav.UnitAt(LMid, LLine, LCol, ATargetMid, AName);
+end;
+
+function TfrmMain.ActiveBuiltinTarget(out AName: string): Boolean;
+var
+  LFilePath: string;
+  LEditor: TSynEdit;
+  LMid, LLine, LCol: Integer;
+begin
+  Result := False;
+  if not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
+    Exit;
+  LMid := FNav.ModelIdOf(LFilePath);
+  if LMid < 0 then
+    Exit;
+  Result := FNav.BuiltinNameAt(LMid, LLine, LCol, AName);
+end;
+
+procedure TfrmMain.FindReferencesActionUpdate(Sender: TObject);
+var
+  LTMid, LSym: Integer;
+  LName: string;
+begin
+  TAction(Sender).Enabled := ActiveSymbolTarget(LTMid, LSym, LName) or
+    ActiveUnitTarget(LTMid, LName) or ActiveBuiltinTarget(LName);
+end;
+
+// A repeated search for the SAME identity (not just the same spelling — two
+// unrelated locals named the same must not collide) reuses and refreshes
+// its own tab rather than stacking a duplicate; ModelByName-style search is
+// small (one page per open search) so a linear scan is fine. ABuiltinName
+// non-empty means "match by name, ASym/ATMid don't matter" — see
+// TFindRefTab's own comment on the SymSym = -1 / -2 sentinels.
+function TfrmMain.FindExistingSearchTab(ATMid, ASym: Integer;
+  const ABuiltinName: string): TFindRefTab;
+var
+  LIdx: Integer;
+  LTab: TFindRefTab;
+begin
+  Result := nil;
+  for LIdx := 0 to pgcBottom.PageCount - 1 do
+  begin
+    if not (pgcBottom.Pages[LIdx] is TFindRefTab) then
+      Continue;
+    LTab := TFindRefTab(pgcBottom.Pages[LIdx]);
+    if ABuiltinName <> '' then
+    begin
+      if (LTab.SymSym = -2) and SameText(LTab.SymBuiltinName, ABuiltinName)
+      then
+        Exit(LTab);
+    end
+    else if (LTab.SymMid = ATMid) and (LTab.SymSym = ASym) then
+      Exit(LTab);
+  end;
+end;
+
+procedure TfrmMain.FindReferencesActionExecute(Sender: TObject);
+var
+  LTMid, LSym: Integer;
+  LName, LBuiltinName: string;
+  LTab: TFindRefTab;
+  LDeclHit: TPasRefHit;
+  LHasDecl: Boolean;
+  LHits: TArray<TPasRefHit>;
+begin
+  LBuiltinName := '';
+  if ActiveSymbolTarget(LTMid, LSym, LName) then
+  begin
+    LHasDecl := FNav.DeclHit(LTMid, LSym, {out} LDeclHit);
+    LHits := FNav.FindReferences(LTMid, LSym);
+  end
+  else if ActiveUnitTarget(LTMid, LName) then
+  begin
+    // -1: never a real symbol index, so (LTMid, -1) can't collide with an
+    // ordinary search's own key — the sentinel FindExistingSearchTab needs
+    // to tell "searching for the unit itself" apart from any real symbol.
+    LSym := -1;
+    LHasDecl := FNav.UnitDeclHit(LTMid, {out} LDeclHit);
+    LHits := FNav.FindUnitReferences(LTMid);
+  end
+  else if ActiveBuiltinTarget(LName) then
+  begin
+    // No (unit, symbol) or even a single target model exists for a builtin
+    // -- LTMid/LSym are meaningless placeholders here, matching is by name.
+    LTMid := -1;
+    LSym := -2;
+    LBuiltinName := LName;
+    LHasDecl := False;   // a builtin has no declaration site anywhere
+    LHits := FNav.FindBuiltinReferences(LName);
+  end
+  else
+    Exit;
+  LTab := FindExistingSearchTab(LTMid, LSym, LBuiltinName);
+  if not Assigned(LTab) then
+  begin
+    LTab := TFindRefTab.Create(pgcBottom);
+    LTab.PageControl := pgcBottom;
+    LTab.SymMid := LTMid;
+    LTab.SymSym := LSym;
+    LTab.SymBuiltinName := LBuiltinName;
+  end;
+  PopulateFindRefTab(LTab, LName, LHits, LHasDecl, LDeclHit);
+  pgcBottom.ActivePage := LTab;
+end;
+
+// "Line N: " for a hit row, "<file> (Line N): " for the standalone
+// declaration row — the one place both prefix shapes are built, so
+// PopulateFindRefTab and nothing else needs to know their exact wording.
+function TfrmMain.MakeFindRefDisplay(const AHit: TPasRefHit;
+  const APrefix: string): TFindRefDisplay;
+var
+  LTrimmed: string;
+  LShift: Integer;
+begin
+  LTrimmed := TrimLeft(AHit.Snippet);
+  LShift := Length(AHit.Snippet) - Length(LTrimmed);
+  Result.Text := APrefix + LTrimmed;
+  Result.PrefixLen := Length(APrefix);
+  Result.HiFrom := Result.PrefixLen + Max(0, AHit.HiFrom - LShift);
+  Result.HiTo := Result.PrefixLen + Max(0, AHit.HiTo - LShift);
+end;
+
+// (Re)builds an existing or brand-new tab's whole tree from scratch — one
+// path for both "new search" and "repeated search reusing its own tab",
+// since a refresh IS a rebuild (the analysis may have changed underneath).
+procedure TfrmMain.PopulateFindRefTab(LTab: TFindRefTab; const AName: string;
+  const AHits: TArray<TPasRefHit>; AHasDecl: Boolean;
+  const ADeclHit: TPasRefHit);
+var
+  LGroup: TFindRefGroup;
+  LIdx, LStart: Integer;
+  LDeclNode, LGroupNode, LHitNode: PVirtualNode;
+begin
+  LTab.Caption := Format('Search for ''%s'' (%d)', [AName, Length(AHits)]);
+  LTab.Hits := AHits;
+  LTab.HasDecl := AHasDecl;
+  LTab.DeclHit := ADeclHit;
+  if AHasDecl then
+    LTab.DeclDisplay := MakeFindRefDisplay(ADeclHit,
+      Format('%s (Line %d): ', [TPath.GetFileName(ADeclHit.FilePath),
+        ADeclHit.Line]));
+
+  SetLength(LTab.Display, Length(AHits));
+  for LIdx := 0 to High(AHits) do
+    LTab.Display[LIdx] :=
+      MakeFindRefDisplay(AHits[LIdx], Format('Line %d: ', [AHits[LIdx].Line]));
+
+  LTab.Groups := nil;
+  LIdx := 0;
+  while LIdx < Length(AHits) do
+  begin
+    LStart := LIdx;
+    while (LIdx < Length(AHits)) and
+          SameText(AHits[LIdx].FilePath, AHits[LStart].FilePath) do
+      Inc(LIdx);
+    LGroup.FilePath := AHits[LStart].FilePath;
+    LGroup.FirstHit := LStart;
+    LGroup.Count := LIdx - LStart;
+    LTab.Groups := LTab.Groups + [LGroup];
+  end;
+
+  if not Assigned(LTab.Tree) then
+  begin
+    LTab.Tree := TVirtualStringTree.Create(LTab);
+    LTab.Tree.Parent := LTab;
+    LTab.Tree.Align := alClient;
+    LTab.Tree.NodeDataSize := SizeOf(TPasRefNodeData);
+    LTab.Tree.DefaultNodeHeight := 19;
+    LTab.Tree.Header.AutoSizeIndex := 0;
+    LTab.Tree.Header.Height := 15;
+    LTab.Tree.Header.MainColumn := -1;
+    LTab.Tree.TreeOptions.SelectionOptions :=
+      [toRightClickSelect, toSelectNextNodeOnRemoval];
+    LTab.Tree.OnGetText := FindRefTreeGetText;
+    LTab.Tree.OnDblClick := FindRefTreeDblClick;
+    LTab.Tree.OnDrawText := FindRefTreeDrawText;
+  end;
+
+  LTab.Tree.BeginUpdate;
+  try
+    LTab.Tree.Clear;
+    if AHasDecl then
+    begin
+      LDeclNode := LTab.Tree.AddChild(nil);
+      PPasRefNodeData(LTab.Tree.GetNodeData(LDeclNode)).Kind := rnDecl;
+      PPasRefNodeData(LTab.Tree.GetNodeData(LDeclNode)).Index := 0;
+    end;
+    for LIdx := 0 to High(LTab.Groups) do
+    begin
+      LGroupNode := LTab.Tree.AddChild(nil);
+      PPasRefNodeData(LTab.Tree.GetNodeData(LGroupNode)).Kind := rnGroup;
+      PPasRefNodeData(LTab.Tree.GetNodeData(LGroupNode)).Index := LIdx;
+      for LStart := LTab.Groups[LIdx].FirstHit to
+        LTab.Groups[LIdx].FirstHit + LTab.Groups[LIdx].Count - 1 do
+      begin
+        LHitNode := LTab.Tree.AddChild(LGroupNode);
+        PPasRefNodeData(LTab.Tree.GetNodeData(LHitNode)).Kind := rnHit;
+        PPasRefNodeData(LTab.Tree.GetNodeData(LHitNode)).Index := LStart;
+      end;
+      LTab.Tree.Expanded[LGroupNode] := True;
+    end;
+  finally
+    LTab.Tree.EndUpdate;
+  end;
+end;
+
+procedure TfrmMain.FindRefTreeGetText(Sender: TBaseVirtualTree;
+  Node: PVirtualNode; Column: TColumnIndex; TextType: TVSTTextType;
+  var CellText: string);
+var
+  LTab: TFindRefTab;
+  LData: PPasRefNodeData;
+begin
+  LTab := TFindRefTab(TVirtualStringTree(Sender).Owner);
+  LData := PPasRefNodeData(Sender.GetNodeData(Node));
+  if LData = nil then
+  begin
+    CellText := '';
+    Exit;
+  end;
+  case LData.Kind of
+    rnDecl:
+      CellText := LTab.DeclDisplay.Text;
+    rnGroup:
+      CellText := Format('%s [%d]', [TPath.GetFileName(
+        LTab.Groups[LData.Index].FilePath), LTab.Groups[LData.Index].Count]);
+  else
+    CellText := LTab.Display[LData.Index].Text;
+  end;
+end;
+
+procedure TfrmMain.FindRefTreeDblClick(Sender: TObject);
+var
+  LTree: TVirtualStringTree;
+  LTab: TFindRefTab;
+  LData: PPasRefNodeData;
+  LHit: TPasRefHit;
+begin
+  LTree := TVirtualStringTree(Sender);
+  if LTree.FocusedNode = nil then
+    Exit;
+  LTab := TFindRefTab(LTree.Owner);
+  LData := PPasRefNodeData(LTree.GetNodeData(LTree.FocusedNode));
+  if LData = nil then
+    Exit;
+  case LData.Kind of
+    rnDecl:
+      begin
+        if not LTab.HasDecl then
+          Exit;
+        LHit := LTab.DeclHit;
+      end;
+    rnHit:
+      begin
+        if (LData.Index < 0) or (LData.Index > High(LTab.Hits)) then
+          Exit;
+        LHit := LTab.Hits[LData.Index];
+      end;
+  else
+    Exit;   // rnGroup: nothing to navigate to
+  end;
+  NavigateTo(LHit.FilePath, LHit.Line, LHit.Col);
+end;
+
+// Bolds/colors the matched identifier, Delphi Search-Results style: a
+// GROUP row's file name in navy bold, its [count] in amber; a HIT or DECL
+// row's "Line N: "/"<file> (Line N): " prefix in gray, the code plain, and
+// the matched identifier itself in red, bold and underlined. Group rows
+// need no highlight span at all (the whole thing is two colored runs);
+// hit/decl rows share PrefixLen/HiFrom/HiTo, already shifted to agree with
+// the exact Text VST resolved (see TFindRefDisplay/MakeFindRefDisplay).
+procedure TfrmMain.FindRefTreeDrawText(Sender: TBaseVirtualTree;
+  TargetCanvas: TCanvas; Node: PVirtualNode; Column: TColumnIndex;
+  const Text: string; const CellRect: TRect; var DefaultDraw: Boolean);
+const
+  CLR_FILE = clNavy;
+  CLR_COUNT = TColor($0000A5FF);   // amber/orange (RGB $FF,$A5,$00), BGR-packed
+  CLR_PREFIX = TColor($00808080);  // muted gray
+  CLR_MATCH = clMaroon;
+var
+  LTab: TFindRefTab;
+  LData: PPasRefNodeData;
+  LDisp: TFindRefDisplay;
+  LRuns: TArray<TPasRefRun>;
+  LGroupNameLen: Integer;
+begin
+  LData := PPasRefNodeData(Sender.GetNodeData(Node));
+  if LData = nil then
+    Exit;
+  LTab := TFindRefTab(TVirtualStringTree(Sender).Owner);
+  case LData.Kind of
+    rnGroup:
+      begin
+        if (LData.Index < 0) or (LData.Index > High(LTab.Groups)) then
+          Exit;
+        LGroupNameLen :=
+          Length(TPath.GetFileName(LTab.Groups[LData.Index].FilePath));
+        if LGroupNameLen >= Length(Text) then
+          Exit;   // malformed -- keep VST's own draw rather than guess
+        LRuns := [
+          MakeRun(Copy(Text, 1, LGroupNameLen), CLR_FILE, True, False),
+          MakeRun(Copy(Text, LGroupNameLen + 1, MaxInt), CLR_COUNT, True,
+            False)];
+      end;
+    rnDecl, rnHit:
+      begin
+        if LData.Kind = rnDecl then
+        begin
+          if not LTab.HasDecl then
+            Exit;
+          LDisp := LTab.DeclDisplay;
+        end
+        else
+        begin
+          if (LData.Index < 0) or (LData.Index > High(LTab.Display)) then
+            Exit;
+          LDisp := LTab.Display[LData.Index];
+        end;
+        if (LDisp.PrefixLen < 0) or (LDisp.HiTo > Length(Text)) or
+           (LDisp.HiFrom < LDisp.PrefixLen) or (LDisp.HiFrom >= LDisp.HiTo)
+        then
+          Exit;   // out of range for the CURRENT text -- keep default draw
+        LRuns := [
+          MakeRun(Copy(Text, 1, LDisp.PrefixLen), CLR_PREFIX, False, False),
+          MakeRun(Copy(Text, LDisp.PrefixLen + 1, LDisp.HiFrom -
+            LDisp.PrefixLen), clWindowText, False, False),
+          MakeRun(Copy(Text, LDisp.HiFrom + 1, LDisp.HiTo - LDisp.HiFrom),
+            CLR_MATCH, True, True),
+          MakeRun(Copy(Text, LDisp.HiTo + 1, MaxInt), clWindowText, False,
+            False)];
+      end;
+  else
+    Exit;
+  end;
+  DefaultDraw := False;
+  DrawRefRuns(TargetCanvas, CellRect, LRuns);
+end;
+
+function TfrmMain.MakeRun(const AText: string; AColor: TColor;
+  ABold, AUnderline: Boolean): TPasRefRun;
+begin
+  Result.Text := AText;
+  Result.Color := AColor;
+  Result.Bold := ABold;
+  Result.Underline := AUnderline;
+end;
+
+// Paints ARuns left to right starting at CellRect's own text origin
+// (cDefaultTextMargin in from the left, vertically centered) -- the one
+// place that actually touches the canvas, so every row shape above just
+// describes WHAT to draw, never HOW.
+procedure TfrmMain.DrawRefRuns(ACanvas: TCanvas; const ACellRect: TRect;
+  const ARuns: TArray<TPasRefRun>);
+var
+  LIdx, LX, LY: Integer;
+  LStyle: TFontStyles;
+begin
+  // TextMargin itself is `protected` on TBaseVirtualTree (visible only
+  // inside VST's own unit) -- cDefaultTextMargin is what it defaults to and
+  // nothing here ever changes it, so it stays the right offset.
+  LX := ACellRect.Left + cDefaultTextMargin;
+  LY := (ACellRect.Top + ACellRect.Bottom - ACanvas.TextHeight('Hg')) div 2;
+  ACanvas.Brush.Style := bsClear;
+  for LIdx := 0 to High(ARuns) do
+  begin
+    LStyle := [];
+    if ARuns[LIdx].Bold then
+      Include(LStyle, fsBold);
+    if ARuns[LIdx].Underline then
+      Include(LStyle, fsUnderline);
+    ACanvas.Font.Style := LStyle;
+    ACanvas.Font.Color := ARuns[LIdx].Color;
+    ACanvas.TextOut(LX, LY, ARuns[LIdx].Text);
+    Inc(LX, ACanvas.TextWidth(ARuns[LIdx].Text));
+  end;
+end;
+
+procedure TfrmMain.pgcBottomMouseDown(Sender: TObject; Button: TMouseButton;
+  Shift: TShiftState; X, Y: Integer);
+var
+  LIdx: Integer;
+begin
+  if Button <> mbRight then
+    Exit;
+  LIdx := pgcBottom.IndexOfTabAt(X, Y);
+  if LIdx >= 0 then
+    pgcBottom.ActivePage := pgcBottom.Pages[LIdx];
+end;
+
+// Both handlers no-op on tsMessages: it is never a TFindRefTab, so a right-
+// click that lands on it (or on empty tab-strip space, which leaves
+// ActivePage wherever it already was) closes nothing.
+procedure TfrmMain.CloseSearchTabClick(Sender: TObject);
+begin
+  if pgcBottom.ActivePage is TFindRefTab then
+    pgcBottom.ActivePage.Free;
+end;
+
+procedure TfrmMain.CloseAllSearchTabsClick(Sender: TObject);
+var
+  LIdx: Integer;
+begin
+  for LIdx := pgcBottom.PageCount - 1 downto 0 do
+    if pgcBottom.Pages[LIdx] is TFindRefTab then
+      pgcBottom.Pages[LIdx].Free;
 end;
 
 { The word under the caret, taken as a FILE or UNIT name: the maximal run of

@@ -55,6 +55,20 @@ type
     Name: string;        // declared name (original spelling)
   end;
 
+  // One USE of a symbol found by FindReferences — never the declaration
+  // itself (see FindReferences' own comment for why). Snippet is the RAW
+  // source line (leading whitespace intact, only the trailing break
+  // stripped — TPasTokenStream.LineText), so HiFrom/HiTo stay valid offsets
+  // into it; a host that trims leading whitespace for display must shift
+  // both by the same amount rather than re-deriving them from the trimmed
+  // text.
+  TPasRefHit = record
+    FilePath: string;
+    Line, Col: Integer;      // 1-based, for NavigateTo
+    Snippet: string;
+    HiFrom, HiTo: Integer;   // 0-based offsets into Snippet to highlight
+  end;
+
   TPasNavigator = class
   private type
     TNavCache = class
@@ -74,6 +88,12 @@ type
       DeclKey, ImplKey: TDictionary<string, Integer>;       // exact arity
       DeclKeyLoose, ImplKeyLoose: TDictionary<string, Integer>; // arity-blind
                                                                  // fallback
+      // Reverse of every symbol's OWN DeclNode -- lets SymbolAt answer "Find
+      // References" from the DECLARATION site itself (a type's own name, a
+      // field, a routine header...), not only from a place that USES it.
+      // Built eagerly alongside NodeOfVis, same cost shape (one pass, bounded
+      // by this model's own symbol count rather than its node count).
+      DeclSymOfNode: TDictionary<Integer, Integer>;
       destructor Destroy; override;
     end;
   private
@@ -91,6 +111,12 @@ type
       out ATarget: TPasNavTarget): Boolean;
     function TargetForUnitId(AUid: Integer; const AName: string;
       out ATarget: TPasNavTarget): Boolean;
+    function ResolveSymbolAt(AMid, ANode: Integer;
+      out ATMid, ASym: Integer): Boolean;
+    function IsDeclSelfName(LM: TPasSemaModel; ASym, ANode: Integer): Boolean;
+    function IsOwnUnitNameNode(LM: TPasSemaModel; ANode: Integer): Boolean;
+    function HitFromNode(LM: TPasSemaModel; ANode: Integer;
+      out AHit: TPasRefHit): Boolean;
     // Declaration<->implementation toggle helpers (all pure CST walks — no
     // dependency on the resolver's symbol table, so a redeclaration or an
     // unusual overload shape can never break navigation, only miss it).
@@ -132,6 +158,50 @@ type
     // (no source declaration) and unresolved names.
     function ResolveDecl(AMid, ANode: Integer;
       out ATarget: TPasNavTarget): Boolean;
+    // IdentAt + ResolveSymbolAt in one step — the identity Find References
+    // searches for, and the Enabled test for the command that starts one.
+    function SymbolAt(AMid, ALine, ACol: Integer;
+      out ATMid, ASym: Integer; out AName: string): Boolean;
+    // Every place ASym (declared in model ATMid) is actually USED, by
+    // resolved symbol identity — never a text search. See the
+    // implementation comment for what that does and does not cover.
+    function FindReferences(ATMid, ASym: Integer): TArray<TPasRefHit>;
+    // The declaration site FindReferences itself always excludes (see its
+    // own comment) — a separate call because a host that wants "where is
+    // this defined, plus every use" (Find References' own results list,
+    // with the declaration pinned first) needs the two answers kept apart:
+    // the USE count must not include it. False when ASym has no DeclNode at
+    // all — the implicit Result, or a symbol SymbolAt would have declined
+    // in the first place (SymbolAt is expected to have gated those already;
+    // this is the same test repeated so the two can never disagree).
+    function DeclHit(ATMid, ASym: Integer; out AHit: TPasRefHit): Boolean;
+    { The unit counterpart of SymbolAt/FindReferences/DeclHit: a click on
+      THIS model's own header name, or on a `uses` clause item (any
+      segment), resolved to the TARGET model id rather than a (unit, symbol)
+      pair — a `uses` name has no single symbol identity shared across
+      referring units (each gets its OWN local skUnitRef symbol), so
+      searching by NAME/model instead is the only identity that means
+      anything project-wide here. }
+    function UnitAt(AMid, ALine, ACol: Integer; out ATargetMid: Integer;
+      out AName: string): Boolean;
+    // Every `uses` clause that resolved to ATargetMid, across the project.
+    function FindUnitReferences(ATargetMid: Integer): TArray<TPasRefHit>;
+    // ATargetMid's own header position — always available (see
+    // TargetForUnitId's own comment: every analyzed model has one).
+    function UnitDeclHit(ATargetMid: Integer;
+      out AHit: TPasRefHit): Boolean;
+    { The THIRD identity, for a compiler-seeded builtin with no source
+      declaration anywhere (SymbolAt declines these — see its own comment).
+      Builtins are seeded PER MODEL, so there is no (unit, symbol) pair or
+      even a single target model to key a search on; the NAME is the only
+      identity left, and FindBuiltinReferences below is restricted enough
+      (sfBuiltin-flagged bindings only) that this stays a resolved-identity
+      search, not the text search the rest of this file avoids. }
+    function BuiltinNameAt(AMid, ALine, ACol: Integer;
+      out AName: string): Boolean;
+    // Every reference bound to a compiler-seeded builtin named AName, across
+    // every loaded model.
+    function FindBuiltinReferences(const AName: string): TArray<TPasRefHit>;
     { Cursor on (or inside) a routine DECLARATION with no body — a `uses`-
       section/class-member header, or a `forward`-declared global/nested
       proc — that has a matching implementation elsewhere in the SAME unit
@@ -170,6 +240,7 @@ begin
   ImplKey.Free;
   DeclKeyLoose.Free;
   ImplKeyLoose.Free;
+  DeclSymOfNode.Free;
   inherited;
 end;
 
@@ -227,6 +298,10 @@ begin
   for LIdx := 0 to High(LM.Tree.Nodes) do
     if LM.Tree.Nodes[LIdx].Kind = nkIdent then
       Result.NodeOfVis.AddOrSetValue(LM.Tree.Nodes[LIdx].FirstToken, LIdx);
+  Result.DeclSymOfNode := TDictionary<Integer, Integer>.Create;
+  for LIdx := 0 to LM.SymCount - 1 do
+    if LM.Symbols[LIdx].DeclNode <> NIL_NODE then
+      Result.DeclSymOfNode.AddOrSetValue(LM.Symbols[LIdx].DeclNode, LIdx);
   FCaches.Add(AMid, Result);
 end;
 
@@ -528,6 +603,51 @@ begin
   end;
 end;
 
+// Resolves ANode to the (unit id, symbol) pair that IS the identity every
+// other reference to the same entity is recorded against — RefMap for a
+// same-model reference, ExtRefMap for a cross-model one. False only for a
+// node that names nothing at all: no local binding, no cross-unit one.
+//
+// Deliberately stops HERE rather than reaching for ResolveDecl's further
+// fallbacks (a bare namespace-qualifier segment via QualifierUnitAt, a
+// builtin redirected to a used unit's real declaration via ResolveRealDecl,
+// the intrinsic-with-no-declaration-anywhere case) — those answer WHERE TO
+// NAVIGATE, a different question from WHAT is being asked about, and none of
+// them hands back a stable (unit, symbol) pair a project-wide scan could
+// search FOR: a namespace qualifier has no symbol of its own at all, and
+// ResolveRealDecl's redirect only ever fires transiently inside a member/
+// ancestor walk (FindMemberX and friends), never as the identity actually
+// stored at a plain identifier reference — every OTHER unit's own bare use
+// of the same builtin NAME still binds to that unit's own separately-seeded
+// symbol (builtins are seeded PER MODEL — PasTree.Sema.Builtins), so
+// redirecting here would not make the scan any more complete, only harder
+// to reason about. The implicit `Result` variable needs no special case:
+// it IS a real, ordinary RefMap hit (a per-routine symbol, just body-less by
+// construction), so it falls out of the plain lookup below for free.
+function TPasNavigator.ResolveSymbolAt(AMid, ANode: Integer;
+  out ATMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LExt: TPasExtRef;
+begin
+  Result := False;
+  ATMid := -1;
+  ASym := NIL_SYM;
+  if (AMid < 0) or (ANode = NIL_NODE) then
+    Exit;
+  LM := FProj.Model(AMid);
+  ATMid := AMid;
+  ASym := LM.RefMap[ANode];
+  if ASym = NIL_SYM then
+  begin
+    if not LM.ExtRefMap.TryGetValue(ANode, LExt) then
+      Exit;
+    ATMid := LExt.UnitId;
+    ASym := LExt.Sym;
+  end;
+  Result := True;
+end;
+
 function TPasNavigator.ResolveDecl(AMid, ANode: Integer;
   out ATarget: TPasNavTarget): Boolean;
 var
@@ -562,25 +682,18 @@ begin
         LM.Symbols[LSym].Name, ATarget));
   end;
 
-  LTMid := AMid;
-  LSym := LM.RefMap[ANode];
-  if LSym = NIL_SYM then
+  if not ResolveSymbolAt(AMid, ANode, LTMid, LSym) then
   begin
-    if not LM.ExtRefMap.TryGetValue(ANode, LExt) then
-    begin
-      // Not a value/type reference at all — ANode may still be a NAMESPACE
-      // QUALIFIER segment of a bigger dotted expression (`System`/`SysUtils`
-      // in `System.SysUtils.TBytes`, `System` alone in `System.sLineBreak`):
-      // real dcc lets you click/hover the qualifier itself, same as a `uses`
-      // clause name, distinct from the MEMBER (TBytes/sLineBreak), which
-      // resolves via the ordinary ExtRefMap path above/below instead.
-      LQUid := FProj.QualifierUnitAt(AMid, ANode, LMatchNode);
-      if LQUid >= 0 then
-        Exit(TargetForUnitId(LQUid, LM.Tree.NodeText(ANode), ATarget));
-      Exit;
-    end;
-    LTMid := LExt.UnitId;
-    LSym := LExt.Sym;
+    // Not a value/type reference at all — ANode may still be a NAMESPACE
+    // QUALIFIER segment of a bigger dotted expression (`System`/`SysUtils`
+    // in `System.SysUtils.TBytes`, `System` alone in `System.sLineBreak`):
+    // real dcc lets you click/hover the qualifier itself, same as a `uses`
+    // clause name, distinct from the MEMBER (TBytes/sLineBreak), which
+    // resolves via ResolveSymbolAt's ordinary ExtRefMap path above instead.
+    LQUid := FProj.QualifierUnitAt(AMid, ANode, LMatchNode);
+    if LQUid >= 0 then
+      Exit(TargetForUnitId(LQUid, LM.Tree.NodeText(ANode), ATarget));
+    Exit;
   end;
 
   // A `uses` clause name (skUnitRef): its own DeclNode is just the clause's
@@ -613,6 +726,405 @@ begin
   //    what the RAD Studio IDE does for these.
   Result := TargetForUnitId(FProj.EnsureSystemUnit,
     FProj.Model(LTMid).Symbols[LSym].Name, ATarget);
+end;
+
+// IdentAt + ResolveSymbolAt in one step. False exactly when there is nothing
+// under the cursor with a STABLE identity: no identifier at all, or one that
+// resolves to a compiler intrinsic with no source declaration ANYWHERE
+// (Length, Integer, True...).
+//
+// A seeded builtin that DOES have a real declaration somewhere reachable
+// (TObject/Exception/TBytes/TArray...) is redirected there — the same
+// ResolveRealDecl hop ResolveDecl's own fallback (1) uses for navigation,
+// reused here for identity. Builtins are seeded PER MODEL (PasTree.Sema.
+// Builtins), so this is NOT a complete project-wide answer: every OTHER
+// unit's own bare use of the same name still binds to ITS OWN separately-
+// seeded copy, never to this redirected symbol — but the declaring unit's
+// OWN body resolves the name to the REAL declaration directly (a real
+// declaration outranks a seed in its own scope, same precedence a member
+// gets over a predefined name — 11 §11.4), so the search is genuinely
+// complete within THAT unit, just not beyond it. Showing that is more
+// honest than an outright refusal, which is what this used to do.
+//
+// The implicit `Result` needs no gate: no DeclNode either, but a plain
+// lookup already handles it correctly — see ResolveSymbolAt's own comment.
+function TPasNavigator.SymbolAt(AMid, ALine, ACol: Integer;
+  out ATMid, ASym: Integer; out AName: string): Boolean;
+var
+  LIdent: TPasNavIdent;
+  LCache: TNavCache;
+  LFbMid, LFbSym: Integer;
+begin
+  Result := False;
+  if not IdentAt(AMid, ALine, ACol, LIdent) then
+    Exit;
+  // The DECLARATION site itself — a type's own name, a field, a routine
+  // header (interface OR implementation; each overload's own DeclNode is
+  // distinct and reliable, unlike the ordinary REFERENCE binding those
+  // headers ALSO carry — see IsDeclSelfName), a parameter, anything with a
+  // real DeclNode. Checked before the ordinary reference path below so a
+  // click here always answers with ITS OWN identity, never something an
+  // incidental self-reference happened to resolve to.
+  //
+  // skUnitRef is excluded: a `uses` name's DeclNode is its LEAF segment
+  // (CollectUsesItem), but that symbol means nothing outside the referring
+  // unit — UnitAt/FindUnitReferences is the right tool for it, not this.
+  LCache := CacheOf(AMid);
+  if LCache.DeclSymOfNode.TryGetValue(LIdent.Node, ASym) and
+     (FProj.Model(AMid).Symbols[ASym].Kind <> skUnitRef) then
+  begin
+    ATMid := AMid;
+    AName := FProj.Model(AMid).Symbols[ASym].Name;
+    Exit(True);
+  end;
+  if not ResolveSymbolAt(AMid, LIdent.Node, ATMid, ASym) then
+    Exit;
+  if (FProj.Model(ATMid).Symbols[ASym].DeclNode = NIL_NODE) and
+     not SameText(FProj.Model(ATMid).Symbols[ASym].Name, 'Result') then
+  begin
+    if not FProj.ResolveRealDecl(AMid,
+      FProj.Model(ATMid).Symbols[ASym].NameLower, LFbMid, LFbSym) then
+      Exit;
+    ATMid := LFbMid;
+    ASym := LFbSym;
+  end;
+  AName := FProj.Model(ATMid).Symbols[ASym].Name;
+  Result := True;
+end;
+
+// True when ANode (a same-model RefMap hit — never reached for a cross-
+// model ExtRefMap one, see FindReferences: a routine's decl and impl are
+// ALWAYS in the same unit, and no unit's ExtRefMap entry can ever literally
+// BE another unit's own declaration node) is the entity NAMING ITSELF in a
+// declaration or implementation header, rather than a genuine use.
+//
+// The routine case is checked STRUCTURALLY, not by symbol identity, because
+// identity is exactly what is unreliable here: an unqualified routine's own
+// name in EITHER its declaration or its implementation header resolves via
+// the ordinary Phase-1 lookup, which has no argument list to disambiguate
+// an overload by, so EVERY overload's own header name lands on whichever
+// symbol heads the chain — dcc-verified harmless everywhere else (nothing
+// needs a header's own name bound to ITS SPECIFIC overload; decl<->impl
+// pairing uses RTSegments' own structural match, never RefMap), but it is
+// precisely the imprecision Find References must not surface: without this
+// filter, searching for the FIRST overload turns up every sibling
+// overload's header too, and searching for a LATER one turns up nothing of
+// its own. "Is ANode the trailing name segment of the nkRoutine ANode sits
+// directly inside" sidesteps the question entirely — true for every
+// overload's own header regardless of which symbol RefMap happened to bind
+// it to.
+//
+// Every other declaration (a type, a variable, a field, a routine with no
+// separate implementation...) has no such ambiguity — one symbol, one
+// DeclNode — and a plain equality against it also catches a type naming
+// itself in its own declaration (`TThing = record`), which the resolver
+// does write into RefMap.
+function TPasNavigator.IsDeclSelfName(LM: TPasSemaModel;
+  ASym, ANode: Integer): Boolean;
+var
+  LParent, LNameNode: Integer;
+  LQualIdents: TArray<Integer>;
+begin
+  LParent := LM.Tree.Nodes[ANode].Parent;
+  if (LParent <> NIL_NODE) and (LM.Tree.Nodes[LParent].Kind = nkRoutine) and
+     RTSegments(LM, LParent, LQualIdents, LNameNode) and
+     (LNameNode = ANode) then
+    Exit(True);
+  Result := ANode = LM.Symbols[ASym].DeclNode;
+end;
+
+// One hit's position + snippet from the node RefMap/ExtRefMap point at (or,
+// for FindUnitReferences/UnitDeclHit, a `uses` item's whole name node or a
+// unit's own header). False only when the node has no visible token
+// (defensive — every node a real caller passes came from a live map entry
+// or CollectRoot's own guarantee, so this should not happen in practice;
+// mirrors TargetFromNode's own guard). Descends to the leftmost child first
+// (same reason TargetFromNode does: an nkMember's OWN FirstToken is the DOT,
+// not its first visible character) — a no-op for the common case, an
+// ordinary reference's node, which is always the leaf nkIdent already (the
+// CrossResolve comment on the nkMember case: "the member name of A.B is
+// resolved via A's scope... never as a plain identifier"); load-bearing
+// only for a dotted UNIT name, the one hit shape that can be a whole
+// nkMember chain rather than its leaf.
+function TPasNavigator.HitFromNode(LM: TPasSemaModel; ANode: Integer;
+  out AHit: TPasRefHit): Boolean;
+var
+  LVisTok, LTokLen, LFirst: Integer;
+  LVis: TPasVisibleToken;
+  LTS: TPasTokenStream;
+begin
+  Result := False;
+  LFirst := ANode;
+  while LM.Tree.Nodes[LFirst].FirstChild <> NIL_NODE do
+    LFirst := LM.Tree.Nodes[LFirst].FirstChild;
+  LVisTok := LM.Tree.Nodes[LFirst].FirstToken;
+  if (LVisTok < 0) or (LVisTok > High(LM.Tree.Source.Visible)) then
+    Exit;
+  LVis := LM.Tree.Source.Visible[LVisTok];
+  LTS := LM.Tree.Source.Files[LVis.FileId];
+  AHit.FilePath := LM.Tree.Source.FileNames[LVis.FileId];
+  LTS.OffsetToLineCol(LTS.Tokens[LVis.TokenIndex].Start, AHit.Line, AHit.Col);
+  AHit.Snippet := LTS.LineText(AHit.Line);
+  LTokLen := LTS.Tokens[LVis.TokenIndex].Len;
+  // The snippet is the RAW line (LineText strips only the trailing break),
+  // so these offsets are directly Col-relative — see TPasRefHit's comment.
+  AHit.HiFrom := AHit.Col - 1;
+  AHit.HiTo := AHit.HiFrom + LTokLen;
+  Result := True;
+end;
+
+{ Every place ASym (declared in model ATMid) is actually USED — resolved
+  symbol identity via RefMap (same-model references) and ExtRefMap
+  (cross-model), never a text search: two same-named locals in different
+  scopes can never cross-pollute, and an overload-precise call site lands on
+  the actual overload rather than any same-named routine.
+
+  No separate CallTargetX scan is needed: every successful SelectCallTarget
+  is immediately followed by RepointCallee (PasTree.Sema.Project.pas, the
+  nkCall branch of CrossType), which writes that SAME (unit, symbol) pair
+  into RefMap/ExtRefMap at the callee node — so by the time analysis has
+  finished, the ordinary scan below is already overload-precise for calls,
+  for free.
+
+  A declaration's own name binds to itself surprisingly often (a type names
+  itself in `TThing = record`; a routine's own header, decl AND impl alike,
+  resolves its own bare name the same way any other reference does) — see
+  IsDeclSelfName, called below, for what filters those back out and why the
+  routine half of that needs a structural test rather than a symbol-identity
+  one. Only genuine USES survive; that is also the ONLY place this scan can
+  drop something the underlying maps recorded — everything else is kept.
+
+  RefMap is scanned only for the model that IS ATMid — its entries are
+  symbol ids local to that ONE model's table, so testing them against ASym
+  from any OTHER model's RefMap would compare unrelated integers.
+  IsDeclSelfName is likewise only ever checked there, never against an
+  ExtRefMap hit: a routine's decl and impl are ALWAYS in the same unit, so a
+  cross-model entry can never literally BE that unit's own declaration node.
+  ExtRefMap is scanned in every model (including ATMid's own, since a
+  same-unit reference can still be recorded there rather than in RefMap,
+  though in practice the resolver never double-writes a node into both —
+  CrossResolve's own guard skips a node whose RefMap entry is already set). }
+function TPasNavigator.FindReferences(ATMid, ASym: Integer): TArray<TPasRefHit>;
+var
+  LHits: TList<TPasRefHit>;
+  LMi, LNode: Integer;
+  LM: TPasSemaModel;
+  LPair: TPair<Integer, TPasExtRef>;
+  LHit: TPasRefHit;
+begin
+  LHits := TList<TPasRefHit>.Create;
+  try
+    for LMi := 0 to FProj.ModelCount - 1 do
+    begin
+      LM := FProj.Model(LMi);
+      if LMi = ATMid then
+        for LNode := 0 to High(LM.RefMap) do
+          if (LM.RefMap[LNode] = ASym) and
+             not IsDeclSelfName(LM, ASym, LNode) and
+             HitFromNode(LM, LNode, LHit) then
+            LHits.Add(LHit);
+      for LPair in LM.ExtRefMap do
+        if (LPair.Value.UnitId = ATMid) and (LPair.Value.Sym = ASym) and
+           HitFromNode(LM, LPair.Key, LHit) then
+          LHits.Add(LHit);
+    end;
+    Result := LHits.ToArray;
+  finally
+    LHits.Free;
+  end;
+  TArray.Sort<TPasRefHit>(Result, TComparer<TPasRefHit>.Construct(
+    function(const A, B: TPasRefHit): Integer
+    begin
+      Result := CompareText(A.FilePath, B.FilePath);
+      if Result = 0 then
+        Result := A.Line - B.Line;
+    end));
+end;
+
+function TPasNavigator.DeclHit(ATMid, ASym: Integer;
+  out AHit: TPasRefHit): Boolean;
+var
+  LM: TPasSemaModel;
+  LDeclNode: Integer;
+begin
+  Result := False;
+  if ATMid < 0 then
+    Exit;
+  LM := FProj.Model(ATMid);
+  LDeclNode := LM.Symbols[ASym].DeclNode;
+  if LDeclNode = NIL_NODE then
+    Exit;
+  Result := HitFromNode(LM, LDeclNode, AHit);
+end;
+
+// True when ANode is (part of) THIS model's OWN unit/program/library name
+// header — node 0's FirstChild, per CollectRoot's shape (TargetForUnitId
+// already relies on the same node for the reverse direction: unit id ->
+// its own name position). Climbs from ANode through Parent links, so any
+// segment of a dotted header (`unit Namespace.Foo;`) counts, same "any
+// segment links the same way" convention IdentAt's uses-clause handling
+// already applies.
+function TPasNavigator.IsOwnUnitNameNode(LM: TPasSemaModel;
+  ANode: Integer): Boolean;
+var
+  LHeader, LCur: Integer;
+begin
+  Result := False;
+  LHeader := LM.Tree.Nodes[0].FirstChild;
+  if LHeader = NIL_NODE then
+    Exit;
+  LCur := ANode;
+  while LCur <> NIL_NODE do
+  begin
+    if LCur = LHeader then
+      Exit(True);
+    LCur := LM.Tree.Nodes[LCur].Parent;
+  end;
+end;
+
+function TPasNavigator.UnitAt(AMid, ALine, ACol: Integer;
+  out ATargetMid: Integer; out AName: string): Boolean;
+var
+  LIdent: TPasNavIdent;
+  LM: TPasSemaModel;
+  LSym, LIdx: Integer;
+begin
+  Result := False;
+  if not IdentAt(AMid, ALine, ACol, LIdent) then
+    Exit;
+  LM := FProj.Model(AMid);
+  if IsOwnUnitNameNode(LM, LIdent.Node) then
+  begin
+    ATargetMid := AMid;
+    AName := LM.Tree.NodeText(LM.Tree.Nodes[0].FirstChild);
+    Exit(True);
+  end;
+  // IdentAt already redirects any segment of a dotted `uses` name to its
+  // LEAF (UsesQualifierInfo), which is exactly where CollectUsesItem put
+  // the local skUnitRef symbol's own DeclNode — so a plain RefMap read
+  // here is enough, no separate qualifier climb needed.
+  LSym := LM.RefMap[LIdent.Node];
+  if (LSym = NIL_SYM) or (LM.Symbols[LSym].Kind <> skUnitRef) then
+    Exit;
+  for LIdx := 0 to High(LM.UsesList) do
+    if LM.UsesList[LIdx].Sym = LSym then
+    begin
+      if LM.UsesList[LIdx].UnitId < 0 then
+        Exit;   // unresolved uses -- nothing to search for
+      ATargetMid := LM.UsesList[LIdx].UnitId;
+      AName := LM.Symbols[LSym].Name;
+      Exit(True);
+    end;
+end;
+
+// Every `uses` clause that resolved to ATargetMid, across the project — the
+// unit counterpart of FindReferences. UsesList's own NameNode may be a
+// dotted nkMember chain (CollectUsesItem stores the WHOLE name, not just
+// the leaf, unlike the symbol's own DeclNode) — HitFromNode's own leftmost
+// descent handles that shape directly.
+function TPasNavigator.FindUnitReferences(
+  ATargetMid: Integer): TArray<TPasRefHit>;
+var
+  LHits: TList<TPasRefHit>;
+  LMi, LIdx: Integer;
+  LM: TPasSemaModel;
+  LHit: TPasRefHit;
+begin
+  LHits := TList<TPasRefHit>.Create;
+  try
+    for LMi := 0 to FProj.ModelCount - 1 do
+    begin
+      LM := FProj.Model(LMi);
+      for LIdx := 0 to High(LM.UsesList) do
+        if (LM.UsesList[LIdx].UnitId = ATargetMid) and
+           HitFromNode(LM, LM.UsesList[LIdx].NameNode, LHit) then
+          LHits.Add(LHit);
+    end;
+    Result := LHits.ToArray;
+  finally
+    LHits.Free;
+  end;
+  TArray.Sort<TPasRefHit>(Result, TComparer<TPasRefHit>.Construct(
+    function(const A, B: TPasRefHit): Integer
+    begin
+      Result := CompareText(A.FilePath, B.FilePath);
+      if Result = 0 then
+        Result := A.Line - B.Line;
+    end));
+end;
+
+function TPasNavigator.UnitDeclHit(ATargetMid: Integer;
+  out AHit: TPasRefHit): Boolean;
+var
+  LM: TPasSemaModel;
+  LHeader: Integer;
+begin
+  Result := False;
+  if ATargetMid < 0 then
+    Exit;
+  LM := FProj.Model(ATargetMid);
+  LHeader := LM.Tree.Nodes[0].FirstChild;
+  Result := (LHeader <> NIL_NODE) and HitFromNode(LM, LHeader, AHit);
+end;
+
+function TPasNavigator.BuiltinNameAt(AMid, ALine, ACol: Integer;
+  out AName: string): Boolean;
+var
+  LIdent: TPasNavIdent;
+  LM: TPasSemaModel;
+  LSym, LFbMid, LFbSym: Integer;
+begin
+  Result := False;
+  if not IdentAt(AMid, ALine, ACol, LIdent) then
+    Exit;
+  LM := FProj.Model(AMid);
+  LSym := LM.RefMap[LIdent.Node];
+  if (LSym = NIL_SYM) or not (sfBuiltin in LM.Symbols[LSym].Flags) then
+    Exit;
+  // A builtin that DOES have a real declaration reachable somewhere is
+  // SymbolAt's job (its own ResolveRealDecl redirect gives a precise
+  // (unit, symbol) identity) -- this name-based fallback is only for the
+  // ones that genuinely have none.
+  if FProj.ResolveRealDecl(AMid, LM.Symbols[LSym].NameLower, LFbMid, LFbSym)
+  then
+    Exit;
+  AName := LM.Symbols[LSym].Name;
+  Result := True;
+end;
+
+function TPasNavigator.FindBuiltinReferences(
+  const AName: string): TArray<TPasRefHit>;
+var
+  LHits: TList<TPasRefHit>;
+  LMi, LNode, LSym: Integer;
+  LM: TPasSemaModel;
+  LHit: TPasRefHit;
+begin
+  LHits := TList<TPasRefHit>.Create;
+  try
+    for LMi := 0 to FProj.ModelCount - 1 do
+    begin
+      LM := FProj.Model(LMi);
+      for LNode := 0 to High(LM.RefMap) do
+      begin
+        LSym := LM.RefMap[LNode];
+        if (LSym <> NIL_SYM) and (sfBuiltin in LM.Symbols[LSym].Flags) and
+           SameText(LM.Symbols[LSym].Name, AName) and
+           HitFromNode(LM, LNode, LHit) then
+          LHits.Add(LHit);
+      end;
+    end;
+    Result := LHits.ToArray;
+  finally
+    LHits.Free;
+  end;
+  TArray.Sort<TPasRefHit>(Result, TComparer<TPasRefHit>.Construct(
+    function(const A, B: TPasRefHit): Integer
+    begin
+      Result := CompareText(A.FilePath, B.FilePath);
+      if Result = 0 then
+        Result := A.Line - B.Line;
+    end));
 end;
 
 { Declaration <-> implementation toggle.

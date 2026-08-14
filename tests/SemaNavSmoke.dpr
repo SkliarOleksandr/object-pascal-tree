@@ -30,6 +30,40 @@ uses
   PasTree.TestKit in 'PasTree.TestKit.pas';
 
 const
+  // A bare call to an INHERITED, non-overloaded method, SAME UNIT as its
+  // declaration (System.Classes.pas' TMemoryStream.SetSize calling bare
+  // `Seek`, the real bug report). Real dcc compiles this as ordinary single
+  // inheritance; the point here is purely internal bookkeeping (see
+  // RepointCallee) -- CrossResolveInherited's FindMemberX binds the call via
+  // ExtRefMap first (name-only match, no argument types), then CrossType's
+  // own overload-precise pass runs on the SAME node and used to write RefMap
+  // WITHOUT clearing that stale ExtRefMap entry. With only one overload both
+  // passes agree on the same symbol, so the node ends up recorded in BOTH
+  // maps -- invisible to a single RefMap-then-ExtRefMap lookup, but Find
+  // References (which reads both as independent evidence) counted the one
+  // real call twice.
+  UNIT_RQ =
+    'unit NavRQ;'#10 +                          // 1
+    'interface'#10 +                            // 2
+    'type'#10 +                                 // 3
+    '  TRQBase = class'#10 +                    // 4
+    '  public'#10 +                             // 5
+    '    procedure Ping(A: Integer); virtual;'#10 + // 6
+    '  end;'#10 +                               // 7
+    '  TRQChild = class(TRQBase)'#10 +          // 8
+    '  public'#10 +                             // 9
+    '    procedure UseIt;'#10 +                 // 10
+    '  end;'#10 +                               // 11
+    'implementation'#10 +                       // 12
+    'procedure TRQBase.Ping(A: Integer);'#10 +  // 13
+    'begin'#10 +                                // 14
+    'end;'#10 +                                 // 15
+    'procedure TRQChild.UseIt;'#10 +             // 16
+    'begin'#10 +                                // 17
+    '  Ping(1);'#10 +                           // 18  Ping col 3
+    'end;'#10 +                                 // 19
+    'end.'#10;                                  // 20
+
   // Line/col layout matters: the checks below address exact positions.
   UNIT_A =
     'unit NavA;'#10 +                          // 1
@@ -54,8 +88,12 @@ const
     '  TBytes = record'#10 +                   // 4  TBytes at col 3
     '    Len: Integer;'#10 +                   // 5
     '  end;'#10 +                              // 6
-    'implementation'#10 +                      // 7
-    'end.'#10;                                 // 8
+    'var'#10 +                                 // 7
+    '  GBytes: TBytes;'#10 +                   // 8  TBytes col 11 -- an
+                                                //    IN-UNIT use, for the
+                                                //    SymbolAt redirect test
+    'implementation'#10 +                      // 9
+    'end.'#10;                                 // 10
 
   // A fixture for the IMPLICIT `System` unit — NEVER named in any `uses`
   // clause (that's the whole point: every unit uses it without saying so),
@@ -413,6 +451,29 @@ begin
     (LTarget.Line = AWantLine) and (LTarget.Col = AWantCol));
 end;
 
+function CountHitsIn(const AHits: TArray<TPasRefHit>;
+  const AFile: string): Integer;
+var
+  LIdx: Integer;
+begin
+  Result := 0;
+  for LIdx := 0 to High(AHits) do
+    if SameText(TPath.GetFileName(AHits[LIdx].FilePath), AFile) then
+      Inc(Result);
+end;
+
+function HasHitAt(const AHits: TArray<TPasRefHit>; const AFile: string;
+  ALine, ACol: Integer): Boolean;
+var
+  LIdx: Integer;
+begin
+  Result := False;
+  for LIdx := 0 to High(AHits) do
+    if SameText(TPath.GetFileName(AHits[LIdx].FilePath), AFile) and
+       (AHits[LIdx].Line = ALine) and (AHits[LIdx].Col = ACol) then
+      Exit(True);
+end;
+
 // Declaration -> implementation: cursor at (ALine,ACol), expect the body's
 // first-statement (or empty-body fallback) at (AWantLine,AWantCol). AWantCol
 // < 0 skips the column check (some callers only care about the line).
@@ -451,6 +512,10 @@ var
   LDir: string;
   LIdent: TPasNavIdent;
   LTarget: TPasNavTarget;
+  LMidA, LRTMid, LRSym: Integer;
+  LRName: string;
+  LHits: TArray<TPasRefHit>;
+  LDeclHit: TPasRefHit;
 begin
   GCounter.Init;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_nav');
@@ -469,6 +534,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavK.pas'), UNIT_K);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOvl.pas'), UNIT_OVL);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOvlUse.pas'), UNIT_OVLUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavRQ.pas'), UNIT_RQ);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -728,6 +794,200 @@ begin
       // still navigates to the variable's own declaration.
       CheckNav('ovl-precise: base C keeps ordinary nav', 21, 9, 'C',
         'NavOvlUse.pas', 14, 3);
+
+      // ---- Find References (SymbolAt + FindReferences) ----
+      // TThing: declared in NavA, where its OWN two signatures (interface +
+      // impl) reference it same-model, plus one more cross-model reference
+      // from NavB's `var GT: TThing`. Exercises both scan branches at once.
+      LMidA := GNav.ModelIdOf(TPath.Combine(LDir, 'NavA.pas'));
+      Ok('NavA model found', LMidA >= 0);
+      Ok('SymbolAt: TThing at its own interface signature',
+        GNav.SymbolAt(LMidA, 7, 21, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'TThing'));
+      LHits := GNav.FindReferences(LRTMid, LRSym);
+      Ok('FindReferences: TThing — exactly 3 hits, no more, no fewer',
+        Length(LHits) = 3);
+      Ok('FindReferences: TThing — own interface signature',
+        HasHitAt(LHits, 'NavA.pas', 7, 21));
+      Ok('FindReferences: TThing — own impl signature',
+        HasHitAt(LHits, 'NavA.pas', 9, 21));
+      Ok('FindReferences: TThing — cross-model use in NavB',
+        HasHitAt(LHits, 'NavB.pas', 4, 9));
+
+      // Overload-precise, CROSS-model: Pick(Integer) and Pick(Double) are
+      // two different symbols in NavOvl; each call site in NavOvlUse must
+      // find ONLY its own overload's call, never the sibling's.
+      Ok('SymbolAt: Pick(11) call site',
+        GNav.SymbolAt(GMidB, 19, 9, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Pick'));
+      LHits := GNav.FindReferences(LRTMid, LRSym);
+      Ok('FindReferences: Pick(Integer) — exactly its own one call site',
+        (Length(LHits) = 1) and HasHitAt(LHits, 'NavOvlUse.pas', 19, 9));
+      Ok('SymbolAt: Pick(2.5) call site',
+        GNav.SymbolAt(GMidB, 20, 9, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Pick'));
+      LHits := GNav.FindReferences(LRTMid, LRSym);
+      Ok('FindReferences: Pick(Double) — exactly its own one call site, '
+        + 'NOT the Integer overload''s',
+        (Length(LHits) = 1) and HasHitAt(LHits, 'NavOvlUse.pas', 20, 9));
+
+      // Overload-precise, SAME-model: TCup.Fill's two overloads exercise the
+      // RefMap-only scan branch (declaring model = referring model).
+      Ok('SymbolAt: C.Fill(7) call site',
+        GNav.SymbolAt(GMidB, 21, 11, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Fill'));
+      LHits := GNav.FindReferences(LRTMid, LRSym);
+      Ok('FindReferences: Fill(Integer) — exactly its own one call site',
+        (Length(LHits) = 1) and HasHitAt(LHits, 'NavOvlUse.pas', 21, 11));
+
+      // The implicit Result: no DeclNode anywhere, yet a real, stable,
+      // per-routine symbol — SymbolAt must NOT decline, and the scan must
+      // stay inside the ONE routine that declares it (NavB's GetLen). GMidB
+      // is NavOvlUse's at this point (see above) — NavB's own id is fetched
+      // fresh here rather than reused.
+      Ok('SymbolAt: Result inside GetLen',
+        GNav.SymbolAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavB.pas')), 20, 3,
+          {out} LRTMid, {out} LRSym, {out} LRName) and
+        SameText(LRName, 'Result'));
+      LHits := GNav.FindReferences(LRTMid, LRSym);
+      Ok('FindReferences: Result — exactly its own routine''s one use',
+        (Length(LHits) = 1) and HasHitAt(LHits, 'NavB.pas', 20, 3));
+
+      // A pure compiler intrinsic (MaxInt, NavH line 14): SymbolAt must
+      // DECLINE — builtins are seeded per model, so there is no stable
+      // cross-model identity to search for, and reporting only this one
+      // unit's uses would read as a complete, misleadingly small answer.
+      Ok('SymbolAt: pure intrinsic declines',
+        not GNav.SymbolAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavH.pas')),
+          14, 13, {out} LRTMid, {out} LRSym, {out} LRName));
+
+      // ---- BuiltinNameAt / FindBuiltinReferences (the third identity) ----
+      // MaxInt: a genuine intrinsic, no declaration anywhere -- exactly the
+      // case SymbolAt above just declined. BuiltinNameAt must pick it up.
+      Ok('BuiltinNameAt: MaxInt (SymbolAt''s own decline case)',
+        GNav.BuiltinNameAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavH.pas')),
+          14, 13, {out} LRName) and SameText(LRName, 'MaxInt'));
+      LHits := GNav.FindBuiltinReferences(LRName);
+      Ok('FindBuiltinReferences: MaxInt -- its one bare use in NavH',
+        (Length(LHits) = 1) and HasHitAt(LHits, 'NavH.pas', 14, 13));
+      // Control: TBytes now has a REAL declaration (NavC) -- SymbolAt's own
+      // redirect already covers it with a precise identity, so this
+      // name-based fallback must decline rather than offer a weaker answer.
+      Ok('BuiltinNameAt: declines when a real declaration exists (TBytes)',
+        not GNav.BuiltinNameAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavB.pas')),
+          9, 6, {out} LRName));
+
+      // TBytes: a used unit (NavC) declares it for real. Originally this
+      // exercised SymbolAt's ResolveRealDecl REDIRECT (TBytes was seeded,
+      // same bug report as TObject/Exception -- System.Hash.pas parameters
+      // typed `TBytes` had Find References grayed out project-wide); now
+      // that PasTree.Sema.Builtins no longer seeds it at all (2026-08-14),
+      // NavB's reference resolves via the ORDINARY fallback instead and the
+      // redirect branch never fires -- kept as a regression check on the
+      // OUTCOME (still NavC's real symbol) regardless of which path got
+      // there.
+      Ok('SymbolAt: TBytes resolves to its real declaration',
+        GNav.SymbolAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavB.pas')), 9, 6,
+          {out} LRTMid, {out} LRSym, {out} LRName) and
+        SameText(LRName, 'TBytes') and
+        (LRTMid = GNav.ModelIdOf(TPath.Combine(LDir, 'NavC.pas'))));
+      LHits := GNav.FindReferences(LRTMid, LRSym);
+      // PasTree.Sema.Builtins no longer seeds TBytes at all (2026-08-14) --
+      // NavB's own reference now resolves via the ORDINARY used-unit
+      // fallback (CrossResolveInherited, since NavB genuinely `uses NavC`),
+      // straight to NavC's real symbol, no SymbolAt redirect involved. So
+      // this is now genuinely complete ACROSS units too: both NavC's own
+      // use (GBytes: TBytes, added to UNIT_C for exactly this) and NavB's
+      // show up. The redirect path (ResolveRealDecl in SymbolAt) is now
+      // reachable only for a name still SEEDED but really declared
+      // somewhere the CURRENT click's own uses list doesn't cover.
+      Ok('FindReferences: TBytes -- complete across BOTH units',
+        Length(LHits) = 2);
+      Ok('FindReferences: TBytes -- NavC''s own use',
+        HasHitAt(LHits, 'NavC.pas', 8, 11));
+      Ok('FindReferences: TBytes -- NavB''s cross-unit use',
+        HasHitAt(LHits, 'NavB.pas', 9, 6));
+
+      // DeclHit: the declaration site FindReferences itself excludes.
+      Ok('SymbolAt: TThing at NavB''s use (for DeclHit)',
+        GNav.SymbolAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavB.pas')), 4, 9,
+          {out} LRTMid, {out} LRSym, {out} LRName) and
+        SameText(LRName, 'TThing'));
+      Ok('DeclHit: TThing''s own declaration, not any of its uses',
+        GNav.DeclHit(LRTMid, LRSym, {out} LDeclHit) and
+        SameText(TPath.GetFileName(LDeclHit.FilePath), 'NavA.pas') and
+        (LDeclHit.Line = 4) and (LDeclHit.Col = 3));
+      // Result has no DeclNode at all (implicit) -- DeclHit must decline
+      // rather than point at something wrong.
+      Ok('SymbolAt: Result (for DeclHit negative)',
+        GNav.SymbolAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavB.pas')), 20, 3,
+          {out} LRTMid, {out} LRSym, {out} LRName));
+      Ok('DeclHit: Result declines (no DeclNode)',
+        not GNav.DeclHit(LRTMid, LRSym, {out} LDeclHit));
+
+      // REGRESSION: a bare call to an inherited, non-overloaded method in
+      // the SAME unit must be counted ONCE, not twice (see UNIT_RQ / the
+      // RepointCallee fix).
+      Ok('SymbolAt: bare inherited call, same unit',
+        GNav.SymbolAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavRQ.pas')), 18, 3,
+          {out} LRTMid, {out} LRSym, {out} LRName) and
+        SameText(LRName, 'Ping'));
+      LHits := GNav.FindReferences(LRTMid, LRSym);
+      Ok('FindReferences: same-unit inherited call counted ONCE',
+        (Length(LHits) = 1) and HasHitAt(LHits, 'NavRQ.pas', 18, 3));
+
+      // ---- SymbolAt from the DECLARATION site itself ----
+      // A type's own name (`TThing = record`, NavA line 4 col 3) must give
+      // the SAME identity clicking a USE of it does.
+      Ok('SymbolAt: TThing at its OWN declaration',
+        GNav.SymbolAt(LMidA, 4, 3, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'TThing'));
+      LHits := GNav.FindReferences(LRTMid, LRSym);
+      Ok('FindReferences: same 3 hits, whether started from the decl or a use',
+        Length(LHits) = 3);
+      // A field's own name (`Value: Integer;`, NavA line 5 col 5).
+      Ok('SymbolAt: Value at its OWN declaration',
+        GNav.SymbolAt(LMidA, 5, 5, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Value'));
+      LHits := GNav.FindReferences(LRTMid, LRSym);
+      Ok('FindReferences: Value -- 2 hits (own body + NavB''s cross use)',
+        Length(LHits) = 2);
+      Ok('FindReferences: Value -- the NavA body''s own Result.Value use',
+        HasHitAt(LHits, 'NavA.pas', 10, 14));
+      Ok('FindReferences: Value -- NavB''s cross-model GT.Value use',
+        HasHitAt(LHits, 'NavB.pas', 13, 11));
+      // An OVERLOADED method's own declaration (NavI's TCalc.Add, 1-param at
+      // line 5) must identify THAT overload specifically, not the head --
+      // the exact imprecision IsDeclSelfName guards the REFERENCE side
+      // against; this is the same guarantee from the declaration side.
+      Ok('SymbolAt: Add(1 param) at its OWN interface declaration',
+        GNav.SymbolAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavI.pas')), 5, 15,
+          {out} LRTMid, {out} LRSym, {out} LRName) and
+        SameText(LRName, 'Add'));
+      Ok('DeclHit: lands back on the SAME 1-param declaration',
+        GNav.DeclHit(LRTMid, LRSym, {out} LDeclHit) and
+        (LDeclHit.Line = 5) and (LDeclHit.Col = 14));
+
+      // ---- UnitAt / FindUnitReferences / UnitDeclHit ----
+      // A `uses` clause item: NavB's own `uses NavA, ...` (line 3 col 6).
+      Ok('UnitAt: NavA via NavB''s uses clause',
+        GNav.UnitAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavB.pas')), 3, 6,
+          {out} LRTMid, {out} LRName) and
+        (LRTMid = LMidA) and SameText(LRName, 'NavA'));
+      // The unit's OWN header name (`unit NavA;`, line 1 col 6) must resolve
+      // to ITSELF.
+      Ok('UnitAt: NavA''s own header names itself',
+        GNav.UnitAt(LMidA, 1, 6, {out} LRTMid, {out} LRName) and
+        (LRTMid = LMidA) and SameText(LRName, 'NavA'));
+      // FindUnitReferences: every `uses NavA` across the loaded project --
+      // just NavB's, in this fixture set.
+      var LUHits := GNav.FindUnitReferences(LMidA);
+      Ok('FindUnitReferences: NavA -- exactly NavB''s one uses clause',
+        (Length(LUHits) = 1) and HasHitAt(LUHits, 'NavB.pas', 3, 6));
+      Ok('UnitDeclHit: NavA''s own header position',
+        GNav.UnitDeclHit(LMidA, {out} LDeclHit) and
+        SameText(TPath.GetFileName(LDeclHit.FilePath), 'NavA.pas') and
+        (LDeclHit.Line = 1) and (LDeclHit.Col = 6));
     finally
       GNav.Free;
     end;
