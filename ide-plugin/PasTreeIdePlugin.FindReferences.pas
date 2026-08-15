@@ -8,23 +8,10 @@ unit PasTreeIdePlugin.FindReferences;
   in-process, inside this (Win32) designtime package. Deliberately NOT
   out-of-process yet - see the architecture note below.
 
-    - GatherOpenUnitOverrides reads every currently-OPEN Pascal unit's live
-      buffer text via IOTAEditorContent.Content, using IOTAModuleServices'
-      already-open-modules list (IOTAModuleServices.Modules) - never forcing
-      anything to load. An earlier version instead walked every unit
-      belonging to the active project via IOTAProject.GetModule and called
-      IOTAModuleInfo.OpenModule on each one to force it open; for a form or
-      data module not already open, that forces the IDE to instantiate its
-      design surface, which flickered every such form's designer open and
-      shut in rapid succession on the very first click. Everything NOT
-      currently open doesn't need us at all: TPasSemaProject.LoadFile
-      already reads any unit straight from disk when nothing overrode its
-      buffer via SetBuffer - overlaying live text is only for units that
-      might have unsaved edits, i.e. ones already open.
-    - ExecuteFindReferences builds a throwaway TPasSemaProject rooted at the
-      active project's own file, overlaying just the open units' live text,
-      analyzes the whole project (TPasSemaProject.AnalyzeProject), and uses
-      TPasNavigator's three-identity lookup (symbol / unit / builtin - see
+    - ExecuteFindReferences calls PasTreeIdePlugin.Analysis.BuildNavigator
+      (shared with PasTreeIdePlugin.GotoDeclaration - see that unit's own
+      header for the Ctrl+Click override), then uses TPasNavigator's
+      three-identity lookup (symbol / unit / builtin - see
       source/PasTree.Sema.Nav.pas's own comments) to resolve whatever is
       under the cursor and enumerate its references.
     - Results go to a dedicated "Find References" tab in the Messages
@@ -46,7 +33,8 @@ unit PasTreeIdePlugin.FindReferences;
   TODO (next):
     1. Cache TPasSemaProject/TPasNavigator across calls instead of rebuilding
        from scratch on every click (fine for a small test project; not for
-       a real one).
+       a real one). Now that both this unit and GotoDeclaration call
+       BuildNavigator, this would help both at once.
     2. Move analysis out-of-process (Win64 helper) once ready to test against
        the real target project - see the architecture note above.
     3. Read the project's actual $DEFINEs (e.g. from .dproj DCC_Define) and
@@ -68,282 +56,70 @@ interface
 uses
   ToolsAPI;
 
-type
-  TUnitSource = record
-    FileName: string;
-    Text: string;
-  end;
-
 /// <summary>
 /// Entry point called from the editor's local menu action.
 /// </summary>
 procedure ExecuteFindReferences(const AView: IOTAEditView);
 
 /// <summary>
-/// Live buffer text of every currently-open Pascal unit, IDE-wide (not
-/// forced open - see the unit header for why forcing modules open is
-/// avoided). These are overlaid onto the analyzed project via SetBuffer so
-/// unsaved edits are picked up; everything else is read from disk by
-/// TPasSemaProject itself.
+/// Removes the "Find References" Messages tab. Call once (from
+/// PasTreeIdePlugin.Wizard's TIDEWizard.Destroy) so the group doesn't
+/// persist forever across package reinstalls - see the field comment on
+/// GMessageGroup in the implementation section for why this is hygiene,
+/// not something suspected of causing the reinstall AVs.
 /// </summary>
-function GatherOpenUnitOverrides: TArray<TUnitSource>;
+procedure FinalizeFindReferencesMessageGroup;
 
 implementation
 
 uses
-  System.SysUtils, System.Classes, System.IOUtils, System.Generics.Collections,
-  Vcl.Dialogs, Vcl.Forms, ToolsAPI.UI, Winapi.ActiveX, IStreams, PlatformConst,
-  PasTree.Platforms, PasTree.Sema.Project, PasTree.Sema.Nav;
+  System.SysUtils, System.Generics.Collections, Vcl.Dialogs,
+  ToolsAPI.UI, PasTree.Sema.Project, PasTree.Sema.Nav, PasTreeIdePlugin.Analysis;
 
 const
   cMessageGroupName = 'Find References';
 
+var
+  // Held so FinalizeFindReferencesMessageGroup can remove it on package
+  // unload - a plain data container (no code pointers back into us), so its
+  // leaking across a hot-reinstall was never itself a crash risk, just an
+  // orphaned IDE resource. Fixed for hygiene, not because it was suspected
+  // of causing the AVs - see PasTreeIdePlugin.GotoDeclaration's own header
+  // for that (unrelated) investigation.
+  GMessageGroup: IOTAMessageGroup;
+
 function GetOrCreateMessageGroup(const AMessageServices: IOTAMessageServices): IOTAMessageGroup;
 begin
-  Result := AMessageServices.GetGroup(cMessageGroupName);
-  if not Assigned(Result) then
-    Result := AMessageServices.AddMessageGroup(cMessageGroupName);
+  if not Assigned(GMessageGroup) then
+    GMessageGroup := AMessageServices.GetGroup(cMessageGroupName);
+  if not Assigned(GMessageGroup) then
+    GMessageGroup := AMessageServices.AddMessageGroup(cMessageGroupName);
+  Result := GMessageGroup;
 end;
 
-function GetActiveProject: IOTAProject;
+procedure FinalizeFindReferencesMessageGroup;
 var
-  LModuleServices: IOTAModuleServices;
-  LGroup: IOTAProjectGroup;
+  LMessageServices: IOTAMessageServices;
 begin
-  Result := nil;
-  if Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) then
-  begin
-    LGroup := LModuleServices.MainProjectGroup;
-    if Assigned(LGroup) then
-      Result := LGroup.ActiveProject;
-  end;
+  if Assigned(GMessageGroup) and Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
+    LMessageServices.RemoveMessageGroup(GMessageGroup);
+  GMessageGroup := nil;
 end;
 
 /// <summary>
-/// IOTAProject.FileName is the .dproj (the MSBuild wrapper RAD Studio
-/// actually opens) - not something TPasParser can make any sense of, and
-/// with no `uses` clause in it, AnalyzeProject silently "succeeds" having
-/// analyzed nothing. The real Pascal main source (.dpr for an application,
-/// .dpk for a package) sits right next to it with the same base name - that
-/// convention is what .dproj's own <MainSource> tag encodes, and is reliable
-/// enough for this PoC without pulling in an XML/dproj parser to read it
-/// properly (source/PasTree.DProj.pas already does that, if this ever needs
-/// to stop assuming the convention holds).
-/// </summary>
-function ResolveMainSourceFile(const AProject: IOTAProject): string;
-var
-  LBase, LCandidate: string;
-begin
-  LBase := ChangeFileExt(AProject.FileName, '');
-  LCandidate := LBase + '.dpr';
-  if TFile.Exists(LCandidate) then
-    Exit(LCandidate);
-  LCandidate := LBase + '.dpk';
-  if TFile.Exists(LCandidate) then
-    Exit(LCandidate);
-  Result := AProject.FileName; // fallback - will very likely fail to parse
-end;
-
-function ReadUnitText(const AModule: IOTAModule): string;
-var
-  LBuffer: IOTAEditBuffer;
-  LEditorContent: IOTAEditorContent;
-  LIStream: IStream;
-  LIMemStream: TIMemoryStream;
-  LMemStream: TMemoryStream;
-  LFileContent: UTF8String;
-begin
-  // Deliberately using the same technique as RAD Studio's own official
-  // "Editor Raw Read Demo" (StreamReadGetFileData): IOTAEditorContent.Content
-  // gives direct access to the buffer's own memory stream. An earlier version
-  // of this function used the legacy IOTAEditReader.GetText loop instead,
-  // which triggered heap/stack corruption (an access violation showing up
-  // much later, in unrelated IDE code, on the *next* menu click) - GetText's
-  // Count-respecting behavior is apparently not safe to assume here. Do not
-  // reintroduce IOTAEditReader for this without re-verifying against the
-  // official samples first.
-  //
-  // AModule is expected to already be open (came from IOTAModuleServices'
-  // already-open-modules list) - no .OpenModule call here. Forcing a module
-  // open (an earlier version of this unit did, via IOTAModuleInfo.OpenModule
-  // over every unit belonging to the project) makes the IDE instantiate a
-  // form/data module's design surface if it wasn't open yet, which flickers
-  // every such form's designer open and shut. See the unit header.
-  Result := '';
-  if not Supports(AModule.GetModuleFileEditor(0), IOTAEditBuffer, LBuffer) then
-    Exit;
-
-  LEditorContent := LBuffer as IOTAEditorContent;
-  LIStream := LEditorContent.Content;
-  LIMemStream := LIStream as TIMemoryStream;
-  LMemStream := LIMemStream.MemoryStream;
-  SetLength(LFileContent, LMemStream.Size);
-  LMemStream.Position := 0;
-  if LMemStream.Size <> 0 then
-    LMemStream.Read(LFileContent[1], Length(LFileContent));
-  Result := UTF8ToString(LFileContent);
-end;
-
-/// <summary>
-/// Unlike a plain AddTitleMessage, this always routes into the same "PasTree
-/// References" tab AND activates it (ShowMessageView) - a diagnostic that
-/// only the Build tab sees, unopened, might as well not exist. Use this for
-/// every early-exit/error path so a silent failure is never actually silent.
+/// Diagnostics/errors/progress - as opposed to actual results (ReportHits) -
+/// go to the IDE's own default Messages tab (nil group = the "Build" tab,
+/// where compiler output already lives) rather than our own "Find
+/// References" tab, so they're where a developer would already be looking
+/// and not competing for space with the actual reference list. Tagged with
+/// "[pastree]" to stay identifiable alongside compiler/linker noise.
 /// </summary>
 procedure LogDiagnostic(const AMessage: string);
 var
   LMessageServices: IOTAMessageServices;
-  LGroup: IOTAMessageGroup;
 begin
-  if not Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
-    Exit;
-  LGroup := GetOrCreateMessageGroup(LMessageServices);
-  LMessageServices.AddTitleMessage(AMessage, LGroup);
-  LMessageServices.ShowMessageView(LGroup);
-end;
-
-function GatherOpenUnitOverrides: TArray<TUnitSource>;
-var
-  LModuleServices: IOTAModuleServices;
-  I: Integer;
-  LModule: IOTAModule;
-  LUnits: TList<TUnitSource>;
-begin
-  SetLength(Result, 0);
-  if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) then
-    Exit;
-
-  LUnits := TList<TUnitSource>.Create;
-  try
-    for I := 0 to LModuleServices.ModuleCount - 1 do
-    begin
-      LModule := LModuleServices.Modules[I];
-      if not Assigned(LModule) then
-        Continue;
-      if not SameText(ExtractFileExt(LModule.FileName), '.pas') then
-        Continue;
-      try
-        var LUnit: TUnitSource;
-        LUnit.FileName := LModule.FileName;
-        LUnit.Text := ReadUnitText(LModule);
-        LUnits.Add(LUnit);
-      except
-        on E: Exception do
-          // Scaffold diagnostics: identify exactly which module/operation is
-          // failing instead of guessing. Remove once the real cause is fixed.
-          LogDiagnostic(Format('PasTree Find References: failed reading open unit #%d '
-            + '(FileName=%s): %s: %s',
-            [I, LModule.FileName, E.ClassName, E.Message]));
-      end;
-    end;
-    Result := LUnits.ToArray;
-  finally
-    LUnits.Free;
-  end;
-end;
-
-/// <summary>
-/// Maps an IOTAProject.CurrentPlatform platform id (see PlatformConst.pas -
-/// cWin32Platform, cWin64Platform, ...) to the closest TPasPlatform PasTree
-/// understands. PasTree doesn't model every RAD Studio target (no ARM64EC,
-/// no 32-bit non-Windows) - those fall back to the nearest 64-bit equivalent,
-/// and anything unrecognized falls back to pfWin32.
-/// </summary>
-function MapPlatform(const APlatformId: string): TPasPlatform;
-begin
-  if SameText(APlatformId, cWin64Platform) or SameText(APlatformId, cWin64xPlatform)
-    or SameText(APlatformId, cWinArm64Platform) or SameText(APlatformId, cWinArm64ECPlatform) then
-    Result := pfWin64
-  else if SameText(APlatformId, ciOSDevice64Platform) then
-    Result := pfIOSDevice64
-  else if SameText(APlatformId, ciOSSimulatorArm64Platform) then
-    Result := pfIOSSimArm64
-  else if SameText(APlatformId, cAndroidArm32Platform) then
-    Result := pfAndroid32
-  else if SameText(APlatformId, cAndroidArm64Platform) then
-    Result := pfAndroid64
-  else if SameText(APlatformId, cLinux64Platform) then
-    Result := pfLinux64
-  else
-    Result := pfWin32; // includes cWin32Platform itself, and any unknown id
-end;
-
-/// <summary>
-/// DISABLED - see CollectSearchPaths' own comment at its call site. Kept
-/// here, unused, as a documented starting point for whoever investigates
-/// the AV next; do not just re-enable the call without a standalone repro.
-///
-/// RTL/VCL/ToolsAPI source directories, rooted at the IDE's own install
-/// location (IOTAServices.GetRootDirectory - portable across machines and
-/// versions, no hardcoded "37.0"). Without these, any identifier declared
-/// outside the active project itself - TActionList (Vcl.ActnList), IOTAWizard
-/// (ToolsAPI), anything from the RTL/VCL - fails to resolve: `uses` can't
-/// find a unit PasTree has no search path for, so SymbolAt/UnitAt/
-/// BuiltinNameAt all correctly report nothing. Only Pascal compiler builtins
-/// (Boolean, Integer, ...) worked before this, since those never depend on
-/// `uses` resolution at all.
-/// </summary>
-function GetIDESourcePaths: TArray<string>;
-var
-  LServices: IOTAServices;
-  LRoot: string;
-begin
-  SetLength(Result, 0);
-  if not Supports(BorlandIDEServices, IOTAServices, LServices) then
-    Exit;
-  LRoot := IncludeTrailingPathDelimiter(LServices.GetRootDirectory) + 'source\';
-  Result := [LRoot + 'rtl', LRoot + 'vcl', LRoot + 'ToolsAPI'];
-end;
-
-/// <summary>
-/// Distinct directories from the active project's own location, every
-/// currently-open unit, and the IDE's own RTL/VCL/ToolsAPI source (see
-/// GetIDESourcePaths) - in first-seen order. TPasSourceManager scans each
-/// entry's whole subtree, so the project's own root alone usually covers
-/// units that aren't open at all.
-/// </summary>
-function CollectSearchPaths(const AProjectDir: string; const AOpenUnits: TArray<TUnitSource>): TArray<string>;
-var
-  LSeen: TDictionary<string, Boolean>;
-  LList: TList<string>;
-  LUnit: TUnitSource;
-  LDir: string;
-
-  procedure AddDir(const ADir: string);
-  begin
-    if (ADir <> '') and not LSeen.ContainsKey(LowerCase(ADir)) then
-    begin
-      LSeen.Add(LowerCase(ADir), True);
-      LList.Add(ADir);
-    end;
-  end;
-
-begin
-  LSeen := TDictionary<string, Boolean>.Create;
-  LList := TList<string>.Create;
-  try
-    AddDir(AProjectDir);
-    for LUnit in AOpenUnits do
-    begin
-      LDir := ExtractFilePath(LUnit.FileName);
-      AddDir(LDir);
-    end;
-    // GetIDESourcePaths (rtl/vcl/ToolsAPI) is DISABLED for now - see its own
-    // comment. Adding those search paths correlated with an access violation
-    // (heap/stack corruption surfacing later, in unrelated IDE code, on a
-    // subsequent menu click - the same signature the IOTAEditReader.GetText
-    // bug had) on a real multi-unit project. That earlier bug was in this
-    // unit's own ToolsAPI usage; this one showed up with no ToolsAPI-side
-    // change at all, only a much larger search corpus handed to PasTree
-    // itself (thousands of RTL/VCL files, incl. platform-duplicate unit
-    // names across subfolders) - suspect it's inside PasTree's own
-    // TPasSourceManager/preprocessor at that scale, not this plugin's code.
-    // Do not re-enable without a proper standalone repro outside the IDE.
-    Result := LList.ToArray;
-  finally
-    LList.Free;
-    LSeen.Free;
-  end;
+  if Supports(BorlandIDEServices, IOTAMessageServices, LMessageServices) then
+    LMessageServices.AddTitleMessage('[pastree] ' + AMessage);
 end;
 
 /// <summary>
@@ -366,7 +142,6 @@ var
   LFileHeaders: TDictionary<string, Pointer>;
   LLineRef, LParentRef: Pointer;
   LHit: TPasRefHit;
-  LCount: Integer;
 
   procedure CountFile(const AFilePath: string);
   var
@@ -447,9 +222,6 @@ var
   LRow, LCol: Integer;
   LProject: IOTAProject;
   LMainFile: string;
-  LUnits: TArray<TUnitSource>;
-  LUnit: TUnitSource;
-  LSearchPaths: TArray<string>;
   LSema: TPasSemaProject;
   LNav: TPasNavigator;
   LMid, LTMid, LSym, LTargetMid: Integer;
@@ -475,68 +247,40 @@ begin
       Exit;
     end;
 
-    LUnits := GatherOpenUnitOverrides;
-    LSearchPaths := CollectSearchPaths(ExtractFilePath(LProject.FileName), LUnits);
-    LMainFile := ResolveMainSourceFile(LProject);
-    LogDiagnostic(Format('PasTree Find References: starting - %d open unit(s) overlaid, '
-      + '%d search path(s), platform=%s, main file=%s',
-      [Length(LUnits), Length(LSearchPaths), LProject.CurrentPlatform, LMainFile]));
-
-    LSema := TPasSemaProject.Create(MapPlatform(LProject.CurrentPlatform), LSearchPaths, []);
+    LNav := BuildNavigator(LProject, LSema, LMainFile);
     try
-      // Run every analysis stage on this (the IDE's main) thread instead of
-      // TPasSemaProject's default one-worker-per-core pool. We're calling
-      // this synchronously from the UI thread; if any worker ever needs to
-      // get back onto the main thread (Synchronize/Queue) while the main
-      // thread is sitting here blocked waiting for the pool, that's a
-      // deadlock - "click and nothing ever happens again" is exactly what
-      // that looks like from the outside. Multi-threaded is only safe to
-      // reintroduce once this runs off the UI thread (see the out-of-process
-      // architecture note at the top of this unit).
-      LSema.SingleThreaded := True;
-
-      for LUnit in LUnits do
-        LSema.SetBuffer(LUnit.FileName, LUnit.Text);
-
-      LSema.AnalyzeProject(LMainFile);
-      LogDiagnostic('PasTree Find References: analysis finished, resolving cursor position...');
-
-      LNav := TPasNavigator.Create(LSema);
-      try
-        LMid := LNav.ModelIdOf(LCursorFile);
-        if LMid < 0 then
-        begin
-          LogDiagnostic(Format('PasTree Find References: "%s" was not part of '
-            + 'the analyzed project (check the Build tab for parse errors).', [LCursorFile]));
-          Exit;
-        end;
-
-        LFound := True;
-        LHasDecl := False;
-        if LNav.SymbolAt(LMid, LRow, LCol, LTMid, LSym, LName) then
-        begin
-          LHasDecl := LNav.DeclHit(LTMid, LSym, LDeclHit);
-          LHits := LNav.FindReferences(LTMid, LSym);
-        end
-        else if LNav.UnitAt(LMid, LRow, LCol, LTargetMid, LName) then
-        begin
-          LHasDecl := LNav.UnitDeclHit(LTargetMid, LDeclHit);
-          LHits := LNav.FindUnitReferences(LTargetMid);
-        end
-        else if LNav.BuiltinNameAt(LMid, LRow, LCol, LName) then
-          LHits := LNav.FindBuiltinReferences(LName)
-        else
-          LFound := False;
-
-        if not LFound then
-          (BorlandIDEServices as INTAIDEUIServices).MessageDlg(
-            'No identifier under the cursor.', mtInformation, [mbOK], -1)
-        else
-          ReportHits(LName, LHasDecl, LDeclHit, LHits);
-      finally
-        LNav.Free;
+      LMid := LNav.ModelIdOf(LCursorFile);
+      if LMid < 0 then
+      begin
+        LogDiagnostic(Format('Find References: "%s" was not part of '
+          + 'the analyzed project (check the Build tab for parse errors).', [LCursorFile]));
+        Exit;
       end;
+
+      LFound := True;
+      LHasDecl := False;
+      if LNav.SymbolAt(LMid, LRow, LCol, LTMid, LSym, LName) then
+      begin
+        LHasDecl := LNav.DeclHit(LTMid, LSym, LDeclHit);
+        LHits := LNav.FindReferences(LTMid, LSym);
+      end
+      else if LNav.UnitAt(LMid, LRow, LCol, LTargetMid, LName) then
+      begin
+        LHasDecl := LNav.UnitDeclHit(LTargetMid, LDeclHit);
+        LHits := LNav.FindUnitReferences(LTargetMid);
+      end
+      else if LNav.BuiltinNameAt(LMid, LRow, LCol, LName) then
+        LHits := LNav.FindBuiltinReferences(LName)
+      else
+        LFound := False;
+
+      if not LFound then
+        (BorlandIDEServices as INTAIDEUIServices).MessageDlg(
+          'No identifier under the cursor.', mtInformation, [mbOK], -1)
+      else
+        ReportHits(LName, LHasDecl, LDeclHit, LHits);
     finally
+      LNav.Free;
       LSema.Free;
     end;
   except
@@ -544,7 +288,7 @@ begin
     // instead of letting an unhandled one pop the IDE's generic "Error"
     // dialog with no context. Remove once the pipeline is stable.
     on E: Exception do
-      LogDiagnostic(Format('PasTree Find References: unhandled %s: %s', [E.ClassName, E.Message]));
+      LogDiagnostic(Format('Find References: unhandled %s: %s', [E.ClassName, E.Message]));
   end;
 end;
 
