@@ -1012,7 +1012,10 @@ begin
     Exit;
   end;
 
-  LStream := TPasLexer.Tokenize(FSourceManager.LoadText(LResolved));
+  // Shared across includers (see TPasSourceManager.FIncludeStreams): the
+  // stream is includer-independent; the per-includer conditional state only
+  // decides which of its tokens land in THIS unit's Visible/Skipped.
+  LStream := FSourceManager.IncludeStream(LResolved);
   FFileNames.Add(LResolved);
   FFiles.Add(LStream);
   FSkipped.Add(TList<TPasSkippedRegion>.Create);

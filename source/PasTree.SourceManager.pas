@@ -15,7 +15,8 @@ interface
 uses
   System.SysUtils,
   System.Threading,
-  System.Generics.Collections;
+  System.Generics.Collections,
+  PasTree.Types;
 
 type
   TPasSourceManager = class
@@ -45,6 +46,16 @@ type
     // not strings: the I/O workers must stay allocation-light (see Prefetch),
     // so decoding happens on the consumer's (per-core parse worker's) thread.
     FContentCache: TDictionary<string, TBytes>;
+    // Lexed include files, shared across every including unit: an include's
+    // Source text and token array are includer-INDEPENDENT (what differs per
+    // includer is which tokens end up visible/skipped, and that lives in the
+    // includer's own TPasPreprocessed) — so re-lexing widely shared .inc
+    // files per includer only duplicated identical strings and arrays.
+    // Guarded by FIncludeLock: HandleInclude runs on the parse workers.
+    // TPasTokenStream is a record of refcounted string/arrays, so handing a
+    // copy out under the lock is two refcount bumps, not a data copy.
+    FIncludeStreams: TDictionary<string, TPasTokenStream>;
+    FIncludeLock: TObject;
     // Files whose bytes did not decode under their declared encoding and had
     // to be recovered (path -> how). Guarded because decoding runs on the
     // parse workers. Empty for every ordinary corpus.
@@ -83,6 +94,19 @@ type
       them, as before. }
     procedure Prefetch(const APaths: TArray<string>);
     function LoadText(const APath: string): string;
+    { The lexed token stream of an include file, shared across includers (see
+      FIncludeStreams). APath must already be RESOLVED (ResolveInclude's out
+      value). An editor-buffer override (SetBuffer) is tokenized fresh and
+      stays OUT of the shared cache — buffers are per-analysis mutable state. }
+    function IncludeStream(const APath: string): TPasTokenStream;
+    { Drops the analysis-scoped caches once a project run has finished: the
+      raw-bytes repository (a complete second copy of every closure file that
+      nothing reads after analysis — post-analysis text access goes through
+      the token streams' own Source) and the shared include-stream cache's
+      OWN references (the models keep theirs; the arrays stay alive exactly
+      as long as a model still uses them). A later analysis on the same
+      manager just re-Prefetches and re-lexes — correctness is unaffected. }
+    procedure ReleaseAnalysisCaches;
     { Indexes every *.inc under ARoot by basename as a last-resort include
       resolver (corpus runs without real project search paths). The first
       occurrence of an ambiguous name wins. }
@@ -120,7 +144,8 @@ implementation
 
 uses
   System.Classes,
-  System.IOUtils;
+  System.IOUtils,
+  PasTree.Lexer;
 
 { TPasSourceManager }
 
@@ -129,12 +154,15 @@ begin
   inherited Create;
   FSearchPaths := ASearchPaths;
   FRecoveredLock := TObject.Create;
+  FIncludeLock := TObject.Create;
 end;
 
 destructor TPasSourceManager.Destroy;
 begin
   FRecovered.Free;
   FRecoveredLock.Free;
+  FIncludeStreams.Free;
+  FIncludeLock.Free;
   FContentCache.Free;
   FDirIndexes.Free;
   FSearchIndex.Free;
@@ -539,6 +567,49 @@ begin
   if (FContentCache <> nil) and FContentCache.TryGetValue(LKey, LRaw) then
     Exit(DecodeText(LRaw, APath));
   Result := ReadFileText(APath);
+end;
+
+function TPasSourceManager.IncludeStream(const APath: string): TPasTokenStream;
+var
+  LKey: string;
+begin
+  LKey := LowerCase(TPath.GetFullPath(APath));
+  // An unsaved-buffer override changes per analysis — never share it.
+  if (FBuffers <> nil) and FBuffers.ContainsKey(LKey) then
+    Exit(TPasLexer.Tokenize(LoadText(APath)));
+  TMonitor.Enter(FIncludeLock);
+  try
+    if (FIncludeStreams <> nil) and
+       FIncludeStreams.TryGetValue(LKey, Result) then
+      Exit;
+  finally
+    TMonitor.Exit(FIncludeLock);
+  end;
+  // Decode + lex OUTSIDE the lock: both are the expensive part, and two
+  // workers racing to the same include at worst lex it twice — the loser
+  // then adopts the winner's copy below, so every includer still ends up
+  // sharing one stream.
+  Result := TPasLexer.Tokenize(LoadText(APath));
+  TMonitor.Enter(FIncludeLock);
+  try
+    if FIncludeStreams = nil then
+      FIncludeStreams := TDictionary<string, TPasTokenStream>.Create;
+    if not FIncludeStreams.TryAdd(LKey, Result) then
+      Result := FIncludeStreams[LKey];
+  finally
+    TMonitor.Exit(FIncludeLock);
+  end;
+end;
+
+procedure TPasSourceManager.ReleaseAnalysisCaches;
+begin
+  FreeAndNil(FContentCache);
+  TMonitor.Enter(FIncludeLock);
+  try
+    FreeAndNil(FIncludeStreams);
+  finally
+    TMonitor.Exit(FIncludeLock);
+  end;
 end;
 
 function TPasSourceManager.ResolveInclude(const AIncludingFile, AName: string;

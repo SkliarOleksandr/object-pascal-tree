@@ -9186,6 +9186,10 @@ begin
   Stage('xtype');
   // Whole transitive closure went through the cross passes.
   MarkAllCrossReady;
+  // Analysis is over: drop the raw-bytes repository (a full second copy of
+  // every closure file that nothing reads from here on — hundreds of MB on
+  // a real project) and the include-cache's own stream references.
+  FSM.ReleaseAnalysisCaches;
 end;
 
 procedure TPasSemaProject.AnalyzeDirectory(const ARoot: string);
@@ -9273,6 +9277,7 @@ begin
   // msFullReady, mirroring the E2003 scoping above.
   for LIdx := 0 to LN - 1 do
     SetModuleStatus(LIdx, msCrossReady);
+  FSM.ReleaseAnalysisCaches;   // see AnalyzeProject
 end;
 
 function TPasSemaProject.AnalyzeStaged(const ARoots, APriority: TArray<string>;
@@ -9571,6 +9576,9 @@ begin
     Report('cross:xtype');
     RunCrossTypePass(LN);
     MarkAllCrossReady;
+    // See AnalyzeProject. On a cancelled run the caches stay — the host
+    // discards a cancelled project wholesale anyway.
+    FSM.ReleaseAnalysisCaches;
     StageMark('cross');
     Recount;
     Report('done');
