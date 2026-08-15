@@ -12,6 +12,22 @@ unit PasTreeIdePlugin.Analysis;
   See PasTreeIdePlugin.FindReferences's own unit header for the fuller
   architecture note (in-process/Win32/PoC, out-of-process Win64 helper
   intended later) - it applies equally here, unchanged.
+
+  Caching (BuildNavigator): the built TPasSemaProject/TPasNavigator pair is
+  kept alive across calls in a package-lifetime cache (GCache*), instead of
+  being rebuilt from scratch on every menu click / every Ctrl+Click - a full
+  reparse of the whole project (now including RTL/VCL search paths) on
+  every single Ctrl+Click was the whole point of adding this. Invalidation
+  is content-based, not time-based: on each call, GatherOpenUnitOverrides
+  runs as before (cheap - a handful of open files) and its result is
+  compared against the last-cached snapshot; the expensive rebuild only
+  happens if the active project changed or any open unit's text differs.
+  KNOWN GAP: changes to files that aren't open in an editor tab (edited
+  externally, or added/removed from the project on disk) are NOT detected -
+  the cache has no file-system watcher. Acceptable for now since RTL/VCL
+  essentially never changes mid-session and other project files not open
+  in a tab rarely change without going through the editor too; revisit if
+  that turns out to be wrong in practice.
 }
 
 interface
@@ -90,16 +106,26 @@ function GetIDESourcePaths: TArray<string>;
 function CollectSearchPaths(const AProjectDir: string; const AOpenUnits: TArray<TUnitSource>): TArray<string>;
 
 /// <summary>
-/// Builds a fresh TPasSemaProject (analyzed) + TPasNavigator for AProject -
-/// see the unit header: in-process, rebuilt from scratch on every call, no
-/// caching yet. The caller owns both and must free them - ANavigator FIRST
-/// (it only holds a reference to ASemaProject, never owns it, so
-/// ASemaProject must outlive it but not the other way around).
+/// Builds (or reuses a cached) TPasSemaProject (analyzed) + TPasNavigator
+/// for AProject. Cached across calls - see the "Caching" section of this
+/// unit's header - and rebuilt only when the active project or the live
+/// text of any open unit has actually changed since last time. The result
+/// is OWNED BY THE CACHE, not the caller: do NOT free ASemaProject or the
+/// returned TPasNavigator - they stay alive until the next invalidating
+/// call, or until FinalizeAnalysisCache runs at package unload.
 /// AMainFile receives the resolved real source file (see
 /// ResolveMainSourceFile) that was actually analyzed, for diagnostics.
 /// </summary>
 function BuildNavigator(const AProject: IOTAProject; out ASemaProject: TPasSemaProject;
   out AMainFile: string): TPasNavigator;
+
+/// <summary>
+/// Frees the cached TPasSemaProject/TPasNavigator, if any. Call once, from
+/// PasTreeIdePlugin.Wizard's TIDEWizard.Destroy, before the package unloads
+/// - same reason the editor local menu's action list and the Ctrl+Click
+/// notifier must be torn down there too.
+/// </summary>
+procedure FinalizeAnalysisCache;
 
 implementation
 
@@ -293,6 +319,60 @@ begin
   end;
 end;
 
+var
+  // Package-lifetime cache for BuildNavigator - see the unit header
+  // ("Caching") for why and its known gap. GCacheProject uses plain
+  // interface (=) comparison, i.e. pointer identity: "is this literally the
+  // same project object as last time", which is what we want to detect a
+  // project switch - IOTAProject implementations are stable per project for
+  // the life of the IDE session, they don't get re-wrapped on repeat
+  // .ActiveProject calls.
+  GCacheProject: IOTAProject;
+  GCacheUnits: TArray<TUnitSource>;
+  GCacheMainFile: string;
+  GCacheSemaProject: TPasSemaProject;
+  GCacheNavigator: TPasNavigator;
+
+/// <summary>
+/// True if both unit-text snapshots are the same set of (filename, text)
+/// pairs, regardless of order (open-tab order isn't a meaningful signal of
+/// "something changed" on its own).
+/// </summary>
+function SameUnits(const A, B: TArray<TUnitSource>): Boolean;
+var
+  LMap: TDictionary<string, string>;
+  LUnit: TUnitSource;
+  LExisting: string;
+begin
+  if Length(A) <> Length(B) then
+    Exit(False);
+
+  LMap := TDictionary<string, string>.Create;
+  try
+    for LUnit in A do
+      LMap.AddOrSetValue(LowerCase(LUnit.FileName), LUnit.Text);
+    for LUnit in B do
+    begin
+      if not LMap.TryGetValue(LowerCase(LUnit.FileName), LExisting) then
+        Exit(False);
+      if LExisting <> LUnit.Text then
+        Exit(False);
+    end;
+    Result := True;
+  finally
+    LMap.Free;
+  end;
+end;
+
+procedure FinalizeAnalysisCache;
+begin
+  FreeAndNil(GCacheNavigator);
+  FreeAndNil(GCacheSemaProject);
+  GCacheProject := nil;
+  GCacheUnits := nil;
+  GCacheMainFile := '';
+end;
+
 function BuildNavigator(const AProject: IOTAProject; out ASemaProject: TPasSemaProject;
   out AMainFile: string): TPasNavigator;
 var
@@ -301,6 +381,18 @@ var
   LSearchPaths: TArray<string>;
 begin
   LUnits := GatherOpenUnitOverrides;
+
+  if Assigned(GCacheNavigator) and (GCacheProject = AProject) and SameUnits(GCacheUnits, LUnits) then
+  begin
+    ASemaProject := GCacheSemaProject;
+    AMainFile := GCacheMainFile;
+    Exit(GCacheNavigator);
+  end;
+
+  // Cache miss (first call, project switched, or an open unit's text
+  // changed) - discard whatever was cached before building fresh.
+  FinalizeAnalysisCache;
+
   LSearchPaths := CollectSearchPaths(ExtractFilePath(AProject.FileName), LUnits);
   AMainFile := ResolveMainSourceFile(AProject);
 
@@ -325,8 +417,16 @@ begin
     Result := TPasNavigator.Create(ASemaProject);
   except
     ASemaProject.Free;
+    ASemaProject := nil;
     raise;
   end;
+
+  // Cache the freshly built pair for the next call.
+  GCacheProject := AProject;
+  GCacheUnits := LUnits;
+  GCacheMainFile := AMainFile;
+  GCacheSemaProject := ASemaProject;
+  GCacheNavigator := Result;
 end;
 
 end.

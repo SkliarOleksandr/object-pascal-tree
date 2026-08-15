@@ -31,16 +31,12 @@ unit PasTreeIdePlugin.FindReferences;
   instead of calling TPasSemaProject directly - deliberately not built yet.
 
   TODO (next):
-    1. Cache TPasSemaProject/TPasNavigator across calls instead of rebuilding
-       from scratch on every click (fine for a small test project; not for
-       a real one). Now that both this unit and GotoDeclaration call
-       BuildNavigator, this would help both at once.
-    2. Move analysis out-of-process (Win64 helper) once ready to test against
+    1. Move analysis out-of-process (Win64 helper) once ready to test against
        the real target project - see the architecture note above.
-    3. Read the project's actual $DEFINEs (e.g. from .dproj DCC_Define) and
+    2. Read the project's actual $DEFINEs (e.g. from .dproj DCC_Define) and
        pass them as TPasSemaProject's AExtraDefines instead of the empty
        array used now.
-    4. Highlight the matched identifier within each hit's snippet text
+    3. Highlight the matched identifier within each hit's snippet text
        (TPasRefHit.HiFrom/HiTo already carry the offsets - same field the
        demo's own MakeFindRefDisplay uses). AddToolMessage draws plain text
        only; doing this means a message class implementing
@@ -49,6 +45,11 @@ unit PasTreeIdePlugin.FindReferences;
        together, registered via AddCustomMessage instead of AddToolMessage.
        Deliberately deferred - real code, not wired up, for a cosmetic-only
        improvement at this PoC stage.
+
+  DONE (2026-08-15): TPasSemaProject/TPasNavigator are now cached across
+  calls instead of rebuilt from scratch on every click - see
+  PasTreeIdePlugin.Analysis's "Caching" note. BuildNavigator's result is
+  cache-owned; this unit no longer frees LNav/LSema itself.
 }
 
 interface
@@ -247,42 +248,40 @@ begin
       Exit;
     end;
 
+    // BuildNavigator's result is cache-owned (see PasTreeIdePlugin.Analysis
+    // - "Caching") - do not free LNav/LSema, they outlive this call.
     LNav := BuildNavigator(LProject, LSema, LMainFile);
-    try
-      LMid := LNav.ModelIdOf(LCursorFile);
-      if LMid < 0 then
-      begin
-        LogDiagnostic(Format('Find References: "%s" was not part of '
-          + 'the analyzed project (check the Build tab for parse errors).', [LCursorFile]));
-        Exit;
-      end;
 
-      LFound := True;
-      LHasDecl := False;
-      if LNav.SymbolAt(LMid, LRow, LCol, LTMid, LSym, LName) then
-      begin
-        LHasDecl := LNav.DeclHit(LTMid, LSym, LDeclHit);
-        LHits := LNav.FindReferences(LTMid, LSym);
-      end
-      else if LNav.UnitAt(LMid, LRow, LCol, LTargetMid, LName) then
-      begin
-        LHasDecl := LNav.UnitDeclHit(LTargetMid, LDeclHit);
-        LHits := LNav.FindUnitReferences(LTargetMid);
-      end
-      else if LNav.BuiltinNameAt(LMid, LRow, LCol, LName) then
-        LHits := LNav.FindBuiltinReferences(LName)
-      else
-        LFound := False;
-
-      if not LFound then
-        (BorlandIDEServices as INTAIDEUIServices).MessageDlg(
-          'No identifier under the cursor.', mtInformation, [mbOK], -1)
-      else
-        ReportHits(LName, LHasDecl, LDeclHit, LHits);
-    finally
-      LNav.Free;
-      LSema.Free;
+    LMid := LNav.ModelIdOf(LCursorFile);
+    if LMid < 0 then
+    begin
+      LogDiagnostic(Format('Find References: "%s" was not part of '
+        + 'the analyzed project (check the Build tab for parse errors).', [LCursorFile]));
+      Exit;
     end;
+
+    LFound := True;
+    LHasDecl := False;
+    if LNav.SymbolAt(LMid, LRow, LCol, LTMid, LSym, LName) then
+    begin
+      LHasDecl := LNav.DeclHit(LTMid, LSym, LDeclHit);
+      LHits := LNav.FindReferences(LTMid, LSym);
+    end
+    else if LNav.UnitAt(LMid, LRow, LCol, LTargetMid, LName) then
+    begin
+      LHasDecl := LNav.UnitDeclHit(LTargetMid, LDeclHit);
+      LHits := LNav.FindUnitReferences(LTargetMid);
+    end
+    else if LNav.BuiltinNameAt(LMid, LRow, LCol, LName) then
+      LHits := LNav.FindBuiltinReferences(LName)
+    else
+      LFound := False;
+
+    if not LFound then
+      (BorlandIDEServices as INTAIDEUIServices).MessageDlg(
+        'No identifier under the cursor.', mtInformation, [mbOK], -1)
+    else
+      ReportHits(LName, LHasDecl, LDeclHit, LHits);
   except
     // Scaffold diagnostics: surface the real exception in the Messages panel
     // instead of letting an unhandled one pop the IDE's generic "Error"

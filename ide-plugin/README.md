@@ -53,6 +53,14 @@ working**:
   `Handled := True` to suppress RAD Studio's own default handling
   (documented as "prevent further processing" - `ToolsAPI.Editor.pas:804-806`).
 
+Every successful jump registers with `IOTAHistoryServices` (the same global
+Backward/Forward stack the IDE's own Alt+Left/Alt+Right toolbar buttons
+use), via `PushHistoryAndNavigate`/`TPasHistoryItem` - so Alt+Left/Right work
+across our jumps too. Every history item handed to the IDE is tracked and
+removed via `RemoveHistoryItem` at package unload (`ClearHistoryItems`) -
+left registered, a stale entry would call `.Execute` on an object living in
+already-unloaded package code the next time the user pressed Alt-Left/Right.
+
 ### Shared analysis pipeline
 
 Both Go to Declaration entry points, and Find References, call
@@ -67,6 +75,15 @@ Both Go to Declaration entry points, and Find References, call
   `TPasNavigator`, whose three-identity lookup (symbol / unit / builtin -
   see `source/PasTree.Sema.Nav.pas`) resolves whatever's at a given
   file/line/column.
+- **Cached across calls.** Rebuilding this from scratch on every menu click
+  - and now every Ctrl+Click - was too slow once RTL/VCL search paths were
+  added (a full reparse per click, visibly). The built pair is kept alive
+  in a package-lifetime cache and only rebuilt when the active project
+  changed or an open unit's live text differs from last time (content
+  comparison, not time-based). `BuildNavigator`'s result is cache-owned -
+  callers must not free it. Known gap: changes to files not open in an
+  editor tab aren't detected (no filesystem watcher) - acceptable since
+  RTL/VCL essentially never changes mid-session.
 
 ### Diagnostics
 
@@ -82,9 +99,8 @@ own.
 ## Architecture: in-process for now, by design
 
 This runs the full `TPasSemaProject` analysis **inside the 32-bit designtime
-package**, synchronously, rebuilding the project from scratch on every call
-(every menu click, and every Ctrl+Click). That's a deliberate, accepted
-limitation for this PoC stage - not an oversight:
+package**, synchronously. That's a deliberate, accepted limitation for this
+PoC stage - not an oversight:
 
 - A designtime package is forced to run **Win32** (the IDE itself is a
   32-bit process) - there is no way to make this package itself Win64.
@@ -92,9 +108,9 @@ limitation for this PoC stage - not an oversight:
   need **Win64 and several GB** to analyze (see project memory - the same
   codebase OOMs when analyzed as Win32). Running that analysis inside this
   Win32 package is expected to fail or be unusable at that scale.
-- Re-analyzing the whole project synchronously on every single call has no
-  caching yet either - fine for a small test project, not for a real one,
-  and now doubly so with Go to Declaration firing on every Ctrl+Click.
+- The analysis result is cached (see "Shared analysis pipeline" above), so
+  this is only a full reparse on a cache miss (project switch, or an open
+  unit's text changed) - not on every single call anymore.
 
 The intended fix, once this moves past PoC: an **out-of-process Win64
 helper** (extending `tools\PasTreeSemaProject.dpr`) that this plugin talks
@@ -104,17 +120,17 @@ not built yet - see the architecture note at the top of
 
 ## Known first-pass limitations
 
-- `uses` resolution only searches the active project's own directory and
-  every open unit's directory - it does not know the RTL/VCL/ToolsAPI
-  source paths, so `TActionList`, `IOTAWizard`, and anything else declared
-  outside the active project won't resolve. A `GetIDESourcePaths` function
-  exists in `PasTreeIdePlugin.Analysis.pas` (rooted at
-  `IOTAServices.GetRootDirectory`, no hardcoded version) but is
-  **disabled** - adding those search paths triggered an access violation on
-  a real multi-unit project (heap/stack corruption surfacing later, in
-  unrelated IDE code, on a subsequent click - suspect it's inside PasTree's
-  own `TPasSourceManager`/preprocessor at RTL/VCL scale, not this plugin's
-  code). See `CollectSearchPaths`'s comment before re-enabling it.
+- `uses` resolution includes the active project's own directory, every open
+  unit's directory, and (as of 2026-08-15) RTL/VCL/ToolsAPI source
+  (`GetIDESourcePaths` in `PasTreeIdePlugin.Analysis.pas`, rooted at
+  `IOTAServices.GetRootDirectory`, no hardcoded version) - `TActionList`,
+  `IOTAWizard`, etc. now resolve correctly. This was disabled once after an
+  AV, re-enabled and re-tested clean after a full IDE restart - the AV was
+  most likely the package-hot-reload issue below, not a real bug, but a
+  theoretical concurrency risk in PasTree's own `TPasSourceManager` is
+  still unconfirmed either way (project memory:
+  `pastree-rtl-vcl-scale-av-suspect`). Disable again (see
+  `CollectSearchPaths`'s comment) if it ever AVs after a *clean* restart.
 - Project `$DEFINE`s aren't read from the `.dproj` yet - `TPasSemaProject`
   is created with an empty extra-defines list.
 - Platform is read from `IOTAProject.CurrentPlatform` and mapped to the
@@ -143,9 +159,10 @@ not built yet - see the architecture note at the top of
   feature calls).
 - `PasTreeIdePlugin.FindReferences.pas` - Find References logic and
   Messages-panel reporting. Its unit header has the fuller architecture
-  note and a TODO list for what's next (caching, out-of-process, real
-  defines, snippet highlighting).
+  note and a TODO list for what's next (out-of-process, real defines,
+  snippet highlighting).
 - `PasTreeIdePlugin.GotoDeclaration.pas` - the Ctrl+Click override plus the
   shared `ResolveAndNavigate`/`ExecuteGotoDeclaration` used by both Go to
   Declaration entry points: mouse event interception, cursor
-  pixel→file-position conversion, and navigation.
+  pixel→file-position conversion, navigation, and `IOTAHistoryServices`
+  integration (`TPasHistoryItem`) for Backward/Forward.

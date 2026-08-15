@@ -32,7 +32,8 @@ implementation
 
 uses
   System.SysUtils, Vcl.ActnList, Vcl.Dialogs, Vcl.Forms, ToolsAPI, ToolsAPI.UI,
-  PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.GotoDeclaration;
+  PasTreeIdePlugin.FindReferences, PasTreeIdePlugin.GotoDeclaration,
+  PasTreeIdePlugin.Analysis;
 
 const
   cMenuCategory = 'PasTreeIdePluginMenuCategory';
@@ -166,6 +167,7 @@ destructor TIDEWizard.Destroy;
 begin
   FinalizeGotoDeclaration;
   FinalizeFindReferencesMessageGroup;
+  FinalizeAnalysisCache;
   FreeAndNil(FMenuManager);
   inherited;
 end;
