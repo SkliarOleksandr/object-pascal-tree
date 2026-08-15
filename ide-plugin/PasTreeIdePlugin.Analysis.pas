@@ -62,9 +62,12 @@ function ResolveMainSourceFile(const AProject: IOTAProject): string;
 function MapPlatform(const APlatformId: string): TPasPlatform;
 
 /// <summary>
-/// DISABLED - see CollectSearchPaths' own comment at its call site. Kept
-/// here, unused, as a documented starting point for whoever investigates
-/// the AV next; do not just re-enable the call without a standalone repro.
+/// RE-ENABLED (2026-08-15, re-test after a confirmed-clean IDE restart) -
+/// see CollectSearchPaths' own comment at its call site for the real risk
+/// (a concurrency bug possibly in PasTree.SourceManager, not just this
+/// package). If it AVs again after a clean restart, disable this call again
+/// and treat it as evidence for the PasTree-side bug (project memory:
+/// pastree-rtl-vcl-scale-av-suspect), not another hot-reload artifact.
 ///
 /// RTL/VCL/ToolsAPI source directories, rooted at the IDE's own install
 /// location (IOTAServices.GetRootDirectory - portable across machines and
@@ -267,17 +270,22 @@ begin
       LDir := ExtractFilePath(LUnit.FileName);
       AddDir(LDir);
     end;
-    // GetIDESourcePaths (rtl/vcl/ToolsAPI) is DISABLED for now - see its own
-    // comment. Adding those search paths correlated with an access violation
-    // (heap/stack corruption surfacing later, in unrelated IDE code, on a
-    // subsequent menu click - the same signature the IOTAEditReader.GetText
-    // bug had) on a real multi-unit project. That earlier bug was in this
-    // unit's own ToolsAPI usage; this one showed up with no ToolsAPI-side
-    // change at all, only a much larger search corpus handed to PasTree
-    // itself (thousands of RTL/VCL files, incl. platform-duplicate unit
-    // names across subfolders) - suspect it's inside PasTree's own
-    // TPasSourceManager/preprocessor at that scale, not this plugin's code.
-    // Do not re-enable without a proper standalone repro outside the IDE.
+    // RE-ENABLED 2026-08-15 for a re-test: the AV that got this disabled
+    // might have been the separately-confirmed package-hot-reload issue
+    // (see project memory) rather than a real PasTree bug - retesting after
+    // a full IDE restart this time to tell the two apart. Real risk either
+    // way: TPasSemaProject.SingleThreaded only gates the CPU parse workers
+    // (ForEachIndex) - FSM.Prefetch (PasTree.Sema.Project.pas:2716) runs its
+    // own concurrent I/O on the default thread pool unconditionally, and a
+    // 2026-08-15 memory audit flagged unsynchronized FSearchIndex/DirIndex
+    // lazy-init and FContentCache access in PasTree.SourceManager.pas as
+    // concrete suspects - exactly the kind of race that would only surface
+    // at RTL/VCL scale. If this AVs again after a clean restart, that's
+    // real evidence for a genuine PasTree-side bug, not just stale-package
+    // noise - see pastree-rtl-vcl-scale-av-suspect (project memory) for the
+    // standalone-repro plan if so.
+    for LDir in GetIDESourcePaths do
+      AddDir(LDir);
     Result := LList.ToArray;
   finally
     LList.Free;

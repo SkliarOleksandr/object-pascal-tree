@@ -167,20 +167,40 @@ var
   LView: IOTAEditView;
 begin
   if not Supports(BorlandIDEServices, IOTAModuleServices, LModuleServices) then
+  begin
+    LogDiagnostic('Goto Declaration: IOTAModuleServices unavailable.');
     Exit;
+  end;
   LModule := LModuleServices.OpenModule(AHit.FilePath);
   if not Assigned(LModule) then
+  begin
+    LogDiagnostic(Format('Goto Declaration: OpenModule("%s") returned nil.', [AHit.FilePath]));
     Exit;
+  end;
+
+  // OpenModule loads the module but doesn't itself create a visible editor
+  // view for a file that wasn't already open - EditViewCount is 0 right
+  // after OpenModule alone. Show creates/reveals the default editor (and
+  // its view) for the module; only after that does EditViews[0] exist.
+  LModule.Show;
+
   if not Supports(LModule.GetModuleFileEditor(0), IOTASourceEditor, LSourceEditor) then
+  begin
+    LogDiagnostic(Format('Goto Declaration: "%s" has no IOTASourceEditor at file index 0.',
+      [AHit.FilePath]));
     Exit;
+  end;
   if LSourceEditor.EditViewCount = 0 then
+  begin
+    LogDiagnostic(Format('Goto Declaration: "%s" has no edit views even after Show.',
+      [AHit.FilePath]));
     Exit;
+  end;
 
   LView := LSourceEditor.EditViews[0];
   LView.Position.GotoLine(AHit.Line);
   LView.Position.Move(AHit.Line, AHit.Col);
   LView.MoveViewToCursor;
-  LModule.Show;
 end;
 
 /// <summary>
