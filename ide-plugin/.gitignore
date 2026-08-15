@@ -1,0 +1,9 @@
+PasTreeIdePlugin.res
+*.RES
+*.dcu
+*.local
+*.identcache
+*.dsk
+*.tvsconfig
+__history/
+__recovery/
