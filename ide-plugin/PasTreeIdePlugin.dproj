@@ -97,6 +97,26 @@
         <DCCReference Include="designide.dcp"/>
         <DCCReference Include="PasTreeIdePlugin.Wizard.pas"/>
         <DCCReference Include="PasTreeIdePlugin.FindReferences.pas"/>
+        <DCCReference Include="..\source\PasTree.Types.pas"/>
+        <DCCReference Include="..\source\PasTree.Lexer.pas"/>
+        <DCCReference Include="..\source\PasTree.SourceManager.pas"/>
+        <DCCReference Include="..\source\PasTree.Preprocessor.pas"/>
+        <DCCReference Include="..\source\PasTree.CondEval.pas"/>
+        <DCCReference Include="..\source\PasTree.Platforms.pas"/>
+        <DCCReference Include="..\source\PasTree.Ast.pas"/>
+        <DCCReference Include="..\source\PasTree.Ast.Json.pas"/>
+        <DCCReference Include="..\source\PasTree.Parser.pas"/>
+        <DCCReference Include="..\source\PasTree.Project.pas"/>
+        <DCCReference Include="..\source\PasTree.DProj.pas"/>
+        <DCCReference Include="..\source\PasTree.Sema.Diagnostics.pas"/>
+        <DCCReference Include="..\source\PasTree.Sema.Model.pas"/>
+        <DCCReference Include="..\source\PasTree.Sema.Builtins.pas"/>
+        <DCCReference Include="..\source\PasTree.Sema.Types.pas"/>
+        <DCCReference Include="..\source\PasTree.Sema.Resolver.pas"/>
+        <DCCReference Include="..\source\PasTree.Sema.Project.pas"/>
+        <DCCReference Include="..\source\PasTree.Sema.Nav.pas"/>
+        <DCCReference Include="..\source\PasTree.Sema.Dump.pas"/>
+        <DCCReference Include="..\source\PasTree.Sema.Async.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>
