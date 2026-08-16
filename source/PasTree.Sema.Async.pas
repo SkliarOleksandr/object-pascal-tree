@@ -67,8 +67,12 @@ type
       was never taken. Safe to call at any time. }
     destructor Destroy; override;
     { Editor-host buffer override — forwarded to the project. Call BEFORE
-      Start (the worker reads buffers as it parses). }
-    procedure SetBuffer(const APath, AText: string);
+      Start (the worker reads buffers as it parses). AVersion is the host's
+      version stamp for the document; after TakeProject the host reads it
+      back via the project's BufferVersion and compares against the version
+      it holds NOW — unequal means this result was computed from older text
+      and its positions may be stale. }
+    procedure SetBuffer(const APath, AText: string; AVersion: Integer = 0);
     { Configuration forwarded to the project. Call BEFORE Start. }
     procedure SetNamespaces(const ANamespaces: TArray<string>);
     procedure AddUnitAlias(const AAlias, AReal: string);
@@ -144,9 +148,10 @@ begin
   inherited;
 end;
 
-procedure TPasAsyncSession.SetBuffer(const APath, AText: string);
+procedure TPasAsyncSession.SetBuffer(const APath, AText: string;
+  AVersion: Integer);
 begin
-  FProject.SetBuffer(APath, AText);
+  FProject.SetBuffer(APath, AText, AVersion);
 end;
 
 procedure TPasAsyncSession.SetNamespaces(const ANamespaces: TArray<string>);

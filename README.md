@@ -280,6 +280,24 @@ usable.
 
 Still open, roughly in the order we're tackling it:
 
+- ~~**Overlay buffers and cancellation in the library facade**~~ — **Done
+  2026-08-16**, the two preconditions for hosting PasTree out-of-process (the
+  LSP server lives in `c:\Repos\pastree-lsp-server`, spec there). Most of it
+  turned out to already exist: `SetBuffer` overlays were consulted before the
+  Prefetch cache and the disk everywhere (LoadText AND IncludeStream), and
+  `AnalyzeStaged` already polled its cancel predicate every 64-file chunk and
+  between cross passes. What was actually missing and got added: (1) overlay
+  buffers carry the HOST's version stamp (`SetBuffer` takes `AVersion`,
+  `BufferVersion` reads it back through session → project → source manager),
+  so an async host can recognize a result computed from older text; (2)
+  cancellation now lands MID-PASS — `ForEachIndex` reads the running staged
+  analysis's predicate and turns the rest of a pass into no-ops (safe because
+  every commit loop already tolerated a nil/unset slot, the same shape as a
+  worker that threw), plus checks in the sequential finalizer loops
+  (ResolveUses, BindTypesX, after RunDeclaredPass and RunCrossTypePass) — a
+  cancel no longer waits out a multi-second cross pass on a big project. The
+  demo grew a **Stop** button that cancels the in-flight background analysis
+  and logs it; the previous project stays live (double-buffering).
 - ~~**An interface's implicit `IInterface` ancestor is not walked.**~~ **Done
   2026-08-06** — `FindMemberX` makes the same hop for a heritage-less interface
   that it already made for a heritage-less class (14 §14.1.1: the default

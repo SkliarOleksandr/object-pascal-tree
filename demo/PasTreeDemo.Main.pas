@@ -190,6 +190,7 @@ type
     btnShowASTJson: TButton;
     btnShowSemantics: TButton;
     btnShowCoverage: TButton;
+    btnStop: TButton;
     lblProgress: TLabel;
     vtMessages: TVirtualStringTree;
     btnParseVcl: TButton;
@@ -213,6 +214,7 @@ type
     procedure btnShowASTJsonClick(Sender: TObject);
     procedure btnShowSemanticsClick(Sender: TObject);
     procedure btnShowCoverageClick(Sender: TObject);
+    procedure btnStopClick(Sender: TObject);
     procedure chkShowErrorsClick(Sender: TObject);
     procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     procedure vstFilesGetText(Sender: TBaseVirtualTree; Node: PVirtualNode;
@@ -2821,7 +2823,22 @@ begin
   FAsyncStart := TStopwatch.StartNew;
   FAsyncSession.Start;
   lblProgress.Caption := 'analyzing...';
+  btnStop.Enabled := True;
   FAsyncTimer.Enabled := True;
+end;
+
+// The Stop button: user-requested cancellation of the in-flight analysis.
+// Cancellation is cooperative and now lands MID-PASS (see FCancelCheck in
+// TPasSemaProject), so the drain inside CancelAsync is short even on a big
+// project. The previous project/navigator were never touched by the aborted
+// build (double-buffering), so navigation keeps working on the older model.
+procedure TfrmMain.btnStopClick(Sender: TObject);
+begin
+  if not Assigned(FAsyncSession) then
+    Exit;
+  CancelAsync;
+  lblProgress.Caption := 'cancelled';
+  Log('Analysis cancelled by user — keeping the previous results.');
 end;
 
 // Cancels and drains the in-flight background analysis (if any). Called before
@@ -2829,6 +2846,7 @@ end;
 procedure TfrmMain.CancelAsync;
 begin
   FAsyncTimer.Enabled := False;
+  btnStop.Enabled := False;
   if Assigned(FAsyncSession) then
   begin
     FAsyncSession.Cancel;
@@ -2854,6 +2872,7 @@ begin
 
   // Build finished — swap in the new project/navigator on this (UI) thread.
   FAsyncTimer.Enabled := False;
+  btnStop.Enabled := False;
   FAsyncStart.Stop;
   LError := FAsyncSession.LastError;
   ClearLink;

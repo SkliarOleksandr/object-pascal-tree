@@ -20,13 +20,23 @@ uses
 
 type
   TPasSourceManager = class
+  private type
+    // An overlay buffer (SetBuffer): the text analysis sees for a path, plus
+    // the HOST's version stamp for it. The version means nothing here — it is
+    // carried so an asynchronous host (the demo, the LSP server) can compare
+    // a finished analysis against the document version it currently holds and
+    // discard a stale result instead of navigating with wrong positions.
+    TBufferEntry = record
+      Text: string;
+      Version: Integer;
+    end;
   private
     FSearchPaths: TArray<string>;
     FNamespaces: TArray<string>;                  // -NS prefixes, in order
     FAliases: TDictionary<string, string>;        // -A alias(lower) -> real
     FIncludeIndex: TDictionary<string, string>;  // basename -> full path
     FUnitIndex: TDictionary<string, string>;      // *.pas/*.dpr basename -> path
-    FBuffers: TDictionary<string, string>;        // full path (lower) -> text
+    FBuffers: TDictionary<string, TBufferEntry>;  // full path (lower) -> entry
     // Unit-file lookup indexes, built LAZILY on the first FindUnitFile call
     // (a project may never resolve units at all). FSearchIndex maps a .pas
     // basename (lower) to its full path across ALL search paths — first path
@@ -81,9 +91,16 @@ type
     { In-memory buffer overrides: LoadText returns the given text for APath
       instead of reading the file. Editor hosts push unsaved buffers here so
       analysis sees what's on screen (main file AND its $I includes go through
-      LoadText). Keyed by full-path, case-insensitive. Set before analyzing. }
-    procedure SetBuffer(const APath, AText: string);
+      LoadText). Keyed by full-path, case-insensitive. Set before analyzing.
+      AVersion is the host's version stamp for the document (an LSP
+      `didChange` version, an editor change counter) — stored verbatim,
+      readable back via BufferVersion, never interpreted here. }
+    procedure SetBuffer(const APath, AText: string; AVersion: Integer = 0);
     procedure ClearBuffers;
+    { The version stamp SetBuffer stored for APath, or -1 when no overlay is
+      set for it. An async host compares this against the version it holds
+      NOW to recognize a result that was computed from older text. }
+    function BufferVersion(const APath: string): Integer;
     { Reads every file of APaths into the in-memory repository CONCURRENTLY,
       with an I/O-depth pool (32 workers) rather than the per-core parse
       pool: a COLD read's cost is dominated by per-file latency (antivirus
@@ -219,16 +236,32 @@ begin
   FAliases.AddOrSetValue(LowerCase(AAlias), AReal);
 end;
 
-procedure TPasSourceManager.SetBuffer(const APath, AText: string);
+procedure TPasSourceManager.SetBuffer(const APath, AText: string;
+  AVersion: Integer);
+var
+  LEntry: TBufferEntry;
 begin
   if FBuffers = nil then
-    FBuffers := TDictionary<string, string>.Create;
-  FBuffers.AddOrSetValue(LowerCase(TPath.GetFullPath(APath)), AText);
+    FBuffers := TDictionary<string, TBufferEntry>.Create;
+  LEntry.Text := AText;
+  LEntry.Version := AVersion;
+  FBuffers.AddOrSetValue(LowerCase(TPath.GetFullPath(APath)), LEntry);
 end;
 
 procedure TPasSourceManager.ClearBuffers;
 begin
   FreeAndNil(FBuffers);
+end;
+
+function TPasSourceManager.BufferVersion(const APath: string): Integer;
+var
+  LEntry: TBufferEntry;
+begin
+  if (FBuffers <> nil) and
+     FBuffers.TryGetValue(LowerCase(TPath.GetFullPath(APath)), LEntry) then
+    Result := LEntry.Version
+  else
+    Result := -1;
 end;
 
 function TPasSourceManager.TryFile(const ADir, AName: string;
@@ -560,10 +593,14 @@ function TPasSourceManager.LoadText(const APath: string): string;
 var
   LKey: string;
   LRaw: TBytes;
+  LEntry: TBufferEntry;
 begin
   LKey := LowerCase(TPath.GetFullPath(APath));
-  if (FBuffers <> nil) and FBuffers.TryGetValue(LKey, Result) then
-    Exit;
+  if FBuffers <> nil then
+  begin
+    if FBuffers.TryGetValue(LKey, LEntry) then
+      Exit(LEntry.Text);
+  end;
   if (FContentCache <> nil) and FContentCache.TryGetValue(LKey, LRaw) then
     Exit(DecodeText(LRaw, APath));
   Result := ReadFileText(APath);

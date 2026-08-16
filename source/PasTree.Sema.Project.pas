@@ -193,8 +193,20 @@ type
     // pass instantiates generics from heritage clauses concurrently (see
     // Instantiate); a bare TList read during another thread's Add is unsafe.
     FInstLock: TCriticalSection;
+    // The cancellation predicate of the CURRENT AnalyzeStaged run, nil
+    // otherwise. Set/cleared by AnalyzeStaged only; read by ForEachIndex so a
+    // cancel lands MID-PASS instead of waiting for a whole cross pass to
+    // finish (seconds on a big project — the LSP server cancels on every
+    // keystroke). Skipped iterations leave their slots at the pass's own
+    // "this unit failed" default (nil), which every commit loop already
+    // tolerates; the driver then exits at its next between-pass check, and
+    // the host discards a cancelled project wholesale.
+    FCancelCheck: TFunc<Boolean>;
+    function CancelRequested: Boolean; inline;
     // Runs ABody for 0..AHi — one worker per core, or a plain loop when
     // SingleThreaded (baseline emulation / timing comparison / debugging).
+    // Stops early (remaining iterations become no-ops) when the current
+    // staged run has been cancelled — see FCancelCheck.
     procedure ForEachIndex(AHi: Integer; const APass: string;
       const ABody: TProc<Integer>;
       const AMidOf: TFunc<Integer, Integer> = nil);
@@ -438,8 +450,14 @@ type
       write FReportVisibility;
     { Editor-host buffer override: analysis reads AText for APath instead of
       the file on disk (for unsaved editor content). Call BEFORE AnalyzeFile/
-      AnalyzeDirectory — LoadFile reads at analysis time. }
-    procedure SetBuffer(const APath, AText: string);
+      AnalyzeDirectory — LoadFile reads at analysis time. AVersion is the
+      host's version stamp for the document, readable back via BufferVersion
+      once the analysis is done — so an async host can tell a result computed
+      from the CURRENT text apart from one computed from an older keystroke. }
+    procedure SetBuffer(const APath, AText: string; AVersion: Integer = 0);
+    { The version SetBuffer stored for APath, or -1 when APath has no
+      overlay (analysis read it from disk). }
+    function BufferVersion(const APath: string): Integer;
     { Unit-scope namespaces (dcc -NS / DCC_Namespace) and unit aliases
       (dcc -A / DCC_UnitAlias), forwarded to the source manager's unit-name
       resolution. Set BEFORE analyzing. }
@@ -706,6 +724,11 @@ begin
     var
       LMid: Integer;
     begin
+      // A cancelled run turns the rest of the pass into no-ops. Cheaper and
+      // safer than TParallel's LoopState.Stop: no overload gymnastics, and
+      // the already-running bodies still finish and commit normally.
+      if CancelRequested then
+        Exit;
       try
         ABody(AIndex);
       except
@@ -720,10 +743,21 @@ begin
       end;
     end;
   if FSingleThreaded then
+  begin
     for LIdx := 0 to AHi do
-      LRun(LIdx)
+    begin
+      if CancelRequested then
+        Break;
+      LRun(LIdx);
+    end;
+  end
   else
     TParallel.&For(0, AHi, LRun);
+end;
+
+function TPasSemaProject.CancelRequested: Boolean;
+begin
+  Result := Assigned(FCancelCheck) and FCancelCheck();
 end;
 
 { Records a pass failure against AMid. Anchored on the unit's ROOT node, which
@@ -748,9 +782,15 @@ begin
   end;
 end;
 
-procedure TPasSemaProject.SetBuffer(const APath, AText: string);
+procedure TPasSemaProject.SetBuffer(const APath, AText: string;
+  AVersion: Integer);
 begin
-  FSM.SetBuffer(APath, AText);
+  FSM.SetBuffer(APath, AText, AVersion);
+end;
+
+function TPasSemaProject.BufferVersion(const APath: string): Integer;
+begin
+  Result := FSM.BufferVersion(APath);
 end;
 
 procedure TPasSemaProject.SetNamespaces(const ANamespaces: TArray<string>);
@@ -9453,6 +9493,10 @@ begin
   FStageTimings := '';
   LProgress := Default(TPasStagedProgress);
   LSeen := TDictionary<string, Boolean>.Create;
+  // Publish the predicate for the duration of the run: ForEachIndex reads it
+  // so a cancel stops the parallel passes mid-pass, not just at the
+  // between-pass checks below.
+  FCancelCheck := ACancelled;
   try
     LSW := TStopwatch.StartNew;
     // Front-load the priority set (open module + its uses), then the roots.
@@ -9526,7 +9570,14 @@ begin
     LN := FModels.Count;
     Report('cross:resolve');
     for LIdx := 0 to LN - 1 do
+    begin
+      if (LIdx and 63 = 0) and Cancelled then
+      begin
+        Report('cancelled');
+        Exit;
+      end;
       ResolveUses(LIdx);
+    end;
     if Cancelled then
     begin
       Report('cancelled');
@@ -9535,6 +9586,11 @@ begin
     RunDeclaredPass(LN);   // see there; must precede every cross pass
     InjectEncodingDiags(LN);
     InjectGuessedIfDiags(LN);
+    if Cancelled then
+    begin
+      Report('cancelled');
+      Exit;
+    end;
     LN := FModels.Count;   // it may have loaded newly-imported units
     Report('cross:xresolve');
     PrepareDeclWork(LN);
@@ -9572,9 +9628,23 @@ begin
     end;
     Report('cross:bindx');
     for LIdx := 0 to FModels.Count - 1 do
+    begin
+      if (LIdx and 63 = 0) and Cancelled then
+      begin
+        Report('cancelled');
+        Exit;
+      end;
       BindTypesX(LIdx);
+    end;
     Report('cross:xtype');
     RunCrossTypePass(LN);
+    // A cancel that landed inside the last pass must not report 'done' with
+    // a half-run pass behind it — the host would treat the project as good.
+    if Cancelled then
+    begin
+      Report('cancelled');
+      Exit;
+    end;
     MarkAllCrossReady;
     // See AnalyzeProject. On a cancelled run the caches stay — the host
     // discards a cancelled project wholesale anyway.
@@ -9586,6 +9656,7 @@ begin
     if Length(ARoots) > 0 then
       FByPath.TryGetValue(LowerCase(TPath.GetFullPath(ARoots[0])), Result);
   finally
+    FCancelCheck := nil;
     LSeen.Free;
   end;
 end;

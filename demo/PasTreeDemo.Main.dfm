@@ -416,6 +416,16 @@ object frmMain: TfrmMain
         TabOrder = 2
         OnClick = btnShowCoverageClick
       end
+      object btnStop: TButton
+        Left = 335
+        Top = 2
+        Width = 60
+        Height = 25
+        Caption = 'Stop'
+        Enabled = False
+        TabOrder = 3
+        OnClick = btnStopClick
+      end
     end
   end
   object SynJSONSyn1: TSynJSONSyn
