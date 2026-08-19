@@ -349,6 +349,40 @@ Still open, roughly in the order we're tackling it:
   closure. Without that, "it seems right on the demo" is not evidence, and the
   corpus suites only prove the FULL path still works.
 
+- **A source with no BOM is decoded as ANSI, and every editor disagrees.**
+  `DecodeBytes` defaults a preamble-less file to `TEncoding.Default` — the
+  system ANSI codepage — because that is what dcc does, and matching the
+  compiler is the right instinct. But every modern editor defaults to UTF-8,
+  and THIS repository's own sources are UTF-8 without a BOM and full of
+  em-dashes in comments, so the analyzer and the editor genuinely read
+  different text out of the same bytes: a 3-byte UTF-8 dash arrives as three
+  ANSI characters. Two consequences, both found while wiring the LSP server:
+
+  - **Positions shift.** A column on a line that contains a non-ASCII
+    character *before* the identifier is off by the byte inflation. Harmless
+    on a comment-only line, wrong the moment code follows a non-ASCII string
+    literal or comment on the same line — and invisible, because nothing
+    reports it: navigation just lands next to the name.
+  - **It looked like a performance bug.** Every such file appeared MODIFIED to
+    a host comparing the editor buffer against a fresh load, which cost the
+    server two full closure rebuilds per peeked declaration (~14 s) before it
+    learned to compare bytes instead. That symptom is fixed host-side; the
+    skew above is not, and cannot be — a host would have to re-decode every
+    file the analysis reads to work around the library's own choice.
+
+  What to decide (it is a behaviour decision, not a bug fix): whether a
+  preamble-less file whose bytes are VALID UTF-8 should be decoded as UTF-8,
+  falling back to ANSI only when the bytes are not valid UTF-8. That is what
+  editors do, it is a superset of the current behaviour for pure-ASCII files
+  (the overwhelming majority), and the tolerant recovery path already exists
+  for the failure case. Against it: dcc really does read such a file as ANSI,
+  so a source with an ANSI-encoded string literal would then analyze
+  differently from how it COMPILES — which is the same fidelity argument that
+  put ANSI there in the first place. If the answer is "match dcc", the
+  alternative is to make it a switch the way `ReportUnresolvedMembers` is, so
+  an editor host can opt into UTF-8-first while the CLI stays dcc-faithful.
+  Either way the corpus needs a re-run: this changes what the analyzer reads.
+
 - ~~**Overlay buffers and cancellation in the library facade**~~ — **Done
   2026-08-16**, the two preconditions for hosting PasTree out-of-process (the
   LSP server lives in `c:\Repos\pastree-lsp-server`, spec there). Most of it
