@@ -41,3 +41,7 @@ local/
 # OS junk
 Thumbs.db
 .DS_Store
+
+# VS Code workspace settings (machine-specific pastree.* paths)
+.vscode/
+*.log

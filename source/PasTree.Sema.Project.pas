@@ -292,6 +292,10 @@ type
       AArity: Integer; out ASym: Integer): Boolean;
     function FindTypeInUsesArity(AId: Integer; const ANameLower: string;
       AArity: Integer; out AUnit, ASym: Integer): Boolean;
+    function WrittenArityOfRef(AModel: TPasSemaModel;
+      ANode: Integer): Integer;
+    procedure FixCrossArity(AId: Integer; AModel: TPasSemaModel;
+      ANode: Integer; const ANameLower: string; var AUnit, ASym: Integer);
     function FindInSystemUnit(const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
     function FindInSysInitUnit(const ANameLower: string;
@@ -3045,6 +3049,80 @@ begin
     AUnit := LUid;
     ASym := LSym;
     Result := True;
+  end;
+end;
+
+{ The generic arity a REFERENCE was written with: the argument count when ANode
+  is the HEAD of an `nkTypeArgs` (`TArray<string>` is 1), else 0. Only the head
+  counts — an ident sitting INSIDE `<...>` is itself a bare reference, and the
+  parser puts the arguments after the head under the same node, so the
+  first-child test tells the two apart. Mirror of the resolver's
+  IsBareTypeUse + GenericArityOfParamsNode pair, which answers the same
+  question for a SAME-unit reference. }
+function TPasSemaProject.WrittenArityOfRef(AModel: TPasSemaModel;
+  ANode: Integer): Integer;
+var
+  LParent, LArg: Integer;
+begin
+  Result := 0;
+  LParent := AModel.Tree.Nodes[ANode].Parent;
+  if (LParent = NIL_NODE) or
+     (AModel.Tree.Nodes[LParent].Kind <> nkTypeArgs) or
+     (AModel.Tree.Nodes[LParent].FirstChild <> ANode) then
+    Exit;
+  LArg := AModel.Tree.Nodes[ANode].NextSibling;
+  while LArg <> NIL_NODE do
+  begin
+    Inc(Result);
+    LArg := AModel.Tree.Nodes[LArg].NextSibling;
+  end;
+end;
+
+{ Arity correction for a CROSS-unit reference, applied where ExtRefMap is
+  written — which is also what ctrl+click reads.
+
+  ResolveTypeExpr already matches arity for the TYPE it computes (see its
+  nkTypeArgs branch), but that answer never reaches ExtRefMap: the binding
+  CrossResolve committed via FindInUses stands, and go-to-declaration follows
+  it. `TArray<string>` in a unit that uses System.Generics.Collections is the
+  case that proves it — last-uses-wins hands back that unit's arity-0
+  `TArray = class`, and the arity-1 `TArray<T> = array of T` in the IMPLICIT
+  System unit is never consulted, because ordinary lookup treats the two as
+  equals. Arity is part of the identity (16.1.2), so they are not equals.
+
+  Same two places in the same order the type pass uses: the found symbol's own
+  overload chain (arities declared in ONE unit link there, and only the head is
+  registered under the name), then an arity-restricted scan of the imports plus
+  System. A no-op unless the reference is a type whose arity actually
+  mismatches, which is rare — the ordinary reference pays one set membership
+  and one parent read. }
+procedure TPasSemaProject.FixCrossArity(AId: Integer; AModel: TPasSemaModel;
+  ANode: Integer; const ANameLower: string; var AUnit, ASym: Integer);
+var
+  LWant, LProbe, LDepth, LUid, LFound: Integer;
+begin
+  if FModels[AUnit].Symbols[ASym].Kind <> skType then
+    Exit;
+  LWant := WrittenArityOfRef(AModel, ANode);
+  if ArityOfTypeSym(AUnit, ASym) = LWant then
+    Exit;
+  LProbe := FModels[AUnit].Symbols[ASym].NextOverload;
+  for LDepth := 1 to 32 do
+  begin
+    if LProbe = NIL_SYM then
+      Break;
+    if (FModels[AUnit].Symbols[LProbe].Kind = skType) and
+       (ArityOfTypeSym(AUnit, LProbe) = LWant) then
+    begin
+      ASym := LProbe;
+      Exit;
+    end;
+    LProbe := FModels[AUnit].Symbols[LProbe].NextOverload;
+  end;
+  if FindTypeInUsesArity(AId, ANameLower, LWant, LUid, LFound) then
+  begin
+    AUnit := LUid;
+    ASym := LFound;
   end;
 end;
 
@@ -7017,6 +7095,9 @@ begin
             Continue;
           if FindInUses(AId, LNameLower, LUid, LSym) then
           begin
+            // ARITY is part of a type's identity (16.1.2) and last-uses-wins
+            // is blind to it — see FixCrossArity.
+            FixCrossArity(AId, LModel, LNode, LNameLower, LUid, LSym);
             LExt.UnitId := LUid; LExt.Sym := LSym;
             LModel.ExtRefMap.Add(LNode, LExt);
           end
@@ -8836,6 +8917,12 @@ begin
        FindInSystemUnit(LNameLower, LUid, LSym) or
        FindInSysInitUnit(LNameLower, LUid, LSym) then
     begin
+      // The uses/System fallbacks are last-uses-wins and blind to ARITY, which
+      // is part of a type's identity (16.1.2) — see FixCrossArity. Not applied
+      // to an inherited MEMBER hit (LFound): that came from a type's own
+      // scope, not from a by-name import race.
+      if not LFound then
+        FixCrossArity(AId, LModel, LNode, LNameLower, LUid, LSym);
       LPend.Node := LNode;
       LPend.Ext.UnitId := LUid;
       LPend.Ext.Sym := LSym;
@@ -8913,7 +9000,7 @@ var
   LNode, LStruct, LUid, LSym, LCtx, LMatchNode, LWIdx: Integer;
   LPend: TPasInhPending;
   LNameLower: string;
-  LBound: Boolean;
+  LBound, LFromMember: Boolean;
   LMemX: TSemaXType;
   LCurExt: TPasExtRef;
 begin
@@ -8986,20 +9073,31 @@ begin
     end
     else if LBound then
       Continue   // no with member by that name: Phase 1's binding stands
-    else if ((LStruct <> NIL_SYM) and
-             FindMemberX(AId, XPlain(AId, LStruct), LNameLower, LUid, LSym, LCtx)) or
-            FindInUses(AId, LNameLower, LUid, LSym) or
-            FindInSystemUnit(LNameLower, LUid, LSym) or
-            FindInSysInitUnit(LNameLower, LUid, LSym) then
+    else
     begin
-      LPend.Node := LNode;
-      LPend.Ext.UnitId := LUid;
-      LPend.Ext.Sym := LSym;
-      LPend.X := XNil;
-      APending := APending + [LPend];
-    end
-    else if AEmit and LModel.AllUsesResolved then
-      EmitE2003(LModel, LNode);
+      // The member walk is hoisted out of the condition it used to sit in, so
+      // the arity correction below can tell WHICH source won. An inherited
+      // member hit is a type's own scope and needs no correction; the
+      // uses/System fallbacks are last-uses-wins and blind to ARITY, which is
+      // part of a type's identity (16.1.2). See FixCrossArity.
+      LFromMember := (LStruct <> NIL_SYM) and
+        FindMemberX(AId, XPlain(AId, LStruct), LNameLower, LUid, LSym, LCtx);
+      if LFromMember or
+         FindInUses(AId, LNameLower, LUid, LSym) or
+         FindInSystemUnit(LNameLower, LUid, LSym) or
+         FindInSysInitUnit(LNameLower, LUid, LSym) then
+      begin
+        if not LFromMember then
+          FixCrossArity(AId, LModel, LNode, LNameLower, LUid, LSym);
+        LPend.Node := LNode;
+        LPend.Ext.UnitId := LUid;
+        LPend.Ext.Sym := LSym;
+        LPend.X := XNil;
+        APending := APending + [LPend];
+      end
+      else if AEmit and LModel.AllUsesResolved then
+        EmitE2003(LModel, LNode);
+    end;
   end;
 end;
 

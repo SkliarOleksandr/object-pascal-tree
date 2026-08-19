@@ -92,8 +92,22 @@ const
     '  GBytes: TBytes;'#10 +                   // 8  TBytes col 11 -- an
                                                 //    IN-UNIT use, for the
                                                 //    SymbolAt redirect test
-    'implementation'#10 +                      // 9
-    'end.'#10;                                 // 10
+    // An ARITY-0 class sharing its name with System's arity-1 `TArray<T>`,
+    // the exact shape System.Generics.Collections has (`TArray = class` of
+    // static helpers beside the RTL's `TArray<T> = array of T`). It is here
+    // to be the WRONG answer for `TArray<Integer>` in NavB: ordinary
+    // last-uses-wins lookup prefers this imported class over the IMPLICIT
+    // System unit, and arity is what tells the two apart (16.1.2). See
+    // TPasSemaProject.FixCrossArity.
+    'type'#10 +                                // 9
+    '  TArray = class'#10 +                    // 10  TArray col 3
+    '    class procedure Sort; static;'#10 +   // 11
+    '  end;'#10 +                              // 12
+    'implementation'#10 +                      // 13
+    'class procedure TArray.Sort;'#10 +        // 14
+    'begin'#10 +                               // 15
+    'end;'#10 +                                // 16
+    'end.'#10;                                 // 17
 
   // A fixture for the IMPLICIT `System` unit — NEVER named in any `uses`
   // clause (that's the whole point: every unit uses it without saying so),
@@ -404,7 +418,16 @@ const
     'begin'#10 +                               // 19
     '  Result := 0;'#10 +                      // 20  Result col 3
     'end;'#10 +                                // 21
-    'end.'#10;                                 // 22
+    // A BARE `TArray` — arity 0 written, so NavC's imported class IS the right
+    // answer and must stay it. The control for the arity-1 case on line 11.
+    'procedure Q;'#10 +                        // 22
+    'var'#10 +                                 // 23
+    '  BA: TArray;'#10 +                       // 24  TArray col 7
+    'begin'#10 +                               // 25
+    '  BA := nil;'#10 +                        // 26
+    '  TArray.Sort;'#10 +                      // 27  TArray col 3
+    'end;'#10 +                                // 28
+    'end.'#10;                                 // 29
 
 var
   GProj: TPasSemaProject;
@@ -558,6 +581,20 @@ begin
       // Implicit System unit, no `uses System` anywhere: TObject/TArray<T>.
       CheckNav('implicit System: TObject', 10, 6, 'TObject', 'System.pas', 7, 3);
       CheckNav('implicit System: TArray', 11, 6, 'TArray', 'System.pas', 6, 3);
+      // BUG REGRESSION: the same line, now that NavC ALSO declares an
+      // arity-0 `TArray = class` (the System.Generics.Collections shape). The
+      // ordinary cross-unit lookup is last-uses-wins and blind to arity, so
+      // ctrl+click on `TArray<Integer>` landed on NavC's class instead of
+      // System's `TArray<T>` — a wrong ExtRefMap binding, not a nav mistake,
+      // and the arity rule the resolver has for SAME-unit references was
+      // simply missing where the CROSS-unit ones are written. See
+      // TPasSemaProject.FixCrossArity. The check above IS that regression
+      // (System.pas 6,3 is the arity-1 declaration); the two below are the
+      // controls that the fix stays a correction and not an override.
+      CheckNav('arity 0 written -> the imported CLASS, not System''s generic',
+        24, 7, 'TArray', 'NavC.pas', 10, 3);
+      CheckNav('arity 0 written, static-call qualifier',
+        27, 3, 'TArray', 'NavC.pas', 10, 3);
       // MEMBER access through a builtin: O.Free — the synthetic TObject
       // symbol has no MemberScope; FindMemberX must redirect to the real
       // TObject class body (System.pas) to resolve `.Free` at all.
