@@ -280,6 +280,75 @@ usable.
 
 Still open, roughly in the order we're tackling it:
 
+- **Incremental reanalysis.** Every analysis today rebuilds the whole closure,
+  and the LSP server (`c:\Repos\pastree-lsp-server`) has made the cost
+  concrete: on the demo's own 197-unit closure a rebuild is **5.3 s**, and the
+  server pays it for every real edit. The host side is already as good as it
+  can get without library support — versioned overlay buffers, a 300 ms
+  debounce, a background session, mid-pass cancellation, and a gate that skips
+  rebuilding when a document's text does not actually differ from what was
+  analyzed — so what remains is here. Measured split (the server logs
+  `StageTimings`):
+
+  | stage | demo closure | share |
+  |---|---|---|
+  | `intf` — interface-only closure parse | 1088 ms | 21% |
+  | `full` — upgrade to full parse | 1418 ms | 27% |
+  | `cross` — every cross-unit pass | 2757 ms | 52% |
+
+  So parsing is only about half of it, which rules out "cache the parse" as a
+  complete answer and splits the work in two.
+
+  **A. Reuse the parse artifacts across analyses.** A cache keyed by (full
+  path, content hash, define set, platform) handing back the parsed
+  `TPasTree`; an unchanged unit is neither re-lexed nor re-parsed and can be
+  registered straight as `msFullReady`, skipping BOTH waves. Worth ~48% (5.3 s
+  → ~2.8 s on the demo), and it is sound by construction rather than by
+  argument: **a tree is immutable once parsed** — the only `Tree :=` anywhere
+  outside the parser is `PasTree.Project.pas`'s assembly of the parse result —
+  so a shared tree cannot be corrupted by the model that borrows it. Two
+  things it must respect: a unit whose preprocessing consumed the `$IF
+  Declared(...)`/symbol oracle is NOT a pure function of its own text (that is
+  exactly what `RunDeclaredPass` re-parses), so anything with a non-empty
+  `Tree.Source.UnresolvedDeclared` or a recorded symbol question stays
+  uncached — a dozen units in the whole RTL; and the cache owns the trees, so
+  its lifetime must outlive any one project while the models only ever
+  reference them (the ownership `TPasSemaModel` already documents).
+
+  **B. Reanalyze ONE module.** This is the actual editor target — a keystroke
+  inside a routine body should cost ~100 ms, not a closure rebuild — and it is
+  structurally within reach, because the cross passes are already written as
+  "one body per model" (`ForEachIndex` over `CrossResolve`, `CheckCalls`,
+  `BindTypesX`, ...). What blocks it is that **symbol identity is an index**:
+
+  - every other model's `ExtRefMap` holds `(UnitId, Sym)` pairs pointing into
+    the edited unit, and `FInstances` / the helper index hold the same shape;
+  - interface symbol indices are stable across a re-parse only while the
+    interface TEXT is unchanged (the collect walk is deterministic), which is
+    the common typing case but must be verified, not assumed;
+  - implementation symbol indices shift on the most ordinary edit there is —
+    adding a local variable — so any instance or helper entry that references
+    an implementation-local symbol of that unit goes stale, and a stale
+    instance index is silent corruption, not an error.
+
+  Hence the shape: `AnalyzeModuleOnly(AId)` re-parses the file, then GUARDS —
+  the interface symbol list (name + kind + order) must be unchanged, and no
+  instance/helper entry may reference an implementation-local symbol of that
+  model — and falls back to a full rebuild whenever a guard fails. Being
+  unclever there is the whole design: a wrong fast path shows up as navigation
+  that lands somewhere plausible but wrong, which is the hardest class of bug
+  this project has. Also needed: per-model entry points for the passes that
+  currently loop rounds over everything (`RunDeclaredPass`,
+  `CrossResolveDecl`'s round loop, `RunInheritedPass`'s pending lists,
+  `RunCrossTypePass`), and `PasTree.Sema.Async` needs a "reanalyze this
+  module" mode for the host to drive it.
+
+  The deliverable of B that matters is not the speed-up but the **differential
+  harness**: run the full pipeline and the incremental one over the same edit
+  sequence and compare RefMap, ExtRefMap and diagnostics across the entire
+  closure. Without that, "it seems right on the demo" is not evidence, and the
+  corpus suites only prove the FULL path still works.
+
 - ~~**Overlay buffers and cancellation in the library facade**~~ — **Done
   2026-08-16**, the two preconditions for hosting PasTree out-of-process (the
   LSP server lives in `c:\Repos\pastree-lsp-server`, spec there). Most of it
