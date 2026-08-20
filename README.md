@@ -24,8 +24,10 @@ the companion specification this parser is built from.
 ## Versioning
 
 `PasTreeVersion` lives in `source/PasTree.Version.pas`. Two rules, and the same
-two hold in the repositories that build on this one (`pastree-lsp-server`,
-`pastree-ide-plugin`), each counting its own commits:
+two hold in the repository that builds on this one
+([`pastree-lsp`](https://github.com/SkliarOleksandr/pastree-lsp) — the LSP
+server and its clients, which share one version between them), counting its
+own commits:
 
 - **Every commit bumps the PATCH.** `0.2.1` → `0.2.2` → `0.2.3`, mechanically,
   no judgement call about whether a change "deserves" it.
@@ -310,7 +312,7 @@ usable.
 Still open, roughly in the order we're tackling it:
 
 - **Incremental reanalysis.** Every analysis today rebuilds the whole closure,
-  and the LSP server (`c:\Repos\pastree-lsp-server`) has made the cost
+  and the LSP server (`c:\Repos\pastree-lsp`) has made the cost
   concrete: on the demo's own 197-unit closure a rebuild is **5.3 s**, and the
   server pays it for every real edit. The host side is already as good as it
   can get without library support — versioned overlay buffers, a 300 ms
@@ -414,7 +416,7 @@ Still open, roughly in the order we're tackling it:
 
 - ~~**Overlay buffers and cancellation in the library facade**~~ — **Done
   2026-08-16**, the two preconditions for hosting PasTree out-of-process (the
-  LSP server lives in `c:\Repos\pastree-lsp-server`, spec there). Most of it
+  LSP server lives in `c:\Repos\pastree-lsp`, spec there). Most of it
   turned out to already exist: `SetBuffer` overlays were consulted before the
   Prefetch cache and the disk everywhere (LoadText AND IncludeStream), and
   `AnalyzeStaged` already polled its cancel predicate every 64-file chunk and

@@ -12,12 +12,12 @@ unit PasTree.Version;
   asking the server, and the server can only tell it if reporting the version
   is free of the analysis machinery.
 
-  VERSIONED INDEPENDENTLY OF THE OTHER TWO REPOSITORIES. PasTree, the LSP
-  server and the IDE plugin each count their own commits. What ties them
-  together is not a shared number but a stated minimum - each consumer declares
-  the oldest version of its dependency it can work with (see cMinPasTreeVersion
-  in the server, and cMinServerVersion in the plugin) and says so when the
-  requirement is not met. See CompareVersions.
+  VERSIONED INDEPENDENTLY OF ITS CONSUMER. PasTree and pastree-lsp (the LSP
+  server together with its clients, which share one number between them) each
+  count their own commits. What ties them together is not a shared number but a
+  stated minimum: the server declares the oldest PasTree it works with
+  (cMinPasTreeVersion) and fails loudly at startup when that is not met, since
+  PasTree is linked into its exe. See CompareVersions.
 
   ONE PATCH BUMP PER COMMIT, MINOR FOR A SUBSTANTIAL CHANGE - see the
   Versioning section of the README. The short version: the patch component
@@ -38,7 +38,7 @@ const
   /// patch component is what makes this able to answer "which build is this";
   /// what a consumer can RELY on is expressed by its own cMin... constant.
   /// </summary>
-  PasTreeVersion = '0.2.1';
+  PasTreeVersion = '0.2.2';
 
 /// <summary>
 /// The last-write time of a binary, formatted, or '' if it cannot be read.
