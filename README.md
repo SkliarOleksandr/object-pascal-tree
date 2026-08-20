@@ -23,28 +23,31 @@ the companion specification this parser is built from.
 
 ## Versioning
 
-**Every commit bumps the MINOR component of `PasTreeVersion`**
-(`source/PasTree.Version.pas`). `0.2.0` → `0.3.0` → `0.4.0`, one step per
-commit, no exceptions and no judgement call about whether a change "deserves"
-it. The same rule holds in the two repositories that build on this one
-(`pastree-lsp-server`, `pastree-ide-plugin`), each counting its own commits.
+`PasTreeVersion` lives in `source/PasTree.Version.pas`. Two rules, and the same
+two hold in the repositories that build on this one (`pastree-lsp-server`,
+`pastree-ide-plugin`), each counting its own commits:
 
-The point is that a version identifies a build, unambiguously. This library is
-linked into tools that get deployed and then debugged from the outside — the LSP
-server reports `PasTreeVersion` in its `serverInfo` precisely so a client can
-ask "does the analysis in this server have the fix I need" — and a number that
-only moves on release cannot answer that.
+- **Every commit bumps the PATCH.** `0.2.1` → `0.2.2` → `0.2.3`, mechanically,
+  no judgement call about whether a change "deserves" it.
+- **A substantial change bumps the MINOR** and resets the patch: a new
+  capability, a reworked subsystem, anything a consumer might reasonably need to
+  *require*.
 
-The consequence, stated plainly so the number is not read as more than it is:
-**MINOR here does not mean "new capability"**, the way plain semver would have
-it. It means "a commit happened". Compatibility is expressed instead by the
-consumers, each of which declares the oldest version of its dependency it
-works with (`cMinPasTreeVersion` in the server, `cMinServerVersion` in the
-plugin) and says so when the requirement is not met. Those constants move only
-when a real dependency appears — notably including a resolver FIX, which is
-not a "capability" at all but is exactly the kind of thing a consumer needs to
-be able to require. PATCH stays reserved for a fix issued against an
-already-tagged version without the commits that followed it.
+The per-commit patch bump exists so that a version identifies a **build**,
+unambiguously. This library is linked into tools that get deployed and then
+debugged from the outside — the LSP server reports `PasTreeVersion` in its
+`serverInfo` precisely so a client can ask "does the analysis in this server
+have the fix I need" — and a number that only moved on release could not answer
+that.
+
+Compatibility is expressed by the consumers rather than by this number: each
+declares the oldest version of its dependency it works with
+(`cMinPasTreeVersion` in the server, `cMinServerVersion` in the plugin) and says
+so when the requirement is not met. Those constants move only when a real
+dependency appears. Usually that means naming a MINOR — but not always, and the
+exception matters: a resolver **fix** is a patch here and can still be a hard
+requirement for a consumer, so a `cMin...` naming a patch version is correct,
+not a mistake.
 
 ## What it does
 

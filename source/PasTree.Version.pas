@@ -19,10 +19,11 @@ unit PasTree.Version;
   in the server, and cMinServerVersion in the plugin) and says so when the
   requirement is not met. See CompareVersions.
 
-  ONE MINOR BUMP PER COMMIT - see the Versioning section of the README for the
-  reasoning and the consequences. The short version: this number identifies a
-  BUILD, not a feature set, because the question it exists to answer is "which
-  build is running", asked from outside a deployed binary.
+  ONE PATCH BUMP PER COMMIT, MINOR FOR A SUBSTANTIAL CHANGE - see the
+  Versioning section of the README. The short version: the patch component
+  makes this number identify a BUILD, because the question it exists to answer
+  is "which build is running", asked from outside a deployed binary; the minor
+  component still means what semver says it means.
 
   The numbers start low deliberately: nothing here promises a stable API yet,
   which is exactly what 0.x means.
@@ -32,12 +33,12 @@ interface
 
 const
   /// <summary>
-  /// PasTree's version. BUMP THE MINOR IN EVERY COMMIT, mechanically - no
-  /// judgement call about whether a change deserves it. It is a commit counter,
-  /// which is what makes it able to answer "which build is this"; what a
-  /// consumer can RELY on is expressed by its own cMin... constant instead.
+  /// PasTree's version. BUMP THE PATCH IN EVERY COMMIT, mechanically; bump the
+  /// MINOR for a substantial change - see the README's Versioning section. The
+  /// patch component is what makes this able to answer "which build is this";
+  /// what a consumer can RELY on is expressed by its own cMin... constant.
   /// </summary>
-  PasTreeVersion = '0.2.0';
+  PasTreeVersion = '0.2.1';
 
 /// <summary>
 /// The last-write time of a binary, formatted, or '' if it cannot be read.
