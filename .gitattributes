@@ -1,10 +1,24 @@
-# Normalize line endings
+# Line endings, declared rather than left to whoever cloned this.
+#
+# Everything is normalized to LF IN THE REPOSITORY; eol= controls what the
+# working copy gets. Delphi sources and anything cmd.exe parses get CRLF,
+# because RAD Studio writes CRLF for everything it touches: edit a source with
+# LF and the IDE re-saves the whole file, so the next diff is the whole file.
+# The same rule is declared in the pastree-lsp repo - keep the two in step.
 * text=auto
+
+# Delphi sources and projects - CRLF, the way the IDE writes them.
 *.pas text eol=crlf
 *.dpr text eol=crlf
 *.dpk text eol=crlf
 *.inc text eol=crlf
-*.md text eol=lf
-LICENSE text eol=lf
 *.dproj text eol=crlf
 *.dfm text eol=crlf
+
+# Batch files: cmd.exe is the one interpreter here that can genuinely misparse
+# an LF-only file, and every build in this repo goes through one.
+*.bat text eol=crlf
+
+# Documentation - LF, which is what every diff viewer expects.
+*.md text eol=lf
+LICENSE text eol=lf

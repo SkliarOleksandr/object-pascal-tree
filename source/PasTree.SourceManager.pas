@@ -3,11 +3,14 @@ unit PasTree.SourceManager;
 {
   PasTree — source file loading and include resolution.
 
-  Loading is tolerant: BOMs are honored, and a file that fails STRICT decoding
-  is decoded again leniently rather than rejected — a UTF-8 file keeps its
-  encoding and gets U+FFFD for the bad sequence, anything else falls back to
-  ANSI. Both fallbacks skip the preamble. See DecodeText: dcc accepts such
-  files, and treating one malformed byte as fatal loses the whole unit.
+  Loading is tolerant: BOMs are honored, a file WITHOUT one is UTF-8 when its
+  bytes are valid UTF-8 and ANSI when they are not, and a file that fails STRICT
+  decoding under a DECLARED encoding is decoded again leniently rather than
+  rejected — it keeps that encoding and gets U+FFFD for the bad sequence. Every
+  fallback skips the preamble. DecodeBytes carries the reasoning for all of it:
+  dcc accepts such files, treating one malformed byte as fatal loses the whole
+  unit, and reading a preamble-less UTF-8 file as ANSI silently shifted every
+  column after a non-ASCII character.
 }
 
 interface
@@ -66,9 +69,11 @@ type
     // copy out under the lock is two refcount bumps, not a data copy.
     FIncludeStreams: TDictionary<string, TPasTokenStream>;
     FIncludeLock: TObject;
-    // Files whose bytes did not decode under their declared encoding and had
+    // Files whose bytes did not decode under their DECLARED encoding and had
     // to be recovered (path -> how). Guarded because decoding runs on the
-    // parse workers. Empty for every ordinary corpus.
+    // parse workers. Empty for every ordinary corpus — a preamble-less file
+    // landing on ANSI is the rule rather than a recovery and is deliberately
+    // NOT recorded here; see the end of DecodeBytes.
     FRecovered: TDictionary<string, string>;
     FRecoveredLock: TObject;
     function TryFile(const ADir, AName: string; out AResolved: string): Boolean;
@@ -453,18 +458,56 @@ begin
   end;
 end;
 
-{ Bytes -> string, tolerantly. A BOM is honored and files without one default
-  to ANSI; the interesting part is what happens when strict decoding FAILS.
+{ Bytes -> string, tolerantly. A BOM is honored; a file without one is UTF-8 if
+  its bytes ARE valid UTF-8, and ANSI otherwise.
 
-  Delphi's TEncoding.UTF8 raises EEncodingError on a malformed sequence, and
-  real sources contain them: one Windows-1252 apostrophe survives in a `///`
-  comment in Alcinoe.FMX.Dynamic.Objects.pas, and dcc compiles that file
-  without complaint. Two things must therefore hold.
+  UTF-8-FIRST FOR PREAMBLE-LESS FILES, decided 2026-08-20 (the open question in
+  the README, now closed). It used to default to TEncoding.Default — the system
+  ANSI codepage — because that is what dcc does, and matching the compiler is
+  the right instinct. It is the wrong answer here, for a reason that only became
+  visible once an editor was hosting this library:
+
+  - Every modern editor decodes a preamble-less .pas as UTF-8. This repository's
+    own sources are UTF-8 with no BOM and full of em-dashes in comments, so the
+    analyzer and the editor genuinely read DIFFERENT TEXT out of the same bytes:
+    a 3-byte dash arrived as three ANSI characters. Every column on a line with
+    a non-ASCII character before the identifier was then off by the byte
+    inflation — silently, because nothing reports it. Navigation just lands next
+    to the name, or inside the preceding string literal.
+  - The two decodes disagreeing also defeated the LSP server's rebuild gate,
+    which compares an editor buffer against the file's BYTES (a decode
+    difference is not an edit). Sound as far as rebuilding goes, but it left the
+    analysis holding its own ANSI reading of a file the editor had open, and no
+    rebuild was ever due to correct it. That is not a host bug that can be
+    worked around host-side: a host would have to re-decode every file the
+    analysis reads.
+  - What "matching dcc" buys is smaller than it looks. Identifiers are ASCII, so
+    the semantic model is unaffected either way; the difference is confined to
+    the CONTENTS of string literals and comments — where dcc, reading UTF-8
+    bytes as ANSI, produces mojibake. Reproducing that faithfully has no value
+    to a caller, while the position skew costs correctness everywhere.
+
+  Pure-ASCII files (the overwhelming majority) decode identically under both
+  rules, so this is a superset of the old behaviour rather than a change of
+  policy for them. A genuinely ANSI-encoded source — high bytes that are NOT
+  valid UTF-8 — still falls back to ANSI, via the same recovery path below, and
+  is still noted through AHow.
+
+  THE FAILURE PATHS, which is where the subtlety always was. Delphi's
+  TEncoding.UTF8 raises EEncodingError on a malformed sequence, and real sources
+  contain them: one Windows-1252 apostrophe survives in a `///` comment in
+  Alcinoe.FMX.Dynamic.Objects.pas, and dcc compiles that file without complaint.
+  Two things must therefore hold.
 
   First, a file that DECLARED itself UTF-8 with a BOM is still UTF-8 — one bad
   byte is not a reason to reinterpret the whole thing as ANSI. It is decoded
   again with a LENIENT UTF-8 that substitutes U+FFFD for the bad sequence and
-  leaves everything else intact.
+  leaves everything else intact, and that IS reported (PPENC), because the text
+  may no longer be what the author wrote. A preamble-less file is the opposite
+  case in both respects: its bad byte is EVIDENCE about the encoding, since
+  nothing declared UTF-8, so it becomes ANSI — which is how a Windows-1251
+  source still reads correctly — and nothing is reported, because nothing went
+  wrong. See the end of the implementation.
 
   Second, and this was the actual bug: the fallback must skip the PREAMBLE.
   Decoding from offset 0 turned the three BOM bytes into text, so the file
@@ -477,15 +520,19 @@ class function TPasSourceManager.DecodeBytes(const ABytes: TBytes;
 var
   LEnc, LLenient: TEncoding;
   LStart: Integer;
+  LDeclared: Boolean;
 begin
   AHow := '';
   LEnc := nil;
-  LStart := TEncoding.GetBufferEncoding(ABytes, LEnc, TEncoding.Default);
+  LStart := TEncoding.GetBufferEncoding(ABytes, LEnc, TEncoding.UTF8);
+  // A preamble was found, so the file SAYS what it is; without one, UTF-8 above
+  // is an assumption this may have to take back.
+  LDeclared := LStart > 0;
   try
     Result := LEnc.GetString(ABytes, LStart, Length(ABytes) - LStart);
   except
     on E: EEncodingError do
-      if LEnc.CodePage = CP_UTF8 then
+      if LDeclared and (LEnc.CodePage = CP_UTF8) then
       begin
         // Same encoding, no error flags: substitute rather than raise.
         LLenient := TUTF8Encoding.Create(CP_UTF8, 0, 0);
@@ -500,7 +547,18 @@ begin
       begin
         Result := TEncoding.ANSI.GetString(ABytes, LStart,
           Length(ABytes) - LStart);
-        AHow := LEnc.EncodingName + '|by re-reading it as ANSI';
+        if LDeclared then
+          AHow := LEnc.EncodingName + '|by re-reading it as ANSI';
+        // ...and NOTHING is noted when nothing was declared: reaching ANSI
+        // because the bytes are not valid UTF-8 is the RULE for a
+        // preamble-less file, not a recovery from a failed one. AHow feeds
+        // PPENC, whose whole meaning is "the recovered text may not be what
+        // the author wrote" - which is false here: ANSI decoding is total and
+        // loses nothing, and the Latin-1 name in a SynEdit copyright header
+        // reads exactly right. Noting it anyway produced 10 warnings on a
+        // 197-unit closure that named a correct reading as a problem (9 in
+        // SynEdit, 1 in the RTL's System.DateUtils), which is how a
+        // diagnostics list stops being read at all.
       end;
   end;
 end;

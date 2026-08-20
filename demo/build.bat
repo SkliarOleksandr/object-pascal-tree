@@ -6,7 +6,14 @@ rem EOutOfMemory and the failure masquerades as an analyzer defect).
 rem Requires SynEdit + VirtualTreeView sources under C:\Repos\3rdlib13.
 call "C:\Program Files (x86)\Embarcadero\Studio\37.0\bin\rsvars.bat"
 cd /d "%~dp0"
+rem DCUs go to the repository's one throwaway directory (..\out\dcu), split by
+rem platform because the same units also compile for Win32 in tests\. Nothing
+rem reads a .dcu between runs -- -B below rebuilds everything -- so that path
+rem exists to be deleted: one directory to skip in a backup, one to clear when
+rem a build looks stale.
+set DCU64=%~dp0..\out\dcu\win64
 if not exist out mkdir out
+if not exist "%DCU64%" mkdir "%DCU64%"
 rem Compile the application manifest (native visual styles + PerMonitorV2 DPI).
 brcc32 PasTreeDemo.rc
 dcc64 -B -Q ^
@@ -18,4 +25,4 @@ dcc64 -B -Q ^
  -I"C:\Repos\3rdlib13\SynEdit\Source" ^
  -I"C:\Repos\3rdlib13\VirtualTreeView\Source" ^
  -NSSystem;System.Win;Winapi;Vcl;Vcl.Imaging;Data;Xml ^
- -N0out -Eout PasTreeDemo.dpr
+ -N0"%DCU64%" -Eout PasTreeDemo.dpr

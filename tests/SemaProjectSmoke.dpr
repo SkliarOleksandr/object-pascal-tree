@@ -4749,6 +4749,109 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  // ---- The decode rule for a file with NO PREAMBLE (decided 2026-08-20; see
+  // the DecodeBytes header). UTF-8 if the bytes are valid UTF-8, ANSI only if
+  // they are not. This used to default to ANSI unconditionally, "because that
+  // is what dcc does", and the cost was invisible: a 3-byte UTF-8 character
+  // arrived as 3 characters, so every COLUMN on a line with non-ASCII text
+  // before the identifier was off by the byte inflation. Navigation landed
+  // beside the name, or inside the preceding string literal, and nothing
+  // reported it. Asserted on the decoded string rather than through the
+  // analysis, because the string IS the rule - a column assertion downstream
+  // would pass or fail for several different reasons. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_decode_rule');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  try
+    // Every string here is spelled with explicit CHARACTER CODES and every
+    // byte with explicit BYTE VALUES, deliberately: this file has no BOM
+    // either, so a literal `Привет` in this source would be read by dcc under
+    // the very rule under test, and the test would then assert against
+    // whatever the compiler happened to decode. Codes make it independent of
+    // that. #$041F.. is 'Privet' in Cyrillic - 6 characters, 12 UTF-8 bytes,
+    // which is the gap between the two rules.
+    const cCyr = #$041F#$0440#$0438#$0432#$0435#$0442;
+    var LText := 'begin Writeln(''' + cCyr + '''); end.'#10;
+    var LNoBom := TPath.Combine(LDir, 'nobom.pas');
+    TFile.WriteAllBytes(LNoBom, TEncoding.UTF8.GetBytes(LText));
+    Ok('decode: a preamble-less file whose bytes are valid UTF-8 decodes as '
+      + 'UTF-8, so a column after non-ASCII text is where the editor sees it',
+      TPasSourceManager.LoadFileTolerant(LNoBom) = LText);
+
+    // Same text, same absence of a BOM, but genuinely Windows-1251 bytes -
+    // $C0 followed by $F0 is not a legal UTF-8 sequence, so this file is NOT
+    // valid UTF-8. The old rule read every file this way; the new one still
+    // reads THIS one this way, which is the whole point of the fallback.
+    var LAnsi := TPath.Combine(LDir, 'ansi.pas');
+    var LAnsiBytes := TEncoding.ASCII.GetBytes('begin Writeln(''')
+      + TBytes.Create($CF, $F0, $E8, $E2, $E5, $F2)
+      + TEncoding.ASCII.GetBytes('''); end.'#10);
+    TFile.WriteAllBytes(LAnsi, LAnsiBytes);
+    Ok('decode: a preamble-less file that is NOT valid UTF-8 still decodes '
+      + 'as ANSI, so a 1251 source is not turned into U+FFFD',
+      TPasSourceManager.LoadFileTolerant(LAnsi) =
+        TEncoding.ANSI.GetString(LAnsiBytes));
+
+    // A declared encoding still wins, and the preamble is still not content -
+    // the bug that once cost ~1700 false E2003 (see the case above).
+    var LBom := TPath.Combine(LDir, 'bom.pas');
+    TFile.WriteAllBytes(LBom,
+      TBytes.Create($EF, $BB, $BF) + TEncoding.UTF8.GetBytes(LText));
+    Ok('decode: a UTF-8 BOM is honored and does not become text',
+      TPasSourceManager.LoadFileTolerant(LBom) = LText);
+
+    // Pure ASCII is valid UTF-8 and decodes identically under either rule,
+    // which is why this change is a superset rather than a new policy for the
+    // overwhelming majority of sources.
+    var LAscii := TPath.Combine(LDir, 'ascii.pas');
+    TFile.WriteAllBytes(LAscii, TEncoding.ASCII.GetBytes('unit A; end.'#10));
+    Ok('decode: an ASCII file is unaffected by the rule change',
+      TPasSourceManager.LoadFileTolerant(LAscii) = 'unit A; end.'#10);
+
+  finally
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- ...and the ANSI reading must happen SILENTLY. PPENC means "the
+  // recovered text may not be what the author wrote"; a preamble-less file
+  // landing on ANSI is the RULE rather than a recovery, and loses nothing, so
+  // it must not report. Reporting it anyway was the first attempt at the rule
+  // above, and it put 10 warnings on a 197-unit closure for files that had been
+  // read perfectly - nine SynEdit units and the RTL's System.DateUtils, every
+  // one of them tripping over a Latin-1 letter in a copyright header. A
+  // diagnostics list that names correct readings as problems stops being
+  // read. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_ansi_quiet');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  begin
+    // 'Ma<EB>l' - Latin-1, no BOM, and $EB followed by 'l' is not legal UTF-8:
+    // byte for byte the shape of the SynEdit copyright headers.
+    var LBytes := TEncoding.ASCII.GetBytes(
+        'unit UnitAnsi;'#10'interface'#10'// (c) Ma')
+      + TBytes.Create($EB)
+      + TEncoding.ASCII.GetBytes(
+        'l'#10'type TAlso = class end;'#10'implementation'#10'end.'#10);
+    TFile.WriteAllBytes(TPath.Combine(LDir, 'UnitAnsi.pas'), LBytes);
+  end;
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    var LQuiet := ModelByName('unitansi');
+    Ok('encoding: an ANSI file with no BOM parses, declarations intact',
+      SymCountOf(LQuiet, 'talso', skType) = 1);
+    Ok('encoding: and reports NO PPENC - reading it as ANSI is the rule, not '
+      + 'a recovery, and nothing was lost',
+      DiagCount(LQuiet, 'PPENC') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
 end.

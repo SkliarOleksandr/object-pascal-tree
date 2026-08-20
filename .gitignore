@@ -19,7 +19,10 @@ __history/
 __recovery/
 ModelSupport*/
 
-# Build output dirs
+# Build output dirs. out/ is the repository-wide throwaway: out/dcu/{win32,win64}
+# holds every build's .dcu (see tests/build.bat), and nothing reads one between
+# runs -- safe to delete, and the one path to skip in a backup.
+out/
 Win32/
 Win64/
 WinArm64/

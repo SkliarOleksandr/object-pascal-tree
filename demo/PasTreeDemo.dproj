@@ -70,7 +70,11 @@
         <VerInfo_Locale>1033</VerInfo_Locale>
         <VerInfo_Keys>CompanyName=;FileDescription=;FileVersion=1.0.0.0;InternalName=;LegalCopyright=;LegalTrademarks=;OriginalFilename=;ProductName=;ProductVersion=1.0.0.0;Comments=;CFBundleName=</VerInfo_Keys>
         <DCC_ExeOutput>.\out\</DCC_ExeOutput>
-        <DCC_DcuOutput>.\out\dcu</DCC_DcuOutput>
+        <!-- One throwaway .dcu directory for the whole repository, split by
+             platform (the same units compile Win32 for tests\). See the note in
+             build.bat: nothing reads a .dcu between runs, so it exists to be
+             deleted - one path to skip in a backup. -->
+        <DCC_DcuOutput>..\out\dcu\win64</DCC_DcuOutput>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Base_Win32)'!=''">
         <DCC_Namespace>Winapi;System.Win;Data.Win;Datasnap.Win;Web.Win;Soap.Win;Xml.Win;Bde;$(DCC_Namespace)</DCC_Namespace>

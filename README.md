@@ -137,6 +137,46 @@ closure fans out across cores instead of being processed one file at a time:
   order of magnitude more CPU **and** more wall time (2643 ms vs 1853 ms, ~20.5 s
   of CPU vs ~5.8 s). Wider is not faster here.
 
+### The one line every host must set
+
+```pascal
+System.NeverSleepOnMMThreadContention := True;   // before analyzing
+```
+
+**This is a requirement of hosting this library, not a tuning knob**, and it
+cannot be set from inside the library: it is a global the application owns, and
+a library flipping a process-wide memory-manager mode behind its host's back is
+exactly the kind of thing that has no business being implicit. So every host has
+to do it, and the honest cost of that design is that a host can forget.
+
+With the default (`False`), Delphi's memory manager **sleeps** when it cannot
+take its lock. Every pass above is allocation-heavy by nature — a token stream,
+a tree and a model per unit — so the workers spend their time in `Sleep` instead
+of allocating, and the fan-out is not merely wasted but actively harmful.
+
+Measured 2026-08-20 on a 3757-unit project, same closure and inputs, only this
+flag differing:
+
+| | wall | CPU | `intf` | `full` | `cross` |
+|---|---|---|---|---|---|
+| flag set | **15.4 s** | 135 s | 2 928 | 4 825 | 7 598 |
+| flag NOT set | **70.3 s** | 50 s | 18 586 | 29 836 | 21 847 |
+| `SingleThreaded`, for scale | 44.7 s | 47 s | 6 421 | 10 982 | 27 314 |
+
+Read the middle row carefully: without the flag the parallel run is **slower
+than a deliberately single-threaded one**, while burning *less* CPU — the
+signature of threads waiting rather than working. Sampling confirmed it: one
+thread running, thirty-odd asleep. And note which stages move. `cross` allocates
+comparatively little and stays fine; `intf` and `full` are 3x worse than serial.
+**A slowdown concentrated in the allocation-heavy stages, with CPU time going
+*down*, means this flag.**
+
+The LSP server (`pastree-lsp`) shipped without it and lost 4.5x. It looked like
+the cost of running analysis out of process, which it was not — the demo and
+every CLI driver in `tools/` set it, and the server was simply the one host that
+did not. Building the server with full release flags, for comparison, was worth
+about 2% — inside the noise. One line was the entire difference.
+
 ## Start from the spec
 
 [object-pascal-spec](https://github.com/SkliarOleksandr/object-pascal-spec) is
@@ -303,9 +343,36 @@ usable.
 | `source/` | the library: `PasTree.Types`, `PasTree.SourceManager`, `PasTree.Lexer`, `PasTree.Preprocessor`, `PasTree.Ast`, `PasTree.Parser`, `PasTree.DProj`, `PasTree.Platforms`, `PasTree.Ast.Json`, `PasTree.Project`, and the semantic layer `PasTree.Sema.*` (`Model`, `Resolver`, `Types`, `Project`, `Builtins`, `Nav`, `Async`, `Diagnostics`, `Dump`) |
 | `source/PasTree.Version.pas` | this library's semver (`PasTreeVersion`), `CompareVersions`, and `BinaryBuiltOn`. Deliberately a standalone unit that pulls in nothing else, so a consumer can report which PasTree it is built against without linking the analysis machinery - which is how the LSP server can put it in its `serverInfo` |
 | `demo/` | `PasTreeDemo` — a VCL host (SynEdit + VirtualTreeView) exercising the highlighter and navigation features interactively over real projects |
-| `tests/` | 10 DUnitX-style smoke suites (`ParserSmoke`, `StagedParseSmoke`, `DProjSmoke`, `SemaSmoke`, `SemaTypeSmoke`, `SemaXTypeSmoke`, `SemaOverloadSmoke`, `SemaProjectSmoke`, `SemaNavSmoke`, `AsyncSmoke`) plus golden JSON trees and full-corpus runs |
+| `tests/` | 13 DUnitX-style smoke suites (`ParserSmoke`, `StagedParseSmoke`, `DProjSmoke`, `SemaSmoke`, `SemaTypeSmoke`, `SemaXTypeSmoke`, `SemaOverloadSmoke`, `SemaProjectSmoke`, `SemaNavSmoke`, `AsyncSmoke`, `UnitListSmoke`, `NavHistorySmoke`, `DemoSettingsSmoke`) plus golden JSON trees and full-corpus runs. **`tests\build.bat` builds and runs all of them** — use it rather than hand-rolling `dcc32` lines: the last three link demo units through relative `in` paths and compile only with the current directory set to `tests\` |
+| `out/` | every build's `.dcu`, under `out\dcu\win32` and `out\dcu\win64`. Intermediate output that nothing reads between runs (every build passes `-B`), kept in one place so it is trivial to delete and to leave out of a backup. Split by platform because the same units compile both ways and `PasTree.Types.dcu` would otherwise exist twice under one name |
 | `tools/` | CLI drivers per pipeline stage (`PasTreeLex`, `PasTreePP`, `PasTreeParse`, `PasTreeJson`, `PasTreeSema`, `PasTreeSemaProject`) and the node-kinds generator |
 | `docs/` | `editor-features.md` — the living IDE-parity spec for the demo's editor features |
+
+### Line endings: CRLF for everything Delphi and cmd.exe read
+
+**A `.pas`, `.dpr`, `.dpk`, `.inc`, `.dproj`, `.dfm` or `.bat` in a working copy
+is CRLF. Docs (`.md`, `LICENSE`) are LF.** Declared in `.gitattributes`, here and
+identically in the `pastree-lsp` repository — keep the two files in step.
+
+The rule is aimed at **tools and scripts as much as people**: a `sed -i`, a
+heredoc, or any editor writing "just a newline" produces LF and nothing
+complains at the time. RAD Studio then re-saves the file its own way on the first
+edit, and the next diff is the whole file instead of the lines that actually
+changed — which is how a real change gets lost in review. `cmd.exe` is worse than
+cosmetic: it is the one interpreter here that can genuinely misparse an LF-only
+`.bat`, and every build goes through one.
+
+Renormalized on 2026-08-20. The drift was not confined to recently-touched
+files: `PasTree.Parser.pas`, `PasTree.Sema.Resolver.pas`, the whole `demo/`
+directory and most of `tests/` had been LF for a while. To check:
+
+```
+git ls-files --eol
+```
+
+Every line's `w/` must match its `attr/`. `i/` is LF for everything, which is
+correct — normalization happens in the repository, `eol=` decides the working
+copy.
 
 ## To do
 
@@ -380,39 +447,58 @@ Still open, roughly in the order we're tackling it:
   closure. Without that, "it seems right on the demo" is not evidence, and the
   corpus suites only prove the FULL path still works.
 
-- **A source with no BOM is decoded as ANSI, and every editor disagrees.**
-  `DecodeBytes` defaults a preamble-less file to `TEncoding.Default` — the
-  system ANSI codepage — because that is what dcc does, and matching the
-  compiler is the right instinct. But every modern editor defaults to UTF-8,
-  and THIS repository's own sources are UTF-8 without a BOM and full of
-  em-dashes in comments, so the analyzer and the editor genuinely read
-  different text out of the same bytes: a 3-byte UTF-8 dash arrives as three
-  ANSI characters. Two consequences, both found while wiring the LSP server:
+- ~~**A source with no BOM is decoded as ANSI, and every editor disagrees.**~~
+  **Decided 2026-08-20: UTF-8 first, ANSI only when the bytes are not valid
+  UTF-8.** `DecodeBytes` used to default a preamble-less file to
+  `TEncoding.Default` — the system ANSI codepage — because that is what dcc
+  does, and matching the compiler is the right instinct. It was the wrong answer
+  here, and what settled it was seeing what the old rule actually cost:
 
-  - **Positions shift.** A column on a line that contains a non-ASCII
-    character *before* the identifier is off by the byte inflation. Harmless
-    on a comment-only line, wrong the moment code follows a non-ASCII string
-    literal or comment on the same line — and invisible, because nothing
-    reports it: navigation just lands next to the name.
-  - **It looked like a performance bug.** Every such file appeared MODIFIED to
-    a host comparing the editor buffer against a fresh load, which cost the
-    server two full closure rebuilds per peeked declaration (~14 s) before it
-    learned to compare bytes instead. That symptom is fixed host-side; the
-    skew above is not, and cannot be — a host would have to re-decode every
-    file the analysis reads to work around the library's own choice.
+  - **Positions shifted, silently.** Every modern editor decodes a
+    preamble-less `.pas` as UTF-8, and THIS repository's own sources are UTF-8
+    with no BOM and full of em-dashes in comments — so the analyzer and the
+    editor genuinely read different text out of the same bytes, a 3-byte dash
+    arriving as three ANSI characters. Any column on a line with a non-ASCII
+    character *before* the identifier was off by that inflation. Nothing
+    reported it: navigation just landed beside the name, or inside the
+    preceding string literal.
+  - **It defeated the host's rebuild gate, unfixably from outside.** The LSP
+    server compares an editor buffer against the file's BYTES, because a decode
+    difference is not an edit (that comparison replaced a string one which cost
+    ~14 s of rebuilds per peeked declaration). Sound for deciding whether to
+    rebuild — but it left the analysis holding its own ANSI reading of a file
+    the editor had open, with no rebuild ever due to correct it. A host cannot
+    work around this: it would have to re-decode every file the analysis reads.
+  - **"Matching dcc" bought less than it looked like.** Identifiers are ASCII,
+    so the semantic model is the same either way; the difference is confined to
+    the CONTENTS of string literals and comments — where dcc, reading UTF-8
+    bytes as ANSI, produces mojibake. Reproducing that faithfully is worth
+    nothing to a caller, while the position skew costs correctness everywhere.
 
-  What to decide (it is a behaviour decision, not a bug fix): whether a
-  preamble-less file whose bytes are VALID UTF-8 should be decoded as UTF-8,
-  falling back to ANSI only when the bytes are not valid UTF-8. That is what
-  editors do, it is a superset of the current behaviour for pure-ASCII files
-  (the overwhelming majority), and the tolerant recovery path already exists
-  for the failure case. Against it: dcc really does read such a file as ANSI,
-  so a source with an ANSI-encoded string literal would then analyze
-  differently from how it COMPILES — which is the same fidelity argument that
-  put ANSI there in the first place. If the answer is "match dcc", the
-  alternative is to make it a switch the way `ReportUnresolvedMembers` is, so
-  an editor host can opt into UTF-8-first while the CLI stays dcc-faithful.
-  Either way the corpus needs a re-run: this changes what the analyzer reads.
+  Pure-ASCII files decode identically under both rules, so for the overwhelming
+  majority this is a superset rather than a change. A genuinely ANSI source —
+  high bytes that are not valid UTF-8 — still reads as ANSI, and **says
+  nothing**: landing on ANSI without a preamble is the rule, not a recovery, so
+  it must not reach `PPENC`, whose entire meaning is "the recovered text may not
+  be what the author wrote". Reporting it anyway was the first attempt, and it
+  put 10 warnings on a 197-unit closure for files that had been read perfectly
+  — nine SynEdit units and `System.DateUtils.pas`, all of them tripping on a
+  Latin-1 letter in a copyright header (`Maël Hörz`, `Flávio Etrusco`). ANSI
+  decoding is total and loses nothing there, so the warning named a correct
+  reading as a problem, with a message that was also false on its face ("text
+  after the bad byte may differ"). That is how a diagnostics list stops being
+  read. `PPENC` stays for the case it was written for: a file that DECLARED an
+  encoding its bytes then failed.
+
+  Pinned in `SemaProjectSmoke` (four cases: no-BOM UTF-8, no-BOM 1251, BOM,
+  ASCII), which spells its fixtures with explicit character codes and byte
+  values because this file has no BOM either — a literal in the test source
+  would otherwise be read under the very rule under test.
+
+  **Corpus re-run, 113-unit `.dproj` closure, before vs after:** identical in
+  every number — 113 units, 9 unresolved `uses` with 5 units gated, 9
+  diagnostics all in project files and none in library units, stage times inside
+  noise. A wider corpus has not been re-run.
 
 - ~~**Overlay buffers and cancellation in the library facade**~~ — **Done
   2026-08-16**, the two preconditions for hosting PasTree out-of-process (the
@@ -1599,7 +1685,11 @@ Still open, roughly in the order we're tackling it:
   costumes.
 
   Still open for the TOOL: build it with
-  `dcc64 -U"%BDS%\lib\win64\release" -U..\source -NSSystem;System.Win;Winapi;Data;Xml -N0out64 -Eout64 PasTreeSemaProject.dpr`
+  `mkdir ..\out\dcu\win64` then
+  `dcc64 -B -Q "-U%BDS%\lib\win64\release;..\source" "-NSSystem;System.Win;Winapi;Data;Xml" "-N0..\out\dcu\win64" -Eout64 PasTreeSemaProject.dpr`
+  — quote `-N0`, and create the directory first: `dcc` neither creates it nor
+  says clearly that it is missing (it reports `F2039 Could not create output
+  file` against the first unit, which reads like a locked file).
   — what is missing is making that the default rather than a manual step.
 - **LSP/LSIF server.** The demo (VCL-hosted) is the only editor integration
   today; a Language Server Protocol server (live highlighting/navigation/
