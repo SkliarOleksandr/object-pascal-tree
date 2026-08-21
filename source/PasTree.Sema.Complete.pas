@@ -97,7 +97,9 @@ type
     ccType,        // a type is expected (after `:` in a decl, `= ` in a type
                    // decl, `class(`, `is`/`as`, `array of`, ...)
     ccStatement,   // statement/declaration head: names in scope + keywords
-    ccExpression); // inside an expression: names in scope + expr keywords
+    ccExpression,  // inside an expression: names in scope + expr keywords
+    ccRecField);   // a FIELD NAME in a record aggregate initializer (3.2.2):
+                   // the record type's fields, nothing else
 
   { Where a candidate came from — the ranking bucket (sortText prefix in the
     LSP mapping; display grouping in the demo). Declaration order IS priority
@@ -135,6 +137,12 @@ type
     OvSym: Integer;
     UnitMid: Integer;
     IsTypeRef: Boolean;
+    { A dotted-qualifier PREFIX that is not a unit YET: `Winapi` of
+      `Winapi.CommonTypes.IBackgroundTaskInstance` names no unit and no
+      symbol, but the next segment may complete a unit name — greedy
+      longest-match, accumulated segment by segment (the same rule
+      navigation's QualifierUnitAt applies). Not a "valid" ref by itself. }
+    PendingUnit: string;
   end;
 
   { Per-model caret queries and candidate collection. Build one per model
@@ -161,6 +169,18 @@ type
     FContext: TPasComplContext;
     FCaretVis: Integer;            // block-scope positional visibility
     FClassSide: Boolean;           // member completion on a TYPE reference
+    FFieldsOnly: Boolean;          // ccRecField: aggregate wants skField only
+    // True when FModel IS the project's own model of this file (the oracle /
+    // any completion over unedited text): overlay symbol indices are then
+    // project symbol indices, so overlay-space dead ends (a generic
+    // parameter's constraints) can hop straight into project machinery.
+    FIsProjectModel: Boolean;
+    // The member walk's BASE type is declared in this unit — which is what
+    // legalizes NON-STRICT protected members of its ancestors (11 §11.2.1's
+    // module rule, and the whole point of the same-unit protected-access
+    // cast idiom: `TProtectedAccess = class(TComponent)` here makes
+    // `TProtectedAccess(C).UpdateRegistry` compile).
+    FBaseOwnUnit: Boolean;
     FAncestry: TArray<TPasExtRef>; // caret struct's bridged ancestor chain
     FAncestryBuilt: Boolean;
     FCaretScope: Integer;          // scope for EnsureAncestry
@@ -170,6 +190,7 @@ type
     function InnermostNodeAt(AVis: Integer): Integer;
     function MemberBaseOfDot(ADotRaw: Integer): Integer;
     // typing (mixed overlay/project space)
+    function ProjModel(AMid: Integer; const AWhere: string): TPasSemaModel;
     function BridgeName(const AKey: string; out AMid, ASym: Integer): Boolean;
     function BridgeUnitMid(const AName: string): Integer;
     function TypeOfOverlaySym(ASym, ADepth: Integer): TPasComplTypeRef;
@@ -182,6 +203,7 @@ type
     function IsDescendantNode(ANode, AAncestor: Integer): Boolean;
     function UpChainKind(ANode: Integer;
       const AKinds: array of TPasNodeKind): TPasNodeKind;
+    function AggregateTypeOf(AAggNode, ADepth: Integer): TPasComplTypeRef;
     function OverlayStructDef(AOvSym: Integer): Integer;
     function OverlayHeritageRef(AOvSym, ADepth: Integer): TPasComplTypeRef;
     // collection
@@ -259,6 +281,8 @@ begin
   FModel := AModel;
   FProj := AProject;
   FProjMid := AProjectMid;
+  FIsProjectModel := (FProj <> nil) and (FProjMid >= 0) and
+    (FProjMid < FProj.ModelCount) and (FProj.Model(FProjMid) = FModel);
   FSeen := TDictionary<string, Integer>.Create;
   SetLength(FVisOfRaw, Length(FModel.Tree.Source.Files[0].Tokens));
   for LIdx := 0 to High(FVisOfRaw) do
@@ -530,11 +554,26 @@ begin
   Result.OvSym := NIL_SYM;
   Result.UnitMid := -1;
   Result.IsTypeRef := False;
+  Result.PendingUnit := '';
 end;
 
 function ComplValid(const ARef: TPasComplTypeRef): Boolean;
 begin
   Result := XValid(ARef.X) or (ARef.OvSym <> NIL_SYM) or (ARef.UnitMid >= 0);
+end;
+
+// Every project-model access in this engine goes through here, so a wrong
+// model id raises NAMING ITS SITE instead of a bare list-range error three
+// frames deeper. Kept after the bug that motivated it was fixed: this engine
+// hand-builds cross-space identities, a wrong one navigates somewhere
+// plausible-but-wrong (the hardest bug class this project has), and two
+// integer compares per call is not a hot-path cost.
+function TPasCompletion.ProjModel(AMid: Integer;
+  const AWhere: string): TPasSemaModel;
+begin
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
+    raise Exception.CreateFmt('bad model id %d at %s', [AMid, AWhere]);
+  Result := FProj.Model(AMid);
 end;
 
 // Resolve AKey as if written in this unit but NOT declared in it: the
@@ -553,7 +592,7 @@ begin
     Exit;
   if FProj.ResolveRealDecl(FProjMid, AKey, AMid, ASym) then
     Exit(True);
-  LM := FProj.Model(FProjMid);
+  LM := ProjModel(FProjMid, 'BridgeName');
   if LM.SystemScope <> NIL_SCOPE then
   begin
     ASym := LM.Resolve(LM.SystemScope, AKey);
@@ -620,6 +659,17 @@ begin
         end;
     skVar, skParam, skField, skConst, skProperty:
       begin
+        // The analysis's own answer first when this model IS the project's:
+        // SymDeclTypeX already handles the type-slot quirks a node walk
+        // re-trips over (a member named like its own type, `TouchInput:
+        // TouchInput` — its TypeSlotByNameX fallback exists for exactly
+        // this).
+        if FIsProjectModel then
+        begin
+          Result.X := FProj.SymDeclTypeX(FProjMid, ASym);
+          if XValid(Result.X) then
+            Exit;
+        end;
         if FModel.Symbols[ASym].TypeNode <> NIL_NODE then
         begin
           Result := ResolveTypeRefNode(FModel.Symbols[ASym].TypeNode,
@@ -661,6 +711,13 @@ begin
     skEnumValue:
       if FModel.Symbols[ASym].TypeSym <> NIL_SYM then
         Result.OvSym := FModel.Symbols[ASym].TypeSym;   // value, not type ref
+    skGenericParam:
+      // A value typed as an unbound parameter has its CONSTRAINTS' members
+      // (16 §16.4.1) — the walk lives in EnumMembersX/FindMemberX, which
+      // need a project-space identity. Available only when this model IS
+      // the project's (overlay generic bodies are a stage-E gap).
+      if FIsProjectModel then
+        Result.X := XPlain(FProjMid, ASym);
   end;
 end;
 
@@ -674,7 +731,7 @@ begin
   Result := ComplNilRef;
   if (FProj = nil) or (AMid < 0) or (ASym = NIL_SYM) or (ADepth > 16) then
     Exit;
-  LM := FProj.Model(AMid);
+  LM := ProjModel(AMid, 'TypeOfProjectSym');
   case LM.Symbols[ASym].Kind of
     skType, skBuiltinType:
       begin
@@ -718,11 +775,17 @@ begin
     nkIdent:
       begin
         LSym := FModel.RefMap[ANode];
-        if LSym <> NIL_SYM then
+        // A TYPE SLOT that phase 1 bound to a NON-TYPE is the self-shadow
+        // shape (`TouchInput: TouchInput` — the parameter shadows its own
+        // type's name): only a type can stand here, so fall through to the
+        // cross-unit lookup instead of chasing the value in a circle.
+        if (LSym <> NIL_SYM) and
+           (FModel.Symbols[LSym].Kind in [skType, skBuiltinType, skUnitRef,
+             skGenericParam]) then
           Exit(TypeOfOverlaySym(LSym, ADepth + 1));
         LKey := FModel.Tree.NodeNameLower(ANode);
         if BridgeName(LKey, LMid, LSym) and
-           (FProj.Model(LMid).Symbols[LSym].Kind in [skType, skBuiltinType])
+           (ProjModel(LMid, 'DesignatorIdent').Symbols[LSym].Kind in [skType, skBuiltinType])
         then
         begin
           Result.X := XPlain(LMid, LSym);
@@ -795,11 +858,24 @@ var
   LSym, LMid, LChild, LScope, LNode: Integer;
   LKey: string;
   LCallee: TPasComplTypeRef;
-  LRes: TSemaXType;
+  LRes, LCached: TSemaXType;
+  LExt: TPasExtRef;
 begin
   Result := ComplNilRef;
   if (ANode = NIL_NODE) or (ADepth > 16) then
     Exit;
+  // An ANALYZED model already typed its expressions (the cross passes fill
+  // ExprTypeX, frames closed) — for VALUE-shaped nodes that answer beats any
+  // re-derivation, and covers what the walk below does not (indexing and
+  // derefs). Only value shapes: a bare type designator may also carry its
+  // type here, and treating THAT as a value would offer instance members on
+  // `TFoo.`. An overlay model has no cache and falls through everywhere.
+  if FModel.Tree.Nodes[ANode].Kind in [nkCall, nkParen, nkIndex, nkDeref] then
+    if FModel.ExprTypeX.TryGetValue(ANode, LCached) and XValid(LCached) then
+    begin
+      Result.X := LCached;
+      Exit;
+    end;
   case FModel.Tree.Nodes[ANode].Kind of
     nkParen:
       Result := DesignatorType(FModel.Tree.Nodes[ANode].FirstChild,
@@ -829,9 +905,36 @@ begin
           Result.OvSym := EnclosingStructSym(LScope);
           Exit;
         end;
+        // The analysis's own CROSS-UNIT binding first (an analyzed model
+        // only; overlays have an empty ExtRefMap): unlike a re-resolve by
+        // name it knows the symbol, and for a VALUE the cached expression
+        // type also carries the closed instantiation frame — `Statics` on a
+        // WinRT import class is typed as the bound ARGUMENT, which nothing
+        // downstream can recover from the symbol alone (the corpus oracle's
+        // whole `Statics.*` bucket).
+        if FModel.ExtRefMap.TryGetValue(ANode, LExt) then
+        begin
+          if FProj = nil then
+            Exit;
+          if ProjModel(LExt.UnitId, 'DesignatorExtRef').Symbols[LExt.Sym].Kind
+             in [skType, skBuiltinType, skUnitRef] then
+            Exit(TypeOfProjectSym(LExt.UnitId, LExt.Sym, NIL_INST,
+              ADepth + 1));
+          if FModel.ExprTypeX.TryGetValue(ANode, LCached) and
+             XValid(LCached) then
+          begin
+            Result.X := LCached;
+            Exit;
+          end;
+          Exit(TypeOfProjectSym(LExt.UnitId, LExt.Sym, NIL_INST, ADepth + 1));
+        end;
         if BridgeName(LKey, LMid, LSym) then
           Exit(TypeOfProjectSym(LMid, LSym, NIL_INST, ADepth + 1));
         Result.UnitMid := BridgeUnitMid(FModel.Tree.NodeText(ANode));
+        // No unit either — maybe the FIRST SEGMENT of a longer dotted unit
+        // name (`Winapi` of Winapi.CommonTypes.X): keep it pending.
+        if Result.UnitMid < 0 then
+          Result.PendingUnit := FModel.Tree.NodeText(ANode);
       end;
     nkMember:
       begin
@@ -891,6 +994,7 @@ var
   LM: TPasSemaModel;
   LSym, LScope, LMemMid, LMemSym, LCtx, LHop, LRoutine: Integer;
   LCur, LHeritage: TPasComplTypeRef;
+  LFull: string;
 begin
   Result := ComplNilRef;
   if (ADepth > 16) or (AKey = '') then
@@ -899,19 +1003,42 @@ begin
   begin
     if FProj = nil then
       Exit;
-    LM := FProj.Model(ABase.UnitMid);
+    LM := ProjModel(ABase.UnitMid, 'MemberOfUnit');
     if LM.InterfaceScope = NIL_SCOPE then
       Exit;
+    // Resolve, not FindLocal: the deep lookup also reaches the compiler
+    // seeds joined into the interface scope, which is what makes
+    // `System.Delete` / `System.PAnsiChar` mean the intrinsic (dcc allows
+    // qualifying ANY compiler-provided name with System).
     LSym := LM.Resolve(LM.InterfaceScope, AKey);
     if LSym <> NIL_SYM then
-      Result := TypeOfProjectSym(ABase.UnitMid, LSym, NIL_INST, ADepth + 1);
+      Exit(TypeOfProjectSym(ABase.UnitMid, LSym, NIL_INST, ADepth + 1));
+    // Not a name in that unit — the qualifier may be the PREFIX of a longer
+    // dotted UNIT name (`System.AnsiStrings.FloatToText`: `System` resolved
+    // as a unit, but the real qualifier is System.AnsiStrings). Greedy
+    // longest-match; when even the longer name is no unit yet, it stays
+    // PENDING for the next segment (`System.Win.ComObj` needs two hops).
+    LFull := ChangeFileExt(ExtractFileName(FProj.ModelFile(ABase.UnitMid)),
+      '') + '.' + AKey;
+    Result.UnitMid := BridgeUnitMid(LFull);
+    if Result.UnitMid < 0 then
+      Result.PendingUnit := LFull;
+    Exit;
+  end;
+  if ABase.PendingUnit <> '' then
+  begin
+    LFull := ABase.PendingUnit + '.' + AKey;
+    Result.UnitMid := BridgeUnitMid(LFull);
+    if Result.UnitMid < 0 then
+      Result.PendingUnit := LFull;
     Exit;
   end;
   LCur := ABase;
   // Overlay hops: the base type (and possibly its overlay-declared
   // ancestors) live in the buffer; the first hop that leaves it falls
-  // through to the project branch below.
-  for LHop := 1 to 16 do
+  // through to the project branch below. 64, not 16 — same-unit interface
+  // chains really do run past 16 (see EnsureAncestry's comment).
+  for LHop := 1 to 64 do
   begin
     if LCur.OvSym = NIL_SYM then
       Break;
@@ -973,11 +1100,16 @@ begin
   LDecl := FModel.Tree.Nodes[LDecl].Parent;
   if (LDecl = NIL_NODE) or (FModel.Tree.Nodes[LDecl].Kind <> nkTypeDecl) then
     Exit;
-  Result := FModel.Tree.Nodes[LDecl].FirstChild;
-  if Result = NIL_NODE then
-    Exit;
-  while FModel.Tree.Nodes[Result].NextSibling <> NIL_NODE do
-    Result := FModel.Tree.Nodes[Result].NextSibling;
+  // The LAST child that is not a trailing hint directive: `TAlias =
+  // Other.TType deprecated 'msg'` hangs the nkDirective after the type
+  // expression, and taking the literal last child returned the directive.
+  LDecl := FModel.Tree.Nodes[LDecl].FirstChild;
+  while LDecl <> NIL_NODE do
+  begin
+    if not (FModel.Tree.Nodes[LDecl].Kind in [nkDirective, nkAttrGroup]) then
+      Result := LDecl;
+    LDecl := FModel.Tree.Nodes[LDecl].NextSibling;
+  end;
 end;
 
 // Where an overlay type's member walk goes NEXT: the first heritage entry
@@ -1033,6 +1165,12 @@ begin
       end;
     nkIdent, nkMember, nkTypeArgs:
       Result := ResolveTypeRefNode(LDef, ADepth + 1);   // type alias
+    nkPointerType, nkClassOf:
+      // `PFoo = ^TFoo` / `TFooClass = class of TFoo`: member access walks
+      // into the pointee / referenced class, the same implicit hop
+      // FindMemberX makes for these kinds.
+      Result := ResolveTypeRefNode(FModel.Tree.Nodes[LDef].FirstChild,
+        ADepth + 1);
   end;
 end;
 
@@ -1083,12 +1221,15 @@ begin
   if AMid < 0 then
     LM := FModel
   else
-    LM := FProj.Model(AMid);
+    LM := ProjModel(AMid, 'AddSym');
   if LM.Symbols[ASym].Kind = skLabel then
     Exit;   // labels complete after `goto` only (stage E)
-  // Type positions take only what can name a type.
+  // Type positions take what can name a type — consts and enum values
+  // included, because a SUBRANGE type's bounds are constant expressions
+  // (`TVCLElements = teCategoryButtons..teTextLabel`, 2.2.5).
   if (FContext = ccType) and not (LM.Symbols[ASym].Kind in
-    [skType, skBuiltinType, skUnitRef, skGenericParam]) then
+    [skType, skBuiltinType, skUnitRef, skGenericParam, skConst,
+     skEnumValue]) then
     Exit;
   AddItem(LM.Symbols[ASym].Name, LM.Symbols[ASym].NameLower,
     LM.Symbols[ASym].Kind, ABucket, AMid, ASym, ACtx);
@@ -1115,8 +1256,7 @@ end;
 
 // Can this member be named on the TYPE itself (TFoo.X)? Constructors, class
 // methods (nkRoutine.Aux = 1), class properties (nkPropertyDecl.Aux = 1),
-// nested types, consts and enum values. KNOWN GAP: `class var` fields carry
-// no marker the model exposes yet, so they are hidden class-side.
+// class vars (their nkVarSec's Aux = 1), nested types, consts, enum values.
 function TPasCompletion.ClassSideMember(AModel: TPasSemaModel;
   ASym: Integer): Boolean;
 var
@@ -1125,6 +1265,20 @@ begin
   case AModel.Symbols[ASym].Kind of
     skType, skConst, skEnumValue:
       Result := True;
+    skVar, skField:
+      begin
+        // The decl chain: name ident -> nkVarDecl -> nkVarSec (Aux = 1 for
+        // a `class var` run — the parser eats both keywords and marks it).
+        LNode := AModel.Symbols[ASym].DeclNode;
+        while (LNode <> NIL_NODE) and
+              (AModel.Tree.Nodes[LNode].Kind <> nkVarSec) and
+              not (AModel.Tree.Nodes[LNode].Kind in [nkClassType,
+                nkRecordType, nkInterfaceType, nkObjectType, nkHelperType]) do
+          LNode := AModel.Tree.Nodes[LNode].Parent;
+        Result := (LNode <> NIL_NODE) and
+          (AModel.Tree.Nodes[LNode].Kind = nkVarSec) and
+          (AModel.Tree.Nodes[LNode].Aux = 1);
+      end;
     skRoutine:
       begin
         LNode := RoutineNodeOf(AModel, ASym);
@@ -1165,7 +1319,14 @@ begin
   LOv := EnclosingStructSym(ACaretScope);
   if LOv = NIL_SYM then
     Exit;
-  for LDepth := 1 to 16 do
+  // LX starts INVALID and stays so when the walk never leaves the overlay —
+  // the corpus oracle caught exactly that as stack garbage flowing into
+  // AncestorOfX when a same-unit interface chain ran past the old cap of 16
+  // (Winapi.WebView2 chains ICoreWebView2_18 down to ICoreWebView2, all in
+  // one unit). 64 covers any sane declaration chain; past it the bridged
+  // half of the ancestry is simply absent, never garbage.
+  LX := XNil;
+  for LDepth := 1 to 64 do
   begin
     LRef := OverlayHeritageRef(LOv, 0);
     if LRef.OvSym <> NIL_SYM then
@@ -1199,7 +1360,7 @@ var
   LM: TPasSemaModel;
   LDeclStruct, LIdx: Integer;
 begin
-  LM := FProj.Model(AMid);
+  LM := ProjModel(AMid, 'MemberVisible');
   case LM.Symbols[ASym].Visibility of
     svStrictPrivate:
       Result := False;
@@ -1208,7 +1369,7 @@ begin
     svProtected, svStrictProtected:
       begin
         Result := (LM.Symbols[ASym].Visibility = svProtected) and
-          (AMid = FProjMid);
+          ((AMid = FProjMid) or FBaseOwnUnit);
         if Result then
           Exit;
         if LM.Symbols[ASym].Scope = NIL_SCOPE then
@@ -1232,11 +1393,16 @@ procedure TPasCompletion.CollectProjectMembers(const AX: TSemaXType;
 begin
   if (FProj = nil) or not XValid(AX) then
     Exit;
+  if AX.UnitId = FProjMid then
+    FBaseOwnUnit := True;
   FProj.EnumMembersX(FProjMid, AX,
     procedure(AMid, ASym, ACtx: Integer)
     begin
+      if FFieldsOnly and
+         (ProjModel(AMid, 'FieldsOnly').Symbols[ASym].Kind <> skField) then
+        Exit;
       if MemberVisible(AMid, ASym) and
-         (not FClassSide or ClassSideMember(FProj.Model(AMid), ASym)) then
+         (not FClassSide or ClassSideMember(ProjModel(AMid, 'CollectProjMembers'), ASym)) then
         AddSym(AMid, ASym, ACtx, ABucket);
     end);
 end;
@@ -1253,8 +1419,11 @@ var
   LRef: TPasComplTypeRef;
   LInclude: Boolean;
 begin
+  // An overlay-declared base IS a type of this unit — its bridged ancestors'
+  // non-strict protected members are reachable (the module rule above).
+  FBaseOwnUnit := True;
   LInclude := AIncludeOwn;
-  for LDepth := 1 to 16 do
+  for LDepth := 1 to 64 do
   begin
     if AOvSym = NIL_SYM then
       Exit;
@@ -1275,6 +1444,8 @@ begin
                   FModel.Tree.Nodes[LNode].FirstToken, 'constructor') or
                 FModel.Tree.Source.VisibleTextEquals(
                   FModel.Tree.Nodes[LNode].FirstToken, 'destructor')) then
+              Exit;
+            if FFieldsOnly and (FModel.Symbols[ASym].Kind <> skField) then
               Exit;
             if not FClassSide or ClassSideMember(FModel, ASym) then
               AddSym(-1, ASym, NIL_INST, ABucket);
@@ -1300,25 +1471,49 @@ var
 begin
   if (FProj = nil) or (AUid < 0) then
     Exit;
-  LM := FProj.Model(AUid);
+  LM := ProjModel(AUid, 'CollectUnitInterface');
   LScope := LM.InterfaceScope;
   if (LScope = NIL_SCOPE) or (LM.Scopes[LScope].Symbols = nil) then
     Exit;
-  // OWN symbols only — the interface scope's Additional joins hold that
-  // unit's builtin seeds (and its own uses' unit refs are not importable
-  // names either, so skUnitRef is skipped).
+  // OWN symbols, not a blind deep walk — the interface scope's Additional
+  // joins hold that unit's builtin seeds (a per-model copy every unit has;
+  // offering them as THIS unit's exports would be wrong), and its own uses'
+  // unit refs are not importable names either, so skUnitRef is skipped.
   for LIdx := 0 to LM.Scopes[LScope].Symbols.Count - 1 do
   begin
     LSym := LM.Scopes[LScope].Symbols[LIdx];
     if LM.Symbols[LSym].Kind <> skUnitRef then
       AddSym(AUid, LSym, NIL_INST, ABucket);
   end;
+  // The one Additional join that IS the unit's own export: an unscoped
+  // enum's value scope ({$SCOPEDENUMS OFF}, the default) — `ffFixed` is
+  // importable from System.SysUtils exactly like TFloatFormat itself. The
+  // corpus oracle caught these missing from every used-unit list.
+  for LIdx := 0 to High(LM.Scopes[LScope].Additional) do
+    if LM.Scopes[LM.Scopes[LScope].Additional[LIdx]].Kind = sckEnum then
+      LM.EnumScopeDeep(LM.Scopes[LScope].Additional[LIdx],
+        procedure(ASym, AScopeOfSym: Integer)
+        begin
+          AddSym(AUid, ASym, NIL_INST, ABucket);
+        end);
 end;
 
 procedure TPasCompletion.CollectMembers(const ABase: TPasComplTypeRef);
 begin
   if ABase.UnitMid >= 0 then
-    CollectUnitInterface(ABase.UnitMid, cbMember)
+  begin
+    CollectUnitInterface(ABase.UnitMid, cbMember);
+    // dcc lets `System.` qualify EVERY compiler-provided name (System.Delete,
+    // System.PAnsiChar), so the System unit's list carries the seeds too —
+    // and only System's: seeds are per-model copies, not anyone's exports.
+    if (FProj <> nil) and (ABase.UnitMid = FProj.EnsureSystemUnit) and
+       (FModel.SystemScope <> NIL_SCOPE) then
+      FModel.EnumScopeDeep(FModel.SystemScope,
+        procedure(ASym, AScopeOfSym: Integer)
+        begin
+          AddSym(-1, ASym, NIL_INST, cbBuiltin);
+        end);
+  end
   else if ABase.OvSym <> NIL_SYM then
     CollectOverlayChain(ABase.OvSym, True, cbMember)
   else
@@ -1362,7 +1557,7 @@ begin
           LAllowed.AddOrSetValue(
             AnsiLowerCase(FModel.UsesList[LJdx].NameFull), True);
     end;
-    PM := FProj.Model(FProjMid);
+    PM := ProjModel(FProjMid, 'CollectUsesImports');
     for LIdx := High(PM.UsesList) downto 0 do
     begin
       LUid := PM.UsesList[LIdx].UnitId;
@@ -1405,8 +1600,17 @@ begin
     LTarget := FModel.Tree.Nodes[FModel.WithUnopened[LIdx]].FirstChild;
     while (LTarget <> NIL_NODE) and (LTarget <> LBody) do
     begin
-      LRef := DesignatorType(LTarget, 0);
-      LRef.IsTypeRef := False;
+      // The with pass's own target typer first, when this model IS the
+      // project's: it covers shapes the caches do not (an INDEXED target —
+      // `with Palette.palPalEntry[I] do` — is typed by nothing else).
+      LRef := ComplNilRef;
+      if FIsProjectModel then
+        LRef.X := FProj.WithTargetTypeX(FProjMid, LTarget);
+      if not ComplValid(LRef) then
+      begin
+        LRef := DesignatorType(LTarget, 0);
+        LRef.IsTypeRef := False;
+      end;
       if ComplValid(LRef) then
       begin
         FClassSide := False;
@@ -1428,6 +1632,19 @@ begin
   begin
     if FModel.Scopes[LScope].Kind = sckImplementation then
       LInterfaceOnly := False;
+    // An OPENED (intra-unit) with joins only the target's OWN member scope;
+    // the target type's cross-unit ANCESTORS are what the cross with pass
+    // binds — walk them explicitly, the same way step 3 below walks the
+    // caret struct's (`with TListActionLink(...) do` sees TActionLink's
+    // FClient, which lives one unit over).
+    if FModel.Scopes[LScope].Kind = sckWith then
+      for LIdx := 0 to High(FModel.Scopes[LScope].Additional) do
+      begin
+        LTarget := FModel.Scopes[
+          FModel.Scopes[LScope].Additional[LIdx]].StructSym;
+        if LTarget <> NIL_SYM then
+          CollectOverlayChain(LTarget, False, cbWithMember);
+      end;
     FModel.EnumScopeDeep(LScope,
       procedure(ASym, AScopeOfSym: Integer)
       var
@@ -1489,6 +1706,46 @@ begin
     end;
 end;
 
+// The record type an aggregate initializer fills: the declared type of the
+// typed const/var whose initializer this is, or — for a NESTED aggregate —
+// the type of the field the enclosing aggregate assigns it to
+// (`uguid: (guid: (D1: ...))`). Invalid for an ARRAY element aggregate
+// (element types come off declaration nodes; a stage-E refinement).
+function TPasCompletion.AggregateTypeOf(AAggNode, ADepth: Integer):
+  TPasComplTypeRef;
+var
+  LParent, LChild, LName: Integer;
+begin
+  Result := ComplNilRef;
+  if (AAggNode = NIL_NODE) or (ADepth > 16) then
+    Exit;
+  LParent := FModel.Tree.Nodes[AAggNode].Parent;
+  if LParent = NIL_NODE then
+    Exit;
+  case FModel.Tree.Nodes[LParent].Kind of
+    nkAggregateField:
+      begin
+        LName := FModel.Tree.Nodes[LParent].FirstChild;
+        Result := MemberOf(
+          AggregateTypeOf(FModel.Tree.Nodes[LParent].Parent, ADepth + 1),
+          FModel.Tree.NodeNameLower(LName), ADepth + 1);
+      end;
+    nkConstDecl, nkVarDecl:
+      begin
+        // A typed const's shape is name, TYPE EXPR, initializer — the type
+        // is the child between the name and this aggregate.
+        LChild := FModel.Tree.Nodes[LParent].FirstChild;
+        LChild := FModel.Tree.Nodes[LChild].NextSibling;   // past the name
+        while (LChild <> NIL_NODE) and (LChild <> AAggNode) do
+        begin
+          Result := ResolveTypeRefNode(LChild, ADepth + 1);
+          LChild := FModel.Tree.Nodes[LChild].NextSibling;
+        end;
+        Result.IsTypeRef := False;
+      end;
+  end;
+end;
+
 // The innermost node of the given kinds on ANode's parent chain, stopping at
 // statement/section boundaries — the disambiguator for `:`/`=`/`of`/`(`.
 function TPasCompletion.UpChainKind(ANode: Integer;
@@ -1533,8 +1790,33 @@ begin
     if LTS.Tokens[AInfo.RawToken].Kind = tkUses then
       Exit(ccUses);
   end;
+  // The MODULE HEADER's own (possibly dotted) name is a naming position —
+  // nothing to offer while the unit names itself.
+  LPrev := AInfo.Node;
+  while (LPrev <> NIL_NODE) and
+        (FModel.Tree.Nodes[LPrev].Kind in [nkIdent, nkMember]) do
+    LPrev := FModel.Tree.Nodes[LPrev].Parent;
+  if (LPrev <> NIL_NODE) and (FModel.Tree.Nodes[LPrev].Kind in
+    [nkUnit, nkProgram, nkLibrary, nkPackage]) then
+    Exit(ccNone);
   if (AInfo.DotBase <> NIL_NODE) or (AInfo.Kind = ckAfterDot) then
     Exit(ccMember);
+  // A record aggregate's FIELD NAME (3.2.2, `(flDensity: 1.0; flDe|`): the
+  // typed prefix that IS an nkAggregateField's name child, or a fresh spot
+  // right after the aggregate's `(`/`;`/`,`.
+  if AInfo.Kind = ckIdent then
+  begin
+    LPrev := FModel.Tree.Nodes[AInfo.Node].Parent;
+    if (LPrev <> NIL_NODE) and
+       (FModel.Tree.Nodes[LPrev].Kind = nkAggregateField) and
+       (FModel.Tree.Nodes[LPrev].FirstChild = AInfo.Node) then
+      Exit(ccRecField);
+  end
+  else if (AInfo.Node <> NIL_NODE) and
+     (FModel.Tree.Nodes[AInfo.Node].Kind = nkAggregate) and
+     (LTS.Tokens[AInfo.RawToken].Kind in [tkLParen, tkSemicolon, tkComma])
+  then
+    Exit(ccRecField);
   // The significant token LEFT of the (possibly empty) prefix decides.
   if AInfo.Kind = ckIdent then
     LPrev := PrevVisibleRaw(AInfo.RawToken - 1)
@@ -1545,20 +1827,43 @@ begin
   LKind := LTS.Tokens[LPrev].Kind;
   case LKind of
     tkColon:
-      // `x: |` is a TYPE in a declaration, a STATEMENT after a case label
-      // or a goto label.
-      if UpChainKind(AInfo.Node, [nkCaseSel, nkCaseLabels, nkLabeledStmt])
-        <> nkError then
-        Result := ccStatement
+      // `x: |` is a TYPE in a declaration, a STATEMENT after a case/goto
+      // label, an EXPRESSION in an aggregate initializer's `field: value`
+      // or a Write width spec — the INNERMOST enclosing construct decides.
+      case UpChainKind(AInfo.Node, [nkCaseSel, nkCaseLabels, nkLabeledStmt,
+        nkAggregateField, nkFormattedArg]) of
+        nkCaseSel, nkCaseLabels, nkLabeledStmt:
+          Result := ccStatement;
+        nkAggregateField, nkFormattedArg:
+          Result := ccExpression;
       else
         Result := ccType;
+      end;
     tkEqual:
-      if UpChainKind(AInfo.Node, [nkTypeDecl]) = nkTypeDecl then
-        Result := ccType
+      // `TFoo = |` in a type decl is a type; `= |` anywhere else — a const
+      // initializer, a parameter DEFAULT, an aggregate value, a comparison —
+      // is an expression. The innermost construct decides again: a param
+      // default sits lexically inside a type declaration, and the old
+      // nkTypeDecl-anywhere test called `AEnabled: Boolean = |` a type
+      // position (the oracle's 'False' [type] misses).
+      case UpChainKind(AInfo.Node, [nkTypeDecl, nkConstDecl, nkVarDecl,
+        nkInlineVar, nkInlineConst, nkParam, nkAggregateField, nkEnumValue,
+        nkMethodResolution]) of
+        nkTypeDecl:
+          Result := ccType;
       else
+        // nkEnumValue included above: `CURLINFO_X = CURLINFO_DOUBLE + 10` is
+        // an ordinal EXPRESSION inside a type declaration. A METHOD
+        // RESOLUTION's right side (14.2.2) names one of this class's own
+        // methods — the scope chain has them, ccExpression lists them.
         Result := ccExpression;
+      end;
     tkIs, tkAs:
-      Result := ccType;
+      // Nominally a class type — but dcc accepts any class-REFERENCE
+      // expression on the right (`if FModel is DefineModelClass then`, a
+      // class FUNCTION — shipped in the FMX sources), so a hard types-only
+      // filter hides legal names. ccExpression lists types too.
+      Result := ccExpression;
     tkOf:
       // `array of |`/`set of |`/`class of |` want a type; `case x of |`
       // wants label EXPRESSIONS.
@@ -1578,8 +1883,15 @@ begin
       else
         Result := ccExpression;
     tkLess:
-      // `TList<|` — inside a generic argument/parameter list.
-      Result := ccType;
+      // `TList<|` — a generic argument/parameter list — but only when the
+      // parse says so: a bare `x < |` is a COMPARISON (the oracle's
+      // `Result := x < y` misses). A generic list mid-typing that has not
+      // parsed as nkTypeArgs yet degrades to ccExpression, which still
+      // lists every type — only the keyword set differs.
+      if UpChainKind(AInfo.Node, [nkTypeArgs, nkGenericParams]) <> nkError then
+        Result := ccType
+      else
+        Result := ccExpression;
     tkSemicolon, tkBegin, tkThen, tkElse, tkDo, tkRepeat, tkTry, tkFinally,
     tkExcept, tkEnd:
       Result := ccStatement;
@@ -1655,7 +1967,7 @@ begin
   if AItem.Mid < 0 then
     LM := FModel
   else if FProj <> nil then
-    LM := FProj.Model(AItem.Mid)
+    LM := ProjModel(AItem.Mid, 'ItemHeadWord')
   else
     Exit;
   LNode := RoutineNodeOf(LM, AItem.Sym);
@@ -1673,6 +1985,7 @@ function TPasCompletion.CompleteAt(ALine, ACol: Integer;
 var
   LInfo: TPasCaretInfo;
   LRef: TPasComplTypeRef;
+  LNode: Integer;
 begin
   AContext := ccNone;
   AItems := nil;
@@ -1687,6 +2000,8 @@ begin
   FSeen.Clear;
   FAncestryBuilt := False;
   FClassSide := False;
+  FFieldsOnly := False;
+  FBaseOwnUnit := False;
   FCaretScope := LInfo.Scope;
   case FContext of
     ccNone:
@@ -1704,6 +2019,21 @@ begin
       end;
     ccUses:
       CollectUnitNames;
+    ccRecField:
+      begin
+        // The enclosing aggregate's record type, fields only.
+        LNode := LInfo.Node;
+        while (LNode <> NIL_NODE) and
+              (FModel.Tree.Nodes[LNode].Kind <> nkAggregate) do
+          LNode := FModel.Tree.Nodes[LNode].Parent;
+        LRef := AggregateTypeOf(LNode, 0);
+        if ComplValid(LRef) then
+        begin
+          FFieldsOnly := True;
+          EnsureAncestry(LInfo.Scope);
+          CollectMembers(LRef);
+        end;
+      end;
   else
     begin
       EnsureAncestry(LInfo.Scope);
