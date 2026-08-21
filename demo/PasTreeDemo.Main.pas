@@ -1591,7 +1591,6 @@ end;
 
 procedure TfrmMain.FormCreate(Sender: TObject);
 begin
-
   FFileList := TStringList.Create;
   FOpenFiles := TStringList.Create;
   FMsgLog := TList<TPasMsgRow>.Create;
@@ -1678,6 +1677,7 @@ begin
   FCompl.TimerInterval := 350;
   FCompl.ShortCut := Vcl.Menus.ShortCut(VK_SPACE, [ssCtrl]);
   FCompl.Columns.Add.ColumnWidth := 90;   // the kind word, dimmed
+  FCompl.Resizeable := True;              // drag the popup's edge to grow it
   FCompl.OnExecute := ComplExecute;
 
   vstFiles.NodeDataSize := SizeOf(TPasNodeData);
