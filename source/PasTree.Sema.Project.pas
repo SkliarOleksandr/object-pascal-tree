@@ -56,6 +56,11 @@ type
     Args: TArray<TSemaXType>;
   end;
 
+  // Callback for EnumMembersX: one member symbol in its declaring model, plus
+  // the instantiation frame (NIL_INST for none) its declared type must be
+  // SubstX'd through — the same triple FindMemberX answers for one name.
+  TPasMemberEnumProc = reference to procedure(AMid, ASym, ACtx: Integer);
+
   // One `class/record helper for T` (15.3) declared in some model.
   //
   // Extended-type identity: a concrete type is (declaring model, symbol),
@@ -260,9 +265,7 @@ type
       ANode, AInnermost: Integer): TArray<Integer>;
     // `with` over a target whose TYPE lives in another unit (ch.05 §5.7) —
     // see FindInEnclosingWith.
-    function PointeeX(const AX: TSemaXType): TSemaXType;
     function AllParamsDefaulted(AMid, AParams: Integer): Boolean;
-    function ProcResultX(const AX: TSemaXType): TSemaXType;
     function PointeeOfDeclX(AId, ABaseNode: Integer): TSemaXType;
     function IsDefaultArrayProp(AMid, ASym: Integer): Boolean;
     function DefaultArrayPropX(const AX: TSemaXType;
@@ -310,8 +313,6 @@ type
       ACallee, ALocalSym: Integer): Boolean;
     procedure CheckCalls(AId: Integer);
     // Phase 3c: cross-model typing.
-    function Instantiate(const ABase: TSemaXType;
-      const AArgs: TArray<TSemaXType>): Integer;
     function InstanceRead(AInst: Integer): TSemaInstance;
     function TypeDefNodeOf(AMid, ASym: Integer): Integer;
     function GenericParamIdents(AMid, ASym: Integer): TArray<Integer>;
@@ -537,6 +538,28 @@ type
     function IsConstructorSym(AMid, ASym: Integer): Boolean;
     function IsClassCtorDtorSym(AMid, ASym: Integer): Boolean;
     function XParamSyms(AMid, ASym: Integer): TArray<Integer>;
+    function PointeeX(const AX: TSemaXType): TSemaXType;
+    function ProcResultX(const AX: TSemaXType): TSemaXType;
+    { Dedup-registers one generic instantiation and returns its instance-table
+      index (locked, callable from anywhere). Promoted for the completion
+      engine: a buffer being typed declares instantiations the analysis has
+      not seen yet (`var G: TQueue<TFoo>; G.`), and dedup means an already-
+      known frame comes back as the SAME index the project uses. }
+    function Instantiate(const ABase: TSemaXType;
+      const AArgs: TArray<TSemaXType>): Integer;
+    { The ENUMERATING twin of FindMemberX, for completion: reports EVERY
+      member reachable from ABase, walking the same hops in the same order —
+      active helper (and its ancestor helpers) first, then each type's own
+      member scope, then the alias / pointer-deref / paramless-proc-result /
+      `class of` / heritage / implicit-root hops, closing each hop over its
+      instantiation frame; a generic parameter enumerates its constraints'
+      members. Class constructors/destructors are skipped (never nameable).
+      Members are reported ancestor-visited-later, and overridden names
+      recur — a caller deduplicating by NameLower and keeping the FIRST hit
+      reproduces FindMemberX's precedence, exactly like EnumScopeDeep's
+      contract mirrors FindLocalDeep's. }
+    procedure EnumMembersX(AFromMid: Integer; const ABase: TSemaXType;
+      const AOnMember: TPasMemberEnumProc; ADepth: Integer = 0);
     { Per-stage wall-clock of the LAST AnalyzeProject/AnalyzeDirectory/
       AnalyzeStaged run ('stage=ms;...') — for perf logging in hosts and
       probes. Empty for AnalyzeFile. }
@@ -5667,6 +5690,190 @@ begin
                  ResolveTypeExpr(LCur.UnitId, LRefs[LAncIdx]), ANameLower,
                  AMemMid, AMemSym, ACtx) then
               Exit(True);
+          LNext := ResolveTypeExpr(LCur.UnitId, LRefs[High(LRefs)]);
+        end;
+    else
+      Exit;
+    end;
+    LNext := SubstX(LNext, LCur.Inst, 0);
+    if XValid(LNext) and (LNext.UnitId = LCur.UnitId) and
+       (LNext.Sym = LCur.Sym) and (LNext.Inst = LCur.Inst) then
+      Exit;   // self-referential alias — bail
+    LCur := LNext;
+  end;
+end;
+
+{ FindMemberX's hop loop, enumerating instead of looking up — see the
+  interface comment for the contract. Kept as a SEPARATE walk rather than a
+  shared iterator on purpose: FindMemberX is on the analysis hot path and a
+  callback-per-hop refactor there is exactly the "cheap-looking normalization
+  on a shared hot path" this codebase has paid for three times. The two walks
+  are pinned together by SemaCompleteSmoke instead (every FindMemberX hit must
+  appear in the enumeration). }
+procedure TPasSemaProject.EnumMembersX(AFromMid: Integer;
+  const ABase: TSemaXType; const AOnMember: TPasMemberEnumProc;
+  ADepth: Integer);
+var
+  LCur, LNext: TSemaXType;
+  LM: TPasSemaModel;
+  LScope, LDef, LChild, LDepth, LRMid, LRSym, LHop, LOwn: Integer;
+  LRootName: string;
+  LExt: TPasExtRef;
+  LEmitMid, LEmitCtx: Integer;
+begin
+  LCur := ABase;
+  for LDepth := 1 to 32 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LM := FModels[LCur.UnitId];
+    if LM.Symbols[LCur.Sym].Kind = skGenericParam then
+    begin
+      // The members an unbound parameter guarantees are its constraints'
+      // (16 §16.4.1) — all of them, same as FindMemberX tries all on a miss.
+      if ADepth >= 4 then
+        Exit;
+      for LNext in ConstraintsOfParamX(LCur) do
+        if XValid(LNext) and
+           not ((LNext.UnitId = LCur.UnitId) and (LNext.Sym = LCur.Sym)) then
+          EnumMembersX(AFromMid, LNext, AOnMember, ADepth + 1);
+      Exit;
+    end;
+    if not (LM.Symbols[LCur.Sym].Kind in [skType, skBuiltinType]) then
+      Exit;
+    // The active helper chain for this hop's type, before its own members
+    // (a helper member HIDES the type's own — first-wins dedup needs them
+    // first). Mirrors HelperMemberHit, including the builtin-seed
+    // canonicalization retry.
+    if (AFromMid >= 0) and (AFromMid <= High(FHelperIdx)) and
+       (FHelperIdx[AFromMid] <> nil) then
+    begin
+      if not FHelperIdx[AFromMid].TryGetValue(
+           (Int64(LCur.UnitId) shl 32) or Cardinal(LCur.Sym), LExt) then
+      begin
+        LExt.UnitId := NIL_SYM;
+        if (LCur.UnitId <> AFromMid) and
+           (FModels[LCur.UnitId].Symbols[LCur.Sym].Kind = skBuiltinType) then
+        begin
+          LOwn := FModels[AFromMid].Resolve(FModels[AFromMid].SystemScope,
+            FModels[LCur.UnitId].Symbols[LCur.Sym].NameLower);
+          if (LOwn = NIL_SYM) or
+             not FHelperIdx[AFromMid].TryGetValue(
+               (Int64(AFromMid) shl 32) or Cardinal(LOwn), LExt) then
+            LExt.UnitId := NIL_SYM;
+        end;
+      end;
+      if LExt.UnitId <> NIL_SYM then
+        for LHop := 1 to 8 do
+        begin
+          LScope := FModels[LExt.UnitId].Symbols[LExt.Sym].MemberScope;
+          if LScope = NIL_SCOPE then
+            Break;
+          LEmitMid := LExt.UnitId;
+          FModels[LEmitMid].EnumScopeDeep(LScope,
+            procedure(ASym, AScopeOfSym: Integer)
+            begin
+              // ACtx NIL_INST, as FindMemberX's helper hit: a helper cannot
+              // extend an instantiation.
+              if not IsClassCtorDtorSym(LEmitMid, ASym) then
+                AOnMember(LEmitMid, ASym, NIL_INST);
+            end);
+          LNext := HelperAncestorX(LExt.UnitId, LExt.Sym);
+          if not XValid(LNext) or
+             ((LNext.UnitId = LExt.UnitId) and (LNext.Sym = LExt.Sym)) then
+            Break;
+          LExt.UnitId := LNext.UnitId;
+          LExt.Sym := LNext.Sym;
+        end;
+    end;
+    LScope := LM.Symbols[LCur.Sym].MemberScope;
+    if LScope <> NIL_SCOPE then
+    begin
+      LEmitMid := LCur.UnitId;
+      LEmitCtx := LCur.Inst;
+      LM.EnumScopeDeep(LScope,
+        procedure(ASym, AScopeOfSym: Integer)
+        begin
+          if not IsClassCtorDtorSym(LEmitMid, ASym) then
+            AOnMember(LEmitMid, ASym, LEmitCtx);
+        end);
+    end;
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if LDef = NIL_NODE then
+    begin
+      // Builtin with a real declaration somewhere reachable — redirect, as
+      // FindMemberX does (Obj: TObject -> System.pas's real class body).
+      if ResolveRealDecl(LCur.UnitId, LM.Symbols[LCur.Sym].NameLower, LRMid,
+         LRSym) and ((LRMid <> LCur.UnitId) or (LRSym <> LCur.Sym)) then
+      begin
+        LCur.UnitId := LRMid;
+        LCur.Sym := LRSym;
+        Continue;
+      end;
+      Exit;
+    end;
+    case LM.Tree.Nodes[LDef].Kind of
+      nkIdent, nkMember, nkTypeArgs:
+        LNext := ResolveTypeExprNested(LCur.UnitId, LDef);   // type alias
+      nkPointerType:
+        LNext := PointeeX(LCur);       // implicit deref: P.Field
+      nkProcType:
+        LNext := ProcResultX(LCur);    // paramless func ref is called
+      nkClassOf:
+        LNext := ResolveTypeExpr(LCur.UnitId,
+          LM.Tree.Nodes[LDef].FirstChild);
+      nkClassType, nkInterfaceType, nkRecordType, nkObjectType:
+        begin
+          LChild := LM.Tree.Nodes[LDef].FirstChild;
+          while (LChild <> NIL_NODE) and not (LM.Tree.Nodes[LChild].Kind in
+            [nkIdent, nkMember, nkTypeArgs]) do
+            LChild := LM.Tree.Nodes[LChild].NextSibling;
+          if LChild = NIL_NODE then
+          begin
+            // Heritage-less: the implicit TObject / IInterface / IDispatch
+            // root, exactly as FindMemberX walks it.
+            LRootName := '';
+            case LM.Tree.Nodes[LDef].Kind of
+              nkClassType:
+                LRootName := 'tobject';
+              nkInterfaceType:
+                if LM.Tree.Nodes[LDef].Aux = 1 then
+                  LRootName := 'idispatch'
+                else
+                  LRootName := 'iinterface';
+            end;
+            if (LRootName <> '') and
+               ResolveRealDecl(LCur.UnitId, LRootName, LRMid, LRSym) and
+               ((LRMid <> LCur.UnitId) or (LRSym <> LCur.Sym)) then
+            begin
+              LCur.UnitId := LRMid;
+              LCur.Sym := LRSym;
+              LCur.Inst := NIL_INST;
+              Continue;
+            end;
+            Exit;
+          end;
+          LNext := ResolveTypeExprNested(LCur.UnitId, LChild);
+        end;
+      nkHelperType:
+        begin
+          // Walk STARTED at a helper (a helper method body's Self): its
+          // ancestor helpers' members first, then continue into the extended
+          // type — FindMemberX's shape, enumerated.
+          LChild := LM.Tree.Nodes[LDef].FirstChild;
+          var LRefs: TArray<Integer> := nil;
+          while (LChild <> NIL_NODE) and (LM.Tree.Nodes[LChild].Kind in
+            [nkIdent, nkMember, nkTypeArgs]) do
+          begin
+            LRefs := LRefs + [LChild];
+            LChild := LM.Tree.Nodes[LChild].NextSibling;
+          end;
+          if LRefs = nil then
+            Exit;
+          for var LAncIdx := 0 to High(LRefs) - 1 do
+            EnumMembersX(AFromMid,
+              ResolveTypeExpr(LCur.UnitId, LRefs[LAncIdx]), AOnMember,
+              ADepth + 1);
           LNext := ResolveTypeExpr(LCur.UnitId, LRefs[High(LRefs)]);
         end;
     else

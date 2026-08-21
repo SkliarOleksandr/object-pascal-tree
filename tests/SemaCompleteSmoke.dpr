@@ -13,6 +13,7 @@ program SemaCompleteSmoke;
 
 uses
   System.SysUtils,
+  System.IOUtils,
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
@@ -24,6 +25,7 @@ uses
   PasTree.Sema.Model in '..\source\PasTree.Sema.Model.pas',
   PasTree.Sema.Builtins in '..\source\PasTree.Sema.Builtins.pas',
   PasTree.Sema.Resolver in '..\source\PasTree.Sema.Resolver.pas',
+  PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
   PasTree.Sema.Complete in '..\source\PasTree.Sema.Complete.pas',
   PasTree.TestKit in 'PasTree.TestKit.pas';
 
@@ -37,6 +39,11 @@ var
   GComp: TPasCompletion;
   GInfo: TPasCaretInfo;
   GHit: Boolean;
+  // stage C: the mini-project the bridged collection cases run against
+  GProj: TPasSemaProject;
+  GProjMid: Integer;
+  GCtx: TPasComplContext;
+  GItems: TArray<TPasComplItem>;
 
 { Parses/analyzes ASource with its single `|` caret marker STRIPPED, then runs
   CaretAt at the marker's (line, col). The marker means "the caret is here";
@@ -98,6 +105,69 @@ begin
     Result := GModel.Symbols[LSym].Name;
 end;
 
+{ Like CaretCase, but BRIDGED: the overlay is parsed against the mini-project
+  built in the main block (GProj/GProjMid), and the whole CompleteAt pipeline
+  runs — context classification plus candidate collection. }
+procedure ProjCase(const ASource: string);
+var
+  LAt, LIdx, LLine, LCol: Integer;
+  LClean: string;
+  LPre: TPasPreprocessed;
+  LDiags: TArray<TPasParseDiag>;
+begin
+  LAt := Pos('|', ASource);
+  if LAt = 0 then
+    raise Exception.Create('proj case has no | marker');
+  LClean := StringReplace(ASource, '|', '', []);
+  LLine := 1;
+  LCol := LAt;
+  for LIdx := 1 to LAt - 1 do
+    if ASource[LIdx] = #10 then
+    begin
+      Inc(LLine);
+      LCol := LAt - LIdx;
+    end;
+
+  GComp.Free;
+  GComp := nil;
+  GModel.Free;
+  LPre := GPP.ProcessText('mainu.pas', LClean);
+  GTree := TPasParser.ParseFile(LPre, LDiags);
+  GModel := TPasSemaResolver.Analyze(GTree);
+  GComp := TPasCompletion.Create(GModel, GProj, GProjMid);
+  GHit := GComp.CompleteAt(LLine, LCol, GCtx, GItems);
+end;
+
+function Has(const AName: string): Boolean;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to High(GItems) do
+    if SameText(GItems[LIdx].Name, AName) then
+      Exit(True);
+  Result := False;
+end;
+
+function BucketOf(const AName: string): TPasComplBucket;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to High(GItems) do
+    if SameText(GItems[LIdx].Name, AName) then
+      Exit(GItems[LIdx].Bucket);
+  Result := cbKeyword;   // "not found" reads as the wrong bucket in a FAIL
+end;
+
+function OverloadsOf(const AName: string): Integer;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to High(GItems) do
+    if SameText(GItems[LIdx].Name, AName) then
+      Exit(GItems[LIdx].Overloads);
+  Result := -1;
+end;
+
 const
   // One unit, reused by most carets: a record type with members, a global,
   // and a routine with a local of that type.
@@ -118,6 +188,69 @@ const
   FIXTURE_TAIL =
     'end;'#10 +
     'end.'#10;
+
+  // The mini-project (self-contained, no RTL on the path — deliberately, so
+  // the suite stays a unit test: builtins remain seeds and TObject has no
+  // real body to walk into).
+  EXTA_UNIT =
+    'unit exta;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TBase = class'#10 +
+    '  private'#10 +
+    '    FSecret: Integer;'#10 +
+    '  protected'#10 +
+    '    FProt: Integer;'#10 +
+    '  public'#10 +
+    '    constructor Create;'#10 +
+    '    class function CF: Integer;'#10 +
+    '    procedure Pub;'#10 +
+    '    procedure Over(A: Integer); overload;'#10 +
+    '    procedure Over(A: string); overload;'#10 +
+    '    property Prop: Integer read FProt;'#10 +
+    '  end;'#10 +
+    '  TExtGen<T> = class'#10 +
+    '  public'#10 +
+    '    procedure Put(AValue: T);'#10 +
+    '  end;'#10 +
+    'procedure ExtProc;'#10 +
+    'var'#10 +
+    '  ExtVar: Integer;'#10 +
+    'implementation'#10 +
+    'constructor TBase.Create;'#10'begin'#10'end;'#10 +
+    'class function TBase.CF: Integer;'#10'begin'#10'  Result := 0;'#10 +
+    'end;'#10 +
+    'procedure TBase.Pub;'#10'begin'#10'end;'#10 +
+    'procedure TBase.Over(A: Integer);'#10'begin'#10'end;'#10 +
+    'procedure TBase.Over(A: string);'#10'begin'#10'end;'#10 +
+    'procedure TExtGen<T>.Put(AValue: T);'#10'begin'#10'end;'#10 +
+    'procedure ExtProc;'#10'begin'#10'end;'#10 +
+    'end.'#10;
+  PROJ_HEAD =                       // lines 1..18; the case line is 19
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses exta;'#10 +
+    'type'#10 +
+    '  TMy = class(TBase)'#10 +
+    '  public'#10 +
+    '    procedure Own;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'var'#10 +
+    '  ImplVar: Integer;'#10 +
+    'procedure TMy.Own;'#10 +
+    'var'#10 +
+    '  B: TBase;'#10 +
+    '  G: TExtGen<Integer>;'#10 +
+    '  M: TMy;'#10 +
+    'begin'#10 +
+    '  B := nil;'#10;
+  PROJ_TAIL =
+    'end;'#10 +
+    'end.'#10;
+
+var
+  GDir: string;
 
 begin
   GSM := TPasSourceManager.Create([]);
@@ -249,6 +382,103 @@ begin
   CaretCase('unit u;'#10'interface'#10'implementation'#10'end.|'#10);
   GCounter.Ok('the end. dot is after-dot with no base',
     GHit and (GInfo.Kind = ckAfterDot) and (GInfo.DotBase = NIL_NODE));
+
+  // ======== stage C: context classification + bridged collection ==========
+  GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_smoke');
+  if TDirectory.Exists(GDir) then
+    TDirectory.Delete(GDir, True);
+  TDirectory.CreateDirectory(GDir);
+  TFile.WriteAllText(TPath.Combine(GDir, 'exta.pas'), EXTA_UNIT);
+  TFile.WriteAllText(TPath.Combine(GDir, 'mainu.pas'),
+    PROJ_HEAD + PROJ_TAIL);
+  GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
+  GProjMid := GProj.AnalyzeProject(TPath.Combine(GDir, 'mainu.pas'));
+  GCounter.Ok('mini-project analyzed', GProjMid >= 0);
+
+  // --- member completion on a bridged type ---------------------------------
+  ProjCase(PROJ_HEAD + '  B.|'#10 + PROJ_TAIL);
+  GCounter.Ok('B.| classifies ccMember', GHit and (GCtx = ccMember));
+  GCounter.Ok('B.| lists the public method', Has('Pub'));
+  GCounter.Ok('B.| lists the property', Has('Prop'));
+  GCounter.Ok('B.| lists the protected field (caret struct descends)',
+    Has('FProt'));
+  GCounter.Ok('B.| hides the private field of another unit',
+    not Has('FSecret'));
+  GCounter.Ok('B.| collapses the overload pair into one item',
+    Has('Over') and (OverloadsOf('Over') = 1));
+
+  // The parser steals the next line's identifier as the member name; the
+  // LIST must be the same as for a clean trailing dot.
+  ProjCase(PROJ_HEAD + '  B.|'#10'  ImplVar := 1;'#10 + PROJ_TAIL);
+  GCounter.Ok('next-line theft: list still holds the members',
+    GHit and (GCtx = ccMember) and Has('Pub'));
+
+  // Instance of the OWN class: own members + bridged inherited ones.
+  ProjCase(PROJ_HEAD + '  M.|'#10 + PROJ_TAIL);
+  GCounter.Ok('M.| lists the own method', Has('Own'));
+  GCounter.Ok('M.| lists the inherited method', Has('Pub'));
+
+  // Class-side (type reference): constructors and class methods, not
+  // instance members.
+  ProjCase(PROJ_HEAD + '  TBase.|'#10 + PROJ_TAIL);
+  GCounter.Ok('TBase.| lists the constructor', Has('Create'));
+  GCounter.Ok('TBase.| lists the class function', Has('CF'));
+  GCounter.Ok('TBase.| hides instance methods', not Has('Pub'));
+  GCounter.Ok('TBase.| hides instance fields', not Has('FProt'));
+
+  // Generic instantiation declared in the OVERLAY.
+  ProjCase(PROJ_HEAD + '  G.|'#10 + PROJ_TAIL);
+  GCounter.Ok('G.| lists the generic''s method', Has('Put'));
+
+  // --- unqualified scope ----------------------------------------------------
+  ProjCase(PROJ_HEAD + '  |'#10 + PROJ_TAIL);
+  GCounter.Ok('body caret classifies ccStatement',
+    GHit and (GCtx = ccStatement));
+  GCounter.Ok('body: the local, as a local',
+    Has('B') and (BucketOf('B') = cbLocal));
+  GCounter.Ok('body: the own struct method through the join',
+    Has('Own') and (BucketOf('Own') = cbStructMember));
+  GCounter.Ok('body: the INHERITED method through the bridge',
+    Has('Pub') and (BucketOf('Pub') = cbStructMember));
+  GCounter.Ok('body: the implementation-section global', Has('ImplVar'));
+  GCounter.Ok('body: the used unit''s routine, as an import',
+    Has('ExtProc') and (BucketOf('ExtProc') = cbUses));
+  GCounter.Ok('body: the used unit''s type', Has('TBase'));
+  GCounter.Ok('body: a statement keyword', Has('begin'));
+  GCounter.Ok('body: a compiler seed, as a builtin',
+    Has('Integer') and (BucketOf('Integer') = cbBuiltin));
+
+  // Interface-section caret: implementation names and implementation-only
+  // uses must not leak (here: ImplVar).
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses exta;'#10 +
+    '|'#10 +
+    'implementation'#10 +
+    'end.'#10);
+  GCounter.Ok('interface: uses imports visible', Has('ExtProc'));
+  GCounter.Ok('interface: declaration keywords', Has('type'));
+
+  // --- type position --------------------------------------------------------
+  ProjCase(PROJ_HEAD + '  var X: |'#10 + PROJ_TAIL);
+  GCounter.Ok('var X: classifies ccType', GHit and (GCtx = ccType));
+  GCounter.Ok('type position lists types', Has('TBase') and Has('TMy'));
+  GCounter.Ok('type position filters non-types', not Has('ExtProc'));
+  GCounter.Ok('type position keyword', Has('array'));
+
+  // --- uses clause ----------------------------------------------------------
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses |'#10 +
+    'implementation'#10 +
+    'end.'#10);
+  GCounter.Ok('uses caret classifies ccUses', GHit and (GCtx = ccUses));
+  GCounter.Ok('uses lists the known unit', Has('exta'));
+
+  GProj.Free;
+  GProj := nil;
 
   if GCounter.Finish('SemaCompleteSmoke') then
     ExitCode := 1;

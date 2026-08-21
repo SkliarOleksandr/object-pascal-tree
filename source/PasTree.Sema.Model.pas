@@ -97,6 +97,10 @@ type
   TSemaScopeKind = (sckSystem, sckUnit, sckImplementation, sckStruct,
     sckRoutine, sckWith, sckBlock, sckGenericParams, sckEnum);
 
+  // Callback for EnumScopeDeep: one symbol, plus the scope it was found IN
+  // (which may be a joined scope, not the one enumeration started from).
+  TPasSymEnumProc = reference to procedure(ASym, AScope: Integer);
+
   TSemaScope = class
     Kind: TSemaScopeKind;
     Parent: Integer;                       // scope index; NIL_SCOPE at root
@@ -224,6 +228,15 @@ type
     // enum values two joins deep). FindLocal alone is one level only; this
     // is what Resolve actually needs at each scope of its PARENT climb.
     function FindLocalDeep(AScope: Integer; const ANameLower: string): Integer;
+    { The ENUMERATING counterpart of FindLocalDeep, for completion: every
+      symbol visible through AScope, reported in exactly the order the lookup
+      would try them — Shadowing joins (recursive) first, then the scope's own
+      declaration-order list, then Additional joins most-recently-added first
+      (recursive). A caller deduplicating by NameLower and keeping the FIRST
+      hit therefore reproduces FindLocalDeep's precedence. Does NOT climb
+      Parent — that is the caller's chain walk, same split as the lookups. }
+    procedure EnumScopeDeep(AScope: Integer; const AOnSym: TPasSymEnumProc;
+      ADepth: Integer = 0);
     // Full lookup: self -> additional (reverse) -> parent -> ...
     function Resolve(AScope: Integer; const ANameLower: string): Integer;
     { Resolve honouring block-scope POSITION — see the implementation. Only a
@@ -536,6 +549,28 @@ begin
       Exit;
   end;
   Result := NIL_SYM;
+end;
+
+procedure TPasSemaModel.EnumScopeDeep(AScope: Integer;
+  const AOnSym: TPasSymEnumProc; ADepth: Integer);
+var
+  LJoins: TArray<Integer>;
+  LIdx: Integer;
+begin
+  // The lookups recurse joins unguarded (the resolver never builds a cyclic
+  // join graph); an enumerator visits EVERYTHING, so it caps depth anyway —
+  // a malformed graph then costs duplicates, never a hang.
+  if ADepth > 16 then
+    Exit;
+  LJoins := Scopes[AScope].Shadowing;
+  for LIdx := High(LJoins) downto 0 do
+    EnumScopeDeep(LJoins[LIdx], AOnSym, ADepth + 1);
+  if Scopes[AScope].Symbols <> nil then
+    for LIdx := 0 to Scopes[AScope].Symbols.Count - 1 do
+      AOnSym(Scopes[AScope].Symbols[LIdx], AScope);
+  LJoins := Scopes[AScope].Additional;
+  for LIdx := High(LJoins) downto 0 do
+    EnumScopeDeep(LJoins[LIdx], AOnSym, ADepth + 1);
 end;
 
 function TPasSemaModel.Resolve(AScope: Integer;
