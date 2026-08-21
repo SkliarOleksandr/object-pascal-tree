@@ -401,14 +401,14 @@ begin
       LTail := FModel.Symbols[LTail].NextOverload;
     FModel.Symbols[LTail].NextOverload := Result;
     FModel.Symbols[Result].Flags := FModel.Symbols[Result].Flags + [sfOverload];
-    FModel.Scopes[AScope].Symbols.Add(Result);
+    FModel.AddToOrder(AScope, Result);
   end
   else if (AKind = skProperty) and
           (FModel.Symbols[LExisting].Kind = skProperty) then
     // Overloaded array properties: `property Item[I: Integer]: T; default;`
     // + `property Item[I: string]: T; default;` is legal (13.1.4) — keep the
     // first registered under the name, no redeclaration.
-    FModel.Scopes[AScope].Symbols.Add(Result)
+    FModel.AddToOrder(AScope, Result)
   else if (FModel.Symbols[LExisting].Kind = skUnitRef) and
           (AKind <> skUnitRef) then
     // A declaration legally HIDES a used unit's (leaf) name — e.g.
@@ -423,7 +423,7 @@ begin
     FModel.AddDiag(MakeDiag('E2004',
       Format(SE2004_IdentifierRedeclared, [AName]), ADeclNode, LFileId, LLine,
       LCol));
-    FModel.Scopes[AScope].Symbols.Add(Result);
+    FModel.AddToOrder(AScope, Result);
   end;
   MarkDeclName(ADeclNode, Result);
 end;

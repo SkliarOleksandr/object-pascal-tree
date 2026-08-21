@@ -6,8 +6,18 @@ unit PasTree.Sema.Builtins;
   so intra-unit references to them resolve. Adapted from AST.Delphi.SysTypes /
   DataTypes groupings.
 
-  Phase 1 seeds these per model (a few dozen symbols). A shared, read-only
-  system symbol space is a later optimization once symbols span units.
+  SHARED-TEMPLATE SEEDING (the audit's "shared immutable builtin scope", done
+  the identity-preserving way): the ~180 symbols are built ONCE per platform
+  bitness at unit init, and every model then bulk-adopts them — the symbol
+  RECORDS are copied per model (so a builtin's identity stays (mid, sym),
+  which the helper registry's '~name' canonicalization and every per-model
+  seed retry rely on; string fields share their heap data by refcount), while
+  the scope's Names dictionary and order list are the template's own,
+  referenced read-only by every model. That is safe precisely because they
+  are immutable after init — and future-proofed anyway: a write through
+  BindName/AddToOrder copy-on-writes them (TSemaScope.EnsureOwnedContainers).
+  A model whose symbol arena is not empty at seed time falls back to the
+  original symbol-by-symbol path below.
 }
 
 interface
@@ -59,8 +69,75 @@ begin
   Result := [ANameLower];
 end;
 
+type
+  // One prebuilt seed per platform bitness (the ONLY platform dependence in
+  // the list below is the Is64Bit intrinsic gate).
+  TSeedTemplate = record
+    Syms: TArray<TSemaSymbol>;
+    Names: TDictionary<string, Integer>;   // immutable after init
+    Order: TList<Integer>;                 // immutable after init
+  end;
+
+var
+  GSeedTemplates: array[Boolean] of TSeedTemplate;   // by Is64Bit
+
+// The original per-symbol seeding — the template builder runs it once per
+// bitness, and it stays the FALLBACK for a model whose arena is not empty.
+function SeedSystemScopeOwn(AModel: TPasSemaModel;
+  APlatform: TPasPlatform): Integer; forward;
+
 function SeedSystemScope(AModel: TPasSemaModel;
   APlatform: TPasPlatform = pfWin32): Integer;
+var
+  LIs64: Boolean;
+begin
+  LIs64 := PlatformInfo(APlatform).Is64Bit;
+  Result := AModel.AddScope(sckSystem, NIL_SCOPE, NIL_NODE);
+  if AModel.AdoptSeededSymbols(GSeedTemplates[LIs64].Syms, Result) then
+  begin
+    AModel.Scopes[Result].Names := GSeedTemplates[LIs64].Names;
+    AModel.Scopes[Result].Symbols := GSeedTemplates[LIs64].Order;
+    AModel.Scopes[Result].SharedContainers := True;
+  end
+  else
+  begin
+    // Non-empty arena: the template's name->index map would be wrong. Remove
+    // the scope we just minted and seed the classic way.
+    AModel.Scopes.Delete(Result);
+    Result := SeedSystemScopeOwn(AModel, APlatform);
+  end;
+end;
+
+procedure BuildSeedTemplates;
+var
+  LIs64: Boolean;
+  LModel: TPasSemaModel;
+  LScope: Integer;
+  LPlat: TPasPlatform;
+begin
+  for LIs64 := False to True do
+  begin
+    if LIs64 then
+      LPlat := pfWin64
+    else
+      LPlat := pfWin32;
+    LModel := TPasSemaModel.Create(Default(TPasTree));
+    try
+      LScope := SeedSystemScopeOwn(LModel, LPlat);
+      GSeedTemplates[LIs64].Syms := Copy(LModel.Symbols, 0, LModel.SymCount);
+      // Steal the containers — the scratch model must not free them.
+      GSeedTemplates[LIs64].Names := LModel.Scopes[LScope].Names;
+      GSeedTemplates[LIs64].Order := LModel.Scopes[LScope].Symbols;
+      LModel.Scopes[LScope].Names := nil;
+      LModel.Scopes[LScope].Symbols := nil;
+    finally
+      LModel.Free;
+    end;
+  end;
+end;
+
+function SeedSystemScopeOwn(AModel: TPasSemaModel;
+  APlatform: TPasPlatform): Integer;
 var
   LSys, LBool: Integer;
 
@@ -254,5 +331,14 @@ begin
 
   Result := LSys;
 end;
+
+initialization
+  BuildSeedTemplates;
+
+finalization
+  GSeedTemplates[False].Names.Free;
+  GSeedTemplates[False].Order.Free;
+  GSeedTemplates[True].Names.Free;
+  GSeedTemplates[True].Order.Free;
 
 end.

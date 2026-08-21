@@ -105,6 +105,13 @@ type
     // one). Readers treat nil as empty; TPasSemaModel.BindName creates them.
     Names: TDictionary<string, Integer>;   // NameLower -> symbol index (head)
     Symbols: TList<Integer>;               // declaration order
+    // True when Names/Symbols point at containers OWNED ELSEWHERE and shared
+    // read-only across models — today only the builtin seed template
+    // (PasTree.Sema.Builtins). Destroy leaves them alone, and any WRITE goes
+    // through EnsureOwnedContainers first (copy-on-write), so a future pass
+    // that declares into such a scope gets a private copy instead of
+    // corrupting every other model's view.
+    SharedContainers: Boolean;
     Additional: TArray<Integer>;           // joined scopes (system/with/ancestor)
     // Joined scopes checked BEFORE this scope's own names. Exactly one thing
     // needs that order and the spec is explicit about it (15.3.3): a HELPER
@@ -119,6 +126,7 @@ type
     StructSym: Integer;
     constructor Create(AKind: TSemaScopeKind; AParent, AOwnerNode: Integer);
     destructor Destroy; override;
+    procedure EnsureOwnedContainers;
   end;
 
   TPasSemaModel = class
@@ -194,6 +202,18 @@ type
       const ANameKey: string = ''): Integer;
     // Registers NameLower -> symbol in a scope's dictionary + order list.
     procedure BindName(AScope, ASym: Integer);
+    // Appends to a scope's declaration-order list WITHOUT (re)binding a name —
+    // the overload/duplicate branches of DeclareSym. Honours copy-on-write on
+    // a shared-container scope, same as BindName.
+    procedure AddToOrder(AScope, ASym: Integer);
+    { Bulk-adopts a seed TEMPLATE: copies ASyms into Symbols[0..N-1] (string
+      fields share their heap data by refcount — no per-name allocation) and
+      re-stamps each record's Scope to AScope. ONLY valid on an empty symbol
+      arena: the template's name dictionary maps names to indices 0..N-1.
+      Returns False (and does nothing) when the arena is not empty — the
+      caller then falls back to seeding symbol by symbol. }
+    function AdoptSeededSymbols(const ASyms: TArray<TSemaSymbol>;
+      AScope: Integer): Boolean;
     // Local lookup in one scope (no chain).
     function FindLocal(AScope: Integer; const ANameLower: string): Integer;
     // AScope's own names, then its Additional (joined) scopes, most-recently
@@ -263,9 +283,32 @@ end;
 
 destructor TSemaScope.Destroy;
 begin
-  Names.Free;
-  Symbols.Free;
+  if not SharedContainers then
+  begin
+    Names.Free;
+    Symbols.Free;
+  end;
   inherited;
+end;
+
+procedure TSemaScope.EnsureOwnedContainers;
+var
+  LOwnNames: TDictionary<string, Integer>;
+  LOwnOrder: TList<Integer>;
+  LPair: TPair<string, Integer>;
+begin
+  if not SharedContainers then
+    Exit;
+  // Copy-on-write off the shared seed containers: from here on this scope
+  // owns private copies and mutating it is ordinary.
+  LOwnNames := TDictionary<string, Integer>.Create(Names.Count);
+  for LPair in Names do
+    LOwnNames.Add(LPair.Key, LPair.Value);
+  LOwnOrder := TList<Integer>.Create;
+  LOwnOrder.AddRange(Symbols);
+  Names := LOwnNames;
+  Symbols := LOwnOrder;
+  SharedContainers := False;
 end;
 
 { TPasSemaModel }
@@ -405,6 +448,7 @@ end;
 
 procedure TPasSemaModel.BindName(AScope, ASym: Integer);
 begin
+  Scopes[AScope].EnsureOwnedContainers;
   if Scopes[AScope].Names = nil then
   begin
     Scopes[AScope].Names := TDictionary<string, Integer>.Create;
@@ -412,6 +456,34 @@ begin
   end;
   Scopes[AScope].Names.AddOrSetValue(Symbols[ASym].NameLower, ASym);
   Scopes[AScope].Symbols.Add(ASym);
+end;
+
+procedure TPasSemaModel.AddToOrder(AScope, ASym: Integer);
+begin
+  Scopes[AScope].EnsureOwnedContainers;
+  // The callers just hit a FindLocal match in this scope, so the containers
+  // exist; the nil test keeps the method honest if that ever changes.
+  if Scopes[AScope].Symbols = nil then
+    Scopes[AScope].Symbols := TList<Integer>.Create;
+  Scopes[AScope].Symbols.Add(ASym);
+end;
+
+function TPasSemaModel.AdoptSeededSymbols(const ASyms: TArray<TSemaSymbol>;
+  AScope: Integer): Boolean;
+var
+  LIdx: Integer;
+begin
+  if FSymCount <> 0 then
+    Exit(False);
+  if Length(Symbols) < Length(ASyms) then
+    SetLength(Symbols, Length(ASyms) + 64);
+  for LIdx := 0 to High(ASyms) do
+  begin
+    Symbols[LIdx] := ASyms[LIdx];
+    Symbols[LIdx].Scope := AScope;   // scope INDEX is per-model — re-stamp
+  end;
+  FSymCount := Length(ASyms);
+  Result := True;
 end;
 
 function TPasSemaModel.FindLocal(AScope: Integer;
