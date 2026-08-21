@@ -1502,10 +1502,19 @@ begin
   ACache.DeclKeyLoose := TDictionary<string, Integer>.Create;
   ACache.ImplKeyLoose := TDictionary<string, Integer>.Create;
 
+  // Count-tracked doubling — `+ [x]` re-copied the array per routine, which
+  // is O(routines²) on every cache build.
   LRoutineIds := nil;
+  var LRCount := 0;
   for LIdx := 0 to High(LM.Tree.Nodes) do
     if LM.Tree.Nodes[LIdx].Kind = nkRoutine then
-      LRoutineIds := LRoutineIds + [LIdx];
+    begin
+      if LRCount = Length(LRoutineIds) then
+        SetLength(LRoutineIds, LRCount * 2 + 16);
+      LRoutineIds[LRCount] := LIdx;
+      Inc(LRCount);
+    end;
+  SetLength(LRoutineIds, LRCount);
 
   // Position index: widest (outermost) span first, so a later, NARROWER
   // (nested) routine's marking correctly overwrites its outer's — avoids an

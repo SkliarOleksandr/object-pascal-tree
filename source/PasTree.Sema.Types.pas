@@ -73,6 +73,7 @@ implementation
 
 uses
   System.SysUtils,
+  System.Generics.Collections,
   PasTree.Preprocessor,
   PasTree.Sema.Diagnostics;
 
@@ -708,14 +709,27 @@ end;
 
 function TPasSemaTyper.ParamsOf(AScope: Integer): TArray<Integer>;
 var
-  LS: Integer;
+  LList: TList<Integer>;
+  LIdx, LCount: Integer;
 begin
+  // Indexed two-pass (count, size once, fill) — runs per overload candidate;
+  // the for-in enumerator and the per-append copy were both allocations.
   Result := nil;
   if AScope = NIL_SCOPE then
     Exit;
-  for LS in M.Scopes[AScope].Symbols do
-    if M.Symbols[LS].Kind = skParam then
-      Result := Result + [LS];
+  LList := M.Scopes[AScope].Symbols;
+  LCount := 0;
+  for LIdx := 0 to LList.Count - 1 do
+    if M.Symbols[LList[LIdx]].Kind = skParam then
+      Inc(LCount);
+  SetLength(Result, LCount);
+  LCount := 0;
+  for LIdx := 0 to LList.Count - 1 do
+    if M.Symbols[LList[LIdx]].Kind = skParam then
+    begin
+      Result[LCount] := LList[LIdx];
+      Inc(LCount);
+    end;
 end;
 
 function TPasSemaTyper.ArgCount(ACall: Integer): Integer;

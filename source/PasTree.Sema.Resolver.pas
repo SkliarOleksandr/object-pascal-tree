@@ -62,6 +62,9 @@ type
     FIsDeclName: TArray<Boolean>;
     FPendingAggr: TArray<TPasPendingAggr>;
     FPendingHelpers: TArray<TPasPendingHelper>;
+    // FModel.UsesList's filled prefix during Run — appends double the array
+    // instead of re-copying it per uses entry; Analyze trims before returning.
+    FUsesCount: Integer;
     FSkipTyper: Boolean;   // see Analyze
     // Two consumers: the builtin seed, and one `set of` rule in the typer.
     FPlatform: TPasPlatform;
@@ -177,6 +180,12 @@ begin
       LR.FNodeScope[LIdx] := NIL_SCOPE;   // unvisited => no scope => resolves NIL
     LR.Run;
     LR.FModel.NodeScope := LR.FNodeScope;
+    // Standalone (non-project) consumers enumerate Diags right after this
+    // returns; the project driver re-trims after its own cross passes.
+    LR.FModel.TrimDiags;
+    // UsesList grew with capacity slack (see FUsesCount); every consumer
+    // enumerates it with Length/High, so cut it exact before publishing.
+    SetLength(LR.FModel.UsesList, LR.FUsesCount);
     Result := LR.FModel;
   finally
     LR.Free;
@@ -999,7 +1008,10 @@ begin
   LU.NameNode := LNameNode;
   LU.Sym := LSym;
   LU.UnitId := NIL_SYM;
-  FModel.UsesList := FModel.UsesList + [LU];
+  if FUsesCount = Length(FModel.UsesList) then
+    SetLength(FModel.UsesList, FUsesCount * 2 + 8);
+  FModel.UsesList[FUsesCount] := LU;
+  Inc(FUsesCount);
 end;
 
 procedure TPasSemaResolver.CollectRoutine(ANode, AScope: Integer);

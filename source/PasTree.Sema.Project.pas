@@ -221,6 +221,7 @@ type
     // Bumps every currently loaded model to at least msCrossReady (called by
     // the synchronous drivers once their cross passes have completed).
     procedure MarkAllCrossReady;
+    procedure TrimAllDiags;
     function LoadFile(const APath: string): Integer;
     procedure LoadFilesParallel(const APaths: TArray<string>;
       AInterfaceOnly: Boolean = False);
@@ -2712,6 +2713,17 @@ begin
       FStatus[LIdx] := msCrossReady;
 end;
 
+// Cut every model's Diags back to its filled prefix (AddDiag grows with
+// capacity slack) — must run before any consumer enumerates Diags with
+// Length/High, i.e. at the end of every analysis entry point.
+procedure TPasSemaProject.TrimAllDiags;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to FModels.Count - 1 do
+    FModels[LIdx].TrimDiags;
+end;
+
 // Parse + Phase-1-analyze a batch of files with one worker per core, then
 // register the results IN INPUT ORDER (deterministic model ids). Pure per
 // file: each worker owns its preprocessor (which clones the shared defines
@@ -2724,14 +2736,17 @@ var
   LKeys: TArray<string>;
   LDone: TArray<TPasSemaModel>;
   LSeen: TDictionary<string, Boolean>;
-  LIdx, LDummy: Integer;
+  LIdx, LDummy, LTodoCount: Integer;
   LFull, LKey: string;
   LStatus: TPasModuleStatus;
   LFailLock: TCriticalSection;
 begin
   // Normalize, drop already-loaded/known-bad paths and in-batch duplicates.
-  LTodo := nil;
-  LKeys := nil;
+  // Pre-sized to the input (survivors <= input), truncated after the loop —
+  // per-append array copies were O(n²) refcount churn on a 3757-path batch.
+  SetLength(LTodo, Length(APaths));
+  SetLength(LKeys, Length(APaths));
+  LTodoCount := 0;
   LSeen := TDictionary<string, Boolean>.Create;
   try
     for LIdx := 0 to High(APaths) do
@@ -2743,12 +2758,15 @@ begin
       if not TFile.Exists(LFull) then
         Continue;
       LSeen.Add(LKey, True);
-      LTodo := LTodo + [LFull];
-      LKeys := LKeys + [LKey];
+      LTodo[LTodoCount] := LFull;
+      LKeys[LTodoCount] := LKey;
+      Inc(LTodoCount);
     end;
   finally
     LSeen.Free;
   end;
+  SetLength(LTodo, LTodoCount);
+  SetLength(LKeys, LTodoCount);
   if LTodo = nil then
     Exit;
   LFailLock := TCriticalSection.Create;
@@ -5782,15 +5800,29 @@ end;
 function TPasSemaProject.XParamSyms(AMid, ASym: Integer): TArray<Integer>;
 var
   LM: TPasSemaModel;
-  LS: Integer;
+  LList: TList<Integer>;
+  LIdx, LCount: Integer;
 begin
+  // Indexed two-pass (count, size once, fill): runs per overload candidate,
+  // and both the for-in enumerator and the per-append array copy it replaces
+  // were allocations on that path.
   Result := nil;
   LM := FModels[AMid];
   if LM.Symbols[ASym].MemberScope = NIL_SCOPE then
     Exit;
-  for LS in LM.Scopes[LM.Symbols[ASym].MemberScope].Symbols do
-    if LM.Symbols[LS].Kind = skParam then
-      Result := Result + [LS];
+  LList := LM.Scopes[LM.Symbols[ASym].MemberScope].Symbols;
+  LCount := 0;
+  for LIdx := 0 to LList.Count - 1 do
+    if LM.Symbols[LList[LIdx]].Kind = skParam then
+      Inc(LCount);
+  SetLength(Result, LCount);
+  LCount := 0;
+  for LIdx := 0 to LList.Count - 1 do
+    if LM.Symbols[LList[LIdx]].Kind = skParam then
+    begin
+      Result[LCount] := LList[LIdx];
+      Inc(LCount);
+    end;
 end;
 
 { 16.5.1 — a generic METHOD's own type parameters, inferred from the ARGUMENT
@@ -6246,7 +6278,8 @@ var
   function SelectCallTarget(ACall, ACalleeNode, AHeadMid, AHeadSym,
     ACtx: Integer; out ABestMid, ABestSym: Integer): Boolean;
   var
-    LSeen: TArray<TPasExtRef>;
+    LSeen: TArray<TPasExtRef>;   // count-tracked (LSeenCount), capacity slack
+    LSeenCount: Integer;
     LBestScore: Integer;
     LTypeQualified: Boolean;
 
@@ -6291,7 +6324,7 @@ var
           Continue;
         end;
         LDup := False;
-        for LIdx := 0 to High(LSeen) do
+        for LIdx := 0 to LSeenCount - 1 do
           if (LSeen[LIdx].UnitId = AMid) and (LSeen[LIdx].Sym = LCand) then
           begin
             LDup := True;
@@ -6301,7 +6334,10 @@ var
         begin
           LRef.UnitId := AMid;
           LRef.Sym := LCand;
-          LSeen := LSeen + [LRef];
+          if LSeenCount = Length(LSeen) then
+            SetLength(LSeen, LSeenCount * 2 + 8);
+          LSeen[LSeenCount] := LRef;
+          Inc(LSeenCount);
           if LTypeQualified and not CallableOnType(AMid, LCand) then
             LScore := -1   // an instance method, reached through the TYPE
           else
@@ -6323,6 +6359,7 @@ var
     LQExt: TPasExtRef;
   begin
     LSeen := nil;
+    LSeenCount := 0;
     LBestScore := -1;
     ABestMid := -1;
     ABestSym := NIL_SYM;
@@ -6819,11 +6856,23 @@ var
                       // `Take(7)` types like `Take<Integer>(7)`. Applied after
                       // the enclosing type's frame (LCtx) because a method
                       // parameter is never substituted by it.
-                      var LArgTypes: TArray<TSemaXType> := nil;
+                      // Count the arguments first and size the array once —
+                      // the old `+ [x]` reallocated per argument, per call.
                       var LArgN := LM.Tree.Nodes[LBase].NextSibling;
+                      var LArgCount := 0;
+                      var LScan := LArgN;
+                      while LScan <> NIL_NODE do
+                      begin
+                        Inc(LArgCount);
+                        LScan := LM.Tree.Nodes[LScan].NextSibling;
+                      end;
+                      var LArgTypes: TArray<TSemaXType> := nil;
+                      SetLength(LArgTypes, LArgCount);
+                      LArgCount := 0;
                       while LArgN <> NIL_NODE do
                       begin
-                        LArgTypes := LArgTypes + [GetX(LArgN)];
+                        LArgTypes[LArgCount] := GetX(LArgN);
+                        Inc(LArgCount);
                         LArgN := LM.Tree.Nodes[LArgN].NextSibling;
                       end;
                       // ...unless the type arguments were WRITTEN, in which
@@ -8732,7 +8781,7 @@ procedure TPasSemaProject.CrossResolveDecl(AId: Integer;
   var APending: TArray<TPasInhPending>; AEmit: Boolean);
 var
   LModel: TPasSemaModel;
-  LNode, LUid, LSym, LCtx, LWIdx: Integer;
+  LNode, LUid, LSym, LCtx, LWIdx, LPendCount: Integer;
   LPend: TPasInhPending;
   LNameLower: string;
   LFound: Boolean;
@@ -8741,6 +8790,11 @@ begin
   if AId > High(FDeclWork) then
     Exit;
   LModel := FModels[AId];
+  // Pre-size to the work list (every entry can pend at most once), truncate at
+  // the end — the old `+ [x]` re-copied the managed-record array per append,
+  // per round (the EnsureCrossWork idiom).
+  SetLength(APending, Length(FDeclWork[AId]));
+  LPendCount := 0;
   for LWIdx := 0 to High(FDeclWork[AId]) do
   begin
     LNode := FDeclWork[AId][LWIdx];
@@ -8765,11 +8819,13 @@ begin
       LPend.Ext.UnitId := LUid;
       LPend.Ext.Sym := LSym;
       LPend.X := XNil;
-      APending := APending + [LPend];
+      APending[LPendCount] := LPend;
+      Inc(LPendCount);
     end
     else if AEmit and LModel.AllUsesResolved then
       EmitE2003(LModel, LNode);   // CrossResolve's verdict, just deferred
   end;
+  SetLength(APending, LPendCount);
 end;
 
 { Parallel compute + sequential commit, iterated: one nested class's heritage
@@ -8815,6 +8871,7 @@ procedure TPasSemaProject.CrossResolveInherited(AId: Integer;
 var
   LModel: TPasSemaModel;
   LNode, LStruct, LUid, LSym, LCtx, LMatchNode, LWIdx, LBound: Integer;
+  LPendCount: Integer;
   LPend: TPasInhPending;
   LFound: Boolean;
   LNameLower: string;
@@ -8824,6 +8881,11 @@ begin
   APending := nil;
   LModel := FModels[AId];
   EnsureCrossWork(AId);
+  // Pre-size to the work list (each entry pends at most once), truncate at
+  // the end — the same idiom EnsureCrossWork itself uses; the old `+ [x]`
+  // re-copied the managed-record array per append, per fixpoint round.
+  SetLength(APending, Length(FInhWork[AId]));
+  LPendCount := 0;
   LMiss := TDictionary<Int64, Byte>.Create;
   try
   // Candidates only — kind, scope, A.B-member and not-in-a-with-body were all
@@ -8916,7 +8978,8 @@ begin
           LPend.X := SubstX(SymDeclTypeX(LUid, LSym), LCtx, 0)
         else
           LPend.X := XNil;
-        APending := APending + [LPend];
+        APending[LPendCount] := LPend;
+        Inc(LPendCount);
       end
       else
         LMiss.AddOrSetValue(LKey, 0);
@@ -8948,11 +9011,13 @@ begin
         LPend.X := SubstX(SymDeclTypeX(LUid, LSym), LCtx, 0)
       else
         LPend.X := XNil;
-      APending := APending + [LPend];
+      APending[LPendCount] := LPend;
+      Inc(LPendCount);
     end
     else if LModel.AllUsesResolved then
       EmitE2003(LModel, LNode);
     end;
+    SetLength(APending, LPendCount);
   finally
     LMiss.Free;
   end;
@@ -9008,6 +9073,7 @@ procedure TPasSemaProject.CrossResolveWith(AId: Integer;
 var
   LModel: TPasSemaModel;
   LNode, LStruct, LUid, LSym, LCtx, LMatchNode, LWIdx: Integer;
+  LPendCount: Integer;
   LPend: TPasInhPending;
   LNameLower: string;
   LBound, LFromMember: Boolean;
@@ -9017,6 +9083,10 @@ begin
   APending := nil;
   LModel := FModels[AId];
   EnsureCrossWork(AId);
+  // Pre-size + truncate, same as CrossResolveInherited — this one repeats per
+  // fixpoint round (MAX_ROUNDS=8), so the old per-append copy multiplied.
+  SetLength(APending, Length(FWithWork[AId]));
+  LPendCount := 0;
   // Idents inside a with body, from the one classifying scan. Bound-ness is
   // NOT part of that list and is tested below per round, because a round can
   // bind a name the next round must then leave alone.
@@ -9079,7 +9149,8 @@ begin
       LPend.Ext.UnitId := LUid;
       LPend.Ext.Sym := LSym;
       LPend.X := LMemX;
-      APending := APending + [LPend];
+      APending[LPendCount] := LPend;
+      Inc(LPendCount);
     end
     else if LBound then
       Continue   // no with member by that name: Phase 1's binding stands
@@ -9103,12 +9174,14 @@ begin
         LPend.Ext.UnitId := LUid;
         LPend.Ext.Sym := LSym;
         LPend.X := XNil;
-        APending := APending + [LPend];
+        APending[LPendCount] := LPend;
+        Inc(LPendCount);
       end
       else if AEmit and LModel.AllUsesResolved then
         EmitE2003(LModel, LNode);
     end;
   end;
+  SetLength(APending, LPendCount);
 end;
 
 { Runs to a FIXPOINT, because one round cannot resolve a nested `with` whose
@@ -9220,6 +9293,7 @@ begin
   // Only the requested unit gets the full cross treatment here (AnalyzeFile's
   // narrower contract); its direct uses stay msFullReady.
   SetModuleStatus(Result, msCrossReady);
+  TrimAllDiags;
 end;
 
 function TPasSemaProject.StageTimings: string;
@@ -9234,7 +9308,7 @@ end;
 
 function TPasSemaProject.AnalyzeProject(const AMainFile: string): Integer;
 var
-  LDone, LN, LIdx, LU: Integer;
+  LDone, LN, LIdx, LU, LPathCount: Integer;
   LPaths: TArray<string>;
   LPath: string;
   LSW: TStopwatch;
@@ -9273,14 +9347,23 @@ begin
   while LDone < FModels.Count do
   begin
     LN := FModels.Count;
+    // Count-tracked doubling: a discovery round collects hundreds of paths,
+    // and `+ [x]` re-copied the string array (refcount churn) per append.
     LPaths := nil;
+    LPathCount := 0;
     LSW := TStopwatch.StartNew;
     for LIdx := LDone to LN - 1 do
       for LU := 0 to High(FModels[LIdx].UsesList) do
         if FSM.ResolveUnit(FModels[LIdx].UsesList[LU].NameFull,
           FModels[LIdx].UsesList[LU].InPath, FFiles[LIdx], LPath) and
           not FByPath.ContainsKey(LowerCase(LPath)) then
-          LPaths := LPaths + [LPath];
+        begin
+          if LPathCount = Length(LPaths) then
+            SetLength(LPaths, LPathCount * 2 + 16);
+          LPaths[LPathCount] := LPath;
+          Inc(LPathCount);
+        end;
+    SetLength(LPaths, LPathCount);
     Inc(LResolveMs, LSW.ElapsedMilliseconds);
     LSW := TStopwatch.StartNew;
     LoadFilesParallel(LPaths);
@@ -9334,6 +9417,7 @@ begin
   Stage('xtype');
   // Whole transitive closure went through the cross passes.
   MarkAllCrossReady;
+  TrimAllDiags;
   // Analysis is over: drop the raw-bytes repository (a full second copy of
   // every closure file that nothing reads from here on — hundreds of MB on
   // a real project) and the include-cache's own stream references.
@@ -9344,7 +9428,7 @@ procedure TPasSemaProject.AnalyzeDirectory(const ARoot: string);
 var
   LFile, LExt: string;
   LPaths: TArray<string>;
-  LN, LIdx: Integer;
+  LN, LIdx, LPathCount: Integer;
   LSW: TStopwatch;
 
   procedure Stage(const AName: string);
@@ -9359,13 +9443,20 @@ begin
   LSW := TStopwatch.StartNew;
   FSM.BuildUnitIndex(ARoot);
   LPaths := nil;
+  LPathCount := 0;
   for LFile in TDirectory.GetFiles(ARoot, '*.*',
     TSearchOption.soAllDirectories) do
   begin
     LExt := LowerCase(TPath.GetExtension(LFile));
     if (LExt = '.pas') or (LExt = '.dpr') then
-      LPaths := LPaths + [LFile];
+    begin
+      if LPathCount = Length(LPaths) then
+        SetLength(LPaths, LPathCount * 2 + 16);
+      LPaths[LPathCount] := LFile;
+      Inc(LPathCount);
+    end;
   end;
+  SetLength(LPaths, LPathCount);
   Stage('scan');
   LoadFilesParallel(LPaths);
   Stage('load');
@@ -9425,6 +9516,7 @@ begin
   // msFullReady, mirroring the E2003 scoping above.
   for LIdx := 0 to LN - 1 do
     SetModuleStatus(LIdx, msCrossReady);
+  TrimAllDiags;
   FSM.ReleaseAnalysisCaches;   // see AnalyzeProject
 end;
 
@@ -9484,10 +9576,13 @@ var
   // Uses-closure paths not yet loaded, discovered from models [AFrom..AToExcl).
   function DiscoverUses(AFrom, AToExcl: Integer): TArray<string>;
   var
-    LI, LK: Integer;
+    LI, LK, LCount: Integer;
     LP: string;
   begin
+    // Count-tracked doubling — a discovery round finds hundreds of paths, and
+    // `+ [x]` re-copied the string array per append.
     Result := nil;
+    LCount := 0;
     for LI := AFrom to AToExcl - 1 do
       for LK := 0 to High(FModels[LI].UsesList) do
         if FSM.ResolveUnit(FModels[LI].UsesList[LK].NameFull,
@@ -9496,8 +9591,12 @@ var
           not LSeen.ContainsKey(LowerCase(LP)) then
         begin
           LSeen.Add(LowerCase(LP), True);
-          Result := Result + [LP];
+          if LCount = Length(Result) then
+            SetLength(Result, LCount * 2 + 16);
+          Result[LCount] := LP;
+          Inc(LCount);
         end;
+    SetLength(Result, LCount);
   end;
 
   // Loads APaths in CHUNK slices — progress report and cancellation check
@@ -9608,16 +9707,20 @@ begin
   try
     LSW := TStopwatch.StartNew;
     // Front-load the priority set (open module + its uses), then the roots.
-    LOrdered := nil;
+    // Pre-sized to the input (survivors <= input), truncated after the loop.
+    SetLength(LOrdered, Length(APriority) + Length(ARoots));
+    LIdx := 0;
     for LPath in APriority + ARoots do
     begin
       LKey := LowerCase(TPath.GetFullPath(LPath));
       if not LSeen.ContainsKey(LKey) then
       begin
         LSeen.Add(LKey, True);
-        LOrdered := LOrdered + [LPath];
+        LOrdered[LIdx] := LPath;
+        Inc(LIdx);
       end;
     end;
+    SetLength(LOrdered, LIdx);
 
     // The implicit System unit is part of every closure (1.2.1) but never
     // named in a `uses` clause — pull it in up front (full, like
@@ -9754,6 +9857,7 @@ begin
       Exit;
     end;
     MarkAllCrossReady;
+    TrimAllDiags;
     // See AnalyzeProject. On a cancelled run the caches stay — the host
     // discards a cancelled project wholesale anyway.
     FSM.ReleaseAnalysisCaches;

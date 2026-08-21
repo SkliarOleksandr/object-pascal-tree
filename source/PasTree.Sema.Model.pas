@@ -122,6 +122,14 @@ type
   TPasSemaModel = class
   private
     FSymCount: Integer;
+    // Diags' filled prefix. The array itself carries CAPACITY between
+    // TrimDiags calls (AddDiag doubles instead of the old `Diags + [x]`,
+    // which re-copied every managed record per append — O(n²) on the
+    // error-heavy units, ~2447 diags in corpus history). Everything outside
+    // this unit reads Diags AFTER analysis, when TrimDiags has cut it back
+    // to exact length; in-flight readers go through HasDiagAt, which stops
+    // at the count.
+    FDiagCount: Integer;
     procedure GrowSyms;
   public
     Tree: TPasTree;                 // referenced, not owned
@@ -211,6 +219,10 @@ type
       majority of units, so this costs one length check on the hot path. }
     function InUnopenedWithBody(ANode: Integer): Boolean;
     procedure AddDiag(const ADiag: TSemaDiag);
+    { Cuts Diags back to its filled prefix. The project driver calls this at
+      the end of every analysis entry point, BEFORE any consumer enumerates
+      Diags with Length/High. }
+    procedure TrimDiags;
     { Is a diagnostic already anchored at this CST node? For a pass that can
       reach the same failure twice (the cross-type pass runs per driver path and
       a node can be visited from more than one expression) and wants dcc's one
@@ -576,12 +588,21 @@ end;
 
 procedure TPasSemaModel.AddDiag(const ADiag: TSemaDiag);
 begin
-  Diags := Diags + [ADiag];
+  if FDiagCount = Length(Diags) then
+    SetLength(Diags, FDiagCount * 2 + 8);
+  Diags[FDiagCount] := ADiag;
+  Inc(FDiagCount);
+end;
+
+procedure TPasSemaModel.TrimDiags;
+begin
+  if Length(Diags) <> FDiagCount then
+    SetLength(Diags, FDiagCount);
 end;
 
 function TPasSemaModel.HasDiagAt(ANode: Integer): Boolean;
 begin
-  for var LIdx := 0 to High(Diags) do
+  for var LIdx := 0 to FDiagCount - 1 do
     if Diags[LIdx].DeclNode = ANode then
       Exit(True);
   Result := False;
