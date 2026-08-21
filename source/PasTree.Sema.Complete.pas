@@ -185,7 +185,7 @@ type
     function OverlayStructDef(AOvSym: Integer): Integer;
     function OverlayHeritageRef(AOvSym, ADepth: Integer): TPasComplTypeRef;
     // collection
-    procedure AddItem(const AName: string; AKind: TSemaSymbolKind;
+    procedure AddItem(const AName, AKey: string; AKind: TSemaSymbolKind;
       ABucket: TPasComplBucket; AMid, ASym, ACtx: Integer);
     procedure AddSym(AMid, ASym, ACtx: Integer; ABucket: TPasComplBucket);
     procedure AddKeywords(const AWords: array of string);
@@ -220,9 +220,20 @@ type
       by name (first hit wins — buckets are enumerated in resolution
       precedence) with overloads collapsed. False only when the position
       offers nothing (ckNone). An empty list with True is a real answer
-      (e.g. a dot whose base cannot be typed). }
+      (e.g. a dot whose base cannot be typed). The first overload also hands
+      back the caret classification — a host building textEdits needs the
+      REPLACE SPAN (ACaret.PrefixColFrom/PrefixColTo) the engine already
+      computed, and must not re-derive tokenization. }
+    function CompleteAt(ALine, ACol: Integer; out ACaret: TPasCaretInfo;
+      out AContext: TPasComplContext;
+      out AItems: TArray<TPasComplItem>): Boolean; overload;
     function CompleteAt(ALine, ACol: Integer; out AContext: TPasComplContext;
-      out AItems: TArray<TPasComplItem>): Boolean;
+      out AItems: TArray<TPasComplItem>): Boolean; overload;
+    { The head keyword of a ROUTINE item ('procedure', 'function',
+      'constructor', 'destructor', 'operator'), '' for anything else — what
+      separates an LSP Constructor kind from a Function, and what a display
+      column shows instead of the generic "routine". }
+    function ItemHeadWord(const AItem: TPasComplItem): string;
     { The innermost struct type symbol whose member scope encloses AScope —
       the `Self` context: NodeScope's chain carries it both inside a struct
       DECLARATION (the sckStruct scope's own StructSym) and inside a method
@@ -1027,16 +1038,19 @@ end;
 
 { ---- collection ----------------------------------------------------------- }
 
-procedure TPasCompletion.AddItem(const AName: string; AKind: TSemaSymbolKind;
-  ABucket: TPasComplBucket; AMid, ASym, ACtx: Integer);
+{ AKey is the caller's ALREADY-NORMALIZED dedup key (a symbol's NameLower, a
+  keyword's own lowercase spelling). Not derived here from AName on purpose:
+  this runs once per CANDIDATE, thousands of times per request, and PasNameKey
+  allocates — the exact "cheap-looking normalization on a shared hot path"
+  this codebase has paid for three times (see FindLocal's own comment). }
+procedure TPasCompletion.AddItem(const AName, AKey: string;
+  AKind: TSemaSymbolKind; ABucket: TPasComplBucket; AMid, ASym, ACtx: Integer);
 var
-  LKey: string;
   LIdx: Integer;
 begin
   if AName = '' then
     Exit;
-  LKey := PasNameKey(AName);
-  if FSeen.TryGetValue(LKey, LIdx) then
+  if FSeen.TryGetValue(AKey, LIdx) then
   begin
     // First hit wins (buckets run in precedence order); a same-name routine
     // is an overload of the one already listed, not a new row.
@@ -1057,7 +1071,7 @@ begin
   FItems[FCount].Sym := ASym;
   FItems[FCount].Ctx := ACtx;
   FItems[FCount].Overloads := 0;
-  FSeen.Add(LKey, FCount);
+  FSeen.Add(AKey, FCount);
   Inc(FCount);
 end;
 
@@ -1076,16 +1090,18 @@ begin
   if (FContext = ccType) and not (LM.Symbols[ASym].Kind in
     [skType, skBuiltinType, skUnitRef, skGenericParam]) then
     Exit;
-  AddItem(LM.Symbols[ASym].Name, LM.Symbols[ASym].Kind, ABucket, AMid, ASym,
-    ACtx);
+  AddItem(LM.Symbols[ASym].Name, LM.Symbols[ASym].NameLower,
+    LM.Symbols[ASym].Kind, ABucket, AMid, ASym, ACtx);
 end;
 
 procedure TPasCompletion.AddKeywords(const AWords: array of string);
 var
   LIdx: Integer;
 begin
+  // The word lists are lowercase already — they are their own keys.
   for LIdx := 0 to High(AWords) do
-    AddItem(AWords[LIdx], skType, cbKeyword, -1, NIL_SYM, NIL_INST);
+    AddItem(AWords[LIdx], AWords[LIdx], skType, cbKeyword, -1, NIL_SYM,
+      NIL_INST);
 end;
 
 function TPasCompletion.RoutineNodeOf(AModel: TPasSemaModel;
@@ -1466,8 +1482,11 @@ begin
     Exit;
   for LIdx := 0 to FProj.ModelCount - 1 do
     if LIdx <> FProjMid then
-      AddItem(ChangeFileExt(ExtractFileName(FProj.ModelFile(LIdx)), ''),
-        skUnitRef, cbUnitName, LIdx, NIL_SYM, NIL_INST);
+    begin
+      var LName := ChangeFileExt(ExtractFileName(FProj.ModelFile(LIdx)), '');
+      AddItem(LName, AnsiLowerCase(LName), skUnitRef, cbUnitName, LIdx,
+        NIL_SYM, NIL_INST);
+    end;
 end;
 
 // The innermost node of the given kinds on ANode's parent chain, stopping at
@@ -1616,12 +1635,49 @@ end;
 function TPasCompletion.CompleteAt(ALine, ACol: Integer;
   out AContext: TPasComplContext; out AItems: TArray<TPasComplItem>): Boolean;
 var
+  LCaret: TPasCaretInfo;
+begin
+  Result := CompleteAt(ALine, ACol, LCaret, AContext, AItems);
+end;
+
+function TPasCompletion.ItemHeadWord(const AItem: TPasComplItem): string;
+const
+  cWords: array[0..4] of string = ('procedure', 'function', 'constructor',
+    'destructor', 'operator');
+var
+  LM: TPasSemaModel;
+  LNode, LIdx: Integer;
+begin
+  Result := '';
+  if (AItem.Kind <> skRoutine) or (AItem.Sym = NIL_SYM) or
+     (AItem.Bucket = cbKeyword) then
+    Exit;
+  if AItem.Mid < 0 then
+    LM := FModel
+  else if FProj <> nil then
+    LM := FProj.Model(AItem.Mid)
+  else
+    Exit;
+  LNode := RoutineNodeOf(LM, AItem.Sym);
+  if LNode = NIL_NODE then
+    Exit;
+  for LIdx := 0 to High(cWords) do
+    if LM.Tree.Source.VisibleTextEquals(LM.Tree.Nodes[LNode].FirstToken,
+      cWords[LIdx]) then
+      Exit(cWords[LIdx]);
+end;
+
+function TPasCompletion.CompleteAt(ALine, ACol: Integer;
+  out ACaret: TPasCaretInfo; out AContext: TPasComplContext;
+  out AItems: TArray<TPasComplItem>): Boolean;
+var
   LInfo: TPasCaretInfo;
   LRef: TPasComplTypeRef;
 begin
   AContext := ccNone;
   AItems := nil;
   Result := CaretAt(ALine, ACol, LInfo);
+  ACaret := LInfo;
   if not Result then
     Exit;
   FContext := ClassifyAt(LInfo);

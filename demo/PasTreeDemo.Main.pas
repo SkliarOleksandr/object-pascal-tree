@@ -2577,7 +2577,7 @@ var
   LCtx: TPasComplContext;
   LItems: TArray<TPasComplItem>;
   LMid, LIdx: Integer;
-  LName, LDetail: string;
+  LName, LDetail, LKindWord: string;
   LX: TSemaXType;
   LWithTypes: Boolean;
 begin
@@ -2614,6 +2614,13 @@ begin
       for LIdx := 0 to High(LItems) do
       begin
         LName := LItems[LIdx].Name;
+        // The kind column: routines get their real head word (constructor/
+        // function/...) — the generic fallback covers everything else.
+        LKindWord := '';
+        if LItems[LIdx].Kind = skRoutine then
+          LKindWord := LEngine.ItemHeadWord(LItems[LIdx]);
+        if LKindWord = '' then
+          LKindWord := ComplKindWord(LItems[LIdx]);
         LDetail := '';
         if LWithTypes and (LItems[LIdx].Mid >= 0) and
            (LItems[LIdx].Sym <> NIL_SYM) and
@@ -2631,7 +2638,7 @@ begin
             [LItems[LIdx].Overloads]);
         FCompl.ItemList.Add(Format(
           '\color{clGrayText}%s\column{}\color{clWindowText}\style{+B}%s\style{-B}%s',
-          [ComplKindWord(LItems[LIdx]), LName, LDetail]));
+          [LKindWord, LName, LDetail]));
         FCompl.InsertList.Add(LName);
       end;
     finally
