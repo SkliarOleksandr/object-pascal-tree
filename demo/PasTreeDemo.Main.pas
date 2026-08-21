@@ -15,11 +15,12 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.IOUtils, System.Generics.Collections,
+  System.Generics.Defaults,
   System.JSON, System.Diagnostics, System.Math, System.Win.Registry,
   Winapi.Windows, Winapi.Messages, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls,
   Vcl.ExtCtrls, Vcl.Dialogs, Vcl.Graphics, Vcl.Clipbrd,
   SynEdit, SynEditTypes, SynEditHighlighter, SynHighlighterJSON, SynFunc,
-  SynHighlighterPas,
+  SynHighlighterPas, SynCompletionProposal,
   VirtualTrees, VirtualTrees.Types,
   PasTree.Types, PasTree.Platforms, PasTree.SourceManager, PasTree.Preprocessor,
   PasTree.Ast,
@@ -27,7 +28,7 @@ uses
   PasTree.Parser, PasTree.Project, PasTree.DProj,
   PasTree.Sema.Diagnostics, PasTree.Sema.Model, PasTree.Sema.Builtins,
   PasTree.Sema.Types, PasTree.Sema.Resolver, PasTree.Sema.Project,
-  PasTree.Sema.Nav, PasTree.Sema.Async,
+  PasTree.Sema.Nav, PasTree.Sema.Async, PasTree.Sema.Complete,
   PasTree.Sema.Dump, VirtualTrees.BaseAncestorVCL, VirtualTrees.BaseTree, VirtualTrees.AncestorVCL, SynEditCodeFolding,
   PasTreeDemo.Highlighter, PasTreeDemo.Settings, PasTreeDemo.NavHistory,
   PasTreeDemo.Includes, PasTreeDemo.UnitList, PasTreeDemo.UnitPicker,
@@ -355,6 +356,19 @@ type
     FSettings: TDemoSettings;
     FRecentMenu: TPopupMenu;       // the Open Project split button's drop-down
     FFindBar: TForm;                // floating find toolbar (TFindBar); lazy
+    // Code completion (ctrl+space / after `.`): the SynEdit popup plus the
+    // cached overlay-preprocessor stack. Per request the CURRENT buffer is
+    // parsed fresh (ProcessText + ParseFile + phase-1 Analyze — the overlay
+    // model) and TPasCompletion bridges every name that leaves it into the
+    // LAST-GOOD FSemaProject; see local/COMPLETION-PLAN.md §3. The SM/PP pair
+    // is cached because TPasSourceManager indexes ~140 search paths on
+    // Create — a per-keystroke cost this field structure exists to avoid —
+    // and invalidated whenever the analysis configuration changes.
+    FCompl: TSynCompletionProposal;
+    FComplSM: TPasSourceManager;
+    FComplDefines: TPasDefines;
+    FComplPP: TPasPreprocessor;
+    FLastDefines: TArray<string>;  // defines the LAST analysis ran with
     procedure ApplyHighlighterContext(AHL: TPasTreeSynHighlighter;
       const APath: string);
     procedure CloseAllTabs;
@@ -407,6 +421,10 @@ type
     procedure DrawRefRuns(ACanvas: TCanvas; const ACellRect: TRect;
       const ARuns: TArray<TPasRefRun>);
     procedure SetupControls;
+    procedure InvalidateComplPipeline;
+    function EnsureComplPP: Boolean;
+    procedure ComplExecute(Kind: SynCompletionType; Sender: TObject;
+      var CurrentInput: string; var x, y: Integer; var CanExecute: Boolean);
     procedure ApplyPasTreePalette(AHL: TSynPasSyn);
     procedure EnsureSampleProject;
     function ExeDir: string;
@@ -1573,6 +1591,7 @@ end;
 
 procedure TfrmMain.FormCreate(Sender: TObject);
 begin
+
   FFileList := TStringList.Create;
   FOpenFiles := TStringList.Create;
   FMsgLog := TList<TPasMsgRow>.Create;
@@ -1618,6 +1637,7 @@ begin
   end;
   FreeAndNil(FSettings);
   CancelAsync;                 // cancel + drain the worker before tearing down
+  InvalidateComplPipeline;
   FreeAndNil(FNav);
   FreeAndNil(FSemaProject);
   FreeAndNil(FDProj);
@@ -1645,6 +1665,20 @@ begin
   // The conventional pair, matching every browser and IDE.
   NavBackAction.ShortCut := Vcl.Menus.ShortCut(VK_LEFT, [ssAlt]);
   NavForwardAction.ShortCut := Vcl.Menus.ShortCut(VK_RIGHT, [ssAlt]);
+
+  // Code completion popup, shared by every source tab (OpenFileTab calls
+  // AddEditor per editor): ctrl+space on demand, and the built-in timer
+  // fires it right after a typed `.`, matching the IDE. The work happens in
+  // ComplExecute — overlay parse of the current buffer + the bridged
+  // collection engine (PasTree.Sema.Complete).
+  FCompl := TSynCompletionProposal.Create(Self);
+  FCompl.Options := DefaultProposalOptions +
+    [scoUseBuiltInTimer, scoUseInsertList, scoUsePrettyText];
+  FCompl.TriggerChars := '.';
+  FCompl.TimerInterval := 350;
+  FCompl.ShortCut := Vcl.Menus.ShortCut(VK_SPACE, [ssCtrl]);
+  FCompl.Columns.Add.ColumnWidth := 90;   // the kind word, dimmed
+  FCompl.OnExecute := ComplExecute;
 
   vstFiles.NodeDataSize := SizeOf(TPasNodeData);
   vstFiles.Header.Options := vstFiles.Header.Options - [hoVisible];
@@ -2260,6 +2294,7 @@ begin
   LTab.Editor := Result;
   LTab.PasTreeHL := LHL;
   LTab.FilePath := TPath.GetFullPath(APath);
+  FCompl.AddEditor(Result);   // code completion (ctrl+space / after `.`)
   // Keeps recorded positions in THIS file pointing at the same text as it is
   // edited. Created after FilePath is known and after the initial load, and
   // owned by the editor — see TNavHistoryPlugin.
@@ -2465,6 +2500,151 @@ begin
 end;
 
 // Analysis core, shared by the loud RunParse and the quiet ReanalyzeForNav.
+procedure TfrmMain.InvalidateComplPipeline;
+begin
+  FreeAndNil(FComplPP);
+  FreeAndNil(FComplDefines);
+  FreeAndNil(FComplSM);
+end;
+
+// The completion overlay's preprocessor stack, cached until the analysis
+// configuration changes (see the field comment): TPasSourceManager indexes
+// every search path on Create, which must not happen per keystroke.
+function TfrmMain.EnsureComplPP: Boolean;
+var
+  LName: string;
+begin
+  if FComplPP = nil then
+  begin
+    if Length(FLastSearchPaths) = 0 then
+      Exit(False);
+    FComplSM := TPasSourceManager.Create(FLastSearchPaths);
+    // The REAL platform define set, then the project's on top — the same
+    // context the analysis (and the highlighter) run under; a thinner set
+    // fakes parse errors in the RTL (see CreatePlatformDefines).
+    FComplDefines := CreatePlatformDefines(FPlatform);
+    for LName in FLastDefines do
+      FComplDefines.Define(LName);
+    FComplPP := TPasPreprocessor.Create(FComplSM, FComplDefines);
+  end;
+  Result := True;
+end;
+
+// The dimmed kind word of one completion row.
+function ComplKindWord(const AItem: TPasComplItem): string;
+begin
+  if AItem.Bucket = cbKeyword then
+    Exit('keyword');
+  if AItem.Bucket = cbUnitName then
+    Exit('unit');
+  case AItem.Kind of
+    skType, skBuiltinType, skGenericParam:
+      Result := 'type';
+    skVar:
+      Result := 'var';
+    skConst:
+      Result := 'const';
+    skField:
+      Result := 'field';
+    skRoutine:
+      Result := 'routine';
+    skParam:
+      Result := 'param';
+    skProperty:
+      Result := 'property';
+    skEnumValue:
+      Result := 'value';
+    skUnitRef:
+      Result := 'unit';
+  else
+    Result := '';
+  end;
+end;
+
+// Code completion: the whole per-request pipeline, on the UI thread — an
+// overlay parse of the CURRENT buffer (~30 ms worst case, measured on
+// System.pas), phase-1 resolve, then the collection engine bridging every
+// name that leaves the buffer into the last-good FSemaProject.
+procedure TfrmMain.ComplExecute(Kind: SynCompletionType; Sender: TObject;
+  var CurrentInput: string; var x, y: Integer; var CanExecute: Boolean);
+var
+  LTab: TSourceTab;
+  LPre: TPasPreprocessed;
+  LDiags: TArray<TPasParseDiag>;
+  LTree: TPasTree;
+  LModel: TPasSemaModel;
+  LEngine: TPasCompletion;
+  LCtx: TPasComplContext;
+  LItems: TArray<TPasComplItem>;
+  LMid, LIdx: Integer;
+  LName, LDetail: string;
+  LX: TSemaXType;
+  LWithTypes: Boolean;
+begin
+  CanExecute := False;
+  if FAnalyzing or not Assigned(FSemaProject) or not Assigned(FNav) or
+     not (pgc.ActivePage is TSourceTab) or not EnsureComplPP then
+    Exit;
+  LTab := TSourceTab(pgc.ActivePage);
+  LPre := FComplPP.ProcessText(LTab.FilePath, LTab.Editor.Text);
+  LTree := TPasParser.ParseFile(LPre, LDiags);
+  LModel := TPasSemaResolver.Analyze(LTree, False, FPlatform);
+  LEngine := nil;
+  try
+    LMid := FNav.ModelIdOf(LTab.FilePath);
+    LEngine := TPasCompletion.Create(LModel, FSemaProject, LMid);
+    if not LEngine.CompleteAt(LTab.Editor.CaretY, LTab.Editor.CaretX,
+         LCtx, LItems) or (Length(LItems) = 0) then
+      Exit;
+    TArray.Sort<TPasComplItem>(LItems, TComparer<TPasComplItem>.Construct(
+      function(const A, B: TPasComplItem): Integer
+      begin
+        Result := Ord(A.Bucket) - Ord(B.Bucket);
+        if Result = 0 then
+          Result := CompareText(A.Name, B.Name);
+      end));
+    // Declared-type detail is a real (cheap, on-demand) resolve per row —
+    // worth it for a member list, noise-cost on a 1700-row scope list.
+    LWithTypes := Length(LItems) <= 512;
+    FCompl.ItemList.BeginUpdate;
+    FCompl.InsertList.BeginUpdate;
+    try
+      FCompl.ItemList.Clear;
+      FCompl.InsertList.Clear;
+      for LIdx := 0 to High(LItems) do
+      begin
+        LName := LItems[LIdx].Name;
+        LDetail := '';
+        if LWithTypes and (LItems[LIdx].Mid >= 0) and
+           (LItems[LIdx].Sym <> NIL_SYM) and
+           (LItems[LIdx].Kind in [skVar, skConst, skField, skParam,
+             skProperty, skRoutine]) then
+        begin
+          LX := FSemaProject.SymDeclTypeX(LItems[LIdx].Mid, LItems[LIdx].Sym);
+          if LItems[LIdx].Ctx <> NIL_INST then
+            LX := FSemaProject.SubstX(LX, LItems[LIdx].Ctx, 0);
+          if XValid(LX) then
+            LDetail := '\color{clGrayText}: ' + FSemaProject.XTypeText(LX);
+        end;
+        if LItems[LIdx].Overloads > 0 then
+          LDetail := LDetail + Format('\color{clGrayText} (+%d)',
+            [LItems[LIdx].Overloads]);
+        FCompl.ItemList.Add(Format(
+          '\color{clGrayText}%s\column{}\color{clWindowText}\style{+B}%s\style{-B}%s',
+          [ComplKindWord(LItems[LIdx]), LName, LDetail]));
+        FCompl.InsertList.Add(LName);
+      end;
+    finally
+      FCompl.InsertList.EndUpdate;
+      FCompl.ItemList.EndUpdate;
+    end;
+    CanExecute := True;
+  finally
+    LEngine.Free;
+    LModel.Free;
+  end;
+end;
+
 // Recreates FSemaProject/FNav (the previous ones, and any hover link into
 // them, die here) and — crucially — feeds every OPEN editor's current text as
 // a buffer override, so analysis (and thus navigation) matches what's on
@@ -2487,6 +2667,8 @@ begin
     Exit;
   FAnalyzeOverhead := Format('paths=%d;', [LSW.ElapsedMilliseconds]);
   FLastSearchPaths := LSearchPaths;   // see the field
+  FLastDefines := LDefines;
+  InvalidateComplPipeline;            // config may have changed
 
   ClearLink;
   FAnalyzing := True;
@@ -2799,6 +2981,8 @@ begin
     LPriority := [];
 
   FLastSearchPaths := LSearchPaths;   // see the field
+  FLastDefines := LDefines;
+  InvalidateComplPipeline;            // config may have changed
   FAsyncSession := TPasAsyncSession.Create(LPlatform, LSearchPaths, LDefines,
     LRoots, LPriority);
   FAsyncSession.SetSingleThreadedInner(cbThreading.ItemIndex = 0);

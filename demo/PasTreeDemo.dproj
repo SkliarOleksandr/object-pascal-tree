@@ -165,6 +165,7 @@
         <DCCReference Include="..\source\PasTree.Sema.Resolver.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Project.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Nav.pas"/>
+        <DCCReference Include="..\source\PasTree.Sema.Complete.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Dump.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Async.pas"/>
         <BuildConfiguration Include="Base">
