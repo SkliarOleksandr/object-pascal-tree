@@ -192,6 +192,7 @@ type
   TPasDefines = class
   private
     FMap: TDictionary<string, Boolean>;
+    constructor Create(ACapacity: Integer); overload;   // Clone's pre-size
   public
     constructor Create; overload;
     constructor Create(const ANames: array of string); overload;
@@ -597,6 +598,12 @@ begin
   FMap := TDictionary<string, Boolean>.Create(GDefinesComparer);
 end;
 
+constructor TPasDefines.Create(ACapacity: Integer);
+begin
+  inherited Create;
+  FMap := TDictionary<string, Boolean>.Create(ACapacity, GDefinesComparer);
+end;
+
 constructor TPasDefines.Create(const ANames: array of string);
 var
   LName: string;
@@ -634,7 +641,9 @@ function TPasDefines.Clone: TPasDefines;
 var
   LKey: string;
 begin
-  Result := TPasDefines.Create;
+  // Pre-sized: this runs once per FILE (defines are unit-local), and growing
+  // through rehashes cost more than the clone itself.
+  Result := TPasDefines.Create(FMap.Count);
   for LKey in FMap.Keys do
     Result.FMap.Add(LKey, True);
 end;
@@ -808,7 +817,10 @@ begin
   ResetSwitches;
   FFileNames.Clear;
   FFiles.Clear;
-  FVisible.Clear;
+  // Count := 0, not Clear: Clear drops CAPACITY, and this instance is reused
+  // across files (the project driver pools preprocessors) — a 100k-token unit
+  // would otherwise re-grow the list through ~17 doublings every time.
+  FVisible.Count := 0;
   FSkipped.Clear;
   FDiags.Clear;
   FIncludePathStack.Clear;
@@ -829,6 +841,10 @@ begin
   FVarPropSetter := False;                // dcc default: OFF (13.1.6)
 
   LStream := TPasLexer.Tokenize(ASource);
+  // Visible tokens <= the main file's raw tokens (trivia and skipped regions
+  // only subtract; includes add, and then the list grows the ordinary way).
+  if FVisible.Capacity < Length(LStream.Tokens) then
+    FVisible.Capacity := Length(LStream.Tokens);
   FFileNames.Add(AFileName);
   FFiles.Add(LStream);
   FSkipped.Add(TList<TPasSkippedRegion>.Create);

@@ -68,16 +68,21 @@ begin
     for LScope := 0 to AModel.Scopes.Count - 1 do
     begin
       // Summarize the system scope; detail user scopes.
+      // Names/Symbols are LAZY (nil until the first bind) — count nil as 0.
       if AModel.Scopes[LScope].Kind = sckSystem then
       begin
+        var LBuiltinCount := 0;
+        if AModel.Scopes[LScope].Symbols <> nil then
+          LBuiltinCount := AModel.Scopes[LScope].Symbols.Count;
         LSB.AppendFormat('scope#%d %s (builtins: %d)'#10,
-          [LScope, ScopeStr(AModel.Scopes[LScope].Kind),
-           AModel.Scopes[LScope].Symbols.Count]);
+          [LScope, ScopeStr(AModel.Scopes[LScope].Kind), LBuiltinCount]);
         Continue;
       end;
       LSB.AppendFormat('scope#%d %s (parent#%d)'#10,
         [LScope, ScopeStr(AModel.Scopes[LScope].Kind),
          AModel.Scopes[LScope].Parent]);
+      if AModel.Scopes[LScope].Symbols = nil then
+        Continue;
       for LSymIdx in AModel.Scopes[LScope].Symbols do
       begin
         LSym := AModel.Symbols[LSymIdx];

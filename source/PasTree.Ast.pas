@@ -207,7 +207,7 @@ type
     FLastChild: TArray<Integer>;  // parallel: last child per node
     procedure Grow;
   public
-    procedure Init;
+    procedure Init(ACapacityHint: Integer = 64);
     function AddNode(AKind: TPasNodeKind; AParent, AFirstToken: Integer):
       Integer;
     procedure SetLast(ANode, ALastToken: Integer);
@@ -420,13 +420,18 @@ end;
 
 { TPasTreeBuilder }
 
-procedure TPasTreeBuilder.Init;
+procedure TPasTreeBuilder.Init(ACapacityHint: Integer);
 begin
+  // The parser passes ~half its visible-token count (nodes run 0.5–1x visible
+  // tokens): one up-front allocation instead of ~10 doublings each copying the
+  // arena so far. Build still trims to the exact count.
+  if ACapacityHint < 64 then
+    ACapacityHint := 64;
   FNodes := nil;
   FLastChild := nil;
   FCount := 0;
-  SetLength(FNodes, 64);
-  SetLength(FLastChild, 64);
+  SetLength(FNodes, ACapacityHint);
+  SetLength(FLastChild, ACapacityHint);
 end;
 
 procedure TPasTreeBuilder.Grow;

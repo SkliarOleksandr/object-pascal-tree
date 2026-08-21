@@ -2851,7 +2851,7 @@ begin
   LP.FSrc := ASource;
   LP.FLast := High(ASource.Visible);
   LP.FFuel := Int64(Length(ASource.Visible)) * 200 + 10000;
-  LP.FB.Init;
+  LP.FB.Init(Length(ASource.Visible) div 2 + 64);
   case LP.CurKind of
     tkUnit:
       begin
@@ -3006,7 +3006,7 @@ begin
   LParser.FSrc := ASource;
   LParser.FLast := High(ASource.Visible);
   LParser.FFuel := Int64(Length(ASource.Visible)) * 200 + 10000;
-  LParser.FB.Init;
+  LParser.FB.Init(Length(ASource.Visible) div 2 + 64);
   LRoot := LParser.FB.AddNode(nkBlock, NIL_NODE, 0);
   LParser.ParseBlockUntil(LRoot, [tkEndOfFile]);
   LParser.FB.SetLast(LRoot, LParser.FPos);

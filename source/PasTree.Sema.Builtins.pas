@@ -37,6 +37,7 @@ function PasBuiltinAliasGroup(const ANameLower: string): TArray<string>;
 implementation
 
 uses
+  System.Generics.Collections,
   PasTree.Ast;
 
 function PasBuiltinAliasGroup(const ANameLower: string): TArray<string>;
@@ -82,6 +83,11 @@ var
 
 begin
   LSys := AModel.AddScope(sckSystem, NIL_SCOPE, NIL_NODE);
+  // ~180 names land below, in EVERY model: pre-size the lazy containers once
+  // instead of letting the dictionary rehash its way up per unit.
+  AModel.Scopes[LSys].Names := TDictionary<string, Integer>.Create(256);
+  AModel.Scopes[LSys].Symbols := TList<Integer>.Create;
+  AModel.Scopes[LSys].Symbols.Capacity := 224;
 
   // Integers (NumRank by width: 8-bit=1 .. 64-bit=4).
   T('Byte', tcInteger, 1); T('ShortInt', tcInteger, 1);

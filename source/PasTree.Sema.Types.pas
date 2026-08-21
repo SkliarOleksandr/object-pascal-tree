@@ -718,6 +718,8 @@ begin
   if AScope = NIL_SCOPE then
     Exit;
   LList := M.Scopes[AScope].Symbols;
+  if LList = nil then
+    Exit;   // lazy scope list — never bound
   LCount := 0;
   for LIdx := 0 to LList.Count - 1 do
     if M.Symbols[LList[LIdx]].Kind = skParam then

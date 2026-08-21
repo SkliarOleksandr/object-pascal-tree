@@ -101,6 +101,8 @@ type
     Kind: TSemaScopeKind;
     Parent: Integer;                       // scope index; NIL_SCOPE at root
     OwnerNode: Integer;                    // CST node that opened this scope
+    // Both LAZY — nil until the first name is bound (most scopes never bind
+    // one). Readers treat nil as empty; TPasSemaModel.BindName creates them.
     Names: TDictionary<string, Integer>;   // NameLower -> symbol index (head)
     Symbols: TList<Integer>;               // declaration order
     Additional: TArray<Integer>;           // joined scopes (system/with/ancestor)
@@ -249,8 +251,11 @@ begin
   Parent := AParent;
   OwnerNode := AOwnerNode;
   StructSym := NIL_SYM;
-  Names := TDictionary<string, Integer>.Create;
-  Symbols := TList<Integer>.Create;
+  // Names/Symbols stay NIL until the first bind (see BindName): scopes are
+  // minted per routine, per block, per with, per enum — and most never
+  // declare a name, so the two eager heap objects per scope were the
+  // dominant small-object count in the analyzer. Every reader treats nil as
+  // empty (FindLocal here; the for-in/Count readers each guard locally).
 end;
 
 destructor TSemaScope.Destroy;
@@ -363,6 +368,11 @@ end;
 
 procedure TPasSemaModel.BindName(AScope, ASym: Integer);
 begin
+  if Scopes[AScope].Names = nil then
+  begin
+    Scopes[AScope].Names := TDictionary<string, Integer>.Create;
+    Scopes[AScope].Symbols := TList<Integer>.Create;
+  end;
   Scopes[AScope].Names.AddOrSetValue(Symbols[ASym].NameLower, ASym);
   Scopes[AScope].Symbols.Add(ASym);
 end;
@@ -376,7 +386,10 @@ begin
   // call. Cheap-looking belt-and-braces on a hot path is not cheap — the
   // boundary that BUILDS the key is the only place that can normalize for free,
   // because it is already producing a string there.
-  if not Scopes[AScope].Names.TryGetValue(ANameLower, Result) then
+  // A scope that never declared anything has no dictionary at all (lazy —
+  // see TSemaScope.Create); the nil test also short-circuits the hash.
+  if (Scopes[AScope].Names = nil) or
+     not Scopes[AScope].Names.TryGetValue(ANameLower, Result) then
     Result := NIL_SYM;
 end;
 

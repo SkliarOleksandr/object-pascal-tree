@@ -113,6 +113,11 @@ type
     FSM: TPasSourceManager;
     FDefines: TPasDefines;
     FPP: TPasPreprocessor;
+    // Reusable preprocessors for the parallel load/declared passes: Process
+    // fully resets per-run state, so a returned instance is as good as a
+    // fresh one — without paying ~20 container allocations per FILE.
+    FPPPool: TList<TPasPreprocessor>;
+    FPPPoolLock: TCriticalSection;
     // A model that exists only to hold the seeded compiler-provided names, so
     // SeedDeclaredQuery can answer before any real unit is loaded. Same
     // SeedSystemScope call as every other model, so the two cannot drift.
@@ -174,7 +179,7 @@ type
     FSystemUnitLock: TCriticalSection;
     // Phase 3c: cross-model typing.
     FInstances: TList<TSemaInstance>;
-    FInstKeys: TDictionary<string, Integer>;
+    FInstKeys: TDictionary<TSemaInstance, Integer>;
     // Cross-unit helper injection (15.3). FModelHelpers is the raw per-model
     // list of DECLARED helpers; FHelperIdx is what the hot path reads: per
     // REFERRING model, extended-type key -> the single ACTIVE helper, with
@@ -222,6 +227,8 @@ type
     // the synchronous drivers once their cross passes have completed).
     procedure MarkAllCrossReady;
     procedure TrimAllDiags;
+    function RentPP: TPasPreprocessor;
+    procedure ReturnPP(APP: TPasPreprocessor);
     function LoadFile(const APath: string): Integer;
     procedure LoadFilesParallel(const APaths: TArray<string>;
       AInterfaceOnly: Boolean = False);
@@ -599,15 +606,71 @@ uses
   System.Threading,
   System.Diagnostics,
   System.Math,
+  System.Generics.Defaults,
   PasTree.Parser,
   PasTree.CondEval,
   PasTree.Sema.Builtins,
   PasTree.Sema.Resolver,
   PasTree.Sema.Diagnostics;
 
+type
+  { Structural equality for the instantiation-dedup dictionary: the instance
+    record IS the key, hashed and compared as integers. Replaces a
+    `Format('%d:%d') + per-arg concat` string key that allocated 2–5 strings
+    per call — 77k calls per corpus run, under the instance lock. }
+  TSemaInstanceComparer = class(TEqualityComparer<TSemaInstance>)
+  public
+    function Equals(const Left, Right: TSemaInstance): Boolean;
+      overload; override;
+    function GetHashCode(const Value: TSemaInstance): Integer;
+      overload; override;
+  end;
+
 var
   // Process-wide, set once — see TPasSemaProject.ConfigureThreadPool.
   GPoolConfigured: Boolean = False;
+  // Shared stateless comparer (interface-refcounted; see initialization).
+  GInstanceComparer: IEqualityComparer<TSemaInstance>;
+
+function TSemaInstanceComparer.Equals(const Left,
+  Right: TSemaInstance): Boolean;
+var
+  LIdx: Integer;
+begin
+  if (Left.UnitId <> Right.UnitId) or (Left.Sym <> Right.Sym) or
+     (Length(Left.Args) <> Length(Right.Args)) then
+    Exit(False);
+  for LIdx := 0 to High(Left.Args) do
+    if (Left.Args[LIdx].UnitId <> Right.Args[LIdx].UnitId) or
+       (Left.Args[LIdx].Sym <> Right.Args[LIdx].Sym) or
+       (Left.Args[LIdx].Inst <> Right.Args[LIdx].Inst) then
+      Exit(False);
+  Result := True;
+end;
+
+function TSemaInstanceComparer.GetHashCode(const Value: TSemaInstance): Integer;
+var
+  LIdx: Integer;
+  LHash: Cardinal;
+
+  procedure Mix(AVal: Integer);
+  begin
+    // FNV-1a over the record's integers, byte-for-byte equivalent mixing.
+    LHash := (LHash xor Cardinal(AVal)) * 16777619;
+  end;
+
+begin
+  LHash := 2166136261;
+  Mix(Value.UnitId);
+  Mix(Value.Sym);
+  for LIdx := 0 to High(Value.Args) do
+  begin
+    Mix(Value.Args[LIdx].UnitId);
+    Mix(Value.Args[LIdx].Sym);
+    Mix(Value.Args[LIdx].Inst);
+  end;
+  Result := Integer(LHash);
+end;
 
 { Pin the default thread pool's width instead of letting it grow.
 
@@ -667,6 +730,8 @@ begin
     FDefines.Define(LName);
   FPP := TPasPreprocessor.Create(FSM, FDefines, 37.0, FInfo.PointerBytes,
     FInfo.ExtendedBytes);
+  FPPPool := TList<TPasPreprocessor>.Create;
+  FPPPoolLock := TCriticalSection.Create;
   FSeedModel := TPasSemaModel.Create(Default(TPasTree));
   FSeedScope := SeedSystemScope(FSeedModel, APlatform);
   FModels := TObjectList<TPasSemaModel>.Create(True);
@@ -674,7 +739,7 @@ begin
   FStatus := TList<TPasModuleStatus>.Create;
   FByPath := TDictionary<string, Integer>.Create;
   FInstances := TList<TSemaInstance>.Create;
-  FInstKeys := TDictionary<string, Integer>.Create;
+  FInstKeys := TDictionary<TSemaInstance, Integer>.Create(GInstanceComparer);
   FInstLock := TCriticalSection.Create;
   FSystemUnitId := -1;
   FSystemUnitResolved := False;
@@ -696,6 +761,10 @@ begin
   FFiles.Free;
   FStatus.Free;
   FModels.Free;
+  for var LPP in FPPPool do
+    LPP.Free;
+  FPPPool.Free;
+  FPPPoolLock.Free;
   FPP.Free;
   FSeedModel.Free;
   FDefines.Free;
@@ -2494,8 +2563,7 @@ begin
       LDiags: TArray<TPasParseDiag>;
     begin
       LDone[AIndex] := nil;
-      LPP := TPasPreprocessor.Create(FSM, FDefines, 37.0, FInfo.PointerBytes,
-        FInfo.ExtendedBytes);
+      LPP := RentPP;
       try
         try
           LPP.OnDeclared := DeclaredQueryFor(LCand[AIndex]);
@@ -2511,7 +2579,7 @@ begin
             LDone[AIndex] := nil;
         end;
       finally
-        LPP.Free;
+        ReturnPP(LPP);
       end;
     end,
     // This pass walks a CANDIDATE list, so the body index is not a unit id.
@@ -2713,6 +2781,37 @@ begin
       FStatus[LIdx] := msCrossReady;
 end;
 
+function TPasSemaProject.RentPP: TPasPreprocessor;
+begin
+  Result := nil;
+  FPPPoolLock.Enter;
+  try
+    if FPPPool.Count > 0 then
+    begin
+      Result := FPPPool[FPPPool.Count - 1];
+      FPPPool.Delete(FPPPool.Count - 1);
+    end;
+  finally
+    FPPPoolLock.Leave;
+  end;
+  if Result = nil then
+    Result := TPasPreprocessor.Create(FSM, FDefines, 37.0, FInfo.PointerBytes,
+      FInfo.ExtendedBytes);
+  // A previous renter's callbacks must never answer this run's questions.
+  Result.OnDeclared := nil;
+  Result.OnSymbol := nil;
+end;
+
+procedure TPasSemaProject.ReturnPP(APP: TPasPreprocessor);
+begin
+  FPPPoolLock.Enter;
+  try
+    FPPPool.Add(APP);
+  finally
+    FPPPoolLock.Leave;
+  end;
+end;
+
 // Cut every model's Diags back to its filled prefix (AddDiag grows with
 // capacity slack) — must run before any consumer enumerates Diags with
 // Length/High, i.e. at the end of every analysis entry point.
@@ -2786,8 +2885,7 @@ begin
       LPre: TPasPreprocessed;
       LDiags: TArray<TPasParseDiag>;
     begin
-      LPP := TPasPreprocessor.Create(FSM, FDefines, 37.0, FInfo.PointerBytes,
-        FInfo.ExtendedBytes);
+      LPP := RentPP;
       try
         try
           // The compiler-provided names are answerable already; anything
@@ -2828,7 +2926,7 @@ begin
           end;
         end;
       finally
-        LPP.Free;
+        ReturnPP(LPP);
       end;
     end,
     // This pass walks FILE PATHS — the models do not exist yet — so there is
@@ -3422,15 +3520,18 @@ begin
   if LScope = NIL_SCOPE then
     Exit(False);
   LSawDefault := False;
-  for LS in LM.Scopes[LScope].Symbols do
-    if LM.Symbols[LS].Kind = skParam then
-    begin
-      Inc(ATot);
-      if sfHasDefault in LM.Symbols[LS].Flags then
-        LSawDefault := True;
-      if not LSawDefault then
-        Inc(AReq);
-    end;
+  // A lazy nil Symbols list is a recorded-but-empty param scope — a paramless
+  // routine, arity 0/0, NOT the "no parameter scope" False above.
+  if LM.Scopes[LScope].Symbols <> nil then
+    for LS in LM.Scopes[LScope].Symbols do
+      if LM.Symbols[LS].Kind = skParam then
+      begin
+        Inc(ATot);
+        if sfHasDefault in LM.Symbols[LS].Flags then
+          LSawDefault := True;
+        if not LSawDefault then
+          Inc(AReq);
+      end;
   LChild := LM.Tree.Nodes[LM.Scopes[LScope].OwnerNode].FirstChild;
   while LChild <> NIL_NODE do
   begin
@@ -3681,22 +3782,21 @@ end;
 function TPasSemaProject.Instantiate(const ABase: TSemaXType;
   const AArgs: TArray<TSemaXType>): Integer;
 var
-  LKey: string;
   LInst: TSemaInstance;
-  LArg: TSemaXType;
 begin
-  LKey := Format('%d:%d', [ABase.UnitId, ABase.Sym]);
-  for LArg in AArgs do
-    LKey := LKey + Format('|%d:%d:%d', [LArg.UnitId, LArg.Sym, LArg.Inst]);
+  // The instance record is its own dictionary key — integer hash + compare
+  // (TSemaInstanceComparer), no string is built. Args is shared by reference
+  // between the key and the stored instance; instances are append-only and
+  // never mutated, so the shared array is safe.
+  LInst.UnitId := ABase.UnitId;
+  LInst.Sym := ABase.Sym;
+  LInst.Args := AArgs;
   FInstLock.Enter;
   try
-    if FInstKeys.TryGetValue(LKey, Result) then
+    if FInstKeys.TryGetValue(LInst, Result) then
       Exit;
-    LInst.UnitId := ABase.UnitId;
-    LInst.Sym := ABase.Sym;
-    LInst.Args := AArgs;
     Result := FInstances.Add(LInst);
-    FInstKeys.Add(LKey, Result);
+    FInstKeys.Add(LInst, Result);
   finally
     FInstLock.Leave;
   end;
@@ -4363,10 +4463,28 @@ begin
   end;
   if AX.Inst <> NIL_INST then
   begin
-    LArgs := Copy(InstanceRead(AX.Inst).Args);
-    for LIdx := 0 to High(LArgs) do
-      LArgs[LIdx] := SubstX(LArgs[LIdx], AInst, ADepth + 1);
-    Result.Inst := Instantiate(XPlain(AX.UnitId, AX.Sym), LArgs);
+    // Copy-on-write: the stored args are read SHARED (instances are append-
+    // only), and the array is copied only when a substitution actually
+    // changes an element. When nothing changes the result is the same
+    // instance by dedup, so both the Copy and the Instantiate lock round are
+    // skipped — the common case on the 126k-call path.
+    var LShared := InstanceRead(AX.Inst).Args;
+    LArgs := nil;
+    for LIdx := 0 to High(LShared) do
+    begin
+      var LSub := SubstX(LShared[LIdx], AInst, ADepth + 1);
+      if (LArgs = nil) and
+         ((LSub.UnitId <> LShared[LIdx].UnitId) or
+          (LSub.Sym <> LShared[LIdx].Sym) or
+          (LSub.Inst <> LShared[LIdx].Inst)) then
+        LArgs := Copy(LShared);   // elements before LIdx were unchanged
+      if LArgs <> nil then
+        LArgs[LIdx] := LSub;
+    end;
+    if LArgs = nil then
+      Result.Inst := AX.Inst
+    else
+      Result.Inst := Instantiate(XPlain(AX.UnitId, AX.Sym), LArgs);
   end
   // A type DECLARED INSIDE the generic this frame instantiates has no
   // arguments of its own, yet its definition is written in that generic's
@@ -5811,6 +5929,8 @@ begin
   if LM.Symbols[ASym].MemberScope = NIL_SCOPE then
     Exit;
   LList := LM.Scopes[LM.Symbols[ASym].MemberScope].Symbols;
+  if LList = nil then
+    Exit;   // lazy scope list — never bound
   LCount := 0;
   for LIdx := 0 to LList.Count - 1 do
     if LM.Symbols[LList[LIdx]].Kind = skParam then
@@ -7916,7 +8036,8 @@ begin
     if not XValid(LCur) then
       Exit;
     LScope := FModels[LCur.UnitId].Symbols[LCur.Sym].MemberScope;
-    if LScope <> NIL_SCOPE then
+    if (LScope <> NIL_SCOPE) and
+       (FModels[LCur.UnitId].Scopes[LScope].Symbols <> nil) then
       for LIdx := 0 to FModels[LCur.UnitId].Scopes[LScope].Symbols.Count - 1 do
       begin
         LCand := FModels[LCur.UnitId].Scopes[LScope].Symbols[LIdx];
@@ -8018,7 +8139,8 @@ begin
     if not XValid(LCur) then
       Exit;
     LScope := FModels[LCur.UnitId].Symbols[LCur.Sym].MemberScope;
-    if LScope <> NIL_SCOPE then
+    if (LScope <> NIL_SCOPE) and
+       (FModels[LCur.UnitId].Scopes[LScope].Symbols <> nil) then
       for LIdx := 0 to FModels[LCur.UnitId].Scopes[LScope].Symbols.Count - 1 do
       begin
         LCand := FModels[LCur.UnitId].Scopes[LScope].Symbols[LIdx];
@@ -8073,7 +8195,7 @@ begin
       Exit;
     LM := FModels[LCur.UnitId];
     LScope := LM.Symbols[LCur.Sym].MemberScope;
-    if LScope <> NIL_SCOPE then
+    if (LScope <> NIL_SCOPE) and (LM.Scopes[LScope].Symbols <> nil) then
       for LIdx := 0 to LM.Scopes[LScope].Symbols.Count - 1 do
       begin
         LSym := LM.Scopes[LScope].Symbols[LIdx];
@@ -9872,5 +9994,8 @@ begin
     LSeen.Free;
   end;
 end;
+
+initialization
+  GInstanceComparer := TSemaInstanceComparer.Create;
 
 end.

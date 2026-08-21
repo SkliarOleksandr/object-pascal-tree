@@ -343,7 +343,7 @@ var
 begin
   Result := 0;
   LScope := FModel.Symbols[ASym].MemberScope;
-  if LScope = NIL_SCOPE then
+  if (LScope = NIL_SCOPE) or (FModel.Scopes[LScope].Symbols = nil) then
     Exit;
   for LS in FModel.Scopes[LScope].Symbols do
     if FModel.Symbols[LS].Kind = skParam then
@@ -744,8 +744,11 @@ begin
     // Every symbol the child adds to the member scope gets the section's
     // visibility. Counted rather than returned, because a single child can
     // declare several (a `A, B: Integer` field group, a property's accessors,
-    // a nested type and its enum values).
-    LFirstNew := FModel.Scopes[LMembers].Symbols.Count;
+    // a nested type and its enum values). Symbols is lazy — nil counts as 0.
+    if FModel.Scopes[LMembers].Symbols <> nil then
+      LFirstNew := FModel.Scopes[LMembers].Symbols.Count
+    else
+      LFirstNew := 0;
     case KindOf(LChild) of
       // ancestor / implemented-interface references: resolve in the outer scope
       nkIdent, nkMember, nkTypeArgs:
@@ -811,7 +814,7 @@ begin
     else
       Collect(LChild, LMembers);   // var/const/type sections, variant parts...
     end;
-    if LVis <> svDefault then
+    if (LVis <> svDefault) and (FModel.Scopes[LMembers].Symbols <> nil) then
       for var LNew := LFirstNew to FModel.Scopes[LMembers].Symbols.Count - 1 do
         FModel.Symbols[FModel.Scopes[LMembers].Symbols[LNew]].Visibility := LVis;
     LChild := NextSib(LChild);
@@ -2191,7 +2194,7 @@ begin
   begin
     Inc(LDepth);
     LScope := FModel.Symbols[ATypeSym].MemberScope;
-    if LScope <> NIL_SCOPE then
+    if (LScope <> NIL_SCOPE) and (FModel.Scopes[LScope].Symbols <> nil) then
       // The scope's OWN declaration list, not a scan of every symbol in the
       // unit: this runs per with-target, and a whole-model scan on a shared
       // path is the perf trap this codebase has hit three times.
@@ -3019,7 +3022,7 @@ procedure TPasSemaResolver.CheckSlicePositions;
        (FModel.Symbols[LSym].NextOverload <> NIL_SYM) then
       Exit;
     LScope := FModel.Symbols[LSym].MemberScope;
-    if LScope = NIL_SCOPE then
+    if (LScope = NIL_SCOPE) or (FModel.Scopes[LScope].Symbols = nil) then
       Exit;   // a builtin, or params not recorded
     LSeen := 0;
     for LParam in FModel.Scopes[LScope].Symbols do
