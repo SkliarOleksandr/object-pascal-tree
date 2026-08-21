@@ -217,7 +217,8 @@ end;
 
 function TPasParser.IsWord(const AWord: string): Boolean;
 begin
-  Result := (CurKind = tkIdentifier) and SameText(CurText, AWord);
+  // Slice compare — no CurText copy. This runs per token in decl-heavy code.
+  Result := (CurKind = tkIdentifier) and FSrc.VisibleTextEquals(FPos, AWord);
 end;
 
 function TPasParser.AdjacentNext: Boolean;
@@ -1736,13 +1737,19 @@ var
   LVis, LNode: Integer;
   LStrict: Boolean;
 
-  function VisLevel(const AWord: string): Integer;
+  // Slice-based: this test runs for EVERY member of every class body, and the
+  // old string-typed version paid a VisibleText copy per call.
+  function VisLevel(ATokIdx: Integer): Integer;
+  var
+    LText: PChar;
+    LLen: Integer;
   begin
-    if SameText(AWord, 'private') then Result := 1
-    else if SameText(AWord, 'protected') then Result := 2
-    else if SameText(AWord, 'public') then Result := 3
-    else if SameText(AWord, 'published') then Result := 4
-    else if SameText(AWord, 'automated') then Result := 5
+    FSrc.VisibleSlice(ATokIdx, LText, LLen);
+    if SliceEqualsWord(LText, LLen, 'private') then Result := 1
+    else if SliceEqualsWord(LText, LLen, 'protected') then Result := 2
+    else if SliceEqualsWord(LText, LLen, 'public') then Result := 3
+    else if SliceEqualsWord(LText, LLen, 'published') then Result := 4
+    else if SliceEqualsWord(LText, LLen, 'automated') then Result := 5
     else Result := 0;
   end;
 
@@ -1752,11 +1759,11 @@ begin
     // Visibility sections (11.2.1), incl. strict and legacy automated.
     // A bare visibility word in member position IS a section marker: a
     // field genuinely named `private` must be written `&private`, and the
-    // &-escaped token text starts with '&', so SameText misses it — the
-    // disambiguation falls out of the lexer (B.3).
+    // &-escaped token slice starts with '&', so the word compare misses it —
+    // the disambiguation falls out of the lexer (B.3).
     LStrict := IsWord('strict') and (FPos < FLast) and
-      (VisLevel(FSrc.VisibleText(FPos + 1)) in [1, 2]);
-    if LStrict or ((CurKind = tkIdentifier) and (VisLevel(CurText) > 0)) then
+      (VisLevel(FPos + 1) in [1, 2]);
+    if LStrict or ((CurKind = tkIdentifier) and (VisLevel(FPos) > 0)) then
     begin
       LVis := FB.AddNode(nkVisibility, NIL_NODE, FPos);
       if LStrict then
@@ -1764,7 +1771,7 @@ begin
         FB.AddFlag(LVis, nfNegated); // reuse flag slot: strict marker
         Next;
       end;
-      FB.SetAux(LVis, VisLevel(CurText));
+      FB.SetAux(LVis, VisLevel(FPos));
       Next;
       FB.SetLast(LVis, FPos - 1);
       FB.Adopt(AOwner, LVis);
@@ -1808,7 +1815,7 @@ begin
               end;
           else
             if (PeekKind(1) = tkIdentifier) and
-               SameText(FSrc.VisibleText(FPos + 1), 'operator') then
+               FSrc.VisibleTextEquals(FPos + 1, 'operator') then
             begin
               Next;
               FB.Adopt(AOwner, ParseRoutine(True, False));
@@ -1883,10 +1890,8 @@ begin
     if not (CurKind = tkIdentifier) then
       Break;
     // A visibility word starts a new section, not a field (see the note in
-    // ParseMemberList: escaped &private would not SameText-match).
-    if SameText(CurText, 'private') or SameText(CurText, 'protected') or
-       SameText(CurText, 'public') or SameText(CurText, 'published') or
-       SameText(CurText, 'strict') or SameText(CurText, 'automated') then
+    // ParseMemberList: escaped &private keeps its '&' and never matches).
+    if IsVisibilityWord then
       Break;
   end;
 end;
@@ -2102,7 +2107,8 @@ end;
 
 function TPasParser.IsDirectiveWord: Boolean;
 var
-  LWord: string;
+  LText: PChar;
+  LLen, LIdx: Integer;
 begin
   if CurKind = tkInline then
     Exit(True);
@@ -2110,22 +2116,31 @@ begin
     Exit(True);
   if CurKind <> tkIdentifier then
     Exit(False);
-  for LWord in PasTree.Types.ROUTINE_DIRECTIVE_WORDS do
-    if SameText(CurText, LWord) then
+  // One slice fetch, then a length-gated compare per word — the old loop
+  // re-materialized CurText for every one of the 30 array elements.
+  FSrc.VisibleSlice(FPos, LText, LLen);
+  for LIdx := Low(PasTree.Types.ROUTINE_DIRECTIVE_WORDS) to
+              High(PasTree.Types.ROUTINE_DIRECTIVE_WORDS) do
+    if SliceEqualsWord(LText, LLen, PasTree.Types.ROUTINE_DIRECTIVE_WORDS[LIdx])
+    then
       Exit(True);
   Result := False;
 end;
 
 function TPasParser.IsVisibilityWord: Boolean;
 var
-  LWord: string;
+  LText: PChar;
+  LLen, LIdx: Integer;
 begin
   // Nested const/type/var sections inside a class body end where the next
-  // visibility section starts (11.2.1). &-escaped names don't match (B.3).
+  // visibility section starts (11.2.1). &-escaped names don't match (B.3):
+  // the slice keeps the '&', so the compare misses exactly as SameText did.
   if CurKind <> tkIdentifier then
     Exit(False);
-  for LWord in PasTree.Types.VISIBILITY_WORDS do
-    if SameText(CurText, LWord) then
+  FSrc.VisibleSlice(FPos, LText, LLen);
+  for LIdx := Low(PasTree.Types.VISIBILITY_WORDS) to
+              High(PasTree.Types.VISIBILITY_WORDS) do
+    if SliceEqualsWord(LText, LLen, PasTree.Types.VISIBILITY_WORDS[LIdx]) then
       Exit(True);
   Result := False;
 end;
@@ -2441,8 +2456,9 @@ begin
     if CurKind = tkIdentifier then
     begin
       LSpec := FB.AddNode(nkPropSpec, NIL_NODE, FPos);
-      LArgless := SameText(CurText, 'nodefault') or
-        SameText(CurText, 'readonly') or SameText(CurText, 'writeonly');
+      LArgless := FSrc.VisibleTextEquals(FPos, 'nodefault') or
+        FSrc.VisibleTextEquals(FPos, 'readonly') or
+        FSrc.VisibleTextEquals(FPos, 'writeonly');
       Next;
       if not LArgless and (CurKind <> tkSemicolon) then
       begin
@@ -2800,7 +2816,7 @@ begin
           FB.Adopt(AParent, ParseRoutine(True, AAllowBodies));
         end
         else if (PeekKind(1) = tkIdentifier) and
-          SameText(FSrc.VisibleText(FPos + 1), 'operator') then
+          FSrc.VisibleTextEquals(FPos + 1, 'operator') then
         begin
           Next;
           FB.Adopt(AParent, ParseRoutine(True, AAllowBodies));

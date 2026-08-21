@@ -617,7 +617,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     end;
   end;
 
-  function EvalRel(const AOp: string; const L, R: TPasCondValue):
+  function EvalRel(AOp: TPasTokenKind; const L, R: TPasCondValue):
     TPasCondValue;
   var
     LCmp: Integer;
@@ -642,28 +642,28 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       // version-guard idiom (`$IF gsIdVersion >= '10.5.5'`), which a blanket
       // False answered by taking the wrong branch every time.
       LCmp := CompareStr(L.Str, R.Str);
-      if AOp = '=' then
+      if AOp = tkEqual then
         Result := MkBool(LCmp = 0)
-      else if AOp = '<>' then
+      else if AOp = tkNotEqual then
         Result := MkBool(LCmp <> 0)
-      else if AOp = '<' then
+      else if AOp = tkLess then
         Result := MkBool(LCmp < 0)
-      else if AOp = '>' then
+      else if AOp = tkGreater then
         Result := MkBool(LCmp > 0)
-      else if AOp = '<=' then
+      else if AOp = tkLessEqual then
         Result := MkBool(LCmp <= 0)
       else
         Result := MkBool(LCmp >= 0);
     end
-    else if AOp = '=' then
+    else if AOp = tkEqual then
       Result := MkBool(CondAsNum(L) = CondAsNum(R))
-    else if AOp = '<>' then
+    else if AOp = tkNotEqual then
       Result := MkBool(CondAsNum(L) <> CondAsNum(R))
-    else if AOp = '<' then
+    else if AOp = tkLess then
       Result := MkBool(CondAsNum(L) < CondAsNum(R))
-    else if AOp = '>' then
+    else if AOp = tkGreater then
       Result := MkBool(CondAsNum(L) > CondAsNum(R))
-    else if AOp = '<=' then
+    else if AOp = tkLessEqual then
       Result := MkBool(CondAsNum(L) <= CondAsNum(R))
     else
       Result := MkBool(CondAsNum(L) >= CondAsNum(R));
@@ -673,7 +673,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
   function EvalBinary(ABinNode: Integer): TPasCondValue;
   var
     LLeftNode, LRightNode: Integer;
-    LOp: string;
+    LOp: TPasTokenKind;
     L, R: TPasCondValue;
     LShift: Integer;
   begin
@@ -686,7 +686,9 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       Exit;
     if ATree.Nodes[ABinNode].Aux < 0 then
       Exit;
-    LOp := LowerCase(ATree.Source.VisibleText(ATree.Nodes[ABinNode].Aux));
+    // The operator's token KIND — every operator here is a reserved word or
+    // punctuation with a dedicated kind, so no text is built to dispatch.
+    LOp := ATree.Source.VisibleToken(ATree.Nodes[ABinNode].Aux).Kind;
 
     L := EvalCondNode(ATree, LLeftNode, ACtx);
     R := EvalCondNode(ATree, LRightNode, ACtx);
@@ -700,7 +702,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     // right order: `Defined(NOPE) and (UNDECL > 3)` is False because dcc never
     // reaches the name, while `(UNDECL > 3) and False` is True because it
     // aborted before it could look at the right-hand side.
-    if LOp = 'and' then
+    if LOp = tkAnd then
     begin
       if CondIsClean(L) and not CondAsBool(L) then
         Exit(MkBool(False));
@@ -714,7 +716,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       Result.Guessed := L.Guessed or R.Guessed;
       Exit;
     end;
-    if LOp = 'or' then
+    if LOp = tkOr then
     begin
       if CondIsClean(L) and CondAsBool(L) then
         Exit(MkBool(True));
@@ -728,7 +730,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       Result.Guessed := L.Guessed or R.Guessed;
       Exit;
     end;
-    if LOp = 'xor' then
+    if LOp = tkXor then
     begin
       if L.AbortTrue or R.AbortTrue then
         Exit(MkAbortTrue);
@@ -737,8 +739,8 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       Exit;
     end;
 
-    if (LOp = '=') or (LOp = '<>') or (LOp = '<') or (LOp = '>') or
-       (LOp = '<=') or (LOp = '>=') then
+    if LOp in [tkEqual, tkNotEqual, tkLess, tkGreater, tkLessEqual,
+       tkGreaterEqual] then
       Exit(EvalRel(LOp, L, R));
 
     // Arithmetic on a name that exists nowhere is the other half of the abort
@@ -746,21 +748,21 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     if L.Undef or R.Undef or L.AbortTrue or R.AbortTrue then
       Exit(MkAbortTrue);
 
-    if LOp = '+' then
+    if LOp = tkPlus then
       Result := MkNum(CondAsNum(L) + CondAsNum(R))
-    else if LOp = '-' then
+    else if LOp = tkMinus then
       Result := MkNum(CondAsNum(L) - CondAsNum(R))
-    else if LOp = '*' then
+    else if LOp = tkStar then
       Result := MkNum(CondAsNum(L) * CondAsNum(R))
-    else if (LOp = '/') and (CondAsNum(R) <> 0) then
+    else if (LOp = tkSlash) and (CondAsNum(R) <> 0) then
       Result := MkNum(CondAsNum(L) / CondAsNum(R))
-    else if (LOp = 'div') and (Trunc(CondAsNum(R)) <> 0) then
+    else if (LOp = tkDiv) and (Trunc(CondAsNum(R)) <> 0) then
       Result := MkNum(Trunc(CondAsNum(L)) div Trunc(CondAsNum(R)))
-    else if (LOp = 'mod') and (Trunc(CondAsNum(R)) <> 0) then
+    else if (LOp = tkMod) and (Trunc(CondAsNum(R)) <> 0) then
       Result := MkNum(Trunc(CondAsNum(L)) mod Trunc(CondAsNum(R)))
-    else if (LOp = 'shl') and CondShiftCount(R, LShift) then
+    else if (LOp = tkShl) and CondShiftCount(R, LShift) then
       Result := MkNum(Trunc(CondAsNum(L)) shl LShift)
-    else if (LOp = 'shr') and CondShiftCount(R, LShift) then
+    else if (LOp = tkShr) and CondShiftCount(R, LShift) then
       Result := MkNum(Trunc(CondAsNum(L)) shr LShift)
     else
       // `in`, division by zero, an out-of-range shift count — a guess,
@@ -825,21 +827,22 @@ begin
         LChild := ATree.Nodes[ANode].FirstChild;
         if (LChild = NIL_NODE) or (ATree.Nodes[ANode].Aux < 0) then
           Exit;
-        LText := LowerCase(ATree.Source.VisibleText(ATree.Nodes[ANode].Aux));
+        var LOpKind :=
+          ATree.Source.VisibleToken(ATree.Nodes[ANode].Aux).Kind;
         LVal := EvalCondNode(ATree, LChild, ACtx);
         // An abort ignores the operator entirely — `not (UNDECL > 3)` is True,
         // not False. A bare unresolvable name under `not` stays False (dcc's
         // boolean-position verdict), but under unary minus it is arithmetic,
         // so it aborts.
-        if LVal.AbortTrue or (LVal.Undef and (LText = '-')) then
+        if LVal.AbortTrue or (LVal.Undef and (LOpKind = tkMinus)) then
           Exit(MkAbortTrue);
         if LVal.Undef then
           Exit(MkBool(False));
-        if LText = 'not' then
+        if LOpKind = tkNot then
           Result := MkBool(not CondAsBool(LVal))
-        else if LText = '-' then
+        else if LOpKind = tkMinus then
           Result := MkNum(-CondAsNum(LVal))
-        else if LText = '+' then
+        else if LOpKind = tkPlus then
           Result := LVal;
         Result.Guessed := LVal.Guessed;
       end;

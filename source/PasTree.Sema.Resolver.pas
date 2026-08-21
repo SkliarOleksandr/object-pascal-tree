@@ -27,6 +27,7 @@ unit PasTree.Sema.Resolver;
 interface
 
 uses
+  PasTree.Types,
   PasTree.Ast,
   PasTree.Platforms,
   PasTree.Sema.Model;
@@ -75,7 +76,7 @@ type
     function IsBareTypeUse(ANode: Integer): Boolean;
     function EnumJoinTarget(AScope: Integer): Integer;
     procedure NotePendingAggregate(ATypeNode: Integer);
-    function SepAfter(ANode: Integer): string;
+    function SepKindAfter(ANode: Integer): TPasTokenKind;
     function QualifiedNameText(ANode: Integer): string;
     procedure CollectRoot(ARoot: Integer);
     function FindChildKind(ANode: Integer; AKind: TPasNodeKind): Integer;
@@ -266,16 +267,22 @@ begin
     (FirstChild(LParent) <> ANode);
 end;
 
-// Text of the visible token immediately after ANode's last token ('','','':'').
-function TPasSemaResolver.SepAfter(ANode: Integer): string;
+// KIND of the visible token immediately after ANode's last token. Every
+// consumer asks about a single punctuation token (':' ',' '.' '<'), and the
+// kind answers that without materializing the text — this runs per declared
+// name and per parameter, hundreds of thousands of times on a big closure.
+// tkUnknown when there is no next token. Note the kinds keep the old string
+// compares exact: ':=' is ONE token (tkAssign, never tkColon) and '..' is
+// tkDotDot (never tkDot).
+function TPasSemaResolver.SepKindAfter(ANode: Integer): TPasTokenKind;
 var
   LNext: Integer;
 begin
   LNext := FTree.Nodes[ANode].LastToken + 1;
   if (LNext >= 0) and (LNext <= High(FTree.Source.Visible)) then
-    Result := FTree.Source.VisibleText(LNext)
+    Result := FTree.Source.VisibleToken(LNext).Kind
   else
-    Result := '';
+    Result := tkUnknown;
 end;
 
 function TPasSemaResolver.FindChildKind(ANode: Integer;
@@ -309,7 +316,7 @@ begin
       while (LChild <> NIL_NODE) and (KindOf(LChild) = nkIdent) do
       begin
         Inc(Result);
-        if SepAfter(LChild) = ':' then
+        if SepKindAfter(LChild) = tkColon then
           Break;                       // last name; the type follows
         LChild := NextSib(LChild);     // ',' -> next name
         if (LChild <> NIL_NODE) and (KindOf(LChild) <> nkIdent) then
@@ -413,7 +420,7 @@ procedure TPasSemaResolver.DeclareNamesAndType(ADecl, AScope: Integer;
   AKind: TSemaSymbolKind);
 var
   LChild, LType: Integer;
-  LSep: string;
+  LSep: TPasTokenKind;
   LSyms: TArray<Integer>;
   LDone: Boolean;
   LIdx: Integer;
@@ -424,14 +431,14 @@ begin
   LDone := False;
   while (LChild <> NIL_NODE) and (KindOf(LChild) = nkIdent) and not LDone do
   begin
-    LSep := SepAfter(LChild);
+    LSep := SepKindAfter(LChild);
     LSyms := LSyms + [DeclareSym(AScope, AKind, NodeText(LChild), LChild)];
-    if LSep = ':' then
+    if LSep = tkColon then
     begin
       LType := NextSib(LChild);
       LDone := True;
     end
-    else if LSep = ',' then
+    else if LSep = tkComma then
       LChild := NextSib(LChild)
     else
       LDone := True;  // untyped parameter, or end
@@ -925,7 +932,7 @@ var
 begin
   LChild := FirstChild(ANode);
   if (LChild <> NIL_NODE) and (KindOf(LChild) = nkIdent) and
-     (SepAfter(LChild) = ':') then
+     (SepKindAfter(LChild) = tkColon) then
   begin
     // Mirrors the nkVarDecl case's own scope test, so a variant part reached
     // outside a struct body still declares something sane rather than a field
@@ -1034,13 +1041,13 @@ begin
     // affected.
     while (LChild <> NIL_NODE) and
           (KindOf(LChild) in [nkGenericParams, nkTypeArgs]) and
-          (SepAfter(LSegLast) = '<') do
+          (SepKindAfter(LSegLast) = tkLess) do
     begin
       Collect(LChild, LRoutine);   // generic params -> routine scope; args refs
       LSegLast := LChild;
       LChild := NextSib(LChild);
     end;
-    if SepAfter(LSegLast) = '.' then
+    if SepKindAfter(LSegLast) = tkDot then
     begin
       LQualified := True;          // qualifier segment; ident is a type ref
       LQualIdents := LQualIdents + [LSegIdent];  // full chain, outer -> inner
@@ -1279,7 +1286,7 @@ begin
           var LSym := DeclareSym(AScope, skConst, NodeText(LName), LName);
           var LNext := NextSib(LName);
           // optional ': Type' before '='
-          if (LNext <> NIL_NODE) and (SepAfter(LName) = ':') then
+          if (LNext <> NIL_NODE) and (SepKindAfter(LName) = tkColon) then
           begin
             FModel.Symbols[LSym].TypeNode := LNext;
             NotePendingAggregate(LNext);
@@ -1314,15 +1321,16 @@ begin
         LName := FirstChild(ANode);
         while (LName <> NIL_NODE) and (KindOf(LName) = nkIdent) do
         begin
-          var LSep := SepAfter(LName);
+          var LSep := SepKindAfter(LName);
           LSyms := LSyms + [DeclareSym(AScope, LKind, NodeText(LName), LName)];
-          if LSep = ',' then
+          if LSep = tkComma then
             LName := NextSib(LName)
           else
           begin
-            // ':' -> the shared type follows; ':=' (one token, never ':') or
-            // anything else -> no type, the tail is an initializer.
-            if LSep = ':' then
+            // ':' -> the shared type follows; ':=' (one token, tkAssign,
+            // never tkColon) or anything else -> no type, the tail is an
+            // initializer.
+            if LSep = tkColon then
               LType := NextSib(LName);
             Break;
           end;

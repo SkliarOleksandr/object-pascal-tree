@@ -127,7 +127,7 @@ type
     function RTFindChildKind(LM: TPasSemaModel; ANode: Integer;
       AKind: TPasNodeKind): Integer;
     function RTSkipAttr(LM: TPasSemaModel; AChild: Integer): Integer;
-    function RTSepAfter(LM: TPasSemaModel; ANode: Integer): string;
+    function RTSepAfter(LM: TPasSemaModel; ANode: Integer): TPasTokenKind;
     function RTSegments(LM: TPasSemaModel; ANode: Integer;
       out AQualIdents: TArray<Integer>; out ANameNode: Integer): Boolean;
     function RTSpanText(LM: TPasSemaModel; ANode: Integer): string;
@@ -1262,15 +1262,18 @@ begin
     Result := LM.Tree.Nodes[Result].NextSibling;
 end;
 
-function TPasNavigator.RTSepAfter(LM: TPasSemaModel; ANode: Integer): string;
+// Kind, not text: both consumers test a single punctuation token, and the
+// kind answers without a string copy (mirrors the resolver's SepKindAfter).
+function TPasNavigator.RTSepAfter(LM: TPasSemaModel;
+  ANode: Integer): TPasTokenKind;
 var
   LNext: Integer;
 begin
   LNext := LM.Tree.Nodes[ANode].LastToken + 1;
   if (LNext >= 0) and (LNext <= High(LM.Tree.Source.Visible)) then
-    Result := LM.Tree.Source.VisibleText(LNext)
+    Result := LM.Tree.Source.VisibleToken(LNext).Kind
   else
-    Result := '';
+    Result := tkUnknown;
 end;
 
 // Mirrors CollectRoutine's own name-segment walk exactly (PasTree.Sema.
@@ -1297,7 +1300,7 @@ begin
       LSegLast := LChild;
       LChild := LM.Tree.Nodes[LChild].NextSibling;
     end;
-    if RTSepAfter(LM, LSegLast) = '.' then
+    if RTSepAfter(LM, LSegLast) = tkDot then
       AQualIdents := AQualIdents + [LSegIdent]
     else
     begin
@@ -1375,7 +1378,7 @@ begin
       while (LChild <> NIL_NODE) and (LM.Tree.Nodes[LChild].Kind = nkIdent) do
       begin
         Inc(LNameCount);
-        if RTSepAfter(LM, LChild) = ':' then
+        if RTSepAfter(LM, LChild) = tkColon then
         begin
           LType := LM.Tree.Nodes[LChild].NextSibling;
           Break;

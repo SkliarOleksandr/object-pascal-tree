@@ -26,6 +26,7 @@ uses
   System.SysUtils,
   System.SyncObjs,
   System.Generics.Collections,
+  PasTree.Types,
   PasTree.Preprocessor,
   PasTree.Platforms,
   PasTree.SourceManager,
@@ -4147,7 +4148,7 @@ var
   LBase, LArgX, LConX: TSemaXType;
   LIdents: TArray<Integer>;
   LCons: TArray<TArray<Integer>>;
-  LWord, LParamName: string;
+  LParamName: string;
   LCat: TSemaTypeCat;
 begin
   LM := FModels[AId];
@@ -4195,21 +4196,26 @@ begin
                   [LParamName, XTypeText(LConX)]));
             Continue;
           end;
-          // A keyword constraint: class / record / constructor.
+          // A keyword constraint: class / record / constructor — reserved
+          // words, so the token KIND is the test (no text copy).
           LTok := FModels[LBase.UnitId].Tree.Nodes[LC].FirstToken;
           if (LTok < 0) or
              (LTok > High(FModels[LBase.UnitId].Tree.Source.Visible)) then
             Continue;
-          LWord := LowerCase(
-            FModels[LBase.UnitId].Tree.Source.VisibleText(LTok));
           if LCat = tcUnknown then
             Continue;   // category not modeled — say nothing
-          if (LWord = 'class') and (LCat <> tcClass) then
-            EmitAt(LM, LArgNode, 'E2511',
-              Format(SE2511_MustBeClass, [LParamName]))
-          else if (LWord = 'record') and not (LCat in VALUE_CATS) then
-            EmitAt(LM, LArgNode, 'E2512',
-              Format(SE2512_MustBeValueType, [LParamName]));
+          // NB: qualified kinds — System.TypInfo's TTypeKind also names
+          // tkClass/tkRecord and shadows ours in this unit.
+          case FModels[LBase.UnitId].Tree.Source.VisibleToken(LTok).Kind of
+            PasTree.Types.tkClass:
+              if LCat <> tcClass then
+                EmitAt(LM, LArgNode, 'E2511',
+                  Format(SE2511_MustBeClass, [LParamName]));
+            PasTree.Types.tkRecord:
+              if not (LCat in VALUE_CATS) then
+                EmitAt(LM, LArgNode, 'E2512',
+                  Format(SE2512_MustBeValueType, [LParamName]));
+          end;
         end;
       end;
       Inc(LIdx);
@@ -5509,8 +5515,11 @@ begin
   if (LRoutine = NIL_NODE) or (LM.Tree.Nodes[LRoutine].Kind <> nkRoutine) then
     Exit;
   LTok := LM.Tree.Nodes[LRoutine].FirstToken;
+  // `constructor` is a reserved word — the token KIND already says it, no
+  // text copy needed (this runs per member hit / per overload candidate).
   if (LTok >= 0) and (LTok <= High(LM.Tree.Source.Visible)) then
-    Result := SameText(LM.Tree.Source.VisibleText(LTok), 'constructor');
+    Result :=
+      LM.Tree.Source.VisibleToken(LTok).Kind = PasTree.Types.tkConstructor;
 end;
 
 { A `class constructor` / `class destructor` — which is NOT callable at all
@@ -5544,8 +5553,8 @@ begin
   LTok := LM.Tree.Nodes[LRoutine].FirstToken;
   if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
     Exit;
-  Result := SameText(LM.Tree.Source.VisibleText(LTok), 'constructor') or
-            SameText(LM.Tree.Source.VisibleText(LTok), 'destructor');
+  Result := LM.Tree.Source.VisibleToken(LTok).Kind in
+    [PasTree.Types.tkConstructor, PasTree.Types.tkDestructor];
 end;
 
 // Type category of a cross-model type — the symbol's own TypeCat, computed by
@@ -7555,7 +7564,8 @@ begin
       for LTok := LM.Tree.Nodes[LParam].FirstToken to
                   LM.Tree.Nodes[LParam].LastToken do
         if (LTok >= 0) and (LTok <= High(LM.Tree.Source.Visible)) and
-           (LM.Tree.Source.VisibleText(LTok) = '=') then
+           (LM.Tree.Source.VisibleToken(LTok).Kind = PasTree.Types.tkEqual)
+        then
         begin
           LHasDefault := True;
           Break;

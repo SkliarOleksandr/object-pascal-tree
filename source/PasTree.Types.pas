@@ -108,6 +108,10 @@ type
     LineStarts: TArray<Integer>;   // 0-based offset of each line start
     function TokenText(AIndex: Integer): string; overload;
     function TokenText(const AToken: TPasToken): string; overload;
+    { SameText(TokenText(AToken), AWord) without the copy — see
+      SliceEqualsWord below. }
+    function TokenTextEquals(const AToken: TPasToken;
+      const AWord: string): Boolean;
     procedure OffsetToLineCol(AOffset: Integer; out ALine, ACol: Integer);
     function LineText(ALine: Integer): string;
   end;
@@ -197,6 +201,17 @@ function IsKeyword(AKind: TPasTokenKind): Boolean; inline;
   Returns tkIdentifier when the slice is not a reserved word.
   ASCII-only folding is correct here: all keywords are ASCII. }
 function KeywordKind(AText: PChar; ALen: Integer): TPasTokenKind;
+
+{ Case-insensitive compare of a raw character slice against a word, without
+  materializing a string — the non-allocating replacement for
+  `SameText(TokenText(...), AWord)` on hot paths. ASCII-only folding, exactly
+  CompareText's semantics (SameText folds only 'A'..'Z'), so the swap is
+  behavior-preserving; every comparand in this codebase (keywords, directives,
+  visibility words, separators) is ASCII. An &-escaped identifier keeps its
+  '&' in the slice and so — deliberately, same as SameText on the copied
+  text — never matches a bare word. }
+function SliceEqualsWord(AText: PChar; ALen: Integer;
+  const AWord: string): Boolean;
 
 { Builds the line-start offsets table for a source string. }
 function BuildLineStarts(const ASource: string): TArray<Integer>;
@@ -349,6 +364,28 @@ begin
   Result := tkIdentifier;
 end;
 
+function SliceEqualsWord(AText: PChar; ALen: Integer;
+  const AWord: string): Boolean;
+var
+  LIdx: Integer;
+  LCh, LWCh: Char;
+begin
+  if ALen <> Length(AWord) then
+    Exit(False);
+  for LIdx := 0 to ALen - 1 do
+  begin
+    LCh := AText[LIdx];
+    if (LCh >= 'A') and (LCh <= 'Z') then
+      Inc(LCh, 32);
+    LWCh := AWord[LIdx + 1];
+    if (LWCh >= 'A') and (LWCh <= 'Z') then
+      Inc(LWCh, 32);
+    if LCh <> LWCh then
+      Exit(False);
+  end;
+  Result := True;
+end;
+
 { ONE pass over the source, not two.
 
   This used to count the lines and then record them, walking every character
@@ -413,6 +450,15 @@ end;
 function TPasTokenStream.TokenText(const AToken: TPasToken): string;
 begin
   Result := Copy(Source, AToken.Start + 1, AToken.Len);
+end;
+
+function TPasTokenStream.TokenTextEquals(const AToken: TPasToken;
+  const AWord: string): Boolean;
+begin
+  // Pointer() sidesteps the refcount bump a PChar(Source) cast would keep
+  // anyway; a zero-length token exits on the length test before any deref.
+  Result := SliceEqualsWord(PChar(Pointer(Source)) + AToken.Start,
+    AToken.Len, AWord);
 end;
 
 procedure TPasTokenStream.OffsetToLineCol(AOffset: Integer; out ALine,

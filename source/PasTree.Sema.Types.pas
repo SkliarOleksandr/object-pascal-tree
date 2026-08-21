@@ -15,6 +15,7 @@ unit PasTree.Sema.Types;
 interface
 
 uses
+  PasTree.Types,
   PasTree.Ast,
   PasTree.Platforms,
   PasTree.Sema.Model;
@@ -33,7 +34,7 @@ type
     function Child(N: Integer): Integer; inline;
     function Sib(N: Integer): Integer; inline;
     function Txt(N: Integer): string; inline;
-    function OpText(N: Integer): string;
+    function OpKind(N: Integer): TPasTokenKind;
     function CatOf(ASym: Integer): TSemaTypeCat;
     function RankOf(ASym: Integer): Byte;
     function Head(N: Integer): Integer;
@@ -111,12 +112,16 @@ begin
   Result := T.NodeText(N);
 end;
 
-function TPasSemaTyper.OpText(N: Integer): string;
+// The operator's token KIND (Aux points at the operator token). Every
+// operator this typer dispatches on has a dedicated kind, so no text is
+// materialized — the old string version paid a LowerCase(VisibleText(...))
+// copy per binary/unary node in the corpus. tkUnknown when Aux is unset.
+function TPasSemaTyper.OpKind(N: Integer): TPasTokenKind;
 begin
   if T.Nodes[N].Aux >= 0 then
-    Result := LowerCase(T.Source.VisibleText(T.Nodes[N].Aux))
+    Result := T.Source.VisibleToken(T.Nodes[N].Aux).Kind
   else
-    Result := '';
+    Result := tkUnknown;
 end;
 
 function TPasSemaTyper.CatOf(ASym: Integer): TSemaTypeCat;
@@ -398,7 +403,7 @@ begin
   AValue := 0;
   if ANode = NIL_NODE then
     Exit;
-  if (Kind(ANode) = nkUnaryOp) and (OpText(ANode) = '-') then
+  if (Kind(ANode) = nkUnaryOp) and (OpKind(ANode) = tkMinus) then
   begin
     if OrdLiteral(Child(ANode), LNeg) then
     begin
@@ -602,7 +607,7 @@ function TPasSemaTyper.BinaryResult(N: Integer): Integer;
 var
   LL, LR: Integer;
   LcL, LcR: TSemaTypeCat;
-  LOp: string;
+  LOp: TPasTokenKind;
 
   function BothNum: Boolean;
   begin
@@ -631,70 +636,73 @@ begin
   if (LL = NIL_SYM) or (LR = NIL_SYM) then
     Exit;
   LcL := CatOf(LL); LcR := CatOf(LR);
-  LOp := OpText(N);
+  LOp := OpKind(N);
 
-  if (LOp = '=') or (LOp = '<>') or (LOp = '<') or (LOp = '<=') or
-     (LOp = '>') or (LOp = '>=') or (LOp = 'in') or (LOp = 'is') then
-    Exit(Bool);
-
-  if LOp = '+' then
-  begin
-    if BothNum then Exit(WiderNum(LL, LR));
-    // char/string concatenation in any combination -> string
-    if (LcL in [tcChar, tcString]) and (LcR in [tcChar, tcString]) then
-      Exit(Str);
-    Exit(Bad);
-  end;
-  if (LOp = '-') or (LOp = '*') then
-  begin
-    if BothNum then Exit(WiderNum(LL, LR));
-    Exit(Bad);
-  end;
-  if LOp = '/' then
-  begin
-    if BothNum then Exit(Ext);
-    Exit(Bad);
-  end;
-  if (LOp = 'div') or (LOp = 'mod') or (LOp = 'shl') or (LOp = 'shr') then
-  begin
-    if BothInt then Exit(WiderNum(LL, LR));
-    Exit(Bad);
-  end;
-  if (LOp = 'and') or (LOp = 'or') or (LOp = 'xor') then
-  begin
-    if (LcL = tcBoolean) and (LcR = tcBoolean) then Exit(Bool);
-    if BothInt then Exit(WiderNum(LL, LR));
-    Exit(Bad);
+  case LOp of
+    tkEqual, tkNotEqual, tkLess, tkLessEqual, tkGreater, tkGreaterEqual,
+    tkIn, tkIs:
+      Exit(Bool);
+    tkPlus:
+      begin
+        if BothNum then Exit(WiderNum(LL, LR));
+        // char/string concatenation in any combination -> string
+        if (LcL in [tcChar, tcString]) and (LcR in [tcChar, tcString]) then
+          Exit(Str);
+        Exit(Bad);
+      end;
+    tkMinus, tkStar:
+      begin
+        if BothNum then Exit(WiderNum(LL, LR));
+        Exit(Bad);
+      end;
+    tkSlash:
+      begin
+        if BothNum then Exit(Ext);
+        Exit(Bad);
+      end;
+    tkDiv, tkMod, tkShl, tkShr:
+      begin
+        if BothInt then Exit(WiderNum(LL, LR));
+        Exit(Bad);
+      end;
+    tkAnd, tkOr, tkXor:
+      begin
+        if (LcL = tcBoolean) and (LcR = tcBoolean) then Exit(Bool);
+        if BothInt then Exit(WiderNum(LL, LR));
+        Exit(Bad);
+      end;
   end;
 end;
 
 function TPasSemaTyper.UnaryResult(N: Integer): Integer;
 var
   LO: Integer;
-  LOp: string;
+  LOp: TPasTokenKind;
   LCat: TSemaTypeCat;
 begin
   LO := M.ExprType[Child(N)];
   Result := NIL_SYM;
-  LOp := OpText(N);
-  if LOp = '@' then
+  LOp := OpKind(N);
+  if LOp = tkAt then
     Exit(Ptr);
   if LO = NIL_SYM then
     Exit;
   LCat := CatOf(LO);
-  if (LOp = '-') or (LOp = '+') then
-  begin
-    if LCat in [tcInteger, tcFloat] then Exit(LO);
-    if LCat in [tcBoolean, tcChar, tcString] then
-      Diag('E2015', SE2015_OperatorNotApplicable, N);
-    Exit(NIL_SYM);
-  end;
-  if LOp = 'not' then
-  begin
-    if LCat in [tcBoolean, tcInteger] then Exit(LO);
-    if LCat in [tcFloat, tcChar, tcString] then
-      Diag('E2015', SE2015_OperatorNotApplicable, N);
-    Exit(NIL_SYM);
+  case LOp of
+    tkMinus, tkPlus:
+      begin
+        if LCat in [tcInteger, tcFloat] then Exit(LO);
+        if LCat in [tcBoolean, tcChar, tcString] then
+          Diag('E2015', SE2015_OperatorNotApplicable, N);
+        Exit(NIL_SYM);
+      end;
+    tkNot:
+      begin
+        if LCat in [tcBoolean, tcInteger] then Exit(LO);
+        if LCat in [tcFloat, tcChar, tcString] then
+          Diag('E2015', SE2015_OperatorNotApplicable, N);
+        Exit(NIL_SYM);
+      end;
   end;
 end;
 

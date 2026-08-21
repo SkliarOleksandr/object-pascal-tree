@@ -170,6 +170,15 @@ type
     AlignEvents: TArray<TPasAlignEvent>;
     function VisibleToken(AIndex: Integer): TPasToken;
     function VisibleText(AIndex: Integer): string;
+    { SameText(VisibleText(AIndex), AWord) without materializing the text —
+      the parser's word tests run through here (see PasTree.Types.
+      SliceEqualsWord for the folding contract). }
+    function VisibleTextEquals(AIndex: Integer; const AWord: string): Boolean;
+    { The raw (PChar, Len) slice of one visible token, for callers that test
+      the same token against SEVERAL words (IsDirectiveWord's 30-word loop
+      would otherwise re-resolve file and token per word). }
+    procedure VisibleSlice(AIndex: Integer; out AText: PChar;
+      out ALen: Integer);
     function IsSkipped(AFileId, AOffset: Integer): Boolean;
     // The SCOPEDENUMS state in effect at visible-stream position AVisIndex
     // (False = unscoped, the default). Binary search over the event list.
@@ -364,6 +373,7 @@ const
 implementation
 
 uses
+  System.Generics.Defaults,
   PasTree.Lexer,
   // Legal circularity, deliberate: Parser interface-uses THIS unit (for
   // TPasPreprocessed), and CondEval implementation-uses Parser — the `$IF`
@@ -374,6 +384,44 @@ uses
 
 const
   MAX_INCLUDE_DEPTH = 32;
+
+type
+  { ASCII-fold case-insensitive comparer for the defines dictionary: hashes
+    and compares without allocating, where the previous scheme paid a
+    LowerCase(Trim(...)) copy on EVERY Define/Undefine/IsDefined — i.e. per
+    `$IFDEF` / `Defined()` evaluation across the whole closure. ASCII-only
+    folding is the same contract the old LowerCase normalization had. }
+  TDefinesNameComparer = class(TEqualityComparer<string>)
+  public
+    function Equals(const Left, Right: string): Boolean; overload; override;
+    function GetHashCode(const Value: string): Integer; overload; override;
+  end;
+
+var
+  GDefinesComparer: IEqualityComparer<string>;
+
+function TDefinesNameComparer.Equals(const Left, Right: string): Boolean;
+begin
+  Result := SliceEqualsWord(PChar(Pointer(Left)), Length(Left), Right);
+end;
+
+function TDefinesNameComparer.GetHashCode(const Value: string): Integer;
+var
+  LIdx: Integer;
+  LCh: Char;
+  LHash: Cardinal;
+begin
+  // FNV-1a over ASCII-folded UTF-16 code units.
+  LHash := 2166136261;
+  for LIdx := 1 to Length(Value) do
+  begin
+    LCh := Value[LIdx];
+    if (LCh >= 'A') and (LCh <= 'Z') then
+      Inc(LCh, 32);
+    LHash := (LHash xor Ord(LCh)) * 16777619;
+  end;
+  Result := Integer(LHash);
+end;
 
 { Directive text helpers ---------------------------------------------------- }
 
@@ -430,6 +478,31 @@ function TPasPreprocessed.VisibleText(AIndex: Integer): string;
 begin
   Result := Files[Visible[AIndex].FileId].TokenText(
     Files[Visible[AIndex].FileId].Tokens[Visible[AIndex].TokenIndex]);
+end;
+
+function TPasPreprocessed.VisibleTextEquals(AIndex: Integer;
+  const AWord: string): Boolean;
+var
+  LText: PChar;
+  LLen: Integer;
+begin
+  VisibleSlice(AIndex, LText, LLen);
+  Result := SliceEqualsWord(LText, LLen, AWord);
+end;
+
+procedure TPasPreprocessed.VisibleSlice(AIndex: Integer; out AText: PChar;
+  out ALen: Integer);
+var
+  LFileId, LTokIdx: Integer;
+begin
+  LFileId := Visible[AIndex].FileId;
+  LTokIdx := Visible[AIndex].TokenIndex;
+  // Pointer() keeps the string field's refcount untouched; the slice is only
+  // valid while this record (and its Files) stay alive, which every caller
+  // guarantees by holding the TPasPreprocessed itself.
+  AText := PChar(Pointer(Files[LFileId].Source)) +
+    Files[LFileId].Tokens[LTokIdx].Start;
+  ALen := Files[LFileId].Tokens[LTokIdx].Len;
 end;
 
 function TPasPreprocessed.IsSkipped(AFileId, AOffset: Integer): Boolean;
@@ -521,7 +594,7 @@ end;
 constructor TPasDefines.Create;
 begin
   inherited Create;
-  FMap := TDictionary<string, Boolean>.Create;
+  FMap := TDictionary<string, Boolean>.Create(GDefinesComparer);
 end;
 
 constructor TPasDefines.Create(const ANames: array of string);
@@ -539,19 +612,22 @@ begin
   inherited;
 end;
 
+// Trim only: the comparer folds case at hash/compare time, so no lowered
+// copy is materialized (and Trim itself returns the SAME string, refcount
+// bump only, when there is nothing to trim — the overwhelmingly common case).
 procedure TPasDefines.Define(const AName: string);
 begin
-  FMap.AddOrSetValue(LowerCase(Trim(AName)), True);
+  FMap.AddOrSetValue(Trim(AName), True);
 end;
 
 procedure TPasDefines.Undefine(const AName: string);
 begin
-  FMap.Remove(LowerCase(Trim(AName)));
+  FMap.Remove(Trim(AName));
 end;
 
 function TPasDefines.IsDefined(const AName: string): Boolean;
 begin
-  Result := FMap.ContainsKey(LowerCase(Trim(AName)));
+  Result := FMap.ContainsKey(Trim(AName));
 end;
 
 function TPasDefines.Clone: TPasDefines;
@@ -1427,5 +1503,10 @@ begin
       LCtx.UnknownSymbols);
   Result := CondAsBool(LValue);
 end;
+
+initialization
+  // One shared, immutable comparer for every defines dictionary; interface-
+  // refcounted, so no finalization pair is needed.
+  GDefinesComparer := TDefinesNameComparer.Create;
 
 end.
