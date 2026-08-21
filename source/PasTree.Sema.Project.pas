@@ -249,7 +249,6 @@ type
     procedure InjectGuessedIfDiags(ACount: Integer);
     procedure InjectEncodingDiags(ACount: Integer);
     procedure CrossResolve(AId: Integer);
-    function StructSymOfNode(AModel: TPasSemaModel; ANode: Integer): Integer;
     procedure CheckVisibility(AId, ANameNode, AMemMid, AMemSym: Integer);
     function StructEncloses(AMid, AOuter, AInner: Integer): Boolean;
     procedure RepointCallee(AModel: TPasSemaModel;
@@ -259,20 +258,12 @@ type
     function InPropertySpecifier(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function OuterStructsOfNode(AModel: TPasSemaModel;
       ANode, AInnermost: Integer): TArray<Integer>;
-    function DeclStructsOfNode(AModel: TPasSemaModel;
-      ANode: Integer): TArray<Integer>;
     // `with` over a target whose TYPE lives in another unit (ch.05 §5.7) —
     // see FindInEnclosingWith.
     function PointeeX(const AX: TSemaXType): TSemaXType;
     function AllParamsDefaulted(AMid, AParams: Integer): Boolean;
     function ProcResultX(const AX: TSemaXType): TSemaXType;
     function PointeeOfDeclX(AId, ABaseNode: Integer): TSemaXType;
-    function DesignatorSymX(AId, ANode: Integer;
-      out AMid, ASym: Integer): Boolean;
-    function AncestorOfX(const AX: TSemaXType): TSemaXType;
-    { The single answer to "what type is this member?" — see the implementation
-      for why a bare property redeclaration makes it necessary. }
-    function SymDeclTypeX(AMid, ASym: Integer): TSemaXType;
     function IsDefaultArrayProp(AMid, ASym: Integer): Boolean;
     function DefaultArrayPropX(const AX: TSemaXType;
       out AMid, ASym: Integer; out AOwner: TSemaXType): Boolean;
@@ -280,14 +271,10 @@ type
     function ParamlessOverloadX(const AX: TSemaXType;
       const ANameLower: string; out AMid, ASym, ACtx: Integer): Boolean;
     function ElementX(AId, ABaseNode: Integer): TSemaXType;
-    function WithTargetTypeX(AId, ANode: Integer): TSemaXType;
     function InlineVarInitTypeX(AMid, ASym, ADepth: Integer): TSemaXType;
     function InsideWithBody(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function InsideLaterWithTarget(AModel: TPasSemaModel;
       ANode: Integer): Boolean;
-    function FindInEnclosingWith(AId, ANode: Integer;
-      const ANameLower: string; out AUid, ASym: Integer;
-      out AX: TSemaXType): Boolean;
     procedure CrossResolveInherited(AId: Integer;
       var APending: TArray<TPasInhPending>);
     procedure EnsureCrossWork(AId: Integer);
@@ -302,8 +289,6 @@ type
     procedure CrossResolveWith(AId: Integer;
       var APending: TArray<TPasInhPending>; AEmit: Boolean);
     procedure RunWithPass(ACount: Integer);
-    function FindInUses(AId: Integer; const ANameLower: string;
-      out AUnit, ASym: Integer): Boolean;
     function ArityOfTypeSym(AMid, ASym: Integer): Integer;
     function FindTypeInSelfArity(AId: Integer; const ANameLower: string;
       AArity: Integer; out ASym: Integer): Boolean;
@@ -313,10 +298,6 @@ type
       ANode: Integer): Integer;
     procedure FixCrossArity(AId: Integer; AModel: TPasSemaModel;
       ANode: Integer; const ANameLower: string; var AUnit, ASym: Integer);
-    function FindInSystemUnit(const ANameLower: string;
-      out AUnit, ASym: Integer): Boolean;
-    function FindInSysInitUnit(const ANameLower: string;
-      out AUnit, ASym: Integer): Boolean;
     function IsAttributeTypeRef(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function UsesUnitOf(AId, ASym: Integer): Integer;
     function LocalHead(AModel: TPasSemaModel; ANode: Integer): Integer;
@@ -325,8 +306,6 @@ type
     procedure EmitE2003(AModel: TPasSemaModel; ANode: Integer);
     procedure EmitAt(AModel: TPasSemaModel; ANode: Integer;
       const ACode, AMsg: string);
-    function RoutineArity(AMid, ASym: Integer; out AReq, ATot: Integer;
-      out AVariadic: Boolean): Boolean;
     function CalleeShadowsUses(AModel: TPasSemaModel;
       ACallee, ALocalSym: Integer): Boolean;
     procedure CheckCalls(AId: Integer);
@@ -342,7 +321,6 @@ type
     function ConstraintsOfParamX(
       const AParam: TSemaXType): TArray<TSemaXType>;
     function RoutineNameOfParam(AMid, ANode: Integer): string;
-    function XDescendsFrom(const ADesc, ABase: TSemaXType): Boolean;
     procedure CheckConstraints(AId: Integer);
     function ResolveCustomAttributeX(AId: Integer): TSemaXType;
     procedure CheckAttributes(AId: Integer);
@@ -390,11 +368,7 @@ type
       out AAlign: Integer): Boolean;
     function OracleLength(AMid, ASym: Integer; out ALen: Double): Boolean;
     function SymbolQueryFor(AId: Integer): TPasCondSymbolQuery;
-    function DeclTypeX(AMid, ASym: Integer): TSemaXType;
-    function SubstX(const AX: TSemaXType; AInst, ADepth: Integer): TSemaXType;
     function DeclaredWithinX(AMid, ASym, AOwnerMid, AOwnerSym: Integer): Boolean;
-    function ResolveTypeExpr(AId, ANode: Integer;
-      ABare: Boolean = True): TSemaXType;
     function PreferNonGeneric(AId, AMid, ASym,
       ANameNode: Integer): TSemaXType;
     function TypeSlotByNameX(AMid, ANode: Integer): TSemaXType;
@@ -408,21 +382,11 @@ type
     function HelperAncestorX(AMid, ASym: Integer): TSemaXType;
     function HelperMemberHit(AFromMid: Integer; const ACur: TSemaXType;
       const ANameLower: string; out AMemMid, AMemSym: Integer): Boolean;
-    { ADepth guards the CONSTRAINT hop, which is the one place this function
-      re-enters itself: a type parameter may carry several constraints and the
-      member may be on ANY of them (16 §16.4.1), so each is walked in turn. }
-    function FindMemberX(AFromMid: Integer; const ABase: TSemaXType;
-      const ANameLower: string;
-      out AMemMid, AMemSym: Integer; out ACtx: Integer;
-      ADepth: Integer = 0): Boolean;
-    function IsConstructorSym(AMid, ASym: Integer): Boolean;
-    function IsClassCtorDtorSym(AMid, ASym: Integer): Boolean;
     // Cross-model overload selection (CrossType's call typing):
     function XCatOf(const AX: TSemaXType): TSemaTypeCat;
     function CanonTypeX(const AX: TSemaXType): TSemaXType;
     function XSameType(const A, B: TSemaXType): Boolean;
     function XAssignableX(const ADst, ASrc: TSemaXType): Boolean;
-    function XParamSyms(AMid, ASym: Integer): TArray<Integer>;
     function InferMethodFrame(AMid, ASym: Integer;
       const AArgTypes: TArray<TSemaXType>; ACtx: Integer): Integer;
     function ExplicitMethodFrame(AId, AMid, ASym, ATypeArgs,
@@ -518,6 +482,61 @@ type
       clicking the QUALIFIER itself opens that unit, not just its member. }
     function QualifierUnitAt(AId, ANode: Integer;
       out AMatchNode: Integer): Integer;
+    { ---- editor-feature query surface -------------------------------------
+      Pure lookups promoted UNCHANGED from the private resolution machinery,
+      so engines outside this unit (PasTree.Sema.Complete, PasTree.Sema.Nav)
+      reuse the real walks instead of re-deriving them. All of them read the
+      analyzed models and mutate no model state (the lazy System/SysInit
+      loading some reach through is the same one EnsureSystemUnit above
+      already exposes). Grouped, not scattered, so the line between "the
+      analysis" and "what editors may ask of it" stays visible. }
+    // The innermost struct type symbol whose scope chain holds ANode — the
+    // `Self` context of a position (a method body's routine scope carries it,
+    // and so does a struct declaration's own member scope).
+    function StructSymOfNode(AModel: TPasSemaModel; ANode: Integer): Integer;
+    // Every struct DECLARATION lexically enclosing ANode, innermost first —
+    // the "declared inside" half of a visibility decision.
+    function DeclStructsOfNode(AModel: TPasSemaModel;
+      ANode: Integer): TArray<Integer>;
+    // The (model, symbol) a designator node names, when one does.
+    function DesignatorSymX(AId, ANode: Integer;
+      out AMid, ASym: Integer): Boolean;
+    function AncestorOfX(const AX: TSemaXType): TSemaXType;
+    { The single answer to "what type is this member?" — see the implementation
+      for why a bare property redeclaration makes it necessary. }
+    function SymDeclTypeX(AMid, ASym: Integer): TSemaXType;
+    { The type of an arbitrary designator NODE, computed on demand — written
+      for `with` targets (hence the name) but structurally general: parens,
+      derefs, indexing, as-casts, calls, `inherited`, `Self`, members. }
+    function WithTargetTypeX(AId, ANode: Integer): TSemaXType;
+    function FindInEnclosingWith(AId, ANode: Integer;
+      const ANameLower: string; out AUid, ASym: Integer;
+      out AX: TSemaXType): Boolean;
+    // The cross-unit halves of unqualified name resolution, in the priority
+    // order CrossResolve itself uses: uses (last-wins) -> System -> SysInit.
+    function FindInUses(AId: Integer; const ANameLower: string;
+      out AUnit, ASym: Integer): Boolean;
+    function FindInSystemUnit(const ANameLower: string;
+      out AUnit, ASym: Integer): Boolean;
+    function FindInSysInitUnit(const ANameLower: string;
+      out AUnit, ASym: Integer): Boolean;
+    function RoutineArity(AMid, ASym: Integer; out AReq, ATot: Integer;
+      out AVariadic: Boolean): Boolean;
+    function XDescendsFrom(const ADesc, ABase: TSemaXType): Boolean;
+    function DeclTypeX(AMid, ASym: Integer): TSemaXType;
+    function SubstX(const AX: TSemaXType; AInst, ADepth: Integer): TSemaXType;
+    function ResolveTypeExpr(AId, ANode: Integer;
+      ABare: Boolean = True): TSemaXType;
+    { ADepth guards the CONSTRAINT hop, which is the one place this function
+      re-enters itself: a type parameter may carry several constraints and the
+      member may be on ANY of them (16 §16.4.1), so each is walked in turn. }
+    function FindMemberX(AFromMid: Integer; const ABase: TSemaXType;
+      const ANameLower: string;
+      out AMemMid, AMemSym: Integer; out ACtx: Integer;
+      ADepth: Integer = 0): Boolean;
+    function IsConstructorSym(AMid, ASym: Integer): Boolean;
+    function IsClassCtorDtorSym(AMid, ASym: Integer): Boolean;
+    function XParamSyms(AMid, ASym: Integer): TArray<Integer>;
     { Per-stage wall-clock of the LAST AnalyzeProject/AnalyzeDirectory/
       AnalyzeStaged run ('stage=ms;...') — for perf logging in hosts and
       probes. Empty for AnalyzeFile. }
@@ -606,6 +625,14 @@ type
       const ACancelled: TFunc<Boolean> = nil;
       const AOnProgress: TProc<TPasStagedProgress> = nil): Integer;
   end;
+
+{ TSemaXType value helpers, promoted with the query surface above: the null
+  value, its test, and a plain (uninstantiated) wrapper — so a caller of
+  FindMemberX/WithTargetTypeX can build and test the record without knowing
+  its field conventions. }
+function XNil: TSemaXType;
+function XValid(const AX: TSemaXType): Boolean;
+function XPlain(AMid, ASym: Integer): TSemaXType;
 
 implementation
 
@@ -3622,7 +3649,6 @@ end;
 
 // Defined with the rest of the Phase-3c helpers just below; CheckCalls needs it
 // for its inherited-member gate.
-function XPlain(AMid, ASym: Integer): TSemaXType; forward;
 
 // Cross-unit argument-count check: gathers a call's candidate routines from the
 // local overload chain PLUS every resolved used unit's interface, then flags
