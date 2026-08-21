@@ -22,7 +22,7 @@ setlocal enabledelayedexpansion
 call "C:\Program Files (x86)\Embarcadero\Studio\37.0\bin\rsvars.bat"
 cd /d "%~dp0"
 
-set SUITES=ParserSmoke StagedParseSmoke DProjSmoke SemaSmoke SemaTypeSmoke SemaXTypeSmoke SemaOverloadSmoke SemaProjectSmoke SemaNavSmoke AsyncSmoke UnitListSmoke NavHistorySmoke DemoSettingsSmoke
+set SUITES=ParserSmoke StagedParseSmoke DProjSmoke SemaSmoke SemaTypeSmoke SemaXTypeSmoke SemaOverloadSmoke SemaProjectSmoke SemaNavSmoke SemaCompleteSmoke AsyncSmoke UnitListSmoke NavHistorySmoke DemoSettingsSmoke
 set DCU32=%~dp0..\out\dcu\win32
 if not exist out mkdir out
 if not exist "%DCU32%" mkdir "%DCU32%"
