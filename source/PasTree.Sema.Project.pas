@@ -144,6 +144,13 @@ type
       slot per model; a worker only ever touches its OWN slot. }
     FInhWork: TArray<TArray<Integer>>;
     FWithWork: TArray<TArray<Integer>>;
+    // Lowered names of the work-list nodes, parallel to FInhWork/FWithWork —
+    // computed ONCE in EnsureCrossWork's single scan. The with pass re-reads
+    // its list on EVERY fixpoint round (up to 8), and each NodeNameLower was
+    // an allocation; a cached name is a refcount bump. Same lifetime and
+    // reset as the lists themselves.
+    FInhWorkNames: TArray<TArray<string>>;
+    FWithWorkNames: TArray<TArray<string>>;
     FWorkBuilt: TArray<Boolean>;
     { Declaration-site idents CrossResolve could bind NOWHERE — see
       CrossResolveDecl. Filled by the CrossResolve workers (own slot only),
@@ -227,6 +234,7 @@ type
     // the synchronous drivers once their cross passes have completed).
     procedure MarkAllCrossReady;
     procedure TrimAllDiags;
+    procedure ReleaseCrossWork;
     function RentPP: TPasPreprocessor;
     procedure ReturnPP(APP: TPasPreprocessor);
     function LoadFile(const APath: string): Integer;
@@ -2823,6 +2831,21 @@ begin
     FModels[LIdx].TrimDiags;
 end;
 
+// Drop the body passes' work lists and their cached names — pass-lifetime
+// scratch, tens of MB on a big closure, and nothing reads them after the
+// passes finish. All five arrays go TOGETHER: EnsureCrossWork's FWorkBuilt
+// guard is what keeps the parallel lists in sync, so a partial release would
+// leave a True guard over empty name arrays. Any later pass entry rebuilds
+// on demand (BuildHelperMap resets the same set at the start of every run).
+procedure TPasSemaProject.ReleaseCrossWork;
+begin
+  SetLength(FWorkBuilt, 0);
+  SetLength(FInhWork, 0);
+  SetLength(FWithWork, 0);
+  SetLength(FInhWorkNames, 0);
+  SetLength(FWithWorkNames, 0);
+end;
+
 // Parse + Phase-1-analyze a batch of files with one worker per core, then
 // register the results IN INPUT ORDER (deterministic model ids). Pure per
 // file: each worker owns its preprocessor (which clones the shared defines
@@ -5107,9 +5130,7 @@ begin
   // that runs the body passes calls this first, and a staged run REPLACES
   // interface-only models with full ones — a worklist held over from a previous
   // run would name nodes of a tree that no longer exists.
-  SetLength(FWorkBuilt, 0);
-  SetLength(FInhWork, 0);
-  SetLength(FWithWork, 0);
+  ReleaseCrossWork;
   // ResolveRealDecl in Publish may load System on demand and APPEND a model,
   // so index only the models present now — a late arrival simply sees no
   // helpers, exactly as the previous revision's out-of-range guard did.
@@ -8779,6 +8800,8 @@ begin
   begin
     SetLength(FInhWork, ACount);
     SetLength(FWithWork, ACount);
+    SetLength(FInhWorkNames, ACount);
+    SetLength(FWithWorkNames, ACount);
     SetLength(FWorkBuilt, ACount);
   end;
 end;
@@ -8809,6 +8832,8 @@ var
   LM: TPasSemaModel;
   LNode, LBase, LInhN, LWithN: Integer;
   LInh, LWith: TArray<Integer>;
+  LInhNames, LWithNames: TArray<string>;
+  LName: string;
 begin
   if FWorkBuilt[AId] then
     Exit;
@@ -8817,6 +8842,8 @@ begin
   // it once beats growing them incrementally.
   SetLength(LInh, Length(LM.RefMap));
   SetLength(LWith, Length(LM.RefMap));
+  SetLength(LInhNames, Length(LM.RefMap));
+  SetLength(LWithNames, Length(LM.RefMap));
   LInhN := 0;
   LWithN := 0;
   for LNode := 0 to High(LM.RefMap) do
@@ -8834,7 +8861,16 @@ begin
     begin
       // NOT filtered on bound-ness: the with pass revisits an already-bound
       // name when its with target went unopened, to OVERRIDE a wrong guess.
+      //
+      // The NAME is computed here, once — the pass itself re-reads this list
+      // on every fixpoint round. 'result'/'self' are skipped at the source:
+      // both passes Continue on them with no side effects, and a with body
+      // mentions Result constantly.
+      LName := LM.Tree.NodeNameLower(LNode);
+      if (LName = 'result') or (LName = 'self') then
+        Continue;
       LWith[LWithN] := LNode;
+      LWithNames[LWithN] := LName;
       Inc(LWithN);
     end
     else if ((LM.RefMap[LNode] = NIL_SYM) and
@@ -8854,14 +8890,22 @@ begin
       // for BUILTIN bindings was not -- unit refs are bounded by the uses
       // clause, while every Integer and Length is builtin-bound, and queueing
       // those measured +3.6%.
+      LName := LM.Tree.NodeNameLower(LNode);
+      if (LName = 'result') or (LName = 'self') then
+        Continue;
       LInh[LInhN] := LNode;
+      LInhNames[LInhN] := LName;
       Inc(LInhN);
     end;
   end;
   SetLength(LInh, LInhN);
   SetLength(LWith, LWithN);
+  SetLength(LInhNames, LInhN);
+  SetLength(LWithNames, LWithN);
   FInhWork[AId] := LInh;
   FWithWork[AId] := LWith;
+  FInhWorkNames[AId] := LInhNames;
+  FWithWorkNames[AId] := LWithNames;
   FWorkBuilt[AId] := True;
 end;
 
@@ -9040,9 +9084,9 @@ begin
       if LMiss.ContainsKey(LKey) then
         Continue;
     end;
-    LNameLower := LModel.Tree.NodeNameLower(LNode);
-    if (LNameLower = 'result') or (LNameLower = 'self') then
-      Continue;
+    // Precomputed by EnsureCrossWork's scan ('result'/'self' filtered there):
+    // a refcount bump instead of an allocation, per candidate per round.
+    LNameLower := FInhWorkNames[AId][LWIdx];
     // Innermost enclosing struct's ancestry, then the OUTER segments of a
     // qualified method name (see OuterStructsOfNode), then the ordinary
     // uses/System fallbacks — dcc's own precedence order.
@@ -9244,10 +9288,10 @@ begin
        (LModel.Symbols[LModel.RefMap[LNode]].DeclNode = LNode) then
       Continue;
     // Scope, the A.B-member case and "is inside a with body" were all settled
-    // by EnsureCrossWork's single scan.
-    LNameLower := LModel.Tree.NodeNameLower(LNode);
-    if (LNameLower = 'result') or (LNameLower = 'self') then
-      Continue;
+    // by EnsureCrossWork's single scan — the NAME too ('result'/'self'
+    // filtered there): this pass re-runs per fixpoint round, and each
+    // NodeNameLower here was an allocation per node per round.
+    LNameLower := FWithWorkNames[AId][LWIdx];
     if QualifierUnitAt(AId, LNode, LMatchNode) >= 0 then
       Continue;
     // dcc's order here: the `with` scope is opened INSIDE the enclosing body,
@@ -9416,6 +9460,7 @@ begin
   // narrower contract); its direct uses stay msFullReady.
   SetModuleStatus(Result, msCrossReady);
   TrimAllDiags;
+  ReleaseCrossWork;
 end;
 
 function TPasSemaProject.StageTimings: string;
@@ -9540,6 +9585,7 @@ begin
   // Whole transitive closure went through the cross passes.
   MarkAllCrossReady;
   TrimAllDiags;
+  ReleaseCrossWork;
   // Analysis is over: drop the raw-bytes repository (a full second copy of
   // every closure file that nothing reads from here on — hundreds of MB on
   // a real project) and the include-cache's own stream references.
@@ -9639,6 +9685,7 @@ begin
   for LIdx := 0 to LN - 1 do
     SetModuleStatus(LIdx, msCrossReady);
   TrimAllDiags;
+  ReleaseCrossWork;
   FSM.ReleaseAnalysisCaches;   // see AnalyzeProject
 end;
 
@@ -9980,6 +10027,7 @@ begin
     end;
     MarkAllCrossReady;
     TrimAllDiags;
+    ReleaseCrossWork;
     // See AnalyzeProject. On a cancelled run the caches stay — the host
     // discards a cancelled project wholesale anyway.
     FSM.ReleaseAnalysisCaches;

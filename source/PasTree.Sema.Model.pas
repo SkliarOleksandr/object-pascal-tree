@@ -186,9 +186,12 @@ type
     { Joins AShadowing so it is searched BEFORE AScope's own names — the one
       precedence a plain JoinScope cannot express. See TSemaScope.Shadowing. }
     procedure JoinScopeShadowing(AScope, AShadowing: Integer);
-    // Adds a symbol to the arena (does not register a name).
+    // Adds a symbol to the arena (does not register a name). ANameKey, when
+    // non-empty, is a PRECOMPUTED PasNameKey(AName) — callers that already
+    // built the key for their own lookup pass it to avoid lowering twice.
     function AddSymbol(AScope: Integer; AKind: TSemaSymbolKind;
-      const AName: string; ADeclNode: Integer): Integer;
+      const AName: string; ADeclNode: Integer;
+      const ANameKey: string = ''): Integer;
     // Registers NameLower -> symbol in a scope's dictionary + order list.
     procedure BindName(AScope, ASym: Integer);
     // Local lookup in one scope (no chain).
@@ -338,22 +341,56 @@ end;
   FindLocal for what gets looked up, so no future call site can reintroduce the
   mismatch by building a key its own way. }
 function PasNameKey(const AName: string): string;
+var
+  LFrom, LLen, LIdx: Integer;
+  LCh: Char;
+  LOut: PChar;
 begin
-  Result := AName;
-  if (Result <> '') and (Result[1] = '&') then
-    Delete(Result, 1, 1);
-  Result := LowerCase(Result);
+  // Fast path: a name that is already a key (no '&', no ASCII uppercase) is
+  // returned as-is — a refcount bump instead of an allocation. Callers often
+  // pass names that are already lowered.
+  LLen := Length(AName);
+  LFrom := 1;
+  if (LLen > 0) and (AName[1] = '&') then
+  begin
+    Inc(LFrom);
+    Dec(LLen);
+  end
+  else
+  begin
+    LIdx := 1;
+    while (LIdx <= LLen) and not ((AName[LIdx] >= 'A') and (AName[LIdx] <= 'Z'))
+    do
+      Inc(LIdx);
+    if LIdx > LLen then
+      Exit(AName);
+  end;
+  // Single pass, one allocation — ASCII-only folding, exactly what the old
+  // Delete('&') -> LowerCase chain produced.
+  SetLength(Result, LLen);
+  LOut := PChar(Pointer(Result));
+  for LIdx := 0 to LLen - 1 do
+  begin
+    LCh := AName[LFrom + LIdx];
+    if (LCh >= 'A') and (LCh <= 'Z') then
+      Inc(LCh, 32);
+    LOut[LIdx] := LCh;
+  end;
 end;
 
 function TPasSemaModel.AddSymbol(AScope: Integer; AKind: TSemaSymbolKind;
-  const AName: string; ADeclNode: Integer): Integer;
+  const AName: string; ADeclNode: Integer;
+  const ANameKey: string): Integer;
 begin
   GrowSyms;
   Result := FSymCount;
   Inc(FSymCount);
   Symbols[Result].Kind := AKind;
   Symbols[Result].Name := AName;
-  Symbols[Result].NameLower := PasNameKey(AName);
+  if ANameKey <> '' then
+    Symbols[Result].NameLower := ANameKey
+  else
+    Symbols[Result].NameLower := PasNameKey(AName);
   Symbols[Result].DeclNode := ADeclNode;
   Symbols[Result].Scope := AScope;
   Symbols[Result].TypeSym := NIL_SYM;

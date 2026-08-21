@@ -382,9 +382,13 @@ function TPasSemaResolver.DeclareSym(AScope: Integer; AKind: TSemaSymbolKind;
   AOverloadOnClash: Boolean): Integer;
 var
   LExisting, LTail, LFileId, LLine, LCol: Integer;
+  LKey: string;
 begin
-  LExisting := FModel.FindLocal(AScope, PasNameKey(AName));
-  Result := FModel.AddSymbol(AScope, AKind, AName, ADeclNode);
+  // One PasNameKey for both the clash lookup and the symbol's stored key —
+  // this runs per declared symbol.
+  LKey := PasNameKey(AName);
+  LExisting := FModel.FindLocal(AScope, LKey);
+  Result := FModel.AddSymbol(AScope, AKind, AName, ADeclNode, LKey);
   if LExisting = NIL_SYM then
     FModel.BindName(AScope, Result)
   else if ((AKind = skRoutine) and
@@ -660,10 +664,13 @@ begin
           // itself: a type that is its own definition, whose members are
           // therefore nothing. ResolveNode leaves an already-bound node alone,
           // which is what makes writing it here enough.
-          if (KindOf(LChild) = nkIdent) and
-             (NodeNameLower(LChild) = NodeNameLower(LName)) then
-            FModel.RefMap[LChild] := ResolveSkipping(LBody,
-              NodeNameLower(LChild), LSym);
+          if KindOf(LChild) = nkIdent then
+          begin
+            var LChildLower := NodeNameLower(LChild);
+            if LChildLower = NodeNameLower(LName) then
+              FModel.RefMap[LChild] := ResolveSkipping(LBody,
+                LChildLower, LSym);
+          end;
           Collect(LChild, LBody);  // alias target, array, pointer…
         end;
       end;
@@ -1814,13 +1821,16 @@ begin
     nkIdent:
       if not FIsDeclName[ANode] and (FModel.RefMap[ANode] = NIL_SYM) then
       begin
+        // Computed ONCE for the whole branch — the arity retry and the
+        // attribute fallback below used to re-lower the same node.
+        var LNameLower := NodeNameLower(ANode);
         // ResolveAt, not Resolve: this is a REFERENCE, and an inline
         // `var`/`const` is visible only from its own declaration onward
         // (3.1.3). See TPasSemaModel.ResolveAt — the position is only
         // consulted for block scopes, so a routine's classic `var` section and
         // everything above it stay order-independent.
         FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],
-          NodeNameLower(ANode), FTree.Nodes[ANode].FirstToken);
+          LNameLower, FTree.Nodes[ANode].FirstToken);
         // ARITY is part of a type's identity (16.1.2), and BOTH directions of
         // ignoring that are real — one third-party library's base unit sets both traps:
         // `Pointer<T>` beside the builtin `Pointer` (a BARE name must skip the
@@ -1841,7 +1851,7 @@ begin
              LWantGeneric then
           begin
             LHead := FModel.ResolveByArityAt(FNodeScope[ANode],
-              NodeNameLower(ANode), FTree.Nodes[ANode].FirstToken,
+              LNameLower, FTree.Nodes[ANode].FirstToken,
               LWantGeneric);
             // NIL_SYM = only the other arity is in scope, which is dcc's error
             // and not a reason to drop the binding we have.
@@ -1883,7 +1893,7 @@ begin
         end;
         if (FModel.RefMap[ANode] = NIL_SYM) and IsAttributeTypeRef(ANode) then
           FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],
-            NodeNameLower(ANode) + 'attribute', FTree.Nodes[ANode].FirstToken);
+            LNameLower + 'attribute', FTree.Nodes[ANode].FirstToken);
       end;
 
     nkMethodResolution:

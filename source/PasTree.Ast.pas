@@ -272,11 +272,36 @@ end;
   round-tripping) must never be used directly as a lookup or declaration key;
   this is what to use instead. }
 function TPasTree.NodeNameLower(AIndex: Integer): string;
+var
+  LText: PChar;
+  LLen, LIdx: Integer;
+  LCh: Char;
+  LOut: PChar;
 begin
-  Result := NodeText(AIndex);
-  if (Result <> '') and (Result[1] = '&') then
-    Delete(Result, 1, 1);
-  Result := LowerCase(Result);
+  // Single pass over the token slice: ONE allocation where the old
+  // NodeText -> Delete('&') -> LowerCase chain paid two or three. Folding is
+  // ASCII-only ('A'..'Z'), exactly what LowerCase did, so keys are unchanged.
+  // Same bounds backstop as NodeText — see its comment.
+  if (AIndex < 0) or (AIndex > High(Nodes)) then
+    Exit('');
+  if (Nodes[AIndex].FirstToken < 0) or
+     (Nodes[AIndex].FirstToken > High(Source.Visible)) then
+    Exit('');
+  Source.VisibleSlice(Nodes[AIndex].FirstToken, LText, LLen);
+  if (LLen > 0) and (LText^ = '&') then
+  begin
+    Inc(LText);
+    Dec(LLen);
+  end;
+  SetLength(Result, LLen);
+  LOut := PChar(Pointer(Result));
+  for LIdx := 0 to LLen - 1 do
+  begin
+    LCh := LText[LIdx];
+    if (LCh >= 'A') and (LCh <= 'Z') then
+      Inc(LCh, 32);
+    LOut[LIdx] := LCh;
+  end;
 end;
 
 function TPasTree.NodeText(AIndex: Integer): string;
