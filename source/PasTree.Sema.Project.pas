@@ -584,6 +584,12 @@ type
       uses-clause candidates beyond the analyzed closure. Delegates to the
       source manager's cached scan (see its contract). }
     function SearchPathUnitNames: TArray<string>;
+    { The `///` doc-comment block above a symbol's declaration (completion
+      plan §8D, Help Insight) — TPasTree.DeclDocComment over the symbol's
+      DeclNode. '' for builtins (no source), unknown ids, and undocumented
+      declarations. The hover path's entry: navigation hands out (Mid, Sym)
+      pairs, and this is the step from one to its documentation. }
+    function SymDocComment(AMid, ASym: Integer): string;
     { 20.3.1 — is AX one of the compiler-MANAGED types (automatic init/
       finalize/copy: long strings, dynamic arrays, interfaces, Variant,
       `reference to` procedural types, and records that either declare a
@@ -1081,6 +1087,19 @@ end;
 function TPasSemaProject.SearchPathUnitNames: TArray<string>;
 begin
   Result := FSM.SearchPathUnitNames;
+end;
+
+function TPasSemaProject.SymDocComment(AMid, ASym: Integer): string;
+var
+  LM: TPasSemaModel;
+begin
+  Result := '';
+  if (AMid < 0) or (AMid >= FModels.Count) then
+    Exit;
+  LM := FModels[AMid];
+  if (LM = nil) or (ASym < 0) or (ASym >= LM.SymCount) then
+    Exit;
+  Result := LM.Tree.DeclDocComment(LM.Symbols[ASym].DeclNode);
 end;
 
 function TPasSemaProject.NodeSite(AId, ANode: Integer; out AFilePath: string;

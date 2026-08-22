@@ -349,6 +349,12 @@ type
       here). Builtins answer the seed table's takes-arguments flag: names
       whose every argument is optional (Exit, Halt, Writeln) are False. }
     function ItemHasParams(const AItem: TPasComplItem): Boolean;
+    { The `///` doc-comment block above the item's declaration (plan §8D) —
+      TPasTree.DeclDocComment over the item's Mid/Sym, for
+      completionItem.documentation and the RAD client's Help Insight. '' for
+      keywords, unit names, builtins (no source) and undocumented
+      declarations. Raw text: XML-tag rendering is the host's. }
+    function ItemDocComment(const AItem: TPasComplItem): string;
     { The call context for signature help: locates the innermost call whose
       ARGUMENT LIST encloses the caret (backward token walk — nesting over
       ()/[] respected, strings/comments are single tokens and cannot fool
@@ -2724,6 +2730,17 @@ function TPasCompletion.ItemHasParams(const AItem: TPasComplItem): Boolean;
 begin
   Result := (AItem.Kind = skRoutine) and (AItem.Sym <> NIL_SYM) and
     (AItem.Bucket <> cbKeyword) and SymHasParams(AItem.Mid, AItem.Sym);
+end;
+
+function TPasCompletion.ItemDocComment(const AItem: TPasComplItem): string;
+var
+  LM: TPasSemaModel;
+begin
+  Result := '';
+  if (AItem.Sym = NIL_SYM) or (AItem.Bucket in [cbKeyword, cbUnitName]) or
+     not SymModelOf(AItem.Mid, 'ItemDocComment', LM) then
+    Exit;
+  Result := LM.Tree.DeclDocComment(LM.Symbols[AItem.Sym].DeclNode);
 end;
 
 { ---- signature help (CallAt) ---------------------------------------------- }

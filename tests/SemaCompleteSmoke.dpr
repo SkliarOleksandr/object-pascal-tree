@@ -271,6 +271,7 @@ const
     '  public'#10 +
     '    constructor Create;'#10 +
     '    class function CF: Integer;'#10 +
+    '    /// Public method of TBase.'#10 +
     '    procedure Pub;'#10 +
     '    procedure Over(A: Integer); overload;'#10 +
     '    procedure Over(A: string); overload;'#10 +
@@ -690,6 +691,61 @@ begin
   ProjCase(PROJ_HEAD + '  |'#10 + PROJ_TAIL);
   GCounter.Ok('keyword rows carry skKeyword',
     Has('begin') and (ItemNamed('begin').Kind = skKeyword));
+
+  // ======== §8D: doc comments =================================================
+  // Overlay-declared members: the marker strips, lines join, an ordinary //
+  // is not doc, a blank line breaks attachment, an attribute group between
+  // the doc and the declaration does not.
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses exta;'#10 +
+    'type'#10 +
+    '  TDoc = class'#10 +
+    '  public'#10 +
+    '    /// <summary>Frobnicates the doodad.</summary>'#10 +
+    '    /// <param name="ACount">How many.</param>'#10 +
+    '    procedure Frob(ACount: Integer);'#10 +
+    '    // not doc'#10 +
+    '    procedure Plain;'#10 +
+    '    /// Detached by a blank line.'#10 +
+    ''#10 +
+    '    procedure Detached;'#10 +
+    '    /// Above the attribute.'#10 +
+    '    [Deprecated]'#10 +
+    '    procedure Attr;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var D: TDoc;'#10 +
+    'begin'#10 +
+    '  D.|'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GCounter.Ok('doc: two /// lines strip and join',
+    GComp.ItemDocComment(ItemNamed('Frob')) =
+      '<summary>Frobnicates the doodad.</summary>'#10 +
+      '<param name="ACount">How many.</param>');
+  GCounter.Ok('doc: an ordinary // comment is not doc',
+    GComp.ItemDocComment(ItemNamed('Plain')) = '');
+  GCounter.Ok('doc: a blank line breaks attachment',
+    GComp.ItemDocComment(ItemNamed('Detached')) = '');
+  GCounter.Ok('doc: an attribute group between doc and decl is stepped over',
+    GComp.ItemDocComment(ItemNamed('Attr')) = 'Above the attribute.');
+
+  // Cross-unit: the doc travels through the bridge (exta's Pub), and the
+  // project-level accessor answers the same from a (Mid, Sym) pair — the
+  // hover path.
+  ProjCase(PROJ_HEAD + '  B.|'#10 + PROJ_TAIL);
+  GCounter.Ok('doc: a BRIDGED member''s doc comes from its own unit',
+    GComp.ItemDocComment(ItemNamed('Pub')) = 'Public method of TBase.');
+  GCounter.Ok('doc: SymDocComment answers the same for the hover path',
+    GProj.SymDocComment(ItemNamed('Pub').Mid, ItemNamed('Pub').Sym) =
+      'Public method of TBase.');
+  GCounter.Ok('doc: an undocumented member answers empty',
+    GComp.ItemDocComment(ItemNamed('Prop')) = '');
+  GCounter.Ok('doc: a builtin answers empty',
+    GProj.SymDocComment(-1, 0) = '');
 
   // ======== §8A: per-item accessors ==========================================
   ProjCase(PROJ_HEAD + '  B.|'#10 + PROJ_TAIL);

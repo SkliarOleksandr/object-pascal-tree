@@ -201,6 +201,31 @@ type
       copies of this walk existed (navigator, LSP, demo) - see the
       completion plan §8A. }
     function NodeSpanText(AIndex: Integer): string;
+    { The node's TRUE leftmost visible token: the smaller of its own
+      FirstToken and its deepest-first-descendant's — nodes whose FirstToken
+      is not their left edge exist by design (nkMember's is the dot). -1 for
+      a bad index or a node with no tokens. }
+    function NodeLeftmostVis(AIndex: Integer): Integer;
+    { The LEADING doc-comment block of the declaration ANode belongs to
+      (completion plan §8D, Help Insight): the contiguous run of `///` line
+      comments immediately above the declaration, in source order, with the
+      `///` markers stripped, lines joined with #10; '' when there is none.
+
+      ANode may be the declaration's NAME node (a symbol's DeclNode) — it is
+      climbed to the enclosing declaration root first (routine, type/const/
+      var/property declaration, enum value), because the doc sits above the
+      whole declaration, not above the name mid-line. The walk then runs
+      BACKWARD over the RAW token stream of the declaration's own file:
+      whitespace is crossed (a BLANK line ends the run — attachment requires
+      adjacency, the native IDE's rule), an attribute group between the doc
+      block and the declaration is stepped over (docs conventionally sit
+      above the attributes), and any other token — code, an ordinary `//`
+      comment, a brace comment, a directive — ends the run.
+
+      Raw text is the contract: XML-tag rendering (`<summary>`, `<param>`)
+      is a HOST display concern, exactly like whitespace collapse in
+      ItemParamsText. No XML parsing here. }
+    function DeclDocComment(AIndex: Integer): string;
     { The same slice as a NAME KEY: lower-cased, leading '&' stripped. Use this
       for every declaration and lookup key — see the implementation. }
     function NodeNameLower(AIndex: Integer): string;
@@ -351,25 +376,32 @@ begin
     Result := '';
 end;
 
+function TPasTree.NodeLeftmostVis(AIndex: Integer): Integer;
+var
+  LNode, LTok: Integer;
+begin
+  if (AIndex < 0) or (AIndex > High(Nodes)) then
+    Exit(-1);
+  Result := Nodes[AIndex].FirstToken;
+  LNode := Nodes[AIndex].FirstChild;
+  while LNode <> NIL_NODE do
+  begin
+    LTok := Nodes[LNode].FirstToken;
+    if (LTok >= 0) and ((Result < 0) or (LTok < Result)) then
+      Result := LTok;
+    LNode := Nodes[LNode].FirstChild;
+  end;
+end;
+
 function TPasTree.NodeSpanText(AIndex: Integer): string;
 var
-  LNode, LTok, LFirst, LLast: Integer;
+  LFirst, LLast: Integer;
   LFrom, LTo: TPasVisibleToken;
 begin
   Result := '';
   if (AIndex < 0) or (AIndex > High(Nodes)) then
     Exit;
-  // The true left edge: the smaller of the node's own FirstToken and its
-  // deepest-first-descendant's.
-  LFirst := Nodes[AIndex].FirstToken;
-  LNode := Nodes[AIndex].FirstChild;
-  while LNode <> NIL_NODE do
-  begin
-    LTok := Nodes[LNode].FirstToken;
-    if (LTok >= 0) and ((LFirst < 0) or (LTok < LFirst)) then
-      LFirst := LTok;
-    LNode := Nodes[LNode].FirstChild;
-  end;
+  LFirst := NodeLeftmostVis(AIndex);
   LLast := Nodes[AIndex].LastToken;
   if (LFirst < 0) or (LLast < LFirst) or (LLast > High(Source.Visible)) then
     Exit;
@@ -380,6 +412,121 @@ begin
   with Source.Files[LFrom.FileId] do
     Result := Copy(Source, Tokens[LFrom.TokenIndex].Start + 1,
       Tokens[LTo.TokenIndex].EndPos - Tokens[LFrom.TokenIndex].Start);
+end;
+
+function TPasTree.DeclDocComment(AIndex: Integer): string;
+var
+  LTS: TPasTokenStream;
+  LVisTok: TPasVisibleToken;
+  LDecl, LVis, LRaw, LDepth, LBreaks, LIdx, LCount: Integer;
+  LText: string;
+  LLines: TArray<string>;
+  LDone: Boolean;
+
+  function TokenText(ARaw: Integer): string;
+  begin
+    Result := Copy(LTS.Source, LTS.Tokens[ARaw].Start + 1,
+      LTS.Tokens[ARaw].Len);
+  end;
+
+begin
+  Result := '';
+  if (AIndex < 0) or (AIndex > High(Nodes)) then
+    Exit;
+  // Climb to the declaration ROOT: the OUTERMOST declaration-shaped ancestor
+  // (a name node sits inside its declaration; the doc sits above the whole
+  // declaration). Containers end the climb — a nested routine keeps its own
+  // nkRoutine because nkRoutineBody stops the walk before the outer one.
+  LDecl := NIL_NODE;
+  LIdx := AIndex;
+  while LIdx <> NIL_NODE do
+  begin
+    case Nodes[LIdx].Kind of
+      nkRoutine, nkTypeDecl, nkConstDecl, nkVarDecl, nkPropertyDecl,
+      nkEnumValue, nkInlineVar, nkInlineConst:
+        LDecl := LIdx;
+      nkTypeSec, nkConstSec, nkVarSec, nkLabelSec, nkInterfaceSec,
+      nkImplementationSec, nkUnit, nkProgram, nkLibrary, nkPackage,
+      nkBlock, nkRoutineBody, nkClassType, nkRecordType, nkInterfaceType,
+      nkObjectType, nkHelperType:
+        Break;
+    end;
+    LIdx := Nodes[LIdx].Parent;
+  end;
+  if LDecl = NIL_NODE then
+    Exit;
+  LVis := NodeLeftmostVis(LDecl);
+  if (LVis < 0) or (LVis > High(Source.Visible)) then
+    Exit;
+  LVisTok := Source.Visible[LVis];
+  LTS := Source.Files[LVisTok.FileId];
+  // Backward over the RAW stream of the declaration's own file.
+  LRaw := LVisTok.TokenIndex - 1;
+  LDepth := 0;
+  LLines := nil;
+  LCount := 0;
+  LDone := False;
+  while (LRaw >= 0) and not LDone do
+  begin
+    if LDepth > 0 then
+      // Stepping over an attribute group: only the brackets count; its
+      // interior (including line breaks) is not the doc block's business.
+      case LTS.Tokens[LRaw].Kind of
+        tkRBracket: Inc(LDepth);
+        tkLBracket: Dec(LDepth);
+      end
+    else
+      case LTS.Tokens[LRaw].Kind of
+        tkWhitespace:
+          begin
+            // A BLANK line breaks attachment: doc must sit immediately
+            // above (the native IDE's rule) — two line breaks in one
+            // whitespace run mean an empty line between.
+            LText := TokenText(LRaw);
+            LBreaks := 0;
+            for LIdx := 1 to Length(LText) do
+              if LText[LIdx] = #10 then
+                Inc(LBreaks);
+            if LBreaks = 0 then
+              // Classic-Mac CR-only line ends, defensively.
+              for LIdx := 1 to Length(LText) do
+                if LText[LIdx] = #13 then
+                  Inc(LBreaks);
+            if LBreaks >= 2 then
+              LDone := True;
+          end;
+        tkCommentLine:
+          begin
+            LText := TokenText(LRaw);
+            if (Length(LText) >= 3) and (LText[1] = '/') and
+               (LText[2] = '/') and (LText[3] = '/') then
+            begin
+              // Strip the marker and the ONE conventional space after it.
+              Delete(LText, 1, 3);
+              if (LText <> '') and (LText[1] = ' ') then
+                Delete(LText, 1, 1);
+              if LCount = Length(LLines) then
+                SetLength(LLines, LCount * 2 + 8);
+              LLines[LCount] := TrimRight(LText);
+              Inc(LCount);
+            end
+            else
+              LDone := True;   // an ordinary // comment is not doc
+          end;
+        tkRBracket:
+          Inc(LDepth);   // an attribute group between doc and declaration
+      else
+        LDone := True;   // code, brace/paren comments, directives
+      end;
+    Dec(LRaw);
+  end;
+  // Collected bottom-up — emit in source order.
+  for LIdx := LCount - 1 downto 0 do
+  begin
+    if Result <> '' then
+      Result := Result + #10;
+    Result := Result + LLines[LIdx];
+  end;
 end;
 
 function TPasTree.Dump(AIndex: Integer): string;
