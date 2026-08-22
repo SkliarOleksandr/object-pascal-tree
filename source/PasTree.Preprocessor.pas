@@ -426,46 +426,45 @@ end;
 
 { Directive text helpers ---------------------------------------------------- }
 
-// Extracts the body of a directive token: brace or paren-star form,
-// e.g. '{$IFDEF X}' -> 'IFDEF X' and '(*$I file*)' -> 'I file'.
-function DirectiveBody(const AText: string): string;
-var
-  LFrom, LTo: Integer;
-begin
-  if AText.StartsWith('{$') then
-  begin
-    LFrom := 3;
-    LTo := Length(AText);
-    if (LTo >= 1) and (AText[LTo] = '}') then
-      Dec(LTo);
-  end
-  else if AText.StartsWith('(*$') then
-  begin
-    LFrom := 4;
-    LTo := Length(AText);
-    if (LTo >= 2) and (AText[LTo - 1] = '*') and (AText[LTo] = ')') then
-      Dec(LTo, 2);
-  end
-  else
-  begin
-    LFrom := 1;
-    LTo := Length(AText);
-  end;
-  Result := Trim(Copy(AText, LFrom, LTo - LFrom + 1));
-end;
+type
+  // Every directive HandleDirective dispatches on by NAME. pdSwitch is any
+  // single-letter word except I (which is {$I file} or the {$I±} switch,
+  // told apart by its argument); pdLong is every other multi-letter word —
+  // the tracked long switches and passthrough trivia alike.
+  TPPDirKind = (pdLong, pdSwitch, pdIfdef, pdIfndef, pdIf, pdIfopt, pdElseif,
+    pdElse, pdEndif, pdDefine, pdUndef, pdInclude, pdPushopt, pdPopopt);
 
-{ Splits 'IFDEF FOO' into name ('IFDEF', uppercased) and arg ('FOO'). The
-  name is the leading run of letters; anything else stops it, so switch
-  forms like 'R-' or 'I-' yield a one-letter name. }
-procedure SplitDirective(const ABody: string; out AName, AArg: string);
-var
-  LIdx: Integer;
+// Classifies the directive word without materializing a string. AText/ALen is
+// the word run ([A-Za-z]+) at the start of the directive body.
+function ClassifyDirective(AText: PChar; ALen: Integer): TPPDirKind;
 begin
-  LIdx := 1;
-  while (LIdx <= Length(ABody)) and CharInSet(ABody[LIdx], ['A'..'Z', 'a'..'z']) do
-    Inc(LIdx);
-  AName := UpperCase(Copy(ABody, 1, LIdx - 1));
-  AArg := Trim(Copy(ABody, LIdx, MaxInt));
+  Result := pdLong;
+  if ALen = 1 then
+  begin
+    if (AText^ = 'I') or (AText^ = 'i') then
+      Exit(pdInclude);
+    Exit(pdSwitch);
+  end;
+  case AText^ of
+    'I', 'i':
+      if SliceEqualsWord(AText, ALen, 'IF') then Exit(pdIf)
+      else if SliceEqualsWord(AText, ALen, 'IFDEF') then Exit(pdIfdef)
+      else if SliceEqualsWord(AText, ALen, 'IFNDEF') then Exit(pdIfndef)
+      else if SliceEqualsWord(AText, ALen, 'IFOPT') then Exit(pdIfopt)
+      else if SliceEqualsWord(AText, ALen, 'IFEND') then Exit(pdEndif)
+      else if SliceEqualsWord(AText, ALen, 'INCLUDE') then Exit(pdInclude);
+    'E', 'e':
+      if SliceEqualsWord(AText, ALen, 'ENDIF') then Exit(pdEndif)
+      else if SliceEqualsWord(AText, ALen, 'ELSE') then Exit(pdElse)
+      else if SliceEqualsWord(AText, ALen, 'ELSEIF') then Exit(pdElseif);
+    'D', 'd':
+      if SliceEqualsWord(AText, ALen, 'DEFINE') then Exit(pdDefine);
+    'U', 'u':
+      if SliceEqualsWord(AText, ALen, 'UNDEF') then Exit(pdUndef);
+    'P', 'p':
+      if SliceEqualsWord(AText, ALen, 'PUSHOPT') then Exit(pdPushopt)
+      else if SliceEqualsWord(AText, ALen, 'POPOPT') then Exit(pdPopopt);
+  end;
 end;
 
 { TPasPreprocessed ----------------------------------------------------------- }
@@ -926,18 +925,72 @@ end;
 procedure TPasPreprocessor.HandleDirective(AFileId: Integer;
   const AToken: TPasToken);
 var
+  LText: PChar;
+  LLen, LNameLen, LIdx: Integer;
+  LKind: TPPDirKind;
   LBody, LName, LArg: string;
   LParent, LTaken: Boolean;
   LTop: Integer;
   LSwitch: Char;
   LWant: Boolean;
+
+  // The argument after the name run, left-trimmed (the right edge was trimmed
+  // with the body) — materialized ONLY by the branches that consume one.
+  function Arg: string;
+  var
+    LP: PChar;
+    LN: Integer;
+  begin
+    LP := LText + LNameLen;
+    LN := LLen - LNameLen;
+    while (LN > 0) and (LP^ <= ' ') do
+    begin
+      Inc(LP);
+      Dec(LN);
+    end;
+    SetString(Result, LP, LN);
+  end;
+
 begin
-  LBody := DirectiveBody(FFiles[AFileId].TokenText(AToken));
-  SplitDirective(LBody, LName, LArg);
+  // The directive body as a SLICE of the file source — this runs for every
+  // {$...} token, including those inside skipped regions, and the old
+  // TokenText -> DirectiveBody -> SplitDirective chain materialized four to
+  // five strings per directive before a single branch was taken. Classify
+  // from the slice; materialize only what the taken branch consumes.
+  LText := PChar(Pointer(FFiles[AFileId].Source)) + AToken.Start;
+  LLen := AToken.Len;
+  if (LLen >= 2) and (LText^ = '{') then
+  begin
+    Inc(LText, 2);                            // '{$'
+    Dec(LLen, 2);
+    if (LLen >= 1) and (LText[LLen - 1] = '}') then
+      Dec(LLen);
+  end
+  else if (LLen >= 3) and (LText^ = '(') then
+  begin
+    Inc(LText, 3);                            // '(*$'
+    Dec(LLen, 3);
+    if (LLen >= 2) and (LText[LLen - 2] = '*') and (LText[LLen - 1] = ')') then
+      Dec(LLen, 2);
+  end;
+  while (LLen > 0) and (LText^ <= ' ') do     // Trim, both edges
+  begin
+    Inc(LText);
+    Dec(LLen);
+  end;
+  while (LLen > 0) and (LText[LLen - 1] <= ' ') do
+    Dec(LLen);
+  LNameLen := 0;
+  while (LNameLen < LLen) and
+        (((LText[LNameLen] >= 'A') and (LText[LNameLen] <= 'Z')) or
+         ((LText[LNameLen] >= 'a') and (LText[LNameLen] <= 'z'))) do
+    Inc(LNameLen);
+  LKind := ClassifyDirective(LText, LNameLen);
 
   // ---- conditionals (always processed, active or not) ----
-  if LName = 'IFDEF' then
+  if LKind = pdIfdef then
   begin
+    LArg := Arg;
     LParent := Active;
     LTaken := LParent and FDefines.IsDefined(LArg);
     FCondParentActive.Add(LParent);
@@ -945,26 +998,27 @@ begin
     FCondThisActive.Add(LTaken);
     FCondSeenElse.Add(False);
   end
-  else if LName = 'IFNDEF' then
+  else if LKind = pdIfndef then
   begin
     LParent := Active;
-    LTaken := LParent and not FDefines.IsDefined(LArg);
+    LTaken := LParent and not FDefines.IsDefined(Arg);
     FCondParentActive.Add(LParent);
     FCondAnyTaken.Add(LTaken);
     FCondThisActive.Add(LTaken);
     FCondSeenElse.Add(False);
   end
-  else if LName = 'IF' then
+  else if LKind = pdIf then
   begin
     LParent := Active;
-    LTaken := LParent and EvalIfExpression(LArg, AFileId, AToken);
+    LTaken := LParent and EvalIfExpression(Arg, AFileId, AToken);
     FCondParentActive.Add(LParent);
     FCondAnyTaken.Add(LTaken);
     FCondThisActive.Add(LTaken);
     FCondSeenElse.Add(False);
   end
-  else if LName = 'IFOPT' then
+  else if LKind = pdIfopt then
   begin
+    LArg := Arg;
     LParent := Active;
     LTaken := False;
     if (Length(LArg) >= 2) and CharInSet(LArg[1], ['A'..'Z', 'a'..'z']) and
@@ -979,7 +1033,7 @@ begin
     FCondThisActive.Add(LTaken);
     FCondSeenElse.Add(False);
   end
-  else if LName = 'ELSEIF' then
+  else if LKind = pdElseif then
   begin
     LTop := FCondThisActive.Count - 1;
     if LTop < 0 then
@@ -989,13 +1043,13 @@ begin
     else
     begin
       LTaken := FCondParentActive[LTop] and not FCondAnyTaken[LTop] and
-        EvalIfExpression(LArg, AFileId, AToken);
+        EvalIfExpression(Arg, AFileId, AToken);
       FCondThisActive[LTop] := LTaken;
       if LTaken then
         FCondAnyTaken[LTop] := True;
     end;
   end
-  else if LName = 'ELSE' then
+  else if LKind = pdElse then
   begin
     LTop := FCondThisActive.Count - 1;
     if LTop < 0 then
@@ -1013,7 +1067,7 @@ begin
         FCondAnyTaken[LTop] := True;
     end;
   end
-  else if (LName = 'ENDIF') or (LName = 'IFEND') then
+  else if LKind = pdEndif then
   begin
     LTop := FCondThisActive.Count - 1;
     if LTop < 0 then
@@ -1029,23 +1083,22 @@ begin
   // ---- everything below acts only in active regions ----
   else if not Active then
     // ignore
-  else if LName = 'DEFINE' then
-    FDefines.Define(LArg)
-  else if LName = 'UNDEF' then
-    FDefines.Undefine(LArg)
-  else if (LName = 'I') or (LName = 'INCLUDE') then
+  else if LKind = pdDefine then
+    FDefines.Define(Arg)
+  else if LKind = pdUndef then
+    FDefines.Undefine(Arg)
+  else if LKind = pdInclude then
   begin
+    LArg := Arg;
     if (LArg <> '') and CharInSet(LArg[1], ['+', '-']) then
       // {$I+} / {$I-}: the IOCHECKS switch, not an include.
       FSwitches['I'] := LArg[1] = '+'
     else if (LArg <> '') and (LArg[1] = '%') then
       Diag(ppUnsupportedInsertion, AFileId, AToken.Start, AToken.Len, LArg)
-    else if LName = 'I' then
-      HandleInclude(AFileId, AToken, LArg)
     else
       HandleInclude(AFileId, AToken, LArg);
   end
-  else if LName = 'PUSHOPT' then
+  else if LKind = pdPushopt then
   begin
     var LOpt: TPasOptState;
     LOpt.Switches := FSwitches;
@@ -1056,7 +1109,7 @@ begin
     LOpt.Align := FAlign;
     FSwitchStack.Push(LOpt);
   end
-  else if LName = 'POPOPT' then
+  else if LKind = pdPopopt then
   begin
     if FSwitchStack.Count > 0 then
     begin
@@ -1071,12 +1124,23 @@ begin
     else
       Diag(ppPopWithoutPush, AFileId, AToken.Start, AToken.Len);
   end
-  else if Length(LName) = 1 then
+  else if LKind = pdSwitch then
+  begin
     // Single-letter switch directive(s): {$R-}, {$O+,W-}, {$Z4}, {$R *.res}
-    ApplySwitches(LBody)
+    SetString(LBody, LText, LLen);
+    ApplySwitches(LBody);
+  end
   else
+  begin
     // Long-form switches we track; everything else is passthrough trivia.
-    ApplyLongSwitch(LName, LArg);
+    // ApplyLongSwitch dispatches on the UPPERCASED name, as SplitDirective
+    // used to hand it.
+    SetString(LName, LText, LNameLen);
+    for LIdx := 1 to LNameLen do
+      if (LName[LIdx] >= 'a') and (LName[LIdx] <= 'z') then
+        LName[LIdx] := Char(Ord(LName[LIdx]) - 32);
+    ApplyLongSwitch(LName, Arg);
+  end;
 end;
 
 procedure TPasPreprocessor.HandleInclude(AFileId: Integer;
