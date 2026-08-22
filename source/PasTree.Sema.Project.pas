@@ -300,10 +300,14 @@ type
       var APending: TArray<TPasInhPending>; AEmit: Boolean);
     procedure RunDeclPass(ACount: Integer);
     procedure RunInheritedPass(ACount: Integer);
-    { AEmit=False computes bindings only; E2003 is left to the final round —
-      see RunWithPass, which iterates this to a fixpoint. }
+    { AEmit=False computes bindings only and RECORDS the still-unresolved
+      candidates in AUnresolved; when a round turns out to be the converged
+      one (no new bindings anywhere), RunWithPass emits E2003 from that list
+      directly instead of paying one more full round to rediscover it. AEmit
+      is the round-cap fallback only. }
     procedure CrossResolveWith(AId: Integer;
-      var APending: TArray<TPasInhPending>; AEmit: Boolean);
+      var APending: TArray<TPasInhPending>; AEmit: Boolean;
+      var AUnresolved: TArray<Integer>);
     procedure RunWithPass(ACount: Integer);
     function ArityOfTypeSym(AMid, ASym: Integer): Integer;
     function FindTypeInSelfArity(AId: Integer; const ANameLower: string;
@@ -392,6 +396,9 @@ type
     function ResolveTypeExprNested(AId, ANode: Integer;
       ADepth: Integer = 0): TSemaXType;
     procedure BuildHelperMap;
+    // BuildHelperMap's phase-B publisher — a method because the parallel
+    // phase-B worker is an anonymous method and cannot capture a nested one.
+    procedure PublishHelper(AMid: Integer; const AReg: TPasHelperReg);
     procedure ClearHelperIdx;
     function HelperAncestorX(AMid, ASym: Integer): TSemaXType;
     function HelperMemberHit(AFromMid: Integer; const ACur: TSemaXType;
@@ -5668,36 +5675,30 @@ end;
 
   Requires CrossResolve to have run: a `for T` target resolves through
   ResolveTypeExpr, i.e. via RefMap/ExtRefMap. }
-procedure TPasSemaProject.BuildHelperMap;
+// Registers AReg as AMid's active helper under every key AMid could reach
+// the extended type by. Callers go weakest-precedence first, so a later
+// write simply wins. Writes ONLY FHelperIdx[AMid] — phase B farms one worker
+// per referring model, so this is the own-slot write discipline every
+// parallel pass here follows.
+procedure TPasSemaProject.PublishHelper(AMid: Integer;
+  const AReg: TPasHelperReg);
 var
-  LCount, LMid, LSym, LDef, LRef, LLast, LScope: Integer;
-  LM: TPasSemaModel;
-  LRegs: TArray<TPasHelperReg>;
-  LReg: TPasHelperReg;
-  LExported: Boolean;
-  LX: TSemaXType;
+  LExt: TPasExtRef;
+  LBSym, LRMid, LRSym: Integer;
 
-  // Registers AReg as AMid's active helper under every key AMid could reach
-  // the extended type by. Callers go weakest-precedence first, so a later
-  // write simply wins.
-  procedure Publish(AMid: Integer; const AReg: TPasHelperReg);
-  var
-    LExt: TPasExtRef;
-    LBSym, LRMid, LRSym: Integer;
-
-    procedure Put(AUnit, ASym: Integer);
-    begin
-      if (AUnit < 0) or (ASym < 0) then
-        Exit;
-      if FHelperIdx[AMid] = nil then
-        FHelperIdx[AMid] := TDictionary<Int64, TPasExtRef>.Create;
-      FHelperIdx[AMid].AddOrSetValue(
-        (Int64(AUnit) shl 32) or Cardinal(ASym), LExt);
-    end;
-
+  procedure Put(AUnit, ASym: Integer);
   begin
-    LExt.UnitId := AReg.HelperMid;
-    LExt.Sym := AReg.Sym;
+    if (AUnit < 0) or (ASym < 0) then
+      Exit;
+    if FHelperIdx[AMid] = nil then
+      FHelperIdx[AMid] := TDictionary<Int64, TPasExtRef>.Create;
+    FHelperIdx[AMid].AddOrSetValue(
+      (Int64(AUnit) shl 32) or Cardinal(ASym), LExt);
+  end;
+
+begin
+  LExt.UnitId := AReg.HelperMid;
+  LExt.Sym := AReg.Sym;
     // A concrete type is one identity — but it may ALSO be an alias of a
     // builtin, and then it is that builtin's identity too (`TUInt32Helper =
     // record helper for UInt32` in System.Classes, applied to a value declared
@@ -5732,8 +5733,11 @@ var
       if ResolveRealDecl(AMid, LAlias, LRMid, LRSym) then
         Put(LRMid, LRSym);
     end;
-  end;
+end;
 
+procedure TPasSemaProject.BuildHelperMap;
+var
+  LCount: Integer;
 begin
   ClearHelperIdx;
   // Same lifetime as the helper index, and for the same reason: every driver
@@ -5741,22 +5745,39 @@ begin
   // interface-only models with full ones — a worklist held over from a previous
   // run would name nodes of a tree that no longer exists.
   ReleaseCrossWork;
-  // ResolveRealDecl in Publish may load System on demand and APPEND a model,
-  // so index only the models present now — a late arrival simply sees no
-  // helpers, exactly as the previous revision's out-of-range guard did.
+  // Both phases below run PARALLEL workers, and PublishHelper's
+  // ResolveRealDecl would APPEND a model on a first-time System load — load
+  // it (and SysInit) now, on this thread, so no worker can. The drivers all
+  // do this already; repeating it here is a memoized no-op that turns the
+  // engine-order assumption into a guarantee.
+  EnsureSystemUnit;
+  EnsureSysInitUnit;
   LCount := FModels.Count;
   SetLength(FModelHelpers, LCount);
   SetLength(FHelperIdx, LCount);
-  // ---- phase A: collect declarations ----
-  for LMid := 0 to LCount - 1 do
-  begin
-    LM := FModels[LMid];
+  // ---- phase A: collect declarations (parallel; each worker scans its own
+  // model's symbols and writes only FModelHelpers[mid] — the same own-slot
+  // discipline as every pass; ResolveTypeExpr reads other models' frozen
+  // Phase-1 state only). This was a SEQUENTIAL sweep over every symbol of
+  // every model, and together with phase B it cost a full second of the
+  // client run — a fifth of it inside one function, on one core. ----
+  ForEachIndex(LCount - 1, 'helpers-collect',
+    procedure(AMid: Integer)
+    var
+      LM: TPasSemaModel;
+      LRegs: TArray<TPasHelperReg>;
+      LReg: TPasHelperReg;
+      LSym, LDef, LRef, LLast, LScope: Integer;
+      LExported: Boolean;
+      LX: TSemaXType;
+    begin
+    LM := FModels[AMid];
     LRegs := nil;
     for LSym := 0 to LM.SymCount - 1 do
     begin
       if LM.Symbols[LSym].Kind <> skType then
         Continue;
-      LDef := TypeDefNodeOf(LMid, LSym);
+      LDef := TypeDefNodeOf(AMid, LSym);
       if (LDef = NIL_NODE) or (LM.Tree.Nodes[LDef].Kind <> nkHelperType) then
         Continue;
       // The `for T` target: LAST of the leading run of type references (a
@@ -5772,7 +5793,7 @@ begin
       end;
       if LLast = NIL_NODE then
         Continue;
-      LX := ResolveTypeExpr(LMid, LLast);
+      LX := ResolveTypeExpr(AMid, LLast);
       if not XValid(LX) then
         Continue;   // target didn't resolve — nothing to inject
       LReg.Aliases := nil;
@@ -5849,32 +5870,37 @@ begin
         end;
         LScope := LM.Scopes[LScope].Parent;
       end;
-      LReg.HelperMid := LMid;
+      LReg.HelperMid := AMid;
       LReg.Sym := LSym;
       LReg.Exported := LExported;
       LRegs := LRegs + [LReg];
     end;
-    FModelHelpers[LMid] := LRegs;
-  end;
-  // ---- phase B: apply precedence, per referring model ----
+    FModelHelpers[AMid] := LRegs;
+    end);
+  // ---- phase B: apply precedence, per referring model (parallel; each
+  // worker reads phase A's committed FModelHelpers and writes only its own
+  // FHelperIdx slot — see PublishHelper). ----
   // Weakest first so a later write wins: used units in `uses` order (a
   // later-listed unit beats an earlier one — dcc-verified last-uses-wins),
   // then the referring unit's OWN helpers (nearest; impl-section ones count
   // here). Within one unit, declaration order, later winning.
-  for LMid := 0 to LCount - 1 do
-  begin
-    for var LU := 0 to High(FModels[LMid].UsesList) do
+  ForEachIndex(LCount - 1, 'helpers-publish',
+    procedure(AMid: Integer)
+    var
+      LU, LUid, LI: Integer;
     begin
-      var LUid := FModels[LMid].UsesList[LU].UnitId;
-      if (LUid < 0) or (LUid >= LCount) then
-        Continue;
-      for var LI := 0 to High(FModelHelpers[LUid]) do
-        if FModelHelpers[LUid][LI].Exported then
-          Publish(LMid, FModelHelpers[LUid][LI]);
-    end;
-    for var LI := 0 to High(FModelHelpers[LMid]) do
-      Publish(LMid, FModelHelpers[LMid][LI]);
-  end;
+      for LU := 0 to High(FModels[AMid].UsesList) do
+      begin
+        LUid := FModels[AMid].UsesList[LU].UnitId;
+        if (LUid < 0) or (LUid >= LCount) then
+          Continue;
+        for LI := 0 to High(FModelHelpers[LUid]) do
+          if FModelHelpers[LUid][LI].Exported then
+            PublishHelper(AMid, FModelHelpers[LUid][LI]);
+      end;
+      for LI := 0 to High(FModelHelpers[AMid]) do
+        PublishHelper(AMid, FModelHelpers[AMid][LI]);
+    end);
 end;
 
 procedure TPasSemaProject.ClearHelperIdx;
@@ -10040,11 +10066,12 @@ end;
 // pass's own entries are with-BODY statement nodes, never type/heritage
 // nodes, so no worker depends on another's uncommitted entry.
 procedure TPasSemaProject.CrossResolveWith(AId: Integer;
-  var APending: TArray<TPasInhPending>; AEmit: Boolean);
+  var APending: TArray<TPasInhPending>; AEmit: Boolean;
+  var AUnresolved: TArray<Integer>);
 var
   LModel: TPasSemaModel;
   LNode, LStruct, LUid, LSym, LCtx, LMatchNode, LWIdx: Integer;
-  LPendCount: Integer;
+  LPendCount, LUnresCount: Integer;
   LPend: TPasInhPending;
   LNameLower: string;
   LBound, LFromMember: Boolean;
@@ -10052,12 +10079,15 @@ var
   LCurExt: TPasExtRef;
 begin
   APending := nil;
+  AUnresolved := nil;
   LModel := FModels[AId];
   EnsureCrossWork(AId);
   // Pre-size + truncate, same as CrossResolveInherited — this one repeats per
   // fixpoint round (MAX_ROUNDS=8), so the old per-append copy multiplied.
   SetLength(APending, Length(FWithWork[AId]));
+  SetLength(AUnresolved, Length(FWithWork[AId]));
   LPendCount := 0;
+  LUnresCount := 0;
   // Idents inside a with body, from the one classifying scan. Bound-ness is
   // NOT part of that list and is tested below per round, because a round can
   // bind a name the next round must then leave alone.
@@ -10148,11 +10178,24 @@ begin
         APending[LPendCount] := LPend;
         Inc(LPendCount);
       end
-      else if AEmit and LModel.AllUsesResolved then
-        EmitE2003(LModel, LNode);
+      else if LModel.AllUsesResolved then
+      begin
+        // Emit-or-record: the converged round's recording IS the emit set —
+        // RunWithPass emits from it without paying another full round. AEmit
+        // stays for the round-cap fallback, where a final round can still
+        // BIND new names and only then report the rest.
+        if AEmit then
+          EmitE2003(LModel, LNode)
+        else
+        begin
+          AUnresolved[LUnresCount] := LNode;
+          Inc(LUnresCount);
+        end;
+      end;
     end;
   end;
   SetLength(APending, LPendCount);
+  SetLength(AUnresolved, LUnresCount);
 end;
 
 { Runs to a FIXPOINT, because one round cannot resolve a nested `with` whose
@@ -10179,10 +10222,12 @@ const
   MAX_ROUNDS = 8;
 var
   LPending: TArray<TArray<TPasInhPending>>;
+  LUnres: TArray<TArray<Integer>>;
   LIdx, LP, LNode, LRound, LNew: Integer;
   LEmit: Boolean;
 begin
   SetLength(LPending, ACount);
+  SetLength(LUnres, ACount);
   SizeCrossWork(ACount);   // AnalyzeFile reaches this pass without the other
   LRound := 0;
   LEmit := False;
@@ -10190,10 +10235,13 @@ begin
   begin
     Inc(LRound);
     for LIdx := 0 to ACount - 1 do
+    begin
       LPending[LIdx] := nil;
+      LUnres[LIdx] := nil;
+    end;
     ForEachIndex(ACount - 1, 'with',      procedure(AIdx: Integer)
       begin
-        CrossResolveWith(AIdx, LPending[AIdx], LEmit);
+        CrossResolveWith(AIdx, LPending[AIdx], LEmit, LUnres[AIdx]);
       end);
     LNew := 0;
     for LIdx := 0 to ACount - 1 do
@@ -10215,11 +10263,22 @@ begin
           FModels[LIdx].ExprTypeX.AddOrSetValue(LNode, LPending[LIdx][LP].X);
       end;
     if LEmit then
-      Break;   // the emitting round is always the last one
-    // Converged (or out of rounds): repeat once more WITH emission. That round
-    // sees exactly this state, so the names it cannot resolve are the stable
-    // ones — and it re-commits nothing, since it finds nothing new.
-    if (LNew = 0) or (LRound >= MAX_ROUNDS) then
+      Break;   // the cap-fallback emitting round is always the last one
+    // Converged: the round that found nothing new saw exactly the final
+    // state, so the candidates it RECORDED as unresolved are the stable ones
+    // — emit from the record instead of re-running a whole round to
+    // rediscover it. Per model in work-list order, the same order the old
+    // emit round produced.
+    if LNew = 0 then
+    begin
+      for LIdx := 0 to ACount - 1 do
+        for LP := 0 to High(LUnres[LIdx]) do
+          EmitE2003(FModels[LIdx], LUnres[LIdx][LP]);
+      Break;
+    end;
+    // Out of rounds with work still moving: one more round, old-style — it
+    // may still BIND new names and must report only what then remains.
+    if LRound >= MAX_ROUNDS then
       LEmit := True;
   end;
 end;
