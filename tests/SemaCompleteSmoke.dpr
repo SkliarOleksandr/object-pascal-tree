@@ -226,7 +226,7 @@ const
     'procedure TExtGen<T>.Put(AValue: T);'#10'begin'#10'end;'#10 +
     'procedure ExtProc;'#10'begin'#10'end;'#10 +
     'end.'#10;
-  PROJ_HEAD =                       // lines 1..18; the case line is 19
+  PROJ_HEAD =                       // lines 1..21; the case line is 22
     'unit mainu;'#10 +
     'interface'#10 +
     'uses exta;'#10 +
@@ -235,6 +235,8 @@ const
     '  public'#10 +
     '    procedure Own;'#10 +
     '  end;'#10 +
+    '  TArr = array of TBase;'#10 +
+    '  PBase = ^TBase;'#10 +
     'implementation'#10 +
     'var'#10 +
     '  ImplVar: Integer;'#10 +
@@ -243,8 +245,9 @@ const
     '  B: TBase;'#10 +
     '  G: TExtGen<Integer>;'#10 +
     '  M: TMy;'#10 +
-    'begin'#10 +
-    '  B := nil;'#10;
+    '  Arr: TArr;'#10 +
+    '  PB: PBase;'#10 +
+    'begin'#10;
   PROJ_TAIL =
     'end;'#10 +
     'end.'#10;
@@ -429,6 +432,47 @@ begin
   // Generic instantiation declared in the OVERLAY.
   ProjCase(PROJ_HEAD + '  G.|'#10 + PROJ_TAIL);
   GCounter.Ok('G.| lists the generic''s method', Has('Put'));
+
+  // Indexing and dereferencing in the OVERLAY (no ExprTypeX cache there).
+  ProjCase(PROJ_HEAD + '  Arr[0].|'#10 + PROJ_TAIL);
+  GCounter.Ok('Arr[0].| lists the element type''s members', Has('Pub'),
+    procedure
+    begin
+      Writeln('    ctx=', Ord(GCtx), ' items=', Length(GItems));
+      for var LFi := 0 to High(GItems) do
+        Writeln('      ', GItems[LFi].Name, ' mid=', GItems[LFi].Mid,
+          ' sym=', GItems[LFi].Sym);
+    end);
+  ProjCase(PROJ_HEAD + '  PB^.|'#10 + PROJ_TAIL);
+  GCounter.Ok('PB^.| lists the pointee''s members', Has('Pub'),
+    procedure
+    begin
+      Writeln('    ctx=', Ord(GCtx), ' items=', Length(GItems));
+    end);
+
+  // `inherited |` — the ancestor's members, not the own class's.
+  ProjCase(PROJ_HEAD + '  inherited |'#10 + PROJ_TAIL);
+  GCounter.Ok('inherited | classifies ccInherited',
+    GHit and (GCtx = ccInherited));
+  GCounter.Ok('inherited | lists the ancestor method', Has('Pub'));
+  GCounter.Ok('inherited | does not list the own method', not Has('Own'));
+
+  // `goto |` — labels only.
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'label'#10 +
+    '  Again;'#10 +
+    'begin'#10 +
+    '  Again:'#10 +
+    '  goto |'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GCounter.Ok('goto | classifies ccLabel', GHit and (GCtx = ccLabel));
+  GCounter.Ok('goto | lists the label', Has('Again'));
+  GCounter.Ok('goto | lists nothing else', Length(GItems) = 1);
 
   // --- unqualified scope ----------------------------------------------------
   ProjCase(PROJ_HEAD + '  |'#10 + PROJ_TAIL);

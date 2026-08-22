@@ -23,15 +23,25 @@ program PasTreeCompleteOracle;
     match shape) and skLabel targets (labels complete after `goto` only —
     a documented stage-E gap).
 
-  Usage: PasTreeCompleteOracle <dir|file.dpr> [-p:<platform>] [-max:<N>]
-           [-list] [-L<dir>]
+  Usage: PasTreeCompleteOracle <dir|file.dpr|file.dproj> [-p:<platform>]
+           [-max:<N>] [-list] [-at:<file>|<line>|<col>] [-studio:<dir>]
+           [-L<dir>]
 
-  -p:      platform (default Win32, matching the flat corpora).
+  -p:      platform (default Win32, matching the flat corpora; a .dproj
+           carries its own and wins).
   -max:N   sample cap PER UNIT (default 200), stride-spread so the sample
            covers the whole file rather than its head. -max:0 = everything.
   -list    print every miss site (default: the first 25).
+  -at:     one verbose request instead of the sweep — the drill-down mode.
+  -studio: RAD Studio root for the RTL/VCL/FMX source trees (.dproj targets;
+           $BDS when unset), same contract as PasTreeSemaProject's.
   -L<dir>  extra search path, repeatable (the registry-path lists for the
-           real projects). }
+           real projects).
+
+  A .dproj target is driven the way PasTreeSemaProject's -dproj mode drives
+  one: platform, search paths, defines, namespaces and unit aliases read from
+  the project file, AnalyzeStaged over its main source — so the oracle runs
+  against the same closure the demo and the LSP server analyze. }
 
 {$APPTYPE CONSOLE}
 
@@ -81,7 +91,29 @@ var
 
 const
   CTX_NAMES: array[TPasComplContext] of string = ('none', 'member', 'uses',
-    'type', 'statement', 'expression', 'recfield');
+    'type', 'statement', 'expression', 'recfield', 'inherited', 'label');
+
+// The Studio SOURCE trees a .dproj needs on top of its own paths — copied
+// from PasTreeSemaProject's -dproj mode (see the note there for why each
+// subdirectory earns its place).
+function StudioSearchPaths(const ARoot: string): TArray<string>;
+const
+  SUBS: array[0..8] of string = ('source\rtl\sys', 'source\rtl\common',
+    'source\rtl\win', 'source\rtl\win\winrt', 'source\rtl\net',
+    'source\databinding\engine', 'source\xml', 'source\vcl', 'source\fmx');
+var
+  LDir: string;
+begin
+  Result := nil;
+  if ARoot = '' then
+    Exit;
+  for var LSub in SUBS do
+  begin
+    LDir := TPath.Combine(ARoot, LSub);
+    if TDirectory.Exists(LDir) then
+      Result := Result + [LDir];
+  end;
+end;
 
 procedure OracleOneModel(AMid: Integer);
 var
@@ -272,6 +304,23 @@ begin
       [CTX_NAMES[LCtx], Ord(LInfo.Kind), LInfo.Prefix, LInfo.DotBase,
        LInfo.Node, LInfo.Scope, Length(GProj.Model(LMid).WithUnopened),
        Length(LItems)]));
+    // The scope chain with its joins — where a member SHOULD have come from.
+    with GProj.Model(LMid) do
+    begin
+      var LSc := LInfo.Scope;
+      var LHops := 0;
+      while (LSc <> NIL_SCOPE) and (LHops < 12) do
+      begin
+        var LAdd := '';
+        for var LA in Scopes[LSc].Additional do
+          LAdd := LAdd + Format(' +%d(k%d,st%d)',
+            [LA, Ord(Scopes[LA].Kind), Scopes[LA].StructSym]);
+        Writeln(Format('  scope %d kind=%d struct=%d%s',
+          [LSc, Ord(Scopes[LSc].Kind), Scopes[LSc].StructSym, LAdd]));
+        LSc := Scopes[LSc].Parent;
+        Inc(LHops);
+      end;
+    end;
     // Which unopened withs enclose the caret, and does the with pass's own
     // typer answer for their targets? (The injection's two preconditions.)
     with GProj.Model(LMid) do
@@ -300,8 +349,14 @@ end;
 var
   LMid, LShow: Integer;
   LCtx: TPasComplContext;
-  GAtSpec: string;
+  GAtSpec, GStudio: string;
+  GDProj: TPasDProj;
 begin
+  // The one line every PasTree host must set — the parallel passes allocate
+  // heavily, and the default MM SLEEPS on contention (measured 4.5x on a
+  // real project; see the README's Multithreading section).
+  System.NeverSleepOnMMThreadContention := True;
+  GStudio := GetEnvironmentVariable('BDS');
   if ParamCount < 1 then
   begin
     Writeln('usage: PasTreeCompleteOracle <dir|file.dpr> [-p:<platform>]'
@@ -332,6 +387,8 @@ begin
       GListAll := True
     else if GArg.StartsWith('-at:', True) then
       GAtSpec := Copy(GArg, 5, MaxInt)
+    else if GArg.StartsWith('-studio:', True) then
+      GStudio := Copy(GArg, 9, MaxInt)
     else if GArg.StartsWith('-L', True) and (Length(GArg) > 2) then
       GExtraPaths := GExtraPaths + [Copy(GArg, 3, MaxInt)]
     else
@@ -343,10 +400,36 @@ begin
   end;
 
   GMisses := TList<TMissRow>.Create;
-  GProj := TPasSemaProject.Create(GPlatform, GExtraPaths, []);
+  GDProj := nil;
+  if SameText(ExtractFileExt(GPath), '.dproj') then
+  begin
+    GDProj := TPasDProj.Create;
+    if not GDProj.Load(GPath, PlatformName(GPlatform)) then
+    begin
+      Writeln('could not load .dproj: ', GPath);
+      ExitCode := 2;
+      Exit;
+    end;
+    GPlatform := GDProj.Platform;
+    GProj := TPasSemaProject.Create(GPlatform,
+      [GDProj.Dir] + GDProj.SearchPaths + StudioSearchPaths(GStudio)
+      + GExtraPaths, GDProj.Defines);
+    if Length(GDProj.Namespaces) > 0 then
+      GProj.SetNamespaces(GDProj.Namespaces)
+    else
+      GProj.SetNamespaces(PasDefaultNamespaces(GPlatform));
+    for var LDef in PasDefaultUnitAliases(GPlatform) do
+      GProj.AddUnitAlias(LDef.Alias, LDef.UnitName);
+    for var LA in GDProj.UnitAliases do
+      GProj.AddUnitAlias(LA.Alias, LA.UnitName);
+  end
+  else
+    GProj := TPasSemaProject.Create(GPlatform, GExtraPaths, []);
   try
     GSW := TStopwatch.StartNew;
-    if TDirectory.Exists(GPath) then
+    if GDProj <> nil then
+      GProj.AnalyzeStaged([GDProj.MainSource], [])
+    else if TDirectory.Exists(GPath) then
       GProj.AnalyzeDirectory(GPath)
     else
       GProj.AnalyzeProject(GPath);
@@ -388,6 +471,7 @@ begin
       Writeln('ORACLE CLEAN');
   finally
     GProj.Free;
+    GDProj.Free;
     GMisses.Free;
   end;
 end.

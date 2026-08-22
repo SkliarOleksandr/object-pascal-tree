@@ -98,8 +98,10 @@ type
                    // decl, `class(`, `is`/`as`, `array of`, ...)
     ccStatement,   // statement/declaration head: names in scope + keywords
     ccExpression,  // inside an expression: names in scope + expr keywords
-    ccRecField);   // a FIELD NAME in a record aggregate initializer (3.2.2):
+    ccRecField,    // a FIELD NAME in a record aggregate initializer (3.2.2):
                    // the record type's fields, nothing else
+    ccInherited,   // right after `inherited `: the ancestor's members
+    ccLabel);      // right after `goto `: the labels in scope
 
   { Where a candidate came from — the ranking bucket (sortText prefix in the
     LSP mapping; display grouping in the demo). Declaration order IS priority
@@ -182,6 +184,11 @@ type
     // `TProtectedAccess(C).UpdateRegistry` compile).
     FBaseOwnUnit: Boolean;
     FAncestry: TArray<TPasExtRef>; // caret struct's bridged ancestor chain
+    // The caret's enclosing struct NEST, innermost first: the method's own
+    // class, then each class it is nested IN (overlay symbols). Same-class
+    // strict-private access and a nested method's reach into the OUTER
+    // class's inherited members both key off this.
+    FCaretStructs: TArray<Integer>;
     FAncestryBuilt: Boolean;
     FCaretScope: Integer;          // scope for EnsureAncestry
     function RawTokenAt(AOffset: Integer): Integer;
@@ -206,6 +213,11 @@ type
     function AggregateTypeOf(AAggNode, ADepth: Integer): TPasComplTypeRef;
     function OverlayStructDef(AOvSym: Integer): Integer;
     function OverlayHeritageRef(AOvSym, ADepth: Integer): TPasComplTypeRef;
+    function ProjectTypeDef(const AX: TSemaXType): Integer;
+    function ElementTypeOf(const ABase: TPasComplTypeRef;
+      ADepth: Integer): TPasComplTypeRef;
+    function PointeeTypeOf(const ABase: TPasComplTypeRef;
+      ADepth: Integer): TPasComplTypeRef;
     // collection
     procedure AddItem(const AName, AKey: string; AKind: TSemaSymbolKind;
       ABucket: TPasComplBucket; AMid, ASym, ACtx: Integer);
@@ -613,19 +625,39 @@ function TPasCompletion.BridgeUnitMid(const AName: string): Integer;
 var
   LIdx: Integer;
   LBase: string;
+  LPM: TPasSemaModel;
 begin
   Result := -1;
   if (FProj = nil) or (AName = '') then
     Exit;
+  if FProjMid >= 0 then
+  begin
+    // The unit's OWN name first — a unit may qualify its own exports
+    // (`ctX = REST.Types.ctX` inside REST.Types itself)...
+    if SameText(ChangeFileExt(ExtractFileName(FProj.ModelFile(FProjMid)), ''),
+       AName) then
+      Exit(FProjMid);
+    // ...then the RESOLVED uses list of this file's project model: a unit is
+    // qualified by the name it was IMPORTED under, and the resolution there
+    // already applied unit ALIASES and namespace prefixes (`Classes.
+    // MakeObjectInstance` means System.Classes through the default -A list —
+    // a plain file-name scan cannot know that).
+    LPM := ProjModel(FProjMid, 'BridgeUnitMid');
+    for LIdx := 0 to High(LPM.UsesList) do
+      if (LPM.UsesList[LIdx].UnitId >= 0) and
+         SameText(LPM.UsesList[LIdx].NameFull, AName) then
+        Exit(LPM.UsesList[LIdx].UnitId);
+  end;
+  // Exact full-dotted spellings last. No suffix guessing: qualifying a unit
+  // requires having USED it, so the uses-list pass above already covers
+  // every namespace-shortened or aliased form dcc accepts — and a suffix
+  // guess false-matched `REST` (of a self-qualified REST.Types) onto an
+  // unrelated `*.REST` unit on the reference project.
   for LIdx := 0 to FProj.ModelCount - 1 do
   begin
     LBase := ChangeFileExt(ExtractFileName(FProj.ModelFile(LIdx)), '');
     if SameText(LBase, AName) then
       Exit(LIdx);
-    if (Result < 0) and (Length(LBase) > Length(AName) + 1) and
-       SameText(Copy(LBase, Length(LBase) - Length(AName), Length(AName) + 1),
-         '.' + AName) then
-      Result := LIdx;   // namespace-prefixed candidate; exact still preferred
   end;
 end;
 
@@ -976,12 +1008,15 @@ begin
       Result := ResolveTypeRefNode(ANode, ADepth);
     nkDeref:
       begin
-        Result := DesignatorType(FModel.Tree.Nodes[ANode].FirstChild,
-          ADepth + 1);
-        if XValid(Result.X) and (FProj <> nil) then
-          Result.X := FProj.PointeeX(Result.X)
-        else
-          Result := ComplNilRef;   // overlay-space pointee: v2
+        Result := PointeeTypeOf(DesignatorType(
+          FModel.Tree.Nodes[ANode].FirstChild, ADepth + 1), ADepth + 1);
+        Result.IsTypeRef := False;   // a dereferenced value is an INSTANCE
+      end;
+    nkIndex:
+      begin
+        Result := ElementTypeOf(DesignatorType(
+          FModel.Tree.Nodes[ANode].FirstChild, ADepth + 1), ADepth + 1);
+        Result.IsTypeRef := False;   // an indexed value is an INSTANCE
       end;
   end;
 end;
@@ -1011,6 +1046,11 @@ begin
     // `System.Delete` / `System.PAnsiChar` mean the intrinsic (dcc allows
     // qualifying ANY compiler-provided name with System).
     LSym := LM.Resolve(LM.InterfaceScope, AKey);
+    // A unit's own USES items live in its interface scope but are not its
+    // exports — `UnitA.UnitB` never chains (a hit here means the longer
+    // dotted UNIT name below, not a member).
+    if (LSym <> NIL_SYM) and (LM.Symbols[LSym].Kind = skUnitRef) then
+      LSym := NIL_SYM;
     if LSym <> NIL_SYM then
       Exit(TypeOfProjectSym(ABase.UnitMid, LSym, NIL_INST, ADepth + 1));
     // Not a name in that unit — the qualifier may be the PREFIX of a longer
@@ -1085,6 +1125,131 @@ begin
       Result := TypeOfProjectSym(LMemMid, LMemSym, LCtx, ADepth + 1);
     end;
   end;
+end;
+
+// The type-definition node of a PROJECT type symbol — OverlayStructDef's
+// cross-model twin (same trailing-directive rule).
+function TPasCompletion.ProjectTypeDef(const AX: TSemaXType): Integer;
+var
+  LM: TPasSemaModel;
+  LDecl: Integer;
+begin
+  Result := NIL_NODE;
+  if (FProj = nil) or not XValid(AX) then
+    Exit;
+  LM := ProjModel(AX.UnitId, 'ProjectTypeDef');
+  LDecl := LM.Symbols[AX.Sym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LDecl := LM.Tree.Nodes[LDecl].Parent;
+  if (LDecl = NIL_NODE) or (LM.Tree.Nodes[LDecl].Kind <> nkTypeDecl) then
+    Exit;
+  LDecl := LM.Tree.Nodes[LDecl].FirstChild;
+  while LDecl <> NIL_NODE do
+  begin
+    if not (LM.Tree.Nodes[LDecl].Kind in [nkDirective, nkAttrGroup]) then
+      Result := LDecl;
+    LDecl := LM.Tree.Nodes[LDecl].NextSibling;
+  end;
+end;
+
+// typeof(base[...]): an ARRAY type's element, a STRING's Char, a POINTER's
+// pointee (pointer indexing) — enough for `A[I].` in a live overlay, where
+// no ExprTypeX cache exists. Default array properties are a stage-E+ item.
+function TPasCompletion.ElementTypeOf(const ABase: TPasComplTypeRef;
+  ADepth: Integer): TPasComplTypeRef;
+var
+  LDef, LElem, LMid, LSym: Integer;
+  LM: TPasSemaModel;
+begin
+  Result := ComplNilRef;
+  if ADepth > 16 then
+    Exit;
+  if ABase.OvSym <> NIL_SYM then
+  begin
+    LDef := OverlayStructDef(ABase.OvSym);
+    if (LDef <> NIL_NODE) and
+       (FModel.Tree.Nodes[LDef].Kind = nkArrayType) then
+    begin
+      LElem := FModel.Tree.Nodes[LDef].FirstChild;
+      while (LElem <> NIL_NODE) and
+            (FModel.Tree.Nodes[LElem].NextSibling <> NIL_NODE) do
+        LElem := FModel.Tree.Nodes[LElem].NextSibling;
+      Exit(ResolveTypeRefNode(LElem, ADepth + 1));
+    end;
+    Exit;
+  end;
+  if (FProj = nil) or not XValid(ABase.X) then
+    Exit;
+  LM := ProjModel(ABase.X.UnitId, 'ElementTypeOf');
+  // Indexing a STRING yields its Char (7.1) — the seeds have no def node.
+  if (LM.Symbols[ABase.X.Sym].Kind = skBuiltinType) and
+     (LM.Symbols[ABase.X.Sym].TypeCat = tcString) then
+  begin
+    if BridgeName('char', LMid, LSym) then
+    begin
+      Result.X := XPlain(LMid, LSym);
+      Result.IsTypeRef := False;
+    end;
+    Exit;
+  end;
+  LDef := ProjectTypeDef(ABase.X);
+  if LDef = NIL_NODE then
+    Exit;
+  case LM.Tree.Nodes[LDef].Kind of
+    nkArrayType:
+      begin
+        LElem := LM.Tree.Nodes[LDef].FirstChild;
+        while (LElem <> NIL_NODE) and
+              (LM.Tree.Nodes[LElem].NextSibling <> NIL_NODE) do
+          LElem := LM.Tree.Nodes[LElem].NextSibling;
+        if LElem <> NIL_NODE then
+        begin
+          Result.X := FProj.ResolveTypeExpr(ABase.X.UnitId, LElem);
+          if ABase.X.Inst <> NIL_INST then
+            Result.X := FProj.SubstX(Result.X, ABase.X.Inst, 0);
+        end;
+      end;
+    nkPointerType:
+      Result.X := FProj.PointeeX(ABase.X);   // P[I] — pointer indexing
+    nkStringType:
+      if BridgeName('char', LMid, LSym) then
+        Result.X := XPlain(LMid, LSym);
+    nkIdent, nkMember, nkTypeArgs:
+      begin
+        // An alias — chase it and index THAT.
+        Result.X := FProj.ResolveTypeExpr(ABase.X.UnitId, LDef);
+        if ABase.X.Inst <> NIL_INST then
+          Result.X := FProj.SubstX(Result.X, ABase.X.Inst, 0);
+        if XValid(Result.X) and ((Result.X.UnitId <> ABase.X.UnitId) or
+           (Result.X.Sym <> ABase.X.Sym)) then
+          Exit(ElementTypeOf(Result, ADepth + 1));
+        Result := ComplNilRef;
+      end;
+  end;
+end;
+
+// typeof(base^): the pointee — project pointers via PointeeX, overlay
+// pointer types via their definition node.
+function TPasCompletion.PointeeTypeOf(const ABase: TPasComplTypeRef;
+  ADepth: Integer): TPasComplTypeRef;
+var
+  LDef: Integer;
+begin
+  Result := ComplNilRef;
+  if ADepth > 16 then
+    Exit;
+  if ABase.OvSym <> NIL_SYM then
+  begin
+    LDef := OverlayStructDef(ABase.OvSym);
+    if (LDef <> NIL_NODE) and
+       (FModel.Tree.Nodes[LDef].Kind = nkPointerType) then
+      Result := ResolveTypeRefNode(FModel.Tree.Nodes[LDef].FirstChild,
+        ADepth + 1);
+    Exit;
+  end;
+  if (FProj <> nil) and XValid(ABase.X) then
+    Result.X := FProj.PointeeX(ABase.X);
 end;
 
 // The type-definition node of an overlay type symbol: the LAST child of its
@@ -1222,8 +1387,10 @@ begin
     LM := FModel
   else
     LM := ProjModel(AMid, 'AddSym');
-  if LM.Symbols[ASym].Kind = skLabel then
-    Exit;   // labels complete after `goto` only (stage E)
+  // Labels complete after `goto` and NOWHERE else — and after `goto`,
+  // nothing but a label means anything.
+  if (LM.Symbols[ASym].Kind = skLabel) <> (FContext = ccLabel) then
+    Exit;
   // Type positions take what can name a type — consts and enum values
   // included, because a SUBRANGE type's bounds are constant expressions
   // (`TVCLElements = teCategoryButtons..teTextLabel`, 2.2.5).
@@ -1316,37 +1483,62 @@ begin
     Exit;
   FAncestryBuilt := True;
   FAncestry := nil;
+  FCaretStructs := nil;
   LOv := EnclosingStructSym(ACaretScope);
   if LOv = NIL_SYM then
     Exit;
-  // LX starts INVALID and stays so when the walk never leaves the overlay —
+  // The struct NEST: the innermost class, then each class it is declared
+  // inside (a nested class's DeclNode sits in the outer's member scope,
+  // whose StructSym names the outer). Winapi-scale code nests freely.
+  LDepth := 0;
+  while (LOv <> NIL_SYM) and (LDepth < 8) do
+  begin
+    FCaretStructs := FCaretStructs + [LOv];
+    Inc(LDepth);
+    if FModel.Symbols[LOv].Scope = NIL_SCOPE then
+      Break;
+    LOv := FModel.Scopes[FModel.Symbols[LOv].Scope].StructSym;
+    if (Length(FCaretStructs) > 0) and
+       (LOv = FCaretStructs[High(FCaretStructs)]) then
+      Break;
+  end;
+  if FProj = nil then
+    Exit;
+  // The bridged ancestry of EVERY nest level (a nested class's method also
+  // reaches the OUTER class's inherited members — the corpus's
+  // TWinGestureEngine.TRealTimeStylus method calling the engine's inherited
+  // IsGesture bare).
+  //
+  // LX starts INVALID and stays so when a walk never leaves the overlay —
   // the corpus oracle caught exactly that as stack garbage flowing into
   // AncestorOfX when a same-unit interface chain ran past the old cap of 16
   // (Winapi.WebView2 chains ICoreWebView2_18 down to ICoreWebView2, all in
   // one unit). 64 covers any sane declaration chain; past it the bridged
   // half of the ancestry is simply absent, never garbage.
-  LX := XNil;
-  for LDepth := 1 to 64 do
+  for var LSIdx := 0 to High(FCaretStructs) do
   begin
-    LRef := OverlayHeritageRef(LOv, 0);
-    if LRef.OvSym <> NIL_SYM then
+    LOv := FCaretStructs[LSIdx];
+    LX := XNil;
+    for LDepth := 1 to 64 do
     begin
-      LOv := LRef.OvSym;
-      Continue;
+      LRef := OverlayHeritageRef(LOv, 0);
+      if LRef.OvSym <> NIL_SYM then
+      begin
+        LOv := LRef.OvSym;
+        Continue;
+      end;
+      LX := LRef.X;
+      Break;
     end;
-    LX := LRef.X;
-    Break;
-  end;
-  if FProj = nil then
-    Exit;
-  for LDepth := 1 to 32 do
-  begin
-    if not XValid(LX) then
-      Exit;
-    LEntry.UnitId := LX.UnitId;
-    LEntry.Sym := LX.Sym;
-    FAncestry := FAncestry + [LEntry];
-    LX := FProj.AncestorOfX(LX);
+    for LDepth := 1 to 32 do
+    begin
+      if not XValid(LX) then
+        Break;
+      LEntry.UnitId := LX.UnitId;
+      LEntry.Sym := LX.Sym;
+      FAncestry := FAncestry + [LEntry];
+      LX := FProj.AncestorOfX(LX);
+    end;
   end;
 end;
 
@@ -1363,7 +1555,20 @@ begin
   LM := ProjModel(AMid, 'MemberVisible');
   case LM.Symbols[ASym].Visibility of
     svStrictPrivate:
-      Result := False;
+      begin
+        // Visible ONLY inside the declaring class itself (or a class the
+        // caret's is nested in — the asymmetric nesting rule, 11 §11.2.1).
+        // Testable only when overlay indices ARE project indices.
+        Result := False;
+        if FIsProjectModel and (AMid = FProjMid) and
+           (LM.Symbols[ASym].Scope <> NIL_SCOPE) then
+        begin
+          LDeclStruct := LM.Scopes[LM.Symbols[ASym].Scope].StructSym;
+          for LIdx := 0 to High(FCaretStructs) do
+            if FCaretStructs[LIdx] = LDeclStruct then
+              Exit(True);
+        end;
+      end;
     svPrivate:
       Result := AMid = FProjMid;
     svProtected, svStrictProtected:
@@ -1381,6 +1586,13 @@ begin
           if (FAncestry[LIdx].UnitId = AMid) and
              (FAncestry[LIdx].Sym = LDeclStruct) then
             Exit(True);
+        // The declaring class IS one of the caret's own nest (same-class
+        // strict-protected access) — overlay indices are project indices
+        // only in project-model mode.
+        if FIsProjectModel and (AMid = FProjMid) then
+          for LIdx := 0 to High(FCaretStructs) do
+            if FCaretStructs[LIdx] = LDeclStruct then
+              Exit(True);
         Result := False;
       end;
   else
@@ -1632,12 +1844,16 @@ begin
   begin
     if FModel.Scopes[LScope].Kind = sckImplementation then
       LInterfaceOnly := False;
-    // An OPENED (intra-unit) with joins only the target's OWN member scope;
-    // the target type's cross-unit ANCESTORS are what the cross with pass
-    // binds — walk them explicitly, the same way step 3 below walks the
-    // caret struct's (`with TListActionLink(...) do` sees TActionLink's
-    // FClient, which lives one unit over).
+    // An OPENED (intra-unit) with joins only the target's OWN member scope —
+    // and that join is phase 1's GUESS, which the cross with pass revises in
+    // the BINDINGS without touching the scope (the oracle's Orpheus
+    // `with CT[J] do` was joined to the wrong struct entirely). So: walk the
+    // joined structs' cross-unit ancestors (the TListActionLink/FClient
+    // shape), and in project-model mode ALSO re-type the with's own targets
+    // with the with pass's typer and inject those members — the authoritative
+    // answer, deduped against whatever the join already provided.
     if FModel.Scopes[LScope].Kind = sckWith then
+    begin
       for LIdx := 0 to High(FModel.Scopes[LScope].Additional) do
       begin
         LTarget := FModel.Scopes[
@@ -1645,6 +1861,25 @@ begin
         if LTarget <> NIL_SYM then
           CollectOverlayChain(LTarget, False, cbWithMember);
       end;
+      if FIsProjectModel then
+      begin
+        LTarget := FModel.Scopes[LScope].OwnerNode;
+        if (LTarget <> NIL_NODE) and
+           (FModel.Tree.Nodes[LTarget].Kind = nkWithStmt) then
+        begin
+          LBody := FModel.Tree.Nodes[LTarget].FirstChild;
+          while FModel.Tree.Nodes[LBody].NextSibling <> NIL_NODE do
+            LBody := FModel.Tree.Nodes[LBody].NextSibling;
+          LTarget := FModel.Tree.Nodes[LTarget].FirstChild;
+          while (LTarget <> NIL_NODE) and (LTarget <> LBody) do
+          begin
+            CollectProjectMembers(
+              FProj.WithTargetTypeX(FProjMid, LTarget), cbWithMember);
+            LTarget := FModel.Tree.Nodes[LTarget].NextSibling;
+          end;
+        end;
+      end;
+    end;
     FModel.EnumScopeDeep(LScope,
       procedure(ASym, AScopeOfSym: Integer)
       var
@@ -1671,12 +1906,14 @@ begin
       end);
     LScope := FModel.Scopes[LScope].Parent;
   end;
-  // 3. INHERITED members of the enclosing struct — the chain join only
-  // carries the struct's own scope; ancestors (overlay-declared and then
-  // cross-unit) are walked explicitly. Skips the first scope: step 2 had it.
-  LOv := EnclosingStructSym(AInfo.Scope);
-  if LOv <> NIL_SYM then
-    CollectOverlayChain(LOv, False, cbStructMember);
+  // 3. INHERITED members of the enclosing struct NEST — the chain join only
+  // carries the structs' own scopes; ancestors (overlay-declared and then
+  // cross-unit) are walked explicitly, for EVERY nesting level (a nested
+  // class's method reaches the outer class's inherited members too). Skips
+  // each first scope: step 2 had them.
+  EnsureAncestry(AInfo.Scope);
+  for LIdx := 0 to High(FCaretStructs) do
+    CollectOverlayChain(FCaretStructs[LIdx], False, cbStructMember);
   // 4. Cross-unit names: uses (reverse, last-wins), System, SysInit.
   CollectUsesImports(LInterfaceOnly);
   // 5. Compiler seeds, last — every real declaration outranks a seed.
@@ -1826,6 +2063,11 @@ begin
     Exit(ccStatement);
   LKind := LTS.Tokens[LPrev].Kind;
   case LKind of
+    tkInherited:
+      // `inherited |` — the ancestor's members (12.1.2).
+      Result := ccInherited;
+    tkGoto:
+      Result := ccLabel;
     tkColon:
       // `x: |` is a TYPE in a declaration, a STATEMENT after a case/goto
       // label, an EXPRESSION in an aggregate initializer's `field: value`
@@ -2013,12 +2255,47 @@ begin
         if ComplValid(LRef) then
         begin
           FClassSide := LRef.IsTypeRef;
+          // `@TClass.Method` takes an INSTANCE method's address through the
+          // class name (the vtable-building idiom) — the class-side filter
+          // stands down under an address-of.
+          if FClassSide then
+          begin
+            LNode := LInfo.DotBase;
+            while FModel.Tree.Nodes[LNode].FirstChild <> NIL_NODE do
+              LNode := FModel.Tree.Nodes[LNode].FirstChild;
+            LNode := FModel.Tree.Nodes[LNode].FirstToken;   // visible idx
+            if (LNode >= 0) and (LNode <= High(FModel.Tree.Source.Visible))
+               and (FModel.Tree.Source.Visible[LNode].FileId = 0) then
+            begin
+              LNode := PrevVisibleRaw(
+                FModel.Tree.Source.Visible[LNode].TokenIndex - 1);
+              if (LNode >= 0) and
+                 (FModel.Tree.Source.Files[0].Tokens[LNode].Kind = tkAt) then
+                FClassSide := False;
+            end;
+          end;
           EnsureAncestry(LInfo.Scope);
           CollectMembers(LRef);
         end;
       end;
     ccUses:
       CollectUnitNames;
+    ccInherited:
+      begin
+        // The ancestor of the innermost enclosing struct, instance side.
+        EnsureAncestry(LInfo.Scope);
+        if Length(FCaretStructs) > 0 then
+        begin
+          LRef := OverlayHeritageRef(FCaretStructs[0], 0);
+          FBaseOwnUnit := True;
+          if LRef.OvSym <> NIL_SYM then
+            CollectOverlayChain(LRef.OvSym, True, cbMember)
+          else
+            CollectProjectMembers(LRef.X, cbMember);
+        end;
+      end;
+    ccLabel:
+      CollectScope(LInfo);   // AddSym filters to skLabel under ccLabel
     ccRecField:
       begin
         // The enclosing aggregate's record type, fields only.

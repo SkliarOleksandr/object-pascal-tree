@@ -38,7 +38,7 @@ const
   /// patch component is what makes this able to answer "which build is this";
   /// what a consumer can RELY on is expressed by its own cMin... constant.
   /// </summary>
-  PasTreeVersion = '0.5.0';
+  PasTreeVersion = '0.5.1';
 
 /// <summary>
 /// The last-write time of a binary, formatted, or '' if it cannot be read.
