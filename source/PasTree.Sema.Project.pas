@@ -10204,6 +10204,9 @@ begin
       Report('cancelled');
       Exit;
     end;
+    // Sub-phase timings, same granularity AnalyzeProject reports: a single
+    // 'cross=6900' says only THAT the finalizer is slow, never which pass.
+    StageMark('declared');
     LN := FModels.Count;   // it may have loaded newly-imported units
     Report('cross:xresolve');
     PrepareDeclWork(LN);
@@ -10216,8 +10219,10 @@ begin
       Report('cancelled');
       Exit;
     end;
+    StageMark('xresolve');
     Report('cross:inherited');
     RunInheritedPass(LN);
+    StageMark('inherited');
     // Reads type nodes the inherited pass just COMMITTED — see
     // CrossResolveWith. Kept inside the same reported step (it is the same
     // "resolve what the parallel pass deferred" phase, just a later slice).
@@ -10227,6 +10232,7 @@ begin
       Report('cancelled');
       Exit;
     end;
+    StageMark('with');
     Report('cross:calls');
     ForEachIndex(LN - 1, 'cross-resolve',      procedure(AIdx: Integer)
       begin
@@ -10239,6 +10245,7 @@ begin
       Report('cancelled');
       Exit;
     end;
+    StageMark('calls');
     Report('cross:bindx');
     for LIdx := 0 to FModels.Count - 1 do
     begin
@@ -10249,8 +10256,10 @@ begin
       end;
       BindTypesX(LIdx);
     end;
+    StageMark('bindx');
     Report('cross:xtype');
     RunCrossTypePass(LN);
+    StageMark('xtype');
     // A cancel that landed inside the last pass must not report 'done' with
     // a half-run pass behind it — the host would treat the project as good.
     if Cancelled then
@@ -10264,7 +10273,7 @@ begin
     // See AnalyzeProject. On a cancelled run the caches stay — the host
     // discards a cancelled project wholesale anyway.
     FSM.ReleaseAnalysisCaches;
-    StageMark('cross');
+    StageMark('final');
     Recount;
     Report('done');
 

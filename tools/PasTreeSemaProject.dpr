@@ -472,8 +472,13 @@ begin
       else if ParamStr(GIdx).StartsWith('-L', True) and
               (Length(ParamStr(GIdx)) > 2) then
         GExtraPaths := GExtraPaths + [Copy(ParamStr(GIdx), 3, MaxInt)]
+      // Through ConfigureThreadPool, not SetMaxWorkerThreads directly: the
+      // project's constructor pins the pool (Min first, then Max) and ignores
+      // a bare SetMaxWorkerThreads made before it — the flag silently did
+      // nothing. ConfigureThreadPool is first-caller-wins, so doing it here
+      // makes the constructor's later call the no-op instead.
       else if ParamStr(GIdx).StartsWith('-threads:', True) then
-        TThreadPool.Default.SetMaxWorkerThreads(
+        TPasSemaProject.ConfigureThreadPool(
           StrToIntDef(Copy(ParamStr(GIdx), 10, MaxInt), 0));
     // A .dproj argument means -dproj; asking for it explicitly is redundant
     // but harmless.
