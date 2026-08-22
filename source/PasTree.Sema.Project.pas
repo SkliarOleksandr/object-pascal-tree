@@ -3686,6 +3686,16 @@ end;
 // E2035/E2034 only if no candidate's arity admits the argument count. Runs only
 // for units with resolved uses (complete candidate visibility).
 procedure TPasSemaProject.CheckCalls(AId: Integer);
+type
+  // One candidate's arity facts, cached per callee NAME (below).
+  TCallArity = record
+    Req, Tot: Integer;
+    Variadic: Boolean;
+  end;
+  TSweep = record
+    Skip: Boolean;                 // a candidate had no param info -> bail
+    Arities: TArray<TCallArity>;
+  end;
 var
   LModel: TPasSemaModel;
   LNode, LCallee, LArg, LArgCount, LLocalHead, LUid, LS, LIdx: Integer;
@@ -3693,6 +3703,15 @@ var
   LAnyFit, LAnyVariadic, LHaveAny, LSkip: Boolean;
   LName: string;
   LExt: TPasExtRef;
+  // The uses-sweep result depends only on the callee NAME (the uses list is
+  // fixed per unit), yet it used to run per CALL NODE — a unit calling
+  // `Format` 500 times paid the 40-unit sweep, and RoutineArity per candidate,
+  // 500 times. Same cure as SelectCallTarget's UsesHeads memo: one sweep per
+  // distinct name per unit, caching each candidate's (Req, Tot, Variadic) —
+  // which are symbol invariants — so a repeat call only re-checks the fit
+  // against ITS argument count. Worker-local, no locks.
+  LSweeps: TDictionary<string, TSweep>;
+  LSweep: TSweep;
 
   procedure Consider(AMid, AHead: Integer);
   var
@@ -3720,11 +3739,63 @@ var
     end;
   end;
 
+  // Collect one unit's chain of AHead into ASweep (the cache-building
+  // counterpart of Consider; fit is NOT computed here — it is per-call).
+  procedure Gather(AMid, AHead: Integer; var ASweep: TSweep;
+    var ACount: Integer);
+  var
+    LCand, LReq, LTot: Integer;
+    LVariadic: Boolean;
+  begin
+    LCand := AHead;
+    while LCand <> NIL_SYM do
+    begin
+      if FModels[AMid].Symbols[LCand].Kind <> skRoutine then
+        Break;
+      if not RoutineArity(AMid, LCand, LReq, LTot, LVariadic) then
+      begin
+        ASweep.Skip := True;
+        Exit;
+      end;
+      if ACount = Length(ASweep.Arities) then
+        SetLength(ASweep.Arities, ACount * 2 + 4);
+      ASweep.Arities[ACount].Req := LReq;
+      ASweep.Arities[ACount].Tot := LTot;
+      ASweep.Arities[ACount].Variadic := LVariadic;
+      Inc(ACount);
+      LCand := FModels[AMid].Symbols[LCand].NextOverload;
+    end;
+  end;
+
+  function SweepFor(const AName: string): TSweep;
+  var
+    LI, LUnit, LHead, LCount: Integer;
+  begin
+    Result.Skip := False;
+    Result.Arities := nil;
+    LCount := 0;
+    for LI := 0 to High(LModel.UsesList) do
+    begin
+      LUnit := LModel.UsesList[LI].UnitId;
+      if LUnit < 0 then
+        Continue;
+      LHead := FModels[LUnit].Resolve(FModels[LUnit].InterfaceScope, AName);
+      if (LHead <> NIL_SYM) and
+         (FModels[LUnit].Symbols[LHead].Kind = skRoutine) then
+        Gather(LUnit, LHead, Result, LCount);
+      if Result.Skip then
+        Break;
+    end;
+    SetLength(Result.Arities, LCount);
+  end;
+
 begin
   LModel := FModels[AId];
   if (Length(LModel.UsesList) = 0) or not LModel.AllUsesResolved then
     Exit;
 
+  LSweeps := nil;
+  try
   for LNode := 0 to High(LModel.RefMap) do
   begin
     if LModel.Tree.Nodes[LNode].Kind <> nkCall then
@@ -3778,21 +3849,35 @@ begin
       end;
     end;
 
-    // Same-named routines from every resolved used unit.
+    // Same-named routines from every resolved used unit — through the
+    // per-name cache (see LSweeps above).
     if not LSkip then
     begin
       LName := LModel.Tree.NodeNameLower(LCallee);
-      for LIdx := 0 to High(LModel.UsesList) do
+      if LSweeps = nil then
+        LSweeps := TDictionary<string, TSweep>.Create;
+      if not LSweeps.TryGetValue(LName, LSweep) then
       begin
-        LUid := LModel.UsesList[LIdx].UnitId;
-        if LUid < 0 then
-          Continue;
-        LS := FModels[LUid].Resolve(FModels[LUid].InterfaceScope, LName);
-        if (LS <> NIL_SYM) and (FModels[LUid].Symbols[LS].Kind = skRoutine) then
-          Consider(LUid, LS);
-        if LSkip then
-          Break;
+        LSweep := SweepFor(LName);
+        LSweeps.Add(LName, LSweep);
       end;
+      if LSweep.Skip then
+        LSkip := True
+      else
+        for LIdx := 0 to High(LSweep.Arities) do
+        begin
+          LHaveAny := True;
+          if LSweep.Arities[LIdx].Variadic then
+            LAnyVariadic := True;
+          if LSweep.Arities[LIdx].Req < LMinReq then
+            LMinReq := LSweep.Arities[LIdx].Req;
+          if LSweep.Arities[LIdx].Tot > LMaxTot then
+            LMaxTot := LSweep.Arities[LIdx].Tot;
+          if LSweep.Arities[LIdx].Variadic or
+             ((LArgCount >= LSweep.Arities[LIdx].Req) and
+              (LArgCount <= LSweep.Arities[LIdx].Tot)) then
+            LAnyFit := True;
+        end;
     end;
 
     if LSkip or not LHaveAny or LAnyVariadic or LAnyFit or (LMaxTot < 0) then
@@ -3828,6 +3913,9 @@ begin
       EmitAt(LModel, LNode, 'E2035', SE2035_NotEnoughActualParams)
     else if LArgCount > LMaxTot then
       EmitAt(LModel, LNode, 'E2034', SE2034_TooManyActualParams);
+  end;
+  finally
+    LSweeps.Free;
   end;
 end;
 
