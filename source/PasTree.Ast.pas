@@ -194,6 +194,9 @@ type
     { The same slice as a NAME KEY: lower-cased, leading '&' stripped. Use this
       for every declaration and lookup key — see the implementation. }
     function NodeNameLower(AIndex: Integer): string;
+    { Non-allocating SameText(NodeText(AIndex), AWord) — the word-test
+      counterpart of SliceEqualsWord for a node's first token. }
+    function NodeTextEquals(AIndex: Integer; const AWord: string): Boolean;
     { Compact S-expression dump for golden tests:
       Kind or Kind'text' or Kind(children...). }
     function Dump(AIndex: Integer): string;
@@ -302,6 +305,22 @@ begin
       Inc(LCh, 32);
     LOut[LIdx] := LCh;
   end;
+end;
+
+function TPasTree.NodeTextEquals(AIndex: Integer; const AWord: string): Boolean;
+var
+  LText: PChar;
+  LLen: Integer;
+begin
+  // Same bounds backstop as NodeText; same '&' semantics as SameText on the
+  // copied text (an escaped identifier keeps its '&' and never matches).
+  if (AIndex < 0) or (AIndex > High(Nodes)) then
+    Exit(False);
+  if (Nodes[AIndex].FirstToken < 0) or
+     (Nodes[AIndex].FirstToken > High(Source.Visible)) then
+    Exit(False);
+  Source.VisibleSlice(Nodes[AIndex].FirstToken, LText, LLen);
+  Result := SliceEqualsWord(LText, LLen, AWord);
 end;
 
 function TPasTree.NodeText(AIndex: Integer): string;

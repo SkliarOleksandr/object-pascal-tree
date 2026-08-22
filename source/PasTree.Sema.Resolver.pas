@@ -157,6 +157,7 @@ implementation
 
 uses
   System.SysUtils,
+  System.Generics.Collections,
   PasTree.Preprocessor,
   PasTree.Sema.Builtins,
   PasTree.Sema.Diagnostics,
@@ -339,14 +340,20 @@ end;
 // Parameter count of an already-collected routine symbol (its param scope).
 function TPasSemaResolver.RoutineParamNameCount(ASym: Integer): Integer;
 var
-  LScope, LS: Integer;
+  LScope, LIdx: Integer;
+  LSyms: TList<Integer>;
 begin
+  // Index loop, not for-in: runs per interface-head candidate when matching
+  // impl routines to overload chains, and a for-in over TList allocates.
   Result := 0;
   LScope := FModel.Symbols[ASym].MemberScope;
-  if (LScope = NIL_SCOPE) or (FModel.Scopes[LScope].Symbols = nil) then
+  if LScope = NIL_SCOPE then
     Exit;
-  for LS in FModel.Scopes[LScope].Symbols do
-    if FModel.Symbols[LS].Kind = skParam then
+  LSyms := FModel.Scopes[LScope].Symbols;
+  if LSyms = nil then
+    Exit;
+  for LIdx := 0 to LSyms.Count - 1 do
+    if FModel.Symbols[LSyms[LIdx]].Kind = skParam then
       Inc(Result);
 end;
 
@@ -435,17 +442,24 @@ var
   LChild, LType: Integer;
   LSep: TPasTokenKind;
   LSyms: TArray<Integer>;
+  LCount: Integer;
   LDone: Boolean;
   LIdx: Integer;
 begin
   LChild := SkipAttr(FirstChild(ADecl));
   LType := NIL_NODE;
+  // Count-tracked doubling: `+ [x]` re-copied the array per declared name,
+  // once for every name in every var/field/param group in the closure.
   LSyms := nil;
+  LCount := 0;
   LDone := False;
   while (LChild <> NIL_NODE) and (KindOf(LChild) = nkIdent) and not LDone do
   begin
     LSep := SepKindAfter(LChild);
-    LSyms := LSyms + [DeclareSym(AScope, AKind, NodeText(LChild), LChild)];
+    if LCount = Length(LSyms) then
+      SetLength(LSyms, LCount * 2 + 4);
+    LSyms[LCount] := DeclareSym(AScope, AKind, NodeText(LChild), LChild);
+    Inc(LCount);
     if LSep = tkColon then
     begin
       LType := NextSib(LChild);
@@ -456,11 +470,11 @@ begin
     else
       LDone := True;  // untyped parameter, or end
   end;
-  for LIdx := 0 to High(LSyms) do
+  for LIdx := 0 to LCount - 1 do
     FModel.Symbols[LSyms[LIdx]].TypeNode := LType;
   // A parameter with a value after its type has a default (optional argument).
   if (AKind = skParam) and (LType <> NIL_NODE) and (NextSib(LType) <> NIL_NODE) then
-    for LIdx := 0 to High(LSyms) do
+    for LIdx := 0 to LCount - 1 do
       FModel.Symbols[LSyms[LIdx]].Flags :=
         FModel.Symbols[LSyms[LIdx]].Flags + [sfHasDefault];
   NotePendingAggregate(LType);
@@ -1339,12 +1353,16 @@ begin
         if KindOf(ANode) = nkInlineConst then
           LKind := skConst;
         var LSyms: TArray<Integer> := nil;
+        var LSymCount := 0;
         var LType := NIL_NODE;
         LName := FirstChild(ANode);
         while (LName <> NIL_NODE) and (KindOf(LName) = nkIdent) do
         begin
           var LSep := SepKindAfter(LName);
-          LSyms := LSyms + [DeclareSym(AScope, LKind, NodeText(LName), LName)];
+          if LSymCount = Length(LSyms) then
+            SetLength(LSyms, LSymCount * 2 + 4);
+          LSyms[LSymCount] := DeclareSym(AScope, LKind, NodeText(LName), LName);
+          Inc(LSymCount);
           if LSep = tkComma then
             LName := NextSib(LName)
           else
@@ -1357,7 +1375,7 @@ begin
             Break;
           end;
         end;
-        for var LIdx := 0 to High(LSyms) do
+        for var LIdx := 0 to LSymCount - 1 do
           FModel.Symbols[LSyms[LIdx]].TypeNode := LType;
         NotePendingAggregate(LType);
         // Everything after the last NAME — the type expression and/or the
@@ -2195,7 +2213,8 @@ end;
   declared type per-ELEMENT already, so the type symbol IS the element's. }
 function TPasSemaResolver.DefaultArrayPropTypeSym(ATypeSym: Integer): Integer;
 var
-  LScope, LDepth, LSym, LDecl, LChild: Integer;
+  LScope, LDepth, LIdx, LSym, LDecl, LChild: Integer;
+  LSyms: TList<Integer>;
   LHasParams, LHasDefault: Boolean;
 begin
   Result := NIL_SYM;
@@ -2204,35 +2223,42 @@ begin
   begin
     Inc(LDepth);
     LScope := FModel.Symbols[ATypeSym].MemberScope;
-    if (LScope <> NIL_SCOPE) and (FModel.Scopes[LScope].Symbols <> nil) then
+    if LScope <> NIL_SCOPE then
+    begin
       // The scope's OWN declaration list, not a scan of every symbol in the
       // unit: this runs per with-target, and a whole-model scan on a shared
-      // path is the perf trap this codebase has hit three times.
-      for LSym in FModel.Scopes[LScope].Symbols do
-      begin
-        if FModel.Symbols[LSym].Kind <> skProperty then
-          Continue;
-        LDecl := FModel.Symbols[LSym].DeclNode;
-        if LDecl = NIL_NODE then
-          Continue;
-        LDecl := FTree.Nodes[LDecl].Parent;
-        if (LDecl = NIL_NODE) or (KindOf(LDecl) <> nkPropertyDecl) then
-          Continue;
-        LHasParams := False;
-        LHasDefault := False;
-        LChild := FirstChild(LDecl);
-        while LChild <> NIL_NODE do
+      // path is the perf trap this codebase has hit three times. Index loop
+      // and a slice compare — the for-in enumerator and the lowered copy per
+      // prop-spec were both allocations on the same per-with-target path.
+      LSyms := FModel.Scopes[LScope].Symbols;
+      if LSyms <> nil then
+        for LIdx := 0 to LSyms.Count - 1 do
         begin
-          if KindOf(LChild) = nkParams then
-            LHasParams := True
-          else if (KindOf(LChild) = nkPropSpec) and
-                  (NodeNameLower(LChild) = 'default') then
-            LHasDefault := True;
-          LChild := NextSib(LChild);
+          LSym := LSyms[LIdx];
+          if FModel.Symbols[LSym].Kind <> skProperty then
+            Continue;
+          LDecl := FModel.Symbols[LSym].DeclNode;
+          if LDecl = NIL_NODE then
+            Continue;
+          LDecl := FTree.Nodes[LDecl].Parent;
+          if (LDecl = NIL_NODE) or (KindOf(LDecl) <> nkPropertyDecl) then
+            Continue;
+          LHasParams := False;
+          LHasDefault := False;
+          LChild := FirstChild(LDecl);
+          while LChild <> NIL_NODE do
+          begin
+            if KindOf(LChild) = nkParams then
+              LHasParams := True
+            else if (KindOf(LChild) = nkPropSpec) and
+                    FTree.NodeTextEquals(LChild, 'default') then
+              LHasDefault := True;
+            LChild := NextSib(LChild);
+          end;
+          if LHasParams and LHasDefault then
+            Exit(FModel.Symbols[LSym].TypeSym);
         end;
-        if LHasParams and LHasDefault then
-          Exit(FModel.Symbols[LSym].TypeSym);
-      end;
+    end;
     ATypeSym := AncestorTypeSym(ATypeSym);
   end;
 end;

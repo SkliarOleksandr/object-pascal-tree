@@ -53,7 +53,7 @@ type
     function CallResult(N: Integer): Integer;
     function ParamsOf(AScope: Integer): TArray<Integer>;
     function ArgCount(ACall: Integer): Integer;
-    function ScoreArgs(ACall, AScope: Integer): Integer;
+    function ScoreArgs(ACall: Integer; const AParams: TArray<Integer>): Integer;
     function IsVarargs(AScope: Integer): Boolean;
     function SelectOverload(ACall, AHead: Integer): Integer;
     function MemberResult(N: Integer): Integer;
@@ -747,20 +747,21 @@ begin
   end;
 end;
 
-// Sum a conservative match score of the call's args against a param scope.
-function TPasSemaTyper.ScoreArgs(ACall, AScope: Integer): Integer;
+// Sum a conservative match score of the call's args against a param list.
+// Takes the params the caller already built (SelectOverload had called
+// ParamsOf twice per fitting candidate — one TArray allocation each).
+function TPasSemaTyper.ScoreArgs(ACall: Integer;
+  const AParams: TArray<Integer>): Integer;
 var
-  LParams: TArray<Integer>;
   LArg, LIdx, LAt, LPt: Integer;
 begin
   Result := 0;
-  LParams := ParamsOf(AScope);
   LArg := Sib(Child(ACall));
   LIdx := 0;
-  while (LArg <> NIL_NODE) and (LIdx <= High(LParams)) do
+  while (LArg <> NIL_NODE) and (LIdx <= High(AParams)) do
   begin
     LAt := M.ExprType[LArg];
-    LPt := M.Symbols[LParams[LIdx]].TypeSym;
+    LPt := M.Symbols[AParams[LIdx]].TypeSym;
     if (LAt <> NIL_SYM) and (LPt <> NIL_SYM) then
       if LAt = LPt then
         Inc(Result, 2)
@@ -783,7 +784,7 @@ begin
   LChild := Child(LRoutine);
   while LChild <> NIL_NODE do
   begin
-    if (Kind(LChild) = nkDirective) and SameText(Txt(LChild), 'varargs') then
+    if (Kind(LChild) = nkDirective) and T.NodeTextEquals(LChild, 'varargs') then
       Exit(True);
     LChild := Sib(LChild);
   end;
@@ -851,7 +852,7 @@ begin
       if LVariadic or ((LArgs >= LReq) and (LArgs <= LTot)) then
       begin
         LAnyFit := True;
-        LScore := ScoreArgs(ACall, M.Symbols[LCand].MemberScope);
+        LScore := ScoreArgs(ACall, LParams);
         if LScore > LBestScore then
         begin
           LBestScore := LScore;
@@ -956,7 +957,10 @@ begin
     LScope := M.Symbols[LBaseTy].MemberScope;
     if LScope = NIL_SCOPE then
       Exit;
-    LMem := M.FindLocal(LScope, LowerCase(Txt(LName)));
+    // NodeNameLower, not LowerCase(Txt()): member keys are PasNameKey-
+    // normalized (leading '&' stripped), so the LowerCase form could never
+    // find an escaped member like X.&End — and it allocated twice.
+    LMem := M.FindLocal(LScope, T.NodeNameLower(LName));
   end;
   if LMem <> NIL_SYM then
     Result := M.Symbols[LMem].TypeSym;

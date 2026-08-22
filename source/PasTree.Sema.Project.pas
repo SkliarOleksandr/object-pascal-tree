@@ -3584,7 +3584,8 @@ function TPasSemaProject.RoutineArity(AMid, ASym: Integer;
   out AReq, ATot: Integer; out AVariadic: Boolean): Boolean;
 var
   LM: TPasSemaModel;
-  LScope, LS, LChild: Integer;
+  LScope, LS, LIdx, LChild: Integer;
+  LSyms: TList<Integer>;
   LSawDefault: Boolean;
 begin
   LM := FModels[AMid];
@@ -3595,8 +3596,14 @@ begin
   LSawDefault := False;
   // A lazy nil Symbols list is a recorded-but-empty param scope — a paramless
   // routine, arity 0/0, NOT the "no parameter scope" False above.
-  if LM.Scopes[LScope].Symbols <> nil then
-    for LS in LM.Scopes[LScope].Symbols do
+  // Index loop, not for-in: this runs per candidate per call site, and a
+  // for-in over TList mints a heap enumerator each time (same reasoning as
+  // ParamsOf/XParamSyms).
+  LSyms := LM.Scopes[LScope].Symbols;
+  if LSyms <> nil then
+    for LIdx := 0 to LSyms.Count - 1 do
+    begin
+      LS := LSyms[LIdx];
       if LM.Symbols[LS].Kind = skParam then
       begin
         Inc(ATot);
@@ -3605,11 +3612,12 @@ begin
         if not LSawDefault then
           Inc(AReq);
       end;
+    end;
   LChild := LM.Tree.Nodes[LM.Scopes[LScope].OwnerNode].FirstChild;
   while LChild <> NIL_NODE do
   begin
     if (LM.Tree.Nodes[LChild].Kind = nkDirective) and
-       SameText(LM.Tree.NodeText(LChild), 'varargs') then
+       LM.Tree.NodeTextEquals(LChild, 'varargs') then
       AVariadic := True;
     LChild := LM.Tree.Nodes[LChild].NextSibling;
   end;
@@ -7060,7 +7068,7 @@ var
           // fine. Costs nothing on the hot path: guarded by RefMap and
           // ExtRefMap both having missed, which for an ordinary identifier
           // they do not.
-          else if SameText(LM.Tree.NodeText(N), 'Self') then
+          else if LM.Tree.NodeTextEquals(N, 'Self') then
           begin
             LSym := StructSymOfNode(LM, N);
             if LSym <> NIL_SYM then
@@ -7157,7 +7165,7 @@ var
           // expression is not merely un-reported but right: `Length(TBytes
           // .Create(...))` needs an array, not nothing. No binding is recorded,
           // since there is nothing to navigate to.
-          else if XValid(LBX) and SameText(LM.Tree.NodeText(LName), 'create') and
+          else if XValid(LBX) and LM.Tree.NodeTextEquals(LName, 'create') and
                   IsTypeDesignator(LBase) and IsDynArrayTypeX(LBX) then
           begin
             LX[N] := LBX;
@@ -8671,8 +8679,9 @@ begin
     // right operand. Only `as`; any other binary operator yields a value no
     // with can open anyway.
     nkBinaryOp:
+      // `as` is a reserved word: the operator token's KIND says it, free.
       if (LM.Tree.Nodes[ANode].Aux >= 0) and
-         SameText(LM.Tree.Source.VisibleText(LM.Tree.Nodes[ANode].Aux), 'as')
+         (LM.Tree.Source.VisibleToken(LM.Tree.Nodes[ANode].Aux).Kind = tkAs)
       then
       begin
         LBase := LM.Tree.Nodes[ANode].FirstChild;
@@ -8815,7 +8824,7 @@ begin
         // its type is the enclosing struct, which is exactly what
         // StructSymOfNode answers. Real shape: `with Self.TreeViewControl do`,
         // where dropping the qualifier's type loses the whole with scope.
-        else if SameText(LM.Tree.NodeText(ANode), 'Self') then
+        else if LM.Tree.NodeTextEquals(ANode, 'Self') then
         begin
           LSym := StructSymOfNode(LM, ANode);
           if LSym <> NIL_SYM then
