@@ -153,6 +153,33 @@ type
     PendingUnit: string;
   end;
 
+  { One resolved target of a located call (CallAt): a routine its designator
+    may bind to — one entry PER OVERLOAD, unlike completion rows, which
+    collapse the family (a host renders each as its own signature). The
+    display fields are materialized eagerly; Mid/Sym/Ctx follow the same
+    LIFETIME rule as TPasComplItem's. }
+  TPasCallTarget = record
+    Mid: Integer;         // declaring model id; -1 = the overlay model
+    Sym: Integer;
+    Ctx: Integer;         // instantiation frame (project members); NIL_INST
+    Name: string;         // original spelling
+    HeadWord: string;     // 'function'/'procedure'/'constructor'/... ; ''
+    ParamsText: string;   // '(...)' display text; '' when parameterless
+    HasParams: Boolean;   // same semantics as ItemHasParams
+    ResultText: string;   // result type display text; '' for procedures
+  end;
+
+  { CallAt's answer: where the enclosing call opens, which argument the caret
+    is in, and what the callee resolves to. Targets may be EMPTY with CallAt
+    still True — a real call whose name nothing can resolve is an honest
+    empty, the same contract as CompleteAt's empty list. }
+  TPasCallInfo = record
+    OpenLine: Integer;    // 1-based position of the call's '('
+    OpenCol: Integer;
+    ArgIndex: Integer;    // active argument: top-level commas before caret
+    Targets: TArray<TPasCallTarget>;
+  end;
+
   { Per-model caret queries and candidate collection. Build one per model
     SNAPSHOT — the constructor precomputes the raw->visible map (the same
     shape TPasNavigator caches per model); a host that keeps a model across
@@ -198,6 +225,7 @@ type
     FCaretStructs: TArray<Integer>;
     FAncestryBuilt: Boolean;
     function RawTokenAt(AOffset: Integer): Integer;
+    function CaretOffset(ALine, ACol: Integer; out AOffset: Integer): Boolean;
     function PrevVisibleRaw(ARaw: Integer): Integer;
     function LeftmostVis(ANode: Integer): Integer;
     function InnermostNodeAt(AVis: Integer): Integer;
@@ -213,6 +241,24 @@ type
     function DesignatorType(ANode, ADepth: Integer): TPasComplTypeRef;
     function MemberOf(const ABase: TPasComplTypeRef; const AKey: string;
       ADepth: Integer): TPasComplTypeRef;
+    function MemberSymOf(const ABase: TPasComplTypeRef; const AKey: string;
+      ADepth: Integer; out AMid, ASym, ACtx: Integer): Boolean;
+    // accessors' shared core (AMid = -1 means the overlay model)
+    function SymModelOf(AMid: Integer; const AWhere: string;
+      out AModel: TPasSemaModel): Boolean;
+    function SymHeadWord(AModel: TPasSemaModel; ASym: Integer): string;
+    function SymParamsNode(AModel: TPasSemaModel; ASym: Integer): Integer;
+    function SymParamsText(AMid, ASym: Integer): string;
+    function SymHasParams(AMid, ASym: Integer): Boolean;
+    function IsTypeSym(AMid, ASym: Integer): Boolean;
+    // CallAt internals
+    function DesignatorNodeAtVis(AVis: Integer): Integer;
+    function CalleeSyms(ANode, ACallNode: Integer;
+      out AMid, ASym, ACtx: Integer): Boolean;
+    procedure AddCallTargets(AMid, ASym, ACtx: Integer;
+      var AInfo: TPasCallInfo);
+    procedure AppendCallTarget(AMid, ASym, ACtx: Integer;
+      var AInfo: TPasCallInfo);
     function IsDescendantNode(ANode, AAncestor: Integer): Boolean;
     function UpChainKind(ANode: Integer;
       const AKinds: array of TPasNodeKind): TPasNodeKind;
@@ -275,6 +321,32 @@ type
       separates an LSP Constructor kind from a Function, and what a display
       column shows instead of the generic "routine". }
     function ItemHeadWord(const AItem: TPasComplItem): string;
+    { The declaration's parameter list as display text — '(const AName:
+      string; ACount: Integer)' — whitespace runs collapsed to one space
+      (a multi-line list must read as one line; any length cap is the
+      host's). '' for parameterless routines and non-routines. Builtins
+      answer from the curated seed-table signatures (PasBuiltinSignature). }
+    function ItemParamsText(const AItem: TPasComplItem): string;
+    { Does calling this routine take at least one argument? SEMANTICS: an
+      empty `()` declaration answers False — this drives a host's auto-
+      parenthesis, and a parameterless routine must stay bare (which is why
+      RoutineHasParams's "has an nkParams" definition is the wrong one
+      here). Builtins answer the seed table's takes-arguments flag: names
+      whose every argument is optional (Exit, Halt, Writeln) are False. }
+    function ItemHasParams(const AItem: TPasComplItem): Boolean;
+    { The call context for signature help: locates the innermost call whose
+      ARGUMENT LIST encloses the caret (backward token walk — nesting over
+      ()/[] respected, strings/comments are single tokens and cannot fool
+      it; an enclosing indexer or grouping paren is stepped over to the
+      call outside it, and a designator that names a TYPE is a cast, also
+      stepped over), counts the active argument (top-level commas), and
+      resolves the designator through the overlay+bridge — the same
+      DesignatorType/MemberOf machinery member completion uses, so
+      `Obj.Method(|` and freshly typed cross-unit calls both answer.
+      False when the caret sits in no call's arguments (including a
+      DECLARATION's parameter list). True with empty Targets is a real
+      answer: a call whose name nothing resolves. }
+    function CallAt(ALine, ACol: Integer; out AInfo: TPasCallInfo): Boolean;
     { The innermost struct type symbol whose member scope encloses AScope —
       the `Self` context: NodeScope's chain carries it both inside a struct
       DECLARATION (the sckStruct scope's own StructSym) and inside a method
@@ -287,7 +359,8 @@ type
 implementation
 
 uses
-  System.SysUtils;
+  System.SysUtils,
+  PasTree.Sema.Builtins;
 
 { TPasCompletion }
 
@@ -342,6 +415,33 @@ begin
     else
       Exit(LMid);
   end;
+end;
+
+// 1-based (line, col) -> character offset into Files[0], clamped to the line
+// end the way every host position is read (SynEdit's virtual space means "at
+// the end"). False when the line itself is out of range.
+function TPasCompletion.CaretOffset(ALine, ACol: Integer;
+  out AOffset: Integer): Boolean;
+var
+  LTS: TPasTokenStream;
+  LLineEnd: Integer;
+begin
+  Result := False;
+  AOffset := 0;
+  LTS := FModel.Tree.Source.Files[0];
+  if (ALine < 1) or (ALine - 1 > High(LTS.LineStarts)) or (ACol < 1) then
+    Exit;
+  AOffset := LTS.LineStarts[ALine - 1] + (ACol - 1);
+  // Clamp a caret past the end of its line to the line end (before the line
+  // break, when there is one — landing ON the break is fine too, the trivia
+  // walk-back reads both the same way).
+  if ALine - 1 < High(LTS.LineStarts) then
+    LLineEnd := LTS.LineStarts[ALine]
+  else
+    LLineEnd := Length(LTS.Source);
+  if AOffset > LLineEnd then
+    AOffset := LLineEnd;
+  Result := True;
 end;
 
 // Nearest raw token at or before ARaw that has a visible mapping (skips
@@ -442,7 +542,7 @@ function TPasCompletion.CaretAt(ALine, ACol: Integer;
   out AInfo: TPasCaretInfo): Boolean;
 var
   LTS: TPasTokenStream;
-  LOffset, LLineEnd, LAnchorOff: Integer;
+  LOffset, LAnchorOff: Integer;
   LRaw, LPrevRaw: Integer;
   LKind: TPasTokenKind;
   LTok: TPasToken;
@@ -459,18 +559,8 @@ begin
   AInfo.DotBase := NIL_NODE;
 
   LTS := FModel.Tree.Source.Files[0];
-  if (ALine < 1) or (ALine - 1 > High(LTS.LineStarts)) or (ACol < 1) then
+  if not CaretOffset(ALine, ACol, LOffset) then
     Exit;
-  LOffset := LTS.LineStarts[ALine - 1] + (ACol - 1);
-  // Clamp a caret past the end of its line to the line end (before the line
-  // break, when there is one — landing ON the break is fine too, the trivia
-  // walk-back below reads both the same way).
-  if ALine - 1 < High(LTS.LineStarts) then
-    LLineEnd := LTS.LineStarts[ALine]
-  else
-    LLineEnd := Length(LTS.Source);
-  if LOffset > LLineEnd then
-    LOffset := LLineEnd;
 
   // Everything below reasons about the character position just LEFT of the
   // caret — that is where the text being completed attaches. A caret at the
@@ -1048,63 +1138,51 @@ begin
   end;
 end;
 
-// One member hop by NAME, for typing intermediate designator segments
-// (`A.B.` needs typeof(A.B), which needs member B of typeof(A)).
-function TPasCompletion.MemberOf(const ABase: TPasComplTypeRef;
-  const AKey: string; ADepth: Integer): TPasComplTypeRef;
+{ The member SYMBOL one dot-hop names — the SEARCH half of MemberOf, shared
+  with CallAt (which reports the symbol as a signature-help target where
+  MemberOf converts it to a TYPE for the next hop). Three spaces, in order:
+  a unit qualifier's exports (Resolve, not FindLocal — the deep lookup also
+  reaches the compiler seeds joined into the interface scope, which is what
+  makes `System.Delete` mean the intrinsic; a unit's own USES items live
+  there too but are not exports, so skUnitRef never chains), the overlay's
+  member scopes walking overlay heritage (64 hops, not 16 — same-unit
+  interface chains really run past 16, see EnsureAncestry), then the bridged
+  project ancestry (FindMemberX). False when nothing is found — including
+  the longer-dotted-unit-name and pending-qualifier shapes, which are
+  MemberOf's own business. }
+function TPasCompletion.MemberSymOf(const ABase: TPasComplTypeRef;
+  const AKey: string; ADepth: Integer;
+  out AMid, ASym, ACtx: Integer): Boolean;
 var
   LM: TPasSemaModel;
-  LSym, LScope, LMemMid, LMemSym, LCtx, LHop, LRoutine: Integer;
+  LSym, LScope, LHop: Integer;
   LCur, LHeritage: TPasComplTypeRef;
-  LFull: string;
 begin
-  Result := ComplNilRef;
+  Result := False;
+  AMid := -1;
+  ASym := NIL_SYM;
+  ACtx := NIL_INST;
   if (ADepth > 16) or (AKey = '') then
     Exit;
   if ABase.UnitMid >= 0 then
   begin
     if FProj = nil then
       Exit;
-    LM := ProjModel(ABase.UnitMid, 'MemberOfUnit');
+    LM := ProjModel(ABase.UnitMid, 'MemberSymOfUnit');
     if LM.InterfaceScope = NIL_SCOPE then
       Exit;
-    // Resolve, not FindLocal: the deep lookup also reaches the compiler
-    // seeds joined into the interface scope, which is what makes
-    // `System.Delete` / `System.PAnsiChar` mean the intrinsic (dcc allows
-    // qualifying ANY compiler-provided name with System).
     LSym := LM.Resolve(LM.InterfaceScope, AKey);
-    // A unit's own USES items live in its interface scope but are not its
-    // exports — `UnitA.UnitB` never chains (a hit here means the longer
-    // dotted UNIT name below, not a member).
     if (LSym <> NIL_SYM) and (LM.Symbols[LSym].Kind = skUnitRef) then
       LSym := NIL_SYM;
-    if LSym <> NIL_SYM then
-      Exit(TypeOfProjectSym(ABase.UnitMid, LSym, NIL_INST, ADepth + 1));
-    // Not a name in that unit — the qualifier may be the PREFIX of a longer
-    // dotted UNIT name (`System.AnsiStrings.FloatToText`: `System` resolved
-    // as a unit, but the real qualifier is System.AnsiStrings). Greedy
-    // longest-match; when even the longer name is no unit yet, it stays
-    // PENDING for the next segment (`System.Win.ComObj` needs two hops).
-    LFull := ChangeFileExt(ExtractFileName(FProj.ModelFile(ABase.UnitMid)),
-      '') + '.' + AKey;
-    Result.UnitMid := BridgeUnitMid(LFull);
-    if Result.UnitMid < 0 then
-      Result.PendingUnit := LFull;
-    Exit;
+    if LSym = NIL_SYM then
+      Exit;
+    AMid := ABase.UnitMid;
+    ASym := LSym;
+    Exit(True);
   end;
   if ABase.PendingUnit <> '' then
-  begin
-    LFull := ABase.PendingUnit + '.' + AKey;
-    Result.UnitMid := BridgeUnitMid(LFull);
-    if Result.UnitMid < 0 then
-      Result.PendingUnit := LFull;
     Exit;
-  end;
   LCur := ABase;
-  // Overlay hops: the base type (and possibly its overlay-declared
-  // ancestors) live in the buffer; the first hop that leaves it falls
-  // through to the project branch below. 64, not 16 — same-unit interface
-  // chains really do run past 16 (see EnsureAncestry's comment).
   for LHop := 1 to 64 do
   begin
     if LCur.OvSym = NIL_SYM then
@@ -1115,19 +1193,8 @@ begin
       LSym := FModel.FindLocalDeep(LScope, AKey);
       if LSym <> NIL_SYM then
       begin
-        // A constructor names the CONSTRUCTED type: T.Create is a T value.
-        LRoutine := RoutineNodeOf(FModel, LSym);
-        if (LRoutine <> NIL_NODE) and
-           (FModel.Tree.Source.VisibleToken(
-              FModel.Tree.Nodes[LRoutine].FirstToken).Kind = tkConstructor)
-        then
-        begin
-          Result := ABase;
-          Result.IsTypeRef := False;
-          Exit;
-        end;
-        Result := TypeOfOverlaySym(LSym, ADepth + 1);
-        Exit;
+        ASym := LSym;   // AMid stays -1: an overlay symbol
+        Exit(True);
       end;
     end;
     LHeritage := OverlayHeritageRef(LCur.OvSym, ADepth + 1);
@@ -1141,22 +1208,71 @@ begin
     Break;
   end;
   if XValid(LCur.X) and (FProj <> nil) then
+    Result := FProj.FindMemberX(FProjMid, LCur.X, AKey, AMid, ASym, ACtx);
+end;
+
+// One member hop by NAME, for typing intermediate designator segments
+// (`A.B.` needs typeof(A.B), which needs member B of typeof(A)).
+function TPasCompletion.MemberOf(const ABase: TPasComplTypeRef;
+  const AKey: string; ADepth: Integer): TPasComplTypeRef;
+var
+  LMemMid, LMemSym, LCtx, LRoutine: Integer;
+  LFull: string;
+begin
+  Result := ComplNilRef;
+  if (ADepth > 16) or (AKey = '') then
+    Exit;
+  if MemberSymOf(ABase, AKey, ADepth, LMemMid, LMemSym, LCtx) then
   begin
-    if FProj.FindMemberX(FProjMid, LCur.X, AKey, LMemMid, LMemSym, LCtx) then
+    // A constructor names the CONSTRUCTED type: T.Create is a T value — and
+    // the NAMED base, not the hop the walk had reached when the constructor
+    // was found: `TFoo.Create` constructs TFoo even when Create itself is
+    // inherited from another unit's TBar — returning the hop typed the
+    // value as TBar and silently lost TFoo's own members (the review's
+    // finding #1).
+    if LMemMid < 0 then
     begin
-      if FProj.IsConstructorSym(LMemMid, LMemSym) then
+      LRoutine := RoutineNodeOf(FModel, LMemSym);
+      if (LRoutine <> NIL_NODE) and
+         (FModel.Tree.Source.VisibleToken(
+            FModel.Tree.Nodes[LRoutine].FirstToken).Kind = tkConstructor)
+      then
       begin
-        // The NAMED base, not the hop the walk had reached when the
-        // constructor was found: `TFoo.Create` constructs TFoo even when
-        // Create itself is inherited from another unit's TBar — returning
-        // the hop typed the value as TBar and silently lost TFoo's own
-        // members (the review's finding #1).
         Result := ABase;
         Result.IsTypeRef := False;
         Exit;
       end;
-      Result := TypeOfProjectSym(LMemMid, LMemSym, LCtx, ADepth + 1);
+      Exit(TypeOfOverlaySym(LMemSym, ADepth + 1));
     end;
+    if (FProj <> nil) and FProj.IsConstructorSym(LMemMid, LMemSym) then
+    begin
+      Result := ABase;
+      Result.IsTypeRef := False;
+      Exit;
+    end;
+    Exit(TypeOfProjectSym(LMemMid, LMemSym, LCtx, ADepth + 1));
+  end;
+  // No member — the qualifier may be the PREFIX of a longer dotted UNIT
+  // name (`System.AnsiStrings.FloatToText`: `System` resolved as a unit,
+  // but the real qualifier is System.AnsiStrings). Greedy longest-match;
+  // when even the longer name is no unit yet, it stays PENDING for the
+  // next segment (`System.Win.ComObj` needs two hops).
+  if ABase.UnitMid >= 0 then
+  begin
+    if FProj = nil then
+      Exit;
+    LFull := ChangeFileExt(ExtractFileName(FProj.ModelFile(ABase.UnitMid)),
+      '') + '.' + AKey;
+    Result.UnitMid := BridgeUnitMid(LFull);
+    if Result.UnitMid < 0 then
+      Result.PendingUnit := LFull;
+  end
+  else if ABase.PendingUnit <> '' then
+  begin
+    LFull := ABase.PendingUnit + '.' + AKey;
+    Result.UnitMid := BridgeUnitMid(LFull);
+    if Result.UnitMid < 0 then
+      Result.PendingUnit := LFull;
   end;
 end;
 
@@ -2271,27 +2387,36 @@ begin
   Result := CompleteAt(ALine, ACol, LCaret, AContext, AItems);
 end;
 
-function TPasCompletion.ItemHeadWord(const AItem: TPasComplItem): string;
+// The model a (Mid, Sym) identity lives in: the overlay for -1, the project
+// model otherwise. False only for a project id with no project attached.
+function TPasCompletion.SymModelOf(AMid: Integer; const AWhere: string;
+  out AModel: TPasSemaModel): Boolean;
+begin
+  if AMid < 0 then
+  begin
+    AModel := FModel;
+    Exit(True);
+  end;
+  Result := FProj <> nil;
+  if Result then
+    AModel := ProjModel(AMid, AWhere)
+  else
+    AModel := nil;
+end;
+
+function TPasCompletion.SymHeadWord(AModel: TPasSemaModel;
+  ASym: Integer): string;
 var
-  LM: TPasSemaModel;
   LNode: Integer;
 begin
   Result := '';
-  if (AItem.Kind <> skRoutine) or (AItem.Sym = NIL_SYM) or
-     (AItem.Bucket = cbKeyword) then
-    Exit;
-  if AItem.Mid < 0 then
-    LM := FModel
-  else if FProj <> nil then
-    LM := ProjModel(AItem.Mid, 'ItemHeadWord')
-  else
-    Exit;
-  LNode := RoutineNodeOf(LM, AItem.Sym);
+  LNode := RoutineNodeOf(AModel, ASym);
   if LNode = NIL_NODE then
     Exit;
   // The token KIND already says it (this runs per display row); `operator`
   // is the one head that lexes as an identifier (a directive word).
-  case LM.Tree.Source.VisibleToken(LM.Tree.Nodes[LNode].FirstToken).Kind of
+  case AModel.Tree.Source.VisibleToken(
+    AModel.Tree.Nodes[LNode].FirstToken).Kind of
     tkProcedure:
       Result := 'procedure';
     tkFunction:
@@ -2301,10 +2426,461 @@ begin
     tkDestructor:
       Result := 'destructor';
   else
-    if LM.Tree.Source.VisibleTextEquals(LM.Tree.Nodes[LNode].FirstToken,
+    if AModel.Tree.Source.VisibleTextEquals(AModel.Tree.Nodes[LNode].FirstToken,
       'operator') then
       Result := 'operator';
   end;
+end;
+
+function TPasCompletion.ItemHeadWord(const AItem: TPasComplItem): string;
+var
+  LM: TPasSemaModel;
+begin
+  Result := '';
+  if (AItem.Kind <> skRoutine) or (AItem.Sym = NIL_SYM) or
+     (AItem.Bucket = cbKeyword) then
+    Exit;
+  if SymModelOf(AItem.Mid, 'ItemHeadWord', LM) then
+    Result := SymHeadWord(LM, AItem.Sym);
+end;
+
+// The nkParams child of a routine symbol's declaration; NIL_NODE when the
+// routine declares none (and for builtins, whose DeclNode is NIL_NODE).
+function TPasCompletion.SymParamsNode(AModel: TPasSemaModel;
+  ASym: Integer): Integer;
+var
+  LRoutine: Integer;
+begin
+  LRoutine := RoutineNodeOf(AModel, ASym);
+  if LRoutine = NIL_NODE then
+    Exit(NIL_NODE);
+  Result := AModel.Tree.Nodes[LRoutine].FirstChild;
+  while (Result <> NIL_NODE) and
+        (AModel.Tree.Nodes[Result].Kind <> nkParams) do
+    Result := AModel.Tree.Nodes[Result].NextSibling;
+end;
+
+// Whitespace runs collapsed to a single space — a multi-line parameter list
+// must read as one display line. Interior comments survive as their own
+// text; a declaration that comments its parameters is rare enough that
+// stripping them is not worth a token-wise rebuild here.
+function CollapseSpaces(const AText: string): string;
+var
+  LIdx, LOut: Integer;
+  LCh: Char;
+  LWasSpace: Boolean;
+begin
+  SetLength(Result, Length(AText));
+  LOut := 0;
+  LWasSpace := False;
+  for LIdx := 1 to Length(AText) do
+  begin
+    LCh := AText[LIdx];
+    if CharInSet(LCh, [#9, #10, #13, ' ']) then
+      LWasSpace := True
+    else
+    begin
+      if LWasSpace and (LOut > 0) then
+      begin
+        Inc(LOut);
+        Result[LOut] := ' ';
+      end;
+      LWasSpace := False;
+      Inc(LOut);
+      Result[LOut] := LCh;
+    end;
+  end;
+  SetLength(Result, LOut);
+end;
+
+function TPasCompletion.SymParamsText(AMid, ASym: Integer): string;
+var
+  LM: TPasSemaModel;
+  LSig: TPasBuiltinSig;
+  LParams, LChild: Integer;
+begin
+  Result := '';
+  if (ASym = NIL_SYM) or not SymModelOf(AMid, 'SymParamsText', LM) then
+    Exit;
+  if sfBuiltin in LM.Symbols[ASym].Flags then
+  begin
+    if PasBuiltinSignature(LM.Symbols[ASym].NameLower, LSig) then
+      Result := LSig.Params;
+    Exit;
+  end;
+  // An empty `()` renders as '' — "parameterless" is about the PARAMETERS,
+  // not the punctuation, and both spellings must display the same way.
+  LParams := SymParamsNode(LM, ASym);
+  if LParams = NIL_NODE then
+    Exit;
+  LChild := LM.Tree.Nodes[LParams].FirstChild;
+  while (LChild <> NIL_NODE) and
+        (LM.Tree.Nodes[LChild].Kind <> nkParam) do
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  if LChild <> NIL_NODE then
+    Result := CollapseSpaces(LM.Tree.NodeSpanText(LParams));
+end;
+
+function TPasCompletion.SymHasParams(AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LSig: TPasBuiltinSig;
+  LChild: Integer;
+begin
+  Result := False;
+  if (ASym = NIL_SYM) or not SymModelOf(AMid, 'SymHasParams', LM) then
+    Exit;
+  if sfBuiltin in LM.Symbols[ASym].Flags then
+  begin
+    if PasBuiltinSignature(LM.Symbols[ASym].NameLower, LSig) then
+      Result := LSig.HasArgs;
+    Exit;
+  end;
+  // An nkParams with no nkParam child is an empty `()` — False by contract.
+  LChild := SymParamsNode(LM, ASym);
+  if LChild <> NIL_NODE then
+    LChild := LM.Tree.Nodes[LChild].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LChild].Kind = nkParam then
+      Exit(True);
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+function TPasCompletion.ItemParamsText(const AItem: TPasComplItem): string;
+begin
+  Result := '';
+  if (AItem.Kind = skRoutine) and (AItem.Sym <> NIL_SYM) and
+     (AItem.Bucket <> cbKeyword) then
+    Result := SymParamsText(AItem.Mid, AItem.Sym);
+end;
+
+function TPasCompletion.ItemHasParams(const AItem: TPasComplItem): Boolean;
+begin
+  Result := (AItem.Kind = skRoutine) and (AItem.Sym <> NIL_SYM) and
+    (AItem.Bucket <> cbKeyword) and SymHasParams(AItem.Mid, AItem.Sym);
+end;
+
+{ ---- signature help (CallAt) ---------------------------------------------- }
+
+function TPasCompletion.IsTypeSym(AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+begin
+  Result := (ASym <> NIL_SYM) and SymModelOf(AMid, 'IsTypeSym', LM) and
+    (LM.Symbols[ASym].Kind in [skType, skBuiltinType]);
+end;
+
+// The largest designator-shaped node ending exactly at AVis — the callee of
+// a call whose nkCall node a broken parse did not produce. Climbs from the
+// innermost node while the parent is still designator-shaped AND still ends
+// at AVis (an nkCall parent ends past the '(', so the climb stops below it).
+function TPasCompletion.DesignatorNodeAtVis(AVis: Integer): Integer;
+var
+  LParent: Integer;
+begin
+  Result := NIL_NODE;
+  if AVis < 0 then
+    Exit;
+  Result := InnermostNodeAt(AVis);
+  while Result <> NIL_NODE do
+  begin
+    LParent := FModel.Tree.Nodes[Result].Parent;
+    if (LParent = NIL_NODE) or
+       not (FModel.Tree.Nodes[LParent].Kind in
+         [nkIdent, nkMember, nkParen, nkTypeArgs, nkIndex, nkDeref]) or
+       (FModel.Tree.Nodes[LParent].LastToken > AVis) then
+      Break;
+    Result := LParent;
+  end;
+end;
+
+{ The (Mid, Sym, Ctx) the call designator binds to — the analysis's own
+  arbitration first (CallTargetX/CallTarget on the nkCall node, filled on
+  analyzed models and for the overlay's intra-buffer calls), then the
+  structural walk the member-completion path uses: RefMap/ExtRefMap on a
+  plain name, BridgeName for one that leaves the buffer, DesignatorType +
+  MemberSymOf for a dotted one — which is exactly the bridged-designator
+  resolution the LSP's interim locator cannot do (`Obj.Method(|`, freshly
+  typed cross-unit calls). ACallNode is the nkCall when the AST produced
+  one; NIL_NODE from the broken-parse fallback. }
+function TPasCompletion.CalleeSyms(ANode, ACallNode: Integer;
+  out AMid, ASym, ACtx: Integer): Boolean;
+var
+  LKey: string;
+  LExt: TPasExtRef;
+  LBase: TPasComplTypeRef;
+  LName, LPeel: Integer;
+begin
+  Result := False;
+  AMid := -1;
+  ASym := NIL_SYM;
+  ACtx := NIL_INST;
+  if ACallNode <> NIL_NODE then
+  begin
+    if (FProj <> nil) and
+       FModel.CallTargetX.TryGetValue(ACallNode, LExt) then
+    begin
+      AMid := LExt.UnitId;
+      ASym := LExt.Sym;
+      Exit(True);
+    end;
+    if FModel.CallTarget.TryGetValue(ACallNode, ASym) and
+       (ASym <> NIL_SYM) then
+      Exit(True);
+    ASym := NIL_SYM;
+  end;
+  // Peel grouping parens and a generic-arguments wrapper down to the name.
+  LPeel := 0;
+  while (ANode <> NIL_NODE) and (LPeel < 8) and
+        (FModel.Tree.Nodes[ANode].Kind in [nkParen, nkTypeArgs]) do
+  begin
+    ANode := FModel.Tree.Nodes[ANode].FirstChild;
+    Inc(LPeel);
+  end;
+  if ANode = NIL_NODE then
+    Exit;
+  case FModel.Tree.Nodes[ANode].Kind of
+    nkIdent:
+      begin
+        ASym := FModel.RefMap[ANode];
+        if ASym <> NIL_SYM then
+          Exit(True);   // AMid stays -1: bound in this model
+        if (FProj <> nil) and FModel.ExtRefMap.TryGetValue(ANode, LExt) then
+        begin
+          AMid := LExt.UnitId;
+          ASym := LExt.Sym;
+          Exit(True);
+        end;
+        LKey := FModel.Tree.NodeNameLower(ANode);
+        if LKey <> '' then
+          Result := BridgeName(LKey, AMid, ASym);
+      end;
+    nkMember:
+      begin
+        LName := FModel.Tree.Nodes[ANode].FirstChild;
+        LBase := DesignatorType(LName, 0);
+        if LName <> NIL_NODE then
+          LName := FModel.Tree.Nodes[LName].NextSibling;
+        if (LName <> NIL_NODE) and ComplValid(LBase) then
+          Result := MemberSymOf(LBase, FModel.Tree.NodeNameLower(LName), 0,
+            AMid, ASym, ACtx);
+      end;
+  end;
+end;
+
+procedure TPasCompletion.AppendCallTarget(AMid, ASym, ACtx: Integer;
+  var AInfo: TPasCallInfo);
+var
+  LM: TPasSemaModel;
+  LSig: TPasBuiltinSig;
+  LT: TPasCallTarget;
+  LX: TSemaXType;
+begin
+  if not SymModelOf(AMid, 'AppendCallTarget', LM) then
+    Exit;
+  LT := Default(TPasCallTarget);
+  LT.Mid := AMid;
+  LT.Sym := ASym;
+  LT.Ctx := ACtx;
+  LT.Name := LM.Symbols[ASym].Name;
+  if sfBuiltin in LM.Symbols[ASym].Flags then
+  begin
+    if PasBuiltinSignature(LM.Symbols[ASym].NameLower, LSig) then
+    begin
+      LT.ParamsText := LSig.Params;
+      LT.HasParams := LSig.HasArgs;
+      LT.ResultText := LSig.ResultType;
+    end;
+    // The seeds have no head token; the curated result says which head fits.
+    if LT.ResultText <> '' then
+      LT.HeadWord := 'function'
+    else
+      LT.HeadWord := 'procedure';
+  end
+  else
+  begin
+    LT.HeadWord := SymHeadWord(LM, ASym);
+    LT.ParamsText := SymParamsText(AMid, ASym);
+    LT.HasParams := SymHasParams(AMid, ASym);
+    if AMid >= 0 then
+    begin
+      LX := FProj.SymDeclTypeX(AMid, ASym);
+      if XValid(LX) then
+        LT.ResultText := FProj.XTypeText(LX);
+    end
+    else if LM.Symbols[ASym].TypeSym <> NIL_SYM then
+      LT.ResultText := LM.Symbols[LM.Symbols[ASym].TypeSym].Name;
+  end;
+  AInfo.Targets := AInfo.Targets + [LT];
+end;
+
+{ Expands one bound callee into targets: a routine reports its WHOLE overload
+  family — the chain from its scope's HEAD, because the bound symbol may sit
+  mid-chain (resolution binds the arity match) and each collapsed overload is
+  its own signature here, unlike completion rows. A procedural VALUE (proc-
+  type variable/parameter/field) reports itself alone. }
+procedure TPasCompletion.AddCallTargets(AMid, ASym, ACtx: Integer;
+  var AInfo: TPasCallInfo);
+var
+  LM: TPasSemaModel;
+  LHead, LNext, LCount, LScope: Integer;
+begin
+  if (ASym = NIL_SYM) or not SymModelOf(AMid, 'AddCallTargets', LM) then
+    Exit;
+  if LM.Symbols[ASym].Kind <> skRoutine then
+  begin
+    if LM.Symbols[ASym].Kind in [skVar, skParam, skField, skProperty,
+       skConst] then
+      AppendCallTarget(AMid, ASym, ACtx, AInfo);
+    Exit;   // units, labels, enum values offer nothing to call
+  end;
+  LHead := ASym;
+  LScope := LM.Symbols[ASym].Scope;
+  if LScope <> NIL_SCOPE then
+  begin
+    LNext := LM.FindLocal(LScope, LM.Symbols[ASym].NameLower);
+    if LNext <> NIL_SYM then
+      LHead := LNext;
+  end;
+  LNext := LHead;
+  LCount := 0;
+  while (LNext <> NIL_SYM) and (LCount < 16) do
+  begin
+    if LM.Symbols[LNext].Kind = skRoutine then
+      AppendCallTarget(AMid, LNext, ACtx, AInfo);
+    LNext := LM.Symbols[LNext].NextOverload;
+    Inc(LCount);
+  end;
+end;
+
+function TPasCompletion.CallAt(ALine, ACol: Integer;
+  out AInfo: TPasCallInfo): Boolean;
+var
+  LTS: TPasTokenStream;
+  LOffset, LRaw, LPrev, LArgs, LDepth, LSteps: Integer;
+  LVis, LNode, LDesig, LOpen: Integer;
+  LMid, LSym, LCtx, LCallNode: Integer;
+  LResolved, LFound: Boolean;
+begin
+  Result := False;
+  AInfo := Default(TPasCallInfo);
+  if not CaretOffset(ALine, ACol, LOffset) then
+    Exit;
+  if LOffset = 0 then
+    Exit;
+  // Dead ($IFDEF'd-out) positions refuse outright, as CaretAt does: walking
+  // backward from one would cross the whole inactive region onto unrelated
+  // active code.
+  if FModel.Tree.Source.IsSkipped(0, LOffset - 1) then
+    Exit;
+  LTS := FModel.Tree.Source.Files[0];
+  LRaw := RawTokenAt(LOffset - 1);
+  if LRaw < 0 then
+    Exit;
+  LRaw := PrevVisibleRaw(LRaw);
+
+  // Backward over VISIBLE tokens: nesting over ()/[], top-level commas count
+  // arguments, a statement boundary at depth 0 means no call at all. Trivia
+  // never appears here, and a string or number is a single token, so parens
+  // and commas inside either cannot fool the walk.
+  LDepth := 0;
+  LArgs := 0;
+  LSteps := 0;
+  LOpen := -1;
+  LMid := -1;
+  LSym := NIL_SYM;
+  LCtx := NIL_INST;
+  LResolved := False;
+  LFound := False;
+  while (LRaw >= 0) and (LSteps < 4096) and not LFound do
+  begin
+    case LTS.Tokens[LRaw].Kind of
+      tkRParen, tkRBracket:
+        Inc(LDepth);
+      tkLBracket:
+        if LDepth = 0 then
+          // The caret sits inside an INDEXER (or set constructor): the
+          // innermost CALL is further out, and the commas counted so far
+          // were the bracket's own, not the call's.
+          LArgs := 0
+        else
+          Dec(LDepth);
+      tkLParen:
+        if LDepth = 0 then
+        begin
+          LVis := FVisOfRaw[LRaw];
+          LNode := NIL_NODE;
+          if LVis >= 0 then
+            LNode := InnermostNodeAt(LVis);
+          // The '(' of a DECLARATION's parameter list: not a call, and
+          // walking out of a declaration head helps nobody.
+          if (LNode <> NIL_NODE) and
+             (FModel.Tree.Nodes[LNode].Kind = nkParams) then
+            Exit;
+          LDesig := NIL_NODE;
+          LCallNode := NIL_NODE;
+          if (LNode <> NIL_NODE) and
+             (FModel.Tree.Nodes[LNode].Kind = nkCall) then
+          begin
+            // A well-formed call owns its '(' directly: the callee child
+            // ends before it, the arguments start after it.
+            LCallNode := LNode;
+            LDesig := FModel.Tree.Nodes[LNode].FirstChild;
+          end
+          else if (LNode = NIL_NODE) or
+                  (FModel.Tree.Nodes[LNode].Kind <> nkParen) then
+          begin
+            // A parse broken around the caret: accept the `ident(` shape,
+            // recovering the designator from the token to the left.
+            LPrev := PrevVisibleRaw(LRaw - 1);
+            if (LPrev >= 0) and
+               (LTS.Tokens[LPrev].Kind = tkIdentifier) then
+              LDesig := DesignatorNodeAtVis(FVisOfRaw[LPrev]);
+          end;
+          if LDesig <> NIL_NODE then
+          begin
+            LResolved := CalleeSyms(LDesig, LCallNode, LMid, LSym, LCtx);
+            // A designator that names a TYPE is a cast, not a call — step
+            // over it to the enclosing call, which is what a caret inside
+            // `CheckResult(HRESULT(x|` wants to see.
+            if LResolved and IsTypeSym(LMid, LSym) then
+              LResolved := False
+            else
+            begin
+              LOpen := LRaw;
+              LFound := True;
+            end;
+          end;
+          if not LFound then
+            // Grouping paren (or a cast): the commas counted so far were
+            // its own — reset and keep walking.
+            LArgs := 0;
+        end
+        else
+          Dec(LDepth);
+      tkComma:
+        if LDepth = 0 then
+          Inc(LArgs);
+      tkSemicolon, tkBegin, tkEnd, tkThen, tkDo, tkElse:
+        if LDepth = 0 then
+          Exit;   // left the statement without meeting an open paren
+    end;
+    if not LFound then
+    begin
+      LRaw := PrevVisibleRaw(LRaw - 1);
+      Inc(LSteps);
+    end;
+  end;
+  if LOpen < 0 then
+    Exit;
+
+  LTS.OffsetToLineCol(LTS.Tokens[LOpen].Start, AInfo.OpenLine, AInfo.OpenCol);
+  AInfo.ArgIndex := LArgs;
+  if LResolved then
+    AddCallTargets(LMid, LSym, LCtx, AInfo);
+  Result := True;
 end;
 
 function TPasCompletion.CompleteAt(ALine, ACol: Integer;

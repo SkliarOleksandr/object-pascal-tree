@@ -31,6 +31,35 @@ uses
 function SeedSystemScope(AModel: TPasSemaModel;
   APlatform: TPasPlatform = pfWin32): Integer;
 
+type
+  { A curated DISPLAY signature for one intrinsic routine (completion plan
+    §8C). The seeds have no DeclNode, so every declaration-span consumer
+    (parameter text, signature help, auto-parenthesis) shows them bare
+    without this. These are documentation-style pseudo-signatures FOR HUMANS
+    - `(var S; NewLength: NativeInt)` - never input to the typer; where the
+    real signature is type-dependent (High, Abs, ...) the text stays honest
+    about the shape and the result is left blank. }
+  TPasBuiltinSig = record
+    Params: string;      // '(...)' display text; '' for a parameterless name
+    ResultType: string;  // result display text; '' for procedures and
+                         // type-dependent results
+    { The auto-parenthesis driver, ItemHasParams's builtin answer: True when
+      the normal call form takes at least one REQUIRED argument. False both
+      for the truly parameterless (Pi, ReturnAddress) and for names whose
+      every argument is optional (Exit, Halt, Break) - those must complete
+      bare, exactly like an empty-() declaration. Params may still be
+      non-empty when HasArgs is False: Exit renders '(ExitValue)' in
+      signature help but never auto-parenthesizes. }
+    HasArgs: Boolean;
+  end;
+
+{ The display signature of a compiler-seeded routine, by NameLower. False for
+  names this table does not know - including every seeded CONST (True, nil,
+  CompilerVersion) and any real declaration, which carry a DeclNode and never
+  need this. }
+function PasBuiltinSignature(const ANameLower: string;
+  out ASig: TPasBuiltinSig): Boolean;
+
 { The seeded names that denote ONE type, as a group — `Cardinal`, `LongWord` and
   (through System.pas's `UInt32 = Cardinal`) `UInt32` are the same type, not
   three compatible ones. Returns the group for a name that is in one, and just
@@ -70,6 +99,204 @@ begin
 end;
 
 type
+  TBuiltinSigEntry = record
+    Name: string;        // NameLower key
+    Params: string;
+    ResultType: string;
+    HasArgs: Boolean;
+  end;
+
+const
+  { One entry per seeded intrinsic ROUTINE below (both the common list and
+    the 64-bit-only tail - the table is signature data, not a resolution
+    surface, so gating it per platform would only create a second list to
+    keep in sync). Shapes follow the documented "Delphi Intrinsic Routines"
+    catalog; optional arguments are shown in [] the way the docs write them. }
+  CBuiltinSigs: array[0..98] of TBuiltinSigEntry = (
+    (Name: 'length'; Params: '(const S: <string|array>)';
+     ResultType: 'Integer'; HasArgs: True),
+    (Name: 'setlength'; Params: '(var S; NewLength: NativeInt)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'setstring'; Params: '(var S: string; Buffer: PChar; Len: Integer)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'high'; Params: '(const X: <type|array|string>)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'low'; Params: '(const X: <type|array|string>)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'ord'; Params: '(const X: <ordinal>)';
+     ResultType: 'Integer'; HasArgs: True),
+    (Name: 'chr'; Params: '(X: Byte)'; ResultType: 'Char'; HasArgs: True),
+    (Name: 'assigned'; Params: '(const P)';
+     ResultType: 'Boolean'; HasArgs: True),
+    (Name: 'inc'; Params: '(var X[; N])'; ResultType: ''; HasArgs: True),
+    (Name: 'dec'; Params: '(var X[; N])'; ResultType: ''; HasArgs: True),
+    (Name: 'sizeof'; Params: '(const X)';
+     ResultType: 'Integer'; HasArgs: True),
+    (Name: 'assert'; Params: '(Condition: Boolean[; Message: string])';
+     ResultType: ''; HasArgs: True),
+    (Name: 'copy'; Params: '(const S[; Index, Count: Integer])';
+     ResultType: ''; HasArgs: True),
+    (Name: 'new'; Params: '(var P: Pointer)'; ResultType: ''; HasArgs: True),
+    (Name: 'dispose'; Params: '(var P: Pointer)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'include'; Params: '(var S: <set>; Element)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'exclude'; Params: '(var S: <set>; Element)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'write'; Params: '([var F: Text;] Args)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'writeln'; Params: '([var F: Text;] Args)';
+     ResultType: ''; HasArgs: False),
+    (Name: 'read'; Params: '([var F: Text;] Args)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'readln'; Params: '([var F: Text;] Args)';
+     ResultType: ''; HasArgs: False),
+    (Name: 'exit'; Params: '([ExitValue])'; ResultType: ''; HasArgs: False),
+    (Name: 'break'; Params: ''; ResultType: ''; HasArgs: False),
+    (Name: 'continue'; Params: ''; ResultType: ''; HasArgs: False),
+    (Name: 'typeinfo'; Params: '(TypeIdent)';
+     ResultType: 'Pointer'; HasArgs: True),
+    (Name: 'delete'; Params: '(var S; Index, Count: Integer)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'insert'; Params: '(const Source; var S; Index: Integer)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'fillchar'; Params: '(var X; Count: NativeInt; Value)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'odd'; Params: '(X: Integer)';
+     ResultType: 'Boolean'; HasArgs: True),
+    (Name: 'pred'; Params: '(const X: <ordinal>)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'succ'; Params: '(const X: <ordinal>)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'default'; Params: '(TypeIdent)'; ResultType: ''; HasArgs: True),
+    (Name: 'trunc'; Params: '(X: Extended)';
+     ResultType: 'Int64'; HasArgs: True),
+    (Name: 'round'; Params: '(X: Extended)';
+     ResultType: 'Int64'; HasArgs: True),
+    (Name: 'abs'; Params: '(X)'; ResultType: ''; HasArgs: True),
+    (Name: 'sqr'; Params: '(X)'; ResultType: ''; HasArgs: True),
+    (Name: 'pi'; Params: ''; ResultType: 'Extended'; HasArgs: False),
+    (Name: 'concat'; Params: '(const S1, S2, ...)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'str'; Params: '(X[: Width[: Decimals]]; var S: string)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'val'; Params: '(const S: string; var V; var Code: Integer)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'swap'; Params: '(X)'; ResultType: ''; HasArgs: True),
+    (Name: 'hi'; Params: '(X)'; ResultType: 'Byte'; HasArgs: True),
+    (Name: 'lo'; Params: '(X)'; ResultType: 'Byte'; HasArgs: True),
+    (Name: 'addr'; Params: '(var X)'; ResultType: 'Pointer'; HasArgs: True),
+    (Name: 'ptr'; Params: '(Address: Integer)';
+     ResultType: 'Pointer'; HasArgs: True),
+    (Name: 'slice'; Params: '(var A: <array>; Count: Integer)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'runerror'; Params: '([ErrorCode: Byte])';
+     ResultType: ''; HasArgs: False),
+    (Name: 'initialize'; Params: '(var V[; Count: NativeInt])';
+     ResultType: ''; HasArgs: True),
+    (Name: 'finalize'; Params: '(var V[; Count: NativeInt])';
+     ResultType: ''; HasArgs: True),
+    (Name: 'gettypekind'; Params: '(TypeIdent)';
+     ResultType: 'TTypeKind'; HasArgs: True),
+    (Name: 'ismanagedtype'; Params: '(TypeIdent)';
+     ResultType: 'Boolean'; HasArgs: True),
+    (Name: 'isconstvalue'; Params: '(const X)';
+     ResultType: 'Boolean'; HasArgs: True),
+    (Name: 'hasweakref'; Params: '(TypeIdent)';
+     ResultType: 'Boolean'; HasArgs: True),
+    (Name: 'typehandle'; Params: '(TypeIdent)';
+     ResultType: 'Pointer'; HasArgs: True),
+    (Name: 'typeof'; Params: '(const X: <object>)';
+     ResultType: 'Pointer'; HasArgs: True),
+    (Name: 'returnaddress'; Params: '';
+     ResultType: 'Pointer'; HasArgs: False),
+    (Name: 'addressofreturnaddress'; Params: '';
+     ResultType: 'Pointer'; HasArgs: False),
+    (Name: 'atomicincrement'; Params: '(var Target[; Increment])';
+     ResultType: ''; HasArgs: True),
+    (Name: 'atomicdecrement'; Params: '(var Target[; Decrement])';
+     ResultType: ''; HasArgs: True),
+    (Name: 'atomicexchange'; Params: '(var Target; Value)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'atomiccmpexchange';
+     Params: '(var Target; NewValue, Comparand[; out Succeeded: Boolean])';
+     ResultType: ''; HasArgs: True),
+    (Name: 'muldivint64';
+     Params: '(AValue, AMultiplier, ADivisor: Int64[; out Remainder: Int64])';
+     ResultType: 'Int64'; HasArgs: True),
+    (Name: 'fail'; Params: ''; ResultType: ''; HasArgs: False),
+    (Name: 'memorybarrier'; Params: ''; ResultType: ''; HasArgs: False),
+    (Name: 'halt'; Params: '([ExitCode: Integer])';
+     ResultType: ''; HasArgs: False),
+    (Name: 'getmem'; Params: '(var P: Pointer; Size: NativeInt)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'freemem'; Params: '(var P: Pointer[; Size: NativeInt])';
+     ResultType: ''; HasArgs: True),
+    (Name: 'reallocmem'; Params: '(var P: Pointer; Size: NativeInt)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'assign'; Params: '(var F; FileName: string)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'assignfile'; Params: '(var F; FileName: string)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'reset'; Params: '(var F[; RecSize: Integer])';
+     ResultType: ''; HasArgs: True),
+    (Name: 'rewrite'; Params: '(var F[; RecSize: Integer])';
+     ResultType: ''; HasArgs: True),
+    (Name: 'append'; Params: '(var F: Text)'; ResultType: ''; HasArgs: True),
+    (Name: 'close'; Params: '(var F)'; ResultType: ''; HasArgs: True),
+    (Name: 'closefile'; Params: '(var F)'; ResultType: ''; HasArgs: True),
+    (Name: 'seek'; Params: '(var F; N: Integer)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'eof'; Params: '([var F])'; ResultType: 'Boolean'; HasArgs: False),
+    (Name: 'eoln'; Params: '([var F: Text])';
+     ResultType: 'Boolean'; HasArgs: False),
+    (Name: 'seekeof'; Params: '([var F: Text])';
+     ResultType: 'Boolean'; HasArgs: False),
+    (Name: 'seekeoln'; Params: '([var F: Text])';
+     ResultType: 'Boolean'; HasArgs: False),
+    (Name: 'filepos'; Params: '(var F)';
+     ResultType: 'Integer'; HasArgs: True),
+    (Name: 'filesize'; Params: '(var F)';
+     ResultType: 'Integer'; HasArgs: True),
+    (Name: 'truncate'; Params: '(var F)'; ResultType: ''; HasArgs: True),
+    (Name: 'erase'; Params: '(var F)'; ResultType: ''; HasArgs: True),
+    (Name: 'rename'; Params: '(var F; NewName: string)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'blockread';
+     Params: '(var F: File; var Buf; Count: Integer[; var AmtTransferred: Integer])';
+     ResultType: ''; HasArgs: True),
+    (Name: 'blockwrite';
+     Params: '(var F: File; var Buf; Count: Integer[; var AmtTransferred: Integer])';
+     ResultType: ''; HasArgs: True),
+    (Name: 'settextbuf'; Params: '(var F: Text; var Buf[; Size: Integer])';
+     ResultType: ''; HasArgs: True),
+    (Name: 'getdir'; Params: '(Drive: Byte; var S: string)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'varclear'; Params: '(var V: Variant)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'varcast';
+     Params: '(var Dest: Variant; const Source: Variant; VarType: Integer)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'varcopy'; Params: '(var Dest: Variant; const Source: Variant)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'vararrayredim'; Params: '(var A: Variant; HighBound: Integer)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'nameof'; Params: '(Identifier)';
+     ResultType: 'string'; HasArgs: True),
+    (Name: 'varargstart'; Params: '(var ArgList)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'varargend'; Params: '(var ArgList)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'varargcopy'; Params: '(var Src, Dest)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'vararggetvalue'; Params: '(var ArgList; var Value)';
+     ResultType: ''; HasArgs: True),
+    (Name: 'atomiccmpexchange128';
+     Params: '(var Target; NewValueHigh, NewValueLow: Int64; var Comparand)';
+     ResultType: 'Boolean'; HasArgs: True)
+  );
+
+type
   // One prebuilt seed per platform bitness (the ONLY platform dependence in
   // the list below is the Is64Bit intrinsic gate).
   TSeedTemplate = record
@@ -80,6 +307,23 @@ type
 
 var
   GSeedTemplates: array[Boolean] of TSeedTemplate;   // by Is64Bit
+  GSigIndex: TDictionary<string, Integer>;  // NameLower -> CBuiltinSigs index
+
+function PasBuiltinSignature(const ANameLower: string;
+  out ASig: TPasBuiltinSig): Boolean;
+var
+  LIdx: Integer;
+begin
+  Result := GSigIndex.TryGetValue(ANameLower, LIdx);
+  if Result then
+  begin
+    ASig.Params := CBuiltinSigs[LIdx].Params;
+    ASig.ResultType := CBuiltinSigs[LIdx].ResultType;
+    ASig.HasArgs := CBuiltinSigs[LIdx].HasArgs;
+  end
+  else
+    ASig := Default(TPasBuiltinSig);
+end;
 
 // The original per-symbol seeding — the template builder runs it once per
 // bitness, and it stays the FALLBACK for a model whose arena is not empty.
@@ -332,10 +576,21 @@ begin
   Result := LSys;
 end;
 
+procedure BuildSigIndex;
+var
+  LIdx: Integer;
+begin
+  GSigIndex := TDictionary<string, Integer>.Create(Length(CBuiltinSigs) * 2);
+  for LIdx := 0 to High(CBuiltinSigs) do
+    GSigIndex.Add(CBuiltinSigs[LIdx].Name, LIdx);
+end;
+
 initialization
   BuildSeedTemplates;
+  BuildSigIndex;
 
 finalization
+  GSigIndex.Free;
   GSeedTemplates[False].Names.Free;
   GSeedTemplates[False].Order.Free;
   GSeedTemplates[True].Names.Free;

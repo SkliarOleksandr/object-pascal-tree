@@ -191,6 +191,16 @@ type
     Nodes: TArray<TPasNode>;
     function KindName(AKind: TPasNodeKind): string;
     function NodeText(AIndex: Integer): string;    // first-token slice
+    { The node's FULL token-span slice: raw source text from its leftmost
+      visible token through LastToken, full fidelity (interior comments and
+      whitespace included - collapse is a display concern, the caller's).
+      Leftmost DESCENDANT, not FirstToken: nodes whose FirstToken is not
+      their left edge exist by design (nkMember's is the dot). '' when the
+      span crosses files (a declaration split over an $I include - not worth
+      reconstructing) or is degenerate. Promoted here because three private
+      copies of this walk existed (navigator, LSP, demo) - see the
+      completion plan §8A. }
+    function NodeSpanText(AIndex: Integer): string;
     { The same slice as a NAME KEY: lower-cased, leading '&' stripped. Use this
       for every declaration and lookup key — see the implementation. }
     function NodeNameLower(AIndex: Integer): string;
@@ -339,6 +349,37 @@ begin
     Result := Source.VisibleText(Nodes[AIndex].FirstToken)
   else
     Result := '';
+end;
+
+function TPasTree.NodeSpanText(AIndex: Integer): string;
+var
+  LNode, LTok, LFirst, LLast: Integer;
+  LFrom, LTo: TPasVisibleToken;
+begin
+  Result := '';
+  if (AIndex < 0) or (AIndex > High(Nodes)) then
+    Exit;
+  // The true left edge: the smaller of the node's own FirstToken and its
+  // deepest-first-descendant's.
+  LFirst := Nodes[AIndex].FirstToken;
+  LNode := Nodes[AIndex].FirstChild;
+  while LNode <> NIL_NODE do
+  begin
+    LTok := Nodes[LNode].FirstToken;
+    if (LTok >= 0) and ((LFirst < 0) or (LTok < LFirst)) then
+      LFirst := LTok;
+    LNode := Nodes[LNode].FirstChild;
+  end;
+  LLast := Nodes[AIndex].LastToken;
+  if (LFirst < 0) or (LLast < LFirst) or (LLast > High(Source.Visible)) then
+    Exit;
+  LFrom := Source.Visible[LFirst];
+  LTo := Source.Visible[LLast];
+  if LFrom.FileId <> LTo.FileId then
+    Exit;
+  with Source.Files[LFrom.FileId] do
+    Result := Copy(Source, Tokens[LFrom.TokenIndex].Start + 1,
+      Tokens[LTo.TokenIndex].EndPos - Tokens[LFrom.TokenIndex].Start);
 end;
 
 function TPasTree.Dump(AIndex: Integer): string;

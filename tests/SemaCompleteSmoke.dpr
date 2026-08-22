@@ -44,6 +44,8 @@ var
   GProjMid: Integer;
   GCtx: TPasComplContext;
   GItems: TArray<TPasComplItem>;
+  // §8: signature help
+  GCall: TPasCallInfo;
 
 { Parses/analyzes ASource with its single `|` caret marker STRIPPED, then runs
   CaretAt at the marker's (line, col). The marker means "the caret is here";
@@ -136,6 +138,71 @@ begin
   GModel := TPasSemaResolver.Analyze(GTree);
   GComp := TPasCompletion.Create(GModel, GProj, GProjMid);
   GHit := GComp.CompleteAt(LLine, LCol, GCtx, GItems);
+end;
+
+{ Like ProjCase, but runs CallAt at the marker — the §8B signature-help
+  primitive over the same bridged mini-project. }
+procedure CallCase(const ASource: string);
+var
+  LAt, LIdx, LLine, LCol: Integer;
+  LClean: string;
+  LPre: TPasPreprocessed;
+  LDiags: TArray<TPasParseDiag>;
+begin
+  LAt := Pos('|', ASource);
+  if LAt = 0 then
+    raise Exception.Create('call case has no | marker');
+  LClean := StringReplace(ASource, '|', '', []);
+  LLine := 1;
+  LCol := LAt;
+  for LIdx := 1 to LAt - 1 do
+    if ASource[LIdx] = #10 then
+    begin
+      Inc(LLine);
+      LCol := LAt - LIdx;
+    end;
+
+  GComp.Free;
+  GComp := nil;
+  GModel.Free;
+  LPre := GPP.ProcessText('mainu.pas', LClean);
+  GTree := TPasParser.ParseFile(LPre, LDiags);
+  GModel := TPasSemaResolver.Analyze(GTree);
+  GComp := TPasCompletion.Create(GModel, GProj, GProjMid);
+  GHit := GComp.CallAt(LLine, LCol, GCall);
+end;
+
+// Number of CallAt targets carrying AName — the overload count, since
+// CallAt reports each overload as its own target.
+function TargetsNamed(const AName: string): Integer;
+var
+  LIdx: Integer;
+begin
+  Result := 0;
+  for LIdx := 0 to High(GCall.Targets) do
+    if SameText(GCall.Targets[LIdx].Name, AName) then
+      Inc(Result);
+end;
+
+function TargetOf(const AName: string): TPasCallTarget;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to High(GCall.Targets) do
+    if SameText(GCall.Targets[LIdx].Name, AName) then
+      Exit(GCall.Targets[LIdx]);
+  Result := Default(TPasCallTarget);
+end;
+
+function ItemNamed(const AName: string): TPasComplItem;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to High(GItems) do
+    if SameText(GItems[LIdx].Name, AName) then
+      Exit(GItems[LIdx]);
+  Result := Default(TPasComplItem);
+  Result.Sym := NIL_SYM;
 end;
 
 function Has(const AName: string): Boolean;
@@ -520,6 +587,109 @@ begin
     'end.'#10);
   GCounter.Ok('uses caret classifies ccUses', GHit and (GCtx = ccUses));
   GCounter.Ok('uses lists the known unit', Has('exta'));
+
+  // ======== §8A: per-item accessors ==========================================
+  ProjCase(PROJ_HEAD + '  B.|'#10 + PROJ_TAIL);
+  GCounter.Ok('ItemParamsText: parameterless method answers empty',
+    GComp.ItemParamsText(ItemNamed('Pub')) = '');
+  GCounter.Ok('ItemHasParams: parameterless method answers False',
+    not GComp.ItemHasParams(ItemNamed('Pub')));
+  GCounter.Ok('ItemParamsText: the first-listed overload''s params',
+    GComp.ItemParamsText(ItemNamed('Over')) = '(A: Integer)');
+  GCounter.Ok('ItemHasParams: a routine with a parameter answers True',
+    GComp.ItemHasParams(ItemNamed('Over')));
+
+  // Empty `()` must answer False (the auto-parenthesis driver), and a
+  // multi-line list must collapse to one display line.
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'implementation'#10 +
+    'procedure Q();'#10'begin'#10'end;'#10 +
+    'procedure R(const S: string;'#10 +
+    '  N: Integer);'#10'begin'#10'end;'#10 +
+    'procedure P;'#10 +
+    'begin'#10 +
+    '  |'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GCounter.Ok('ItemHasParams: empty () answers False',
+    Has('Q') and not GComp.ItemHasParams(ItemNamed('Q')));
+  GCounter.Ok('ItemParamsText: empty () answers empty',
+    GComp.ItemParamsText(ItemNamed('Q')) = '');
+  GCounter.Ok('ItemParamsText: multi-line list collapses to one line',
+    GComp.ItemParamsText(ItemNamed('R')) = '(const S: string; N: Integer)');
+  // §8C: a compiler seed answers the curated display signature.
+  GCounter.Ok('ItemParamsText: builtin answers the curated signature',
+    GComp.ItemParamsText(ItemNamed('SetLength')) =
+      '(var S; NewLength: NativeInt)');
+  GCounter.Ok('ItemHasParams: builtin takes-arguments flag',
+    GComp.ItemHasParams(ItemNamed('SetLength')));
+  GCounter.Ok('ItemHasParams: optional-only builtin answers False',
+    Has('Exit') and not GComp.ItemHasParams(ItemNamed('Exit')));
+
+  // ======== §8B: CallAt ======================================================
+  // The bridged member call, both overloads as separate signatures.
+  CallCase(PROJ_HEAD + '  B.Over(|'#10 + PROJ_TAIL);
+  GCounter.Ok('B.Over(| answers', GHit);
+  GCounter.Ok('B.Over(| finds the ( position',
+    (GCall.OpenLine = 22) and (GCall.OpenCol = 9));
+  GCounter.Ok('B.Over(| argument 0', GCall.ArgIndex = 0);
+  GCounter.Ok('B.Over(| reports BOTH overloads as separate targets',
+    TargetsNamed('Over') = 2);
+  GCounter.Ok('B.Over(| first overload params',
+    TargetOf('Over').ParamsText = '(A: Integer)');
+  GCounter.Ok('B.Over(| head word', TargetOf('Over').HeadWord = 'procedure');
+
+  // Active argument: top-level commas; a nested call binds to ITS name.
+  CallCase(PROJ_HEAD + '  B.Over(1, |'#10 + PROJ_TAIL);
+  GCounter.Ok('B.Over(1, | argument 1', GHit and (GCall.ArgIndex = 1));
+  CallCase(PROJ_HEAD + '  B.Over(Ord(|'#10 + PROJ_TAIL);
+  GCounter.Ok('nested call: the INNERMOST call wins',
+    GHit and (TargetsNamed('Ord') = 1));
+
+  // The freshly typed CROSS-UNIT call — the gap the LSP interim cannot
+  // close, and the reason CallAt exists (plan §8B).
+  CallCase(PROJ_HEAD + '  ExtProc(|'#10 + PROJ_TAIL);
+  GCounter.Ok('freshly typed cross-unit call resolves through the bridge',
+    GHit and (TargetsNamed('ExtProc') = 1));
+  GCounter.Ok('cross-unit target lives in the project space',
+    TargetOf('ExtProc').Mid >= 0);
+
+  // A builtin callee renders the curated signature (§8C through CallAt).
+  CallCase(PROJ_HEAD + '  SetLength(|'#10 + PROJ_TAIL);
+  GCounter.Ok('SetLength(| target params from the seed table',
+    GHit and (TargetOf('SetLength').ParamsText =
+      '(var S; NewLength: NativeInt)'));
+
+  // A constructor is a target, with its head word.
+  CallCase(PROJ_HEAD + '  TBase.Create(|'#10 + PROJ_TAIL);
+  GCounter.Ok('TBase.Create(| resolves the constructor',
+    GHit and (TargetOf('Create').HeadWord = 'constructor'));
+
+  // A member call on an INDEXED base — the designator walk, not a name scan.
+  CallCase(PROJ_HEAD + '  Arr[0].Pub(|'#10 + PROJ_TAIL);
+  GCounter.Ok('Arr[0].Pub(| types the element and finds the method',
+    GHit and (TargetsNamed('Pub') = 1));
+
+  // Grouping parens and casts are stepped over to the enclosing call.
+  CallCase(PROJ_HEAD + '  B.Over((1 + |'#10 + PROJ_TAIL);
+  GCounter.Ok('grouping paren steps out to the call',
+    GHit and (TargetsNamed('Over') = 2) and (GCall.ArgIndex = 0));
+  CallCase(PROJ_HEAD + '  B.Over(Integer(|'#10 + PROJ_TAIL);
+  GCounter.Ok('a cast steps out to the call',
+    GHit and (TargetsNamed('Over') = 2));
+
+  // Refusals: no call, and a DECLARATION's parameter list.
+  CallCase(PROJ_HEAD + '  |'#10 + PROJ_TAIL);
+  GCounter.Ok('statement caret is in no call', not GHit);
+  CallCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'implementation'#10 +
+    'procedure T(|'#10 +
+    'end.'#10);
+  GCounter.Ok('a declaration''s parameter list is not a call', not GHit);
 
   GProj.Free;
   GProj := nil;
