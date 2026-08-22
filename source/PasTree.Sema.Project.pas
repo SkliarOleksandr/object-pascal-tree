@@ -580,6 +580,10 @@ type
     function ModelCount: Integer;
     function Model(AId: Integer): TPasSemaModel;
     function ModelFile(AId: Integer): string;
+    { Every unit name the project's search paths can reach — completion's
+      uses-clause candidates beyond the analyzed closure. Delegates to the
+      source manager's cached scan (see its contract). }
+    function SearchPathUnitNames: TArray<string>;
     { 20.3.1 — is AX one of the compiler-MANAGED types (automatic init/
       finalize/copy: long strings, dynamic arrays, interfaces, Variant,
       `reference to` procedural types, and records that either declare a
@@ -1072,6 +1076,11 @@ end;
 function TPasSemaProject.ModelFile(AId: Integer): string;
 begin
   Result := FFiles[AId];
+end;
+
+function TPasSemaProject.SearchPathUnitNames: TArray<string>;
+begin
+  Result := FSM.SearchPathUnitNames;
 end;
 
 function TPasSemaProject.NodeSite(AId, ANode: Integer; out AFilePath: string;

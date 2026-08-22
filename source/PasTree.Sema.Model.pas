@@ -31,7 +31,12 @@ type
   TPasModuleStatus = (msQueued, msIntfReady, msFullReady, msCrossReady);
 
   TSemaSymbolKind = (skType, skVar, skConst, skField, skRoutine, skParam,
-    skProperty, skEnumValue, skGenericParam, skLabel, skUnitRef, skBuiltinType);
+    skProperty, skEnumValue, skGenericParam, skLabel, skUnitRef, skBuiltinType,
+    // Never a declared symbol: completion KEYWORD rows carry this so a host
+    // mapping Kind to its own item kinds cannot mistake `begin` for a type
+    // (they used to ship as skType, documented-meaningless — the review's
+    // note). No resolver code path produces or consumes it.
+    skKeyword);
 
   // sfGeneric: a TYPE declared with parameters (`TFoo<T>`). Set once at collect
   // time because the alternative — deriving it at lookup — sits on the hottest

@@ -137,7 +137,7 @@ begin
   GTree := TPasParser.ParseFile(LPre, LDiags);
   GModel := TPasSemaResolver.Analyze(GTree);
   GComp := TPasCompletion.Create(GModel, GProj, GProjMid);
-  GHit := GComp.CompleteAt(LLine, LCol, GCtx, GItems);
+  GHit := GComp.CompleteAt(LLine, LCol, GInfo, GCtx, GItems);
 end;
 
 { Like ProjCase, but runs CallAt at the marker — the §8B signature-help
@@ -279,6 +279,7 @@ const
     '  TExtGen<T> = class'#10 +
     '  public'#10 +
     '    procedure Put(AValue: T);'#10 +
+    '    function Get: T;'#10 +
     '  end;'#10 +
     'procedure ExtProc;'#10 +
     'var'#10 +
@@ -291,6 +292,7 @@ const
     'procedure TBase.Over(A: Integer);'#10'begin'#10'end;'#10 +
     'procedure TBase.Over(A: string);'#10'begin'#10'end;'#10 +
     'procedure TExtGen<T>.Put(AValue: T);'#10'begin'#10'end;'#10 +
+    'function TExtGen<T>.Get: T;'#10'begin'#10'end;'#10 +
     'procedure ExtProc;'#10'begin'#10'end;'#10 +
     'end.'#10;
   PROJ_HEAD =                       // lines 1..21; the case line is 22
@@ -459,6 +461,10 @@ begin
     TDirectory.Delete(GDir, True);
   TDirectory.CreateDirectory(GDir);
   TFile.WriteAllText(TPath.Combine(GDir, 'exta.pas'), EXTA_UNIT);
+  // Never used by anything: only the search-path directory scan can offer
+  // this one in a uses clause (the analyzed closure cannot).
+  TFile.WriteAllText(TPath.Combine(GDir, 'Unused.Extb.pas'),
+    'unit Unused.Extb;'#10'interface'#10'implementation'#10'end.'#10);
   TFile.WriteAllText(TPath.Combine(GDir, 'mainu.pas'),
     PROJ_HEAD + PROJ_TAIL);
   GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
@@ -587,6 +593,103 @@ begin
     'end.'#10);
   GCounter.Ok('uses caret classifies ccUses', GHit and (GCtx = ccUses));
   GCounter.Ok('uses lists the known unit', Has('exta'));
+  GCounter.Ok('uses lists the search-path unit nothing analyzed',
+    Has('Unused.Extb'));
+
+  // Dotted uses prefixes: the caret's prefix and replace-span must cover the
+  // WHOLE dotted chain typed so far, not the last segment — a client filters
+  // 'Unused.Ex' against 'Unused.Extb' and replaces the full name.
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses exta, Unused.Ex|'#10 +
+    'implementation'#10 +
+    'end.'#10);
+  GCounter.Ok('dotted uses prefix spans the chain',
+    GHit and (GCtx = ccUses) and (GInfo.Prefix = 'Unused.Ex'));
+  GCounter.Ok('dotted uses replace-span starts at the first segment',
+    GInfo.PrefixColFrom = 12);
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses Unused.|'#10 +
+    'implementation'#10 +
+    'end.'#10);
+  GCounter.Ok('uses after-dot prefix carries the qualifier',
+    GHit and (GInfo.Prefix = 'Unused.') and (GInfo.PrefixColFrom = 6));
+
+  // --- property accessor positions (read/write signature filter) -----------
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses exta;'#10 +
+    'type'#10 +
+    '  TP = class(TBase)'#10 +
+    '  private'#10 +
+    '    FVal: Integer;'#10 +
+    '    function GetVal: Integer;'#10 +
+    '    procedure SetVal(AValue: Integer);'#10 +
+    '  public'#10 +
+    '    property Val: Integer read |'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10);
+  GCounter.Ok('read | classifies ccPropRead', GHit and (GCtx = ccPropRead));
+  GCounter.Ok('read | lists the field', Has('FVal'));
+  GCounter.Ok('read | lists the getter function', Has('GetVal'));
+  GCounter.Ok('read | filters the procedure', not Has('SetVal'));
+  GCounter.Ok('read | reaches the INHERITED field', Has('FProt'));
+  GCounter.Ok('read | offers no keywords', not Has('nil'));
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses exta;'#10 +
+    'type'#10 +
+    '  TP = class(TBase)'#10 +
+    '  private'#10 +
+    '    FVal: Integer;'#10 +
+    '    function GetVal: Integer;'#10 +
+    '    procedure SetVal(AValue: Integer);'#10 +
+    '  public'#10 +
+    '    property Val: Integer read FVal write |'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10);
+  GCounter.Ok('write | classifies ccPropWrite', GHit and (GCtx = ccPropWrite));
+  GCounter.Ok('write | lists the setter procedure', Has('SetVal'));
+  GCounter.Ok('write | filters the function', not Has('GetVal'));
+  GCounter.Ok('write | lists the field', Has('FVal'));
+
+  // --- overlay-generic frames -----------------------------------------------
+  // The generic's argument is an OVERLAY-declared type: the frame must close
+  // by bridging TMy into this file's last-good model, so Get's T substitutes
+  // and the chained dot lists TMy's members. (Used to stay an open generic.)
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses exta;'#10 +
+    'type'#10 +
+    '  TMy = class(TBase)'#10 +
+    '  public'#10 +
+    '    procedure Own;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var'#10 +
+    '  GM: TExtGen<TMy>;'#10 +
+    'begin'#10 +
+    '  GM.Get.|'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GCounter.Ok('overlay-generic frame closes: chained dot sees the arg type',
+    GHit and (GCtx = ccMember) and Has('Own'));
+  GCounter.Ok('overlay-generic frame: inherited members through the arg',
+    Has('Pub'));
+
+  // --- keyword rows carry skKeyword ------------------------------------------
+  ProjCase(PROJ_HEAD + '  |'#10 + PROJ_TAIL);
+  GCounter.Ok('keyword rows carry skKeyword',
+    Has('begin') and (ItemNamed('begin').Kind = skKeyword));
 
   // ======== §8A: per-item accessors ==========================================
   ProjCase(PROJ_HEAD + '  B.|'#10 + PROJ_TAIL);

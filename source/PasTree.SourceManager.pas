@@ -76,8 +76,11 @@ type
     // NOT recorded here; see the end of DecodeBytes.
     FRecovered: TDictionary<string, string>;
     FRecoveredLock: TObject;
+    FSearchNames: TArray<string>;   // SearchPathUnitNames' cache
+    FSearchNamesBuilt: Boolean;
     function TryFile(const ADir, AName: string; out AResolved: string): Boolean;
     function DirIndex(const ADir: string): TDictionary<string, string>;
+    procedure EnsureSearchIndex;
     function FindUnitFile(const AUnitName, AFromDir: string;
       out AResolved: string): Boolean;
     function ReadFileText(const APath: string): string;
@@ -145,6 +148,13 @@ type
       the referring file, the search paths, and the unit index. }
     function ResolveUnit(const AUnitName, AInPath, AFromFile: string;
       out AResolved: string): Boolean;
+    { Every unit NAME the search paths can reach (each *.pas basename, its
+      original spelling, extension dropped) — completion's uses-clause
+      candidate set. Built from the same per-path index ResolveUnit uses
+      (first path wins on a duplicate basename) and cached for this
+      manager's lifetime, i.e. one analysis run — the same staleness the
+      index itself already accepts. }
+    function SearchPathUnitNames: TArray<string>;
     { How APath had to be RECOVERED to be read at all, or '' when it decoded
       cleanly. A caller turns this into a diagnostic (PPENC): the text after
       the bad byte may not be what the author wrote, and staying silent about
@@ -306,33 +316,58 @@ end;
 // One candidate unit name (as-spelled) against the referring dir, then the
 // search paths — the shared step ResolveUnit runs per candidate spelling.
 // Index-backed (see FSearchIndex): two dictionary lookups, no file syscalls.
-function TPasSourceManager.FindUnitFile(const AUnitName, AFromDir: string;
-  out AResolved: string): Boolean;
+procedure TPasSourceManager.EnsureSearchIndex;
 var
   LFile: string;
   LListings: TArray<TArray<string>>;
   LIdx: Integer;
 begin
-  if FSearchIndex = nil then
+  if FSearchIndex <> nil then
+    Exit;
+  FSearchIndex := TDictionary<string, string>.Create;
+  // Enumerate every search path CONCURRENTLY (a cold directory listing is
+  // latency-bound, like a cold file read — see Prefetch) into per-path
+  // slots, then merge SEQUENTIALLY in path order: first path wins, the
+  // same priority the sequential probing loop had.
+  SetLength(LListings, Length(FSearchPaths));
+  TParallel.&For(0, High(FSearchPaths),
+    procedure(AIndex: Integer)
+    begin
+      if TDirectory.Exists(FSearchPaths[AIndex]) then
+        LListings[AIndex] := TDirectory.GetFiles(FSearchPaths[AIndex], '*.pas')
+      else
+        LListings[AIndex] := nil;
+    end);
+  for LIdx := 0 to High(LListings) do
+    for LFile in LListings[LIdx] do
+      FSearchIndex.TryAdd(LowerCase(TPath.GetFileName(LFile)), LFile);
+end;
+
+function TPasSourceManager.SearchPathUnitNames: TArray<string>;
+var
+  LPath: string;
+  LIdx: Integer;
+begin
+  if not FSearchNamesBuilt then
   begin
-    FSearchIndex := TDictionary<string, string>.Create;
-    // Enumerate every search path CONCURRENTLY (a cold directory listing is
-    // latency-bound, like a cold file read — see Prefetch) into per-path
-    // slots, then merge SEQUENTIALLY in path order: first path wins, the
-    // same priority the sequential probing loop had.
-    SetLength(LListings, Length(FSearchPaths));
-    TParallel.&For(0, High(FSearchPaths),
-      procedure(AIndex: Integer)
-      begin
-        if TDirectory.Exists(FSearchPaths[AIndex]) then
-          LListings[AIndex] := TDirectory.GetFiles(FSearchPaths[AIndex], '*.pas')
-        else
-          LListings[AIndex] := nil;
-      end);
-    for LIdx := 0 to High(LListings) do
-      for LFile in LListings[LIdx] do
-        FSearchIndex.TryAdd(LowerCase(TPath.GetFileName(LFile)), LFile);
+    FSearchNamesBuilt := True;
+    EnsureSearchIndex;
+    SetLength(FSearchNames, FSearchIndex.Count);
+    LIdx := 0;
+    // The VALUES carry the original-case filenames; the keys are lowered.
+    for LPath in FSearchIndex.Values do
+    begin
+      FSearchNames[LIdx] := TPath.GetFileNameWithoutExtension(LPath);
+      Inc(LIdx);
+    end;
   end;
+  Result := FSearchNames;
+end;
+
+function TPasSourceManager.FindUnitFile(const AUnitName, AFromDir: string;
+  out AResolved: string): Boolean;
+begin
+  EnsureSearchIndex;
   // SEARCH PATHS FIRST, referring directory only as a fallback. dcc-verified,
   // and the order matters more than it looks: with `b.pas` and `c.pas` sitting
   // together in one directory and ANOTHER `c.pas` earlier on the search path,

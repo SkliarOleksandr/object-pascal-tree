@@ -101,7 +101,16 @@ type
     ccRecField,    // a FIELD NAME in a record aggregate initializer (3.2.2):
                    // the record type's fields, nothing else
     ccInherited,   // right after `inherited `: the ancestor's members
-    ccLabel);      // right after `goto `: the labels in scope
+    ccLabel,       // right after `goto `: the labels in scope
+    // A property ACCESSOR position (13.1.1): after `read` / `write` in a
+    // property declaration only a field or a method of this class (or an
+    // ancestor) may stand — the collection is the struct chain alone, and
+    // AddSym filters by SHAPE (fields always; functions for read,
+    // procedures for write). Type compatibility is deliberately not
+    // checked: a wrong-typed member is the compiler's E2258 to report,
+    // and hiding near-misses helps nobody.
+    ccPropRead,
+    ccPropWrite);
 
   { Where a candidate came from — the ranking bucket (sortText prefix in the
     LSP mapping; display grouping in the demo). Declaration order IS priority
@@ -127,7 +136,7 @@ type
     needs before the next analysis swap, not hold (Mid, Sym) across it. }
   TPasComplItem = record
     Name: string;              // original spelling
-    Kind: TSemaSymbolKind;     // meaningless when Bucket = cbKeyword
+    Kind: TSemaSymbolKind;     // skKeyword when Bucket = cbKeyword
     Bucket: TPasComplBucket;
     Mid: Integer;              // declaring model id; -1 = the overlay model
     Sym: Integer;              // NIL_SYM for keywords/unit names
@@ -224,6 +233,10 @@ type
     // class's inherited members both key off this.
     FCaretStructs: TArray<Integer>;
     FAncestryBuilt: Boolean;
+    // The last-good model's sckImplementation scope (lazy; -2 = not yet
+    // looked up, NIL_SCOPE = the model has none) — OwnModelTypeX resolves
+    // from it so implementation-section types bridge too.
+    FOwnImplScope: Integer;
     function RawTokenAt(AOffset: Integer): Integer;
     function CaretOffset(ALine, ACol: Integer; out AOffset: Integer): Boolean;
     function PrevVisibleRaw(ARaw: Integer): Integer;
@@ -234,6 +247,7 @@ type
     function ProjModel(AMid: Integer; const AWhere: string): TPasSemaModel;
     function BridgeName(const AKey: string; out AMid, ASym: Integer): Boolean;
     function BridgeUnitMid(const AName: string): Integer;
+    function OwnModelTypeX(AOvSym: Integer): TSemaXType;
     function TypeOfOverlaySym(ASym, ADepth: Integer): TPasComplTypeRef;
     function TypeOfProjectSym(AMid, ASym, ACtx, ADepth: Integer):
       TPasComplTypeRef;
@@ -251,6 +265,7 @@ type
     function SymParamsText(AMid, ASym: Integer): string;
     function SymHasParams(AMid, ASym: Integer): Boolean;
     function IsTypeSym(AMid, ASym: Integer): Boolean;
+    procedure ExtendUsesPrefix(ALine: Integer; var AInfo: TPasCaretInfo);
     // CallAt internals
     function DesignatorNodeAtVis(AVis: Integer): Integer;
     function CalleeSyms(ANode, ACallNode: Integer;
@@ -373,6 +388,7 @@ begin
   FModel := AModel;
   FProj := AProject;
   FProjMid := AProjectMid;
+  FOwnImplScope := -2;
   FIsProjectModel := (FProj <> nil) and (FProjMid >= 0) and
     (FProjMid < FProj.ModelCount) and (FProj.Model(FProjMid) = FModel);
   // Pre-sized: a statement-context list runs to thousands of names, and
@@ -777,6 +793,49 @@ begin
     Result := -1;
 end;
 
+{ The last-good PROJECT identity of an OVERLAY-declared TYPE, by name: the
+  overlay is an edit of FProjMid's file, so a type it declares usually still
+  exists in the last-good model — which gives an instantiation frame a
+  project-space argument where the overlay symbol alone has none
+  (`TList<TMyOwnClass>` used to stay an OPEN generic; plan §5.C). Resolved
+  from the implementation scope so implementation-section types bridge too
+  (its parent chain covers the interface). A freshly typed type that the
+  last-good analysis never saw still answers XNil — the frame then stays
+  open, exactly the old behavior. When this model IS the project's, the
+  symbol needs no bridging at all. }
+function TPasCompletion.OwnModelTypeX(AOvSym: Integer): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LScope, LSym: Integer;
+begin
+  Result := XNil;
+  if (AOvSym = NIL_SYM) or (FProj = nil) or (FProjMid < 0) then
+    Exit;
+  if not (FModel.Symbols[AOvSym].Kind in [skType, skBuiltinType]) then
+    Exit;
+  if FIsProjectModel then
+    Exit(XPlain(FProjMid, AOvSym));
+  LM := ProjModel(FProjMid, 'OwnModelTypeX');
+  if FOwnImplScope = -2 then
+  begin
+    FOwnImplScope := NIL_SCOPE;
+    for LScope := 0 to LM.Scopes.Count - 1 do
+      if LM.Scopes[LScope].Kind = sckImplementation then
+      begin
+        FOwnImplScope := LScope;
+        Break;
+      end;
+    if (FOwnImplScope = NIL_SCOPE) and (LM.InterfaceScope <> NIL_SCOPE) then
+      FOwnImplScope := LM.InterfaceScope;
+  end;
+  if FOwnImplScope = NIL_SCOPE then
+    Exit;
+  LSym := LM.Resolve(FOwnImplScope, FModel.Symbols[AOvSym].NameLower);
+  if (LSym <> NIL_SYM) and
+     (LM.Symbols[LSym].Kind in [skType, skBuiltinType]) then
+    Result := XPlain(FProjMid, LSym);
+end;
+
 // The declared type of an OVERLAY value/type symbol, as a mixed-space ref.
 function TPasCompletion.TypeOfOverlaySym(ASym, ADepth: Integer):
   TPasComplTypeRef;
@@ -962,15 +1021,19 @@ begin
         if not XValid(LBase.X) or (FProj = nil) then
           Exit;
         // Build the instantiation frame when EVERY argument lands in project
-        // space (an overlay type as an argument has no project identity yet);
-        // otherwise fall back to the open generic — members still complete,
-        // parameter types stay open.
+        // space. An OVERLAY-declared argument type is bridged by NAME into
+        // this file's own last-good model first (OwnModelTypeX) — the
+        // `TList<TMyOwnClass>` frame closes that way; only a type the
+        // last-good analysis never saw falls back to the open generic
+        // (members still complete, parameter types stay open).
         LArgs := nil;
         LAllProject := True;
         LChild := FModel.Tree.Nodes[LChild].NextSibling;
         while LChild <> NIL_NODE do
         begin
           LArg := ResolveTypeRefNode(LChild, ADepth + 1);
+          if not XValid(LArg.X) then
+            LArg.X := OwnModelTypeX(LArg.OvSym);
           if XValid(LArg.X) then
             LArgs := LArgs + [LArg.X]
           else
@@ -1547,6 +1610,22 @@ begin
     [skType, skBuiltinType, skUnitRef, skGenericParam, skConst,
      skEnumValue]) then
     Exit;
+  // Property accessor positions take members of the right SHAPE only:
+  // fields always, routines split by head — a function can stand after
+  // `read`, a procedure after `write`, nothing else (13.1.1).
+  if FContext in [ccPropRead, ccPropWrite] then
+    case LM.Symbols[ASym].Kind of
+      skField, skVar:
+        ;
+      skRoutine:
+        if ((FContext = ccPropRead) and
+            (SymHeadWord(LM, ASym) <> 'function')) or
+           ((FContext = ccPropWrite) and
+            (SymHeadWord(LM, ASym) <> 'procedure')) then
+          Exit;
+    else
+      Exit;
+    end;
   AddItem(LM.Symbols[ASym].Name, LM.Symbols[ASym].NameLower,
     LM.Symbols[ASym].Kind, ABucket, AMid, ASym, ACtx);
 end;
@@ -1557,7 +1636,7 @@ var
 begin
   // The word lists are lowercase already — they are their own keys.
   for LIdx := 0 to High(AWords) do
-    AddItem(AWords[LIdx], AWords[LIdx], skType, cbKeyword, -1, NIL_SYM,
+    AddItem(AWords[LIdx], AWords[LIdx], skKeyword, cbKeyword, -1, NIL_SYM,
       NIL_INST);
 end;
 
@@ -1960,7 +2039,7 @@ end;
 
 procedure TPasCompletion.CollectScope(const AInfo: TPasCaretInfo);
 var
-  LScope, LIdx, LTarget, LBody, LOv: Integer;
+  LScope, LIdx, LTarget, LBody: Integer;
   LInterfaceOnly: Boolean;
   LRef: TPasComplTypeRef;
 begin
@@ -2115,22 +2194,86 @@ begin
   end;
 end;
 
-// Uses-clause candidates: the units the last-good project knows about.
-// (A search-path directory scan is a stage-E refinement; the analyzed
-// closure is what navigation can already reach.)
+{ ccUses: unit names are DOTTED, but the lexical anchor is one SEGMENT — a
+  client filtering candidates ('System.SysUtils') against the bare segment
+  prefix ('Sys' of `System.Sys|`) matches nothing, and its textEdit would
+  replace half a name. So the prefix and replace-span are extended LEFT
+  across the `ident . ident` chain (same line only — a replace span covers
+  one line) before the caret leaves the engine: the prefix reads
+  'System.Sys' and the span covers the whole dotted name typed so far.
+  (Plan §5.C's "dotted uses prefixes filter per segment", solved engine-side
+  so every client gets it.) }
+procedure TPasCompletion.ExtendUsesPrefix(ALine: Integer;
+  var AInfo: TPasCaretInfo);
+var
+  LTS: TPasTokenStream;
+  LCur, LPrev, LLine, LCol, LFrom: Integer;
+  LHead: string;
+begin
+  LTS := FModel.Tree.Source.Files[0];
+  if AInfo.RawToken < 0 then
+    Exit;
+  LCur := AInfo.RawToken;   // ckIdent: the segment; ckAfterDot: the dot
+  if AInfo.Kind = ckIdent then
+  begin
+    LPrev := PrevVisibleRaw(LCur - 1);
+    if (LPrev < 0) or (LTS.Tokens[LPrev].Kind <> tkDot) then
+      Exit;
+    LCur := LPrev;
+  end
+  else if (AInfo.Kind <> ckAfterDot) or
+          (LTS.Tokens[LCur].Kind <> tkDot) then
+    Exit;
+  // Accumulate whole `ident .` pairs leftward; apply only what stayed
+  // consistent (a chain continuing on an earlier line stops the walk with
+  // the same-line part intact).
+  LHead := '';
+  LFrom := -1;
+  while (LCur >= 0) and (LTS.Tokens[LCur].Kind = tkDot) do
+  begin
+    LPrev := PrevVisibleRaw(LCur - 1);
+    if (LPrev < 0) or (LTS.Tokens[LPrev].Kind <> tkIdentifier) then
+      Break;
+    LTS.OffsetToLineCol(LTS.Tokens[LPrev].Start, LLine, LCol);
+    if LLine <> ALine then
+      Break;
+    LHead := Copy(LTS.Source, LTS.Tokens[LPrev].Start + 1,
+      LTS.Tokens[LPrev].Len) + '.' + LHead;
+    LFrom := LCol;
+    LCur := PrevVisibleRaw(LPrev - 1);
+  end;
+  if LFrom < 0 then
+    Exit;
+  AInfo.Prefix := LHead + AInfo.Prefix;
+  AInfo.PrefixColFrom := LFrom;
+end;
+
+// Uses-clause candidates: the units the last-good project knows about, plus
+// the units the search paths could REACH — a `uses` may legitimately name a
+// unit nothing has analyzed yet (that is what typing a new uses item IS), so
+// the project's cached search-path scan fills in the rest. Both name sets
+// are full dotted names; loaded models win the dedup (they carry a real
+// model id where a path-scanned name has none).
 procedure TPasCompletion.CollectUnitNames;
 var
   LIdx: Integer;
+  LName: string;
 begin
   if FProj = nil then
     Exit;
   for LIdx := 0 to FProj.ModelCount - 1 do
     if LIdx <> FProjMid then
     begin
-      var LName := ChangeFileExt(ExtractFileName(FProj.ModelFile(LIdx)), '');
+      LName := ChangeFileExt(ExtractFileName(FProj.ModelFile(LIdx)), '');
       AddItem(LName, PasNameKey(LName), skUnitRef, cbUnitName, LIdx,
         NIL_SYM, NIL_INST);
     end;
+  // Mid = -1 for a path-scanned name: there is no model to point at. A
+  // cbUnitName item's identity is its NAME either way — nothing resolves
+  // these rows further.
+  for LName in FProj.SearchPathUnitNames do
+    AddItem(LName, PasNameKey(LName), skUnitRef, cbUnitName, -1,
+      NIL_SYM, NIL_INST);
 end;
 
 // The record type an aggregate initializer fills: the declared type of the
@@ -2231,6 +2374,27 @@ begin
     Exit(ccNone);
   if (AInfo.DotBase <> NIL_NODE) or (AInfo.Kind = ckAfterDot) then
     Exit(ccMember);
+  // A property ACCESSOR position: the caret sits inside an nkPropSpec whose
+  // specifier word is `read`/`write`. Checked before the generic token rules
+  // below — the word left of the caret is an identifier-LEXED directive word
+  // the token switch cannot tell from any other name. The other specifiers
+  // (index, stored, default, implements) keep the ordinary expression
+  // treatment: their right sides really are expressions.
+  LPrev := AInfo.Node;
+  while (LPrev <> NIL_NODE) and
+        not (FModel.Tree.Nodes[LPrev].Kind in [nkPropSpec, nkPropertyDecl,
+          nkBlock, nkInterfaceSec, nkImplementationSec, nkUnit]) do
+    LPrev := FModel.Tree.Nodes[LPrev].Parent;
+  if (LPrev <> NIL_NODE) and
+     (FModel.Tree.Nodes[LPrev].Kind = nkPropSpec) then
+  begin
+    if FModel.Tree.Source.VisibleTextEquals(
+         FModel.Tree.Nodes[LPrev].FirstToken, 'read') then
+      Exit(ccPropRead);
+    if FModel.Tree.Source.VisibleTextEquals(
+         FModel.Tree.Nodes[LPrev].FirstToken, 'write') then
+      Exit(ccPropWrite);
+  end;
   // A record aggregate's FIELD NAME (3.2.2, `(flDensity: 1.0; flDe|`): the
   // typed prefix that IS an nkAggregateField's name child, or a fresh spot
   // right after the aggregate's `(`/`;`/`,`.
@@ -2899,6 +3063,12 @@ begin
     Exit;
   FContext := ClassifyAt(LInfo);
   AContext := FContext;
+  if FContext = ccUses then
+  begin
+    // Unit names are dotted; the caret's prefix/replace-span must be too.
+    ExtendUsesPrefix(ALine, LInfo);
+    ACaret := LInfo;
+  end;
   FItems := nil;
   FCount := 0;
   // Not Clear: it discards the table's capacity AND virtual-notifies every
@@ -2960,6 +3130,15 @@ begin
       end;
     ccLabel:
       CollectLabels(LInfo);
+    ccPropRead, ccPropWrite:
+      begin
+        // Only this class's (and its ancestors') members are legal after
+        // read/write — the struct chain alone, no scope pipeline. The shape
+        // filter (fields; functions vs procedures) lives in AddSym.
+        EnsureAncestry(LInfo.Scope);
+        for LNode := 0 to High(FCaretStructs) do
+          CollectOverlayChain(FCaretStructs[LNode], True, cbStructMember);
+      end;
     ccRecField:
       begin
         // The enclosing aggregate's record type, fields only.
