@@ -120,7 +120,7 @@ var
   LM: TPasSemaModel;
   LComp: TPasCompletion;
   LRefs: TArray<Integer>;
-  LCount, LNode, LIdx, LSym, LVis, LRaw, LLine, LCol: Integer;
+  LCount, LNode, LIdx, LSym, LVis, LRaw, LLine, LCol, LUp: Integer;
   LStride: Double;
   LExt: TPasExtRef;
   LTName: string;
@@ -170,11 +170,11 @@ begin
     // The MODULE HEADER's own dotted name is a naming position, not a
     // completion one (the engine refuses it by design) — a segment of it
     // can still RESOLVE (`FMX.Dialogs` of `unit FMX.Dialogs.Default`).
-    LVis := LNode;
-    while (LVis <> NIL_NODE) and
-          (LM.Tree.Nodes[LVis].Kind in [nkIdent, nkMember]) do
-      LVis := LM.Tree.Nodes[LVis].Parent;
-    if (LVis <> NIL_NODE) and (LM.Tree.Nodes[LVis].Kind in
+    LUp := LNode;
+    while (LUp <> NIL_NODE) and
+          (LM.Tree.Nodes[LUp].Kind in [nkIdent, nkMember]) do
+      LUp := LM.Tree.Nodes[LUp].Parent;
+    if (LUp <> NIL_NODE) and (LM.Tree.Nodes[LUp].Kind in
       [nkUnit, nkProgram, nkLibrary, nkPackage]) then
       Continue;
     if LCount = Length(LRefs) then
@@ -199,17 +199,22 @@ begin
       LSym := LM.RefMap[LNode];
       if LSym <> NIL_SYM then
         LTName := LM.Symbols[LSym].Name
+      else if LM.ExtRefMap.TryGetValue(LNode, LExt) then
+        LTName := GProj.Model(LExt.UnitId).Symbols[LExt.Sym].Name
       else
-      begin
-        LM.ExtRefMap.TryGetValue(LNode, LExt);
-        LTName := GProj.Model(LExt.UnitId).Symbols[LExt.Sym].Name;
-      end;
+        // Pass 1 guarantees one of the two maps answers; if that invariant
+        // ever breaks, fail LOUDLY instead of scoring against Default() =
+        // model 0 / symbol 0.
+        raise Exception.CreateFmt('oracle pass-2 node %d lost its binding',
+          [LNode]);
 
       LVis := LM.Tree.Nodes[LNode].FirstToken;
       LRaw := LM.Tree.Source.Visible[LVis].TokenIndex;
       LTS.OffsetToLineCol(LTS.Tokens[LRaw].Start, LLine, LCol);
 
       Inc(GSampled);
+      // The dataflow through try/except is beyond W1036's sight — the
+      // pre-init trades an unfixable warning for a pedantic H2077.
       LHit := False;
       // Caret one character INTO the identifier: a one-letter prefix, the
       // ordinary mid-typing shape.
@@ -408,6 +413,8 @@ begin
     begin
       Writeln('could not load .dproj: ', GPath);
       ExitCode := 2;
+      GDProj.Free;
+      GMisses.Free;
       Exit;
     end;
     GPlatform := GDProj.Platform;

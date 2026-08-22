@@ -2576,15 +2576,21 @@ var
   LEngine: TPasCompletion;
   LCtx: TPasComplContext;
   LItems: TArray<TPasComplItem>;
-  LMid, LIdx: Integer;
+  LMid, LIdx, LKeep: Integer;
   LName, LDetail, LKindWord: string;
   LX: TSemaXType;
   LWithTypes: Boolean;
+  LCaret: TPasCaretInfo;
 begin
   CanExecute := False;
   if FAnalyzing or not Assigned(FSemaProject) or not Assigned(FNav) or
      not (pgc.ActivePage is TSourceTab) or not EnsureComplPP then
     Exit;
+  // The barrier: this runs from SynEdit's timer/shortcut dispatch, and an
+  // exception here (a mid-typed `{$I}` failing I/O, an engine defect) would
+  // otherwise pop a modal error dialog and REARM every 350 ms while the
+  // caret sits after the dot. No completion beats a dialog loop.
+  try
   LTab := TSourceTab(pgc.ActivePage);
   LPre := FComplPP.ProcessText(LTab.FilePath, LTab.Editor.Text);
   LTree := TPasParser.ParseFile(LPre, LDiags);
@@ -2594,8 +2600,24 @@ begin
     LMid := FNav.ModelIdOf(LTab.FilePath);
     LEngine := TPasCompletion.Create(LModel, FSemaProject, LMid);
     if not LEngine.CompleteAt(LTab.Editor.CaretY, LTab.Editor.CaretX,
-         LCtx, LItems) or (Length(LItems) = 0) then
+         LCaret, LCtx, LItems) or (Length(LItems) = 0) then
       Exit;
+    // Pre-filter by the typed prefix (the engine's replace span, not a
+    // re-tokenization): sorting and formatting 20k rows so the popup can
+    // filter them again dwarfed the engine's own cost on statement lists.
+    if LCaret.Prefix <> '' then
+    begin
+      LKeep := 0;
+      for LIdx := 0 to High(LItems) do
+        if LItems[LIdx].Name.StartsWith(LCaret.Prefix, True) then
+        begin
+          LItems[LKeep] := LItems[LIdx];
+          Inc(LKeep);
+        end;
+      SetLength(LItems, LKeep);
+      if LKeep = 0 then
+        Exit;
+    end;
     TArray.Sort<TPasComplItem>(LItems, TComparer<TPasComplItem>.Construct(
       function(const A, B: TPasComplItem): Integer
       begin
@@ -2649,6 +2671,10 @@ begin
   finally
     LEngine.Free;
     LModel.Free;
+  end;
+  except
+    on Exception do
+      CanExecute := False;
   end;
 end;
 

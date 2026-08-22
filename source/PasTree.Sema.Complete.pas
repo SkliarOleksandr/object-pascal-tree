@@ -119,6 +119,12 @@ type
     cbKeyword,
     cbUnitName);    // uses-clause candidates
 
+  { LIFETIME: Name/Kind/Bucket/Overloads are plain values, but Mid/Sym/Ctx
+    (and everything derived from them — ItemHeadWord, a host's SymDeclTypeX
+    detail) are only meaningful while BOTH the overlay model (Mid = -1) and
+    the project GENERATION this request ran against are alive. A host doing
+    deferred resolution (LSP completionItem/resolve) must materialize what it
+    needs before the next analysis swap, not hold (Mid, Sym) across it. }
   TPasComplItem = record
     Name: string;              // original spelling
     Kind: TSemaSymbolKind;     // meaningless when Bucket = cbKeyword
@@ -168,6 +174,7 @@ type
     FItems: TArray<TPasComplItem>;
     FCount: Integer;
     FSeen: TDictionary<string, Integer>;   // NameLower -> item index
+    FUnitMids: TDictionary<string, Integer>;  // lazy: unit basename -> mid
     FContext: TPasComplContext;
     FCaretVis: Integer;            // block-scope positional visibility
     FClassSide: Boolean;           // member completion on a TYPE reference
@@ -190,7 +197,6 @@ type
     // class's inherited members both key off this.
     FCaretStructs: TArray<Integer>;
     FAncestryBuilt: Boolean;
-    FCaretScope: Integer;          // scope for EnsureAncestry
     function RawTokenAt(AOffset: Integer): Integer;
     function PrevVisibleRaw(ARaw: Integer): Integer;
     function LeftmostVis(ANode: Integer): Integer;
@@ -233,6 +239,7 @@ type
     procedure CollectProjectMembers(const AX: TSemaXType;
       ABucket: TPasComplBucket);
     procedure CollectScope(const AInfo: TPasCaretInfo);
+    procedure CollectLabels(const AInfo: TPasCaretInfo);
     procedure CollectUsesImports(AInterfaceOnly: Boolean);
     procedure CollectUnitInterface(AUid: Integer; ABucket: TPasComplBucket);
     procedure CollectUnitNames;
@@ -295,7 +302,10 @@ begin
   FProjMid := AProjectMid;
   FIsProjectModel := (FProj <> nil) and (FProjMid >= 0) and
     (FProjMid < FProj.ModelCount) and (FProj.Model(FProjMid) = FModel);
-  FSeen := TDictionary<string, Integer>.Create;
+  // Pre-sized: a statement-context list runs to thousands of names, and
+  // TDictionary.Clear throws its capacity away — CompleteAt recreates with
+  // the same capacity per request instead (the review's finding #2).
+  FSeen := TDictionary<string, Integer>.Create(4096);
   SetLength(FVisOfRaw, Length(FModel.Tree.Source.Files[0].Tokens));
   for LIdx := 0 to High(FVisOfRaw) do
     FVisOfRaw[LIdx] := -1;
@@ -306,6 +316,7 @@ end;
 
 destructor TPasCompletion.Destroy;
 begin
+  FUnitMids.Free;
   FSeen.Free;
   inherited;
 end;
@@ -340,6 +351,8 @@ end;
 function TPasCompletion.PrevVisibleRaw(ARaw: Integer): Integer;
 begin
   Result := ARaw;
+  if Result > High(FVisOfRaw) then
+    Result := High(FVisOfRaw);
   while (Result >= 0) and (FVisOfRaw[Result] < 0) do
     Dec(Result);
 end;
@@ -383,12 +396,21 @@ begin
     LChild := FModel.Tree.Nodes[Result].FirstChild;
     while LChild <> NIL_NODE do
     begin
-      LFirst := LeftmostVis(LChild);
-      if (LFirst >= 0) and (LFirst <= AVis) and
-         (AVis <= FModel.Tree.Nodes[LChild].LastToken) then
+      // Pre-gate on the O(1) LastToken before paying for the leftmost
+      // descent: siblings are source-ordered, so everything ending before
+      // AVis is skipped with one field read, and the FIRST sibling ending at
+      // or after it is the only containment candidate — if its left edge is
+      // past AVis, the position sits between siblings and the walk stops.
+      // (Scanning thousands of unit-level declarations with a LeftmostVis
+      // each was the review's finding #3.)
+      if FModel.Tree.Nodes[LChild].LastToken >= AVis then
       begin
-        Result := LChild;
-        LFound := True;
+        LFirst := LeftmostVis(LChild);
+        if (LFirst >= 0) and (LFirst <= AVis) then
+        begin
+          Result := LChild;
+          LFound := True;
+        end;
         Break;
       end;
       LChild := FModel.Tree.Nodes[LChild].NextSibling;
@@ -624,7 +646,6 @@ end;
 function TPasCompletion.BridgeUnitMid(const AName: string): Integer;
 var
   LIdx: Integer;
-  LBase: string;
   LPM: TPasSemaModel;
 begin
   Result := -1;
@@ -648,17 +669,22 @@ begin
          SameText(LPM.UsesList[LIdx].NameFull, AName) then
         Exit(LPM.UsesList[LIdx].UnitId);
   end;
-  // Exact full-dotted spellings last. No suffix guessing: qualifying a unit
-  // requires having USED it, so the uses-list pass above already covers
-  // every namespace-shortened or aliased form dcc accepts — and a suffix
-  // guess false-matched `REST` (of a self-qualified REST.Types) onto an
-  // unrelated `*.REST` unit on the reference project.
-  for LIdx := 0 to FProj.ModelCount - 1 do
+  // Exact full-dotted spellings last, via a lazily built basename index —
+  // the linear scan allocated two strings per model per lookup, and a
+  // dotted-qualifier chain does several lookups. No suffix guessing:
+  // qualifying a unit requires having USED it, so the uses-list pass above
+  // already covers every namespace-shortened or aliased form dcc accepts —
+  // and a suffix guess false-matched `REST` (of a self-qualified REST.Types)
+  // onto an unrelated `*.REST` unit on the reference project.
+  if FUnitMids = nil then
   begin
-    LBase := ChangeFileExt(ExtractFileName(FProj.ModelFile(LIdx)), '');
-    if SameText(LBase, AName) then
-      Exit(LIdx);
+    FUnitMids := TDictionary<string, Integer>.Create(FProj.ModelCount * 2);
+    for LIdx := 0 to FProj.ModelCount - 1 do
+      FUnitMids.AddOrSetValue(PasNameKey(
+        ChangeFileExt(ExtractFileName(FProj.ModelFile(LIdx)), '')), LIdx);
   end;
+  if not FUnitMids.TryGetValue(PasNameKey(AName), Result) then
+    Result := -1;
 end;
 
 // The declared type of an OVERLAY value/type symbol, as a mixed-space ref.
@@ -817,7 +843,8 @@ begin
           Exit(TypeOfOverlaySym(LSym, ADepth + 1));
         LKey := FModel.Tree.NodeNameLower(ANode);
         if BridgeName(LKey, LMid, LSym) and
-           (ProjModel(LMid, 'DesignatorIdent').Symbols[LSym].Kind in [skType, skBuiltinType])
+           (ProjModel(LMid, 'ResolveTypeRefIdent').Symbols[LSym].Kind in
+             [skType, skBuiltinType])
         then
         begin
           Result.X := XPlain(LMid, LSym);
@@ -1091,8 +1118,9 @@ begin
         // A constructor names the CONSTRUCTED type: T.Create is a T value.
         LRoutine := RoutineNodeOf(FModel, LSym);
         if (LRoutine <> NIL_NODE) and
-           FModel.Tree.Source.VisibleTextEquals(
-             FModel.Tree.Nodes[LRoutine].FirstToken, 'constructor') then
+           (FModel.Tree.Source.VisibleToken(
+              FModel.Tree.Nodes[LRoutine].FirstToken).Kind = tkConstructor)
+        then
         begin
           Result := ABase;
           Result.IsTypeRef := False;
@@ -1118,7 +1146,12 @@ begin
     begin
       if FProj.IsConstructorSym(LMemMid, LMemSym) then
       begin
-        Result := LCur;
+        // The NAMED base, not the hop the walk had reached when the
+        // constructor was found: `TFoo.Create` constructs TFoo even when
+        // Create itself is inherited from another unit's TBar — returning
+        // the hop typed the value as TBar and silently lost TFoo's own
+        // members (the review's finding #1).
+        Result := ABase;
         Result.IsTypeRef := False;
         Exit;
       end;
@@ -1451,10 +1484,10 @@ begin
         LNode := RoutineNodeOf(AModel, ASym);
         Result := (LNode <> NIL_NODE) and
           ((AModel.Tree.Nodes[LNode].Aux = 1) and
-             not AModel.Tree.Source.VisibleTextEquals(
-               AModel.Tree.Nodes[LNode].FirstToken, 'destructor') or
-           AModel.Tree.Source.VisibleTextEquals(
-             AModel.Tree.Nodes[LNode].FirstToken, 'constructor'));
+             (AModel.Tree.Source.VisibleToken(
+                AModel.Tree.Nodes[LNode].FirstToken).Kind <> tkDestructor) or
+           (AModel.Tree.Source.VisibleToken(
+              AModel.Tree.Nodes[LNode].FirstToken).Kind = tkConstructor));
       end;
     skProperty:
       begin
@@ -1648,15 +1681,21 @@ begin
           var
             LNode: Integer;
           begin
-            // Class constructors/destructors are never nameable.
-            LNode := RoutineNodeOf(FModel, ASym);
-            if (LNode <> NIL_NODE) and
-               (FModel.Tree.Nodes[LNode].Aux = 1) and
-               (FModel.Tree.Source.VisibleTextEquals(
-                  FModel.Tree.Nodes[LNode].FirstToken, 'constructor') or
-                FModel.Tree.Source.VisibleTextEquals(
-                  FModel.Tree.Nodes[LNode].FirstToken, 'destructor')) then
-              Exit;
+            // Class constructors/destructors are never nameable. Kind-gated
+            // and token-KIND-tested — this closure is the per-candidate hot
+            // path, and a parent walk per field/const was pure waste (the
+            // review's finding #4; the token-kind policy is the one
+            // IsConstructorSym documents for itself).
+            if FModel.Symbols[ASym].Kind = skRoutine then
+            begin
+              LNode := RoutineNodeOf(FModel, ASym);
+              if (LNode <> NIL_NODE) and
+                 (FModel.Tree.Nodes[LNode].Aux = 1) and
+                 (FModel.Tree.Source.VisibleToken(
+                    FModel.Tree.Nodes[LNode].FirstToken).Kind in
+                    [tkConstructor, tkDestructor]) then
+                Exit;
+            end;
             if FFieldsOnly and (FModel.Symbols[ASym].Kind <> skField) then
               Exit;
             if not FClassSide or ClassSideMember(FModel, ASym) then
@@ -1767,7 +1806,7 @@ begin
            (FModel.Symbols[FModel.UsesList[LJdx].Sym].Scope =
              FModel.InterfaceScope) then
           LAllowed.AddOrSetValue(
-            AnsiLowerCase(FModel.UsesList[LJdx].NameFull), True);
+            PasNameKey(FModel.UsesList[LJdx].NameFull), True);
     end;
     PM := ProjModel(FProjMid, 'CollectUsesImports');
     for LIdx := High(PM.UsesList) downto 0 do
@@ -1777,7 +1816,7 @@ begin
         Continue;
       if LAllowed <> nil then
       begin
-        LOk := LAllowed.ContainsKey(AnsiLowerCase(PM.UsesList[LIdx].NameFull));
+        LOk := LAllowed.ContainsKey(PasNameKey(PM.UsesList[LIdx].NameFull));
         if not LOk then
           Continue;
       end;
@@ -1865,7 +1904,8 @@ begin
       begin
         LTarget := FModel.Scopes[LScope].OwnerNode;
         if (LTarget <> NIL_NODE) and
-           (FModel.Tree.Nodes[LTarget].Kind = nkWithStmt) then
+           (FModel.Tree.Nodes[LTarget].Kind = nkWithStmt) and
+           (FModel.Tree.Nodes[LTarget].FirstChild <> NIL_NODE) then
         begin
           LBody := FModel.Tree.Nodes[LTarget].FirstChild;
           while FModel.Tree.Nodes[LBody].NextSibling <> NIL_NODE do
@@ -1925,6 +1965,27 @@ begin
       end);
 end;
 
+// `goto |`: labels live in `label` sections of the lexical chain and nowhere
+// else — running the full CollectScope pipeline (with typing, ancestry
+// bridging, every used unit's interface) only for AddSym to reject all of it
+// was measured waste (the review's finding #1).
+procedure TPasCompletion.CollectLabels(const AInfo: TPasCaretInfo);
+var
+  LScope: Integer;
+begin
+  FCaretVis := AInfo.VisToken;
+  LScope := AInfo.Scope;
+  while LScope <> NIL_SCOPE do
+  begin
+    FModel.EnumScopeDeep(LScope,
+      procedure(ASym, AScopeOfSym: Integer)
+      begin
+        AddSym(-1, ASym, NIL_INST, cbLocal);   // AddSym keeps only skLabel
+      end);
+    LScope := FModel.Scopes[LScope].Parent;
+  end;
+end;
+
 // Uses-clause candidates: the units the last-good project knows about.
 // (A search-path directory scan is a stage-E refinement; the analyzed
 // closure is what navigation can already reach.)
@@ -1938,7 +1999,7 @@ begin
     if LIdx <> FProjMid then
     begin
       var LName := ChangeFileExt(ExtractFileName(FProj.ModelFile(LIdx)), '');
-      AddItem(LName, AnsiLowerCase(LName), skUnitRef, cbUnitName, LIdx,
+      AddItem(LName, PasNameKey(LName), skUnitRef, cbUnitName, LIdx,
         NIL_SYM, NIL_INST);
     end;
 end;
@@ -2028,7 +2089,10 @@ begin
       Exit(ccUses);
   end;
   // The MODULE HEADER's own (possibly dotted) name is a naming position —
-  // nothing to offer while the unit names itself.
+  // nothing to offer while the unit names itself. (AInfo.Node is never
+  // NIL_NODE for a valid caret — the parser always allocates a root — but
+  // the guard keeps this self-defending rather than resting on a parser
+  // invariant stated two units away.)
   LPrev := AInfo.Node;
   while (LPrev <> NIL_NODE) and
         (FModel.Tree.Nodes[LPrev].Kind in [nkIdent, nkMember]) do
@@ -2153,7 +2217,7 @@ const
   STMT_WORDS: array[0..21] of string = ('begin', 'end', 'if', 'then', 'else',
     'case', 'while', 'do', 'repeat', 'until', 'for', 'to', 'downto', 'with',
     'try', 'finally', 'except', 'raise', 'goto', 'asm', 'inherited', 'var');
-  UNIT_WORDS: array[0..14 ] of string = ('type', 'var', 'const', 'uses',
+  UNIT_WORDS: array[0..14] of string = ('type', 'var', 'const', 'uses',
     'procedure', 'function', 'implementation', 'initialization',
     'finalization', 'end', 'begin', 'resourcestring', 'threadvar', 'label',
     'class');
@@ -2195,12 +2259,9 @@ begin
 end;
 
 function TPasCompletion.ItemHeadWord(const AItem: TPasComplItem): string;
-const
-  cWords: array[0..4] of string = ('procedure', 'function', 'constructor',
-    'destructor', 'operator');
 var
   LM: TPasSemaModel;
-  LNode, LIdx: Integer;
+  LNode: Integer;
 begin
   Result := '';
   if (AItem.Kind <> skRoutine) or (AItem.Sym = NIL_SYM) or
@@ -2215,10 +2276,22 @@ begin
   LNode := RoutineNodeOf(LM, AItem.Sym);
   if LNode = NIL_NODE then
     Exit;
-  for LIdx := 0 to High(cWords) do
+  // The token KIND already says it (this runs per display row); `operator`
+  // is the one head that lexes as an identifier (a directive word).
+  case LM.Tree.Source.VisibleToken(LM.Tree.Nodes[LNode].FirstToken).Kind of
+    tkProcedure:
+      Result := 'procedure';
+    tkFunction:
+      Result := 'function';
+    tkConstructor:
+      Result := 'constructor';
+    tkDestructor:
+      Result := 'destructor';
+  else
     if LM.Tree.Source.VisibleTextEquals(LM.Tree.Nodes[LNode].FirstToken,
-      cWords[LIdx]) then
-      Exit(cWords[LIdx]);
+      'operator') then
+      Result := 'operator';
+  end;
 end;
 
 function TPasCompletion.CompleteAt(ALine, ACol: Integer;
@@ -2239,12 +2312,14 @@ begin
   AContext := FContext;
   FItems := nil;
   FCount := 0;
-  FSeen.Clear;
+  // Not Clear: it discards the table's capacity AND virtual-notifies every
+  // old entry — recreating at the same capacity is cheaper at list scale.
+  FSeen.Free;
+  FSeen := TDictionary<string, Integer>.Create(4096);
   FAncestryBuilt := False;
   FClassSide := False;
   FFieldsOnly := False;
   FBaseOwnUnit := False;
-  FCaretScope := LInfo.Scope;
   case FContext of
     ccNone:
       Exit(False);
@@ -2295,7 +2370,7 @@ begin
         end;
       end;
     ccLabel:
-      CollectScope(LInfo);   // AddSym filters to skLabel under ccLabel
+      CollectLabels(LInfo);
     ccRecField:
       begin
         // The enclosing aggregate's record type, fields only.
