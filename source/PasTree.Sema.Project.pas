@@ -747,9 +747,19 @@ end;
     1                  5352    2300      ~1.6 s
 
   Same work, an order of magnitude more CPU at the wide end, and WORSE wall
-  time. Physical-core width (logical div 2 on an SMT machine) sits at the
-  optimum and is what 0 selects. The 4-vs-8 difference is inside the noise here,
-  so the rule is deliberately coarse.
+  time. NB that table was measured while the pin LEAKED (see the
+  UnlimitedWorkerThreadsWhenBlocked note below): "16" really meant 16 pinned
+  plus an unbounded injected tail, which is what made wide look pathological.
+  With the cap actually holding, re-measured on the 3757-unit client corpus:
+
+    workers   wall     CPU
+    8         10.6 s   49 s
+    12        10.7 s   59 s
+    16 (=CPUs) 9.5 s   65 s
+
+  Logical-core width now wins the clock (the extra CPU is MM spin, bounded),
+  so 0 selects CPUCount. A host that prefers CPU-efficiency over wall time —
+  a background LSP, say — passes its own width instead.
 
   NB this configures the PROCESS-WIDE default pool, which a library should not do
   silently — hence a public knob to override it, and a documented default. A
@@ -766,7 +776,7 @@ begin
   GPoolConfigured := True;
   LWant := AWorkers;
   if LWant <= 0 then
-    LWant := Max(2, CPUCount div 2);
+    LWant := Max(2, CPUCount);
   // Min first: Max refuses anything below the current Min.
   TThreadPool.Default.SetMinWorkerThreads(LWant);
   TThreadPool.Default.SetMaxWorkerThreads(LWant);

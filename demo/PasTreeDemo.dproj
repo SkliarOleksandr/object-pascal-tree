@@ -70,10 +70,6 @@
         <VerInfo_Locale>1033</VerInfo_Locale>
         <VerInfo_Keys>CompanyName=;FileDescription=;FileVersion=1.0.0.0;InternalName=;LegalCopyright=;LegalTrademarks=;OriginalFilename=;ProductName=;ProductVersion=1.0.0.0;Comments=;CFBundleName=</VerInfo_Keys>
         <DCC_ExeOutput>.\out\</DCC_ExeOutput>
-        <!-- One throwaway .dcu directory for the whole repository, split by
-             platform (the same units compile Win32 for tests\). See the note in
-             build.bat: nothing reads a .dcu between runs, so it exists to be
-             deleted - one path to skip in a backup. -->
         <DCC_DcuOutput>..\out\dcu\win64</DCC_DcuOutput>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Base_Win32)'!=''">
@@ -196,7 +192,6 @@
             <Platforms>
                 <Platform value="Win32">False</Platform>
                 <Platform value="Win64">True</Platform>
-                <Platform value="WinARM64EC">False</Platform>
             </Platforms>
             <Deployment Version="5">
                 <DeployFile LocalName="PasTreeDemo.exe" Configuration="Debug" Class="ProjectOutput">
@@ -862,9 +857,6 @@
                     <Platform Name="Win64x">
                         <Operation>1</Operation>
                     </Platform>
-                    <Platform Name="WinARM64EC">
-                        <Operation>1</Operation>
-                    </Platform>
                 </DeployClass>
                 <DeployClass Name="ProjectiOSDeviceDebug">
                     <Platform Name="iOSDevice32">
@@ -935,10 +927,6 @@
                         <RemoteDir>Assets</RemoteDir>
                         <Operation>1</Operation>
                     </Platform>
-                    <Platform Name="WinARM64EC">
-                        <RemoteDir>Assets</RemoteDir>
-                        <Operation>1</Operation>
-                    </Platform>
                 </DeployClass>
                 <DeployClass Name="UWP_DelphiLogo44">
                     <Platform Name="Win32">
@@ -946,10 +934,6 @@
                         <Operation>1</Operation>
                     </Platform>
                     <Platform Name="Win64">
-                        <RemoteDir>Assets</RemoteDir>
-                        <Operation>1</Operation>
-                    </Platform>
-                    <Platform Name="WinARM64EC">
                         <RemoteDir>Assets</RemoteDir>
                         <Operation>1</Operation>
                     </Platform>
