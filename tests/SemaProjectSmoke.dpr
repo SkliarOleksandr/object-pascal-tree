@@ -2032,6 +2032,23 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitConUse.pas'), UNIT_CONUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArity.pas'), UNIT_ARITY);
 
+  // AnalyzeFile first: the single-file driver had NO suite coverage, and its
+  // pass chain diverges from the parallel drivers (it calls
+  // CrossResolveInherited directly, not through RunInheritedPass) — which is
+  // exactly how an unsized cross-work array shipped as an AV visible only
+  // from this driver (found by the 2026-08-22 Prefetch stress repro).
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    var LFMid := GProj.AnalyzeFile(TPath.Combine(LDir, 'UnitB.pas'));
+    Ok('AnalyzeFile: the single-file driver runs its whole pass chain',
+      LFMid >= 0);
+    Ok('AnalyzeFile: cross-unit refs resolve, no internal errors',
+      (LFMid >= 0) and (DiagCount(GProj.Model(LFMid), 'E2003') = 0) and
+      (DiagCount(GProj.Model(LFMid), 'PPINT') = 0));
+  finally
+    GProj.Free;
+  end;
+
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
     GProj.AnalyzeDirectory(LDir);

@@ -9197,6 +9197,16 @@ var
   LInhNames, LWithNames: TArray<string>;
   LName: string;
 begin
+  // Fail LOUDLY, naming the contract, instead of the AV an unsized read
+  // produces (range checks are off in release; a nil-array index read
+  // whatever sat at address AId). Sizing stays the CALLER's job on purpose:
+  // this runs on pass workers, and lazily growing shared arrays here would
+  // be a write race between them — the exact bug class this file avoids by
+  // hoisting every SetLength to the driver (SizeCrossWork's callers).
+  if AId > High(FWorkBuilt) then
+    raise Exception.CreateFmt(
+      'EnsureCrossWork(%d) before SizeCrossWork sized %d slots',
+      [AId, Length(FWorkBuilt)]);
   if FWorkBuilt[AId] then
     Exit;
   LM := FModels[AId];
@@ -9813,6 +9823,14 @@ begin
   // Heritage first, for the same reason the parallel drivers do it — the
   // inherited walk below reads what it binds (see CrossResolveDecl).
   RunDeclPass(FModels.Count);
+  // The ONE direct CrossResolveInherited caller — every other driver goes
+  // through RunInheritedPass, which sizes the cross-work arrays before
+  // farming out. Without this, EnsureCrossWork read FWorkBuilt[Result] off a
+  // NIL array: an AV on every AnalyzeFile run with real search paths, found
+  // by the Prefetch-race stress repro (2026-08-22), invisible to the suites
+  // because none of them drives AnalyzeFile. RunWithPass's own sizing call
+  // carries the same "AnalyzeFile reaches this pass without the other" note.
+  SizeCrossWork(FModels.Count);
   var LPend: TArray<TPasInhPending>;
   CrossResolveInherited(Result, LPend);
   for LIdx := 0 to High(LPend) do
