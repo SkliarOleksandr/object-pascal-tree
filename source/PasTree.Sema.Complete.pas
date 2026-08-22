@@ -1610,6 +1610,19 @@ begin
           ((AMid = FProjMid) or FBaseOwnUnit);
         if Result then
           Exit;
+        // dcc enforces a GENERIC class's plain `protected` only outside
+        // method bodies (dcc32 37.0-probed; spec 11.2.1) — and completion
+        // positions are method bodies in every case that matters, so a
+        // generic's protected members stay visible. spring4d's collections
+        // depend on the access being legal.
+        if (LM.Symbols[ASym].Visibility = svProtected) and
+           (LM.Symbols[ASym].Scope <> NIL_SCOPE) then
+        begin
+          LDeclStruct := LM.Scopes[LM.Symbols[ASym].Scope].StructSym;
+          if (LDeclStruct <> NIL_SYM) and
+             (sfGeneric in LM.Symbols[LDeclStruct].Flags) then
+            Exit(True);
+        end;
         if LM.Symbols[ASym].Scope = NIL_SCOPE then
           Exit(True);
         LDeclStruct := LM.Scopes[LM.Symbols[ASym].Scope].StructSym;
