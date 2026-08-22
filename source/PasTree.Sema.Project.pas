@@ -229,7 +229,9 @@ type
       const ABody: TProc<Integer>;
       const AMidOf: TFunc<Integer, Integer> = nil);
     procedure NoteInternalError(AMid: Integer; const APass: string;
-      E: Exception);
+      E: Exception); overload;
+    procedure NoteInternalError(AMid: Integer; const APass, AClassName,
+      AMessage: string); overload;
     // Appends a model + its initial status, keeping FModels/FFiles/FStatus in
     // lockstep. Returns the new model id.
     function RegisterModel(AModel: TPasSemaModel; const AFullPath: string;
@@ -245,6 +247,17 @@ type
     function LoadFile(const APath: string): Integer;
     procedure LoadFilesParallel(const APaths: TArray<string>;
       AInterfaceOnly: Boolean = False);
+    // Continuous closure loader — see the implementation. Returns False when
+    // the run was cancelled part-way (committed models stay published).
+    function RunLoadEngine(const ASeedLoads: TArray<string>;
+      const ASeedUpgrades: TArray<Integer>; AIntfLoads: Boolean;
+      const AAfterCommits: TProc): Boolean;
+    // RunLoadEngine's worker computes — a method, not a nested routine,
+    // because the worker is an anonymous method and cannot capture one.
+    function ComputeLoad(const APath: string; AIntf: Boolean;
+      out AErrClass, AErrMsg: string): TPasSemaModel;
+    function ComputeUpgrade(const ASource: TPasPreprocessed;
+      out AErrClass, AErrMsg: string): TPasSemaModel;
     procedure RegisterUnitName(AId: Integer);
     function LoadedUnitByName(const AName: string): Integer;
     procedure ResolveUses(AId: Integer);
@@ -932,10 +945,16 @@ end;
   note goes to the project-level list, which the report prints alongside. }
 procedure TPasSemaProject.NoteInternalError(AMid: Integer; const APass: string;
   E: Exception);
+begin
+  NoteInternalError(AMid, APass, E.ClassName, E.Message);
+end;
+
+procedure TPasSemaProject.NoteInternalError(AMid: Integer; const APass,
+  AClassName, AMessage: string);
 var
   LMsg: string;
 begin
-  LMsg := Format(SPPINT_PassFailed, [APass, E.ClassName, E.Message]);
+  LMsg := Format(SPPINT_PassFailed, [APass, AClassName, AMessage]);
   TMonitor.Enter(FInternalLock);
   try
     if (AMid >= 0) and (AMid < FModels.Count) and (FModels[AMid] <> nil) and
@@ -3082,6 +3101,401 @@ begin
   finally
     LFailLock.Free;
   end;
+end;
+
+type
+  // RunLoadEngine's queue entry / result. Unit-level: Delphi has no local
+  // type declarations, and the queue is a generic over these.
+  TPasLoadKind = (lkLoad, lkUpgrade);
+  TPasLoadItem = record
+    Kind: TPasLoadKind;
+    Path, Key: string;         // lkLoad: normalized full path + lower key
+    Mid: Integer;              // lkUpgrade: model to swap in place
+    Source: TPasPreprocessed;  // lkUpgrade: token-layer snapshot
+  end;
+  TPasLoadRes = record
+    Model: TPasSemaModel;            // nil = failed; ErrClass/ErrMsg say why
+    ErrClass, ErrMsg: string;
+  end;
+
+function TPasSemaProject.ComputeLoad(const APath: string; AIntf: Boolean;
+  out AErrClass, AErrMsg: string): TPasSemaModel;
+var
+  LPP: TPasPreprocessor;
+  LPre: TPasPreprocessed;
+  LDiags: TArray<TPasParseDiag>;
+  LTree: TPasTree;
+begin
+  // Mirrors LoadFilesParallel's worker body — see the comments there (the
+  // typer skip rule, the tolerate-out-loud contract).
+  Result := nil;
+  AErrClass := '';
+  AErrMsg := '';
+  try
+    LPP := RentPP;
+    try
+      LPP.OnDeclared := SeedDeclaredQuery();
+      LPre := LPP.Process(APath);
+      LTree := TPasParser.ParseFile(LPre, LDiags, AIntf);
+      Result := TPasSemaResolver.Analyze(LTree,
+        {ASkipTyper} AIntf and (Length(LTree.Nodes) > 0) and
+        (LTree.Nodes[0].Kind = nkUnit), FPlatform);
+    finally
+      ReturnPP(LPP);
+    end;
+  except
+    on E: Exception do
+    begin
+      Result := nil;
+      AErrClass := E.ClassName;
+      AErrMsg := E.Message;
+    end;
+  end;
+end;
+
+function TPasSemaProject.ComputeUpgrade(const ASource: TPasPreprocessed;
+  out AErrClass, AErrMsg: string): TPasSemaModel;
+var
+  LDiags: TArray<TPasParseDiag>;
+begin
+  // Mirrors UpgradeChunked's worker body: reparse from the SAME token layer
+  // (stage 1 preprocessed the whole file; re-preprocessing would double-pay
+  // lex+PP and break the prefix invariant against on-disk changes).
+  Result := nil;
+  AErrClass := '';
+  AErrMsg := '';
+  try
+    Result := TPasSemaResolver.Analyze(
+      TPasParser.ParseFile(ASource, LDiags, False), False, FPlatform);
+  except
+    on E: Exception do
+    begin
+      Result := nil;
+      AErrClass := E.ClassName;
+      AErrMsg := E.Message;
+    end;
+  end;
+end;
+
+{ Continuous closure loading — the barrier-free replacement for the
+  LoadChunked/DiscoverUses rounds and for UpgradeChunked's slices.
+
+  The chunked drivers held 16 workers at 10-22% busy through the load waves
+  (measured on the 3757-unit client corpus): a 64-file slice ends at a
+  barrier one straggler holds alone, and between slices the driver thread
+  runs discovery while every worker idles. Here instead:
+
+  - N worker tasks pull items from a shared queue and parse OUT OF ORDER;
+  - the driver commits results STRICTLY IN QUEUE ORDER (a reorder buffer),
+    so model ids stay exactly as deterministic as the chunked loader's;
+  - discovery runs on the driver right after each commit, in commit order.
+    Committing in queue order makes per-commit discovery concatenate to the
+    very same path sequence the old id-ordered DiscoverUses sweep produced —
+    which is what keeps the queue, and therefore every model id and every
+    downstream report, byte-for-byte reproducible against the old driver;
+  - wave-2 upgrades ride the same queue; the item carries a SNAPSHOT of the
+    model's token layer, so no worker ever indexes FModels while the
+    driver's commits are growing its backing array.
+
+  No Prefetch here: it runs TParallel.&For, and this engine's tasks occupy
+  the whole pinned pool for the duration (see ConfigureThreadPool — with
+  past-Max injection off that inner For would execute on the driver alone).
+  The workers overlap their own I/O with each other's CPU instead. For the
+  same reason the FIRST FSM.ResolveUnit of a run must happen before the
+  engine starts — it lazily builds the search index with a TParallel.&For of
+  its own; every driver's EnsureSystemUnit satisfies this.
+
+  Cancellation: the driver stops committing between items and workers stop
+  taking; in-flight parses finish, their results are freed uncommitted, and
+  the committed prefix stays published — LoadChunked's exact contract. }
+function TPasSemaProject.RunLoadEngine(const ASeedLoads: TArray<string>;
+  const ASeedUpgrades: TArray<Integer>; AIntfLoads: Boolean;
+  const AAfterCommits: TProc): Boolean;
+const
+  REPORT_EVERY = 64;
+var
+  LQueue: TList<TPasLoadItem>;              // guarded by LLock
+  LResults: TDictionary<Integer, TPasLoadRes>; // guarded by LLock
+  LTake: Integer;                           // guarded by LLock
+  LStop: Boolean;                           // guarded by LLock
+  LLock: TCriticalSection;
+  LWorkEvt, LDoneEvt: TEvent;               // auto-reset kicks; 5 ms fallback
+  LTasks: TArray<ITask>;
+  LSeen: TDictionary<string, Boolean>;      // driver-only enqueue dedup
+  LItem: TPasLoadItem;
+  LRes: TPasLoadRes;
+  LPair: TPair<Integer, TPasLoadRes>;
+  LCommit, LSince, LIdx, LWorkers: Integer;
+  LHaveItem, LHaveRes: Boolean;
+  LStatus: TPasModuleStatus;
+
+  procedure EnqueueLoad(const APath: string);
+  var
+    LFull, LKey: string;
+    LDummy: Integer;
+    LNew: TPasLoadItem;
+  begin
+    // Same normalize/dedup gate LoadFilesParallel ran per batch.
+    LFull := TPath.GetFullPath(APath);
+    LKey := LowerCase(LFull);
+    if FByPath.TryGetValue(LKey, LDummy) or LSeen.ContainsKey(LKey) then
+      Exit;
+    if not TFile.Exists(LFull) then
+      Exit;
+    LSeen.Add(LKey, True);
+    LNew := Default(TPasLoadItem);
+    LNew.Kind := lkLoad;
+    LNew.Path := LFull;
+    LNew.Key := LKey;
+    LNew.Mid := -1;
+    LLock.Enter;
+    try
+      LQueue.Add(LNew);
+    finally
+      LLock.Leave;
+    end;
+    LWorkEvt.SetEvent;
+  end;
+
+  procedure EnqueueUpgrade(AMid: Integer);
+  var
+    LNew: TPasLoadItem;
+  begin
+    LNew := Default(TPasLoadItem);
+    LNew.Kind := lkUpgrade;
+    LNew.Mid := AMid;
+    LNew.Source := FModels[AMid].Tree.Source;
+    LLock.Enter;
+    try
+      LQueue.Add(LNew);
+    finally
+      LLock.Leave;
+    end;
+    LWorkEvt.SetEvent;
+  end;
+
+  // The per-model half of the old DiscoverUses sweep, run at commit time.
+  procedure DiscoverFrom(AMid: Integer);
+  var
+    LU: Integer;
+    LPath: string;
+  begin
+    for LU := 0 to High(FModels[AMid].UsesList) do
+      if FSM.ResolveUnit(FModels[AMid].UsesList[LU].NameFull,
+        FModels[AMid].UsesList[LU].InPath, FFiles[AMid], LPath) then
+        EnqueueLoad(LPath);
+  end;
+
+begin
+  Result := True;
+  LQueue := TList<TPasLoadItem>.Create;
+  LResults := TDictionary<Integer, TPasLoadRes>.Create;
+  LSeen := TDictionary<string, Boolean>.Create;
+  LLock := TCriticalSection.Create;
+  LWorkEvt := TEvent.Create(nil, False, False, '');
+  LDoneEvt := TEvent.Create(nil, False, False, '');
+  LTasks := nil;
+  LTake := 0;
+  LStop := False;
+  try
+    // Seed order decides model ids, so it replicates the chunked drivers
+    // exactly: explicit roots first (they loaded before any discovery), then
+    // one discovery sweep over every model committed before this call, in id
+    // order — the first round of the old loop.
+    for LIdx := 0 to High(ASeedLoads) do
+      EnqueueLoad(ASeedLoads[LIdx]);
+    for LIdx := 0 to High(ASeedUpgrades) do
+      EnqueueUpgrade(ASeedUpgrades[LIdx]);
+    if ASeedUpgrades = nil then
+      for LIdx := 0 to FModels.Count - 1 do
+        DiscoverFrom(LIdx);
+
+    if not FSingleThreaded then
+    begin
+      LWorkers := TThreadPool.Default.MaxWorkerThreads;
+      if LWorkers < 1 then
+        LWorkers := 1;
+      SetLength(LTasks, LWorkers);
+      for LIdx := 0 to LWorkers - 1 do
+        LTasks[LIdx] := TTask.Run(
+          procedure
+          var
+            LMine: Integer;
+            LIt: TPasLoadItem;
+            LR: TPasLoadRes;
+            LExit: Boolean;
+          begin
+            while True do
+            begin
+              LMine := -1;
+              LLock.Enter;
+              try
+                LExit := LStop;
+                if not LExit and (LTake < LQueue.Count) then
+                begin
+                  LMine := LTake;
+                  Inc(LTake);
+                  LIt := LQueue[LMine];
+                end;
+              finally
+                LLock.Leave;
+              end;
+              if LExit then
+                Break;
+              if LMine < 0 then
+              begin
+                LWorkEvt.WaitFor(5);
+                Continue;
+              end;
+              LR := Default(TPasLoadRes);
+              // A cancelled run turns the rest into no-ops; the driver stops
+              // committing at the same check, so this result is never read.
+              if not CancelRequested then
+                if LIt.Kind = lkLoad then
+                  LR.Model := ComputeLoad(LIt.Path, AIntfLoads,
+                    LR.ErrClass, LR.ErrMsg)
+                else
+                  LR.Model := ComputeUpgrade(LIt.Source,
+                    LR.ErrClass, LR.ErrMsg);
+              LLock.Enter;
+              try
+                LResults.Add(LMine, LR);
+              finally
+                LLock.Leave;
+              end;
+              LDoneEvt.SetEvent;
+            end;
+          end);
+    end;
+
+    LCommit := 0;
+    LSince := 0;
+    while True do
+    begin
+      LLock.Enter;
+      try
+        LHaveItem := LCommit < LQueue.Count;
+        if LHaveItem then
+          LItem := LQueue[LCommit];
+      finally
+        LLock.Leave;
+      end;
+      if not LHaveItem then
+        Break;   // drained; only this thread enqueues, so nothing can appear
+      if CancelRequested then
+      begin
+        Result := False;
+        Break;
+      end;
+      if FSingleThreaded then
+      begin
+        LRes := Default(TPasLoadRes);
+        if LItem.Kind = lkLoad then
+          LRes.Model := ComputeLoad(LItem.Path, AIntfLoads,
+            LRes.ErrClass, LRes.ErrMsg)
+        else
+          LRes.Model := ComputeUpgrade(LItem.Source,
+            LRes.ErrClass, LRes.ErrMsg);
+      end
+      else
+      begin
+        // Reorder buffer: wait for THE NEXT queue index, not just any result.
+        LHaveRes := False;
+        repeat
+          LLock.Enter;
+          try
+            LHaveRes := LResults.TryGetValue(LCommit, LRes);
+            if LHaveRes then
+              LResults.Remove(LCommit);
+          finally
+            LLock.Leave;
+          end;
+          if not LHaveRes then
+          begin
+            if CancelRequested then
+              Break;
+            LDoneEvt.WaitFor(5);
+          end;
+        until LHaveRes;
+        if not LHaveRes then
+        begin
+          Result := False;
+          Break;
+        end;
+      end;
+
+      // Commit — the same registration the chunked loaders made, one item at
+      // a time, on this thread only.
+      if LItem.Kind = lkLoad then
+      begin
+        if LRes.Model <> nil then
+        begin
+          if AIntfLoads and (Length(LRes.Model.Tree.Nodes) > 0) and
+             (LRes.Model.Tree.Nodes[0].Kind = nkUnit) then
+            LStatus := msIntfReady
+          else
+            LStatus := msFullReady;
+          FByPath.Add(LItem.Key,
+            RegisterModel(LRes.Model, LItem.Path, LStatus));
+          RegisterUnitName(FModels.Count - 1);
+          DiscoverFrom(FModels.Count - 1);
+        end
+        else
+        begin
+          FByPath.Add(LItem.Key, -1);
+          if LRes.ErrClass <> '' then
+            FLoadFailures := FLoadFailures +
+              [Format('%s: %s: %s', [TPath.GetFileName(LItem.Path),
+                LRes.ErrClass, LRes.ErrMsg])];
+        end;
+      end
+      else
+      begin
+        if LRes.Model <> nil then
+        begin
+          FModels[LItem.Mid] := LRes.Model; // owns-list frees the intf one
+          FStatus[LItem.Mid] := msFullReady;
+          DiscoverFrom(LItem.Mid);
+        end
+        else
+          // Keep the interface snapshot rather than losing the unit — but
+          // SAY SO (UpgradeChunked's contract).
+          NoteInternalError(LItem.Mid, 'full-parse',
+            LRes.ErrClass, LRes.ErrMsg);
+      end;
+      Inc(LCommit);
+      Inc(LSince);
+      if (LSince >= REPORT_EVERY) and Assigned(AAfterCommits) then
+      begin
+        AAfterCommits();
+        LSince := 0;
+      end;
+    end;
+  finally
+    LLock.Enter;
+    try
+      LStop := True;
+    finally
+      LLock.Leave;
+    end;
+    if LTasks <> nil then
+    begin
+      for LIdx := 0 to High(LTasks) do
+        LWorkEvt.SetEvent;
+      TTask.WaitForAll(LTasks);
+    end;
+    // A cancelled run leaves computed-but-uncommitted models behind.
+    for LPair in LResults do
+      LPair.Value.Model.Free;
+    LResults.Free;
+    LQueue.Free;
+    LSeen.Free;
+    LWorkEvt.Free;
+    LDoneEvt.Free;
+    LLock.Free;
+  end;
+  if Assigned(AAfterCommits) then
+    AAfterCommits();
 end;
 
 // Maps the model's DECLARED unit name (root's name node, dotted included) to
@@ -9881,11 +10295,8 @@ end;
 
 function TPasSemaProject.AnalyzeProject(const AMainFile: string): Integer;
 var
-  LDone, LN, LIdx, LU, LPathCount: Integer;
-  LPaths: TArray<string>;
-  LPath: string;
+  LIdx, LN: Integer;
   LSW: TStopwatch;
-  LResolveMs, LLoadMs: Int64;
 
   procedure Stage(const AName: string);
   begin
@@ -9908,48 +10319,15 @@ begin
   EnsureSystemUnit;
   EnsureSysInitUnit;
   Stage('main+sys');
-  // Load the TRANSITIVE closure, breadth-first: resolve every not-yet-
-  // processed model's uses, batch-preload the newly discovered files in
-  // parallel, then let ResolveUses (sequential, the single source of truth
-  // for UnitId assignment) find them all cached. Repeat until no model is
-  // left unprocessed. Terminates: each round processes models created
-  // before it, and a file loads at most once (FByPath cache).
-  LResolveMs := 0;
-  LLoadMs := 0;
-  LDone := 0;
-  while LDone < FModels.Count do
-  begin
-    LN := FModels.Count;
-    // Count-tracked doubling: a discovery round collects hundreds of paths,
-    // and `+ [x]` re-copied the string array (refcount churn) per append.
-    LPaths := nil;
-    LPathCount := 0;
-    LSW := TStopwatch.StartNew;
-    for LIdx := LDone to LN - 1 do
-      for LU := 0 to High(FModels[LIdx].UsesList) do
-        if FSM.ResolveUnit(FModels[LIdx].UsesList[LU].NameFull,
-          FModels[LIdx].UsesList[LU].InPath, FFiles[LIdx], LPath) and
-          not FByPath.ContainsKey(LowerCase(LPath)) then
-        begin
-          if LPathCount = Length(LPaths) then
-            SetLength(LPaths, LPathCount * 2 + 16);
-          LPaths[LPathCount] := LPath;
-          Inc(LPathCount);
-        end;
-    SetLength(LPaths, LPathCount);
-    Inc(LResolveMs, LSW.ElapsedMilliseconds);
-    LSW := TStopwatch.StartNew;
-    LoadFilesParallel(LPaths);
-    Inc(LLoadMs, LSW.ElapsedMilliseconds);
-    LSW := TStopwatch.StartNew;
-    for LIdx := LDone to LN - 1 do
-      ResolveUses(LIdx);
-    Inc(LResolveMs, LSW.ElapsedMilliseconds);
-    LDone := LN;
-  end;
-  FStageTimings := FStageTimings +
-    Format('resolve=%d;load=%d;', [LResolveMs, LLoadMs]);
-  LSW := TStopwatch.StartNew;
+  // Load the TRANSITIVE closure — continuous, not round-barriered (see
+  // RunLoadEngine). ResolveUses (sequential, the single source of truth for
+  // UnitId assignment) then finds every file cached, exactly as it did after
+  // the old per-round batch loads.
+  RunLoadEngine(nil, nil, {AIntfLoads} False, nil);
+  Stage('load');
+  for LIdx := 0 to FModels.Count - 1 do
+    ResolveUses(LIdx);
+  Stage('resolve');
   // A Declared() guard can only be answered now — see RunDeclaredPass. It may
   // load units the re-decided branch newly imports, so LN is taken after it.
   RunDeclaredPass(FModels.Count);
@@ -10098,20 +10476,18 @@ end;
 function TPasSemaProject.AnalyzeStaged(const ARoots, APriority: TArray<string>;
   const ACancelled: TFunc<Boolean>;
   const AOnProgress: TProc<TPasStagedProgress>): Integer;
-const
-  // Batch slice: big enough to keep every core busy, small enough that the
-  // progress counter keeps moving and a Cancel never waits longer than one
-  // slice (the first implementation loaded a several-hundred-file discovery
-  // round as ONE silent batch — the counter froze for seconds, and a project
-  // switch blocked the UI in the session drain for just as long).
-  CHUNK = 64;
 var
   LProgress: TPasStagedProgress;
-  LDone, LN, LIdx, LScanFrom: Integer;
-  LNewPaths, LOrdered: TArray<string>;
+  LN, LIdx: Integer;
+  LOrdered: TArray<string>;
+  LIds: TArray<Integer>;
   LPath, LKey: string;
   LSeen: TDictionary<string, Boolean>;
   LSW: TStopwatch;
+  // Recount+Report as a CAPTURED closure: RunLoadEngine's progress hook is an
+  // anonymous method, and an anonymous method cannot call the nested
+  // Recount/Report (E2555) — but it can call another closure.
+  LNotify: TProc<string>;
 
   procedure StageMark(const AName: string);
   begin
@@ -10148,128 +10524,6 @@ var
       AOnProgress(LProgress);
   end;
 
-  // Uses-closure paths not yet loaded, discovered from models [AFrom..AToExcl).
-  function DiscoverUses(AFrom, AToExcl: Integer): TArray<string>;
-  var
-    LI, LK, LCount: Integer;
-    LP: string;
-  begin
-    // Count-tracked doubling — a discovery round finds hundreds of paths, and
-    // `+ [x]` re-copied the string array per append.
-    Result := nil;
-    LCount := 0;
-    for LI := AFrom to AToExcl - 1 do
-      for LK := 0 to High(FModels[LI].UsesList) do
-        if FSM.ResolveUnit(FModels[LI].UsesList[LK].NameFull,
-          FModels[LI].UsesList[LK].InPath, FFiles[LI], LP) and
-          not FByPath.ContainsKey(LowerCase(LP)) and
-          not LSeen.ContainsKey(LowerCase(LP)) then
-        begin
-          LSeen.Add(LowerCase(LP), True);
-          if LCount = Length(Result) then
-            SetLength(Result, LCount * 2 + 16);
-          Result[LCount] := LP;
-          Inc(LCount);
-        end;
-    SetLength(Result, LCount);
-  end;
-
-  // Loads APaths in CHUNK slices — progress report and cancellation check
-  // between slices. False = cancelled part-way (loaded slices stay published).
-  function LoadChunked(const APaths: TArray<string>; AIntf: Boolean;
-    const APhase: string): Boolean;
-  var
-    LFrom, LTo: Integer;
-  begin
-    Result := True;
-    LFrom := 0;
-    while LFrom <= High(APaths) do
-    begin
-      if Cancelled then
-        Exit(False);
-      LTo := LFrom + CHUNK - 1;
-      if LTo > High(APaths) then
-        LTo := High(APaths);
-      LoadFilesParallel(Copy(APaths, LFrom, LTo - LFrom + 1), AIntf);
-      Recount;
-      Report(APhase);
-      LFrom := LTo + 1;
-    end;
-  end;
-
-  // Upgrades every msIntfReady module to a full model: the compute (reparse
-  // reusing the intf snapshot's whole-file lex+PP, then Phase 1) farms one
-  // worker per core, the commit (model swap + status) is sequential between
-  // chunks — the same pure-compute/sequential-commit discipline as
-  // LoadFilesParallel. The first implementation upgraded ONE MODULE AT A
-  // TIME on the single worker thread — the dominant perf loss vs the batch
-  // driver on a big project. False = cancelled part-way.
-  function UpgradeChunked: Boolean;
-  var
-    LIds: TArray<Integer>;
-    LNew: TArray<TPasSemaModel>;
-    LI, LFrom, LTo: Integer;
-  begin
-    Result := True;
-    LIds := nil;
-    for LI := 0 to FStatus.Count - 1 do
-      if FStatus[LI] = msIntfReady then
-        LIds := LIds + [LI];
-    LFrom := 0;
-    while LFrom <= High(LIds) do
-    begin
-      if Cancelled then
-        Exit(False);
-      LTo := LFrom + CHUNK - 1;
-      if LTo > High(LIds) then
-        LTo := High(LIds);
-      SetLength(LNew, LTo - LFrom + 1);
-      ForEachIndex(LTo - LFrom, 'full-parse',
-        procedure(AIdx: Integer)
-        var
-          LDiags: TArray<TPasParseDiag>;
-        begin
-          try
-            // Tree.Source always covers the WHOLE file (stage 1 stops only
-            // the parser, never the preprocessor) — so the upgrade pays
-            // parse + Phase 1 only, per the plan's §2.2 "reparse reusing
-            // stage-1 artifacts". Re-preprocessing here would double-pay
-            // lex+PP for the entire closure (the single biggest perf
-            // regression of the first implementation), and building from
-            // the SAME token layer also keeps the prefix invariant safe
-            // against a file changing on disk between the waves.
-            LNew[AIdx] := TPasSemaResolver.Analyze(
-              TPasParser.ParseFile(
-                FModels[LIds[LFrom + AIdx]].Tree.Source, LDiags, False),
-              False, FPlatform);
-          except
-            on E: Exception do
-            begin
-              // Keep the interface snapshot rather than losing the unit — but
-              // SAY SO. This used to swallow the exception outright, so a unit
-              // silently stayed interface-only and every body in it went
-              // unanalyzed with nothing in the log to explain why.
-              LNew[AIdx] := nil;
-              NoteInternalError(LIds[LFrom + AIdx], 'full-parse', E);
-            end;
-          end;
-        end,
-        function(AIndex: Integer): Integer
-        begin
-          Result := LIds[LFrom + AIndex];
-        end);
-      for LI := 0 to LTo - LFrom do
-        if LNew[LI] <> nil then
-        begin
-          FModels[LIds[LFrom + LI]] := LNew[LI]; // owns-list frees the intf one
-          FStatus[LIds[LFrom + LI]] := msFullReady;
-        end;
-      Recount;
-      Report('full');
-      LFrom := LTo + 1;
-    end;
-  end;
-
 begin
   Result := -1;
   FStageTimings := '';
@@ -10281,6 +10535,25 @@ begin
   FCancelCheck := ACancelled;
   try
     LSW := TStopwatch.StartNew;
+    LNotify :=
+      procedure(APhase: string)
+      var
+        LI: Integer;
+      begin
+        LProgress.Total := FModels.Count;
+        LProgress.IntfDone := 0;
+        LProgress.FullDone := 0;
+        for LI := 0 to FStatus.Count - 1 do
+        begin
+          if FStatus[LI] >= msIntfReady then
+            Inc(LProgress.IntfDone);
+          if FStatus[LI] >= msFullReady then
+            Inc(LProgress.FullDone);
+        end;
+        LProgress.Phase := APhase;
+        if Assigned(AOnProgress) then
+          AOnProgress(LProgress);
+      end;
     // Front-load the priority set (open module + its uses), then the roots.
     // Pre-sized to the input (survivors <= input), truncated after the loop.
     SetLength(LOrdered, Length(APriority) + Length(ARoots));
@@ -10305,49 +10578,41 @@ begin
     EnsureSystemUnit;
     EnsureSysInitUnit;
 
-    // ---- Wave 1: interface-only closure (breadth-first) ----
+    // ---- Wave 1: interface-only closure, continuous (see RunLoadEngine —
+    // parses run out of order, commits and discovery keep the old BFS's
+    // deterministic id order; the engine reports every 64 commits, the same
+    // heartbeat the 64-file chunks used to give) ----
     Report('intf');
-    if not LoadChunked(LOrdered, {AIntf} True, 'intf') then
+    if not RunLoadEngine(LOrdered, nil, {AIntfLoads} True,
+      procedure
+      begin
+        LNotify('intf');
+      end) then
     begin
       Report('cancelled');
       Exit;
     end;
-    LDone := 0;
-    while LDone < FModels.Count do
-    begin
-      LN := FModels.Count;
-      LNewPaths := DiscoverUses(LDone, LN);
-      if not LoadChunked(LNewPaths, {AIntf} True, 'intf') then
-      begin
-        Report('cancelled');
-        Exit;
-      end;
-      LDone := LN;
-    end;
     StageMark('intf');
 
     // ---- Wave 2: upgrade every module to a full parse, discovering any
-    // implementation-only dependencies the interface trees didn't show ----
+    // implementation-only dependencies the interface trees didn't show.
+    // Upgrades and the loads they discover ride one queue, so a discovered
+    // unit parses WHILE later upgrades still run — the old shape upgraded
+    // everything, then loaded, in separate barriered rounds. ----
     Report('full');
-    // The FIRST discovery round after the upgrades must rescan EVERY model
-    // (implementation uses only just became visible); later rounds only the
-    // newly loaded ones (they arrive as full trees already).
-    LScanFrom := 0;
-    repeat
-      if not UpgradeChunked then
+    LIds := nil;
+    for LIdx := 0 to FStatus.Count - 1 do
+      if FStatus[LIdx] = msIntfReady then
+        LIds := LIds + [LIdx];
+    if not RunLoadEngine(nil, LIds, {AIntfLoads} False,
+      procedure
       begin
-        Report('cancelled');
-        Exit;
-      end;
-      LN := FModels.Count;
-      LNewPaths := DiscoverUses(LScanFrom, LN);
-      LScanFrom := LN;
-      if not LoadChunked(LNewPaths, {AIntf} False, 'full') then
-      begin
-        Report('cancelled');
-        Exit;
-      end;
-    until FModels.Count = LN;
+        LNotify('full');
+      end) then
+    begin
+      Report('cancelled');
+      Exit;
+    end;
     StageMark('full');
 
     // ---- Finalizer: cross passes over the whole closure. Reported as
@@ -10454,6 +10719,11 @@ begin
       FByPath.TryGetValue(LowerCase(TPath.GetFullPath(ARoots[0])), Result);
   finally
     FCancelCheck := nil;
+    // LNotify is a closure OVER THIS FRAME stored IN this frame — a
+    // self-cycle the compiler cannot collect (the $ActRec holds the TProc,
+    // the TProc pins the $ActRec). Break it or every staged run leaks its
+    // activation record plus everything it captured.
+    LNotify := nil;
     LSeen.Free;
   end;
 end;
