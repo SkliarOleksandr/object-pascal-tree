@@ -770,6 +770,19 @@ begin
   // Min first: Max refuses anything below the current Min.
   TThreadPool.Default.SetMinWorkerThreads(LWant);
   TThreadPool.Default.SetMaxWorkerThreads(LWant);
+  // Without this the Min=Max pin does not actually hold: the pool's monitor
+  // thread injects threads PAST Max whenever the queue is non-empty, no
+  // worker is idle and process CPU usage is "low" — and on a machine with
+  // more logical cores than workers, a fully busy pinned pool IS "low"
+  // (8 busy of 16 logical = 50%). Measured on the 3757-unit client corpus:
+  // the pool grew 8 -> ~38 threads within the first two seconds, the extras
+  // then took part in every later pass, and the run burned 85 s CPU against
+  // the single-thread run's 38 s — the very MM-spin spiral the pin above was
+  // measured to prevent. The trade: past-Max injection is also the pool's
+  // deadlock escape for tasks that BLOCK on other queued tasks, so no task
+  // scheduled on the default pool may wait on another queued task. The
+  // analyzer's passes never do (fork-join only, joins on the caller).
+  TThreadPool.Default.UnlimitedWorkerThreadsWhenBlocked := False;
 end;
 
 constructor TPasSemaProject.Create(APlatform: TPasPlatform;
