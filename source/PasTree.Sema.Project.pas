@@ -9758,6 +9758,13 @@ begin
   Result := LoadFile(AMainFile);
   if Result < 0 then
     Exit;
+  // Eagerly, like every other driver (AnalyzeProject/Directory/Staged): the
+  // parallel passes below can reach EnsureSystemUnit from a worker (any
+  // FindMemberX ancestry climb hops to the implicit TObject), and a
+  // first-time System load THERE appends to FModels/FByPath while sibling
+  // workers index them. This was the one driver without the eager load.
+  EnsureSystemUnit;
+  EnsureSysInitUnit;
   // Pre-load the main unit's direct uses in parallel; ResolveUses below then
   // finds every one already cached (it stays the single source of truth for
   // UnitId assignment and the AllUsesResolved gate).
