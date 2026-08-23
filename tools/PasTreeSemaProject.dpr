@@ -80,6 +80,10 @@ var
   GVisibility: Boolean;
   GRelease: Boolean;   // -release: exercise ReleaseTransientMaps, report held
   GDemote: Boolean;    // -demote: stage 2 on top (DemoteClosedUnits)
+  GRehydrate: Boolean; // -rehydrate: after -demote, EnsureHydrated EVERY model
+                       // and report failures — the stream-reproducibility
+                       // check over a real closure (includes, $IF oracle,
+                       // recovered encodings), which no fixture can cover.
   GSW: TStopwatch;
   GMode: string;
 
@@ -385,6 +389,20 @@ begin
         GProj.DemoteClosedUnits([LD.MainSource]);
         Writeln(ErrOutput, Format('  after DemoteClosedUnits: %s held',
           [MemoryText(AllocatedBytes)]));
+        if GRehydrate then
+        begin
+          var LFail := 0;
+          for var LRIdx := 0 to GProj.ModelCount - 1 do
+            if not GProj.EnsureHydrated(LRIdx) then
+            begin
+              Inc(LFail);
+              Writeln(ErrOutput, '    rehydrate FAILED: ' +
+                GProj.ModelFile(LRIdx));
+            end;
+          Writeln(ErrOutput, Format(
+            '  rehydrate: %d of %d model(s) FAILED; %s held',
+            [LFail, GProj.ModelCount, MemoryText(AllocatedBytes)]));
+        end;
       end;
       if LTotalLines > 0 then
         Writeln(ErrOutput, Format(
@@ -478,6 +496,8 @@ begin
         GRelease := True
       else if SameText(ParamStr(GIdx), '-demote') then
         GDemote := True
+      else if SameText(ParamStr(GIdx), '-rehydrate') then
+        GRehydrate := True
       else if ParamStr(GIdx).StartsWith('-p:', True) then
         TryParsePlatformName(Copy(ParamStr(GIdx), 4, MaxInt), GPlatform)
       else if ParamStr(GIdx).StartsWith('-studio:', True) then
@@ -569,6 +589,16 @@ begin
         GProj.DemoteClosedUnits([GPath]);
         Writeln(ErrOutput, Format('after DemoteClosedUnits: %s held',
           [MemoryText(AllocatedBytes)]));
+        if GRehydrate then
+        begin
+          var LFail := 0;
+          for var LRIdx := 0 to GProj.ModelCount - 1 do
+            if not GProj.EnsureHydrated(LRIdx) then
+              Inc(LFail);
+          Writeln(ErrOutput, Format(
+            'rehydrate: %d of %d model(s) FAILED; %s held',
+            [LFail, GProj.ModelCount, MemoryText(AllocatedBytes)]));
+        end;
       end;
     finally
       GProj.Free;

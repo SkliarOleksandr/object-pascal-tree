@@ -2774,7 +2774,12 @@ begin
   // what frees the first-pass model — freeing it here as well is a double free.
   for LIdx := 0 to High(LCand) do
     if LDone[LIdx] <> nil then
+    begin
+      // An oracle-built stream cannot be reproduced from cold — mark it so
+      // text demotion skips this model (see TPasSemaModel.OracleStream).
+      LDone[LIdx].OracleStream := True;
       FModels[LCand[LIdx]] := LDone[LIdx];
+    end;
   LPaths := nil;
   for LIdx := 0 to High(LCand) do
     if LDone[LIdx] <> nil then
@@ -10443,7 +10448,10 @@ begin
       if not LKeep.ContainsKey(LIdx) then
       begin
         FModels[LIdx].ReleaseTransientMaps;
-        FModels[LIdx].DemoteText;
+        // An oracle-built stream is not reproducible from cold (see the
+        // field) — stage 1 applies, the text stays.
+        if not FModels[LIdx].OracleStream then
+          FModels[LIdx].DemoteText;
       end;
   finally
     LKeep.Free;
@@ -10462,8 +10470,12 @@ begin
     Exit(True);
   LPP := RentPP;
   try
-    LPP.OnDeclared := DeclaredQueryFor(AMid);
-    LPP.OnSymbol := SymbolQueryFor(AMid);
+    // The SEED query, exactly like the load pass that produced this stream:
+    // a demotable model's final stream IS its first-pass stream (an
+    // oracle-reprocessed one is never demoted — see OracleStream), and the
+    // full per-unit oracle would answer what the first pass GUESSED,
+    // flipping branches and failing the identity check below.
+    LPP.OnDeclared := SeedDeclaredQuery();
     try
       LPre := LPP.Process(FFiles[AMid]);
     except

@@ -213,6 +213,14 @@ type
       The Demoted* fields are the REHYDRATION IDENTITY CHECK: a re-preprocess
       must reproduce exactly this stream or the node token indices would lie. }
     Demoted: Boolean;
+    { True when this model's FINAL token stream came from the declared-pass
+      re-preprocess (the per-unit $IF oracle) rather than the plain seeded
+      first pass. Such a stream depended on MID-ANALYSIS oracle state and is
+      not reproducible from cold — measured on the client closure: exactly
+      these units (System.pas, System.Rtti, FastMM4...) failed the rehydration
+      identity check. DemoteClosedUnits therefore skips them; they keep full
+      text. A handful of units against ~3750 demoted. }
+    OracleStream: Boolean;
     DemotedVisCount: Integer;
     DemotedFileSizes: TArray<Integer>;    // Length(Files[i].Source)
     DemotedTokenCounts: TArray<Integer>;  // Length(Files[i].Tokens)
