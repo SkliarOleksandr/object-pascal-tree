@@ -42,7 +42,8 @@ uses
   PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas',
   PasTree.Sema.Complete in '..\source\PasTree.Sema.Complete.pas',
   PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas',
-  PasTree.Sema.Async in '..\source\PasTree.Sema.Async.pas';
+  PasTree.Sema.Async in '..\source\PasTree.Sema.Async.pas',
+  PasTree.Version in '..\source\PasTree.Version.pas';
 
 {$R PasTreeDemo.res}
 

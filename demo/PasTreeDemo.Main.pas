@@ -29,7 +29,7 @@ uses
   PasTree.Sema.Diagnostics, PasTree.Sema.Model, PasTree.Sema.Builtins,
   PasTree.Sema.Types, PasTree.Sema.Resolver, PasTree.Sema.Project,
   PasTree.Sema.Nav, PasTree.Sema.Async, PasTree.Sema.Complete,
-  PasTree.Sema.Dump, VirtualTrees.BaseAncestorVCL, VirtualTrees.BaseTree, VirtualTrees.AncestorVCL, SynEditCodeFolding,
+  PasTree.Sema.Dump, PasTree.Version, VirtualTrees.BaseAncestorVCL, VirtualTrees.BaseTree, VirtualTrees.AncestorVCL, SynEditCodeFolding,
   PasTreeDemo.Highlighter, PasTreeDemo.Settings, PasTreeDemo.NavHistory,
   PasTreeDemo.Includes, PasTreeDemo.UnitList, PasTreeDemo.UnitPicker,
   PasTreeDemo.Coverage,
@@ -1591,6 +1591,9 @@ end;
 
 procedure TfrmMain.FormCreate(Sender: TObject);
 begin
+  // Which PasTree this demo is built against — the caption is the one place
+  // visible on every screenshot and in every bug report.
+  Caption := 'PasTree Demo v' + PasTreeVersion;
   FFileList := TStringList.Create;
   FOpenFiles := TStringList.Create;
   FMsgLog := TList<TPasMsgRow>.Create;
@@ -2075,7 +2078,8 @@ begin
   FProjectFile := LFile;
   PopulateConfigCombo;
 
-  Caption := 'PasTree Demo — ' + TPath.GetFileName(LFile);
+  Caption := Format('PasTree Demo v%s — %s',
+    [PasTreeVersion, TPath.GetFileName(LFile)]);
   // Remembered here, at the one point every route into a project passes
   // through, and with LFile — the .dproj the .dpr was redirected to, not the
   // .dpr the caller happened to name.

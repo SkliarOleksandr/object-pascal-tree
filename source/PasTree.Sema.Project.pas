@@ -692,6 +692,7 @@ function XPlain(AMid, ASym: Integer): TSemaXType;
 implementation
 
 uses
+  System.Classes,   // TTask.Run's inline needs it in scope (H2443 otherwise)
   System.IOUtils,
   System.Threading,
   System.Diagnostics,
@@ -3137,7 +3138,6 @@ var
 begin
   // Mirrors LoadFilesParallel's worker body — see the comments there (the
   // typer skip rule, the tolerate-out-loud contract).
-  Result := nil;
   AErrClass := '';
   AErrMsg := '';
   try
@@ -3170,7 +3170,6 @@ begin
   // Mirrors UpgradeChunked's worker body: reparse from the SAME token layer
   // (stage 1 preprocessed the whole file; re-preprocessing would double-pay
   // lex+PP and break the prefix invariant against on-disk changes).
-  Result := nil;
   AErrClass := '';
   AErrMsg := '';
   try
@@ -3409,7 +3408,6 @@ begin
       else
       begin
         // Reorder buffer: wait for THE NEXT queue index, not just any result.
-        LHaveRes := False;
         repeat
           LLock.Enter;
           try
