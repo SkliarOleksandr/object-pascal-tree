@@ -158,9 +158,11 @@ type
     FWithWorkNames: TArray<TArray<string>>;
     FWorkBuilt: TArray<Boolean>;
     { Declaration-site idents CrossResolve could bind NOWHERE — see
-      CrossResolveDecl. Filled by the CrossResolve workers (own slot only),
-      drained by the decl pass. }
+      CrossResolveDecl. Filled by the CrossResolve workers (own slot only,
+      count-tracked doubling — the filled prefix is FDeclWorkCount[mid], the
+      array carries capacity slack), drained by the decl pass. }
     FDeclWork: TArray<TArray<Integer>>;
+    FDeclWorkCount: TArray<Integer>;
     { Per-model overlay of the member references CrossType discovers, so the
       parallel walks never mutate a dictionary another walk is reading — see
       RunCrossTypePass. Owned here; merged and freed there. }
@@ -3460,6 +3462,12 @@ begin
       begin
         if LRes.Model <> nil then
         begin
+          // The owns-list assignment frees the interface model here, on the
+          // driver — measured at 604 ms across the client's full wave, and
+          // deliberately LEFT that way: deferring the frees into a parallel
+          // batch after the engine was tried and changed the wall time not
+          // at all (the workers overlap the driver's teardown), so the
+          // simpler form wins.
           FModels[LItem.Mid] := LRes.Model; // owns-list frees the intf one
           FStatus[LItem.Mid] := msFullReady;
           DiscoverFrom(LItem.Mid);
@@ -8143,7 +8151,14 @@ begin
           // other models' ExtRefMap while their own workers are still writing,
           // so it waits for the frozen-map pass: queue, don't judge.
           else if DeclStructsOfNode(LModel, LNode) <> nil then
-            FDeclWork[AId] := FDeclWork[AId] + [LNode]
+          begin
+            // Count-tracked doubling: `+ [x]` reallocated and re-copied the
+            // array per queued node, per unit with any E2003-shaped decl name.
+            if FDeclWorkCount[AId] = Length(FDeclWork[AId]) then
+              SetLength(FDeclWork[AId], FDeclWorkCount[AId] * 2 + 8);
+            FDeclWork[AId][FDeclWorkCount[AId]] := LNode;
+            Inc(FDeclWorkCount[AId]);
+          end
           else if LModel.AllUsesResolved then
             EmitE2003(LModel, LNode);
         end;
@@ -9748,8 +9763,12 @@ var
   LIdx: Integer;
 begin
   SetLength(FDeclWork, ACount);
+  SetLength(FDeclWorkCount, ACount);
   for LIdx := 0 to ACount - 1 do
+  begin
     FDeclWork[LIdx] := nil;
+    FDeclWorkCount[LIdx] := 0;
+  end;
 end;
 
 { The DECLARATION-site companion to CrossResolveInherited: the names inside a
@@ -9790,9 +9809,10 @@ begin
   // Pre-size to the work list (every entry can pend at most once), truncate at
   // the end — the old `+ [x]` re-copied the managed-record array per append,
   // per round (the EnsureCrossWork idiom).
-  SetLength(APending, Length(FDeclWork[AId]));
+  // FDeclWork carries capacity slack — the filled prefix is FDeclWorkCount.
+  SetLength(APending, FDeclWorkCount[AId]);
   LPendCount := 0;
-  for LWIdx := 0 to High(FDeclWork[AId]) do
+  for LWIdx := 0 to FDeclWorkCount[AId] - 1 do
   begin
     LNode := FDeclWork[AId][LWIdx];
     // An earlier ROUND may have bound it — that is what the rounds are for.
