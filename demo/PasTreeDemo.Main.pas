@@ -1,4 +1,4 @@
-﻿unit PasTreeDemo.Main;
+unit PasTreeDemo.Main;
 
 {
   PasTree demo — a small VCL host that opens a Delphi project, analyzes it with
@@ -2774,7 +2774,7 @@ begin
     // Same as the async swap: the project is immutable from here on (every
     // re-analysis builds a fresh one), so drop the closed units' transient
     // maps — see ReleaseTransientMaps.
-    FSemaProject.ReleaseTransientMaps(FOpenFiles.ToStringArray);
+    FSemaProject.DemoteClosedUnits(FOpenFiles.ToStringArray);
   finally
     FAnalyzing := False;
   end;
@@ -3123,7 +3123,7 @@ begin
     // (completion reads the ACTIVE file's). ~10% of a big closure's RSS.
     // A tab opened later than this simply re-analyzes (OpenFileTab arms the
     // same debounce an edit does).
-    FSemaProject.ReleaseTransientMaps(FOpenFiles.ToStringArray);
+    FSemaProject.DemoteClosedUnits(FOpenFiles.ToStringArray);
   end;
 
   if LError <> '' then

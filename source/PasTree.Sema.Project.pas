@@ -699,6 +699,26 @@ type
       than the release is the ordinary re-analyze trigger, exactly like an
       edit. }
     procedure ReleaseTransientMaps(const AKeepFiles: TArray<string>);
+    { MEMORY-AUDIT §6.4-4 stage 2, on top of stage 1: additionally DEMOTES
+      every non-kept model — frees its whole text layer (Visible + per-file
+      Source/Tokens/LineStarts; the big half of a model's footprint), keeping
+      Nodes, RefMap/ExtRefMap, Symbols/Scopes/SymTypeX, so resolution,
+      completion enumeration and the generic machinery are untouched.
+      Positions, snippets and hover/doc text for a demoted unit come back
+      through EnsureHydrated — an on-demand re-preprocess that must reproduce
+      the exact stream (identity-checked) or the unit stays demoted and those
+      answers degrade to "none", never to a wrong one. Same loud
+      no-more-Analyze* contract as ReleaseTransientMaps. }
+    procedure DemoteClosedUnits(const AKeepFiles: TArray<string>);
+    { Rehydrates a demoted model's text layer by re-preprocessing its file
+      with the SAME oracle the analysis used (DeclaredQueryFor/SymbolQueryFor
+      — a declared-pass candidate got its final stream from exactly these,
+      and a non-candidate's stream is oracle-invariant by the candidate
+      criterion). True when the model is usable (was never demoted, or the
+      re-preprocess reproduced the identical stream). Single-consumer: call
+      from the host's nav/completion thread only, like every other read of a
+      finished project. }
+    function EnsureHydrated(AMid: Integer): Boolean;
   private
     procedure GuardNotReleased(const AEntry: string);
   end;
@@ -1150,6 +1170,9 @@ begin
   LM := FModels[AMid];
   if (LM = nil) or (ASym < 0) or (ASym >= LM.SymCount) then
     Exit;
+  // Doc text needs the raw token layer; a demoted unit gets it back on
+  // demand (per hover — cheap), or degrades to '' when the file changed.
+  EnsureHydrated(AMid);
   Result := LM.Tree.DeclDocComment(LM.Symbols[ASym].DeclNode);
 end;
 
@@ -10402,6 +10425,56 @@ begin
     LKeep.Free;
   end;
   FTransientReleased := True;
+end;
+
+procedure TPasSemaProject.DemoteClosedUnits(const AKeepFiles: TArray<string>);
+var
+  LKeep: TDictionary<Integer, Boolean>;
+  LIdx, LMid: Integer;
+begin
+  LKeep := TDictionary<Integer, Boolean>.Create;
+  try
+    for LIdx := 0 to High(AKeepFiles) do
+      if FByPath.TryGetValue(
+           LowerCase(TPath.GetFullPath(AKeepFiles[LIdx])), LMid) and
+         (LMid >= 0) then
+        LKeep.AddOrSetValue(LMid, True);
+    for LIdx := 0 to FModels.Count - 1 do
+      if not LKeep.ContainsKey(LIdx) then
+      begin
+        FModels[LIdx].ReleaseTransientMaps;
+        FModels[LIdx].DemoteText;
+      end;
+  finally
+    LKeep.Free;
+  end;
+  FTransientReleased := True;
+end;
+
+function TPasSemaProject.EnsureHydrated(AMid: Integer): Boolean;
+var
+  LPP: TPasPreprocessor;
+  LPre: TPasPreprocessed;
+begin
+  if (AMid < 0) or (AMid >= FModels.Count) then
+    Exit(False);
+  if not FModels[AMid].Demoted then
+    Exit(True);
+  LPP := RentPP;
+  try
+    LPP.OnDeclared := DeclaredQueryFor(AMid);
+    LPP.OnSymbol := SymbolQueryFor(AMid);
+    try
+      LPre := LPP.Process(FFiles[AMid]);
+    except
+      // A vanished or unreadable file cannot rehydrate — the demoted model
+      // keeps answering everything that needs no text.
+      Exit(False);
+    end;
+  finally
+    ReturnPP(LPP);
+  end;
+  Result := FModels[AMid].TryRehydrate(LPre);
 end;
 
 // See ReleaseTransientMaps: the freed arrays are indexed unguarded by the

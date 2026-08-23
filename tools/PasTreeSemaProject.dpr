@@ -79,6 +79,7 @@ var
   GSingle, GWholeProject, GDProjMode, GList, GMembers, GIfs: Boolean;
   GVisibility: Boolean;
   GRelease: Boolean;   // -release: exercise ReleaseTransientMaps, report held
+  GDemote: Boolean;    // -demote: stage 2 on top (DemoteClosedUnits)
   GSW: TStopwatch;
   GMode: string;
 
@@ -371,12 +372,18 @@ begin
          MemoryText(AllocatedBytes), GMode]));
       if GProj.StageTimings <> '' then
         Writeln(ErrOutput, '  stages: ', GProj.StageTimings);
-      // The stage-1 retained-memory measurement: keep only the main source
-      // (the "open editor"), release everything else, report the delta.
+      // The retained-memory measurements: keep only the main source (the
+      // "open editor"), release/demote everything else, report the delta.
       if GRelease then
       begin
         GProj.ReleaseTransientMaps([LD.MainSource]);
         Writeln(ErrOutput, Format('  after ReleaseTransientMaps: %s held',
+          [MemoryText(AllocatedBytes)]));
+      end;
+      if GDemote then
+      begin
+        GProj.DemoteClosedUnits([LD.MainSource]);
+        Writeln(ErrOutput, Format('  after DemoteClosedUnits: %s held',
           [MemoryText(AllocatedBytes)]));
       end;
       if LTotalLines > 0 then
@@ -469,6 +476,8 @@ begin
         GVisibility := True
       else if SameText(ParamStr(GIdx), '-release') then
         GRelease := True
+      else if SameText(ParamStr(GIdx), '-demote') then
+        GDemote := True
       else if ParamStr(GIdx).StartsWith('-p:', True) then
         TryParsePlatformName(Copy(ParamStr(GIdx), 4, MaxInt), GPlatform)
       else if ParamStr(GIdx).StartsWith('-studio:', True) then
@@ -553,6 +562,12 @@ begin
       begin
         GProj.ReleaseTransientMaps([GPath]);
         Writeln(ErrOutput, Format('after ReleaseTransientMaps: %s held',
+          [MemoryText(AllocatedBytes)]));
+      end;
+      if GDemote then
+      begin
+        GProj.DemoteClosedUnits([GPath]);
+        Writeln(ErrOutput, Format('after DemoteClosedUnits: %s held',
           [MemoryText(AllocatedBytes)]));
       end;
     finally

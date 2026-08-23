@@ -1682,13 +1682,14 @@ begin
       end;
     skRoutine:
       begin
+        // RoutineHead, not a raw VisibleToken read: this runs during member
+        // LIST BUILDING over foreign models, which may be text-demoted — the
+        // head word is exactly what DemoteText snapshots per symbol.
         LNode := RoutineNodeOf(AModel, ASym);
         Result := (LNode <> NIL_NODE) and
           ((AModel.Tree.Nodes[LNode].Aux = 1) and
-             (AModel.Tree.Source.VisibleToken(
-                AModel.Tree.Nodes[LNode].FirstToken).Kind <> tkDestructor) or
-           (AModel.Tree.Source.VisibleToken(
-              AModel.Tree.Nodes[LNode].FirstToken).Kind = tkConstructor));
+             (AModel.RoutineHead(ASym) <> rhDestructor) or
+           (AModel.RoutineHead(ASym) = rhConstructor));
       end;
     skProperty:
       begin
@@ -2569,36 +2570,38 @@ begin
   end;
   Result := FProj <> nil;
   if Result then
-    AModel := ProjModel(AMid, AWhere)
+  begin
+    AModel := ProjModel(AMid, AWhere);
+    // The callers of this accessor are the item DETAIL readers (params text,
+    // doc comment, signature help) — per selected item, not per candidate —
+    // so rehydrating a text-demoted model here is cheap and gives them the
+    // real text back. On failure they degrade through their bounds guards.
+    if (AModel <> nil) and AModel.Demoted then
+      FProj.EnsureHydrated(AMid);
+  end
   else
     AModel := nil;
 end;
 
 function TPasCompletion.SymHeadWord(AModel: TPasSemaModel;
   ASym: Integer): string;
-var
-  LNode: Integer;
 begin
-  Result := '';
-  LNode := RoutineNodeOf(AModel, ASym);
-  if LNode = NIL_NODE then
-    Exit;
-  // The token KIND already says it (this runs per display row); `operator`
-  // is the one head that lexes as an identifier (a directive word).
-  case AModel.Tree.Source.VisibleToken(
-    AModel.Tree.Nodes[LNode].FirstToken).Kind of
-    tkProcedure:
+  // Through the model's RoutineHead (this runs per display row): it answers
+  // from the head token on a live model and from DemoteText's snapshot on a
+  // text-demoted one — no raw token read either way.
+  case AModel.RoutineHead(ASym) of
+    rhProcedure:
       Result := 'procedure';
-    tkFunction:
+    rhFunction:
       Result := 'function';
-    tkConstructor:
+    rhConstructor:
       Result := 'constructor';
-    tkDestructor:
+    rhDestructor:
       Result := 'destructor';
-  else
-    if AModel.Tree.Source.VisibleTextEquals(AModel.Tree.Nodes[LNode].FirstToken,
-      'operator') then
+    rhOperator:
       Result := 'operator';
+  else
+    Result := '';
   end;
 end;
 

@@ -13,6 +13,11 @@ interface
 
 uses
   System.Generics.Collections,
+  // Types after System units so its tk* token kinds shadow System.TTypeKind's
+  // same-named members (RoutineHead switches on them); Preprocessor for
+  // TPasPreprocessed (TryRehydrate's parameter).
+  PasTree.Types,
+  PasTree.Preprocessor,
   PasTree.Ast,
   PasTree.Sema.Diagnostics;
 
@@ -76,6 +81,11 @@ type
   // Appended, never reordered: svAutomated last so existing ordinals hold.
   TSemaVisibility = (svDefault, svStrictPrivate, svPrivate, svStrictProtected,
     svProtected, svPublic, svPublished, svAutomated);
+
+  // A routine's HEAD word, resolved once — the display/classification facts
+  // completion reads per row (see RoutineHead). Survives text demotion.
+  TPasRoutineHead = (rhNone, rhProcedure, rhFunction, rhConstructor,
+    rhDestructor, rhOperator);
 
   // Type category (mirrors DelphiAST TDataTypeID groupings) — set on
   // skType/skBuiltinType symbols; drives assignment/operator checks.
@@ -193,6 +203,20 @@ type
     // any type derived from it is unreliable — which is why the typer stays
     // quiet over these nodes (see InUnopenedWithBody / TPasSemaTyper.Diag).
     WithUnopened: TArray<Integer>;
+    { MEMORY-AUDIT §6.4-4 stage 2 — TEXT DEMOTION state. When Demoted, the
+      token layer is gone: Tree.Source.Visible is nil and every file's
+      Source/Tokens/LineStarts are empty; Nodes, RefMap, ExtRefMap, Symbols,
+      Scopes, SymTypeX all survive, so resolution and the generic machinery
+      keep working (they are node-id/symbol-table driven — verified in the
+      audit). Every text/position consumer either degrades through its
+      existing bounds guards or asks TPasSemaProject.EnsureHydrated first.
+      The Demoted* fields are the REHYDRATION IDENTITY CHECK: a re-preprocess
+      must reproduce exactly this stream or the node token indices would lie. }
+    Demoted: Boolean;
+    DemotedVisCount: Integer;
+    DemotedFileSizes: TArray<Integer>;    // Length(Files[i].Source)
+    DemotedTokenCounts: TArray<Integer>;  // Length(Files[i].Tokens)
+    DemotedHeads: TArray<Byte>;           // per symbol: Ord(TPasRoutineHead)
     constructor Create(const ATree: TPasTree);
     destructor Destroy; override;
 
@@ -270,6 +294,20 @@ type
       TPasSemaProject.ReleaseTransientMaps for the contract — this is not
       called during any analysis. }
     procedure ReleaseTransientMaps;
+    { The routine head word of ASym (skRoutine), from the head token — or,
+      on a demoted model, from the snapshot DemoteText took. rhNone for a
+      symbol that is not a routine or has no routine node. }
+    function RoutineHead(ASym: Integer): TPasRoutineHead;
+    { Stage 2 of the release: snapshots RoutineHead for every routine symbol
+      and the stream identity counts, then frees the whole text layer
+      (Visible + per-file Source/Tokens/LineStarts). See the Demoted field. }
+    procedure DemoteText;
+    { Installs APre as this model's token layer IF it is stream-identical to
+      the demoted one (same file count, per-file source sizes and token
+      counts, same visible count) — the guard that a changed file can only
+      ever mean "no answer", never a wrong position. False leaves the model
+      demoted. }
+    function TryRehydrate(const APre: TPasPreprocessed): Boolean;
     procedure AddDiag(const ADiag: TSemaDiag);
     { Cuts Diags back to its filled prefix. The project driver calls this at
       the end of every analysis entry point, BEFORE any consumer enumerates
@@ -734,6 +772,95 @@ begin
   WithUnopened := nil;
   ExprTypeX.Free;
   ExprTypeX := TDictionary<Integer, TSemaXType>.Create;
+end;
+
+function TPasSemaModel.RoutineHead(ASym: Integer): TPasRoutineHead;
+var
+  LNode, LVis: Integer;
+begin
+  Result := rhNone;
+  if (ASym < 0) or (ASym >= SymCount) or (Symbols[ASym].Kind <> skRoutine) then
+    Exit;
+  if Demoted then
+  begin
+    if ASym <= High(DemotedHeads) then
+      Result := TPasRoutineHead(DemotedHeads[ASym]);
+    Exit;
+  end;
+  // The name node sits inside its nkRoutine; the head token is the routine's
+  // first. `class` is NOT in the routine's token span (the struct-body parser
+  // eats it and sets Aux = 1), so the head really is one of the five words.
+  LNode := Symbols[ASym].DeclNode;
+  while (LNode <> NIL_NODE) and (Tree.Nodes[LNode].Kind <> nkRoutine) do
+    LNode := Tree.Nodes[LNode].Parent;
+  if LNode = NIL_NODE then
+    Exit;
+  LVis := Tree.Nodes[LNode].FirstToken;
+  if (LVis < 0) or (LVis > High(Tree.Source.Visible)) then
+    Exit;
+  case Tree.Source.VisibleToken(LVis).Kind of
+    tkProcedure: Result := rhProcedure;
+    tkFunction: Result := rhFunction;
+    tkConstructor: Result := rhConstructor;
+    tkDestructor: Result := rhDestructor;
+  else
+    // `operator` is the one head that lexes as an identifier.
+    if Tree.Source.VisibleTextEquals(LVis, 'operator') then
+      Result := rhOperator;
+  end;
+end;
+
+procedure TPasSemaModel.DemoteText;
+var
+  LIdx: Integer;
+begin
+  if Demoted then
+    Exit;
+  // Snapshot the per-row facts completion keeps reading (RoutineHead), then
+  // the stream identity, THEN free — order matters, RoutineHead reads text.
+  SetLength(DemotedHeads, SymCount);
+  for LIdx := 0 to SymCount - 1 do
+    DemotedHeads[LIdx] := Byte(RoutineHead(LIdx));
+  DemotedVisCount := Length(Tree.Source.Visible);
+  SetLength(DemotedFileSizes, Length(Tree.Source.Files));
+  SetLength(DemotedTokenCounts, Length(Tree.Source.Files));
+  for LIdx := 0 to High(Tree.Source.Files) do
+  begin
+    DemotedFileSizes[LIdx] := Length(Tree.Source.Files[LIdx].Source);
+    DemotedTokenCounts[LIdx] := Length(Tree.Source.Files[LIdx].Tokens);
+  end;
+  Demoted := True;   // before the frees: RoutineHead must read the snapshot
+  Tree.Source.Visible := nil;
+  for LIdx := 0 to High(Tree.Source.Files) do
+  begin
+    Tree.Source.Files[LIdx].Source := '';
+    Tree.Source.Files[LIdx].Tokens := nil;
+    Tree.Source.Files[LIdx].LineStarts := nil;
+  end;
+end;
+
+function TPasSemaModel.TryRehydrate(const APre: TPasPreprocessed): Boolean;
+var
+  LIdx: Integer;
+begin
+  Result := False;
+  if not Demoted then
+    Exit(True);
+  if Length(APre.Visible) <> DemotedVisCount then
+    Exit;
+  if Length(APre.Files) <> Length(DemotedTokenCounts) then
+    Exit;
+  for LIdx := 0 to High(APre.Files) do
+    if (Length(APre.Files[LIdx].Source) <> DemotedFileSizes[LIdx]) or
+       (Length(APre.Files[LIdx].Tokens) <> DemotedTokenCounts[LIdx]) then
+      Exit;
+  Tree.Source := APre;
+  Demoted := False;
+  DemotedFileSizes := nil;
+  DemotedTokenCounts := nil;
+  DemotedHeads := nil;
+  DemotedVisCount := 0;
+  Result := True;
 end;
 
 function TPasSemaModel.InUnopenedWithBody(ANode: Integer): Boolean;

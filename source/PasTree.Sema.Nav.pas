@@ -472,6 +472,10 @@ begin
   Result := False;
   if ANode = NIL_NODE then
     Exit;
+  // A demoted model's text layer comes back on demand (per goto — cheap);
+  // when the file changed underneath, "no target" beats a wrong position.
+  if not FProj.EnsureHydrated(AMid) then
+    Exit;
   LM := FProj.Model(AMid);
   // An nkMember's OWN FirstToken is the '.' (see PasTree.Ast), not its first
   // visible character — descend to the leftmost descendant so a dotted
@@ -917,14 +921,21 @@ begin
     for LMi := 0 to FProj.ModelCount - 1 do
     begin
       LM := FProj.Model(LMi);
+      // EnsureHydrated sits AFTER the match tests: only a model that
+      // actually holds a hit pays a rehydration, so references to a hot RTL
+      // symbol re-preprocess the units that USE it, not the whole closure.
+      // A model that fails to rehydrate contributes no hits (HitFromNode's
+      // bounds guards) rather than wrong ones.
       if LMi = ATMid then
         for LNode := 0 to High(LM.RefMap) do
           if (LM.RefMap[LNode] = ASym) and
              not IsDeclSelfName(LM, ASym, LNode) and
+             FProj.EnsureHydrated(LMi) and
              HitFromNode(LM, LNode, LHit) then
             LHits.Add(LHit);
       for LPair in LM.ExtRefMap do
         if (LPair.Value.UnitId = ATMid) and (LPair.Value.Sym = ASym) and
+           FProj.EnsureHydrated(LMi) and
            HitFromNode(LM, LPair.Key, LHit) then
           LHits.Add(LHit);
     end;
@@ -1228,6 +1239,8 @@ var
   LTS: TPasTokenStream;
 begin
   Result := False;
+  if not FProj.EnsureHydrated(AMid) then   // same contract as TargetFromNode
+    Exit;
   LM := FProj.Model(AMid);
   if (AVisIdx < 0) or (AVisIdx > High(LM.Tree.Source.Visible)) then
     Exit;

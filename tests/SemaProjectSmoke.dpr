@@ -24,6 +24,7 @@ uses
   PasTree.Sema.Builtins in '..\source\PasTree.Sema.Builtins.pas',
   PasTree.Sema.Resolver in '..\source\PasTree.Sema.Resolver.pas',
   PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas',
+  PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas',
   PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
   PasTree.TestKit in 'PasTree.TestKit.pas';
 
@@ -4918,6 +4919,101 @@ begin
     end;
     Ok('release: a later Analyze* refuses loudly (EInvalidOperation), never '
       + 'indexes the freed maps', LRaised);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- Text demotion + on-demand rehydration (MEMORY-AUDIT 6.4-4 stage 2).
+  // Demote frees the whole token layer of a closed unit; navigation into it
+  // then transparently rehydrates (re-preprocess, identity-checked); a file
+  // that CHANGED after demotion refuses to rehydrate - no positions rather
+  // than wrong ones. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_demote');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitDA.pas'),
+    'unit UnitDA;'#10'interface'#10 +
+    'type TD = class'#10'  procedure M;'#10'end;'#10 +
+    'implementation'#10 +
+    'procedure TD.M; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitDB.pas'),
+    'unit UnitDB;'#10'interface'#10'uses UnitDA;'#10 +
+    'var GD: TD;'#10'implementation'#10 +
+    'procedure PD;'#10'begin'#10'  GD.M;'#10'end;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    var LDaMid := MidByName('unitda');
+    var LDbMid := MidByName('unitdb');
+    var LDa := GProj.Model(LDaMid);
+    // The symbol indices we assert against, found BEFORE any demotion.
+    var LTdSym := NIL_SYM;
+    var LMSym := NIL_SYM;
+    for var LS := 0 to LDa.SymCount - 1 do
+      if (LDa.Symbols[LS].NameLower = 'td') and
+         (LDa.Symbols[LS].Kind = skType) then
+        LTdSym := LS
+      else if (LDa.Symbols[LS].NameLower = 'm') and
+              (LDa.Symbols[LS].Kind = skRoutine) and (LMSym = NIL_SYM) then
+        LMSym := LS;
+    Ok('demote: fixture symbols found', (LTdSym <> NIL_SYM) and
+      (LMSym <> NIL_SYM));
+    Ok('demote: head word is readable before (procedure)',
+      LDa.RoutineHead(LMSym) = rhProcedure);
+    GProj.DemoteClosedUnits([GProj.ModelFile(LDbMid)]);
+    Ok('demote: the closed unit lost its text layer',
+      LDa.Demoted and (LDa.Tree.Source.Visible = nil) and
+      (LDa.Tree.Source.Files[0].Tokens = nil) and
+      (LDa.Tree.Source.Files[0].Source = ''));
+    Ok('demote: the kept unit did not',
+      not GProj.Model(LDbMid).Demoted);
+    Ok('demote: the routine head survives from the snapshot',
+      LDa.RoutineHead(LMSym) = rhProcedure);
+    // Navigation still answers (the hits live in the KEPT unit's ExtRefMap;
+    // a demoted unit that holds a hit rehydrates lazily inside the scan).
+    var LNav := TPasNavigator.Create(GProj);
+    var LHitsBefore := 0;
+    try
+      var LHits := LNav.FindReferences(LDaMid, LTdSym);
+      LHitsBefore := Length(LHits);
+      Ok('demote: Find References still answers, with positions and snippets',
+        (LHitsBefore > 0) and (LHits[0].Line > 0) and (LHits[0].Snippet <> ''));
+    finally
+      LNav.Free;
+    end;
+    // Explicit rehydration restores the full text layer, identity-checked.
+    Ok('demote: EnsureHydrated restores the text layer',
+      GProj.EnsureHydrated(LDaMid) and not LDa.Demoted and
+      (Length(LDa.Tree.Source.Visible) > 0) and
+      (LDa.Tree.Source.Files[0].LineText(1) <> ''));
+    // Stale file: demote again, then CHANGE the file - rehydration must
+    // refuse, and the askers degrade to nothing instead of lying.
+    GProj.DemoteClosedUnits([GProj.ModelFile(LDbMid)]);
+    Ok('demote: a second demotion works', LDa.Demoted);
+    TFile.WriteAllText(TPath.Combine(LDir, 'UnitDA.pas'),
+      'unit UnitDA;'#10'interface'#10 +
+    'type TD = class'#10'  procedure MRenamedLonger;'#10'end;'#10 +
+      'implementation'#10 +
+      'procedure TD.MRenamedLonger; begin end;'#10'end.'#10);
+    Ok('demote: a CHANGED file refuses to rehydrate',
+      not GProj.EnsureHydrated(LDaMid) and LDa.Demoted);
+    LNav := TPasNavigator.Create(GProj);
+    try
+      var LHits := LNav.FindReferences(LDaMid, LTdSym);
+      var LOnlyKept := True;
+      for var LH := 0 to High(LHits) do
+        if not SameText(TPath.GetFileName(LHits[LH].FilePath), 'UnitDB.pas')
+        then
+          LOnlyKept := False;
+      Ok('demote: hits then come ONLY from still-hydrated units - the stale '
+        + 'unit contributes none rather than wrong ones',
+        (Length(LHits) <= LHitsBefore) and LOnlyKept);
+    finally
+      LNav.Free;
+    end;
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then
