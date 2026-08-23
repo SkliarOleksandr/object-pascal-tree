@@ -5034,6 +5034,118 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  // ---- Parse-reuse donor (incremental plan, stage A). A re-analysis that
+  // adopts the previous project as donor must produce IDENTICAL diagnostics
+  // while actually hitting (donorhits > 0 in StageTimings); an edited file
+  // must MISS and its diagnostics must follow the edit. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_donor');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitKA.pas'),
+    'unit UnitKA;'#10'interface'#10 +
+    'type TK = class'#10'  procedure M;'#10'end;'#10 +
+    'const KV = 3;'#10 +
+    'implementation'#10 +
+    'procedure TK.M; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitKB.pas'),
+    'unit UnitKB;'#10'interface'#10'uses UnitKA;'#10 +
+    'var GK: TK;'#10'implementation'#10 +
+    'procedure PB;'#10'begin'#10'  GK.M;'#10 +
+    '  MissingName := KV;'#10 +     // a stable E2003 to compare across runs
+    'end;'#10'end.'#10);
+  var LDonor := TPasSemaProject.Create(pfWin32, [LDir], []);
+  GProj := LDonor;
+  var LSigA := '';
+  var LSigB := '';
+  try
+    LDonor.AnalyzeDirectory(LDir);
+    for var LMid := 0 to LDonor.ModelCount - 1 do
+      for var LDi := 0 to High(LDonor.Model(LMid).Diags) do
+        LSigA := LSigA + LDonor.Model(LMid).UnitNameLower + ':' +
+          LDonor.Model(LMid).Diags[LDi].Msg + ':' +
+          IntToStr(LDonor.Model(LMid).Diags[LDi].Line) + '|';
+    Ok('donor: the baseline run reports the fixture E2003',
+      DiagCount(ModelByName('unitkb'), 'E2003') = 1);
+
+    GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+    try
+      Ok('donor: a config-matched donor is adopted',
+        GProj.AdoptParseDonor(LDonor));
+      GProj.AnalyzeDirectory(LDir);
+      for var LMid := 0 to GProj.ModelCount - 1 do
+        for var LDi := 0 to High(GProj.Model(LMid).Diags) do
+          LSigB := LSigB + GProj.Model(LMid).UnitNameLower + ':' +
+            GProj.Model(LMid).Diags[LDi].Msg + ':' +
+            IntToStr(GProj.Model(LMid).Diags[LDi].Line) + '|';
+      Ok('donor: diagnostics are identical across the donor rebuild',
+        (LSigA <> '') and (LSigA = LSigB));
+      Ok('donor: the rebuild actually reused parses (donorhits > 0, '
+        + 'donormiss = 0)',
+        (Pos('donormiss=0;', GProj.StageTimings) > 0) and
+        (Pos('donorhits=', GProj.StageTimings) > 0) and
+        (Pos('donorhits=0;', GProj.StageTimings) = 0));
+      Ok('donor: cross-refs resolve in a donor-built project',
+        DiagCount(ModelByName('unitkb'), 'E2003') = 1);
+    finally
+      // The second project becomes the donor for the edited-file run below.
+    end;
+
+    // Edit ONE file: it must miss (donormiss > 0) and its diags must follow
+    // the edit — the E2003 name changes — while the untouched unit hits.
+    TFile.WriteAllText(TPath.Combine(LDir, 'UnitKB.pas'),
+      'unit UnitKB;'#10'interface'#10'uses UnitKA;'#10 +
+      'var GK: TK;'#10'implementation'#10 +
+      'procedure PB;'#10'begin'#10'  GK.M;'#10 +
+      '  RenamedMissing := KV;'#10 +
+      'end;'#10'end.'#10);
+    var LSecond := GProj;
+    GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+    try
+      Ok('donor: the second-generation donor is adopted',
+        GProj.AdoptParseDonor(LSecond));
+      GProj.AnalyzeDirectory(LDir);
+      Ok('donor: the edited file MISSES and the untouched one hits',
+        (Pos('donormiss=0;', GProj.StageTimings) = 0) and
+        (Pos('donorhits=0;', GProj.StageTimings) = 0));
+      Ok('donor: the edited file''s diagnostics follow the edit',
+        DiagHasText(ModelByName('unitkb'), 'E2003', 'RenamedMissing') and
+        not DiagHasText(ModelByName('unitkb'), 'E2003', 'MissingName'));
+    finally
+      GProj.Free;
+      GProj := LSecond;   // so the outer finally frees the second project
+    end;
+  finally
+    GProj.Free;
+    if GProj <> LDonor then
+      LDonor.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // A config MISMATCH must refuse the donor (different extra defines).
+  GProj := TPasSemaProject.Create(pfWin32, [TPath.GetTempPath], []);
+  try
+    var LOther := TPasSemaProject.Create(pfWin32, [TPath.GetTempPath],
+      ['SOMEDEFINE']);
+    try
+      Ok('donor: an extra-defines mismatch is refused',
+        not GProj.AdoptParseDonor(LOther));
+    finally
+      LOther.Free;
+    end;
+    var LOtherPaths := TPasSemaProject.Create(pfWin32, ['C:\nonexistent'], []);
+    try
+      Ok('donor: a search-path mismatch is refused',
+        not GProj.AdoptParseDonor(LOtherPaths));
+    finally
+      LOtherPaths.Free;
+    end;
+    Ok('donor: nil clears without refusing', GProj.AdoptParseDonor(nil));
+  finally
+    GProj.Free;
+  end;
+
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
 end.

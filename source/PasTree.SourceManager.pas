@@ -96,6 +96,12 @@ type
     { Unit aliases (dcc -A / DCC_UnitAlias): a whole-name match rewrites the
       unit name BEFORE resolution (WinTypes -> Winapi.Windows). }
     procedure AddUnitAlias(const AAlias, AReal: string);
+    { A canonical signature of everything that decides WHICH file a unit name
+      resolves to: search paths (in order — order is priority), namespaces (in
+      order — tried in order), aliases (sorted — a dictionary has no order).
+      Two managers with equal signatures resolve every unit name identically,
+      which is what TPasSemaProject.AdoptParseDonor gates on. }
+    function ConfigSignature: string;
     { In-memory buffer overrides: LoadText returns the given text for APath
       instead of reading the file. Editor hosts push unsaved buffers here so
       analysis sees what's on screen (main file AND its $I includes go through
@@ -249,6 +255,30 @@ begin
   if FAliases = nil then
     FAliases := TDictionary<string, string>.Create;
   FAliases.AddOrSetValue(LowerCase(AAlias), AReal);
+end;
+
+function TPasSourceManager.ConfigSignature: string;
+var
+  LItem: string;
+  LPairs: TArray<string>;
+  LPair: TPair<string, string>;
+begin
+  Result := '';
+  for LItem in FSearchPaths do
+    Result := Result + LItem + #1;
+  Result := Result + '|';
+  for LItem in FNamespaces do
+    Result := Result + LItem + #1;
+  Result := Result + '|';
+  if FAliases <> nil then
+  begin
+    LPairs := nil;
+    for LPair in FAliases do
+      LPairs := LPairs + [LPair.Key + '=' + LPair.Value];
+    TArray.Sort<string>(LPairs);
+    for LItem in LPairs do
+      Result := Result + LItem + #1;
+  end;
 end;
 
 procedure TPasSourceManager.SetBuffer(const APath, AText: string;

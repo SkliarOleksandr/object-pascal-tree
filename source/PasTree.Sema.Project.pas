@@ -1,4 +1,4 @@
-﻿unit PasTree.Sema.Project;
+unit PasTree.Sema.Project;
 
 {
   PasTree semantics — Phase 2 project driver: resolves `uses` to real units,
@@ -117,6 +117,19 @@ type
     FInfo: TPasPlatformInfo;
     FSM: TPasSourceManager;
     FDefines: TPasDefines;
+    // The ctor's AExtraDefines verbatim (the defines themselves are folded
+    // into FDefines) — kept ONLY for AdoptParseDonor's config gate, which
+    // must compare what the two projects were CREATED with.
+    FExtraDefines: TArray<string>;
+    // Parse-reuse donor (stage A of the incremental plan): the previous
+    // last-good project, adopted via AdoptParseDonor for exactly ONE Analyze*
+    // run and cleared in that run's finally (see FinishDonor) — after the
+    // build the host frees the donor, so a dangling reference here must be
+    // impossible, not just unlikely. Frozen while adopted: TryDonorLoad only
+    // READS its dictionaries and models (single-owner contract).
+    FDonor: TPasSemaProject;
+    FDonorHits: Integer;      // AtomicIncrement — workers count concurrently
+    FDonorMisses: Integer;
     FPP: TPasPreprocessor;
     // Reusable preprocessors for the parallel load/declared passes: Process
     // fully resets per-run state, so a returned instance is as good as a
@@ -260,7 +273,17 @@ type
     // RunLoadEngine's worker computes — a method, not a nested routine,
     // because the worker is an anonymous method and cannot capture one.
     function ComputeLoad(const APath: string; AIntf: Boolean;
-      out AErrClass, AErrMsg: string): TPasSemaModel;
+      out AErrClass, AErrMsg: string; out AFullDonor: Boolean): TPasSemaModel;
+    { The donor-reuse core, worker-callable (the donor is the frozen last-good
+      project: dictionary READS only, no lock). AKey is the lower-cased full
+      path. Returns a FRESH model built by re-running Phase 1 over the donor's
+      tree (record copy, arrays shared) when the donor holds a reusable,
+      text-identical full parse of APath — nil otherwise (normal parse path).
+      Counts FDonorHits/FDonorMisses. }
+    function TryDonorLoad(const AKey, APath: string): TPasSemaModel;
+    // Clears FDonor at the end of the one run that consumed it; AReport
+    // appends 'donorhits=..;donormiss=..;' to StageTimings first.
+    procedure FinishDonor(AReport: Boolean);
     function ComputeUpgrade(const ASource: TPasPreprocessed;
       out AErrClass, AErrMsg: string): TPasSemaModel;
     procedure RegisterUnitName(AId: Integer);
@@ -474,6 +497,25 @@ type
       resolution. Set BEFORE analyzing. }
     procedure SetNamespaces(const ANamespaces: TArray<string>);
     procedure AddUnitAlias(const AAlias, AReal: string);
+    { Parse reuse across rebuilds (incremental plan, stage A): adopt ADonor —
+      the host's still-alive LAST-GOOD project — as a parse donor for the NEXT
+      Analyze* call on this project. For every file whose donor model is a
+      clean full parse of BYTE-IDENTICAL text (main file and every $I include
+      re-read and compared exactly), the pp+lex+parse is skipped: Phase 1 runs
+      over the donor's tree (immutable, structure-shared), producing a model
+      indistinguishable from a fresh parse's. Everything else — edited files,
+      demoted units, oracle-reprocessed streams ($IF Declared), units with
+      parse-time unresolved guards — takes the normal path.
+
+      False = configuration mismatch (platform, extra defines, search paths /
+      namespaces / aliases), donor refused; the caller logs and the run
+      proceeds donor-less. nil clears a previously adopted donor.
+
+      LIFETIME: the adoption is valid for the NEXT Analyze* call only and is
+      consumed by it (cleared in its finally, cancelled exits included); the
+      donor must stay alive until that call returns. Call BEFORE the run;
+      never adopt a project that any other thread still mutates. }
+    function AdoptParseDonor(ADonor: TPasSemaProject): Boolean;
     { Resolves and loads the real `System` unit on demand (memoized; -1 if it
       cannot be found via the configured search paths). EVERY unit implicitly
       uses System (11.2.1 / 1.2.1) without a `uses` clause naming it, so it
@@ -882,6 +924,7 @@ begin
   FInfo := PlatformInfo(APlatform);
   FSM := TPasSourceManager.Create(ASearchPaths);
   FDefines := CreatePlatformDefines(APlatform);
+  FExtraDefines := AExtraDefines;   // kept verbatim for AdoptParseDonor's gate
   for LName in AExtraDefines do
     FDefines.Define(LName);
   FPP := TPasPreprocessor.Create(FSM, FDefines, 37.0, FInfo.PointerBytes,
@@ -1220,6 +1263,96 @@ begin
     AModel := nil;
 end;
 
+function TPasSemaProject.AdoptParseDonor(ADonor: TPasSemaProject): Boolean;
+var
+  LIdx: Integer;
+begin
+  FDonor := nil;
+  FDonorHits := 0;
+  FDonorMisses := 0;
+  if ADonor = nil then
+    Exit(True);   // explicit clear
+  // Config gate: a donor built under ANY other configuration could hand back
+  // a tree whose preprocessed stream this project would never produce.
+  if (ADonor = Self) or (ADonor.FPlatform <> FPlatform) or
+     (Length(ADonor.FExtraDefines) <> Length(FExtraDefines)) then
+    Exit(False);
+  for LIdx := 0 to High(FExtraDefines) do
+    if not SameText(ADonor.FExtraDefines[LIdx], FExtraDefines[LIdx]) then
+      Exit(False);
+  if ADonor.FSM.ConfigSignature <> FSM.ConfigSignature then
+    Exit(False);
+  FDonor := ADonor;
+  Result := True;
+end;
+
+function TPasSemaProject.TryDonorLoad(const AKey, APath: string): TPasSemaModel;
+var
+  LMid, LIdx: Integer;
+  LDM: TPasSemaModel;
+  LText: string;
+begin
+  Result := nil;
+  if FDonor = nil then
+    Exit;
+  try
+    try
+      if not FDonor.FByPath.TryGetValue(AKey, LMid) or (LMid < 0) or
+         (FDonor.FStatus[LMid] < msFullReady) then
+        Exit;
+      LDM := FDonor.FModels[LMid];
+      // Demoted = the text layer is gone; OracleStream = the stream depended
+      // on mid-analysis oracle state and is not a pure function of the text
+      // (the rehydration work proved exactly these two classes non-reusable).
+      if LDM.Demoted or LDM.OracleStream or (Length(LDM.Tree.Nodes) = 0) then
+        Exit;
+      // A stream with parse-time UNANSWERED $IF questions was re-decided by
+      // RunDeclaredPass against the donor generation's models — not reusable
+      // (the README's first-pass oracle exclusion, ~a dozen units on the RTL).
+      if (Length(LDM.Tree.Source.UnresolvedDeclared) > 0) or
+         (Length(LDM.Tree.Source.UnresolvedSymbols) > 0) then
+        Exit;
+      // Text validation, main file AND every $I include (FileNames[0] = main,
+      // includes appended at resolution, all paths RESOLVED): exact string
+      // compare against what THIS run would read (LoadText serves editor-
+      // buffer overlays too, so an unsaved edit is an ordinary miss).
+      if Length(LDM.Tree.Source.FileNames) <>
+         Length(LDM.Tree.Source.Files) then
+        Exit;
+      for LIdx := 0 to High(LDM.Tree.Source.FileNames) do
+      begin
+        LText := FSM.LoadText(LDM.Tree.Source.FileNames[LIdx]);
+        if LText <> LDM.Tree.Source.Files[LIdx].Source then
+          Exit;
+      end;
+    except
+      // A vanished include (or any read failure) degrades to the normal parse
+      // path — which will report it the way it always did — never to an error.
+      Exit;
+    end;
+    // Hit: Phase 1 over the donor's tree. The tree RECORD is copied, its
+    // arrays shared (immutable by construction — the only post-parse `Tree :=`
+    // is TPasProject's assembly). Phase 1 MUST re-run: a donated MODEL would
+    // carry ExtRefMap/ExprTypeX/CallTargetX with the OLD generation's unit ids.
+    Result := TPasSemaResolver.Analyze(LDM.Tree, False, FPlatform);
+  finally
+    if Result <> nil then
+      AtomicIncrement(FDonorHits)
+    else
+      AtomicIncrement(FDonorMisses);
+  end;
+end;
+
+procedure TPasSemaProject.FinishDonor(AReport: Boolean);
+begin
+  if FDonor = nil then
+    Exit;
+  if AReport then
+    FStageTimings := FStageTimings +
+      Format('donorhits=%d;donormiss=%d;', [FDonorHits, FDonorMisses]);
+  FDonor := nil;
+end;
+
 function TPasSemaProject.LoadFile(const APath: string): Integer;
 var
   LFull, LKey: string;
@@ -1235,10 +1368,17 @@ begin
   if not TFile.Exists(LFull) then
     Exit(-1);
   try
-    FPP.OnDeclared := SeedDeclaredQuery();
-    LPre := FPP.Process(LFull);
-    LTree := TPasParser.ParseFile(LPre, LDiags);
-    LModel := TPasSemaResolver.Analyze(LTree, False, FPlatform);
+    // Donor reuse first — System.pas (this route's eager Ensure* load) is
+    // one of the biggest single parses in any closure. An Analyze raise here
+    // takes the same known-bad path the normal parse would.
+    LModel := TryDonorLoad(LKey, LFull);
+    if LModel = nil then
+    begin
+      FPP.OnDeclared := SeedDeclaredQuery();
+      LPre := FPP.Process(LFull);
+      LTree := TPasParser.ParseFile(LPre, LDiags);
+      LModel := TPasSemaResolver.Analyze(LTree, False, FPlatform);
+    end;
   except
     on Exception do
     begin
@@ -3091,21 +3231,30 @@ begin
       LPP := RentPP;
       try
         try
-          // The compiler-provided names are answerable already; anything
-          // else a Declared() guard asks is recorded for RunDeclaredPass.
-          LPP.OnDeclared := SeedDeclaredQuery();
-          LPre := LPP.Process(LTodo[AIndex]);
-          var LTree := TPasParser.ParseFile(LPre, LDiags, AInterfaceOnly);
-          // A model whose parse really did stop at the interface is
-          // TRANSIENT (replaced by the full wave) — skip the expression
-          // typer, its ExprType/E2010/E2015 output dies with the model.
-          // NOT keyed on AInterfaceOnly alone: a program/library/package
-          // ignores the flag, parses fully, registers msFullReady below and
-          // is never upgraded — skipping ITS typer would permanently lose
-          // its type diagnostics.
-          LDone[AIndex] := TPasSemaResolver.Analyze(LTree,
-            {ASkipTyper} AInterfaceOnly and (Length(LTree.Nodes) > 0) and
-            (LTree.Nodes[0].Kind = nkUnit), FPlatform);
+          // Donor reuse first — full batches only: this driver's status
+          // logic has no way to mark a donor-full model inside an
+          // interface batch (unlike RunLoadEngine's FullDonor flag), and
+          // the interface wave that matters runs through the engine anyway.
+          if not AInterfaceOnly then
+            LDone[AIndex] := TryDonorLoad(LKeys[AIndex], LTodo[AIndex]);
+          if LDone[AIndex] = nil then
+          begin
+            // The compiler-provided names are answerable already; anything
+            // else a Declared() guard asks is recorded for RunDeclaredPass.
+            LPP.OnDeclared := SeedDeclaredQuery();
+            LPre := LPP.Process(LTodo[AIndex]);
+            var LTree := TPasParser.ParseFile(LPre, LDiags, AInterfaceOnly);
+            // A model whose parse really did stop at the interface is
+            // TRANSIENT (replaced by the full wave) — skip the expression
+            // typer, its ExprType/E2010/E2015 output dies with the model.
+            // NOT keyed on AInterfaceOnly alone: a program/library/package
+            // ignores the flag, parses fully, registers msFullReady below and
+            // is never upgraded — skipping ITS typer would permanently lose
+            // its type diagnostics.
+            LDone[AIndex] := TPasSemaResolver.Analyze(LTree,
+              {ASkipTyper} AInterfaceOnly and (Length(LTree.Nodes) > 0) and
+              (LTree.Nodes[0].Kind = nkUnit), FPlatform);
+          end;
         except
           on E: Exception do
           begin
@@ -3176,10 +3325,14 @@ type
   TPasLoadRes = record
     Model: TPasSemaModel;            // nil = failed; ErrClass/ErrMsg say why
     ErrClass, ErrMsg: string;
+    // True = a donor hit, which is a FULL model even in the interface wave;
+    // the commit's msIntfReady test cannot tell that from an interface-only
+    // tree (both root at nkUnit), so the worker says so explicitly.
+    FullDonor: Boolean;
   end;
 
 function TPasSemaProject.ComputeLoad(const APath: string; AIntf: Boolean;
-  out AErrClass, AErrMsg: string): TPasSemaModel;
+  out AErrClass, AErrMsg: string; out AFullDonor: Boolean): TPasSemaModel;
 var
   LPP: TPasPreprocessor;
   LPre: TPasPreprocessed;
@@ -3190,7 +3343,17 @@ begin
   // typer skip rule, the tolerate-out-loud contract).
   AErrClass := '';
   AErrMsg := '';
+  AFullDonor := False;
   try
+    // Donor reuse first (APath arrives normalized — see EnqueueLoad). A hit
+    // is ALWAYS a full model, even during the interface wave: the commit
+    // must not classify it msIntfReady by its nkUnit root — hence the flag.
+    Result := TryDonorLoad(LowerCase(APath), APath);
+    if Result <> nil then
+    begin
+      AFullDonor := True;
+      Exit;
+    end;
     LPP := RentPP;
     try
       LPP.OnDeclared := SeedDeclaredQuery();
@@ -3411,7 +3574,7 @@ begin
               if not CancelRequested then
                 if LIt.Kind = lkLoad then
                   LR.Model := ComputeLoad(LIt.Path, AIntfLoads,
-                    LR.ErrClass, LR.ErrMsg)
+                    LR.ErrClass, LR.ErrMsg, LR.FullDonor)
                 else
                   LR.Model := ComputeUpgrade(LIt.Source,
                     LR.ErrClass, LR.ErrMsg);
@@ -3450,7 +3613,7 @@ begin
         LRes := Default(TPasLoadRes);
         if LItem.Kind = lkLoad then
           LRes.Model := ComputeLoad(LItem.Path, AIntfLoads,
-            LRes.ErrClass, LRes.ErrMsg)
+            LRes.ErrClass, LRes.ErrMsg, LRes.FullDonor)
         else
           LRes.Model := ComputeUpgrade(LItem.Source,
             LRes.ErrClass, LRes.ErrMsg);
@@ -3487,7 +3650,11 @@ begin
       begin
         if LRes.Model <> nil then
         begin
-          if AIntfLoads and (Length(LRes.Model.Tree.Nodes) > 0) and
+          // A donor-full model registers msFullReady even in the interface
+          // wave and thereby skips wave 2 for free — the upgrade seed
+          // selects FStatus = msIntfReady only.
+          if AIntfLoads and not LRes.FullDonor and
+             (Length(LRes.Model.Tree.Nodes) > 0) and
              (LRes.Model.Tree.Nodes[0].Kind = nkUnit) then
             LStatus := msIntfReady
           else
@@ -10362,57 +10529,65 @@ var
   LPath: string;
 begin
   GuardNotReleased('AnalyzeFile');
-  Result := LoadFile(AMainFile);
-  if Result < 0 then
-    Exit;
-  // Eagerly, like every other driver (AnalyzeProject/Directory/Staged): the
-  // parallel passes below can reach EnsureSystemUnit from a worker (any
-  // FindMemberX ancestry climb hops to the implicit TObject), and a
-  // first-time System load THERE appends to FModels/FByPath while sibling
-  // workers index them. This was the one driver without the eager load.
-  EnsureSystemUnit;
-  EnsureSysInitUnit;
-  // Pre-load the main unit's direct uses in parallel; ResolveUses below then
-  // finds every one already cached (it stays the single source of truth for
-  // UnitId assignment and the AllUsesResolved gate).
-  LPaths := nil;
-  for LIdx := 0 to High(FModels[Result].UsesList) do
-    if FSM.ResolveUnit(FModels[Result].UsesList[LIdx].NameFull,
-      FModels[Result].UsesList[LIdx].InPath, FFiles[Result], LPath) then
-      LPaths := LPaths + [LPath];
-  LoadFilesParallel(LPaths);
-  ResolveUses(Result);
-  PrepareDeclWork(FModels.Count);
-  CrossResolve(Result);
-  BuildHelperMap;   // needs CrossResolve's ExtRefMap; feeds FindMemberX below
-  // Heritage first, for the same reason the parallel drivers do it — the
-  // inherited walk below reads what it binds (see CrossResolveDecl).
-  RunDeclPass(FModels.Count);
-  // The ONE direct CrossResolveInherited caller — every other driver goes
-  // through RunInheritedPass, which sizes the cross-work arrays before
-  // farming out. Without this, EnsureCrossWork read FWorkBuilt[Result] off a
-  // NIL array: an AV on every AnalyzeFile run with real search paths, found
-  // by the Prefetch-race stress repro (2026-08-22), invisible to the suites
-  // because none of them drives AnalyzeFile. RunWithPass's own sizing call
-  // carries the same "AnalyzeFile reaches this pass without the other" note.
-  SizeCrossWork(FModels.Count);
-  var LPend: TArray<TPasInhPending>;
-  CrossResolveInherited(Result, LPend);
-  for LIdx := 0 to High(LPend) do
-    FModels[Result].ExtRefMap.Add(LPend[LIdx].Node, LPend[LIdx].Ext);
-  CheckCalls(Result);
-  CheckConstraints(Result);
-  CheckAttributes(Result);
-  // Declared types for EVERY loaded model first (the expression pass reads
-  // used units' SymTypeX), then expressions for the requested unit only.
-  for LIdx := 0 to FModels.Count - 1 do
-    BindTypesX(LIdx);
-  CrossType(Result);
-  // Only the requested unit gets the full cross treatment here (AnalyzeFile's
-  // narrower contract); its direct uses stay msFullReady.
-  SetModuleStatus(Result, msCrossReady);
-  TrimAllDiags;
-  ReleaseCrossWork;
+  // The donor is consumed by exactly THIS run, cancelled/failed exits
+  // included: after the build the host frees it, and the only post-build
+  // LoadFile routes (the memoized Ensure* pair) must never see a dangling
+  // reference. Same try/finally in every driver.
+  try
+    Result := LoadFile(AMainFile);
+    if Result < 0 then
+      Exit;
+    // Eagerly, like every other driver (AnalyzeProject/Directory/Staged): the
+    // parallel passes below can reach EnsureSystemUnit from a worker (any
+    // FindMemberX ancestry climb hops to the implicit TObject), and a
+    // first-time System load THERE appends to FModels/FByPath while sibling
+    // workers index them. This was the one driver without the eager load.
+    EnsureSystemUnit;
+    EnsureSysInitUnit;
+    // Pre-load the main unit's direct uses in parallel; ResolveUses below then
+    // finds every one already cached (it stays the single source of truth for
+    // UnitId assignment and the AllUsesResolved gate).
+    LPaths := nil;
+    for LIdx := 0 to High(FModels[Result].UsesList) do
+      if FSM.ResolveUnit(FModels[Result].UsesList[LIdx].NameFull,
+        FModels[Result].UsesList[LIdx].InPath, FFiles[Result], LPath) then
+        LPaths := LPaths + [LPath];
+    LoadFilesParallel(LPaths);
+    ResolveUses(Result);
+    PrepareDeclWork(FModels.Count);
+    CrossResolve(Result);
+    BuildHelperMap;   // needs CrossResolve's ExtRefMap; feeds FindMemberX below
+    // Heritage first, for the same reason the parallel drivers do it — the
+    // inherited walk below reads what it binds (see CrossResolveDecl).
+    RunDeclPass(FModels.Count);
+    // The ONE direct CrossResolveInherited caller — every other driver goes
+    // through RunInheritedPass, which sizes the cross-work arrays before
+    // farming out. Without this, EnsureCrossWork read FWorkBuilt[Result] off a
+    // NIL array: an AV on every AnalyzeFile run with real search paths, found
+    // by the Prefetch-race stress repro (2026-08-22), invisible to the suites
+    // because none of them drives AnalyzeFile. RunWithPass's own sizing call
+    // carries the same "AnalyzeFile reaches this pass without the other" note.
+    SizeCrossWork(FModels.Count);
+    var LPend: TArray<TPasInhPending>;
+    CrossResolveInherited(Result, LPend);
+    for LIdx := 0 to High(LPend) do
+      FModels[Result].ExtRefMap.Add(LPend[LIdx].Node, LPend[LIdx].Ext);
+    CheckCalls(Result);
+    CheckConstraints(Result);
+    CheckAttributes(Result);
+    // Declared types for EVERY loaded model first (the expression pass reads
+    // used units' SymTypeX), then expressions for the requested unit only.
+    for LIdx := 0 to FModels.Count - 1 do
+      BindTypesX(LIdx);
+    CrossType(Result);
+    // Only the requested unit gets the full cross treatment here (AnalyzeFile's
+    // narrower contract); its direct uses stay msFullReady.
+    SetModuleStatus(Result, msCrossReady);
+    TrimAllDiags;
+    ReleaseCrossWork;
+  finally
+    FinishDonor({AReport} False);   // AnalyzeFile carries no StageTimings
+  end;
 end;
 
 procedure TPasSemaProject.ReleaseTransientMaps(const AKeepFiles: TArray<string>);
@@ -10531,72 +10706,76 @@ begin
   GuardNotReleased('AnalyzeProject');
   FStageTimings := '';
   LSW := TStopwatch.StartNew;
-  Result := LoadFile(AMainFile);
-  if Result < 0 then
-    Exit;
-  // The implicit System unit is part of every unit's closure (1.2.1) yet
-  // never appears in a `uses` clause — pull it in NOW so the closure loop
-  // and the cross passes below cover it too (nav inside an opened System.pas
-  // works), and so no parallel CrossResolve worker triggers its first-time
-  // load mid-flight. SysInit is the same story (bare HInstance/ModuleIsLib).
-  EnsureSystemUnit;
-  EnsureSysInitUnit;
-  Stage('main+sys');
-  // Load the TRANSITIVE closure — continuous, not round-barriered (see
-  // RunLoadEngine). ResolveUses (sequential, the single source of truth for
-  // UnitId assignment) then finds every file cached, exactly as it did after
-  // the old per-round batch loads.
-  RunLoadEngine(nil, nil, {AIntfLoads} False, nil);
-  Stage('load');
-  for LIdx := 0 to FModels.Count - 1 do
-    ResolveUses(LIdx);
-  Stage('resolve');
-  // A Declared() guard can only be answered now — see RunDeclaredPass. It may
-  // load units the re-decided branch newly imports, so LN is taken after it.
-  RunDeclaredPass(FModels.Count);
-  InjectEncodingDiags(FModels.Count);
-  InjectGuessedIfDiags(FModels.Count);
-  // Cross passes for EVERY loaded unit — same per-unit write discipline as
-  // AnalyzeDirectory (each writes only its own model, reads others' frozen
-  // Phase-1 state), so the same parallel farming is safe.
-  LN := FModels.Count;
-  PrepareDeclWork(LN);
-  ForEachIndex(LN - 1, 'resolve',    procedure(AIdx: Integer)
-    begin
-      CrossResolve(AIdx);
-    end);
-  Stage('xresolve');
-  // The inherited-member pass needs every CrossResolve worker done first
-  // (it reads their ExtRefMaps); parallel compute + sequential commit.
-  RunInheritedPass(LN);
-  Stage('inherited');
-  // Then the with-body pass, which reads type nodes the inherited pass just
-  // COMMITTED (see CrossResolveWith) — order matters, not just grouping. Timed
-  // apart because it iterates to a fixpoint: its cost is the one that is not
-  // obvious from reading the code.
-  RunWithPass(LN);
-  Stage('with');
-  ForEachIndex(LN - 1, 'cross-resolve',    procedure(AIdx: Integer)
-    begin
-      CheckCalls(AIdx);
-      CheckConstraints(AIdx);
-      CheckAttributes(AIdx);
-    end);
-  Stage('calls');
-  // Sequential by design — see AnalyzeDirectory's Phase-3c comment.
-  for LIdx := 0 to FModels.Count - 1 do
-    BindTypesX(LIdx);
-  Stage('bindx');
-  RunCrossTypePass(LN);
-  Stage('xtype');
-  // Whole transitive closure went through the cross passes.
-  MarkAllCrossReady;
-  TrimAllDiags;
-  ReleaseCrossWork;
-  // Analysis is over: drop the raw-bytes repository (a full second copy of
-  // every closure file that nothing reads from here on — hundreds of MB on
-  // a real project) and the include-cache's own stream references.
-  FSM.ReleaseAnalysisCaches;
+  try   // donor lifetime — see AnalyzeFile
+    Result := LoadFile(AMainFile);
+    if Result < 0 then
+      Exit;
+    // The implicit System unit is part of every unit's closure (1.2.1) yet
+    // never appears in a `uses` clause — pull it in NOW so the closure loop
+    // and the cross passes below cover it too (nav inside an opened System.pas
+    // works), and so no parallel CrossResolve worker triggers its first-time
+    // load mid-flight. SysInit is the same story (bare HInstance/ModuleIsLib).
+    EnsureSystemUnit;
+    EnsureSysInitUnit;
+    Stage('main+sys');
+    // Load the TRANSITIVE closure — continuous, not round-barriered (see
+    // RunLoadEngine). ResolveUses (sequential, the single source of truth for
+    // UnitId assignment) then finds every file cached, exactly as it did after
+    // the old per-round batch loads.
+    RunLoadEngine(nil, nil, {AIntfLoads} False, nil);
+    Stage('load');
+    for LIdx := 0 to FModels.Count - 1 do
+      ResolveUses(LIdx);
+    Stage('resolve');
+    // A Declared() guard can only be answered now — see RunDeclaredPass. It may
+    // load units the re-decided branch newly imports, so LN is taken after it.
+    RunDeclaredPass(FModels.Count);
+    InjectEncodingDiags(FModels.Count);
+    InjectGuessedIfDiags(FModels.Count);
+    // Cross passes for EVERY loaded unit — same per-unit write discipline as
+    // AnalyzeDirectory (each writes only its own model, reads others' frozen
+    // Phase-1 state), so the same parallel farming is safe.
+    LN := FModels.Count;
+    PrepareDeclWork(LN);
+    ForEachIndex(LN - 1, 'resolve',    procedure(AIdx: Integer)
+      begin
+        CrossResolve(AIdx);
+      end);
+    Stage('xresolve');
+    // The inherited-member pass needs every CrossResolve worker done first
+    // (it reads their ExtRefMaps); parallel compute + sequential commit.
+    RunInheritedPass(LN);
+    Stage('inherited');
+    // Then the with-body pass, which reads type nodes the inherited pass just
+    // COMMITTED (see CrossResolveWith) — order matters, not just grouping. Timed
+    // apart because it iterates to a fixpoint: its cost is the one that is not
+    // obvious from reading the code.
+    RunWithPass(LN);
+    Stage('with');
+    ForEachIndex(LN - 1, 'cross-resolve',    procedure(AIdx: Integer)
+      begin
+        CheckCalls(AIdx);
+        CheckConstraints(AIdx);
+        CheckAttributes(AIdx);
+      end);
+    Stage('calls');
+    // Sequential by design — see AnalyzeDirectory's Phase-3c comment.
+    for LIdx := 0 to FModels.Count - 1 do
+      BindTypesX(LIdx);
+    Stage('bindx');
+    RunCrossTypePass(LN);
+    Stage('xtype');
+    // Whole transitive closure went through the cross passes.
+    MarkAllCrossReady;
+    TrimAllDiags;
+    ReleaseCrossWork;
+    // Analysis is over: drop the raw-bytes repository (a full second copy of
+    // every closure file that nothing reads from here on — hundreds of MB on
+    // a real project) and the include-cache's own stream references.
+    FSM.ReleaseAnalysisCaches;
+  finally
+    FinishDonor({AReport} True);
+  end;
 end;
 
 procedure TPasSemaProject.AnalyzeDirectory(const ARoot: string);
@@ -10617,84 +10796,88 @@ begin
   GuardNotReleased('AnalyzeDirectory');
   FStageTimings := '';
   LSW := TStopwatch.StartNew;
-  FSM.BuildUnitIndex(ARoot);
-  LPaths := nil;
-  LPathCount := 0;
-  for LFile in TDirectory.GetFiles(ARoot, '*.*',
-    TSearchOption.soAllDirectories) do
-  begin
-    LExt := LowerCase(TPath.GetExtension(LFile));
-    if (LExt = '.pas') or (LExt = '.dpr') then
+  try   // donor lifetime — see AnalyzeFile
+    FSM.BuildUnitIndex(ARoot);
+    LPaths := nil;
+    LPathCount := 0;
+    for LFile in TDirectory.GetFiles(ARoot, '*.*',
+      TSearchOption.soAllDirectories) do
     begin
-      if LPathCount = Length(LPaths) then
-        SetLength(LPaths, LPathCount * 2 + 16);
-      LPaths[LPathCount] := LFile;
-      Inc(LPathCount);
+      LExt := LowerCase(TPath.GetExtension(LFile));
+      if (LExt = '.pas') or (LExt = '.dpr') then
+      begin
+        if LPathCount = Length(LPaths) then
+          SetLength(LPaths, LPathCount * 2 + 16);
+        LPaths[LPathCount] := LFile;
+        Inc(LPathCount);
+      end;
     end;
+    SetLength(LPaths, LPathCount);
+    Stage('scan');
+    LoadFilesParallel(LPaths);
+    Stage('load');
+    LN := FModels.Count;   // snapshot: only the directory's own units get E2003
+    // Resolve the implicit System unit BEFORE any parallel pass: a worker
+    // hitting it first mid-flight would LoadFile into the shared FModels
+    // while other workers read FModels[i] (the lock serializes the load
+    // itself, not the container reads elsewhere). After the LN snapshot, so a
+    // from-search-paths System stays outside the cross passes — exactly where
+    // the old lazy mid-CrossResolve load would have put it. SysInit: same deal.
+    EnsureSystemUnit;
+    EnsureSysInitUnit;
+    for LIdx := 0 to LN - 1 do
+      ResolveUses(LIdx);
+    // See RunDeclaredPass. LN stays the directory snapshot: anything it pulls in
+    // from the search paths belongs outside the E2003 set, like System itself.
+    RunDeclaredPass(LN);
+    InjectEncodingDiags(LN);
+    InjectGuessedIfDiags(LN);
+    Stage('main+sys+resolve');
+    // Cross passes per unit write ONLY their own model and read the others'
+    // Phase-1 state (frozen once every unit is loaded) — safe to farm out.
+    PrepareDeclWork(LN);
+    ForEachIndex(LN - 1, 'resolve',    procedure(AIdx: Integer)
+      begin
+        CrossResolve(AIdx);
+      end);
+    Stage('xresolve');
+    // The inherited-member pass needs every CrossResolve worker done first
+    // (it reads their ExtRefMaps); parallel compute + sequential commit.
+    RunInheritedPass(LN);
+    Stage('inherited');
+    // Then the with-body pass, which reads type nodes the inherited pass just
+    // COMMITTED (see CrossResolveWith) — order matters, not just grouping. Timed
+    // apart because it iterates to a fixpoint: its cost is the one that is not
+    // obvious from reading the code.
+    RunWithPass(LN);
+    Stage('with');
+    ForEachIndex(LN - 1, 'cross-resolve',    procedure(AIdx: Integer)
+      begin
+        CheckCalls(AIdx);
+        CheckConstraints(AIdx);
+        CheckAttributes(AIdx);
+      end);
+    Stage('calls');
+    // Cross typing stays SEQUENTIAL by design: Instantiate mutates the shared
+    // instance table, and CrossType both writes a model's RefMap/ExtRefMap and
+    // reads other models' — parallelizing would need locks on the hot path for
+    // ~5% of the total time (measured on the full RTL).
+    for LIdx := 0 to FModels.Count - 1 do
+      BindTypesX(LIdx);
+    Stage('bindx');
+    RunCrossTypePass(LN);
+    Stage('xtype');
+    // Units [0..LN-1] (the directory's own) went through the cross passes; a
+    // System unit pulled in from search paths after the LN snapshot stays
+    // msFullReady, mirroring the E2003 scoping above.
+    for LIdx := 0 to LN - 1 do
+      SetModuleStatus(LIdx, msCrossReady);
+    TrimAllDiags;
+    ReleaseCrossWork;
+    FSM.ReleaseAnalysisCaches;   // see AnalyzeProject
+  finally
+    FinishDonor({AReport} True);
   end;
-  SetLength(LPaths, LPathCount);
-  Stage('scan');
-  LoadFilesParallel(LPaths);
-  Stage('load');
-  LN := FModels.Count;   // snapshot: only the directory's own units get E2003
-  // Resolve the implicit System unit BEFORE any parallel pass: a worker
-  // hitting it first mid-flight would LoadFile into the shared FModels
-  // while other workers read FModels[i] (the lock serializes the load
-  // itself, not the container reads elsewhere). After the LN snapshot, so a
-  // from-search-paths System stays outside the cross passes — exactly where
-  // the old lazy mid-CrossResolve load would have put it. SysInit: same deal.
-  EnsureSystemUnit;
-  EnsureSysInitUnit;
-  for LIdx := 0 to LN - 1 do
-    ResolveUses(LIdx);
-  // See RunDeclaredPass. LN stays the directory snapshot: anything it pulls in
-  // from the search paths belongs outside the E2003 set, like System itself.
-  RunDeclaredPass(LN);
-  InjectEncodingDiags(LN);
-  InjectGuessedIfDiags(LN);
-  Stage('main+sys+resolve');
-  // Cross passes per unit write ONLY their own model and read the others'
-  // Phase-1 state (frozen once every unit is loaded) — safe to farm out.
-  PrepareDeclWork(LN);
-  ForEachIndex(LN - 1, 'resolve',    procedure(AIdx: Integer)
-    begin
-      CrossResolve(AIdx);
-    end);
-  Stage('xresolve');
-  // The inherited-member pass needs every CrossResolve worker done first
-  // (it reads their ExtRefMaps); parallel compute + sequential commit.
-  RunInheritedPass(LN);
-  Stage('inherited');
-  // Then the with-body pass, which reads type nodes the inherited pass just
-  // COMMITTED (see CrossResolveWith) — order matters, not just grouping. Timed
-  // apart because it iterates to a fixpoint: its cost is the one that is not
-  // obvious from reading the code.
-  RunWithPass(LN);
-  Stage('with');
-  ForEachIndex(LN - 1, 'cross-resolve',    procedure(AIdx: Integer)
-    begin
-      CheckCalls(AIdx);
-      CheckConstraints(AIdx);
-      CheckAttributes(AIdx);
-    end);
-  Stage('calls');
-  // Cross typing stays SEQUENTIAL by design: Instantiate mutates the shared
-  // instance table, and CrossType both writes a model's RefMap/ExtRefMap and
-  // reads other models' — parallelizing would need locks on the hot path for
-  // ~5% of the total time (measured on the full RTL).
-  for LIdx := 0 to FModels.Count - 1 do
-    BindTypesX(LIdx);
-  Stage('bindx');
-  RunCrossTypePass(LN);
-  Stage('xtype');
-  // Units [0..LN-1] (the directory's own) went through the cross passes; a
-  // System unit pulled in from search paths after the LN snapshot stays
-  // msFullReady, mirroring the E2003 scoping above.
-  for LIdx := 0 to LN - 1 do
-    SetModuleStatus(LIdx, msCrossReady);
-  TrimAllDiags;
-  ReleaseCrossWork;
-  FSM.ReleaseAnalysisCaches;   // see AnalyzeProject
 end;
 
 function TPasSemaProject.AnalyzeStaged(const ARoots, APriority: TArray<string>;
@@ -10943,6 +11126,7 @@ begin
     if Length(ARoots) > 0 then
       FByPath.TryGetValue(LowerCase(TPath.GetFullPath(ARoots[0])), Result);
   finally
+    FinishDonor({AReport} True);   // donor lifetime — see AnalyzeFile
     FCancelCheck := nil;
     // LNotify is a closure OVER THIS FRAME stored IN this frame — a
     // self-cycle the compiler cannot collect (the $ActRec holds the TProc,

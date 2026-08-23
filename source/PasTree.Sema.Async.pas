@@ -76,6 +76,16 @@ type
     { Configuration forwarded to the project. Call BEFORE Start. }
     procedure SetNamespaces(const ANamespaces: TArray<string>);
     procedure AddUnitAlias(const AAlias, AReal: string);
+    { Parse reuse — forwarded to TPasSemaProject.AdoptParseDonor (see there
+      for the config gate and what a hit reuses). Call BEFORE Start, after
+      the other configuration calls (the gate compares namespaces/aliases):
+      the session's worker owns the project once the thread exists, the same
+      "set BEFORE Start" contract as SetBuffer. ADonor — the host's
+      still-alive last-good project — must outlive this session's build; the
+      host's existing free-after-TakeProject-swap order already guarantees
+      that. False = configuration mismatch, donor refused (log it; the run
+      proceeds donor-less). }
+    function SetParseDonor(ADonor: TPasSemaProject): Boolean;
     { Forwarded to the inner project: True runs the analysis stages
       sequentially (the inner parallelism still runs on THIS worker thread
       either way). Set BEFORE Start. }
@@ -162,6 +172,11 @@ end;
 procedure TPasAsyncSession.AddUnitAlias(const AAlias, AReal: string);
 begin
   FProject.AddUnitAlias(AAlias, AReal);
+end;
+
+function TPasAsyncSession.SetParseDonor(ADonor: TPasSemaProject): Boolean;
+begin
+  Result := FProject.AdoptParseDonor(ADonor);
 end;
 
 procedure TPasAsyncSession.SetSingleThreadedInner(AValue: Boolean);
