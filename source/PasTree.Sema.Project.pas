@@ -5489,12 +5489,16 @@ begin
     // An ANONYMOUS structured type written inline in a type slot. It has no
     // name, so there is nothing in RefMap — but CollectStruct gave it a member
     // scope and DeclareAnonStruct gave that scope a symbol, and the node is the
-    // way back to both.
+    // way back to both. Through StructSymAtNode: this is the ONE cross-model
+    // NodeScope read reachable after analysis (completion typing a foreign
+    // declaration), so it must keep answering on a RELEASED model — from the
+    // snapshot ReleaseTransientMaps takes.
     nkRecordType, nkClassType, nkInterfaceType, nkObjectType:
-      if (ANode <= High(LM.NodeScope)) and
-         (LM.NodeScope[ANode] <> NIL_SCOPE) and
-         (LM.Scopes[LM.NodeScope[ANode]].StructSym <> NIL_SYM) then
-        Result := XPlain(AId, LM.Scopes[LM.NodeScope[ANode]].StructSym);
+      begin
+        LSym := LM.StructSymAtNode(ANode);
+        if LSym <> NIL_SYM then
+          Result := XPlain(AId, LSym);
+      end;
 
     nkTypeArgs:
       begin

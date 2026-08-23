@@ -4885,6 +4885,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitRA.pas'),
     'unit UnitRA;'#10'interface'#10 +
     'type TR = record V: Integer; end;'#10 +
+    'var AR: record FF: Integer; end;'#10 +   // anon struct: the NodeScope case
     'function FA: Integer;'#10 +
     'implementation'#10 +
     'function FA: Integer; begin Result := 1 + 2; end;'#10'end.'#10);
@@ -4903,10 +4904,23 @@ begin
     GProj.ReleaseTransientMaps([GProj.ModelFile(LKeepMid)]);
     Ok('release: the kept (open-editor) model keeps its maps',
       Length(GProj.Model(LKeepMid).ExprType) > 0);
-    Ok('release: a released model drops ExprType/ExprTypeX/WithUnopened',
+    Ok('release: a released model drops ExprType/ExprTypeX/WithUnopened/'
+      + 'NodeScope',
       (GProj.Model(LRelMid).ExprType = nil) and
       (GProj.Model(LRelMid).ExprTypeX.Count = 0) and
-      (GProj.Model(LRelMid).WithUnopened = nil));
+      (GProj.Model(LRelMid).WithUnopened = nil) and
+      (GProj.Model(LRelMid).NodeScope = nil));
+    Ok('release: the kept model keeps NodeScope',
+      GProj.Model(LKeepMid).NodeScope <> nil);
+    // The one post-analysis NodeScope consumer: an ANONYMOUS struct in a type
+    // slot must still resolve to its member-scope symbol from the snapshot.
+    var LAnonOk := False;
+    for var LN := 0 to High(GProj.Model(LRelMid).Tree.Nodes) do
+      if (GProj.Model(LRelMid).Tree.Nodes[LN].Kind = nkRecordType) and
+         (GProj.Model(LRelMid).StructSymAtNode(LN) <> NIL_SYM) then
+        LAnonOk := True;
+    Ok('release: an anonymous struct node still answers its scope symbol '
+      + '(the snapshot)', LAnonOk);
     Ok('release: navigation state survives - RefMap, ExtRefMap and symbols',
       (Length(GProj.Model(LRelMid).RefMap) > 0) and
       (GProj.Model(LRelMid).SymCount > 0));

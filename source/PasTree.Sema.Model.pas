@@ -212,6 +212,14 @@ type
       existing bounds guards or asks TPasSemaProject.EnsureHydrated first.
       The Demoted* fields are the REHYDRATION IDENTITY CHECK: a re-preprocess
       must reproduce exactly this stream or the node token indices would lie. }
+    { Snapshot ReleaseTransientMaps takes before freeing NodeScope: struct
+      TYPE node -> its member scope's StructSym, for every scope owned by a
+      struct-kind node. The one post-analysis reader of another model's
+      NodeScope is ResolveTypeExpr's anonymous-struct branch (an inline
+      `record ... end` in a type slot has no name, so RefMap has nothing) —
+      this dictionary is that branch's released-mode answer. Nil until a
+      release; scopes are few, so it is tiny. }
+    AnonStructSyms: TDictionary<Integer, Integer>;
     Demoted: Boolean;
     { True when this model's FINAL token stream came from the declared-pass
       re-preprocess (the per-unit $IF oracle) rather than the plain seeded
@@ -302,6 +310,10 @@ type
       TPasSemaProject.ReleaseTransientMaps for the contract — this is not
       called during any analysis. }
     procedure ReleaseTransientMaps;
+    { The member-scope struct symbol stamped on a struct TYPE node — from
+      NodeScope while it lives, from the release-time snapshot afterwards.
+      NIL_SYM when the node owns no such scope. }
+    function StructSymAtNode(ANode: Integer): Integer;
     { The routine head word of ASym (skRoutine), from the head token — or,
       on a demoted model, from the snapshot DemoteText took. rhNone for a
       symbol that is not a routine or has no routine node. }
@@ -412,6 +424,7 @@ end;
 
 destructor TPasSemaModel.Destroy;
 begin
+  AnonStructSyms.Free;
   ExprTypeX.Free;
   SymTypeX.Free;
   CallTargetX.Free;
@@ -775,11 +788,52 @@ begin
 end;
 
 procedure TPasSemaModel.ReleaseTransientMaps;
+var
+  LScope, LOwner: Integer;
 begin
   ExprType := nil;
   WithUnopened := nil;
   ExprTypeX.Free;
   ExprTypeX := TDictionary<Integer, TSemaXType>.Create;
+  // NodeScope joins the released set — but its one post-analysis consumer
+  // (the anonymous-struct branch, see AnonStructSyms) gets a snapshot first.
+  // Built from the SCOPES (a few hundred) rather than a scan of every node.
+  if NodeScope <> nil then
+  begin
+    for LScope := 0 to Scopes.Count - 1 do
+      if Scopes[LScope].StructSym <> NIL_SYM then
+      begin
+        LOwner := Scopes[LScope].OwnerNode;
+        if (LOwner <> NIL_NODE) and (LOwner <= High(Tree.Nodes)) and
+           (Tree.Nodes[LOwner].Kind in [nkRecordType, nkClassType,
+             nkInterfaceType, nkObjectType]) then
+        begin
+          if AnonStructSyms = nil then
+            AnonStructSyms := TDictionary<Integer, Integer>.Create;
+          AnonStructSyms.AddOrSetValue(LOwner, Scopes[LScope].StructSym);
+        end;
+      end;
+    NodeScope := nil;
+  end;
+end;
+
+function TPasSemaModel.StructSymAtNode(ANode: Integer): Integer;
+var
+  LScope: Integer;
+begin
+  Result := NIL_SYM;
+  if (ANode < 0) or (ANode > High(Tree.Nodes)) then
+    Exit;
+  if NodeScope <> nil then
+  begin
+    if ANode > High(NodeScope) then
+      Exit;
+    LScope := NodeScope[ANode];
+    if LScope <> NIL_SCOPE then
+      Result := Scopes[LScope].StructSym;
+  end
+  else if AnonStructSyms <> nil then
+    AnonStructSyms.TryGetValue(ANode, Result);
 end;
 
 function TPasSemaModel.RoutineHead(ASym: Integer): TPasRoutineHead;
