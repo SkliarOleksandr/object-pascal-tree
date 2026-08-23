@@ -314,6 +314,15 @@ type
       NodeScope while it lives, from the release-time snapshot afterwards.
       NIL_SYM when the node owns no such scope. }
     function StructSymAtNode(ANode: Integer): Integer;
+    { The innermost struct whose scope ENCLOSES ANode — the `Self` context
+      there, as opposed to StructSymAtNode's "this node IS the struct".
+      Climbs the node's parents to the nearest scope, then that scope's
+      parents: StructSym is stamped both on a struct's own member scope and
+      on a method IMPLEMENTATION's routine scope, so this answers inside a
+      declaration and inside a body alike. NIL_SYM outside any struct.
+      Reads NodeScope, so it is an ANALYSIS-TIME query — a demoted model
+      (ReleaseTransientMaps) answers NIL_SYM. }
+    function EnclosingStructSym(ANode: Integer): Integer;
     { The routine head word of ASym (skRoutine), from the head token — or,
       on a demoted model, from the snapshot DemoteText took. rhNone for a
       symbol that is not a routine or has no routine node. }
@@ -814,6 +823,34 @@ begin
         end;
       end;
     NodeScope := nil;
+  end;
+end;
+
+function TPasSemaModel.EnclosingStructSym(ANode: Integer): Integer;
+var
+  LScope: Integer;
+begin
+  Result := NIL_SYM;
+  if (ANode < 0) or (NodeScope = nil) then
+    Exit;
+  // To the nearest scope-owning ancestor node...
+  LScope := NIL_SCOPE;
+  while ANode <> NIL_NODE do
+  begin
+    if ANode <= High(NodeScope) then
+    begin
+      LScope := NodeScope[ANode];
+      if LScope <> NIL_SCOPE then
+        Break;
+    end;
+    ANode := Tree.Nodes[ANode].Parent;
+  end;
+  // ...then out through the enclosing scopes.
+  while LScope <> NIL_SCOPE do
+  begin
+    if Scopes[LScope].StructSym <> NIL_SYM then
+      Exit(Scopes[LScope].StructSym);
+    LScope := Scopes[LScope].Parent;
   end;
 end;
 

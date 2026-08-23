@@ -179,8 +179,17 @@ begin
     SetLength(LR.FIsDeclName, Length(ATree.Nodes));
     for var LIdx := 0 to High(LR.FNodeScope) do
       LR.FNodeScope[LIdx] := NIL_SCOPE;   // unvisited => no scope => resolves NIL
-    LR.Run;
+    // Published BEFORE Run, not after: the LATER PHASES OF THIS SAME RUN are
+    // model-level consumers too — the typer asks the model for the struct
+    // enclosing a call site (EnclosingStructSym), and it runs inside Run.
+    // Sharing the array rather than copying it is the point: a dynamic array
+    // assignment shares the reference and element writes are visible through
+    // both, so Collect keeps filling exactly what the model publishes (the
+    // array is sized once here and never re-SetLength'd, which is what makes
+    // that safe). Entries a phase has not reached yet read NIL_SCOPE — the
+    // same answer they gave before this moved.
     LR.FModel.NodeScope := LR.FNodeScope;
+    LR.Run;
     // Standalone (non-project) consumers enumerate Diags right after this
     // returns; the project driver re-trims after its own cross passes.
     LR.FModel.TrimDiags;

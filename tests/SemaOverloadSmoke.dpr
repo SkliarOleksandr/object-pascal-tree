@@ -98,6 +98,49 @@ const
     '  Writeln(1, 2, 3);'#10 + // ok (builtin)
     'end;'#10'end.'#10;
 
+  { Inside a METHOD the candidate set is never complete intra-unit: dcc
+    searches the type's own AND inherited members before the unit's globals,
+    and every class also inherits TObject, which a `uses`-less unit has no
+    model of. Both calls below are legal dcc (verified as a real compile) —
+    they mean TBase.Foo/TBase.Bar, not the globals the intra-unit resolver
+    binds them to, and the arity check must stay silent about them. }
+  SRC_METHOD =
+    'unit U;'#10'interface'#10 +
+    'type'#10 +
+    '  TBase = class'#10 +
+    '    procedure Foo(A: Integer);'#10 +
+    '    function Bar(A: Integer): Integer;'#10 +
+    '  end;'#10 +
+    '  TDer = class(TBase)'#10 +
+    '    procedure Run;'#10 +
+    '  end;'#10 +
+    'procedure Foo(A, B: Integer);'#10 +   // global, needs 2
+    'function Bar: Integer;'#10 +          // global, takes none
+    'implementation'#10 +
+    'procedure Foo(A, B: Integer); begin end;'#10 +
+    'function Bar: Integer; begin Result := 0; end;'#10 +
+    'procedure TBase.Foo(A: Integer); begin end;'#10 +
+    'function TBase.Bar(A: Integer): Integer; begin Result := A; end;'#10 +
+    'procedure TDer.Run;'#10'var I: Integer;'#10'begin'#10 +
+    '  Foo(1);'#10 +           // the inherited TBase.Foo(A) — not 2 args short
+    '  I := Bar(1);'#10 +      // the inherited TBase.Bar(A) — not 1 arg over
+    'end;'#10'end.'#10;
+
+  { The same unit and the same globals, called from OUTSIDE any struct: here
+    the globals really are the only candidates, so both diagnostics must
+    still fire — dcc reports exactly these two. }
+  SRC_PLAIN =
+    'unit U;'#10'interface'#10 +
+    'procedure Foo(A, B: Integer);'#10 +
+    'function Bar: Integer;'#10 +
+    'implementation'#10 +
+    'procedure Foo(A, B: Integer); begin end;'#10 +
+    'function Bar: Integer; begin Result := 0; end;'#10 +
+    'procedure Plain;'#10'var I: Integer;'#10'begin'#10 +
+    '  Foo(1);'#10 +           // E2035
+    '  I := Bar(1);'#10 +      // E2034
+    'end;'#10'end.'#10;
+
 begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN32']);
@@ -111,6 +154,23 @@ begin
   Ok('E2035 x1 (too few)', DiagCount('E2035') = 1);
   Ok('E2034 x2 (too many)', DiagCount('E2034') = 2);
   Ok('no bogus type errors', (DiagCount('E2010') = 0) and (DiagCount('E2015') = 0));
+  GModel.Free;
+
+  // A call inside a method may really be an inherited member, so the arity
+  // check stands down there (the global it resolved to is not the callee).
+  Analyze(SRC_METHOD);
+  Ok('no false arity inside a method: inherited Foo(A) beats the 2-arg global',
+    DiagCount('E2035') = 0);
+  Ok('no false arity inside a method: inherited Bar(A) beats the 0-arg global',
+    DiagCount('E2034') = 0);
+  GModel.Free;
+
+  // ...and the same globals still get checked where they ARE the callee.
+  Analyze(SRC_PLAIN);
+  Ok('outside a struct the check still fires: E2035 x1',
+    DiagCount('E2035') = 1);
+  Ok('outside a struct the check still fires: E2034 x1',
+    DiagCount('E2034') = 1);
   GModel.Free;
 
   if GCounter.Finish('SemaOverloadSmoke') then

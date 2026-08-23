@@ -875,12 +875,28 @@ begin
 
   // Arg-count is only reliable when the candidate set is complete:
   //  - a plain GLOBAL routine (methods/constructors are inherited/overloaded
-  //    across the class hierarchy, which we don't model), and
+  //    across the class hierarchy, which we don't model),
   //  - the unit has NO `uses` (with imports, same-named overloads can live in
   //    another unit and Delphi merges them — we don't yet; cross-unit overload
-  //    merging is a later slice). This keeps arity zero-false-positive.
+  //    merging is a later slice), and
+  //  - the CALL SITE is not inside a struct. That last one is the same rule
+  //    from the other end, and it is not the ancestor walk the To-do assumed:
+  //    inside a method, dcc searches the type's members — own AND inherited —
+  //    before the unit's globals, so a same-named global we resolved to may
+  //    not be the real callee at all. Walking the same-unit ancestry would
+  //    not be enough to prove otherwise, because EVERY class also inherits
+  //    TObject, which a `uses`-less unit has no model of (no System unit is
+  //    loaded, and TObject is deliberately not seeded) — `ToString(X)` in a
+  //    method of such a unit really can mean TObject.ToString. Since the
+  //    candidate set inside a method is therefore never provably complete,
+  //    the diagnostic stays out of methods entirely and keeps its
+  //    zero-false-positive promise where it does fire: unit-level code and
+  //    plain global routines. Probed: a global `Bar` beside an inherited
+  //    `TBase.Bar(A: Integer)` used to report a false E2034 on `Bar(1)`,
+  //    which dcc compiles.
   var LGlobal := (M.Scopes[M.Symbols[AHead].Scope].Kind in
-    [sckUnit, sckImplementation]) and (Length(M.UsesList) = 0);
+    [sckUnit, sckImplementation]) and (Length(M.UsesList) = 0) and
+    (M.EnclosingStructSym(ACall) = NIL_SYM);
 
   // Deterministic arg-count diagnostic (independent of implicit rules).
   if LGlobal and LAllHaveParams and not LAnyVariadic and not LAnyFit and

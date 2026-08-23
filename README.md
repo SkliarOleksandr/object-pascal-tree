@@ -1475,13 +1475,25 @@ Still open, roughly in the order we're tackling it:
   the same test as any other refactor here (README's own rule, and the
   merged-typers episode above): fewer special cases AND no slower, measured —
   not "cleaner".
-- **Arity check in the intra-unit typer ignores inherited members.** The
-  cross-unit check (`CheckCalls`) now yields to an inherited member before
-  reporting, but `PasTree.Sema.Types.SelectOverload` has its own arity
-  diagnostic and does not. It is gated to units with NO `uses` clause at all, so
-  nothing in the RTL/VCL/FMX corpus reaches it — but a bare unit with an
-  inherited method shadowed by a same-named global still gets a false `E2035`.
-  Fixing it means the typer needs the ancestor walk the resolver already has.
+- ~~**Arity check in the intra-unit typer ignores inherited members.**~~
+  **Fixed on 2026-08-23**, and the fix is NOT the ancestor walk this item
+  assumed. Reproduced first: a `uses`-less unit with a global `Bar` and an
+  inherited `TBase.Bar(A: Integer)` reported a false `E2034` on `Bar(1)`
+  inside a method — dcc compiles that unit. Walking the same-unit ancestry
+  would not have been enough to clear it, because EVERY class also inherits
+  `TObject`, which such a unit has no model of (no `System` is loaded and
+  `TObject` is deliberately not seeded), so `ToString(X)` in a method there
+  really can mean `TObject.ToString`. The candidate set inside a method is
+  therefore never provably complete, and `SelectOverload`'s gate now also
+  requires the CALL SITE to be outside any struct
+  (`TPasSemaModel.EnclosingStructSym`, new — the scope-chain climb the
+  completion engine already had per-scope). The diagnostic keeps firing for
+  unit-level code and plain global routines, where the globals really are
+  the only candidates: the same probe unit reports `E2034` on exactly the
+  line dcc does, and nothing on the method call. One enabling change: the
+  resolver publishes `NodeScope` to the model BEFORE `Run` rather than
+  after, because the typer is a phase of that same run (the array is shared,
+  not copied).
 - ~~**Helper precedence inside the same-unit join.**~~ **Fixed on 2026-08-08**
   — the ordering exception this item asked for is a `Shadowing` list on a
   scope, searched by `FindLocalDeep` BEFORE the scope's own names, and
