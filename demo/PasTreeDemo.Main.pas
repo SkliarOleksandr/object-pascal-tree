@@ -2305,6 +2305,15 @@ begin
   TNavHistoryPlugin.Create(Result, Self, LTab.FilePath);
   FOpenFiles.AddObject(APath, LTab);
   pgc.ActivePage := LTab;
+  // The current project may have RELEASED this unit's transient maps (it was
+  // not an open tab when the analysis finished — see ReleaseTransientMaps in
+  // the async swap). A quiet re-analysis restores full completion for it,
+  // through the same debounce an edit uses.
+  if Assigned(FSemaProject) then
+  begin
+    FReparseTimer.Enabled := False;
+    FReparseTimer.Enabled := True;
+  end;
 end;
 
 { go-to-declaration }
@@ -2762,6 +2771,10 @@ begin
     FNav := TPasNavigator.Create(FSemaProject);
     FAnalyzeOverhead := FAnalyzeOverhead +
       Format('nav=%d;', [LSW.ElapsedMilliseconds]);
+    // Same as the async swap: the project is immutable from here on (every
+    // re-analysis builds a fresh one), so drop the closed units' transient
+    // maps — see ReleaseTransientMaps.
+    FSemaProject.ReleaseTransientMaps(FOpenFiles.ToStringArray);
   finally
     FAnalyzing := False;
   end;
@@ -3102,7 +3115,16 @@ begin
   FSemaProject := FAsyncSession.TakeProject;
   FreeAndNil(FAsyncSession);
   if Assigned(FSemaProject) then
+  begin
     FNav := TPasNavigator.Create(FSemaProject);
+    // MEMORY-AUDIT §6.4-4 stage 1: this project is now IMMUTABLE for us —
+    // every re-analysis goes through a fresh session — so the per-unit maps
+    // nothing reads after analysis can go, except for the open tabs'
+    // (completion reads the ACTIVE file's). ~10% of a big closure's RSS.
+    // A tab opened later than this simply re-analyzes (OpenFileTab arms the
+    // same debounce an edit does).
+    FSemaProject.ReleaseTransientMaps(FOpenFiles.ToStringArray);
+  end;
 
   if LError <> '' then
     Log('Background analysis error: ' + LError);

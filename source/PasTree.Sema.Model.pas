@@ -261,6 +261,15 @@ type
       the last-child test. WithUnopened is empty for the overwhelming
       majority of units, so this costs one length check on the hot path. }
     function InUnopenedWithBody(ANode: Integer): Boolean;
+    { Frees the maps nothing reads after analysis for a unit the host is not
+      EDITING: ExprType (a nodes-sized array), ExprTypeX and WithUnopened.
+      Navigation reads none of them (grep-verified in MEMORY-AUDIT §6.4-4 and
+      re-verified 2026-08-23); completion reads them for the ACTIVE file only,
+      which the caller keeps. ExprTypeX stays a live-but-empty dictionary so
+      existing TryGetValue readers need no nil-guard. See
+      TPasSemaProject.ReleaseTransientMaps for the contract — this is not
+      called during any analysis. }
+    procedure ReleaseTransientMaps;
     procedure AddDiag(const ADiag: TSemaDiag);
     { Cuts Diags back to its filled prefix. The project driver calls this at
       the end of every analysis entry point, BEFORE any consumer enumerates
@@ -717,6 +726,14 @@ begin
   if (LDecl = NIL_NODE) or (LDecl > High(Tree.Nodes)) then
     Exit;
   Result := Tree.Nodes[LDecl].FirstToken > AAtToken;
+end;
+
+procedure TPasSemaModel.ReleaseTransientMaps;
+begin
+  ExprType := nil;
+  WithUnopened := nil;
+  ExprTypeX.Free;
+  ExprTypeX := TDictionary<Integer, TSemaXType>.Create;
 end;
 
 function TPasSemaModel.InUnopenedWithBody(ANode: Integer): Boolean;

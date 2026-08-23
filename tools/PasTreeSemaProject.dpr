@@ -78,6 +78,7 @@ var
   GIdx: Integer;
   GSingle, GWholeProject, GDProjMode, GList, GMembers, GIfs: Boolean;
   GVisibility: Boolean;
+  GRelease: Boolean;   // -release: exercise ReleaseTransientMaps, report held
   GSW: TStopwatch;
   GMode: string;
 
@@ -370,6 +371,14 @@ begin
          MemoryText(AllocatedBytes), GMode]));
       if GProj.StageTimings <> '' then
         Writeln(ErrOutput, '  stages: ', GProj.StageTimings);
+      // The stage-1 retained-memory measurement: keep only the main source
+      // (the "open editor"), release everything else, report the delta.
+      if GRelease then
+      begin
+        GProj.ReleaseTransientMaps([LD.MainSource]);
+        Writeln(ErrOutput, Format('  after ReleaseTransientMaps: %s held',
+          [MemoryText(AllocatedBytes)]));
+      end;
       if LTotalLines > 0 then
         Writeln(ErrOutput, Format(
           '  source: %s lines, %.1f MB, %s file(s) — %s lines/s',
@@ -458,6 +467,8 @@ begin
         GIfs := True
       else if SameText(ParamStr(GIdx), '-visibility') then
         GVisibility := True
+      else if SameText(ParamStr(GIdx), '-release') then
+        GRelease := True
       else if ParamStr(GIdx).StartsWith('-p:', True) then
         TryParsePlatformName(Copy(ParamStr(GIdx), 4, MaxInt), GPlatform)
       else if ParamStr(GIdx).StartsWith('-studio:', True) then
@@ -538,6 +549,12 @@ begin
       // Per-stage breakdown: without it a slow run says only THAT it is slow.
       if GProj.StageTimings <> '' then
         Writeln(ErrOutput, 'stages: ' + GProj.StageTimings);
+      if GRelease then
+      begin
+        GProj.ReleaseTransientMaps([GPath]);
+        Writeln(ErrOutput, Format('after ReleaseTransientMaps: %s held',
+          [MemoryText(AllocatedBytes)]));
+      end;
     finally
       GProj.Free;
     end;

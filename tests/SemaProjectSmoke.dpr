@@ -8,6 +8,7 @@ program SemaProjectSmoke;
 
 uses
   System.SysUtils,
+  System.Classes,
   System.IOUtils,
   System.Generics.Collections,
   PasTree.Types in '..\source\PasTree.Types.pas',
@@ -4863,6 +4864,60 @@ begin
     Ok('encoding: and reports NO PPENC - reading it as ANSI is the rule, not '
       + 'a recovery, and nothing was lost',
       DiagCount(LQuiet, 'PPENC') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- ReleaseTransientMaps (MEMORY-AUDIT 6.4-4, stage 1): a host opt-in
+  // that frees the post-analysis dead weight of every unit it is NOT editing.
+  // The kept ("open editor") model keeps everything; the released one keeps
+  // its navigation state (RefMap/ExtRefMap/Symbols) and drops only the maps
+  // nothing reads for a closed unit; any later Analyze* must refuse LOUDLY
+  // (the freed arrays are indexed unguarded by the cross passes, and with
+  // range checks off the silent alternative is a wrong analysis). ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_release');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitRA.pas'),
+    'unit UnitRA;'#10'interface'#10 +
+    'type TR = record V: Integer; end;'#10 +
+    'function FA: Integer;'#10 +
+    'implementation'#10 +
+    'function FA: Integer; begin Result := 1 + 2; end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitRB.pas'),
+    'unit UnitRB;'#10'interface'#10'uses UnitRA;'#10 +
+    'var GR: TR;'#10'implementation'#10 +
+    'procedure PB;'#10'begin'#10'  GR.V := FA;'#10'end;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    var LKeepMid := MidByName('unitrb');
+    var LRelMid := MidByName('unitra');
+    Ok('release: both models carry ExprType before the call',
+      (Length(GProj.Model(LKeepMid).ExprType) > 0) and
+      (Length(GProj.Model(LRelMid).ExprType) > 0));
+    GProj.ReleaseTransientMaps([GProj.ModelFile(LKeepMid)]);
+    Ok('release: the kept (open-editor) model keeps its maps',
+      Length(GProj.Model(LKeepMid).ExprType) > 0);
+    Ok('release: a released model drops ExprType/ExprTypeX/WithUnopened',
+      (GProj.Model(LRelMid).ExprType = nil) and
+      (GProj.Model(LRelMid).ExprTypeX.Count = 0) and
+      (GProj.Model(LRelMid).WithUnopened = nil));
+    Ok('release: navigation state survives - RefMap, ExtRefMap and symbols',
+      (Length(GProj.Model(LRelMid).RefMap) > 0) and
+      (GProj.Model(LRelMid).SymCount > 0));
+    var LRaised := False;
+    try
+      GProj.AnalyzeDirectory(LDir);
+    except
+      on EInvalidOperation do
+        LRaised := True;
+    end;
+    Ok('release: a later Analyze* refuses loudly (EInvalidOperation), never '
+      + 'indexes the freed maps', LRaised);
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

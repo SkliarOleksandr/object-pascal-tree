@@ -163,6 +163,9 @@ type
       array carries capacity slack), drained by the decl pass. }
     FDeclWork: TArray<TArray<Integer>>;
     FDeclWorkCount: TArray<Integer>;
+    // Set by ReleaseTransientMaps; every Analyze* refuses to run after it —
+    // see the public method's contract comment.
+    FTransientReleased: Boolean;
     { Per-model overlay of the member references CrossType discovers, so the
       parallel walks never mutate a dictionary another walk is reading — see
       RunCrossTypePass. Owned here; merged and freed there. }
@@ -679,6 +682,25 @@ type
     function AnalyzeStaged(const ARoots, APriority: TArray<string>;
       const ACancelled: TFunc<Boolean> = nil;
       const AOnProgress: TProc<TPasStagedProgress> = nil): Integer;
+    { MEMORY-AUDIT §6.4-4 stage 1 — a HOST opt-in, called AFTER analysis:
+      frees per-model maps nothing reads once the run is over (ExprType,
+      ExprTypeX, WithUnopened — together a nodes-sized array plus two
+      dictionaries per unit), for every model EXCEPT the ones whose files the
+      host names in AKeepFiles (its open editors: completion reads the ACTIVE
+      file's ExprType/ExprTypeX, so those must survive). Nothing calls this
+      by default — every existing consumer is untouched.
+
+      THE CONTRACT: a released project serves navigation and completion until
+      the host replaces it (both current hosts re-analyze through a fresh
+      TPasAsyncSession, so a project is immutable once handed over). Running
+      any Analyze* on it afterwards is refused LOUDLY (EInvalidOperation) —
+      the cross passes index the freed arrays, and with range checks off a
+      silent wrong answer is the alternative. A file the host opens LATER
+      than the release is the ordinary re-analyze trigger, exactly like an
+      edit. }
+    procedure ReleaseTransientMaps(const AKeepFiles: TArray<string>);
+  private
+    procedure GuardNotReleased(const AEntry: string);
   end;
 
 { TSemaXType value helpers, promoted with the query surface above: the null
@@ -10307,6 +10329,7 @@ var
   LPaths: TArray<string>;
   LPath: string;
 begin
+  GuardNotReleased('AnalyzeFile');
   Result := LoadFile(AMainFile);
   if Result < 0 then
     Exit;
@@ -10360,6 +10383,39 @@ begin
   ReleaseCrossWork;
 end;
 
+procedure TPasSemaProject.ReleaseTransientMaps(const AKeepFiles: TArray<string>);
+var
+  LKeep: TDictionary<Integer, Boolean>;
+  LIdx, LMid: Integer;
+begin
+  LKeep := TDictionary<Integer, Boolean>.Create;
+  try
+    for LIdx := 0 to High(AKeepFiles) do
+      if FByPath.TryGetValue(
+           LowerCase(TPath.GetFullPath(AKeepFiles[LIdx])), LMid) and
+         (LMid >= 0) then
+        LKeep.AddOrSetValue(LMid, True);
+    for LIdx := 0 to FModels.Count - 1 do
+      if not LKeep.ContainsKey(LIdx) then
+        FModels[LIdx].ReleaseTransientMaps;
+  finally
+    LKeep.Free;
+  end;
+  FTransientReleased := True;
+end;
+
+// See ReleaseTransientMaps: the freed arrays are indexed unguarded by the
+// cross passes, and with range checks off the failure mode of running one
+// anyway is a silently wrong analysis, not a crash. Refusing here converts
+// that into the loud, findable error.
+procedure TPasSemaProject.GuardNotReleased(const AEntry: string);
+begin
+  if FTransientReleased then
+    raise EInvalidOperation.CreateFmt(
+      '%s: this project released its transient maps (ReleaseTransientMaps); ' +
+      'analyze into a fresh TPasSemaProject instead', [AEntry]);
+end;
+
 function TPasSemaProject.StageTimings: string;
 begin
   Result := FStageTimings;
@@ -10383,6 +10439,7 @@ var
   end;
 
 begin
+  GuardNotReleased('AnalyzeProject');
   FStageTimings := '';
   LSW := TStopwatch.StartNew;
   Result := LoadFile(AMainFile);
@@ -10468,6 +10525,7 @@ var
   end;
 
 begin
+  GuardNotReleased('AnalyzeDirectory');
   FStageTimings := '';
   LSW := TStopwatch.StartNew;
   FSM.BuildUnitIndex(ARoot);
@@ -10602,6 +10660,7 @@ var
   end;
 
 begin
+  GuardNotReleased('AnalyzeStaged');
   Result := -1;
   FStageTimings := '';
   LProgress := Default(TPasStagedProgress);
