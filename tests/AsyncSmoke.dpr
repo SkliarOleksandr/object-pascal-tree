@@ -352,6 +352,65 @@ begin
     end;
   end;
 
+  // ---- 6. Single-module session (incremental plan, stage B) ----
+  // The host hands its last-good project to CreateForModule, sets the edited
+  // buffer, and gets it back through TakeProject — accepted for a body edit,
+  // refused (project untouched) for an interface edit.
+  begin
+    var LHost := StagedProject(LDir, []);
+    var LUnitPath := TPath.Combine(LDir, 'UnitA.pas');
+    var LOrig := TFile.ReadAllText(LUnitPath);
+    var LSession := TPasAsyncSession.CreateForModule(LHost, LUnitPath);
+    try
+      // A body-only edit: append a statement to an existing routine body.
+      LSession.SetBuffer(LUnitPath,
+        StringReplace(LOrig, 'end.',
+          'procedure __Added; begin end;'#10'end.', []));
+      LSession.Start;
+      LSession.WaitFor;
+      Ok('module session: finishes', LSession.IsDone);
+      Ok('module session: no worker error', LSession.LastError = '');
+      Ok('module session: a body edit is accepted', LSession.ModuleAccepted);
+      var LTaken := LSession.TakeProject;
+      try
+        Ok('module session: the project comes back through TakeProject',
+          LTaken <> nil);
+        Ok('module session: the main result id names the re-analyzed unit',
+          (LTaken <> nil) and (LSession.MainResultId >= 0) and
+          SameText(LTaken.Model(LSession.MainResultId).UnitNameLower,
+            'unita'));
+      finally
+        LTaken.Free;
+      end;
+    finally
+      LSession.Free;
+    end;
+
+    // An INTERFACE edit must be refused, and the project handed back intact.
+    var LHost2 := StagedProject(LDir, []);
+    var LSession2 := TPasAsyncSession.CreateForModule(LHost2, LUnitPath);
+    try
+      LSession2.SetBuffer(LUnitPath,
+        StringReplace(
+          StringReplace(LOrig, 'implementation',
+            'procedure __Exported;'#10'implementation', []),
+          'end.', 'procedure __Exported; begin end;'#10'end.', []));
+      LSession2.Start;
+      LSession2.WaitFor;
+      Ok('module session: an interface edit is refused',
+        LSession2.IsDone and not LSession2.ModuleAccepted);
+      var LTaken2 := LSession2.TakeProject;
+      try
+        Ok('module session: a refused run still hands the project back',
+          LTaken2 <> nil);
+      finally
+        LTaken2.Free;
+      end;
+    finally
+      LSession2.Free;
+    end;
+  end;
+
   if TDirectory.Exists(LDir) then
     TDirectory.Delete(LDir, True);
 

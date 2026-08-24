@@ -130,6 +130,10 @@ type
     FDonor: TPasSemaProject;
     FDonorHits: Integer;      // AtomicIncrement — workers count concurrently
     FDonorMisses: Integer;
+    // Why the last IntfPrefixBounds/IntfPrefixSame said no, in detail — the
+    // refusal reason AnalyzeModuleOnly publishes in StageTimings. Diagnostic
+    // only; nothing branches on it.
+    FLastBoundaryNote: string;
     FPP: TPasPreprocessor;
     // Reusable preprocessors for the parallel load/declared passes: Process
     // fully resets per-run state, so a returned instance is as good as a
@@ -293,7 +297,36 @@ type
     function DeclaredQueryFor(AId: Integer): TPasDeclaredQuery;
     procedure RunDeclaredPass(ACount: Integer);
     procedure InjectGuessedIfDiags(ACount: Integer);
+    procedure InjectGuessedIfDiagsOne(AId: Integer);
     procedure InjectEncodingDiags(ACount: Integer);
+    procedure InjectEncodingDiagsOne(AId: Integer);
+    { ---- single-module reanalysis (incremental plan, stage B) -------------
+      The INTERFACE PREFIX of a model: symbols [0..ASymN) and scopes
+      [0..AScopeN), everything declared before the implementation section.
+      Every cross-generation (UnitId, Sym) reference into a unit names a
+      symbol in that prefix, so a re-parse that reproduces it exactly leaves
+      every other model's binding valid.
+
+      False = the model has no implementation scope (a program/library, or a
+      unit whose implementation declares nothing) or the arena is NOT split
+      cleanly at the boundary — an interface symbol living past the first
+      implementation-scoped one would be compared by nobody. Both answers
+      mean "no fast path", never "assume it is fine". }
+    function ScopeIsImplSide(AModel: TPasSemaModel;
+      AScope, AImplScope: Integer): Boolean;
+    function IntfPrefixBounds(AModel: TPasSemaModel;
+      out ASymN, AScopeN, AImplScope: Integer): Boolean;
+    // Guard 1: AOld and ANew have the SAME interface prefix (name, kind,
+    // order, scope shape). ASymN is the old model's boundary, for guard 2.
+    function IntfPrefixSame(AOld, ANew: TPasSemaModel;
+      out ASymN: Integer; out AWhy: string): Boolean;
+    // Guard 2: no instance-table entry names an IMPLEMENTATION-local symbol
+    // of model AId (such an index would dangle after the swap).
+    function InstancesSafeFor(AId, ASymN: Integer): Boolean;
+    // The per-model pass tail AnalyzeModuleOnly re-runs after the swap: the
+    // same sequence AnalyzeFile drives, narrowed to one model (the fixpoint
+    // passes included) so no other model's diagnostics are re-emitted.
+    procedure RunModulePasses(AId: Integer);
     procedure CrossResolve(AId: Integer);
     procedure CheckVisibility(AId, ANameNode, AMemMid, AMemSym: Integer);
     function StructEncloses(AMid, AOuter, AInner: Integer): Boolean;
@@ -647,6 +680,10 @@ type
     function ModelCount: Integer;
     function Model(AId: Integer): TPasSemaModel;
     function ModelFile(AId: Integer): string;
+    { The model id of an already-loaded FILE, or -1 (an unknown path and a
+      known-bad one both answer -1). Pure lookup — never loads anything, so a
+      host may call it on a finished project. }
+    function ModelIdOf(const APath: string): Integer;
     { Every unit name the project's search paths can reach — completion's
       uses-clause candidates beyond the analyzed closure. Delegates to the
       source manager's cached scan (see its contract). }
@@ -703,6 +740,31 @@ type
       units: without it a dependency only gets Phase 1 (no ExtRefMap at
       all). Returns the main unit's model id. }
     function AnalyzeProject(const AMainFile: string): Integer;
+    { Incremental plan, stage B — RE-ANALYZE ONE ALREADY-ANALYZED MODULE in
+      place, for the editor's keystroke path: re-parse APath (buffer overlay
+      included), check the guards, swap the model into the project and re-run
+      that model's own passes. Nothing else in the closure is touched.
+
+      True = the fast path ran and the project is consistent. FALSE = REFUSED,
+      and the project is UNCHANGED (nothing was swapped): the caller must fall
+      back to a full rebuild. Refusals are deliberately generous — an unknown
+      or not-yet-full path, a demoted model, a parse failure, a stream with
+      unanswered $IF questions (those are re-decided against the whole
+      generation by RunDeclaredPass, not reproducible per module), an
+      interface change of ANY kind, or an instance-table entry naming an
+      implementation-local symbol. A wrong fast path is plausible-but-wrong
+      navigation, the worst bug class here; a needless rebuild costs time.
+
+      What holds it together: every cross-model reference into this unit is a
+      (UnitId, Sym) pair naming an INTERFACE symbol, and guard 1 reproduces
+      the interface arena prefix exactly — so other models' RefMap/ExtRefMap/
+      SymTypeX stay valid and their diagnostics stay untouched. The new model
+      carries its own fresh Phase-1 diagnostics plus the cross diagnostics the
+      re-run appends.
+
+      Single-threaded, like every other driver entry point; do not call it
+      while an async session owns this project. }
+    function AnalyzeModuleOnly(const APath: string): Boolean;
     // Analyze every .pas/.dpr under a directory (indexed first).
     procedure AnalyzeDirectory(const ARoot: string);
     { Incremental analysis of ARoots' transitive uses closure, in two waves —
@@ -1196,6 +1258,12 @@ end;
 function TPasSemaProject.ModelFile(AId: Integer): string;
 begin
   Result := FFiles[AId];
+end;
+
+function TPasSemaProject.ModelIdOf(const APath: string): Integer;
+begin
+  if not FByPath.TryGetValue(LowerCase(TPath.GetFullPath(APath)), Result) then
+    Result := -1;
 end;
 
 function TPasSemaProject.SearchPathUnitNames: TArray<string>;
@@ -2973,31 +3041,50 @@ end;
   the Alcinoe package with nothing in the log pointing back. }
 procedure TPasSemaProject.InjectEncodingDiags(ACount: Integer);
 var
-  LIdx, LF: Integer;
+  LIdx: Integer;
+begin
+  for LIdx := 0 to ACount - 1 do
+    InjectEncodingDiagsOne(LIdx);
+end;
+
+// One model's share of the loop above — AnalyzeModuleOnly re-injects for the
+// module it re-parsed and must not touch any other model's diagnostics.
+procedure TPasSemaProject.InjectEncodingDiagsOne(AId: Integer);
+var
+  LF: Integer;
   LM: TPasSemaModel;
   LNote: string;
   LParts: TArray<string>;
 begin
-  for LIdx := 0 to ACount - 1 do
+  LM := FModels[AId];
+  if (LM = nil) or (LM.Tree.Source.FileNames = nil) then
+    Exit;
+  for LF := 0 to High(LM.Tree.Source.FileNames) do
   begin
-    LM := FModels[LIdx];
-    if (LM = nil) or (LM.Tree.Source.FileNames = nil) then
+    LNote := FSM.RecoveryNote(LM.Tree.Source.FileNames[LF]);
+    if LNote = '' then
       Continue;
-    for LF := 0 to High(LM.Tree.Source.FileNames) do
-    begin
-      LNote := FSM.RecoveryNote(LM.Tree.Source.FileNames[LF]);
-      if LNote = '' then
-        Continue;
-      LParts := LNote.Split(['|']);
-      if Length(LParts) < 2 then
-        Continue;
-      LM.AddDiag(MakeDiag('PPENC',
-        Format(SPPENC_Recovered, [LParts[0], LParts[1]]), 0, LF, 1, 1));
-    end;
+    LParts := LNote.Split(['|']);
+    if Length(LParts) < 2 then
+      Continue;
+    LM.AddDiag(MakeDiag('PPENC',
+      Format(SPPENC_Recovered, [LParts[0], LParts[1]]), 0, LF, 1, 1));
   end;
 end;
 
 procedure TPasSemaProject.InjectGuessedIfDiags(ACount: Integer);
+var
+  LIdx: Integer;
+begin
+  if not FReportGuessedIfs then
+    Exit;
+  for LIdx := 0 to ACount - 1 do
+    InjectGuessedIfDiagsOne(LIdx);
+end;
+
+// One model's share of the loop above — see InjectEncodingDiagsOne. Checks
+// the switch itself, so the single-module caller needs no guard of its own.
+procedure TPasSemaProject.InjectGuessedIfDiagsOne(AId: Integer);
 var
   LIdx, LDIdx, LQIdx: Integer;
   LM: TPasSemaModel;
@@ -3012,7 +3099,7 @@ var
 begin
   if not FReportGuessedIfs then
     Exit;
-  for LIdx := 0 to ACount - 1 do
+  LIdx := AId;   // the block below is the old loop body, verbatim
   begin
     LM := FModels[LIdx];
     LDeclQuery := nil;
@@ -10587,6 +10674,377 @@ begin
     ReleaseCrossWork;
   finally
     FinishDonor({AReport} False);   // AnalyzeFile carries no StageTimings
+  end;
+end;
+
+{ ---- single-module reanalysis (incremental plan, stage B) ----------------- }
+
+// Is AScope the implementation scope or nested inside it? Scope INDEX order
+// does not answer this: the implementation scope is created early (index 2 in
+// every unit measured), while an interface class's member scope gets a higher
+// index — the walk order and the nesting are two different things, and the
+// first cut of this guard got it wrong in exactly that way.
+function TPasSemaProject.ScopeIsImplSide(AModel: TPasSemaModel;
+  AScope, AImplScope: Integer): Boolean;
+var
+  LScope, LHops: Integer;
+begin
+  LScope := AScope;
+  LHops := 0;
+  while (LScope >= 0) and (LScope < AModel.Scopes.Count) and
+        (LHops <= AModel.Scopes.Count) do
+  begin
+    if LScope = AImplScope then
+      Exit(True);
+    LScope := AModel.Scopes[LScope].Parent;
+    Inc(LHops);
+  end;
+  Result := False;
+end;
+
+function TPasSemaProject.IntfPrefixBounds(AModel: TPasSemaModel;
+  out ASymN, AScopeN, AImplScope: Integer): Boolean;
+var
+  LIdx: Integer;
+begin
+  ASymN := 0;
+  AScopeN := 0;
+  // A model without an implementation scope (a program, or an implementation
+  // that declares nothing at all) has no boundary to compare against — refuse
+  // rather than invent one.
+  AImplScope := -1;
+  for LIdx := 0 to AModel.Scopes.Count - 1 do
+    if AModel.Scopes[LIdx].Kind = sckImplementation then
+    begin
+      AImplScope := LIdx;
+      Break;
+    end;
+  if AImplScope < 0 then
+  begin
+    FLastBoundaryNote := 'no implementation scope';
+    Exit(False);
+  end;
+  // The scope boundary: the first scope NESTED in the implementation one (the
+  // implementation scope itself is excluded — it exists from the start and is
+  // compared by nobody, its own members being implementation-local).
+  AScopeN := AModel.Scopes.Count;
+  for LIdx := 0 to AModel.Scopes.Count - 1 do
+    if (LIdx <> AImplScope) and
+       ScopeIsImplSide(AModel, LIdx, AImplScope) then
+    begin
+      AScopeN := LIdx;
+      Break;
+    end;
+  // ...and everything past it must be implementation-side too. An interface
+  // scope appearing after the boundary would shift the index space the other
+  // models' MemberScope references walk, uncompared.
+  for LIdx := AScopeN to AModel.Scopes.Count - 1 do
+    if (LIdx <> AImplScope) and
+       not ScopeIsImplSide(AModel, LIdx, AImplScope) then
+    begin
+      FLastBoundaryNote := Format('scope#%d interface-side after #%d',
+        [LIdx, AScopeN]);
+      Exit(False);
+    end;
+  // Same two steps over the symbol arena: the first implementation-side
+  // symbol, then the assertion that nothing interface-side follows it (the
+  // collect walk is interface-first today; this asserts it, not trusts it).
+  ASymN := AModel.SymCount;
+  for LIdx := 0 to AModel.SymCount - 1 do
+    if ScopeIsImplSide(AModel, AModel.Symbols[LIdx].Scope, AImplScope) then
+    begin
+      ASymN := LIdx;
+      Break;
+    end;
+  for LIdx := ASymN to AModel.SymCount - 1 do
+    if not ScopeIsImplSide(AModel, AModel.Symbols[LIdx].Scope, AImplScope) then
+    begin
+      FLastBoundaryNote := Format('sym#%d %s scope %d interface-side after #%d',
+        [LIdx, AModel.Symbols[LIdx].NameLower, AModel.Symbols[LIdx].Scope,
+         ASymN]);
+      Exit(False);
+    end;
+  Result := True;
+end;
+
+function TPasSemaProject.IntfPrefixSame(AOld, ANew: TPasSemaModel;
+  out ASymN: Integer; out AWhy: string): Boolean;
+var
+  LOldScopeN, LNewSymN, LNewScopeN, LIdx, LJdx: Integer;
+  LOldImpl, LNewImpl: Integer;
+  LA, LB: TSemaSymbol;
+  LSA, LSB: TSemaScope;
+begin
+  ASymN := 0;
+  AWhy := 'intf-prefix';
+  if not IntfPrefixBounds(AOld, ASymN, LOldScopeN, LOldImpl) then
+  begin
+    AWhy := 'no-clean-boundary-old[' + FLastBoundaryNote + ']';
+    Exit(False);
+  end;
+  if not IntfPrefixBounds(ANew, LNewSymN, LNewScopeN, LNewImpl) then
+  begin
+    AWhy := 'no-clean-boundary-new[' + FLastBoundaryNote + ']';
+    Exit(False);
+  end;
+  if (LOldImpl <> LNewImpl) or (ASymN <> LNewSymN) or
+     (LOldScopeN <> LNewScopeN) or
+     (AOld.InterfaceScope <> ANew.InterfaceScope) or
+     (AOld.SystemScope <> ANew.SystemScope) or
+     (AOld.UnitNameLower <> ANew.UnitNameLower) then
+  begin
+    AWhy := Format('intf-shape(sym %d/%d scope %d/%d)',
+      [ASymN, LNewSymN, LOldScopeN, LNewScopeN]);
+    Exit(False);
+  end;
+  // Symbols: everything that decides what a (UnitId, Sym) reference MEANS.
+  // DeclNode/TypeNode are deliberately NOT compared — they are indices into
+  // the new tree, and reading them from the new model is the correct answer.
+  for LIdx := 0 to ASymN - 1 do
+  begin
+    LA := AOld.Symbols[LIdx];
+    LB := ANew.Symbols[LIdx];
+    if (LA.Kind <> LB.Kind) or (LA.NameLower <> LB.NameLower) or
+       (LA.Name <> LB.Name) or (LA.Scope <> LB.Scope) or
+       (LA.MemberScope <> LB.MemberScope) or (LA.TypeSym <> LB.TypeSym) or
+       (LA.NextOverload <> LB.NextOverload) or
+       // sfExternalUnresolved excluded: ResolveUses CLEARS it on the model it
+       // resolved, so the analyzed old model and the raw Phase-1 new one
+       // legitimately differ there — and the re-run resolves the new one too.
+       ((LA.Flags - [sfExternalUnresolved]) <>
+        (LB.Flags - [sfExternalUnresolved])) or
+       (LA.Visibility <> LB.Visibility) or (LA.TypeCat <> LB.TypeCat) or
+       (LA.NumRank <> LB.NumRank) then
+    begin
+      AWhy := Format(
+        'intf-sym#%d %s/%s kind %d/%d scope %d/%d mem %d/%d type %d/%d ' +
+        'next %d/%d', [LIdx, LA.NameLower, LB.NameLower, Ord(LA.Kind),
+        Ord(LB.Kind), LA.Scope, LB.Scope, LA.MemberScope, LB.MemberScope,
+        LA.TypeSym, LB.TypeSym, LA.NextOverload, LB.NextOverload]);
+      Exit(False);
+    end;
+  end;
+  // Scopes: the index space cross-model lookups walk (MemberScope above is a
+  // scope index, and FindMemberX enumerates the scope's own order list).
+  for LIdx := 0 to LOldScopeN - 1 do
+  begin
+    // The implementation scope itself sits INSIDE this index range (it is
+    // created with the unit, before any interface class's member scope) and
+    // its own member list is implementation-local by definition — comparing
+    // it would refuse every body edit there is.
+    if LIdx = LOldImpl then
+      Continue;
+    LSA := AOld.Scopes[LIdx];
+    LSB := ANew.Scopes[LIdx];
+    if (LSA.Kind <> LSB.Kind) or (LSA.Parent <> LSB.Parent) or
+       (LSA.StructSym <> LSB.StructSym) or
+       (Length(LSA.Additional) <> Length(LSB.Additional)) or
+       (Length(LSA.Shadowing) <> Length(LSB.Shadowing)) then
+    begin
+      AWhy := 'intf-scope#' + IntToStr(LIdx);
+      Exit(False);
+    end;
+    AWhy := 'intf-scope-members#' + IntToStr(LIdx);
+    for LJdx := 0 to High(LSA.Additional) do
+      if LSA.Additional[LJdx] <> LSB.Additional[LJdx] then
+        Exit(False);
+    for LJdx := 0 to High(LSA.Shadowing) do
+      if LSA.Shadowing[LJdx] <> LSB.Shadowing[LJdx] then
+        Exit(False);
+    if (LSA.Symbols = nil) <> (LSB.Symbols = nil) then
+      Exit(False);
+    if LSA.Symbols <> nil then
+    begin
+      if LSA.Symbols.Count <> LSB.Symbols.Count then
+        Exit(False);
+      for LJdx := 0 to LSA.Symbols.Count - 1 do
+        if LSA.Symbols[LJdx] <> LSB.Symbols[LJdx] then
+          Exit(False);
+    end;
+  end;
+  Result := True;
+end;
+
+function TPasSemaProject.InstancesSafeFor(AId, ASymN: Integer): Boolean;
+var
+  LIdx, LArg: Integer;
+  LInst: TSemaInstance;
+begin
+  // The instance table OUTLIVES every pass (it is never cleared), so an entry
+  // whose generic — or any of its argument types — is an implementation-local
+  // symbol of this model would index a symbol the swap replaces.
+  for LIdx := 0 to InstanceCount - 1 do
+  begin
+    LInst := Instance(LIdx);
+    if (LInst.UnitId = AId) and (LInst.Sym >= ASymN) then
+      Exit(False);
+    for LArg := 0 to High(LInst.Args) do
+      if (LInst.Args[LArg].UnitId = AId) and (LInst.Args[LArg].Sym >= ASymN) then
+        Exit(False);
+  end;
+  Result := True;
+end;
+
+procedure TPasSemaProject.RunModulePasses(AId: Integer);
+const
+  MAX_ROUNDS = 8;
+var
+  LPend: TArray<TPasInhPending>;
+  LUnres: TArray<Integer>;
+  LIdx, LRound: Integer;
+  LEmit: Boolean;
+  LM: TPasSemaModel;
+begin
+  LM := FModels[AId];
+  ResolveUses(AId);
+  InjectEncodingDiagsOne(AId);
+  InjectGuessedIfDiagsOne(AId);
+  PrepareDeclWork(FModels.Count);
+  CrossResolve(AId);
+  // Wholesale by design — it resets the helper registry AND the cross-work
+  // arrays every run, and this module's helper declarations may have changed.
+  BuildHelperMap;
+  // RunDeclPass narrowed to one model: same fixpoint, same emit-on-the-last-
+  // round rule, but only this model's work list is walked and only its
+  // ExtRefMap is written. Other models' heritage bindings already stand from
+  // the full run and guard 1 keeps them true.
+  LRound := 0;
+  LEmit := False;
+  while True do
+  begin
+    Inc(LRound);
+    LPend := nil;
+    CrossResolveDecl(AId, LPend, LEmit);
+    for LIdx := 0 to High(LPend) do
+      LM.ExtRefMap.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].Ext);
+    if LEmit then
+      Break;
+    LEmit := (Length(LPend) = 0) or (LRound >= 3);
+  end;
+  SizeCrossWork(FModels.Count);
+  LPend := nil;
+  CrossResolveInherited(AId, LPend);
+  for LIdx := 0 to High(LPend) do
+  begin
+    LM.RefMap[LPend[LIdx].Node] := NIL_SYM;
+    LM.ExtRefMap.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].Ext);
+    if XValid(LPend[LIdx].X) then
+      LM.ExprTypeX.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].X);
+  end;
+  // RunWithPass, same narrowing (see the decl pass above).
+  LRound := 0;
+  LEmit := False;
+  while True do
+  begin
+    Inc(LRound);
+    LPend := nil;
+    LUnres := nil;
+    CrossResolveWith(AId, LPend, LEmit, LUnres);
+    for LIdx := 0 to High(LPend) do
+    begin
+      LM.RefMap[LPend[LIdx].Node] := NIL_SYM;
+      LM.ExtRefMap.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].Ext);
+      if XValid(LPend[LIdx].X) then
+        LM.ExprTypeX.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].X);
+    end;
+    if LEmit then
+      Break;
+    if Length(LPend) = 0 then
+    begin
+      for LIdx := 0 to High(LUnres) do
+        EmitE2003(LM, LUnres[LIdx]);
+      Break;
+    end;
+    if LRound >= MAX_ROUNDS then
+      LEmit := True;
+  end;
+  CheckCalls(AId);
+  CheckConstraints(AId);
+  CheckAttributes(AId);
+  // Only this model's declared types are new; every other model's SymTypeX
+  // stands from the full run (guard 1: its interface types are unchanged).
+  BindTypesX(AId);
+  CrossType(AId);
+  if FReportVisibility then
+    RunVisibilityPass(AId);
+  LM.TrimDiags;
+  ReleaseCrossWork;
+end;
+
+function TPasSemaProject.AnalyzeModuleOnly(const APath: string): Boolean;
+var
+  LFull, LKey: string;
+  LId, LSymN: Integer;
+  LOld, LNew: TPasSemaModel;
+  LPre: TPasPreprocessed;
+  LDiags: TArray<TPasParseDiag>;
+  LTree: TPasTree;
+  LSW: TStopwatch;
+  LWhy: string;
+
+  // Every refusal names itself in StageTimings — the fast path's whole value
+  // is how OFTEN it fires, so "it fell back" without a reason is unreadable.
+  function Refuse(const AReason: string): Boolean;
+  begin
+    FStageTimings := 'module=refused:' + AReason + ';';
+    Result := False;
+  end;
+
+begin
+  GuardNotReleased('AnalyzeModuleOnly');
+  // No `Result := False` here: every exit below goes through Refuse (which
+  // returns False and records why) or sets Result explicitly.
+  FStageTimings := '';
+  LSW := TStopwatch.StartNew;
+  LFull := TPath.GetFullPath(APath);
+  LKey := LowerCase(LFull);
+  if not FByPath.TryGetValue(LKey, LId) or (LId < 0) then
+    Exit(Refuse('unknown-file'));
+  if (LId >= FStatus.Count) or (FStatus[LId] < msFullReady) then
+    Exit(Refuse('not-full'));
+  LOld := FModels[LId];
+  if (LOld = nil) or LOld.Demoted then
+    Exit(Refuse('demoted'));
+  LNew := nil;
+  try
+    FPP.OnDeclared := SeedDeclaredQuery();
+    LPre := FPP.Process(LFull);
+    LTree := TPasParser.ParseFile(LPre, LDiags);
+    LNew := TPasSemaResolver.Analyze(LTree, False, FPlatform);
+  except
+    // Unparsable now: the full path records that as a known-bad file with a
+    // negative-cache entry and a changed closure — a rebuild's job, not ours.
+    FreeAndNil(LNew);
+    Exit(Refuse('parse-failed'));
+  end;
+  try
+    // A stream with unanswered $IF questions is re-decided against the WHOLE
+    // generation by RunDeclaredPass (which may pull in new units) — the same
+    // exclusion the parse donor makes, for the same reason.
+    if (Length(LNew.Tree.Source.UnresolvedDeclared) > 0) or
+       (Length(LNew.Tree.Source.UnresolvedSymbols) > 0) then
+      Exit(Refuse('unresolved-if'));
+    if not IntfPrefixSame(LOld, LNew, LSymN, LWhy) then
+      Exit(Refuse(LWhy));
+    if not InstancesSafeFor(LId, LSymN) then
+      Exit(Refuse('instance-impl-sym'));
+    FStageTimings := Format('parse=%d;', [LSW.ElapsedMilliseconds]);
+    LSW := TStopwatch.StartNew;
+    // Committed: the owning list frees the old model. Nothing outside FModels
+    // holds a model reference across a call (ids, not pointers, are the
+    // currency), and the per-model pass scratch is rebuilt below.
+    FModels[LId] := LNew;
+    LNew := nil;
+    if LId <= High(FWorkBuilt) then
+      FWorkBuilt[LId] := False;
+    RunModulePasses(LId);
+    SetModuleStatus(LId, msCrossReady);
+    FStageTimings := FStageTimings +
+      Format('passes=%d;module=1;', [LSW.ElapsedMilliseconds]);
+    Result := True;
+  finally
+    // Refused: the project was never touched, and the fresh model is ours.
+    LNew.Free;
   end;
 end;
 

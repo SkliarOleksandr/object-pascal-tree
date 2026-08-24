@@ -378,6 +378,22 @@ copy.
 
 Still open, roughly in the order we're tackling it:
 
+- **Incremental reanalysis — BOTH HALVES NOW SHIPPED (0.9.0); this entry is
+  kept for the reasoning, and the sketch below differs from what was built.**
+  A is `TPasSemaProject.AdoptParseDonor` — reshaped from the standalone cache
+  sketched under A into a **donor project** (the host's still-alive last-good
+  project), which needs no new lifetime and pins no memory: 192/200 parses
+  reused on the demo closure, interface+full waves 1894 → 1326 ms. B is
+  `TPasSemaProject.AnalyzeModuleOnly` plus `TPasAsyncSession.CreateForModule`:
+  a body edit costs **19–33 ms against a 3400 ms rebuild** on the demo
+  closure, an interface edit is refused and the host rebuilds. The guards are
+  the ones described below, with one correction the harness forced: interface
+  membership is decided by walking a scope's PARENT chain, not by comparing
+  scope indices — the implementation scope is created early (index 2), while
+  an interface class's member scope gets a much higher one. The differential
+  harness is `tools\PasTreeDiffHarness.dpr` (`-module` for B, `-selftest` as
+  the negative control).
+
 - **Incremental reanalysis.** Every analysis today rebuilds the whole closure,
   and the LSP server (`c:\Repos\pastree-lsp`) has made the cost
   concrete: on the demo's own 197-unit closure a rebuild is **5.3 s**, and the

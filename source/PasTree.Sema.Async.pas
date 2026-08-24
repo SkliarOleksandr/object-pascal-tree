@@ -55,6 +55,11 @@ type
     FProgress: TPasStagedProgress;
     FError: string;                 // worker exception, if any ('' = none)
     FStarted: Boolean;
+    // Single-module mode (CreateForModule): the worker calls
+    // AnalyzeModuleOnly for FModulePath instead of a staged build.
+    FModuleMode: Boolean;
+    FModulePath: string;
+    FModuleAccepted: Boolean;       // written before FDoneFlag, read after
     procedure RunBody;
   public
     { Creates the session and its (empty) project. Call SetBuffer for any
@@ -63,6 +68,20 @@ type
       to analyze first (the open editor module + its direct uses). }
     constructor Create(APlatform: TPasPlatform;
       const ASearchPaths, AExtraDefines, ARoots, APriority: TArray<string>);
+    { SINGLE-MODULE mode (incremental plan, stage B), the keystroke path: takes
+      OWNERSHIP of AProject — the host's last-good, fully analyzed project —
+      and, on Start, re-analyzes APath in place via
+      TPasSemaProject.AnalyzeModuleOnly. Set the edited buffer with SetBuffer
+      before Start, exactly like a full session.
+
+      After IsDone, ModuleAccepted says whether the fast path ran. Either way
+      the project comes back through TakeProject UNCHANGED-or-updated and
+      still consistent: on a refusal (interface change, and every other case
+      AnalyzeModuleOnly lists) the host takes it back untouched and starts an
+      ordinary session over it, passing it as the parse donor. No progress is
+      reported — the whole point is that there are no stages to report. }
+    constructor CreateForModule(AProject: TPasSemaProject;
+      const APath: string);
     { Cancels the worker, waits for it to drain, then frees the project if it
       was never taken. Safe to call at any time. }
     destructor Destroy; override;
@@ -117,6 +136,11 @@ type
     function TakeProject: TPasSemaProject;
     { The model id of ARoots[0] in the built project (valid once done). }
     function MainResultId: Integer;
+    { CreateForModule sessions only: did the single-module fast path run?
+      Valid once IsDone. False = refused, the project is untouched and the
+      host must rebuild (see CreateForModule). Always False for a normal
+      session. }
+    function ModuleAccepted: Boolean;
   end;
 
 implementation
@@ -143,6 +167,24 @@ begin
   FLock := TCriticalSection.Create;
   FProgress := Default(TPasStagedProgress);
   FStarted := False;
+end;
+
+constructor TPasAsyncSession.CreateForModule(AProject: TPasSemaProject;
+  const APath: string);
+begin
+  inherited Create;
+  FProject := AProject;   // ownership transferred; TakeProject hands it back
+  FRoots := nil;
+  FPriority := nil;
+  FCancelFlag := 0;
+  FDoneFlag := 0;
+  FMainResultId := -1;
+  FLock := TCriticalSection.Create;
+  FProgress := Default(TPasStagedProgress);
+  FStarted := False;
+  FModuleMode := True;
+  FModulePath := APath;
+  FModuleAccepted := False;
 end;
 
 destructor TPasAsyncSession.Destroy;
@@ -198,6 +240,15 @@ procedure TPasAsyncSession.RunBody;
 begin
   try
     try
+      if FModuleMode then
+      begin
+        // Cancellation is not offered here: the call is milliseconds, and a
+        // half-applied module swap has no meaning (it is one commit point).
+        FModuleAccepted := FProject.AnalyzeModuleOnly(FModulePath);
+        if FModuleAccepted then
+          FMainResultId := FProject.ModelIdOf(FModulePath);
+        Exit;
+      end;
       FMainResultId := FProject.AnalyzeStaged(FRoots, FPriority,
         function: Boolean
         begin
@@ -286,6 +337,11 @@ begin
   end
   else
     Result := nil;
+end;
+
+function TPasAsyncSession.ModuleAccepted: Boolean;
+begin
+  Result := FModuleAccepted;
 end;
 
 function TPasAsyncSession.MainResultId: Integer;

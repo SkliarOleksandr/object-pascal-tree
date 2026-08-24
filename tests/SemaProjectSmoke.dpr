@@ -5146,6 +5146,81 @@ begin
     GProj.Free;
   end;
 
+  // ---- Single-module reanalysis (incremental plan, stage B). A BODY edit
+  // must be accepted and change only that module's diagnostics; an INTERFACE
+  // edit must be refused with the project left untouched; an unknown file
+  // must be refused. The differential harness is the real evidence (whole
+  // closures, RefMap/ExtRefMap compared per step) — this is the unit-level
+  // gate that the contract holds at all. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_module');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitMA.pas'),
+    'unit UnitMA;'#10'interface'#10 +
+    'type TM = class'#10'  procedure M;'#10'end;'#10 +
+    'const MV = 3;'#10 +
+    'implementation'#10 +
+    'procedure TM.M; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitMB.pas'),
+    'unit UnitMB;'#10'interface'#10'uses UnitMA;'#10 +
+    'var GM: TM;'#10'implementation'#10 +
+    'procedure PB;'#10'begin'#10'  GM.M;'#10 +
+    '  MissingName := MV;'#10 +
+    'end;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    Ok('module: the baseline run reports the fixture E2003',
+      DiagCount(ModelByName('unitmb'), 'E2003') = 1);
+    Ok('module: an unknown file is refused',
+      not GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'NoSuchUnit.pas')));
+
+    // A BODY edit (buffer overlay — the editor's real path): accepted, and
+    // this module's diagnostics follow the edit.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitMB.pas'),
+      'unit UnitMB;'#10'interface'#10'uses UnitMA;'#10 +
+      'var GM: TM;'#10'implementation'#10 +
+      'procedure PB;'#10'begin'#10'  GM.M;'#10 +
+      '  RenamedMissing := MV;'#10 +
+      'end;'#10'end.'#10, 7);
+    Ok('module: a body edit is accepted',
+      GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitMB.pas')));
+    Ok('module: the accepted run reports itself in StageTimings',
+      Pos('module=1;', GProj.StageTimings) > 0);
+    Ok('module: the re-analyzed module''s diagnostics follow the edit',
+      DiagHasText(ModelByName('unitmb'), 'E2003', 'RenamedMissing') and
+      not DiagHasText(ModelByName('unitmb'), 'E2003', 'MissingName'));
+    Ok('module: exactly one E2003 remains (no duplicated re-runs)',
+      DiagCount(ModelByName('unitmb'), 'E2003') = 1);
+    Ok('module: the untouched module is not re-diagnosed',
+      Length(ModelByName('unitma').Diags) = 0);
+    Ok('module: cross-unit references still resolve after the swap',
+      CrossRefTo(ModelByName('unitmb'), 'M', 'M'));
+
+    // An INTERFACE edit must be REFUSED — and refused BEFORE anything is
+    // swapped, so the project still answers from the previous generation.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitMB.pas'),
+      'unit UnitMB;'#10'interface'#10'uses UnitMA;'#10 +
+      'var GM: TM;'#10'procedure NewlyExported;'#10'implementation'#10 +
+      'procedure NewlyExported; begin end;'#10 +
+      'procedure PB;'#10'begin'#10'  GM.M;'#10 +
+      '  RenamedMissing := MV;'#10 +
+      'end;'#10'end.'#10, 8);
+    Ok('module: an interface edit is refused',
+      not GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitMB.pas')));
+    Ok('module: the refusal names its reason',
+      Pos('module=refused:', GProj.StageTimings) > 0);
+    Ok('module: a refused call leaves the project untouched',
+      DiagHasText(ModelByName('unitmb'), 'E2003', 'RenamedMissing') and
+      (ModelByName('unitmb').FindLocal(
+         ModelByName('unitmb').InterfaceScope, 'newlyexported') = NIL_SYM));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
 end.

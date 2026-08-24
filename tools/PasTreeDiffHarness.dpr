@@ -9,12 +9,22 @@ program PasTreeDiffHarness;
 
   Usage:
     PasTreeDiffHarness <root.dpr> [-p:<platform>] [-L<dir>]...
-                       [-samples:<N>] [-script:<file>]
+                       [-samples:<N>] [-script:<file>] [-module]
 
-  The INCREMENTAL side today is the stage-A donor chain: rebuild k adopts
-  rebuild k-1 as parse donor, exactly the LSP's intended usage. When stage B's
-  AnalyzeModuleOnly lands it slots in here as a second mode, and the (a)/(b)
-  edit split below becomes the guard PASS/FAIL expectation the plan states.
+  Two incremental MODES:
+    default  — the stage-A donor CHAIN: rebuild k adopts rebuild k-1 as parse
+               donor, exactly the LSP's intended usage.
+    -module  — stage B: ONE project is kept alive across the whole sequence
+               and each edit goes through AnalyzeModuleOnly (buffer overlay,
+               single-module re-analysis in place). A REFUSAL falls back to a
+               donor rebuild, exactly as a host must, and is reported as such.
+               The (a)/(b) edit split below is then the guard expectation: a
+               body edit must be ACCEPTED, an interface edit must be REFUSED.
+               An accepted interface edit is a hard failure (guard 1 missed a
+               change every other model can see); an unexpected fallback on a
+               body edit is only a WARNING — refusing is always safe — but it
+               is counted and summarized, because a fast path that never fires
+               is not a fast path.
 
   Edits are applied as BUFFER OVERLAYS (SetBuffer), never to the disk: both
   pipelines read byte-identical text through the one loader, so even an edit
@@ -80,6 +90,9 @@ var
   GVersion: Integer;                      // bumped per applied edit
   GFailedSteps: Integer;
   GSelfTest: Boolean;
+  GModuleMode: Boolean;       // -module: AnalyzeModuleOnly instead of the chain
+  GAccepted: Integer;         // module mode: steps the guards accepted
+  GFellBack: Integer;         // module mode: body edits that fell back anyway
   // -selftest state for the CURRENT step: the edited file's pre-edit text,
   // fed to the incremental side only. '' = no divergence this step.
   GStaleKey, GStaleText: string;
@@ -431,6 +444,9 @@ begin
   GPlatform := pfWin64;
   GSamples := 5;
   GSelfTest := False;
+  GModuleMode := False;
+  GAccepted := 0;
+  GFellBack := 0;
   for GIdx := 1 to ParamCount do
     if ParamStr(GIdx).StartsWith('-p:', True) then
     begin
@@ -447,6 +463,8 @@ begin
       GScriptFile := Copy(ParamStr(GIdx), 9, MaxInt)
     else if SameText(ParamStr(GIdx), '-selftest') then
       GSelfTest := True
+    else if SameText(ParamStr(GIdx), '-module') then
+      GModuleMode := True
     else if ParamStr(GIdx).StartsWith('-L', True) then
       GPaths := GPaths + [Copy(ParamStr(GIdx), 3, MaxInt)]
     else if GRoot = '' then
@@ -454,7 +472,7 @@ begin
   if (GRoot = '') or not TFile.Exists(GRoot) then
   begin
     Writeln(ErrOutput, 'usage: PasTreeDiffHarness <root.dpr> [-p:<platform>] '
-      + '[-L<dir>]... [-samples:<N>] [-script:<file>]');
+      + '[-L<dir>]... [-samples:<N>] [-script:<file>] [-module] [-selftest]');
     Halt(2);
   end;
   GPaths := GPaths + [TPath.GetDirectoryName(GRoot)];
@@ -516,11 +534,41 @@ begin
     end;
 
     LSW := TStopwatch.StartNew;
-    // The incremental (donor-chain) side; under -selftest it analyzes a
-    // DIFFERENT project on edit steps, which the comparator must catch.
-    LNext := AnalyzeOne(LCand, GStaleKey <> '');
-    LCand.Free;                        // donor consumed; chain moves on
-    LCand := LNext;
+    var LHow := 'chain';
+    if GModuleMode and (GIdx > 0) then
+    begin
+      // Stage B: the SAME project takes the edit as a buffer overlay and
+      // re-analyzes the one module. Under -selftest the overlay is the
+      // PRE-edit text, so the module the comparator sees is genuinely stale.
+      if GStaleKey <> '' then
+        LCand.SetBuffer(LStep.Path, GStaleText, GVersion)
+      else
+        LCand.SetBuffer(LStep.Path, GTexts[LKey], GVersion);
+      if LCand.AnalyzeModuleOnly(LStep.Path) then
+      begin
+        LHow := 'module';
+        Inc(GAccepted);
+      end
+      else
+      begin
+        // Refused — a host must rebuild. The donor chain does that here.
+        // AnalyzeModuleOnly names the reason in StageTimings; carry it into
+        // the step line, because WHY a fast path did not fire is the report.
+        LHow := 'fallback(' + LCand.StageTimings + ')';
+        LNext := AnalyzeOne(LCand, GStaleKey <> '');
+        LCand.Free;
+        LCand := LNext;
+      end;
+    end
+    else
+    begin
+      // The default incremental (donor-chain) side; under -selftest it
+      // analyzes a DIFFERENT project on edit steps, which the comparator
+      // must catch.
+      LNext := AnalyzeOne(LCand, GStaleKey <> '');
+      LCand.Free;                      // donor consumed; chain moves on
+      LCand := LNext;
+    end;
     var LCandMs := LSW.ElapsedMilliseconds;
 
     LSW := TStopwatch.StartNew;
@@ -529,6 +577,19 @@ begin
 
     LOk := CompareStep(LTruth, LCand);
     LTruth.Free;
+    // Module mode keeps ONE project across the sequence, so a -selftest step's
+    // deliberately stale overlay would poison every later step. Heal it right
+    // after the compare: the divergence has served its purpose.
+    if GModuleMode and (GStaleKey <> '') then
+    begin
+      LCand.SetBuffer(LStep.Path, GTexts[LKey], GVersion);
+      if not LCand.AnalyzeModuleOnly(LStep.Path) then
+      begin
+        LNext := AnalyzeOne(LCand);
+        LCand.Free;
+        LCand := LNext;
+      end;
+    end;
     var LVerdict: string;
     if GStaleKey <> '' then
     begin
@@ -549,8 +610,24 @@ begin
       LVerdict := 'OK'
     else
       LVerdict := 'MISMATCH';
-    Writeln(ErrOutput, Format('step %d (%s): %s  inc=%d ms full=%d ms  %s',
-      [GIdx, LLabel, LVerdict, LCandMs, LTruthMs, DonorStats(LCand)]));
+    // Guard expectations (module mode, real edits only): a body edit must be
+    // accepted, an interface edit must be refused. Only the second direction
+    // is a failure — see the header.
+    if GModuleMode and (GIdx > 0) and (GStaleKey = '') then
+    begin
+      if (LStep.Kind = ekIntf) and (LHow = 'module') then
+      begin
+        LVerdict := LVerdict + ' + GUARD FAILURE (interface edit accepted)';
+        Inc(GFailedSteps);
+      end
+      else if (LStep.Kind = ekBody) and (LHow <> 'module') then
+      begin
+        LVerdict := LVerdict + ' (unexpected fallback)';
+        Inc(GFellBack);
+      end;
+    end;
+    Writeln(ErrOutput, Format('step %d (%s): %s  %s inc=%d ms full=%d ms  %s',
+      [GIdx, LLabel, LVerdict, LHow, LCandMs, LTruthMs, DonorStats(LCand)]));
   end;
   LCand.Free;
   GTexts.Free;
@@ -570,4 +647,8 @@ begin
     Writeln(ErrOutput, 'self-test passed: every divergence was caught')
   else
     Writeln(ErrOutput, 'all steps identical');
+  if GModuleMode then
+    Writeln(ErrOutput, Format(
+      'module mode: %d step(s) taken by AnalyzeModuleOnly, %d body edit(s) ' +
+      'fell back', [GAccepted, GFellBack]));
 end.
