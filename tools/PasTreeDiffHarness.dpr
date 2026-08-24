@@ -90,6 +90,7 @@ var
   GVersion: Integer;                      // bumped per applied edit
   GFailedSteps: Integer;
   GSelfTest: Boolean;
+  GSingleThread: Boolean;     // -st: both sides run the passes sequentially
   GModuleMode: Boolean;       // -module: AnalyzeModuleOnly instead of the chain
   GAccepted: Integer;         // module mode: steps the guards accepted
   GFellBack: Integer;         // module mode: body edits that fell back anyway
@@ -104,6 +105,7 @@ var
   LPair: TPair<string, string>;
 begin
   Result := TPasSemaProject.Create(GPlatform, GPaths, []);
+  Result.SingleThreaded := GSingleThread;
   Result.SetNamespaces(PasDefaultNamespaces(GPlatform));
   for var LDef in PasDefaultUnitAliases(GPlatform) do
     Result.AddUnitAlias(LDef.Alias, LDef.UnitName);
@@ -444,6 +446,7 @@ begin
   GPlatform := pfWin64;
   GSamples := 5;
   GSelfTest := False;
+  GSingleThread := False;
   GModuleMode := False;
   GAccepted := 0;
   GFellBack := 0;
@@ -463,6 +466,8 @@ begin
       GScriptFile := Copy(ParamStr(GIdx), 9, MaxInt)
     else if SameText(ParamStr(GIdx), '-selftest') then
       GSelfTest := True
+    else if SameText(ParamStr(GIdx), '-st') then
+      GSingleThread := True
     else if SameText(ParamStr(GIdx), '-module') then
       GModuleMode := True
     else if ParamStr(GIdx).StartsWith('-L', True) then
