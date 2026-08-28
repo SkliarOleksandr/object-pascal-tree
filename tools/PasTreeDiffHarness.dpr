@@ -92,6 +92,10 @@ var
   GFailedSteps: Integer;
   GSelfTest: Boolean;
   GSingleThread: Boolean;     // -st: both sides run the passes sequentially
+  // -redolimit:N - ModuleRedoLimit for both sides (0 = leave the default).
+  // Negative means NO ceiling: take any blast radius, which is how the
+  // crossover against a full rebuild gets measured instead of guessed.
+  GRedoLimit: Integer;
   GModuleMode: Boolean;       // -module: AnalyzeModuleOnly instead of the chain
   GAccepted: Integer;         // module mode: steps the guards accepted
   GFellBack: Integer;         // module mode: body edits that fell back anyway
@@ -108,6 +112,8 @@ var
 begin
   Result := TPasSemaProject.Create(GPlatform, GPaths, []);
   Result.SingleThreaded := GSingleThread;
+  if GRedoLimit <> 0 then
+    Result.ModuleRedoLimit := GRedoLimit;
   Result.SetNamespaces(PasDefaultNamespaces(GPlatform));
   for var LDef in PasDefaultUnitAliases(GPlatform) do
     Result.AddUnitAlias(LDef.Alias, LDef.UnitName);
@@ -449,6 +455,7 @@ begin
   GSamples := 5;
   GSelfTest := False;
   GSingleThread := False;
+  GRedoLimit := 0;
   GModuleMode := False;
   GAccepted := 0;
   GFellBack := 0;
@@ -469,6 +476,8 @@ begin
       GScriptFile := Copy(ParamStr(GIdx), 9, MaxInt)
     else if SameText(ParamStr(GIdx), '-selftest') then
       GSelfTest := True
+    else if ParamStr(GIdx).StartsWith('-redolimit:', True) then
+      GRedoLimit := StrToIntDef(Copy(ParamStr(GIdx), 12, MaxInt), 0)
     else if SameText(ParamStr(GIdx), '-st') then
       GSingleThread := True
     else if SameText(ParamStr(GIdx), '-module') then
@@ -554,7 +563,10 @@ begin
         LCand.SetBuffer(LStep.Path, GTexts[LKey], GVersion);
       if LCand.AnalyzeModuleOnly(LStep.Path) then
       begin
-        LHow := 'module';
+        // Carry the accepted run's own report too: it names the redo SIZE
+        // (module=N) and whether the interface moved, which is the number to
+        // pick ModuleRedoLimit from.
+        LHow := 'module(' + LCand.StageTimings + ')';
         Inc(GAccepted);
       end
       else
@@ -628,9 +640,9 @@ begin
       // their own references), a shifted symbol index harms nobody. What
       // decides correctness is the comparison against the full pipeline,
       // which every step runs anyway - so this is counted, not judged.
-      if (LStep.Kind = ekIntf) and (LHow = 'module') then
+      if (LStep.Kind = ekIntf) and LHow.StartsWith('module') then
         Inc(GAcceptedIntf)
-      else if (LStep.Kind = ekBody) and (LHow <> 'module') then
+      else if (LStep.Kind = ekBody) and not LHow.StartsWith('module') then
       begin
         LVerdict := LVerdict + ' (unexpected fallback)';
         Inc(GFellBack);

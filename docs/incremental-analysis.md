@@ -89,7 +89,8 @@ needed.
 - the walk continues THROUGH a unit only if it imported in its INTERFACE
   section - such a unit may republish types from the edited one. An
   implementation-only importer cannot, so it is a leaf;
-- over `MODULE_REDO_LIMIT` (24) models the call refuses and the host rebuilds.
+- over `ModuleRedoLimit` models (128 by default, a MEASURED value - see the
+  open list) the call refuses and the host rebuilds.
 
 The interface/implementation distinction needs no new data: the unit-reference
 symbol's scope is either the interface one or the implementation one.
@@ -134,7 +135,7 @@ from a slow analyzer.
 | `new-dependency(X)` | an import resolves to a file the closure never loaded |
 | `no-clean-boundary-*` | no implementation scope, or the arena is not split cleanly at it |
 | `intf-sym#N`, `intf-scope#N` | the interface prefix moved in a way the redo cannot express |
-| `too-many-consumers` | radius over the limit |
+| `too-many-consumers` | radius over `ModuleRedoLimit` (128; 0 or less lifts the ceiling) |
 | `instance-impl-sym`, `instance-into-changed-intf` | the instance table points into the part being renumbered |
 
 ### Driving it from a host
@@ -221,10 +222,14 @@ rebuilds over EVERY model on every module run, and `PrepareDeclWork` /
 it incremental should take the module path into the tens of milliseconds and
 helps every edit. Nothing else here is worth as much.
 
-**B. `MODULE_REDO_LIMIT` = 24 is a guess.** Given A the cost is nearly flat in
-the size of the redo set, so the crossover against a rebuild is probably much
-higher. Measure it with the harness and raise it; that is what would make the
-fast path cover widely-used units, which is where it refuses today.
+**B. DONE - the radius ceiling was measured and raised, 24 -> 128.** It is now
+the `ModuleRedoLimit` property (0 or less = no ceiling), and the harness can
+override it per run with `-redolimit:N`. What the measurement said on the
+3676-unit closure: a radius of 28 models costs 1.8-2.1 s against a 29 s
+rebuild - about 300 ms fixed plus ~57 ms per model - so break-even sits near
+500 models, and the old 24 was refusing a case 15x cheaper than its own
+fallback. 128 keeps the worst case near 7 s; a host that knows its closure can
+tune the property.
 
 **C. The instance table forces a refusal on interface changes.** Fixable by
 matching old declarations to new ones (name, kind, nesting), repointing the

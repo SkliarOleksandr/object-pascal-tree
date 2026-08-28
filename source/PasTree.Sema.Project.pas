@@ -149,6 +149,10 @@ type
     FStatsKeys: TDictionary<string, Byte>;        // pass|asker|base|name
     FStatsKeysNoAsker: TDictionary<string, Byte>; // pass|base|name
 {$ENDIF}
+    { How many models an interface change may drag into the single-module redo
+      before a plain rebuild is the better answer - see the ModuleRedoLimit
+      property. }
+    FModuleRedoLimit: Integer;
     FLastBoundaryNote: string;
     FPP: TPasPreprocessor;
     // Reusable preprocessors for the parallel load/declared passes: Process
@@ -562,6 +566,20 @@ type
       default. What it covers and what it does not is in the README. }
     property ReportVisibility: Boolean read FReportVisibility
       write FReportVisibility;
+    { Ceiling on the blast radius AnalyzeModuleOnly will take on: an interface
+      change re-runs Phase 1 and the cross passes for every model that could
+      see it, and past some size a plain rebuild is simply cheaper. Default
+      128; 0 or less means NO ceiling (take any radius), which is a
+      measurement setting more than a production one.
+
+      MEASURED on a 3676-unit closure: a radius of 28 costs 1.8-2.1 s against
+      a 29 s rebuild - roughly 300 ms fixed plus ~57 ms per model - so the
+      break-even sits near 500 models. 128 keeps the worst case around 7 s,
+      still several times cheaper than rebuilding, without letting one edit
+      quietly turn into a closure-sized job. The first cut of this was 24,
+      which refused a 28-model radius that was 15x cheaper than its fallback. }
+    property ModuleRedoLimit: Integer read FModuleRedoLimit
+      write FModuleRedoLimit;
     { Editor-host buffer override: analysis reads AText for APath instead of
       the file on disk (for unsaved editor content). Call BEFORE AnalyzeFile/
       AnalyzeDirectory - LoadFile reads at analysis time. AVersion is the
@@ -1063,6 +1081,7 @@ begin
   FStatsKeysNoAsker := TDictionary<string, Byte>.Create;
   FStatsPass := 'other';
 {$ENDIF}
+  FModuleRedoLimit := 128;
   FSystemUnitId := -1;
   FSystemUnitResolved := False;
   FSysInitUnitId := -1;
@@ -11123,7 +11142,8 @@ begin
       LSeen[LIdx] := True;
       AIds := AIds + [LIdx];
       LExpand := LExpand + [LPropagates];
-      if Length(AIds) > ALimit then
+      // ALimit <= 0 means no ceiling - take any radius (a measurement mode).
+      if (ALimit > 0) and (Length(AIds) > ALimit) then
       begin
         AIds := nil;
         Exit(False);
@@ -11255,13 +11275,6 @@ begin
 end;
 
 function TPasSemaProject.AnalyzeModuleOnly(const APath: string): Boolean;
-const
-  { How many models an interface change may drag into the redo before a plain
-    rebuild is the better answer. Each one costs Phase 1 (no parse) plus its
-    cross passes, against a rebuild's whole closure - so the crossover is not
-    tight, and the point of the cap is to stay predictable, not to squeeze the
-    last unit out of it. }
-  MODULE_REDO_LIMIT = 24;
 var
   LFull, LKey: string;
   LId, LSymN, LScopeN, LImplScope, LIdx: Integer;
@@ -11331,7 +11344,7 @@ begin
       // Refuse the shapes the redo cannot express, BEFORE touching anything.
       if not IntfPrefixBounds(LNew, LSymN, LScopeN, LImplScope) then
         Exit(Refuse('no-clean-boundary-new[' + FLastBoundaryNote + ']'));
-      if not AffectedConsumers(LId, MODULE_REDO_LIMIT, LIds) then
+      if not AffectedConsumers(LId, FModuleRedoLimit, LIds) then
         Exit(Refuse('too-many-consumers'));
       for LIdx := 1 to High(LIds) do
         if FModels[LIds[LIdx]].Demoted then
