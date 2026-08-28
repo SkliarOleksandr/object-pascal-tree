@@ -148,6 +148,18 @@ type
     cbConfig: TComboBox;       // build configuration (Debug/Release/...)
     cbHighlighter: TComboBox;
     cbThreading: TComboBox;    // background-analysis "phase done/total"
+    { Incremental reanalysis (PasTree 0.9.0), ON by default. Checked, an edit
+      first tries TPasAsyncSession.CreateForModule — re-parse and re-analyze
+      just the edited unit in place, milliseconds instead of a closure
+      rebuild — and any refusal falls back to an ordinary rebuild that adopts
+      the current project as a PARSE DONOR. Unchecked, the demo behaves
+      exactly as it did before: every edit rebuilds the closure from scratch.
+
+      It also turns DemoteClosedUnits OFF, and that is the real trade this
+      switch exposes: a demoted unit has no text layer, so it is a donor MISS
+      and a fast-path refusal. Memory against edit latency, the dial the LSP
+      host has to set too. }
+    chkIncremental: TCheckBox;
     cbHighlightColor: TColorBox; // background color for "same identifier" highlight
     splLeft: TSplitter;
     vstFiles: TVirtualStringTree;
@@ -311,6 +323,17 @@ type
     FAsyncSession: TPasAsyncSession;
     FAsyncTimer: TTimer;
     FAsyncLoud: Boolean;           // true = report diagnostics + populate views
+    { The in-flight session is a SINGLE-MODULE reanalysis (CreateForModule):
+      it owns FSemaProject rather than building a new one, so the swap in
+      AsyncTimerTick takes the same project back instead of replacing it, and
+      a refusal starts an ordinary rebuild. See chkIncremental. }
+    FAsyncModule: Boolean;
+    FAsyncModulePath: string;
+    { Files edited since the last COMPLETED analysis. The fast path applies to
+      exactly one changed unit; two dirty tabs go straight to a rebuild (the
+      library offers no multi-module entry point, and looping the single-module
+      one would need its own guard story). }
+    FDirtyFiles: TStringList;
     FAsyncStart: TStopwatch;       // wall-clock of the in-flight async build
     FLoadingFile: Boolean;         // suppresses OnChange during programmatic load
     // Guards every FNav/FSemaProject READ (ResolveAt, ActiveRoutineTarget)
@@ -442,6 +465,12 @@ type
     procedure RunParse;
     procedure ReportProjectResult(AElapsedMs: Int64);
     procedure StartAsyncAnalyze(const APriorityFile: string; ALoud: Boolean);
+    { The fast path: hand FSemaProject to a single-module session for APath.
+      False = not applicable (switch off, no project, path not in the analyzed
+      closure, more than one dirty tab, a build already running) and the
+      caller must do an ordinary rebuild. True only means the session STARTED
+      — the guards may still refuse, which AsyncTimerTick handles. }
+    function TryModuleReanalyze(const APath: string): Boolean;
     procedure CancelAsync;
     procedure AsyncTimerTick(Sender: TObject);
     procedure EditorChange(Sender: TObject);
@@ -1596,6 +1625,7 @@ begin
   Caption := 'PasTree Demo v' + PasTreeVersion;
   FFileList := TStringList.Create;
   FOpenFiles := TStringList.Create;
+  FDirtyFiles := TStringList.Create;   // edits since the last analysis
   FMsgLog := TList<TPasMsgRow>.Create;
   FMsgVisible := TList<Integer>.Create;
   FNavHistory := TNavHistory.Create;
@@ -1648,6 +1678,7 @@ begin
   FMsgVisible.Free;
   FMsgLog.Free;
   FOpenFiles.Free;
+  FDirtyFiles.Free;
   FFileList.Free;
 end;
 
@@ -3033,6 +3064,7 @@ begin
   FLastSearchPaths := LSearchPaths;   // see the field
   FLastDefines := LDefines;
   InvalidateComplPipeline;            // config may have changed
+  FAsyncModule := False;
   FAsyncSession := TPasAsyncSession.Create(LPlatform, LSearchPaths, LDefines,
     LRoots, LPriority);
   FAsyncSession.SetSingleThreadedInner(cbThreading.ItemIndex = 0);
@@ -3052,6 +3084,15 @@ begin
     FAsyncSession.SetBuffer(LTab.FilePath, LTab.Editor.Text);
   end;
 
+  // PARSE DONOR (PasTree 0.9.0): the current project stays alive until the
+  // swap in AsyncTimerTick, which is exactly the donor's contract — every
+  // unit whose text is byte-identical skips preprocessing, lexing and
+  // parsing. A configuration change refuses the donor and the run simply
+  // proceeds without one, which is why the result is only logged.
+  if chkIncremental.Checked and Assigned(FSemaProject) then
+    if not FAsyncSession.SetParseDonor(FSemaProject) then
+      Log('Parse donor refused (configuration changed) — full rebuild.');
+
   FAsyncLoud := ALoud;
   FAnalyzeOverhead := '';      // async build reports no wrapper/stage timings
   FAsyncStart := TStopwatch.StartNew;
@@ -3059,6 +3100,55 @@ begin
   lblProgress.Caption := 'analyzing...';
   btnStop.Enabled := True;
   FAsyncTimer.Enabled := True;
+end;
+
+{ The single-module fast path (incremental plan stage B). The session TAKES
+  OWNERSHIP of FSemaProject: the pointer stays valid and pointing at the same
+  object throughout, but its models are being rewritten on the worker thread,
+  so FAnalyzing is raised for the duration — the same guard the synchronous
+  Analyze uses over every FNav/FSemaProject read.
+
+  Applicability is deliberately narrow (see the declaration). Everything past
+  that is the library's decision, reported by AsyncTimerTick. }
+function TfrmMain.TryModuleReanalyze(const APath: string): Boolean;
+var
+  LIdx: Integer;
+  LTab: TSourceTab;
+begin
+  Result := False;
+  if not chkIncremental.Checked or Assigned(FAsyncSession) or
+     not Assigned(FSemaProject) or (APath = '') then
+    Exit;
+  // Exactly one edited file, and it must be the one we were asked about.
+  if (FDirtyFiles.Count <> 1) or not SameText(FDirtyFiles[0], APath) then
+    Exit;
+  // ...and it must already BE in the analyzed closure: a file the analysis
+  // never loaded has no model to replace.
+  if FSemaProject.ModelIdOf(APath) < 0 then
+    Exit;
+
+  FReparseTimer.Enabled := False;
+  ClearLink;
+  FreeAndNil(FNav);            // rebuilt after the swap, over the new models
+  InvalidateComplPipeline;
+  FAsyncModule := True;
+  FAsyncModulePath := APath;
+  FAsyncLoud := False;
+  FAnalyzing := True;          // see the header
+  FAsyncSession := TPasAsyncSession.CreateForModule(FSemaProject, APath);
+  // Every open tab's current text, exactly like the full path — the edited
+  // one is what this run is about, the rest keep their overlays alive.
+  for LIdx := 0 to FOpenFiles.Count - 1 do
+  begin
+    LTab := TSourceTab(FOpenFiles.Objects[LIdx]);
+    FAsyncSession.SetBuffer(LTab.FilePath, LTab.Editor.Text);
+  end;
+  FAnalyzeOverhead := '';
+  FAsyncStart := TStopwatch.StartNew;
+  FAsyncSession.Start;
+  lblProgress.Caption := 'module...';
+  FAsyncTimer.Enabled := True;
+  Result := True;
 end;
 
 // The Stop button: user-requested cancellation of the in-flight analysis.
@@ -3084,6 +3174,18 @@ begin
   if Assigned(FAsyncSession) then
   begin
     FAsyncSession.Cancel;
+    // A module session OWNS our project — Destroy would take it with it. It
+    // also cannot be cancelled part-way (one commit point, milliseconds), so
+    // let it finish and reclaim the project either way.
+    if FAsyncModule then
+    begin
+      FAsyncSession.WaitFor;
+      FSemaProject := FAsyncSession.TakeProject;
+      FAnalyzing := False;
+      FAsyncModule := False;
+      if Assigned(FSemaProject) and not Assigned(FNav) then
+        FNav := TPasNavigator.Create(FSemaProject);
+    end;
     FreeAndNil(FAsyncSession);   // Destroy waits for the worker to drain
   end;
 end;
@@ -3091,18 +3193,60 @@ end;
 procedure TfrmMain.AsyncTimerTick(Sender: TObject);
 var
   LProgress: TPasStagedProgress;
-  LError: string;
+  LError, LTimings: string;
+  LAccepted: Boolean;
 begin
   if not Assigned(FAsyncSession) then
   begin
     FAsyncTimer.Enabled := False;
     Exit;
   end;
-  LProgress := FAsyncSession.Progress;
-  lblProgress.Caption := Format('%s %d/%d',
-    [LProgress.Phase, LProgress.FullDone, LProgress.Total]);
+  if not FAsyncModule then
+  begin
+    LProgress := FAsyncSession.Progress;
+    lblProgress.Caption := Format('%s %d/%d',
+      [LProgress.Phase, LProgress.FullDone, LProgress.Total]);
+  end;
   if not FAsyncSession.IsDone then
     Exit;
+
+  // ---- the single-module fast path finished ----
+  if FAsyncModule then
+  begin
+    FAsyncTimer.Enabled := False;
+    FAsyncStart.Stop;
+    LError := FAsyncSession.LastError;
+    LAccepted := FAsyncSession.ModuleAccepted;
+    FSemaProject := FAsyncSession.TakeProject;   // ours again, either way
+    LTimings := '';
+    if Assigned(FSemaProject) then
+      LTimings := FSemaProject.StageTimings;
+    FreeAndNil(FAsyncSession);
+    FAsyncModule := False;
+    FAnalyzing := False;
+    if Assigned(FSemaProject) then
+      FNav := TPasNavigator.Create(FSemaProject);
+    if LError <> '' then
+      Log('Module reanalysis error: ' + LError);
+    if LAccepted then
+    begin
+      FDirtyFiles.Clear;
+      lblProgress.Caption := Format('module %d ms',
+        [FAsyncStart.ElapsedMilliseconds]);
+      Log(Format('Reanalyzed %s only — %d ms (%s)',
+        [TPath.GetFileName(FAsyncModulePath), FAsyncStart.ElapsedMilliseconds,
+         LTimings]));
+    end
+    else
+    begin
+      // Refused (an interface change, an unresolved $IF, a demoted model...).
+      // The reason is in StageTimings; the rebuild below adopts this project
+      // as a parse donor, so the fallback is not a cold build either.
+      Log('Module fast path refused (' + LTimings + ') — rebuilding.');
+      StartAsyncAnalyze(FAsyncModulePath, {ALoud} False);
+    end;
+    Exit;
+  end;
 
   // Build finished — swap in the new project/navigator on this (UI) thread.
   FAsyncTimer.Enabled := False;
@@ -3123,7 +3267,13 @@ begin
     // (completion reads the ACTIVE file's). ~10% of a big closure's RSS.
     // A tab opened later than this simply re-analyzes (OpenFileTab arms the
     // same debounce an edit does).
-    FSemaProject.DemoteClosedUnits(FOpenFiles.ToStringArray);
+    //
+    // NOT while chkIncremental is on: a demoted unit has no text layer, so it
+    // is a parse-donor MISS and a fast-path refusal. That is the trade the
+    // switch exists to show — memory against edit latency.
+    if not chkIncremental.Checked then
+      FSemaProject.DemoteClosedUnits(FOpenFiles.ToStringArray);
+    FDirtyFiles.Clear;   // this build saw every edit made so far
   end;
 
   if LError <> '' then
@@ -3142,6 +3292,10 @@ begin
   LActive := '';
   if Assigned(pgc.ActivePage) and (pgc.ActivePage is TSourceTab) then
     LActive := TSourceTab(pgc.ActivePage).FilePath;
+  // One edited unit already in the closure goes through the fast path; the
+  // rebuild below is both the general case and the refusal fallback.
+  if TryModuleReanalyze(LActive) then
+    Exit;
   StartAsyncAnalyze(LActive, {ALoud} False);
 end;
 
@@ -3158,6 +3312,11 @@ begin
   // highlighter is the active one, so this is safe regardless of cbHighlighter.
   TSourceTab(TSynEdit(Sender).Parent).PasTreeHL.MarkDirty;
   ClearLink;                        // the stale model no longer matches the text
+  // Which units the next analysis must account for — the fast path applies to
+  // exactly one (see FDirtyFiles).
+  var LPath := TSourceTab(TSynEdit(Sender).Parent).FilePath;
+  if (LPath <> '') and (FDirtyFiles.IndexOf(LPath) < 0) then
+    FDirtyFiles.Add(LPath);
   FReparseTimer.Enabled := False;
   FReparseTimer.Enabled := True;
 end;

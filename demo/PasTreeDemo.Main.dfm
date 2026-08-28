@@ -167,6 +167,23 @@ object frmMain: TfrmMain
       TabOrder = 8
       OnClick = btnParseFmxClick
     end
+    object chkIncremental: TCheckBox
+      Left = 880
+      Top = 44
+      Width = 130
+      Height = 17
+      Hint =
+        'Incremental reanalysis: an edit re-analyzes just that unit (millise' +
+        'conds) and falls back to a rebuild that reuses the previous parse. ' +
+        'Also keeps closed units' + #39' text in memory - a demoted unit canno' +
+        't take either fast path.'
+      Caption = 'Incremental'
+      Checked = True
+      ParentShowHint = False
+      ShowHint = True
+      State = cbChecked
+      TabOrder = 13
+    end
     object btnViewUnit: TButton
       Left = 918
       Top = 7
