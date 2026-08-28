@@ -104,6 +104,14 @@ symbol's scope is either the interface one or the implementation one.
 For a body edit the radius is always 1 - nothing outside the unit can see the
 change.
 
+What real radii look like, measured on the 3676-unit closure: a COM type
+library unit reaches 28 models and is redone in ~1.8 s; a core types unit
+that half the project imports reaches **1181** - a third of the closure, which
+at ~57 ms per model would cost twice a rebuild. So a wide interface edit
+rebuilding is not the fast path failing, it is the fast path being right; the
+rebuild is still donor-assisted (23 s against 29 s). Editing the BODY of that
+same core unit takes 303 ms.
+
 ### The guards
 
 1. **Interface prefix reproduced exactly** - the symbol arena and the scope
@@ -141,7 +149,7 @@ from a slow analyzer.
 | `new-dependency(X)` | an import resolves to a file the closure never loaded |
 | `no-clean-boundary-*` | no implementation scope, or the arena is not split cleanly at it |
 | `intf-sym#N`, `intf-scope#N` | the interface prefix moved in a way the redo cannot express |
-| `too-many-consumers` | radius over `ModuleRedoLimit` (128; 0 or less lifts the ceiling) |
+| `too-many-consumers(N>L)` | the blast radius N exceeds `ModuleRedoLimit` (128; 0 or less lifts the ceiling). The number is reported because "too many" alone says nothing about whether the limit is set sensibly |
 | `instance-impl-sym`, `instance-into-changed-intf` | the instance table points into the part being renumbered |
 
 ### Driving it from a host

@@ -374,7 +374,7 @@ type
       cheaper than re-running most of the closure one model at a time. AId
       itself is always the first element. }
     function AffectedConsumers(AId, ALimit: Integer;
-      out AIds: TArray<Integer>): Boolean;
+      out AIds: TArray<Integer>; out ARadius: Integer): Boolean;
     // Is AId's uses entry AIdx declared in the INTERFACE section? (An
     // implementation-section import cannot propagate a change further.)
     function UsesIsInterface(AId, AUseIdx: Integer): Boolean;
@@ -11098,7 +11098,7 @@ begin
 end;
 
 function TPasSemaProject.AffectedConsumers(AId, ALimit: Integer;
-  out AIds: TArray<Integer>): Boolean;
+  out AIds: TArray<Integer>; out ARadius: Integer): Boolean;
 var
   LSeen: TArray<Boolean>;
   LExpand: TArray<Boolean>;   // parallel to AIds: does the walk go THROUGH it?
@@ -11106,6 +11106,7 @@ var
   LPropagates, LUses: Boolean;
 begin
   AIds := nil;
+  Result := True;   // cleared the moment the ceiling is passed; the walk goes on
   SetLength(LSeen, FModels.Count);
   // Breadth-first over the REVERSE uses graph. Forward edges are the models'
   // own UsesList (already carrying resolved ids), so one sweep per frontier
@@ -11143,14 +11144,18 @@ begin
       AIds := AIds + [LIdx];
       LExpand := LExpand + [LPropagates];
       // ALimit <= 0 means no ceiling - take any radius (a measurement mode).
+      // Over the ceiling the walk still runs to the end: the SIZE is what the
+      // refusal has to report, because "too many" without a number tells a
+      // host nothing about whether its limit is set sensibly.
       if (ALimit > 0) and (Length(AIds) > ALimit) then
-      begin
-        AIds := nil;
-        Exit(False);
-      end;
+        Result := False;
     end;
   end;
-  Result := True;
+  // The size is reported whatever the verdict; the SET is handed back only
+  // when it is usable.
+  ARadius := Length(AIds);
+  if not Result then
+    AIds := nil;
 end;
 
 procedure TPasSemaProject.RunModulePasses(const AIds: TArray<Integer>);
@@ -11277,7 +11282,7 @@ end;
 function TPasSemaProject.AnalyzeModuleOnly(const APath: string): Boolean;
 var
   LFull, LKey: string;
-  LId, LSymN, LScopeN, LImplScope, LIdx: Integer;
+  LId, LSymN, LScopeN, LImplScope, LIdx, LRadius: Integer;
   LIds: TArray<Integer>;
   LOld, LNew, LCons: TPasSemaModel;
   LPre: TPasPreprocessed;
@@ -11344,8 +11349,9 @@ begin
       // Refuse the shapes the redo cannot express, BEFORE touching anything.
       if not IntfPrefixBounds(LNew, LSymN, LScopeN, LImplScope) then
         Exit(Refuse('no-clean-boundary-new[' + FLastBoundaryNote + ']'));
-      if not AffectedConsumers(LId, FModuleRedoLimit, LIds) then
-        Exit(Refuse('too-many-consumers'));
+      if not AffectedConsumers(LId, FModuleRedoLimit, LIds, LRadius) then
+        Exit(Refuse(Format('too-many-consumers(%d>%d)',
+          [LRadius, FModuleRedoLimit])));
       for LIdx := 1 to High(LIds) do
         if FModels[LIds[LIdx]].Demoted then
           Exit(Refuse('consumer-demoted'));
