@@ -346,7 +346,7 @@ usable.
 | `tests/` | 13 DUnitX-style smoke suites (`ParserSmoke`, `StagedParseSmoke`, `DProjSmoke`, `SemaSmoke`, `SemaTypeSmoke`, `SemaXTypeSmoke`, `SemaOverloadSmoke`, `SemaProjectSmoke`, `SemaNavSmoke`, `AsyncSmoke`, `UnitListSmoke`, `NavHistorySmoke`, `DemoSettingsSmoke`) plus golden JSON trees and full-corpus runs. **`tests\build.bat` builds and runs all of them** - use it rather than hand-rolling `dcc32` lines: the last three link demo units through relative `in` paths and compile only with the current directory set to `tests\` |
 | `out/` | every build's `.dcu`, under `out\dcu\win32` and `out\dcu\win64`. Intermediate output that nothing reads between runs (every build passes `-B`), kept in one place so it is trivial to delete and to leave out of a backup. Split by platform because the same units compile both ways and `PasTree.Types.dcu` would otherwise exist twice under one name |
 | `tools/` | CLI drivers per pipeline stage (`PasTreeLex`, `PasTreePP`, `PasTreeParse`, `PasTreeJson`, `PasTreeSema`, `PasTreeSemaProject`) and the node-kinds generator |
-| `docs/` | `editor-features.md` - the living IDE-parity spec for the demo's editor features |
+| `docs/` | `incremental-analysis.md` - how a single edit is re-analyzed without rebuilding the closure: the parse donor, `AnalyzeModuleOnly`, the guards, every reason a fast path is refused, and what is still open. `editor-features.md` - the living IDE-parity spec for the demo's editor features |
 
 ### Line endings: CRLF for everything Delphi and cmd.exe read
 
