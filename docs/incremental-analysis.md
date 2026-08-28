@@ -1,7 +1,13 @@
 # Incremental analysis
 
 How PasTree avoids re-analyzing a whole closure when one file changes, what it
-refuses to do and why, and what is still open. Shipped in 0.9.0.
+refuses to do and why, and what is still open.
+
+Shipped in 0.9.0 (the parse donor and single-module reanalysis for body
+edits); 0.10.0 added the consumer redo, which puts INTERFACE edits on the fast
+path too; 0.11.0 made the blast-radius ceiling a tunable property after
+measuring it. The demo host drives both mechanisms behind its `Incremental`
+checkbox and is the worked example of the host-side contract below.
 
 The problem it solves: an editor host re-analyzes on every pause in typing, and
 a full closure rebuild costs seconds - 3.4 s on the demo's own 200-unit
