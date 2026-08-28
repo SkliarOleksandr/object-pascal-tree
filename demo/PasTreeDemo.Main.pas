@@ -3083,6 +3083,12 @@ var
   LTab: TSourceTab;
 begin
   CancelAsync;
+  // ...and any PENDING one: a debounce armed a moment ago (an edit, a tab, the
+  // project that was open before this one) would otherwise fire mid-build,
+  // cancel this run and restart the same work QUIET - which is how opening a
+  // project lost its own "Done:" report. This run supersedes it, exactly as
+  // the synchronous path already assumes.
+  FReparseTimer.Enabled := False;
   if (FMainSource = '') or not BuildConfig(LPlatform, LSearchPaths, LDefines)
   then
     Exit;
