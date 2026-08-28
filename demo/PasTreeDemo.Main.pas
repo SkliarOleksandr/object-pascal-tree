@@ -334,6 +334,10 @@ type
       library offers no multi-module entry point, and looping the single-module
       one would need its own guard story). }
     FDirtyFiles: TStringList;
+    // Did the LAST completed build demote its closed units? Then an opened tab
+    // needs a re-analysis to get its text and transient maps back; otherwise
+    // opening one is free. See OpenFileTab.
+    FLastBuildDemoted: Boolean;
     FAsyncStart: TStopwatch;       // wall-clock of the in-flight async build
     FLoadingFile: Boolean;         // suppresses OnChange during programmatic load
     // Guards every FNav/FSemaProject READ (ResolveAt, ActiveRoutineTarget)
@@ -2337,11 +2341,17 @@ begin
   TNavHistoryPlugin.Create(Result, Self, LTab.FilePath);
   FOpenFiles.AddObject(APath, LTab);
   pgc.ActivePage := LTab;
-  // The current project may have RELEASED this unit's transient maps (it was
-  // not an open tab when the analysis finished - see ReleaseTransientMaps in
-  // the async swap). A quiet re-analysis restores full completion for it,
-  // through the same debounce an edit uses.
-  if Assigned(FSemaProject) then
+  // A re-analysis here is needed ONLY when this tab's unit cannot answer in
+  // full already: the file is outside the analyzed closure, or the last build
+  // demoted it (DemoteClosedUnits frees the text layer and the transient maps
+  // completion reads, for everything that was not an open tab back then).
+  //
+  // With incremental analysis on we do not demote at all, so merely LOOKING at
+  // a unit that is already in the closure must cost nothing - it used to
+  // rebuild the whole closure per opened tab, which is exactly the progress
+  // bar you would see while just clicking through the file list.
+  if Assigned(FSemaProject) and
+     (FLastBuildDemoted or (FSemaProject.ModelIdOf(LTab.FilePath) < 0)) then
   begin
     FReparseTimer.Enabled := False;
     FReparseTimer.Enabled := True;
@@ -3266,13 +3276,14 @@ begin
     // every re-analysis goes through a fresh session - so the per-unit maps
     // nothing reads after analysis can go, except for the open tabs'
     // (completion reads the ACTIVE file's). ~10% of a big closure's RSS.
-    // A tab opened later than this simply re-analyzes (OpenFileTab arms the
-    // same debounce an edit does).
+    // A tab opened later than a build that demoted then re-analyzes to get
+    // its unit back in full - and ONLY then (see OpenFileTab).
     //
     // NOT while chkIncremental is on: a demoted unit has no text layer, so it
     // is a parse-donor MISS and a fast-path refusal. That is the trade the
     // switch exists to show - memory against edit latency.
-    if not chkIncremental.Checked then
+    FLastBuildDemoted := not chkIncremental.Checked;
+    if FLastBuildDemoted then
       FSemaProject.DemoteClosedUnits(FOpenFiles.ToStringArray);
     FDirtyFiles.Clear;   // this build saw every edit made so far
   end;
