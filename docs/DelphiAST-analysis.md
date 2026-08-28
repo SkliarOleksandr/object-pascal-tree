@@ -1,4 +1,4 @@
-# DelphiAST — analysis for PasTree golden comparison
+# DelphiAST - analysis for PasTree golden comparison
 
 Analysis of the user's **previous** hand-written Delphi parser at `C:\Repos\DelphiAST`
 (git `master`, MIT © Oleksandr Skliar). Purpose: understand its `.pas.astjson`
@@ -6,7 +6,7 @@ golden dumps so PasTree can be validated against them later.
 
 > **One-line verdict:** DelphiAST is a **semantic compiler front-end**, not a
 > syntactic CST. Its `.astjson` dumps are a **declaration-signature summary** with
-> resolved types and memory-address handles — **not** a faithful syntax tree.
+> resolved types and memory-address handles - **not** a faithful syntax tree.
 > They are useful as a *declaration-inventory* cross-check for PasTree, nothing more.
 
 ---
@@ -37,12 +37,12 @@ happen *inline during parse*. Two-pass per unit (interface-only, then full).
   operator tables `AST.Delphi.Operators.pas:119`/`:170`).
 
 ### Two AST hierarchies
-- **A — syntactic** (`AST.Classes.pas`: `TASTItem`/`TASTDeclaration`/`TASTKWxxx`,
+- **A - syntactic** (`AST.Classes.pas`: `TASTItem`/`TASTDeclaration`/`TASTKWxxx`,
   `TASTBlock`): mostly **stubs**. The `TASTWriter` (`AST.Writer.pas`) that walks
   statement bodies (`WriteKW_If`/`Loop`/`Case`/`Try`) is **not wired into `.astjson`**.
-- **B — semantic** (`AST.Delphi.Classes.pas`: `TIDDeclaration` → `TIDType`/
-  `TIDStructure`/`TIDProcedure`/`TIDVariable`/`TIDField`/`TIDParam`/…): the **real** AST.
-  `TIDDeclaration = class(TASTDeclaration)` — B extends A.
+- **B - semantic** (`AST.Delphi.Classes.pas`: `TIDDeclaration` → `TIDType`/
+  `TIDStructure`/`TIDProcedure`/`TIDVariable`/`TIDField`/`TIDParam`/...): the **real** AST.
+  `TIDDeclaration = class(TASTDeclaration)` - B extends A.
 - **`.astjson` is emitted from hierarchy B only** (declaration signatures).
 
 ---
@@ -54,7 +54,7 @@ Emission: `ToJson` overrides in `AST.Delphi.Classes.pas`, driven by
 `TPascalUnit.ToJson` (`AST.Pascal.Parser.pas:177`). Serialized with RTL
 `REST.Json` in `TestApp` and written to `<file>.pas.astjson`.
 
-### Root — `unit`
+### Root - `unit`
 ```jsonc
 { "fileName": "...", "intfDecls": [ ... ], "implDecls": [ ... ],
   "kind": "unit", "name": "...", "handle": 0, "srcRow": 0, "srcCol": 0 }
@@ -72,20 +72,20 @@ Emission: `ToJson` overrides in `AST.Delphi.Classes.pas`, driven by
 `constant` · `property` · `field` · `parameter` · `uses` · `<unknown>`.
 
 ### Per-kind extra fields
-- **`type`** — `typeKind` + `typeDecl` (usually `null`). `typeKind` (`GetASTTypeKind`,
+- **`type`** - `typeKind` + `typeDecl` (usually `null`). `typeKind` (`GetASTTypeKind`,
   `:4013`): `pointer`·`range`·`enum`·`set`·`static-array`·`dynamic-array`·
   `open-array`·`proctype`·`record`·`class`·`classof`·`interface`·`generic-param`·`<unknown>`.
   (`alias` is defined in the schema but comes from a separate path.)
   Structured types (`record`/`class`/`interface`/`helper`) add
   **`ansestorName`**, `ansestorHandle`, **`members[]`** (`TIDStructure.ToJson:5751`;
   members include *expanded overloads*).
-- **`function`** — `params[]`, `isVirtual`, `isOverload`, `prevOverload` (handle),
+- **`function`** - `params[]`, `isVirtual`, `isOverload`, `prevOverload` (handle),
   `resultTypeName`/`resultTypeHandle`, **`body{}`** (`TIDProcedure.ToJson:3281`).
-  **`body` is ALWAYS `{}`** — `WriteFuncs` is a stub (`AST.Writer.pas:115`),
+  **`body` is ALWAYS `{}`** - `WriteFuncs` is a stub (`AST.Writer.pas:115`),
   `BodyToJson` emits an empty `TASTJsonFunctionBody`. **No statement detail exists.**
-- **`variable`/`field`** — `dataTypeName`, `dataTypeHandle` (`TIDVariable.ToJson:4865`;
+- **`variable`/`field`** - `dataTypeName`, `dataTypeHandle` (`TIDVariable.ToJson:4865`;
   `<unknown>`/0 when unresolved).
-- **`parameter`** — base + `dataTypeName`/`dataTypeHandle` + **`modifier`**
+- **`parameter`** - base + `dataTypeName`/`dataTypeHandle` + **`modifier`**
   (`const ` / `var` / `out` / `""`) (`TIDParam.ToJson:9722`).
 
 ### Quirks to expect
@@ -93,7 +93,7 @@ Emission: `ToJson` overrides in `AST.Delphi.Classes.pas`, driven by
    (slot left unassigned) and any decl whose `ToJson` returns `nil` serializes as `null`
    (`TPascalUnit.ToJson:184-201`).
 2. **Only 95 golden files**, and many are essentially empty
-   (`intfDecls:[]`, `implDecls:[]`) — e.g. all the `Classes.Inherited*`, `Enums.*`
+   (`intfDecls:[]`, `implDecls:[]`) - e.g. all the `Classes.Inherited*`, `Enums.*`
    goldens. The richest are `Operators/Compare/*` (~13 KB).
 3. No comments, no formatting, no statement bodies, no local vars, no expressions.
 
@@ -112,7 +112,7 @@ The only sound use is a **declaration-inventory projection**:
 2. **Normalize away** everything non-deterministic / semantic-only before compare:
    - drop **all** `*Handle` fields (memory addresses);
    - drop `dataTypeName`/`resultTypeName`/`ancestorName` **or** compare only as
-     written text (DelphiAST resolves them; PasTree sees syntax) — start by dropping;
+     written text (DelphiAST resolves them; PasTree sees syntax) - start by dropping;
    - drop `body` (empty on both sides);
    - drop `null` array slots (uses-imports);
    - treat `procedure` vs `function` both as `kind:function` (DelphiAST merges them).
@@ -127,11 +127,11 @@ not as golden trees. PasTree's own numbered golden S-expr tests remain the prima
 
 ---
 
-## 4. Project goal — semantic parity (future work)
+## 4. Project goal - semantic parity (future work)
 
 DelphiAST's value is its **semantics**, and PasTree must eventually match it.
 Stated goal: PasTree should reach **at least the same functional level** as
-DelphiAST — i.e. grow a full semantic layer on top of the CST providing:
+DelphiAST - i.e. grow a full semantic layer on top of the CST providing:
 
 1. **Generic instantiation** (`List<T>` → `List<Integer>`).
 2. **Overload resolution** (rank candidates, implicit-cast/data-loss tiers).
@@ -139,26 +139,26 @@ DelphiAST — i.e. grow a full semantic layer on top of the CST providing:
 4. **Delphi-compatible `EXXXX` diagnostics** (same codes/messages as dcc).
 
 PasTree remains a **superset**: it keeps CST / full-fidelity roundtrip /
-error-tolerance (all of which DelphiAST lacks) *and* adds semantics — it is not a
+error-tolerance (all of which DelphiAST lacks) *and* adds semantics - it is not a
 reimplementation of DelphiAST. Byte-for-byte reconstruction was never a DelphiAST
 goal; it is PasTree's distinguishing edge.
 
 **Reference material in DelphiAST for the future resolver:**
-- `AST.Delphi.Errors.pas` — 100+ `EXXXX`/resourcestring messages matched to Delphi.
-- `AST.Delphi.System.pas` + `SysTypes`/`SysFunctions`/`SysOperators` — builtin
-  type/function/operator bootstrap (Integer, TObject, Length, `+`, implicit casts…).
-- `AST.Delphi.Classes.pas` + `AST.Delphi.Parser.pas` — scope model, overload
+- `AST.Delphi.Errors.pas` - 100+ `EXXXX`/resourcestring messages matched to Delphi.
+- `AST.Delphi.System.pas` + `SysTypes`/`SysFunctions`/`SysOperators` - builtin
+  type/function/operator bootstrap (Integer, TObject, Length, `+`, implicit casts...).
+- `AST.Delphi.Classes.pas` + `AST.Delphi.Parser.pas` - scope model, overload
   matcher (`MatchOverloadProc`, match tiers), generic descriptor/instantiation.
 
 ---
 
-## Appendix — key files
+## Appendix - key files
 | File | Role |
 |---|---|
 | `AST.Delphi.Parser.pas` (405 KB) | recursive-descent parser + inline semantics |
 | `AST.Delphi.Classes.pas` (305 KB) | semantic node hierarchy `TID*` + all `ToJson` |
 | `AST.Classes.pas` | syntactic hierarchy `TAST*` (stubbed) |
-| `AST.Writer.pas` | statement-body walker — **not used for `.astjson`** |
+| `AST.Writer.pas` | statement-body walker - **not used for `.astjson`** |
 | `AST.JsonSchema.pas` / `AST.Delphi.JsonSchema.pas` | JSON DTO classes |
 | `AST.Pascal.Parser.pas` | `TPascalUnit` base, `ToJson` root, scopes/state |
 | `Source/Lexers/AST.Lexer*.pas` | generic + Delphi lexer |
