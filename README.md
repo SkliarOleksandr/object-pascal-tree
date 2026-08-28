@@ -29,7 +29,7 @@ two hold in the repository that builds on this one
 server and its clients, which share one version between them), counting its
 own commits:
 
-- **Every commit bumps the PATCH.** `0.2.1` → `0.2.2` → `0.2.3`, mechanically,
+- **Every commit bumps the PATCH.** `0.2.1` -> `0.2.2` -> `0.2.3`, mechanically,
   no judgement call about whether a change "deserves" it.
 - **A substantial change bumps the MINOR** and resets the patch: a new
   capability, a reworked subsystem, anything a consumer might reasonably need to
@@ -75,19 +75,19 @@ not a mistake.
 │ 1. SourceManager   files, encodings/BOM, text cache,        │
 │                    .inc path resolution, .dproj parsing     │
 ├────────────────────────────────────────────────────────────┤
-│ 2. Lexer           text → flat token array                  │
+│ 2. Lexer           text -> flat token array                  │
 │                    (incl. directives and trivia)             │
 ├────────────────────────────────────────────────────────────┤
 │ 3. Preprocessor    $IFDEF/$IF branching, $I splicing        │
 │                    (include stack), option-state stack      │
-│                    → visible token stream                   │
+│                    -> visible token stream                   │
 ├────────────────────────────────────────────────────────────┤
 │ 4. Parser          recursive descent + Pratt expressions    │
-│                    → homogeneous AST                        │
+│                    -> homogeneous AST                        │
 ├────────────────────────────────────────────────────────────┤
-│ 5. Sema            per-unit scopes/symbols → cross-unit     │
-│                    resolution → type checking → overloads/  │
-│                    generics → project-wide diagnostics      │
+│ 5. Sema            per-unit scopes/symbols -> cross-unit     │
+│                    resolution -> type checking -> overloads/  │
+│                    generics -> project-wide diagnostics      │
 ├────────────────────────────────────────────────────────────┤
 │ 6. Nav             pure lookups over the analyzed model:    │
 │                    go-to-declaration, decl↔impl toggle      │
@@ -101,11 +101,11 @@ also what makes the parallelism below safe.
 
 ## Multithreading
 
-Parsing and analyzing a unit is a pure function `(text, defines) → model`,
+Parsing and analyzing a unit is a pure function `(text, defines) -> model`,
 with no shared mutable state on the hot path, so a whole project's `uses`
 closure fans out across cores instead of being processed one file at a time:
 
-- **Parse + Phase 1** (lex → preprocess → parse → per-unit scopes/symbols)
+- **Parse + Phase 1** (lex -> preprocess -> parse -> per-unit scopes/symbols)
   run one worker per core (`TParallel.&For`) over every file in the closure;
   results are registered back **in input order** afterwards, so model IDs stay
   deterministic regardless of which worker finishes first.
@@ -251,11 +251,11 @@ usable.
   first; wave 2 upgrades each unit to a full parse (revealing any
   implementation-only dependencies wave 1 couldn't see); a finalizer then
   runs the existing cross-unit passes over the whole closure. Each module
-  tracks its own progress - `msQueued → msIntfReady → msFullReady →
+  tracks its own progress - `msQueued -> msIntfReady -> msFullReady ->
   msCrossReady` - so a consumer can gate on "just enough" instead of waiting
   for everything.
 - **Snapshot swap, not mutation.** A module's tree/model is an immutable
-  snapshot; the interface→full upgrade parses a *new* tree - reusing the
+  snapshot; the interface->full upgrade parses a *new* tree - reusing the
   interface wave's own lexed/preprocessed token stream, not re-lexing - and
   atomically swaps it in. A reader always sees a complete snapshot, old or
   new, never a half-built one.
@@ -383,7 +383,7 @@ Still open, roughly in the order we're tackling it:
   A is `TPasSemaProject.AdoptParseDonor` - reshaped from the standalone cache
   sketched under A into a **donor project** (the host's still-alive last-good
   project), which needs no new lifetime and pins no memory: 192/200 parses
-  reused on the demo closure, interface+full waves 1894 → 1326 ms. B is
+  reused on the demo closure, interface+full waves 1894 -> 1326 ms. B is
   `TPasSemaProject.AnalyzeModuleOnly` plus `TPasAsyncSession.CreateForModule`:
   a body edit costs **19-33 ms against a 3400 ms rebuild** on the demo
   closure, an interface edit is refused and the host rebuilds. The guards are
@@ -417,7 +417,7 @@ Still open, roughly in the order we're tackling it:
   path, content hash, define set, platform) handing back the parsed
   `TPasTree`; an unchanged unit is neither re-lexed nor re-parsed and can be
   registered straight as `msFullReady`, skipping BOTH waves. Worth ~48% (5.3 s
-  → ~2.8 s on the demo), and it is sound by construction rather than by
+  -> ~2.8 s on the demo), and it is sound by construction rather than by
   argument: **a tree is immutable once parsed** - the only `Tree :=` anywhere
   outside the parser is `PasTree.Project.pas`'s assembly of the parse result -
   so a shared tree cannot be corrupted by the model that borrows it. Two
@@ -524,7 +524,7 @@ Still open, roughly in the order we're tackling it:
   `AnalyzeStaged` already polled its cancel predicate every 64-file chunk and
   between cross passes. What was actually missing and got added: (1) overlay
   buffers carry the HOST's version stamp (`SetBuffer` takes `AVersion`,
-  `BufferVersion` reads it back through session → project → source manager),
+  `BufferVersion` reads it back through session -> project -> source manager),
   so an async host can recognize a result computed from older text; (2)
   cancellation now lands MID-PASS - `ForEachIndex` reads the running staged
   analysis's predicate and turns the rest of a pass into no-ops (safe because
@@ -896,8 +896,8 @@ Still open, roughly in the order we're tackling it:
     the `refs:`/`typed exprs:` summaries, unresolved references drop by 8 203 on
     rtlflat and 8 236 on bigflat, and the clock is unchanged (966-1 000 ms
     rtlflat, ~1 960 ms bigflat, both before and after).
-  - ~~**helpers on a builtin-typed value.**~~ **Fixed 2026-08-06 - rtlflat 104 →
-    51, bigflat 387 → 194.** `Trim`, `StartsWith`, `ToLower`, `IsEmpty`,
+  - ~~**helpers on a builtin-typed value.**~~ **Fixed 2026-08-06 - rtlflat 104 ->
+    51, bigflat 387 -> 194.** `Trim`, `StartsWith`, `ToLower`, `IsEmpty`,
     `Length`: `TStringHelper`/`TCharHelper` members reached through a chain.
 
     **A builtin type has no single identity** - every model SEEDS its own
@@ -935,7 +935,7 @@ Still open, roughly in the order we're tackling it:
     on the hop because a constraint is written in the DECLARING scope.
 
     ~~The surviving `QueryInterface` is a different shape still to look at.~~
-    **It was the same rule, one scope out - fixed 2026-08-06, rtlflat 51 → 23
+    **It was the same rule, one scope out - fixed 2026-08-06, rtlflat 51 -> 23
     and the whole `System.Net.Mime` cluster with it.** The constraint hop read
     the parameter's OWN `nkGenericParam` group, and a method BODY's `<T>` has no
     constraints in it: 16 sec. 16.4.1 puts them on the declaration and dcc REFUSES
@@ -953,7 +953,7 @@ Still open, roughly in the order we're tackling it:
     `StructSymOfNode` had nothing to walk), and parameters are matched by NAME,
     so a body that renames them finds nothing rather than the wrong constraint.
   - ~~**`Create` and `Free`, the tail after those three.**~~ **Fixed 2026-08-06 -
-    rtlflat 23 → 6, the RTL package 23 → 5.** Two unrelated rules wearing one
+    rtlflat 23 -> 6, the RTL package 23 -> 5.** Two unrelated rules wearing one
     pair of names, and the spec had neither, so both were settled by dcc probes
     and both are now written down (sec. 8.2.3 is new; sec. 16.4.1 grew the table):
 
@@ -986,7 +986,7 @@ Still open, roughly in the order we're tackling it:
   off until those numbers are near zero, because an editor embedding PasTree
   should not inherit a work list as diagnostics.
 
-  What is left on rtlflat is six reports: `HasName` ×2, `FromBytes` ×2,
+  What is left on rtlflat is six reports: `HasName` x2, `FromBytes` x2,
   `ToString`, `Wrap`. bigflat's 136 are a longer tail of the same kind, led by
   `Index` (20), `Length` (15) and the `Text` binding bug below. There is no
   bucket left to name - from here it is one site at a time.
@@ -1072,8 +1072,8 @@ Still open, roughly in the order we're tackling it:
   with `Aux = 1` on its `nkRoutine` (6.1), and a CONSTRUCTOR counts as callable
   on the type because `TFoo.Create(...)` is how one is called.
 
-  **Then the tail, worked one site at a time on 2026-08-07: 546 → 2 on rtlflat
-  and 998 → 2 on bigflat, in two rounds.** Eight causes between them, and not
+  **Then the tail, worked one site at a time on 2026-08-07: 546 -> 2 on rtlflat
+  and 998 -> 2 on bigflat, in two rounds.** Eight causes between them, and not
   one was a visibility rule - the flag has now said the same thing about every
   flood it has produced. The first four:
 
@@ -1109,7 +1109,7 @@ Still open, roughly in the order we're tackling it:
     candidates. One `FindMemberX` from the owner's ancestor, run only when
     nothing fit, which keeps it off the common path.
 
-  **The last twelve, read end to end the same day: 6 → 2 on rtlflat and 12 → 2
+  **The last twelve, read end to end the same day: 6 -> 2 on rtlflat and 12 -> 2
   on bigflat.** Four more causes, four more binding gaps:
 
   - **a UNIT-QUALIFIED type is still a type qualifier.** `System.TMonitor
@@ -1294,25 +1294,25 @@ Still open, roughly in the order we're tackling it:
   scores 0 rather than -1), which is the next refinement there and wants its own
   measurement, since it can change a selection rather than only break a tie.
   The second item, **generic-ancestor frames** in the member walk, is done too
-  (2026-08-06: 8 300 → 104 on rtlflat, and the gap was a later pass re-deriving
+  (2026-08-06: 8 300 -> 104 on rtlflat, and the gap was a later pass re-deriving
   a type instead of reading the frame-substituted one an earlier pass had
   already computed). So is the third, **helpers on builtin-typed values**
-  (rtlflat 104 → 51: a builtin type is seeded PER MODEL, so the helper index was
+  (rtlflat 104 -> 51: a builtin type is seeded PER MODEL, so the helper index was
   keyed on one `string` and asked about another).
 
   All three named buckets are therefore closed, and a fourth that only became
   visible once they were: a constrained parameter used in a method BODY
-  (rtlflat 51 → 23). The list is out of named items, so the next objective comes
+  (rtlflat 51 -> 23). The list is out of named items, so the next objective comes
   from reading the tail rather than from here. What the tail says today:
 
   - ~~`Create` (12 on rtlflat) and `Free` (5)~~ - **done the same day, and they
-    were two unrelated rules sharing a pair of names** (rtlflat 23 → 6): a
+    were two unrelated rules sharing a pair of names** (rtlflat 23 -> 6): a
     `class` constraint guarantees TObject's members, and a dynamic array type
     has a `Create` pseudo-constructor. Both were spec gaps, now filled - this is
     the first tail item where the spec had to be WRITTEN before the code could
     be, and both probes are in it;
   - ~~a seeded builtin name beating a class's own member~~ - **done 2026-08-06,
-    bigflat 136 → 110, and the point of it is the reports it did NOT change.**
+    bigflat 136 -> 110, and the point of it is the reports it did NOT change.**
     `Text` is a predefined FILE type (10 sec. 10.3) and also an inherited property
     on FMX's `TTextLayout`; dcc gives the member precedence throughout the
     method body (`Text.IsEmpty` compiles, and `var F: Text;` there is `E2007` -
@@ -1354,7 +1354,7 @@ Still open, roughly in the order we're tackling it:
     longer drive this - `bigflat`'s 110 and the client project are the ones with
     anything to say.
 - **Audit coverage, so the next pass knows where to start.** The 2026-07-31
-  sweep ran pass 1 (spec → code) over every chapter and pass 2 (code → spec)
+  sweep ran pass 1 (spec -> code) over every chapter and pass 2 (code -> spec)
   over the member-lookup, property, interface, helper, array and generic
   machinery, with `dcc` probes for anything either side left unstated. What
   pass 2 has still NOT covered: the parser's own branch set (appendix B and the
@@ -1547,13 +1547,13 @@ Still open, roughly in the order we're tackling it:
   == source, byte-for-byte), which proves the LEXER lossless and says nothing
   about the tree. A printer that regenerates source from the AST is the next
   rung, and it is worth being precise about what each variant actually tests:
-  - **Verbatim printing → parser/AST fidelity.** Print the tree and diff against
+  - **Verbatim printing -> parser/AST fidelity.** Print the tree and diff against
     the original. Every mismatch is a node that DROPPED information - a directive
     the parser swallowed, an operand order it normalized, a construct it folded.
     This is a strong, cheap, fully automatable check over the whole RTL, and it
     is the one to build first. It does NOT test the semantic layer: the tree is
     the same tree whether or not a single name resolved.
-  - **Qualified printing → the semantic layer, end to end.** Print every
+  - **Qualified printing -> the semantic layer, end to end.** Print every
     unqualified reference in its FULLY QUALIFIED form (`Unit.Type.Member`,
     each `with` body member rewritten to `target.member` - literally what sec. 5.7's
     parser guidance suggests keeping the tree shaped for). Now the output encodes
@@ -1687,7 +1687,7 @@ Still open, roughly in the order we're tackling it:
     across the whole group parses each shared unit once. Building a project
     instance per group member would multiply the 7.4M-line closure by the
     member count for no gain.
-  - *The tree.* Group → project → the .dproj's own grouping (Contains /
+  - *The tree.* Group -> project -> the .dproj's own grouping (Contains /
     Requires for a package, unit vs form vs resource), and separately the
     closure a project actually pulls in, which is where the units NOT listed in
     any `.dproj` live (3747 analyzed vs 1542 listed for the client project - the other
@@ -1805,7 +1805,7 @@ Still open, roughly in the order we're tackling it:
 - **Generate method body from declaration** (Ctrl+Shift+C) - given a method
   or routine declaration with no implementation yet, emit an empty matching
   body (right unit, right place, right signature), the inverse of the
-  existing decl→impl navigation.
+  existing decl->impl navigation.
 - **Formatter** - reformat source to a configurable style, off the same AST
   the highlighter and navigation already use rather than a separate
   regex-based pass.

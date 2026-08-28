@@ -18,15 +18,15 @@
 
 НЕ меняется: синхронные API (`AnalyzeFile/AnalyzeDirectory/AnalyzeProject`) и всё,
 что на них сидит - 8 тест-сьютов, корпусные baseline'ы, инструменты, кнопка Parse RTL,
-кнопка Run Parse (= отменить фон → синхронный прогон в UI-потоке, тестовый режим).
+кнопка Run Parse (= отменить фон -> синхронный прогон в UI-потоке, тестовый режим).
 
 ## 1. Зафиксированные решения (обсуждение 2026-07-20)
 
-1. Статусы модуля: `msQueued → msIntfReady → msFullReady → msCrossReady`
+1. Статусы модуля: `msQueued -> msIntfReady -> msFullReady -> msCrossReady`
    (юзер назвал IntfReady/FullReady; msCrossReady добавлен мной - см. sec. 4).
-2. Отмена: смена/закрытие проекта → Cancel + Wait (drain) всех воркеров.
+2. Отмена: смена/закрытие проекта -> Cancel + Wait (drain) всех воркеров.
 3. Приоритет открытого модуля - компромиссы допустимы, ставка на скорость.
-4. Никакого чекбокса. Две волны intf→full для всех. Main source (.dpr/.dpk/program/
+4. Никакого чекбокса. Две волны intf->full для всех. Main source (.dpr/.dpk/program/
    library - нет interface-секции) - всегда сразу full.
 5. ГЛАВНЫЙ ИНВАРИАНТ: парсинг implementation НЕ меняет интерфейсную часть AST.
 6. Прогресс - растущий total. Таймер на форме, Interlocked-счётчики.
@@ -37,7 +37,7 @@
 ### 2.1 Снапшоты вместо мутации дерева
 
 НЕ доращивать арену in place: `SetLength` = realloc = старый блок освобождается под
-конкурентным читателем → AV. НЕ разделять на два дерева (intf/impl): каждая ссылка
+конкурентным читателем -> AV. НЕ разделять на два дерева (intf/impl): каждая ссылка
 на узел стала бы парой (tree, index) - расползается по RefMap/ExtRefMap/Nav/dump/JSON.
 
 Вместо этого - слот модуля с публикацией неизменяемых снапшотов:
@@ -54,7 +54,7 @@ end;
 TPasModuleSlot = class
   Path: string;
   FCurrent: TPasModuleSnapshot;  // читается атомарно (aligned pointer), пишется
-                                 // только координатором: build fully → publish
+                                 // только координатором: build fully -> publish
   FStatus: Integer;              // TPasModuleStatus, Interlocked
   FIntfReady, FFullReady: TEvent; // для ЖДУЩИХ фоновых потребителей
 end;
@@ -74,7 +74,7 @@ end;
 Stage 1: лексер + препроцессор по ВСЕМУ файлу (дёшево; снимает проблему $IFDEF,
 открытого в interface и закрытого в implementation; Skipped-регионы whole-file -
 паритет с хайлайтером), парсер останавливается на top-level токене `implementation`.
-Stage 2: полный перепарс тем же visible-стримом (лекс+PP НЕ повторяются) → новое
+Stage 2: полный перепарс тем же visible-стримом (лекс+PP НЕ повторяются) -> новое
 полное дерево.
 
 Почему не resume: пришлось бы сохранять/восстанавливать состояние билдера
@@ -94,19 +94,19 @@ intf-дерева, где N = количество узлов intf-дерева,
 Id символов: Collect идёт по дереву в порядке узлов, интерфейс - раньше ⇒ id
 интерфейсных символов full-модели совпадают с intf-моделью (тоже закрепить тестом).
 Следствие: ExtRefMap других юнитов, указывающий в интерфейс этого юнита
-(unitId, symId), остаётся валиден при переходе intf→full. Это и есть выгода схемы.
+(unitId, symId), остаётся валиден при переходе intf->full. Это и есть выгода схемы.
 
 ### 2.3 Правило ожидания: UI не ждёт НИКОГДА
 
 Уточнение юзерского «вызывающий код всегда ждёт минимум IntfReady»:
-- UI-поток: `TryGetSnapshot(AMid, AMinStatus, out ASnap): Boolean` - не готово →
-  false → экшен disabled / hover no-op. Блокировать UI нельзя - вернём фризы.
+- UI-поток: `TryGetSnapshot(AMid, AMinStatus, out ASnap): Boolean` - не готово ->
+  false -> экшен disabled / hover no-op. Блокировать UI нельзя - вернём фризы.
 - Фоновые потребители (cross-финализатор): ждут `FIntfReady`/`FFullReady`-событий
   с проверкой токена отмены.
 
 ### 2.4 Single-writer координатор + чистые воркеры
 
-Воркеры - чистые функции (path, buffer-text, mode) → снапшот; НИКАКОЙ общей мутации.
+Воркеры - чистые функции (path, buffer-text, mode) -> снапшот; НИКАКОЙ общей мутации.
 Вся мутация общего состояния (регистрация юнитов, model id, публикация снапшотов,
 постановка follow-up задач) - на одном координаторе. Это продолжение принципа
 «parse is a pure function» и снимает 90% вопросов синхронизации.
@@ -137,16 +137,16 @@ dump-валидация живёт там). Дампы async-результат�
 
 ### 3.3 PasTree.Sema.Project.pas - слоты, статусы, TryGet, per-module cross
 
-- Хранилище моделей: `FModels: TList<...>` → слоты (`TPasModuleSlot`), model id =
+- Хранилище моделей: `FModels: TList<...>` -> слоты (`TPasModuleSlot`), model id =
   индекс слота. Синхронные Analyze* работают через те же слоты, просто доводят всё
   до msCrossReady последовательно - существующее поведение не меняется.
 - `TryGetSnapshot(AMid, AMinStatus, out ASnap)` - публичный API (sec. 2.3).
 - Cross-пассы (CrossResolve/CheckCalls/BindTypesX/CrossType) - ПО-МОДУЛЬНО:
-  модуль готов к cross, когда сам msFullReady И все его uses ≥ msIntfReady
+  модуль готов к cross, когда сам msFullReady И все его uses >= msIntfReady
   (cross смотрит только в ИНТЕРФЕЙСЫ used-юнитов - msIntfReady зависимостей
   достаточно; `verify:` FindMemberX/CrossType ходят по ancestor'ам тоже только
   интерфейсно). BindTypesX/CrossType остаются сериализованными (общая таблица
-  generic-инстансов): один «финализатор»-воркер, модули по одному → msCrossReady.
+  generic-инстансов): один «финализатор»-воркер, модули по одному -> msCrossReady.
 - EnsureSystemUnit/FSystemUnitLock - фолдится в координатор (System - такой же слот).
 - E2003-гейтинг (AllUsesResolved) не меняется.
 
@@ -168,10 +168,10 @@ TPasAsyncSession = class
 end;
 ```
 
-- Корни closure: dproj → FDProj.Files; bare .dpr/.dpk → main source; Sample-режим
-  (директория без dproj) → текущий dir-scan список как корни (покрытие не сужаем).
-  Closure растёт из uses/contains по мере intf-парсов → FTotalDiscovered растёт.
-- Cancel: смена проекта / FormDestroy / Run Parse → `Cancel; WaitDrain;` (bounded),
+- Корни closure: dproj -> FDProj.Files; bare .dpr/.dpk -> main source; Sample-режим
+  (директория без dproj) -> текущий dir-scan список как корни (покрытие не сужаем).
+  Closure растёт из uses/contains по мере intf-парсов -> FTotalDiscovered растёт.
+- Cancel: смена проекта / FormDestroy / Run Parse -> `Cancel; WaitDrain;` (bounded),
   потом teardown/synchronous-прогон.
 - Ошибки воркеров: складывать в очередь сообщений, дренируемую UI-таймером
   (Log() в контрол из воркера нельзя).
@@ -183,17 +183,17 @@ end;
 ### 3.5 PasTree.Sema.Nav.pas - кэши по идентичности снапшота
 
 `TNavCache` привязать к снапшоту: хранить ссылку на снапшот, при `CacheOf(AMid)`
-сравнить с `Slot.Current` - не совпало → перестроить кэш (VisOfRaw/NodeOfVis/
-RoutineOfVis/decl-impl-ключи; индексы узлов между снапшотами intf→full для
+сравнить с `Slot.Current` - не совпало -> перестроить кэш (VisOfRaw/NodeOfVis/
+RoutineOfVis/decl-impl-ключи; индексы узлов между снапшотами intf->full для
 ИНТЕРФЕЙСА совпадают, но кэши строятся по всему дереву - проще перестроить целиком).
 Это заменяет нынешнее «пересоздать FNav после каждого Analyze».
 Деградация на intf-снапшоте зависимости - естественная: клики в интерфейсе работают,
-в impl-зоне NodeOfVis пуст → ничего не находится; GotoImplementation не находит
-impl-ключей → false → экшен disabled. Специальных гейтов почти не нужно.
+в impl-зоне NodeOfVis пуст -> ничего не находится; GotoImplementation не находит
+impl-ключей -> false -> экшен disabled. Специальных гейтов почти не нужно.
 
 ### 3.6 Демка (PasTreeDemo.Main.pas)
 
-- Open Project (.dproj/.dpr/.dpk) и стартовый Sample → отменить старую сессию →
+- Open Project (.dproj/.dpr/.dpk) и стартовый Sample -> отменить старую сессию ->
   новая TPasAsyncSession. Parse RTL - как есть (sync). Run Parse - Cancel; sync
   Analyze (существующий код, UI блокируется - осознанно, тестовый режим); после
   него async не перезапускается (всё уже msCrossReady).
@@ -201,8 +201,8 @@ impl-ключей → false → экшен disabled. Специальных ге
   буфер в EnsureFresh, независимо от sema (юзерский пункт «первичный парсинг для
   подсветки в главном потоке» уже выполняется by design). Новое - только бамп
   модуля в P0.
-- Edit + 500ms debounce: снять снапшот буфера (main thread) → P0 re-analyze ТОЛЬКО
-  этого модуля (intf+full) → fast path: если интерфейсный префикс нового дерева
+- Edit + 500ms debounce: снять снапшот буфера (main thread) -> P0 re-analyze ТОЛЬКО
+  этого модуля (intf+full) -> fast path: если интерфейсный префикс нового дерева
   идентичен старому (memcmp узлов) - опубликовать, перегнать его собственный cross,
   ГОТОВО (правка в impl - типовой случай, зависимые не трогаем). Если интерфейс
   ИЗМЕНИЛСЯ - опубликовать и перезапустить cross-пассы зависимых (нужен обратный
@@ -216,12 +216,12 @@ impl-ключей → false → экшен disabled. Специальных ге
 
 Лексер, препроцессор (whole-file - уже так), хайлайтер, DProj, все инструменты.
 
-## 4. Матрица «операция → минимальный статус»
+## 4. Матрица «операция -> минимальный статус»
 
 | Операция                                   | Модуль          | Статус |
 |--------------------------------------------|-----------------|--------|
 | Подсветка синтаксиса                        | открытый        | не зависит от sema (свой лексер) |
-| Hover/go-to-decl ИЗ модуля                  | открытый        | msFullReady (+cross для внешних имён → msCrossReady) |
+| Hover/go-to-decl ИЗ модуля                  | открытый        | msFullReady (+cross для внешних имён -> msCrossReady) |
 | Go-to-decl В зависимость (цель)             | зависимость     | msIntfReady |
 | Decl↔impl toggle                            | открытый        | msFullReady (чистый CST-walk) |
 | Диагностики модуля (полные)                 | сам             | msCrossReady |
@@ -233,9 +233,9 @@ impl-ключей → false → экшен disabled. Специальных ге
   (313 юнитов, MT), stages/wrapper-разбивка, корпусные числа инструментов.
 - Sync-путь не меняется ⇒ числа инструментов/тестов идентичны by construction -
   перепроверить прогоном.
-- Бюджет async: суммарное время полного async-прогона ≤ sync + 10-15%
+- Бюджет async: суммарное время полного async-прогона <= sync + 10-15%
   (перепарс интерфейсов + оверхед очереди). Цель P0: полная семантика открытого
-  модуля ≪ 1 с на Sample, ≤ 1-3 с на большом проекте.
+  модуля ≪ 1 с на Sample, <= 1-3 с на большом проекте.
 
 ## 6. Тесты
 
@@ -246,7 +246,7 @@ impl-ключей → false → экшен disabled. Специальных ге
    пересекающий границу секций; (f) unit БЕЗ implementation-секции вообще
    (легален? `verify:` - если да, intf==full).
 2. Sema: id-стабильность (sec. 3.2).
-3. НОВЫЙ AsyncSmoke.dpr: fixture-проект → async-сессия → дождаться → дамп
+3. НОВЫЙ AsyncSmoke.dpr: fixture-проект -> async-сессия -> дождаться -> дамп
    (сортировка по пути) == sync-дамп; отмена посреди прогона (нет AV/утечек,
    прогнать под ReportMemoryLeaksOnShutdown); edit-fast-path (impl-правка не
    трогает зависимых; intf-правка перегоняет их cross).
@@ -278,14 +278,14 @@ impl-ключей → false → экшен disabled. Специальных ге
 typer пропускается для транзиентных intf-моделей (ASkipTyper, ключуется по
 факту остановки парса, НЕ по флагу - иначе .dpr терял бы диагностику).
 
-СТРУКТУРНЫЙ ОСТАТОК (не баг): staged/batch ≈ 1.45 на RTL-образном коде
+СТРУКТУРНЫЙ ОСТАТОК (не баг): staged/batch ~ 1.45 на RTL-образном коде
 (замер: BuildWinRTL.dpk, 317 юнитов, результаты идентичны). Причина: волна 1
 (intf parse + Phase 1) для interface-heavy юнитов (Winapi.* = почти весь файл
 интерфейс) стоит почти как полная загрузка, а в текущем swap-when-ready
 режиме транзиентные intf-модели НИКТО не читает - их цена покупает живой
 прогресс и фундамент под live-доступ, но не скорость. Пути вниз (если
 понадобится): (а) волна 1 без Phase 1 - uses доставать прямо из дерева,
-модель строить только при upgrade (≈1.15-1.2, но IntfReady перестаёт нести
+модель строить только при upgrade (~1.15-1.2, но IntfReady перестаёт нести
 семантическую модель - приемлемо, пока нет live-доступа); (б) resume-parse
 волны 2 с префикса intf-арены (sec. 2.2 «настоящий resume») - экономит только
 parse-долю интерфейса; (в) полноценный live-доступ к слотам во время сборки

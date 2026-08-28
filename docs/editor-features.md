@@ -48,8 +48,8 @@ declared**, exactly like the RAD Studio IDE. "Any" means all of:
 | 8 | `uses` clause unit name (single or dotted; any segment) | that unit's file, its `unit` header | OK |
 | 9 | Qualifier of a qualified expression (`System` in `System.sLineBreak`; longest-match: `System.SysUtils` wins in `System.SysUtils.TBytes`) | that unit's file | OK |
 | 10 | Identifier inside ANY unit of the project closure (not just the main file) | as above | OK (`AnalyzeProject`) |
-| 11 | Name from a unit found only via IDE library/browsing paths (`Application` → Vcl.Forms, `TSynCustomHighlighter` → SynEditHighlighter) | decl in that unit | OK (demo registry paths) |
-| 12 | Unqualified unit name needing a namespace prefix (`uses Generics.Collections` → System.Generics.Collections.pas, per `-NS`) | resolved unit | OK |
+| 11 | Name from a unit found only via IDE library/browsing paths (`Application` -> Vcl.Forms, `TSynCustomHighlighter` -> SynEditHighlighter) | decl in that unit | OK (demo registry paths) |
+| 12 | Unqualified unit name needing a namespace prefix (`uses Generics.Collections` -> System.Generics.Collections.pas, per `-NS`) | resolved unit | OK |
 | 13 | Aliased unit name (`-A` / DCC_UnitAlias) | aliased-to unit | OK |
 | 14 | Identifier inside an opened `$I` include file tab | decl | GAP (IdentAt is main-file-only; nav INTO includes works) |
 | 15 | Overload-precise jump (CallTarget) / decl↔impl toggle | exact overload | GAP (jumps to head symbol) |
@@ -67,16 +67,16 @@ qualified expression highlights only itself.
    greedy longest-match (row 9).
 3. **Phase 3c** `CrossType`/`FindMemberX`: member refs cross-unit, through
    builtins redirected by `ResolveRealDecl` (rows 3, 5).
-4. **Nav fallbacks** (`ResolveDecl`): skUnitRef → unit file (row 8);
-   DeclNode-less builtin → `ResolveRealDecl` (row 5) → else the real
-   System unit's header (row 6); synthetic Result → routine (row 7).
+4. **Nav fallbacks** (`ResolveDecl`): skUnitRef -> unit file (row 8);
+   DeclNode-less builtin -> `ResolveRealDecl` (row 5) -> else the real
+   System unit's header (row 6); synthetic Result -> routine (row 7).
 5. **Closure analysis** (`AnalyzeProject`, row 10): the transitive uses
    closure from the main source is loaded, and EVERY loaded model gets the
    cross passes - not just the main file (which is `AnalyzeFile`'s narrower
    contract, kept for tools).
-6. **Unit-file resolution** (`ResolveUnit`, rows 11-13): `in`-path →
-   `<dotted>.pas`/`<leaf>.pas` against referring dir + search paths →
-   **unit aliases** → **namespace prefixes** (`-NS` order) → basename index.
+6. **Unit-file resolution** (`ResolveUnit`, rows 11-13): `in`-path ->
+   `<dotted>.pas`/`<leaf>.pas` against referring dir + search paths ->
+   **unit aliases** -> **namespace prefixes** (`-NS` order) -> basename index.
 7. **Search path assembly** (demo, row 11): project dir + .dproj
    DCC_UnitSearchPath + the IDE's REAL resolution sources, read from the
    registry (`HKCU\SOFTWARE\Embarcadero\BDS\<ver>`): `Library\<Platform>\

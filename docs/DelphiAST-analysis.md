@@ -27,10 +27,10 @@ happen *inline during parse*. Two-pass per unit (interface-only, then full).
 | Handles | Object memory address | Arena index (deterministic) |
 
 ### Pipeline
-`Text → Lexer → Parser(+semantics) → symbol table`
-- Entry: `TPascalProject.Compile` (`AST.Pascal.Project.pas:492`) →
-  `TASTDelphiUnit.Compile` (`AST.Delphi.Parser.pas:2724`) →
-  `Lexer.First` (`:2746`) → `ParseUnitDecl` (`:2756`) → `DoParse` (`:2771`, big dispatch `:2806`).
+`Text -> Lexer -> Parser(+semantics) -> symbol table`
+- Entry: `TPascalProject.Compile` (`AST.Pascal.Project.pas:492`) ->
+  `TASTDelphiUnit.Compile` (`AST.Delphi.Parser.pas:2724`) ->
+  `Lexer.First` (`:2746`) -> `ParseUnitDecl` (`:2756`) -> `DoParse` (`:2771`, big dispatch `:2806`).
 - Lexer: `Source/Lexers/AST.Lexer.pas` (generic `TGenericLexer`) +
   `AST.Lexer.Delphi.pas` (`TTokenID`, 150+ tokens). Character-driven; no trivia kept.
 - Expressions: **RPN stack + precedence climbing** (`AST.Parser.Contexts.pas:42`,
@@ -40,7 +40,7 @@ happen *inline during parse*. Two-pass per unit (interface-only, then full).
 - **A - syntactic** (`AST.Classes.pas`: `TASTItem`/`TASTDeclaration`/`TASTKWxxx`,
   `TASTBlock`): mostly **stubs**. The `TASTWriter` (`AST.Writer.pas`) that walks
   statement bodies (`WriteKW_If`/`Loop`/`Case`/`Try`) is **not wired into `.astjson`**.
-- **B - semantic** (`AST.Delphi.Classes.pas`: `TIDDeclaration` → `TIDType`/
+- **B - semantic** (`AST.Delphi.Classes.pas`: `TIDDeclaration` -> `TIDType`/
   `TIDStructure`/`TIDProcedure`/`TIDVariable`/`TIDField`/`TIDParam`/...): the **real** AST.
   `TIDDeclaration = class(TASTDeclaration)` - B extends A.
 - **`.astjson` is emitted from hierarchy B only** (declaration signatures).
@@ -63,7 +63,7 @@ Emission: `ToJson` overrides in `AST.Delphi.Classes.pas`, driven by
 ### Base fields on every declaration
 `kind`, `name`, `handle`, `srcRow`, `srcCol`
 (`TIDDeclaration.ToJson`, `AST.Delphi.Classes.pas:2967`).
-- **`srcCol` = `Col − Length(name)`** → the *start* column of the identifier (1-based).
+- **`srcCol` = `Col − Length(name)`** -> the *start* column of the identifier (1-based).
 - **`handle` = `TASTHandle(Self)`** = the object's memory address
   (`AST.Classes.pas:852`). **Non-deterministic across runs.**
 
@@ -105,7 +105,7 @@ The goldens are **not** a CST oracle. A direct tree diff is impossible and point
 The only sound use is a **declaration-inventory projection**:
 
 **Plan (deferred until PasTree has a projection layer):**
-1. Build a PasTree → *declaration summary* projector that walks the CST and emits,
+1. Build a PasTree -> *declaration summary* projector that walks the CST and emits,
    per unit: ordered interface/implementation declarations with
    `{ kind, name, srcRow, srcCol(start), typeKind, ancestorName,
    members[], params[{modifier, name, typeName}], resultTypeName, isVirtual, isOverload }`.
@@ -133,7 +133,7 @@ DelphiAST's value is its **semantics**, and PasTree must eventually match it.
 Stated goal: PasTree should reach **at least the same functional level** as
 DelphiAST - i.e. grow a full semantic layer on top of the CST providing:
 
-1. **Generic instantiation** (`List<T>` → `List<Integer>`).
+1. **Generic instantiation** (`List<T>` -> `List<Integer>`).
 2. **Overload resolution** (rank candidates, implicit-cast/data-loss tiers).
 3. **Full type-checking** (assignability, operator typing, member access).
 4. **Delphi-compatible `EXXXX` diagnostics** (same codes/messages as dcc).
@@ -164,4 +164,4 @@ goal; it is PasTree's distinguishing edge.
 | `Source/Lexers/AST.Lexer*.pas` | generic + Delphi lexer |
 | `AST.Parser.Contexts.pas` | RPN expression stack |
 | `AST.Delphi.System*.pas`, `SysTypes/SysFunctions/SysOperators` | builtin bootstrap |
-| `TestApp/` | GUI driver; calls `Module.ToJson` → writes `.pas.astjson` |
+| `TestApp/` | GUI driver; calls `Module.ToJson` -> writes `.pas.astjson` |
