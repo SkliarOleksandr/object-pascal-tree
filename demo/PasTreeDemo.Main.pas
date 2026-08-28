@@ -3242,8 +3242,10 @@ begin
     if LAccepted then
     begin
       FDirtyFiles.Clear;
-      lblProgress.Caption := Format('module %d ms',
-        [FAsyncStart.ElapsedMilliseconds]);
+      // The label is a PROGRESS indicator and ends where every other path
+      // ends - at 'done'. The timing belongs in the message log, which the
+      // line below writes.
+      lblProgress.Caption := 'done';
       Log(Format('Reanalyzed %s only - %d ms (%s)',
         [TPath.GetFileName(FAsyncModulePath), FAsyncStart.ElapsedMilliseconds,
          LTimings]));
