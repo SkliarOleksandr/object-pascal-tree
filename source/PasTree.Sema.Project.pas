@@ -133,6 +133,22 @@ type
     // Why the last IntfPrefixBounds/IntfPrefixSame said no, in detail — the
     // refusal reason AnalyzeModuleOnly publishes in StageTimings. Diagnostic
     // only; nothing branches on it.
+{$IFDEF PASTREE_MEMBERSTATS}
+    { MEASUREMENT BUILD ONLY (INCREMENTAL-NEXT lead 4) — compiled out without
+      the define. Counts every top-level FindMemberX query so the REPEAT RATE
+      can be read off a real closure: per pass and per fixpoint ROUND (a round
+      commits new bindings, so repeats across rounds are not cacheable), keyed
+      both with and without the asking model — the answer depends on the asker
+      (helpers and builtin identity resolve per referring model), so the gap
+      between the two is what a shared cache could ever add over a per-model
+      one. See local/perf/PasTreeMemberStats.dpr and the lead's write-up for
+      what the numbers turned out to be. }
+    FStatsLock: TCriticalSection;
+    FStatsPass: string;
+    FStatsCalls: TDictionary<string, Integer>;    // pass -> calls
+    FStatsKeys: TDictionary<string, Byte>;        // pass|asker|base|name
+    FStatsKeysNoAsker: TDictionary<string, Byte>; // pass|base|name
+{$ENDIF}
     FLastBoundaryNote: string;
     FPP: TPasPreprocessor;
     // Reusable preprocessors for the parallel load/declared passes: Process
@@ -312,6 +328,11 @@ type
       cleanly at the boundary — an interface symbol living past the first
       implementation-scoped one would be compared by nobody. Both answers
       mean "no fast path", never "assume it is fine". }
+{$IFDEF PASTREE_MEMBERSTATS}
+    // Records one top-level member query — see the FStats* fields.
+    procedure NoteMemberQuery(AFromMid: Integer; const ABase: TSemaXType;
+      const ANameLower: string);
+{$ENDIF}
     function ScopeIsImplSide(AModel: TPasSemaModel;
       AScope, AImplScope: Integer): Boolean;
     function IntfPrefixBounds(AModel: TPasSemaModel;
@@ -710,6 +731,13 @@ type
       known-bad one both answer -1). Pure lookup — never loads anything, so a
       host may call it on a finished project. }
     function ModelIdOf(const APath: string): Integer;
+{$IFDEF PASTREE_MEMBERSTATS}
+    { Measurement build only — see FStatsCalls. Per pass and round: how many
+      member queries ran, how many were DISTINCT, and how many would be
+      distinct without the asking model in the key. The ratio is the ceiling
+      any memoization of FindMemberX could reach. }
+    function MemberStatsReport: string;
+{$ENDIF}
     { Every unit name the project's search paths can reach — completion's
       uses-clause candidates beyond the analyzed closure. Delegates to the
       source manager's cached scan (see its contract). }
@@ -1028,6 +1056,13 @@ begin
   FInstances := TList<TSemaInstance>.Create;
   FInstKeys := TDictionary<TSemaInstance, Integer>.Create(GInstanceComparer);
   FInstLock := TCriticalSection.Create;
+{$IFDEF PASTREE_MEMBERSTATS}
+  FStatsLock := TCriticalSection.Create;
+  FStatsCalls := TDictionary<string, Integer>.Create;
+  FStatsKeys := TDictionary<string, Byte>.Create;
+  FStatsKeysNoAsker := TDictionary<string, Byte>.Create;
+  FStatsPass := 'other';
+{$ENDIF}
   FSystemUnitId := -1;
   FSystemUnitResolved := False;
   FSysInitUnitId := -1;
@@ -1041,6 +1076,12 @@ begin
   FSystemUnitLock.Free;
   ClearHelperIdx;
   FInstLock.Free;
+{$IFDEF PASTREE_MEMBERSTATS}
+  FStatsLock.Free;
+  FStatsCalls.Free;
+  FStatsKeys.Free;
+  FStatsKeysNoAsker.Free;
+{$ENDIF}
   FInstKeys.Free;
   FInstances.Free;
   FByPath.Free;
@@ -6376,6 +6417,11 @@ var
   LScope, LDef, LChild, LDepth, LFound, LRMid, LRSym: Integer;
   LRootName: string;   // the implicit ancestor for a heritage-less struct
 begin
+{$IFDEF PASTREE_MEMBERSTATS}
+  // Top-level calls only — the constraint hop re-enters and would double-count.
+  if ADepth = 0 then
+    NoteMemberQuery(AFromMid, ABase, ANameLower);
+{$ENDIF}
   Result := False;
   AMemMid := NIL_SYM;
   AMemSym := NIL_SYM;
@@ -8284,6 +8330,9 @@ procedure TPasSemaProject.RunCrossTypePass(ACount: Integer);
 var
   LIdx: Integer;
 begin
+{$IFDEF PASTREE_MEMBERSTATS}
+  FStatsPass := 'xtype';
+{$ENDIF}
   SetLength(FXNewExt, ACount);
   for LIdx := 0 to ACount - 1 do
     FXNewExt[LIdx] := TDictionary<Integer, TPasExtRef>.Create;
@@ -10198,6 +10247,9 @@ begin
     Inc(LRound);
     for LIdx := 0 to ACount - 1 do
       LPending[LIdx] := nil;
+{$IFDEF PASTREE_MEMBERSTATS}
+    FStatsPass := 'decl#' + IntToStr(LRound);   // per ROUND: bindings move
+{$ENDIF}
     ForEachIndex(ACount - 1, 'declarations',      procedure(AIdx: Integer)
       begin
         CrossResolveDecl(AIdx, LPending[AIdx], LEmit);
@@ -10379,6 +10431,9 @@ var
   LPending: TArray<TArray<TPasInhPending>>;
   LIdx, LP: Integer;
 begin
+{$IFDEF PASTREE_MEMBERSTATS}
+  FStatsPass := 'inherited';
+{$ENDIF}
   // Sequential point right before the first parallel FindMemberX consumers:
   // the helper registry must be complete and read-only by the time the
   // workers below start (see BuildHelperMap / ActiveHelperFor).
@@ -10390,6 +10445,9 @@ begin
   RunDeclPass(ACount);
   SizeCrossWork(ACount);   // slots must exist before workers write their own
   SetLength(LPending, ACount);
+{$IFDEF PASTREE_MEMBERSTATS}
+  FStatsPass := 'inherited';   // RunDeclPass above retagged it
+{$ENDIF}
   ForEachIndex(ACount - 1, 'inherited',    procedure(AIdx: Integer)
     begin
       CrossResolveInherited(AIdx, LPending[AIdx]);
@@ -10591,6 +10649,9 @@ begin
       LPending[LIdx] := nil;
       LUnres[LIdx] := nil;
     end;
+{$IFDEF PASTREE_MEMBERSTATS}
+    FStatsPass := 'with#' + IntToStr(LRound);   // per ROUND: bindings move
+{$ENDIF}
     ForEachIndex(ACount - 1, 'with',      procedure(AIdx: Integer)
       begin
         CrossResolveWith(AIdx, LPending[AIdx], LEmit, LUnres[AIdx]);
@@ -10910,6 +10971,62 @@ begin
   end;
   Result := True;
 end;
+
+{$IFDEF PASTREE_MEMBERSTATS}
+procedure TPasSemaProject.NoteMemberQuery(AFromMid: Integer;
+  const ABase: TSemaXType; const ANameLower: string);
+var
+  LBase, LKey: string;
+  LCount: Integer;
+begin
+  LBase := Format('%d:%d:%d:%s',
+    [ABase.UnitId, ABase.Sym, ABase.Inst, ANameLower]);
+  FStatsLock.Enter;
+  try
+    if not FStatsCalls.TryGetValue(FStatsPass, LCount) then
+      LCount := 0;
+    FStatsCalls.AddOrSetValue(FStatsPass, LCount + 1);
+    LKey := FStatsPass + '|' + IntToStr(AFromMid) + '|' + LBase;
+    FStatsKeys.AddOrSetValue(LKey, 1);
+    FStatsKeysNoAsker.AddOrSetValue(FStatsPass + '|' + LBase, 1);
+  finally
+    FStatsLock.Leave;
+  end;
+end;
+
+function TPasSemaProject.MemberStatsReport: string;
+var
+  LTotal, LDistinct, LDistinctNA, LCalls, LD, LDNA: Integer;
+  LPass, LKey: string;
+begin
+  Result := 'member queries (pass: calls / distinct / distinct-ignoring-'
+    + 'asker = repeat factor)' + sLineBreak;
+  LTotal := 0;
+  LDistinct := 0;
+  LDistinctNA := 0;
+  for LPass in FStatsCalls.Keys do
+  begin
+    LCalls := FStatsCalls[LPass];
+    LD := 0;
+    for LKey in FStatsKeys.Keys do
+      if LKey.StartsWith(LPass + '|') then
+        Inc(LD);
+    LDNA := 0;
+    for LKey in FStatsKeysNoAsker.Keys do
+      if LKey.StartsWith(LPass + '|') then
+        Inc(LDNA);
+    Inc(LTotal, LCalls);
+    Inc(LDistinct, LD);
+    Inc(LDistinctNA, LDNA);
+    if LD > 0 then
+      Result := Result + Format('  %-12s %8d / %8d / %8d = %.2fx' +
+        sLineBreak, [LPass, LCalls, LD, LDNA, LCalls / LD]);
+  end;
+  if LDistinct > 0 then
+    Result := Result + Format('  %-12s %8d / %8d / %8d = %.2fx' + sLineBreak,
+      ['TOTAL', LTotal, LDistinct, LDistinctNA, LTotal / LDistinct]);
+end;
+{$ENDIF}
 
 function TPasSemaProject.UsesAllLoaded(AModel: TPasSemaModel; AId: Integer;
   out AWhy: string): Boolean;
