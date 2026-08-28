@@ -338,6 +338,16 @@ type
     // needs a re-analysis to get its text and transient maps back; otherwise
     // opening one is free. See OpenFileTab.
     FLastBuildDemoted: Boolean;
+    // The main source the CURRENT FSemaProject was built from. A donor only
+    // makes sense for the same project - switching projects changes the
+    // search paths, so the gate would refuse it anyway; without this we would
+    // log a refusal every time somebody opens a different project.
+    FSemaProjectRoot: string;
+    // An opened tab wanted a re-analysis while a build was already running.
+    // Arming the debounce there would CANCEL that build and restart it quiet,
+    // which is how opening a project used to lose its own report - so the
+    // wish is remembered and re-checked after the build lands.
+    FPendingTabReanalyze: Boolean;
     FAsyncStart: TStopwatch;       // wall-clock of the in-flight async build
     FLoadingFile: Boolean;         // suppresses OnChange during programmatic load
     // Guards every FNav/FSemaProject READ (ResolveAt, ActiveRoutineTarget)
@@ -2353,8 +2363,18 @@ begin
   if Assigned(FSemaProject) and
      (FLastBuildDemoted or (FSemaProject.ModelIdOf(LTab.FilePath) < 0)) then
   begin
-    FReparseTimer.Enabled := False;
-    FReparseTimer.Enabled := True;
+    // ...and never ON TOP of a running build: arming the debounce cancels it
+    // and restarts it QUIET, which is how opening a project used to lose its
+    // own "Done:" report (and log a second donor refusal). The build in
+    // flight most likely covers this tab anyway; if it does not, the check
+    // runs again when it lands.
+    if Assigned(FAsyncSession) then
+      FPendingTabReanalyze := True
+    else
+    begin
+      FReparseTimer.Enabled := False;
+      FReparseTimer.Enabled := True;
+    end;
   end;
 end;
 
@@ -3098,9 +3118,15 @@ begin
   // PARSE DONOR (PasTree 0.9.0): the current project stays alive until the
   // swap in AsyncTimerTick, which is exactly the donor's contract - every
   // unit whose text is byte-identical skips preprocessing, lexing and
-  // parsing. A configuration change refuses the donor and the run simply
-  // proceeds without one, which is why the result is only logged.
-  if chkIncremental.Checked and Assigned(FSemaProject) then
+  // parsing.
+  //
+  // Only for the SAME project: another project means other search paths, so
+  // the gate would refuse the donor by definition, and offering it would log
+  // a "refused" line every time somebody opens something else. A refusal for
+  // the same project IS worth reporting - it means the configuration moved
+  // under us.
+  if chkIncremental.Checked and Assigned(FSemaProject) and
+     SameText(FSemaProjectRoot, FMainSource) then
     if not FAsyncSession.SetParseDonor(FSemaProject) then
       Log('Parse donor refused (configuration changed) - full rebuild.');
 
@@ -3288,6 +3314,28 @@ begin
     if FLastBuildDemoted then
       FSemaProject.DemoteClosedUnits(FOpenFiles.ToStringArray);
     FDirtyFiles.Clear;   // this build saw every edit made so far
+    FSemaProjectRoot := FMainSource;   // what this project was built from
+  end;
+  // A tab opened while this build was running asked for a re-analysis; now
+  // that it has landed, ask again - most of the time the answer is no,
+  // because the build covered that unit.
+  if FPendingTabReanalyze then
+  begin
+    FPendingTabReanalyze := False;
+    if Assigned(FSemaProject) and FLastBuildDemoted then
+    begin
+      FReparseTimer.Enabled := False;
+      FReparseTimer.Enabled := True;
+    end
+    else if Assigned(FSemaProject) then
+      for var LIdx := 0 to FOpenFiles.Count - 1 do
+        if FSemaProject.ModelIdOf(
+             TSourceTab(FOpenFiles.Objects[LIdx]).FilePath) < 0 then
+        begin
+          FReparseTimer.Enabled := False;
+          FReparseTimer.Enabled := True;
+          Break;
+        end;
   end;
 
   if LError <> '' then
