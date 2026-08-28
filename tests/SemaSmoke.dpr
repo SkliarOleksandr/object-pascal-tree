@@ -40,7 +40,7 @@ begin
   GModel := TPasSemaResolver.Analyze(GTree);
 end;
 
-{ As Analyze, for the handful of rules whose answer depends on the TARGET — the
+{ As Analyze, for the handful of rules whose answer depends on the TARGET - the
   builtin seed's 64-bit intrinsics, and `set of NativeInt`. }
 procedure AnalyzeOn(APlatform: TPasPlatform; const ASource: string);
 var
@@ -126,7 +126,7 @@ end;
 
 // True when EVERY bare reference spelled ARefText resolved to something (and
 // there was at least one). Unlike RefResolvesTo this needs no target name, so
-// it also covers symbols with no DeclNode at all — exactly the seeded
+// it also covers symbols with no DeclNode at all - exactly the seeded
 // builtins/intrinsics case.
 function AllRefsResolved(const ARefText: string): Boolean;
 var
@@ -242,7 +242,7 @@ const
     'implementation'#10'end.'#10;
 
   // A call no local overload admits: arg-count fires, but the call must stay
-  // UNTYPED (the real callee may be an unseen overload from another unit) —
+  // UNTYPED (the real callee may be an unseen overload from another unit) -
   // no bogus E2010 from the local head's result type.
   SRC_NOFIT =
     'unit U;'#10'interface'#10'implementation'#10 +
@@ -253,14 +253,14 @@ const
 
   // Real bug report: an ARRAY property's index parameter name (`Index` in
   // `property Items[Index: Integer]`) is a pure declaration of the
-  // property's own signature slot — nothing in real Object Pascal can ever
-  // reference it — but the resolver fell through to a generic Collect() with
+  // property's own signature slot - nothing in real Object Pascal can ever
+  // reference it - but the resolver fell through to a generic Collect() with
   // no case for nkParams/nkParam at all, so the name was never declared,
   // never marked as a declaration, and Resolve treated it as an ordinary
   // (undeclared) reference: false E2003. Mirrors System.Actions.pas's
   // TCustomShortCutList.ShortCuts exactly (private getter + one-param array
   // property reading it). Two properties reusing the SAME index name
-  // ('Index') must NOT collide with each other either (E2004) — each gets
+  // ('Index') must NOT collide with each other either (E2004) - each gets
   // its own isolated scope, same as nkProcType's signature scope.
   SRC_PROPINDEX =
     'unit U;'#10 +
@@ -287,7 +287,7 @@ const
 
   // Real bug report: an implementation may OMIT its own parameter list when
   // it exactly matches the declaration (`procedure Foo;` completing
-  // `procedure Foo(AParam: Integer);` — legal dcc). CollectRoutine only
+  // `procedure Foo(AParam: Integer);` - legal dcc). CollectRoutine only
   // declares params from the IMPLEMENTATION'S OWN nkParams child, which does
   // not exist when omitted, so the body treated every such name as an
   // ordinary (undeclared) reference: false E2003. Mirrors
@@ -314,7 +314,7 @@ const
     'end;'#10 +
     'end.'#10;
 
-  // Real bug report: {$SCOPEDENUMS ON} (2.2.4) was IGNORED — CollectEnum
+  // Real bug report: {$SCOPEDENUMS ON} (2.2.4) was IGNORED - CollectEnum
   // always injected enum values into the enclosing scope. The killer is not
   // the missing E2003 on a bare value; it is SHADOWING: System.Threading
   // (whole unit under SCOPEDENUMS ON) declares `TLoopStateFlags = (Exception,
@@ -328,7 +328,7 @@ const
   // in the unit's OWN scope cannot be shadowed by a leaked value (FindLocal-
   // Deep checks own Names before Additional). Threading's Exception was
   // shadowed precisely because it comes from a JOINED scope (the builtin
-  // system scope) and the enum join is more recent — so the fixture names
+  // system scope) and the enum join is more recent - so the fixture names
   // its value `Exception`, the builtin, exactly like the real bug.
   SRC_SCOPEDENUMS =
     'unit U;'#10 +
@@ -365,14 +365,14 @@ const
     'end;'#10 +
     'end.'#10;
 
-  { 5.7 — "a target member outranks EVERYTHING else in scope" applied to names
+  { 5.7 - "a target member outranks EVERYTHING else in scope" applied to names
     Phase 1 ALREADY BOUND. The rule was stated and dcc-verified in the spec, and
     the implementation only honoured it for targets it could not open: a target
     whose type IS same-unit resolvable opened its scope and then kept the older
     binding, because ResolveNode only fills NIL_SYM.
 
     Every member here is a `string` and every shadowed name an `Integer`, so a
-    wrong binding is not silent — it surfaces as E2010 on the assignment. All
+    wrong binding is not silent - it surfaces as E2010 on the assignment. All
     four shadow kinds from the 5.7 bullet, plus the implicit `Result`, which the
     bullet did not mention and dcc also lets the member win (W_res probe:
     `with R do Result := 'x'` compiles inside a function returning Integer). }
@@ -478,7 +478,7 @@ const
 
     Real48 (2.5.1) is compiler-provided like Comp: System.pas names it only in a
     NODEFINE directive and in comments, so a source grep says "declared" and dcc
-    says otherwise — exactly the trap the intrinsic-routine list in
+    says otherwise - exactly the trap the intrinsic-routine list in
     Sema.Builtins documents. 11 false E2003.
 
     Meth(Source := X) is an OLE-automation NAMED ARGUMENT (4.10.1), legal on a
@@ -509,13 +509,13 @@ const
     non-generic declaration. One library unit has all three, in this order:
     `TJclArrayIterator` (arity 0), `TJclArrayIterator<T> = class;` (the
     forward), then the real `TJclArrayIterator<T>`. FindLocal returns the HEAD
-    of the name's overload chain — the arity-0 class — so the arity test read
+    of the name's overload chain - the arity-0 class - so the arity test read
     "a different type", the completion declared a THIRD symbol, and the empty
     forward stayed the arity-1 winner. Every method body of the real class then
     lost its own fields AND its inherited members: ~60 false E2003 in that one
     unit. The completion has to be searched along the whole chain.
 
-    The non-generic sibling is load-bearing here — without it the shape does not
+    The non-generic sibling is load-bearing here - without it the shape does not
     reproduce at all, which is exactly why it took a real corpus to surface. }
   SRC_FWDGENERIC =
     'unit U;'#10 +
@@ -546,14 +546,14 @@ const
     'end.'#10;
 
   { A directive WORD used as the name of the next declaration. Directives are
-    context-sensitive identifiers, and `unsafe` is one — so ConsumeTrailingDirectives
+    context-sensitive identifiers, and `unsafe` is one - so ConsumeTrailingDirectives
     read a component suite's `Unsafe = class` as the `cdecl = nil` shape (a
     procedural VARIABLE whose initializer follows its calling convention) and
     swallowed the type declaration, everything the interface declared after it,
     and every use of any of it across the library: 283 false E2003 from one line.
     Only a VAR section can legitimately reach an '=' there.
 
-    TSecond exists to prove the damage was not limited to the swallowed name —
+    TSecond exists to prove the damage was not limited to the swallowed name -
     it is what "everything after it" means. The procedural-var shape the '='
     branch exists for is asserted alongside, so the fix cannot silently undo it. }
   SRC_DIRECTIVENAME =
@@ -588,10 +588,10 @@ const
     'end;'#10 +
     'end.'#10;
 
-  { 5.7 — four target FORMS from the section's table that nothing else covers.
+  { 5.7 - four target FORMS from the section's table that nothing else covers.
     All four compile under dcc 37.0; `with TCanvas do` was the one that did not
     work here, because the nkIdent path asked for the symbol's DECLARED type and
-    a type symbol has none — for a bare class name the target's type is the type
+    a type symbol has none - for a bare class name the target's type is the type
     ITSELF, the same reach a `class of` reference gives. }
   SRC_WITHFORMS =
     'unit U;'#10 +
@@ -648,7 +648,7 @@ const
   // would make them unreachable by any spelling. dcc-verified under
   // {$SCOPEDENUMS ON}: `Include(S, SetChecked)` on `set of (SetChecked,
   // CallClick)` compiles, while the bare value of a NAMED enum does not.
-  // FMX.StdCtrls (a SCOPEDENUMS unit) is the real case — TCustomSwitch's
+  // FMX.StdCtrls (a SCOPEDENUMS unit) is the real case - TCustomSwitch's
   // `TNeededToDo = set of (SetChecked, CallClick)`, 8 false E2003.
   SRC_ANONENUM =
     'unit U;'#10 +
@@ -680,14 +680,14 @@ const
     'end.'#10;
 
   // Real bug report: an inline var declaring SEVERAL names (`var V, S:
-  // string;`, 10.3+, dcc-verified) declared only the FIRST — every other name
+  // string;`, 10.3+, dcc-verified) declared only the FIRST - every other name
   // was then an undeclared identifier, and the shared type bound to none of
   // them. Mirrors System.SysUtils' `var V, S: string` and System.TypInfo's
   // `var sType, sEnum: string`. The single-name and no-type-with-initializer
   // forms are the controls: an inline var's tail may be an initializer with
   // no type at all, and it still has to be collected.
   // Real bug report: a function whose RESULT TYPE is a generic instantiation
-  // (`function LockList: TList<T>;` — System.Generics.Collections) lost its
+  // (`function LockList: TList<T>;` - System.Generics.Collections) lost its
   // result type entirely: CollectRoutine's name-segment loop consumed the
   // nkTypeArgs following the name ident as the SEGMENT's generic args, though
   // the ':' separator marks it as the result type. Only the separator tells
@@ -727,7 +727,7 @@ const
     'end.'#10;
 
   // Real bug report: two with-target shapes the type-of-target walk did not
-  // know. A CAST (`with TVarData(X) do`) and a DEREFERENCE (`with P^ do`) —
+  // know. A CAST (`with TVarData(X) do`) and a DEREFERENCE (`with P^ do`) -
   // System.ObjAuto and System.Variants respectively, both writing to a
   // `VType` field that then read as undeclared. The cast branch existed in
   // Phase 1 but not in the cross-unit twin; nkDeref existed in NEITHER.
@@ -758,7 +758,7 @@ const
     '  LO: TAncestor;'#10 +
     'begin'#10 +
     // An `as`-CAST target. Phase 1 reads the operator lexeme off nkBinaryOp's
-    // Aux, which is a TOKEN index — passing it to NodeText (a NODE index) read
+    // Aux, which is a TOKEN index - passing it to NodeText (a NODE index) read
     // past the end of Nodes, so the comparison against 'as' usually came out
     // False on garbage and this target silently never opened. Invisible from
     // the project-level suites: the cross-model twin reads Aux correctly and
@@ -784,11 +784,11 @@ const
   // T's, so a method of T referencing a helper member bare (`Result :=
   // Identity` in System.Math.Vectors' TMatrix.CreateRotation, where Identity
   // is a const of `TMatrixConstants = record helper for TMatrix`) was a false
-  // E2003 — as was the reverse direction, the helper's own body reaching T's
+  // E2003 - as was the reverse direction, the helper's own body reaching T's
   // fields through the implicit Self. Note `Double` here: a bare helper
   // METHOD whose name collides with a builtin type must reach the helper,
-  // not System's Double (that one never E2003'd — it silently mis-resolved).
-  // B.3 — an &-escaped identifier is the SAME identifier as the bare one; the
+  // not System's Double (that one never E2003'd - it silently mis-resolved).
+  // B.3 - an &-escaped identifier is the SAME identifier as the bare one; the
   // ampersand only stops the word being read as a keyword. Real bug report:
   // Vcl.Controls declares `var Message: TWMKeyDown` and then writes BOTH
   // `&Message.CmdType` and `Broadcast(Message)` in one routine, so the two
@@ -858,7 +858,7 @@ const
     'end.'#10;
 
   // `TFoo = record helper for TFoo` is malformed but parses, and the `for`
-  // name resolves right back to the helper — the join must refuse it, or
+  // name resolves right back to the helper - the join must refuse it, or
   // FindLocalDeep recurses forever on the first failed lookup (hence the
   // deliberately undeclared name in the body: it forces a full miss).
   // Completing the analysis at all is the assertion.
@@ -878,7 +878,7 @@ const
 
   // Real bug report: a `label` section declared NOTHING (the parser emitted
   // nkLabelSec as a bare token span with no children, and Collect had no case
-  // for it), while a labeled statement DID emit an nkIdent for its own name —
+  // for it), while a labeled statement DID emit an nkIdent for its own name -
   // so `notAscii:` resolved to nothing and Phase 2 reported a false E2003.
   // Mirrors System.Generics.Defaults.AnsiIdentHash exactly. Numeric labels
   // (`goto 1`) declare no name and must stay diagnostic-free too.
@@ -916,9 +916,9 @@ const
 
   // Real bug report: `with` statement member resolution was NOT IMPLEMENTED
   // at all (found via Vcl.ComCtrls.pas: `with FItems.Add do begin Caption :=
-  // S; Result := Index; end;` — Caption/Index are members of the with-
+  // S; Result := Index; end;` - Caption/Index are members of the with-
   // target's OWN class, never declared as locals). `Result` here is the
-  // ENCLOSING FUNCTION's own Result, not a with-target member — must not be
+  // ENCLOSING FUNCTION's own Result, not a with-target member - must not be
   // shadowed by the with-scope.
   SRC_WITHSTMT =
     'unit U;'#10 +
@@ -950,8 +950,8 @@ const
     'end;'#10 +
     'end.'#10;
 
-  // Multi-target precedence (ch.05 §5.7): `with A, B do` resolves a shared
-  // name against the LAST target first. TA.X is Integer, TB.X is string —
+  // Multi-target precedence (ch.05 sec. 5.7): `with A, B do` resolves a shared
+  // name against the LAST target first. TA.X is Integer, TB.X is string -
   // if precedence were wrong (picked TA.X), `S := X` would be an
   // Integer->string assignment and fire E2010; correct precedence (TB.X)
   // assigns string->string, no diagnostic.
@@ -972,7 +972,7 @@ const
 
   // Nested `with`: the inner target (B, a field of A) must resolve THROUGH
   // the outer with's scope, and the inner body sees both (innermost/last
-  // wins on a shared name — here there is none, just confirming reach).
+  // wins on a shared name - here there is none, just confirming reach).
   SRC_WITHNESTED =
     'unit U;'#10 +
     'interface'#10 +
@@ -993,7 +993,7 @@ const
   // Vcl.ComCtrls.pas's TComboExItems.Add returns TComboExItem, whose
   // Caption/Index are declared on its ANCESTOR TListControlItem, not on
   // TComboExItem itself). CollectStruct never joins an ancestor's
-  // MemberScope into the descendant's own — AncestorTypeSym/
+  // MemberScope into the descendant's own - AncestorTypeSym/
   // FindMemberUpChain climb it (same-unit only) instead. TDerived's OWN
   // Index must still shadow anything of the same name an ancestor might
   // have (none here, but exercises the "own scope checked first" ordering).
@@ -1071,7 +1071,7 @@ const
   // Compiler intrinsics with NO declaration anywhere (spec B.4.3): the whole
   // classic file-I/O family, raw memory, Halt/GetDir, the Variant four,
   // CompilerVersion and the OpenString type. Every one of these must resolve
-  // straight out of the seeded System scope — nothing else CAN resolve them
+  // straight out of the seeded System scope - nothing else CAN resolve them
   // (real bug: the RTL's own System.Classes.pas got a false E2003 on GetMem).
   // The negative half matters just as much: `Abort` looks like a flow
   // intrinsic but is an ordinary System.SysUtils routine, so a unit that does
@@ -1104,7 +1104,7 @@ const
     'end;'#10 +
     'end.'#10;
 
-  // Companion negative case — see SRC_INTRINSICS.
+  // Companion negative case - see SRC_INTRINSICS.
   SRC_NOTINTRINSIC =
     'unit U;'#10 +
     'interface'#10 +
@@ -1119,9 +1119,9 @@ const
   // fields, a var and routines; the implementation adds bodies (and its own
   // locals). Because SeedSystemScope runs first (identical) and the interface
   // is collected before the implementation, every symbol id an interface-only
-  // model assigns must equal the full model's symbol at the SAME id — the
+  // model assigns must equal the full model's symbol at the SAME id - the
   // guarantee that keeps other units' cross-references valid across the
-  // intf->full snapshot swap (async parser plan §2.2).
+  // intf->full snapshot swap (async parser plan sec. 2.2).
   SRC_STAGED =
     'unit Staged;'#10 +
     'interface'#10 +
@@ -1230,7 +1230,7 @@ begin
   Ok('propindex: read Pairs -> GetPair resolves',
     RefResolvesTo('GetPair', 'GetPair'));
   // The getter's OWN Index param (a different, ordinary routine-param scope)
-  // still resolves normally inside its body — untouched by this fix.
+  // still resolves normally inside its body - untouched by this fix.
   Ok('propindex: GetPair body Index resolves to its own param',
     RefResolvesTo('Index', 'Index'));
   Ok('propindex: no false E2003 (the index placeholder names)',
@@ -1240,7 +1240,7 @@ begin
   GModel.Free;
 
   // 9c. implementation omits its own parameter list (method AND global
-  // routine) — the omitted names must still resolve inside the body.
+  // routine) - the omitted names must still resolve inside the body.
   Analyze(SRC_OMITPARAMS);
   Ok('omitparams: no false E2003', DiagCount('E2003') = 0);
   Ok('omitparams: method body Index resolves',
@@ -1271,7 +1271,7 @@ begin
     AllRefsResolved('Gamma'));
   GModel.Free;
 
-  // 5.7 — a with member outranks a name Phase 1 already bound.
+  // 5.7 - a with member outranks a name Phase 1 already bound.
   Analyze(SRC_WITHSHADOW);
   Ok('withshadow: no diags at all', Length(GModel.Diags) = 0);
   // Each assignment is string-to-string ONLY if the member won; if the
@@ -1280,7 +1280,7 @@ begin
     DiagCount('E2010') = 0);
   GModel.Free;
 
-  // Real48 and OLE named arguments — both from that project's first run.
+  // Real48 and OLE named arguments - both from that project's first run.
   Analyze(SRC_AVICLUSTERS);
   Ok('aviclusters: no diags at all', Length(GModel.Diags) = 0);
   Ok('aviclusters: Real48 is a seeded builtin', TypeOf('r', skVar) = 'Real48');
@@ -1312,7 +1312,7 @@ begin
     HasSym('Hook', skVar));
   GModel.Free;
 
-  // 5.7 — target forms: inherited property, class reference, bare class type
+  // 5.7 - target forms: inherited property, class reference, bare class type
   // name, interface.
   Analyze(SRC_WITHFORMS);
   Ok('withforms: no diags at all', Length(GModel.Diags) = 0);
@@ -1338,7 +1338,7 @@ begin
     RefResolvesTo('offset', 'offset') and RefResolvesTo('minimum', 'minimum'));
   GModel.Free;
 
-  // ANONYMOUS enums are exempt from SCOPEDENUMS — there is no name to qualify.
+  // ANONYMOUS enums are exempt from SCOPEDENUMS - there is no name to qualify.
   Analyze(SRC_ANONENUM);
   Ok('anonenum: no diags at all', Length(GModel.Diags) = 0);
   Ok('anonenum: a nested `set of (...)` injects its values',
@@ -1377,21 +1377,21 @@ begin
   Ok('withshapes: no diags at all', Length(GModel.Diags) = 0);
   Ok('withshapes: every VType reference resolves to the field',
     AllRefsResolved('VType') and RefResolvesTo('VType', 'VType'));
-  // `with LO as TChild do Tag := 9` — the as-cast target, INTRA-UNIT.
+  // `with LO as TChild do Tag := 9` - the as-cast target, INTRA-UNIT.
   Ok('withshapes: as-cast target opens (Tag resolves)',
     AllRefsResolved('Tag') and RefResolvesTo('Tag', 'Tag'));
   Ok('withshapes: the call-target control still resolves (F)',
     RefResolvesTo('F', 'F'));
   GModel.Free;
 
-  // 9c-quinquies. &-escaped identifiers (B.3) — same symbol as the bare form.
+  // 9c-quinquies. &-escaped identifiers (B.3) - same symbol as the bare form.
   Analyze(SRC_AMPERSAND);
   Ok('ampersand: no diags at all', Length(GModel.Diags) = 0);
   Ok('ampersand: no false E2003', DiagCount('E2003') = 0);
-  // Declared plain, written `&Message` — the reference must reach the parameter.
+  // Declared plain, written `&Message` - the reference must reach the parameter.
   Ok('ampersand: &Message resolves to the plain-declared Message',
     RefResolvesTo('&Message', 'Message'));
-  // Declared `&Handled`, written plain — the DECLARATION key must be stripped,
+  // Declared `&Handled`, written plain - the DECLARATION key must be stripped,
   // so the symbol is named `Handled` and the bare reference finds it.
   Ok('ampersand: plain Handled resolves to the &-declared parameter',
     RefResolvesTo('Handled', '&Handled'));
@@ -1453,7 +1453,7 @@ begin
 
   Analyze(SRC_WITHMULTI);
   Ok('with-multi: no diags at all', Length(GModel.Diags) = 0);
-  Ok('with-multi: last target (TB.X, string) wins over TA.X (Integer) — '
+  Ok('with-multi: last target (TB.X, string) wins over TA.X (Integer) - '
     + 'no E2010 from a wrong Integer->string assign',
     DiagCount('E2010') = 0);
   GModel.Free;
@@ -1496,7 +1496,7 @@ begin
     not HasSym('Integer', skField));
 
   // 9e. declaration-less compiler intrinsics (spec B.4.3) resolve from the
-  // seeded System scope — and `Abort`, which is NOT one, still does not.
+  // seeded System scope - and `Abort`, which is NOT one, still does not.
   Analyze(SRC_INTRINSICS);
   Ok('intrinsics: no diags at all', Length(GModel.Diags) = 0);
   for var LName in ['GetMem', 'FreeMem', 'ReallocMem', 'Assign', 'AssignFile',
@@ -1524,7 +1524,7 @@ begin
     try
       Ok('staged: intf model has fewer symbols than full',
         LIntfModel.SymCount < LFullModel.SymCount);
-      // The interface declared these — all must exist in the intf-only model.
+      // The interface declared these - all must exist in the intf-only model.
       var LHaveIntfSyms := True;
       var LNames: TArray<string> := ['TFoo', 'FX', 'Bar', 'Baz', 'GCount',
         'Helper'];
@@ -1712,7 +1712,7 @@ begin
   GModel.Free;
 
   // A named nested routine is not lexically inside the handler, so its body
-  // starts with no context — dcc rejects it and so must we.
+  // starts with no context - dcc rejects it and so must we.
   Analyze(
     'unit u;'#10'interface'#10'implementation'#10 +
     'procedure P;'#10 +
@@ -1770,7 +1770,7 @@ begin
     DiagHasText('E2193', 'only allowed as open array argument'));
   GModel.Free;
 
-  // The sanctioned position, in all three forms dcc accepts — including a
+  // The sanctioned position, in all three forms dcc accepts - including a
   // Slice of an open-array parameter, which is how the RTL uses it.
   Analyze(
     'unit u;'#10'interface'#10'implementation'#10 +
@@ -1862,7 +1862,7 @@ begin
   Ok('e2001: dcc''s wording', DiagHasText('E2001', 'Ordinal type required'));
   GModel.Free;
 
-  // The ordinal ones, including a SPARSE enum — which dcc accepts everywhere,
+  // The ordinal ones, including a SPARSE enum - which dcc accepts everywhere,
   // against what 2.1.1/2.2.4 used to claim.
   Analyze(
     'unit u;'#10'interface'#10 +
@@ -1887,7 +1887,7 @@ begin
     DiagCount('E2001') = 0);
   GModel.Free;
 
-  // E2032 — the same rule for a `for` counter, with dcc's own message. Variant
+  // E2032 - the same rule for a `for` counter, with dcc's own message. Variant
   // is an error HERE and legal as a `case` selector: per position, not per type.
   Analyze(
     'unit u;'#10'interface'#10'implementation'#10 +
@@ -1972,7 +1972,7 @@ begin
   GModel.Free;
 
   // The `case` selector: same code as the type positions, different exemptions
-  // — a record is an error here even with an Implicit operator to an ordinal.
+  // - a record is an error here even with an Implicit operator to an ordinal.
   Analyze(
     'unit u;'#10'interface'#10'implementation'#10 +
     'type'#10 +
@@ -2007,7 +2007,7 @@ begin
     'type'#10 +
     '  TNeg = -5..5;'#10 +
     '  TBigEnum = (beA = 0, beB = 256);'#10 +
-    // Implicit successors after an explicit value creep past 255 — dcc-verified
+    // Implicit successors after an explicit value creep past 255 - dcc-verified
     // that six of them (ending at 255) are legal and seven are not.
     '  TCreep = (cA = 250, cB, cC, cD, cE, cF, cG);'#10 +
     '  S1 = set of Word;'#10 +
@@ -2091,7 +2091,7 @@ begin
     RefBindKind('Pointer', 0) = 'generic');
   GModel.Free;
 
-  // A non-generic of that name declared in the SAME unit beside the generic —
+  // A non-generic of that name declared in the SAME unit beside the generic -
   // the same-scope chain rather than the system seed.
   Analyze(
     'unit u;'#10'interface'#10 +
@@ -2166,7 +2166,7 @@ begin
 
   // ---- `&&`-prefixed names (B.3) ----
   // One '&' escapes and the rest belong to the NAME, so `&&op_Equality` is a
-  // different member from `op_Equality` — dcc accepts both in one record and
+  // different member from `op_Equality` - dcc accepts both in one record and
   // rejects `&op_Equality` beside `op_Equality`. Before this, the stray '&'
   // token derailed the class body and its parameters were declared into the
   // enclosing scope (5 false E2004 in its TValue).

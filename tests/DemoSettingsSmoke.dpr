@@ -5,9 +5,9 @@ program DemoSettingsSmoke;
 
   Worth a suite despite living in the demo, for one reason: none of this is
   checkable by looking at the running program. The list only shows itself when
-  a drop-down opens, and the rules that make it useful — most-recent-first,
+  a drop-down opens, and the rules that make it useful - most-recent-first,
   one entry per project however it was spelled, a cap that does not leave a
-  tail behind in the file — are exactly the ones that break silently. }
+  tail behind in the file - are exactly the ones that break silently. }
 
 {$APPTYPE CONSOLE}
 
@@ -24,7 +24,7 @@ var
 
 procedure Ok(const AName: string; ACond: Boolean); forward;
 
-{ The include-argument span, asserted as the TEXT it selects — an expected ''
+{ The include-argument span, asserted as the TEXT it selects - an expected ''
   means "column ACol is not inside an $I argument". Comparing text rather than
   two column numbers is what makes a failure readable. }
 procedure CheckSpan(const AName, ALine: string; ACol: Integer;
@@ -60,7 +60,7 @@ begin
   TFile.WriteAllText(Result, '{}');
 end;
 
-// Lower-cased, because re-adding an entry stores the spelling just used —
+// Lower-cased, because re-adding an entry stores the spelling just used -
 // `AddRecent(UpperCase(P))` leaves the path upper-cased, which is right (it is
 // what the user typed) and would otherwise make these comparisons about case.
 function Joined(const A: TArray<string>): string;
@@ -104,7 +104,7 @@ begin
       Joined(LSet.Recent) = 'a.dproj;c.dproj;b.dproj;');
 
     // The filesystem is case-insensitive here, so a differently-cased or
-    // relative spelling is the SAME project — the commonest way a list like
+    // relative spelling is the SAME project - the commonest way a list like
     // this fills up with the same entry three times.
     LSet.AddRecent(UpperCase(LB));
     Ok('case-insensitive dedup', Length(LSet.Recent) = 3);
@@ -129,7 +129,7 @@ begin
     LSet.Free;
   end;
 
-  // Reload: the cap must have SHRUNK the file, not just the in-memory list —
+  // Reload: the cap must have SHRUNK the file, not just the in-memory list -
   // leaving the old tail under its own keys would read straight back.
   LSet := TDemoSettings.Create(LIni);
   try
@@ -168,7 +168,7 @@ begin
     '{$I ''..\lib\a b.inc''}', 8, '..\lib\a b.inc');
   CheckSpan('a relative path', '{$I ..\include\common.inc}', 8,
     '..\include\common.inc');
-  // The caret one PAST the name is still the name — that is where a
+  // The caret one PAST the name is still the name - that is where a
   // double-click leaves it.
   CheckSpan('caret just past the last character', '{$I common.inc}', 12,
     'common.inc');

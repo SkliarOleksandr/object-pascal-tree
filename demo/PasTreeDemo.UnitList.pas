@@ -1,11 +1,11 @@
 unit PasTreeDemo.UnitList;
 
 {
-  PasTree demo — the list behind View Unit (Ctrl+F12), and the filter over it.
+  PasTree demo - the list behind View Unit (Ctrl+F12), and the filter over it.
 
   Data only, no form: what goes in the list, in what order, and what a typed
   filter keeps. The dialog owns the widgets and this owns the rules, the same
-  split PasTreeDemo.NavHistory makes and for the same reason — the rules have
+  split PasTreeDemo.NavHistory makes and for the same reason - the rules have
   cases that are invisible when they are wrong. A duplicate name does not look
   like a bug, it looks like a list with two rows that both say `Types.pas`, and
   the one that opens is whichever happened to be added first.
@@ -16,12 +16,12 @@ unit PasTreeDemo.UnitList;
     different search paths are ONE entry, because the analyzer will only ever
     reach one of them, and offering both would let the user open a file the
     analysis never looked at. The project's own files are added first, so a
-    project copy wins over a library one — which is the same precedence
+    project copy wins over a library one - which is the same precedence
     AnalyzeProject applies when it builds the closure.
   - the filter matches a SUBSTRING of the name, case-insensitively. Not a
     prefix: the names are dotted (`System.Types.pas`), so a prefix filter makes
     the part people actually remember unreachable. The path is deliberately NOT
-    matched — it is shown per row, but a hit invisible in the row it selects
+    matched - it is shown per row, but a hit invisible in the row it selects
     reads as a bug.
 }
 

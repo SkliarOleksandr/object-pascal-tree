@@ -1,8 +1,8 @@
-﻿program PasTreeDemo;
+program PasTreeDemo;
 
 // PasTree demo host (VCL). Opens a Delphi project, parses it with PasTree and
 // shows source (SynEdit), the file tree (VirtualTrees), diagnostics and AST
-// JSON. Build with demo\build.bat — WIN64 ONLY (needs SynEdit +
+// JSON. Build with demo\build.bat - WIN64 ONLY (needs SynEdit +
 // VirtualTreeView). A real project's closure does not fit 32 bits: see
 // demo\README.md for the measurement and for why a Win32 OOM disguises
 // itself as an analyzer defect. Every unit added to source\ must be listed

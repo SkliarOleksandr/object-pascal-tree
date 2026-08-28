@@ -1,7 +1,7 @@
-﻿unit PasTree.Preprocessor;
+unit PasTree.Preprocessor;
 
 {
-  PasTree — the preprocessor (spec: object-pascal-spec 1.3, B.2.2).
+  PasTree - the preprocessor (spec: object-pascal-spec 1.3, B.2.2).
 
   Consumes raw token streams from the lexer and produces the VISIBLE token
   stream the parser reads:
@@ -18,7 +18,7 @@
     compiler (an .inc may open a conditional the includer closes).
 
   The visible stream is an array of (FileId, TokenIndex) pairs referencing
-  the retained raw streams — full fidelity is preserved underneath.
+  the retained raw streams - full fidelity is preserved underneath.
 }
 
 interface
@@ -52,7 +52,7 @@ type
 
   TPasSymbolQuery = (sqConstValue, sqSizeOfType, sqLengthOf, sqDeclared);
 
-  // A symbol question nobody could answer — recorded (deduplicated, source
+  // A symbol question nobody could answer - recorded (deduplicated, source
   // order) exactly like UnresolvedDeclared, and consumed by the same second
   // pass to decide whether re-preprocessing could learn anything.
   TPasUnresolvedSymbol = record
@@ -72,7 +72,7 @@ type
     // table says X is declared nowhere (the overwhelmingly common
     // platform-guard case), whereas `SizeOf(SomeExoticType)` may stay
     // unanswerable forever. Without this list the two are indistinguishable
-    // and reporting both floods normal code — see
+    // and reporting both floods normal code - see
     // TPasSemaProject.ReportGuessedIfs.
     Unanswered: TArray<TPasUnresolvedSymbol>;
   end;
@@ -87,7 +87,7 @@ type
   // is the first positional directive-state record (the "Show Defines" plan
   // needs the same shape for $DEFINE later): the resolver needs to know the
   // state AT AN ENUM'S DECLARATION SITE, which a single final flag cannot
-  // answer — System.Threading turns it ON for the whole unit while most of
+  // answer - System.Threading turns it ON for the whole unit while most of
   // the RTL never does, and one unit routinely toggles it around a group of
   // declarations.
   TPasScopedEnumsEvent = record
@@ -137,7 +137,7 @@ type
     NoSymbol: Boolean;
   end;
 
-  { Answers symbol questions from a `$IF` expression — the widened sibling of
+  { Answers symbol questions from a `$IF` expression - the widened sibling of
     TPasDeclaredQuery, same three-state contract: the RESULT says whether the
     oracle could answer at all, AValue is the answer when it could. Nil on the
     first pass; TPasSemaProject.SymbolQueryFor supplies it on the second. }
@@ -156,11 +156,11 @@ type
     ScopedEnumsEvents: TArray<TPasScopedEnumsEvent>;
     // Names a `$IF Declared(X)` guard asked about that no one could answer,
     // in source order, deduplicated. Empty unless the unit uses that guard AND
-    // the run had no OnDeclared to ask — which is the signal a caller with a
+    // the run had no OnDeclared to ask - which is the signal a caller with a
     // symbol table uses to decide the unit is worth preprocessing again.
     UnresolvedDeclared: TArray<string>;
     // Same contract for the symbol questions (const values, SizeOf, Length)
-    // no OnSymbol could answer — see TPasUnresolvedSymbol.
+    // no OnSymbol could answer - see TPasUnresolvedSymbol.
     UnresolvedSymbols: TArray<TPasUnresolvedSymbol>;
     // {$Z}/{$MINENUMSIZE} state changes, ascending by VisIndex; empty for
     // the overwhelming majority of units (the default is 1).
@@ -170,7 +170,7 @@ type
     AlignEvents: TArray<TPasAlignEvent>;
     function VisibleToken(AIndex: Integer): TPasToken;
     function VisibleText(AIndex: Integer): string;
-    { SameText(VisibleText(AIndex), AWord) without materializing the text —
+    { SameText(VisibleText(AIndex), AWord) without materializing the text -
       the parser's word tests run through here (see PasTree.Types.
       SliceEqualsWord for the folding contract). }
     function VisibleTextEquals(AIndex: Integer; const AWord: string): Boolean;
@@ -205,7 +205,7 @@ type
 
   { Answers a `$IF Declared(X)` guard. The preprocessor cannot: the symbol
     table it would need is built from the token stream this very decision
-    produces. So the question is handed OUT to whoever has one — see
+    produces. So the question is handed OUT to whoever has one - see
     TPasSemaProject.RunDeclaredPass, which supplies it on a second pass once
     every unit has a model. Nil means "nobody can answer", the ordinary
     first-pass state.
@@ -213,7 +213,7 @@ type
     A three-state answer, because "I do not know" is a real and common case:
     the RESULT says whether the query could answer at all, ADeclared is the
     answer when it could. A query that knows only the compiler-provided names
-    can run on the FIRST pass — it needs no models — and takes the big RTL
+    can run on the FIRST pass - it needs no models - and takes the big RTL
     units out of the second pass entirely, which is most of what that pass
     would otherwise cost. }
   TPasDeclaredQuery = reference to function(const AName: string;
@@ -273,7 +273,7 @@ type
     FSkipped: TObjectList<TList<TPasSkippedRegion>>;
     FDiags: TList<TPasPPDiagnostic>;
     FIncludePathStack: TList<string>;
-    // Conditional stack — shared across include boundaries by design.
+    // Conditional stack - shared across include boundaries by design.
     FCondParentActive: TList<Boolean>;
     FCondAnyTaken: TList<Boolean>;
     FCondThisActive: TList<Boolean>;
@@ -318,11 +318,11 @@ type
     { Same, but with the main file's text supplied directly (tests, LSP
       buffers). AFileName is used for include resolution and reporting. }
     function ProcessText(const AFileName, ASource: string): TPasPreprocessed;
-    { Set to answer a `$IF Declared(X)` guard — see TPasDeclaredQuery. While
+    { Set to answer a `$IF Declared(X)` guard - see TPasDeclaredQuery. While
       set the expression is no longer flagged as needing semantics, because it
       no longer does. }
     property OnDeclared: TPasDeclaredQuery read FOnDeclared write FOnDeclared;
-    { The symbol oracle for `$IF` const/SizeOf/Length questions — nil on the
+    { The symbol oracle for `$IF` const/SizeOf/Length questions - nil on the
       first pass, supplied by the project's second pass exactly like
       OnDeclared. See TPasCondSymbolQuery. }
     property OnSymbol: TPasCondSymbolQuery read FOnSymbol write FOnSymbol;
@@ -332,7 +332,7 @@ type
       1.3.1/1.3.4 (switch directives, $PUSHOPT/$POPOPT) have no AST shape
       of their own to dump -- this is their observation surface, direct
       rather than round-tripped through a conditional's taken/not-taken
-      branch (though that path is also tested — see 1.3.1's own case). }
+      branch (though that path is also tested - see 1.3.1's own case). }
     function SwitchState(ASwitch: Char): Boolean;
     { Same idea for `SCOPEDENUMS`, whose positional history is already on
       TPasPreprocessed.ScopedEnumsEvents/ScopedEnumsAt -- this is just the
@@ -377,7 +377,7 @@ uses
   System.Generics.Defaults,
   PasTree.Lexer,
   // Legal circularity, deliberate: Parser interface-uses THIS unit (for
-  // TPasPreprocessed), and CondEval implementation-uses Parser — the `$IF`
+  // TPasPreprocessed), and CondEval implementation-uses Parser - the `$IF`
   // grammar is the language's own expression grammar, parsed by the one
   // real parser instead of a private re-implementation. Only the EVALUATION
   // lives in CondEval; see its unit comment.
@@ -389,7 +389,7 @@ const
 type
   { ASCII-fold case-insensitive comparer for the defines dictionary: hashes
     and compares without allocating, where the previous scheme paid a
-    LowerCase(Trim(...)) copy on EVERY Define/Undefine/IsDefined — i.e. per
+    LowerCase(Trim(...)) copy on EVERY Define/Undefine/IsDefined - i.e. per
     `$IFDEF` / `Defined()` evaluation across the whole closure. ASCII-only
     folding is the same contract the old LowerCase normalization had. }
   TDefinesNameComparer = class(TEqualityComparer<string>)
@@ -428,8 +428,8 @@ end;
 
 type
   // Every directive HandleDirective dispatches on by NAME. pdSwitch is any
-  // single-letter word except I (which is {$I file} or the {$I±} switch,
-  // told apart by its argument); pdLong is every other multi-letter word —
+  // single-letter word except I (which is {$I file} or the {$I+}/{$I-} switch,
+  // told apart by its argument); pdLong is every other multi-letter word -
   // the tracked long switches and passthrough trivia alike.
   TPPDirKind = (pdLong, pdSwitch, pdIfdef, pdIfndef, pdIf, pdIfopt, pdElseif,
     pdElse, pdEndif, pdDefine, pdUndef, pdInclude, pdPushopt, pdPopopt);
@@ -620,7 +620,7 @@ end;
 
 // Trim only: the comparer folds case at hash/compare time, so no lowered
 // copy is materialized (and Trim itself returns the SAME string, refcount
-// bump only, when there is nothing to trim — the overwhelmingly common case).
+// bump only, when there is nothing to trim - the overwhelmingly common case).
 procedure TPasDefines.Define(const AName: string);
 begin
   FMap.AddOrSetValue(Trim(AName), True);
@@ -817,7 +817,7 @@ begin
   FFileNames.Clear;
   FFiles.Clear;
   // Count := 0, not Clear: Clear drops CAPACITY, and this instance is reused
-  // across files (the project driver pools preprocessors) — a 100k-token unit
+  // across files (the project driver pools preprocessors) - a 100k-token unit
   // would otherwise re-grow the list through ~17 doublings every time.
   FVisible.Count := 0;
   FSkipped.Clear;
@@ -935,7 +935,7 @@ var
   LWant: Boolean;
 
   // The argument after the name run, left-trimmed (the right edge was trimmed
-  // with the body) — materialized ONLY by the branches that consume one.
+  // with the body) - materialized ONLY by the branches that consume one.
   function Arg: string;
   var
     LP: PChar;
@@ -952,7 +952,7 @@ var
   end;
 
 begin
-  // The directive body as a SLICE of the file source — this runs for every
+  // The directive body as a SLICE of the file source - this runs for every
   // {$...} token, including those inside skipped regions, and the old
   // TokenText -> DirectiveBody -> SplitDirective chain materialized four to
   // five strings per directive before a single branch was taken. Classify
@@ -1058,7 +1058,7 @@ begin
     begin
       // NB: dcc tolerates MULTIPLE $ELSE in one chain (System.ObjAuto.pas
       // ships `...{$ELSE}...{$ELSE OTHERCPU}...`). Each $ELSE activates
-      // iff no earlier branch was taken — so we deliberately do NOT error
+      // iff no earlier branch was taken - so we deliberately do NOT error
       // on a repeated $ELSE.
       FCondSeenElse[LTop] := True;
       FCondThisActive[LTop] :=
@@ -1201,7 +1201,7 @@ begin
        CharInSet(ABody[LIdx + 1], ['+', '-']) then
     begin
       FSwitches[LSwitch] := ABody[LIdx + 1] = '+';
-      // {$Z+} is {$Z4} and {$Z-} is {$Z1} — dcc's own equivalences; the
+      // {$Z+} is {$Z4} and {$Z-} is {$Z1} - dcc's own equivalences; the
       // boolean table above keeps its generic entry ($IFOPT Z reads it),
       // the SIZE is what SizeOf-of-an-enum needs.
       if LSwitch = 'Z' then
@@ -1237,7 +1237,7 @@ begin
     begin
       // {$A1/2/4/8/16}: the record field-alignment cap, tracked positionally
       // (see TPasAlignEvent). Two digits only for 16, and 16 caps nothing a
-      // builtin can exceed — it lands on the same layout as 8, but it is
+      // builtin can exceed - it lands on the same layout as 8, but it is
       // recorded as written rather than normalized.
       if (ABody[LIdx + 1] = '1') and (LIdx + 2 <= Length(ABody)) and
          (ABody[LIdx + 2] = '6') then
@@ -1255,7 +1255,7 @@ begin
         Inc(LIdx);
     end
     else
-      Exit; // {$R *.res} etc. — no state to track
+      Exit; // {$R *.res} etc. - no state to track
   end;
 end;
 
@@ -1291,7 +1291,7 @@ begin
   else if AName = 'SCOPEDENUMS' then
   begin
     // Long-form only (no single-letter twin). Positional: the resolver reads
-    // the state at each enum's declaration site — see TPasScopedEnumsEvent.
+    // the state at each enum's declaration site - see TPasScopedEnumsEvent.
     if SameText(AArg, 'ON') then
       SetScopedEnums(True)
     else if SameText(AArg, 'OFF') then
@@ -1301,7 +1301,7 @@ begin
     ApplyRtti(AArg)
   else if AName = 'MINENUMSIZE' then
   begin
-    // The long form of {$Z1/2/4} (13.0 docs list both). Positional — see
+    // The long form of {$Z1/2/4} (13.0 docs list both). Positional - see
     // TPasMinEnumEvent.
     if (Length(AArg) = 1) and CharInSet(AArg[1], ['1', '2', '4']) then
       SetMinEnumSize(Ord(AArg[1]) - Ord('0'));
@@ -1309,7 +1309,7 @@ begin
   else if AName = 'ALIGN' then
   begin
     // The long form of {$A1/2/4/8/16}, plus ON/OFF for {$A+}/{$A-}.
-    // Positional — see TPasAlignEvent. dcc rejects any other value (E1030 on
+    // Positional - see TPasAlignEvent. dcc rejects any other value (E1030 on
     // `{$ALIGN 32}`), so an unrecognized argument changes nothing rather than
     // inventing a cap.
     if SameText(AArg, 'ON') then
@@ -1522,7 +1522,7 @@ end;
 // PasTree.CondEval (tri-state; see its unit comment for grammar ownership,
 // Kleene and/or, and the dcc-probed divergence on genuinely undeclared
 // names). Trailing junk after a complete expression is tolerated by
-// construction — the parser consumes one expression and ignores the rest,
+// construction - the parser consumes one expression and ignores the rest,
 // which is dcc's own behavior (System.ObjAuto.pas ships
 // '$IF SizeOf(Extended) >= 10)' with a stray closing paren).
 function TPasPreprocessor.EvalIfExpression(const AExpr: string;
@@ -1544,11 +1544,11 @@ begin
   LCtx.ExtendedBytes := FExtendedBytes;
   LValue := EvalCondText(AExpr, LCtx, LBad);
   // Unanswered Declared() names and symbol questions feed the second pass
-  // (RunDeclaredPass) — but only when they could still CHANGE anything: a
+  // (RunDeclaredPass) - but only when they could still CHANGE anything: a
   // verdict settled by a clean side alone (`False and Declared(X)`) is final
   // no matter what X turns out to be, so recording X would only buy a wasted
   // re-parse. A FAILED expression still records, the old evaluator's
-  // deliberate behavior — a half-parsed expression that mentioned a name is
+  // deliberate behavior - a half-parsed expression that mentioned a name is
   // still a case worth a second look.
   if LBad or LValue.Guessed then
   begin

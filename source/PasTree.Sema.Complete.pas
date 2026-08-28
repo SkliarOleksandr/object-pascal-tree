@@ -1,14 +1,14 @@
 unit PasTree.Sema.Complete;
 
 {
-  PasTree editor features — code completion, stage A: the caret primitive.
+  PasTree editor features - code completion, stage A: the caret primitive.
 
   Everything the completion engine will do starts with one question the
   existing navigator deliberately refuses to answer: "where does this caret
   SIT, lexically and semantically, in a buffer that is mid-keystroke?"
   TPasNavigator.IdentAt requires an exact identifier hit (the right contract
   for ctrl+click, the wrong one for typing), and nothing anywhere maps a
-  position to the innermost AST NODE — NodeOfVis covers nkIdent nodes only.
+  position to the innermost AST NODE - NodeOfVis covers nkIdent nodes only.
 
   This unit answers it. Given (line, col) over ONE analyzed model, CaretAt
   classifies the position (a prefix being typed / right after a dot / a fresh
@@ -22,14 +22,14 @@ unit PasTree.Sema.Complete;
   buffer into a fresh overlay model per request (the demo highlighter's
   proven per-keystroke path), so "as analyzed" and "as typed" are the same
   text; a caller that aims this at a stale project model gets stale answers,
-  not errors. Main file only (FileId 0), like IdentAt — a caret inside an
+  not errors. Main file only (FileId 0), like IdentAt - a caret inside an
   opened $I include is the same GAP navigation already has.
 
   Two parser facts this unit leans on (see PasTree.Parser):
 
   - `Foo.` always yields a LIVE nkMember node whose FirstToken is the DOT and
     whose first child is the base expression, even when the member name is
-    missing — so the base of a dot-completion is FirstChild, never a text
+    missing - so the base of a dot-completion is FirstChild, never a text
     scan backward.
   - That same recovery will happily adopt an identifier from the NEXT LINE as
     the member name (`Foo.` + newline + `Bar := 1;` parses as `Foo.Bar`).
@@ -54,10 +54,10 @@ type
                  // the interior of a comment/string/number literal/asm chunk,
                  // or nothing before the caret at all
     ckIdent,     // caret inside or at the right edge of an identifier or
-                 // reserved word — a prefix being typed
+                 // reserved word - a prefix being typed
     ckAfterDot,  // nearest visible token at/before the caret is a `.` and no
-                 // prefix has been typed yet — member position, empty prefix
-    ckFresh      // any other token precedes the caret — an empty-prefix
+                 // prefix has been typed yet - member position, empty prefix
+    ckFresh      // any other token precedes the caret - an empty-prefix
                  // position (statement start, after `:=`, after `uses`, ...)
   );
 
@@ -74,7 +74,7 @@ type
     { The typed prefix: the anchor identifier's text UP TO the caret (so
       `Foo.Ba|zzz` filters on 'Ba'). '' unless ckIdent. }
     Prefix: string;
-    { 1-based columns of the WHOLE anchor identifier on the caret's line —
+    { 1-based columns of the WHOLE anchor identifier on the caret's line -
       the range a host's completion replaces (mid-word invocation replaces
       the full word, the clangd behavior). For an empty prefix both equal
       the caret column. }
@@ -83,7 +83,7 @@ type
     { The member-access BASE for a dot completion: the nkMember node's first
       child when the caret is after a dot (ckAfterDot), or when the ckIdent
       prefix's left visible neighbor is a dot (`Foo.Ba|`). NIL_NODE when the
-      position is not a member access (including `end.` — the dot there
+      position is not a member access (including `end.` - the dot there
       belongs to no nkMember). }
     DotBase: Integer;
   end;
@@ -104,7 +104,7 @@ type
     ccLabel,       // right after `goto `: the labels in scope
     // A property ACCESSOR position (13.1.1): after `read` / `write` in a
     // property declaration only a field or a method of this class (or an
-    // ancestor) may stand — the collection is the struct chain alone, and
+    // ancestor) may stand - the collection is the struct chain alone, and
     // AddSym filters by SHAPE (fields always; functions for read,
     // procedures for write). Type compatibility is deliberately not
     // checked: a wrong-typed member is the compiler's E2258 to report,
@@ -112,7 +112,7 @@ type
     ccPropRead,
     ccPropWrite);
 
-  { Where a candidate came from — the ranking bucket (sortText prefix in the
+  { Where a candidate came from - the ranking bucket (sortText prefix in the
     LSP mapping; display grouping in the demo). Declaration order IS priority
     order: dedup keeps the first hit, so the enum mirrors resolution
     precedence (with > locals/struct > unit > uses > System > builtins). }
@@ -129,7 +129,7 @@ type
     cbUnitName);    // uses-clause candidates
 
   { LIFETIME: Name/Kind/Bucket/Overloads are plain values, but Mid/Sym/Ctx
-    (and everything derived from them — ItemHeadWord, a host's SymDeclTypeX
+    (and everything derived from them - ItemHeadWord, a host's SymDeclTypeX
     detail) are only meaningful while BOTH the overlay model (Mid = -1) and
     the project GENERATION this request ran against are alive. A host doing
     deferred resolution (LSP completionItem/resolve) must materialize what it
@@ -146,7 +146,7 @@ type
 
   { A type answer that may live in either space: the last-good PROJECT
     (X, a TSemaXType) or the OVERLAY being typed (OvSym, a type symbol of
-    the fresh model) — or name a UNIT qualifier (UnitMid). IsTypeRef says
+    the fresh model) - or name a UNIT qualifier (UnitMid). IsTypeRef says
     the designator named the TYPE itself (class-side members) rather than
     a value of it. }
   TPasComplTypeRef = record
@@ -156,14 +156,14 @@ type
     IsTypeRef: Boolean;
     { A dotted-qualifier PREFIX that is not a unit YET: `Winapi` of
       `Winapi.CommonTypes.IBackgroundTaskInstance` names no unit and no
-      symbol, but the next segment may complete a unit name — greedy
+      symbol, but the next segment may complete a unit name - greedy
       longest-match, accumulated segment by segment (the same rule
       navigation's QualifierUnitAt applies). Not a "valid" ref by itself. }
     PendingUnit: string;
   end;
 
   { One resolved target of a located call (CallAt): a routine its designator
-    may bind to — one entry PER OVERLOAD, unlike completion rows, which
+    may bind to - one entry PER OVERLOAD, unlike completion rows, which
     collapse the family (a host renders each as its own signature). The
     display fields are materialized eagerly; Mid/Sym/Ctx follow the same
     LIFETIME rule as TPasComplItem's. }
@@ -180,7 +180,7 @@ type
 
   { CallAt's answer: where the enclosing call opens, which argument the caret
     is in, and what the callee resolves to. Targets may be EMPTY with CallAt
-    still True — a real call whose name nothing can resolve is an honest
+    still True - a real call whose name nothing can resolve is an honest
     empty, the same contract as CompleteAt's empty list. }
   TPasCallInfo = record
     OpenLine: Integer;    // 1-based position of the call's '('
@@ -190,16 +190,16 @@ type
   end;
 
   { Per-model caret queries and candidate collection. Build one per model
-    SNAPSHOT — the constructor precomputes the raw->visible map (the same
+    SNAPSHOT - the constructor precomputes the raw->visible map (the same
     shape TPasNavigator caches per model); a host that keeps a model across
     requests keeps this with it, and the overlay pipeline creates both fresh
     per request.
 
-    Two modes, one class: standalone (AProject = nil — the caret primitive
+    Two modes, one class: standalone (AProject = nil - the caret primitive
     and intra-model collection only) and BRIDGED (AProject + AProjectMid =
     the last-good analysis and this file's model id in it), where every name
-    that leaves the overlay resolves through the project — see
-    local/COMPLETION-PLAN.md §3 and the stage-B spike. }
+    that leaves the overlay resolves through the project - see
+    local/COMPLETION-PLAN.md sec. 3 and the stage-B spike. }
   TPasCompletion = class
   private
     FModel: TPasSemaModel;
@@ -220,8 +220,8 @@ type
     // project symbol indices, so overlay-space dead ends (a generic
     // parameter's constraints) can hop straight into project machinery.
     FIsProjectModel: Boolean;
-    // The member walk's BASE type is declared in this unit — which is what
-    // legalizes NON-STRICT protected members of its ancestors (11 §11.2.1's
+    // The member walk's BASE type is declared in this unit - which is what
+    // legalizes NON-STRICT protected members of its ancestors (11 sec. 11.2.1's
     // module rule, and the whole point of the same-unit protected-access
     // cast idiom: `TProtectedAccess = class(TComponent)` here makes
     // `TProtectedAccess(C).UpdateRegistry` compile).
@@ -234,7 +234,7 @@ type
     FCaretStructs: TArray<Integer>;
     FAncestryBuilt: Boolean;
     // The last-good model's sckImplementation scope (lazy; -2 = not yet
-    // looked up, NIL_SCOPE = the model has none) — OwnModelTypeX resolves
+    // looked up, NIL_SCOPE = the model has none) - OwnModelTypeX resolves
     // from it so implementation-section types bridge too.
     FOwnImplScope: Integer;
     function RawTokenAt(AOffset: Integer): Integer;
@@ -311,19 +311,19 @@ type
     destructor Destroy; override;
     { Classifies the caret at 1-based (line, col) of the model's main file.
       False = ckNone (AInfo.Kind still says so); True fills every field. A
-      column past the end of its line clamps to the line end — hosts report
+      column past the end of its line clamps to the line end - hosts report
       such carets (SynEdit's virtual space) and they mean "at the end". }
     function CaretAt(ALine, ACol: Integer; out AInfo: TPasCaretInfo): Boolean;
-    { The completion context the caret position calls for — token-first, with
+    { The completion context the caret position calls for - token-first, with
       the (fresh) AST consulted to split the ambiguous tokens (`:` in a decl
       vs a case label, `of` in `array of` vs `case of`, ...). }
     function ClassifyAt(const AInfo: TPasCaretInfo): TPasComplContext;
     { The whole pipeline: caret -> context -> candidate list, deduplicated
-      by name (first hit wins — buckets are enumerated in resolution
+      by name (first hit wins - buckets are enumerated in resolution
       precedence) with overloads collapsed. False only when the position
       offers nothing (ckNone). An empty list with True is a real answer
       (e.g. a dot whose base cannot be typed). The first overload also hands
-      back the caret classification — a host building textEdits needs the
+      back the caret classification - a host building textEdits needs the
       REPLACE SPAN (ACaret.PrefixColFrom/PrefixColTo) the engine already
       computed, and must not re-derive tokenization. }
     function CompleteAt(ALine, ACol: Integer; out ACaret: TPasCaretInfo;
@@ -332,43 +332,43 @@ type
     function CompleteAt(ALine, ACol: Integer; out AContext: TPasComplContext;
       out AItems: TArray<TPasComplItem>): Boolean; overload;
     { The head keyword of a ROUTINE item ('procedure', 'function',
-      'constructor', 'destructor', 'operator'), '' for anything else — what
+      'constructor', 'destructor', 'operator'), '' for anything else - what
       separates an LSP Constructor kind from a Function, and what a display
       column shows instead of the generic "routine". }
     function ItemHeadWord(const AItem: TPasComplItem): string;
-    { The declaration's parameter list as display text — '(const AName:
-      string; ACount: Integer)' — whitespace runs collapsed to one space
+    { The declaration's parameter list as display text - '(const AName:
+      string; ACount: Integer)' - whitespace runs collapsed to one space
       (a multi-line list must read as one line; any length cap is the
       host's). '' for parameterless routines and non-routines. Builtins
       answer from the curated seed-table signatures (PasBuiltinSignature). }
     function ItemParamsText(const AItem: TPasComplItem): string;
     { Does calling this routine take at least one argument? SEMANTICS: an
-      empty `()` declaration answers False — this drives a host's auto-
+      empty `()` declaration answers False - this drives a host's auto-
       parenthesis, and a parameterless routine must stay bare (which is why
       RoutineHasParams's "has an nkParams" definition is the wrong one
       here). Builtins answer the seed table's takes-arguments flag: names
       whose every argument is optional (Exit, Halt, Writeln) are False. }
     function ItemHasParams(const AItem: TPasComplItem): Boolean;
-    { The `///` doc-comment block above the item's declaration (plan §8D) —
+    { The `///` doc-comment block above the item's declaration (plan sec. 8D) -
       TPasTree.DeclDocComment over the item's Mid/Sym, for
       completionItem.documentation and the RAD client's Help Insight. '' for
       keywords, unit names, builtins (no source) and undocumented
       declarations. Raw text: XML-tag rendering is the host's. }
     function ItemDocComment(const AItem: TPasComplItem): string;
     { The call context for signature help: locates the innermost call whose
-      ARGUMENT LIST encloses the caret (backward token walk — nesting over
+      ARGUMENT LIST encloses the caret (backward token walk - nesting over
       ()/[] respected, strings/comments are single tokens and cannot fool
       it; an enclosing indexer or grouping paren is stepped over to the
       call outside it, and a designator that names a TYPE is a cast, also
       stepped over), counts the active argument (top-level commas), and
-      resolves the designator through the overlay+bridge — the same
+      resolves the designator through the overlay+bridge - the same
       DesignatorType/MemberOf machinery member completion uses, so
       `Obj.Method(|` and freshly typed cross-unit calls both answer.
       False when the caret sits in no call's arguments (including a
       DECLARATION's parameter list). True with empty Targets is a real
       answer: a call whose name nothing resolves. }
     function CallAt(ALine, ACol: Integer; out AInfo: TPasCallInfo): Boolean;
-    { The innermost struct type symbol whose member scope encloses AScope —
+    { The innermost struct type symbol whose member scope encloses AScope -
       the `Self` context: NodeScope's chain carries it both inside a struct
       DECLARATION (the sckStruct scope's own StructSym) and inside a method
       IMPLEMENTATION (stamped on the routine scope by the resolver).
@@ -398,7 +398,7 @@ begin
   FIsProjectModel := (FProj <> nil) and (FProjMid >= 0) and
     (FProjMid < FProj.ModelCount) and (FProj.Model(FProjMid) = FModel);
   // Pre-sized: a statement-context list runs to thousands of names, and
-  // TDictionary.Clear throws its capacity away — CompleteAt recreates with
+  // TDictionary.Clear throws its capacity away - CompleteAt recreates with
   // the same capacity per request instead (the review's finding #2).
   FSeen := TDictionary<string, Integer>.Create(4096);
   SetLength(FVisOfRaw, Length(FModel.Tree.Source.Files[0].Tokens));
@@ -417,7 +417,7 @@ begin
 end;
 
 // The raw token of Files[0] covering AOffset (Start <= AOffset < EndPos), or
-// -1. Tokens are gapless and sorted by Start — same search IdentAt/VisAt use.
+// -1. Tokens are gapless and sorted by Start - same search IdentAt/VisAt use.
 function TPasCompletion.RawTokenAt(AOffset: Integer): Integer;
 var
   LTS: TPasTokenStream;
@@ -455,7 +455,7 @@ begin
     Exit;
   AOffset := LTS.LineStarts[ALine - 1] + (ACol - 1);
   // Clamp a caret past the end of its line to the line end (before the line
-  // break, when there is one — landing ON the break is fine too, the trivia
+  // break, when there is one - landing ON the break is fine too, the trivia
   // walk-back reads both the same way).
   if ALine - 1 < High(LTS.LineStarts) then
     LLineEnd := LTS.LineStarts[ALine]
@@ -467,7 +467,7 @@ begin
 end;
 
 // Nearest raw token at or before ARaw that has a visible mapping (skips
-// trivia backward — a caret in trailing whitespace still belongs to whatever
+// trivia backward - a caret in trailing whitespace still belongs to whatever
 // came before it, the same reading VisAt established). -1 when nothing
 // visible precedes.
 function TPasCompletion.PrevVisibleRaw(ARaw: Integer): Integer;
@@ -502,7 +502,7 @@ end;
 // descent from the root, taking the first child that covers the position at
 // each level. The arena cannot be binary-searched for this (Adopt re-parents
 // an already-built expression under a LATER-created operator node, so node
-// index order is not source order) — but child spans are source-ordered
+// index order is not source order) - but child spans are source-ordered
 // within a parent, so the descent is linear in tree depth times fan-out.
 function TPasCompletion.InnermostNodeAt(AVis: Integer): Integer;
 var
@@ -521,7 +521,7 @@ begin
       // Pre-gate on the O(1) LastToken before paying for the leftmost
       // descent: siblings are source-ordered, so everything ending before
       // AVis is skipped with one field read, and the FIRST sibling ending at
-      // or after it is the only containment candidate — if its left edge is
+      // or after it is the only containment candidate - if its left edge is
       // past AVis, the position sits between siblings and the walk stops.
       // (Scanning thousands of unit-level declarations with a LeftmostVis
       // each was the review's finding #3.)
@@ -542,9 +542,9 @@ end;
 
 // The member-access base for the dot at raw index ADotRaw: the innermost node
 // containing the dot is the nkMember that OWNS it (the dot is inside no
-// child's span — the base ends before it, the name starts after it), and the
+// child's span - the base ends before it, the name starts after it), and the
 // base is that node's first child. NIL_NODE when the dot belongs to no member
-// access (`end.`, a float's dot never gets here — `1.5` is one raw token).
+// access (`end.`, a float's dot never gets here - `1.5` is one raw token).
 function TPasCompletion.MemberBaseOfDot(ADotRaw: Integer): Integer;
 var
   LVis, LNode: Integer;
@@ -585,7 +585,7 @@ begin
     Exit;
 
   // Everything below reasons about the character position just LEFT of the
-  // caret — that is where the text being completed attaches. A caret at the
+  // caret - that is where the text being completed attaches. A caret at the
   // very start of the file has nothing to attach to.
   if LOffset = 0 then
     Exit;
@@ -593,7 +593,7 @@ begin
 
   // Dead code: a position inside a Skipped ($IFDEF'd-out) region has no
   // visible mapping at all, and walking backward from it would cross the
-  // entire inactive region onto unrelated active code — refuse outright,
+  // entire inactive region onto unrelated active code - refuse outright,
   // exactly as VisAt does for navigation.
   if FModel.Tree.Source.IsSkipped(0, LAnchorOff) then
     Exit;
@@ -604,7 +604,7 @@ begin
   LKind := LTS.Tokens[LRaw].Kind;
 
   // A prefix being typed: the caret sits inside (or at the right edge of) an
-  // identifier or reserved word. Reserved words count — `begi|n` and a
+  // identifier or reserved word. Reserved words count - `begi|n` and a
   // half-typed `f|or` lex as what they are, and the host is filtering a
   // list that legitimately contains keywords.
   if (LKind = tkIdentifier) or (LKind >= tkAnd) then
@@ -616,7 +616,7 @@ begin
     if AInfo.VisToken < 0 then
     begin
       // An active-region word with no visible mapping does not exist today
-      // (trivia is never a word; dead regions were refused above) — treat a
+      // (trivia is never a word; dead regions were refused above) - treat a
       // future exception as "no completion" rather than guessing a scope.
       AInfo.Kind := ckNone;
       Exit;
@@ -624,14 +624,14 @@ begin
     AInfo.Prefix := Copy(LTS.Source, LTok.Start + 1, LOffset - LTok.Start);
     LTS.OffsetToLineCol(LTok.Start, LLine, AInfo.PrefixColFrom);
     AInfo.PrefixColTo := AInfo.PrefixColFrom + LTok.Len;
-    // `Foo.Ba|` — the prefix continues a member access when its left visible
+    // `Foo.Ba|` - the prefix continues a member access when its left visible
     // neighbor is a dot.
     LPrevRaw := PrevVisibleRaw(LRaw - 1);
     if (LPrevRaw >= 0) and (LTS.Tokens[LPrevRaw].Kind = tkDot) then
       AInfo.DotBase := MemberBaseOfDot(LPrevRaw);
   end
   // Strictly INSIDE a literal, comment, directive or asm text: no completion
-  // (matches the IDE). Whitespace interior falls through instead — that is
+  // (matches the IDE). Whitespace interior falls through instead - that is
   // the ordinary "caret in trivia" case the walk-back below reads as "after
   // whatever came before". An unterminated string/comment extends to the
   // line end, so its right EDGE still counts as inside.
@@ -690,7 +690,7 @@ end;
   The overlay is fresh but alone; the project is complete but stale. A
   designator's type is derived by walking the overlay's own bindings (RefMap,
   member scopes) until a name leaves the buffer, then BRIDGING into the
-  project — the resolution order mirrored is CrossResolve's (uses last-wins,
+  project - the resolution order mirrored is CrossResolve's (uses last-wins,
   then System/SysInit, then the compiler seeds). Everything project-side is
   a TSemaXType, so FindMemberX/EnumMembersX/SubstX apply unchanged. }
 
@@ -725,7 +725,7 @@ end;
 // Resolve AKey as if written in this unit but NOT declared in it: the
 // project-side half of unqualified resolution. Real declarations first
 // (uses, last-wins, then the implicit System unit), then the compiler seeds
-// of this file's own project model — the same effective order the analysis
+// of this file's own project model - the same effective order the analysis
 // produces (a seed BINDS first intra-unit but is redirected to its real
 // declaration; asking for the real one directly collapses the two steps).
 function TPasCompletion.BridgeName(const AKey: string;
@@ -752,7 +752,7 @@ end;
 
 // Project model id of a unit named AName (as written in a uses clause or as
 // a qualifier). Exact dotted-name match first, then the namespace-prefixed
-// form (`Generics.Collections` -> System.Generics.Collections.pas) — good
+// form (`Generics.Collections` -> System.Generics.Collections.pas) - good
 // enough for names the project has ALREADY loaded, which is the only kind a
 // bridge can answer anyway.
 function TPasCompletion.BridgeUnitMid(const AName: string): Integer;
@@ -765,7 +765,7 @@ begin
     Exit;
   if FProjMid >= 0 then
   begin
-    // The unit's OWN name first — a unit may qualify its own exports
+    // The unit's OWN name first - a unit may qualify its own exports
     // (`ctX = REST.Types.ctX` inside REST.Types itself)...
     if SameText(ChangeFileExt(ExtractFileName(FProj.ModelFile(FProjMid)), ''),
        AName) then
@@ -773,7 +773,7 @@ begin
     // ...then the RESOLVED uses list of this file's project model: a unit is
     // qualified by the name it was IMPORTED under, and the resolution there
     // already applied unit ALIASES and namespace prefixes (`Classes.
-    // MakeObjectInstance` means System.Classes through the default -A list —
+    // MakeObjectInstance` means System.Classes through the default -A list -
     // a plain file-name scan cannot know that).
     LPM := ProjModel(FProjMid, 'BridgeUnitMid');
     for LIdx := 0 to High(LPM.UsesList) do
@@ -781,11 +781,11 @@ begin
          SameText(LPM.UsesList[LIdx].NameFull, AName) then
         Exit(LPM.UsesList[LIdx].UnitId);
   end;
-  // Exact full-dotted spellings last, via a lazily built basename index —
+  // Exact full-dotted spellings last, via a lazily built basename index -
   // the linear scan allocated two strings per model per lookup, and a
   // dotted-qualifier chain does several lookups. No suffix guessing:
   // qualifying a unit requires having USED it, so the uses-list pass above
-  // already covers every namespace-shortened or aliased form dcc accepts —
+  // already covers every namespace-shortened or aliased form dcc accepts -
   // and a suffix guess false-matched `REST` (of a self-qualified REST.Types)
   // onto an unrelated `*.REST` unit on the reference project.
   if FUnitMids = nil then
@@ -801,12 +801,12 @@ end;
 
 { The last-good PROJECT identity of an OVERLAY-declared TYPE, by name: the
   overlay is an edit of FProjMid's file, so a type it declares usually still
-  exists in the last-good model — which gives an instantiation frame a
+  exists in the last-good model - which gives an instantiation frame a
   project-space argument where the overlay symbol alone has none
-  (`TList<TMyOwnClass>` used to stay an OPEN generic; plan §5.C). Resolved
+  (`TList<TMyOwnClass>` used to stay an OPEN generic; plan sec. 5.C). Resolved
   from the implementation scope so implementation-section types bridge too
   (its parent chain covers the interface). A freshly typed type that the
-  last-good analysis never saw still answers XNil — the frame then stays
+  last-good analysis never saw still answers XNil - the frame then stays
   open, exactly the old behavior. When this model IS the project's, the
   symbol needs no bridging at all. }
 function TPasCompletion.OwnModelTypeX(AOvSym: Integer): TSemaXType;
@@ -875,7 +875,7 @@ begin
         // The analysis's own answer first when this model IS the project's:
         // SymDeclTypeX already handles the type-slot quirks a node walk
         // re-trips over (a member named like its own type, `TouchInput:
-        // TouchInput` — its TypeSlotByNameX fallback exists for exactly
+        // TouchInput` - its TypeSlotByNameX fallback exists for exactly
         // this).
         if FIsProjectModel then
         begin
@@ -891,7 +891,7 @@ begin
         end
         else
         begin
-          // `var X := expr` — an inline var with an inferred type: the
+          // `var X := expr` - an inline var with an inferred type: the
           // initializer is the last child of the nkInlineVar (3.1.3).
           LDecl := FModel.Symbols[ASym].DeclNode;
           if (LDecl <> NIL_NODE) and
@@ -926,7 +926,7 @@ begin
         Result.OvSym := FModel.Symbols[ASym].TypeSym;   // value, not type ref
     skGenericParam:
       // A value typed as an unbound parameter has its CONSTRAINTS' members
-      // (16 §16.4.1) — the walk lives in EnumMembersX/FindMemberX, which
+      // (16 sec. 16.4.1) - the walk lives in EnumMembersX/FindMemberX, which
       // need a project-space identity. Available only when this model IS
       // the project's (overlay generic bodies are a stage-E gap).
       if FIsProjectModel then
@@ -989,7 +989,7 @@ begin
       begin
         LSym := FModel.RefMap[ANode];
         // A TYPE SLOT that phase 1 bound to a NON-TYPE is the self-shadow
-        // shape (`TouchInput: TouchInput` — the parameter shadows its own
+        // shape (`TouchInput: TouchInput` - the parameter shadows its own
         // type's name): only a type can stand here, so fall through to the
         // cross-unit lookup instead of chasing the value in a circle.
         if (LSym <> NIL_SYM) and
@@ -1028,7 +1028,7 @@ begin
           Exit;
         // Build the instantiation frame when EVERY argument lands in project
         // space. An OVERLAY-declared argument type is bridged by NAME into
-        // this file's own last-good model first (OwnModelTypeX) — the
+        // this file's own last-good model first (OwnModelTypeX) - the
         // `TList<TMyOwnClass>` frame closes that way; only a type the
         // last-good analysis never saw falls back to the open generic
         // (members still complete, parameter types stay open).
@@ -1053,7 +1053,7 @@ begin
     nkPointerType:
       begin
         // A value of an inline `^T` reaches T's members through the implicit
-        // deref — resolve to the pointee directly (the same hop FindMemberX
+        // deref - resolve to the pointee directly (the same hop FindMemberX
         // makes for a NAMED pointer type).
         Result := ResolveTypeRefNode(FModel.Tree.Nodes[ANode].FirstChild,
           ADepth + 1);
@@ -1068,7 +1068,7 @@ begin
   end;
 end;
 
-// The type of an EXPRESSION (designator) node of the overlay — what a dot
+// The type of an EXPRESSION (designator) node of the overlay - what a dot
 // after it completes on.
 function TPasCompletion.DesignatorType(ANode, ADepth: Integer):
   TPasComplTypeRef;
@@ -1083,7 +1083,7 @@ begin
   if (ANode = NIL_NODE) or (ADepth > 16) then
     Exit;
   // An ANALYZED model already typed its expressions (the cross passes fill
-  // ExprTypeX, frames closed) — for VALUE-shaped nodes that answer beats any
+  // ExprTypeX, frames closed) - for VALUE-shaped nodes that answer beats any
   // re-derivation, and covers what the walk below does not (indexing and
   // derefs). Only value shapes: a bare type designator may also carry its
   // type here, and treating THAT as a value would offer instance members on
@@ -1104,7 +1104,7 @@ begin
         if LSym <> NIL_SYM then
           Exit(TypeOfOverlaySym(LSym, ADepth + 1));
         LKey := FModel.Tree.NodeNameLower(ANode);
-        // `Self` has no symbol anywhere (11.3.3) — answered structurally,
+        // `Self` has no symbol anywhere (11.3.3) - answered structurally,
         // the same way the analysis answers it (StructSymOfNode).
         if LKey = 'self' then
         begin
@@ -1126,7 +1126,7 @@ begin
         // The analysis's own CROSS-UNIT binding first (an analyzed model
         // only; overlays have an empty ExtRefMap): unlike a re-resolve by
         // name it knows the symbol, and for a VALUE the cached expression
-        // type also carries the closed instantiation frame — `Statics` on a
+        // type also carries the closed instantiation frame - `Statics` on a
         // WinRT import class is typed as the bound ARGUMENT, which nothing
         // downstream can recover from the symbol alone (the corpus oracle's
         // whole `Statics.*` bucket).
@@ -1149,7 +1149,7 @@ begin
         if BridgeName(LKey, LMid, LSym) then
           Exit(TypeOfProjectSym(LMid, LSym, NIL_INST, ADepth + 1));
         Result.UnitMid := BridgeUnitMid(FModel.Tree.NodeText(ANode));
-        // No unit either — maybe the FIRST SEGMENT of a longer dotted unit
+        // No unit either - maybe the FIRST SEGMENT of a longer dotted unit
         // name (`Winapi` of Winapi.CommonTypes.X): keep it pending.
         if Result.UnitMid < 0 then
           Result.PendingUnit := FModel.Tree.NodeText(ANode);
@@ -1173,7 +1173,7 @@ begin
           Exit;
         if LCallee.IsTypeRef then
         begin
-          // A cast — T(expr) — or a value-typed use of a constructor's
+          // A cast - T(expr) - or a value-typed use of a constructor's
           // class (T.Create is already an instance by MemberOf's ctor rule).
           Result := LCallee;
           Result.IsTypeRef := False;
@@ -1207,16 +1207,16 @@ begin
   end;
 end;
 
-{ The member SYMBOL one dot-hop names — the SEARCH half of MemberOf, shared
+{ The member SYMBOL one dot-hop names - the SEARCH half of MemberOf, shared
   with CallAt (which reports the symbol as a signature-help target where
   MemberOf converts it to a TYPE for the next hop). Three spaces, in order:
-  a unit qualifier's exports (Resolve, not FindLocal — the deep lookup also
+  a unit qualifier's exports (Resolve, not FindLocal - the deep lookup also
   reaches the compiler seeds joined into the interface scope, which is what
   makes `System.Delete` mean the intrinsic; a unit's own USES items live
   there too but are not exports, so skUnitRef never chains), the overlay's
-  member scopes walking overlay heritage (64 hops, not 16 — same-unit
+  member scopes walking overlay heritage (64 hops, not 16 - same-unit
   interface chains really run past 16, see EnsureAncestry), then the bridged
-  project ancestry (FindMemberX). False when nothing is found — including
+  project ancestry (FindMemberX). False when nothing is found - including
   the longer-dotted-unit-name and pending-qualifier shapes, which are
   MemberOf's own business. }
 function TPasCompletion.MemberSymOf(const ABase: TPasComplTypeRef;
@@ -1293,10 +1293,10 @@ begin
     Exit;
   if MemberSymOf(ABase, AKey, ADepth, LMemMid, LMemSym, LCtx) then
   begin
-    // A constructor names the CONSTRUCTED type: T.Create is a T value — and
+    // A constructor names the CONSTRUCTED type: T.Create is a T value - and
     // the NAMED base, not the hop the walk had reached when the constructor
     // was found: `TFoo.Create` constructs TFoo even when Create itself is
-    // inherited from another unit's TBar — returning the hop typed the
+    // inherited from another unit's TBar - returning the hop typed the
     // value as TBar and silently lost TFoo's own members (the review's
     // finding #1).
     if LMemMid < 0 then
@@ -1321,7 +1321,7 @@ begin
     end;
     Exit(TypeOfProjectSym(LMemMid, LMemSym, LCtx, ADepth + 1));
   end;
-  // No member — the qualifier may be the PREFIX of a longer dotted UNIT
+  // No member - the qualifier may be the PREFIX of a longer dotted UNIT
   // name (`System.AnsiStrings.FloatToText`: `System` resolved as a unit,
   // but the real qualifier is System.AnsiStrings). Greedy longest-match;
   // when even the longer name is no unit yet, it stays PENDING for the
@@ -1345,7 +1345,7 @@ begin
   end;
 end;
 
-// The type-definition node of a PROJECT type symbol — OverlayStructDef's
+// The type-definition node of a PROJECT type symbol - OverlayStructDef's
 // cross-model twin (same trailing-directive rule).
 function TPasCompletion.ProjectTypeDef(const AX: TSemaXType): Integer;
 var
@@ -1372,7 +1372,7 @@ begin
 end;
 
 // typeof(base[...]): an ARRAY type's element, a STRING's Char, a POINTER's
-// pointee (pointer indexing) — enough for `A[I].` in a live overlay, where
+// pointee (pointer indexing) - enough for `A[I].` in a live overlay, where
 // no ExprTypeX cache exists. Default array properties are a stage-E+ item.
 function TPasCompletion.ElementTypeOf(const ABase: TPasComplTypeRef;
   ADepth: Integer): TPasComplTypeRef;
@@ -1400,7 +1400,7 @@ begin
   if (FProj = nil) or not XValid(ABase.X) then
     Exit;
   LM := ProjModel(ABase.X.UnitId, 'ElementTypeOf');
-  // Indexing a STRING yields its Char (7.1) — the seeds have no def node.
+  // Indexing a STRING yields its Char (7.1) - the seeds have no def node.
   if (LM.Symbols[ABase.X.Sym].Kind = skBuiltinType) and
      (LM.Symbols[ABase.X.Sym].TypeCat = tcString) then
   begin
@@ -1429,13 +1429,13 @@ begin
         end;
       end;
     nkPointerType:
-      Result.X := FProj.PointeeX(ABase.X);   // P[I] — pointer indexing
+      Result.X := FProj.PointeeX(ABase.X);   // P[I] - pointer indexing
     nkStringType:
       if BridgeName('char', LMid, LSym) then
         Result.X := XPlain(LMid, LSym);
     nkIdent, nkMember, nkTypeArgs:
       begin
-        // An alias — chase it and index THAT.
+        // An alias - chase it and index THAT.
         Result.X := FProj.ResolveTypeExpr(ABase.X.UnitId, LDef);
         if ABase.X.Inst <> NIL_INST then
           Result.X := FProj.SubstX(Result.X, ABase.X.Inst, 0);
@@ -1447,7 +1447,7 @@ begin
   end;
 end;
 
-// typeof(base^): the pointee — project pointers via PointeeX, overlay
+// typeof(base^): the pointee - project pointers via PointeeX, overlay
 // pointer types via their definition node.
 function TPasCompletion.PointeeTypeOf(const ABase: TPasComplTypeRef;
   ADepth: Integer): TPasComplTypeRef;
@@ -1562,7 +1562,7 @@ end;
 { AKey is the caller's ALREADY-NORMALIZED dedup key (a symbol's NameLower, a
   keyword's own lowercase spelling). Not derived here from AName on purpose:
   this runs once per CANDIDATE, thousands of times per request, and PasNameKey
-  allocates — the exact "cheap-looking normalization on a shared hot path"
+  allocates - the exact "cheap-looking normalization on a shared hot path"
   this codebase has paid for three times (see FindLocal's own comment). }
 procedure TPasCompletion.AddItem(const AName, AKey: string;
   AKind: TSemaSymbolKind; ABucket: TPasComplBucket; AMid, ASym, ACtx: Integer);
@@ -1605,11 +1605,11 @@ begin
     LM := FModel
   else
     LM := ProjModel(AMid, 'AddSym');
-  // Labels complete after `goto` and NOWHERE else — and after `goto`,
+  // Labels complete after `goto` and NOWHERE else - and after `goto`,
   // nothing but a label means anything.
   if (LM.Symbols[ASym].Kind = skLabel) <> (FContext = ccLabel) then
     Exit;
-  // Type positions take what can name a type — consts and enum values
+  // Type positions take what can name a type - consts and enum values
   // included, because a SUBRANGE type's bounds are constant expressions
   // (`TVCLElements = teCategoryButtons..teTextLabel`, 2.2.5).
   if (FContext = ccType) and not (LM.Symbols[ASym].Kind in
@@ -1617,7 +1617,7 @@ begin
      skEnumValue]) then
     Exit;
   // Property accessor positions take members of the right SHAPE only:
-  // fields always, routines split by head — a function can stand after
+  // fields always, routines split by head - a function can stand after
   // `read`, a procedure after `write`, nothing else (13.1.1).
   if FContext in [ccPropRead, ccPropWrite] then
     case LM.Symbols[ASym].Kind of
@@ -1640,7 +1640,7 @@ procedure TPasCompletion.AddKeywords(const AWords: array of string);
 var
   LIdx: Integer;
 begin
-  // The word lists are lowercase already — they are their own keys.
+  // The word lists are lowercase already - they are their own keys.
   for LIdx := 0 to High(AWords) do
     AddItem(AWords[LIdx], AWords[LIdx], skKeyword, cbKeyword, -1, NIL_SYM,
       NIL_INST);
@@ -1669,7 +1669,7 @@ begin
     skVar, skField:
       begin
         // The decl chain: name ident -> nkVarDecl -> nkVarSec (Aux = 1 for
-        // a `class var` run — the parser eats both keywords and marks it).
+        // a `class var` run - the parser eats both keywords and marks it).
         LNode := AModel.Symbols[ASym].DeclNode;
         while (LNode <> NIL_NODE) and
               (AModel.Tree.Nodes[LNode].Kind <> nkVarSec) and
@@ -1683,7 +1683,7 @@ begin
     skRoutine:
       begin
         // RoutineHead, not a raw VisibleToken read: this runs during member
-        // LIST BUILDING over foreign models, which may be text-demoted — the
+        // LIST BUILDING over foreign models, which may be text-demoted - the
         // head word is exactly what DemoteText snapshots per symbol.
         LNode := RoutineNodeOf(AModel, ASym);
         Result := (LNode <> NIL_NODE) and
@@ -1706,7 +1706,7 @@ begin
 end;
 
 // The caret struct's bridged ancestor chain, for the protected-visibility
-// test — built once per request, only when a member list needs it.
+// test - built once per request, only when a member list needs it.
 procedure TPasCompletion.EnsureAncestry(ACaretScope: Integer);
 var
   LOv, LDepth: Integer;
@@ -1740,11 +1740,11 @@ begin
   if FProj = nil then
     Exit;
   // The bridged ancestry of EVERY nest level (a nested class's method also
-  // reaches the OUTER class's inherited members — the corpus's
+  // reaches the OUTER class's inherited members - the corpus's
   // TWinGestureEngine.TRealTimeStylus method calling the engine's inherited
   // IsGesture bare).
   //
-  // LX starts INVALID and stays so when a walk never leaves the overlay —
+  // LX starts INVALID and stays so when a walk never leaves the overlay -
   // the corpus oracle caught exactly that as stack garbage flowing into
   // AncestorOfX when a same-unit interface chain ran past the old cap of 16
   // (Winapi.WebView2 chains ICoreWebView2_18 down to ICoreWebView2, all in
@@ -1777,11 +1777,11 @@ begin
   end;
 end;
 
-// Visibility of a PROJECT member from this caret (11 §11.2.1): private is
+// Visibility of a PROJECT member from this caret (11 sec. 11.2.1): private is
 // same-unit-friendly, protected needs the caret's struct to descend from the
 // declaring one (non-strict protected is also same-unit-friendly), strict
 // variants drop the friend rule. svDefault means "no section stated" and
-// stays visible — hiding on a guess is the wrong failure mode for a list.
+// stays visible - hiding on a guess is the wrong failure mode for a list.
 function TPasCompletion.MemberVisible(AMid, ASym: Integer): Boolean;
 var
   LM: TPasSemaModel;
@@ -1792,7 +1792,7 @@ begin
     svStrictPrivate:
       begin
         // Visible ONLY inside the declaring class itself (or a class the
-        // caret's is nested in — the asymmetric nesting rule, 11 §11.2.1).
+        // caret's is nested in - the asymmetric nesting rule, 11 sec. 11.2.1).
         // Testable only when overlay indices ARE project indices.
         Result := False;
         if FIsProjectModel and (AMid = FProjMid) and
@@ -1813,7 +1813,7 @@ begin
         if Result then
           Exit;
         // dcc enforces a GENERIC class's plain `protected` only outside
-        // method bodies (dcc32 37.0-probed; spec 11.2.1) — and completion
+        // method bodies (dcc32 37.0-probed; spec 11.2.1) - and completion
         // positions are method bodies in every case that matters, so a
         // generic's protected members stay visible. spring4d's collections
         // depend on the access being legal.
@@ -1835,7 +1835,7 @@ begin
              (FAncestry[LIdx].Sym = LDeclStruct) then
             Exit(True);
         // The declaring class IS one of the caret's own nest (same-class
-        // strict-protected access) — overlay indices are project indices
+        // strict-protected access) - overlay indices are project indices
         // only in project-model mode.
         if FIsProjectModel and (AMid = FProjMid) then
           for LIdx := 0 to High(FCaretStructs) do
@@ -1867,10 +1867,10 @@ begin
     end);
 end;
 
-// Members of an OVERLAY-declared type: its own scope (deep — nested enums
+// Members of an OVERLAY-declared type: its own scope (deep - nested enums
 // and intra-unit joins included), then each overlay ancestor's, then the
 // first hop that leaves the buffer continues in project space.
-// AIncludeOwn = False skips the FIRST scope — the caller already enumerated
+// AIncludeOwn = False skips the FIRST scope - the caller already enumerated
 // it through the caret's scope chain (a method body's joined member scope).
 procedure TPasCompletion.CollectOverlayChain(AOvSym: Integer;
   AIncludeOwn: Boolean; ABucket: TPasComplBucket);
@@ -1879,7 +1879,7 @@ var
   LRef: TPasComplTypeRef;
   LInclude: Boolean;
 begin
-  // An overlay-declared base IS a type of this unit — its bridged ancestors'
+  // An overlay-declared base IS a type of this unit - its bridged ancestors'
   // non-strict protected members are reachable (the module rule above).
   FBaseOwnUnit := True;
   LInclude := AIncludeOwn;
@@ -1897,7 +1897,7 @@ begin
             LNode: Integer;
           begin
             // Class constructors/destructors are never nameable. Kind-gated
-            // and token-KIND-tested — this closure is the per-candidate hot
+            // and token-KIND-tested - this closure is the per-candidate hot
             // path, and a parent walk per field/const was pure waste (the
             // review's finding #4; the token-kind policy is the one
             // IsConstructorSym documents for itself).
@@ -1941,7 +1941,7 @@ begin
   LScope := LM.InterfaceScope;
   if (LScope = NIL_SCOPE) or (LM.Scopes[LScope].Symbols = nil) then
     Exit;
-  // OWN symbols, not a blind deep walk — the interface scope's Additional
+  // OWN symbols, not a blind deep walk - the interface scope's Additional
   // joins hold that unit's builtin seeds (a per-model copy every unit has;
   // offering them as THIS unit's exports would be wrong), and its own uses'
   // unit refs are not importable names either, so skUnitRef is skipped.
@@ -1952,7 +1952,7 @@ begin
       AddSym(AUid, LSym, NIL_INST, ABucket);
   end;
   // The one Additional join that IS the unit's own export: an unscoped
-  // enum's value scope ({$SCOPEDENUMS OFF}, the default) — `ffFixed` is
+  // enum's value scope ({$SCOPEDENUMS OFF}, the default) - `ffFixed` is
   // importable from System.SysUtils exactly like TFloatFormat itself. The
   // corpus oracle caught these missing from every used-unit list.
   for LIdx := 0 to High(LM.Scopes[LScope].Additional) do
@@ -1970,7 +1970,7 @@ begin
   begin
     CollectUnitInterface(ABase.UnitMid, cbMember);
     // dcc lets `System.` qualify EVERY compiler-provided name (System.Delete,
-    // System.PAnsiChar), so the System unit's list carries the seeds too —
+    // System.PAnsiChar), so the System unit's list carries the seeds too -
     // and only System's: seeds are per-model copies, not anyone's exports.
     if (FProj <> nil) and (ABase.UnitMid = FProj.EnsureSystemUnit) and
        (FModel.SystemScope <> NIL_SCOPE) then
@@ -1998,7 +1998,7 @@ begin
 end;
 
 // Used units' interface names + the implicit System/SysInit, through the
-// PROJECT model of this same file — its UsesList already carries resolved
+// PROJECT model of this same file - its UsesList already carries resolved
 // model ids with namespaces and aliases applied (stage-B spike note). When
 // the caret sits in the INTERFACE section, implementation-section uses are
 // excluded (the overlay's own symbols say which section each item is in).
@@ -2051,7 +2051,7 @@ var
   LRef: TPasComplTypeRef;
 begin
   FCaretVis := AInfo.VisToken;
-  // 1. Enclosing UNOPENED with statements (cross-unit targets, ch.05 §5.7):
+  // 1. Enclosing UNOPENED with statements (cross-unit targets, ch.05 sec. 5.7):
   // their members shadow everything, so they go first. Opened (intra-unit)
   // withs are ordinary sckWith scopes and come through the chain below.
   for LIdx := 0 to High(FModel.WithUnopened) do
@@ -2067,8 +2067,8 @@ begin
     while (LTarget <> NIL_NODE) and (LTarget <> LBody) do
     begin
       // The with pass's own target typer first, when this model IS the
-      // project's: it covers shapes the caches do not (an INDEXED target —
-      // `with Palette.palPalEntry[I] do` — is typed by nothing else).
+      // project's: it covers shapes the caches do not (an INDEXED target -
+      // `with Palette.palPalEntry[I] do` - is typed by nothing else).
       LRef := ComplNilRef;
       if FIsProjectModel then
         LRef.X := FProj.WithTargetTypeX(FProjMid, LTarget);
@@ -2086,7 +2086,7 @@ begin
     end;
   end;
   FClassSide := False;
-  // 2. The lexical scope chain, deep (joined scopes included) — this is
+  // 2. The lexical scope chain, deep (joined scopes included) - this is
   // exactly what unqualified lookup sees intra-unit: locals, params, the
   // enclosing struct's own members through the method-body join, opened
   // withs, enum values, and the unit's own names. The builtin seeds joined
@@ -2098,13 +2098,13 @@ begin
   begin
     if FModel.Scopes[LScope].Kind = sckImplementation then
       LInterfaceOnly := False;
-    // An OPENED (intra-unit) with joins only the target's OWN member scope —
+    // An OPENED (intra-unit) with joins only the target's OWN member scope -
     // and that join is phase 1's GUESS, which the cross with pass revises in
     // the BINDINGS without touching the scope (the oracle's Orpheus
     // `with CT[J] do` was joined to the wrong struct entirely). So: walk the
     // joined structs' cross-unit ancestors (the TListActionLink/FClient
     // shape), and in project-model mode ALSO re-type the with's own targets
-    // with the with pass's typer and inject those members — the authoritative
+    // with the with pass's typer and inject those members - the authoritative
     // answer, deduped against whatever the join already provided.
     if FModel.Scopes[LScope].Kind = sckWith then
     begin
@@ -2153,7 +2153,7 @@ begin
           LBucket := cbLocal;
         end;
         // Inline vars/consts are visible only BELOW their declaration
-        // (3.1.3) — the same positional rule ResolveAt applies.
+        // (3.1.3) - the same positional rule ResolveAt applies.
         if (FModel.Scopes[AScopeOfSym].Kind = sckBlock) and
            FModel.DeclaredAfter(ASym, FCaretVis) then
           Exit;
@@ -2161,7 +2161,7 @@ begin
       end);
     LScope := FModel.Scopes[LScope].Parent;
   end;
-  // 3. INHERITED members of the enclosing struct NEST — the chain join only
+  // 3. INHERITED members of the enclosing struct NEST - the chain join only
   // carries the structs' own scopes; ancestors (overlay-declared and then
   // cross-unit) are walked explicitly, for EVERY nesting level (a nested
   // class's method reaches the outer class's inherited members too). Skips
@@ -2171,7 +2171,7 @@ begin
     CollectOverlayChain(FCaretStructs[LIdx], False, cbStructMember);
   // 4. Cross-unit names: uses (reverse, last-wins), System, SysInit.
   CollectUsesImports(LInterfaceOnly);
-  // 5. Compiler seeds, last — every real declaration outranks a seed.
+  // 5. Compiler seeds, last - every real declaration outranks a seed.
   if FModel.SystemScope <> NIL_SCOPE then
     FModel.EnumScopeDeep(FModel.SystemScope,
       procedure(ASym, AScopeOfSym: Integer)
@@ -2181,7 +2181,7 @@ begin
 end;
 
 // `goto |`: labels live in `label` sections of the lexical chain and nowhere
-// else — running the full CollectScope pipeline (with typing, ancestry
+// else - running the full CollectScope pipeline (with typing, ancestry
 // bridging, every used unit's interface) only for AddSym to reject all of it
 // was measured waste (the review's finding #1).
 procedure TPasCompletion.CollectLabels(const AInfo: TPasCaretInfo);
@@ -2201,14 +2201,14 @@ begin
   end;
 end;
 
-{ ccUses: unit names are DOTTED, but the lexical anchor is one SEGMENT — a
+{ ccUses: unit names are DOTTED, but the lexical anchor is one SEGMENT - a
   client filtering candidates ('System.SysUtils') against the bare segment
   prefix ('Sys' of `System.Sys|`) matches nothing, and its textEdit would
   replace half a name. So the prefix and replace-span are extended LEFT
-  across the `ident . ident` chain (same line only — a replace span covers
+  across the `ident . ident` chain (same line only - a replace span covers
   one line) before the caret leaves the engine: the prefix reads
   'System.Sys' and the span covers the whole dotted name typed so far.
-  (Plan §5.C's "dotted uses prefixes filter per segment", solved engine-side
+  (Plan sec. 5.C's "dotted uses prefixes filter per segment", solved engine-side
   so every client gets it.) }
 procedure TPasCompletion.ExtendUsesPrefix(ALine: Integer;
   var AInfo: TPasCaretInfo);
@@ -2256,7 +2256,7 @@ begin
 end;
 
 // Uses-clause candidates: the units the last-good project knows about, plus
-// the units the search paths could REACH — a `uses` may legitimately name a
+// the units the search paths could REACH - a `uses` may legitimately name a
 // unit nothing has analyzed yet (that is what typing a new uses item IS), so
 // the project's cached search-path scan fills in the rest. Both name sets
 // are full dotted names; loaded models win the dedup (they carry a real
@@ -2276,7 +2276,7 @@ begin
         NIL_SYM, NIL_INST);
     end;
   // Mid = -1 for a path-scanned name: there is no model to point at. A
-  // cbUnitName item's identity is its NAME either way — nothing resolves
+  // cbUnitName item's identity is its NAME either way - nothing resolves
   // these rows further.
   for LName in FProj.SearchPathUnitNames do
     AddItem(LName, PasNameKey(LName), skUnitRef, cbUnitName, -1,
@@ -2284,7 +2284,7 @@ begin
 end;
 
 // The record type an aggregate initializer fills: the declared type of the
-// typed const/var whose initializer this is, or — for a NESTED aggregate —
+// typed const/var whose initializer this is, or - for a NESTED aggregate -
 // the type of the field the enclosing aggregate assigns it to
 // (`uguid: (guid: (D1: ...))`). Invalid for an ARRAY element aggregate
 // (element types come off declaration nodes; a stage-E refinement).
@@ -2309,7 +2309,7 @@ begin
       end;
     nkConstDecl, nkVarDecl:
       begin
-        // A typed const's shape is name, TYPE EXPR, initializer — the type
+        // A typed const's shape is name, TYPE EXPR, initializer - the type
         // is the child between the name and this aggregate.
         LChild := FModel.Tree.Nodes[LParent].FirstChild;
         LChild := FModel.Tree.Nodes[LChild].NextSibling;   // past the name
@@ -2324,7 +2324,7 @@ begin
 end;
 
 // The innermost node of the given kinds on ANode's parent chain, stopping at
-// statement/section boundaries — the disambiguator for `:`/`=`/`of`/`(`.
+// statement/section boundaries - the disambiguator for `:`/`=`/`of`/`(`.
 function TPasCompletion.UpChainKind(ANode: Integer;
   const AKinds: array of TPasNodeKind): TPasNodeKind;
 var
@@ -2355,7 +2355,7 @@ begin
   if AInfo.Kind = ckNone then
     Exit(ccNone);
   LTS := FModel.Tree.Source.Files[0];
-  // A uses clause first: any position inside one is a unit-name position —
+  // A uses clause first: any position inside one is a unit-name position -
   // but a caret whose anchor is a SEMICOLON sits after the clause's own
   // terminator (the `;` is the clause node's last token, so the node test
   // alone over-reaches by one token): that is the next declaration, not a
@@ -2367,9 +2367,9 @@ begin
     if LTS.Tokens[AInfo.RawToken].Kind = tkUses then
       Exit(ccUses);
   end;
-  // The MODULE HEADER's own (possibly dotted) name is a naming position —
+  // The MODULE HEADER's own (possibly dotted) name is a naming position -
   // nothing to offer while the unit names itself. (AInfo.Node is never
-  // NIL_NODE for a valid caret — the parser always allocates a root — but
+  // NIL_NODE for a valid caret - the parser always allocates a root - but
   // the guard keeps this self-defending rather than resting on a parser
   // invariant stated two units away.)
   LPrev := AInfo.Node;
@@ -2383,7 +2383,7 @@ begin
     Exit(ccMember);
   // A property ACCESSOR position: the caret sits inside an nkPropSpec whose
   // specifier word is `read`/`write`. Checked before the generic token rules
-  // below — the word left of the caret is an identifier-LEXED directive word
+  // below - the word left of the caret is an identifier-LEXED directive word
   // the token switch cannot tell from any other name. The other specifiers
   // (index, stored, default, implements) keep the ordinary expression
   // treatment: their right sides really are expressions.
@@ -2428,14 +2428,14 @@ begin
   LKind := LTS.Tokens[LPrev].Kind;
   case LKind of
     tkInherited:
-      // `inherited |` — the ancestor's members (12.1.2).
+      // `inherited |` - the ancestor's members (12.1.2).
       Result := ccInherited;
     tkGoto:
       Result := ccLabel;
     tkColon:
       // `x: |` is a TYPE in a declaration, a STATEMENT after a case/goto
       // label, an EXPRESSION in an aggregate initializer's `field: value`
-      // or a Write width spec — the INNERMOST enclosing construct decides.
+      // or a Write width spec - the INNERMOST enclosing construct decides.
       case UpChainKind(AInfo.Node, [nkCaseSel, nkCaseLabels, nkLabeledStmt,
         nkAggregateField, nkFormattedArg]) of
         nkCaseSel, nkCaseLabels, nkLabeledStmt:
@@ -2446,8 +2446,8 @@ begin
         Result := ccType;
       end;
     tkEqual:
-      // `TFoo = |` in a type decl is a type; `= |` anywhere else — a const
-      // initializer, a parameter DEFAULT, an aggregate value, a comparison —
+      // `TFoo = |` in a type decl is a type; `= |` anywhere else - a const
+      // initializer, a parameter DEFAULT, an aggregate value, a comparison -
       // is an expression. The innermost construct decides again: a param
       // default sits lexically inside a type declaration, and the old
       // nkTypeDecl-anywhere test called `AEnabled: Boolean = |` a type
@@ -2461,13 +2461,13 @@ begin
         // nkEnumValue included above: `CURLINFO_X = CURLINFO_DOUBLE + 10` is
         // an ordinal EXPRESSION inside a type declaration. A METHOD
         // RESOLUTION's right side (14.2.2) names one of this class's own
-        // methods — the scope chain has them, ccExpression lists them.
+        // methods - the scope chain has them, ccExpression lists them.
         Result := ccExpression;
       end;
     tkIs, tkAs:
-      // Nominally a class type — but dcc accepts any class-REFERENCE
+      // Nominally a class type - but dcc accepts any class-REFERENCE
       // expression on the right (`if FModel is DefineModelClass then`, a
-      // class FUNCTION — shipped in the FMX sources), so a hard types-only
+      // class FUNCTION - shipped in the FMX sources), so a hard types-only
       // filter hides legal names. ccExpression lists types too.
       Result := ccExpression;
     tkOf:
@@ -2489,11 +2489,11 @@ begin
       else
         Result := ccExpression;
     tkLess:
-      // `TList<|` — a generic argument/parameter list — but only when the
+      // `TList<|` - a generic argument/parameter list - but only when the
       // parse says so: a bare `x < |` is a COMPARISON (the oracle's
       // `Result := x < y` misses). A generic list mid-typing that has not
       // parsed as nkTypeArgs yet degrades to ccExpression, which still
-      // lists every type — only the keyword set differs.
+      // lists every type - only the keyword set differs.
       if UpChainKind(AInfo.Node, [nkTypeArgs, nkGenericParams]) <> nkError then
         Result := ccType
       else
@@ -2503,8 +2503,8 @@ begin
       Result := ccStatement;
   else
     // A reserved word (interface/implementation/var/type/...) opens a
-    // declaration head; anything else — an operator, `:=`, a bracket, a
-    // literal — sits inside an expression.
+    // declaration head; anything else - an operator, `:=`, a bracket, a
+    // literal - sits inside an expression.
     if LKind >= tkAnd then
       Result := ccStatement
     else
@@ -2573,7 +2573,7 @@ begin
   begin
     AModel := ProjModel(AMid, AWhere);
     // The callers of this accessor are the item DETAIL readers (params text,
-    // doc comment, signature help) — per selected item, not per candidate —
+    // doc comment, signature help) - per selected item, not per candidate -
     // so rehydrating a text-demoted model here is cheap and gives them the
     // real text back. On failure they degrade through their bounds guards.
     if (AModel <> nil) and AModel.Demoted then
@@ -2588,7 +2588,7 @@ function TPasCompletion.SymHeadWord(AModel: TPasSemaModel;
 begin
   // Through the model's RoutineHead (this runs per display row): it answers
   // from the head token on a live model and from DemoteText's snapshot on a
-  // text-demoted one — no raw token read either way.
+  // text-demoted one - no raw token read either way.
   case AModel.RoutineHead(ASym) of
     rhProcedure:
       Result := 'procedure';
@@ -2633,7 +2633,7 @@ begin
     Result := AModel.Tree.Nodes[Result].NextSibling;
 end;
 
-// Whitespace runs collapsed to a single space — a multi-line parameter list
+// Whitespace runs collapsed to a single space - a multi-line parameter list
 // must read as one display line. Interior comments survive as their own
 // text; a declaration that comments its parameters is rare enough that
 // stripping them is not worth a token-wise rebuild here.
@@ -2681,7 +2681,7 @@ begin
       Result := LSig.Params;
     Exit;
   end;
-  // An empty `()` renders as '' — "parameterless" is about the PARAMETERS,
+  // An empty `()` renders as '' - "parameterless" is about the PARAMETERS,
   // not the punctuation, and both spellings must display the same way.
   LParams := SymParamsNode(LM, ASym);
   if LParams = NIL_NODE then
@@ -2709,7 +2709,7 @@ begin
       Result := LSig.HasArgs;
     Exit;
   end;
-  // An nkParams with no nkParam child is an empty `()` — False by contract.
+  // An nkParams with no nkParam child is an empty `()` - False by contract.
   LChild := SymParamsNode(LM, ASym);
   if LChild <> NIL_NODE then
     LChild := LM.Tree.Nodes[LChild].FirstChild;
@@ -2756,7 +2756,7 @@ begin
     (LM.Symbols[ASym].Kind in [skType, skBuiltinType]);
 end;
 
-// The largest designator-shaped node ending exactly at AVis — the callee of
+// The largest designator-shaped node ending exactly at AVis - the callee of
 // a call whose nkCall node a broken parse did not produce. Climbs from the
 // innermost node while the parent is still designator-shaped AND still ends
 // at AVis (an nkCall parent ends past the '(', so the climb stops below it).
@@ -2780,12 +2780,12 @@ begin
   end;
 end;
 
-{ The (Mid, Sym, Ctx) the call designator binds to — the analysis's own
+{ The (Mid, Sym, Ctx) the call designator binds to - the analysis's own
   arbitration first (CallTargetX/CallTarget on the nkCall node, filled on
   analyzed models and for the overlay's intra-buffer calls), then the
   structural walk the member-completion path uses: RefMap/ExtRefMap on a
   plain name, BridgeName for one that leaves the buffer, DesignatorType +
-  MemberSymOf for a dotted one — which is exactly the bridged-designator
+  MemberSymOf for a dotted one - which is exactly the bridged-designator
   resolution the LSP's interim locator cannot do (`Obj.Method(|`, freshly
   typed cross-unit calls). ACallNode is the nkCall when the AST produced
   one; NIL_NODE from the broken-parse fallback. }
@@ -2901,7 +2901,7 @@ begin
 end;
 
 { Expands one bound callee into targets: a routine reports its WHOLE overload
-  family — the chain from its scope's HEAD, because the bound symbol may sit
+  family - the chain from its scope's HEAD, because the bound symbol may sit
   mid-chain (resolution binds the arity match) and each collapsed overload is
   its own signature here, unlike completion rows. A procedural VALUE (proc-
   type variable/parameter/field) reports itself alone. }
@@ -3026,7 +3026,7 @@ begin
           if LDesig <> NIL_NODE then
           begin
             LResolved := CalleeSyms(LDesig, LCallNode, LMid, LSym, LCtx);
-            // A designator that names a TYPE is a cast, not a call — step
+            // A designator that names a TYPE is a cast, not a call - step
             // over it to the enclosing call, which is what a caret inside
             // `CheckResult(HRESULT(x|` wants to see.
             if LResolved and IsTypeSym(LMid, LSym) then
@@ -3039,7 +3039,7 @@ begin
           end;
           if not LFound then
             // Grouping paren (or a cast): the commas counted so far were
-            // its own — reset and keep walking.
+            // its own - reset and keep walking.
             LArgs := 0;
         end
         else
@@ -3092,7 +3092,7 @@ begin
   FItems := nil;
   FCount := 0;
   // Not Clear: it discards the table's capacity AND virtual-notifies every
-  // old entry — recreating at the same capacity is cheaper at list scale.
+  // old entry - recreating at the same capacity is cheaper at list scale.
   FSeen.Free;
   FSeen := TDictionary<string, Integer>.Create(4096);
   FAncestryBuilt := False;
@@ -3110,7 +3110,7 @@ begin
         begin
           FClassSide := LRef.IsTypeRef;
           // `@TClass.Method` takes an INSTANCE method's address through the
-          // class name (the vtable-building idiom) — the class-side filter
+          // class name (the vtable-building idiom) - the class-side filter
           // stands down under an address-of.
           if FClassSide then
           begin
@@ -3153,7 +3153,7 @@ begin
     ccPropRead, ccPropWrite:
       begin
         // Only this class's (and its ancestors') members are legal after
-        // read/write — the struct chain alone, no scope pipeline. The shape
+        // read/write - the struct chain alone, no scope pipeline. The shape
         // filter (fields; functions vs procedures) lives in AddSym.
         EnsureAncestry(LInfo.Scope);
         for LNode := 0 to High(FCaretStructs) do

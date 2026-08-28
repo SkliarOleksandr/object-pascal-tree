@@ -1,7 +1,7 @@
 unit PasTree.DProj;
 
 {
-  PasTree — .dproj (MSBuild project file) reader.
+  PasTree - .dproj (MSBuild project file) reader.
 
   Encapsulates enough of the MSBuild property/condition model that a real
   Embarcadero-generated .dproj evaluates correctly for a chosen
@@ -11,11 +11,11 @@ unit PasTree.DProj;
 
   Scope: a purpose-built reader for this one XML shape, not a general XML
   library. It hand-parses elements/attributes/text, plus comments and CDATA
-  (both appear in real files — see the CDATA branch in ParseElement for what
+  (both appear in real files - see the CDATA branch in ParseElement for what
   ignoring them silently costs); namespaced tags are still assumed absent.
   It evaluates each PropertyGroup/element
   `Condition` attribute with a tiny boolean-expression evaluator (parentheses,
-  and/or, '$(Name)'==/!='literal') — exactly the grammar Embarcadero's
+  and/or, '$(Name)'==/!='literal') - exactly the grammar Embarcadero's
   generator emits. Walking the file top-to-bottom and letting each matching
   group's `Name;$(Name)` pattern chain onto an accumulator dictionary
   reproduces real MSBuild property inheritance (Base -> Base_<Platform> ->
@@ -85,7 +85,7 @@ uses
   System.IOUtils,
   System.Generics.Collections;
 
-{ ==== minimal XML node tree — private, scoped to the .dproj shape ==== }
+{ ==== minimal XML node tree - private, scoped to the .dproj shape ==== }
 
 type
   TXNode = class
@@ -278,7 +278,7 @@ begin
         if (FPos + 1 <= FLen) and (FText[FPos + 1] = '/') then
         begin
           Inc(FPos, 2);
-          ReadName; // closing tag name — trust structure, don't verify
+          ReadName; // closing tag name - trust structure, don't verify
           SkipWs;
           if Cur = '>' then
             Inc(FPos);
@@ -293,14 +293,14 @@ begin
         end
         else if (FPos + 8 <= FLen) and (Copy(FText, FPos, 9) = '<![CDATA[') then
         begin
-          // Real .dproj files DO carry CDATA — Embarcadero emits
+          // Real .dproj files DO carry CDATA - Embarcadero emits
           // <PreBuildEvent><![CDATA[...]]></PreBuildEvent> for any project
           // with build events. The body is literal TEXT and routinely holds
           // '>' and '"', so falling through to ParseElement (as this used to)
           // consumed up to the first '>' INSIDE the payload and desynchronized
           // the rest of the document. Measured on a real 2500-unit project:
-          // the PropertyGroup holding it lost its remaining children — no
-          // DCC_UnitSearchPath, hence zero search paths — and every later
+          // the PropertyGroup holding it lost its remaining children - no
+          // DCC_UnitSearchPath, hence zero search paths - and every later
           // ItemGroup vanished, hence an empty DCCReference file list. Both
           // failures are silent: Load still returns True.
           // NB the payload joins LText and is entity-decoded with it below.
@@ -431,7 +431,7 @@ begin
               Inc(LPos, 2);
             end
             else
-              Inc(LPos); // stray '=' — ignore
+              Inc(LPos); // stray '=' - ignore
           end;
         '!':
           begin
@@ -451,7 +451,7 @@ begin
             Inc(LPos);
           LWord := Copy(ACond, LStart, LPos - LStart);
           if LWord = '' then
-            Inc(LPos) // unrecognized character — skip defensively
+            Inc(LPos) // unrecognized character - skip defensively
           else if SameText(LWord, 'and') then
           begin
             LTok.Kind := ctAnd; LTok.Value := '';
@@ -617,7 +617,7 @@ begin
   try
     Result := TPath.GetFullPath(Result);
   except
-    // a stray unresolved macro or malformed segment — keep the combined form
+    // a stray unresolved macro or malformed segment - keep the combined form
   end;
 end;
 
@@ -766,9 +766,9 @@ begin
       end;
 
       { A DCCReference is not always relative to the project directory. A
-        package whose sources live one level up lists them by BARE NAME —
+        package whose sources live one level up lists them by BARE NAME -
         `<DCCReference Include="Alcinoe.Cipher.pas"/>` with
-        `DCC_UnitSearchPath=..\` — and the IDE finds them on the search path.
+        `DCC_UnitSearchPath=..\` - and the IDE finds them on the search path.
         Combining with the project dir alone yielded a list of paths that do
         not exist, so the host's file tree showed only the two entries that
         happened to sit beside the .dproj, and every unit in the package was
@@ -823,7 +823,7 @@ begin
           begin
             var LOne := Trim(LName);
             // The accumulated chain ends in a literal '$(DCC_Namespace)'
-            // self-reference when the env var is unset — skip macro leftovers.
+            // self-reference when the env var is unset - skip macro leftovers.
             if (LOne <> '') and (Pos('$(', LOne) = 0) and
                not LNS.Contains(LOne) then
               LNS.Add(LOne);

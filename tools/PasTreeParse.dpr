@@ -134,7 +134,7 @@ begin
         GProject := TPasProject.Create(GPlatform, [], []);
         try
           // Keep the serial parts (disk walk, include index) out of the
-          // timed region — we are measuring the parse pipeline.
+          // timed region - we are measuring the parse pipeline.
           GProject.SourceManager.BuildIncludeIndex(GRoot);
           GFiles := TDirectory.GetFiles(GRoot, '*.*',
             TSearchOption.soAllDirectories);

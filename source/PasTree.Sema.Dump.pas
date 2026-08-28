@@ -1,7 +1,7 @@
 unit PasTree.Sema.Dump;
 
 {
-  PasTree semantics — a compact, human-readable dump of a TPasSemaModel
+  PasTree semantics - a compact, human-readable dump of a TPasSemaModel
   (scope tree + symbols + diagnostics + resolution stats). Used by the
   PasTreeSema tool and for eyeballing test failures.
 }
@@ -68,7 +68,7 @@ begin
     for LScope := 0 to AModel.Scopes.Count - 1 do
     begin
       // Summarize the system scope; detail user scopes.
-      // Names/Symbols are LAZY (nil until the first bind) — count nil as 0.
+      // Names/Symbols are LAZY (nil until the first bind) - count nil as 0.
       if AModel.Scopes[LScope].Kind = sckSystem then
       begin
         var LBuiltinCount := 0;

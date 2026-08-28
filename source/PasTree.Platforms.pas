@@ -1,7 +1,7 @@
 unit PasTree.Platforms;
 
 {
-  PasTree — target platform presets.
+  PasTree - target platform presets.
 
   A "platform" for the preprocessor is (a) the set of predefined
   conditional symbols and (b) the type sizes the $IF evaluator needs
@@ -73,7 +73,7 @@ function TryParsePlatformName(const AName: string;
 function PlatformName(APlatform: TPasPlatform): string;
 
 { The IDE's DEFAULT `Unit scope names` (Project Options > Delphi Compiler, dcc
-  -NS) — what a project inherits when its .dproj says nothing extra.
+  -NS) - what a project inherits when its .dproj says nothing extra.
 
   A host needs this when there IS no .dproj: a bare .dpr/.dpk or a directory
   scan. Without it every legacy unqualified import fails, because dcc itself
@@ -91,11 +91,11 @@ function PlatformName(APlatform: TPasPlatform): string;
   The Vcl* entries are kept on every platform: a prefix that names no real file
   costs one failed lookup and nothing else, whereas dropping it would break a
   Windows-only unit reached from a cross-platform scan. NB the FireMonkey
-  templates add their own entries — not listed here, because every FMX unit is
+  templates add their own entries - not listed here, because every FMX unit is
   already fully qualified and needs no prefix. }
 function PasDefaultNamespaces(APlatform: TPasPlatform): TArray<string>;
 
-{ The IDE's DEFAULT unit aliases (dcc -A) — the sibling of the list above, and
+{ The IDE's DEFAULT unit aliases (dcc -A) - the sibling of the list above, and
   read straight out of CodeGear.Common.Targets, which builds them in the same
   two groups:
 
@@ -107,7 +107,7 @@ function PasDefaultNamespaces(APlatform: TPasPlatform): TArray<string>;
 
   One difference from the namespaces matters: the next line there is
   `<UnitAliases Condition="'$(DCC_UnitAlias)'!=''">$(DCC_UnitAlias)$(UnitAliases)`
-  — the project's own aliases are PREPENDED, not substituted. So these defaults
+  - the project's own aliases are PREPENDED, not substituted. So these defaults
   apply even to a project that declares its own, and a host must add them first
   and let the project's entries override on collision, never skip them. }
 function PasDefaultUnitAliases(

@@ -1,7 +1,7 @@
 unit PasTree.Sema.Model;
 
 {
-  PasTree semantics — the side-model bound to one immutable TPasTree.
+  PasTree semantics - the side-model bound to one immutable TPasTree.
 
   Everything is index-based (mirrors the AST arena): symbols live in a grown
   array, scopes in an owned list, and RefMap maps a CST node index to the
@@ -39,12 +39,12 @@ type
     skProperty, skEnumValue, skGenericParam, skLabel, skUnitRef, skBuiltinType,
     // Never a declared symbol: completion KEYWORD rows carry this so a host
     // mapping Kind to its own item kinds cannot mistake `begin` for a type
-    // (they used to ship as skType, documented-meaningless — the review's
+    // (they used to ship as skType, documented-meaningless - the review's
     // note). No resolver code path produces or consumes it.
     skKeyword);
 
   // sfGeneric: a TYPE declared with parameters (`TFoo<T>`). Set once at collect
-  // time because the alternative — deriving it at lookup — sits on the hottest
+  // time because the alternative - deriving it at lookup - sits on the hottest
   // path there is: a bare type reference must prefer the arity-0 declaration
   // (16.1.2), so EVERY type reference in the closure asks the question. Reading
   // it off the declaration there cost +1.7% even in its cheapest structural
@@ -82,12 +82,12 @@ type
   TSemaVisibility = (svDefault, svStrictPrivate, svPrivate, svStrictProtected,
     svProtected, svPublic, svPublished, svAutomated);
 
-  // A routine's HEAD word, resolved once — the display/classification facts
+  // A routine's HEAD word, resolved once - the display/classification facts
   // completion reads per row (see RoutineHead). Survives text demotion.
   TPasRoutineHead = (rhNone, rhProcedure, rhFunction, rhConstructor,
     rhDestructor, rhOperator);
 
-  // Type category (mirrors DelphiAST TDataTypeID groupings) — set on
+  // Type category (mirrors DelphiAST TDataTypeID groupings) - set on
   // skType/skBuiltinType symbols; drives assignment/operator checks.
   TSemaTypeCat = (tcUnknown, tcInteger, tcFloat, tcBoolean, tcChar, tcString,
     tcPointer, tcNil, tcEnum, tcSet, tcArray, tcRecord, tcClass, tcInterface,
@@ -120,12 +120,12 @@ type
     Kind: TSemaScopeKind;
     Parent: Integer;                       // scope index; NIL_SCOPE at root
     OwnerNode: Integer;                    // CST node that opened this scope
-    // Both LAZY — nil until the first name is bound (most scopes never bind
+    // Both LAZY - nil until the first name is bound (most scopes never bind
     // one). Readers treat nil as empty; TPasSemaModel.BindName creates them.
     Names: TDictionary<string, Integer>;   // NameLower -> symbol index (head)
     Symbols: TList<Integer>;               // declaration order
     // True when Names/Symbols point at containers OWNED ELSEWHERE and shared
-    // read-only across models — today only the builtin seed template
+    // read-only across models - today only the builtin seed template
     // (PasTree.Sema.Builtins). Destroy leaves them alone, and any WRITE goes
     // through EnsureOwnedContainers first (copy-on-write), so a future pass
     // that declares into such a scope gets a private copy instead of
@@ -135,7 +135,7 @@ type
     // Joined scopes checked BEFORE this scope's own names. Exactly one thing
     // needs that order and the spec is explicit about it (15.3.3): a HELPER
     // member hides the extended type's own member of the same name. Everything
-    // else joined here — uses, with, ancestors, enums — is a fallback and
+    // else joined here - uses, with, ancestors, enums - is a fallback and
     // belongs in Additional. See JoinScopeShadowing.
     Shadowing: TArray<Integer>;
     // For a METHOD implementation's routine scope: the (innermost) struct
@@ -153,7 +153,7 @@ type
     FSymCount: Integer;
     // Diags' filled prefix. The array itself carries CAPACITY between
     // TrimDiags calls (AddDiag doubles instead of the old `Diags + [x]`,
-    // which re-copied every managed record per append — O(n²) on the
+    // which re-copied every managed record per append - O(n^2) on the
     // error-heavy units, ~2447 diags in corpus history). Everything outside
     // this unit reads Diags AFTER analysis, when TrimDiags has cut it back
     // to exact length; in-flight readers go through HasDiagAt, which stops
@@ -180,7 +180,7 @@ type
     // Cross-model call target (Phase 3c): the overload CrossType selected by
     // argument types among the merged local + used-units candidate set. Set
     // only when the winner is meaningful beyond CallTarget (cross-unit callee
-    // or a real overload choice) — the future overload-precise navigation
+    // or a real overload choice) - the future overload-precise navigation
     // jump reads this.
     CallTargetX: TDictionary<Integer, TPasExtRef>;
     // Phase 3c: cross-model typing (filled by the project driver; empty in a
@@ -195,19 +195,19 @@ type
     // nkWithStmt nodes whose target type could NOT be resolved intra-unit, so
     // their member scope was never opened (PasTree.Sema.Resolver.
     // ResolveOneWithStmt). Inside such a body ANY unqualified name might be a
-    // member of the target — a member that shadows everything else (ch.05
-    // §5.7, dcc-verified against a class field, a local, a parameter, a
+    // member of the target - a member that shadows everything else (ch.05
+    // sec. 5.7, dcc-verified against a class field, a local, a parameter, a
     // same-unit global, and even an inline var declared in the body itself).
     // So Phase 1's binding there is a best-effort GUESS: the project's
     // with pass revises it once the cross-unit type is known, and until then
-    // any type derived from it is unreliable — which is why the typer stays
+    // any type derived from it is unreliable - which is why the typer stays
     // quiet over these nodes (see InUnopenedWithBody / TPasSemaTyper.Diag).
     WithUnopened: TArray<Integer>;
-    { MEMORY-AUDIT §6.4-4 stage 2 — TEXT DEMOTION state. When Demoted, the
+    { MEMORY-AUDIT sec. 6.4-4 stage 2 - TEXT DEMOTION state. When Demoted, the
       token layer is gone: Tree.Source.Visible is nil and every file's
       Source/Tokens/LineStarts are empty; Nodes, RefMap, ExtRefMap, Symbols,
       Scopes, SymTypeX all survive, so resolution and the generic machinery
-      keep working (they are node-id/symbol-table driven — verified in the
+      keep working (they are node-id/symbol-table driven - verified in the
       audit). Every text/position consumer either degrades through its
       existing bounds guards or asks TPasSemaProject.EnsureHydrated first.
       The Demoted* fields are the REHYDRATION IDENTITY CHECK: a re-preprocess
@@ -216,7 +216,7 @@ type
       TYPE node -> its member scope's StructSym, for every scope owned by a
       struct-kind node. The one post-analysis reader of another model's
       NodeScope is ResolveTypeExpr's anonymous-struct branch (an inline
-      `record ... end` in a type slot has no name, so RefMap has nothing) —
+      `record ... end` in a type slot has no name, so RefMap has nothing) -
       this dictionary is that branch's released-mode answer. Nil until a
       release; scopes are few, so it is tiny. }
     AnonStructSyms: TDictionary<Integer, Integer>;
@@ -224,7 +224,7 @@ type
     { True when this model's FINAL token stream came from the declared-pass
       re-preprocess (the per-unit $IF oracle) rather than the plain seeded
       first pass. Such a stream depended on MID-ANALYSIS oracle state and is
-      not reproducible from cold — measured on the client closure: exactly
+      not reproducible from cold - measured on the client closure: exactly
       these units (System.pas, System.Rtti, FastMM4...) failed the rehydration
       identity check. DemoteClosedUnits therefore skips them; they keep full
       text. A handful of units against ~3750 demoted. }
@@ -240,26 +240,26 @@ type
     function AddScope(AKind: TSemaScopeKind; AParent, AOwnerNode: Integer):
       Integer;
     procedure JoinScope(AScope, AAdditional: Integer);
-    { Joins AShadowing so it is searched BEFORE AScope's own names — the one
+    { Joins AShadowing so it is searched BEFORE AScope's own names - the one
       precedence a plain JoinScope cannot express. See TSemaScope.Shadowing. }
     procedure JoinScopeShadowing(AScope, AShadowing: Integer);
     // Adds a symbol to the arena (does not register a name). ANameKey, when
-    // non-empty, is a PRECOMPUTED PasNameKey(AName) — callers that already
+    // non-empty, is a PRECOMPUTED PasNameKey(AName) - callers that already
     // built the key for their own lookup pass it to avoid lowering twice.
     function AddSymbol(AScope: Integer; AKind: TSemaSymbolKind;
       const AName: string; ADeclNode: Integer;
       const ANameKey: string = ''): Integer;
     // Registers NameLower -> symbol in a scope's dictionary + order list.
     procedure BindName(AScope, ASym: Integer);
-    // Appends to a scope's declaration-order list WITHOUT (re)binding a name —
+    // Appends to a scope's declaration-order list WITHOUT (re)binding a name -
     // the overload/duplicate branches of DeclareSym. Honours copy-on-write on
     // a shared-container scope, same as BindName.
     procedure AddToOrder(AScope, ASym: Integer);
     { Bulk-adopts a seed TEMPLATE: copies ASyms into Symbols[0..N-1] (string
-      fields share their heap data by refcount — no per-name allocation) and
+      fields share their heap data by refcount - no per-name allocation) and
       re-stamps each record's Scope to AScope. ONLY valid on an empty symbol
       arena: the template's name dictionary maps names to indices 0..N-1.
-      Returns False (and does nothing) when the arena is not empty — the
+      Returns False (and does nothing) when the arena is not empty - the
       caller then falls back to seeding symbol by symbol. }
     function AdoptSeededSymbols(const ASyms: TArray<TSemaSymbol>;
       AScope: Integer): Boolean;
@@ -267,7 +267,7 @@ type
     function FindLocal(AScope: Integer; const ANameLower: string): Integer;
     // AScope's own names, then its Additional (joined) scopes, most-recently
     // -added first, EACH CHECKED THE SAME WAY (so a joined scope's own
-    // joins are reachable too — e.g. a class's member scope has a nested
+    // joins are reachable too - e.g. a class's member scope has a nested
     // enum's values joined into IT; a routine implementing that class's
     // method joins the class's member scope in turn, and must still see the
     // enum values two joins deep). FindLocal alone is one level only; this
@@ -275,16 +275,16 @@ type
     function FindLocalDeep(AScope: Integer; const ANameLower: string): Integer;
     { The ENUMERATING counterpart of FindLocalDeep, for completion: every
       symbol visible through AScope, reported in exactly the order the lookup
-      would try them — Shadowing joins (recursive) first, then the scope's own
+      would try them - Shadowing joins (recursive) first, then the scope's own
       declaration-order list, then Additional joins most-recently-added first
       (recursive). A caller deduplicating by NameLower and keeping the FIRST
       hit therefore reproduces FindLocalDeep's precedence. Does NOT climb
-      Parent — that is the caller's chain walk, same split as the lookups. }
+      Parent - that is the caller's chain walk, same split as the lookups. }
     procedure EnumScopeDeep(AScope: Integer; const AOnSym: TPasSymEnumProc;
       ADepth: Integer = 0);
     // Full lookup: self -> additional (reverse) -> parent -> ...
     function Resolve(AScope: Integer; const ANameLower: string): Integer;
-    { Resolve honouring block-scope POSITION — see the implementation. Only a
+    { Resolve honouring block-scope POSITION - see the implementation. Only a
       reference lookup passes a real AAtToken; everything else passes -1. }
     function ResolveAt(AScope: Integer; const ANameLower: string;
       AAtToken: Integer): Integer;
@@ -295,7 +295,7 @@ type
     function FindByArityDeep(AScope: Integer; const ANameLower: string;
       AWantGeneric: Boolean): Integer;
     function DeclaredAfter(ASym, AAtToken: Integer): Boolean;
-    { True when ANode sits in the BODY of a `with` listed in WithUnopened —
+    { True when ANode sits in the BODY of a `with` listed in WithUnopened -
       see that field. An identifier inside a with's own TARGET expression is
       NOT in its scope (the target is evaluated in the enclosing one), hence
       the last-child test. WithUnopened is empty for the overwhelming
@@ -303,27 +303,27 @@ type
     function InUnopenedWithBody(ANode: Integer): Boolean;
     { Frees the maps nothing reads after analysis for a unit the host is not
       EDITING: ExprType (a nodes-sized array), ExprTypeX and WithUnopened.
-      Navigation reads none of them (grep-verified in MEMORY-AUDIT §6.4-4 and
+      Navigation reads none of them (grep-verified in MEMORY-AUDIT sec. 6.4-4 and
       re-verified 2026-08-23); completion reads them for the ACTIVE file only,
       which the caller keeps. ExprTypeX stays a live-but-empty dictionary so
       existing TryGetValue readers need no nil-guard. See
-      TPasSemaProject.ReleaseTransientMaps for the contract — this is not
+      TPasSemaProject.ReleaseTransientMaps for the contract - this is not
       called during any analysis. }
     procedure ReleaseTransientMaps;
-    { The member-scope struct symbol stamped on a struct TYPE node — from
+    { The member-scope struct symbol stamped on a struct TYPE node - from
       NodeScope while it lives, from the release-time snapshot afterwards.
       NIL_SYM when the node owns no such scope. }
     function StructSymAtNode(ANode: Integer): Integer;
-    { The innermost struct whose scope ENCLOSES ANode — the `Self` context
+    { The innermost struct whose scope ENCLOSES ANode - the `Self` context
       there, as opposed to StructSymAtNode's "this node IS the struct".
       Climbs the node's parents to the nearest scope, then that scope's
       parents: StructSym is stamped both on a struct's own member scope and
       on a method IMPLEMENTATION's routine scope, so this answers inside a
       declaration and inside a body alike. NIL_SYM outside any struct.
-      Reads NodeScope, so it is an ANALYSIS-TIME query — a demoted model
+      Reads NodeScope, so it is an ANALYSIS-TIME query - a demoted model
       (ReleaseTransientMaps) answers NIL_SYM. }
     function EnclosingStructSym(ANode: Integer): Integer;
-    { The routine head word of ASym (skRoutine), from the head token — or,
+    { The routine head word of ASym (skRoutine), from the head token - or,
       on a demoted model, from the snapshot DemoteText took. rhNone for a
       symbol that is not a routine or has no routine node. }
     function RoutineHead(ASym: Integer): TPasRoutineHead;
@@ -333,7 +333,7 @@ type
     procedure DemoteText;
     { Installs APre as this model's token layer IF it is stream-identical to
       the demoted one (same file count, per-file source sizes and token
-      counts, same visible count) — the guard that a changed file can only
+      counts, same visible count) - the guard that a changed file can only
       ever mean "no answer", never a wrong position. False leaves the model
       demoted. }
     function TryRehydrate(const APre: TPasPreprocessed): Boolean;
@@ -350,7 +350,7 @@ type
   end;
 
 { Any name -> its lookup key: lower-cased, leading '&' stripped. `&Foo` and
-  `Foo` name the same thing — see the implementation. }
+  `Foo` name the same thing - see the implementation. }
 function PasNameKey(const AName: string): string;
 
 implementation
@@ -369,7 +369,7 @@ begin
   OwnerNode := AOwnerNode;
   StructSym := NIL_SYM;
   // Names/Symbols stay NIL until the first bind (see BindName): scopes are
-  // minted per routine, per block, per with, per enum — and most never
+  // minted per routine, per block, per with, per enum - and most never
   // declare a name, so the two eager heap objects per scope were the
   // dominant small-object count in the analyzer. Every reader treats nil as
   // empty (FindLocal here; the for-in/Count readers each guard locally).
@@ -474,7 +474,7 @@ end;
 
   `&Foo` and `Foo` name the SAME thing (see TPasTree.NodeNameLower for the
   dcc-verified detail). Callers pass a symbol's DISPLAY name here, ampersand and
-  all, because that is what the source said — the key must not keep it. Applied
+  all, because that is what the source said - the key must not keep it. Applied
   at both ends on purpose: AddSymbol/DeclareSym for what gets declared, and
   FindLocal for what gets looked up, so no future call site can reintroduce the
   mismatch by building a key its own way. }
@@ -485,7 +485,7 @@ var
   LOut: PChar;
 begin
   // Fast path: a name that is already a key (no '&', no ASCII uppercase) is
-  // returned as-is — a refcount bump instead of an allocation. Callers often
+  // returned as-is - a refcount bump instead of an allocation. Callers often
   // pass names that are already lowered.
   LLen := Length(AName);
   LFrom := 1;
@@ -503,7 +503,7 @@ begin
     if LIdx > LLen then
       Exit(AName);
   end;
-  // Single pass, one allocation — ASCII-only folding, exactly what the old
+  // Single pass, one allocation - ASCII-only folding, exactly what the old
   // Delete('&') -> LowerCase chain produced.
   SetLength(Result, LLen);
   LOut := PChar(Pointer(Result));
@@ -575,7 +575,7 @@ begin
   for LIdx := 0 to High(ASyms) do
   begin
     Symbols[LIdx] := ASyms[LIdx];
-    Symbols[LIdx].Scope := AScope;   // scope INDEX is per-model — re-stamp
+    Symbols[LIdx].Scope := AScope;   // scope INDEX is per-model - re-stamp
   end;
   FSymCount := Length(ASyms);
   Result := True;
@@ -587,10 +587,10 @@ begin
   // ANameLower must ALREADY be a key (PasNameKey / TPasTree.NodeNameLower).
   // Normalizing defensively here instead cost 3.3x total analysis time: this is
   // the hottest function in the analyzer, and PasNameKey allocates a string per
-  // call. Cheap-looking belt-and-braces on a hot path is not cheap — the
+  // call. Cheap-looking belt-and-braces on a hot path is not cheap - the
   // boundary that BUILDS the key is the only place that can normalize for free,
   // because it is already producing a string there.
-  // A scope that never declared anything has no dictionary at all (lazy —
+  // A scope that never declared anything has no dictionary at all (lazy -
   // see TSemaScope.Create); the nil test also short-circuits the hash.
   if (Scopes[AScope].Names = nil) or
      not Scopes[AScope].Names.TryGetValue(ANameLower, Result) then
@@ -603,7 +603,7 @@ var
   LAdd: TArray<Integer>;
   LIdx: Integer;
 begin
-  // SHADOWING joins first, before the scope's own names: 15.3.3 — a helper
+  // SHADOWING joins first, before the scope's own names: 15.3.3 - a helper
   // member hides the extended type's own member of the same name.
   // dcc-verified, and a component suite leans on it hard: its rich-edit
   // `TdxTagBaseInnerHelper = class helper for TdxTagBase` redeclares
@@ -620,7 +620,7 @@ begin
   Result := FindLocal(AScope, ANameLower);
   if Result <> NIL_SYM then
     Exit;
-  // Joined scopes, most-recently-added first (uses/with priority) — each
+  // Joined scopes, most-recently-added first (uses/with priority) - each
   // recursed into the SAME way, not just FindLocal'd, so a joined scope's
   // own joins are reachable too.
   LAdd := Scopes[AScope].Additional;
@@ -640,7 +640,7 @@ var
   LIdx: Integer;
 begin
   // The lookups recurse joins unguarded (the resolver never builds a cyclic
-  // join graph); an enumerator visits EVERYTHING, so it caps depth anyway —
+  // join graph); an enumerator visits EVERYTHING, so it caps depth anyway -
   // a malformed graph then costs duplicates, never a hang.
   if ADepth > 16 then
     Exit;
@@ -661,7 +661,7 @@ begin
   Result := ResolveAt(AScope, ANameLower, -1);
 end;
 
-{ FindLocalDeep restricted to one side of the generic split — the same-name chain
+{ FindLocalDeep restricted to one side of the generic split - the same-name chain
   first, then the joined scopes. See ResolveByArityAt.
 
   AWantGeneric False skips generic TYPES; True skips everything that is not one,
@@ -706,21 +706,21 @@ begin
   Result := NIL_SYM;
 end;
 
-{ ResolveAt restricted to one side of the generic split (16 §16.1.2).
+{ ResolveAt restricted to one side of the generic split (16 sec. 16.1.2).
 
   ARITY is part of a type's identity, and BOTH directions of ignoring that are
   real, both set by one third-party library's base unit:
 
   - a BARE name must not bind to a generic. `Pointer<T> = record ... end` does
-    not shadow the builtin `Pointer`, however much nearer it is — every
+    not shadow the builtin `Pointer`, however much nearer it is - every
     `Pointer(X) := nil` in that unit was a type error until this existed.
   - a `Name<T>` must not bind to a NON-generic. `Nullable = record class var
     HasValue: string; end` sits beside `Nullable<T>` with a Boolean `HasValue`
     property, and a parameter typed `Nullable<T>` was resolving to the arity-0
-    record — so `not other.HasValue` was `not <string>`.
+    record - so `not other.HasValue` was `not <string>`.
 
   Called ONLY when the ordinary lookup already answered with the wrong side, and
-  the reference's form is known — both tested at the call site, because this walk
+  the reference's form is known - both tested at the call site, because this walk
   is not free and every name in the closure would otherwise pay for it. NIL_SYM
   means "no candidate of the wanted arity anywhere", and the caller then keeps
   the binding it has rather than losing the reference: that is dcc's error, not a
@@ -745,7 +745,7 @@ begin
 end;
 
 { Resolve, but honouring the one scope kind whose names are visible only from
-  their declaration onward: a BLOCK, where inline `var`/`const` live (3.1.3 —
+  their declaration onward: a BLOCK, where inline `var`/`const` live (3.1.3 -
   "visible from its declaration to the end of the enclosing block").
 
   Everything else stays order-independent, and deliberately: a routine's classic
@@ -753,8 +753,8 @@ end;
   throughout regardless of where the reference sits.
 
   AAtToken is the referring node's own first VISIBLE-stream index, which is
-  monotonic in source order across include boundaries — that is what the
-  visible stream is for — so comparing it against the declaration's is the
+  monotonic in source order across include boundaries - that is what the
+  visible stream is for - so comparing it against the declaration's is the
   whole test. Pass -1 to skip the check, which is what every lookup that is not
   resolving a reference does (a declaration completing a forward, a qualified
   segment, the aggregate walk). }
@@ -774,7 +774,7 @@ begin
         Exit;
       // Declared BELOW the reference: not in scope yet, so keep walking
       // outward. Without this the inline declaration captured references
-      // above it — a WRONG binding rather than a missing one, so it cost no
+      // above it - a WRONG binding rather than a missing one, so it cost no
       // diagnostic and sent go-to-declaration to the wrong line.
     end;
     LCur := Scopes[LCur].Parent;
@@ -804,7 +804,7 @@ begin
   WithUnopened := nil;
   ExprTypeX.Free;
   ExprTypeX := TDictionary<Integer, TSemaXType>.Create;
-  // NodeScope joins the released set — but its one post-analysis consumer
+  // NodeScope joins the released set - but its one post-analysis consumer
   // (the anonymous-struct branch, see AnonStructSyms) gets a snapshot first.
   // Built from the SCOPES (a few hundred) rather than a scan of every node.
   if NodeScope <> nil then
@@ -916,7 +916,7 @@ begin
   if Demoted then
     Exit;
   // Snapshot the per-row facts completion keeps reading (RoutineHead), then
-  // the stream identity, THEN free — order matters, RoutineHead reads text.
+  // the stream identity, THEN free - order matters, RoutineHead reads text.
   SetLength(DemotedHeads, SymCount);
   for LIdx := 0 to SymCount - 1 do
     DemotedHeads[LIdx] := Byte(RoutineHead(LIdx));

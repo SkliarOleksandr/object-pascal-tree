@@ -9,7 +9,7 @@ program PasTreeSemaProject;
   -proj  analyzes a FILE as a whole project (AnalyzeProject): the transitive
          uses closure, with the cross passes run on EVERY unit. Without it a
          file goes through AnalyzeFile, whose narrower contract cross-analyzes
-         only the main file itself — so a package/program with no code of its
+         only the main file itself - so a package/program with no code of its
          own reports NO project-wide diagnostics at all, which reads
          misleadingly like "clean".
 
@@ -19,7 +19,7 @@ program PasTreeSemaProject;
          timings, source volume and a diagnostics breakdown split by
          project-file vs library unit (the same split the demo's message
          window makes). This is the closest headless equivalent of opening
-         the project in the demo — use it to reproduce and bisect what the
+         the project in the demo - use it to reproduce and bisect what the
          demo reports.
 
          One deliberate difference: the demo also folds in the IDE's own
@@ -81,7 +81,7 @@ var
   GRelease: Boolean;   // -release: exercise ReleaseTransientMaps, report held
   GDemote: Boolean;    // -demote: stage 2 on top (DemoteClosedUnits)
   GRehydrate: Boolean; // -rehydrate: after -demote, EnsureHydrated EVERY model
-                       // and report failures — the stream-reproducibility
+                       // and report failures - the stream-reproducibility
                        // check over a real closure (includes, $IF oracle,
                        // recovered encodings), which no fixture can cover.
   GSW: TStopwatch;
@@ -94,7 +94,7 @@ const
   // winrt, databinding\engine and xml earn their place from the VCL/FMX package
   // closures: without them Vcl.Clipbrd, Vcl.Bind.* and FMX's Xml.XMLDoc importers
   // stay unresolved, and an unresolved unit silences its IMPORTERS' diagnostics
-  // (the AllUsesResolved gate) — which reads as "clean" instead of "not
+  // (the AllUsesResolved gate) - which reads as "clean" instead of "not
   // analyzed". Sanity check for any host doing this: the UNIT COUNT must match
   // what the IDE reports (271 for BuildWinVCL, 353 for BuildWinFMX).
   SUBS: array[0..8] of string = ('source\rtl\sys', 'source\rtl\common',
@@ -114,7 +114,7 @@ begin
   end;
 end;
 
-// TDictionary has no GetValueOrDefault in this RTL — one-liner instead.
+// TDictionary has no GetValueOrDefault in this RTL - one-liner instead.
 procedure Bump(ACounts: TDictionary<string, Integer>; const AName: string);
 var
   LN: Integer;
@@ -126,7 +126,7 @@ end;
 
 { Descending by count, then by name so equal counts print stably.
 
-  ASites (optional) annotates each row with a 'file(line,col)' site — for the
+  ASites (optional) annotates each row with a 'file(line,col)' site - for the
   missing-unit histogram, the FIRST place the name was imported. A count says
   a library is absent; the site says which of your units asked for it, which is
   the part you actually act on. }
@@ -234,7 +234,7 @@ begin
     Writeln(ErrOutput, Format('  %d project file(s)', [Length(LD.Files)]));
     if GStudio = '' then
       Writeln(ErrOutput,
-        '  NB no Studio root (BDS unset, no -studio:) — RTL/VCL/FMX will not resolve');
+        '  NB no Studio root (BDS unset, no -studio:) - RTL/VCL/FMX will not resolve');
 
     GProj := TPasSemaProject.Create(LD.Platform, LPaths, LD.Defines);
     try
@@ -243,7 +243,7 @@ begin
       GProj.ReportVisibility := GVisibility;
       GProj.ReportGuessedIfs := GIfs;
       // No -NS list in the .dproj means we could not read the option, not that
-      // the project wants zero prefixes — dcc has none built in, so zero would
+      // the project wants zero prefixes - dcc has none built in, so zero would
       // turn every legacy unqualified import into an F1027.
       if Length(LD.Namespaces) > 0 then
         GProj.SetNamespaces(LD.Namespaces)
@@ -273,7 +273,7 @@ begin
           Inc(LTotalChars, Length(LM.Tree.Source.Files[LFileId].Source));
         end;
         // Closure HEALTH. A `uses` name that did not resolve means a subtree
-        // the compiler would have compiled is simply absent here — so the unit
+        // the compiler would have compiled is simply absent here - so the unit
         // count is an UNDER-count, and E2003 is suppressed for that unit
         // (AllUsesResolved gates it), which makes the diagnostics an
         // under-count too. dcc treats an unresolvable uses as fatal (F1027),
@@ -331,7 +331,7 @@ begin
             // The one exception to counted-not-listed below: the residual-$IF
             // codes are what -ifs exists to show, they live almost entirely in
             // LIBRARY units (FastMM4, Indy, third-party suites), and there are
-            // a handful of them — so "one site per name" would hide all but
+            // a handful of them - so "one site per name" would hide all but
             // the first. Listing them needs -list as well, like everything
             // else that prints per site.
             if GList and GIfs and ((LM.Diags[LDIdx].Code = 'PPIF') or
@@ -347,7 +347,7 @@ begin
                 [LFile, LM.Diags[LDIdx].Line, LM.Diags[LDIdx].Col,
                  LM.Diags[LDIdx].Code, LM.Diags[LDIdx].Msg]));
             end;
-            // Library diagnostics are counted, not listed — but a bare count
+            // Library diagnostics are counted, not listed - but a bare count
             // is not actionable: working the tail down means opening the site,
             // and finding it by grepping a 3790-unit closure for a name like
             // `Left` is hopeless. One site per NAME, the first one met.
@@ -406,7 +406,7 @@ begin
       end;
       if LTotalLines > 0 then
         Writeln(ErrOutput, Format(
-          '  source: %s lines, %.1f MB, %s file(s) — %s lines/s',
+          '  source: %s lines, %.1f MB, %s file(s) - %s lines/s',
           [FormatFloat('#,##0', LTotalLines), LTotalChars / (1024 * 1024),
            FormatFloat('#,##0', LTotalFiles),
            FormatFloat('#,##0', LTotalLines * 1000 /
@@ -416,14 +416,14 @@ begin
         + 'GATED because of them',
         [LUnresUses, LUnitsGated, GProj.ModelCount]));
       Writeln(ErrOutput, Format(
-        'diagnostics: %d total — %d in project files, %d in library units',
+        'diagnostics: %d total - %d in project files, %d in library units',
         [LListed + LOther, LListed, LOther]));
       // OUR failures, kept distinct from F1027: the file is present and we
       // broke on it. Silence here once let an internal ERangeError look like a
       // missing unit for a whole day.
       if Length(GProj.LoadFailures) > 0 then
       begin
-        Writeln(ErrOutput, Format('INTERNAL: %d unit(s) failed to parse — ' +
+        Writeln(ErrOutput, Format('INTERNAL: %d unit(s) failed to parse - ' +
           'analyzer defect, not a missing file:', [Length(GProj.LoadFailures)]));
         for var LFail in GProj.LoadFailures do
           Writeln(ErrOutput, '    ' + LFail);
@@ -506,7 +506,7 @@ begin
       // registry Library/Browsing paths, which is where a real project's
       // third-party components live (large component suites). This is how a
       // headless run reaches the same closure without teaching the tool to read
-      // the registry — and the closure line in the report is the check that it
+      // the registry - and the closure line in the report is the check that it
       // did: a short unit count means paths are still missing, and a missing
       // unit GATES its importers' diagnostics rather than reporting them.
       else if ParamStr(GIdx).StartsWith('-L', True) and
@@ -514,7 +514,7 @@ begin
         GExtraPaths := GExtraPaths + [Copy(ParamStr(GIdx), 3, MaxInt)]
       // Through ConfigureThreadPool, not SetMaxWorkerThreads directly: the
       // project's constructor pins the pool (Min first, then Max) and ignores
-      // a bare SetMaxWorkerThreads made before it — the flag silently did
+      // a bare SetMaxWorkerThreads made before it - the flag silently did
       // nothing. ConfigureThreadPool is first-caller-wins, so doing it here
       // makes the constructor's later call the no-op instead.
       else if ParamStr(GIdx).StartsWith('-threads:', True) then

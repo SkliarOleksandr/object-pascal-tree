@@ -1,7 +1,7 @@
 unit PasTree.Parser;
 
 {
-  PasTree — the parser, v1: full expression grammar (spec B.7/B.9, ch.04)
+  PasTree - the parser, v1: full expression grammar (spec B.7/B.9, ch.04)
   and statements (ch.05 + ch.18). Declarations come next.
 
   Principles:
@@ -10,13 +10,13 @@ unit PasTree.Parser;
   - Reads the preprocessor's VISIBLE stream; trivia and directives are
     invisible here but recoverable via token indices (full fidelity).
   - Disambiguation notes reference the spec:
-    * assignment vs call statement — ":=" after a parsed designator (5.1);
-    * dangling else — nearest unmatched if (5.3.1);
-    * inline-if expression vs if statement — by context (5.4.1);
-    * generic args vs less-than — bounded speculative token scan (16.3);
-    * caret control-char vs deref — operand position + raw adjacency (B.6.2);
-    * "is not" / "not in" — token pairs at the relational level (4.9.1);
-    * "at" / "on" — contextual directives, matched by text (18.x).
+    * assignment vs call statement - ":=" after a parsed designator (5.1);
+    * dangling else - nearest unmatched if (5.3.1);
+    * inline-if expression vs if statement - by context (5.4.1);
+    * generic args vs less-than - bounded speculative token scan (16.3);
+    * caret control-char vs deref - operand position + raw adjacency (B.6.2);
+    * "is not" / "not in" - token pairs at the relational level (4.9.1);
+    * "at" / "on" - contextual directives, matched by text (18.x).
 }
 
 interface
@@ -116,20 +116,20 @@ type
     { Parses a whole source file (unit/program/library/package).
       When AInterfaceOnly is True AND the file is a unit, parsing stops right
       after the interface section (the implementation/init/final/end. are NOT
-      consumed) — enough for cross-unit navigation, and cheap. The flag is
+      consumed) - enough for cross-unit navigation, and cheap. The flag is
       IGNORED for program/library/package (they have no interface section).
       PREFIX INVARIANT (relied on by the async parser's snapshot swap): the
       resulting tree's nodes [0..N-1] are byte-identical to a full parse of
       the same source, EXCEPT Nodes[0] (nkUnit root) LastToken and the
       nkInterfaceSec node's NextSibling (NIL_NODE here vs the impl section in
-      a full parse) — see StagedParseSmoke for the exact, tested delta. }
+      a full parse) - see StagedParseSmoke for the exact, tested delta. }
     class function ParseFile(const ASource: TPasPreprocessed;
       out ADiags: TArray<TPasParseDiag>;
       AInterfaceOnly: Boolean = False): TPasTree; static;
     { Parses ONE expression out of a bare text fragment (no unit around it):
       lexes AText, wraps the tokens in a minimal single-file visible stream,
       and runs the expression grammar once. ARoot is the expression's root
-      node (NOT necessarily node 0 — the arena allocates leaves first, so the
+      node (NOT necessarily node 0 - the arena allocates leaves first, so the
       topmost operator has the HIGHEST index of its subtree). Tokens left
       over after the expression are deliberately ignored: the first consumer
       is the preprocessor's `$IF` evaluation (PasTree.CondEval), and dcc
@@ -150,12 +150,12 @@ const
   STMT_TERMINATORS: array[0..4] of TPasTokenKind =
     (tkEnd, tkUntil, tkFinally, tkExcept, tkEndOfFile);
 
-{ TPasParser — cursor ------------------------------------------------------- }
+{ TPasParser - cursor ------------------------------------------------------- }
 
 function TPasParser.CurKind: TPasTokenKind;
 begin
   // Fuel watchdog: CurKind is evaluated by every parsing loop's condition,
-  // so a step budget here bounds ALL loops — including silent ones that
+  // so a step budget here bounds ALL loops - including silent ones that
   // never consume and never report. Deterministic (per-token budget), so
   // parse stays a pure function: no timers, no wall-clock, thread-safe.
   if FFuel > 0 then
@@ -164,7 +164,7 @@ begin
   begin
     FFuelTripped := True;
     Error('internal: parser step budget exhausted (loop guard)');
-    FPos := FLast; // jump to EOF — every loop terminates naturally
+    FPos := FLast; // jump to EOF - every loop terminates naturally
   end;
   Result := FSrc.VisibleToken(FPos).Kind;
 end;
@@ -217,14 +217,14 @@ end;
 
 function TPasParser.IsWord(const AWord: string): Boolean;
 begin
-  // Slice compare — no CurText copy. This runs per token in decl-heavy code.
+  // Slice compare - no CurText copy. This runs per token in decl-heavy code.
   Result := (CurKind = tkIdentifier) and FSrc.VisibleTextEquals(FPos, AWord);
 end;
 
 function TPasParser.AdjacentNext: Boolean;
 begin
   // True when the next visible token is raw-adjacent to the current one
-  // (same file, consecutive raw indices — no trivia between).
+  // (same file, consecutive raw indices - no trivia between).
   Result := (FPos < FLast) and
     (FSrc.Visible[FPos + 1].FileId = FSrc.Visible[FPos].FileId) and
     (FSrc.Visible[FPos + 1].TokenIndex = FSrc.Visible[FPos].TokenIndex + 1);
@@ -238,7 +238,7 @@ begin
   FDiags[FDiagCount].Msg := AMsg;
   Inc(FDiagCount);
   // Anti-stall guard: repeated errors at one position mean some recovery
-  // path is not consuming — force progress rather than loop forever.
+  // path is not consuming - force progress rather than loop forever.
   if FPos = FStuckPos then
   begin
     Inc(FStuckCount);
@@ -255,7 +255,7 @@ begin
   end;
 end;
 
-{ TPasParser — expressions --------------------------------------------------- }
+{ TPasParser - expressions --------------------------------------------------- }
 
 function TPasParser.ParseExpression: Integer;
 var
@@ -273,7 +273,7 @@ begin
       tkIs:
         begin
           LOp := FPos;
-          // "is not" (4.9.1) — negation consumed after the operator below.
+          // "is not" (4.9.1) - negation consumed after the operator below.
         end;
       tkNot:
         begin
@@ -404,7 +404,7 @@ begin
       end;
     tkCaret:
       begin
-        // Operand position: caret control char (B.6.2), e.g. ^M — the
+        // Operand position: caret control char (B.6.2), e.g. ^M - the
         // letter must be raw-adjacent to the caret (no trivia between).
         LNode := FB.AddNode(nkCaretChar, NIL_NODE, LStart);
         if AdjacentNext and (PeekKind(1) = tkIdentifier) then
@@ -492,7 +492,7 @@ begin
       begin
         // Anonymous method literal (17.2.1). Params parse with the same
         // grammar (and same nkParams/nkParam shape) as a routine's, so the
-        // resolver declares them like any parameter — `AIndex` inside a
+        // resolver declares them like any parameter - `AIndex` inside a
         // `procedure(AIndex: Integer) begin ... end` literal is a real,
         // resolvable symbol, not opaque trivia (the retired v1 shape).
         LNode := FB.AddNode(nkAnonMethod, NIL_NODE, LStart);
@@ -509,8 +509,8 @@ begin
         while IsDirectiveWord do
           Next;
         // The body is a full routine body: anonymous methods may declare
-        // locals — function(...): TValue var fx: Extended; begin ... end
-        // (System.Bindings.EvalSys.pas) — and even nested routines.
+        // locals - function(...): TValue var fx: Extended; begin ... end
+        // (System.Bindings.EvalSys.pas) - and even nested routines.
         FB.Adopt(LNode, ParseRoutineBody);
         FB.SetLast(LNode, FPos - 1);
         Exit(LNode);
@@ -571,7 +571,7 @@ begin
           Next;
           while (CurKind <> tkRBracket) and (CurKind <> tkEndOfFile) do
           begin
-            // A Variant's INDEXED property takes named arguments too — see
+            // A Variant's INDEXED property takes named arguments too - see
             // MaybeNamedArg.
             FB.Adopt(LNode, MaybeNamedArg(ParseExpression));
             if CurKind = tkComma then
@@ -621,21 +621,21 @@ end;
   (4.11.3), otherwise returns it unchanged.
 
   `Meth(Source := X)` on a Variant call passes a DISPATCH parameter name, not an
-  identifier of this program — dcc resolves nothing there, and the compiler names
+  identifier of this program - dcc resolves nothing there, and the compiler names
   the feature itself in `E2166 Unnamed arguments must precede named arguments in
   OLE Automation call`. Without this the argument ended at the name and the ':='
   read as an assignment whose TARGET was the whole call: two parse errors plus a
   false E2003 per site (~20 in one real project's Excel code).
 
   Needed in BOTH bracketed forms, because a Variant's INDEXED property takes them
-  too (`V.Range[Source := 1] := 5`, dcc-verified) — that one was still a false
+  too (`V.Range[Source := 1] := 5`, dcc-verified) - that one was still a false
   E2003 after the parenthesised call was fixed.
 
   Only a bare identifier qualifies, which is all the syntax admits; anything else
   stays the syntax error it always was. NB this is deliberately more permissive
   than dcc in one direction: it does not check that the callee is Variant-typed
-  (nothing knows that at parse time), so `Foo(A := 1)` on a real routine — an
-  E2003 for dcc, even when the parameter really is named A — is silently
+  (nothing knows that at parse time), so `Foo(A := 1)` on a real routine - an
+  E2003 for dcc, even when the parameter really is named A - is silently
   accepted. A lost diagnostic, never a false one. }
 function TPasParser.MaybeNamedArg(AArg: Integer): Integer;
 var
@@ -777,7 +777,7 @@ begin
               // args unless the next token could START AN OPERAND. If it
               // cannot (`;` `then` `=` `do` `and` ...), the comparison
               // reading `(a < X) >  <follower>` would lack a right operand
-              // — a guaranteed syntax error — so accepting generic never
+              // - a guaranteed syntax error - so accepting generic never
               // steals a valid comparison. Covers Value.AsType<T>;,
               // AsType<char> = #0, AsType<Boolean> then, @Proc<T>;.
               // '(' is genuinely ambiguous and reads as a call, matching
@@ -801,7 +801,7 @@ begin
   end;
 end;
 
-{ TPasParser — statements ---------------------------------------------------- }
+{ TPasParser - statements ---------------------------------------------------- }
 
 function TPasParser.AtAny(const AKinds: array of TPasTokenKind): Boolean;
 var
@@ -831,7 +831,7 @@ begin
     if AtAny(ATerminators) or (CurKind = tkEndOfFile) or (CurKind = tkElse)
     then
       Break;
-    // Recovery: missing separator — resync to ';' or a terminator.
+    // Recovery: missing separator - resync to ';' or a terminator.
     Error('";" expected');
     while not (AtAny(ATerminators) or
       (CurKind in [tkSemicolon, tkEndOfFile])) do
@@ -1179,7 +1179,7 @@ begin
         Next;
         // 5.6.4: an IDENTIFIER label is a reference to a `label`-section
         // declaration, so it gets a node the resolver can bind. A numeric
-        // label declares no name at all — it stays a bare token, exactly as
+        // label declares no name at all - it stays a bare token, exactly as
         // the numeric form of nkLabeledStmt below does.
         if CurKind = tkIdentifier then
         begin
@@ -1255,12 +1255,12 @@ begin
   end;
 
   // Expression statement / assignment (5.1). LStart is captured BEFORE
-  // ParseExpression runs — by the time it returns, FPos has already moved
+  // ParseExpression runs - by the time it returns, FPos has already moved
   // past the whole LHS expression, so creating the wrapper node AT THAT
   // POINT (as this used to) gave nkAssign/nkExprStmt a FirstToken sitting
   // near the END of the statement instead of its true start (the same
   // "wrapper created after its child" trap nkMember's own dot-position
-  // FirstToken is — see PasTree.Ast.pas — except THAT one is a deliberate,
+  // FirstToken is - see PasTree.Ast.pas - except THAT one is a deliberate,
   // documented, worked-around-in-consumers quirk; this one was a plain
   // bug with no consumer relying on the wrong position, caught by go-to-
   // implementation landing the cursor at the end of the first line instead
@@ -1288,7 +1288,7 @@ begin
   end;
 end;
 
-{ TPasParser — declarations ------------------------------------------------- }
+{ TPasParser - declarations ------------------------------------------------- }
 
 function TPasParser.ParseQualifiedName: Integer;
 var
@@ -1391,7 +1391,7 @@ var
 begin
   // 2.5.2 hint directives after a declaration. Each hint is its own
   // nkDirective child (mirroring ParseRoutineDirectives), so the demo
-  // highlighter's AST-precise BuildWeakKeywordSpans can color it — a hint
+  // highlighter's AST-precise BuildWeakKeywordSpans can color it - a hint
   // consumed by plain Next with no node (the old behavior) is invisible to
   // that walk and stays uncolored (real bug: `X = 1 deprecated 'msg';`).
   while True do
@@ -1519,7 +1519,7 @@ begin
         // Type-context: generics always bind (16.3); may be a subrange lo.
         LExpr := ParseTypeRef;
         // Constant-expression continuations in ordinal positions:
-        // array[Ord(reA)..Ord(reB)] — allow selector chains (calls etc.).
+        // array[Ord(reA)..Ord(reB)] - allow selector chains (calls etc.).
         if CurKind in [tkLParen, tkLBracket, tkCaret] then
           LExpr := ParseSelectors(LExpr);
         if CurKind = tkDotDot then
@@ -1759,7 +1759,7 @@ begin
     // Visibility sections (11.2.1), incl. strict and legacy automated.
     // A bare visibility word in member position IS a section marker: a
     // field genuinely named `private` must be written `&private`, and the
-    // &-escaped token slice starts with '&', so the word compare misses it —
+    // &-escaped token slice starts with '&', so the word compare misses it -
     // the disambiguation falls out of the lexer (B.3).
     LStrict := IsWord('strict') and (FPos < FLast) and
       (VisLevel(FPos + 1) in [1, 2]);
@@ -1857,7 +1857,7 @@ procedure TPasParser.ParseFieldList(AOwner: Integer;
 var
   LDecl: Integer;
 begin
-  // identList : Type [hints] ; ... — stops before terminators or non-fields.
+  // identList : Type [hints] ; ... - stops before terminators or non-fields.
   while CurKind = tkIdentifier do
   begin
     LDecl := FB.AddNode(nkVarDecl, NIL_NODE, FPos);
@@ -1910,8 +1910,8 @@ begin
     Next;
   end;
   // The tag type is an ORDINAL TYPE (9.1.3 grammar), not just a type NAME:
-  // besides a named ref it may be an INLINE ANONYMOUS ENUM — `case Kind:
-  // (skCircle, skRect) of`, the spec's own 9.1.3 example — or a subrange
+  // besides a named ref it may be an INLINE ANONYMOUS ENUM - `case Kind:
+  // (skCircle, skRect) of`, the spec's own 9.1.3 example - or a subrange
   // (`case Tag: 0..9 of`). ParseTypeRef accepts only identifiers, so it
   // errored on the '(' and every following token shifted, turning the branch
   // LABELS into fields and `(Radius: Double)` into an enum type. ParseTypeExpr
@@ -1967,9 +1967,9 @@ begin
   begin
     LParam := FB.AddNode(nkGenericParam, NIL_NODE, FPos);
     // A "parameter" here is a TypeRef, not a bare ident: implementation
-    // headers of closed generics use type arguments — e.g. the method
+    // headers of closed generics use type arguments - e.g. the method
     // resolution `function IEnumerator<string>.GetCurrent = ...`
-    // (System.IOUtils.pas) — and TypeRef also covers plain T.
+    // (System.IOUtils.pas) - and TypeRef also covers plain T.
     FB.Adopt(LParam, ParseTypeRef);
     while CurKind = tkComma do
     begin
@@ -2031,12 +2031,12 @@ begin
     begin
       // `out` is a DIRECTIVE word, not a reserved one, so it is also a legal
       // parameter NAME: dcc accepts `procedure P(out: Integer)` and treats the
-      // word as the name. The lookahead is what tells the two apart — a
+      // word as the name. The lookahead is what tells the two apart - a
       // modifier is followed by the name (or by an attribute group, as
       // `const [Ref] X` is), a name by ':' or ',' or ')'.
       //
       // Recorded rather than just consumed, because a highlighter cannot colour
-      // a directive word from the token alone — see nkParam's Aux.
+      // a directive word from the token alone - see nkParam's Aux.
       FB.SetAux(LParam, FPos);
       Next;
     end;
@@ -2086,18 +2086,18 @@ end;
   declaration rather than a directive of the one just parsed.
 
   Directives are context-sensitive identifiers: a real directive is followed by
-  ';', by another directive, or by its own argument — NEVER by '=' or ':'. So
+  ';', by another directive, or by its own argument - NEVER by '=' or ':'. So
   `Unsafe = class` is a type declaration and `Index: Integer` is a field, even
   though both words are in ROUTINE_DIRECTIVE_WORDS.
 
   Not hypothetical, and the damage is out of all proportion to the shape:
   A component suite's core unit declares `Unsafe = class` right after a method, the
-  name was swallowed as that method's directive, and the type declaration —
-  plus everything the interface declared AFTER it — was lost. 156 `Unsafe` and
+  name was swallowed as that method's directive, and the type declaration -
+  plus everything the interface declared AFTER it - was lost. 156 `Unsafe` and
   127 `EdxException` false E2003 across one component library, from one word.
 
   ParseTypeDirectives already applies the same discipline by a different route
-  ("the run must terminate with ';' — otherwise the word is the next
+  ("the run must terminate with ';' - otherwise the word is the next
   declaration's name"); this is the routine-directive side of it. }
 function TPasParser.DirectiveNameStartsDecl: Boolean;
 begin
@@ -2116,7 +2116,7 @@ begin
     Exit(True);
   if CurKind <> tkIdentifier then
     Exit(False);
-  // One slice fetch, then a length-gated compare per word — the old loop
+  // One slice fetch, then a length-gated compare per word - the old loop
   // re-materialized CurText for every one of the 30 array elements.
   FSrc.VisibleSlice(FPos, LText, LLen);
   for LIdx := Low(PasTree.Types.ROUTINE_DIRECTIVE_WORDS) to
@@ -2149,7 +2149,7 @@ end;
 // not a reserved word, so nothing colors it as a keyword. Emit a standalone
 // nkDirective over the current single token purely so the editor highlighter
 // treats it as one (BuildWeakKeywordSpans marks the span of every nkDirective/
-// nkVisibility/nkPropSpec node). The node is intentionally an ORPHAN — never
+// nkVisibility/nkPropSpec node). The node is intentionally an ORPHAN - never
 // adopted into the tree: it carries no structure any consumer needs, and
 // staying out of every child chain leaves sema, Nav, Dump, JSON and the
 // routine/type name-finding logic completely unaffected (they all walk from
@@ -2179,7 +2179,7 @@ begin
   // several directives without separators are legal:
   //   TFn = function(...): X; stdcall;
   //   curl_formadd: function(...): CURLFORMcode; cdecl varargs;
-  // The run must terminate with ';' — otherwise the word is the next
+  // The run must terminate with ';' - otherwise the word is the next
   // declaration's name (e.g. a variable named `index`), and we leave it.
   while IsDirectiveWord do
   begin
@@ -2194,11 +2194,11 @@ begin
     //
     // AAllowInitializer gates it, and the gate is the whole point: in a TYPE or
     // CONST section an identifier followed by '=' is the NEXT DECLARATION, not
-    // an initializer — and if that identifier happens to be a directive word,
+    // an initializer - and if that identifier happens to be a directive word,
     // this branch swallowed the entire declaration. That same core unit
     // declares `Unsafe = class`, so `Unsafe`, everything the interface declared
     // after it, and every use of any of it across the library became a false
-    // E2003 — 283 of them from this one branch. Only a VAR section can
+    // E2003 - 283 of them from this one branch. Only a VAR section can
     // legitimately reach an '=' here.
     if AAllowInitializer and
        (LProbe <= FLast) and (FSrc.VisibleToken(LProbe).Kind = tkEqual) then
@@ -2224,7 +2224,7 @@ var
   LDir: Integer;
   LIsExternal, LIsForward, LIsAbstract: Boolean;
 begin
-  // 6.x: `; directive`* — returns True when the routine has no body.
+  // 6.x: `; directive`* - returns True when the routine has no body.
   LIsExternal := False;
   LIsForward := False;
   LIsAbstract := False;
@@ -2237,7 +2237,7 @@ begin
       Next;
       // external [lib] [name expr | index expr | dependency e,e | delayed]
       // The clause stops at ';' OR at anything that starts the next
-      // declaration — dcc tolerates a missing terminator:
+      // declaration - dcc tolerates a missing terminator:
       // `function F; external shell32 name 'X'` + newline + `function ...`
       // (user corpus, verified against dcc64).
       while not (CurKind in [tkSemicolon, tkEndOfFile, tkFunction,
@@ -2290,7 +2290,7 @@ begin
     if CurKind = tkSemicolon then
       Next
     else if not IsDirectiveWord then
-      // dcc tolerates a missing ';' after the LAST directive in a run —
+      // dcc tolerates a missing ';' after the LAST directive in a run -
       // both between directives (`platform deprecated`) and before the
       // next declaration or body (`procedure P; platform deprecated`
       // followed directly by `procedure`/`begin`; user corpus, verified).
@@ -2547,7 +2547,7 @@ begin
   end;
   try
   // 3.2.2: typed constants may use ( ... ) aggregates; only a typed const
-  // can be an aggregate, so '(' after an untyped '=' is a paren expr —
+  // can be an aggregate, so '(' after an untyped '=' is a paren expr -
   // and even for typed consts the parens may be a plain expression.
   if AHasType and (CurKind = tkLParen) and LooksLikeAggregate then
   begin
@@ -2677,7 +2677,7 @@ begin
   //
   // A `class var` section RUNS ON exactly like a `var` one: it ends at the
   // next visibility word, section keyword or member, not after its first
-  // declaration. dcc-verified — in
+  // declaration. dcc-verified - in
   //   TR = record class var Q: Integer; A: Byte; end;
   // `TR.A := 2` compiles (so A is per-TYPE storage) and SizeOf(TR) is 0 (so
   // it is not an instance field). Ending the section early made A an ordinary
@@ -2718,7 +2718,7 @@ begin
     if IsWord('absolute') then
     begin
       // 3.1.4. The expression is an ALIAS, not an initial value, and the two
-      // land in the same child slot — so without this mark nothing downstream
+      // land in the same child slot - so without this mark nothing downstream
       // (nor a golden dump) can tell `absolute B` from `= B`.
       FB.SetAux(LDecl, 1);
       Next;
@@ -2790,7 +2790,7 @@ begin
           while CurKind in [tkIdentifier, tkIntLiteral] do
           begin
             // 5.6.4: each identifier label DECLARES a name in the enclosing
-            // routine's scope — emit a node so the resolver can declare it
+            // routine's scope - emit a node so the resolver can declare it
             // (skLabel) and the `Foo:` / `goto Foo` references bind to it.
             // Numeric labels declare no name; they stay bare tokens.
             if CurKind = tkIdentifier then
@@ -2923,7 +2923,7 @@ begin
         LP.Expect(tkSemicolon, '";"');
         if LP.CurKind = tkUses then
           LP.FB.Adopt(LRoot, LP.ParseUsesClause);
-        // A library may end with a bare `end.` — no main begin-block
+        // A library may end with a bare `end.` - no main begin-block
         // (DUnit's testXpgenLib.dpr: exports ...; end.)
         LP.ParseDeclSections(LRoot, True, [tkBegin, tkEnd]);
         if LP.CurKind = tkBegin then

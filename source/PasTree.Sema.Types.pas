@@ -1,11 +1,11 @@
 unit PasTree.Sema.Types;
 
 {
-  PasTree semantics — Phase 3a type checker (intra-unit).
+  PasTree semantics - Phase 3a type checker (intra-unit).
 
   Runs after name resolution: categorizes user-declared types, computes a type
   symbol for each expression node (ExprType), and emits E2010 (incompatible
-  assignment) / E2015 (operator not applicable). Deliberately conservative —
+  assignment) / E2015 (operator not applicable). Deliberately conservative -
   only definite scalar mismatches are flagged; anything with an unknown/external
   operand or a class/record/enum/set/array/pointer/variant operand (where
   inheritance or operator overloading could make it legal) is allowed. Overload
@@ -115,7 +115,7 @@ end;
 
 // The operator's token KIND (Aux points at the operator token). Every
 // operator this typer dispatches on has a dedicated kind, so no text is
-// materialized — the old string version paid a LowerCase(VisibleText(...))
+// materialized - the old string version paid a LowerCase(VisibleText(...))
 // copy per binary/unary node in the corpus. tkUnknown when Aux is unset.
 function TPasSemaTyper.OpKind(N: Integer): TPasTokenKind;
 begin
@@ -233,7 +233,7 @@ begin
   end;
 end;
 
-{ The category a type EXPRESSION node denotes — CatFromNode plus the named-type
+{ The category a type EXPRESSION node denotes - CatFromNode plus the named-type
   case, which CatFromNode delegates through Head. Separate because the ordinal
   checks below ask about type nodes written in a position (an array's index, a
   set's base), not about type symbols. }
@@ -245,8 +245,8 @@ begin
     Result := CatFromNode(ANode);
 end;
 
-{ 2 §2.1.1 / §2.4.1: only an ORDINAL type may be an array's index type or a
-  set's base type — dcc reports `E2001 Ordinal type required`. Same rule, same
+{ 2 sec. 2.1.1 / sec. 2.4.1: only an ORDINAL type may be an array's index type or a
+  set's base type - dcc reports `E2001 Ordinal type required`. Same rule, same
   code, for the `for` counter's declared type, except that dcc has a dedicated
   message there: `E2032 For loop control variable must have ordinal type`.
 
@@ -255,20 +255,20 @@ end;
   - `Variant` is NOT ordinal in these positions (`array[Variant]`, `set of
     Variant`, `for V := 1 to 3` are all errors) even though it IS accepted as a
     `case` selector and as an `if` condition. Per-position, not per-type.
-  - a SPARSE (explicitly-valued) enum is fine everywhere — as an index, a set
-    base, a `case` selector and a `for` counter. §2.1.1/§2.2.4 claimed the
+  - a SPARSE (explicitly-valued) enum is fine everywhere - as an index, a set
+    base, a `case` selector and a `for` counter. sec. 2.1.1/sec. 2.2.4 claimed the
     opposite; the spec was corrected rather than the code, since dcc accepts
     `array[(spA = 0, spB = 10, spC = 99)]` and `set of` it without a murmur.
 
   Reports only a category that is DEFINITELY not ordinal. `tcUnknown` covers
   every cross-unit type (an imported enum's category is not computed intra-unit)
-  and every generic parameter, so those stay silent — a missed report, never a
+  and every generic parameter, so those stay silent - a missed report, never a
   false one. Records are included deliberately: an `Implicit` operator to an
   ordinal does NOT rescue any of these positions (dcc-verified for `case`, which
   is the one place a conversion could plausibly have applied). }
 procedure TPasSemaTyper.CheckOrdinalTypePositions;
 const
-  // Everything that is not ordinal AND not "we do not know" — tcNil cannot
+  // Everything that is not ordinal AND not "we do not know" - tcNil cannot
   // appear in a type position at all.
   CNotOrdinal = [tcFloat, tcString, tcPointer, tcSet, tcArray, tcRecord,
     tcClass, tcInterface, tcProc, tcClassOf, tcVariant, tcFile];
@@ -279,7 +279,7 @@ begin
     case Kind(LIdx) of
       nkArrayType:
         begin
-          // Children are the index types followed by the element type — except
+          // Children are the index types followed by the element type - except
           // for `array of const`, which has no element child (Aux = 1). A
           // dynamic array's single child is the element type, so it has none of
           // its own to check.
@@ -324,12 +324,12 @@ begin
     end;
 end;
 
-{ The two EXPRESSION positions of the same family (2 §2.2.2, §2.1.1), so this one
+{ The two EXPRESSION positions of the same family (2 sec. 2.2.2, sec. 2.1.1), so this one
   runs after TypeNode has filled ExprType rather than beside CategorizeTypes:
 
-  - an `if`/`while`/`until` condition must be Boolean — `E2012 Type of expression
+  - an `if`/`while`/`until` condition must be Boolean - `E2012 Type of expression
     must be BOOLEAN`;
-  - a `case` selector must be ordinal — `E2001`, the same code as the type
+  - a `case` selector must be ordinal - `E2001`, the same code as the type
     positions above.
 
   The two exempt sets differ, and dcc32 37.0 is the only reason to know how:
@@ -337,14 +337,14 @@ end;
   - `Variant` is accepted in BOTH a condition and a `case` selector, though it is
     an error as an array index, a set base or a `for` counter.
   - a RECORD is accepted as a condition when it has an `Implicit` operator to
-    Boolean, and rejected when it has one to Integer — so whether a record
+    Boolean, and rejected when it has one to Integer - so whether a record
     condition is legal depends on its operators, which is not a question asked
     here. Records are therefore exempt in conditions and NOT exempt as `case`
     selectors, where dcc rejects one even with `Implicit` to an ordinal.
   - a PROCEDURAL type is exempt in both, because a parameterless function
     reference in a value position is CALLED: `if AShouldStop then` where the
     parameter is `reference to function: Boolean` is ordinary, correct code, and
-    the type of the condition is the function's RESULT. Found the honest way —
+    the type of the condition is the function's RESULT. Found the honest way -
     six such conditions in one component suite lit up on a real
     corpus the first time this check ran. In a TYPE position (an array index, a
     set base) a procedural type stays an error, since nothing is called there.
@@ -352,11 +352,11 @@ end;
   Everything else is reported only when the category is definite; an unknown
   expression type (a cross-unit member, an untyped intrinsic result, a deref)
   says nothing. `Diag` additionally withholds anything inside an unresolved
-  `with` body, where a binding — and so a type — is only a guess. }
+  `with` body, where a binding - and so a type - is only a guess. }
 procedure TPasSemaTyper.CheckConditionTypes;
 const
   // Not Boolean and not "we do not know". tcRecord, tcVariant and tcProc are
-  // absent deliberately — see the header.
+  // absent deliberately - see the header.
   CNotBoolean = [tcInteger, tcFloat, tcChar, tcString, tcEnum, tcSet, tcArray,
     tcClass, tcInterface, tcClassOf, tcPointer, tcFile];
   // Not ordinal and not "we do not know". Variant is legal HERE; a record is
@@ -392,7 +392,7 @@ end;
 
 { The ordinal value of a LITERAL bound, and only of a literal: a decimal or `$`
   hex integer, either of those negated, or a one-character string literal. Named
-  constants and `Ord(...)` expressions deliberately answer False — the set check
+  constants and `Ord(...)` expressions deliberately answer False - the set check
   below reports nothing it cannot compute exactly, and constant folding is not
   this pass's job. }
 function TPasSemaTyper.OrdLiteral(ANode: Integer; out AValue: Int64): Boolean;
@@ -436,15 +436,15 @@ begin
   end;
 end;
 
-{ 2 §2.4.1: a set's base type may have at most 256 values and those values must
-  lie in `0..255` — one code for both, `E2028 Sets may have at most 256
+{ 2 sec. 2.4.1: a set's base type may have at most 256 values and those values must
+  lie in `0..255` - one code for both, `E2028 Sets may have at most 256
   elements`, which dcc32 37.0 also uses for a NEGATIVE lower bound (`set of
   -5..5`) rather than a separate message.
 
   A 64-BIT ordinal base is the exception, and not a small one: dcc answers
   `E2001 Ordinal type required` there rather than E2028, even though `Int64` is
-  perfectly ordinal. `NativeInt`/`NativeUInt` follow the TARGET — dcc32 says
-  E2028 for `set of NativeInt` and dcc64 says E2001 for the same line — which is
+  perfectly ordinal. `NativeInt`/`NativeUInt` follow the TARGET - dcc32 says
+  E2028 for `set of NativeInt` and dcc64 says E2001 for the same line - which is
   the one thing in this typer that needs to know the platform.
 
   `set of Char` (and `WideChar`) is only a WARNING, `W1050 WideChar reduced to
@@ -468,7 +468,7 @@ const
   // 0..255 exactly, so a set over the whole type is legal.
   CFits: array[0..2] of string = ('byte', 'boolean', 'ansichar');
   // More than 256 values but not 64-bit. `ShortInt` is here for its NEGATIVE
-  // half, and the three `*Bool`s because dcc says so — `ByteBool` is one byte
+  // half, and the three `*Bool`s because dcc says so - `ByteBool` is one byte
   // and still E2028, while `Boolean` above is fine.
   CTooMany: array[0..11] of string = ('shortint', 'word', 'smallint', 'integer',
     'cardinal', 'longint', 'longword', 'fixedint', 'fixeduint',
@@ -712,14 +712,14 @@ var
   LList: TList<Integer>;
   LIdx, LCount: Integer;
 begin
-  // Indexed two-pass (count, size once, fill) — runs per overload candidate;
+  // Indexed two-pass (count, size once, fill) - runs per overload candidate;
   // the for-in enumerator and the per-append copy were both allocations.
   Result := nil;
   if AScope = NIL_SCOPE then
     Exit;
   LList := M.Scopes[AScope].Symbols;
   if LList = nil then
-    Exit;   // lazy scope list — never bound
+    Exit;   // lazy scope list - never bound
   LCount := 0;
   for LIdx := 0 to LList.Count - 1 do
     if M.Symbols[LList[LIdx]].Kind = skParam then
@@ -749,7 +749,7 @@ end;
 
 // Sum a conservative match score of the call's args against a param list.
 // Takes the params the caller already built (SelectOverload had called
-// ParamsOf twice per fitting candidate — one TArray allocation each).
+// ParamsOf twice per fitting candidate - one TArray allocation each).
 function TPasSemaTyper.ScoreArgs(ACall: Integer;
   const AParams: TArray<Integer>): Integer;
 var
@@ -833,7 +833,7 @@ begin
     if M.Symbols[LCand].Kind <> skRoutine then
       Break;
     if M.Symbols[LCand].MemberScope = NIL_SCOPE then
-      LAllHaveParams := False   // e.g. a builtin — no param info
+      LAllHaveParams := False   // e.g. a builtin - no param info
     else
     begin
       LParams := ParamsOf(M.Symbols[LCand].MemberScope);
@@ -862,7 +862,7 @@ begin
     end;
     LCand := M.Symbols[LCand].NextOverload;
     // 6.4: the interface section's overloads of the same name are part of the
-    // set, and they are a separate chain in a separate scope — see
+    // set, and they are a separate chain in a separate scope - see
     // InterfaceCounterpart.
     if LCand = NIL_SYM then
     begin
@@ -877,16 +877,16 @@ begin
   //  - a plain GLOBAL routine (methods/constructors are inherited/overloaded
   //    across the class hierarchy, which we don't model),
   //  - the unit has NO `uses` (with imports, same-named overloads can live in
-  //    another unit and Delphi merges them — we don't yet; cross-unit overload
+  //    another unit and Delphi merges them - we don't yet; cross-unit overload
   //    merging is a later slice), and
   //  - the CALL SITE is not inside a struct. That last one is the same rule
   //    from the other end, and it is not the ancestor walk the To-do assumed:
-  //    inside a method, dcc searches the type's members — own AND inherited —
+  //    inside a method, dcc searches the type's members - own AND inherited -
   //    before the unit's globals, so a same-named global we resolved to may
   //    not be the real callee at all. Walking the same-unit ancestry would
   //    not be enough to prove otherwise, because EVERY class also inherits
   //    TObject, which a `uses`-less unit has no model of (no System unit is
-  //    loaded, and TObject is deliberately not seeded) — `ToString(X)` in a
+  //    loaded, and TObject is deliberately not seeded) - `ToString(X)` in a
   //    method of such a unit really can mean TObject.ToString. Since the
   //    candidate set inside a method is therefore never provably complete,
   //    the diagnostic stays out of methods entirely and keeps its
@@ -911,15 +911,15 @@ begin
   // When NO local candidate admits the argument count, the real callee is
   // most likely a same-named overload in another unit (e.g. SysUtils calling
   // the 3-arg Winapi.Windows.GetEnvironmentVariable while declaring a 1-arg
-  // one itself) — claiming the local head's result type would poison E2010.
+  // one itself) - claiming the local head's result type would poison E2010.
   if LAllHaveParams and not LAnyVariadic and not LAnyFit and (LMaxTot >= 0) then
     Exit(NIL_SYM);
 
   // Same caution for argument TYPES: the unit imports something, and the
   // arity-fitting local candidates showed NO type evidence at all for a call
-  // with typed arguments (best score 0 — not even one loosely-assignable
+  // with typed arguments (best score 0 - not even one loosely-assignable
   // arg). dcc merges same-named overloads from used units into one candidate
-  // set; we cannot in a pure per-unit pass — so don't claim the local result
+  // set; we cannot in a pure per-unit pass - so don't claim the local result
   // type (a local `Pick(Boolean)` would mistype `Pick(11)` that really calls
   // an imported `Pick(Integer)`, poisoning E2010). The cross-unit pass
   // (CrossType) retypes the call against the properly MERGED set.
@@ -929,7 +929,7 @@ begin
     while LArg <> NIL_NODE do
     begin
       if M.ExprType[LArg] <> NIL_SYM then
-        Exit(NIL_SYM);   // a typed arg matched nothing local — stay silent
+        Exit(NIL_SYM);   // a typed arg matched nothing local - stay silent
       LArg := Sib(LArg);
     end;
   end;
@@ -975,7 +975,7 @@ begin
       Exit;
     // NodeNameLower, not LowerCase(Txt()): member keys are PasNameKey-
     // normalized (leading '&' stripped), so the LowerCase form could never
-    // find an escaped member like X.&End — and it allocated twice.
+    // find an escaped member like X.&End - and it allocated twice.
     LMem := M.FindLocal(LScope, T.NodeNameLower(LName));
   end;
   if LMem <> NIL_SYM then
@@ -988,7 +988,7 @@ var
   LFile, LLine, LCol, LTok: Integer;
 begin
   // Inside a `with` whose target type could not be resolved intra-unit, a
-  // name's binding — and therefore its TYPE — is only a guess: a cross-unit
+  // name's binding - and therefore its TYPE - is only a guess: a cross-unit
   // member of the target outranks it and the project's with pass may rebind
   // it (see TPasSemaModel.WithUnopened). Type-checking a guess produces
   // confident nonsense, e.g. E2010 'Double' vs 'string' where the real member
@@ -1066,7 +1066,7 @@ begin
   // An operand that resolved to a TYPE NAME is a mis-binding, not a type
   // mismatch, so this is the wrong diagnostic for it and the numbers say so:
   // dcc has its own errors for a type used as a value. It happens when a
-  // MEMBER shadows a builtin type name — a class with `property Word: string`
+  // MEMBER shadows a builtin type name - a class with `property Word: string`
   // makes bare `Word` in a descendant's method mean the property (dcc-verified),
   // but Phase 1 sees only the seeded type, because the member is INHERITED and
   // cross-unit and only the project's later pass can reach it. That pass cannot
@@ -1141,10 +1141,10 @@ begin
       else if M.Symbols[LIdx].NameLower = '_nil' then Nul := LIdx;
 
   CategorizeTypes;
-  CheckOrdinalTypePositions;   // needs CategorizeTypes — see its own header
-  CheckSetCardinality;         // needs RefMap only — see its own header
+  CheckOrdinalTypePositions;   // needs CategorizeTypes - see its own header
+  CheckSetCardinality;         // needs RefMap only - see its own header
   TypeNode(0);
-  CheckConditionTypes;         // needs ExprType — see its own header
+  CheckConditionTypes;         // needs ExprType - see its own header
 end;
 
 end.

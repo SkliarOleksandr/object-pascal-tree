@@ -1,11 +1,11 @@
 unit PasTree.CondEval;
 
 {
-  PasTree — the `$IF` / `$ELSEIF` expression evaluator (spec 1.3.2, B.2.2).
+  PasTree - the `$IF` / `$ELSEIF` expression evaluator (spec 1.3.2, B.2.2).
 
   The GRAMMAR is not here: the expression text is parsed by the real
   TPasParser (ParseExpressionText), so the preprocessor's conditional
-  expressions and the language's expressions can never drift apart — any
+  expressions and the language's expressions can never drift apart - any
   construct the parser learns is automatically legal in `$IF`. This unit
   only EVALUATES the resulting tree, under a context of things the
   preprocessor knows (defines, compiler version, seeded type sizes, an
@@ -13,7 +13,7 @@ unit PasTree.CondEval;
 
   A name only the semantic phase could resolve (a unit constant, an
   unanswered Declared(), SizeOf of a user type, Ord(x)) evaluates as a
-  GUESS AT THE LEAF — False (0 for SizeOf) — and computation proceeds
+  GUESS AT THE LEAF - False (0 for SizeOf) - and computation proceeds
   normally, exactly as the old string-walking evaluator did. The leaf-level
   guess is LOAD-BEARING, found the hard way (a Kleene draft of this unit
   propagated "unknown" to the top instead, and a corpus diff caught 6 RTL
@@ -24,20 +24,20 @@ unit PasTree.CondEval;
   and only `not False = True` takes the fallback, which is what keeps the
   name resolvable either way. The second pass is calibrated to the same
   guess: RunDeclaredPass re-preprocesses exactly the units where a recorded
-  name turns out DECLARED — the one case where the False guess was wrong.
+  name turns out DECLARED - the one case where the False guess was wrong.
 
   What the guess taints, however, is tracked: TPasCondValue.Guessed rides
   along, and an and/or whose verdict is settled by a CLEAN side alone drops
   the other side's taint (dcc32 37.0-probed: dcc short-circuits
-  left-to-right, so `Defined(FPC) and (FPC_FULLVERSION < 30301)` — the
-  RTL's own System.Skia.API shape — never evaluates the undeclared name;
+  left-to-right, so `Defined(FPC) and (FPC_FULLVERSION < 30301)` - the
+  RTL's own System.Skia.API shape - never evaluates the undeclared name;
   same verdict here, and no needs-semantics flag, because no second pass
   could change it).
 
   dcc's ABORT RULES, reproduced here rather than diverged from. When dcc
   actually EVALUATES an identifier that resolves nowhere it abandons the whole
   expression with a fixed verdict, and the verdict depends on the position the
-  name sat in (probed by executing both branches on dcc64 36.0 and 37.0 —
+  name sat in (probed by executing both branches on dcc64 36.0 and 37.0 -
   identical, so this is long-standing, not a beta quirk; the full table is in
   the language spec, 1.3.2):
 
@@ -54,7 +54,7 @@ unit PasTree.CondEval;
   The abort is gated on KNOWING the name resolves nowhere, which only a full
   symbol table can say (TPasSymbolValue.NoSymbol, second pass). On the first
   pass, and for a name that exists but whose value we cannot fold, the False
-  guess stands and the taint below records the open question — the two cases
+  guess stands and the taint below records the open question - the two cases
   must not be confused: the first is dcc parity, the second is a finding.
 }
 
@@ -74,7 +74,7 @@ type
     Num: Double;
     Str: string;
     // A guessed leaf contributed to THIS value. Cleared when an and/or was
-    // settled by a clean side alone — the flag's consumer is the
+    // settled by a clean side alone - the flag's consumer is the
     // needs-semantics diagnostic, i.e. "could a second pass change this
     // verdict", and a Kleene-decided verdict it could not.
     Guessed: Boolean;
@@ -110,7 +110,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
 
 { Lex + parse (TPasParser.ParseExpressionText) + evaluate AExpr. ABadExpr is
   the old `Failed`: the text does not parse as an expression at all. The tree
-  is still evaluated in that case — solely so UnknownDeclared gets recorded,
+  is still evaluated in that case - solely so UnknownDeclared gets recorded,
   matching the old evaluator's deliberate behavior ("a half-parsed expression
   that mentioned a name is still a case a second pass could learn from"). }
 function EvalCondText(const AExpr: string; var ACtx: TPasCondContext;
@@ -125,7 +125,7 @@ function CondAsNum(const AValue: TPasCondValue): Double;
 function PasBuiltinSizeOf(const AName: string; APointerBytes,
   AExtendedBytes: Integer; out ASize: Double): Boolean;
 
-{ The same table, with ALIGNMENT — which is NOT derivable from the size.
+{ The same table, with ALIGNMENT - which is NOT derivable from the size.
   ShortString is 256 bytes aligned to 1, a set is up to 32 bytes aligned to 1,
   and Extended is 10 bytes aligned to 8 (Win32). Anything that lays out a
   record must ask this rather than clipping the size to 8. }
@@ -162,7 +162,7 @@ begin
   Result.Guessed := True;
 end;
 
-// True when this value can settle a branch on its own — no guess in it, and
+// True when this value can settle a branch on its own - no guess in it, and
 // no dcc abort riding on it either.
 function CondIsClean(const AValue: TPasCondValue): Boolean;
 begin
@@ -211,7 +211,7 @@ end;
 
 // Token text -> number. Handles what the LEXER can hand us: decimal, real,
 // $hex, %binary, digit separators. (The old string-walking evaluator only
-// knew bare decimals — `$IF $10 > 15` was a bad expression; the real lexer
+// knew bare decimals - `$IF $10 > 15` was a bad expression; the real lexer
 // tokenizes it, so it now evaluates.)
 function CondNumOfText(const AText: string; out ANum: Double): Boolean;
 var
@@ -281,7 +281,7 @@ begin
   end;
 end;
 
-// A Declared() argument is a DESIGNATOR, not a bare identifier — the RTL
+// A Declared() argument is a DESIGNATOR, not a bare identifier - the RTL
 // writes `Declared(System.Embedded)`. '' = a shape we cannot name (and the
 // caller guesses).
 function DottedNameOf(const ATree: TPasTree; ANode: Integer): string;
@@ -335,7 +335,7 @@ begin
     AAlign := APointerBytes;
     Exit(True);
   end;
-  // 256 bytes of storage, but byte-aligned — the case that makes alignment a
+  // 256 bytes of storage, but byte-aligned - the case that makes alignment a
   // separate question from size.
   if SameText(AName, 'ShortString') then
   begin
@@ -380,7 +380,7 @@ begin
     Result := False;
   end;
   // Every remaining builtin is a scalar, and a scalar aligns to its own size
-  // capped at 8 — Extended (10 bytes on Win32) is the only one where that
+  // capped at 8 - Extended (10 bytes on Win32) is the only one where that
   // clipping does real work.
   if Result then
     AAlign := Min(Trunc(ASize), 8)
@@ -405,7 +405,7 @@ begin
     ACount := Trunc(LNum);
 end;
 
-{ An ordinal type-cast in a constant expression — `Byte(UnsignedBit shl 5)`,
+{ An ordinal type-cast in a constant expression - `Byte(UnsignedBit shl 5)`,
   `NativeUInt(1)`, FastMM4's whole const block. dcc folds these; without them a
   cast reads as an unknown function call and poisons every constant downstream
   of it. Only the INTEGRAL builtins cast here: they are the ones whose result
@@ -497,7 +497,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
   end;
 
   // A symbol question: ask the oracle when there is one, otherwise record
-  // the question (kind + name) for the second pass and return the guess —
+  // the question (kind + name) for the second pass and return the guess -
   // exactly the Declared() contract, widened.
   function AskSymbol(AQuery: TPasSymbolQuery; const AName: string;
     const AGuess: TPasCondValue): TPasCondValue;
@@ -517,7 +517,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
         Exit;
       end;
       // The name exists NOWHERE: not an open question but a determined dcc
-      // verdict, so it is neither guessed nor recorded — it is copied. Only
+      // verdict, so it is neither guessed nor recorded - it is copied. Only
       // the const-value query can say this; a SizeOf/Length question about a
       // missing name is still a question.
       if LAns.NoSymbol and (AQuery = sqConstValue) then
@@ -556,16 +556,16 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       if LArgName = '' then
         Exit;
       if Assigned(ACtx.OnDeclared) and ACtx.OnDeclared(LArgName, LKnown) then
-        // Somebody with a symbol table answered — see TPasDeclaredQuery.
+        // Somebody with a symbol table answered - see TPasDeclaredQuery.
         // Not recorded, because it is not a guess.
         Result := MkBool(LKnown)
       else
         // Nobody can answer yet: the symbol table that knows is built from
-        // the token stream this very decision produces. False is the guess —
+        // the token stream this very decision produces. False is the guess -
         // the guarded text is by construction the text that does NOT compile
         // when the name IS declared, and `not Declared(X)` fallbacks then
         // come out True, keeping the name resolvable. The NAME is recorded
-        // so a caller with a symbol table can come back and ask properly —
+        // so a caller with a symbol table can come back and ask properly -
         // twice over: UnknownDeclared drives RunDeclaredPass's candidate
         // filter, UnknownSymbols rides on the diagnostic so a reporter can
         // tell an UNVERIFIED guess from one a full symbol table later
@@ -594,7 +594,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     end
     else if SameText(LName, 'Length') then
     begin
-      // Length(X) of an array constant/variable — System.pas guards on
+      // Length(X) of an array constant/variable - System.pas guards on
       // `Length(RegisteredTypeInfoTable)`. Guess 0 when unanswered.
       LArgName := DottedNameOf(ATree, LArg);
       if LArgName <> '' then
@@ -602,14 +602,14 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     end
     else
     begin
-      // An ordinal type-cast folds like dcc does — but ONLY when its operand
+      // An ordinal type-cast folds like dcc does - but ONLY when its operand
       // is clean. A cast wrapped around a guess would turn the guess into a
       // confident-looking number and hide the open question.
       LArgVal := EvalCondNode(ATree, LArg, ACtx);
       if not LArgVal.Guessed and
          PasBuiltinCast(LName, ACtx.PointerBytes, LArgVal, LSize) then
         Exit(MkNum(LSize));
-      // Anything else (Ord(x), a unit function, ...) stays a guess — but the
+      // Anything else (Ord(x), a unit function, ...) stays a guess - but the
       // CALLEE is recorded so a reporter can say what it choked on. Without
       // this the guess carries no question at all, and a filter that trusts
       // "no open questions" would call it verified.
@@ -638,7 +638,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     begin
       // dcc-probed, and both of these used to be wrong: string comparison is
       // case-SENSITIVE (`$IF 'ABC' = 'abc'` takes the ELSE branch), and the
-      // ORDERING operators really order — they are the whole point of the
+      // ORDERING operators really order - they are the whole point of the
       // version-guard idiom (`$IF gsIdVersion >= '10.5.5'`), which a blanket
       // False answered by taking the wrong branch every time.
       LCmp := CompareStr(L.Str, R.Str);
@@ -686,7 +686,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       Exit;
     if ATree.Nodes[ABinNode].Aux < 0 then
       Exit;
-    // The operator's token KIND — every operator here is a reserved word or
+    // The operator's token KIND - every operator here is a reserved word or
     // punctuation with a dedicated kind, so no text is built to dispatch.
     LOp := ATree.Source.VisibleToken(ATree.Nodes[ABinNode].Aux).Kind;
 
@@ -694,7 +694,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     R := EvalCondNode(ATree, LRightNode, ACtx);
 
     // and/or: a CLEAN side that settles the verdict alone drops the other
-    // side's taint — the verdict cannot change no matter what the guessed
+    // side's taint - the verdict cannot change no matter what the guessed
     // part turns out to be, so no second pass needs to look at it. This is
     // dcc's own left-to-right short-circuit, applied symmetrically (see the
     // unit comment for the probed divergence on undeclared names).
@@ -765,7 +765,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     else if (LOp = tkShr) and CondShiftCount(R, LShift) then
       Result := MkNum(Trunc(CondAsNum(L)) shr LShift)
     else
-      // `in`, division by zero, an out-of-range shift count — a guess,
+      // `in`, division by zero, an out-of-range shift count - a guess,
       // never a crash.
       Exit;
     Result.Guessed := L.Guessed or R.Guessed;
@@ -802,7 +802,7 @@ begin
           Result := MkNum(ACtx.CompilerVersion)
         else
           // Any other bare name is a CONSTANT only semantics could resolve
-          // (`$IF GenericVariants`, System.VarUtils) — the oracle's
+          // (`$IF GenericVariants`, System.VarUtils) - the oracle's
           // question; guessed False when nobody answers (`$ELSEIF CPUX64`
           // in the RTL is a DEFINE used bare; dcc evaluates the undeclared
           // name by its quirk, we by the guess).
@@ -810,7 +810,7 @@ begin
       end;
     nkMember:
       begin
-        // A dotted constant reference (`Unit.Const`) — same oracle question
+        // A dotted constant reference (`Unit.Const`) - same oracle question
         // with the dotted name; a shape we cannot name stays a guess.
         LText := DottedNameOf(ATree, ANode);
         if LText <> '' then
@@ -830,7 +830,7 @@ begin
         var LOpKind :=
           ATree.Source.VisibleToken(ATree.Nodes[ANode].Aux).Kind;
         LVal := EvalCondNode(ATree, LChild, ACtx);
-        // An abort ignores the operator entirely — `not (UNDECL > 3)` is True,
+        // An abort ignores the operator entirely - `not (UNDECL > 3)` is True,
         // not False. A bare unresolvable name under `not` stays False (dcc's
         // boolean-position verdict), but under unary minus it is arithmetic,
         // so it aborts.
@@ -850,7 +850,7 @@ begin
       Result := EvalBinary(ANode);
     nkCall:
       Result := EvalCall(ANode);
-    // Everything else: a designator only semantics could resolve — a guess.
+    // Everything else: a designator only semantics could resolve - a guess.
   end;
 end;
 

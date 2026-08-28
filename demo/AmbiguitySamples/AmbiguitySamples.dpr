@@ -1,7 +1,7 @@
 program AmbiguitySamples;
 
 {
-  Weak-keyword ambiguity samples for PasTreeDemo.Highlighter — open this
+  Weak-keyword ambiguity samples for PasTreeDemo.Highlighter - open this
   project in the demo (Open Project...) to browse each unit and eyeball the
   coloring. Every unit here demonstrates spec B.4.2 directives / visibility
   words used in a position where they're NOT keywords, contrasted against

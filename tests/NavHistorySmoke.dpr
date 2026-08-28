@@ -4,7 +4,7 @@ program NavHistorySmoke;
   keeps recorded positions pointing at the same text while a file is edited.
 
   Both halves are invisible in the running program. A wrong rule does not look
-  like a bug when it happens — Back simply lands somewhere slightly unexpected,
+  like a bug when it happens - Back simply lands somewhere slightly unexpected,
   three clicks after the mistake, and by then the history that would explain it
   is gone. }
 

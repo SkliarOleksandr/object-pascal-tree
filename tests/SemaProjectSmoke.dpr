@@ -61,13 +61,13 @@ const
   // FindInSystemUnit fallback must resolve it (real dcc always can) instead
   // of firing a false E2003.
   // TObject lives here too, because a class with NO heritage clause still
-  // inherits from it (11.1.1) — see UNIT_TOBJ below.
+  // inherits from it (11.1.1) - see UNIT_TOBJ below.
   UNIT_SYS =
     'unit System;'#10'interface'#10 +
     'const SYS_CONST = 42;'#10 +
     'type'#10 +
     // TGUID/IInterface: real declarations (PasTree.Sema.Builtins no longer
-    // seeds either — both are genuine System.pas types), needed by
+    // seeds either - both are genuine System.pas types), needed by
     // UNIT_IFACEROOT's heritage-less interface reaching QueryInterface.
     '  TGUID = record'#10 +
     '    D1: Cardinal;'#10 +
@@ -81,7 +81,7 @@ const
     '  end;'#10 +
     // TArray is ALSO a seeded builtin (PasTree.Sema.Builtins), so a
     // `TArray<T>` reference resolves its head to a DeclNode-less symbol with
-    // no generic parameter list — see UNIT_WSHAPES.
+    // no generic parameter list - see UNIT_WSHAPES.
     '  TArray<T> = array of T;'#10 +
     // The element type of `array of const` (6.2.6). Real System.pas declares it
     // as a variant record; two fields are enough to prove the with scope opened.
@@ -98,17 +98,17 @@ const
   // not know, plus two neighbours found while closing them. Together these
   // were the last 39 false E2003s over the Win32 RTL, and the file mirrors
   // each real site:
-  //   Arr[I]            — element type: inline array, named array, TArray<T>
+  //   Arr[I]            - element type: inline array, named array, TArray<T>
   //                       (System.WideStrings' FList[Index], System.Variants'
   //                       LVarBounds[I], System.TypInfo's Entry.Aliases[...])
-  //   P^[I]             — index over a dereference (System.AnsiStrings)
-  //   Obj as T          — cast (System.Net.Socket)
-  //   TFoo.Create(...)  — constructor call yields the CLASS (System.Win.VCLCom)
-  //   P.Field           — IMPLICIT dereference in member access, which is what
+  //   P^[I]             - index over a dereference (System.AnsiStrings)
+  //   Obj as T          - cast (System.Net.Socket)
+  //   TFoo.Create(...)  - constructor call yields the CLASS (System.Win.VCLCom)
+  //   P.Field           - IMPLICIT dereference in member access, which is what
   //                       reaches Entry.Aliases at all (System.TypInfo)
-  //   Own.Unit.Name.X   — a unit qualifying with its OWN name, which is never
+  //   Own.Unit.Name.X   - a unit qualifying with its OWN name, which is never
   //                       in its own uses list (Winapi.Windows' DrawText)
-  //   helper for Alias  — a helper declared for an ALIAS of the struct whose
+  //   helper for Alias  - a helper declared for an ALIAS of the struct whose
   //                       methods use it (Winapi.D2D1's SetProduct)
   UNIT_WSHAPES =
     'unit UnitWShapes;'#10'interface'#10 +
@@ -183,8 +183,8 @@ const
     // before it, so `mid` is only findable through Outer and `inner` only
     // through mid. This is Vcl.Graphics' `with DIB, dsbm, dsbmih do` and
     // Vcl.Controls' `with TDragDockObject(ADragObject), FDockRect do`; both
-    // used to leave the later targets — and then every member reached through
-    // them in the body — undeclared.
+    // used to leave the later targets - and then every member reached through
+    // them in the body - undeclared.
     '  with Outer, mid, inner do'#10 +
     '    W := 7;'#10 +
     '  with TSub(Obj), Box do'#10 +       // cast first, then a field OF the cast
@@ -193,13 +193,13 @@ const
     'end;'#10 +
     'end.'#10;
 
-  // 16.4.1 — type-parameter constraints. The generics live in UnitCon and the
+  // 16.4.1 - type-parameter constraints. The generics live in UnitCon and the
   // instantiations in UnitConUse, so the whole check runs CROSS-MODEL: the
   // constraint nodes belong to the declaring model while the arguments belong
   // to the using one, and reading either in the wrong model is the mistake
-  // this fixture exists to catch. Accepted sets are dcc32 37.0-verified — see
+  // this fixture exists to catch. Accepted sets are dcc32 37.0-verified - see
   // CheckConstraints. TFree is the control: no constraint, anything goes.
-  { 5.7 — a NESTED `with` whose INNER target is an inherited CROSS-UNIT
+  { 5.7 - a NESTED `with` whose INNER target is an inherited CROSS-UNIT
     property. Vcl.ColorGrd's real shape:
 
       else with CellRect do
@@ -213,7 +213,7 @@ const
 
     The inner target `Canvas` is a body node of the OUTER with, which is exactly
     the position the two earlier cross passes skip (deciding such a node needs a
-    with-target type they are still producing). Only the with pass resolves it —
+    with-target type they are still producing). Only the with pass resolves it -
     and its bindings used to be committed after the whole round, so the body's
     `Pen` looked it up while still unbound, the inner with never opened, and
     every member of it became a false E2003. `Rectangle` was worse than
@@ -222,7 +222,7 @@ const
 
     Three units because both hops must be CROSS-model: the property is declared
     in the ancestor's unit, its type in a third. }
-  { 5.7 — a MULTI-TARGET `with` whose first target's type lives in ANOTHER unit.
+  { 5.7 - a MULTI-TARGET `with` whose first target's type lives in ANOTHER unit.
     Vcl.Graphics' real shape, `with DIB, dsbm, dsbmih do`, where DIB is a
     TDIBSection from Winapi.Windows and each later target is a field of the one
     before it.
@@ -230,15 +230,15 @@ const
     Distinct from the same-unit case in UNIT_WSHAPES, and it stayed broken after
     that one was fixed: a later TARGET is not inside any with BODY, so the cross
     passes classified it as an ordinary identifier, handed it to the inherited
-    pass — which knows nothing about with scopes — and emitted E2003 for it.
+    pass - which knows nothing about with scopes - and emitted E2003 for it.
     FindInEnclosingWith could already resolve it; nothing routed it there. }
-  { 14.2.2 — METHOD RESOLUTION CLAUSES. `function IPersistStreamInit.Load =
+  { 14.2.2 - METHOD RESOLUTION CLAUSES. `function IPersistStreamInit.Load =
     PersistStreamLoad;` maps an interface method to a differently-named class
     method. The segments arrive as a flat sibling list, so resolving them all as
     names in the CLASS scope reports the interface's own method as undeclared:
     6 sites in Vcl.AxCtrls, 49 across the corpus.
 
-    Both interfaces declare `Load`, which is the point of the construct — and the
+    Both interfaces declare `Load`, which is the point of the construct - and the
     control that a fix cannot cheat by picking the first match. }
   UNIT_MRIFACE =
     'unit UnitMRIface;'#10'interface'#10 +
@@ -291,12 +291,12 @@ const
     '  end;'#10 +
     '  PParamsLike = ^TParamsLike;'#10 +
     // Indexing a POINTER to an array, `^` omitted before `[` and no POINTERMATH
-    // — Vcl.Imaging.pngimage's pPixelLine/TPixelLine shape, 23 sites there and
+    // - Vcl.Imaging.pngimage's pPixelLine/TPixelLine shape, 23 sites there and
     // 6 more in GIFImg. dcc-verified as both an expression and a with target.
     '  TQuadLike = record R, G, B: Byte; end;'#10 +
     '  TLineLike = array[0..255] of TQuadLike;'#10 +
     '  PLineLike = ^TLineLike;'#10 +
-    // 13.1.4 default ARRAY property, inherited one level down — the
+    // 13.1.4 default ARRAY property, inherited one level down - the
     // `with ActionManager.ActionBars[I] do` shape. TValueProp is the control:
     // a default VALUE spec on an ordinary property spells the same word and
     // must NOT be mistaken for it.
@@ -306,7 +306,7 @@ const
     '  TCanvasBaseKin = class'#10 +
     '    Mark: Integer;'#10 +
     '  end;'#10 +
-    // 15.2.1 — a CLASS REFERENCE. `with TEngineClass(SomeEngine) do` reaches the
+    // 15.2.1 - a CLASS REFERENCE. `with TEngineClass(SomeEngine) do` reaches the
     // referenced class's members (Vcl.Themes does this for its class vars), so a
     // member walk must hop from `class of T` to T.
     '  TEngineKin = class'#10 +
@@ -323,7 +323,7 @@ const
     '  TCollLike = class(TCollBase)'#10 +
     '    Count: Integer;'#10 +
     '  end;'#10 +
-    // 13.1 — a bare property REDECLARATION: no type, no specifiers, it only
+    // 13.1 - a bare property REDECLARATION: no type, no specifiers, it only
     // promotes visibility. Vcl.StdCtrls declares `Items: TStrings` on
     // TCustomListBox and republishes it on TListBox exactly like this, which is
     // why `with CatList.Items do` (Vcl.CustomizeDlg) typed to nothing: the
@@ -375,7 +375,7 @@ const
     'end;'#10 +
     // Target-expression shapes over CROSS-UNIT types, the Vcl.Forms
     // `with Params^.rgrc[0] do` family. A member whose declared type is an
-    // inline array, indexed — DesignatorSymX has to find that member through
+    // inline array, indexed - DesignatorSymX has to find that member through
     // the base's TYPE, because the pass that records cross-unit member
     // references (CrossType) runs after the with pass that needs it.
     'procedure Shapes(P: PParamsLike);'#10 +
@@ -397,7 +397,7 @@ const
     '  with L[1] do'#10 +                  // with-target form
     '    G := 2;'#10 +
     'end;'#10 +
-    // Indexing a CLASS through its INHERITED default array property, unnamed —
+    // Indexing a CLASS through its INHERITED default array property, unnamed -
     // the element type is the property's, not the collection's.
     'procedure Coll(C: TCollLike; V: TValueProp);'#10 +
     'begin'#10 +
@@ -410,12 +410,12 @@ const
     '  with V do'#10 +                     // 37 control: a default VALUE spec
     '    if N = 0 then Exit;'#10 +         //    is not a default array property
     'end;'#10 +
-    // 6.2.6 — `array of const` IS an array of System.TVarRec, so indexing one
+    // 6.2.6 - `array of const` IS an array of System.TVarRec, so indexing one
     // opens over TVarRec's fields. A threading library's own units do
     // exactly this (`with aValues[i] do case VType of ...`), 56 sites.
-    // 10.3 — `TextFile` is predefined and has no declaration to fall back on.
+    // 10.3 - `TextFile` is predefined and has no declaration to fall back on.
     // The redeclaration as a with TARGET, reached through a bare field of the
-    // enclosing class — the Vcl.CustomizeDlg shape exactly.
+    // enclosing class - the Vcl.CustomizeDlg shape exactly.
     'type'#10 +
     '  TFormLike = class'#10 +
     '    CatList: TBoxLike;'#10 +
@@ -442,7 +442,7 @@ const
     '  with CatList.Items do'#10 +
     '    N := Count;'#10 +
     'end;'#10 +
-    // A CONSTRUCTOR call as the with target — the cross-unit case, where the
+    // A CONSTRUCTOR call as the with target - the cross-unit case, where the
     // constructor is NOT bound yet when the with pass asks (CrossType records
     // that, and it runs later). Both spellings: paren-less and with arguments.
     'procedure Ctors;'#10 +
@@ -458,7 +458,7 @@ const
     '  with TEngineKinClass(E) do'#10 +
     '    Registry := 1;'#10 +
     'end;'#10 +
-    // 12.1.2 — `inherited Name` heads a designator naming an ANCESTOR member, so
+    // 12.1.2 - `inherited Name` heads a designator naming an ANCESTOR member, so
     // its type comes from the ancestor. Vcl.ExtCtrls uses `with inherited Canvas
     // do`, where resolving the name against the class itself finds nothing.
     'type'#10 +
@@ -550,7 +550,7 @@ const
     '  Ok7: TFree<string>;'#10 +
     'implementation'#10'end.'#10;
 
-  // 16.1.2 — one generic name declared at several ARITIES. These are two
+  // 16.1.2 - one generic name declared at several ARITIES. These are two
   // distinct types; CollectTypeDecl used to reuse the first symbol for the
   // second declaration (the forward-completion path) and overwrite its member
   // scope, orphaning the first type's members. TFwd is the control that
@@ -620,7 +620,7 @@ const
   // A private nested type of the ANCESTOR OF A MIDDLE QUALIFIER SEGMENT.
   // TFlagSet belongs to TState; the method being implemented is
   // TPar.TState32.TFlag32.Check, so the type is reachable only by walking
-  // TState32's ancestry — not TFlag32's, which is all the inherited pass used
+  // TState32's ancestry - not TFlag32's, which is all the inherited pass used
   // to search. Mirrors System.Threading's TParallel.TLoopState32.
   // TLoopStateFlag32.ShouldExit over TLoopState's TLoopStateFlagSet (16 of
   // the RTL's false E2003s). TFlag32's OWN ancestry is exercised too, via
@@ -656,7 +656,7 @@ const
     'end.'#10;
 
   { A nested type whose ANCESTOR is a nested type of the ENCLOSING class's own
-    ancestor — and that ancestor lives in ANOTHER unit, so only the cross pass
+    ancestor - and that ancestor lives in ANOTHER unit, so only the cross pass
     can see it. Vcl.Skia/FMX.Skia's shape:
 
       TSkAnimatedPaintBox = class(TSkCustomAnimatedControl)
@@ -700,7 +700,7 @@ const
     'implementation'#10 +
     'end.'#10;
 
-  { 5.7 — three CROSS-UNIT with-target shapes, each a different mechanism and
+  { 5.7 - three CROSS-UNIT with-target shapes, each a different mechanism and
     each a real VCL false E2003:
 
     - `with P^ do` where P is declared with an INLINE anonymous pointer type
@@ -708,8 +708,8 @@ const
       only come from the declaration's type NODE. Vcl.Graphics.GetPenData's
       `PExtLogPen: ^TExtLogPen` + `with Result, PExtLogPen^ do`.
     - `with AZ, UnitWX do` where the later target names a FIELD of the earlier
-      one AND a used UNIT. Phase 1 binds the unit reference — never a legal with
-      target — and a "bound" node used not to be reconsidered, so the second
+      one AND a used UNIT. Phase 1 binds the unit reference - never a legal with
+      target - and a "bound" node used not to be reconsidered, so the second
       target never opened. Vcl.Imaging.pngimage's `with ZStream, ZLIB do` against
       System.ZLib.
     - `with THook.TScrollWindow(X) do`: a cast to a NESTED type named through its
@@ -764,7 +764,7 @@ const
     `TMemoTextSettings = class(TTextSettingsInfo.TCustomTextSettings)` (FMX.Memo,
     and the same line in 8 sibling units). Nothing binds that last segment before
     the passes that decide E2003, and as a HERITAGE reference the miss is silent
-    and expensive — the class is left with no ancestry, so every inherited member
+    and expensive - the class is left with no ancestry, so every inherited member
     its methods use goes undeclared. 12 false E2003 across FMX came from this one
     form. HorzAlign is the control: redeclared here, so it resolved even while
     the ancestry was broken, which is why only SOME members of each such class
@@ -804,11 +804,11 @@ const
     'end.'#10;
 
   { An INHERITED method outranks a unit-level global of the same name, even one
-    in this unit's own implementation section — dcc-verified. CollectStruct never
+    in this unit's own implementation section - dcc-verified. CollectStruct never
     joins an ancestor's scope, so Phase 1 bound the 4-parameter procedure and the
     1-argument call looked short by three: `GetFileNames(FShellItems)` inside
     TCustomFileOpenDialog.GetResults (FMX.Dialogs.Win), the corpus's last E2035.
-    The `uses` clause is load-bearing — the arity check that fires on this shape
+    The `uses` clause is load-bearing - the arity check that fires on this shape
     is the cross-unit one, and it only runs for a unit that has imports. }
   UNIT_DLG =
     'unit UnitDlg;'#10'interface'#10'uses UnitA;'#10 +
@@ -843,7 +843,7 @@ const
     into TAttribute.
 
     Two frame bugs met here, and either alone leaves the element type as the OPEN
-    parameter — so the with scope opens over nothing and every member in the body
+    parameter - so the with scope opens over nothing and every member in the body
     is a false E2003 (~250 across that one library):
       - AncestorOfX resolved each heritage reference WITHOUT composing the
         descendant's frame, so a frame survived only one hop;
@@ -901,7 +901,7 @@ const
     'end;'#10 +
     'end.'#10;
 
-  { `$IF Declared(X)` — the portability guard, answered on a SECOND
+  { `$IF Declared(X)` - the portability guard, answered on a SECOND
     preprocessing pass (RunDeclaredPass) once every unit has a model.
 
     Both directions have to be checked, because getting one right by accident
@@ -916,8 +916,8 @@ const
 
     Written so a wrong binding is a TYPE error rather than nothing: the outer
     `GName` is a string and the inline one an Integer, so binding the earlier
-    reference to the inline declaration — which is what a plain block scope
-    does — silently loses the E2010 that dcc reports there. That asymmetry is
+    reference to the inline declaration - which is what a plain block scope
+    does - silently loses the E2010 that dcc reports there. That asymmetry is
     the only observable difference; a wrong binding costs no diagnostic of its
     own, which is exactly why this survived a zero-false-positive corpus.
 
@@ -942,22 +942,22 @@ const
 
   { An interface's IMPLICIT ancestor (14.1.1). A heritage-less interface still
     descends from IInterface, so QueryInterface/_AddRef/_Release are reachable
-    on any value of that type — the member walk has to make that hop the way it
+    on any value of that type - the member walk has to make that hop the way it
     already makes the TObject one for a heritage-less class.
 
     Written as a `with` body on purpose: an unresolved MEMBER after a dot is not
     reported at all today, so `I.QueryInterface` would pass whether the hop
     works or not. Inside a `with` the same name is a BARE identifier and a miss
-    is a real E2003 — which is how the defect was found. (The first probe used
+    is a real E2003 - which is how the defect was found. (The first probe used
     a name that happened to resolve anyway, and a silent analyzer and a correct
     one looked identical until a deliberately undeclared control name proved
     the diagnostic fires there at all.)
 
     IInterface is DECLARED in a fixture unit rather than taken from the RTL:
     this suite analyses a temp directory whose only search path is itself, so a
-    real System.pas is not reachable. It has to be a SEPARATE unit — the hop
+    real System.pas is not reachable. It has to be a SEPARATE unit - the hop
     goes through ResolveRealDecl, which searches used units and the System unit
-    and deliberately not the current one — which also makes this the same
+    and deliberately not the current one - which also makes this the same
     cross-unit shape the real IInterface has. }
   UNIT_IFACEBASE =
     'unit UnitIfaceBase;'#10'interface'#10 +
@@ -1030,7 +1030,7 @@ const
     `with FSelections.List[I] do` is ordinary code. Substituting the member
     type over the T := TSelection frame handed back the bare nested-type symbol
     with that frame dropped, indexing it produced the OPEN `T`, and the scope
-    opened over nothing — 78 of 94 diagnostics on one project, across two units
+    opened over nothing - 78 of 94 diagnostics on one project, across two units
     of the same editor component. }
   UNIT_NGBASE =
     'unit UnitNGBase;'#10'interface'#10 +
@@ -1125,7 +1125,7 @@ const
     generic in the interface, a plain instantiation alias in the
     implementation. An editor library writes exactly this to give the common
     instantiation a short name. The alias is the nearer declaration, so its own
-    heritage reference `TSelfAr<TSCtl>` resolved to the alias ITSELF — leaving
+    heritage reference `TSelfAr<TSCtl>` resolved to the alias ITSELF - leaving
     it with no ancestor and every inherited member in the generic's method
     bodies a false E2003. }
   UNIT_SABASE =
@@ -1171,7 +1171,7 @@ const
     `with Items[I] do if StartCurs > N then ...`.
 
     A different code path and a separate bug: here `Items` is a bare ident the
-    INHERITED pass binds, and that pass recorded only (unit, symbol) — no
+    INHERITED pass binds, and that pass recorded only (unit, symbol) - no
     instantiation frame. So the with pass read `Items`' declared type straight
     off TBaseList<T> and got the OPEN `T`, indexed nothing, and every name in
     the body went undeclared. The frame is unrecoverable later: nothing
@@ -1198,7 +1198,7 @@ const
     it actually bites: `TObjectList` is a plain class in one RTL unit and a
     generic in another, and a unit importing both got whichever it imported
     LAST. Four classes in one debug library then inherited from the wrong
-    TObjectList and lost every member of the real one — including TList.Get,
+    TObjectList and lost every member of the real one - including TList.Get,
     reported three hops from the mistake.
 
     The first fix searched the used units with the ordinary last-uses-wins
@@ -1268,7 +1268,7 @@ const
     'end;'#10 +
     'end.'#10;
 
-  { 6.4 — an overload declared ONLY in the IMPLEMENTATION section joins the
+  { 6.4 - an overload declared ONLY in the IMPLEMENTATION section joins the
     interface section's set for the same unit. The two are separate symbols in
     separate scopes, deliberately: chaining them would export an
     implementation-only overload to every importer. So a call written inside the
@@ -1330,7 +1330,7 @@ const
 
   { The MIRROR of the same rule: a reference WITH type arguments must skip an
     imported NON-generic of that name. It hides better than the bare case,
-    because `Name<T>` reads as unambiguous — but the ordinary lookup still
+    because `Name<T>` reads as unambiguous - but the ordinary lookup still
     returns whichever declaration was imported last, and a plain class of that
     name in another unit takes a whole ancestry with it. }
   UNIT_ARGENUSE =
@@ -1367,7 +1367,7 @@ const
     'end;'#10 +
     'end.'#10;
 
-  { 16.1.2 — a reference supplying NO type arguments names the ARITY-0
+  { 16.1.2 - a reference supplying NO type arguments names the ARITY-0
     declaration, even when a same-named GENERIC is nearer in scope. dcc-verified.
 
     A component suite's shape: `TBarAccessibilityHelper` is a plain class in one unit
@@ -1375,7 +1375,7 @@ const
     another, which then writes both spellings. Taking the nearer
     (generic) one is not merely imprecise: the generic's OWN heritage is that
     same bare name, so it resolves to ITSELF and the self-reference guard stops
-    the ancestor walk dead — 100+ false E2003 on members declared three hops up.
+    the ancestor walk dead - 100+ false E2003 on members declared three hops up.
 
     TLocal is the control: an arity-1 reference must still mean the generic, and
     the fix must not "correct" the base of `T<...>` on its way through. }
@@ -1423,7 +1423,7 @@ const
     'end;'#10 +
     'end.'#10;
 
-  { A member whose name equals its OWN TYPE's — `property Params: Params`, the
+  { A member whose name equals its OWN TYPE's - `property Params: Params`, the
     routine shape in imported type-library interfaces. Phase 1 resolves that
     type slot inside the struct's member scope, finds the PROPERTY, and the
     declared type comes back empty; every member reached through it is then a
@@ -1465,7 +1465,7 @@ const
     'end.'#10;
 
   { An explicit `Self` as the with target's base. Nothing DECLARES Self (11.3.3),
-    so RefMap is empty for it and the qualifier typed as nothing — losing the
+    so RefMap is empty for it and the qualifier typed as nothing - losing the
     whole with scope, and with it every member in the body. Inside a method its
     type is the enclosing struct. Real shape: `with Self.TreeViewControl do`. }
   UNIT_SELFBASE =
@@ -1537,14 +1537,14 @@ const
 
   { A MEMBER whose name is a compiler-seeded BUILTIN. A class with
     `property Word: string` makes bare `Word` in a descendant's method mean the
-    PROPERTY, not the type — dcc-verified; an inherited member outranks a
+    PROPERTY, not the type - dcc-verified; an inherited member outranks a
     predefined name exactly as it outranks a unit-level one (12.1.1).
 
     Phase 1 cannot see it: the member is INHERITED and cross-unit, so only the
     project's later pass can reach it, and by then the intra-unit TYPER has
     already judged `ATestWord := Word` as string-vs-Word and emitted E2010. A
     later pass cannot unsay a diagnostic, so the typer withholds judgement when
-    an operand resolved to a TYPE NAME — that is a mis-binding, not a type
+    an operand resolved to a TYPE NAME - that is a mis-binding, not a type
     mismatch, and dcc has its own errors for a type used as a value. 12 false
     E2010 on one real code base, every one of them a member named Word. }
   UNIT_SHADOWBUILTIN =
@@ -1576,7 +1576,7 @@ const
     'end;'#10 +
     'end.'#10;
 
-  { A constructor called through a CLASS REFERENCE that is a function RESULT —
+  { A constructor called through a CLASS REFERENCE that is a function RESULT -
     the virtual-constructor factory shape, `with GetPainterClass.Create(...) do`.
     dcc-verified. The qualifier is not a type NAME, so the with-target typer's
     constructor branch had nothing to resolve: it must type the qualifier and
@@ -1710,7 +1710,7 @@ const
 
   // `with` over a target whose TYPE lives in ANOTHER unit (5.7). The
   // intra-unit pass opens a with scope by JOINING the type's member scope,
-  // which only works same-unit — so every cross-unit case fell through to a
+  // which only works same-unit - so every cross-unit case fell through to a
   // false E2003 per member (real bug: System.DateUtils.pas:2612's
   // `with LTZ.StandardDate do`, 464 diagnostics across the RTL).
   UNIT_WTYPES =
@@ -1752,7 +1752,7 @@ const
 
   // A with-target member SHADOWS everything else (5.7). dcc-verified: all five
   // bodies below compile, so `Shared` means UWRec.TRec.Shared (string) in every
-  // one — never the class field, the local, the parameter, the unit global, or
+  // one - never the class field, the local, the parameter, the unit global, or
   // even the inline var declared inside the body. The intra-unit pass cannot
   // know that (TRec is cross-unit, so it never opens the scope) and binds each
   // to the nearest same-unit `Shared` instead; the project's with pass has to
@@ -1855,9 +1855,9 @@ begin
 end;
 
 // How many references spelled ARefText resolved to a symbol named ATarget
-// declared in unit AUnitLower — via ExtRefMap (a genuinely cross-unit hit)
+// declared in unit AUnitLower - via ExtRefMap (a genuinely cross-unit hit)
 // OR via RefMap (a SAME-unit one: RepointCallee's own-model branch writes
-// RefMap directly and needs no ExtRefMap entry at all — see its own comment
+// RefMap directly and needs no ExtRefMap entry at all - see its own comment
 // on why a stale one there would be a bug, not a feature). Unlike CrossRefTo
 // this pins the OWNING UNIT, which is the whole point when the same name
 // exists on both sides of the shadowing question (a `with` target's member
@@ -1892,7 +1892,7 @@ begin
 end;
 
 // References spelled ARefText still bound LOCALLY (RefMap) to a symbol that is
-// not their own declaration — i.e. genuine local references left over.
+// not their own declaration - i.e. genuine local references left over.
 function LocalRefCount(AModel: TPasSemaModel; const ARefText: string): Integer;
 var
   LSym: Integer;
@@ -2036,7 +2036,7 @@ begin
 
   // AnalyzeFile first: the single-file driver had NO suite coverage, and its
   // pass chain diverges from the parallel drivers (it calls
-  // CrossResolveInherited directly, not through RunInheritedPass) — which is
+  // CrossResolveInherited directly, not through RunInheritedPass) - which is
   // exactly how an unsized cross-work array shipped as an AV visible only
   // from this driver (found by the 2026-08-22 Prefetch stress repro).
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
@@ -2089,7 +2089,7 @@ begin
       DiagCount(LD, 'F1027') = 1);
     Ok('D: F1027 names the unit that could not be found',
       (Length(LD.Diags) = 1) and LD.Diags[0].Msg.Contains('NoSuchUnit'));
-    // Units whose imports all resolve must stay silent — F1027 is not a
+    // Units whose imports all resolve must stay silent - F1027 is not a
     // per-uses-clause remark, it fires only on an actual failure.
     Ok('B: no F1027 when every uses resolves', DiagCount(LB, 'F1027') = 0);
     // NodeSite over the very `uses` item that failed: hosts need the IMPORT
@@ -2105,7 +2105,7 @@ begin
       (LSLine = 3) and (LSCol = 6));
     Ok('NodeSite: names UnitD''s own file',
       SameText(TPath.GetFileName(LSFile), 'UnitD.pas'));
-    // Out-of-range is a False, never an exception — a host may hold a node id
+    // Out-of-range is a False, never an exception - a host may hold a node id
     // from a model that has since been replaced.
     Ok('NodeSite: bad model id is False',
       not GProj.NodeSite(GProj.ModelCount, 0,
@@ -2140,7 +2140,7 @@ begin
     Ok('Shadow: no E2034 at all', DiagCount(LShadow, 'E2034') = 0);
     // Exactly ONE E2035: the genuine `Fire;` (0 args, needs 1). The four
     // shadowed GetObject(1) calls must contribute none.
-    Ok('Shadow: exactly 1 E2035 — the genuine cross-unit arity error only, '
+    Ok('Shadow: exactly 1 E2035 - the genuine cross-unit arity error only, '
       + 'none from the four shadowed GetObject calls',
       DiagCount(LShadow, 'E2035') = 1);
 
@@ -2151,7 +2151,7 @@ begin
     // Exactly ONE E2003: the genuine NoSuchMember. Every real member across
     // all five with-shapes (plain var, member target, multi-target, nested,
     // and inside a method) must resolve.
-    Ok('With: exactly 1 E2003 — the genuine NoSuchMember only',
+    Ok('With: exactly 1 E2003 - the genuine NoSuchMember only',
       DiagCount(LWith, 'E2003') = 1);
     for var LName in ['OnlyA', 'OnlyB', 'Deep', 'Top'] do
       Ok('With: ' + LName + ' resolves cross-unit',
@@ -2168,14 +2168,14 @@ begin
       CrossRefCountInUnit(LWSh, 'Shared', 'Shared', 'uwrec') = 5);
     Ok('WithShadow: no Shared reference stays bound locally',
       LocalRefCount(LWSh, 'Shared') = 0);
-    // The five same-named DECLARATIONS must survive untouched — only
+    // The five same-named DECLARATIONS must survive untouched - only
     // references get re-pointed.
     Ok('WithShadow: the local Shared declarations are still declared',
       SymCountOf(LWSh, 'shared', skField) = 1);
 
     // Module status / snapshot API: AnalyzeDirectory takes the directory's
     // own units all the way to msCrossReady, and TryGetSnapshot gates on the
-    // minimum requested status (never blocks — synchronously everything is
+    // minimum requested status (never blocks - synchronously everything is
     // already ready).
     var LSnap: TPasSemaModel;
     Ok('status: unita is msCrossReady',
@@ -2190,7 +2190,7 @@ begin
       (LSnap = nil));
 
     // Members of the IMPLICIT TObject ancestor, reached bare from a class
-    // with no heritage clause of its own — and from one whose explicit
+    // with no heritage clause of its own - and from one whose explicit
     // ancestor has none either. The walk used to stop where the clause is
     // absent, making every such name a false E2003 (the RTL's `ClassName`).
     var LTObj := ModelByName('unittobj');
@@ -2204,10 +2204,10 @@ begin
     Ok('tobject: Free resolves into System''s TObject',
       CrossRefCountInUnit(LTObj, 'Free', 'Free', 'system') = 1);
 
-    // 16.1.2 — one generic name at two arities (see UNIT_ARITY).
+    // 16.1.2 - one generic name at two arities (see UNIT_ARITY).
     var LAR := ModelByName('unitarity');
     Ok('arity: UnitArity loaded', Assigned(LAR));
-    Ok('arity: no diags — and in particular no E2004 for the second TBox '
+    Ok('arity: no diags - and in particular no E2004 for the second TBox '
       + 'nor for the forward-completed TFwd',
       Length(LAR.Diags) = 0);
     Ok('arity: TBox is TWO distinct type symbols, not one',
@@ -2228,7 +2228,7 @@ begin
       Length(LCU.Diags) = 4);
     Ok('constraints: E2511 for a non-class under `T: class`',
       DiagCount(LCU, 'E2511') = 1);
-    Ok('constraints: E2512 twice — managed string and a dynamic array',
+    Ok('constraints: E2512 twice - managed string and a dynamic array',
       DiagCount(LCU, 'E2512') = 2);
     Ok('constraints: E2515 for an unrelated class under `T: TBase`',
       DiagCount(LCU, 'E2515') = 1);
@@ -2240,7 +2240,7 @@ begin
 
     // Every with-target shape the RTL uses (see UNIT_WSHAPES). One assertion
     // per shape would be eight lookups into the same body, so the no-diags
-    // check carries them collectively — with the positive checks below it
+    // check carries them collectively - with the positive checks below it
     // cannot pass by failing to resolve, since an unresolved with-body member
     // IS an E2003 here (all uses resolve, so the gate is open).
     var LWS := ModelByName('unitwshapes');
@@ -2300,7 +2300,7 @@ begin
     { KNOWN GAP, deliberately not asserted: the EXPRESSION form `L[0].R` across a
       unit boundary does not bind R, because CrossType's own walk has no nkIndex
       case and so cannot type `L[0]`. Giving it one was measured (+4% wall time,
-      zero diagnostic change) and reverted — see the README To-do. It costs
+      zero diagnostic change) and reverted - see the README To-do. It costs
       typing precision, not diagnostics: the corpus shows no E2003 from this
       form, since the intra-unit typer covers the same-unit case, which is what
       Vcl.Imaging.pngimage actually uses. }
@@ -2324,7 +2324,7 @@ begin
     // reachable only if the walk hopped from the class reference to T.
     Ok('class reference: a class var through TEngineKinClass(E)',
       CrossRefTo(LMT, 'Registry', 'Registry'));
-    // `with inherited Owner do` — the ancestor's member, and ClassName then comes
+    // `with inherited Owner do` - the ancestor's member, and ClassName then comes
     // from the type it yields. Both only bind if nkInherited types at all.
     Ok('inherited target: ClassName through `with inherited Owner do`',
       CrossRefTo(LMT, 'ClassName', 'ClassName'));
@@ -2335,7 +2335,7 @@ begin
       CrossRefTo(LMT, 'VType', 'VType'));
     Ok('array of const: VInteger too',
       CrossRefTo(LMT, 'VInteger', 'VInteger'));
-    // `textfile` is a seeded predefined type — no declaration to resolve to.
+    // `textfile` is a seeded predefined type - no declaration to resolve to.
     Ok('predefined: textfile resolves (a var of it is not E2003)',
       DiagCount(LMT, 'E2003') = 0);
     // A bare property REDECLARATION as the with target: `property Items;` has no
@@ -2347,7 +2347,7 @@ begin
     // NESTED with whose INNER target is an inherited cross-unit property (see
     // UNIT_NWUSE for the Vcl.ColorGrd shape this reproduces). Both halves
     // matter: Pen must resolve at all, and `Rectangle` must pick the target's
-    // 4-arg METHOD rather than the 5-arg global — binding the global is how
+    // 4-arg METHOD rather than the 5-arg global - binding the global is how
     // the old behaviour turned a missed with-scope into a bogus E2035.
     var LNW := ModelByName('unitnwuse');
     Ok('nested-with: UnitNWUse loaded', Assigned(LNW));
@@ -2441,7 +2441,7 @@ begin
     Ok('arity0-uses: the bare heritage skips the generic import',
       CrossRefTo(LAru, 'Get', 'Get'));
 
-    // 16.1.2 — a bare reference means the ARITY-0 declaration, even when a
+    // 16.1.2 - a bare reference means the ARITY-0 declaration, even when a
     // same-named generic is nearer in scope (a component suite's shape).
     var LAr0 := ModelByName('unitaruse');
     Ok('arity0: UnitArUse loaded', Assigned(LAr0));
@@ -2513,7 +2513,7 @@ begin
     Ok('nestedgen: indexing `List` yields the ARGUMENT, not the open parameter',
       CrossRefTo(LNG, 'Line', 'Line') and CrossRefTo(LNG, 'Ch', 'Ch'));
 
-    // Three cross-unit with-target shapes, one Ok each — see UNIT_WXUSE for
+    // Three cross-unit with-target shapes, one Ok each - see UNIT_WXUSE for
     // which real VCL unit every one of them comes from.
     var LWX := ModelByName('unitwxuse');
     Ok('wx: UnitWXUse loaded', Assigned(LWX));
@@ -2526,7 +2526,7 @@ begin
       CrossRefTo(LWX, 'SizeBox', 'SizeBox'));
 
     // A nested type inheriting from the ENCLOSING class's ancestor's nested
-    // type, cross-unit (the Skia shape — see UNIT_NHUSE). Each Ok is one layer
+    // type, cross-unit (the Skia shape - see UNIT_NHUSE). Each Ok is one layer
     // of the cascade: the heritage name itself, then what only resolves once
     // the nested class HAS an ancestry.
     var LNH := ModelByName('unitnhuse');
@@ -2636,7 +2636,7 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
-  { ReportUnresolvedMembers — the opt-in "member after a dot" diagnostic.
+  { ReportUnresolvedMembers - the opt-in "member after a dot" diagnostic.
     Error-tolerant (OFF) is the editor's mode and the default; ON is the
     compiler-front-end one. Both directions are pinned, because the value of the
     switch is that the OFF state stays silent. }
@@ -2651,7 +2651,7 @@ begin
     '    Good: Integer;'#10 +
     '  end;'#10 +
     'implementation'#10'end.'#10);
-  // One good member and one that does not exist, on a type from ANOTHER unit —
+  // One good member and one that does not exist, on a type from ANOTHER unit -
   // the cross-unit path, which is where the check lives.
   TFile.WriteAllText(TPath.Combine(LDir, 'MemUser.pas'),
     'unit MemUser;'#10'interface'#10'uses MemHost;'#10 +
@@ -2686,7 +2686,7 @@ begin
 
   { A compiler-SEEDED name shadowed by an INHERITED member. dcc-probed both
     ways: a class with a `Text` property compiles `Text.IsEmpty` in a method
-    body — the member beats the predefined FILE type — and `var F: Text;` in
+    body - the member beats the predefined FILE type - and `var F: Text;` in
     that same body is `E2007`, so the member wins in a type position too.
 
     This is a WRONG binding rather than a missing one, so the assertion that
@@ -2757,12 +2757,12 @@ begin
     dcc32 37.0-probed and both stated by the probe rather than by the spec:
 
     - `T: class` guarantees TObject's members (`V.Free`, `V.ClassName` compile);
-      `T: record` and a lone `T: constructor` do NOT — the same `V.Free` is
+      `T: record` and a lone `T: constructor` do NOT - the same `V.Free` is
       `E2003` under either, so only the `class` keyword answers a type here;
     - a DYNAMIC array type has a pseudo-constructor (`TBytes.Create($20, $20)`,
       also with no arguments at all). A STATIC array and a VARIABLE qualifier
-      are both `E2671`, which is why the negative cases are asserted too — and
-      `TBytes` (a real declaration in CFSys now — PasTree.Sema.Builtins no
+      are both `E2671`, which is why the negative cases are asserted too - and
+      `TBytes` (a real declaration in CFSys now - PasTree.Sema.Builtins no
       longer seeds it) is exercised beside a locally-declared array, to prove
       the pseudo-constructor walk does not care which kind of DeclNode a
       dynamic array type has.
@@ -2775,7 +2775,7 @@ begin
   TDirectory.CreateDirectory(LDir);
   // TObject in a fixture unit, for the reason UnitIfaceBase gives: this suite
   // analyses a temp directory whose only search path is itself, and the hop
-  // goes through ResolveRealDecl, which searches USED units — never this one.
+  // goes through ResolveRealDecl, which searches USED units - never this one.
   TFile.WriteAllText(TPath.Combine(LDir, 'CFSys.pas'),
     'unit CFSys;'#10'interface'#10 +
     'type'#10 +
@@ -2809,7 +2809,7 @@ begin
     'end;'#10 +
     'procedure TRecOnly<T>.Use(const V: T);'#10 +
     'begin'#10 +
-    '  V.Free;'#10 +                     // dcc: E2003 — and so do we
+    '  V.Free;'#10 +                     // dcc: E2003 - and so do we
     'end;'#10 +
     'procedure P;'#10 +
     'var'#10 +
@@ -2820,7 +2820,7 @@ begin
     '  LA := TMyArr.Create(1, 2);'#10 +  // a declared dynamic array
     '  LB := TBytes.Create(1);'#10 +     // the SEEDED one
     '  LA := TMyArr.Create();'#10 +      // no arguments
-    '  LS := TStat.Create(1, 2);'#10 +   // dcc: E2671 — we report the member
+    '  LS := TStat.Create(1, 2);'#10 +   // dcc: E2671 - we report the member
     '  LA := LA.Create(1);'#10 +         // a VARIABLE qualifier, likewise
     'end;'#10 +
     'end.'#10);
@@ -2841,9 +2841,9 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
-  { A constrained parameter used inside a method BODY. 16 §16.4.1 puts the
+  { A constrained parameter used inside a method BODY. 16 sec. 16.4.1 puts the
     constraints on the declaration and dcc forbids repeating them on the
-    implementation header — `procedure TListBase<T>.Add;` — so the body's own
+    implementation header - `procedure TListBase<T>.Add;` - so the body's own
     `<T>` carries none, and that is where nearly every use of a constrained
     parameter lives (the whole `TAcceptValueListBase<T: TAcceptValueItem,
     constructor>` family in System.Net.Mime was this one shape).
@@ -2900,7 +2900,7 @@ begin
 
     - a NESTED type as a type ARGUMENT (`TMsg<TModel.TInfo>`). Nothing binds
       that last segment cross-unit this early, and losing one argument loses
-      the whole instantiation FRAME — with it every member of a field typed by
+      the whole instantiation FRAME - with it every member of a field typed by
       the parameter. 82 of the FMX package's 89 reports were
       `Message.Value.<anything>` through exactly this.
     - a NESTED type as a member QUALIFIER (`TModel.TItems.Create(1, 2)`, where
@@ -2989,7 +2989,7 @@ begin
     `ValueFunc: TFunc<IValue>` means `ValueFunc().GetValue`
     (System.Bindings.Outputs, and the whole VCL package's member tail).
 
-    The generic is the point rather than decoration — `TFunc<TResult> =
+    The generic is the point rather than decoration - `TFunc<TResult> =
     reference to function: TResult` declares its result as a type PARAMETER, so
     only the instantiation makes it IValue, and a hop that forgot the frame
     would land on the open TResult and find nothing.
@@ -3045,7 +3045,7 @@ begin
   { Builtin ALIAS identity, and the distinct type that must not be caught by it.
     dcc32 37.0-probed: a `record helper for Cardinal` applies to values declared
     `Cardinal`, `LongWord` and `UInt32` (System.pas: `UInt32 = Cardinal`) alike,
-    and is `E2671` on an `Integer` — identity, not compatibility. But
+    and is `E2671` on an `Integer` - identity, not compatibility. But
     `TEditMask = type string` (System.MaskUtils) declares a DISTINCT type, so
     ITS helper is not a string helper: registering it as one hid TStringHelper
     in FMX.MaskEdit and cost 17 false reports in the measurement that caught it.
@@ -3103,13 +3103,13 @@ begin
   end;
 
   { 16.2.1: a generic METHOD's constraints live on its own declaration, and the
-    body repeats a bare `<T>` — the same rule as a generic TYPE's, one level in.
+    body repeats a bare `<T>` - the same rule as a generic TYPE's, one level in.
     System.Rtti's `GetNamedObject<T: TRttiNamedObject>` is the shape; its body
     calls `Obj.HasName`, the last two member reports the RTL package had.
 
     The qualified implementation name is a FLAT run of idents, each able to
     carry its own parameter list, so the owner of a list is the ident right
-    BEFORE it — the first segment would answer with the class's name. }
+    BEFORE it - the first segment would answer with the class's name. }
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_genmethod');
   if TDirectory.Exists(LDir) then
     TDirectory.Delete(LDir, True);
@@ -3151,7 +3151,7 @@ begin
   { A helper on a BUILTIN-typed value whose type came from ANOTHER model. Every
     model seeds its own `string` symbol, so `S.Trim` on a local (this model's
     seed) and `Give(S).Trim` on a third unit's function result (that unit's
-    seed) are different keys into the helper index — and only the first was
+    seed) are different keys into the helper index - and only the first was
     registered. Three units because two cannot tell the two keys apart: the
     helper and the function have to live in DIFFERENT units, neither of them the
     referring one. The local is asserted beside it so a fix that canonicalized
@@ -3209,13 +3209,13 @@ begin
   end;
 
   { A member reached through a GENERIC ANCESTOR and typed by that ancestor's own
-    parameter — `class property Statics: S` on `TGenericImport<S>`, which is the
+    parameter - `class property Statics: S` on `TGenericImport<S>`, which is the
     WinRT shape (`TWinRTGenericImportS<S: IInspectable>` in System.Win.WinRT,
     used by every `Statics.CreateInstance` in the Winapi.* units).
 
     Bare `Statics` is found by the inherited pass, which closes its type over the
     instantiation frame; the next dot has to READ that answer instead of the open
-    `S`. Run with the member check ON, since a member miss is otherwise silent —
+    `S`. Run with the member check ON, since a member miss is otherwise silent -
     the binding assertion is the real subject and the diagnostic count is what
     makes a regression loud. Cross-unit on purpose: that is the failing shape,
     and it is the ancestor's frame rather than this unit's that matters. }
@@ -3267,7 +3267,7 @@ begin
     Ok('genanc: the property itself comes from the generic ancestor',
       CrossRefTo(LGA, 'Statics', 'Statics'));
     // The member is declared in THIS unit (IController is), so the binding the
-    // instantiation argument earns is a LOCAL one — which is exactly the point:
+    // instantiation argument earns is a LOCAL one - which is exactly the point:
     // the open `S` could never have led here.
     Ok('genanc: and its member binds through the instantiation argument',
       LocalRefCount(LGA, 'GetDefault') = 1);
@@ -3277,7 +3277,7 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
-  { ReportVisibility — the enforcement half of 11.2.1, also opt-in. Every rule
+  { ReportVisibility - the enforcement half of 11.2.1, also opt-in. Every rule
     below is dcc32 37.0-probed, and the SILENT ones carry the weight: `private`
     is visible to the whole declaring UNIT (the friend rule), so enforcing it
     per-type would reject correct code everywhere. }
@@ -3336,9 +3336,9 @@ begin
     GProj.Free;
   end;
   // The overload shape that made this check unusable: a PRIVATE member sharing
-  // its name with the PUBLIC one people call. `Exception` does exactly this — a
+  // its name with the PUBLIC one people call. `Exception` does exactly this - a
   // private `class constructor Create` above the public `constructor
-  // Create(const Msg: string)` — and binding used to answer with the chain head,
+  // Create(const Msg: string)` - and binding used to answer with the chain head,
   // so every `Create('x')` was refused. The call's selected target is what must
   // be judged.
   TFile.WriteAllText(TPath.Combine(LDir, 'VisOver.pas'),
@@ -3377,7 +3377,7 @@ begin
     GProj.AnalyzeDirectory(LDir);
     Ok('visibility: judged on the SELECTED overload, not the chain head',
       DiagCount(ModelByName('visoveruse'), 'E2361') = 0);
-    // Same unit: only the STRICT one is refused — the friend rule keeps
+    // Same unit: only the STRICT one is refused - the friend rule keeps
     // `A.FPriv` legal, and a type's own strict member stays reachable.
     Ok('visibility: strict private is refused even in the declaring unit',
       DiagCount(ModelByName('vishost'), 'E2361') = 1);
@@ -3393,15 +3393,15 @@ begin
   end;
 
   { The three rules the `-visibility` tail turned out to need, all dcc32
-    37.0-probed and all of them BINDING rules rather than visibility ones —
+    37.0-probed and all of them BINDING rules rather than visibility ones -
     which is what the flag has said about every one of its floods so far:
 
     - `strict private` reaches a NESTED type, and the relation is asymmetric.
       A nested class reading the OUTER class's strict private field compiles;
       the outer class reading a NESTED class's is dcc's own `E2361`.
       (`TJSONCollectionBuilder.TBaseCollection` reads the outer `FJSONWriter`.)
-    - a `class constructor` is never what a name means — it runs once,
-      automatically, and cannot be called (15 §15.1.5). `TRegistry` declares a
+    - a `class constructor` is never what a name means - it runs once,
+      automatically, and cannot be called (15 sec. 15.1.5). `TRegistry` declares a
       private one fourteen lines above the public parameterless `Create`.
     - when NOTHING in a type's own chain fits the arguments, the call means an
       INHERITED routine: `TButton.Create(Self)` is TComponent's.
@@ -3557,7 +3557,7 @@ begin
   { An ANONYMOUS METHOD literal cannot bind to a non-procedural parameter, so it
     rejects that candidate outright. `TThread.Synchronize(nil, procedure ... end)`
     fits the PRIVATE `(ASyncRec: PSynchronizeRecord; QueueEvent: Boolean = False)`
-    on arity and `nil` scores the same against either first parameter — 41 of
+    on arity and `nil` scores the same against either first parameter - 41 of
     bigflat's 111 false E2361 came from that one pair. }
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_anonpick');
   if TDirectory.Exists(LDir) then
@@ -3604,7 +3604,7 @@ begin
 
   { 16.4.1: a value typed by an unbound type PARAMETER has the members its
     CONSTRAINT guarantees. System.Win.WinRT's `class var FFactory: F` with
-    `F: IInspectable` is the shape — every `FFactory._AddRef` there was a false
+    `F: IInspectable` is the shape - every `FFactory._AddRef` there was a false
     E2003 until the walk hopped to the constraint. }
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_constraint');
   if TDirectory.Exists(LDir) then
@@ -4099,16 +4099,16 @@ begin
   // ---- 1.3.2, the $IF symbol oracle (RunDeclaredPass widened beyond
   // Declared): const values, SizeOf of enums (with positional {$Z}/
   // MINENUMSIZE state), SizeOf of a same-size-fields record, Length of a
-  // bounded array — the four shapes measured on the RTL (System.VarUtils'
+  // bounded array - the four shapes measured on the RTL (System.VarUtils'
   // Generic*, System.Classes' TValueType, System.Rtti's TMethod, System.pas'
   // RegisteredTypeInfoTable). Each guard below is TRUE under the oracle but
   // guessed False on the first pass, so the declaration it guards EXISTS
-  // only if the second pass really re-decided the unit — the assertion is
+  // only if the second pass really re-decided the unit - the assertion is
   // the symbol's existence, which cannot pass vacuously.
   //
   // The STRING-const guard is the deliberate negative: tier-1 answers
   // numbers and booleans only, so that one stays guessed-False and its type
-  // must NOT exist — pinning that the oracle refuses rather than guesses.
+  // must NOT exist - pinning that the oracle refuses rather than guesses.
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_iforacle');
   if TDirectory.Exists(LDir) then
     TDirectory.Delete(LDir, True);
@@ -4161,7 +4161,7 @@ begin
     // Strings ARE answered now, and this is the shape that pins it. dcc
     // orders string constants for real and does it CASE-SENSITIVELY (probed:
     // `$IF 'ABC' = 'abc'` takes the ELSE branch), which is what the
-    // version-guard idiom in the wild depends on — Indy's
+    // version-guard idiom in the wild depends on - Indy's
     // `$IF gsIdVersion >= '10.5.5'`. Both guards below are False under the
     // first-pass guess and True only if the oracle really supplied the
     // string, so the types cannot appear vacuously. The case guard is the
@@ -4785,8 +4785,8 @@ begin
   try
     // Every string here is spelled with explicit CHARACTER CODES and every
     // byte with explicit BYTE VALUES, deliberately: this file has no BOM
-    // either, so a literal `Привет` in this source would be read by dcc under
-    // the very rule under test, and the test would then assert against
+    // either, so a non-ASCII literal in this source would be read by dcc under
+    // by dcc under the very rule under test, and the test would then assert
     // whatever the compiler happened to decode. Codes make it independent of
     // that. #$041F.. is 'Privet' in Cyrillic - 6 characters, 12 UTF-8 bytes,
     // which is the gap between the two rules.
@@ -5092,7 +5092,7 @@ begin
     end;
 
     // Edit ONE file: it must miss (donormiss > 0) and its diags must follow
-    // the edit — the E2003 name changes — while the untouched unit hits.
+    // the edit - the E2003 name changes - while the untouched unit hits.
     TFile.WriteAllText(TPath.Combine(LDir, 'UnitKB.pas'),
       'unit UnitKB;'#10'interface'#10'uses UnitKA;'#10 +
       'var GK: TK;'#10'implementation'#10 +
@@ -5150,7 +5150,7 @@ begin
   // must be accepted and change only that module's diagnostics; an INTERFACE
   // edit must be refused with the project left untouched; an unknown file
   // must be refused. The differential harness is the real evidence (whole
-  // closures, RefMap/ExtRefMap compared per step) — this is the unit-level
+  // closures, RefMap/ExtRefMap compared per step) - this is the unit-level
   // gate that the contract holds at all. ----
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_module');
   if TDirectory.Exists(LDir) then
@@ -5176,7 +5176,7 @@ begin
     Ok('module: an unknown file is refused',
       not GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'NoSuchUnit.pas')));
 
-    // A BODY edit (buffer overlay — the editor's real path): accepted, and
+    // A BODY edit (buffer overlay - the editor's real path): accepted, and
     // this module's diagnostics follow the edit.
     GProj.SetBuffer(TPath.Combine(LDir, 'UnitMB.pas'),
       'unit UnitMB;'#10'interface'#10'uses UnitMA;'#10 +
@@ -5198,7 +5198,7 @@ begin
     Ok('module: cross-unit references still resolve after the swap',
       CrossRefTo(ModelByName('unitmb'), 'M', 'M'));
 
-    // An INTERFACE edit must be REFUSED — and refused BEFORE anything is
+    // An INTERFACE edit must be REFUSED - and refused BEFORE anything is
     // swapped, so the project still answers from the previous generation.
     GProj.SetBuffer(TPath.Combine(LDir, 'UnitMB.pas'),
       'unit UnitMB;'#10'interface'#10'uses UnitMA;'#10 +
@@ -5240,7 +5240,7 @@ begin
     Ok('module: the consumer was not double-diagnosed',
       DiagCount(ModelByName('unitmb'), 'E2003') = 1);
 
-    // A NEW dependency changes the closure itself — that is a rebuild's job.
+    // A NEW dependency changes the closure itself - that is a rebuild's job.
     GProj.SetBuffer(TPath.Combine(LDir, 'UnitMB.pas'),
       'unit UnitMB;'#10'interface'#10'uses UnitMA, NoSuchUnitXY;'#10 +
       'var GM: TM;'#10'implementation'#10'end.'#10, 10);

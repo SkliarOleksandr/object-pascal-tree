@@ -1,12 +1,12 @@
 unit PasTree.SourceManager;
 
 {
-  PasTree — source file loading and include resolution.
+  PasTree - source file loading and include resolution.
 
   Loading is tolerant: BOMs are honored, a file WITHOUT one is UTF-8 when its
   bytes are valid UTF-8 and ANSI when they are not, and a file that fails STRICT
   decoding under a DECLARED encoding is decoded again leniently rather than
-  rejected — it keeps that encoding and gets U+FFFD for the bad sequence. Every
+  rejected - it keeps that encoding and gets U+FFFD for the bad sequence. Every
   fallback skips the preamble. DecodeBytes carries the reasoning for all of it:
   dcc accepts such files, treating one malformed byte as fatal loses the whole
   unit, and reading a preamble-less UTF-8 file as ANSI silently shifted every
@@ -25,7 +25,7 @@ type
   TPasSourceManager = class
   private type
     // An overlay buffer (SetBuffer): the text analysis sees for a path, plus
-    // the HOST's version stamp for it. The version means nothing here — it is
+    // the HOST's version stamp for it. The version means nothing here - it is
     // carried so an asynchronous host (the demo, the LSP server) can compare
     // a finished analysis against the document version it currently holds and
     // discard a stale result instead of navigating with wrong positions.
@@ -42,19 +42,19 @@ type
     FBuffers: TDictionary<string, TBufferEntry>;  // full path (lower) -> entry
     // Unit-file lookup indexes, built LAZILY on the first FindUnitFile call
     // (a project may never resolve units at all). FSearchIndex maps a .pas
-    // basename (lower) to its full path across ALL search paths — first path
+    // basename (lower) to its full path across ALL search paths - first path
     // wins, preserving exactly the priority order the un-indexed loop had.
     // FDirIndexes holds the same per single directory, for the referring-
     // file's dir (which outranks every search path). Replaces the previous
     // per-candidate TFile.Exists probing: a project-closure load was doing
     // hundreds of thousands of file-exists syscalls (each unqualified name
-    // tries every namespace prefix against every search path) — measured at
+    // tries every namespace prefix against every search path) - measured at
     // 5.5s of a 6.7s real-project analysis before this index, ~0 after.
     FSearchIndex: TDictionary<string, string>;
     FDirIndexes: TObjectDictionary<string, TDictionary<string, string>>;
     // In-memory file-content repository, filled by Prefetch (below): LoadText
     // serves from here before touching the disk. Same lifetime as this
-    // manager — one analysis run — so no external-change invalidation is
+    // manager - one analysis run - so no external-change invalidation is
     // needed (a fresh run re-reads via the OS cache anyway). Holds raw BYTES,
     // not strings: the I/O workers must stay allocation-light (see Prefetch),
     // so decoding happens on the consumer's (per-core parse worker's) thread.
@@ -62,7 +62,7 @@ type
     // Lexed include files, shared across every including unit: an include's
     // Source text and token array are includer-INDEPENDENT (what differs per
     // includer is which tokens end up visible/skipped, and that lives in the
-    // includer's own TPasPreprocessed) — so re-lexing widely shared .inc
+    // includer's own TPasPreprocessed) - so re-lexing widely shared .inc
     // files per includer only duplicated identical strings and arrays.
     // Guarded by FIncludeLock: HandleInclude runs on the parse workers.
     // TPasTokenStream is a record of refcounted string/arrays, so handing a
@@ -71,7 +71,7 @@ type
     FIncludeLock: TObject;
     // Files whose bytes did not decode under their DECLARED encoding and had
     // to be recovered (path -> how). Guarded because decoding runs on the
-    // parse workers. Empty for every ordinary corpus — a preamble-less file
+    // parse workers. Empty for every ordinary corpus - a preamble-less file
     // landing on ANSI is the rule rather than a recovery and is deliberately
     // NOT recorded here; see the end of DecodeBytes.
     FRecovered: TDictionary<string, string>;
@@ -97,8 +97,8 @@ type
       unit name BEFORE resolution (WinTypes -> Winapi.Windows). }
     procedure AddUnitAlias(const AAlias, AReal: string);
     { A canonical signature of everything that decides WHICH file a unit name
-      resolves to: search paths (in order — order is priority), namespaces (in
-      order — tried in order), aliases (sorted — a dictionary has no order).
+      resolves to: search paths (in order - order is priority), namespaces (in
+      order - tried in order), aliases (sorted - a dictionary has no order).
       Two managers with equal signatures resolve every unit name identically,
       which is what TPasSemaProject.AdoptParseDonor gates on. }
     function ConfigSignature: string;
@@ -107,7 +107,7 @@ type
       analysis sees what's on screen (main file AND its $I includes go through
       LoadText). Keyed by full-path, case-insensitive. Set before analyzing.
       AVersion is the host's version stamp for the document (an LSP
-      `didChange` version, an editor change counter) — stored verbatim,
+      `didChange` version, an editor change counter) - stored verbatim,
       readable back via BufferVersion, never interpreted here. }
     procedure SetBuffer(const APath, AText: string; AVersion: Integer = 0);
     procedure ClearBuffers;
@@ -121,22 +121,22 @@ type
       scan-on-first-touch, MFT lookups), not throughput, so it pays to keep
       many requests in flight while the CPU-bound parse workers stay
       per-core. Call before a parse batch; LoadText then serves from memory.
-      Failed reads are skipped silently — LoadText's own error path reports
+      Failed reads are skipped silently - LoadText's own error path reports
       them, as before. }
     procedure Prefetch(const APaths: TArray<string>);
     function LoadText(const APath: string): string;
     { The lexed token stream of an include file, shared across includers (see
       FIncludeStreams). APath must already be RESOLVED (ResolveInclude's out
       value). An editor-buffer override (SetBuffer) is tokenized fresh and
-      stays OUT of the shared cache — buffers are per-analysis mutable state. }
+      stays OUT of the shared cache - buffers are per-analysis mutable state. }
     function IncludeStream(const APath: string): TPasTokenStream;
     { Drops the analysis-scoped caches once a project run has finished: the
       raw-bytes repository (a complete second copy of every closure file that
-      nothing reads after analysis — post-analysis text access goes through
+      nothing reads after analysis - post-analysis text access goes through
       the token streams' own Source) and the shared include-stream cache's
       OWN references (the models keep theirs; the arrays stay alive exactly
       as long as a model still uses them). A later analysis on the same
-      manager just re-Prefetches and re-lexes — correctness is unaffected. }
+      manager just re-Prefetches and re-lexes - correctness is unaffected. }
     procedure ReleaseAnalysisCaches;
     { Indexes every *.inc under ARoot by basename as a last-resort include
       resolver (corpus runs without real project search paths). The first
@@ -155,10 +155,10 @@ type
     function ResolveUnit(const AUnitName, AInPath, AFromFile: string;
       out AResolved: string): Boolean;
     { Every unit NAME the search paths can reach (each *.pas basename, its
-      original spelling, extension dropped) — completion's uses-clause
+      original spelling, extension dropped) - completion's uses-clause
       candidate set. Built from the same per-path index ResolveUnit uses
       (first path wins on a duplicate basename) and cached for this
-      manager's lifetime, i.e. one analysis run — the same staleness the
+      manager's lifetime, i.e. one analysis run - the same staleness the
       index itself already accepts. }
     function SearchPathUnitNames: TArray<string>;
     { How APath had to be RECOVERED to be read at all, or '' when it decoded
@@ -172,7 +172,7 @@ type
       are hardest to read. `TStrings.LoadFromFile` raises on a malformed byte
       (`No mapping for the Unicode character exists in the target multi-byte
       code page`), so the demo used to display that message INSTEAD of the
-      unit — the one file where seeing the source actually mattered. }
+      unit - the one file where seeing the source actually mattered. }
     class function DecodeBytes(const ABytes: TBytes;
       out AHow: string): string; static;
     class function LoadFileTolerant(const APath: string): string; static;
@@ -212,7 +212,7 @@ begin
 end;
 
 { Prefetch and the search-index build run their concurrent I/O on the
-  DEFAULT thread pool — deliberately NOT a private TThreadPool. A private
+  DEFAULT thread pool - deliberately NOT a private TThreadPool. A private
   pool was tried (a fixed 16-worker one) and behaved pathologically on a
   machine with more cores than the dev box: TThreadPool.SetMaxWorkerThreads
   REJECTS values below the default MinWorkerThreads (= CPU count), so the
@@ -344,7 +344,7 @@ begin
 end;
 
 // One candidate unit name (as-spelled) against the referring dir, then the
-// search paths — the shared step ResolveUnit runs per candidate spelling.
+// search paths - the shared step ResolveUnit runs per candidate spelling.
 // Index-backed (see FSearchIndex): two dictionary lookups, no file syscalls.
 procedure TPasSourceManager.EnsureSearchIndex;
 var
@@ -356,7 +356,7 @@ begin
     Exit;
   FSearchIndex := TDictionary<string, string>.Create;
   // Enumerate every search path CONCURRENTLY (a cold directory listing is
-  // latency-bound, like a cold file read — see Prefetch) into per-path
+  // latency-bound, like a cold file read - see Prefetch) into per-path
   // slots, then merge SEQUENTIALLY in path order: first path wins, the
   // same priority the sequential probing loop had.
   SetLength(LListings, Length(FSearchPaths));
@@ -401,11 +401,11 @@ begin
   // SEARCH PATHS FIRST, referring directory only as a fallback. dcc-verified,
   // and the order matters more than it looks: with `b.pas` and `c.pas` sitting
   // together in one directory and ANOTHER `c.pas` earlier on the search path,
-  // dcc compiles b against the search-path one — the importer's own directory
+  // dcc compiles b against the search-path one - the importer's own directory
   // carries no priority at all. This is how a project SHADOWS a third-party
   // unit: it drops a patched copy into its own tree and puts that directory
   // first. Probing the referring directory first quietly undid that, and the
-  // patched member then read as undeclared at every use — reported, of course,
+  // patched member then read as undeclared at every use - reported, of course,
   // in the patched file itself, three units away from the actual mistake.
   //
   // The fallback stays because it is strictly more tolerant than dcc: a unit
@@ -458,13 +458,13 @@ begin
   if (FAliases <> nil) and FAliases.TryGetValue(LowerCase(AUnitName), LCand) then
     LUnitName := LCand;
 
-  // 3. As spelled: <dotted>.pas on the search paths, then — beyond what dcc
-  // accepts — relative to the referring file. See FindUnitFile for the order.
+  // 3. As spelled: <dotted>.pas on the search paths, then - beyond what dcc
+  // accepts - relative to the referring file. See FindUnitFile for the order.
   if FindUnitFile(LUnitName, LDir, AResolved) then
     Exit(True);
 
   // 4. Unit-scope namespaces (dcc -NS), IN ORDER, applied to the name AS
-  // SPELLED — dotted or not. `uses Generics.Collections` with -NS System
+  // SPELLED - dotted or not. `uses Generics.Collections` with -NS System
   // resolves to System.Generics.Collections.pas, and there is no
   // Generics.Collections.pas anywhere, so the prefix is the ONLY way to find
   // it: dcc-verified, compiles with -NSSystem and cannot be explained by any
@@ -481,7 +481,7 @@ begin
   LDot := LastDelimiter('.', LUnitName);
 
   // 5. Leaf-name tolerance for a dotted name (System.SysUtils -> SysUtils.pas
-  // — pre-namespace-era file layouts).
+  // - pre-namespace-era file layouts).
   if LDot > 0 then
   begin
     LLeaf := Copy(LUnitName, LDot + 1, MaxInt);
@@ -527,8 +527,8 @@ end;
   its bytes ARE valid UTF-8, and ANSI otherwise.
 
   UTF-8-FIRST FOR PREAMBLE-LESS FILES, decided 2026-08-20 (the open question in
-  the README, now closed). It used to default to TEncoding.Default — the system
-  ANSI codepage — because that is what dcc does, and matching the compiler is
+  the README, now closed). It used to default to TEncoding.Default - the system
+  ANSI codepage - because that is what dcc does, and matching the compiler is
   the right instinct. It is the wrong answer here, for a reason that only became
   visible once an editor was hosting this library:
 
@@ -537,7 +537,7 @@ end;
     analyzer and the editor genuinely read DIFFERENT TEXT out of the same bytes:
     a 3-byte dash arrived as three ANSI characters. Every column on a line with
     a non-ASCII character before the identifier was then off by the byte
-    inflation — silently, because nothing reports it. Navigation just lands next
+    inflation - silently, because nothing reports it. Navigation just lands next
     to the name, or inside the preceding string literal.
   - The two decodes disagreeing also defeated the LSP server's rebuild gate,
     which compares an editor buffer against the file's BYTES (a decode
@@ -548,14 +548,14 @@ end;
     analysis reads.
   - What "matching dcc" buys is smaller than it looks. Identifiers are ASCII, so
     the semantic model is unaffected either way; the difference is confined to
-    the CONTENTS of string literals and comments — where dcc, reading UTF-8
+    the CONTENTS of string literals and comments - where dcc, reading UTF-8
     bytes as ANSI, produces mojibake. Reproducing that faithfully has no value
     to a caller, while the position skew costs correctness everywhere.
 
   Pure-ASCII files (the overwhelming majority) decode identically under both
   rules, so this is a superset of the old behaviour rather than a change of
-  policy for them. A genuinely ANSI-encoded source — high bytes that are NOT
-  valid UTF-8 — still falls back to ANSI, via the same recovery path below, and
+  policy for them. A genuinely ANSI-encoded source - high bytes that are NOT
+  valid UTF-8 - still falls back to ANSI, via the same recovery path below, and
   is still noted through AHow.
 
   THE FAILURE PATHS, which is where the subtlety always was. Delphi's
@@ -564,20 +564,20 @@ end;
   Alcinoe.FMX.Dynamic.Objects.pas, and dcc compiles that file without complaint.
   Two things must therefore hold.
 
-  First, a file that DECLARED itself UTF-8 with a BOM is still UTF-8 — one bad
+  First, a file that DECLARED itself UTF-8 with a BOM is still UTF-8 - one bad
   byte is not a reason to reinterpret the whole thing as ANSI. It is decoded
   again with a LENIENT UTF-8 that substitutes U+FFFD for the bad sequence and
   leaves everything else intact, and that IS reported (PPENC), because the text
   may no longer be what the author wrote. A preamble-less file is the opposite
   case in both respects: its bad byte is EVIDENCE about the encoding, since
-  nothing declared UTF-8, so it becomes ANSI — which is how a Windows-1251
-  source still reads correctly — and nothing is reported, because nothing went
+  nothing declared UTF-8, so it becomes ANSI - which is how a Windows-1251
+  source still reads correctly - and nothing is reported, because nothing went
   wrong. See the end of the implementation.
 
   Second, and this was the actual bug: the fallback must skip the PREAMBLE.
   Decoding from offset 0 turned the three BOM bytes into text, so the file
   began with garbage instead of `unit`. The lexer rejected it at line 1, the
-  parser produced a single node, the model came out EMPTY — and every unit
+  parser produced a single node, the model came out EMPTY - and every unit
   that imported it lost every name it declared. One byte in a comment cost
   ~1700 false "undeclared identifier" reports on the Alcinoe package. }
 class function TPasSourceManager.DecodeBytes(const ABytes: TBytes;
@@ -672,7 +672,7 @@ begin
   end;
 end;
 
-// One tolerant disk read (BOM honored; ANSI fallback on decode failure) —
+// One tolerant disk read (BOM honored; ANSI fallback on decode failure) -
 // LoadText's direct-from-disk path.
 function TPasSourceManager.ReadFileText(const APath: string): string;
 begin
@@ -688,12 +688,12 @@ begin
     Exit;
   if FContentCache = nil then
     FContentCache := TDictionary<string, TBytes>.Create;
-  // Concurrent reads into per-index slots, sequential commit — no locks, and
+  // Concurrent reads into per-index slots, sequential commit - no locks, and
   // the dictionary is never mutated while parse workers might read it. The
   // workers read raw BYTES only (one allocation per file): decoding to a
   // UTF-16 string doubles the memory traffic and, under
   // NeverSleepOnMMThreadContention=True, memory-manager contention across
-  // many threads SPINS — 32 workers decoding multi-MB sources concurrently
+  // many threads SPINS - 32 workers decoding multi-MB sources concurrently
   // spin-convoyed an 185-unit analysis into the 16-second range. Decoding
   // happens per-core in the parse workers instead (LoadText/DecodeText).
   SetLength(LBytes, Length(APaths));
@@ -703,7 +703,7 @@ begin
       try
         LBytes[AIndex] := TFile.ReadAllBytes(APaths[AIndex]);
       except
-        LBytes[AIndex] := nil;   // unreadable — LoadText's disk path reports it
+        LBytes[AIndex] := nil;   // unreadable - LoadText's disk path reports it
       end;
     end);
   for LIdx := 0 to High(APaths) do
@@ -734,7 +734,7 @@ var
   LKey: string;
 begin
   LKey := LowerCase(TPath.GetFullPath(APath));
-  // An unsaved-buffer override changes per analysis — never share it.
+  // An unsaved-buffer override changes per analysis - never share it.
   if (FBuffers <> nil) and FBuffers.ContainsKey(LKey) then
     Exit(TPasLexer.Tokenize(LoadText(APath)));
   TMonitor.Enter(FIncludeLock);
@@ -746,7 +746,7 @@ begin
     TMonitor.Exit(FIncludeLock);
   end;
   // Decode + lex OUTSIDE the lock: both are the expensive part, and two
-  // workers racing to the same include at worst lex it twice — the loser
+  // workers racing to the same include at worst lex it twice - the loser
   // then adopts the winner's copy below, so every includer still ends up
   // sharing one stream.
   Result := TPasLexer.Tokenize(LoadText(APath));

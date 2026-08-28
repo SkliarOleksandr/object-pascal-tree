@@ -5,7 +5,7 @@ program StagedParseSmoke;
   stage 1 of the async parser's two-wave scheme. Its whole correctness rests
   on the PREFIX INVARIANT: the interface-only tree's nodes [0..N-1] are
   byte-identical to a FULL parse of the same source, with exactly two allowed
-  divergences —
+  divergences -
     - Nodes[0] (the unit root) LastToken: the interface-only root spans less;
     - the nkInterfaceSec node's NextSibling: NIL_NODE here, but the
       implementation section in a full parse.
@@ -86,7 +86,7 @@ begin
   begin
     LA := AIntf.Nodes[LI];
     LB := AFull.Nodes[LI];
-    // Every field must match, EXCEPT the two sanctioned deltas — which we
+    // Every field must match, EXCEPT the two sanctioned deltas - which we
     // require to actually be present (they prove the two parses really did
     // diverge where expected, not that they happened to be identical).
     if (LI = 0) and (LA.LastToken <> LB.LastToken) then
@@ -192,8 +192,8 @@ const
 
   // $IFDEF opened in the interface and another closed in the implementation:
   // whole-file preprocessing (shared stage 1) resolves both regardless of the
-  // interface/implementation cut, so the visible stream — and thus the prefix
-  // — is unaffected. WIN64 is defined (see main), NEXTGEN is not.
+  // interface/implementation cut, so the visible stream - and thus the prefix
+  // - is unaffected. WIN64 is defined (see main), NEXTGEN is not.
   UNIT_IFDEF =
     'unit CondSample;'#10 +
     'interface'#10 +
@@ -219,7 +219,7 @@ const
     'implementation'#10 +
     'end.'#10;
 
-  // A program has no interface section — AInterfaceOnly must be IGNORED.
+  // A program has no interface section - AInterfaceOnly must be IGNORED.
   PROGRAM_SRC =
     'program App;'#10 +
     'uses System.SysUtils;'#10 +

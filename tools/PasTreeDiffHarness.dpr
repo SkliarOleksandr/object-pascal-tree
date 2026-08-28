@@ -12,16 +12,16 @@ program PasTreeDiffHarness;
                        [-samples:<N>] [-script:<file>] [-module]
 
   Two incremental MODES:
-    default  — the stage-A donor CHAIN: rebuild k adopts rebuild k-1 as parse
+    default  - the stage-A donor CHAIN: rebuild k adopts rebuild k-1 as parse
                donor, exactly the LSP's intended usage.
-    -module  — stage B: ONE project is kept alive across the whole sequence
+    -module  - stage B: ONE project is kept alive across the whole sequence
                and each edit goes through AnalyzeModuleOnly (buffer overlay,
                single-module re-analysis in place). A REFUSAL falls back to a
                donor rebuild, exactly as a host must, and is reported as such.
                A body edit is expected to be ACCEPTED; an interface edit may
                be accepted too, since the redo covers the affected consumers
                (they return to Phase 1 and rebuild their own references), and
-               is then counted, not judged — what decides correctness is the
+               is then counted, not judged - what decides correctness is the
                comparison against the full pipeline that every step runs.
                An unexpected fallback on a body edit is a WARNING (refusing is
                always safe) but is counted: a fast path that never fires is
@@ -29,12 +29,12 @@ program PasTreeDiffHarness;
 
   Edits are applied as BUFFER OVERLAYS (SetBuffer), never to the disk: both
   pipelines read byte-identical text through the one loader, so even an edit
-  that lands badly in some exotic layout still differentiates the pipelines —
+  that lands badly in some exotic layout still differentiates the pipelines -
   the ground truth sees the same text. Steps are CUMULATIVE. Two synthetic
   edit kinds per sampled unit, per the plan:
-    (a) body edit — a new procedure at the end of the implementation section
+    (a) body edit - a new procedure at the end of the implementation section
         (interface symbol sequence unchanged);
-    (b) interface edit — a new routine declared at the end of the interface
+    (b) interface edit - a new routine declared at the end of the interface
         section, with its body appended.
   A -script file replaces the synthetic sampling: one edit per line,
   `body <full-path>` or `intf <full-path>`, applied in order.
@@ -42,7 +42,7 @@ program PasTreeDiffHarness;
   -selftest inverts the exercise to prove the COMPARATOR can see: the
   incremental side is deliberately fed the PRE-EDIT text of each step's
   edited file (the two pipelines then really analyze different projects), and
-  every edit step is REQUIRED to mismatch — a step that compares equal fails
+  every edit step is REQUIRED to mismatch - a step that compares equal fails
   the run, because a blind comparator makes every green run above worthless.
 
   Exit code 0 = every step compared equal (or, under -selftest, every edit
@@ -124,7 +124,7 @@ begin
   Result := NewProject(AStale);
   if (ADonor <> nil) and not Result.AdoptParseDonor(ADonor) then
   begin
-    Writeln(ErrOutput, 'FATAL: donor refused (config mismatch) — the harness ' +
+    Writeln(ErrOutput, 'FATAL: donor refused (config mismatch) - the harness ' +
       'builds both sides identically, so this is a defect');
     Halt(2);
   end;
@@ -158,11 +158,11 @@ end;
   carry the markers the transform needs (the sampler then skips it).
 
   Insertion points: the interface DECLARATION goes right before the
-  `implementation` line (the end of the interface section — always legal, no
+  `implementation` line (the end of the interface section - always legal, no
   interference with a leading `uses`); the implementation CODE goes before
   `initialization` when the unit has one, else before the final `end.` (a
   declaration after `initialization` would not compile). NB even a transform
-  that lands badly on some exotic layout stays a VALID differential step —
+  that lands badly on some exotic layout stays a VALID differential step -
   both pipelines read the identical result. }
 function ApplyEdit(const AText: string; AKind: TEditKind; ASeq: Integer;
   out ANewText: string): Boolean;
@@ -310,7 +310,7 @@ begin
       LTM := ATruth.Model(LPair.Value);
       LCM := ACand.Model(LMid);
 
-      // RefMap: intra-unit bindings, node-indexed — a pure array compare
+      // RefMap: intra-unit bindings, node-indexed - a pure array compare
       // (symbol indices are intra-model and both sides parsed identical text).
       if Length(LTM.RefMap) <> Length(LCM.RefMap) then
         Mismatch(Format('%s: RefMap length %d vs %d',
@@ -324,7 +324,7 @@ begin
             Break;   // one line per unit; the first divergence names the node
           end;
 
-      // ExtRefMap: cross-unit bindings — compared via file PATHS, because
+      // ExtRefMap: cross-unit bindings - compared via file PATHS, because
       // model ids are a per-run accident of load order, not an identity.
       LDelta := FirstDelta(ExtLines(ATruth, LTM), ExtLines(ACand, LCM));
       if LDelta <> '' then
@@ -368,7 +368,7 @@ begin
 end;
 
 // The synthetic sample: every loaded unit whose layout carries the markers,
-// paths sorted, then an even stride down to GSamples — deterministic, no
+// paths sorted, then an even stride down to GSamples - deterministic, no
 // randomness (the harness must reproduce bit-for-bit across runs).
 function SampleUnits(AProj: TPasSemaProject): TArray<string>;
 var
@@ -488,7 +488,7 @@ begin
   GVersion := 0;
   GFailedSteps := 0;
 
-  // Initial build — the sampling source and the first donor in the chain.
+  // Initial build - the sampling source and the first donor in the chain.
   LSW := TStopwatch.StartNew;
   LCand := AnalyzeOne(nil);
   Writeln(ErrOutput, Format('initial: %d units in %d ms (%s)',
@@ -511,7 +511,7 @@ begin
   end;
   Writeln(ErrOutput, Format('steps: 1 no-edit + %d edits', [Length(LSteps)]));
 
-  // Step 0 — no edit: a pure warm rebuild must reproduce the project exactly.
+  // Step 0 - no edit: a pure warm rebuild must reproduce the project exactly.
   for GIdx := 0 to Length(LSteps) do
   begin
     GStaleKey := '';
@@ -559,7 +559,7 @@ begin
       end
       else
       begin
-        // Refused — a host must rebuild. The donor chain does that here.
+        // Refused - a host must rebuild. The donor chain does that here.
         // AnalyzeModuleOnly names the reason in StageTimings; carry it into
         // the step line, because WHY a fast path did not fire is the report.
         LHow := 'fallback(' + LCand.StageTimings + ')';
@@ -602,7 +602,7 @@ begin
     if GStaleKey <> '' then
     begin
       // Self-test inversion: an equal compare here means the comparator is
-      // BLIND — count it as the failure; a mismatch is the pass.
+      // BLIND - count it as the failure; a mismatch is the pass.
       if LOk then
       begin
         LVerdict := 'SELFTEST FAILED (comparator saw nothing)';
@@ -620,14 +620,14 @@ begin
       LVerdict := 'MISMATCH';
     // Guard expectations (module mode, real edits only): a body edit must be
     // accepted, an interface edit must be refused. Only the second direction
-    // is a failure — see the header.
+    // is a failure - see the header.
     if GModuleMode and (GIdx > 0) and (GStaleKey = '') then
     begin
       // An accepted INTERFACE edit is no longer a failure: since the redo
       // covers the affected consumers (they go back to Phase 1 and rebuild
       // their own references), a shifted symbol index harms nobody. What
       // decides correctness is the comparison against the full pipeline,
-      // which every step runs anyway — so this is counted, not judged.
+      // which every step runs anyway - so this is counted, not judged.
       if (LStep.Kind = ekIntf) and (LHow = 'module') then
         Inc(GAcceptedIntf)
       else if (LStep.Kind = ekBody) and (LHow <> 'module') then

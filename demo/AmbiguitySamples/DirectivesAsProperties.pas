@@ -3,14 +3,14 @@ unit DirectivesAsProperties;
 {
   Ambiguity sample: weak keywords used as PROPERTY names. `property` always
   wants a plain identifier next, so this is never actually ambiguous to the
-  parser — but it's a good contrast case for the highlighter: the property
+  parser - but it's a good contrast case for the highlighter: the property
   NAME (e.g. `override`) must render as Identifier, while the trailing `read`
   specifier on the SAME line must render as Keyword. Both are the same
   tkIdentifier token kind from the lexer; only AST position tells them apart
   (see PasTreeDemo.Highlighter's BuildWeakKeywordSpans).
 
   Adapted from the user's own DelphiAST test corpus (TestScripts\Names
-  Overloading\ASTTest.NamesOverloading.DirsAsProps.pas) — real,
+  Overloading\ASTTest.NamesOverloading.DirsAsProps.pas) - real,
   dcc-verified Delphi syntax. PasTree parses it with 0 diagnostics.
 }
 

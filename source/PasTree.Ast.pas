@@ -1,7 +1,7 @@
 unit PasTree.Ast;
 
 {
-  PasTree — the homogeneous AST.
+  PasTree - the homogeneous AST.
 
   Design (see README):
   - One node type. A node is a 32-byte record in a contiguous per-unit
@@ -49,7 +49,7 @@ type
     nkUnaryOp,        // Aux = operator visible-token index (not/@/+/-)
     nkBinaryOp,       // Aux = operator visible-token index; is not/not in
                       // are flagged via nfNegated on the node
-    nkParen,          // ( expr ) — kept for fidelity
+    nkParen,          // ( expr ) - kept for fidelity
     nkCall,           // callee = child 0, args follow (4.10 cast-vs-call is
                       // resolved semantically)
     nkFormattedArg,   // Write/Str colon-arg: expr [:width [:prec]] (4.11.2)
@@ -141,7 +141,7 @@ type
     // 6.2. Aux = the visible-token index of an `out` modifier, -1 otherwise.
     // `var` and `const` need no such mark: they are reserved words and a lexer
     // already knows them, while `out` is a context-sensitive directive word
-    // (B.4.2) — legal as an identifier elsewhere — so the only thing that can
+    // (B.4.2) - legal as an identifier elsewhere - so the only thing that can
     // prove this one MEANS the modifier is the parser, here.
     nkParam,
     nkDirective,      // routine directive (+ optional args as children)
@@ -162,7 +162,7 @@ type
     // Appended, not inserted: existing ordinals stay stable (see nkAnonParams).
     nkNamedArg        // OLE-automation named argument `Name := Expr` in a call
                       // argument list (4.10.1): name = child 0, value = child 1.
-                      // The NAME is a dispatch parameter name, NOT a reference —
+                      // The NAME is a dispatch parameter name, NOT a reference -
                       // nothing resolves it.
   );
 
@@ -199,37 +199,37 @@ type
       span crosses files (a declaration split over an $I include - not worth
       reconstructing) or is degenerate. Promoted here because three private
       copies of this walk existed (navigator, LSP, demo) - see the
-      completion plan §8A. }
+      completion plan sec. 8A. }
     function NodeSpanText(AIndex: Integer): string;
     { The node's TRUE leftmost visible token: the smaller of its own
-      FirstToken and its deepest-first-descendant's — nodes whose FirstToken
+      FirstToken and its deepest-first-descendant's - nodes whose FirstToken
       is not their left edge exist by design (nkMember's is the dot). -1 for
       a bad index or a node with no tokens. }
     function NodeLeftmostVis(AIndex: Integer): Integer;
     { The LEADING doc-comment block of the declaration ANode belongs to
-      (completion plan §8D, Help Insight): the contiguous run of `///` line
+      (completion plan sec. 8D, Help Insight): the contiguous run of `///` line
       comments immediately above the declaration, in source order, with the
       `///` markers stripped, lines joined with #10; '' when there is none.
 
-      ANode may be the declaration's NAME node (a symbol's DeclNode) — it is
+      ANode may be the declaration's NAME node (a symbol's DeclNode) - it is
       climbed to the enclosing declaration root first (routine, type/const/
       var/property declaration, enum value), because the doc sits above the
       whole declaration, not above the name mid-line. The walk then runs
       BACKWARD over the RAW token stream of the declaration's own file:
-      whitespace is crossed (a BLANK line ends the run — attachment requires
+      whitespace is crossed (a BLANK line ends the run - attachment requires
       adjacency, the native IDE's rule), an attribute group between the doc
       block and the declaration is stepped over (docs conventionally sit
-      above the attributes), and any other token — code, an ordinary `//`
-      comment, a brace comment, a directive — ends the run.
+      above the attributes), and any other token - code, an ordinary `//`
+      comment, a brace comment, a directive - ends the run.
 
       Raw text is the contract: XML-tag rendering (`<summary>`, `<param>`)
       is a HOST display concern, exactly like whitespace collapse in
       ItemParamsText. No XML parsing here. }
     function DeclDocComment(AIndex: Integer): string;
     { The same slice as a NAME KEY: lower-cased, leading '&' stripped. Use this
-      for every declaration and lookup key — see the implementation. }
+      for every declaration and lookup key - see the implementation. }
     function NodeNameLower(AIndex: Integer): string;
-    { Non-allocating SameText(NodeText(AIndex), AWord) — the word-test
+    { Non-allocating SameText(NodeText(AIndex), AWord) - the word-test
       counterpart of SliceEqualsWord for a node's first token. }
     function NodeTextEquals(AIndex: Integer; const AWord: string): Boolean;
     { Compact S-expression dump for golden tests:
@@ -299,14 +299,14 @@ end;
 { An identifier node's NAME KEY: its text, lower-cased, with a leading '&'
   removed.
 
-  `&Foo` and `Foo` are the SAME identifier — the ampersand only stops the word
+  `&Foo` and `Foo` are the SAME identifier - the ampersand only stops the word
   being read as a keyword, it is not part of the name. dcc-verified in BOTH
   directions: a parameter declared `var Message` can be written `&Message` in
   the body, one declared `var &Message` can be written `Message`, and `&begin`
   declares an identifier named `begin`. Vcl.Controls mixes the two spellings of
   the same parameter inside a single routine.
 
-  So NodeText (full fidelity, ampersand included — right for spans, hovers and
+  So NodeText (full fidelity, ampersand included - right for spans, hovers and
   round-tripping) must never be used directly as a lookup or declaration key;
   this is what to use instead. }
 function TPasTree.NodeNameLower(AIndex: Integer): string;
@@ -319,7 +319,7 @@ begin
   // Single pass over the token slice: ONE allocation where the old
   // NodeText -> Delete('&') -> LowerCase chain paid two or three. Folding is
   // ASCII-only ('A'..'Z'), exactly what LowerCase did, so keys are unchanged.
-  // Same bounds backstop as NodeText — see its comment.
+  // Same bounds backstop as NodeText - see its comment.
   if (AIndex < 0) or (AIndex > High(Nodes)) then
     Exit('');
   if (Nodes[AIndex].FirstToken < 0) or
@@ -361,7 +361,7 @@ end;
 function TPasTree.NodeText(AIndex: Integer): string;
 begin
   // Backstop, not a licence: every caller is expected to pass a real node id.
-  // It exists because the alternative is worse than a wrong answer — without
+  // It exists because the alternative is worse than a wrong answer - without
   // range checks an out-of-range index reads whatever memory follows Nodes, so
   // a caller bug became NON-DETERMINISTIC behaviour rather than a failure
   // (found exactly that way: a token index passed here, see
@@ -435,7 +435,7 @@ begin
     Exit;
   // Climb to the declaration ROOT: the OUTERMOST declaration-shaped ancestor
   // (a name node sits inside its declaration; the doc sits above the whole
-  // declaration). Containers end the climb — a nested routine keeps its own
+  // declaration). Containers end the climb - a nested routine keeps its own
   // nkRoutine because nkRoutineBody stops the walk before the outer one.
   LDecl := NIL_NODE;
   LIdx := AIndex;
@@ -480,7 +480,7 @@ begin
         tkWhitespace:
           begin
             // A BLANK line breaks attachment: doc must sit immediately
-            // above (the native IDE's rule) — two line breaks in one
+            // above (the native IDE's rule) - two line breaks in one
             // whitespace run mean an empty line between.
             LText := TokenText(LRaw);
             LBreaks := 0;
@@ -520,7 +520,7 @@ begin
       end;
     Dec(LRaw);
   end;
-  // Collected bottom-up — emit in source order.
+  // Collected bottom-up - emit in source order.
   for LIdx := LCount - 1 downto 0 do
   begin
     if Result <> '' then
@@ -611,7 +611,7 @@ begin
       end;
     // A routine needs BOTH: the head word says procedure/function/constructor/
     // destructor/operator, Aux says whether `class` preceded it (that keyword
-    // is not in the node's own token span — the struct-body parser eats it).
+    // is not in the node's own token span - the struct-body parser eats it).
     nkRoutine:
       begin
         Result := Result + '''' + LowerCase(NodeText(AIndex)) + '''';
@@ -654,7 +654,7 @@ end;
 
 procedure TPasTreeBuilder.Init(ACapacityHint: Integer);
 begin
-  // The parser passes ~half its visible-token count (nodes run 0.5–1x visible
+  // The parser passes ~half its visible-token count (nodes run 0.5-1x visible
   // tokens): one up-front allocation instead of ~10 doublings each copying the
   // arena so far. Build still trims to the exact count.
   if ACapacityHint < 64 then

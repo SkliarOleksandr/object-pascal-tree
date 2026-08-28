@@ -101,7 +101,7 @@ const
   { Inside a METHOD the candidate set is never complete intra-unit: dcc
     searches the type's own AND inherited members before the unit's globals,
     and every class also inherits TObject, which a `uses`-less unit has no
-    model of. Both calls below are legal dcc (verified as a real compile) —
+    model of. Both calls below are legal dcc (verified as a real compile) -
     they mean TBase.Foo/TBase.Bar, not the globals the intra-unit resolver
     binds them to, and the arity check must stay silent about them. }
   SRC_METHOD =
@@ -122,13 +122,13 @@ const
     'procedure TBase.Foo(A: Integer); begin end;'#10 +
     'function TBase.Bar(A: Integer): Integer; begin Result := A; end;'#10 +
     'procedure TDer.Run;'#10'var I: Integer;'#10'begin'#10 +
-    '  Foo(1);'#10 +           // the inherited TBase.Foo(A) — not 2 args short
-    '  I := Bar(1);'#10 +      // the inherited TBase.Bar(A) — not 1 arg over
+    '  Foo(1);'#10 +           // the inherited TBase.Foo(A) - not 2 args short
+    '  I := Bar(1);'#10 +      // the inherited TBase.Bar(A) - not 1 arg over
     'end;'#10'end.'#10;
 
   { The same unit and the same globals, called from OUTSIDE any struct: here
     the globals really are the only candidates, so both diagnostics must
-    still fire — dcc reports exactly these two. }
+    still fire - dcc reports exactly these two. }
   SRC_PLAIN =
     'unit U;'#10'interface'#10 +
     'procedure Foo(A, B: Integer);'#10 +

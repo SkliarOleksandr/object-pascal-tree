@@ -5,7 +5,7 @@ unit PasTreeDemo.Includes;
   NAME inside an $I / $INCLUDE directive on a source line.
 
   It is a line scan and not a use of the lexer on purpose. Ctrl+hover calls it on
-  every mouse move, and it has to work in a buffer the analysis never saw — a
+  every mouse move, and it has to work in a buffer the analysis never saw - a
   file just opened, or one edited since the last parse.
 }
 
@@ -70,7 +70,7 @@ begin
         Inc(AFrom);
       while (ATo >= AFrom) and CharInSet(ALine[ATo], [' ', #9, '''', '"']) do
         Dec(ATo);
-      // A caret one past the last character still means the name — that is
+      // A caret one past the last character still means the name - that is
       // where it sits after double-clicking it.
       if (AFrom <= ATo) and not CharInSet(ALine[AFrom], ['%', '+', '-']) and
          (ACol >= AFrom) and (ACol <= ATo + 1) then

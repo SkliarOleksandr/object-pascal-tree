@@ -1,7 +1,7 @@
 unit PasTree.Project;
 
 {
-  PasTree — project-level driver: parallel whole-tree parsing and .dproj
+  PasTree - project-level driver: parallel whole-tree parsing and .dproj
   platform detection.
 
   Parallel model (see README): parsing one file is a pure function of
@@ -9,7 +9,7 @@ unit PasTree.Project;
   core and NO locks on the hot path. Shared state is read-only: the source
   manager (include index built once up front) and the base define set
   (each preprocessor run works on its own clone). Results land in a
-  pre-sized array by index — no contention, deterministic output.
+  pre-sized array by index - no contention, deterministic output.
 }
 
 interface
@@ -85,7 +85,7 @@ var
 begin
   SetLength(LResults, Length(AFiles));
   LInfo := PlatformInfo(FPlatform);
-  // I/O first, CPU second — see TPasSourceManager.Prefetch (cold reads are
+  // I/O first, CPU second - see TPasSourceManager.Prefetch (cold reads are
   // latency-bound; don't serialize them with parsing inside per-core workers).
   FSourceManager.Prefetch(AFiles);
   LBaseDefines := CreatePlatformDefines(FPlatform);

@@ -1,12 +1,12 @@
-﻿unit PasTreeDemo.UnitPicker;
+unit PasTreeDemo.UnitPicker;
 
 {
-  PasTree demo — the View Unit dialog (Ctrl+F12).
+  PasTree demo - the View Unit dialog (Ctrl+F12).
 
   A modal picker over the open project's units: type to filter, Enter or a
   double-click opens. An ordinary designed form, with the same font and design
   PixelsPerInch as the main one, so the VCL scales it on a high-DPI display
-  exactly as it scales the rest of the demo — a code-built form (CreateNew)
+  exactly as it scales the rest of the demo - a code-built form (CreateNew)
   carries the CURRENT screen's PPI, which means no scaling ever happens and
   every control comes out visibly smaller than the window that opened it.
 
@@ -14,7 +14,7 @@
   cannot express:
 
   - each row is TWO lines, the name over its directory, drawn by hand
-    (lbOwnerDrawFixed). A name-only list is unusable exactly when it matters —
+    (lbOwnerDrawFixed). A name-only list is unusable exactly when it matters -
     with "Uses Units" on, the closure of a real project holds
     `System.Types.pas` and `Vcl.Types.pas`, which are the same nine characters
     in that column.
@@ -23,7 +23,7 @@
     background analysis can finish while this is on screen; snapshotting means
     "you opened it too early, close and reopen".
 
-  What goes in the list, in what order, and what a filter keeps is NOT here —
+  What goes in the list, in what order, and what a filter keeps is NOT here -
   that is PasTreeDemo.UnitList, where a console test can reach it.
 }
 
@@ -112,7 +112,7 @@ begin
   inherited Create(AOwner);   // loads the .dfm, and with it the design PPI
   FSource := ASource;
   // Two text lines plus breathing room, measured from the font actually in
-  // effect after scaling rather than left at the designed 38 — the row is the
+  // effect after scaling rather than left at the designed 38 - the row is the
   // one control whose height the designer cannot state in font terms.
   lbUnits.ItemHeight := Abs(Font.Height) * 2 + 14;
   FTimer := TTimer.Create(Self);
@@ -150,7 +150,7 @@ var
   LIdx, LKeep: Integer;
   LWanted: string;
 begin
-  // Keep the selected file across a filter change when it survives it — the
+  // Keep the selected file across a filter change when it survives it - the
   // list is rebuilt on every keystroke, and losing the selection mid-typing is
   // what makes such a dialog feel like it is fighting back.
   LWanted := '';
@@ -200,7 +200,7 @@ procedure TfrmUnitPicker.edFilterKeyDown(Sender: TObject; var Key: Word;
 begin
   // Up/Down move the LIST while the caret stays in the filter box: typing and
   // choosing are one gesture, and it is the reason focus never has to leave
-  // the edit — which is where Enter has to keep working.
+  // the edit - which is where Enter has to keep working.
   case Key of
     VK_DOWN:
       if lbUnits.ItemIndex < lbUnits.Items.Count - 1 then
@@ -242,7 +242,7 @@ begin
   LTop := ARect.Top + 3;
   LCanvas.TextOut(ARect.Left + 6, LTop, FShown[AIndex].Name);
   Inc(LTop, Abs(Font.Height) + 4);
-  // The directory in a quieter colour — but NOT when the row is selected,
+  // The directory in a quieter colour - but NOT when the row is selected,
   // where the system's highlight text colour is the only one guaranteed to be
   // readable against the highlight background (a fixed grey is not).
   if not (odSelected in AState) then

@@ -1,7 +1,7 @@
-﻿unit PasTreeDemo.Settings;
+unit PasTreeDemo.Settings;
 
 {
-  PasTree demo — persisted settings, in a plain .ini next to the executable.
+  PasTree demo - persisted settings, in a plain .ini next to the executable.
 
   Everything the demo used to forget on every launch: the target platform, the
   highlighter and threading choices, the identifier-highlight colour, and the
@@ -9,7 +9,7 @@
 
   A file rather than the registry, deliberately: it travels with the checkout,
   can be inspected and hand-edited, and a corrupt or missing one costs nothing
-  — every getter takes a default. The registry is still read for the IDE's own
+  - every getter takes a default. The registry is still read for the IDE's own
   library paths (that is the IDE's data, not ours).
 
   Layout:
@@ -25,7 +25,7 @@
       Project1=...
 
   Recent entries are most-recent-first, deduplicated by full path (case-
-  insensitively, matching the filesystem), and capped — see RECENT_MAX.
+  insensitively, matching the filesystem), and capped - see RECENT_MAX.
 }
 
 interface
@@ -35,7 +35,7 @@ uses
 
 const
   // Twenty still fits a drop-down without scrolling on any usable screen, and
-  // covers more than the working week ten did — the list is the fastest way
+  // covers more than the working week ten did - the list is the fastest way
   // back into a project that was open two days ago. The cap is applied on ADD,
   // so the file never grows unbounded whatever this is set to.
   RECENT_MAX = 20;
@@ -60,7 +60,7 @@ type
     { Moves AProjectFile to the front, or inserts it there. Existence is NOT
       checked here: a project on a disconnected network share is still the last
       thing the user opened, and dropping it at save time would lose it for
-      good. The display side does the pruning — see ExistingRecent. }
+      good. The display side does the pruning - see ExistingRecent. }
     procedure AddRecent(const AProjectFile: string);
     // Every remembered entry, most-recent-first, including missing files.
     function Recent: TArray<string>;
@@ -93,7 +93,7 @@ constructor TDemoSettings.Create(const AFileName: string);
 begin
   inherited Create;
   // TMemIniFile reads once and writes once (UpdateFile), so nothing here
-  // touches the disk between Create and Save — the recent list is rewritten on
+  // touches the disk between Create and Save - the recent list is rewritten on
   // every open, and a file write per click is not something to pay for.
   FIni := TMemIniFile.Create(AFileName, TEncoding.UTF8);
   FRecent := TStringList.Create;

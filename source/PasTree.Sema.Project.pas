@@ -1,7 +1,7 @@
 unit PasTree.Sema.Project;
 
 {
-  PasTree semantics — Phase 2 project driver: resolves `uses` to real units,
+  PasTree semantics - Phase 2 project driver: resolves `uses` to real units,
   indexes their interface symbols, re-resolves each unit's external references
   against them, and emits E2003 for genuinely undeclared identifiers.
 
@@ -13,7 +13,7 @@ unit PasTree.Sema.Project;
   Phase 3c adds cross-model TYPING on top: BindTypesX resolves declared types
   that live in another unit (and generic instantiations, deduped in the
   project-owned instance table), CrossType then types expressions the
-  intra-unit typer could not — Var.Field across units, member access through
+  intra-unit typer could not - Var.Field across units, member access through
   ancestor chains and type aliases, constructor calls, and generic-parameter
   substitution (TList<Integer>.First -> Integer). This pass records types and
   member references only; it emits NO diagnostics (typing for navigation and
@@ -37,8 +37,8 @@ type
   // One generic type PARAMETER bound to an actual, for the SizeOf layout walk
   // only (the general instantiation machinery is TSemaInstance below). The
   // argument is kept as a (model, type-node) pair rather than a resolved
-  // symbol because an argument may be any type expression — `TG<array[0..2]
-  // of Byte>` — and the walk already knows how to size a node.
+  // symbol because an argument may be any type expression - `TG<array[0..2]
+  // of Byte>` - and the walk already knows how to size a node.
   TPasSubstEntry = record
     Name: string;     // lower-case parameter name
     Mid: Integer;     // model the argument node lives in
@@ -49,7 +49,7 @@ type
   // One generic instantiation: a generic type symbol + positional actual
   // args. Args may themselves reference skGenericParam symbols (an "open"
   // instantiation inside another generic's body, e.g. TEnumerator<T> inside
-  // TList<T>) — those close over the outer instance on substitution.
+  // TList<T>) - those close over the outer instance on substitution.
   TSemaInstance = record
     UnitId: Integer;            // model id of the generic type symbol
     Sym: Integer;               // the skType symbol of the generic
@@ -58,14 +58,14 @@ type
 
   // Callback for EnumMembersX: one member symbol in its declaring model, plus
   // the instantiation frame (NIL_INST for none) its declared type must be
-  // SubstX'd through — the same triple FindMemberX answers for one name.
+  // SubstX'd through - the same triple FindMemberX answers for one name.
   TPasMemberEnumProc = reference to procedure(AMid, ASym, ACtx: Integer);
 
   // One `class/record helper for T` (15.3) declared in some model.
   //
   // Extended-type identity: a concrete type is (declaring model, symbol),
   // stable across every referring unit. A BUILTIN target keeps its NAME
-  // instead — every model seeds its own string/TObject/... symbols, so the
+  // instead - every model seeds its own string/TObject/... symbols, so the
   // identity must be re-resolved per referring model (BuildHelperMap phase B).
   //
   // Exported = declared in (or nested under) the interface section; an
@@ -77,7 +77,7 @@ type
     // Every FURTHER identity of the extended type: the plain-alias chain
     // behind TargetUnit/TargetSym (`Winapi.Windows.TRect = System.Types
     // .TRect`). One type, several symbols, and which one a VALUE carries
-    // depends on the unit its declaration was read in — so the helper is
+    // depends on the unit its declaration was read in - so the helper is
     // indexed under all of them. See Publish.
     Aliases: TArray<TPasExtRef>;
     HelperMid: Integer;       // model the helper is declared in
@@ -86,24 +86,24 @@ type
   end;
 
   // One deferred ExtRefMap write from the inherited-member pass (computed in
-  // parallel, committed sequentially — see CrossResolveInherited).
+  // parallel, committed sequentially - see CrossResolveInherited).
   TPasInhPending = record
     Node: Integer;
     Ext: TPasExtRef;
     // Filled by the WITH pass only (XNil from the inherited pass): the
     // member's declared type ALREADY SUBSTITUTED in the with-target's
     // instantiation frame. It has to travel with the pending entry because
-    // the frame is only known while the target is being typed — by the time
+    // the frame is only known while the target is being typed - by the time
     // CrossType sees the bare ident there is no with-target context left, so
     // it would type `FValue` as the open parameter T instead of Integer
-    // (`with FThreads.LockList do` — a TList<TBaseWorkerThread>).
+    // (`with FThreads.LockList do` - a TList<TBaseWorkerThread>).
     X: TSemaXType;
   end;
 
   // Progress of a staged (incremental) analysis, reported to AnalyzeStaged's
   // callback after each step. Total GROWS as the uses closure is discovered
   // (a module's dependencies aren't known until it is parsed), so a UI shows
-  // "done/total" with a moving total — as designed.
+  // "done/total" with a moving total - as designed.
   TPasStagedProgress = record
     Total: Integer;      // modules discovered so far
     IntfDone: Integer;   // modules that reached at least msIntfReady
@@ -118,27 +118,27 @@ type
     FSM: TPasSourceManager;
     FDefines: TPasDefines;
     // The ctor's AExtraDefines verbatim (the defines themselves are folded
-    // into FDefines) — kept ONLY for AdoptParseDonor's config gate, which
+    // into FDefines) - kept ONLY for AdoptParseDonor's config gate, which
     // must compare what the two projects were CREATED with.
     FExtraDefines: TArray<string>;
     // Parse-reuse donor (stage A of the incremental plan): the previous
     // last-good project, adopted via AdoptParseDonor for exactly ONE Analyze*
-    // run and cleared in that run's finally (see FinishDonor) — after the
+    // run and cleared in that run's finally (see FinishDonor) - after the
     // build the host frees the donor, so a dangling reference here must be
     // impossible, not just unlikely. Frozen while adopted: TryDonorLoad only
     // READS its dictionaries and models (single-owner contract).
     FDonor: TPasSemaProject;
-    FDonorHits: Integer;      // AtomicIncrement — workers count concurrently
+    FDonorHits: Integer;      // AtomicIncrement - workers count concurrently
     FDonorMisses: Integer;
-    // Why the last IntfPrefixBounds/IntfPrefixSame said no, in detail — the
+    // Why the last IntfPrefixBounds/IntfPrefixSame said no, in detail - the
     // refusal reason AnalyzeModuleOnly publishes in StageTimings. Diagnostic
     // only; nothing branches on it.
 {$IFDEF PASTREE_MEMBERSTATS}
-    { MEASUREMENT BUILD ONLY (INCREMENTAL-NEXT lead 4) — compiled out without
+    { MEASUREMENT BUILD ONLY (INCREMENTAL-NEXT lead 4) - compiled out without
       the define. Counts every top-level FindMemberX query so the REPEAT RATE
       can be read off a real closure: per pass and per fixpoint ROUND (a round
       commits new bindings, so repeats across rounds are not cacheable), keyed
-      both with and without the asking model — the answer depends on the asker
+      both with and without the asking model - the answer depends on the asker
       (helpers and builtin identity resolve per referring model), so the gap
       between the two is what a shared cache could ever add over a per-model
       one. See local/perf/PasTreeMemberStats.dpr and the lead's write-up for
@@ -153,7 +153,7 @@ type
     FPP: TPasPreprocessor;
     // Reusable preprocessors for the parallel load/declared passes: Process
     // fully resets per-run state, so a returned instance is as good as a
-    // fresh one — without paying ~20 container allocations per FILE.
+    // fresh one - without paying ~20 container allocations per FILE.
     FPPPool: TList<TPasPreprocessor>;
     FPPPoolLock: TCriticalSection;
     // A model that exists only to hold the seeded compiler-provided names, so
@@ -172,17 +172,17 @@ type
     FByPath: TDictionary<string, Integer>; // full path (lower) -> model id
     // Declared unit name (lower) -> model id, registered as files load. The
     // dcc rule this serves: a program's `uses X in 'path'` locates X for the
-    // WHOLE project — other units say just `uses X` with the file nowhere on
+    // WHOLE project - other units say just `uses X` with the file nowhere on
     // any search path (the demo's own .dproj has no UnitSearchPath at all).
     FByUnitName: TDictionary<string, Integer>;
     FNamespaces: TArray<string>;           // own copy for LoadedUnitByName
     FStageTimings: string;                 // see StageTimings
     FLoadFailures: TArray<string>;         // see LoadFailures
-    { Candidate node lists for the two body passes — see EnsureCrossWork. One
+    { Candidate node lists for the two body passes - see EnsureCrossWork. One
       slot per model; a worker only ever touches its OWN slot. }
     FInhWork: TArray<TArray<Integer>>;
     FWithWork: TArray<TArray<Integer>>;
-    // Lowered names of the work-list nodes, parallel to FInhWork/FWithWork —
+    // Lowered names of the work-list nodes, parallel to FInhWork/FWithWork -
     // computed ONCE in EnsureCrossWork's single scan. The with pass re-reads
     // its list on EVERY fixpoint round (up to 8), and each NodeNameLower was
     // an allocation; a cached name is a refcount bump. Same lifetime and
@@ -190,21 +190,21 @@ type
     FInhWorkNames: TArray<TArray<string>>;
     FWithWorkNames: TArray<TArray<string>>;
     FWorkBuilt: TArray<Boolean>;
-    { Declaration-site idents CrossResolve could bind NOWHERE — see
+    { Declaration-site idents CrossResolve could bind NOWHERE - see
       CrossResolveDecl. Filled by the CrossResolve workers (own slot only,
-      count-tracked doubling — the filled prefix is FDeclWorkCount[mid], the
+      count-tracked doubling - the filled prefix is FDeclWorkCount[mid], the
       array carries capacity slack), drained by the decl pass. }
     FDeclWork: TArray<TArray<Integer>>;
     FDeclWorkCount: TArray<Integer>;
-    // Set by ReleaseTransientMaps; every Analyze* refuses to run after it —
+    // Set by ReleaseTransientMaps; every Analyze* refuses to run after it -
     // see the public method's contract comment.
     FTransientReleased: Boolean;
     { Per-model overlay of the member references CrossType discovers, so the
-      parallel walks never mutate a dictionary another walk is reading — see
+      parallel walks never mutate a dictionary another walk is reading - see
       RunCrossTypePass. Owned here; merged and freed there. }
     FXNewExt: TArray<TDictionary<Integer, TPasExtRef>>;
     FSingleThreaded: Boolean;
-    // Pass failures that had no model to hang off — see NoteInternalError.
+    // Pass failures that had no model to hang off - see NoteInternalError.
     // The lock also guards AddDiag on a shared model from a parallel body.
     FInternalDiags: TArray<string>;
     FInternalLock: TObject;
@@ -218,13 +218,13 @@ type
     // Guards EnsureSystemUnit AND EnsureSysInitUnit (both mutate the same
     // shared FModels/FByPath via LoadFile, so must exclude each other too,
     // not just themselves): unlike ResolveUses (always sequential) and
-    // CrossType/BindTypesX (deliberately sequential — see the Phase 3c
+    // CrossType/BindTypesX (deliberately sequential - see the Phase 3c
     // comment above), CrossResolve runs ONE WORKER PER CORE by default
     // (ForEachIndex) and is the only caller of either Ensure*Unit that can
-    // race — several units' CrossResolve can hit an unresolved implicit-
+    // race - several units' CrossResolve can hit an unresolved implicit-
     // System name (e.g. sLineBreak) on different threads at the same
     // instant, all racing the SAME first-time LoadFile (which mutates the
-    // shared FModels/FByPath, neither thread-safe) — real, not
+    // shared FModels/FByPath, neither thread-safe) - real, not
     // hypothetical: reproduced via SemaProjectSmoke's UnitE fixture.
     FSystemUnitLock: TCriticalSection;
     // Phase 3c: cross-model typing.
@@ -252,17 +252,17 @@ type
     // The cancellation predicate of the CURRENT AnalyzeStaged run, nil
     // otherwise. Set/cleared by AnalyzeStaged only; read by ForEachIndex so a
     // cancel lands MID-PASS instead of waiting for a whole cross pass to
-    // finish (seconds on a big project — the LSP server cancels on every
+    // finish (seconds on a big project - the LSP server cancels on every
     // keystroke). Skipped iterations leave their slots at the pass's own
     // "this unit failed" default (nil), which every commit loop already
     // tolerates; the driver then exits at its next between-pass check, and
     // the host discards a cancelled project wholesale.
     FCancelCheck: TFunc<Boolean>;
     function CancelRequested: Boolean; inline;
-    // Runs ABody for 0..AHi — one worker per core, or a plain loop when
+    // Runs ABody for 0..AHi - one worker per core, or a plain loop when
     // SingleThreaded (baseline emulation / timing comparison / debugging).
     // Stops early (remaining iterations become no-ops) when the current
-    // staged run has been cancelled — see FCancelCheck.
+    // staged run has been cancelled - see FCancelCheck.
     procedure ForEachIndex(AHi: Integer; const APass: string;
       const ABody: TProc<Integer>;
       const AMidOf: TFunc<Integer, Integer> = nil);
@@ -285,12 +285,12 @@ type
     function LoadFile(const APath: string): Integer;
     procedure LoadFilesParallel(const APaths: TArray<string>;
       AInterfaceOnly: Boolean = False);
-    // Continuous closure loader — see the implementation. Returns False when
+    // Continuous closure loader - see the implementation. Returns False when
     // the run was cancelled part-way (committed models stay published).
     function RunLoadEngine(const ASeedLoads: TArray<string>;
       const ASeedUpgrades: TArray<Integer>; AIntfLoads: Boolean;
       const AAfterCommits: TProc): Boolean;
-    // RunLoadEngine's worker computes — a method, not a nested routine,
+    // RunLoadEngine's worker computes - a method, not a nested routine,
     // because the worker is an anonymous method and cannot capture one.
     function ComputeLoad(const APath: string; AIntf: Boolean;
       out AErrClass, AErrMsg: string; out AFullDonor: Boolean): TPasSemaModel;
@@ -298,7 +298,7 @@ type
       project: dictionary READS only, no lock). AKey is the lower-cased full
       path. Returns a FRESH model built by re-running Phase 1 over the donor's
       tree (record copy, arrays shared) when the donor holds a reusable,
-      text-identical full parse of APath — nil otherwise (normal parse path).
+      text-identical full parse of APath - nil otherwise (normal parse path).
       Counts FDonorHits/FDonorMisses. }
     function TryDonorLoad(const AKey, APath: string): TPasSemaModel;
     // Clears FDonor at the end of the one run that consumed it; AReport
@@ -325,11 +325,11 @@ type
 
       False = the model has no implementation scope (a program/library, or a
       unit whose implementation declares nothing) or the arena is NOT split
-      cleanly at the boundary — an interface symbol living past the first
+      cleanly at the boundary - an interface symbol living past the first
       implementation-scoped one would be compared by nobody. Both answers
       mean "no fast path", never "assume it is fine". }
 {$IFDEF PASTREE_MEMBERSTATS}
-    // Records one top-level member query — see the FStats* fields.
+    // Records one top-level member query - see the FStats* fields.
     procedure NoteMemberQuery(AFromMid: Integer; const ABase: TSemaXType;
       const ANameLower: string);
 {$ENDIF}
@@ -347,7 +347,7 @@ type
     function InstancesSafeFor(AId, ASymN: Integer): Boolean;
     { Does every `uses` entry of AModel (a freshly parsed replacement for
       model AId) resolve to a file the project has ALREADY loaded? A new
-      import changes the closure, which the single-module path cannot do —
+      import changes the closure, which the single-module path cannot do -
       it would have to load, Phase-1 and cross-analyze the newcomer, i.e. a
       rebuild. Resolution only (no loading), so a refusal costs nothing. }
     function UsesAllLoaded(AModel: TPasSemaModel; AId: Integer;
@@ -358,15 +358,15 @@ type
     // re-emitted.
     procedure RunModulePasses(const AIds: TArray<Integer>);
     { Every model whose view of AId could have changed when AId's INTERFACE
-      changes — the blast radius, computed from the reverse `uses` graph.
+      changes - the blast radius, computed from the reverse `uses` graph.
 
       A `uses` in the INTERFACE section propagates: that unit may republish
       types from AId, so ITS importers are affected too. A `uses` only in the
-      IMPLEMENTATION does not — such an importer is a LEAF (nothing it exports
+      IMPLEMENTATION does not - such an importer is a LEAF (nothing it exports
       can depend on AId). The distinction is already recorded: the unit-ref
       symbol's Scope is either the interface one or the implementation one.
 
-      False when the set exceeds ALimit — the caller then rebuilds, which is
+      False when the set exceeds ALimit - the caller then rebuilds, which is
       cheaper than re-running most of the closure one model at a time. AId
       itself is always the first element. }
     function AffectedConsumers(AId, ALimit: Integer;
@@ -384,7 +384,7 @@ type
     function InPropertySpecifier(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function OuterStructsOfNode(AModel: TPasSemaModel;
       ANode, AInnermost: Integer): TArray<Integer>;
-    // `with` over a target whose TYPE lives in another unit (ch.05 §5.7) —
+    // `with` over a target whose TYPE lives in another unit (ch.05 sec. 5.7) -
     // see FindInEnclosingWith.
     function AllParamsDefaulted(AMid, AParams: Integer): Boolean;
     function PointeeOfDeclX(AId, ABaseNode: Integer): TSemaXType;
@@ -504,7 +504,7 @@ type
     function ResolveTypeExprNested(AId, ANode: Integer;
       ADepth: Integer = 0): TSemaXType;
     procedure BuildHelperMap;
-    // BuildHelperMap's phase-B publisher — a method because the parallel
+    // BuildHelperMap's phase-B publisher - a method because the parallel
     // phase-B worker is an anonymous method and cannot capture a nested one.
     procedure PublishHelper(AMid: Integer; const AReg: TPasHelperReg);
     procedure ClearHelperIdx;
@@ -528,12 +528,12 @@ type
       const ASearchPaths: TArray<string>; const AExtraDefines: TArray<string>);
     destructor Destroy; override;
     // True = run every stage on the calling thread (emulates the sequential
-    // driver exactly; results are identical either way — the parallel stages
+    // driver exactly; results are identical either way - the parallel stages
     // are pure per unit). Default False (one worker per core).
     property SingleThreaded: Boolean read FSingleThreaded write FSingleThreaded;
     { OPT-IN diagnostic, default OFF: report a member after a dot that no
       lookup could resolve, as `E2003` on the member's own name. dcc reports
-      such a name and we do not, so this is a real gap — but the member walk
+      such a name and we do not, so this is a real gap - but the member walk
       keeps gaining branches (the audit found the `IInterface` hole exactly
       here), and a FALSE E2003 on a member is worse than a missing one, so it
       stays behind this switch until a corpus run says otherwise. What that run
@@ -543,19 +543,19 @@ type
       write FReportMembers;
     { OPT-IN, default OFF: surface every `$IF`/`$ELSEIF` whose branch still
       rests on a GUESS after the second pass (code PPIF), and every
-      conditional expression that did not parse at all (PPBAD) — as ordinary
+      conditional expression that did not parse at all (PPBAD) - as ordinary
       model diagnostics, so they flow through -list, the histograms and the
       demo with no new plumbing. The exotica detector for foreign projects:
       the message carries the expression text verbatim. NB a Declared(X)-only
       guard whose name is declared NOWHERE is a CONFIRMED-correct guess (the
-      second pass checked and skipped the re-run) yet still listed — the
+      second pass checked and skipped the re-run) yet still listed - the
       expression text makes those easy to eyeball, and hiding them would also
       hide a misspelled name that WAS meant to exist. Off, the analysis is
       byte-identical. }
     property ReportGuessedIfs: Boolean read FReportGuessedIfs
       write FReportGuessedIfs;
-    { OPT-IN, default OFF: enforce member VISIBILITY on a QUALIFIED access —
-      `E2361 Cannot access private symbol TType.Member` (11 §11.2.1). Recording
+    { OPT-IN, default OFF: enforce member VISIBILITY on a QUALIFIED access -
+      `E2361 Cannot access private symbol TType.Member` (11 sec. 11.2.1). Recording
       landed first and deliberately; this is the enforcement half, and it is the
       only check here that can reject code the corpora currently ACCEPT for a
       reason other than a missing check, which is why it is a switch and not a
@@ -564,9 +564,9 @@ type
       write FReportVisibility;
     { Editor-host buffer override: analysis reads AText for APath instead of
       the file on disk (for unsaved editor content). Call BEFORE AnalyzeFile/
-      AnalyzeDirectory — LoadFile reads at analysis time. AVersion is the
+      AnalyzeDirectory - LoadFile reads at analysis time. AVersion is the
       host's version stamp for the document, readable back via BufferVersion
-      once the analysis is done — so an async host can tell a result computed
+      once the analysis is done - so an async host can tell a result computed
       from the CURRENT text apart from one computed from an older keystroke. }
     procedure SetBuffer(const APath, AText: string; AVersion: Integer = 0);
     { The version SetBuffer stored for APath, or -1 when APath has no
@@ -577,15 +577,15 @@ type
       resolution. Set BEFORE analyzing. }
     procedure SetNamespaces(const ANamespaces: TArray<string>);
     procedure AddUnitAlias(const AAlias, AReal: string);
-    { Parse reuse across rebuilds (incremental plan, stage A): adopt ADonor —
-      the host's still-alive LAST-GOOD project — as a parse donor for the NEXT
+    { Parse reuse across rebuilds (incremental plan, stage A): adopt ADonor -
+      the host's still-alive LAST-GOOD project - as a parse donor for the NEXT
       Analyze* call on this project. For every file whose donor model is a
       clean full parse of BYTE-IDENTICAL text (main file and every $I include
       re-read and compared exactly), the pp+lex+parse is skipped: Phase 1 runs
       over the donor's tree (immutable, structure-shared), producing a model
-      indistinguishable from a fresh parse's. Everything else — edited files,
+      indistinguishable from a fresh parse's. Everything else - edited files,
       demoted units, oracle-reprocessed streams ($IF Declared), units with
-      parse-time unresolved guards — takes the normal path.
+      parse-time unresolved guards - takes the normal path.
 
       False = configuration mismatch (platform, extra defines, search paths /
       namespaces / aliases), donor refused; the caller logs and the run
@@ -601,19 +601,19 @@ type
       uses System (11.2.1 / 1.2.1) without a `uses` clause naming it, so it
       never appears in any model's UsesList and the normal name-resolution
       machinery (Phase 1/2, which decides RefMap/ExtRefMap/diagnostics) never
-      reaches it — that stays exactly as before, no behavior change there.
+      reaches it - that stays exactly as before, no behavior change there.
       Used by ResolveRealDecl below, itself used by FindMemberX (so member
       access through a compiler-seeded builtin type, e.g. `Obj.Free` where
       Obj: TObject, can reach the real class body) and by PasTree.Sema.Nav
       (go-to-declaration for a builtin name that is really declared
-      somewhere — TBytes/SysUtils, TObject/System, ...). Never emits a
+      somewhere - TBytes/SysUtils, TObject/System, ...). Never emits a
       diagnostic and never affects RefMap/ExtRefMap for genuinely intra- or
-      cross-unit names — purely additive reach for names that would
+      cross-unit names - purely additive reach for names that would
       otherwise dead-end at a DeclNode-less compiler symbol. }
     function EnsureSystemUnit: Integer;
     { SysInit is, like System, implicitly visible to every OTHER unit with no
       `uses` entry at all (dcc-verified: a unit with an EMPTY uses clause
-      still resolves bare `HInstance`/`ModuleIsLib` — SysInit-only globals,
+      still resolves bare `HInstance`/`ModuleIsLib` - SysInit-only globals,
       not System's). Same memoize-and-lock shape as EnsureSystemUnit, same
       race (see FSystemUnitLock), reusing that lock rather than a second
       one since both mutate the same shared FModels/FByPath. }
@@ -638,11 +638,11 @@ type
       loading some reach through is the same one EnsureSystemUnit above
       already exposes). Grouped, not scattered, so the line between "the
       analysis" and "what editors may ask of it" stays visible. }
-    // The innermost struct type symbol whose scope chain holds ANode — the
+    // The innermost struct type symbol whose scope chain holds ANode - the
     // `Self` context of a position (a method body's routine scope carries it,
     // and so does a struct declaration's own member scope).
     function StructSymOfNode(AModel: TPasSemaModel; ANode: Integer): Integer;
-    // Every struct DECLARATION lexically enclosing ANode, innermost first —
+    // Every struct DECLARATION lexically enclosing ANode, innermost first -
     // the "declared inside" half of a visibility decision.
     function DeclStructsOfNode(AModel: TPasSemaModel;
       ANode: Integer): TArray<Integer>;
@@ -650,10 +650,10 @@ type
     function DesignatorSymX(AId, ANode: Integer;
       out AMid, ASym: Integer): Boolean;
     function AncestorOfX(const AX: TSemaXType): TSemaXType;
-    { The single answer to "what type is this member?" — see the implementation
+    { The single answer to "what type is this member?" - see the implementation
       for why a bare property redeclaration makes it necessary. }
     function SymDeclTypeX(AMid, ASym: Integer): TSemaXType;
-    { The type of an arbitrary designator NODE, computed on demand — written
+    { The type of an arbitrary designator NODE, computed on demand - written
       for `with` targets (hence the name) but structurally general: parens,
       derefs, indexing, as-casts, calls, `inherited`, `Self`, members. }
     function WithTargetTypeX(AId, ANode: Integer): TSemaXType;
@@ -677,7 +677,7 @@ type
       ABare: Boolean = True): TSemaXType;
     { ADepth guards the CONSTRAINT hop, which is the one place this function
       re-enters itself: a type parameter may carry several constraints and the
-      member may be on ANY of them (16 §16.4.1), so each is walked in turn. }
+      member may be on ANY of them (16 sec. 16.4.1), so each is walked in turn. }
     function FindMemberX(AFromMid: Integer; const ABase: TSemaXType;
       const ANameLower: string;
       out AMemMid, AMemSym: Integer; out ACtx: Integer;
@@ -695,20 +695,20 @@ type
     function Instantiate(const ABase: TSemaXType;
       const AArgs: TArray<TSemaXType>): Integer;
     { The ENUMERATING twin of FindMemberX, for completion: reports EVERY
-      member reachable from ABase, walking the same hops in the same order —
+      member reachable from ABase, walking the same hops in the same order -
       active helper (and its ancestor helpers) first, then each type's own
       member scope, then the alias / pointer-deref / paramless-proc-result /
       `class of` / heritage / implicit-root hops, closing each hop over its
       instantiation frame; a generic parameter enumerates its constraints'
       members. Class constructors/destructors are skipped (never nameable).
       Members are reported ancestor-visited-later, and overridden names
-      recur — a caller deduplicating by NameLower and keeping the FIRST hit
+      recur - a caller deduplicating by NameLower and keeping the FIRST hit
       reproduces FindMemberX's precedence, exactly like EnumScopeDeep's
       contract mirrors FindLocalDeep's. }
     procedure EnumMembersX(AFromMid: Integer; const ABase: TSemaXType;
       const AOnMember: TPasMemberEnumProc; ADepth: Integer = 0);
     { Per-stage wall-clock of the LAST AnalyzeProject/AnalyzeDirectory/
-      AnalyzeStaged run ('stage=ms;...') — for perf logging in hosts and
+      AnalyzeStaged run ('stage=ms;...') - for perf logging in hosts and
       probes. Empty for AnalyzeFile. }
     { Width of the default thread pool for every parallel pass, pinned once per
       process. 0 = physical-core width, which is where measurement puts the
@@ -719,7 +719,7 @@ type
     class procedure ConfigureThreadPool(AWorkers: Integer);
     function StageTimings: string;
     { Units that could not be parsed at all, as 'file: EClass: message'.
-      A unit in here is treated as unresolvable, so its importers report F1027 —
+      A unit in here is treated as unresolvable, so its importers report F1027 -
       which is why the list must be surfaced: F1027 says "no source on the
       search path", and for these the source IS there and WE failed on it.
       Non-empty means an analyzer defect, not a project problem. }
@@ -728,32 +728,32 @@ type
     function Model(AId: Integer): TPasSemaModel;
     function ModelFile(AId: Integer): string;
     { The model id of an already-loaded FILE, or -1 (an unknown path and a
-      known-bad one both answer -1). Pure lookup — never loads anything, so a
+      known-bad one both answer -1). Pure lookup - never loads anything, so a
       host may call it on a finished project. }
     function ModelIdOf(const APath: string): Integer;
 {$IFDEF PASTREE_MEMBERSTATS}
-    { Measurement build only — see FStatsCalls. Per pass and round: how many
+    { Measurement build only - see FStatsCalls. Per pass and round: how many
       member queries ran, how many were DISTINCT, and how many would be
       distinct without the asking model in the key. The ratio is the ceiling
       any memoization of FindMemberX could reach. }
     function MemberStatsReport: string;
 {$ENDIF}
-    { Every unit name the project's search paths can reach — completion's
+    { Every unit name the project's search paths can reach - completion's
       uses-clause candidates beyond the analyzed closure. Delegates to the
       source manager's cached scan (see its contract). }
     function SearchPathUnitNames: TArray<string>;
     { The `///` doc-comment block above a symbol's declaration (completion
-      plan §8D, Help Insight) — TPasTree.DeclDocComment over the symbol's
+      plan sec. 8D, Help Insight) - TPasTree.DeclDocComment over the symbol's
       DeclNode. '' for builtins (no source), unknown ids, and undocumented
       declarations. The hover path's entry: navigation hands out (Mid, Sym)
       pairs, and this is the step from one to its documentation. }
     function SymDocComment(AMid, ASym: Integer): string;
-    { 20.3.1 — is AX one of the compiler-MANAGED types (automatic init/
+    { 20.3.1 - is AX one of the compiler-MANAGED types (automatic init/
       finalize/copy: long strings, dynamic arrays, interfaces, Variant,
       `reference to` procedural types, and records that either declare a
       lifecycle operator or transitively contain a managed field)? A pure
       query, exposed publicly (like XCatOf/XTypeText's own callers use them)
-      rather than tied to a diagnostic — the spec itself frames this as a
+      rather than tied to a diagnostic - the spec itself frames this as a
       type-system question a type-checker computes, not a rule dcc enforces
       or warns about (probed: dcc32 37.0 gives no diagnostic at all for
       GetMem/FreeMem of a managed-field record, so THAT is not a real check
@@ -761,11 +761,11 @@ type
       same way every other cross-model walk in this file caps itself. }
     function IsManagedTypeX(const AX: TSemaXType; ADepth: Integer = 0): Boolean;
     { Source position of ANY node in AId, as a clickable site: the file the
-      node's FIRST token really came from (NOT ModelFile — an $I-included file
+      node's FIRST token really came from (NOT ModelFile - an $I-included file
       is a different path), 1-based line/col. False if AId/ANode is out of
       range or the node carries no token. This is the same mapping EmitAt uses
       for a diagnostic, exposed because hosts also need to point at nodes that
-      never produced one — e.g. the `uses` item that first imported a unit
+      never produced one - e.g. the `uses` item that first imported a unit
       whose source could not be found. }
     function NodeSite(AId, ANode: Integer; out AFilePath: string;
       out ALine, ACol: Integer): Boolean;
@@ -773,7 +773,7 @@ type
     function ModuleStatus(AId: Integer): TPasModuleStatus;
     { Non-blocking snapshot fetch for UI/consumers: returns the model at AId
       only if it has reached at least AMinStatus, else False (AModel := nil).
-      The UI must NEVER block waiting for analysis — it calls this and, on
+      The UI must NEVER block waiting for analysis - it calls this and, on
       False, disables the action / no-ops the hover. In the synchronous
       drivers every model is msCrossReady by the time anyone can call this, so
       it always succeeds; the gate matters once analysis runs in the
@@ -788,20 +788,20 @@ type
     function AnalyzeFile(const AMainFile: string): Integer;
     { Analyze a whole PROJECT from its main source: loads the TRANSITIVE
       uses closure and runs the cross passes (CrossResolve/CheckCalls/
-      BindTypesX/CrossType) on EVERY loaded unit — not just the main file
+      BindTypesX/CrossType) on EVERY loaded unit - not just the main file
       (AnalyzeFile's narrower contract, kept for tools). This is what an
       editor host needs for go-to-declaration to work INSIDE dependency
       units: without it a dependency only gets Phase 1 (no ExtRefMap at
       all). Returns the main unit's model id. }
     function AnalyzeProject(const AMainFile: string): Integer;
-    { Incremental plan, stage B — RE-ANALYZE ONE ALREADY-ANALYZED MODULE in
+    { Incremental plan, stage B - RE-ANALYZE ONE ALREADY-ANALYZED MODULE in
       place, for the editor's keystroke path: re-parse APath (buffer overlay
       included), check the guards, swap the model into the project and re-run
       that model's own passes. Nothing else in the closure is touched.
 
       True = the fast path ran and the project is consistent. FALSE = REFUSED,
       and the project is UNCHANGED (nothing was swapped): the caller must fall
-      back to a full rebuild. Refusals are deliberately generous — an unknown
+      back to a full rebuild. Refusals are deliberately generous - an unknown
       or not-yet-full path, a demoted model, a parse failure, a stream with
       unanswered $IF questions (those are re-decided against the whole
       generation by RunDeclaredPass, not reproducible per module), an
@@ -811,7 +811,7 @@ type
 
       What holds it together: every cross-model reference into this unit is a
       (UnitId, Sym) pair naming an INTERFACE symbol, and guard 1 reproduces
-      the interface arena prefix exactly — so other models' RefMap/ExtRefMap/
+      the interface arena prefix exactly - so other models' RefMap/ExtRefMap/
       SymTypeX stay valid and their diagnostics stay untouched. The new model
       carries its own fresh Phase-1 diagnostics plus the cross diagnostics the
       re-run appends.
@@ -821,13 +821,13 @@ type
     function AnalyzeModuleOnly(const APath: string): Boolean;
     // Analyze every .pas/.dpr under a directory (indexed first).
     procedure AnalyzeDirectory(const ARoot: string);
-    { Incremental analysis of ARoots' transitive uses closure, in two waves —
+    { Incremental analysis of ARoots' transitive uses closure, in two waves -
       wave 1 parses every reachable module INTERFACE-ONLY (msIntfReady: enough
       for navigation INTO it), wave 2 upgrades each to a full parse
       (msFullReady, revealing implementation-only dependencies), then a
       finalizer runs the cross passes (msCrossReady). APriority names files to
       front-load (the open editor module + its direct uses) so they reach
-      readiness first. ACancelled is polled between modules/waves — on True the
+      readiness first. ACancelled is polled between modules/waves - on True the
       call returns early leaving whatever completed published (partial but
       consistent). AOnProgress reports a growing done/total after each step.
       Returns the model id of ARoots[0], or -1.
@@ -835,42 +835,42 @@ type
       The FINAL state (models + diagnostics + cross-refs) is equivalent to
       AnalyzeProject over the same closure; the interface wave is a transient
       early-usability optimization. This method carries no threads of its own
-      — TPasAsyncSession runs it on a background thread; a caller using it
+      - TPasAsyncSession runs it on a background thread; a caller using it
       directly (tests, headless) gets a deterministic staged build. }
     function AnalyzeStaged(const ARoots, APriority: TArray<string>;
       const ACancelled: TFunc<Boolean> = nil;
       const AOnProgress: TProc<TPasStagedProgress> = nil): Integer;
-    { MEMORY-AUDIT §6.4-4 stage 1 — a HOST opt-in, called AFTER analysis:
+    { MEMORY-AUDIT sec. 6.4-4 stage 1 - a HOST opt-in, called AFTER analysis:
       frees per-model maps nothing reads once the run is over (ExprType,
-      ExprTypeX, WithUnopened — together a nodes-sized array plus two
+      ExprTypeX, WithUnopened - together a nodes-sized array plus two
       dictionaries per unit), for every model EXCEPT the ones whose files the
       host names in AKeepFiles (its open editors: completion reads the ACTIVE
       file's ExprType/ExprTypeX, so those must survive). Nothing calls this
-      by default — every existing consumer is untouched.
+      by default - every existing consumer is untouched.
 
       THE CONTRACT: a released project serves navigation and completion until
       the host replaces it (both current hosts re-analyze through a fresh
       TPasAsyncSession, so a project is immutable once handed over). Running
-      any Analyze* on it afterwards is refused LOUDLY (EInvalidOperation) —
+      any Analyze* on it afterwards is refused LOUDLY (EInvalidOperation) -
       the cross passes index the freed arrays, and with range checks off a
       silent wrong answer is the alternative. A file the host opens LATER
       than the release is the ordinary re-analyze trigger, exactly like an
       edit. }
     procedure ReleaseTransientMaps(const AKeepFiles: TArray<string>);
-    { MEMORY-AUDIT §6.4-4 stage 2, on top of stage 1: additionally DEMOTES
-      every non-kept model — frees its whole text layer (Visible + per-file
+    { MEMORY-AUDIT sec. 6.4-4 stage 2, on top of stage 1: additionally DEMOTES
+      every non-kept model - frees its whole text layer (Visible + per-file
       Source/Tokens/LineStarts; the big half of a model's footprint), keeping
       Nodes, RefMap/ExtRefMap, Symbols/Scopes/SymTypeX, so resolution,
       completion enumeration and the generic machinery are untouched.
       Positions, snippets and hover/doc text for a demoted unit come back
-      through EnsureHydrated — an on-demand re-preprocess that must reproduce
+      through EnsureHydrated - an on-demand re-preprocess that must reproduce
       the exact stream (identity-checked) or the unit stays demoted and those
       answers degrade to "none", never to a wrong one. Same loud
       no-more-Analyze* contract as ReleaseTransientMaps. }
     procedure DemoteClosedUnits(const AKeepFiles: TArray<string>);
     { Rehydrates a demoted model's text layer by re-preprocessing its file
       with the SAME oracle the analysis used (DeclaredQueryFor/SymbolQueryFor
-      — a declared-pass candidate got its final stream from exactly these,
+      - a declared-pass candidate got its final stream from exactly these,
       and a non-candidate's stream is oracle-invariant by the candidate
       criterion). True when the model is usable (was never demoted, or the
       re-preprocess reproduced the identical stream). Single-consumer: call
@@ -882,7 +882,7 @@ type
   end;
 
 { TSemaXType value helpers, promoted with the query surface above: the null
-  value, its test, and a plain (uninstantiated) wrapper — so a caller of
+  value, its test, and a plain (uninstantiated) wrapper - so a caller of
   FindMemberX/WithTargetTypeX can build and test the record without knowing
   its field conventions. }
 function XNil: TSemaXType;
@@ -907,8 +907,8 @@ uses
 type
   { Structural equality for the instantiation-dedup dictionary: the instance
     record IS the key, hashed and compared as integers. Replaces a
-    `Format('%d:%d') + per-arg concat` string key that allocated 2–5 strings
-    per call — 77k calls per corpus run, under the instance lock. }
+    `Format('%d:%d') + per-arg concat` string key that allocated 2-5 strings
+    per call - 77k calls per corpus run, under the instance lock. }
   TSemaInstanceComparer = class(TEqualityComparer<TSemaInstance>)
   public
     function Equals(const Left, Right: TSemaInstance): Boolean;
@@ -918,7 +918,7 @@ type
   end;
 
 var
-  // Process-wide, set once — see TPasSemaProject.ConfigureThreadPool.
+  // Process-wide, set once - see TPasSemaProject.ConfigureThreadPool.
   GPoolConfigured: Boolean = False;
   // Shared stateless comparer (interface-refcounted; see initialization).
   GInstanceComparer: IEqualityComparer<TSemaInstance>;
@@ -965,8 +965,8 @@ end;
 
 { Pin the default thread pool's width instead of letting it grow.
 
-  Every parallel pass here is allocation-heavy — a token stream, a tree and a
-  model per unit — and Delphi's memory manager SPINS on contention rather than
+  Every parallel pass here is allocation-heavy - a token stream, a tree and a
+  model per unit - and Delphi's memory manager SPINS on contention rather than
   sleeping. TThreadPool grows its worker count when it thinks workers are
   blocked, and it cannot tell spinning from blocking, so it adds threads, which
   adds contention, which looks like more blocking. Measured on the 665-unit
@@ -991,11 +991,11 @@ end;
     16 (=CPUs) 9.5 s   65 s
 
   Logical-core width now wins the clock (the extra CPU is MM spin, bounded),
-  so 0 selects CPUCount. A host that prefers CPU-efficiency over wall time —
-  a background LSP, say — passes its own width instead.
+  so 0 selects CPUCount. A host that prefers CPU-efficiency over wall time -
+  a background LSP, say - passes its own width instead.
 
   NB this configures the PROCESS-WIDE default pool, which a library should not do
-  silently — hence a public knob to override it, and a documented default. A
+  silently - hence a public knob to override it, and a documented default. A
   private pool was tried before and behaved pathologically (see the note in
   PasTree.SourceManager): SetMaxWorkerThreads REFUSES values below the pool's
   MinWorkerThreads, which defaults to the CPU count, so Min must come down
@@ -1015,12 +1015,12 @@ begin
   TThreadPool.Default.SetMaxWorkerThreads(LWant);
   // Without this the Min=Max pin does not actually hold: the pool's monitor
   // thread injects threads PAST Max whenever the queue is non-empty, no
-  // worker is idle and process CPU usage is "low" — and on a machine with
+  // worker is idle and process CPU usage is "low" - and on a machine with
   // more logical cores than workers, a fully busy pinned pool IS "low"
   // (8 busy of 16 logical = 50%). Measured on the 3757-unit client corpus:
   // the pool grew 8 -> ~38 threads within the first two seconds, the extras
   // then took part in every later pass, and the run burned 85 s CPU against
-  // the single-thread run's 38 s — the very MM-spin spiral the pin above was
+  // the single-thread run's 38 s - the very MM-spin spiral the pin above was
   // measured to prevent. The trade: past-Max injection is also the pool's
   // deadlock escape for tasks that BLOCK on other queued tasks, so no task
   // scheduled on the default pool may wait on another queued task. The
@@ -1104,7 +1104,7 @@ end;
   an exception escaping a pass body is recorded as a PPINT diagnostic on the
   unit it was working on and the run CONTINUES.
 
-  Without it the failure is invisible in the worst possible way — the unit ends
+  Without it the failure is invisible in the worst possible way - the unit ends
   up half-analyzed, so the names it should declare are missing and its
   importers report a flood of "undeclared identifier" that points everywhere
   except at the cause. (An unhandled exception in a TParallel body also
@@ -1165,7 +1165,7 @@ end;
 
 { Records a pass failure against AMid. Anchored on the unit's ROOT node, which
   every model has, so the host gets a file and a line rather than nothing. If
-  the model itself is missing — the failure happened while building it — the
+  the model itself is missing - the failure happened while building it - the
   note goes to the project-level list, which the report prints alongside. }
 procedure TPasSemaProject.NoteInternalError(AMid: Integer; const APass: string;
   E: Exception);
@@ -1218,7 +1218,7 @@ var
   LPath: string;
 begin
   // Locked unconditionally (no unlocked fast-path read of FSystemUnitResolved)
-  // — this is called only for identifiers that missed local/explicit-uses
+  // - this is called only for identifiers that missed local/explicit-uses
   // resolution, never once per token, so the lock is not a hot-path cost; a
   // "check outside, lock, check again" version would just reintroduce the
   // exact race this exists to fix, for a saving that doesn't matter here.
@@ -1349,7 +1349,7 @@ begin
   if (LM = nil) or (ASym < 0) or (ASym >= LM.SymCount) then
     Exit;
   // Doc text needs the raw token layer; a demoted unit gets it back on
-  // demand (per hover — cheap), or degrades to '' when the file changed.
+  // demand (per hover - cheap), or degrades to '' when the file changed.
   EnsureHydrated(AMid);
   Result := LM.Tree.DeclDocComment(LM.Symbols[ASym].DeclNode);
 end;
@@ -1442,7 +1442,7 @@ begin
       if LDM.Demoted or LDM.OracleStream or (Length(LDM.Tree.Nodes) = 0) then
         Exit;
       // A stream with parse-time UNANSWERED $IF questions was re-decided by
-      // RunDeclaredPass against the donor generation's models — not reusable
+      // RunDeclaredPass against the donor generation's models - not reusable
       // (the README's first-pass oracle exclusion, ~a dozen units on the RTL).
       if (Length(LDM.Tree.Source.UnresolvedDeclared) > 0) or
          (Length(LDM.Tree.Source.UnresolvedSymbols) > 0) then
@@ -1462,11 +1462,11 @@ begin
       end;
     except
       // A vanished include (or any read failure) degrades to the normal parse
-      // path — which will report it the way it always did — never to an error.
+      // path - which will report it the way it always did - never to an error.
       Exit;
     end;
     // Hit: Phase 1 over the donor's tree. The tree RECORD is copied, its
-    // arrays shared (immutable by construction — the only post-parse `Tree :=`
+    // arrays shared (immutable by construction - the only post-parse `Tree :=`
     // is TPasProject's assembly). Phase 1 MUST re-run: a donated MODEL would
     // carry ExtRefMap/ExprTypeX/CallTargetX with the OLD generation's unit ids.
     Result := TPasSemaResolver.Analyze(LDM.Tree, False, FPlatform);
@@ -1503,7 +1503,7 @@ begin
   if not TFile.Exists(LFull) then
     Exit(-1);
   try
-    // Donor reuse first — System.pas (this route's eager Ensure* load) is
+    // Donor reuse first - System.pas (this route's eager Ensure* load) is
     // one of the biggest single parses in any closure. An Analyze raise here
     // takes the same known-bad path the normal parse would.
     LModel := TryDonorLoad(LKey, LFull);
@@ -1517,7 +1517,7 @@ begin
   except
     on Exception do
     begin
-      // Tolerate a unit that fails to parse; treat as unresolvable — and
+      // Tolerate a unit that fails to parse; treat as unresolvable - and
       // remember that, so repeated `uses` of it don't re-parse every time.
       FByPath.Add(LKey, -1);
       Exit(-1);
@@ -1559,7 +1559,7 @@ end;
   outside: its own imports, the implicit System and SysInit units, and the
   compiler-provided seed. Including the unit's own scope would make the answer
   depend on the branch the previous pass took, which is exactly what this pass
-  is re-deciding — `TSomething = QWord` inside the guarded text would report
+  is re-deciding - `TSomething = QWord` inside the guarded text would report
   TSomething as declared, flip the branch, remove the declaration, and the two
   readings would trade places forever.
 
@@ -1567,7 +1567,7 @@ end;
   same reason: InterfaceScope JOINS the seed, so asking it would drag the
   unit's own names back in. And each lookup rejects a hit in AId itself, which
   is how System.pas asking `Declared(RTLVersion132)` about its OWN const stops
-  being self-referential — FindInSystemUnit reaches exactly that scope. }
+  being self-referential - FindInSystemUnit reaches exactly that scope. }
 function TPasSemaProject.DeclaredQueryFor(AId: Integer): TPasDeclaredQuery;
 begin
   Result :=
@@ -1587,7 +1587,7 @@ begin
     end;
 end;
 
-{ The `$IF` symbol oracle (const values / SizeOf / Length — see
+{ The `$IF` symbol oracle (const values / SizeOf / Length - see
   TPasCondSymbolQuery), RunDeclaredPass's second half. Unlike DeclaredQueryFor
   it DOES answer from the asking unit's own model: a constant's VALUE cannot
   self-fulfil the way a Declared() guard around a fallback declaration can
@@ -1599,12 +1599,12 @@ end;
   FIRST-pass model (a value whose own declaration sits inside a branch the
   second pass flips would be stale for that round), and position is not
   checked (dcc answers a $IF only from declarations ABOVE it; a $IF
-  referencing a constant declared BELOW reads here as declared — code that
+  referencing a constant declared BELOW reads here as declared - code that
   fragile hits dcc's undeclared-abort quirk anyway and exists in no corpus).
 
   Everything is three-state and proof-or-refuse: an initializer that does not
   fold to a clean number/bool, an enum with explicit values, a record with
-  mixed field sizes, a dotted name — all answer "cannot", which leaves the
+  mixed field sizes, a dotted name - all answer "cannot", which leaves the
   first-pass guess standing, exactly today's behavior. }
 
 function TPasSemaProject.OracleResolve(AId: Integer; const ANameLower: string;
@@ -1666,7 +1666,7 @@ begin
     Exit;
   // The initializer is the LAST expression-kind child: children are the name
   // ident, an optional type ref, the initializer, then optional nkDirective
-  // hints — so "last expression child that is not child #0" is exactly it.
+  // hints - so "last expression child that is not child #0" is exactly it.
   LInit := NIL_NODE;
   LChild := LM.Tree.Nodes[LParent].FirstChild;
   if LChild <> NIL_NODE then
@@ -1736,7 +1736,7 @@ end;
 { Resolves a name that MAY be qualified. dcc resolves `Unit.Const` in a `$IF`
   exactly like a plain one (probed: a `$IF UConst.QC > 1` guard evaluates for
   real, and a known unit with an unknown member is a hard E2003, not a
-  fallback), and the version-guard idiom in the wild writes it that way —
+  fallback), and the version-guard idiom in the wild writes it that way -
   `$IF IdGlobal.gsIdVersion > '10.6.2'`. Refusing dots turned every such guard
   into a residual guess.
 
@@ -1809,7 +1809,7 @@ begin
 end;
 
 { The size AND alignment of a named type. Alignment has to travel with size
-  because a record's own alignment is the largest of its fields' — a nested
+  because a record's own alignment is the largest of its fields' - a nested
   record contributes ITS alignment, not its size, and dcc-probed a 9-byte
   `$A1` record nested inside an `$A8` one lands at offset 1, not 8.
 
@@ -1848,8 +1848,8 @@ begin
     nkEnumType:
       Result := OracleEnumLayout(AMid, LDef, ADepth, ABytes, AAlign);
   else
-    // Everything else — a record, an array, `string[N]`, a pointer, a class,
-    // an alias — is the same question a FIELD asks, so one dispatcher answers
+    // Everything else - a record, an array, `string[N]`, a pointer, a class,
+    // an alias - is the same question a FIELD asks, so one dispatcher answers
     // both and the two cannot drift apart.
     Result := OracleFieldLayout(AMid, LDef, ADepth, ASubst, ABytes, AAlign);
   end;
@@ -1863,8 +1863,8 @@ end;
     the size is the running offset rounded UP to that own alignment
 
   The cap is `$A`/`$ALIGN` AT THE DECLARATION SITE, positional for the same
-  reason `$Z` is; `packed` is a cap of 1. Anything the walk does not model —
-  a variant part, a class-var section, a field whose type will not resolve —
+  reason `$Z` is; `packed` is a cap of 1. Anything the walk does not model -
+  a variant part, a class-var section, a field whose type will not resolve -
   REFUSES rather than guessing, which leaves the caller's residual-$IF
   diagnostic standing. }
 function TPasSemaProject.OracleRecordLayout(AMid, ADefNode, ADepth: Integer;
@@ -1930,7 +1930,7 @@ begin
   AAlign := 1;
   LM := FModels[AMid];
   LCap := LM.Tree.Source.AlignAt(LM.Tree.Nodes[ADefNode].FirstToken);
-  // `packed record` — the parser consumes the keyword without a node of its
+  // `packed record` - the parser consumes the keyword without a node of its
   // own, so the token in front of the definition is what says so.
   if (LM.Tree.Nodes[ADefNode].FirstToken > 0) and
      SameText(LM.Tree.Source.VisibleText(
@@ -1987,16 +1987,16 @@ begin
   Result := True;
 end;
 
-{ A `case … of` variant part, laid out from AStart. Three rules, all measured
+{ A `case ... of` variant part, laid out from AStart. Three rules, all measured
   by printing real field OFFSETS rather than inferring them from sizes:
 
-  1. a NAMED tag occupies storage, placed with its own alignment — but it does
+  1. a NAMED tag occupies storage, placed with its own alignment - but it does
      NOT contribute to the record's alignment. `record A: Byte;
      case T: Int64 of 0: (X: Byte); end` puts T at 8, X at 16 and is 17 bytes
      long: an odd size, so nothing rounded it. An UNNAMED tag
      (`case Integer of`) occupies nothing at all.
   2. every branch starts at the SAME offset, aligned to the largest alignment
-     among the fields declared directly at this level — not counting a nested
+     among the fields declared directly at this level - not counting a nested
      variant's fields. That is what separates `case of 0: (P: Byte; Q: Int64)`
      (both at this level, so the part starts at 8) from
      `case of 0: (X: Byte; case of 0: (Q: Int64))` (X alone here, so the part
@@ -2060,7 +2060,7 @@ begin
   LChild := LM.Tree.Nodes[APartNode].FirstChild;
   if LChild = NIL_NODE then
     Exit;
-  // Children are [tag name] tag-type branch... — the name is there only when
+  // Children are [tag name] tag-type branch... - the name is there only when
   // the SECOND child is not already a branch.
   if (LM.Tree.Nodes[LChild].Kind = nkIdent) and
      (LM.Tree.Nodes[LChild].NextSibling <> NIL_NODE) and
@@ -2137,13 +2137,13 @@ begin
 end;
 
 { A STATIC array is element-size times the product of its dimensions, aligned
-  exactly like one element — dcc-probed, including that `packed array` changes
+  exactly like one element - dcc-probed, including that `packed array` changes
   neither (there is no sub-byte packing to do, and the element type carries its
   own). A DYNAMIC array (`array of T`, no index) is one pointer.
 
   The node carries one child per dimension followed by the element type, so
   `array[0..1, 0..2] of Integer` and `array[0..1] of array[0..2] of Integer`
-  fall out of the same walk — both measured at 24. }
+  fall out of the same walk - both measured at 24. }
 function TPasSemaProject.OracleArrayLayout(AMid, ADefNode, ADepth: Integer;
   const ASubst: TPasSubst; out ABytes: Double; out AAlign: Integer): Boolean;
 var
@@ -2252,7 +2252,7 @@ begin
 end;
 
 { An enum's storage: the smallest of 1/2/4 bytes that holds its LARGEST value
-  (dcc-probed — `(c1 = 5, c2 = 9)` is one byte, `(f1 = 200, f2 = 300)` is
+  (dcc-probed - `(c1 = 5, c2 = 9)` is one byte, `(f1 = 200, f2 = 300)` is
   two), then raised to the `$Z`/`$MINENUMSIZE` state AT THE DECLARATION SITE,
   which is positional because System.pas flips it mid-file (see
   TPasMinEnumEvent). An enum aligns to its size. }
@@ -2400,14 +2400,14 @@ begin
   Result := True;
 end;
 
-{ The size and alignment of the type NAMED by ATypeNode — a field's type, or
+{ The size and alignment of the type NAMED by ATypeNode - a field's type, or
   the right-hand side of an alias. Builtins answer straight from the table;
   anything else resolves and recurses. Kept apart from OracleLayout so the two
   callers cannot drift: a field and an alias must size identically. }
 function TPasSemaProject.OracleFieldLayout(AMid, ATypeNode, ADepth: Integer;
   const ASubst: TPasSubst; out ABytes: Double; out AAlign: Integer): Boolean;
 
-  // `System.ShortInt`, `Winapi.Windows.DWORD` — a type name written with its
+  // `System.ShortInt`, `Winapi.Windows.DWORD` - a type name written with its
   // unit. FastMM4 aliases one (TSynchronizationVariable), and refusing the dot
   // stopped the whole record it appears in.
   function DottedText(ANode: Integer): string;
@@ -2461,7 +2461,7 @@ begin
     nkPointerType, nkClassOf, nkClassType, nkInterfaceType:
       begin
         // `^T`, `class of T`, and a class or interface VARIABLE are all one
-        // machine pointer — no need to resolve the target, and resolving it
+        // machine pointer - no need to resolve the target, and resolving it
         // would recurse forever on the linked-list shapes these appear in
         // (FastMM4's PSmallBlockPoolHeader points back at the record that
         // contains it). dcc-probed: SizeOf of a CLASS type is the reference,
@@ -2578,7 +2578,7 @@ begin
     ABytes, AAlign) then
     Exit(True);
   // `Text` is a compiler intrinsic with no size in the table, and `TextFile`
-  // is System's alias for it. Both are that unit's TTextRec — looked up, not
+  // is System's alias for it. Both are that unit's TTextRec - looked up, not
   // hard-coded, for the same reason TFileRec is.
   if SameText(LName, 'Text') or SameText(LName, 'TextFile') then
     if OracleResolve(AMid, 'ttextrec', LRMid, LRSym) and
@@ -2591,7 +2591,7 @@ begin
     Exit(OracleLayout(LRMid, LRSym, ADepth + 1, nil, ABytes, AAlign));
   // `System.X` where X is a builtin: System is the implicit unit and is not
   // in anyone's `uses`, so the lookup above cannot reach it. Restricted to
-  // that one prefix — for any other unit, an unresolved member must refuse
+  // that one prefix - for any other unit, an unresolved member must refuse
   // rather than fall back to a same-named builtin.
   LDot := LName.LastIndexOf('.');
   Result := (LDot >= 0) and SameText(Copy(LName, 1, LDot), 'System') and
@@ -2602,7 +2602,7 @@ end;
 { An old-style `object` (11.5). Its fields lay out exactly like a record's,
   starting where the ANCESTOR's storage ended, plus one rule that has to be
   measured: introducing a VIRTUAL member appends a VMT pointer AFTER the
-  fields, pointer-aligned — and that pointer does NOT raise the type's own
+  fields, pointer-aligned - and that pointer does NOT raise the type's own
   alignment, so `object A: Integer; procedure P; virtual; end` is 16 bytes on
   Win64 yet still aligns to 4 (a Byte before such a field gives 20, not 24).
   A derived object whose ancestor already has a VMT does not get a second one:
@@ -2635,7 +2635,7 @@ begin
          LStartAlign) then
       Exit(False);
     LStart := Trunc(LBaseSize);
-    // Whether the ANCESTOR already carries a VMT — asked of its own
+    // Whether the ANCESTOR already carries a VMT - asked of its own
     // definition, not ours, because that is what decides if we introduce one.
     if (LM.Tree.Nodes[LChild].Kind = nkIdent) and
        OracleQualified(AMid, LM.Tree.NodeText(LChild), LRMid, LRSym) then
@@ -2661,7 +2661,7 @@ begin
   Result := True;
 end;
 
-{ Does this object introduce or inherit a VMT — that is, does it or any
+{ Does this object introduce or inherit a VMT - that is, does it or any
   ancestor declare a `virtual` (or `dynamic`) member? Called with ADepth+1 for
   the type's own members and with ADepth for its ancestor chain, so the two
   questions stay separable. }
@@ -2692,7 +2692,7 @@ begin
     end;
     LChild := LM.Tree.Nodes[LChild].NextSibling;
   end;
-  // Not here — ask the ancestor.
+  // Not here - ask the ancestor.
   LBase := LM.Tree.Nodes[ADefNode].FirstChild;
   if (LBase <> NIL_NODE) and (LM.Tree.Nodes[LBase].Kind = nkIdent) and
      OracleQualified(AMid, LM.Tree.NodeText(LBase), LRMid, LRSym) then
@@ -2704,7 +2704,7 @@ begin
   end;
 end;
 
-{ A generic INSTANTIATION used as a type — `TG<Integer>`, the nkTypeArgs node.
+{ A generic INSTANTIATION used as a type - `TG<Integer>`, the nkTypeArgs node.
   The generic's own declaration is laid out with its parameters bound to the
   actuals, which live in the REFERRING model and are therefore carried as
   (model, node) pairs.
@@ -2875,7 +2875,7 @@ begin
   LHi := LM.Tree.Nodes[LLo].NextSibling;
   if LHi = NIL_NODE then
     Exit;
-  // Bounds may themselves be constants — evaluate with the same recursive
+  // Bounds may themselves be constants - evaluate with the same recursive
   // const context OracleConstNum builds.
   LCtx := Default(TPasCondContext);
   LCtx.CompilerVersion := 37.0;
@@ -2911,13 +2911,13 @@ begin
     begin
       Result := False;
       AValue := Default(TPasSymbolValue);
-      // Qualified names resolve too — dcc evaluates a `$IF Unit.Const > 1`
+      // Qualified names resolve too - dcc evaluates a `$IF Unit.Const > 1`
       // guard for real, so refusing the dot invented a residual guess where
       // the compiler had a plain answer (see OracleQualified).
       if not OracleQualified(AId, AName, LMid, LSym) then
       begin
         // "Exists nowhere" is a stronger claim than "I could not resolve it",
-        // and CondEval copies dcc's abort verdict from it — so only make it
+        // and CondEval copies dcc's abort verdict from it - so only make it
         // when the claim is sound. A unit with an unresolved import has a
         // hole in its symbol table exactly where a declaration could be
         // hiding, and a DOTTED name is dcc's own fallback-to-False shape
@@ -2948,7 +2948,7 @@ end;
   interface, which would change the answer for a unit that imports it; chasing
   that to a fixpoint would mean re-parsing on every round for a shape nobody
   writes (the guards ask about RTL names, not about each other). Units the new
-  branch newly imports ARE loaded, though — otherwise the unit would end up
+  branch newly imports ARE loaded, though - otherwise the unit would end up
   with an unresolved `uses`, which gates its diagnostics entirely. }
 procedure TPasSemaProject.RunDeclaredPass(ACount: Integer);
 var
@@ -2965,15 +2965,15 @@ var
 begin
   // Candidates are not "asked a question" but "would get a DIFFERENT answer".
   // The first pass answered every Declared() False, so a unit whose names all
-  // still answer False would re-preprocess to a byte-identical stream — and
+  // still answer False would re-preprocess to a byte-identical stream - and
   // paying a re-parse for that is not free: doing it unfiltered measured +4%
   // on the 665-unit corpus, for zero diagnostic change there. The test itself
   // is a few dictionary lookups per recorded name.
   //
-  // Symbol questions (const values / SizeOf / Length — see TPasCondSymbolQuery)
+  // Symbol questions (const values / SizeOf / Length - see TPasCondSymbolQuery)
   // use the looser "would get an ANSWER" criterion: unlike Declared, whose
   // False guess only ever flips on a True answer, a const's real value may
-  // happen to reproduce the guessed verdict — comparing would need the define
+  // happen to reproduce the guessed verdict - comparing would need the define
   // state at the directive, so the re-run eats that instead. Bounded by how
   // rare the questions are (a dozen units on the whole RTL).
   LCand := nil;
@@ -2998,7 +2998,7 @@ begin
         // Either kind of answer earns the re-run. "Here is the value" is the
         // obvious one; "this name exists NOWHERE" is the other, because that
         // is what lets CondEval apply dcc's abort rules instead of leaving the
-        // first pass's False guess standing — a different verdict, not a
+        // first pass's False guess standing - a different verdict, not a
         // byte-identical one.
         if LSymQuery(LUnsym.Query, LUnsym.Name, LNum) or LNum.NoSymbol then
         begin
@@ -3032,7 +3032,7 @@ begin
         except
           // Keep the first-pass model. A unit that parsed once and throws now
           // is a defect, but the wrong branch is still better than no unit at
-          // all — an unloadable unit gates every importer.
+          // all - an unloadable unit gates every importer.
           on Exception do
             LDone[AIndex] := nil;
         end;
@@ -3046,11 +3046,11 @@ begin
       Result := LCand[AIndex];
     end);
   // Then commit, sequentially. FModels OWNS its items, so the assignment is
-  // what frees the first-pass model — freeing it here as well is a double free.
+  // what frees the first-pass model - freeing it here as well is a double free.
   for LIdx := 0 to High(LCand) do
     if LDone[LIdx] <> nil then
     begin
-      // An oracle-built stream cannot be reproduced from cold — mark it so
+      // An oracle-built stream cannot be reproduced from cold - mark it so
       // text demotion skips this model (see TPasSemaModel.OracleStream).
       LDone[LIdx].OracleStream := True;
       FModels[LCand[LIdx]] := LDone[LIdx];
@@ -3074,21 +3074,21 @@ end;
   each model's retained preprocess data and into its ordinary diagnostics,
   where -list/histograms/the demo already know how to show them. Runs right
   after RunDeclaredPass in each driver, and gated on ACount like every other
-  diagnostic — units pulled in later from search paths stay out, as their
+  diagnostic - units pulled in later from search paths stay out, as their
   E2003s do.
 
   THE FILTER IS THE POINT. A flag means "the verdict rested on a guess", and
   most such guesses are provably CORRECT by the time we get here: a
   `$IF Declared(TlsStart)` in SysInit guards a name that exists on another
   platform only, and DeclaredQueryFor answers that definitively ("declared
-  nowhere in this closure") — the guard is ordinary platform-conditional
+  nowhere in this closure") - the guard is ordinary platform-conditional
   code, not a finding. RunDeclaredPass therefore did not even re-run the
   unit, which is exactly why its first-pass flag is still sitting there. So
   the flag alone cannot be the report criterion; re-asking is.
 
   Each flag carries the questions its evaluation could not answer
   (TPasPPDiagnostic.Unanswered). We ask them again with the FULL project
-  oracle, and report only when something is STILL unanswerable — the genuine
+  oracle, and report only when something is STILL unanswerable - the genuine
   exotica: SizeOf of a type whose layout tier 1 refuses, a string-valued
   constant, Ord(), a dotted name. A `Declared` question is always answerable
   now, so a Declared-only guard never reports.
@@ -3096,9 +3096,9 @@ end;
   (An earlier version reported every flag and argued that hiding a confirmed
   guess would also hide a misspelled name meant to exist. That was wrong: a
   misspelling is indistinguishable from a legitimate platform guard, and the
-  guards outnumber it 31 to 0 on the RTL alone — so the argument bought
+  guards outnumber it 31 to 0 on the RTL alone - so the argument bought
   nothing and cost a flood of normal code reported as findings.) }
-{ One PPENC per file that had to be RECOVERED to be read — see
+{ One PPENC per file that had to be RECOVERED to be read - see
   TPasSourceManager.DecodeText. Every file of the unit is checked, includes as
   well, since a `.inc` is where such a byte is most likely to hide.
 
@@ -3114,7 +3114,7 @@ begin
     InjectEncodingDiagsOne(LIdx);
 end;
 
-// One model's share of the loop above — AnalyzeModuleOnly re-injects for the
+// One model's share of the loop above - AnalyzeModuleOnly re-injects for the
 // module it re-parsed and must not touch any other model's diagnostics.
 procedure TPasSemaProject.InjectEncodingDiagsOne(AId: Integer);
 var
@@ -3149,7 +3149,7 @@ begin
     InjectGuessedIfDiagsOne(LIdx);
 end;
 
-// One model's share of the loop above — see InjectEncodingDiagsOne. Checks
+// One model's share of the loop above - see InjectEncodingDiagsOne. Checks
 // the switch itself, so the single-module caller needs no guard of its own.
 procedure TPasSemaProject.InjectGuessedIfDiagsOne(AId: Integer);
 var
@@ -3207,7 +3207,7 @@ begin
         end;
         // No questions recorded at all means the evaluation guessed at
         // something it could not even NAME (an indexed designator, a shape
-        // CondEval has no case for) — the most unknown thing there is, so it
+        // CondEval has no case for) - the most unknown thing there is, so it
         // reports rather than passing the "nothing open" test vacuously.
         if (LOpen = nil) and
            (Length(LM.Tree.Source.Diagnostics[LDIdx].Unanswered) > 0) then
@@ -3218,7 +3218,7 @@ begin
       if LPPCode = ppIfNeedsSemantics then
       begin
         LDiag.Code := 'PPIF';
-        LDiag.Msg := Format('PPIF conditional still undecidable: [%s] — ' +
+        LDiag.Msg := Format('PPIF conditional still undecidable: [%s] - ' +
           'cannot resolve %s', [LM.Tree.Source.Diagnostics[LDIdx].Detail,
           string.Join(', ', LOpen)]);
       end
@@ -3295,7 +3295,7 @@ begin
 end;
 
 // Cut every model's Diags back to its filled prefix (AddDiag grows with
-// capacity slack) — must run before any consumer enumerates Diags with
+// capacity slack) - must run before any consumer enumerates Diags with
 // Length/High, i.e. at the end of every analysis entry point.
 procedure TPasSemaProject.TrimAllDiags;
 var
@@ -3305,7 +3305,7 @@ begin
     FModels[LIdx].TrimDiags;
 end;
 
-// Drop the body passes' work lists and their cached names — pass-lifetime
+// Drop the body passes' work lists and their cached names - pass-lifetime
 // scratch, tens of MB on a big closure, and nothing reads them after the
 // passes finish. All five arrays go TOGETHER: EnsureCrossWork's FWorkBuilt
 // guard is what keeps the parallel lists in sync, so a partial release would
@@ -3323,7 +3323,7 @@ end;
 // Parse + Phase-1-analyze a batch of files with one worker per core, then
 // register the results IN INPUT ORDER (deterministic model ids). Pure per
 // file: each worker owns its preprocessor (which clones the shared defines
-// per run); the source manager and define set are read-only during the loop —
+// per run); the source manager and define set are read-only during the loop -
 // the same no-locks model as TPasProject.ParseFiles.
 procedure TPasSemaProject.LoadFilesParallel(const APaths: TArray<string>;
   AInterfaceOnly: Boolean = False);
@@ -3338,8 +3338,8 @@ var
   LFailLock: TCriticalSection;
 begin
   // Normalize, drop already-loaded/known-bad paths and in-batch duplicates.
-  // Pre-sized to the input (survivors <= input), truncated after the loop —
-  // per-append array copies were O(n²) refcount churn on a 3757-path batch.
+  // Pre-sized to the input (survivors <= input), truncated after the loop -
+  // per-append array copies were O(n^2) refcount churn on a 3757-path batch.
   SetLength(LTodo, Length(APaths));
   SetLength(LKeys, Length(APaths));
   LTodoCount := 0;
@@ -3385,7 +3385,7 @@ begin
       LPP := RentPP;
       try
         try
-          // Donor reuse first — full batches only: this driver's status
+          // Donor reuse first - full batches only: this driver's status
           // logic has no way to mark a donor-full model inside an
           // interface batch (unlike RunLoadEngine's FullDonor flag), and
           // the interface wave that matters runs through the engine anyway.
@@ -3399,11 +3399,11 @@ begin
             LPre := LPP.Process(LTodo[AIndex]);
             var LTree := TPasParser.ParseFile(LPre, LDiags, AInterfaceOnly);
             // A model whose parse really did stop at the interface is
-            // TRANSIENT (replaced by the full wave) — skip the expression
+            // TRANSIENT (replaced by the full wave) - skip the expression
             // typer, its ExprType/E2010/E2015 output dies with the model.
             // NOT keyed on AInterfaceOnly alone: a program/library/package
             // ignores the flag, parses fully, registers msFullReady below and
-            // is never upgraded — skipping ITS typer would permanently lose
+            // is never upgraded - skipping ITS typer would permanently lose
             // its type diagnostics.
             LDone[AIndex] := TPasSemaResolver.Analyze(LTree,
               {ASkipTyper} AInterfaceOnly and (Length(LTree.Nodes) > 0) and
@@ -3419,7 +3419,7 @@ begin
             // path" for a file sitting right there. That cost a day of chasing
             // a phantom search-path problem before a trace showed the real
             // cause (an ERangeError inside Phase 1). Tolerating the failure is
-            // still right — one bad unit must not sink an analysis — but it has
+            // still right - one bad unit must not sink an analysis - but it has
             // to be tolerated OUT LOUD.
             LFailLock.Enter;
             try
@@ -3435,7 +3435,7 @@ begin
         ReturnPP(LPP);
       end;
     end,
-    // This pass walks FILE PATHS — the models do not exist yet — so there is
+    // This pass walks FILE PATHS - the models do not exist yet - so there is
     // no unit to blame; -1 sends the note to the project-level list.
     function(AIndex: Integer): Integer
     begin
@@ -3444,7 +3444,7 @@ begin
 
   // Interface-only -> msIntfReady (later upgraded); full parse -> msFullReady.
   // Per item, not per batch: program/library/package files IGNORE
-  // AInterfaceOnly (no interface section — ParseFile parses them fully), so
+  // AInterfaceOnly (no interface section - ParseFile parses them fully), so
   // they register as already-full and wave 2 never pays a pointless reparse
   // for a .dpr/.dpk root.
   for LIdx := 0 to High(LTodo) do
@@ -3493,15 +3493,15 @@ var
   LDiags: TArray<TPasParseDiag>;
   LTree: TPasTree;
 begin
-  // Mirrors LoadFilesParallel's worker body — see the comments there (the
+  // Mirrors LoadFilesParallel's worker body - see the comments there (the
   // typer skip rule, the tolerate-out-loud contract).
   AErrClass := '';
   AErrMsg := '';
   AFullDonor := False;
   try
-    // Donor reuse first (APath arrives normalized — see EnqueueLoad). A hit
+    // Donor reuse first (APath arrives normalized - see EnqueueLoad). A hit
     // is ALWAYS a full model, even during the interface wave: the commit
-    // must not classify it msIntfReady by its nkUnit root — hence the flag.
+    // must not classify it msIntfReady by its nkUnit root - hence the flag.
     Result := TryDonorLoad(LowerCase(APath), APath);
     if Result <> nil then
     begin
@@ -3552,7 +3552,7 @@ begin
   end;
 end;
 
-{ Continuous closure loading — the barrier-free replacement for the
+{ Continuous closure loading - the barrier-free replacement for the
   LoadChunked/DiscoverUses rounds and for UpgradeChunked's slices.
 
   The chunked drivers held 16 workers at 10-22% busy through the load waves
@@ -3565,7 +3565,7 @@ end;
     so model ids stay exactly as deterministic as the chunked loader's;
   - discovery runs on the driver right after each commit, in commit order.
     Committing in queue order makes per-commit discovery concatenate to the
-    very same path sequence the old id-ordered DiscoverUses sweep produced —
+    very same path sequence the old id-ordered DiscoverUses sweep produced -
     which is what keeps the queue, and therefore every model id and every
     downstream report, byte-for-byte reproducible against the old driver;
   - wave-2 upgrades ride the same queue; the item carries a SNAPSHOT of the
@@ -3573,16 +3573,16 @@ end;
     driver's commits are growing its backing array.
 
   No Prefetch here: it runs TParallel.&For, and this engine's tasks occupy
-  the whole pinned pool for the duration (see ConfigureThreadPool — with
+  the whole pinned pool for the duration (see ConfigureThreadPool - with
   past-Max injection off that inner For would execute on the driver alone).
   The workers overlap their own I/O with each other's CPU instead. For the
   same reason the FIRST FSM.ResolveUnit of a run must happen before the
-  engine starts — it lazily builds the search index with a TParallel.&For of
+  engine starts - it lazily builds the search index with a TParallel.&For of
   its own; every driver's EnsureSystemUnit satisfies this.
 
   Cancellation: the driver stops committing between items and workers stop
   taking; in-flight parses finish, their results are freed uncommitted, and
-  the committed prefix stays published — LoadChunked's exact contract. }
+  the committed prefix stays published - LoadChunked's exact contract. }
 function TPasSemaProject.RunLoadEngine(const ASeedLoads: TArray<string>;
   const ASeedUpgrades: TArray<Integer>; AIntfLoads: Boolean;
   const AAfterCommits: TProc): Boolean;
@@ -3676,7 +3676,7 @@ begin
     // Seed order decides model ids, so it replicates the chunked drivers
     // exactly: explicit roots first (they loaded before any discovery), then
     // one discovery sweep over every model committed before this call, in id
-    // order — the first round of the old loop.
+    // order - the first round of the old loop.
     for LIdx := 0 to High(ASeedLoads) do
       EnqueueLoad(ASeedLoads[LIdx]);
     for LIdx := 0 to High(ASeedUpgrades) do
@@ -3798,14 +3798,14 @@ begin
         end;
       end;
 
-      // Commit — the same registration the chunked loaders made, one item at
+      // Commit - the same registration the chunked loaders made, one item at
       // a time, on this thread only.
       if LItem.Kind = lkLoad then
       begin
         if LRes.Model <> nil then
         begin
           // A donor-full model registers msFullReady even in the interface
-          // wave and thereby skips wave 2 for free — the upgrade seed
+          // wave and thereby skips wave 2 for free - the upgrade seed
           // selects FStatus = msIntfReady only.
           if AIntfLoads and not LRes.FullDonor and
              (Length(LRes.Model.Tree.Nodes) > 0) and
@@ -3832,7 +3832,7 @@ begin
         if LRes.Model <> nil then
         begin
           // The owns-list assignment frees the interface model here, on the
-          // driver — measured at 604 ms across the client's full wave, and
+          // driver - measured at 604 ms across the client's full wave, and
           // deliberately LEFT that way: deferring the frees into a parallel
           // batch after the engine was tried and changed the wall time not
           // at all (the workers overlap the driver's teardown), so the
@@ -3842,7 +3842,7 @@ begin
           DiscoverFrom(LItem.Mid);
         end
         else
-          // Keep the interface snapshot rather than losing the unit — but
+          // Keep the interface snapshot rather than losing the unit - but
           // SAY SO (UpgradeChunked's contract).
           NoteInternalError(LItem.Mid, 'full-parse',
             LRes.ErrClass, LRes.ErrMsg);
@@ -3883,7 +3883,7 @@ begin
 end;
 
 // Maps the model's DECLARED unit name (root's name node, dotted included) to
-// its id — first-loaded wins, so a program's own `in 'path'` units (loaded
+// its id - first-loaded wins, so a program's own `in 'path'` units (loaded
 // first, from the main source) are authoritative over later stray same-named
 // files. This is the dcc rule that lets OTHER units say plain `uses X` for a
 // unit only the program's `uses X in 'path'` locates (no search-path entry).
@@ -3934,7 +3934,7 @@ begin
       LModel.UsesList[LIdx].InPath, FFiles[AId], LPath) then
       LUid := LoadFile(LPath)
     else
-      // No file on any path — but the unit may ALREADY be loaded under this
+      // No file on any path - but the unit may ALREADY be loaded under this
       // name via a program's `uses X in 'path'` (dcc: an in-path locates the
       // unit for the whole project, not just the program file).
       LUid := LoadedUnitByName(LModel.UsesList[LIdx].NameFull);
@@ -3950,7 +3950,7 @@ begin
     begin
       LModel.AllUsesResolved := False;
       // Report it. This used to be silent, which hid TWO things at once: that
-      // an import was missing, and — because AllUsesResolved gates E2003 —
+      // an import was missing, and - because AllUsesResolved gates E2003 -
       // that every undeclared identifier in this unit was being suppressed as
       // a consequence. A unit could look clean when it had simply not been
       // checked. Anchored on the `uses` name node so a host can navigate to it.
@@ -4013,10 +4013,10 @@ end;
 { The same arity search, but in the referring unit's OWN interface scope.
 
   The NextOverload chain links arities declared in one SCOPE, and the uses
-  search covers OTHER units — between them sits the case that has neither: the
+  search covers OTHER units - between them sits the case that has neither: the
   two arities are declared in the same unit but in different sections. One
   editor library writes exactly that, and the shape is idiomatic rather than
-  odd — a generic in the interface plus
+  odd - a generic in the interface plus
 
       TSomeProvider = class(TSomeProvider<TSomeControl>);
 
@@ -4044,7 +4044,7 @@ begin
   end;
 end;
 
-{ FindInUses, restricted to a type of a GIVEN generic arity — see
+{ FindInUses, restricted to a type of a GIVEN generic arity - see
   PreferNonGeneric for why a wrong-arity candidate must not end the search. Same
   last-uses-wins order among the candidates that do qualify, then the implicit
   System unit.
@@ -4052,7 +4052,7 @@ end;
   BOTH directions of the mistake are real, and both are set by the RTL's or a
   component library's own naming: a BARE name that has to skip an imported
   GENERIC, and a `Name<T>` that has to skip an imported NON-generic. The second
-  hides better, because the reference looks unambiguous — `TdxPDFObjectList<T>`
+  hides better, because the reference looks unambiguous - `TdxPDFObjectList<T>`
   reads like it can only mean the generic, but the plain class of that name in
   another unit is what the ordinary lookup returns. }
 function TPasSemaProject.FindTypeInUsesArity(AId: Integer;
@@ -4093,7 +4093,7 @@ end;
 
 { The generic arity a REFERENCE was written with: the argument count when ANode
   is the HEAD of an `nkTypeArgs` (`TArray<string>` is 1), else 0. Only the head
-  counts — an ident sitting INSIDE `<...>` is itself a bare reference, and the
+  counts - an ident sitting INSIDE `<...>` is itself a bare reference, and the
   parser puts the arguments after the head under the same node, so the
   first-child test tells the two apart. Mirror of the resolver's
   IsBareTypeUse + GenericArityOfParamsNode pair, which answers the same
@@ -4118,13 +4118,13 @@ begin
 end;
 
 { Arity correction for a CROSS-unit reference, applied where ExtRefMap is
-  written — which is also what ctrl+click reads.
+  written - which is also what ctrl+click reads.
 
   ResolveTypeExpr already matches arity for the TYPE it computes (see its
   nkTypeArgs branch), but that answer never reaches ExtRefMap: the binding
   CrossResolve committed via FindInUses stands, and go-to-declaration follows
   it. `TArray<string>` in a unit that uses System.Generics.Collections is the
-  case that proves it — last-uses-wins hands back that unit's arity-0
+  case that proves it - last-uses-wins hands back that unit's arity-0
   `TArray = class`, and the arity-1 `TArray<T> = array of T` in the IMPLICIT
   System unit is never consulted, because ordinary lookup treats the two as
   equals. Arity is part of the identity (16.1.2), so they are not equals.
@@ -4133,7 +4133,7 @@ end;
   overload chain (arities declared in ONE unit link there, and only the head is
   registered under the name), then an arity-restricted scan of the imports plus
   System. A no-op unless the reference is a type whose arity actually
-  mismatches, which is rare — the ordinary reference pays one set membership
+  mismatches, which is rare - the ordinary reference pays one set membership
   and one parent read. }
 procedure TPasSemaProject.FixCrossArity(AId: Integer; AModel: TPasSemaModel;
   ANode: Integer; const ANameLower: string; var AUnit, ASym: Integer);
@@ -4167,10 +4167,10 @@ end;
 
 // Every unit implicitly uses System (1.2.1 / 11.2.1) without naming it in a
 // `uses` clause, so FindInUses (which only walks the model's OWN UsesList)
-// can never find a name declared ONLY there — sLineBreak, PathDelim, and
+// can never find a name declared ONLY there - sLineBreak, PathDelim, and
 // similar System-only RTL identifiers were false E2003s until this existed.
 // Tried as the LAST resort in CrossResolve, after explicit uses, matching
-// real dcc lookup order; a miss here changes nothing — the normal
+// real dcc lookup order; a miss here changes nothing - the normal
 // AllUsesResolved-gated E2003 still applies exactly as before.
 function TPasSemaProject.FindInSystemUnit(const ANameLower: string;
   out AUnit, ASym: Integer): Boolean;
@@ -4195,7 +4195,7 @@ begin
 end;
 
 // Companion to FindInSystemUnit for the OTHER implicit unit (see
-// EnsureSysInitUnit) — tried right after it, same last-resort spot in
+// EnsureSysInitUnit) - tried right after it, same last-resort spot in
 // CrossResolve, so a miss here changes nothing either.
 function TPasSemaProject.FindInSysInitUnit(const ANameLower: string;
   out AUnit, ASym: Integer): Boolean;
@@ -4223,7 +4223,7 @@ end;
 // TFoo;`) if its parent is the nkAttribute node AND it sits in that node's
 // TypeRef position (FirstChild) rather than among its `(...)` argument
 // expressions. 19.3.1: the `Attribute` suffix may be omitted at the use
-// site (`[Weak]` names `WeakAttribute`) — real dcc tries the bare name
+// site (`[Weak]` names `WeakAttribute`) - real dcc tries the bare name
 // first, then retries with the suffix; a name this project resolves plainly
 // (SOME OTHER `TFooAttribute` declared under its own short alias) must not
 // pay the suffix-retry cost or risk resolving to the wrong symbol, so this
@@ -4267,9 +4267,9 @@ begin
 end;
 
 // The dotted spelling of a name designator (nkIdent or nested nkMember), as
-// WRITTEN — e.g. "System.SysUtils" for the nkMember(nkMember(System,
+// WRITTEN - e.g. "System.SysUtils" for the nkMember(nkMember(System,
 // SysUtils)) shape. Used to recognize a qualified-expression prefix as a
-// UNIT name (System.sLineBreak, System.SysUtils.TBytes) — distinct from
+// UNIT name (System.sLineBreak, System.SysUtils.TBytes) - distinct from
 // PasTree.Sema.Resolver's private QualifiedNameText, which serves the same
 // purpose but isn't reachable from this unit.
 function TPasSemaProject.QualifiedText(AId, ANode: Integer): string;
@@ -4288,7 +4288,7 @@ begin
     Result := LM.Tree.NodeText(ANode);
 end;
 
-// The model id ANode's qualified text names as a UNIT — literally 'System'
+// The model id ANode's qualified text names as a UNIT - literally 'System'
 // (the implicit unit; see EnsureSystemUnit), or a match (full dotted name OR
 // bare leaf, either is legal in real dcc) against AId's OWN `uses` list.
 // -1 when the text doesn't name any unit reachable from AId. This is what
@@ -4305,7 +4305,7 @@ begin
   Result := -1;
   LM := FModels[AId];
   LText := QualifiedText(AId, ANode);
-  // A unit may qualify with its OWN name — Winapi.Windows.pas calls
+  // A unit may qualify with its OWN name - Winapi.Windows.pas calls
   // `Winapi.Windows.DrawText(...)` from an overload of DrawText to reach the
   // other one unambiguously. It is not in its own UsesList, so the loop below
   // can never find it; checked here, before the implicit units, since a unit
@@ -4329,30 +4329,30 @@ begin
   end;
 end;
 
-// ANode (an identifier that failed ALL normal local resolution — callers
+// ANode (an identifier that failed ALL normal local resolution - callers
 // only reach this after that check) may be a namespace-qualifier segment of
-// SOME enclosing dotted expression that names a real unit — `System` in
+// SOME enclosing dotted expression that names a real unit - `System` in
 // `System.sLineBreak`; either of `System`/`SysUtils` in `System.SysUtils.
 // TBytes`. First climbs to the OUTERMOST node of the WHOLE dotted chain
 // ANode belongs to (regardless of whether ANode sits at a "base" or
-// "member name" position — a caller only ever reaches this for a node that
+// "member name" position - a caller only ever reaches this for a node that
 // is NOT the chain's actual final/real member, since that one already
 // resolved via RefMap/ExtRefMap before this is ever called, so climbing
 // past ANode is always safe). The outermost node's OWN member-name child is
 // therefore the chain's true final segment (TBytes); the QUALIFIER is
 // exactly its base. From there, tries progressively SHORTER prefixes
-// (drop one trailing segment at a time) so the LONGEST match wins FIRST —
+// (drop one trailing segment at a time) so the LONGEST match wins FIRST -
 // mirrors real dcc's greedy namespace resolution (spec 1.2.3): in `System.
 // SysUtils.TBytes`, `System.SysUtils` (a real used unit) must win over bare
 // `System` (the ALSO-valid implicit unit) rather than stopping at the
 // first, shortest candidate. Returns the matched unit's model id (-1 if
 // none), and AMatchNode = the node whose OWN span is exactly the matched
-// qualifier text — e.g. the inner nkMember representing "System.SysUtils"
-// — so a host can highlight/link the WHOLE qualifier when hovering ANY of
+// qualifier text - e.g. the inner nkMember representing "System.SysUtils"
+// - so a host can highlight/link the WHOLE qualifier when hovering ANY of
 // its segments, same as it would for a `uses` clause's dotted name.
 //
 // Two uses: CrossResolve's E2003 exemption for `System`/`SysUtils` above
-// (a namespace token is never an undeclared-identifier candidate — mirrors
+// (a namespace token is never an undeclared-identifier candidate - mirrors
 // the existing "member name of A.B" guard, generalized to the qualifier
 // side of the dot), and PasTree.Sema.Nav (clicking/hovering the qualifier
 // itself opens the referenced unit, same as a `uses` clause name).
@@ -4428,7 +4428,7 @@ begin
 end;
 
 // Model-aware parameter arity of a routine symbol. Result=False if the routine
-// has no parameter scope (a builtin) — caller then skips the whole call.
+// has no parameter scope (a builtin) - caller then skips the whole call.
 function TPasSemaProject.RoutineArity(AMid, ASym: Integer;
   out AReq, ATot: Integer; out AVariadic: Boolean): Boolean;
 var
@@ -4443,7 +4443,7 @@ begin
   if LScope = NIL_SCOPE then
     Exit(False);
   LSawDefault := False;
-  // A lazy nil Symbols list is a recorded-but-empty param scope — a paramless
+  // A lazy nil Symbols list is a recorded-but-empty param scope - a paramless
   // routine, arity 0/0, NOT the "no parameter scope" False above.
   // Index loop, not for-in: this runs per candidate per call site, and a
   // for-in over TList mints a heap enumerator each time (same reasoning as
@@ -4474,7 +4474,7 @@ begin
 end;
 
 // True when ACallee (a call's callee identifier) is already bound to a
-// declaration NEARER than any used unit's globals — so those globals are
+// declaration NEARER than any used unit's globals - so those globals are
 // shadowed and must NOT be gathered as arity candidates for this call.
 // Covers: a method reached through implicit Self (same-unit, via RefMap's
 // struct-scoped symbol; or inherited from a CROSS-unit ancestor, which lands
@@ -4482,7 +4482,7 @@ end;
 // local/param/field/property of procedural type called through its value.
 //
 // dcc-verified: inside `TStrings.IndexOfObject`, unqualified
-// `GetObject(Result)` means `TStrings.GetObject(Index)` — Winapi.Windows'
+// `GetObject(Result)` means `TStrings.GetObject(Index)` - Winapi.Windows'
 // 3-parameter GDI `GetObject`, though perfectly visible through
 // System.Classes' own `uses`, simply is not a candidate. Gathering it anyway
 // made a 1-argument call look like it was missing two (real bug: E2035 on
@@ -4505,7 +4505,7 @@ begin
     // that were never in the running. dcc-verified: a unit-level
     // `Compare: TCompareFunc` (a procedural-type VAR) shadows an imported
     // 2-parameter `Compare`, and a 3-argument call through it compiles. Testing
-    // only the SCOPE KIND missed exactly that — the var is at unit level, so it
+    // only the SCOPE KIND missed exactly that - the var is at unit level, so it
     // looked like a candidate for merging.
     if AModel.Symbols[ALocalSym].Kind <> skRoutine then
       Exit(True);
@@ -4516,8 +4516,8 @@ begin
     Exit;
   end;
   // Not locally bound. An inherited MEMBER found by CrossResolveInherited
-  // still shadows; a used unit's own unit-level global — the very thing the
-  // sweep exists to check — does not.
+  // still shadows; a used unit's own unit-level global - the very thing the
+  // sweep exists to check - does not.
   Result := False;
   if AModel.ExtRefMap.TryGetValue(ACallee, LExt) then
   begin
@@ -4553,11 +4553,11 @@ var
   LName: string;
   LExt: TPasExtRef;
   // The uses-sweep result depends only on the callee NAME (the uses list is
-  // fixed per unit), yet it used to run per CALL NODE — a unit calling
+  // fixed per unit), yet it used to run per CALL NODE - a unit calling
   // `Format` 500 times paid the 40-unit sweep, and RoutineArity per candidate,
   // 500 times. Same cure as SelectCallTarget's UsesHeads memo: one sweep per
-  // distinct name per unit, caching each candidate's (Req, Tot, Variadic) —
-  // which are symbol invariants — so a repeat call only re-checks the fit
+  // distinct name per unit, caching each candidate's (Req, Tot, Variadic) -
+  // which are symbol invariants - so a repeat call only re-checks the fit
   // against ITS argument count. Worker-local, no locks.
   LSweeps: TDictionary<string, TSweep>;
   LSweep: TSweep;
@@ -4589,7 +4589,7 @@ var
   end;
 
   // Collect one unit's chain of AHead into ASweep (the cache-building
-  // counterpart of Consider; fit is NOT computed here — it is per-call).
+  // counterpart of Consider; fit is NOT computed here - it is per-call).
   procedure Gather(AMid, AHead: Integer; var ASweep: TSweep;
     var ACount: Integer);
   var
@@ -4656,7 +4656,7 @@ begin
     if (LLocalHead <> NIL_SYM) and
        (LModel.Symbols[LLocalHead].Kind in [skType, skBuiltinType]) then
       Continue;   // a type cast, not a call
-    // Whatever this call means, it is NOT one of the used units' globals —
+    // Whatever this call means, it is NOT one of the used units' globals -
     // so the sweep below would only gather irrelevant same-named candidates
     // and arity-check against them. See CalleeShadowsUses.
     if CalleeShadowsUses(LModel, LCallee, LLocalHead) then
@@ -4681,7 +4681,7 @@ begin
       Consider(AId, LLocalHead);
       // 6.4: an IMPLEMENTATION-section overload joins the interface section's
       // set for the same unit, but the two are separate symbols in separate
-      // scopes — deliberately, since chaining them would export an
+      // scopes - deliberately, since chaining them would export an
       // implementation-only overload to every importer. So a call written
       // inside the implementation resolves to the nearer (impl) head and must
       // still be measured against the interface ones. dcc-verified; without it
@@ -4698,7 +4698,7 @@ begin
       end;
     end;
 
-    // Same-named routines from every resolved used unit — through the
+    // Same-named routines from every resolved used unit - through the
     // per-name cache (see LSweeps above).
     if not LSkip then
     begin
@@ -4734,7 +4734,7 @@ begin
     // Last gate before reporting: an INHERITED member of the enclosing struct
     // outranks a unit-level global of the same name, so none of the candidates
     // gathered above was ever the callee. This is CalleeShadowsUses' rule for a
-    // member the intra-unit pass could not see — CollectStruct never joins an
+    // member the intra-unit pass could not see - CollectStruct never joins an
     // ancestor's scope, so `GetFileNames(FShellItems)` inside
     // TCustomFileOpenDialog.GetResults (FMX.Dialogs.Win) bound the 4-parameter
     // implementation-section procedure instead of TCustomFileDialog's
@@ -4751,7 +4751,7 @@ begin
     begin
       // Re-point while we are here: the binding was wrong, not just the arity,
       // and everything downstream (typing, navigation) reads these maps. Own
-      // model only — the same write discipline every parallel pass here follows.
+      // model only - the same write discipline every parallel pass here follows.
       LModel.RefMap[LCallee] := NIL_SYM;
       LExt.UnitId := LUid;
       LExt.Sym := LS;
@@ -4768,7 +4768,7 @@ begin
   end;
 end;
 
-{ Phase 3c — cross-model typing }
+{ Phase 3c - cross-model typing }
 
 function XNil: TSemaXType;
 begin
@@ -4792,7 +4792,7 @@ end;
 // Dedup-registers one generic instantiation; returns its instance-table index.
 // LOCKED (FInstLock): the parallel inherited-member pass reaches here through
 // FindMemberX -> ResolveTypeExpr on generic heritage (TList<T> = class(
-// TEnumerable<T>)) with one worker per unit — unguarded, concurrent
+// TEnumerable<T>)) with one worker per unit - unguarded, concurrent
 // FInstances.Add corrupted the list (AV on the full-RTL scan). Every other
 // FInstances access is locked too (InstanceRead below): a TList read during
 // another thread's Add sees a mid-reallocation array.
@@ -4801,7 +4801,7 @@ function TPasSemaProject.Instantiate(const ABase: TSemaXType;
 var
   LInst: TSemaInstance;
 begin
-  // The instance record is its own dictionary key — integer hash + compare
+  // The instance record is its own dictionary key - integer hash + compare
   // (TSemaInstanceComparer), no string is built. Args is shared by reference
   // between the key and the stored instance; instances are append-only and
   // never mutated, so the shared array is safe.
@@ -4819,7 +4819,7 @@ begin
   end;
 end;
 
-// Locked FInstances[AInst] snapshot — see the Instantiate comment.
+// Locked FInstances[AInst] snapshot - see the Instantiate comment.
 function TPasSemaProject.InstanceRead(AInst: Integer): TSemaInstance;
 begin
   FInstLock.Enter;
@@ -4844,7 +4844,7 @@ begin
   if LName = NIL_NODE then
     Exit;
   // An ANONYMOUS struct's symbol has the struct node ITSELF as its declaration
-  // — there is no name node and no nkTypeDecl above it (see DeclareAnonStruct).
+  // - there is no name node and no nkTypeDecl above it (see DeclareAnonStruct).
   if LM.Tree.Nodes[LName].Kind in [nkRecordType, nkClassType, nkInterfaceType,
      nkObjectType, nkHelperType] then
     Exit(LName);
@@ -4857,7 +4857,7 @@ begin
     Result := LM.Tree.Nodes[Result].NextSibling;
 end;
 
-// The name-ident nodes of a generic type's parameters, in declaration order —
+// The name-ident nodes of a generic type's parameters, in declaration order -
 // the positional frame instantiation args are matched against.
 function TPasSemaProject.GenericParamIdents(AMid,
   ASym: Integer): TArray<Integer>;
@@ -4873,7 +4873,7 @@ begin
   // A generic TYPE hangs its parameters off the nkTypeDecl; a generic METHOD
   // (16.2.1, `function Wrap<T>(...)`) off its nkRoutine. Both are read the
   // same way from there, which is what lets ONE substitution frame serve
-  // either — see InferMethodFrame.
+  // either - see InferMethodFrame.
   LParent := LM.Tree.Nodes[LName].Parent;
   if (LParent = NIL_NODE) or not (LM.Tree.Nodes[LParent].Kind in
      [nkTypeDecl, nkRoutine]) then
@@ -4957,10 +4957,10 @@ begin
 end;
 
 { The TYPE a generic parameter is constrained to, or XNil when it has no type
-  constraint — `F: IInspectable` answers IInspectable, and `T: class` answers
-  TObject, because "a reference type" (16 §16.4.1) means one, and dcc agrees:
+  constraint - `F: IInspectable` answers IInspectable, and `T: class` answers
+  TObject, because "a reference type" (16 sec. 16.4.1) means one, and dcc agrees:
   `V.Free` and `V.ClassName` compile under a bare `T: class`. The other two kind
-  constraints answer nothing, and that is dcc's line too — under `T: record` or
+  constraints answer nothing, and that is dcc's line too - under `T: record` or
   a lone `T: constructor` the same `V.Free` is `E2003`, all three probed.
 
   The parameter symbol's DeclNode is its name inside the `nkGenericParam` group,
@@ -4970,7 +4970,7 @@ end;
 
   A method BODY's parameter has no constraints of its own, and that is not a
   parse gap but the language: `procedure TList<T>.Sort;` may not repeat them
-  (16 §16.4.1 puts them on the declaration, once). The body is also where nearly
+  (16 sec. 16.4.1 puts them on the declaration, once). The body is also where nearly
   every use of a constrained parameter lives, so the group is searched first and
   the DECLARING type's same-named parameter second. }
 function TPasSemaProject.ConstraintsOfParamX(
@@ -4983,7 +4983,7 @@ var
 
   { EVERY constraint of AGroup that names a type, in source order. All of
     them, not the first: `TKey: IComparable<TKey>, IEquatable<TKey>,
-    IHashable` guarantees the members of all three at once (16 §16.4.1), and
+    IHashable` guarantees the members of all three at once (16 sec. 16.4.1), and
     a utility library calls `AKey.GetHashCode` (the third) and `A.Equals(B)` (the
     second) in adjacent methods. }
   function AllTypeConstraints(
@@ -5014,7 +5014,7 @@ var
     is what tells the three apart.
 
     `constructor` counts for the same reason `class` does, and it is not a
-    formality: only a CLASS can satisfy it (16 §16.4.1 — a record has no
+    formality: only a CLASS can satisfy it (16 sec. 16.4.1 - a record has no
     constructor to require), so a `T: constructor` parameter is a class
     parameter that additionally promises a parameterless `Create`.
     `Atomic<I; T: constructor>` in a threading library writes exactly that and
@@ -5081,7 +5081,7 @@ begin
   if Length(Result) > 0 then
     Exit;
   // Nothing here: this is a method body's `<T>`, and the constraint is on the
-  // type. Match by NAME rather than by position — the body may spell the
+  // type. Match by NAME rather than by position - the body may spell the
   // parameters differently from the declaration, and dcc binds them positionally
   // but names them here, so a same-named parameter is the honest link and a
   // renamed one simply finds nothing rather than the wrong constraint.
@@ -5114,7 +5114,7 @@ begin
       Exit;
     end;
   // Still nothing: the parameter belongs to a generic METHOD rather than to the
-  // type (16 §16.2.1), so the constraints are on the method's own declaration —
+  // type (16 sec. 16.2.1), so the constraints are on the method's own declaration -
   // `function GetNamedObject<T: TRttiNamedObject>(...)` in System.Rtti's
   // TRttiType, whose body writes a bare `<T>` and then calls `Obj.HasName`.
   // Find the declaration by NAME in the struct's member scope and read its
@@ -5143,7 +5143,7 @@ end;
 
 { The NAME of the routine whose generic-parameter list ANode sits in, lowered.
   ANode is the parameter's own ident, so the walk is group -> list -> routine,
-  and the routine's name may be qualified (`TRttiType.GetNamedObject`) — the
+  and the routine's name may be qualified (`TRttiType.GetNamedObject`) - the
   LAST segment is the method's own name. '' when the shape is anything else. }
 function TPasSemaProject.RoutineNameOfParam(AMid, ANode: Integer): string;
 var
@@ -5162,8 +5162,8 @@ begin
   LRoutine := LM.Tree.Nodes[LList].Parent;
   if (LRoutine = NIL_NODE) or (LM.Tree.Nodes[LRoutine].Kind <> nkRoutine) then
     Exit;
-  // A qualified implementation name is a FLAT run of nkIdent children —
-  // `TFoo`, `Bar` — and each segment may carry its OWN nkGenericParams right
+  // A qualified implementation name is a FLAT run of nkIdent children -
+  // `TFoo`, `Bar` - and each segment may carry its OWN nkGenericParams right
   // after it (`TList<T>.Sort`, `TFinder.Pick<T>`). So the owner of this list is
   // the ident immediately before it, not the first or the last segment: taking
   // the first answered `TFinder` and looked up a method by the class's name.
@@ -5249,7 +5249,7 @@ begin
   end;
 end;
 
-{ 16.4.1 — type-parameter constraints, checked at each instantiation site.
+{ 16.4.1 - type-parameter constraints, checked at each instantiation site.
 
   A DIAGNOSTIC pass, so it is deliberately conservative: every uncertainty
   skips silently. dcc32 37.0 was probed for the exact accepted sets before any
@@ -5266,7 +5266,7 @@ end;
 
   Not checked, and each for a stated reason:
     T: SomeInterface  needs the implemented-interface list, including the ones
-                      inherited from ancestors — a traversal nothing here does
+                      inherited from ancestors - a traversal nothing here does
                       yet (FindMemberX deliberately follows only the FIRST
                       heritage entry). Silence is correct until it exists.
     constructor       satisfied by essentially every class, since TObject
@@ -5320,7 +5320,7 @@ begin
           begin
             // A TYPE constraint. Only a class one is checked (see header).
             // The constraint node lives in the DECLARING model, so it must be
-            // resolved there — not in AId, where that node index means
+            // resolved there - not in AId, where that node index means
             // something else entirely.
             LConX := ResolveTypeExpr(LBase.UnitId,
               FModels[LBase.UnitId].Tree.Nodes[LC].FirstChild);
@@ -5331,15 +5331,15 @@ begin
                   [LParamName, XTypeText(LConX)]));
             Continue;
           end;
-          // A keyword constraint: class / record / constructor — reserved
+          // A keyword constraint: class / record / constructor - reserved
           // words, so the token KIND is the test (no text copy).
           LTok := FModels[LBase.UnitId].Tree.Nodes[LC].FirstToken;
           if (LTok < 0) or
              (LTok > High(FModels[LBase.UnitId].Tree.Source.Visible)) then
             Continue;
           if LCat = tcUnknown then
-            Continue;   // category not modeled — say nothing
-          // NB: qualified kinds — System.TypInfo's TTypeKind also names
+            Continue;   // category not modeled - say nothing
+          // NB: qualified kinds - System.TypInfo's TTypeKind also names
           // tkClass/tkRecord and shadows ours in this unit.
           case FModels[LBase.UnitId].Tree.Source.VisibleToken(LTok).Kind of
             PasTree.Types.tkClass:
@@ -5375,19 +5375,19 @@ begin
     Result := XNil;
 end;
 
-{ 19.3.1/19.3.3 — an attribute's TypeRef must resolve to a class descending
+{ 19.3.1/19.3.3 - an attribute's TypeRef must resolve to a class descending
   from TCustomAttribute. dcc32 37.0 probed first (never guess a diagnostic
   code): `[TObject] TFoo = class end;` and a from-scratch `TNotAnAttr =
   class end; [TNotAnAttr] ...` both give
-  `E2010 Incompatible types: '<name>' and 'TCustomAttribute'` — the exact
+  `E2010 Incompatible types: '<name>' and 'TCustomAttribute'` - the exact
   SE2010_IncompatibleTypes shape 2.6.1's assignment-compatibility checks
   already use, just fired from a declaration site instead of an assignment.
 
   Conservative like CheckConstraints, for the same reason: a diagnostic
   pass says nothing the moment it is unsure, rather than guess.
-  - TCustomAttribute itself must resolve (ResolveCustomAttributeX) — a unit
+  - TCustomAttribute itself must resolve (ResolveCustomAttributeX) - a unit
     that genuinely cannot see it says nothing at all.
-  - The TypeRef must resolve to an actual class (XCatOf = tcClass) — an
+  - The TypeRef must resolve to an actual class (XCatOf = tcClass) - an
     unresolved name already gets its own E2003 elsewhere (or, for a name
     this pass cannot judge at all, nothing), and this must never pile a
     second diagnostic on top of a first one, or invent one for something
@@ -5412,7 +5412,7 @@ begin
     // the name up in scope, so ordinary resolution here means nothing. The
     // parser already tagged them (nkAttribute.Aux, PasAttrMagicAux).
     //
-    // Not a nicety — this was 3 false E2010 on a real project. A component
+    // Not a nicety - this was 3 false E2010 on a real project. A component
     // suite declares `Unsafe = class // for internal use` (dxCore.pas), so
     // the bare name in `[unsafe] FField: IPalette;` resolves to THAT class;
     // 19.3.1's `+Attribute` fallback never fires, because it only fires when
@@ -5476,7 +5476,7 @@ begin
           Exit(LInst.Args[LIdx]);
         Exit;
       end;
-    Exit;   // someone else's parameter (an enclosing generic) — leave open
+    Exit;   // someone else's parameter (an enclosing generic) - leave open
   end;
   if AX.Inst <> NIL_INST then
   begin
@@ -5484,7 +5484,7 @@ begin
     // only), and the array is copied only when a substitution actually
     // changes an element. When nothing changes the result is the same
     // instance by dedup, so both the Copy and the Instantiate lock round are
-    // skipped — the common case on the 126k-call path.
+    // skipped - the common case on the 126k-call path.
     var LShared := InstanceRead(AX.Inst).Args;
     LArgs := nil;
     for LIdx := 0 to High(LShared) do
@@ -5505,13 +5505,13 @@ begin
   end
   // A type DECLARED INSIDE the generic this frame instantiates has no
   // arguments of its own, yet its definition is written in that generic's
-  // parameters — so the frame must travel WITH it, or it is lost at exactly
+  // parameters - so the frame must travel WITH it, or it is lost at exactly
   // the point it is about to be needed.
   //
   // `TList<T>` declares `arrayofT = array of T` as a nested type and returns it
   // from `property List`. `with FSelections.List[I] do` then substitutes the
   // member type over {T := TSelection}, gets back the bare nested-type symbol,
-  // indexes it — and the element is the OPEN `T`, because by then nothing knows
+  // indexes it - and the element is the OPEN `T`, because by then nothing knows
   // which instantiation it came from. 78 of 94 diagnostics on one project were
   // that single shape, in two units of the same editor component.
   else if DeclaredWithinX(AX.UnitId, AX.Sym, LInst.UnitId, LInst.Sym) then
@@ -5543,7 +5543,7 @@ end;
 { The real declaration behind a generic base, when the head of a `Foo<...>`
   resolved to a compiler-seeded BUILTIN. Such a symbol has no source
   declaration and therefore no generic parameter list, so an arity check
-  against it always fails and the instantiation degrades to the OPEN generic —
+  against it always fails and the instantiation degrades to the OPEN generic -
   which is what silently happened to every `TArray<T>` in the codebase, TArray
   being seeded (PasTree.Sema.Builtins). Same redirect FindMemberX does for a
   DeclNode-less builtin. Returns AX unchanged when there is nothing to fix. }
@@ -5569,20 +5569,20 @@ end;
 // nkTypeArgs the args are resolved too and the instantiation is registered;
 // an unresolved arg degrades to the plain (open) generic.
 { A type reference that supplies NO type arguments names the arity-0
-  declaration (16.1.2) — even when a same-named GENERIC is closer in scope.
+  declaration (16.1.2) - even when a same-named GENERIC is closer in scope.
   dcc-verified: with `TBase` in unit A and `TBase<T> = class(TBase)` in unit B,
   B's own `TDerived = class(TBase)` means A's.
 
   A component suite leans on it: `TBarAccessibilityHelper` is a plain class in
   one unit and `TBarAccessibilityHelper<T: TWinControl>` a generic in
   another, and the latter unit then writes both spellings. Taking
-  the nearer (generic) one is not merely imprecise — the generic's OWN heritage
+  the nearer (generic) one is not merely imprecise - the generic's OWN heritage
   is that same bare name, so the walk resolves it to ITSELF and the
   self-reference guard in FindMemberX stops the ancestry dead. 100+ false E2003
   in that library, on names declared three hops up.
 
   Two places to look, in dcc's own order: the same scope's overload chain
-  (16.1.2's arity overloading), then the used units — the cross-UNIT case is
+  (16.1.2's arity overloading), then the used units - the cross-UNIT case is
   ordinary shadowing rather than an overload chain, so nothing links the two.
   The generic test is deliberately structural and allocation-free: a generic
   type's member scope hangs off an sckGenericParams scope (CollectTypeDecl), so
@@ -5594,7 +5594,7 @@ var
   LNameLower: string;
 begin
   Result := XPlain(AMid, ASym);
-  // Reached only for a BARE reference to a GENERIC type — both conditions are
+  // Reached only for a BARE reference to a GENERIC type - both conditions are
   // tested INLINE by the callers, because this body allocates (NodeNameLower)
   // and every type reference in the closure would otherwise pass through it.
   // Taking the name eagerly measured +7% (1886 -> 2021 ms) on the 665-unit
@@ -5613,7 +5613,7 @@ begin
   end;
   // Scan the used units for a NON-generic of that name, rather than asking
   // FindInUses for "the" one. FindInUses answers with last-uses-wins, which is
-  // the right rule between equals — but arity is part of the identity, so a
+  // the right rule between equals - but arity is part of the identity, so a
   // generic is not an equal here and must not end the search. `TObjectList` is
   // the case that proves it: non-generic in one RTL unit, generic in another,
   // and a unit importing BOTH gets whichever it happened to import later. Four
@@ -5623,7 +5623,7 @@ begin
     Result := XPlain(LUid, LFound);
 end;
 
-{ T for a `class of T` (15.2.1), XNil for anything else — chasing alias links,
+{ T for a `class of T` (15.2.1), XNil for anything else - chasing alias links,
   since a class-reference type is usually reached through one
   (`TPainterClass = class of TPainter`, then a function returning it). The
   member walk already hops through nkClassOf inline; this is the same step for
@@ -5656,7 +5656,7 @@ begin
 end;
 
 { Is AX a DYNAMIC array, after following aliases? `TBytes` is `TArray<Byte>` is
-  `array of T`, so the answer takes a walk rather than a TypeCat test — and the
+  `array of T`, so the answer takes a walk rather than a TypeCat test - and the
   distinction from a STATIC array is the whole point: only the dynamic one has
   the pseudo-constructor below. A dimension list makes the array static, so the
   test is "exactly one child, the element type"; `array of const` (Aux = 1) has
@@ -5677,7 +5677,7 @@ begin
     LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
     if LDef = NIL_NODE then
     begin
-      // A SEEDED array type (`TArray`, `TBytes` — PasTree.Sema.Builtins) has no
+      // A SEEDED array type (`TArray`, `TBytes` - PasTree.Sema.Builtins) has no
       // declaration to walk, and every seed of that category is a dynamic
       // array. Answering from the category is also what makes this work in a
       // model that never used System.SysUtils, where the real TBytes is not
@@ -5750,7 +5750,7 @@ begin
 end;
 
 // True when ASym is a GENERIC type. Read straight off the flag CollectTypeDecl
-// set — see sfGeneric for why this is not derived here.
+// set - see sfGeneric for why this is not derived here.
 function TPasSemaProject.IsGenericTypeSym(AMid, ASym: Integer): Boolean;
 begin
   Result := sfGeneric in FModels[AMid].Symbols[ASym].Flags;
@@ -5783,8 +5783,8 @@ begin
             Exit;
         end;
         LSym := LM.RefMap[LName];
-        // The generic test is inline so the overwhelmingly common case — a
-        // non-generic type reference — costs one set membership and no call.
+        // The generic test is inline so the overwhelmingly common case - a
+        // non-generic type reference - costs one set membership and no call.
         if (LSym <> NIL_SYM) and (LM.Symbols[LSym].Kind in
            [skType, skBuiltinType, skGenericParam]) then
         begin
@@ -5808,11 +5808,11 @@ begin
         // SymDeclTypeX, which is only ever given a declaration's type slot.
       end;
     // An ANONYMOUS structured type written inline in a type slot. It has no
-    // name, so there is nothing in RefMap — but CollectStruct gave it a member
+    // name, so there is nothing in RefMap - but CollectStruct gave it a member
     // scope and DeclareAnonStruct gave that scope a symbol, and the node is the
     // way back to both. Through StructSymAtNode: this is the ONE cross-model
     // NodeScope read reachable after analysis (completion typing a foreign
-    // declaration), so it must keep answering on a RELEASED model — from the
+    // declaration), so it must keep answering on a RELEASED model - from the
     // snapshot ReleaseTransientMaps takes.
     nkRecordType, nkClassType, nkInterfaceType, nkObjectType:
       begin
@@ -5858,7 +5858,7 @@ begin
           end;
           // The chain only links declarations in ONE model. When the arities
           // live in DIFFERENT used units there is nothing to chain, and the
-          // ordinary lookup returned whichever was imported last — so
+          // ordinary lookup returned whichever was imported last - so
           // `TdxPDFObjectList<T>` can land on a plain class of that name in
           // another unit and take a whole ancestry with it. Mirror of the bare
           // case in PreferNonGeneric; searched only after the chain misses, so
@@ -5870,7 +5870,7 @@ begin
           if (ArityOfTypeSym(LBase.UnitId, LBase.Sym) <> LArgCount) and
              not (sfBuiltin in FModels[LBase.UnitId].Symbols[LBase.Sym].Flags) then
           begin
-            // The referring unit's own interface section first — see
+            // The referring unit's own interface section first - see
             // FindTypeInSelfArity; then the used units.
             if FindTypeInSelfArity(AId,
                  LM.Tree.NodeNameLower(LM.Tree.Nodes[ANode].FirstChild),
@@ -5894,7 +5894,7 @@ begin
           LArg := ResolveTypeExpr(AId, LArgNode);
           // A type ARGUMENT may be a NESTED type named through its outer type
           // (`TDispatchMessageWithValue<TCustomMemoModel.TLineInfo>`, FMX), and
-          // nothing binds that last segment this early — the same gap the
+          // nothing binds that last segment this early - the same gap the
           // HERITAGE case has, and the same helper answers it. Reached only
           // after the plain lookup missed, so the common argument pays nothing.
           //
@@ -5929,7 +5929,7 @@ end;
   ResolveTypeExpr reads the maps, and nothing has bound that last segment: Phase 1
   resolves a type-qualified member only within its own unit, and the cross-unit
   member pass (CrossType) runs long after the passes that decide E2003. As a
-  HERITAGE reference the miss is silent and expensive — the class is left with no
+  HERITAGE reference the miss is silent and expensive - the class is left with no
   ancestry, so every inherited member used in its methods reads as undeclared
   (12 diagnostics across 9 FMX units from this one form, all of them the
   `WordWrap`/`HorzAlign`/`VertAlign` family).
@@ -5937,20 +5937,20 @@ end;
   Kept OUT of ResolveTypeExpr itself, which is on the BindTypesX/CrossType hot
   path: callers reach this only after the plain lookup has already missed.
 
-  The lookup is the qualifier's own members and then its ANCESTORS' — a nested
+  The lookup is the qualifier's own members and then its ANCESTORS' - a nested
   type is inherited like any other member (11.4.1), and the qualifier need not be
   the class that declares it:
 
     TTextSettings = class(TALBaseEdit.TDisabledStateStyle.TTextSettings)  // Alcinoe
 
-  where TDisabledStateStyle declares no TTextSettings at all — it comes from its
+  where TDisabledStateStyle declares no TTextSettings at all - it comes from its
   own ancestor TBaseStateStyle. Costing three false E2003 on `Create`, because a
   heritage miss leaves the DESCENDANT with no ancestry: TObject's constructor is
   then out of reach and every member the class inherits reads as undeclared.
 
   Still deliberately NOT FindMemberX: this is called FROM FindMemberX's ancestor
-  walk, so `TFoo = class(TFoo.TBar)` — where finding TBar needs TFoo's ancestry,
-  which is the very clause being resolved — would recurse until the stack ran
+  walk, so `TFoo = class(TFoo.TBar)` - where finding TBar needs TFoo's ancestry,
+  which is the very clause being resolved - would recurse until the stack ran
   out. ADepth caps the ancestor hops instead, and only that hop spends it: the
   qualifier recursion below walks to a strictly smaller node and is bounded by
   the chain. }
@@ -6003,7 +6003,7 @@ begin
       nkClassType, nkInterfaceType, nkRecordType, nkObjectType:
         begin
           // Up to the qualifier's ANCESTOR and ask again. The heritage clause is
-          // the leading run of type references and the FIRST is the ancestor —
+          // the leading run of type references and the FIRST is the ancestor -
           // the same convention AncestorOfX and FindMemberX use. No heritage
           // clause ends the walk: the implicit TObject/IInterface declare no
           // nested types, so there is nothing there to find.
@@ -6026,7 +6026,7 @@ end;
 { Cross-unit helper injection (15.3) ---------------------------------------
 
   A `class/record helper for T` declared in unit B applies wherever B is in
-  scope — the common real-world arrangement (TGUIDHelper in System.SysUtils
+  scope - the common real-world arrangement (TGUIDHelper in System.SysUtils
   for System's TGUID; TStringHelper for the intrinsic string). Same-unit
   helpers are already joined by the resolver (JoinHelperScopes); this is the
   cross-model side, which cannot use scope joining at all (a scope index only
@@ -6035,30 +6035,30 @@ end;
 
   The dcc-verified rules this implements:
   - The ACTIVE helper is per REFERRING unit: own unit's last declaration
-    first, then `uses` last-to-first — ordinary last-uses-wins (two units
+    first, then `uses` last-to-first - ordinary last-uses-wins (two units
     each declaring a helper for one type: the later-listed unit's wins).
   - At most ONE helper is active per (referring unit, type): a miss in the
     active helper's members falls through to the type's OWN members, never
     to an earlier-in-scope helper (15.3.3).
-  - A helper MEMBER hides the type's own member of the same name — so the
+  - A helper MEMBER hides the type's own member of the same name - so the
     helper is consulted BEFORE the member scope at every hop. NB the
     same-unit join (JoinHelperScopes) enforces the same order, through a
-    scope's Shadowing list — searched before its own names.
+    scope's Shadowing list - searched before its own names.
   - An implementation-section helper is unit-local; interface-section ones
-    (however deeply nested — 15.3.4) export. }
+    (however deeply nested - 15.3.4) export. }
 
 { Scans every model for helper DECLARATIONS (phase A), then resolves the one
   ACTIVE helper per (referring model, extended type) into FHelperIdx (phase
   B). Sequential by contract: the parallel FindMemberX consumers only READ
   FHelperIdx, so the hot path needs no lock. Rebuilt per cross run, which is
-  also how the staged pipeline's growing closure is handled — its finalizer
+  also how the staged pipeline's growing closure is handled - its finalizer
   simply re-scans.
 
   Requires CrossResolve to have run: a `for T` target resolves through
   ResolveTypeExpr, i.e. via RefMap/ExtRefMap. }
 // Registers AReg as AMid's active helper under every key AMid could reach
 // the extended type by. Callers go weakest-precedence first, so a later
-// write simply wins. Writes ONLY FHelperIdx[AMid] — phase B farms one worker
+// write simply wins. Writes ONLY FHelperIdx[AMid] - phase B farms one worker
 // per referring model, so this is the own-slot write discipline every
 // parallel pass here follows.
 procedure TPasSemaProject.PublishHelper(AMid: Integer;
@@ -6080,7 +6080,7 @@ var
 begin
   LExt.UnitId := AReg.HelperMid;
   LExt.Sym := AReg.Sym;
-    // A concrete type is one identity — but it may ALSO be an alias of a
+    // A concrete type is one identity - but it may ALSO be an alias of a
     // builtin, and then it is that builtin's identity too (`TUInt32Helper =
     // record helper for UInt32` in System.Classes, applied to a value declared
     // `Cardinal`; System.pas says `UInt32 = Cardinal`). So both keys go in, and
@@ -6092,15 +6092,15 @@ begin
     // `record helper for TRect` with Winapi.Windows last in its uses, so it
     // registered Winapi's alias; SynEditScrollBars declares `R: TRect` with
     // System.Types in its IMPLEMENTATION uses, so the local carries the
-    // canonical symbol — a different key, and every `R.SetTop` came back
+    // canonical symbol - a different key, and every `R.SetTop` came back
     // undeclared while the helper sat right there in scope.
     for var LAlias in AReg.Aliases do
       Put(LAlias.UnitId, LAlias.Sym);
     if AReg.TargetName = '' then
       Exit;
-    // Builtin target: re-resolve the NAME in the REFERRING model — its own
+    // Builtin target: re-resolve the NAME in the REFERRING model - its own
     // seeded symbol, plus the real declaration the walk may redirect to
-    // (ResolveRealDecl — System.pas's TObject for a seeded TObject). Doing
+    // (ResolveRealDecl - System.pas's TObject for a seeded TObject). Doing
     // both here is what removes the old hot-path by-name fallback probe.
     //
     // Every name in the ALIAS GROUP, because the seeds are distinct symbols
@@ -6123,11 +6123,11 @@ begin
   ClearHelperIdx;
   // Same lifetime as the helper index, and for the same reason: every driver
   // that runs the body passes calls this first, and a staged run REPLACES
-  // interface-only models with full ones — a worklist held over from a previous
+  // interface-only models with full ones - a worklist held over from a previous
   // run would name nodes of a tree that no longer exists.
   ReleaseCrossWork;
   // Both phases below run PARALLEL workers, and PublishHelper's
-  // ResolveRealDecl would APPEND a model on a first-time System load — load
+  // ResolveRealDecl would APPEND a model on a first-time System load - load
   // it (and SysInit) now, on this thread, so no worker can. The drivers all
   // do this already; repeating it here is a memoized no-op that turns the
   // engine-order assumption into a guarantee.
@@ -6137,11 +6137,11 @@ begin
   SetLength(FModelHelpers, LCount);
   SetLength(FHelperIdx, LCount);
   // ---- phase A: collect declarations (parallel; each worker scans its own
-  // model's symbols and writes only FModelHelpers[mid] — the same own-slot
+  // model's symbols and writes only FModelHelpers[mid] - the same own-slot
   // discipline as every pass; ResolveTypeExpr reads other models' frozen
   // Phase-1 state only). This was a SEQUENTIAL sweep over every symbol of
   // every model, and together with phase B it cost a full second of the
-  // client run — a fifth of it inside one function, on one core. ----
+  // client run - a fifth of it inside one function, on one core. ----
   ForEachIndex(LCount - 1, 'helpers-collect',
     procedure(AMid: Integer)
     var
@@ -6162,7 +6162,7 @@ begin
       if (LDef = NIL_NODE) or (LM.Tree.Nodes[LDef].Kind <> nkHelperType) then
         Continue;
       // The `for T` target: LAST of the leading run of type references (a
-      // class helper may name a helper ancestor first — `class helper (X)
+      // class helper may name a helper ancestor first - `class helper (X)
       // for T`; the parser adopts X before T).
       LRef := LM.Tree.Nodes[LDef].FirstChild;
       LLast := NIL_NODE;
@@ -6176,7 +6176,7 @@ begin
         Continue;
       LX := ResolveTypeExpr(AMid, LLast);
       if not XValid(LX) then
-        Continue;   // target didn't resolve — nothing to inject
+        Continue;   // target didn't resolve - nothing to inject
       LReg.Aliases := nil;
       if FModels[LX.UnitId].Symbols[LX.Sym].Kind = skBuiltinType then
       begin
@@ -6201,13 +6201,13 @@ begin
           if not (FModels[LCanon.UnitId].Tree.Nodes[LCDef].Kind in
              [nkIdent, nkMember]) then
             Break;
-          // `T = type Base` (2 §2.5.1) declares a DISTINCT type, and a helper
+          // `T = type Base` (2 sec. 2.5.1) declares a DISTINCT type, and a helper
           // for it is NOT a helper for Base. The parser marks the nkTypeDecl
           // with Aux = 1, which is the whole difference between the two forms
           // here. Missing it cost 17 false reports in one measurement:
           // `TEditMask = type string` with its own helper claimed the `string`
           // key in FMX.MaskEdit and hid TStringHelper, so ordinary
-          // `NewText.Substring` stopped resolving — a helper made INACTIVE by
+          // `NewText.Substring` stopped resolving - a helper made INACTIVE by
           // registering another one too widely.
           var LCParent := FModels[LCanon.UnitId].Tree.Nodes[LCDef].Parent;
           if (LCParent <> NIL_NODE) and
@@ -6217,7 +6217,7 @@ begin
           LCanon := ResolveTypeExpr(LCanon.UnitId, LCDef);
           if not XValid(LCanon) then
             Break;
-          // Same type, another symbol — index the helper under it too. Only
+          // Same type, another symbol - index the helper under it too. Only
           // reached for a PLAIN alias: the `type Base` test above has already
           // broken out of the walk for a distinct type.
           if FModels[LCanon.UnitId].Symbols[LCanon.Sym].Kind <> skBuiltinType
@@ -6260,9 +6260,9 @@ begin
     end);
   // ---- phase B: apply precedence, per referring model (parallel; each
   // worker reads phase A's committed FModelHelpers and writes only its own
-  // FHelperIdx slot — see PublishHelper). ----
+  // FHelperIdx slot - see PublishHelper). ----
   // Weakest first so a later write wins: used units in `uses` order (a
-  // later-listed unit beats an earlier one — dcc-verified last-uses-wins),
+  // later-listed unit beats an earlier one - dcc-verified last-uses-wins),
   // then the referring unit's OWN helpers (nearest; impl-section ones count
   // here). Within one unit, declaration order, later winning.
   ForEachIndex(LCount - 1, 'helpers-publish',
@@ -6294,7 +6294,7 @@ begin
 end;
 
 // The active helper's member scope, consulted at one FindMemberX hop. HOT
-// PATH: a single integer-keyed lookup in a prebuilt read-only dictionary —
+// PATH: a single integer-keyed lookup in a prebuilt read-only dictionary -
 // no allocation, no lock. Only the helper's OWN member scope is read
 // (FindLocalDeep), never a recursive FindMemberX, so a malformed helper graph
 // cannot cycle; a helper ANCESTOR's members (`class helper (X) for T`) are
@@ -6320,7 +6320,7 @@ begin
     // `string`/`Integer`/`Char` symbol (PasTree.Sema.Builtins), so which one a
     // value carries depends on where its type was READ. `S.Trim` on a local
     // works because the local's type is this model's seed and Publish indexed
-    // exactly that — but `UpperCase(S).Trim` carries System.SysUtils' seed and
+    // exactly that - but `UpperCase(S).Trim` carries System.SysUtils' seed and
     // `Give(S).Trim` a third unit's, and both missed. That is the whole
     // `TStringHelper`/`TCharHelper` bucket of the member flag: the helper is
     // active, the name is right, and the KEY was a different `string`.
@@ -6348,7 +6348,7 @@ begin
   // derived one and `ReturnTypeHandle`/`IsAbstract` live on its ancestor. A
   // unit using only Spring resolved them and one using both did not.
   //
-  // Still no recursive FindMemberX — only helper member scopes are read, and
+  // Still no recursive FindMemberX - only helper member scopes are read, and
   // the walk is depth-capped, so a malformed helper graph cannot cycle.
   for var LHop := 1 to 8 do
   begin
@@ -6374,7 +6374,7 @@ end;
 { The ANCESTOR helper of a `class helper (X) for T` declaration, XNil when the
   helper names none. The parser adopts the leading run of type references in
   source order, so with two of them the FIRST is the ancestor and the LAST is
-  the extended type — the same run BuildHelperMap reads from the other end. }
+  the extended type - the same run BuildHelperMap reads from the other end. }
 function TPasSemaProject.HelperAncestorX(AMid, ASym: Integer): TSemaXType;
 var
   LM: TPasSemaModel;
@@ -6397,7 +6397,7 @@ begin
     LRef := LM.Tree.Nodes[LRef].NextSibling;
   end;
   if (LFirst = NIL_NODE) or (LFirst = LLast) then
-    Exit;   // only the `for T` target — no helper ancestor
+    Exit;   // only the `for T` target - no helper ancestor
   Result := ResolveTypeExprNested(AMid, LFirst);
 end;
 
@@ -6405,7 +6405,7 @@ end;
 // heritage entry (ancestor class / base interface) across models, closing
 // each hop over the current instantiation. ACtx returns the instantiation
 // in whose frame the found member's declared type must be substituted.
-// AFromMid is the REFERRING unit — it decides which helper is active (see
+// AFromMid is the REFERRING unit - it decides which helper is active (see
 // the helper-injection block above); it does not otherwise affect the walk.
 function TPasSemaProject.FindMemberX(AFromMid: Integer;
   const ABase: TSemaXType;
@@ -6418,7 +6418,7 @@ var
   LRootName: string;   // the implicit ancestor for a heritage-less struct
 begin
 {$IFDEF PASTREE_MEMBERSTATS}
-  // Top-level calls only — the constraint hop re-enters and would double-count.
+  // Top-level calls only - the constraint hop re-enters and would double-count.
   if ADepth = 0 then
     NoteMemberQuery(AFromMid, ABase, ANameLower);
 {$ENDIF}
@@ -6435,10 +6435,10 @@ begin
     if LM.Symbols[LCur.Sym].Kind = skGenericParam then
     begin
       // A value whose type is an UNBOUND type parameter still has the members
-      // its CONSTRAINT guarantees (16 §16.4.1): `class var FFactory: F` with
+      // its CONSTRAINT guarantees (16 sec. 16.4.1): `class var FFactory: F` with
       // `F: IInspectable` reaches `_AddRef` through IInspectable's own
       // IInterface ancestor and through nothing else. The walk used to stop at
-      // the parameter, which is 40 false E2003 in System.Win.WinRT alone —
+      // the parameter, which is 40 false E2003 in System.Win.WinRT alone -
       // every `_AddRef`/`QueryInterface` on one of those factory fields.
       //
       // The parameter's own frame is dropped deliberately: a constraint is
@@ -6449,7 +6449,7 @@ begin
       // members of ALL of them: `TKey: IComparable<TKey>, IEquatable<TKey>,
       // IHashable` in a utility library means `AKey.GetHashCode` (IHashable) and
       // `A.Equals(B)` (IEquatable) both compile, though neither is on the
-      // FIRST constraint. So the extra ones are tried too — after the first,
+      // FIRST constraint. So the extra ones are tried too - after the first,
       // which keeps the single-constraint case (all but a handful) walking
       // exactly as before, and only on a MISS, so the answer is still the
       // first constraint that HAS the name.
@@ -6467,7 +6467,7 @@ begin
       Exit;
     // The ACTIVE helper for the current hop's type, before the type's own
     // members: a helper member HIDES the type's own of the same name
-    // (dcc-verified). Checking per hop also covers descendants — a helper
+    // (dcc-verified). Checking per hop also covers descendants - a helper
     // for TBase applies to a TDerived value once the walk reaches TBase.
     // ACtx deliberately NIL_INST: a helper cannot extend an instantiation,
     // so its members' types never involve the target's parameters.
@@ -6483,20 +6483,20 @@ begin
       // member scope carries a joined scope only where one was deliberately
       // injected, and the sole injector is PasTree.Sema.Resolver's
       // JoinHelperScopes. So this is what lets a helper declared ALONGSIDE
-      // its extended type be seen from any OTHER unit — `M.Twice` in unit B
+      // its extended type be seen from any OTHER unit - `M.Twice` in unit B
       // where both TMatrix and its helper live in unit A. The converse (a
       // helper in B for a type in A) goes through HelperMemberHit above.
       LFound := LM.FindLocalDeep(LScope, ANameLower);
       // A `class constructor` is never what a NAME means: it runs once,
-      // automatically, and cannot be called (15 §15.1.5). It is registered
-      // under its name like any routine, though, so `TRegistry.Create` — with
+      // automatically, and cannot be called (15 sec. 15.1.5). It is registered
+      // under its name like any routine, though, so `TRegistry.Create` - with
       // a private class constructor declared fourteen lines above the public
-      // parameterless one — found it and stopped. Advance along the overload
+      // parameterless one - found it and stopped. Advance along the overload
       // chain instead, and when the chain holds nothing else, fall through to
       // the ANCESTOR walk rather than returning it: with a class constructor as
       // a class's only own `Create`, the name means the inherited constructor
       // (`FEngineClass.Create` on TCustomStyleEngine, whose only `Create` is a
-      // strict private class one — dcc-probed, it resolves to TObject's).
+      // strict private class one - dcc-probed, it resolves to TObject's).
       //
       // The cost is one Aux read for a member hit that is a routine; the token
       // text is only reached for a `class` routine, which is rare enough.
@@ -6514,7 +6514,7 @@ begin
     if LDef = NIL_NODE then
     begin
       // A compiler-seeded builtin (TObject, Exception, ...) has no source
-      // DeclNode in ITS OWN model, so there is normally nowhere to go — but
+      // DeclNode in ITS OWN model, so there is normally nowhere to go - but
       // it may be a REAL declaration somewhere reachable (System, or a used
       // unit): redirect there and continue the walk instead of giving up.
       // This is what lets `Obj.Free` (Obj: TObject) resolve at all: the
@@ -6533,7 +6533,7 @@ begin
       nkIdent, nkMember, nkTypeArgs:
         // Nested-aware, because an alias to another class's NESTED type is
         // written as a dotted name and nothing binds its last segment: no
-        // used unit declares `TNotify` — TRESTComponentAdapter does
+        // used unit declares `TNotify` - TRESTComponentAdapter does
         // (REST.BindSource), and REST.Client's `TNotify = TRESTComponentAdapter
         // .TNotify` then has no definition at all, so `TNotify.Create` had no
         // members to search. Costs nothing on the common path:
@@ -6543,7 +6543,7 @@ begin
         // Implicit dereference in member access: Object Pascal lets `P.Field`
         // stand for `P^.Field` when P is a pointer to a record, and the RTL
         // leans on it constantly (`Entry.Aliases` where Entry:
-        // PEnumAliasEntry — System.TypInfo). Follow the pointee and keep
+        // PEnumAliasEntry - System.TypInfo). Follow the pointee and keep
         // looking, so a member lookup on a pointer type behaves like one on
         // what it points at.
         LNext := PointeeX(LCur);
@@ -6551,7 +6551,7 @@ begin
         // A PARAMETERLESS FUNCTION reference in a value position is CALLED,
         // and `.Member` then applies to its RESULT: `ValueFunc.GetValue` where
         // `ValueFunc: TFunc<IValue>` means `ValueFunc().GetValue`
-        // (System.Bindings.Outputs — the whole VCL package's member tail). The
+        // (System.Bindings.Outputs - the whole VCL package's member tail). The
         // same rule the E2012 guard entry already leans on from the other
         // side, where it exempts procedural types because the guard's type is
         // the RESULT.
@@ -6568,7 +6568,7 @@ begin
         // A CLASS REFERENCE (15.2.1, `class of T`): its members are T's, which
         // is how `with TCustomStyleEngineClass(TStyleManager.Engine) do` reaches
         // TCustomStyleEngine's class vars (Vcl.Themes). Same shape as the
-        // pointer hop — redirect to the referenced type and keep looking.
+        // pointer hop - redirect to the referenced type and keep looking.
         // Visibility is not filtered here, so an INSTANCE member is reachable
         // through a class reference too; that is a known imprecision of this
         // walk, not specific to this hop.
@@ -6578,7 +6578,7 @@ begin
         begin
           // Leading nkIdent/nkMember/nkTypeArgs children are the heritage
           // list; the FIRST is the ancestor (a class's other entries are
-          // implemented interfaces — their members must be implemented in
+          // implemented interfaces - their members must be implemented in
           // the class anyway, so they are not followed).
           LChild := LM.Tree.Nodes[LDef].FirstChild;
           while (LChild <> NIL_NODE) and not (LM.Tree.Nodes[LChild].Kind in
@@ -6586,7 +6586,7 @@ begin
             LChild := LM.Tree.Nodes[LChild].NextSibling;
           if LChild = NIL_NODE then
           begin
-            // No heritage clause — but a CLASS still has an ancestor: the
+            // No heritage clause - but a CLASS still has an ancestor: the
             // implicit TObject (11.1.1), whose members are reachable bare
             // inside the class's own methods (`ClassName`, `Free`,
             // `InitInstance`). The walk used to stop here, so those were
@@ -6594,7 +6594,7 @@ begin
             // the DeclNode-less branch above uses, so it finds the REAL
             // TObject (System.pas) rather than a compiler-seeded stub.
             //
-            // An INTERFACE has one too — `IInterface` (14.1.1), or `IDispatch`
+            // An INTERFACE has one too - `IInterface` (14.1.1), or `IDispatch`
             // for a dispinterface, which descends from IInterface and so
             // covers strictly more. This was originally left out on the
             // reasoning quoted for the implemented-interface entries above
@@ -6603,13 +6603,13 @@ begin
             // reaches QueryInterface/_AddRef/_Release through this hop and
             // nothing else. dcc compiles `with I do QueryInterface(G, O)` for
             // a heritage-less `IFoo`; we reported E2003 on it. Found by
-            // auditing the spec against the code, not by the corpora — the RTL
+            // auditing the spec against the code, not by the corpora - the RTL
             // reaches those three through `Supports`/`as`, never by name.
             //
             // A record/object type genuinely has no implicit ancestor.
             // The (LRMid, LRSym) <> (current) guard is what stops TObject or
-            // IInterface itself — which of course have no heritage clause
-            // either — from walking into themselves forever.
+            // IInterface itself - which of course have no heritage clause
+            // either - from walking into themselves forever.
             LRootName := '';
             case LM.Tree.Nodes[LDef].Kind of
               nkClassType:
@@ -6632,22 +6632,22 @@ begin
             Exit;
           end;
           // Nested: the ancestor may be named through its OUTER type
-          // (`TTextSettingsInfo.TCustomTextSettings`, FMX) — nothing binds that
+          // (`TTextSettingsInfo.TCustomTextSettings`, FMX) - nothing binds that
           // segment this early, and the miss costs the whole ancestry.
           LNext := ResolveTypeExprNested(LCur.UnitId, LChild);
         end;
       nkHelperType:
         begin
-          // The walk STARTED at a helper (a method body's enclosing struct —
+          // The walk STARTED at a helper (a method body's enclosing struct -
           // System.SysUtils' TGUIDHelper.ToByteArray using TGUID's D1 bare;
           // a helper is never another type's heritage, so this cannot be
           // reached mid-walk). Its members behave as if declared on the
           // extended type, and vice versa: the body sees T's members through
-          // the implicit Self — so continue the walk INTO the `for` target,
+          // the implicit Self - so continue the walk INTO the `for` target,
           // which also picks up T's own ancestors. Leading refs are optional
           // helper ANCESTORS then the target (last); an ancestor helper's
           // members apply too, tried first via recursion (bounded by the
-          // declaration chain — helpers cannot form cycles).
+          // declaration chain - helpers cannot form cycles).
           LChild := LM.Tree.Nodes[LDef].FirstChild;
           var LRefs: TArray<Integer> := nil;
           while (LChild <> NIL_NODE) and (LM.Tree.Nodes[LChild].Kind in
@@ -6671,12 +6671,12 @@ begin
     LNext := SubstX(LNext, LCur.Inst, 0);
     if XValid(LNext) and (LNext.UnitId = LCur.UnitId) and
        (LNext.Sym = LCur.Sym) and (LNext.Inst = LCur.Inst) then
-      Exit;   // self-referential alias — bail
+      Exit;   // self-referential alias - bail
     LCur := LNext;
   end;
 end;
 
-{ FindMemberX's hop loop, enumerating instead of looking up — see the
+{ FindMemberX's hop loop, enumerating instead of looking up - see the
   interface comment for the contract. Kept as a SEPARATE walk rather than a
   shared iterator on purpose: FindMemberX is on the analysis hot path and a
   callback-per-hop refactor there is exactly the "cheap-looking normalization
@@ -6703,7 +6703,7 @@ begin
     if LM.Symbols[LCur.Sym].Kind = skGenericParam then
     begin
       // The members an unbound parameter guarantees are its constraints'
-      // (16 §16.4.1) — all of them, same as FindMemberX tries all on a miss.
+      // (16 sec. 16.4.1) - all of them, same as FindMemberX tries all on a miss.
       if ADepth >= 4 then
         Exit;
       for LNext in ConstraintsOfParamX(LCur) do
@@ -6715,7 +6715,7 @@ begin
     if not (LM.Symbols[LCur.Sym].Kind in [skType, skBuiltinType]) then
       Exit;
     // The active helper chain for this hop's type, before its own members
-    // (a helper member HIDES the type's own — first-wins dedup needs them
+    // (a helper member HIDES the type's own - first-wins dedup needs them
     // first). Mirrors HelperMemberHit, including the builtin-seed
     // canonicalization retry.
     if (AFromMid >= 0) and (AFromMid <= High(FHelperIdx)) and
@@ -6774,7 +6774,7 @@ begin
     LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
     if LDef = NIL_NODE then
     begin
-      // Builtin with a real declaration somewhere reachable — redirect, as
+      // Builtin with a real declaration somewhere reachable - redirect, as
       // FindMemberX does (Obj: TObject -> System.pas's real class body).
       if ResolveRealDecl(LCur.UnitId, LM.Symbols[LCur.Sym].NameLower, LRMid,
          LRSym) and ((LRMid <> LCur.UnitId) or (LRSym <> LCur.Sym)) then
@@ -6832,7 +6832,7 @@ begin
         begin
           // Walk STARTED at a helper (a helper method body's Self): its
           // ancestor helpers' members first, then continue into the extended
-          // type — FindMemberX's shape, enumerated.
+          // type - FindMemberX's shape, enumerated.
           LChild := LM.Tree.Nodes[LDef].FirstChild;
           var LRefs: TArray<Integer> := nil;
           while (LChild <> NIL_NODE) and (LM.Tree.Nodes[LChild].Kind in
@@ -6855,7 +6855,7 @@ begin
     LNext := SubstX(LNext, LCur.Inst, 0);
     if XValid(LNext) and (LNext.UnitId = LCur.UnitId) and
        (LNext.Sym = LCur.Sym) and (LNext.Inst = LCur.Inst) then
-      Exit;   // self-referential alias — bail
+      Exit;   // self-referential alias - bail
     LCur := LNext;
   end;
 end;
@@ -6878,20 +6878,20 @@ begin
   if (LRoutine = NIL_NODE) or (LM.Tree.Nodes[LRoutine].Kind <> nkRoutine) then
     Exit;
   LTok := LM.Tree.Nodes[LRoutine].FirstToken;
-  // `constructor` is a reserved word — the token KIND already says it, no
+  // `constructor` is a reserved word - the token KIND already says it, no
   // text copy needed (this runs per member hit / per overload candidate).
   if (LTok >= 0) and (LTok <= High(LM.Tree.Source.Visible)) then
     Result :=
       LM.Tree.Source.VisibleToken(LTok).Kind = PasTree.Types.tkConstructor;
 end;
 
-{ A `class constructor` / `class destructor` — which is NOT callable at all
-  (15 §15.1.5: they run once, automatically, at unit initialization and
+{ A `class constructor` / `class destructor` - which is NOT callable at all
+  (15 sec. 15.1.5: they run once, automatically, at unit initialization and
   finalization). So they are never overload candidates, and saying so is what
   keeps `TRegistry.Create` off the private `class constructor Create` that sits
   fourteen lines above the public parameterless one it means.
 
-  The `class` keyword is NOT in the routine node's token span — the struct-body
+  The `class` keyword is NOT in the routine node's token span - the struct-body
   parser consumes it and then calls ParseRoutine, which records the fact as
   `Aux = 1` instead. So a class constructor's first token is `constructor`, the
   same as an instance one's, and `IsConstructorSym` answers True for both:
@@ -6912,7 +6912,7 @@ begin
   LRoutine := LM.Tree.Nodes[LName].Parent;
   if (LRoutine = NIL_NODE) or (LM.Tree.Nodes[LRoutine].Kind <> nkRoutine) or
      (LM.Tree.Nodes[LRoutine].Aux <> 1) then
-    Exit;   // not a `class` routine at all — the cheap half of the test first
+    Exit;   // not a `class` routine at all - the cheap half of the test first
   LTok := LM.Tree.Nodes[LRoutine].FirstToken;
   if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
     Exit;
@@ -6920,7 +6920,7 @@ begin
     [PasTree.Types.tkConstructor, PasTree.Types.tkDestructor];
 end;
 
-// Type category of a cross-model type — the symbol's own TypeCat, computed by
+// Type category of a cross-model type - the symbol's own TypeCat, computed by
 // each model's Phase-1 typer categorization. tcUnknown for an invalid X.
 function TPasSemaProject.XCatOf(const AX: TSemaXType): TSemaTypeCat;
 begin
@@ -6930,7 +6930,7 @@ begin
 end;
 
 // Does the struct definition node ADefNode declare its own `class operator
-// Initialize`/`Finalize` (9.4.1's custom managed-record lifecycle, 10.4) —
+// Initialize`/`Finalize` (9.4.1's custom managed-record lifecycle, 10.4) -
 // walked over the AST directly (head word = 'operator', name = the
 // operator's own first child) rather than through the symbol table, since
 // Initialize/Finalize are ALSO seeded as global builtin intrinsic routine
@@ -7064,14 +7064,14 @@ end;
 { AX with its plain ALIAS links followed to the declaration that actually
   defines the type. `Winapi.Windows.TRect = System.Types.TRect` is one type
   under two symbols, and which one a value carries depends on the unit its
-  declaration was read in — the same fact the helper index has to canonicalize
+  declaration was read in - the same fact the helper index has to canonicalize
   for. XSameType compares SYMBOLS, so without this an argument typed through
   one name never matches a parameter declared through the other, and a
   three-way overload set (TSize / TPoint / TRect at one arity) is decided by
   declaration order instead of by the argument.
 
-  `T = type Base` is NOT followed: 2 §2.5.1 makes it a distinct type, and the
-  parser marks it with Aux = 1 on the nkTypeDecl — the same test BuildHelperMap
+  `T = type Base` is NOT followed: 2 sec. 2.5.1 makes it a distinct type, and the
+  parser marks it with Aux = 1 on the nkTypeDecl - the same test BuildHelperMap
   applies for the same reason. }
 function TPasSemaProject.CanonTypeX(const AX: TSemaXType): TSemaXType;
 var
@@ -7091,7 +7091,7 @@ begin
     if (LParent <> NIL_NODE) and
        (FModels[Result.UnitId].Tree.Nodes[LParent].Kind = nkTypeDecl) and
        (FModels[Result.UnitId].Tree.Nodes[LParent].Aux = 1) then
-      Exit;   // `type Base` — a distinct type, not an alias
+      Exit;   // `type Base` - a distinct type, not an alias
     LNext := ResolveTypeExprNested(Result.UnitId, LDef);
     if not XValid(LNext) or
        ((LNext.UnitId = Result.UnitId) and (LNext.Sym = Result.Sym)) then
@@ -7102,7 +7102,7 @@ end;
 
 // Same type across models. Builtin symbol indexes are IDENTICAL in every
 // model (SeedSystemScope runs first, deterministically), so two references to
-// the builtin Integer compare equal even when they live in different models —
+// the builtin Integer compare equal even when they live in different models -
 // without this, an exact arg/param match across units would never register.
 function TPasSemaProject.XSameType(const A, B: TSemaXType): Boolean;
 begin
@@ -7139,7 +7139,7 @@ begin
     Result := True;
 end;
 
-// A routine's parameter symbols in declaration order (its param scope —
+// A routine's parameter symbols in declaration order (its param scope -
 // reused as MemberScope, see the resolver). nil when there is no param info
 // (builtins).
 function TPasSemaProject.XParamSyms(AMid, ASym: Integer): TArray<Integer>;
@@ -7157,7 +7157,7 @@ begin
     Exit;
   LList := LM.Scopes[LM.Symbols[ASym].MemberScope].Symbols;
   if LList = nil then
-    Exit;   // lazy scope list — never bound
+    Exit;   // lazy scope list - never bound
   LCount := 0;
   for LIdx := 0 to LList.Count - 1 do
     if LM.Symbols[LList[LIdx]].Kind = skParam then
@@ -7172,7 +7172,7 @@ begin
     end;
 end;
 
-{ 16.5.1 — a generic METHOD's own type parameters, inferred from the ARGUMENT
+{ 16.5.1 - a generic METHOD's own type parameters, inferred from the ARGUMENT
   types at a call site: `Take(7)` binds T to Integer without anyone writing
   `Take<Integer>(7)`. Returns a substitution frame (an instance-table index) to
   apply to the call's result type, or NIL_INST when nothing can be inferred.
@@ -7180,7 +7180,7 @@ end;
   Only the direct shape is inferred: a parameter whose declared type IS one of
   the routine's own generic parameters. Delphi's real algorithm also matches
   through structure (`A: TArray<T>` against `TArray<Integer>`), which is a
-  later slice — an unbound parameter makes the whole frame fail rather than
+  later slice - an unbound parameter makes the whole frame fail rather than
   guess, so the call stays typed exactly as it is today.
 
   NB the frame is keyed on the ROUTINE symbol, so an instance-table entry may
@@ -7200,7 +7200,7 @@ begin
   Result := NIL_INST;
   LIdents := GenericParamIdents(AMid, ASym);
   if Length(LIdents) = 0 then
-    Exit;   // not a generic method — nothing to infer
+    Exit;   // not a generic method - nothing to infer
   LM := FModels[AMid];
   LParams := XParamSyms(AMid, ASym);
   SetLength(LArgs, Length(LIdents));
@@ -7211,7 +7211,7 @@ begin
     if LPIdx > High(AArgTypes) then
       Break;
     if not XValid(AArgTypes[LPIdx]) then
-      Continue;   // untyped argument — cannot bind from it
+      Continue;   // untyped argument - cannot bind from it
     LPX := DeclTypeX(AMid, LParams[LPIdx]);
     if not XValid(LPX) then
       Continue;
@@ -7231,20 +7231,20 @@ begin
   end;
   for LGIdx := 0 to High(LArgs) do
     if not XValid(LArgs[LGIdx]) then
-      Exit;   // some parameter stayed open — do not guess a partial frame
+      Exit;   // some parameter stayed open - do not guess a partial frame
   Result := Instantiate(XPlain(AMid, ASym), LArgs);
 end;
 
-{ 16.5.1's other half — a generic method whose type arguments are WRITTEN at
+{ 16.5.1's other half - a generic method whose type arguments are WRITTEN at
   the call site: `Unsafe.Cast<TcxCustomTextEdit>(Edit)`. InferMethodFrame reads
   them off the ARGUMENTS, which cannot work here at all: `Cast<T: class>
   (AObject: TObject): T` declares every parameter concretely, so nothing binds
-  T and the frame fails — leaving the call typed as the OPEN parameter, and
+  T and the frame fails - leaving the call typed as the OPEN parameter, and
   every member after it undeclared. A suite's `Unsafe` trio (Cast /
   CastWithNilCheck / AccessProtected) is the shape at scale, and `TJSONObject
   .GetValue<TJSONObject>(...)` is the same thing in the RTL.
 
-  The written list wins outright when it is present and complete — inference
+  The written list wins outright when it is present and complete - inference
   exists only to supply what was NOT written, and 16.5.1 does not mix the two:
   a partial list is an error at the call, not a hint. So a count mismatch
   returns NIL_INST and the caller falls back, rather than instantiating a frame
@@ -7303,12 +7303,12 @@ begin
          // A same-unit binding to a GENERIC, from a BARE reference, is the one
          // intra-unit answer worth overriding: arity is part of a type's
          // identity (16.1.2), and the resolver's own arity rule can only see
-         // this unit — the non-generic of that name usually lives in a USED
+         // this unit - the non-generic of that name usually lives in a USED
          // one, which is where PreferNonGeneric has already looked by now.
          // `FCollectionEnumerator: TCollectionEnumerator` declared INSIDE
          // `TCollectionEnumerator<T>` is the shape (Data.Bind.Components): it
-         // bound to the enclosing generic, and `.GetCurrent` — System.Classes'
-         // — went undeclared.
+         // bound to the enclosing generic, and `.GetCurrent` - System.Classes'
+         // - went undeclared.
          (IsGenericTypeSym(AId, LM.Symbols[LSym].TypeSym) and
           not ((LX.UnitId = AId) and (LX.Sym = LM.Symbols[LSym].TypeSym)))) then
         LM.SymTypeX.AddOrSetValue(LSym, LX);
@@ -7316,16 +7316,16 @@ begin
 end;
 
 // Expression pass: bottom-up over the whole tree, typing what the intra-unit
-// typer could not — cross-model idents/members (with ancestor/alias walk),
+// typer could not - cross-model idents/members (with ancestor/alias walk),
 // constructor calls, casts, generic-parameter substitution. Also records the
-// member references it discovers (RefMap locally, ExtRefMap across models) —
+// member references it discovers (RefMap locally, ExtRefMap across models) -
 // typing and navigation only, NO diagnostics.
 procedure TPasSemaProject.CrossType(AId: Integer);
 var
   LM: TPasSemaModel;
   LX: TArray<TSemaXType>;
   // Instantiation frame a member designator was found in (NIL_INST elsewhere)
-  // — kept per node so the CALL over that member can substitute the chosen
+  // - kept per node so the CALL over that member can substitute the chosen
   // overload's parameter/result types in the same frame (TWrap<Integer>.Get).
   LCtxOf: TArray<Integer>;
   // Same-named routine heads from every resolved used unit, memoized per
@@ -7334,7 +7334,7 @@ var
   // per call).
   LUsesHeads: TDictionary<string, TArray<TPasExtRef>>;
   // Cross-unit member references this walk discovers, held OUT of the model's
-  // own ExtRefMap until the pass is over — see the overlay note in the header.
+  // own ExtRefMap until the pass is over - see the overlay note in the header.
   LNewExt: TDictionary<Integer, TPasExtRef>;
 
   { A node's cross-unit binding: this walk's own finds first, then the committed
@@ -7346,7 +7346,7 @@ var
     Result := LNewExt.TryGetValue(N, AExt) or LM.ExtRefMap.TryGetValue(N, AExt);
   end;
 
-  { Is N a bare designator naming a PROCEDURE — a routine with no result?
+  { Is N a bare designator naming a PROCEDURE - a routine with no result?
 
     Such an argument is a method VALUE and nothing else. It cannot be the
     implicit call that lets a procedural argument meet an ordinary parameter
@@ -7357,7 +7357,7 @@ var
     False; ...)` still ties on arity with the public `(const AThread: TThread;
     AMethod: TThreadMethod)`.
 
-    A CALL is not a designator — `F(X)` has an nkCall parent — so the test is on
+    A CALL is not a designator - `F(X)` has an nkCall parent - so the test is on
     the node kind first, and a routine symbol with a TypeNode (a function) is
     excluded. }
   function IsProcedureDesignator(N: Integer): Boolean;
@@ -7395,10 +7395,10 @@ var
     LExt: TPasExtRef;
   begin
     // `TArray<TGUID>` names a type by construction and binds no symbol of its
-    // own — neither map has anything for the nkTypeArgs node itself.
+    // own - neither map has anything for the nkTypeArgs node itself.
     if LM.Tree.Nodes[N].Kind = nkTypeArgs then
       Exit(True);
-    // A DOTTED name binds on its last segment, never on the nkMember node —
+    // A DOTTED name binds on its last segment, never on the nkMember node -
     // `TObjectAppearance.TDataMembers.Create(...)` (FMX.ListView.Appearances,
     // where that nested name is an alias of `TArray<TDataMember>`) reads as a
     // value qualifier without this, and the dynamic-array pseudo-constructor
@@ -7494,9 +7494,9 @@ var
   // parameter types substituted in ACtx (the instantiation frame the callee
   // member was found in). -1 = the candidate's arity does not admit the call.
   // A candidate with NO param info (builtin) fits neutrally at 0.
-  { Does AX's type declare a conversion operator — the one thing that can make
+  { Does AX's type declare a conversion operator - the one thing that can make
     a value of another record type acceptable where AX is wanted (`class
-    operator Implicit`/`Explicit`, 6 §6.7)? Only the type's OWN members are
+    operator Implicit`/`Explicit`, 6 sec. 6.7)? Only the type's OWN members are
     read: an operator is not inherited. }
   function HasConversionOperator(const AX: TSemaXType): Boolean;
   var
@@ -7544,7 +7544,7 @@ var
       // TThreadProcedure)` and the PRIVATE `(ASyncRec: PSynchronizeRecord;
       // QueueEvent: Boolean = False; ForceQueue: Boolean = False)` on arity,
       // `nil` scores the same against either first parameter, and the first
-      // candidate — the private one — won the tie. 41 of bigflat's 111 false
+      // candidate - the private one - won the tie. 41 of bigflat's 111 false
       // E2361 came from that single pair.
       //
       // Deliberately SYNTACTIC and not a general type-mismatch rejection. A
@@ -7554,7 +7554,7 @@ var
       // operators, Variant, untyped parameters, and the rule that a
       // PARAMETERLESS function reference in a value position is CALLED (which
       // is why a tcProc argument in general may legitimately meet a Boolean
-      // parameter — see the E2012 entry). A literal cannot be called that way.
+      // parameter - see the E2012 entry). A literal cannot be called that way.
       if XValid(LParX) and
          not (XCatOf(LParX) in [tcProc, tcVariant, tcUnknown]) and
          (FModels[LParX.UnitId].Symbols[LParX.Sym].Kind <> skGenericParam) and
@@ -7566,12 +7566,12 @@ var
           Inc(Result, 2)
         else
         begin
-          // Not the same SYMBOL — but it may still be the same TYPE reached
+          // Not the same SYMBOL - but it may still be the same TYPE reached
           // through an alias, and the two sides are read in different units
           // by construction. `LayoutUnitsToPixels` in
           // dxDocumentLayoutUnitConverter is declared for TSize, TPoint and
           // TRect at one arity; a TRect argument matched none of them by
-          // symbol, all three scored 0, and the FIRST — TSize — won the tie.
+          // symbol, all three scored 0, and the FIRST - TSize - won the tie.
           // The call then typed as TSize: a wrong binding that costs no
           // diagnostic until something reads a member off it (`.ToRectF` in
           // a suite's ruler unit). Canonicalized only after the cheap test has
@@ -7584,7 +7584,7 @@ var
           // "the types do not fit" rule is still not attempted (see the note
           // above), but this corner of it is decidable: distinct records are
           // not assignable to one another, and the one thing that could make
-          // them so — a `class operator Implicit`/`Explicit` on either side —
+          // them so - a `class operator Implicit`/`Explicit` on either side -
           // is a MEMBER, so it can be looked for.
           else if (XCatOf(LCanonPar) = tcRecord) and
                   (XCatOf(LCanonArg) = tcRecord) and
@@ -7600,7 +7600,7 @@ var
           // `TArray<...>`. Rejecting it is what lets the "nothing in the
           // type's own chain fits, so this means an INHERITED routine"
           // fallback do its job. `nil` and untyped arguments never reach here
-          // — they are tcNil/tcUnknown, not these three.
+          // - they are tcNil/tcUnknown, not these three.
           else if ((XCatOf(LCanonPar) = tcArray) and
                    (XCatOf(LCanonArg) in [tcRecord, tcClass, tcInterface]) and
                    not HasConversionOperator(LCanonArg)) or
@@ -7617,7 +7617,7 @@ var
   end;
 
   // Cross-model overload selection for a call: walks the resolved head's
-  // overload chain and — for a bare-ident callee naming a UNIT-LEVEL routine —
+  // overload chain and - for a bare-ident callee naming a UNIT-LEVEL routine -
   // merges same-named heads from every resolved used unit (real dcc merges
   // the visible overload sets; CheckCalls already does the same for arity).
   // Picks the arity-fitting candidate with the best argument score (first
@@ -7630,7 +7630,7 @@ var
     LBestScore: Integer;
     LTypeQualified: Boolean;
 
-    // A `class` method — the parser marks the declaration with Aux = 1 (6.1), so
+    // A `class` method - the parser marks the declaration with Aux = 1 (6.1), so
     // this reads the fact rather than re-deriving it. A CONSTRUCTOR counts too:
     // `TFoo.Create(...)` is the ordinary way to call one.
     function CallableOnType(AMid, ACand: Integer): Boolean;
@@ -7661,8 +7661,8 @@ var
         if FModels[AMid].Symbols[LCand].Kind <> skRoutine then
           Break;
         // Never a candidate, whatever it scores: a class constructor runs
-        // automatically and cannot be called (15 §15.1.5). `TRegistry.Create`
-        // is the shape — a private `class constructor Create` declared above
+        // automatically and cannot be called (15 sec. 15.1.5). `TRegistry.Create`
+        // is the shape - a private `class constructor Create` declared above
         // the public parameterless `constructor Create`, both fitting zero
         // arguments, and the first candidate winning the tie.
         if IsClassCtorDtorSym(AMid, LCand) then
@@ -7716,13 +7716,13 @@ var
     // PRIVATE instance `function Enter(Timeout: Cardinal): Boolean` beside the
     // public `class procedure Enter(const AObject: TObject)`, same arity, so
     // argument scores decide nothing whenever the argument's own type is
-    // unknown — and the first candidate, the private one, used to win. 150
+    // unknown - and the first candidate, the private one, used to win. 150
     // false E2361 on bigflat came from this pair alone.
     LTypeQualified := False;
     if LM.Tree.Nodes[ACalleeNode].Kind = nkMember then
     begin
       LQBase := LM.Tree.Nodes[ACalleeNode].FirstChild;
-      // A qualifier may itself be dotted — `System.TMonitor.Enter(X)` writes the
+      // A qualifier may itself be dotted - `System.TMonitor.Enter(X)` writes the
       // type as UNIT.TYPE, so the base is another nkMember and neither map has
       // anything for that node. Its LAST segment is the type name, and reading
       // it is what keeps the class-vs-instance rule working there: without this
@@ -7749,7 +7749,7 @@ var
       end;
     end;
     ConsiderChain(AHeadMid, AHeadSym);
-    // Merge used units' candidates only for a bare unit-level routine name —
+    // Merge used units' candidates only for a bare unit-level routine name -
     // methods and nested routines have a closed candidate set (their scope).
     if (LM.Tree.Nodes[ACalleeNode].Kind = nkIdent) and
        (FModels[AHeadMid].Scopes[FModels[AHeadMid].Symbols[AHeadSym].Scope].
@@ -7760,7 +7760,7 @@ var
         ConsiderChain(LHeads[LIdx].UnitId, LHeads[LIdx].Sym);
     end;
     // Nothing in the type's OWN chain fits, so the call means an INHERITED
-    // routine of that name — `TButton.Create(Self)`, where Vcl.StdCtrls'
+    // routine of that name - `TButton.Create(Self)`, where Vcl.StdCtrls'
     // TButton declares only a parameterless `class constructor Create` and the
     // one being called is TComponent's `constructor Create(AOwner:
     // TComponent)`. A binding stops at the first declaration of the name, so
@@ -7770,7 +7770,7 @@ var
     //
     // Only when nothing fit, which keeps it off the common path entirely: one
     // FindMemberX from the owner's ANCESTOR, which walks the whole ancestry
-    // itself. A class constructor is not callable at all (15 §15.1.5), so this
+    // itself. A class constructor is not callable at all (15 sec. 15.1.5), so this
     // is also what stops the analyzer from believing it is.
     if (ABestSym = NIL_SYM) and (FModels[AHeadMid].Symbols[AHeadSym].Scope <>
        NIL_SCOPE) then
@@ -7791,9 +7791,9 @@ var
     Result := ABestSym <> NIL_SYM;
   end;
 
-  { Moves (AMid, ASym) off a routine that cannot be what `Name<...>` means —
+  { Moves (AMid, ASym) off a routine that cannot be what `Name<...>` means -
     one whose own generic-parameter count does not match the ARGUMENTS
-    written — onto the ancestor's declaration that does. Walks up the owner's
+    written - onto the ancestor's declaration that does. Walks up the owner's
     ancestry, since the member lookup that produced ASym stopped at the first
     hit; leaves the pair untouched when the ancestry offers nothing better,
     which keeps a genuinely unmatched call typed exactly as it was. }
@@ -7841,7 +7841,7 @@ var
     end;
   end;
 
-  { Is N the BASE of a member access — `Add` in `Add.Assign(X)`? Then its
+  { Is N the BASE of a member access - `Add` in `Add.Assign(X)`? Then its
     value is what the dot applies to. A callee (`Add(X)`) is an nkCall child,
     not an nkMember base, so it is excluded by construction. }
   function IsValueQualifier(N: Integer): Boolean;
@@ -7856,7 +7856,7 @@ var
 
   { Re-points N from an overload that TAKES parameters to the parameterless
     one of the same name on the enclosing struct's chain, when there is one.
-    A no-op otherwise — including for every ordinary name, which is what keeps
+    A no-op otherwise - including for every ordinary name, which is what keeps
     this off the hot path: the bound symbol must already be a routine with
     parameters before anything is searched. }
   procedure PreferParamlessOverload(N: Integer);
@@ -7888,7 +7888,7 @@ var
     LCtxOf[N] := LCtx;
   end;
 
-  { Is N the NAME an `inherited` designator starts with — the `Alignment` of
+  { Is N the NAME an `inherited` designator starts with - the `Alignment` of
     `inherited Alignment.Horz`, the `Create` of `inherited Create(X)`? The
     parser hangs the whole selector chain under one nkInherited (see
     ParseSelectors at tkInherited), so the head is reached by walking up the
@@ -7912,7 +7912,7 @@ var
 
   { Re-points an inherited head at the ANCESTOR's member of that name. Leaves
     the node alone when the enclosing struct has no ancestry, or the ancestry
-    has no such name — the existing binding is then still the best guess. }
+    has no such name - the existing binding is then still the best guess. }
   procedure ResolveInheritedHead(N: Integer);
   var
     LStruct, LMemMid, LMemSym, LCtx: Integer;
@@ -7943,8 +7943,8 @@ var
   end;
 
   // The type a member access yields: the member's declared type (routines:
-  // result type; constructors: the base type itself, so `TDerived.Create` —
-  // parsed as a plain member when argless — types as TDerived), substituted
+  // result type; constructors: the base type itself, so `TDerived.Create` -
+  // parsed as a plain member when argless - types as TDerived), substituted
   // in the instantiation frame it was found in; a nested type member is the
   // type itself (designator).
   function MemberTypeX(AMid, ASym, AInstCtx: Integer;
@@ -7985,13 +7985,13 @@ var
           // 12.1.2: the name at the head of an `inherited` designator is a
           // member of the ANCESTOR, whatever the class itself declares. The
           // inherited pass only retries names that bound NOWHERE, so a
-          // REDECLARED name never reached it — it bound to the class's own
+          // REDECLARED name never reached it - it bound to the class's own
           // member and typed as that. `inherited Alignment.Horz` in
           // two editor units of one suite are the shape at its sharpest: the derived
           // `Alignment` is a TAlignment (an enum) while the ancestor's is a
           // TcxEditAlignment object, so the chain after it lost every member.
           //
-          // Off the hot path by construction — the test is one parent-kind
+          // Off the hot path by construction - the test is one parent-kind
           // check per identifier, and the ancestor walk runs only for the head
           // of an actual inherited chain. A name the ancestry does NOT have
           // keeps whatever it already bound to (error-tolerant: this pass
@@ -7999,8 +7999,8 @@ var
           if IsInheritedHead(N) then
             ResolveInheritedHead(N);
           // A bare name used as a QUALIFIER is a value, so an overloaded
-          // routine of that name means the PARAMETERLESS overload — writing
-          // its name calls it (6 §6.6.1). A binding stops at the first
+          // routine of that name means the PARAMETERLESS overload - writing
+          // its name calls it (6 sec. 6.6.1). A binding stops at the first
           // declaration, and an RPC library declares `function Add(anEntity): Integer`
           // ahead of `function Add: TRODLEntity`, so `Add.Assign(...)` typed
           // as Integer and lost the member. Restricted to a qualifier
@@ -8023,12 +8023,12 @@ var
               skType, skBuiltinType:
                 LX[N] := XPlain(LExt.UnitId, LExt.Sym);
             end
-          // `Self` (11.3.3) has NO symbol — nothing declares it, so both maps
+          // `Self` (11.3.3) has NO symbol - nothing declares it, so both maps
           // above are empty for it and its type has to come from the enclosing
           // struct instead, exactly as WithTargetTypeX already does for
           // `with Self.X do`. Without this the nkMember branch below sees an
           // invalid qualifier type, never runs FindMemberX, and the member in
-          // `Self.FX` stays unbound — navigation and every RefMap consumer
+          // `Self.FX` stays unbound - navigation and every RefMap consumer
           // lose it, even though the bare `FX` spelling right beside it binds
           // fine. Costs nothing on the hot path: guarded by RefMap and
           // ExtRefMap both having missed, which for an ordinary identifier
@@ -8040,13 +8040,13 @@ var
               LX[N] := XPlain(AId, LSym);
           end;
           // A bare name reached through a GENERIC ancestor is declared in that
-          // ancestor's OPEN parameters — `class property Statics: S` on
-          // `TWinRTGenericImportS<S>` — so the declared type read above IS that
+          // ancestor's OPEN parameters - `class property Statics: S` on
+          // `TWinRTGenericImportS<S>` - so the declared type read above IS that
           // bare `S`. The inherited pass already closed it over the
           // instantiation frame it found the member in (TPasInhPending.X) and
           // parked the answer in ExprTypeX; that frame cannot be recovered
           // here, because nothing at this node says which hop the member came
-          // from. So take that answer when there is one — without it
+          // from. So take that answer when there is one - without it
           // `Statics.GetDefault` looks its member up in the OPEN parameter and
           // gives up (535 `CreateInstance` reports in the WinRT units alone).
           //
@@ -8119,14 +8119,14 @@ var
           end
           // A DYNAMIC ARRAY's pseudo-constructor: `TBytes.Create($EF, $BB)`
           // builds the array, and there is no member symbol anywhere to bind
-          // — the compiler makes it up. dcc-probed in both directions: legal
+          // - the compiler makes it up. dcc-probed in both directions: legal
           // with arguments and with none, `E2671 Record, object, class type,
           // or type helper required` for a STATIC array and for a VARIABLE
           // qualifier, which is why the type test and the type-QUALIFIER test
           // are both here. 11 of the RTL package's remaining reports were this
           // one form (`TBytes`, `TCharArray`, `TArray<TGUID>`).
           //
-          // Typed like any other constructor — as the type itself — so the
+          // Typed like any other constructor - as the type itself - so the
           // expression is not merely un-reported but right: `Length(TBytes
           // .Create(...))` needs an array, not nothing. No binding is recorded,
           // since there is nothing to navigate to.
@@ -8146,7 +8146,7 @@ var
                   not LM.HasDiagAt(LName) then
             // The one place a member reference is finally given up on: RefMap
             // and ExtRefMap are both empty and the member walk failed, with a
-            // KNOWN container type (XValid) — without that last part we would
+            // KNOWN container type (XValid) - without that last part we would
             // be reporting our own inability to type the qualifier. Gated on
             // AllUsesResolved for the same reason bare-name E2003 is: a missing
             // unit can hide the declaration. See ReportUnresolvedMembers.
@@ -8163,7 +8163,7 @@ var
                   LCtx := LCtxOf[LBase];
                   // A callee written `Name<...>` cannot mean a NON-generic
                   // routine of that name (16.1.2, the same arity rule types
-                  // already get) — and the member walk stops at the FIRST
+                  // already get) - and the member walk stops at the FIRST
                   // declaration, so a derived class redeclaring the name
                   // plainly hid the ancestor's generic. System.JSON is the
                   // shape: `TJSONObject.GetValue(Name): TJSONValue` sits in
@@ -8175,7 +8175,7 @@ var
                   if SelectCallTarget(N, LBase, LMemMid, LMemSym, LCtx,
                     LBestMid, LBestSym) then
                   begin
-                    // Record the argument-matched overload — the
+                    // Record the argument-matched overload - the
                     // overload-precise navigation jump reads this.
                     LExt.UnitId := LBestMid;
                     LExt.Sym := LBestSym;
@@ -8187,7 +8187,7 @@ var
                     // `Exception.Create` bound to the PRIVATE `class constructor
                     // Create` at the top of that class's private section, which
                     // is how visibility enforcement got 475 false reports on one
-                    // corpus. Same discipline as CheckCalls' own re-point — own
+                    // corpus. Same discipline as CheckCalls' own re-point - own
                     // model's RefMap directly, another model's through the
                     // deferred dictionary.
                     RepointCallee(LM, LBase, LBestMid, LBestSym, LNewExt);
@@ -8203,7 +8203,7 @@ var
                       // `Take(7)` types like `Take<Integer>(7)`. Applied after
                       // the enclosing type's frame (LCtx) because a method
                       // parameter is never substituted by it.
-                      // Count the arguments first and size the array once —
+                      // Count the arguments first and size the array once -
                       // the old `+ [x]` reallocated per argument, per call.
                       var LArgN := LM.Tree.Nodes[LBase].NextSibling;
                       var LArgCount := 0;
@@ -8224,7 +8224,7 @@ var
                       end;
                       // ...unless the type arguments were WRITTEN, in which
                       // case they are the answer and inference is not
-                      // consulted at all — see ExplicitMethodFrame.
+                      // consulted at all - see ExplicitMethodFrame.
                       var LFrame := NIL_INST;
                       if LM.Tree.Nodes[LBase].Kind = nkTypeArgs then
                         LFrame := ExplicitMethodFrame(AId, LBestMid, LBestSym,
@@ -8239,10 +8239,10 @@ var
                   else if IsConstructorSym(LMemMid, LMemSym) and
                      (LM.Tree.Nodes[LBase].Kind = nkMember) then
                     // No modeled ctor overload admits the args (inherited
-                    // constructors across unseen hierarchy links) — keep the
+                    // constructors across unseen hierarchy links) - keep the
                     // long-standing behavior: a ctor call is the class type.
                     LX[N] := GetX(LM.Tree.Nodes[LBase].FirstChild);
-                  // else: no candidate admits the arg count — the real
+                  // else: no candidate admits the arg count - the real
                   // callee is likely an unseen same-named overload; leave
                   // the call untyped rather than claim the wrong result.
                 end;
@@ -8296,7 +8296,7 @@ begin
   // untyped node, an instantiation, or a type living in another model.
   // An entry ALREADY present is left alone: at this point the only earlier
   // writer is the with pass, whose entries carry the with-target's
-  // instantiation frame (TPasInhPending.X) — this walk has no with-target
+  // instantiation frame (TPasInhPending.X) - this walk has no with-target
   // context, so for exactly those nodes its answer is the OPEN generic
   // parameter, strictly worse.
   for LNode := 0 to High(LX) do
@@ -8309,7 +8309,7 @@ end;
 { CrossType for every unit, in PARALLEL, with the one shared-write hazard
   removed rather than locked.
 
-  The walk reads other models freely (Symbols/Tree/SymTypeX — all frozen by
+  The walk reads other models freely (Symbols/Tree/SymTypeX - all frozen by
   now) but used to also WRITE its own model's ExtRefMap mid-walk, recording each
   cross-unit member reference it discovered. That is the hazard: another walk
   reads that same dictionary through ResolveTypeExpr(thatModel, ...), and
@@ -8322,7 +8322,7 @@ end;
   on that), and the overlays are merged here, sequentially, once every walk has
   finished. ExprTypeX needs no such treatment: nothing reads another model's.
 
-  Instantiate stays locked — measured at 77k calls for the whole 665-unit corpus
+  Instantiate stays locked - measured at 77k calls for the whole 665-unit corpus
   against 126k InstanceRead calls, so ~200k uncontended acquisitions in total;
   that is single-digit milliseconds, not a reason to redesign the instance
   table. }
@@ -8344,7 +8344,7 @@ begin
     for LIdx := 0 to ACount - 1 do
       for var LPair in FXNewExt[LIdx] do
         FModels[LIdx].ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
-    // Only now are the bindings final — see RunVisibilityPass. No-op unless
+    // Only now are the bindings final - see RunVisibilityPass. No-op unless
     // ReportVisibility asked for it.
     if FReportVisibility then
       ForEachIndex(ACount - 1, 'visibility',        procedure(AIdx: Integer)
@@ -8434,10 +8434,10 @@ begin
           else if LHead = NIL_SYM then
           begin
             // LBase resolved to NOTHING locally (never shadowed by a real
-            // declaration — a genuine local/global always wins and is
+            // declaration - a genuine local/global always wins and is
             // handled above via LHead <> NIL_SYM): it may still be a
             // namespace qualifier that was never collected as a `uses` item
-            // at all — the IMPLICIT System unit (`System.sLineBreak`), or a
+            // at all - the IMPLICIT System unit (`System.sLineBreak`), or a
             // multi-segment prefix naming a used unit even though the
             // PREFIX itself (e.g. `System.SysUtils` as a whole) is never
             // itself a skUnitRef symbol (`System.SysUtils.TBytes`).
@@ -8464,7 +8464,7 @@ begin
              (LModel.NodeScope[LNode] = NIL_SCOPE) then
             Continue;   // not a reference in a real scope (e.g. uses name)
           // The member name of `A.B` is resolved via A's scope (nkMember case),
-          // never as a plain identifier — it is not an undeclared-id candidate.
+          // never as a plain identifier - it is not an undeclared-id candidate.
           LBase := LModel.Tree.Nodes[LNode].Parent;
           if (LBase <> NIL_NODE) and
              (LModel.Tree.Nodes[LBase].Kind = nkMember) and
@@ -8473,8 +8473,8 @@ begin
           // Inside a METHOD body the name may be an INHERITED member from a
           // cross-unit ancestor (AddAttribute in a TSynCustomHighlighter
           // descendant), which dcc resolves BEFORE any used unit's globals.
-          // That walk (FindMemberX) reads OTHER models' ExtRefMap — mutated
-          // concurrently by their own CrossResolve workers — so it is
+          // That walk (FindMemberX) reads OTHER models' ExtRefMap - mutated
+          // concurrently by their own CrossResolve workers - so it is
           // DEFERRED to the sequential CrossResolveInherited pass, wholesale
           // (uses/System fallback included, to keep dcc's precedence).
           // Checked FIRST: the cheap scope-climb spares the allocation-heavy
@@ -8484,7 +8484,7 @@ begin
           // Same reason, for a `with` body whose target type is cross-unit:
           // resolving it needs FindMemberX over OTHER models, so it waits for
           // the frozen-ExtRefMap pass too (see FindInEnclosingWith). A LATER
-          // with TARGET waits for exactly the same reason — it is resolved
+          // with TARGET waits for exactly the same reason - it is resolved
           // inside the earlier targets, whose types are just as likely to live
           // in another unit. Emitting here instead meant the with pass went on
           // to bind the name correctly while this pass's E2003 for it stood.
@@ -8497,14 +8497,14 @@ begin
           // A qualifier segment of a dotted expression that names a real
           // unit (`System` in `System.sLineBreak`; `System`/`SysUtils` in
           // `System.SysUtils.TBytes`) is a namespace token, not an
-          // undeclared-id candidate — same spirit as the member-name guard
+          // undeclared-id candidate - same spirit as the member-name guard
           // above, generalized to the OTHER side of the dot.
           if QualifierUnitAt(AId, LNode, LMatchNode) >= 0 then
             Continue;
           if FindInUses(AId, LNameLower, LUid, LSym) then
           begin
             // ARITY is part of a type's identity (16.1.2) and last-uses-wins
-            // is blind to it — see FixCrossArity.
+            // is blind to it - see FixCrossArity.
             FixCrossArity(AId, LModel, LNode, LNameLower, LUid, LSym);
             LExt.UnitId := LUid; LExt.Sym := LSym;
             LModel.ExtRefMap.Add(LNode, LExt);
@@ -8526,7 +8526,7 @@ begin
             LExt.UnitId := LUid; LExt.Sym := LSym;
             LModel.ExtRefMap.Add(LNode, LExt);
           end
-          // Nothing local, nothing in a used unit — but a name written INSIDE a
+          // Nothing local, nothing in a used unit - but a name written INSIDE a
           // type declaration may still be an INHERITED member of that type or of
           // one it is nested in (11.4.1). That walk is FindMemberX, which reads
           // other models' ExtRefMap while their own workers are still writing,
@@ -8550,24 +8550,24 @@ end;
 // The struct type symbol of the METHOD implementation enclosing ANode, via
 // the scope chain (a local proc inside a method climbs to the method's
 // scope); NIL_SYM when ANode isn't inside any method body.
-{ Points a callee NAME node at ASym — the node RefMap/ExtRefMap are keyed by,
+{ Points a callee NAME node at ASym - the node RefMap/ExtRefMap are keyed by,
   which for `A.Create` is the trailing segment and for a bare `Foo` the ident
   itself. AId's own model is written directly; another model's binding goes into
   the caller's deferred dictionary, because the cross pass runs one worker per
   model and only the owner may touch a model's ExtRefMap during it.
 
   The same-model branch also REMOVES any ExtRefMap entry already sitting at
-  LName — needed because a bare call to an INHERITED member (`Seek(0, soEnd)`
+  LName - needed because a bare call to an INHERITED member (`Seek(0, soEnd)`
   in TMemoryStream.SetSize, System.Classes.pas) is bound TWICE, by two passes
   that run in a fixed order and neither knows about the other's node: first
   CrossResolveInherited's FindMemberX, which matches by NAME only (no argument
   types) and commits straight to ExtRefMap even for a same-unit hit (its own
   commit clears RefMap first, so nothing is wrong on ITS side); then, only if
   the callee is a routine, CrossType's OWN overload-precise SelectCallTarget
-  runs on the SAME node and calls RepointCallee — which used to write RefMap
+  runs on the SAME node and calls RepointCallee - which used to write RefMap
   and stop, leaving the FIRST pass's ExtRefMap entry standing right beside it.
   With one overload the two passes agree, so both maps end up holding the
-  identical (unit, symbol) — invisible to every consumer that reads "RefMap,
+  identical (unit, symbol) - invisible to every consumer that reads "RefMap,
   falling back to ExtRefMap" (a single answer either way), but a project-wide
   scan that reads BOTH maps as independent evidence (Find References) counted
   the one real reference twice. Removing the stale entry restores the
@@ -8604,37 +8604,37 @@ begin
     AModel.ExtRefMap.AddOrSetValue(LName, LExt);
 end;
 
-{ 11 §11.2.1, enforcement half: a QUALIFIED access to a private member, reported
-  as dcc does — `E2361 Cannot access private symbol TType.Member`.
+{ 11 sec. 11.2.1, enforcement half: a QUALIFIED access to a private member, reported
+  as dcc does - `E2361 Cannot access private symbol TType.Member`.
 
   OFF unless ReportVisibility says otherwise. This is the only check here that
   can reject code the corpora ACCEPT, so it ships as a switch.
 
   The rules, dcc32 37.0-probed rather than assumed:
 
-  - `private` is visible to the whole DECLARING UNIT, not just the type — the
+  - `private` is visible to the whole DECLARING UNIT, not just the type - the
     "friend" rule. So it is an error only across units, which is why the test is
     a unit-id comparison and not a struct one.
   - `strict private` is visible only inside the declaring type, in its own unit
     too: `A.FStrict` from a sibling class one line below is already an error.
   - `protected` gets its own code (`E2362`) and needs an ancestry walk to answer,
     so it is deliberately NOT enforced here; the README names it.
-  - A BARE name in a descendant is a different diagnostic entirely — dcc says
+  - A BARE name in a descendant is a different diagnostic entirely - dcc says
     `E2003 Undeclared identifier`, because an inaccessible member is not in scope
     rather than in scope and refused. Also named, also not done here: this
     routine sees qualified accesses only.
 
   Two things must keep working and are the reason the walk is written this way
   rather than as "the member's struct must be the accessing struct": a nested
-  enum's VALUES are reachable from outside a private type (2 §2.2.4), and a
-  strict private nested helper still activates (15 §15.4). Neither is a member
+  enum's VALUES are reachable from outside a private type (2 sec. 2.2.4), and a
+  strict private nested helper still activates (15 sec. 15.4). Neither is a member
   ACCESS, so neither reaches here. }
 { Visibility over one model's finished bindings.
 
   A separate pass, and AFTER the cross-type one on purpose: a member's binding is
   not final while that pass runs. `Exception.Create` binds to the chain HEAD when
   the nkMember node is visited and is re-pointed to the argument-matched overload
-  only when the enclosing nkCall is — so a check that ran inline saw the private
+  only when the enclosing nkCall is - so a check that ran inline saw the private
   `class constructor Create` and reported 475 times on one corpus. Reading the
   maps once everything has settled is the fix, and it is also why this is the only
   right shape for any check that inspects a BINDING rather than producing one. }
@@ -8648,7 +8648,7 @@ begin
     Exit;
   LM := FModels[AId];
   if not LM.AllUsesResolved then
-    Exit;   // a missing unit can hide the declaration — the E2003 gate's reason
+    Exit;   // a missing unit can hide the declaration - the E2003 gate's reason
   for LNode := 0 to High(LM.Tree.Nodes) do
   begin
     if LM.Tree.Nodes[LNode].Kind <> nkMember then
@@ -8723,8 +8723,8 @@ begin
     // The site may be in a type DECLARATION rather than a method body, and
     // StructSymOfNode deliberately answers NIL there (its own comment gives the
     // ordering reason). A field declared with its own class's strict private
-    // NESTED type is exactly that shape — `FGlow: TSystemTitlebarButton
-    // .TGlowWindow` inside TSystemTitlebarButton (Vcl.TitleBarCtrls) — and
+    // NESTED type is exactly that shape - `FGlow: TSystemTitlebarButton
+    // .TGlowWindow` inside TSystemTitlebarButton (Vcl.TitleBarCtrls) - and
     // refusing it was this check reporting a class for using its own member.
     // DeclStructsOfNode answers the same question for declaration sites,
     // innermost first, which is the one wanted here.
@@ -8740,11 +8740,11 @@ begin
       Exit;   // the friend rule: same unit, always legal
   end
   else
-    // strict private: only from inside the declaring type itself — or from a
+    // strict private: only from inside the declaring type itself - or from a
     // type NESTED in it, which is dcc's rule and an asymmetric one. Probed both
     // ways: a nested class reaching the OUTER class's strict private field
     // compiles, and the outer class reaching a NESTED class's strict private
-    // field is `E2361` — the same code we emit, so the enclosing type is not
+    // field is `E2361` - the same code we emit, so the enclosing type is not
     // "inside" its own nested one. System.JSON.Builders is the shape:
     // `TJSONCollectionBuilder.TBaseCollection.WriteBuilder` reads the outer
     // class's strict private `FJSONWriter`.
@@ -8780,7 +8780,7 @@ begin
       // member by walking the struct's ancestors, which means reading the
       // heritage reference (`class(TThread)`) out of this very declaration.
       // Deferring heritage references TOO puts them in the same round as the
-      // lookups that depend on them — they are still uncommitted when the
+      // lookups that depend on them - they are still uncommitted when the
       // walk reads them, and the ancestor is simply not found. Measured, not
       // theorised: deferring the whole declaration fixed the 47 property
       // specifiers and broke 74 previously-fine inherited members in nested
@@ -8795,21 +8795,21 @@ begin
   end;
 end;
 
-{ The OUTER qualifier segments of the method enclosing ANode — everything
+{ The OUTER qualifier segments of the method enclosing ANode - everything
   StructSymOfNode does not return, innermost first.
 
   `procedure TParallel.TLoopState32.TLoopStateFlag32.ShouldExit` uses
-  TLoopStateFlagSet, a private nested type of TLoopState — which is the
+  TLoopStateFlagSet, a private nested type of TLoopState - which is the
   ANCESTOR of the MIDDLE segment, TLoopState32. The innermost segment's own
   ancestry (all the inherited pass ever searched) does not contain it, so
-  every such use was a false E2003 — 16 of them in System.Threading alone.
+  every such use was a false E2003 - 16 of them in System.Threading alone.
 
   CollectRoutine joins each resolved segment's member scope into the routine
   scope, and CollectStruct tags every struct scope with its own type, so the
   chain is readable straight off Additional. Join order is outer-to-inner, so
   it is walked backwards to keep dcc's innermost-first precedence. Scopes of
   other kinds joined in there (a matched declaration's parameter scope) are
-  skipped — only structs have an ancestry to search. }
+  skipped - only structs have an ancestry to search. }
 function TPasSemaProject.OuterStructsOfNode(AModel: TPasSemaModel;
   ANode, AInnermost: Integer): TArray<Integer>;
 var
@@ -8842,14 +8842,14 @@ begin
   end;
 end;
 
-{ The enclosing TYPE-DECLARATION scopes around ANode, innermost first — the
+{ The enclosing TYPE-DECLARATION scopes around ANode, innermost first - the
   chain StructSymOfNode deliberately refuses to serve (it answers for method
   BODIES only). Empty for a node that is not inside a type declaration, and for
   one inside a method body, so it doubles as the "is this a declaration site?"
   test CrossResolve needs.
 
   What it buys: a name written inside a class declaration sees the members of
-  that class AND of every class it is NESTED in — each one's ANCESTORS included
+  that class AND of every class it is NESTED in - each one's ANCESTORS included
   (dcc-verified: a nested `TSub = class(TInner)` resolves both `TInner`, a
   nested type of the enclosing class's GRANDPARENT, and a const of that same
   grandparent used as an array bound). Vcl.Skia's
@@ -8874,7 +8874,7 @@ begin
   begin
     if AModel.Scopes[LScope].StructSym <> NIL_SYM then
     begin
-      // A method body (or a local proc in one) — StructSymOfNode's territory,
+      // A method body (or a local proc in one) - StructSymOfNode's territory,
       // and the inherited pass already searches exactly this chain there.
       if AModel.Scopes[LScope].Kind <> sckStruct then
         Exit(nil);
@@ -8885,7 +8885,7 @@ begin
 end;
 
 // True when ANode sits inside a property's read/write/stored/... specifier
-// (nkPropSpec). Walks CST parents, stopping at the property declaration —
+// (nkPropSpec). Walks CST parents, stopping at the property declaration -
 // nothing above it can be a specifier, so the walk is short.
 function TPasSemaProject.InPropertySpecifier(AModel: TPasSemaModel;
   ANode: Integer): Boolean;
@@ -8907,21 +8907,21 @@ begin
   end;
 end;
 
-{ `with` over a CROSS-UNIT target type (ch.05 §5.7)
+{ `with` over a CROSS-UNIT target type (ch.05 sec. 5.7)
 
   PasTree.Sema.Resolver.ResolveWithStmts already opens a with-target's member
-  scope — but only when the target's type is resolvable INTRA-unit, because it
+  scope - but only when the target's type is resolvable INTRA-unit, because it
   works by joining the type's MemberScope, and a scope index only means
   anything inside its own model. In real code the target's type usually comes
   from another unit (`with LTZ.StandardDate do` where LTZ: TTimeZoneInformation
-  from Winapi.Windows — System.DateUtils.pas:2612), and the whole body then
+  from Winapi.Windows - System.DateUtils.pas:2612), and the whole body then
   stayed unresolved and got a false E2003 per member.
 
   Cross-unit member references cannot use scope joining at all; the project
   records them in ExtRefMap instead, exactly as the inherited-member pass
   does. So this mirrors that pass: CrossResolve DEFERS an unresolved ident
-  sitting in a with body (InsideWithBody), and CrossResolveInherited — which
-  already runs late enough for every model's ExtRefMap to be frozen —
+  sitting in a with body (InsideWithBody), and CrossResolveInherited - which
+  already runs late enough for every model's ExtRefMap to be frozen -
   resolves it here. }
 
 // The cross-model TYPE of a with-target expression, deliberately computed
@@ -8934,11 +8934,11 @@ end;
   cross-model twin of TPasSemaResolver.PointeeTypeSym, depth-capped for the
   same reason. XNil when AX is not a pointer type. }
 { The RESULT type of a PARAMETERLESS function/procedural type, closed over AX's
-  own instantiation — XNil for anything else.
+  own instantiation - XNil for anything else.
 
   "Parameterless" is the whole rule: `ValueFunc.GetValue` is only a member of
   the result because writing the name of a parameterless function reference
-  CALLS it (6 §6.6.1). One that takes parameters cannot be called that way, and
+  CALLS it (6 sec. 6.6.1). One that takes parameters cannot be called that way, and
   a `procedure` type has no result to take a member from, so both answer XNil
   and the member walk ends where it did before.
 
@@ -8951,7 +8951,7 @@ end;
   node shape: a default is the only thing that can put an `=` inside a
   parameter declaration (a type expression never contains one), while the node
   shape cannot tell `X: TFoo` from `X: TFoo = nil` without knowing which
-  trailing child is a type and which an expression — and both can be an
+  trailing child is a type and which an expression - and both can be an
   nkIdent. An empty list answers True, which is the same "callable bare" the
   no-list case already gets. }
 function TPasSemaProject.AllParamsDefaulted(AMid, AParams: Integer): Boolean;
@@ -9008,7 +9008,7 @@ begin
           LChild := LM.Tree.Nodes[LDef].FirstChild;
           if LChild = NIL_NODE then
             Exit;   // `procedure` with neither parameters nor a result
-          // Takes parameters — but a parameter with a DEFAULT still lets the
+          // Takes parameters - but a parameter with a DEFAULT still lets the
           // name be written bare, and dcc calls it then:
           // `TVTStyleServicesFunc = function(AControl: TControl = nil):
           // TCustomStyleServices` is called as `VTStyleServicesFunc.
@@ -9059,13 +9059,13 @@ begin
 end;
 
 { The pointee of an ANONYMOUS pointer type written INLINE on the base
-  designator's own declaration — `PExtLogPen: ^TExtLogPen` as a local var, then
+  designator's own declaration - `PExtLogPen: ^TExtLogPen` as a local var, then
   `with Result, PExtLogPen^ do` (Vcl.Graphics.GetPenData). There is no pointer
   type SYMBOL anywhere in that shape, so PointeeX has nothing to chase: the
   declaration's type NODE is the only place the pointer type exists at all.
 
   Exactly the reason ElementX starts from the declared type node for an inline
-  `array[...] of T` — same gap, the other type constructor. XNil whenever the
+  `array[...] of T` - same gap, the other type constructor. XNil whenever the
   base does have a named type, which is the ordinary path. }
 function TPasSemaProject.PointeeOfDeclX(AId, ABaseNode: Integer): TSemaXType;
 var
@@ -9130,7 +9130,7 @@ begin
   { Neither map has it yet. That is the normal state for a member inside a with
     TARGET: the pass that records cross-unit member references is CrossType,
     which runs AFTER the with pass that is asking. So find the member the same
-    way WithTargetTypeX does — through the base's type.
+    way WithTargetTypeX does - through the base's type.
 
     `with Params^.rgrc[0] do` (Vcl.Forms) needs exactly this: rgrc's declared
     type is an INLINE `array[..] of TRect`, so ElementX can only reach the
@@ -9158,23 +9158,23 @@ begin
 end;
 
 { The ELEMENT type of an indexable designator, or XNil when it is not an array
-  (the caller reads that as "leave the type alone" — see the nkIndex branch).
+  (the caller reads that as "leave the type alone" - see the nkIndex branch).
   Cross-model twin of TPasSemaResolver.ElementTypeOf, and it needs the same two
   sources: the base's own declared type NODE may BE an inline array, which no
   symbol lookup can reach, so that is tried before the named type it resolves
   to. Alias links chased in both, depth-capped like PointeeX. }
-{ True when ASym is a DEFAULT ARRAY property (13.1.4) — `property Items[Index:
+{ True when ASym is a DEFAULT ARRAY property (13.1.4) - `property Items[Index:
   Integer]: T read GetItem; default;`.
 
   Two different specifiers spell `default` and both land as an nkPropSpec whose
   first token is that word: this one, and the default-VALUE of an ordinary
   property (`property Align: TAlign read FAlign default alLeft;`). They are told
-  apart by the index parameters — a value-default property has none, and only an
+  apart by the index parameters - a value-default property has none, and only an
   ARRAY property can be the default one. }
 { One step up the inheritance chain: AX's ancestor, or XNil at the root.
 
   Chases a type alias transparently, and takes the heritage clause's FIRST type
-  reference as the ancestor — the same convention CollectStruct and XDescendsFrom
+  reference as the ancestor - the same convention CollectStruct and XDescendsFrom
   use. Extracted because three callers now climb (XDescendsFrom's own compare
   loop aside): the default-array-property search and the property-redeclaration
   type search below, and it is exactly the kind of step that should exist once. }
@@ -9201,7 +9201,7 @@ begin
           LChild := LM.Tree.Nodes[LChild].NextSibling;
         if LChild <> NIL_NODE then
           // Nested ancestor (`Outer.Inner`) reached the same way FindMemberX's
-          // own heritage hop does — see ResolveTypeExprNested.
+          // own heritage hop does - see ResolveTypeExprNested.
           Result := ResolveTypeExprNested(AX.UnitId, LChild);
       end;
   end;
@@ -9214,14 +9214,14 @@ begin
   Result := SubstX(Result, AX.Inst, 0);
 end;
 
-{ The declared type of ONE symbol, resolved in its own model — the single place
+{ The declared type of ONE symbol, resolved in its own model - the single place
   that answers "what type is this member?".
 
   It exists because of the bare property REDECLARATION: `property Items;` with no
   type and no specifiers, which only promotes visibility. Vcl.StdCtrls declares
   `Items: TStrings` on TCustomListBox and then republishes it on TListBox exactly
   that way, so `with CatList.Items do` (Vcl.CustomizeDlg) finds the
-  redeclaration — a real symbol, with NO TypeNode — and used to type to nothing,
+  redeclaration - a real symbol, with NO TypeNode - and used to type to nothing,
   leaving the whole with body undeclared.
 
   Such a symbol's type is the inherited declaration's, so the walk continues up
@@ -9247,11 +9247,11 @@ begin
       Exit;
     // A declaration's type slot that resolved to NOTHING, in a position where
     // only a type is legal. The ordinary cause is a member whose name equals
-    // its own type's — `property Params: Params`, routine in imported
+    // its own type's - `property Params: Params`, routine in imported
     // type-library interfaces. Phase 1 resolves that slot inside the struct's
     // member scope, finds the PROPERTY, and the declared type comes back empty;
     // every member reached through it is then a false E2003 (11 sites in one
-    // database layer). dcc resolves the TYPE there, so look one up by name —
+    // database layer). dcc resolves the TYPE there, so look one up by name -
     // only here, where the node is known to be a type slot, and only after the
     // normal path has failed.
     Exit(TypeSlotByNameX(AMid, LM.Symbols[ASym].TypeNode));
@@ -9353,7 +9353,7 @@ end;
   `with GetScreenBounds do X := (Left + Right) div 2` in one ribbon library: the
   class OVERRIDES `GetScreenBounds(out ABounds: TRect): Boolean` and inherits a
   parameterless `GetScreenBounds: TRect` overload from two classes up. A bare
-  with target carries no arguments, so 6.3.1 selects the arity-0 one — but the
+  with target carries no arguments, so 6.3.1 selects the arity-0 one - but the
   ordinary member walk answers with the NEAREST member of that name, which is
   the Boolean override, and the with then opened over a Boolean.
 
@@ -9400,8 +9400,8 @@ end;
   `with ActionManager.ActionBars[I] do` (Vcl.CustomizeDlg) indexes a value whose
   type is a CLASS, not an array: TActionBars declares `property ActionBars[const
   Index: Integer]: TActionBarItem ... default`, and the element type is that
-  property's. Naming the property explicitly always worked — `Coll.Items[0]`
-  types through the member — so it was only the unnamed form that fell back to
+  property's. Naming the property explicitly always worked - `Coll.Items[0]`
+  types through the member - so it was only the unnamed form that fell back to
   the collection type itself and looked for the item's members on it.
 
   Walk shape and alias chasing mirror XDescendsFrom: a default property is
@@ -9409,7 +9409,7 @@ end;
 { AOwner is the hop the property was FOUND at, instantiation frame included, and
   it is not the same thing as AX: the walk climbs ancestors, and an ancestor is
   where the frame usually comes from. `TAttrList = class(TObjectList<TAttr>)`
-  has no frame of its own — `Items: T` lives two hops up in `TList<T>`, and only
+  has no frame of its own - `Items: T` lives two hops up in `TList<T>`, and only
   TObjectList<TAttr>'s frame turns that `T` into TAttr. Substituting with AX's
   own frame (empty here) left the element type as the OPEN parameter, so
   `with L[I] do` opened over nothing and every member in the body was a false
@@ -9451,7 +9451,7 @@ end;
 function TPasSemaProject.ElementX(AId, ABaseNode: Integer): TSemaXType;
 
   // Element child of an nkArrayType: its LAST child. For a multi-dimensional
-  // `array[a, b] of T` this reaches T rather than the intermediate row type —
+  // `array[a, b] of T` this reaches T rather than the intermediate row type -
   // over-eager by one level in a shape too rare to model, and it can only find
   // members of T instead of failing.
   function ElemOf(AMid, ANode: Integer): TSemaXType;
@@ -9463,7 +9463,7 @@ function TPasSemaProject.ElementX(AId, ABaseNode: Integer): TSemaXType;
        (FModels[AMid].Tree.Nodes[ANode].Kind <> nkArrayType) then
       Exit;
     // `array of const` (Aux=1) has no element type NODE to resolve, but it does
-    // have an element TYPE: 6.2.6 — "array of const builds a TVarRec array". So
+    // have an element TYPE: 6.2.6 - "array of const builds a TVarRec array". So
     // indexing one yields System.TVarRec, and `with aValues[i] do VType ...`
     // over an `array of const` parameter opens over its fields. Bailing here
     // instead left every one of them undeclared (56 of 57 diagnostics on
@@ -9481,7 +9481,7 @@ function TPasSemaProject.ElementX(AId, ABaseNode: Integer): TSemaXType;
       LLast := LChild;
       LChild := FModels[AMid].Tree.Nodes[LChild].NextSibling;
     end;
-    // NESTED inline arrays — `array of array of T`, written as one nkArrayType
+    // NESTED inline arrays - `array of array of T`, written as one nkArrayType
     // inside another. Descend to the innermost element, which is the same
     // deliberate over-eagerness the header already documents for the
     // comma-dimension spelling `array[a, b] of T`: right when the index count
@@ -9536,7 +9536,7 @@ begin
         // Indexing a POINTER to an array: `ImageData[i]` where
         // `pPixelLine = ^TPixelLine` and `TPixelLine = array[Word] of TRGBQuad`
         // (Vcl.Imaging.pngimage, 23 sites; Vcl.Imaging.GIFImg the same). The `^`
-        // may be omitted before `[`, and no POINTERMATH directive is needed —
+        // may be omitted before `[`, and no POINTERMATH directive is needed -
         // dcc-verified, both as an expression and as a with target.
         //
         // Deref and let the loop continue, so pointer -> alias -> array composes
@@ -9544,13 +9544,13 @@ begin
         // the same implicit deref for `P.Field`; this is its sibling.
         LCur := PointeeX(LCur);
     else
-      Break;   // not an array — a default array property may still index it
+      Break;   // not an array - a default array property may still index it
     end;
   end;
   // A CLASS/interface being indexed: the element type is its default array
   // property's (see DefaultArrayPropX).
   // Substituted over the frame of the hop the property was FOUND at, not over
-  // LCur's own — see DefaultArrayPropX. For `TAttrList = class(TObjectList
+  // LCur's own - see DefaultArrayPropX. For `TAttrList = class(TObjectList
   // <TAttr>)` LCur has no frame at all and the element type would stay `T`.
   if XValid(LCur) and DefaultArrayPropX(LCur, LMid, LSym, LOwner) then
     Exit(SubstX(ResolveTypeExpr(LMid, FModels[LMid].Symbols[LSym].TypeNode),
@@ -9558,7 +9558,7 @@ begin
   Result := XNil;
 end;
 
-{ The type of an inline `var` that declared no type of its own — 3.1.3's
+{ The type of an inline `var` that declared no type of its own - 3.1.3's
   `var L := Expr;`, inferred from the INITIALIZER. Nothing records such a type:
   the resolver leaves TypeNode empty by design, so SymDeclTypeX answers XNil
   and every consumer that asks the symbol comes away empty-handed.
@@ -9566,7 +9566,7 @@ end;
   For member binding that is merely silent (an unknown base type cannot be
   said to lack a member), which is why this went unnoticed. `with` is where it
   bites: the target types as nothing, the with-scope never opens, and every
-  bare name in the body becomes a hard E2003 — 24 of them in one JSON writer
+  bare name in the body becomes a hard E2003 - 24 of them in one JSON writer
   off a single `var LNodeList := InternalGetChildNodes;`.
 
   The initializer is typed by the same walk the target itself uses, so calls,
@@ -9619,29 +9619,29 @@ begin
     nkParen:
       Result := WithTargetTypeX(AId, LM.Tree.Nodes[ANode].FirstChild);
 
-    // `with SomePointer^ do` — the target's type is the POINTEE. Mirrors
+    // `with SomePointer^ do` - the target's type is the POINTEE. Mirrors
     // TPasSemaResolver.WithTargetTypeSym's own nkDeref branch, for a pointer
     // (or a pointee) declared in another unit: System.Variants' `with
     // LVarData^ do VType := ...` and `with FindVarData(V)^ do`, where both
     // PVarData and TVarData come from the implicit System unit. The second
-    // shape composes with the cast/call branch above — the call types to
+    // shape composes with the cast/call branch above - the call types to
     // PVarData, this dereferences it to TVarData.
     nkDeref:
       begin
         LBase := LM.Tree.Nodes[ANode].FirstChild;
-        // An inline `^T` on the base's own declaration first — that pointer type
+        // An inline `^T` on the base's own declaration first - that pointer type
         // has no symbol for PointeeX to chase (see PointeeOfDeclX).
         Result := PointeeOfDeclX(AId, LBase);
         if not XValid(Result) then
           Result := PointeeX(WithTargetTypeX(AId, LBase));
       end;
 
-    // `with Arr[I] do` — the ELEMENT type; the single most common with-target
+    // `with Arr[I] do` - the ELEMENT type; the single most common with-target
     // shape in the RTL (`with NetResources^[I] do` over a Winapi record,
     // `with LVarBounds[I] do`, `with FList[Index] do`). ElementX returns XNil
     // for a non-array, which is the array-PROPERTY case: such a property's
     // declared type is ALREADY its element type, so indexing must not peel a
-    // level — hence the pass-through fallback.
+    // level - hence the pass-through fallback.
     nkIndex:
       begin
         LBase := LM.Tree.Nodes[ANode].FirstChild;
@@ -9650,7 +9650,7 @@ begin
           Result := WithTargetTypeX(AId, LBase);
       end;
 
-    // `with Obj as TSomething do` (System.Net.Socket) — the CAST's type, the
+    // `with Obj as TSomething do` (System.Net.Socket) - the CAST's type, the
     // right operand. Only `as`; any other binary operator yields a value no
     // with can open anyway.
     nkBinaryOp:
@@ -9669,7 +9669,7 @@ begin
       begin
         LBase := LM.Tree.Nodes[ANode].FirstChild;
         // A CAST `T(Expr)`: the callee is a TYPE name, so the with-target's
-        // type is that type ITSELF — not the callee's declared type, which is
+        // type is that type ITSELF - not the callee's declared type, which is
         // what the recursion below would read. ResolveTypeExpr yields XNil for
         // anything that is not a type, so a genuine parameterless call
         // (`with GetRec do`) still falls through to it and picks up the
@@ -9678,18 +9678,18 @@ begin
         // TPasSemaResolver.WithTargetTypeSym has had this branch all along;
         // it was missing HERE, so a cast to a type declared in ANOTHER unit
         // never typed at all. Real bug: System.ObjAuto's `with TVarData(
-        // ParamValues[...]) do VType := ...` — TVarData lives in the implicit
+        // ParamValues[...]) do VType := ...` - TVarData lives in the implicit
         // System unit, so Phase 1 cannot bind it and this pass is the only
         // one that can. Unlike the Phase 1 branch this also covers a
         // QUALIFIED cast (`System.TVarData(X)`) and a generic one, since
-        // ResolveTypeExpr handles nkMember/nkTypeArgs too — and the Nested
+        // ResolveTypeExpr handles nkMember/nkTypeArgs too - and the Nested
         // variant also reaches a cross-unit NESTED type named through its outer
         // one (`TScrollBarStyleHook.TScrollWindow(X)`), which nothing has bound
         // this early.
         Result := ResolveTypeExprNested(AId, LBase);
         if XValid(Result) then
           Exit;
-        // `with TApartmentThread.Create(...) do` (System.Win.VCLCom) — a
+        // `with TApartmentThread.Create(...) do` (System.Win.VCLCom) - a
         // CONSTRUCTOR call yields the CLASS. Its routine symbol has no result
         // type, so the plain recursion below would type the whole thing as
         // nothing. Mirrors what CrossType already does for a ctor call.
@@ -9703,7 +9703,7 @@ begin
             Exit;
           // The qualifier need not be a type NAME: a constructor called through
           // a CLASS REFERENCE constructs the referenced class (15.2.1), and the
-          // reference is routinely a function result —
+          // reference is routinely a function result -
           // `with GetPainterClass.Create(...) do MainPaint`, a virtual-
           // constructor factory. Type the qualifier and unwrap `class of T`.
           Result := ClassRefTargetX(
@@ -9717,12 +9717,12 @@ begin
     nkInherited:
       begin
         // `with inherited Canvas do` (Vcl.ExtCtrls). 12.1.2: `inherited` heads a
-        // designator, and `inherited Name` names a member of the ANCESTOR — so
+        // designator, and `inherited Name` names a member of the ANCESTOR - so
         // the target's type is that member's, looked up from the ancestor of the
         // struct whose method body this is, never from the struct itself.
         // Without it the target had no type, the body's Pen/Brush went
         // undeclared, and StretchDraw's bare name matched a GLOBAL instead of the
-        // canvas method — which is where that E2035 came from.
+        // canvas method - which is where that E2035 came from.
         LName := LM.Tree.Nodes[ANode].FirstChild;
         if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) then
           Exit;
@@ -9737,7 +9737,7 @@ begin
 
     nkIdent:
       begin
-        // A bare class TYPE NAME is itself a legal target (5.7) — its class
+        // A bare class TYPE NAME is itself a legal target (5.7) - its class
         // methods and class vars are what the body sees, exactly as for a
         // `class of` reference. ResolveTypeExpr yields XNil for anything that
         // is not a type, so a value designator falls through unchanged.
@@ -9745,7 +9745,7 @@ begin
         if XValid(Result) then
           Exit;
         // A routine that REQUIRES arguments is not what a bare `with Name do`
-        // calls — see ParamlessOverloadX. Tried before the ordinary reading,
+        // calls - see ParamlessOverloadX. Tried before the ordinary reading,
         // which would hand back that routine's own result type.
         LSym := LM.RefMap[ANode];
         if LSym <> NIL_SYM then
@@ -9781,8 +9781,8 @@ begin
         // - the inherited pass writes it for a member reached through a
         //   GENERIC ancestor: `Items` on a `class(TObjectList<TFloatingObj>)`
         //   is declared `T` on TList<T> (HTMLSubs.TFloatingObjList.Decrement);
-        // - an INLINE VAR WITH AN INFERRED TYPE — `var L := GetChildNodes;`
-        //   then `with L do ... Count` — has a symbol but no type NODE, so
+        // - an INLINE VAR WITH AN INFERRED TYPE - `var L := GetChildNodes;`
+        //   then `with L do ... Count` - has a symbol but no type NODE, so
         //   SymDeclTypeX answers nothing and the old else-chain stopped there.
         //   A plain `L.Count` typed fine, which is what made it look like a
         //   member-binding problem rather than a with-target one
@@ -9794,7 +9794,7 @@ begin
           Result := InlineVarInitTypeX(AId, LSym, 0);
         if not XValid(Result) and LM.ExtRefMap.TryGetValue(ANode, LExt) then
           Result := SymDeclTypeX(LExt.UnitId, LExt.Sym)
-        // `Self` has no symbol — nothing declares it (11.3.3), so RefMap is
+        // `Self` has no symbol - nothing declares it (11.3.3), so RefMap is
         // empty for it and the recursion above dead-ends. Inside a method body
         // its type is the enclosing struct, which is exactly what
         // StructSymOfNode answers. Real shape: `with Self.TreeViewControl do`,
@@ -9815,7 +9815,7 @@ begin
         LName := LM.Tree.Nodes[LBase].NextSibling;
         if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) then
           Exit;
-        // A CONSTRUCTOR yields the class, not its (absent) result type — and
+        // A CONSTRUCTOR yields the class, not its (absent) result type - and
         // a parameterless one needs no parentheses, so `with TThing.Create do`
         // arrives here as a plain nkMember, not as the nkCall the branch above
         // handles (System.Win.VCLCom writes it with arguments, the paren-less
@@ -9824,7 +9824,7 @@ begin
         // cross-unit class the constructor is not bound yet at with-pass time
         // (CrossType records that, and it runs later), and DesignatorSymX is
         // the one place that knows to fall back to walking the base's type.
-        // Probing the maps directly was the bug — `with TControlCanvas.Create
+        // Probing the maps directly was the bug - `with TControlCanvas.Create
         // do` (Vcl.ComCtrls) then fell through to the generic member path,
         // which typed the target as the constructor's own (absent) result type.
         if DesignatorSymX(AId, ANode, LMemMid, LMemSym) and
@@ -9851,7 +9851,7 @@ begin
           // instantiation frame: FThreads: TThreadList<TBaseWorkerThread>
           // makes LockList's declared TList<T> a TList<TBaseWorkerThread>,
           // exactly as CrossType's own member typing does. Without it the
-          // with-body would look members up in an OPEN TList<T> — right
+          // with-body would look members up in an OPEN TList<T> - right
           // members, imprecise element types.
           Result := SubstX(SymDeclTypeX(LMemMid, LMemSym), LCtx, 0);
       end;
@@ -9888,7 +9888,7 @@ end;
 { True when ANode sits inside a with TARGET that is not the FIRST one.
 
   Such a node needs the with pass just as much as a body node does, because a
-  later target is resolved inside the earlier ones — `with DIB, dsbm, dsbmih do`
+  later target is resolved inside the earlier ones - `with DIB, dsbm, dsbmih do`
   (Vcl.Graphics), where dsbm is a field of DIB. It is NOT in any with body, so
   testing only InsideWithBody left it to the inherited pass, which knows nothing
   about with scopes: the target came out undeclared and every member reached
@@ -9908,7 +9908,7 @@ begin
     if AModel.Tree.Nodes[LParent].Kind = nkWithStmt then
     begin
       // LCur is one of the with's children. It qualifies when it is a target
-      // (i.e. has a next sibling — the body is last) and not the first one.
+      // (i.e. has a next sibling - the body is last) and not the first one.
       LChild := AModel.Tree.Nodes[LParent].FirstChild;
       if (LChild <> LCur) and (LCur <> NIL_NODE) and
          (AModel.Tree.Nodes[LCur].NextSibling <> NIL_NODE) then
@@ -9922,7 +9922,7 @@ end;
 // Resolves ANameLower as a member of an enclosing with-target's type.
 // Precedence follows 5.7: the INNERMOST `with` first (the outward climb gives
 // that for free), and within one `with` its targets RIGHT-TO-LEFT, so the
-// last target wins a name they share — the same rule the intra-unit pass gets
+// last target wins a name they share - the same rule the intra-unit pass gets
 // out of Resolve()'s reverse Additional-scope walk.
 //
 // Only reached for names the intra-unit pass could NOT bind, so a `with`
@@ -9959,7 +9959,7 @@ begin
         LChild := LM.Tree.Nodes[LChild].NextSibling;
       end;
       // WHICH targets are open at LCur. In the body, all of them. But a target
-      // is itself resolved inside the ones BEFORE it — `with DIB, dsbm, dsbmih
+      // is itself resolved inside the ones BEFORE it - `with DIB, dsbm, dsbmih
       // do` is legal precisely because dsbm is a field of DIB and dsbmih a
       // field of dsbm (Vcl.Graphics does exactly this). Treating a target like
       // ordinary enclosing code, which is what only testing `LCur = LLast`
@@ -9983,7 +9983,7 @@ begin
              FindMemberX(AId, LX, ANameLower, AUid, ASym, LCtx) then
           begin
             // The member's declared type, closed over the instantiation
-            // frame FindMemberX reported — travels back with the hit (see
+            // frame FindMemberX reported - travels back with the hit (see
             // TPasInhPending.X for why it cannot be recovered later).
             AX := SubstX(SymDeclTypeX(AUid, ASym), LCtx, 0);
             Exit(True);
@@ -9997,13 +9997,13 @@ end;
 
 // Companion to CrossResolve for idents inside METHOD bodies, deferred there
 // because the inherited-member walk (FindMemberX) reads other models'
-// ExtRefMap — those must be FROZEN (every parallel CrossResolve worker done)
+// ExtRefMap - those must be FROZEN (every parallel CrossResolve worker done)
 // before this runs. Resolution order matches dcc: inherited members first,
 // then used units, then the implicit System unit; E2003 after all three miss.
 //
 // Runs in TWO PHASES (see RunInheritedPass): this COMPUTE step is safe to
 // farm out one-worker-per-unit because every worker only READS ExtRefMaps
-// (its own included) and writes its results to APending / its OWN Diags —
+// (its own included) and writes its results to APending / its OWN Diags -
 // the ExtRefMap writes are committed sequentially afterwards. The split is
 // exact: the entries this pass produces are method-BODY nodes, which are
 // never heritage/alias/type nodes, so no worker's FindMemberX result can
@@ -10029,7 +10029,7 @@ end;
 
   The scan those passes used to do each was the expensive part of them, not the
   work: per node it probed ExtRefMap (a dictionary) and, for the with pass, ran
-  InsideWithBody (a walk up the parent chain) — and RunWithPass iterates to a
+  InsideWithBody (a walk up the parent chain) - and RunWithPass iterates to a
   fixpoint, so it paid that for every node of every model on every round. Here
   each node is classified once.
 
@@ -10042,7 +10042,7 @@ end;
   617 ms to 480 ms, but on TOTAL analysis time that is inside the noise band
   (2904 -> 2882 ms best-of-5). The commit's actual win is the convergence fix in
   CrossResolveWith. Kept because the per-round rescan it removes scales with
-  fixpoint depth, and depth grows with project size — not because it moved the
+  fixpoint depth, and depth grows with project size - not because it moved the
   number today. }
 procedure TPasSemaProject.EnsureCrossWork(AId: Integer);
 var
@@ -10056,7 +10056,7 @@ begin
   // produces (range checks are off in release; a nil-array index read
   // whatever sat at address AId). Sizing stays the CALLER's job on purpose:
   // this runs on pass workers, and lazily growing shared arrays here would
-  // be a write race between them — the exact bug class this file avoids by
+  // be a write race between them - the exact bug class this file avoids by
   // hoisting every SetLength to the driver (SizeCrossWork's callers).
   if AId > High(FWorkBuilt) then
     raise Exception.CreateFmt(
@@ -10089,7 +10089,7 @@ begin
       // NOT filtered on bound-ness: the with pass revisits an already-bound
       // name when its with target went unopened, to OVERRIDE a wrong guess.
       //
-      // The NAME is computed here, once — the pass itself re-reads this list
+      // The NAME is computed here, once - the pass itself re-reads this list
       // on every fixpoint round. 'result'/'self' are skipped at the source:
       // both passes Continue on them with no side effects, and a with body
       // mentions Result constantly.
@@ -10156,7 +10156,7 @@ end;
   type declaration that CrossResolve could bind nowhere, retried against the
   ancestry of every class they are declared inside (see DeclStructsOfNode).
 
-  Runs BEFORE the inherited pass, and that order is the whole point — the
+  Runs BEFORE the inherited pass, and that order is the whole point - the
   entries it produces are HERITAGE references, which is precisely what the
   inherited and with passes read when they walk a struct's ancestors. Feeding
   them into the same round as their consumers is the ordering hazard
@@ -10170,7 +10170,7 @@ end;
 
   Known precedence gap that costs: a used unit's global still outranks an
   inherited member for these, where dcc has it the other way round. Closing it
-  means deferring EVERY unresolved-locally declaration-site name — that is every
+  means deferring EVERY unresolved-locally declaration-site name - that is every
   cross-unit type reference in every class in the closure, all of them through
   FindMemberX. Not worth it for a collision nobody has hit; noted in the README
   To-do instead. }
@@ -10188,21 +10188,21 @@ begin
     Exit;
   LModel := FModels[AId];
   // Pre-size to the work list (every entry can pend at most once), truncate at
-  // the end — the old `+ [x]` re-copied the managed-record array per append,
+  // the end - the old `+ [x]` re-copied the managed-record array per append,
   // per round (the EnsureCrossWork idiom).
-  // FDeclWork carries capacity slack — the filled prefix is FDeclWorkCount.
+  // FDeclWork carries capacity slack - the filled prefix is FDeclWorkCount.
   SetLength(APending, FDeclWorkCount[AId]);
   LPendCount := 0;
   for LWIdx := 0 to FDeclWorkCount[AId] - 1 do
   begin
     LNode := FDeclWork[AId][LWIdx];
-    // An earlier ROUND may have bound it — that is what the rounds are for.
+    // An earlier ROUND may have bound it - that is what the rounds are for.
     if (LModel.RefMap[LNode] <> NIL_SYM) or
        LModel.ExtRefMap.ContainsKey(LNode) then
       Continue;
     LNameLower := LModel.Tree.NodeNameLower(LNode);
     LFound := False;
-    // Innermost declaration first, matching dcc's precedence — and matching
+    // Innermost declaration first, matching dcc's precedence - and matching
     // what the method-body side already does with OuterStructsOfNode.
     for var LStruct in DeclStructsOfNode(LModel, LNode) do
       if FindMemberX(AId, XPlain(AId, LStruct), LNameLower, LUid, LSym,
@@ -10228,7 +10228,7 @@ end;
 
 { Parallel compute + sequential commit, iterated: one nested class's heritage
   can be another's, and round N+1 sees round N's bindings. Same shape and same
-  reasoning as RunWithPass — including E2003 only in the final round, so a name
+  reasoning as RunWithPass - including E2003 only in the final round, so a name
   a later round resolves is never reported. Depth here is nesting depth, so two
   rounds is already generous; the cap is a runaway guard. }
 procedure TPasSemaProject.RunDeclPass(ACount: Integer);
@@ -10283,13 +10283,13 @@ begin
   LModel := FModels[AId];
   EnsureCrossWork(AId);
   // Pre-size to the work list (each entry pends at most once), truncate at
-  // the end — the same idiom EnsureCrossWork itself uses; the old `+ [x]`
+  // the end - the same idiom EnsureCrossWork itself uses; the old `+ [x]`
   // re-copied the managed-record array per append, per fixpoint round.
   SetLength(APending, Length(FInhWork[AId]));
   LPendCount := 0;
   LMiss := TDictionary<Int64, Byte>.Create;
   try
-  // Candidates only — kind, scope, A.B-member and not-in-a-with-body were all
+  // Candidates only - kind, scope, A.B-member and not-in-a-with-body were all
   // decided by that single scan (see EnsureCrossWork).
   for LWIdx := 0 to High(FInhWork[AId]) do
   begin
@@ -10297,7 +10297,7 @@ begin
     // NB a with BODY is deliberately absent from this list and handled by the
     // LATER with pass: deciding such a node needs the with-target's TYPE node,
     // and for a `with` inside a METHOD that type node is itself a method-body
-    // node THIS pass is still producing — it would be read while still
+    // node THIS pass is still producing - it would be read while still
     // uncommitted and come back unresolved. Keeping them out preserves this
     // pass's stated invariant (see the header: its own entries are never type
     // nodes another worker needs).
@@ -10305,7 +10305,7 @@ begin
     if LStruct = NIL_SYM then
       Continue;
     // A node that ARRIVES BOUND is here for the shadowing retry, and its
-    // answer is almost always "no, the binding stands" — `Length`, `Copy` and
+    // answer is almost always "no, the binding stands" - `Length`, `Copy` and
     // every other intrinsic used in a method body asks the same question over
     // and over. Remember the misses, keyed by (struct, the symbol it is bound
     // to): two integers, so no string is built and nothing is allocated, which
@@ -10324,7 +10324,7 @@ begin
     LNameLower := FInhWorkNames[AId][LWIdx];
     // Innermost enclosing struct's ancestry, then the OUTER segments of a
     // qualified method name (see OuterStructsOfNode), then the ordinary
-    // uses/System fallbacks — dcc's own precedence order.
+    // uses/System fallbacks - dcc's own precedence order.
     LFound := FindMemberX(AId, XPlain(AId, LStruct), LNameLower, LUid, LSym, LCtx);
     if not LFound then
       for var LOuter in OuterStructsOfNode(LModel, LNode, LStruct) do
@@ -10337,7 +10337,7 @@ begin
     // an inherited MEMBER outranks a unit name. `uses SomeLib.Header`
     // registers the unit under its LAST segment, so in a class that also has a
     // `Header` property the qualifier test says "this is a namespace token" and
-    // skipped the very node that had a member to find — leaving `Header.Columns`
+    // skipped the very node that had a member to find - leaving `Header.Columns`
     // typed as nothing and its whole with body undeclared. Tested first, it also
     // suppressed the override below, which is why that change alone did nothing.
     if not LFound and (QualifierUnitAt(AId, LNode, LMatchNode) >= 0) then
@@ -10352,7 +10352,7 @@ begin
     //   that also has a `Header` property);
     // - a compiler SEED, for the same reason one step further out. dcc-probed:
     //   a class with a `Text` property compiles `Text.IsEmpty` in its method
-    //   body — the member beats the predefined FILE type — and `var F: Text;`
+    //   body - the member beats the predefined FILE type - and `var F: Text;`
     //   in that same body is `E2007`, so the member wins in a TYPE position
     //   too. FMX's canvases are full of the first form (`TTextLayout.Text`),
     //   and binding the seed there is a WRONG binding, not a missing one: it
@@ -10368,7 +10368,7 @@ begin
         // branch below states at length: it cannot be recovered downstream.
         // Dropping it here was invisible until a name was BOTH the last
         // segment of a dotted `uses` AND a member declared in a generic
-        // ancestor's open parameters — `Params` in a real project's UI tests, where
+        // ancestor's open parameters - `Params` in a real project's UI tests, where
         // `uses UITest.Params` registers the unit under `Params` and
         // `TUITest<TParams>.Params: TParams` is the member that outranks it.
         // The override then typed every one of them as the open TParams,
@@ -10392,7 +10392,7 @@ begin
        FindInSysInitUnit(LNameLower, LUid, LSym) then
     begin
       // The uses/System fallbacks are last-uses-wins and blind to ARITY, which
-      // is part of a type's identity (16.1.2) — see FixCrossArity. Not applied
+      // is part of a type's identity (16.1.2) - see FixCrossArity. Not applied
       // to an inherited MEMBER hit (LFound): that came from a type's own
       // scope, not from a by-name import race.
       if not LFound then
@@ -10401,7 +10401,7 @@ begin
       LPend.Ext.UnitId := LUid;
       LPend.Ext.Sym := LSym;
       // The member's type, closed over the instantiation frame FindMemberX
-      // reported — but ONLY when there is one. A member reached through a
+      // reported - but ONLY when there is one. A member reached through a
       // GENERIC ancestor is declared in the open parameters (`Items: T` on
       // TList<T>), and the frame is the only thing that turns that `T` into the
       // actual element type. It cannot be recovered later: nothing downstream
@@ -10439,7 +10439,7 @@ begin
   // workers below start (see BuildHelperMap / ActiveHelperFor).
   BuildHelperMap;
   // Heritage references this pass is about to WALK are resolved (and
-  // committed) first — see CrossResolveDecl for why it cannot be folded in
+  // committed) first - see CrossResolveDecl for why it cannot be folded in
   // here. Placed inside this pass, not beside it, so it inherits the same
   // "helper map is built" precondition rather than rebuilding it.
   RunDeclPass(ACount);
@@ -10492,7 +10492,7 @@ begin
   AUnresolved := nil;
   LModel := FModels[AId];
   EnsureCrossWork(AId);
-  // Pre-size + truncate, same as CrossResolveInherited — this one repeats per
+  // Pre-size + truncate, same as CrossResolveInherited - this one repeats per
   // fixpoint round (MAX_ROUNDS=8), so the old per-append copy multiplied.
   SetLength(APending, Length(FWithWork[AId]));
   SetLength(AUnresolved, Length(FWithWork[AId]));
@@ -10506,18 +10506,18 @@ begin
     LNode := FWithWork[AId][LWIdx];
     LBound := (LModel.RefMap[LNode] <> NIL_SYM) or
               LModel.ExtRefMap.ContainsKey(LNode);
-    // An already-bound name is finished — EXCEPT in a `with` body whose target
+    // An already-bound name is finished - EXCEPT in a `with` body whose target
     // type Phase 1 could not resolve. There its binding is only a guess, and a
     // member of that target outranks whatever it guessed (5.7): such nodes are
     // revisited here and OVERRIDDEN on a hit. That is the difference between
-    // filling a gap and fixing a wrong answer — `with GR do Shared := 'x'`
+    // filling a gap and fixing a wrong answer - `with GR do Shared := 'x'`
     // must mean GR.Shared even when the enclosing class, a local, a parameter
     // or a unit global also offers a `Shared`.
     // A LATER TARGET is revisited for the same reason, and its Phase-1 binding
     // is even less trustworthy: `with ZStream, ZLIB do` (Vcl.Imaging.pngimage),
     // where ZLIB is a FIELD of ZStream and also the name of a used unit
-    // (System.ZLib). Phase 1 bound the unit reference — a bare unit name is not
-    // a legal with target at all (5.7) — and, being "bound", the node was never
+    // (System.ZLib). Phase 1 bound the unit reference - a bare unit name is not
+    // a legal with target at all (5.7) - and, being "bound", the node was never
     // reconsidered, so the second target never opened and its members
     // (next_out/avail_out) were false E2003. 5.7 is explicit on both halves: a
     // target after the first is resolved INSIDE the ones before it, and a target
@@ -10528,12 +10528,12 @@ begin
       Continue;
     // Never re-point a DECLARATION's own name node: MarkDeclName records
     // declarations in RefMap too, and an inline `var Shared: Integer` inside
-    // the body stays a declaration — only REFERENCES bind to the member.
+    // the body stays a declaration - only REFERENCES bind to the member.
     if (LModel.RefMap[LNode] <> NIL_SYM) and
        (LModel.Symbols[LModel.RefMap[LNode]].DeclNode = LNode) then
       Continue;
     // Scope, the A.B-member case and "is inside a with body" were all settled
-    // by EnsureCrossWork's single scan — the NAME too ('result'/'self'
+    // by EnsureCrossWork's single scan - the NAME too ('result'/'self'
     // filtered there): this pass re-runs per fixpoint round, and each
     // NodeNameLower here was an allocation per node per round.
     LNameLower := FWithWorkNames[AId][LWIdx];
@@ -10545,7 +10545,7 @@ begin
     LStruct := StructSymOfNode(LModel, LNode);
     if FindInEnclosingWith(AId, LNode, LNameLower, LUid, LSym, LMemX) then
     begin
-      // Already exactly this symbol — nothing to rewrite. BOTH maps have to be
+      // Already exactly this symbol - nothing to rewrite. BOTH maps have to be
       // consulted, and missing the second one is what made the fixpoint spin:
       // a commit CLEARS RefMap and writes ExtRefMap, so a node bound by an
       // earlier ROUND looked unbound-here-but-still-in-an-unopened-with-body,
@@ -10590,7 +10590,7 @@ begin
       end
       else if LModel.AllUsesResolved then
       begin
-        // Emit-or-record: the converged round's recording IS the emit set —
+        // Emit-or-record: the converged round's recording IS the emit set -
         // RunWithPass emits from it without paying another full round. AEmit
         // stays for the round-cap fallback, where a final round can still
         // BIND new names and only then report the rest.
@@ -10615,7 +10615,7 @@ end;
   (Vcl.ColorGrd) is the shape: `Canvas` is an inherited cross-unit property, so
   the earlier passes skip it (it sits in the OUTER with's body, and deciding
   such a node needs a with-target type this very pass is still producing), and
-  this pass does resolve it — but only into APending, committed after every
+  this pass does resolve it - but only into APending, committed after every
   worker has finished. So within one round `Pen`'s lookup still sees `Canvas`
   unbound, the inner with never opens, and every member of it is a false E2003.
 
@@ -10666,7 +10666,7 @@ begin
         // RefMap must be CLEARED, not just shadowed: every consumer checks it
         // FIRST and only falls back to ExtRefMap (see CrossType's nkIdent), so
         // an override that merely added an ExtRefMap entry would be ignored.
-        // Harmless for the gap-filling entries — those were NIL_SYM already.
+        // Harmless for the gap-filling entries - those were NIL_SYM already.
         FModels[LIdx].RefMap[LNode] := NIL_SYM;
         FModels[LIdx].ExtRefMap.AddOrSetValue(LNode, LPending[LIdx][LP].Ext);
         // The frame-substituted member type, when the compute step had one.
@@ -10679,7 +10679,7 @@ begin
       Break;   // the cap-fallback emitting round is always the last one
     // Converged: the round that found nothing new saw exactly the final
     // state, so the candidates it RECORDED as unresolved are the stable ones
-    // — emit from the record instead of re-running a whole round to
+    // - emit from the record instead of re-running a whole round to
     // rediscover it. Per model in work-list order, the same order the old
     // emit round produced.
     if LNew = 0 then
@@ -10689,7 +10689,7 @@ begin
           EmitE2003(FModels[LIdx], LUnres[LIdx][LP]);
       Break;
     end;
-    // Out of rounds with work still moving: one more round, old-style — it
+    // Out of rounds with work still moving: one more round, old-style - it
     // may still BIND new names and must report only what then remains.
     if LRound >= MAX_ROUNDS then
       LEmit := True;
@@ -10731,10 +10731,10 @@ begin
     PrepareDeclWork(FModels.Count);
     CrossResolve(Result);
     BuildHelperMap;   // needs CrossResolve's ExtRefMap; feeds FindMemberX below
-    // Heritage first, for the same reason the parallel drivers do it — the
+    // Heritage first, for the same reason the parallel drivers do it - the
     // inherited walk below reads what it binds (see CrossResolveDecl).
     RunDeclPass(FModels.Count);
-    // The ONE direct CrossResolveInherited caller — every other driver goes
+    // The ONE direct CrossResolveInherited caller - every other driver goes
     // through RunInheritedPass, which sizes the cross-work arrays before
     // farming out. Without this, EnsureCrossWork read FWorkBuilt[Result] off a
     // NIL array: an AV on every AnalyzeFile run with real search paths, found
@@ -10769,7 +10769,7 @@ end;
 // Is AScope the implementation scope or nested inside it? Scope INDEX order
 // does not answer this: the implementation scope is created early (index 2 in
 // every unit measured), while an interface class's member scope gets a higher
-// index — the walk order and the nesting are two different things, and the
+// index - the walk order and the nesting are two different things, and the
 // first cut of this guard got it wrong in exactly that way.
 function TPasSemaProject.ScopeIsImplSide(AModel: TPasSemaModel;
   AScope, AImplScope: Integer): Boolean;
@@ -10797,7 +10797,7 @@ begin
   ASymN := 0;
   AScopeN := 0;
   // A model without an implementation scope (a program, or an implementation
-  // that declares nothing at all) has no boundary to compare against — refuse
+  // that declares nothing at all) has no boundary to compare against - refuse
   // rather than invent one.
   AImplScope := -1;
   for LIdx := 0 to AModel.Scopes.Count - 1 do
@@ -10812,7 +10812,7 @@ begin
     Exit(False);
   end;
   // The scope boundary: the first scope NESTED in the implementation one (the
-  // implementation scope itself is excluded — it exists from the start and is
+  // implementation scope itself is excluded - it exists from the start and is
   // compared by nobody, its own members being implementation-local).
   AScopeN := AModel.Scopes.Count;
   for LIdx := 0 to AModel.Scopes.Count - 1 do
@@ -10885,7 +10885,7 @@ begin
     Exit(False);
   end;
   // Symbols: everything that decides what a (UnitId, Sym) reference MEANS.
-  // DeclNode/TypeNode are deliberately NOT compared — they are indices into
+  // DeclNode/TypeNode are deliberately NOT compared - they are indices into
   // the new tree, and reading them from the new model is the correct answer.
   for LIdx := 0 to ASymN - 1 do
   begin
@@ -10897,7 +10897,7 @@ begin
        (LA.NextOverload <> LB.NextOverload) or
        // sfExternalUnresolved excluded: ResolveUses CLEARS it on the model it
        // resolved, so the analyzed old model and the raw Phase-1 new one
-       // legitimately differ there — and the re-run resolves the new one too.
+       // legitimately differ there - and the re-run resolves the new one too.
        ((LA.Flags - [sfExternalUnresolved]) <>
         (LB.Flags - [sfExternalUnresolved])) or
        (LA.Visibility <> LB.Visibility) or (LA.TypeCat <> LB.TypeCat) or
@@ -10917,7 +10917,7 @@ begin
   begin
     // The implementation scope itself sits INSIDE this index range (it is
     // created with the unit, before any interface class's member scope) and
-    // its own member list is implementation-local by definition — comparing
+    // its own member list is implementation-local by definition - comparing
     // it would refuse every body edit there is.
     if LIdx = LOldImpl then
       Continue;
@@ -10958,7 +10958,7 @@ var
   LInst: TSemaInstance;
 begin
   // The instance table OUTLIVES every pass (it is never cleared), so an entry
-  // whose generic — or any of its argument types — is an implementation-local
+  // whose generic - or any of its argument types - is an implementation-local
   // symbol of this model would index a symbol the swap replaces.
   for LIdx := 0 to InstanceCount - 1 do
   begin
@@ -11041,7 +11041,7 @@ begin
       AModel.UsesList[LIdx].InPath, FFiles[AId], LPath) then
     begin
       // Unresolvable: the full path reports F1027 and carries on, and so does
-      // ours — ResolveUses re-emits it on the new model. Not a refusal.
+      // ours - ResolveUses re-emits it on the new model. Not a refusal.
       Continue;
     end;
     if not FByPath.TryGetValue(LowerCase(TPath.GetFullPath(LPath)), LMid) or
@@ -11090,7 +11090,7 @@ begin
   SetLength(LSeen, FModels.Count);
   // Breadth-first over the REVERSE uses graph. Forward edges are the models'
   // own UsesList (already carrying resolved ids), so one sweep per frontier
-  // unit is enough — a full reverse index would cost more to build than the
+  // unit is enough - a full reverse index would cost more to build than the
   // walk costs on any radius small enough to be worth taking.
   AIds := [AId];
   LExpand := [True];
@@ -11153,7 +11153,7 @@ begin
   PrepareDeclWork(FModels.Count);
   for LId in AIds do
     CrossResolve(LId);
-  // Wholesale by design — it resets the helper registry AND the cross-work
+  // Wholesale by design - it resets the helper registry AND the cross-work
   // arrays every run, and these modules' helper declarations may have changed.
   BuildHelperMap;
   // RunDeclPass narrowed to this SET: same fixpoint, same emit-on-the-last-
@@ -11220,7 +11220,7 @@ begin
     end;
     if LEmit then
       Break;
-    // Converged — for the WHOLE set, not per model: one model's commits can
+    // Converged - for the WHOLE set, not per model: one model's commits can
     // bind a name another model could not resolve a moment ago, so emitting
     // as soon as a single model goes quiet would report names the next round
     // resolves. Same rule as RunWithPass, same reason.
@@ -11258,7 +11258,7 @@ function TPasSemaProject.AnalyzeModuleOnly(const APath: string): Boolean;
 const
   { How many models an interface change may drag into the redo before a plain
     rebuild is the better answer. Each one costs Phase 1 (no parse) plus its
-    cross passes, against a rebuild's whole closure — so the crossover is not
+    cross passes, against a rebuild's whole closure - so the crossover is not
     tight, and the point of the cap is to stay predictable, not to squeeze the
     last unit out of it. }
   MODULE_REDO_LIMIT = 24;
@@ -11274,7 +11274,7 @@ var
   LWhy: string;
   LIntfSame: Boolean;
 
-  // Every refusal names itself in StageTimings — the fast path's whole value
+  // Every refusal names itself in StageTimings - the fast path's whole value
   // is how OFTEN it fires, so "it fell back" without a reason is unreadable.
   function Refuse(const AReason: string): Boolean;
   begin
@@ -11305,25 +11305,25 @@ begin
     LNew := TPasSemaResolver.Analyze(LTree, False, FPlatform);
   except
     // Unparsable now: the full path records that as a known-bad file with a
-    // negative-cache entry and a changed closure — a rebuild's job, not ours.
+    // negative-cache entry and a changed closure - a rebuild's job, not ours.
     FreeAndNil(LNew);
     Exit(Refuse('parse-failed'));
   end;
   try
     // A stream with unanswered $IF questions is re-decided against the WHOLE
-    // generation by RunDeclaredPass (which may pull in new units) — the same
+    // generation by RunDeclaredPass (which may pull in new units) - the same
     // exclusion the parse donor makes, for the same reason.
     if (Length(LNew.Tree.Source.UnresolvedDeclared) > 0) or
        (Length(LNew.Tree.Source.UnresolvedSymbols) > 0) then
       Exit(Refuse('unresolved-if'));
     // A new `uses` entry that resolves to a file the closure never loaded
-    // changes the closure itself — a rebuild's job.
+    // changes the closure itself - a rebuild's job.
     if not UsesAllLoaded(LNew, LId, LWhy) then
       Exit(Refuse(LWhy));
     // The interface prefix decides WHO has to be redone, not whether the fast
     // path may run at all: unchanged, nobody but this module; changed, every
     // model that could see the difference re-runs from Phase 1 (their text is
-    // untouched, so no re-parse) and rebuilds its own references — which is
+    // untouched, so no re-parse) and rebuilds its own references - which is
     // why a shifted symbol index harms nobody.
     LIntfSame := IntfPrefixSame(LOld, LNew, LSymN, LWhy);
     if not LIntfSame then
@@ -11339,7 +11339,7 @@ begin
       // The instance table survives every pass and is keyed by (unit, symbol);
       // an entry naming THIS module cannot be trusted once its numbering
       // moved. Repointing it needs the old->new match this first cut does not
-      // build — see INCREMENTAL-NEXT.
+      // build - see INCREMENTAL-NEXT.
       if not InstancesSafeFor(LId, 0) then
         Exit(Refuse('instance-into-changed-intf'));
     end
@@ -11356,7 +11356,7 @@ begin
     // currency), and the per-model pass scratch is rebuilt below.
     FModels[LId] := LNew;
     LNew := nil;
-    // Each affected consumer goes back to its OWN Phase-1 state — a fresh
+    // Each affected consumer goes back to its OWN Phase-1 state - a fresh
     // Analyze over the tree it already has. No preprocessing, no parse: the
     // tree is unchanged and immutable, and Phase 1 over the same tree is
     // deterministic, so the consumer's own symbol numbering is reproduced
@@ -11423,7 +11423,7 @@ begin
       begin
         FModels[LIdx].ReleaseTransientMaps;
         // An oracle-built stream is not reproducible from cold (see the
-        // field) — stage 1 applies, the text stays.
+        // field) - stage 1 applies, the text stays.
         if not FModels[LIdx].OracleStream then
           FModels[LIdx].DemoteText;
       end;
@@ -11446,14 +11446,14 @@ begin
   try
     // The SEED query, exactly like the load pass that produced this stream:
     // a demotable model's final stream IS its first-pass stream (an
-    // oracle-reprocessed one is never demoted — see OracleStream), and the
+    // oracle-reprocessed one is never demoted - see OracleStream), and the
     // full per-unit oracle would answer what the first pass GUESSED,
     // flipping branches and failing the identity check below.
     LPP.OnDeclared := SeedDeclaredQuery();
     try
       LPre := LPP.Process(FFiles[AMid]);
     except
-      // A vanished or unreadable file cannot rehydrate — the demoted model
+      // A vanished or unreadable file cannot rehydrate - the demoted model
       // keeps answering everything that needs no text.
       Exit(False);
     end;
@@ -11501,19 +11501,19 @@ begin
   GuardNotReleased('AnalyzeProject');
   FStageTimings := '';
   LSW := TStopwatch.StartNew;
-  try   // donor lifetime — see AnalyzeFile
+  try   // donor lifetime - see AnalyzeFile
     Result := LoadFile(AMainFile);
     if Result < 0 then
       Exit;
     // The implicit System unit is part of every unit's closure (1.2.1) yet
-    // never appears in a `uses` clause — pull it in NOW so the closure loop
+    // never appears in a `uses` clause - pull it in NOW so the closure loop
     // and the cross passes below cover it too (nav inside an opened System.pas
     // works), and so no parallel CrossResolve worker triggers its first-time
     // load mid-flight. SysInit is the same story (bare HInstance/ModuleIsLib).
     EnsureSystemUnit;
     EnsureSysInitUnit;
     Stage('main+sys');
-    // Load the TRANSITIVE closure — continuous, not round-barriered (see
+    // Load the TRANSITIVE closure - continuous, not round-barriered (see
     // RunLoadEngine). ResolveUses (sequential, the single source of truth for
     // UnitId assignment) then finds every file cached, exactly as it did after
     // the old per-round batch loads.
@@ -11522,12 +11522,12 @@ begin
     for LIdx := 0 to FModels.Count - 1 do
       ResolveUses(LIdx);
     Stage('resolve');
-    // A Declared() guard can only be answered now — see RunDeclaredPass. It may
+    // A Declared() guard can only be answered now - see RunDeclaredPass. It may
     // load units the re-decided branch newly imports, so LN is taken after it.
     RunDeclaredPass(FModels.Count);
     InjectEncodingDiags(FModels.Count);
     InjectGuessedIfDiags(FModels.Count);
-    // Cross passes for EVERY loaded unit — same per-unit write discipline as
+    // Cross passes for EVERY loaded unit - same per-unit write discipline as
     // AnalyzeDirectory (each writes only its own model, reads others' frozen
     // Phase-1 state), so the same parallel farming is safe.
     LN := FModels.Count;
@@ -11542,7 +11542,7 @@ begin
     RunInheritedPass(LN);
     Stage('inherited');
     // Then the with-body pass, which reads type nodes the inherited pass just
-    // COMMITTED (see CrossResolveWith) — order matters, not just grouping. Timed
+    // COMMITTED (see CrossResolveWith) - order matters, not just grouping. Timed
     // apart because it iterates to a fixpoint: its cost is the one that is not
     // obvious from reading the code.
     RunWithPass(LN);
@@ -11554,7 +11554,7 @@ begin
         CheckAttributes(AIdx);
       end);
     Stage('calls');
-    // Sequential by design — see AnalyzeDirectory's Phase-3c comment.
+    // Sequential by design - see AnalyzeDirectory's Phase-3c comment.
     for LIdx := 0 to FModels.Count - 1 do
       BindTypesX(LIdx);
     Stage('bindx');
@@ -11565,7 +11565,7 @@ begin
     TrimAllDiags;
     ReleaseCrossWork;
     // Analysis is over: drop the raw-bytes repository (a full second copy of
-    // every closure file that nothing reads from here on — hundreds of MB on
+    // every closure file that nothing reads from here on - hundreds of MB on
     // a real project) and the include-cache's own stream references.
     FSM.ReleaseAnalysisCaches;
   finally
@@ -11591,7 +11591,7 @@ begin
   GuardNotReleased('AnalyzeDirectory');
   FStageTimings := '';
   LSW := TStopwatch.StartNew;
-  try   // donor lifetime — see AnalyzeFile
+  try   // donor lifetime - see AnalyzeFile
     FSM.BuildUnitIndex(ARoot);
     LPaths := nil;
     LPathCount := 0;
@@ -11616,7 +11616,7 @@ begin
     // hitting it first mid-flight would LoadFile into the shared FModels
     // while other workers read FModels[i] (the lock serializes the load
     // itself, not the container reads elsewhere). After the LN snapshot, so a
-    // from-search-paths System stays outside the cross passes — exactly where
+    // from-search-paths System stays outside the cross passes - exactly where
     // the old lazy mid-CrossResolve load would have put it. SysInit: same deal.
     EnsureSystemUnit;
     EnsureSysInitUnit;
@@ -11629,7 +11629,7 @@ begin
     InjectGuessedIfDiags(LN);
     Stage('main+sys+resolve');
     // Cross passes per unit write ONLY their own model and read the others'
-    // Phase-1 state (frozen once every unit is loaded) — safe to farm out.
+    // Phase-1 state (frozen once every unit is loaded) - safe to farm out.
     PrepareDeclWork(LN);
     ForEachIndex(LN - 1, 'resolve',    procedure(AIdx: Integer)
       begin
@@ -11641,7 +11641,7 @@ begin
     RunInheritedPass(LN);
     Stage('inherited');
     // Then the with-body pass, which reads type nodes the inherited pass just
-    // COMMITTED (see CrossResolveWith) — order matters, not just grouping. Timed
+    // COMMITTED (see CrossResolveWith) - order matters, not just grouping. Timed
     // apart because it iterates to a fixpoint: its cost is the one that is not
     // obvious from reading the code.
     RunWithPass(LN);
@@ -11655,7 +11655,7 @@ begin
     Stage('calls');
     // Cross typing stays SEQUENTIAL by design: Instantiate mutates the shared
     // instance table, and CrossType both writes a model's RefMap/ExtRefMap and
-    // reads other models' — parallelizing would need locks on the hot path for
+    // reads other models' - parallelizing would need locks on the hot path for
     // ~5% of the total time (measured on the full RTL).
     for LIdx := 0 to FModels.Count - 1 do
       BindTypesX(LIdx);
@@ -11688,7 +11688,7 @@ var
   LSW: TStopwatch;
   // Recount+Report as a CAPTURED closure: RunLoadEngine's progress hook is an
   // anonymous method, and an anonymous method cannot call the nested
-  // Recount/Report (E2555) — but it can call another closure.
+  // Recount/Report (E2555) - but it can call another closure.
   LNotify: TProc<string>;
 
   procedure StageMark(const AName: string);
@@ -11774,14 +11774,14 @@ begin
     SetLength(LOrdered, LIdx);
 
     // The implicit System unit is part of every closure (1.2.1) but never
-    // named in a `uses` clause — pull it in up front (full, like
+    // named in a `uses` clause - pull it in up front (full, like
     // AnalyzeProject) so wave 1's BFS also walks its uses and the finalizer
     // covers it. Matches AnalyzeProject's early EnsureSystemUnit. SysInit
     // rides along the same way.
     EnsureSystemUnit;
     EnsureSysInitUnit;
 
-    // ---- Wave 1: interface-only closure, continuous (see RunLoadEngine —
+    // ---- Wave 1: interface-only closure, continuous (see RunLoadEngine -
     // parses run out of order, commits and discovery keep the old BFS's
     // deterministic id order; the engine reports every 64 commits, the same
     // heartbeat the 64-file chunks used to give) ----
@@ -11800,7 +11800,7 @@ begin
     // ---- Wave 2: upgrade every module to a full parse, discovering any
     // implementation-only dependencies the interface trees didn't show.
     // Upgrades and the loads they discover ride one queue, so a discovered
-    // unit parses WHILE later upgrades still run — the old shape upgraded
+    // unit parses WHILE later upgrades still run - the old shape upgraded
     // everything, then loaded, in separate barriered rounds. ----
     Report('full');
     LIds := nil;
@@ -11819,7 +11819,7 @@ begin
     StageMark('full');
 
     // ---- Finalizer: cross passes over the whole closure. Reported as
-    // sub-phases (they take real seconds on a big project — a single silent
+    // sub-phases (they take real seconds on a big project - a single silent
     // 'cross' looked like a hang), with a cancel point between passes. ----
     LN := FModels.Count;
     Report('cross:resolve');
@@ -11864,7 +11864,7 @@ begin
     Report('cross:inherited');
     RunInheritedPass(LN);
     StageMark('inherited');
-    // Reads type nodes the inherited pass just COMMITTED — see
+    // Reads type nodes the inherited pass just COMMITTED - see
     // CrossResolveWith. Kept inside the same reported step (it is the same
     // "resolve what the parallel pass deferred" phase, just a later slice).
     RunWithPass(LN);
@@ -11902,7 +11902,7 @@ begin
     RunCrossTypePass(LN);
     StageMark('xtype');
     // A cancel that landed inside the last pass must not report 'done' with
-    // a half-run pass behind it — the host would treat the project as good.
+    // a half-run pass behind it - the host would treat the project as good.
     if Cancelled then
     begin
       Report('cancelled');
@@ -11911,7 +11911,7 @@ begin
     MarkAllCrossReady;
     TrimAllDiags;
     ReleaseCrossWork;
-    // See AnalyzeProject. On a cancelled run the caches stay — the host
+    // See AnalyzeProject. On a cancelled run the caches stay - the host
     // discards a cancelled project wholesale anyway.
     FSM.ReleaseAnalysisCaches;
     StageMark('final');
@@ -11921,9 +11921,9 @@ begin
     if Length(ARoots) > 0 then
       FByPath.TryGetValue(LowerCase(TPath.GetFullPath(ARoots[0])), Result);
   finally
-    FinishDonor({AReport} True);   // donor lifetime — see AnalyzeFile
+    FinishDonor({AReport} True);   // donor lifetime - see AnalyzeFile
     FCancelCheck := nil;
-    // LNotify is a closure OVER THIS FRAME stored IN this frame — a
+    // LNotify is a closure OVER THIS FRAME stored IN this frame - a
     // self-cycle the compiler cannot collect (the $ActRec holds the TProc,
     // the TProc pins the $ActRec). Break it or every staged run leaks its
     // activation record plus everything it captured.

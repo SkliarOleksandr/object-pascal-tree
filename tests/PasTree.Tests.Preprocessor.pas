@@ -11,7 +11,7 @@ unit PasTree.Tests.Preprocessor;
   it doesn't fit.
 
   Two properties get tested per section, not one: that the OPTION reads
-  right (SwitchCase, direct), and — for 1.3.1 only — that a downstream
+  right (SwitchCase, direct), and - for 1.3.1 only - that a downstream
   $IFOPT actually BRANCHES on it (a plain STMT_CASES row via ParseStatements,
   since that half already fits CheckDump). $PUSHOPT/$POPOPT is state-only
   (nothing branches on the SAVE/RESTORE itself), so 1.3.4 stays entirely in

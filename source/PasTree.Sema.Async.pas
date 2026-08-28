@@ -6,7 +6,7 @@ unit PasTree.Sema.Async;
   so the UI thread never blocks on analysis.
 
   DOUBLE-BUFFERING ownership model: the worker thread is the SOLE owner of its
-  project while building — nothing else touches it — so there are no shared-
+  project while building - nothing else touches it - so there are no shared-
   mutable-access races to reason about. When the build finishes, the host polls
   IsDone (e.g. from a form timer), then, ON ITS OWN THREAD, calls TakeProject
   to assume ownership and swaps it in for the previous one. The previous
@@ -69,7 +69,7 @@ type
     constructor Create(APlatform: TPasPlatform;
       const ASearchPaths, AExtraDefines, ARoots, APriority: TArray<string>);
     { SINGLE-MODULE mode (incremental plan, stage B), the keystroke path: takes
-      OWNERSHIP of AProject — the host's last-good, fully analyzed project —
+      OWNERSHIP of AProject - the host's last-good, fully analyzed project -
       and, on Start, re-analyzes APath in place via
       TPasSemaProject.AnalyzeModuleOnly. Set the edited buffer with SetBuffer
       before Start, exactly like a full session.
@@ -79,28 +79,28 @@ type
       still consistent: on a refusal (interface change, and every other case
       AnalyzeModuleOnly lists) the host takes it back untouched and starts an
       ordinary session over it, passing it as the parse donor. No progress is
-      reported — the whole point is that there are no stages to report. }
+      reported - the whole point is that there are no stages to report. }
     constructor CreateForModule(AProject: TPasSemaProject;
       const APath: string);
     { Cancels the worker, waits for it to drain, then frees the project if it
       was never taken. Safe to call at any time. }
     destructor Destroy; override;
-    { Editor-host buffer override — forwarded to the project. Call BEFORE
+    { Editor-host buffer override - forwarded to the project. Call BEFORE
       Start (the worker reads buffers as it parses). AVersion is the host's
       version stamp for the document; after TakeProject the host reads it
       back via the project's BufferVersion and compares against the version
-      it holds NOW — unequal means this result was computed from older text
+      it holds NOW - unequal means this result was computed from older text
       and its positions may be stale. }
     procedure SetBuffer(const APath, AText: string; AVersion: Integer = 0);
     { Configuration forwarded to the project. Call BEFORE Start. }
     procedure SetNamespaces(const ANamespaces: TArray<string>);
     procedure AddUnitAlias(const AAlias, AReal: string);
-    { Parse reuse — forwarded to TPasSemaProject.AdoptParseDonor (see there
+    { Parse reuse - forwarded to TPasSemaProject.AdoptParseDonor (see there
       for the config gate and what a hit reuses). Call BEFORE Start, after
       the other configuration calls (the gate compares namespaces/aliases):
       the session's worker owns the project once the thread exists, the same
-      "set BEFORE Start" contract as SetBuffer. ADonor — the host's
-      still-alive last-good project — must outlive this session's build; the
+      "set BEFORE Start" contract as SetBuffer. ADonor - the host's
+      still-alive last-good project - must outlive this session's build; the
       host's existing free-after-TakeProject-swap order already guarantees
       that. False = configuration mismatch, donor refused (log it; the run
       proceeds donor-less). }
@@ -111,10 +111,10 @@ type
     procedure SetSingleThreadedInner(AValue: Boolean);
     { Forwarded to the inner project: report a member after a dot that no lookup
       resolved. OFF is the error-TOLERANT mode an editor wants; ON is what a
-      compiler front end needs. Set BEFORE Start — it changes what the analysis
+      compiler front end needs. Set BEFORE Start - it changes what the analysis
       produces, not how the result is displayed. }
     procedure SetReportUnresolvedMembers(AValue: Boolean);
-    { Same contract for ReportGuessedIfs — the residual-$IF exotica detector
+    { Same contract for ReportGuessedIfs - the residual-$IF exotica detector
       (PPIF/PPBAD diagnostics); see TPasSemaProject.ReportGuessedIfs. }
     procedure SetReportGuessedIfs(AValue: Boolean);
     procedure Start;
@@ -126,7 +126,7 @@ type
     function IsDone: Boolean;
     { A thread-safe snapshot of the latest progress. }
     function Progress: TPasStagedProgress;
-    { Non-empty if the worker died on an exception — the host should log it
+    { Non-empty if the worker died on an exception - the host should log it
       (a silently swallowed background failure looks like a hang). The built
       project may be partial but is internally consistent (same guarantee as
       a cancellation). }

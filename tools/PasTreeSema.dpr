@@ -55,7 +55,7 @@ begin
       GPre := GPP.Process(TPath.GetFullPath(ParamStr(1)));
       GTree := TPasParser.ParseFile(GPre, GDiags);
       // `-p:` reached the preprocessor's defines but not the analyzer, so the
-      // model was seeded for Win32 whatever the flag said — which hides every
+      // model was seeded for Win32 whatever the flag said - which hides every
       // platform-conditional sema rule (the 64-bit intrinsics, `set of
       // NativeInt`). PasTreeSemaProject always passed it.
       GModel := TPasSemaResolver.Analyze(GTree, False, GPlatform);

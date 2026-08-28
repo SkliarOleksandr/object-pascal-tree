@@ -4,7 +4,7 @@ program UnitListSmoke;
 
   Split out of the dialog for the reason NavHistorySmoke's header gives about
   the history: none of this is observable while the program runs. A wrong rule
-  here does not look like a bug — it looks like a list with two rows that both
+  here does not look like a bug - it looks like a list with two rows that both
   say `Types.pas`, or like a unit that is simply not in the list, and by the
   time anyone notices, the thing that would explain it is a filter box that has
   since been retyped. }
@@ -24,7 +24,7 @@ begin
   GCounter.Ok(AName, ACond);
 end;
 
-// The list's names, joined — one string is a readable failure, six index
+// The list's names, joined - one string is a readable failure, six index
 // assertions are not.
 function Names(const AList: TPasUnitList): string;
 var

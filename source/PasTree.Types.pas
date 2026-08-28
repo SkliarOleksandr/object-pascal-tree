@@ -1,16 +1,16 @@
 unit PasTree.Types;
 
 {
-  PasTree — core lexical types.
+  PasTree - core lexical types.
 
   Design (see README / object-pascal-spec Appendix B):
-  - Tokens are small records in a contiguous array; text is never copied —
+  - Tokens are small records in a contiguous array; text is never copied -
     a token is a (Start, Len) slice of the source string.
   - The lexer emits EVERY character of the source as part of exactly one
     token (trivia included), so concatenating all tokens reproduces the
     source byte-for-byte (full fidelity).
   - Reserved words (spec B.4.1) get dedicated kinds; directives (B.4.2) and
-    predefined identifiers (B.4.3) are plain tkIdentifier — the parser
+    predefined identifiers (B.4.3) are plain tkIdentifier - the parser
     interprets them by position, the resolver by scope.
 }
 
@@ -108,7 +108,7 @@ type
     LineStarts: TArray<Integer>;   // 0-based offset of each line start
     function TokenText(AIndex: Integer): string; overload;
     function TokenText(const AToken: TPasToken): string; overload;
-    { SameText(TokenText(AToken), AWord) without the copy — see
+    { SameText(TokenText(AToken), AWord) without the copy - see
       SliceEqualsWord below. }
     function TokenTextEquals(const AToken: TPasToken;
       const AWord: string): Boolean;
@@ -117,7 +117,7 @@ type
   end;
 
 const
-  { Spec B.4.1 — the 64 reserved words, alphabetical. Aligned with
+  { Spec B.4.1 - the 64 reserved words, alphabetical. Aligned with
     tkAnd..tkXor above. Directives (B.4.2) are intentionally absent. }
   KEYWORDS: array[0..63] of string = (
     'and', 'array', 'as', 'asm', 'begin', 'case', 'class', 'const',
@@ -131,17 +131,17 @@ const
     'type', 'unit', 'until', 'uses', 'var', 'while', 'with', 'xor'
   );
 
-  { Spec B.4.2 — the FULL, exhaustive directive vocabulary (context-sensitive;
+  { Spec B.4.2 - the FULL, exhaustive directive vocabulary (context-sensitive;
     legal as identifiers elsewhere), verbatim from object-pascal-spec's
     B-lexical-grammar.md (itself transcribed from the official RAD Studio
-    docs). Lexically these are all plain tkIdentifier — the lexer cannot
+    docs). Lexically these are all plain tkIdentifier - the lexer cannot
     (and by design must not) special-case them; only the PARSER may, and only
     where the grammar actually looks for a specific word. This array is a
     vocabulary reference for consumers that want the complete word list (a
-    syntax highlighter, autocomplete, ...) — it is NOT wired into any single
+    syntax highlighter, autocomplete, ...) - it is NOT wired into any single
     grammar check. Not every word here is yet recognised by name at its
     grammatical position in TPasParser (e.g. package-level contains/requires,
-    resident, exception-directive on/at) — that reflects unimplemented
+    resident, exception-directive on/at) - that reflects unimplemented
     grammar, not a lexical gap; see ROUTINE_DIRECTIVE_WORDS/VISIBILITY_WORDS
     below for the narrower, grammar-scoped subsets the parser actually uses. }
   DIRECTIVE_WORDS: array[0..58] of string = (
@@ -160,7 +160,7 @@ const
   { Grammar-scoped SUBSET of DIRECTIVE_WORDS actually checked by
     TPasParser.IsDirectiveWord: trailing method/procedure directives
     (binding, calling convention, hints, external linkage). Deliberately
-    narrower than DIRECTIVE_WORDS — e.g. 'read'/'write'/'index' are real
+    narrower than DIRECTIVE_WORDS - e.g. 'read'/'write'/'index' are real
     directives (property specifiers) but would be a GRAMMAR BUG if accepted
     here, since they're not valid trailing routine directives. }
   ROUTINE_DIRECTIVE_WORDS: array[0..29] of string = (
@@ -171,7 +171,7 @@ const
     'experimental', 'forward', 'delayed', 'message', 'dispid', 'external'
   );
 
-  { Spec 11.2.1 — class-member visibility sections. Also a grammar-scoped
+  { Spec 11.2.1 - class-member visibility sections. Also a grammar-scoped
     subset of DIRECTIVE_WORDS; TPasParser.IsVisibilityWord is the authority. }
   VISIBILITY_WORDS: array[0..5] of string = (
     'private', 'protected', 'public', 'published', 'strict', 'automated'
@@ -191,7 +191,7 @@ const
     'Inconsistent indent characters'
   );
 
-{ True for trivia kinds — tokens the parser's visible stream skips. }
+{ True for trivia kinds - tokens the parser's visible stream skips. }
 function IsTrivia(AKind: TPasTokenKind): Boolean; inline;
 
 { True for reserved-word kinds. }
@@ -203,20 +203,20 @@ function IsKeyword(AKind: TPasTokenKind): Boolean; inline;
 function KeywordKind(AText: PChar; ALen: Integer): TPasTokenKind;
 
 { Case-insensitive compare of a raw character slice against a word, without
-  materializing a string — the non-allocating replacement for
+  materializing a string - the non-allocating replacement for
   `SameText(TokenText(...), AWord)` on hot paths. ASCII-only folding, exactly
   CompareText's semantics (SameText folds only 'A'..'Z'), so the swap is
   behavior-preserving; every comparand in this codebase (keywords, directives,
   visibility words, separators) is ASCII. An &-escaped identifier keeps its
-  '&' in the slice and so — deliberately, same as SameText on the copied
-  text — never matches a bare word. }
+  '&' in the slice and so - deliberately, same as SameText on the copied
+  text - never matches a bare word. }
 function SliceEqualsWord(AText: PChar; ALen: Integer;
   const AWord: string): Boolean;
 
 { Builds the line-start offsets table for a source string. }
 function BuildLineStarts(const ASource: string): TArray<Integer>;
 
-{ Bytes currently ALLOCATED through the memory manager — token streams, node
+{ Bytes currently ALLOCATED through the memory manager - token streams, node
   arenas, models, everything the analysis holds. Walked out of
   GetMemoryManagerState, so it is the process's own accounting rather than an
   OS working-set figure: it excludes the reserved-but-unused slack a working
@@ -281,7 +281,7 @@ end;
 { Keyword recognition, bucketed by FOLDED FIRST LETTER.
 
   KEYWORDS is alphabetical, so every word starting with a given letter occupies
-  one contiguous range — GKwBucket caches those 26 ranges (built once, at unit
+  one contiguous range - GKwBucket caches those 26 ranges (built once, at unit
   init, from the table itself: no generated code to keep in sync, and KEYWORDS
   stays the single source of truth for both the words and their 1:1 alignment
   with the token-kind enum).
@@ -294,7 +294,7 @@ end;
   Measured on the flattened RTL+VCL+FMX corpus (665 units, 13.6M tokens): lexing
   it takes 478 ms with the previous 6-probe binary search, 404 ms with this, and
   387 ms with keyword recognition removed entirely. So the old cost was 91 ms,
-  this is 17 ms, and the floor is 0 — this captures ~80% of what is there to get.
+  this is 17 ms, and the floor is 0 - this captures ~80% of what is there to get.
   Worth knowing the ceiling before reading more into it: the whole analysis is
   ~2960 ms, so ALL keyword recognition was 3.1% of it and this saves ~2.5%. The
   cross-model passes are ~70%; that is where analysis time actually lives. }
@@ -343,7 +343,7 @@ begin
   begin
     if Length(KEYWORDS[LIdx]) = ALen then
     begin
-      // First char already matched by the bucket — compare from index 1.
+      // First char already matched by the bucket - compare from index 1.
       LMatch := True;
       for LPos := 1 to ALen - 1 do
       begin
@@ -389,7 +389,7 @@ end;
 { ONE pass over the source, not two.
 
   This used to count the lines and then record them, walking every character
-  twice — and it is not a minor cost: measured over the flattened RTL+VCL+FMX
+  twice - and it is not a minor cost: measured over the flattened RTL+VCL+FMX
   corpus (665 files, 69.3M chars), stubbing this function out took lexing from
   404 ms to 304 ms. A quarter of lexing was here, more than all keyword
   recognition ever cost.
@@ -419,7 +419,7 @@ begin
     if (LCh = #10) or (LCh = #13) then
     begin
       if (LCh = #13) and (LPos < LLen) and (ASource[LPos + 1] = #10) then
-        Inc(LPos);   // CRLF — one break
+        Inc(LPos);   // CRLF - one break
       if LCount = LCap then
       begin
         LCap := LCap * 2;
@@ -482,7 +482,7 @@ begin
 end;
 
 // The raw text of one 1-based line, trailing CR/LF (whichever break BuildLine
-// Starts recorded) stripped by TrimRight — Find References' snippet, and
+// Starts recorded) stripped by TrimRight - Find References' snippet, and
 // deliberately generic rather than folded into that one caller: nothing here
 // is specific to what the text is used for.
 function TPasTokenStream.LineText(ALine: Integer): string;

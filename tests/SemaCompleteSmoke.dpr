@@ -44,7 +44,7 @@ var
   GProjMid: Integer;
   GCtx: TPasComplContext;
   GItems: TArray<TPasComplItem>;
-  // §8: signature help
+  // sec. 8: signature help
   GCall: TPasCallInfo;
 
 { Parses/analyzes ASource with its single `|` caret marker STRIPPED, then runs
@@ -109,7 +109,7 @@ end;
 
 { Like CaretCase, but BRIDGED: the overlay is parsed against the mini-project
   built in the main block (GProj/GProjMid), and the whole CompleteAt pipeline
-  runs — context classification plus candidate collection. }
+  runs - context classification plus candidate collection. }
 procedure ProjCase(const ASource: string);
 var
   LAt, LIdx, LLine, LCol: Integer;
@@ -140,7 +140,7 @@ begin
   GHit := GComp.CompleteAt(LLine, LCol, GInfo, GCtx, GItems);
 end;
 
-{ Like ProjCase, but runs CallAt at the marker — the §8B signature-help
+{ Like ProjCase, but runs CallAt at the marker - the sec. 8B signature-help
   primitive over the same bridged mini-project. }
 procedure CallCase(const ASource: string);
 var
@@ -172,7 +172,7 @@ begin
   GHit := GComp.CallAt(LLine, LCol, GCall);
 end;
 
-// Number of CallAt targets carrying AName — the overload count, since
+// Number of CallAt targets carrying AName - the overload count, since
 // CallAt reports each overload as its own target.
 function TargetsNamed(const AName: string): Integer;
 var
@@ -256,7 +256,7 @@ const
     'end;'#10 +
     'end.'#10;
 
-  // The mini-project (self-contained, no RTL on the path — deliberately, so
+  // The mini-project (self-contained, no RTL on the path - deliberately, so
   // the suite stays a unit test: builtins remain seeds and TObject has no
   // real body to walk into).
   EXTA_UNIT =
@@ -342,7 +342,7 @@ begin
 
   // The parser adopts the NEXT LINE's identifier as the member name (`Foo.X`
   // out of `Foo.` + `X := 1;`). The caret answer must be immune: still a dot
-  // position, still base Foo — the stolen name is what completion REPLACES.
+  // position, still base Foo - the stolen name is what completion REPLACES.
   CaretCase(FIXTURE_HEAD + '  Foo.|'#10'  GTotal := 1;'#10 + FIXTURE_TAIL);
   GCounter.Ok('next-line theft: still ckAfterDot',
     GHit and (GInfo.Kind = ckAfterDot));
@@ -376,7 +376,7 @@ begin
     GInfo.PrefixColTo - GInfo.PrefixColFrom = 6);
   GCounter.Ok('GTo|tal is not a member position', GInfo.DotBase = NIL_NODE);
 
-  // A RESERVED word under the caret is still a prefix (`th` of `then`) — the
+  // A RESERVED word under the caret is still a prefix (`th` of `then`) - the
   // candidate list legitimately contains keywords.
   CaretCase(FIXTURE_HEAD + '  if True th|en GTotal := 1;'#10 + FIXTURE_TAIL);
   GCounter.Ok('caret inside a keyword is a prefix',
@@ -450,7 +450,7 @@ begin
   GCounter.Ok('caret at the very start of the file refuses', not GHit);
 
   // After the final `end.` dot there is no member access: an after-dot
-  // classification with NO base — the classifier upstairs sees DotBase =
+  // classification with NO base - the classifier upstairs sees DotBase =
   // NIL_NODE and offers nothing.
   CaretCase('unit u;'#10'interface'#10'implementation'#10'end.|'#10);
   GCounter.Ok('the end. dot is after-dot with no base',
@@ -524,14 +524,14 @@ begin
       Writeln('    ctx=', Ord(GCtx), ' items=', Length(GItems));
     end);
 
-  // `inherited |` — the ancestor's members, not the own class's.
+  // `inherited |` - the ancestor's members, not the own class's.
   ProjCase(PROJ_HEAD + '  inherited |'#10 + PROJ_TAIL);
   GCounter.Ok('inherited | classifies ccInherited',
     GHit and (GCtx = ccInherited));
   GCounter.Ok('inherited | lists the ancestor method', Has('Pub'));
   GCounter.Ok('inherited | does not list the own method', not Has('Own'));
 
-  // `goto |` — labels only.
+  // `goto |` - labels only.
   ProjCase(
     'unit mainu;'#10 +
     'interface'#10 +
@@ -598,7 +598,7 @@ begin
     Has('Unused.Extb'));
 
   // Dotted uses prefixes: the caret's prefix and replace-span must cover the
-  // WHOLE dotted chain typed so far, not the last segment — a client filters
+  // WHOLE dotted chain typed so far, not the last segment - a client filters
   // 'Unused.Ex' against 'Unused.Extb' and replaces the full name.
   ProjCase(
     'unit mainu;'#10 +
@@ -692,7 +692,7 @@ begin
   GCounter.Ok('keyword rows carry skKeyword',
     Has('begin') and (ItemNamed('begin').Kind = skKeyword));
 
-  // ======== §8D: doc comments =================================================
+  // ======== sec. 8D: doc comments =================================================
   // Overlay-declared members: the marker strips, lines join, an ordinary //
   // is not doc, a blank line breaks attachment, an attribute group between
   // the doc and the declaration does not.
@@ -734,7 +734,7 @@ begin
     GComp.ItemDocComment(ItemNamed('Attr')) = 'Above the attribute.');
 
   // Cross-unit: the doc travels through the bridge (exta's Pub), and the
-  // project-level accessor answers the same from a (Mid, Sym) pair — the
+  // project-level accessor answers the same from a (Mid, Sym) pair - the
   // hover path.
   ProjCase(PROJ_HEAD + '  B.|'#10 + PROJ_TAIL);
   GCounter.Ok('doc: a BRIDGED member''s doc comes from its own unit',
@@ -747,7 +747,7 @@ begin
   GCounter.Ok('doc: a builtin answers empty',
     GProj.SymDocComment(-1, 0) = '');
 
-  // ======== §8A: per-item accessors ==========================================
+  // ======== sec. 8A: per-item accessors ==========================================
   ProjCase(PROJ_HEAD + '  B.|'#10 + PROJ_TAIL);
   GCounter.Ok('ItemParamsText: parameterless method answers empty',
     GComp.ItemParamsText(ItemNamed('Pub')) = '');
@@ -778,7 +778,7 @@ begin
     GComp.ItemParamsText(ItemNamed('Q')) = '');
   GCounter.Ok('ItemParamsText: multi-line list collapses to one line',
     GComp.ItemParamsText(ItemNamed('R')) = '(const S: string; N: Integer)');
-  // §8C: a compiler seed answers the curated display signature.
+  // sec. 8C: a compiler seed answers the curated display signature.
   GCounter.Ok('ItemParamsText: builtin answers the curated signature',
     GComp.ItemParamsText(ItemNamed('SetLength')) =
       '(var S; NewLength: NativeInt)');
@@ -787,7 +787,7 @@ begin
   GCounter.Ok('ItemHasParams: optional-only builtin answers False',
     Has('Exit') and not GComp.ItemHasParams(ItemNamed('Exit')));
 
-  // ======== §8B: CallAt ======================================================
+  // ======== sec. 8B: CallAt ======================================================
   // The bridged member call, both overloads as separate signatures.
   CallCase(PROJ_HEAD + '  B.Over(|'#10 + PROJ_TAIL);
   GCounter.Ok('B.Over(| answers', GHit);
@@ -807,15 +807,15 @@ begin
   GCounter.Ok('nested call: the INNERMOST call wins',
     GHit and (TargetsNamed('Ord') = 1));
 
-  // The freshly typed CROSS-UNIT call — the gap the LSP interim cannot
-  // close, and the reason CallAt exists (plan §8B).
+  // The freshly typed CROSS-UNIT call - the gap the LSP interim cannot
+  // close, and the reason CallAt exists (plan sec. 8B).
   CallCase(PROJ_HEAD + '  ExtProc(|'#10 + PROJ_TAIL);
   GCounter.Ok('freshly typed cross-unit call resolves through the bridge',
     GHit and (TargetsNamed('ExtProc') = 1));
   GCounter.Ok('cross-unit target lives in the project space',
     TargetOf('ExtProc').Mid >= 0);
 
-  // A builtin callee renders the curated signature (§8C through CallAt).
+  // A builtin callee renders the curated signature (sec. 8C through CallAt).
   CallCase(PROJ_HEAD + '  SetLength(|'#10 + PROJ_TAIL);
   GCounter.Ok('SetLength(| target params from the seed table',
     GHit and (TargetOf('SetLength').ParamsText =
@@ -826,7 +826,7 @@ begin
   GCounter.Ok('TBase.Create(| resolves the constructor',
     GHit and (TargetOf('Create').HeadWord = 'constructor'));
 
-  // A member call on an INDEXED base — the designator walk, not a name scan.
+  // A member call on an INDEXED base - the designator walk, not a name scan.
   CallCase(PROJ_HEAD + '  Arr[0].Pub(|'#10 + PROJ_TAIL);
   GCounter.Ok('Arr[0].Pub(| types the element and finds the method',
     GHit and (TargetsNamed('Pub') = 1));

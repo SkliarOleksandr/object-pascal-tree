@@ -1,10 +1,10 @@
 program KindsCheck;
 
 // Cross-checks AST node kinds between the spec (object-pascal-spec) and
-// PasTree.Ast.pas — the spec's per-feature "*AST:* NodeName" hints vs the
+// PasTree.Ast.pas - the spec's per-feature "*AST:* NodeName" hints vs the
 // implemented TPasNodeKind enum. Reports both directions.
 //
-// NOTE: this is deliberately a CHECK, not a generator — the enum predates
+// NOTE: this is deliberately a CHECK, not a generator - the enum predates
 // full spec-name alignment; the report drives convergence.
 //
 // Vocabulary policy (see docs/DelphiAST-analysis.md and the spec):

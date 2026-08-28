@@ -1,6 +1,6 @@
 unit PasTree.Ast.Json;
 
-// PasTree — JSON serialization of the AST.
+// PasTree - JSON serialization of the AST.
 //
 // Schema (stable, machine-diffable), braces shown as [ ] to survive this
 // comment: node = [ kind, file (index into files), line, col (1-based,

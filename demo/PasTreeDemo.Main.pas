@@ -1,7 +1,7 @@
 unit PasTreeDemo.Main;
 
 {
-  PasTree demo — a small VCL host that opens a Delphi project, analyzes it with
+  PasTree demo - a small VCL host that opens a Delphi project, analyzes it with
   PasTree (parse + full semantics) and shows the source (SynEdit tabs), the
   project files (VirtualTree), the AST JSON, the semantic model and diagnostics.
 
@@ -46,7 +46,7 @@ type
 
   // One message-window row. mkStatus rows (Opened project, Done: N units...)
   // are always shown; mkError rows are gated by chkShowErrors and carry a
-  // navigation target (FilePath/Line/Col — resolved from the diagnostic's OWN
+  // navigation target (FilePath/Line/Col - resolved from the diagnostic's OWN
   // FileId at log time, which for an $I-included file is NOT the unit's main
   // file, so it must be captured here rather than re-derived at double-click
   // time). Kind will grow mkWarning/mkHint later (same navigation shape).
@@ -60,7 +60,7 @@ type
   { One missing unit in the closure-health summary: how many places import it,
     plus the FIRST place we did (lowest model id = discovery order, so this is
     literally where the analyzer first met the name). The summary row is
-    double-clickable because of these three fields — a count alone tells you a
+    double-clickable because of these three fields - a count alone tells you a
     library is missing but not which of your units asked for it. }
   TPasMissingUnit = record
     Count: Integer;
@@ -68,7 +68,7 @@ type
     FirstLine, FirstCol: Integer;
   end;
   // vtMessages node payload: an index into FMsgVisible (itself indexing the
-  // master FMsgLog) — mirrors TPasNodeData/FFileList's own convention so a
+  // master FMsgLog) - mirrors TPasNodeData/FFileList's own convention so a
   // managed field (string) never has to live in VST node data.
   TPasMsgNodeData = record
     Index: Integer;
@@ -78,17 +78,17 @@ type
   { Find References results, one tab per search (see FindReferencesAction).
 
     The tree has THREE row shapes: one flat DECL row at the very top (where
-    the symbol is defined — never counted in the tab caption, which is a USE
+    the symbol is defined - never counted in the tab caption, which is a USE
     count), then a GROUP node per file ("<name> [<count>]", the Delphi Search
     Results panel this mirrors), a HIT node per reference underneath each.
-    All three share one node-data shape — never a managed field in it, same
+    All three share one node-data shape - never a managed field in it, same
     discipline TPasMsgNodeData's own comment states (VST's raw node-data
-    blocks are never finalized) — so every row's string text lives on the
+    blocks are never finalized) - so every row's string text lives on the
     TAB object instead, indexed by Index. }
   TPasRefNodeKind = (rnDecl, rnGroup, rnHit);
   TPasRefNodeData = record
     Kind: TPasRefNodeKind;
-    Index: Integer;   // Groups[Index] or Hits[Index] — unused for rnDecl,
+    Index: Integer;   // Groups[Index] or Hits[Index] - unused for rnDecl,
                        // there is at most one
   end;
   PPasRefNodeData = ^TPasRefNodeData;
@@ -99,7 +99,7 @@ type
   end;
 
   // Display-ready form of one TPasRefHit: "Line N: " prefixed, leading
-  // snippet whitespace trimmed off, HiFrom/HiTo shifted to match both —
+  // snippet whitespace trimmed off, HiFrom/HiTo shifted to match both -
   // computed once at tab-population time so FindRefTreeGetText and
   // FindRefTreeDrawText can never disagree about what those two steps did
   // to the offsets. PrefixLen marks where the "Line N: " run ends and the
@@ -111,7 +111,7 @@ type
     PrefixLen, HiFrom, HiTo: Integer;
   end;
 
-  // One colored/styled run of text, painted left to right by DrawRefRuns —
+  // One colored/styled run of text, painted left to right by DrawRefRuns -
   // the one thing FindRefTreeDrawText needs for all three row shapes, each
   // of which just builds a different short run list.
   TPasRefRun = record
@@ -123,7 +123,7 @@ type
   TFindRefTab = class(TTabSheet)
   public
     Tree: TVirtualStringTree;
-    // The identity this tab searches for — how a repeated search finds and
+    // The identity this tab searches for - how a repeated search finds and
     // refreshes this SAME tab instead of opening a duplicate (see
     // FindReferencesActionExecute). SymSym = -1 means SymMid is a UNIT
     // target (FNav.UnitAt), not a symbol; SymSym = -2 means this is a
@@ -149,9 +149,9 @@ type
     cbHighlighter: TComboBox;
     cbThreading: TComboBox;    // background-analysis "phase done/total"
     { Incremental reanalysis (PasTree 0.9.0), ON by default. Checked, an edit
-      first tries TPasAsyncSession.CreateForModule — re-parse and re-analyze
+      first tries TPasAsyncSession.CreateForModule - re-parse and re-analyze
       just the edited unit in place, milliseconds instead of a closure
-      rebuild — and any refusal falls back to an ordinary rebuild that adopts
+      rebuild - and any refusal falls back to an ordinary rebuild that adopts
       the current project as a PARSE DONOR. Unchecked, the demo behaves
       exactly as it did before: every edit rebuilds the closure from scratch.
 
@@ -285,7 +285,7 @@ type
     // Message window: FMsgLog is the full chronological history (status +
     // error rows, never filtered); FMsgVisible indexes the subset currently
     // shown in vtMessages (status rows always included, error rows gated by
-    // chkShowErrors — see RebuildVisibleMessages/LogRow).
+    // chkShowErrors - see RebuildVisibleMessages/LogRow).
     FMsgLog: TList<TPasMsgRow>;
     FMsgVisible: TList<Integer>;
     FDProj: TPasDProj;       // Assigned only when a .dproj was opened
@@ -309,16 +309,16 @@ type
     // FNavBusy suppresses RECORDING while Back/Forward is itself jumping.
     FNavHistory: TNavHistory;
     FNavBusy: Boolean;
-    // "Highlight other occurrences of the selected identifier" — the
+    // "Highlight other occurrences of the selected identifier" - the
     // background color, shared by every tab's own highlighter instance
-    // (each set from cbHighlightColor; new tabs pick up the current value —
+    // (each set from cbHighlightColor; new tabs pick up the current value -
     // see OpenFileTab).
     FIdentHighlightColor: TColor;
     FReparseTimer: TTimer;         // debounces re-analysis after edits
     // Background (non-blocking) analysis. Opening a project and the edit-
     // debounce reanalysis run on FAsyncSession's worker thread; FAsyncTimer
     // polls its progress into lblProgress and, when it finishes, swaps the
-    // built project/navigator in for the current ones (double-buffered — see
+    // built project/navigator in for the current ones (double-buffered - see
     // TPasAsyncSession). Run Parse stays synchronous and cancels this first.
     FAsyncSession: TPasAsyncSession;
     FAsyncTimer: TTimer;
@@ -338,11 +338,11 @@ type
     FLoadingFile: Boolean;         // suppresses OnChange during programmatic load
     // Guards every FNav/FSemaProject READ (ResolveAt, ActiveRoutineTarget)
     // against a real race: Analyze's own parallel passes (LoadFilesParallel/
-    // CrossResolve/...) run via TParallel.&For, which — called from the MAIN
-    // thread — pumps the message queue while waiting for worker threads, so
+    // CrossResolve/...) run via TParallel.&For, which - called from the MAIN
+    // thread - pumps the message queue while waiting for worker threads, so
     // Application.OnIdle (and with it EVERY TAction.OnUpdate, incl. the new
     // GotoImpl/GotoDeclAction added today) can fire WHILE a background parse
-    // is still writing into the very model these actions read — a proper
+    // is still writing into the very model these actions read - a proper
     // data race (TArray reallocation, half-written RefMap...), not just a
     // perf cost. This was always a latent gap (ResolveAt/ctrl+hover shared
     // it from day one) but went unnoticed since a mouse-move landing in that
@@ -350,10 +350,10 @@ type
     // second hits it constantly. Set for the FULL duration of Analyze.
     FAnalyzing: Boolean;
     // ExtraSearchPaths result cache: registry enumeration + validating ~140
-    // candidate directories (TDirectory.Exists, one at a time — NOT the
+    // candidate directories (TDirectory.Exists, one at a time - NOT the
     // parallel index SourceManager builds internally) is expensive on a
     // slow disk/AV-scanned machine, and Analyze() calls ExtraSearchPaths on
-    // EVERY run — including the 500ms-debounced reanalysis after EVERY
+    // EVERY run - including the 500ms-debounced reanalysis after EVERY
     // edit. Recomputing that on every keystroke pause is the actual cost a
     // quick "Run Parse" click was never meant to pay repeatedly; the
     // result is static for a given platform for the whole session (the
@@ -370,7 +370,7 @@ type
     FLastSearchPaths: TArray<string>;
     // One-entry memo for FileForName. It exists for ctrl+HOVER: the mouse moves
     // many times over one `{$I ...}`, and the lookup behind it walks every
-    // model's file list — 3747 of them on the real project. One entry is all the
+    // model's file list - 3747 of them on the real project. One entry is all the
     // pattern needs, since a hover asks the same question repeatedly.
     FNameCacheKey, FNameCacheFile: string;
     FStudioRoot: string;           // RAD Studio root (for RTL search paths)
@@ -381,11 +381,11 @@ type
     FFindBar: TForm;                // floating find toolbar (TFindBar); lazy
     // Code completion (ctrl+space / after `.`): the SynEdit popup plus the
     // cached overlay-preprocessor stack. Per request the CURRENT buffer is
-    // parsed fresh (ProcessText + ParseFile + phase-1 Analyze — the overlay
+    // parsed fresh (ProcessText + ParseFile + phase-1 Analyze - the overlay
     // model) and TPasCompletion bridges every name that leaves it into the
-    // LAST-GOOD FSemaProject; see local/COMPLETION-PLAN.md §3. The SM/PP pair
+    // LAST-GOOD FSemaProject; see local/COMPLETION-PLAN.md sec. 3. The SM/PP pair
     // is cached because TPasSourceManager indexes ~140 search paths on
-    // Create — a per-keystroke cost this field structure exists to avoid —
+    // Create - a per-keystroke cost this field structure exists to avoid -
     // and invalidated whenever the analysis configuration changes.
     FCompl: TSynCompletionProposal;
     FComplSM: TPasSourceManager;
@@ -395,11 +395,11 @@ type
     procedure ApplyHighlighterContext(AHL: TPasTreeSynHighlighter;
       const APath: string);
     procedure CloseAllTabs;
-    // Navigation history — see NavigateTo.
+    // Navigation history - see NavigateTo.
     function CurrentNavPos(out AEntry: TNavHistoryEntry): Boolean;
     procedure NavigateTo(const APath: string; ALine, ACol: Integer);
     procedure GoToNavEntry(const AEntry: TNavHistoryEntry);
-    // Called from TNavHistoryPlugin — see there and ShiftNavHistory.
+    // Called from TNavHistoryPlugin - see there and ShiftNavHistory.
     procedure ShiftNavHistory(const APath: string;
       AFirstLine, ACount: Integer; AInserted: Boolean);
     procedure AppMessage(var AMsg: TMsg; var AHandled: Boolean);
@@ -413,13 +413,13 @@ type
     procedure DoFindNext(const AText: string);
     // Shared by the Goto*Action Update/Execute pairs: the active source
     // tab's model + caret position, and (if AWantImpl) the implementation
-    // or (else) the declaration at that position — the SAME lookup Nav.pas
+    // or (else) the declaration at that position - the SAME lookup Nav.pas
     // documents as safe to call from an Update handler (its per-model index
     // is built once and cached; repeating the call in Execute is cheap).
     function ActiveRoutineTarget(AWantImpl: Boolean;
       out ATarget: TPasNavTarget): Boolean;
     // Same shape, for Find References: the active tab's caret (or the
-    // START of a selection — see the implementation) resolved to a symbol
+    // START of a selection - see the implementation) resolved to a symbol
     // identity (FNav.SymbolAt) rather than a navigation target. TSourceTab
     // itself is declared in the implementation section (below), so this
     // returns the two pieces callers actually need rather than the tab.
@@ -469,7 +469,7 @@ type
       False = not applicable (switch off, no project, path not in the analyzed
       closure, more than one dirty tab, a build already running) and the
       caller must do an ordinary rebuild. True only means the session STARTED
-      — the guards may still refuse, which AsyncTimerTick handles. }
+      - the guards may still refuse, which AsyncTimerTick handles. }
     function TryModuleReanalyze(const APath: string): Boolean;
     procedure CancelAsync;
     procedure AsyncTimerTick(Sender: TObject);
@@ -529,7 +529,7 @@ type
 
     SynEdit already does this arithmetic for its own gutter marks, its
     indicators and its selections, and exposes the same two notifications to
-    plugins — so this rides on machinery that is already correct and already
+    plugins - so this rides on machinery that is already correct and already
     called from the one place that knows (TCustomSynEdit.DoLinesInserted /
     DoLinesDeleted, driven by the string list's own notifications).
 
@@ -540,7 +540,7 @@ type
 
     The rules are copied from TSynIndicators, not from the mark shifting: the
     two disagree, and the indicator one is right. SynEdit's own comment states
-    the convention — FirstLine is 0-based, a Line is 1-based — and indicators
+    the convention - FirstLine is 0-based, a Line is 1-based - and indicators
     shift on `Line > FirstLine` while marks shift on `Mark.Line >= FirstLine`,
     which moves the line ABOVE an insertion point along with the text below it.
     Owned by the editor (TCustomSynEdit.FPlugins is an owning list). }
@@ -564,7 +564,7 @@ type
   // Floating "Find" toolbar: non-modal (Show, not ShowModal) and always on
   // top (fsStayOnTop), built entirely in code (too small to earn a .dfm).
   // One instance, owned by frmMain and reused across searches. Every search
-  // reads frmMain.pgc.ActivePage FRESH (see TfrmMain.DoFindNext) — moving
+  // reads frmMain.pgc.ActivePage FRESH (see TfrmMain.DoFindNext) - moving
   // keyboard focus to this separate top-level window does not change which
   // tab is "active" in the page control, so the target editor stays correct
   // even while this toolbar has the focus.
@@ -579,13 +579,13 @@ type
     constructor CreateFor(AOwnerForm: TfrmMain);
     // Shows (or re-shows) the bar near AOwnerForm's top-right, pre-filling
     // AInitialText (the active editor's current selection, if any) only
-    // when the box is still empty — repeated Ctrl+F keeps your last search.
+    // when the box is still empty - repeated Ctrl+F keeps your last search.
     procedure PopUp(const AInitialText: string);
   end;
 
 const
   // Pastel-ish background swatches (readable under normal black text) for
-  // the "same identifier" highlight combo (cbHighlightColor) — SandyBrown
+  // the "same identifier" highlight combo (cbHighlightColor) - SandyBrown
   // first/default, per request.
   IDENT_HIGHLIGHT_COLORS: array[0..9] of TNamedColor = (
     (Name: 'SandyBrown';   Color: $0060A4F4),
@@ -602,7 +602,7 @@ const
 
 // Pascal identifier lexeme: letter/underscore, then letters/digits/
 // underscores. Gates whether a text SELECTION is even eligible for the
-// "same identifier" highlight — a multi-word or punctuation selection never
+// "same identifier" highlight - a multi-word or punctuation selection never
 // matches any whole identifier token anyway (the highlighter compares the
 // FULL token text), but this avoids bothering it with obvious non-identifier
 // selections (whitespace, an expression, ...).
@@ -768,7 +768,7 @@ end;
 
 procedure TfrmMain.FindActionUpdate(Sender: TObject);
 begin
-  // Enabled whenever a source tab is the ACTIVE one — not gated on which
+  // Enabled whenever a source tab is the ACTIVE one - not gated on which
   // control currently holds keyboard focus: a TTabSheet is a container, its
   // own Focused is essentially always False (the child SynEdit holds real
   // focus), so requiring it here would permanently disable this action.
@@ -778,7 +778,7 @@ end;
 
 // Finds AText forward from the caret in the CURRENTLY ACTIVE source tab,
 // wrapping to the top of the document if not found before EOF. Case-
-// insensitive (SynEdit's default when ssoMatchCase is omitted) — a quick-
+// insensitive (SynEdit's default when ssoMatchCase is omitted) - a quick-
 // find bar, not the full Find/Replace dialog.
 procedure TfrmMain.DoFindNext(const AText: string);
 var
@@ -820,9 +820,9 @@ begin
       LTab.Editor.CaretX, ATarget);
 end;
 
-// Go to implementation (Ctrl+Shift+Down): always the SAME unit/tab — Object
+// Go to implementation (Ctrl+Shift+Down): always the SAME unit/tab - Object
 // Pascal never lets a routine's body live in a different unit from its
-// declaration — so this only ever moves the caret in place, unlike ctrl+
+// declaration - so this only ever moves the caret in place, unlike ctrl+
 // click (EditorMouseDown) which may open another tab.
 procedure TfrmMain.GotoImplActionExecute(Sender: TObject);
 var
@@ -840,7 +840,7 @@ begin
   TAction(Sender).Enabled := ActiveRoutineTarget(True, {out} LTarget);
 end;
 
-// Go to declaration (Ctrl+Shift+Up) — the reverse direction.
+// Go to declaration (Ctrl+Shift+Up) - the reverse direction.
 procedure TfrmMain.GotoDeclActionExecute(Sender: TObject);
 var
   LTarget: TPasNavTarget;
@@ -859,9 +859,9 @@ end;
 
 // The active source tab plus the position Find References/SymbolAt should
 // query: a SELECTED identifier's own START (double-click, shift+arrow,
-// drag) — the caret itself sits at whichever END the selection was made
+// drag) - the caret itself sits at whichever END the selection was made
 // TOWARD, often one character past the identifier's last letter, which
-// IdentAt (an exact-token hit test) refuses — or, with no selection, the
+// IdentAt (an exact-token hit test) refuses - or, with no selection, the
 // plain caret. Returns False (leaving LTab/ALine/ACol untouched) when
 // there's nothing to query at all, so both ActiveSymbolTarget and
 // ActiveUnitTarget share one Exit path for that.
@@ -906,7 +906,7 @@ begin
 end;
 
 // The unit counterpart: a click on THIS file's own header name, or on a
-// `uses` clause item — see FNav.UnitAt for what counts as which.
+// `uses` clause item - see FNav.UnitAt for what counts as which.
 function TfrmMain.ActiveUnitTarget(out ATargetMid: Integer;
   out AName: string): Boolean;
 var
@@ -947,11 +947,11 @@ begin
     ActiveUnitTarget(LTMid, LName) or ActiveBuiltinTarget(LName);
 end;
 
-// A repeated search for the SAME identity (not just the same spelling — two
+// A repeated search for the SAME identity (not just the same spelling - two
 // unrelated locals named the same must not collide) reuses and refreshes
 // its own tab rather than stacking a duplicate; ModelByName-style search is
 // small (one page per open search) so a linear scan is fine. ABuiltinName
-// non-empty means "match by name, ASym/ATMid don't matter" — see
+// non-empty means "match by name, ASym/ATMid don't matter" - see
 // TFindRefTab's own comment on the SymSym = -1 / -2 sentinels.
 function TfrmMain.FindExistingSearchTab(ATMid, ASym: Integer;
   const ABuiltinName: string): TFindRefTab;
@@ -994,7 +994,7 @@ begin
   else if ActiveUnitTarget(LTMid, LName) then
   begin
     // -1: never a real symbol index, so (LTMid, -1) can't collide with an
-    // ordinary search's own key — the sentinel FindExistingSearchTab needs
+    // ordinary search's own key - the sentinel FindExistingSearchTab needs
     // to tell "searching for the unit itself" apart from any real symbol.
     LSym := -1;
     LHasDecl := FNav.UnitDeclHit(LTMid, {out} LDeclHit);
@@ -1026,7 +1026,7 @@ begin
 end;
 
 // "Line N: " for a hit row, "<file> (Line N): " for the standalone
-// declaration row — the one place both prefix shapes are built, so
+// declaration row - the one place both prefix shapes are built, so
 // PopulateFindRefTab and nothing else needs to know their exact wording.
 function TfrmMain.MakeFindRefDisplay(const AHit: TPasRefHit;
   const APrefix: string): TFindRefDisplay;
@@ -1042,7 +1042,7 @@ begin
   Result.HiTo := Result.PrefixLen + Max(0, AHit.HiTo - LShift);
 end;
 
-// (Re)builds an existing or brand-new tab's whole tree from scratch — one
+// (Re)builds an existing or brand-new tab's whole tree from scratch - one
 // path for both "new search" and "repeated search reusing its own tab",
 // since a refresh IS a rebuild (the analysis may have changed underneath).
 procedure TfrmMain.PopulateFindRefTab(LTab: TFindRefTab; const AName: string;
@@ -1328,9 +1328,9 @@ begin
 end;
 
 { The word under the caret, taken as a FILE or UNIT name: the maximal run of
-  characters either can contain. Deliberately wider than an identifier —
+  characters either can contain. Deliberately wider than an identifier -
   a unit name is dotted (`Vcl.Forms`), an include is `common.inc`, and a path in a
-  string has separators — and deliberately stops at quotes, braces and
+  string has separators - and deliberately stops at quotes, braces and
   whitespace, which is what keeps an $I directive's argument and a quoted
   '..\lib\x.inc' down to their file part. }
 function TfrmMain.ActiveEditor: TSynEdit;
@@ -1387,7 +1387,7 @@ end;
 
   Resolution order matters and is the reverse of what looks natural: the
   ANALYSIS is asked first, because it already knows the resolved path of every
-  unit AND of every included file in the closure — which is how an $I argument
+  unit AND of every included file in the closure - which is how an $I argument
   opens the right common.inc when three copies exist on different search paths, and
   how `uses Forms` opens Vcl.Forms.pas through the namespace/alias rules. Only
   then the filesystem, relative to the current file and to the project's search
@@ -1420,7 +1420,7 @@ begin
     Exit;
   // 1. Anything the analysis loaded: the models' own files first, then every
   // file their token streams came from (that second list is where includes
-  // live — see TPasSemaProject.NodeSite on why an $I file is a different path).
+  // live - see TPasSemaProject.NodeSite on why an $I file is a different path).
   if Assigned(FSemaProject) then
   begin
     for LMid := 0 to FSemaProject.ModelCount - 1 do
@@ -1507,7 +1507,7 @@ begin
   Clipboard.AsText := FMsgLog[FMsgVisible[LData.Index]].Text;
 end;
 
-// Only enabled while vtMessages itself has focus — Ctrl+C must not steal
+// Only enabled while vtMessages itself has focus - Ctrl+C must not steal
 // "copy" away from a focused SynEdit tab (which handles it natively as a
 // text-edit shortcut) just because a message row happens to still be
 // focused from an earlier click.
@@ -1517,7 +1517,7 @@ begin
     Assigned(vtMessages.FocusedNode);
 end;
 
-// The WHOLE visible history, in one go — for pasting a run's log somewhere
+// The WHOLE visible history, in one go - for pasting a run's log somewhere
 // else. Copies what is actually on screen (FMsgVisible, i.e. honoring the
 // Show Errors filter) rather than FMsgLog, so what you paste is what you see.
 procedure TfrmMain.CopyAllMessagesActionExecute(Sender: TObject);
@@ -1539,14 +1539,14 @@ begin
   TAction(Sender).Enabled := FMsgVisible.Count > 0;
 end;
 
-{ The most-imported missing units, busiest first — the shortest description of
+{ The most-imported missing units, busiest first - the shortest description of
   a broken search-path setup there is. Sorted by import count because that is
   the order in which fixing them buys back closure.
 
   Each row carries the FIRST import site and is double-clickable, which is the
   whole point: the name says WHAT is missing, and the jump says who asked for
   it. Without it a single-site entry like `System.Internal.HelperHlpr` is a
-  dead end — the F1027 rows only cover PROJECT files, and the unit that
+  dead end - the F1027 rows only cover PROJECT files, and the unit that
   imported it is usually a library unit that is never listed. }
 procedure TfrmMain.LogMissingUnits(AMissing: TDictionary<string,
   TPasMissingUnit>);
@@ -1580,7 +1580,7 @@ begin
         [LParts[0].TrimLeft(['0']), LParts[1]]);
       if AMissing.TryGetValue(LParts[1], LInfo) and (LInfo.FirstFile <> '') then
         // Say the position in the text too, not only in the (invisible) row
-        // payload — the line has to be readable when it is COPIED out of the
+        // payload - the line has to be readable when it is COPIED out of the
         // message window, where no amount of double-clicking is available.
         LogRow(mkStatus, LText + Format(', first at %s(%d,%d)',
           [TPath.GetFileName(LInfo.FirstFile), LInfo.FirstLine, LInfo.FirstCol]),
@@ -1611,7 +1611,7 @@ begin
   Result := PasDefaultNamespaces(APlatform);
 end;
 
-// Seconds with one decimal — a five-digit millisecond count is not something
+// Seconds with one decimal - a five-digit millisecond count is not something
 // anyone reads comfortably.
 function TfrmMain.ElapsedText(AMs: Int64): string;
 begin
@@ -1620,7 +1620,7 @@ end;
 
 procedure TfrmMain.FormCreate(Sender: TObject);
 begin
-  // Which PasTree this demo is built against — the caption is the one place
+  // Which PasTree this demo is built against - the caption is the one place
   // visible on every screenshot and in every bug report.
   Caption := 'PasTree Demo v' + PasTreeVersion;
   FFileList := TStringList.Create;
@@ -1629,7 +1629,7 @@ begin
   FMsgLog := TList<TPasMsgRow>.Create;
   FMsgVisible := TList<Integer>.Create;
   FNavHistory := TNavHistory.Create;
-  // The mouse's back/forward buttons never reach a control's OnMouseDown —
+  // The mouse's back/forward buttons never reach a control's OnMouseDown -
   // see AppMessage.
   Application.OnMessage := AppMessage;
   FPlatform := pfWin32;
@@ -1648,7 +1648,7 @@ begin
   FSettings := TDemoSettings.Create(DefaultSettingsFile);
   SetupControls;
   SetupRecentMenu;
-  // After SetupControls, which fills the combos and picks their defaults —
+  // After SetupControls, which fills the combos and picks their defaults -
   // the stored values are an override of those defaults, not a substitute.
   LoadSettings;
   EnsureSampleProject;
@@ -1686,13 +1686,13 @@ end;
 // the VST node payload/options, highlighters and code fonts).
 procedure TfrmMain.SetupControls;
 begin
-  // Numeric ShortCut values are a pain to get right by hand in the .dfm —
+  // Numeric ShortCut values are a pain to get right by hand in the .dfm -
   // Menus.ShortCut computes the correct encoding from the actual keys.
   GotoImplAction.ShortCut := Vcl.Menus.ShortCut(VK_DOWN, [ssCtrl, ssShift]);
   GotoDeclAction.ShortCut := Vcl.Menus.ShortCut(VK_UP, [ssCtrl, ssShift]);
   CopyMessageAction.ShortCut := Vcl.Menus.ShortCut(Ord('C'), [ssCtrl]);
   // Delphi's own key for it, and worth matching exactly: it is the command
-  // people reach for when ctrl+click cannot help — an include file, or a unit
+  // people reach for when ctrl+click cannot help - an include file, or a unit
   // whose source the analysis never loaded.
   OpenFileAtCursorAction.ShortCut := Vcl.Menus.ShortCut(VK_RETURN, [ssCtrl]);
   // The conventional pair, matching every browser and IDE.
@@ -1702,7 +1702,7 @@ begin
   // Code completion popup, shared by every source tab (OpenFileTab calls
   // AddEditor per editor): ctrl+space on demand, and the built-in timer
   // fires it right after a typed `.`, matching the IDE. The work happens in
-  // ComplExecute — overlay parse of the current buffer + the bridged
+  // ComplExecute - overlay parse of the current buffer + the bridged
   // collection engine (PasTree.Sema.Complete).
   FCompl := TSynCompletionProposal.Create(Self);
   FCompl.Options := DefaultProposalOptions +
@@ -1729,7 +1729,7 @@ begin
   edSema.Font.Name := 'Consolas';
 
   // AST JSON / Semantics are lazily populated (see btnShowASTJsonClick/
-  // btnShowSemanticsClick) and hidden until asked for — TabVisible keeps the
+  // btnShowSemanticsClick) and hidden until asked for - TabVisible keeps the
   // page usable as pgc.ActivePage without a header in the strip.
   tsJson.TabVisible := False;
   tsSema.TabVisible := False;
@@ -1748,7 +1748,7 @@ begin
   end;
   cbPlatform.ItemIndex := 0;
 
-  // Shared across every tab when "SynEdit" is selected — TSynPasSyn is a
+  // Shared across every tab when "SynEdit" is selected - TSynPasSyn is a
   // stateless-per-call highlighter (unlike TPasTreeSynHighlighter, which
   // caches one buffer's tokenization), so one instance is safe to reuse.
   FSynPasHL := TSynPasSyn.Create(Self);
@@ -1776,7 +1776,7 @@ end;
 // (which words/tokens get flagged) instead of two unrelated color schemes.
 // TSynPasSyn distinguishes a few things ours doesn't (Float/Hex split from
 // Number, Char split from String, a separate Type attribute for built-in
-// type names) — those are folded into the nearest matching PasTree color so
+// type names) - those are folded into the nearest matching PasTree color so
 // nothing stands out that our highlighter wouldn't also color that way.
 procedure TfrmMain.ApplyPasTreePalette(AHL: TSynPasSyn);
 begin
@@ -1792,7 +1792,7 @@ begin
   AHL.FloatAttri.Foreground := PAS_NUMBER_COLOR;
   AHL.HexAttri.Foreground := PAS_NUMBER_COLOR;
   AHL.AsmAttri.Background := PAS_ASM_BACKGROUND;
-  // Ours never singles out built-in type names — match IdentifierAttri so
+  // Ours never singles out built-in type names - match IdentifierAttri so
   // TypeAttri doesn't introduce a distinction our highlighter doesn't make.
   AHL.TypeAttri.Foreground := AHL.IdentifierAttri.Foreground;
   AHL.TypeAttri.Style := AHL.IdentifierAttri.Style;
@@ -1812,7 +1812,7 @@ end;
 
 // Appends one row to the master log and, if it should be visible right now
 // (status rows always; error rows only while chkShowErrors is checked),
-// adds a real VST node for it — mirrors PopulateTree's own AddChild+
+// adds a real VST node for it - mirrors PopulateTree's own AddChild+
 // GetNodeData convention (an Integer index in node data, never a managed
 // string) rather than a virtual RootNodeCount+OnInitNode scheme.
 procedure TfrmMain.LogRow(AKind: TPasMsgKind; const AText, AFilePath: string;
@@ -1841,7 +1841,7 @@ begin
   LogRow(mkStatus, AText, '', 0, 0);
 end;
 
-// A diagnostic row — the future hint/warning entry points will call LogRow
+// A diagnostic row - the future hint/warning entry points will call LogRow
 // directly with mkWarning/mkHint once those severities exist.
 procedure TfrmMain.LogError(const AFilePath: string; ALine, ACol: Integer;
   const AText: string);
@@ -1856,10 +1856,11 @@ begin
   vtMessages.Clear;
 end;
 
-// Re-applies the chkShowErrors filter to the ENTIRE history — needed because
+// Re-applies the chkShowErrors filter to the ENTIRE history - needed because
 // toggling the checkbox must retroactively show/hide every already-logged
-// error row, not just future ones ("даже если чекбокс нажат после завершения
-// парсинга").
+// error row, not just future ones: the request was explicitly that ticking the
+// box AFTER the analysis has finished still reveals the errors it already
+// logged.
 procedure TfrmMain.RebuildVisibleMessages;
 var
   LIdx: Integer;
@@ -1896,7 +1897,7 @@ begin
 end;
 
 // The main unit's model in the CURRENT FSemaProject, if any has been
-// analyzed yet — shared by btnShowASTJsonClick/btnShowSemanticsClick (AST
+// analyzed yet - shared by btnShowASTJsonClick/btnShowSemanticsClick (AST
 // JSON/Semantics content is computed lazily FROM THIS at click time, always
 // reflecting the latest analysis, including a quiet background reanalysis
 // the user never saw a "Done" line for).
@@ -1987,7 +1988,7 @@ begin
 end;
 
 // Double-click a row that NAMES A POSITION: open (or focus) its file and land
-// the caret exactly there. Gated on the position, not on Kind — the
+// the caret exactly there. Gated on the position, not on Kind - the
 // closure-health summary rows are mkStatus yet do carry the first import site
 // of a unit we could not find, and jumping to it is the only way to see who
 // asked for that unit. A row with no position, or one whose file no longer
@@ -2038,7 +2039,7 @@ begin
   LFile := AProjectFile;
   LExt := LowerCase(TPath.GetExtension(LFile));
   // Opening the bare main source of a real project should behave exactly like
-  // opening its .dproj (same search paths/defines/full file list) — a real
+  // opening its .dproj (same search paths/defines/full file list) - a real
   // IDE does this too. Redirect BEFORE anything else reads LExt/LFile.
   //
   // A PACKAGE is the same arrangement with a different main source: `.dpk`
@@ -2062,7 +2063,7 @@ begin
   begin
     FDProj := TPasDProj.Create;
     // FConfigOverride is '' for a fresh open (the project's own default) and
-    // set only when cbConfig re-opens the SAME project — see cbConfigChange.
+    // set only when cbConfig re-opens the SAME project - see cbConfigChange.
     if FDProj.Load(LFile, '', FConfigOverride) then
     begin
       FPlatform := FDProj.Platform;
@@ -2109,10 +2110,10 @@ begin
   FProjectFile := LFile;
   PopulateConfigCombo;
 
-  Caption := Format('PasTree Demo v%s — %s',
+  Caption := Format('PasTree Demo v%s - %s',
     [PasTreeVersion, TPath.GetFileName(LFile)]);
   // Remembered here, at the one point every route into a project passes
-  // through, and with LFile — the .dproj the .dpr was redirected to, not the
+  // through, and with LFile - the .dproj the .dpr was redirected to, not the
   // .dpr the caller happened to name.
   if Assigned(FSettings) then
     FSettings.AddRecent(LFile);
@@ -2128,14 +2129,14 @@ begin
   // and (if chkShowErrors is checked) the error list when it finishes. The
   // open main file is front-loaded so it is ready first.
   // The configuration is named here and not only in the .dproj summary line,
-  // because a bare .dpr has no summary line and still has a configuration —
+  // because a bare .dpr has no summary line and still has a configuration -
   // it is what decides whether DEBUG is defined.
   Log('Analyzing ' + TPath.GetFileName(FMainSource) + ' in ' + FProjectDir +
     ' (' + cbPlatform.Text + ', ' + SelectedConfig +
     ') in the background...');
   // The TOTAL search-path set, not just the .dproj's own: the rest comes from
   // the IDE's registry library/browsing paths (ExtraSearchPaths), and that set
-  // is what decides how much of the `uses` graph resolves — so how many units
+  // is what decides how much of the `uses` graph resolves - so how many units
   // the closure ends up with, and hence the run time. Two runs of the same
   // project differing in unit count differ HERE, and without this line there
   // was no way to tell from a log.
@@ -2154,10 +2155,10 @@ begin
     // F1027 on units that obviously exist, so the log must not leave it
     // implicit.
     if Assigned(FDProj) and (Length(FDProj.Namespaces) > 0) then
-      Log(Format('  unit scope names: %d from .dproj — %s',
+      Log(Format('  unit scope names: %d from .dproj - %s',
         [Length(FDProj.Namespaces), string.Join(';', FDProj.Namespaces)]))
     else
-      Log(Format('  unit scope names: %d IDE defaults (no .dproj list) — %s',
+      Log(Format('  unit scope names: %d IDE defaults (no .dproj list) - %s',
         [Length(EffectiveNamespaces(LDbgPlat)),
          string.Join(';', EffectiveNamespaces(LDbgPlat))]));
   end;
@@ -2173,7 +2174,7 @@ begin
   if Assigned(FDProj) and (Length(FDProj.Files) > 0) then
   begin
     // Source of truth: the .dproj's own compiled-unit list (DCCReference),
-    // not a directory scan — this also correctly reaches units that live
+    // not a directory scan - this also correctly reaches units that live
     // outside FProjectDir (e.g. '..\source\*.pas' referenced by the .dproj).
     for LFile in FDProj.Files do
       if TFile.Exists(LFile) then
@@ -2181,7 +2182,7 @@ begin
   end
   else if (FMainSource <> '') and TFile.Exists(FMainSource) then
     // No .dproj for this project (OpenProject already redirects to a sibling
-    // .dproj when one exists — see there). Start with just the main file:
+    // .dproj when one exists - see there). Start with just the main file:
     // its own members are only knowable once it has been parsed, so
     // AdoptProjectMembers adds them when the analysis lands.
     FFileList.Add(FMainSource);
@@ -2216,12 +2217,12 @@ end;
   is not just a thin tree: ReportProjectResult LISTS diagnostics only for
   FFileList members (everything else is RTL reach, counted but not listed), so
   the message window stayed empty while the Done line honestly reported
-  hundreds — the count and the list disagreeing for a real reason, but looking
+  hundreds - the count and the list disagreeing for a real reason, but looking
   exactly like a lie.
 
   The main source's uses/contains entries carrying an `in 'path'` clause ARE
-  the project's own unit list. That is Delphi's own convention — the IDE
-  writes `in` for a project member and a bare name for a library unit — and it
+  the project's own unit list. That is Delphi's own convention - the IDE
+  writes `in` for a project member and a bare name for a library unit - and it
   is how the shipped BuildWinRTL.dpk names all ~310 of its units, as well as
   how the demo's generated VCL/FMX packages name theirs. }
 procedure TfrmMain.AdoptProjectMembers(AMainId: Integer);
@@ -2286,7 +2287,7 @@ begin
   Result.PopupMenu := SourcePopupMenu;
   Result.SearchEngine := SynEditSearch1;
 
-  // Our own PasTree-lexer-driven highlighter — one instance per tab (it
+  // Our own PasTree-lexer-driven highlighter - one instance per tab (it
   // caches the tokenization of its own attached buffer, so instances can't
   // be shared across editors). Kept alive even when SynEdit's highlighter is
   // the active one, so cbHighlighterChange can switch back without recreating it.
@@ -2294,7 +2295,7 @@ begin
   LHL.SourceLines := Result.Lines;
   // Give it the same context the ANALYSIS runs under. Without it the
   // highlighter preprocesses the buffer under a placeholder name and no search
-  // paths, so every `{$I ...}` fails — and an include that DEFINES symbols then
+  // paths, so every `{$I ...}` fails - and an include that DEFINES symbols then
   // flips which branches look live. One library unit greyed out `SizeInt = Integer`
   // under `{$IFDEF CPU32}` (CPU32 comes from a config include reached through
   // its own `$I`) while ctrl+click navigated to that very line, because
@@ -2309,12 +2310,12 @@ begin
   FLoadingFile := True;   // don't let the programmatic load arm the reparse timer
   try
     try
-      // The ANALYSIS's own loader, not TStrings.LoadFromFile — for the same
+      // The ANALYSIS's own loader, not TStrings.LoadFromFile - for the same
       // reason ApplyHighlighterContext exists a few lines up: two loaders are
       // two sources of truth, and they disagree exactly on the files that are
       // hardest to read. LoadFromFile RAISES on a malformed byte ("No mapping
       // for the Unicode character exists in the target multi-byte code page"),
-      // so this tab used to show that message instead of the unit — on the one
+      // so this tab used to show that message instead of the unit - on the one
       // file where reading the source mattered most. Now the editor shows the
       // recovered text character-for-character as the analyzer sees it, which
       // also keeps every reported line/column pointing at the right place.
@@ -2332,12 +2333,12 @@ begin
   FCompl.AddEditor(Result);   // code completion (ctrl+space / after `.`)
   // Keeps recorded positions in THIS file pointing at the same text as it is
   // edited. Created after FilePath is known and after the initial load, and
-  // owned by the editor — see TNavHistoryPlugin.
+  // owned by the editor - see TNavHistoryPlugin.
   TNavHistoryPlugin.Create(Result, Self, LTab.FilePath);
   FOpenFiles.AddObject(APath, LTab);
   pgc.ActivePage := LTab;
   // The current project may have RELEASED this unit's transient maps (it was
-  // not an open tab when the analysis finished — see ReleaseTransientMaps in
+  // not an open tab when the analysis finished - see ReleaseTransientMaps in
   // the async swap). A quiet re-analysis restores full completion for it,
   // through the same debounce an edit uses.
   if Assigned(FSemaProject) then
@@ -2349,7 +2350,7 @@ end;
 
 { go-to-declaration }
 
-// The (raw token, declaration target) under pixel (X, Y) of an editor —
+// The (raw token, declaration target) under pixel (X, Y) of an editor -
 // shared by hover-link display and the actual ctrl+click jump.
 function TfrmMain.ResolveAt(AEditor: TSynEdit; X, Y: Integer;
   out ARawFrom, ARawTo: Integer; out ATarget: TPasNavTarget): Boolean;
@@ -2377,7 +2378,7 @@ begin
 end;
 
 { The file named by an $I / $INCLUDE directive under pixel (X, Y), as a
-  navigation target — the include half of ctrl+click.
+  navigation target - the include half of ctrl+click.
 
   It cannot go through TPasNav at all: a directive is TRIVIA, it has no
   identifier and no AST node, so nothing the resolver produced knows about it.
@@ -2388,7 +2389,7 @@ end;
 
   Deliberately NOT the reverse direction: an identifier typed inside an opened
   .inc still resolves to nothing, for the model-keyed reason in the README's
-  To-do. This is the direction that matters — getting INTO the include from the
+  To-do. This is the direction that matters - getting INTO the include from the
   unit that includes it. }
 function TfrmMain.IncludeTargetAt(AEditor: TSynEdit; X, Y: Integer;
   out ARawFrom, ARawTo: Integer; out ATarget: TPasNavTarget): Boolean;
@@ -2486,7 +2487,7 @@ begin
   ClearLink;
   // SynEdit's own MouseDown moves the caret to the click position AFTER this
   // handler returns (inherited MouseDown fires us, THEN MoveDisplayPosAnd-
-  // Selection), clobbering our jump — which is why it previously only "worked"
+  // Selection), clobbering our jump - which is why it previously only "worked"
   // on a double-click, where SynEdit bails early on ssDouble. Defer the jump so
   // it runs after SynEdit's caret move, and a single ctrl+click lands correctly.
   TThread.ForceQueue(nil,
@@ -2494,7 +2495,7 @@ begin
     begin
       // NavigateTo opens the tab when the target is in another unit and finds
       // the existing one when it is not, so the same-file case needs no
-      // special path here — but the ORIGIN it records must be this editor's
+      // special path here - but the ORIGIN it records must be this editor's
       // caret, which SynEdit has by now moved to the click. That is the right
       // origin: it is where the user was looking.
       NavigateTo(LTarget.FilePath, LTarget.Line, LTarget.Col);
@@ -2508,7 +2509,7 @@ begin
     ClearLink;
 end;
 
-// Platform + search paths + defines for the current project — shared by the
+// Platform + search paths + defines for the current project - shared by the
 // synchronous Analyze and the background StartAsyncAnalyze so they never drift.
 // False if no project is open.
 function TfrmMain.BuildConfig(out APlatform: TPasPlatform;
@@ -2563,7 +2564,7 @@ begin
     if Length(FLastSearchPaths) = 0 then
       Exit(False);
     FComplSM := TPasSourceManager.Create(FLastSearchPaths);
-    // The REAL platform define set, then the project's on top — the same
+    // The REAL platform define set, then the project's on top - the same
     // context the analysis (and the highlighter) run under; a thinner set
     // fakes parse errors in the RTL (see CreatePlatformDefines).
     FComplDefines := CreatePlatformDefines(FPlatform);
@@ -2605,7 +2606,7 @@ begin
   end;
 end;
 
-// Code completion: the whole per-request pipeline, on the UI thread — an
+// Code completion: the whole per-request pipeline, on the UI thread - an
 // overlay parse of the CURRENT buffer (~30 ms worst case, measured on
 // System.pas), phase-1 resolve, then the collection engine bridging every
 // name that leaves the buffer into the last-good FSemaProject.
@@ -2669,7 +2670,7 @@ begin
         if Result = 0 then
           Result := CompareText(A.Name, B.Name);
       end));
-    // Declared-type detail is a real (cheap, on-demand) resolve per row —
+    // Declared-type detail is a real (cheap, on-demand) resolve per row -
     // worth it for a member list, noise-cost on a 1700-row scope list.
     LWithTypes := Length(LItems) <= 512;
     FCompl.ItemList.BeginUpdate;
@@ -2681,7 +2682,7 @@ begin
       begin
         LName := LItems[LIdx].Name;
         // The kind column: routines get their real head word (constructor/
-        // function/...) — the generic fallback covers everything else.
+        // function/...) - the generic fallback covers everything else.
         LKindWord := '';
         if LItems[LIdx].Kind = skRoutine then
           LKindWord := LEngine.ItemHeadWord(LItems[LIdx]);
@@ -2723,7 +2724,7 @@ begin
 end;
 
 // Recreates FSemaProject/FNav (the previous ones, and any hover link into
-// them, die here) and — crucially — feeds every OPEN editor's current text as
+// them, die here) and - crucially - feeds every OPEN editor's current text as
 // a buffer override, so analysis (and thus navigation) matches what's on
 // screen, including unsaved edits. Returns False only if no project is open.
 function TfrmMain.Analyze: Boolean;
@@ -2781,12 +2782,12 @@ begin
     end;
 
     // Same engine as the background path (AnalyzeStaged, run here to
-    // completion on THIS thread instead of a worker) — its uses-closure walk
+    // completion on THIS thread instead of a worker) - its uses-closure walk
     // from FMainSource covers a plain .dpr just as well as the old
     // AnalyzeDirectory fallback did (StartAsyncAnalyze has used it
     // unconditionally, dproj or not, since the async path shipped). The one
     // real payoff: AOnProgress fires synchronously on the UI thread, so
-    // lblProgress can show live progress during a blocking Run Parse —
+    // lblProgress can show live progress during a blocking Run Parse -
     // Update forces an immediate repaint since we're not pumping messages.
     LSW := TStopwatch.StartNew;
     FSemaProject.AnalyzeStaged([FMainSource], [], nil,
@@ -2804,7 +2805,7 @@ begin
       Format('nav=%d;', [LSW.ElapsedMilliseconds]);
     // Same as the async swap: the project is immutable from here on (every
     // re-analysis builds a fresh one), so drop the closed units' transient
-    // maps — see ReleaseTransientMaps.
+    // maps - see ReleaseTransientMaps.
     FSemaProject.DemoteClosedUnits(FOpenFiles.ToStringArray);
   finally
     FAnalyzing := False;
@@ -2829,7 +2830,7 @@ begin
   // closure now includes the whole RTL/VCL/3rd-party reach (for nav), so
   // only PROJECT files' diagnostics are LISTED (external ones would bury
   // the user's own in noise); the total still counts everything. AST JSON/
-  // Semantics are NOT computed here anymore — btnShowASTJsonClick/
+  // Semantics are NOT computed here anymore - btnShowASTJsonClick/
   // btnShowSemanticsClick compute them lazily, from whatever is current at
   // the moment the user actually asks to see them.
   LMain := -1;
@@ -2868,8 +2869,8 @@ begin
       end;
       // Closure HEALTH, the number that says whether the unit count above can
       // be trusted. A `uses` name that did not resolve means a whole subtree
-      // the compiler WOULD compile is missing here — so the unit count is an
-      // under-count — and it also GATES E2003 for that unit, so the diagnostic
+      // the compiler WOULD compile is missing here - so the unit count is an
+      // under-count - and it also GATES E2003 for that unit, so the diagnostic
       // count is an under-count too. dcc treats an unresolvable uses as fatal
       // (F1027), so on a project that really builds, a healthy run is zero.
       // This is what distinguishes "the project got smaller" from "we resolved
@@ -2882,7 +2883,7 @@ begin
           // Group by NAME: thousands of import sites are usually a handful of
           // libraries missing from the search path, and the name list says
           // which. The per-site F1027 rows answer "where"; this answers "what"
-          // — and keeps the FIRST site so the summary row can answer "where"
+          // - and keeps the FIRST site so the summary row can answer "where"
           // as well, for the (common) case where the importer is a library
           // unit whose F1027 is never listed.
           var LMiss: TPasMissingUnit;
@@ -2903,7 +2904,7 @@ begin
         Inc(LUnitsGated);
       // EVERY diagnostic is listed, project file or library unit. Counting one
       // silently was the wrong trade twice over: the Done line said 906 and the
-      // window showed 5, which reads as the tool contradicting itself — and the
+      // window showed 5, which reads as the tool contradicting itself - and the
       // 901 it hid were OUR OWN false positives in third-party code (283 of
       // them turned out to be a single parser bug in one third-party unit). A
       // diagnostic nobody can see is a bug nobody can report.
@@ -2913,7 +2914,7 @@ begin
         Inc(LDiagTotal);
         if LOwnFile then
           Inc(LDiagListed);
-        // A diagnostic's FileId is the MODEL'S OWN file table — for one
+        // A diagnostic's FileId is the MODEL'S OWN file table - for one
         // raised inside an $I-included file this is NOT the unit's main
         // file, so resolve it properly rather than assuming ModelFile(LId).
         LFileId := LModel.Diags[LDIdx].FileId;
@@ -2938,25 +2939,25 @@ begin
   // Say WHERE the diagnostics are, not just how many. The total spans the
   // whole analyzed closure while only project files are listed, so a bare
   // total next to an empty message window reads as the tool contradicting
-  // itself — which is exactly how the .dproj-less case used to look.
+  // itself - which is exactly how the .dproj-less case used to look.
   // Memory beside the time, and for the same reason: on a 32-bit host the
   // address space is the binding constraint on a large project long before
   // speed is, and an EOutOfMemory reads as an analyzer defect unless the
   // figure that explains it is on screen. AllocatedBytes is what the analysis
-  // HOLDS (models, token streams, node arenas) — see its own comment.
+  // HOLDS (models, token streams, node arenas) - see its own comment.
   if LDiagListed = LDiagTotal then
     Log(Format('Done: %d units, %d diagnostics in %s, %s held (%s).',
       [FSemaProject.ModelCount, LDiagTotal, ElapsedText(AElapsedMs),
        MemoryText(AllocatedBytes), cbThreading.Text]))
   else
-    Log(Format('Done: %d units, %d diagnostics in %s, %s held (%s) — %d in ' +
+    Log(Format('Done: %d units, %d diagnostics in %s, %s held (%s) - %d in ' +
       'project files, %d in library units. ALL are listed below.',
       [FSemaProject.ModelCount, LDiagTotal, ElapsedText(AElapsedMs),
        MemoryText(AllocatedBytes), cbThreading.Text, LDiagListed,
        LDiagTotal - LDiagListed]));
   // Volume the parser actually processed. An $I include is counted once per
   // INCLUDING unit, because that is how many times it was really lexed and
-  // parsed — the figure is work done, not distinct bytes on disk. Chars, not
+  // parsed - the figure is work done, not distinct bytes on disk. Chars, not
   // bytes: the source is UTF-16 in memory, and for (essentially ASCII)
   // Pascal source one char is one byte on disk, so this also reads as the
   // on-disk size.
@@ -2966,16 +2967,16 @@ begin
       [FormatFloat('#,##0', LTotalLines), LTotalChars / (1024 * 1024),
        FormatFloat('#,##0', LTotalFiles)]);
     if AElapsedMs > 0 then
-      LVolume := LVolume + Format(' — %s lines/s',
+      LVolume := LVolume + Format(' - %s lines/s',
         [FormatFloat('#,##0', LTotalLines * 1000 / AElapsedMs)]);
     Log(LVolume);
   end;
   if LUnresUses = 0 then
-    Log(Format('  closure: complete — every `uses` resolved across %d unit(s)',
+    Log(Format('  closure: complete - every `uses` resolved across %d unit(s)',
       [FSemaProject.ModelCount]))
   else
   begin
-    Log(Format('  closure: INCOMPLETE — %d unresolved `uses` name(s) over %d ' +
+    Log(Format('  closure: INCOMPLETE - %d unresolved `uses` name(s) over %d ' +
       'distinct unit(s); %d of %d unit(s) have their E2003 suppressed. Unit ' +
       'and diagnostic counts are both under-counts; check the search paths ' +
       'above. Each site is an F1027 in the list below.',
@@ -2988,7 +2989,7 @@ begin
   // ERangeError present itself as "no source on the search path".
   if Length(FSemaProject.LoadFailures) > 0 then
   begin
-    Log(Format('  INTERNAL: %d unit(s) failed to parse — analyzer defect, not a ' +
+    Log(Format('  INTERNAL: %d unit(s) failed to parse - analyzer defect, not a ' +
       'missing file. Their importers report F1027 as a consequence.',
       [Length(FSemaProject.LoadFailures)]));
     for var LFail in FSemaProject.LoadFailures do
@@ -3039,7 +3040,7 @@ end;
 
 // Starts (or restarts) the background analysis. The current FSemaProject/FNav
 // stay live and usable until the new build finishes and AsyncTimerTick swaps
-// them in — so opening a project or re-analyzing after an edit never blocks
+// them in - so opening a project or re-analyzing after an edit never blocks
 // the UI. APriorityFile (the active editor's file) is front-loaded so it is
 // ready first. ALoud = report diagnostics + populate the AST/Semantics views
 // when done (open project); quiet = just refresh navigation (edit debounce).
@@ -3085,13 +3086,13 @@ begin
   end;
 
   // PARSE DONOR (PasTree 0.9.0): the current project stays alive until the
-  // swap in AsyncTimerTick, which is exactly the donor's contract — every
+  // swap in AsyncTimerTick, which is exactly the donor's contract - every
   // unit whose text is byte-identical skips preprocessing, lexing and
   // parsing. A configuration change refuses the donor and the run simply
   // proceeds without one, which is why the result is only logged.
   if chkIncremental.Checked and Assigned(FSemaProject) then
     if not FAsyncSession.SetParseDonor(FSemaProject) then
-      Log('Parse donor refused (configuration changed) — full rebuild.');
+      Log('Parse donor refused (configuration changed) - full rebuild.');
 
   FAsyncLoud := ALoud;
   FAnalyzeOverhead := '';      // async build reports no wrapper/stage timings
@@ -3105,7 +3106,7 @@ end;
 { The single-module fast path (incremental plan stage B). The session TAKES
   OWNERSHIP of FSemaProject: the pointer stays valid and pointing at the same
   object throughout, but its models are being rewritten on the worker thread,
-  so FAnalyzing is raised for the duration — the same guard the synchronous
+  so FAnalyzing is raised for the duration - the same guard the synchronous
   Analyze uses over every FNav/FSemaProject read.
 
   Applicability is deliberately narrow (see the declaration). Everything past
@@ -3136,7 +3137,7 @@ begin
   FAsyncLoud := False;
   FAnalyzing := True;          // see the header
   FAsyncSession := TPasAsyncSession.CreateForModule(FSemaProject, APath);
-  // Every open tab's current text, exactly like the full path — the edited
+  // Every open tab's current text, exactly like the full path - the edited
   // one is what this run is about, the rest keep their overlays alive.
   for LIdx := 0 to FOpenFiles.Count - 1 do
   begin
@@ -3162,7 +3163,7 @@ begin
     Exit;
   CancelAsync;
   lblProgress.Caption := 'cancelled';
-  Log('Analysis cancelled by user — keeping the previous results.');
+  Log('Analysis cancelled by user - keeping the previous results.');
 end;
 
 // Cancels and drains the in-flight background analysis (if any). Called before
@@ -3174,7 +3175,7 @@ begin
   if Assigned(FAsyncSession) then
   begin
     FAsyncSession.Cancel;
-    // A module session OWNS our project — Destroy would take it with it. It
+    // A module session OWNS our project - Destroy would take it with it. It
     // also cannot be cancelled part-way (one commit point, milliseconds), so
     // let it finish and reclaim the project either way.
     if FAsyncModule then
@@ -3233,7 +3234,7 @@ begin
       FDirtyFiles.Clear;
       lblProgress.Caption := Format('module %d ms',
         [FAsyncStart.ElapsedMilliseconds]);
-      Log(Format('Reanalyzed %s only — %d ms (%s)',
+      Log(Format('Reanalyzed %s only - %d ms (%s)',
         [TPath.GetFileName(FAsyncModulePath), FAsyncStart.ElapsedMilliseconds,
          LTimings]));
     end
@@ -3242,13 +3243,13 @@ begin
       // Refused (an interface change, an unresolved $IF, a demoted model...).
       // The reason is in StageTimings; the rebuild below adopts this project
       // as a parse donor, so the fallback is not a cold build either.
-      Log('Module fast path refused (' + LTimings + ') — rebuilding.');
+      Log('Module fast path refused (' + LTimings + ') - rebuilding.');
       StartAsyncAnalyze(FAsyncModulePath, {ALoud} False);
     end;
     Exit;
   end;
 
-  // Build finished — swap in the new project/navigator on this (UI) thread.
+  // Build finished - swap in the new project/navigator on this (UI) thread.
   FAsyncTimer.Enabled := False;
   btnStop.Enabled := False;
   FAsyncStart.Stop;
@@ -3261,8 +3262,8 @@ begin
   if Assigned(FSemaProject) then
   begin
     FNav := TPasNavigator.Create(FSemaProject);
-    // MEMORY-AUDIT §6.4-4 stage 1: this project is now IMMUTABLE for us —
-    // every re-analysis goes through a fresh session — so the per-unit maps
+    // MEMORY-AUDIT sec. 6.4-4 stage 1: this project is now IMMUTABLE for us -
+    // every re-analysis goes through a fresh session - so the per-unit maps
     // nothing reads after analysis can go, except for the open tabs'
     // (completion reads the ACTIVE file's). ~10% of a big closure's RSS.
     // A tab opened later than this simply re-analyzes (OpenFileTab arms the
@@ -3270,7 +3271,7 @@ begin
     //
     // NOT while chkIncremental is on: a demoted unit has no text layer, so it
     // is a parse-donor MISS and a fast-path refusal. That is the trade the
-    // switch exists to show — memory against edit latency.
+    // switch exists to show - memory against edit latency.
     if not chkIncremental.Checked then
       FSemaProject.DemoteClosedUnits(FOpenFiles.ToStringArray);
     FDirtyFiles.Clear;   // this build saw every edit made so far
@@ -3304,7 +3305,7 @@ procedure TfrmMain.EditorChange(Sender: TObject);
 begin
   if FLoadingFile then
     Exit;
-  // Tell the PasTree highlighter its buffer changed — see EnsureFresh's
+  // Tell the PasTree highlighter its buffer changed - see EnsureFresh's
   // header comment: without this it can only detect a change by rebuilding
   // and comparing the WHOLE buffer on every repainted line, which is what
   // made opening a large file (e.g. System.SysUtils.pas via go-to-
@@ -3312,7 +3313,7 @@ begin
   // highlighter is the active one, so this is safe regardless of cbHighlighter.
   TSourceTab(TSynEdit(Sender).Parent).PasTreeHL.MarkDirty;
   ClearLink;                        // the stale model no longer matches the text
-  // Which units the next analysis must account for — the fast path applies to
+  // Which units the next analysis must account for - the fast path applies to
   // exactly one (see FDirtyFiles).
   var LPath := TSourceTab(TSynEdit(Sender).Parent).FilePath;
   if (LPath <> '') and (FDirtyFiles.IndexOf(LPath) < 0) then
@@ -3343,10 +3344,10 @@ begin
   TfrmMain(FForm).ShiftNavHistory(FFilePath, FirstLine, Count, False);
 end;
 
-{ navigation history — Back / Forward }
+{ navigation history - Back / Forward }
 
 // Loading a file REPLACES its whole text, which arrives as one enormous
-// insertion — nothing has moved as far as the history is concerned. The rules
+// insertion - nothing has moved as far as the history is concerned. The rules
 // themselves are TNavHistory.Shift's.
 procedure TfrmMain.ShiftNavHistory(const APath: string;
   AFirstLine, ACount: Integer; AInserted: Boolean);
@@ -3370,8 +3371,8 @@ begin
   Result := AEntry.FilePath <> '';
 end;
 
-{ THE jump. Every navigation goes through here — ctrl+click, the Goto
-  Declaration/Implementation pair, and a double-click in the message window —
+{ THE jump. Every navigation goes through here - ctrl+click, the Goto
+  Declaration/Implementation pair, and a double-click in the message window -
   so "where did I come from" is recorded in one place instead of three that
   drift apart. (The To-do called the ctrl+click handler "the single place a
   jump happens"; it was not, once the Goto actions and the message window
@@ -3384,7 +3385,7 @@ var
   LHasOrigin: Boolean;
   LEditor: TSynEdit;
 begin
-  // Read BEFORE the jump, obviously — but also before OpenFileTab, which can
+  // Read BEFORE the jump, obviously - but also before OpenFileTab, which can
   // change the active page and with it what "here" means.
   LHasOrigin := not FNavBusy and CurrentNavPos({out} LOrigin);
   LEditor := OpenFileTab(APath);   // the existing tab if it is already open
@@ -3403,7 +3404,7 @@ begin
 end;
 
 // Moves to a recorded position without recording anything, refreshing the
-// entry being LEFT from the live caret first — see TNavHistory.UpdateCurrent.
+// entry being LEFT from the live caret first - see TNavHistory.UpdateCurrent.
 procedure TfrmMain.GoToNavEntry(const AEntry: TNavHistoryEntry);
 begin
   FNavBusy := True;
@@ -3420,7 +3421,7 @@ end;
   mbMiddle) and never reports an X button, so the handler is never called for
   them. WM_XBUTTONDOWN goes to the focused control, which is the editor, so
   Application.OnMessage is the one place that sees it without subclassing every
-  editor as it is created. Kept to an integer compare — this runs for every
+  editor as it is created. Kept to an integer compare - this runs for every
   message in the application. }
 procedure TfrmMain.AppMessage(var AMsg: TMsg; var AHandled: Boolean);
 const
@@ -3493,7 +3494,7 @@ end;
 { Closes every source tab.
 
   Called when a project is (re-)opened, and that is the whole reason it exists:
-  a tab carries a preprocessing context — search paths, defines, platform —
+  a tab carries a preprocessing context - search paths, defines, platform -
   fixed when it was created. Keeping tabs across an open leaves them painting
   under the PREVIOUS project's context, or the previous build configuration's,
   which is visible as the wrong branches greyed out. Re-applying the context to
@@ -3518,7 +3519,7 @@ const
 
 { Fills cbConfig for the project just opened and selects the active one.
 
-  With a .dproj, the names come from the project — a real one rarely stops at
+  With a .dproj, the names come from the project - a real one rarely stops at
   Debug/Release, and a name we invented would silently evaluate to the
   project's fallback instead. `Base` is dropped: it is the shared parent every
   configuration inherits from, not something you build. }
@@ -3570,13 +3571,13 @@ begin
   if FProjectFile = '' then
     Exit;
   // Re-OPEN rather than just re-analyze: a configuration changes the defines,
-  // the search paths and — through per-config DCCReference conditions — the
+  // the search paths and - through per-config DCCReference conditions - the
   // file list itself, so nothing short of reading the .dproj again is honest.
   FConfigOverride := SelectedConfig;
   OpenProject(FProjectFile);
 end;
 
-{ recent projects — the Open Project split button's drop-down }
+{ recent projects - the Open Project split button's drop-down }
 
 // Turns the plain button into a split button whose arrow drops the list. A
 // real bsSplitButton rather than a second button next to it: the primary click
@@ -3619,7 +3620,7 @@ begin
     // appear to run backwards at the tenth row.
     //
     // The accelerator is what the `&` was for, so it is kept exactly where it
-    // is unambiguous — the first nine. `&10` would bind the key `1`, which
+    // is unambiguous - the first nine. `&10` would bind the key `1`, which
     // item 1 already owns, and Windows resolves such a clash by cycling rather
     // than choosing: a shortcut that opens the wrong project half the time is
     // worse than no shortcut on that row.
@@ -3677,7 +3678,7 @@ begin
   cbHighlightColor.Selected := FIdentHighlightColor;
   // NB the target PLATFORM is deliberately NOT persisted. OpenProject sets it
   // from the .dproj being opened, so a stored value would be overwritten
-  // before it was ever visible — remembering it would be a setting that does
+  // before it was ever visible - remembering it would be a setting that does
   // nothing.
 end;
 
@@ -3754,7 +3755,7 @@ begin
               // WITHOUT the trailing '\' the registry writes ('...\23.0\'):
               // ReadIdePaths matches this value against the same RootDir
               // through ExcludeTrailingPathDelimiter, and while the slash
-              // survived here the two never compared equal — so EVERY
+              // survived here the two never compared equal - so EVERY
               // version was skipped and the whole IDE library/browsing set
               // was silently lost, leaving only the four bare-RTL fallback
               // dirs. That is what turned Vcl.Forms and every third-party
@@ -3773,7 +3774,7 @@ end;
 
 // Source directories the IDE ITSELF uses to resolve go-to-declaration
 // beyond the project's own paths: the registry Library `Search Path` (for
-// the active platform — third-party component sources land
+// the active platform - third-party component sources land
 // here) and the `Browsing Path` ($(BDS)\SOURCE\VCL, rtl\sys/common/win,
 // fmx, ...). Macros ($(BDS), $(Platform), and user-defined ones like
 // $(avi3rdlib) from the `Environment Variables` key) are expanded; only
@@ -3814,7 +3815,7 @@ var
     begin
       LDir := Expand(Trim(LOne));
       if (LDir = '') or (Pos('$(', LDir) > 0) then
-        Continue;   // unresolvable macro left — not a usable dir
+        Continue;   // unresolvable macro left - not a usable dir
       if TDirectory.Exists(LDir) and
          not LSeen.ContainsKey(LowerCase(LDir)) then
       begin
@@ -3904,7 +3905,7 @@ begin
 end;
 
 // Opens and analyzes the installed Studio's Win RTL package project
-// (source\rtl\BuildWinRTL.dproj — its `contains` list is the full Windows
+// (source\rtl\BuildWinRTL.dproj - its `contains` list is the full Windows
 // RTL, ~310 units) through the regular project flow.
 procedure TfrmMain.btnParseRtlClick(Sender: TObject);
 var
@@ -3965,7 +3966,7 @@ const
   { Dot-delimited name SEGMENTS marking a unit as belonging to a non-Windows
     platform. Matched as whole segments, never as substrings, so a name like
     'FMX.Macros' cannot read as a Mac unit. This is only the FALLBACK filter
-    for a Studio install with no compiled lib directory — Win32UnitIndex below
+    for a Studio install with no compiled lib directory - Win32UnitIndex below
     is the real one, and is strictly better (see its own comment). }
   CNonWindowsSegments: array[0..9] of string = (
     'mac', 'osx', 'ios', 'android', 'linux', 'posix', 'cocoa', 'gles',
@@ -3974,9 +3975,9 @@ const
 { Basenames (lower-cased, extension-less) of every unit the installed Studio
   actually COMPILES for Win32: exactly those with a .dcu under
   lib\win32\release. This is Embarcadero's own answer to "is this unit part of
-  the Win32 build", which beats any name-based guess — measured against
+  the Win32 build", which beats any name-based guess - measured against
   Studio 37.0's source tree it additionally excludes:
-    - FMX.BiometricAuth and FMX.Media.AVFoundation — Apple-only, but with no
+    - FMX.BiometricAuth and FMX.Media.AVFoundation - Apple-only, but with no
       platform word anywhere in the name;
     - the IDE's own timestamped backup files left in the source tree
       ('FMX.ScrollBox-2025-10-02 14.17.14.pas'), which are not compilable
@@ -4011,7 +4012,7 @@ end;
 { Writes a package whose `contains` list is every unit of ASourceSubDir that
   belongs to the Win32 build. The parser reads a package's `contains` as a
   uses graph (see TPasParser's package branch), so analyzing this one file
-  pulls in the whole closure — the same trick the Parse RTL button gets for
+  pulls in the whole closure - the same trick the Parse RTL button gets for
   free from the shipped BuildWinRTL.dproj, which is why VCL/FMX need one
   generated: Studio ships no equivalent for them.
 
@@ -4069,10 +4070,10 @@ begin
       Format(CDPKTemplate, [APackageName, LUnits.ToString]));
     Result := True;
     if LIndex.Count > 0 then
-      Log(Format('%s: %d unit(s); %d skipped (no Win32 .dcu — not part of ' +
+      Log(Format('%s: %d unit(s); %d skipped (no Win32 .dcu - not part of ' +
         'this platform''s build)', [APackageName, LKept, LSkipped]))
     else
-      Log(Format('%s: %d unit(s); %d skipped by name (no compiled lib dir — ' +
+      Log(Format('%s: %d unit(s); %d skipped by name (no compiled lib dir - ' +
         'using the fallback filter)', [APackageName, LKept, LSkipped]));
   finally
     LUnits.Free;
@@ -4152,7 +4153,7 @@ begin
     OpenFileTab(FFileList[LData.Index]);
 end;
 
-{ View Unit (Ctrl+F12) — a modal picker over the project's units.
+{ View Unit (Ctrl+F12) - a modal picker over the project's units.
 
   Enabled whenever the project has files to show; the picker's own "Uses Units"
   box is what depends on an analysis, and it asks for that state itself while
@@ -4177,7 +4178,7 @@ begin
     end;
   // The analysed CLOSURE, which is a superset of the project's own files and
   // includes every RTL/VCL unit reached. Read on the UI thread only, and only
-  // when UsesReady said yes — the same FAnalyzing/FAsyncSession guard every
+  // when UsesReady said yes - the same FAnalyzing/FAsyncSession guard every
   // other FSemaProject reader here uses, for the reason FAnalyzing documents.
   LSource.UsesFiles :=
     function: TArray<string>
@@ -4222,7 +4223,7 @@ end;
 { "same identifier" highlight }
 
 // TColorBox's own [cbCustomColors] style calls this to populate the
-// dropdown — the standard VCL color-picker combo, restricted to exactly our
+// dropdown - the standard VCL color-picker combo, restricted to exactly our
 // curated palette (no standard/extended/system colors mixed in). Swatch +
 // name drawing, custom-color entry, keyboard nav etc. all come from the
 // component itself; nothing to hand-roll here.
@@ -4237,7 +4238,7 @@ end;
 
 // Broadcasts the newly picked background color to every open tab's OWN
 // highlighter instance (each caches its own buffer, so there is no single
-// shared highlighter to update — see TSourceTab/OpenFileTab) and repaints
+// shared highlighter to update - see TSourceTab/OpenFileTab) and repaints
 // them. New tabs opened afterward pick up FIdentHighlightColor at creation
 // (see OpenFileTab).
 procedure TfrmMain.cbHighlightColorChange(Sender: TObject);
@@ -4254,12 +4255,12 @@ begin
   end;
 end;
 
-// SynEdit's own selection-change notification — fires for any selection
+// SynEdit's own selection-change notification - fires for any selection
 // change regardless of input method (mouse drag, double-click word-select,
 // Shift+arrow, Ctrl+A, ...). A plain identifier selection arms the "same
 // identifier" highlight on THIS tab's own highlighter instance; anything
 // else (no selection, a multi-word/punctuation selection) clears it. Plain
-// NAME match, no semantic resolution — see PasTreeDemo.Highlighter.
+// NAME match, no semantic resolution - see PasTreeDemo.Highlighter.
 // SetSameIdentHighlight's own header comment.
 procedure TfrmMain.EditorStatusChange(Sender: TObject;
   Changes: TSynStatusChanges);
@@ -4270,7 +4271,7 @@ var
   LTok: Integer;
 begin
   // FLoadingFile: LTab.PasTreeHL isn't assigned until AFTER OpenFileTab's own
-  // Result.Lines.LoadFromFile call returns (see its own comments) — loading
+  // Result.Lines.LoadFromFile call returns (see its own comments) - loading
   // text can itself fire a selection-change notification, which would
   // otherwise dereference a still-nil PasTreeHL below.
   if FLoadingFile or not (scSelection in Changes) then

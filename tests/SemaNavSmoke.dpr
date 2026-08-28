@@ -1,10 +1,10 @@
-﻿program SemaNavSmoke;
+program SemaNavSmoke;
 
 { Go-to-declaration smoke tests: fixture units in a temp dir, then IdentAt +
-  ResolveDecl checks — same-unit locals, cross-unit types, cross-unit MEMBER
+  ResolveDecl checks - same-unit locals, cross-unit types, cross-unit MEMBER
   access (Phase-3c discovered refs), a builtin name a used unit actually
   declares (the TBytes/SysUtils shape), the IMPLICIT System unit (TObject/
-  TArray<T> — real declarations, never in any UsesList), the implicit Result,
+  TArray<T> - real declarations, never in any UsesList), the implicit Result,
   and pure builtins (no target). }
 
 {$APPTYPE CONSOLE}
@@ -78,7 +78,7 @@ const
     'begin Result.Value := 1; end;'#10 +       // 10
     'end.'#10;                                 // 11
 
-  // Declares TBytes — a name ALSO seeded as a compiler builtin. A reference to
+  // Declares TBytes - a name ALSO seeded as a compiler builtin. A reference to
   // it in NavB resolves locally to the builtin (no DeclNode); the used-unit
   // fallback must find THIS declaration. Mirrors TBytes / System.SysUtils.
   UNIT_C =
@@ -109,7 +109,7 @@ const
     'end;'#10 +                                // 16
     'end.'#10;                                 // 17
 
-  // A fixture for the IMPLICIT `System` unit — NEVER named in any `uses`
+  // A fixture for the IMPLICIT `System` unit - NEVER named in any `uses`
   // clause (that's the whole point: every unit uses it without saying so),
   // yet TObject/TArray<T> below are REAL declarations PasTree.Sema.Nav must
   // find via TPasSemaProject.EnsureSystemUnit. Mirrors real System.pas.
@@ -118,7 +118,7 @@ const
   // THIS real class body to resolve `.Free` at all (see FindMemberX's
   // ResolveRealDecl call for the "builtin, nowhere to go" case).
   // SYS_MARK exercises a QUALIFIED EXPRESSION into the implicit unit
-  // (`System.SYS_MARK`, not a `uses` item) — distinct from TObject/TArray
+  // (`System.SYS_MARK`, not a `uses` item) - distinct from TObject/TArray
   // above, whose OWN NAME already resolves locally to a compiler-seeded
   // builtin; SYS_MARK isn't seeded at all, so it's a genuinely unresolved
   // local reference until CrossResolve's UnitNameOf fallback kicks in.
@@ -209,7 +209,7 @@ const
 
   // Declaration <-> implementation toggle fixtures (Ctrl+Shift+Down/Up):
   // overloaded methods (arity disambiguation), a nested class's qualified
-  // impl, a global forward decl, and a NESTED local proc's forward decl —
+  // impl, a global forward decl, and a NESTED local proc's forward decl -
   // matched to its impl WITHIN the same enclosing routine only.
   UNIT_I =
     'unit NavI;'#10 +                              // 1
@@ -255,13 +255,13 @@ const
     'end;'#10 +                                         // 41
     'end.'#10;                                          // 42
 
-  // Overloads sharing the SAME ARITY but different parameter TYPES — the
+  // Overloads sharing the SAME ARITY but different parameter TYPES - the
   // real bug report (System.SysUtils.AnsiCompareFileName's actual overload
   // set): count-only matching collided all three onto one bucket, and
   // which one "won" depended on the position index's span-size sort order,
   // not which one the user clicked. Also covers a body containing ONLY A
   // COMMENT (no statements at all, same as a truly empty body structurally
-  // — PasTree drops comments before the AST) landing on the comment's own
+  // - PasTree drops comments before the AST) landing on the comment's own
   // line, not jumping past it to `end`.
   UNIT_J =
     'unit NavJ;'#10 +                                       // 1
@@ -269,7 +269,7 @@ const
     'function Cmp(const S1: PChar; L1: Integer; const S2: PChar;'#10 + // 3
     '  L2: Integer; CVC: Boolean = False): Integer; overload; forward;'#10 + // 4  5 params (PChar)
     'function Cmp(const S1: string; L1: Integer; const S2: string;'#10 + // 5
-    '  L2: Integer; CVC: Boolean = False): Integer; overload; forward;'#10 + // 6  5 params (string) — SAME arity as above
+    '  L2: Integer; CVC: Boolean = False): Integer; overload; forward;'#10 + // 6  5 params (string) - SAME arity as above
     'function Cmp(const S1, S2: string; CVC: Boolean = False): Integer;'#10 + // 7  3 params
     '  overload; forward;'#10 +                             // 8
     'implementation'#10 +                                   // 9
@@ -290,7 +290,7 @@ const
     'end.'#10;                                              // 24
 
   // Real bug report: go-to-impl/decl must NEVER cross from/to an INACTIVE
-  // ($IFDEF'd-out) region — mirrors the actual System.SysUtils.CharInSet
+  // ($IFDEF'd-out) region - mirrors the actual System.SysUtils.CharInSet
   // shape (two overloads active under $IFNDEF NEXTGEN, two more inactive
   // under $ELSE, same routine NAME reused in both branches). pfWin32 never
   // defines NEXTGEN, so lines 4-5/12-19 are ACTIVE and 7-8/21-28 are the
@@ -398,7 +398,7 @@ const
   UNIT_B =
     'unit NavB;'#10 +                          // 1
     'interface'#10 +                           // 2
-    'uses NavA, NavC, Namespace.NavD;'#10 +    // 3  (NOT System — implicit)
+    'uses NavA, NavC, Namespace.NavD;'#10 +    // 3  (NOT System - implicit)
     'var GT: TThing;'#10 +                     // 4  GT col 5, TThing col 9
     'implementation'#10 +                      // 5
     'procedure P;'#10 +                        // 6
@@ -418,7 +418,7 @@ const
     'begin'#10 +                               // 19
     '  Result := 0;'#10 +                      // 20  Result col 3
     'end;'#10 +                                // 21
-    // A BARE `TArray` — arity 0 written, so NavC's imported class IS the right
+    // A BARE `TArray` - arity 0 written, so NavC's imported class IS the right
     // answer and must stay it. The control for the arity-1 case on line 11.
     'procedure Q;'#10 +                        // 22
     'var'#10 +                                 // 23
@@ -585,7 +585,7 @@ begin
       // arity-0 `TArray = class` (the System.Generics.Collections shape). The
       // ordinary cross-unit lookup is last-uses-wins and blind to arity, so
       // ctrl+click on `TArray<Integer>` landed on NavC's class instead of
-      // System's `TArray<T>` — a wrong ExtRefMap binding, not a nav mistake,
+      // System's `TArray<T>` - a wrong ExtRefMap binding, not a nav mistake,
       // and the arity rule the resolver has for SAME-unit references was
       // simply missing where the CROSS-unit ones are written. See
       // TPasSemaProject.FixCrossArity. The check above IS that regression
@@ -595,13 +595,13 @@ begin
         24, 7, 'TArray', 'NavC.pas', 10, 3);
       CheckNav('arity 0 written, static-call qualifier',
         27, 3, 'TArray', 'NavC.pas', 10, 3);
-      // MEMBER access through a builtin: O.Free — the synthetic TObject
+      // MEMBER access through a builtin: O.Free - the synthetic TObject
       // symbol has no MemberScope; FindMemberX must redirect to the real
       // TObject class body (System.pas) to resolve `.Free` at all.
       CheckNav('member through builtin: O.Free', 14, 5, 'Free', 'System.pas',
         9, 15);
       // QUALIFIED EXPRESSION into the implicit unit (`System.SYS_MARK`, not
-      // a `uses` item, and SYS_MARK isn't a seeded builtin at all — this is
+      // a `uses` item, and SYS_MARK isn't a seeded builtin at all - this is
       // CrossResolve's UnitNameOf fallback, not ResolveDecl's builtin-decl
       // redirect). The qualifier `System` itself must NOT get a false E2003.
       CheckNav('qualified expr: System.SYS_MARK', 15, 15, 'SYS_MARK',
@@ -613,7 +613,7 @@ begin
       CheckNav('qualified expr: Namespace.NavD.NSD_MARK (leaf)', 16, 23,
         'NSD_MARK', 'Namespace.NavD.pas', 3, 7);
       // Clicking the QUALIFIER ITSELF (not the member) opens THAT unit, same
-      // as a `uses` clause name — `System` in `System.SYS_MARK` is the whole
+      // as a `uses` clause name - `System` in `System.SYS_MARK` is the whole
       // qualifier (single segment); `Namespace`/`NavD` in `Namespace.NavD.
       // NSD_MARK` are BOTH part of the SAME 2-segment qualifier and must
       // resolve to the SAME target regardless of which one was clicked.
@@ -635,7 +635,7 @@ begin
         GNav.IdentAt(GMidB, 16, 18, {out} LIdent) and
         (LIdent.RawTokenTo - LIdent.RawToken = 2));
       // BUG REGRESSION: clicking the trailing MEMBER of a qualified
-      // expression (SYS_MARK/NSD_MARK — already resolved via ExtRefMap, NOT
+      // expression (SYS_MARK/NSD_MARK - already resolved via ExtRefMap, NOT
       // a qualifier segment) must highlight ONLY ITSELF, not get its span
       // stolen by QualifierUnitAt widening it to the qualifier prefix
       // instead (the exact bug reported: hovering `sLineBreak` in `System.
@@ -679,7 +679,7 @@ begin
         (LIdent.RawTokenTo - LIdent.RawToken = 2));
 
       // Compiler INTRINSIC with no source declaration anywhere (Integer):
-      // targets the System unit's own header — RAD Studio IDE behavior
+      // targets the System unit's own header - RAD Studio IDE behavior
       // (real System.pas: "Predefined ... do not have actual declarations").
       Ok('builtin: IdentAt', GNav.IdentAt(GMidB, 8, 6, {out} LIdent));
       Ok('intrinsic -> System header',
@@ -691,7 +691,7 @@ begin
       Ok('symbol pos -> no ident', not GNav.IdentAt(GMidB, 13, 5, {out} LIdent));
 
       // The qualifier segments of BOTH qualified expressions above (System;
-      // Namespace, NavD) must NOT be false "undeclared identifier" E2003s —
+      // Namespace, NavD) must NOT be false "undeclared identifier" E2003s -
       // that was the actual bug report (nav didn't work at all for these,
       // and the qualifier itself was flagged as undeclared).
       Ok('qualified expr qualifiers: no false E2003',
@@ -699,7 +699,7 @@ begin
 
       // ---- The false-E2003 taxonomy from the real demo project ----
       // Inherited members from a CROSS-UNIT ancestor, unqualified in a
-      // method body (the AddAttribute/fCaseSensitive shape) — resolve, are
+      // method body (the AddAttribute/fCaseSensitive shape) - resolve, are
       // not E2003, and NAVIGATE to the ancestor's declaration.
       GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavH.pas'));
       Ok('NavH model found', GMidB >= 0);
@@ -728,7 +728,7 @@ begin
       GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavI.pas'));
       Ok('NavI model found', GMidB >= 0);
       // Overloaded methods: arity picks the RIGHT implementation both ways.
-      // Column pinned too: regression for a real bug — nkExprStmt/nkAssign
+      // Column pinned too: regression for a real bug - nkExprStmt/nkAssign
       // used to get FirstToken from FPos AFTER ParseExpression already
       // consumed the whole statement, so the target landed at the END of
       // the line (near the `;`) instead of the statement's own start.
@@ -744,18 +744,18 @@ begin
       // Global routine, forward-declared in the interface section.
       CheckImpl('decl->impl: GProc (global fwd)', 12, 11, 27, 3);
       CheckDecl('impl->decl: GProc body', 27, 3, 12);
-      // Regression: a cursor sitting in the GAP right after `begin` (col 6 —
-      // `begin` is 5 chars — before the next real token) used to fail
+      // Regression: a cursor sitting in the GAP right after `begin` (col 6 -
+      // `begin` is 5 chars - before the next real token) used to fail
       // entirely: that raw position is lexed as trailing whitespace, which
       // never survives into the Visible stream, so VisAt found no mapping
       // at all. Must resolve exactly like clicking inside the body proper.
       CheckDecl('impl->decl: cursor in the gap right after begin', 15, 6, 5);
       // NESTED local procedure, forward-declared inside Outer's own local
-      // declarations — container-scoped so it can never match some OTHER
+      // declarations - container-scoped so it can never match some OTHER
       // outer routine's same-named nested proc.
       CheckImpl('decl->impl: Inner (nested fwd)', 30, 15, 37, 5);
       CheckDecl('impl->decl: Inner body', 37, 5, 30);
-      // Negative: Helper has NO separate forward decl (defined directly) —
+      // Negative: Helper has NO separate forward decl (defined directly) -
       // neither direction should find anything.
       Ok('Helper body: no declaration to jump to',
         not GNav.GotoDeclaration(GMidB, 33, 5, {out} LTarget));
@@ -770,13 +770,13 @@ begin
       // ---- Same-arity overloads (real bug report) + comment-only body ----
       GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavJ.pas'));
       Ok('NavJ model found', GMidB >= 0);
-      // Both the PChar and the string overload have arity 5 — count-only
+      // Both the PChar and the string overload have arity 5 - count-only
       // matching collided them; the signature must pick the RIGHT one.
       CheckImpl('decl->impl: Cmp(PChar,...) 5-arg overload', 3, 10, 13);
       CheckImpl('decl->impl: Cmp(string,...) 5-arg overload', 5, 10, 18);
       CheckDecl('impl->decl: Cmp(PChar,...) body', 13, 3, 3);
       CheckDecl('impl->decl: Cmp(string,...) body', 18, 3, 5);
-      // The 3-param overload's body holds ONLY a comment — structurally
+      // The 3-param overload's body holds ONLY a comment - structurally
       // empty (comments never reach the AST), so this also exercises the
       // empty-body fallback; it must land on the COMMENT'S OWN line (22),
       // not jump past it to `end` (23).
@@ -815,7 +815,7 @@ begin
       // ---- Overload-PRECISE go-to-declaration (CallTargetX/CallTarget) ----
       GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavOvlUse.pas'));
       Ok('NavOvlUse model found', GMidB >= 0);
-      // Cross-unit global overloads: the ARGUMENT type picks the overload —
+      // Cross-unit global overloads: the ARGUMENT type picks the overload -
       // Pick(11) lands on the Integer declaration, Pick(2.5) on the Double
       // one (the old behavior landed both on the chain head, line 3).
       CheckNav('ovl-precise: Pick(11) -> Integer overload', 19, 9, 'Pick',
@@ -827,7 +827,7 @@ begin
         'NavOvlUse.pas', 6, 14);
       CheckNav('ovl-precise: C.Fill(''x'') -> string method', 22, 11, 'Fill',
         'NavOvlUse.pas', 7, 14);
-      // Negative: the callee's BASE (`C` in C.Fill) is not a callee name —
+      // Negative: the callee's BASE (`C` in C.Fill) is not a callee name -
       // still navigates to the variable's own declaration.
       CheckNav('ovl-precise: base C keeps ordinary nav', 21, 9, 'C',
         'NavOvlUse.pas', 14, 3);
@@ -842,13 +842,13 @@ begin
         GNav.SymbolAt(LMidA, 7, 21, {out} LRTMid, {out} LRSym,
           {out} LRName) and SameText(LRName, 'TThing'));
       LHits := GNav.FindReferences(LRTMid, LRSym);
-      Ok('FindReferences: TThing — exactly 3 hits, no more, no fewer',
+      Ok('FindReferences: TThing - exactly 3 hits, no more, no fewer',
         Length(LHits) = 3);
-      Ok('FindReferences: TThing — own interface signature',
+      Ok('FindReferences: TThing - own interface signature',
         HasHitAt(LHits, 'NavA.pas', 7, 21));
-      Ok('FindReferences: TThing — own impl signature',
+      Ok('FindReferences: TThing - own impl signature',
         HasHitAt(LHits, 'NavA.pas', 9, 21));
-      Ok('FindReferences: TThing — cross-model use in NavB',
+      Ok('FindReferences: TThing - cross-model use in NavB',
         HasHitAt(LHits, 'NavB.pas', 4, 9));
 
       // Overload-precise, CROSS-model: Pick(Integer) and Pick(Double) are
@@ -858,13 +858,13 @@ begin
         GNav.SymbolAt(GMidB, 19, 9, {out} LRTMid, {out} LRSym,
           {out} LRName) and SameText(LRName, 'Pick'));
       LHits := GNav.FindReferences(LRTMid, LRSym);
-      Ok('FindReferences: Pick(Integer) — exactly its own one call site',
+      Ok('FindReferences: Pick(Integer) - exactly its own one call site',
         (Length(LHits) = 1) and HasHitAt(LHits, 'NavOvlUse.pas', 19, 9));
       Ok('SymbolAt: Pick(2.5) call site',
         GNav.SymbolAt(GMidB, 20, 9, {out} LRTMid, {out} LRSym,
           {out} LRName) and SameText(LRName, 'Pick'));
       LHits := GNav.FindReferences(LRTMid, LRSym);
-      Ok('FindReferences: Pick(Double) — exactly its own one call site, '
+      Ok('FindReferences: Pick(Double) - exactly its own one call site, '
         + 'NOT the Integer overload''s',
         (Length(LHits) = 1) and HasHitAt(LHits, 'NavOvlUse.pas', 20, 9));
 
@@ -874,24 +874,24 @@ begin
         GNav.SymbolAt(GMidB, 21, 11, {out} LRTMid, {out} LRSym,
           {out} LRName) and SameText(LRName, 'Fill'));
       LHits := GNav.FindReferences(LRTMid, LRSym);
-      Ok('FindReferences: Fill(Integer) — exactly its own one call site',
+      Ok('FindReferences: Fill(Integer) - exactly its own one call site',
         (Length(LHits) = 1) and HasHitAt(LHits, 'NavOvlUse.pas', 21, 11));
 
       // The implicit Result: no DeclNode anywhere, yet a real, stable,
-      // per-routine symbol — SymbolAt must NOT decline, and the scan must
+      // per-routine symbol - SymbolAt must NOT decline, and the scan must
       // stay inside the ONE routine that declares it (NavB's GetLen). GMidB
-      // is NavOvlUse's at this point (see above) — NavB's own id is fetched
+      // is NavOvlUse's at this point (see above) - NavB's own id is fetched
       // fresh here rather than reused.
       Ok('SymbolAt: Result inside GetLen',
         GNav.SymbolAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavB.pas')), 20, 3,
           {out} LRTMid, {out} LRSym, {out} LRName) and
         SameText(LRName, 'Result'));
       LHits := GNav.FindReferences(LRTMid, LRSym);
-      Ok('FindReferences: Result — exactly its own routine''s one use',
+      Ok('FindReferences: Result - exactly its own routine''s one use',
         (Length(LHits) = 1) and HasHitAt(LHits, 'NavB.pas', 20, 3));
 
       // A pure compiler intrinsic (MaxInt, NavH line 14): SymbolAt must
-      // DECLINE — builtins are seeded per model, so there is no stable
+      // DECLINE - builtins are seeded per model, so there is no stable
       // cross-model identity to search for, and reporting only this one
       // unit's uses would read as a complete, misleadingly small answer.
       Ok('SymbolAt: pure intrinsic declines',
@@ -1035,7 +1035,7 @@ begin
   // ---- AnalyzeProject: the TRANSITIVE closure from a main program. ----
   // NavMain uses only NavB/NavE/OldNavF; NavA, NavC, Namespace.NavD and the
   // implicit System unit must all load transitively, and the cross passes
-  // must run for DEPENDENCY units too — clicking inside NavB behaves exactly
+  // must run for DEPENDENCY units too - clicking inside NavB behaves exactly
   // like the direct-analysis pass above (AnalyzeFile's documented gap).
   TFile.WriteAllText(TPath.Combine(LDir, 'NavMain.dpr'), UNIT_MAIN);
   TFile.WriteAllText(TPath.Combine(LDir, 'Wide.NavE.pas'), UNIT_E);
@@ -1069,7 +1069,7 @@ begin
       Ok('project: no false F1027 for the dotted namespaced name',
         DiagCount(GProj.Model(GNav.ModelIdOf(
           TPath.Combine(LDir, 'NavMain.dpr'))), 'F1027') = 0);
-      // Nav INSIDE the dependency NavB — the reported-bug shape (clicking
+      // Nav INSIDE the dependency NavB - the reported-bug shape (clicking
       // TSynCustomHighlighter inside a dependency unit did nothing).
       GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavB.pas'));
       Ok('project: NavB model found', GMidB >= 0);

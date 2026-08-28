@@ -1,11 +1,11 @@
 unit PasTreeDemo.NavHistory;
 
 {
-  PasTree demo — the Back/Forward list behind ctrl+click, Go to
+  PasTree demo - the Back/Forward list behind ctrl+click, Go to
   Declaration/Implementation, and the message window's double-click.
 
   Everything here is data: a list of visited positions, an index into it, and
-  the rules for moving that index. The form keeps what needs a form — reading
+  the rules for moving that index. The form keeps what needs a form - reading
   the caret, opening tabs, enabling the actions. Split this way because the
   rules have edge cases (a jump discards the forward tail; consecutive entries
   on one line collapse; positions move when the file is edited) that are
@@ -46,13 +46,13 @@ type
       (no source tab open yet), which happens for the very first navigation of
       a session.
 
-      The origin goes in FIRST — it is what Back returns to — and anything to
+      The origin goes in FIRST - it is what Back returns to - and anything to
       the RIGHT of where we currently are is discarded, the conventional
       browser rule and the only one that keeps Forward meaning something. }
     procedure RecordJump(const AOrigin: TNavHistoryEntry; AHasOrigin: Boolean;
       const ATarget: TNavHistoryEntry);
 
-    { Overwrites the entry for where we are with a fresher position — the live
+    { Overwrites the entry for where we are with a fresher position - the live
       caret, which has usually moved since we landed. Called before stepping
       away, so Back-then-Forward returns to where the user actually was.
       Ignored unless it still names the same file, since a caret in a
@@ -66,15 +66,15 @@ type
 
     { Moves every recorded line in APath past an insertion or deletion.
 
-      AFirstLine is 0-BASED and a recorded Line is 1-based — SynEdit's own
+      AFirstLine is 0-BASED and a recorded Line is 1-based - SynEdit's own
       convention, stated in TSynIndicators, and the reason the rules below look
       off by one until you know it. Inserting at AFirstLine pushes down
       everything strictly below it; deleting takes out the ACount lines
       starting at AFirstLine + 1 and pulls up everything after them.
 
       A position INSIDE a deleted block collapses to where the block was
-      instead of being dropped. Dropping would silently renumber the history —
-      Back starts landing one entry further away than the user counted — and
+      instead of being dropped. Dropping would silently renumber the history -
+      Back starts landing one entry further away than the user counted - and
       "where that text used to be" is the honest answer anyway. }
     procedure Shift(const APath: string; AFirstLine, ACount: Integer;
       AInserted: Boolean);

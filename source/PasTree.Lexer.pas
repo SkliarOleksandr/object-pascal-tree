@@ -1,7 +1,7 @@
 unit PasTree.Lexer;
 
 {
-  PasTree — the lexer (spec: object-pascal-spec, Appendix B).
+  PasTree - the lexer (spec: object-pascal-spec, Appendix B).
 
   Contract:
   - Full fidelity: every character of the source belongs to exactly one
@@ -134,7 +134,7 @@ begin
     Result := #0;
 end;
 
-{ True when AIndex begins a run of '&' followed by an identifier start — i.e. the
+{ True when AIndex begins a run of '&' followed by an identifier start - i.e. the
   `&&op_Equality` shape, where only the FIRST '&' of the whole token escapes and
   the rest are name characters. }
 function TPasLexer.IsIdentRun(AIndex: Integer): Boolean;
@@ -204,7 +204,7 @@ begin
         '&':
           // One '&' escapes (B.3), and any FURTHER '&'s belong to the name:
           // `&&op_Equality` names `&op_Equality`, which is a different member
-          // from `op_Equality` — dcc32 37.0 accepts both in one record, and
+          // from `op_Equality` - dcc32 37.0 accepts both in one record, and
           // rejects `&op_Equality` beside `op_Equality` as a redeclaration, so
           // exactly one leading '&' is the escape. a third-party library's TValue declares
           // its comparison operators this way and the stray-'&' token that used
@@ -386,7 +386,7 @@ var
   LStart, LLineStart, LProbe, LRun, LFirstContent: Integer;
 
   { B.6.3: the closing run's indentation is the base, and every content line
-    must BEGIN with it — dcc reports `E2657 Inconsistent indent characters`, one
+    must BEGIN with it - dcc reports `E2657 Inconsistent indent characters`, one
     per offending line, and the message names the real rule better than "under-
     indented" does. Verified against dcc32 37.0, comparing characters and not
     widths:
@@ -539,7 +539,7 @@ begin
       Include(LFlags, tfHasSeparator);
     Inc(FPos);
   end;
-  // Fraction: '.' only when followed by a digit — guards '..' ranges and
+  // Fraction: '.' only when followed by a digit - guards '..' ranges and
   // member access on literals (42.ToString).
   if (CharAt(FPos) = '.') and IsDigit(CharAt(FPos + 1)) then
   begin
@@ -717,7 +717,7 @@ begin
     if ((LCh = 'e') or (LCh = 'E')) and not IsIdentChar(CharAt(FPos - 1)) and
        (CharAt(FPos - 1) <> '@') then
     begin
-      // NB: '@' exclusion — BASM labels may be named END: `JS @@END` /
+      // NB: '@' exclusion - BASM labels may be named END: `JS @@END` /
       // `@@END:` (Vcl.Graphics.pas) must not close the asm block.
       // Possible closing `end` at a word boundary.
       LWordStart := FPos;

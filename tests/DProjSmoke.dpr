@@ -1,7 +1,7 @@
 program DProjSmoke;
 
 { TPasDProj smoke tests: MSBuild-lite condition evaluation, property chaining
-  across Base/Platform/Config, file list, search paths, defines, aliases —
+  across Base/Platform/Config, file list, search paths, defines, aliases -
   against a fabricated fixture (the real Embarcadero PropertyGroup shape) and
   a sanity pass over this repo's own demo\PasTreeDemo.dproj. }
 
@@ -83,7 +83,7 @@ const
     '  </PropertyGroup>'#10 +
     '  <PropertyGroup Condition="''$(Base)''!=''''">'#10 +
     // A build event in CDATA, placed BEFORE the search path in the same group
-    // and containing '>' and '"' — the exact shape Embarcadero emits for any
+    // and containing '>' and '"' - the exact shape Embarcadero emits for any
     // project with build events. Mishandled, it eats to the first '>' inside
     // the payload and desynchronizes the whole document: this group's later
     // children and every following ItemGroup are lost, silently (Load still
@@ -134,7 +134,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitA.pas'), 'unit UnitA;'#10'interface'#10'implementation'#10'end.'#10);
   TDirectory.CreateDirectory(TPath.Combine(LDir, 'sub'));
   TFile.WriteAllText(TPath.Combine(LDir, 'sub\UnitB.pas'), 'unit UnitB;'#10'interface'#10'implementation'#10'end.'#10);
-  // Reachable only through the Win64 search path — see the DCCReference note.
+  // Reachable only through the Win64 search path - see the DCCReference note.
   TDirectory.CreateDirectory(TPath.Combine(LDir, 'Win64Only'));
   TFile.WriteAllText(TPath.Combine(LDir, 'Win64Only\UnitC.pas'), 'unit UnitC;'#10'interface'#10'implementation'#10'end.'#10);
 
@@ -216,7 +216,7 @@ begin
       end;
     end
     else
-      Writeln('(skip) demo\PasTreeDemo.dproj not found next to the test exe — real-world check skipped');
+      Writeln('(skip) demo\PasTreeDemo.dproj not found next to the test exe - real-world check skipped');
   finally
     if TDirectory.Exists(LDir) then
       TDirectory.Delete(LDir, True);

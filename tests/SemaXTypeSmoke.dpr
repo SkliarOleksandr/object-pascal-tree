@@ -1,7 +1,7 @@
 program SemaXTypeSmoke;
 
 { Phase-3c cross-model typing smoke tests: writes tiny unit fixtures to a
-  temp dir, runs the project analyzer, and checks ExprTypeX — cross-unit
+  temp dir, runs the project analyzer, and checks ExprTypeX - cross-unit
   Var.Field access, ancestor/alias member walks, constructor calls, and
   generic-parameter substitution (TWrap<Integer>.Get -> Integer). }
 
@@ -100,7 +100,7 @@ const
   // A helper declared ALONGSIDE the type it extends (15.3.4): its members
   // must be reachable from a DIFFERENT unit, since the join lives inside XH's
   // own model and FindMemberX walks into it. Nested inside another class on
-  // purpose — dcc-verified that nesting only namespaces the helper's TYPE
+  // purpose - dcc-verified that nesting only namespaces the helper's TYPE
   // name and never confines its activation (spec 15.3.4).
   UNIT_XH =
     'unit XH;'#10'interface'#10 +
@@ -135,8 +135,8 @@ const
 
   // A property specifier naming an accessor INHERITED from another unit:
   // `read GetWordProp` where GetWordProp is TBase's, in XP. The ancestor walk
-  // only ever ran for nodes inside a METHOD BODY, so a specifier — which sits
-  // in the type declaration — got a straight E2003 (System.Win.
+  // only ever ran for nodes inside a METHOD BODY, so a specifier - which sits
+  // in the type declaration - got a straight E2003 (System.Win.
   // InternetExplorer over OleControls' TOleControl, 47 of the RTL's).
   // The bare-inherited-member uses in Work are the control: they already
   // worked, and deferring the WHOLE declaration to the inherited pass (rather
@@ -189,13 +189,13 @@ const
     'end;'#10 +
     'end.'#10;
 
-  // A nested type named through an OUTER type that does not declare it — it is
+  // A nested type named through an OUTER type that does not declare it - it is
   // INHERITED by the qualifier (11.4.1). Alcinoe's
   // `class(TALBaseEdit.TDisabledStateStyle.TTextSettings)`, where
   // TDisabledStateStyle declares no TTextSettings and its ancestor
   // TBaseStateStyle does. ResolveTypeExprNested searched the qualifier's OWN
   // members only, so the heritage reference resolved to nothing and the
-  // descendant was left with NO ancestry — three false E2003 on `Create`, all
+  // descendant was left with NO ancestry - three false E2003 on `Create`, all
   // of them a dot away from the actual cause. TNqCtl is the control: same
   // shape with the segment declared ON the qualifier, which always worked.
   UNIT_NQ1 =
@@ -242,7 +242,7 @@ const
     'end;'#10 +
     'end.'#10;
 
-  // with-targets whose TYPE lives in another unit — the shapes Phase 1 cannot
+  // with-targets whose TYPE lives in another unit - the shapes Phase 1 cannot
   // resolve on its own, so only the cross-unit pass can. Mirrors
   // System.ObjAuto (`with TVarData(X) do`) and System.Variants (`with P^ do`,
   // `with FindVarData(V)^ do`), where TVarData/PVarData come from System.
@@ -282,13 +282,13 @@ const
     'end.'#10;
 
   // ---- cross-unit helper injection (15.3, README's former To do) ----
-  // HA: the extended types. HB: helpers in ANOTHER unit — the common
+  // HA: the extended types. HB: helpers in ANOTHER unit - the common
   // real-world arrangement (TGUIDHelper in SysUtils for System's TGUID).
   // Lo's body reads D1 BARE (direction 2: helper body sees T through the
-  // implicit Self — the RTL's own `Move(D1, ...)` false E2003). Mark exists
+  // implicit Self - the RTL's own `Move(D1, ...)` false E2003). Mark exists
   // on BOTH the type and the helper with different types: dcc-verified, the
   // HELPER member hides the type's own. TStrHelper extends the intrinsic
-  // string — the by-name ('~') canonical-key path. HB2 declares a competing
+  // string - the by-name ('~') canonical-key path. HB2 declares a competing
   // Version; HC lists HB LAST, so HB's must win (dcc-verified
   // last-uses-wins). HD's helper lives in the IMPLEMENTATION section and
   // must stay invisible to HE (dcc-verified, 15.3.4).
@@ -389,7 +389,7 @@ const
     'end.'#10;
 
   // `with` over a call whose result is a generic INSTANTIATION from another
-  // unit — System.Threading's `with FThreads.LockList do Count`, the largest
+  // unit - System.Threading's `with FThreads.LockList do Count`, the largest
   // single with-bucket shape. Two things must both work: the method's result
   // type must exist at all (see SemaSmoke's genresult case for the parsing
   // bug that ate it), and the member's declared type must be substituted in
@@ -419,7 +419,7 @@ const
     'end;'#10 +
     'end.'#10;
 
-  // 16.5.1 — a generic METHOD's type parameters inferred from the ARGUMENT
+  // 16.5.1 - a generic METHOD's type parameters inferred from the ARGUMENT
   // types, with no explicit <>. Declared in another unit so the inference runs
   // cross-model. Max exercises two calls of the same method inferring
   // DIFFERENT T; Wrap exercises a result that is an instantiation OF the
@@ -469,8 +469,8 @@ const
     'end.'#10;
 
   // 16.5.1's other half: the type arguments WRITTEN at the call site. Nothing
-  // here can be inferred from the arguments — `Cast<T>(AObject: TObject): T`
-  // declares every parameter concretely — so the written list is the only
+  // here can be inferred from the arguments - `Cast<T>(AObject: TObject): T`
+  // declares every parameter concretely - so the written list is the only
   // source, and a call typed without it loses every member after the dot
   // (a suite's `Unsafe.Cast<TFoo>(X).Bar`, ~30 reports on one project).
   //
@@ -517,7 +517,7 @@ const
     'end;'#10 +
     'end.'#10;
 
-  // 16.6.1 — "generic methods returning a derived type". The spec is explicit
+  // 16.6.1 - "generic methods returning a derived type". The spec is explicit
   // that this is a PATTERN, not a feature: it falls out of generic methods
   // plus constraints, and the section exists to answer "does Object Pascal
   // have return-type covariance?" with "not directly, write this instead".
@@ -612,7 +612,7 @@ const
     'end.'#10;
 
   // 12.1.2: `inherited Name` is the ANCESTOR's member even when the class
-  // REDECLARES that name — and two suite editor units redeclare it at a different
+  // REDECLARES that name - and two suite editor units redeclare it at a different
   // TYPE, so the whole chain after it depends on getting this right.
   UNIT_IN1 =
     'unit IN1;'#10'interface'#10 +
@@ -647,11 +647,11 @@ const
   // Five shapes that took a real project's member-flag tail to zero, in one
   // unit because each is a couple of declarations:
   //
-  //   1. `with Values[I] do` over a class with a DEFAULT array property —
+  //   1. `with Values[I] do` over a class with a DEFAULT array property -
   //      the brackets mean that property, so the body opens the ELEMENT. The
   //      collection ALSO has a `Values` member, so opening it instead was a
   //      wrong binding, not a missing one (a suite's filter control).
-  //   2. `T.Create` under a bare `constructor` constraint — only a class can
+  //   2. `T.Create` under a bare `constructor` constraint - only a class can
   //      satisfy it (a threading library's `Atomic<I; T: constructor>`).
   //   3. a parameter with SEVERAL constraints guarantees the members of all
   //      of them, not the first (a utility library's `TKey: IComparable<TKey>,
@@ -735,15 +735,15 @@ const
 
   // Two things one third-party library needs and nothing else in the corpora does.
   //
-  // 1. `class helper (X) for T` — the derived helper is the ACTIVE one (at most
+  // 1. `class helper (X) for T` - the derived helper is the ACTIVE one (at most
   //    one is, per type), so its ANCESTOR's members are only reachable through
   //    it. Spring.Reflection declares `TRttiMethodHelper = class helper(Spring
   //    .TRttiMethodHelper) for TRttiMethod`, and a unit using BOTH units lost
-  //    `ReturnTypeHandle`/`IsAbstract` — a unit using only Spring kept them.
+  //    `ReturnTypeHandle`/`IsAbstract` - a unit using only Spring kept them.
   // 2. 16.1.2 by COUNT, not just generic-vs-not: `TNodes<T>` and
   //    `TNodes<TKey, TValue>` both declare a nested `PRedBlackTreeNode`, so
   //    binding the qualifier to the wrong arity silently resolved the wrong
-  //    nested type — the node records differ only in `fKey` vs `fPair`
+  //    nested type - the node records differ only in `fKey` vs `fPair`
   //    (Spring.Collections.Trees, 16 reports).
   UNIT_SP_A =
     'unit SPA;'#10'interface'#10 +
@@ -833,7 +833,7 @@ const
   // Overload selection between RECORD parameters of one arity, where the two
   // sides name the same type through DIFFERENT symbols. `AL2.TSpot` is an
   // alias of `AL1.TSpot`, so a symbol comparison matches neither candidate,
-  // both score 0, and declaration order decides — which is how
+  // both score 0, and declaration order decides - which is how
   // `LayoutUnitsToPixels(TRect, Single, Single)` lost to the TSize overload
   // declared above it (dxDocumentLayoutUnitConverter), typed the call as
   // TSize, and left `.ToRectF` undeclared two units away.
@@ -853,7 +853,7 @@ const
     // Declares ONLY the array overload and INHERITS the single-item one, so
     // the derived interface's own has to be rejected on argument types for the
     // ancestor's to be looked for at all. Both carry `overload` because that
-    // is what makes the set span the ancestry — dcc-verified: drop the
+    // is what makes the set span the ancestry - dcc-verified: drop the
     // directive and the derived declaration HIDES the ancestor's, and the
     // same call is `E2010 Incompatible types`.
     '  IMore = interface(IBase)'#10 +
@@ -882,7 +882,7 @@ const
   // 15.3.3 the SAME-UNIT way: a helper declared beside (here: below) its
   // extended type still HIDES that type's own member of the same name. The
   // cross-unit direction was always right; this one bound own-first, and
-  // A suite's rich-edit units lean on it — `TTagBaseInnerHelper = class helper for
+  // A suite's rich-edit units lean on it - `TTagBaseInnerHelper = class helper for
   // TdxTagBase` redeclares `Importer` at the DERIVED importer type, so every
   // `Importer.TagsStack` in that unit reads the helper's (60+ reports).
   UNIT_SH =
@@ -922,7 +922,7 @@ const
   // A member reached through a GENERIC ancestor whose bare name is ALSO the
   // last segment of a dotted `uses`. Both halves are needed: the unit name
   // makes the ident arrive at the inherited pass already BOUND (to the unit),
-  // and that override path used to drop the instantiation frame — so `Params`
+  // and that override path used to drop the instantiation frame - so `Params`
   // typed as the open TParams, fell back to its CONSTRAINT, and only the
   // CONSTRAINT's members resolved. A real project's UI tests are this shape ~700
   // times over, and `uses UITest.Params` is what made it visible.
@@ -1024,7 +1024,7 @@ begin
 end;
 
 // The node's source text: its visible tokens joined without whitespace
-// ('GD.FP.X') — enough to address an expression in the fixtures uniquely.
+// ('GD.FP.X') - enough to address an expression in the fixtures uniquely.
 // An nkMember's own FirstToken is the '.', so the span starts at the
 // LEFTMOST DESCENDANT's first token (the base expression), not the node's.
 function SpanText(AModel: TPasSemaModel; ANode: Integer): string;
@@ -1066,7 +1066,7 @@ begin
 end;
 
 // The unit name of the overload CrossType selected for the call spelled
-// AExpr ('?' when no CallTargetX was recorded) — the future overload-precise
+// AExpr ('?' when no CallTargetX was recorded) - the future overload-precise
 // navigation jump reads the same map.
 function CallTargetUnitOf(AModel: TPasSemaModel; const AExpr: string): string;
 var
@@ -1190,14 +1190,14 @@ begin
     // used twice -> one entry; plus TWrap<string>, TWrap<TWrap<string>>,
     // TPairWrap<string,Boolean>, XV's TWrap<Double>. The with-over-generic
     // fixtures add TPool<Integer>, an open TWrap<T> per DISTINCT parameter
-    // symbol (TPool's T and TWrap's own T are different types — two
+    // symbol (TPool's T and TWrap's own T are different types - two
     // entries), and a second TWrap<Integer>: XR's Integer arg is ITS model's
-    // builtin symbol, not XU's, so the key differs — dedup is per-model for
+    // builtin symbol, not XU's, so the key differs - dedup is per-model for
     // builtin args by construction (each model seeds its own builtins; see
     // PasTree.Sema.Builtins). Cross-model canonicalization of builtin args
     // would shrink this to 8; until then the count documents the behavior.
     // The table also holds GENERIC METHOD frames now (Max<Integer>,
-    // Max<string>, Wrap<Integer>, Pair<Integer,string>, Take<Integer> —
+    // Max<string>, Wrap<Integer>, Pair<Integer,string>, Take<Integer> -
     // keyed on the ROUTINE symbol, substitution frames only, never types;
     // see InferMethodFrame), plus the TBox<Integer> those produce.
     //
@@ -1205,7 +1205,7 @@ begin
     // an OPEN TBox<T> appears twice because a method's interface declaration
     // and its implementation each declare their own T symbol, so the keys
     // differ; and TWrap<Integer> appears twice for the builtin-arg reason
-    // above. Neither affects typing — same text, same members — so the count
+    // above. Neither affects typing - same text, same members - so the count
     // is documented rather than deduplicated.
     // 19 since GY: the two calls written `Cast<TThing>` / `Fetch<TThing>` add
     // one EXPLICIT method frame each (ExplicitMethodFrame keys them on the
@@ -1213,12 +1213,12 @@ begin
     // `TRunner<TMyParams>` is one more instantiation. 22 since SPN: the two
     // `TNodes<...>` arities are two. 23 since CV2 (16.6.1): `Clone<TDog>` is
     // ONE more explicit method frame, not two, even though it is written at
-    // two call sites — both share the routine symbol and the type argument, so
+    // two call sites - both share the routine symbol and the type argument, so
     // Instantiate's dedup collapses them, which is the contract rather than a
     // coincidence. 24 since PasTree.Sema.Builtins stopped seeding TArray
     // (2026-08-14): the shared System.pas fixture now declares `TArray<T> =
     // array of T;` for real, so `TArray<TSpotDirect>` in UNIT_OV genuinely
-    // instantiates — the seeded stub had no generic parameter list to
+    // instantiates - the seeded stub had no generic parameter list to
     // instantiate against at all.
     Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '24');
 
@@ -1228,13 +1228,13 @@ begin
     Ok('XV: no diags (esp. no false E2010 from the local-overload shadow)',
       Length(LV.Diags) = 0);
     // Three same-arity imported overloads (the System.Math.Min shape): the
-    // argument's type picks the overload — and thus the call's result type.
+    // argument's type picks the overload - and thus the call's result type.
     Eq('Pick(11) -> Integer overload', XTypeOf(LV, 'Pick(11)'), 'Integer');
     Eq('Pick(2.5) -> Double overload', XTypeOf(LV, 'Pick(2.5)'), 'Double');
     Eq('Pick(''s'') -> string overload',
       XTypeOf(LV, 'Pick(''s'')'), 'string');
     // The LOCAL same-named overload joins the merged candidate set and wins
-    // on an exact match — dcc's merge semantics.
+    // on an exact match - dcc's merge semantics.
     Eq('Pick(True) -> the local Boolean overload',
       XTypeOf(LV, 'Pick(True)'), 'Boolean');
     // Method overloads across units.
@@ -1302,7 +1302,7 @@ begin
     // ---- cross-unit helper injection ----
     LB := ModelByName('hb');
     Ok('HB loaded', Assigned(LB));
-    Ok('HB: no diags (helper body reads the target''s D1 bare — direction 2)',
+    Ok('HB: no diags (helper body reads the target''s D1 bare - direction 2)',
       Length(LB.Diags) = 0);
     Eq('helper body: bare D1 types to the target''s field',
       XTypeOf(LB, 'D1'), 'Cardinal');
@@ -1334,7 +1334,7 @@ begin
     Ok('GU: no diags at all', Length(LG.Diags) = 0);
     Eq('16.5.1: Max(3,7) infers T=Integer', XTypeOf(LG, 'G.Max(3,7)'),
       'Integer');
-    Eq('16.5.1: Max(''a'',''b'') infers T=string — same method, different T',
+    Eq('16.5.1: Max(''a'',''b'') infers T=string - same method, different T',
       XTypeOf(LG, 'G.Max(''a'',''b'')'), 'string');
     Eq('16.5.1: Wrap(5) infers T through an INSTANTIATED result',
       XTypeOf(LG, 'G.Wrap(5)'), 'TBox<Integer>');
@@ -1380,7 +1380,7 @@ begin
     LE := ModelByName('in2');
     Ok('IN2 loaded', Assigned(LE));
     Ok('IN2: no diags at all', Length(LE.Diags) = 0);
-    // NB not `XTypeOf(LE, 'Alignment')` — that text matches the class's own
+    // NB not `XTypeOf(LE, 'Alignment')` - that text matches the class's own
     // property DECLARATION first. The chain is the unambiguous probe, and it
     // is also the thing that was broken: the head bound to the class's own
     // `Alignment: string`, so `.FHorz` had nowhere to resolve.
@@ -1399,11 +1399,11 @@ begin
       XTypeOf(LE, 'AThing.Own'), 'Integer');
     LE := ModelByName('spn');
     Ok('SPN loaded', Assigned(LE));
-    Ok('SPN: no diags at all — both arities pick their OWN nested type',
+    Ok('SPN: no diags at all - both arities pick their OWN nested type',
       Length(LE.Diags) = 0);
     Eq('16.1.2: arity 1 reaches TNodes<T>''s node record',
       XTypeOf(LE, 'Result.fKey'), 'T');
-    Eq('16.1.2: arity 2 reaches TNodes<TKey,TValue>''s — a DIFFERENT nested type',
+    Eq('16.1.2: arity 2 reaches TNodes<TKey,TValue>''s - a DIFFERENT nested type',
       XTypeOf(LE, 'Result.fKeyed'), 'TKey');
 
     // ---- overload selection across an alias identity ----
@@ -1411,7 +1411,7 @@ begin
     Ok('OV loaded', Assigned(LE));
     Ok('OV: no diags at all', Length(LE.Diags) = 0);
     // `X` is TSpot's; reaching it means the TSpot overload won, and it could
-    // only win by canonicalizing the alias — the argument and the parameter
+    // only win by canonicalizing the alias - the argument and the parameter
     // are declared through different symbols for the one type.
     Eq('the record overload matching through an ALIAS wins the tie',
       XTypeOf(LE, 'AConv.Conv(S,1,1)'), 'TSpotAlias');
@@ -1433,7 +1433,7 @@ begin
     Ok('NS.Test: no diags at all', Length(LE.Diags) = 0);
     // `Mine` exists only on the ARGUMENT: reaching it proves the frame was
     // carried through the override, not that the constraint was searched.
-    Eq('`Params.Mine` — the frame survives, not just the constraint',
+    Eq('`Params.Mine` - the frame survives, not just the constraint',
       XTypeOf(LE, 'Params.Mine'), 'Integer');
 
     // ---- a real project's tail: five shapes, one unit ----
@@ -1447,7 +1447,7 @@ begin
     // NB no `T.Create` case here: the `constructor` constraint resolves
     // through TObject, and this corpus is a bare directory with no System
     // unit to resolve it in. It is covered by the corpus measurement instead
-    // (a real project's threading-library report) — the same reason the RTL
+    // (a real project's threading-library report) - the same reason the RTL
     // helper cases below assert types rather than absence.
     Eq('a member on the SECOND of several constraints (16.4.1)',
       XTypeOf(LE, 'AKey.Hash'), 'Integer');

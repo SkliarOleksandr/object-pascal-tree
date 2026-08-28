@@ -1,7 +1,7 @@
 program AsyncSmoke;
 
 {
-  Staged (incremental) analysis — TPasSemaProject.AnalyzeStaged — is the engine
+  Staged (incremental) analysis - TPasSemaProject.AnalyzeStaged - is the engine
   the background async parser drives. These tests run it SYNCHRONOUSLY (no
   threads, so no flakiness) and assert:
 
@@ -104,7 +104,7 @@ const
     'uses UnitA, UnitB;'#10 +
     'begin'#10 +
     'end.'#10;
-  // UnitA: interface exposes TThing + KA; its IMPLEMENTATION uses UnitC — an
+  // UnitA: interface exposes TThing + KA; its IMPLEMENTATION uses UnitC - an
   // implementation-only dependency the interface wave cannot see (exercises
   // wave-2 discovery).
   UNIT_A =
@@ -200,7 +200,7 @@ begin
     Ok('staged: all non-System units reached msCrossReady', LAllCross);
 
     // Wave-2 discovery: UnitC is an implementation-only dependency of UnitA,
-    // invisible to the interface wave — it must still be loaded.
+    // invisible to the interface wave - it must still be loaded.
     var LHasC := False;
     for LMid := 0 to LStaged.ModelCount - 1 do
       if LStaged.Model(LMid).UnitNameLower = 'unitc' then
@@ -208,7 +208,7 @@ begin
     Ok('staged: implementation-only dependency UnitC discovered in wave 2',
       LHasC);
 
-    // The cross-unit const use (UnitA impl: CC_MARK from UnitC) resolved —
+    // The cross-unit const use (UnitA impl: CC_MARK from UnitC) resolved -
     // proves the full (not interface-only) trees drove the final analysis.
     var LCResolved := False;
     for LMid := 0 to LStaged.ModelCount - 1 do
@@ -345,7 +345,7 @@ begin
       LSession.WaitFor;
       Ok('session: cancelled-before-start still finishes (drains)',
         LSession.IsDone);
-      // Whatever it built is owned by the session and freed in Destroy —
+      // Whatever it built is owned by the session and freed in Destroy -
       // no TakeProject here, so Destroy must free the project (leak check).
     finally
       LSession.Free;
@@ -354,7 +354,7 @@ begin
 
   // ---- 6. Single-module session (incremental plan, stage B) ----
   // The host hands its last-good project to CreateForModule, sets the edited
-  // buffer, and gets it back through TakeProject — accepted for a body edit,
+  // buffer, and gets it back through TakeProject - accepted for a body edit,
   // refused (project untouched) for an interface edit.
   begin
     var LHost := StagedProject(LDir, []);

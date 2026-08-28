@@ -1,8 +1,8 @@
 program PasTreeCompleteOracle;
 
-{ The completion CORPUS SELF-ORACLE (local/COMPLETION-PLAN.md §6): for every
+{ The completion CORPUS SELF-ORACLE (local/COMPLETION-PLAN.md sec. 6): for every
   RESOLVED identifier reference in an analyzed corpus, completion invoked at
-  that identifier must OFFER that name. The corpus is its own oracle — no
+  that identifier must OFFER that name. The corpus is its own oracle - no
   goldens to write or maintain: RefMap/ExtRefMap say what the analysis proved
   each name means, and a list that would not have offered it is a context-
   classification or collection bug at that exact position.
@@ -18,9 +18,9 @@ program PasTreeCompleteOracle;
   - the DECLARATION site itself (naming something new is not a completion
     position);
   - references whose token lives in an $I INCLUDE file (the caret machinery
-    is main-file-only — the same GAP navigation row 14 documents);
+    is main-file-only - the same GAP navigation row 14 documents);
   - skUnitRef targets (uses names complete as dotted UNIT names, a different
-    match shape) and skLabel targets (labels complete after `goto` only —
+    match shape) and skLabel targets (labels complete after `goto` only -
     a documented stage-E gap).
 
   Usage: PasTreeCompleteOracle <dir|file.dpr|file.dproj> [-p:<platform>]
@@ -32,7 +32,7 @@ program PasTreeCompleteOracle;
   -max:N   sample cap PER UNIT (default 200), stride-spread so the sample
            covers the whole file rather than its head. -max:0 = everything.
   -list    print every miss site (default: the first 25).
-  -at:     one verbose request instead of the sweep — the drill-down mode.
+  -at:     one verbose request instead of the sweep - the drill-down mode.
   -studio: RAD Studio root for the RTL/VCL/FMX source trees (.dproj targets;
            $BDS when unset), same contract as PasTreeSemaProject's.
   -L<dir>  extra search path, repeatable (the registry-path lists for the
@@ -40,7 +40,7 @@ program PasTreeCompleteOracle;
 
   A .dproj target is driven the way PasTreeSemaProject's -dproj mode drives
   one: platform, search paths, defines, namespaces and unit aliases read from
-  the project file, AnalyzeStaged over its main source — so the oracle runs
+  the project file, AnalyzeStaged over its main source - so the oracle runs
   against the same closure the demo and the LSP server analyze. }
 
 {$APPTYPE CONSOLE}
@@ -94,7 +94,7 @@ const
     'type', 'statement', 'expression', 'recfield', 'inherited', 'label',
     'propread', 'propwrite');
 
-// The Studio SOURCE trees a .dproj needs on top of its own paths — copied
+// The Studio SOURCE trees a .dproj needs on top of its own paths - copied
 // from PasTreeSemaProject's -dproj mode (see the note there for why each
 // subdirectory earns its place).
 function StudioSearchPaths(const ARoot: string): TArray<string>;
@@ -162,14 +162,14 @@ begin
         Continue;
     end
     else
-      Continue;   // unresolved — nothing proven to offer
+      Continue;   // unresolved - nothing proven to offer
     // Main file only: the caret machinery does not address $I includes.
     LVis := LM.Tree.Nodes[LNode].FirstToken;
     if (LVis < 0) or (LVis > High(LM.Tree.Source.Visible)) or
        (LM.Tree.Source.Visible[LVis].FileId <> 0) then
       Continue;
     // The MODULE HEADER's own dotted name is a naming position, not a
-    // completion one (the engine refuses it by design) — a segment of it
+    // completion one (the engine refuses it by design) - a segment of it
     // can still RESOLVE (`FMX.Dialogs` of `unit FMX.Dialogs.Default`).
     LUp := LNode;
     while (LUp <> NIL_NODE) and
@@ -214,7 +214,7 @@ begin
       LTS.OffsetToLineCol(LTS.Tokens[LRaw].Start, LLine, LCol);
 
       Inc(GSampled);
-      // The dataflow through try/except is beyond W1036's sight — the
+      // The dataflow through try/except is beyond W1036's sight - the
       // pre-init trades an unfixable warning for a pedantic H2077.
       LHit := False;
       // Caret one character INTO the identifier: a one-letter prefix, the
@@ -266,7 +266,7 @@ begin
   end;
 end;
 
-// -at:<file>|<line>|<col> — one verbose request instead of the sweep: prints
+// -at:<file>|<line>|<col> - one verbose request instead of the sweep: prints
 // the caret classification, the context and every item, for drilling a miss.
 procedure ProbeAt(const ASpec: string);
 var
@@ -310,7 +310,7 @@ begin
       [CTX_NAMES[LCtx], Ord(LInfo.Kind), LInfo.Prefix, LInfo.DotBase,
        LInfo.Node, LInfo.Scope, Length(GProj.Model(LMid).WithUnopened),
        Length(LItems)]));
-    // The scope chain with its joins — where a member SHOULD have come from.
+    // The scope chain with its joins - where a member SHOULD have come from.
     with GProj.Model(LMid) do
     begin
       var LSc := LInfo.Scope;
@@ -358,7 +358,7 @@ var
   GAtSpec, GStudio: string;
   GDProj: TPasDProj;
 begin
-  // The one line every PasTree host must set — the parallel passes allocate
+  // The one line every PasTree host must set - the parallel passes allocate
   // heavily, and the default MM SLEEPS on contention (measured 4.5x on a
   // real project; see the README's Multithreading section).
   System.NeverSleepOnMMThreadContention := True;

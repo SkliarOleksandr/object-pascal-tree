@@ -1,26 +1,26 @@
 unit PasTree.Sema.Resolver;
 
 {
-  PasTree semantics — Phase 1 resolver (per unit).
+  PasTree semantics - Phase 1 resolver (per unit).
 
   Passes over the immutable CST, in order:
-    1. Collect         — open scopes (unit / struct / routine / block), add a
+    1. Collect         - open scopes (unit / struct / routine / block), add a
                           symbol for every declaration, chain routine
                           overloads, and flag same-scope duplicates (E2004).
-    2. Resolve         — bind each identifier/member reference to a symbol via
+    2. Resolve         - bind each identifier/member reference to a symbol via
                           the scope chain. Unresolved refs (e.g. names from a
                           not-yet-indexed used unit, or a `with`-target's
                           member, not yet in scope) are left NIL and flagged
-                          sfExternalUnresolved — no diagnostic in Phase 1.
-    3. BindTypes       — bind each declaration's declared type to a type
+                          sfExternalUnresolved - no diagnostic in Phase 1.
+    3. BindTypes       - bind each declaration's declared type to a type
                           symbol.
-    4. ResolveWithStmts — NOW that types are bound, open each `with` target's
+    4. ResolveWithStmts - NOW that types are bound, open each `with` target's
                           member scope and retry whatever its body left
                           unresolved in pass 2 (see its own header comment for
                           why this can only run this late).
 
   Names vs. type are separated by the ':' token (leading idents joined by ','
-  are names; the child after ':' is the type) — see TPasParser.ParseParamList /
+  are names; the child after ':' is the type) - see TPasParser.ParseParamList /
   the var section in PasTree.Parser.pas.
 }
 
@@ -34,7 +34,7 @@ uses
 
 type
   // A structured typed-const/var initializer (3.2.2, `X: TPoint = (X: 0;
-  // Y: 0)`) noted during Collect, resolved once BindTypes has run — see
+  // Y: 0)`) noted during Collect, resolved once BindTypes has run - see
   // ResolveAggregates for why this can't happen any earlier.
   TPasPendingAggr = record
     AggrNode: Integer;   // the nkAggregate node
@@ -45,7 +45,7 @@ type
   // nkHelperType node and its OWN type symbol. The extended type T cannot be
   // looked up while collecting (a helper may be declared before the type it
   // extends), so the two member scopes are wired together in a pass of its
-  // own — see JoinHelperScopes.
+  // own - see JoinHelperScopes.
   TPasPendingHelper = record
     Node: Integer;       // the nkHelperType node
     HelperSym: Integer;  // the helper's own skType symbol
@@ -62,7 +62,7 @@ type
     FIsDeclName: TArray<Boolean>;
     FPendingAggr: TArray<TPasPendingAggr>;
     FPendingHelpers: TArray<TPasPendingHelper>;
-    // FModel.UsesList's filled prefix during Run — appends double the array
+    // FModel.UsesList's filled prefix during Run - appends double the array
     // instead of re-copying it per uses entry; Analyze trims before returning.
     FUsesCount: Integer;
     FSkipTyper: Boolean;   // see Analyze
@@ -89,7 +89,7 @@ type
     // collect
     procedure MarkDeclName(ANode, ASym: Integer);
     { AOverloadOnClash chains onto a same-named, same-kind symbol instead of
-      reporting a redeclaration — for the one non-routine case that is legal,
+      reporting a redeclaration - for the one non-routine case that is legal,
       a generic type name declared at several ARITIES (16.1.2). }
     function DeclareSym(AScope: Integer; AKind: TSemaSymbolKind;
       const AName: string; ADeclNode: Integer;
@@ -110,7 +110,7 @@ type
     procedure CollectUsesItem(AItem, AScope: Integer);
     procedure CollectRoutine(ANode, AScope: Integer);
     procedure Collect(ANode, AScope: Integer);
-    // helpers (ch.15 §15.3) — see JoinHelperScopes for why this is its own
+    // helpers (ch.15 sec. 15.3) - see JoinHelperScopes for why this is its own
     // pass rather than something CollectStruct could do inline.
     function HelperForTypeRef(ANode: Integer): Integer;
     procedure JoinHelperScopes;
@@ -118,12 +118,12 @@ type
     function DesignatorHead(ANode: Integer): Integer;
     procedure ResolveNode(ANode: Integer);
     procedure BindTypes;
-    // structured typed-const/var initializers (3.2.2) — see ResolveAggregates
+    // structured typed-const/var initializers (3.2.2) - see ResolveAggregates
     // for why this also runs as its own pass, after BindTypes.
     function StructMemberScope(ATypeSym: Integer): Integer;
     procedure ResolveAggregateAgainst(AAggrNode, AStructScope: Integer);
     procedure ResolveAggregates;
-    // with (ch.05 §5.7) — see ResolveWithStmts for why this runs as its own
+    // with (ch.05 sec. 5.7) - see ResolveWithStmts for why this runs as its own
     // pass, after BindTypes, rather than inline in Collect/ResolveNode.
     function FindMemberUpChain(ATypeSym: Integer;
       const ANameLower: string): Integer;
@@ -142,12 +142,12 @@ type
     procedure CheckSlicePositions;
     procedure Run;
   public
-    { ASkipTyper skips the final expression type-check (Phase 3a) — for
+    { ASkipTyper skips the final expression type-check (Phase 3a) - for
       TRANSIENT models only (the async parser's interface-only wave, whose
       models are replaced by fully-analyzed ones before anyone reads
       diagnostics or ExprType). Collect/Resolve/BindTypes still run, so
-      scopes, symbols, RefMap and declared-type bindings — everything
-      navigation and cross-unit resolution read — are complete. }
+      scopes, symbols, RefMap and declared-type bindings - everything
+      navigation and cross-unit resolution read - are complete. }
     class function Analyze(const ATree: TPasTree;
       ASkipTyper: Boolean = False;
       APlatform: TPasPlatform = pfWin32): TPasSemaModel; static;
@@ -180,13 +180,13 @@ begin
     for var LIdx := 0 to High(LR.FNodeScope) do
       LR.FNodeScope[LIdx] := NIL_SCOPE;   // unvisited => no scope => resolves NIL
     // Published BEFORE Run, not after: the LATER PHASES OF THIS SAME RUN are
-    // model-level consumers too — the typer asks the model for the struct
+    // model-level consumers too - the typer asks the model for the struct
     // enclosing a call site (EnclosingStructSym), and it runs inside Run.
     // Sharing the array rather than copying it is the point: a dynamic array
     // assignment shares the reference and element writes are visible through
     // both, so Collect keeps filling exactly what the model publishes (the
     // array is sized once here and never re-SetLength'd, which is what makes
-    // that safe). Entries a phase has not reached yet read NIL_SCOPE — the
+    // that safe). Entries a phase has not reached yet read NIL_SCOPE - the
     // same answer they gave before this moved.
     LR.FModel.NodeScope := LR.FNodeScope;
     LR.Run;
@@ -239,7 +239,7 @@ end;
 // ATypeNode is a var/const/field declaration's OWN type-expression node
 // (`TWndClass` in `UtilWindowClass: TWndClass = (style: 0; ...)`); if it is
 // immediately followed by a structured aggregate initializer (3.2.2), note
-// it for ResolveAggregates — which needs ATypeNode's designator RESOLVED
+// it for ResolveAggregates - which needs ATypeNode's designator RESOLVED
 // (RefMap, filled by ResolveNode) to find the target type, so field-name
 // resolution can't happen inline here, in Collect.
 procedure TPasSemaResolver.NotePendingAggregate(ATypeNode: Integer);
@@ -272,7 +272,7 @@ begin
     (FirstChild(LParent) = ANode);
 end;
 
-{ True when ANode is a name written WITHOUT type arguments — i.e. not the head of
+{ True when ANode is a name written WITHOUT type arguments - i.e. not the head of
   an `nkTypeArgs` (`TFoo<T>`). Only the head matters: an ident that is an
   ARGUMENT inside `<...>` is itself a bare reference (`TDict<Pointer, TList>`
   means the builtin Pointer), and the parser puts arguments after the head under
@@ -288,7 +288,7 @@ end;
 
 // KIND of the visible token immediately after ANode's last token. Every
 // consumer asks about a single punctuation token (':' ',' '.' '<'), and the
-// kind answers that without materializing the text — this runs per declared
+// kind answers that without materializing the text - this runs per declared
 // name and per parameter, hundreds of thousands of times on a big closure.
 // tkUnknown when there is no next token. Note the kinds keep the old string
 // compares exact: ':=' is ONE token (tkAssign, never tkColon) and '..' is
@@ -400,7 +400,7 @@ var
   LExisting, LTail, LFileId, LLine, LCol: Integer;
   LKey: string;
 begin
-  // One PasNameKey for both the clash lookup and the symbol's stored key —
+  // One PasNameKey for both the clash lookup and the symbol's stored key -
   // this runs per declared symbol.
   LKey := PasNameKey(AName);
   LExisting := FModel.FindLocal(AScope, LKey);
@@ -422,12 +422,12 @@ begin
   else if (AKind = skProperty) and
           (FModel.Symbols[LExisting].Kind = skProperty) then
     // Overloaded array properties: `property Item[I: Integer]: T; default;`
-    // + `property Item[I: string]: T; default;` is legal (13.1.4) — keep the
+    // + `property Item[I: string]: T; default;` is legal (13.1.4) - keep the
     // first registered under the name, no redeclaration.
     FModel.AddToOrder(AScope, Result)
   else if (FModel.Symbols[LExisting].Kind = skUnitRef) and
           (AKind <> skUnitRef) then
-    // A declaration legally HIDES a used unit's (leaf) name — e.g.
+    // A declaration legally HIDES a used unit's (leaf) name - e.g.
     // Winapi.WinSock2 declares `QOS = _QualityOfService` while using
     // Winapi.Qos. The new symbol takes the bare name; the unit stays
     // reachable via its fully-qualified name (UsesList keeps NameFull).
@@ -600,7 +600,7 @@ begin
   if (LName = NIL_NODE) or (KindOf(LName) <> nkIdent) then
     Exit;
   // Forward-declared types (`TFoo = class;`) complete later under the same
-  // name — reuse the existing symbol rather than flagging a redeclaration.
+  // name - reuse the existing symbol rather than flagging a redeclaration.
   //
   // The match must be searched along the WHOLE NextOverload chain, not just at
   // its head: one name can carry several declarations at different arities
@@ -608,7 +608,7 @@ begin
   // declares a non-generic `TJclArrayIterator`, then `TJclArrayIterator<T> =
   // class;`, then the real `TJclArrayIterator<T>`. Testing only the head found
   // the arity-0 class, read the arity mismatch as "a different type", and
-  // declared a THIRD symbol — so the forward stayed the arity-1 winner with an
+  // declared a THIRD symbol - so the forward stayed the arity-1 winner with an
   // empty member scope, and every method body of the real class lost its own
   // fields and its inherited members. ~60 false E2003 in that one unit, and it
   // did not reproduce until the fixture also had the non-generic sibling.
@@ -638,7 +638,7 @@ begin
   end
   else if (LExisting <> NIL_SYM) and
           (FModel.Symbols[LExisting].Kind = skType) then
-    // Same name, DIFFERENT generic arity — `TBox<T>` and `TBox<TKey, TVal>`
+    // Same name, DIFFERENT generic arity - `TBox<T>` and `TBox<TKey, TVal>`
     // are two distinct types (16.1.2), not a redeclaration and not a forward
     // completion. Chained like routine overloads so ResolveTypeExpr can pick
     // by argument count; without this the second declaration reused the
@@ -649,7 +649,7 @@ begin
   else
     LSym := DeclareSym(AScope, skType, NodeText(LName), LName);
 
-  // Generic type params live in a per-type scope so identical names (T, TKey…)
+  // Generic type params live in a per-type scope so identical names (T, TKey...)
   // across different generic types don't collide in the unit scope.
   LBody := AScope;
   LGen := FindChildKind(ANode, nkGenericParams);
@@ -675,7 +675,7 @@ begin
       else
         begin
           // `X = X` is the RE-EXPORT idiom, and its right side means the OUTER
-          // X — the name being declared cannot alias itself. FMX writes it
+          // X - the name being declared cannot alias itself. FMX writes it
           // twice inside classes: `TOverlayMode = TOverlayMode deprecated ...`
           // (FMX.MultiView.Types) and `TItemAppearanceObjectsClass =
           // TItemAppearanceObjectsClass` (FMX.ListView.Appearances), and
@@ -694,7 +694,7 @@ begin
               FModel.RefMap[LChild] := ResolveSkipping(LBody,
                 LChildLower, LSym);
           end;
-          Collect(LChild, LBody);  // alias target, array, pointer…
+          Collect(LChild, LBody);  // alias target, array, pointer...
         end;
       end;
     LChild := NextSib(LChild);
@@ -743,14 +743,14 @@ begin
     FModel.Symbols[ATypeSym].MemberScope := LMembers;
     // Tag the member scope with its OWN type, not just method-implementation
     // routine scopes (CollectRoutine). The project driver partitions its two
-    // cross-unit passes on exactly this tag — CrossResolve defers a node when
+    // cross-unit passes on exactly this tag - CrossResolve defers a node when
     // StructSymOfNode finds one, CrossResolveInherited then walks the
-    // ancestors for it — so anything inside a type DECLARATION was invisible
+    // ancestors for it - so anything inside a type DECLARATION was invisible
     // to the ancestor walk and got a straight E2003 instead. That is what a
     // property specifier naming an INHERITED accessor hits: `property Flag:
     // Boolean read GetWordBoolProp` where GetWordBoolProp is declared in an
     // ancestor in ANOTHER unit (System.Win.InternetExplorer over
-    // System.Win.OleControls' TOleControl — 47 of the RTL's remaining false
+    // System.Win.OleControls' TOleControl - 47 of the RTL's remaining false
     // E2003s). Setting it here flips both passes coherently, since they read
     // the same predicate.
     FModel.Scopes[LMembers].StructSym := ATypeSym;
@@ -774,7 +774,7 @@ begin
     // Every symbol the child adds to the member scope gets the section's
     // visibility. Counted rather than returned, because a single child can
     // declare several (a `A, B: Integer` field group, a property's accessors,
-    // a nested type and its enum values). Symbols is lazy — nil counts as 0.
+    // a nested type and its enum values). Symbols is lazy - nil counts as 0.
     if FModel.Scopes[LMembers].Symbols <> nil then
       LFirstNew := FModel.Scopes[LMembers].Symbols.Count
     else
@@ -799,7 +799,7 @@ begin
             LPropSym := DeclareSym(LMembers, skProperty, NodeText(LN), LN);
           // Array-property index parameters (`property Items[Index: Integer]:
           // T read GetItem;`) arrive as an nkParams child, SAME shape as a
-          // routine's — but the generic Collect() below has no case for
+          // routine's - but the generic Collect() below has no case for
           // nkParams/nkParam at all (only CollectRoutine/nkProcType/
           // nkAnonMethod special-case them), so falling through to plain
           // Collect(LC, LMembers) walks down to the index name's bare nkIdent
@@ -810,7 +810,7 @@ begin
           // dcc never lets anything reference this name outside the
           // property's own signature slot (the read/write specifier matches
           // the getter/setter by position/type, not by this placeholder's
-          // name), so — exactly like nkProcType's own isolated LSig scope —
+          // name), so - exactly like nkProcType's own isolated LSig scope -
           // give it a scope of its own: declared, but reachable from nowhere
           // else, which is all "not undeclared" requires.
           var LPropSig := NIL_SCOPE;
@@ -874,20 +874,20 @@ begin
 end;
 
 // The nearest ancestor of AScope that is NOT itself a struct (class/record/
-// interface/object/helper) member scope — climbing past however many
+// interface/object/helper) member scope - climbing past however many
 // classes/records the point in question is nested inside. A non-scoped
 // enum's element names inject as if the enum sat AT THAT SCOPE directly:
 // nesting an enum inside a class only namespaces the TYPE name (`TFoo.
-// TInner`), never the VALUES — dcc-verified: TWO unrelated classes A/B in
+// TInner`), never the VALUES - dcc-verified: TWO unrelated classes A/B in
 // one unit, A's own `private type` nested enum's literal resolves bare
 // inside B's method too, and the same literal resolves bare from a
 // DIFFERENT unit that merely `uses` this one, as long as the nesting chain
 // up to the enum sits entirely in the INTERFACE section (an enum nested
 // inside an IMPLEMENTATION-section type stays unit-local, same as any other
-// implementation declaration — real dcc E2003s a cross-unit bare reference
+// implementation declaration - real dcc E2003s a cross-unit bare reference
 // to one). A routine-LOCAL nested type's enum, by contrast, stays properly
 // routine-scoped (dcc-verified: real E2003 outside the declaring routine)
-// — AScope is already non-struct there, so this is a no-op.
+// - AScope is already non-struct there, so this is a no-op.
 function TPasSemaResolver.EnumJoinTarget(AScope: Integer): Integer;
 begin
   Result := AScope;
@@ -909,12 +909,12 @@ begin
   if ATypeSym <> NIL_SYM then
     FModel.Symbols[ATypeSym].MemberScope := LEnum;
   // {$SCOPEDENUMS ON} (2.2.4): values do NOT inject into the enclosing scope
-  // — qualified access (TEnum.Value) via the member scope above is the ONLY
+  // - qualified access (TEnum.Value) via the member scope above is the ONLY
   // way in. The state is positional (read at this enum's own declaration
   // site, via the preprocessor's event journal), because one unit routinely
   // toggles it around a group of declarations. Real bug when this was
   // ignored: System.Threading ({$SCOPEDENUMS ON} for the whole unit) has
-  // `TLoopStateFlags = (Exception, Broken, ...)` — the leaked `Exception`
+  // `TLoopStateFlags = (Exception, Broken, ...)` - the leaked `Exception`
   // VALUE shadowed the `Exception` TYPE for every declaration below it, so
   // `EAggregateException = class(Exception)`'s heritage resolved to an enum
   // value, the ancestor walk died at the first hop, and every inherited
@@ -924,7 +924,7 @@ begin
   // (SetChecked, CallClick)` (FMX.StdCtrls, a {$SCOPEDENUMS ON} unit) has no
   // enum type NAME to qualify with, so scoping the values would make them
   // unreachable by any spelling. dcc-verified: both bare values compile there,
-  // while a NAMED enum's do not. ATypeSym = NIL_SYM is exactly that case — an
+  // while a NAMED enum's do not. ATypeSym = NIL_SYM is exactly that case - an
   // enum reached through the generic Collect fallthrough rather than as a named
   // type declaration's own definition.
   if (ATypeSym = NIL_SYM) or
@@ -951,7 +951,7 @@ end;
 
 // 9.1.3 `case [Tag:] OrdinalType of <labels>: (fields) ...` inside a record.
 //
-// The optional TAG NAME is a REAL field of the record — it occupies storage
+// The optional TAG NAME is a REAL field of the record - it occupies storage
 // and is freely readable/assignable, not a cosmetic annotation on the type.
 // dcc-verified both ways: `R.data := 2` compiles, and naming the tag grows
 // SizeOf by the tag type's width (12 vs 8 for the same record with an
@@ -961,7 +961,7 @@ end;
 //
 // Presence of the tag is decided by the ':' AFTER the first child, not by its
 // node kind: an anonymous tag (`case Integer of`) also leads with an nkIdent
-// — the type name — so the kinds are identical in both shapes.
+// - the type name - so the kinds are identical in both shapes.
 //
 // Everything after the tag name (the tag type, then each nkVariantBranch)
 // collects into the SAME scope: a branch's fields are the record's own
@@ -1065,7 +1065,7 @@ begin
   // `ident [<...>]`; a '.' after a segment means it is a qualifier (TFoo. /
   // TList<T>.), so the *last* segment's ident is the routine name. A ':' or '('
   // ends the name (result type / parameters follow). Qualified names are method
-  // implementations of existing declarations — do not redeclare them.
+  // implementations of existing declarations - do not redeclare them.
   LChild := SkipAttr(FirstChild(ANode));
   LNameNode := NIL_NODE;
   LQualified := False;
@@ -1075,13 +1075,13 @@ begin
     LSegLast := LChild;
     LChild := NextSib(LChild);
     // A following nkGenericParams/nkTypeArgs belongs to THIS segment only when
-    // the segment ident is immediately followed by '<' — `TThreadList<T>.` or
+    // the segment ident is immediately followed by '<' - `TThreadList<T>.` or
     // `Foo<T>(...)`. Without the separator check, `function LockList:
     // TList<T>;` had its RESULT TYPE eaten as segment generic-args: nkTypeArgs
     // follows the name ident either way, only the ':' between them tells the
     // two shapes apart. The result node then never registered, the routine
-    // symbol's TypeNode stayed NIL, and every consumer of the result type —
-    // most visibly `with FThreads.LockList do Count` (System.Threading) —
+    // symbol's TypeNode stayed NIL, and every consumer of the result type -
+    // most visibly `with FThreads.LockList do Count` (System.Threading) -
     // dead-ended. Every function returning a generic instantiation was
     // affected.
     while (LChild <> NIL_NODE) and
@@ -1112,11 +1112,11 @@ begin
     end;
   end;
 
-  // For a method implementation (TFoo.Bar — or nested, TOuter.TInner.Bar),
+  // For a method implementation (TFoo.Bar - or nested, TOuter.TInner.Bar),
   // make the routine body see the struct's members (implicit Self): resolve
   // the qualifier CHAIN (first segment at AScope, each next one INSIDE the
   // previous type's member scope) and join every resolved segment's member
-  // scope — outer first, innermost last, so the innermost wins lookups. The
+  // scope - outer first, innermost last, so the innermost wins lookups. The
   // innermost type is remembered as the scope's StructSym: the project
   // driver's inherited-member pass starts its cross-unit ancestor walk there.
   if LQualified then
@@ -1161,15 +1161,15 @@ begin
     FModel.Scopes[LRoutine].StructSym := LTy;
     // A qualified implementation that OMITS its own parameter list
     // (`procedure TFoo.Bar;` completing a class-declared `procedure Bar(
-    // Index: Integer);` — legal dcc: the impl header may drop the params
+    // Index: Integer);` - legal dcc: the impl header may drop the params
     // when they exactly match the declaration) has NO nkParams child, so
-    // the "Remaining children" loop below declares nothing into LRoutine —
+    // the "Remaining children" loop below declares nothing into LRoutine -
     // the body then treats every omitted parameter name as an ordinary
     // (undeclared) reference: false E2003 (real bug, found analyzing
     // Vcl.CheckLst.pas: TCustomCheckListBox.ToggleClickCheck declares
     // `(Index: Integer)` but implements bodilessly as `ToggleClickCheck;`,
     // using `Index` freely in its body). Mirrors the SAME idiom the
-    // unqualified branch below already honors for global routines — find
+    // unqualified branch below already honors for global routines - find
     // the class's own declared method (by name; an overloaded name is left
     // alone, the same simplification the global-routine path already makes
     // for LIntfHead) and join ITS param scope in, exactly like the struct's
@@ -1189,7 +1189,7 @@ begin
   if (LNameNode <> NIL_NODE) and not LQualified then
   begin
     // An unqualified implementation-section routine that matches an interface
-    // declaration is that declaration's implementation — link to it (by
+    // declaration is that declaration's implementation - link to it (by
     // parameter count for overloads; a routine that omits its param list is a
     // forward/external completion of the sole interface decl) instead of adding
     // a phantom symbol. This is essential: e.g. `function X; external;` in the
@@ -1226,7 +1226,7 @@ begin
         FModel.Symbols[LLink].Flags := FModel.Symbols[LLink].Flags + [sfHasBody];
       MarkDeclName(LNameNode, LLink);
       // Same gap as the qualified branch above, for a global routine: params
-      // omitted here means nothing else ever declares them for THIS body —
+      // omitted here means nothing else ever declares them for THIS body -
       // join the matched declaration's own param scope in.
       if (FindChildKind(ANode, nkParams) = NIL_NODE) and
          (FModel.Symbols[LLink].MemberScope <> NIL_SCOPE) then
@@ -1274,7 +1274,7 @@ begin
     FModel.Symbols[LRoutineSym].TypeNode := LResultNode;
 
   // Functions get the implicit `Result` variable, declared LOCALLY so it
-  // shadows any same-named member of the enclosing class (real dcc behavior —
+  // shadows any same-named member of the enclosing class (real dcc behavior -
   // e.g. TMatch in System.RegularExpressions has a METHOD named Result, yet
   // `Result := ...` inside its other methods still means the function result).
   if (LResultNode <> NIL_NODE) and
@@ -1296,7 +1296,7 @@ begin
 
   case KindOf(ANode) of
     nkUsesClause:
-      // Aux = 1 is a package `requires` clause — references to PACKAGES,
+      // Aux = 1 is a package `requires` clause - references to PACKAGES,
       // not units; resolving those as units would only poison the graph.
       if FTree.Nodes[ANode].Aux <> 1 then
       begin
@@ -1346,8 +1346,8 @@ begin
 
     nkInlineVar, nkInlineConst:
       begin
-        // 3.1.3: an inline var may declare SEVERAL names — `var V, S: string;`
-        // (10.3+, dcc-verified) — and the parser already emits one nkIdent per
+        // 3.1.3: an inline var may declare SEVERAL names - `var V, S: string;`
+        // (10.3+, dcc-verified) - and the parser already emits one nkIdent per
         // name. Only the FIRST was ever declared, so every other name read as
         // an undeclared identifier and the shared type bound to none of them
         // (real bug: System.SysUtils' `var V, S: string`, System.TypInfo's
@@ -1387,8 +1387,8 @@ begin
         for var LIdx := 0 to LSymCount - 1 do
           FModel.Symbols[LSyms[LIdx]].TypeNode := LType;
         NotePendingAggregate(LType);
-        // Everything after the last NAME — the type expression and/or the
-        // initializer — is ordinary content of this scope.
+        // Everything after the last NAME - the type expression and/or the
+        // initializer - is ordinary content of this scope.
         if LName <> NIL_NODE then
         begin
           var LRest := NextSib(LName);
@@ -1402,10 +1402,10 @@ begin
 
     nkLabelSec:
       begin
-        // 5.6.4 `label Foo, Bar;` — declare each identifier label in the
+        // 5.6.4 `label Foo, Bar;` - declare each identifier label in the
         // enclosing (routine/program) scope. Without this nothing ever
         // produced a skLabel symbol, so the labeled statement's OWN `Foo:`
-        // ident — which the parser does emit — resolved to nothing and Phase 2
+        // ident - which the parser does emit - resolved to nothing and Phase 2
         // reported a false E2003 (found on System.Generics.Defaults'
         // AnsiIdentHash, which jumps to a `notAscii` label).
         LChild := FirstChild(ANode);
@@ -1422,13 +1422,13 @@ begin
 
     nkAnonMethod:
       begin
-        // An anonymous method owns its params/locals — two sibling literals
+        // An anonymous method owns its params/locals - two sibling literals
         // reusing a local name (both declaring `var LSer: ...`) must not read
         // as a redeclaration in the enclosing routine. It also owns its
         // implicit `Result` (typed by the child between the params and the
         // body): `Result := True` inside a function(...): Boolean literal
         // must NOT bind to (and type-check against) the ENCLOSING function's
-        // Result. Params arrive in the same nkParams shape as a routine's —
+        // Result. Params arrive in the same nkParams shape as a routine's -
         // declare them the same way.
         var LAnon := FModel.AddScope(sckRoutine, AScope, ANode);
         FNodeScope[ANode] := LAnon;
@@ -1479,16 +1479,16 @@ begin
 
           Only the first and last are names in THIS scope. The middle segment
           names a member of the interface, so resolving it here as an ordinary
-          unqualified reference is guaranteed to fail — that was 6 false E2003 in
+          unqualified reference is guaranteed to fail - that was 6 false E2003 in
           Vcl.AxCtrls alone (`IPersistStorage.Load`, `.Save`, ...).
 
           It is left WITHOUT A SCOPE, the same device the unit's own name node
-          uses, so no pass — intra-unit or cross — tries to resolve or report it.
+          uses, so no pass - intra-unit or cross - tries to resolve or report it.
           ResolveNode binds it against the interface's member scope where it can,
           which is the navigable case.
 
           The <...> segment is a type ARGUMENT of the implemented interface, not
-          a generic parameter declaration (§14.2.2's own warning), so its idents
+          a generic parameter declaration (sec. 14.2.2's own warning), so its idents
           stay plain references. }
         var LIdents: TArray<Integer> := nil;
         LChild := FirstChild(ANode);
@@ -1522,11 +1522,11 @@ begin
       end;
 
     nkRecordType, nkClassType, nkInterfaceType, nkObjectType, nkHelperType:
-      // An ANONYMOUS structured type — written inline in a declaration's type
+      // An ANONYMOUS structured type - written inline in a declaration's type
       // slot rather than given a name, e.g. `TAB: array[0..1] of record
       // offset, minimum: Cardinal; end = (...)`. It gets a member scope like
       // any other struct, but until now no SYMBOL owned that scope, and every
-      // cross-model type is a (unit, symbol) pair — so `with TAB[I] do` could
+      // cross-model type is a (unit, symbol) pair - so `with TAB[I] do` could
       // name the element type at all, and its fields read as undeclared. The
       // synthetic symbol is deliberately unnamed: nothing may resolve TO it by
       // name, it exists only to carry the member scope.
@@ -1536,7 +1536,7 @@ begin
       begin
         // Inline vars are block-scoped: give each begin..end its own scope so
         // the same name in sibling blocks does not read as a redeclaration.
-        // A for statement scopes the same way — its `for var I` counter or
+        // A for statement scopes the same way - its `for var I` counter or
         // `for var E in` element lives in the LOOP, so two sibling loops
         // reusing one name are not a redeclaration (dcc behavior).
         var LBlock := FModel.AddScope(sckBlock, AScope, ANode);
@@ -1552,7 +1552,7 @@ begin
     nkProcType:
       begin
         // 6.6.1 procedural type: its parameter NAMES are declarations of the
-        // signature, not references — declare them in a scope of their own
+        // signature, not references - declare them in a scope of their own
         // (nothing outside the signature can see them), so they neither leak
         // nor read as undeclared identifiers (`TNotifyEvent = procedure(
         // Sender: TObject)...` must not E2003 on Sender). Everything else
@@ -1581,7 +1581,7 @@ begin
 
     nkExceptOn:
       begin
-        // 18.1.2 `on [E:] Type do stmt` — the handler variable (named form:
+        // 18.1.2 `on [E:] Type do stmt` - the handler variable (named form:
         // 3 children = ident, type, body) is scoped to THIS handler alone.
         var LOn := FModel.AddScope(sckBlock, AScope, ANode);
         FNodeScope[ANode] := LOn;
@@ -1633,13 +1633,13 @@ begin
     nkAggregateField:
       begin
         // FirstChild is a FIELD NAME (`style` in `(style: 0; ...)`), never
-        // an ordinary value reference — resolved directly against the
+        // an ordinary value reference - resolved directly against the
         // aggregate's target type once BindTypes has run (see
         // ResolveAggregates), same spirit as nkMember's own member name
         // (ResolveNode: "resolved via A's scope, never as a plain
         // identifier"). Left UNVISITED here (NIL_SCOPE stays), so it is
         // never an undeclared-identifier candidate regardless of whether
-        // that later pass finds a match — a typo'd field name silently
+        // that later pass finds a match - a typo'd field name silently
         // stays unresolved rather than false-E2003ing, the same trade-off
         // the array-property index param fix already makes. Only the VALUE
         // needs ordinary Collect.
@@ -1650,7 +1650,7 @@ begin
       begin
         // `Meth(Source := X)` on a late-bound (Variant) call, 4.10.1. FirstChild
         // is a DISPATCH PARAMETER NAME resolved by the automation server at run
-        // time — dcc name-checks nothing there (`V.Add(Nonexistent := 1)`
+        // time - dcc name-checks nothing there (`V.Add(Nonexistent := 1)`
         // compiles), so leaving it unvisited, NIL_SCOPE and all, is exactly
         // right: every undeclared-identifier path already skips scopeless nodes.
         // The VALUE is an ordinary expression and IS checked (dcc-verified:
@@ -1670,26 +1670,26 @@ begin
   end;
 end;
 
-{ helpers (ch.15 §15.3)
+{ helpers (ch.15 sec. 15.3)
 
   A `class/record helper for T` declares members that behave, at every use
   site, as if they were T's own: a method of T sees the helper's members bare
   (`Result := Identity` inside TMatrix.CreateRotation, where Identity is a
-  const of `TMatrixConstants = record helper for TMatrix` — System.Math.
+  const of `TMatrixConstants = record helper for TMatrix` - System.Math.
   Vectors, the bug that prompted this), a qualified `T.Member` finds them, and
-  — the other direction — the helper's OWN method bodies see T's members
+  - the other direction - the helper's OWN method bodies see T's members
   through their implicit Self (`FValue` inside a TThingHelper method).
 
   None of that could happen from CollectStruct: a helper may be declared
   before the type it extends, so the `for T` target is not necessarily a
   declared symbol yet while collecting. Hence a pass of its own, run once
   Collect has declared every type in the unit but before Resolve binds any
-  name — the joins have to be in place before the first lookup.
+  name - the joins have to be in place before the first lookup.
 
   INTRA-UNIT ONLY. A helper whose target lives in another unit (a qualified
   `for Some.Unit.T`) is skipped: cross-model member injection belongs to the
   project driver's cross passes, not here. Skipping only costs reach, never
-  correctness — an unresolved name is never itself a diagnostic. }
+  correctness - an unresolved name is never itself a diagnostic. }
 
 // The `for T` target of a helper: the LAST of the leading run of type
 // references under the nkHelperType node. A class helper may also name a
@@ -1763,17 +1763,17 @@ begin
     // Chase alias links, because the `for` target is often an ALIAS of the
     // real struct and only the struct's own symbol carries a member scope
     // (`TD2DMatrix3x2F = D2D_MATRIX_3X2_F`, helper declared for the alias
-    // while the operator methods are on the underlying record —
+    // while the operator methods are on the underlying record -
     // Winapi.D2D1). NOT StructMemberScope: that chases via DesignatorHead,
     // i.e. RefMap, and this pass runs BEFORE ResolveNode has filled it (it
-    // must — Resolve is what binds the names this join exists to serve). So
+    // must - Resolve is what binds the names this join exists to serve). So
     // resolve each link by NAME instead. Bare names only, matching the
     // INTRA-UNIT guard on the `for` target above.
     var LExtScope := AliasedMemberScope(LExtSym);
     if LExtScope = NIL_SCOPE then
       Continue;
     // `TFoo = record helper for TFoo` is malformed but parses, and the name
-    // resolves right back to the helper itself — joining a scope INTO ITSELF
+    // resolves right back to the helper itself - joining a scope INTO ITSELF
     // would make FindLocalDeep recurse forever on every failed lookup. The
     // one shape that can do that, refused explicitly; every other join here
     // points from an extended type to a DIFFERENT helper, so the Additional
@@ -1783,12 +1783,12 @@ begin
     // Direction 1: T's members now include the helper's, so both a bare
     // reference from inside T's own methods (which join T's member scope)
     // and a qualified T.Member (ResolveNode's nkMember, via FindLocalDeep)
-    // find them. LAST helper joined wins the lookup — FindLocalDeep walks
+    // find them. LAST helper joined wins the lookup - FindLocalDeep walks
     // Additional most-recently-added first, which is dcc's own rule when two
     // helpers for one type are in scope.
     // SHADOWING, not an ordinary join: a helper member hides the extended
     // type's own of the same name (15.3.3). That precedence was the long
-    // standing same-unit gap — the cross-unit side (HelperMemberHit, checked
+    // standing same-unit gap - the cross-unit side (HelperMemberHit, checked
     // before the type's members at every hop) has always had it right.
     FModel.JoinScopeShadowing(LExtScope, LHelperScope);
     LExtScopes[LIdx] := LExtScope;
@@ -1799,7 +1799,7 @@ begin
   // Direction 2: the helper's own method BODIES see T's members through the
   // implicit Self. Those bodies are separate routine scopes (a method is
   // implemented outside the type), each tagged by CollectRoutine with the
-  // struct it belongs to — so the tag is what identifies them. Joined into
+  // struct it belongs to - so the tag is what identifies them. Joined into
   // the ROUTINE scope, deliberately NOT into the helper's member scope: the
   // latter would pair with direction 1 into a two-node cycle.
   for LScope := 0 to FModel.Scopes.Count - 1 do
@@ -1848,18 +1848,18 @@ begin
     nkIdent:
       if not FIsDeclName[ANode] and (FModel.RefMap[ANode] = NIL_SYM) then
       begin
-        // Computed ONCE for the whole branch — the arity retry and the
+        // Computed ONCE for the whole branch - the arity retry and the
         // attribute fallback below used to re-lower the same node.
         var LNameLower := NodeNameLower(ANode);
         // ResolveAt, not Resolve: this is a REFERENCE, and an inline
         // `var`/`const` is visible only from its own declaration onward
-        // (3.1.3). See TPasSemaModel.ResolveAt — the position is only
+        // (3.1.3). See TPasSemaModel.ResolveAt - the position is only
         // consulted for block scopes, so a routine's classic `var` section and
         // everything above it stay order-independent.
         FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],
           LNameLower, FTree.Nodes[ANode].FirstToken);
         // ARITY is part of a type's identity (16.1.2), and BOTH directions of
-        // ignoring that are real — one third-party library's base unit sets both traps:
+        // ignoring that are real - one third-party library's base unit sets both traps:
         // `Pointer<T>` beside the builtin `Pointer` (a BARE name must skip the
         // generic) and `Nullable` beside `Nullable<T>` (a `Name<T>` must skip
         // the non-generic). The project pass has had the rule for CROSS-unit
@@ -1890,7 +1890,7 @@ begin
           // only its head. `TNodes<T>` and `TNodes<TKey, TValue>` (a third-party
           // Spring.Collections.Trees) both declare a nested
           // `PRedBlackTreeNode`, so binding the qualifier to the wrong arity
-          // silently resolved the wrong nested type — and the only visible
+          // silently resolved the wrong nested type - and the only visible
           // difference was that its node record has `fKey` where the other has
           // `fPair`. Same walk the qualified-implementation-name case does
           // above; reached only for a name written WITH type arguments whose
@@ -1927,7 +1927,7 @@ begin
       begin
         // Segments are flat siblings; see Collect's own case for the roles. The
         // middle one has no scope, so the generic child walk below would leave
-        // it unbound — bind it against the interface's members when the
+        // it unbound - bind it against the interface's members when the
         // interface is same-unit, which is what makes it navigable.
         var LSegs: TArray<Integer> := nil;
         LChild := FirstChild(ANode);
@@ -1963,7 +1963,7 @@ begin
         begin
           LMemScope := FModel.Symbols[LHead].MemberScope;
           // FindLocalDeep, not FindLocal: a struct's member scope carries a
-          // joined scope only where one was deliberately injected into it —
+          // joined scope only where one was deliberately injected into it -
           // today that is a helper's members (JoinHelperScopes), which a
           // qualified `TMatrix.Identity` must find exactly like a bare one.
           if LMemScope <> NIL_SCOPE then
@@ -1999,17 +1999,17 @@ end;
 
 { structured typed-const/var initializers (3.2.2)
 
-  `X: TWndClass = (style: 0; lpfnWndProc: ...)` — the parser already builds
+  `X: TWndClass = (style: 0; lpfnWndProc: ...)` - the parser already builds
   nkAggregate/nkAggregateField nodes (TPasParser.ParseConstInitializer) but
   nothing downstream resolved a field NAME against the target type; Collect
   left it deliberately unvisited (see the nkAggregateField case) rather than
   treat it as an ordinary value reference, so this pass is the only place
-  that can still fill in the right answer — same two-phase shape as `with`
+  that can still fill in the right answer - same two-phase shape as `with`
   above: type binding (BindTypes) must run first, so this runs right after. }
 
 // ATypeSym's own struct member scope, chasing through however many alias
 // links sit in between (`TWndClass = TWndClassW = tagWNDCLASSW = record
-// ... end;` — only tagWNDCLASSW's OWN symbol gets a MemberScope from
+// ... end;` - only tagWNDCLASSW's OWN symbol gets a MemberScope from
 // CollectStruct; every alias in the chain has NIL_SCOPE). Depth-capped like
 // AncestorTypeSym: real alias chains are shallow; this only guards a
 // malformed/circular one.
@@ -2039,12 +2039,12 @@ begin
 end;
 
 // Resolves every nkAggregateField name directly under AAggrNode against
-// AStructScope (the target type's member scope — NIL_SCOPE if the type
+// AStructScope (the target type's member scope - NIL_SCOPE if the type
 // wasn't a struct at all, e.g. an array/set aggregate, in which case this
 // is a no-op: those have no field names to resolve in the first place),
 // recursing into a nested aggregate for a record-typed field. Plain
-// (unnamed) elements sitting alongside field entries — an array-of-scalar
-// or set aggregate — are untouched: ordinary expressions Collect/ResolveNode
+// (unnamed) elements sitting alongside field entries - an array-of-scalar
+// or set aggregate - are untouched: ordinary expressions Collect/ResolveNode
 // already resolve normally, nothing new needed there.
 procedure TPasSemaResolver.ResolveAggregateAgainst(AAggrNode,
   AStructScope: Integer);
@@ -2091,31 +2091,31 @@ begin
   end;
 end;
 
-{ with (ch.05 §5.7)
+{ with (ch.05 sec. 5.7)
 
   `with A, B do Body` opens an unqualified-name scope over A's and B's own
-  members, right-to-left (B, the LAST target, wins a name both share) —
+  members, right-to-left (B, the LAST target, wins a name both share) -
   Body sees them BEFORE the enclosing scope. This can only run as a
   SEPARATE, LATER pass, not inline in Collect/ResolveNode: it needs the
   TARGET's TYPE to find the member scope to open, and type information
   (TypeSym, bound by BindTypes from a symbol's own declared type node) is
-  only available once BindTypes has run — which itself runs after
+  only available once BindTypes has run - which itself runs after
   ResolveNode. So: Collect/ResolveNode run as normal, unaware of `with`
   (a with-body's identifiers are Phase-1-unresolved exactly like any
   identifier from a not-yet-known scope); THEN, once BindTypes has bound
   declared types, ResolveWithStmts finds each target's type, opens a scope
   over its members, splices that scope into the with-body's existing scope
-  chain (RepointScope), and re-runs ResolveNode over the body — which,
+  chain (RepointScope), and re-runs ResolveNode over the body - which,
   thanks to ResolveNode's existing NIL_SYM guard, only fills in the NAMES
   that were still unresolved, never touching ones Phase 1 already got right. }
 
-// ATypeSym's DIRECT ancestor's type symbol — same-unit only. CollectStruct
+// ATypeSym's DIRECT ancestor's type symbol - same-unit only. CollectStruct
 // never joins an ancestor's MemberScope into the descendant's own (that is
 // the PROJECT-level CrossResolveInherited/FindMemberX pass's job, which also
 // reaches CROSS-unit ancestors); this is a deliberately NARROWER intra-unit
 // climb, giving `with` at least same-unit inherited members (a same-unit
-// struct's own children lead with the heritage clause — ancestor first, any
-// IMPLEMENTED INTERFACES after — CollectStruct's own nkIdent/nkMember/
+// struct's own children lead with the heritage clause - ancestor first, any
+// IMPLEMENTED INTERFACES after - CollectStruct's own nkIdent/nkMember/
 // nkTypeArgs case list; the FIRST such child is always the true ancestor,
 // same convention the project-level pass already uses). NIL_SYM (a
 // cross-unit ancestor, or none) is the same graceful "can't fully type
@@ -2145,7 +2145,7 @@ begin
 end;
 
 // ANameLower on ATypeSym's OWN member scope, or (same-unit only) an
-// ancestor's — see AncestorTypeSym. Depth-capped defensively; real
+// ancestor's - see AncestorTypeSym. Depth-capped defensively; real
 // hierarchies are nowhere near this deep.
 function TPasSemaResolver.FindMemberUpChain(ATypeSym: Integer;
   const ANameLower: string): Integer;
@@ -2169,24 +2169,24 @@ begin
 end;
 
 // The with-TARGET's type, restricted to what BindTypes already established
-// (a symbol's OWN declared type — not full expression-level inference,
+// (a symbol's OWN declared type - not full expression-level inference,
 // which is the intra-unit typer's job and runs even later than this pass).
 // Matches the spec's own restriction that with-targets are plain designators
 // (var/field/param/property/routine-result) or a type-cast, not arbitrary
-// expressions — NIL_SYM for anything fancier (e.g. an inline-if) is a
+// expressions - NIL_SYM for anything fancier (e.g. an inline-if) is a
 // deliberate, graceful "leave it unresolved", not a regression.
 //
 // nkMember needs its OWN chain-walk, not a RefMap lookup: Phase 1's
-// ResolveNode only resolves a TYPE-QUALIFIED member (TFoo.Bar) — an
-// INSTANCE member chain (Obj.Field.Method, e.g. `FItems.Add` — the ACTUAL
+// ResolveNode only resolves a TYPE-QUALIFIED member (TFoo.Bar) - an
+// INSTANCE member chain (Obj.Field.Method, e.g. `FItems.Add` - the ACTUAL
 // shape of the real bug report, Vcl.ComCtrls.pas's `with FItems.Add do`) is
 // deliberately left NIL there; walking it is normally the PROJECT-level
 // CrossType pass's job (FindMemberX), which runs long after this one unit's
-// Run finishes — too late for `with`. So this recurses on the BASE's own
-// type (via this same function — restricted to the same simple designator
+// Run finishes - too late for `with`. So this recurses on the BASE's own
+// type (via this same function - restricted to the same simple designator
 // shapes) and looks the member up directly, rather than trusting a RefMap
 // entry that was never going to be there.
-{ Does ABaseNode name an ARRAY PROPERTY — a property that declares parameters?
+{ Does ABaseNode name an ARRAY PROPERTY - a property that declares parameters?
   Then the brackets after it are ITS index list, the model already stores its
   declared type per-element, and nothing further may be peeled. Anything else
   (a field, a variable, a plain property) is a value being indexed, and if its
@@ -2214,8 +2214,8 @@ begin
   end;
 end;
 
-{ The declared type of ATypeSym's DEFAULT array property — the one indexing an
-  instance of it means (13.1.2) — searched up the same-unit ancestor chain,
+{ The declared type of ATypeSym's DEFAULT array property - the one indexing an
+  instance of it means (13.1.2) - searched up the same-unit ancestor chain,
   NIL_SYM when the type has none. A property qualifies when it declares
   PARAMETERS and carries the `default` specifier, exactly as the project
   typer's IsDefaultArrayProp reads it; the model stores such a property's
@@ -2237,7 +2237,7 @@ begin
       // The scope's OWN declaration list, not a scan of every symbol in the
       // unit: this runs per with-target, and a whole-model scan on a shared
       // path is the perf trap this codebase has hit three times. Index loop
-      // and a slice compare — the for-in enumerator and the lowered copy per
+      // and a slice compare - the for-in enumerator and the lowered copy per
       // prop-spec were both allocations on the same per-with-target path.
       LSyms := FModel.Scopes[LScope].Symbols;
       if LSyms <> nil then
@@ -2282,7 +2282,7 @@ begin
     // a member of the ANCESTOR, so the target's type is that member's, looked up
     // from the ancestor of the struct whose method body this is. The project
     // typer has had this branch since the nkInherited fix; without it here the
-    // SAME-unit case never opened its scope intra-unit — no false diagnostic
+    // SAME-unit case never opened its scope intra-unit - no false diagnostic
     // (the project pass covers it) but no navigation either.
     nkInherited:
       begin
@@ -2312,7 +2312,7 @@ begin
           skVar, skConst, skField, skParam, skRoutine, skProperty:
             Result := FModel.Symbols[LHead].TypeSym;
           // A bare class TYPE NAME is a legal target (5.7, dcc-verified:
-          // `with TCanvas do Tick` reaches its class methods and class vars —
+          // `with TCanvas do Tick` reaches its class methods and class vars -
           // the same reach a `class of` reference gives). The target's type is
           // the type ITSELF; asking for its declared type, as the value kinds
           // above do, yields nothing.
@@ -2335,11 +2335,11 @@ begin
           LHead := FindMemberUpChain(LBaseType, NodeNameLower(LName));
           if LHead = NIL_SYM then
             Exit;
-          // Retroactively record it — the same thing CrossType would do
+          // Retroactively record it - the same thing CrossType would do
           // later for navigation purposes; a free correctness improvement
           // (e.g. ctrl+click on `Add` in `with FItems.Add do` now works
           // too), and keeps the upcoming ResolveNode(LBody) re-walk (which
-          // recurses back through the targets — see ResolveWithStmts'
+          // recurses back through the targets - see ResolveWithStmts'
           // header) consistent with what this function already found.
           FModel.RefMap[LName] := LHead;
         end;
@@ -2351,7 +2351,7 @@ begin
     nkCall:
       begin
         LBase := FirstChild(ANode);
-        // A cast T(Expr): the callee is a bare type name — resolves
+        // A cast T(Expr): the callee is a bare type name - resolves
         // directly (Phase 1 already gets a plain type-name reference
         // right, no chain-walk needed).
         if KindOf(LBase) = nkIdent then
@@ -2362,17 +2362,17 @@ begin
             Exit(LHead);
         end;
         // Otherwise a routine/property call (bare or parenthesized,
-        // qualified or not) -> its own declared result type — same
+        // qualified or not) -> its own declared result type - same
         // designator-typing this function already does for a parenless
         // access, so just recurse on the callee.
         Result := WithTargetTypeSym(LBase);
       end;
     nkIndex:
-      // `with Arr[I] do` — the ELEMENT type. By far the most common with-target
+      // `with Arr[I] do` - the ELEMENT type. By far the most common with-target
       // shape in the RTL: `with FList[Index] do` (System.WideStrings),
       // `with LVarBounds[I] do` (System.Variants), `with Entry.Aliases[High(
       // Entry.Aliases)] do` (System.TypInfo), `with NetResources^[I] do`
-      // (System.AnsiStrings, index over a deref) — 27 false E2003s between
+      // (System.AnsiStrings, index over a deref) - 27 false E2003s between
       // them.
       //
       // ElementTypeOf returns NIL_SYM when the base is NOT an array, which is
@@ -2384,7 +2384,7 @@ begin
         Result := ElementTypeOf(FirstChild(ANode));
         // Not an array, but a CLASS/record with a DEFAULT array property is
         // indexable all the same, and then the element type is that
-        // property's — `with Values[I - 1] do`, where Values is a
+        // property's - `with Values[I - 1] do`, where Values is a
         // TcxValuesViewInfo and `property Values[Index]: TcxValueInfo ...
         // default` is what the brackets mean (a suite's filter control). The
         // pass-through below would open the COLLECTION instead, and the
@@ -2395,7 +2395,7 @@ begin
         // exists for the case where the base designator IS the array
         // property (its declared type is already per-element).
         // ...but ONLY when the base is not itself an array property, whose
-        // stored type is per-element already — peeling a second level there
+        // stored type is per-element already - peeling a second level there
         // is how `with TaviFileList.Singleton.Files[Hospital_file] do` lost
         // its whole body (2447 reports on one project, from one `.inc`).
         if (Result = NIL_SYM) and
@@ -2406,16 +2406,16 @@ begin
           Result := WithTargetTypeSym(FirstChild(ANode));
       end;
     nkBinaryOp:
-      // `with Obj as TSomething do` (System.Net.Socket) — the CAST's type, i.e.
+      // `with Obj as TSomething do` (System.Net.Socket) - the CAST's type, i.e.
       // the right operand. Only `as` qualifies; every other binary operator
       // yields a value whose type is not a with-openable struct anyway.
       //
       // Aux on nkBinaryOp is a TOKEN index, so it must be read through
-      // Source.VisibleText — NOT NodeText, which takes a NODE index. Token
+      // Source.VisibleText - NOT NodeText, which takes a NODE index. Token
       // indices run well past the node count, so passing one to NodeText read
       // memory past the end of Nodes: garbage without range checks (this
       // comparison then usually said False, silently losing the cast, and the
-      // junk it read varied per run — that was the source of the analyzer's
+      // junk it read varied per run - that was the source of the analyzer's
       // run-to-run non-determinism), ERangeError with them (whole unit
       // discarded as unparseable, reported as a missing unit). Every other
       // reader of Aux in the codebase already uses VisibleText.
@@ -2437,7 +2437,7 @@ begin
         end;
       end;
     nkDeref:
-      // `with SomePointer^ do` — the target's type is what the pointer POINTS
+      // `with SomePointer^ do` - the target's type is what the pointer POINTS
       // AT (System.Variants: `with LVarData^ do VType := ...`, LVarData being
       // a PVarData). Without this the whole with-body stayed unresolved.
       Result := PointeeTypeSym(WithTargetTypeSym(FirstChild(ANode)));
@@ -2451,7 +2451,7 @@ end;
 
   Two sources, because an array is often not a named type: the base's own
   declared type NODE may BE an inline `array[...] of T` (`LVarBounds:
-  array[0..3] of TVarBound;`), which no symbol lookup can reach — nothing
+  array[0..3] of TVarBound;`), which no symbol lookup can reach - nothing
   resolves an nkArrayType expression to a symbol. So try the declared node
   first, then the named type it resolves to. Alias links are chased in both
   (TArr = TInner = array of T), depth-capped like PointeeTypeSym. }
@@ -2459,7 +2459,7 @@ function TPasSemaResolver.ElementTypeOf(ABaseNode: Integer): Integer;
 
   // Element child of an nkArrayType node: the LAST child (`array[dims] of T`).
   // NB for a multi-dimensional `array[a, b] of T` this jumps straight to T
-  // rather than to the intermediate row type — over-eager by one level in a
+  // rather than to the intermediate row type - over-eager by one level in a
   // shape too rare to model, and it can only ever find members of T instead
   // of failing.
   function ElemOfArrayNode(ANode: Integer): Integer;
@@ -2477,7 +2477,7 @@ function TPasSemaResolver.ElementTypeOf(ABaseNode: Integer): Integer;
       LLast := LChild;
       LChild := NextSib(LChild);
     end;
-    // NESTED inline arrays (`array of array of T`) — descend to the innermost
+    // NESTED inline arrays (`array of array of T`) - descend to the innermost
     // element. Same accepted over-eagerness as the comma-dimension spelling
     // documented above, and the intermediate row type is anonymous anyway.
     while (LLast <> NIL_NODE) and (KindOf(LLast) = nkArrayType) and
@@ -2494,7 +2494,7 @@ function TPasSemaResolver.ElementTypeOf(ABaseNode: Integer): Integer;
     // An ANONYMOUS element type (`array[...] of record ... end`) is a struct
     // NODE, not a designator, so DesignatorHead has nothing to read. Its
     // synthetic symbol is reachable through the member scope CollectStruct
-    // hung off that node — see DeclareAnonStruct.
+    // hung off that node - see DeclareAnonStruct.
     if (LLast <> NIL_NODE) and (KindOf(LLast) in [nkRecordType, nkClassType,
        nkInterfaceType, nkObjectType]) then
     begin
@@ -2531,7 +2531,7 @@ begin
       nkArrayType:
         Exit(ElemOfArrayNode(LDef));
       nkIdent, nkMember, nkTypeArgs:
-        LSym := DesignatorHead(LDef);   // alias link — keep chasing
+        LSym := DesignatorHead(LDef);   // alias link - keep chasing
     else
       Exit(NIL_SYM);                    // not an array, and never will be
     end;
@@ -2542,7 +2542,7 @@ end;
 // The type a POINTER type points at: PVarData = ^TVarData -> TVarData,
 // chasing through however many alias links sit in between (PFoo = PVarData),
 // exactly like StructMemberScope does for member scopes. Depth-capped for the
-// same reason — real chains are shallow, this only guards a malformed or
+// same reason - real chains are shallow, this only guards a malformed or
 // circular one. NIL_SYM when ATypeSym is not a pointer type at all.
 function TPasSemaResolver.PointeeTypeSym(ATypeSym: Integer): Integer;
 var
@@ -2563,19 +2563,19 @@ begin
       nkPointerType:
         Exit(DesignatorHead(FirstChild(LDef)));
       nkIdent, nkMember, nkTypeArgs:
-        LSym := DesignatorHead(LDef);   // alias link — keep chasing
+        LSym := DesignatorHead(LDef);   // alias link - keep chasing
     else
       Exit;                             // not a pointer, and never will be
     end;
   end;
 end;
 
-// Retroactively routes ANode's name resolution — and, transitively, every
-// descendant that does NOT open its own scope — through ANewScope instead of
+// Retroactively routes ANode's name resolution - and, transitively, every
+// descendant that does NOT open its own scope - through ANewScope instead of
 // whatever Collect originally assigned. A descendant that DOES own a scope
 // (block, nested `with`, anon method, ...) only needs THAT scope's own
 // Parent link reparented; everything beneath it already resolves relative to
-// that scope's chain, so recursion stops there — one link fixes the whole
+// that scope's chain, so recursion stops there - one link fixes the whole
 // subtree. Used to splice a with-target's member scope into an
 // already-Collected body (see ResolveOneWithStmt).
 procedure TPasSemaResolver.RepointScope(ANode, ANewScope: Integer);
@@ -2602,7 +2602,7 @@ end;
 
 { Unbinds every body name that the with scope ALSO offers, so ResolveNode's
   "only fill NIL_SYM" rule cannot leave a Phase-1 guess standing in front of a
-  member. 5.7: a target member outranks EVERYTHING — dcc-verified against a
+  member. 5.7: a target member outranks EVERYTHING - dcc-verified against a
   local, a parameter, a unit-level global and an inline `var` declared inside
   the body itself.
 
@@ -2610,11 +2610,11 @@ end;
   open (WithUnopened, revised later by the project's with pass); a target whose
   type IS same-unit resolvable opened its scope and then quietly kept the older
   binding. `with R do Shared := 'x'` with a local `Shared: Integer` in scope
-  was a false E2010 — the shape the 5.7 bullet describes, and the one the RTL
+  was a false E2010 - the shape the 5.7 bullet describes, and the one the RTL
   corpus happens never to contain.
 
   Skips the two node classes that are not bare references: a DECLARATION's own
-  name (an inline `var Shared` in the body still declares Shared — only its USES
+  name (an inline `var Shared` in the body still declares Shared - only its USES
   bind to the member, which is exactly why dcc rejects that program), and the
   member name of `A.B`, which is resolved through A. }
 procedure TPasSemaResolver.UnbindShadowedByWith(ANode, AWithScope: Integer);
@@ -2660,7 +2660,7 @@ begin
     Exit;
 
   // One scope per with-statement. Every resolved target's members are
-  // JOINED in LEFT-TO-RIGHT source order — Resolve()'s existing
+  // JOINED in LEFT-TO-RIGHT source order - Resolve()'s existing
   // Additional-scope walk already checks the MOST-RECENTLY-JOINED one first
   // ("uses/with priority", see TPasSemaModel.Resolve), which is exactly the
   // spec's right-to-left, last-target-wins precedence, for free. Each
@@ -2672,7 +2672,7 @@ begin
   LAnyUnopened := False;
   for LTarget in LTargets do
   begin
-    // A target after the first is resolved INSIDE the ones before it — that is
+    // A target after the first is resolved INSIDE the ones before it - that is
     // the whole point of the multi-target form: `with DIB, dsbm, dsbmih do`
     // works because dsbm is a field of DIB and dsbmih a field of dsbm
     // (Vcl.Graphics does exactly this, and Vcl.Controls does
@@ -2716,7 +2716,7 @@ begin
 
   // A target this pass could not open leaves every Phase-1 binding in the body
   // TENTATIVE: one of that target's members may still shadow whatever the name
-  // bound to instead (5.7 — and a with member outranks EVERYTHING, verified
+  // bound to instead (5.7 - and a with member outranks EVERYTHING, verified
   // against a class field, local, parameter, same-unit global and even an
   // inline var declared inside the body). Recorded so the typer withholds
   // judgement here and the project's with pass can revise the binding.
@@ -2724,7 +2724,7 @@ begin
     FModel.WithUnopened := FModel.WithUnopened + [AWith];
 
   if LWithScope = NIL_SCOPE then
-    Exit;   // no target resolved to a real, member-bearing type — leave as-is
+    Exit;   // no target resolved to a real, member-bearing type - leave as-is
 
   UnbindShadowedByWith(LBody, LWithScope);
   RepointScope(LBody, LWithScope);
@@ -2737,7 +2737,7 @@ var
 begin
   // A flat forward scan over all nodes visits an OUTER with-statement before
   // any with NESTED in its body (node indices are assigned in parse order,
-  // depth-first) — required for correctness: ResolveOneWithStmt's
+  // depth-first) - required for correctness: ResolveOneWithStmt's
   // RepointScope+ResolveNode(LBody) call for the outer one also re-resolves
   // the INNER with's own target expressions (ResolveNode recurses into
   // every child generically; nkWithStmt has no special case there), so by
@@ -2771,7 +2771,7 @@ var
   LChild, LNameNode: Integer;
 begin
   FNodeScope[ARoot] := FImpl;
-  // First child is the compilation unit's own name — a definition, not a
+  // First child is the compilation unit's own name - a definition, not a
   // reference. Record it and leave it without a scope so no pass resolves it.
   LNameNode := FirstChild(ARoot);
   if (LNameNode <> NIL_NODE) and (KindOf(LNameNode) in [nkIdent, nkMember]) then
@@ -2798,7 +2798,7 @@ begin
   end;
 end;
 
-{ 5.5.1: the counter of a `for` loop is read-only in the body — dcc reports
+{ 5.5.1: the counter of a `for` loop is read-only in the body - dcc reports
   `E2081 Assignment to FOR-Loop variable 'X'`. Three shapes, all dcc-verified
   and all reported: a direct `I := ...`, a var-param mutation (`Inc(I)`,
   `Dec(I)`), and the same two against an inline `for var K` counter.
@@ -2807,8 +2807,8 @@ end;
   that the assignment target is the same SYMBOL the header declared or named,
   which is what makes a shadowed name in a nested scope not a false hit.
 
-  Intra-unit by construction — a for counter is a local or an inline
-  declaration, never reachable from another unit — so this needs none of the
+  Intra-unit by construction - a for counter is a local or an inline
+  declaration, never reachable from another unit - so this needs none of the
   cross-unit machinery and cannot be gated on AllUsesResolved. }
 procedure TPasSemaResolver.CheckForCounters;
 var
@@ -2872,7 +2872,7 @@ var
           // mutate the counter exactly as an assignment does. Matched by NAME
           // rather than by symbol: both are compiler intrinsics with no
           // declaration to point at, and a user routine that shadows either
-          // name would not be an intrinsic call at all — but it would also
+          // name would not be an intrinsic call at all - but it would also
           // have to take a var parameter to matter, which is a precision this
           // check does not claim.
           LCallee := FirstChild(ANode);
@@ -2917,13 +2917,13 @@ begin
   end;
 end;
 
-{ 18 §18.3.1: a bare `raise` re-raises the in-flight exception and is only
-  valid inside an exception handler — dcc reports `E2145 Re-raising an
+{ 18 sec. 18.3.1: a bare `raise` re-raises the in-flight exception and is only
+  valid inside an exception handler - dcc reports `E2145 Re-raising an
   exception only allowed in exception handler`.
 
   The spec says "the analyzer must track handler context" without saying what
   that context is, so dcc32 37.0 was asked. It is purely LEXICAL, and the part
-  of a `try` statement the `raise` sits in is what decides — the NEAREST one,
+  of a `try` statement the `raise` sits in is what decides - the NEAREST one,
   not any enclosing one:
 
     try except try finally raise end end   error  (nearest part is `finally`)
@@ -2932,7 +2932,7 @@ end;
     try try except raise end finally end   legal
 
   So a `finally` or a `try` body RESETS the context that an enclosing handler
-  established. An anonymous method body does NOT — `raise` inside a
+  established. An anonymous method body does NOT - `raise` inside a
   `procedure begin ... end` written in a handler is accepted, which makes the
   boundary the try-statement part and nothing else. A named nested routine
   needs no rule of its own: its body is never lexically inside a statement, so
@@ -2941,7 +2941,7 @@ end;
   All eight shapes above plus the `on ... do` and `else` branches are pinned in
   SemaSmoke, and the probe's output matches dcc line for line.
 
-  Structural, like CheckForCounters, but unlike it needs no bindings at all —
+  Structural, like CheckForCounters, but unlike it needs no bindings at all -
   it runs on the tree alone. }
 procedure TPasSemaResolver.CheckBareRaises;
 
@@ -2995,8 +2995,8 @@ begin
   Walk(0, False);
 end;
 
-{ 4 §4.11: `Slice(A, Count)` is valid only as an actual argument to an open-array
-  parameter — dcc reports `E2193 Slice standard function only allowed as open
+{ 4 sec. 4.11: `Slice(A, Count)` is valid only as an actual argument to an open-array
+  parameter - dcc reports `E2193 Slice standard function only allowed as open
   array argument` anywhere else.
 
   dcc32 37.0 turned out to be STRICTER than the spec's wording, and in a way
@@ -3004,7 +3004,7 @@ end;
   COMPILER INTRINSIC is never a valid position, even when that intrinsic's
   parameter really is an open array. `Insert(const Values: array of T; var
   Dest; Index)` is the strongest case and it is rejected, as are `Concat` and
-  `Writeln` — so "open-array argument" means an argument of an ordinary call,
+  `Writeln` - so "open-array argument" means an argument of an ordinary call,
   and Slice's own arguments are excluded too (Slice is itself an intrinsic).
 
   What this reports, therefore, is every Slice call that is not an argument of a
@@ -3014,7 +3014,7 @@ end;
 
   What it deliberately does NOT report is a Slice passed to an ordinary routine
   whose parameter at that position is NOT an open array (`TakesInt(Slice(A,3))`,
-  `TakesDynArray(Slice(A,3))` — both E2193 under dcc). Deciding that needs the
+  `TakesDynArray(Slice(A,3))` - both E2193 under dcc). Deciding that needs the
   parameter of the SELECTED overload for a given argument index, which nothing
   here computes; CheckCalls only measures arity, and across units it bails on
   any candidate without param info. Claiming it from a single unbound guess is
@@ -3049,7 +3049,7 @@ procedure TPasSemaResolver.CheckSlicePositions;
 
     Certainty here means a single candidate: the callee is a plain name bound to
     a routine symbol with NO further overload and with its parameters visible in
-    this unit. That deliberately skips overload sets rather than ranking them —
+    this unit. That deliberately skips overload sets rather than ranking them -
     picking the wrong candidate would invent a diagnostic, and `Slice` is rare
     enough that the precision is not worth the risk. Everything cross-unit
     (params in another model), every method call through a qualifier, and every
@@ -3147,14 +3147,14 @@ begin
   FImpl := FModel.AddScope(sckImplementation, FIntf, 0);
   FModel.InterfaceScope := FIntf;
   CollectRoot(0);
-  JoinHelperScopes;   // must precede Resolve — see its own header
+  JoinHelperScopes;   // must precede Resolve - see its own header
   ResolveNode(0);
   BindTypes;
-  ResolveAggregates;  // needs BindTypes' declared types — see its own header
-  ResolveWithStmts;   // needs BindTypes' declared types — see its own header
-  CheckForCounters;   // needs RefMap — see its own header
-  CheckBareRaises;    // structural only — see its own header
-  CheckSlicePositions; // needs RefMap — see its own header
+  ResolveAggregates;  // needs BindTypes' declared types - see its own header
+  ResolveWithStmts;   // needs BindTypes' declared types - see its own header
+  CheckForCounters;   // needs RefMap - see its own header
+  CheckBareRaises;    // structural only - see its own header
+  CheckSlicePositions; // needs RefMap - see its own header
   if not FSkipTyper then
     // The platform reaches the typer for one rule only: a 64-bit ordinal
     // `set of` base is E2001 where a 32-bit one is E2028, and NativeInt is

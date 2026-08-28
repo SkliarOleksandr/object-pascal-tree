@@ -4,7 +4,7 @@ unit DirectivesAsVariables;
   Ambiguity sample: weak keywords used as ordinary VARIABLE, PARAMETER and
   ROUTINE names, directly contrasted against the SAME words used in real
   directive/property-specifier position in TFoo. Lexically identical
-  tkIdentifier tokens either way — only the parser's grammar position tells
+  tkIdentifier tokens either way - only the parser's grammar position tells
   them apart. This is the exact shape of the bug the user found by hand:
   `var dynamic: Integer;` was rendering `dynamic` as a keyword before
   PasTreeDemo.Highlighter switched from a flat word-list check to AST-precise
