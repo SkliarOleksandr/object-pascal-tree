@@ -320,13 +320,39 @@ type
     // order, scope shape). ASymN is the old model's boundary, for guard 2.
     function IntfPrefixSame(AOld, ANew: TPasSemaModel;
       out ASymN: Integer; out AWhy: string): Boolean;
-    // Guard 2: no instance-table entry names an IMPLEMENTATION-local symbol
-    // of model AId (such an index would dangle after the swap).
+    // Guard 2: no instance-table entry names a symbol of model AId at or past
+    // ASymN (such an index would dangle after the swap). ASymN = the interface
+    // boundary for a body edit; 0 when the interface itself was renumbered.
     function InstancesSafeFor(AId, ASymN: Integer): Boolean;
+    { Does every `uses` entry of AModel (a freshly parsed replacement for
+      model AId) resolve to a file the project has ALREADY loaded? A new
+      import changes the closure, which the single-module path cannot do —
+      it would have to load, Phase-1 and cross-analyze the newcomer, i.e. a
+      rebuild. Resolution only (no loading), so a refusal costs nothing. }
+    function UsesAllLoaded(AModel: TPasSemaModel; AId: Integer;
+      out AWhy: string): Boolean;
     // The per-model pass tail AnalyzeModuleOnly re-runs after the swap: the
-    // same sequence AnalyzeFile drives, narrowed to one model (the fixpoint
-    // passes included) so no other model's diagnostics are re-emitted.
-    procedure RunModulePasses(AId: Integer);
+    // same sequence AnalyzeFile drives, narrowed to a SET of models (the
+    // fixpoint passes included) so no other model's diagnostics are
+    // re-emitted.
+    procedure RunModulePasses(const AIds: TArray<Integer>);
+    { Every model whose view of AId could have changed when AId's INTERFACE
+      changes — the blast radius, computed from the reverse `uses` graph.
+
+      A `uses` in the INTERFACE section propagates: that unit may republish
+      types from AId, so ITS importers are affected too. A `uses` only in the
+      IMPLEMENTATION does not — such an importer is a LEAF (nothing it exports
+      can depend on AId). The distinction is already recorded: the unit-ref
+      symbol's Scope is either the interface one or the implementation one.
+
+      False when the set exceeds ALimit — the caller then rebuilds, which is
+      cheaper than re-running most of the closure one model at a time. AId
+      itself is always the first element. }
+    function AffectedConsumers(AId, ALimit: Integer;
+      out AIds: TArray<Integer>): Boolean;
+    // Is AId's uses entry AIdx declared in the INTERFACE section? (An
+    // implementation-section import cannot propagate a change further.)
+    function UsesIsInterface(AId, AUseIdx: Integer): Boolean;
     procedure CrossResolve(AId: Integer);
     procedure CheckVisibility(AId, ANameNode, AMemMid, AMemSym: Integer);
     function StructEncloses(AMid, AOuter, AInner: Integer): Boolean;
@@ -10885,61 +10911,164 @@ begin
   Result := True;
 end;
 
-procedure TPasSemaProject.RunModulePasses(AId: Integer);
+function TPasSemaProject.UsesAllLoaded(AModel: TPasSemaModel; AId: Integer;
+  out AWhy: string): Boolean;
+var
+  LIdx, LMid: Integer;
+  LPath: string;
+begin
+  AWhy := '';
+  for LIdx := 0 to High(AModel.UsesList) do
+  begin
+    if not FSM.ResolveUnit(AModel.UsesList[LIdx].NameFull,
+      AModel.UsesList[LIdx].InPath, FFiles[AId], LPath) then
+    begin
+      // Unresolvable: the full path reports F1027 and carries on, and so does
+      // ours — ResolveUses re-emits it on the new model. Not a refusal.
+      Continue;
+    end;
+    if not FByPath.TryGetValue(LowerCase(TPath.GetFullPath(LPath)), LMid) or
+       (LMid < 0) then
+    begin
+      AWhy := 'new-dependency(' + AModel.UsesList[LIdx].NameFull + ')';
+      Exit(False);
+    end;
+  end;
+  Result := True;
+end;
+
+function TPasSemaProject.UsesIsInterface(AId, AUseIdx: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LSym, LScope, LHops: Integer;
+begin
+  LM := FModels[AId];
+  LSym := LM.UsesList[AUseIdx].Sym;
+  if (LSym < 0) or (LSym >= LM.SymCount) then
+    Exit(True);   // unknown shape: assume the propagating one
+  LScope := LM.Symbols[LSym].Scope;
+  // Walk out to the root: inside the implementation scope (or anything nested
+  // in it) the import is unit-local.
+  LHops := 0;
+  while (LScope >= 0) and (LScope < LM.Scopes.Count) and
+        (LHops <= LM.Scopes.Count) do
+  begin
+    if LM.Scopes[LScope].Kind = sckImplementation then
+      Exit(False);
+    LScope := LM.Scopes[LScope].Parent;
+    Inc(LHops);
+  end;
+  Result := True;
+end;
+
+function TPasSemaProject.AffectedConsumers(AId, ALimit: Integer;
+  out AIds: TArray<Integer>): Boolean;
+var
+  LSeen: TArray<Boolean>;
+  LExpand: TArray<Boolean>;   // parallel to AIds: does the walk go THROUGH it?
+  LHead, LIdx, LCur, LUse: Integer;
+  LPropagates, LUses: Boolean;
+begin
+  AIds := nil;
+  SetLength(LSeen, FModels.Count);
+  // Breadth-first over the REVERSE uses graph. Forward edges are the models'
+  // own UsesList (already carrying resolved ids), so one sweep per frontier
+  // unit is enough — a full reverse index would cost more to build than the
+  // walk costs on any radius small enough to be worth taking.
+  AIds := [AId];
+  LExpand := [True];
+  LSeen[AId] := True;
+  LHead := 0;
+  while LHead <= High(AIds) do
+  begin
+    LCur := AIds[LHead];
+    if not LExpand[LHead] then
+    begin
+      Inc(LHead);
+      Continue;   // a leaf: nothing it exports can depend on the edited unit
+    end;
+    Inc(LHead);
+    for LIdx := 0 to FModels.Count - 1 do
+    begin
+      if LSeen[LIdx] then
+        Continue;
+      LUses := False;
+      LPropagates := False;
+      for LUse := 0 to High(FModels[LIdx].UsesList) do
+        if FModels[LIdx].UsesList[LUse].UnitId = LCur then
+        begin
+          LUses := True;
+          // Imported in BOTH sections: the interface one decides.
+          LPropagates := LPropagates or UsesIsInterface(LIdx, LUse);
+        end;
+      if not LUses then
+        Continue;
+      LSeen[LIdx] := True;
+      AIds := AIds + [LIdx];
+      LExpand := LExpand + [LPropagates];
+      if Length(AIds) > ALimit then
+      begin
+        AIds := nil;
+        Exit(False);
+      end;
+    end;
+  end;
+  Result := True;
+end;
+
+procedure TPasSemaProject.RunModulePasses(const AIds: TArray<Integer>);
 const
   MAX_ROUNDS = 8;
 var
   LPend: TArray<TPasInhPending>;
   LUnres: TArray<Integer>;
-  LIdx, LRound: Integer;
-  LEmit: Boolean;
+  LUnresOf: TArray<TArray<Integer>>;   // per model, the last round's record
+  LIdx, LRound, LSlot, LId: Integer;
+  LEmit, LAny: Boolean;
   LM: TPasSemaModel;
 begin
-  LM := FModels[AId];
-  ResolveUses(AId);
-  InjectEncodingDiagsOne(AId);
-  InjectGuessedIfDiagsOne(AId);
+  for LId in AIds do
+  begin
+    ResolveUses(LId);
+    InjectEncodingDiagsOne(LId);
+    InjectGuessedIfDiagsOne(LId);
+  end;
   PrepareDeclWork(FModels.Count);
-  CrossResolve(AId);
+  for LId in AIds do
+    CrossResolve(LId);
   // Wholesale by design — it resets the helper registry AND the cross-work
-  // arrays every run, and this module's helper declarations may have changed.
+  // arrays every run, and these modules' helper declarations may have changed.
   BuildHelperMap;
-  // RunDeclPass narrowed to one model: same fixpoint, same emit-on-the-last-
-  // round rule, but only this model's work list is walked and only its
-  // ExtRefMap is written. Other models' heritage bindings already stand from
-  // the full run and guard 1 keeps them true.
+  // RunDeclPass narrowed to this SET: same fixpoint, same emit-on-the-last-
+  // round rule, but only these models' work lists are walked and only their
+  // ExtRefMaps are written. Every other model's heritage binding already
+  // stands, and the set is exactly the one whose view of the edited unit
+  // could have changed (see AffectedConsumers).
   LRound := 0;
   LEmit := False;
   while True do
   begin
     Inc(LRound);
-    LPend := nil;
-    CrossResolveDecl(AId, LPend, LEmit);
-    for LIdx := 0 to High(LPend) do
-      LM.ExtRefMap.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].Ext);
+    LAny := False;
+    for LSlot := 0 to High(AIds) do
+    begin
+      LPend := nil;
+      CrossResolveDecl(AIds[LSlot], LPend, LEmit);
+      LM := FModels[AIds[LSlot]];
+      for LIdx := 0 to High(LPend) do
+        LM.ExtRefMap.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].Ext);
+      LAny := LAny or (Length(LPend) > 0);
+    end;
     if LEmit then
       Break;
-    LEmit := (Length(LPend) = 0) or (LRound >= 3);
+    LEmit := not LAny or (LRound >= 3);
   end;
   SizeCrossWork(FModels.Count);
-  LPend := nil;
-  CrossResolveInherited(AId, LPend);
-  for LIdx := 0 to High(LPend) do
+  for LId in AIds do
   begin
-    LM.RefMap[LPend[LIdx].Node] := NIL_SYM;
-    LM.ExtRefMap.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].Ext);
-    if XValid(LPend[LIdx].X) then
-      LM.ExprTypeX.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].X);
-  end;
-  // RunWithPass, same narrowing (see the decl pass above).
-  LRound := 0;
-  LEmit := False;
-  while True do
-  begin
-    Inc(LRound);
     LPend := nil;
-    LUnres := nil;
-    CrossResolveWith(AId, LPend, LEmit, LUnres);
+    CrossResolveInherited(LId, LPend);
+    LM := FModels[LId];
     for LIdx := 0 to High(LPend) do
     begin
       LM.RefMap[LPend[LIdx].Node] := NIL_SYM;
@@ -10947,40 +11076,86 @@ begin
       if XValid(LPend[LIdx].X) then
         LM.ExprTypeX.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].X);
     end;
+  end;
+  // RunWithPass, same narrowing (see the decl pass above).
+  LRound := 0;
+  LEmit := False;
+  SetLength(LUnresOf, Length(AIds));
+  while True do
+  begin
+    Inc(LRound);
+    LAny := False;
+    for LSlot := 0 to High(AIds) do
+    begin
+      LPend := nil;
+      LUnres := nil;
+      CrossResolveWith(AIds[LSlot], LPend, LEmit, LUnres);
+      LUnresOf[LSlot] := LUnres;
+      LM := FModels[AIds[LSlot]];
+      for LIdx := 0 to High(LPend) do
+      begin
+        LM.RefMap[LPend[LIdx].Node] := NIL_SYM;
+        LM.ExtRefMap.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].Ext);
+        if XValid(LPend[LIdx].X) then
+          LM.ExprTypeX.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].X);
+      end;
+      LAny := LAny or (Length(LPend) > 0);
+    end;
     if LEmit then
       Break;
-    if Length(LPend) = 0 then
+    // Converged — for the WHOLE set, not per model: one model's commits can
+    // bind a name another model could not resolve a moment ago, so emitting
+    // as soon as a single model goes quiet would report names the next round
+    // resolves. Same rule as RunWithPass, same reason.
+    if not LAny then
     begin
-      for LIdx := 0 to High(LUnres) do
-        EmitE2003(LM, LUnres[LIdx]);
+      for LSlot := 0 to High(AIds) do
+        for LIdx := 0 to High(LUnresOf[LSlot]) do
+          EmitE2003(FModels[AIds[LSlot]], LUnresOf[LSlot][LIdx]);
       Break;
     end;
     if LRound >= MAX_ROUNDS then
       LEmit := True;
   end;
-  CheckCalls(AId);
-  CheckConstraints(AId);
-  CheckAttributes(AId);
-  // Only this model's declared types are new; every other model's SymTypeX
-  // stands from the full run (guard 1: its interface types are unchanged).
-  BindTypesX(AId);
-  CrossType(AId);
-  if FReportVisibility then
-    RunVisibilityPass(AId);
-  LM.TrimDiags;
+  for LId in AIds do
+  begin
+    CheckCalls(LId);
+    CheckConstraints(LId);
+    CheckAttributes(LId);
+  end;
+  // Only these models' declared types are new; every other model's SymTypeX
+  // stands (their text, and so their declarations, did not change).
+  for LId in AIds do
+    BindTypesX(LId);
+  for LId in AIds do
+  begin
+    CrossType(LId);
+    if FReportVisibility then
+      RunVisibilityPass(LId);
+    FModels[LId].TrimDiags;
+  end;
   ReleaseCrossWork;
 end;
 
 function TPasSemaProject.AnalyzeModuleOnly(const APath: string): Boolean;
+const
+  { How many models an interface change may drag into the redo before a plain
+    rebuild is the better answer. Each one costs Phase 1 (no parse) plus its
+    cross passes, against a rebuild's whole closure — so the crossover is not
+    tight, and the point of the cap is to stay predictable, not to squeeze the
+    last unit out of it. }
+  MODULE_REDO_LIMIT = 24;
 var
   LFull, LKey: string;
-  LId, LSymN: Integer;
-  LOld, LNew: TPasSemaModel;
+  LId, LSymN, LScopeN, LImplScope, LIdx: Integer;
+  LIds: TArray<Integer>;
+  LOld, LNew, LCons: TPasSemaModel;
   LPre: TPasPreprocessed;
   LDiags: TArray<TPasParseDiag>;
   LTree: TPasTree;
   LSW: TStopwatch;
   LWhy: string;
+  LIntfSame: Boolean;
 
   // Every refusal names itself in StageTimings — the fast path's whole value
   // is how OFTEN it fires, so "it fell back" without a reason is unreadable.
@@ -11024,10 +11199,39 @@ begin
     if (Length(LNew.Tree.Source.UnresolvedDeclared) > 0) or
        (Length(LNew.Tree.Source.UnresolvedSymbols) > 0) then
       Exit(Refuse('unresolved-if'));
-    if not IntfPrefixSame(LOld, LNew, LSymN, LWhy) then
+    // A new `uses` entry that resolves to a file the closure never loaded
+    // changes the closure itself — a rebuild's job.
+    if not UsesAllLoaded(LNew, LId, LWhy) then
       Exit(Refuse(LWhy));
-    if not InstancesSafeFor(LId, LSymN) then
-      Exit(Refuse('instance-impl-sym'));
+    // The interface prefix decides WHO has to be redone, not whether the fast
+    // path may run at all: unchanged, nobody but this module; changed, every
+    // model that could see the difference re-runs from Phase 1 (their text is
+    // untouched, so no re-parse) and rebuilds its own references — which is
+    // why a shifted symbol index harms nobody.
+    LIntfSame := IntfPrefixSame(LOld, LNew, LSymN, LWhy);
+    if not LIntfSame then
+    begin
+      // Refuse the shapes the redo cannot express, BEFORE touching anything.
+      if not IntfPrefixBounds(LNew, LSymN, LScopeN, LImplScope) then
+        Exit(Refuse('no-clean-boundary-new[' + FLastBoundaryNote + ']'));
+      if not AffectedConsumers(LId, MODULE_REDO_LIMIT, LIds) then
+        Exit(Refuse('too-many-consumers'));
+      for LIdx := 1 to High(LIds) do
+        if FModels[LIds[LIdx]].Demoted then
+          Exit(Refuse('consumer-demoted'));
+      // The instance table survives every pass and is keyed by (unit, symbol);
+      // an entry naming THIS module cannot be trusted once its numbering
+      // moved. Repointing it needs the old->new match this first cut does not
+      // build — see INCREMENTAL-NEXT.
+      if not InstancesSafeFor(LId, 0) then
+        Exit(Refuse('instance-into-changed-intf'));
+    end
+    else
+    begin
+      if not InstancesSafeFor(LId, LSymN) then
+        Exit(Refuse('instance-impl-sym'));
+      LIds := [LId];
+    end;
     FStageTimings := Format('parse=%d;', [LSW.ElapsedMilliseconds]);
     LSW := TStopwatch.StartNew;
     // Committed: the owning list frees the old model. Nothing outside FModels
@@ -11035,12 +11239,28 @@ begin
     // currency), and the per-model pass scratch is rebuilt below.
     FModels[LId] := LNew;
     LNew := nil;
-    if LId <= High(FWorkBuilt) then
-      FWorkBuilt[LId] := False;
-    RunModulePasses(LId);
-    SetModuleStatus(LId, msCrossReady);
+    // Each affected consumer goes back to its OWN Phase-1 state — a fresh
+    // Analyze over the tree it already has. No preprocessing, no parse: the
+    // tree is unchanged and immutable, and Phase 1 over the same tree is
+    // deterministic, so the consumer's own symbol numbering is reproduced
+    // exactly. This is what clears its stale cross-unit state wholesale
+    // instead of trying to patch entries one by one.
+    for LIdx := 1 to High(LIds) do
+    begin
+      LCons := TPasSemaResolver.Analyze(FModels[LIds[LIdx]].Tree, False,
+        FPlatform);
+      FModels[LIds[LIdx]] := LCons;
+    end;
+    for LIdx := 0 to High(LIds) do
+      if LIds[LIdx] <= High(FWorkBuilt) then
+        FWorkBuilt[LIds[LIdx]] := False;
+    RunModulePasses(LIds);
+    for LIdx := 0 to High(LIds) do
+      SetModuleStatus(LIds[LIdx], msCrossReady);
     FStageTimings := FStageTimings +
-      Format('passes=%d;module=1;', [LSW.ElapsedMilliseconds]);
+      Format('passes=%d;module=%d;', [LSW.ElapsedMilliseconds, Length(LIds)]);
+    if not LIntfSame then
+      FStageTimings := FStageTimings + 'intfchanged=1;';
     Result := True;
   finally
     // Refused: the project was never touched, and the fresh model is ours.

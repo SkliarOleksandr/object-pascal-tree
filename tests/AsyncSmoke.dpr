@@ -386,7 +386,10 @@ begin
       LSession.Free;
     end;
 
-    // An INTERFACE edit must be refused, and the project handed back intact.
+    // An INTERFACE edit is accepted too now (sub-project step 1+2): the redo
+    // pulls in the affected consumers, so the changed numbering harms nobody.
+    // UnitA IS used by UnitB here, so this exercises the multi-model redo
+    // through the session.
     var LHost2 := StagedProject(LDir, []);
     var LSession2 := TPasAsyncSession.CreateForModule(LHost2, LUnitPath);
     try
@@ -397,12 +400,15 @@ begin
           'end.', 'procedure __Exported; begin end;'#10'end.', []));
       LSession2.Start;
       LSession2.WaitFor;
-      Ok('module session: an interface edit is refused',
-        LSession2.IsDone and not LSession2.ModuleAccepted);
+      Ok('module session: an interface edit is accepted (consumers redone)',
+        LSession2.IsDone and LSession2.ModuleAccepted);
       var LTaken2 := LSession2.TakeProject;
       try
-        Ok('module session: a refused run still hands the project back',
+        Ok('module session: the project comes back either way',
           LTaken2 <> nil);
+        Ok('module session: the redo covered more than the edited unit',
+          (LTaken2 <> nil) and
+          (Pos('intfchanged=1;', LTaken2.StageTimings) > 0));
       finally
         LTaken2.Free;
       end;

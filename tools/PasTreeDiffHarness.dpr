@@ -18,13 +18,14 @@ program PasTreeDiffHarness;
                and each edit goes through AnalyzeModuleOnly (buffer overlay,
                single-module re-analysis in place). A REFUSAL falls back to a
                donor rebuild, exactly as a host must, and is reported as such.
-               The (a)/(b) edit split below is then the guard expectation: a
-               body edit must be ACCEPTED, an interface edit must be REFUSED.
-               An accepted interface edit is a hard failure (guard 1 missed a
-               change every other model can see); an unexpected fallback on a
-               body edit is only a WARNING — refusing is always safe — but it
-               is counted and summarized, because a fast path that never fires
-               is not a fast path.
+               A body edit is expected to be ACCEPTED; an interface edit may
+               be accepted too, since the redo covers the affected consumers
+               (they return to Phase 1 and rebuild their own references), and
+               is then counted, not judged — what decides correctness is the
+               comparison against the full pipeline that every step runs.
+               An unexpected fallback on a body edit is a WARNING (refusing is
+               always safe) but is counted: a fast path that never fires is
+               not a fast path.
 
   Edits are applied as BUFFER OVERLAYS (SetBuffer), never to the disk: both
   pipelines read byte-identical text through the one loader, so even an edit
@@ -94,6 +95,7 @@ var
   GModuleMode: Boolean;       // -module: AnalyzeModuleOnly instead of the chain
   GAccepted: Integer;         // module mode: steps the guards accepted
   GFellBack: Integer;         // module mode: body edits that fell back anyway
+  GAcceptedIntf: Integer;     // module mode: interface edits the redo covered
   // -selftest state for the CURRENT step: the edited file's pre-edit text,
   // fed to the incremental side only. '' = no divergence this step.
   GStaleKey, GStaleText: string;
@@ -450,6 +452,7 @@ begin
   GModuleMode := False;
   GAccepted := 0;
   GFellBack := 0;
+  GAcceptedIntf := 0;
   for GIdx := 1 to ParamCount do
     if ParamStr(GIdx).StartsWith('-p:', True) then
     begin
@@ -620,11 +623,13 @@ begin
     // is a failure — see the header.
     if GModuleMode and (GIdx > 0) and (GStaleKey = '') then
     begin
+      // An accepted INTERFACE edit is no longer a failure: since the redo
+      // covers the affected consumers (they go back to Phase 1 and rebuild
+      // their own references), a shifted symbol index harms nobody. What
+      // decides correctness is the comparison against the full pipeline,
+      // which every step runs anyway — so this is counted, not judged.
       if (LStep.Kind = ekIntf) and (LHow = 'module') then
-      begin
-        LVerdict := LVerdict + ' + GUARD FAILURE (interface edit accepted)';
-        Inc(GFailedSteps);
-      end
+        Inc(GAcceptedIntf)
       else if (LStep.Kind = ekBody) and (LHow <> 'module') then
       begin
         LVerdict := LVerdict + ' (unexpected fallback)';
@@ -654,6 +659,7 @@ begin
     Writeln(ErrOutput, 'all steps identical');
   if GModuleMode then
     Writeln(ErrOutput, Format(
-      'module mode: %d step(s) taken by AnalyzeModuleOnly, %d body edit(s) ' +
-      'fell back', [GAccepted, GFellBack]));
+      'module mode: %d step(s) taken by AnalyzeModuleOnly (%d of them ' +
+      'interface edits), %d body edit(s) fell back',
+      [GAccepted, GAcceptedIntf, GFellBack]));
 end.

@@ -5207,14 +5207,47 @@ begin
       'procedure PB;'#10'begin'#10'  GM.M;'#10 +
       '  RenamedMissing := MV;'#10 +
       'end;'#10'end.'#10, 8);
-    Ok('module: an interface edit is refused',
-      not GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitMB.pas')));
-    Ok('module: the refusal names its reason',
-      Pos('module=refused:', GProj.StageTimings) > 0);
-    Ok('module: a refused call leaves the project untouched',
-      DiagHasText(ModelByName('unitmb'), 'E2003', 'RenamedMissing') and
-      (ModelByName('unitmb').FindLocal(
-         ModelByName('unitmb').InterfaceScope, 'newlyexported') = NIL_SYM));
+    // An INTERFACE edit is ACCEPTED too (sub-project step 1+2): the redo
+    // covers the affected consumers, which return to Phase 1 and rebuild
+    // their own references, so a shifted symbol index harms nobody. UnitMB is
+    // used by nobody here, so the redo set is UnitMB alone.
+    Ok('module: an interface edit is accepted when the radius is small',
+      GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitMB.pas')));
+    Ok('module: an interface change is reported as such',
+      Pos('intfchanged=1;', GProj.StageTimings) > 0);
+    Ok('module: the new interface symbol is really there',
+      ModelByName('unitmb').FindLocal(
+        ModelByName('unitmb').InterfaceScope, 'newlyexported') <> NIL_SYM);
+    Ok('module: the untouched module is STILL not re-diagnosed',
+      Length(ModelByName('unitma').Diags) = 0);
+
+    // Editing the USED unit's interface drags its consumer into the redo:
+    // UnitMB sees UnitMA, so both models are rebuilt and UnitMB's reference
+    // to the renamed member must follow.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitMA.pas'),
+      'unit UnitMA;'#10'interface'#10 +
+      'type TM = class'#10'  procedure M;'#10'  procedure Extra;'#10'end;'#10 +
+      'const MV = 3;'#10 +
+      'implementation'#10 +
+      'procedure TM.M; begin end;'#10 +
+      'procedure TM.Extra; begin end;'#10'end.'#10, 9);
+    Ok('module: an interface edit in a USED unit is accepted',
+      GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitMA.pas')));
+    Ok('module: the redo covered the consumer as well',
+      Pos('module=2;', GProj.StageTimings) > 0);
+    Ok('module: the consumer''s cross-unit reference still resolves',
+      CrossRefTo(ModelByName('unitmb'), 'M', 'M'));
+    Ok('module: the consumer was not double-diagnosed',
+      DiagCount(ModelByName('unitmb'), 'E2003') = 1);
+
+    // A NEW dependency changes the closure itself — that is a rebuild's job.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitMB.pas'),
+      'unit UnitMB;'#10'interface'#10'uses UnitMA, NoSuchUnitXY;'#10 +
+      'var GM: TM;'#10'implementation'#10'end.'#10, 10);
+    Ok('module: an unresolvable new import is not a refusal by itself',
+      GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitMB.pas')));
+    Ok('module: it reports the missing unit like the full path does',
+      DiagCount(ModelByName('unitmb'), 'F1027') = 1);
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then
