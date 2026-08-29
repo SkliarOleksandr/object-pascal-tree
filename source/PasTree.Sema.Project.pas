@@ -436,7 +436,9 @@ type
     function LocalHead(AModel: TPasSemaModel; ANode: Integer): Integer;
     function QualifiedText(AId, ANode: Integer): string;
     function UnitNameOf(AId, ANode: Integer): Integer;
-    procedure EmitE2003(AModel: TPasSemaModel; ANode: Integer);
+    procedure EmitE2003(AModel: TPasSemaModel; ANode: Integer;
+      AId: Integer = -1);
+    function UnknownAncestryX(const AX: TSemaXType): Boolean;
     procedure EmitAt(AModel: TPasSemaModel; ANode: Integer;
       const ACode, AMsg: string);
     function CalleeShadowsUses(AModel: TPasSemaModel;
@@ -4407,12 +4409,85 @@ begin
   end;
 end;
 
-procedure TPasSemaProject.EmitE2003(AModel: TPasSemaModel; ANode: Integer);
+{ Does AX's ancestor chain reach a type this analysis cannot see?
+
+  Not the same question as "has no ancestor": a class whose chain ends at TObject
+  is fully known, while one whose heritage clause names something that resolves
+  to NOTHING has an unknown set of inherited members - and every one of them
+  used in its methods reads as undeclared. That is a report about OUR missing
+  input, not about the code.
+
+  It is worth its own walk because the break is routinely SEVERAL hops up and in
+  another unit: an IDE-plugin library declares `TCnIdeDockForm = class(
+  TDockableForm)` over the DockForm unit, which ships as a DCU with no source at
+  all. Its own unit is gated by the F1027, but the form classes two hops down
+  are in units whose every `uses` resolved, and they lost Icon/ShowHint/Handle/
+  Top/Height/Caption - 17 reports over 5 units from that one absent ancestor.
+
+  On the error path only, so the walk is not memoized: it runs per name that
+  already failed every lookup, not per reference. }
+function TPasSemaProject.UnknownAncestryX(const AX: TSemaXType): Boolean;
+var
+  LCur, LNext: TSemaXType;
+  LM: TPasSemaModel;
+  LDef, LChild, LDepth: Integer;
+begin
+  Result := False;
+  LCur := AX;
+  for LDepth := 1 to 32 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LM := FModels[LCur.UnitId];
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if LDef = NIL_NODE then
+      Exit;   // a SEEDED type (TObject and friends) - nothing to read
+    case LM.Tree.Nodes[LDef].Kind of
+      nkIdent, nkMember, nkTypeArgs:
+        begin
+          LNext := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
+          if not XValid(LNext) then
+            Exit(True);
+        end;
+      nkClassType, nkInterfaceType:
+        begin
+          // The heritage clause's FIRST type reference is the ancestor - the
+          // convention AncestorOfX and CollectStruct share. No such child means
+          // an implicit TObject root, which is fully known.
+          LChild := LM.Tree.Nodes[LDef].FirstChild;
+          while (LChild <> NIL_NODE) and not (LM.Tree.Nodes[LChild].Kind in
+            [nkIdent, nkMember, nkTypeArgs]) do
+            LChild := LM.Tree.Nodes[LChild].NextSibling;
+          if LChild = NIL_NODE then
+            Exit;
+          LNext := ResolveTypeExprNested(LCur.UnitId, LChild);
+          if not XValid(LNext) then
+            Exit(True);
+        end;
+    else
+      Exit;   // a record, an enum, ... - no ancestry to be missing
+    end;
+    LCur := LNext;
+  end;
+end;
+
+procedure TPasSemaProject.EmitE2003(AModel: TPasSemaModel; ANode: Integer;
+  AId: Integer = -1);
 var
   LVis: TPasVisibleToken;
-  LFile, LLine, LCol, LTok: Integer;
+  LFile, LLine, LCol, LTok, LStruct: Integer;
   LName: string;
 begin
+  // The enclosing struct's ancestry decides whether this verdict is knowable
+  // at all - see UnknownAncestryX. AId is the model's own index, which this
+  // procedure is not otherwise given; a caller that cannot supply it (none
+  // today) simply skips the gate.
+  if AId >= 0 then
+  begin
+    LStruct := StructSymOfNode(AModel, ANode);
+    if (LStruct <> NIL_SYM) and UnknownAncestryX(XPlain(AId, LStruct)) then
+      Exit;
+  end;
   LFile := 0; LLine := 0; LCol := 0;
   LTok := AModel.Tree.Nodes[ANode].FirstToken;
   if (LTok >= 0) and (LTok <= High(AModel.Tree.Source.Visible)) then
@@ -8163,6 +8238,13 @@ var
                   // the first refinement the flag earned.
                   (XCatOf(LBX) <> tcVariant) and
                   not LM.InUnopenedWithBody(LName) and
+                  // The QUALIFIER's ancestry, for the same reason the bare-name
+                  // gate reads the enclosing struct's: a container whose
+                  // ancestor is a type with no source has an unknown member
+                  // set, so "not a member" is a statement about our input.
+                  // Same absent DockForm unit, reached through a global of the
+                  // form's type instead of from inside one of its methods.
+                  not UnknownAncestryX(LBX) and
                   not LM.HasDiagAt(LName) then
             // The one place a member reference is finally given up on: RefMap
             // and ExtRefMap are both empty and the member walk failed, with a
@@ -8170,7 +8252,7 @@ var
             // be reporting our own inability to type the qualifier. Gated on
             // AllUsesResolved for the same reason bare-name E2003 is: a missing
             // unit can hide the declaration. See ReportUnresolvedMembers.
-            EmitE2003(LM, LName);
+            EmitE2003(LM, LName, AId);
         end;
 
       nkCall:
@@ -8561,7 +8643,7 @@ begin
             Inc(FDeclWorkCount[AId]);
           end
           else if LModel.AllUsesResolved then
-            EmitE2003(LModel, LNode);
+            EmitE2003(LModel, LNode, AId);
         end;
     end;
   end;
@@ -10286,7 +10368,7 @@ begin
       Inc(LPendCount);
     end
     else if AEmit and LModel.AllUsesResolved then
-      EmitE2003(LModel, LNode);   // CrossResolve's verdict, just deferred
+      EmitE2003(LModel, LNode, AId);   // CrossResolve's verdict, just deferred
   end;
   SetLength(APending, LPendCount);
 end;
@@ -10481,7 +10563,7 @@ begin
       Inc(LPendCount);
     end
     else if LModel.AllUsesResolved then
-      EmitE2003(LModel, LNode);
+      EmitE2003(LModel, LNode, AId);
     end;
     SetLength(APending, LPendCount);
   finally
@@ -10660,7 +10742,7 @@ begin
         // stays for the round-cap fallback, where a final round can still
         // BIND new names and only then report the rest.
         if AEmit then
-          EmitE2003(LModel, LNode)
+          EmitE2003(LModel, LNode, AId)
         else
         begin
           AUnresolved[LUnresCount] := LNode;
@@ -10751,7 +10833,7 @@ begin
     begin
       for LIdx := 0 to ACount - 1 do
         for LP := 0 to High(LUnres[LIdx]) do
-          EmitE2003(FModels[LIdx], LUnres[LIdx][LP]);
+          EmitE2003(FModels[LIdx], LUnres[LIdx][LP], LIdx);
       Break;
     end;
     // Out of rounds with work still moving: one more round, old-style - it
@@ -11299,7 +11381,7 @@ begin
     begin
       for LSlot := 0 to High(AIds) do
         for LIdx := 0 to High(LUnresOf[LSlot]) do
-          EmitE2003(FModels[AIds[LSlot]], LUnresOf[LSlot][LIdx]);
+          EmitE2003(FModels[AIds[LSlot]], LUnresOf[LSlot][LIdx], AIds[LSlot]);
       Break;
     end;
     if LRound >= MAX_ROUNDS then

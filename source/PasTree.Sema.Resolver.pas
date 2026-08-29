@@ -77,6 +77,8 @@ type
     function SkipAttr(AChild: Integer): Integer;
     function IsAttributeTypeRef(ANode: Integer): Boolean;
     function IsBareTypeUse(ANode: Integer): Boolean;
+    function IsHeritageRef(ANode: Integer): Boolean;
+    function DeclaredAfter(ASym, ANode: Integer): Boolean;
     function EnumJoinTarget(AScope: Integer): Integer;
     procedure NotePendingAggregate(ATypeNode: Integer);
     function SepKindAfter(ANode: Integer): TPasTokenKind;
@@ -284,6 +286,40 @@ begin
   LParent := FTree.Nodes[ANode].Parent;
   Result := (LParent = NIL_NODE) or (KindOf(LParent) <> nkTypeArgs) or
     (FirstChild(LParent) <> ANode);
+end;
+
+{ True when ANode is a type reference in a HERITAGE clause - the ancestor or an
+  implemented interface of a class/interface/object declaration. Those are the
+  struct node's leading children, before any member, which is the same
+  convention AncestorTypeSym and the project pass already read the clause by.
+  The head of a `TFoo<T>` heritage reference counts too: its nkTypeArgs is the
+  struct's child. }
+function TPasSemaResolver.IsHeritageRef(ANode: Integer): Boolean;
+var
+  LParent: Integer;
+begin
+  LParent := FTree.Nodes[ANode].Parent;
+  if (LParent <> NIL_NODE) and (KindOf(LParent) = nkTypeArgs) and
+     (FirstChild(LParent) = ANode) then
+    LParent := FTree.Nodes[LParent].Parent;
+  Result := (LParent <> NIL_NODE) and
+    (KindOf(LParent) in [nkClassType, nkInterfaceType, nkObjectType]);
+end;
+
+{ Is ASym's declaration written BELOW ANode in this unit? The declaration name
+  node's first token against ANode's, both in this model - the cheapest total
+  order the tree has. }
+function TPasSemaResolver.DeclaredAfter(ASym, ANode: Integer): Boolean;
+var
+  LDecl: Integer;
+begin
+  Result := False;
+  if ASym = NIL_SYM then
+    Exit;
+  LDecl := FModel.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  Result := FTree.Nodes[LDecl].FirstToken > FTree.Nodes[ANode].FirstToken;
 end;
 
 // KIND of the visible token immediately after ANode's last token. Every
@@ -1050,11 +1086,12 @@ end;
 procedure TPasSemaResolver.CollectRoutine(ANode, AScope: Integer);
 var
   LRoutine, LChild, LNameNode, LSegIdent, LSegLast: Integer;
-  LRoutineSym, LResultNode: Integer;
+  LRoutineSym, LResultNode, LGenScope: Integer;
   LQualified: Boolean;
   LQualIdents, LQualArity: TArray<Integer>;
 begin
   LRoutine := FModel.AddScope(sckRoutine, AScope, ANode);
+  LGenScope := NIL_SCOPE;
   FNodeScope[ANode] := AScope;
   LQualIdents := nil;
   LQualArity := nil;
@@ -1088,7 +1125,21 @@ begin
           (KindOf(LChild) in [nkGenericParams, nkTypeArgs]) and
           (SepKindAfter(LSegLast) = tkLess) do
     begin
-      Collect(LChild, LRoutine);   // generic params -> routine scope; args refs
+      // Generic params get a scope of their OWN, between the routine and its
+      // enclosing one - not the routine scope itself. A PARAMETER may reuse a
+      // type parameter's name, and dcc accepts it because the two live in
+      // different scopes: `class function TGenericsCast<T, TT>.Cast(const T:
+      // T): TT;` (a detour library's cast helper) declares a parameter named
+      // T typed by the type parameter T. Collected into one scope that was a
+      // genuine same-scope redeclaration - a false E2004 on the parameter,
+      // and the shadowing that makes the header legal never happened.
+      // Created lazily: a non-generic routine keeps the scope chain it had.
+      if LGenScope = NIL_SCOPE then
+      begin
+        LGenScope := FModel.AddScope(sckGenericParams, AScope, ANode);
+        FModel.Scopes[LRoutine].Parent := LGenScope;
+      end;
+      Collect(LChild, LGenScope);  // generic params -> their own scope; args refs
       LSegLast := LChild;
       LChild := NextSib(LChild);
     end;
@@ -1159,6 +1210,13 @@ begin
         FModel.JoinScope(LRoutine, FModel.Symbols[LTy].MemberScope);
     end;
     FModel.Scopes[LRoutine].StructSym := LTy;
+    // ...and on the generic-parameter scope too, when the header opened one:
+    // a type parameter's own scope is now that one, and the project's
+    // constraint lookup walks UP from the symbol's scope looking for exactly
+    // this link (see ConstraintsOfParamX). Parented outside the routine, that
+    // walk would never pass through the routine scope again.
+    if LGenScope <> NIL_SCOPE then
+      FModel.Scopes[LGenScope].StructSym := LTy;
     // A qualified implementation that OMITS its own parameter list
     // (`procedure TFoo.Bar;` completing a class-declared `procedure Bar(
     // Index: Integer);` - legal dcc: the impl header may drop the params
@@ -1918,6 +1976,32 @@ begin
             end;
           end;
         end;
+        // An ANCESTOR named by a symbol declared FURTHER DOWN this same unit
+        // is not that symbol: a heritage clause can only name a type already
+        // visible (3.1.1 - a forward `TFoo = class;` is the sole way to name
+        // one below, and that forward IS the earlier declaration this test
+        // sees). Everywhere else in a type section forward references are
+        // legal and normal (`PNode = ^TNode;`), which is why the rule is
+        // narrowed to the heritage position rather than applied to ResolveAt.
+        //
+        // The shape is a compatibility SHIM, and it is a whole cluster when it
+        // hits: a wizard library declares
+        //   TCnAnsiMemIniFile = class(TMemIniFile) ... end;
+        //   TMemIniFile = TCnAnsiMemIniFile;
+        // where the ancestor is System.IniFiles' TMemIniFile and the alias
+        // below re-points the NAME at the subclass. Binding the ancestor to
+        // that alias made the class its own ancestor: the walk went in circles,
+        // every inherited member of every user of the shim was undeclared
+        // (Create/Free/ReadString/WriteInteger..., ~90 reports over 8 units).
+        //
+        // Dropping the binding rather than repointing it is deliberate: the
+        // type that IS meant lives in another unit, and the cross-unit pass
+        // (CrossResolve) is what binds an unresolved name against the uses
+        // clause. This runs before it, and leaving NIL_SYM is exactly the
+        // handoff that pass expects.
+        if (FModel.RefMap[ANode] <> NIL_SYM) and IsHeritageRef(ANode) and
+           DeclaredAfter(FModel.RefMap[ANode], ANode) then
+          FModel.RefMap[ANode] := NIL_SYM;
         if (FModel.RefMap[ANode] = NIL_SYM) and IsAttributeTypeRef(ANode) then
           FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],
             LNameLower + 'attribute', FTree.Nodes[ANode].FirstToken);

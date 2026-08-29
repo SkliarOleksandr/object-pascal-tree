@@ -5146,6 +5146,164 @@ begin
     GProj.Free;
   end;
 
+  { A compatibility SHIM: a class whose ancestor is the name an ALIAS below it
+    re-points at that very class.
+
+      TCnAnsiMemIniFile = class(TMemIniFile) ... end;   // the IMPORTED one
+      TMemIniFile = TCnAnsiMemIniFile;                  // the name, re-pointed
+
+    A heritage clause can only name a type already visible, so the ancestor is
+    the imported TMemIniFile and not the alias written below it. Binding it to
+    the alias made the class its own ancestor and every inherited member of
+    every user of the shim went undeclared (a wizard library: ~90 reports over
+    8 units, all of them Create/Free/ReadString/WriteInteger). }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_shim');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ShimBase.pas'),
+    'unit ShimBase;'#10'interface'#10 +
+    'type'#10 +
+    '  TMemIniFile = class'#10 +
+    '  public'#10 +
+    '    function ReadBool(const S: string): Boolean;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TMemIniFile.ReadBool(const S: string): Boolean;'#10 +
+    'begin Result := True; end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ShimDecl.pas'),
+    'unit ShimDecl;'#10'interface'#10'uses ShimBase;'#10 +
+    'type'#10 +
+    '  TCnAnsiMemIniFile = class(TMemIniFile)'#10 +
+    '  public'#10 +
+    '    procedure UpdateFile;'#10 +
+    '  end;'#10 +
+    '  TMemIniFile = TCnAnsiMemIniFile;'#10 +
+    'implementation'#10 +
+    'procedure TCnAnsiMemIniFile.UpdateFile;'#10 +
+    'begin'#10 +
+    '  if ReadBool(''x'') then Exit;'#10 +   // the shim's OWN inherited member
+    'end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ShimUser.pas'),
+    'unit ShimUser;'#10'interface'#10'uses ShimDecl;'#10 +
+    'procedure P;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var LF: TMemIniFile;'#10 +
+    'begin'#10 +
+    '  LF := nil;'#10 +
+    '  with LF do'#10 +
+    '  begin'#10 +
+    '    UpdateFile;'#10 +          // the shim's own member
+    '    if ReadBool(''x'') then Exit;'#10 +   // and the INHERITED one
+    '  end;'#10 +
+    'end;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    Ok('shim: the class''s own inherited member resolves',
+      DiagCount(ModelByName('shimdecl'), 'E2003') = 0);
+    Ok('shim: a `with` over the re-pointed name sees both levels',
+      DiagCount(ModelByName('shimuser'), 'E2003') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  { An ancestor with no source at all - the designtime units an IDE plugin
+    extends ship as DCUs. The unit that names one is gated by its own F1027,
+    but its DESCENDANTS are in units whose every `uses` resolved, and their
+    inherited members are just as unknowable. Both spellings are covered: a
+    bare name inside such a class's method, and a member after a dot on a
+    value of its type. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_noancestor');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DockBase.pas'),
+    'unit DockBase;'#10'interface'#10'uses NoSuchDockUnit;'#10 +
+    'type'#10 +
+    '  TDockFormBase = class(TDockableForm)'#10 +
+    '  end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DockUser.pas'),
+    'unit DockUser;'#10'interface'#10'uses DockBase;'#10 +
+    'type'#10 +
+    '  TMyForm = class(TDockFormBase)'#10 +
+    '    procedure Poke;'#10 +
+    '  end;'#10 +
+    'var GForm: TMyForm;'#10 +
+    'procedure Q;'#10 +
+    'implementation'#10 +
+    'procedure TMyForm.Poke;'#10 +
+    'begin'#10 +
+    '  Caption := ''x'';'#10 +      // inherited from the unknown ancestor
+    'end;'#10 +
+    'procedure Q;'#10 +
+    'begin'#10 +
+    '  GForm.BringToFront;'#10 +    // ...and the same through a dot
+    'end;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    Ok('noancestor: a descendant of an unknowable ancestor is not diagnosed',
+      DiagCount(ModelByName('dockuser'), 'E2003') = 0);
+    Ok('noancestor: the missing unit itself is still reported',
+      DiagCount(ModelByName('dockbase'), 'F1027') = 1);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  { A generic method implementation whose PARAMETER reuses a type parameter's
+    name - `class function TCast<T, TT>.Do(const T: T): TT`. The two live in
+    different scopes, so it is shadowing and not a redeclaration; collecting
+    both into the routine scope made it a false E2004. The control is that the
+    method's own constraint still reaches its body. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_genparam');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'GenShadow.pas'),
+    'unit GenShadow;'#10'interface'#10 +
+    'type'#10 +
+    '  TCtl = class'#10 +
+    '    Tag: Integer;'#10 +
+    '  end;'#10 +
+    '  TCast<T, TT> = class'#10 +
+    '    class function Conv(const T: T): TT;'#10 +
+    '  end;'#10 +
+    '  THost = class'#10 +
+    '    function Add<TItem: TCtl>(const S: string): TItem;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'class function TCast<T, TT>.Conv(const T: T): TT;'#10 +
+    'begin'#10 +
+    '  Result := Default(TT);'#10 +
+    'end;'#10 +
+    'function THost.Add<TItem>(const S: string): TItem;'#10 +
+    'begin'#10 +
+    '  Result := nil;'#10 +
+    '  Result.Tag := 1;'#10 +   // the method''s own constraint, from the body
+    'end;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    Ok('genparam: a parameter may reuse a type parameter''s name',
+      DiagCount(ModelByName('genshadow'), 'E2004') = 0);
+    Ok('genparam: the method''s constraint still reaches its body',
+      DiagCount(ModelByName('genshadow'), 'E2003') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   // ---- Single-module reanalysis (incremental plan, stage B). A BODY edit
   // must be accepted and change only that module's diagnostics; an INTERFACE
   // edit must be refused with the project left untouched; an unknown file
