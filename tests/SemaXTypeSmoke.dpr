@@ -680,6 +680,20 @@ const
     '    property Separator: string read FSep;'#10 +
     '    property Values[Index: Integer]: TItem read GetItem; default;'#10 +
     '  end;'#10 +
+    '  TQuery = class(TItems)'#10 +
+    '  private'#10 +
+    '    FRows: Integer;'#10 +
+    '  public'#10 +
+    '    property RowsAffected: Integer read FRows;'#10 +
+    '    property Separator;'#10 +          // bare redeclaration
+    '  end;'#10 +
+    '  THost = class'#10 +
+    '  private'#10 +
+    '    function GetQuery(AKind: Integer): TQuery;'#10 +
+    '  public'#10 +
+    '    property Query[AKind: Integer]: TQuery read GetQuery;'#10 +
+    '    procedure Exec;'#10 +
+    '  end;'#10 +
     '  TRow = class'#10 +
     '  private'#10 +
     '    FValues: TItems;'#10 +
@@ -718,6 +732,23 @@ const
     '  Add.Tag := 1;'#10 +                 // the PARAMETERLESS overload
     'end;'#10 +
     'function TStyler.Color: Integer; begin Result := 0; end;'#10 +
+    'function THost.GetQuery(AKind: Integer): TQuery; begin Result := nil; end;'#10 +
+    // `with Query[K] do` over an ARRAY PROPERTY: the brackets are the
+    // property's own, so the target is TQuery itself. Its ancestor carries a
+    // DEFAULT array property (Values), and peeling that too typed the target
+    // as TItem - both names below then went undeclared, the shape a component
+    // library hit on `with Query[UpdateKind] do Prepared := True`.
+    'procedure THost.Exec;'#10 +
+    'var'#10 +
+    '  N: Integer;'#10 +
+    '  S: string;'#10 +
+    'begin'#10 +
+    '  with Query[0] do'#10 +
+    '  begin'#10 +
+    '    N := RowsAffected;'#10 +          // declared on TQuery itself
+    '    S := Separator;'#10 +             // a bare REDECLARATION
+    '  end;'#10 +
+    'end;'#10 +
     'procedure DrawRow(ARow: TRow);'#10 +
     'var'#10 +
     '  I, N: Integer;'#10 +

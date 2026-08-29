@@ -393,6 +393,7 @@ type
     function AllParamsDefaulted(AMid, AParams: Integer): Boolean;
     function PointeeOfDeclX(AId, ABaseNode: Integer): TSemaXType;
     function IsDefaultArrayProp(AMid, ASym: Integer): Boolean;
+    function PropertyHasParams(AMid, ASym: Integer): Boolean;
     function DefaultArrayPropX(const AX: TSemaXType;
       out AMid, ASym: Integer; out AOwner: TSemaXType): Boolean;
     function RoutineHasParams(AMid, ASym: Integer): Boolean;
@@ -9307,6 +9308,43 @@ begin
   end;
 end;
 
+{ Does this property declare INDEX parameters - i.e. is it an array property?
+
+  An array property's declared type is ALREADY its element type, so `P[I]`
+  consumes the parameters and yields that type unchanged. ElementX has to know,
+  because the value's own type may be a CLASS that happens to carry a default
+  array property of its own, and peeling one more level off it is a wrong
+  answer that LOOKS valid: `with Query[Kind] do` over a
+  `property Query[K: TUpdateKind]: TADOQuery` typed to the Variant of
+  TDataSet.FieldValues instead of to TADOQuery, and every name in the with body
+  became a false E2003. }
+function TPasSemaProject.PropertyHasParams(AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LDecl, LChild: Integer;
+begin
+  Result := False;
+  LM := FModels[AMid];
+  if (ASym = NIL_SYM) or (LM.Symbols[ASym].Kind <> skProperty) then
+    Exit;
+  // The symbol's DeclNode is the property's NAME node; the parameter list is a
+  // sibling of it under the nkPropertyDecl - same shape IsDefaultArrayProp
+  // walks.
+  LDecl := LM.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LDecl := LM.Tree.Nodes[LDecl].Parent;
+  if (LDecl = NIL_NODE) or (LM.Tree.Nodes[LDecl].Kind <> nkPropertyDecl) then
+    Exit;
+  LChild := LM.Tree.Nodes[LDecl].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LChild].Kind = nkParams then
+      Exit(True);
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
 function TPasSemaProject.IsDefaultArrayProp(AMid, ASym: Integer): Boolean;
 var
   LM: TPasSemaModel;
@@ -9533,6 +9571,14 @@ begin
     Result := ElemOf(LMid, FModels[LMid].Symbols[LSym].TypeNode);
     if XValid(Result) then
       Exit;
+    // The base is an ARRAY PROPERTY: the brackets belong to the property
+    // itself, so its declared type IS the result and there is no element to
+    // peel. Bail before the default-array-property search below, which would
+    // otherwise run on that RESULT type - and answer with the element type of
+    // an unrelated inherited default property. The caller's pass-through
+    // fallback then types the index expression as the property's own type.
+    if PropertyHasParams(LMid, LSym) then
+      Exit(XNil);
   end;
   // 2. The named type it resolves to, chasing aliases to a definition.
   LCur := WithTargetTypeX(AId, ABaseNode);
