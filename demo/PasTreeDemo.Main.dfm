@@ -507,6 +507,15 @@ object frmMain: TfrmMain
       OnExecute = FindReferencesActionExecute
       OnUpdate = FindReferencesActionUpdate
     end
+    object RenameAction: TAction
+      Caption = 'Rename...'
+      Hint =
+        'Renames the symbol at the caret and every resolved reference to it' +
+        ' - the same identity Find References uses'
+      ShortCut = 16453
+      OnExecute = RenameActionExecute
+      OnUpdate = RenameActionUpdate
+    end
   end
   object SourcePopupMenu: TPopupMenu
     Left = 548
@@ -528,6 +537,9 @@ object frmMain: TfrmMain
     end
     object FindReferences1: TMenuItem
       Action = FindReferencesAction
+    end
+    object Rename1: TMenuItem
+      Action = RenameAction
     end
     object NavSep1: TMenuItem
       Caption = '-'

@@ -17,6 +17,7 @@ uses
   System.SysUtils, System.Classes, System.IOUtils, System.Generics.Collections,
   System.Generics.Defaults,
   System.JSON, System.Diagnostics, System.Math, System.Win.Registry,
+  System.UITypes,   // MessageDlg's mtWarning/mbOK, inline-expanded
   Winapi.Windows, Winapi.Messages, Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls,
   Vcl.ExtCtrls, Vcl.Dialogs, Vcl.Graphics, Vcl.Clipbrd,
   SynEdit, SynEditTypes, SynEditHighlighter, SynHighlighterJSON, SynFunc,
@@ -131,6 +132,10 @@ type
     // actually gets compared, SymMid being meaningless there.
     SymMid, SymSym: Integer;
     SymBuiltinName: string;
+    // A rename RESULT page rather than a search page - same tree, same
+    // three row shapes, but the snippets are the lines as they read AFTER
+    // the rename (see RenameActionExecute).
+    IsRename: Boolean;
     Hits: TArray<TPasRefHit>;
     Groups: TArray<TFindRefGroup>;
     Display: TArray<TFindRefDisplay>;
@@ -219,6 +224,8 @@ type
     CloseAllSearchTabs1: TMenuItem;
     FindReferencesAction: TAction;
     FindReferences1: TMenuItem;
+    RenameAction: TAction;
+    Rename1: TMenuItem;
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
     procedure btnOpenClick(Sender: TObject);
@@ -268,6 +275,8 @@ type
     procedure ViewUnitActionExecute(Sender: TObject);
     procedure FindReferencesActionUpdate(Sender: TObject);
     procedure FindReferencesActionExecute(Sender: TObject);
+    procedure RenameActionUpdate(Sender: TObject);
+    procedure RenameActionExecute(Sender: TObject);
     procedure pgcBottomMouseDown(Sender: TObject; Button: TMouseButton;
       Shift: TShiftState; X, Y: Integer);
     procedure CloseSearchTabClick(Sender: TObject);
@@ -282,6 +291,13 @@ type
   private
     FFileList: TStringList;  // full paths shown in the tree
     FOpenFiles: TStringList; // path -> TTabSheet (Objects)
+    { Renamed text for files that have NO tab open - lower path -> full text.
+      A rename must not open a tab per touched file (a name used across a
+      closure would open dozens), but the edits still have to be visible to
+      the analysis and to a later OpenFileTab; this is where they live until
+      then. Cleared when a project is (re)opened, like everything else that
+      describes the current sources. }
+    FRenameBuffers: TDictionary<string, string>;
     // Message window: FMsgLog is the full chronological history (status +
     // error rows, never filtered); FMsgVisible indexes the subset currently
     // shown in vtMessages (status rows always included, error rows gated by
@@ -447,10 +463,18 @@ type
     // anywhere (FNav.BuiltinNameAt) -- a NAME, not a (unit, symbol) pair.
     function ActiveBuiltinTarget(out AName: string): Boolean;
     function FindExistingSearchTab(ATMid, ASym: Integer;
-      const ABuiltinName: string = ''): TFindRefTab;
+      const ABuiltinName: string = ''; AIsRename: Boolean = False): TFindRefTab;
+    // Rename: applies a PlanRename edit set to the EDITOR BUFFERS (see
+    // ApplyRenameEdits' own comment on why buffers and not files), then
+    // shows the result in a Find References-shaped tab.
+    function ApplyRenameEdits(const AEdits: TArray<TPasRenameEdit>;
+      const ANewName: string): Boolean;
+    procedure ShowRenameTab(ATMid, ASym: Integer;
+      const AOldName, ANewName: string;
+      const AEdits: TArray<TPasRenameEdit>);
     function MakeFindRefDisplay(const AHit: TPasRefHit;
       const APrefix: string): TFindRefDisplay;
-    procedure PopulateFindRefTab(LTab: TFindRefTab; const AName: string;
+    procedure PopulateFindRefTab(LTab: TFindRefTab; const ACaption: string;
       const AHits: TArray<TPasRefHit>; AHasDecl: Boolean;
       const ADeclHit: TPasRefHit);
     function MakeRun(const AText: string; AColor: TColor;
@@ -968,7 +992,7 @@ end;
 // non-empty means "match by name, ASym/ATMid don't matter" - see
 // TFindRefTab's own comment on the SymSym = -1 / -2 sentinels.
 function TfrmMain.FindExistingSearchTab(ATMid, ASym: Integer;
-  const ABuiltinName: string): TFindRefTab;
+  const ABuiltinName: string; AIsRename: Boolean): TFindRefTab;
 var
   LIdx: Integer;
   LTab: TFindRefTab;
@@ -979,6 +1003,11 @@ begin
     if not (pgcBottom.Pages[LIdx] is TFindRefTab) then
       Continue;
     LTab := TFindRefTab(pgcBottom.Pages[LIdx]);
+    // A rename's result page and a search page for the same symbol say
+    // different things (what the code READS NOW vs where the name occurs) -
+    // one must never overwrite the other.
+    if LTab.IsRename <> AIsRename then
+      Continue;
     if ABuiltinName <> '' then
     begin
       if (LTab.SymSym = -2) and SameText(LTab.SymBuiltinName, ABuiltinName)
@@ -1035,7 +1064,286 @@ begin
     LTab.SymSym := LSym;
     LTab.SymBuiltinName := LBuiltinName;
   end;
-  PopulateFindRefTab(LTab, LName, LHits, LHasDecl, LDeclHit);
+  PopulateFindRefTab(LTab, Format('Search for ''%s'' (%d)',
+    [LName, Length(LHits)]), LHits, LHasDecl, LDeclHit);
+  pgcBottom.ActivePage := LTab;
+end;
+
+// Rename covers the same two identities Find References does MINUS the third:
+// a symbol, or a unit (its header + every `uses` item). A compiler builtin is
+// never renameable - the name is the compiler's, so there is nothing to edit
+// and no declaration to edit it at (PlanRename refuses one outright).
+procedure TfrmMain.RenameActionUpdate(Sender: TObject);
+var
+  LTMid, LSym: Integer;
+  LName: string;
+begin
+  TAction(Sender).Enabled := ActiveSymbolTarget(LTMid, LSym, LName) or
+    ActiveUnitTarget(LTMid, LName);
+end;
+
+{ Ctrl+E / the editor's context menu. Ask for the new name (pre-filled with
+  the identifier under the caret), plan the edits, apply them, then show the
+  result in a Find References-shaped page - same tree, but every snippet is
+  the line as it now READS, so what the panel shows is the outcome rather
+  than a promise. }
+procedure TfrmMain.RenameActionExecute(Sender: TObject);
+var
+  LTMid, LSym: Integer;
+  LName, LNewName, LError, LFileName: string;
+  LEdits: TArray<TPasRenameEdit>;
+  LIsUnit: Boolean;
+  LKind: string;
+begin
+  // A symbol first, a UNIT second (the caret is on a `uses` item or on this
+  // file's own header name) - the same two targets Find References offers,
+  // minus builtins, which have no declaration to rename anywhere.
+  LIsUnit := False;
+  if not ActiveSymbolTarget(LTMid, LSym, {out} LName) then
+  begin
+    if not ActiveUnitTarget(LTMid, {out} LName) then
+      Exit;
+    LIsUnit := True;
+    LSym := -1;
+  end;
+  LNewName := LName;
+  if LIsUnit then
+    LKind := 'unit'
+  else
+    LKind := 'symbol';
+  if not InputQuery('Rename', Format('Rename %s ''%s'' to:',
+    [LKind, LName]), LNewName) then
+    Exit;
+  LNewName := Trim(LNewName);
+  if LIsUnit then
+  begin
+    if not FNav.PlanUnitRename(LTMid, LNewName, {out} LEdits,
+      {out} LFileName, {out} LError) then
+    begin
+      if LError <> '' then
+        MessageDlg(LError, mtWarning, [mbOK], 0);
+      Exit;
+    end;
+  end
+  else if not FNav.PlanRename(LTMid, LSym, LNewName, {out} LEdits,
+    {out} LError) then
+  begin
+    if LError <> '' then
+      MessageDlg(LError, mtWarning, [mbOK], 0);
+    Exit;
+  end;
+  if not ApplyRenameEdits(LEdits, LNewName) then
+    Exit;
+  ShowRenameTab(LTMid, LSym, LName, LNewName, LEdits);
+  if LIsUnit then
+    // Object Pascal ties a unit's name to its file name, and this demo
+    // never writes files - saying so is the only honest end to a unit
+    // rename here (PlanUnitRename hands the required name back for exactly
+    // this reason).
+    MessageDlg(Format('The unit was renamed in %d place(s) - in BUFFERS ' +
+      'only, nothing was written. For it to compile, the file %s must also ' +
+      'be renamed to %s, which this viewer does not do.',
+      [Length(LEdits), TPath.GetFileName(FSemaProject.ModelFile(LTMid)),
+       LFileName]), mtInformation, [mbOK], 0);
+end;
+
+{ Applies the plan to BUFFERS, never to files: this demo has no save of any
+  kind, and a rename reaching the RTL sources on disk from a viewer would be
+  the one irreversible thing in the whole application.
+
+  A file that is already OPEN is edited through its editor (SelText inside
+  one undo block, so the rename is one undoable step and the reanalysis
+  debounce fires exactly as it does for hand typing). A file that is NOT
+  open is edited in FRenameBuffers instead - a path -> text overlay that the
+  analysis reads alongside the open tabs (see SeedAnalysisBuffers), and that
+  OpenFileTab hands to the editor if the file is opened later. Renaming a
+  name used across a large closure must not open thirty tabs to say so.
+
+  Per file, edits are applied from the LAST position BACKWARDS, so an
+  earlier edit on the same line can never move a later one's column (the
+  plan is sorted ascending - see TPasRenameEdit).
+
+  The replacement text is read from each edit's own PREVIEW rather than from
+  one new name for the whole plan: a unit rename writes a full dotted name
+  in one `uses` clause and a bare leaf in another (PlanUnitRename's own
+  rule), and those are different strings.
+
+  Every position is verified before anything is touched: the plan's
+  coordinates describe the sources AS ANALYZED, and a buffer edited since
+  then has moved them. A single mismatch aborts the WHOLE rename (the check
+  is its own pass) rather than applying a partial one. }
+function TfrmMain.ApplyRenameEdits(const AEdits: TArray<TPasRenameEdit>;
+  const ANewName: string): Boolean;
+var
+  LIdx, LTabIdx: Integer;
+  LEditor: TSynEdit;
+  LEditors: TArray<TSynEdit>;
+  LTexts: TObjectDictionary<string, TStringList>;
+  LOffline: TStringList;
+  LLines: TStrings;
+  LKey, LLine, LNewText: string;
+  LTouched: Boolean;
+
+  // The lines an edit must be verified against and applied to: the open
+  // editor's, or the offline copy (overlay text, else the file as the
+  // ANALYZER reads it - LoadFileTolerant, the same loader OpenFileTab uses,
+  // so a malformed byte cannot make the two disagree about columns).
+  function LinesOf(const APath: string; out AEditor: TSynEdit): TStrings;
+  var
+    LI: Integer;
+    LText, LPathKey: string;
+    LNew: TStringList;
+  begin
+    LI := FOpenFiles.IndexOf(APath);
+    if LI >= 0 then
+    begin
+      AEditor := TSourceTab(FOpenFiles.Objects[LI]).Editor;
+      Exit(AEditor.Lines);
+    end;
+    AEditor := nil;
+    LPathKey := LowerCase(TPath.GetFullPath(APath));
+    if not LTexts.ContainsKey(LPathKey) then
+    begin
+      if not FRenameBuffers.TryGetValue(LPathKey, LText) then
+        LText := TPasSourceManager.LoadFileTolerant(APath);
+      LNew := TStringList.Create;
+      LNew.Text := LText;
+      LTexts.Add(LPathKey, LNew);
+    end;
+    Result := LTexts[LPathKey];
+  end;
+
+begin
+  Result := False;
+  LTouched := False;
+  SetLength(LEditors, Length(AEdits));
+  LTexts := TObjectDictionary<string, TStringList>.Create([doOwnsValues]);
+  try
+    // Pass 1 - verify everything, change nothing.
+    for LIdx := 0 to High(AEdits) do
+    begin
+      LLines := LinesOf(AEdits[LIdx].FilePath, {out} LEditor);
+      LEditors[LIdx] := LEditor;
+      if (AEdits[LIdx].Line < 1) or (AEdits[LIdx].Line > LLines.Count) then
+        LLine := ''
+      else
+        LLine := LLines[AEdits[LIdx].Line - 1];
+      // Per EDIT, not per rename: the peer header's parameter (see
+      // PlanRename) is its own symbol and could, in already-broken code, be
+      // spelled differently from the one that was clicked.
+      if not SameText(Copy(LLine, AEdits[LIdx].Col, AEdits[LIdx].Len),
+        AEdits[LIdx].OldText) then
+      begin
+        MessageDlg(Format('%s line %d no longer reads ''%s'' - the buffer ' +
+          'has changed since the last analysis. Rename cancelled, nothing ' +
+          'changed.', [TPath.GetFileName(AEdits[LIdx].FilePath),
+           AEdits[LIdx].Line, AEdits[LIdx].OldText]), mtError, [mbOK], 0);
+        Exit;
+      end;
+    end;
+    // Pass 2 - apply, backwards.
+    for LIdx := High(AEdits) downto 0 do
+    begin
+      // The new text, per EDIT (a unit rename writes different spellings
+      // in different places - see the header comment).
+      LNewText := Copy(AEdits[LIdx].Snippet, AEdits[LIdx].HiFrom + 1,
+        AEdits[LIdx].HiTo - AEdits[LIdx].HiFrom);
+      LEditor := LEditors[LIdx];
+      if Assigned(LEditor) then
+      begin
+        LEditor.BeginUndoBlock;
+        try
+          LEditor.BlockBegin :=
+            BufferCoord(AEdits[LIdx].Col, AEdits[LIdx].Line);
+          LEditor.BlockEnd :=
+            BufferCoord(AEdits[LIdx].Col + AEdits[LIdx].Len, AEdits[LIdx].Line);
+          LEditor.SelText := LNewText;
+        finally
+          LEditor.EndUndoBlock;
+        end;
+      end
+      else
+      begin
+        LOffline :=
+          LTexts[LowerCase(TPath.GetFullPath(AEdits[LIdx].FilePath))];
+        LLine := LOffline[AEdits[LIdx].Line - 1];
+        LOffline[AEdits[LIdx].Line - 1] :=
+          Copy(LLine, 1, AEdits[LIdx].Col - 1) + LNewText +
+          Copy(LLine, AEdits[LIdx].Col + AEdits[LIdx].Len, MaxInt);
+      end;
+    end;
+    // The offline files' new text becomes the overlay the next analysis
+    // reads, and marks them dirty exactly as an editor keystroke would.
+    for LKey in LTexts.Keys do
+    begin
+      FRenameBuffers.AddOrSetValue(LKey, LTexts[LKey].Text);
+      LTabIdx := FDirtyFiles.IndexOf(LKey);
+      if LTabIdx < 0 then
+        FDirtyFiles.Add(LKey);
+      LTouched := True;
+    end;
+  finally
+    LTexts.Free;
+  end;
+  if LTouched then
+  begin
+    // No OnChange fired for an offline file - arm the debounce by hand, the
+    // one thing EditorChange would otherwise have done for it.
+    ClearLink;
+    FReparseTimer.Enabled := False;
+    FReparseTimer.Enabled := True;
+  end;
+  Result := True;
+end;
+
+// The rename's own results page: the SAME tree Find References fills, fed
+// the POST-rename lines. TPasRenameEdit already carries a hit's shape
+// (path/line/col + snippet + highlight), so the conversion is a copy.
+procedure TfrmMain.ShowRenameTab(ATMid, ASym: Integer;
+  const AOldName, ANewName: string; const AEdits: TArray<TPasRenameEdit>);
+var
+  LIdx, LUses: Integer;
+  LHits: TArray<TPasRefHit>;
+  LDeclHit: TPasRefHit;
+  LHasDecl: Boolean;
+  LHit: TPasRefHit;
+  LTab: TFindRefTab;
+begin
+  LHasDecl := False;
+  LUses := 0;
+  SetLength(LHits, 0);
+  for LIdx := 0 to High(AEdits) do
+  begin
+    LHit.FilePath := AEdits[LIdx].FilePath;
+    LHit.Line := AEdits[LIdx].Line;
+    LHit.Col := AEdits[LIdx].Col;
+    LHit.Snippet := AEdits[LIdx].Snippet;
+    LHit.HiFrom := AEdits[LIdx].HiFrom;
+    LHit.HiTo := AEdits[LIdx].HiTo;
+    if AEdits[LIdx].IsDecl then
+    begin
+      LDeclHit := LHit;
+      LHasDecl := True;
+    end
+    else
+    begin
+      SetLength(LHits, LUses + 1);
+      LHits[LUses] := LHit;
+      Inc(LUses);
+    end;
+  end;
+  LTab := FindExistingSearchTab(ATMid, ASym, '', {AIsRename} True);
+  if not Assigned(LTab) then
+  begin
+    LTab := TFindRefTab.Create(pgcBottom);
+    LTab.PageControl := pgcBottom;
+    LTab.SymMid := ATMid;
+    LTab.SymSym := ASym;
+    LTab.SymBuiltinName := '';
+    LTab.IsRename := True;
+  end;
+  PopulateFindRefTab(LTab, Format('Renamed ''%s'' -> ''%s'' (%d)',
+    [AOldName, ANewName, Length(AEdits)]), LHits, LHasDecl, LDeclHit);
   pgcBottom.ActivePage := LTab;
 end;
 
@@ -1059,15 +1367,15 @@ end;
 // (Re)builds an existing or brand-new tab's whole tree from scratch - one
 // path for both "new search" and "repeated search reusing its own tab",
 // since a refresh IS a rebuild (the analysis may have changed underneath).
-procedure TfrmMain.PopulateFindRefTab(LTab: TFindRefTab; const AName: string;
-  const AHits: TArray<TPasRefHit>; AHasDecl: Boolean;
+procedure TfrmMain.PopulateFindRefTab(LTab: TFindRefTab;
+  const ACaption: string; const AHits: TArray<TPasRefHit>; AHasDecl: Boolean;
   const ADeclHit: TPasRefHit);
 var
   LGroup: TFindRefGroup;
   LIdx, LStart: Integer;
   LDeclNode, LGroupNode, LHitNode: PVirtualNode;
 begin
-  LTab.Caption := Format('Search for ''%s'' (%d)', [AName, Length(AHits)]);
+  LTab.Caption := ACaption;
   LTab.Hits := AHits;
   LTab.HasDecl := AHasDecl;
   LTab.DeclHit := ADeclHit;
@@ -1639,6 +1947,7 @@ begin
   Caption := 'PasTree Demo v' + PasTreeVersion;
   FFileList := TStringList.Create;
   FOpenFiles := TStringList.Create;
+  FRenameBuffers := TDictionary<string, string>.Create;
   FDirtyFiles := TStringList.Create;   // edits since the last analysis
   FMsgLog := TList<TPasMsgRow>.Create;
   FMsgVisible := TList<Integer>.Create;
@@ -1693,6 +2002,7 @@ begin
   FMsgLog.Free;
   FOpenFiles.Free;
   FDirtyFiles.Free;
+  FRenameBuffers.Free;
   FFileList.Free;
 end;
 
@@ -2271,6 +2581,7 @@ end;
 function TfrmMain.OpenFileTab(const APath: string): TSynEdit;
 var
   LIdx: Integer;
+  LOverlay: string;
   LTab: TSourceTab;
   LHL: TPasTreeSynHighlighter;
 begin
@@ -2333,7 +2644,18 @@ begin
       // file where reading the source mattered most. Now the editor shows the
       // recovered text character-for-character as the analyzer sees it, which
       // also keeps every reported line/column pointing at the right place.
-      Result.Text := TPasSourceManager.LoadFileTolerant(APath);
+      // A rename may have edited this file without opening it (see
+      // FRenameBuffers) - that text, not the disk's, is what the analysis
+      // is working from, so it is what the tab must show. The entry is
+      // dropped: the editor owns the text from here on.
+      if FRenameBuffers.TryGetValue(LowerCase(TPath.GetFullPath(APath)),
+        LOverlay) then
+      begin
+        Result.Text := LOverlay;
+        FRenameBuffers.Remove(LowerCase(TPath.GetFullPath(APath)));
+      end
+      else
+        Result.Text := TPasSourceManager.LoadFileTolerant(APath);
     except
       on E: Exception do
         Result.Text := '{ could not load: ' + E.Message + ' }';
@@ -2810,6 +3132,9 @@ begin
       LTab := TSourceTab(FOpenFiles.Objects[LIdx]);
       FSemaProject.SetBuffer(LTab.FilePath, LTab.Editor.Text);
     end;
+    for var LRen in FRenameBuffers do
+      if FOpenFiles.IndexOf(LRen.Key) < 0 then
+        FSemaProject.SetBuffer(LRen.Key, LRen.Value);
 
     // Same engine as the background path (AnalyzeStaged, run here to
     // completion on THIS thread instead of a worker) - its uses-closure walk
@@ -3120,6 +3445,11 @@ begin
     LTab := TSourceTab(FOpenFiles.Objects[LIdx]);
     FAsyncSession.SetBuffer(LTab.FilePath, LTab.Editor.Text);
   end;
+  // ...plus every file a rename edited without opening a tab for it (see
+  // FRenameBuffers): the analysis must see those edits too.
+  for var LRen in FRenameBuffers do
+    if FOpenFiles.IndexOf(LRen.Key) < 0 then
+      FAsyncSession.SetBuffer(LRen.Key, LRen.Value);
 
   // PARSE DONOR (PasTree 0.9.0): the current project stays alive until the
   // swap in AsyncTimerTick, which is exactly the donor's contract - every
@@ -3186,6 +3516,11 @@ begin
     LTab := TSourceTab(FOpenFiles.Objects[LIdx]);
     FAsyncSession.SetBuffer(LTab.FilePath, LTab.Editor.Text);
   end;
+  // ...plus every file a rename edited without opening a tab for it (see
+  // FRenameBuffers): the analysis must see those edits too.
+  for var LRen in FRenameBuffers do
+    if FOpenFiles.IndexOf(LRen.Key) < 0 then
+      FAsyncSession.SetBuffer(LRen.Key, LRen.Value);
   FAnalyzeOverhead := '';
   FAsyncStart := TStopwatch.StartNew;
   FAsyncSession.Start;
@@ -3575,6 +3910,10 @@ begin
   for LIdx := FOpenFiles.Count - 1 downto 0 do
     TSourceTab(FOpenFiles.Objects[LIdx]).Free;
   FOpenFiles.Clear;
+  // The tab-less rename edits describe the sources of the project being
+  // left - they must not survive into the next one (same reason the tabs
+  // themselves do not).
+  FRenameBuffers.Clear;
 end;
 
 { build configuration }

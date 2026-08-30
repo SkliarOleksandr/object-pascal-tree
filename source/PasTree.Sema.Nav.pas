@@ -69,6 +69,29 @@ type
     HiFrom, HiTo: Integer;   // 0-based offsets into Snippet to highlight
   end;
 
+  { One text replacement produced by PlanRename - the SAME identifier
+    positions Find References reports (the declaration plus every resolved
+    USE), turned into edits. Line/Col/Len address the OLD identifier in the
+    file as analyzed; Snippet/HiFrom/HiTo are the PREVIEW: the line as it
+    reads AFTER every edit on that same line has been applied, with the new
+    name highlighted - so a host can show the RESULT of the rename in the
+    very same results panel it shows a search in, without applying anything
+    first.
+
+    A host applying these must walk each file's edits from the LAST position
+    backwards (they arrive sorted ascending), or shift by hand: two edits on
+    one line move each other whenever the name changes length. }
+  TPasRenameEdit = record
+    FilePath: string;
+    Line, Col: Integer;      // 1-based, of the OLD identifier
+    Len: Integer;            // length of the OLD identifier
+    OldText: string;         // the exact text being replaced, for a host's
+                             // own "has the buffer moved since?" check
+    IsDecl: Boolean;         // this is the declaration site itself
+    Snippet: string;         // the line AFTER all of its own edits
+    HiFrom, HiTo: Integer;   // 0-based offsets of the NEW name in Snippet
+  end;
+
   TPasNavigator = class
   private type
     TNavCache = class
@@ -144,6 +167,13 @@ type
     function RTRoutineKeyLoose(AContainer: Integer; const AName: string):
       string;
     procedure EnsureRoutinePairs(AMid: Integer; ACache: TNavCache);
+    function RoutinePeerNode(AMid, ARoutine: Integer): Integer;
+    function RTParamNames(LM: TPasSemaModel;
+      ARoutine: Integer): TArray<Integer>;
+    function PeerDeclSym(AMid, ASym: Integer): Integer;
+    function PeerRoutineNameNode(AMid, ASym: Integer): Integer;
+    function UnitNameHit(LM: TPasSemaModel; ANode: Integer;
+      out AHit: TPasRefHit): Boolean;
     function RoutineBodyEntry(AMid: Integer; LM: TPasSemaModel;
       AImplNode: Integer; out ATarget: TPasNavTarget): Boolean;
   public
@@ -175,6 +205,47 @@ type
     // in the first place (SymbolAt is expected to have gated those already;
     // this is the same test repeated so the two can never disagree).
     function DeclHit(ATMid, ASym: Integer; out AHit: TPasRefHit): Boolean;
+    { Rename: the whole edit set for giving (ATMid, ASym) a new name -
+      DeclHit + FindReferences, nothing else. Deliberately the SAME identity
+      search Find References runs, so a rename can never touch a
+      same-spelled unrelated symbol, and never reaches further than the
+      references panel already showed.
+
+      False (AError set, AEdits empty) when the new name is not a legal
+      Object Pascal identifier, is a reserved word, is the current name
+      unchanged, or the symbol has no declaration site (see DeclHit) - the
+      last one keeps a rename from half-applying to the uses while leaving
+      the declaration behind. AError is host-displayable text.
+
+      What this does NOT do: it does not check whether the new name COLLIDES
+      with something already visible at each edit site (Object Pascal
+      scoping makes that a full re-resolution question, not a lookup), and
+      it does not touch files - a host applies the edits and re-analyzes.
+      Renaming a UNIT is not this API either (that is a file rename plus
+      every `uses` clause - see FindUnitReferences). }
+    function PlanRename(ATMid, ASym: Integer; const ANewName: string;
+      out AEdits: TArray<TPasRenameEdit>; out AError: string): Boolean;
+    { The UNIT counterpart of PlanRename: ATargetMid's own header name plus
+      every `uses` item across the project that resolved to it (the same two
+      answers UnitDeclHit/FindUnitReferences give, as edits). A dotted new
+      name is legal here and only here - `Namespace.Foo` is one unit name.
+
+      ARequiredFileName is what the FILE must be called for the rename to
+      compile (`<new name>.pas`, dots included - Object Pascal ties a unit's
+      name to its file name). This API never touches files, so a host either
+      renames it or tells the user; either way it must not be left silent.
+
+      Refuses (False, AError set, no edits) on an invalid name - each dotted
+      segment must be an identifier and not a reserved word - on the
+      unchanged name, and on a `uses` item whose WRITTEN text is neither the
+      unit's full name nor its bare leaf (a `-A` alias, or a spelling this
+      code has no rule for). That last one is a refusal rather than a skip
+      on purpose: a rename that silently leaves one `uses` clause pointing
+      at a name that no longer exists produces a build break, which is the
+      one outcome worse than doing nothing. }
+    function PlanUnitRename(ATargetMid: Integer; const ANewName: string;
+      out AEdits: TArray<TPasRenameEdit>; out ARequiredFileName: string;
+      out AError: string): Boolean;
     { The unit counterpart of SymbolAt/FindReferences/DeclHit: a click on
       THIS model's own header name, or on a `uses` clause item (any
       segment), resolved to the TARGET model id rather than a (unit, symbol)
@@ -223,6 +294,16 @@ type
     function GotoDeclaration(AMid, ALine, ACol: Integer;
       out ATarget: TPasNavTarget): Boolean;
   end;
+
+// True when AName is a legal, unescaped Object Pascal identifier that is not
+// a reserved word - PlanRename's own name test, exposed so a host can gate
+// its OK button as the user types rather than only on submit.
+function IsValidRenameName(const AName: string): Boolean;
+
+// The same test for a UNIT name, where dots are part of the name: every
+// segment must pass IsValidRenameName (`Namespace.Foo`, never `.Foo` or
+// `Foo..Bar`). PlanUnitRename's own test, exposed for the same reason.
+function IsValidUnitRenameName(const AName: string): Boolean;
 
 implementation
 
@@ -1757,6 +1838,588 @@ begin
     Exit;
   Result := TargetFromVis(AMid, LM.Tree.Nodes[LNameNode].FirstToken, LName,
     ATarget);
+end;
+
+{ The routine node paired with ARoutine - a body-less declaration's
+  implementation, or an implementation's own declaration - or NIL_NODE when
+  it has no counterpart (an ordinary routine defined once). The same keys
+  GotoImplementation/GotoDeclaration match on, in one node-level form: those
+  two answer "where do I jump", this answers "which OTHER header spells the
+  same routine", which is what a rename of a parameter needs. }
+function TPasNavigator.RoutinePeerNode(AMid, ARoutine: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LCache: TNavCache;
+  LNameNode, LContainer, LIdx: Integer;
+  LQualIdents: TArray<Integer>;
+  LName, LKey, LKeyLoose: string;
+  LChain: TArray<string>;
+  LIsImpl, LIsMethod: Boolean;
+begin
+  Result := NIL_NODE;
+  if (AMid < 0) or (ARoutine = NIL_NODE) then
+    Exit;
+  LM := FProj.Model(AMid);
+  LCache := CacheOf(AMid);
+  EnsureRoutinePairs(AMid, LCache);
+  if LM.Tree.Nodes[ARoutine].Kind <> nkRoutine then
+    Exit;
+  LIsImpl := RTFindChildKind(LM, ARoutine, nkRoutineBody) <> NIL_NODE;
+  if not RTSegments(LM, ARoutine, LQualIdents, LNameNode) then
+    Exit;
+  LName := LM.Tree.NodeNameLower(LNameNode);
+  if LIsImpl then
+    // A qualified implementation (TFoo.Bar) is a method's; an unqualified
+    // one completes a `forward` in its own lexical container.
+    LIsMethod := LQualIdents <> nil
+  else
+    // A declaration is a method's when a struct-type body adopted it.
+    LIsMethod := (LM.Tree.Nodes[ARoutine].Parent <> NIL_NODE) and
+      RTIsStructKind(LM.Tree.Nodes[LM.Tree.Nodes[ARoutine].Parent].Kind);
+  if LIsMethod then
+  begin
+    if LIsImpl then
+    begin
+      SetLength(LChain, Length(LQualIdents));
+      for LIdx := 0 to High(LQualIdents) do
+        LChain[LIdx] := LM.Tree.NodeNameLower(LQualIdents[LIdx]);
+    end
+    else
+      LChain := RTEnclosingTypeChain(LM, ARoutine);
+    LKey := RTMethodKey(LChain, LName, RTParamSignature(LM, ARoutine));
+    LKeyLoose := RTMethodKeyLoose(LChain, LName);
+  end
+  else
+  begin
+    LContainer := RTEnclosingRoutine(LM, ARoutine);
+    LKey := RTRoutineKey(LContainer, LName, RTParamSignature(LM, ARoutine));
+    LKeyLoose := RTRoutineKeyLoose(LContainer, LName);
+  end;
+  if LIsImpl then
+  begin
+    if not LCache.DeclKey.TryGetValue(LKey, Result) then
+      if not LCache.DeclKeyLoose.TryGetValue(LKeyLoose, Result) then
+        Result := NIL_NODE;
+  end
+  else
+    if not LCache.ImplKey.TryGetValue(LKey, Result) then
+      if not LCache.ImplKeyLoose.TryGetValue(LKeyLoose, Result) then
+        Result := NIL_NODE;
+end;
+
+// A routine's parameter NAME nodes in source order, flattened across the
+// groups a header writes them in (`(A, B: Integer; C: string)` is three).
+// Position in this list is the only thing that pairs a declaration's
+// parameter with the implementation's - the names are what a rename is
+// changing, so they cannot be the key.
+function TPasNavigator.RTParamNames(LM: TPasSemaModel;
+  ARoutine: Integer): TArray<Integer>;
+var
+  LParams, LParam, LChild, LCount: Integer;
+begin
+  Result := nil;
+  LCount := 0;
+  LParams := RTFindChildKind(LM, ARoutine, nkParams);
+  if LParams = NIL_NODE then
+    Exit;
+  LParam := LM.Tree.Nodes[LParams].FirstChild;
+  while LParam <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LParam].Kind = nkParam then
+    begin
+      LChild := RTSkipAttr(LM, LM.Tree.Nodes[LParam].FirstChild);
+      while (LChild <> NIL_NODE) and (LM.Tree.Nodes[LChild].Kind = nkIdent) do
+      begin
+        if LCount = Length(Result) then
+          SetLength(Result, LCount * 2 + 8);
+        Result[LCount] := LChild;
+        Inc(LCount);
+        // A colon ends the name list of this group - what follows is the
+        // TYPE, which is a reference, never a parameter name.
+        if RTSepAfter(LM, LChild) = tkColon then
+          Break;
+        LChild := LM.Tree.Nodes[LChild].NextSibling;
+      end;
+    end;
+    LParam := LM.Tree.Nodes[LParam].NextSibling;
+  end;
+  SetLength(Result, LCount);
+end;
+
+{ The symbol that MUST be renamed together with ASym, or NIL_SYM.
+
+  Object Pascal requires a routine's implementation header to repeat its
+  declaration EXACTLY, parameter names included - dcc rejects a mismatch
+  with E2037 ("Declaration differs from previous declaration") and then
+  E2003 on the body's now-undeclared name. But a declaration's parameter and
+  its implementation's parameter are two different SYMBOLS (each routine
+  scope declares its own), so renaming by symbol identity alone renames one
+  header and leaves the other - code that no longer compiles. This is the
+  one place a rename must reach past the identity Find References reports,
+  and it is a language rule, not a heuristic.
+
+  Paired by POSITION in the parameter list, never by name (the name is what
+  is being changed, and a mismatch is exactly the state a half-done rename
+  leaves behind). The routine NAME itself needs the same treatment for a
+  different reason - see PeerRoutineNameNode. }
+function TPasNavigator.PeerDeclSym(AMid, ASym: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LCache: TNavCache;
+  LDecl, LRoutine, LPeer, LIdx: Integer;
+  LNames, LPeerNames: TArray<Integer>;
+begin
+  Result := NIL_SYM;
+  if AMid < 0 then
+    Exit;
+  LM := FProj.Model(AMid);
+  if LM.Symbols[ASym].Kind <> skParam then
+    Exit;
+  LDecl := LM.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LRoutine := RTEnclosingRoutine(LM, LDecl);
+  if LRoutine = NIL_NODE then
+    Exit;
+  LPeer := RoutinePeerNode(AMid, LRoutine);
+  if LPeer = NIL_NODE then
+    Exit;
+  LCache := CacheOf(AMid);
+  LNames := RTParamNames(LM, LRoutine);
+  LPeerNames := RTParamNames(LM, LPeer);
+  for LIdx := 0 to High(LNames) do
+    if LNames[LIdx] = LDecl then
+    begin
+      if LIdx > High(LPeerNames) then
+        Exit;   // headers disagree on arity - not this function's problem
+      if not LCache.DeclSymOfNode.TryGetValue(LPeerNames[LIdx], Result) then
+        Result := NIL_SYM;
+      Exit;
+    end;
+end;
+
+{ The OTHER header's own name node for a routine symbol, or NIL_NODE.
+
+  A routine's declaration and its implementation share ONE symbol, so this
+  is not a second identity - but FindReferences deliberately reports neither
+  header (IsDeclSelfName filters a routine's own header, decl and impl
+  alike: they are not uses), and DeclHit answers with only one of them. A
+  rename that took just those would leave `function Foo(...)` in the
+  implementation while the declaration said `function Bar(...)` - E2037, the
+  same breakage the parameter case produces. So the peer header's name is
+  looked up structurally and added as an edit position. }
+function TPasNavigator.PeerRoutineNameNode(AMid, ASym: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LDecl, LRoutine, LPeer, LNameNode: Integer;
+  LQualIdents: TArray<Integer>;
+begin
+  Result := NIL_NODE;
+  if AMid < 0 then
+    Exit;
+  LM := FProj.Model(AMid);
+  if LM.Symbols[ASym].Kind <> skRoutine then
+    Exit;
+  LDecl := LM.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LRoutine := RTEnclosingRoutine(LM, LDecl);
+  if LRoutine = NIL_NODE then
+    Exit;
+  LPeer := RoutinePeerNode(AMid, LRoutine);
+  if LPeer = NIL_NODE then
+    Exit;
+  if RTSegments(LM, LPeer, LQualIdents, LNameNode) then
+    Result := LNameNode;
+end;
+
+{ Rename }
+
+function IsValidRenameName(const AName: string): Boolean;
+var
+  LIdx: Integer;
+begin
+  Result := False;
+  if AName = '' then
+    Exit;
+  if not CharInSet(AName[1], ['A'..'Z', 'a'..'z', '_']) then
+    Exit;
+  for LIdx := 2 to Length(AName) do
+    if not CharInSet(AName[LIdx], ['A'..'Z', 'a'..'z', '0'..'9', '_']) then
+      Exit;
+  // A reserved word would not parse as a name here, and `&`-escaping one is
+  // a deliberate act - never something a rename should do behind the user.
+  Result := KeywordKind(PChar(AName), Length(AName)) = tkIdentifier;
+end;
+
+function IsValidUnitRenameName(const AName: string): Boolean;
+var
+  LSeg: string;
+begin
+  Result := False;
+  if AName = '' then
+    Exit;
+  for LSeg in AName.Split(['.']) do
+    if not IsValidRenameName(LSeg) then
+      Exit;
+  Result := True;
+end;
+
+{ A `uses` item's or a unit header's WHOLE written name as one hit -
+  HitFromNode deliberately reports only the first token (its highlight
+  convention: one identifier), but a dotted unit name is ONE name, and a
+  rename replaces all of it or none of it. False when the name spans files
+  or lines (nothing legitimate does; a rename must not guess at it). }
+function TPasNavigator.UnitNameHit(LM: TPasSemaModel; ANode: Integer;
+  out AHit: TPasRefHit): Boolean;
+var
+  LFirstVis, LLastVis, LLineTo, LColTo: Integer;
+  LFrom, LTo: TPasVisibleToken;
+  LTS: TPasTokenStream;
+begin
+  Result := False;
+  if (ANode = NIL_NODE) or (ANode > High(LM.Tree.Nodes)) then
+    Exit;
+  LFirstVis := LM.Tree.NodeLeftmostVis(ANode);
+  LLastVis := LM.Tree.Nodes[ANode].LastToken;
+  if (LFirstVis < 0) or (LLastVis < LFirstVis) or
+     (LLastVis > High(LM.Tree.Source.Visible)) then
+    Exit;
+  LFrom := LM.Tree.Source.Visible[LFirstVis];
+  LTo := LM.Tree.Source.Visible[LLastVis];
+  if LFrom.FileId <> LTo.FileId then
+    Exit;
+  LTS := LM.Tree.Source.Files[LFrom.FileId];
+  AHit.FilePath := LM.Tree.Source.FileNames[LFrom.FileId];
+  LTS.OffsetToLineCol(LTS.Tokens[LFrom.TokenIndex].Start, AHit.Line, AHit.Col);
+  LTS.OffsetToLineCol(LTS.Tokens[LTo.TokenIndex].EndPos, LLineTo, LColTo);
+  if LLineTo <> AHit.Line then
+    Exit;
+  AHit.Snippet := LTS.LineText(AHit.Line);
+  AHit.HiFrom := AHit.Col - 1;
+  AHit.HiTo := LColTo - 1;
+  Result := AHit.HiTo > AHit.HiFrom;
+end;
+
+{ Unit rename - the header plus every `uses` item that resolved here.
+
+  Unlike PlanRename there is no symbol identity to search: each referring
+  unit gets its OWN local skUnitRef symbol, so the shared identity is the
+  TARGET MODEL, which is exactly what FindUnitReferences already keys on
+  (its own comment says why). What this adds is the header itself, whole
+  dotted spans instead of first segments, and the file-name obligation. }
+function TPasNavigator.PlanUnitRename(ATargetMid: Integer;
+  const ANewName: string; out AEdits: TArray<TPasRenameEdit>;
+  out ARequiredFileName: string; out AError: string): Boolean;
+var
+  LM: TPasSemaModel;
+  LList: TList<TPasRenameEdit>;
+  LEdit: TPasRenameEdit;
+  LHit: TPasRefHit;
+  LMi, LIdx, LHeader: Integer;
+  LOldFull, LOldLeaf, LNewLeaf, LWritten, LText: string;
+
+  procedure AddHit(const AHitRec: TPasRefHit; const AText: string;
+    AIsDecl: Boolean);
+  begin
+    LEdit.FilePath := AHitRec.FilePath;
+    LEdit.Line := AHitRec.Line;
+    LEdit.Col := AHitRec.Col;
+    LEdit.Len := AHitRec.HiTo - AHitRec.HiFrom;
+    LEdit.OldText := Copy(AHitRec.Snippet, AHitRec.HiFrom + 1, LEdit.Len);
+    LEdit.IsDecl := AIsDecl;
+    // The preview is built here rather than by the shared per-line pass
+    // PlanRename uses: two `uses` items on one line can be replaced by
+    // DIFFERENT texts (a full name here, a bare leaf there), which that
+    // pass's single new-name assumption cannot express.
+    LEdit.Snippet := Copy(AHitRec.Snippet, 1, AHitRec.HiFrom) + AText +
+      Copy(AHitRec.Snippet, AHitRec.HiTo + 1, MaxInt);
+    LEdit.HiFrom := AHitRec.HiFrom;
+    LEdit.HiTo := AHitRec.HiFrom + Length(AText);
+    LList.Add(LEdit);
+  end;
+
+begin
+  Result := False;
+  AEdits := nil;
+  ARequiredFileName := '';
+  AError := '';
+  if (ATargetMid < 0) or (ATargetMid >= FProj.ModelCount) then
+  begin
+    AError := 'No unit to rename.';
+    Exit;
+  end;
+  if not IsValidUnitRenameName(ANewName) then
+  begin
+    AError := Format('"%s" is not a valid unit name.', [ANewName]);
+    Exit;
+  end;
+  LM := FProj.Model(ATargetMid);
+  LHeader := LM.Tree.Nodes[0].FirstChild;
+  if not UnitNameHit(LM, LHeader, {out} LHit) then
+  begin
+    AError := 'This unit has no readable name in its own header.';
+    Exit;
+  end;
+  LOldFull := Copy(LHit.Snippet, LHit.HiFrom + 1, LHit.HiTo - LHit.HiFrom);
+  if ANewName = LOldFull then
+  begin
+    AError := 'The new name is the same as the old one.';
+    Exit;
+  end;
+  LOldLeaf := LOldFull;
+  if LOldLeaf.Contains('.') then
+    LOldLeaf := LOldLeaf.Substring(LOldLeaf.LastDelimiter('.') + 1);
+  LNewLeaf := ANewName;
+  if LNewLeaf.Contains('.') then
+    LNewLeaf := LNewLeaf.Substring(LNewLeaf.LastDelimiter('.') + 1);
+
+  LList := TList<TPasRenameEdit>.Create;
+  try
+    AddHit(LHit, ANewName, True);
+    for LMi := 0 to FProj.ModelCount - 1 do
+    begin
+      LM := FProj.Model(LMi);
+      for LIdx := 0 to High(LM.UsesList) do
+      begin
+        if LM.UsesList[LIdx].UnitId <> ATargetMid then
+          Continue;
+        if not UnitNameHit(LM, LM.UsesList[LIdx].NameNode, {out} LHit) then
+        begin
+          AError := Format('A `uses` reference in %s could not be read as ' +
+            'one name - rename refused, nothing planned.',
+            [TPath.GetFileName(FProj.ModelFile(LMi))]);
+          Exit;
+        end;
+        LWritten := Copy(LHit.Snippet, LHit.HiFrom + 1,
+          LHit.HiTo - LHit.HiFrom);
+        // Written in full -> write the new full name. Written as the bare
+        // leaf (a namespace prefix resolved it) -> keep it bare, which
+        // stays correct only while the prefix itself is unchanged;
+        // otherwise the full name is the safe spelling.
+        if SameText(LWritten, LOldFull) then
+          LText := ANewName
+        else if SameText(LWritten, LOldLeaf) then
+        begin
+          if SameText(Copy(LOldFull, 1, Length(LOldFull) - Length(LOldLeaf)),
+             Copy(ANewName, 1, Length(ANewName) - Length(LNewLeaf))) then
+            LText := LNewLeaf
+          else
+            LText := ANewName;
+        end
+        else
+        begin
+          AError := Format('%s line %d spells this unit as "%s", which is ' +
+            'neither its name nor its leaf (a unit alias?) - rename ' +
+            'refused, nothing planned.',
+            [TPath.GetFileName(LHit.FilePath), LHit.Line, LWritten]);
+          Exit;
+        end;
+        AddHit(LHit, LText, False);
+      end;
+    end;
+    AEdits := LList.ToArray;
+  finally
+    LList.Free;
+  end;
+
+  TArray.Sort<TPasRenameEdit>(AEdits, TComparer<TPasRenameEdit>.Construct(
+    function(const A, B: TPasRenameEdit): Integer
+    begin
+      Result := CompareText(A.FilePath, B.FilePath);
+      if Result = 0 then
+        Result := A.Line - B.Line;
+      if Result = 0 then
+        Result := A.Col - B.Col;
+    end));
+  ARequiredFileName := ANewName + '.pas';
+  Result := True;
+end;
+
+{ Decl + every use, turned into edits with a per-line preview. The preview is
+  built per (file, line) GROUP rather than per edit, because two hits on one
+  line each move the other: applying them left to right shifts every later
+  HiFrom/HiTo by the accumulated length delta, and a preview that ignored
+  that would highlight the wrong span on exactly the lines a rename is most
+  likely to get wrong. }
+function TPasNavigator.PlanRename(ATMid, ASym: Integer;
+  const ANewName: string; out AEdits: TArray<TPasRenameEdit>;
+  out AError: string): Boolean;
+var
+  LDecl: TPasRefHit;
+  LList: TList<TPasRenameEdit>;
+  LArr: TArray<TPasRenameEdit>;
+  LIdx, LStart, LRun, LDelta, LNewLen, LPeer: Integer;
+  LLine: string;
+
+  // One CST node's own position, as an edit - for the peer routine header,
+  // which is the same symbol and therefore not reachable through any
+  // symbol-identity scan (see PeerRoutineNameNode).
+  procedure AddNodeEdit(AList: TList<TPasRenameEdit>; ANode: Integer);
+  var
+    LHit: TPasRefHit;
+    LEdit: TPasRenameEdit;
+  begin
+    if (ANode = NIL_NODE) or
+       not HitFromNode(FProj.Model(ATMid), ANode, LHit) then
+      Exit;
+    LEdit.FilePath := LHit.FilePath;
+    LEdit.Line := LHit.Line;
+    LEdit.Col := LHit.Col;
+    LEdit.Len := LHit.HiTo - LHit.HiFrom;
+    LEdit.OldText := Copy(LHit.Snippet, LHit.HiFrom + 1, LEdit.Len);
+    LEdit.IsDecl := False;
+    LEdit.Snippet := LHit.Snippet;
+    LEdit.HiFrom := LHit.HiFrom;
+    LEdit.HiTo := LHit.HiTo;
+    AList.Add(LEdit);
+  end;
+
+  // One symbol's own declaration + every use, as edits. AMarkDecl flags the
+  // declaration row for a host to pin at the top of its results; only the
+  // symbol the user actually clicked gets it, so a peer header's own
+  // parameter declaration lists as an ordinary edit.
+  procedure AddSymEdits(AList: TList<TPasRenameEdit>; AMid, ASymbol: Integer;
+    AMarkDecl: Boolean);
+  var
+    LHits: TArray<TPasRefHit>;
+    LHit: TPasRefHit;
+    LEdit: TPasRenameEdit;
+    LI: Integer;
+  begin
+    if DeclHit(AMid, ASymbol, {out} LHit) then
+    begin
+      LEdit.FilePath := LHit.FilePath;
+      LEdit.Line := LHit.Line;
+      LEdit.Col := LHit.Col;
+      LEdit.Len := LHit.HiTo - LHit.HiFrom;
+      LEdit.OldText := Copy(LHit.Snippet, LHit.HiFrom + 1, LEdit.Len);
+      LEdit.IsDecl := AMarkDecl;
+      LEdit.Snippet := LHit.Snippet;
+      LEdit.HiFrom := LHit.HiFrom;
+      LEdit.HiTo := LHit.HiTo;
+      AList.Add(LEdit);
+    end;
+    LHits := FindReferences(AMid, ASymbol);
+    for LI := 0 to High(LHits) do
+    begin
+      LEdit.FilePath := LHits[LI].FilePath;
+      LEdit.Line := LHits[LI].Line;
+      LEdit.Col := LHits[LI].Col;
+      LEdit.Len := LHits[LI].HiTo - LHits[LI].HiFrom;
+      LEdit.OldText := Copy(LHits[LI].Snippet, LHits[LI].HiFrom + 1,
+        LEdit.Len);
+      LEdit.IsDecl := False;
+      LEdit.Snippet := LHits[LI].Snippet;
+      LEdit.HiFrom := LHits[LI].HiFrom;
+      LEdit.HiTo := LHits[LI].HiTo;
+      AList.Add(LEdit);
+    end;
+  end;
+
+begin
+  Result := False;
+  AEdits := nil;
+  AError := '';
+  if (ATMid < 0) or (ASym = NIL_SYM) then
+  begin
+    AError := 'No symbol to rename.';
+    Exit;
+  end;
+  if not IsValidRenameName(ANewName) then
+  begin
+    AError := Format('"%s" is not a valid identifier.', [ANewName]);
+    Exit;
+  end;
+  if ANewName = FProj.Model(ATMid).Symbols[ASym].Name then
+  begin
+    AError := 'The new name is the same as the old one.';
+    Exit;
+  end;
+  // A compiler-seeded builtin is never renameable, even where one happens to
+  // carry a declaration node: the name is the COMPILER's (`Integer`,
+  // `Length`, `True`), the seeding is per model, and "every use" would mean
+  // every unit in the language. SymbolAt already declines the seeds with no
+  // real declaration (its own comment says why); this is the explicit rule
+  // for the rest, so a host cannot reach one through any other path.
+  if sfBuiltin in FProj.Model(ATMid).Symbols[ASym].Flags then
+  begin
+    AError := Format('"%s" is a compiler builtin - it cannot be renamed.',
+      [FProj.Model(ATMid).Symbols[ASym].Name]);
+    Exit;
+  end;
+  if not DeclHit(ATMid, ASym, {out} LDecl) then
+  begin
+    AError := 'This symbol has no declaration site to rename ' +
+      '(an implicit Result, or a compiler builtin).';
+    Exit;
+  end;
+  // The peer header's own parameter symbol, when there is one (see
+  // PeerDeclSym): a language rule, not an extra search - the two headers
+  // must keep spelling the parameter the same way.
+  LPeer := PeerDeclSym(ATMid, ASym);
+
+  LList := TList<TPasRenameEdit>.Create;
+  try
+    AddSymEdits(LList, ATMid, ASym, True);
+    if (LPeer <> NIL_SYM) and (LPeer <> ASym) then
+      AddSymEdits(LList, ATMid, LPeer, False);
+    AddNodeEdit(LList, PeerRoutineNameNode(ATMid, ASym));
+    LArr := LList.ToArray;
+  finally
+    LList.Free;
+  end;
+
+  TArray.Sort<TPasRenameEdit>(LArr, TComparer<TPasRenameEdit>.Construct(
+    function(const A, B: TPasRenameEdit): Integer
+    begin
+      Result := CompareText(A.FilePath, B.FilePath);
+      if Result = 0 then
+        Result := A.Line - B.Line;
+      if Result = 0 then
+        Result := A.Col - B.Col;
+    end));
+
+  // The declaration site can also arrive as a hit through a map the decl
+  // filter does not cover (IsDeclSelfName is structural, and guards only the
+  // declaring model's own RefMap) - one POSITION must never be edited twice,
+  // or the second edit would land inside the first one's new text.
+  LIdx := 1;
+  while LIdx <= High(LArr) do
+    if (LArr[LIdx].Line = LArr[LIdx - 1].Line) and
+       (LArr[LIdx].Col = LArr[LIdx - 1].Col) and
+       SameText(LArr[LIdx].FilePath, LArr[LIdx - 1].FilePath) then
+    begin
+      LArr[LIdx - 1].IsDecl := LArr[LIdx - 1].IsDecl or LArr[LIdx].IsDecl;
+      Delete(LArr, LIdx, 1);
+    end
+    else
+      Inc(LIdx);
+
+  LNewLen := Length(ANewName);
+  LIdx := 0;
+  while LIdx <= High(LArr) do
+  begin
+    LStart := LIdx;
+    LLine := LArr[LStart].Snippet;
+    LDelta := 0;
+    while (LIdx <= High(LArr)) and (LArr[LIdx].Line = LArr[LStart].Line) and
+          SameText(LArr[LIdx].FilePath, LArr[LStart].FilePath) do
+    begin
+      // 1-based Copy offsets, from the 0-based hit offsets.
+      LLine := Copy(LLine, 1, LArr[LIdx].HiFrom + LDelta) + ANewName +
+        Copy(LLine, LArr[LIdx].HiTo + LDelta + 1, MaxInt);
+      LArr[LIdx].HiFrom := LArr[LIdx].HiFrom + LDelta;
+      LArr[LIdx].HiTo := LArr[LIdx].HiFrom + LNewLen;
+      Inc(LDelta, LNewLen - LArr[LIdx].Len);
+      Inc(LIdx);
+    end;
+    for LRun := LStart to LIdx - 1 do
+      LArr[LRun].Snippet := LLine;
+  end;
+
+  AEdits := LArr;
+  Result := True;
 end;
 
 end.

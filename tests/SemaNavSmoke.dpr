@@ -1,4 +1,4 @@
-program SemaNavSmoke;
+﻿program SemaNavSmoke;
 
 { Go-to-declaration smoke tests: fixture units in a temp dir, then IdentAt +
   ResolveDecl checks - same-unit locals, cross-unit types, cross-unit MEMBER
@@ -63,6 +63,49 @@ const
     '  Ping(1);'#10 +                           // 18  Ping col 3
     'end;'#10 +                                 // 19
     'end.'#10;                                  // 20
+
+  // Rename fixture: line 9 uses the SAME symbol TWICE, which is the one
+  // shape a per-line rename preview can get wrong - the second edit's
+  // highlight has to move by the first one's length delta (see
+  // TPasNavigator.PlanRename).
+  UNIT_REN =
+    'unit NavRen;'#10 +                         // 1
+    'interface'#10 +                            // 2
+    'var'#10 +                                  // 3
+    '  Cnt: Integer;'#10 +                      // 4  Cnt col 3
+    'procedure Bump;'#10 +                      // 5
+    'implementation'#10 +                       // 6
+    'procedure Bump;'#10 +                      // 7
+    'begin'#10 +                                // 8
+    '  Cnt := Cnt + 1;'#10 +                    // 9  Cnt col 3 and col 10
+    'end;'#10 +                                 // 10
+    'end.'#10;
+
+  { Renaming a PARAMETER: dcc requires the implementation header to repeat
+    the declaration's parameter names EXACTLY (verified with dcc32: a
+    mismatch is E2037 on the header plus E2003 on the body's own use), for a
+    `forward` global routine and for a class method alike. Each header
+    declares its OWN parameter symbol, so a rename that stopped at symbol
+    identity would edit one header and leave the other - code that no longer
+    compiles. Both shapes are here. }
+  UNIT_RENP =
+    'unit NavRenP;'#10 +                        // 1
+    'interface'#10 +                            // 2
+    'type'#10 +                                 // 3
+    '  TRP = class'#10 +                        // 4
+    '    procedure Take(AVal: Integer);'#10 +   // 5   AVal col 20
+    '  end;'#10 +                               // 6
+    'function Twice(ALen: Integer): Integer; forward;'#10 + // 7  ALen col 16
+    'implementation'#10 +                       // 8
+    'function Twice(ALen: Integer): Integer;'#10 + // 9  ALen col 16
+    'begin'#10 +                                // 10
+    '  Result := ALen + ALen;'#10 +             // 11  ALen col 13 and col 20
+    'end;'#10 +                                 // 12
+    'procedure TRP.Take(AVal: Integer);'#10 +   // 13  AVal col 20 (same)
+    'begin'#10 +                                // 14
+    '  Writeln(AVal);'#10 +                     // 15  AVal col 11
+    'end;'#10 +                                 // 16
+    'end.'#10;                                  // 11
 
   // Line/col layout matters: the checks below address exact positions.
   UNIT_A =
@@ -497,6 +540,22 @@ begin
       Exit(True);
 end;
 
+// One rename edit at an exact position, with the preview line and the
+// highlight span it claims for the NEW name.
+function HasEdit(const AEdits: TArray<TPasRenameEdit>; const AFile: string;
+  ALine, ACol: Integer; const ASnippet: string;
+  AHiFrom, AHiTo: Integer): Boolean;
+var
+  LIdx: Integer;
+begin
+  Result := False;
+  for LIdx := 0 to High(AEdits) do
+    if SameText(TPath.GetFileName(AEdits[LIdx].FilePath), AFile) and
+       (AEdits[LIdx].Line = ALine) and (AEdits[LIdx].Col = ACol) then
+      Exit((AEdits[LIdx].Snippet = ASnippet) and
+        (AEdits[LIdx].HiFrom = AHiFrom) and (AEdits[LIdx].HiTo = AHiTo));
+end;
+
 // Declaration -> implementation: cursor at (ALine,ACol), expect the body's
 // first-statement (or empty-body fallback) at (AWantLine,AWantCol). AWantCol
 // < 0 skips the column check (some callers only care about the line).
@@ -539,6 +598,9 @@ var
   LRName: string;
   LHits: TArray<TPasRefHit>;
   LDeclHit: TPasRefHit;
+  LEdits: TArray<TPasRenameEdit>;
+  LMidRen, LIdx: Integer;
+  LErr, LFileName: string;
 begin
   GCounter.Init;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_nav');
@@ -558,6 +620,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOvl.pas'), UNIT_OVL);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOvlUse.pas'), UNIT_OVLUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRQ.pas'), UNIT_RQ);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavRen.pas'), UNIT_REN);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavRenP.pas'), UNIT_RENP);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -961,6 +1025,184 @@ begin
           {out} LRTMid, {out} LRSym, {out} LRName));
       Ok('DeclHit: Result declines (no DeclNode)',
         not GNav.DeclHit(LRTMid, LRSym, {out} LDeclHit));
+      // ---- Rename (PlanRename) ----
+      // Result has no declaration site: renaming it would half-apply, so
+      // the plan must refuse rather than edit the uses alone.
+      Ok('PlanRename: Result refuses (no declaration site)',
+        not GNav.PlanRename(LRTMid, LRSym, 'Res', {out} LEdits, {out} LErr) and
+        (LErr <> '') and (Length(LEdits) = 0));
+
+      // TThing: decl (NavA 4,3) + the same 3 uses Find References reports.
+      Ok('SymbolAt: TThing for rename',
+        GNav.SymbolAt(LMidA, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName));
+      Ok('PlanRename: TThing -> TWidget, decl + every use',
+        GNav.PlanRename(LRTMid, LRSym, 'TWidget', {out} LEdits, {out} LErr) and
+        (Length(LEdits) = 4) and (LErr = ''));
+      Ok('PlanRename: TThing - the declaration itself, flagged',
+        HasEdit(LEdits, 'NavA.pas', 4, 3, '  TWidget = record', 2, 9) and
+        LEdits[0].IsDecl);
+      Ok('PlanRename: TThing - both NavA signatures',
+        HasEdit(LEdits, 'NavA.pas', 7, 21, 'function MakeThing: TWidget;',
+          20, 27) and
+        HasEdit(LEdits, 'NavA.pas', 9, 21, 'function MakeThing: TWidget;',
+          20, 27));
+      Ok('PlanRename: TThing - the cross-unit use in NavB',
+        HasEdit(LEdits, 'NavB.pas', 4, 9, 'var GT: TWidget;', 8, 15));
+      Ok('PlanRename: old length is the OLD name''s',
+        (LEdits[0].Len = 6) and not LEdits[1].IsDecl);
+
+      // Two uses on ONE line: the second edit's preview span must move by
+      // the first one's length delta, and both must show the SAME finished
+      // line (NavRen line 9, `  Cnt := Cnt + 1;` -> `  Counter := ...`).
+      Ok('SymbolAt: Cnt in NavRen',
+        GNav.SymbolAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavRen.pas')),
+          4, 3, {out} LRTMid, {out} LRSym, {out} LRName) and
+        SameText(LRName, 'Cnt'));
+      Ok('PlanRename: Cnt -> Counter, decl + 2 uses',
+        GNav.PlanRename(LRTMid, LRSym, 'Counter', {out} LEdits, {out} LErr) and
+        (Length(LEdits) = 3));
+      Ok('PlanRename: two edits on one line - first span',
+        HasEdit(LEdits, 'NavRen.pas', 9, 3, '  Counter := Counter + 1;',
+          2, 9));
+      Ok('PlanRename: two edits on one line - second span SHIFTED',
+        HasEdit(LEdits, 'NavRen.pas', 9, 10, '  Counter := Counter + 1;',
+          13, 20));
+
+      // A `forward` routine's parameter, renamed FROM THE DECLARATION: the
+      // implementation's own same-named parameter is a DIFFERENT symbol,
+      // and dcc requires both headers to spell it identically - so all four
+      // positions must be in the plan (2 headers + 2 body uses).
+      LMidRen := GNav.ModelIdOf(TPath.Combine(LDir, 'NavRenP.pas'));
+      Ok('NavRenP model found', LMidRen >= 0);
+      Ok('SymbolAt: forward decl''s ALen',
+        GNav.SymbolAt(LMidRen, 7, 16, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'ALen'));
+      Ok('PlanRename: forward param -> BOTH headers and the body',
+        GNav.PlanRename(LRTMid, LRSym, 'ALen2', {out} LEdits, {out} LErr) and
+        (Length(LEdits) = 4));
+      Ok('PlanRename: forward param - the forward header',
+        HasEdit(LEdits, 'NavRenP.pas', 7, 16,
+          'function Twice(ALen2: Integer): Integer; forward;', 15, 20));
+      Ok('PlanRename: forward param - the IMPLEMENTATION header too',
+        HasEdit(LEdits, 'NavRenP.pas', 9, 16,
+          'function Twice(ALen2: Integer): Integer;', 15, 20));
+      Ok('PlanRename: forward param - both body uses, spans shifted',
+        HasEdit(LEdits, 'NavRenP.pas', 11, 13,
+          '  Result := ALen2 + ALen2;', 12, 17) and
+        HasEdit(LEdits, 'NavRenP.pas', 11, 20,
+          '  Result := ALen2 + ALen2;', 20, 25));
+      // ...and started from the IMPLEMENTATION side, the same four.
+      Ok('SymbolAt: implementation''s ALen',
+        GNav.SymbolAt(LMidRen, 9, 16, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'ALen'));
+      Ok('PlanRename: impl param -> the same four positions',
+        GNav.PlanRename(LRTMid, LRSym, 'ALen2', {out} LEdits, {out} LErr) and
+        (Length(LEdits) = 4) and
+        HasEdit(LEdits, 'NavRenP.pas', 7, 16,
+          'function Twice(ALen2: Integer): Integer; forward;', 15, 20));
+      // A class METHOD's parameter: the class body's declaration and the
+      // qualified implementation, same rule.
+      Ok('SymbolAt: method decl''s AVal',
+        GNav.SymbolAt(LMidRen, 5, 20, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'AVal'));
+      Ok('PlanRename: method param -> decl, impl header and the body use',
+        GNav.PlanRename(LRTMid, LRSym, 'AV', {out} LEdits, {out} LErr) and
+        (Length(LEdits) = 3) and
+        HasEdit(LEdits, 'NavRenP.pas', 5, 20,
+          '    procedure Take(AV: Integer);', 19, 21) and
+        HasEdit(LEdits, 'NavRenP.pas', 13, 20,
+          'procedure TRP.Take(AV: Integer);', 19, 21) and
+        HasEdit(LEdits, 'NavRenP.pas', 15, 11, '  Writeln(AV);', 10, 12));
+      // The ROUTINE NAME itself is one symbol across both headers already -
+      // the peer walk must not double-count it into a second edit.
+      Ok('SymbolAt: Twice at its forward header',
+        GNav.SymbolAt(LMidRen, 7, 10, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Twice'));
+      Ok('PlanRename: routine name - both headers, once each',
+        GNav.PlanRename(LRTMid, LRSym, 'Twice2', {out} LEdits, {out} LErr) and
+        (Length(LEdits) = 2) and
+        HasEdit(LEdits, 'NavRenP.pas', 7, 10,
+          'function Twice2(ALen: Integer): Integer; forward;', 9, 15) and
+        HasEdit(LEdits, 'NavRenP.pas', 9, 10,
+          'function Twice2(ALen: Integer): Integer;', 9, 15));
+
+      // ---- Unit rename (PlanUnitRename) ----
+      // NavA: its own header plus NavB's `uses` item, and the file name the
+      // rename obliges the host to change.
+      LMidRen := GNav.ModelIdOf(TPath.Combine(LDir, 'NavA.pas'));
+      Ok('PlanUnitRename: NavA -> NavA2, header + the one uses item',
+        GNav.PlanUnitRename(LMidRen, 'NavA2', {out} LEdits, {out} LFileName,
+          {out} LErr) and (Length(LEdits) = 2) and (LErr = ''));
+      Ok('PlanUnitRename: NavA - its own header, flagged as the decl',
+        HasEdit(LEdits, 'NavA.pas', 1, 6, 'unit NavA2;', 5, 10));
+      Ok('PlanUnitRename: NavA - NavB''s uses item',
+        HasEdit(LEdits, 'NavB.pas', 3, 6,
+          'uses NavA2, NavC, Namespace.NavD;', 5, 10));
+      Ok('PlanUnitRename: the file name the host must also change',
+        LFileName = 'NavA2.pas');
+      // A DOTTED unit name is one name: the whole span is replaced, not the
+      // segment the cursor happened to be over.
+      LMidRen := GNav.ModelIdOf(TPath.Combine(LDir, 'Namespace.NavD.pas'));
+      Ok('PlanUnitRename: dotted name, whole span in both places',
+        GNav.PlanUnitRename(LMidRen, 'Namespace.NavD2', {out} LEdits,
+          {out} LFileName, {out} LErr) and (Length(LEdits) = 2) and
+        HasEdit(LEdits, 'Namespace.NavD.pas', 1, 6,
+          'unit Namespace.NavD2;', 5, 20) and
+        HasEdit(LEdits, 'NavB.pas', 3, 18,
+          'uses NavA, NavC, Namespace.NavD2;', 17, 32) and
+        (LFileName = 'Namespace.NavD2.pas'));
+      Ok('IsValidUnitRenameName: dotted accepted',
+        IsValidUnitRenameName('Namespace.Foo'));
+      Ok('IsValidUnitRenameName: empty segment rejected',
+        not IsValidUnitRenameName('Namespace..Foo') and
+        not IsValidUnitRenameName('.Foo') and
+        not IsValidUnitRenameName('Foo.'));
+      Ok('IsValidUnitRenameName: reserved segment rejected',
+        not IsValidUnitRenameName('Namespace.end'));
+      Ok('PlanUnitRename: invalid name refused',
+        not GNav.PlanUnitRename(LMidRen, 'Name space', {out} LEdits,
+          {out} LFileName, {out} LErr) and (Length(LEdits) = 0) and
+        (LErr <> ''));
+      Ok('PlanUnitRename: unchanged name refused',
+        not GNav.PlanUnitRename(LMidRen, 'Namespace.NavD', {out} LEdits,
+          {out} LFileName, {out} LErr));
+
+      // ---- Builtins are never renameable ----
+      // A compiler-seeded name is the COMPILER's: PlanRename must refuse one
+      // outright, whatever path a host reached it by (SymbolAt declines the
+      // seeds with no real declaration, but that is a different gate).
+      LMidRen := GNav.ModelIdOf(TPath.Combine(LDir, 'NavH.pas'));
+      LRSym := -1;
+      for LIdx := 0 to High(GProj.Model(LMidRen).Symbols) do
+        if sfBuiltin in GProj.Model(LMidRen).Symbols[LIdx].Flags then
+        begin
+          LRSym := LIdx;
+          Break;
+        end;
+      Ok('a seeded builtin symbol exists to test with', LRSym >= 0);
+      Ok('PlanRename: a compiler builtin is refused',
+        not GNav.PlanRename(LMidRen, LRSym, 'Renamed', {out} LEdits,
+          {out} LErr) and (Length(LEdits) = 0) and
+        LErr.Contains('builtin'));
+
+      // Name validation - the same test a host greys its OK button with.
+      Ok('IsValidRenameName: plain identifier', IsValidRenameName('Foo_1'));
+      Ok('IsValidRenameName: leading digit rejected',
+        not IsValidRenameName('1Foo'));
+      Ok('IsValidRenameName: empty rejected', not IsValidRenameName(''));
+      Ok('IsValidRenameName: punctuation rejected',
+        not IsValidRenameName('Foo.Bar'));
+      Ok('IsValidRenameName: reserved word rejected',
+        not IsValidRenameName('begin'));
+      // Back to an ordinary symbol - the builtin probe above left LRSym on a
+      // seeded one, which refuses for its OWN reason.
+      GNav.SymbolAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavRenP.pas')), 7, 10,
+        {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('PlanRename: reserved word refused',
+        not GNav.PlanRename(LRTMid, LRSym, 'end', {out} LEdits, {out} LErr) and
+        (Length(LEdits) = 0));
+      Ok('PlanRename: unchanged name refused',
+        not GNav.PlanRename(LRTMid, LRSym, 'Twice', {out} LEdits, {out} LErr));
 
       // REGRESSION: a bare call to an inherited, non-overloaded method in
       // the SAME unit must be counted ONCE, not twice (see UNIT_RQ / the
