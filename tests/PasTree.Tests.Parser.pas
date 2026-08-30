@@ -487,7 +487,7 @@ const
        'Ident''B'') Ident''C'')) Ident''D'') Ident''E'')))'; ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..114] of TPasCaseRow = (
+  DECL_CASES: array[0..115] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1060,6 +1060,20 @@ const
      Expected: 'TypeSec(TypeDecl(Ident''TBox'' GenericParams(' +
        'GenericParam(Ident''T'' Constraint(Ident''IInterface''))) ' +
        'ClassType))'; ExpectDiags: 0),
+    // dcc-verified: TWO generic parameters closed with NO space before the
+    // `=` that follows (`T, TT >= class`) lex `>=` as ONE fused
+    // greater-or-equal token - real source in the wild (a detours library's
+    // `TGenericsCast < T, TT >= class(TObject)`). The parser must split it:
+    // consume the '>' as the list's close, leave the '=' pending for the
+    // type declaration's own `=`. Without the split this dropped the SECOND
+    // parameter entirely and read as `TypeDecl(Ident TGenericsCast
+    // GenericParams(GenericParam(Ident T)))` followed by a parse error where
+    // `TT` and `>=` themselves became the (nonsensical) type expression.
+    (Section: '16.3.1'; Name: 'fused ">=" splits at a generic list''s close';
+     Source: 'type TGenericsCast<T, TT>= class(TObject) end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TGenericsCast'' GenericParams(' +
+       'GenericParam(Ident''T'' Ident''TT'')) ' +
+       'ClassType(Ident''TObject'')))'; ExpectDiags: 0),
 
     // ==== test-coverage plan step 3 batch 4 ====================
 

@@ -47,6 +47,11 @@ type
     FFuelTripped: Boolean;
     FDepth: Integer;           // recursion depth across Parse* entries
     FRoutineNameVis: Integer;  // diagnostics: current routine's name token
+    // True when the token at FPos is a lexed '>=' being read as its SECOND
+    // half only - see CloseGeneric. CurKind then answers tkEqual instead of
+    // the real tkGreaterEqual, and the Next() that consumes it advances FPos
+    // past the whole compound token exactly as an ordinary Next always does.
+    FSplitEq: Boolean;
     // cursor
     function CurKind: TPasTokenKind;
     function EnterGuard: Boolean;
@@ -55,6 +60,30 @@ type
     function CurText: string;
     procedure Next;
     function Expect(AKind: TPasTokenKind; const AWhat: string): Boolean;
+    { Consumes a generic-parameter/argument list's closing '>'. The lexer has
+      no grammar context, so `T, TT >=` (no space before `=`, a `class(...)`
+      or another '=' right after) lexes as ONE tkGreaterEqual token - the same
+      ambiguity `>>` would be for nested generics, except this codebase's
+      lexer never combines '>>' at all (Object Pascal has no shift-right
+      OPERATOR, only the `shr` keyword, so nothing ever needed to). '>=' has no
+      such escape: `>=` is a real comparison operator and must stay one token
+      everywhere else.
+
+      Splitting it here - consume the '>' half, leave the '=' half PENDING as
+      the next token - is exactly the C++-template trick generalized to
+      Delphi's own ambiguity, and safe for the reason `>>`-splitting always is:
+      a real '>=' can never appear where the grammar expects a bare '>' to
+      close a list. Real bug this fixes: a detour library's
+      `TGenericsCast < T, TT >= class(TObject)` - dcc-verified to compile -
+      lost its second parameter's every use to a false E2003, because ScanFor
+      the close never advanced past the fused token and TT never entered the
+      generic-parameter scope. }
+    function CloseGeneric(const AWhat: string): Boolean;
+    { True at a generic list's closing token OR the fused '>=' shape
+      CloseGeneric splits below - the loop-continuation test beside every
+      `Expect(tkGreater, ...)` this covers must stop for both, or it tries to
+      parse one more argument off the wrong half of that token. }
+    function AtGenericClose: Boolean;
     function IsWord(const AWord: string): Boolean;
     function AdjacentNext: Boolean;
     procedure Error(const AMsg: string);
@@ -166,7 +195,30 @@ begin
     Error('internal: parser step budget exhausted (loop guard)');
     FPos := FLast; // jump to EOF - every loop terminates naturally
   end;
-  Result := FSrc.VisibleToken(FPos).Kind;
+  if FSplitEq then
+    Result := tkEqual
+  else
+    Result := FSrc.VisibleToken(FPos).Kind;
+end;
+
+function TPasParser.AtGenericClose: Boolean;
+begin
+  Result := (CurKind = tkGreater) or
+    ((CurKind = tkGreaterEqual) and not FSplitEq);
+end;
+
+function TPasParser.CloseGeneric(const AWhat: string): Boolean;
+begin
+  Result := True;
+  if CurKind = tkGreater then
+    Next
+  else if CurKind = tkGreaterEqual then
+    FSplitEq := True   // '>' consumed; '=' is now CurKind, still at this FPos
+  else
+  begin
+    Result := False;
+    Error(AWhat + ' expected');
+  end;
 end;
 
 function TPasParser.EnterGuard: Boolean;
@@ -202,6 +254,9 @@ end;
 
 procedure TPasParser.Next;
 begin
+  // Clears CloseGeneric's split first - the FPos step below then moves past
+  // the whole fused '>=' token, exactly the step an ordinary '>' would take.
+  FSplitEq := False;
   if FPos < FLast then
     Inc(FPos);
 end;
@@ -600,7 +655,7 @@ begin
           LNode := FB.AddNode(nkTypeArgs, NIL_NODE, FPos);
           FB.Adopt(LNode, Result);
           Next; // '<'
-          while (CurKind <> tkGreater) and (CurKind <> tkEndOfFile) do
+          while not AtGenericClose and (CurKind <> tkEndOfFile) do
           begin
             FB.Adopt(LNode, ParseTypeRef);
             if CurKind = tkComma then
@@ -608,7 +663,7 @@ begin
             else
               Break;
           end;
-          Expect(tkGreater, '">"');
+          CloseGeneric('">"');
           FB.SetLast(LNode, FPos - 1);
           Result := LNode;
         end;
@@ -723,7 +778,7 @@ begin
             LNode := FB.AddNode(nkTypeArgs, NIL_NODE, FPos);
             FB.Adopt(LNode, Result);
             Next;
-            while (CurKind <> tkGreater) and (CurKind <> tkEndOfFile) do
+            while not AtGenericClose and (CurKind <> tkEndOfFile) do
             begin
               FB.Adopt(LNode, ParseTypeRef);
               if CurKind = tkComma then
@@ -731,7 +786,7 @@ begin
               else
                 Break;
             end;
-            Expect(tkGreater, '">"');
+            CloseGeneric('">"');
             FB.SetLast(LNode, FPos - 1);
             Result := LNode;
           end;
@@ -1963,7 +2018,7 @@ begin
     Exit(NIL_NODE);
   Result := FB.AddNode(nkGenericParams, NIL_NODE, FPos);
   Next;
-  while (CurKind <> tkGreater) and (CurKind <> tkEndOfFile) do
+  while not AtGenericClose and (CurKind <> tkEndOfFile) do
   begin
     LParam := FB.AddNode(nkGenericParam, NIL_NODE, FPos);
     // A "parameter" here is a TypeRef, not a bare ident: implementation
@@ -2002,7 +2057,7 @@ begin
     else
       Break;
   end;
-  Expect(tkGreater, '">"');
+  CloseGeneric('">"');
   FB.SetLast(Result, FPos - 1);
 end;
 

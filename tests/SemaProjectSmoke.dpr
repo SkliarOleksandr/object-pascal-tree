@@ -5304,6 +5304,47 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { `with P[I] do` over a LOCAL variable typed by an INLINE `^array-of-record`
+    slot - no named pointer alias (`PFoo = ^TFooArray`) for the array-index
+    chase to hang off. 10.1.1/8.1's "index a pointer to an array without `^`"
+    rule already worked when the pointer type had a name; an inline one typed
+    XNil outright (ResolveTypeExpr has no case for a bare nkPointerType node),
+    so `with` never opened and the whole body read as undeclared (an
+    AsRegExpr-derived library's `with Stack[StackIdx] do SubExprIdx := ...`,
+    a local `Stack: ^TStackArray` with no separate pointer-type name, 7
+    reports in one function). }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_inlineptrarr');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PtrArrUser.pas'),
+    'unit PtrArrUser;'#10'interface'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'type'#10 +
+    '  TItem = record'#10 +
+    '    Tag: Integer;'#10 +
+    '  end;'#10 +
+    '  TItems = array[0..9] of TItem;'#10 +
+    'var'#10 +
+    '  Stack: ^TItems;'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  with Stack[I] do'#10 +
+    '    Tag := 1;'#10 +
+    'end;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    Ok('inlineptrarr: an inline pointer-to-array indexes without a name',
+      DiagCount(ModelByName('ptrarruser'), 'E2003') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   // ---- Single-module reanalysis (incremental plan, stage B). A BODY edit
   // must be accepted and change only that module's diagnostics; an INTERFACE
   // edit must be refused with the project left untouched; an unknown file

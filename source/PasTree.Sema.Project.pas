@@ -9663,7 +9663,27 @@ begin
       Exit(XNil);
   end;
   // 2. The named type it resolves to, chasing aliases to a definition.
-  LCur := WithTargetTypeX(AId, ABaseNode);
+  //
+  // An INLINE pointer slot (`Stack: ^TStackArray`, no separate `PStack = ^...`
+  // to hang the chase off) needs seeding here rather than through
+  // WithTargetTypeX: that path types a bare ident by resolving its declared
+  // type NODE (SymDeclTypeX -> ResolveTypeExpr), which answers a type's own
+  // NAME, and an inline pointer has none - ResolveTypeExpr's case has nothing
+  // for nkPointerType and comes back XNil, so the loop below never started
+  // and every member indexed off it read as undeclared (an AsRegExpr-derived
+  // library's `with Stack[StackIdx] do` over a local `Stack: ^TStackArray`, 7
+  // reports in one function). Reading the pointee HERE, off the same
+  // TypeNode step 1 just read, reaches its declaration by the ordinary type
+  // lookup the loop below already knows how to chase (TStackArray is itself
+  // a plain nested type, generic or aliased or not).
+  if (LSym <> NIL_SYM) and
+     (FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE) and
+     (FModels[LMid].Tree.Nodes[FModels[LMid].Symbols[LSym].TypeNode].Kind =
+      nkPointerType) then
+    LCur := ResolveTypeExpr(LMid,
+      FModels[LMid].Tree.Nodes[FModels[LMid].Symbols[LSym].TypeNode].FirstChild)
+  else
+    LCur := WithTargetTypeX(AId, ABaseNode);
   for LDepth := 1 to 32 do
   begin
     if not XValid(LCur) then
