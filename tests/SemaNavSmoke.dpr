@@ -1258,6 +1258,28 @@ begin
       Ok('UnitAt: NavA''s own header names itself',
         GNav.UnitAt(LMidA, 1, 6, {out} LRTMid, {out} LRName) and
         (LRTMid = LMidA) and SameText(LRName, 'NavA'));
+      // The same, from a dotted `uses` ITEM (NavB line 3): either segment,
+      // the whole name - what the rename dialog pre-fills there too.
+      Ok('UnitAt: dotted uses item, first segment',
+        GNav.UnitAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavB.pas')), 3, 18,
+          {out} LRTMid, {out} LRName) and
+        SameText(LRName, 'Namespace.NavD'));
+      Ok('UnitAt: dotted uses item, last segment',
+        GNav.UnitAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavB.pas')), 3, 28,
+          {out} LRTMid, {out} LRName) and
+        SameText(LRName, 'Namespace.NavD'));
+      // REGRESSION: a DOTTED header name is an nkMember chain whose own
+      // first token is the DOT - the first-token slice answered "." here,
+      // which is what the rename dialog pre-filled and what the Find
+      // References caption said. The WHOLE name, from any segment.
+      Ok('UnitAt: dotted own header gives the WHOLE name, not "."',
+        GNav.UnitAt(GNav.ModelIdOf(TPath.Combine(LDir, 'Namespace.NavD.pas')),
+          1, 6, {out} LRTMid, {out} LRName) and
+        SameText(LRName, 'Namespace.NavD'));
+      Ok('UnitAt: dotted own header, cursor on the LAST segment',
+        GNav.UnitAt(GNav.ModelIdOf(TPath.Combine(LDir, 'Namespace.NavD.pas')),
+          1, 16, {out} LRTMid, {out} LRName) and
+        SameText(LRName, 'Namespace.NavD'));
       // FindUnitReferences: every `uses NavA` across the loaded project --
       // just NavB's, in this fixture set.
       var LUHits := GNav.FindUnitReferences(LMidA);

@@ -174,6 +174,7 @@ type
     function PeerRoutineNameNode(AMid, ASym: Integer): Integer;
     function UnitNameHit(LM: TPasSemaModel; ANode: Integer;
       out AHit: TPasRefHit): Boolean;
+    function UnitNameOfModel(AUid: Integer): string;
     function RoutineBodyEntry(AMid: Integer; LM: TPasSemaModel;
       AImplNode: Integer; out ATarget: TPasNavTarget): Boolean;
   public
@@ -1074,6 +1075,21 @@ begin
   end;
 end;
 
+{ A model's own name as its header spells it, dots and all.
+
+  NodeSpanText, not NodeText: a DOTTED header name is an nkMember chain whose
+  own first token is the DOT, so the first-token slice answers "." for
+  `unit Foo.Bar` - which is exactly what reached the user, as the pre-filled
+  text of the rename dialog and as a Find References caption. }
+function TPasNavigator.UnitNameOfModel(AUid: Integer): string;
+begin
+  Result := '';
+  if (AUid < 0) or (AUid >= FProj.ModelCount) then
+    Exit;
+  Result := FProj.Model(AUid).Tree.NodeSpanText(
+    FProj.Model(AUid).Tree.Nodes[0].FirstChild);
+end;
+
 function TPasNavigator.UnitAt(AMid, ALine, ACol: Integer;
   out ATargetMid: Integer; out AName: string): Boolean;
 var
@@ -1088,7 +1104,7 @@ begin
   if IsOwnUnitNameNode(LM, LIdent.Node) then
   begin
     ATargetMid := AMid;
-    AName := LM.Tree.NodeText(LM.Tree.Nodes[0].FirstChild);
+    AName := UnitNameOfModel(AMid);
     Exit(True);
   end;
   // IdentAt already redirects any segment of a dotted `uses` name to its
@@ -1104,7 +1120,14 @@ begin
       if LM.UsesList[LIdx].UnitId < 0 then
         Exit;   // unresolved uses -- nothing to search for
       ATargetMid := LM.UsesList[LIdx].UnitId;
-      AName := LM.Symbols[LSym].Name;
+      // The TARGET's own name, not this clause's spelling of it: the local
+      // skUnitRef symbol is named after the LEAF, and a `-NS` prefix or an
+      // alias can make the written text differ from the unit's real name in
+      // any case. A caller renaming the unit must be shown what it is
+      // actually called; NameFull (as written) is the fallback.
+      AName := UnitNameOfModel(LM.UsesList[LIdx].UnitId);
+      if AName = '' then
+        AName := LM.UsesList[LIdx].NameFull;
       Exit(True);
     end;
 end;
