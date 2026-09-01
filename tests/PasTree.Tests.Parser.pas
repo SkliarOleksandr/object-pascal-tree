@@ -29,7 +29,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..75] of TPasCaseRow = (
+  STMT_CASES: array[0..78] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -484,10 +484,31 @@ const
     (Section: 'B.8'; Name: 'every designator form chained together';
      Source: 'A.B[C]^.D(E);';
      Expected: 'Block(ExprStmt(Call(Member(Deref(Index(Member(Ident''A'' ' +
-       'Ident''B'') Ident''C'')) Ident''D'') Ident''E'')))'; ExpectDiags: 0)
+       'Ident''B'') Ident''C'')) Ident''D'') Ident''E'')))'; ExpectDiags: 0),
+
+    // ---- Code audit 2026-08-31, section 2.9: dcc64-valid shapes the parser
+    // rejected or silently mis-shaped ----
+    // 3.1.3: an inline var may be given a STRUCTURAL type, not just a type
+    // reference. Both of these were a hard "type expected".
+    (Section: '3.1.3'; Name: 'inline var with an array type';
+     Source: 'var A: array[0..1] of Byte;';
+     Expected: 'Block(InlineVar(Ident''A'' ArrayType(Subrange(IntLit''0'' ' +
+       'IntLit''1'') Ident''Byte'')))'; ExpectDiags: 0),
+    (Section: '3.1.3'; Name: 'inline var with a set type';
+     Source: 'var S: set of Byte;';
+     Expected: 'Block(InlineVar(Ident''S'' SetType(Ident''Byte'')))';
+     ExpectDiags: 0),
+    // 16.3: `>=` written without a space lexes as ONE token, and the
+    // expression-side generic scan refused it - so this parsed as
+    // `(V.AsType < Integer) >= 5` with no diagnostic at all.
+    (Section: '16.3'; Name: 'fused >= closes a generic argument list';
+     Source: 'B := V.AsType<Integer>=5;';
+     Expected: 'Block(Assign(Ident''B'' BinaryOp''>=''(TypeArgs(Member(' +
+       'Ident''V'' Ident''AsType'') Ident''Integer'') IntLit''5'')))';
+     ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..115] of TPasCaseRow = (
+  DECL_CASES: array[0..119] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1344,7 +1365,38 @@ const
      Source: 'type TP = ^Generics.Collections.TList<Integer>;';
      Expected: 'TypeSec(TypeDecl(Ident''TP'' PointerType(TypeArgs(' +
        'Member(Member(Ident''Generics'' Ident''Collections'') ' +
-       'Ident''TList'') Ident''Integer''))))'; ExpectDiags: 0)
+       'Ident''TList'') Ident''Integer''))))'; ExpectDiags: 0),
+
+    // ---- Code audit 2026-08-31, section 2.9 ----
+    // 2.2.5: an IDENT-headed subrange bound may carry arithmetic. Only
+    // selector continuations were allowed after an identifier head, so both
+    // of these - dcc64-valid - were hard parse errors.
+    (Section: '2.2.5'; Name: 'ident-headed subrange bound with arithmetic';
+     Source: 'type T = A+1..B;';
+     Expected: 'TypeSec(TypeDecl(Ident''T'' Subrange(BinaryOp''+''(' +
+       'Ident''A'' IntLit''1'') Ident''B'')))'; ExpectDiags: 0),
+    (Section: '2.2.5'; Name: 'array index range with arithmetic bounds';
+     Source: 'var A: array[B-1..B] of Integer;';
+     Expected: 'VarSec''var''(VarDecl(Ident''A'' ArrayType(Subrange(' +
+       'BinaryOp''-''(Ident''B'' IntLit''1'') Ident''B'') ' +
+       'Ident''Integer'')))'; ExpectDiags: 0),
+    // A stray reserved word in MEMBER position used to consume nothing, so
+    // the member loop spun until the fuel watchdog abandoned the rest of the
+    // FILE. One error, one token, and the declarations after it survive.
+    (Section: '11.1'; Name: 'a stray reserved word in member position does '
+       + 'not eat the rest of the file';
+     Source: 'type TR = record string end; TGood = class end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType) ' +
+       'TypeDecl(Ident''TGood'' ClassType))'; ExpectDiags: 1),
+    // A parenthesised const EXPRESSION whose first inner token is '(' is not
+    // a one-element aggregate - the shape LooksLikeAggregate's own header
+    // names as the one to reject.
+    (Section: '4.2'; Name: 'a parenthesised const expression is not an '
+       + 'aggregate';
+     Source: 'const C = ((1.0/2) / 3);';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''C'' Paren(BinaryOp''/''(' +
+       'Paren(BinaryOp''/''(RealLit''1.0'' IntLit''2'')) IntLit''3''))))';
+     ExpectDiags: 0)
   );
 
 { Builds every case that is not a plain dump comparison: the platform matrix

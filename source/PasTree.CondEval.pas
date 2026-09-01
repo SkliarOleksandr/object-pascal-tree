@@ -234,11 +234,21 @@ begin
       begin
         if Length(LClean) < 2 then
           Exit(False);
+        // The digit COUNT is checked first: past 63 significant bits the
+        // doubling below overflows Int64 - a silent wrap under {$Q-} and an
+        // EIntOverflow in the checked builds this project is tested with,
+        // where the hex path beside it uses TryStrToInt64 and simply fails.
         L64 := 0;
         for LIdx := 2 to Length(LClean) do
           case LClean[LIdx] of
-            '0': L64 := L64 * 2;
-            '1': L64 := L64 * 2 + 1;
+            '0', '1':
+              begin
+                if (L64 < 0) or ((L64 shr 62) <> 0) then
+                  Exit(False);
+                L64 := L64 * 2;
+                if LClean[LIdx] = '1' then
+                  L64 := L64 + 1;
+              end;
           else
             Exit(False);
           end;
@@ -391,6 +401,21 @@ end;
 // A shift count dcc would accept: a clean (unguessed) whole number in 0..63.
 // Anything else refuses, which leaves the expression a guess rather than
 // inventing a value.
+{ Trunc that cannot raise. Every integer operator below folds through a Double
+  (a `$IF` literal too big for Int64 lands there via TryStrToFloat), and
+  RTL Trunc raises EInvalidOp outside Int64 range - which would kill the whole
+  preprocess run of the unit and break this unit's "never raises" contract.
+  Out of range, or NaN, is simply "no answer": the caller guesses. }
+function CondTryTrunc(const AValue: Double; out ANum: Int64): Boolean;
+const
+  LIMIT = 9223372036854775808.0;   // 2^63; exclusive on both ends
+begin
+  ANum := 0;
+  Result := (AValue > -LIMIT) and (AValue < LIMIT);
+  if Result then
+    ANum := Trunc(AValue);
+end;
+
 function CondShiftCount(const AValue: TPasCondValue; out ACount: Integer):
   Boolean;
 var
@@ -463,7 +488,10 @@ begin
   else
     Exit;
 
-  LRaw := Trunc(CondAsNum(AValue));
+  // A value outside Int64 has no bit pattern to mask - refuse rather than
+  // let Trunc raise (see CondTryTrunc): `{$IF Byte(1E300) = 0}` is a guess.
+  if not CondTryTrunc(CondAsNum(AValue), LRaw) then
+    Exit;
   LBits := LBytes * 8;
   if LBits >= 64 then
     ANum := LRaw
@@ -522,6 +550,12 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       // missing name is still a question.
       if LAns.NoSymbol and (AQuery = sqConstValue) then
         Exit(MkUndef);
+      // SizeOf of a type that exists NOWHERE is 4 for dcc (spec 1.3.2) - a
+      // determined answer, not a question. Left as a guessed 0, the wrong
+      // branch survived the second pass and the unit stayed a candidate for
+      // re-decision forever.
+      if LAns.NoSymbol and (AQuery = sqSizeOfType) then
+        Exit(MkNum(4));
     end;
     AddUnknown(AQuery, AName);
     Result := AGuess;
@@ -606,7 +640,11 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       // is clean. A cast wrapped around a guess would turn the guess into a
       // confident-looking number and hide the open question.
       LArgVal := EvalCondNode(ATree, LArg, ACtx);
-      if not LArgVal.Guessed and
+      // CondIsClean, not just "not Guessed": an Undef or abort-True operand
+      // folded to a confident number too (`{$IF Byte(UNDECL) = 1}` came out a
+      // clean False where dcc aborts True), which is exactly the hiding of an
+      // open question the comment above forbids.
+      if CondIsClean(LArgVal) and
          PasBuiltinCast(LName, ACtx.PointerBytes, LArgVal, LSize) then
         Exit(MkNum(LSize));
       // Anything else (Ord(x), a unit function, ...) stays a guess - but the
@@ -632,7 +670,14 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     begin
       if (L.Undef or (L.Kind = cvNum)) and (R.Undef or (R.Kind = cvNum)) then
         Exit(MkAbortTrue);
-      Exit(MkBool(False));
+      // The error-token exit, but it must NOT launder the other side's guess:
+      // an Undef against a GUESSED Boolean left as a clean False also left
+      // EvalIfExpression with nothing to copy, so no UnknownSymbols reached
+      // the stream, no ppIfNeedsSemantics was emitted, and the second-pass
+      // question simply vanished.
+      Result := MkBool(False);
+      Result.Guessed := L.Guessed or R.Guessed;
+      Exit;
     end;
     if (L.Kind = cvStr) and (R.Kind = cvStr) then
     begin
@@ -676,6 +721,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     LOp: TPasTokenKind;
     L, R: TPasCondValue;
     LShift: Integer;
+    LLeft, LRight: Int64;   // CondTryTrunc's answers - see there
   begin
     Result := MkGuess;
     LLeftNode := ATree.Nodes[ABinNode].FirstChild;
@@ -756,17 +802,21 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       Result := MkNum(CondAsNum(L) * CondAsNum(R))
     else if (LOp = tkSlash) and (CondAsNum(R) <> 0) then
       Result := MkNum(CondAsNum(L) / CondAsNum(R))
-    else if (LOp = tkDiv) and (Trunc(CondAsNum(R)) <> 0) then
-      Result := MkNum(Trunc(CondAsNum(L)) div Trunc(CondAsNum(R)))
-    else if (LOp = tkMod) and (Trunc(CondAsNum(R)) <> 0) then
-      Result := MkNum(Trunc(CondAsNum(L)) mod Trunc(CondAsNum(R)))
-    else if (LOp = tkShl) and CondShiftCount(R, LShift) then
-      Result := MkNum(Trunc(CondAsNum(L)) shl LShift)
-    else if (LOp = tkShr) and CondShiftCount(R, LShift) then
-      Result := MkNum(Trunc(CondAsNum(L)) shr LShift)
+    else if (LOp = tkDiv) and CondTryTrunc(CondAsNum(L), LLeft) and
+            CondTryTrunc(CondAsNum(R), LRight) and (LRight <> 0) then
+      Result := MkNum(LLeft div LRight)
+    else if (LOp = tkMod) and CondTryTrunc(CondAsNum(L), LLeft) and
+            CondTryTrunc(CondAsNum(R), LRight) and (LRight <> 0) then
+      Result := MkNum(LLeft mod LRight)
+    else if (LOp = tkShl) and CondShiftCount(R, LShift) and
+            CondTryTrunc(CondAsNum(L), LLeft) then
+      Result := MkNum(LLeft shl LShift)
+    else if (LOp = tkShr) and CondShiftCount(R, LShift) and
+            CondTryTrunc(CondAsNum(L), LLeft) then
+      Result := MkNum(LLeft shr LShift)
     else
-      // `in`, division by zero, an out-of-range shift count - a guess,
-      // never a crash.
+      // `in`, division by zero, an out-of-range shift count, an operand too
+      // big to be an integer at all - a guess, never a crash.
       Exit;
     Result.Guessed := L.Guessed or R.Guessed;
   end;

@@ -2051,6 +2051,24 @@ begin
     GProj.Free;
   end;
 
+  // The with pass, from THIS driver (code audit 2026-08-31, finding 2.4.1):
+  // CrossResolve defers every with-body identifier to it, and AnalyzeFile
+  // never ran it - so those names were neither bound nor diagnosed here,
+  // while the same file through AnalyzeDirectory resolved them all.
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    var LWMid := GProj.AnalyzeFile(TPath.Combine(LDir, 'UnitWXUse.pas'));
+    Ok('AnalyzeFile: the with fixture analyzes', LWMid >= 0);
+    Ok('AnalyzeFile: with-body names are BOUND, exactly as in a full run',
+      (LWMid >= 0) and CrossRefTo(GProj.Model(LWMid), 'elpColor', 'elpColor')
+      and CrossRefTo(GProj.Model(LWMid), 'next_out', 'next_out')
+      and CrossRefTo(GProj.Model(LWMid), 'SizeBox', 'SizeBox'));
+    Ok('AnalyzeFile: and nothing is reported over them',
+      (LWMid >= 0) and (Length(GProj.Model(LWMid).Diags) = 0));
+  finally
+    GProj.Free;
+  end;
+
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
     GProj.AnalyzeDirectory(LDir);
@@ -5034,6 +5052,144 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  // ---- Demotion, second round (code audit 2026-08-31, findings 2.1.4 and
+  // 2.2.1-2.2.6). Everything here is about answers a DEMOTED model used to
+  // give WRONG or not at all:
+  //   - a same-LENGTH edit passed the old size-only rehydration fingerprint
+  //     and installed text from a foreign parse;
+  //   - the declaration row, `uses` hits, builtin hits and unit rename all
+  //     read the text layer without hydrating first, so they vanished (or,
+  //     for unit rename, refused with a misleading reason);
+  //   - a nav cache built while demoted stayed empty forever, because
+  //     rehydration restores the arrays on the SAME model object. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_demote2');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitEA.pas'),
+    'unit UnitEA;'#10'interface'#10 +               // 1-2
+    'type TE = class'#10 +                          // 3
+    '  procedure Mmm;'#10 +                         // 4
+    'end;'#10 +                                     // 5
+    'implementation'#10 +                           // 6
+    'procedure TE.Mmm; begin end;'#10 +             // 7
+    'end.'#10);                                     // 8
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitEB.pas'),
+    'unit UnitEB;'#10'interface'#10'uses UnitEA;'#10 +
+    'var GE: TE;'#10'implementation'#10 +
+    'procedure PE;'#10'begin'#10'  GE.Mmm;'#10'end;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    var LEaMid := MidByName('unitea');
+    var LEbMid := MidByName('uniteb');
+    var LEa := GProj.Model(LEaMid);
+    var LTeSym := NIL_SYM;
+    for var LS := 0 to LEa.SymCount - 1 do
+      if (LEa.Symbols[LS].NameLower = 'te') and
+         (LEa.Symbols[LS].Kind = skType) then
+        LTeSym := LS;
+    Ok('demote2: fixture type symbol found', LTeSym <> NIL_SYM);
+
+    GProj.DemoteClosedUnits([GProj.ModelFile(LEbMid)]);
+    Ok('demote2: the declaring unit is demoted', LEa.Demoted);
+
+    var LNav := TPasNavigator.Create(GProj);
+    try
+      // 2.2.3 - the declaration row itself. Before the fix HitFromNode's
+      // bounds guards dropped it and PlanRename refused with "no declaration
+      // site", which is a statement about the SYMBOL, not about the text.
+      var LDecl: TPasRefHit;
+      Ok('demote2: DeclHit answers over a demoted declaring unit',
+        LNav.DeclHit(LEaMid, LTeSym, LDecl) and (LDecl.Line = 3) and
+        (LDecl.Snippet <> ''));
+      var LEdits: TArray<TPasRenameEdit>;
+      var LErr := '';
+      Ok('demote2: PlanRename plans the declaration edit too',
+        LNav.PlanRename(LEaMid, LTeSym, 'TERenamed', LEdits, LErr) and
+        (Length(LEdits) >= 2));
+      var LHasDecl := False;
+      for var LEi := 0 to High(LEdits) do
+        if LEdits[LEi].IsDecl then
+          LHasDecl := True;
+      Ok('demote2: ... and one of them IS the declaration', LHasDecl);
+    finally
+      LNav.Free;
+    end;
+
+    // 2.2.4 - the `uses` identity. UnitEB is the kept unit here, so demote
+    // IT instead and ask for references to UnitEA: the one hit lives in the
+    // demoted unit's uses clause.
+    GProj.EnsureHydrated(LEaMid);
+    GProj.DemoteClosedUnits([GProj.ModelFile(LEaMid)]);
+    Ok('demote2: the referencing unit is demoted', GProj.Model(LEbMid).Demoted);
+    LNav := TPasNavigator.Create(GProj);
+    try
+      var LU := LNav.FindUnitReferences(LEaMid);
+      Ok('demote2: FindUnitReferences still finds the demoted unit''s uses '
+        + 'clause', (Length(LU) = 1) and (LU[0].Line = 3) and
+        SameText(TPath.GetFileName(LU[0].FilePath), 'UnitEB.pas'));
+      // 2.2.6 - unit rename used to be refused projectwide after a demotion.
+      var LUEdits: TArray<TPasRenameEdit>;
+      var LNeed := '';
+      var LUErr := '';
+      Ok('demote2: PlanUnitRename covers header + the demoted unit''s uses',
+        LNav.PlanUnitRename(LEaMid, 'UnitEARenamed', LUEdits, LNeed, LUErr) and
+        (Length(LUEdits) = 2) and (LNeed = 'UnitEARenamed.pas') and
+        (LUErr = ''));
+    finally
+      LNav.Free;
+    end;
+
+    // 2.2.1 - a nav cache BUILT while the model was demoted. CacheOf now
+    // hydrates first (and rebuilds if it ever did cache a demoted model), so
+    // a goto through that same navigator answers instead of indexing
+    // zero-length arrays.
+    GProj.EnsureHydrated(LEaMid);
+    GProj.DemoteClosedUnits([GProj.ModelFile(LEbMid)]);
+    Ok('demote2: back to a demoted declaring unit', LEa.Demoted);
+    LNav := TPasNavigator.Create(GProj);
+    try
+      var LIdent: TPasNavIdent;
+      Ok('demote2: IdentAt over a demoted model answers (it hydrates first)',
+        LNav.IdentAt(LEaMid, 3, 6, LIdent) and SameText(LIdent.Name, 'TE'));
+      // Same navigator, same question, demoted vs hydrated: the answer must
+      // not depend on whether the text layer happened to be paged out.
+      var LTarget: TPasNavTarget;
+      var LGot := LNav.GotoImplementation(LEaMid, 4, 13, LTarget);
+      GProj.EnsureHydrated(LEaMid);
+      var LTarget2: TPasNavTarget;
+      var LGot2 := LNav.GotoImplementation(LEaMid, 4, 13, LTarget2);
+      Ok('demote2: GotoImplementation answers the same demoted as hydrated',
+        LGot and LGot2 and (LTarget.Line = LTarget2.Line) and
+        (LTarget.Col = LTarget2.Col) and SameText(LTarget.Name, 'mmm'));
+    finally
+      LNav.Free;
+    end;
+
+    // 2.1.4 - the rehydration fingerprint. A SAME-LENGTH, same-token-count
+    // edit (Mmm -> Qqq) passes a size-only check; installing that parse's
+    // text over these symbols is exactly the wrong-position class the
+    // demote contract promises never to produce.
+    GProj.EnsureHydrated(LEaMid);
+    GProj.DemoteClosedUnits([GProj.ModelFile(LEbMid)]);
+    Ok('demote2: demoted again for the fingerprint check', LEa.Demoted);
+    TFile.WriteAllText(TPath.Combine(LDir, 'UnitEA.pas'),
+      'unit UnitEA;'#10'interface'#10 +
+      'type TE = class'#10 +
+      '  procedure Qqq;'#10 +
+      'end;'#10 +
+      'implementation'#10 +
+      'procedure TE.Qqq; begin end;'#10 +
+      'end.'#10);
+    Ok('demote2: a SAME-LENGTH edit refuses to rehydrate',
+      not GProj.EnsureHydrated(LEaMid) and LEa.Demoted);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   // ---- Parse-reuse donor (incremental plan, stage A). A re-analysis that
   // adopts the previous project as donor must produce IDENTICAL diagnostics
   // while actually hitting (donorhits > 0 in StageTimings); an edited file
@@ -5447,6 +5603,97 @@ begin
       GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitMB.pas')));
     Ok('module: it reports the missing unit like the full path does',
       DiagCount(ModelByName('unitmb'), 'F1027') = 1);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- A cross-unit TYPE used as a cast is not a call (code audit
+  // 2026-08-31, finding 2.5.1). The exclusion tested the LOCAL RefMap only,
+  // so a cast through an imported type still entered the arity sweep, and a
+  // same-named routine exported by another used unit turned a compiling cast
+  // into a false E2035. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_cast');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitXR.pas'),
+    'unit UnitXR;'#10'interface'#10 +
+    'procedure Shape(A, B: Integer);'#10 +
+    'implementation'#10 +
+    'procedure Shape(A, B: Integer); begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitXT.pas'),
+    'unit UnitXT;'#10'interface'#10 +
+    'type Shape = type Integer;'#10 +
+    'implementation'#10'end.'#10);
+  // UnitXT LAST, so the callee binds to the TYPE - which is what dcc does.
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitXU.pas'),
+    'unit UnitXU;'#10'interface'#10'uses UnitXR, UnitXT;'#10 +
+    'implementation'#10 +
+    'procedure PU;'#10'var V: Integer;'#10'begin'#10 +
+    '  V := Integer(Shape(V));'#10 +
+    'end;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    var LXU := ModelByName('unitxu');
+    Ok('cast: the fixture unit loaded', Assigned(LXU));
+    Ok('cast: a cast through an IMPORTED type is not arity-checked',
+      (DiagCount(LXU, 'E2035') = 0) and (DiagCount(LXU, 'E2034') = 0));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- AffectedConsumers: reach is per EDGE, not per unit (code audit
+  // 2026-08-31, finding 2.3.1). NC is reachable from NA BOTH ways - directly
+  // over an implementation-only edge, and through NB's interface. Discovered
+  // first over the impl edge, the first cut fixed it as a leaf forever, so ND
+  // (which imports NC's interface) never entered the redo set and kept an
+  // ExtRefMap pointing into NA's old symbol numbering. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_reach');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitNA.pas'),
+    'unit UnitNA;'#10'interface'#10 +
+    'type TN = class'#10'  procedure M;'#10'end;'#10 +
+    'implementation'#10 +
+    'procedure TN.M; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitNB.pas'),
+    'unit UnitNB;'#10'interface'#10'uses UnitNA;'#10 +
+    'type TNB = class(TN) end;'#10 +
+    'implementation'#10'end.'#10);
+  // Interface-imports NB, implementation-imports NA: the double reach.
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitNC.pas'),
+    'unit UnitNC;'#10'interface'#10'uses UnitNB;'#10 +
+    'type TNC = class(TNB) end;'#10 +
+    'implementation'#10'uses UnitNA;'#10 +
+    'procedure PC;'#10'var L: TN;'#10'begin'#10'  L.M;'#10'end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitND.pas'),
+    'unit UnitND;'#10'interface'#10'uses UnitNC;'#10 +
+    'var GD: TNC;'#10 +
+    'implementation'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    Ok('reach: the four fixture units loaded',
+      (MidByName('unitna') >= 0) and (MidByName('unitnb') >= 0) and
+      (MidByName('unitnc') >= 0) and (MidByName('unitnd') >= 0));
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitNA.pas'),
+      'unit UnitNA;'#10'interface'#10 +
+      'type TN = class'#10'  procedure M;'#10'  procedure Extra;'#10'end;'#10 +
+      'implementation'#10 +
+      'procedure TN.M; begin end;'#10 +
+      'procedure TN.Extra; begin end;'#10'end.'#10, 2);
+    Ok('reach: the interface edit is accepted',
+      GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitNA.pas')));
+    Ok('reach: the redo set is ALL FOUR units, not three',
+      Pos('module=4;', GProj.StageTimings) > 0);
+    Ok('reach: the transitive consumer still resolves its own imports',
+      CrossRefTo(ModelByName('unitnd'), 'TNC', 'TNC'));
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

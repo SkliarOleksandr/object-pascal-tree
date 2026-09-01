@@ -356,6 +356,20 @@ begin
   GCounter.Ok('caret past EOL clamps and still answers ckAfterDot',
     GHit and (GInfo.Kind = ckAfterDot) and (DotBaseText = 'Foo'));
 
+  // Virtual space on a NON-LAST line (code audit 2026-08-31, finding 2.8.1).
+  // The clamp used LineStarts[ALine], which is the next line's first
+  // character - already past the break - so the caret landed on the FOLLOWING
+  // line: a line ending in an identifier never classified as ckIdent, and the
+  // replace span pointed at the wrong line's column 1.
+  CaretCase(FIXTURE_HEAD + '  GTotal|'#10'  GTotal := 1;'#10 + FIXTURE_TAIL);
+  GCounter.Ok('virtual space: the exact-EOL caret is a prefix position',
+    GHit and (GInfo.Kind = ckIdent) and (GInfo.Prefix = 'GTotal'));
+  GHit := GComp.CaretAt(14, 200, GInfo);
+  GCounter.Ok('virtual space: a caret far past EOL clamps to the LINE END, '
+    + 'not onto the next line',
+    GHit and (GInfo.Kind = ckIdent) and (GInfo.Prefix = 'GTotal') and
+    (GInfo.PrefixColFrom = 3));
+
   // --- dot completion, prefix being typed ------------------------------------
   CaretCase(FIXTURE_HEAD + '  Foo.Ba|'#10 + FIXTURE_TAIL);
   GCounter.Ok('Foo.Ba| classifies ckIdent', GHit and (GInfo.Kind = ckIdent));

@@ -232,6 +232,12 @@ type
     DemotedVisCount: Integer;
     DemotedFileSizes: TArray<Integer>;    // Length(Files[i].Source)
     DemotedTokenCounts: TArray<Integer>;  // Length(Files[i].Tokens)
+    { CONTENT fingerprint per file, not just a size one. Sizes and token
+      counts alone accept any edit that keeps both - `foo` -> `bar` is the
+      cheap one to reach - and rehydration would then install text and
+      positions from a DIFFERENT parse than the one Symbols/RefMap were built
+      from: a wrong answer where the contract above promises none. }
+    DemotedFileHashes: TArray<Cardinal>;  // FNV-1a over Files[i].Source
     DemotedHeads: TArray<Byte>;           // per symbol: Ord(TPasRoutineHead)
     constructor Create(const ATree: TPasTree);
     destructor Destroy; override;
@@ -272,7 +278,8 @@ type
     // method joins the class's member scope in turn, and must still see the
     // enum values two joins deep). FindLocal alone is one level only; this
     // is what Resolve actually needs at each scope of its PARENT climb.
-    function FindLocalDeep(AScope: Integer; const ANameLower: string): Integer;
+    function FindLocalDeep(AScope: Integer; const ANameLower: string;
+      ADepth: Integer = 0): Integer;
     { The ENUMERATING counterpart of FindLocalDeep, for completion: every
       symbol visible through AScope, reported in exactly the order the lookup
       would try them - Shadowing joins (recursive) first, then the scope's own
@@ -598,11 +605,20 @@ begin
 end;
 
 function TPasSemaModel.FindLocalDeep(AScope: Integer;
-  const ANameLower: string): Integer;
+  const ANameLower: string; ADepth: Integer): Integer;
 var
   LAdd: TArray<Integer>;
   LIdx: Integer;
 begin
+  // A DEPTH CAP, not a visited set: this is the hottest lookup in the
+  // analyzer and real join chains are a handful of links deep, so the cost
+  // has to be one integer compare. The resolver refuses to join a scope into
+  // ITSELF, but nothing stops a MUTUAL pair - `TH1 = record helper for TH2;
+  // TH2 = record helper for TH1;` is illegal for dcc yet representable
+  // mid-edit - and an unguarded recursion there is a stack overflow, i.e. a
+  // crashed editor process, on a file the analyzer is supposed to tolerate.
+  if ADepth > 16 then
+    Exit(NIL_SYM);
   // SHADOWING joins first, before the scope's own names: 15.3.3 - a helper
   // member hides the extended type's own member of the same name.
   // dcc-verified, and a component suite leans on it hard: its rich-edit
@@ -613,7 +629,7 @@ begin
   LAdd := Scopes[AScope].Shadowing;
   for LIdx := High(LAdd) downto 0 do
   begin
-    Result := FindLocalDeep(LAdd[LIdx], ANameLower);
+    Result := FindLocalDeep(LAdd[LIdx], ANameLower, ADepth + 1);
     if Result <> NIL_SYM then
       Exit;
   end;
@@ -626,7 +642,7 @@ begin
   LAdd := Scopes[AScope].Additional;
   for LIdx := High(LAdd) downto 0 do
   begin
-    Result := FindLocalDeep(LAdd[LIdx], ANameLower);
+    Result := FindLocalDeep(LAdd[LIdx], ANameLower, ADepth + 1);
     if Result <> NIL_SYM then
       Exit;
   end;
@@ -639,9 +655,9 @@ var
   LJoins: TArray<Integer>;
   LIdx: Integer;
 begin
-  // The lookups recurse joins unguarded (the resolver never builds a cyclic
-  // join graph); an enumerator visits EVERYTHING, so it caps depth anyway -
-  // a malformed graph then costs duplicates, never a hang.
+  // Same depth cap as the lookups (FindLocalDeep), for the same reason and
+  // then one of its own: an enumerator visits EVERYTHING, so on a malformed
+  // graph the cap costs duplicates rather than a hang.
   if ADepth > 16 then
     Exit;
   LJoins := Scopes[AScope].Shadowing;
@@ -909,6 +925,21 @@ begin
   end;
 end;
 
+{ FNV-1a over the UTF-16 code units of a preprocessed file's source. Cheap
+  (one pass, no allocation) and enough to reject the same-length edits the
+  size fingerprint alone lets through - see DemotedFileHashes. }
+function SourceFingerprint(const AText: string): Cardinal;
+var
+  LIdx: Integer;
+begin
+  Result := 2166136261;
+  for LIdx := 1 to Length(AText) do
+  begin
+    Result := Result xor Cardinal(Ord(AText[LIdx]));
+    Result := Result * 16777619;
+  end;
+end;
+
 procedure TPasSemaModel.DemoteText;
 var
   LIdx: Integer;
@@ -923,10 +954,13 @@ begin
   DemotedVisCount := Length(Tree.Source.Visible);
   SetLength(DemotedFileSizes, Length(Tree.Source.Files));
   SetLength(DemotedTokenCounts, Length(Tree.Source.Files));
+  SetLength(DemotedFileHashes, Length(Tree.Source.Files));
   for LIdx := 0 to High(Tree.Source.Files) do
   begin
     DemotedFileSizes[LIdx] := Length(Tree.Source.Files[LIdx].Source);
     DemotedTokenCounts[LIdx] := Length(Tree.Source.Files[LIdx].Tokens);
+    DemotedFileHashes[LIdx] :=
+      SourceFingerprint(Tree.Source.Files[LIdx].Source);
   end;
   Demoted := True;   // before the frees: RoutineHead must read the snapshot
   Tree.Source.Visible := nil;
@@ -949,14 +983,19 @@ begin
     Exit;
   if Length(APre.Files) <> Length(DemotedTokenCounts) then
     Exit;
+  if Length(APre.Files) <> Length(DemotedFileHashes) then
+    Exit;
   for LIdx := 0 to High(APre.Files) do
     if (Length(APre.Files[LIdx].Source) <> DemotedFileSizes[LIdx]) or
-       (Length(APre.Files[LIdx].Tokens) <> DemotedTokenCounts[LIdx]) then
+       (Length(APre.Files[LIdx].Tokens) <> DemotedTokenCounts[LIdx]) or
+       (SourceFingerprint(APre.Files[LIdx].Source) <>
+        DemotedFileHashes[LIdx]) then
       Exit;
   Tree.Source := APre;
   Demoted := False;
   DemotedFileSizes := nil;
   DemotedTokenCounts := nil;
+  DemotedFileHashes := nil;
   DemotedHeads := nil;
   DemotedVisCount := 0;
   Result := True;

@@ -60,6 +60,7 @@ type
     FModuleMode: Boolean;
     FModulePath: string;
     FModuleAccepted: Boolean;       // written before FDoneFlag, read after
+    FModuleRebuild: Boolean;        // same discipline - ModuleNeedsFullRebuild
     procedure RunBody;
   public
     { Creates the session and its (empty) project. Call SetBuffer for any
@@ -79,7 +80,14 @@ type
       still consistent: on a refusal (interface change, and every other case
       AnalyzeModuleOnly lists) the host takes it back untouched and starts an
       ordinary session over it, passing it as the parse donor. No progress is
-      reported - the whole point is that there are no stages to report. }
+      reported - the whole point is that there are no stages to report.
+
+      THE ONE EXCEPTION, and it is why LastError must be checked here too: a
+      failure PAST AnalyzeModuleOnly's commit point leaves the project
+      half-updated. ModuleAccepted is then False without the "untouched"
+      guarantee, LastError is non-empty, and ModuleNeedsFullRebuild says so
+      explicitly. Such a project must be DISCARDED, not reused as the live
+      project or as a parse donor. }
     constructor CreateForModule(AProject: TPasSemaProject;
       const APath: string);
     { Cancels the worker, waits for it to drain, then frees the project if it
@@ -117,6 +125,11 @@ type
     { Same contract for ReportGuessedIfs - the residual-$IF exotica detector
       (PPIF/PPBAD diagnostics); see TPasSemaProject.ReportGuessedIfs. }
     procedure SetReportGuessedIfs(AValue: Boolean);
+    { Same contract for ReportVisibility - the E2361 qualified-access check;
+      see TPasSemaProject.ReportVisibility. Forwarded like the other two
+      because a switch that can only be set on the project itself is a switch
+      an async host (which never sees the project before Start) cannot use. }
+    procedure SetReportVisibility(AValue: Boolean);
     procedure Start;
     { Request cooperative cancellation; the worker stops at the next module/
       wave boundary. Does not block. }
@@ -141,6 +154,11 @@ type
       host must rebuild (see CreateForModule). Always False for a normal
       session. }
     function ModuleAccepted: Boolean;
+    { CreateForModule sessions only: True when the fast path died after its
+      commit point, so the project this session holds is half-updated and
+      must be thrown away rather than reused (see CreateForModule). Always
+      False for a normal session, and False for an ordinary refusal. }
+    function ModuleNeedsFullRebuild: Boolean;
   end;
 
 implementation
@@ -185,6 +203,7 @@ begin
   FModuleMode := True;
   FModulePath := APath;
   FModuleAccepted := False;
+  FModuleRebuild := False;
 end;
 
 destructor TPasAsyncSession.Destroy;
@@ -236,6 +255,11 @@ begin
   FProject.ReportGuessedIfs := AValue;
 end;
 
+procedure TPasAsyncSession.SetReportVisibility(AValue: Boolean);
+begin
+  FProject.ReportVisibility := AValue;
+end;
+
 procedure TPasAsyncSession.RunBody;
 begin
   try
@@ -244,9 +268,15 @@ begin
       begin
         // Cancellation is not offered here: the call is milliseconds, and a
         // half-applied module swap has no meaning (it is one commit point).
-        FModuleAccepted := FProject.AnalyzeModuleOnly(FModulePath);
-        if FModuleAccepted then
-          FMainResultId := FProject.ModelIdOf(FModulePath);
+        try
+          FModuleAccepted := FProject.AnalyzeModuleOnly(FModulePath);
+          if FModuleAccepted then
+            FMainResultId := FProject.ModelIdOf(FModulePath);
+        finally
+          // Read here, not in the getter: the host may have TAKEN the project
+          // by the time it asks, and this verdict is about that project.
+          FModuleRebuild := FProject.NeedsFullRebuild;
+        end;
         Exit;
       end;
       FMainResultId := FProject.AnalyzeStaged(FRoots, FPriority,
@@ -342,6 +372,11 @@ end;
 function TPasAsyncSession.ModuleAccepted: Boolean;
 begin
   Result := FModuleAccepted;
+end;
+
+function TPasAsyncSession.ModuleNeedsFullRebuild: Boolean;
+begin
+  Result := FModuleRebuild;
 end;
 
 function TPasAsyncSession.MainResultId: Integer;

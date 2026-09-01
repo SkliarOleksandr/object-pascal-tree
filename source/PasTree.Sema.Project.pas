@@ -203,10 +203,16 @@ type
     // Set by ReleaseTransientMaps; every Analyze* refuses to run after it -
     // see the public method's contract comment.
     FTransientReleased: Boolean;
+    // See the NeedsFullRebuild property.
+    FNeedsFullRebuild: Boolean;
     { Per-model overlay of the member references CrossType discovers, so the
       parallel walks never mutate a dictionary another walk is reading - see
       RunCrossTypePass. Owned here; merged and freed there. }
     FXNewExt: TArray<TDictionary<Integer, TPasExtRef>>;
+    { Same treatment for CheckCalls' arity-error re-point, which runs in the
+      parallel 'cross-resolve' pass - see RunCallChecksPass. Nil outside it,
+      and then the write goes straight to the model. }
+    FCallNewExt: TArray<TDictionary<Integer, TPasExtRef>>;
     FSingleThreaded: Boolean;
     // Pass failures that had no model to hang off - see NoteInternalError.
     // The lock also guards AddDiag on a shared model from a parallel body.
@@ -444,6 +450,7 @@ type
     function CalleeShadowsUses(AModel: TPasSemaModel;
       ACallee, ALocalSym: Integer): Boolean;
     procedure CheckCalls(AId: Integer);
+    procedure RunCallChecksPass(ACount: Integer);
     // Phase 3c: cross-model typing.
     function InstanceRead(AInst: Integer): TSemaInstance;
     function TypeDefNodeOf(AMid, ASym: Integer): Integer;
@@ -583,6 +590,16 @@ type
       which refused a 28-model radius that was 15x cheaper than its fallback. }
     property ModuleRedoLimit: Integer read FModuleRedoLimit
       write FModuleRedoLimit;
+    { True once a pass failed AFTER a commit point, leaving this project in a
+      state no caller may keep using. Today the one producer is
+      AnalyzeModuleOnly: everything before its swap is a clean refusal ("the
+      project was never touched"), but a failure in the consumer redo or in
+      RunModulePasses happens with the new module already in FModels and the
+      consumers' cross-unit state already thrown away. The exception is
+      re-raised as well, so a host that only watches for errors still sees it;
+      this flag is what tells a host that catches broadly that the answer is a
+      FULL REBUILD and not a retry over the same project. }
+    property NeedsFullRebuild: Boolean read FNeedsFullRebuild;
     { Editor-host buffer override: analysis reads AText for APath instead of
       the file on disk (for unsaved editor content). Call BEFORE AnalyzeFile/
       AnalyzeDirectory - LoadFile reads at analysis time. AVersion is the
@@ -924,6 +941,18 @@ uses
   PasTree.Sema.Builtins,
   PasTree.Sema.Resolver,
   PasTree.Sema.Diagnostics;
+
+const
+  { Overlay tombstone: "this node's committed ExtRefMap entry must go away".
+
+    RepointCallee's same-model branch used to call ExtRefMap.Remove directly.
+    That runs inside the PARALLEL cross-type pass, and Remove relocates entries
+    within a collision cluster while sibling workers read the same dictionary
+    through ResolveTypeExpr - the exact writer-vs-reader hazard the overlay was
+    built to remove for the cross-model half. So the removal is deferred too:
+    the overlay records a tombstone, ExtOf reads it as "no entry", and the
+    sequential merge in RunCrossTypePass turns it back into a Remove. }
+  EXT_TOMBSTONE_UNIT = -2;
 
 type
   { Structural equality for the instantiation-dedup dictionary: the instance
@@ -4616,6 +4645,13 @@ begin
   Result := False;
   if AModel.ExtRefMap.TryGetValue(ACallee, LExt) then
   begin
+    // The NON-routine rule above holds on this side too, and used not to be
+    // applied here: an imported TYPE used as a cast - `TImportedType(x)` -
+    // still entered the arity sweep, so any other used unit exporting a
+    // same-named routine could produce a false E2034/E2035 on a compiling
+    // cast (and, worse, get the binding rewritten by the re-point below it).
+    if FModels[LExt.UnitId].Symbols[LExt.Sym].Kind <> skRoutine then
+      Exit(True);
     LScope := FModels[LExt.UnitId].Symbols[LExt.Sym].Scope;
     Result := (LScope <> NIL_SCOPE) and
       (FModels[LExt.UnitId].Scopes[LScope].Kind = sckStruct);
@@ -4845,12 +4881,17 @@ begin
          LModel.Tree.NodeNameLower(LCallee), LUid, LS, LIdx) then
     begin
       // Re-point while we are here: the binding was wrong, not just the arity,
-      // and everything downstream (typing, navigation) reads these maps. Own
-      // model only - the same write discipline every parallel pass here follows.
+      // and everything downstream (typing, navigation) reads these maps.
       LModel.RefMap[LCallee] := NIL_SYM;
       LExt.UnitId := LUid;
       LExt.Sym := LS;
-      LModel.ExtRefMap.AddOrSetValue(LCallee, LExt);
+      // Own model only, and DEFERRED while the pass runs in parallel: a live
+      // AddOrSetValue can rehash the dictionary under a sibling worker's
+      // ResolveTypeExpr read of this same model - see RunCallChecksPass.
+      if (AId <= High(FCallNewExt)) and (FCallNewExt[AId] <> nil) then
+        FCallNewExt[AId].AddOrSetValue(LCallee, LExt)
+      else
+        LModel.ExtRefMap.AddOrSetValue(LCallee, LExt);
       Continue;
     end;
     if LArgCount < LMinReq then
@@ -4860,6 +4901,39 @@ begin
   end;
   finally
     LSweeps.Free;
+  end;
+end;
+
+{ The three call/constraint/attribute checks, farmed out per unit - with the
+  one shared-write hazard deferred, exactly as RunCrossTypePass does it.
+
+  CheckCalls is the only writer here: on the arity-error path it re-points a
+  wrong binding into its OWN model's ExtRefMap. Own-model is not enough on its
+  own, because sibling workers READ arbitrary models' ExtRefMap through
+  FindMemberX -> ResolveTypeExpr, and TDictionary.AddOrSetValue can rehash
+  under a concurrent TryGetValue. So the re-points go into a per-model overlay
+  and are merged here, sequentially, once every worker has finished. }
+procedure TPasSemaProject.RunCallChecksPass(ACount: Integer);
+var
+  LIdx: Integer;
+begin
+  SetLength(FCallNewExt, ACount);
+  for LIdx := 0 to ACount - 1 do
+    FCallNewExt[LIdx] := TDictionary<Integer, TPasExtRef>.Create;
+  try
+    ForEachIndex(ACount - 1, 'cross-resolve',      procedure(AIdx: Integer)
+      begin
+        CheckCalls(AIdx);
+        CheckConstraints(AIdx);
+        CheckAttributes(AIdx);
+      end);
+    for LIdx := 0 to ACount - 1 do
+      for var LPair in FCallNewExt[LIdx] do
+        FModels[LIdx].ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
+  finally
+    for LIdx := 0 to ACount - 1 do
+      FCallNewExt[LIdx].Free;
+    SetLength(FCallNewExt, 0);
   end;
 end;
 
@@ -7438,7 +7512,9 @@ var
     node discovered (see TargetSym). }
   function ExtOf(N: Integer; out AExt: TPasExtRef): Boolean;
   begin
-    Result := LNewExt.TryGetValue(N, AExt) or LM.ExtRefMap.TryGetValue(N, AExt);
+    if LNewExt.TryGetValue(N, AExt) then
+      Exit(AExt.UnitId <> EXT_TOMBSTONE_UNIT);
+    Result := LM.ExtRefMap.TryGetValue(N, AExt);
   end;
 
   { Is N a bare designator naming a PROCEDURE - a routine with no result?
@@ -8445,7 +8521,10 @@ begin
       end);
     for LIdx := 0 to ACount - 1 do
       for var LPair in FXNewExt[LIdx] do
-        FModels[LIdx].ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
+        if LPair.Value.UnitId = EXT_TOMBSTONE_UNIT then
+          FModels[LIdx].ExtRefMap.Remove(LPair.Key)
+        else
+          FModels[LIdx].ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
     // Only now are the bindings final - see RunVisibilityPass. No-op unless
     // ReportVisibility asked for it.
     if FReportVisibility then
@@ -8673,7 +8752,11 @@ end;
   falling back to ExtRefMap" (a single answer either way), but a project-wide
   scan that reads BOTH maps as independent evidence (Find References) counted
   the one real reference twice. Removing the stale entry restores the
-  invariant every other caller already assumed held: one node, one map. }
+  invariant every other caller already assumed held: one node, one map.
+
+  That removal is DEFERRED through the same overlay as the cross-model branch
+  whenever one is supplied (EXT_TOMBSTONE_UNIT): a live Remove inside the
+  parallel pass would rehash the dictionary under a sibling worker's read. }
 procedure TPasSemaProject.RepointCallee(AModel: TPasSemaModel;
   ACalleeNode, AMid, ASym: Integer;
   ANewExt: TDictionary<Integer, TPasExtRef>);
@@ -8694,7 +8777,14 @@ begin
   if AModel = FModels[AMid] then
   begin
     AModel.RefMap[LName] := ASym;
-    AModel.ExtRefMap.Remove(LName);
+    if ANewExt <> nil then
+    begin
+      LExt.UnitId := EXT_TOMBSTONE_UNIT;   // deferred Remove - see the constant
+      LExt.Sym := NIL_SYM;
+      ANewExt.AddOrSetValue(LName, LExt);
+    end
+    else
+      AModel.ExtRefMap.Remove(LName);
     Exit;
   end;
   AModel.RefMap[LName] := NIL_SYM;
@@ -10911,8 +11001,27 @@ begin
     SizeCrossWork(FModels.Count);
     var LPend: TArray<TPasInhPending>;
     CrossResolveInherited(Result, LPend);
+    // The SAME commit RunInheritedPass performs, not just the ExtRefMap half:
+    // RefMap must be CLEARED (every consumer reads it first and only falls
+    // back to ExtRefMap, so a shadowing override that merely added an entry
+    // stayed ineffective), a bare Add also left the node in BOTH maps - the
+    // double-count Find References counts - and the frame-substituted member
+    // type has to be committed or generic member types are silently dropped.
     for LIdx := 0 to High(LPend) do
-      FModels[Result].ExtRefMap.Add(LPend[LIdx].Node, LPend[LIdx].Ext);
+    begin
+      FModels[Result].RefMap[LPend[LIdx].Node] := NIL_SYM;
+      FModels[Result].ExtRefMap.AddOrSetValue(LPend[LIdx].Node,
+        LPend[LIdx].Ext);
+      if XValid(LPend[LIdx].X) then
+        FModels[Result].ExprTypeX.AddOrSetValue(LPend[LIdx].Node,
+          LPend[LIdx].X);
+    end;
+    // CrossResolve DEFERS every with-body identifier to this pass rather than
+    // binding it (see there), so without it those names are never bound and
+    // never diagnosed - a hole in this driver only. Run over the whole loaded
+    // set, like the BindTypesX loop below: the with pass reads the used
+    // units' state and is the sole writer of these bindings.
+    RunWithPass(FModels.Count);
     CheckCalls(Result);
     CheckConstraints(Result);
     CheckAttributes(Result);
@@ -11248,35 +11357,43 @@ end;
 function TPasSemaProject.AffectedConsumers(AId, ALimit: Integer;
   out AIds: TArray<Integer>; out ARadius: Integer): Boolean;
 var
-  LSeen: TArray<Boolean>;
-  LExpand: TArray<Boolean>;   // parallel to AIds: does the walk go THROUGH it?
+  LSeen: TArray<Boolean>;     // already in AIds
+  LQueued: TArray<Boolean>;   // already expanded THROUGH (per model id)
+  LQueue: TArray<Integer>;
   LHead, LIdx, LCur, LUse: Integer;
   LPropagates, LUses: Boolean;
 begin
   AIds := nil;
   Result := True;   // cleared the moment the ceiling is passed; the walk goes on
   SetLength(LSeen, FModels.Count);
+  SetLength(LQueued, FModels.Count);
   // Breadth-first over the REVERSE uses graph. Forward edges are the models'
   // own UsesList (already carrying resolved ids), so one sweep per frontier
   // unit is enough - a full reverse index would cost more to build than the
   // walk costs on any radius small enough to be worth taking.
+  //
+  // MEMBERSHIP and REACH are tracked separately, and that separation is the
+  // point: a unit reached over an IMPLEMENTATION-only edge must be redone
+  // (its own bindings into the edited unit are stale) but nothing it exports
+  // changed, so the walk does not continue through it. Keying that decision
+  // to first discovery - as the first cut did - is wrong, because the same
+  // unit can be reachable BOTH ways: A <- B (intf) <- C (intf), with C also
+  // impl-using A. Discovered first over the impl edge, C was fixed as a leaf
+  // forever, and D (which uses C) never made the redo set - leaving D's
+  // ExtRefMap pointing into A's old numbering. So membership is decided once
+  // (LSeen) and reach is decided per EDGE (LQueued): reaching an already-seen
+  // unit over a propagating edge still queues it for expansion.
   AIds := [AId];
-  LExpand := [True];
   LSeen[AId] := True;
+  LQueue := [AId];
+  LQueued[AId] := True;
   LHead := 0;
-  while LHead <= High(AIds) do
+  while LHead <= High(LQueue) do
   begin
-    LCur := AIds[LHead];
-    if not LExpand[LHead] then
-    begin
-      Inc(LHead);
-      Continue;   // a leaf: nothing it exports can depend on the edited unit
-    end;
+    LCur := LQueue[LHead];
     Inc(LHead);
     for LIdx := 0 to FModels.Count - 1 do
     begin
-      if LSeen[LIdx] then
-        Continue;
       LUses := False;
       LPropagates := False;
       for LUse := 0 to High(FModels[LIdx].UsesList) do
@@ -11288,15 +11405,22 @@ begin
         end;
       if not LUses then
         Continue;
-      LSeen[LIdx] := True;
-      AIds := AIds + [LIdx];
-      LExpand := LExpand + [LPropagates];
-      // ALimit <= 0 means no ceiling - take any radius (a measurement mode).
-      // Over the ceiling the walk still runs to the end: the SIZE is what the
-      // refusal has to report, because "too many" without a number tells a
-      // host nothing about whether its limit is set sensibly.
-      if (ALimit > 0) and (Length(AIds) > ALimit) then
-        Result := False;
+      if not LSeen[LIdx] then
+      begin
+        LSeen[LIdx] := True;
+        AIds := AIds + [LIdx];
+        // ALimit <= 0 means no ceiling - take any radius (a measurement
+        // mode). Over the ceiling the walk still runs to the end: the SIZE is
+        // what the refusal has to report, because "too many" without a number
+        // tells a host nothing about whether its limit is set sensibly.
+        if (ALimit > 0) and (Length(AIds) > ALimit) then
+          Result := False;
+      end;
+      if LPropagates and not LQueued[LIdx] then
+      begin
+        LQueued[LIdx] := True;
+        LQueue := LQueue + [LIdx];
+      end;
     end;
   end;
   // The size is reported whatever the verdict; the SET is handed back only
@@ -11523,24 +11647,38 @@ begin
     // currency), and the per-model pass scratch is rebuilt below.
     FModels[LId] := LNew;
     LNew := nil;
+    // PAST THE COMMIT POINT. Everything above is a clean refusal; from here a
+    // failure cannot restore the project (the consumers' cross-unit state is
+    // being thrown away and rebuilt), so it is published as such: the flag
+    // says "full rebuild", the timing string says where it died, and the
+    // exception still propagates to whoever drives the call.
+    try
     // Each affected consumer goes back to its OWN Phase-1 state - a fresh
     // Analyze over the tree it already has. No preprocessing, no parse: the
     // tree is unchanged and immutable, and Phase 1 over the same tree is
     // deterministic, so the consumer's own symbol numbering is reproduced
     // exactly. This is what clears its stale cross-unit state wholesale
     // instead of trying to patch entries one by one.
-    for LIdx := 1 to High(LIds) do
-    begin
-      LCons := TPasSemaResolver.Analyze(FModels[LIds[LIdx]].Tree, False,
-        FPlatform);
-      FModels[LIds[LIdx]] := LCons;
+      for LIdx := 1 to High(LIds) do
+      begin
+        LCons := TPasSemaResolver.Analyze(FModels[LIds[LIdx]].Tree, False,
+          FPlatform);
+        FModels[LIds[LIdx]] := LCons;
+      end;
+      for LIdx := 0 to High(LIds) do
+        if LIds[LIdx] <= High(FWorkBuilt) then
+          FWorkBuilt[LIds[LIdx]] := False;
+      RunModulePasses(LIds);
+      for LIdx := 0 to High(LIds) do
+        SetModuleStatus(LIds[LIdx], msCrossReady);
+    except
+      on E: Exception do
+      begin
+        FNeedsFullRebuild := True;
+        FStageTimings := 'module=half-committed:' + E.ClassName;
+        raise;
+      end;
     end;
-    for LIdx := 0 to High(LIds) do
-      if LIds[LIdx] <= High(FWorkBuilt) then
-        FWorkBuilt[LIds[LIdx]] := False;
-    RunModulePasses(LIds);
-    for LIdx := 0 to High(LIds) do
-      SetModuleStatus(LIds[LIdx], msCrossReady);
     FStageTimings := FStageTimings +
       Format('passes=%d;module=%d;', [LSW.ElapsedMilliseconds, Length(LIds)]);
     if not LIntfSame then
@@ -11714,12 +11852,7 @@ begin
     // obvious from reading the code.
     RunWithPass(LN);
     Stage('with');
-    ForEachIndex(LN - 1, 'cross-resolve',    procedure(AIdx: Integer)
-      begin
-        CheckCalls(AIdx);
-        CheckConstraints(AIdx);
-        CheckAttributes(AIdx);
-      end);
+    RunCallChecksPass(LN);
     Stage('calls');
     // Sequential by design - see AnalyzeDirectory's Phase-3c comment.
     for LIdx := 0 to FModels.Count - 1 do
@@ -11813,12 +11946,7 @@ begin
     // obvious from reading the code.
     RunWithPass(LN);
     Stage('with');
-    ForEachIndex(LN - 1, 'cross-resolve',    procedure(AIdx: Integer)
-      begin
-        CheckCalls(AIdx);
-        CheckConstraints(AIdx);
-        CheckAttributes(AIdx);
-      end);
+    RunCallChecksPass(LN);
     Stage('calls');
     // Cross typing stays SEQUENTIAL by design: Instantiate mutates the shared
     // instance table, and CrossType both writes a model's RefMap/ExtRefMap and
@@ -12042,12 +12170,7 @@ begin
     end;
     StageMark('with');
     Report('cross:calls');
-    ForEachIndex(LN - 1, 'cross-resolve',      procedure(AIdx: Integer)
-      begin
-        CheckCalls(AIdx);
-        CheckConstraints(AIdx);
-        CheckAttributes(AIdx);
-      end);
+    RunCallChecksPass(LN);
     if Cancelled then
     begin
       Report('cancelled');

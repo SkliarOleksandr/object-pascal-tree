@@ -457,8 +457,17 @@ begin
   // Clamp a caret past the end of its line to the line end (before the line
   // break, when there is one - landing ON the break is fine too, the trivia
   // walk-back reads both the same way).
+  // LineStarts[ALine] is the FIRST CHARACTER OF THE NEXT LINE, i.e. already
+  // past the break - clamping there put the caret on the next line, so the
+  // replace span landed at its column 1 and a line ending in an identifier
+  // never classified as ckIdent. Walk back over the break instead.
   if ALine - 1 < High(LTS.LineStarts) then
-    LLineEnd := LTS.LineStarts[ALine]
+  begin
+    LLineEnd := LTS.LineStarts[ALine];
+    while (LLineEnd > LTS.LineStarts[ALine - 1]) and
+          (LTS.Source[LLineEnd] in [#10, #13]) do
+      Dec(LLineEnd);
+  end
   else
     LLineEnd := Length(LTS.Source);
   if AOffset > LLineEnd then

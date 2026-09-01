@@ -101,6 +101,12 @@ type
       // the mismatch and rebuilds - the cached raw/visible/node indices are
       // only valid for the exact tree they came from.
       SourceModel: TPasSemaModel;
+      { Identity is not enough on its own: TryRehydrate restores the text
+        layer on the SAME model object, so a cache built while the model was
+        DEMOTED (empty Visible, empty token arrays -> zero-length VisOfRaw,
+        tkUnknown routine keys) would survive rehydration untouched and be
+        indexed with the now-valid larger indices. CacheOf rebuilds instead. }
+      BuiltDemoted: Boolean;
       VisOfRaw: TArray<Integer>;                 // raw idx -> visible idx | -1
       NodeOfVis: TDictionary<Integer, Integer>;  // visible idx -> nkIdent node
       // Declaration<->implementation pairing (routine decl<->impl toggle),
@@ -358,10 +364,13 @@ var
   LM: TPasSemaModel;
   LIdx: Integer;
 begin
+  // Everything below indexes the TEXT layer, so hydrate first: a cache built
+  // over a demoted model is all-empty, and (see BuiltDemoted) permanently so.
+  FProj.EnsureHydrated(AMid);
   LM := FProj.Model(AMid);
   if FCaches.TryGetValue(AMid, Result) then
   begin
-    if Result.SourceModel = LM then
+    if (Result.SourceModel = LM) and (Result.BuiltDemoted = LM.Demoted) then
       Exit;
     // Stale: the project swapped in a new snapshot at this id. Drop the cache
     // (doOwnsValues frees it) and rebuild against the current model.
@@ -369,6 +378,7 @@ begin
   end;
   Result := TNavCache.Create;
   Result.SourceModel := LM;
+  Result.BuiltDemoted := LM.Demoted;
   SetLength(Result.VisOfRaw, Length(LM.Tree.Source.Files[0].Tokens));
   for LIdx := 0 to High(Result.VisOfRaw) do
     Result.VisOfRaw[LIdx] := -1;
@@ -445,6 +455,10 @@ begin
   Result := False;
   if AMid < 0 then
     Exit;
+  // Position -> token is pure text work, so a demoted model must get its text
+  // back first: without this the empty LineStarts below read as "position out
+  // of range" and every editor gesture over a closed unit silently declines.
+  FProj.EnsureHydrated(AMid);
   LM := FProj.Model(AMid);
   LTS := LM.Tree.Source.Files[0];
   if (ALine < 1) or (ALine - 1 > High(LTS.LineStarts)) or (ACol < 1) then
@@ -1000,6 +1014,7 @@ var
 begin
   LHits := TList<TPasRefHit>.Create;
   try
+    FProj.EnsureHydrated(ATMid);
     for LMi := 0 to FProj.ModelCount - 1 do
     begin
       LM := FProj.Model(LMi);
@@ -1007,7 +1022,12 @@ begin
       // actually holds a hit pays a rehydration, so references to a hot RTL
       // symbol re-preprocess the units that USE it, not the whole closure.
       // A model that fails to rehydrate contributes no hits (HitFromNode's
-      // bounds guards) rather than wrong ones.
+      // bounds guards) rather than wrong ones. The DECLARING model is the one
+      // exception, hydrated before the loop: IsDeclSelfName below reads the
+      // text layer (RTSepAfter -> Source.Visible), and on a demoted model
+      // every separator reads back tkUnknown, mispicking the segments of a
+      // `TFoo.Bar` implementation header - spurious self-name hits for
+      // methods, dropped qualifier hits for types.
       if LMi = ATMid then
         for LNode := 0 to High(LM.RefMap) do
           if (LM.RefMap[LNode] = ASym) and
@@ -1043,6 +1063,11 @@ begin
   Result := False;
   if ATMid < 0 then
     Exit;
+  // Hydrate like every other hit producer: on a demoted declaring unit
+  // HitFromNode's bounds guards would silently drop the declaration row, and
+  // PlanRename then refuses the whole rename with a false reason ("no
+  // declaration site... implicit Result or builtin").
+  FProj.EnsureHydrated(ATMid);
   LM := FProj.Model(ATMid);
   LDeclNode := LM.Symbols[ASym].DeclNode;
   if LDeclNode = NIL_NODE then
@@ -1151,7 +1176,12 @@ begin
     begin
       LM := FProj.Model(LMi);
       for LIdx := 0 to High(LM.UsesList) do
+        // Hydration AFTER the id test, exactly as FindReferences does it:
+        // only a unit that actually names the target pays a re-preprocess.
+        // Without it every hit in a DEMOTED unit - i.e. most of them after
+        // DemoteClosedUnits - was silently dropped by HitFromNode's guards.
         if (LM.UsesList[LIdx].UnitId = ATargetMid) and
+           FProj.EnsureHydrated(LMi) and
            HitFromNode(LM, LM.UsesList[LIdx].NameNode, LHit) then
           LHits.Add(LHit);
     end;
@@ -1223,8 +1253,10 @@ begin
       for LNode := 0 to High(LM.RefMap) do
       begin
         LSym := LM.RefMap[LNode];
+        // Hydration after the name test - see FindUnitReferences.
         if (LSym <> NIL_SYM) and (sfBuiltin in LM.Symbols[LSym].Flags) and
            SameText(LM.Symbols[LSym].Name, AName) and
+           FProj.EnsureHydrated(LMi) and
            HitFromNode(LM, LNode, LHit) then
           LHits.Add(LHit);
       end;
@@ -1280,6 +1312,7 @@ var
   LOffset, LLo, LHi, LMidTok, LRaw: Integer;
 begin
   Result := -1;
+  FProj.EnsureHydrated(AMid);   // pure text work - see IdentAt
   LM := FProj.Model(AMid);
   LTS := LM.Tree.Source.Files[0];
   if (ALine < 1) or (ALine - 1 > High(LTS.LineStarts)) or (ACol < 1) then
@@ -2177,6 +2210,11 @@ begin
     AError := Format('"%s" is not a valid unit name.', [ANewName]);
     Exit;
   end;
+  // UnitNameHit reads the text layer, and a DEMOTED model has none - the
+  // refusals below are about spellings that cannot be read, not about text
+  // that is merely put away. Without this, unit rename is unavailable
+  // projectwide after any DemoteClosedUnits, with a misleading reason.
+  FProj.EnsureHydrated(ATargetMid);
   LM := FProj.Model(ATargetMid);
   LHeader := LM.Tree.Nodes[0].FirstChild;
   if not UnitNameHit(LM, LHeader, {out} LHit) then
@@ -2207,6 +2245,9 @@ begin
       begin
         if LM.UsesList[LIdx].UnitId <> ATargetMid then
           Continue;
+        // Same reason as the header above, paid only by units that actually
+        // reference the target.
+        FProj.EnsureHydrated(LMi);
         if not UnitNameHit(LM, LM.UsesList[LIdx].NameNode, {out} LHit) then
         begin
           AError := Format('A `uses` reference in %s could not be read as ' +

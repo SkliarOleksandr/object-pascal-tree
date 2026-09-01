@@ -846,6 +846,20 @@ begin
             Exit(-1);
           end;
         end;
+      tkGreaterEqual:
+        begin
+          // The FUSED close, the same ambiguity CloseGeneric splits on the
+          // declaration side: `V.AsType<Integer>=5` lexes the `>=` as one
+          // token, and refusing it here made the whole thing read as
+          // `(V.AsType < Integer) >= 5` - dcc-valid code, silently parsed as
+          // a comparison, with no diagnostic anywhere. The follower is by
+          // construction `=`, which the rule below already accepts, so the
+          // depth test is the whole check. Consumption is unaffected:
+          // AtGenericClose/CloseGeneric split the token when they get there.
+          if LDepth = 1 then
+            Exit(LIdx + 1);
+          Exit(-1);
+        end;
       tkIdentifier, tkDot, tkComma, tkString, tkFile:
         ; // plausible type-list content
     else
@@ -995,7 +1009,7 @@ begin
     if CurKind = tkColon then
     begin
       Next;
-      FB.Adopt(LVar, ParseTypeRef);
+      FB.Adopt(LVar, ParseTypeExpr);   // same as ParseInlineVar - see there
     end;
     FB.SetLast(LVar, FPos - 1);
     FB.Adopt(LNode, LVar);
@@ -1144,7 +1158,11 @@ begin
   if CurKind = tkColon then
   begin
     Next;
-    FB.Adopt(Result, ParseTypeRef);
+    // ParseTypeExpr, not ParseTypeRef: an inline var may be given a
+    // STRUCTURAL type, exactly like any other var - `var A: array[0..1] of
+    // Byte;` and `var S: set of Byte;` are dcc64-valid and used to be a hard
+    // "type expected" here (3.1.3).
+    FB.Adopt(Result, ParseTypeExpr);
   end;
   if (CurKind = tkAssign) or (AConst and (CurKind = tkEqual)) then
   begin
@@ -1479,7 +1497,7 @@ end;
 
 function TPasParser.ParseTypeExpr: Integer;
 var
-  LNode, LExpr: Integer;
+  LNode, LExpr, LStart: Integer;
 begin
   if not EnterGuard then
   begin
@@ -1572,11 +1590,26 @@ begin
           Exit(ParseProcTypeExpr(True));
         end;
         // Type-context: generics always bind (16.3); may be a subrange lo.
+        LStart := FPos;
         LExpr := ParseTypeRef;
         // Constant-expression continuations in ordinal positions:
         // array[Ord(reA)..Ord(reB)] - allow selector chains (calls etc.).
         if CurKind in [tkLParen, tkLBracket, tkCaret] then
           LExpr := ParseSelectors(LExpr);
+        // An ARITHMETIC continuation says this was never a type reference at
+        // all: `type T = A+1..B;` and `array[B-1..B] of Integer` are both
+        // dcc-valid and used to be hard parse errors, because only selector
+        // continuations were allowed after an identifier head. Re-read the
+        // whole thing as the constant expression it is - the literal- and
+        // call-headed forms below already take that route. The node built by
+        // the type-reference attempt is simply left unadopted.
+        if CurKind in [tkPlus, tkMinus, tkStar, tkSlash, tkDiv, tkMod,
+           tkShl, tkShr, tkAnd, tkOr, tkXor] then
+        begin
+          FPos := LStart;
+          FSplitEq := False;
+          LExpr := ParseExpression;
+        end;
         if CurKind = tkDotDot then
         begin
           LNode := FB.AddNode(nkSubrange, NIL_NODE, FPos);
@@ -1897,9 +1930,16 @@ begin
         end;
       tkCase:
         ParseVariantPart(AOwner);
-      tkIdentifier, tkString:
+      tkIdentifier:
         // field declaration(s)
         ParseFieldList(AOwner, [tkEnd, tkCase]);
+      // tkString used to be routed here TOO, and it is the one dispatch that
+      // could not make progress: ParseFieldList's loop is
+      // `while CurKind = tkIdentifier`, so nothing was consumed, the member
+      // loop re-dispatched forever, and the fuel watchdog abandoned
+      // EVERYTHING after the stray token (`TR = record string end;` lost the
+      // rest of the file). It falls through to the default now: one error,
+      // one token consumed, the parse continues.
     else
       Error('member declaration expected, found "' + CurText + '"');
       Next;
@@ -2556,8 +2596,9 @@ var
 
   function LooksLikeAggregate: Boolean;
   var
-    LIdx, LDepth, LSteps: Integer;
+    LIdx, LDepth, LSteps, LInnerClose: Integer;
     LKind: TPasTokenKind;
+    LFirstLParen: Boolean;
   begin
     // Distinguishes `(1, 2, 3)` / `(X: 0; Y: 1)` aggregates from plain
     // parenthesised const expressions like ((1.0/$10000) / $10000):
@@ -2566,13 +2607,19 @@ var
     LIdx := FPos + 1;
     LDepth := 1;
     LSteps := 0;
+    // Does the content open with its own '('? That used to mean "aggregate"
+    // outright, which swallowed the very case this function's header names as
+    // the one to reject: `((1.0/$10000) / $10000)` is a parenthesised const
+    // EXPRESSION, not a one-element nested aggregate. Only the bare
+    // `((...))` shape - the inner group closing immediately before the outer
+    // one - is genuinely ambiguous, so that is all that is treated as one.
+    LFirstLParen := FSrc.VisibleToken(FPos + 1).Kind = tkLParen;
+    LInnerClose := -1;
     while (LIdx <= FLast) and (LSteps < 4096) do
     begin
       LKind := FSrc.VisibleToken(LIdx).Kind;
-      // First-inner-token checks must run BEFORE the depth bookkeeping:
-      // '()' empty aggregate closes depth immediately (OleControls), and
-      // '((' opens a single-element nested aggregate (test_xpParse).
-      if (LIdx = FPos + 1) and (LKind in [tkLParen, tkRParen]) then
+      // The empty aggregate `()` closes depth immediately (OleControls).
+      if (LIdx = FPos + 1) and (LKind = tkRParen) then
         Exit(True);
       case LKind of
         tkLParen, tkLBracket:
@@ -2580,8 +2627,10 @@ var
         tkRParen, tkRBracket:
           begin
             Dec(LDepth);
+            if (LDepth = 1) and LFirstLParen and (LInnerClose < 0) then
+              LInnerClose := LIdx;
             if LDepth = 0 then
-              Exit(False);
+              Exit(LFirstLParen and (LInnerClose = LIdx - 1));
           end;
         tkComma, tkSemicolon, tkColon:
           if LDepth = 1 then

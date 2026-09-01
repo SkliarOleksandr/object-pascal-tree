@@ -373,7 +373,10 @@ begin
         Inc(Result);
         if SepKindAfter(LChild) = tkColon then
           Break;                       // last name; the type follows
-        LChild := NextSib(LChild);     // ',' -> next name
+        // SkipAttr: an attribute group can sit mid-list (see
+        // DeclareNamesAndType), and undercounting names here mismatches an
+        // implementation against the wrong interface overload.
+        LChild := SkipAttr(NextSib(LChild));   // ',' -> next name
         if (LChild <> NIL_NODE) and (KindOf(LChild) <> nkIdent) then
           Break;
       end;
@@ -511,7 +514,11 @@ begin
       LDone := True;
     end
     else if LSep = tkComma then
-      LChild := NextSib(LChild)
+      // SkipAttr, not a bare NextSib: an attribute group may sit MID-LIST -
+      // `const [Ref] CLSID, [Ref] IID: TGUID` is a shape the parser emits for
+      // a real RTL unit - and stopping there left every later name in the
+      // group undeclared AND the whole group untyped (LType stays NIL_NODE).
+      LChild := SkipAttr(NextSib(LChild))
     else
       LDone := True;  // untyped parameter, or end
   end;

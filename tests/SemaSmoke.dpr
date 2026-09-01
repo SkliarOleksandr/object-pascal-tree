@@ -2383,6 +2383,41 @@ begin
   Ok('9.4.2: no E2003 in a parameterless Initialize body',
     DiagCount('E2003') = 0);
 
+  // ---- An attribute group MID-LIST (code audit 2026-08-31, finding 2.6.2).
+  // `const [Ref] CLSID, [Ref] IID: TGUID` is the shape the parser emits for a
+  // real RTL unit: the name walk stopped at the second group, so IID was
+  // never declared and NO name in the group got a type. ----
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10'  RefAttribute = class end;'#10 +
+    'procedure P(const [Ref] AFirst, [Ref] ASecond: Integer);'#10 +
+    'implementation'#10 +
+    'procedure P(const [Ref] AFirst, [Ref] ASecond: Integer);'#10 +
+    'begin'#10'end;'#10 +
+    'end.'#10);
+  Ok('attr-midlist: the name AFTER a mid-list attribute group is declared',
+    SymCountOf('asecond', skParam) > 0);
+  Ok('attr-midlist: and the FIRST name is still declared',
+    SymCountOf('afirst', skParam) > 0);
+  Ok('attr-midlist: nothing is reported over the group',
+    DiagCount('E2003') = 0);
+
+  // ---- Mutually extending helpers (finding 2.6.1). Illegal for dcc, but
+  // representable mid-edit, and it used to build a CYCLIC join graph that
+  // FindLocalDeep recursed into until the stack ran out. Tolerated input must
+  // never crash the analyzer - the assertion is simply that we get here. ----
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10 +
+    '  TH1 = record helper for TH2'#10'    procedure A;'#10'  end;'#10 +
+    '  TH2 = record helper for TH1'#10'    procedure B;'#10'  end;'#10 +
+    'implementation'#10 +
+    'procedure TH1.A;'#10'begin'#10'  NoSuchNameAtAll := 1;'#10'end;'#10 +
+    'procedure TH2.B;'#10'begin'#10'  AlsoNoSuchName := 2;'#10'end;'#10 +
+    'end.'#10);
+  Ok('helper-cycle: a mutually-extending helper pair does not hang or crash '
+    + 'the lookup', HasSym('TH1', skType) and HasSym('TH2', skType));
+
   if GCounter.Finish('SemaSmoke') then
     ExitCode := 1;
   GPP.Free;

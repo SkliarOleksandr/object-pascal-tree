@@ -444,6 +444,39 @@ begin
       + 'as dcc does (System.ObjAuto ships a stray closing paren)',
       '{$IF True)}A := 1;{$ELSE}A := 2;{$ENDIF}',
       'Block(Assign(Ident''A'' IntLit''1''))', False),
+    // ---- Code audit 2026-08-31, findings 2.7.1 / 2.7.2 / 3.2. Each of these
+    // is a shape that used to CRASH the whole preprocess run of the unit
+    // (Trunc outside Int64 raises EInvalidOp, against this unit's "never
+    // raises" contract) or to launder a guess into a confident answer. The
+    // branch each one takes matters less than the fact that an answer comes
+    // back at all - but it is pinned anyway, because "guess" has a defined
+    // meaning here. ----
+    IfBranchCase('an integer operand too big for Int64 is a guess, '
+      + 'not an EInvalidOp',
+      '{$IF 1E300 div 1 = 0}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''1''))', True),
+    IfBranchCase('...same for mod',
+      '{$IF 1E300 mod 2 = 0}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''1''))', True),
+    IfBranchCase('...and for a shl whose LEFT side is out of range',
+      '{$IF 1E300 shl 1 = 0}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''1''))', True),
+    IfBranchCase('...and for an ordinal cast of one',
+      '{$IF Byte(1E300) = 0}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''1''))', True),
+    IfBranchCase('2^63 written out folds through a Double and still answers',
+      '{$IF 9223372036854775808 div 2 > 0}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''2''))', True),
+    IfBranchCase('a 64-digit binary literal is refused, not overflowed',
+      '{$IF %11111111111111111111111111111111111111111111111111111111111111111'
+      + ' = 0}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''1''))', True),
+    // 2.7.2: the relational error-token exit must keep the other side's
+    // taint, or nothing is recorded and the second-pass question vanishes.
+    IfBranchCase('a relational against an unresolvable name keeps the '
+      + 'GUESS flag, so the second pass still gets its question',
+      '{$IF (UNKNOWN_K > 3) > ''s''}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''2''))', True),
     DeclaredRecordingCase,
 
     // ---- {$Z}/{$MINENUMSIZE}: positional minimum-enum-size state, the
