@@ -8747,11 +8747,20 @@ begin
           end
           else if FindInSystemUnit(LNameLower, LUid, LSym) then
           begin
+            // Blind to arity for the same reason - and this is the branch a
+            // name declared ONLY in System reaches, so the correction has to
+            // sit here too. System.IOUtils' `class(TInterfacedObject,
+            // IEnumerator, IEnumerator<string>)` is the report: nothing in
+            // that unit's uses declares the name, so BOTH heritage
+            // references took this branch and both bound the arity-0
+            // interface.
+            FixCrossArity(AId, LModel, LNode, LNameLower, LUid, LSym);
             LExt.UnitId := LUid; LExt.Sym := LSym;
             LModel.ExtRefMap.Add(LNode, LExt);
           end
           else if FindInSysInitUnit(LNameLower, LUid, LSym) then
           begin
+            FixCrossArity(AId, LModel, LNode, LNameLower, LUid, LSym);
             LExt.UnitId := LUid; LExt.Sym := LSym;
             LModel.ExtRefMap.Add(LNode, LExt);
           end

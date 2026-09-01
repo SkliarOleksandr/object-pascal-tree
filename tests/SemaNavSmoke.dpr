@@ -176,14 +176,22 @@ const
     '    constructor Create;'#10 +              // 8
     '    procedure Free;'#10 +                  // 9  Free col 15
     '  end;'#10 +                              // 10
-    'implementation'#10 +                      // 11
-    'constructor TObject.Create;'#10 +          // 12
-    'begin'#10 +                               // 13
-    'end;'#10 +                                // 14
-    'procedure TObject.Free;'#10 +              // 15
-    'begin'#10 +                               // 16
-    'end;'#10 +                                // 17
-    'end.'#10;                                 // 18
+    // Two arities of ONE name, both declared ONLY here - the shape System.pas
+    // has for IEnumerator / IEnumerator<T>. Nothing NavB names in `uses`
+    // declares it, so the cross-unit lookup reaches this unit through the
+    // IMPLICIT-System fallback, which used to skip the arity correction.
+    '  IEnum = interface'#10 +                 // 11  IEnum col 3
+    '  end;'#10 +                              // 12
+    '  IEnum<T> = interface'#10 +              // 13  IEnum col 3
+    '  end;'#10 +                              // 14
+    'implementation'#10 +                      // 15
+    'constructor TObject.Create;'#10 +          // 16
+    'begin'#10 +                               // 17
+    'end;'#10 +                                // 18
+    'procedure TObject.Free;'#10 +              // 19
+    'begin'#10 +                               // 20
+    'end;'#10 +                                // 21
+    'end.'#10;                                 // 22
 
   // A DOTTED (namespaced) unit name, to exercise go-to-declaration on a
   // multi-segment `uses` reference (any segment clicked -> the SAME unit).
@@ -470,7 +478,15 @@ const
     '  BA := nil;'#10 +                        // 26
     '  TArray.Sort;'#10 +                      // 27  TArray col 3
     'end;'#10 +                                // 28
-    'end.'#10;                                 // 29
+    // Both arities of the SAME implicit-System name in ONE heritage list -
+    // the System.IOUtils shape (`class(TInterfacedObject, IEnumerator,
+    // IEnumerator<string>)`), where both references landed on the arity-0
+    // declaration.
+    'type'#10 +                                // 29
+    '  TE = class(TObject, IEnum, IEnum<Integer>)'#10 + // 30  IEnum col 23,
+                                                //     IEnum<> col 30
+    '  end;'#10 +                              // 31
+    'end.'#10;                                 // 32
 
 var
   GProj: TPasSemaProject;
@@ -659,6 +675,15 @@ begin
         24, 7, 'TArray', 'NavC.pas', 10, 3);
       CheckNav('arity 0 written, static-call qualifier',
         27, 3, 'TArray', 'NavC.pas', 10, 3);
+      // BUG REGRESSION (reported on System.IOUtils' TEnumerator, whose
+      // heritage list names IEnumerator AND IEnumerator<string>): the name is
+      // declared ONLY in the implicit System unit, so the FindInSystemUnit
+      // fallback answered - and that branch never ran FixCrossArity, so both
+      // references landed on the arity-0 declaration.
+      CheckNav('implicit System, arity 0 in a heritage list',
+        30, 23, 'IEnum', 'System.pas', 11, 3);
+      CheckNav('implicit System, arity 1 in the SAME heritage list',
+        30, 30, 'IEnum', 'System.pas', 13, 3);
       // MEMBER access through a builtin: O.Free - the synthetic TObject
       // symbol has no MemberScope; FindMemberX must redirect to the real
       // TObject class body (System.pas) to resolve `.Free` at all.
