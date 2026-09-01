@@ -66,7 +66,7 @@ type
     // files per includer only duplicated identical strings and arrays.
     // Guarded by FIncludeLock: HandleInclude runs on the parse workers.
     // TPasTokenStream is a record of refcounted string/arrays, so handing a
-    // copy out under the lock is two refcount bumps, not a data copy.
+    // copy out under the lock is a handful of refcount bumps, not a data copy.
     FIncludeStreams: TDictionary<string, TPasTokenStream>;
     FIncludeLock: TObject;
     // Files whose bytes did not decode under their DECLARED encoding and had
@@ -115,12 +115,13 @@ type
       set for it. An async host compares this against the version it holds
       NOW to recognize a result that was computed from older text. }
     function BufferVersion(const APath: string): Integer;
-    { Reads every file of APaths into the in-memory repository CONCURRENTLY,
-      with an I/O-depth pool (32 workers) rather than the per-core parse
-      pool: a COLD read's cost is dominated by per-file latency (antivirus
-      scan-on-first-touch, MFT lookups), not throughput, so it pays to keep
-      many requests in flight while the CPU-bound parse workers stay
-      per-core. Call before a parse batch; LoadText then serves from memory.
+    { Reads every file of APaths into the in-memory repository CONCURRENTLY.
+      A COLD read's cost is dominated by per-file latency (antivirus
+      scan-on-first-touch, MFT lookups) rather than throughput, so the reads
+      are farmed out rather than serialized - on the DEFAULT pool, deliberately
+      (the private 32-worker I/O pool this once described is gone; see the
+      implementation). Call before a parse batch; LoadText then serves from
+      memory.
       Failed reads are skipped silently - LoadText's own error path reports
       them, as before. }
     procedure Prefetch(const APaths: TArray<string>);
@@ -239,9 +240,18 @@ begin
   if FDirIndexes.TryGetValue(LKey, Result) then
     Exit;
   Result := TDictionary<string, string>.Create;
-  if (ADir <> '') and TDirectory.Exists(ADir) then
-    for LFile in TDirectory.GetFiles(ADir, '*.pas') do
-      Result.TryAdd(LowerCase(TPath.GetFileName(LFile)), LFile);
+  // The enumeration can RAISE after Exists says yes (an access-denied
+  // directory is the ordinary case), and the fresh dictionary is not owned by
+  // anything until the Add below - so it has to be registered whatever
+  // happens: an empty index for an unreadable directory is the right answer
+  // anyway, and a leak per such directory was the alternative.
+  try
+    if (ADir <> '') and TDirectory.Exists(ADir) then
+      for LFile in TDirectory.GetFiles(ADir, '*.pas') do
+        Result.TryAdd(LowerCase(TPath.GetFileName(LFile)), LFile);
+  except
+    Result.Clear;
+  end;
   FDirIndexes.Add(LKey, Result);
 end;
 
@@ -447,7 +457,13 @@ begin
     for LDir in FSearchPaths do
       if TryFile(LDir, AInPath, AResolved) then
         Exit(True);
-    if AFromFile <> '' then
+    // Restore the ANCHOR directory the loop above just used LDir for. The
+    // reset used to be gated on AFromFile <> '', which left an empty-anchor
+    // caller with the LAST SEARCH PATH as its "referring directory" for
+    // steps 3-5 below.
+    if AFromFile = '' then
+      LDir := ''
+    else
       LDir := TPath.GetDirectoryName(AFromFile);
   end;
 
@@ -648,7 +664,10 @@ end;
 procedure TPasSourceManager.NoteRecovered(const APath, AHow: string);
 begin
   if FRecoveredLock = nil then
-    Exit;   // never nil after Create; the guard keeps a torn-down manager safe
+    // Never nil after Create. The guard covers a ZEROED instance only - a
+    // DESTROYED one still holds the freed pointer (Destroy does not nil it),
+    // so this is not, and cannot be, a use-after-free net.
+    Exit;
   TMonitor.Enter(FRecoveredLock);
   try
     if FRecovered = nil then

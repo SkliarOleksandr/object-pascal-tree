@@ -508,7 +508,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..119] of TPasCaseRow = (
+  DECL_CASES: array[0..122] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1368,6 +1368,22 @@ const
        'Ident''TList'') Ident''Integer''))))'; ExpectDiags: 0),
 
     // ---- Code audit 2026-08-31, section 2.9 ----
+    // 14.1.1: a FORWARD interface is not a dispinterface. Both used to write
+    // Aux = 1, so the two were indistinguishable in the tree.
+    (Section: '14.1.1'; Name: 'a forward interface is marked forward, not disp';
+     Source: 'type IFoo = interface;';
+     Expected: 'TypeSec(TypeDecl(Ident''IFoo'' InterfaceType#forward))';
+     ExpectDiags: 0),
+    (Section: '14.1.1'; Name: 'and a dispinterface still reads as one';
+     Source: 'type IFoo = dispinterface end;';
+     Expected: 'TypeSec(TypeDecl(Ident''IFoo'' InterfaceType#disp))';
+     ExpectDiags: 0),
+    // 14.1.1: a GUID clause written as a NAMED CONSTANT is still the GUID
+    // clause, not an attribute group.
+    (Section: '14.1.1'; Name: 'a named-constant GUID clause';
+     Source: 'type IFoo = interface [SID_IFoo] end;';
+     Expected: 'TypeSec(TypeDecl(Ident''IFoo'' InterfaceType(' +
+       'Guid(Ident''SID_IFoo''))))'; ExpectDiags: 0),
     // 2.2.5: an IDENT-headed subrange bound may carry arithmetic. Only
     // selector continuations were allowed after an identifier head, so both
     // of these - dcc64-valid - were hard parse errors.

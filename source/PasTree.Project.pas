@@ -145,17 +145,23 @@ end;
 function TryReadDProj(const ADProjPath: string; out APlatform: TPasPlatform;
   out AMainSource: string): Boolean;
 
-  function TagContent(const AText, ATag: string): string;
+  { Matches <AOpen...>content</ACloseName>; first occurrence wins. The two are
+    separate because the OPENING search may carry an attribute (`<Platform
+    Condition`) while the CLOSING tag is always the bare element name -
+    searching for `</Platform Condition>` matched nothing ever, so that whole
+    branch was dead and the fallback below decided the platform by first
+    occurrence, silently calling a Win64 project Win32 whenever some other
+    `<Platform` element came first. }
+  function TagContent(const AText, AOpen, ACloseName: string): string;
   var
     LOpen, LFrom, LTo: Integer;
   begin
-    // Matches <Tag ...>content</Tag>; first occurrence wins.
     Result := '';
-    LOpen := Pos('<' + ATag, AText);
+    LOpen := Pos('<' + AOpen, AText);
     if LOpen = 0 then
       Exit;
     LFrom := Pos('>', AText, LOpen);
-    LTo := Pos('</' + ATag + '>', AText, LOpen);
+    LTo := Pos('</' + ACloseName + '>', AText, LOpen);
     if (LFrom = 0) or (LTo = 0) or (LTo < LFrom) then
       Exit;
     Result := Trim(Copy(AText, LFrom + 1, LTo - LFrom - 1));
@@ -169,11 +175,11 @@ begin
   if not TFile.Exists(ADProjPath) then
     Exit(False);
   LText := TFile.ReadAllText(ADProjPath);
-  AMainSource := TagContent(LText, 'MainSource');
+  AMainSource := TagContent(LText, 'MainSource', 'MainSource');
   // Default platform: <Platform Condition="'$(Platform)'==''">Win64</Platform>
-  LValue := TagContent(LText, 'Platform Condition');
+  LValue := TagContent(LText, 'Platform Condition', 'Platform');
   if LValue = '' then
-    LValue := TagContent(LText, 'Platform');
+    LValue := TagContent(LText, 'Platform', 'Platform');
   Result := (LValue <> '') and TryParsePlatformName(LValue, APlatform);
 end;
 

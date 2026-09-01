@@ -175,10 +175,6 @@ uses
   System.SysUtils,
   PasTree.Lexer;
 
-const
-  STMT_TERMINATORS: array[0..4] of TPasTokenKind =
-    (tkEnd, tkUntil, tkFinally, tkExcept, tkEndOfFile);
-
 { TPasParser - cursor ------------------------------------------------------- }
 
 function TPasParser.CurKind: TPasTokenKind;
@@ -1745,6 +1741,10 @@ begin
     LKind := nkClassType;
   end;
   Result := FB.AddNode(LKind, NIL_NODE, FPos);
+  // Aux on an interface is a BIT SET (1 = dispinterface, 2 = forward), so it
+  // starts at a real 0 rather than the arena's NIL_NODE default.
+  if LKind = nkInterfaceType then
+    FB.SetAux(Result, 0);
   if AHeadKind = tkDispinterface then
     FB.SetAux(Result, 1);
   Next; // head keyword
@@ -1766,7 +1766,13 @@ begin
   // Forward declaration: class; / interface;
   if (CurKind = tkSemicolon) and not LIsHelper then
   begin
-    FB.SetAux(Result, 1);
+    // On nkInterfaceType Aux 1 already MEANS dispinterface, so the forward
+    // mark is a separate bit there - written as 1 it made every forward
+    // `IFoo = interface;` indistinguishable from a dispinterface.
+    if LKind = nkInterfaceType then
+      FB.SetAux(Result, FB.AuxOf(Result) or 2)
+    else
+      FB.SetAux(Result, 1);
     FB.SetLast(Result, FPos - 1);
     Exit;
   end;
@@ -1798,14 +1804,25 @@ begin
     FB.SetLast(Result, FPos - 1);
     Exit;
   end;
-  // Interface GUID (14.1.1).
+  // Interface GUID (14.1.1). The clause may also be a NAMED CONSTANT -
+  // `interface [SID_IFoo]`, dcc64-valid - which used to parse as an attribute
+  // group, losing the GUID and inventing an attribute. An identifier followed
+  // by `]` is that form; anything else stays an attribute group.
   if (AHeadKind in [tkInterface, tkDispinterface]) and
-     (CurKind = tkLBracket) and (PeekKind(1) = tkStringLiteral) then
+     (CurKind = tkLBracket) and
+     ((PeekKind(1) = tkStringLiteral) or
+      ((PeekKind(1) = tkIdentifier) and (PeekKind(2) = tkRBracket))) then
   begin
-    FB.Adopt(Result, FB.AddNode(nkGuid, NIL_NODE, FPos));
-    Next;
-    Next;
+    var LGuid := FB.AddNode(nkGuid, NIL_NODE, FPos);
+    FB.Adopt(Result, LGuid);
+    Next;   // '['
+    if CurKind = tkIdentifier then
+      FB.Adopt(LGuid, FB.AddNode(nkIdent, NIL_NODE, FPos));
+    Next;   // the literal or the constant name
     Expect(tkRBracket, '"]"');
+    // The SPAN covers the whole clause, brackets included - SetLast was
+    // simply never called, so the node ended at its own '['.
+    FB.SetLast(LGuid, FPos - 1);
   end;
   ParseMemberList(Result);
   Expect(tkEnd, '"end"');

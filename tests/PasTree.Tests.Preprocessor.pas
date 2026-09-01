@@ -327,6 +327,23 @@ begin
     SwitchCase('1.3.1', 'two switches on one directive line, second',
       '{$R+,O-}', 'O', False, APP),
     IfOptBranchesOnSwitchCase,
+    // Code audit 2026-08-31, section 3.2. The NUMERIC and long spellings of
+    // Z/A moved the size only, so $IFOPT read a stale boolean; and a switch
+    // group HEADED by I ({$I-,R+}) applied the I toggle and silently dropped
+    // everything after it.
+    SwitchCase('1.3.1', '{$Z4} sets the Z option $IFOPT reads', '{$Z4}', 'Z',
+      True, APP),
+    SwitchCase('1.3.1', '{$MINENUMSIZE 4} does the same', '{$MINENUMSIZE 4}',
+      'Z', True, APP),
+    SwitchCase('1.3.1', '{$Z1} clears it again', '{$Z4}{$Z1}', 'Z', False,
+      APP),
+    SwitchCase('1.3.1', 'A is ON by default - the default IS {$A8}', '', 'A',
+      True, APP),
+    SwitchCase('1.3.1', '{$A1} clears it', '{$A1}', 'A', False, APP),
+    SwitchCase('1.3.1', 'a switch group headed by I applies the I half',
+      '{$I-,R+}', 'I', False, APP),
+    SwitchCase('1.3.1', '...and the REST of the group too',
+      '{$I-,R+}', 'R', True, APP),
 
     // ---- 1.3.4: $PUSHOPT/$POPOPT round-trips BOTH halves of TPasOptState
     // -- the single-letter switches and SCOPEDENUMS, tracked separately

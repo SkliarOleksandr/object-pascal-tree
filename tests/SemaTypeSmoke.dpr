@@ -120,6 +120,34 @@ begin
   Ok('member R.X typed Integer', SameText(MemberType('X'), 'Integer'));
   GModel.Free;
 
+  // ---- A subrange takes its category from its BOUNDS (code audit
+  // 2026-08-31, finding 3.6). Every nkSubrange used to be tcInteger, which
+  // made a Char subrange assignment a false E2010 and a Boolean subrange in
+  // an `if` a false E2012 - in a typer whose whole design is to report only
+  // definite mismatches. ----
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10 +
+    '  TLetter = ''a''..''z'';'#10 +
+    '  TFlag = False..True;'#10 +
+    '  TSmall = 0..9;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var'#10'  L: TLetter;'#10'  C: Char;'#10 +
+    '  F: TFlag;'#10'  S: TSmall;'#10'  I: Integer;'#10 +
+    'begin'#10 +
+    '  C := L;'#10 +
+    '  L := C;'#10 +
+    '  if F then'#10 +
+    '    I := S;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Ok('2.2.5: a Char subrange is not an Integer - no false E2010',
+    DiagCount('E2010') = 0);
+  Ok('2.2.5: a Boolean subrange is a legal condition - no false E2012',
+    DiagCount('E2012') = 0);
+  GModel.Free;
+
   if GCounter.Finish('SemaTypeSmoke') then
     ExitCode := 1;
   GPP.Free;

@@ -423,7 +423,17 @@ begin
   // intrinsics, same as Integer/Cardinal on this same line -- confirmed by
   // removing them experimentally: 2091 new false E2003 on rtlflat, 2319 on
   // bigflat, 100% attributable to these two names. Stays seeded.
-  T('NativeInt', tcInteger, 4); T('NativeUInt', tcInteger, 4);
+  // The RANK is the one platform-dependent fact here, and the template is
+  // already built per bitness - these two are 32-bit wide on a 32-bit target
+  // (2.2.1), so ranking them 64-bit everywhere was simply wrong.
+  if PlatformInfo(APlatform).Is64Bit then
+  begin
+    T('NativeInt', tcInteger, 4); T('NativeUInt', tcInteger, 4);
+  end
+  else
+  begin
+    T('NativeInt', tcInteger, 3); T('NativeUInt', tcInteger, 3);
+  end;
   // Floats.
   T('Single', tcFloat, 1); T('Double', tcFloat, 2); T('Extended', tcFloat, 3);
   T('Real', tcFloat, 2); T('Currency', tcFloat, 2); T('Comp', tcFloat, 2);

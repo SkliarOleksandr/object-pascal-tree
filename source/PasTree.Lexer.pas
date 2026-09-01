@@ -231,6 +231,16 @@ begin
         LexPunctuation;
       end;
   end;
+  // The file ended while still inside an `asm` block. Reported HERE and not
+  // in LexAsmToken, where the test used to sit: that one needed FPos = LStart
+  // with FPos >= FLen at once, and the chunk loop always consumes at least
+  // one character - so the diagnostic could never fire, and a truncated asm
+  // block ended the file silently.
+  if FInAsm then
+  begin
+    FInAsm := False;
+    Diag(dcUnterminatedAsm, FPos, 0);
+  end;
   // Zero-length EOF sentinel.
   Emit(tkEndOfFile, FPos);
 end;
@@ -736,12 +746,8 @@ begin
     Inc(FPos);
   end;
   if FPos > LStart then
-    Emit(tkAsmChunk, LStart)
-  else if FPos >= FLen then
-  begin
-    FInAsm := False;
-    Diag(dcUnterminatedAsm, LStart, 0);
-  end;
+    Emit(tkAsmChunk, LStart);
+  // EOF inside the block is Run's to report - see there.
 end;
 
 procedure TPasLexer.LexPunctuation;

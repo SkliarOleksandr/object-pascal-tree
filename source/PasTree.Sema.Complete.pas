@@ -232,6 +232,8 @@ type
     // strict-private access and a nested method's reach into the OUTER
     // class's inherited members both key off this.
     FCaretStructs: TArray<Integer>;
+    // Overlay-space ancestors of the caret structs - see OverlayMemberVisible.
+    FOverlayAncestry: TArray<Integer>;
     FAncestryBuilt: Boolean;
     // The last-good model's sckImplementation scope (lazy; -2 = not yet
     // looked up, NIL_SCOPE = the model has none) - OwnModelTypeX resolves
@@ -292,6 +294,7 @@ type
     procedure AddKeywords(const AWords: array of string);
     procedure EnsureAncestry(ACaretScope: Integer);
     function MemberVisible(AMid, ASym: Integer): Boolean;
+    function OverlayMemberVisible(ASym: Integer): Boolean;
     function ClassSideMember(AModel: TPasSemaModel; ASym: Integer): Boolean;
     function RoutineNodeOf(AModel: TPasSemaModel; ASym: Integer): Integer;
     procedure CollectMembers(const ABase: TPasComplTypeRef);
@@ -465,7 +468,7 @@ begin
   begin
     LLineEnd := LTS.LineStarts[ALine];
     while (LLineEnd > LTS.LineStarts[ALine - 1]) and
-          (LTS.Source[LLineEnd] in [#10, #13]) do
+          CharInSet(LTS.Source[LLineEnd], [#10, #13]) do
       Dec(LLineEnd);
   end
   else
@@ -1728,6 +1731,7 @@ begin
   FAncestryBuilt := True;
   FAncestry := nil;
   FCaretStructs := nil;
+  FOverlayAncestry := nil;
   LOv := EnclosingStructSym(ACaretScope);
   if LOv = NIL_SYM then
     Exit;
@@ -1769,6 +1773,11 @@ begin
       if LRef.OvSym <> NIL_SYM then
       begin
         LOv := LRef.OvSym;
+        // The OVERLAY half of the same chain, kept for the overlay-side
+        // visibility rule (see OverlayMemberVisible): strict protected is
+        // legal from a descendant, and in the buffer's own space FAncestry's
+        // project ids cannot express that.
+        FOverlayAncestry := FOverlayAncestry + [LOv];
         Continue;
       end;
       LX := LRef.X;
@@ -1857,23 +1866,67 @@ begin
   end;
 end;
 
+{ The visibility rule for an OVERLAY-declared member (11.2.1), the half
+  MemberVisible cannot answer: overlay symbol indices are not project indices,
+  so that function's model lookup does not apply here.
+
+  Everything in the overlay is the edited unit's own, so `private` and plain
+  `protected` are visible by the friend rule. The STRICT forms are not, and
+  used to be offered anyway - a strict private member of a same-unit class was
+  listed outside its declaring class, which is precisely what strict means. }
+function TPasCompletion.OverlayMemberVisible(ASym: Integer): Boolean;
+var
+  LDeclStruct, LIdx: Integer;
+begin
+  if not (FModel.Symbols[ASym].Visibility in
+     [svStrictPrivate, svStrictProtected]) then
+    Exit(True);
+  Result := False;
+  if FModel.Symbols[ASym].Scope = NIL_SCOPE then
+    Exit(True);   // not a struct member after all
+  LDeclStruct := FModel.Scopes[FModel.Symbols[ASym].Scope].StructSym;
+  if LDeclStruct = NIL_SYM then
+    Exit(True);
+  // The caret's own class, or one it is nested in.
+  for LIdx := 0 to High(FCaretStructs) do
+    if FCaretStructs[LIdx] = LDeclStruct then
+      Exit(True);
+  // strict protected additionally reaches DESCENDANTS - the caret's ancestry,
+  // recorded in overlay space by EnsureAncestry.
+  if FModel.Symbols[ASym].Visibility = svStrictProtected then
+    for LIdx := 0 to High(FOverlayAncestry) do
+      if FOverlayAncestry[LIdx] = LDeclStruct then
+        Exit(True);
+end;
+
 procedure TPasCompletion.CollectProjectMembers(const AX: TSemaXType;
   ABucket: TPasComplBucket);
+var
+  LSaveOwn: Boolean;
 begin
   if (FProj = nil) or not XValid(AX) then
     Exit;
-  if AX.UnitId = FProjMid then
-    FBaseOwnUnit := True;
-  FProj.EnumMembersX(FProjMid, AX,
-    procedure(AMid, ASym, ACtx: Integer)
-    begin
-      if FFieldsOnly and
-         (ProjModel(AMid, 'FieldsOnly').Symbols[ASym].Kind <> skField) then
-        Exit;
-      if MemberVisible(AMid, ASym) and
-         (not FClassSide or ClassSideMember(ProjModel(AMid, 'CollectProjMembers'), ASym)) then
-        AddSym(AMid, ASym, ACtx, ABucket);
-    end);
+  // The flag is PER BASE, not per request. Left set, the first own-unit base
+  // walk legalized plain `protected` on every unrelated foreign base walked
+  // after it in the same request.
+  LSaveOwn := FBaseOwnUnit;
+  try
+    if AX.UnitId = FProjMid then
+      FBaseOwnUnit := True;
+    FProj.EnumMembersX(FProjMid, AX,
+      procedure(AMid, ASym, ACtx: Integer)
+      begin
+        if FFieldsOnly and
+           (ProjModel(AMid, 'FieldsOnly').Symbols[ASym].Kind <> skField) then
+          Exit;
+        if MemberVisible(AMid, ASym) and
+           (not FClassSide or
+            ClassSideMember(ProjModel(AMid, 'CollectProjMembers'), ASym)) then
+          AddSym(AMid, ASym, ACtx, ABucket);
+      end);
+  finally
+    FBaseOwnUnit := LSaveOwn;
+  end;
 end;
 
 // Members of an OVERLAY-declared type: its own scope (deep - nested enums
@@ -1886,10 +1939,13 @@ procedure TPasCompletion.CollectOverlayChain(AOvSym: Integer;
 var
   LDepth, LScope: Integer;
   LRef: TPasComplTypeRef;
-  LInclude: Boolean;
+  LInclude, LSaveOwn: Boolean;
 begin
   // An overlay-declared base IS a type of this unit - its bridged ancestors'
   // non-strict protected members are reachable (the module rule above).
+  // Saved and restored, like CollectProjectMembers: the flag is per BASE.
+  LSaveOwn := FBaseOwnUnit;
+  try
   FBaseOwnUnit := True;
   LInclude := AIncludeOwn;
   for LDepth := 1 to 64 do
@@ -1922,6 +1978,8 @@ begin
             end;
             if FFieldsOnly and (FModel.Symbols[ASym].Kind <> skField) then
               Exit;
+            if not OverlayMemberVisible(ASym) then
+              Exit;
             if not FClassSide or ClassSideMember(FModel, ASym) then
               AddSym(-1, ASym, NIL_INST, ABucket);
           end);
@@ -1935,6 +1993,9 @@ begin
     end;
     CollectProjectMembers(LRef.X, ABucket);
     Exit;
+  end;
+  finally
+    FBaseOwnUnit := LSaveOwn;
   end;
 end;
 
@@ -2056,6 +2117,7 @@ end;
 procedure TPasCompletion.CollectScope(const AInfo: TPasCaretInfo);
 var
   LScope, LIdx, LTarget, LBody: Integer;
+  LTargets: TArray<Integer>;
   LInterfaceOnly: Boolean;
   LRef: TPasComplTypeRef;
 begin
@@ -2063,7 +2125,15 @@ begin
   // 1. Enclosing UNOPENED with statements (cross-unit targets, ch.05 sec. 5.7):
   // their members shadow everything, so they go first. Opened (intra-unit)
   // withs are ordinary sckWith scopes and come through the chain below.
-  for LIdx := 0 to High(FModel.WithUnopened) do
+  //
+  // INNERMOST FIRST, and within one statement LAST TARGET FIRST - that is the
+  // shadowing order 5.7 gives, and AddItem keeps the FIRST hit for a name. In
+  // source order the OUTER target's member identity survived where the inner
+  // one must shadow it: the inserted text was the same, but the (Mid, Sym)
+  // behind it - and so the detail, doc and kind shown - belonged to the wrong
+  // member. WithUnopened is in source order, so a descending walk is
+  // innermost-first for the nested case.
+  for LIdx := High(FModel.WithUnopened) downto 0 do
   begin
     LBody := FModel.Tree.Nodes[FModel.WithUnopened[LIdx]].FirstChild;
     if LBody = NIL_NODE then
@@ -2072,9 +2142,17 @@ begin
       LBody := FModel.Tree.Nodes[LBody].NextSibling;
     if not IsDescendantNode(AInfo.Node, LBody) then
       Continue;
+    // Targets of THIS statement, gathered so they can be walked backwards.
+    LTargets := nil;
     LTarget := FModel.Tree.Nodes[FModel.WithUnopened[LIdx]].FirstChild;
     while (LTarget <> NIL_NODE) and (LTarget <> LBody) do
     begin
+      LTargets := LTargets + [LTarget];
+      LTarget := FModel.Tree.Nodes[LTarget].NextSibling;
+    end;
+    for var LTi := High(LTargets) downto 0 do
+    begin
+      LTarget := LTargets[LTi];
       // The with pass's own target typer first, when this model IS the
       // project's: it covers shapes the caches do not (an INDEXED target -
       // `with Palette.palPalEntry[I] do` - is typed by nothing else).
@@ -2091,7 +2169,6 @@ begin
         FClassSide := False;
         CollectMembers(LRef);
       end;
-      LTarget := FModel.Tree.Nodes[LTarget].NextSibling;
     end;
   end;
   FClassSide := False;

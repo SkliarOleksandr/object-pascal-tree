@@ -229,6 +229,20 @@ begin
     Inc(FPos, 2);
     SkipWs;
   end;
+  // Comments before the root element are well-formed XML. Embarcadero never
+  // writes one, but a hand-edited .dproj can, and mis-parsing the document
+  // silently dropped Load back to the lightweight scan.
+  while (Cur = '<') and (FPos + 3 <= FLen) and (FText[FPos + 1] = '!') and
+        (FText[FPos + 2] = '-') and (FText[FPos + 3] = '-') do
+  begin
+    Inc(FPos, 4);
+    while (FPos + 2 <= FLen) and
+          not ((FText[FPos] = '-') and (FText[FPos + 1] = '-') and
+               (FText[FPos + 2] = '>')) do
+      Inc(FPos);
+    Inc(FPos, 3);
+    SkipWs;
+  end;
   if Cur <> '<' then
     Exit(nil);
   Result := ParseElement;
@@ -822,8 +836,10 @@ begin
           for LName in LVal.Split([';']) do
           begin
             var LOne := Trim(LName);
-            // The accumulated chain ends in a literal '$(DCC_Namespace)'
-            // self-reference when the env var is unset - skip macro leftovers.
+            // Any UNEXPANDED macro is skipped. (The '$(DCC_Namespace)'
+            // self-reference this once described cannot actually reach here:
+            // ExpandMacros already substitutes '' for an undefined property
+            // at store time. The guard is kept as a cheap invariant.)
             if (LOne <> '') and (Pos('$(', LOne) = 0) and
                not LNS.Contains(LOne) then
               LNS.Add(LOne);

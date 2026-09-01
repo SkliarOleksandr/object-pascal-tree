@@ -74,15 +74,24 @@ var
       nkUnaryOp, nkBinaryOp:
         begin
           LSB.Append(',"text":');
+          // Bounds-checked like the position emission above: on a demoted
+          // model Visible is nil and this read was an AV.
           if LKind in [nkUnaryOp, nkBinaryOp] then
-            JsonEscape(LowerCase(
-              ATree.Source.VisibleText(ATree.Nodes[AIndex].Aux)), LSB)
+            if (ATree.Nodes[AIndex].Aux >= 0) and
+               (ATree.Nodes[AIndex].Aux <= High(ATree.Source.Visible)) then
+              JsonEscape(LowerCase(
+                ATree.Source.VisibleText(ATree.Nodes[AIndex].Aux)), LSB)
+            else
+              LSB.Append('""')
           else
             JsonEscape(ATree.NodeText(AIndex), LSB);
-          if nfNegated in ATree.Nodes[AIndex].Flags then
-            LSB.Append(',"negated":true');
         end;
     end;
+    // ANY node's negated mark, not just the text-bearing ones. On nkVisibility
+    // it is what separates `strict private` from `private` - the S-expression
+    // dump prints `#strict` for it, while JSON made the two byte-identical.
+    if nfNegated in ATree.Nodes[AIndex].Flags then
+      LSB.Append(',"negated":true');
     if ATree.Nodes[AIndex].Aux <> NIL_NODE then
       if not (LKind in [nkUnaryOp, nkBinaryOp]) then
         LSB.AppendFormat(',"aux":%d', [ATree.Nodes[AIndex].Aux]);

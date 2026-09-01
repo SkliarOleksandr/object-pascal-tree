@@ -2383,6 +2383,27 @@ begin
   Ok('9.4.2: no E2003 in a parameterless Initialize body',
     DiagCount('E2003') = 0);
 
+  // ---- Attributes on a VAR / CONST / PARAM are Collected too (code audit
+  // 2026-08-31, finding 3.6). The group was skipped rather than visited, so
+  // the ident inside kept NIL_SCOPE and the suffix fallback - which needs a
+  // scope - could not run: an attribute on anything but a TYPE was
+  // unresolvable however its class was named. ----
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10'  TableAttribute = class end;'#10 +
+    'var'#10'  [Table] GV: Integer;'#10 +
+    'const'#10'  [Table] KV = 1;'#10 +
+    'procedure P([Table] A: Integer);'#10 +
+    'implementation'#10 +
+    'procedure P([Table] A: Integer); begin end;'#10 +
+    'end.'#10);
+  Ok('19.3.1: an attribute on a VAR resolves', RefResolvesTo('Table',
+    'TableAttribute'));
+  Ok('19.3.1: ...and nothing is reported over any of the three',
+    DiagCount('E2003') = 0);
+  Ok('19.3.1: every attribute reference resolves, not just the first',
+    AllRefsResolved('Table'));
+
   // ---- An attribute group MID-LIST (code audit 2026-08-31, finding 2.6.2).
   // `const [Ref] CLSID, [Ref] IID: TGUID` is the shape the parser emits for a
   // real RTL unit: the name walk stopped at the second group, so IID was

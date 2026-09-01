@@ -5,7 +5,10 @@ unit PasTree.Sema.Diagnostics;
 
   Codes and message wording mirror Delphi's compiler (and the DelphiAST
   reference, AST.Delphi.Errors.pas) so downstream tooling can match dcc output.
-  Phase 1 only emits E2004; the rest are declared for the phases that follow.
+  Most of the catalog is emitted today - E2003, E2004, E2081, F1027, E2010,
+  E2515, E2361, E2001, E2012, E2015, E2028, E2032, E2034, E2035, E2145,
+  E2193, plus the preprocessor's own PPINT/PPENC. The rest are declared for
+  the phases that follow.
 }
 
 interface
@@ -42,7 +45,9 @@ const
   SE2032_ForCounterNotOrdinal =
     'E2032 For loop control variable must have ordinal type';
   SE2005_NotATypeIdentifier   = 'E2005 ''%s'' is not a type identifier';
-  // E2010 takes two type names (dst, src); E2015 takes the operator lexeme.
+  // E2010 takes two type names (dst, src). E2015 takes NOTHING - dcc's own
+  // wording names no operator, so the template has no %s and every call site
+  // passes it verbatim.
   SE2010_IncompatibleTypes    = 'E2010 Incompatible types: ''%s'' and ''%s''';
   SE2015_OperatorNotApplicable =
     'E2015 Operator not applicable to this operand type';

@@ -36,6 +36,9 @@ const
   amaVolatile = 2;
   amaWeak = 3;
   amaUnsafe = 4;
+  // [Align(n)] - dcc-recognized field alignment (the RTL uses it in
+  // System.Classes and System.Threading); no class declares it either.
+  amaAlign = 5;
 
 type
   TPasNodeKind = (
@@ -127,7 +130,8 @@ type
                       // Aux: 1 = of object, 2 = reference to
     nkClassType,      // 11.1.1; Aux: 1 = forward declaration
     nkRecordType,     // 9.x
-    nkInterfaceType,  // 14.1.1; dispinterface flagged via Aux = 1
+    nkInterfaceType,  // 14.1.1; Aux is a BIT SET: 1 = dispinterface,
+                      // 2 = forward declaration (both can be set)
     nkObjectType,     // 11.5 legacy
     nkHelperType,     // 15.3: class/record helper for T; Aux 1 = record
     nkGuid,           // 14.1.1: ['{...}']
@@ -250,6 +254,7 @@ type
       Integer;
     procedure SetLast(ANode, ALastToken: Integer);
     procedure SetAux(ANode, AAux: Integer);
+    function AuxOf(ANode: Integer): Integer;
     procedure SetKind(ANode: Integer; AKind: TPasNodeKind);
     procedure AddFlag(ANode: Integer; AFlag: TPasNodeFlag);
     { Re-parents ANode under ANewParent (used when a parsed expression
@@ -284,6 +289,8 @@ begin
     Result := amaWeak
   else if (ANameLower = 'unsafe') or (ANameLower = 'unsafeattribute') then
     Result := amaUnsafe
+  else if (ANameLower = 'align') or (ANameLower = 'alignattribute') then
+    Result := amaAlign
   else
     Result := amaNone;
 end;
@@ -540,7 +547,11 @@ begin
     nkIdent, nkIntLit, nkRealLit, nkStrLit, nkCaretChar:
       Result := Result + '''' + NodeText(AIndex) + '''';
     nkUnaryOp, nkBinaryOp:
-      if (Nodes[AIndex].Aux >= 0) then
+      // The upper bound matters as much as the lower one: on a DEMOTED model
+      // Visible is nil, so any Aux at all indexes a nil array (the position
+      // emission a few lines up already guards both ends).
+      if (Nodes[AIndex].Aux >= 0) and
+         (Nodes[AIndex].Aux <= High(Source.Visible)) then
       begin
         LText := Source.VisibleText(Nodes[AIndex].Aux);
         Result := Result + '''' + LowerCase(LText) + '''';
@@ -593,8 +604,12 @@ begin
       if Nodes[AIndex].Aux = 1 then
         Result := Result + '#distinct';
     nkInterfaceType:
-      if Nodes[AIndex].Aux = 1 then
-        Result := Result + '#disp';
+      begin
+        if Nodes[AIndex].Aux and 1 <> 0 then
+          Result := Result + '#disp';
+        if Nodes[AIndex].Aux and 2 <> 0 then
+          Result := Result + '#forward';
+      end;
     nkClassType:
       if Nodes[AIndex].Aux = 1 then
         Result := Result + '#forward';
@@ -708,6 +723,13 @@ end;
 procedure TPasTreeBuilder.SetAux(ANode, AAux: Integer);
 begin
   FNodes[ANode].Aux := AAux;
+end;
+
+// The Aux value already set on ANode - for the kinds whose Aux is a BIT SET
+// rather than one number (nkInterfaceType: 1 = dispinterface, 2 = forward).
+function TPasTreeBuilder.AuxOf(ANode: Integer): Integer;
+begin
+  Result := FNodes[ANode].Aux;
 end;
 
 procedure TPasTreeBuilder.SetKind(ANode: Integer; AKind: TPasNodeKind);

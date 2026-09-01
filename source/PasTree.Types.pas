@@ -22,7 +22,7 @@ type
     tkEndOfFile,
 
     // ---- trivia -----------------------------------------------------------
-    tkWhitespace,        // runs of space/tab/CR/LF/FF/^Z
+    tkWhitespace,        // runs of space/tab/CR/LF/VT/FF/^Z
     tkCommentLine,       // // ...
     tkCommentBrace,      // { ... }
     tkCommentParen,      // (* ... *)

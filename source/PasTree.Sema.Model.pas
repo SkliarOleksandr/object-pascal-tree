@@ -551,11 +551,13 @@ end;
 procedure TPasSemaModel.BindName(AScope, ASym: Integer);
 begin
   Scopes[AScope].EnsureOwnedContainers;
+  // Both fields tested INDEPENDENTLY: keying "the containers exist" on Names
+  // alone meant that if AddToOrder's own defensive branch had ever run first,
+  // this would overwrite a non-nil Symbols list and lose its contents.
   if Scopes[AScope].Names = nil then
-  begin
     Scopes[AScope].Names := TDictionary<string, Integer>.Create;
+  if Scopes[AScope].Symbols = nil then
     Scopes[AScope].Symbols := TList<Integer>.Create;
-  end;
   Scopes[AScope].Names.AddOrSetValue(Symbols[ASym].NameLower, ASym);
   Scopes[AScope].Symbols.Add(ASym);
 end;
@@ -700,6 +702,17 @@ var
   end;
 
 begin
+  // SHADOWING joins first, exactly as FindLocalDeep orders them: this walk
+  // searched a DIFFERENT scope set from the lookup it corrects, so a
+  // right-arity candidate reachable only through a helper's shadowing join
+  // stayed invisible to the arity-corrected relookup.
+  LAdd := Scopes[AScope].Shadowing;
+  for LIdx := High(LAdd) downto 0 do
+  begin
+    Result := FindByArityDeep(LAdd[LIdx], ANameLower, AWantGeneric);
+    if Result <> NIL_SYM then
+      Exit;
+  end;
   LSym := FindLocal(AScope, ANameLower);
   // Same name, same scope: types chain through NextOverload like routines do,
   // so the other arity declared beside this one is found here. Depth-capped for
@@ -804,7 +817,9 @@ var
   LDecl: Integer;
 begin
   Result := False;
-  if (ASym = NIL_SYM) or (ASym > High(Symbols)) then
+  // SymCount, not High(Symbols): the array carries capacity slack, and an
+  // index into the zeroed tail passed this test and read a default record.
+  if (ASym = NIL_SYM) or (ASym >= SymCount) then
     Exit;
   LDecl := Symbols[ASym].DeclNode;
   if (LDecl = NIL_NODE) or (LDecl > High(Tree.Nodes)) then
@@ -851,7 +866,11 @@ begin
     Exit;
   // To the nearest scope-owning ancestor node...
   LScope := NIL_SCOPE;
-  while ANode <> NIL_NODE do
+  // The Parent read needs the SAME backstop the NodeScope read has (see
+  // StructSymAtNode): a node id from another generation can be past this
+  // tree's end, and the guarded lookup above would then be followed by an
+  // unguarded array read.
+  while (ANode <> NIL_NODE) and (ANode <= High(Tree.Nodes)) do
   begin
     if ANode <= High(NodeScope) then
     begin
@@ -1006,7 +1025,10 @@ var
   LCur, LParent, LLast, LIdx: Integer;
 begin
   Result := False;
-  if (Length(WithUnopened) = 0) or (ANode = NIL_NODE) then
+  // Bounds-checked, not just nil-checked - same cross-generation-id class the
+  // other node walks guard against.
+  if (Length(WithUnopened) = 0) or (ANode = NIL_NODE) or
+     (ANode > High(Tree.Nodes)) then
     Exit;
   LCur := ANode;
   LParent := Tree.Nodes[LCur].Parent;

@@ -130,9 +130,6 @@ type
     FDonor: TPasSemaProject;
     FDonorHits: Integer;      // AtomicIncrement - workers count concurrently
     FDonorMisses: Integer;
-    // Why the last IntfPrefixBounds/IntfPrefixSame said no, in detail - the
-    // refusal reason AnalyzeModuleOnly publishes in StageTimings. Diagnostic
-    // only; nothing branches on it.
 {$IFDEF PASTREE_MEMBERSTATS}
     { MEASUREMENT BUILD ONLY (INCREMENTAL-NEXT lead 4) - compiled out without
       the define. Counts every top-level FindMemberX query so the REPEAT RATE
@@ -153,6 +150,9 @@ type
       before a plain rebuild is the better answer - see the ModuleRedoLimit
       property. }
     FModuleRedoLimit: Integer;
+    { Why the last IntfPrefixBounds/IntfPrefixSame said no, in detail - the
+      refusal reason AnalyzeModuleOnly publishes in StageTimings. Diagnostic
+      only; nothing branches on it. }
     FLastBoundaryNote: string;
     FPP: TPasPreprocessor;
     // Reusable preprocessors for the parallel load/declared passes: Process
@@ -227,9 +227,8 @@ type
     FSysInitUnitResolved: Boolean;
     // Guards EnsureSystemUnit AND EnsureSysInitUnit (both mutate the same
     // shared FModels/FByPath via LoadFile, so must exclude each other too,
-    // not just themselves): unlike ResolveUses (always sequential) and
-    // CrossType/BindTypesX (deliberately sequential - see the Phase 3c
-    // comment above), CrossResolve runs ONE WORKER PER CORE by default
+    // not just themselves): unlike ResolveUses and BindTypesX (both always
+    // sequential), CrossResolve runs ONE WORKER PER CORE by default
     // (ForEachIndex) and is the only caller of either Ensure*Unit that can
     // race - several units' CrossResolve can hit an unresolved implicit-
     // System name (e.g. sLineBreak) on different threads at the same
@@ -438,6 +437,7 @@ type
     procedure FixCrossArity(AId: Integer; AModel: TPasSemaModel;
       ANode: Integer; const ANameLower: string; var AUnit, ASym: Integer);
     function IsAttributeTypeRef(AModel: TPasSemaModel; ANode: Integer): Boolean;
+    function IsMagicAttributeRef(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function UsesUnitOf(AId, ASym: Integer): Integer;
     function LocalHead(AModel: TPasSemaModel; ANode: Integer): Integer;
     function QualifiedText(AId, ANode: Integer): string;
@@ -2554,8 +2554,14 @@ begin
         else if ((LNum >= 0) and (LNum2 <= 65535)) or
                 ((LNum >= -32768) and (LNum2 <= 32767)) then
           ABytes := 2
+        // 4 only when the bounds ACTUALLY fit 32 bits. Answering 4 for
+        // anything wider (`0..$1FFFFFFFF` is 8) broke the proof-or-refuse
+        // contract and fed a wrong SizeOf straight into a $IF.
+        else if ((LNum >= 0) and (LNum2 <= 4294967295.0)) or
+                ((LNum >= -2147483648.0) and (LNum2 <= 2147483647.0)) then
+          ABytes := 4
         else
-          ABytes := 4;
+          Exit(False);
         AAlign := Trunc(ABytes);
         Exit(True);
       end;
@@ -2688,8 +2694,12 @@ begin
     LStart := Trunc(LBaseSize);
     // Whether the ANCESTOR already carries a VMT - asked of its own
     // definition, not ours, because that is what decides if we introduce one.
-    if (LM.Tree.Nodes[LChild].Kind = nkIdent) and
-       OracleQualified(AMid, LM.Tree.NodeText(LChild), LRMid, LRSym) then
+    if LM.Tree.Nodes[LChild].Kind <> nkIdent then
+      // A DOTTED or generic ancestor (`Unit.TBase`) cannot be asked this way,
+      // and assuming "no VMT" counted a second VMT slot into the size. This
+      // oracle proves or refuses; it does not guess.
+      Exit(False);
+    if OracleQualified(AMid, LM.Tree.NodeText(LChild), LRMid, LRSym) then
     begin
       LBaseDef := TypeDefNodeOf(LRMid, LRSym);
       LBaseHasVmt := (LBaseDef <> NIL_NODE) and
@@ -3121,34 +3131,6 @@ begin
       ResolveUses(LCand[LIdx]);
 end;
 
-{ ReportGuessedIfs' worker: lifts the preprocessor's conditional flags out of
-  each model's retained preprocess data and into its ordinary diagnostics,
-  where -list/histograms/the demo already know how to show them. Runs right
-  after RunDeclaredPass in each driver, and gated on ACount like every other
-  diagnostic - units pulled in later from search paths stay out, as their
-  E2003s do.
-
-  THE FILTER IS THE POINT. A flag means "the verdict rested on a guess", and
-  most such guesses are provably CORRECT by the time we get here: a
-  `$IF Declared(TlsStart)` in SysInit guards a name that exists on another
-  platform only, and DeclaredQueryFor answers that definitively ("declared
-  nowhere in this closure") - the guard is ordinary platform-conditional
-  code, not a finding. RunDeclaredPass therefore did not even re-run the
-  unit, which is exactly why its first-pass flag is still sitting there. So
-  the flag alone cannot be the report criterion; re-asking is.
-
-  Each flag carries the questions its evaluation could not answer
-  (TPasPPDiagnostic.Unanswered). We ask them again with the FULL project
-  oracle, and report only when something is STILL unanswerable - the genuine
-  exotica: SizeOf of a type whose layout tier 1 refuses, a string-valued
-  constant, Ord(), a dotted name. A `Declared` question is always answerable
-  now, so a Declared-only guard never reports.
-
-  (An earlier version reported every flag and argued that hiding a confirmed
-  guess would also hide a misspelled name meant to exist. That was wrong: a
-  misspelling is indistinguishable from a legitimate platform guard, and the
-  guards outnumber it 31 to 0 on the RTL alone - so the argument bought
-  nothing and cost a flood of normal code reported as findings.) }
 { One PPENC per file that had to be RECOVERED to be read - see
   TPasSourceManager.DecodeText. Every file of the unit is checked, includes as
   well, since a `.inc` is where such a byte is most likely to hide.
@@ -3190,6 +3172,34 @@ begin
   end;
 end;
 
+{ ReportGuessedIfs' worker: lifts the preprocessor's conditional flags out of
+  each model's retained preprocess data and into its ordinary diagnostics,
+  where -list/histograms/the demo already know how to show them. Runs right
+  after RunDeclaredPass in each driver, and gated on ACount like every other
+  diagnostic - units pulled in later from search paths stay out, as their
+  E2003s do.
+
+  THE FILTER IS THE POINT. A flag means "the verdict rested on a guess", and
+  most such guesses are provably CORRECT by the time we get here: a
+  `$IF Declared(TlsStart)` in SysInit guards a name that exists on another
+  platform only, and DeclaredQueryFor answers that definitively ("declared
+  nowhere in this closure") - the guard is ordinary platform-conditional
+  code, not a finding. RunDeclaredPass therefore did not even re-run the
+  unit, which is exactly why its first-pass flag is still sitting there. So
+  the flag alone cannot be the report criterion; re-asking is.
+
+  Each flag carries the questions its evaluation could not answer
+  (TPasPPDiagnostic.Unanswered). We ask them again with the FULL project
+  oracle, and report only when something is STILL unanswerable - the genuine
+  exotica: SizeOf of a type whose layout tier 1 refuses, a string-valued
+  constant, Ord(), a dotted name. A `Declared` question is always answerable
+  now, so a Declared-only guard never reports.
+
+  (An earlier version reported every flag and argued that hiding a confirmed
+  guess would also hide a misspelled name meant to exist. That was wrong: a
+  misspelling is indistinguishable from a legitimate platform guard, and the
+  guards outnumber it 31 to 0 on the RTL alone - so the argument bought
+  nothing and cost a flood of normal code reported as findings.) }
 procedure TPasSemaProject.InjectGuessedIfDiags(ACount: Integer);
 var
   LIdx: Integer;
@@ -4290,6 +4300,16 @@ begin
     (AModel.Tree.Nodes[LParent].FirstChild = ANode);
 end;
 
+// ...and specifically the type ref of a COMPILER-RECOGNIZED one (19.3.3),
+// which resolves to no declaration anywhere and must not be reported as
+// undeclared. The parser tags these at parse time (nkAttribute.Aux).
+function TPasSemaProject.IsMagicAttributeRef(AModel: TPasSemaModel;
+  ANode: Integer): Boolean;
+begin
+  Result := IsAttributeTypeRef(AModel, ANode) and
+    (AModel.Tree.Nodes[AModel.Tree.Nodes[ANode].Parent].Aux <> amaNone);
+end;
+
 // The local symbol a designator head resolved to (reads RefMap only).
 function TPasSemaProject.LocalHead(AModel: TPasSemaModel;
   ANode: Integer): Integer;
@@ -4507,6 +4527,13 @@ var
   LFile, LLine, LCol, LTok, LStruct: Integer;
   LName: string;
 begin
+  // A COMPILER-RECOGNIZED attribute name (19.3.3) resolves to no declaration
+  // anywhere BY DESIGN - dcc matches `[Ref]`, `[Align(8)]`, `[weak]` and
+  // friends by name instead of looking a class up - so "undeclared" is a
+  // false positive. Gated here rather than at the call sites because several
+  // passes reach this verdict; CheckAttributes exempts the same set.
+  if IsMagicAttributeRef(AModel, ANode) then
+    Exit;
   // The enclosing struct's ancestry decides whether this verdict is knowable
   // at all - see UnknownAncestryX. AId is the model's own index, which this
   // procedure is not otherwise given; a caller that cannot supply it (none
@@ -5463,7 +5490,14 @@ begin
     LHead := LM.Tree.Nodes[LNode].FirstChild;
     if LHead = NIL_NODE then
       Continue;
-    LBase := RealGenericBase(ResolveTypeExpr(AId, LHead));
+    // ABare=False: LHead is the head of a `T<...>`, so the GENERIC
+    // declaration is what it names - the unit's own convention (see
+    // ResolveTypeExpr). With the default True it went through
+    // PreferNonGeneric, and a name declared both generic and non-generic
+    // (the documented TObjectList case) redirected to the arity-0
+    // declaration, whose GenericParamIdents is nil - silently skipping every
+    // E2511/E2512/E2515 check for that use.
+    LBase := RealGenericBase(ResolveTypeExpr(AId, LHead, {ABare} False));
     if not XValid(LBase) then
       Continue;
     LIdents := GenericParamIdents(LBase.UnitId, LBase.Sym);
@@ -6827,10 +6861,15 @@ begin
           end;
           if LRefs = nil then
             Exit;
+          // ADepth is PASSED ON, and tested: omitting it reset the budget to
+          // 0 at every hop, so a malformed helper-ancestor cycle recursed to
+          // a stack overflow. HelperMemberHit caps the same graph at 8.
+          if ADepth > 8 then
+            Exit;
           for var LAncIdx := 0 to High(LRefs) - 1 do
             if FindMemberX(AFromMid,
                  ResolveTypeExpr(LCur.UnitId, LRefs[LAncIdx]), ANameLower,
-                 AMemMid, AMemSym, ACtx) then
+                 AMemMid, AMemSym, ACtx, ADepth + 1) then
               Exit(True);
           LNext := ResolveTypeExpr(LCur.UnitId, LRefs[High(LRefs)]);
         end;
@@ -7011,6 +7050,10 @@ begin
             LChild := LM.Tree.Nodes[LChild].NextSibling;
           end;
           if LRefs = nil then
+            Exit;
+          // The depth was incremented but never TESTED - same cycle, same
+          // overflow. See FindMemberX's twin.
+          if ADepth > 8 then
             Exit;
           for var LAncIdx := 0 to High(LRefs) - 1 do
             EnumMembersX(AFromMid,
@@ -7914,7 +7957,12 @@ var
         LQSym := LM.RefMap[LQBase];
         if LQSym <> NIL_SYM then
           LTypeQualified := LM.Symbols[LQSym].Kind in [skType, skBuiltinType]
-        else if LM.ExtRefMap.TryGetValue(LQBase, LQExt) then
+        // ExtOf, not the committed map alone - "the two must be read together
+        // everywhere". A qualifier this same walk resolved into the overlay
+        // was invisible here, so it did not read as a TYPE and instance
+        // methods were re-admitted for the class-vs-instance pairs this test
+        // exists to separate.
+        else if ExtOf(LQBase, LQExt) then
           LTypeQualified := FModels[LQExt.UnitId].Symbols[LQExt.Sym].Kind in
             [skType, skBuiltinType];
       end;
@@ -8281,6 +8329,13 @@ var
               LM.RefMap[LName] := LMemSym
             else
             begin
+              // RefMap must be CLEARED alongside, the way ResolveInheritedHead
+              // does it: this branch is reached with a SEED binding still
+              // sitting there (dropped above only as a local variable), and
+              // every consumer reads RefMap first - so navigation went to the
+              // DeclNode-less seed, and Find References, which reads both maps
+              // as independent evidence, counted the node twice.
+              LM.RefMap[LName] := NIL_SYM;
               LExt.UnitId := LMemMid;
               LExt.Sym := LMemSym;
               LNewExt.AddOrSetValue(LName, LExt);
@@ -8721,7 +8776,13 @@ begin
             FDeclWork[AId][FDeclWorkCount[AId]] := LNode;
             Inc(FDeclWorkCount[AId]);
           end
-          else if LModel.AllUsesResolved then
+          // A COMPILER-RECOGNIZED attribute name (19.3.3) resolves to nothing
+          // by design - dcc matches `[Ref]`, `[Align(8)]`, `[weak]` and
+          // friends by name rather than by looking a class up - so reporting
+          // it undeclared is a false positive. CheckAttributes exempts the
+          // same set for the same reason.
+          else if LModel.AllUsesResolved and
+                  not IsMagicAttributeRef(LModel, LNode) then
             EmitE2003(LModel, LNode, AId);
         end;
     end;
@@ -11948,10 +12009,11 @@ begin
     Stage('with');
     RunCallChecksPass(LN);
     Stage('calls');
-    // Cross typing stays SEQUENTIAL by design: Instantiate mutates the shared
-    // instance table, and CrossType both writes a model's RefMap/ExtRefMap and
-    // reads other models' - parallelizing would need locks on the hot path for
-    // ~5% of the total time (measured on the full RTL).
+    // The BindTypesX loop stays sequential; CrossType itself does NOT - see
+    // RunCrossTypePass, which farms it out and defers the one shared write
+    // through a per-model overlay. (This comment used to claim the whole of
+    // cross typing was sequential "by design", and it was exactly the guard
+    // that should have caught the RepointCallee race.)
     for LIdx := 0 to FModels.Count - 1 do
       BindTypesX(LIdx);
     Stage('bindx');
@@ -12133,6 +12195,11 @@ begin
       Exit;
     end;
     RunDeclaredPass(LN);   // see there; must precede every cross pass
+    // Counted FRESH, like AnalyzeProject does it: the declared pass can load
+    // newly-imported units, and passing the PRE-pass count left exactly those
+    // units without encoding/guessed-IF diagnostics - a staged-vs-whole
+    // divergence, which this driver's contract forbids.
+    LN := FModels.Count;
     InjectEncodingDiags(LN);
     InjectGuessedIfDiags(LN);
     if Cancelled then

@@ -39,6 +39,7 @@ type
     function RankOf(ASym: Integer): Byte;
     function Head(N: Integer): Integer;
     function TypeDefNode(ASym: Integer): Integer;
+    function CatOfSubrangeBound(ALo: Integer): TSemaTypeCat;
     function CatFromNode(ADef: Integer): TSemaTypeCat;
     procedure CategorizeTypes;
     function CatOfTypeNode(ANode: Integer): TSemaTypeCat;
@@ -183,6 +184,38 @@ begin
     Result := Sib(Result);
 end;
 
+{ The category a subrange's LOW BOUND establishes - see CatFromNode. Literals
+  only, deliberately: a bound this cannot read exactly is answered tcUnknown,
+  which every check below treats as "say nothing". }
+function TPasSemaTyper.CatOfSubrangeBound(ALo: Integer): TSemaTypeCat;
+var
+  LTxt: string;
+begin
+  Result := tcUnknown;
+  if ALo = NIL_NODE then
+    Exit;
+  // A signed literal (`-5..5`) is an nkUnaryOp over the literal.
+  if (Kind(ALo) = nkUnaryOp) and (OpKind(ALo) in [tkMinus, tkPlus]) then
+    ALo := Child(ALo);
+  if ALo = NIL_NODE then
+    Exit;
+  case Kind(ALo) of
+    nkIntLit:
+      Result := tcInteger;
+    nkStrLit:
+      begin
+        LTxt := Txt(ALo);
+        if (Length(LTxt) = 3) and (LTxt[1] = '''') and (LTxt[3] = '''') then
+          Result := tcChar;
+      end;
+    nkCaretChar:
+      Result := tcChar;
+    nkIdent:
+      if SameText(Txt(ALo), 'True') or SameText(Txt(ALo), 'False') then
+        Result := tcBoolean;
+  end;
+end;
+
 function TPasSemaTyper.CatFromNode(ADef: Integer): TSemaTypeCat;
 begin
   case Kind(ADef) of
@@ -197,7 +230,14 @@ begin
     nkProcType: Result := tcProc;
     nkStringType: Result := tcString;
     nkFileType: Result := tcFile;
-    nkSubrange: Result := tcInteger;
+    // A subrange is the category of its BOUNDS, not always an integer one:
+    // `'a'..'z'` is a Char subrange and `False..True` a Boolean one, and
+    // calling both tcInteger made `C := R` a false E2010 and a Boolean
+    // subrange in an `if` a false E2012 - against this typer's
+    // zero-false-positive rule. Anything the literal test cannot settle
+    // (a named constant, an Ord() expression) stays UNKNOWN, which reports
+    // nothing.
+    nkSubrange: Result := CatOfSubrangeBound(Child(ADef));
     nkIdent, nkMember, nkTypeArgs:   // alias to another named type
       Result := CatOf(Head(ADef));   // may be tcUnknown until target computed
   else

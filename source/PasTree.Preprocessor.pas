@@ -44,8 +44,11 @@ type
     ppIncludeTooDeep,
     ppBadIfExpression,
     ppIfNeedsSemantics,       // $IF references symbols (Ord(x), unit consts)
-                              // only the semantic phase can evaluate; the
-                              // expression was treated as False. Informational.
+                              // only the semantic phase can evaluate. The
+                              // GUESS sits at the leaf, so the verdict is
+                              // frequently True (`{$IF not Declared(X)}` is
+                              // the flagship case) - "treated as False" was
+                              // never the whole story. Informational.
     ppUnsupportedInsertion,   // {$I %VAR%}
     ppPopWithoutPush
   );
@@ -366,7 +369,7 @@ const
     'Circular include',
     'Include nesting too deep',
     'Cannot evaluate $IF expression',
-    '$IF needs semantic info (treated as False)',
+    '$IF needs semantic info (unknown leaves guessed False)',
     'Insertion form {$I %...%} is not supported',
     '$POPOPT without $PUSHOPT'
   );
@@ -706,6 +709,7 @@ begin
   // processed file: switch changes are unit-local, like defines.
   for LCh := 'A' to 'Z' do
     FSwitches[LCh] := False;
+  FSwitches['A'] := True;   // field alignment: the default IS {$A8}, so '+'
   FSwitches['C'] := True;   // assertions
   FSwitches['D'] := True;   // debug info
   FSwitches['G'] := True;   // imported data
@@ -1091,8 +1095,14 @@ begin
   begin
     LArg := Arg;
     if (LArg <> '') and CharInSet(LArg[1], ['+', '-']) then
-      // {$I+} / {$I-}: the IOCHECKS switch, not an include.
-      FSwitches['I'] := LArg[1] = '+'
+    begin
+      // {$I+} / {$I-}: the IOCHECKS switch, not an include. And it can HEAD A
+      // GROUP - `{$I-,R+}` - so the remainder goes through the ordinary
+      // switch parser instead of being dropped on the floor.
+      FSwitches['I'] := LArg[1] = '+';
+      if Length(LArg) > 1 then
+        ApplySwitches('I' + LArg);
+    end
     else if (LArg <> '') and (LArg[1] = '%') then
       Diag(ppUnsupportedInsertion, AFileId, AToken.Start, AToken.Len, LArg)
     else
@@ -1190,7 +1200,7 @@ var
   LIdx: Integer;
   LSwitch: Char;
 begin
-  // Forms: X+  X-  X+,Y-  Xn (numeric: ignored)  X <arg> (e.g. $R res: ignored)
+  // Forms: X+  X-  X+,Y-  Zn / An (tracked, below)  X <arg> ($R res: ignored)
   LIdx := 1;
   while LIdx < Length(ABody) do
   begin
@@ -1497,6 +1507,11 @@ procedure TPasPreprocessor.SetMinEnumSize(AValue: Integer);
 var
   LEvent: TPasMinEnumEvent;
 begin
+  // The boolean table and the SIZE are two views of one setting, and every
+  // writer has to keep both: `{$Z4}` and `{$MINENUMSIZE 4}` used to move the
+  // size only, so `{$IFOPT Z+}` right after them read the stale default.
+  // dcc's own equivalence is {$Z+} = {$Z4}, so anything above 1 is "+".
+  FSwitches['Z'] := AValue > 1;
   if FMinEnumSize = AValue then
     Exit;
   FMinEnumSize := AValue;
@@ -1510,6 +1525,7 @@ procedure TPasPreprocessor.SetAlign(AValue: Integer);
 var
   LEvent: TPasAlignEvent;
 begin
+  FSwitches['A'] := AValue > 1;   // {$A+} is {$A8} - see SetMinEnumSize
   if FAlign = AValue then
     Exit;
   FAlign := AValue;

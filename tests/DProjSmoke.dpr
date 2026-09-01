@@ -193,6 +193,27 @@ begin
       LDProj.Free;
     end;
 
+    // ---- a COMMENT before the root element (code audit 2026-08-31, finding
+    // 3.8). Well-formed XML that Embarcadero never writes but a hand edit can;
+    // it used to make ParseDocument return nil, and Load fell back silently to
+    // the lightweight scan. ----
+    LPath := TPath.Combine(LDir, 'Commented.dproj');
+    TFile.WriteAllText(LPath,
+      '<?xml version="1.0" encoding="utf-8"?>'#10 +
+      '<!-- hand-edited: do not reformat -->'#10 +
+      Copy(FIXTURE, Pos('<Project', FIXTURE), MaxInt));
+    LDProj := TPasDProj.Create;
+    try
+      Ok('leading comment: Load still parses the document',
+        LDProj.Load(LPath));
+      Ok('leading comment: ...and reads the same platform as without it',
+        LDProj.Platform = pfWin64);
+      Ok('leading comment: ...and the same file list',
+        Length(LDProj.Files) = 4);
+    finally
+      LDProj.Free;
+    end;
+
     // ---- real-world sanity: this repo's own demo\PasTreeDemo.dproj ----
     LPath := TPath.GetFullPath(TPath.Combine(ExtractFilePath(ParamStr(0)),
       '..\..\demo\PasTreeDemo.dproj'));

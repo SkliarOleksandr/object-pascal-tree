@@ -494,7 +494,17 @@ var
   LDone: Boolean;
   LIdx: Integer;
 begin
-  LChild := SkipAttr(FirstChild(ADecl));
+  // Attribute groups are VISITED, not just skipped - the exact bug class
+  // CollectTypeDecl documents and fixes for nkTypeDecl: SkipAttr jumps past
+  // the group without ever Collecting it, so every attribute on a var, a
+  // field or a parameter kept NIL_SCOPE and stayed unresolvable. Mid-list
+  // groups are reached the same way below.
+  LChild := FirstChild(ADecl);
+  while (LChild <> NIL_NODE) and (KindOf(LChild) = nkAttrGroup) do
+  begin
+    Collect(LChild, AScope);
+    LChild := NextSib(LChild);
+  end;
   LType := NIL_NODE;
   // Count-tracked doubling: `+ [x]` re-copied the array per declared name,
   // once for every name in every var/field/param group in the closure.
@@ -514,11 +524,18 @@ begin
       LDone := True;
     end
     else if LSep = tkComma then
-      // SkipAttr, not a bare NextSib: an attribute group may sit MID-LIST -
+    begin
+      // Step over - and VISIT - any attribute group sitting MID-LIST:
       // `const [Ref] CLSID, [Ref] IID: TGUID` is a shape the parser emits for
-      // a real RTL unit - and stopping there left every later name in the
+      // a real RTL unit, and stopping there left every later name in the
       // group undeclared AND the whole group untyped (LType stays NIL_NODE).
-      LChild := SkipAttr(NextSib(LChild))
+      LChild := NextSib(LChild);
+      while (LChild <> NIL_NODE) and (KindOf(LChild) = nkAttrGroup) do
+      begin
+        Collect(LChild, AScope);
+        LChild := NextSib(LChild);
+      end;
+    end
     else
       LDone := True;  // untyped parameter, or end
   end;
@@ -1390,7 +1407,14 @@ begin
 
     nkConstDecl:
       begin
-        LName := SkipAttr(FirstChild(ANode));
+        // Visit the attribute group, do not merely skip it - see
+        // DeclareNamesAndType and CollectTypeDecl for the same rule.
+        LName := FirstChild(ANode);
+        while (LName <> NIL_NODE) and (KindOf(LName) = nkAttrGroup) do
+        begin
+          Collect(LName, AScope);
+          LName := NextSib(LName);
+        end;
         if (LName <> NIL_NODE) and (KindOf(LName) = nkIdent) then
         begin
           var LSym := DeclareSym(AScope, skConst, NodeText(LName), LName);
@@ -1986,8 +2010,11 @@ begin
         // An ANCESTOR named by a symbol declared FURTHER DOWN this same unit
         // is not that symbol: a heritage clause can only name a type already
         // visible (3.1.1 - a forward `TFoo = class;` is the sole way to name
-        // one below, and that forward IS the earlier declaration this test
-        // sees). Everywhere else in a type section forward references are
+        // one below). NB the forward is NOT what this test sees:
+        // CollectTypeDecl re-points DeclNode to the COMPLETING declaration, so
+        // the position compared here is the later one - the rule survives only
+        // because naming a still-incomplete forward as an ancestor is E2086
+        // anyway. Everywhere else in a type section forward references are
         // legal and normal (`PNode = ^TNode;`), which is why the rule is
         // narrowed to the heritage position rather than applied to ResolveAt.
         //
@@ -2694,8 +2721,13 @@ end;
 { Unbinds every body name that the with scope ALSO offers, so ResolveNode's
   "only fill NIL_SYM" rule cannot leave a Phase-1 guess standing in front of a
   member. 5.7: a target member outranks EVERYTHING - dcc-verified against a
-  local, a parameter, a unit-level global and an inline `var` declared inside
-  the body itself.
+  local, a parameter and a unit-level global.
+
+  ONE CASE THIS DOES NOT DELIVER, despite 5.7 covering it: an inline `var`
+  declared INSIDE the with body's own block. Unbinding sends the name back
+  through re-resolution, which starts at the block scope and simply re-finds
+  that local - so the member never wins there. Only declarations OUTSIDE the
+  body behave as described above.
 
   Without this the override only ever happened for targets this pass could NOT
   open (WithUnopened, revised later by the project's with pass); a target whose
@@ -2777,6 +2809,13 @@ begin
     if LWithScope <> NIL_SCOPE then
     begin
       RepointScope(LTarget, LWithScope);
+      // UNBIND first, for the same reason the body is unbound: ResolveNode
+      // leaves an already-bound node alone, so a later target that Phase 1
+      // bound to an enclosing name of its own kept that binding even when an
+      // earlier target's member of the same name must shadow it - a confident
+      // WRONG member scope for the whole body, with no WithUnopened flag to
+      // keep the typer quiet about it.
+      UnbindShadowedByWith(LTarget, LWithScope);
       ResolveNode(LTarget);
     end;
     LTypeSym := WithTargetTypeSym(LTarget);

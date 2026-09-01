@@ -57,8 +57,8 @@ type
 
   // One USE of a symbol found by FindReferences - never the declaration
   // itself (see FindReferences' own comment for why). Snippet is the RAW
-  // source line (leading whitespace intact, only the trailing break
-  // stripped - TPasTokenStream.LineText), so HiFrom/HiTo stay valid offsets
+  // source line (leading whitespace intact; TPasTokenStream.LineText trims
+  // ALL trailing whitespace, break included), so HiFrom/HiTo stay valid offsets
   // into it; a host that trims leading whitespace for display must shift
   // both by the same amount rather than re-deriving them from the trimmed
   // text.
@@ -355,6 +355,15 @@ end;
 
 function TPasNavigator.ModelIdOf(const APath: string): Integer;
 begin
+  if FByPath.TryGetValue(LowerCase(TPath.GetFullPath(APath)), Result) then
+    Exit;
+  // The index is built once, in the constructor, and the project can gain
+  // models AFTER that - ResolveDecl's intrinsic fallback reaches
+  // EnsureSystemUnit, which may register a brand-new id. Rather than answer
+  // "unknown file" for it, top the index up on a miss (bounded: it only ever
+  // runs when a lookup fails, and the project's model list only grows).
+  for var LMid := FByPath.Count to FProj.ModelCount - 1 do
+    FByPath.AddOrSetValue(LowerCase(FProj.ModelFile(LMid)), LMid);
   if not FByPath.TryGetValue(LowerCase(TPath.GetFullPath(APath)), Result) then
     Result := -1;
 end;
@@ -449,7 +458,7 @@ var
   LOffset, LLo, LHi, LMidTok, LRaw, LVis, LNode, LEndCol: Integer;
   LCache: TNavCache;
   LTS: TPasTokenStream;   // record copy - the arrays inside are shared refs
-  LLeaf, LSpanFirstVis, LSpanLastVis, LRawFrom, LRawTo: Integer;
+  LLeaf, LSpanFirstVis, LSpanLastVis, LRawFrom, LRawTo, LEndLine: Integer;
   LQUid, LMatchNode, LFirst: Integer;
 begin
   Result := False;
@@ -550,9 +559,19 @@ begin
   AIdent.RawToken := LRawFrom;
   AIdent.RawTokenTo := LRawTo;
   LTS.OffsetToLineCol(LTS.Tokens[LRawFrom].Start, AIdent.Line, AIdent.ColFrom);
-  LTS.OffsetToLineCol(LTS.Tokens[LRawTo].EndPos, AIdent.Line, LEndCol);
-  AIdent.ColTo := AIdent.ColFrom + (LTS.Tokens[LRawTo].EndPos -
-    LTS.Tokens[LRawFrom].Start);
+  // The END of the span, read as a real (line, col) pair. It used to be
+  // written back over AIdent.Line - which the record's own contract says is
+  // the token START line - and ColTo was a raw BYTE distance from the start,
+  // line breaks included, so a multi-line dotted `uses` name produced a
+  // record whose three fields did not describe one position.
+  LTS.OffsetToLineCol(LTS.Tokens[LRawTo].EndPos, LEndLine, LEndCol);
+  if LEndLine = AIdent.Line then
+    AIdent.ColTo := LEndCol
+  else
+    // The span leaves the line: report it as running to the line's end, which
+    // is what a single-line highlight can express.
+    AIdent.ColTo := AIdent.ColFrom + (LTS.Tokens[LRawTo].EndPos -
+      LTS.Tokens[LRawFrom].Start);
   Result := True;
 end;
 
@@ -1051,6 +1070,10 @@ begin
       Result := CompareText(A.FilePath, B.FilePath);
       if Result = 0 then
         Result := A.Line - B.Line;
+      // Col too: TArray.Sort is unstable, so two hits on one line came back
+      // in random column order. PlanRename's own comparer already did this.
+      if Result = 0 then
+        Result := A.Col - B.Col;
     end));
 end;
 
@@ -1195,6 +1218,10 @@ begin
       Result := CompareText(A.FilePath, B.FilePath);
       if Result = 0 then
         Result := A.Line - B.Line;
+      // Col too: TArray.Sort is unstable, so two hits on one line came back
+      // in random column order. PlanRename's own comparer already did this.
+      if Result = 0 then
+        Result := A.Col - B.Col;
     end));
 end;
 
@@ -1271,6 +1298,10 @@ begin
       Result := CompareText(A.FilePath, B.FilePath);
       if Result = 0 then
         Result := A.Line - B.Line;
+      // Col too: TArray.Sort is unstable, so two hits on one line came back
+      // in random column order. PlanRename's own comparer already did this.
+      if Result = 0 then
+        Result := A.Col - B.Col;
     end));
 end;
 
@@ -1841,7 +1872,9 @@ begin
       Exit;
   Result := RoutineBodyEntry(AMid, LM, LImplNode, ATarget);
   if Result then
-    ATarget.Name := LName;
+    // The DECLARED spelling, which is what TPasNavTarget.Name promises and
+    // every other producer delivers - LName is the lowercased lookup key.
+    ATarget.Name := LM.Tree.NodeText(LNameNode);
 end;
 
 function TPasNavigator.GotoDeclaration(AMid, ALine, ACol: Integer;
@@ -1892,8 +1925,9 @@ begin
       Exit;
   if not RTSegments(LM, LDeclNode, LQualIdents, LNameNode) then
     Exit;
-  Result := TargetFromVis(AMid, LM.Tree.Nodes[LNameNode].FirstToken, LName,
-    ATarget);
+  // Original spelling, not the lowercased lookup key - see GotoImplementation.
+  Result := TargetFromVis(AMid, LM.Tree.Nodes[LNameNode].FirstToken,
+    LM.Tree.NodeText(LNameNode), ATarget);
 end;
 
 { The routine node paired with ARoutine - a body-less declaration's

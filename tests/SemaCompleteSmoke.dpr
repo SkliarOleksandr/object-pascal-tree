@@ -701,6 +701,40 @@ begin
   GCounter.Ok('overlay-generic frame: inherited members through the arg',
     Has('Pub'));
 
+  // --- overlay visibility (code audit 2026-08-31, finding 3.7) ---------------
+  // The overlay-side member collection applied NO visibility filter, so a
+  // strict private member of a same-unit class was offered from outside its
+  // declaring class - the one rule `strict` exists to state.
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses exta;'#10 +
+    'type'#10 +
+    '  TVis = class'#10 +
+    '  strict private'#10 +
+    '    FSecret: Integer;'#10 +
+    '  private'#10 +
+    '    FFriend: Integer;'#10 +
+    '  public'#10 +
+    '    FOpen: Integer;'#10 +
+    '  end;'#10 +
+    '  TOther = class'#10 +
+    '    procedure Use;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TOther.Use;'#10 +
+    'var V: TVis;'#10 +
+    'begin'#10 +
+    '  V.|'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GCounter.Ok('overlay visibility: public members are offered',
+    GHit and (GCtx = ccMember) and Has('FOpen'));
+  GCounter.Ok('overlay visibility: same-unit private still is (friend rule)',
+    Has('FFriend'));
+  GCounter.Ok('overlay visibility: STRICT private is not',
+    not Has('FSecret'));
+
   // --- keyword rows carry skKeyword ------------------------------------------
   ProjCase(PROJ_HEAD + '  |'#10 + PROJ_TAIL);
   GCounter.Ok('keyword rows carry skKeyword',

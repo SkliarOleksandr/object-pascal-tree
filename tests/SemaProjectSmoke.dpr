@@ -5609,6 +5609,45 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  // ---- COMPILER-RECOGNIZED attributes are not undeclared identifiers
+  // (19.3.3). dcc matches [Ref] / [Align(n)] / [weak] / [unsafe] /
+  // [Volatile] by NAME - no class declares them anywhere, including in the
+  // RTL - so an "undeclared identifier" over one is a false positive. This
+  // became reachable when attribute groups on vars/params/consts started
+  // being resolved at all (audit finding 3.6). ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_magicattr');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitMagic.pas'),
+    'unit UnitMagic;'#10'interface'#10 +
+    'type'#10 +
+    '  TRec = record'#10 +
+    '    [Align(8)]'#10 +
+    '    F: Integer;'#10 +
+    '    [weak] W: Integer;'#10 +
+    '    [unsafe] U: Integer;'#10 +
+    '    [Volatile] V: Integer;'#10 +
+    '  end;'#10 +
+    'procedure P(const [Ref] A: TRec);'#10 +
+    'implementation'#10 +
+    'procedure P(const [Ref] A: TRec); begin end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    var LMag := ModelByName('unitmagic');
+    Ok('magic-attr: the fixture unit loaded', Assigned(LMag));
+    Ok('magic-attr: no name is reported undeclared',
+      DiagCount(LMag, 'E2003') = 0);
+    Ok('magic-attr: and none of them is reported incompatible either',
+      DiagCount(LMag, 'E2010') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   // ---- A cross-unit TYPE used as a cast is not a call (code audit
   // 2026-08-31, finding 2.5.1). The exclusion tested the LOCAL RefMap only,
   // so a cast through an imported type still entered the arity sweep, and a
