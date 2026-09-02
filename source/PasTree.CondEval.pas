@@ -234,10 +234,17 @@ begin
       begin
         if Length(LClean) < 2 then
           Exit(False);
-        // The digit COUNT is checked first: past 63 significant bits the
-        // doubling below overflows Int64 - a silent wrap under {$Q-} and an
-        // EIntOverflow in the checked builds this project is tested with,
-        // where the hex path beside it uses TryStrToInt64 and simply fails.
+        // The magnitude is checked BEFORE each doubling: past 63 significant
+        // bits the multiplication below overflows Int64 - a silent wrap with
+        // overflow checking off, an EIntOverflow with it on - where the hex
+        // path beside it uses TryStrToInt64 and simply fails. Rejecting the
+        // literal is the behaviour both builds must have, so neither is left
+        // to decide it.
+        //
+        // Until 0.15.2 this said the suites were built with the check ON. They
+        // were not: the -Q in tests\build.bat is the compiler's QUIET switch,
+        // not $Q, so the claim guarded nothing for as long as it stood. They
+        // are now, which is what makes the sentence above true.
         L64 := 0;
         for LIdx := 2 to Length(LClean) do
           case LClean[LIdx] of

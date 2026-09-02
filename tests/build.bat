@@ -18,6 +18,21 @@ rem compile for Win64 (tools\, demo\) and PasTree.Types.dcu would otherwise
 rem exist twice under one name. Nothing reads a .dcu between runs (every call
 rem below passes -B), so that directory exists to be deleted: one path to skip
 rem in a backup, one path to clear when a build looks stale.
+rem
+rem CHECKED BUILDS: -$Q+ (integer overflow) and -$R+ (range). Not a style
+rem preference - this library is compiled by whatever project links it, and RAD
+rem Studio's stock Debug configuration sets both. Whatever the suites do not
+rem exercise with them ON is a behaviour half the hosts get and nothing here
+rem tests. Note that -Q, right beside them, is the compiler's QUIET switch and
+rem has nothing to do with overflow; the two read alike and that cost a
+rem misreading once already (the comment in PasTree.CondEval claiming these
+rem suites were checked builds, when they were not).
+rem
+rem Turned on after 0.15.1, where three FNV hashes raised EIntOverflow under a
+rem host's $Q+ because wraparound IS their algorithm. That reached a user as an
+rem access violation with no visible cause, in a server built from the IDE
+rem rather than by its own script, and took two rounds to find. These flags
+rem would have caught it here, in the repository that owns the defect.
 setlocal enabledelayedexpansion
 call "C:\Program Files (x86)\Embarcadero\Studio\37.0\bin\rsvars.bat"
 cd /d "%~dp0"
@@ -29,7 +44,7 @@ if not exist "%DCU32%" mkdir "%DCU32%"
 
 echo === building %SUITES: =% ===
 for %%T in (%SUITES%) do (
-  dcc32 -B -Q -U"%BDS%\lib\win32\release;..\source;..\demo;." -Eout -N0"%DCU32%" "%%T.dpr"
+  dcc32 -B -Q -$Q+ -$R+ -U"%BDS%\lib\win32\release;..\source;..\demo;." -Eout -N0"%DCU32%" "%%T.dpr"
   if errorlevel 1 goto :fail
 )
 
