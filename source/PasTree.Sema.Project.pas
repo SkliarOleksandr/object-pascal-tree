@@ -989,6 +989,10 @@ begin
   Result := True;
 end;
 
+{ $Q- because the wraparound IS the algorithm and the host's switches are not
+  ours to inherit - the full story is on TDefinesNameComparer.GetHashCode in
+  PasTree.Preprocessor. }
+{$IFOPT Q+}{$DEFINE PT_RESTORE_Q}{$OVERFLOWCHECKS OFF}{$ENDIF}
 function TSemaInstanceComparer.GetHashCode(const Value: TSemaInstance): Integer;
 var
   LIdx: Integer;
@@ -1012,6 +1016,7 @@ begin
   end;
   Result := Integer(LHash);
 end;
+{$IFDEF PT_RESTORE_Q}{$OVERFLOWCHECKS ON}{$UNDEF PT_RESTORE_Q}{$ENDIF}
 
 { Pin the default thread pool's width instead of letting it grow.
 
@@ -1140,8 +1145,18 @@ begin
   FFiles.Free;
   FStatus.Free;
   FModels.Free;
-  for var LPP in FPPPool do
-    LPP.Free;
+  // NIL-GUARDED, because this destructor also runs on a HALF-BUILT object:
+  // Delphi calls it when the constructor raises, and every field past the
+  // raise is still nil. `for x in nil-list` is not an empty loop, it is an
+  // access violation - which then replaces the constructor's exception on the
+  // way out, so the caller is told the wrong thing about the wrong place.
+  // That cost two rounds of diagnosis on 2026-09-02: the real fault was an
+  // EIntOverflow in a hash under a host's $Q+ (see
+  // TDefinesNameComparer.GetHashCode), and all anyone could see was an
+  // EAccessViolation reading address $10 here.
+  if FPPPool <> nil then
+    for var LPP in FPPPool do
+      LPP.Free;
   FPPPool.Free;
   FPPPoolLock.Free;
   FPP.Free;

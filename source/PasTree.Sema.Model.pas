@@ -946,7 +946,12 @@ end;
 
 { FNV-1a over the UTF-16 code units of a preprocessed file's source. Cheap
   (one pass, no allocation) and enough to reject the same-length edits the
-  size fingerprint alone lets through - see DemotedFileHashes. }
+  size fingerprint alone lets through - see DemotedFileHashes.
+
+  $Q- because the wraparound IS the algorithm and the host's switches are
+  not ours to inherit - the full story is on TDefinesNameComparer.GetHashCode
+  in PasTree.Preprocessor. }
+{$IFOPT Q+}{$DEFINE PT_RESTORE_Q}{$OVERFLOWCHECKS OFF}{$ENDIF}
 function SourceFingerprint(const AText: string): Cardinal;
 var
   LIdx: Integer;
@@ -958,6 +963,7 @@ begin
     Result := Result * 16777619;
   end;
 end;
+{$IFDEF PT_RESTORE_Q}{$OVERFLOWCHECKS ON}{$UNDEF PT_RESTORE_Q}{$ENDIF}
 
 procedure TPasSemaModel.DemoteText;
 var

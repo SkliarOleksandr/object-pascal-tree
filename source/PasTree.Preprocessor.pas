@@ -409,6 +409,22 @@ begin
   Result := SliceEqualsWord(PChar(Pointer(Left)), Length(Left), Right);
 end;
 
+{ WRAPAROUND IS THE ALGORITHM, so the overflow check is turned off HERE rather
+  than left to whoever compiles this unit. FNV-1a multiplies by 16777619 and
+  keeps the low 32 bits; under $Q+ every one of those multiplications raises
+  EIntOverflow instead. The same applies to the two sibling hashes, in
+  PasTree.Sema.Model (SourceFingerprint) and PasTree.Sema.Project
+  (TSemaInstanceComparer.GetHashCode).
+
+  NOT THEORETICAL, and the reason it is spelled out three times rather than
+  assumed: this library is compiled by whatever project links it, and RAD
+  Studio's stock Debug configuration turns integer overflow checking ON. On
+  2026-09-02 that produced an EAccessViolation with no visible cause in an LSP
+  server built from the IDE, while the same sources built by the reference
+  script were fine - the raise landed inside TPasSemaProject.Create, and the
+  destructor of the half-built object then faulted on top of it and hid the
+  real exception entirely. A library must not depend on its host's switches. }
+{$IFOPT Q+}{$DEFINE PT_RESTORE_Q}{$OVERFLOWCHECKS OFF}{$ENDIF}
 function TDefinesNameComparer.GetHashCode(const Value: string): Integer;
 var
   LIdx: Integer;
@@ -426,6 +442,7 @@ begin
   end;
   Result := Integer(LHash);
 end;
+{$IFDEF PT_RESTORE_Q}{$OVERFLOWCHECKS ON}{$UNDEF PT_RESTORE_Q}{$ENDIF}
 
 { Directive text helpers ---------------------------------------------------- }
 
