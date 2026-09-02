@@ -512,7 +512,7 @@ object frmMain: TfrmMain
       Hint =
         'Renames the symbol at the caret and every resolved reference to it' +
         ' - the same identity Find References uses'
-      ShortCut = 16453
+      ShortCut = 24645
       OnExecute = RenameActionExecute
       OnUpdate = RenameActionUpdate
     end

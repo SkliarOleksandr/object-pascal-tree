@@ -1210,6 +1210,58 @@ begin
           {out} LErr) and (Length(LEdits) = 0) and
         LErr.Contains('builtin'));
 
+      // ---- Off-limits FILES: library trees and read-only sources ----
+      // The gate is the FILE, not the symbol: declaring LDir a library tree
+      // must refuse every rename in this fixture, symbol and unit alike,
+      // whole and with the file named.
+      Ok('RenameBlockReason: no library paths, writable file -> allowed',
+        GNav.RenameBlockReason(TPath.Combine(LDir, 'NavA.pas')) = '');
+      Ok('RenameBlockReason: empty path -> allowed (unsaved buffer)',
+        GNav.RenameBlockReason('') = '');
+      GNav.LibraryPaths := [LDir];
+      Ok('RenameBlockReason: a file in a library tree -> blocked',
+        GNav.RenameBlockReason(TPath.Combine(LDir, 'NavA.pas'))
+          .Contains('library'));
+      Ok('SymbolAt: TThing again, for the library gate',
+        GNav.SymbolAt(LMidA, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName));
+      Ok('PlanRename: a library source is refused, nothing planned',
+        not GNav.PlanRename(LRTMid, LRSym, 'TWidget', {out} LEdits,
+          {out} LErr) and (Length(LEdits) = 0) and
+        LErr.Contains('library') and LErr.Contains('NavA.pas'));
+      LMidRen := GNav.ModelIdOf(TPath.Combine(LDir, 'NavA.pas'));
+      Ok('PlanUnitRename: a library source is refused too',
+        not GNav.PlanUnitRename(LMidRen, 'NavA2', {out} LEdits,
+          {out} LFileName, {out} LErr) and (Length(LEdits) = 0) and
+        LErr.Contains('library'));
+      // A sibling directory whose name merely STARTS with a library dir's
+      // name is not under it - the trailing delimiter in the normalized path
+      // is what makes the prefix test a tree test.
+      GNav.LibraryPaths := [LDir + '_other'];
+      Ok('RenameBlockReason: a name-prefix sibling dir is NOT a match',
+        GNav.RenameBlockReason(TPath.Combine(LDir, 'NavA.pas')) = '');
+      GNav.LibraryPaths := [];
+      Ok('PlanRename: allowed again once the library paths are cleared',
+        GNav.PlanRename(LRTMid, LRSym, 'TWidget', {out} LEdits, {out} LErr));
+
+      // Read-only is the other file-level refusal - and it is enough for it
+      // to hit ONE of the files the plan would rewrite (here NavB, which
+      // only USES TThing; the declaration in NavA stays writable).
+      TFile.SetAttributes(TPath.Combine(LDir, 'NavB.pas'),
+        [TFileAttribute.faReadOnly]);
+      try
+        Ok('RenameBlockReason: a read-only file -> blocked',
+          GNav.RenameBlockReason(TPath.Combine(LDir, 'NavB.pas'))
+            .Contains('read-only'));
+        Ok('PlanRename: ONE read-only file among the uses refuses it whole',
+          not GNav.PlanRename(LRTMid, LRSym, 'TWidget', {out} LEdits,
+            {out} LErr) and (Length(LEdits) = 0) and
+          LErr.Contains('read-only') and LErr.Contains('NavB.pas'));
+      finally
+        TFile.SetAttributes(TPath.Combine(LDir, 'NavB.pas'), []);
+      end;
+      Ok('PlanRename: allowed again once the file is writable',
+        GNav.PlanRename(LRTMid, LRSym, 'TWidget', {out} LEdits, {out} LErr));
+
       // Name validation - the same test a host greys its OK button with.
       Ok('IsValidRenameName: plain identifier', IsValidRenameName('Foo_1'));
       Ok('IsValidRenameName: leading digit rejected',

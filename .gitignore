@@ -48,3 +48,6 @@ Thumbs.db
 # VS Code workspace settings (machine-specific pastree.* paths)
 .vscode/
 *.log
+
+# Claude Code, per-clone: permissions and other machine-local settings.
+.claude/settings.local.json

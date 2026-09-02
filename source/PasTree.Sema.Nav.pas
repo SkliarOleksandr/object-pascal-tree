@@ -127,6 +127,10 @@ type
     end;
   private
     FProj: TPasSemaProject;
+    { Directories holding INSTALLED library sources (RTL/VCL/third-party) -
+      see the LibraryPaths property. Normalized: full paths, lower case, each
+      with a trailing path delimiter, so a prefix test is a tree test. }
+    FLibraryPaths: TArray<string>;
     FByPath: TDictionary<string, Integer>;       // full lower path -> model id
     FCaches: TObjectDictionary<Integer, TNavCache>;
     function CacheOf(AMid: Integer): TNavCache;
@@ -181,6 +185,8 @@ type
     function UnitNameHit(LM: TPasSemaModel; ANode: Integer;
       out AHit: TPasRefHit): Boolean;
     function UnitNameOfModel(AUid: Integer): string;
+    procedure SetLibraryPaths(const AValue: TArray<string>);
+    function IsUnderLibraryPath(const APath: string): Boolean;
     function RoutineBodyEntry(AMid: Integer; LM: TPasSemaModel;
       AImplNode: Integer; out ATarget: TPasNavTarget): Boolean;
   public
@@ -222,7 +228,9 @@ type
       Object Pascal identifier, is a reserved word, is the current name
       unchanged, or the symbol has no declaration site (see DeclHit) - the
       last one keeps a rename from half-applying to the uses while leaving
-      the declaration behind. AError is host-displayable text.
+      the declaration behind - or when ANY file the plan would rewrite is off
+      limits (a library tree, a read-only file - see RenameBlockReason).
+      AError is host-displayable text.
 
       What this does NOT do: it does not check whether the new name COLLIDES
       with something already visible at each edit site (Object Pascal
@@ -249,10 +257,34 @@ type
       code has no rule for). That last one is a refusal rather than a skip
       on purpose: a rename that silently leaves one `uses` clause pointing
       at a name that no longer exists produces a build break, which is the
-      one outcome worse than doing nothing. }
+      one outcome worse than doing nothing. The same all-or-nothing rule
+      covers an off-limits file among the ones the plan would rewrite (see
+      RenameBlockReason). }
     function PlanUnitRename(ATargetMid: Integer; const ANewName: string;
       out AEdits: TArray<TPasRenameEdit>; out ARequiredFileName: string;
       out AError: string): Boolean;
+    { Directories whose sources a rename must never touch - the INSTALLED
+      library trees (RTL/VCL/third-party), as absolute paths; a file anywhere
+      UNDER one of them is off limits, subdirectories included. Empty by
+      default, because only the host knows which of its search paths hold the
+      user's own sources and which hold somebody else's: the demo feeds it the
+      IDE's registry library/browsing paths and keeps the project's own
+      directories out. Assigning re-normalizes, so the property reads back
+      normalized rather than as assigned. }
+    property LibraryPaths: TArray<string> read FLibraryPaths
+      write SetLibraryPaths;
+    { Why APath may not be rewritten, as host-displayable text, or '' when it
+      may. Two reasons, both about the FILE rather than the symbol: it lives
+      under a LibraryPaths tree (renaming an RTL/VCL identifier would mean
+      renaming it for every project on the machine, and the source is not the
+      user's to change), or it is read-only on disk. A rename that would
+      touch even ONE such file is refused whole by PlanRename/PlanUnitRename -
+      the same "nothing planned" rule the unreadable-`uses` refusal follows,
+      and for the same reason: a partly applied rename is a build break.
+      Exposed so a host can also gate its command before it asks the user for
+      a new name. }
+    function RenameBlockReason(const APath: string): string;
+
     { The unit counterpart of SymbolAt/FindReferences/DeclHit: a click on
       THIS model's own header name, or on a `uses` clause item (any
       segment), resolved to the TARGET model id rather than a (unit, symbol)
@@ -2125,6 +2157,73 @@ end;
 
 { Rename }
 
+procedure TPasNavigator.SetLibraryPaths(const AValue: TArray<string>);
+var
+  LList: TList<string>;
+  LDir: string;
+begin
+  LList := TList<string>.Create;
+  try
+    for LDir in AValue do
+    begin
+      if Trim(LDir) = '' then
+        Continue;
+      LList.Add(LowerCase(IncludeTrailingPathDelimiter(
+        TPath.GetFullPath(Trim(LDir)))));
+    end;
+    FLibraryPaths := LList.ToArray;
+  finally
+    LList.Free;
+  end;
+end;
+
+function TPasNavigator.IsUnderLibraryPath(const APath: string): Boolean;
+var
+  LFull, LDir: string;
+begin
+  Result := False;
+  if (Length(FLibraryPaths) = 0) or (APath = '') then
+    Exit;
+  // The file's own full path, lower case. The stored dirs each carry a
+  // trailing delimiter, so this prefix test cannot mistake a file in a
+  // sibling directory whose name merely STARTS with a library dir's name
+  // (`...\rtl2\x.pas` under `...\rtl\`) for a library source.
+  LFull := LowerCase(TPath.GetFullPath(APath));
+  for LDir in FLibraryPaths do
+    if LFull.StartsWith(LDir) then
+      Exit(True);
+end;
+
+function TPasNavigator.RenameBlockReason(const APath: string): string;
+begin
+  Result := '';
+  if APath = '' then
+    Exit;
+  if IsUnderLibraryPath(APath) then
+    Exit(Format('"%s" is a library source (RTL/VCL or third-party) - its ' +
+      'identifiers cannot be renamed from here.',
+      [TPath.GetFileName(APath)]));
+  // A path that does not exist is NOT blocked: a host may have analyzed an
+  // unsaved buffer that has no file yet, and the read-only question is about
+  // files that do exist. A path that cannot be STATTED at all (a vanished
+  // network share) is a refusal, though - "unknown" is not "writable".
+  try
+    // W1002 "specific to a platform": faReadOnly is Windows-and-POSIX
+    // both, but the enum member itself is declared platform-specific.
+    {$WARN SYMBOL_PLATFORM OFF}
+    if TFile.Exists(APath) and
+       (TFileAttribute.faReadOnly in TFile.GetAttributes(APath)) then
+    {$WARN SYMBOL_PLATFORM ON}
+      Exit(Format('"%s" is read-only - a rename could not write it.',
+        [TPath.GetFileName(APath)]));
+  except
+    on E: Exception do
+      Exit(Format('"%s" cannot be checked for write access (%s: %s) - ' +
+        'rename refused.', [TPath.GetFileName(APath), E.ClassName,
+        E.Message]));
+  end;
+end;
+
 function IsValidRenameName(const AName: string): Boolean;
 var
   LIdx: Integer;
@@ -2330,8 +2429,20 @@ begin
       if Result = 0 then
         Result := A.Col - B.Col;
     end));
+  // Every file the plan would rewrite must be writable and the user's own -
+  // one blocked file refuses the whole rename (see RenameBlockReason).
+  for LIdx := 0 to High(AEdits) do
+  begin
+    AError := RenameBlockReason(AEdits[LIdx].FilePath);
+    if AError <> '' then
+    begin
+      AEdits := nil;
+      Exit;
+    end;
+  end;
   ARequiredFileName := ANewName + '.pas';
   Result := True;
+
 end;
 
 { Decl + every use, turned into edits with a per-line preview. The preview is
@@ -2493,6 +2604,16 @@ begin
     end
     else
       Inc(LIdx);
+
+  // Same file-level gate as PlanUnitRename, on the same all-or-nothing rule:
+  // a rename whose declaration or any use sits in a library tree or in a
+  // read-only file is refused whole, nothing planned.
+  for LIdx := 0 to High(LArr) do
+  begin
+    AError := RenameBlockReason(LArr[LIdx].FilePath);
+    if AError <> '' then
+      Exit;
+  end;
 
   LNewLen := Length(ANewName);
   LIdx := 0;

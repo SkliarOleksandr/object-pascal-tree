@@ -494,6 +494,12 @@ type
     function EffectiveNamespaces(APlatform: TPasPlatform): TArray<string>;
     function StudioRoot: string;
     function ExtraSearchPaths: TArray<string>;
+    // TPasNavigator + the rename gate its LibraryPaths carries: the IDE's
+    // registry library/browsing paths are somebody ELSE's sources (RTL, VCL,
+    // installed third-party), and the project's own directories deliberately
+    // are not in that set - see TPasNavigator.RenameBlockReason.
+    function NewNavigator: TPasNavigator;
+
     procedure OpenProject(const AProjectFile: string);
     procedure PopulateTree;
     function OpenFileTab(const APath: string): TSynEdit;
@@ -1073,16 +1079,30 @@ end;
 // a symbol, or a unit (its header + every `uses` item). A compiler builtin is
 // never renameable - the name is the compiler's, so there is nothing to edit
 // and no declaration to edit it at (PlanRename refuses one outright).
+// Neither is an identifier in a LIBRARY source or in a read-only file - the
+// gate below, and the plan's own refusal.
 procedure TfrmMain.RenameActionUpdate(Sender: TObject);
 var
-  LTMid, LSym: Integer;
-  LName: string;
+  LTMid, LSym, LLine, LCol: Integer;
+  LName, LFilePath: string;
+  LEditor: TSynEdit;
 begin
+  // The caret's OWN file first: a library source (RTL/VCL/third-party) or a
+  // read-only file is nobody's to rewrite here, and the identity under the
+  // caret does not matter once the file is off limits. The plan refuses the
+  // same cases anyway (TPasNavigator.RenameBlockReason) - this only keeps the
+  // command from looking available when it is not.
+  if Assigned(FNav) and ActiveEditorPos(LFilePath, LEditor, LLine, LCol) and
+     (FNav.RenameBlockReason(LFilePath) <> '') then
+  begin
+    TAction(Sender).Enabled := False;
+    Exit;
+  end;
   TAction(Sender).Enabled := ActiveSymbolTarget(LTMid, LSym, LName) or
     ActiveUnitTarget(LTMid, LName);
 end;
 
-{ Ctrl+E / the editor's context menu. Ask for the new name (pre-filled with
+{ Ctrl+Shift+E / the editor's context menu. Ask for the new name (pre-filled with
   the identifier under the caret), plan the edits, apply them, then show the
   result in a Find References-shaped page - same tree, but every snippet is
   the line as it now READS, so what the panel shows is the outcome rather
@@ -3155,7 +3175,7 @@ begin
     FAnalyzeOverhead := FAnalyzeOverhead +
       Format('engine=%d;', [LSW.ElapsedMilliseconds]);
     LSW := TStopwatch.StartNew;
-    FNav := TPasNavigator.Create(FSemaProject);
+    FNav := NewNavigator;
     FAnalyzeOverhead := FAnalyzeOverhead +
       Format('nav=%d;', [LSW.ElapsedMilliseconds]);
     // Same as the async swap: the project is immutable from here on (every
@@ -3562,7 +3582,7 @@ begin
       FAnalyzing := False;
       FAsyncModule := False;
       if Assigned(FSemaProject) and not Assigned(FNav) then
-        FNav := TPasNavigator.Create(FSemaProject);
+        FNav := NewNavigator;
     end;
     FreeAndNil(FAsyncSession);   // Destroy waits for the worker to drain
   end;
@@ -3603,7 +3623,7 @@ begin
     FAsyncModule := False;
     FAnalyzing := False;
     if Assigned(FSemaProject) then
-      FNav := TPasNavigator.Create(FSemaProject);
+      FNav := NewNavigator;
     if LError <> '' then
       Log('Module reanalysis error: ' + LError);
     if LAccepted then
@@ -3640,7 +3660,7 @@ begin
   FreeAndNil(FAsyncSession);
   if Assigned(FSemaProject) then
   begin
-    FNav := TPasNavigator.Create(FSemaProject);
+    FNav := NewNavigator;
     // MEMORY-AUDIT sec. 6.4-4 stage 1: this project is now IMMUTABLE for us -
     // every re-analysis goes through a fresh session - so the per-unit maps
     // nothing reads after analysis can go, except for the open tabs'
@@ -4186,6 +4206,12 @@ end;
 // $(avi3rdlib) from the `Environment Variables` key) are expanded; only
 // directories that exist survive. Falls back to the bare RTL source dirs
 // when Studio/registry aren't available.
+function TfrmMain.NewNavigator: TPasNavigator;
+begin
+  Result := TPasNavigator.Create(FSemaProject);
+  Result.LibraryPaths := ExtraSearchPaths;
+end;
+
 function TfrmMain.ExtraSearchPaths: TArray<string>;
 var
   LSeen: TDictionary<string, Boolean>;

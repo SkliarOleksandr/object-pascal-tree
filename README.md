@@ -1772,15 +1772,18 @@ Still open, roughly in the order we're tackling it:
   consumer of data already computed. This is also the direct PREREQUISITE
   for Rename Symbol below (rename = find references + apply edits) - build
   this first.
-- ~~**Rename symbol** (Ctrl+E)~~ - DONE (`TPasNavigator.PlanRename` /
-  `PlanUnitRename`, demo ctrl+E / context menu): renames the declaration and
-  every reference to it project-wide off the same resolved identity Find
-  References walks, so it only touches the actual declaration's references
-  and never a textually matching name from an unrelated scope. Also renames
-  a UNIT (its header + every `uses` item, dotted names whole; the required
-  file name is handed back to the host). A compiler builtin is refused
-  outright - the name is the compiler's. See `docs/editor-features.md` §3
-  for the edit/preview contract and what it deliberately does not check.
+- ~~**Rename symbol** (Ctrl+Shift+E)~~ - DONE (`TPasNavigator.PlanRename` /
+  `PlanUnitRename`, demo ctrl+shift+E / context menu): renames the
+  declaration and every reference to it project-wide off the same resolved
+  identity Find References walks, so it only touches the actual
+  declaration's references and never a textually matching name from an
+  unrelated scope. Also renames a UNIT (its header + every `uses` item,
+  dotted names whole; the required file name is handed back to the host).
+  A compiler builtin is refused outright - the name is the compiler's - and
+  so is a rename that would touch a LIBRARY source (RTL/VCL/third-party: the
+  host declares those trees through `TPasNavigator.LibraryPaths`) or a
+  read-only file, whole rather than in part. See `docs/editor-features.md`
+  §3 for the edit/preview contract and what it deliberately does not check.
 - **Show Defines** - for the identifier/position under the cursor, list
   every preprocessor define ACTIVE there (module where `$DEFINE`d / project-
   or platform-level, line, the define name), in its own results window,

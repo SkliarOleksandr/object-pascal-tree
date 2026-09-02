@@ -93,10 +93,10 @@ qualified expression highlights only itself.
 
 ## 3. Rename (`TPasNavigator.PlanRename`/`PlanUnitRename` + demo wiring)
 
-Status: IMPLEMENTED (PasTree 0.13.1) - `PlanRename`, `PlanUnitRename`,
-`IsValidRenameName`, `IsValidUnitRenameName` in
-`source/PasTree.Sema.Nav.pas`, wired into the demo as ctrl+E / the editor
-context menu, regression-covered by `tests/SemaNavSmoke.dpr` (fixtures
+Status: IMPLEMENTED (PasTree 0.15.0) - `PlanRename`, `PlanUnitRename`,
+`IsValidRenameName`, `IsValidUnitRenameName`, `RenameBlockReason` and
+`LibraryPaths` in `source/PasTree.Sema.Nav.pas`, wired into the demo as
+ctrl+shift+E / the editor context menu, regression-covered by `tests/SemaNavSmoke.dpr` (fixtures
 `NavRen`, `NavRenP`, plus the existing `NavA`/`NavB`/`Namespace.NavD` set for
 the unit half).
 
@@ -126,8 +126,10 @@ identifier class does here:
 | 9 | A UNIT, from its own header name or from any `uses` item (any segment) | the header + every `uses` item project-wide, whole dotted spans | OK (3.8) |
 | 10 | The FILE a renamed unit lives in | not renamed - the required name is HANDED BACK to the host | OK (by design, 3.8) |
 | 11 | A `uses` item spelled as a `-A` unit ALIAS | nothing - the whole unit rename is refused, named in the error | OK (by design, 3.8) |
-| 12 | Name-collision detection at an edit site | - | GAP (deliberate - see 3.5) |
-| 13 | Identifier inside an opened `$I` include file | - | GAP (`IdentAt` is main-file-only, same limit go-to-declaration has) |
+| 12 | Anything declared in a LIBRARY source (RTL/VCL/third-party) | nothing - refused whole, naming the file | OK (by design, 3.9) |
+| 13 | Anything whose declaration or ANY use sits in a read-only file | nothing - refused whole, naming the file | OK (by design, 3.9) |
+| 14 | Name-collision detection at an edit site | - | GAP (deliberate - see 3.5) |
+| 15 | Identifier inside an opened `$I` include file | - | GAP (`IdentAt` is main-file-only, same limit go-to-declaration has) |
 
 3.1 **Scope.** Two identities: a symbol (`SymbolAt` -> `PlanRename`) and a
     unit (`UnitAt` -> `PlanUnitRename`, see 3.8). A compiler BUILTIN is
@@ -173,8 +175,8 @@ identifier class does here:
     arrive sorted ascending, so a host applies each file's edits from the
     LAST backwards (or shifts columns by hand).
 
-3.7 **Demo wiring**: ctrl+E, or the editor context menu's `Rename...`, on
-    the identifier under the caret (or the start of a selection - the same
+3.7 **Demo wiring**: ctrl+shift+E, or the editor context menu's
+    `Rename...`, on the identifier under the caret (or the start of a selection - the same
     position rule Find References uses). An input dialog pre-filled with the
     current name (and saying whether a symbol or a unit is being renamed);
     OK applies the edits to BUFFERS, never to files, and opens a Find
@@ -212,4 +214,31 @@ identifier class does here:
     returns `ARequiredFileName` (`<new name>.pas`). It does NOT rename the
     file - a host either does it or tells the user, but must not stay
     silent. The demo, which never writes files, says so in a dialog.
+
+3.9 **Off-limits FILES** (both plans, `RenameBlockReason`). Two refusals are
+    about the file rather than the symbol, and either one refuses the WHOLE
+    rename with the file named - the same all-or-nothing rule as the
+    unit-alias refusal in 3.8, for the same reason:
+
+    - the file lives under a `LibraryPaths` tree - the INSTALLED library
+      sources (RTL/VCL/third-party). Renaming a name there would mean
+      renaming it for every project on the machine, in sources that are not
+      the user's to change, and the plan can only see the uses inside THIS
+      project's closure anyway;
+    - the file is read-only on disk (a source-control lock, a shipped
+      library copied in). A path that does not EXIST is not blocked - a host
+      may have analyzed an unsaved buffer - but a path that cannot be
+      statted at all is: "unknown" is not "writable".
+
+    `LibraryPaths` is the HOST's declaration and is empty by default: only
+    the host knows which of its search paths hold the user's own sources.
+    The demo feeds it the IDE's registry library/browsing paths
+    (`ExtraSearchPaths`) and deliberately keeps the project directory and the
+    `.dproj` search paths OUT - those are the user's units, and renaming
+    across them is the point of the feature. The test is a path prefix over
+    the whole tree, subdirectories included.
+
+    A host can call `RenameBlockReason(APath)` itself to gate its command
+    before asking for a new name; the demo's `Rename...` is disabled while
+    the caret sits in a blocked file.
 

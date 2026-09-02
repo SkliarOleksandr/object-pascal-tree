@@ -22,3 +22,15 @@
 # Documentation - LF, which is what every diff viewer expects.
 *.md text eol=lf
 LICENSE text eol=lf
+
+# Shell scripts and the hooks that ARE shell scripts (no extension) - LF, or
+# /bin/sh chokes on the CR: `#!/bin/sh\r` is not an interpreter. Without this
+# they are `unspecified`, and core.autocrlf=true then checks them out CRLF.
+*.sh text eol=lf
+.githooks/* text eol=lf
+
+# Tool configuration read by non-Windows tooling - LF for the same reason.
+*.json text eol=lf
+*.yml text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
