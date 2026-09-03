@@ -37,7 +37,8 @@ program PasTreeDiffHarness;
     (b) interface edit - a new routine declared at the end of the interface
         section, with its body appended.
   A -script file replaces the synthetic sampling: one edit per line,
-  `body <full-path>` or `intf <full-path>`, applied in order.
+  `body|intf|blank|comment|const|type <full-path>`, applied in order (the
+  last four land at the end of the interface section).
 
   -selftest inverts the exercise to prove the COMPARATOR can see: the
   incremental side is deliberately fed the PRE-EDIT text of each step's
@@ -72,7 +73,7 @@ uses
   PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas';
 
 type
-  TEditKind = (ekBody, ekIntf);
+  TEditKind = (ekBody, ekIntf, ekBlank, ekComment, ekConst, ekType);
   TEditStep = record
     Kind: TEditKind;
     Path: string;    // full path of the unit to edit
@@ -204,6 +205,19 @@ begin
             'procedure __DiffIntf%d; begin end;', [ASeq]));
           LLines.Insert(LImpl, Format('procedure __DiffIntf%d;', [ASeq]));
         end;
+      // The "start typing in a big interface" shapes: nothing a consumer can
+      // see (blank lines, a comment) and a fresh declaration nobody refers to.
+      ekBlank:
+        begin
+          LLines.Insert(LImpl, '');
+          LLines.Insert(LImpl, '');
+        end;
+      ekComment:
+        LLines.Insert(LImpl, Format('// __DiffComment%d', [ASeq]));
+      ekConst:
+        LLines.Insert(LImpl, Format('const __DiffConst%d = %d;', [ASeq, ASeq]));
+      ekType:
+        LLines.Insert(LImpl, Format('type __DiffType%d = Integer;', [ASeq]));
     end;
     ANewText := string.Join(#13#10, LLines.ToArray);
     Result := True;
@@ -367,10 +381,15 @@ end;
 
 function KindName(AKind: TEditKind): string;
 begin
-  if AKind = ekBody then
-    Result := 'body'
+  case AKind of
+    ekBody: Result := 'body';
+    ekIntf: Result := 'intf';
+    ekBlank: Result := 'blank';
+    ekComment: Result := 'comment';
+    ekConst: Result := 'const';
   else
-    Result := 'intf';
+    Result := 'type';
+  end;
 end;
 
 // The synthetic sample: every loaded unit whose layout carries the markers,
@@ -429,6 +448,14 @@ begin
       LStep.Kind := ekBody
     else if SameText(LKindWord, 'intf') then
       LStep.Kind := ekIntf
+    else if SameText(LKindWord, 'blank') then
+      LStep.Kind := ekBlank
+    else if SameText(LKindWord, 'comment') then
+      LStep.Kind := ekComment
+    else if SameText(LKindWord, 'const') then
+      LStep.Kind := ekConst
+    else if SameText(LKindWord, 'type') then
+      LStep.Kind := ekType
     else
     begin
       Writeln(ErrOutput, 'bad script kind: ', LKindWord);
@@ -640,9 +667,11 @@ begin
       // their own references), a shifted symbol index harms nobody. What
       // decides correctness is the comparison against the full pipeline,
       // which every step runs anyway - so this is counted, not judged.
-      if (LStep.Kind = ekIntf) and LHow.StartsWith('module') then
+      if (LStep.Kind in [ekIntf, ekConst, ekType]) and
+         LHow.StartsWith('module') then
         Inc(GAcceptedIntf)
-      else if (LStep.Kind = ekBody) and not LHow.StartsWith('module') then
+      else if (LStep.Kind in [ekBody, ekBlank, ekComment]) and
+              not LHow.StartsWith('module') then
       begin
         LVerdict := LVerdict + ' (unexpected fallback)';
         Inc(GFellBack);

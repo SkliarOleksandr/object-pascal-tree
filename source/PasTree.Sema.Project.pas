@@ -8534,9 +8534,17 @@ begin
     LUsesHeads.Free;
     if (AId > High(FXNewExt)) or (FXNewExt[AId] = nil) then
     begin
-      // Unmanaged case: commit and drop it here.
+      // Unmanaged case: commit and drop it here - the SAME merge
+      // RunCrossTypePass performs, tombstones included. Writing a tombstone
+      // through as an entry left the module path (and AnalyzeFile) with a
+      // stale binding the full pipeline had removed: 27 extra ExtRefMap
+      // entries on a 3676-unit closure's hub unit, caught by the differential
+      // harness on a BODY edit (2026-09-03).
       for var LPair in LNewExt do
-        LM.ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
+        if LPair.Value.UnitId = EXT_TOMBSTONE_UNIT then
+          LM.ExtRefMap.Remove(LPair.Key)
+        else
+          LM.ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
       LNewExt.Free;
     end;
   end;

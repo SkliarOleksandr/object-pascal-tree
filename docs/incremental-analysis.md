@@ -207,6 +207,13 @@ AND the incremental path over the same closure and compares RefMap, ExtRefMap
 and diagnostics across the ENTIRE closure after every step. The corpus suites
 only ever prove the full path.
 
+- `-script:<file>` replaces the synthetic sampling: one `kind <path>` per
+  line, kind = `body`, `intf`, `blank`, `comment`, `const` or `type` (the last
+  four land at the end of the interface section - the "start typing in a big
+  interface" shapes). On the client closure a blank line or comment in the hub
+  types unit is a 250 ms module step; a new const or type refuses with
+  `too-many-consumers(1260>128)` and rebuilds, which is what the name-level
+  dependency idea in the open list is for;
 - default mode: the donor CHAIN (rebuild k adopts rebuild k-1);
 - `-module`: single-module reanalysis, falling back to a donor rebuild on
   refusal, exactly as a host must;
