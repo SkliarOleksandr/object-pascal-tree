@@ -205,6 +205,20 @@ type
       copies of this walk existed (navigator, LSP, demo) - see the
       completion plan sec. 8A. }
     function NodeSpanText(AIndex: Integer): string;
+    { The declaration a node belongs to: its OUTERMOST declaration-shaped
+      ancestor (nkRoutine, nkTypeDecl, nkConstDecl, nkVarDecl, ...), the climb
+      stopping at containers - so a class member's root is the member, not the
+      class, and a nested routine keeps its own nkRoutine. NIL_NODE when AIndex
+      sits in no declaration (a `uses` name, a statement). Shared by the doc
+      comment lookup and the module path's declaration comparison. }
+    function DeclRootOf(AIndex: Integer): Integer;
+    { Do two nodes read the same, token for token? Compares the VISIBLE token
+      slices from each node's leftmost token through its LastToken - exact
+      text, so comments and whitespace do not count and a change of identifier
+      case does. The module path asks this about two declarations of the same
+      symbol in two parses of one unit. }
+    function SpanTokensEqual(ANode: Integer; const AOther: TPasTree;
+      AOtherNode: Integer): Boolean;
     { The node's TRUE leftmost visible token: the smaller of its own
       FirstToken and its deepest-first-descendant's - nodes whose FirstToken
       is not their left edge exist by design (nkMember's is the dot). -1 for
@@ -421,6 +435,60 @@ begin
       Tokens[LTo.TokenIndex].EndPos - Tokens[LFrom.TokenIndex].Start);
 end;
 
+function TPasTree.DeclRootOf(AIndex: Integer): Integer;
+var
+  LIdx: Integer;
+begin
+  Result := NIL_NODE;
+  if (AIndex < 0) or (AIndex > High(Nodes)) then
+    Exit;
+  LIdx := AIndex;
+  while LIdx <> NIL_NODE do
+  begin
+    case Nodes[LIdx].Kind of
+      nkRoutine, nkTypeDecl, nkConstDecl, nkVarDecl, nkPropertyDecl,
+      nkEnumValue, nkInlineVar, nkInlineConst:
+        Result := LIdx;
+      nkTypeSec, nkConstSec, nkVarSec, nkLabelSec, nkInterfaceSec,
+      nkImplementationSec, nkUnit, nkProgram, nkLibrary, nkPackage,
+      nkBlock, nkRoutineBody, nkClassType, nkRecordType, nkInterfaceType,
+      nkObjectType, nkHelperType:
+        Break;
+    end;
+    LIdx := Nodes[LIdx].Parent;
+  end;
+end;
+
+function TPasTree.SpanTokensEqual(ANode: Integer; const AOther: TPasTree;
+  AOtherNode: Integer): Boolean;
+var
+  LFirst, LLast, LOtherFirst, LOtherLast, LIdx, LLen, LOtherLen: Integer;
+  LText, LOtherText: PChar;
+begin
+  Result := False;
+  if (ANode < 0) or (ANode > High(Nodes)) or (AOtherNode < 0) or
+     (AOtherNode > High(AOther.Nodes)) then
+    Exit;
+  LFirst := NodeLeftmostVis(ANode);
+  LLast := Nodes[ANode].LastToken;
+  LOtherFirst := AOther.NodeLeftmostVis(AOtherNode);
+  LOtherLast := AOther.Nodes[AOtherNode].LastToken;
+  if (LFirst < 0) or (LOtherFirst < 0) or (LLast < LFirst) or
+     (LLast > High(Source.Visible)) or
+     (LOtherLast > High(AOther.Source.Visible)) or
+     (LLast - LFirst <> LOtherLast - LOtherFirst) then
+    Exit;
+  for LIdx := 0 to LLast - LFirst do
+  begin
+    Source.VisibleSlice(LFirst + LIdx, LText, LLen);
+    AOther.Source.VisibleSlice(LOtherFirst + LIdx, LOtherText, LOtherLen);
+    if (LLen <> LOtherLen) or
+       not CompareMem(LText, LOtherText, LLen * SizeOf(Char)) then
+      Exit;
+  end;
+  Result := True;
+end;
+
 function TPasTree.DeclDocComment(AIndex: Integer): string;
 var
   LTS: TPasTokenStream;
@@ -440,26 +508,9 @@ begin
   Result := '';
   if (AIndex < 0) or (AIndex > High(Nodes)) then
     Exit;
-  // Climb to the declaration ROOT: the OUTERMOST declaration-shaped ancestor
-  // (a name node sits inside its declaration; the doc sits above the whole
-  // declaration). Containers end the climb - a nested routine keeps its own
-  // nkRoutine because nkRoutineBody stops the walk before the outer one.
-  LDecl := NIL_NODE;
-  LIdx := AIndex;
-  while LIdx <> NIL_NODE do
-  begin
-    case Nodes[LIdx].Kind of
-      nkRoutine, nkTypeDecl, nkConstDecl, nkVarDecl, nkPropertyDecl,
-      nkEnumValue, nkInlineVar, nkInlineConst:
-        LDecl := LIdx;
-      nkTypeSec, nkConstSec, nkVarSec, nkLabelSec, nkInterfaceSec,
-      nkImplementationSec, nkUnit, nkProgram, nkLibrary, nkPackage,
-      nkBlock, nkRoutineBody, nkClassType, nkRecordType, nkInterfaceType,
-      nkObjectType, nkHelperType:
-        Break;
-    end;
-    LIdx := Nodes[LIdx].Parent;
-  end;
+  // The declaration ROOT: a name node sits inside its declaration, the doc
+  // sits above the whole declaration - see DeclRootOf.
+  LDecl := DeclRootOf(AIndex);
   if LDecl = NIL_NODE then
     Exit;
   LVis := NodeLeftmostVis(LDecl);

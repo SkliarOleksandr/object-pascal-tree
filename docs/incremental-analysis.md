@@ -6,7 +6,8 @@ refuses to do and why, and what is still open.
 Shipped in 0.9.0 (the parse donor and single-module reanalysis for body
 edits); 0.10.0 added the consumer redo, which puts INTERFACE edits on the fast
 path too; 0.11.0 made the blast-radius ceiling a tunable property after
-measuring it. The demo host drives both mechanisms behind its `Incremental`
+measuring it; 0.15.7-0.15.8 replaced "redo everyone who can see the unit"
+with a diff of the interface and a name-level choice of who is redone. The demo host drives both mechanisms behind its `Incremental`
 checkbox and is the worked example of the host-side contract below.
 
 The problem it solves: an editor host re-analyzes on every pause in typing, and
@@ -20,7 +21,8 @@ calls neither gets exactly the previous behaviour.
 
 ```
 edit inside a routine body   -> single-module reanalysis   ~20 ms / ~300 ms
-edit in an interface         -> module + affected consumers ~70 ms / ~1.5 s
+edit in an interface         -> module + the consumers that  ~70 ms / ~0.5 s
+                                can SEE the change
 anything refused             -> ordinary rebuild WITH the parse donor
 a different project opened   -> ordinary rebuild
                                         (demo closure / big client closure)
@@ -87,9 +89,11 @@ then rebuilt against the new module from scratch. This is why a shifted symbol
 index in the edited unit harms nobody, and why no old-to-new index matching is
 needed.
 
-### The blast radius
+### The blast radius, and who inside it is redone
 
-`AffectedConsumers` walks the REVERSE `uses` graph from the edited unit:
+`AffectedConsumers` walks the REVERSE `uses` graph from the edited unit (over
+a reverse index built per call - a few tens of thousands of steps, where the
+first cut rescanned every model per frontier unit):
 
 - every direct importer is in the set, whichever section imported it;
 - the walk continues THROUGH a unit only if it imported in its INTERFACE
@@ -105,12 +109,41 @@ For a body edit the radius is always 1 - nothing outside the unit can see the
 change.
 
 What real radii look like, measured on the 3676-unit closure: a COM type
-library unit reaches 28 models and is redone in ~1.8 s; a core types unit
-that half the project imports reaches **1181** - a third of the closure, which
-at ~57 ms per model would cost twice a rebuild. So a wide interface edit
-rebuilding is not the fast path failing, it is the fast path being right; the
-rebuild is still donor-assisted (23 s against 29 s). Editing the BODY of that
-same core unit takes 303 ms.
+library unit reaches 28 models; a core types unit that half the project
+imports reaches **1260** - a third of the closure, which at ~57 ms per model
+would cost twice a rebuild. Until 0.15.8 the whole reach WAS the redo set, so
+typing a new constant into that unit refused (`too-many-consumers`) and cost
+a 24 s donor rebuild every time.
+
+The reach is only the upper bound now. `DiffInterface` compares the old and
+new interface over `MatchSymbols`' map (guard 2 below) and sorts every old
+symbol into unchanged / changed / removed - changed meaning a Phase-1
+attribute differs or the declaration no longer reads the same token for
+token (`DeclRootOf` + `SpanTokensEqual`; coarse on purpose: any edit inside
+a class marks the class changed) - and collects the NAMES of added symbols
+another unit could reach by name (globals, members, enum values; not
+parameters). `SelectConsumers` then keeps, out of the reach, only:
+
+- a model holding a pair (unit, changed-or-removed symbol) in any of its
+  four cross-unit maps, or an instance tainted by one;
+- a model whose tree MENTIONS an added name anywhere - the shadowing test:
+  that name may have resolved elsewhere, or nowhere, and may now bind here.
+  A token scan with a length filter, no allocation for the bulk of nodes.
+
+Everyone else in the reach is UNTOUCHED: `RenumberConsumer` follows its
+bindings into the unit through the map and nothing else about it changes -
+its diagnostics included. A helper type among the changed/added/removed
+forces the whole reach, because a helper attaches by TYPE and no name test
+can find who it now affects. The `ModuleRedoLimit` ceiling applies to the
+SELECTED set.
+
+Measured on the same closure, every step verified identical to a full
+build: a new const, type or routine in the core types unit is now a
+one-module run of ~500 ms (`reach=1260;renumbered=1259`); a unit appended to
+its interface `uses` selects the 82 models that mention the new unit's name
+and takes 4.2 s; a body edit there is 337 ms. The STAGE string carries the
+accounting: `intfchanged=1;changed=C;removed=R;added=A;reach=N;renumbered=K;`
+plus `helpers=1;` when the fallback fired.
 
 ### The guards
 
@@ -159,7 +192,7 @@ from a slow analyzer.
 | `new-dependency(X)` | an import resolves to a file the closure never loaded |
 | `no-clean-boundary-*` | no implementation scope, or the arena is not split cleanly at it |
 | `intf-sym#N`, `intf-scope#N` | the interface prefix moved in a way the redo cannot express |
-| `too-many-consumers(N>L)` | the blast radius N exceeds `ModuleRedoLimit` (128; 0 or less lifts the ceiling). The number is reported because "too many" alone says nothing about whether the limit is set sensibly |
+| `too-many-consumers(N>L)` | the SELECTED redo set N exceeds `ModuleRedoLimit` (128; 0 or less lifts the ceiling). The number is reported because "too many" alone says nothing about whether the limit is set sensibly |
 | `instance-unmatched-sym(<name>)` | an instance names a symbol of this unit that the new text no longer declares (a deleted generic, or an overload whose ordinal moved) - see guard 2 |
 
 ### Driving it from a host

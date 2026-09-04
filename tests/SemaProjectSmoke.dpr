@@ -5733,6 +5733,137 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  // ---- Name-level consumer selection (0.15.8). An interface edit used to
+  // redo every model that could see the unit; now the diff over the matched
+  // symbols (DiffInterface) decides WHO is redone: holders of a changed or
+  // removed symbol, and models that mention an added name. Everyone else in
+  // the reach only has its bindings renumbered (RenumberConsumer), which the
+  // cross-references below prove by still landing on the right symbol after
+  // the numbering moved. Helpers force the whole reach. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_namedeps');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  const cNAIntf = 'unit UnitNA;'#10'interface'#10'type'#10;
+  const cNATA = '  TA = class'#10'    procedure M;'#10'  end;'#10;
+  const cNAConst = 'const'#10'  CA = 1;'#10'  CB = 2;'#10;
+  const cNAImpl = 'implementation'#10'procedure TA.M; begin end;'#10;
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitNA.pas'),
+    cNAIntf + cNATA + cNAConst + cNAImpl + 'end.'#10);
+  // NB holds TA (a variable of the type) and sees NA in its INTERFACE, so the
+  // reach continues through it to ND.
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitNB.pas'),
+    'unit UnitNB;'#10'interface'#10'uses UnitNA;'#10'var GA: TA;'#10 +
+    'implementation'#10'procedure PB; begin GA.M; end;'#10'end.'#10);
+  // NC holds CB only, and has an UNRESOLVED name that a later edit declares.
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitNC.pas'),
+    'unit UnitNC;'#10'interface'#10'implementation'#10'uses UnitNA;'#10 +
+    'procedure PC; var X: Integer; begin X := CB; X := Shared; end;'#10 +
+    'end.'#10);
+  // ND never imports NA, yet binds into it through NB's variable.
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitND.pas'),
+    'unit UnitND;'#10'interface'#10'uses UnitNB;'#10'implementation'#10 +
+    'procedure PD; begin GA.M; end;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    Ok('namedeps: baseline - NC has exactly the one unresolved name',
+      DiagHasText(ModelByName('unitnc'), 'E2003', 'Shared') and
+      (DiagCount(ModelByName('unitnc'), 'E2003') = 1));
+    Ok('namedeps: baseline - ND binds M through NB',
+      CrossRefTo(ModelByName('unitnd'), 'M', 'M'));
+
+    // A new constant nobody mentions: the unit alone is redone, the three
+    // models in the reach are renumbered, not recomputed.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitNA.pas'),
+      cNAIntf + cNATA + cNAConst + '  CNEW = 3;'#10 + cNAImpl + 'end.'#10, 2);
+    Ok('namedeps: an unmentioned new constant is accepted',
+      GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitNA.pas')));
+    Ok('namedeps: ...and redoes the edited unit alone',
+      (Pos('module=1;', GProj.StageTimings) > 0) and
+      (Pos('reach=4;', GProj.StageTimings) > 0) and
+      (Pos('renumbered=3;', GProj.StageTimings) > 0) and
+      (Pos('added=1', GProj.StageTimings) > 0));
+
+    // A type inserted BEFORE everything: every interface symbol moves, nothing
+    // changes meaning. The untouched consumers' bindings must follow.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitNA.pas'),
+      cNAIntf + '  TFirst = class end;'#10 + cNATA + cNAConst +
+      '  CNEW = 3;'#10 + cNAImpl + 'end.'#10, 3);
+    Ok('namedeps: a shift of the whole interface is a one-module run',
+      GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitNA.pas')) and
+      (Pos('module=1;', GProj.StageTimings) > 0));
+    Ok('namedeps: NB''s renumbered binding still lands on TA',
+      CrossRefTo(ModelByName('unitnb'), 'TA', 'TA'));
+    Ok('namedeps: ND''s renumbered binding still lands on M',
+      CrossRefTo(ModelByName('unitnd'), 'M', 'M'));
+    Ok('namedeps: NC''s renumbered binding still lands on CB',
+      CrossRefTo(ModelByName('unitnc'), 'CB', 'CB'));
+    Ok('namedeps: the untouched consumer keeps its diagnostics',
+      DiagCount(ModelByName('unitnc'), 'E2003') = 1);
+
+    // A new name that NC MENTIONS (its unresolved one): NC is selected by the
+    // name test, resolves it, and loses the E2003. NB and ND are not redone.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitNA.pas'),
+      cNAIntf + '  TFirst = class end;'#10 + cNATA + cNAConst +
+      '  CNEW = 3;'#10'  Shared = 9;'#10 + cNAImpl + 'end.'#10, 4);
+    Ok('namedeps: a new name mentioned by one consumer selects that one',
+      GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitNA.pas')) and
+      (Pos('module=2;', GProj.StageTimings) > 0));
+    Ok('namedeps: ...which now resolves it',
+      DiagCount(ModelByName('unitnc'), 'E2003') = 0);
+
+    // TA's declaration changes: everyone HOLDING TA is redone - NB (its
+    // variable) and ND (the expression GA is typed TA) - and NC is not.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitNA.pas'),
+      cNAIntf + '  TFirst = class end;'#10 +
+      '  TA = class'#10'    procedure M;'#10'    procedure N;'#10'  end;'#10 +
+      cNAConst + '  CNEW = 3;'#10'  Shared = 9;'#10 +
+      'implementation'#10'procedure TA.M; begin end;'#10 +
+      'procedure TA.N; begin end;'#10'end.'#10, 5);
+    Ok('namedeps: a changed type selects its holders',
+      GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitNA.pas')) and
+      (Pos('changed=1;', GProj.StageTimings) > 0) and
+      (Pos('module=3;', GProj.StageTimings) > 0) and
+      (Pos('renumbered=1;', GProj.StageTimings) > 0));
+    Ok('namedeps: the holders still bind after the redo',
+      CrossRefTo(ModelByName('unitnb'), 'TA', 'TA') and
+      CrossRefTo(ModelByName('unitnd'), 'M', 'M'));
+
+    // CB removed: NC holds it, is redone, and reports it. Nobody else is.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitNA.pas'),
+      cNAIntf + '  TFirst = class end;'#10 +
+      '  TA = class'#10'    procedure M;'#10'    procedure N;'#10'  end;'#10 +
+      'const'#10'  CA = 1;'#10'  CNEW = 3;'#10'  Shared = 9;'#10 +
+      'implementation'#10'procedure TA.M; begin end;'#10 +
+      'procedure TA.N; begin end;'#10'end.'#10, 6);
+    Ok('namedeps: a removed constant selects its holder',
+      GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitNA.pas')) and
+      (Pos('removed=1;', GProj.StageTimings) > 0) and
+      (Pos('module=2;', GProj.StageTimings) > 0));
+    Ok('namedeps: ...which now reports it undeclared',
+      DiagHasText(ModelByName('unitnc'), 'E2003', 'CB'));
+
+    // A helper attaches by TYPE - no name test can find who it affects, so
+    // the whole reach is redone, as before 0.15.8.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitNA.pas'),
+      cNAIntf + '  TFirst = class end;'#10 +
+      '  TA = class'#10'    procedure M;'#10'    procedure N;'#10'  end;'#10 +
+      '  TAHelper = class helper for TA'#10'    procedure H;'#10'  end;'#10 +
+      'const'#10'  CA = 1;'#10'  CNEW = 3;'#10'  Shared = 9;'#10 +
+      'implementation'#10'procedure TA.M; begin end;'#10 +
+      'procedure TA.N; begin end;'#10'procedure TAHelper.H; begin end;'#10 +
+      'end.'#10, 7);
+    Ok('namedeps: a new helper redoes the whole reach',
+      GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitNA.pas')) and
+      (Pos('helpers=1;', GProj.StageTimings) > 0) and
+      (Pos('module=4;', GProj.StageTimings) > 0));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   // ---- COMPILER-RECOGNIZED attributes are not undeclared identifiers
   // (19.3.3). dcc matches [Ref] / [Align(n)] / [weak] / [unsafe] /
   // [Volatile] by NAME - no class declares them anywhere, including in the
@@ -5853,8 +5984,14 @@ begin
       'procedure TN.Extra; begin end;'#10'end.'#10, 2);
     Ok('reach: the interface edit is accepted',
       GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitNA.pas')));
-    Ok('reach: the redo set is ALL FOUR units, not three',
-      Pos('module=4;', GProj.StageTimings) > 0);
+    // Since 0.15.8 the REACH is still all four (that is what the per-edge
+    // walk fixed), but only the HOLDERS of the changed type are redone - NB
+    // (heritage) and NC (a variable). ND holds nothing of NA; its bindings
+    // are renumbered, which the cross-reference below proves.
+    Ok('reach: the reach is ALL FOUR units, not three',
+      (Pos('reach=4;', GProj.StageTimings) > 0) and
+      (Pos('module=3;', GProj.StageTimings) > 0) and
+      (Pos('renumbered=1;', GProj.StageTimings) > 0));
     Ok('reach: the transitive consumer still resolves its own imports',
       CrossRefTo(ModelByName('unitnd'), 'TNC', 'TNC'));
   finally
