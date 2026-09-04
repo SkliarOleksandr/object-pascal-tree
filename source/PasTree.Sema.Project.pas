@@ -12599,7 +12599,11 @@ begin
       Inc(LNAdded);
       Note(LAddedNames, ANew.Symbols[LNewIdx].NameLower);
       AHelpers := AHelpers or IsHelper(ANew, LNewIdx);
-      if (ANew.Symbols[LNewIdx].Scope <> NIL_SCOPE) and
+      // Not a unit reference: nobody outside can name THIS unit's uses entry,
+      // and its leaf (`Classes`, `Windows`) is an identifier half the closure
+      // mentions - typing a unit into the uses clause selected 1103 models.
+      if (ANew.Symbols[LNewIdx].Kind <> skUnitRef) and
+         (ANew.Symbols[LNewIdx].Scope <> NIL_SCOPE) and
          (ANew.Scopes[ANew.Symbols[LNewIdx].Scope].Kind in
             [sckUnit, sckStruct, sckEnum]) then
         AAdded.AddOrSetValue(ANew.Symbols[LNewIdx].NameLower, 0);

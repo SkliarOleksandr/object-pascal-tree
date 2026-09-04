@@ -1441,6 +1441,12 @@ begin
     FB.Adopt(Result, LItem);
     if CurKind = tkComma then
       Next
+    else if CurKind = tkIdentifier then
+      // A missing comma - the author is typing a unit into the list. Read on
+      // as if it were there: breaking out here made every unit after the
+      // cursor a stray token, 15 imports lost per keystroke on the client hub
+      // unit and its whole reach redone (2026-09-04).
+      Error('"," expected')
     else
       Break;
   until CurKind = tkEndOfFile;

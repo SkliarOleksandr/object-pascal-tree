@@ -349,6 +349,15 @@ dotted) and ends there; and `ParseDeclSections` treats a declaration head
 with no keyword in front as the resumption of the last section kind (or of
 what the head's shape says - `:` and `,` mean var), so the section goes on.
 
+Fifth, the `uses` clause (0.15.13). A unit typed into the list without its
+comma yet ended the clause, and every unit after the cursor became a stray
+token - 15 imports gone. The clause now reads on over a missing comma. And
+the name test no longer counts a unit REFERENCE as an added name: nobody
+outside can name this unit's uses entry, while its leaf (`Classes`,
+`Windows`) is an identifier half the closure mentions - typing `System.Classes`
+into the hub unit's uses selected 1103 models. Every state of typing a unit
+into the list is a one-module run now.
+
 ## 5. Open - what could still be improved
 
 Ordered by evidence, not by interest.
