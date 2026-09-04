@@ -350,6 +350,15 @@ type
       library offers no multi-module entry point, and looping the single-module
       one would need its own guard story). }
     FDirtyFiles: TStringList;
+    { Every edit bumps FEditSerial; a session records the value at its start.
+      At completion the dirty list is cleared ONLY if the two still agree - an
+      edit that landed while the run was in flight was NOT in the text the
+      run snapshotted, and dropping it left the next debounce tick with zero
+      dirty files, which is not "one edited unit" - so it went to a quiet
+      full rebuild. On the client project that was a 25 s rebuild once every
+      5-10 keystrokes, with no log line (2026-09-03). }
+    FEditSerial: Integer;
+    FAsyncEditSerial: Integer;
     // Did the LAST completed build demote its closed units? Then an opened tab
     // needs a re-analysis to get its text and transient maps back; otherwise
     // opening one is free. See OpenFileTab.
@@ -1307,6 +1316,7 @@ begin
   end;
   if LTouched then
   begin
+    Inc(FEditSerial);
     // No OnChange fired for an offline file - arm the debounce by hand, the
     // one thing EditorChange would otherwise have done for it.
     ClearLink;
@@ -3488,6 +3498,7 @@ begin
 
   FAsyncLoud := ALoud;
   FAnalyzeOverhead := '';      // async build reports no wrapper/stage timings
+  FAsyncEditSerial := FEditSerial;   // see the field
   FAsyncStart := TStopwatch.StartNew;
   FAsyncSession.Start;
   lblProgress.Caption := 'analyzing...';
@@ -3509,9 +3520,21 @@ var
   LTab: TSourceTab;
 begin
   Result := False;
-  if not chkIncremental.Checked or Assigned(FAsyncSession) or
-     not Assigned(FSemaProject) or (APath = '') then
+  if not chkIncremental.Checked or not Assigned(FSemaProject) or
+     (APath = '') then
     Exit;
+  // A module run is still in flight (300 ms on a big unit, against a 500 ms
+  // debounce - it happens): let it land and ask again, rather than cancel it
+  // into a full rebuild. Its completion keeps the file dirty (FEditSerial).
+  if Assigned(FAsyncSession) then
+  begin
+    if FAsyncModule then
+    begin
+      FReparseTimer.Enabled := True;
+      Exit(True);
+    end;
+    Exit;
+  end;
   // Exactly one edited file, and it must be the one we were asked about.
   if (FDirtyFiles.Count <> 1) or not SameText(FDirtyFiles[0], APath) then
     Exit;
@@ -3542,6 +3565,7 @@ begin
     if FOpenFiles.IndexOf(LRen.Key) < 0 then
       FAsyncSession.SetBuffer(LRen.Key, LRen.Value);
   FAnalyzeOverhead := '';
+  FAsyncEditSerial := FEditSerial;   // see the field
   FAsyncStart := TStopwatch.StartNew;
   FAsyncSession.Start;
   lblProgress.Caption := 'module...';
@@ -3628,7 +3652,8 @@ begin
       Log('Module reanalysis error: ' + LError);
     if LAccepted then
     begin
-      FDirtyFiles.Clear;
+      if FAsyncEditSerial = FEditSerial then
+        FDirtyFiles.Clear;   // else: an edit is pending, keep it dirty
       // The label is a PROGRESS indicator and ends where every other path
       // ends - at 'done'. The timing belongs in the message log, which the
       // line below writes.
@@ -3674,7 +3699,8 @@ begin
     FLastBuildDemoted := not chkIncremental.Checked;
     if FLastBuildDemoted then
       FSemaProject.DemoteClosedUnits(FOpenFiles.ToStringArray);
-    FDirtyFiles.Clear;   // this build saw every edit made so far
+    if FAsyncEditSerial = FEditSerial then
+      FDirtyFiles.Clear;   // this build saw every edit made so far
     FSemaProjectRoot := FMainSource;   // what this project was built from
   end;
   // A tab opened while this build was running asked for a re-analysis; now
@@ -3740,6 +3766,7 @@ begin
   var LPath := TSourceTab(TSynEdit(Sender).Parent).FilePath;
   if (LPath <> '') and (FDirtyFiles.IndexOf(LPath) < 0) then
     FDirtyFiles.Add(LPath);
+  Inc(FEditSerial);
   FReparseTimer.Enabled := False;
   FReparseTimer.Enabled := True;
 end;

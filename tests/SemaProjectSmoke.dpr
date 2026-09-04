@@ -4846,6 +4846,31 @@ begin
     Ok('decode: an ASCII file is unaffected by the rule change',
       TPasSourceManager.LoadFileTolerant(LAscii) = 'unit A; end.'#10);
 
+    // The validity scan that now decides the fallback (it used to be decided
+    // by letting the strict decoder RAISE, a first-chance stop per ANSI file
+    // in the debugger). Its verdict must match the strict decoder's: every
+    // shape it rejects, TEncoding.UTF8 rejected too.
+    Ok('utf8scan: valid multi-byte text passes',
+      TPasSourceManager.IsValidUtf8(TEncoding.UTF8.GetBytes(LText), 0));
+    Ok('utf8scan: 1251 bytes fail',
+      not TPasSourceManager.IsValidUtf8(LAnsiBytes, 0));
+    Ok('utf8scan: an overlong 2-byte form (C0 80) fails',
+      not TPasSourceManager.IsValidUtf8(TBytes.Create($41, $C0, $80), 0));
+    Ok('utf8scan: an overlong 3-byte form (E0 80 80) fails',
+      not TPasSourceManager.IsValidUtf8(TBytes.Create($E0, $80, $80), 0));
+    Ok('utf8scan: an encoded surrogate (ED A0 80) fails',
+      not TPasSourceManager.IsValidUtf8(TBytes.Create($ED, $A0, $80), 0));
+    Ok('utf8scan: past U+10FFFF (F4 90 80 80) fails',
+      not TPasSourceManager.IsValidUtf8(TBytes.Create($F4, $90, $80, $80), 0));
+    Ok('utf8scan: U+10FFFF itself (F4 8F BF BF) passes',
+      TPasSourceManager.IsValidUtf8(TBytes.Create($F4, $8F, $BF, $BF), 0));
+    Ok('utf8scan: a truncated sequence at the end fails',
+      not TPasSourceManager.IsValidUtf8(TBytes.Create($41, $E2, $82), 0));
+    Ok('utf8scan: a stray continuation byte fails',
+      not TPasSourceManager.IsValidUtf8(TBytes.Create($41, $80), 0));
+    Ok('utf8scan: the start offset skips the preamble',
+      TPasSourceManager.IsValidUtf8(TBytes.Create($EF, $BB, $BF, $41), 3));
+
   finally
     if TDirectory.Exists(LDir) then
       TDirectory.Delete(LDir, True);

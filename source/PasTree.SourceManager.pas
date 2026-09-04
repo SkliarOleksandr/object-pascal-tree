@@ -174,6 +174,11 @@ type
       (`No mapping for the Unicode character exists in the target multi-byte
       code page`), so the demo used to display that message INSTEAD of the
       unit - the one file where seeing the source actually mattered. }
+    { Strict UTF-8 validity of ABytes from AStart: the same rule the strict
+      TEncoding.UTF8 enforces (no overlong forms, no surrogates, nothing past
+      U+10FFFF, no truncated sequence), so DecodeBytes can take its fallback
+      WITHOUT raising first. Exposed for the tests. }
+    class function IsValidUtf8(const ABytes: TBytes; AStart: Integer): Boolean;
     class function DecodeBytes(const ABytes: TBytes;
       out AHow: string): string; static;
     class function LoadFileTolerant(const APath: string): string; static;
@@ -596,6 +601,49 @@ end;
   parser produced a single node, the model came out EMPTY - and every unit
   that imported it lost every name it declared. One byte in a comment cost
   ~1700 false "undeclared identifier" reports on the Alcinoe package. }
+class function TPasSourceManager.IsValidUtf8(const ABytes: TBytes;
+  AStart: Integer): Boolean;
+var
+  LIdx, LEnd, LNeed: Integer;
+  LB, LMin2: Byte;
+begin
+  LIdx := AStart;
+  LEnd := Length(ABytes);
+  while LIdx < LEnd do
+  begin
+    LB := ABytes[LIdx];
+    if LB < $80 then
+    begin
+      Inc(LIdx);
+      Continue;
+    end;
+    // Lead byte -> continuation count, plus the range of the SECOND byte that
+    // rules out overlong forms (E0, F0), surrogates (ED) and > U+10FFFF (F4).
+    LMin2 := $80;
+    case LB of
+      $C2..$DF: LNeed := 1;
+      $E0: begin LNeed := 2; LMin2 := $A0; end;
+      $E1..$EF: LNeed := 2;
+      $F0: begin LNeed := 3; LMin2 := $90; end;
+      $F1..$F4: LNeed := 3;
+    else
+      Exit(False);   // C0, C1, F5..FF, or a stray continuation byte
+    end;
+    if LIdx + LNeed >= LEnd then
+      Exit(False);   // truncated sequence
+    if (ABytes[LIdx + 1] < LMin2) or (ABytes[LIdx + 1] > $BF) or
+       ((LB = $ED) and (ABytes[LIdx + 1] > $9F)) or
+       ((LB = $F4) and (ABytes[LIdx + 1] > $8F)) then
+      Exit(False);
+    if (LNeed >= 2) and ((ABytes[LIdx + 2] and $C0) <> $80) then
+      Exit(False);
+    if (LNeed = 3) and ((ABytes[LIdx + 3] and $C0) <> $80) then
+      Exit(False);
+    Inc(LIdx, LNeed + 1);
+  end;
+  Result := True;
+end;
+
 class function TPasSourceManager.DecodeBytes(const ABytes: TBytes;
   out AHow: string): string;
 var
@@ -609,22 +657,36 @@ begin
   // A preamble was found, so the file SAYS what it is; without one, UTF-8 above
   // is an assumption this may have to take back.
   LDeclared := LStart > 0;
+  // Decided by a byte scan, NOT by letting the strict decoder raise: the
+  // outcome is the same, but a raise per ANSI file is a first-chance stop in
+  // the debugger on every one of them (a project with hundreds of Windows-1251
+  // sources became unusable under the IDE that way, 2026-09-03) and an
+  // exception's worth of time on a load path that is the closure's fixed cost.
+  if (LEnc.CodePage = CP_UTF8) and not IsValidUtf8(ABytes, LStart) then
+  begin
+    if LDeclared then
+    begin
+      // Same encoding, no error flags: substitute rather than raise.
+      LLenient := TUTF8Encoding.Create(CP_UTF8, 0, 0);
+      try
+        Result := LLenient.GetString(ABytes, LStart, Length(ABytes) - LStart);
+      finally
+        LLenient.Free;
+      end;
+      AHow := 'UTF-8|leniently, substituting U+FFFD';
+    end
+    else
+      Result := TEncoding.ANSI.GetString(ABytes, LStart,
+        Length(ABytes) - LStart);
+      // ...and NOTHING is noted for the preamble-less case - see below.
+    Exit;
+  end;
   try
     Result := LEnc.GetString(ABytes, LStart, Length(ABytes) - LStart);
   except
+    // Kept for the non-UTF-8 preambles (UTF-16/32 are total decoders, but the
+    // contract stays: a decode failure is never fatal to the load).
     on E: EEncodingError do
-      if LDeclared and (LEnc.CodePage = CP_UTF8) then
-      begin
-        // Same encoding, no error flags: substitute rather than raise.
-        LLenient := TUTF8Encoding.Create(CP_UTF8, 0, 0);
-        try
-          Result := LLenient.GetString(ABytes, LStart, Length(ABytes) - LStart);
-        finally
-          LLenient.Free;
-        end;
-        AHow := 'UTF-8|leniently, substituting U+FFFD';
-      end
-      else
       begin
         Result := TEncoding.ANSI.GetString(ABytes, LStart,
           Length(ABytes) - LStart);

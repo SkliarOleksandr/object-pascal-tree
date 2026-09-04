@@ -37,8 +37,9 @@ program PasTreeDiffHarness;
     (b) interface edit - a new routine declared at the end of the interface
         section, with its body appended.
   A -script file replaces the synthetic sampling: one edit per line,
-  `body|intf|blank|comment|const|type <full-path>`, applied in order (the
-  last four land at the end of the interface section).
+  `body|intf|blank|comment|const|type|implvar|implvartop <full-path>`,
+  applied in order (blank/comment/const/type land at the end of the interface
+  section).
 
   -selftest inverts the exercise to prove the COMPARATOR can see: the
   incremental side is deliberately fed the PRE-EDIT text of each step's
@@ -73,7 +74,8 @@ uses
   PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas';
 
 type
-  TEditKind = (ekBody, ekIntf, ekBlank, ekComment, ekConst, ekType);
+  TEditKind = (ekBody, ekIntf, ekBlank, ekComment, ekConst, ekType,
+    ekImplVar, ekImplVarTop);
   TEditStep = record
     Kind: TEditKind;
     Path: string;    // full path of the unit to edit
@@ -218,6 +220,13 @@ begin
         LLines.Insert(LImpl, Format('const __DiffConst%d = %d;', [ASeq, ASeq]));
       ekType:
         LLines.Insert(LImpl, Format('type __DiffType%d = Integer;', [ASeq]));
+      // A global variable in the implementation section: at its end, and
+      // right after the `implementation` line (before its uses clause - dcc
+      // rejects that, the analyzer must still take it as a body edit).
+      ekImplVar:
+        LLines.Insert(LTail, Format('var __DiffVar%d: Integer;', [ASeq]));
+      ekImplVarTop:
+        LLines.Insert(LImpl + 1, Format('var __DiffVar%d: Integer;', [ASeq]));
     end;
     ANewText := string.Join(#13#10, LLines.ToArray);
     Result := True;
@@ -387,6 +396,8 @@ begin
     ekBlank: Result := 'blank';
     ekComment: Result := 'comment';
     ekConst: Result := 'const';
+    ekImplVar: Result := 'implvar';
+    ekImplVarTop: Result := 'implvartop';
   else
     Result := 'type';
   end;
@@ -456,6 +467,10 @@ begin
       LStep.Kind := ekConst
     else if SameText(LKindWord, 'type') then
       LStep.Kind := ekType
+    else if SameText(LKindWord, 'implvar') then
+      LStep.Kind := ekImplVar
+    else if SameText(LKindWord, 'implvartop') then
+      LStep.Kind := ekImplVarTop
     else
     begin
       Writeln(ErrOutput, 'bad script kind: ', LKindWord);
@@ -670,7 +685,8 @@ begin
       if (LStep.Kind in [ekIntf, ekConst, ekType]) and
          LHow.StartsWith('module') then
         Inc(GAcceptedIntf)
-      else if (LStep.Kind in [ekBody, ekBlank, ekComment]) and
+      else if (LStep.Kind in [ekBody, ekBlank, ekComment, ekImplVar,
+                             ekImplVarTop]) and
               not LHow.StartsWith('module') then
       begin
         LVerdict := LVerdict + ' (unexpected fallback)';
