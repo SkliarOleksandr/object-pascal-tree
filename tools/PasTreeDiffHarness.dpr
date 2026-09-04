@@ -37,9 +37,9 @@ program PasTreeDiffHarness;
     (b) interface edit - a new routine declared at the end of the interface
         section, with its body appended.
   A -script file replaces the synthetic sampling: one edit per line,
-  `body|intf|blank|comment|const|type|implvar|implvartop <full-path>`,
-  applied in order (blank/comment/const/type land at the end of the interface
-  section).
+  `body|intf|blank|comment|const|type|implvar|implvartop|intfuses
+  <full-path>`, applied in order (blank/comment/const/type land at the end of
+  the interface section, intfuses appends a unit to the interface uses).
 
   -selftest inverts the exercise to prove the COMPARATOR can see: the
   incremental side is deliberately fed the PRE-EDIT text of each step's
@@ -75,7 +75,7 @@ uses
 
 type
   TEditKind = (ekBody, ekIntf, ekBlank, ekComment, ekConst, ekType,
-    ekImplVar, ekImplVarTop);
+    ekImplVar, ekImplVarTop, ekIntfUses);
   TEditStep = record
     Kind: TEditKind;
     Path: string;    // full path of the unit to edit
@@ -178,7 +178,7 @@ function ApplyEdit(const AText: string; AKind: TEditKind; ASeq: Integer;
 var
   LLines: TList<string>;
   LArr: TArray<string>;
-  LImpl, LTail, LInit: Integer;
+  LImpl, LTail, LInit, LIntf, LUses: Integer;
 begin
   Result := False;
   ANewText := AText;
@@ -227,6 +227,26 @@ begin
         LLines.Insert(LTail, Format('var __DiffVar%d: Integer;', [ASeq]));
       ekImplVarTop:
         LLines.Insert(LImpl + 1, Format('var __DiffVar%d: Integer;', [ASeq]));
+      // A unit added to the INTERFACE uses clause - the edit that renumbers
+      // every interface symbol (the unit-ref symbol lands first). Appended
+      // to an existing clause, or a new clause right after `interface`.
+      ekIntfUses:
+        begin
+          LIntf := LineIndexOf(LArr, 'interface');
+          if LIntf < 0 then
+            Exit(False);
+          LUses := -1;
+          for var LIdx := LIntf + 1 to LImpl - 1 do
+            if Trim(LArr[LIdx]).StartsWith('uses', True) then
+            begin
+              LUses := LIdx;
+              Break;
+            end;
+          if LUses >= 0 then
+            LLines.Insert(LUses + 1, '  System.Zip,')
+          else
+            LLines.Insert(LIntf + 1, 'uses System.Zip;');
+        end;
     end;
     ANewText := string.Join(#13#10, LLines.ToArray);
     Result := True;
@@ -398,6 +418,7 @@ begin
     ekConst: Result := 'const';
     ekImplVar: Result := 'implvar';
     ekImplVarTop: Result := 'implvartop';
+    ekIntfUses: Result := 'intfuses';
   else
     Result := 'type';
   end;
@@ -471,6 +492,8 @@ begin
       LStep.Kind := ekImplVar
     else if SameText(LKindWord, 'implvartop') then
       LStep.Kind := ekImplVarTop
+    else if SameText(LKindWord, 'intfuses') then
+      LStep.Kind := ekIntfUses
     else
     begin
       Writeln(ErrOutput, 'bad script kind: ', LKindWord);
@@ -682,7 +705,7 @@ begin
       // their own references), a shifted symbol index harms nobody. What
       // decides correctness is the comparison against the full pipeline,
       // which every step runs anyway - so this is counted, not judged.
-      if (LStep.Kind in [ekIntf, ekConst, ekType]) and
+      if (LStep.Kind in [ekIntf, ekConst, ekType, ekIntfUses]) and
          LHow.StartsWith('module') then
         Inc(GAcceptedIntf)
       else if (LStep.Kind in [ekBody, ekBlank, ekComment, ekImplVar,

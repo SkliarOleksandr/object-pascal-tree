@@ -350,10 +350,43 @@ type
     // order, scope shape). ASymN is the old model's boundary, for guard 2.
     function IntfPrefixSame(AOld, ANew: TPasSemaModel;
       out ASymN: Integer; out AWhy: string): Boolean;
-    // Guard 2: no instance-table entry names a symbol of model AId at or past
-    // ASymN (such an index would dangle after the swap). ASymN = the interface
-    // boundary for a body edit; 0 when the interface itself was renumbered.
+    // Guard 2, the cheap half: no instance-table entry names a symbol of
+    // model AId at or past ASymN (such an index would dangle after the swap).
+    // ASymN = the interface boundary for a body edit; 0 when the interface
+    // itself was renumbered. False is no longer a refusal by itself - see
+    // MatchSymbols / RepointInstances for what happens then.
     function InstancesSafeFor(AId, ASymN: Integer): Boolean;
+    { Old-to-new symbol map between two models of the SAME unit - the analyzed
+      one and its fresh re-parse. Result[old] is the new index of the symbol
+      with the same identity, or NIL_SYM when the new model has none.
+
+      Identity is (kind, name, declaring scope, ordinal) with the scope named
+      structurally - by the symbol that OWNS it (a type's member scope, a
+      routine's parameter scope), recursively, never by index - plus the
+      generic arity for a type, so `TFoo<T>` and `TFoo<T, U>` in one scope
+      stay apart. Same-named routines in one scope (overloads) are told apart
+      by declaration order alone; an overload inserted BEFORE another shifts
+      the later ones to a different identity, which reads as "removed" here.
+      That is the conservative direction: nothing is ever matched to a
+      symbol it is not.
+
+      Cost is one pass over each arena; cheaper than the parse that produced
+      ANew. Class function: it reads the two models and nothing else. }
+    class function MatchSymbols(AOld, ANew: TPasSemaModel): TArray<Integer>;
+    { Can every instance-table entry naming model AId be carried across the
+      swap through AMap? False, with the symbol named in AWhy, when one of
+      them names a symbol the new model no longer has - a deleted generic, or
+      an overload that lost its identity (see MatchSymbols). }
+    function InstancesRepointable(AId: Integer; const AMap: TArray<Integer>;
+      out AWhy: string): Boolean;
+    { Rewrite those entries in place - the generic's own symbol and every
+      argument's - and rehash the key dictionary. Instance INDICES do not
+      move, which is the point: every model's SymTypeX/ExprTypeX carries
+      them, and none of those models is touched. Run only after
+      InstancesRepointable said yes, and only past the commit point. Returns
+      the number of entries rewritten, for StageTimings. }
+    function RepointInstances(AId: Integer;
+      const AMap: TArray<Integer>): Integer;
     { Does every `uses` entry of AModel (a freshly parsed replacement for
       model AId) resolve to a file the project has ALREADY loaded? A new
       import changes the closure, which the single-module path cannot do -
@@ -457,6 +490,10 @@ type
     function InstanceRead(AInst: Integer): TSemaInstance;
     function TypeDefNodeOf(AMid, ASym: Integer): Integer;
     function GenericParamIdents(AMid, ASym: Integer): TArray<Integer>;
+    // The same walk over a model that need not be in FModels yet (a fresh
+    // re-parse the module path is still deciding about).
+    class function GenericParamIdentsOf(LM: TPasSemaModel;
+      ASym: Integer): TArray<Integer>;
     function GenericParamConstraints(AMid,
       ASym: Integer): TArray<TArray<Integer>>;
     function RealGenericBase(const AX: TSemaXType): TSemaXType;
@@ -5074,12 +5111,16 @@ end;
 // the positional frame instantiation args are matched against.
 function TPasSemaProject.GenericParamIdents(AMid,
   ASym: Integer): TArray<Integer>;
+begin
+  Result := GenericParamIdentsOf(FModels[AMid], ASym);
+end;
+
+class function TPasSemaProject.GenericParamIdentsOf(LM: TPasSemaModel;
+  ASym: Integer): TArray<Integer>;
 var
-  LM: TPasSemaModel;
   LName, LParent, LGen, LParam, LP: Integer;
 begin
   Result := nil;
-  LM := FModels[AMid];
   LName := LM.Symbols[ASym].DeclNode;
   if LName = NIL_NODE then
     Exit;
@@ -11516,6 +11557,183 @@ begin
   Result := True;
 end;
 
+class function TPasSemaProject.MatchSymbols(AOld,
+  ANew: TPasSemaModel): TArray<Integer>;
+
+  // Every symbol of AModel -> its identity key (see the declaration). Keys
+  // are unique within one model by construction: the ordinal counts earlier
+  // symbols with the same (kind, name, scope, arity).
+  function KeysOf(AModel: TPasSemaModel): TArray<string>;
+  var
+    LOwner: TArray<Integer>;     // scope -> the symbol whose MemberScope it is
+    LScopeKey: TArray<string>;   // memo; '' = not computed yet
+    LOrdinals: TDictionary<string, Integer>;
+    LKeys: TArray<string>;
+    LIdx, LN: Integer;
+    LBase: string;
+
+    // Unowned scopes (a routine BODY, a block, a with, a type's generic
+    // parameter list) are told apart by kind and order under their parent.
+    function ScopeKey(AScope: Integer): string;
+    var
+      LSc: TSemaScope;
+      LCount: Integer;
+    begin
+      if AScope = NIL_SCOPE then
+        Exit('-');
+      if LScopeKey[AScope] <> '' then
+        Exit(LScopeKey[AScope]);
+      LSc := AModel.Scopes[AScope];
+      case LSc.Kind of
+        sckSystem: Result := 'S';
+        sckUnit: Result := 'U';
+        sckImplementation: Result := 'I';
+      else
+        if (LOwner[AScope] <> NIL_SYM) and (LKeys[LOwner[AScope]] <> '') then
+          Result := 'M(' + LKeys[LOwner[AScope]] + ')'
+        else
+        begin
+          Result := Format('K%d(%s)', [Ord(LSc.Kind), ScopeKey(LSc.Parent)]);
+          if not LOrdinals.TryGetValue(Result, LCount) then
+            LCount := 0;
+          LOrdinals.AddOrSetValue(Result, LCount + 1);
+          Result := Result + '#' + IntToStr(LCount);
+        end;
+      end;
+      LScopeKey[AScope] := Result;
+    end;
+
+  begin
+    SetLength(LKeys, AModel.SymCount);
+    SetLength(LScopeKey, AModel.Scopes.Count);
+    SetLength(LOwner, AModel.Scopes.Count);
+    for LIdx := 0 to High(LOwner) do
+      LOwner[LIdx] := NIL_SYM;
+    // A type or routine symbol is declared BEFORE the members or parameters
+    // in its scope are collected, so by the time a member asks for its scope
+    // key the owner's own key is already there. Where it is not (an owner
+    // that follows its members, which the collect order never produces
+    // today), the scope falls back to the positional key above - still a
+    // valid identity, just a more brittle one.
+    for LIdx := 0 to AModel.SymCount - 1 do
+      if (AModel.Symbols[LIdx].MemberScope <> NIL_SCOPE) and
+         (AModel.Symbols[LIdx].MemberScope <= High(LOwner)) and
+         (LOwner[AModel.Symbols[LIdx].MemberScope] = NIL_SYM) then
+        LOwner[AModel.Symbols[LIdx].MemberScope] := LIdx;
+    LOrdinals := TDictionary<string, Integer>.Create;
+    try
+      for LIdx := 0 to AModel.SymCount - 1 do
+      begin
+        LBase := Format('%d|%s|%s', [Ord(AModel.Symbols[LIdx].Kind),
+          AModel.Symbols[LIdx].NameLower, ScopeKey(AModel.Symbols[LIdx].Scope)]);
+        if sfGeneric in AModel.Symbols[LIdx].Flags then
+          LBase := LBase + '<' +
+            IntToStr(Length(GenericParamIdentsOf(AModel, LIdx))) + '>';
+        if not LOrdinals.TryGetValue(LBase, LN) then
+          LN := 0;
+        LOrdinals.AddOrSetValue(LBase, LN + 1);
+        LKeys[LIdx] := LBase + '|' + IntToStr(LN);
+      end;
+    finally
+      LOrdinals.Free;
+    end;
+    Result := LKeys;
+  end;
+
+var
+  LOldKeys, LNewKeys: TArray<string>;
+  LNewByKey: TDictionary<string, Integer>;
+  LIdx, LNew: Integer;
+begin
+  LOldKeys := KeysOf(AOld);
+  LNewKeys := KeysOf(ANew);
+  SetLength(Result, Length(LOldKeys));
+  LNewByKey := TDictionary<string, Integer>.Create(Length(LNewKeys));
+  try
+    for LIdx := 0 to High(LNewKeys) do
+      LNewByKey.Add(LNewKeys[LIdx], LIdx);
+    for LIdx := 0 to High(LOldKeys) do
+      if LNewByKey.TryGetValue(LOldKeys[LIdx], LNew) then
+        Result[LIdx] := LNew
+      else
+        Result[LIdx] := NIL_SYM;
+  finally
+    LNewByKey.Free;
+  end;
+end;
+
+function TPasSemaProject.InstancesRepointable(AId: Integer;
+  const AMap: TArray<Integer>; out AWhy: string): Boolean;
+
+  function Mapped(ASym: Integer): Boolean;
+  begin
+    Result := (ASym >= 0) and (ASym <= High(AMap)) and (AMap[ASym] <> NIL_SYM);
+    if not Result then
+      AWhy := 'instance-unmatched-sym(' +
+        FModels[AId].Symbols[ASym].NameLower + ')';
+  end;
+
+var
+  LIdx, LArg: Integer;
+  LInst: TSemaInstance;
+begin
+  AWhy := '';
+  for LIdx := 0 to InstanceCount - 1 do
+  begin
+    LInst := Instance(LIdx);
+    if (LInst.UnitId = AId) and not Mapped(LInst.Sym) then
+      Exit(False);
+    for LArg := 0 to High(LInst.Args) do
+      if (LInst.Args[LArg].UnitId = AId) and not Mapped(LInst.Args[LArg].Sym) then
+        Exit(False);
+  end;
+  Result := True;
+end;
+
+function TPasSemaProject.RepointInstances(AId: Integer;
+  const AMap: TArray<Integer>): Integer;
+var
+  LIdx, LArg: Integer;
+  LInst: TSemaInstance;
+  LTouched: Boolean;
+begin
+  Result := 0;
+  FInstLock.Enter;
+  try
+    for LIdx := 0 to FInstances.Count - 1 do
+    begin
+      LInst := FInstances[LIdx];
+      LTouched := False;
+      if LInst.UnitId = AId then
+      begin
+        LInst.Sym := AMap[LInst.Sym];
+        LTouched := True;
+      end;
+      // Args is shared by reference with the key dictionary's copy of this
+      // record; an element write goes to the one array both hold, which is
+      // what the rehash below relies on.
+      for LArg := 0 to High(LInst.Args) do
+        if LInst.Args[LArg].UnitId = AId then
+        begin
+          LInst.Args[LArg].Sym := AMap[LInst.Args[LArg].Sym];
+          LTouched := True;
+        end;
+      if LTouched then
+      begin
+        FInstances[LIdx] := LInst;
+        Inc(Result);
+      end;
+    end;
+    // The keys hashed the OLD indices; distinct entries stay distinct (the
+    // map is injective on what it matches), so a plain rebuild is exact.
+    FInstKeys.Clear;
+    for LIdx := 0 to FInstances.Count - 1 do
+      FInstKeys.Add(FInstances[LIdx], LIdx);
+  finally
+    FInstLock.Leave;
+  end;
+end;
+
 {$IFDEF PASTREE_MEMBERSTATS}
 procedure TPasSemaProject.NoteMemberQuery(AFromMid: Integer;
   const ABase: TSemaXType; const ANameLower: string);
@@ -11831,6 +12049,8 @@ var
   LSW: TStopwatch;
   LWhy: string;
   LIntfSame: Boolean;
+  LMap: TArray<Integer>;      // old -> new symbol, when the instances need it
+  LRepointed: Integer;
 
   // Every refusal names itself in StageTimings - the fast path's whole value
   // is how OFTEN it fires, so "it fell back" without a reason is unreadable.
@@ -11895,18 +12115,28 @@ begin
       for LIdx := 1 to High(LIds) do
         if FModels[LIds[LIdx]].Demoted then
           Exit(Refuse('consumer-demoted'));
-      // The instance table survives every pass and is keyed by (unit, symbol);
-      // an entry naming THIS module cannot be trusted once its numbering
-      // moved. Repointing it needs the old->new match this first cut does not
-      // build - see INCREMENTAL-NEXT.
-      if not InstancesSafeFor(LId, 0) then
-        Exit(Refuse('instance-into-changed-intf'));
     end
     else
-    begin
-      if not InstancesSafeFor(LId, LSymN) then
-        Exit(Refuse('instance-impl-sym'));
       LIds := [LId];
+    // The instance table survives every pass and is keyed by (unit, symbol):
+    // an entry naming THIS module past the point where its numbering moved
+    // (the interface boundary for a body edit, symbol 0 for an interface
+    // edit) would dangle after the swap. Until 0.15.7 that was a refusal -
+    // `instance-into-changed-intf` on every interface edit of a unit whose
+    // generics anybody instantiates, `instance-impl-sym` on a body edit
+    // whose implementation-local type is a generic argument. Now the old
+    // and new symbols are matched by identity and the entries follow; only
+    // an entry whose symbol has no successor still refuses.
+    LMap := nil;
+    if LIntfSame then
+      LIdx := LSymN
+    else
+      LIdx := 0;
+    if not InstancesSafeFor(LId, LIdx) then
+    begin
+      LMap := MatchSymbols(LOld, LNew);
+      if not InstancesRepointable(LId, LMap, LWhy) then
+        Exit(Refuse(LWhy));
     end;
     FStageTimings := Format('parse=%d;', [LSW.ElapsedMilliseconds]);
     LSW := TStopwatch.StartNew;
@@ -11915,6 +12145,9 @@ begin
     // currency), and the per-model pass scratch is rebuilt below.
     FModels[LId] := LNew;
     LNew := nil;
+    LRepointed := 0;
+    if LMap <> nil then
+      LRepointed := RepointInstances(LId, LMap);
     // PAST THE COMMIT POINT. Everything above is a clean refusal; from here a
     // failure cannot restore the project (the consumers' cross-unit state is
     // being thrown away and rebuilt), so it is published as such: the flag
@@ -11951,6 +12184,9 @@ begin
       Format('passes=%d;module=%d;', [LSW.ElapsedMilliseconds, Length(LIds)]);
     if not LIntfSame then
       FStageTimings := FStageTimings + 'intfchanged=1;';
+    if LRepointed > 0 then
+      FStageTimings := FStageTimings +
+        Format('instrepoint=%d;', [LRepointed]);
     Result := True;
   finally
     // Refused: the project was never touched, and the fresh model is ours.

@@ -125,9 +125,19 @@ same core unit takes 303 ms.
    much higher index. The scan also continues past the boundary and refuses if
    anything interface-side follows it, rather than trusting the collect order.
 
-2. **The instance table** must hold no entry naming a symbol of this model at
-   or past the boundary. That table survives every pass and is keyed by
-   (unit, symbol), so such an entry would dangle after the swap.
+2. **The instance table** is carried across the swap. It survives every pass
+   and is keyed by (unit, symbol), so an entry naming a symbol of this model
+   at or past the boundary would dangle once the numbering moved. Until
+   0.15.7 that was a refusal on every interface edit of a unit whose generics
+   anybody instantiates - which on the client closure is every hub unit.
+   Now `MatchSymbols` pairs old and new symbols by identity - (kind, name,
+   declaring scope named structurally by its owning symbol, ordinal, generic
+   arity) - and `RepointInstances` rewrites the entries in place and rehashes
+   the key dictionary. Instance INDICES do not move, which is what makes it
+   safe: every model's `SymTypeX`/`ExprTypeX` carries them, and none of those
+   models is touched. The one shape that still refuses is an instance whose
+   generic has no successor (the generic was deleted, or an overload before
+   it changed its identity): `instance-unmatched-sym(<name>)`.
 
 `sfExternalUnresolved` is excluded from the symbol comparison: `ResolveUses`
 clears it on an analyzed model, so the old (post-pass) model and the new (raw
@@ -150,7 +160,7 @@ from a slow analyzer.
 | `no-clean-boundary-*` | no implementation scope, or the arena is not split cleanly at it |
 | `intf-sym#N`, `intf-scope#N` | the interface prefix moved in a way the redo cannot express |
 | `too-many-consumers(N>L)` | the blast radius N exceeds `ModuleRedoLimit` (128; 0 or less lifts the ceiling). The number is reported because "too many" alone says nothing about whether the limit is set sensibly |
-| `instance-impl-sym`, `instance-into-changed-intf` | the instance table points into the part being renumbered |
+| `instance-unmatched-sym(<name>)` | an instance names a symbol of this unit that the new text no longer declares (a deleted generic, or an overload whose ordinal moved) - see guard 2 |
 
 ### Driving it from a host
 
@@ -208,9 +218,11 @@ and diagnostics across the ENTIRE closure after every step. The corpus suites
 only ever prove the full path.
 
 - `-script:<file>` replaces the synthetic sampling: one `kind <path>` per
-  line, kind = `body`, `intf`, `blank`, `comment`, `const` or `type` (the last
+  line, kind = `body`, `intf`, `blank`, `comment`, `const`, `type` (the last
   four land at the end of the interface section - the "start typing in a big
-  interface" shapes). On the client closure a blank line or comment in the hub
+  interface" shapes), `implvar`/`implvartop` (a variable at the end / the top
+  of the implementation section) or `intfuses` (a unit appended to the
+  interface uses clause - the edit that renumbers every interface symbol). On the client closure a blank line or comment in the hub
   types unit is a 250 ms module step; a new const or type refuses with
   `too-many-consumers(1260>128)` and rebuilds, which is what the name-level
   dependency idea in the open list is for;
@@ -252,10 +264,14 @@ rebuild - about 300 ms fixed plus ~57 ms per model - so break-even sits near
 fallback. 128 keeps the worst case near 7 s; a host that knows its closure can
 tune the property.
 
-**C. The instance table forces a refusal on interface changes.** Fixable by
-matching old declarations to new ones (name, kind, nesting), repointing the
-entries and rehashing the key dictionary. Measured frequency: once in three
-interface edits on the client closure, never on the demo. Do it when it bites.
+**C. DONE (0.15.7) - the instance table follows a renumbered unit.** Old and
+new declarations are matched by identity and the entries repointed (guard 2
+above). Measured on the client closure: a body edit in a generics-heavy
+library unit that used to refuse `instance-impl-sym` is a 166 ms module step;
+an interface edit or a new interface `uses` entry in a project types unit
+that used to refuse `instance-into-changed-intf` is a 4-model redo at 1.35 s
+against a 28 s rebuild. Harness kinds `body`/`intf`/`intfuses` on those
+units are the gate.
 
 **D. A new `uses` entry falls back to a rebuild.** The newcomer needs loading,
 Phase 1 and cross passes of its own - bounded work that could be done

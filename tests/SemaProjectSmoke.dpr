@@ -5634,6 +5634,105 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  // ---- Guard 2 became a repoint (0.15.7). The instance table is keyed by
+  // (unit, symbol) and outlives every pass; an edit that renumbers a unit's
+  // symbols used to be REFUSED whenever any instance named one of them past
+  // the point where the numbering moved. Now old and new symbols are matched
+  // by identity (MatchSymbols) and the entries follow; instance INDICES stay,
+  // so no other model's SymTypeX/ExprTypeX is touched. Both the interface
+  // shift (a type inserted BEFORE the generic) and the body shift (a type
+  // inserted before an implementation-local generic argument) are covered,
+  // and the one case that must still refuse - the generic itself is gone -
+  // is asserted as a refusal that leaves the project untouched. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_instrepoint');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  const cGAHead = 'unit UnitGA;'#10'interface'#10'type'#10;
+  const cGABox = '  TBox<T> = class'#10'    Value: T;'#10'  end;'#10 +
+    '  TPlain = class end;'#10'implementation'#10'type'#10;
+  const cGATail = '  TLocal = record X: Integer; end;'#10 +
+    'var LV: TBox<TLocal>;'#10'end.'#10;
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitGA.pas'),
+    cGAHead + cGABox + cGATail);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitGB.pas'),
+    'unit UnitGB;'#10'interface'#10'uses UnitGA;'#10 +
+    'type TIntBox = TBox<Integer>;'#10 +
+    'var GB: TBox<TPlain>;'#10'implementation'#10 +
+    'procedure Q; var B: TBox<Integer>; begin B := nil; end;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    var LGa := GProj.ModelIdOf(TPath.Combine(LDir, 'UnitGA.pas'));
+    // Every instance naming UnitGA points at a symbol of the given name -
+    // the property the repoint must preserve, asserted by NAME because the
+    // indices are exactly what the edit moves.
+    var LInstancesName := function(const ABoxName: string): Boolean
+    begin
+      Result := GProj.InstanceCount > 0;
+      for var LIdx := 0 to GProj.InstanceCount - 1 do
+      begin
+        var LInst := GProj.Instance(LIdx);
+        if (LInst.UnitId = LGa) and
+           (GProj.Model(LGa).Symbols[LInst.Sym].NameLower <> ABoxName) then
+          Exit(False);
+        for var LArg := 0 to High(LInst.Args) do
+          if LInst.Args[LArg].UnitId = LGa then
+          begin
+            var LArgName := GProj.Model(LGa).Symbols[LInst.Args[LArg].Sym].NameLower;
+            if (LArgName <> 'tplain') and (LArgName <> 'tlocal') then
+              Exit(False);
+          end;
+      end;
+    end;
+    Ok('instrepoint: the fixture instantiates the generic (baseline)',
+      LInstancesName('tbox'));
+
+    // Interface shift: a new type BEFORE TBox moves every symbol after it.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitGA.pas'),
+      cGAHead + '  TFirst = class end;'#10 + cGABox + cGATail, 2);
+    Ok('instrepoint: an interface edit that shifts an instantiated generic '
+      + 'is accepted',
+      GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitGA.pas')));
+    Ok('instrepoint: the run reports the repoint',
+      Pos('instrepoint=', GProj.StageTimings) > 0);
+    Ok('instrepoint: every instance still names TBox and its arguments',
+      LInstancesName('tbox'));
+    Ok('instrepoint: the consumer was redone and still binds TBox',
+      CrossRefTo(ModelByName('unitgb'), 'TBox', 'TBox'));
+
+    // Body shift: a type before TLocal moves the implementation-local
+    // argument of LV's instantiation. Radius 1, so `module=1`.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitGA.pas'),
+      cGAHead + '  TFirst = class end;'#10 + cGABox +
+      '  TZero = record end;'#10 + cGATail, 3);
+    Ok('instrepoint: a body edit that shifts a local generic argument is '
+      + 'accepted',
+      GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitGA.pas')));
+    Ok('instrepoint: the body edit stayed a one-module run',
+      Pos('module=1;', GProj.StageTimings) > 0);
+    Ok('instrepoint: the local argument followed its symbol',
+      LInstancesName('tbox'));
+
+    // The generic itself deleted: its instances have no successor. Refused,
+    // and refused BEFORE the swap - the old model still answers.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitGA.pas'),
+      cGAHead + '  TFirst = class end;'#10'  TPlain = class end;'#10 +
+      'implementation'#10'end.'#10, 4);
+    Ok('instrepoint: deleting the instantiated generic is refused',
+      not GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitGA.pas')));
+    Ok('instrepoint: the refusal names the symbol',
+      Pos('instance-unmatched-sym(tbox)', GProj.StageTimings) > 0);
+    Ok('instrepoint: the refused project is untouched',
+      LInstancesName('tbox') and
+      (ModelByName('unitga').FindLocal(ModelByName('unitga').InterfaceScope,
+         'tbox') <> NIL_SYM));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   // ---- COMPILER-RECOGNIZED attributes are not undeclared identifiers
   // (19.3.3). dcc matches [Ref] / [Align(n)] / [weak] / [unsafe] /
   // [Volatile] by NAME - no class declares them anywhere, including in the
