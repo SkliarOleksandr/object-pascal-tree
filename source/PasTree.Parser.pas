@@ -41,6 +41,11 @@ type
     FDiags: TArray<TPasParseDiag>;
     FDiagCount: Integer;
     FStuckPos: Integer;
+    // Nesting depth of parameter lists being parsed: inside one the "next
+    // declaration" cannot appear, and a wrapped parameter (`AAlign:` NEWLINE
+    // `TSeGlyphAlign = kgfaCenter)`) is token-identical to one - real code in
+    // Vcl.StyleAPI, 35 false diagnostics before this guard.
+    FParamDepth: Integer;
     FStuckCount: Integer;
     // Watchdogs (see notes on ParseGuard):
     FFuel: Int64;              // decremented in CurKind; trips at 0
@@ -166,6 +171,17 @@ type
     function AtDeclHead: Boolean; overload;
     function AtDeclHead(const AFollow: array of TPasTokenKind): Boolean; overload;
     function AtSectionBoundary: Boolean;
+    { Does the visible token at AVisIndex begin its LINE (only whitespace
+      before it since the previous line break)? Recovery-only evidence: some
+      unfinished states are token-identical to valid code - `C4:` typed above
+      `C2 = 2;` reads as the typed constant `C4: C2 = 2` - and the line break
+      is the one thing that tells them apart. Never consulted for valid input:
+      every use is behind a test that has already failed to parse the state as
+      what the grammar expected. }
+    function TokenStartsLine(AVisIndex: Integer): Boolean;
+    { An identifier that starts its line and is followed by `=` or `:` - the
+      head of the NEXT declaration, seen from inside an unfinished one. }
+    function AtLineDeclHead: Boolean;
     procedure SkipToDeclHead;
     procedure MarkContextKeyword;
     procedure ConsumeTrailingDirectives(AAllowInitializer: Boolean);
@@ -578,6 +594,14 @@ begin
         // resolver declares them like any parameter - `AIndex` inside a
         // `procedure(AIndex: Integer) begin ... end` literal is a real,
         // resolvable symbol, not opaque trivia (the retired v1 shape).
+        // An anonymous method has no name. `procedure Q` here is the next
+        // member or declaration, reached from an unfinished expression
+        // (`const CI =` above it) - not consumed.
+        if (PeekKind(1) = tkIdentifier) and not IsDirectiveWord(FPos + 1) then
+        begin
+          Error('expression expected, found "' + CurText + '"');
+          Exit(FB.AddNode(nkError, NIL_NODE, FPos));
+        end;
         LNode := FB.AddNode(nkAnonMethod, NIL_NODE, LStart);
         Next;
         if CurKind = tkLParen then
@@ -629,8 +653,11 @@ begin
           Next;
           // Member position is unambiguous, so dcc accepts RESERVED WORDS
           // as member names: TAnimationType.In (FMX declares `&In` but
-          // call sites write `.In`). Accept any keyword here.
-          if (CurKind = tkIdentifier) or IsKeyword(CurKind) then
+          // call sites write `.In`). Accept any keyword here - but not the
+          // next declaration's head on its own line (`array[1.` typed above
+          // `Reserve: ...`): that name is not consumed.
+          if ((CurKind = tkIdentifier) or IsKeyword(CurKind)) and
+             not AtLineDeclHead then
           begin
             LChild := FB.AddNode(nkIdent, NIL_NODE, FPos);
             Next;
@@ -776,6 +803,13 @@ function TPasParser.ParseTypeRef: Integer;
 var
   LNode, LChild: Integer;
 begin
+  // Same recovery as ParseTypeExpr: `TRecno = Integer;` on its own line where
+  // an ancestor or a type argument was due (`TG = class(`, `TL = TList<`).
+  if AtLineDeclHead then
+  begin
+    Error('type expected');
+    Exit(FB.AddNode(nkError, NIL_NODE, FPos));
+  end;
   // Minimal type reference: dotted name with optional generic args per
   // segment (B.11), plus the type keywords usable as refs.
   if CurKind in [tkIdentifier, tkString, tkFile] then
@@ -1541,6 +1575,15 @@ begin
     Exit;
   end;
   try
+  // The head of the NEXT declaration, on its own line, where a type was due:
+  // the author has not typed the type yet (`E` above `Reserve: ...`, `TArr =
+  // array` above `TRecno = Integer;`). Not consumed - the caller's recovery
+  // lands on it. See TokenStartsLine for why the line break may be used.
+  if AtLineDeclHead then
+  begin
+    Error('type expected');
+    Exit(FB.AddNode(nkError, NIL_NODE, FPos));
+  end;
   case CurKind of
     tkPacked:
       begin
@@ -1676,7 +1719,12 @@ begin
       LNode := FB.AddNode(nkSubrange, NIL_NODE, FPos);
       FB.Adopt(LNode, LExpr);
       Next;
-      FB.Adopt(LNode, ParseExpression);
+      // `array[1..` typed above `Reserve: ...`: the upper bound is not there
+      // yet, and that field is not it.
+      if AtLineDeclHead then
+        Error('expression expected')
+      else
+        FB.Adopt(LNode, ParseExpression);
       FB.SetLast(LNode, FPos - 1);
       Exit(LNode);
     end;
@@ -1696,6 +1744,14 @@ begin
   Next; // (
   while (CurKind <> tkRParen) and (CurKind <> tkEndOfFile) do
   begin
+    // `TRecno = Integer;` on its own line is the next declaration, not an
+    // element with an explicit ordinal: an element's value ends with `,` or
+    // `)`, never `;`. The list has no `)` yet (`TE = (` while typing).
+    if AtLineDeclHead and (PeekKind(1) = tkEqual) and (PeekKind(3) = tkSemicolon) then
+    begin
+      Error('")" expected');
+      Break;
+    end;
     LValue := FB.AddNode(nkEnumValue, NIL_NODE, FPos);
     if CurKind = tkIdentifier then
     begin
@@ -1999,8 +2055,16 @@ begin
       tkCase:
         ParseVariantPart(AOwner);
       tkIdentifier:
-        // field declaration(s)
-        ParseFieldList(AOwner, [tkEnd, tkCase]);
+        // field declaration(s) - unless `Ident =`, which no member can start
+        // with: it is the NEXT type declaration, and this class body has no
+        // `end` yet (`TG = class` typed above `TRecno = Integer;`).
+        if PeekKind(1) = tkEqual then
+        begin
+          Error('"end" expected');
+          Break;
+        end
+        else
+          ParseFieldList(AOwner, [tkEnd, tkCase]);
       // tkString used to be routed here TOO, and it is the one dispatch that
       // could not make progress: ParseFieldList's loop is
       // `while CurKind = tkIdentifier`, so nothing was consumed, the member
@@ -2037,7 +2101,17 @@ begin
       else
         Error('field name expected');
     end;
-    Expect(tkColon, '":"');
+    // A field with no `:` yet, the next member or the `end` right behind
+    // it: declared as it is, nothing consumed (recovery, see AtDeclHead).
+    if not Expect(tkColon, '":"') and
+       (AtDeclHead([tkColon, tkComma]) or AtSectionBoundary or (CurKind = tkCase)) then
+    begin
+      FB.SetLast(LDecl, FPos - 1);
+      FB.Adopt(AOwner, LDecl);
+      if CurKind = tkIdentifier then
+        Continue;
+      Break;
+    end;
     FB.Adopt(LDecl, ParseTypeExpr);
     ParseHintsOpt(LDecl);
     FB.SetLast(LDecl, FPos - 1);
@@ -2050,8 +2124,8 @@ begin
     if AtAny(ATerminators) then
       Break;
     // Non-field successor ends the field run (methods, visibility, ...).
-    if not (CurKind = tkIdentifier) then
-      Break;
+    if (CurKind <> tkIdentifier) or (PeekKind(1) = tkEqual) then
+      Break;   // `Ident =` is the next type declaration, not a field
     // A visibility word starts a new section, not a field (see the note in
     // ParseMemberList: escaped &private keeps its '&' and never matches).
     if IsVisibilityWord then
@@ -2066,6 +2140,16 @@ begin
   // 9.1.3: case [tag:] OrdinalType of const,...: ( fields [variant] ); ...
   LPart := FB.AddNode(nkVariantPart, NIL_NODE, FPos);
   Next; // case
+  // `case` alone above `Reserve: array...` while typing: that field is not
+  // the tag (a tag never starts the next line). An empty variant part, the
+  // field stays a field.
+  if AtLineDeclHead then
+  begin
+    Error('variant tag expected');
+    FB.SetLast(LPart, FPos - 1);
+    FB.Adopt(AOwner, LPart);
+    Exit;
+  end;
   if (CurKind = tkIdentifier) and (PeekKind(1) = tkColon) then
   begin
     FB.Adopt(LPart, FB.AddNode(nkIdent, NIL_NODE, FPos));
@@ -2081,9 +2165,24 @@ begin
   // covers all three forms and, unlike its tkSet/tkFile branches, never
   // consumes the `of` that terminates the tag type here.
   FB.Adopt(LPart, ParseTypeExpr);
-  Expect(tkOf, '"of"');
+  // No `of` yet (`case T` / `case T:` while typing): an empty variant part;
+  // the fields behind it stay fields instead of becoming variant branches.
+  if not Expect(tkOf, '"of"') then
+  begin
+    FB.SetLast(LPart, FPos - 1);
+    FB.Adopt(AOwner, LPart);
+    Exit;
+  end;
   while not (CurKind in [tkEnd, tkRParen, tkEndOfFile]) do
   begin
+    // `Reserve: array...` on its own line after `case Tag: Byte of` while
+    // typing is the next FIELD, not a branch: a branch label is followed by
+    // `: (`. The variant part ends here, without it.
+    if AtLineDeclHead and (PeekKind(1) = tkColon) and (PeekKind(2) <> tkLParen) then
+    begin
+      Error('variant branch expected');
+      Break;
+    end;
     LBranch := FB.AddNode(nkVariantBranch, NIL_NODE, FPos);
     // labels
     repeat
@@ -2093,9 +2192,17 @@ begin
       else
         Break;
     until False;
-    Expect(tkColon, '":"');
-    Expect(tkLParen, '"("');
-    while not (CurKind in [tkRParen, tkEndOfFile]) do
+    // An unfinished branch (`0` typed, nothing after it yet): the fields
+    // behind it are the record's, not this branch's - stop before them.
+    if not Expect(tkColon, '":"') or not Expect(tkLParen, '"("') then
+    begin
+      FB.SetLast(LBranch, FPos - 1);
+      FB.Adopt(LPart, LBranch);
+      Break;
+    end;
+    // tkEnd too: an unclosed branch (`0: (` typed) must not eat the record's
+    // `end` looking for its `)`.
+    while not (CurKind in [tkRParen, tkEnd, tkEndOfFile]) do
       if CurKind = tkCase then
         ParseVariantPart(LBranch)
       else if CurKind = tkIdentifier then
@@ -2176,8 +2283,20 @@ begin
   // 6.2: [attrs] [var|const|out] names [: [array of] T] [= default]
   Result := FB.AddNode(nkParams, NIL_NODE, FPos);
   Next; // ( or [
+  Inc(FParamDepth);
+  try
   while (CurKind <> AClose) and (CurKind <> tkEndOfFile) do
   begin
+    // `TRecno = Integer;` on the next line is not a parameter: the list has
+    // no `)` yet (`TP = procedure(` while typing). Tested at the START of a
+    // parameter, where a default value cannot stand - the depth guard in
+    // AtLineDeclHead is bypassed for exactly this test.
+    if (CurKind = tkIdentifier) and (PeekKind(1) = tkEqual) and
+       TokenStartsLine(FPos) and not IsVisibilityWord then
+    begin
+      Error('")" expected');
+      Break;
+    end;
     LParam := FB.AddNode(nkParam, NIL_NODE, FPos);
     LAttrs := ParseAttrGroups;
     if LAttrs <> NIL_NODE then
@@ -2242,6 +2361,9 @@ begin
       Break;
   end;
   Expect(AClose, 'closing bracket');
+  finally
+    Dec(FParamDepth);
+  end;
   FB.SetLast(Result, FPos - 1);
 end;
 
@@ -2315,6 +2437,36 @@ begin
     if PeekKind(1) = LKind then
       Exit(True);
   Result := False;
+end;
+
+function TPasParser.TokenStartsLine(AVisIndex: Integer): Boolean;
+var
+  LVis: TPasVisibleToken;
+  LSrc: string;
+  LPos: Integer;
+begin
+  if (AVisIndex < 0) or (AVisIndex > FLast) then
+    Exit(False);
+  LVis := FSrc.Visible[AVisIndex];
+  LSrc := FSrc.Files[LVis.FileId].Source;
+  LPos := FSrc.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start;   // 0-based
+  while LPos > 0 do
+  begin
+    case LSrc[LPos] of   // the character BEFORE offset LPos, 1-based string
+      ' ', #9: Dec(LPos);
+      #10, #13: Exit(True);
+    else
+      Exit(False);
+    end;
+  end;
+  Result := True;
+end;
+
+function TPasParser.AtLineDeclHead: Boolean;
+begin
+  Result := (FParamDepth = 0) and (CurKind = tkIdentifier) and
+    (PeekKind(1) in [tkEqual, tkColon]) and not IsVisibilityWord and
+    TokenStartsLine(FPos);
 end;
 
 function TPasParser.AtSectionBoundary: Boolean;
@@ -2671,7 +2823,13 @@ begin
   // nodefault implements readonly writeonly dispid.
   while not (CurKind in [tkSemicolon, tkEndOfFile]) do
   begin
-    if CurKind = tkIdentifier then
+    // Only a specifier WORD opens a specifier. `r` half-typed before the next
+    // member's `function GetP...` used to become a specifier whose expression
+    // swallowed that member as an anonymous method.
+    if (CurKind = tkIdentifier) and (IsWord('read') or IsWord('write') or
+       IsWord('index') or IsWord('stored') or IsWord('default') or
+       IsWord('nodefault') or IsWord('implements') or IsWord('readonly') or
+       IsWord('writeonly') or IsWord('dispid')) then
     begin
       LSpec := FB.AddNode(nkPropSpec, NIL_NODE, FPos);
       LArgless := FSrc.VisibleTextEquals(FPos, 'nodefault') or

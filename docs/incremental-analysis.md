@@ -358,6 +358,27 @@ outside can name this unit's uses entry, while its leaf (`Classes`,
 into the hub unit's uses selected 1103 models. Every state of typing a unit
 into the list is a one-module run now.
 
+**The resilience suite (0.15.14) enumerates these instead of waiting for the
+next report.** `testsResilienceSmoke.dpr` types 28 snippets into a fixture
+unit at nine kinds of declaration site - uses, record body, type section,
+interface body, class body, const, var, routine declarations, routine body,
+statements - one keystroke at a time, and checks after every prefix that
+every symbol the fixture had (kind, name, owner) is still there and that
+Phase 1 did not raise. Its first run found 15 failing snippets; they came
+down to a handful of parser rules, now in place: a declaration head on its
+own line where a type, an ancestor, a type argument, a subrange bound or a
+variant tag was due is the NEXT declaration (`TokenStartsLine` /
+`AtLineDeclHead` - the line break is recovery-only evidence, consulted after
+the grammar has already failed to parse the state); `Ident =` is never a
+field, so a class body meeting one has no `end` yet; a property specifier
+must be one of the ten specifier words; a named `procedure`/`function` is
+not an anonymous method; an unfinished variant part or branch does not take
+the fields behind it. One state is left ambiguous on purpose and declared so
+in the suite: `procedure(A:` above `TRecno = Integer;` reads as a wrapped
+parameter with a default, because that is what it IS in Vcl.StyleAPI - the
+line heuristic is off inside parameter lists (`FParamDepth`), the corpora
+stay at zero diagnostics, and TRecno is lost for that one keystroke.
+
 ## 5. Open - what could still be improved
 
 Ordered by evidence, not by interest.
