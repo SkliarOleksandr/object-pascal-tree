@@ -77,10 +77,13 @@ uses
 
 type
   TEditKind = (ekBody, ekIntf, ekBlank, ekComment, ekConst, ekType,
-    ekImplVar, ekImplVarTop, ekIntfUses, ekMember, ekParent);
+    ekImplVar, ekImplVarTop, ekIntfUses, ekMember, ekParent, ekMidType,
+    ekInsert, ekReplace);
   TEditStep = record
     Kind: TEditKind;
     Path: string;    // full path of the unit to edit
+    InsLine: Integer;  // ekInsert: 1-based line the text goes BEFORE
+    InsText: string;   // ekInsert: the line to insert, verbatim
   end;
 
 const
@@ -200,7 +203,7 @@ end;
   that lands badly on some exotic layout stays a VALID differential step -
   both pipelines read the identical result. }
 function ApplyEdit(const AText: string; AKind: TEditKind; ASeq: Integer;
-  out ANewText: string): Boolean;
+  out ANewText: string; AInsLine: Integer = 0; const AInsText: string = ''): Boolean;
 var
   LLines: TList<string>;
   LArr: TArray<string>;
@@ -276,6 +279,41 @@ begin
             [LClassName, ASeq]));
           LLines.Insert(LClassLine + 1,
             Format('    procedure __DiffMember%d;', [ASeq]));
+        end;
+      // An arbitrary line at an arbitrary place - `insert <path>|<line>|<text>`
+      // in a script - to reproduce exactly what a user typed.
+      ekInsert:
+        begin
+          if (AInsLine < 1) or (AInsLine > LLines.Count + 1) then
+            Exit(False);
+          LLines.Insert(AInsLine - 1, AInsText);
+        end;
+      // `replace <path>|<line>|<text>`: the line is overwritten - with insert,
+      // enough to replay a typing sequence keystroke group by keystroke group.
+      ekReplace:
+        begin
+          if (AInsLine < 1) or (AInsLine > LLines.Count) then
+            Exit(False);
+          LLines[AInsLine - 1] := AInsText;
+        end;
+      // A type declared right after the FIRST `type` keyword of the interface:
+      // every interface symbol after it moves. The end-of-interface `type`
+      // kind moves nothing, which is why this one exists (2026-09-04: a type
+      // typed into the middle of the client hub unit refused with 349
+      // consumers selected while the end-of-interface one selected none).
+      ekMidType:
+        begin
+          LIntf := LineIndexOf(LArr, 'interface');
+          LClassLine := -1;
+          for var LIdx := LIntf + 1 to LImpl - 1 do
+            if SameText(Trim(LArr[LIdx]), 'type') then
+            begin
+              LClassLine := LIdx;
+              Break;
+            end;
+          if LClassLine < 0 then
+            Exit(False);
+          LLines.Insert(LClassLine + 1, Format('  __DiffMidType%d = Integer;', [ASeq]));
         end;
       // `TFoo = class` -> `TFoo = class(TObject)` on the first parentless
       // class of the interface: identical for dcc, identical for Phase 1
@@ -490,6 +528,9 @@ begin
     ekIntfUses: Result := 'intfuses';
     ekMember: Result := 'member';
     ekParent: Result := 'parent';
+    ekMidType: Result := 'midtype';
+    ekInsert: Result := 'insert';
+    ekReplace: Result := 'replace';
   else
     Result := 'type';
   end;
@@ -546,6 +587,26 @@ begin
       Halt(2);
     end;
     LKindWord := Copy(LLine, 1, LSpace - 1);
+    LStep := Default(TEditStep);
+    if SameText(LKindWord, 'insert') or SameText(LKindWord, 'replace') then
+    begin
+      // insert|replace <path>|<line>|<text>
+      var LParts := Copy(LLine, LSpace + 1, MaxInt).Split(['|'], 3);
+      if Length(LParts) <> 3 then
+      begin
+        Writeln(ErrOutput, 'bad insert line: ', LLine);
+        Halt(2);
+      end;
+      if SameText(LKindWord, 'insert') then
+        LStep.Kind := ekInsert
+      else
+        LStep.Kind := ekReplace;
+      LStep.Path := TPath.GetFullPath(Trim(LParts[0]));
+      LStep.InsLine := StrToIntDef(Trim(LParts[1]), 0);
+      LStep.InsText := LParts[2];
+      Result := Result + [LStep];
+      Continue;
+    end;
     LPath := TPath.GetFullPath(Trim(Copy(LLine, LSpace + 1, MaxInt)));
     if SameText(LKindWord, 'body') then
       LStep.Kind := ekBody
@@ -569,6 +630,8 @@ begin
       LStep.Kind := ekMember
     else if SameText(LKindWord, 'parent') then
       LStep.Kind := ekParent
+    else if SameText(LKindWord, 'midtype') then
+      LStep.Kind := ekMidType
     else
     begin
       Writeln(ErrOutput, 'bad script kind: ', LKindWord);
@@ -673,7 +736,8 @@ begin
       LKey := LowerCase(LStep.Path);
       if not GTexts.TryGetValue(LKey, LText) then
         LText := TPasSourceManager.LoadFileTolerant(LStep.Path);
-      if not ApplyEdit(LText, LStep.Kind, GIdx, LNew) then
+      if not ApplyEdit(LText, LStep.Kind, GIdx, LNew, LStep.InsLine,
+           LStep.InsText) then
       begin
         Writeln(ErrOutput, Format('step %d: SKIP (no markers) %s',
           [GIdx, LStep.Path]));
@@ -780,7 +844,7 @@ begin
       // their own references), a shifted symbol index harms nobody. What
       // decides correctness is the comparison against the full pipeline,
       // which every step runs anyway - so this is counted, not judged.
-      if (LStep.Kind in [ekIntf, ekConst, ekType, ekIntfUses, ekMember, ekParent]) and
+      if (LStep.Kind in [ekIntf, ekConst, ekType, ekIntfUses, ekMember, ekParent, ekMidType]) and
          LHow.StartsWith('module') then
         Inc(GAcceptedIntf)
       else if (LStep.Kind in [ekBody, ekBlank, ekComment, ekImplVar,

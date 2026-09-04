@@ -241,13 +241,13 @@ exposes the choice as a checkbox; a host has to make it deliberately.
 | closure | body edit | interface edit | full rebuild |
 |---|---:|---:|---:|
 | demo, 200 units | 19-33 ms | 29-204 ms | ~3400 ms |
-| client, 3676 units | 6-120 ms | 21-260 ms | ~29 000 ms |
+| client, 3676 units | 6-130 ms | 21-200 ms | ~29 000 ms |
 
-The client rows are 0.15.10 numbers: a body edit is 6 ms in a library unit
+The client rows are 0.15.11 numbers: a body edit is 6 ms in a library unit
 and 119 ms in the 300 KB core types unit (all of it the re-parse); a new
 const, type, routine or method in that core unit is ~250 ms, of which the
-passes are 60 ms and the rest is the parse plus the diff and selection over
-1260 models. Before 0.15.7 the same interface edits refused and cost a 24 s
+passes are ~15 ms and the rest is the parse (~100 ms) plus the decision over
+1260 models (~70 ms); the whole edit is ~190 ms. Before 0.15.7 the same interface edits refused and cost a 24 s
 rebuild; before 0.15.10 every module run carried a fixed 141-159 ms of
 `BuildHelperMap`.
 
@@ -312,9 +312,19 @@ full pipeline's. Measured on the client closure: the `helpers` stage went
 from 141-159 ms to 0-5 ms, the whole pass tail of a one-module run from
 ~155 ms to 3-14 ms. The per-stage split is in `StageTimings` as
 `mp=resolve:N,helpers:N,decl:N,inherited:N,with:N,calls:N,bindx:N,xtype:N;`.
-What is left of the fixed cost is the re-parse of the edited unit (105 ms
-for the 300 KB core unit) and, on an interface edit, the diff and selection
-over the reach (~85 ms over 1260 models).
+What is left of the fixed cost is the re-parse of the edited unit (~100 ms
+for the 300 KB core unit) and, on an interface edit, the decision over the
+reach: `decide=` in the stage string, split as
+`dec=shape:N,match:N,diff:N,reach:N,select:N,inst:N` (cumulative). 0.15.11
+took that from 136 to 62-81 ms on the 1260-model reach: `MatchSymbols` keys
+symbols by a record (kind, name, interned scope id, arity, ordinal) instead
+of a Format'd string per symbol (56 -> 26 ms); `AffectedConsumers` counts
+and preallocates its reverse index instead of appending (22 -> 5 ms); the
+consumer scan and the renumbering run in parallel over the reach
+(`ParallelFor`), and the identifier scan compares characters against the
+candidates of the identifier's own length without building a string - the
+allocating version was SLOWER in parallel than sequential, the threads
+queuing on the memory manager (commit 47 -> 8 ms, select 41 -> 28 ms).
 
 **B. DONE - the radius ceiling was measured and raised, 24 -> 128.** It is now
 the `ModuleRedoLimit` property (0 or less = no ceiling), and the harness can

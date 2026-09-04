@@ -85,6 +85,13 @@ type
     Exported: Boolean;
   end;
 
+  // The keys of one consumer's four cross-unit maps whose VALUE names the
+  // edited unit - collected while the module path decides, applied after its
+  // commit (see SelectConsumers / RenumberConsumer).
+  TPasRenumberKeys = record
+    ExtRef, CallTarget, SymType, ExprType: TArray<Integer>;
+  end;
+
   // One deferred ExtRefMap write from the inherited-member pass (computed in
   // parallel, committed sequentially - see CrossResolveInherited).
   TPasInhPending = record
@@ -426,16 +433,38 @@ type
       scan) - AWhy names it, and the caller refuses. }
     function SelectConsumers(AId: Integer; const AReach: TArray<Integer>;
       const AChanged: TArray<Boolean>; AAdded: TDictionary<string, Byte>;
-      out ASelected, AUntouched: TArray<Integer>; out AWhy: string): Boolean;
+      out ASelected, AUntouched: TArray<Integer>;
+      out AUntouchedKeys: TArray<TPasRenumberKeys>; out AWhy: string): Boolean;
     { Follow model AMid's bindings into AId through AMap - the four maps, values
-      only, keys untouched. For an untouched consumer this is the whole
-      update: nothing it can see changed, only the numbering did. }
-    procedure RenumberConsumer(AMid, AId: Integer; const AMap: TArray<Integer>);
-    { Does any nkIdent in ATree spell one of ANames (lower-case), ampersand
-      stripped, case-insensitively? ALenHit[n] = some name has length n, the
-      filter that spares the allocation for the bulk of identifiers. }
+      only, at the keys SelectConsumers collected for it. For an untouched
+      consumer this is the whole update: nothing it can see changed, only the
+      numbering did. Writes one model's own maps and nothing else, so the
+      untouched set is renumbered in parallel. }
+    procedure RenumberConsumer(AMid, AId: Integer; const AMap: TArray<Integer>;
+      const AKeys: TPasRenumberKeys);
+    { A plain parallel loop for the module path's DECISIONS: unlike
+      ForEachIndex it neither skips bodies on a cancel request nor swallows a
+      body's exception into a diagnostic - a decision taken over a partial
+      set would be a wrong decision, so it is complete or it fails loudly.
+      Small ranges and the single-threaded mode run inline. }
+    procedure ParallelFor(AHi: Integer; const ABody: TProc<Integer>);
+    // SelectConsumers' per-consumer tests, as class methods: an anonymous
+    // method body cannot declare nested routines.
+    class procedure PushKey(var AArr: TArray<Integer>; var ACount: Integer;
+      AKey: Integer); static;
+    class function SymChangedIn(const AChanged: TArray<Boolean>;
+      ASym: Integer): Boolean; static;
+    class function XTaintedIn(AId: Integer; const AChanged,
+      AInstChanged: TArray<Boolean>; const AX: TSemaXType): Boolean; static;
+    { Does any nkIdent in ATree spell one of the names (lower-case), ampersand
+      stripped, case-insensitively? ANamesByLen[n] = the names of length n, so
+      an identifier is compared only against candidates of its own length,
+      character by character with the ASCII fold - no string is built. That
+      matters because this runs on every core at once: the allocating first
+      version was SLOWER in parallel than sequential (decide 102 -> 194 ms on
+      a 1260-model reach), the threads queuing on the memory manager. }
     class function TreeMentionsAny(const ATree: TPasTree;
-      ANames: TDictionary<string, Byte>; const ALenHit: TArray<Boolean>): Boolean;
+      const ANamesByLen: TArray<TArray<string>>): Boolean;
     { Does every `uses` entry of AModel (a freshly parsed replacement for
       model AId) resolve to a file the project has ALREADY loaded? A new
       import changes the closure, which the single-module path cannot do -
@@ -1079,11 +1108,58 @@ type
       overload; override;
   end;
 
+  { A symbol's identity for MatchSymbols: kind, name, the id of its declaring
+    scope's structural key (interned, shared between the two models being
+    matched), generic arity, and the ordinal among equals. A record with one
+    string, hashed and compared as such, instead of a Format'd string per
+    symbol: the string version was 56 ms of a 136 ms decision on the client
+    hub unit, two arenas of ~25k symbols each. }
+  TSymIdentity = record
+    Kind, ScopeId, Arity, Ordinal: Integer;
+    NameLower: string;
+  end;
+
+  TSymIdentityComparer = class(TEqualityComparer<TSymIdentity>)
+  public
+    function Equals(const Left, Right: TSymIdentity): Boolean;
+      overload; override;
+    function GetHashCode(const Value: TSymIdentity): Integer;
+      overload; override;
+  end;
+
 var
   // Process-wide, set once - see TPasSemaProject.ConfigureThreadPool.
   GPoolConfigured: Boolean = False;
   // Shared stateless comparer (interface-refcounted; see initialization).
   GInstanceComparer: IEqualityComparer<TSemaInstance>;
+
+function TSymIdentityComparer.Equals(const Left,
+  Right: TSymIdentity): Boolean;
+begin
+  Result := (Left.Kind = Right.Kind) and (Left.ScopeId = Right.ScopeId) and
+    (Left.Arity = Right.Arity) and (Left.Ordinal = Right.Ordinal) and
+    (Left.NameLower = Right.NameLower);
+end;
+
+// $Q- for the same reason as TSemaInstanceComparer.GetHashCode below: the
+// wraparound IS the algorithm.
+{$IFOPT Q+}{$DEFINE PT_RESTORE_Q}{$OVERFLOWCHECKS OFF}{$ENDIF}
+function TSymIdentityComparer.GetHashCode(const Value: TSymIdentity): Integer;
+var
+  LHash: Cardinal;
+  LIdx: Integer;
+begin
+  // FNV-1a over the integers, then the name's characters.
+  LHash := 2166136261;
+  LHash := (LHash xor Cardinal(Value.Kind)) * 16777619;
+  LHash := (LHash xor Cardinal(Value.ScopeId)) * 16777619;
+  LHash := (LHash xor Cardinal(Value.Arity)) * 16777619;
+  LHash := (LHash xor Cardinal(Value.Ordinal)) * 16777619;
+  for LIdx := 1 to Length(Value.NameLower) do
+    LHash := (LHash xor Ord(Value.NameLower[LIdx])) * 16777619;
+  Result := Integer(LHash);
+end;
+{$IFDEF PT_RESTORE_Q}{$OVERFLOWCHECKS ON}{$UNDEF PT_RESTORE_Q}{$ENDIF}
 
 function TSemaInstanceComparer.Equals(const Left,
   Right: TSemaInstance): Boolean;
@@ -11797,60 +11873,91 @@ end;
 
 class function TPasSemaProject.MatchSymbols(AOld,
   ANew: TPasSemaModel): TArray<Integer>;
+var
+  LComparer: IEqualityComparer<TSymIdentity>;
+  // Structural scope key -> id, SHARED by the two models: the same structure
+  // gets the same id on both sides, which is what makes the identities
+  // comparable as integers.
+  LScopeIds: TDictionary<string, Integer>;
 
-  // Every symbol of AModel -> its identity key (see the declaration). Keys
-  // are unique within one model by construction: the ordinal counts earlier
-  // symbols with the same (kind, name, scope, arity).
-  function KeysOf(AModel: TPasSemaModel): TArray<string>;
+  function InternScope(const AKey: string): Integer;
+  begin
+    if not LScopeIds.TryGetValue(AKey, Result) then
+    begin
+      Result := LScopeIds.Count;
+      LScopeIds.Add(AKey, Result);
+    end;
+  end;
+
+  // Every symbol of AModel -> its identity (see the declaration). Unique
+  // within one model by construction: the ordinal counts earlier symbols
+  // with the same (kind, name, scope, arity).
+  function KeysOf(AModel: TPasSemaModel): TArray<TSymIdentity>;
   var
     LOwner: TArray<Integer>;     // scope -> the symbol whose MemberScope it is
-    LScopeKey: TArray<string>;   // memo; '' = not computed yet
-    LOrdinals: TDictionary<string, Integer>;
-    LKeys: TArray<string>;
+    LScopeId: TArray<Integer>;   // memo; -1 = not computed yet
+    LDone: TArray<Boolean>;      // symbol's identity computed
+    LOrdinals: TDictionary<TSymIdentity, Integer>;
+    LPositional: TDictionary<string, Integer>;   // unowned scopes, per parent
+    LKeys: TArray<TSymIdentity>;
     LIdx, LN: Integer;
-    LBase: string;
+    LKey: TSymIdentity;
+
+    // The string form of a computed identity - only ever built for the
+    // owners of scopes (types, routines), a small fraction of the arena.
+    function OwnerKeyStr(ASym: Integer): string;
+    begin
+      Result := Format('%d|%s|%d|%d|%d', [LKeys[ASym].Kind, LKeys[ASym].NameLower,
+        LKeys[ASym].ScopeId, LKeys[ASym].Arity, LKeys[ASym].Ordinal]);
+    end;
 
     // Unowned scopes (a routine BODY, a block, a with, a type's generic
     // parameter list) are told apart by kind and order under their parent.
-    function ScopeKey(AScope: Integer): string;
+    function ScopeIdOf(AScope: Integer): Integer;
     var
       LSc: TSemaScope;
+      LStr: string;
       LCount: Integer;
     begin
       if AScope = NIL_SCOPE then
-        Exit('-');
-      if LScopeKey[AScope] <> '' then
-        Exit(LScopeKey[AScope]);
+        Exit(InternScope('-'));
+      if LScopeId[AScope] >= 0 then
+        Exit(LScopeId[AScope]);
       LSc := AModel.Scopes[AScope];
       case LSc.Kind of
-        sckSystem: Result := 'S';
-        sckUnit: Result := 'U';
-        sckImplementation: Result := 'I';
+        sckSystem: LStr := 'S';
+        sckUnit: LStr := 'U';
+        sckImplementation: LStr := 'I';
       else
-        if (LOwner[AScope] <> NIL_SYM) and (LKeys[LOwner[AScope]] <> '') then
-          Result := 'M(' + LKeys[LOwner[AScope]] + ')'
+        if (LOwner[AScope] <> NIL_SYM) and LDone[LOwner[AScope]] then
+          LStr := 'M(' + OwnerKeyStr(LOwner[AScope]) + ')'
         else
         begin
-          Result := Format('K%d(%s)', [Ord(LSc.Kind), ScopeKey(LSc.Parent)]);
-          if not LOrdinals.TryGetValue(Result, LCount) then
+          LStr := Format('K%d(%d)', [Ord(LSc.Kind), ScopeIdOf(LSc.Parent)]);
+          if not LPositional.TryGetValue(LStr, LCount) then
             LCount := 0;
-          LOrdinals.AddOrSetValue(Result, LCount + 1);
-          Result := Result + '#' + IntToStr(LCount);
+          LPositional.AddOrSetValue(LStr, LCount + 1);
+          LStr := LStr + '#' + IntToStr(LCount);
         end;
       end;
-      LScopeKey[AScope] := Result;
+      Result := InternScope(LStr);
+      LScopeId[AScope] := Result;
     end;
 
   begin
     SetLength(LKeys, AModel.SymCount);
-    SetLength(LScopeKey, AModel.Scopes.Count);
+    SetLength(LDone, AModel.SymCount);
+    SetLength(LScopeId, AModel.Scopes.Count);
     SetLength(LOwner, AModel.Scopes.Count);
     for LIdx := 0 to High(LOwner) do
+    begin
       LOwner[LIdx] := NIL_SYM;
+      LScopeId[LIdx] := -1;
+    end;
     // A type or routine symbol is declared BEFORE the members or parameters
     // in its scope are collected, so by the time a member asks for its scope
-    // key the owner's own key is already there. Where it is not (an owner
-    // that follows its members, which the collect order never produces
+    // key the owner's own identity is already there. Where it is not (an
+    // owner that follows its members, which the collect order never produces
     // today), the scope falls back to the positional key above - still a
     // valid identity, just a more brittle one.
     for LIdx := 0 to AModel.SymCount - 1 do
@@ -11858,36 +11965,48 @@ class function TPasSemaProject.MatchSymbols(AOld,
          (AModel.Symbols[LIdx].MemberScope <= High(LOwner)) and
          (LOwner[AModel.Symbols[LIdx].MemberScope] = NIL_SYM) then
         LOwner[AModel.Symbols[LIdx].MemberScope] := LIdx;
-    LOrdinals := TDictionary<string, Integer>.Create;
+    LOrdinals := TDictionary<TSymIdentity, Integer>.Create(AModel.SymCount,
+      LComparer);
+    LPositional := TDictionary<string, Integer>.Create;
     try
       for LIdx := 0 to AModel.SymCount - 1 do
       begin
-        LBase := Format('%d|%s|%s', [Ord(AModel.Symbols[LIdx].Kind),
-          AModel.Symbols[LIdx].NameLower, ScopeKey(AModel.Symbols[LIdx].Scope)]);
+        LKey.Kind := Ord(AModel.Symbols[LIdx].Kind);
+        LKey.NameLower := AModel.Symbols[LIdx].NameLower;
+        LKey.ScopeId := ScopeIdOf(AModel.Symbols[LIdx].Scope);
         if sfGeneric in AModel.Symbols[LIdx].Flags then
-          LBase := LBase + '<' +
-            IntToStr(Length(GenericParamIdentsOf(AModel, LIdx))) + '>';
-        if not LOrdinals.TryGetValue(LBase, LN) then
+          LKey.Arity := Length(GenericParamIdentsOf(AModel, LIdx))
+        else
+          LKey.Arity := 0;
+        LKey.Ordinal := 0;
+        if not LOrdinals.TryGetValue(LKey, LN) then
           LN := 0;
-        LOrdinals.AddOrSetValue(LBase, LN + 1);
-        LKeys[LIdx] := LBase + '|' + IntToStr(LN);
+        LOrdinals.AddOrSetValue(LKey, LN + 1);
+        LKey.Ordinal := LN;
+        LKeys[LIdx] := LKey;
+        LDone[LIdx] := True;
       end;
     finally
+      LPositional.Free;
       LOrdinals.Free;
     end;
     Result := LKeys;
   end;
 
 var
-  LOldKeys, LNewKeys: TArray<string>;
-  LNewByKey: TDictionary<string, Integer>;
+  LOldKeys, LNewKeys: TArray<TSymIdentity>;
+  LNewByKey: TDictionary<TSymIdentity, Integer>;
   LIdx, LNew: Integer;
 begin
-  LOldKeys := KeysOf(AOld);
-  LNewKeys := KeysOf(ANew);
-  SetLength(Result, Length(LOldKeys));
-  LNewByKey := TDictionary<string, Integer>.Create(Length(LNewKeys));
+  LComparer := TSymIdentityComparer.Create;
+  LScopeIds := TDictionary<string, Integer>.Create;
+  LNewByKey := nil;
   try
+    LOldKeys := KeysOf(AOld);
+    LNewKeys := KeysOf(ANew);
+    SetLength(Result, Length(LOldKeys));
+    LNewByKey := TDictionary<TSymIdentity, Integer>.Create(Length(LNewKeys),
+      LComparer);
     for LIdx := 0 to High(LNewKeys) do
       LNewByKey.Add(LNewKeys[LIdx], LIdx);
     for LIdx := 0 to High(LOldKeys) do
@@ -11897,6 +12016,7 @@ begin
         Result[LIdx] := NIL_SYM;
   finally
     LNewByKey.Free;
+    LScopeIds.Free;
   end;
 end;
 
@@ -12092,6 +12212,7 @@ var
   // radius was a hundred million comparisons before the walk even decided.
   LImporters: TArray<TArray<Integer>>;
   LIntfEdge: TArray<TArray<Boolean>>;
+  LFill: TArray<Integer>;   // per model, importers stored so far
   LHead, LIdx, LCur, LUse, LUid, LSlot: Integer;
 begin
   AIds := nil;
@@ -12100,23 +12221,46 @@ begin
   SetLength(LQueued, FModels.Count);
   SetLength(LImporters, FModels.Count);
   SetLength(LIntfEdge, FModels.Count);
+  SetLength(LFill, FModels.Count);
+  // Two passes: count, then fill into preallocated rows. Appending one
+  // element at a time reallocated the row each time, and a hub unit has
+  // 1260 importers - 22 ms of the decision went into copying those rows.
+  for LIdx := 0 to FModels.Count - 1 do
+    for LUse := 0 to High(FModels[LIdx].UsesList) do
+    begin
+      LUid := FModels[LIdx].UsesList[LUse].UnitId;
+      if (LUid >= 0) and (LUid < FModels.Count) then
+        Inc(LFill[LUid]);
+    end;
+  for LIdx := 0 to FModels.Count - 1 do
+  begin
+    SetLength(LImporters[LIdx], LFill[LIdx]);
+    SetLength(LIntfEdge[LIdx], LFill[LIdx]);
+    LFill[LIdx] := 0;
+  end;
   for LIdx := 0 to FModels.Count - 1 do
     for LUse := 0 to High(FModels[LIdx].UsesList) do
     begin
       LUid := FModels[LIdx].UsesList[LUse].UnitId;
       if (LUid < 0) or (LUid >= FModels.Count) then
         Continue;
-      LSlot := High(LImporters[LUid]);
+      LSlot := LFill[LUid] - 1;
       if (LSlot >= 0) and (LImporters[LUid][LSlot] = LIdx) then
         // Imported in BOTH sections: the interface one decides.
         LIntfEdge[LUid][LSlot] :=
           LIntfEdge[LUid][LSlot] or UsesIsInterface(LIdx, LUse)
       else
       begin
-        LImporters[LUid] := LImporters[LUid] + [LIdx];
-        LIntfEdge[LUid] := LIntfEdge[LUid] + [UsesIsInterface(LIdx, LUse)];
+        LImporters[LUid][LFill[LUid]] := LIdx;
+        LIntfEdge[LUid][LFill[LUid]] := UsesIsInterface(LIdx, LUse);
+        Inc(LFill[LUid]);
       end;
     end;
+  for LIdx := 0 to FModels.Count - 1 do
+  begin
+    SetLength(LImporters[LIdx], LFill[LIdx]);   // duplicates merged above
+    SetLength(LIntfEdge[LIdx], LFill[LIdx]);
+  end;
   // Breadth-first over that graph.
   //
   // MEMBERSHIP and REACH are tracked separately, and that separation is the
@@ -12466,11 +12610,12 @@ begin
 end;
 
 class function TPasSemaProject.TreeMentionsAny(const ATree: TPasTree;
-  ANames: TDictionary<string, Byte>; const ALenHit: TArray<Boolean>): Boolean;
+  const ANamesByLen: TArray<TArray<string>>): Boolean;
 var
-  LNode, LTok, LLen, LIdx: Integer;
+  LNode, LTok, LLen, LIdx, LCand: Integer;
   LText: PChar;
-  LWord: string;
+  LCh: Char;
+  LSame: Boolean;
 begin
   Result := False;
   for LNode := 0 to High(ATree.Nodes) do
@@ -12486,66 +12631,52 @@ begin
       Inc(LText);
       Dec(LLen);
     end;
-    if (LLen <= 0) or (LLen > High(ALenHit)) or not ALenHit[LLen] then
+    if (LLen <= 0) or (LLen > High(ANamesByLen)) or (ANamesByLen[LLen] = nil) then
       Continue;
-    // The same ASCII fold NodeNameLower applies, on the few candidates.
-    SetString(LWord, LText, LLen);
-    for LIdx := 1 to LLen do
-      if (LWord[LIdx] >= 'A') and (LWord[LIdx] <= 'Z') then
-        LWord[LIdx] := Char(Ord(LWord[LIdx]) + 32);
-    if ANames.ContainsKey(LWord) then
-      Exit(True);
+    // The same ASCII fold NodeNameLower applies, character by character.
+    for LCand := 0 to High(ANamesByLen[LLen]) do
+    begin
+      LSame := True;
+      for LIdx := 0 to LLen - 1 do
+      begin
+        LCh := LText[LIdx];
+        if (LCh >= 'A') and (LCh <= 'Z') then
+          LCh := Char(Ord(LCh) + 32);
+        if LCh <> ANamesByLen[LLen][LCand][LIdx + 1] then
+        begin
+          LSame := False;
+          Break;
+        end;
+      end;
+      if LSame then
+        Exit(True);
+    end;
   end;
 end;
 
 function TPasSemaProject.SelectConsumers(AId: Integer;
   const AReach: TArray<Integer>; const AChanged: TArray<Boolean>;
   AAdded: TDictionary<string, Byte>; out ASelected, AUntouched: TArray<Integer>;
-  out AWhy: string): Boolean;
+  out AUntouchedKeys: TArray<TPasRenumberKeys>; out AWhy: string): Boolean;
+const
+  vUntouched = 0;
+  vSelected = 1;
+  vNeedsScanButDemoted = 2;
 var
   LInstChanged: TArray<Boolean>;
-  LLenHit: TArray<Boolean>;
-
-  function ChangedSym(ASym: Integer): Boolean;
-  begin
-    Result := (ASym >= 0) and (ASym <= High(AChanged)) and AChanged[ASym];
-  end;
-
-  function XChanged(const AX: TSemaXType): Boolean;
-  begin
-    Result := ((AX.UnitId = AId) and ChangedSym(AX.Sym)) or
-      ((AX.Inst <> NIL_INST) and (AX.Inst <= High(LInstChanged)) and
-       LInstChanged[AX.Inst]);
-  end;
-
-  function Holds(LM: TPasSemaModel): Boolean;
-  begin
-    for var LPair in LM.ExtRefMap do
-      if (LPair.Value.UnitId = AId) and ChangedSym(LPair.Value.Sym) then
-        Exit(True);
-    for var LPair in LM.CallTargetX do
-      if (LPair.Value.UnitId = AId) and ChangedSym(LPair.Value.Sym) then
-        Exit(True);
-    for var LPair in LM.SymTypeX do
-      if XChanged(LPair.Value) then
-        Exit(True);
-    for var LPair in LM.ExprTypeX do
-      if XChanged(LPair.Value) then
-        Exit(True);
-    Result := False;
-  end;
-
-var
+  LNamesByLen: TArray<TArray<string>>;
+  LVerdict: TArray<Byte>;               // per reach slot (slot 0 = AId itself)
+  LKeys: TArray<TPasRenumberKeys>;      // per reach slot, untouched ones only
   LIdx, LArg, LRound: Integer;
   LInst: TSemaInstance;
-  LM: TPasSemaModel;
   LAny: Boolean;
   LName: string;
 begin
   AWhy := '';
-  LRound := 0;
   ASelected := [AId];
   AUntouched := nil;
+  AUntouchedKeys := nil;
+  LRound := 0;
   // Instances tainted by a changed symbol - as the generic, as an argument,
   // or through an argument that is itself a tainted instance. The table is
   // append-only but an argument may name a LATER entry, so iterate to a
@@ -12558,11 +12689,17 @@ begin
       if LInstChanged[LIdx] then
         Continue;
       LInst := Instance(LIdx);
-      if (LInst.UnitId = AId) and ChangedSym(LInst.Sym) then
+      if (LInst.UnitId = AId) and (LInst.Sym >= 0) and
+         (LInst.Sym <= High(AChanged)) and AChanged[LInst.Sym] then
         LInstChanged[LIdx] := True
       else
         for LArg := 0 to High(LInst.Args) do
-          if XChanged(LInst.Args[LArg]) then
+          if ((LInst.Args[LArg].UnitId = AId) and (LInst.Args[LArg].Sym >= 0) and
+              (LInst.Args[LArg].Sym <= High(AChanged)) and
+              AChanged[LInst.Args[LArg].Sym]) or
+             ((LInst.Args[LArg].Inst <> NIL_INST) and
+              (LInst.Args[LArg].Inst <= High(LInstChanged)) and
+              LInstChanged[LInst.Args[LArg].Inst]) then
           begin
             LInstChanged[LIdx] := True;
             Break;
@@ -12571,101 +12708,192 @@ begin
     end;
     Inc(LRound);
   until not LAny or (LRound > 8);
-  SetLength(LLenHit, 256);
+  SetLength(LNamesByLen, 256);
   for LName in AAdded.Keys do
-    if Length(LName) < Length(LLenHit) then
-      LLenHit[Length(LName)] := True;
-  for LIdx := 1 to High(AReach) do
-  begin
-    LM := FModels[AReach[LIdx]];
-    if Holds(LM) then
-      ASelected := ASelected + [AReach[LIdx]]
-    else if AAdded.Count = 0 then
-      AUntouched := AUntouched + [AReach[LIdx]]
-    else if LM.Demoted then
+    if (Length(LName) > 0) and (Length(LName) < Length(LNamesByLen)) then
+      LNamesByLen[Length(LName)] := LNamesByLen[Length(LName)] + [LName];
+  // One pass over each consumer's four maps, in parallel (reads only; the
+  // verdict and the key list go to the slot's own cell): does it hold a
+  // changed pair - then it is redone and the keys are dropped - or, if not,
+  // which keys name the unit at all, for the renumbering after the commit.
+  // Reading the maps once for both questions is half the cost of reading
+  // them twice; running the 1260 consumers of a hub unit on every core is
+  // the other half (measured: decide 102 ms + commit 47 ms sequential).
+  SetLength(LVerdict, Length(AReach));
+  SetLength(LKeys, Length(AReach));
+  ParallelFor(High(AReach) - 1,
+    procedure(ASlotMinus1: Integer)
+    var
+      LSlot: Integer;
+      LM: TPasSemaModel;
+      LK: TPasRenumberKeys;
+      LNExt, LNCall, LNSym, LNExpr: Integer;
+      LHolds: Boolean;
     begin
-      AWhy := 'consumer-demoted';
-      Exit(False);
-    end
-    else if TreeMentionsAny(LM.Tree, AAdded, LLenHit) then
-      ASelected := ASelected + [AReach[LIdx]]
+      LSlot := ASlotMinus1 + 1;
+      LM := FModels[AReach[LSlot]];
+      LK := Default(TPasRenumberKeys);
+      LNExt := 0; LNCall := 0; LNSym := 0; LNExpr := 0;
+      LHolds := False;
+      for var LPair in LM.ExtRefMap do
+        if LPair.Value.UnitId = AId then
+        begin
+          if SymChangedIn(AChanged, LPair.Value.Sym) then
+          begin
+            LHolds := True;
+            Break;
+          end;
+          PushKey(LK.ExtRef, LNExt, LPair.Key);
+        end;
+      if not LHolds then
+        for var LPair in LM.CallTargetX do
+          if LPair.Value.UnitId = AId then
+          begin
+            if SymChangedIn(AChanged, LPair.Value.Sym) then
+            begin
+              LHolds := True;
+              Break;
+            end;
+            PushKey(LK.CallTarget, LNCall, LPair.Key);
+          end;
+      if not LHolds then
+        for var LPair in LM.SymTypeX do
+        begin
+          if XTaintedIn(AId, AChanged, LInstChanged, LPair.Value) then
+          begin
+            LHolds := True;
+            Break;
+          end;
+          if LPair.Value.UnitId = AId then
+            PushKey(LK.SymType, LNSym, LPair.Key);
+        end;
+      if not LHolds then
+        for var LPair in LM.ExprTypeX do
+        begin
+          if XTaintedIn(AId, AChanged, LInstChanged, LPair.Value) then
+          begin
+            LHolds := True;
+            Break;
+          end;
+          if LPair.Value.UnitId = AId then
+            PushKey(LK.ExprType, LNExpr, LPair.Key);
+        end;
+      if LHolds then
+        LVerdict[LSlot] := vSelected
+      else if AAdded.Count = 0 then
+        LVerdict[LSlot] := vUntouched
+      else if LM.Demoted then
+        LVerdict[LSlot] := vNeedsScanButDemoted
+      else if TreeMentionsAny(LM.Tree, LNamesByLen) then
+        LVerdict[LSlot] := vSelected
+      else
+        LVerdict[LSlot] := vUntouched;
+      if LVerdict[LSlot] = vUntouched then
+      begin
+        SetLength(LK.ExtRef, LNExt);
+        SetLength(LK.CallTarget, LNCall);
+        SetLength(LK.SymType, LNSym);
+        SetLength(LK.ExprType, LNExpr);
+        LKeys[LSlot] := LK;
+      end;
+    end);
+  for LIdx := 1 to High(AReach) do
+    case LVerdict[LIdx] of
+      vSelected:
+        ASelected := ASelected + [AReach[LIdx]];
+      vNeedsScanButDemoted:
+        begin
+          AWhy := 'consumer-demoted';
+          Exit(False);
+        end;
     else
       AUntouched := AUntouched + [AReach[LIdx]];
-  end;
+      AUntouchedKeys := AUntouchedKeys + [LKeys[LIdx]];
+    end;
   Result := True;
 end;
 
 procedure TPasSemaProject.RenumberConsumer(AMid, AId: Integer;
-  const AMap: TArray<Integer>);
+  const AMap: TArray<Integer>; const AKeys: TPasRenumberKeys);
 var
   LM: TPasSemaModel;
-  LKeys: TArray<Integer>;
   LKey: Integer;
   LExt: TPasExtRef;
   LX: TSemaXType;
 
-  // Keys first, values after: a value write during enumeration is legal for
-  // TDictionary, but collecting keeps the two steps obviously separate.
-  function KeysInto(ADict: TDictionary<Integer, TPasExtRef>): TArray<Integer>;
-    overload;
+  function Follow(ASym: Integer): Integer;
   begin
-    Result := nil;
-    for var LPair in ADict do
-      if LPair.Value.UnitId = AId then
-        Result := Result + [LPair.Key];
-  end;
-
-  function KeysInto(ADict: TDictionary<Integer, TSemaXType>): TArray<Integer>;
-    overload;
-  begin
-    Result := nil;
-    for var LPair in ADict do
-      if LPair.Value.UnitId = AId then
-        Result := Result + [LPair.Key];
+    if (ASym >= 0) and (ASym <= High(AMap)) and (AMap[ASym] <> NIL_SYM) then
+      Result := AMap[ASym]
+    else
+      Result := ASym;   // cannot happen for an untouched consumer; keep it
   end;
 
 begin
   LM := FModels[AMid];
-  LKeys := KeysInto(LM.ExtRefMap);
-  for LKey in LKeys do
+  // Existing keys only, so Items[] is a value write - no rehash.
+  for LKey in AKeys.ExtRef do
   begin
     LExt := LM.ExtRefMap[LKey];
-    if (LExt.Sym >= 0) and (LExt.Sym <= High(AMap)) and (AMap[LExt.Sym] <> NIL_SYM) then
-    begin
-      LExt.Sym := AMap[LExt.Sym];
-      LM.ExtRefMap[LKey] := LExt;
-    end;
+    LExt.Sym := Follow(LExt.Sym);
+    LM.ExtRefMap[LKey] := LExt;
   end;
-  LKeys := KeysInto(LM.CallTargetX);
-  for LKey in LKeys do
+  for LKey in AKeys.CallTarget do
   begin
     LExt := LM.CallTargetX[LKey];
-    if (LExt.Sym >= 0) and (LExt.Sym <= High(AMap)) and (AMap[LExt.Sym] <> NIL_SYM) then
-    begin
-      LExt.Sym := AMap[LExt.Sym];
-      LM.CallTargetX[LKey] := LExt;
-    end;
+    LExt.Sym := Follow(LExt.Sym);
+    LM.CallTargetX[LKey] := LExt;
   end;
-  LKeys := KeysInto(LM.SymTypeX);
-  for LKey in LKeys do
+  for LKey in AKeys.SymType do
   begin
     LX := LM.SymTypeX[LKey];
-    if (LX.Sym >= 0) and (LX.Sym <= High(AMap)) and (AMap[LX.Sym] <> NIL_SYM) then
-    begin
-      LX.Sym := AMap[LX.Sym];
-      LM.SymTypeX[LKey] := LX;
-    end;
+    LX.Sym := Follow(LX.Sym);
+    LM.SymTypeX[LKey] := LX;
   end;
-  LKeys := KeysInto(LM.ExprTypeX);
-  for LKey in LKeys do
+  for LKey in AKeys.ExprType do
   begin
     LX := LM.ExprTypeX[LKey];
-    if (LX.Sym >= 0) and (LX.Sym <= High(AMap)) and (AMap[LX.Sym] <> NIL_SYM) then
-    begin
-      LX.Sym := AMap[LX.Sym];
-      LM.ExprTypeX[LKey] := LX;
-    end;
+    LX.Sym := Follow(LX.Sym);
+    LM.ExprTypeX[LKey] := LX;
   end;
+end;
+
+class procedure TPasSemaProject.PushKey(var AArr: TArray<Integer>;
+  var ACount: Integer; AKey: Integer);
+begin
+  if ACount = Length(AArr) then
+    SetLength(AArr, Max(16, ACount * 2));
+  AArr[ACount] := AKey;
+  Inc(ACount);
+end;
+
+class function TPasSemaProject.SymChangedIn(const AChanged: TArray<Boolean>;
+  ASym: Integer): Boolean;
+begin
+  Result := (ASym >= 0) and (ASym <= High(AChanged)) and AChanged[ASym];
+end;
+
+class function TPasSemaProject.XTaintedIn(AId: Integer; const AChanged,
+  AInstChanged: TArray<Boolean>; const AX: TSemaXType): Boolean;
+begin
+  Result := ((AX.UnitId = AId) and SymChangedIn(AChanged, AX.Sym)) or
+    ((AX.Inst <> NIL_INST) and (AX.Inst <= High(AInstChanged)) and
+     AInstChanged[AX.Inst]);
+end;
+
+procedure TPasSemaProject.ParallelFor(AHi: Integer; const ABody: TProc<Integer>);
+var
+  LIdx: Integer;
+begin
+  if AHi < 0 then
+    Exit;
+  if FSingleThreaded or (AHi < 8) then
+  begin
+    for LIdx := 0 to AHi do
+      ABody(LIdx);
+  end
+  else
+    TParallel.&For(0, AHi, ABody);
 end;
 
 function TPasSemaProject.AnalyzeModuleOnly(const APath: string): Boolean;
@@ -12673,6 +12901,7 @@ var
   LFull, LKey: string;
   LId, LOldSymN, LNewSymN, LScopeN, LImplScope, LIdx, LRadius: Integer;
   LIds, LReach, LUntouched: TArray<Integer>;
+  LUntouchedKeys: TArray<TPasRenumberKeys>;
   LOld, LNew, LCons: TPasSemaModel;
   LPre: TPasPreprocessed;
   LDiags: TArray<TPasParseDiag>;
@@ -12684,6 +12913,13 @@ var
   LChanged: TArray<Boolean>;  // per old interface symbol, see DiffInterface
   LAdded: TDictionary<string, Byte>;
   LRepointed: Integer;
+  LDecide: string;            // the split of `decide=`, see Lap
+
+  // The decision's own stages, appended as `dec=<stage>:<ms>,...;`.
+  procedure Lap(const AName: string);
+  begin
+    LDecide := LDecide + Format('%s:%d,', [AName, LSW.ElapsedMilliseconds]);
+  end;
 
   // Every refusal names itself in StageTimings - the fast path's whole value
   // is how OFTEN it fires, so "it fell back" without a reason is unreadable.
@@ -12738,7 +12974,11 @@ begin
     // model that could see the difference re-runs from Phase 1 (their text is
     // untouched, so no re-parse) and rebuilds its own references - which is
     // why a shifted symbol index harms nobody.
+    FStageTimings := Format('parse=%d;', [LSW.ElapsedMilliseconds]);
+    LSW := TStopwatch.StartNew;
+    LDecide := '';
     LIntfSame := IntfPrefixSame(LOld, LNew, LOldSymN, LWhy);
+    Lap('shape');
     LMap := nil;
     LUntouched := nil;
     LHelpers := False;
@@ -12760,6 +13000,7 @@ begin
       LNewSymN := LOldSymN;
       DiffInterface(LOld, LNew, LOldSymN, LNewSymN, LMap, LChanged, LAdded,
         LHelpers, LAnyChange, LCounts);
+      Lap('diff');
       if not LAnyChange then
         LMap := nil
       else
@@ -12779,21 +13020,27 @@ begin
       // of a hub unit's interface used to redo a third of the closure for
       // nothing (measured: 1260 models, a 24 s rebuild after the refusal).
       LMap := MatchSymbols(LOld, LNew);
+      Lap('match');
       DiffInterface(LOld, LNew, LOldSymN, LNewSymN, LMap, LChanged, LAdded,
         LHelpers, LAnyChange, LCounts);
+      Lap('diff');
     end;
     if not LIntfSame then
     begin
       AffectedConsumers(LId, 0, LReach, LRadius);   // no ceiling: the bound
+      Lap('reach');
       if LHelpers then
         // A helper attaches by type, not by name - nobody can be excluded.
         LIds := LReach
       else if not SelectConsumers(LId, LReach, LChanged, LAdded, LIds,
-                LUntouched, LWhy) then
+                LUntouched, LUntouchedKeys, LWhy) then
         Exit(Refuse(LWhy));
+      Lap('select');
+      // The counts and names travel with the refusal: a host log that says
+      // only "349>128" cannot tell a real wide change from a diff mistake.
       if (FModuleRedoLimit > 0) and (Length(LIds) > FModuleRedoLimit) then
-        Exit(Refuse(Format('too-many-consumers(%d>%d)',
-          [Length(LIds), FModuleRedoLimit])));
+        Exit(Refuse(Format('too-many-consumers(%d>%d;reach=%d;%s)',
+          [Length(LIds), FModuleRedoLimit, LRadius, LCounts])));
       for LIdx := 1 to High(LIds) do
         if FModels[LIds[LIdx]].Demoted then
           Exit(Refuse('consumer-demoted'));
@@ -12821,7 +13068,12 @@ begin
       if not InstancesRepointable(LId, LMap, LWhy) then
         Exit(Refuse(LWhy));
     end;
-    FStageTimings := Format('parse=%d;', [LSW.ElapsedMilliseconds]);
+    Lap('inst');
+    // parse = preprocess + parse + Phase 1 of the edited unit; decide = the
+    // guards, the diff and the selection over the reach; commit = the
+    // renumbering of the untouched reach and the instance table.
+    FStageTimings := FStageTimings + Format('decide=%d;dec=%s;',
+      [LSW.ElapsedMilliseconds, LDecide]);
     LSW := TStopwatch.StartNew;
     // Committed: the owning list frees the old model. Nothing outside FModels
     // holds a model reference across a call (ids, not pointers, are the
@@ -12833,8 +13085,13 @@ begin
       LRepointed := RepointInstances(LId, LMap);
     // The untouched part of the reach: bindings into this unit follow the
     // renumbering, nothing else about those models changes.
-    for LIdx := 0 to High(LUntouched) do
-      RenumberConsumer(LUntouched[LIdx], LId, LMap);
+    ParallelFor(High(LUntouched),
+      procedure(AIdx: Integer)
+      begin
+        RenumberConsumer(LUntouched[AIdx], LId, LMap, LUntouchedKeys[AIdx]);
+      end);
+    FStageTimings := FStageTimings + Format('commit=%d;', [LSW.ElapsedMilliseconds]);
+    LSW := TStopwatch.StartNew;
     // PAST THE COMMIT POINT. Everything above is a clean refusal; from here a
     // failure cannot restore the project (the consumers' cross-unit state is
     // being thrown away and rebuilt), so it is published as such: the flag
