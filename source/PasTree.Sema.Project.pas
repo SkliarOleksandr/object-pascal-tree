@@ -401,10 +401,18 @@ type
       or type parameters, which shadow nothing outside their declaration.
       AHelpers reports a helper type among the changed, removed or added: a
       helper attaches by TYPE, so no name test can find who it now affects,
-      and the caller falls back to the whole reach. }
+      and the caller falls back to the whole reach.
+
+      A CLASS or INTERFACE type is compared with its members masked out
+      (SpanTokensEqualMasked): each member is a symbol of its own and gets its
+      own verdict, so adding a method to a hub class no longer marks the class
+      changed for its hundreds of holders - the new member's NAME goes to
+      AAdded instead, and only the models mentioning it are redone. Records,
+      objects and enums keep the whole-declaration comparison: their layout
+      and ordinals are what a consumer may have folded. }
     procedure DiffInterface(AOld, ANew: TPasSemaModel; AOldSymN, ANewSymN: Integer;
       const AMap: TArray<Integer>; out AChanged: TArray<Boolean>;
-      AAdded: TDictionary<string, Byte>; out AHelpers: Boolean;
+      AAdded: TDictionary<string, Byte>; out AHelpers, AAnyChange: Boolean;
       out ACounts: string);
     { Which of the reach (AffectedConsumers' set, AId first) must actually be
       recomputed. A consumer is SELECTED when it holds a pair (AId, s) with
@@ -12101,7 +12109,7 @@ end;
 procedure TPasSemaProject.DiffInterface(AOld, ANew: TPasSemaModel;
   AOldSymN, ANewSymN: Integer; const AMap: TArray<Integer>;
   out AChanged: TArray<Boolean>; AAdded: TDictionary<string, Byte>;
-  out AHelpers: Boolean; out ACounts: string);
+  out AHelpers, AAnyChange: Boolean; out ACounts: string);
 
   // Two symbol links agree when both are unbound, or the old one's successor
   // IS the new one.
@@ -12121,13 +12129,66 @@ procedure TPasSemaProject.DiffInterface(AOld, ANew: TPasSemaModel;
     Result := (LDef <> NIL_NODE) and (LM.Tree.Nodes[LDef].Kind = nkHelperType);
   end;
 
+  // A class or interface whose members are symbols in their own right - the
+  // shape whose declaration is compared with the members masked out.
+  function IsMemberOwner(LM: TPasSemaModel; ASym: Integer): Boolean;
+  var
+    LDef: Integer;
+  begin
+    if LM.Symbols[ASym].MemberScope = NIL_SCOPE then
+      Exit(False);
+    LDef := TypeDefNodeIn(LM, ASym);
+    Result := (LDef <> NIL_NODE) and
+      (LM.Tree.Nodes[LDef].Kind in [nkClassType, nkInterfaceType]);
+  end;
+
+  // The mask over ADecl's visible span: True for every token inside a member
+  // declaration of scope AScope (each member's own DeclRootOf span).
+  function MemberMask(LM: TPasSemaModel; ADecl, AScope: Integer): TArray<Boolean>;
+  var
+    LFirst, LLast, LMFirst, LMLast, LIdx, LRoot: Integer;
+    LMember: Integer;
+  begin
+    Result := nil;
+    if not LM.Tree.NodeVisRange(ADecl, LFirst, LLast) then
+      Exit;
+    SetLength(Result, LLast - LFirst + 1);
+    if LM.Scopes[AScope].Symbols = nil then
+      Exit;
+    for LMember in LM.Scopes[AScope].Symbols do
+    begin
+      LRoot := LM.Tree.DeclRootOf(LM.Symbols[LMember].DeclNode);
+      if (LRoot = NIL_NODE) or (LRoot = ADecl) or
+         not LM.Tree.NodeVisRange(LRoot, LMFirst, LMLast) then
+        Continue;
+      for LIdx := Max(LMFirst, LFirst) to Min(LMLast, LLast) do
+        Result[LIdx - LFirst] := True;
+    end;
+  end;
+
+  // The first few names of each class, for the stage string: a refusal or a
+  // surprising redo set is read from a log, and "changed=1" alone says
+  // nothing about WHAT the analyzer thought had changed.
+  procedure Note(var ANames: string; const AName: string);
+  begin
+    if Length(ANames) > 60 then
+      Exit;
+    if ANames <> '' then
+      ANames := ANames + ',';
+    ANames := ANames + AName;
+  end;
+
 var
   LHasPredecessor: TArray<Boolean>;   // per NEW symbol
   LOldIdx, LNewIdx, LDeclOld, LDeclNew: Integer;
   LNChanged, LNRemoved, LNAdded: Integer;
   LA, LB: TSemaSymbol;
   LChanged: Boolean;
+  LChangedNames, LRemovedNames, LAddedNames: string;
 begin
+  LChangedNames := '';
+  LRemovedNames := '';
+  LAddedNames := '';
   AHelpers := False;
   LNChanged := 0;
   LNRemoved := 0;
@@ -12141,6 +12202,7 @@ begin
     begin
       AChanged[LOldIdx] := True;
       Inc(LNRemoved);
+      Note(LRemovedNames, AOld.Symbols[LOldIdx].NameLower);
       AHelpers := AHelpers or IsHelper(AOld, LOldIdx);
       Continue;
     end;
@@ -12164,13 +12226,20 @@ begin
       LDeclNew := ANew.Tree.DeclRootOf(LB.DeclNode);
       if (LDeclOld = NIL_NODE) <> (LDeclNew = NIL_NODE) then
         LChanged := True
-      else if LDeclOld <> NIL_NODE then
+      else if LDeclOld = NIL_NODE then
+        LChanged := False
+      else if IsMemberOwner(AOld, LOldIdx) and IsMemberOwner(ANew, LNewIdx) then
+        LChanged := not AOld.Tree.SpanTokensEqualMasked(LDeclOld,
+          MemberMask(AOld, LDeclOld, LA.MemberScope), ANew.Tree, LDeclNew,
+          MemberMask(ANew, LDeclNew, LB.MemberScope))
+      else
         LChanged := not AOld.Tree.SpanTokensEqual(LDeclOld, ANew.Tree, LDeclNew);
     end;
     AChanged[LOldIdx] := LChanged;
     if LChanged then
     begin
       Inc(LNChanged);
+      Note(LChangedNames, LA.NameLower);
       AHelpers := AHelpers or IsHelper(AOld, LOldIdx);
     end;
   end;
@@ -12178,14 +12247,16 @@ begin
     if not LHasPredecessor[LNewIdx] then
     begin
       Inc(LNAdded);
+      Note(LAddedNames, ANew.Symbols[LNewIdx].NameLower);
       AHelpers := AHelpers or IsHelper(ANew, LNewIdx);
       if (ANew.Symbols[LNewIdx].Scope <> NIL_SCOPE) and
          (ANew.Scopes[ANew.Symbols[LNewIdx].Scope].Kind in
             [sckUnit, sckStruct, sckEnum]) then
         AAdded.AddOrSetValue(ANew.Symbols[LNewIdx].NameLower, 0);
     end;
-  ACounts := Format('changed=%d;removed=%d;added=%d',
-    [LNChanged, LNRemoved, LNAdded]);
+  AAnyChange := (LNChanged > 0) or (LNRemoved > 0) or (LNAdded > 0);
+  ACounts := Format('changed=%d;removed=%d;added=%d;names=%s/%s/%s',
+    [LNChanged, LNRemoved, LNAdded, LChangedNames, LRemovedNames, LAddedNames]);
 end;
 
 class function TPasSemaProject.TreeMentionsAny(const ATree: TPasTree;
@@ -12402,7 +12473,7 @@ var
   LTree: TPasTree;
   LSW: TStopwatch;
   LWhy, LCounts: string;
-  LIntfSame, LHelpers, LInstancesMove: Boolean;
+  LIntfSame, LHelpers, LInstancesMove, LAnyChange: Boolean;
   LMap: TArray<Integer>;      // old -> new symbol; nil until something needs it
   LChanged: TArray<Boolean>;  // per old interface symbol, see DiffInterface
   LAdded: TDictionary<string, Byte>;
@@ -12467,7 +12538,28 @@ begin
     LHelpers := False;
     LRadius := 1;
     LCounts := '';
-    if not LIntfSame then
+    if LIntfSame then
+    begin
+      // Same SHAPE is not the same interface. Phase 1 declares symbols and
+      // scopes; it does not resolve a heritage clause, a cross-unit type name
+      // or a constant's value, so `TA = class` becoming `TA = class(TBase)`,
+      // or `X: TFoo` becoming `X: TBar`, leaves the arena identical - and a
+      // consumer that inherits from TA would have kept its stale members
+      // (found by the harness's `parent` edit, 2026-09-04). The declaration
+      // text is compared symbol by symbol over the identity map; any
+      // difference sends the edit down the interface path.
+      SetLength(LMap, LOld.SymCount);
+      for LIdx := 0 to High(LMap) do
+        LMap[LIdx] := LIdx;
+      LNewSymN := LOldSymN;
+      DiffInterface(LOld, LNew, LOldSymN, LNewSymN, LMap, LChanged, LAdded,
+        LHelpers, LAnyChange, LCounts);
+      if not LAnyChange then
+        LMap := nil
+      else
+        LIntfSame := False;
+    end
+    else
     begin
       // Refuse the shapes the redo cannot express, BEFORE touching anything.
       if not IntfPrefixBounds(LNew, LNewSymN, LScopeN, LImplScope) then
@@ -12482,7 +12574,10 @@ begin
       // nothing (measured: 1260 models, a 24 s rebuild after the refusal).
       LMap := MatchSymbols(LOld, LNew);
       DiffInterface(LOld, LNew, LOldSymN, LNewSymN, LMap, LChanged, LAdded,
-        LHelpers, LCounts);
+        LHelpers, LAnyChange, LCounts);
+    end;
+    if not LIntfSame then
+    begin
       AffectedConsumers(LId, 0, LReach, LRadius);   // no ceiling: the bound
       if LHelpers then
         // A helper attaches by type, not by name - nobody can be excluded.

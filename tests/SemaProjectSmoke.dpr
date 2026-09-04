@@ -5613,8 +5613,12 @@ begin
       'procedure TM.Extra; begin end;'#10'end.'#10, 9);
     Ok('module: an interface edit in a USED unit is accepted',
       GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitMA.pas')));
-    Ok('module: the redo covered the consumer as well',
-      Pos('module=2;', GProj.StageTimings) > 0);
+    // Since 0.15.9 a member ADDED to a class is an added name, not a changed
+    // class: nobody mentions Extra, so the consumer is renumbered, not redone.
+    Ok('module: the consumer was renumbered, not redone [' +
+      GProj.StageTimings + ']',
+      (Pos('module=1;', GProj.StageTimings) > 0) and
+      (Pos('renumbered=1;', GProj.StageTimings) > 0));
     Ok('module: the consumer''s cross-unit reference still resolves',
       CrossRefTo(ModelByName('unitmb'), 'M', 'M'));
     Ok('module: the consumer was not double-diagnosed',
@@ -5813,16 +5817,41 @@ begin
     Ok('namedeps: ...which now resolves it',
       DiagCount(ModelByName('unitnc'), 'E2003') = 0);
 
-    // TA's declaration changes: everyone HOLDING TA is redone - NB (its
-    // variable) and ND (the expression GA is typed TA) - and NC is not.
+    // A method ADDED to TA: the class is compared with its members masked
+    // out, so it is not "changed" - the new member is an added NAME, and
+    // nobody mentions N. One module, everybody else renumbered.
     GProj.SetBuffer(TPath.Combine(LDir, 'UnitNA.pas'),
       cNAIntf + '  TFirst = class end;'#10 +
       '  TA = class'#10'    procedure M;'#10'    procedure N;'#10'  end;'#10 +
       cNAConst + '  CNEW = 3;'#10'  Shared = 9;'#10 +
       'implementation'#10'procedure TA.M; begin end;'#10 +
       'procedure TA.N; begin end;'#10'end.'#10, 5);
-    Ok('namedeps: a changed type selects its holders',
+    Ok('namedeps: a method added to a class redoes nobody who does not name it',
       GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitNA.pas')) and
+      (Pos('changed=0;', GProj.StageTimings) > 0) and
+      (Pos('added=1;', GProj.StageTimings) > 0) and
+      (Pos('module=1;', GProj.StageTimings) > 0));
+    Ok('namedeps: the holders still bind after the member was added',
+      CrossRefTo(ModelByName('unitnb'), 'TA', 'TA') and
+      CrossRefTo(ModelByName('unitnd'), 'M', 'M'));
+
+    // TA's HEADER changes (a new ancestor): that is the class itself, and
+    // everyone HOLDING TA is redone - NB (its variable) and ND (the
+    // expression GA is typed TA) - and NC is not.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitNA.pas'),
+      cNAIntf + '  TFirst = class end;'#10 +
+      '  TA = class(TFirst)'#10'    procedure M;'#10'    procedure N;'#10 +
+      '  end;'#10 +
+      cNAConst + '  CNEW = 3;'#10'  Shared = 9;'#10 +
+      'implementation'#10'procedure TA.M; begin end;'#10 +
+      'procedure TA.N; begin end;'#10'end.'#10, 6);
+    // NB: the heritage clause is invisible to Phase 1 (the arena is identical
+    // with and without it), so this is also the test that the text diff runs
+    // when the SHAPE compares equal.
+    var LHeaderOk := GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitNA.pas'));
+    Ok('namedeps: a changed class header selects the class''s holders [' +
+      GProj.StageTimings + ']',
+      LHeaderOk and
       (Pos('changed=1;', GProj.StageTimings) > 0) and
       (Pos('module=3;', GProj.StageTimings) > 0) and
       (Pos('renumbered=1;', GProj.StageTimings) > 0));
@@ -5830,13 +5859,34 @@ begin
       CrossRefTo(ModelByName('unitnb'), 'TA', 'TA') and
       CrossRefTo(ModelByName('unitnd'), 'M', 'M'));
 
+    // A member's own signature changes: the MEMBER is changed, the class is
+    // not. NB and ND hold M (they call it); their redo is for M.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitNA.pas'),
+      cNAIntf + '  TFirst = class end;'#10 +
+      '  TA = class(TFirst)'#10'    procedure M(AArg: Integer);'#10 +
+      '    procedure N;'#10'  end;'#10 +
+      cNAConst + '  CNEW = 3;'#10'  Shared = 9;'#10 +
+      'implementation'#10'procedure TA.M(AArg: Integer); begin end;'#10 +
+      'procedure TA.N; begin end;'#10'end.'#10, 7);
+    var LMemberOk := GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitNA.pas'));
+    Ok('namedeps: a changed member selects the member''s holders, not the class''s ['
+      + GProj.StageTimings + ']',
+      LMemberOk and
+      (Pos('changed=1;', GProj.StageTimings) > 0) and
+      (Pos('names=m/', GProj.StageTimings) > 0) and
+      (Pos('module=3;', GProj.StageTimings) > 0));
+    Ok('namedeps: the call sites still bind the changed member',
+      CrossRefTo(ModelByName('unitnb'), 'M', 'M') and
+      CrossRefTo(ModelByName('unitnd'), 'M', 'M'));
+
     // CB removed: NC holds it, is redone, and reports it. Nobody else is.
     GProj.SetBuffer(TPath.Combine(LDir, 'UnitNA.pas'),
       cNAIntf + '  TFirst = class end;'#10 +
-      '  TA = class'#10'    procedure M;'#10'    procedure N;'#10'  end;'#10 +
+      '  TA = class(TFirst)'#10'    procedure M(AArg: Integer);'#10 +
+      '    procedure N;'#10'  end;'#10 +
       'const'#10'  CA = 1;'#10'  CNEW = 3;'#10'  Shared = 9;'#10 +
-      'implementation'#10'procedure TA.M; begin end;'#10 +
-      'procedure TA.N; begin end;'#10'end.'#10, 6);
+      'implementation'#10'procedure TA.M(AArg: Integer); begin end;'#10 +
+      'procedure TA.N; begin end;'#10'end.'#10, 8);
     Ok('namedeps: a removed constant selects its holder',
       GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitNA.pas')) and
       (Pos('removed=1;', GProj.StageTimings) > 0) and
@@ -5848,12 +5898,13 @@ begin
     // the whole reach is redone, as before 0.15.8.
     GProj.SetBuffer(TPath.Combine(LDir, 'UnitNA.pas'),
       cNAIntf + '  TFirst = class end;'#10 +
-      '  TA = class'#10'    procedure M;'#10'    procedure N;'#10'  end;'#10 +
+      '  TA = class(TFirst)'#10'    procedure M(AArg: Integer);'#10 +
+      '    procedure N;'#10'  end;'#10 +
       '  TAHelper = class helper for TA'#10'    procedure H;'#10'  end;'#10 +
       'const'#10'  CA = 1;'#10'  CNEW = 3;'#10'  Shared = 9;'#10 +
-      'implementation'#10'procedure TA.M; begin end;'#10 +
+      'implementation'#10'procedure TA.M(AArg: Integer); begin end;'#10 +
       'procedure TA.N; begin end;'#10'procedure TAHelper.H; begin end;'#10 +
-      'end.'#10, 7);
+      'end.'#10, 9);
     Ok('namedeps: a new helper redoes the whole reach',
       GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitNA.pas')) and
       (Pos('helpers=1;', GProj.StageTimings) > 0) and
@@ -5988,10 +6039,11 @@ begin
     // walk fixed), but only the HOLDERS of the changed type are redone - NB
     // (heritage) and NC (a variable). ND holds nothing of NA; its bindings
     // are renumbered, which the cross-reference below proves.
-    Ok('reach: the reach is ALL FOUR units, not three',
+    Ok('reach: the reach is ALL FOUR units, not three [' +
+      GProj.StageTimings + ']',
       (Pos('reach=4;', GProj.StageTimings) > 0) and
-      (Pos('module=3;', GProj.StageTimings) > 0) and
-      (Pos('renumbered=1;', GProj.StageTimings) > 0));
+      (Pos('module=1;', GProj.StageTimings) > 0) and
+      (Pos('renumbered=3;', GProj.StageTimings) > 0));
     Ok('reach: the transitive consumer still resolves its own imports',
       CrossRefTo(ModelByName('unitnd'), 'TNC', 'TNC'));
   finally

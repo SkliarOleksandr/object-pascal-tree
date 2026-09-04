@@ -37,9 +37,11 @@ program PasTreeDiffHarness;
     (b) interface edit - a new routine declared at the end of the interface
         section, with its body appended.
   A -script file replaces the synthetic sampling: one edit per line,
-  `body|intf|blank|comment|const|type|implvar|implvartop|intfuses
+  `body|intf|blank|comment|const|type|implvar|implvartop|intfuses|member|parent
   <full-path>`, applied in order (blank/comment/const/type land at the end of
-  the interface section, intfuses appends a unit to the interface uses).
+  the interface section, intfuses appends a unit to the interface uses,
+  member adds a method to the first interface class, parent gives the first
+  parentless class an explicit `(TObject)`).
 
   -selftest inverts the exercise to prove the COMPARATOR can see: the
   incremental side is deliberately fed the PRE-EDIT text of each step's
@@ -75,7 +77,7 @@ uses
 
 type
   TEditKind = (ekBody, ekIntf, ekBlank, ekComment, ekConst, ekType,
-    ekImplVar, ekImplVarTop, ekIntfUses);
+    ekImplVar, ekImplVarTop, ekIntfUses, ekMember, ekParent);
   TEditStep = record
     Kind: TEditKind;
     Path: string;    // full path of the unit to edit
@@ -163,6 +165,30 @@ begin
   Result := -1;
 end;
 
+// `TFoo = class` or `TFoo = class(TBase)` opening a class body on this line:
+// the class name; '' for anything else (a forward `= class;`, a one-line
+// `= class(TBase);`, a class of, or not a type header at all).
+function ClassHeaderName(const ALine: string): string;
+var
+  LText, LRest: string;
+  LEq: Integer;
+begin
+  Result := '';
+  LText := Trim(ALine);
+  LEq := Pos(' = class', LText);
+  if LEq <= 1 then
+    Exit;
+  LRest := Trim(Copy(LText, LEq + Length(' = class'), MaxInt));
+  if (LRest <> '') and (LRest[1] <> '(') then
+    Exit;
+  if (LRest <> '') and (LRest[Length(LRest)] = ';') then
+    Exit;
+  Result := Copy(LText, 1, LEq - 1);
+  for var LCh in Result do
+    if not (CharInSet(LCh, ['A'..'Z', 'a'..'z', '0'..'9', '_'])) then
+      Exit('');
+end;
+
 { Applies one synthetic edit to AText; False when the unit's layout does not
   carry the markers the transform needs (the sampler then skips it).
 
@@ -178,7 +204,8 @@ function ApplyEdit(const AText: string; AKind: TEditKind; ASeq: Integer;
 var
   LLines: TList<string>;
   LArr: TArray<string>;
-  LImpl, LTail, LInit, LIntf, LUses: Integer;
+  LImpl, LTail, LInit, LIntf, LUses, LClassLine: Integer;
+  LClassName: string;
 begin
   Result := False;
   ANewText := AText;
@@ -227,6 +254,48 @@ begin
         LLines.Insert(LTail, Format('var __DiffVar%d: Integer;', [ASeq]));
       ekImplVarTop:
         LLines.Insert(LImpl + 1, Format('var __DiffVar%d: Integer;', [ASeq]));
+      // A method added to the FIRST class declared in the interface (its
+      // header line `TFoo = class` or `TFoo = class(TBase)`), with the body
+      // appended - the "add a method to a hub class" edit.
+      ekMember:
+        begin
+          LIntf := LineIndexOf(LArr, 'interface');
+          LClassLine := -1;
+          for var LIdx := LIntf + 1 to LImpl - 1 do
+          begin
+            LClassName := ClassHeaderName(LArr[LIdx]);
+            if LClassName <> '' then
+            begin
+              LClassLine := LIdx;
+              Break;
+            end;
+          end;
+          if LClassLine < 0 then
+            Exit(False);
+          LLines.Insert(LTail, Format('procedure %s.__DiffMember%d; begin end;',
+            [LClassName, ASeq]));
+          LLines.Insert(LClassLine + 1,
+            Format('    procedure __DiffMember%d;', [ASeq]));
+        end;
+      // `TFoo = class` -> `TFoo = class(TObject)` on the first parentless
+      // class of the interface: identical for dcc, identical for Phase 1
+      // (no symbol or scope moves), a different declaration TEXT - the edit
+      // that proved guard 1 blind to heritage (2026-09-04).
+      ekParent:
+        begin
+          LIntf := LineIndexOf(LArr, 'interface');
+          LClassLine := -1;
+          for var LIdx := LIntf + 1 to LImpl - 1 do
+            if (ClassHeaderName(LArr[LIdx]) <> '') and
+               Trim(LArr[LIdx]).EndsWith('class', True) then
+            begin
+              LClassLine := LIdx;
+              Break;
+            end;
+          if LClassLine < 0 then
+            Exit(False);
+          LLines[LClassLine] := LLines[LClassLine] + '(TObject)';
+        end;
       // A unit added to the INTERFACE uses clause - the edit that renumbers
       // every interface symbol (the unit-ref symbol lands first). Appended
       // to an existing clause, or a new clause right after `interface`.
@@ -419,6 +488,8 @@ begin
     ekImplVar: Result := 'implvar';
     ekImplVarTop: Result := 'implvartop';
     ekIntfUses: Result := 'intfuses';
+    ekMember: Result := 'member';
+    ekParent: Result := 'parent';
   else
     Result := 'type';
   end;
@@ -494,6 +565,10 @@ begin
       LStep.Kind := ekImplVarTop
     else if SameText(LKindWord, 'intfuses') then
       LStep.Kind := ekIntfUses
+    else if SameText(LKindWord, 'member') then
+      LStep.Kind := ekMember
+    else if SameText(LKindWord, 'parent') then
+      LStep.Kind := ekParent
     else
     begin
       Writeln(ErrOutput, 'bad script kind: ', LKindWord);
@@ -705,7 +780,7 @@ begin
       // their own references), a shifted symbol index harms nobody. What
       // decides correctness is the comparison against the full pipeline,
       // which every step runs anyway - so this is counted, not judged.
-      if (LStep.Kind in [ekIntf, ekConst, ekType, ekIntfUses]) and
+      if (LStep.Kind in [ekIntf, ekConst, ekType, ekIntfUses, ekMember, ekParent]) and
          LHow.StartsWith('module') then
         Inc(GAcceptedIntf)
       else if (LStep.Kind in [ekBody, ekBlank, ekComment, ekImplVar,

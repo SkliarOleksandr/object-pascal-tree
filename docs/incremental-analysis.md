@@ -119,10 +119,14 @@ The reach is only the upper bound now. `DiffInterface` compares the old and
 new interface over `MatchSymbols`' map (guard 2 below) and sorts every old
 symbol into unchanged / changed / removed - changed meaning a Phase-1
 attribute differs or the declaration no longer reads the same token for
-token (`DeclRootOf` + `SpanTokensEqual`; coarse on purpose: any edit inside
-a class marks the class changed) - and collects the NAMES of added symbols
-another unit could reach by name (globals, members, enum values; not
-parameters). `SelectConsumers` then keeps, out of the reach, only:
+token (`DeclRootOf` + `SpanTokensEqual`) - and collects the NAMES of added
+symbols another unit could reach by name (globals, members, enum values; not
+parameters). A class or interface is compared with its MEMBERS masked out
+(`SpanTokensEqualMasked`): each member is a symbol with its own verdict, so a
+method added to a hub class is an added name, not a changed class, and only
+the models mentioning that name are redone. Records, objects and enums keep
+the whole-declaration comparison - their layout and ordinals are what a
+consumer may have folded. `SelectConsumers` then keeps, out of the reach, only:
 
 - a model holding a pair (unit, changed-or-removed symbol) in any of its
   four cross-unit maps, or an instance tainted by one;
@@ -149,8 +153,14 @@ plus `helpers=1;` when the fallback fired.
 
 1. **Interface prefix reproduced exactly** - the symbol arena and the scope
    index space up to the implementation section: name, kind, order, scope
-   shape. When it holds, only the edited unit is redone. When it does not, the
-   consumers above are redone with it.
+   shape. Same SHAPE is not the same interface, though: Phase 1 does not
+   resolve a heritage clause, a cross-unit type name or a constant's value,
+   so `TA = class` becoming `TA = class(TBase)` leaves the arena identical.
+   Until 0.15.9 that edit passed as a body edit and a consumer inheriting
+   from TA kept its stale members - found by the harness's `parent` kind, not
+   by any user. The declaration TEXT is therefore diffed on this path too
+   (over the identity map), and any difference sends the edit down the
+   interface path above.
 
    Interface membership is decided by walking a scope's PARENT chain, not by
    comparing indices: the implementation scope is created with the unit (index
@@ -254,8 +264,11 @@ only ever prove the full path.
   line, kind = `body`, `intf`, `blank`, `comment`, `const`, `type` (the last
   four land at the end of the interface section - the "start typing in a big
   interface" shapes), `implvar`/`implvartop` (a variable at the end / the top
-  of the implementation section) or `intfuses` (a unit appended to the
-  interface uses clause - the edit that renumbers every interface symbol). On the client closure a blank line or comment in the hub
+  of the implementation section), `intfuses` (a unit appended to the
+  interface uses clause - the edit that renumbers every interface symbol),
+  `member` (a method added to the first interface class) or `parent` (the
+  first parentless class gets an explicit `(TObject)` - a no-op for dcc and
+  for Phase 1, a changed declaration for the diff). On the client closure a blank line or comment in the hub
   types unit is a 250 ms module step; a new const or type refuses with
   `too-many-consumers(1260>128)` and rebuilds, which is what the name-level
   dependency idea in the open list is for;

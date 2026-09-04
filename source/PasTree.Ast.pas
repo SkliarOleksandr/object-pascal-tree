@@ -219,6 +219,19 @@ type
       symbol in two parses of one unit. }
     function SpanTokensEqual(ANode: Integer; const AOther: TPasTree;
       AOtherNode: Integer): Boolean;
+    { SpanTokensEqual with parts of each span MASKED OUT: ASkip[i] / AOtherSkip[i]
+      is True for the i-th visible token of the respective span (counted from
+      the node's leftmost token) that must not take part. The two sequences of
+      unmasked tokens are compared. Used to compare a class declaration with
+      its members removed - the members are symbols of their own and are
+      compared on their own. }
+    function SpanTokensEqualMasked(ANode: Integer; const ASkip: TArray<Boolean>;
+      const AOther: TPasTree; AOtherNode: Integer;
+      const AOtherSkip: TArray<Boolean>): Boolean;
+    { The visible-token range of a node, as SpanTokensEqualMasked counts it:
+      AFirst = the leftmost token (NodeLeftmostVis), ALast = LastToken. False
+      when the node has no usable span. }
+    function NodeVisRange(AIndex: Integer; out AFirst, ALast: Integer): Boolean;
     { The node's TRUE leftmost visible token: the smaller of its own
       FirstToken and its deepest-first-descendant's - nodes whose FirstToken
       is not their left edge exist by design (nkMember's is the dot). -1 for
@@ -485,6 +498,60 @@ begin
     if (LLen <> LOtherLen) or
        not CompareMem(LText, LOtherText, LLen * SizeOf(Char)) then
       Exit;
+  end;
+  Result := True;
+end;
+
+function TPasTree.NodeVisRange(AIndex: Integer; out AFirst,
+  ALast: Integer): Boolean;
+begin
+  AFirst := -1;
+  ALast := -1;
+  if (AIndex < 0) or (AIndex > High(Nodes)) then
+    Exit(False);
+  AFirst := NodeLeftmostVis(AIndex);
+  ALast := Nodes[AIndex].LastToken;
+  Result := (AFirst >= 0) and (ALast >= AFirst) and (ALast <= High(Source.Visible));
+end;
+
+function TPasTree.SpanTokensEqualMasked(ANode: Integer;
+  const ASkip: TArray<Boolean>; const AOther: TPasTree; AOtherNode: Integer;
+  const AOtherSkip: TArray<Boolean>): Boolean;
+var
+  LFirst, LLast, LOtherFirst, LOtherLast, LIdx, LOtherIdx: Integer;
+  LLen, LOtherLen: Integer;
+  LText, LOtherText: PChar;
+
+  // Advance AIdx (relative) past masked tokens; False at the end of the span.
+  function Next(const ASkipMask: TArray<Boolean>; var AIdx: Integer;
+    ACount: Integer): Boolean;
+  begin
+    while (AIdx < ACount) and (AIdx <= High(ASkipMask)) and ASkipMask[AIdx] do
+      Inc(AIdx);
+    Result := AIdx < ACount;
+  end;
+
+begin
+  Result := False;
+  if not NodeVisRange(ANode, LFirst, LLast) or
+     not AOther.NodeVisRange(AOtherNode, LOtherFirst, LOtherLast) then
+    Exit;
+  LIdx := 0;
+  LOtherIdx := 0;
+  while True do
+  begin
+    if Next(ASkip, LIdx, LLast - LFirst + 1) <>
+       Next(AOtherSkip, LOtherIdx, LOtherLast - LOtherFirst + 1) then
+      Exit;   // one side ran out first
+    if LIdx >= LLast - LFirst + 1 then
+      Break;  // both exhausted together
+    Source.VisibleSlice(LFirst + LIdx, LText, LLen);
+    AOther.Source.VisibleSlice(LOtherFirst + LOtherIdx, LOtherText, LOtherLen);
+    if (LLen <> LOtherLen) or
+       not CompareMem(LText, LOtherText, LLen * SizeOf(Char)) then
+      Exit;
+    Inc(LIdx);
+    Inc(LOtherIdx);
   end;
   Result := True;
 end;
