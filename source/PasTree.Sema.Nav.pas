@@ -332,6 +332,24 @@ type
       to). Also serves as the Enabled check for "go to declaration". }
     function GotoDeclaration(AMid, ALine, ACol: Integer;
       out ATarget: TPasNavTarget): Boolean;
+    { Cursor on the `inherited` KEYWORD - which IdentAt never sees, it being a
+      keyword token and not an identifier node. Two cases, both what the real
+      IDE's Ctrl+Click on that word does:
+      - `inherited Foo(...)`: the name is an ordinary nkIdent already bound by
+        CrossResolveInherited (overload included), so this is ResolveDecl on
+        that name, as if the name itself had been clicked.
+      - bare `inherited;` (12.1.2): there is no name node the resolver could
+        have bound, so the target is looked up here - the ancestor's member of
+        the SAME NAME as the method the cursor is in, the overload with the
+        same arity when there are several (a bare inherited passes the
+        current parameters on unchanged).
+      The DECLARATION, like ResolveDecl; the caller applies its own redirect to
+      the implementation (PasLsp.Server.HandleDefinition does, for every
+      routine target alike). False off the keyword, outside a method, or when
+      the ancestry has no member of that name - a bare `inherited;` in a
+      method no ancestor declares is a legal no-op, with nothing to go to. }
+    function GotoBareInherited(AMid, ALine, ACol: Integer;
+      out ATarget: TPasNavTarget): Boolean;
   end;
 
 // True when AName is a legal, unescaped Object Pascal identifier that is not
@@ -1960,6 +1978,95 @@ begin
   // Original spelling, not the lowercased lookup key - see GotoImplementation.
   Result := TargetFromVis(AMid, LM.Tree.Nodes[LNameNode].FirstToken,
     LM.Tree.NodeText(LNameNode), ATarget);
+end;
+
+function TPasNavigator.GotoBareInherited(AMid, ALine, ACol: Integer;
+  out ATarget: TPasNavTarget): Boolean;
+var
+  LM, LTM: TPasSemaModel;
+  LCache: TNavCache;
+  LVis, LNameVis, LImplNode, LNameNode, LBody, LScopeNode: Integer;
+  LStruct, LMemMid, LMemSym, LCtx, LCand, LArity, LReq, LTot: Integer;
+  LQualIdents: TArray<Integer>;
+  LAnc: TSemaXType;
+  LVariadic: Boolean;
+begin
+  Result := False;
+  if AMid < 0 then
+    Exit;
+  LM := FProj.Model(AMid);
+  LCache := CacheOf(AMid);
+  // VisAt only walks back from whitespace/comments, and `inherited` is a
+  // visible token, so this is an exact hit or nothing.
+  LVis := VisAt(AMid, ALine, ACol);
+  if (LVis < 0) or (LM.Tree.Source.Visible[LVis].FileId <> 0) or
+     (LM.Tree.Source.Files[0].Tokens[
+        LM.Tree.Source.Visible[LVis].TokenIndex].Kind <> tkInherited) then
+    Exit;
+
+  // NAMED `inherited Foo(...)`, cursor on the keyword rather than the name:
+  // the name is an ordinary nkIdent that CrossResolveInherited has already
+  // bound, overload and all (CallTargetX) - hand it to ResolveDecl exactly as
+  // a click on the name would. Only a truly bare `inherited;` needs the
+  // lookup below.
+  LNameVis := LVis + 1;
+  if (LNameVis <= High(LM.Tree.Source.Visible)) and
+     LCache.NodeOfVis.TryGetValue(LNameVis, LNameNode) and
+     (LM.Tree.Nodes[LM.Tree.Nodes[LNameNode].Parent].Kind = nkInherited) then
+    Exit(ResolveDecl(AMid, LNameNode, ATarget));
+
+  // The enclosing method's implementation - RoutineOfVis covers keyword
+  // positions too, unlike IdentAt (same lookup GotoDeclaration uses).
+  EnsureRoutinePairs(AMid, LCache);
+  LImplNode := LCache.RoutineOfVis[LVis];
+  if (LImplNode = NIL_NODE) or
+     not RTSegments(LM, LImplNode, LQualIdents, LNameNode) then
+    Exit;
+  // The block inside the body, not the nkRoutine itself: a routine node is
+  // stamped with the scope it is DECLARED in, its block with the body's own
+  // scope - the one that carries the Self context StructSymOfNode reads.
+  LBody := RTFindChildKind(LM, LImplNode, nkRoutineBody);
+  if LBody = NIL_NODE then
+    Exit;
+  LScopeNode := LM.Tree.Nodes[LBody].FirstChild;
+  if LScopeNode = NIL_NODE then
+    Exit;
+
+  // ResolveInheritedHead's own lookup (PasTree.Sema.Project) - repeated here
+  // because that pass only visits a NAMED head; a bare `inherited` has no
+  // node it could have bound.
+  LStruct := FProj.StructSymOfNode(LM, LScopeNode);
+  if LStruct = NIL_SYM then
+    Exit;
+  LAnc := FProj.AncestorOfX(XPlain(AMid, LStruct));
+  if not XValid(LAnc) or
+     not FProj.FindMemberX(AMid, LAnc, LM.Tree.NodeNameLower(LNameNode),
+       LMemMid, LMemSym, LCtx) then
+    Exit;
+
+  // A bare `inherited` passes the CURRENT method's parameters on unchanged
+  // (12.1.2), so among same-named ancestor overloads the one with that
+  // arity is the one called - FindMemberX answers the chain head, which for
+  // TSynEditPlugin.Create(AOwner) vs Create(AOwner, AHandlers) is the wrong
+  // half of the time. Arity, not full type matching: the same precision the
+  // decl<->impl pairing settles for. Head stays when nothing matches.
+  LTM := FProj.Model(LMemMid);
+  LArity := Length(RTParamNames(LM, LImplNode));
+  LCand := LMemSym;
+  while LCand <> NIL_SYM do
+  begin
+    if FProj.RoutineArity(LMemMid, LCand, LReq, LTot, LVariadic) and
+       (LArity >= LReq) and (LArity <= LTot) then
+    begin
+      LMemSym := LCand;
+      Break;
+    end;
+    LCand := LTM.Symbols[LCand].NextOverload;
+  end;
+
+  Result := (LTM.Symbols[LMemSym].DeclNode <> NIL_NODE) and
+    TargetFromNode(LMemMid, LTM.Symbols[LMemSym].DeclNode,
+      LTM.Symbols[LMemSym].Name, ATarget);
 end;
 
 { The routine node paired with ARoutine - a body-less declaration's
