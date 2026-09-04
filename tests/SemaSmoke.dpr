@@ -2439,6 +2439,24 @@ begin
   Ok('helper-cycle: a mutually-extending helper pair does not hang or crash '
     + 'the lookup', HasSym('TH1', skType) and HasSym('TH2', skType));
 
+  // ---- Recovery: a `property` with no name yet (the author mid-word) has a
+  // PropertyDecl with no children. NextSib(NIL_NODE) once read Nodes[-1] -
+  // a range error here, and in a release build the root node, so Collect
+  // recursed into the whole unit until the stack ran out (2026-09-04). The
+  // parser no longer eats the class `end` on it either, so the next type
+  // survives. ----
+  Analyze('unit U; interface type'#10 +
+    '  IA = interface(IUnknown)'#10 +
+    '    [''{6BD11B25-82E3-4C87-8E99-AE4C313F12A9}'']'#10 +
+    '    property'#10 +
+    '  end;'#10 +
+    '  IB = interface end;'#10 +
+    'implementation end.');
+  Ok('recovery: a bare property in an interface analyzes', GModel <> nil);
+  Ok('recovery: ...and the next type is still a type of the unit',
+    HasSym('IA', skType) and HasSym('IB', skType) and
+    (SymCountOf('ib', skField) = 0));
+
   if GCounter.Finish('SemaSmoke') then
     ExitCode := 1;
   GPP.Free;

@@ -211,13 +211,23 @@ begin
   Result := FTree.Nodes[ANode].Kind;
 end;
 
+// Both answer NIL_NODE for NIL_NODE. Without that guard `NextSib(NIL_NODE)`
+// reads Nodes[-1]: a range error under checks, and in a release build an
+// arbitrary node index - on a `property` with no name (the author mid-word)
+// it came back as the ROOT, Collect recursed into the whole unit again and
+// the analysis died of EStackOverflow, which the module path reported as
+// `parse-failed` and the host answered with a 25 s rebuild (2026-09-04).
 function TPasSemaResolver.FirstChild(ANode: Integer): Integer;
 begin
+  if ANode = NIL_NODE then
+    Exit(NIL_NODE);
   Result := FTree.Nodes[ANode].FirstChild;
 end;
 
 function TPasSemaResolver.NextSib(ANode: Integer): Integer;
 begin
+  if ANode = NIL_NODE then
+    Exit(NIL_NODE);
   Result := FTree.Nodes[ANode].NextSibling;
 end;
 

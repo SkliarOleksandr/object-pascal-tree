@@ -298,6 +298,57 @@ Unit-level coverage lives in `tests\SemaProjectSmoke.dpr` (donor + module
 paths, refusals, the consumer redo) and `tests\AsyncSmoke.dpr` (the session
 wrapper).
 
+## 4b. The parser is part of the fast path
+
+The module path analyzes whatever the buffer holds at each pause in typing,
+and most of those states are not valid Pascal. What the parser does with an
+UNFINISHED declaration therefore decides how many symbols the diff sees as
+removed. Until 0.15.12 a type name alone on a line (`ttt`, the author about
+to type `= Integer;`) took the rest of its section with it: the missing `=`
+was reported, the next line was read as this declaration's type, the `;` was
+missing too, the section loop ended on the stray `=`, and every following
+token went down as "declaration expected" until the next section keyword.
+In the client hub unit that was 326 interface symbols gone per keystroke,
+348 consumers to redo, a refusal, a 25 s rebuild and hundreds of false E2003
+until the line was finished. The replayed typing sequence (`insert` /
+`replace` harness kinds) is what found it; the harness's own edits were all
+complete declarations.
+
+Now a declaration ends where the next one begins (`TPasParser.AtDeclHead`):
+a declaration cut short before its `=` / `:` / type is closed as it is - its
+name IS declared - and a declaration missing its `;` skips to the next
+declaration head or section boundary and loses only itself. Every state of
+typing `ttt = integer;` into the hub unit is a one-module run of 170-290 ms
+with `removed=0`; the flat corpora still parse with zero diagnostics.
+
+The same day, the same method found the second shape: `property` typed into
+an interface body, no name yet. The parser's specifier loop ate the `end`
+of the interface (one error, one token, repeat), and the resolver, handed a
+PropertyDecl with no children, asked `NextSib(NIL_NODE)` - Nodes[-1], which
+in a release build came back as the root node, so Collect recursed into the
+whole unit until the stack ran out. The module path saw an exception and
+refused with `parse-failed`; the host rebuilt. The specifier loop now stops
+at a stray token, the child-navigation helpers answer NIL_NODE for NIL_NODE,
+and a refusal names the exception: `parse-failed(EClass: message)`. Every
+state of typing that property is a module step of 200-400 ms.
+
+Third shape, same day: `type s =` typed above a method. `s = procedure
+SetData(...)` read as a procedural type and swallowed the method; where the
+header's failed `;` then skipped past the class's `end`, the rest of the unit
+became that class's members - 17959 symbols with a new identity, a refusal.
+A `procedure` / `function` followed by a NAME is now not a type expression
+(the declaration is left without a type, the header is left for the member
+loop); `S = procedure stdcall` still is one.
+
+Fourth shape: a bare `function` at section level above `TRecno = ...`. The
+routing keyword took TRecno as its name, `= umcsTypes.TRecno` as a method
+resolution clause, and the section loop then had no keyword to resume on -
+every following token "declaration expected" again. A routine whose next
+token is `Ident =` has no name (a method resolution clause is always
+dotted) and ends there; and `ParseDeclSections` treats a declaration head
+with no keyword in front as the resumption of the last section kind (or of
+what the head's shape says - `:` and `,` mean var), so the section goes on.
+
 ## 5. Open - what could still be improved
 
 Ordered by evidence, not by interest.

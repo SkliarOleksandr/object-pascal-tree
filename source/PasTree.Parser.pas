@@ -127,14 +127,46 @@ type
     function ParseRoutineDirectives(ARoutine: Integer): Boolean; // True=no body
     function ParseRoutineBody: Integer;
     function ParseProperty(AClassProp: Boolean): Integer;
-    function ParseTypeSection: Integer;
-    function ParseConstSection: Integer;
+    function ParseTypeSection(AHeadless: Boolean = False): Integer;
+    function ParseConstSection(AHeadless: Boolean = False): Integer;
     function ParseVarSection(AClassVar: Boolean): Integer;
     function ParseConstInitializer(AHasType: Boolean): Integer;
     function ParseExportsClause: Integer;
     function DirectiveNameStartsDecl: Boolean;
-    function IsDirectiveWord: Boolean;
+    function IsDirectiveWord: Boolean; overload;
+    function IsDirectiveWord(AVisIndex: Integer): Boolean; overload;
     function IsVisibilityWord: Boolean;
+    { Error recovery inside a type / const / var section.
+
+      A declaration that stops short - `ttt` alone on a line while the author
+      is still typing - used to take the REST of the section with it: the
+      missing `=` was reported and parsing went on as if the next line were
+      this declaration's type, the `;` was then missing too, and the section
+      loop ended on the stray `=`; from there ParseDeclSections consumed every
+      following token one "declaration expected" at a time until the next
+      section keyword. In the client's core types unit that was 326 lost
+      interface symbols per keystroke, 348 consumers to redo, a refusal of the
+      module path and a 25 s rebuild that then reported hundreds of false
+      E2003 - until the line was finished (2026-09-04, found by replaying the
+      typing sequence through the differential harness).
+
+      The rule now: a declaration ends where the next one begins. AtDeclHead
+      recognizes a declaration head at the cursor - an identifier followed by
+      `=`, `:`, `<` or `,` - and AtSectionBoundary a token that ends the
+      section. A declaration whose `=` / `:` is missing while the cursor
+      stands on a head or a boundary is closed as it is (its name IS declared)
+      and nothing is consumed; a declaration whose `;` is missing skips to the
+      next head or boundary (SkipToDeclHead) and loses only itself. The
+      narrower AFollow sets guard the type-expression position: after a type
+      section's `=`, an identifier followed by `=` or `:` is the next
+      declaration (`ttt =` above `TRecno = ...` must not read TRecno as ttt's
+      type) while `X = TList<Integer>` must still read TList; after a var or
+      typed-const `:` only `ident :` is a head, because `A: Integer = 1` is
+      one declaration. }
+    function AtDeclHead: Boolean; overload;
+    function AtDeclHead(const AFollow: array of TPasTokenKind): Boolean; overload;
+    function AtSectionBoundary: Boolean;
+    procedure SkipToDeclHead;
     procedure MarkContextKeyword;
     procedure ConsumeTrailingDirectives(AAllowInitializer: Boolean);
     procedure ParseDeclSections(AParent: Integer; AAllowBodies: Boolean;
@@ -1556,7 +1588,20 @@ begin
     tkInterface, tkDispinterface, tkRecord, tkObject:
       Exit(ParseClassLike(CurKind));
     tkProcedure, tkFunction:
-      Exit(ParseProcTypeExpr(False));
+      // A NAMED routine header (`procedure Foo`) is not a procedural type -
+      // it is the next member or declaration, and the type being declared has
+      // no type yet (`type s =` typed above a method, 2026-09-04). Reading it
+      // as `s = procedure` swallowed the method, and its failed `;` then
+      // skipped the class's `end`, so the rest of the unit became members of
+      // that class - 17959 symbols with a new identity, a refusal, a rebuild.
+      // Not consumed: the caller's recovery lands on the header.
+      if (PeekKind(1) = tkIdentifier) and not IsDirectiveWord(FPos + 1) then
+      begin
+        Error('type expected');
+        Exit(FB.AddNode(nkError, NIL_NODE, FPos));
+      end
+      else
+        Exit(ParseProcTypeExpr(False));
     tkLParen:
       Exit(ParseEnumType);
     tkString:
@@ -2218,25 +2263,66 @@ begin
 end;
 
 function TPasParser.IsDirectiveWord: Boolean;
+begin
+  Result := IsDirectiveWord(FPos);
+end;
+
+function TPasParser.IsDirectiveWord(AVisIndex: Integer): Boolean;
 var
   LText: PChar;
   LLen, LIdx: Integer;
+  LKind: TPasTokenKind;
 begin
-  if CurKind = tkInline then
+  if AVisIndex > FLast then
+    AVisIndex := FLast;
+  LKind := FSrc.Files[FSrc.Visible[AVisIndex].FileId]
+    .Tokens[FSrc.Visible[AVisIndex].TokenIndex].Kind;
+  if LKind = tkInline then
     Exit(True);
-  if CurKind = tkLibrary then
+  if LKind = tkLibrary then
     Exit(True);
-  if CurKind <> tkIdentifier then
+  if LKind <> tkIdentifier then
     Exit(False);
   // One slice fetch, then a length-gated compare per word - the old loop
   // re-materialized CurText for every one of the 30 array elements.
-  FSrc.VisibleSlice(FPos, LText, LLen);
+  FSrc.VisibleSlice(AVisIndex, LText, LLen);
   for LIdx := Low(PasTree.Types.ROUTINE_DIRECTIVE_WORDS) to
               High(PasTree.Types.ROUTINE_DIRECTIVE_WORDS) do
     if SliceEqualsWord(LText, LLen, PasTree.Types.ROUTINE_DIRECTIVE_WORDS[LIdx])
     then
       Exit(True);
   Result := False;
+end;
+
+function TPasParser.AtDeclHead: Boolean;
+begin
+  Result := AtDeclHead([tkEqual, tkColon, tkLess, tkComma]);
+end;
+
+function TPasParser.AtDeclHead(const AFollow: array of TPasTokenKind): Boolean;
+var
+  LKind: TPasTokenKind;
+begin
+  if (CurKind <> tkIdentifier) or IsVisibilityWord then
+    Exit(False);
+  for LKind in AFollow do
+    if PeekKind(1) = LKind then
+      Exit(True);
+  Result := False;
+end;
+
+function TPasParser.AtSectionBoundary: Boolean;
+begin
+  Result := (CurKind in [tkType, tkConst, tkResourcestring, tkVar, tkThreadvar,
+    tkLabel, tkExports, tkProcedure, tkFunction, tkConstructor, tkDestructor,
+    tkClass, tkProperty, tkImplementation, tkInitialization, tkFinalization,
+    tkBegin, tkEnd, tkUses, tkLBracket, tkEndOfFile]) or IsVisibilityWord;
+end;
+
+procedure TPasParser.SkipToDeclHead;
+begin
+  while not (AtDeclHead or AtSectionBoundary) do
+    Next;
 end;
 
 function TPasParser.IsVisibilityWord: Boolean;
@@ -2433,7 +2519,7 @@ begin
     FB.Adopt(Result, FB.AddNode(nkIdent, NIL_NODE, FPos));
     Next;
   end
-  else if CurKind = tkIdentifier then
+  else if (CurKind = tkIdentifier) and (PeekKind(1) <> tkEqual) then
   begin
     LSeg := FB.AddNode(nkIdent, NIL_NODE, FPos);
     Next;
@@ -2463,7 +2549,21 @@ begin
     end;
   end
   else
+  begin
+    // No name: a bare `function` while the author types, with the next
+    // declaration right behind it. `Ident =` is that declaration's head (a
+    // method resolution clause is always dotted, so it never starts so),
+    // and a keyword is the next member. Neither is consumed, and unless a
+    // parameter list or result type follows there is nothing more of this
+    // header to read - going on would take the next declaration as the
+    // `;`-less tail of this one (in an implementation section, as its BODY).
     Error('routine name expected');
+    if not (CurKind in [tkLParen, tkColon]) then
+    begin
+      FB.SetLast(Result, FPos - 1);
+      Exit;
+    end;
+  end;
   // Method resolution clause (14.2.2): function IFoo.M = Impl;
   if CurKind = tkEqual then
   begin
@@ -2587,8 +2687,12 @@ begin
     end
     else
     begin
+      // Not consumed: a stray token here is usually the `end` of the class
+      // or the next member - the author has not finished this property.
+      // Eating it took the class's `end` and made the next type's members
+      // this class's fields.
       Error('property specifier expected');
-      Next;
+      Break;
     end;
   end;
   Expect(tkSemicolon, '";"');
@@ -2706,13 +2810,15 @@ begin
   end;
 end;
 
-function TPasParser.ParseTypeSection: Integer;
+function TPasParser.ParseTypeSection(AHeadless: Boolean): Integer;
 var
   LDecl, LGen, LAttrs: Integer;
+  LHasEq: Boolean;
 begin
   // 2.x: type name<...> = [type] TypeExpr; ...
   Result := FB.AddNode(nkTypeSec, NIL_NODE, FPos);
-  Next; // type
+  if not AHeadless then
+    Next; // type
   while (CurKind = tkIdentifier) or (CurKind = tkLBracket) do
   begin
     if IsVisibilityWord then
@@ -2732,7 +2838,18 @@ begin
     LGen := ParseGenericParamsOpt;
     if LGen <> NIL_NODE then
       FB.Adopt(LDecl, LGen);
-    Expect(tkEqual, '"="');
+    // Recovery, see AtDeclHead: a declaration cut short before its `=` or
+    // its type is closed as it is and the cursor is left on what follows.
+    LHasEq := Expect(tkEqual, '"="');
+    if (not LHasEq and (AtDeclHead or AtSectionBoundary)) or
+       (LHasEq and AtDeclHead([tkEqual, tkColon])) then
+    begin
+      if LHasEq then
+        Error('type expected');   // the missing `=` case was reported above
+      FB.SetLast(LDecl, FPos - 1);
+      FB.Adopt(Result, LDecl);
+      Continue;
+    end;
     if CurKind = tkType then
     begin
       // Distinct alias: T = type Base (2.5.1).
@@ -2743,7 +2860,8 @@ begin
     ParseHintsOpt(LDecl);
     FB.SetLast(LDecl, FPos - 1);
     FB.Adopt(Result, LDecl);
-    Expect(tkSemicolon, '";"');
+    if not Expect(tkSemicolon, '";"') then
+      SkipToDeclHead;
     ConsumeTrailingDirectives(False);   // a type decl name may BE a directive word
     if IsVisibilityWord then
       Break;
@@ -2751,14 +2869,15 @@ begin
   FB.SetLast(Result, FPos - 1);
 end;
 
-function TPasParser.ParseConstSection: Integer;
+function TPasParser.ParseConstSection(AHeadless: Boolean): Integer;
 var
   LDecl, LAttrs: Integer;
-  LHasType: Boolean;
+  LHasType, LHasEq: Boolean;
 begin
   // 3.2: const/resourcestring entries.
   Result := FB.AddNode(nkConstSec, NIL_NODE, FPos);
-  Next;
+  if not AHeadless then
+    Next;
   while (CurKind = tkIdentifier) or (CurKind = tkLBracket) do
   begin
     if IsVisibilityWord then
@@ -2775,14 +2894,28 @@ begin
     if LHasType then
     begin
       Next;
-      FB.Adopt(LDecl, ParseTypeExpr);
+      if AtDeclHead([tkColon]) then
+        Error('type expected')
+      else
+        FB.Adopt(LDecl, ParseTypeExpr);
     end;
-    Expect(tkEqual, '"="');
+    // Recovery, see AtDeclHead.
+    LHasEq := Expect(tkEqual, '"="');
+    if (not LHasEq and (AtDeclHead or AtSectionBoundary)) or
+       (LHasEq and AtDeclHead([tkEqual, tkColon])) then
+    begin
+      if LHasEq then
+        Error('constant expected');
+      FB.SetLast(LDecl, FPos - 1);
+      FB.Adopt(Result, LDecl);
+      Continue;
+    end;
     FB.Adopt(LDecl, ParseConstInitializer(LHasType));
     ParseHintsOpt(LDecl);
     FB.SetLast(LDecl, FPos - 1);
     FB.Adopt(Result, LDecl);
-    Expect(tkSemicolon, '";"');
+    if not Expect(tkSemicolon, '";"') then
+      SkipToDeclHead;
     ConsumeTrailingDirectives(False);   // ditto for a const name
     if IsVisibilityWord then
       Break;
@@ -2793,6 +2926,7 @@ end;
 function TPasParser.ParseVarSection(AClassVar: Boolean): Integer;
 var
   LDecl, LAttrs: Integer;
+  LHasColon: Boolean;
 begin
   // 3.1: var/threadvar entries; also used for class var sections.
   //
@@ -2831,7 +2965,17 @@ begin
       else
         Error('name expected');
     end;
-    Expect(tkColon, '":"');
+    // Recovery, see AtDeclHead.
+    LHasColon := Expect(tkColon, '":"');
+    if (not LHasColon and (AtDeclHead or AtSectionBoundary)) or
+       (LHasColon and AtDeclHead([tkColon])) then
+    begin
+      if LHasColon then
+        Error('type expected');
+      FB.SetLast(LDecl, FPos - 1);
+      FB.Adopt(Result, LDecl);
+      Continue;
+    end;
     FB.Adopt(LDecl, ParseTypeExpr);
     // Hints may sit BETWEEN the type and the initializer:
     // Default8087CW: Word platform = $033F;  (System.pas)
@@ -2855,7 +2999,8 @@ begin
     // plain hint loop already consumed deprecated/platform.
     FB.SetLast(LDecl, FPos - 1);
     FB.Adopt(Result, LDecl);
-    Expect(tkSemicolon, '";"');
+    if not Expect(tkSemicolon, '";"') then
+      SkipToDeclHead;
     ConsumeTrailingDirectives(True);
   end;
   FB.SetLast(Result, FPos - 1);
@@ -2895,15 +3040,53 @@ procedure TPasParser.ParseDeclSections(AParent: Integer; AAllowBodies: Boolean;
   const ATerminators: array of TPasTokenKind);
 var
   LNode: Integer;
+  LResume: TPasTokenKind;   // the section kind a stray declaration resumes
 begin
+  LResume := tkType;
   while not (AtAny(ATerminators) or (CurKind = tkEndOfFile)) do
     case CurKind of
       tkType:
-        FB.Adopt(AParent, ParseTypeSection);
+        begin
+          LResume := tkType;
+          FB.Adopt(AParent, ParseTypeSection);
+        end;
       tkConst, tkResourcestring:
-        FB.Adopt(AParent, ParseConstSection);
+        begin
+          LResume := tkConst;
+          FB.Adopt(AParent, ParseConstSection);
+        end;
       tkVar, tkThreadvar:
-        FB.Adopt(AParent, ParseVarSection(False));
+        begin
+          LResume := tkVar;
+          FB.Adopt(AParent, ParseVarSection(False));
+        end;
+      tkIdentifier:
+        // A declaration head with no section keyword in front of it: the
+        // text between the keyword and here was a declaration cut short (a
+        // bare `function` above `TRecno = ...`). The section RESUMES - as the
+        // kind last seen, or as what the head's shape says - instead of
+        // every following token going down as "declaration expected" until
+        // the next keyword, which lost the rest of the section.
+        if AtDeclHead then
+        begin
+          Error('declaration expected, found "' + CurText + '"');
+          if PeekKind(1) in [tkColon, tkComma] then
+          begin
+            if LResume = tkConst then
+              FB.Adopt(AParent, ParseConstSection(True))
+            else
+              FB.Adopt(AParent, ParseVarSection(False));
+          end
+          else if LResume = tkConst then
+            FB.Adopt(AParent, ParseConstSection(True))
+          else
+            FB.Adopt(AParent, ParseTypeSection(True));
+        end
+        else
+        begin
+          Error('declaration expected, found "' + CurText + '"');
+          Next;
+        end;
       tkLabel:
         begin
           LNode := FB.AddNode(nkLabelSec, NIL_NODE, FPos);

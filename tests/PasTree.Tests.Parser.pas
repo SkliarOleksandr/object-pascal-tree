@@ -508,7 +508,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..122] of TPasCaseRow = (
+  DECL_CASES: array[0..133] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -532,6 +532,56 @@ const
      Source: 'resourcestring SHi = ''hi'';';
      Expected: 'ConstSec''resourcestring''(ConstDecl(Ident''SHi'' ' +
        'StrLit''''hi''''))'; ExpectDiags: 0),
+
+    // ---- recovery inside declaration sections (see TPasParser.AtDeclHead):
+    // a declaration cut short loses ITSELF, never the declarations after it.
+    // Each case is one keystroke state of typing a new declaration above an
+    // existing one; the diagnostic count is the one error the author is
+    // still fixing. ----
+    (Section: '2.5.1'; Name: 'recovery: type name alone keeps the next decl';
+     Source: 'type A'#10'B = Integer;';
+     Expected: 'TypeSec(TypeDecl(Ident''A'') TypeDecl(Ident''B'' ' +
+       'Ident''Integer''))'; ExpectDiags: 1),
+    (Section: '2.5.1'; Name: 'recovery: type name and = keep the next decl';
+     Source: 'type A ='#10'B = Integer;';
+     Expected: 'TypeSec(TypeDecl(Ident''A'') TypeDecl(Ident''B'' ' +
+       'Ident''Integer''))'; ExpectDiags: 1),
+    (Section: '2.5.1'; Name: 'recovery: a generic type still reads its args';
+     Source: 'type A = TList<Integer>;';
+     Expected: 'TypeSec(TypeDecl(Ident''A'' TypeArgs(Ident''TList'' ' +
+       'Ident''Integer'')))'; ExpectDiags: 0),
+    (Section: '2.5.1'; Name: 'recovery: a missing ; resyncs at the next head';
+     Source: 'type A = Integer B = Byte; C = Word;';
+     Expected: 'TypeSec(TypeDecl(Ident''A'' Ident''Integer'') ' +
+       'TypeDecl(Ident''B'' Ident''Byte'') TypeDecl(Ident''C'' Ident''Word''))';
+     ExpectDiags: 1),
+    (Section: '2.5.1'; Name: 'recovery: garbage after a decl is skipped to the next head';
+     Source: 'type A = Integer x y z; B = Byte;';
+     Expected: 'TypeSec(TypeDecl(Ident''A'' Ident''Integer'') ' +
+       'TypeDecl(Ident''B'' Ident''Byte''))'; ExpectDiags: 1),
+    (Section: '13.1.1'; Name: 'recovery: a bare property does not eat the class end';
+     Source: 'type C = class property end; D = Integer;';
+     Expected: 'TypeSec(TypeDecl(Ident''C'' ClassType(PropertyDecl)) ' +
+       'TypeDecl(Ident''D'' Ident''Integer''))'; ExpectDiags: 3),
+    (Section: '6.6.1'; Name: 'recovery: a named routine header is not a proc type';
+     Source: 'type S ='#10'procedure P;';
+     Expected: 'TypeSec(TypeDecl(Ident''S'' Error)) Routine''procedure''(Ident''P'')';
+     ExpectDiags: 2),
+    (Section: '6.6.1'; Name: 'recovery: a real procedural type still parses';
+     Source: 'type S = procedure stdcall;';
+     Expected: 'TypeSec(TypeDecl(Ident''S'' ProcType))'; ExpectDiags: 0),
+    (Section: '6.1'; Name: 'recovery: a bare routine keyword keeps the next decl';
+     Source: 'type A = Byte;'#10'function'#10'B = Integer;';
+     Expected: 'TypeSec(TypeDecl(Ident''A'' Ident''Byte'')) Routine''function'' ' +
+       'TypeSec(TypeDecl(Ident''B'' Ident''Integer''))'; ExpectDiags: 2),
+    (Section: '3.2.1'; Name: 'recovery: const name alone keeps the next decl';
+     Source: 'const A'#10'B = 1;';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''A'') ConstDecl(Ident''B'' ' +
+       'IntLit''1''))'; ExpectDiags: 1),
+    (Section: '3.1.1'; Name: 'recovery: var name alone keeps the next decl';
+     Source: 'var A'#10'B: Integer;';
+     Expected: 'VarSec''var''(VarDecl(Ident''A'') VarDecl(Ident''B'' ' +
+       'Ident''Integer''))'; ExpectDiags: 1),
 
     // ---- 2.5.1 distinct alias ----
     (Section: '2.5.1'; Name: 'plain alias'; Source: 'type TId = Integer;';

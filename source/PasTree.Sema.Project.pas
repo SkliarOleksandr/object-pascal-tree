@@ -12953,8 +12953,13 @@ begin
   except
     // Unparsable now: the full path records that as a known-bad file with a
     // negative-cache entry and a changed closure - a rebuild's job, not ours.
-    FreeAndNil(LNew);
-    Exit(Refuse('parse-failed'));
+    // The exception is named: "parse-failed" alone hid a resolver crash on an
+    // unfinished property for a day (2026-09-04).
+    on E: Exception do
+    begin
+      FreeAndNil(LNew);
+      Exit(Refuse('parse-failed(' + E.ClassName + ': ' + E.Message + ')'));
+    end;
   end;
   LAdded := nil;
   try
