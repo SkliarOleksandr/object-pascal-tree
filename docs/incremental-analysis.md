@@ -241,7 +241,15 @@ exposes the choice as a checkbox; a host has to make it deliberately.
 | closure | body edit | interface edit | full rebuild |
 |---|---:|---:|---:|
 | demo, 200 units | 19-33 ms | 29-204 ms | ~3400 ms |
-| client, 3676 units | 310 ms | 1525 ms | ~29 000 ms |
+| client, 3676 units | 6-120 ms | 21-260 ms | ~29 000 ms |
+
+The client rows are 0.15.10 numbers: a body edit is 6 ms in a library unit
+and 119 ms in the 300 KB core types unit (all of it the re-parse); a new
+const, type, routine or method in that core unit is ~250 ms, of which the
+passes are 60 ms and the rest is the parse plus the diff and selection over
+1260 models. Before 0.15.7 the same interface edits refused and cost a 24 s
+rebuild; before 0.15.10 every module run carried a fixed 141-159 ms of
+`BuildHelperMap`.
 
 Hit rate on the demo closure over 40 synthetic edits: 19 of 20 body edits
 accepted (the refusal is a unit whose stream depends on the `$IF` oracle -
@@ -294,12 +302,19 @@ wrapper).
 
 Ordered by evidence, not by interest.
 
-**A. The helper registry is the module path's fixed cost.** `BuildHelperMap`
-rebuilds over EVERY model on every module run, and `PrepareDeclWork` /
-`SizeCrossWork` size their arrays over every model too. That is why a
-1-model and a 12-model redo cost the same ~157 ms on the demo closure. Making
-it incremental should take the module path into the tens of milliseconds and
-helps every edit. Nothing else here is worth as much.
+**A. DONE (0.15.10) - the helper registry is incremental on the module
+path.** `UpdateHelperMap` keeps the registry and the per-model index from the
+last run: pairs naming the renumbered unit follow the symbol map, the redone
+models recollect their declared helpers, and the index is republished for
+them and - only when a redone model's exported helpers actually differ - for
+their direct importers. `BuildHelperMap` (wholesale, parallel) remains the
+full pipeline's. Measured on the client closure: the `helpers` stage went
+from 141-159 ms to 0-5 ms, the whole pass tail of a one-module run from
+~155 ms to 3-14 ms. The per-stage split is in `StageTimings` as
+`mp=resolve:N,helpers:N,decl:N,inherited:N,with:N,calls:N,bindx:N,xtype:N;`.
+What is left of the fixed cost is the re-parse of the edited unit (105 ms
+for the 300 KB core unit) and, on an interface edit, the diff and selection
+over the reach (~85 ms over 1260 models).
 
 **B. DONE - the radius ceiling was measured and raised, 24 -> 128.** It is now
 the `ModuleRedoLimit` property (0 or less = no ceiling), and the harness can

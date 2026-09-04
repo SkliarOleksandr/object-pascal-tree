@@ -447,7 +447,8 @@ type
     // same sequence AnalyzeFile drives, narrowed to a SET of models (the
     // fixpoint passes included) so no other model's diagnostics are
     // re-emitted.
-    procedure RunModulePasses(const AIds: TArray<Integer>);
+    procedure RunModulePasses(const AIds: TArray<Integer>; AId: Integer;
+      const AMap: TArray<Integer>);
     { Every model whose view of AId could have changed when AId's INTERFACE
       changes - the blast radius, computed from the reverse `uses` graph.
 
@@ -609,6 +610,26 @@ type
     function ResolveTypeExprNested(AId, ANode: Integer;
       ADepth: Integer = 0): TSemaXType;
     procedure BuildHelperMap;
+    // BuildHelperMap's two halves for ONE model: the helpers it declares
+    // (phase A) and the index of helpers it sees (phase B, rebuilt from
+    // scratch for that model). Factored out so the module path can run them
+    // for a handful of models instead of the whole closure.
+    function CollectHelpers(AMid: Integer): TArray<TPasHelperReg>;
+    procedure PublishHelpersFor(AMid: Integer);
+    { The module path's replacement for BuildHelperMap. The registry and the
+      index stand from the last run; only what the edit could have moved is
+      redone: pairs naming the renumbered unit AId are followed through AMap
+      everywhere (a helper FOR a type of AId, a helper declared IN AId), the
+      redone models AIds recollect their declarations, and the index is
+      republished for them and - only when a redone model's declared helpers
+      actually differ from before - for their direct importers. Everything
+      else keeps the index it has: an importer's view depends on its own
+      uses list and the exported helpers of those units, none of which
+      changed. Falls back to BuildHelperMap when there is no registry to
+      start from. Measured: BuildHelperMap was 141-159 ms of a 155 ms module
+      run on the client closure, every other stage under 5 ms. }
+    procedure UpdateHelperMap(const AIds: TArray<Integer>; AId: Integer;
+      const AMap: TArray<Integer>);
     // BuildHelperMap's phase-B publisher - a method because the parallel
     // phase-B worker is an anonymous method and cannot capture a nested one.
     procedure PublishHelper(AMid: Integer; const AReg: TPasHelperReg);
@@ -6461,14 +6482,25 @@ begin
   // client run - a fifth of it inside one function, on one core. ----
   ForEachIndex(LCount - 1, 'helpers-collect',
     procedure(AMid: Integer)
-    var
-      LM: TPasSemaModel;
-      LRegs: TArray<TPasHelperReg>;
-      LReg: TPasHelperReg;
-      LSym, LDef, LRef, LLast, LScope: Integer;
-      LExported: Boolean;
-      LX: TSemaXType;
     begin
+      FModelHelpers[AMid] := CollectHelpers(AMid);
+    end);
+  ForEachIndex(LCount - 1, 'helpers-publish',
+    procedure(AMid: Integer)
+    begin
+      PublishHelpersFor(AMid);
+    end);
+end;
+
+function TPasSemaProject.CollectHelpers(AMid: Integer): TArray<TPasHelperReg>;
+var
+  LM: TPasSemaModel;
+  LRegs: TArray<TPasHelperReg>;
+  LReg: TPasHelperReg;
+  LSym, LDef, LRef, LLast, LScope: Integer;
+  LExported: Boolean;
+  LX: TSemaXType;
+begin
     LM := FModels[AMid];
     LRegs := nil;
     for LSym := 0 to LM.SymCount - 1 do
@@ -6573,32 +6605,182 @@ begin
       LReg.Exported := LExported;
       LRegs := LRegs + [LReg];
     end;
-    FModelHelpers[AMid] := LRegs;
-    end);
-  // ---- phase B: apply precedence, per referring model (parallel; each
-  // worker reads phase A's committed FModelHelpers and writes only its own
-  // FHelperIdx slot - see PublishHelper). ----
-  // Weakest first so a later write wins: used units in `uses` order (a
-  // later-listed unit beats an earlier one - dcc-verified last-uses-wins),
-  // then the referring unit's OWN helpers (nearest; impl-section ones count
-  // here). Within one unit, declaration order, later winning.
-  ForEachIndex(LCount - 1, 'helpers-publish',
-    procedure(AMid: Integer)
-    var
-      LU, LUid, LI: Integer;
+    Result := LRegs;
+end;
+
+// Weakest first so a later write wins: used units in `uses` order (a
+// later-listed unit beats an earlier one - dcc-verified last-uses-wins), then
+// the referring unit's OWN helpers (nearest; impl-section ones count here).
+// Within one unit, declaration order, later winning.
+procedure TPasSemaProject.PublishHelpersFor(AMid: Integer);
+var
+  LU, LUid, LI, LCount: Integer;
+begin
+  LCount := Length(FModelHelpers);
+  FreeAndNil(FHelperIdx[AMid]);   // nil = sees none, until PublishHelper says
+  for LU := 0 to High(FModels[AMid].UsesList) do
+  begin
+    LUid := FModels[AMid].UsesList[LU].UnitId;
+    if (LUid < 0) or (LUid >= LCount) then
+      Continue;
+    for LI := 0 to High(FModelHelpers[LUid]) do
+      if FModelHelpers[LUid][LI].Exported then
+        PublishHelper(AMid, FModelHelpers[LUid][LI]);
+  end;
+  for LI := 0 to High(FModelHelpers[AMid]) do
+    PublishHelper(AMid, FModelHelpers[AMid][LI]);
+end;
+
+procedure TPasSemaProject.UpdateHelperMap(const AIds: TArray<Integer>;
+  AId: Integer; const AMap: TArray<Integer>);
+
+  function Mapped(ASym: Integer): Integer;
+  begin
+    if (ASym >= 0) and (ASym <= High(AMap)) then
+      Result := AMap[ASym]
+    else
+      Result := ASym;
+  end;
+
+  // Follow every pair naming AId in one model's declared helpers.
+  procedure RenumberRegs(var ARegs: TArray<TPasHelperReg>);
+  var
+    LIdx, LAlias: Integer;
+  begin
+    for LIdx := 0 to High(ARegs) do
     begin
-      for LU := 0 to High(FModels[AMid].UsesList) do
+      if ARegs[LIdx].TargetUnit = AId then
+        ARegs[LIdx].TargetSym := Mapped(ARegs[LIdx].TargetSym);
+      if ARegs[LIdx].HelperMid = AId then
+        ARegs[LIdx].Sym := Mapped(ARegs[LIdx].Sym);
+      for LAlias := 0 to High(ARegs[LIdx].Aliases) do
+        if ARegs[LIdx].Aliases[LAlias].UnitId = AId then
+          ARegs[LIdx].Aliases[LAlias].Sym :=
+            Mapped(ARegs[LIdx].Aliases[LAlias].Sym);
+    end;
+  end;
+
+  // ...and in one model's index: keys (the extended type) and values (the
+  // helper) both carry a unit; a dictionary keyed by the pair is rebuilt.
+  procedure RenumberIdx(var ADict: TDictionary<Int64, TPasExtRef>);
+  var
+    LNew: TDictionary<Int64, TPasExtRef>;
+    LKeyUnit, LKeySym, LSym: Integer;
+    LExt: TPasExtRef;
+    LTouched: Boolean;
+  begin
+    if ADict = nil then
+      Exit;
+    LTouched := False;
+    for var LPair in ADict do
+      if (Integer(LPair.Key shr 32) = AId) or (LPair.Value.UnitId = AId) then
       begin
-        LUid := FModels[AMid].UsesList[LU].UnitId;
-        if (LUid < 0) or (LUid >= LCount) then
-          Continue;
-        for LI := 0 to High(FModelHelpers[LUid]) do
-          if FModelHelpers[LUid][LI].Exported then
-            PublishHelper(AMid, FModelHelpers[LUid][LI]);
+        LTouched := True;
+        Break;
       end;
-      for LI := 0 to High(FModelHelpers[AMid]) do
-        PublishHelper(AMid, FModelHelpers[AMid][LI]);
-    end);
+    if not LTouched then
+      Exit;
+    LNew := TDictionary<Int64, TPasExtRef>.Create(ADict.Count);
+    for var LPair in ADict do
+    begin
+      LKeyUnit := Integer(LPair.Key shr 32);
+      LKeySym := Integer(Cardinal(LPair.Key));
+      LExt := LPair.Value;
+      if LKeyUnit = AId then
+      begin
+        LSym := Mapped(LKeySym);
+        if LSym = NIL_SYM then
+          Continue;   // the extended type is gone; nothing to attach to
+        LKeySym := LSym;
+      end;
+      if LExt.UnitId = AId then
+      begin
+        LExt.Sym := Mapped(LExt.Sym);
+        if LExt.Sym = NIL_SYM then
+          Continue;   // the helper itself is gone
+      end;
+      LNew.AddOrSetValue((Int64(LKeyUnit) shl 32) or Cardinal(LKeySym), LExt);
+    end;
+    ADict.Free;
+    ADict := LNew;
+  end;
+
+  function RegsEqual(const A, B: TArray<TPasHelperReg>): Boolean;
+  var
+    LIdx, LAlias: Integer;
+  begin
+    if Length(A) <> Length(B) then
+      Exit(False);
+    for LIdx := 0 to High(A) do
+    begin
+      if (A[LIdx].TargetUnit <> B[LIdx].TargetUnit) or
+         (A[LIdx].TargetSym <> B[LIdx].TargetSym) or
+         (A[LIdx].TargetName <> B[LIdx].TargetName) or
+         (A[LIdx].HelperMid <> B[LIdx].HelperMid) or
+         (A[LIdx].Sym <> B[LIdx].Sym) or
+         (A[LIdx].Exported <> B[LIdx].Exported) or
+         (Length(A[LIdx].Aliases) <> Length(B[LIdx].Aliases)) then
+        Exit(False);
+      for LAlias := 0 to High(A[LIdx].Aliases) do
+        if (A[LIdx].Aliases[LAlias].UnitId <> B[LIdx].Aliases[LAlias].UnitId) or
+           (A[LIdx].Aliases[LAlias].Sym <> B[LIdx].Aliases[LAlias].Sym) then
+          Exit(False);
+    end;
+    Result := True;
+  end;
+
+var
+  LCount, LIdx, LUse, LUid: Integer;
+  LChanged, LTarget: TArray<Boolean>;
+  LOld: TArray<TPasHelperReg>;
+  LAnyChanged: Boolean;
+begin
+  LCount := FModels.Count;
+  if (Length(FModelHelpers) <> LCount) or (Length(FHelperIdx) <> LCount) then
+  begin
+    BuildHelperMap;
+    Exit;
+  end;
+  // Same lifetime contract as BuildHelperMap - see there.
+  ReleaseCrossWork;
+  EnsureSystemUnit;
+  EnsureSysInitUnit;
+  // 1. The renumbered unit's pairs, everywhere - BEFORE anything is
+  //    recollected, so the comparison below is against the same numbering.
+  if AMap <> nil then
+    for LIdx := 0 to LCount - 1 do
+    begin
+      RenumberRegs(FModelHelpers[LIdx]);
+      RenumberIdx(FHelperIdx[LIdx]);
+    end;
+  // 2. The redone models declare their helpers afresh.
+  SetLength(LChanged, LCount);
+  SetLength(LTarget, LCount);
+  LAnyChanged := False;
+  for LIdx in AIds do
+  begin
+    LOld := FModelHelpers[LIdx];
+    FModelHelpers[LIdx] := CollectHelpers(LIdx);
+    LChanged[LIdx] := not RegsEqual(LOld, FModelHelpers[LIdx]);
+    LAnyChanged := LAnyChanged or LChanged[LIdx];
+    LTarget[LIdx] := True;
+  end;
+  // 3. Whose index to republish: the redone models (their uses may have
+  //    changed), plus every importer of a model whose exports changed.
+  if LAnyChanged then
+    for LIdx := 0 to LCount - 1 do
+      for LUse := 0 to High(FModels[LIdx].UsesList) do
+      begin
+        LUid := FModels[LIdx].UsesList[LUse].UnitId;
+        if (LUid >= 0) and (LUid < LCount) and LChanged[LUid] then
+        begin
+          LTarget[LIdx] := True;
+          Break;
+        end;
+      end;
+  for LIdx := 0 to LCount - 1 do
+    if LTarget[LIdx] then
+      PublishHelpersFor(LIdx);
 end;
 
 procedure TPasSemaProject.ClearHelperIdx;
@@ -11985,7 +12167,8 @@ begin
     AIds := nil;
 end;
 
-procedure TPasSemaProject.RunModulePasses(const AIds: TArray<Integer>);
+procedure TPasSemaProject.RunModulePasses(const AIds: TArray<Integer>;
+  AId: Integer; const AMap: TArray<Integer>);
 const
   MAX_ROUNDS = 8;
 var
@@ -11995,7 +12178,21 @@ var
   LIdx, LRound, LSlot, LId: Integer;
   LEmit, LAny: Boolean;
   LM: TPasSemaModel;
+  LSW: TStopwatch;
+  LStages: string;
+
+  // The per-stage split of a module run, appended to StageTimings as
+  // `mp=<stage>:<ms>,...;` - the fixed cost of the module path lives here,
+  // and "passes=160" alone cannot say in which stage.
+  procedure Lap(const AName: string);
+  begin
+    LStages := LStages + Format('%s:%d,', [AName, LSW.ElapsedMilliseconds]);
+    LSW := TStopwatch.StartNew;
+  end;
+
 begin
+  LStages := '';
+  LSW := TStopwatch.StartNew;
   for LId in AIds do
   begin
     ResolveUses(LId);
@@ -12005,9 +12202,11 @@ begin
   PrepareDeclWork(FModels.Count);
   for LId in AIds do
     CrossResolve(LId);
-  // Wholesale by design - it resets the helper registry AND the cross-work
-  // arrays every run, and these modules' helper declarations may have changed.
-  BuildHelperMap;
+  Lap('resolve');
+  // Incremental since 0.15.10 - the wholesale BuildHelperMap was the module
+  // path's whole fixed cost (see UpdateHelperMap).
+  UpdateHelperMap(AIds, AId, AMap);
+  Lap('helpers');
   // RunDeclPass narrowed to this SET: same fixpoint, same emit-on-the-last-
   // round rule, but only these models' work lists are walked and only their
   // ExtRefMaps are written. Every other model's heritage binding already
@@ -12032,6 +12231,7 @@ begin
       Break;
     LEmit := not LAny or (LRound >= 3);
   end;
+  Lap('decl');
   SizeCrossWork(FModels.Count);
   for LId in AIds do
   begin
@@ -12046,6 +12246,7 @@ begin
         LM.ExprTypeX.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].X);
     end;
   end;
+  Lap('inherited');
   // RunWithPass, same narrowing (see the decl pass above).
   LRound := 0;
   LEmit := False;
@@ -12086,16 +12287,19 @@ begin
     if LRound >= MAX_ROUNDS then
       LEmit := True;
   end;
+  Lap('with');
   for LId in AIds do
   begin
     CheckCalls(LId);
     CheckConstraints(LId);
     CheckAttributes(LId);
   end;
+  Lap('calls');
   // Only these models' declared types are new; every other model's SymTypeX
   // stands (their text, and so their declarations, did not change).
   for LId in AIds do
     BindTypesX(LId);
+  Lap('bindx');
   for LId in AIds do
   begin
     CrossType(LId);
@@ -12104,6 +12308,8 @@ begin
     FModels[LId].TrimDiags;
   end;
   ReleaseCrossWork;
+  Lap('xtype');
+  FStageTimings := FStageTimings + 'mp=' + LStages + ';';
 end;
 
 procedure TPasSemaProject.DiffInterface(AOld, ANew: TPasSemaModel;
@@ -12650,7 +12856,7 @@ begin
       for LIdx := 0 to High(LIds) do
         if LIds[LIdx] <= High(FWorkBuilt) then
           FWorkBuilt[LIds[LIdx]] := False;
-      RunModulePasses(LIds);
+      RunModulePasses(LIds, LId, LMap);
       for LIdx := 0 to High(LIds) do
         SetModuleStatus(LIds[LIdx], msCrossReady);
     except
