@@ -86,8 +86,11 @@ README's own section on that).
 ## 05-statements.md
 
 ### 5.5.2 `for … in` (for-in loop)
-- no GetEnumerator/element-type inference is implemented -
-  an untyped `for var E in C` element never receives a type.
+- an untyped `for var E in C` element is typed from the collection at the
+  project level only (arrays incl. `TArray<T>`, strings, sets, and a
+  class/record/interface's `GetEnumerator` result's `Current` property); the
+  intra-unit typer still has no ExprType for it, and a `GetEnumerator`
+  supplied by a helper on a non-struct type is not chased.
 
 ## 06-routines.md
 

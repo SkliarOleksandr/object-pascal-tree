@@ -405,6 +405,29 @@ const
     'function TPool<T>.Lock: TWrap<T>; begin Result := FList; end;'#10 +
     'end.'#10;
 
+  // 5.5.2 - an untyped `for var E in Coll` element takes the COLLECTION's
+  // element type (TPasSemaProject.ForInElementX). Navigation pins the array
+  // and GetEnumerator shapes in SemaNavSmoke; here the types that nothing
+  // navigates THROUGH are asserted directly: a string yields Char, a set its
+  // base type, a named dynamic array its element.
+  UNIT_XF =
+    'unit XF;'#10'interface'#10 +
+    'type'#10 +
+    '  TColor = (cRed, cBlue);'#10 +
+    '  TColors = set of TColor;'#10 +
+    '  TNames = array of string;'#10 +
+    'implementation'#10 +
+    'procedure Walk(const S: string; const C: TColors; const N: TNames);'#10 +
+    'begin'#10 +
+    '  for var LCh in S do'#10 +
+    '    if LCh = ''x'' then Exit;'#10 +
+    '  for var LCol in C do'#10 +
+    '    if LCol = cRed then Exit;'#10 +
+    '  for var LNm in N do'#10 +
+    '    if LNm = '''' then Exit;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   UNIT_XR =
     'unit XR;'#10'interface'#10'uses XG, XZ;'#10 +
     'var'#10 +
@@ -1188,6 +1211,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XQ.pas'), UNIT_XQ);
   TFile.WriteAllText(TPath.Combine(LDir, 'NQ1.pas'), UNIT_NQ1);
   TFile.WriteAllText(TPath.Combine(LDir, 'NQ2.pas'), UNIT_NQ2);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XF.pas'), UNIT_XF);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -1495,6 +1519,17 @@ begin
     // (the instantiation frame applied), not as the open parameter T.
     Eq('with-body member substituted in the instantiation frame',
       XTypeOf(LR, 'FValue'), 'Integer');
+
+    // ---- for-in element typing (5.5.2) ----
+    LE := ModelByName('xf');
+    Ok('XF loaded', Assigned(LE));
+    Ok('XF: no diags at all', Length(LE.Diags) = 0);
+    Eq('for-in over a string: the element is Char',
+      XTypeOf(LE, 'LCh'), 'Char');
+    Eq('for-in over a set: the element is the base type',
+      XTypeOf(LE, 'LCol'), 'TColor');
+    Eq('for-in over a named dynamic array: the element type',
+      XTypeOf(LE, 'LNm'), 'string');
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

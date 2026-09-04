@@ -390,6 +390,46 @@ const
     'function Pick(A: Integer): Integer; begin Result := A; end;'#10 + // 6
     'function Pick(A: Double): Double; begin Result := A; end;'#10 +   // 7
     'end.'#10;                                                   // 8
+
+  // `for var E in Coll` (5.5.2): the inline element has no written type and
+  // no initializer, so nothing typed it - a member accessed through it had
+  // no declaration to go to (real report: `for var AForm in AForms do
+  // AForm.SetAlwaysOnTop(True)` over a `TArray<TBaseForm>` parameter). The
+  // element type comes from the collection: an array's element (TArray<T>
+  // closed over its argument, from the implicit System fixture), and a
+  // class's GetEnumerator -> Current. See TPasSemaProject.ForInElementX.
+  UNIT_FI =
+    'unit NavFI;'#10 +                                           // 1
+    'interface'#10 +                                             // 2
+    'type'#10 +                                                  // 3
+    '  TFIItem = class'#10 +                                     // 4
+    '    procedure Poke;'#10 +                                   // 5  Poke col 15
+    '  end;'#10 +                                                // 6
+    '  TFIEnum = class'#10 +                                     // 7
+    '    function GetCurrent: TFIItem;'#10 +                     // 8
+    '    function MoveNext: Boolean;'#10 +                       // 9
+    '    property Current: TFIItem read GetCurrent;'#10 +        // 10
+    '  end;'#10 +                                                // 11
+    '  TFIBag = class'#10 +                                      // 12
+    '    function GetEnumerator: TFIEnum;'#10 +                  // 13
+    '  end;'#10 +                                                // 14
+    '  TFIItems = TArray<TFIItem>;'#10 +                         // 15
+    'procedure Walk(const AArr: TArray<TFIItem>; ABag: TFIBag;'#10 + // 16
+    '  const AAlias: TFIItems; const AStr: string);'#10 +         // 17
+    'implementation'#10 +                                        // 18
+    'procedure Walk(const AArr: TArray<TFIItem>; ABag: TFIBag;'#10 + // 19
+    '  const AAlias: TFIItems; const AStr: string);'#10 +         // 20
+    'begin'#10 +                                                 // 21
+    '  for var AItem in AArr do'#10 +                            // 22
+    '    AItem.Poke;'#10 +                                       // 23  Poke col 11
+    '  for var AElem in ABag do'#10 +                            // 24
+    '    AElem.Poke;'#10 +                                       // 25  Poke col 11
+    '  for var AOther in AAlias do'#10 +                         // 26
+    '    AOther.Poke;'#10 +                                      // 27  Poke col 12
+    '  for var ACh in AStr do'#10 +                              // 28
+    '    if ACh = ''x'' then Exit;'#10 +                         // 29
+    'end;'#10 +                                                  // 30
+    'end.'#10;                                                   // 31
   UNIT_OVLUSE =
     'unit NavOvlUse;'#10 +                                       // 1
     'interface'#10 +                                             // 2
@@ -633,6 +673,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavI.pas'), UNIT_I);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavJ.pas'), UNIT_J);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavK.pas'), UNIT_K);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavFI.pas'), UNIT_FI);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOvl.pas'), UNIT_OVL);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOvlUse.pas'), UNIT_OVLUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRQ.pas'), UNIT_RQ);
@@ -875,6 +916,17 @@ begin
       Ok('NavJ: no false E2003', DiagCount(GProj.Model(GMidB), 'E2003') = 0);
 
       // ---- Inactive ($IFDEF'd-out) code must never cross-match ----
+      // ---- for-in element typing (ForInElementX) ----
+      GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavFI.pas'));
+      Ok('NavFI model found', GMidB >= 0);
+      CheckNav('for-in over TArray<T>: element member', 23, 11, 'Poke',
+        'NavFI.pas', 5, 15);
+      CheckNav('for-in over GetEnumerator/Current: element member', 25, 11,
+        'Poke', 'NavFI.pas', 5, 15);
+      CheckNav('for-in over an ALIAS of TArray<T>: element member', 27, 12,
+        'Poke', 'NavFI.pas', 5, 15);
+      Ok('NavFI: no false E2003', DiagCount(GProj.Model(GMidB), 'E2003') = 0);
+
       // (real bug report: CharInSet's $IFNDEF NEXTGEN / $ELSE overload pair)
       GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavK.pas'));
       Ok('NavK model found', GMidB >= 0);

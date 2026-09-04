@@ -406,6 +406,8 @@ type
       const ANameLower: string; out AMid, ASym, ACtx: Integer): Boolean;
     function ElementX(AId, ABaseNode: Integer): TSemaXType;
     function InlineVarInitTypeX(AMid, ASym, ADepth: Integer): TSemaXType;
+    function ForInElementX(AMid, ACollNode: Integer;
+      const ACollX: TSemaXType): TSemaXType;
     function InsideWithBody(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function InsideLaterWithTarget(AModel: TPasSemaModel;
       ANode: Integer): Boolean;
@@ -8206,6 +8208,63 @@ var
     LExt: TPasExtRef;
     LBX: TSemaXType;
   begin
+    // `for var E in Coll do Body` (5.5.2): an element declared with no type
+    // has no TypeNode, so nothing above typed it and every member reached
+    // through it in the body stayed unbound - `for var AForm in AForms do
+    // AForm.SetAlwaysOnTop(True)` over a `TArray<TBaseForm>` parameter had no
+    // declaration to go to (the real report). Its type is the collection's
+    // element type, and the collection's own type is exactly what this walk
+    // computes - overload-precise, frame-closed - so the element is typed
+    // HERE, after the collection and BEFORE the body, and memoized in
+    // SymTypeX so the body's uses read it like a declared type. The
+    // pre-order detour is why this sits above the ordinary child loop.
+    //
+    // Deliberately ONLY the for-in shape, not 3.1.3's `var L := Expr;`: that
+    // initializer is typed by the same walk, but a bare overloaded name in it
+    // binds to the FIRST overload while dcc calls the parameterless one, and
+    // typing the variable from that guess turned silent misses into false
+    // E2003s on the very next line (`var LItem := Add; LItem.Text` in a
+    // check-list-box helper; `var ARect := Grid.ClientToScreen(...)` picking
+    // the TPoint overload). A for-in collection is a plain designator in
+    // practice, and its element type only ever ADDS a binding.
+    if LM.Tree.Nodes[N].Kind = nkForInStmt then
+    begin
+      LChild := LM.Tree.Nodes[N].FirstChild;   // the element
+      if LChild = NIL_NODE then
+        Exit;
+      Walk(LChild);
+      LBase := LM.Tree.Nodes[LChild].NextSibling;   // the collection
+      if LBase = NIL_NODE then
+        Exit;
+      Walk(LBase);
+      if (LM.Tree.Nodes[LChild].Kind = nkInlineVar) then
+      begin
+        LName := LM.Tree.Nodes[LChild].FirstChild;
+        if (LName <> NIL_NODE) and (LM.Tree.Nodes[LName].Kind = nkIdent) and
+           (LM.Tree.Nodes[LName].NextSibling = NIL_NODE) then
+        begin
+          LSym := LM.RefMap[LName];
+          if (LSym <> NIL_SYM) and (LM.Symbols[LSym].Kind = skVar) and
+             (LM.Symbols[LSym].TypeNode = NIL_NODE) then
+          begin
+            LBX := ForInElementX(AId, LBase, GetX(LBase));
+            if XValid(LBX) then
+            begin
+              LX[LName] := LBX;
+              LM.SymTypeX.AddOrSetValue(LSym, LBX);
+            end;
+          end;
+        end;
+      end;
+      LChild := LM.Tree.Nodes[LBase].NextSibling;   // the body
+      while LChild <> NIL_NODE do
+      begin
+        Walk(LChild);
+        LChild := LM.Tree.Nodes[LChild].NextSibling;
+      end;
+      Exit;
+    end;
+
     LChild := LM.Tree.Nodes[N].FirstChild;
     while LChild <> NIL_NODE do
     begin
@@ -9941,6 +10000,20 @@ begin
   if (LParent = NIL_NODE) or
      not (LM.Tree.Nodes[LParent].Kind in [nkInlineVar, nkInlineConst]) then
     Exit;
+  // `for var E in Coll do` (5.5.2): the inline var is the for-in's FIRST
+  // child and has no initializer of its own - its type is the COLLECTION's
+  // element type, and the collection is the for-in's next child. Until this
+  // branch existed such an element never received a type at all (the gap
+  // docs/coverage.md recorded), so `for var AForm in AForms do
+  // AForm.SetAlwaysOnTop(True)` over a `TArray<TmcsBaseForm>` parameter
+  // had no declaration to go to on the member.
+  LInit := LM.Tree.Nodes[LParent].Parent;
+  if (LInit <> NIL_NODE) and (LM.Tree.Nodes[LInit].Kind = nkForInStmt) and
+     (LM.Tree.Nodes[LInit].FirstChild = LParent) then
+    begin
+    LInit := LM.Tree.Nodes[LParent].NextSibling;
+    Exit(ForInElementX(AMid, LInit, WithTargetTypeX(AMid, LInit)));
+  end;
   // Everything after the names is the initializer, and with no type node
   // that is exactly the LAST child. Equal to the name itself means there is
   // no initializer at all.
@@ -9952,6 +10025,108 @@ begin
   if LInit = LDecl then
     Exit;
   Result := WithTargetTypeX(AMid, LInit);
+end;
+
+{ The ELEMENT type a `for ... in` loop walks over (5.5.2), for the collection
+  expression ACollNode - XNil when nothing here can say.
+
+  What dcc accepts as a collection, and where its element type lives:
+  - an array (static, dynamic, `TArray<T>` closed over its frame, `array of
+    const`): the element type - ElementX already knows every spelling;
+  - a string: Char (the builtin, looked up by name in the referring unit);
+  - a set: its base type;
+  - a class, record or interface: the `Current` property of whatever its
+    `GetEnumerator` returns, each looked up with the ordinary member walk so
+    ancestors, helpers and generic frames come along (`TList<T>.GetEnumerator`
+    returns `TEnumerator<T>`, whose `Current: T` closes over the list's frame).
+  Aliases are chased the way PointeeX chases them, so a named alias of any of
+  the above works. An enumerator with a `GetCurrent` but no `Current` property
+  is not a legal for-in collection (dcc requires the property), so it is not
+  looked for. }
+function TPasSemaProject.ForInElementX(AMid, ACollNode: Integer;
+  const ACollX: TSemaXType): TSemaXType;
+const
+  CStringNames: array[0..5] of string = ('string', 'ansistring', 'widestring',
+    'unicodestring', 'shortstring', 'rawbytestring');
+
+  function CharX: TSemaXType;
+  var
+    LSym: Integer;
+  begin
+    Result := XNil;
+    if FModels[AMid].InterfaceScope = NIL_SCOPE then
+      Exit;
+    LSym := FModels[AMid].Resolve(FModels[AMid].InterfaceScope, 'char');
+    if LSym <> NIL_SYM then
+      Result := XPlain(AMid, LSym);
+  end;
+
+var
+  LCur, LEnum: TSemaXType;
+  LM: TPasSemaModel;
+  LDef, LDepth, LIdx, LMemMid, LMemSym, LCtx: Integer;
+begin
+  Result := XNil;
+  if ACollNode = NIL_NODE then
+    Exit;
+  // NOT ElementX first: that helper also answers for a class with a DEFAULT
+  // array property, and a for-in over such a class walks its enumerator, not
+  // its indexer - `for var LPair in Dict` yielded V instead of TPair<K,V>
+  // that way, and every `.Key`/`.Value` after it was a false E2003 (44 in
+  // one project). So the type is classified first; arrays defer to ElementX
+  // from inside the loop, and a designator whose type could not be named at
+  // all (an inline `array[..] of T` on its own declaration) is the fallback.
+  LCur := ACollX;
+  // The caller's walk records no type for an inline var inferred from its
+  // initializer (`var LDict := TObjectDictionary<..>.Create(..)` - see the
+  // nkForInStmt note in CrossType), but the with-target typer can read one
+  // off that initializer; without this the fallback below typed such a
+  // dictionary by its DEFAULT property and every `.Key`/`.Value` on the
+  // pair was a false E2003 (6 sites in one project).
+  if not XValid(LCur) then
+    LCur := WithTargetTypeX(AMid, ACollNode);
+  if not XValid(LCur) then
+    Exit(ElementX(AMid, ACollNode));
+  for LDepth := 1 to 32 do
+  begin
+    if not XValid(LCur) then
+      Exit(XNil);
+    LM := FModels[LCur.UnitId];
+    if LM.Symbols[LCur.Sym].Kind = skBuiltinType then
+    begin
+      for LIdx := Low(CStringNames) to High(CStringNames) do
+        if LM.Symbols[LCur.Sym].NameLower = CStringNames[LIdx] then
+          Exit(CharX);
+      Exit(XNil);
+    end;
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if LDef = NIL_NODE then
+      Exit(XNil);
+    case LM.Tree.Nodes[LDef].Kind of
+      nkStringType:
+        Exit(CharX);
+      nkSetType:
+        Exit(SubstX(ResolveTypeExpr(LCur.UnitId,
+          LM.Tree.Nodes[LDef].FirstChild), LCur.Inst, 0));
+      nkArrayType:
+        Exit(ElementX(AMid, ACollNode));
+      nkIdent, nkMember, nkTypeArgs:
+        LCur := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
+      nkClassType, nkRecordType, nkInterfaceType, nkObjectType:
+        begin
+          if not FindMemberX(AMid, LCur, 'getenumerator', LMemMid, LMemSym,
+               LCtx) then
+            Exit(XNil);
+          LEnum := SubstX(SymDeclTypeX(LMemMid, LMemSym), LCtx, 0);
+          if not XValid(LEnum) or
+             not FindMemberX(AMid, LEnum, 'current', LMemMid, LMemSym, LCtx) then
+            Exit(XNil);
+          Exit(SubstX(SymDeclTypeX(LMemMid, LMemSym), LCtx, 0));
+        end;
+    else
+      Exit(XNil);
+    end;
+  end;
 end;
 
 function TPasSemaProject.WithTargetTypeX(AId, ANode: Integer): TSemaXType;
