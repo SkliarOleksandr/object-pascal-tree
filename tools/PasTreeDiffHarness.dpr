@@ -78,7 +78,7 @@ uses
 type
   TEditKind = (ekBody, ekIntf, ekBlank, ekComment, ekConst, ekType,
     ekImplVar, ekImplVarTop, ekIntfUses, ekMember, ekParent, ekMidType,
-    ekInsert, ekReplace);
+    ekRecField, ekOverload, ekInsert, ekReplace);
   TEditStep = record
     Kind: TEditKind;
     Path: string;    // full path of the unit to edit
@@ -171,6 +171,53 @@ end;
 // `TFoo = class` or `TFoo = class(TBase)` opening a class body on this line:
 // the class name; '' for anything else (a forward `= class;`, a one-line
 // `= class(TBase);`, a class of, or not a type header at all).
+// `TFoo = record` / `TFoo = packed record` with nothing after the word (a
+// `record helper` is not a record body).
+function RecordHeaderName(const ALine: string): string;
+var
+  LText, LRest: string;
+  LEq: Integer;
+begin
+  Result := '';
+  LText := Trim(ALine);
+  LEq := Pos(' = ', LText);
+  if LEq <= 1 then
+    Exit;
+  LRest := Trim(Copy(LText, LEq + 3, MaxInt));
+  if LRest.StartsWith('packed ') then
+    LRest := Trim(Copy(LRest, 8, MaxInt));
+  if not SameText(LRest, 'record') then
+    Exit;
+  Result := Copy(LText, 1, LEq - 1);
+  for var LCh in Result do
+    if not (CharInSet(LCh, ['A'..'Z', 'a'..'z', '0'..'9', '_'])) then
+      Exit('');
+end;
+
+// `procedure Name;` / `procedure Name(...)` inside a class body - the plain
+// instance method shape the overload transform can duplicate (no `class`,
+// no `function`: a second overload needs the same kind of routine and the
+// harness does not parse return types).
+function MethodHeaderName(const ALine: string): string;
+var
+  LText: string;
+  LEnd: Integer;
+begin
+  Result := '';
+  LText := Trim(ALine);
+  if not LText.StartsWith('procedure ') then
+    Exit;
+  LText := Copy(LText, 11, MaxInt);
+  LEnd := 1;
+  while (LEnd <= Length(LText)) and
+        CharInSet(LText[LEnd], ['A'..'Z', 'a'..'z', '0'..'9', '_']) do
+    Inc(LEnd);
+  if (LEnd = 1) or (LEnd > Length(LText)) or
+     not CharInSet(LText[LEnd], [';', '(']) then
+    Exit;
+  Result := Copy(LText, 1, LEnd - 1);
+end;
+
 function ClassHeaderName(const ALine: string): string;
 var
   LText, LRest: string;
@@ -207,8 +254,8 @@ function ApplyEdit(const AText: string; AKind: TEditKind; ASeq: Integer;
 var
   LLines: TList<string>;
   LArr: TArray<string>;
-  LImpl, LTail, LInit, LIntf, LUses, LClassLine: Integer;
-  LClassName: string;
+  LImpl, LTail, LInit, LIntf, LUses, LClassLine, LMethodLine: Integer;
+  LClassName, LMethodName: string;
 begin
   Result := False;
   ANewText := AText;
@@ -279,6 +326,59 @@ begin
             [LClassName, ASeq]));
           LLines.Insert(LClassLine + 1,
             Format('    procedure __DiffMember%d;', [ASeq]));
+        end;
+      // A field added to the FIRST record declared in the interface (`TFoo =
+      // record` or `TFoo = packed record`) - the "type a field into a hub
+      // record" edit; the record's holders must NOT be redone for it.
+      ekRecField:
+        begin
+          LIntf := LineIndexOf(LArr, 'interface');
+          LClassLine := -1;
+          for var LIdx := LIntf + 1 to LImpl - 1 do
+            if RecordHeaderName(LArr[LIdx]) <> '' then
+            begin
+              LClassLine := LIdx;
+              Break;
+            end;
+          if LClassLine < 0 then
+            Exit(False);
+          LLines.Insert(LClassLine + 1,
+            Format('    __DiffField%d: Integer;', [ASeq]));
+        end;
+      // A second declaration of an EXISTING method of the first class - the
+      // name is not new, the existing member's overload link is; its holders
+      // are redone, the class's are not.
+      ekOverload:
+        begin
+          LIntf := LineIndexOf(LArr, 'interface');
+          LClassLine := -1;
+          LMethodLine := -1;
+          for var LIdx := LIntf + 1 to LImpl - 1 do
+          begin
+            if LClassLine < 0 then
+            begin
+              LClassName := ClassHeaderName(LArr[LIdx]);
+              if LClassName <> '' then
+                LClassLine := LIdx;
+              Continue;
+            end;
+            if SameText(Trim(LArr[LIdx]), 'end;') then
+              Break;
+            LMethodName := MethodHeaderName(LArr[LIdx]);
+            if LMethodName <> '' then
+            begin
+              LMethodLine := LIdx;
+              Break;
+            end;
+          end;
+          if LMethodLine < 0 then
+            Exit(False);
+          LLines.Insert(LTail, Format(
+            'procedure %s.%s(const __DiffOv%d: Integer); begin end;',
+            [LClassName, LMethodName, ASeq]));
+          LLines.Insert(LMethodLine + 1, Format(
+            '    procedure %s(const __DiffOv%d: Integer); overload;',
+            [LMethodName, ASeq]));
         end;
       // An arbitrary line at an arbitrary place - `insert <path>|<line>|<text>`
       // in a script - to reproduce exactly what a user typed.
@@ -529,6 +629,8 @@ begin
     ekMember: Result := 'member';
     ekParent: Result := 'parent';
     ekMidType: Result := 'midtype';
+    ekRecField: Result := 'recfield';
+    ekOverload: Result := 'overload';
     ekInsert: Result := 'insert';
     ekReplace: Result := 'replace';
   else
@@ -632,6 +734,10 @@ begin
       LStep.Kind := ekParent
     else if SameText(LKindWord, 'midtype') then
       LStep.Kind := ekMidType
+    else if SameText(LKindWord, 'recfield') then
+      LStep.Kind := ekRecField
+    else if SameText(LKindWord, 'overload') then
+      LStep.Kind := ekOverload
     else
     begin
       Writeln(ErrOutput, 'bad script kind: ', LKindWord);
@@ -844,7 +950,8 @@ begin
       // their own references), a shifted symbol index harms nobody. What
       // decides correctness is the comparison against the full pipeline,
       // which every step runs anyway - so this is counted, not judged.
-      if (LStep.Kind in [ekIntf, ekConst, ekType, ekIntfUses, ekMember, ekParent, ekMidType]) and
+      if (LStep.Kind in [ekIntf, ekConst, ekType, ekIntfUses, ekMember,
+                         ekParent, ekMidType, ekRecField, ekOverload]) and
          LHow.StartsWith('module') then
         Inc(GAcceptedIntf)
       else if (LStep.Kind in [ekBody, ekBlank, ekComment, ekImplVar,

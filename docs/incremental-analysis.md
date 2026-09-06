@@ -121,12 +121,18 @@ symbol into unchanged / changed / removed - changed meaning a Phase-1
 attribute differs or the declaration no longer reads the same token for
 token (`DeclRootOf` + `SpanTokensEqual`) - and collects the NAMES of added
 symbols another unit could reach by name (globals, members, enum values; not
-parameters). A class or interface is compared with its MEMBERS masked out
-(`SpanTokensEqualMasked`): each member is a symbol with its own verdict, so a
-method added to a hub class is an added name, not a changed class, and only
-the models mentioning that name are redone. Records, objects and enums keep
-the whole-declaration comparison - their layout and ordinals are what a
-consumer may have folded. `SelectConsumers` then keeps, out of the reach, only:
+parameters). A class, interface, record or object is compared with its
+MEMBERS masked out (`SpanTokensEqualMasked`, each member's span plus its
+terminating `;`): each member is a symbol with its own verdict, so a method
+added to a hub class, or a field typed into a hub record, is an added name,
+not a changed type, and only the models mentioning that name are redone.
+Enums keep the whole-declaration comparison - a value added in the middle
+moves the ordinals after it. The one consumer that can depend on a record's
+LAYOUT without naming a field is a `$IF` that asks the oracle for `SizeOf`;
+such a consumer's stream cannot be re-decided by a redo that keeps its tree,
+so any oracle-built stream in the reach is a refusal (`consumer-oracle`),
+which also covers a constant's value folded the same way. `SelectConsumers`
+then keeps, out of the reach, only:
 
 - a model holding a pair (unit, changed-or-removed symbol) in any of its
   four cross-unit maps, or an instance tainted by one;
@@ -203,6 +209,8 @@ from a slow analyzer.
 | `no-clean-boundary-*` | no implementation scope, or the arena is not split cleanly at it |
 | `intf-sym#N`, `intf-scope#N` | the interface prefix moved in a way the redo cannot express |
 | `too-many-consumers(N>L)` | the SELECTED redo set N exceeds `ModuleRedoLimit` (128; 0 or less lifts the ceiling). The number is reported because "too many" alone says nothing about whether the limit is set sensibly |
+| `consumer-demoted` | a consumer to redo has no text layer any more (see the memory dial) |
+| `consumer-oracle(<unit>)` | a consumer in the reach has an oracle-built token stream: its `$IF`s may have folded this unit's constants or record sizes, and only a re-preprocess can re-decide them |
 | `instance-unmatched-sym(<name>)` | an instance names a symbol of this unit that the new text no longer declares (a deleted generic, or an overload whose ordinal moved) - see guard 2 |
 
 ### Driving it from a host
@@ -274,12 +282,16 @@ only ever prove the full path.
   interface" shapes), `implvar`/`implvartop` (a variable at the end / the top
   of the implementation section), `intfuses` (a unit appended to the
   interface uses clause - the edit that renumbers every interface symbol),
-  `member` (a method added to the first interface class) or `parent` (the
-  first parentless class gets an explicit `(TObject)` - a no-op for dcc and
-  for Phase 1, a changed declaration for the diff). On the client closure a blank line or comment in the hub
-  types unit is a 250 ms module step; a new const or type refuses with
-  `too-many-consumers(1260>128)` and rebuilds, which is what the name-level
-  dependency idea in the open list is for;
+  `member` (a method added to the first interface class), `overload` (a
+  second declaration of that class's first method - the name exists, the
+  overload link is what changes), `recfield` (a field added to the first
+  interface record), `parent` (the first parentless class gets an explicit
+  `(TObject)` - a no-op for dcc and for Phase 1, a changed declaration for
+  the diff), and `insert <path>|<line>|<text>` / `replace` for replaying an
+  exact typing sequence. On the client closure every one of these in the hub
+  types unit (1260 models in reach) is a one-module step of ~170-200 ms
+  against a 29 s rebuild; `intfuses` selects the ~80 models that mention the
+  new unit's leaf name;
 - default mode: the donor CHAIN (rebuild k adopts rebuild k-1);
 - `-module`: single-module reanalysis, falling back to a donor rebuild on
   refusal, exactly as a host must;

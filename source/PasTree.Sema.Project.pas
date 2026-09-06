@@ -12479,8 +12479,13 @@ procedure TPasSemaProject.DiffInterface(AOld, ANew: TPasSemaModel;
     Result := (LDef <> NIL_NODE) and (LM.Tree.Nodes[LDef].Kind = nkHelperType);
   end;
 
-  // A class or interface whose members are symbols in their own right - the
-  // shape whose declaration is compared with the members masked out.
+  // A class, interface, record or object whose members are symbols in their
+  // own right - the shape whose declaration is compared with the members
+  // masked out. Records joined in 0.16.1: a field typed into a hub record
+  // marked the RECORD changed and redid every holder of the type. The one
+  // consumer of a record's LAYOUT rather than its members is a `$IF` asking
+  // the oracle for SizeOf - the consumer-oracle refusal in AnalyzeModuleOnly
+  // covers it. Helpers stay out: they attach by type, full radius.
   function IsMemberOwner(LM: TPasSemaModel; ASym: Integer): Boolean;
   var
     LDef: Integer;
@@ -12489,7 +12494,8 @@ procedure TPasSemaProject.DiffInterface(AOld, ANew: TPasSemaModel;
       Exit(False);
     LDef := TypeDefNodeIn(LM, ASym);
     Result := (LDef <> NIL_NODE) and
-      (LM.Tree.Nodes[LDef].Kind in [nkClassType, nkInterfaceType]);
+      (LM.Tree.Nodes[LDef].Kind in
+         [nkClassType, nkInterfaceType, nkRecordType, nkObjectType]);
   end;
 
   // The mask over ADecl's visible span: True for every token inside a member
@@ -12497,7 +12503,8 @@ procedure TPasSemaProject.DiffInterface(AOld, ANew: TPasSemaModel;
   function MemberMask(LM: TPasSemaModel; ADecl, AScope: Integer): TArray<Boolean>;
   var
     LFirst, LLast, LMFirst, LMLast, LIdx, LRoot: Integer;
-    LMember: Integer;
+    LMember, LLen: Integer;
+    LText: PChar;
   begin
     Result := nil;
     if not LM.Tree.NodeVisRange(ADecl, LFirst, LLast) then
@@ -12511,6 +12518,16 @@ procedure TPasSemaProject.DiffInterface(AOld, ANew: TPasSemaModel;
       if (LRoot = NIL_NODE) or (LRoot = ADecl) or
          not LM.Tree.NodeVisRange(LRoot, LMFirst, LMLast) then
         Continue;
+      // A field's or constant's node ends BEFORE its `;` (the parser closes
+      // the declaration, then expects the semicolon), so the terminator
+      // stayed in the compared text and a second field was one `;` more -
+      // the record read as changed with every member masked.
+      if (LMLast + 1 <= High(LM.Tree.Source.Visible)) then
+      begin
+        LM.Tree.Source.VisibleSlice(LMLast + 1, LText, LLen);
+        if (LLen = 1) and (LText^ = ';') then
+          Inc(LMLast);
+      end;
       for LIdx := Max(LMFirst, LFirst) to Min(LMLast, LLast) do
         Result[LIdx - LFirst] := True;
     end;
@@ -13038,6 +13055,16 @@ begin
     begin
       AffectedConsumers(LId, 0, LReach, LRadius);   // no ceiling: the bound
       Lap('reach');
+      // A consumer whose token stream came from the `$IF` oracle may have
+      // folded THIS unit's constants or record layouts (`{$IF SizeOf(TR) =
+      // 40}`) without holding a pair or naming a member - and the redo below
+      // keeps its tree, so no selection can re-decide its branches. Only a
+      // rebuild re-preprocesses it. On the client closure such units are RTL
+      // ones (System, System.Rtti), never in a project unit's reach.
+      for LIdx := 1 to High(LReach) do
+        if FModels[LReach[LIdx]].OracleStream then
+          Exit(Refuse('consumer-oracle(' +
+            FModels[LReach[LIdx]].UnitNameLower + ')'));
       if LHelpers then
         // A helper attaches by type, not by name - nobody can be excluded.
         LIds := LReach

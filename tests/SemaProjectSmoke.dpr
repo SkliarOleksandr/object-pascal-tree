@@ -5909,6 +5909,84 @@ begin
       GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitNA.pas')) and
       (Pos('helpers=1;', GProj.StageTimings) > 0) and
       (Pos('module=4;', GProj.StageTimings) > 0));
+
+    // A RECORD is a member owner too. Declared, then given a second field,
+    // then its first field retyped: the record's declaration is compared
+    // with the fields masked, so a new field is an added NAME (nobody
+    // mentions it: one module) and a retyped field is a changed MEMBER
+    // (nobody holds it: one module) - the record itself never "changes".
+    const cNATail = '  TAHelper = class helper for TA'#10'    procedure H;'#10 +
+      '  end;'#10'const'#10'  CA = 1;'#10'  CNEW = 3;'#10'  Shared = 9;'#10 +
+      'implementation'#10'procedure TA.M(AArg: Integer); begin end;'#10 +
+      'procedure TA.N; begin end;'#10'procedure TAHelper.H; begin end;'#10 +
+      'end.'#10;
+    const cNAHead = cNAIntf + '  TFirst = class end;'#10 +
+      '  TA = class(TFirst)'#10'    procedure M(AArg: Integer);'#10 +
+      '    procedure N;'#10'  end;'#10;
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitNA.pas'),
+      cNAHead + '  TR = record'#10'    F1: Integer;'#10'  end;'#10 + cNATail, 10);
+    Ok('namedeps: a new record is added names, nothing changed',
+      GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitNA.pas')) and
+      (Pos('changed=0;', GProj.StageTimings) > 0) and
+      (Pos('module=1;', GProj.StageTimings) > 0));
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitNA.pas'),
+      cNAHead + '  TR = record'#10'    F1: Integer;'#10'    F2: Integer;'#10 +
+      '  end;'#10 + cNATail, 11);
+    var LFieldOk := GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitNA.pas'));
+    Ok('namedeps: a field added to a record leaves the record unchanged [' +
+      GProj.StageTimings + ']',
+      LFieldOk and
+      (Pos('changed=0;', GProj.StageTimings) > 0) and
+      (Pos('added=1;', GProj.StageTimings) > 0) and
+      (Pos('module=1;', GProj.StageTimings) > 0));
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitNA.pas'),
+      cNAHead + '  TR = record'#10'    F1: string;'#10'    F2: Integer;'#10 +
+      '  end;'#10 + cNATail, 12);
+    var LRetypeOk := GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitNA.pas'));
+    Ok('namedeps: a retyped record field is the field changed, not the record [' +
+      GProj.StageTimings + ']',
+      LRetypeOk and
+      (Pos('changed=1;', GProj.StageTimings) > 0) and
+      (Pos('names=f1/', GProj.StageTimings) > 0) and
+      (Pos('module=1;', GProj.StageTimings) > 0));
+    Ok('namedeps: the holders still bind after the record edits',
+      CrossRefTo(ModelByName('unitnb'), 'TA', 'TA') and
+      CrossRefTo(ModelByName('unitnd'), 'M', 'M'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- A consumer whose stream the `$IF` oracle built folded a value of the
+  // edited unit without holding a pair or naming a member: the module path
+  // cannot re-decide its branches (the redo keeps trees), so it refuses and
+  // the rebuild re-preprocesses. Without this, `OC = 1` -> `OC = 2` left OB
+  // on the `$IF UnitOA.OC = 1` branch with nobody selected to notice. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_oraclecons');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitOA.pas'),
+    'unit UnitOA;'#10'interface'#10'const'#10'  OC = 1;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitOB.pas'),
+    'unit UnitOB;'#10'interface'#10'uses UnitOA;'#10 +
+    '{$IF UnitOA.OC = 1}'#10'const OnOne = 1;'#10'{$ELSE}'#10 +
+    'const OnOther = 2;'#10'{$IFEND}'#10'implementation'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    Ok('oracle consumer: baseline - OB took the branch the oracle decided',
+      Assigned(ModelByName('unitob')) and ModelByName('unitob').OracleStream and
+      (ModelByName('unitob').FindLocal(ModelByName('unitob').InterfaceScope, 'onone') <> NIL_SYM));
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitOA.pas'),
+      'unit UnitOA;'#10'interface'#10'const'#10'  OC = 2;'#10 +
+      'implementation'#10'end.'#10, 2);
+    Ok('oracle consumer: a changed constant refuses when an oracle-built stream is in the reach [' +
+      GProj.StageTimings + ']',
+      not GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitOA.pas')) and
+      (Pos('consumer-oracle(unitob)', GProj.StageTimings) > 0));
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then
