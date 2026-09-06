@@ -1306,7 +1306,13 @@ begin
   FStatsKeysNoAsker := TDictionary<string, Byte>.Create;
   FStatsPass := 'other';
 {$ENDIF}
-  FModuleRedoLimit := 128;
+  // No ceiling by default (0.16.2). Measured on the client closure with the
+  // name-level selection in place: 184 selected models redo in 3.7 s, 557 in
+  // 5.9 s, the WHOLE reach of 1260 (a helper edit) in 7.2 s - against a
+  // 28-29 s rebuild every time, byte-identical. The old 128 turned each of
+  // those into the rebuild it was meant to avoid. The property stays for a
+  // host that has measured otherwise on its own closure.
+  FModuleRedoLimit := 0;
   FSystemUnitId := -1;
   FSystemUnitResolved := False;
   FSysInitUnitId := -1;

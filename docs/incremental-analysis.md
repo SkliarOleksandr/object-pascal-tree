@@ -99,8 +99,9 @@ first cut rescanned every model per frontier unit):
 - the walk continues THROUGH a unit only if it imported in its INTERFACE
   section - such a unit may republish types from the edited one. An
   implementation-only importer cannot, so it is a leaf;
-- over `ModuleRedoLimit` models (128 by default, a MEASURED value - see the
-  open list) the call refuses and the host rebuilds.
+- over `ModuleRedoLimit` SELECTED models the call refuses and the host
+  rebuilds. The default is no ceiling (0) since 0.16.2 - a measured decision,
+  see item B2 in the open list; a host can set the property.
 
 The interface/implementation distinction needs no new data: the unit-reference
 symbol's scope is either the interface one or the implementation one.
@@ -208,7 +209,7 @@ from a slow analyzer.
 | `new-dependency(X)` | an import resolves to a file the closure never loaded |
 | `no-clean-boundary-*` | no implementation scope, or the arena is not split cleanly at it |
 | `intf-sym#N`, `intf-scope#N` | the interface prefix moved in a way the redo cannot express |
-| `too-many-consumers(N>L)` | the SELECTED redo set N exceeds `ModuleRedoLimit` (128; 0 or less lifts the ceiling). The number is reported because "too many" alone says nothing about whether the limit is set sensibly |
+| `too-many-consumers(N>L)` | the SELECTED redo set N exceeds `ModuleRedoLimit` (only when a host set one; the default is no ceiling). The number is reported because "too many" alone says nothing about whether the limit is set sensibly |
 | `consumer-demoted` | a consumer to redo has no text layer any more (see the memory dial) |
 | `consumer-oracle(<unit>)` | a consumer in the reach has an oracle-built token stream: its `$IF`s may have folded this unit's constants or record sizes, and only a re-preprocess can re-decide them |
 | `instance-unmatched-sym(<name>)` | an instance names a symbol of this unit that the new text no longer declares (a deleted generic, or an overload whose ordinal moved) - see guard 2 |
@@ -427,6 +428,24 @@ rebuild - about 300 ms fixed plus ~57 ms per model - so break-even sits near
 500 models, and the old 24 was refusing a case 15x cheaper than its own
 fallback. 128 keeps the worst case near 7 s; a host that knows its closure can
 tune the property.
+
+**B2. DONE (0.16.2) - the ceiling is lifted by default.** Re-measured once the
+selection was name-level and the passes were incremental (helpers included):
+typing a constant whose name the closure already uses widely selects 184
+(`Client`), 344 (`Index`), 432 (`Recno`) or 557 (`Count`) of the 1260 models
+in the hub unit's reach and redoes them in 3.7 / 4.7 / 5.1 / 5.9 s; a new
+helper, which takes the whole reach, redoes 1260 in 7.2 s. The rebuild is
+28-29 s in every case and every run was byte-identical, so the 128 ceiling
+turned each of these into the 28 s it existed to avoid. The per-model cost is
+now ~7 ms plus a fixed part that the `inherited` pass carries (1.6 s at 184
+models, 2.7 s at 1260 - it scales with the closure walked, not with the
+models redone) - that fixed part is the next lead, not the ceiling.
+`ModuleRedoLimit` stays as a property for a host with a measured reason.
+
+Measured at the same time and rejected: the lazy per-model identifier set.
+With the added-name scan on, `select` on the 1260-model reach is 54-77 ms;
+with no added name it is 49-73 ms. The scan is inside the noise, and the set
+would cost 50-150 MB on the client.
 
 **C. DONE (0.15.7) - the instance table follows a renumbered unit.** Old and
 new declarations are matched by identity and the entries repointed (guard 2
