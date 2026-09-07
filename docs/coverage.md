@@ -53,7 +53,7 @@ README's own section on that).
 - the layout oracle refuses enums containing negative
   explicit ordinals, so a `$IF SizeOf(...)` over such an enum stays a guess.
 
-### 2.5.1 Type aliases — weak vs. distinct
+### 2.5.1 Type aliases - weak vs. distinct
 - the parser marks distinctness (Aux=1) but no semantic
   layer reads the flag - distinct aliases are typed identically to weak
   aliases, with no assignment-identity distinction.
