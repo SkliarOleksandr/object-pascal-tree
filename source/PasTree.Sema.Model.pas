@@ -229,6 +229,15 @@ type
       identity check. DemoteClosedUnits therefore skips them; they keep full
       text. A handful of units against ~3750 demoted. }
     OracleStream: Boolean;
+    { The names the oracle was asked for that stream - every `Declared(X)`
+      and symbol question (`SizeOf(T)`, a const) the first pass could not
+      answer, lower-cased, dotted names split into their segments. Empty
+      unless OracleStream. AnalyzeModuleOnly reads it: an interface edit that
+      touches none of these names cannot flip a branch of this stream, so the
+      model stays an ordinary consumer instead of forcing a rebuild (one
+      project unit guarding on `Declared(RTLVersion131)` used to turn every
+      edit of the hub unit it imports into a 7 s rebuild). }
+    OracleNames: TArray<string>;
     DemotedVisCount: Integer;
     DemotedFileSizes: TArray<Integer>;    // Length(Files[i].Source)
     DemotedTokenCounts: TArray<Integer>;  // Length(Files[i].Tokens)

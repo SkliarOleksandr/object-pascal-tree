@@ -5973,16 +5973,63 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitOB.pas'),
     'unit UnitOB;'#10'interface'#10'uses UnitOA;'#10 +
     '{$IF UnitOA.OC = 1}'#10'const OnOne = 1;'#10'{$ELSE}'#10 +
-    'const OnOther = 2;'#10'{$IFEND}'#10'implementation'#10'end.'#10);
+    'const OnOther = 2;'#10'{$IFEND}'#10 +
+    '{$IF Declared(Later)}'#10'const SawLater = 1;'#10'{$IFEND}'#10 +
+    'implementation'#10'end.'#10);
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
     GProj.AnalyzeDirectory(LDir);
     Ok('oracle consumer: baseline - OB took the branch the oracle decided',
       Assigned(ModelByName('unitob')) and ModelByName('unitob').OracleStream and
       (ModelByName('unitob').FindLocal(ModelByName('unitob').InterfaceScope, 'onone') <> NIL_SYM));
+    // The refusal is by NAME, not by presence (0.16.5): a project unit guarding
+    // on `Declared(RTLVersion131)` turned every edit of the hub unit it
+    // imports into a full rebuild. An edit touching nothing the oracle was
+    // asked about leaves OB an ordinary consumer.
     GProj.SetBuffer(TPath.Combine(LDir, 'UnitOA.pas'),
-      'unit UnitOA;'#10'interface'#10'const'#10'  OC = 2;'#10 +
-      'implementation'#10'end.'#10, 2);
+      'unit UnitOA;'#10'interface'#10'const'#10'  OC = 1;'#10'  OD = 5;'#10 +
+      'type'#10'  TOA = class'#10'    procedure M;'#10'  end;'#10 +
+      'implementation'#10'procedure TOA.M; begin end;'#10'end.'#10, 2);
+    Ok('oracle consumer: an edit touching no asked name is accepted [' +
+      GProj.StageTimings + ']',
+      GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitOA.pas')) and
+      (Pos('module=1;', GProj.StageTimings) > 0) and
+      (Pos('renumbered=1;', GProj.StageTimings) > 0));
+    Ok('oracle consumer: ...and OB keeps its oracle-built branch',
+      ModelByName('unitob').OracleStream and
+      (ModelByName('unitob').FindLocal(ModelByName('unitob').InterfaceScope, 'onone') <> NIL_SYM));
+    // A member added to a class the oracle never asked about: masked out of
+    // the class diff, an added name nobody mentions - still one module.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitOA.pas'),
+      'unit UnitOA;'#10'interface'#10'const'#10'  OC = 1;'#10'  OD = 5;'#10 +
+      'type'#10'  TOA = class'#10'    procedure M;'#10'    procedure N;'#10 +
+      '  end;'#10 +
+      'implementation'#10'procedure TOA.M; begin end;'#10 +
+      'procedure TOA.N; begin end;'#10'end.'#10, 3);
+    Ok('oracle consumer: a method added to an unasked class is accepted [' +
+      GProj.StageTimings + ']',
+      GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitOA.pas')) and
+      (Pos('module=1;', GProj.StageTimings) > 0));
+    // A name the oracle asked `Declared()` about APPEARS: the guess False
+    // would flip, and only a re-preprocess can take the branch - refused.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitOA.pas'),
+      'unit UnitOA;'#10'interface'#10'const'#10'  OC = 1;'#10'  OD = 5;'#10 +
+      '  Later = 7;'#10 +
+      'type'#10'  TOA = class'#10'    procedure M;'#10'    procedure N;'#10 +
+      '  end;'#10 +
+      'implementation'#10'procedure TOA.M; begin end;'#10 +
+      'procedure TOA.N; begin end;'#10'end.'#10, 4);
+    Ok('oracle consumer: an asked Declared() name appearing refuses [' +
+      GProj.StageTimings + ']',
+      not GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitOA.pas')) and
+      (Pos('consumer-oracle(unitob)', GProj.StageTimings) > 0));
+    // The asked CONSTANT changes value: refused, as before.
+    GProj.SetBuffer(TPath.Combine(LDir, 'UnitOA.pas'),
+      'unit UnitOA;'#10'interface'#10'const'#10'  OC = 2;'#10'  OD = 5;'#10 +
+      'type'#10'  TOA = class'#10'    procedure M;'#10'    procedure N;'#10 +
+      '  end;'#10 +
+      'implementation'#10'procedure TOA.M; begin end;'#10 +
+      'procedure TOA.N; begin end;'#10'end.'#10, 5);
     Ok('oracle consumer: a changed constant refuses when an oracle-built stream is in the reach [' +
       GProj.StageTimings + ']',
       not GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitOA.pas')) and

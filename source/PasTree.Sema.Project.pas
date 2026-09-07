@@ -431,6 +431,11 @@ type
       are all to unchanged symbols and only need renumbering. False only when
       a name test is needed on a consumer whose text is demoted (no tree to
       scan) - AWhy names it, and the caller refuses. }
+    class function OracleNamesOf(AModel: TPasSemaModel): TArray<string>;
+    class function OracleConsumerAffected(ACons, AOld, ANew: TPasSemaModel;
+      AOldSymN: Integer; const AMap: TArray<Integer>;
+      const AChanged: TArray<Boolean>;
+      AAdded: TDictionary<string, Byte>): Boolean;
     function SelectConsumers(AId: Integer; const AReach: TArray<Integer>;
       const AChanged: TArray<Boolean>; AAdded: TDictionary<string, Byte>;
       out ASelected, AUntouched: TArray<Integer>;
@@ -3323,6 +3328,11 @@ begin
       // An oracle-built stream cannot be reproduced from cold - mark it so
       // text demotion skips this model (see TPasSemaModel.OracleStream).
       LDone[LIdx].OracleStream := True;
+      // The questions of BOTH passes: the first pass's are what the oracle
+      // answered (no longer unresolved in LDone), the second's are what still
+      // nobody could - either kind may decide a branch.
+      LDone[LIdx].OracleNames := OracleNamesOf(FModels[LCand[LIdx]]) +
+        OracleNamesOf(LDone[LIdx]);
       FModels[LCand[LIdx]] := LDone[LIdx];
     end;
   LPaths := nil;
@@ -12681,6 +12691,71 @@ begin
   end;
 end;
 
+class function TPasSemaProject.OracleNamesOf(
+  AModel: TPasSemaModel): TArray<string>;
+
+  procedure Add(var ANames: TArray<string>; const AName: string);
+  var
+    LPart: string;
+  begin
+    // `System.RTLVersion131` asks about RTLVersion131; `SizeOf(TR.F)` about
+    // both TR and F. Every segment is a name an edit could touch.
+    for LPart in LowerCase(AName).Split(['.']) do
+      if LPart <> '' then
+        ANames := ANames + [LPart];
+  end;
+
+var
+  LName: string;
+  LSym: TPasUnresolvedSymbol;
+begin
+  Result := nil;
+  if AModel = nil then
+    Exit;
+  for LName in AModel.Tree.Source.UnresolvedDeclared do
+    Add(Result, LName);
+  for LSym in AModel.Tree.Source.UnresolvedSymbols do
+    Add(Result, LSym.Name);
+end;
+
+// True when the interface edit AOld -> ANew could change an answer the oracle
+// gave ACons: a name it asked about appeared (Declared flips to True), or a
+// symbol of that name changed or disappeared. The member mask DiffInterface
+// applies to a class or record does not apply here - `SizeOf` is a question
+// about the LAYOUT, so a record's declaration is compared whole.
+class function TPasSemaProject.OracleConsumerAffected(ACons, AOld,
+  ANew: TPasSemaModel; AOldSymN: Integer; const AMap: TArray<Integer>;
+  const AChanged: TArray<Boolean>;
+  AAdded: TDictionary<string, Byte>): Boolean;
+var
+  LName: string;
+  LIdx, LNewIdx, LDeclOld, LDeclNew: Integer;
+begin
+  Result := False;
+  for LName in ACons.OracleNames do
+  begin
+    if AAdded.ContainsKey(LName) then
+      Exit(True);
+    for LIdx := 0 to AOldSymN - 1 do
+    begin
+      if AOld.Symbols[LIdx].NameLower <> LName then
+        Continue;
+      if AChanged[LIdx] then
+        Exit(True);
+      LNewIdx := AMap[LIdx];
+      if LNewIdx = NIL_SYM then
+        Exit(True);
+      LDeclOld := AOld.Tree.DeclRootOf(AOld.Symbols[LIdx].DeclNode);
+      LDeclNew := ANew.Tree.DeclRootOf(ANew.Symbols[LNewIdx].DeclNode);
+      if (LDeclOld = NIL_NODE) <> (LDeclNew = NIL_NODE) then
+        Exit(True);
+      if (LDeclOld <> NIL_NODE) and
+         not AOld.Tree.SpanTokensEqual(LDeclOld, ANew.Tree, LDeclNew) then
+        Exit(True);
+    end;
+  end;
+end;
+
 function TPasSemaProject.SelectConsumers(AId: Integer;
   const AReach: TArray<Integer>; const AChanged: TArray<Boolean>;
   AAdded: TDictionary<string, Byte>; out ASelected, AUntouched: TArray<Integer>;
@@ -13065,10 +13140,15 @@ begin
       // folded THIS unit's constants or record layouts (`{$IF SizeOf(TR) =
       // 40}`) without holding a pair or naming a member - and the redo below
       // keeps its tree, so no selection can re-decide its branches. Only a
-      // rebuild re-preprocesses it. On the client closure such units are RTL
-      // ones (System, System.Rtti), never in a project unit's reach.
+      // rebuild re-preprocesses it. But only an edit that touches a name the
+      // oracle was ASKED can flip a branch: a project unit guarding on
+      // `Declared(RTLVersion131)` is an ordinary consumer of every other edit
+      // (measured: it turned each edit of the hub unit it imports into a 7 s
+      // rebuild).
       for LIdx := 1 to High(LReach) do
-        if FModels[LReach[LIdx]].OracleStream then
+        if FModels[LReach[LIdx]].OracleStream and
+           OracleConsumerAffected(FModels[LReach[LIdx]], LOld, LNew, LOldSymN,
+             LMap, LChanged, LAdded) then
           Exit(Refuse('consumer-oracle(' +
             FModels[LReach[LIdx]].UnitNameLower + ')'));
       if LHelpers then
