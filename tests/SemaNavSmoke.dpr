@@ -558,31 +558,40 @@ const
     '    Rows: array of TRecArr;'#10 +         // 60
     '    Cells: array[0..3, 0..3] of TRec;'#10 + // 61
     '  end;'#10 +                              // 62
-    'implementation'#10 +                      // 63
-    'procedure TItems.Clear;'#10 +             // 64
-    'begin'#10 +                               // 65
-    'end;'#10 +                                // 66
-    'function TItems.Add: TItem;'#10 +         // 67
-    'begin'#10 +                               // 68
-    '  Result := nil;'#10 +                    // 69
-    'end;'#10 +                                // 70
-    'function TIdx.GetF(I: Integer): TItem;'#10 + // 71
-    'begin'#10 +                               // 72
-    '  Result := nil;'#10 +                    // 73
+    // An enum with a record helper, for the for-counter check in NavF.
+    '  TPeriod = (pDay, pWeek);'#10 +          // 63
+    '  TPeriodHelper = record helper for TPeriod'#10 + // 64
+    '    function Text: string;'#10 +          // 65 Text col 14
+    '  end;'#10 +                              // 66
+    'implementation'#10 +                      // 67
+    'function TPeriodHelper.Text: string;'#10 + // 68
+    'begin'#10 +                               // 69
+    '  Result := '''';'#10 +                   // 70
+    'end;'#10 +                                // 71
+    'procedure TItems.Clear;'#10 +             // 72
+    'begin'#10 +                               // 73
+    'end;'#10 +                                // 90
+    'function TItems.Add: TItem;'#10 +         // 75
+    'begin'#10 +                               // 92
+    '  Result := nil;'#10 +                    // 77
+    'end;'#10 +                                // 94
+    'function TIdx.GetF(I: Integer): TItem;'#10 + // 79
+    'begin'#10 +                               // 88
+    '  Result := nil;'#10 +                    // 81
     'end;'#10 +                                // 74
-    'function TIdx.GetA(I: Integer): TRec;'#10 + // 75
+    'function TIdx.GetA(I: Integer): TRec;'#10 + // 83
     'begin'#10 +                               // 76
-    '  Result.Code := 0;'#10 +                 // 77
+    '  Result.Code := 0;'#10 +                 // 85
     'end;'#10 +                                // 78
-    'procedure TObjMap.Drop;'#10 +             // 79
+    'procedure TObjMap.Drop;'#10 +             // 87
     'begin'#10 +                               // 80
-    '  Table[0].Description := '''';'#10 +     // 81 Description col 12
+    '  Table[0].Description := '''';'#10 +     // 89 Description col 12
     'end;'#10 +                                // 82
-    'function TBox.GetProps: TProps;'#10 +     // 83
+    'function TBox.GetProps: TProps;'#10 +     // 91
     'begin'#10 +                               // 84
-    '  Result := nil;'#10 +                    // 85
+    '  Result := nil;'#10 +                    // 93
     'end;'#10 +                                // 86
-    'end.'#10;                                 // 87
+    'end.'#10;                                 // 95
   UNIT_F =
     'unit NavF;'#10 +                          // 1
     'interface'#10 +                           // 2
@@ -606,8 +615,12 @@ const
     '  G.Rows[0][1].Code := 4;'#10 +           // 19 Code col 16
     '  G.Rows[0, 1].Code := 5;'#10 +           // 20 Code col 16
     '  G.Cells[1, 2].Code := 6;'#10 +          // 21 Code col 17
-    'end;'#10 +                                // 22
-    'end.'#10;                                 // 23
+    '  for var P := Low(TPeriod) to High(TPeriod) do'#10 + // 22
+    '    P.Text;'#10 +                         // 23 Text col 7
+    '  for var Q := pDay to pWeek do'#10 +      // 24
+    '    Q.Text;'#10 +                         // 25 Text col 7
+    'end;'#10 +                                // 26
+    'end.'#10;                                 // 27
 
   UNIT_B =
     'unit NavB;'#10 +                          // 1
@@ -1642,11 +1655,17 @@ begin
         'NavPromo.pas', 37, 5);
       CheckNav('index: two-dimensional inline array', 21, 17, 'Code',
         'NavPromo.pas', 37, 5);
+      // REGRESSION: a for counter's uses live in the loop BODY, a child of
+      // the loop - typed before a post-order case could infer the counter.
+      CheckNav('for counter: helper method, intrinsic bound', 23, 7, 'Text',
+        'NavPromo.pas', 65, 14);
+      CheckNav('for counter: helper method, enum-value bound', 25, 7, 'Text',
+        'NavPromo.pas', 65, 14);
       // REGRESSION: the generic frame of a bare inherited member whose type
       // is NESTED in the generic ancestor - `Table[0]` peeled to the open
       // TValue without it (see the nkIdent case in CrossType).
       GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavPromo.pas'));
-      CheckNav('generic frame: nested array type off inherited member', 81, 12,
+      CheckNav('generic frame: nested array type off inherited member', 89, 12,
         'Description', 'NavPromo.pas', 6, 5);
       GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavMain.dpr'));
       // Either segment of the dotted, namespace-prefixed name opens the file.

@@ -8940,6 +8940,33 @@ var
     // turned silent misses into false E2003s on the very next line. Both are
     // now decided rather than guessed (PreferParamlessOverload/-Member for
     // the first, LAmbig for the second), which is what let the case in.
+    // 5.5.1: `for var I := From to To do` - the counter's type is the FROM
+    // bound's (`for var C := 'a' to 'z'` walks Chars). The same detour as
+    // for-in below, for the same reason: the body is a CHILD of the loop, so
+    // a post-order case typed the counter only after every use inside the
+    // body had already been walked without it - `for var LPeriod :=
+    // Low(TFilterByPeriod) to High(..) do ..LPeriod.ToString` lost the enum
+    // helper's method on every counter, whatever the bound.
+    if LM.Tree.Nodes[N].Kind = nkForStmt then
+    begin
+      LChild := LM.Tree.Nodes[N].FirstChild;   // the counter
+      if LChild = NIL_NODE then
+        Exit;
+      Walk(LChild);
+      LBase := LM.Tree.Nodes[LChild].NextSibling;   // the FROM bound
+      if LBase = NIL_NODE then
+        Exit;
+      Walk(LBase);
+      if LM.Tree.Nodes[LChild].Kind = nkInlineVar then
+        InferInlineDecl(LChild, LBase);
+      LChild := LM.Tree.Nodes[LBase].NextSibling;   // the TO bound, the body
+      while LChild <> NIL_NODE do
+      begin
+        Walk(LChild);
+        LChild := LM.Tree.Nodes[LChild].NextSibling;
+      end;
+      Exit;
+    end;
     if LM.Tree.Nodes[N].Kind = nkForInStmt then
     begin
       LChild := LM.Tree.Nodes[N].FirstChild;   // the element
@@ -9466,17 +9493,6 @@ var
                 InferInlineDecl(N, LChild);
             end;
           end;
-        end;
-
-      // 5.5.1: `for var I := From to To do` - the counter's type is the FROM
-      // bound's (`for var C := 'a' to 'z'` walks Chars).
-      nkForStmt:
-        begin
-          LChild := LM.Tree.Nodes[N].FirstChild;
-          if (LChild <> NIL_NODE) and
-             (LM.Tree.Nodes[LChild].Kind = nkInlineVar) and
-             (LM.Tree.Nodes[LChild].NextSibling <> NIL_NODE) then
-            InferInlineDecl(LChild, LM.Tree.Nodes[LChild].NextSibling);
         end;
     end;
   end;
