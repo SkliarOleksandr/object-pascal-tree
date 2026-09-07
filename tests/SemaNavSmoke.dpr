@@ -480,11 +480,75 @@ const
     'interface'#10 +                           // 2
     'implementation'#10 +                      // 3
     'end.'#10;                                 // 4
+  // A bare property REDECLARATION reached through a NARROWED property - the
+  // component-suite check-combo shape. TProps republishes its ancestor's
+  // `Items: TItems` as `property Items;` (no type written), and TBox narrows
+  // `Properties` from TCustomProps to TProps. `Box.Properties.Items.Clear`
+  // resolved Items to the promotion and then nothing: the promotion has no
+  // TypeNode, so BindTypesX recorded no type for it, and CrossType's member
+  // typing (DeclTypeX) reads only that table. SymDeclTypeX knew the answer
+  // all along; the fix is to record it in the declared-type pass.
+  UNIT_PROMO =
+    'unit NavPromo;'#10 +                          // 1
+    'interface'#10 +                           // 2
+    'type'#10 +                                // 3
+    '  TItem = class'#10 +                     // 4
+    '  public'#10 +                            // 5
+    '    Description: string;'#10 +            // 6  Description col 5
+    '  end;'#10 +                              // 7
+    '  TItems = class'#10 +                    // 8
+    '  public'#10 +                            // 9
+    '    procedure Clear;'#10 +                // 10 Clear col 15
+    '    function Add: TItem;'#10 +            // 11 Add col 14
+    '  end;'#10 +                              // 12
+    '  TCustomProps = class'#10 +              // 13
+    '  private'#10 +                           // 14
+    '    FItems: TItems;'#10 +                 // 15
+    '  protected'#10 +                         // 16
+    '    property Items: TItems read FItems;'#10 + // 17
+    '  end;'#10 +                              // 18
+    '  TProps = class(TCustomProps)'#10 +      // 19
+    '  published'#10 +                         // 20
+    '    property Items;'#10 +                 // 21 Items col 14
+    '  end;'#10 +                              // 22
+    '  TCustomBox = class'#10 +                // 23
+    '  private'#10 +                           // 24
+    '    FProps: TCustomProps;'#10 +           // 25
+    '  public'#10 +                            // 26
+    '    property Properties: TCustomProps read FProps;'#10 + // 27
+    '  end;'#10 +                              // 28
+    '  TBox = class(TCustomBox)'#10 +          // 29
+    '  private'#10 +                           // 30
+    '    function GetProps: TProps;'#10 +      // 31
+    '  public'#10 +                            // 32
+    '    property Properties: TProps read GetProps;'#10 + // 33 Properties col 14
+    '  end;'#10 +                              // 34
+    'implementation'#10 +                      // 35
+    'procedure TItems.Clear;'#10 +             // 36
+    'begin'#10 +                               // 37
+    'end;'#10 +                                // 38
+    'function TItems.Add: TItem;'#10 +         // 39
+    'begin'#10 +                               // 40
+    '  Result := nil;'#10 +                    // 41
+    'end;'#10 +                                // 42
+    'function TBox.GetProps: TProps;'#10 +     // 43
+    'begin'#10 +                               // 44
+    '  Result := nil;'#10 +                    // 45
+    'end;'#10 +                                // 46
+    'end.'#10;                                 // 47
   UNIT_F =
     'unit NavF;'#10 +                          // 1
     'interface'#10 +                           // 2
-    'implementation'#10 +                      // 3
-    'end.'#10;                                 // 4
+    'uses NavPromo;'#10 +                          // 3
+    'procedure Fill(Box: TBox);'#10 +          // 4
+    'implementation'#10 +                      // 5
+    'procedure Fill(Box: TBox);'#10 +          // 6
+    'begin'#10 +                               // 7
+    '  Box.Properties.Items.Clear;'#10 +       // 8  Items col 18, Clear col 24
+    '  Box.Properties.Items.Add.Description := '''';'#10 + // 9  Add col 24,
+                                                //    Description col 28
+    'end;'#10 +                                // 10
+    'end.'#10;                                 // 11
 
   UNIT_B =
     'unit NavB;'#10 +                          // 1
@@ -1444,6 +1508,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'Wide.NavE.pas'), UNIT_E);
   TFile.WriteAllText(TPath.Combine(LDir, 'Wide.Deep.NavX.pas'), UNIT_X);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavF.pas'), UNIT_F);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavPromo.pas'), UNIT_PROMO);
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
     GProj.SetNamespaces(['Wide']);
@@ -1488,6 +1553,20 @@ begin
         'Wide.NavE.pas', 1, 6);
       CheckNav('project uses: OldNavF -> aliased file', 2, 19, 'OldNavF',
         'NavF.pas', 1, 6);
+      // REGRESSION (UNIT_PROMO's comment): members reached THROUGH a bare
+      // property redeclaration, behind a narrowed property.
+      GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavF.pas'));
+      CheckNav('bare redecl: narrowed Properties', 8, 7, 'Properties',
+        'NavPromo.pas', 33, 14);
+      CheckNav('bare redecl: Items lands on the promotion', 8, 18, 'Items',
+        'NavPromo.pas', 21, 14);
+      CheckNav('bare redecl: Clear through the promotion', 8, 24, 'Clear',
+        'NavPromo.pas', 10, 15);
+      CheckNav('bare redecl: Add through the promotion', 9, 24, 'Add',
+        'NavPromo.pas', 11, 14);
+      CheckNav('bare redecl: member of Add''s result', 9, 28, 'Description',
+        'NavPromo.pas', 6, 5);
+      GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavMain.dpr'));
       // Either segment of the dotted, namespace-prefixed name opens the file.
       CheckNav('project uses: Deep.NavX -> namespace-prefixed file', 2, 27,
         'Deep', 'Wide.Deep.NavX.pas', 1, 6);

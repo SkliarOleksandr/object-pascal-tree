@@ -7948,6 +7948,22 @@ begin
       LX := InferredDeclTypeX(AId, LSym, {AFollowForeign} True);
       if XValid(LX) then
         LM.SymTypeX.AddOrSetValue(LSym, LX);
+    end
+    // A bare property REDECLARATION - `property Items;` promoting visibility,
+    // no type written - has no TypeNode and so was skipped above, and
+    // DeclTypeX (the hot path CrossType's member typing reads) knows only
+    // this table and TypeSym: the promoted property typed to nothing, and
+    // every member reached THROUGH it went unresolved. SymDeclTypeX already
+    // walks the ancestor chain for exactly this shape (it was written for
+    // `with X.Items do`); recording its answer here puts the type where the
+    // ordinary member chain finds it. `Box.Properties.Items.Clear`, where
+    // TProps republishes its ancestor's `Items: TItems` (a component suite's
+    // check-combo editor), had Items resolve and Clear go dark.
+    else if LM.Symbols[LSym].Kind = skProperty then
+    begin
+      LX := SymDeclTypeX(AId, LSym);
+      if XValid(LX) then
+        LM.SymTypeX.AddOrSetValue(LSym, LX);
     end;
 end;
 
