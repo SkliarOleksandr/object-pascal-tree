@@ -526,7 +526,15 @@ const
     '  TE = class(TObject, IEnum, IEnum<Integer>)'#10 + // 30  IEnum col 23,
                                                 //     IEnum<> col 30
     '  end;'#10 +                              // 31
-    'end.'#10;                                 // 32
+    // 3.1.3: a member reached through an INFERRED inline var - the report
+    // that opened the feature (`var LForm := TForm.Create(..); LForm.Panel`
+    // had no declaration to go to on the member).
+    'procedure R;'#10 +                        // 32
+    'begin'#10 +                               // 33
+    '  var LT := GT;'#10 +                     // 34
+    '  LT.Value := 1;'#10 +                    // 35  Value col 6
+    'end;'#10 +                                // 36
+    'end.'#10;                                 // 37
 
 var
   GProj: TPasSemaProject;
@@ -697,6 +705,8 @@ begin
       CheckNav('local var', 13, 8, 'GT', 'NavB.pas', 4, 5);
       // Cross-unit MEMBER (Phase-3c discovered): GT.Value -> NavA field.
       CheckNav('cross member', 13, 11, 'Value', 'NavA.pas', 5, 5);
+      // The same member through an inline var with an INFERRED type (3.1.3).
+      CheckNav('inferred inline var member', 35, 6, 'Value', 'NavA.pas', 5, 5);
       // Builtin name a used unit actually declares: TBytes -> NavC.
       CheckNav('builtin-in-uses', 9, 6, 'TBytes', 'NavC.pas', 4, 3);
       // Implicit System unit, no `uses System` anywhere: TObject/TArray<T>.
@@ -1358,8 +1368,8 @@ begin
         GNav.SymbolAt(LMidA, 5, 5, {out} LRTMid, {out} LRSym,
           {out} LRName) and SameText(LRName, 'Value'));
       LHits := GNav.FindReferences(LRTMid, LRSym);
-      Ok('FindReferences: Value -- 2 hits (own body + NavB''s cross use)',
-        Length(LHits) = 2);
+      Ok('FindReferences: Value -- 3 hits (own body + NavB''s cross use + ' +
+        'NavB''s use through an inferred inline var)', Length(LHits) = 3);
       Ok('FindReferences: Value -- the NavA body''s own Result.Value use',
         HasHitAt(LHits, 'NavA.pas', 10, 14));
       Ok('FindReferences: Value -- NavB''s cross-model GT.Value use',

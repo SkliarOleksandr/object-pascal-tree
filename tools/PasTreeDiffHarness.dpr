@@ -504,8 +504,12 @@ begin
   LCount := 0;
   for LPair in AModel.ExtRefMap do
   begin
-    Result[LCount] := Format('%d>%s:%d', [LPair.Key,
-      UnitTag(AProj, LPair.Value.UnitId), LPair.Value.Sym]);
+    // Node index and symbol index are what is compared; the node's text and
+    // the symbol's name ride along so a mismatch line names what to look at.
+    Result[LCount] := Format('%d>%s:%d (%s -> %s)', [LPair.Key,
+      UnitTag(AProj, LPair.Value.UnitId), LPair.Value.Sym,
+      AModel.Tree.NodeText(LPair.Key),
+      AProj.Model(LPair.Value.UnitId).Symbols[LPair.Value.Sym].Name]);
     Inc(LCount);
   end;
   TArray.Sort<string>(Result);   // dictionary order is not deterministic
@@ -527,10 +531,40 @@ end;
 // First index where the sorted line sets differ, described; '' when equal.
 function FirstDelta(const ATruth, ACand: TArray<string>): string;
 var
-  LIdx: Integer;
+  LIdx, LT, LC, LShown: Integer;
 begin
   if Length(ATruth) <> Length(ACand) then
-    Exit(Format('count %d vs %d', [Length(ATruth), Length(ACand)]));
+  begin
+    // The count alone does not say WHICH entries differ; a merge walk over
+    // the two sorted sets names the first few from each side, which is what
+    // turns "1216 vs 1214" into a node to look at.
+    Result := Format('count %d vs %d', [Length(ATruth), Length(ACand)]);
+    LT := 0;
+    LC := 0;
+    LShown := 0;
+    while ((LT <= High(ATruth)) or (LC <= High(ACand))) and (LShown < 6) do
+    begin
+      if (LC > High(ACand)) or
+         ((LT <= High(ATruth)) and (ATruth[LT] < ACand[LC])) then
+      begin
+        Result := Result + ' truth-only:' + ATruth[LT];
+        Inc(LT);
+        Inc(LShown);
+      end
+      else if (LT > High(ATruth)) or (ACand[LC] < ATruth[LT]) then
+      begin
+        Result := Result + ' cand-only:' + ACand[LC];
+        Inc(LC);
+        Inc(LShown);
+      end
+      else
+      begin
+        Inc(LT);
+        Inc(LC);
+      end;
+    end;
+    Exit;
+  end;
   for LIdx := 0 to High(ATruth) do
     if ATruth[LIdx] <> ACand[LIdx] then
       Exit(Format('[%d] "%s" vs "%s"', [LIdx, ATruth[LIdx], ACand[LIdx]]));

@@ -29,7 +29,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..79] of TPasCaseRow = (
+  STMT_CASES: array[0..81] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -204,6 +204,17 @@ const
      Source: 'var I: Integer := 0;';
      Expected: 'Block(InlineVar(Ident''I'' Ident''Integer'' IntLit''0''))';
      ExpectDiags: 0),
+    // Recovery: an initializer not yet typed keeps the NEXT declaration -
+    // with the ';' present (one error) and without it (a second error for
+    // the ';', still nothing lost).
+    (Section: '3.1.3'; Name: 'recovery: empty initializer keeps the next decl';
+     Source: 'var A := ;'#10'var B := 5;';
+     Expected: 'Block(InlineVar(Ident''A'' Error) InlineVar(Ident''B'' ' +
+       'IntLit''5''))'; ExpectDiags: 1),
+    (Section: '3.1.3'; Name: 'recovery: unfinished initializer keeps the next decl';
+     Source: 'var A :='#10'var B := 5;';
+     Expected: 'Block(InlineVar(Ident''A'' Error) InlineVar(Ident''B'' ' +
+       'IntLit''5''))'; ExpectDiags: 2),
 
     // ---- 18.x exceptions ----
     (Section: '18.2.1'; Name: 'try-finally';

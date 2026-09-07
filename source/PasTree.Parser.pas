@@ -977,6 +977,15 @@ begin
       Break;
     // Recovery: missing separator - resync to ';' or a terminator.
     Error('";" expected');
+    // ...unless the token already STARTS the next statement: then the only
+    // thing missing was the ';', and skipping to the next one would throw
+    // that whole statement away (`var LB :=` on one line, `var LC := 5;` on
+    // the next - the second declaration vanished, 3.1.3). Every kind listed
+    // makes ParseStatement consume at least its keyword, so the loop
+    // progresses.
+    if CurKind in [tkVar, tkConst, tkBegin, tkIf, tkFor, tkWhile, tkRepeat,
+      tkCase, tkTry, tkWith, tkRaise, tkGoto, tkAsm, tkInherited] then
+      Continue;
     while not (AtAny(ATerminators) or
       (CurKind in [tkSemicolon, tkEndOfFile])) do
       Next;
@@ -1245,7 +1254,23 @@ begin
   if (CurKind = tkAssign) or (AConst and (CurKind = tkEqual)) then
   begin
     Next;
-    FB.Adopt(Result, ParseExpression);
+    // Recovery: `var A :=` with the initializer not yet typed, and the NEXT
+    // statement (or the block's end) already on the following line. The
+    // generic ParseFactor fallback consumes one token to guarantee progress,
+    // and here that token IS the next statement's keyword - `var LC := 5;`
+    // lost its `var`, and the block loop's ';' resync then ate the rest of
+    // the line. An error node at the position, nothing consumed: progress is
+    // the block loop's business (see ParseBlockUntil), and every keyword
+    // below starts a statement or ends the block.
+    if CurKind in [tkSemicolon, tkVar, tkConst, tkBegin, tkEnd, tkIf, tkFor,
+      tkWhile, tkRepeat, tkUntil, tkCase, tkTry, tkFinally, tkExcept, tkWith,
+      tkRaise, tkGoto, tkAsm, tkElse, tkEndOfFile] then
+    begin
+      Error('expression expected, found "' + CurText + '"');
+      FB.Adopt(Result, FB.AddNode(nkError, NIL_NODE, FPos));
+    end
+    else
+      FB.Adopt(Result, ParseExpression);
   end;
   FB.SetLast(Result, FPos - 1);
 end;

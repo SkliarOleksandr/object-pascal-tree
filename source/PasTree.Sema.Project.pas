@@ -216,6 +216,14 @@ type
       parallel walks never mutate a dictionary another walk is reading - see
       RunCrossTypePass. Owned here; merged and freed there. }
     FXNewExt: TArray<TDictionary<Integer, TPasExtRef>>;
+    { The same overlay for the types CrossType INFERS for a model's own
+      untyped declarations (3.1.3 inline vars, 5.5.2 for-in elements). They
+      belong in SymTypeX, but every other walk reads this model's SymTypeX for
+      its interface symbols at the same time, and a TDictionary being grown
+      under a reader is exactly the hazard above: the differential harness
+      caught it as ExtRefMap counts differing between two full runs of the
+      same closure (2026-09-07). Merged after the parallel phase. }
+    FXNewSymType: TArray<TDictionary<Integer, TSemaXType>>;
     { Same treatment for CheckCalls' arity-error re-point, which runs in the
       parallel 'cross-resolve' pass - see RunCallChecksPass. Nil outside it,
       and then the write goes straight to the model. }
@@ -519,10 +527,18 @@ type
     function DefaultArrayPropX(const AX: TSemaXType;
       out AMid, ASym: Integer; out AOwner: TSemaXType): Boolean;
     function RoutineHasParams(AMid, ASym: Integer): Boolean;
+    function RoutineRequiresArgs(AMid, ASym: Integer): Boolean;
     function ParamlessOverloadX(const AX: TSemaXType;
       const ANameLower: string; out AMid, ASym, ACtx: Integer): Boolean;
     function ElementX(AId, ABaseNode: Integer): TSemaXType;
-    function InlineVarInitTypeX(AMid, ASym, ADepth: Integer): TSemaXType;
+    function BuiltinX(AMid: Integer; const ANameLower: string): TSemaXType;
+    function LiteralTypeX(AMid, ANode: Integer; ANegated: Boolean): TSemaXType;
+    function IsSignedLiteral(AMid, ANode: Integer;
+      out ALit: Integer; out ANegated: Boolean): Boolean;
+    function UntypedInitTypeX(AMid, ANode: Integer;
+      AFollowForeign: Boolean): TSemaXType;
+    function InferredDeclTypeX(AMid, ASym: Integer;
+      AFollowForeign: Boolean): TSemaXType;
     function ForInElementX(AMid, ACollNode: Integer;
       const ACollX: TSemaXType): TSemaXType;
     function InsideWithBody(AModel: TPasSemaModel; ANode: Integer): Boolean;
@@ -7912,6 +7928,26 @@ begin
          (IsGenericTypeSym(AId, LM.Symbols[LSym].TypeSym) and
           not ((LX.UnitId = AId) and (LX.Sym = LM.Symbols[LSym].TypeSym)))) then
         LM.SymTypeX.AddOrSetValue(LSym, LX);
+    end
+    // A TRUE constant (3.2.1) - `const Max = 100;` - writes no type, and its
+    // type is the initializer's. Filled HERE, in the sequential declared-type
+    // pass, because another unit's CrossType reads this model's SymTypeX for
+    // it (`MyMax.ToString`, `with` over a record constant) and that pass runs
+    // in parallel over frozen tables. Only the section form: an inline
+    // `const` inside a body is CrossType's own to type, from a walk that
+    // knows overloads and ambiguity (see the nkInlineVar case there).
+    else if (LM.Symbols[LSym].Kind = skConst) and
+            not (sfBuiltin in LM.Symbols[LSym].Flags) and
+            (LM.Symbols[LSym].DeclNode <> NIL_NODE) and
+            (LM.Tree.Nodes[LM.Symbols[LSym].DeclNode].Parent <> NIL_NODE) and
+            (LM.Tree.Nodes[LM.Tree.Nodes[LM.Symbols[LSym].DeclNode].Parent].Kind
+             = nkConstDecl) then
+    begin
+      // Sequential phase: following a constant defined by ANOTHER unit's
+      // constant is safe here, and nowhere else (see UntypedInitTypeX).
+      LX := InferredDeclTypeX(AId, LSym, {AFollowForeign} True);
+      if XValid(LX) then
+        LM.SymTypeX.AddOrSetValue(LSym, LX);
     end;
 end;
 
@@ -7936,6 +7972,17 @@ var
   // Cross-unit member references this walk discovers, held OUT of the model's
   // own ExtRefMap until the pass is over - see the overlay note in the header.
   LNewExt: TDictionary<Integer, TPasExtRef>;
+  // Call nodes whose overload selection was a TIE between candidates with
+  // DIFFERENT result types (see SelectCallTarget). The call itself keeps the
+  // first candidate's type, as it always has; an inline var inferred from
+  // such a call is refused instead (3.1.3 - a wrong inferred type turns
+  // silent misses into false E2003s on the next line). Created on the first
+  // tie only: ambiguity is rare, and this walk is the hot path.
+  LAmbig: TDictionary<Integer, Boolean>;
+  // Inferred types of this model's own untyped declarations, held OUT of
+  // SymTypeX until the parallel phase is over (see FXNewSymType). The nkIdent
+  // case reads this before SymTypeX so a later use in the same walk sees it.
+  LNewSymType: TDictionary<Integer, TSemaXType>;
 
   { A node's cross-unit binding: this walk's own finds first, then the committed
     map. The two must be read together everywhere, because within one walk a
@@ -8224,13 +8271,36 @@ var
   // the visible overload sets; CheckCalls already does the same for arity).
   // Picks the arity-fitting candidate with the best argument score (first
   // wins ties, matching the intra-unit SelectOverload). False = nothing fits.
+  // AAmbiguous reports a tie the arguments could not break between candidates
+  // whose RESULT types differ - the winner is then a guess about the call's
+  // type, and the one consumer that must not build on a guess (inline var
+  // inference) reads the flag. Two constructors never differ: both yield
+  // the class.
   function SelectCallTarget(ACall, ACalleeNode, AHeadMid, AHeadSym,
-    ACtx: Integer; out ABestMid, ABestSym: Integer): Boolean;
+    ACtx: Integer; out ABestMid, ABestSym: Integer;
+    out AAmbiguous: Boolean): Boolean;
   var
     LSeen: TArray<TPasExtRef>;   // count-tracked (LSeenCount), capacity slack
     LSeenCount: Integer;
     LBestScore: Integer;
     LTypeQualified: Boolean;
+
+    function SameResult(AMid1, ASym1, AMid2, ASym2: Integer): Boolean;
+    var
+      LCtor1, LCtor2: Boolean;
+      LX1, LX2: TSemaXType;
+    begin
+      LCtor1 := IsConstructorSym(AMid1, ASym1);
+      LCtor2 := IsConstructorSym(AMid2, ASym2);
+      if LCtor1 or LCtor2 then
+        Exit(LCtor1 and LCtor2);
+      LX1 := DeclTypeX(AMid1, ASym1);
+      LX2 := DeclTypeX(AMid2, ASym2);
+      if not (XValid(LX1) or XValid(LX2)) then
+        Exit(True);   // two procedures: nothing to type either way
+      Result := XValid(LX1) and XValid(LX2) and
+        XSameType(CanonTypeX(LX1), CanonTypeX(LX2));
+    end;
 
     // A `class` method - the parser marks the declaration with Aux = 1 (6.1), so
     // this reads the fact rather than re-deriving it. A CONSTRUCTOR counts too:
@@ -8296,7 +8366,11 @@ var
             LBestScore := LScore;
             ABestMid := AMid;
             ABestSym := LCand;
-          end;
+            AAmbiguous := False;
+          end
+          else if (LScore >= 0) and (LScore = LBestScore) and
+                  not SameResult(ABestMid, ABestSym, AMid, LCand) then
+            AAmbiguous := True;
         end;
         LCand := FModels[AMid].Symbols[LCand].NextOverload;
       end;
@@ -8312,6 +8386,7 @@ var
     LBestScore := -1;
     ABestMid := -1;
     ABestSym := NIL_SYM;
+    AAmbiguous := False;
     // Is the callee qualified by a TYPE (`TMonitor.Enter(X)`) rather than by a
     // value? Then an INSTANCE method is not a candidate at all, and that is the
     // only thing separating some overload pairs: System's TMonitor declares a
@@ -8461,6 +8536,71 @@ var
               (LM.Tree.Nodes[LParent].FirstChild = N);
   end;
 
+  { Is N the INITIALIZER of an inline `var`/`const` (3.1.3) - the `Add` of
+    `var LItem := Add;`? The same value-position rule as a qualifier: a bare
+    overloaded routine name there means the parameterless overload, and the
+    declaration takes that overload's result type (dcc-probed: `var N :=
+    GF.Add` with `Add: TStringList` beside `Add(A: Integer): Integer` types
+    N as TStringList). The initializer is the LAST child, and it is not one
+    of the declared names (each of those is bound to its own symbol). }
+  function IsInlineInitializer(N: Integer): Boolean;
+  var
+    LParent, LSym: Integer;
+  begin
+    LParent := LM.Tree.Nodes[N].Parent;
+    Result := (LParent <> NIL_NODE) and
+              (LM.Tree.Nodes[LParent].Kind in [nkInlineVar, nkInlineConst]) and
+              (LM.Tree.Nodes[N].NextSibling = NIL_NODE);
+    if Result and (LM.Tree.Nodes[N].Kind = nkIdent) then
+    begin
+      LSym := LM.RefMap[N];
+      Result := (LSym = NIL_SYM) or (LM.Symbols[LSym].DeclNode <> N);
+    end;
+  end;
+
+  { The member twin of PreferParamlessOverload: N is an nkMember whose name
+    LName bound (locally, ALSym, or through the overlay) to a routine that
+    TAKES parameters, in a position where the name is a VALUE - a qualifier
+    (`GF.Add.Assign(X)`) or an inline initializer (`var N := GF.Add;`). 6.6.1
+    says that names the PARAMETERLESS overload, looked up on the qualifier's
+    type ABX with the same walk the with-target typer uses. Re-points the
+    binding (RepointCallee, own model or overlay) and hands back the symbol
+    and the instantiation frame the overload was found in; a no-op, ALSym and
+    AMemCtx untouched, when nothing applies. }
+  procedure PreferParamlessMember(N, LName: Integer; const ABX: TSemaXType;
+    var ALSym, AMemCtx: Integer);
+  var
+    LBMid, LBSym, LMemMid, LMemSym, LCtx: Integer;
+    LExt: TPasExtRef;
+  begin
+    if ALSym <> NIL_SYM then
+    begin
+      LBMid := AId;
+      LBSym := ALSym;
+    end
+    else if ExtOf(LName, LExt) then
+    begin
+      LBMid := LExt.UnitId;
+      LBSym := LExt.Sym;
+    end
+    else
+      Exit;
+    if (FModels[LBMid].Symbols[LBSym].Kind <> skRoutine) or
+       not RoutineRequiresArgs(LBMid, LBSym) then
+      Exit;
+    if not ParamlessOverloadX(ABX, LM.Tree.NodeNameLower(LName),
+         LMemMid, LMemSym, LCtx) then
+      Exit;
+    if (LMemMid = LBMid) and (LMemSym = LBSym) then
+      Exit;
+    RepointCallee(LM, LName, LMemMid, LMemSym, LNewExt);
+    if LMemMid = AId then
+      ALSym := LMemSym
+    else
+      ALSym := NIL_SYM;
+    AMemCtx := LCtx;
+  end;
+
   { Re-points N from an overload that TAKES parameters to the parameterless
     one of the same name on the enclosing struct's chain, when there is one.
     A no-op otherwise - including for every ordinary name, which is what keeps
@@ -8572,10 +8712,94 @@ var
     end;
   end;
 
+  { The type an inline declaration INFERS from initializer AInit - this
+    walk's own answer for the node (GetX), with the refusals that keep the
+    inference from being a guess:
+
+    - a literal, signed or not, gets dcc's exact rule (LiteralTypeX) rather
+      than the intra-unit typer's category-level Integer/string - `'a'` is a
+      Char, `$FFFFFFFF` a Cardinal, `1.5` a Currency on Win64;
+    - a designator naming a routine that still REQUIRES arguments after the
+      parameterless-overload rule has had its turn is `E2035 Not enough
+      actual parameters` in dcc, so it types nothing here (its result type
+      would be an invention);
+    - a designator naming a TYPE (`var C := TFoo;`) is a class reference, and
+      there is no named `class of TFoo` to hand out;
+    - a call whose overload selection tied between different result types
+      (LAmbig) is refused - the first-wins type is right for the call node's
+      own chained members often enough to keep, but not to DECLARE a variable
+      with (`var ARect := Grid.ClientToScreen(LPt)` picked the TPoint
+      overload over the TRect one with an untyped argument);
+    - `nil`. }
+  function InferInitX(AInit: Integer): TSemaXType;
+  var
+    LLit, LMid, LSym: Integer;
+    LNeg: Boolean;
+  begin
+    Result := XNil;
+    if AInit = NIL_NODE then
+      Exit;
+    if IsSignedLiteral(AId, AInit, LLit, LNeg) then
+      Exit(LiteralTypeX(AId, LLit, LNeg));
+    case LM.Tree.Nodes[AInit].Kind of
+      nkParen:
+        Exit(InferInitX(LM.Tree.Nodes[AInit].FirstChild));
+      nkIdent, nkMember, nkTypeArgs:
+        if TargetSym(AInit, LMid, LSym) then
+          case FModels[LMid].Symbols[LSym].Kind of
+            skType, skBuiltinType, skUnitRef:
+              Exit;
+            skRoutine:
+              if RoutineRequiresArgs(LMid, LSym) then
+                Exit;
+          end;
+      nkCall:
+        if (LAmbig <> nil) and LAmbig.ContainsKey(AInit) then
+          Exit;
+    end;
+    Result := GetX(AInit);
+    if XValid(Result) and (XCatOf(Result) = tcNil) then
+      Result := XNil;
+  end;
+
+  { Types every name an inline `var`/`const` ADecl declares without a type
+    from initializer AInit: SymTypeX for the symbol (what DeclTypeX reads at
+    each later use) and the name node itself. A declaration that WROTE a type
+    is left alone - its TypeNode is set - and so is one whose initializer
+    types as nothing. Cheap by construction: a handful of node reads per
+    inline declaration, no lookups unless the initializer is a designator. }
+  procedure InferInlineDecl(ADecl, AInit: Integer);
+  var
+    LName, LSym: Integer;
+    LX0: TSemaXType;
+  begin
+    LX0 := XNil;
+    LName := LM.Tree.Nodes[ADecl].FirstChild;
+    while (LName <> NIL_NODE) and (LName <> AInit) and
+          (LM.Tree.Nodes[LName].Kind = nkIdent) do
+    begin
+      LSym := LM.RefMap[LName];
+      if (LSym = NIL_SYM) or (LM.Symbols[LSym].DeclNode <> LName) then
+        Break;   // not a declared name: the type slot or the initializer
+      if LM.Symbols[LSym].TypeNode <> NIL_NODE then
+        Exit;    // a written type wins; nothing to infer
+      if not XValid(LX0) then
+      begin
+        LX0 := InferInitX(AInit);
+        if not XValid(LX0) then
+          Exit;
+      end;
+      LNewSymType.AddOrSetValue(LSym, LX0);
+      LX[LName] := LX0;
+      LName := LM.Tree.Nodes[LName].NextSibling;
+    end;
+  end;
+
   procedure Walk(N: Integer);
   var
     LChild, LBase, LName, LSym, LMemMid, LMemSym, LCtx: Integer;
-    LBestMid, LBestSym: Integer;
+    LBestMid, LBestSym, LMemCtx: Integer;
+    LAmbiguous: Boolean;
     LExt: TPasExtRef;
     LBX: TSemaXType;
   begin
@@ -8590,14 +8814,18 @@ var
     // SymTypeX so the body's uses read it like a declared type. The
     // pre-order detour is why this sits above the ordinary child loop.
     //
-    // Deliberately ONLY the for-in shape, not 3.1.3's `var L := Expr;`: that
-    // initializer is typed by the same walk, but a bare overloaded name in it
-    // binds to the FIRST overload while dcc calls the parameterless one, and
-    // typing the variable from that guess turned silent misses into false
-    // E2003s on the very next line (`var LItem := Add; LItem.Text` in a
-    // check-list-box helper; `var ARect := Grid.ClientToScreen(...)` picking
-    // the TPoint overload). A for-in collection is a plain designator in
-    // practice, and its element type only ever ADDS a binding.
+    // The for-in shape needs the pre-order detour because the element is
+    // declared BEFORE the collection in the tree; 3.1.3's `var L := Expr;`
+    // has its initializer as a child and is typed post-order by the
+    // nkInlineVar case below. That case was held back for a long time
+    // because the initializer's type was a GUESS in two shapes - a bare
+    // overloaded name bound to the FIRST overload where dcc calls the
+    // parameterless one (`var LItem := Add; LItem.Text`), and a call whose
+    // overload selection tied (`var ARect := Grid.ClientToScreen(...)`
+    // picking the TPoint overload) - and typing a variable from a guess
+    // turned silent misses into false E2003s on the very next line. Both are
+    // now decided rather than guessed (PreferParamlessOverload/-Member for
+    // the first, LAmbig for the second), which is what let the case in.
     if LM.Tree.Nodes[N].Kind = nkForInStmt then
     begin
       LChild := LM.Tree.Nodes[N].FirstChild;   // the element
@@ -8622,7 +8850,7 @@ var
             if XValid(LBX) then
             begin
               LX[LName] := LBX;
-              LM.SymTypeX.AddOrSetValue(LSym, LBX);
+              LNewSymType.AddOrSetValue(LSym, LBX);
             end;
           end;
         end;
@@ -8670,13 +8898,14 @@ var
           // as Integer and lost the member. Restricted to a qualifier
           // position: as a CALLEE the name is the whole overload set and
           // SelectCallTarget picks from it by arguments.
-          if IsValueQualifier(N) then
+          if IsValueQualifier(N) or IsInlineInitializer(N) then
             PreferParamlessOverload(N);
           LSym := LM.RefMap[N];
           if LSym <> NIL_SYM then
             case LM.Symbols[LSym].Kind of
               skVar, skConst, skField, skParam, skProperty, skRoutine:
-                LX[N] := DeclTypeX(AId, LSym);
+                if not LNewSymType.TryGetValue(LSym, LX[N]) then
+                  LX[N] := DeclTypeX(AId, LSym);
               skType, skBuiltinType, skGenericParam:
                 LX[N] := XPlain(AId, LSym);
             end
@@ -8754,21 +8983,45 @@ var
           // runs and re-points the name at what it finds.
           if (LSym <> NIL_SYM) and (sfBuiltin in LM.Symbols[LSym].Flags) then
             LSym := NIL_SYM;
+          // A member name in a VALUE position bound to an overload that takes
+          // parameters means the parameterless one (6.6.1) - the member twin
+          // of the bare-name rule above. Off the hot path by the same
+          // construction: the binding must already be a routine WITH
+          // parameters, and the position a qualifier or an inline
+          // initializer, before anything is searched.
+          LMemCtx := LBX.Inst;
+            PreferParamlessMember(N, LName, LBX, LSym, LMemCtx);
           if LSym <> NIL_SYM then
           begin
-            LX[N] := MemberTypeX(AId, LSym, LBX.Inst, LBX);
-            LCtxOf[N] := LBX.Inst;
+            LX[N] := MemberTypeX(AId, LSym, LMemCtx, LBX);
+            LCtxOf[N] := LMemCtx;
           end
           else if ExtOf(LName, LExt) and
                   not (sfBuiltin in
                        FModels[LExt.UnitId].Symbols[LExt.Sym].Flags) then
           begin
-            LX[N] := MemberTypeX(LExt.UnitId, LExt.Sym, LBX.Inst, LBX);
-            LCtxOf[N] := LBX.Inst;
+            LX[N] := MemberTypeX(LExt.UnitId, LExt.Sym, LMemCtx, LBX);
+            LCtxOf[N] := LMemCtx;
           end
           else if XValid(LBX) and FindMemberX(AId, LBX,
             LM.Tree.NodeNameLower(LName), LMemMid, LMemSym, LCtx) then
           begin
+            // The member walk stops at the FIRST declaration of the name; in
+            // a value position that is the parameterless overload when there
+            // is one (6.6.1) - the same rule PreferParamlessMember applies to
+            // a name Phase 1 or CrossResolve had already bound. `TBox.Create`
+            // with `Create(A: Integer)` declared ahead of `Create` is the
+            // shape.
+            if (FModels[LMemMid].Symbols[LMemSym].Kind = skRoutine) and
+               (IsValueQualifier(N) or IsInlineInitializer(N)) and
+               RoutineRequiresArgs(LMemMid, LMemSym) and
+               ParamlessOverloadX(LBX, LM.Tree.NodeNameLower(LName),
+                 LBestMid, LBestSym, LMemCtx) then
+            begin
+              LMemMid := LBestMid;
+              LMemSym := LBestSym;
+              LCtx := LMemCtx;
+            end;
             // Record the discovered member reference for navigation.
             if LMemMid = AId then
               LM.RefMap[LName] := LMemSym
@@ -8851,8 +9104,14 @@ var
                   if LM.Tree.Nodes[LBase].Kind = nkTypeArgs then
                     RetargetToGeneric(LBase, LMemMid, LMemSym);
                   if SelectCallTarget(N, LBase, LMemMid, LMemSym, LCtx,
-                    LBestMid, LBestSym) then
+                    LBestMid, LBestSym, LAmbiguous) then
                   begin
+                    if LAmbiguous then
+                    begin
+                      if LAmbig = nil then
+                        LAmbig := TDictionary<Integer, Boolean>.Create;
+                      LAmbig.AddOrSetValue(N, True);
+                    end;
                     // Record the argument-matched overload - the
                     // overload-precise navigation jump reads this.
                     LExt.UnitId := LBestMid;
@@ -8936,6 +9195,42 @@ var
              (LM.Tree.Nodes[LChild].NextSibling <> NIL_NODE) then
             LX[N] := GetX(LM.Tree.Nodes[LChild].NextSibling);
         end;
+
+      // 3.1.3: `var L := Expr;` / `const C = Expr;` in a body, no type
+      // written - the declaration takes the initializer's static type. The
+      // initializer is a child, so it is fully typed by now (post-order), and
+      // every USE follows the declaration in tree order, so writing SymTypeX
+      // here is what lets the ordinary nkIdent case above read the type like
+      // a declared one. See InferInlineDecl for what is refused.
+      nkInlineVar, nkInlineConst:
+        begin
+          LChild := LM.Tree.Nodes[N].Parent;
+          // The for-in element is typed by the detour at the top of Walk; a
+          // for counter by the nkForStmt case below, once its bound is typed.
+          if (LChild = NIL_NODE) or
+             not (LM.Tree.Nodes[LChild].Kind in [nkForInStmt, nkForStmt]) then
+          begin
+            LChild := LM.Tree.Nodes[N].FirstChild;
+            if LChild <> NIL_NODE then
+            begin
+              while LM.Tree.Nodes[LChild].NextSibling <> NIL_NODE do
+                LChild := LM.Tree.Nodes[LChild].NextSibling;
+              if IsInlineInitializer(LChild) then
+                InferInlineDecl(N, LChild);
+            end;
+          end;
+        end;
+
+      // 5.5.1: `for var I := From to To do` - the counter's type is the FROM
+      // bound's (`for var C := 'a' to 'z'` walks Chars).
+      nkForStmt:
+        begin
+          LChild := LM.Tree.Nodes[N].FirstChild;
+          if (LChild <> NIL_NODE) and
+             (LM.Tree.Nodes[LChild].Kind = nkInlineVar) and
+             (LM.Tree.Nodes[LChild].NextSibling <> NIL_NODE) then
+            InferInlineDecl(LChild, LM.Tree.Nodes[LChild].NextSibling);
+        end;
     end;
   end;
 
@@ -8956,12 +9251,26 @@ begin
     LNewExt := FXNewExt[AId]
   else
     LNewExt := TDictionary<Integer, TPasExtRef>.Create;
+  if (AId <= High(FXNewSymType)) and (FXNewSymType[AId] <> nil) then
+    LNewSymType := FXNewSymType[AId]
+  else
+    LNewSymType := TDictionary<Integer, TSemaXType>.Create;
   LUsesHeads := TDictionary<string, TArray<TPasExtRef>>.Create;
+  LAmbig := nil;
   try
     if Length(LX) > 0 then
       Walk(0);
   finally
     LUsesHeads.Free;
+    LAmbig.Free;
+    if (AId > High(FXNewSymType)) or (FXNewSymType[AId] = nil) then
+    begin
+      // Unmanaged case (AnalyzeFile, the module path): single-threaded, so
+      // the inferred types can go straight in.
+      for var LPair in LNewSymType do
+        LM.SymTypeX.AddOrSetValue(LPair.Key, LPair.Value);
+      LNewSymType.Free;
+    end;
     if (AId > High(FXNewExt)) or (FXNewExt[AId] = nil) then
     begin
       // Unmanaged case: commit and drop it here - the SAME merge
@@ -9020,19 +9329,27 @@ begin
   FStatsPass := 'xtype';
 {$ENDIF}
   SetLength(FXNewExt, ACount);
+  SetLength(FXNewSymType, ACount);
   for LIdx := 0 to ACount - 1 do
+  begin
     FXNewExt[LIdx] := TDictionary<Integer, TPasExtRef>.Create;
+    FXNewSymType[LIdx] := TDictionary<Integer, TSemaXType>.Create;
+  end;
   try
     ForEachIndex(ACount - 1, 'cross-type',      procedure(AIdx: Integer)
       begin
         CrossType(AIdx);
       end);
     for LIdx := 0 to ACount - 1 do
+    begin
       for var LPair in FXNewExt[LIdx] do
         if LPair.Value.UnitId = EXT_TOMBSTONE_UNIT then
           FModels[LIdx].ExtRefMap.Remove(LPair.Key)
         else
           FModels[LIdx].ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
+      for var LPair in FXNewSymType[LIdx] do
+        FModels[LIdx].SymTypeX.AddOrSetValue(LPair.Key, LPair.Value);
+    end;
     // Only now are the bindings final - see RunVisibilityPass. No-op unless
     // ReportVisibility asked for it.
     if FReportVisibility then
@@ -9042,8 +9359,12 @@ begin
         end);
   finally
     for LIdx := 0 to ACount - 1 do
+    begin
       FXNewExt[LIdx].Free;
+      FXNewSymType[LIdx].Free;
+    end;
     SetLength(FXNewExt, 0);
+    SetLength(FXNewSymType, 0);
   end;
 end;
 
@@ -9896,7 +10217,8 @@ end;
 function TPasSemaProject.AncestorOfX(const AX: TSemaXType): TSemaXType;
 var
   LM: TPasSemaModel;
-  LDef, LChild: Integer;
+  LDef, LChild, LRMid, LRSym: Integer;
+  LRootName: string;
 begin
   Result := XNil;
   if not XValid(AX) then
@@ -9917,7 +10239,33 @@ begin
         if LChild <> NIL_NODE then
           // Nested ancestor (`Outer.Inner`) reached the same way FindMemberX's
           // own heritage hop does - see ResolveTypeExprNested.
-          Result := ResolveTypeExprNested(AX.UnitId, LChild);
+          Result := ResolveTypeExprNested(AX.UnitId, LChild)
+        else
+        begin
+          // No heritage clause: the IMPLICIT root, exactly as FindMemberX's
+          // own walk takes it (TObject for a class, IInterface for an
+          // interface, IDispatch for a dispinterface; a record has none), with
+          // the same self-guard so the root does not become its own ancestor.
+          // Without this hop every AncestorOfX climber - ParamlessOverloadX
+          // first among them - stopped one class short of TObject, and
+          // `TLabService.Create` (a paren-less constructor on a class whose
+          // own `Create(A, B); overload` needs arguments) resolved to
+          // TObject.Create only once someone wrote `= class(TObject)`
+          // explicitly: the differential harness caught the two spellings
+          // giving different bindings (2026-09-07).
+          case LM.Tree.Nodes[LDef].Kind of
+            nkClassType:
+              LRootName := 'tobject';
+          else
+            if LM.Tree.Nodes[LDef].Aux = 1 then
+              LRootName := 'idispatch'
+            else
+              LRootName := 'iinterface';
+          end;
+          if ResolveRealDecl(AX.UnitId, LRootName, LRMid, LRSym) and
+             ((LRMid <> AX.UnitId) or (LRSym <> AX.Sym)) then
+            Result := XPlain(LRMid, LRSym);
+        end;
       end;
   end;
   // Compose the frames, exactly as FindMemberX's own walk does one hop at a
@@ -10076,6 +10424,24 @@ end;
 // Does this routine declare a parameter list? Its DeclNode is the NAME node
 // and the nkParams sits beside it under the nkRoutine, same shape as a
 // property's specifiers.
+{ Does writing the routine's bare name FAIL to call it - does it require at
+  least one argument? A routine with no parameters and one whose parameters
+  all carry defaults are both called by their name (6.6.1; dcc-probed:
+  `var O := GF.Defaulted` with `Defaulted(A: Integer = 1): string` types O as
+  string), and an ALL-DEFAULTED declaration in the class hides an ancestor's
+  parameterless one of the same name - `GetClientOffset(AIncludeDetachCaption:
+  Boolean = True): TRect` on a sub-menu control over a `GetClientOffset:
+  TPoint` two classes up (a toolbar library, 3 false E2003 on `.TopLeft` when
+  the parameterless rule was keyed on "has parameters" instead of this). }
+function TPasSemaProject.RoutineRequiresArgs(AMid, ASym: Integer): Boolean;
+var
+  LReq, LTot: Integer;
+  LVariadic: Boolean;
+begin
+  Result := RoutineHasParams(AMid, ASym) and
+    (not RoutineArity(AMid, ASym, LReq, LTot, LVariadic) or (LReq > 0));
+end;
+
 function TPasSemaProject.RoutineHasParams(AMid, ASym: Integer): Boolean;
 var
   LM: TPasSemaModel;
@@ -10338,10 +10704,328 @@ begin
   Result := XNil;
 end;
 
-{ The type of an inline `var` that declared no type of its own - 3.1.3's
-  `var L := Expr;`, inferred from the INITIALIZER. Nothing records such a type:
-  the resolver leaves TypeNode empty by design, so SymDeclTypeX answers XNil
-  and every consumer that asks the symbol comes away empty-handed.
+{ A seeded builtin type by name, as seen from unit AMid - `integer`, `char`,
+  `currency`... Every model carries the seed scope under its interface scope,
+  so the ordinary scope walk finds it; XNil for a model with no interface
+  scope at all (a program's model before its block is collected). }
+function TPasSemaProject.BuiltinX(AMid: Integer;
+  const ANameLower: string): TSemaXType;
+var
+  LSym: Integer;
+begin
+  Result := XNil;
+  if (AMid < 0) or (FModels[AMid].InterfaceScope = NIL_SCOPE) then
+    Exit;
+  LSym := FModels[AMid].Resolve(FModels[AMid].InterfaceScope, ANameLower);
+  if (LSym <> NIL_SYM) and (FModels[AMid].Symbols[LSym].Kind = skBuiltinType) then
+    Result := XPlain(AMid, LSym);
+end;
+
+{ Is ANode a literal with an optional sign in front - `5`, `-5`, `+1.5`?
+  ALit is the literal node itself, ANegated whether a `-` applies. The sign is
+  part of what dcc folds before it picks the literal's type (`-2147483648` is
+  an Integer, `-2147483649` an Int64), so the two are read together. }
+function TPasSemaProject.IsSignedLiteral(AMid, ANode: Integer;
+  out ALit: Integer; out ANegated: Boolean): Boolean;
+var
+  LM: TPasSemaModel;
+begin
+  Result := False;
+  ALit := ANode;
+  ANegated := False;
+  if ANode = NIL_NODE then
+    Exit;
+  LM := FModels[AMid];
+  if LM.Tree.Nodes[ANode].Kind = nkUnaryOp then
+  begin
+    // Aux is the operator's visible-token index (see nkUnaryOp); a literal
+    // operand is the only child.
+    ALit := LM.Tree.Nodes[ANode].FirstChild;
+    if (ALit = NIL_NODE) or (LM.Tree.Nodes[ALit].NextSibling <> NIL_NODE) or
+       (LM.Tree.Nodes[ANode].Aux < 0) or
+       (LM.Tree.Nodes[ANode].Aux > High(LM.Tree.Source.Visible)) then
+      Exit;
+    case LM.Tree.Source.VisibleToken(LM.Tree.Nodes[ANode].Aux).Kind of
+      tkMinus: ANegated := True;
+      tkPlus: ;
+    else
+      Exit;
+    end;
+  end;
+  Result := LM.Tree.Nodes[ALit].Kind in [nkIntLit, nkRealLit, nkStrLit,
+    nkCaretChar];
+end;
+
+{ The type dcc gives a LITERAL where a type is inferred from it (3.1.3, 3.2.1)
+  - every rule below is a dcc 37.0 probe, both compilers, not the spec's
+  sketch:
+
+  - an integer literal is the narrowest of Integer, Cardinal, Int64, UInt64
+    that holds its VALUE after the sign is applied: `2147483647` Integer,
+    `2147483648` and `$FFFFFFFF` Cardinal, `4294967296` Int64,
+    `18446744073709551615` UInt64; `-2147483648` Integer, `-2147483649` Int64.
+    Digit separators and the hex/binary prefixes carry no type.
+  - a real literal is Extended on a 32-bit target. On a 64-bit target (where
+    Extended is Double-sized) a literal written WITHOUT an exponent, with at
+    most four fractional digits and inside Currency's range is CURRENCY -
+    `1.5`, `0.1`, `2.0`, `1.50`, `-1.5`, `922337203685477.5807` all are, while
+    `1.50000`, `3.14159`, `1e3`, `1.5e0` and `922337203685478.0` are Extended.
+    Probed on Win64; the other 64-bit targets share the Double-sized Extended
+    the rule follows from, so they get the same answer here.
+  - a string literal is Char when it denotes exactly ONE UTF-16 unit - `'a'`,
+    `''''`, `#65`, `#$41`, `^M` - and string otherwise: `''`, `'ab'`, `'a'#0`,
+    and `#$1F600` (a surrogate pair). The parser joins adjacent pieces into
+    one node, so the count runs over every token of the node.
+  ANegated says a `-` stands in front (see IsSignedLiteral); XNil for a
+  literal this cannot read exactly, which every caller treats as "no type". }
+function TPasSemaProject.LiteralTypeX(AMid, ANode: Integer;
+  ANegated: Boolean): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LTxt: string;
+  LTok, LIdx, LUnits, LFrac: Integer;
+  LU: UInt64;
+  LHasExp, LInFrac: Boolean;
+  LVal: Extended;
+begin
+  Result := XNil;
+  if ANode = NIL_NODE then
+    Exit;
+  LM := FModels[AMid];
+  case LM.Tree.Nodes[ANode].Kind of
+    nkIntLit:
+      begin
+        LTxt := StringReplace(LM.Tree.NodeText(ANode), '_', '',
+          [rfReplaceAll]);
+        if LTxt = '' then
+          Exit;
+        if LTxt[1] = '%' then
+        begin
+          // Binary: TryStrToUInt64 knows `$` but not `%`.
+          LU := 0;
+          for LIdx := 2 to Length(LTxt) do
+          begin
+            if not CharInSet(LTxt[LIdx], ['0', '1']) or (LU > High(UInt64) shr 1) then
+              Exit;
+            LU := (LU shl 1) or UInt64(Ord(LTxt[LIdx]) - Ord('0'));
+          end;
+        end
+        else if not TryStrToUInt64(LTxt, LU) then
+          Exit;
+        if ANegated then
+        begin
+          if LU <= UInt64(High(Integer)) + 1 then
+            Result := BuiltinX(AMid, 'integer')
+          else if LU <= UInt64(High(Int64)) + 1 then
+            Result := BuiltinX(AMid, 'int64');
+          // Beyond that dcc rejects the literal; nothing to infer.
+        end
+        else if LU <= UInt64(High(Integer)) then
+          Result := BuiltinX(AMid, 'integer')
+        else if LU <= UInt64(High(Cardinal)) then
+          Result := BuiltinX(AMid, 'cardinal')
+        else if LU <= UInt64(High(Int64)) then
+          Result := BuiltinX(AMid, 'int64')
+        else
+          Result := BuiltinX(AMid, 'uint64');
+      end;
+
+    nkRealLit:
+      begin
+        Result := BuiltinX(AMid, 'extended');
+        if not PlatformInfo(FPlatform).Is64Bit then
+          Exit;
+        LTxt := StringReplace(LM.Tree.NodeText(ANode), '_', '',
+          [rfReplaceAll]);
+        LHasExp := False;
+        LInFrac := False;
+        LFrac := 0;
+        for LIdx := 1 to Length(LTxt) do
+          case LTxt[LIdx] of
+            'e', 'E':
+              LHasExp := True;
+            '.':
+              LInFrac := True;
+          else
+            if LInFrac and not LHasExp then
+              Inc(LFrac);
+          end;
+        if LHasExp or (LFrac > 4) then
+          Exit;
+        // Currency's range: |v| <= 922337203685477.5807. The text is decimal
+        // with at most four fractional digits, so an Extended reads it
+        // exactly enough for this comparison (the boundary itself has 19
+        // significant digits, within Extended's 64-bit mantissa on Win32;
+        // on a Double-sized Extended it rounds, and dcc's own comparison is
+        // over the same Double - probed at the boundary both ways).
+        if not TryStrToFloat(LTxt, LVal, TFormatSettings.Invariant) then
+          Exit;
+        if Abs(LVal) > 922337203685477.5807 then
+          Exit;
+        Result := BuiltinX(AMid, 'currency');
+      end;
+
+    nkCaretChar:
+      Result := BuiltinX(AMid, 'char');
+
+    nkStrLit:
+      begin
+        // Count UTF-16 units over every visible token of the node.
+        LUnits := 0;
+        for LTok := LM.Tree.Nodes[ANode].FirstToken to
+            LM.Tree.Nodes[ANode].LastToken do
+        begin
+          if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
+            Exit;
+          LTxt := LM.Tree.Source.VisibleText(LTok);
+          if LTxt = '' then
+            Exit;
+          if LTxt[1] = '#' then
+          begin
+            // #nnn / #$hh / #%bbb - one unit unless the value needs a
+            // surrogate pair.
+            LTxt := StringReplace(LTxt, '_', '', [rfReplaceAll]);
+            LTxt := Copy(LTxt, 2, MaxInt);
+            if (LTxt <> '') and (LTxt[1] = '%') then
+              Inc(LUnits)   // a binary escape is at most 8 bits in practice
+            else if TryStrToUInt64(LTxt, LU) then
+            begin
+              if LU > $FFFF then
+                Inc(LUnits, 2)
+              else
+                Inc(LUnits);
+            end
+            else
+              Exit;
+          end
+          else if (Length(LTxt) >= 2) and (LTxt[1] = '''') then
+          begin
+            // Quoted: each character one unit, a doubled quote one unit.
+            LIdx := 2;
+            while LIdx < Length(LTxt) do
+            begin
+              if (LTxt[LIdx] = '''') then
+                Inc(LIdx);   // the escape's second quote
+              Inc(LUnits);
+              Inc(LIdx);
+            end;
+          end
+          else
+            Exit;   // a multiline string or anything unexpected: not a Char
+          if LUnits > 1 then
+            Break;
+        end;
+        if LUnits = 1 then
+          Result := BuiltinX(AMid, 'char')
+        else
+          Result := BuiltinX(AMid, 'string');
+      end;
+  end;
+end;
+
+{ The type of an INITIALIZER expression, read without the Phase-3c tables -
+  the table-free twin of what CrossType's walk computes, for the two callers
+  that run before or beside that walk: BindTypesX typing a section-level
+  untyped constant (3.2.1) so that every unit's consumers can read it, and
+  the with-target typer meeting an inferred inline var (3.1.3).
+
+  Literals get dcc's exact rule (LiteralTypeX, sign included); a designator
+  or call goes through WithTargetTypeX, which chases declared type nodes and
+  recurses into another inferred declaration of the SAME model; an operator
+  expression takes the intra-unit typer's answer when it has one (Integer for
+  `CI * 2 + 1`, Extended for `/`, Boolean for a comparison) - that typer does
+  not fold magnitudes, so `5000000000 + 1` reads Integer where dcc says
+  Int64, the one documented gap. A set constructor has no NAMEABLE type and
+  answers XNil.
+
+  AFollowForeign: may a designator naming ANOTHER unit's true constant be
+  chased into that unit (`const CA = UnitB.CB;`)? That reads unit B's
+  RefMap/ExtRefMap, which is only safe while no pass is writing them - the
+  sequential BindTypesX, and NOT the with pass, which calls this through
+  WithTargetTypeX in parallel while every model's with-body bindings are
+  being written. A pass that reads another model's ExtRefMap while its owner
+  writes it is exactly the hazard RunCrossTypePass exists to avoid; the flag
+  keeps that discipline here. }
+function TPasSemaProject.UntypedInitTypeX(AMid, ANode: Integer;
+  AFollowForeign: Boolean): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LLit, LName, LSym: Integer;
+  LNeg: Boolean;
+  LExt: TPasExtRef;
+begin
+  Result := XNil;
+  if (AMid < 0) or (ANode = NIL_NODE) then
+    Exit;
+  LM := FModels[AMid];
+  case LM.Tree.Nodes[ANode].Kind of
+    nkParen:
+      Result := UntypedInitTypeX(AMid, LM.Tree.Nodes[ANode].FirstChild,
+        AFollowForeign);
+    nkIntLit, nkRealLit, nkStrLit, nkCaretChar:
+      Result := LiteralTypeX(AMid, ANode, False);
+    nkUnaryOp:
+      if IsSignedLiteral(AMid, ANode, LLit, LNeg) then
+        Result := LiteralTypeX(AMid, LLit, LNeg)
+      else if LM.ExprType[ANode] <> NIL_SYM then
+        Result := XPlain(AMid, LM.ExprType[ANode]);
+    nkBinaryOp:
+      if LM.ExprType[ANode] <> NIL_SYM then
+        Result := XPlain(AMid, LM.ExprType[ANode]);
+    nkInlineIf:
+      begin
+        LLit := LM.Tree.Nodes[ANode].FirstChild;   // cond, then, else
+        if (LLit <> NIL_NODE) and (LM.Tree.Nodes[LLit].NextSibling <> NIL_NODE) then
+          Result := UntypedInitTypeX(AMid, LM.Tree.Nodes[LLit].NextSibling,
+            AFollowForeign);
+      end;
+    nkIdent, nkMember, nkCall, nkIndex, nkDeref, nkTypeArgs, nkInherited:
+      begin
+        Result := WithTargetTypeX(AMid, ANode);
+        // A designator naming a TRUE CONSTANT of another unit: its own
+        // SymDeclTypeX is XNil (no type node), and WithTargetTypeX stays
+        // inside this model by design - so the chase into the other unit
+        // happens here, and only when the caller said it is safe.
+        if not XValid(Result) and AFollowForeign and
+           (LM.Tree.Nodes[ANode].Kind in [nkIdent, nkMember]) then
+        begin
+          LName := ANode;
+          if LM.Tree.Nodes[ANode].Kind = nkMember then
+          begin
+            LName := LM.Tree.Nodes[ANode].FirstChild;
+            while (LName <> NIL_NODE) and
+                  (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
+              LName := LM.Tree.Nodes[LName].NextSibling;
+          end;
+          if (LName <> NIL_NODE) and (LM.RefMap[LName] = NIL_SYM) and
+             LM.ExtRefMap.TryGetValue(LName, LExt) then
+          begin
+            LSym := LExt.Sym;
+            if (LSym <> NIL_SYM) and
+               (FModels[LExt.UnitId].Symbols[LSym].Kind = skConst) then
+              Result := InferredDeclTypeX(LExt.UnitId, LSym, True);
+          end;
+        end;
+      end;
+  end;
+  // `nil` has no type to give a declaration (dcc accepts `var P := nil` but
+  // nothing can be read off P); an untyped pointer is not a better answer.
+  if XValid(Result) and (XCatOf(Result) = tcNil) then
+    Result := XNil;
+end;
+
+threadvar
+  // Re-entrancy guard for InferredDeclTypeX: `const A = B; const B = A;` is
+  // an error dcc reports and this must merely not follow forever. A
+  // threadvar because the with pass and CrossType run in parallel and each
+  // may reach this through WithTargetTypeX.
+  GInferDepth: Integer;
+
+{ The type of a declaration that wrote NONE and is inferred from its
+  INITIALIZER: an inline `var`/`const` (3.1.3), a `for var E in` element
+  (5.5.2), or a section-level true constant (3.2.1). Nothing records such a
+  type: the resolver leaves TypeNode empty by design, so SymDeclTypeX answers
+  XNil and every consumer that asks the symbol comes away empty-handed.
 
   For member binding that is merely silent (an unknown base type cannot be
   said to lack a member), which is why this went unnoticed. `with` is where it
@@ -10349,53 +11033,69 @@ end;
   bare name in the body becomes a hard E2003 - 24 of them in one JSON writer
   off a single `var LNodeList := InternalGetChildNodes;`.
 
-  The initializer is typed by the same walk the target itself uses, so calls,
-  casts, `as`, indexing and dereferences all come along; the depth cap is for
-  one inferred var initialised from another. }
-function TPasSemaProject.InlineVarInitTypeX(AMid, ASym,
-  ADepth: Integer): TSemaXType;
+  Table-free (UntypedInitTypeX), so BindTypesX can fill SymTypeX for a unit's
+  constants before any other unit's CrossType reads them; CrossType itself
+  types an inline var from its own richer walk (overload-precise, ambiguity-
+  aware) and overwrites this answer where it has a better one. }
+function TPasSemaProject.InferredDeclTypeX(AMid, ASym: Integer;
+  AFollowForeign: Boolean): TSemaXType;
 var
   LM: TPasSemaModel;
   LDecl, LParent, LInit: Integer;
 begin
   Result := XNil;
-  if (ADepth > 4) or (AMid < 0) or (ASym = NIL_SYM) then
+  if (GInferDepth > 8) or (AMid < 0) or (ASym = NIL_SYM) then
     Exit;
   LM := FModels[AMid];
   if LM.Symbols[ASym].TypeNode <> NIL_NODE then
     Exit;   // it has a written type; not our case
+  if not (LM.Symbols[ASym].Kind in [skVar, skConst]) then
+    Exit;
   LDecl := LM.Symbols[ASym].DeclNode;
   if LDecl = NIL_NODE then
     Exit;
   LParent := LM.Tree.Nodes[LDecl].Parent;
   if (LParent = NIL_NODE) or
-     not (LM.Tree.Nodes[LParent].Kind in [nkInlineVar, nkInlineConst]) then
+     not (LM.Tree.Nodes[LParent].Kind in [nkInlineVar, nkInlineConst,
+       nkConstDecl]) then
     Exit;
-  // `for var E in Coll do` (5.5.2): the inline var is the for-in's FIRST
-  // child and has no initializer of its own - its type is the COLLECTION's
-  // element type, and the collection is the for-in's next child. Until this
-  // branch existed such an element never received a type at all (the gap
-  // docs/coverage.md recorded), so `for var AForm in AForms do
-  // AForm.SetAlwaysOnTop(True)` over a `TArray<TmcsBaseForm>` parameter
-  // had no declaration to go to on the member.
-  LInit := LM.Tree.Nodes[LParent].Parent;
-  if (LInit <> NIL_NODE) and (LM.Tree.Nodes[LInit].Kind = nkForInStmt) and
-     (LM.Tree.Nodes[LInit].FirstChild = LParent) then
+  Inc(GInferDepth);
+  try
+    // `for var E in Coll do` (5.5.2): the inline var is the for-in's FIRST
+    // child and has no initializer of its own - its type is the COLLECTION's
+    // element type, and the collection is the for-in's next child. Until
+    // this branch existed such an element never received a type at all (the
+    // gap docs/coverage.md recorded), so `for var AForm in AForms do
+    // AForm.SetAlwaysOnTop(True)` over a `TArray<TmcsBaseForm>` parameter
+    // had no declaration to go to on the member.
+    LInit := LM.Tree.Nodes[LParent].Parent;
+    if (LInit <> NIL_NODE) and (LM.Tree.Nodes[LInit].Kind = nkForInStmt) and
+       (LM.Tree.Nodes[LInit].FirstChild = LParent) then
     begin
-    LInit := LM.Tree.Nodes[LParent].NextSibling;
-    Exit(ForInElementX(AMid, LInit, WithTargetTypeX(AMid, LInit)));
+      LInit := LM.Tree.Nodes[LParent].NextSibling;
+      Exit(ForInElementX(AMid, LInit, WithTargetTypeX(AMid, LInit)));
+    end;
+    // `for var I := From to To do` (5.5.1): the counter's type is the FROM
+    // bound's, which is the for-stmt's next child.
+    if (LInit <> NIL_NODE) and (LM.Tree.Nodes[LInit].Kind = nkForStmt) and
+       (LM.Tree.Nodes[LInit].FirstChild = LParent) then
+      Exit(UntypedInitTypeX(AMid, LM.Tree.Nodes[LParent].NextSibling,
+        AFollowForeign));
+    // Everything after the names is the initializer, and with no type node
+    // that is exactly the LAST child. Equal to the name itself means there is
+    // no initializer at all (a const's own name is its first ident after any
+    // attribute group; the initializer always follows it).
+    LInit := LM.Tree.Nodes[LParent].FirstChild;
+    if LInit = NIL_NODE then
+      Exit;
+    while LM.Tree.Nodes[LInit].NextSibling <> NIL_NODE do
+      LInit := LM.Tree.Nodes[LInit].NextSibling;
+    if (LInit = LDecl) or (LM.Tree.Nodes[LInit].Kind in [nkAttrGroup]) then
+      Exit;
+    Result := UntypedInitTypeX(AMid, LInit, AFollowForeign);
+  finally
+    Dec(GInferDepth);
   end;
-  // Everything after the names is the initializer, and with no type node
-  // that is exactly the LAST child. Equal to the name itself means there is
-  // no initializer at all.
-  LInit := LM.Tree.Nodes[LParent].FirstChild;
-  if LInit = NIL_NODE then
-    Exit;
-  while LM.Tree.Nodes[LInit].NextSibling <> NIL_NODE do
-    LInit := LM.Tree.Nodes[LInit].NextSibling;
-  if LInit = LDecl then
-    Exit;
-  Result := WithTargetTypeX(AMid, LInit);
 end;
 
 { The ELEMENT type a `for ... in` loop walks over (5.5.2), for the collection
@@ -10686,8 +11386,10 @@ begin
         if not XValid(Result) and
            LM.ExprTypeX.TryGetValue(ANode, LBX) and XValid(LBX) then
           Result := LBX;
+        // Own model only (AFollowForeign False): this runs inside the with
+        // pass, in parallel, and another unit's maps may be mid-write.
         if not XValid(Result) and (LSym <> NIL_SYM) then
-          Result := InlineVarInitTypeX(AId, LSym, 0);
+          Result := InferredDeclTypeX(AId, LSym, False);
         if not XValid(Result) and LM.ExtRefMap.TryGetValue(ANode, LExt) then
           Result := SymDeclTypeX(LExt.UnitId, LExt.Sym)
         // `Self` has no symbol - nothing declares it (11.3.3), so RefMap is

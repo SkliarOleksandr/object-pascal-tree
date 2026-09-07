@@ -66,9 +66,30 @@ README's own section on that).
 ## 03-variables-constants.md
 
 ### 3.1.3 Inline variables & type inference
-- `var X := Expr` type inference is not implemented in the semantic layer -
-  such locals stay untyped. (The parser DOES take structural types in the
-  type slot as of v0.14.0.)
+- `var X := Expr` / `const C = Expr` in a body and a `for var I := From`
+  counter are typed from the initializer at the PROJECT level (CrossType);
+  the intra-unit typer still has no ExprType for them. The inference refuses
+  rather than guesses: a designator naming a routine that still requires
+  arguments (dcc's E2035), a call whose overload selection tied between
+  different result types, a bare type name (a class reference with no named
+  `class of` type), `nil`, and a set constructor (an anonymous type) all
+  leave the declaration untyped.
+- A literal initializer gets dcc's exact type (LiteralTypeX, probed on both
+  compilers): Integer/Cardinal/Int64/UInt64 by magnitude with the sign
+  folded, Char for a one-unit string literal, Currency for an exponent-free
+  real with at most four fractional digits on a 64-bit target (Extended
+  otherwise). An OPERATOR expression over literals takes the intra-unit
+  typer's category-level answer, which does not fold magnitudes:
+  `var X := 5000000000 + 1` reads Integer where dcc says Int64. The Currency
+  rule was probed on Win64 only; the other 64-bit targets are assumed to
+  share it.
+
+### 3.2.1 True constants
+- a section-level `const C = Expr` is typed from its initializer in the
+  declared-type pass (BindTypesX), so another unit's `C.ToString` binds; the
+  same literal and operator rules as 3.1.3 apply, and an initializer built
+  from an intrinsic (`Ord`, `Length`, `High`...) stays untyped with the
+  intrinsic (4.11).
 
 ## 04-expressions-operators.md
 
@@ -102,7 +123,13 @@ same-arity overloads differing only in modifiers can mis-pair.
 ### 6.3.1 The `overload` directive
 - overload resolution is a conservative
   arity-plus-assignability score, not formal betterness ranking; ties go to
-  the first candidate.
+  the first candidate. A tie between candidates with DIFFERENT result types
+  is recorded (CrossType's LAmbig) and refuses inline-var inference from the
+  call, but the call node itself still carries the first candidate's type.
+- a bare routine name in a value position - a member qualifier or an inline
+  initializer - means the parameterless overload (6.6.1); the same rule is
+  NOT applied in other value positions (an argument, an assignment's right
+  side), where the first-declared overload still wins.
 
 ## 6.10 Inline assembly (`asm … end`)
 - a bare `end` inside a skipped $IFDEF branch of an asm

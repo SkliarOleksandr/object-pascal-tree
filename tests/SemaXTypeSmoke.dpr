@@ -428,6 +428,149 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // 3.1.3 / 3.2.1 inference fixtures. XJ declares the overload shapes the
+  // inference must decide rather than guess (a parameterless overload beside
+  // one with parameters, a same-arity pair with DIFFERENT result types, a
+  // same-arity pair with the SAME result type, an all-defaulted routine, two
+  // constructors) and the true constants another unit reads. Every rule
+  // asserted below is a dcc 37.0 probe - see LiteralTypeX.
+  UNIT_XJV =
+    'unit XJV;'#10'interface'#10 +
+    'type'#10 +
+    '  TItem = class'#10 +
+    '    Tag: Integer;'#10 +
+    '  end;'#10 +
+    '  TBox = class'#10 +
+    '    function Add: TItem; overload;'#10 +
+    '    function Add(A: Integer): Integer; overload;'#10 +
+    '    function Two(A: Integer): Integer;'#10 +
+    '    function Conv(A: TItem): TItem; overload;'#10 +
+    '    function Conv(A: TBox): TBox; overload;'#10 +
+    '    function Same(A: TItem): Integer; overload;'#10 +
+    '    function Same(A: TBox): Integer; overload;'#10 +
+    '    function Dflt(A: Integer = 1): TItem;'#10 +
+    '    constructor Create(A: Integer); overload;'#10 +
+    '    constructor Create; overload;'#10 +
+    '  end;'#10 +
+    // An ALL-DEFAULTED redeclaration hides the ancestor's parameterless one:
+    // `LDer.Off` calls TDer's (TBox), never TBox's own Off (TItem). The
+    // toolbar-library shape that produced 3 false E2003 when the rule was
+    // keyed on "has parameters".
+    '  TBase = class'#10 +
+    '    function Off: TItem;'#10 +
+    '  end;'#10 +
+    '  TDer = class(TBase)'#10 +
+    '    function Off(A: Boolean = True): TBox;'#10 +
+    '  end;'#10 +
+    'const'#10 +
+    '  CMax = 100;'#10 +
+    '  CBig = 5000000000;'#10 +
+    '  CStr = ''abc'';'#10 +
+    '  CChr = ''a'';'#10 +
+    '  CNeg = -2147483649;'#10 +
+    '  CAlias = CMax;'#10 +
+    '  CTyped: Cardinal = 1;'#10 +
+    'implementation'#10 +
+    'function TBox.Add: TItem; begin Result := nil; end;'#10 +
+    'function TBox.Add(A: Integer): Integer; begin Result := A; end;'#10 +
+    'function TBox.Two(A: Integer): Integer; begin Result := A; end;'#10 +
+    'function TBox.Conv(A: TItem): TItem; begin Result := A; end;'#10 +
+    'function TBox.Conv(A: TBox): TBox; begin Result := A; end;'#10 +
+    'function TBox.Same(A: TItem): Integer; begin Result := 0; end;'#10 +
+    'function TBox.Same(A: TBox): Integer; begin Result := 0; end;'#10 +
+    'function TBox.Dflt(A: Integer): TItem; begin Result := nil; end;'#10 +
+    'constructor TBox.Create(A: Integer); begin end;'#10 +
+    'constructor TBox.Create; begin end;'#10 +
+    'function TBase.Off: TItem; begin Result := nil; end;'#10 +
+    'function TDer.Off(A: Boolean): TBox; begin Result := nil; end;'#10 +
+    'end.'#10;
+
+  // The inline declarations themselves. `U` is an UNTYPED parameter, so a
+  // call passing it cannot be scored by argument type - `Conv(U)` ties between
+  // TItem and TBox (refused), `Same(U)` ties between two Integers (typed).
+  UNIT_XIV =
+    'unit XIV;'#10'interface'#10'uses XJV;'#10 +
+    'implementation'#10 +
+    'procedure Use(const U);'#10 +
+    'var'#10 +
+    '  LB: TBox;'#10 +
+    '  LDer: TDer;'#10 +
+    'begin'#10 +
+    '  var LOff := LDer.Off;'#10 +
+    '  var LBox := TBox.Create(1);'#10 +
+    '  var LBox2 := TBox.Create;'#10 +
+    '  var LItem := LBox.Add;'#10 +
+    '  var LTwo := LBox.Two;'#10 +
+    '  var LConv := LBox.Conv(U);'#10 +
+    '  var LSame := LBox.Same(U);'#10 +
+    '  var LDflt := LBox.Dflt;'#10 +
+    '  var LI := 5;'#10 +
+    '  var LCard := $FFFFFFFF;'#10 +
+    '  var L64 := 5000000000;'#10 +
+    '  var LU64 := 18446744073709551615;'#10 +
+    '  var LNegI := -2147483648;'#10 +
+    '  var LNeg64 := -2147483649;'#10 +
+    '  var LR := 1.5;'#10 +
+    '  var LC := ''a'';'#10 +
+    '  var LC2 := #65;'#10 +
+    '  var LC3 := '''''''';'#10 +
+    '  var LS := ''ab'';'#10 +
+    '  var LS2 := '''';'#10 +
+    '  var LS3 := ''a''#0;'#10 +
+    '  var LCh2 := ^M;'#10 +
+    '  var LChain := LItem;'#10 +
+    '  var LNil := nil;'#10 +
+    '  var LT := TBox;'#10 +
+    '  var LK := CMax;'#10 +
+    '  var LKB := CBig;'#10 +
+    '  var LKS := CStr;'#10 +
+    '  var LKC := CChr;'#10 +
+    '  var LKN := CNeg;'#10 +
+    '  var LKA := CAlias;'#10 +
+    '  var LKT := CTyped;'#10 +
+    '  var LTyped: TItem := LBox.Add;'#10 +
+    '  const LCI = LBox.Add;'#10 +
+    '  const LCK = 7;'#10 +
+    '  for var I := 0 to 3 do LI := I;'#10 +
+    '  for var Ch := ''a'' to ''z'' do LC := Ch;'#10 +
+    '  LItem.Tag := LChain.Tag + LCI.Tag;'#10 +
+    '  LB := LBox;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  // Recovery: broken initializers around a good one. Nothing here may crash,
+  // and the good declaration still infers.
+  UNIT_XEV =
+    'unit XEV;'#10'interface'#10 +
+    'implementation'#10 +
+    'procedure Bad;'#10 +
+    'begin'#10 +
+    '  var LA := ;'#10 +
+    '  var LB :='#10 +
+    '  var LC := 5;'#10 +
+    '  LC := LA;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  // The 64-bit real-literal rule (LiteralTypeX): analyzed in a SECOND project
+  // targeting Win64, since the corpus above is Win32 (where every real
+  // literal is Extended).
+  UNIT_XWV =
+    'unit XWV;'#10'interface'#10 +
+    'implementation'#10 +
+    'procedure Reals;'#10 +
+    'begin'#10 +
+    '  var LR1 := 1.5;'#10 +
+    '  var LR2 := 3.14159;'#10 +
+    '  var LR3 := 1e3;'#10 +
+    '  var LR4 := 1.5e0;'#10 +
+    '  var LR5 := 922337203685477.5807;'#10 +
+    '  var LR6 := 922337203685478.0;'#10 +
+    '  var LR7 := -1.5;'#10 +
+    '  var LR8 := 1.50000;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   UNIT_XR =
     'unit XR;'#10'interface'#10'uses XG, XZ;'#10 +
     'var'#10 +
@@ -1212,6 +1355,9 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NQ1.pas'), UNIT_NQ1);
   TFile.WriteAllText(TPath.Combine(LDir, 'NQ2.pas'), UNIT_NQ2);
   TFile.WriteAllText(TPath.Combine(LDir, 'XF.pas'), UNIT_XF);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XJV.pas'), UNIT_XJV);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XIV.pas'), UNIT_XIV);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XEV.pas'), UNIT_XEV);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -1530,6 +1676,111 @@ begin
       XTypeOf(LE, 'LCol'), 'TColor');
     Eq('for-in over a named dynamic array: the element type',
       XTypeOf(LE, 'LNm'), 'string');
+
+    // ---- 3.1.3 inline var/const inference ----
+    LE := ModelByName('xiv');
+    Ok('XIV loaded', Assigned(LE));
+    Ok('XIV: no diags at all', Length(LE.Diags) = 0);
+    Eq('3.1.3: a constructor call with arguments types as the class',
+      XTypeOf(LE, 'LBox'), 'TBox');
+    Eq('3.1.3: a paren-less constructor too',
+      XTypeOf(LE, 'LBox2'), 'TBox');
+    Eq('6.6.1: a bare overloaded member in an initializer is the ' +
+      'PARAMETERLESS overload', XTypeOf(LE, 'LBox.Add'), 'TItem');
+    Eq('3.1.3: ...and the variable takes its result type',
+      XTypeOf(LE, 'LItem'), 'TItem');
+    Eq('3.1.3: a routine that still needs arguments is E2035 in dcc - ' +
+      'REFUSED, not typed from its result', XTypeOf(LE, 'LTwo'), '?');
+    Eq('3.1.3: a call tied between DIFFERENT result types is refused',
+      XTypeOf(LE, 'LConv'), '?');
+    Eq('3.1.3: a call tied between the SAME result type is typed',
+      XTypeOf(LE, 'LSame'), 'Integer');
+    Eq('6.6.1: an all-defaulted routine is called by its name',
+      XTypeOf(LE, 'LDflt'), 'TItem');
+    Eq('6.6.1: ...and an all-defaulted REDECLARATION hides the ancestor''s ' +
+      'parameterless one', XTypeOf(LE, 'LOff'), 'TBox');
+    Eq('literal: 5 is Integer', XTypeOf(LE, 'LI'), 'Integer');
+    Eq('literal: $FFFFFFFF is Cardinal', XTypeOf(LE, 'LCard'), 'Cardinal');
+    Eq('literal: 5000000000 is Int64', XTypeOf(LE, 'L64'), 'Int64');
+    Eq('literal: 18446744073709551615 is UInt64', XTypeOf(LE, 'LU64'),
+      'UInt64');
+    Eq('literal: -2147483648 is Integer (the sign is folded first)',
+      XTypeOf(LE, 'LNegI'), 'Integer');
+    Eq('literal: -2147483649 is Int64', XTypeOf(LE, 'LNeg64'), 'Int64');
+    Eq('literal: a real is Extended on Win32', XTypeOf(LE, 'LR'), 'Extended');
+    Eq('literal: ''a'' is Char', XTypeOf(LE, 'LC'), 'Char');
+    Eq('literal: #65 is Char', XTypeOf(LE, 'LC2'), 'Char');
+    Eq('literal: '''''''' (one escaped quote) is Char', XTypeOf(LE, 'LC3'),
+      'Char');
+    Eq('literal: ''ab'' is string', XTypeOf(LE, 'LS'), 'string');
+    Eq('literal: '''' is string', XTypeOf(LE, 'LS2'), 'string');
+    Eq('literal: ''a''#0 (two pieces) is string', XTypeOf(LE, 'LS3'),
+      'string');
+    Eq('literal: ^M is Char', XTypeOf(LE, 'LCh2'), 'Char');
+    Eq('3.1.3: an inferred var initialised from another inferred var',
+      XTypeOf(LE, 'LChain'), 'TItem');
+    Eq('3.1.3: nil gives no type', XTypeOf(LE, 'LNil'), '?');
+    Eq('3.1.3: a bare class name is a class REFERENCE, not the class - refused',
+      XTypeOf(LE, 'LT'), '?');
+    Eq('3.2.1: another unit''s true constant carries its inferred type',
+      XTypeOf(LE, 'LK'), 'Integer');
+    Eq('3.2.1: ...by magnitude', XTypeOf(LE, 'LKB'), 'Int64');
+    Eq('3.2.1: ...a string constant', XTypeOf(LE, 'LKS'), 'string');
+    Eq('3.2.1: ...a one-character constant is Char', XTypeOf(LE, 'LKC'),
+      'Char');
+    Eq('3.2.1: ...a signed constant', XTypeOf(LE, 'LKN'), 'Int64');
+    Eq('3.2.1: ...a constant defined by another constant', XTypeOf(LE, 'LKA'),
+      'Integer');
+    Eq('3.2.2: a TYPED constant keeps its written type', XTypeOf(LE, 'LKT'),
+      'Cardinal');
+    Eq('3.1.3: a written type wins over the initializer',
+      XTypeOf(LE, 'LTyped'), 'TItem');
+    Eq('3.1.3: an inline const infers like an inline var',
+      XTypeOf(LE, 'LCI'), 'TItem');
+    Eq('3.1.3: an inline const from a literal', XTypeOf(LE, 'LCK'), 'Integer');
+    Eq('5.5.1: a for counter is typed from its FROM bound',
+      XTypeOf(LE, 'I'), 'Integer');
+    Eq('5.5.1: ...a Char range walks Chars', XTypeOf(LE, 'Ch'), 'Char');
+    Eq('3.1.3: members bind through the inferred type (the whole point)',
+      XTypeOf(LE, 'LChain.Tag'), 'Integer');
+    Eq('3.1.3: ...through an inferred inline const too',
+      XTypeOf(LE, 'LCI.Tag'), 'Integer');
+    LE := ModelByName('xev');
+    Ok('XEV loaded (recovery: no crash on broken initializers)', Assigned(LE));
+    Eq('recovery: a declaration with NO initializer infers nothing',
+      XTypeOf(LE, 'LA'), '?');
+    Eq('recovery: the good declaration after the broken ones still infers',
+      XTypeOf(LE, 'LC'), 'Integer');
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- the 64-bit real-literal rule, in a Win64 project of its own ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype64');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XWV.pas'), UNIT_XWV);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    LE := ModelByName('xwv');
+    Ok('XWV loaded', Assigned(LE));
+    Ok('XWV: no diags at all', Length(LE.Diags) = 0);
+    Eq('Win64: 1.5 is Currency', XTypeOf(LE, 'LR1'), 'Currency');
+    Eq('Win64: 3.14159 (five fractional digits) is Extended',
+      XTypeOf(LE, 'LR2'), 'Extended');
+    Eq('Win64: 1e3 (an exponent) is Extended', XTypeOf(LE, 'LR3'), 'Extended');
+    Eq('Win64: 1.5e0 (an exponent) is Extended', XTypeOf(LE, 'LR4'),
+      'Extended');
+    Eq('Win64: Currency''s upper bound is still Currency',
+      XTypeOf(LE, 'LR5'), 'Currency');
+    Eq('Win64: one past it is Extended', XTypeOf(LE, 'LR6'), 'Extended');
+    Eq('Win64: -1.5 is Currency', XTypeOf(LE, 'LR7'), 'Currency');
+    Eq('Win64: 1.50000 (five digits, trailing zeros) is Extended',
+      XTypeOf(LE, 'LR8'), 'Extended');
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then
