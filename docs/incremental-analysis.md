@@ -392,6 +392,22 @@ parameter with a default, because that is what it IS in Vcl.StyleAPI - the
 line heuristic is off inside parameter lists (`FParamDepth`), the corpora
 stay at zero diagnostics, and TRecno is lost for that one keystroke.
 
+The heuristic's first client run (0.16.2) found three more places where the
+typing state is token-identical to valid code, and valid code wins there too
+(0.16.3). A generic parameter list is a parameter list for it (`FParamDepth`):
+a third-party library wraps `TdxIndexBasedObject<` NEWLINE `TInfo:
+TdxCloneable;` NEWLINE `TOptions: record> =`, and refusing `TInfo:` as a
+parameter lost the class and every one of its 736 users to E2003/E2515 - the
+whole regression the user saw. Inside a statement block (`FBlockDepth`) it is off entirely: a
+member access wrapped after its dot - `TTag(X).` NEWLINE `TransType =
+Trans_stored)` in an `if` - is an expression, not the next declaration; three
+false E2003. While the TYPE of a typed constant or an initialized variable is
+being parsed (`FInitFollows`), `Ident =` on its own line is the type's last
+name followed by the initializer - `X: array[..] of` NEWLINE `TClass = (nil,
+...)` - not the next declaration; four false E2004. The price is the second
+declared ambiguity in the suite: `C4:` above `C2 = 2;` reads as a typed
+constant of type C2, and C2 is lost for that one keystroke.
+
 ## 5. Open - what could still be improved
 
 Ordered by evidence, not by interest.

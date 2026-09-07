@@ -29,7 +29,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..78] of TPasCaseRow = (
+  STMT_CASES: array[0..79] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -126,6 +126,14 @@ const
        'Ident''C'')))'; ExpectDiags: 0),
 
     // ---- 5.3.1 if / dangling else ----
+    // A member access wrapped after its dot inside a statement: `B =` on its
+    // own line is the member and a comparison, not a declaration head (the
+    // line heuristic is off inside statement blocks).
+    (Section: '5.3.1'; Name: 'wrapped member after the dot is not a decl head';
+     Source: 'if T(A).'#10'B = C then X := 1;';
+     Expected: 'Block(IfStmt(BinaryOp''=''(Member(Call(Ident''T'' Ident''A'') ' +
+       'Ident''B'') Ident''C'') Assign(Ident''X'' IntLit''1'')))';
+     ExpectDiags: 0),
     (Section: '5.3.1'; Name: 'dangling else';
      Source: 'if A then if B then X := 1 else X := 2;';
      Expected: 'Block(IfStmt(Ident''A'' IfStmt(Ident''B'' Assign(' +
@@ -508,7 +516,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..133] of TPasCaseRow = (
+  DECL_CASES: array[0..135] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -582,6 +590,20 @@ const
      Source: 'var A'#10'B: Integer;';
      Expected: 'VarSec''var''(VarDecl(Ident''A'') VarDecl(Ident''B'' ' +
        'Ident''Integer''))'; ExpectDiags: 1),
+
+    // ---- valid code the line heuristic must not touch: each of these is
+    // token-identical to a typing state above and was a false diagnostic in a
+    // real project before its guard. ----
+    (Section: '16.4'; Name: 'wrapped generic constraints are parameters';
+     Source: 'type G<'#10'TInfo: TObject;'#10'TOptions: record> ='#10'class end;';
+     Expected: 'TypeSec(TypeDecl(Ident''G'' GenericParams(GenericParam(' +
+       'Ident''TInfo'' Constraint(Ident''TObject'')) GenericParam(' +
+       'Ident''TOptions'' Constraint''record'')) ClassType))'; ExpectDiags: 0),
+    (Section: '3.2.2'; Name: 'wrapped typed const type followed by its initializer';
+     Source: 'const A: array[0..1] of'#10'TC = (nil, nil);';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''A'' ArrayType(Subrange(' +
+       'IntLit''0'' IntLit''1'') Ident''TC'') Aggregate(NilLit NilLit)))';
+     ExpectDiags: 0),
 
     // ---- 2.5.1 distinct alias ----
     (Section: '2.5.1'; Name: 'plain alias'; Source: 'type TId = Integer;';

@@ -46,6 +46,17 @@ type
     // `TSeGlyphAlign = kgfaCenter)`) is token-identical to one - real code in
     // Vcl.StyleAPI, 35 false diagnostics before this guard.
     FParamDepth: Integer;
+    // Nesting depth of statement blocks: inside one, `Ident =` or `Ident :`
+    // on its own line is an expression continued after a wrapped `.` (a
+    // client unit: `TTag(X).` NEWLINE `TransType = Trans_stored)`) or a case
+    // label, never the next declaration - 3 false E2003 before this guard.
+    FBlockDepth: Integer;
+    // Set while parsing the TYPE of a typed constant or an initialized
+    // variable (`C: T = ...`): there `=` legitimately follows the type, so
+    // `Ident =` on its own line is the type's last name and the initializer
+    // (`array[..] of` NEWLINE `TClass = (nil, ...)`), not the next
+    // declaration - 4 false E2004 before this guard.
+    FInitFollows: Boolean;
     FStuckCount: Integer;
     // Watchdogs (see notes on ParseGuard):
     FFuel: Int64;              // decremented in CurKind; trips at 0
@@ -949,6 +960,8 @@ function TPasParser.ParseBlockUntil(ABlock: Integer;
 var
   LStmt: Integer;
 begin
+  Inc(FBlockDepth);
+  try
   while True do
   begin
     while CurKind = tkSemicolon do
@@ -967,6 +980,9 @@ begin
     while not (AtAny(ATerminators) or
       (CurKind in [tkSemicolon, tkEndOfFile])) do
       Next;
+  end;
+  finally
+    Dec(FBlockDepth);
   end;
   Result := ABlock;
 end;
@@ -2233,6 +2249,13 @@ begin
     Exit(NIL_NODE);
   Result := FB.AddNode(nkGenericParams, NIL_NODE, FPos);
   Next;
+  // A parameter list for the line heuristic too: `TdxIndexBasedObject<`
+  // NEWLINE `TInfo: TdxCloneable;` NEWLINE `TOptions: record> =` is how a
+  // third-party library wraps its constraints, and `TInfo:` on its own line is
+  // then a parameter, not the next declaration - 736 false diagnostics in one
+  // project before this guard, every user of the two classes.
+  Inc(FParamDepth);
+  try
   while not AtGenericClose and (CurKind <> tkEndOfFile) do
   begin
     LParam := FB.AddNode(nkGenericParam, NIL_NODE, FPos);
@@ -2271,6 +2294,9 @@ begin
       Next
     else
       Break;
+  end;
+  finally
+    Dec(FParamDepth);
   end;
   CloseGeneric('">"');
   FB.SetLast(Result, FPos - 1);
@@ -2464,9 +2490,9 @@ end;
 
 function TPasParser.AtLineDeclHead: Boolean;
 begin
-  Result := (FParamDepth = 0) and (CurKind = tkIdentifier) and
-    (PeekKind(1) in [tkEqual, tkColon]) and not IsVisibilityWord and
-    TokenStartsLine(FPos);
+  Result := (FParamDepth = 0) and (FBlockDepth = 0) and (CurKind = tkIdentifier) and
+    ((PeekKind(1) = tkColon) or ((PeekKind(1) = tkEqual) and not FInitFollows)) and
+    not IsVisibilityWord and TokenStartsLine(FPos);
 end;
 
 function TPasParser.AtSectionBoundary: Boolean;
@@ -3061,7 +3087,14 @@ begin
       if AtDeclHead([tkColon]) then
         Error('type expected')
       else
-        FB.Adopt(LDecl, ParseTypeExpr);
+      begin
+        FInitFollows := True;
+        try
+          FB.Adopt(LDecl, ParseTypeExpr);
+        finally
+          FInitFollows := False;
+        end;
+      end;
     end;
     // Recovery, see AtDeclHead.
     LHasEq := Expect(tkEqual, '"="');
@@ -3140,7 +3173,12 @@ begin
       FB.Adopt(Result, LDecl);
       Continue;
     end;
-    FB.Adopt(LDecl, ParseTypeExpr);
+    FInitFollows := True;
+    try
+      FB.Adopt(LDecl, ParseTypeExpr);
+    finally
+      FInitFollows := False;
+    end;
     // Hints may sit BETWEEN the type and the initializer:
     // Default8087CW: Word platform = $033F;  (System.pas)
     ParseHintsOpt(LDecl);

@@ -137,7 +137,11 @@ const
     (Marker: 'CLASS'; Snippet: 'type TInner = Integer;'),
     (Marker: 'CLASS'; Snippet: 'const CI = 1;'),
     (Marker: 'CONST'; Snippet: 'C3 = 3;'),
-    (Marker: 'CONST'; Snippet: 'C4: Integer = 4;'),
+    // `C4:` above `C2 = 2;` reads as a typed constant of type C2 with value 2 -
+    // the same tokens as a wrapped typed constant `X: array[..] of` NEWLINE
+    // `TClass = (nil, ...)` in a client unit, which must keep parsing clean.
+    // C2 is lost for that one keystroke.
+    (Marker: 'CONST'; Snippet: 'C4: Integer = 4;'; Allowed: '2|c2|'),
     (Marker: 'VAR'; Snippet: 'V3: Integer;'),
     (Marker: 'VAR'; Snippet: 'V4, V5: Byte;'),
     (Marker: 'DECL'; Snippet: 'procedure NewProc(A: Integer);'),
