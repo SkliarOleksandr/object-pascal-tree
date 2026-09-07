@@ -1291,6 +1291,94 @@ begin
     end);
 end;
 
+const
+  // ---- 4.11: intrinsic result typing across units. XIA owns the types and
+  // the section-level constants an intrinsic initializes (3.2.1); XIB uses
+  // them, so every rule below runs through the cross-unit descriptors and
+  // the alias/definition chase, not the intra-unit shortcut. ----
+  UNIT_XIA =
+    'unit XIA;'#10'interface'#10 +
+    'type'#10 +
+    '  TColor = (cRed, cGreen, cBlue);'#10 +
+    '  TDynI = array of Integer;'#10 +
+    '  TStatE = array[TColor] of Integer;'#10 +
+    '  TStatC = array[''a''..''z''] of Integer;'#10 +
+    '  TStatW = array[Word] of Integer;'#10 +
+    '  TStatI = array[2..5] of Integer;'#10 +
+    '  TDynAlias = TDynI;'#10 +
+    '  TPt = record X, Y: Integer; end;'#10 +
+    '  TNode = class end;'#10 +
+    'const'#10 +
+    '  CArr: array[0..2] of Integer = (1, 2, 3);'#10 +
+    '  CLen = Length(CArr);'#10 +
+    '  COrd = Ord(cGreen);'#10 +
+    '  CTop = High(TColor);'#10 +
+    '  CPi = Pi;'#10 +
+    '  CSz = SizeOf(TPt);'#10 +
+    'var'#10 +
+    '  GDyn: TDynI;'#10 +
+    '  GStatE: TStatE;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
+  UNIT_XIB =
+    'unit XIB;'#10'interface'#10'uses XIA;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var'#10 +
+    '  SC: TStatC; SW: TStatW; SI: TStatI; AL: TDynAlias; C: TColor;'#10 +
+    '  S: string; AS_: AnsiString; Cu: Currency; I64: Int64;'#10 +
+    '  Inl: array of TPt;'#10 +
+    'begin'#10 +
+    '  var L01 := Length(GDyn);'#10 +
+    '  var L02 := High(GDyn);'#10 +
+    '  var L03 := Low(GStatE);'#10 +
+    '  var L04 := High(SC);'#10 +
+    '  var L05 := Low(SW);'#10 +
+    '  var L06 := High(SI);'#10 +
+    '  var L07 := High(AL);'#10 +
+    '  var L08 := Succ(C);'#10 +
+    '  var L09 := Pred(cBlue);'#10 +
+    '  var L10 := Default(TPt);'#10 +
+    '  var L11 := Default(TNode);'#10 +
+    '  var L12 := Default(TDynI);'#10 +
+    '  var L13 := Copy(AS_, 1, 2);'#10 +
+    '  var L14 := Concat(GDyn, GDyn);'#10 +
+    '  var L15 := Concat(S, AS_);'#10 +
+    '  var L16 := Abs(Cu);'#10 +
+    '  var L17 := Trunc(Cu);'#10 +
+    '  var L18 := Ord(I64);'#10 +
+    '  var L19 := Length(Inl);'#10 +
+    '  var L20 := Low(TColor);'#10 +
+    '  var L21 := Pi;'#10 +
+    '  var L22 := XIA.CTop;'#10 +
+    '  var L23 := Abs(2.5);'#10 +
+    '  var L24 := Length(S) - 1;'#10 +
+    '  var L25 := cGreen;'#10 +
+    '  L10.X := CLen + COrd + CSz;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  // The 64-bit differences, in a project of their own: Length/High of a
+  // dynamic array read NativeInt (Int64 there), Abs(Currency) stays
+  // Currency, Pi is still Extended (what dcc64 prints as Double).
+  UNIT_XIW =
+    'unit XIW;'#10'interface'#10 +
+    'type TDynB = array of Byte;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var D: TDynB; Cu: Currency; Db: Double;'#10 +
+    'begin'#10 +
+    '  var W01 := Length(D);'#10 +
+    '  var W02 := High(D);'#10 +
+    '  var W03 := Low(D);'#10 +
+    '  var W04 := Abs(Cu);'#10 +
+    '  var W05 := Abs(Db);'#10 +
+    '  var W06 := Pi;'#10 +
+    '  var W07 := Sqr(Cu);'#10 +
+    'end;'#10 +
+    'end.'#10;
+
 var
   LDir: string;
   LU, LV, LH, LW, LQ, LR, LB, LC, LE, LG, LN: TPasSemaModel;
@@ -1781,6 +1869,107 @@ begin
     Eq('Win64: -1.5 is Currency', XTypeOf(LE, 'LR7'), 'Currency');
     Eq('Win64: 1.50000 (five digits, trailing zeros) is Extended',
       XTypeOf(LE, 'LR8'), 'Extended');
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- 4.11: intrinsic result typing, cross-unit (the rules are dcc
+  // probes on both compilers, local/probe/intr, 2026-09-07) ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype_intr');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XIA.pas'), UNIT_XIA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XIB.pas'), UNIT_XIB);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    LE := ModelByName('xia');
+    LB := ModelByName('xib');
+    Ok('XIA/XIB loaded', Assigned(LE) and Assigned(LB));
+    Ok('XIA: no diags at all', Length(LE.Diags) = 0);
+    Ok('XIB: no diags at all', Length(LB.Diags) = 0);
+    // 3.2.1: section-level constants from an intrinsic - visible to the
+    // consumer unit through the producer's SymTypeX.
+    Eq('3.2.1: const CLen = Length(CArr) is Integer', XTypeOf(LE, 'CLen'),
+      'Integer');
+    Eq('3.2.1: const COrd = Ord(cGreen) is Integer', XTypeOf(LE, 'COrd'),
+      'Integer');
+    Eq('3.2.1: const CTop = High(TColor) is TColor', XTypeOf(LE, 'CTop'),
+      'TColor');
+    Eq('3.2.1: const CPi = Pi is Extended', XTypeOf(LE, 'CPi'), 'Extended');
+    Eq('3.2.1: const CSz = SizeOf(TPt) is Integer', XTypeOf(LE, 'CSz'),
+      'Integer');
+    Eq('3.2.1: ...read from the consumer unit', XTypeOf(LB, 'XIA.CTop'),
+      'TColor');
+    Eq('3.1.3: var := XIA.CTop is TColor', XTypeOf(LB, 'L22'), 'TColor');
+    // 3.1.3 through the intrinsic rules, every argument a cross-unit type.
+    Eq('4.11x: Length(dyn array) is NativeInt', XTypeOf(LB, 'L01'),
+      'NativeInt');
+    Eq('4.11x: High(dyn array) is NativeInt', XTypeOf(LB, 'L02'),
+      'NativeInt');
+    Eq('4.11x: Low(enum-indexed array) is the enum', XTypeOf(LB, 'L03'),
+      'TColor');
+    Eq('4.11x: High(Char-indexed array) is Char', XTypeOf(LB, 'L04'), 'Char');
+    Eq('4.11x: Low(array[Word]) widens to Integer', XTypeOf(LB, 'L05'),
+      'Integer');
+    Eq('4.11x: High(array[2..5]) is Integer', XTypeOf(LB, 'L06'), 'Integer');
+    Eq('4.11x: High through an alias of a dyn array', XTypeOf(LB, 'L07'),
+      'NativeInt');
+    Eq('4.11x: Succ(enum var) is the enum', XTypeOf(LB, 'L08'), 'TColor');
+    Eq('4.11x: Pred(enum member) is the enum', XTypeOf(LB, 'L09'), 'TColor');
+    Eq('4.11x: Default(record) is the record', XTypeOf(LB, 'L10'), 'TPt');
+    Eq('4.11x: Default(class) is Pointer', XTypeOf(LB, 'L11'), 'Pointer');
+    Eq('4.11x: Default(dyn array) is Pointer', XTypeOf(LB, 'L12'), 'Pointer');
+    Eq('4.11x: Copy(AnsiString) stays AnsiString', XTypeOf(LB, 'L13'),
+      'AnsiString');
+    Eq('4.11x: Concat(dyn, dyn) stays the array', XTypeOf(LB, 'L14'), 'TDynI');
+    Eq('4.11x: Concat(string, AnsiString) is string', XTypeOf(LB, 'L15'),
+      'string');
+    Eq('4.11x: Abs(Currency) is Extended on Win32', XTypeOf(LB, 'L16'),
+      'Extended');
+    Eq('4.11x: Trunc is Int64', XTypeOf(LB, 'L17'), 'Int64');
+    Eq('4.11x: Ord(Int64) is Integer', XTypeOf(LB, 'L18'), 'Integer');
+    Eq('4.11x: Length of an INLINE dyn array is NativeInt',
+      XTypeOf(LB, 'L19'), 'NativeInt');
+    Eq('4.11x: Low(enum TYPE) is the enum', XTypeOf(LB, 'L20'), 'TColor');
+    Eq('4.11x: bare Pi is Extended', XTypeOf(LB, 'L21'), 'Extended');
+    Eq('4.11x: Abs(2.5) is Extended', XTypeOf(LB, 'L23'), 'Extended');
+    Eq('4.11x: Length(S) - 1 is Integer (operator over a typed intrinsic)',
+      XTypeOf(LB, 'L24'), 'Integer');
+    Eq('4.11x: a member through Default(TPt) binds', XTypeOf(LB, 'L10.X'),
+      'Integer');
+    Eq('2.2.4: a cross-unit enum VALUE is typed as its enum',
+      XTypeOf(LB, 'L25'), 'TColor');
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype_intr64');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XIW.pas'), UNIT_XIW);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    LE := ModelByName('xiw');
+    Ok('XIW loaded', Assigned(LE));
+    Ok('XIW: no diags at all', Length(LE.Diags) = 0);
+    Eq('4.11/Win64: Length(dyn) is NativeInt', XTypeOf(LE, 'W01'),
+      'NativeInt');
+    Eq('4.11/Win64: High(dyn) is NativeInt', XTypeOf(LE, 'W02'), 'NativeInt');
+    Eq('4.11/Win64: Low(dyn) is Integer', XTypeOf(LE, 'W03'), 'Integer');
+    Eq('4.11/Win64: Abs(Currency) is Currency', XTypeOf(LE, 'W04'),
+      'Currency');
+    Eq('4.11/Win64: Abs(Double) is Extended', XTypeOf(LE, 'W05'), 'Extended');
+    Eq('4.11/Win64: Pi is Extended', XTypeOf(LE, 'W06'), 'Extended');
+    Eq('4.11/Win64: Sqr(Currency) is Extended', XTypeOf(LE, 'W07'),
+      'Extended');
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

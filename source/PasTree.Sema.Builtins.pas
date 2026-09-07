@@ -73,6 +73,76 @@ function PasBuiltinSignature(const ANameLower: string;
   `Word` against the Integer helper is the negative that pins the boundary. }
 function PasBuiltinAliasGroup(const ANameLower: string): TArray<string>;
 
+type
+  { How a value-returning intrinsic's RESULT type is decided (4.11). Every
+    shape below is a dcc 37.0 probe on BOTH compilers (2026-09-07, local/probe/
+    intr: `P := Intrinsic(...)` against a record `P`, the E2010 text names the
+    type), not the documentation, which is silent on most of them. The two
+    typers (PasTree.Sema.Types intra-unit, PasTree.Sema.Project cross-unit)
+    dispatch on this and apply the same rules to their own type descriptors;
+    a name that is not here (a procedure, or Slice) stays untyped. }
+  TPasIntrinsicResult = (
+    irNone,
+    // Fixed type, whatever the arguments: Ord is Integer even of an Int64,
+    // SizeOf/Hi/Lo are Integer, Trunc/Round/MulDivInt64 are Int64 even of a
+    // Single, Chr is Char, Pi is Extended (dcc64 prints it as Double, which
+    // is what Extended IS on a 64-bit target), the address family and
+    // TypeInfo/TypeHandle/TypeOf are the untyped Pointer.
+    irInteger, irInt64, irBoolean, irChar, irExtended, irPointer,
+    // Length: Integer, except NativeInt for a DYNAMIC array (Int64 on
+    // dcc64, Integer on dcc32 - the one platform-dependent Length).
+    irLength,
+    // Abs: an integer widens by WIDTH (Byte..Cardinal -> Integer, 64-bit ->
+    // Int64, NativeInt/NativeUInt -> NativeInt); a real is Extended on a
+    // 32-bit target, and on a 64-bit one Currency stays Currency and Comp
+    // stays Comp (their arithmetic is integral there) while every other
+    // real is Extended. A Variant argument types as nothing.
+    irAbs,
+    // Sqr: an integer widens like Abs except that a 32-bit UNSIGNED stays
+    // Cardinal and the 64-bit ones keep their signedness (UInt64 -> UInt64,
+    // NativeUInt -> NativeUInt); every real, Currency and Comp included, is
+    // Extended.
+    irSqr,
+    // Pred, Succ: an integer widens (Byte/Word/SmallInt/ShortInt/Cardinal
+    // -> Integer, Int64 AND UInt64 -> Int64, NativeInt/NativeUInt ->
+    // NativeInt); an enum, Char, AnsiChar or Boolean keeps its own type.
+    irOrdinal,
+    // Low, High: an ordinal type or value as irOrdinal; a static array's
+    // INDEX type (widened the same way: `array[Word]` bounds are Integer, an
+    // enum-indexed array's are the enum, a Char-indexed one's are Char); a
+    // dynamic array's Low is Integer and its High NativeInt; any string's
+    // are Integer (High of the long-string TYPE itself is E2198).
+    irBounds,
+    // Swap: a 16- or 32-bit integer keeps its type (Word, SmallInt, Integer,
+    // Cardinal), everything else - Byte, Int64, a literal - is Integer.
+    irSwap,
+    // The first argument's own type: Copy (a string kind stays that kind, a
+    // dynamic array stays that array, a literal is string) and the Atomic*
+    // family (Increment/Decrement/Exchange/CmpExchange over an integer or a
+    // Pointer).
+    irFirstArg,
+    // Concat: arguments of ONE type keep it (AnsiString+AnsiString is
+    // AnsiString, TDynI+TDynI is TDynI) with two exceptions - ShortString+
+    // ShortString is AnsiString and AnsiChar+AnsiChar is ShortString; mixed
+    // string kinds, Char operands and literals are `string`.
+    irConcat,
+    // Default(T): T itself for a record, an ordinal, a real, a string, a
+    // STATIC array; the untyped Pointer for every reference type - class,
+    // interface, dynamic array, procedural type, class reference, pointer
+    // (`var X := Default(TObj); X.Free` is E2018 under dcc).
+    irDefault,
+    // GetTypeKind: System.TTypeKind, a real declaration in System.pas that
+    // only the project level can reach.
+    irTypeKind);
+
+{ The result shape of the seeded intrinsic ROUTINE named ANameLower - irNone
+  for a procedure, for Slice, and for any name that is not an intrinsic. }
+function PasIntrinsicResult(const ANameLower: string): TPasIntrinsicResult;
+
+{ Does AShape read its ARGUMENTS' types? False for the fixed-type shapes, so
+  a caller can skip typing the arguments of `Ord(X)` or `SizeOf(T)`. }
+function PasIntrinsicReadsArgs(AShape: TPasIntrinsicResult): Boolean; inline;
+
 implementation
 
 uses
@@ -586,6 +656,50 @@ begin
   Result := LSys;
 end;
 
+var
+  GIntrResult: TDictionary<string, TPasIntrinsicResult>;
+
+procedure BuildIntrResult;
+  procedure Put(const ANames: array of string; AShape: TPasIntrinsicResult);
+  begin
+    for var LName in ANames do
+      GIntrResult.Add(LName, AShape);
+  end;
+begin
+  GIntrResult := TDictionary<string, TPasIntrinsicResult>.Create(96);
+  Put(['ord', 'sizeof', 'hi', 'lo'], irInteger);
+  Put(['trunc', 'round', 'muldivint64'], irInt64);
+  Put(['assigned', 'odd', 'ismanagedtype', 'isconstvalue', 'hasweakref',
+    'eof', 'eoln', 'seekeof', 'seekeoln'], irBoolean);
+  Put(['chr'], irChar);
+  Put(['pi'], irExtended);
+  Put(['addr', 'ptr', 'returnaddress', 'addressofreturnaddress', 'typeinfo',
+    'typehandle', 'typeof'], irPointer);
+  Put(['length'], irLength);
+  Put(['abs'], irAbs);
+  Put(['sqr'], irSqr);
+  Put(['pred', 'succ'], irOrdinal);
+  Put(['low', 'high'], irBounds);
+  Put(['swap'], irSwap);
+  Put(['copy', 'atomicincrement', 'atomicdecrement', 'atomicexchange',
+    'atomiccmpexchange'], irFirstArg);
+  Put(['concat'], irConcat);
+  Put(['default'], irDefault);
+  Put(['gettypekind'], irTypeKind);
+end;
+
+function PasIntrinsicResult(const ANameLower: string): TPasIntrinsicResult;
+begin
+  if not GIntrResult.TryGetValue(ANameLower, Result) then
+    Result := irNone;
+end;
+
+function PasIntrinsicReadsArgs(AShape: TPasIntrinsicResult): Boolean;
+begin
+  Result := AShape in [irLength, irAbs, irSqr, irOrdinal, irBounds, irSwap,
+    irFirstArg, irConcat, irDefault];
+end;
+
 procedure BuildSigIndex;
 var
   LIdx: Integer;
@@ -598,8 +712,10 @@ end;
 initialization
   BuildSeedTemplates;
   BuildSigIndex;
+  BuildIntrResult;
 
 finalization
+  GIntrResult.Free;
   GSigIndex.Free;
   GSeedTemplates[False].Names.Free;
   GSeedTemplates[False].Order.Free;

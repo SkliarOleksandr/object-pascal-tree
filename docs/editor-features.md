@@ -53,6 +53,7 @@ declared**, exactly like the RAD Studio IDE. "Any" means all of:
 | 13 | Aliased unit name (`-A` / DCC_UnitAlias) | aliased-to unit | OK |
 | 14 | Identifier inside an opened `$I` include file tab | decl | GAP (IdentAt is main-file-only; nav INTO includes works) |
 | 15 | Overload-precise jump (CallTarget) / decl↔impl toggle | exact overload | GAP (jumps to head symbol) |
+| 16 | An inline `var`'s OWN declaration name (`var L := Expr`, caret on L) | its type, for a type-of query | GAP (SymbolAt does not claim the declaration name; a USE of L answers normally - measured through pastree-lsp 2026-09-07) |
 
 Hover highlight span rules: a plain identifier highlights itself; a dotted
 `uses` name or expression QUALIFIER highlights the whole qualifier (all

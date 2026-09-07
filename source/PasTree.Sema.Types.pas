@@ -30,6 +30,8 @@ type
     // (dcc32 E2028, dcc64 E2001 for the same source).
     FPlatform: TPasPlatform;
     Int, Ext, Str, Chr, Bool, Ptr, Nul: Integer;   // cached builtin type syms
+    // The rest of what the intrinsic result rules (IntrinsicResult) name.
+    I64, NInt, AStr, SStr: Integer;
     function Kind(N: Integer): TPasNodeKind; inline;
     function Child(N: Integer): Integer; inline;
     function Sib(N: Integer): Integer; inline;
@@ -52,6 +54,11 @@ type
     function BinaryResult(N: Integer): Integer;
     function UnaryResult(N: Integer): Integer;
     function CallResult(N: Integer): Integer;
+    function IntrinsicResult(ACall, AHead: Integer): Integer;
+    function WidenOrdinal(ASym: Integer): Integer;
+    function ArrayDefOf(ASym: Integer): Integer;
+    function IsDynArrayDef(ADef: Integer): Boolean;
+    function ArrayBoundType(ADef: Integer): Integer;
     function ParamsOf(AScope: Integer): TArray<Integer>;
     function ArgCount(ACall: Integer): Integer;
     function ScoreArgs(ACall: Integer; const AParams: TArray<Integer>): Integer;
@@ -76,6 +83,7 @@ uses
   System.SysUtils,
   System.Generics.Collections,
   PasTree.Preprocessor,
+  PasTree.Sema.Builtins,
   PasTree.Sema.Diagnostics;
 
 class procedure TPasSemaTyper.Check(AModel: TPasSemaModel;
@@ -635,8 +643,15 @@ begin
   if LSym = NIL_SYM then
     Exit(NIL_SYM);   // external / unresolved
   case M.Symbols[LSym].Kind of
-    skVar, skConst, skField, skParam, skRoutine, skProperty:
-      Result := M.Symbols[LSym].TypeSym;   // value / result / property type
+    skVar, skConst, skField, skParam, skRoutine, skProperty, skEnumValue:
+      begin
+        Result := M.Symbols[LSym].TypeSym;   // value / result / property type
+        // A parameterless intrinsic written bare - `Pi`, `ReturnAddress`,
+        // `Eof` - is a call without its parentheses (4.11).
+        if (Result = NIL_SYM) and (M.Symbols[LSym].Kind = skRoutine) and
+           (sfBuiltin in M.Symbols[LSym].Flags) then
+          Result := IntrinsicResult(N, LSym);
+      end;
     skType, skBuiltinType:
       Result := LSym;                       // type designator (casts)
   else
@@ -992,7 +1007,286 @@ begin
     skType, skBuiltinType:
       Result := LHead;                    // type cast T(x) -> T
     skRoutine:
-      Result := SelectOverload(N, LHead); // choose overload + maybe arg-count
+      // A seeded intrinsic has no declaration to select an overload from -
+      // its result follows the rules the seed documents (4.11).
+      if sfBuiltin in M.Symbols[LHead].Flags then
+        Result := IntrinsicResult(N, LHead)
+      else
+        Result := SelectOverload(N, LHead); // choose overload + maybe arg-count
+  end;
+end;
+
+{ The widened ordinal type dcc gives Pred/Succ/Low/High/Abs of an integer
+  ASym: NativeInt keeps its (platform-sized) name, a 64-bit one is Int64, and
+  everything narrower - Byte, Word, SmallInt, ShortInt, Cardinal, a subrange -
+  is Integer. UInt64 too: `Succ(U64)` is an Int64 under dcc. }
+function TPasSemaTyper.WidenOrdinal(ASym: Integer): Integer;
+begin
+  if (ASym <> NIL_SYM) and (M.Symbols[ASym].Kind = skBuiltinType) then
+  begin
+    if (M.Symbols[ASym].NameLower = 'nativeint') or
+       (M.Symbols[ASym].NameLower = 'nativeuint') then
+      Exit(NInt);
+    if RankOf(ASym) = 4 then
+      Exit(I64);
+  end;
+  Result := Int;
+end;
+
+{ The nkArrayType node type symbol ASym denotes, through plain aliases;
+  NIL_NODE for anything else. An ANONYMOUS inline array (`A: array of T`) has
+  no type symbol and so answers nothing here - the project level reads the
+  declaration's own type node for those. }
+function TPasSemaTyper.ArrayDefOf(ASym: Integer): Integer;
+var
+  LDepth, LDef: Integer;
+begin
+  Result := NIL_NODE;
+  for LDepth := 1 to 8 do
+  begin
+    if (ASym = NIL_SYM) or (M.Symbols[ASym].Kind <> skType) then
+      Exit;
+    LDef := TypeDefNode(ASym);
+    if LDef = NIL_NODE then
+      Exit;
+    case Kind(LDef) of
+      nkArrayType:
+        Exit(LDef);
+      nkIdent:
+        ASym := M.RefMap[LDef];   // alias link - follow it
+    else
+      Exit;
+    end;
+  end;
+end;
+
+// `array of T` (no index child, not `array of const`) - the shape whose Length
+// and High are NativeInt rather than Integer.
+function TPasSemaTyper.IsDynArrayDef(ADef: Integer): Boolean;
+var
+  LFirst: Integer;
+begin
+  LFirst := Child(ADef);
+  Result := (LFirst <> NIL_NODE) and (Sib(LFirst) = NIL_NODE) and
+    (T.Nodes[ADef].Aux <> 1);
+end;
+
+{ The type of a STATIC array's bounds (its first index dimension, the one
+  Low/High read): an explicit `lo..hi` by the category of its low bound - an
+  integer literal is Integer, a character literal Char, True/False Boolean, an
+  enum member its enum; a NAMED index type by the ordinal rule (`array[Word]`
+  bounds are Integer, `array[TEnum]` bounds are TEnum). NIL_SYM when the bound
+  cannot be read. }
+function TPasSemaTyper.ArrayBoundType(ADef: Integer): Integer;
+var
+  LIdx, LLo, LSym: Integer;
+begin
+  Result := NIL_SYM;
+  LIdx := Child(ADef);
+  if (LIdx = NIL_NODE) or (Sib(LIdx) = NIL_NODE) then
+    Exit;   // dynamic array - the caller has its own answer
+  case Kind(LIdx) of
+    nkSubrange:
+      begin
+        LLo := Child(LIdx);
+        case CatOfSubrangeBound(LLo) of
+          tcInteger: Exit(Int);
+          tcChar: Exit(Chr);
+          tcBoolean: Exit(Bool);
+        end;
+        // `eA..eC` - an enum member's type. A signed literal was categorized
+        // above, so what is left is a bare name.
+        if (LLo <> NIL_NODE) and (Kind(LLo) = nkIdent) then
+        begin
+          LSym := M.RefMap[LLo];
+          if (LSym <> NIL_SYM) and
+             (M.Symbols[LSym].Kind in [skConst, skEnumValue]) and
+             (M.Symbols[LSym].TypeSym <> NIL_SYM) then
+            Exit(WidenOrdinal(M.Symbols[LSym].TypeSym));
+        end;
+      end;
+    nkIdent:
+      begin
+        LSym := M.RefMap[LIdx];
+        if (LSym <> NIL_SYM) and
+           (M.Symbols[LSym].Kind in [skType, skBuiltinType]) then
+          case CatOf(LSym) of
+            tcInteger: Exit(WidenOrdinal(LSym));
+            tcEnum, tcChar, tcBoolean: Exit(LSym);
+          end;
+      end;
+  end;
+end;
+
+{ The result type of a call to the seeded intrinsic AHead (4.11), by the shape
+  PasTree.Sema.Builtins documents for its name. Argument types are this
+  typer's own ExprType - a type-name argument (`Low(TEnum)`, `Default(TRec)`,
+  `SizeOf(TRec)`) reads as that type through TypeOfIdent's cast rule, which
+  is exactly what the type-argument intrinsics want. NIL_SYM wherever a rule
+  needs something this unit cannot see (a cross-unit array type, System's
+  TTypeKind, a Variant operand of Abs). }
+function TPasSemaTyper.IntrinsicResult(ACall, AHead: Integer): Integer;
+var
+  LShape: TPasIntrinsicResult;
+  LArg, LA, LDef, LCur: Integer;
+  LSame: Boolean;
+begin
+  Result := NIL_SYM;
+  LShape := PasIntrinsicResult(M.Symbols[AHead].NameLower);
+  if LShape = irNone then
+    Exit;
+  // The first argument, if any - a bare `Pi` is an nkIdent with no children.
+  LArg := NIL_NODE;
+  if (Kind(ACall) = nkCall) and (Child(ACall) <> NIL_NODE) then
+    LArg := Sib(Child(ACall));
+  LA := NIL_SYM;
+  if (LArg <> NIL_NODE) and PasIntrinsicReadsArgs(LShape) then
+    LA := M.ExprType[LArg];
+  // A VALUE-taking intrinsic whose argument resolved to a TYPE NAME is the
+  // same mis-binding CheckAssign withholds judgement on: a member named
+  // `Word` (`Copy(Word, 1, I)` in a spell checker, where Word is a string
+  // property) reads as the builtin type here because the member is inherited
+  // and cross-unit. Only Low/High/Default/SizeOf/TypeInfo take a type; for
+  // the others a type argument means "do not know", never "an integer".
+  if (LA <> NIL_SYM) and IsTypeNameOperand(LArg) and
+     (LShape in [irLength, irAbs, irSqr, irOrdinal, irSwap, irFirstArg,
+       irConcat]) then
+    Exit;
+  case LShape of
+    irInteger:  Result := Int;
+    irInt64:    Result := I64;
+    irBoolean:  Result := Bool;
+    irChar:     Result := Chr;
+    irExtended: Result := Ext;
+    irPointer:  Result := Ptr;
+    irTypeKind: Result := NIL_SYM;   // System.TTypeKind - project level only
+    irLength:
+      begin
+        Result := Int;
+        LDef := ArrayDefOf(LA);
+        if (LDef <> NIL_NODE) and IsDynArrayDef(LDef) then
+          Result := NInt;
+      end;
+    irAbs:
+      case CatOf(LA) of
+        tcInteger: Result := WidenOrdinal(LA);
+        tcFloat:
+          if PlatformInfo(FPlatform).Is64Bit and
+             (M.Symbols[LA].Kind = skBuiltinType) and
+             ((M.Symbols[LA].NameLower = 'currency') or
+              (M.Symbols[LA].NameLower = 'comp')) then
+            Result := LA
+          else
+            Result := Ext;
+      end;
+    irSqr:
+      case CatOf(LA) of
+        tcInteger:
+          if (M.Symbols[LA].Kind = skBuiltinType) and
+             ((RankOf(LA) = 4) or
+              (M.Symbols[LA].NameLower = 'cardinal') or
+              (M.Symbols[LA].NameLower = 'longword') or
+              (M.Symbols[LA].NameLower = 'nativeint') or
+              (M.Symbols[LA].NameLower = 'nativeuint')) then
+            Result := LA
+          else
+            Result := Int;
+        tcFloat: Result := Ext;
+      end;
+    irOrdinal:
+      case CatOf(LA) of
+        tcInteger: Result := WidenOrdinal(LA);
+        tcEnum, tcChar, tcBoolean: Result := LA;
+      end;
+    irBounds:
+      case CatOf(LA) of
+        tcInteger: Result := WidenOrdinal(LA);
+        tcEnum, tcChar, tcBoolean: Result := LA;
+        tcString: Result := Int;
+        tcArray:
+          begin
+            LDef := ArrayDefOf(LA);
+            if LDef = NIL_NODE then
+              Exit;
+            if IsDynArrayDef(LDef) then
+            begin
+              if M.Symbols[AHead].NameLower = 'high' then
+                Result := NInt
+              else
+                Result := Int;
+            end
+            else
+              Result := ArrayBoundType(LDef);
+          end;
+      end;
+    irSwap:
+      if (CatOf(LA) = tcInteger) and (M.Symbols[LA].Kind = skBuiltinType) and
+         (RankOf(LA) in [2, 3]) and
+         (M.Symbols[LA].NameLower <> 'nativeint') and
+         (M.Symbols[LA].NameLower <> 'nativeuint') then
+        Result := LA
+      else if CatOf(LA) = tcInteger then
+        Result := Int;
+    irFirstArg:
+      if CatOf(LA) in [tcString, tcArray, tcInteger, tcPointer] then
+        Result := LA;
+    irConcat:
+      begin
+        if LA = NIL_SYM then
+          Exit;
+        // One type throughout, or `string`.
+        LSame := True;
+        LCur := Sib(LArg);
+        while LCur <> NIL_NODE do
+        begin
+          if M.ExprType[LCur] <> LA then
+            LSame := False;
+          LCur := Sib(LCur);
+        end;
+        case CatOf(LA) of
+          tcArray:
+            if LSame then
+              Result := LA;
+          tcString:
+            if not LSame then
+              Result := Str
+            else if (M.Symbols[LA].Kind = skBuiltinType) and
+                    (M.Symbols[LA].NameLower = 'shortstring') then
+              Result := AStr
+            else
+              Result := LA;
+          tcChar:
+            if LSame and (M.Symbols[LA].Kind = skBuiltinType) and
+               (M.Symbols[LA].NameLower = 'ansichar') then
+              Result := SStr
+            else
+              Result := Str;
+        end;
+      end;
+    irDefault:
+      begin
+        if (LA = NIL_SYM) or
+           not (M.Symbols[LA].Kind in [skType, skBuiltinType]) then
+          Exit;   // not a type argument, or a generic parameter
+        case CatOf(LA) of
+          tcClass, tcInterface, tcPointer, tcProc, tcClassOf:
+            Result := Ptr;
+          tcArray:
+            begin
+              LDef := ArrayDefOf(LA);
+              if LDef = NIL_NODE then
+                Exit;
+              if IsDynArrayDef(LDef) then
+                Result := Ptr
+              else
+                Result := LA;
+            end;
+          tcUnknown:
+            Result := NIL_SYM;
+        else
+          Result := LA;
+        end;
+      end;
   end;
 end;
 
@@ -1170,6 +1464,7 @@ var
 begin
   Int := NIL_SYM; Ext := NIL_SYM; Str := NIL_SYM; Chr := NIL_SYM;
   Bool := NIL_SYM; Ptr := NIL_SYM; Nul := NIL_SYM;
+  I64 := NIL_SYM; NInt := NIL_SYM; AStr := NIL_SYM; SStr := NIL_SYM;
   for LIdx := 0 to M.SymCount - 1 do
     if M.Symbols[LIdx].Kind = skBuiltinType then
       if M.Symbols[LIdx].NameLower = 'integer' then Int := LIdx
@@ -1178,7 +1473,11 @@ begin
       else if M.Symbols[LIdx].NameLower = 'char' then Chr := LIdx
       else if M.Symbols[LIdx].NameLower = 'boolean' then Bool := LIdx
       else if M.Symbols[LIdx].NameLower = 'pointer' then Ptr := LIdx
-      else if M.Symbols[LIdx].NameLower = '_nil' then Nul := LIdx;
+      else if M.Symbols[LIdx].NameLower = '_nil' then Nul := LIdx
+      else if M.Symbols[LIdx].NameLower = 'int64' then I64 := LIdx
+      else if M.Symbols[LIdx].NameLower = 'nativeint' then NInt := LIdx
+      else if M.Symbols[LIdx].NameLower = 'ansistring' then AStr := LIdx
+      else if M.Symbols[LIdx].NameLower = 'shortstring' then SStr := LIdx;
 
   CategorizeTypes;
   CheckOrdinalTypePositions;   // needs CategorizeTypes - see its own header

@@ -31,7 +31,8 @@ uses
   PasTree.Platforms,
   PasTree.SourceManager,
   PasTree.Ast,
-  PasTree.Sema.Model;
+  PasTree.Sema.Model,
+  PasTree.Sema.Builtins;
 
 type
   // One generic type PARAMETER bound to an actual, for the SizeOf layout walk
@@ -532,6 +533,17 @@ type
       const ANameLower: string; out AMid, ASym, ACtx: Integer): Boolean;
     function ElementX(AId, ABaseNode: Integer): TSemaXType;
     function BuiltinX(AMid: Integer; const ANameLower: string): TSemaXType;
+    function IsIntrinsicRoutine(AMid, ASym: Integer;
+      out AShape: TPasIntrinsicResult): Boolean;
+    function IntrinsicResultX(AMid, ACall: Integer;
+      AShape: TPasIntrinsicResult;
+      const AArgX: TArray<TSemaXType>): TSemaXType;
+    function IntrinsicArgX(AMid, AArg: Integer;
+      const AX: TSemaXType): TSemaXType;
+    function WidenOrdinalX(AMid: Integer; const AX: TSemaXType): TSemaXType;
+    function ArrayDefOfX(AMid, AArg: Integer; const AX: TSemaXType;
+      out ADefMid, ADef: Integer): Boolean;
+    function ArrayBoundTypeX(ADefMid, ADef: Integer): TSemaXType;
     function LiteralTypeX(AMid, ANode: Integer; ANegated: Boolean): TSemaXType;
     function IsSignedLiteral(AMid, ANode: Integer;
       out ALit: Integer; out ANegated: Boolean): Boolean;
@@ -1100,7 +1112,6 @@ uses
   System.Generics.Defaults,
   PasTree.Parser,
   PasTree.CondEval,
-  PasTree.Sema.Builtins,
   PasTree.Sema.Resolver,
   PasTree.Sema.Diagnostics;
 
@@ -7995,6 +8006,10 @@ var
   // silent misses into false E2003s on the next line). Created on the first
   // tie only: ambiguity is rare, and this walk is the hot path.
   LAmbig: TDictionary<Integer, Boolean>;
+  // A callee that is a seeded intrinsic: its result shape (4.11) and the
+  // argument types the shape reads, collected only when it reads any.
+  LIntrShape: TPasIntrinsicResult;
+  LIntrArgs: TArray<TSemaXType>;
   // Inferred types of this model's own untyped declarations, held OUT of
   // SymTypeX until the parallel phase is over (see FXNewSymType). The nkIdent
   // case reads this before SymTypeX so a later use in the same walk sees it.
@@ -8919,15 +8934,25 @@ var
           LSym := LM.RefMap[N];
           if LSym <> NIL_SYM then
             case LM.Symbols[LSym].Kind of
-              skVar, skConst, skField, skParam, skProperty, skRoutine:
-                if not LNewSymType.TryGetValue(LSym, LX[N]) then
-                  LX[N] := DeclTypeX(AId, LSym);
+              skVar, skConst, skField, skParam, skProperty, skRoutine,
+              skEnumValue:
+                begin
+                  if not LNewSymType.TryGetValue(LSym, LX[N]) then
+                    LX[N] := DeclTypeX(AId, LSym);
+                  // A parameterless intrinsic written bare - `Pi`,
+                  // `ReturnAddress` - is a call without its parentheses.
+                  if not XValid(LX[N]) and
+                     IsIntrinsicRoutine(AId, LSym, LIntrShape) and
+                     not PasIntrinsicReadsArgs(LIntrShape) then
+                    LX[N] := IntrinsicResultX(AId, N, LIntrShape, nil);
+                end;
               skType, skBuiltinType, skGenericParam:
                 LX[N] := XPlain(AId, LSym);
             end
           else if ExtOf(N, LExt) then
             case FModels[LExt.UnitId].Symbols[LExt.Sym].Kind of
-              skVar, skConst, skField, skParam, skProperty, skRoutine:
+              skVar, skConst, skField, skParam, skProperty, skRoutine,
+              skEnumValue:
                 LX[N] := DeclTypeX(LExt.UnitId, LExt.Sym);
               skType, skBuiltinType:
                 LX[N] := XPlain(LExt.UnitId, LExt.Sym);
@@ -9106,6 +9131,36 @@ var
           if (LBase <> NIL_NODE) and TargetSym(LBase, LMemMid, LMemSym) then
             case FModels[LMemMid].Symbols[LMemSym].Kind of
               skRoutine:
+                // A seeded compiler intrinsic (4.11) has no declaration to
+                // select from and no parameters to match: its result follows
+                // the rules its seed documents, from its arguments' types
+                // where the shape reads them. Before the overload machinery,
+                // which has nothing to say about a seed.
+                if IsIntrinsicRoutine(LMemMid, LMemSym, LIntrShape) then
+                begin
+                  LIntrArgs := nil;
+                  if PasIntrinsicReadsArgs(LIntrShape) then
+                  begin
+                    var LArgN := LM.Tree.Nodes[LBase].NextSibling;
+                    var LArgCount := 0;
+                    var LScan := LArgN;
+                    while LScan <> NIL_NODE do
+                    begin
+                      Inc(LArgCount);
+                      LScan := LM.Tree.Nodes[LScan].NextSibling;
+                    end;
+                    SetLength(LIntrArgs, LArgCount);
+                    LArgCount := 0;
+                    while LArgN <> NIL_NODE do
+                    begin
+                      LIntrArgs[LArgCount] := GetX(LArgN);
+                      Inc(LArgCount);
+                      LArgN := LM.Tree.Nodes[LArgN].NextSibling;
+                    end;
+                  end;
+                  LX[N] := IntrinsicResultX(AId, N, LIntrShape, LIntrArgs);
+                end
+                else
                 begin
                   LCtx := LCtxOf[LBase];
                   // A callee written `Name<...>` cannot mean a NON-generic
@@ -10737,6 +10792,388 @@ begin
     Result := XPlain(AMid, LSym);
 end;
 
+{ Is (AMid, ASym) a seeded compiler intrinsic ROUTINE whose result this level
+  types - and which shape (PasTree.Sema.Builtins)? False for a real routine,
+  for a seeded procedure and for Slice. The test is the seed flag on a
+  routine symbol, never the name: a unit's own `Length` is a real routine and
+  types through its declaration. }
+function TPasSemaProject.IsIntrinsicRoutine(AMid, ASym: Integer;
+  out AShape: TPasIntrinsicResult): Boolean;
+begin
+  AShape := irNone;
+  if (AMid < 0) or (ASym = NIL_SYM) then
+    Exit(False);
+  with FModels[AMid].Symbols[ASym] do
+    if (Kind = skRoutine) and (sfBuiltin in Flags) then
+      AShape := PasIntrinsicResult(NameLower);
+  Result := AShape <> irNone;
+end;
+
+{ An intrinsic ARGUMENT's type for the rules below: the caller's own answer
+  AX when it has one, else the intra-unit typer's (a literal, an operator
+  expression). Both call sites - CrossType's table walk and the table-free
+  WithTargetTypeX - funnel through this so a literal argument types the same
+  way in each: `Abs(2.5)` is Extended by the intra-unit rule, not Currency by
+  the 64-bit literal rule (dcc agrees - Abs of a real literal is a real). }
+function TPasSemaProject.IntrinsicArgX(AMid, AArg: Integer;
+  const AX: TSemaXType): TSemaXType;
+begin
+  Result := AX;
+  if not XValid(Result) and (AArg <> NIL_NODE) and
+     (FModels[AMid].ExprType[AArg] <> NIL_SYM) then
+    Result := XPlain(AMid, FModels[AMid].ExprType[AArg]);
+end;
+
+{ The widened ordinal type dcc gives Pred/Succ/Low/High/Abs of an integer AX:
+  NativeInt keeps its (platform-sized) name, a 64-bit one is Int64 - UInt64
+  included, `Succ(U64)` is an Int64 - and everything narrower (Byte, Word,
+  SmallInt, ShortInt, Cardinal, a subrange type) is Integer. }
+function TPasSemaProject.WidenOrdinalX(AMid: Integer;
+  const AX: TSemaXType): TSemaXType;
+var
+  LC: TSemaXType;
+begin
+  LC := CanonTypeX(AX);
+  if XValid(LC) and (FModels[LC.UnitId].Symbols[LC.Sym].Kind = skBuiltinType)
+  then
+  begin
+    if (FModels[LC.UnitId].Symbols[LC.Sym].NameLower = 'nativeint') or
+       (FModels[LC.UnitId].Symbols[LC.Sym].NameLower = 'nativeuint') then
+      Exit(BuiltinX(AMid, 'nativeint'));
+    if FModels[LC.UnitId].Symbols[LC.Sym].NumRank = 4 then
+      Exit(BuiltinX(AMid, 'int64'));
+  end;
+  Result := BuiltinX(AMid, 'integer');
+end;
+
+{ The nkArrayType definition behind an intrinsic's array argument AArg of
+  type AX: the named type's definition through plain aliases (the same chase
+  ElementX runs), or - for an ANONYMOUS inline array (`A: array of T`), which
+  has no type symbol - the declaring symbol's own type node. }
+function TPasSemaProject.ArrayDefOfX(AMid, AArg: Integer;
+  const AX: TSemaXType; out ADefMid, ADef: Integer): Boolean;
+var
+  LCur: TSemaXType;
+  LDepth, LMid, LSym: Integer;
+begin
+  Result := False;
+  ADefMid := NIL_SYM;
+  ADef := NIL_NODE;
+  LCur := AX;
+  for LDepth := 1 to 32 do
+  begin
+    if not XValid(LCur) then
+      Break;
+    ADef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if ADef = NIL_NODE then
+      Break;
+    case FModels[LCur.UnitId].Tree.Nodes[ADef].Kind of
+      nkArrayType:
+        begin
+          ADefMid := LCur.UnitId;
+          Exit(True);
+        end;
+      nkIdent, nkMember, nkTypeArgs:
+        LCur := ResolveTypeExpr(LCur.UnitId, ADef);   // alias link
+    else
+      Break;
+    end;
+  end;
+  ADef := NIL_NODE;
+  // The inline-array case: the argument names a declaration whose TypeNode
+  // is the array itself.
+  if (AArg <> NIL_NODE) and DesignatorSymX(AMid, AArg, LMid, LSym) and
+     (FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE) and
+     (FModels[LMid].Tree.Nodes[FModels[LMid].Symbols[LSym].TypeNode].Kind =
+      nkArrayType) then
+  begin
+    ADefMid := LMid;
+    ADef := FModels[LMid].Symbols[LSym].TypeNode;
+    Result := True;
+  end;
+end;
+
+{ The type of a STATIC array definition's bounds (its first index dimension,
+  the one Low/High read): an explicit `lo..hi` by its low bound's type -
+  an integer literal is Integer, a character literal Char, True/False
+  Boolean, an enum member its enum; a NAMED index type by the ordinal rule
+  (`array[Word]` bounds are Integer, `array[TEnum]` bounds are TEnum). XNil
+  for a dynamic array (no index child) or a bound this cannot read. }
+function TPasSemaProject.ArrayBoundTypeX(ADefMid, ADef: Integer): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LIdx, LLo: Integer;
+  LX: TSemaXType;
+begin
+  Result := XNil;
+  LM := FModels[ADefMid];
+  LIdx := LM.Tree.Nodes[ADef].FirstChild;
+  if (LIdx = NIL_NODE) or (LM.Tree.Nodes[LIdx].NextSibling = NIL_NODE) then
+    Exit;
+  case LM.Tree.Nodes[LIdx].Kind of
+    nkSubrange:
+      begin
+        LLo := LM.Tree.Nodes[LIdx].FirstChild;
+        if LLo = NIL_NODE then
+          Exit;
+        // A signed literal bound (`-5..5`) is the literal's type; the sign
+        // cannot change an integer bound's category.
+        if (LM.Tree.Nodes[LLo].Kind = nkUnaryOp) and
+           (LM.Tree.Nodes[LLo].FirstChild <> NIL_NODE) then
+          LLo := LM.Tree.Nodes[LLo].FirstChild;
+        case LM.Tree.Nodes[LLo].Kind of
+          nkIntLit:
+            Exit(BuiltinX(ADefMid, 'integer'));
+          nkStrLit, nkCaretChar:
+            Exit(BuiltinX(ADefMid, 'char'));
+          nkIdent, nkMember:
+            begin
+              // An enum member, True/False, or a named constant: its
+              // declared type, widened when it is an integer one.
+              LX := WithTargetTypeX(ADefMid, LLo);
+              case XCatOf(LX) of
+                tcInteger: Exit(WidenOrdinalX(ADefMid, LX));
+                tcEnum, tcChar, tcBoolean: Exit(LX);
+              end;
+            end;
+        end;
+      end;
+    nkIdent, nkMember, nkTypeArgs:
+      begin
+        LX := ResolveTypeExpr(ADefMid, LIdx);
+        case XCatOf(LX) of
+          tcInteger: Exit(WidenOrdinalX(ADefMid, LX));
+          tcEnum, tcChar, tcBoolean: Exit(LX);
+        end;
+      end;
+  end;
+end;
+
+{ The result type of the call ACall to a seeded intrinsic of shape AShape
+  (4.11; the rules are documented on TPasIntrinsicResult and are dcc probes,
+  not the documentation). AArgX are the argument types the caller already
+  has - empty when the shape reads none, else one entry per argument, XNil
+  where the caller could not type one; IntrinsicArgX fills the literal and
+  operator gaps from the intra-unit typer. The seeded `_nil` and Variant
+  operands answer XNil, as does anything a rule cannot read (a bound, a
+  cross-unit array this level does not see) - never a guess. }
+function TPasSemaProject.IntrinsicResultX(AMid, ACall: Integer;
+  AShape: TPasIntrinsicResult; const AArgX: TArray<TSemaXType>): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LArg, LDefMid, LDef, LIdx, LSysUid, LSysSym, LTSym: Integer;
+  LA, LC: TSemaXType;
+  LName: string;
+  LSame, LDyn: Boolean;
+
+  function CanonName(const AX: TSemaXType): string;
+  var
+    LCN: TSemaXType;
+  begin
+    LCN := CanonTypeX(AX);
+    if XValid(LCN) and
+       (FModels[LCN.UnitId].Symbols[LCN.Sym].Kind = skBuiltinType) then
+      Result := FModels[LCN.UnitId].Symbols[LCN.Sym].NameLower
+    else
+      Result := '';
+  end;
+
+  // `array of T` (no index child, not `array of const`).
+  function IsDynDef: Boolean;
+  var
+    LFirst: Integer;
+  begin
+    LFirst := FModels[LDefMid].Tree.Nodes[LDef].FirstChild;
+    Result := (LFirst <> NIL_NODE) and
+      (FModels[LDefMid].Tree.Nodes[LFirst].NextSibling = NIL_NODE) and
+      (FModels[LDefMid].Tree.Nodes[LDef].Aux <> 1);
+  end;
+
+begin
+  Result := XNil;
+  LM := FModels[AMid];
+  // The first argument: a bare parameterless intrinsic (`Pi`) arrives as the
+  // nkIdent/nkMember itself and has none.
+  LArg := NIL_NODE;
+  if LM.Tree.Nodes[ACall].Kind = nkCall then
+  begin
+    LArg := LM.Tree.Nodes[ACall].FirstChild;   // the callee
+    if LArg <> NIL_NODE then
+      LArg := LM.Tree.Nodes[LArg].NextSibling; // the first argument
+  end;
+  LA := XNil;
+  if (LArg <> NIL_NODE) and (Length(AArgX) > 0) then
+    LA := IntrinsicArgX(AMid, LArg, AArgX[0]);
+  // A VALUE-taking intrinsic whose argument resolved to a TYPE NAME is a
+  // mis-binding, not a value of that type - a member named `Word` that Phase
+  // 1 bound to the builtin (see TPasSemaTyper.CheckAssign). Only Low/High/
+  // Default/SizeOf/TypeInfo take a type; for the others it means "do not
+  // know" - `Copy(Word, 1, I)` typed as the integer Word was a false E2010.
+  if XValid(LA) and (AShape in [irLength, irAbs, irSqr, irOrdinal, irSwap,
+       irFirstArg, irConcat]) and
+     DesignatorSymX(AMid, LArg, LDefMid, LTSym) and
+     (FModels[LDefMid].Symbols[LTSym].Kind in [skType, skBuiltinType]) then
+    Exit;
+  case AShape of
+    irInteger:  Result := BuiltinX(AMid, 'integer');
+    irInt64:    Result := BuiltinX(AMid, 'int64');
+    irBoolean:  Result := BuiltinX(AMid, 'boolean');
+    irChar:     Result := BuiltinX(AMid, 'char');
+    irExtended: Result := BuiltinX(AMid, 'extended');
+    irPointer:  Result := BuiltinX(AMid, 'pointer');
+    irTypeKind:
+      if FindInSystemUnit('ttypekind', LSysUid, LSysSym) then
+        Result := XPlain(LSysUid, LSysSym);
+    irLength:
+      begin
+        Result := BuiltinX(AMid, 'integer');
+        if (XCatOf(LA) = tcArray) or not XValid(LA) then
+          if ArrayDefOfX(AMid, LArg, LA, LDefMid, LDef) and IsDynDef then
+            Result := BuiltinX(AMid, 'nativeint');
+      end;
+    irAbs:
+      case XCatOf(LA) of
+        tcInteger: Result := WidenOrdinalX(AMid, LA);
+        tcFloat:
+          begin
+            LName := CanonName(LA);
+            if FInfo.Is64Bit and ((LName = 'currency') or (LName = 'comp'))
+            then
+              Result := LA
+            else
+              Result := BuiltinX(AMid, 'extended');
+          end;
+      end;
+    irSqr:
+      case XCatOf(LA) of
+        tcInteger:
+          begin
+            LC := CanonTypeX(LA);
+            LName := CanonName(LA);
+            if XValid(LC) and (LName <> '') and
+               ((FModels[LC.UnitId].Symbols[LC.Sym].NumRank = 4) or
+                (LName = 'cardinal') or (LName = 'longword') or
+                (LName = 'nativeint') or (LName = 'nativeuint')) then
+              Result := LA
+            else
+              Result := BuiltinX(AMid, 'integer');
+          end;
+        tcFloat: Result := BuiltinX(AMid, 'extended');
+      end;
+    irOrdinal:
+      case XCatOf(LA) of
+        tcInteger: Result := WidenOrdinalX(AMid, LA);
+        tcEnum, tcChar, tcBoolean: Result := LA;
+      end;
+    irBounds:
+      case XCatOf(LA) of
+        tcInteger: Result := WidenOrdinalX(AMid, LA);
+        tcEnum, tcChar, tcBoolean: Result := LA;
+        tcString: Result := BuiltinX(AMid, 'integer');
+        tcArray, tcUnknown:
+          if ArrayDefOfX(AMid, LArg, LA, LDefMid, LDef) then
+          begin
+            if IsDynDef then
+            begin
+              // Low is Integer, High NativeInt: the callee's NAME decides,
+              // read off the callee node (`High(A)` or `System.High(A)`).
+              LArg := LM.Tree.Nodes[ACall].FirstChild;
+              if LM.Tree.Nodes[LArg].Kind = nkMember then
+              begin
+                LArg := LM.Tree.Nodes[LArg].FirstChild;
+                while (LArg <> NIL_NODE) and
+                      (LM.Tree.Nodes[LArg].NextSibling <> NIL_NODE) do
+                  LArg := LM.Tree.Nodes[LArg].NextSibling;
+              end;
+              if (LArg <> NIL_NODE) and (LM.Tree.Nodes[LArg].Kind = nkIdent)
+                 and (LM.Tree.NodeNameLower(LArg) = 'high') then
+                Result := BuiltinX(AMid, 'nativeint')
+              else
+                Result := BuiltinX(AMid, 'integer');
+            end
+            else
+              Result := ArrayBoundTypeX(LDefMid, LDef);
+          end;
+      end;
+    irSwap:
+      if XCatOf(LA) = tcInteger then
+      begin
+        LC := CanonTypeX(LA);
+        LName := CanonName(LA);
+        if (LName <> '') and (LName <> 'nativeint') and
+           (LName <> 'nativeuint') and
+           (FModels[LC.UnitId].Symbols[LC.Sym].NumRank in [2, 3]) then
+          Result := LA
+        else
+          Result := BuiltinX(AMid, 'integer');
+      end;
+    irFirstArg:
+      if XCatOf(LA) in [tcString, tcArray, tcInteger, tcPointer] then
+        Result := LA;
+    irConcat:
+      begin
+        if not XValid(LA) then
+          Exit;
+        // One type throughout, or `string`.
+        LSame := True;
+        LIdx := 1;
+        LArg := LM.Tree.Nodes[LArg].NextSibling;
+        while LArg <> NIL_NODE do
+        begin
+          if LIdx < Length(AArgX) then
+            LC := IntrinsicArgX(AMid, LArg, AArgX[LIdx])
+          else
+            LC := IntrinsicArgX(AMid, LArg, XNil);
+          if not XSameType(LC, LA) then
+            LSame := False;
+          Inc(LIdx);
+          LArg := LM.Tree.Nodes[LArg].NextSibling;
+        end;
+        case XCatOf(LA) of
+          tcArray:
+            if LSame then
+              Result := LA;
+          tcString:
+            if not LSame then
+              Result := BuiltinX(AMid, 'string')
+            else if CanonName(LA) = 'shortstring' then
+              Result := BuiltinX(AMid, 'ansistring')
+            else
+              Result := LA;
+          tcChar:
+            if LSame and (CanonName(LA) = 'ansichar') then
+              Result := BuiltinX(AMid, 'shortstring')
+            else
+              Result := BuiltinX(AMid, 'string');
+        end;
+      end;
+    irDefault:
+      begin
+        // The argument is a TYPE name; a value there is dcc's own error.
+        if not XValid(LA) or
+           not (FModels[LA.UnitId].Symbols[LA.Sym].Kind in
+                [skType, skBuiltinType]) then
+          Exit;
+        case XCatOf(LA) of
+          tcClass, tcInterface, tcPointer, tcProc, tcClassOf:
+            Result := BuiltinX(AMid, 'pointer');
+          tcArray:
+            begin
+              LDyn := ArrayDefOfX(AMid, NIL_NODE, LA, LDefMid, LDef) and
+                IsDynDef;
+              if LDyn then
+                Result := BuiltinX(AMid, 'pointer')
+              else if LDef <> NIL_NODE then
+                Result := LA;
+            end;
+          tcUnknown: ;
+        else
+          Result := LA;
+        end;
+      end;
+  end;
+end;
+
 { Is ANode a literal with an optional sign in front - `5`, `-5`, `+1.5`?
   ALit is the literal node itself, ANegated whether a `-` applies. The sign is
   part of what dcc folds before it picks the literal's type (`-2147483648` is
@@ -11222,6 +11659,8 @@ var
   LBase, LName, LSym, LMemMid, LMemSym, LCtx: Integer;
   LExt: TPasExtRef;
   LBX: TSemaXType;
+  LIntrShape: TPasIntrinsicResult;
+  LIntrArgs: TArray<TSemaXType>;
 begin
   Result := XNil;
   if ANode = NIL_NODE then
@@ -11323,6 +11762,37 @@ begin
           if XValid(Result) then
             Exit;
         end;
+        // A seeded intrinsic (4.11): `const N = Length(CArr)` typed by the
+        // table-free BindTypesX pass, `with Default(TRec) do`. The callee's
+        // declared type is nothing (the seed has none), so the recursion
+        // below cannot answer; the shape rules can, from the arguments typed
+        // the same table-free way.
+        if (LBase <> NIL_NODE) and
+           DesignatorSymX(AId, LBase, LMemMid, LMemSym) and
+           IsIntrinsicRoutine(LMemMid, LMemSym, LIntrShape) then
+        begin
+          LIntrArgs := nil;
+          if PasIntrinsicReadsArgs(LIntrShape) then
+          begin
+            LName := LM.Tree.Nodes[LBase].NextSibling;
+            LSym := 0;
+            while LName <> NIL_NODE do
+            begin
+              Inc(LSym);
+              LName := LM.Tree.Nodes[LName].NextSibling;
+            end;
+            SetLength(LIntrArgs, LSym);
+            LName := LM.Tree.Nodes[LBase].NextSibling;
+            LSym := 0;
+            while LName <> NIL_NODE do
+            begin
+              LIntrArgs[LSym] := WithTargetTypeX(AId, LName);
+              Inc(LSym);
+              LName := LM.Tree.Nodes[LName].NextSibling;
+            end;
+          end;
+          Exit(IntrinsicResultX(AId, ANode, LIntrShape, LIntrArgs));
+        end;
         Result := WithTargetTypeX(AId, LBase);
       end;
 
@@ -11385,7 +11855,16 @@ begin
         end;
         LSym := LM.RefMap[ANode];
         if LSym <> NIL_SYM then
+        begin
           Result := SymDeclTypeX(AId, LSym);
+          // A parameterless intrinsic written bare (`const C = Pi;`) is a
+          // call without its parentheses (4.11); the seed has no type of
+          // its own to read.
+          if not XValid(Result) and
+             IsIntrinsicRoutine(AId, LSym, LIntrShape) and
+             not PasIntrinsicReadsArgs(LIntrShape) then
+            Exit(IntrinsicResultX(AId, ANode, LIntrShape, nil));
+        end;
         // A type ALREADY recorded for this ident, when the symbol did not
         // yield one. Two shapes need it, and the second is why this is a
         // FALLBACK rather than an else-branch:

@@ -967,7 +967,7 @@ end;
 
 procedure TPasSemaResolver.CollectEnum(ANode, AOuter, ATypeSym: Integer);
 var
-  LEnum, LChild, LName, LVal: Integer;
+  LEnum, LChild, LName, LVal, LSym: Integer;
 begin
   // Each enum gets its own scope, so values of different enums never share a
   // scope (no false redeclaration). The scope is also joined into the
@@ -1007,7 +1007,17 @@ begin
     begin
       LName := FirstChild(LChild);
       if (LName <> NIL_NODE) and (KindOf(LName) = nkIdent) then
-        DeclareSym(LEnum, skEnumValue, NodeText(LName), LName);
+      begin
+        // A value of a NAMED enum is typed as that enum (2.2.4) - it is a
+        // constant of the type, and the two typers read TypeSym for a
+        // constant's type. Without this a bare `cRed` had no type anywhere:
+        // `var C := cRed` inferred nothing and `Pred(cBlue)` could not apply
+        // the ordinal rule (4.11). An anonymous enum's values keep no type -
+        // the type has no symbol to name.
+        LSym := DeclareSym(LEnum, skEnumValue, NodeText(LName), LName);
+        if ATypeSym <> NIL_SYM then
+          FModel.Symbols[LSym].TypeSym := ATypeSym;
+      end;
       LVal := NextSib(LName);
       while LVal <> NIL_NODE do
       begin
