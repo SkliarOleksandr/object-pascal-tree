@@ -523,19 +523,66 @@ const
     '  public'#10 +                            // 32
     '    property Properties: TProps read GetProps;'#10 + // 33 Properties col 14
     '  end;'#10 +                              // 34
-    'implementation'#10 +                      // 35
-    'procedure TItems.Clear;'#10 +             // 36
-    'begin'#10 +                               // 37
-    'end;'#10 +                                // 38
-    'function TItems.Add: TItem;'#10 +         // 39
-    'begin'#10 +                               // 40
-    '  Result := nil;'#10 +                    // 41
-    'end;'#10 +                                // 42
-    'function TBox.GetProps: TProps;'#10 +     // 43
-    'begin'#10 +                               // 44
-    '  Result := nil;'#10 +                    // 45
-    'end;'#10 +                                // 46
-    'end.'#10;                                 // 47
+    // Value shapes CrossType's walk had no case for (all three typed to
+    // nothing across units): an ARRAY PROPERTY indexed, a DEFAULT array
+    // property, an explicit `^` dereference, and an `as` cast in parens.
+    '  PRec = ^TRec;'#10 +                     // 35
+    '  TRec = record'#10 +                     // 36
+    '    Code: Integer;'#10 +                  // 37 Code col 5
+    '  end;'#10 +                              // 38
+    '  TIdx = class'#10 +                      // 39
+    '  private'#10 +                           // 40
+    '    function GetF(I: Integer): TItem;'#10 + // 41
+    '    function GetA(I: Integer): TRec;'#10 + // 42
+    '  public'#10 +                            // 43
+    '    P: PRec;'#10 +                        // 44 P col 5
+    '    property Fields[I: Integer]: TItem read GetF;'#10 + // 45
+    '    property Recs[I: Integer]: TRec read GetA; default;'#10 + // 46
+    '  end;'#10 +                              // 47
+    // Multi-dimensional indexing (one nkIndex per bracket pair, one level
+    // per index expression) and an array type NESTED in a generic, read
+    // off a bare inherited member - both shapes the first indexing typer
+    // got wrong on a real corpus (17 false E2003 in five library units).
+    '  TRecArr = array of TRec;'#10 +          // 48
+    '  TGenMap<TValue> = class'#10 +           // 49
+    '  public type'#10 +                       // 50
+    '    TTable = array of TValue;'#10 +       // 51
+    '  public'#10 +                            // 52
+    '    Table: TTable;'#10 +                  // 53
+    '  end;'#10 +                              // 54
+    '  TObjMap = class(TGenMap<TItem>)'#10 +   // 55
+    '    procedure Drop;'#10 +                 // 56
+    '  end;'#10 +                              // 57
+    '  TGrid = class'#10 +                     // 58
+    '  public'#10 +                            // 59
+    '    Rows: array of TRecArr;'#10 +         // 60
+    '    Cells: array[0..3, 0..3] of TRec;'#10 + // 61
+    '  end;'#10 +                              // 62
+    'implementation'#10 +                      // 63
+    'procedure TItems.Clear;'#10 +             // 64
+    'begin'#10 +                               // 65
+    'end;'#10 +                                // 66
+    'function TItems.Add: TItem;'#10 +         // 67
+    'begin'#10 +                               // 68
+    '  Result := nil;'#10 +                    // 69
+    'end;'#10 +                                // 70
+    'function TIdx.GetF(I: Integer): TItem;'#10 + // 71
+    'begin'#10 +                               // 72
+    '  Result := nil;'#10 +                    // 73
+    'end;'#10 +                                // 74
+    'function TIdx.GetA(I: Integer): TRec;'#10 + // 75
+    'begin'#10 +                               // 76
+    '  Result.Code := 0;'#10 +                 // 77
+    'end;'#10 +                                // 78
+    'procedure TObjMap.Drop;'#10 +             // 79
+    'begin'#10 +                               // 80
+    '  Table[0].Description := '''';'#10 +     // 81 Description col 12
+    'end;'#10 +                                // 82
+    'function TBox.GetProps: TProps;'#10 +     // 83
+    'begin'#10 +                               // 84
+    '  Result := nil;'#10 +                    // 85
+    'end;'#10 +                                // 86
+    'end.'#10;                                 // 87
   UNIT_F =
     'unit NavF;'#10 +                          // 1
     'interface'#10 +                           // 2
@@ -548,7 +595,19 @@ const
     '  Box.Properties.Items.Add.Description := '''';'#10 + // 9  Add col 24,
                                                 //    Description col 28
     'end;'#10 +                                // 10
-    'end.'#10;                                 // 11
+    'procedure Idx(X: TIdx; Obj: TObject; G: TGrid);'#10 + // 11
+    'begin'#10 +                               // 12
+    '  X.Fields[0].Description := '''';'#10 +  // 13 Description col 15
+    '  var F := X.Fields[1];'#10 +             // 14
+    '  F.Description := '''';'#10 +            // 15 Description col 5
+    '  X[0].Code := 1;'#10 +                   // 16 Code col 8
+    '  X.P^.Code := 2;'#10 +                   // 17 Code col 8
+    '  (Obj as TIdx).P.Code := 3;'#10 +        // 18 P col 17, Code col 19
+    '  G.Rows[0][1].Code := 4;'#10 +           // 19 Code col 16
+    '  G.Rows[0, 1].Code := 5;'#10 +           // 20 Code col 16
+    '  G.Cells[1, 2].Code := 6;'#10 +          // 21 Code col 17
+    'end;'#10 +                                // 22
+    'end.'#10;                                 // 23
 
   UNIT_B =
     'unit NavB;'#10 +                          // 1
@@ -1566,6 +1625,29 @@ begin
         'NavPromo.pas', 11, 14);
       CheckNav('bare redecl: member of Add''s result', 9, 28, 'Description',
         'NavPromo.pas', 6, 5);
+      // REGRESSION: value shapes with no CrossType case (UNIT_PROMO's TIdx).
+      CheckNav('index: array property, member of result', 13, 15,
+        'Description', 'NavPromo.pas', 6, 5);
+      CheckNav('index: array property through inline var', 15, 5,
+        'Description', 'NavPromo.pas', 6, 5);
+      CheckNav('index: default array property', 16, 8, 'Code',
+        'NavPromo.pas', 37, 5);
+      CheckNav('deref: explicit caret', 17, 8, 'Code', 'NavPromo.pas', 37, 5);
+      CheckNav('as-cast in parens: member', 18, 17, 'P', 'NavPromo.pas', 44, 5);
+      CheckNav('as-cast in parens: implicit deref', 18, 19, 'Code',
+        'NavPromo.pas', 37, 5);
+      CheckNav('index: chained brackets, named row type', 19, 16, 'Code',
+        'NavPromo.pas', 37, 5);
+      CheckNav('index: comma indices over nested arrays', 20, 16, 'Code',
+        'NavPromo.pas', 37, 5);
+      CheckNav('index: two-dimensional inline array', 21, 17, 'Code',
+        'NavPromo.pas', 37, 5);
+      // REGRESSION: the generic frame of a bare inherited member whose type
+      // is NESTED in the generic ancestor - `Table[0]` peeled to the open
+      // TValue without it (see the nkIdent case in CrossType).
+      GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavPromo.pas'));
+      CheckNav('generic frame: nested array type off inherited member', 81, 12,
+        'Description', 'NavPromo.pas', 6, 5);
       GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavMain.dpr'));
       // Either segment of the dotted, namespace-prefixed name opens the file.
       CheckNav('project uses: Deep.NavX -> namespace-prefixed file', 2, 27,

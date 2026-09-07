@@ -532,6 +532,12 @@ type
     function ParamlessOverloadX(const AX: TSemaXType;
       const ANameLower: string; out AMid, ASym, ACtx: Integer): Boolean;
     function ElementX(AId, ABaseNode: Integer): TSemaXType;
+    { The type of `Base[i1, .., iN]` - ACount index levels peeled off the
+      base's type (or, when that type is an inline array on the base's own
+      declaration, off that node). See the implementation for why ElementX,
+      which peels to the INNERMOST element regardless of count, is not it. }
+    function IndexResultX(AId, ABaseNode: Integer; const ABaseX: TSemaXType;
+      ACount: Integer): TSemaXType;
     function BuiltinX(AMid: Integer; const ANameLower: string): TSemaXType;
     function IsIntrinsicRoutine(AMid, ASym: Integer;
       out AShape: TPasIntrinsicResult): Boolean;
@@ -663,6 +669,14 @@ type
     function OracleLength(AMid, ASym: Integer; out ALen: Double): Boolean;
     function SymbolQueryFor(AId: Integer): TPasCondSymbolQuery;
     function DeclaredWithinX(AMid, ASym, AOwnerMid, AOwnerSym: Integer): Boolean;
+    // Is AX a type declared inside a GENERIC struct (so its definition may be
+    // written in that struct's open parameters)? See the nkIdent case in
+    // CrossType for why a frameless one is worth a second look.
+    function NestedInGenericX(const AX: TSemaXType): Boolean;
+    // Does AX mention an OPEN generic parameter - itself, or through any
+    // argument of its instantiation (`TdxEnumeratedMap<TValue>` read off a
+    // member declared in a generic ancestor)?
+    function OpenX(const AX: TSemaXType; ADepth: Integer = 0): Boolean;
     function PreferNonGeneric(AId, AMid, ASym,
       ANameNode: Integer): TSemaXType;
     function TypeSlotByNameX(AMid, ANode: Integer): TSemaXType;
@@ -6213,6 +6227,45 @@ begin
   Result := sfGeneric in FModels[AMid].Symbols[ASym].Flags;
 end;
 
+function TPasSemaProject.OpenX(const AX: TSemaXType; ADepth: Integer): Boolean;
+var
+  LArg: TSemaXType;
+begin
+  Result := False;
+  if not XValid(AX) or (ADepth > 8) then
+    Exit;
+  if FModels[AX.UnitId].Symbols[AX.Sym].Kind = skGenericParam then
+    Exit(True);
+  if AX.Inst = NIL_INST then
+    Exit;
+  for LArg in InstanceRead(AX.Inst).Args do
+    if OpenX(LArg, ADepth + 1) then
+      Exit(True);
+end;
+
+function TPasSemaProject.NestedInGenericX(const AX: TSemaXType): Boolean;
+var
+  LM: TPasSemaModel;
+  LScope, LStruct, LDepth: Integer;
+begin
+  Result := False;
+  if not XValid(AX) then
+    Exit;
+  LM := FModels[AX.UnitId];
+  if LM.Symbols[AX.Sym].Kind <> skType then
+    Exit;
+  LScope := LM.Symbols[AX.Sym].Scope;
+  for LDepth := 1 to 16 do
+  begin
+    if LScope = NIL_SCOPE then
+      Exit;
+    LStruct := LM.Scopes[LScope].StructSym;
+    if (LStruct <> NIL_SYM) and IsGenericTypeSym(AX.UnitId, LStruct) then
+      Exit(True);
+    LScope := LM.Scopes[LScope].Parent;
+  end;
+end;
+
 function TPasSemaProject.ResolveTypeExpr(AId, ANode: Integer;
   ABare: Boolean = True): TSemaXType;
 var
@@ -8067,6 +8120,36 @@ var
                 (FModels[LExt.UnitId].Symbols[LExt.Sym].TypeNode = NIL_NODE);
   end;
 
+  // Does N name an ARRAY PROPERTY (`property Fields[I: Integer]: T`)? Same
+  // last-segment-then-two-maps reading as above; the nkIndex case needs it
+  // because such a property's declared type is already the indexing's result.
+  function IsArrayPropertyDesignator(N: Integer): Boolean;
+  var
+    LSym, LName: Integer;
+    LExt: TPasExtRef;
+  begin
+    Result := False;
+    if not (LM.Tree.Nodes[N].Kind in [nkIdent, nkMember]) then
+      Exit;
+    LName := N;
+    if LM.Tree.Nodes[N].Kind = nkMember then
+    begin
+      LName := LM.Tree.Nodes[N].FirstChild;
+      while (LName <> NIL_NODE) and
+            (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
+        LName := LM.Tree.Nodes[LName].NextSibling;
+      if LName = NIL_NODE then
+        Exit;
+    end;
+    LSym := LM.RefMap[LName];
+    if LSym <> NIL_SYM then
+      Result := (LM.Symbols[LSym].Kind = skProperty) and
+                PropertyHasParams(AId, LSym)
+    else if ExtOf(LName, LExt) then
+      Result := (FModels[LExt.UnitId].Symbols[LExt.Sym].Kind = skProperty) and
+                PropertyHasParams(LExt.UnitId, LExt.Sym);
+  end;
+
   // Does N name a TYPE rather than a value? Same question SelectCallTarget's
   // own class-vs-instance test asks, and the same two maps answer it.
   function IsTypeDesignator(N: Integer): Boolean;
@@ -8987,8 +9070,24 @@ var
           // Gated on what we computed being an open parameter (or nothing)
           // rather than probing ExprTypeX for every identifier: that lookup is
           // on this walk's hot path and the common ident is neither.
-          if (not XValid(LX[N])) or
-             (FModels[LX[N].UnitId].Symbols[LX[N].Sym].Kind = skGenericParam) then
+          //
+          // The same frame loss one step removed: a bare name whose declared
+          // type is a type NESTED in the generic ancestor (`property
+          // ValueTable: TValueTable`, with `TValueTable = array of TValue`
+          // declared inside `TGenMap<TValue>`). The type is no parameter
+          // itself, so the gate above let it through frameless, and
+          // `ValueTable[K].Free` in a `class(TGenMap<TObject>)` descendant's
+          // method peeled to the OPEN TValue and reported Free undeclared -
+          // 7 sites in one component suite, surfaced when indexing was first
+          // typed at all. Same fallback, gated on the type living inside a
+          // generic (a scope walk, no dictionary probe for the common ident).
+          // And the frame lost INSIDE an instantiation: `Map:
+          // TdxEnumeratedMap<TValue>` on a generic ancestor reads as an
+          // instance whose argument is the OPEN TValue, so
+          // `Map.ValueTable[I].WordMLValue` peeled to that parameter (7
+          // sites, same suite) - OpenX looks through the arguments.
+          if (not XValid(LX[N])) or OpenX(LX[N]) or
+             ((LX[N].Inst = NIL_INST) and NestedInGenericX(LX[N])) then
             if LM.ExprTypeX.TryGetValue(N, LBX) and XValid(LBX) then
               LX[N] := LBX;
         end;
@@ -9257,6 +9356,83 @@ var
               skType, skBuiltinType:
                 LX[N] := GetX(LBase);   // a cast (incl. instantiated generic)
             end;
+        end;
+
+      // `X[I]` - the ONE value shape this walk had no case for. The intra-unit
+      // typer answers when everything is local and the with pass when the
+      // index is a with-target, so a cross-unit `Owner.Fields[I].Visible`
+      // (an array property declared in another unit, then a member of its
+      // result) typed to nothing and every member behind the brackets was
+      // dark for navigation - three sites in one client frame, two of them
+      // behind an inferred inline var. Three answers, in the order they must
+      // be tried:
+      //  - the base names an ARRAY PROPERTY: the brackets consume its
+      //    parameters, and its declared type IS the result (10215 has the
+      //    same rule for `with`);
+      //  - the base's type is a struct with a DEFAULT array property: that
+      //    property's type, closed over the frame it was found in;
+      //  - otherwise an array (or pointer to one): the element type, by the
+      //    same node-based helper `with` uses.
+      nkIndex:
+        begin
+          LBase := LM.Tree.Nodes[N].FirstChild;
+          if LBase <> NIL_NODE then
+          begin
+            LBX := GetX(LBase);
+            if IsArrayPropertyDesignator(LBase) then
+              LX[N] := LBX
+            else
+            begin
+              // One level per index expression: `A[I, J]` is two, `A[I][J]`
+              // two nkIndex nodes of one each.
+              LMemCtx := 0;
+              LChild := LM.Tree.Nodes[LBase].NextSibling;
+              while LChild <> NIL_NODE do
+              begin
+                Inc(LMemCtx);
+                LChild := LM.Tree.Nodes[LChild].NextSibling;
+              end;
+              LX[N] := IndexResultX(AId, LBase, LBX, LMemCtx);
+              // A pointer to an inline array on the base's own declaration
+              // (`Stack: ^TStackArray`, one index) - only the with-target
+              // helper knows that shape; nothing else is delegated to it.
+              if not XValid(LX[N]) and not XValid(LBX) and (LMemCtx = 1) and
+                 XValid(PointeeOfDeclX(AId, LBase)) then
+                LX[N] := ElementX(AId, LBase);
+            end;
+          end;
+        end;
+
+      // `P^` - the pointee. Same two-step reading the with-target typer uses:
+      // an inline `^T` on the base's own declaration has no pointer symbol
+      // to chase, so it is read off the declaration first. The IMPLICIT
+      // dereference (`P.Fmt`, 6.3.1) was already typed by the member walk;
+      // the explicit one, one node deeper, was not - `O.P^.Fmt` and
+      // `var M := O.P^` both lost every member behind the caret.
+      nkDeref:
+        begin
+          LBase := LM.Tree.Nodes[N].FirstChild;
+          if LBase <> NIL_NODE then
+          begin
+            LX[N] := PointeeOfDeclX(AId, LBase);
+            if not XValid(LX[N]) then
+              LX[N] := PointeeX(GetX(LBase));
+          end;
+        end;
+
+      // `Obj as TOwner` - the CAST's type, the right operand. Only `as`: any
+      // other binary operator yields a value whose members nobody walks.
+      // `(Obj as TOwner).Items` and `var K := Obj as TOwner` both typed to
+      // nothing here while `with Obj as TOwner do` worked, because only the
+      // with-target typer had the case.
+      nkBinaryOp:
+        if (LM.Tree.Nodes[N].Aux >= 0) and
+           (LM.Tree.Source.VisibleToken(LM.Tree.Nodes[N].Aux).Kind = tkAs) then
+        begin
+          LBase := LM.Tree.Nodes[N].FirstChild;
+          if LBase <> NIL_NODE then
+            LX[N] := ResolveTypeExprNested(AId,
+              LM.Tree.Nodes[LBase].NextSibling);
         end;
 
       nkInlineIf:
@@ -10419,6 +10595,171 @@ begin
             FModels[LCur.UnitId].Symbols[LCand].TypeNode), LCur.Inst, 0));
       end;
     LCur := AncestorOfX(LCur);
+  end;
+end;
+
+{ `Base[i1, .., iN]` as a VALUE - the type ACount index levels down.
+
+  ElementX is the with-target helper and deliberately peels an inline array to
+  its INNERMOST element whatever the index count ("over-eager by one level in a
+  shape too rare to model" - rare for `with`, not for values). Used for values
+  it typed `A2[I][J]` wrongly at the FIRST bracket (`A2: array of TRecArr` -
+  the inner index came back TRec, the outer one had nothing to peel) and
+  `EnumAliases[Hash, I]` short (one level off `array[Byte] of TArray<T>`,
+  then `.TypeInfo` looked up on the TArray) - 17 false E2003 across five
+  library units the moment CrossType started typing indexing at all.
+
+  So this one counts. Each nkArrayType node consumes as many levels as it has
+  dimensions (`array of T` one, `array[a, b] of T` two, `array of array of T`
+  one per nesting), a named array type is chased to its definition and its
+  generic frame carried along (`TArray<T>` closed over the instance), a string
+  indexes to Char, a struct with a default array property indexes to that
+  property's type, and a base declared with an inline array (no nameable type)
+  starts from its own TypeNode. XNil for anything else, and for a count that
+  stops INSIDE an inline nesting - that row type is anonymous and has no
+  symbol to answer with; typing it wrongly is what this replaces. }
+function TPasSemaProject.IndexResultX(AId, ABaseNode: Integer;
+  const ABaseX: TSemaXType; ACount: Integer): TSemaXType;
+var
+  LRemaining: Integer;
+
+  // Dimensions of one nkArrayType node: its children minus the element.
+  function DimsOf(AMid, ANode: Integer): Integer;
+  var
+    LChild: Integer;
+  begin
+    Result := 0;
+    LChild := FModels[AMid].Tree.Nodes[ANode].FirstChild;
+    while LChild <> NIL_NODE do
+    begin
+      Inc(Result);
+      LChild := FModels[AMid].Tree.Nodes[LChild].NextSibling;
+    end;
+    // `array of T` has the element child only; `array of const` has none.
+    if Result <= 1 then
+      Result := 1
+    else
+      Dec(Result);
+  end;
+
+  // Peel LRemaining levels off an nkArrayType node, descending through inline
+  // nestings; the type reached (closed over AInst) when the levels ran out
+  // exactly at a named element, XNil otherwise.
+  function PeelArrayNode(AMid, ANode, AInst: Integer): TSemaXType;
+  var
+    LDims, LLast, LChild, LSysUid, LSysSym: Integer;
+  begin
+    Result := XNil;
+    while (ANode <> NIL_NODE) and
+          (FModels[AMid].Tree.Nodes[ANode].Kind = nkArrayType) do
+    begin
+      if FModels[AMid].Tree.Nodes[ANode].Aux = 1 then
+      begin
+        // 6.2.6: `array of const` indexes to System.TVarRec.
+        Dec(LRemaining);
+        if (LRemaining = 0) and FindInSystemUnit('tvarrec', LSysUid, LSysSym)
+        then
+          Result := XPlain(LSysUid, LSysSym);
+        Exit;
+      end;
+      LDims := DimsOf(AMid, ANode);
+      if LDims > LRemaining then
+        Exit;   // stopped inside a multi-dimensional array: an anonymous row
+      Dec(LRemaining, LDims);
+      LLast := NIL_NODE;
+      LChild := FModels[AMid].Tree.Nodes[ANode].FirstChild;
+      while LChild <> NIL_NODE do
+      begin
+        LLast := LChild;
+        LChild := FModels[AMid].Tree.Nodes[LChild].NextSibling;
+      end;
+      if LLast = NIL_NODE then
+        Exit;
+      if FModels[AMid].Tree.Nodes[LLast].Kind = nkArrayType then
+      begin
+        if LRemaining = 0 then
+          Exit;   // the remaining nesting is anonymous
+        ANode := LLast;
+        Continue;
+      end;
+      Exit(SubstX(ResolveTypeExpr(AMid, LLast), AInst, 0));
+    end;
+  end;
+
+var
+  LCur, LOwner: TSemaXType;
+  LM: TPasSemaModel;
+  LMid, LSym, LDef, LDepth: Integer;
+begin
+  Result := XNil;
+  if ACount <= 0 then
+    Exit;
+  LRemaining := ACount;
+  LCur := ABaseX;
+  // A base whose declaration carries an inline array (`Inl: array of array of
+  // TRec`, `Fixed: array[0..3, 0..3] of TRec`) has no nameable type - the
+  // member typer answers XNil for it - so the peel starts at its TypeNode.
+  if not XValid(LCur) then
+  begin
+    if not DesignatorSymX(AId, ABaseNode, LMid, LSym) then
+      Exit;
+    LDef := FModels[LMid].Symbols[LSym].TypeNode;
+    if (LDef = NIL_NODE) or
+       (FModels[LMid].Tree.Nodes[LDef].Kind <> nkArrayType) then
+      Exit;
+    LCur := PeelArrayNode(LMid, LDef, NIL_INST);
+  end;
+  for LDepth := 1 to 32 do
+  begin
+    if not XValid(LCur) then
+      Exit(XNil);
+    if LRemaining = 0 then
+      Exit(LCur);
+    LM := FModels[LCur.UnitId];
+    if LM.Symbols[LCur.Sym].Kind = skBuiltinType then
+    begin
+      // A string indexes to Char (ch.05: `S[I]`); nothing else builtin does.
+      if XCatOf(LCur) = tcString then
+      begin
+        Dec(LRemaining);
+        LCur := BuiltinX(AId, 'char');
+        Continue;
+      end;
+      Exit(XNil);
+    end;
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if LDef = NIL_NODE then
+      Exit(XNil);
+    // A generic declaration's def child follows its parameter list.
+    if LM.Tree.Nodes[LDef].Kind = nkGenericParams then
+      LDef := LM.Tree.Nodes[LDef].NextSibling;
+    if LDef = NIL_NODE then
+      Exit(XNil);
+    case LM.Tree.Nodes[LDef].Kind of
+      nkStringType:
+        begin
+          Dec(LRemaining);
+          LCur := BuiltinX(AId, 'char');
+        end;
+      nkArrayType:
+        LCur := PeelArrayNode(LCur.UnitId, LDef, LCur.Inst);
+      nkIdent, nkMember, nkTypeArgs:
+        LCur := SubstX(ResolveTypeExpr(LCur.UnitId, LDef), LCur.Inst, 0);
+      nkClassType, nkRecordType, nkInterfaceType, nkObjectType:
+        begin
+          // `L[I]` over a default array property: the property's type, closed
+          // over the frame the property was found in (TObjectList<TAttr>'s,
+          // two hops above `Items: T` - see DefaultArrayPropX). One level:
+          // a multi-parameter default property is written with commas, and
+          // its parameters are all consumed here as one.
+          if not DefaultArrayPropX(LCur, LMid, LSym, LOwner) then
+            Exit(XNil);
+          Dec(LRemaining);
+          LCur := SubstX(SymDeclTypeX(LMid, LSym), LOwner.Inst, 0);
+        end;
+    else
+      Exit(XNil);
+    end;
   end;
 end;
 
