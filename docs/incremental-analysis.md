@@ -458,6 +458,49 @@ models, 2.7 s at 1260 - it scales with the closure walked, not with the
 models redone) - that fixed part is the next lead, not the ceiling.
 `ModuleRedoLimit` stays as a property for a host with a measured reason.
 
+**B3. DONE (0.20.2) - the "fixed part" was one unit, and it is gone.** Two
+findings, both from per-model timing inside the passes rather than from the
+stage totals:
+
+- The module path ran every pass as a sequential loop over the redone set
+  while the full pipeline farms the same compute out to the workers. It now
+  uses the same parallel-compute / sequential-commit shape for every stage
+  (`CrossResolve`, the decl rounds, `inherited`, the with rounds, the call
+  checks, `CrossType`, visibility), the consumers' Phase-1 re-analysis
+  included, with the deferred-write buffers the full drivers use so no
+  worker rehashes a dictionary under a sibling's read.
+- Parallel or not, one model set the wall: the main form unit took 1.2 s of
+  the full pipeline's 1.5 s `inherited` stage and 2.0-2.6 s on the module
+  path, for a work list of only 9313 candidates. The split was `FindInUses`
+  - a walk over the unit's several hundred `uses` entries per name, 6952
+  probes, 1142 ms - and `UnitNameOf`, which rebuilt the leaf of every `uses`
+  name per namespace-qualifier probe (235 ms). Now `ResolveUses` indexes the
+  clause once (`UsesByName`, full name and leaf, first entry wins) and the
+  body passes go through a per-model memo of `FindInUses` answers
+  (`FindInUsesMemo`, misses included) that lives from `PrepareDeclWork` to
+  the end of the run.
+
+- The same stopwatch on the other two body stages said different things.
+  `CrossType` is balanced (6.4 s of worker time over 3759 units, wall 646 ms,
+  largest model 116 ms) - only an algorithmic change moves it. The `with`
+  pass converged in four rounds that bound 50479 / 891 / 18 / 0 names yet
+  cost ~470 ms of worker time EACH: every round re-walked every candidate of
+  every model. A model's verdicts depend only on its own committed bindings
+  (the target types come from its own tree; what they point to elsewhere are
+  declarations, never a with-body node), so `RunWithPass` now walks in round
+  N+1 only the models that committed something in round N and keeps the
+  others' unresolved record from their last walk; the cap's emitting round
+  still walks everything. 677 -> 353 ms.
+
+Measured on the frozen client closure, same steps as B2: 184 / 344 / 432 /
+557 models redo in 1.4 / 1.6 / 1.8 / 2.2 s (was 3.7 / 4.7 / 5.1 / 5.9), the
+`inherited` stage of those runs is 210-253 ms (was 1.6-2.5 s), and the full
+rebuild went from 28-29 to 20 s (`xresolve` 1081 -> 180 ms, `inherited` 1570
+-> 961 ms, `with` 677 -> 353 ms; the project tool's run 7.8 -> 5.5 s).
+Byte-identical on the shadow and name-deps scripts, the `-members` reports
+of the client and the flat RTL/VCL/FMX corpora identical to the run before,
+the client diagnostic floor of 7 held.
+
 Measured at the same time and rejected: the lazy per-model identifier set.
 With the added-name scan on, `select` on the 1260-model reach is 54-77 ms;
 with no added name it is 49-73 ms. The scan is inside the noise, and the set

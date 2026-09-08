@@ -208,6 +208,12 @@ type
       array carries capacity slack), drained by the decl pass. }
     FDeclWork: TArray<TArray<Integer>>;
     FDeclWorkCount: TArray<Integer>;
+    { Per-model memo of FindInUses answers (misses included, UnitId = -1) for
+      the body passes - see FindInUsesMemo. Same lifetime as FDeclWork: sized
+      and emptied by PrepareDeclWork at the start of every run's cross passes,
+      dropped by ReleaseCrossWork. One slot per model, OWNER-only: only the
+      worker processing model i reads or creates slot i. }
+    FUsesMemo: TArray<TDictionary<string, TPasExtRef>>;
     // Set by ReleaseTransientMaps; every Analyze* refuses to run after it -
     // see the public method's contract comment.
     FTransientReleased: Boolean;
@@ -567,6 +573,7 @@ type
     procedure EnsureCrossWork(AId: Integer);
     procedure SizeCrossWork(ACount: Integer);
     procedure PrepareDeclWork(ACount: Integer);
+    procedure ReleaseUsesMemo;
     procedure CrossResolveDecl(AId: Integer;
       var APending: TArray<TPasInhPending>; AEmit: Boolean);
     procedure RunDeclPass(ACount: Integer);
@@ -889,6 +896,13 @@ type
     // The cross-unit halves of unqualified name resolution, in the priority
     // order CrossResolve itself uses: uses (last-wins) -> System -> SysInit.
     function FindInUses(AId: Integer; const ANameLower: string;
+      out AUnit, ASym: Integer): Boolean;
+    { FindInUses through the model's memo slot (FUsesMemo). For the body
+      passes ONLY, and only with AId = the model the calling worker owns:
+      the slot is created and written without a lock. Valid for one run's
+      cross passes - the used units' interface scopes are frozen Phase-1
+      state for their duration - and emptied at the next PrepareDeclWork. }
+    function FindInUsesMemo(AId: Integer; const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
     function FindInSystemUnit(const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
@@ -1368,6 +1382,7 @@ end;
 
 destructor TPasSemaProject.Destroy;
 begin
+  ReleaseUsesMemo;
   FByUnitName.Free;
   FSystemUnitLock.Free;
   ClearHelperIdx;
@@ -4279,6 +4294,22 @@ begin
         Format(SF1027_UnitSourceNotFound, [LModel.UsesList[LIdx].NameFull]));
     end;
   end;
+  // The by-name index UnitNameOf reads - see the field. TryAdd in ascending
+  // order keeps the FIRST entry for a name, full name and leaf alike, which
+  // is exactly what the scan's early exit returned.
+  LModel.UsesByName.Free;
+  LModel.UsesByName := TDictionary<string, Integer>.Create(
+    2 * Length(LModel.UsesList));
+  for LIdx := 0 to High(LModel.UsesList) do
+  begin
+    LUid := LModel.UsesList[LIdx].UnitId;
+    if LUid < 0 then
+      Continue;
+    LPath := LowerCase(LModel.UsesList[LIdx].NameFull);
+    LModel.UsesByName.TryAdd(LPath, LUid);
+    LModel.UsesByName.TryAdd(
+      Copy(LPath, LastDelimiter('.', LPath) + 1, MaxInt), LUid);
+  end;
 end;
 
 function TPasSemaProject.UsesUnitOf(AId, ASym: Integer): Integer;
@@ -4319,6 +4350,45 @@ begin
     end;
   end;
   Result := False;
+end;
+
+function TPasSemaProject.FindInUsesMemo(AId: Integer; const ANameLower: string;
+  out AUnit, ASym: Integer): Boolean;
+var
+  LExt: TPasExtRef;
+begin
+  // Why a memo and not a cheaper scan: FindInUses walks the model's whole
+  // `uses` clause per name, and a main form unit imports hundreds of units
+  // while its method bodies mention the same few thousand cross-unit names
+  // over and over. Measured on such a unit: 6952 probes, 1142 ms of a 1475 ms
+  // inherited pass - the walk was the pass. The memo turns a repeat into one
+  // string hash.
+  if (AId > High(FUsesMemo)) or (FUsesMemo[AId] = nil) then
+  begin
+    Result := FindInUses(AId, ANameLower, AUnit, ASym);
+    if AId > High(FUsesMemo) then
+      Exit;   // unsized (a direct caller outside the drivers): no memo
+    FUsesMemo[AId] := TDictionary<string, TPasExtRef>.Create;
+  end
+  else if FUsesMemo[AId].TryGetValue(ANameLower, LExt) then
+  begin
+    AUnit := LExt.UnitId;
+    ASym := LExt.Sym;
+    Exit(AUnit >= 0);
+  end
+  else
+    Result := FindInUses(AId, ANameLower, AUnit, ASym);
+  if Result then
+  begin
+    LExt.UnitId := AUnit;
+    LExt.Sym := ASym;
+  end
+  else
+  begin
+    LExt.UnitId := -1;
+    LExt.Sym := NIL_SYM;
+  end;
+  FUsesMemo[AId].Add(ANameLower, LExt);
 end;
 
 // The generic ARITY of a type symbol: 0 for a plain type, else its parameter
@@ -4647,6 +4717,14 @@ begin
     Exit(EnsureSystemUnit);
   if SameText(LText, 'sysinit') then
     Exit(EnsureSysInitUnit);
+  // One lookup where ResolveUses has indexed the clause; the scan below is
+  // the same answer for a model that never went through it.
+  if LM.UsesByName <> nil then
+  begin
+    if not LM.UsesByName.TryGetValue(LowerCase(LText), Result) then
+      Result := -1;
+    Exit;
+  end;
   for LIdx := 0 to High(LM.UsesList) do
   begin
     if LM.UsesList[LIdx].UnitId < 0 then
@@ -9774,7 +9852,7 @@ begin
           // above, generalized to the OTHER side of the dot.
           if QualifierUnitAt(AId, LNode, LMatchNode) >= 0 then
             Continue;
-          if FindInUses(AId, LNameLower, LUid, LSym) then
+          if FindInUsesMemo(AId, LNameLower, LUid, LSym) then
           begin
             // ARITY is part of a type's identity (16.1.2) and last-uses-wins
             // is blind to it - see FixCrossArity.
@@ -12600,6 +12678,20 @@ begin
     FDeclWork[LIdx] := nil;
     FDeclWorkCount[LIdx] := 0;
   end;
+  // The uses memo starts every run empty: on the module path the edited
+  // unit's interface is what changed, and every consumer's memo may hold
+  // an answer that came from it.
+  ReleaseUsesMemo;
+  SetLength(FUsesMemo, ACount);
+end;
+
+procedure TPasSemaProject.ReleaseUsesMemo;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to High(FUsesMemo) do
+    FUsesMemo[LIdx].Free;
+  SetLength(FUsesMemo, 0);
 end;
 
 { The DECLARATION-site companion to CrossResolveInherited: the names inside a
@@ -12837,7 +12929,7 @@ begin
       Continue;
     end;
     if LFound or
-       FindInUses(AId, LNameLower, LUid, LSym) or
+       FindInUsesMemo(AId, LNameLower, LUid, LSym) or
        FindInSystemUnit(LNameLower, LUid, LSym) or
        FindInSysInitUnit(LNameLower, LUid, LSym) then
     begin
@@ -13025,7 +13117,7 @@ begin
       LFromMember := (LStruct <> NIL_SYM) and
         FindMemberX(AId, XPlain(AId, LStruct), LNameLower, LUid, LSym, LCtx);
       if LFromMember or
-         FindInUses(AId, LNameLower, LUid, LSym) or
+         FindInUsesMemo(AId, LNameLower, LUid, LSym) or
          FindInSystemUnit(LNameLower, LUid, LSym) or
          FindInSysInitUnit(LNameLower, LUid, LSym) then
       begin
@@ -13085,27 +13177,51 @@ var
   LUnres: TArray<TArray<Integer>>;
   LIdx, LP, LNode, LRound, LNew: Integer;
   LEmit: Boolean;
+  LActive: TArray<Boolean>;
 begin
   SetLength(LPending, ACount);
   SetLength(LUnres, ACount);
   SizeCrossWork(ACount);   // AnalyzeFile reaches this pass without the other
+  // Which models a round walks. A model's verdicts depend on its OWN
+  // committed bindings only: the with-target types come from walking its own
+  // tree, and what those bindings point to in other models are declarations,
+  // never a with-body node this pass produces. So a model that committed
+  // nothing in round N sees exactly the same state in round N+1 and would
+  // reproduce the same (empty) pendings and the same unresolved record -
+  // walking it again is pure cost, and on the client closure it WAS the pass:
+  // rounds 2-4 bound 891 / 18 / 0 names for ~470 ms of worker time each,
+  // the same as round 1's 50k. Round 1 walks everything; from then on only
+  // the models that moved; the cap's emitting round walks everything again
+  // because it emits inside the walk.
+  SetLength(LActive, ACount);
+  for LIdx := 0 to ACount - 1 do
+    LActive[LIdx] := True;
   LRound := 0;
   LEmit := False;
   while True do
   begin
     Inc(LRound);
+    if LEmit then
+      for LIdx := 0 to ACount - 1 do
+        LActive[LIdx] := True;
+    // An inactive model KEEPS its record: it is the stable one the converged
+    // emit below reads.
     for LIdx := 0 to ACount - 1 do
     begin
       LPending[LIdx] := nil;
-      LUnres[LIdx] := nil;
+      if LActive[LIdx] then
+        LUnres[LIdx] := nil;
     end;
 {$IFDEF PASTREE_MEMBERSTATS}
     FStatsPass := 'with#' + IntToStr(LRound);   // per ROUND: bindings move
 {$ENDIF}
     ForEachIndex(ACount - 1, 'with',      procedure(AIdx: Integer)
       begin
-        CrossResolveWith(AIdx, LPending[AIdx], LEmit, LUnres[AIdx]);
+        if LActive[AIdx] then
+          CrossResolveWith(AIdx, LPending[AIdx], LEmit, LUnres[AIdx]);
       end);
+    for LIdx := 0 to ACount - 1 do
+      LActive[LIdx] := Length(LPending[LIdx]) > 0;
     LNew := 0;
     for LIdx := 0 to ACount - 1 do
       Inc(LNew, Length(LPending[LIdx]));
@@ -13228,6 +13344,7 @@ begin
     SetModuleStatus(Result, msCrossReady);
     TrimAllDiags;
     ReleaseCrossWork;
+    ReleaseUsesMemo;
   finally
     FinishDonor({AReport} False);   // AnalyzeFile carries no StageTimings
   end;
@@ -13886,14 +14003,14 @@ procedure TPasSemaProject.RunModulePasses(const AIds: TArray<Integer>;
 const
   MAX_ROUNDS = 8;
 var
-  LPend: TArray<TPasInhPending>;
-  LUnres: TArray<Integer>;
-  LUnresOf: TArray<TArray<Integer>>;   // per model, the last round's record
-  LIdx, LRound, LSlot, LId: Integer;
-  LEmit, LAny: Boolean;
+  LPendOf: TArray<TArray<TPasInhPending>>;   // per SLOT, one round's compute
+  LUnresOf: TArray<TArray<Integer>>;   // per slot, the last round's record
+  LIdx, LRound, LSlot, LId, LNew: Integer;
+  LEmit: Boolean;
   LM: TPasSemaModel;
   LSW: TStopwatch;
   LStages: string;
+  LMidOf: TFunc<Integer, Integer>;
 
   // The per-stage split of a module run, appended to StageTimings as
   // `mp=<stage>:<ms>,...;` - the fixed cost of the module path lives here,
@@ -13904,9 +14021,55 @@ var
     LSW := TStopwatch.StartNew;
   end;
 
+  // The commit half of a two-phase stage: what every worker pended for its
+  // own model, written sequentially in slot order (the order the sequential
+  // loop this replaced used). Returns the number of entries committed - the
+  // fixpoint loops' "anything new" signal. AClearRef is the inherited/with
+  // shape (RefMap cleared, frame-substituted type stored); the decl pass
+  // writes ExtRefMap alone, exactly as RunDeclPass does.
+  function CommitPendings(AClearRef: Boolean): Integer;
+  var
+    LS, LP: Integer;
+    LMdl: TPasSemaModel;
+  begin
+    Result := 0;
+    for LS := 0 to High(AIds) do
+    begin
+      LMdl := FModels[AIds[LS]];
+      for LP := 0 to High(LPendOf[LS]) do
+      begin
+        if AClearRef then
+          LMdl.RefMap[LPendOf[LS][LP].Node] := NIL_SYM;
+        LMdl.ExtRefMap.AddOrSetValue(LPendOf[LS][LP].Node, LPendOf[LS][LP].Ext);
+        if AClearRef and XValid(LPendOf[LS][LP].X) then
+          LMdl.ExprTypeX.AddOrSetValue(LPendOf[LS][LP].Node, LPendOf[LS][LP].X);
+      end;
+      Inc(Result, Length(LPendOf[LS]));
+      LPendOf[LS] := nil;
+    end;
+  end;
+
 begin
   LStages := '';
   LSW := TStopwatch.StartNew;
+  // Every compute phase below is farmed out over the SET, in the same
+  // parallel-compute / sequential-commit shape as the full pipeline's
+  // Run*Pass drivers, and for the same reason it is safe there: a worker
+  // writes only its own model's pendings and reads the others' committed
+  // state. Until 0.20.2 this procedure ran each stage as a sequential loop,
+  // which made the module path SLOWER per model than a rebuild: 557 redone
+  // models paid 2.4 s in the inherited stage alone where the rebuild's
+  // 16-worker pass covers the whole 1260-model closure in ~1.2 s.
+  SetLength(LPendOf, Length(AIds));
+  SetLength(LUnresOf, Length(AIds));
+  // Body index -> model, for ForEachIndex's internal-error report.
+  LMidOf :=
+    function(ASlot: Integer): Integer
+    begin
+      Result := AIds[ASlot];
+    end;
+  // ResolveUses stays sequential: it is the single source of truth for
+  // UnitId assignment (see AnalyzeFile).
   for LId in AIds do
   begin
     ResolveUses(LId);
@@ -13914,8 +14077,11 @@ begin
     InjectGuessedIfDiagsOne(LId);
   end;
   PrepareDeclWork(FModels.Count);
-  for LId in AIds do
-    CrossResolve(LId);
+  ForEachIndex(High(AIds), 'resolve',
+    procedure(ASlot: Integer)
+    begin
+      CrossResolve(AIds[ASlot]);
+    end, LMidOf);
   Lap('resolve');
   // Incremental since 0.15.10 - the wholesale BuildHelperMap was the module
   // path's whole fixed cost (see UpdateHelperMap).
@@ -13931,67 +14097,46 @@ begin
   while True do
   begin
     Inc(LRound);
-    LAny := False;
-    for LSlot := 0 to High(AIds) do
-    begin
-      LPend := nil;
-      CrossResolveDecl(AIds[LSlot], LPend, LEmit);
-      LM := FModels[AIds[LSlot]];
-      for LIdx := 0 to High(LPend) do
-        LM.ExtRefMap.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].Ext);
-      LAny := LAny or (Length(LPend) > 0);
-    end;
+    ForEachIndex(High(AIds), 'declarations',
+      procedure(ASlot: Integer)
+      begin
+        CrossResolveDecl(AIds[ASlot], LPendOf[ASlot], LEmit);
+      end, LMidOf);
+    LNew := CommitPendings({AClearRef} False);
     if LEmit then
       Break;
-    LEmit := not LAny or (LRound >= 3);
+    LEmit := (LNew = 0) or (LRound >= 3);
   end;
   Lap('decl');
   SizeCrossWork(FModels.Count);
-  for LId in AIds do
-  begin
-    LPend := nil;
-    CrossResolveInherited(LId, LPend);
-    LM := FModels[LId];
-    for LIdx := 0 to High(LPend) do
+  ForEachIndex(High(AIds), 'inherited',
+    procedure(ASlot: Integer)
     begin
-      LM.RefMap[LPend[LIdx].Node] := NIL_SYM;
-      LM.ExtRefMap.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].Ext);
-      if XValid(LPend[LIdx].X) then
-        LM.ExprTypeX.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].X);
-    end;
-  end;
+      CrossResolveInherited(AIds[ASlot], LPendOf[ASlot]);
+    end, LMidOf);
+  CommitPendings({AClearRef} True);
   Lap('inherited');
   // RunWithPass, same narrowing (see the decl pass above).
   LRound := 0;
   LEmit := False;
-  SetLength(LUnresOf, Length(AIds));
   while True do
   begin
     Inc(LRound);
-    LAny := False;
     for LSlot := 0 to High(AIds) do
-    begin
-      LPend := nil;
-      LUnres := nil;
-      CrossResolveWith(AIds[LSlot], LPend, LEmit, LUnres);
-      LUnresOf[LSlot] := LUnres;
-      LM := FModels[AIds[LSlot]];
-      for LIdx := 0 to High(LPend) do
+      LUnresOf[LSlot] := nil;
+    ForEachIndex(High(AIds), 'with',
+      procedure(ASlot: Integer)
       begin
-        LM.RefMap[LPend[LIdx].Node] := NIL_SYM;
-        LM.ExtRefMap.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].Ext);
-        if XValid(LPend[LIdx].X) then
-          LM.ExprTypeX.AddOrSetValue(LPend[LIdx].Node, LPend[LIdx].X);
-      end;
-      LAny := LAny or (Length(LPend) > 0);
-    end;
+        CrossResolveWith(AIds[ASlot], LPendOf[ASlot], LEmit, LUnresOf[ASlot]);
+      end, LMidOf);
+    LNew := CommitPendings({AClearRef} True);
     if LEmit then
       Break;
     // Converged - for the WHOLE set, not per model: one model's commits can
     // bind a name another model could not resolve a moment ago, so emitting
     // as soon as a single model goes quiet would report names the next round
     // resolves. Same rule as RunWithPass, same reason.
-    if not LAny then
+    if LNew = 0 then
     begin
       for LSlot := 0 to High(AIds) do
         for LIdx := 0 to High(LUnresOf[LSlot]) do
@@ -14002,26 +14147,84 @@ begin
       LEmit := True;
   end;
   Lap('with');
+  // RunCallChecksPass over the set: the deferred-write buffers are sized to
+  // the whole model table (CheckCalls indexes them by model id) and created
+  // for the set's slots only - a nil slot means "write straight through",
+  // which no model outside the set does here because none is visited.
+  SetLength(FCallNewExt, FModels.Count);
   for LId in AIds do
-  begin
-    CheckCalls(LId);
-    CheckConstraints(LId);
-    CheckAttributes(LId);
+    FCallNewExt[LId] := TDictionary<Integer, TPasExtRef>.Create;
+  try
+    ForEachIndex(High(AIds), 'cross-resolve',
+      procedure(ASlot: Integer)
+      begin
+        CheckCalls(AIds[ASlot]);
+        CheckConstraints(AIds[ASlot]);
+        CheckAttributes(AIds[ASlot]);
+      end, LMidOf);
+    for LId in AIds do
+      for var LPair in FCallNewExt[LId] do
+        FModels[LId].ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
+  finally
+    for LId in AIds do
+      FCallNewExt[LId].Free;
+    SetLength(FCallNewExt, 0);
   end;
   Lap('calls');
   // Only these models' declared types are new; every other model's SymTypeX
   // stands (their text, and so their declarations, did not change).
+  // Sequential by design - see AnalyzeDirectory's Phase-3c comment.
   for LId in AIds do
     BindTypesX(LId);
   Lap('bindx');
+  // RunCrossTypePass over the set, same buffer discipline as the call checks:
+  // SymTypeX and ExtRefMap must not be rehashed under a sibling worker's read
+  // of the same model, so the workers fill FXNewExt/FXNewSymType and the
+  // merge (tombstones included) happens here, after the parallel phase.
+  SetLength(FXNewExt, FModels.Count);
+  SetLength(FXNewSymType, FModels.Count);
   for LId in AIds do
   begin
-    CrossType(LId);
-    if FReportVisibility then
-      RunVisibilityPass(LId);
-    FModels[LId].TrimDiags;
+    FXNewExt[LId] := TDictionary<Integer, TPasExtRef>.Create;
+    FXNewSymType[LId] := TDictionary<Integer, TSemaXType>.Create;
   end;
+  try
+    ForEachIndex(High(AIds), 'cross-type',
+      procedure(ASlot: Integer)
+      begin
+        CrossType(AIds[ASlot]);
+      end, LMidOf);
+    for LId in AIds do
+    begin
+      LM := FModels[LId];
+      for var LPair in FXNewExt[LId] do
+        if LPair.Value.UnitId = EXT_TOMBSTONE_UNIT then
+          LM.ExtRefMap.Remove(LPair.Key)
+        else
+          LM.ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
+      for var LPair in FXNewSymType[LId] do
+        LM.SymTypeX.AddOrSetValue(LPair.Key, LPair.Value);
+    end;
+    // Only now are the bindings final - see RunVisibilityPass.
+    if FReportVisibility then
+      ForEachIndex(High(AIds), 'visibility',
+        procedure(ASlot: Integer)
+        begin
+          RunVisibilityPass(AIds[ASlot]);
+        end, LMidOf);
+  finally
+    for LId in AIds do
+    begin
+      FXNewExt[LId].Free;
+      FXNewSymType[LId].Free;
+    end;
+    SetLength(FXNewExt, 0);
+    SetLength(FXNewSymType, 0);
+  end;
+  for LId in AIds do
+    FModels[LId].TrimDiags;
   ReleaseCrossWork;
+  ReleaseUsesMemo;
   Lap('xtype');
   FStageTimings := FStageTimings + 'mp=' + LStages + ';';
 end;
@@ -14558,7 +14761,8 @@ var
   LId, LOldSymN, LNewSymN, LScopeN, LImplScope, LIdx, LRadius: Integer;
   LIds, LReach, LUntouched: TArray<Integer>;
   LUntouchedKeys: TArray<TPasRenumberKeys>;
-  LOld, LNew, LCons: TPasSemaModel;
+  LOld, LNew: TPasSemaModel;
+  LConsOf: TArray<TPasSemaModel>;
   LPre: TPasPreprocessed;
   LDiags: TArray<TPasParseDiag>;
   LTree: TPasTree;
@@ -14780,12 +14984,19 @@ begin
     // deterministic, so the consumer's own symbol numbering is reproduced
     // exactly. This is what clears its stale cross-unit state wholesale
     // instead of trying to patch entries one by one.
+    // Farmed out like the load engine's Phase 1 (each Analyze reads only its
+    // own immutable tree); the swap into the owning list stays sequential
+    // because assigning FModels[i] frees the old model.
+      SetLength(LConsOf, Length(LIds));
+      ParallelFor(High(LIds) - 1,
+        procedure(AIdx: Integer)
+        begin
+          LConsOf[AIdx + 1] := TPasSemaResolver.Analyze(
+            FModels[LIds[AIdx + 1]].Tree, False, FPlatform);
+        end);
       for LIdx := 1 to High(LIds) do
-      begin
-        LCons := TPasSemaResolver.Analyze(FModels[LIds[LIdx]].Tree, False,
-          FPlatform);
-        FModels[LIds[LIdx]] := LCons;
-      end;
+        FModels[LIds[LIdx]] := LConsOf[LIdx];
+      LConsOf := nil;
       for LIdx := 0 to High(LIds) do
         if LIds[LIdx] <= High(FWorkBuilt) then
           FWorkBuilt[LIds[LIdx]] := False;
@@ -14994,6 +15205,7 @@ begin
     MarkAllCrossReady;
     TrimAllDiags;
     ReleaseCrossWork;
+    ReleaseUsesMemo;
     // Analysis is over: drop the raw-bytes repository (a full second copy of
     // every closure file that nothing reads from here on - hundreds of MB on
     // a real project) and the include-cache's own stream references.
@@ -15095,6 +15307,7 @@ begin
       SetModuleStatus(LIdx, msCrossReady);
     TrimAllDiags;
     ReleaseCrossWork;
+    ReleaseUsesMemo;
     FSM.ReleaseAnalysisCaches;   // see AnalyzeProject
   finally
     FinishDonor({AReport} True);
@@ -15337,6 +15550,7 @@ begin
     MarkAllCrossReady;
     TrimAllDiags;
     ReleaseCrossWork;
+    ReleaseUsesMemo;
     // See AnalyzeProject. On a cancelled run the caches stay - the host
     // discards a cancelled project wholesale anyway.
     FSM.ReleaseAnalysisCaches;
