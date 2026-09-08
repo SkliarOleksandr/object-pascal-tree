@@ -1784,6 +1784,33 @@ Still open, roughly in the order we're tackling it:
   host declares those trees through `TPasNavigator.LibraryPaths`) or a
   read-only file, whole rather than in part. See `docs/editor-features.md`
   §3 for the edit/preview contract and what it deliberately does not check.
+- ~~**Find Overrides**~~ - DONE (`TPasNavigator.MethodAt` /
+  `FindOverrides`, demo editor context menu, next to Find References): for a
+  class METHOD, every declaration sharing its VMT slot - the
+  `virtual`/`dynamic` root the chain starts at plus every `override` below
+  it, in any unit of the closure - and the two shapes that belong to such a
+  report without saying `override`: a `message` handler (implicitly virtual,
+  dispatched through the message table, and dcc rejects `override` on one)
+  and a `reintroduce` (deliberately leaving the chain, which a reader must
+  not mistake for staying in it). Not a reference search: no call site is a
+  row, and neither is a same-named method in an unrelated hierarchy. Climbs
+  to the root first, so any link of a chain answers for the whole chain; then
+  descends over a reverse-heritage index built from every class's
+  `class(TBase)` reference as the RESOLVER bound it. See
+  `docs/editor-features.md` §4 for the per-shape table, including the two
+  honest gaps (an ancestor named through a type alias).
+- ~~**Find Implementations**~~ - DONE (`TPasNavigator.InterfaceMethodAt` /
+  `FindImplementations`, demo editor context menu): the interface-side twin
+  of Find Overrides - for an INTERFACE method, every class method that
+  implements it, project-wide. Harder than an override chain because there is
+  no keyword to key on (an interface method is implicitly virtual and an
+  implementor writes no directive at all), so the tie is the class's own
+  `class(TBase, IFoo)` list: the interface plus every interface descending
+  from it, then every class listing one of those, and for a class that
+  declares no such method itself, the ANCESTOR method that satisfies it
+  (positioned on the code that actually runs, credited to the class that took
+  the interface on). A method resolution clause and a delegated
+  `implements` property are honest gaps - see `docs/editor-features.md` §5.
 - **Show Defines** - for the identifier/position under the cursor, list
   every preprocessor define ACTIVE there (module where `$DEFINE`d / project-
   or platform-level, line, the define name), in its own results window,

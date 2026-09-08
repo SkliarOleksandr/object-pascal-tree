@@ -64,6 +64,124 @@ const
     'end;'#10 +                                 // 19
     'end.'#10;                                  // 20
 
+  { Find Overrides fixtures. NavOvrA holds a three-deep chain plus the two
+    shapes that are NOT `override` and still belong to a chain report: a
+    `message` handler (implicitly virtual - dispatched through the message
+    table, and dcc rejects `override` on one) and a `reintroduce` that
+    deliberately leaves the chain. NavOvrB continues the same chain from
+    ANOTHER unit, which is the half a same-unit-only search would miss, and
+    declares an unrelated class with a same-named method that must never
+    appear in the result. }
+  UNIT_OVRA =
+    'unit NavOvrA;'#10 +                             // 1
+    'interface'#10 +                                 // 2
+    'type'#10 +                                      // 3
+    '  TOvBase = class'#10 +                         // 4
+    '  public'#10 +                                  // 5
+    '    procedure Paint; virtual;'#10 +             // 6  Paint col 15
+    '    procedure Plain;'#10 +                      // 7  Plain col 15
+    '    procedure WndProc(var M: Integer); virtual;'#10 + // 8 WndProc col 15
+    '  end;'#10 +                                    // 9
+    '  TOvMid = class(TOvBase)'#10 +                 // 10
+    '  public'#10 +                                  // 11
+    '    procedure Paint; override;'#10 +            // 12  Paint col 15
+    '    procedure Hidden(var M: Integer); message 1;'#10 + // 13
+    '  end;'#10 +                                    // 14
+    '  TOvLeaf = class(TOvMid)'#10 +                 // 15
+    '  public'#10 +                                  // 16
+    '    procedure Paint; override;'#10 +            // 17  Paint col 15
+    '    procedure Hidden(var M: Integer); message 1;'#10 + // 18 Hidden col 15
+    '  end;'#10 +                                    // 19
+    '  TOvSkip = class(TOvBase)'#10 +                // 20
+    '  public'#10 +                                  // 21
+    '    procedure Paint; reintroduce;'#10 +         // 22  Paint col 15
+    '  end;'#10 +                                    // 23
+    'implementation'#10 +                            // 24
+    'procedure TOvBase.Paint; begin end;'#10 +       // 25  Paint col 19
+    'procedure TOvBase.Plain; begin end;'#10 +       // 26
+    'procedure TOvBase.WndProc(var M: Integer); begin end;'#10 + // 27
+    'procedure TOvMid.Paint; begin end;'#10 +        // 28
+    'procedure TOvMid.Hidden(var M: Integer); begin end;'#10 + // 29
+    'procedure TOvLeaf.Paint; begin end;'#10 +       // 30
+    'procedure TOvLeaf.Hidden(var M: Integer); begin end;'#10 + // 31
+    'procedure TOvSkip.Paint; begin end;'#10 +       // 32
+    'end.'#10;                                       // 33
+  UNIT_OVRB =
+    'unit NavOvrB;'#10 +                             // 1
+    'interface'#10 +                                 // 2
+    'uses NavOvrA;'#10 +                             // 3
+    'type'#10 +                                      // 4
+    '  TOvFar = class(TOvLeaf)'#10 +                 // 5
+    '  public'#10 +                                  // 6
+    '    procedure Paint; override;'#10 +            // 7  Paint col 15
+    '  end;'#10 +                                    // 8
+    '  TOvUnrelated = class'#10 +                     // 9
+    '  public'#10 +                                  // 10
+    '    procedure Paint; virtual;'#10 +             // 11
+    '  end;'#10 +                                    // 12
+    'implementation'#10 +                            // 13
+    'procedure TOvFar.Paint; begin end;'#10 +        // 14
+    'procedure TOvUnrelated.Paint; begin end;'#10 +  // 15
+    'end.'#10;                                       // 16
+
+  { Find Implementations fixtures. NavIntfA declares the interface and one
+    direct implementor; NavIntfB implements it from ANOTHER unit, implements
+    it through a DESCENDANT interface (`IOvChild = interface(IOvBase)`), and
+    holds the shape with no directive to key on at all: a class that lists
+    the interface and satisfies it with an ANCESTOR's method. Plus a class
+    with a same-named method that implements nothing. }
+  UNIT_INTFA =
+    'unit NavIntfA;'#10 +                            // 1
+    'interface'#10 +                                 // 2
+    'type'#10 +                                      // 3
+    '  IOvBase = interface'#10 +                     // 4
+    '    procedure Run;'#10 +                        // 5  Run col 15
+    '    function Name: string;'#10 +                // 6
+    '  end;'#10 +                                    // 7
+    '  IOvChild = interface(IOvBase)'#10 +           // 8
+    '    procedure Extra;'#10 +                      // 9
+    '  end;'#10 +                                    // 10
+    '  TOvDirect = class(TObject, IOvBase)'#10 +     // 11
+    '  public'#10 +                                  // 12
+    '    procedure Run;'#10 +                        // 13  Run col 15
+    '    function Name: string;'#10 +                // 14
+    '  end;'#10 +                                    // 15
+    'implementation'#10 +                            // 16
+    'procedure TOvDirect.Run; begin end;'#10 +       // 17
+    'function TOvDirect.Name: string; begin end;'#10 + // 18
+    'end.'#10;                                       // 19
+  UNIT_INTFB =
+    'unit NavIntfB;'#10 +                            // 1
+    'interface'#10 +                                 // 2
+    'uses NavIntfA;'#10 +                            // 3
+    'type'#10 +                                      // 4
+    '  TOvViaChild = class(TObject, IOvChild)'#10 +  // 5
+    '  public'#10 +                                  // 6
+    '    procedure Run;'#10 +                        // 7  Run col 15
+    '    procedure Extra;'#10 +                      // 8
+    '    function Name: string;'#10 +                // 9
+    '  end;'#10 +                                    // 10
+    '  TOvAncestor = class'#10 +                     // 11
+    '  public'#10 +                                  // 12
+    '    procedure Run;'#10 +                        // 13  Run col 15
+    '  end;'#10 +                                    // 14
+    '  TOvInherits = class(TOvAncestor, IOvBase)'#10 + // 15
+    '  public'#10 +                                  // 16
+    '    function Name: string;'#10 +                // 17
+    '  end;'#10 +                                    // 18
+    '  TOvNoIntf = class'#10 +                       // 19
+    '  public'#10 +                                  // 20
+    '    procedure Run;'#10 +                        // 21
+    '  end;'#10 +                                    // 22
+    'implementation'#10 +                            // 23
+    'procedure TOvViaChild.Run; begin end;'#10 +     // 24
+    'procedure TOvViaChild.Extra; begin end;'#10 +   // 25
+    'function TOvViaChild.Name: string; begin end;'#10 + // 26
+    'procedure TOvAncestor.Run; begin end;'#10 +     // 27
+    'function TOvInherits.Name: string; begin end;'#10 + // 28
+    'procedure TOvNoIntf.Run; begin end;'#10 +       // 29
+    'end.'#10;                                       // 30
+
   // Rename fixture: line 9 uses the SAME symbol TWICE, which is the one
   // shape a per-line rename preview can get wrong - the second edit's
   // highlight has to move by the first one's length delta (see
@@ -740,6 +858,50 @@ begin
       Exit(True);
 end;
 
+// One Find Overrides row: the declaring class, its kind, and the LINE its
+// declaration sits on (the column is the class body's own indentation, which
+// the fixture comments already pin for the rows that matter).
+function HasOvAt(const AOvs: TArray<TPasOverrideHit>; const AFile: string;
+  ALine: Integer; AKind: TPasOverrideKind; const ATypeName: string): Boolean;
+var
+  LIdx: Integer;
+begin
+  Result := False;
+  for LIdx := 0 to High(AOvs) do
+    if SameText(TPath.GetFileName(AOvs[LIdx].Hit.FilePath), AFile) and
+       (AOvs[LIdx].Hit.Line = ALine) and (AOvs[LIdx].Kind = AKind) and
+       SameText(AOvs[LIdx].TypeName, ATypeName) then
+      Exit(True);
+end;
+
+// One Find Implementations row, and (separately) the class credited with
+// bringing the interface in for an inherited one.
+function HasImplAt(const AImps: TArray<TPasImplHit>; const AFile: string;
+  ALine: Integer; AKind: TPasImplKind; const ATypeName: string): Boolean;
+var
+  LIdx: Integer;
+begin
+  Result := False;
+  for LIdx := 0 to High(AImps) do
+    if SameText(TPath.GetFileName(AImps[LIdx].Hit.FilePath), AFile) and
+       (AImps[LIdx].Hit.Line = ALine) and (AImps[LIdx].Kind = AKind) and
+       SameText(AImps[LIdx].TypeName, ATypeName) then
+      Exit(True);
+end;
+
+function HasImplVia(const AImps: TArray<TPasImplHit>; const AFile: string;
+  ALine: Integer; const AViaTypeName: string): Boolean;
+var
+  LIdx: Integer;
+begin
+  Result := False;
+  for LIdx := 0 to High(AImps) do
+    if SameText(TPath.GetFileName(AImps[LIdx].Hit.FilePath), AFile) and
+       (AImps[LIdx].Hit.Line = ALine) and
+       SameText(AImps[LIdx].ViaTypeName, AViaTypeName) then
+      Exit(True);
+end;
+
 // One rename edit at an exact position, with the preview line and the
 // highlight span it claims for the NEW name.
 function HasEdit(const AEdits: TArray<TPasRenameEdit>; const AFile: string;
@@ -821,6 +983,10 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOvl.pas'), UNIT_OVL);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOvlUse.pas'), UNIT_OVLUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRQ.pas'), UNIT_RQ);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavIntfA.pas'), UNIT_INTFA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavIntfB.pas'), UNIT_INTFB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavOvrA.pas'), UNIT_OVRA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavOvrB.pas'), UNIT_OVRB);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRen.pas'), UNIT_REN);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRenP.pas'), UNIT_RENP);
 
@@ -1564,6 +1730,143 @@ begin
         GNav.UnitDeclHit(LMidA, {out} LDeclHit) and
         SameText(TPath.GetFileName(LDeclHit.FilePath), 'NavA.pas') and
         (LDeclHit.Line = 1) and (LDeclHit.Col = 6));
+
+      // ---- Find Overrides (MethodAt + FindOverrides) ----
+      var LMidOvA := GNav.ModelIdOf(TPath.Combine(LDir, 'NavOvrA.pas'));
+      Ok('NavOvrA model found', LMidOvA >= 0);
+      // Started from the ROOT declaration: the whole chain, one row per
+      // declaration, the cross-unit descendant included and the unrelated
+      // same-named method in the same unit excluded.
+      Ok('MethodAt: TOvBase.Paint (a virtual method declaration)',
+        GNav.MethodAt(LMidOvA, 6, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Paint'));
+      var LOvs := GNav.FindOverrides(LRTMid, LRSym);
+      // Root + TOvMid + TOvLeaf + TOvFar (another unit) + TOvSkip's
+      // reintroduce.
+      Ok('FindOverrides: Paint - root + 4 chain declarations',
+        Length(LOvs) = 5);
+      Ok('FindOverrides: the root row comes first, and IS the virtual decl',
+        (Length(LOvs) > 0) and (LOvs[0].Kind = pokRoot) and
+        (LOvs[0].Hit.Line = 6) and (LOvs[0].Hit.Col = 15) and
+        SameText(LOvs[0].TypeName, 'TOvBase'));
+      Ok('FindOverrides: TOvMid.Paint',
+        HasOvAt(LOvs, 'NavOvrA.pas', 12, pokOverride, 'TOvMid'));
+      Ok('FindOverrides: TOvLeaf.Paint',
+        HasOvAt(LOvs, 'NavOvrA.pas', 17, pokOverride, 'TOvLeaf'));
+      Ok('FindOverrides: TOvSkip.Paint is reported as REINTRODUCE, ' +
+        'not as an override',
+        HasOvAt(LOvs, 'NavOvrA.pas', 22, pokReintroduce, 'TOvSkip'));
+      Ok('FindOverrides: TOvFar.Paint - the chain crosses into NavOvrB',
+        HasOvAt(LOvs, 'NavOvrB.pas', 7, pokOverride, 'TOvFar'));
+      Ok('FindOverrides: TOvUnrelated.Paint - same NAME, unrelated ' +
+        'hierarchy, never a row',
+        not HasOvAt(LOvs, 'NavOvrB.pas', 11, pokOverride, 'TOvUnrelated'));
+
+      // Started from the MIDDLE of the chain: the same answer, which is the
+      // point of climbing to the root before descending.
+      Ok('MethodAt: TOvLeaf.Paint (an override two levels down)',
+        GNav.MethodAt(LMidOvA, 17, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Paint'));
+      var LOvs2 := GNav.FindOverrides(LRTMid, LRSym);
+      Ok('FindOverrides: same chain from a middle override', (Length(LOvs2) = 5)
+        and (LOvs2[0].Kind = pokRoot) and (LOvs2[0].Hit.Line = 6));
+
+      // Started from the IMPLEMENTATION header: MethodAt normalizes to the
+      // declaration-side symbol, so the chain is the same one again.
+      Ok('MethodAt: TOvBase.Paint''s implementation header',
+        GNav.MethodAt(LMidOvA, 25, 19, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Paint'));
+      Ok('FindOverrides: same chain from the implementation header',
+        Length(GNav.FindOverrides(LRTMid, LRSym)) = 5);
+
+      // A `message` handler: implicitly virtual, no `override` anywhere, so
+      // the pair is a chain only if the directive itself is read.
+      Ok('MethodAt: TOvLeaf.Hidden (a message handler)',
+        GNav.MethodAt(LMidOvA, 18, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Hidden'));
+      LOvs := GNav.FindOverrides(LRTMid, LRSym);
+      Ok('FindOverrides: message handlers chain without `override`',
+        (Length(LOvs) = 2) and (LOvs[0].Kind = pokRoot) and
+        (LOvs[0].Hit.Line = 13) and
+        HasOvAt(LOvs, 'NavOvrA.pas', 18, pokMessage, 'TOvLeaf'));
+
+      // A non-virtual method is still a method: the command is enabled and
+      // the answer is the honest one-row "nothing overrides this".
+      Ok('MethodAt: TOvBase.Plain (a non-virtual method)',
+        GNav.MethodAt(LMidOvA, 7, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Plain'));
+      LOvs := GNav.FindOverrides(LRTMid, LRSym);
+      Ok('FindOverrides: a non-virtual method is its own single row',
+        (Length(LOvs) = 1) and (LOvs[0].Kind = pokRoot));
+
+      // ---- Find Implementations (InterfaceMethodAt + FindImplementations) --
+      var LMidIA := GNav.ModelIdOf(TPath.Combine(LDir, 'NavIntfA.pas'));
+      Ok('NavIntfA model found', LMidIA >= 0);
+      Ok('InterfaceMethodAt: IOvBase.Run',
+        GNav.InterfaceMethodAt(LMidIA, 5, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Run'));
+      var LImps := GNav.FindImplementations(LRTMid, LRSym);
+      // The interface decl + TOvDirect (direct, same unit) + TOvViaChild
+      // (through IOvChild, another unit) + TOvAncestor.Run (TOvInherits
+      // satisfies IOvBase with it).
+      Ok('FindImplementations: Run - decl + 3 implementations',
+        Length(LImps) = 4);
+      Ok('FindImplementations: the interface declaration comes first',
+        (Length(LImps) > 0) and (LImps[0].Kind = pikRoot) and
+        (LImps[0].Hit.Line = 5) and SameText(LImps[0].TypeName, 'IOvBase'));
+      Ok('FindImplementations: a direct implementor in the same unit',
+        HasImplAt(LImps, 'NavIntfA.pas', 13, pikImplementor, 'TOvDirect'));
+      Ok('FindImplementations: an implementor through a DESCENDANT ' +
+        'interface, in another unit',
+        HasImplAt(LImps, 'NavIntfB.pas', 7, pikImplementor, 'TOvViaChild'));
+      Ok('FindImplementations: an INHERITED implementation, credited to the ' +
+        'class that took the interface on',
+        HasImplAt(LImps, 'NavIntfB.pas', 13, pikInherited, 'TOvAncestor') and
+        HasImplVia(LImps, 'NavIntfB.pas', 13, 'TOvInherits'));
+      Ok('FindImplementations: a same-named method implementing NOTHING is ' +
+        'never a row',
+        not HasImplAt(LImps, 'NavIntfB.pas', 21, pikImplementor,
+          'TOvNoIntf'));
+
+      // The other method of the same interface, to prove the search is
+      // per-METHOD and not per-interface: TOvInherits declares Name itself.
+      Ok('InterfaceMethodAt: IOvBase.Name',
+        GNav.InterfaceMethodAt(LMidIA, 6, 14, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Name'));
+      LImps := GNav.FindImplementations(LRTMid, LRSym);
+      Ok('FindImplementations: Name - decl + 3 implementations, all declared',
+        (Length(LImps) = 4) and
+        HasImplAt(LImps, 'NavIntfA.pas', 14, pikImplementor, 'TOvDirect') and
+        HasImplAt(LImps, 'NavIntfB.pas', 9, pikImplementor, 'TOvViaChild') and
+        HasImplAt(LImps, 'NavIntfB.pas', 17, pikImplementor, 'TOvInherits'));
+
+      // A method declared only by the DESCENDANT interface: its implementors
+      // are the classes listing that one, not every IOvBase implementor.
+      Ok('InterfaceMethodAt: IOvChild.Extra',
+        GNav.InterfaceMethodAt(LMidIA, 9, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Extra'));
+      LImps := GNav.FindImplementations(LRTMid, LRSym);
+      Ok('FindImplementations: Extra - decl + the one IOvChild implementor',
+        (Length(LImps) = 2) and (LImps[0].Kind = pikRoot) and
+        HasImplAt(LImps, 'NavIntfB.pas', 8, pikImplementor, 'TOvViaChild'));
+
+      // The two identities stay apart: a CLASS method is not an interface
+      // method, and an interface method has no override chain to walk.
+      Ok('InterfaceMethodAt: declines a class method',
+        not GNav.InterfaceMethodAt(LMidOvA, 6, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName));
+      Ok('MethodAt: declines an interface method',
+        not GNav.MethodAt(LMidIA, 5, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName));
+
+      // Not a method: MethodAt must decline, or the demo/LSP would offer the
+      // command on every identifier.
+      Ok('MethodAt: declines a plain global routine',
+        not GNav.MethodAt(LMidA, 7, 10, {out} LRTMid, {out} LRSym,
+          {out} LRName));
+      Ok('MethodAt: declines a record field',
+        not GNav.MethodAt(LMidA, 5, 5, {out} LRTMid, {out} LRSym,
+          {out} LRName));
     finally
       GNav.Free;
     end;

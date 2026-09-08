@@ -507,6 +507,23 @@ object frmMain: TfrmMain
       OnExecute = FindReferencesActionExecute
       OnUpdate = FindReferencesActionUpdate
     end
+    object FindOverridesAction: TAction
+      Caption = 'Find Overrides'
+      Hint =
+        'Every declaration sharing the VMT slot of the method at the caret ' +
+        '- the virtual root plus every override, message handler and reintr' +
+        'oduce below it'
+      OnExecute = FindOverridesActionExecute
+      OnUpdate = FindOverridesActionUpdate
+    end
+    object FindImplementationsAction: TAction
+      Caption = 'Find Implementations'
+      Hint =
+        'Every class method that implements the INTERFACE method at the car' +
+        'et, across the analyzed project'
+      OnExecute = FindImplementationsActionExecute
+      OnUpdate = FindImplementationsActionUpdate
+    end
     object RenameAction: TAction
       Caption = 'Rename...'
       Hint =
@@ -537,6 +554,12 @@ object frmMain: TfrmMain
     end
     object FindReferences1: TMenuItem
       Action = FindReferencesAction
+    end
+    object FindOverrides1: TMenuItem
+      Action = FindOverridesAction
+    end
+    object FindImplementations1: TMenuItem
+      Action = FindImplementationsAction
     end
     object Rename1: TMenuItem
       Action = RenameAction

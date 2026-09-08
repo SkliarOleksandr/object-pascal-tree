@@ -92,8 +92,104 @@ type
     HiFrom, HiTo: Integer;   // 0-based offsets of the NEW name in Snippet
   end;
 
+  { What makes one row of a Find Overrides result the answer it is - the
+    DIRECTIVE that ties it to the same VMT (or message-table) slot, never a
+    name match on its own:
+
+    - pokRoot: the topmost declaration of the chain, the one that INTRODUCED
+      the slot (`virtual` / `dynamic`, or a `message` handler with no
+      virtual ancestor of that name). Always first, and one row per OVERLOAD
+      the root class declares under that name - `TStream.Read` really is six
+      declarations, and which of them a given `override` completes is an
+      argument-type question this search does not ask (it reports the chain,
+      not a signature match). Root rows only means the method is never
+      overridden anywhere in the analyzed closure.
+    - pokOverride: `override` - the ordinary case.
+    - pokMessage: a `message <expr>` handler with the same name in a
+      descendant. Object Pascal dispatches these through the message table
+      rather than the VMT, and dcc requires NO `override` on them (a
+      `message` handler in a descendant replaces its ancestor's for the same
+      message id), so they are the one implicitly-virtual shape here: found
+      by name + the `message` directive, not by comparing the message
+      EXPRESSION (a constant this analysis would have to evaluate on both
+      sides; two handlers of the same name for different ids are rare enough
+      that reporting them is better than missing the real chain).
+    - pokReintroduce: `reintroduce` - deliberately NOT an override; it hides
+      the ancestor's method and starts a new chain. Reported because it is
+      the one shape a reader of the hierarchy must not mistake for one, and
+      it is what a caller through the ancestor's type will NOT reach.
+
+    A same-named descendant method carrying NONE of these directives is not
+    reported at all: it is an ordinary hiding declaration (dcc's W1010), and
+    including it would drown every result for a name as common as `Create`
+    in rows that share nothing with the method under the cursor. }
+  TPasOverrideKind = (pokRoot, pokOverride, pokMessage, pokReintroduce);
+
+  // The routine directives an override chain is decided by, read off the
+  // declaration's own nkDirective children (OvDirsOf). `abstract` is in here
+  // only because it comes with `virtual` and would otherwise look like an
+  // undecorated declaration to a reader of this set.
+  TPasOvDir = (odVirtual, odDynamic, odOverride, odAbstract, odMessage,
+    odReintroduce);
+  TPasOvDirs = set of TPasOvDir;
+
+  { One declaration in a method's override chain. Hit is positioned on the
+    declaration's own NAME, exactly as DeclHit positions the declaration row
+    of a Find References result, so a host can feed both to one results
+    panel; TypeName/Kind are what that panel shows INSTEAD of a file group's
+    line prefix ("TFoo override"), the class being the thing a reader of an
+    override chain navigates by. UnitId/Sym are the method symbol itself, so
+    a host can start a further query (references, rename) from a row without
+    re-resolving its position. }
+  TPasOverrideHit = record
+    Hit: TPasRefHit;
+    Kind: TPasOverrideKind;
+    TypeName: string;        // owning class, original spelling
+    UnitId, Sym: Integer;    // the method symbol this row declares
+  end;
+
+  { What makes one row of a Find Implementations result. An interface method
+    is implicitly virtual and an implementing class writes NO directive at
+    all - dcc matches it by name and signature alone - so unlike an override
+    chain there is no keyword to key on; the tie is the class's own
+    `class(TBase, IFoo)` list, which is what this searches.
+
+    - pikRoot: the interface method declaration itself (one row per overload
+      the interface declares under that name).
+    - pikImplementor: a method DECLARED by a class that lists the interface
+      (or lists a descendant interface of it - `IChild = interface(IBase)`
+      carries IBase's methods into every implementor of IChild).
+    - pikInherited: the class that lists the interface does not declare the
+      method itself and satisfies it with an ANCESTOR's method. The row is
+      the ancestor's declaration - the code that actually runs - and
+      ViaTypeName names the class that brought the interface in, without
+      which the row looks unrelated to the interface. }
+  TPasImplKind = (pikRoot, pikImplementor, pikInherited);
+
+  TPasImplHit = record
+    Hit: TPasRefHit;
+    Kind: TPasImplKind;
+    TypeName: string;        // the type DECLARING this method
+    ViaTypeName: string;     // the class that lists the interface, when it
+                             // is not TypeName itself; '' otherwise
+    UnitId, Sym: Integer;    // the method symbol this row declares
+  end;
+
   TPasNavigator = class
   private type
+    // What OvStructDefNode will accept - a set literal at each call site, so
+    // "a class or an `object`" and "an interface" stay readable there.
+    TPasOvStructKinds = set of TPasNodeKind;
+    { One heritage edge, reversed: the class/`object`/interface that NAMED
+      the type this edge is filed under. IsFirst marks the first heritage
+      item as WRITTEN, which is the ancestor for everything except a class
+      whose list starts with an interface (`TFoo = class(IBar)`, ancestor
+      TObject implied) - so a consumer checks the kind of what it landed on
+      rather than trusting the position. }
+    TOvEdge = record
+      UnitId, Sym: Integer;
+      IsFirst: Boolean;
+    end;
     TNavCache = class
       // The model snapshot this cache was built from. If the project later
       // publishes a different snapshot at the same model id (the async
@@ -189,6 +285,30 @@ type
     function IsUnderLibraryPath(const APath: string): Boolean;
     function RoutineBodyEntry(AMid: Integer; LM: TPasSemaModel;
       AImplNode: Integer; out ATarget: TPasNavTarget): Boolean;
+    // Find Overrides / Find Implementations (see FindOverrides and
+    // FindImplementations for the whole shape).
+    function OvDirsOf(AMid, ARoutineNode: Integer): TPasOvDirs;
+    function OvStructOfMethod(AMid, ASym: Integer;
+      out AStructSym: Integer): Boolean;
+    function OvStructDefNode(AMid, AStructSym: Integer;
+      const AKinds: TPasOvStructKinds): Integer;
+    function OvClassDefNode(AMid, AStructSym: Integer): Integer;
+    function OvInterfaceDefNode(AMid, AStructSym: Integer): Integer;
+    function OvMethodsNamed(AMid, AStructSym: Integer;
+      const ANameLower: string): TArray<Integer>;
+    function OvRefOfHeritageItem(AMid, AItemNode: Integer;
+      out ABMid, ABSym: Integer): Boolean;
+    procedure OvBuildTypeEdges(
+      AIndex: TDictionary<string, TArray<TOvEdge>>);
+    procedure OvClimbToRoot(var AMid, AStructSym: Integer;
+      const ANameLower: string);
+    procedure OvCollectFrom(AMid, AStructSym: Integer;
+      const ANameLower: string; AIsRoot: Boolean;
+      AHits: TList<TPasOverrideHit>);
+    function OvImplRow(AMid, AStructSym: Integer; const ANameLower: string;
+      const AViaTypeName: string; AKind: TPasImplKind;
+      AHits: TList<TPasImplHit>;
+      ASeen: TDictionary<string, Boolean>): Boolean;
   public
     constructor Create(AProject: TPasSemaProject);
     destructor Destroy; override;
@@ -312,6 +432,95 @@ type
     // Every reference bound to a compiler-seeded builtin named AName, across
     // every loaded model.
     function FindBuiltinReferences(const AName: string): TArray<TPasRefHit>;
+    { Find Overrides, part one: the cursor is on a CLASS METHOD (its
+      declaration, its implementation header, or a use of it) whose override
+      chain can be searched - the Enabled test for the command, and the
+      identity FindOverrides then takes. ATMid/ASym come back NORMALIZED to
+      the DECLARATION-side symbol inside the class body, never the
+      implementation's own: the two are different symbols with the same name
+      (see IsDeclSelfName on why that ambiguity exists at all), and a chain
+      search keyed on the implementation would find no class to climb from.
+
+      False for anything that is not a method of a class: a plain routine, a
+      record or interface method (a record has no VMT; an interface's
+      implementors are a different search this does not do yet - see
+      docs/coverage.md), a property, a field, a type. }
+    function MethodAt(AMid, ALine, ACol: Integer;
+      out ATMid, ASym: Integer; out AName: string): Boolean;
+    { Find Overrides, part two: every declaration that shares the VMT (or
+      message-table) slot of the method (ATMid, ASym) - the topmost
+      declaration that introduced it, plus every `override` below it, across
+      the whole analyzed closure. See TPasOverrideKind for what each row is
+      and what is deliberately NOT a row.
+
+      Two walks, both by resolved identity rather than by name alone:
+
+      UP first, from the clicked method's own class through AncestorOfX,
+      while each ancestor declares a same-named method carrying
+      virtual/dynamic/override/message - so clicking an `override` in the
+      middle of a chain answers for the WHOLE chain, exactly as clicking its
+      root does. The topmost such declaration becomes pokRoot.
+
+      DOWN from there over a child index built for this one call from the
+      HERITAGE reference of every class in the project (the `class(TBase)`
+      name, as the resolver bound it - RefMap/ExtRefMap, never a text
+      match), then breadth-first. That index is the reason this is affordable
+      at all: the alternative, asking XDescendsFrom of every class in the
+      closure, re-walks every ancestor chain in the project.
+
+      What it does not reach: a class whose ancestor is written through a
+      type ALIAS (`TBase2 = TBase;` then `class(TBase2)`) - the index keys on
+      the symbol the heritage name bound to, which is the alias, and the
+      chain stops there. Rare enough to document rather than pay for on
+      every edge; XDescendsFrom follows aliases if a future caller needs it.
+
+      Cost warning for hosts: the chain of a method as universal as
+      `Destroy` legitimately covers every class in the closure, and each
+      model holding a hit is rehydrated to read its directives (the same
+      rule FindReferences follows). Gate the command on MethodAt, not on
+      "the cursor is on an identifier". }
+    function FindOverrides(ATMid, ASym: Integer): TArray<TPasOverrideHit>;
+    { Find Implementations, part one: the cursor is on an INTERFACE method -
+      the counterpart of MethodAt, and the Enabled test for that command.
+      ATMid/ASym come back as the interface's own method symbol.
+
+      Deliberately a SEPARATE identity from MethodAt rather than a branch
+      inside it: a class method and an interface method are two different
+      questions with two different answers ("who overrides this" against "who
+      implements this"), and a host that offered one command for both would
+      have to guess which the user meant on a class that does both. }
+    function InterfaceMethodAt(AMid, ALine, ACol: Integer;
+      out ATMid, ASym: Integer; out AName: string): Boolean;
+    { Find Implementations, part two: every class method that satisfies the
+      interface method (ATMid, ASym), across the analyzed closure. See
+      TPasImplKind for what each row is.
+
+      Two hops over the same reverse-heritage index FindOverrides uses:
+
+      1. the interface's own DESCENDANT interfaces (`IChild =
+         interface(IBase)`), transitively - a class implementing IChild must
+         implement IBase's methods too, and the RTL is built that way
+         (IInterface -> IInvokable -> ...);
+      2. every class/`object` that LISTS any of those interfaces. For each,
+         the method under that name from the class itself (pikImplementor) or,
+         failing that, from the nearest ancestor that declares one
+         (pikInherited - the code that actually runs, which is a different
+         file from the class that took the interface on).
+
+      Matched by NAME, not by signature: dcc pairs an implementor to an
+      interface method by its full signature, and reproducing that would mean
+      overload resolution against every candidate - the same choice
+      FindOverrides makes for a chain, and the reason an interface's
+      overloaded method reports each candidate rather than the one dcc picks.
+
+      What it does not reach, all documented in docs/editor-features.md §5: a
+      method RESOLUTION clause (`procedure IBar.Baz = MyBaz;` - the
+      implementor is a differently NAMED method), a delegated implementation
+      (`property Impl: IBar read FImpl implements IBar` - the implementor is
+      whatever object the property returns, a value question), and an
+      ancestor named through a type alias (the index's own limit - see
+      FindOverrides). }
+    function FindImplementations(ATMid, ASym: Integer): TArray<TPasImplHit>;
     { Cursor on (or inside) a routine DECLARATION with no body - a `uses`-
       section/class-member header, or a `forward`-declared global/nested
       proc - that has a matching implementation elsewhere in the SAME unit
@@ -1352,6 +1561,706 @@ begin
       // in random column order. PlanRename's own comparer already did this.
       if Result = 0 then
         Result := A.Col - B.Col;
+    end));
+end;
+
+{ ---- Find Overrides ----------------------------------------------------
+  The override chain of a class method: the declaration that introduced the
+  slot, plus every `override` (and `message`/`reintroduce` - see
+  TPasOverrideKind) below it. Everything here reads the ANALYZED models and
+  the resolver's own bindings; the only text it needs is the directive words
+  themselves, which is why each model is hydrated just before they are read
+  and never before. }
+
+// The routine directives on ARoutineNode (an nkRoutine), as a set. Reads
+// NodeText, so the model must be hydrated first: on a demoted one every
+// directive reads back empty and a whole chain looks undecorated.
+function TPasNavigator.OvDirsOf(AMid, ARoutineNode: Integer): TPasOvDirs;
+var
+  LM: TPasSemaModel;
+  LChild: Integer;
+  LText: string;
+begin
+  Result := [];
+  if ARoutineNode = NIL_NODE then
+    Exit;
+  LM := FProj.Model(AMid);
+  LChild := LM.Tree.Nodes[ARoutineNode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LChild].Kind = nkDirective then
+    begin
+      LText := LM.Tree.NodeText(LChild);
+      if SameText(LText, 'override') then
+        Include(Result, odOverride)
+      else if SameText(LText, 'virtual') then
+        Include(Result, odVirtual)
+      else if SameText(LText, 'dynamic') then
+        Include(Result, odDynamic)
+      else if SameText(LText, 'abstract') then
+        Include(Result, odAbstract)
+      else if SameText(LText, 'message') then
+        Include(Result, odMessage)
+      else if SameText(LText, 'reintroduce') then
+        Include(Result, odReintroduce);
+    end;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+{ The class (or `object`) type symbol a METHOD symbol belongs to, from either
+  side of the decl/impl pair: a declaration-side symbol lives directly in the
+  struct's member scope, an implementation-side one (`procedure TFoo.Bar;`)
+  is declared in the implementation scope and reaches its class through the
+  StructSym its own routine scope carries - the same link the project's
+  inherited-member pass starts its ancestor walk from. False for a routine
+  that is not a method at all, and for a method of a record or an interface
+  (no VMT to share, respectively no `override` to find). }
+function TPasNavigator.OvStructOfMethod(AMid, ASym: Integer;
+  out AStructSym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LScope: Integer;
+begin
+  Result := False;
+  AStructSym := NIL_SYM;
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
+    Exit;
+  LM := FProj.Model(AMid);
+  if (ASym < 0) or (ASym >= LM.SymCount) or
+     (LM.Symbols[ASym].Kind <> skRoutine) then
+    Exit;
+  LScope := LM.Symbols[ASym].Scope;
+  if (LScope >= 0) and (LScope < LM.Scopes.Count) and
+     (LM.Scopes[LScope].Kind = sckStruct) then
+    AStructSym := LM.Scopes[LScope].StructSym
+  else if LM.Symbols[ASym].DeclNode <> NIL_NODE then
+    // A method reached from inside its own BODY (a routine scope carries the
+    // StructSym link the project's inherited pass starts from). The
+    // implementation HEADER is not this case and never reaches here: its
+    // qualified name binds to no symbol at all, so SymbolAt declines it and
+    // MethodAt takes the GotoDeclaration hop instead.
+    AStructSym := FProj.StructSymOfNode(LM, LM.Symbols[ASym].DeclNode);
+  Result := (AStructSym <> NIL_SYM) and
+    (OvClassDefNode(AMid, AStructSym) <> NIL_NODE);
+end;
+
+{ A struct type symbol's own nkClassType/nkObjectType node, or NIL_NODE for
+  anything else (a record, an interface, a helper, an alias, a non-struct
+  type). Taken from the MEMBER SCOPE's OwnerNode rather than from a type-def
+  walk: the resolver tags that scope with the type symbol (CollectStruct), so
+  the two directions cannot disagree, and an alias - which has no member
+  scope of its own - drops out here instead of being climbed into. }
+function TPasNavigator.OvStructDefNode(AMid, AStructSym: Integer;
+  const AKinds: TPasOvStructKinds): Integer;
+var
+  LM: TPasSemaModel;
+  LScope: Integer;
+begin
+  Result := NIL_NODE;
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
+    Exit;
+  LM := FProj.Model(AMid);
+  if (AStructSym < 0) or (AStructSym >= LM.SymCount) or
+     (LM.Symbols[AStructSym].Kind <> skType) then
+    Exit;
+  LScope := LM.Symbols[AStructSym].MemberScope;
+  if (LScope < 0) or (LScope >= LM.Scopes.Count) then
+    Exit;
+  Result := LM.Scopes[LScope].OwnerNode;
+  if (Result = NIL_NODE) or
+     not (LM.Tree.Nodes[Result].Kind in AKinds) then
+    Result := NIL_NODE;
+end;
+
+function TPasNavigator.OvClassDefNode(AMid, AStructSym: Integer): Integer;
+begin
+  Result := OvStructDefNode(AMid, AStructSym, [nkClassType, nkObjectType]);
+end;
+
+function TPasNavigator.OvInterfaceDefNode(AMid, AStructSym: Integer): Integer;
+begin
+  Result := OvStructDefNode(AMid, AStructSym, [nkInterfaceType]);
+end;
+
+// Every method DECLARED by this class itself under ANameLower - overloads
+// included, which is why this is an array: each carries its own directives,
+// and `override` on one sibling says nothing about the others.
+function TPasNavigator.OvMethodsNamed(AMid, AStructSym: Integer;
+  const ANameLower: string): TArray<Integer>;
+var
+  LM: TPasSemaModel;
+  LScope, LIdx, LSym: Integer;
+  LList: TList<Integer>;
+begin
+  Result := nil;
+  LM := FProj.Model(AMid);
+  LScope := LM.Symbols[AStructSym].MemberScope;
+  if (LScope < 0) or (LScope >= LM.Scopes.Count) or
+     (LM.Scopes[LScope].Symbols = nil) then
+    Exit;
+  LList := TList<Integer>.Create;
+  try
+    for LIdx := 0 to LM.Scopes[LScope].Symbols.Count - 1 do
+    begin
+      LSym := LM.Scopes[LScope].Symbols[LIdx];
+      if (LM.Symbols[LSym].Kind = skRoutine) and
+         (LM.Symbols[LSym].NameLower = ANameLower) then
+        LList.Add(LSym);
+    end;
+    Result := LList.ToArray;
+  finally
+    LList.Free;
+  end;
+end;
+
+{ The (model, symbol) ONE heritage item bound to. The node the resolver keyed
+  the binding on is picked exactly as ResolveTypeExpr picks it (a dotted name
+  binds on its LAST segment, a generic instantiation on the base name that
+  opens it), so this reads the resolver's own answer rather than re-resolving
+  a name. False for a heritage name that never resolved. }
+function TPasNavigator.OvRefOfHeritageItem(AMid, AItemNode: Integer;
+  out ABMid, ABSym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LName, LDepth: Integer;
+  LExt: TPasExtRef;
+begin
+  Result := False;
+  ABMid := -1;
+  ABSym := NIL_SYM;
+  LM := FProj.Model(AMid);
+  LName := AItemNode;
+  // Bounded: `TBase<TArg>` nests one level, a pathological spelling no more
+  // than a few - never a loop on a tree this shallow.
+  for LDepth := 1 to 8 do
+  begin
+    case LM.Tree.Nodes[LName].Kind of
+      nkTypeArgs:
+        LName := LM.Tree.Nodes[LName].FirstChild;
+      nkMember:
+        begin
+          LName := LM.Tree.Nodes[LName].FirstChild;
+          while (LName <> NIL_NODE) and
+                (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
+            LName := LM.Tree.Nodes[LName].NextSibling;
+        end;
+    else
+      Break;
+    end;
+    if LName = NIL_NODE then
+      Exit;
+  end;
+  if (LName <= High(LM.RefMap)) and (LM.RefMap[LName] <> NIL_SYM) then
+  begin
+    ABMid := AMid;
+    ABSym := LM.RefMap[LName];
+    Exit(True);
+  end;
+  if LM.ExtRefMap.TryGetValue(LName, LExt) then
+  begin
+    ABMid := LExt.UnitId;
+    ABSym := LExt.Sym;
+    Exit(True);
+  end;
+end;
+
+{ The reverse of the heritage link, over the WHOLE project: named type ->
+  every class/`object`/interface that lists it, with the ancestor slot marked.
+  Nothing in the analysis needs this direction and no model records it.
+
+  ONE index for both features, because they read the same edges from opposite
+  ends: Find Overrides wants ancestor edges between CLASSES, Find
+  Implementations wants an interface's own ancestor edges (`IChild =
+  interface(IBase)`) plus the non-ancestor edges that are a class's
+  implements list. A class's first heritage item is not always its ancestor -
+  `TFoo = class(IBar)` is legal, ancestor TObject implied - so the slot is
+  recorded as written and each consumer checks the KIND of what it landed on
+  rather than trusting the position.
+
+  Built per call: a search is a user gesture, caching would need an
+  invalidation story against incremental reanalysis, and the pass is one
+  symbol sweep per model that reads no text at all (measured: single-digit ms
+  over the RTL). }
+procedure TPasNavigator.OvBuildTypeEdges(
+  AIndex: TDictionary<string, TArray<TOvEdge>>);
+var
+  LMi, LSym, LDef, LItem, LBMid, LBSym, LSlot: Integer;
+  LM: TPasSemaModel;
+  LKey: string;
+  LEdges: TArray<TOvEdge>;
+  LEdge: TOvEdge;
+begin
+  for LMi := 0 to FProj.ModelCount - 1 do
+  begin
+    LM := FProj.Model(LMi);
+    for LSym := 0 to LM.SymCount - 1 do
+    begin
+      if LM.Symbols[LSym].Kind <> skType then
+        Continue;
+      LDef := OvStructDefNode(LMi, LSym,
+        [nkClassType, nkObjectType, nkInterfaceType]);
+      if LDef = NIL_NODE then
+        Continue;
+      LSlot := 0;
+      LItem := LM.Tree.Nodes[LDef].FirstChild;
+      while LItem <> NIL_NODE do
+      begin
+        if LM.Tree.Nodes[LItem].Kind in [nkIdent, nkMember, nkTypeArgs] then
+        begin
+          if OvRefOfHeritageItem(LMi, LItem, LBMid, LBSym) then
+          begin
+            LKey := Format('%d:%d', [LBMid, LBSym]);
+            LEdge.UnitId := LMi;
+            LEdge.Sym := LSym;
+            LEdge.IsFirst := LSlot = 0;
+            if AIndex.TryGetValue(LKey, LEdges) then
+              AIndex[LKey] := LEdges + [LEdge]
+            else
+              AIndex.Add(LKey, [LEdge]);
+          end;
+          Inc(LSlot);
+        end;
+        LItem := LM.Tree.Nodes[LItem].NextSibling;
+      end;
+    end;
+  end;
+end;
+
+{ Climb from (AMid, AStructSym) to the class that INTRODUCED the slot for
+  ANameLower: the topmost ancestor still declaring a same-named method with
+  virtual/dynamic/override/message on it. Stops at the first ancestor that
+  does not (or that this closure cannot reach), leaving the last class that
+  did - so clicking an `override` halfway down a chain answers for the same
+  chain as clicking its root. AMid/AStructSym are left untouched when the
+  clicked class is already the root. }
+procedure TPasNavigator.OvClimbToRoot(var AMid, AStructSym: Integer;
+  const ANameLower: string);
+var
+  LX: TSemaXType;
+  LDepth, LIdx, LDef: Integer;
+  LSyms: TArray<Integer>;
+  LFound: Boolean;
+begin
+  LX := XPlain(AMid, AStructSym);
+  for LDepth := 1 to 32 do
+  begin
+    LX := FProj.AncestorOfX(LX);
+    if not XValid(LX) then
+      Exit;
+    if OvClassDefNode(LX.UnitId, LX.Sym) = NIL_NODE then
+      Exit;
+    LSyms := OvMethodsNamed(LX.UnitId, LX.Sym, ANameLower);
+    if Length(LSyms) = 0 then
+      Exit;
+    if not FProj.EnsureHydrated(LX.UnitId) then
+      Exit;   // directives unreadable there - stop rather than guess
+    LFound := False;
+    for LIdx := 0 to High(LSyms) do
+    begin
+      LDef := FProj.Model(LX.UnitId).Symbols[LSyms[LIdx]].DeclNode;
+      if LDef <> NIL_NODE then
+        LDef := RTEnclosingRoutine(FProj.Model(LX.UnitId), LDef);
+      if OvDirsOf(LX.UnitId, LDef) *
+         [odVirtual, odDynamic, odOverride, odMessage] <> [] then
+        LFound := True;
+    end;
+    if not LFound then
+      Exit;
+    AMid := LX.UnitId;
+    AStructSym := LX.Sym;
+  end;
+end;
+
+{ The rows one class contributes. AIsRoot marks the chain's own top, whose
+  every same-named method is reported whatever its directives say (it is the
+  declaration the user is asking about, and a chain whose root this closure
+  cannot see above still has to start somewhere - see FindOverrides). Below
+  the root only the three directive shapes are rows; an undecorated
+  same-named method is an ordinary hiding declaration and no part of the
+  chain. }
+procedure TPasNavigator.OvCollectFrom(AMid, AStructSym: Integer;
+  const ANameLower: string; AIsRoot: Boolean;
+  AHits: TList<TPasOverrideHit>);
+var
+  LM: TPasSemaModel;
+  LSyms: TArray<Integer>;
+  LIdx, LDeclNode: Integer;
+  LDirs: TPasOvDirs;
+  LOv: TPasOverrideHit;
+begin
+  LSyms := OvMethodsNamed(AMid, AStructSym, ANameLower);
+  if Length(LSyms) = 0 then
+    Exit;
+  // Hydration AFTER the name test, exactly as FindReferences does it: only a
+  // model that actually declares a candidate pays for its text back.
+  if not FProj.EnsureHydrated(AMid) then
+    Exit;
+  LM := FProj.Model(AMid);
+  for LIdx := 0 to High(LSyms) do
+  begin
+    LDeclNode := LM.Symbols[LSyms[LIdx]].DeclNode;
+    if LDeclNode = NIL_NODE then
+      Continue;
+    LDirs := OvDirsOf(AMid, RTEnclosingRoutine(LM, LDeclNode));
+    if AIsRoot then
+      LOv.Kind := pokRoot
+    else if odOverride in LDirs then
+      LOv.Kind := pokOverride
+    else if odMessage in LDirs then
+      LOv.Kind := pokMessage
+    else if odReintroduce in LDirs then
+      LOv.Kind := pokReintroduce
+    else
+      Continue;
+    if not HitFromNode(LM, LDeclNode, LOv.Hit) then
+      Continue;
+    LOv.TypeName := LM.Symbols[AStructSym].Name;
+    LOv.UnitId := AMid;
+    LOv.Sym := LSyms[LIdx];
+    AHits.Add(LOv);
+  end;
+end;
+
+function TPasNavigator.MethodAt(AMid, ALine, ACol: Integer;
+  out ATMid, ASym: Integer; out AName: string): Boolean;
+var
+  LM: TPasSemaModel;
+  LStruct, LIdx: Integer;
+  LSyms: TArray<Integer>;
+  LTarget: TPasNavTarget;
+begin
+  Result := False;
+  if not SymbolAt(AMid, ALine, ACol, ATMid, ASym, AName) then
+  begin
+    // A qualified implementation HEADER (`procedure TFoo.Bar;`): its name
+    // binds to no symbol of its own, so SymbolAt declines it - and it is one
+    // of the two places a reader most wants this command. The decl<->impl
+    // toggle already knows the way across, and it is a pure CST match rather
+    // than a second identity, so the hop cannot disagree with itself.
+    if not GotoDeclaration(AMid, ALine, ACol, {out} LTarget) then
+      Exit;
+    if not SymbolAt(LTarget.UnitId, LTarget.Line, LTarget.Col,
+      ATMid, ASym, AName) then
+      Exit;
+  end;
+  if not OvStructOfMethod(ATMid, ASym, LStruct) then
+    Exit;
+  // Normalize to the DECLARATION-side symbol: an implementation header's own
+  // name is a different symbol in a different scope, and the chain search
+  // keys on the class's member scope.
+  LM := FProj.Model(ATMid);
+  LSyms := OvMethodsNamed(ATMid, LStruct, LM.Symbols[ASym].NameLower);
+  if Length(LSyms) = 0 then
+    Exit;
+  // Already a declaration-side symbol (the common case, a click in the class
+  // body or on a use of the method) - keep it, so a specific overload keeps
+  // its own directives. Otherwise the click was on the implementation and any
+  // of the overloads is as good an entry to the chain as another: they share
+  // the name the chain is searched by.
+  for LIdx := 0 to High(LSyms) do
+    if LSyms[LIdx] = ASym then
+      Break
+    else if LIdx = High(LSyms) then
+      ASym := LSyms[0];
+  AName := LM.Symbols[ASym].Name;
+  Result := True;
+end;
+
+function TPasNavigator.FindOverrides(ATMid,
+  ASym: Integer): TArray<TPasOverrideHit>;
+var
+  LHits: TList<TPasOverrideHit>;
+  LIndex: TDictionary<string, TArray<TOvEdge>>;
+  LSeen: TDictionary<string, Boolean>;
+  LQueue: TQueue<TPasExtRef>;
+  LCur: TPasExtRef;
+  LKids: TArray<TOvEdge>;
+  LIdx, LMid, LStruct: Integer;
+  LNameLower, LKey: string;
+begin
+  Result := nil;
+  if not OvStructOfMethod(ATMid, ASym, LStruct) then
+    Exit;
+  LNameLower := FProj.Model(ATMid).Symbols[ASym].NameLower;
+  LMid := ATMid;
+  OvClimbToRoot(LMid, LStruct, LNameLower);
+
+  LHits := TList<TPasOverrideHit>.Create;
+  LIndex := TDictionary<string, TArray<TOvEdge>>.Create;
+  LSeen := TDictionary<string, Boolean>.Create;
+  LQueue := TQueue<TPasExtRef>.Create;
+  try
+    OvCollectFrom(LMid, LStruct, LNameLower, True, LHits);
+    OvBuildTypeEdges(LIndex);
+    LCur.UnitId := LMid;
+    LCur.Sym := LStruct;
+    LQueue.Enqueue(LCur);
+    LSeen.Add(Format('%d:%d', [LMid, LStruct]), True);
+    while LQueue.Count > 0 do
+    begin
+      LCur := LQueue.Dequeue;
+      if not LIndex.TryGetValue(Format('%d:%d', [LCur.UnitId, LCur.Sym]),
+        LKids) then
+        Continue;
+      for LIdx := 0 to High(LKids) do
+      begin
+        // ANCESTOR edges only, and only to a class/`object`: a class that
+        // merely LISTS this type (its implements list) shares no VMT slot
+        // with it, and neither does anything but a class.
+        if not LKids[LIdx].IsFirst then
+          Continue;
+        if OvClassDefNode(LKids[LIdx].UnitId, LKids[LIdx].Sym) = NIL_NODE then
+          Continue;
+        LKey := Format('%d:%d', [LKids[LIdx].UnitId, LKids[LIdx].Sym]);
+        // A diamond cannot happen in single inheritance, but the SAME class
+        // can be reached twice through a self-referential or duplicated
+        // heritage spelling in broken source - error tolerance is the
+        // primary mode here, so guard rather than assume.
+        if LSeen.ContainsKey(LKey) then
+          Continue;
+        LSeen.Add(LKey, True);
+        OvCollectFrom(LKids[LIdx].UnitId, LKids[LIdx].Sym, LNameLower, False,
+          LHits);
+        LCur.UnitId := LKids[LIdx].UnitId;
+        LCur.Sym := LKids[LIdx].Sym;
+        LQueue.Enqueue(LCur);
+      end;
+    end;
+    Result := LHits.ToArray;
+  finally
+    LQueue.Free;
+    LSeen.Free;
+    LIndex.Free;
+    LHits.Free;
+  end;
+  // The root row stays first (it is the chain's own head, and a host pins it
+  // like a Find References declaration row); everything below it sorts the
+  // way a search-results panel groups - by file, then position.
+  TArray.Sort<TPasOverrideHit>(Result, TComparer<TPasOverrideHit>.Construct(
+    function(const A, B: TPasOverrideHit): Integer
+    begin
+      Result := Ord(B.Kind = pokRoot) - Ord(A.Kind = pokRoot);
+      if Result = 0 then
+        Result := CompareText(A.Hit.FilePath, B.Hit.FilePath);
+      if Result = 0 then
+        Result := A.Hit.Line - B.Hit.Line;
+      if Result = 0 then
+        Result := A.Hit.Col - B.Hit.Col;
+    end));
+end;
+
+{ ---- Find Implementations ----------------------------------------------
+  The interface-side twin of Find Overrides: who actually implements this
+  interface method. Shares the reverse-heritage index and the hit/hydration
+  discipline; everything specific to it is the pair of hops below. }
+
+{ One row per method named ANameLower that AStructSym declares. AViaTypeName
+  is the class that brought the interface in - equal to this type for a
+  direct implementor, a descendant of it for an inherited one. False when the
+  type declares no such method, which is how the ancestor climb knows to keep
+  going - so the result is about the TYPE, not about whether a row was
+  actually appended: ASeen keeps ONE row per method declaration (fifty
+  classes listing IInterface all inherit the same `_AddRef`, and fifty rows
+  on one line is not an answer), and a suppressed duplicate still means "yes,
+  implemented here". }
+function TPasNavigator.OvImplRow(AMid, AStructSym: Integer;
+  const ANameLower: string; const AViaTypeName: string;
+  AKind: TPasImplKind; AHits: TList<TPasImplHit>;
+  ASeen: TDictionary<string, Boolean>): Boolean;
+var
+  LM: TPasSemaModel;
+  LSyms: TArray<Integer>;
+  LIdx, LDeclNode: Integer;
+  LRow: TPasImplHit;
+  LKey: string;
+begin
+  LSyms := OvMethodsNamed(AMid, AStructSym, ANameLower);
+  Result := Length(LSyms) > 0;
+  if not Result then
+    Exit;
+  // Hydration after the name test, as everywhere else here.
+  if not FProj.EnsureHydrated(AMid) then
+    Exit;
+  LM := FProj.Model(AMid);
+  for LIdx := 0 to High(LSyms) do
+  begin
+    LDeclNode := LM.Symbols[LSyms[LIdx]].DeclNode;
+    if LDeclNode = NIL_NODE then
+      Continue;
+    LKey := Format('%d:%d', [AMid, LSyms[LIdx]]);
+    if ASeen.ContainsKey(LKey) then
+      Continue;
+    if not HitFromNode(LM, LDeclNode, LRow.Hit) then
+      Continue;
+    ASeen.Add(LKey, True);
+    LRow.Kind := AKind;
+    LRow.TypeName := LM.Symbols[AStructSym].Name;
+    if SameText(AViaTypeName, LRow.TypeName) then
+      LRow.ViaTypeName := ''
+    else
+      LRow.ViaTypeName := AViaTypeName;
+    LRow.UnitId := AMid;
+    LRow.Sym := LSyms[LIdx];
+    AHits.Add(LRow);
+  end;
+end;
+
+function TPasNavigator.InterfaceMethodAt(AMid, ALine, ACol: Integer;
+  out ATMid, ASym: Integer; out AName: string): Boolean;
+var
+  LM: TPasSemaModel;
+  LScope: Integer;
+begin
+  Result := False;
+  if not SymbolAt(AMid, ALine, ACol, ATMid, ASym, AName) then
+    Exit;
+  LM := FProj.Model(ATMid);
+  if LM.Symbols[ASym].Kind <> skRoutine then
+    Exit;
+  LScope := LM.Symbols[ASym].Scope;
+  if (LScope < 0) or (LScope >= LM.Scopes.Count) or
+     (LM.Scopes[LScope].Kind <> sckStruct) then
+    Exit;
+  // An interface has no implementation section, so there is no decl<->impl
+  // hop to make here (the one MethodAt needs): every reference to an
+  // interface method is either its declaration or a call.
+  Result := OvInterfaceDefNode(ATMid, LM.Scopes[LScope].StructSym) <> NIL_NODE;
+end;
+
+function TPasNavigator.FindImplementations(ATMid,
+  ASym: Integer): TArray<TPasImplHit>;
+var
+  LHits: TList<TPasImplHit>;
+  LIndex: TDictionary<string, TArray<TOvEdge>>;
+  LSeenIntf, LSeenClass, LSeenRow: TDictionary<string, Boolean>;
+  LQueue: TQueue<TPasExtRef>;
+  LIntfs: TList<TPasExtRef>;
+  LCur: TPasExtRef;
+  LEdges: TArray<TOvEdge>;
+  LM: TPasSemaModel;
+  LScope, LIntfSym, LIdx, LIntfIdx, LDepth: Integer;
+  LNameLower, LKey, LVia: string;
+  LX: TSemaXType;
+begin
+  Result := nil;
+  if (ATMid < 0) or (ATMid >= FProj.ModelCount) then
+    Exit;
+  LM := FProj.Model(ATMid);
+  if (ASym < 0) or (ASym >= LM.SymCount) or
+     (LM.Symbols[ASym].Kind <> skRoutine) then
+    Exit;
+  LScope := LM.Symbols[ASym].Scope;
+  if (LScope < 0) or (LScope >= LM.Scopes.Count) or
+     (LM.Scopes[LScope].Kind <> sckStruct) then
+    Exit;
+  LIntfSym := LM.Scopes[LScope].StructSym;
+  if OvInterfaceDefNode(ATMid, LIntfSym) = NIL_NODE then
+    Exit;
+  LNameLower := LM.Symbols[ASym].NameLower;
+
+  LHits := TList<TPasImplHit>.Create;
+  LIndex := TDictionary<string, TArray<TOvEdge>>.Create;
+  LSeenIntf := TDictionary<string, Boolean>.Create;
+  LSeenClass := TDictionary<string, Boolean>.Create;
+  LSeenRow := TDictionary<string, Boolean>.Create;
+  LQueue := TQueue<TPasExtRef>.Create;
+  LIntfs := TList<TPasExtRef>.Create;
+  try
+    // The interface's own declaration(s) first - the chain's head, like
+    // FindOverrides' pokRoot.
+    OvImplRow(ATMid, LIntfSym, LNameLower, '', pikRoot, LHits, LSeenRow);
+    OvBuildTypeEdges(LIndex);
+
+    // Hop 1: this interface plus every interface that DESCENDS from it.
+    LCur.UnitId := ATMid;
+    LCur.Sym := LIntfSym;
+    LQueue.Enqueue(LCur);
+    LSeenIntf.Add(Format('%d:%d', [ATMid, LIntfSym]), True);
+    while LQueue.Count > 0 do
+    begin
+      LCur := LQueue.Dequeue;
+      LIntfs.Add(LCur);
+      if not LIndex.TryGetValue(Format('%d:%d', [LCur.UnitId, LCur.Sym]),
+        LEdges) then
+        Continue;
+      for LIdx := 0 to High(LEdges) do
+      begin
+        if OvInterfaceDefNode(LEdges[LIdx].UnitId, LEdges[LIdx].Sym) =
+          NIL_NODE then
+          Continue;   // a CLASS listing it - hop 2's business, not this one
+        LKey := Format('%d:%d', [LEdges[LIdx].UnitId, LEdges[LIdx].Sym]);
+        if LSeenIntf.ContainsKey(LKey) then
+          Continue;
+        LSeenIntf.Add(LKey, True);
+        LCur.UnitId := LEdges[LIdx].UnitId;
+        LCur.Sym := LEdges[LIdx].Sym;
+        LQueue.Enqueue(LCur);
+      end;
+    end;
+
+    // Hop 2: every class/`object` listing one of those interfaces. Its own
+    // method if it declares one, else the nearest ancestor's - which is a
+    // real implementation, just written one class up (TInterfacedObject's
+    // own _AddRef for every class that lists IInterface, to take the shape
+    // the RTL repeats most).
+    for LIntfIdx := 0 to LIntfs.Count - 1 do
+    begin
+      if not LIndex.TryGetValue(Format('%d:%d',
+        [LIntfs[LIntfIdx].UnitId, LIntfs[LIntfIdx].Sym]), LEdges) then
+        Continue;
+      for LIdx := 0 to High(LEdges) do
+      begin
+        if OvClassDefNode(LEdges[LIdx].UnitId, LEdges[LIdx].Sym) =
+          NIL_NODE then
+          Continue;
+        LKey := Format('%d:%d', [LEdges[LIdx].UnitId, LEdges[LIdx].Sym]);
+        if LSeenClass.ContainsKey(LKey) then
+          Continue;
+        LSeenClass.Add(LKey, True);
+        LVia := FProj.Model(LEdges[LIdx].UnitId).Symbols[
+          LEdges[LIdx].Sym].Name;
+        if OvImplRow(LEdges[LIdx].UnitId, LEdges[LIdx].Sym, LNameLower, LVia,
+          pikImplementor, LHits, LSeenRow) then
+          Continue;
+        // Not here - climb. Stops at the first ancestor that declares one:
+        // anything above it is what THAT declaration overrides, which is
+        // Find Overrides' question.
+        LX := XPlain(LEdges[LIdx].UnitId, LEdges[LIdx].Sym);
+        for LDepth := 1 to 32 do
+        begin
+          LX := FProj.AncestorOfX(LX);
+          if not XValid(LX) or
+             (OvClassDefNode(LX.UnitId, LX.Sym) = NIL_NODE) then
+            Break;
+          if OvImplRow(LX.UnitId, LX.Sym, LNameLower, LVia, pikInherited,
+            LHits, LSeenRow) then
+            Break;
+        end;
+      end;
+    end;
+    Result := LHits.ToArray;
+  finally
+    LIntfs.Free;
+    LQueue.Free;
+    LSeenRow.Free;
+    LSeenClass.Free;
+    LSeenIntf.Free;
+    LIndex.Free;
+    LHits.Free;
+  end;
+  // Root rows first, then by file and position - the same order a search
+  // results panel groups in.
+  TArray.Sort<TPasImplHit>(Result, TComparer<TPasImplHit>.Construct(
+    function(const A, B: TPasImplHit): Integer
+    begin
+      Result := Ord(B.Kind = pikRoot) - Ord(A.Kind = pikRoot);
+      if Result = 0 then
+        Result := CompareText(A.Hit.FilePath, B.Hit.FilePath);
+      if Result = 0 then
+        Result := A.Hit.Line - B.Hit.Line;
+      if Result = 0 then
+        Result := A.Hit.Col - B.Hit.Col;
     end));
 end;
 

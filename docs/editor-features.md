@@ -243,3 +243,119 @@ identifier class does here:
     before asking for a new name; the demo's `Rename...` is disabled while
     the caret sits in a blocked file.
 
+
+## 4. Find Overrides (`TPasNavigator.MethodAt`/`FindOverrides` + demo wiring)
+
+Status: IMPLEMENTED (PasTree 0.19.0) - `MethodAt`, `FindOverrides`,
+`TPasOverrideHit`/`TPasOverrideKind` in `source/PasTree.Sema.Nav.pas`, wired
+into the demo as `Find Overrides` in the editor context menu (next to Find
+References), regression-covered by `tests/SemaNavSmoke.dpr` (fixtures
+`NavOvrA`, `NavOvrB`).
+
+The question it answers is "where does this method go when the object is
+really a descendant" - every declaration sharing one VMT (or message-table)
+slot, across the whole analyzed closure. It is NOT a reference search: no
+call site is a row, and a same-named method in an unrelated hierarchy never
+is either.
+
+Two walks, both over resolved bindings:
+
+1. **Up**, from the class of the method under the caret through
+   `AncestorOfX`, while each ancestor still declares a same-named method
+   carrying `virtual`/`dynamic`/`override`/`message`. The topmost one is the
+   chain's root - so clicking an `override` halfway down answers for the
+   whole chain, exactly like clicking the root does.
+2. **Down**, over a reverse-heritage index built for that one call from
+   every class's `class(TBase)` reference AS THE RESOLVER BOUND IT
+   (RefMap/ExtRefMap), then breadth-first. The index is the reason this is
+   affordable: the alternative, `XDescendsFrom` per class in the closure,
+   re-walks every ancestor chain in the project.
+
+What each declaration shape does:
+
+| # | Declaration | Row | Status |
+|---|-------------|-----|--------|
+| 1 | The `virtual`/`dynamic` declaration that introduced the slot | `pokRoot`, always first; one row per OVERLOAD the root class declares under that name (`TStream.Read` is six) - the chain is reported by name, not by signature match | OK |
+| 2 | `override`, any depth, any unit of the closure | `pokOverride` | OK |
+| 3 | `reintroduce` (deliberately NOT an override) | `pokReintroduce` - reported because a reader must not mistake it for one | OK |
+| 4 | A `message <expr>` handler in a descendant - implicitly virtual, and dcc rejects `override` on one | `pokMessage`, matched by name + directive | OK |
+| 5 | A same-named method with NONE of those directives (an ordinary hiding declaration, dcc's W1010) | no row, by design - it shares no slot, and it would drown every `Create`/`Destroy` result | OK (by design) |
+| 6 | A non-virtual method, or a virtual one nothing overrides | its own single `pokRoot` row - the honest "nothing overrides this" | OK |
+| 7 | Started from a qualified implementation header (`procedure TFoo.Bar;`) | the same chain (`MethodAt` takes the decl<->impl hop; the header's own name binds to no symbol, so `SymbolAt` alone declines it) | OK |
+| 8 | A method of a record, an interface, or a plain routine | `MethodAt` declines - the command is not offered | OK (by design) |
+| 9 | An INTERFACE method's implementors (`TFoo = class(TObject, IBar)`) | - | not this search - a separate command, see §5 |
+| 10 | A class whose ancestor is written through a type ALIAS (`TB2 = TB;` then `class(TB2)`) | - | GAP - the index keys on the symbol the heritage name bound to, which is the alias |
+| 11 | An event handler wired only through a `.dfm` (`OnClick`) | - | not an override at all: it is an assignment to a property, reached by Find References |
+
+Measured on the flattened RTL corpus (342 models, 2.5 s to analyze):
+`TObject.Destroy` = 136 rows in 8 ms, `TPersistent.Assign` = 8 rows in 6 ms,
+`TStream.Read` = 23 in 6 ms. The reverse-heritage index is rebuilt per call
+and is not what costs - so no cache, and no invalidation story to get wrong
+against incremental reanalysis.
+
+**Cost note for hosts.** The chain of a method as universal as `Destroy`
+legitimately covers every class in the closure, and each model holding a row
+is rehydrated to read its directives (the same rule `FindReferences`
+follows). Gate the command on `MethodAt`, never on "the caret is on an
+identifier".
+
+## 5. Find Implementations (`TPasNavigator.InterfaceMethodAt`/`FindImplementations` + demo wiring)
+
+Status: IMPLEMENTED (PasTree 0.20.0) - `InterfaceMethodAt`,
+`FindImplementations`, `TPasImplHit`/`TPasImplKind` in
+`source/PasTree.Sema.Nav.pas`, wired into the demo as `Find Implementations`
+in the editor context menu (next to Find Overrides), regression-covered by
+`tests/SemaNavSmoke.dpr` (fixtures `NavIntfA`, `NavIntfB`).
+
+The interface-side twin of §4, and a SEPARATE command for a separate
+identity: an interface method has no override chain, a class method has no
+implementors, and one command for both would have to guess which the user
+meant on a class that does both.
+
+The hard part is that there is no keyword to key on. An interface method is
+implicitly virtual and an implementing class writes NO directive at all - dcc
+pairs the two by name and signature. So the tie this searches is the class's
+own heritage list, over the same reverse-heritage index §4 builds:
+
+1. the interface's own DESCENDANT interfaces (`IChild = interface(IBase)`),
+   transitively - a class implementing IChild implements IBase's methods too;
+2. every class/`object` LISTING one of those interfaces.
+
+| # | Declaration | Row | Status |
+|---|-------------|-----|--------|
+| 1 | The interface method itself | `pikRoot`, first; one row per overload the interface declares under that name | OK |
+| 2 | A method of a class that lists the interface | `pikImplementor` | OK |
+| 3 | A method of a class that lists a DESCENDANT interface (`class(TObject, IChild)`) | `pikImplementor` | OK |
+| 4 | The class lists the interface but declares no such method - an ANCESTOR's method satisfies it | `pikInherited`, positioned on the ancestor's declaration (the code that runs) with `ViaTypeName` naming the class that took the interface on | OK |
+| 5 | The same inherited declaration reached through many classes (fifty classes over one `TInterfacedObject._AddRef`) | ONE row, first reach wins - fifty rows on one line is not an answer | OK (by design) |
+| 6 | A same-named method on a class that implements nothing | no row | OK |
+| 7 | A method RESOLUTION clause (`procedure IBar.Baz = MyBaz;`) | - | GAP - the implementor is a differently NAMED method; nothing in the name search can find it |
+| 8 | A delegated implementation (`property Impl: IBar read FImpl implements IBar`) | - | GAP - the implementor is whatever object the property returns, a value question rather than a declaration one |
+| 9 | Signature-precise pairing of an OVERLOADED interface method | - | GAP (by design) - every same-named candidate is a row, the same choice §4 makes for a chain |
+| 10 | An ancestor or interface named through a type ALIAS | - | GAP - the index's own limit, see §4 |
+
+Measured on the VCL closure of a `uses Vcl.Forms, Vcl.ComCtrls, Vcl.Grids`
+program (103 models): `IInterface.QueryInterface` = 9 rows across 3 files in
+1 ms, `IStreamPersist.LoadFromStream` = 3 rows in 1 ms.
+
+### 5.1 "Does it only search the current file?" - no, and how to tell
+
+Both searches are project-wide by construction (the index sweeps every loaded
+model), and both demo pages put the unit count in the tab caption -
+`Overrides of 'Paint' (5 in 3 units)` - precisely so this question has an
+answer visible without scrolling. Measured cross-unit reach at the time of
+writing: `TObject.Destroy` 136 rows across 49 files of the flattened RTL;
+`TWinControl.CreateParams` 54 rows across 8 files of the VCL; 991 classes in
+that closure, ZERO with an unresolved heritage reference (so no missing
+edges).
+
+When a result LOOKS current-file-only, the closure is what to check, not the
+search:
+
+- the demo analyzed ONE FILE (`Parse` on a .pas, `AnalyzeFile`) rather than a
+  project - there is only one model to search;
+- the descendants live in units the analyzed project never imports (nothing
+  in the closure names them, so nothing loaded them);
+- the chain's root is in the RTL/VCL and those sources are not on the search
+  paths - the climb then stops at the caret's own class, and its overrides
+  are the only rows left.

@@ -33,6 +33,14 @@ program PasTreeSemaProject;
          instead of only the histogram. Suppresses the per-unit model dump,
          which is what stdout normally carries.
 
+  -overrides:TClass.Method / -impls:IIntf.Method  (repeatable) after the
+         analysis, run the demo's Find Overrides / Find Implementations for
+         that method (found by NAME over the closure - every declaration of
+         that name on a struct type of that name, so overloads and same-named
+         types in two units each get their own block) and print every row.
+         The headless way to check "the demo showed one row" against what the
+         closure really holds.
+
   -members  turns ON the opt-in "unresolved member after a dot" diagnostic
          (TPasSemaProject.ReportUnresolvedMembers). Off by default because a
          FALSE E2003 on a member is worse than a missing one; this is how the
@@ -62,7 +70,8 @@ uses
   PasTree.Sema.Builtins in '..\source\PasTree.Sema.Builtins.pas',
   PasTree.Sema.Resolver in '..\source\PasTree.Sema.Resolver.pas',
   PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas',
-  PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas';
+  PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
+  PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas';
 
 type
   TCount = record
@@ -75,6 +84,12 @@ var
   GProj: TPasSemaProject;
   GPath, GStudio: string;
   GExtraPaths: TArray<string>;   // -L<dir>, repeatable; see the arg loop
+  // -overrides:TClass.Method / -impls:IIntf.Method, repeatable: Find
+  // Overrides / Find Implementations queries to run over the analyzed closure
+  // and print (see ReportChains). The headless twin of the demo's two
+  // context-menu commands, for reproducing "the demo showed one row" against
+  // a real project without the demo.
+  GOverrideQueries, GImplQueries: TArray<string>;
   GIdx: Integer;
   GSingle, GWholeProject, GDProjMode, GList, GMembers, GIfs: Boolean;
   GVisibility: Boolean;
@@ -172,6 +187,116 @@ begin
 end;
 
 { The -dproj driver. }
+{ Every (model, symbol) of a method named AMethod declared directly by a
+  struct type named AType - by NAME over the whole closure, since a headless
+  run has no caret to click. Several hits are normal: overloads, and the same
+  type name declared in more than one unit. }
+function FindMethodSyms(const AType, AMethod: string): TArray<TPasExtRef>;
+var
+  LMi, LSym, LScope, LStruct: Integer;
+  LM: TPasSemaModel;
+  LRef: TPasExtRef;
+begin
+  Result := nil;
+  for LMi := 0 to GProj.ModelCount - 1 do
+  begin
+    LM := GProj.Model(LMi);
+    for LSym := 0 to LM.SymCount - 1 do
+    begin
+      if (LM.Symbols[LSym].Kind <> skRoutine) or
+         not SameText(LM.Symbols[LSym].Name, AMethod) then
+        Continue;
+      LScope := LM.Symbols[LSym].Scope;
+      if (LScope < 0) or (LScope >= LM.Scopes.Count) or
+         (LM.Scopes[LScope].Kind <> sckStruct) then
+        Continue;
+      LStruct := LM.Scopes[LScope].StructSym;
+      if (LStruct = NIL_SYM) or not SameText(LM.Symbols[LStruct].Name, AType)
+      then
+        Continue;
+      LRef.UnitId := LMi;
+      LRef.Sym := LSym;
+      Result := Result + [LRef];
+    end;
+  end;
+end;
+
+{ Runs the -overrides:/-impls: queries and prints every row as
+  `file(line): Type kind`, plus a rows/files summary line. The demo's two
+  result pages, as text. }
+procedure ReportChains;
+const
+  OVK: array[TPasOverrideKind] of string = ('root', 'override', 'message',
+    'reintroduce');
+  IMK: array[TPasImplKind] of string = ('declares', 'implements',
+    'implements-via');
+var
+  LNav: TPasNavigator;
+  LQ, LType, LMethod: string;
+  LDot, LIdx, LFiles: Integer;
+  LRefs: TArray<TPasExtRef>;
+  LOvs: TArray<TPasOverrideHit>;
+  LImps: TArray<TPasImplHit>;
+  LSeenFiles: TDictionary<string, Boolean>;
+begin
+  if (Length(GOverrideQueries) = 0) and (Length(GImplQueries) = 0) then
+    Exit;
+  LNav := TPasNavigator.Create(GProj);
+  LSeenFiles := TDictionary<string, Boolean>.Create;
+  try
+    for LQ in GOverrideQueries do
+    begin
+      LDot := LastDelimiter('.', LQ);
+      LType := Copy(LQ, 1, LDot - 1);
+      LMethod := Copy(LQ, LDot + 1, MaxInt);
+      LRefs := FindMethodSyms(LType, LMethod);
+      Writeln(Format('--- overrides of %s: %d matching declaration(s) ---',
+        [LQ, Length(LRefs)]));
+      for var LRef in LRefs do
+      begin
+        LOvs := LNav.FindOverrides(LRef.UnitId, LRef.Sym);
+        LSeenFiles.Clear;
+        for LIdx := 0 to High(LOvs) do
+        begin
+          LSeenFiles.AddOrSetValue(LowerCase(LOvs[LIdx].Hit.FilePath), True);
+          Writeln(Format('  %s(%d): %s %s', [LOvs[LIdx].Hit.FilePath,
+            LOvs[LIdx].Hit.Line, LOvs[LIdx].TypeName, OVK[LOvs[LIdx].Kind]]));
+        end;
+        LFiles := LSeenFiles.Count;
+        Writeln(Format('  = %d row(s) in %d file(s) from %s',
+          [Length(LOvs), LFiles, GProj.ModelFile(LRef.UnitId)]));
+      end;
+    end;
+    for LQ in GImplQueries do
+    begin
+      LDot := LastDelimiter('.', LQ);
+      LType := Copy(LQ, 1, LDot - 1);
+      LMethod := Copy(LQ, LDot + 1, MaxInt);
+      LRefs := FindMethodSyms(LType, LMethod);
+      Writeln(Format('--- implementations of %s: %d matching declaration(s) ---',
+        [LQ, Length(LRefs)]));
+      for var LRef in LRefs do
+      begin
+        LImps := LNav.FindImplementations(LRef.UnitId, LRef.Sym);
+        LSeenFiles.Clear;
+        for LIdx := 0 to High(LImps) do
+        begin
+          LSeenFiles.AddOrSetValue(LowerCase(LImps[LIdx].Hit.FilePath), True);
+          Writeln(Format('  %s(%d): %s %s %s', [LImps[LIdx].Hit.FilePath,
+            LImps[LIdx].Hit.Line, LImps[LIdx].TypeName, IMK[LImps[LIdx].Kind],
+            LImps[LIdx].ViaTypeName]));
+        end;
+        LFiles := LSeenFiles.Count;
+        Writeln(Format('  = %d row(s) in %d file(s) from %s',
+          [Length(LImps), LFiles, GProj.ModelFile(LRef.UnitId)]));
+      end;
+    end;
+  finally
+    LSeenFiles.Free;
+    LNav.Free;
+  end;
+end;
+
 procedure RunDProj(const APath: string);
 var
   LD: TPasDProj;
@@ -433,6 +558,7 @@ begin
       ReportHistogram('--- project files, by identifier/code ---', LInProj, 25);
       ReportHistogram('--- library units, by identifier/code ---', LOutProj, 25,
         LLibSites);
+      ReportChains;
     finally
       GProj.Free;
     end;
@@ -485,6 +611,11 @@ begin
         GList := True
       else if SameText(ParamStr(GIdx), '-members') then
         GMembers := True
+      else if ParamStr(GIdx).StartsWith('-overrides:', True) then
+        GOverrideQueries := GOverrideQueries +
+          [Copy(ParamStr(GIdx), 12, MaxInt)]
+      else if ParamStr(GIdx).StartsWith('-impls:', True) then
+        GImplQueries := GImplQueries + [Copy(ParamStr(GIdx), 8, MaxInt)]
       else if SameText(ParamStr(GIdx), '-ifs') then
         // Residual- exotica: every guard still GUESSED after the second
         // pass (PPIF) and every malformed conditional (PPBAD), as ordinary
@@ -568,6 +699,7 @@ begin
         Writeln('=== ', GProj.ModelFile(GIdx), ' ===');
         Write(DumpSemaModel(GProj.Model(GIdx)));
       end;
+      ReportChains;
       if GSingle then
         GMode := 'SingleThread'
       else
