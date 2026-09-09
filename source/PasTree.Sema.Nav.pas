@@ -2793,7 +2793,7 @@ var
   LQualIdents: TArray<Integer>;
   LName, LKey, LKeyLoose: string;
   LChain: TArray<string>;
-  LIsMethod: Boolean;
+  LIsMethod, LFound: Boolean;
 begin
   Result := False;
   if AMid < 0 then
@@ -2809,26 +2809,39 @@ begin
     Exit;
   if RTFindChildKind(LM, LDeclNode, nkRoutineBody) <> NIL_NODE then
     Exit;   // cursor is already on/in an implementation
-  if not RTSegments(LM, LDeclNode, LQualIdents, LNameNode) then
-    Exit;
-  LName := LM.Tree.NodeNameLower(LNameNode);
-  LIsMethod := (LM.Tree.Nodes[LDeclNode].Parent <> NIL_NODE) and
-    RTIsStructKind(LM.Tree.Nodes[LM.Tree.Nodes[LDeclNode].Parent].Kind);
-  if LIsMethod then
+  // Mirrors the climb in GotoDeclaration: a routine local to another
+  // routine's declaration-only header (rare, but a forward-declared routine
+  // could itself nest a further forward declaration) climbs to each
+  // enclosing routine until one has a paired implementation.
+  LFound := False;
+  while (LDeclNode <> NIL_NODE) and
+    RTSegments(LM, LDeclNode, LQualIdents, LNameNode) do
   begin
-    LChain := RTEnclosingTypeChain(LM, LDeclNode);
-    LKey := RTMethodKey(LChain, LName, RTParamSignature(LM, LDeclNode));
-    LKeyLoose := RTMethodKeyLoose(LChain, LName);
-  end
-  else
-  begin
-    LContainer := RTEnclosingRoutine(LM, LDeclNode);
-    LKey := RTRoutineKey(LContainer, LName, RTParamSignature(LM, LDeclNode));
-    LKeyLoose := RTRoutineKeyLoose(LContainer, LName);
+    LName := LM.Tree.NodeNameLower(LNameNode);
+    LIsMethod := (LM.Tree.Nodes[LDeclNode].Parent <> NIL_NODE) and
+      RTIsStructKind(LM.Tree.Nodes[LM.Tree.Nodes[LDeclNode].Parent].Kind);
+    if LIsMethod then
+    begin
+      LChain := RTEnclosingTypeChain(LM, LDeclNode);
+      LKey := RTMethodKey(LChain, LName, RTParamSignature(LM, LDeclNode));
+      LKeyLoose := RTMethodKeyLoose(LChain, LName);
+    end
+    else
+    begin
+      LContainer := RTEnclosingRoutine(LM, LDeclNode);
+      LKey := RTRoutineKey(LContainer, LName, RTParamSignature(LM, LDeclNode));
+      LKeyLoose := RTRoutineKeyLoose(LContainer, LName);
+    end;
+    if LCache.ImplKey.TryGetValue(LKey, LImplNode) or
+       LCache.ImplKeyLoose.TryGetValue(LKeyLoose, LImplNode) then
+    begin
+      LFound := True;
+      Break;
+    end;
+    LDeclNode := RTEnclosingRoutine(LM, LDeclNode);
   end;
-  if not LCache.ImplKey.TryGetValue(LKey, LImplNode) then
-    if not LCache.ImplKeyLoose.TryGetValue(LKeyLoose, LImplNode) then
-      Exit;
+  if not LFound then
+    Exit;
   Result := RoutineBodyEntry(AMid, LM, LImplNode, ATarget);
   if Result then
     // The DECLARED spelling, which is what TPasNavTarget.Name promises and
@@ -2845,7 +2858,7 @@ var
   LQualIdents: TArray<Integer>;
   LName, LKey, LKeyLoose: string;
   LChain: TArray<string>;
-  LIsMethod: Boolean;
+  LIsMethod, LFound: Boolean;
 begin
   Result := False;
   if AMid < 0 then
@@ -2861,27 +2874,41 @@ begin
     Exit;
   if RTFindChildKind(LM, LImplNode, nkRoutineBody) = NIL_NODE then
     Exit;   // cursor is already on/in a declaration
-  if not RTSegments(LM, LImplNode, LQualIdents, LNameNode) then
-    Exit;
-  LName := LM.Tree.NodeNameLower(LNameNode);
-  LIsMethod := LQualIdents <> nil;
-  if LIsMethod then
+  // A routine local to another routine's body (e.g. a nested procedure) most
+  // often has no forward declaration of its own - climb to each enclosing
+  // routine in turn until one has a paired declaration, same as invoking this
+  // from the enclosing routine's own header would find. Without this, the
+  // shortcut silently does nothing from inside a nested routine.
+  LFound := False;
+  while (LImplNode <> NIL_NODE) and
+    RTSegments(LM, LImplNode, LQualIdents, LNameNode) do
   begin
-    SetLength(LChain, Length(LQualIdents));
-    for LIdx := 0 to High(LQualIdents) do
-      LChain[LIdx] := LM.Tree.NodeNameLower(LQualIdents[LIdx]);
-    LKey := RTMethodKey(LChain, LName, RTParamSignature(LM, LImplNode));
-    LKeyLoose := RTMethodKeyLoose(LChain, LName);
-  end
-  else
-  begin
-    LContainer := RTEnclosingRoutine(LM, LImplNode);
-    LKey := RTRoutineKey(LContainer, LName, RTParamSignature(LM, LImplNode));
-    LKeyLoose := RTRoutineKeyLoose(LContainer, LName);
+    LName := LM.Tree.NodeNameLower(LNameNode);
+    LIsMethod := LQualIdents <> nil;
+    if LIsMethod then
+    begin
+      SetLength(LChain, Length(LQualIdents));
+      for LIdx := 0 to High(LQualIdents) do
+        LChain[LIdx] := LM.Tree.NodeNameLower(LQualIdents[LIdx]);
+      LKey := RTMethodKey(LChain, LName, RTParamSignature(LM, LImplNode));
+      LKeyLoose := RTMethodKeyLoose(LChain, LName);
+    end
+    else
+    begin
+      LContainer := RTEnclosingRoutine(LM, LImplNode);
+      LKey := RTRoutineKey(LContainer, LName, RTParamSignature(LM, LImplNode));
+      LKeyLoose := RTRoutineKeyLoose(LContainer, LName);
+    end;
+    if LCache.DeclKey.TryGetValue(LKey, LDeclNode) or
+       LCache.DeclKeyLoose.TryGetValue(LKeyLoose, LDeclNode) then
+    begin
+      LFound := True;
+      Break;
+    end;
+    LImplNode := RTEnclosingRoutine(LM, LImplNode);
   end;
-  if not LCache.DeclKey.TryGetValue(LKey, LDeclNode) then
-    if not LCache.DeclKeyLoose.TryGetValue(LKeyLoose, LDeclNode) then
-      Exit;
+  if not LFound then
+    Exit;
   if not RTSegments(LM, LDeclNode, LQualIdents, LNameNode) then
     Exit;
   // Original spelling, not the lowercased lookup key - see GotoImplementation.
