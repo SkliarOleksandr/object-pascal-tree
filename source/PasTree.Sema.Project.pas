@@ -886,6 +886,18 @@ type
     { The single answer to "what type is this member?" - see the implementation
       for why a bare property redeclaration makes it necessary. }
     function SymDeclTypeX(AMid, ASym: Integer): TSemaXType;
+    { The property REDECLARATION chain (`property Items;` republishing an
+      inherited property), for the navigator. PropertyInAncestorsX is the
+      link - see its implementation comment for the dcc-probed rules;
+      IsBarePropertyRedecl says whether (AMid, ASym) is a typeless
+      redeclaration inside a struct (the shape that is the SAME property as
+      an ancestor's); PropertyRedeclPrev is one step up that chain - the
+      nearest ancestor property of the same name, typed or not. }
+    function PropertyInAncestorsX(const AOwnerX: TSemaXType;
+      const ANameLower: string; out ACand: Integer): TSemaXType;
+    function IsBarePropertyRedecl(AMid, ASym: Integer): Boolean;
+    function PropertyRedeclPrev(AMid, ASym: Integer;
+      out APrevMid, APrevSym: Integer): Boolean;
     { The type of an arbitrary designator NODE, computed on demand - written
       for `with` targets (hence the name) but structurally general: parens,
       derefs, indexing, as-casts, calls, `inherited`, `Self`, members. }
@@ -10636,7 +10648,7 @@ end;
 function TPasSemaProject.SymDeclTypeX(AMid, ASym: Integer): TSemaXType;
 var
   LM: TPasSemaModel;
-  LOwner, LScope, LIdx, LCand, LDepth: Integer;
+  LOwner, LScope, LCand, LDepth: Integer;
   LNameLower: string;
   LCur: TSemaXType;
 begin
@@ -10671,25 +10683,114 @@ begin
   if LOwner = NIL_SYM then
     Exit;
   LNameLower := LM.Symbols[ASym].NameLower;
-  LCur := AncestorOfX(XPlain(AMid, LOwner));
+  // Follow the redeclaration chain link by link (PropertyInAncestorsX is the
+  // one definition of "link"; the navigator walks the same chain for Find
+  // References / Rename / go to declaration) until a declaration that
+  // actually writes a type - a chain of bare redeclarations can be several
+  // classes long (`property Items;` promoted twice).
+  LCur := PropertyInAncestorsX(XPlain(AMid, LOwner), LNameLower, LCand);
   for LDepth := 1 to 32 do
   begin
     if not XValid(LCur) then
       Exit;
-    LScope := FModels[LCur.UnitId].Symbols[LCur.Sym].MemberScope;
-    if (LScope <> NIL_SCOPE) and
-       (FModels[LCur.UnitId].Scopes[LScope].Symbols <> nil) then
-      for LIdx := 0 to FModels[LCur.UnitId].Scopes[LScope].Symbols.Count - 1 do
-      begin
-        LCand := FModels[LCur.UnitId].Scopes[LScope].Symbols[LIdx];
-        if (FModels[LCur.UnitId].Symbols[LCand].Kind = skProperty) and
-           (FModels[LCur.UnitId].Symbols[LCand].NameLower = LNameLower) and
-           (FModels[LCur.UnitId].Symbols[LCand].TypeNode <> NIL_NODE) then
-          Exit(SubstX(ResolveTypeExpr(LCur.UnitId,
-            FModels[LCur.UnitId].Symbols[LCand].TypeNode), LCur.Inst, 0));
-      end;
-    LCur := AncestorOfX(LCur);
+    if FModels[LCur.UnitId].Symbols[LCand].TypeNode <> NIL_NODE then
+      Exit(SubstX(ResolveTypeExpr(LCur.UnitId,
+        FModels[LCur.UnitId].Symbols[LCand].TypeNode), LCur.Inst, 0));
+    LCur := PropertyInAncestorsX(LCur, LNameLower, LCand);
   end;
+end;
+
+{ The nearest ancestor of AOwnerX that declares a PROPERTY named ANameLower -
+  the link a property redeclaration chain is walked by. dcc-probed rules the
+  chain rests on (2026-09-09):
+  - a redeclaration with NO type (`property Items;`, `property X read GetX;`,
+    `property X default 5;`) is the SAME property - visibility, accessors or
+    streaming specifiers change, the identity does not;
+  - a redeclaration WITH a type is a NEW property that hides the inherited one,
+    exactly like an undecorated same-named method (12.3): a bare
+    redeclaration below it refers to the hiding one, not to the original.
+  So a chain is walked upward from any link through same-named properties
+  until one writes a type, and the typed one is its root. Same-named fields
+  and methods in an intermediate ancestor are skipped, not stopped at: dcc
+  resolves `property X;` against the nearest inherited PROPERTY of that name.
+  ACand is the property symbol in Result.UnitId; XNil when no ancestor has one
+  (the chain's top, or an ancestry this closure cannot see). }
+function TPasSemaProject.PropertyInAncestorsX(const AOwnerX: TSemaXType;
+  const ANameLower: string; out ACand: Integer): TSemaXType;
+var
+  LScope, LIdx, LSym, LDepth: Integer;
+  LM: TPasSemaModel;
+begin
+  ACand := NIL_SYM;
+  Result := AncestorOfX(AOwnerX);
+  for LDepth := 1 to 32 do
+  begin
+    if not XValid(Result) then
+      Exit(XNil);
+    LM := FModels[Result.UnitId];
+    LScope := LM.Symbols[Result.Sym].MemberScope;
+    if (LScope <> NIL_SCOPE) and (LM.Scopes[LScope].Symbols <> nil) then
+      for LIdx := 0 to LM.Scopes[LScope].Symbols.Count - 1 do
+      begin
+        LSym := LM.Scopes[LScope].Symbols[LIdx];
+        if (LM.Symbols[LSym].Kind = skProperty) and
+           (LM.Symbols[LSym].NameLower = ANameLower) then
+        begin
+          ACand := LSym;
+          Exit;
+        end;
+      end;
+    Result := AncestorOfX(Result);
+  end;
+  Result := XNil;
+end;
+
+function TPasSemaProject.IsBarePropertyRedecl(AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LScope: Integer;
+begin
+  Result := False;
+  if (AMid < 0) or (AMid >= FModels.Count) or (ASym = NIL_SYM) then
+    Exit;
+  LM := FModels[AMid];
+  if (ASym < 0) or (ASym >= LM.SymCount) or
+     (LM.Symbols[ASym].Kind <> skProperty) or
+     (LM.Symbols[ASym].TypeNode <> NIL_NODE) then
+    Exit;
+  LScope := LM.Symbols[ASym].Scope;
+  Result := (LScope <> NIL_SCOPE) and (LScope < LM.Scopes.Count) and
+    (LM.Scopes[LScope].StructSym <> NIL_SYM);
+end;
+
+function TPasSemaProject.PropertyRedeclPrev(AMid, ASym: Integer;
+  out APrevMid, APrevSym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LScope, LOwner: Integer;
+  LX: TSemaXType;
+begin
+  Result := False;
+  APrevMid := -1;
+  APrevSym := NIL_SYM;
+  if (AMid < 0) or (AMid >= FModels.Count) or (ASym = NIL_SYM) then
+    Exit;
+  LM := FModels[AMid];
+  if (ASym < 0) or (ASym >= LM.SymCount) or
+     (LM.Symbols[ASym].Kind <> skProperty) then
+    Exit;
+  LScope := LM.Symbols[ASym].Scope;
+  if (LScope = NIL_SCOPE) or (LScope >= LM.Scopes.Count) then
+    Exit;
+  LOwner := LM.Scopes[LScope].StructSym;
+  if LOwner = NIL_SYM then
+    Exit;
+  LX := PropertyInAncestorsX(XPlain(AMid, LOwner), LM.Symbols[ASym].NameLower,
+    APrevSym);
+  if not XValid(LX) then
+    Exit;
+  APrevMid := LX.UnitId;
+  Result := True;
 end;
 
 { `Base[i1, .., iN]` as a VALUE - the type ACount index levels down.

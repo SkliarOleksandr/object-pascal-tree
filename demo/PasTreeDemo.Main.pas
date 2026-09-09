@@ -1155,6 +1155,7 @@ begin
     pokRoot: Result := 'root';
     pokOverride: Result := 'override';
     pokMessage: Result := 'message';
+    pokRedeclared: Result := 'redeclared';
   else
     Result := 'reintroduce';
   end;

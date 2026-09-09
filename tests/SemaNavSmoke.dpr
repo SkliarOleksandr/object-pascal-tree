@@ -681,7 +681,26 @@ const
     '  TPeriodHelper = record helper for TPeriod'#10 + // 64
     '    function Text: string;'#10 +          // 65 Text col 14
     '  end;'#10 +                              // 66
-    'implementation'#10 +                      // 67
+    // The property redeclaration CHAIN below TProps.Items (line 21): a
+    // second bare promotion (TMoreProps - same property, a chain link), a
+    // TYPED redeclaration (THider - dcc-probed: a NEW property hiding the
+    // inherited one, so no link and the end of that branch), and a bare
+    // redeclaration below the hider, which belongs to the hider's chain.
+    '  TMoreProps = class(TProps)'#10 +        // 67
+    '  public'#10 +                            // 68
+    '    property Items;'#10 +                 // 69 Items col 14
+    '  end;'#10 +                              // 70
+    '  THider = class(TMoreProps)'#10 +        // 71
+    '  private'#10 +                           // 72
+    '    FS: string;'#10 +                     // 73
+    '  public'#10 +                            // 74
+    '    property Items: string read FS;'#10 + // 75 Items col 14
+    '  end;'#10 +                              // 76
+    '  TBelowHider = class(THider)'#10 +       // 77
+    '  published'#10 +                         // 78
+    '    property Items;'#10 +                 // 79 Items col 14
+    '  end;'#10 +                              // 80
+    'implementation'#10 +                      // 81
     'function TPeriodHelper.Text: string;'#10 + // 68
     'begin'#10 +                               // 69
     '  Result := '''';'#10 +                   // 70
@@ -1798,7 +1817,6 @@ begin
       LOvs := GNav.FindOverrides(LRTMid, LRSym);
       Ok('FindOverrides: a non-virtual method is its own single row',
         (Length(LOvs) = 1) and (LOvs[0].Kind = pokRoot));
-
       // ---- Find Implementations (InterfaceMethodAt + FindImplementations) --
       var LMidIA := GNav.ModelIdOf(TPath.Combine(LDir, 'NavIntfA.pas'));
       Ok('NavIntfA model found', LMidIA >= 0);
@@ -1968,8 +1986,104 @@ begin
       // is NESTED in the generic ancestor - `Table[0]` peeled to the open
       // TValue without it (see the nkIdent case in CrossType).
       GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavPromo.pas'));
-      CheckNav('generic frame: nested array type off inherited member', 89, 12,
+      CheckNav('generic frame: nested array type off inherited member', 103, 12,
         'Description', 'NavPromo.pas', 6, 5);
+      // ---- Property redeclaration chains (UNIT_PROMO's Items) ----
+      // TCustomProps.Items: TItems (17) is republished bare by TProps (21)
+      // and again by TMoreProps (69); THider (75) redeclares it WITH a type
+      // and TBelowHider (79) republishes THAT. Two chains: {17, 21, 69} and
+      // {75, 79}. The uses in NavF (8:18, 9:18) bound to TProps' promotion.
+      var LMidPromo := GNav.ModelIdOf(TPath.Combine(LDir, 'NavPromo.pas'));
+      Ok('NavPromo model found', LMidPromo >= 0);
+      // Find Overrides from the ROOT: three rows, root first, hider excluded.
+      Ok('MethodAt: accepts a class property (TCustomProps.Items)',
+        GNav.MethodAt(LMidPromo, 17, 14, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Items'));
+      var LPOvs := GNav.FindOverrides(LRTMid, LRSym);
+      Ok('FindOverrides: property chain - root + 2 bare redeclarations',
+        Length(LPOvs) = 3);
+      Ok('FindOverrides: property chain - the typed root comes first',
+        (Length(LPOvs) > 0) and (LPOvs[0].Kind = pokRoot) and
+        (LPOvs[0].Hit.Line = 17) and SameText(LPOvs[0].TypeName, 'TCustomProps'));
+      Ok('FindOverrides: property chain - TProps.Items is REDECLARED',
+        HasOvAt(LPOvs, 'NavPromo.pas', 21, pokRedeclared, 'TProps'));
+      Ok('FindOverrides: property chain - TMoreProps.Items, two links down',
+        HasOvAt(LPOvs, 'NavPromo.pas', 69, pokRedeclared, 'TMoreProps'));
+      Ok('FindOverrides: property chain - a TYPED redeclaration is a new ' +
+        'property, never a row',
+        not HasOvAt(LPOvs, 'NavPromo.pas', 75, pokRedeclared, 'THider') and
+        not HasOvAt(LPOvs, 'NavPromo.pas', 79, pokRedeclared, 'TBelowHider'));
+      // From the MIDDLE link: same chain.
+      Ok('MethodAt: TMoreProps.Items (a bare redeclaration)',
+        GNav.MethodAt(LMidPromo, 69, 14, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Items'));
+      LPOvs := GNav.FindOverrides(LRTMid, LRSym);
+      Ok('FindOverrides: property chain - same 3 rows from a redeclaration',
+        (Length(LPOvs) = 3) and (LPOvs[0].Hit.Line = 17));
+      // Below the hider: the hider's own chain, not the original's.
+      Ok('MethodAt: TBelowHider.Items',
+        GNav.MethodAt(LMidPromo, 79, 14, {out} LRTMid, {out} LRSym,
+          {out} LRName));
+      LPOvs := GNav.FindOverrides(LRTMid, LRSym);
+      Ok('FindOverrides: below a typed redeclaration the root IS the hider',
+        (Length(LPOvs) = 2) and (LPOvs[0].Kind = pokRoot) and
+        (LPOvs[0].Hit.Line = 75) and
+        HasOvAt(LPOvs, 'NavPromo.pas', 79, pokRedeclared, 'TBelowHider'));
+
+      // Find References: ONE property, wherever the click was. From the
+      // root: the two uses in NavF (bound to TProps' link) plus the two
+      // other declaration names (21, 69); the hider's chain stays out.
+      Ok('SymbolAt: TCustomProps.Items',
+        GNav.SymbolAt(LMidPromo, 17, 14, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Items'));
+      LHits := GNav.FindReferences(LRTMid, LRSym);
+      Ok('FindReferences: property chain from the root - 2 uses + 2 ' +
+        'other declarations', Length(LHits) = 4);
+      Ok('FindReferences: property chain - use bound to the promotion',
+        HasHitAt(LHits, 'NavF.pas', 8, 18) and HasHitAt(LHits, 'NavF.pas', 9, 18));
+      Ok('FindReferences: property chain - the other links'' declarations',
+        HasHitAt(LHits, 'NavPromo.pas', 21, 14) and
+        HasHitAt(LHits, 'NavPromo.pas', 69, 14));
+      Ok('FindReferences: property chain - not the root''s own declaration, ' +
+        'not the hider''s chain',
+        not HasHitAt(LHits, 'NavPromo.pas', 17, 14) and
+        not HasHitAt(LHits, 'NavPromo.pas', 75, 14) and
+        not HasHitAt(LHits, 'NavPromo.pas', 79, 14));
+      // From the promotion the uses bound to: same set, its own decl swapped
+      // for the root's.
+      Ok('SymbolAt: TProps.Items (the promotion)',
+        GNav.SymbolAt(LMidPromo, 21, 14, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Items'));
+      LHits := GNav.FindReferences(LRTMid, LRSym);
+      Ok('FindReferences: property chain from a link - same 4 hits',
+        (Length(LHits) = 4) and HasHitAt(LHits, 'NavPromo.pas', 17, 14) and
+        HasHitAt(LHits, 'NavPromo.pas', 69, 14) and
+        not HasHitAt(LHits, 'NavPromo.pas', 21, 14));
+      // Rename follows: every declaration of the chain plus every use, and
+      // nothing of the hider's chain.
+      Ok('PlanRename: property chain - 3 declarations + 2 uses',
+        GNav.PlanRename(LRTMid, LRSym, 'Elems', {out} LEdits, {out} LErr) and
+        (Length(LEdits) = 5) and
+        HasEdit(LEdits, 'NavPromo.pas', 17, 14,
+          '    property Elems: TItems read FItems;', 13, 18) and
+        HasEdit(LEdits, 'NavPromo.pas', 69, 14, '    property Elems;', 13, 18));
+
+      // Go to declaration ON a bare redeclaration climbs ONE link: the
+      // promotion's name goes to the root's, TMoreProps' to TProps', and
+      // TBelowHider's to the hider (its own root), never past it.
+      GMidB := LMidPromo;   // NavPromo is GMidB already; kept explicit
+      CheckNav('redecl click: TProps.Items -> TCustomProps.Items', 21, 14,
+        'Items', 'NavPromo.pas', 17, 14);
+      CheckNav('redecl click: TMoreProps.Items -> TProps.Items (one link)',
+        69, 14, 'Items', 'NavPromo.pas', 21, 14);
+      CheckNav('redecl click: TBelowHider.Items -> THider.Items', 79, 14,
+        'Items', 'NavPromo.pas', 75, 14);
+      // A TYPED declaration's own name still resolves to itself (no chain
+      // above it to climb).
+      CheckNav('redecl click: the typed root stays put', 17, 14,
+        'Items', 'NavPromo.pas', 17, 14);
+
+
       GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavMain.dpr'));
       // Either segment of the dotted, namespace-prefixed name opens the file.
       CheckNav('project uses: Deep.NavX -> namespace-prefixed file', 2, 27,

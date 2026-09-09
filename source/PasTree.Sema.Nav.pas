@@ -122,8 +122,19 @@ type
     A same-named descendant method carrying NONE of these directives is not
     reported at all: it is an ordinary hiding declaration (dcc's W1010), and
     including it would drown every result for a name as common as `Create`
-    in rows that share nothing with the method under the cursor. }
-  TPasOverrideKind = (pokRoot, pokOverride, pokMessage, pokReintroduce);
+    in rows that share nothing with the method under the cursor.
+
+    - pokRedeclared: the PROPERTY counterpart of the chain, `property Items;`
+      republishing an inherited property with no type written (visibility,
+      accessors or streaming specifiers changed, nothing else). Not an
+      override in the language's sense - there is no slot - but it is the
+      SAME property (dcc-probed; see TPasSemaProject.PropertyInAncestorsX),
+      and a reader asking "where else is this declared" wants the chain. The
+      root is the declaration that writes the type; a descendant that
+      redeclares the name WITH a type hides it and starts a chain of its own,
+      so it is no row here, and neither is anything below it. }
+  TPasOverrideKind = (pokRoot, pokOverride, pokMessage, pokReintroduce,
+    pokRedeclared);
 
   // The routine directives an override chain is decided by, read off the
   // declaration's own nkDirective children (OvDirsOf). `abstract` is in here
@@ -309,6 +320,14 @@ type
       const AViaTypeName: string; AKind: TPasImplKind;
       AHits: TList<TPasImplHit>;
       ASeen: TDictionary<string, Boolean>): Boolean;
+    // Property redeclaration chains (see PropertyChain).
+    function OvStructOfProperty(AMid, ASym: Integer;
+      out AStructSym: Integer): Boolean;
+    function OvPropertyNamed(AMid, AStructSym: Integer;
+      const ANameLower: string): Integer;
+    function PropertyChain(ATMid, ASym: Integer): TArray<TPasExtRef>;
+    procedure CollectReferencesOf(ATMid, ASym: Integer;
+      AHits: TList<TPasRefHit>);
   public
     constructor Create(AProject: TPasSemaProject);
     destructor Destroy; override;
@@ -441,10 +460,14 @@ type
       (see IsDeclSelfName on why that ambiguity exists at all), and a chain
       search keyed on the implementation would find no class to climb from.
 
-      False for anything that is not a method of a class: a plain routine, a
-      record or interface method (a record has no VMT; an interface's
-      implementors are a different search this does not do yet - see
-      docs/coverage.md), a property, a field, a type. }
+      Also true for a class PROPERTY: its chain is the redeclaration chain
+      (`property Items;` republishing an inherited property - pokRedeclared),
+      and ATMid/ASym come back unchanged, a property having no
+      implementation-side twin.
+
+      False for anything else: a plain routine, a record or interface method
+      (a record has no VMT; an interface's implementors are a different
+      search - FindImplementations), a field, a type. }
     function MethodAt(AMid, ALine, ACol: Integer;
       out ATMid, ASym: Integer; out AName: string): Boolean;
     { Find Overrides, part two: every declaration that shares the VMT (or
@@ -1080,6 +1103,20 @@ begin
   if FProj.Model(LTMid).Symbols[LSym].Kind = skUnitRef then
     Exit(ResolveUnitRefTarget(LTMid, LSym, ATarget));
 
+  // The clicked identifier IS the declaration name of a bare property
+  // REDECLARATION (`property Items;` in a descendant): its own declaration is
+  // where the cursor already sits, so go one link UP the chain instead - to
+  // the ancestor's declaration of the same property, which may itself be a
+  // redeclaration (a second click climbs again; the chain is walked one
+  // step at a time so every link stays reachable). A click on a USE of the
+  // property still lands on the nearest declaration, as before.
+  if (LTMid = AMid) and IsDeclSelfName(LM, LSym, ANode) and
+     FProj.IsBarePropertyRedecl(LTMid, LSym) and
+     FProj.PropertyRedeclPrev(LTMid, LSym, LFbMid, LFbSym) and
+     (FProj.Model(LFbMid).Symbols[LFbSym].DeclNode <> NIL_NODE) then
+    Exit(TargetFromNode(LFbMid, FProj.Model(LFbMid).Symbols[LFbSym].DeclNode,
+      FProj.Model(LFbMid).Symbols[LFbSym].Name, ATarget));
+
   // A resolved symbol with a real declaration node - the common case.
   if FProj.Model(LTMid).Symbols[LSym].DeclNode <> NIL_NODE then
     Exit(TargetFromNode(LTMid, FProj.Model(LTMid).Symbols[LSym].DeclNode,
@@ -1285,13 +1322,65 @@ end;
 function TPasNavigator.FindReferences(ATMid, ASym: Integer): TArray<TPasRefHit>;
 var
   LHits: TList<TPasRefHit>;
+  LChain: TArray<TPasExtRef>;
+  LIdx: Integer;
+  LHit: TPasRefHit;
+begin
+  LHits := TList<TPasRefHit>.Create;
+  try
+    // A property REDECLARATION chain (`property Items;` republishing an
+    // inherited property - TPasSemaProject.PropertyInAncestorsX) is ONE
+    // property declared in several places, and every use bound to any link
+    // is a use of it: the resolver binds a use to whichever link the static
+    // type reaches, so a search keyed on one symbol would miss the uses that
+    // went through the others - and a rename that missed them would break
+    // the code. The other links' own declaration names are hits too: they
+    // spell the name, a rename must rewrite them, and a reader of the
+    // references list wants to see where else it is declared. The clicked
+    // symbol's own declaration stays out, as ever (DeclHit gives it).
+    LChain := PropertyChain(ATMid, ASym);
+    if Length(LChain) <= 1 then
+      CollectReferencesOf(ATMid, ASym, LHits)
+    else
+      for LIdx := 0 to High(LChain) do
+      begin
+        CollectReferencesOf(LChain[LIdx].UnitId, LChain[LIdx].Sym, LHits);
+        if ((LChain[LIdx].UnitId <> ATMid) or (LChain[LIdx].Sym <> ASym)) and
+           DeclHit(LChain[LIdx].UnitId, LChain[LIdx].Sym, LHit) then
+          LHits.Add(LHit);
+      end;
+    Result := LHits.ToArray;
+  finally
+    LHits.Free;
+  end;
+  TArray.Sort<TPasRefHit>(Result, TComparer<TPasRefHit>.Construct(
+    function(const A, B: TPasRefHit): Integer
+    begin
+      Result := CompareText(A.FilePath, B.FilePath);
+      if Result = 0 then
+        Result := A.Line - B.Line;
+      // Col too: TArray.Sort is unstable, so two hits on one line came back
+      // in random column order. PlanRename's own comparer already did this.
+      if Result = 0 then
+        Result := A.Col - B.Col;
+    end));
+end;
+
+// The scan itself, for ONE symbol - see FindReferences' comment for what the
+// two maps are and why RefMap is read only in the declaring model.
+procedure TPasNavigator.CollectReferencesOf(ATMid, ASym: Integer;
+  AHits: TList<TPasRefHit>);
+var
+  LHits: TList<TPasRefHit>;
   LMi, LNode: Integer;
   LM: TPasSemaModel;
   LPair: TPair<Integer, TPasExtRef>;
   LHit: TPasRefHit;
 begin
-  LHits := TList<TPasRefHit>.Create;
-  try
+  LHits := AHits;
+  if (ATMid < 0) or (ATMid >= FProj.ModelCount) then
+    Exit;
+  begin
     FProj.EnsureHydrated(ATMid);
     for LMi := 0 to FProj.ModelCount - 1 do
     begin
@@ -1319,21 +1408,157 @@ begin
            HitFromNode(LM, LPair.Key, LHit) then
           LHits.Add(LHit);
     end;
-    Result := LHits.ToArray;
-  finally
-    LHits.Free;
   end;
-  TArray.Sort<TPasRefHit>(Result, TComparer<TPasRefHit>.Construct(
-    function(const A, B: TPasRefHit): Integer
+end;
+
+{ Is (AMid, ASym) a property declared directly inside a class/`object` body -
+  the property twin of OvStructOfMethod, and the shape a redeclaration chain
+  can exist for at all (a record or interface property is never redeclared
+  bare: neither inherits members that way). }
+function TPasNavigator.OvStructOfProperty(AMid, ASym: Integer;
+  out AStructSym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LScope: Integer;
+begin
+  Result := False;
+  AStructSym := NIL_SYM;
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
+    Exit;
+  LM := FProj.Model(AMid);
+  if (ASym < 0) or (ASym >= LM.SymCount) or
+     (LM.Symbols[ASym].Kind <> skProperty) then
+    Exit;
+  LScope := LM.Symbols[ASym].Scope;
+  if (LScope >= 0) and (LScope < LM.Scopes.Count) and
+     (LM.Scopes[LScope].Kind = sckStruct) then
+    AStructSym := LM.Scopes[LScope].StructSym;
+  Result := (AStructSym <> NIL_SYM) and
+    (OvClassDefNode(AMid, AStructSym) <> NIL_NODE);
+end;
+
+// The property named ANameLower that AStructSym itself declares, or NIL_SYM.
+// One, not an array: a class declares a property name once (an overloaded
+// default array property - 13.1.4 - is a record/indexer shape this chain
+// does not model; the first one wins there).
+function TPasNavigator.OvPropertyNamed(AMid, AStructSym: Integer;
+  const ANameLower: string): Integer;
+var
+  LM: TPasSemaModel;
+  LScope, LIdx, LSym: Integer;
+begin
+  Result := NIL_SYM;
+  LM := FProj.Model(AMid);
+  LScope := LM.Symbols[AStructSym].MemberScope;
+  if (LScope < 0) or (LScope >= LM.Scopes.Count) or
+     (LM.Scopes[LScope].Symbols = nil) then
+    Exit;
+  for LIdx := 0 to LM.Scopes[LScope].Symbols.Count - 1 do
+  begin
+    LSym := LM.Scopes[LScope].Symbols[LIdx];
+    if (LM.Symbols[LSym].Kind = skProperty) and
+       (LM.Symbols[LSym].NameLower = ANameLower) then
+      Exit(LSym);
+  end;
+end;
+
+{ Every declaration of the ONE property (ATMid, ASym) belongs to, root first:
+  the declaration that writes the type, then each bare redeclaration below it
+  across the analyzed closure. A one-element array (the symbol itself) for
+  anything that is not a class property, for a property nothing redeclares,
+  and for the ordinary typed property - so callers can take the chain
+  unconditionally and pay nothing extra in the common case... except the
+  reverse-heritage index (OvBuildTypeEdges), which every class property pays
+  for once per call: whether a DESCENDANT redeclares the name cannot be known
+  without looking at the descendants, and FindOverrides already accepts that
+  cost for an interactive command. Not cached: the navigator's caches are
+  per model and this spans the project.
+
+  UP: PropertyRedeclPrev link by link while the current link is bare (a typed
+  declaration is the root, wherever the click was). DOWN: breadth-first over
+  ancestor edges; a descendant declaring the name bare joins the chain and is
+  descended from, one declaring it WITH a type hides the property (dcc-
+  probed) and closes its whole branch, one not declaring it is passed
+  through. }
+function TPasNavigator.PropertyChain(ATMid, ASym: Integer): TArray<TPasExtRef>;
+var
+  LStruct, LPMid, LPSym, LDepth, LIdx, LCand: Integer;
+  LNameLower, LKey: string;
+  LRoot, LCur, LLink: TPasExtRef;
+  LIndex: TDictionary<string, TArray<TOvEdge>>;
+  LSeen: TDictionary<string, Boolean>;
+  LQueue: TQueue<TPasExtRef>;
+  LList: TList<TPasExtRef>;
+  LKids: TArray<TOvEdge>;
+begin
+  LRoot.UnitId := ATMid;
+  LRoot.Sym := ASym;
+  Result := [LRoot];
+  if not OvStructOfProperty(ATMid, ASym, LStruct) then
+    Exit;
+  LNameLower := FProj.Model(ATMid).Symbols[ASym].NameLower;
+  // Up to the root.
+  for LDepth := 1 to 32 do
+  begin
+    if not FProj.IsBarePropertyRedecl(LRoot.UnitId, LRoot.Sym) or
+       not FProj.PropertyRedeclPrev(LRoot.UnitId, LRoot.Sym, LPMid, LPSym) then
+      Break;
+    LRoot.UnitId := LPMid;
+    LRoot.Sym := LPSym;
+  end;
+  if not OvStructOfProperty(LRoot.UnitId, LRoot.Sym, LStruct) then
+    Exit;   // the chain climbed into something that is not a class - keep
+            // the clicked symbol alone rather than half a chain
+  LList := TList<TPasExtRef>.Create;
+  LIndex := TDictionary<string, TArray<TOvEdge>>.Create;
+  LSeen := TDictionary<string, Boolean>.Create;
+  LQueue := TQueue<TPasExtRef>.Create;
+  try
+    LList.Add(LRoot);
+    OvBuildTypeEdges(LIndex);
+    LCur.UnitId := LRoot.UnitId;
+    LCur.Sym := LStruct;
+    LQueue.Enqueue(LCur);
+    LSeen.Add(Format('%d:%d', [LCur.UnitId, LCur.Sym]), True);
+    while LQueue.Count > 0 do
     begin
-      Result := CompareText(A.FilePath, B.FilePath);
-      if Result = 0 then
-        Result := A.Line - B.Line;
-      // Col too: TArray.Sort is unstable, so two hits on one line came back
-      // in random column order. PlanRename's own comparer already did this.
-      if Result = 0 then
-        Result := A.Col - B.Col;
-    end));
+      LCur := LQueue.Dequeue;
+      if not LIndex.TryGetValue(Format('%d:%d', [LCur.UnitId, LCur.Sym]),
+        LKids) then
+        Continue;
+      for LIdx := 0 to High(LKids) do
+      begin
+        if not LKids[LIdx].IsFirst then
+          Continue;
+        if OvClassDefNode(LKids[LIdx].UnitId, LKids[LIdx].Sym) = NIL_NODE then
+          Continue;
+        LKey := Format('%d:%d', [LKids[LIdx].UnitId, LKids[LIdx].Sym]);
+        if LSeen.ContainsKey(LKey) then
+          Continue;
+        LSeen.Add(LKey, True);
+        LCand := OvPropertyNamed(LKids[LIdx].UnitId, LKids[LIdx].Sym,
+          LNameLower);
+        if LCand <> NIL_SYM then
+        begin
+          if FProj.Model(LKids[LIdx].UnitId).Symbols[LCand].TypeNode <>
+             NIL_NODE then
+            Continue;   // typed: hides the property, closes the branch
+          LLink.UnitId := LKids[LIdx].UnitId;
+          LLink.Sym := LCand;
+          LList.Add(LLink);
+        end;
+        LCur.UnitId := LKids[LIdx].UnitId;
+        LCur.Sym := LKids[LIdx].Sym;
+        LQueue.Enqueue(LCur);
+      end;
+    end;
+    Result := LList.ToArray;
+  finally
+    LQueue.Free;
+    LSeen.Free;
+    LIndex.Free;
+    LList.Free;
+  end;
 end;
 
 function TPasNavigator.DeclHit(ATMid, ASym: Integer;
@@ -1944,6 +2169,12 @@ begin
       ATMid, ASym, AName) then
       Exit;
   end;
+  // A class PROPERTY: its "chain" is the redeclaration chain (pokRedeclared -
+  // see TPasOverrideKind), and the symbol is already declaration-side (a
+  // property has no implementation header), so there is nothing to
+  // normalize.
+  if OvStructOfProperty(ATMid, ASym, LStruct) then
+    Exit(True);
   if not OvStructOfMethod(ATMid, ASym, LStruct) then
     Exit;
   // Normalize to the DECLARATION-side symbol: an implementation header's own
@@ -1978,8 +2209,37 @@ var
   LKids: TArray<TOvEdge>;
   LIdx, LMid, LStruct: Integer;
   LNameLower, LKey: string;
+  LChain: TArray<TPasExtRef>;
+  LOv: TPasOverrideHit;
 begin
   Result := nil;
+  // A property: the redeclaration chain, root first, every other link a
+  // pokRedeclared row. Rows carry the declaring class the way method rows
+  // do; a lone root is the honest "declared nowhere else".
+  if OvStructOfProperty(ATMid, ASym, LStruct) then
+  begin
+    LChain := PropertyChain(ATMid, ASym);
+    for LIdx := 0 to High(LChain) do
+    begin
+      if not OvStructOfProperty(LChain[LIdx].UnitId, LChain[LIdx].Sym,
+        LStruct) then
+        Continue;
+      if not FProj.EnsureHydrated(LChain[LIdx].UnitId) then
+        Continue;
+      if not DeclHit(LChain[LIdx].UnitId, LChain[LIdx].Sym, LOv.Hit) then
+        Continue;
+      if LIdx = 0 then
+        LOv.Kind := pokRoot
+      else
+        LOv.Kind := pokRedeclared;
+      LOv.TypeName := FProj.Model(LChain[LIdx].UnitId).Symbols[LStruct].Name;
+      LOv.UnitId := LChain[LIdx].UnitId;
+      LOv.Sym := LChain[LIdx].Sym;
+      Result := Result + [LOv];
+    end;
+    Exit;   // already root-first; the rest of the chain came out of a
+            // breadth-first walk, which is hierarchy order - keep it
+  end;
   if not OvStructOfMethod(ATMid, ASym, LStruct) then
     Exit;
   LNameLower := FProj.Model(ATMid).Symbols[ASym].NameLower;

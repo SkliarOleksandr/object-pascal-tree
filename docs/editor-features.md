@@ -54,6 +54,7 @@ declared**, exactly like the RAD Studio IDE. "Any" means all of:
 | 14 | Identifier inside an opened `$I` include file tab | decl | GAP (IdentAt is main-file-only; nav INTO includes works) |
 | 15 | Overload-precise jump (CallTarget) / decl↔impl toggle | exact overload | GAP (jumps to head symbol) |
 | 16 | An inline `var`'s OWN declaration name (`var L := Expr`, caret on L) | its type, for a type-of query | GAP (SymbolAt does not claim the declaration name; a USE of L answers normally - measured through pastree-lsp 2026-09-07) |
+| 17 | The NAME of a bare property redeclaration (`property Items;` republishing an inherited property, caret on the declaration itself) | ONE link up the chain: the nearest ancestor's declaration of the same property, which may itself be a redeclaration - a second ctrl+click climbs again; a typed declaration stays put | OK (0.21.0; a USE of the property still lands on the nearest declaration, as before) |
 
 Hover highlight span rules: a plain identifier highlights itself; a dotted
 `uses` name or expression QUALIFIER highlights the whole qualifier (all
@@ -128,6 +129,7 @@ identifier class does here:
 | 10 | The FILE a renamed unit lives in | not renamed - the required name is HANDED BACK to the host | OK (by design, 3.8) |
 | 11 | A `uses` item spelled as a `-A` unit ALIAS | nothing - the whole unit rename is refused, named in the error | OK (by design, 3.8) |
 | 12 | Anything declared in a LIBRARY source (RTL/VCL/third-party) | nothing - refused whole, naming the file | OK (by design, 3.9) |
+| 13 | A property REDECLARED bare in descendants (`property Items;` promoting visibility, changing accessors or streaming specifiers - no type written), from any link | every declaration of the chain + every use bound to any of them; Find References shows the same set (the other links' declaration names are hits). A redeclaration WITH a type is a NEW property hiding the inherited one (dcc-probed 2026-09-09) - it and everything below it stay out | OK (0.21.0) |
 | 13 | Anything whose declaration or ANY use sits in a read-only file | nothing - refused whole, naming the file | OK (by design, 3.9) |
 | 14 | Name-collision detection at an edit site | - | GAP (deliberate - see 3.5) |
 | 15 | Identifier inside an opened `$I` include file | - | GAP (`IdentAt` is main-file-only, same limit go-to-declaration has) |
@@ -286,6 +288,7 @@ What each declaration shape does:
 | 9 | An INTERFACE method's implementors (`TFoo = class(TObject, IBar)`) | - | not this search - a separate command, see §5 |
 | 10 | A class whose ancestor is written through a type ALIAS (`TB2 = TB;` then `class(TB2)`) | - | GAP - the index keys on the symbol the heritage name bound to, which is the alias |
 | 11 | An event handler wired only through a `.dfm` (`OnClick`) | - | not an override at all: it is an assignment to a property, reached by Find References |
+| 12 | A class PROPERTY (`MethodAt` accepts it since 0.21.0) | its redeclaration chain: the declaration that writes the type is `pokRoot`, every bare `property Items;` below it `pokRedeclared`, hierarchy order; a redeclaration WITH a type is a new property - no row, and its branch is closed. A lone root is the honest "declared nowhere else" | OK (0.21.0) |
 
 Measured on the flattened RTL corpus (342 models, 2.5 s to analyze):
 `TObject.Destroy` = 136 rows in 8 ms, `TPersistent.Assign` = 8 rows in 6 ms,
