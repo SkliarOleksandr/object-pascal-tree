@@ -581,7 +581,8 @@ type
       whatever object the property returns, a value question), and an
       ancestor named through a type alias (the index's own limit - see
       FindOverrides). }
-    function FindImplementations(ATMid, ASym: Integer): TArray<TPasImplHit>;
+    function FindImplementations(ATMid, ASym: Integer;
+      AFull: Boolean = True): TArray<TPasImplHit>;
     { Find Implementations from the INTERFACE ITSELF rather than one of its
       methods: the cursor is on an interface TYPE name (its declaration or
       any use). ATMid/ASym come back as the interface type symbol. The
@@ -606,8 +607,8 @@ type
       Descendants' answer, not this one. A delegated implementation
       (`implements`) and an alias-named interface are not reached - the same
       limits FindImplementations has. }
-    function FindInterfaceImplementors(ATMid,
-      ASym: Integer): TArray<TPasImplHit>;
+    function FindInterfaceImplementors(ATMid, ASym: Integer;
+      AFull: Boolean = True): TArray<TPasImplHit>;
     { Find Descendants, part one: the cursor is on a CLASS, `object` or
       INTERFACE type name (its declaration, or any use of it). ATMid/ASym
       come back as that type symbol. False for a record, a helper, an alias,
@@ -625,7 +626,17 @@ type
       type - the index's own limit (see FindOverrides). Cost note for hosts:
       `TObject`'s descendants are every class in the closure, each row's model
       rehydrated to position the hit - gate on TypeAt, not on "an identifier". }
-    function FindDescendants(ATMid, ASym: Integer): TArray<TPasDescendantHit>;
+    function FindDescendants(ATMid, ASym: Integer;
+      AFull: Boolean = True): TArray<TPasDescendantHit>;
+    { AFull, on the three searches above: True (the default) is the whole
+      transitive answer described at each; False keeps only what is written
+      DIRECTLY against the type under the caret - a class whose heritage list
+      names it (depth 1), a class that itself lists the interface (not a
+      descendant interface) and declares the method itself (no pikInherited
+      row). The direct answer is what a reader wants nine times in ten - the
+      immediate children, the classes that spell the interface name - and
+      the full one is a deliberate widening a host offers as a modifier (the
+      demo: Ctrl held while clicking the command). }
     { Find All Assignments, part one: the cursor is on something that can be
       WRITTEN - a variable, a field, a parameter, or a property with a `write`
       specifier (its declaration or any use). ATMid/ASym come back as that
@@ -2687,13 +2698,14 @@ begin
   Result := OvInterfaceDefNode(ATMid, LM.Scopes[LScope].StructSym) <> NIL_NODE;
 end;
 
-function TPasNavigator.FindImplementations(ATMid,
-  ASym: Integer): TArray<TPasImplHit>;
+function TPasNavigator.FindImplementations(ATMid, ASym: Integer;
+  AFull: Boolean): TArray<TPasImplHit>;
 var
   LHits: TList<TPasImplHit>;
   LIndex: TDictionary<string, TArray<TOvEdge>>;
   LSeenClass, LSeenRow: TDictionary<string, Boolean>;
   LIntfs: TList<TPasExtRef>;
+  LCurIntf: TPasExtRef;
   LEdges: TArray<TOvEdge>;
   LM: TPasSemaModel;
   LScope, LIntfSym, LIdx, LIntfIdx, LDepth: Integer;
@@ -2727,8 +2739,16 @@ begin
     OvImplRow(ATMid, LIntfSym, LNameLower, '', pikRoot, LHits, LSeenRow);
     OvBuildTypeEdges(LIndex);
 
-    // Hop 1: this interface plus every interface that DESCENDS from it.
-    OvCollectInterfaceFamily(ATMid, LIntfSym, LIndex, LIntfs);
+    // Hop 1: this interface plus every interface that DESCENDS from it -
+    // or, for the direct answer, this interface alone.
+    if AFull then
+      OvCollectInterfaceFamily(ATMid, LIntfSym, LIndex, LIntfs)
+    else
+    begin
+      LCurIntf.UnitId := ATMid;
+      LCurIntf.Sym := LIntfSym;
+      LIntfs.Add(LCurIntf);
+    end;
 
     // Hop 2: every class/`object` listing one of those interfaces. Its own
     // method if it declares one, else the nearest ancestor's - which is a
@@ -2752,8 +2772,8 @@ begin
         LVia := FProj.Model(LEdges[LIdx].UnitId).Symbols[
           LEdges[LIdx].Sym].Name;
         if OvImplRow(LEdges[LIdx].UnitId, LEdges[LIdx].Sym, LNameLower, LVia,
-          pikImplementor, LHits, LSeenRow) then
-          Continue;
+          pikImplementor, LHits, LSeenRow) or not AFull then
+          Continue;   // (the direct answer never climbs)
         // Not here - climb. Stops at the first ancestor that declares one:
         // anything above it is what THAT declaration overrides, which is
         // Find Overrides' question.
@@ -2849,13 +2869,14 @@ begin
     (OvInterfaceDefNode(ATMid, ASym) <> NIL_NODE);
 end;
 
-function TPasNavigator.FindInterfaceImplementors(ATMid,
-  ASym: Integer): TArray<TPasImplHit>;
+function TPasNavigator.FindInterfaceImplementors(ATMid, ASym: Integer;
+  AFull: Boolean): TArray<TPasImplHit>;
 var
   LHits: TList<TPasImplHit>;
   LIndex: TDictionary<string, TArray<TOvEdge>>;
   LSeenClass: TDictionary<string, Boolean>;
   LIntfs: TList<TPasExtRef>;
+  LCurIntf: TPasExtRef;
   LEdges: TArray<TOvEdge>;
   LM: TPasSemaModel;
   LIdx, LIntfIdx, LDecl: Integer;
@@ -2884,7 +2905,14 @@ begin
       LHits.Add(LRow);
     end;
     OvBuildTypeEdges(LIndex);
-    OvCollectInterfaceFamily(ATMid, ASym, LIndex, LIntfs);
+    if AFull then
+      OvCollectInterfaceFamily(ATMid, ASym, LIndex, LIntfs)
+    else
+    begin
+      LCurIntf.UnitId := ATMid;
+      LCurIntf.Sym := ASym;
+      LIntfs.Add(LCurIntf);
+    end;
     for LIntfIdx := 0 to LIntfs.Count - 1 do
     begin
       if not LIndex.TryGetValue(Format('%d:%d',
@@ -2954,8 +2982,8 @@ begin
       [nkClassType, nkObjectType, nkInterfaceType]) <> NIL_NODE);
 end;
 
-function TPasNavigator.FindDescendants(ATMid,
-  ASym: Integer): TArray<TPasDescendantHit>;
+function TPasNavigator.FindDescendants(ATMid, ASym: Integer;
+  AFull: Boolean): TArray<TPasDescendantHit>;
 type
   TQueued = record
     Ref: TPasExtRef;
@@ -3021,6 +3049,10 @@ begin
       LCur := LQueue.Dequeue;
       if RowFor(LCur, LRow) then
         LHits.Add(LRow);
+      // The direct answer expands the root only: its children are rows,
+      // their children are not.
+      if not AFull and (LCur.Depth >= 1) then
+        Continue;
       if not LIndex.TryGetValue(Format('%d:%d',
         [LCur.Ref.UnitId, LCur.Ref.Sym]), LEdges) then
         Continue;
