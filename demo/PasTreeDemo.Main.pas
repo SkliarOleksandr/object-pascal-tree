@@ -121,6 +121,9 @@ type
     Bold, Underline: Boolean;
   end;
 
+  TSearchTabKind = (stkRefs, stkRename, stkOverrides, stkImpls,
+    stkDescendants, stkAssigns, stkCreations, stkDestructions);
+
   TFindRefTab = class(TTabSheet)
   public
     Tree: TVirtualStringTree;
@@ -132,22 +135,17 @@ type
     // actually gets compared, SymMid being meaningless there.
     SymMid, SymSym: Integer;
     SymBuiltinName: string;
-    // A rename RESULT page rather than a search page - same tree, same
-    // three row shapes, but the snippets are the lines as they read AFTER
-    // the rename (see RenameActionExecute).
-    IsRename: Boolean;
-    { A Find OVERRIDES page rather than a reference search: the same tree and
-      the same three row shapes, but each hit row's prefix names the
-      declaring class and what makes it part of the chain ("TFoo override")
-      instead of just its line - the class being what a reader of an override
-      chain navigates by. Kept as its own flag rather than another SymSym
-      sentinel because the identity IS a real (unit, symbol) pair here, the
-      same one Find References would use, and the two searches must not
-      overwrite each other's page. }
-    IsOverrides: Boolean;
-    // Same again for Find IMPLEMENTATIONS: a third answer about one symbol,
-    // and a third page that must not overwrite either of the others.
-    IsImpls: Boolean;
+    { WHICH question this page answers about (SymMid, SymSym). Six answers
+      share one tree and the same three row shapes, and every one of them is
+      a different page: "where is it used" (stkRefs), "what the code reads
+      after the rename" (stkRename - snippets are the POST-rename lines),
+      "where is it overridden" (stkOverrides - each row prefixed with the
+      declaring class and what ties it to the chain), "who implements it"
+      (stkImpls), "what descends from it" (stkDescendants), "where is it
+      written" (stkAssigns). Part of the identity FindExistingSearchTab
+      matches on, so a repeated search refreshes its own page and never
+      overwrites a sibling's. }
+    Kind: TSearchTabKind;
     Hits: TArray<TPasRefHit>;
     Groups: TArray<TFindRefGroup>;
     Display: TArray<TFindRefDisplay>;
@@ -240,6 +238,15 @@ type
     FindOverrides1: TMenuItem;
     FindImplementationsAction: TAction;
     FindImplementations1: TMenuItem;
+    FindDescendantsAction: TAction;
+    FindDescendants1: TMenuItem;
+    FindAssignmentsAction: TAction;
+    FindAssignments1: TMenuItem;
+    FindCreationsAction: TAction;
+    FindCreations1: TMenuItem;
+    FindDestructionsAction: TAction;
+    FindDestructions1: TMenuItem;
+    FindAll1: TMenuItem;
     RenameAction: TAction;
     Rename1: TMenuItem;
     procedure FormCreate(Sender: TObject);
@@ -295,6 +302,14 @@ type
     procedure FindOverridesActionExecute(Sender: TObject);
     procedure FindImplementationsActionUpdate(Sender: TObject);
     procedure FindImplementationsActionExecute(Sender: TObject);
+    procedure FindDescendantsActionUpdate(Sender: TObject);
+    procedure FindDescendantsActionExecute(Sender: TObject);
+    procedure FindAssignmentsActionUpdate(Sender: TObject);
+    procedure FindAssignmentsActionExecute(Sender: TObject);
+    procedure FindCreationsActionUpdate(Sender: TObject);
+    procedure FindCreationsActionExecute(Sender: TObject);
+    procedure FindDestructionsActionUpdate(Sender: TObject);
+    procedure FindDestructionsActionExecute(Sender: TObject);
     procedure RenameActionUpdate(Sender: TObject);
     procedure RenameActionExecute(Sender: TObject);
     procedure pgcBottomMouseDown(Sender: TObject; Button: TMouseButton;
@@ -492,9 +507,12 @@ type
     // anywhere (FNav.BuiltinNameAt) -- a NAME, not a (unit, symbol) pair.
     function ActiveBuiltinTarget(out AName: string): Boolean;
     function FindExistingSearchTab(ATMid, ASym: Integer;
-      const ABuiltinName: string = ''; AIsRename: Boolean = False;
-      AIsOverrides: Boolean = False;
-      AIsImpls: Boolean = False): TFindRefTab;
+      const ABuiltinName: string = '';
+      AKind: TSearchTabKind = stkRefs): TFindRefTab;
+    // The tab for one (identity, question), found or created - what every
+    // Find... command's Execute ends with.
+    function SearchTabFor(ATMid, ASym: Integer;
+      AKind: TSearchTabKind): TFindRefTab;
     // Rename: applies a PlanRename edit set to the EDITOR BUFFERS (see
     // ApplyRenameEdits' own comment on why buffers and not files), then
     // shows the result in a Find References-shaped tab.
@@ -1032,8 +1050,7 @@ end;
 // non-empty means "match by name, ASym/ATMid don't matter" - see
 // TFindRefTab's own comment on the SymSym = -1 / -2 sentinels.
 function TfrmMain.FindExistingSearchTab(ATMid, ASym: Integer;
-  const ABuiltinName: string;
-  AIsRename, AIsOverrides, AIsImpls: Boolean): TFindRefTab;
+  const ABuiltinName: string; AKind: TSearchTabKind): TFindRefTab;
 var
   LIdx: Integer;
   LTab: TFindRefTab;
@@ -1044,16 +1061,10 @@ begin
     if not (pgcBottom.Pages[LIdx] is TFindRefTab) then
       Continue;
     LTab := TFindRefTab(pgcBottom.Pages[LIdx]);
-    // A rename's result page and a search page for the same symbol say
-    // different things (what the code READS NOW vs where the name occurs) -
-    // one must never overwrite the other.
-    if LTab.IsRename <> AIsRename then
-      Continue;
-    // Same reason, same shape: "where is this method overridden" and "where
-    // is it used" are two answers about one symbol.
-    if LTab.IsOverrides <> AIsOverrides then
-      Continue;
-    if LTab.IsImpls <> AIsImpls then
+    // Two pages about one symbol that answer different questions (where it
+    // is used / what the code reads after a rename / where it is overridden
+    // ...) must never overwrite each other - see TSearchTabKind.
+    if LTab.Kind <> AKind then
       Continue;
     if ABuiltinName <> '' then
     begin
@@ -1064,6 +1075,19 @@ begin
     else if (LTab.SymMid = ATMid) and (LTab.SymSym = ASym) then
       Exit(LTab);
   end;
+end;
+
+function TfrmMain.SearchTabFor(ATMid, ASym: Integer;
+  AKind: TSearchTabKind): TFindRefTab;
+begin
+  Result := FindExistingSearchTab(ATMid, ASym, '', AKind);
+  if Assigned(Result) then
+    Exit;
+  Result := TFindRefTab.Create(pgcBottom);
+  Result.PageControl := pgcBottom;
+  Result.SymMid := ATMid;
+  Result.SymSym := ASym;
+  Result.Kind := AKind;
 end;
 
 procedure TfrmMain.FindReferencesActionExecute(Sender: TObject);
@@ -1110,6 +1134,7 @@ begin
     LTab.SymMid := LTMid;
     LTab.SymSym := LSym;
     LTab.SymBuiltinName := LBuiltinName;
+    LTab.Kind := stkRefs;
   end;
   PopulateFindRefTab(LTab, Format('Search for ''%s'' (%d)',
     [LName, Length(LHits)]), LHits, LHasDecl, LDeclHit);
@@ -1191,16 +1216,7 @@ begin
       [LOvs[LIdx].TypeName, OverrideKindText(LOvs[LIdx].Kind),
        LOvs[LIdx].Hit.Line]);
   end;
-  LTab := FindExistingSearchTab(LTMid, LSym, '', {AIsRename} False,
-    {AIsOverrides} True);
-  if not Assigned(LTab) then
-  begin
-    LTab := TFindRefTab.Create(pgcBottom);
-    LTab.PageControl := pgcBottom;
-    LTab.SymMid := LTMid;
-    LTab.SymSym := LSym;
-    LTab.IsOverrides := True;
-  end;
+  LTab := SearchTabFor(LTMid, LSym, stkOverrides);
   // No pinned declaration row: the chain's ROOT is already its first hit
   // row, and it is the declaration - see TPasOverrideKind's pokRoot.
   // The UNIT count is in the caption on purpose: this is a project-wide
@@ -1221,11 +1237,15 @@ var
   LName, LFilePath: string;
   LEditor: TSynEdit;
 begin
+  // Two entry points, one command: an interface METHOD (who implements this
+  // method) or the interface TYPE itself (which classes implement it).
   TAction(Sender).Enabled := Assigned(FNav) and
     ActiveEditorPos(LFilePath, LEditor, LLine, LCol) and
     (FNav.ModelIdOf(LFilePath) >= 0) and
-    FNav.InterfaceMethodAt(FNav.ModelIdOf(LFilePath), LLine, LCol,
-      {out} LTMid, {out} LSym, {out} LName);
+    (FNav.InterfaceMethodAt(FNav.ModelIdOf(LFilePath), LLine, LCol,
+       {out} LTMid, {out} LSym, {out} LName) or
+     FNav.InterfaceAt(FNav.ModelIdOf(LFilePath), LLine, LCol,
+       {out} LTMid, {out} LSym, {out} LName));
 end;
 
 function ImplKindText(const AHit: TPasImplHit): string;
@@ -1254,10 +1274,14 @@ begin
   LMid := FNav.ModelIdOf(LFilePath);
   if LMid < 0 then
     Exit;
-  if not FNav.InterfaceMethodAt(LMid, LLine, LCol, {out} LTMid, {out} LSym,
+  if FNav.InterfaceMethodAt(LMid, LLine, LCol, {out} LTMid, {out} LSym,
     {out} LName) then
+    LImps := FNav.FindImplementations(LTMid, LSym)
+  else if FNav.InterfaceAt(LMid, LLine, LCol, {out} LTMid, {out} LSym,
+    {out} LName) then
+    LImps := FNav.FindInterfaceImplementors(LTMid, LSym)
+  else
     Exit;
-  LImps := FNav.FindImplementations(LTMid, LSym);
   LDeclHit := Default(TPasRefHit);   // never read: AHasDecl is False below
   SetLength(LHits, Length(LImps));
   SetLength(LPrefixes, Length(LImps));
@@ -1268,19 +1292,193 @@ begin
       [LImps[LIdx].TypeName, ImplKindText(LImps[LIdx]),
        LImps[LIdx].Hit.Line]);
   end;
-  LTab := FindExistingSearchTab(LTMid, LSym, '', {AIsRename} False,
-    {AIsOverrides} False, {AIsImpls} True);
-  if not Assigned(LTab) then
-  begin
-    LTab := TFindRefTab.Create(pgcBottom);
-    LTab.PageControl := pgcBottom;
-    LTab.SymMid := LTMid;
-    LTab.SymSym := LSym;
-    LTab.IsImpls := True;
-  end;
+  LTab := SearchTabFor(LTMid, LSym, stkImpls);
   PopulateFindRefTab(LTab, Format('Implementations of ''%s'' (%d in %d units)',
     [LName, Length(LImps), DistinctFileCount(LHits)]), LHits,
     {AHasDecl} False, LDeclHit, LPrefixes);
+  pgcBottom.ActivePage := LTab;
+end;
+
+{ Find Descendants: the type hierarchy below the class or interface at the
+  caret (FNav.TypeAt is the Enabled test), one row per type declaration,
+  indented by depth so the list reads as the tree it is. }
+procedure TfrmMain.FindDescendantsActionUpdate(Sender: TObject);
+var
+  LTMid, LSym, LLine, LCol: Integer;
+  LName, LFilePath: string;
+  LEditor: TSynEdit;
+begin
+  TAction(Sender).Enabled := Assigned(FNav) and
+    ActiveEditorPos(LFilePath, LEditor, LLine, LCol) and
+    (FNav.ModelIdOf(LFilePath) >= 0) and
+    FNav.TypeAt(FNav.ModelIdOf(LFilePath), LLine, LCol,
+      {out} LTMid, {out} LSym, {out} LName);
+end;
+
+procedure TfrmMain.FindDescendantsActionExecute(Sender: TObject);
+var
+  LTMid, LSym, LLine, LCol, LIdx, LMid: Integer;
+  LName, LFilePath: string;
+  LEditor: TSynEdit;
+  LTab: TFindRefTab;
+  LDs: TArray<TPasDescendantHit>;
+  LHits: TArray<TPasRefHit>;
+  LPrefixes: TArray<string>;
+  LDeclHit: TPasRefHit;
+begin
+  if not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
+    Exit;
+  LMid := FNav.ModelIdOf(LFilePath);
+  if LMid < 0 then
+    Exit;
+  if not FNav.TypeAt(LMid, LLine, LCol, {out} LTMid, {out} LSym,
+    {out} LName) then
+    Exit;
+  LDs := FNav.FindDescendants(LTMid, LSym);
+  LDeclHit := Default(TPasRefHit);   // never read: AHasDecl is False below
+  SetLength(LHits, Length(LDs));
+  SetLength(LPrefixes, Length(LDs));
+  for LIdx := 0 to High(LDs) do
+  begin
+    LHits[LIdx] := LDs[LIdx].Hit;
+    if LDs[LIdx].Kind = pdkRoot then
+      LPrefixes[LIdx] := Format('%s (Line %d): ',
+        [LDs[LIdx].TypeName, LDs[LIdx].Hit.Line])
+    else
+      LPrefixes[LIdx] := Format('%s%s < %s (Line %d): ',
+        [StringOfChar(' ', 2 * LDs[LIdx].Depth), LDs[LIdx].TypeName,
+         LDs[LIdx].ParentTypeName, LDs[LIdx].Hit.Line]);
+  end;
+  LTab := SearchTabFor(LTMid, LSym, stkDescendants);
+  // The rows arrive in hierarchy order and the page groups by FILE, so the
+  // indentation is per group - a cross-unit hierarchy reads as one tree per
+  // unit, each rooted where its first descendant enters that unit.
+  PopulateFindRefTab(LTab, Format('Descendants of ''%s'' (%d in %d units)',
+    [LName, Length(LDs) - 1, DistinctFileCount(LHits)]), LHits,
+    {AHasDecl} False, LDeclHit, LPrefixes);
+  pgcBottom.ActivePage := LTab;
+end;
+
+{ Find All Assignments: every place the variable/field/parameter/property at
+  the caret is WRITTEN (FNav.AssignableAt gates it - a constant, a type or a
+  read-only property never offers the command). A Find References-shaped
+  page with the declaration pinned first, since "where is it declared" is
+  the row a reader of a write list orients by. }
+procedure TfrmMain.FindAssignmentsActionUpdate(Sender: TObject);
+var
+  LTMid, LSym, LLine, LCol: Integer;
+  LName, LFilePath: string;
+  LEditor: TSynEdit;
+begin
+  TAction(Sender).Enabled := Assigned(FNav) and
+    ActiveEditorPos(LFilePath, LEditor, LLine, LCol) and
+    (FNav.ModelIdOf(LFilePath) >= 0) and
+    FNav.AssignableAt(FNav.ModelIdOf(LFilePath), LLine, LCol,
+      {out} LTMid, {out} LSym, {out} LName);
+end;
+
+procedure TfrmMain.FindAssignmentsActionExecute(Sender: TObject);
+var
+  LTMid, LSym, LLine, LCol, LMid: Integer;
+  LName, LFilePath: string;
+  LEditor: TSynEdit;
+  LTab: TFindRefTab;
+  LHits: TArray<TPasRefHit>;
+  LDeclHit: TPasRefHit;
+  LHasDecl: Boolean;
+begin
+  if not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
+    Exit;
+  LMid := FNav.ModelIdOf(LFilePath);
+  if LMid < 0 then
+    Exit;
+  if not FNav.AssignableAt(LMid, LLine, LCol, {out} LTMid, {out} LSym,
+    {out} LName) then
+    Exit;
+  LHasDecl := FNav.DeclHit(LTMid, LSym, {out} LDeclHit);
+  LHits := FNav.FindAssignments(LTMid, LSym);
+  LTab := SearchTabFor(LTMid, LSym, stkAssigns);
+  PopulateFindRefTab(LTab, Format('Assignments to ''%s'' (%d in %d units)',
+    [LName, Length(LHits), DistinctFileCount(LHits)]), LHits, LHasDecl,
+    LDeclHit);
+  pgcBottom.ActivePage := LTab;
+end;
+
+{ Find Creations / Find Destructions: where instances of the CLASS at the
+  caret (FNav.ClassAt gates both) are constructed and released. Two commands
+  because the two lists are read for different reasons - "who makes these"
+  against "who owns and frees these" - and a reader of one rarely wants the
+  other on the same page. Both show a Find References-shaped page with the
+  class declaration pinned first. }
+procedure TfrmMain.FindCreationsActionUpdate(Sender: TObject);
+var
+  LTMid, LSym, LLine, LCol: Integer;
+  LName, LFilePath: string;
+  LEditor: TSynEdit;
+begin
+  TAction(Sender).Enabled := Assigned(FNav) and
+    ActiveEditorPos(LFilePath, LEditor, LLine, LCol) and
+    (FNav.ModelIdOf(LFilePath) >= 0) and
+    FNav.ClassAt(FNav.ModelIdOf(LFilePath), LLine, LCol,
+      {out} LTMid, {out} LSym, {out} LName);
+end;
+
+procedure TfrmMain.FindCreationsActionExecute(Sender: TObject);
+var
+  LTMid, LSym, LLine, LCol, LMid: Integer;
+  LName, LFilePath: string;
+  LEditor: TSynEdit;
+  LTab: TFindRefTab;
+  LHits: TArray<TPasRefHit>;
+  LDeclHit: TPasRefHit;
+  LHasDecl: Boolean;
+begin
+  if not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
+    Exit;
+  LMid := FNav.ModelIdOf(LFilePath);
+  if LMid < 0 then
+    Exit;
+  if not FNav.ClassAt(LMid, LLine, LCol, {out} LTMid, {out} LSym,
+    {out} LName) then
+    Exit;
+  LHasDecl := FNav.DeclHit(LTMid, LSym, {out} LDeclHit);
+  LHits := FNav.FindCreations(LTMid, LSym);
+  LTab := SearchTabFor(LTMid, LSym, stkCreations);
+  PopulateFindRefTab(LTab, Format('Creations of ''%s'' (%d in %d units)',
+    [LName, Length(LHits), DistinctFileCount(LHits)]), LHits, LHasDecl,
+    LDeclHit);
+  pgcBottom.ActivePage := LTab;
+end;
+
+procedure TfrmMain.FindDestructionsActionUpdate(Sender: TObject);
+begin
+  FindCreationsActionUpdate(Sender);   // the same gate: a class at the caret
+end;
+
+procedure TfrmMain.FindDestructionsActionExecute(Sender: TObject);
+var
+  LTMid, LSym, LLine, LCol, LMid: Integer;
+  LName, LFilePath: string;
+  LEditor: TSynEdit;
+  LTab: TFindRefTab;
+  LHits: TArray<TPasRefHit>;
+  LDeclHit: TPasRefHit;
+  LHasDecl: Boolean;
+begin
+  if not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
+    Exit;
+  LMid := FNav.ModelIdOf(LFilePath);
+  if LMid < 0 then
+    Exit;
+  if not FNav.ClassAt(LMid, LLine, LCol, {out} LTMid, {out} LSym,
+    {out} LName) then
+    Exit;
+  LHasDecl := FNav.DeclHit(LTMid, LSym, {out} LDeclHit);
+  LHits := FNav.FindDestructions(LTMid, LSym);
+  LTab := SearchTabFor(LTMid, LSym, stkDestructions);
+  PopulateFindRefTab(LTab, Format('Destructions of ''%s'' (%d in %d units)',
+    [LName, Length(LHits), DistinctFileCount(LHits)]), LHits, LHasDecl,
+    LDeclHit);
   pgcBottom.ActivePage := LTab;
 end;
 
@@ -1562,16 +1760,7 @@ begin
       Inc(LUses);
     end;
   end;
-  LTab := FindExistingSearchTab(ATMid, ASym, '', {AIsRename} True);
-  if not Assigned(LTab) then
-  begin
-    LTab := TFindRefTab.Create(pgcBottom);
-    LTab.PageControl := pgcBottom;
-    LTab.SymMid := ATMid;
-    LTab.SymSym := ASym;
-    LTab.SymBuiltinName := '';
-    LTab.IsRename := True;
-  end;
+  LTab := SearchTabFor(ATMid, ASym, stkRename);
   PopulateFindRefTab(LTab, Format('Renamed ''%s'' -> ''%s'' (%d)',
     [AOldName, ANewName, Length(AEdits)]), LHits, LHasDecl, LDeclHit);
   pgcBottom.ActivePage := LTab;

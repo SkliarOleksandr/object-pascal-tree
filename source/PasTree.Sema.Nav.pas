@@ -186,6 +186,33 @@ type
     UnitId, Sym: Integer;    // the method symbol this row declares
   end;
 
+  { One row of a Find Descendants result - a TYPE declaration, never a
+    member: every class (or `object`) below a class, every interface below an
+    interface, transitively, across the analyzed closure.
+
+    - pdkRoot: the type under the caret itself, always first.
+    - pdkDescendant: a type whose heritage list names the root or another
+      descendant. Depth is the number of heritage links from the root (1 for
+      a direct child), so a host can indent or sort by it; ParentTypeName is
+      the type it was reached THROUGH, which for a class is its ancestor and
+      for an interface the one it extends.
+
+    Deliberately one axis only: for an interface the rows are interfaces
+    extending it, not the classes implementing it - those are Find
+    Implementations' answer (FindInterfaceImplementors), and one command
+    that mixed the two would have to explain why a class row and an
+    interface row sit in the same list. }
+  TPasDescendantKind = (pdkRoot, pdkDescendant);
+
+  TPasDescendantHit = record
+    Hit: TPasRefHit;
+    Kind: TPasDescendantKind;
+    TypeName: string;        // this row's type, original spelling
+    ParentTypeName: string;  // the type it descends from directly; '' on root
+    Depth: Integer;          // heritage links from the root; 0 on root
+    UnitId, Sym: Integer;    // the type symbol this row declares
+  end;
+
   TPasNavigator = class
   private type
     // What OvStructDefNode will accept - a set literal at each call site, so
@@ -327,7 +354,18 @@ type
       const ANameLower: string): Integer;
     function PropertyChain(ATMid, ASym: Integer): TArray<TPasExtRef>;
     procedure CollectReferencesOf(ATMid, ASym: Integer;
-      AHits: TList<TPasRefHit>);
+      AHits: TList<TPasRefHit>; AAssignOnly: Boolean = False);
+    // Find Descendants / interface implementors / assignments.
+    procedure OvCollectInterfaceFamily(ATMid, AIntfSym: Integer;
+      AIndex: TDictionary<string, TArray<TOvEdge>>;
+      AFamily: TList<TPasExtRef>);
+    function IsAssignTarget(LM: TPasSemaModel; ANode: Integer): Boolean;
+    function PropertyIsWritable(AMid, ASym: Integer): Boolean;
+    // Find Creations / Find Destructions.
+    function NodeBinding(LM: TPasSemaModel; ANode: Integer;
+      out AUid, ASym: Integer): Boolean;
+    function DesignatorNameNode(LM: TPasSemaModel; ANode: Integer): Integer;
+    function DesignatorIsClass(AMid, ANode, ATMid, ASym: Integer): Boolean;
   public
     constructor Create(AProject: TPasSemaProject);
     destructor Destroy; override;
@@ -544,6 +582,110 @@ type
       ancestor named through a type alias (the index's own limit - see
       FindOverrides). }
     function FindImplementations(ATMid, ASym: Integer): TArray<TPasImplHit>;
+    { Find Implementations from the INTERFACE ITSELF rather than one of its
+      methods: the cursor is on an interface TYPE name (its declaration or
+      any use). ATMid/ASym come back as the interface type symbol. The
+      Enabled test for the type-level half of the command; a host offers
+      Find Implementations when either this or InterfaceMethodAt says yes. }
+    function InterfaceAt(AMid, ALine, ACol: Integer;
+      out ATMid, ASym: Integer; out AName: string): Boolean;
+    { Every CLASS (or `object`) implementing the interface (ATMid, ASym) -
+      one row per class, positioned on the class's own declaration name,
+      across the analyzed closure. The same two hops FindImplementations
+      takes, stopped one level earlier: the interface's descendant
+      interfaces first, then every class listing any of them. Rows are
+      pikRoot for the interface's own declaration and pikImplementor for each
+      class, with ViaTypeName naming the DESCENDANT interface the class
+      actually listed when that is not the interface asked about (`class(
+      TObject, IChild)` for a search on IBase); '' for a direct listing.
+
+      A class that gets the interface from its ANCESTOR (`TBase = class(
+      TObject, IBar)` then `TLeaf = class(TBase)`) is not a row: dcc treats
+      the ancestor as the implementor and the descendant inherits the
+      binding, and listing every descendant of every implementor is Find
+      Descendants' answer, not this one. A delegated implementation
+      (`implements`) and an alias-named interface are not reached - the same
+      limits FindImplementations has. }
+    function FindInterfaceImplementors(ATMid,
+      ASym: Integer): TArray<TPasImplHit>;
+    { Find Descendants, part one: the cursor is on a CLASS, `object` or
+      INTERFACE type name (its declaration, or any use of it). ATMid/ASym
+      come back as that type symbol. False for a record, a helper, an alias,
+      a non-type. The Enabled test for the command. }
+    function TypeAt(AMid, ALine, ACol: Integer;
+      out ATMid, ASym: Integer; out AName: string): Boolean;
+    { Find Descendants, part two: every type whose heritage chain reaches
+      (ATMid, ASym), across the analyzed closure - the reverse-heritage index
+      FindOverrides builds, walked breadth-first over ANCESTOR edges for a
+      class and over extends-edges for an interface, so the rows come out in
+      hierarchy order (all depth-1 children, then depth-2, ...). See
+      TPasDescendantKind for what a row is and the one axis it keeps to.
+
+      Not reached: a descendant whose heritage name is a type ALIAS of this
+      type - the index's own limit (see FindOverrides). Cost note for hosts:
+      `TObject`'s descendants are every class in the closure, each row's model
+      rehydrated to position the hit - gate on TypeAt, not on "an identifier". }
+    function FindDescendants(ATMid, ASym: Integer): TArray<TPasDescendantHit>;
+    { Find All Assignments, part one: the cursor is on something that can be
+      WRITTEN - a variable, a field, a parameter, or a property with a `write`
+      specifier (its declaration or any use). ATMid/ASym come back as that
+      symbol. False for a constant, a type, a routine, a read-only property
+      (nothing to find - the honest answer is to not offer the command), and
+      everything SymbolAt declines. }
+    function AssignableAt(AMid, ALine, ACol: Integer;
+      out ATMid, ASym: Integer; out AName: string): Boolean;
+    { Find All Assignments, part two: the subset of FindReferences' rows that
+      sit in an ASSIGNMENT TARGET position - the same resolved-identity search,
+      filtered by the CST shape around each hit rather than a second search.
+      A hit counts when its identifier is, after climbing out of the trailing
+      segment of a `X.Y` member chain and the base of an `A[i]` index, the
+      left-hand side of `:=` or the counter of a `for`. A property's rows go
+      through the property syntax (`Obj.Prop := X`), the redeclaration chain
+      included, exactly as Find References already groups them.
+
+      What is deliberately NOT a row: a `var`/`out` argument (`Foo(X)` where
+      the parameter is `var` - a write to X that reads as a call site; it
+      needs the resolved parameter list and is left for a later pass),
+      `Inc(X)`/`Dec(X)` and the other mutating intrinsics, a write THROUGH the
+      symbol (`P^ := ...`, `X.Field := ...` where X is the caret's symbol -
+      the target is what X points to, not X), and a direct call to a
+      property's setter routine (that is a reference to the setter, not to
+      the property). The declaration site is not a row either, as in
+      FindReferences - DeclHit gives it. }
+    function FindAssignments(ATMid, ASym: Integer): TArray<TPasRefHit>;
+    { Find Creations / Find Destructions, part one: the cursor is on a CLASS
+      (or `object`) type name - TypeAt narrowed to what has instances to
+      create and free; an interface declines. The Enabled test for both. }
+    function ClassAt(AMid, ALine, ACol: Integer;
+      out ATMid, ASym: Integer; out AName: string): Boolean;
+    { Every place an instance of EXACTLY this class is constructed: a call
+      `TFoo.Create(...)` whose qualifier resolved to (ATMid, ASym) and whose
+      member resolved to a constructor - the class's own or an inherited one
+      (`TFoo.Create` with Create declared on TObject still creates a TFoo),
+      across the analyzed closure. Rows are positioned on the class name in
+      the call. Read off the resolver's bindings, never by the name `Create`:
+      a class method or a plain routine called Create is no row.
+
+      Not a row, by design: `TBar.Create` for a descendant TBar - that is a
+      TBar, and Find Descendants says which those are; `inherited Create`
+      inside a descendant's constructor (it constructs the object already
+      being constructed); a constructor called through a class-reference
+      VARIABLE (`LClass.Create` with `LClass: TFooClass`) - the static type
+      is a metaclass and the actual class a runtime value. }
+    function FindCreations(ATMid, ASym: Integer): TArray<TPasRefHit>;
+    { Every place an instance whose STATIC type is exactly this class is
+      released: `X.Free`, `X.Destroy`, `FreeAndNil(X)`, where the designator
+      X types to (ATMid, ASym) - project-wide, positioned on X. `Free` /
+      `Destroy` / `FreeAndNil` are matched as RESOLVED routine symbols by
+      name (TObject's, and any FreeAndNil in scope - System.SysUtils' or a
+      project's own), so a same-named method on an unrelated type is no row.
+
+      Static type is the honest limit: an instance freed through a variable
+      of an ANCESTOR type (`var O: TObject; O := TFoo.Create; O.Free`) is not
+      found, and neither is one freed by an owner (`TComponent` ownership, an
+      object list with OwnsObjects) - both are runtime facts. `inherited
+      Destroy` inside the class's own destructor is not a row either. }
+    function FindDestructions(ATMid, ASym: Integer): TArray<TPasRefHit>;
     { Cursor on (or inside) a routine DECLARATION with no body - a `uses`-
       section/class-member header, or a `forward`-declared global/nested
       proc - that has a matching implementation elsewhere in the SAME unit
@@ -1368,8 +1510,11 @@ end;
 
 // The scan itself, for ONE symbol - see FindReferences' comment for what the
 // two maps are and why RefMap is read only in the declaring model.
+// AAssignOnly keeps only the hits in an assignment-target position
+// (IsAssignTarget) - Find All Assignments is this same scan with that one
+// filter, tested BEFORE hydration since it reads node kinds only.
 procedure TPasNavigator.CollectReferencesOf(ATMid, ASym: Integer;
-  AHits: TList<TPasRefHit>);
+  AHits: TList<TPasRefHit>; AAssignOnly: Boolean);
 var
   LHits: TList<TPasRefHit>;
   LMi, LNode: Integer;
@@ -1398,17 +1543,171 @@ begin
       if LMi = ATMid then
         for LNode := 0 to High(LM.RefMap) do
           if (LM.RefMap[LNode] = ASym) and
+             (not AAssignOnly or IsAssignTarget(LM, LNode)) and
              not IsDeclSelfName(LM, ASym, LNode) and
              FProj.EnsureHydrated(LMi) and
              HitFromNode(LM, LNode, LHit) then
             LHits.Add(LHit);
       for LPair in LM.ExtRefMap do
         if (LPair.Value.UnitId = ATMid) and (LPair.Value.Sym = ASym) and
+           (not AAssignOnly or IsAssignTarget(LM, LPair.Key)) and
            FProj.EnsureHydrated(LMi) and
            HitFromNode(LM, LPair.Key, LHit) then
           LHits.Add(LHit);
     end;
   end;
+end;
+
+{ Is the identifier ANode written to - the LEFT side of `:=`, or the counter
+  of a `for`? Climbs out of the shapes that still name ANode's symbol as the
+  thing assigned: the trailing NAME of a member chain (`Obj.Field := ` writes
+  Field; the base `Obj` is only read - a write to what Obj refers to is not a
+  write to Obj) and the BASE of an index (`A[i] := ` writes into A). Anything
+  else on the way up - a dereference, a call, an argument list, a paren -
+  means ANode is read, not written. Pure node-kind walk: no text, so it runs
+  on a demoted model. }
+function TPasNavigator.IsAssignTarget(LM: TPasSemaModel; ANode: Integer): Boolean;
+var
+  LCur, LParent, LChild: Integer;
+begin
+  Result := False;
+  if (ANode < 0) or (ANode > High(LM.Tree.Nodes)) then
+    Exit;
+  LCur := ANode;
+  // Bounded: a designator nests as deep as it is written, never further.
+  while True do
+  begin
+    LParent := LM.Tree.Nodes[LCur].Parent;
+    if LParent = NIL_NODE then
+      Exit;
+    case LM.Tree.Nodes[LParent].Kind of
+      nkMember:
+        begin
+          // Only as the NAME (the last child): the base is read.
+          if LM.Tree.Nodes[LCur].NextSibling <> NIL_NODE then
+            Exit;
+          LCur := LParent;
+        end;
+      nkIndex:
+        begin
+          if LM.Tree.Nodes[LParent].FirstChild <> LCur then
+            Exit;   // an index EXPRESSION, not the thing indexed
+          LCur := LParent;
+        end;
+      nkAssign:
+        Exit(LM.Tree.Nodes[LParent].FirstChild = LCur);
+      nkForStmt:
+        // `for I := ` - the counter is the first child; `for var I := ` wraps
+        // it in an nkInlineVar, which is that first child then.
+        Exit(LM.Tree.Nodes[LParent].FirstChild = LCur);
+      nkInlineVar:
+        begin
+          // `for var I := lo to hi` declares AND assigns I; an inline var in a
+          // statement position (`var X := 1;`) is a declaration with an
+          // initializer, which FindReferences does not report as a use at
+          // all (it is the DeclNode), so it never reaches here.
+          LChild := LM.Tree.Nodes[LParent].Parent;
+          Exit((LChild <> NIL_NODE) and
+            (LM.Tree.Nodes[LChild].Kind = nkForStmt) and
+            (LM.Tree.Nodes[LChild].FirstChild = LParent));
+        end;
+    else
+      Exit;
+    end;
+  end;
+end;
+
+// Does the property (AMid, ASym) carry a `write` specifier? Reads the
+// specifier keyword's text, so the declaring model is hydrated here - ONE
+// model, and the caller is a caret gesture.
+function TPasNavigator.PropertyIsWritable(AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LDecl, LChild: Integer;
+begin
+  Result := False;
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
+    Exit;
+  LM := FProj.Model(AMid);
+  if (ASym < 0) or (ASym >= LM.SymCount) or
+     (LM.Symbols[ASym].Kind <> skProperty) then
+    Exit;
+  LDecl := LM.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LDecl := LM.Tree.Nodes[LDecl].Parent;
+  if (LDecl = NIL_NODE) or (LM.Tree.Nodes[LDecl].Kind <> nkPropertyDecl) then
+    Exit;
+  if not FProj.EnsureHydrated(AMid) then
+    Exit;
+  LChild := LM.Tree.Nodes[LDecl].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if (LM.Tree.Nodes[LChild].Kind = nkPropSpec) and
+       SameText(LM.Tree.NodeText(LChild), 'write') then
+      Exit(True);
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+function TPasNavigator.AssignableAt(AMid, ALine, ACol: Integer;
+  out ATMid, ASym: Integer; out AName: string): Boolean;
+var
+  LM: TPasSemaModel;
+  LChain: TArray<TPasExtRef>;
+  LIdx: Integer;
+begin
+  Result := False;
+  if not SymbolAt(AMid, ALine, ACol, ATMid, ASym, AName) then
+    Exit;
+  LM := FProj.Model(ATMid);
+  case LM.Symbols[ASym].Kind of
+    skVar, skField, skParam:
+      Result := True;
+    skProperty:
+      begin
+        // A bare redeclaration (`property Items;`) carries no specifiers of
+        // its own unless it changes them - ask the whole chain; any link with
+        // a `write` makes the property writable.
+        LChain := PropertyChain(ATMid, ASym);
+        for LIdx := 0 to High(LChain) do
+          if PropertyIsWritable(LChain[LIdx].UnitId, LChain[LIdx].Sym) then
+            Exit(True);
+      end;
+  end;
+end;
+
+function TPasNavigator.FindAssignments(ATMid, ASym: Integer): TArray<TPasRefHit>;
+var
+  LHits: TList<TPasRefHit>;
+  LChain: TArray<TPasExtRef>;
+  LIdx: Integer;
+begin
+  LHits := TList<TPasRefHit>.Create;
+  try
+    // The property redeclaration chain is one property - see FindReferences.
+    // Unlike there, the other links' declaration names are NOT rows: a
+    // declaration is not an assignment.
+    LChain := PropertyChain(ATMid, ASym);
+    if Length(LChain) <= 1 then
+      CollectReferencesOf(ATMid, ASym, LHits, {AAssignOnly} True)
+    else
+      for LIdx := 0 to High(LChain) do
+        CollectReferencesOf(LChain[LIdx].UnitId, LChain[LIdx].Sym, LHits,
+          {AAssignOnly} True);
+    Result := LHits.ToArray;
+  finally
+    LHits.Free;
+  end;
+  TArray.Sort<TPasRefHit>(Result, TComparer<TPasRefHit>.Construct(
+    function(const A, B: TPasRefHit): Integer
+    begin
+      Result := CompareText(A.FilePath, B.FilePath);
+      if Result = 0 then
+        Result := A.Line - B.Line;
+      if Result = 0 then
+        Result := A.Col - B.Col;
+    end));
 end;
 
 { Is (AMid, ASym) a property declared directly inside a class/`object` body -
@@ -2393,10 +2692,8 @@ function TPasNavigator.FindImplementations(ATMid,
 var
   LHits: TList<TPasImplHit>;
   LIndex: TDictionary<string, TArray<TOvEdge>>;
-  LSeenIntf, LSeenClass, LSeenRow: TDictionary<string, Boolean>;
-  LQueue: TQueue<TPasExtRef>;
+  LSeenClass, LSeenRow: TDictionary<string, Boolean>;
   LIntfs: TList<TPasExtRef>;
-  LCur: TPasExtRef;
   LEdges: TArray<TOvEdge>;
   LM: TPasSemaModel;
   LScope, LIntfSym, LIdx, LIntfIdx, LDepth: Integer;
@@ -2421,10 +2718,8 @@ begin
 
   LHits := TList<TPasImplHit>.Create;
   LIndex := TDictionary<string, TArray<TOvEdge>>.Create;
-  LSeenIntf := TDictionary<string, Boolean>.Create;
   LSeenClass := TDictionary<string, Boolean>.Create;
   LSeenRow := TDictionary<string, Boolean>.Create;
-  LQueue := TQueue<TPasExtRef>.Create;
   LIntfs := TList<TPasExtRef>.Create;
   try
     // The interface's own declaration(s) first - the chain's head, like
@@ -2433,31 +2728,7 @@ begin
     OvBuildTypeEdges(LIndex);
 
     // Hop 1: this interface plus every interface that DESCENDS from it.
-    LCur.UnitId := ATMid;
-    LCur.Sym := LIntfSym;
-    LQueue.Enqueue(LCur);
-    LSeenIntf.Add(Format('%d:%d', [ATMid, LIntfSym]), True);
-    while LQueue.Count > 0 do
-    begin
-      LCur := LQueue.Dequeue;
-      LIntfs.Add(LCur);
-      if not LIndex.TryGetValue(Format('%d:%d', [LCur.UnitId, LCur.Sym]),
-        LEdges) then
-        Continue;
-      for LIdx := 0 to High(LEdges) do
-      begin
-        if OvInterfaceDefNode(LEdges[LIdx].UnitId, LEdges[LIdx].Sym) =
-          NIL_NODE then
-          Continue;   // a CLASS listing it - hop 2's business, not this one
-        LKey := Format('%d:%d', [LEdges[LIdx].UnitId, LEdges[LIdx].Sym]);
-        if LSeenIntf.ContainsKey(LKey) then
-          Continue;
-        LSeenIntf.Add(LKey, True);
-        LCur.UnitId := LEdges[LIdx].UnitId;
-        LCur.Sym := LEdges[LIdx].Sym;
-        LQueue.Enqueue(LCur);
-      end;
-    end;
+    OvCollectInterfaceFamily(ATMid, LIntfSym, LIndex, LIntfs);
 
     // Hop 2: every class/`object` listing one of those interfaces. Its own
     // method if it declares one, else the nearest ancestor's - which is a
@@ -2502,10 +2773,8 @@ begin
     Result := LHits.ToArray;
   finally
     LIntfs.Free;
-    LQueue.Free;
     LSeenRow.Free;
     LSeenClass.Free;
-    LSeenIntf.Free;
     LIndex.Free;
     LHits.Free;
   end;
@@ -2521,6 +2790,531 @@ begin
         Result := A.Hit.Line - B.Hit.Line;
       if Result = 0 then
         Result := A.Hit.Col - B.Hit.Col;
+    end));
+end;
+
+{ The interface (ATMid, AIntfSym) plus every interface that DESCENDS from it,
+  transitively, in breadth-first order - hop 1 of FindImplementations, shared
+  with FindInterfaceImplementors. Classes listing an interface are edges in
+  the same index and are skipped here: they are the NEXT hop's business. }
+procedure TPasNavigator.OvCollectInterfaceFamily(ATMid, AIntfSym: Integer;
+  AIndex: TDictionary<string, TArray<TOvEdge>>;
+  AFamily: TList<TPasExtRef>);
+var
+  LSeen: TDictionary<string, Boolean>;
+  LQueue: TQueue<TPasExtRef>;
+  LCur: TPasExtRef;
+  LEdges: TArray<TOvEdge>;
+  LIdx: Integer;
+  LKey: string;
+begin
+  LSeen := TDictionary<string, Boolean>.Create;
+  LQueue := TQueue<TPasExtRef>.Create;
+  try
+    LCur.UnitId := ATMid;
+    LCur.Sym := AIntfSym;
+    LQueue.Enqueue(LCur);
+    LSeen.Add(Format('%d:%d', [ATMid, AIntfSym]), True);
+    while LQueue.Count > 0 do
+    begin
+      LCur := LQueue.Dequeue;
+      AFamily.Add(LCur);
+      if not AIndex.TryGetValue(Format('%d:%d', [LCur.UnitId, LCur.Sym]),
+        LEdges) then
+        Continue;
+      for LIdx := 0 to High(LEdges) do
+      begin
+        if OvInterfaceDefNode(LEdges[LIdx].UnitId, LEdges[LIdx].Sym) =
+          NIL_NODE then
+          Continue;
+        LKey := Format('%d:%d', [LEdges[LIdx].UnitId, LEdges[LIdx].Sym]);
+        if LSeen.ContainsKey(LKey) then
+          Continue;
+        LSeen.Add(LKey, True);
+        LCur.UnitId := LEdges[LIdx].UnitId;
+        LCur.Sym := LEdges[LIdx].Sym;
+        LQueue.Enqueue(LCur);
+      end;
+    end;
+  finally
+    LQueue.Free;
+    LSeen.Free;
+  end;
+end;
+
+function TPasNavigator.InterfaceAt(AMid, ALine, ACol: Integer;
+  out ATMid, ASym: Integer; out AName: string): Boolean;
+begin
+  Result := SymbolAt(AMid, ALine, ACol, ATMid, ASym, AName) and
+    (OvInterfaceDefNode(ATMid, ASym) <> NIL_NODE);
+end;
+
+function TPasNavigator.FindInterfaceImplementors(ATMid,
+  ASym: Integer): TArray<TPasImplHit>;
+var
+  LHits: TList<TPasImplHit>;
+  LIndex: TDictionary<string, TArray<TOvEdge>>;
+  LSeenClass: TDictionary<string, Boolean>;
+  LIntfs: TList<TPasExtRef>;
+  LEdges: TArray<TOvEdge>;
+  LM: TPasSemaModel;
+  LIdx, LIntfIdx, LDecl: Integer;
+  LKey: string;
+  LRow: TPasImplHit;
+begin
+  Result := nil;
+  if OvInterfaceDefNode(ATMid, ASym) = NIL_NODE then
+    Exit;
+  LHits := TList<TPasImplHit>.Create;
+  LIndex := TDictionary<string, TArray<TOvEdge>>.Create;
+  LSeenClass := TDictionary<string, Boolean>.Create;
+  LIntfs := TList<TPasExtRef>.Create;
+  try
+    // The interface's own declaration first, as FindImplementations' pikRoot.
+    LM := FProj.Model(ATMid);
+    LDecl := LM.Symbols[ASym].DeclNode;
+    if (LDecl <> NIL_NODE) and FProj.EnsureHydrated(ATMid) and
+       HitFromNode(LM, LDecl, LRow.Hit) then
+    begin
+      LRow.Kind := pikRoot;
+      LRow.TypeName := LM.Symbols[ASym].Name;
+      LRow.ViaTypeName := '';
+      LRow.UnitId := ATMid;
+      LRow.Sym := ASym;
+      LHits.Add(LRow);
+    end;
+    OvBuildTypeEdges(LIndex);
+    OvCollectInterfaceFamily(ATMid, ASym, LIndex, LIntfs);
+    for LIntfIdx := 0 to LIntfs.Count - 1 do
+    begin
+      if not LIndex.TryGetValue(Format('%d:%d',
+        [LIntfs[LIntfIdx].UnitId, LIntfs[LIntfIdx].Sym]), LEdges) then
+        Continue;
+      for LIdx := 0 to High(LEdges) do
+      begin
+        if OvClassDefNode(LEdges[LIdx].UnitId, LEdges[LIdx].Sym) =
+          NIL_NODE then
+          Continue;
+        LKey := Format('%d:%d', [LEdges[LIdx].UnitId, LEdges[LIdx].Sym]);
+        // One row per class even when it lists both IBase and IChild.
+        if LSeenClass.ContainsKey(LKey) then
+          Continue;
+        LSeenClass.Add(LKey, True);
+        LM := FProj.Model(LEdges[LIdx].UnitId);
+        LDecl := LM.Symbols[LEdges[LIdx].Sym].DeclNode;
+        if (LDecl = NIL_NODE) or
+           not FProj.EnsureHydrated(LEdges[LIdx].UnitId) or
+           not HitFromNode(LM, LDecl, LRow.Hit) then
+          Continue;
+        LRow.Kind := pikImplementor;
+        LRow.TypeName := LM.Symbols[LEdges[LIdx].Sym].Name;
+        // The interface the class WROTE, when it is a descendant of the one
+        // asked about - so a reader sees why TFoo is a row for IBase.
+        if LIntfIdx = 0 then
+          LRow.ViaTypeName := ''
+        else
+          LRow.ViaTypeName := FProj.Model(LIntfs[LIntfIdx].UnitId).Symbols[
+            LIntfs[LIntfIdx].Sym].Name;
+        LRow.UnitId := LEdges[LIdx].UnitId;
+        LRow.Sym := LEdges[LIdx].Sym;
+        LHits.Add(LRow);
+      end;
+    end;
+    Result := LHits.ToArray;
+  finally
+    LIntfs.Free;
+    LSeenClass.Free;
+    LIndex.Free;
+    LHits.Free;
+  end;
+  TArray.Sort<TPasImplHit>(Result, TComparer<TPasImplHit>.Construct(
+    function(const A, B: TPasImplHit): Integer
+    begin
+      Result := Ord(B.Kind = pikRoot) - Ord(A.Kind = pikRoot);
+      if Result = 0 then
+        Result := CompareText(A.Hit.FilePath, B.Hit.FilePath);
+      if Result = 0 then
+        Result := A.Hit.Line - B.Hit.Line;
+      if Result = 0 then
+        Result := A.Hit.Col - B.Hit.Col;
+    end));
+end;
+
+{ ---- Find Descendants --------------------------------------------------
+  The type hierarchy below one class or interface, as declarations. The
+  reverse-heritage index again, walked along ONE kind of edge: ancestor edges
+  between classes for a class, extends-edges between interfaces for an
+  interface - so the answer never mixes the two axes (see TPasDescendantKind). }
+
+function TPasNavigator.TypeAt(AMid, ALine, ACol: Integer;
+  out ATMid, ASym: Integer; out AName: string): Boolean;
+begin
+  Result := SymbolAt(AMid, ALine, ACol, ATMid, ASym, AName) and
+    (OvStructDefNode(ATMid, ASym,
+      [nkClassType, nkObjectType, nkInterfaceType]) <> NIL_NODE);
+end;
+
+function TPasNavigator.FindDescendants(ATMid,
+  ASym: Integer): TArray<TPasDescendantHit>;
+type
+  TQueued = record
+    Ref: TPasExtRef;
+    Depth: Integer;
+    ParentName: string;
+  end;
+var
+  LHits: TList<TPasDescendantHit>;
+  LIndex: TDictionary<string, TArray<TOvEdge>>;
+  LSeen: TDictionary<string, Boolean>;
+  LQueue: TQueue<TQueued>;
+  LCur, LNext: TQueued;
+  LEdges: TArray<TOvEdge>;
+  LIdx: Integer;
+  LIsIntf: Boolean;
+  LKey: string;
+  LRow: TPasDescendantHit;
+
+  // The row for one type, positioned on its declaration name; False when the
+  // model cannot be hydrated or the symbol has no declaration node.
+  function RowFor(const AQ: TQueued; out ARow: TPasDescendantHit): Boolean;
+  var
+    M: TPasSemaModel;
+    D: Integer;
+  begin
+    Result := False;
+    M := FProj.Model(AQ.Ref.UnitId);
+    D := M.Symbols[AQ.Ref.Sym].DeclNode;
+    if (D = NIL_NODE) or not FProj.EnsureHydrated(AQ.Ref.UnitId) or
+       not HitFromNode(M, D, ARow.Hit) then
+      Exit;
+    if AQ.Depth = 0 then
+      ARow.Kind := pdkRoot
+    else
+      ARow.Kind := pdkDescendant;
+    ARow.TypeName := M.Symbols[AQ.Ref.Sym].Name;
+    ARow.ParentTypeName := AQ.ParentName;
+    ARow.Depth := AQ.Depth;
+    ARow.UnitId := AQ.Ref.UnitId;
+    ARow.Sym := AQ.Ref.Sym;
+    Result := True;
+  end;
+
+begin
+  Result := nil;
+  LIsIntf := OvInterfaceDefNode(ATMid, ASym) <> NIL_NODE;
+  if not LIsIntf and (OvClassDefNode(ATMid, ASym) = NIL_NODE) then
+    Exit;
+  LHits := TList<TPasDescendantHit>.Create;
+  LIndex := TDictionary<string, TArray<TOvEdge>>.Create;
+  LSeen := TDictionary<string, Boolean>.Create;
+  LQueue := TQueue<TQueued>.Create;
+  try
+    OvBuildTypeEdges(LIndex);
+    LCur.Ref.UnitId := ATMid;
+    LCur.Ref.Sym := ASym;
+    LCur.Depth := 0;
+    LCur.ParentName := '';
+    LQueue.Enqueue(LCur);
+    LSeen.Add(Format('%d:%d', [ATMid, ASym]), True);
+    while LQueue.Count > 0 do
+    begin
+      LCur := LQueue.Dequeue;
+      if RowFor(LCur, LRow) then
+        LHits.Add(LRow);
+      if not LIndex.TryGetValue(Format('%d:%d',
+        [LCur.Ref.UnitId, LCur.Ref.Sym]), LEdges) then
+        Continue;
+      for LIdx := 0 to High(LEdges) do
+      begin
+        // For a class: ANCESTOR edges to classes only - a class LISTING an
+        // interface is not its descendant. For an interface: every interface
+        // naming it (an interface's whole heritage list is extends-edges).
+        if LIsIntf then
+        begin
+          if OvInterfaceDefNode(LEdges[LIdx].UnitId, LEdges[LIdx].Sym) =
+            NIL_NODE then
+            Continue;
+        end
+        else
+        begin
+          if not LEdges[LIdx].IsFirst then
+            Continue;
+          if OvClassDefNode(LEdges[LIdx].UnitId, LEdges[LIdx].Sym) =
+            NIL_NODE then
+            Continue;
+        end;
+        LKey := Format('%d:%d', [LEdges[LIdx].UnitId, LEdges[LIdx].Sym]);
+        if LSeen.ContainsKey(LKey) then
+          Continue;   // broken source can spell a cycle - guard, as ever
+        LSeen.Add(LKey, True);
+        LNext.Ref.UnitId := LEdges[LIdx].UnitId;
+        LNext.Ref.Sym := LEdges[LIdx].Sym;
+        LNext.Depth := LCur.Depth + 1;
+        LNext.ParentName := FProj.Model(LCur.Ref.UnitId).Symbols[
+          LCur.Ref.Sym].Name;
+        LQueue.Enqueue(LNext);
+      end;
+    end;
+    // Breadth-first IS hierarchy order (all depth-1 rows, then depth-2...);
+    // no sort, so a host indenting by Depth gets the tree it expects.
+    Result := LHits.ToArray;
+  finally
+    LQueue.Free;
+    LSeen.Free;
+    LIndex.Free;
+    LHits.Free;
+  end;
+end;
+
+{ ---- Find Creations / Find Destructions ---------------------------------
+  Where instances of one class begin and end. Both read the resolver's
+  bindings around a call rather than searching a name, and both are limited
+  to what the STATIC text says - see the public comments for what a runtime
+  fact keeps out of reach. }
+
+// The (model, symbol) an identifier node bound to, RefMap first (same
+// model), then ExtRefMap (another model). False for an unresolved name.
+function TPasNavigator.NodeBinding(LM: TPasSemaModel; ANode: Integer;
+  out AUid, ASym: Integer): Boolean;
+var
+  LExt: TPasExtRef;
+  LMi: Integer;
+begin
+  Result := False;
+  AUid := -1;
+  ASym := NIL_SYM;
+  if (ANode < 0) or (ANode > High(LM.Tree.Nodes)) then
+    Exit;
+  if (ANode <= High(LM.RefMap)) and (LM.RefMap[ANode] <> NIL_SYM) then
+  begin
+    // RefMap is model-local: the model's own id is not stored on it, so it
+    // is found by identity - a handful of models, once per hit.
+    for LMi := 0 to FProj.ModelCount - 1 do
+      if FProj.Model(LMi) = LM then
+      begin
+        AUid := LMi;
+        ASym := LM.RefMap[ANode];
+        Exit(True);
+      end;
+    Exit;
+  end;
+  if LM.ExtRefMap.TryGetValue(ANode, LExt) then
+  begin
+    AUid := LExt.UnitId;
+    ASym := LExt.Sym;
+    Result := True;
+  end;
+end;
+
+// The identifier a designator ends in: `A.B.C` -> C, `A[i]`/`A^`/`(A)`/
+// `A<T>` -> A's own name, a bare identifier -> itself. What a hit row is
+// positioned on, so `Self.FFoo.Free` highlights FFoo rather than Self.
+function TPasNavigator.DesignatorNameNode(LM: TPasSemaModel;
+  ANode: Integer): Integer;
+var
+  LDepth: Integer;
+begin
+  Result := ANode;
+  for LDepth := 1 to 16 do
+  begin
+    if (Result < 0) or (Result > High(LM.Tree.Nodes)) then
+      Exit(NIL_NODE);
+    case LM.Tree.Nodes[Result].Kind of
+      nkMember:
+        begin
+          Result := LM.Tree.Nodes[Result].FirstChild;
+          while (Result <> NIL_NODE) and
+                (LM.Tree.Nodes[Result].NextSibling <> NIL_NODE) do
+            Result := LM.Tree.Nodes[Result].NextSibling;
+        end;
+      nkIndex, nkDeref, nkParen, nkCall, nkTypeArgs:
+        Result := LM.Tree.Nodes[Result].FirstChild;
+    else
+      Exit;
+    end;
+    if Result = NIL_NODE then
+      Exit;
+  end;
+end;
+
+// Does the designator ANode (in model AMid) have the STATIC type (ATMid,
+// ASym) - alias links followed, generic instance ignored?
+function TPasNavigator.DesignatorIsClass(AMid, ANode, ATMid,
+  ASym: Integer): Boolean;
+var
+  LX: TSemaXType;
+begin
+  LX := FProj.WithTargetTypeX(AMid, ANode);
+  if not XValid(LX) then
+    Exit(False);
+  LX := FProj.CanonTypeX(LX);
+  Result := (LX.UnitId = ATMid) and (LX.Sym = ASym);
+end;
+
+function TPasNavigator.ClassAt(AMid, ALine, ACol: Integer;
+  out ATMid, ASym: Integer; out AName: string): Boolean;
+begin
+  Result := SymbolAt(AMid, ALine, ACol, ATMid, ASym, AName) and
+    (OvClassDefNode(ATMid, ASym) <> NIL_NODE);
+end;
+
+function TPasNavigator.FindCreations(ATMid, ASym: Integer): TArray<TPasRefHit>;
+var
+  LHits: TList<TPasRefHit>;
+  LMi, LNode, LBase, LName, LUid, LSym: Integer;
+  LM: TPasSemaModel;
+  LPair: TPair<Integer, TPasExtRef>;
+  LHit: TPasRefHit;
+
+  // ANode is bound to the class. Is it the QUALIFIER of a member access whose
+  // member is a constructor? `TFoo<T>.Create` wraps the name in nkTypeArgs
+  // first, so one such level is stepped over.
+  function IsCtorQualifier(ANode: Integer): Boolean;
+  begin
+    Result := False;
+    LBase := ANode;
+    if (LM.Tree.Nodes[LBase].Parent <> NIL_NODE) and
+       (LM.Tree.Nodes[LM.Tree.Nodes[LBase].Parent].Kind = nkTypeArgs) then
+      LBase := LM.Tree.Nodes[LBase].Parent;
+    LName := LM.Tree.Nodes[LBase].Parent;
+    if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkMember) or
+       (LM.Tree.Nodes[LName].FirstChild <> LBase) then
+      Exit;
+    LName := LM.Tree.Nodes[LBase].NextSibling;
+    if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) then
+      Exit;
+    Result := NodeBinding(LM, LName, LUid, LSym) and
+      FProj.IsConstructorSym(LUid, LSym) and
+      not FProj.IsClassCtorDtorSym(LUid, LSym);
+  end;
+
+begin
+  Result := nil;
+  if OvClassDefNode(ATMid, ASym) = NIL_NODE then
+    Exit;
+  LHits := TList<TPasRefHit>.Create;
+  try
+    for LMi := 0 to FProj.ModelCount - 1 do
+    begin
+      LM := FProj.Model(LMi);
+      // Same scan shape as CollectReferencesOf: every node bound to the
+      // class, RefMap in the declaring model, ExtRefMap everywhere; hydration
+      // only for a model that holds a row.
+      if LMi = ATMid then
+        for LNode := 0 to High(LM.RefMap) do
+          if (LM.RefMap[LNode] = ASym) and IsCtorQualifier(LNode) and
+             FProj.EnsureHydrated(LMi) and HitFromNode(LM, LNode, LHit) then
+            LHits.Add(LHit);
+      for LPair in LM.ExtRefMap do
+        if (LPair.Value.UnitId = ATMid) and (LPair.Value.Sym = ASym) and
+           IsCtorQualifier(LPair.Key) and FProj.EnsureHydrated(LMi) and
+           HitFromNode(LM, LPair.Key, LHit) then
+          LHits.Add(LHit);
+    end;
+    Result := LHits.ToArray;
+  finally
+    LHits.Free;
+  end;
+  TArray.Sort<TPasRefHit>(Result, TComparer<TPasRefHit>.Construct(
+    function(const A, B: TPasRefHit): Integer
+    begin
+      Result := CompareText(A.FilePath, B.FilePath);
+      if Result = 0 then
+        Result := A.Line - B.Line;
+      if Result = 0 then
+        Result := A.Col - B.Col;
+    end));
+end;
+
+function TPasNavigator.FindDestructions(ATMid,
+  ASym: Integer): TArray<TPasRefHit>;
+var
+  LHits: TList<TPasRefHit>;
+  LMi, LNode, LUid, LSym, LTarget, LParent: Integer;
+  LM: TPasSemaModel;
+  LPair: TPair<Integer, TPasExtRef>;
+  LHit: TPasRefHit;
+  LNameLower: string;
+
+  // The designator being released when ANode is the bound name of one of the
+  // three release shapes, or NIL_NODE: `X.Free` / `X.Destroy` -> X is the
+  // member base; `FreeAndNil(X)` -> X is the first argument.
+  function ReleasedBy(ANode: Integer): Integer;
+  begin
+    Result := NIL_NODE;
+    LNameLower := FProj.Model(LUid).Symbols[LSym].NameLower;
+    LParent := LM.Tree.Nodes[ANode].Parent;
+    if LParent = NIL_NODE then
+      Exit;
+    if (LNameLower = 'free') or (LNameLower = 'destroy') then
+    begin
+      if (LM.Tree.Nodes[LParent].Kind = nkMember) and
+         (LM.Tree.Nodes[LParent].FirstChild <> ANode) then
+        Result := LM.Tree.Nodes[LParent].FirstChild;
+    end
+    else if LNameLower = 'freeandnil' then
+    begin
+      if (LM.Tree.Nodes[LParent].Kind = nkCall) and
+         (LM.Tree.Nodes[LParent].FirstChild = ANode) then
+        Result := LM.Tree.Nodes[ANode].NextSibling;
+    end;
+  end;
+
+  procedure Consider(ANode: Integer);
+  begin
+    LTarget := ReleasedBy(ANode);
+    if LTarget = NIL_NODE then
+      Exit;
+    if not DesignatorIsClass(LMi, LTarget, ATMid, ASym) then
+      Exit;
+    LTarget := DesignatorNameNode(LM, LTarget);
+    if (LTarget <> NIL_NODE) and FProj.EnsureHydrated(LMi) and
+       HitFromNode(LM, LTarget, LHit) then
+      LHits.Add(LHit);
+  end;
+
+begin
+  Result := nil;
+  if OvClassDefNode(ATMid, ASym) = NIL_NODE then
+    Exit;
+  LHits := TList<TPasRefHit>.Create;
+  try
+    for LMi := 0 to FProj.ModelCount - 1 do
+    begin
+      LM := FProj.Model(LMi);
+      // Every bound routine name in the model, whichever map holds it - the
+      // release routines live in System/SysUtils, so almost always ExtRefMap;
+      // RefMap covers a project declaring its own FreeAndNil.
+      for LNode := 0 to High(LM.RefMap) do
+        if LM.RefMap[LNode] <> NIL_SYM then
+        begin
+          LUid := LMi;
+          LSym := LM.RefMap[LNode];
+          if LM.Symbols[LSym].Kind = skRoutine then
+            Consider(LNode);
+        end;
+      for LPair in LM.ExtRefMap do
+      begin
+        LUid := LPair.Value.UnitId;
+        LSym := LPair.Value.Sym;
+        if (LUid >= 0) and (LUid < FProj.ModelCount) and (LSym >= 0) and
+           (LSym < FProj.Model(LUid).SymCount) and
+           (FProj.Model(LUid).Symbols[LSym].Kind = skRoutine) then
+          Consider(LPair.Key);
+      end;
+    end;
+    Result := LHits.ToArray;
+  finally
+    LHits.Free;
+  end;
+  TArray.Sort<TPasRefHit>(Result, TComparer<TPasRefHit>.Construct(
+    function(const A, B: TPasRefHit): Integer
+    begin
+      Result := CompareText(A.FilePath, B.FilePath);
+      if Result = 0 then
+        Result := A.Line - B.Line;
+      if Result = 0 then
+        Result := A.Col - B.Col;
     end));
 end;
 

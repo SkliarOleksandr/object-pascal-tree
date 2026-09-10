@@ -503,12 +503,12 @@ object frmMain: TfrmMain
       OnUpdate = CopyAllMessagesActionUpdate
     end
     object FindReferencesAction: TAction
-      Caption = 'Find References'
+      Caption = 'References'
       OnExecute = FindReferencesActionExecute
       OnUpdate = FindReferencesActionUpdate
     end
     object FindOverridesAction: TAction
-      Caption = 'Find Overrides'
+      Caption = 'Overrides'
       Hint =
         'Every declaration sharing the VMT slot of the method at the caret ' +
         '- the virtual root plus every override, message handler and reintr' +
@@ -517,12 +517,45 @@ object frmMain: TfrmMain
       OnUpdate = FindOverridesActionUpdate
     end
     object FindImplementationsAction: TAction
-      Caption = 'Find Implementations'
+      Caption = 'Implementations'
       Hint =
         'Every class method that implements the INTERFACE method at the car' +
-        'et, across the analyzed project'
+        'et - or, on an interface NAME, every class implementing it - acros' +
+        's the analyzed project'
       OnExecute = FindImplementationsActionExecute
       OnUpdate = FindImplementationsActionUpdate
+    end
+    object FindDescendantsAction: TAction
+      Caption = 'Descendants'
+      Hint =
+        'Every class below the class (or interface below the interface) at ' +
+        'the caret, across the analyzed project'
+      OnExecute = FindDescendantsActionExecute
+      OnUpdate = FindDescendantsActionUpdate
+    end
+    object FindAssignmentsAction: TAction
+      Caption = 'Assignments'
+      Hint =
+        'Every place the variable, field, parameter or property at the care' +
+        't is written'
+      OnExecute = FindAssignmentsActionExecute
+      OnUpdate = FindAssignmentsActionUpdate
+    end
+    object FindCreationsAction: TAction
+      Caption = 'Creations'
+      Hint =
+        'Every constructor call that creates an instance of the class at th' +
+        'e caret'
+      OnExecute = FindCreationsActionExecute
+      OnUpdate = FindCreationsActionUpdate
+    end
+    object FindDestructionsAction: TAction
+      Caption = 'Destructions'
+      Hint =
+        'Every Free / Destroy / FreeAndNil of a designator whose static type' +
+        ' is the class at the caret'
+      OnExecute = FindDestructionsActionExecute
+      OnUpdate = FindDestructionsActionUpdate
     end
     object RenameAction: TAction
       Caption = 'Rename...'
@@ -552,14 +585,29 @@ object frmMain: TfrmMain
     object GotoDeclaration1: TMenuItem
       Action = GotoDeclAction
     end
-    object FindReferences1: TMenuItem
-      Action = FindReferencesAction
-    end
-    object FindOverrides1: TMenuItem
-      Action = FindOverridesAction
-    end
-    object FindImplementations1: TMenuItem
-      Action = FindImplementationsAction
+    object FindAll1: TMenuItem
+      Caption = 'Find All'
+      object FindReferences1: TMenuItem
+        Action = FindReferencesAction
+      end
+      object FindOverrides1: TMenuItem
+        Action = FindOverridesAction
+      end
+      object FindImplementations1: TMenuItem
+        Action = FindImplementationsAction
+      end
+      object FindDescendants1: TMenuItem
+        Action = FindDescendantsAction
+      end
+      object FindAssignments1: TMenuItem
+        Action = FindAssignmentsAction
+      end
+      object FindCreations1: TMenuItem
+        Action = FindCreationsAction
+      end
+      object FindDestructions1: TMenuItem
+        Action = FindDestructionsAction
+      end
     end
     object Rename1: TMenuItem
       Action = RenameAction

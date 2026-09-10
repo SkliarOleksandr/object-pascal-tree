@@ -246,6 +246,30 @@ identifier class does here:
     the caret sits in a blocked file.
 
 
+## 3.10 Demo menu: one `Find All` submenu
+
+Status: IMPLEMENTED (demo, 0.22.0; no engine change). The editor context
+menu groups every "find" question under one `Find All` submenu, one entry
+per identity question, References first (the one always available) and the
+rest in the order this document describes them:
+
+- `Find All > References` (§2/§3 identity - `SymbolAt`/`UnitAt`/`BuiltinNameAt`)
+- `Find All > Overrides` (§4 - `MethodAt`)
+- `Find All > Implementations` (§5 - `InterfaceMethodAt` OR `InterfaceAt`)
+- `Find All > Descendants` (§6 - `TypeAt`)
+- `Find All > Assignments` (§7 - `AssignableAt`)
+- `Find All > Creations` (§8 - `ClassAt`)
+- `Find All > Destructions` (§8 - `ClassAt`)
+
+Each entry keeps its own gating rule - the regrouping is presentation only. A
+gated-out entry stays visible but disabled (the IDE greys out inapplicable
+Refactor items the same way) so the submenu's shape never shifts with the
+caret. Every command opens its own results page: `TFindRefTab.Kind`
+(`stkRefs`, `stkRename`, `stkOverrides`, `stkImpls`, `stkDescendants`,
+`stkAssigns`, `stkCreations`, `stkDestructions`) is part of the page
+identity, so a repeated search refreshes its own page and eight answers
+about one symbol never overwrite each other.
+
 ## 4. Find Overrides (`TPasNavigator.MethodAt`/`FindOverrides` + demo wiring)
 
 Status: IMPLEMENTED (PasTree 0.19.0) - `MethodAt`, `FindOverrides`,
@@ -286,6 +310,7 @@ What each declaration shape does:
 | 7 | Started from a qualified implementation header (`procedure TFoo.Bar;`) | the same chain (`MethodAt` takes the decl<->impl hop; the header's own name binds to no symbol, so `SymbolAt` alone declines it) | OK |
 | 8 | A method of a record, an interface, or a plain routine | `MethodAt` declines - the command is not offered | OK (by design) |
 | 9 | An INTERFACE method's implementors (`TFoo = class(TObject, IBar)`) | - | not this search - a separate command, see §5 |
+| 9a | The CLASSES below this method's class (no method question at all) | - | not this search either - Find Descendants, §6 |
 | 10 | A class whose ancestor is written through a type ALIAS (`TB2 = TB;` then `class(TB2)`) | - | GAP - the index keys on the symbol the heritage name bound to, which is the alias |
 | 11 | An event handler wired only through a `.dfm` (`OnClick`) | - | not an override at all: it is an assignment to a property, reached by Find References |
 | 12 | A class PROPERTY (`MethodAt` accepts it since 0.21.0) | its redeclaration chain: the declaration that writes the type is `pokRoot`, every bare `property Items;` below it `pokRedeclared`, hierarchy order; a redeclaration WITH a type is a new property - no row, and its branch is closed. A lone root is the honest "declared nowhere else" | OK (0.21.0) |
@@ -341,7 +366,30 @@ Measured on the VCL closure of a `uses Vcl.Forms, Vcl.ComCtrls, Vcl.Grids`
 program (103 models): `IInterface.QueryInterface` = 9 rows across 3 files in
 1 ms, `IStreamPersist.LoadFromStream` = 3 rows in 1 ms.
 
-### 5.1 "Does it only search the current file?" - no, and how to tell
+### 5.1 From the interface NAME: which classes implement it
+
+Status: IMPLEMENTED (PasTree 0.22.0) - `InterfaceAt`,
+`FindInterfaceImplementors`; the demo's `Find All > Implementations` is
+enabled by either `InterfaceMethodAt` or `InterfaceAt` and picks the search
+accordingly.
+
+`FindImplementations` answers "who implements this METHOD". With the caret on
+the interface TYPE itself the coarser question is "which CLASSES implement
+it" - one row per class, positioned on the class's own declaration name, the
+same two hops stopped one level earlier (the interface's descendant
+interfaces, then every class listing any of them; a class listing both IBase
+and IChild is one row). Rows reuse `TPasImplHit`: `pikRoot` for the
+interface's declaration, `pikImplementor` per class, with `ViaTypeName`
+naming the DESCENDANT interface the class actually wrote when that is not
+the one asked about (`class(TObject, IChild)` for a search on IBase).
+
+Not a row, by design: a class that gets the interface from its ANCESTOR
+(`TBase = class(TObject, IBar)` then `TLeaf = class(TBase)`) - dcc treats
+the ancestor as the implementor, and listing every descendant of every
+implementor is §6's answer. GAPs shared with the method search: `implements`
+delegation, an alias-named interface.
+
+### 5.2 "Does it only search the current file?" - no, and how to tell
 
 Both searches are project-wide by construction (the index sweeps every loaded
 model), and both demo pages put the unit count in the tab caption -
@@ -362,3 +410,103 @@ search:
 - the chain's root is in the RTL/VCL and those sources are not on the search
   paths - the climb then stops at the caret's own class, and its overrides
   are the only rows left.
+
+## 6. Find Descendants (`TPasNavigator.TypeAt`/`FindDescendants` + demo wiring)
+
+Status: IMPLEMENTED (PasTree 0.22.0) - `TypeAt`, `FindDescendants`,
+`TPasDescendantHit`/`TPasDescendantKind` in `source/PasTree.Sema.Nav.pas`,
+wired into the demo as `Find All > Descendants`, regression-covered by
+`tests/SemaNavSmoke.dpr` over the `NavOvrA`/`NavOvrB`/`NavIntfA` fixtures.
+
+A different question than §4/§5: given a class, `object` or interface, list
+every TYPE below it - the declarations themselves (`TFoo = class(TBase)`),
+never a member. The same reverse-heritage index §4 builds, walked
+breadth-first along ONE kind of edge: ancestor edges between classes for a
+class, extends-edges between interfaces for an interface. Breadth-first IS
+hierarchy order, so rows arrive as all depth-1 children, then depth-2, and a
+host indenting by `Depth` gets the tree without sorting; `ParentTypeName` is
+the direct ancestor each row was reached through.
+
+| # | Started from | Row | Status |
+|---|--------------|-----|--------|
+| 1 | A class/`object` declaration, or its name at any use | `pdkRoot` (the type itself, always first), then every class transitively below it, one row per declaration, project-wide | OK |
+| 2 | An interface declaration or its name | the interfaces transitively extending it (`IChild = interface(IBase)`) | OK |
+| 3 | The classes IMPLEMENTING a found interface | no row, by design - one axis per command: that is §5.1's answer, and a list mixing class rows and interface rows would have to explain itself | OK (by design) |
+| 4 | A type nothing descends from | its single `pdkRoot` row - the honest "no descendants" | OK |
+| 5 | A record, a helper, an alias, a non-type | `TypeAt` declines - the command is not offered | OK (by design) |
+| 6 | A descendant naming its ancestor through a type ALIAS | - | GAP - the index's own limit, see §4 row 10 |
+
+Cost note for hosts: `TObject`'s descendants are every class in the closure,
+each row's model rehydrated to position the hit - gate on `TypeAt`, not on
+"the caret is on an identifier". The demo caption counts descendants
+excluding the root (`Descendants of 'TOvBase' (4 in 2 units)`).
+
+## 7. Find All Assignments (`TPasNavigator.AssignableAt`/`FindAssignments` + demo wiring)
+
+Status: IMPLEMENTED (PasTree 0.22.0) - `AssignableAt`, `FindAssignments` in
+`source/PasTree.Sema.Nav.pas`, wired into the demo as `Find All >
+Assignments`, regression-covered by `tests/SemaNavSmoke.dpr` (fixture
+`NavAsg`).
+
+Find References with the answer narrowed to WRITES: the same resolved-
+identity scan (`CollectReferencesOf`, the property redeclaration chain
+included), keeping only the hits that sit in an assignment-target position.
+The filter is a node-kind walk from the hit's identifier (`IsAssignTarget`,
+no text read, so it runs on demoted models): climb out of the trailing NAME
+of a member chain (`Obj.Field := ` writes Field) and out of the BASE of an
+index (`A[i] := ` writes into A), then the identifier counts if what it
+reached is the left side of `:=` or the counter of a `for`. Anything else on
+the way up - a dereference, a call, an argument list - means it is read.
+
+| # | Target | Row | Status |
+|---|--------|-----|--------|
+| 1 | A local/global var, a field, a parameter | every `X := `, `Obj.X := `, `X[i] := `, `for X := ` project-wide | OK |
+| 2 | A property with a `write` specifier (field or setter method) | every write through the PROPERTY syntax (`Obj.Prop := X`), across its redeclaration chain; the setter's own body writes to the FIELD, and a direct call to the setter is a reference to the setter - neither is a row here | OK |
+| 3 | A property with NO `write` specifier | `AssignableAt` declines - the command is not offered (nothing to find is not an error); a bare redeclaration asks the whole chain, so `property Items;` under a writable root is writable | OK (by design) |
+| 4 | A constant, a type, a routine, `Result` | `AssignableAt` declines | OK (by design) |
+| 5 | The declaration site | not a row, as in Find References; the demo pins `DeclHit` above the list | OK |
+| 6 | A write THROUGH the symbol (`P^ := `, `Obj.Field := ` with the caret on `Obj`) | no row - the target is what the symbol refers to, not the symbol | OK (by design) |
+| 7 | `var`/`out` argument passing (`Foo(X)` with a `var` parameter) | - | GAP - a write to X that reads as a call site; needs the resolved parameter list per argument, left for a later pass |
+| 8 | `Inc(X)`/`Dec(X)` and the other mutating intrinsics | - | GAP - same reason as row 7, intrinsic side |
+| 9 | Identifier inside an opened `$I` include file | - | GAP (`IdentAt` is main-file-only, the shared limit) |
+
+Rows 7 and 8 are the two the reader of a write list will notice missing;
+both need "is this argument position a `var`/`out` parameter" from the
+resolver's overload choice, which nothing in the navigator reads yet. When
+that lands, `IsAssignTarget` grows one case (`nkCall` argument -> the bound
+routine's parameter mode) and nothing else changes.
+
+## 8. Find Creations / Find Destructions (`TPasNavigator.ClassAt`/`FindCreations`/`FindDestructions` + demo wiring)
+
+Status: IMPLEMENTED (PasTree 0.23.0) - `ClassAt`, `FindCreations`,
+`FindDestructions` in `source/PasTree.Sema.Nav.pas`, wired into the demo as
+`Find All > Creations` and `Find All > Destructions`, regression-covered by
+`tests/SemaNavSmoke.dpr` (fixture `NavCD`).
+
+Where instances of one CLASS begin and end. Two commands rather than one
+"lifetime" list because the two are read for different reasons - "who makes
+these" against "who owns and frees these" - and both are gated by `ClassAt`
+(`TypeAt` narrowed to classes/`object`s: an interface has no instances of its
+own to create or free). Both read the resolver's BINDINGS around a call,
+never the spelling `Create`/`Free`, and both are limited to what the static
+text says - the table's "not a row" lines are runtime facts.
+
+| # | Shape | Row | Status |
+|---|-------|-----|--------|
+| 1 | `TFoo.Create(...)` - qualifier bound to the class, member bound to a constructor (the class's own OR an inherited one: `TFoo.Create` with Create declared on TObject still makes a TFoo) | Creations row, positioned on the class name in the call; one per call, overloads included | OK |
+| 2 | `TFoo<T>.Create` (qualifier wrapped in type arguments) | Creations row | OK |
+| 3 | `TBar.Create` for a descendant TBar | no row - that is a TBar; §6 says which those are | OK (by design) |
+| 4 | `inherited Create` inside a descendant's constructor | no row - it constructs the object already being built | OK (by design) |
+| 5 | A class method or plain routine NAMED Create | no row - the member binding is not a constructor | OK |
+| 6 | `LClass.Create` through a class-reference VARIABLE (`LClass: TFooClass`) | - | GAP - the static type is a metaclass, the class a runtime value |
+| 7 | `X.Free`, `X.Destroy`, `FreeAndNil(X)` where the designator X has the STATIC type of the class (aliases followed; `Self.FFoo.Free`, `Items[i].Free` and the like resolve through `WithTargetTypeX`) | Destructions row, positioned on X's own name (FFoo, not Self) | OK |
+| 8 | The release routines themselves | matched as RESOLVED routine symbols named `free`/`destroy`/`freeandnil` - TObject's, System.SysUtils' FreeAndNil, or a project's own; a same-named method on an unrelated type is no row | OK |
+| 9 | A `TBar` instance freed through a `TBar`-typed variable (descendant) | no row for TFoo - its static type is TBar, the same rule row 3 applies to creation | OK (by design) |
+| 10 | An instance freed through an ANCESTOR-typed variable (`var O: TObject; O := TFoo.Create; O.Free`) | - | GAP - static type is TObject; would need flow analysis |
+| 11 | Ownership release (`TComponent` owner, `TObjectList` with OwnsObjects, interface refcount) | - | GAP - runtime facts, not in the source text at all |
+| 12 | `inherited Destroy` inside the class's own destructor | no row - the parent node is nkInherited, not a member access | OK (by design) |
+| 13 | `C := nil` after a Free | no row - an assignment (§7), not a release | OK |
+
+`CanonTypeX` (alias links followed) was made public on `TPasSemaProject` for
+row 7's comparison; it was private before because only overload typing
+needed it.

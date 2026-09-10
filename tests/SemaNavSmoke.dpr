@@ -182,6 +182,83 @@ const
     'procedure TOvNoIntf.Run; begin end;'#10 +       // 29
     'end.'#10;                                       // 30
 
+  { Find All Assignments fixture: every write shape the search must report
+    (plain `:=`, a member-chain target, an indexed target, a `for` counter)
+    beside the reads that sit on the same lines and must NOT be rows (the
+    right side of `:=`, an index expression, a property read), plus a
+    read-only property the command must decline. }
+  UNIT_ASG =
+    'unit NavAsg;'#10 +                         // 1
+    'interface'#10 +                            // 2
+    'type'#10 +                                 // 3
+    '  TAsg = class'#10 +                       // 4
+    '  private'#10 +                            // 5
+    '    FVal: Integer;'#10 +                   // 6  FVal col 5
+    '    procedure SetVal(V: Integer);'#10 +    // 7
+    '  public'#10 +                             // 8
+    '    property Val: Integer read FVal write SetVal;'#10 + // 9  Val col 14
+    '    property RO: Integer read FVal;'#10 +  // 10 RO col 14
+    '  end;'#10 +                               // 11
+    'var'#10 +                                  // 12
+    '  G: Integer;'#10 +                        // 13  G col 3
+    '  Arr: array[0..3] of Integer;'#10 +       // 14  Arr col 3
+    'procedure Work(A: TAsg);'#10 +             // 15
+    'implementation'#10 +                       // 16
+    'procedure TAsg.SetVal(V: Integer);'#10 +   // 17
+    'begin'#10 +                                // 18
+    '  FVal := V;'#10 +                         // 19  FVal := (col 3)
+    'end;'#10 +                                 // 20
+    'procedure Work(A: TAsg);'#10 +             // 21
+    'var I: Integer;'#10 +                      // 22  I col 5
+    'begin'#10 +                                // 23
+    '  G := 1;'#10 +                            // 24  G := (col 3)
+    '  G := G + 1;'#10 +                        // 25  G := (col 3), G read (col 8)
+    '  Arr[G] := 2;'#10 +                       // 26  Arr[..] := ; G read
+    '  A.Val := G;'#10 +                        // 27  A.Val := (Val col 5)
+    '  I := A.Val;'#10 +                        // 28  I :=; Val read
+    '  for I := 0 to G do'#10 +                 // 29  for I := (col 7)
+    '    Arr[I] := I;'#10 +                     // 30  Arr[..] :=; I read twice
+    '  A.FVal := 0;'#10 +                       // 31  A.FVal := (FVal col 5)
+    'end;'#10 +                                 // 32
+    'end.'#10;                                  // 33
+
+  { Find Creations / Find Destructions fixture. Two constructor overloads,
+    a descendant created beside the class (a TCdSub, never a TCd row), a
+    TObject created and freed through the fixture System.pas (never a row),
+    and the three release shapes for the class itself. FreeAndNil is declared
+    HERE - the fixture closure has no SysUtils - which also proves the match
+    is by resolved routine, not by which unit declares it. }
+  UNIT_CD =
+    'unit NavCD;'#10 +                          // 1
+    'interface'#10 +                            // 2
+    'type'#10 +                                 // 3
+    '  TCd = class'#10 +                        // 4  TCd col 3
+    '    constructor Create; overload;'#10 +    // 5
+    '    constructor Create(A: Integer); overload;'#10 + // 6
+    '  end;'#10 +                               // 7
+    '  TCdSub = class(TCd)'#10 +                // 8
+    '  end;'#10 +                               // 9
+    'procedure FreeAndNil(var Obj);'#10 +       // 10
+    'procedure Work;'#10 +                      // 11
+    'implementation'#10 +                       // 12
+    'constructor TCd.Create; begin end;'#10 +   // 13
+    'constructor TCd.Create(A: Integer); begin end;'#10 + // 14
+    'procedure FreeAndNil(var Obj); begin end;'#10 + // 15
+    'procedure Work;'#10 +                      // 16
+    'var C: TCd; S: TCdSub; O: TObject;'#10 +   // 17
+    'begin'#10 +                                // 18
+    '  C := TCd.Create;'#10 +                   // 19  TCd col 8 - creation
+    '  C := TCd.Create(1);'#10 +                // 20  TCd col 8 - creation
+    '  S := TCdSub.Create;'#10 +                // 21  a TCdSub, not a TCd
+    '  O := TObject.Create;'#10 +               // 22  not a TCd
+    '  C.Free;'#10 +                            // 23  C col 3 - destruction
+    '  FreeAndNil(C);'#10 +                     // 24  C col 14 - destruction
+    '  S.Free;'#10 +                            // 25  static type TCdSub
+    '  O.Free;'#10 +                            // 26  static type TObject
+    '  C := nil;'#10 +                          // 27  not a release
+    'end;'#10 +                                 // 28
+    'end.'#10;                                  // 29
+
   // Rename fixture: line 9 uses the SAME symbol TWICE, which is the one
   // shape a per-line rename preview can get wrong - the second edit's
   // highlight has to move by the first one's length delta (see
@@ -921,6 +998,21 @@ begin
       Exit(True);
 end;
 
+// One Find Descendants row: the type, the line its declaration sits on, and
+// its depth below the root.
+function HasDescAt(const ADs: TArray<TPasDescendantHit>; const AFile: string;
+  ALine: Integer; const ATypeName: string; ADepth: Integer): Boolean;
+var
+  LIdx: Integer;
+begin
+  Result := False;
+  for LIdx := 0 to High(ADs) do
+    if SameText(TPath.GetFileName(ADs[LIdx].Hit.FilePath), AFile) and
+       (ADs[LIdx].Hit.Line = ALine) and (ADs[LIdx].Depth = ADepth) and
+       SameText(ADs[LIdx].TypeName, ATypeName) then
+      Exit(True);
+end;
+
 // One rename edit at an exact position, with the preview line and the
 // highlight span it claims for the NEW name.
 function HasEdit(const AEdits: TArray<TPasRenameEdit>; const AFile: string;
@@ -1006,6 +1098,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavIntfB.pas'), UNIT_INTFB);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOvrA.pas'), UNIT_OVRA);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOvrB.pas'), UNIT_OVRB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavAsg.pas'), UNIT_ASG);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavCD.pas'), UNIT_CD);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRen.pas'), UNIT_REN);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRenP.pas'), UNIT_RENP);
 
@@ -1885,6 +1979,171 @@ begin
       Ok('MethodAt: declines a record field',
         not GNav.MethodAt(LMidA, 5, 5, {out} LRTMid, {out} LRSym,
           {out} LRName));
+
+      // ---- Find Implementations from the INTERFACE NAME ----
+      Ok('InterfaceAt: IOvBase at its declaration',
+        GNav.InterfaceAt(LMidIA, 4, 3, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'IOvBase'));
+      Ok('InterfaceAt: declines a class type',
+        not GNav.InterfaceAt(LMidIA, 11, 3, {out} LRTMid, {out} LRSym,
+          {out} LRName));
+      Ok('InterfaceAt: declines an interface METHOD (that is InterfaceMethodAt)',
+        not GNav.InterfaceAt(LMidIA, 5, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName));
+      GNav.InterfaceAt(LMidIA, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName);
+      LImps := GNav.FindInterfaceImplementors(LRTMid, LRSym);
+      // The interface itself + TOvDirect (direct) + TOvViaChild (via IOvChild)
+      // + TOvInherits (direct, satisfies Run through an ancestor - still a
+      // class LISTING it). Not TOvAncestor (lists nothing), not TOvNoIntf.
+      Ok('FindInterfaceImplementors: IOvBase - decl + 3 classes',
+        Length(LImps) = 4);
+      Ok('FindInterfaceImplementors: the interface declaration comes first',
+        (Length(LImps) > 0) and (LImps[0].Kind = pikRoot) and
+        (LImps[0].Hit.Line = 4));
+      Ok('FindInterfaceImplementors: rows sit on the CLASS declarations',
+        HasImplAt(LImps, 'NavIntfA.pas', 11, pikImplementor, 'TOvDirect') and
+        HasImplAt(LImps, 'NavIntfB.pas', 5, pikImplementor, 'TOvViaChild') and
+        HasImplAt(LImps, 'NavIntfB.pas', 15, pikImplementor, 'TOvInherits'));
+      Ok('FindInterfaceImplementors: a class listing a DESCENDANT interface ' +
+        'says which one',
+        HasImplVia(LImps, 'NavIntfB.pas', 5, 'IOvChild') and
+        HasImplVia(LImps, 'NavIntfA.pas', 11, ''));
+      Ok('FindInterfaceImplementors: a class with the same method names but ' +
+        'no interface is never a row',
+        not HasImplAt(LImps, 'NavIntfB.pas', 19, pikImplementor, 'TOvNoIntf'));
+
+      // ---- Find Descendants (TypeAt + FindDescendants) ----
+      Ok('TypeAt: TOvBase at its declaration',
+        GNav.TypeAt(LMidOvA, 4, 3, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'TOvBase'));
+      Ok('TypeAt: declines a method',
+        not GNav.TypeAt(LMidOvA, 6, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName));
+      Ok('TypeAt: declines a record type',
+        not GNav.TypeAt(LMidA, 4, 3, {out} LRTMid, {out} LRSym,
+          {out} LRName));
+      GNav.TypeAt(LMidOvA, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName);
+      var LDs := GNav.FindDescendants(LRTMid, LRSym);
+      // TOvBase -> TOvMid, TOvSkip (depth 1) -> TOvLeaf (2) -> TOvFar (3, in
+      // NavOvrB). TOvUnrelated never.
+      Ok('FindDescendants: TOvBase - root + 4 descendants',
+        Length(LDs) = 5);
+      Ok('FindDescendants: the root comes first, depth 0',
+        (Length(LDs) > 0) and (LDs[0].Kind = pdkRoot) and (LDs[0].Depth = 0)
+        and SameText(LDs[0].TypeName, 'TOvBase'));
+      Ok('FindDescendants: direct children at depth 1',
+        HasDescAt(LDs, 'NavOvrA.pas', 10, 'TOvMid', 1) and
+        HasDescAt(LDs, 'NavOvrA.pas', 20, 'TOvSkip', 1));
+      Ok('FindDescendants: grandchild at depth 2, great-grandchild in ' +
+        'ANOTHER unit at depth 3',
+        HasDescAt(LDs, 'NavOvrA.pas', 15, 'TOvLeaf', 2) and
+        HasDescAt(LDs, 'NavOvrB.pas', 5, 'TOvFar', 3));
+      Ok('FindDescendants: ParentTypeName is the DIRECT ancestor',
+        (Length(LDs) = 5) and SameText(LDs[4].TypeName, 'TOvFar') and
+        SameText(LDs[4].ParentTypeName, 'TOvLeaf'));
+      Ok('FindDescendants: hierarchy order (depths never decrease)',
+        (Length(LDs) = 5) and (LDs[1].Depth <= LDs[2].Depth) and
+        (LDs[2].Depth <= LDs[3].Depth) and (LDs[3].Depth <= LDs[4].Depth));
+      Ok('FindDescendants: an unrelated class is never a row',
+        not HasDescAt(LDs, 'NavOvrB.pas', 9, 'TOvUnrelated', 1));
+      // From the MIDDLE: only what is below.
+      GNav.TypeAt(LMidOvA, 15, 3, {out} LRTMid, {out} LRSym, {out} LRName);
+      LDs := GNav.FindDescendants(LRTMid, LRSym);
+      Ok('FindDescendants: from TOvLeaf - root + TOvFar only',
+        (Length(LDs) = 2) and HasDescAt(LDs, 'NavOvrB.pas', 5, 'TOvFar', 1));
+      // An INTERFACE: interfaces extending it, never the classes implementing.
+      GNav.TypeAt(LMidIA, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName);
+      LDs := GNav.FindDescendants(LRTMid, LRSym);
+      Ok('FindDescendants: IOvBase - root + IOvChild, no classes',
+        (Length(LDs) = 2) and HasDescAt(LDs, 'NavIntfA.pas', 8, 'IOvChild', 1));
+
+      // ---- Find All Assignments (AssignableAt + FindAssignments) ----
+      var LMidAsg := GNav.ModelIdOf(TPath.Combine(LDir, 'NavAsg.pas'));
+      Ok('NavAsg model found', LMidAsg >= 0);
+      Ok('AssignableAt: a global var',
+        GNav.AssignableAt(LMidAsg, 13, 3, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'G'));
+      LHits := GNav.FindAssignments(LRTMid, LRSym);
+      Ok('FindAssignments: G - the two `G :=`, not the reads on lines 25-27, ' +
+        '29', (Length(LHits) = 2) and
+        HasHitAt(LHits, 'NavAsg.pas', 24, 3) and
+        HasHitAt(LHits, 'NavAsg.pas', 25, 3));
+      Ok('AssignableAt: a field, from a use',
+        GNav.AssignableAt(LMidAsg, 19, 3, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'FVal'));
+      LHits := GNav.FindAssignments(LRTMid, LRSym);
+      Ok('FindAssignments: FVal - a bare write and a member-chain write ' +
+        '(`A.FVal :=`); the property `read FVal` is not one',
+        (Length(LHits) = 2) and
+        HasHitAt(LHits, 'NavAsg.pas', 19, 3) and
+        HasHitAt(LHits, 'NavAsg.pas', 31, 5));
+      Ok('AssignableAt: a writable property',
+        GNav.AssignableAt(LMidAsg, 9, 14, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Val'));
+      LHits := GNav.FindAssignments(LRTMid, LRSym);
+      Ok('FindAssignments: Val - `A.Val :=` only, not `I := A.Val`',
+        (Length(LHits) = 1) and HasHitAt(LHits, 'NavAsg.pas', 27, 5));
+      Ok('AssignableAt: declines a READ-ONLY property',
+        not GNav.AssignableAt(LMidAsg, 10, 14, {out} LRTMid, {out} LRSym,
+          {out} LRName));
+      Ok('AssignableAt: declines a type',
+        not GNav.AssignableAt(LMidAsg, 4, 3, {out} LRTMid, {out} LRSym,
+          {out} LRName));
+      Ok('AssignableAt: declines a routine',
+        not GNav.AssignableAt(LMidAsg, 15, 11, {out} LRTMid, {out} LRSym,
+          {out} LRName));
+      Ok('AssignableAt: an array var',
+        GNav.AssignableAt(LMidAsg, 14, 3, {out} LRTMid, {out} LRSym,
+          {out} LRName));
+      LHits := GNav.FindAssignments(LRTMid, LRSym);
+      Ok('FindAssignments: Arr - both indexed writes `Arr[..] :=`',
+        (Length(LHits) = 2) and
+        HasHitAt(LHits, 'NavAsg.pas', 26, 3) and
+        HasHitAt(LHits, 'NavAsg.pas', 30, 5));
+      Ok('AssignableAt: a local var',
+        GNav.AssignableAt(LMidAsg, 22, 5, {out} LRTMid, {out} LRSym,
+          {out} LRName));
+      LHits := GNav.FindAssignments(LRTMid, LRSym);
+      Ok('FindAssignments: I - `I :=` and the `for I :=` counter; the index ' +
+        'and the right side on line 30 are reads',
+        (Length(LHits) = 2) and
+        HasHitAt(LHits, 'NavAsg.pas', 28, 3) and
+        HasHitAt(LHits, 'NavAsg.pas', 29, 7));
+
+      // ---- Find Creations / Find Destructions (ClassAt + Find*) ----
+      var LMidCD := GNav.ModelIdOf(TPath.Combine(LDir, 'NavCD.pas'));
+      Ok('NavCD model found', LMidCD >= 0);
+      Ok('ClassAt: TCd at its declaration',
+        GNav.ClassAt(LMidCD, 4, 3, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'TCd'));
+      Ok('ClassAt: declines an interface (TypeAt accepts it)',
+        not GNav.ClassAt(LMidIA, 4, 3, {out} LRTMid, {out} LRSym,
+          {out} LRName) and
+        GNav.TypeAt(LMidIA, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName));
+      Ok('ClassAt: declines a variable',
+        not GNav.ClassAt(LMidCD, 17, 5, {out} LRTMid, {out} LRSym,
+          {out} LRName));
+      GNav.ClassAt(LMidCD, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName);
+      LHits := GNav.FindCreations(LRTMid, LRSym);
+      Ok('FindCreations: TCd - both constructor overloads, not the ' +
+        'descendant''s or TObject''s',
+        (Length(LHits) = 2) and
+        HasHitAt(LHits, 'NavCD.pas', 19, 8) and
+        HasHitAt(LHits, 'NavCD.pas', 20, 8));
+      LHits := GNav.FindDestructions(LRTMid, LRSym);
+      Ok('FindDestructions: TCd - `C.Free` and `FreeAndNil(C)`; S and O ' +
+        'have other static types, `C := nil` is not a release',
+        (Length(LHits) = 2) and
+        HasHitAt(LHits, 'NavCD.pas', 23, 3) and
+        HasHitAt(LHits, 'NavCD.pas', 24, 14));
+      // The descendant: its own creation, its own Free.
+      GNav.ClassAt(LMidCD, 8, 3, {out} LRTMid, {out} LRSym, {out} LRName);
+      LHits := GNav.FindCreations(LRTMid, LRSym);
+      Ok('FindCreations: TCdSub - one, through the INHERITED constructor',
+        (Length(LHits) = 1) and HasHitAt(LHits, 'NavCD.pas', 21, 8));
+      LHits := GNav.FindDestructions(LRTMid, LRSym);
+      Ok('FindDestructions: TCdSub - `S.Free` only',
+        (Length(LHits) = 1) and HasHitAt(LHits, 'NavCD.pas', 25, 3));
     finally
       GNav.Free;
     end;

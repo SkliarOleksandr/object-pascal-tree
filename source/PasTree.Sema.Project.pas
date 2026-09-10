@@ -722,7 +722,6 @@ type
       const ANameLower: string; out AMemMid, AMemSym: Integer): Boolean;
     // Cross-model overload selection (CrossType's call typing):
     function XCatOf(const AX: TSemaXType): TSemaTypeCat;
-    function CanonTypeX(const AX: TSemaXType): TSemaXType;
     function XSameType(const A, B: TSemaXType): Boolean;
     function XAssignableX(const ADst, ASrc: TSemaXType): Boolean;
     function InferMethodFrame(AMid, ASym: Integer;
@@ -886,6 +885,9 @@ type
     { The single answer to "what type is this member?" - see the implementation
       for why a bare property redeclaration makes it necessary. }
     function SymDeclTypeX(AMid, ASym: Integer): TSemaXType;
+    // AX with plain alias links followed to the defining declaration (public
+    // for the navigator's static-type comparisons; see the implementation).
+    function CanonTypeX(const AX: TSemaXType): TSemaXType;
     { The property REDECLARATION chain (`property Items;` republishing an
       inherited property), for the navigator. PropertyInAncestorsX is the
       link - see its implementation comment for the dcc-probed rules;
