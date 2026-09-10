@@ -335,6 +335,7 @@ type
       const AKinds: TPasOvStructKinds): Integer;
     function OvClassDefNode(AMid, AStructSym: Integer): Integer;
     function OvInterfaceDefNode(AMid, AStructSym: Integer): Integer;
+    procedure OvUnalias(var AMid, ASym: Integer);
     function OvMethodsNamed(AMid, AStructSym: Integer;
       const ANameLower: string): TArray<Integer>;
     function OvRefOfHeritageItem(AMid, AItemNode: Integer;
@@ -529,11 +530,11 @@ type
       at all: the alternative, asking XDescendsFrom of every class in the
       closure, re-walks every ancestor chain in the project.
 
-      What it does not reach: a class whose ancestor is written through a
-      type ALIAS (`TBase2 = TBase;` then `class(TBase2)`) - the index keys on
-      the symbol the heritage name bound to, which is the alias, and the
-      chain stops there. Rare enough to document rather than pay for on
-      every edge; XDescendsFrom follows aliases if a future caller needs it.
+      An ancestor written through a type ALIAS (`TBase2 = TBase;` then
+      `class(TBase2)`) is reached: the index keys on the TYPE the alias
+      names, not on the alias symbol the heritage name bound to (OvUnalias;
+      0.25.2 - VirtualTrees declares every tree over `TVTBaseAncestor =
+      TVTBaseAncestorVcl`, and the chain used to stop at the alias).
 
       Cost warning for hosts: the chain of a method as universal as
       `Destroy` legitimately covers every class in the closure, and each
@@ -582,8 +583,8 @@ type
       method RESOLUTION clause (`procedure IBar.Baz = MyBaz;` - the
       implementor is a differently NAMED method), a delegated implementation
       (`property Impl: IBar read FImpl implements IBar` - the implementor is
-      whatever object the property returns, a value question), and an
-      ancestor named through a type alias (the index's own limit - see
+      whatever object the property returns, a value question). An ancestor
+      or interface named through a type alias IS reached (OvUnalias, see
       FindOverrides). }
     function FindImplementations(ATMid, ASym: Integer): TArray<TPasImplHit>;
     { Find Implementations from the INTERFACE ITSELF rather than one of its
@@ -607,13 +608,14 @@ type
       binding, and listing every descendant of every implementor is Find
       Descendants' answer, not this one. Nor is a class listing a DESCENDANT
       interface - FindImplementations says why (0.25.0). A delegated
-      implementation (`implements`) and an alias-named interface are not
-      reached - the same limits FindImplementations has. }
+      implementation (`implements`) is not reached - FindImplementations has
+      the same limit; an alias-named interface is (OvUnalias). }
     function FindInterfaceImplementors(ATMid, ASym: Integer): TArray<TPasImplHit>;
     { Find Descendants, part one: the cursor is on a CLASS, `object` or
       INTERFACE type name (its declaration, or any use of it). ATMid/ASym
-      come back as that type symbol. False for a record, a helper, an alias,
-      a non-type. The Enabled test for the command. }
+      come back as that type symbol - the TYPE, when the caret is on an alias
+      of it (OvUnalias). False for a record, a helper, a non-type. The
+      Enabled test for the command. }
     function TypeAt(AMid, ALine, ACol: Integer;
       out ATMid, ASym: Integer; out AName: string): Boolean;
     { Find Descendants, part two: every type whose heritage chain reaches
@@ -623,8 +625,8 @@ type
       hierarchy order (all depth-1 children, then depth-2, ...). See
       TPasDescendantKind for what a row is and the one axis it keeps to.
 
-      Not reached: a descendant whose heritage name is a type ALIAS of this
-      type - the index's own limit (see FindOverrides). Cost note for hosts:
+      A descendant whose heritage name is a type ALIAS of this type is a row
+      too (OvUnalias, see FindOverrides). Cost note for hosts:
       `TObject`'s descendants are every class in the closure, each row's model
       rehydrated to position the hit - gate on TypeAt, not on "an identifier". }
     function FindDescendants(ATMid, ASym: Integer): TArray<TPasDescendantHit>;
@@ -2209,6 +2211,29 @@ begin
   Result := OvStructDefNode(AMid, AStructSym, [nkInterfaceType]);
 end;
 
+{ A type ALIAS stands for the type it names: `TVTBaseAncestor =
+  TVTBaseAncestorVcl;` then `class abstract(TVTBaseAncestor)` (VirtualTrees)
+  makes the alias the symbol every heritage name binds to and the symbol
+  SymbolAt answers at the caret, while the member scope - and so
+  OvStructDefNode - belongs to the class. Followed here to the chain's end
+  (CanonTypeX: `type TX = type TBase` is a distinct type and stays itself), so
+  the gate and the Find All commands see the class wherever the alias is
+  written. Anything that is not a type alias is left as it came. }
+procedure TPasNavigator.OvUnalias(var AMid, ASym: Integer);
+var
+  LX: TSemaXType;
+begin
+  if (AMid < 0) or (AMid >= FProj.ModelCount) or (ASym = NIL_SYM) or
+     (ASym < 0) or (ASym >= FProj.Model(AMid).SymCount) then
+    Exit;
+  LX := FProj.CanonTypeX(XPlain(AMid, ASym));
+  if XValid(LX) and (LX.Inst = NIL_INST) then
+  begin
+    AMid := LX.UnitId;
+    ASym := LX.Sym;
+  end;
+end;
+
 // Every method DECLARED by this class itself under ANameLower - overloads
 // included, which is why this is an array: each carries its own directives,
 // and `override` on one sibling says nothing about the others.
@@ -2281,14 +2306,18 @@ begin
   begin
     ABMid := AMid;
     ABSym := LM.RefMap[LName];
-    Exit(True);
-  end;
-  if LM.ExtRefMap.TryGetValue(LName, LExt) then
+  end
+  else if LM.ExtRefMap.TryGetValue(LName, LExt) then
   begin
     ABMid := LExt.UnitId;
     ABSym := LExt.Sym;
-    Exit(True);
-  end;
+  end
+  else
+    Exit;
+  // The edge keys on the TYPE, not on the alias the heritage list may spell
+  // it through - so the index reaches `class(TBaseAlias)` from TBase.
+  OvUnalias(ABMid, ABSym);
+  Result := True;
 end;
 
 { The reverse of the heritage link, over the WHOLE project: named type ->
@@ -2783,8 +2812,12 @@ end;
 function TPasNavigator.InterfaceAt(AMid, ALine, ACol: Integer;
   out ATMid, ASym: Integer; out AName: string): Boolean;
 begin
-  Result := SymbolAt(AMid, ALine, ACol, ATMid, ASym, AName) and
-    (OvInterfaceDefNode(ATMid, ASym) <> NIL_NODE);
+  Result := SymbolAt(AMid, ALine, ACol, ATMid, ASym, AName);
+  if Result then
+  begin
+    OvUnalias(ATMid, ASym);
+    Result := OvInterfaceDefNode(ATMid, ASym) <> NIL_NODE;
+  end;
 end;
 
 function TPasNavigator.FindInterfaceImplementors(ATMid, ASym: Integer):
@@ -2866,9 +2899,13 @@ end;
 function TPasNavigator.TypeAt(AMid, ALine, ACol: Integer;
   out ATMid, ASym: Integer; out AName: string): Boolean;
 begin
-  Result := SymbolAt(AMid, ALine, ACol, ATMid, ASym, AName) and
-    (OvStructDefNode(ATMid, ASym,
-      [nkClassType, nkObjectType, nkInterfaceType]) <> NIL_NODE);
+  Result := SymbolAt(AMid, ALine, ACol, ATMid, ASym, AName);
+  if Result then
+  begin
+    OvUnalias(ATMid, ASym);
+    Result := OvStructDefNode(ATMid, ASym,
+      [nkClassType, nkObjectType, nkInterfaceType]) <> NIL_NODE;
+  end;
 end;
 
 function TPasNavigator.FindDescendants(ATMid, ASym: Integer):
@@ -3071,8 +3108,12 @@ end;
 function TPasNavigator.ClassAt(AMid, ALine, ACol: Integer;
   out ATMid, ASym: Integer; out AName: string): Boolean;
 begin
-  Result := SymbolAt(AMid, ALine, ACol, ATMid, ASym, AName) and
-    (OvClassDefNode(ATMid, ASym) <> NIL_NODE);
+  Result := SymbolAt(AMid, ALine, ACol, ATMid, ASym, AName);
+  if Result then
+  begin
+    OvUnalias(ATMid, ASym);
+    Result := OvClassDefNode(ATMid, ASym) <> NIL_NODE;
+  end;
 end;
 
 function TPasNavigator.FindCreations(ATMid, ASym: Integer): TArray<TPasRefHit>;
@@ -3105,6 +3146,20 @@ var
       not FProj.IsClassCtorDtorSym(LUid, LSym);
   end;
 
+  // Is the symbol (ABMid, ABSym) a node is bound to the class - itself, or a
+  // type ALIAS of it (`TCdAlias.Create` binds the qualifier to the alias)?
+  // The alias hop is paid only for a type symbol that is not the class, so
+  // the scan over every reference in the closure stays a pair of compares.
+  function BoundToClass(ABMid, ABSym: Integer): Boolean;
+  begin
+    Result := (ABMid = ATMid) and (ABSym = ASym);
+    if Result or (ABSym = NIL_SYM) or
+       (FProj.Model(ABMid).Symbols[ABSym].Kind <> skType) then
+      Exit;
+    OvUnalias(ABMid, ABSym);
+    Result := (ABMid = ATMid) and (ABSym = ASym);
+  end;
+
 begin
   Result := nil;
   if OvClassDefNode(ATMid, ASym) = NIL_NODE then
@@ -3115,15 +3170,17 @@ begin
     begin
       LM := FProj.Model(LMi);
       // Same scan shape as CollectReferencesOf: every node bound to the
-      // class, RefMap in the declaring model, ExtRefMap everywhere; hydration
-      // only for a model that holds a row.
-      if LMi = ATMid then
-        for LNode := 0 to High(LM.RefMap) do
-          if (LM.RefMap[LNode] = ASym) and IsCtorQualifier(LNode) and
-             FProj.EnsureHydrated(LMi) and HitFromNode(LM, LNode, LHit) then
-            LHits.Add(LHit);
+      // class - or to a type alias of it, which is why every model's RefMap
+      // is read and not only the declaring one's (the alias may be declared
+      // anywhere) - ExtRefMap everywhere; hydration only for a model that
+      // holds a row.
+      for LNode := 0 to High(LM.RefMap) do
+        if (LM.RefMap[LNode] <> NIL_SYM) and
+           BoundToClass(LMi, LM.RefMap[LNode]) and IsCtorQualifier(LNode) and
+           FProj.EnsureHydrated(LMi) and HitFromNode(LM, LNode, LHit) then
+          LHits.Add(LHit);
       for LPair in LM.ExtRefMap do
-        if (LPair.Value.UnitId = ATMid) and (LPair.Value.Sym = ASym) and
+        if BoundToClass(LPair.Value.UnitId, LPair.Value.Sym) and
            IsCtorQualifier(LPair.Key) and FProj.EnsureHydrated(LMi) and
            HitFromNode(LM, LPair.Key, LHit) then
           LHits.Add(LHit);

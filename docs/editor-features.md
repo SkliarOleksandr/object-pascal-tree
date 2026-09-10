@@ -320,7 +320,7 @@ What each declaration shape does:
 | 8 | A method of a record, an interface, or a plain routine | `MethodAt` declines - the command is not offered | OK (by design) |
 | 9 | An INTERFACE method's implementors (`TFoo = class(TObject, IBar)`) | - | not this search - a separate command, see §5 |
 | 9a | The CLASSES below this method's class (no method question at all) | - | not this search either - Find Descendants, §6 |
-| 10 | A class whose ancestor is written through a type ALIAS (`TB2 = TB;` then `class(TB2)`) | - | GAP - the index keys on the symbol the heritage name bound to, which is the alias |
+| 10 | A class whose ancestor is written through a type ALIAS (`TB2 = TB;` then `class(TB2)`) | the same chain as through `TB` itself | OK (0.25.2 - the index keys on the type the alias names, `OvUnalias`; VirtualTrees declares every tree over `TVTBaseAncestor = TVTBaseAncestorVcl`) |
 | 11 | An event handler wired only through a `.dfm` (`OnClick`) | - | not an override at all: it is an assignment to a property, reached by Find References |
 | 12 | A class PROPERTY (`MethodAt` accepts it since 0.21.0) | its redeclaration chain: the declaration that writes the type is `pokRoot`, every bare `property Items;` below it `pokRedeclared`, hierarchy order; a redeclaration WITH a type is a new property - no row, and its branch is closed. A lone root is the honest "declared nowhere else" | OK (0.21.0) |
 
@@ -392,7 +392,7 @@ the ancestor as the implementor, and listing every descendant of every
 implementor is §6's answer. Nor a class listing a DESCENDANT interface (row 3
 above, 0.25.0; up to 0.24.x it was a row with `ViaTypeName` naming the
 interface it wrote). GAPs shared with the method search: `implements`
-delegation, an alias-named interface.
+delegation. An alias-named interface is reached since 0.25.2 (`OvUnalias`).
 
 ### 5.2 "Does it only search the current file?" - no, and how to tell
 
@@ -438,8 +438,9 @@ the direct ancestor each row was reached through.
 | 2 | An interface declaration or its name | the interfaces transitively extending it (`IChild = interface(IBase)`) | OK |
 | 3 | The classes IMPLEMENTING a found interface | no row, by design - one axis per command: that is §5.1's answer, and a list mixing class rows and interface rows would have to explain itself | OK (by design) |
 | 4 | A type nothing descends from | its single `pdkRoot` row - the honest "no descendants" | OK |
-| 5 | A record, a helper, an alias, a non-type | `TypeAt` declines - the command is not offered | OK (by design) |
-| 6 | A descendant naming its ancestor through a type ALIAS | - | GAP - the index's own limit, see §4 row 10 |
+| 5 | A record, a helper, a non-type | `TypeAt` declines - the command is not offered | OK (by design) |
+| 5a | A type ALIAS of a class or interface (`TVTBaseAncestor = TVTBaseAncestorVcl;`), at its declaration or where it is written | `TypeAt` answers the TYPE the alias names | OK (0.25.2, `OvUnalias`) |
+| 6 | A descendant naming its ancestor through a type ALIAS | a row like any other | OK (0.25.2, see §4 row 10) |
 
 Cost note for hosts: `TObject`'s descendants are every class in the closure,
 each row's model rehydrated to position the hit - gate on `TypeAt`, not on
@@ -500,6 +501,7 @@ text says - the table's "not a row" lines are runtime facts.
 |---|-------|-----|--------|
 | 1 | `TFoo.Create(...)` - qualifier bound to the class, member bound to a constructor (the class's own OR an inherited one: `TFoo.Create` with Create declared on TObject still makes a TFoo) | Creations row, positioned on the class name in the call; one per call, overloads included | OK |
 | 2 | `TFoo<T>.Create` (qualifier wrapped in type arguments) | Creations row | OK |
+| 2a | `TFooAlias.Create` where `TFooAlias = TFoo;` (VirtualTrees spells its base through such an alias) | Creations row on the alias name in the call | OK (0.25.2, `OvUnalias`) |
 | 3 | `TBar.Create` for a descendant TBar | no row - that is a TBar; §6 says which those are | OK (by design) |
 | 4 | `inherited Create` inside a descendant's constructor | no row - it constructs the object already being built | OK (by design) |
 | 5 | A class method or plain routine NAMED Create | no row - the member binding is not a constructor | OK |

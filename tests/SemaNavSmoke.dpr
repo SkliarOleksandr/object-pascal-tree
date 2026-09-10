@@ -119,10 +119,14 @@ const
     '  public'#10 +                                  // 10
     '    procedure Paint; virtual;'#10 +             // 11
     '  end;'#10 +                                    // 12
-    'implementation'#10 +                            // 13
-    'procedure TOvFar.Paint; begin end;'#10 +        // 14
-    'procedure TOvUnrelated.Paint; begin end;'#10 +  // 15
-    'end.'#10;                                       // 16
+    '  TOvLeafAlias = TOvLeaf;'#10 +                // 13  alias col 3
+    '  TOvViaAlias = class(TOvLeafAlias)'#10 +      // 14  TOvLeafAlias col 23
+    '  end;'#10 +                                    // 15
+    'implementation'#10 +                            // 16
+    'procedure TOvFar.Paint; begin end;'#10 +        // 17
+    'procedure TOvUnrelated.Paint; begin end;'#10 +  // 18
+    'end.'#10;                                       // 19
+
 
   { Find Implementations fixtures. NavIntfA declares the interface and one
     direct implementor; NavIntfB lists it from ANOTHER unit, holds a class
@@ -239,26 +243,28 @@ const
     '  end;'#10 +                               // 7
     '  TCdSub = class(TCd)'#10 +                // 8
     '  end;'#10 +                               // 9
-    'procedure FreeAndNil(var Obj);'#10 +       // 10
-    'procedure Work;'#10 +                      // 11
-    'implementation'#10 +                       // 12
-    'constructor TCd.Create; begin end;'#10 +   // 13
-    'constructor TCd.Create(A: Integer); begin end;'#10 + // 14
-    'procedure FreeAndNil(var Obj); begin end;'#10 + // 15
-    'procedure Work;'#10 +                      // 16
-    'var C: TCd; S: TCdSub; O: TObject;'#10 +   // 17
-    'begin'#10 +                                // 18
-    '  C := TCd.Create;'#10 +                   // 19  TCd col 8 - creation
-    '  C := TCd.Create(1);'#10 +                // 20  TCd col 8 - creation
-    '  S := TCdSub.Create;'#10 +                // 21  a TCdSub, not a TCd
-    '  O := TObject.Create;'#10 +               // 22  not a TCd
-    '  C.Free;'#10 +                            // 23  C col 3 - destruction
-    '  FreeAndNil(C);'#10 +                     // 24  C col 14 - destruction
-    '  S.Free;'#10 +                            // 25  static type TCdSub
-    '  O.Free;'#10 +                            // 26  static type TObject
-    '  C := nil;'#10 +                          // 27  not a release
-    'end;'#10 +                                 // 28
-    'end.'#10;                                  // 29
+    '  TCdAlias = TCd;'#10 +                    // 10  a type alias of TCd
+    'procedure FreeAndNil(var Obj);'#10 +       // 11
+    'procedure Work;'#10 +                      // 12
+    'implementation'#10 +                       // 13
+    'constructor TCd.Create; begin end;'#10 +   // 14
+    'constructor TCd.Create(A: Integer); begin end;'#10 + // 15
+    'procedure FreeAndNil(var Obj); begin end;'#10 + // 16
+    'procedure Work;'#10 +                      // 17
+    'var C: TCd; S: TCdSub; O: TObject;'#10 +   // 18
+    'begin'#10 +                                // 19
+    '  C := TCd.Create;'#10 +                   // 20  TCd col 8 - creation
+    '  C := TCd.Create(1);'#10 +                // 21  TCd col 8 - creation
+    '  S := TCdSub.Create;'#10 +                // 22  a TCdSub, not a TCd
+    '  O := TObject.Create;'#10 +               // 23  not a TCd
+    '  C := TCdAlias.Create;'#10 +              // 24  TCdAlias col 8 - a TCd through the alias
+    '  C.Free;'#10 +                            // 25  C col 3 - destruction
+    '  FreeAndNil(C);'#10 +                     // 26  C col 14 - destruction
+    '  S.Free;'#10 +                            // 27  static type TCdSub
+    '  O.Free;'#10 +                            // 28  static type TObject
+    '  C := nil;'#10 +                          // 29  not a release
+    'end;'#10 +                                 // 30
+    'end.'#10;                                  // 31
 
   // Rename fixture: line 9 uses the SAME symbol TWICE, which is the one
   // shape a per-line rename preview can get wrong - the second edit's
@@ -2051,10 +2057,11 @@ begin
           {out} LRName));
       GNav.TypeAt(LMidOvA, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName);
       var LDs := GNav.FindDescendants(LRTMid, LRSym);
-      // TOvBase -> TOvMid, TOvSkip (depth 1) -> TOvLeaf (2) -> TOvFar (3, in
-      // NavOvrB). TOvUnrelated never.
-      Ok('FindDescendants: TOvBase - root + 4 descendants',
-        Length(LDs) = 5);
+      // TOvBase -> TOvMid, TOvSkip (depth 1) -> TOvLeaf (2) -> TOvFar and
+      // TOvViaAlias (3, in NavOvrB - the latter through the alias
+      // TOvLeafAlias). TOvUnrelated never.
+      Ok('FindDescendants: TOvBase - root + 5 descendants',
+        Length(LDs) = 6);
       Ok('FindDescendants: the root comes first, depth 0',
         (Length(LDs) > 0) and (LDs[0].Kind = pdkRoot) and (LDs[0].Depth = 0)
         and SameText(LDs[0].TypeName, 'TOvBase'));
@@ -2066,18 +2073,46 @@ begin
         HasDescAt(LDs, 'NavOvrA.pas', 15, 'TOvLeaf', 2) and
         HasDescAt(LDs, 'NavOvrB.pas', 5, 'TOvFar', 3));
       Ok('FindDescendants: ParentTypeName is the DIRECT ancestor',
-        (Length(LDs) = 5) and SameText(LDs[4].TypeName, 'TOvFar') and
+        (Length(LDs) = 6) and SameText(LDs[4].TypeName, 'TOvFar') and
         SameText(LDs[4].ParentTypeName, 'TOvLeaf'));
       Ok('FindDescendants: hierarchy order (depths never decrease)',
-        (Length(LDs) = 5) and (LDs[1].Depth <= LDs[2].Depth) and
-        (LDs[2].Depth <= LDs[3].Depth) and (LDs[3].Depth <= LDs[4].Depth));
+        (Length(LDs) = 6) and (LDs[1].Depth <= LDs[2].Depth) and
+        (LDs[2].Depth <= LDs[3].Depth) and (LDs[3].Depth <= LDs[4].Depth) and
+        (LDs[4].Depth <= LDs[5].Depth));
       Ok('FindDescendants: an unrelated class is never a row',
         not HasDescAt(LDs, 'NavOvrB.pas', 9, 'TOvUnrelated', 1));
+      // A descendant naming its ancestor through a type ALIAS (0.25.2): a
+      // row, at depth 3 like TOvFar, with the TYPE - not the alias - as its
+      // parent (the alias is not a row of its own).
+      Ok('FindDescendants: through a type alias - a row with the TYPE as parent',
+        HasDescAt(LDs, 'NavOvrB.pas', 14, 'TOvViaAlias', 3) and
+        (Length(LDs) = 6) and SameText(LDs[5].ParentTypeName, 'TOvLeaf'));
       // From the MIDDLE: only what is below.
       GNav.TypeAt(LMidOvA, 15, 3, {out} LRTMid, {out} LRSym, {out} LRName);
       LDs := GNav.FindDescendants(LRTMid, LRSym);
-      Ok('FindDescendants: from TOvLeaf - root + TOvFar only',
-        (Length(LDs) = 2) and HasDescAt(LDs, 'NavOvrB.pas', 5, 'TOvFar', 1));
+      Ok('FindDescendants: from TOvLeaf - root + TOvFar + TOvViaAlias',
+        (Length(LDs) = 3) and HasDescAt(LDs, 'NavOvrB.pas', 5, 'TOvFar', 1) and
+        HasDescAt(LDs, 'NavOvrB.pas', 14, 'TOvViaAlias', 1));
+      // The caret ON the alias - its declaration, or where a heritage list
+      // spells it - answers the type it names, so the gate opens and the
+      // command answers the same rows (the VirtualTrees shape:
+      // `TVTBaseAncestor = TVTBaseAncestorVcl;` then
+      // `class abstract(TVTBaseAncestor)`).
+      var LMidOvB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavOvrB.pas'));
+      var LAMid, LASym: Integer;
+      Ok('TypeAt: a type alias, at its declaration, is the class it names',
+        GNav.TypeAt(LMidOvB, 13, 3, {out} LAMid, {out} LASym, {out} LRName) and
+        (LAMid = LRTMid) and (LASym = LRSym) and
+        SameText(LRName, 'TOvLeafAlias'));
+      Ok('TypeAt: the alias written in a heritage list, the same',
+        GNav.TypeAt(LMidOvB, 14, 23, {out} LAMid, {out} LASym, {out} LRName) and
+        (LAMid = LRTMid) and (LASym = LRSym));
+      Ok('ClassAt: the alias in the heritage list is a class',
+        GNav.ClassAt(LMidOvB, 14, 23, {out} LAMid, {out} LASym, {out} LRName) and
+        (LAMid = LRTMid) and (LASym = LRSym));
+      LDs := GNav.FindDescendants(LAMid, LASym);
+      Ok('FindDescendants: from the alias - the same three rows',
+        (Length(LDs) = 3) and SameText(LDs[0].TypeName, 'TOvLeaf'));
       // An INTERFACE: interfaces extending it, never the classes implementing.
       GNav.TypeAt(LMidIA, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName);
       LDs := GNav.FindDescendants(LRTMid, LRSym);
@@ -2148,29 +2183,30 @@ begin
           {out} LRName) and
         GNav.TypeAt(LMidIA, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName));
       Ok('ClassAt: declines a variable',
-        not GNav.ClassAt(LMidCD, 17, 5, {out} LRTMid, {out} LRSym,
+        not GNav.ClassAt(LMidCD, 18, 5, {out} LRTMid, {out} LRSym,
           {out} LRName));
       GNav.ClassAt(LMidCD, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName);
       LHits := GNav.FindCreations(LRTMid, LRSym);
-      Ok('FindCreations: TCd - both constructor overloads, not the ' +
-        'descendant''s or TObject''s',
-        (Length(LHits) = 2) and
-        HasHitAt(LHits, 'NavCD.pas', 19, 8) and
-        HasHitAt(LHits, 'NavCD.pas', 20, 8));
+      Ok('FindCreations: TCd - both constructor overloads and the one ' +
+        'through the type ALIAS (0.25.2), not the descendant''s or TObject''s',
+        (Length(LHits) = 3) and
+        HasHitAt(LHits, 'NavCD.pas', 20, 8) and
+        HasHitAt(LHits, 'NavCD.pas', 21, 8) and
+        HasHitAt(LHits, 'NavCD.pas', 24, 8));
       LHits := GNav.FindDestructions(LRTMid, LRSym);
       Ok('FindDestructions: TCd - `C.Free` and `FreeAndNil(C)`; S and O ' +
         'have other static types, `C := nil` is not a release',
         (Length(LHits) = 2) and
-        HasHitAt(LHits, 'NavCD.pas', 23, 3) and
-        HasHitAt(LHits, 'NavCD.pas', 24, 14));
+        HasHitAt(LHits, 'NavCD.pas', 25, 3) and
+        HasHitAt(LHits, 'NavCD.pas', 26, 14));
       // The descendant: its own creation, its own Free.
       GNav.ClassAt(LMidCD, 8, 3, {out} LRTMid, {out} LRSym, {out} LRName);
       LHits := GNav.FindCreations(LRTMid, LRSym);
       Ok('FindCreations: TCdSub - one, through the INHERITED constructor',
-        (Length(LHits) = 1) and HasHitAt(LHits, 'NavCD.pas', 21, 8));
+        (Length(LHits) = 1) and HasHitAt(LHits, 'NavCD.pas', 22, 8));
       LHits := GNav.FindDestructions(LRTMid, LRSym);
       Ok('FindDestructions: TCdSub - `S.Free` only',
-        (Length(LHits) = 1) and HasHitAt(LHits, 'NavCD.pas', 25, 3));
+        (Length(LHits) = 1) and HasHitAt(LHits, 'NavCD.pas', 27, 3));
     finally
       GNav.Free;
     end;
