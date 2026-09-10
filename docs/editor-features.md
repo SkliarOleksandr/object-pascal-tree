@@ -261,14 +261,14 @@ rest in the order this document describes them:
 - `Find All > Creations` (§8 - `ClassAt`)
 - `Find All > Destructions` (§8 - `ClassAt`)
 
-`Implementations` and `Descendants` carry a MODIFIER, spelled in the caption
-(`Descendants (Ctrl - incl. indirect)`): fired plainly they give the DIRECT answer -
-the classes that name the type themselves, the depth-1 children - and fired
-with Ctrl held they give the full transitive one. The engine side is the
-`AIncludeIndirect` parameter on `FindImplementations`, `FindInterfaceImplementors` and
-`FindDescendants` (default True, the full answer); the demo reads
-`GetKeyState(VK_CONTROL)` at Execute time and the page caption says which
-was asked (`Direct Descendants of ...` / `All Descendants of ...`).
+`Implementations` and `Descendants` have no modifier and one answer each:
+Descendants the whole transitive tree, Implementations the classes that
+spell THIS interface's name (§5, §6). 0.24.0-0.24.1 put a Ctrl modifier on
+both (`AIncludeIndirect`, "direct" plainly and "transitive" with Ctrl held);
+0.25.0 took it out, because the direct Descendants answer was a flat list in
+a page built to show a tree, and the transitive Implementations answer on a
+base interface had no shape a list could show - the two questions it folded
+together are Descendants on the interface and Implementations on the child.
 
 Each entry keeps its own gating rule - the regrouping is presentation only. A
 gated-out entry stays visible but disabled (the IDE greys out inapplicable
@@ -352,17 +352,14 @@ meant on a class that does both.
 The hard part is that there is no keyword to key on. An interface method is
 implicitly virtual and an implementing class writes NO directive at all - dcc
 pairs the two by name and signature. So the tie this searches is the class's
-own heritage list, over the same reverse-heritage index §4 builds:
-
-1. the interface's own DESCENDANT interfaces (`IChild = interface(IBase)`),
-   transitively - a class implementing IChild implements IBase's methods too;
-2. every class/`object` LISTING one of those interfaces.
+own heritage list, over the same reverse-heritage index §4 builds: every
+class/`object` LISTING this interface, one hop.
 
 | # | Declaration | Row | Status |
 |---|-------------|-----|--------|
 | 1 | The interface method itself | `pikRoot`, first; one row per overload the interface declares under that name | OK |
 | 2 | A method of a class that lists the interface | `pikImplementor` | OK |
-| 3 | A method of a class that lists a DESCENDANT interface (`class(TObject, IChild)`) | `pikImplementor` | OK |
+| 3 | A method of a class that lists a DESCENDANT interface (`class(TObject, IChild)` for a search on IBase) | no row | OK (by design, 0.25.0) - dcc does carry IBase's methods into IChild's implementors, but the interfaces below IBase are §6's axis and IChild's implementors are this search asked on IChild. 0.20.0-0.24.x walked the descendant interfaces too (0.24.0 behind a Ctrl modifier), and on a base interface with a hundred extending interfaces the answer had no shape a list could show |
 | 4 | The class lists the interface but declares no such method - an ANCESTOR's method satisfies it | `pikInherited`, positioned on the ancestor's declaration (the code that runs) with `ViaTypeName` naming the class that took the interface on | OK |
 | 5 | The same inherited declaration reached through many classes (fifty classes over one `TInterfacedObject._AddRef`) | ONE row, first reach wins - fifty rows on one line is not an answer | OK (by design) |
 | 6 | A same-named method on a class that implements nothing | no row | OK |
@@ -370,7 +367,6 @@ own heritage list, over the same reverse-heritage index §4 builds:
 | 8 | A delegated implementation (`property Impl: IBar read FImpl implements IBar`) | - | GAP - the implementor is whatever object the property returns, a value question rather than a declaration one |
 | 9 | Signature-precise pairing of an OVERLOADED interface method | - | GAP (by design) - every same-named candidate is a row, the same choice §4 makes for a chain |
 | 10 | An ancestor or interface named through a type ALIAS | - | GAP - the index's own limit, see §4 |
-| 11 | `AIncludeIndirect = False` (the demo's plain click, §3.10) | rows 1-2 only: the interface's own declaration and the methods of classes that list THIS interface; no descendant-interface hop, no inherited climb | OK (0.24.0) |
 
 Measured on the VCL closure of a `uses Vcl.Forms, Vcl.ComCtrls, Vcl.Grids`
 program (103 models): `IInterface.QueryInterface` = 9 rows across 3 files in
@@ -386,20 +382,16 @@ accordingly.
 `FindImplementations` answers "who implements this METHOD". With the caret on
 the interface TYPE itself the coarser question is "which CLASSES implement
 it" - one row per class, positioned on the class's own declaration name, the
-same two hops stopped one level earlier (the interface's descendant
-interfaces, then every class listing any of them; a class listing both IBase
-and IChild is one row). Rows reuse `TPasImplHit`: `pikRoot` for the
-interface's declaration, `pikImplementor` per class, with `ViaTypeName`
-naming the DESCENDANT interface the class actually wrote when that is not
-the one asked about (`class(TObject, IChild)` for a search on IBase).
-
-`AIncludeIndirect = False` (0.24.0) drops the descendant-interface hop: only the
-classes that spell THIS interface's name are rows.
+same one hop stopped before the method: every class listing THIS interface.
+Rows reuse `TPasImplHit`: `pikRoot` for the interface's declaration,
+`pikImplementor` per class; `ViaTypeName` is `''` on every row here.
 
 Not a row, by design: a class that gets the interface from its ANCESTOR
 (`TBase = class(TObject, IBar)` then `TLeaf = class(TBase)`) - dcc treats
 the ancestor as the implementor, and listing every descendant of every
-implementor is §6's answer. GAPs shared with the method search: `implements`
+implementor is §6's answer. Nor a class listing a DESCENDANT interface (row 3
+above, 0.25.0; up to 0.24.x it was a row with `ViaTypeName` naming the
+interface it wrote). GAPs shared with the method search: `implements`
 delegation, an alias-named interface.
 
 ### 5.2 "Does it only search the current file?" - no, and how to tell
@@ -448,7 +440,6 @@ the direct ancestor each row was reached through.
 | 4 | A type nothing descends from | its single `pdkRoot` row - the honest "no descendants" | OK |
 | 5 | A record, a helper, an alias, a non-type | `TypeAt` declines - the command is not offered | OK (by design) |
 | 6 | A descendant naming its ancestor through a type ALIAS | - | GAP - the index's own limit, see §4 row 10 |
-| 7 | `AIncludeIndirect = False` (the demo's plain click, §3.10) | the root and its depth-1 children only | OK (0.24.0) |
 
 Cost note for hosts: `TObject`'s descendants are every class in the closure,
 each row's model rehydrated to position the hit - gate on `TypeAt`, not on

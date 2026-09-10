@@ -168,8 +168,11 @@ type
     - pikRoot: the interface method declaration itself (one row per overload
       the interface declares under that name).
     - pikImplementor: a method DECLARED by a class that lists the interface
-      (or lists a descendant interface of it - `IChild = interface(IBase)`
-      carries IBase's methods into every implementor of IChild).
+      itself. A class listing a DESCENDANT interface (`IChild =
+      interface(IBase)`) is not a row for IBase, although dcc carries
+      IBase's methods into it: the interfaces below one are Find
+      Descendants' axis, and IChild's implementors are this search asked on
+      IChild (see FindImplementations for the history).
     - pikInherited: the class that lists the interface does not declare the
       method itself and satisfies it with an ANCESTOR's method. The row is
       the ancestor's declaration - the code that actually runs - and
@@ -355,10 +358,7 @@ type
     function PropertyChain(ATMid, ASym: Integer): TArray<TPasExtRef>;
     procedure CollectReferencesOf(ATMid, ASym: Integer;
       AHits: TList<TPasRefHit>; AAssignOnly: Boolean = False);
-    // Find Descendants / interface implementors / assignments.
-    procedure OvCollectInterfaceFamily(ATMid, AIntfSym: Integer;
-      AIndex: TDictionary<string, TArray<TOvEdge>>;
-      AFamily: TList<TPasExtRef>);
+    // Find Assignments.
     function IsAssignTarget(LM: TPasSemaModel; ANode: Integer): Boolean;
     function PropertyIsWritable(AMid, ASym: Integer): Boolean;
     // Find Creations / Find Destructions.
@@ -556,17 +556,21 @@ type
       interface method (ATMid, ASym), across the analyzed closure. See
       TPasImplKind for what each row is.
 
-      Two hops over the same reverse-heritage index FindOverrides uses:
+      One hop over the same reverse-heritage index FindOverrides uses: every
+      class/`object` that LISTS this interface. For each, the method under
+      that name from the class itself (pikImplementor) or, failing that, from
+      the nearest ancestor that declares one (pikInherited - the code that
+      actually runs, which is a different file from the class that took the
+      interface on).
 
-      1. the interface's own DESCENDANT interfaces (`IChild =
-         interface(IBase)`), transitively - a class implementing IChild must
-         implement IBase's methods too, and the RTL is built that way
-         (IInterface -> IInvokable -> ...);
-      2. every class/`object` that LISTS any of those interfaces. For each,
-         the method under that name from the class itself (pikImplementor) or,
-         failing that, from the nearest ancestor that declares one
-         (pikInherited - the code that actually runs, which is a different
-         file from the class that took the interface on).
+      The interfaces DESCENDING from this one (`IChild = interface(IBase)`)
+      are not walked, so a class listing IChild is not a row for IBase -
+      although dcc does carry IBase's methods into it. 0.20.0-0.24.x took
+      that hop (0.24.0 behind a modifier), and on a base interface with a
+      hundred extending interfaces the answer had no shape a list could
+      show, while the two questions it folded together each have a command
+      of their own: FindDescendants on IBase lists the interfaces below it,
+      this search on IChild lists IChild's implementors (0.25.0).
 
       Matched by NAME, not by signature: dcc pairs an implementor to an
       interface method by its full signature, and reproducing that would mean
@@ -581,8 +585,7 @@ type
       whatever object the property returns, a value question), and an
       ancestor named through a type alias (the index's own limit - see
       FindOverrides). }
-    function FindImplementations(ATMid, ASym: Integer;
-      AIncludeIndirect: Boolean = True): TArray<TPasImplHit>;
+    function FindImplementations(ATMid, ASym: Integer): TArray<TPasImplHit>;
     { Find Implementations from the INTERFACE ITSELF rather than one of its
       methods: the cursor is on an interface TYPE name (its declaration or
       any use). ATMid/ASym come back as the interface type symbol. The
@@ -592,23 +595,21 @@ type
       out ATMid, ASym: Integer; out AName: string): Boolean;
     { Every CLASS (or `object`) implementing the interface (ATMid, ASym) -
       one row per class, positioned on the class's own declaration name,
-      across the analyzed closure. The same two hops FindImplementations
-      takes, stopped one level earlier: the interface's descendant
-      interfaces first, then every class listing any of them. Rows are
-      pikRoot for the interface's own declaration and pikImplementor for each
-      class, with ViaTypeName naming the DESCENDANT interface the class
-      actually listed when that is not the interface asked about (`class(
-      TObject, IChild)` for a search on IBase); '' for a direct listing.
+      across the analyzed closure. The same one hop FindImplementations
+      takes, stopped before the method: every class LISTING this interface.
+      Rows are pikRoot for the interface's own declaration and pikImplementor
+      for each class; ViaTypeName is '' on every row here (it is the method
+      search's field).
 
       A class that gets the interface from its ANCESTOR (`TBase = class(
       TObject, IBar)` then `TLeaf = class(TBase)`) is not a row: dcc treats
       the ancestor as the implementor and the descendant inherits the
       binding, and listing every descendant of every implementor is Find
-      Descendants' answer, not this one. A delegated implementation
-      (`implements`) and an alias-named interface are not reached - the same
-      limits FindImplementations has. }
-    function FindInterfaceImplementors(ATMid, ASym: Integer;
-      AIncludeIndirect: Boolean = True): TArray<TPasImplHit>;
+      Descendants' answer, not this one. Nor is a class listing a DESCENDANT
+      interface - FindImplementations says why (0.25.0). A delegated
+      implementation (`implements`) and an alias-named interface are not
+      reached - the same limits FindImplementations has. }
+    function FindInterfaceImplementors(ATMid, ASym: Integer): TArray<TPasImplHit>;
     { Find Descendants, part one: the cursor is on a CLASS, `object` or
       INTERFACE type name (its declaration, or any use of it). ATMid/ASym
       come back as that type symbol. False for a record, a helper, an alias,
@@ -626,17 +627,7 @@ type
       type - the index's own limit (see FindOverrides). Cost note for hosts:
       `TObject`'s descendants are every class in the closure, each row's model
       rehydrated to position the hit - gate on TypeAt, not on "an identifier". }
-    function FindDescendants(ATMid, ASym: Integer;
-      AIncludeIndirect: Boolean = True): TArray<TPasDescendantHit>;
-    { AIncludeIndirect, on the three searches above: True (the default) is the whole
-      transitive answer described at each; False keeps only what is written
-      DIRECTLY against the type under the caret - a class whose heritage list
-      names it (depth 1), a class that itself lists the interface (not a
-      descendant interface) and declares the method itself (no pikInherited
-      row). The direct answer is what a reader wants nine times in ten - the
-      immediate children, the classes that spell the interface name - and
-      the full one is a deliberate widening a host offers as a modifier (the
-      demo: Ctrl held while clicking the command). }
+    function FindDescendants(ATMid, ASym: Integer): TArray<TPasDescendantHit>;
     { Find All Assignments, part one: the cursor is on something that can be
       WRITTEN - a variable, a field, a parameter, or a property with a `write`
       specifier (its declaration or any use). ATMid/ASym come back as that
@@ -2698,18 +2689,16 @@ begin
   Result := OvInterfaceDefNode(ATMid, LM.Scopes[LScope].StructSym) <> NIL_NODE;
 end;
 
-function TPasNavigator.FindImplementations(ATMid, ASym: Integer;
-  AIncludeIndirect: Boolean): TArray<TPasImplHit>;
+function TPasNavigator.FindImplementations(ATMid, ASym: Integer):
+  TArray<TPasImplHit>;
 var
   LHits: TList<TPasImplHit>;
   LIndex: TDictionary<string, TArray<TOvEdge>>;
-  LSeenClass, LSeenRow: TDictionary<string, Boolean>;
-  LIntfs: TList<TPasExtRef>;
-  LCurIntf: TPasExtRef;
+  LSeenRow: TDictionary<string, Boolean>;
   LEdges: TArray<TOvEdge>;
   LM: TPasSemaModel;
-  LScope, LIntfSym, LIdx, LIntfIdx, LDepth: Integer;
-  LNameLower, LKey, LVia: string;
+  LScope, LIntfSym, LIdx, LDepth: Integer;
+  LNameLower, LVia: string;
   LX: TSemaXType;
 begin
   Result := nil;
@@ -2730,50 +2719,31 @@ begin
 
   LHits := TList<TPasImplHit>.Create;
   LIndex := TDictionary<string, TArray<TOvEdge>>.Create;
-  LSeenClass := TDictionary<string, Boolean>.Create;
   LSeenRow := TDictionary<string, Boolean>.Create;
-  LIntfs := TList<TPasExtRef>.Create;
   try
     // The interface's own declaration(s) first - the chain's head, like
     // FindOverrides' pokRoot.
     OvImplRow(ATMid, LIntfSym, LNameLower, '', pikRoot, LHits, LSeenRow);
     OvBuildTypeEdges(LIndex);
 
-    // Hop 1: this interface plus every interface that DESCENDS from it -
-    // or, for the direct answer, this interface alone.
-    if AIncludeIndirect then
-      OvCollectInterfaceFamily(ATMid, LIntfSym, LIndex, LIntfs)
-    else
-    begin
-      LCurIntf.UnitId := ATMid;
-      LCurIntf.Sym := LIntfSym;
-      LIntfs.Add(LCurIntf);
-    end;
-
-    // Hop 2: every class/`object` listing one of those interfaces. Its own
-    // method if it declares one, else the nearest ancestor's - which is a
-    // real implementation, just written one class up (TInterfacedObject's
-    // own _AddRef for every class that lists IInterface, to take the shape
-    // the RTL repeats most).
-    for LIntfIdx := 0 to LIntfs.Count - 1 do
-    begin
-      if not LIndex.TryGetValue(Format('%d:%d',
-        [LIntfs[LIntfIdx].UnitId, LIntfs[LIntfIdx].Sym]), LEdges) then
-        Continue;
+    // Every class/`object` listing THIS interface - the interfaces below it
+    // are not walked (the declaration says why). Its own method if it
+    // declares one, else the nearest ancestor's - which is a real
+    // implementation, just written one class up (TInterfacedObject's own
+    // _AddRef for every class that lists IInterface, to take the shape the
+    // RTL repeats most). A class lists an interface once, so no per-class
+    // dedup is needed; LSeenRow still keeps one row per method declaration.
+    if LIndex.TryGetValue(Format('%d:%d', [ATMid, LIntfSym]), LEdges) then
       for LIdx := 0 to High(LEdges) do
       begin
         if OvClassDefNode(LEdges[LIdx].UnitId, LEdges[LIdx].Sym) =
           NIL_NODE then
           Continue;
-        LKey := Format('%d:%d', [LEdges[LIdx].UnitId, LEdges[LIdx].Sym]);
-        if LSeenClass.ContainsKey(LKey) then
-          Continue;
-        LSeenClass.Add(LKey, True);
         LVia := FProj.Model(LEdges[LIdx].UnitId).Symbols[
           LEdges[LIdx].Sym].Name;
         if OvImplRow(LEdges[LIdx].UnitId, LEdges[LIdx].Sym, LNameLower, LVia,
-          pikImplementor, LHits, LSeenRow) or not AIncludeIndirect then
-          Continue;   // (the direct answer never climbs)
+          pikImplementor, LHits, LSeenRow) then
+          Continue;
         // Not here - climb. Stops at the first ancestor that declares one:
         // anything above it is what THAT declaration overrides, which is
         // Find Overrides' question.
@@ -2789,12 +2759,9 @@ begin
             Break;
         end;
       end;
-    end;
     Result := LHits.ToArray;
   finally
-    LIntfs.Free;
     LSeenRow.Free;
-    LSeenClass.Free;
     LIndex.Free;
     LHits.Free;
   end;
@@ -2813,55 +2780,6 @@ begin
     end));
 end;
 
-{ The interface (ATMid, AIntfSym) plus every interface that DESCENDS from it,
-  transitively, in breadth-first order - hop 1 of FindImplementations, shared
-  with FindInterfaceImplementors. Classes listing an interface are edges in
-  the same index and are skipped here: they are the NEXT hop's business. }
-procedure TPasNavigator.OvCollectInterfaceFamily(ATMid, AIntfSym: Integer;
-  AIndex: TDictionary<string, TArray<TOvEdge>>;
-  AFamily: TList<TPasExtRef>);
-var
-  LSeen: TDictionary<string, Boolean>;
-  LQueue: TQueue<TPasExtRef>;
-  LCur: TPasExtRef;
-  LEdges: TArray<TOvEdge>;
-  LIdx: Integer;
-  LKey: string;
-begin
-  LSeen := TDictionary<string, Boolean>.Create;
-  LQueue := TQueue<TPasExtRef>.Create;
-  try
-    LCur.UnitId := ATMid;
-    LCur.Sym := AIntfSym;
-    LQueue.Enqueue(LCur);
-    LSeen.Add(Format('%d:%d', [ATMid, AIntfSym]), True);
-    while LQueue.Count > 0 do
-    begin
-      LCur := LQueue.Dequeue;
-      AFamily.Add(LCur);
-      if not AIndex.TryGetValue(Format('%d:%d', [LCur.UnitId, LCur.Sym]),
-        LEdges) then
-        Continue;
-      for LIdx := 0 to High(LEdges) do
-      begin
-        if OvInterfaceDefNode(LEdges[LIdx].UnitId, LEdges[LIdx].Sym) =
-          NIL_NODE then
-          Continue;
-        LKey := Format('%d:%d', [LEdges[LIdx].UnitId, LEdges[LIdx].Sym]);
-        if LSeen.ContainsKey(LKey) then
-          Continue;
-        LSeen.Add(LKey, True);
-        LCur.UnitId := LEdges[LIdx].UnitId;
-        LCur.Sym := LEdges[LIdx].Sym;
-        LQueue.Enqueue(LCur);
-      end;
-    end;
-  finally
-    LQueue.Free;
-    LSeen.Free;
-  end;
-end;
-
 function TPasNavigator.InterfaceAt(AMid, ALine, ACol: Integer;
   out ATMid, ASym: Integer; out AName: string): Boolean;
 begin
@@ -2869,18 +2787,14 @@ begin
     (OvInterfaceDefNode(ATMid, ASym) <> NIL_NODE);
 end;
 
-function TPasNavigator.FindInterfaceImplementors(ATMid, ASym: Integer;
-  AIncludeIndirect: Boolean): TArray<TPasImplHit>;
+function TPasNavigator.FindInterfaceImplementors(ATMid, ASym: Integer):
+  TArray<TPasImplHit>;
 var
   LHits: TList<TPasImplHit>;
   LIndex: TDictionary<string, TArray<TOvEdge>>;
-  LSeenClass: TDictionary<string, Boolean>;
-  LIntfs: TList<TPasExtRef>;
-  LCurIntf: TPasExtRef;
   LEdges: TArray<TOvEdge>;
   LM: TPasSemaModel;
-  LIdx, LIntfIdx, LDecl: Integer;
-  LKey: string;
+  LIdx, LDecl: Integer;
   LRow: TPasImplHit;
 begin
   Result := nil;
@@ -2888,8 +2802,6 @@ begin
     Exit;
   LHits := TList<TPasImplHit>.Create;
   LIndex := TDictionary<string, TArray<TOvEdge>>.Create;
-  LSeenClass := TDictionary<string, Boolean>.Create;
-  LIntfs := TList<TPasExtRef>.Create;
   try
     // The interface's own declaration first, as FindImplementations' pikRoot.
     LM := FProj.Model(ATMid);
@@ -2905,29 +2817,15 @@ begin
       LHits.Add(LRow);
     end;
     OvBuildTypeEdges(LIndex);
-    if AIncludeIndirect then
-      OvCollectInterfaceFamily(ATMid, ASym, LIndex, LIntfs)
-    else
-    begin
-      LCurIntf.UnitId := ATMid;
-      LCurIntf.Sym := ASym;
-      LIntfs.Add(LCurIntf);
-    end;
-    for LIntfIdx := 0 to LIntfs.Count - 1 do
-    begin
-      if not LIndex.TryGetValue(Format('%d:%d',
-        [LIntfs[LIntfIdx].UnitId, LIntfs[LIntfIdx].Sym]), LEdges) then
-        Continue;
+    // One row per class listing THIS interface - the interfaces below it
+    // are not walked (the declaration says why), so there is no "via" to
+    // name and a class cannot reach here twice.
+    if LIndex.TryGetValue(Format('%d:%d', [ATMid, ASym]), LEdges) then
       for LIdx := 0 to High(LEdges) do
       begin
         if OvClassDefNode(LEdges[LIdx].UnitId, LEdges[LIdx].Sym) =
           NIL_NODE then
           Continue;
-        LKey := Format('%d:%d', [LEdges[LIdx].UnitId, LEdges[LIdx].Sym]);
-        // One row per class even when it lists both IBase and IChild.
-        if LSeenClass.ContainsKey(LKey) then
-          Continue;
-        LSeenClass.Add(LKey, True);
         LM := FProj.Model(LEdges[LIdx].UnitId);
         LDecl := LM.Symbols[LEdges[LIdx].Sym].DeclNode;
         if (LDecl = NIL_NODE) or
@@ -2936,22 +2834,13 @@ begin
           Continue;
         LRow.Kind := pikImplementor;
         LRow.TypeName := LM.Symbols[LEdges[LIdx].Sym].Name;
-        // The interface the class WROTE, when it is a descendant of the one
-        // asked about - so a reader sees why TFoo is a row for IBase.
-        if LIntfIdx = 0 then
-          LRow.ViaTypeName := ''
-        else
-          LRow.ViaTypeName := FProj.Model(LIntfs[LIntfIdx].UnitId).Symbols[
-            LIntfs[LIntfIdx].Sym].Name;
+        LRow.ViaTypeName := '';
         LRow.UnitId := LEdges[LIdx].UnitId;
         LRow.Sym := LEdges[LIdx].Sym;
         LHits.Add(LRow);
       end;
-    end;
     Result := LHits.ToArray;
   finally
-    LIntfs.Free;
-    LSeenClass.Free;
     LIndex.Free;
     LHits.Free;
   end;
@@ -2982,8 +2871,8 @@ begin
       [nkClassType, nkObjectType, nkInterfaceType]) <> NIL_NODE);
 end;
 
-function TPasNavigator.FindDescendants(ATMid, ASym: Integer;
-  AIncludeIndirect: Boolean): TArray<TPasDescendantHit>;
+function TPasNavigator.FindDescendants(ATMid, ASym: Integer):
+  TArray<TPasDescendantHit>;
 type
   TQueued = record
     Ref: TPasExtRef;
@@ -3049,10 +2938,6 @@ begin
       LCur := LQueue.Dequeue;
       if RowFor(LCur, LRow) then
         LHits.Add(LRow);
-      // The direct answer expands the root only: its children are rows,
-      // their children are not.
-      if not AIncludeIndirect and (LCur.Depth >= 1) then
-        Continue;
       if not LIndex.TryGetValue(Format('%d:%d',
         [LCur.Ref.UnitId, LCur.Ref.Sym]), LEdges) then
         Continue;

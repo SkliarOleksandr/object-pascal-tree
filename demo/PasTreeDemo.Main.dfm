@@ -517,19 +517,19 @@ object frmMain: TfrmMain
       OnUpdate = FindOverridesActionUpdate
     end
     object FindImplementationsAction: TAction
-      Caption = 'Implementations (Ctrl - incl. indirect)'
+      Caption = 'Implementations'
       Hint =
-        'Classes that directly implement the INTERFACE method (or, on an int' +
-        'erface NAME, the interface) at the caret; hold Ctrl for the full a' +
-        'nswer - descendant interfaces and inherited implementations too'
+        'Classes that list the INTERFACE at the caret - the method'#39's imp' +
+        'lementations on an interface method, the classes on an interface N' +
+        'AME. Descendant interfaces are Find Descendants'#39' answer'
       OnExecute = FindImplementationsActionExecute
       OnUpdate = FindImplementationsActionUpdate
     end
     object FindDescendantsAction: TAction
-      Caption = 'Descendants (Ctrl - incl. indirect)'
+      Caption = 'Descendants'
       Hint =
-        'The direct descendants of the class (or interface) at the caret; h' +
-        'old Ctrl for the whole hierarchy below it'
+        'The whole hierarchy below the class (or interface) at the caret, i' +
+        'ndented by depth'
       OnExecute = FindDescendantsActionExecute
       OnUpdate = FindDescendantsActionUpdate
     end

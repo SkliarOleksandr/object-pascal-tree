@@ -125,11 +125,12 @@ const
     'end.'#10;                                       // 16
 
   { Find Implementations fixtures. NavIntfA declares the interface and one
-    direct implementor; NavIntfB implements it from ANOTHER unit, implements
-    it through a DESCENDANT interface (`IOvChild = interface(IOvBase)`), and
-    holds the shape with no directive to key on at all: a class that lists
-    the interface and satisfies it with an ANCESTOR's method. Plus a class
-    with a same-named method that implements nothing. }
+    direct implementor; NavIntfB lists it from ANOTHER unit, holds a class
+    listing only a DESCENDANT interface (`IOvChild = interface(IOvBase)`) -
+    NOT a row for IOvBase since 0.25.0, a row for IOvChild - and the shape
+    with no directive to key on at all: a class that lists the interface and
+    satisfies it with an ANCESTOR's method. Plus a class with a same-named
+    method that implements nothing. }
   UNIT_INTFA =
     'unit NavIntfA;'#10 +                            // 1
     'interface'#10 +                                 // 2
@@ -1918,19 +1919,20 @@ begin
         GNav.InterfaceMethodAt(LMidIA, 5, 15, {out} LRTMid, {out} LRSym,
           {out} LRName) and SameText(LRName, 'Run'));
       var LImps := GNav.FindImplementations(LRTMid, LRSym);
-      // The interface decl + TOvDirect (direct, same unit) + TOvViaChild
-      // (through IOvChild, another unit) + TOvAncestor.Run (TOvInherits
-      // satisfies IOvBase with it).
-      Ok('FindImplementations: Run - decl + 3 implementations',
-        Length(LImps) = 4);
+      // The interface decl + TOvDirect (direct, same unit) + TOvAncestor.Run
+      // (TOvInherits lists IOvBase and satisfies Run with it). NOT
+      // TOvViaChild: it lists IOvChild, and the interfaces below IOvBase are
+      // Find Descendants' axis (0.25.0).
+      Ok('FindImplementations: Run - decl + 2 implementations',
+        Length(LImps) = 3);
       Ok('FindImplementations: the interface declaration comes first',
         (Length(LImps) > 0) and (LImps[0].Kind = pikRoot) and
         (LImps[0].Hit.Line = 5) and SameText(LImps[0].TypeName, 'IOvBase'));
       Ok('FindImplementations: a direct implementor in the same unit',
         HasImplAt(LImps, 'NavIntfA.pas', 13, pikImplementor, 'TOvDirect'));
-      Ok('FindImplementations: an implementor through a DESCENDANT ' +
-        'interface, in another unit',
-        HasImplAt(LImps, 'NavIntfB.pas', 7, pikImplementor, 'TOvViaChild'));
+      Ok('FindImplementations: a class listing only a DESCENDANT interface ' +
+        'is not a row - that is the search asked on IOvChild',
+        not HasImplAt(LImps, 'NavIntfB.pas', 7, pikImplementor, 'TOvViaChild'));
       Ok('FindImplementations: an INHERITED implementation, credited to the ' +
         'class that took the interface on',
         HasImplAt(LImps, 'NavIntfB.pas', 13, pikInherited, 'TOvAncestor') and
@@ -1946,14 +1948,15 @@ begin
         GNav.InterfaceMethodAt(LMidIA, 6, 14, {out} LRTMid, {out} LRSym,
           {out} LRName) and SameText(LRName, 'Name'));
       LImps := GNav.FindImplementations(LRTMid, LRSym);
-      Ok('FindImplementations: Name - decl + 3 implementations, all declared',
-        (Length(LImps) = 4) and
+      Ok('FindImplementations: Name - decl + 2 implementations, both declared',
+        (Length(LImps) = 3) and
         HasImplAt(LImps, 'NavIntfA.pas', 14, pikImplementor, 'TOvDirect') and
-        HasImplAt(LImps, 'NavIntfB.pas', 9, pikImplementor, 'TOvViaChild') and
-        HasImplAt(LImps, 'NavIntfB.pas', 17, pikImplementor, 'TOvInherits'));
+        HasImplAt(LImps, 'NavIntfB.pas', 17, pikImplementor, 'TOvInherits') and
+        not HasImplAt(LImps, 'NavIntfB.pas', 9, pikImplementor, 'TOvViaChild'));
 
       // A method declared only by the DESCENDANT interface: its implementors
-      // are the classes listing that one, not every IOvBase implementor.
+      // are the classes listing that one - and this is also where the
+      // IOvChild implementor the IOvBase searches above leave out IS a row.
       Ok('InterfaceMethodAt: IOvChild.Extra',
         GNav.InterfaceMethodAt(LMidIA, 9, 15, {out} LRTMid, {out} LRSym,
           {out} LRName) and SameText(LRName, 'Extra'));
@@ -1992,22 +1995,32 @@ begin
           {out} LRName));
       GNav.InterfaceAt(LMidIA, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName);
       LImps := GNav.FindInterfaceImplementors(LRTMid, LRSym);
-      // The interface itself + TOvDirect (direct) + TOvViaChild (via IOvChild)
-      // + TOvInherits (direct, satisfies Run through an ancestor - still a
-      // class LISTING it). Not TOvAncestor (lists nothing), not TOvNoIntf.
-      Ok('FindInterfaceImplementors: IOvBase - decl + 3 classes',
-        Length(LImps) = 4);
+      // The interface itself + TOvDirect (direct) + TOvInherits (direct,
+      // satisfies Run through an ancestor - still a class LISTING it). Not
+      // TOvViaChild (lists IOvChild, not IOvBase - 0.25.0), not TOvAncestor
+      // (lists nothing), not TOvNoIntf.
+      Ok('FindInterfaceImplementors: IOvBase - decl + 2 classes',
+        Length(LImps) = 3);
       Ok('FindInterfaceImplementors: the interface declaration comes first',
         (Length(LImps) > 0) and (LImps[0].Kind = pikRoot) and
         (LImps[0].Hit.Line = 4));
       Ok('FindInterfaceImplementors: rows sit on the CLASS declarations',
         HasImplAt(LImps, 'NavIntfA.pas', 11, pikImplementor, 'TOvDirect') and
-        HasImplAt(LImps, 'NavIntfB.pas', 5, pikImplementor, 'TOvViaChild') and
         HasImplAt(LImps, 'NavIntfB.pas', 15, pikImplementor, 'TOvInherits'));
-      Ok('FindInterfaceImplementors: a class listing a DESCENDANT interface ' +
-        'says which one',
-        HasImplVia(LImps, 'NavIntfB.pas', 5, 'IOvChild') and
-        HasImplVia(LImps, 'NavIntfA.pas', 11, ''));
+      Ok('FindInterfaceImplementors: a class listing only a DESCENDANT ' +
+        'interface is not a row - Find Descendants owns the interfaces below',
+        not HasImplAt(LImps, 'NavIntfB.pas', 5, pikImplementor, 'TOvViaChild'));
+      Ok('FindInterfaceImplementors: ViaTypeName is empty on every row',
+        HasImplVia(LImps, 'NavIntfA.pas', 11, '') and
+        HasImplVia(LImps, 'NavIntfB.pas', 15, ''));
+      // Asked on the CHILD, the child's implementor is the row.
+      GNav.InterfaceAt(LMidIA, 8, 3, {out} LRTMid, {out} LRSym, {out} LRName);
+      LImps := GNav.FindInterfaceImplementors(LRTMid, LRSym);
+      Ok('FindInterfaceImplementors: IOvChild - decl + TOvViaChild',
+        (Length(LImps) = 2) and
+        HasImplAt(LImps, 'NavIntfB.pas', 5, pikImplementor, 'TOvViaChild'));
+      GNav.InterfaceAt(LMidIA, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName);
+      LImps := GNav.FindInterfaceImplementors(LRTMid, LRSym);
       Ok('FindInterfaceImplementors: a class with the same method names but ' +
         'no interface is never a row',
         not HasImplAt(LImps, 'NavIntfB.pas', 19, pikImplementor, 'TOvNoIntf'));
@@ -2056,31 +2069,6 @@ begin
       LDs := GNav.FindDescendants(LRTMid, LRSym);
       Ok('FindDescendants: IOvBase - root + IOvChild, no classes',
         (Length(LDs) = 2) and HasDescAt(LDs, 'NavIntfA.pas', 8, 'IOvChild', 1));
-      // DIRECT mode (AIncludeIndirect = False): depth-1 children only.
-      GNav.TypeAt(LMidOvA, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName);
-      LDs := GNav.FindDescendants(LRTMid, LRSym, {AIncludeIndirect} False);
-      Ok('FindDescendants direct: TOvBase - root + TOvMid + TOvSkip only',
-        (Length(LDs) = 3) and
-        HasDescAt(LDs, 'NavOvrA.pas', 10, 'TOvMid', 1) and
-        HasDescAt(LDs, 'NavOvrA.pas', 20, 'TOvSkip', 1) and
-        not HasDescAt(LDs, 'NavOvrA.pas', 15, 'TOvLeaf', 2));
-      // DIRECT implementors: classes that spell IOvBase themselves.
-      GNav.InterfaceAt(LMidIA, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName);
-      LImps := GNav.FindInterfaceImplementors(LRTMid, LRSym, {AIncludeIndirect} False);
-      Ok('FindInterfaceImplementors direct: IOvBase - decl + TOvDirect + ' +
-        'TOvInherits; TOvViaChild lists IOvChild, not IOvBase',
-        (Length(LImps) = 3) and
-        HasImplAt(LImps, 'NavIntfA.pas', 11, pikImplementor, 'TOvDirect') and
-        HasImplAt(LImps, 'NavIntfB.pas', 15, pikImplementor, 'TOvInherits') and
-        not HasImplAt(LImps, 'NavIntfB.pas', 5, pikImplementor, 'TOvViaChild'));
-      // DIRECT method implementations: no descendant interface, no climb.
-      GNav.InterfaceMethodAt(LMidIA, 5, 15, {out} LRTMid, {out} LRSym,
-        {out} LRName);
-      LImps := GNav.FindImplementations(LRTMid, LRSym, {AIncludeIndirect} False);
-      Ok('FindImplementations direct: Run - decl + TOvDirect.Run only ' +
-        '(TOvViaChild is via IOvChild, TOvAncestor.Run is inherited)',
-        (Length(LImps) = 2) and
-        HasImplAt(LImps, 'NavIntfA.pas', 13, pikImplementor, 'TOvDirect'));
 
       // ---- Find All Assignments (AssignableAt + FindAssignments) ----
       var LMidAsg := GNav.ModelIdOf(TPath.Combine(LDir, 'NavAsg.pas'));
