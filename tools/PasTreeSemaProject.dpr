@@ -227,7 +227,7 @@ end;
 procedure ReportChains;
 const
   OVK: array[TPasOverrideKind] of string = ('root', 'override', 'message',
-    'reintroduce');
+    'reintroduce', 'redeclared');
   IMK: array[TPasImplKind] of string = ('declares', 'implements',
     'implements-via');
 var

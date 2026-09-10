@@ -835,7 +835,21 @@ const
     '  for var Q := pDay to pWeek do'#10 +      // 24
     '    Q.Text;'#10 +                         // 25 Text col 7
     'end;'#10 +                                // 26
-    'end.'#10;                                 // 27
+    // A procedural-type VALUE called with arguments (a client's pluggable
+    // service locator: `var LGateway := GlobalGateway(True, False);
+    // LGateway.FillDevices`). Line 34 is the bare-name hop that already
+    // worked; 31, 33 and 35 had no case in either typer's call typing.
+    'type'#10 +                                // 27
+    '  TItemFunc = reference to function(A: Boolean = True; B: Boolean = True): TItem;'#10 + // 28
+    'procedure PT(F: TItemFunc; var GF: TItemFunc);'#10 + // 29
+    'begin'#10 +                               // 30
+    '  var LI := GF(False, True);'#10 +        // 31
+    '  LI.Description := '''';'#10 +           // 32 Description col 6
+    '  GF(False).Description := '''';'#10 +    // 33 Description col 13
+    '  GF.Description := '''';'#10 +           // 34 Description col 6
+    '  F(True).Description := '''';'#10 +      // 35 Description col 12
+    'end;'#10 +                                // 36
+    'end.'#10;                                 // 37
 
   UNIT_B =
     'unit NavB;'#10 +                          // 1
@@ -2254,6 +2268,17 @@ begin
         'NavPromo.pas', 65, 14);
       CheckNav('for counter: helper method, enum-value bound', 25, 7, 'Text',
         'NavPromo.pas', 65, 14);
+      // REGRESSION: a procedural-type VALUE called with arguments - neither
+      // typer had a case for a callee that is a variable/parameter, so the
+      // call typed to nothing and every member of its result was dark.
+      CheckNav('proc value call: inferred inline var', 32, 6, 'Description',
+        'NavPromo.pas', 6, 5);
+      CheckNav('proc value call: member of the call', 33, 13, 'Description',
+        'NavPromo.pas', 6, 5);
+      CheckNav('proc value call: bare name (defaulted params)', 34, 6,
+        'Description', 'NavPromo.pas', 6, 5);
+      CheckNav('proc value call: value parameter', 35, 12, 'Description',
+        'NavPromo.pas', 6, 5);
       // REGRESSION: the generic frame of a bare inherited member whose type
       // is NESTED in the generic ancestor - `Table[0]` peeled to the open
       // TValue without it (see the nkIdent case in CrossType).

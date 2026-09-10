@@ -54,6 +54,7 @@ type
     function BinaryResult(N: Integer): Integer;
     function UnaryResult(N: Integer): Integer;
     function CallResult(N: Integer): Integer;
+    function ProcTypeResult(ASym: Integer): Integer;
     function IntrinsicResult(ACall, AHead: Integer): Integer;
     function WidenOrdinal(ASym: Integer): Integer;
     function ArrayDefOf(ASym: Integer): Integer;
@@ -992,6 +993,39 @@ begin
   Result := M.Symbols[LBest].TypeSym;   // result type of the chosen overload
 end;
 
+{ The RESULT type of the procedural type ASym (through plain aliases), the
+  type a value of it has once CALLED; NIL_SYM for a procedure type or anything
+  that is not a procedural type at all. }
+function TPasSemaTyper.ProcTypeResult(ASym: Integer): Integer;
+var
+  LDepth, LDef, LChild: Integer;
+begin
+  Result := NIL_SYM;
+  for LDepth := 1 to 8 do
+  begin
+    if (ASym = NIL_SYM) or (M.Symbols[ASym].Kind <> skType) then
+      Exit;
+    LDef := TypeDefNode(ASym);
+    if LDef = NIL_NODE then
+      Exit;
+    case Kind(LDef) of
+      nkIdent:
+        ASym := M.RefMap[LDef];   // alias link - follow it
+      nkProcType:
+        begin
+          LChild := Child(LDef);
+          if (LChild <> NIL_NODE) and (Kind(LChild) = nkParams) then
+            LChild := Sib(LChild);   // the result type follows the list
+          if LChild = NIL_NODE then
+            Exit;   // a procedure type: no result
+          Exit(Head(LChild));
+        end;
+    else
+      Exit;
+    end;
+  end;
+end;
+
 function TPasSemaTyper.CallResult(N: Integer): Integer;
 var
   LCallee, LHead: Integer;
@@ -1002,7 +1036,9 @@ begin
     Exit;
   LHead := Head(LCallee);
   if LHead = NIL_SYM then
-    Exit;
+    // Not a designator (`GetFunc(1)(2)`, `Handlers[I](Sender)`): the callee
+    // is an expression whose type, if procedural, is called.
+    Exit(ProcTypeResult(M.ExprType[LCallee]));
   case M.Symbols[LHead].Kind of
     skType, skBuiltinType:
       Result := LHead;                    // type cast T(x) -> T
@@ -1013,6 +1049,13 @@ begin
         Result := IntrinsicResult(N, LHead)
       else
         Result := SelectOverload(N, LHead); // choose overload + maybe arg-count
+    skVar, skConst, skField, skParam, skProperty:
+      // A VALUE of a procedural type called with arguments -
+      // `Gateway(True, False).FillDevices` where Gateway: reference to
+      // function(...): IPaymentServer. The call has the procedural type's
+      // RESULT type; the project-level typer takes the same hop through
+      // ProcResultX for the cross-unit case.
+      Result := ProcTypeResult(M.Symbols[LHead].TypeSym);
   end;
 end;
 

@@ -940,7 +940,12 @@ type
     function IsClassCtorDtorSym(AMid, ASym: Integer): Boolean;
     function XParamSyms(AMid, ASym: Integer): TArray<Integer>;
     function PointeeX(const AX: TSemaXType): TSemaXType;
-    function ProcResultX(const AX: TSemaXType): TSemaXType;
+    { The RESULT type of the procedural type AX when its value is called:
+      written bare (`ValueFunc.GetValue`) only when no parameter must be
+      supplied; with an argument list (ACalled) always. XNil for a procedure
+      type or one that cannot be called bare. }
+    function ProcResultX(const AX: TSemaXType;
+      ACalled: Boolean = False): TSemaXType;
     { Dedup-registers one generic instantiation and returns its instance-table
       index (locked, callable from anywhere). Promoted for the completion
       engine: a buffer being typed declares instantiations the analysis has
@@ -9474,7 +9479,23 @@ var
                 end;
               skType, skBuiltinType:
                 LX[N] := GetX(LBase);   // a cast (incl. instantiated generic)
-            end;
+            else
+              // A VALUE of a procedural type, called with arguments: a
+              // variable, field, parameter or property (`GlobalGateway(True,
+              // False).FillDevices(...)` where GlobalGateway: TGatewayFunc =
+              // reference to function(...): IPaymentServer, a client's
+              // pluggable service locator). The call's type is the procedural
+              // type's RESULT - the same hop the bare-name member walk takes
+              // through ProcResultX, minus the "every parameter defaulted"
+              // condition, which an explicit argument list satisfies by
+              // construction. Nothing typed this before, so an inferred
+              // `var LGateway := GlobalGateway(...)` was dark for navigation.
+              LX[N] := ProcResultX(GetX(LBase), {ACalled:} True);
+            end
+          else if LBase <> NIL_NODE then
+            // The callee is not a designator at all - `GetFunc(1)(2)`,
+            // `Handlers[I](Sender)`: type the expression and call its type.
+            LX[N] := ProcResultX(GetX(LBase), {ACalled:} True);
         end;
 
       // `X[I]` - the ONE value shape this walk had no case for. The intra-unit
@@ -10375,7 +10396,8 @@ begin
   Result := True;
 end;
 
-function TPasSemaProject.ProcResultX(const AX: TSemaXType): TSemaXType;
+function TPasSemaProject.ProcResultX(const AX: TSemaXType;
+  ACalled: Boolean): TSemaXType;
 var
   LM: TPasSemaModel;
   LCur: TSemaXType;
@@ -10405,7 +10427,9 @@ begin
           // TCustomStyleServices` is called as `VTStyleServicesFunc.
           // GetSystemColor(...)` in a tree component's style hooks. So the rule is
           // "no parameter the caller MUST supply", not "no parameters".
-          if (LM.Tree.Nodes[LChild].Kind = nkParams) and
+          // An EXPLICIT call (`Gateway(True, False).FillDevices`, ACalled)
+          // supplies its arguments itself, so the parameter list is no bar.
+          if not ACalled and (LM.Tree.Nodes[LChild].Kind = nkParams) and
              not AllParamsDefaulted(LCur.UnitId, LChild) then
             Exit;
           if LM.Tree.Nodes[LChild].Kind = nkParams then
@@ -12332,6 +12356,10 @@ begin
           Exit(IntrinsicResultX(AId, ANode, LIntrShape, LIntrArgs));
         end;
         Result := WithTargetTypeX(AId, LBase);
+        // `with Gateway(True) do` - a procedural-type VALUE called with
+        // arguments opens the call's RESULT, not the procedural type.
+        if XValid(Result) and (XCatOf(Result) = tcProc) then
+          Result := ProcResultX(Result, {ACalled:} True);
       end;
 
     nkInherited:
