@@ -517,7 +517,7 @@ object frmMain: TfrmMain
       OnUpdate = FindOverridesActionUpdate
     end
     object FindImplementationsAction: TAction
-      Caption = 'Implementations (Ctrl: full)'
+      Caption = 'Implementations (Ctrl - incl. indirect)'
       Hint =
         'Classes that directly implement the INTERFACE method (or, on an int' +
         'erface NAME, the interface) at the caret; hold Ctrl for the full a' +
@@ -526,7 +526,7 @@ object frmMain: TfrmMain
       OnUpdate = FindImplementationsActionUpdate
     end
     object FindDescendantsAction: TAction
-      Caption = 'Descendants (Ctrl: full)'
+      Caption = 'Descendants (Ctrl - incl. indirect)'
       Hint =
         'The direct descendants of the class (or interface) at the caret; h' +
         'old Ctrl for the whole hierarchy below it'

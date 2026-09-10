@@ -262,10 +262,10 @@ rest in the order this document describes them:
 - `Find All > Destructions` (§8 - `ClassAt`)
 
 `Implementations` and `Descendants` carry a MODIFIER, spelled in the caption
-(`Descendants (Ctrl: full)`): fired plainly they give the DIRECT answer -
+(`Descendants (Ctrl - incl. indirect)`): fired plainly they give the DIRECT answer -
 the classes that name the type themselves, the depth-1 children - and fired
 with Ctrl held they give the full transitive one. The engine side is the
-`AFull` parameter on `FindImplementations`, `FindInterfaceImplementors` and
+`AIncludeIndirect` parameter on `FindImplementations`, `FindInterfaceImplementors` and
 `FindDescendants` (default True, the full answer); the demo reads
 `GetKeyState(VK_CONTROL)` at Execute time and the page caption says which
 was asked (`Direct Descendants of ...` / `All Descendants of ...`).
@@ -370,7 +370,7 @@ own heritage list, over the same reverse-heritage index §4 builds:
 | 8 | A delegated implementation (`property Impl: IBar read FImpl implements IBar`) | - | GAP - the implementor is whatever object the property returns, a value question rather than a declaration one |
 | 9 | Signature-precise pairing of an OVERLOADED interface method | - | GAP (by design) - every same-named candidate is a row, the same choice §4 makes for a chain |
 | 10 | An ancestor or interface named through a type ALIAS | - | GAP - the index's own limit, see §4 |
-| 11 | `AFull = False` (the demo's plain click, §3.10) | rows 1-2 only: the interface's own declaration and the methods of classes that list THIS interface; no descendant-interface hop, no inherited climb | OK (0.24.0) |
+| 11 | `AIncludeIndirect = False` (the demo's plain click, §3.10) | rows 1-2 only: the interface's own declaration and the methods of classes that list THIS interface; no descendant-interface hop, no inherited climb | OK (0.24.0) |
 
 Measured on the VCL closure of a `uses Vcl.Forms, Vcl.ComCtrls, Vcl.Grids`
 program (103 models): `IInterface.QueryInterface` = 9 rows across 3 files in
@@ -393,7 +393,7 @@ interface's declaration, `pikImplementor` per class, with `ViaTypeName`
 naming the DESCENDANT interface the class actually wrote when that is not
 the one asked about (`class(TObject, IChild)` for a search on IBase).
 
-`AFull = False` (0.24.0) drops the descendant-interface hop: only the
+`AIncludeIndirect = False` (0.24.0) drops the descendant-interface hop: only the
 classes that spell THIS interface's name are rows.
 
 Not a row, by design: a class that gets the interface from its ANCESTOR
@@ -448,7 +448,7 @@ the direct ancestor each row was reached through.
 | 4 | A type nothing descends from | its single `pdkRoot` row - the honest "no descendants" | OK |
 | 5 | A record, a helper, an alias, a non-type | `TypeAt` declines - the command is not offered | OK (by design) |
 | 6 | A descendant naming its ancestor through a type ALIAS | - | GAP - the index's own limit, see §4 row 10 |
-| 7 | `AFull = False` (the demo's plain click, §3.10) | the root and its depth-1 children only | OK (0.24.0) |
+| 7 | `AIncludeIndirect = False` (the demo's plain click, §3.10) | the root and its depth-1 children only | OK (0.24.0) |
 
 Cost note for hosts: `TObject`'s descendants are every class in the closure,
 each row's model rehydrated to position the hit - gate on `TypeAt`, not on

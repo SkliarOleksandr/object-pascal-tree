@@ -582,7 +582,7 @@ type
       ancestor named through a type alias (the index's own limit - see
       FindOverrides). }
     function FindImplementations(ATMid, ASym: Integer;
-      AFull: Boolean = True): TArray<TPasImplHit>;
+      AIncludeIndirect: Boolean = True): TArray<TPasImplHit>;
     { Find Implementations from the INTERFACE ITSELF rather than one of its
       methods: the cursor is on an interface TYPE name (its declaration or
       any use). ATMid/ASym come back as the interface type symbol. The
@@ -608,7 +608,7 @@ type
       (`implements`) and an alias-named interface are not reached - the same
       limits FindImplementations has. }
     function FindInterfaceImplementors(ATMid, ASym: Integer;
-      AFull: Boolean = True): TArray<TPasImplHit>;
+      AIncludeIndirect: Boolean = True): TArray<TPasImplHit>;
     { Find Descendants, part one: the cursor is on a CLASS, `object` or
       INTERFACE type name (its declaration, or any use of it). ATMid/ASym
       come back as that type symbol. False for a record, a helper, an alias,
@@ -627,8 +627,8 @@ type
       `TObject`'s descendants are every class in the closure, each row's model
       rehydrated to position the hit - gate on TypeAt, not on "an identifier". }
     function FindDescendants(ATMid, ASym: Integer;
-      AFull: Boolean = True): TArray<TPasDescendantHit>;
-    { AFull, on the three searches above: True (the default) is the whole
+      AIncludeIndirect: Boolean = True): TArray<TPasDescendantHit>;
+    { AIncludeIndirect, on the three searches above: True (the default) is the whole
       transitive answer described at each; False keeps only what is written
       DIRECTLY against the type under the caret - a class whose heritage list
       names it (depth 1), a class that itself lists the interface (not a
@@ -2699,7 +2699,7 @@ begin
 end;
 
 function TPasNavigator.FindImplementations(ATMid, ASym: Integer;
-  AFull: Boolean): TArray<TPasImplHit>;
+  AIncludeIndirect: Boolean): TArray<TPasImplHit>;
 var
   LHits: TList<TPasImplHit>;
   LIndex: TDictionary<string, TArray<TOvEdge>>;
@@ -2741,7 +2741,7 @@ begin
 
     // Hop 1: this interface plus every interface that DESCENDS from it -
     // or, for the direct answer, this interface alone.
-    if AFull then
+    if AIncludeIndirect then
       OvCollectInterfaceFamily(ATMid, LIntfSym, LIndex, LIntfs)
     else
     begin
@@ -2772,7 +2772,7 @@ begin
         LVia := FProj.Model(LEdges[LIdx].UnitId).Symbols[
           LEdges[LIdx].Sym].Name;
         if OvImplRow(LEdges[LIdx].UnitId, LEdges[LIdx].Sym, LNameLower, LVia,
-          pikImplementor, LHits, LSeenRow) or not AFull then
+          pikImplementor, LHits, LSeenRow) or not AIncludeIndirect then
           Continue;   // (the direct answer never climbs)
         // Not here - climb. Stops at the first ancestor that declares one:
         // anything above it is what THAT declaration overrides, which is
@@ -2870,7 +2870,7 @@ begin
 end;
 
 function TPasNavigator.FindInterfaceImplementors(ATMid, ASym: Integer;
-  AFull: Boolean): TArray<TPasImplHit>;
+  AIncludeIndirect: Boolean): TArray<TPasImplHit>;
 var
   LHits: TList<TPasImplHit>;
   LIndex: TDictionary<string, TArray<TOvEdge>>;
@@ -2905,7 +2905,7 @@ begin
       LHits.Add(LRow);
     end;
     OvBuildTypeEdges(LIndex);
-    if AFull then
+    if AIncludeIndirect then
       OvCollectInterfaceFamily(ATMid, ASym, LIndex, LIntfs)
     else
     begin
@@ -2983,7 +2983,7 @@ begin
 end;
 
 function TPasNavigator.FindDescendants(ATMid, ASym: Integer;
-  AFull: Boolean): TArray<TPasDescendantHit>;
+  AIncludeIndirect: Boolean): TArray<TPasDescendantHit>;
 type
   TQueued = record
     Ref: TPasExtRef;
@@ -3051,7 +3051,7 @@ begin
         LHits.Add(LRow);
       // The direct answer expands the root only: its children are rows,
       // their children are not.
-      if not AFull and (LCur.Depth >= 1) then
+      if not AIncludeIndirect and (LCur.Depth >= 1) then
         Continue;
       if not LIndex.TryGetValue(Format('%d:%d',
         [LCur.Ref.UnitId, LCur.Ref.Sym]), LEdges) then

@@ -2056,9 +2056,9 @@ begin
       LDs := GNav.FindDescendants(LRTMid, LRSym);
       Ok('FindDescendants: IOvBase - root + IOvChild, no classes',
         (Length(LDs) = 2) and HasDescAt(LDs, 'NavIntfA.pas', 8, 'IOvChild', 1));
-      // DIRECT mode (AFull = False): depth-1 children only.
+      // DIRECT mode (AIncludeIndirect = False): depth-1 children only.
       GNav.TypeAt(LMidOvA, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName);
-      LDs := GNav.FindDescendants(LRTMid, LRSym, {AFull} False);
+      LDs := GNav.FindDescendants(LRTMid, LRSym, {AIncludeIndirect} False);
       Ok('FindDescendants direct: TOvBase - root + TOvMid + TOvSkip only',
         (Length(LDs) = 3) and
         HasDescAt(LDs, 'NavOvrA.pas', 10, 'TOvMid', 1) and
@@ -2066,7 +2066,7 @@ begin
         not HasDescAt(LDs, 'NavOvrA.pas', 15, 'TOvLeaf', 2));
       // DIRECT implementors: classes that spell IOvBase themselves.
       GNav.InterfaceAt(LMidIA, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName);
-      LImps := GNav.FindInterfaceImplementors(LRTMid, LRSym, {AFull} False);
+      LImps := GNav.FindInterfaceImplementors(LRTMid, LRSym, {AIncludeIndirect} False);
       Ok('FindInterfaceImplementors direct: IOvBase - decl + TOvDirect + ' +
         'TOvInherits; TOvViaChild lists IOvChild, not IOvBase',
         (Length(LImps) = 3) and
@@ -2076,7 +2076,7 @@ begin
       // DIRECT method implementations: no descendant interface, no climb.
       GNav.InterfaceMethodAt(LMidIA, 5, 15, {out} LRTMid, {out} LRSym,
         {out} LRName);
-      LImps := GNav.FindImplementations(LRTMid, LRSym, {AFull} False);
+      LImps := GNav.FindImplementations(LRTMid, LRSym, {AIncludeIndirect} False);
       Ok('FindImplementations direct: Run - decl + TOvDirect.Run only ' +
         '(TOvViaChild is via IOvChild, TOvAncestor.Run is inherited)',
         (Length(LImps) = 2) and

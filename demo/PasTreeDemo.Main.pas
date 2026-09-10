@@ -1250,7 +1250,7 @@ end;
 
 { The Find Implementations / Find Descendants MODIFIER: Ctrl held while the
   command fires widens the direct answer to the full transitive one (the
-  captions say so - "Descendants (Ctrl: full)"). Read at Execute time, so it
+  captions say so - "Descendants (Ctrl - incl. indirect)"). Read at Execute time, so it
   works from the menu, a shortcut and a toolbar button alike; the menu
   item's own Ctrl+click is the ordinary way. }
 function CtrlHeld: Boolean;
@@ -1259,9 +1259,9 @@ begin
 end;
 
 // The page caption's first word: what the reader asked for.
-function FullOrDirect(AFull: Boolean; const ANoun: string): string;
+function ScopeWord(AIncludeIndirect: Boolean; const ANoun: string): string;
 begin
-  if AFull then
+  if AIncludeIndirect then
     Result := 'All ' + ANoun
   else
     Result := 'Direct ' + ANoun;
@@ -1287,20 +1287,20 @@ var
   LHits: TArray<TPasRefHit>;
   LPrefixes: TArray<string>;
   LDeclHit: TPasRefHit;
-  LFull: Boolean;
+  LIndirect: Boolean;
 begin
   if not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
     Exit;
   LMid := FNav.ModelIdOf(LFilePath);
   if LMid < 0 then
     Exit;
-  LFull := CtrlHeld;
+  LIndirect := CtrlHeld;
   if FNav.InterfaceMethodAt(LMid, LLine, LCol, {out} LTMid, {out} LSym,
     {out} LName) then
-    LImps := FNav.FindImplementations(LTMid, LSym, LFull)
+    LImps := FNav.FindImplementations(LTMid, LSym, LIndirect)
   else if FNav.InterfaceAt(LMid, LLine, LCol, {out} LTMid, {out} LSym,
     {out} LName) then
-    LImps := FNav.FindInterfaceImplementors(LTMid, LSym, LFull)
+    LImps := FNav.FindInterfaceImplementors(LTMid, LSym, LIndirect)
   else
     Exit;
   LDeclHit := Default(TPasRefHit);   // never read: AHasDecl is False below
@@ -1315,7 +1315,7 @@ begin
   end;
   LTab := SearchTabFor(LTMid, LSym, stkImpls);
   PopulateFindRefTab(LTab, Format('%s of ''%s'' (%d in %d units)',
-    [FullOrDirect(LFull, 'Implementations'), LName, Length(LImps),
+    [ScopeWord(LIndirect, 'Implementations'), LName, Length(LImps),
      DistinctFileCount(LHits)]), LHits, {AHasDecl} False, LDeclHit,
     LPrefixes);
   pgcBottom.ActivePage := LTab;
@@ -1347,7 +1347,7 @@ var
   LHits: TArray<TPasRefHit>;
   LPrefixes: TArray<string>;
   LDeclHit: TPasRefHit;
-  LFull: Boolean;
+  LIndirect: Boolean;
 begin
   if not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
     Exit;
@@ -1357,8 +1357,8 @@ begin
   if not FNav.TypeAt(LMid, LLine, LCol, {out} LTMid, {out} LSym,
     {out} LName) then
     Exit;
-  LFull := CtrlHeld;
-  LDs := FNav.FindDescendants(LTMid, LSym, LFull);
+  LIndirect := CtrlHeld;
+  LDs := FNav.FindDescendants(LTMid, LSym, LIndirect);
   LDeclHit := Default(TPasRefHit);   // never read: AHasDecl is False below
   SetLength(LHits, Length(LDs));
   SetLength(LPrefixes, Length(LDs));
@@ -1378,7 +1378,7 @@ begin
   // indentation is per group - a cross-unit hierarchy reads as one tree per
   // unit, each rooted where its first descendant enters that unit.
   PopulateFindRefTab(LTab, Format('%s of ''%s'' (%d in %d units)',
-    [FullOrDirect(LFull, 'Descendants'), LName, Length(LDs) - 1,
+    [ScopeWord(LIndirect, 'Descendants'), LName, Length(LDs) - 1,
      DistinctFileCount(LHits)]), LHits, {AHasDecl} False, LDeclHit,
     LPrefixes);
   pgcBottom.ActivePage := LTab;
