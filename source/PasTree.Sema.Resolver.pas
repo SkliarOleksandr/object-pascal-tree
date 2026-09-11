@@ -2105,8 +2105,39 @@ begin
           // today that is a helper's members (JoinHelperScopes), which a
           // qualified `TMatrix.Identity` must find exactly like a bare one.
           if LMemScope <> NIL_SCOPE then
+          begin
             FModel.RefMap[LName] :=
               FModel.FindLocalDeep(LMemScope, NodeNameLower(LName));
+            // `TOuter.TInner<T>` beside a nested `TOuter.TInner`: the member
+            // lookup answers with the chain head, and arity is part of the
+            // identity (16.1.2). The arguments hang off the nkMember's
+            // parent, not the name's, so the count is read from there. Same
+            // chain walk as the bare case below; a chain with no such arity
+            // keeps the head.
+            var LQSym := FModel.RefMap[LName];
+            if (LQSym <> NIL_SYM) and (FModel.Symbols[LQSym].Kind = skType) then
+            begin
+              var LQParent := FTree.Nodes[ANode].Parent;
+              var LQWant := 0;
+              if (LQParent <> NIL_NODE) and (KindOf(LQParent) = nkTypeArgs) and
+                 (FirstChild(LQParent) = ANode) then
+                LQWant := GenericArityOfParamsNode(LQParent);
+              if GenericArityOfSym(LQSym) <> LQWant then
+              begin
+                var LQAlt := FModel.Symbols[LQSym].NextOverload;
+                while LQAlt <> NIL_SYM do
+                begin
+                  if (FModel.Symbols[LQAlt].Kind = skType) and
+                     (GenericArityOfSym(LQAlt) = LQWant) then
+                  begin
+                    FModel.RefMap[LName] := LQAlt;
+                    Break;
+                  end;
+                  LQAlt := FModel.Symbols[LQAlt].NextOverload;
+                end;
+              end;
+            end;
+          end;
         end;
         // LName resolved (or left NIL) here; do not recurse into it as an ident
         Exit;

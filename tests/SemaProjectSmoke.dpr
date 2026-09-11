@@ -1394,6 +1394,7 @@ const
   UNIT_ARUSE =
     'unit UnitArUse;'#10'interface'#10'uses UnitArBase;'#10 +
     'type'#10 +
+    '  TProv<T: class> = class;'#10 +         // forward: a DECLARATION name, not a bare ref
     '  TProv<T: class> = class(TProv)'#10 +   // same NAME, arity 1, heritage bare
     '  private'#10 +
     '    function GetElem: T;'#10 +
@@ -1420,6 +1421,93 @@ const
     'function TLocal.Peek: TObject;'#10 +
     'begin'#10 +
     '  Result := Elem;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  { Both arities in ONE unit, the GENERIC declared first - so the name registers
+    the generic and the arity-0 class sits second on its NextOverload chain. An
+    arity-restricted search that tests only the chain head discards the whole
+    unit, and a bare `TBoth` in a unit with its own `TBoth<T>` then keeps the
+    local generic - nothing else of arity 0 is ever seen. Delphi has no bare
+    spelling of a generic (16.1.2): a name without `<...>` is always the plain
+    type, wherever the plain type lives. }
+  UNIT_ARBOTH =
+    'unit UnitArBoth;'#10'interface'#10 +
+    'type'#10 +
+    '  TBoth<T> = class'#10 +               // generic FIRST: the chain head
+    '  public'#10 +
+    '    FGen: T;'#10 +
+    '  end;'#10 +
+    '  TBoth = class'#10 +                  // arity 0, second on the chain
+    '  private'#10 +
+    '    FTag: Integer;'#10 +
+    '  public'#10 +
+    '    property Tag: Integer read FTag;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
+  { The user: a LOCAL generic of the same name, then the plain class named bare,
+    qualified bare, and qualified with arguments - three spellings, each with
+    exactly one legal meaning. Plus the same question INSIDE one unit for nested
+    types: `TOuter.TInner` vs `TOuter.TInner<Integer>`, where the qualified
+    member lookup also answers with the chain head. }
+  UNIT_ARBOTHUSE =
+    'unit UnitArBothUse;'#10'interface'#10'uses UnitArBoth;'#10 +
+    'type'#10 +
+    '  TBoth<T> = class'#10 +               // local generic ONLY
+    '  end;'#10 +
+    '  TDerBare = class(TBoth)'#10 +        // bare -> UnitArBoth's ARITY-0 class
+    '  public'#10 +
+    '    function Check: Boolean;'#10 +
+    '  end;'#10 +
+    '  TDerQual = class(UnitArBoth.TBoth)'#10 +           // qualified bare -> arity 0
+    '  public'#10 +
+    '    function Check2: Boolean;'#10 +
+    '  end;'#10 +
+    '  TDerQualGen = class(UnitArBoth.TBoth<Integer>)'#10 +   // qualified, 1 arg -> arity 1
+    '  public'#10 +
+    '    function Check3: Integer;'#10 +
+    '  end;'#10 +
+    '  TOuter = class'#10 +
+    '  public type'#10 +
+    '    TInner<T> = class'#10 +            // nested generic FIRST
+    '    public'#10 +
+    '      FG: T;'#10 +
+    '    end;'#10 +
+    '    TInner = class'#10 +               // nested arity 0
+    '    public'#10 +
+    '      FN: Integer;'#10 +
+    '    end;'#10 +
+    '  end;'#10 +
+    '  TUseIn = class(TOuter.TInner)'#10 +              // qualified bare -> nested arity 0
+    '  public'#10 +
+    '    function Check4: Integer;'#10 +
+    '  end;'#10 +
+    '  TUseInG = class(TOuter.TInner<Integer>)'#10 +    // qualified, 1 arg -> nested arity 1
+    '  public'#10 +
+    '    function Check5: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TDerBare.Check: Boolean;'#10 +
+    'begin'#10 +
+    '  Result := Tag > 0;'#10 +             // arity-0 member
+    'end;'#10 +
+    'function TDerQual.Check2: Boolean;'#10 +
+    'begin'#10 +
+    '  Result := Tag > 0;'#10 +
+    'end;'#10 +
+    'function TDerQualGen.Check3: Integer;'#10 +
+    'begin'#10 +
+    '  Result := FGen;'#10 +                // generic's member, closed over Integer
+    'end;'#10 +
+    'function TUseIn.Check4: Integer;'#10 +
+    'begin'#10 +
+    '  Result := FN;'#10 +
+    'end;'#10 +
+    'function TUseInG.Check5: Integer;'#10 +
+    'begin'#10 +
+    '  Result := FG;'#10 +
     'end;'#10 +
     'end.'#10;
 
@@ -1893,6 +1981,60 @@ end;
 
 // References spelled ARefText still bound LOCALLY (RefMap) to a symbol that is
 // not their own declaration - i.e. genuine local references left over.
+// Whether the type symbol ASym of model AMid is declared with generic
+// parameters - read structurally off its nkTypeDecl, the way the project's
+// own ArityOfTypeSym does, so a test can pin WHICH arity a reference chose
+// when both share one name.
+function IsGenericTarget(AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LDecl, LChild: Integer;
+begin
+  Result := False;
+  LM := GProj.Model(AMid);
+  LDecl := LM.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LDecl := LM.Tree.Nodes[LDecl].Parent;
+  if (LDecl = NIL_NODE) or (LM.Tree.Nodes[LDecl].Kind <> nkTypeDecl) then
+    Exit;
+  LChild := LM.Tree.Nodes[LDecl].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LChild].Kind = nkGenericParams then
+      Exit(True);
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+// References spelled ARefText - RefMap (own declaration excluded) or ExtRefMap
+// - whose target is a GENERIC type (AGeneric True) or a plain one (False).
+function RefCountByGeneric(AModel: TPasSemaModel; const ARefText: string;
+  AGeneric: Boolean): Integer;
+var
+  LExt: TPasExtRef;
+  LSym: Integer;
+begin
+  Result := 0;
+  for var LNode := 0 to High(AModel.RefMap) do
+    if (AModel.Tree.Nodes[LNode].Kind = nkIdent) and
+       SameText(AModel.Tree.NodeText(LNode), ARefText) then
+    begin
+      if AModel.ExtRefMap.TryGetValue(LNode, LExt) then
+      begin
+        if IsGenericTarget(LExt.UnitId, LExt.Sym) = AGeneric then
+          Inc(Result);
+      end
+      else
+      begin
+        LSym := AModel.RefMap[LNode];
+        if (LSym <> NIL_SYM) and (AModel.Symbols[LSym].DeclNode <> LNode) and
+           (IsGenericTarget(MidByName(AModel.UnitNameLower), LSym) = AGeneric) then
+          Inc(Result);
+      end;
+    end;
+end;
+
 function LocalRefCount(AModel: TPasSemaModel; const ARefText: string): Integer;
 var
   LSym: Integer;
@@ -2004,6 +2146,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArGenUse.pas'), UNIT_ARGENUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArBase.pas'), UNIT_ARBASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArUse.pas'), UNIT_ARUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitArBoth.pas'), UNIT_ARBOTH);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitArBothUse.pas'), UNIT_ARBOTHUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitGenList.pas'), UNIT_GENLIST);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitGenListUse.pas'), UNIT_GENLISTUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitGenSelf.pas'), UNIT_GENSELF);
@@ -2466,6 +2610,50 @@ begin
     Ok('arity0: no diags at all', Length(LAr0.Diags) = 0);
     Ok('arity0: the bare heritage reaches the imported arity-0 class',
       CrossRefTo(LAr0, 'Parent', 'Parent'));
+    // The NAME itself, not only the members it brings: both bare `TProv` idents
+    // (the generic's own heritage and TDerived's) must record UnitArBase.TProv
+    // as their identity - that is what ctrl+click and Find References read. A
+    // same-unit generic of that name being nearer, the resolver bound them to
+    // it and the cross-unit pass never looked, so the heritage of
+    // `TProv<T> = class(TProv)` navigated to the line it was written on and
+    // Find References on the arity-0 class missed every bare use in this unit.
+    Ok('arity0: both bare TProv idents record the imported class as identity',
+      CrossRefCountInUnit(LAr0, 'TProv', 'TProv', 'unitarbase') = 2);
+    // Exactly two TProv idents stay LOCAL: TLocal's arity-1 `TProv<TObject>`
+    // heritage, and the FORWARD declaration's own name - bound to the symbol
+    // the completing declaration owns, so it is not the DeclNode, and the
+    // first cut of the correction read it as a bare reference and sent it
+    // into UnitArBase. A third would be a bare one that escaped.
+    // (The `TProv<T>.GetElem` implementation head carries no RefMap binding
+    // at all, before and after - it is not this rule's business.)
+    Ok('arity0: only the arity-1 spelling and the forward name stay local',
+      LocalRefCount(LAr0, 'TProv') = 2);
+
+    // 16.1.2 again, with the plain class SECOND on its unit's chain and the
+    // generic first - the shape a head-only arity search discards wholesale.
+    // Plus the qualified spellings, cross-unit and nested in one unit.
+    var LArB := ModelByName('unitarbothuse');
+    Ok('arity-chain: UnitArBothUse loaded', Assigned(LArB));
+    Ok('arity-chain: no diags at all', Length(LArB.Diags) = 0);
+    Ok('arity-chain: bare and qualified-bare TBoth both mean the PLAIN class',
+      RefCountByGeneric(LArB, 'TBoth', False) = 2);
+    Ok('arity-chain: those two record UnitArBoth as the owner',
+      CrossRefCountInUnit(LArB, 'TBoth', 'TBoth', 'unitarboth') = 3);
+    Ok('arity-chain: UnitArBoth.TBoth<Integer> means the GENERIC',
+      RefCountByGeneric(LArB, 'TBoth', True) = 1);
+    Ok('arity-chain: no TBoth reference stays on the local generic',
+      LocalRefCount(LArB, 'TBoth') = 0);
+    Ok('arity-chain: the plain class''s member reaches through both spellings',
+      CrossRefCountInUnit(LArB, 'Tag', 'Tag', 'unitarboth') = 2);
+    Ok('arity-chain: the generic''s member reaches through the qualified one',
+      CrossRefTo(LArB, 'FGen', 'FGen'));
+    Ok('arity-chain: TOuter.TInner means the nested PLAIN class',
+      RefCountByGeneric(LArB, 'TInner', False) = 1);
+    Ok('arity-chain: TOuter.TInner<Integer> means the nested GENERIC',
+      RefCountByGeneric(LArB, 'TInner', True) = 1);
+    Ok('arity-chain: both nested ancestors hand their members down',
+      (CrossRefCountInUnit(LArB, 'FN', 'FN', 'unitarbothuse') >= 1) and
+      (CrossRefCountInUnit(LArB, 'FG', 'FG', 'unitarbothuse') >= 1));
     Ok('arity0: an arity-1 reference still means the LOCAL generic',
       (LocalRefCount(LAr0, 'Elem') +
        CrossRefCountInUnit(LAr0, 'Elem', 'Elem', 'unitaruse')) >= 1);

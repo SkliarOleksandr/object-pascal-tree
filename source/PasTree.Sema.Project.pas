@@ -595,6 +595,8 @@ type
       AArity: Integer; out AUnit, ASym: Integer): Boolean;
     function WrittenArityOfRef(AModel: TPasSemaModel;
       ANode: Integer): Integer;
+    function TypeOfArityInChain(AMid, ASym, AArity: Integer): Integer;
+    function IsTypeDeclName(AModel: TPasSemaModel; ANode: Integer): Boolean;
     procedure FixCrossArity(AId: Integer; AModel: TPasSemaModel;
       ANode: Integer; const ANameLower: string; var AUnit, ASym: Integer);
     function IsAttributeTypeRef(AModel: TPasSemaModel; ANode: Integer): Boolean;
@@ -4459,13 +4461,37 @@ begin
   LModel := FModels[AId];
   if LModel.InterfaceScope = NIL_SCOPE then
     Exit;
-  LSym := LModel.Resolve(LModel.InterfaceScope, ANameLower);
-  if (LSym <> NIL_SYM) and (LModel.Symbols[LSym].Kind = skType) and
-     (ArityOfTypeSym(AId, LSym) = AArity) then
+  LSym := TypeOfArityInChain(AId,
+    LModel.Resolve(LModel.InterfaceScope, ANameLower), AArity);
+  if LSym <> NIL_SYM then
   begin
     ASym := LSym;
     Result := True;
   end;
+end;
+
+{ The type of arity AArity on ASym's NextOverload chain, ASym included, or
+  NIL_SYM. Every by-name lookup returns only the HEAD of a scope's chain, and
+  a unit that declares both `TFoo<T>` and `TFoo` registers whichever came
+  first - so an arity-restricted search that tests the head alone discards the
+  whole unit when the head is the other arity. The ordinary caller pays one
+  read: the head matches. }
+function TPasSemaProject.TypeOfArityInChain(AMid, ASym,
+  AArity: Integer): Integer;
+var
+  LDepth: Integer;
+begin
+  Result := ASym;
+  for LDepth := 1 to 32 do
+  begin
+    if Result = NIL_SYM then
+      Exit;
+    if (FModels[AMid].Symbols[Result].Kind = skType) and
+       (ArityOfTypeSym(AMid, Result) = AArity) then
+      Exit;
+    Result := FModels[AMid].Symbols[Result].NextOverload;
+  end;
+  Result := NIL_SYM;
 end;
 
 { FindInUses, restricted to a type of a GIVEN generic arity - see
@@ -4496,22 +4522,29 @@ begin
     LUsed := FModels[LUid];
     if LUsed.InterfaceScope = NIL_SCOPE then
       Continue;
-    LSym := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
-    if (LSym <> NIL_SYM) and (LUsed.Symbols[LSym].Kind = skType) and
-       (ArityOfTypeSym(LUid, LSym) = AArity) then
+    // The whole chain, not the head: a unit declaring `TFoo<T>` before `TFoo`
+    // registers the generic under the name, and testing only that discarded
+    // the unit - so a bare `TFoo` in a unit with its own `TFoo<T>` kept the
+    // local generic (the generic's heritage then named itself; see
+    // PreferNonGeneric), and Find References on the plain class missed it.
+    LSym := TypeOfArityInChain(LUid,
+      LUsed.Resolve(LUsed.InterfaceScope, ANameLower), AArity);
+    if LSym <> NIL_SYM then
     begin
       AUnit := LUid;
       ASym := LSym;
       Exit(True);
     end;
   end;
-  if FindInSystemUnit(ANameLower, LUid, LSym) and
-     (FModels[LUid].Symbols[LSym].Kind = skType) and
-     (ArityOfTypeSym(LUid, LSym) = AArity) then
+  if FindInSystemUnit(ANameLower, LUid, LSym) then
   begin
-    AUnit := LUid;
-    ASym := LSym;
-    Result := True;
+    LSym := TypeOfArityInChain(LUid, LSym, AArity);
+    if LSym <> NIL_SYM then
+    begin
+      AUnit := LUid;
+      ASym := LSym;
+      Result := True;
+    end;
   end;
 end;
 
@@ -4529,6 +4562,18 @@ var
 begin
   Result := 0;
   LParent := AModel.Tree.Nodes[ANode].Parent;
+  // A QUALIFIED head - `Unit.TFoo<T>` / `TOuter.TInner<T>` - is the NAME
+  // child of an nkMember that is itself the head of the nkTypeArgs, so the
+  // arguments hang one level up. Counting the name as bare would read the
+  // reference as arity 0 and "correct" a right generic binding to a plain
+  // twin, so hop through the member first.
+  if (LParent <> NIL_NODE) and
+     (AModel.Tree.Nodes[LParent].Kind = nkMember) and
+     (AModel.Tree.Nodes[LParent].FirstChild <> ANode) then
+  begin
+    ANode := LParent;
+    LParent := AModel.Tree.Nodes[ANode].Parent;
+  end;
   if (LParent = NIL_NODE) or
      (AModel.Tree.Nodes[LParent].Kind <> nkTypeArgs) or
      (AModel.Tree.Nodes[LParent].FirstChild <> ANode) then
@@ -4539,6 +4584,27 @@ begin
     Inc(Result);
     LArg := AModel.Tree.Nodes[LArg].NextSibling;
   end;
+end;
+
+{ True when ANode is the NAME of an nkTypeDecl - its first child, or the one
+  after a leading attribute group (`[Attr] TFoo = class`). A structural test,
+  because the model keeps only one DeclNode per symbol and a forward
+  declaration's name is not it. }
+function TPasSemaProject.IsTypeDeclName(AModel: TPasSemaModel;
+  ANode: Integer): Boolean;
+var
+  LParent, LFirst: Integer;
+begin
+  Result := False;
+  LParent := AModel.Tree.Nodes[ANode].Parent;
+  if (LParent = NIL_NODE) or
+     (AModel.Tree.Nodes[LParent].Kind <> nkTypeDecl) then
+    Exit;
+  LFirst := AModel.Tree.Nodes[LParent].FirstChild;
+  if (LFirst <> NIL_NODE) and
+     (AModel.Tree.Nodes[LFirst].Kind = nkAttrGroup) then
+    LFirst := AModel.Tree.Nodes[LFirst].NextSibling;
+  Result := LFirst = ANode;
 end;
 
 { Arity correction for a CROSS-unit reference, applied where ExtRefMap is
@@ -9824,6 +9890,21 @@ begin
             begin
               LSym := FModels[LUid].Resolve(FModels[LUid].InterfaceScope,
                 LModel.Tree.NodeNameLower(LName));
+              // Arity is part of the identity (16.1.2) for a QUALIFIED name
+              // too: `Unit.TFoo` names the plain class and `Unit.TFoo<T>`
+              // the generic, and the by-name lookup answers with whichever
+              // that unit declared first. Within THIS unit's chain only -
+              // the qualifier has already chosen the unit, so unlike
+              // FixCrossArity there is no uses search; a chain with no such
+              // arity keeps the head, which is dcc's error, not ours.
+              if (LSym <> NIL_SYM) and
+                 (FModels[LUid].Symbols[LSym].Kind = skType) then
+              begin
+                LMatchNode := TypeOfArityInChain(LUid, LSym,
+                  WrittenArityOfRef(LModel, LName));
+                if LMatchNode <> NIL_SYM then
+                  LSym := LMatchNode;
+              end;
               if LSym <> NIL_SYM then
               begin
                 LExt.UnitId := LUid; LExt.Sym := LSym;
@@ -9846,6 +9927,21 @@ begin
             begin
               LSym := FModels[LUid].Resolve(FModels[LUid].InterfaceScope,
                 LModel.Tree.NodeNameLower(LName));
+              // Arity is part of the identity (16.1.2) for a QUALIFIED name
+              // too: `Unit.TFoo` names the plain class and `Unit.TFoo<T>`
+              // the generic, and the by-name lookup answers with whichever
+              // that unit declared first. Within THIS unit's chain only -
+              // the qualifier has already chosen the unit, so unlike
+              // FixCrossArity there is no uses search; a chain with no such
+              // arity keeps the head, which is dcc's error, not ours.
+              if (LSym <> NIL_SYM) and
+                 (FModels[LUid].Symbols[LSym].Kind = skType) then
+              begin
+                LMatchNode := TypeOfArityInChain(LUid, LSym,
+                  WrittenArityOfRef(LModel, LName));
+                if LMatchNode <> NIL_SYM then
+                  LSym := LMatchNode;
+              end;
               if LSym <> NIL_SYM then
               begin
                 LExt.UnitId := LUid; LExt.Sym := LSym;
@@ -9857,9 +9953,48 @@ begin
 
       nkIdent:
         begin
-          if (LModel.RefMap[LNode] <> NIL_SYM) or
-             LModel.ExtRefMap.ContainsKey(LNode) then
+          if LModel.ExtRefMap.ContainsKey(LNode) then
             Continue;
+          LSym := LModel.RefMap[LNode];
+          if LSym <> NIL_SYM then
+          begin
+            // Bound SAME-unit, and normally that is the end of it - except
+            // when the binding is a TYPE of the wrong generic ARITY. The
+            // resolver's own correction (ResolveByArityAt) searches this
+            // unit only and deliberately KEEPS a wrong-arity binding when
+            // the unit has no other, because dropping it would cost a false
+            // E2003 where dcc reports a different error. But the type dcc
+            // means is usually in a USED unit: `TFoo<T> = class(TFoo)` with
+            // the plain TFoo imported is the idiom, and every bare `TFoo` in
+            // that unit - the heritage first - bound to the nearer generic.
+            // Go-to-definition on the ancestor then landed on the generic's
+            // own line, and Find References / descendants on the imported
+            // class missed every bare use here. Members were already right
+            // (PreferNonGeneric fixes the TYPE pass); this is the identity
+            // the navigator reads. Cheap for the ordinary reference: one
+            // Kind read, and the arity reads only for a type hit.
+            // The generic's own NAME in its declaration is bound to itself
+            // and written bare - a declaration, not a reference: skip it.
+            // By POSITION, not DeclNode: a forward `TFoo<T> = class;` is
+            // re-pointed to its completing declaration by CollectTypeDecl,
+            // so the forward's name node no longer equals DeclNode, and the
+            // first cut of this rule sent the forward line into the unit
+            // that declares the plain TFoo.
+            if (LModel.Symbols[LSym].Kind <> skType) or
+               IsTypeDeclName(LModel, LNode) or
+               (ArityOfTypeSym(AId, LSym) =
+                WrittenArityOfRef(LModel, LNode)) then
+              Continue;
+            LNameLower := LModel.Tree.NodeNameLower(LNode);
+            if FindTypeInUsesArity(AId, LNameLower,
+                 WrittenArityOfRef(LModel, LNode), LUid, LSym) then
+            begin
+              LModel.RefMap[LNode] := NIL_SYM;
+              LExt.UnitId := LUid; LExt.Sym := LSym;
+              LModel.ExtRefMap.Add(LNode, LExt);
+            end;
+            Continue;   // no right-arity import: the local binding stands
+          end;
           if (LNode > High(LModel.NodeScope)) or
              (LModel.NodeScope[LNode] = NIL_SCOPE) then
             Continue;   // not a reference in a real scope (e.g. uses name)
