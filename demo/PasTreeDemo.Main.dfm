@@ -102,6 +102,16 @@ object frmMain: TfrmMain
       TabOrder = 9
       OnChange = cbConfigChange
     end
+    object cbStudio: TComboBox
+      Left = 412
+      Top = 40
+      Width = 242
+      Height = 23
+      Hint = 'RAD Studio installation the analysis runs under'
+      Style = csDropDownList
+      TabOrder = 14
+      OnChange = cbStudioChange
+    end
     object cbHighlighter: TComboBox
       Left = 412
       Top = 9
@@ -172,11 +182,11 @@ object frmMain: TfrmMain
       Top = 44
       Width = 130
       Height = 17
-      Hint =
-        'Incremental reanalysis: an edit re-analyzes just that unit (millise' +
-        'conds) and falls back to a rebuild that reuses the previous parse. ' +
-        'Also keeps closed units' + #39' text in memory - a demoted unit canno' +
-        't take either fast path.'
+      Hint = 
+        'Incremental reanalysis: an edit re-analyzes just that unit (mill' +
+        'iseconds) and falls back to a rebuild that reuses the previous p' +
+        'arse. Also keeps closed units'#39' text in memory - a demoted unit c' +
+        'annot take either fast path.'
       Caption = 'Incremental'
       Checked = True
       ParentShowHint = False
@@ -191,7 +201,6 @@ object frmMain: TfrmMain
       Height = 27
       Hint = 'View Unit (Ctrl+F12)'
       Action = ViewUnitAction
-      ShowHint = True
       TabOrder = 12
     end
   end
@@ -227,9 +236,10 @@ object frmMain: TfrmMain
       Top = 0
       Width = 1180
       Height = 164
+      ActivePage = tsMessages
       Align = alClient
-      TabOrder = 0
       PopupMenu = BottomTabsPopupMenu
+      TabOrder = 0
       OnMouseDown = pgcBottomMouseDown
       object tsMessages: TTabSheet
         Caption = 'Messages'
@@ -247,10 +257,10 @@ object frmMain: TfrmMain
             Top = 6
             Width = 97
             Height = 17
-            Hint =
-              'Show every diagnostic the analysis produced, including an unresolv' +
-              'ed member after a dot. Filters this list only - nothing is re-anal' +
-              'yzed.'
+            Hint = 
+              'Show every diagnostic the analysis produced, including an unreso' +
+              'lved member after a dot. Filters this list only - nothing is re-' +
+              'analyzed.'
             Caption = 'Show Errors'
             ParentShowHint = False
             ShowHint = True
@@ -394,17 +404,27 @@ object frmMain: TfrmMain
       BevelOuter = bvNone
       ShowCaption = False
       TabOrder = 1
-      object lblProgress: TLabel
+      object lblProgress: TPanel
         AlignWithMargins = True
-        Left = 858
+        Left = 784
         Top = 3
-        Width = 55
+        Width = 129
         Height = 27
         Align = alRight
-        Alignment = taRightJustify
-        Caption = '0/0 Parsed'
-        Layout = tlCenter
-        ExplicitHeight = 15
+        BevelOuter = bvLowered
+        Caption = 'progress'
+        TabOrder = 4
+      end
+      object lblDiagCount: TPanel
+        AlignWithMargins = True
+        Left = 649
+        Top = 3
+        Width = 129
+        Height = 27
+        Align = alRight
+        BevelOuter = bvLowered
+        Caption = 'errors'
+        TabOrder = 5
       end
       object btnShowASTJson: TButton
         Left = 4
@@ -486,9 +506,9 @@ object frmMain: TfrmMain
     end
     object OpenFileAtCursorAction: TAction
       Caption = 'Open File at Cursor'
-      Hint =
-        'Opens the unit or include file named at the caret - a `uses` item, ' +
-        'an {$I ...} directive, or a path in a string'
+      Hint = 
+        'Opens the unit or include file named at the caret - a `uses` ite' +
+        'm, an {$I ...} directive, or a path in a string'
       OnExecute = OpenFileAtCursorActionExecute
       OnUpdate = OpenFileAtCursorActionUpdate
     end
@@ -509,59 +529,59 @@ object frmMain: TfrmMain
     end
     object FindOverridesAction: TAction
       Caption = 'Overrides'
-      Hint =
-        'Every declaration sharing the VMT slot of the method at the caret ' +
-        '- the virtual root plus every override, message handler and reintr' +
-        'oduce below it'
+      Hint = 
+        'Every declaration sharing the VMT slot of the method at the care' +
+        't - the virtual root plus every override, message handler and re' +
+        'introduce below it'
       OnExecute = FindOverridesActionExecute
       OnUpdate = FindOverridesActionUpdate
     end
     object FindImplementationsAction: TAction
       Caption = 'Implementations'
-      Hint =
-        'Classes that list the INTERFACE at the caret - the method'#39's imp' +
-        'lementations on an interface method, the classes on an interface N' +
-        'AME. Descendant interfaces are Find Descendants'#39' answer'
+      Hint = 
+        'Classes that list the INTERFACE at the caret - the method'#39's impl' +
+        'ementations on an interface method, the classes on an interface ' +
+        'NAME. Descendant interfaces are Find Descendants'#39' answer'
       OnExecute = FindImplementationsActionExecute
       OnUpdate = FindImplementationsActionUpdate
     end
     object FindDescendantsAction: TAction
       Caption = 'Descendants'
-      Hint =
-        'The whole hierarchy below the class (or interface) at the caret, i' +
-        'ndented by depth'
+      Hint = 
+        'The whole hierarchy below the class (or interface) at the caret,' +
+        ' indented by depth'
       OnExecute = FindDescendantsActionExecute
       OnUpdate = FindDescendantsActionUpdate
     end
     object FindAssignmentsAction: TAction
       Caption = 'Assignments'
-      Hint =
-        'Every place the variable, field, parameter or property at the care' +
-        't is written'
+      Hint = 
+        'Every place the variable, field, parameter or property at the ca' +
+        'ret is written'
       OnExecute = FindAssignmentsActionExecute
       OnUpdate = FindAssignmentsActionUpdate
     end
     object FindCreationsAction: TAction
       Caption = 'Creations'
-      Hint =
-        'Every constructor call that creates an instance of the class at th' +
-        'e caret'
+      Hint = 
+        'Every constructor call that creates an instance of the class at ' +
+        'the caret'
       OnExecute = FindCreationsActionExecute
       OnUpdate = FindCreationsActionUpdate
     end
     object FindDestructionsAction: TAction
       Caption = 'Destructions'
-      Hint =
-        'Every Free / Destroy / FreeAndNil of a designator whose static type' +
-        ' is the class at the caret'
+      Hint = 
+        'Every Free / Destroy / FreeAndNil of a designator whose static t' +
+        'ype is the class at the caret'
       OnExecute = FindDestructionsActionExecute
       OnUpdate = FindDestructionsActionUpdate
     end
     object RenameAction: TAction
       Caption = 'Rename...'
-      Hint =
-        'Renames the symbol at the caret and every resolved reference to it' +
-        ' - the same identity Find References uses'
+      Hint = 
+        'Renames the symbol at the caret and every resolved reference to ' +
+        'it - the same identity Find References uses'
       ShortCut = 24645
       OnExecute = RenameActionExecute
       OnUpdate = RenameActionUpdate

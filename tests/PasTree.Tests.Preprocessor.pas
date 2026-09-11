@@ -461,6 +461,23 @@ begin
       + 'as dcc does (System.ObjAuto ships a stray closing paren)',
       '{$IF True)}A := 1;{$ELSE}A := 2;{$ENDIF}',
       'Block(Assign(Ident''A'' IntLit''1''))', False),
+    // dcc-probed 2026-09-11 (35.0 and 37.0 agree): $IFDEF/$IFNDEF/$DEFINE/$UNDEF
+    // read the LEADING identifier and ignore the rest. Delphi 11's getmem.inc
+    // ships `{$ifdef CPU386)}`; taking the whole argument as the name sent
+    // Win32 down the Win64 branch and Move8 went undeclared.
+    IfBranchCase('$IFDEF ignores junk after the symbol, as dcc does',
+      '{$DEFINE JUNK_SYM}{$IFDEF JUNK_SYM)}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''1''))', False),
+    IfBranchCase('$IFNDEF ignores junk after the symbol',
+      '{$DEFINE JUNK_SYM}{$IFNDEF JUNK_SYM junk}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''2''))', False),
+    IfBranchCase('$DEFINE defines the leading identifier only',
+      '{$DEFINE JUNK_A JUNK_B}{$IFDEF JUNK_B}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''2''))', False),
+    IfBranchCase('$UNDEF ignores junk after the symbol',
+      '{$DEFINE JUNK_SYM}{$UNDEF JUNK_SYM)}{$IFDEF JUNK_SYM}A := 1;{$ELSE}A := 2;'
+      + '{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''2''))', False),
     // ---- Code audit 2026-08-31, findings 2.7.1 / 2.7.2 / 3.2. Each of these
     // is a shape that used to CRASH the whole preprocess run of the unit
     // (Trunc outside Int64 raises EInvalidOp, against this unit's "never

@@ -56,14 +56,27 @@ type
   end;
 
 const
-  { Symbols shared by every target. }
-  COMMON_DEFINES: array[0..2] of string =
-    ('VER370', 'CONDITIONALEXPRESSIONS', 'UNICODE');
+  { Symbols shared by every target and every compiler version. The version
+    symbol (VER370, VER350, ...) is derived from the compiler version below. }
+  COMMON_DEFINES: array[0..1] of string =
+    ('CONDITIONALEXPRESSIONS', 'UNICODE');
+  { The compiler the analyzer emulates when the host names none: dcc 37.0
+    (RAD Studio 13), the compiler every probe in this repository was run on.
+    Also the value of CompilerVersion/RTLVersion in $IF expressions. }
+  DEFAULT_COMPILER_VERSION = 37.0;
 
 function PlatformInfo(APlatform: TPasPlatform): TPasPlatformInfo;
 
-{ Full define set (common + platform) as a fresh TPasDefines the caller owns. }
-function CreatePlatformDefines(APlatform: TPasPlatform): TPasDefines;
+{ 'VER370' for 37.0, 'VER350' for 35.0 - the VERnnn symbol dcc predefines
+  for a given CompilerVersion (nnn = CompilerVersion * 10). }
+function CompilerVersionDefine(ACompilerVersion: Double): string;
+
+{ Full define set (common + version symbol + platform) as a fresh TPasDefines
+  the caller owns. ACompilerVersion picks the VERnnn symbol; a host analyzing
+  under an installed RAD Studio passes that Studio's compiler version so the
+  RTL's own $IFDEF VERnnn / $IF CompilerVersion branches select as dcc would. }
+function CreatePlatformDefines(APlatform: TPasPlatform;
+  ACompilerVersion: Double = DEFAULT_COMPILER_VERSION): TPasDefines;
 
 { Parses a platform name ('Win32', 'OSX64', 'Android'...); case-insensitive,
   accepts both our canonical names and common .dproj spellings. }
@@ -262,13 +275,20 @@ begin
   end;
 end;
 
-function CreatePlatformDefines(APlatform: TPasPlatform): TPasDefines;
+function CompilerVersionDefine(ACompilerVersion: Double): string;
+begin
+  Result := 'VER' + IntToStr(Round(ACompilerVersion * 10));
+end;
+
+function CreatePlatformDefines(APlatform: TPasPlatform;
+  ACompilerVersion: Double): TPasDefines;
 var
   LName: string;
 begin
   Result := TPasDefines.Create;
   for LName in COMMON_DEFINES do
     Result.Define(LName);
+  Result.Define(CompilerVersionDefine(ACompilerVersion));
   for LName in PlatformInfo(APlatform).Defines do
     Result.Define(LName);
 end;

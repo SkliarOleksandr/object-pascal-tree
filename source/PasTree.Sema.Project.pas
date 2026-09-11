@@ -122,6 +122,7 @@ type
   TPasSemaProject = class
   private
     FPlatform: TPasPlatform;
+    FCompilerVersion: Double;   // emulated dcc: VERnnn + $IF CompilerVersion
     FInfo: TPasPlatformInfo;
     FSM: TPasSourceManager;
     FDefines: TPasDefines;
@@ -733,12 +734,16 @@ type
     procedure RunCrossTypePass(ACount: Integer);
   public
     constructor Create(APlatform: TPasPlatform;
-      const ASearchPaths: TArray<string>; const AExtraDefines: TArray<string>);
+      const ASearchPaths: TArray<string>; const AExtraDefines: TArray<string>;
+      ACompilerVersion: Double = DEFAULT_COMPILER_VERSION);
     destructor Destroy; override;
     // True = run every stage on the calling thread (emulates the sequential
     // driver exactly; results are identical either way - the parallel stages
     // are pure per unit). Default False (one worker per core).
     property SingleThreaded: Boolean read FSingleThreaded write FSingleThreaded;
+    // The compiler version this project emulates (VERnnn define, CompilerVersion
+    // and RTLVersion in $IF); fixed at Create.
+    property CompilerVersion: Double read FCompilerVersion;
     { OPT-IN diagnostic, default OFF: report a member after a dot that no
       lookup could resolve, as `E2003` on the member's own name. dcc reports
       such a name and we do not, so this is a real gap - but the member walk
@@ -1347,11 +1352,18 @@ begin
   // deadlock escape for tasks that BLOCK on other queued tasks, so no task
   // scheduled on the default pool may wait on another queued task. The
   // analyzer's passes never do (fork-join only, joins on the caller).
+  // The switch exists from Delphi 12 (RTLVersion 36 - spelled so because the
+  // CompilerVersion PROPERTY above shadows the intrinsic in $IF). 11.x has no
+  // such property and always inflates the pool on blocked workers; the same
+  // fork-join-only contract keeps that from mattering there.
+  {$IF RTLVersion >= 36}
   TThreadPool.Default.UnlimitedWorkerThreadsWhenBlocked := False;
+  {$ENDIF}
 end;
 
 constructor TPasSemaProject.Create(APlatform: TPasPlatform;
-  const ASearchPaths: TArray<string>; const AExtraDefines: TArray<string>);
+  const ASearchPaths: TArray<string>; const AExtraDefines: TArray<string>;
+  ACompilerVersion: Double);
 var
   LName: string;
 begin
@@ -1360,13 +1372,14 @@ begin
   FInternalLock := TObject.Create;
   FPlatform := APlatform;
   FInfo := PlatformInfo(APlatform);
+  FCompilerVersion := ACompilerVersion;
   FSM := TPasSourceManager.Create(ASearchPaths);
-  FDefines := CreatePlatformDefines(APlatform);
+  FDefines := CreatePlatformDefines(APlatform, ACompilerVersion);
   FExtraDefines := AExtraDefines;   // kept verbatim for AdoptParseDonor's gate
   for LName in AExtraDefines do
     FDefines.Define(LName);
-  FPP := TPasPreprocessor.Create(FSM, FDefines, 37.0, FInfo.PointerBytes,
-    FInfo.ExtendedBytes);
+  FPP := TPasPreprocessor.Create(FSM, FDefines, FCompilerVersion,
+    FInfo.PointerBytes, FInfo.ExtendedBytes);
   FPPPool := TList<TPasPreprocessor>.Create;
   FPPPoolLock := TCriticalSection.Create;
   FSeedModel := TPasSemaModel.Create(Default(TPasTree));
@@ -1750,6 +1763,7 @@ begin
   // Config gate: a donor built under ANY other configuration could hand back
   // a tree whose preprocessed stream this project would never produce.
   if (ADonor = Self) or (ADonor.FPlatform <> FPlatform) or
+     (ADonor.FCompilerVersion <> FCompilerVersion) or
      (Length(ADonor.FExtraDefines) <> Length(FExtraDefines)) then
     Exit(False);
   for LIdx := 0 to High(FExtraDefines) do
@@ -2021,7 +2035,7 @@ begin
   if LInit = NIL_NODE then
     Exit;
   LCtx := Default(TPasCondContext);
-  LCtx.CompilerVersion := 37.0;
+  LCtx.CompilerVersion := FCompilerVersion;
   LCtx.PointerBytes := FInfo.PointerBytes;
   LCtx.ExtendedBytes := FInfo.ExtendedBytes;
   LCtx.OnSymbol :=
@@ -2706,7 +2720,7 @@ begin
   if ADepth > 8 then
     Exit(False);
   LCtx := Default(TPasCondContext);
-  LCtx.CompilerVersion := 37.0;
+  LCtx.CompilerVersion := FCompilerVersion;
   LCtx.PointerBytes := FInfo.PointerBytes;
   LCtx.ExtendedBytes := FInfo.ExtendedBytes;
   LCtx.OnSymbol :=
@@ -3228,7 +3242,7 @@ begin
   // Bounds may themselves be constants - evaluate with the same recursive
   // const context OracleConstNum builds.
   LCtx := Default(TPasCondContext);
-  LCtx.CompilerVersion := 37.0;
+  LCtx.CompilerVersion := FCompilerVersion;
   LCtx.PointerBytes := FInfo.PointerBytes;
   LCtx.ExtendedBytes := FInfo.ExtendedBytes;
   LCtx.OnSymbol :=
@@ -3632,8 +3646,8 @@ begin
     FPPPoolLock.Leave;
   end;
   if Result = nil then
-    Result := TPasPreprocessor.Create(FSM, FDefines, 37.0, FInfo.PointerBytes,
-      FInfo.ExtendedBytes);
+    Result := TPasPreprocessor.Create(FSM, FDefines, FCompilerVersion,
+      FInfo.PointerBytes, FInfo.ExtendedBytes);
   // A previous renter's callbacks must never answer this run's questions.
   Result.OnDeclared := nil;
   Result.OnSymbol := nil;

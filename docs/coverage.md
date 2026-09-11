@@ -44,8 +44,10 @@ README's own section on that).
   diagnosed (ppUnsupportedInsertion) but no value is injected.
 
 ### 1.3.5 Compiler-version symbols
-- VERxxx seeding is hardcoded to VER370 regardless of the
-  compiler-version parameter; there is no per-version derivation.
+- the VERxxx symbol and CompilerVersion/RTLVersion follow the one
+  compiler version a project is created with (default 37.0); a host
+  cannot mix versions inside one project, and no other version-dependent
+  behaviour (language features gated per release) is emulated.
 
 ## 02-fundamental-types.md
 

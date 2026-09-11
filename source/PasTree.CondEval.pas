@@ -372,6 +372,22 @@ begin
     Exit(True);
   end;
 
+  // The legacy 6-byte float: 6 bytes of storage aligned to 8, not to 6 -
+  // dcc-probed (`record A: Byte; F: Real48; end` is 16 on both targets), so
+  // the scalar rule below would get it wrong.
+  if SameText(AName, 'Real48') then
+  begin
+    ASize := 6;
+    AAlign := 8;
+    Exit(True);
+  end;
+
+  // The names below are the ones SeedSystemScope registers as BUILTIN types
+  // (skBuiltinType, no declaration to walk) - every one of them must have a
+  // row here, or SizeOf() of a record holding it refuses. Real/Comp and the
+  // sized Booleans were missing until 2026-09-11: Delphi 11's TValueData has
+  // an FAsComp branch, so `{$IF SizeOf(TValue) = 32}` in its System.Rtti
+  // stayed undecidable.
   Result := True;
   if SameText(AName, 'Pointer') or SameText(AName, 'NativeInt') or
      SameText(AName, 'NativeUInt') then
@@ -379,17 +395,20 @@ begin
   else if SameText(AName, 'Extended') then
     ASize := AExtendedBytes
   else if SameText(AName, 'Int64') or SameText(AName, 'UInt64') or
-    SameText(AName, 'Double') or SameText(AName, 'Currency') then
+    SameText(AName, 'Double') or SameText(AName, 'Currency') or
+    SameText(AName, 'Real') or SameText(AName, 'Comp') then
     ASize := 8
   else if SameText(AName, 'Integer') or SameText(AName, 'Cardinal') or
     SameText(AName, 'LongInt') or SameText(AName, 'LongWord') or
-    SameText(AName, 'Single') then
+    SameText(AName, 'Single') or SameText(AName, 'LongBool') then
     ASize := 4
   else if SameText(AName, 'Char') or SameText(AName, 'WideChar') or
-    SameText(AName, 'Word') or SameText(AName, 'SmallInt') then
+    SameText(AName, 'Word') or SameText(AName, 'SmallInt') or
+    SameText(AName, 'WordBool') then
     ASize := 2
   else if SameText(AName, 'AnsiChar') or SameText(AName, 'Byte') or
-    SameText(AName, 'ShortInt') or SameText(AName, 'Boolean') then
+    SameText(AName, 'ShortInt') or SameText(AName, 'Boolean') or
+    SameText(AName, 'ByteBool') then
     ASize := 1
   else
   begin

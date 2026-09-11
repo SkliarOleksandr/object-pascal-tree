@@ -4361,6 +4361,17 @@ begin
     // (TMeth above, TR16) aligns to 4. The two together pin the difference.
     '  TProcOO = procedure(A: Integer) of object;'#10 +
     '  TS08 = record A: Byte; F: TProcOO; end;'#10 +         // 16, not 12
+    // The BUILTIN scalars SeedSystemScope registers without a declaration to
+    // walk: each needs its own row in PasBuiltinLayout. Real/Comp/Real48 and
+    // the sized Booleans had none (Delphi 11's TValueData carries an FAsComp
+    // branch, so SizeOf(TValue) refused). dcc32/dcc64-measured 2026-09-11;
+    // Real48 is 6 bytes ALIGNED TO 8, not to 6.
+    '  TF01 = record A: Byte; F: Comp; end;'#10 +            // 16
+    '  TF02 = record A: Byte; F: Real; end;'#10 +            // 16
+    '  TF03 = record A: Byte; F: Real48; end;'#10 +          // 16
+    '  TF04 = record A: Byte; F: LongBool; end;'#10 +        // 8
+    '  TF05 = record A: Byte; F: WordBool; end;'#10 +        // 4
+    '  TF06 = record A: Byte; F: ByteBool; end;'#10 +        // 2
     // Static arrays, standalone and as fields. The last two pin that the
     // array's alignment is its ELEMENT's, not its size.
     '  TE5 = (q0, q1, q2, q3, q4);'#10 +
@@ -4476,6 +4487,12 @@ begin
     '{$IF SizeOf(TS06) = 8}type MS06 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TS07) = 8}type MS07 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TS08) = 16}type MS08 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TF01) = 16}type MF01 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TF02) = 16}type MF02 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TF03) = 16}type MF03 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TF04) = 8}type MF04 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TF05) = 4}type MF05 = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TF06) = 2}type MF06 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TSub) = 1}type MSub = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TB01) = 12}type MB01 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TB02) = 1024}type MB02 = class end;{$IFEND}'#10 +
@@ -4550,6 +4567,12 @@ begin
     Ok('1.3.2 layout: string/ShortString/string[N]/Variant/interface/class/' +
       'dynarray/method-pointer fields and a subrange type all size and ALIGN ' +
       'as measured (missing:' + LMissing + ')', LMissing = '');
+    LMissing := '';
+    for var LM in ['mf01', 'mf02', 'mf03', 'mf04', 'mf05', 'mf06'] do
+      if SymCountOf(LLay, LM, skType) <> 1 then
+        LMissing := LMissing + ' ' + LM;
+    Ok('1.3.2 layout: Comp/Real/Real48 and ByteBool/WordBool/LongBool fields ' +
+      'size and align as measured (missing:' + LMissing + ')', LMissing = '');
     LMissing := '';
     for var LM in ['mb01', 'mb02', 'mb03', 'mb04', 'mb05', 'mb06', 'mb07',
                    'mb08', 'mc01', 'mc02', 'mc03', 'mc04'] do

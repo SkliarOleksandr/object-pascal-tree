@@ -68,7 +68,8 @@ type
       project main source, or the files of a directory); APriority names files
       to analyze first (the open editor module + its direct uses). }
     constructor Create(APlatform: TPasPlatform;
-      const ASearchPaths, AExtraDefines, ARoots, APriority: TArray<string>);
+      const ASearchPaths, AExtraDefines, ARoots, APriority: TArray<string>;
+      ACompilerVersion: Double = DEFAULT_COMPILER_VERSION);
     { SINGLE-MODULE mode (incremental plan, stage B), the keystroke path: takes
       OWNERSHIP of AProject - the host's last-good, fully analyzed project -
       and, on Start, re-analyzes APath in place via
@@ -173,10 +174,12 @@ end;
 { TPasAsyncSession }
 
 constructor TPasAsyncSession.Create(APlatform: TPasPlatform;
-  const ASearchPaths, AExtraDefines, ARoots, APriority: TArray<string>);
+  const ASearchPaths, AExtraDefines, ARoots, APriority: TArray<string>;
+  ACompilerVersion: Double);
 begin
   inherited Create;
-  FProject := TPasSemaProject.Create(APlatform, ASearchPaths, AExtraDefines);
+  FProject := TPasSemaProject.Create(APlatform, ASearchPaths, AExtraDefines,
+    ACompilerVersion);
   FRoots := ARoots;
   FPriority := APriority;
   FCancelFlag := 0;

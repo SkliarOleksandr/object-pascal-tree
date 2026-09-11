@@ -228,7 +228,8 @@ type
     // direction, and just as visible: the greyed line is the second one on
     // screen when the project opens.
     procedure SetContext(const AFilePath: string;
-      const ASearchPaths, ADefines: TArray<string>; APlatform: TPasPlatform);
+      const ASearchPaths, ADefines: TArray<string>; APlatform: TPasPlatform;
+      ACompilerVersion: Double = DEFAULT_COMPILER_VERSION);
     procedure SetSameIdentColor(AColor: TColor);
   end;
 
@@ -404,7 +405,8 @@ begin
 end;
 
 procedure TPasTreeSynHighlighter.SetContext(const AFilePath: string;
-  const ASearchPaths, ADefines: TArray<string>; APlatform: TPasPlatform);
+  const ASearchPaths, ADefines: TArray<string>; APlatform: TPasPlatform;
+  ACompilerVersion: Double);
 var
   LPaths: TArray<string>;
   LName: string;
@@ -420,13 +422,14 @@ begin
   FSourceManager.Free;
   FDefines.Free;
   FSourceManager := TPasSourceManager.Create(LPaths);
-  FDefines := CreatePlatformDefines(APlatform);
+  FDefines := CreatePlatformDefines(APlatform, ACompilerVersion);
   // Added, not substituted: the project's defines sit ON TOP of the platform
   // preset, which is the order TPasSemaProject uses too.
   for LName in ADefines do
     FDefines.Define(LName);
-  FPreprocessor := TPasPreprocessor.Create(FSourceManager, FDefines, 37.0,
-    PlatformInfo(APlatform).PointerBytes, PlatformInfo(APlatform).ExtendedBytes);
+  FPreprocessor := TPasPreprocessor.Create(FSourceManager, FDefines,
+    ACompilerVersion, PlatformInfo(APlatform).PointerBytes,
+    PlatformInfo(APlatform).ExtendedBytes);
   // The cached tokenization was produced under the OLD context; the text has
   // not changed, so EnsureFresh's text compare would keep it.
   FCachedSource := #0;

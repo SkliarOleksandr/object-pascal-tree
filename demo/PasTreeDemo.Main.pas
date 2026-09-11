@@ -63,6 +63,12 @@ type
     literally where the analyzer first met the name). The summary row is
     double-clickable because of these three fields - a count alone tells you a
     library is missing but not which of your units asked for it. }
+  // One RAD Studio installation as the registry describes it.
+  TStudioInstall = record
+    Version: Double;   // BDS key: 22.0 (Delphi 11), 23.0 (12), 37.0 (13)
+    Root: string;      // RootDir without the trailing delimiter
+  end;
+
   TPasMissingUnit = record
     Count: Integer;
     FirstFile: string;
@@ -160,6 +166,7 @@ type
     btnParse: TButton;
     btnParseRtl: TButton;
     cbPlatform: TComboBox;
+    cbStudio: TComboBox;       // installed RAD Studio to analyze under
     cbConfig: TComboBox;       // build configuration (Debug/Release/...)
     cbHighlighter: TComboBox;
     cbThreading: TComboBox;    // background-analysis "phase done/total"
@@ -219,7 +226,8 @@ type
     btnShowSemantics: TButton;
     btnShowCoverage: TButton;
     btnStop: TButton;
-    lblProgress: TLabel;
+    lblProgress: TPanel;
+    lblDiagCount: TPanel; // total diagnostics from the last full analysis
     vtMessages: TVirtualStringTree;
     btnParseVcl: TButton;
     btnParseFmx: TButton;
@@ -267,6 +275,7 @@ type
       Column: TColumnIndex; TextType: TVSTTextType; var CellText: string);
     procedure vtMessagesDblClick(Sender: TObject);
     procedure cbConfigChange(Sender: TObject);
+    procedure cbStudioChange(Sender: TObject);
     procedure cbHighlighterChange(Sender: TObject);
     procedure cbHighlightColorChange(Sender: TObject);
     procedure cbHighlightColorGetColors(Sender: TCustomColorBox; Items: TStrings);
@@ -447,7 +456,13 @@ type
     // model's file list - 3747 of them on the real project. One entry is all the
     // pattern needs, since a hover asks the same question repeatedly.
     FNameCacheKey, FNameCacheFile: string;
-    FStudioRoot: string;           // RAD Studio root (for RTL search paths)
+    // The RAD Studio the analysis runs under: every install found (registry,
+    // highest first), the selected one's root (RTL/IDE search paths, the lib
+    // index, the generated VCL/FMX packages) and its dcc version (VERnnn +
+    // CompilerVersion in $IF). See cbStudio.
+    FStudios: TArray<TStudioInstall>;
+    FStudioRoot: string;
+    FCompilerVersion: Double;
     // Persisted demo settings (recent projects + the sticky combos), in an .ini
     // beside the executable. See PasTreeDemo.Settings.
     FSettings: TDemoSettings;
@@ -544,7 +559,9 @@ type
     function ElapsedText(AMs: Int64): string;
     procedure LogMissingUnits(AMissing: TDictionary<string, TPasMissingUnit>);
     function EffectiveNamespaces(APlatform: TPasPlatform): TArray<string>;
-    function StudioRoot: string;
+    function InstalledStudios: TArray<TStudioInstall>;
+    procedure PopulateStudios;
+    procedure ApplyStudio(AIndex: Integer);
     function ExtraSearchPaths: TArray<string>;
     // TPasNavigator + the rename gate its LibraryPaths carries: the IDE's
     // registry library/browsing paths are somebody ELSE's sources (RTL, VCL,
@@ -787,43 +804,43 @@ begin
 end;
 
 const
+  { Classic concatenation, not a Delphi 12 multiline literal ('''): the demo
+    still builds on 11.x. }
   SAMPLE_DPR =
-  '''
-  program Sample;
-
-  {$APPTYPE CONSOLE}
-
-  uses
-    System.SysUtils;
-
-  type
-    TMyInt = Integer;
-
-  const
-    CBYTESLEN = 8;
-
-  var
-    S: string;
-    MyInt: TMyInt;
-    Bytes: TBytes;
-    Arr: TArray<Integer>;
-
-  function CreateBytes(ALen: Integer): TBytes; forward;
-
-  function CreateBytes(ALen: Integer): TBytes;
-  begin
-    SetLength(Result, ALen);
-  end;
-
-  begin
-    S := System.sLineBreak;
-    Arr := [1, 2, 3];
-    MyInt := 42;
-    Bytes := CreateBytes(CBYTESLEN);
-    Writeln('Hello, world!');
-    Readln;
-  end.
-  ''';
+    'program Sample;' + sLineBreak +
+    '' + sLineBreak +
+    '{$APPTYPE CONSOLE}' + sLineBreak +
+    '' + sLineBreak +
+    'uses' + sLineBreak +
+    '  System.SysUtils;' + sLineBreak +
+    '' + sLineBreak +
+    'type' + sLineBreak +
+    '  TMyInt = Integer;' + sLineBreak +
+    '' + sLineBreak +
+    'const' + sLineBreak +
+    '  CBYTESLEN = 8;' + sLineBreak +
+    '' + sLineBreak +
+    'var' + sLineBreak +
+    '  S: string;' + sLineBreak +
+    '  MyInt: TMyInt;' + sLineBreak +
+    '  Bytes: TBytes;' + sLineBreak +
+    '  Arr: TArray<Integer>;' + sLineBreak +
+    '' + sLineBreak +
+    'function CreateBytes(ALen: Integer): TBytes; forward;' + sLineBreak +
+    '' + sLineBreak +
+    'function CreateBytes(ALen: Integer): TBytes;' + sLineBreak +
+    'begin' + sLineBreak +
+    '  SetLength(Result, ALen);' + sLineBreak +
+    'end;' + sLineBreak +
+    '' + sLineBreak +
+    'begin' + sLineBreak +
+    '  S := System.sLineBreak;' + sLineBreak +
+    '  Arr := [1, 2, 3];' + sLineBreak +
+    '  MyInt := 42;' + sLineBreak +
+    '  Bytes := CreateBytes(CBYTESLEN);' + sLineBreak +
+    '  Writeln(''Hello, world!'');' + sLineBreak +
+    '  Readln;' + sLineBreak +
+    'end.';
 
 { helpers }
 
@@ -2378,7 +2395,7 @@ begin
   // see AppMessage.
   Application.OnMessage := AppMessage;
   FPlatform := pfWin32;
-  FStudioRoot := StudioRoot;   // resolve once; RTL search paths reuse it
+  FCompilerVersion := DEFAULT_COMPILER_VERSION;
   // Debounces re-analysis while typing: an edit (re)starts the timer, and only
   // when it fires (the user paused) do we re-analyze to refresh navigation.
   FReparseTimer := TTimer.Create(Self);
@@ -2392,6 +2409,7 @@ begin
   FAsyncTimer.OnTimer := AsyncTimerTick;
   FSettings := TDemoSettings.Create(DefaultSettingsFile);
   SetupControls;
+  PopulateStudios;   // after SetupControls (needs Log), before LoadSettings
   SetupRecentMenu;
   // After SetupControls, which fills the combos and picks their defaults -
   // the stored values are an override of those defaults, not a substitute.
@@ -3341,10 +3359,12 @@ begin
     // The REAL platform define set, then the project's on top - the same
     // context the analysis (and the highlighter) run under; a thinner set
     // fakes parse errors in the RTL (see CreatePlatformDefines).
-    FComplDefines := CreatePlatformDefines(FPlatform);
+    FComplDefines := CreatePlatformDefines(FPlatform, FCompilerVersion);
     for LName in FLastDefines do
       FComplDefines.Define(LName);
-    FComplPP := TPasPreprocessor.Create(FComplSM, FComplDefines);
+    FComplPP := TPasPreprocessor.Create(FComplSM, FComplDefines,
+      FCompilerVersion, PlatformInfo(FPlatform).PointerBytes,
+      PlatformInfo(FPlatform).ExtendedBytes);
   end;
   Result := True;
 end;
@@ -3530,7 +3550,8 @@ begin
     FreeAndNil(FSemaProject);
     FAnalyzeOverhead := FAnalyzeOverhead +
       Format('destroy=%d;', [LSW.ElapsedMilliseconds]);
-    FSemaProject := TPasSemaProject.Create(LPlatform, LSearchPaths, LDefines);
+    FSemaProject := TPasSemaProject.Create(LPlatform, LSearchPaths, LDefines,
+      FCompilerVersion);
     FSemaProject.SingleThreaded := cbThreading.ItemIndex = 0;
     // ALWAYS on in the demo, which is the host whose job is to show what the
     // analyzer still gets wrong: an unresolved member after a dot is a real gap
@@ -3732,6 +3753,15 @@ begin
       [FSemaProject.ModelCount, LDiagTotal, ElapsedText(AElapsedMs),
        MemoryText(AllocatedBytes), cbThreading.Text, LDiagListed,
        LDiagTotal - LDiagListed]));
+  // Same total as the Done line above, next to the progress label for a
+  // glance without opening the message window - red the moment it is
+  // nonzero, since a diagnostic anywhere in the closure is worth noticing
+  // even if what triggered it is the browsing/completion pass, not a build.
+  lblDiagCount.Caption := Format('%d diagnostics', [LDiagTotal]);
+  if LDiagTotal = 0 then
+    lblDiagCount.Font.Color := clWindowText
+  else
+    lblDiagCount.Font.Color := clRed;
   // Volume the parser actually processed. An $I include is counted once per
   // INCLUDING unit, because that is how many times it was really lexed and
   // parsed - the figure is work done, not distinct bytes on disk. Chars, not
@@ -3850,7 +3880,7 @@ begin
   InvalidateComplPipeline;            // config may have changed
   FAsyncModule := False;
   FAsyncSession := TPasAsyncSession.Create(LPlatform, LSearchPaths, LDefines,
-    LRoots, LPriority);
+    LRoots, LPriority, FCompilerVersion);
   FAsyncSession.SetSingleThreadedInner(cbThreading.ItemIndex = 0);
   FAsyncSession.SetReportUnresolvedMembers(True);   // see the synchronous path
   FAsyncSession.SetReportGuessedIfs(True);
@@ -4329,7 +4359,7 @@ var
   LPaths, LDefines: TArray<string>;
 begin
   if BuildConfig(LPlat, LPaths, LDefines) then
-    AHL.SetContext(APath, LPaths, LDefines, LPlat);
+    AHL.SetContext(APath, LPaths, LDefines, LPlat, FCompilerVersion);
 end;
 
 { Closes every source tab.
@@ -4507,6 +4537,7 @@ const
   SET_HIGHLIGHTER = 'Highlighter';
   SET_THREADING = 'Threading';
   SET_HIGHLIGHTCOLOR = 'HighlightColor';
+  SET_STUDIO = 'Studio';   // BDS version of the selected install, e.g. 22.0
 
 procedure TfrmMain.LoadSettings;
 begin
@@ -4521,6 +4552,17 @@ begin
   FIdentHighlightColor := TColor(FSettings.ReadInt(SET_HIGHLIGHTCOLOR,
     Integer(FIdentHighlightColor)));
   cbHighlightColor.Selected := FIdentHighlightColor;
+  // The remembered RAD Studio, matched by BDS version so a stale .ini (the
+  // install was removed) falls back to PopulateStudios' default silently.
+  var LStudio := FSettings.ReadString(SET_STUDIO, '');
+  for var LIdx := 0 to High(FStudios) do
+    if SameText(FormatFloat('0.0', FStudios[LIdx].Version,
+         TFormatSettings.Invariant), LStudio) and (cbStudio.ItemIndex <> LIdx)
+    then
+    begin
+      cbStudio.ItemIndex := LIdx;
+      ApplyStudio(LIdx);
+    end;
   // NB the target PLATFORM is deliberately NOT persisted. OpenProject sets it
   // from the .dproj being opened, so a stored value would be overwritten
   // before it was ever visible - remembering it would be a setting that does
@@ -4532,6 +4574,9 @@ begin
   FSettings.WriteInt(SET_HIGHLIGHTER, cbHighlighter.ItemIndex);
   FSettings.WriteInt(SET_THREADING, cbThreading.ItemIndex);
   FSettings.WriteInt(SET_HIGHLIGHTCOLOR, Integer(FIdentHighlightColor));
+  if (cbStudio.ItemIndex >= 0) and (cbStudio.ItemIndex <= High(FStudios)) then
+    FSettings.WriteString(SET_STUDIO, FormatFloat('0.0',
+      FStudios[cbStudio.ItemIndex].Version, TFormatSettings.Invariant));
 end;
 
 { event handlers }
@@ -4558,25 +4603,26 @@ begin
   RunParse;
 end;
 
-// The RAD Studio installation root: %BDS% (set under a RAD Studio command
-// prompt) if present, else the registry (current user then machine-wide,
-// highest installed version). '' if none found.
-function TfrmMain.StudioRoot: string;
+
+
+// Every RAD Studio installation the registry knows (current user, then
+// machine-wide; a version present in both counts once), highest version
+// first. Only keys whose RootDir exists are kept. Empty when none is found.
+function TfrmMain.InstalledStudios: TArray<TStudioInstall>;
 const
   ROOTS: array [0 .. 1] of HKEY = (HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE);
 var
   LReg: TRegistry;
   LKeys: TStringList;
   LIdx: Integer;
-  LBest: Double;
   LVer: Double;
   LDir: string;
+  LList: TList<TStudioInstall>;
+  LSeen: TDictionary<Double, Boolean>;
+  LInstall: TStudioInstall;
 begin
-  Result := GetEnvironmentVariable('BDS');
-  if (Result <> '') and TDirectory.Exists(Result) then
-    Exit(ExcludeTrailingPathDelimiter(Result));
-  Result := '';
-  LBest := 0;
+  LList := TList<TStudioInstall>.Create;
+  LSeen := TDictionary<Double, Boolean>.Create;
   LKeys := TStringList.Create;
   try
     for LIdx := Low(ROOTS) to High(ROOTS) do
@@ -4590,13 +4636,13 @@ begin
         LReg.GetKeyNames(LKeys);
         for var LKey in LKeys do
           if TryStrToFloat(LKey, LVer, TFormatSettings.Invariant) and
-             (LVer > LBest) and
+             not LSeen.ContainsKey(LVer) and
              LReg.OpenKeyReadOnly('\SOFTWARE\Embarcadero\BDS\' + LKey) then
           begin
             LDir := LReg.ReadString('RootDir');
             if (LDir <> '') and TDirectory.Exists(LDir) then
             begin
-              LBest := LVer;
+              LInstall.Version := LVer;
               // WITHOUT the trailing '\' the registry writes ('...\23.0\'):
               // ReadIdePaths matches this value against the same RootDir
               // through ExcludeTrailingPathDelimiter, and while the slash
@@ -4605,16 +4651,113 @@ begin
               // was silently lost, leaving only the four bare-RTL fallback
               // dirs. That is what turned Vcl.Forms and every third-party
               // FastMM4 into F1027 on a project that compiles.
-              Result := ExcludeTrailingPathDelimiter(LDir);
+              LInstall.Root := ExcludeTrailingPathDelimiter(LDir);
+              LList.Add(LInstall);
+              LSeen.Add(LVer, True);
             end;
           end;
       finally
         LReg.Free;
       end;
     end;
+    LList.Sort(TComparer<TStudioInstall>.Construct(
+      function(const L, R: TStudioInstall): Integer
+      begin
+        Result := CompareValue(R.Version, L.Version);   // highest first
+      end));
+    Result := LList.ToArray;
   finally
     LKeys.Free;
+    LSeen.Free;
+    LList.Free;
   end;
+end;
+
+// Fills cbStudio from InstalledStudios and applies the default: the install
+// %BDS% points at (set under a RAD Studio command prompt), else the highest.
+// LoadSettings overrides that with the remembered choice afterwards.
+procedure TfrmMain.PopulateStudios;
+const
+  // Product names by BDS version, for a caption that reads at a glance.
+  // An unknown version shows as the bare BDS number.
+  KNOWN: array [0 .. 2] of record V: Double; N: string; end = (
+    (V: 22.0; N: 'Delphi 11'), (V: 23.0; N: 'Delphi 12'),
+    (V: 37.0; N: 'Delphi 13'));
+var
+  LBds: string;
+  LDefault: Integer;
+  LName: string;
+begin
+  FStudios := InstalledStudios;
+  cbStudio.Items.BeginUpdate;
+  try
+    cbStudio.Items.Clear;
+    for var LInstall in FStudios do
+    begin
+      LName := '';
+      for var LKnown in KNOWN do
+        if SameValue(LKnown.V, LInstall.Version) then
+          LName := LKnown.N + ' ';
+      cbStudio.Items.Add(Format('%s(%s)', [LName,
+        FormatFloat('0.0', LInstall.Version, TFormatSettings.Invariant)]));
+    end;
+  finally
+    cbStudio.Items.EndUpdate;
+  end;
+  cbStudio.Enabled := Length(FStudios) > 0;
+  if Length(FStudios) = 0 then
+  begin
+    Log('RAD Studio installation not found - RTL/VCL sources unavailable.');
+    ApplyStudio(-1);
+    Exit;
+  end;
+  LDefault := 0;
+  LBds := ExcludeTrailingPathDelimiter(GetEnvironmentVariable('BDS'));
+  if LBds <> '' then
+    for var LIdx := 0 to High(FStudios) do
+      if SameText(FStudios[LIdx].Root, LBds) then
+        LDefault := LIdx;
+  cbStudio.ItemIndex := LDefault;
+  ApplyStudio(LDefault);
+end;
+
+// Makes FStudios[AIndex] the install everything reads: FStudioRoot (RTL/IDE
+// search paths, the Win32 lib index, the generated VCL/FMX packages) and the
+// compiler version the analysis emulates (VERnnn, CompilerVersion/RTLVersion
+// in $IF - BDS 22.0 is dcc 35.0, 23.0 is 36.0, 37.0 is 37.0: the two numbers
+// diverged for 11 and 12 and met again at 13). Drops every cache derived from
+// the previous install. -1 = no install: bare defaults, no RTL paths.
+procedure TfrmMain.ApplyStudio(AIndex: Integer);
+begin
+  if (AIndex < 0) or (AIndex > High(FStudios)) then
+  begin
+    FStudioRoot := '';
+    FCompilerVersion := DEFAULT_COMPILER_VERSION;
+  end
+  else
+  begin
+    FStudioRoot := FStudios[AIndex].Root;
+    if SameValue(FStudios[AIndex].Version, 22.0) then
+      FCompilerVersion := 35.0
+    else if SameValue(FStudios[AIndex].Version, 23.0) then
+      FCompilerVersion := 36.0
+    else
+      FCompilerVersion := FStudios[AIndex].Version;
+  end;
+  FExtraSearchPathsBuilt := False;   // registry paths are per install
+  InvalidateComplPipeline;           // defines (VERnnn) changed
+end;
+
+procedure TfrmMain.cbStudioChange(Sender: TObject);
+begin
+  ApplyStudio(cbStudio.ItemIndex);
+  if FStudioRoot <> '' then
+    Log(Format('RAD Studio: %s at %s (dcc %s)', [cbStudio.Text, FStudioRoot,
+      FormatFloat('0.0', FCompilerVersion, TFormatSettings.Invariant)]));
+  // Re-OPEN like a configuration change: the install decides the RTL/IDE
+  // search paths and the VERnnn define, so the last analysis is stale.
+  if FProjectFile <> '' then
+    OpenProject(FProjectFile);
 end;
 
 // Source directories the IDE ITSELF uses to resolve go-to-declaration
@@ -4774,44 +4917,44 @@ begin
 end;
 
 const
-  CDPKTemplate = '''
-package %s;
-
-{$R *.res}
-{$IFDEF IMPLICITBUILDING This IFDEF should not be used by users}
-{$ALIGN 8}
-{$ASSERTIONS ON}
-{$BOOLEVAL OFF}
-{$DEBUGINFO OFF}
-{$EXTENDEDSYNTAX ON}
-{$IMPORTEDDATA ON}
-{$IOCHECKS ON}
-{$LOCALSYMBOLS ON}
-{$LONGSTRINGS ON}
-{$OPENSTRINGS ON}
-{$OPTIMIZATION ON}
-{$OVERFLOWCHECKS OFF}
-{$RANGECHECKS OFF}
-{$REFERENCEINFO OFF}
-{$SAFEDIVIDE OFF}
-{$STACKFRAMES OFF}
-{$TYPEDADDRESS OFF}
-{$VARSTRINGCHECKS ON}
-{$WRITEABLECONST OFF}
-{$MINENUMSIZE 1}
-{$IMAGEBASE $400000}
-{$DEFINE RELEASE}
-{$ENDIF IMPLICITBUILDING}
-{$RUNONLY}
-{$IMPLICITBUILD OFF}
-
-requires
-  rtl;
-
-contains
-%s;
-end.
-''';
+  { See SAMPLE_DPR: classic concatenation so the demo builds on 11.x. }
+  CDPKTemplate =
+    'package %s;' + sLineBreak +
+    '' + sLineBreak +
+    '{$R *.res}' + sLineBreak +
+    '{$IFDEF IMPLICITBUILDING This IFDEF should not be used by users}' + sLineBreak +
+    '{$ALIGN 8}' + sLineBreak +
+    '{$ASSERTIONS ON}' + sLineBreak +
+    '{$BOOLEVAL OFF}' + sLineBreak +
+    '{$DEBUGINFO OFF}' + sLineBreak +
+    '{$EXTENDEDSYNTAX ON}' + sLineBreak +
+    '{$IMPORTEDDATA ON}' + sLineBreak +
+    '{$IOCHECKS ON}' + sLineBreak +
+    '{$LOCALSYMBOLS ON}' + sLineBreak +
+    '{$LONGSTRINGS ON}' + sLineBreak +
+    '{$OPENSTRINGS ON}' + sLineBreak +
+    '{$OPTIMIZATION ON}' + sLineBreak +
+    '{$OVERFLOWCHECKS OFF}' + sLineBreak +
+    '{$RANGECHECKS OFF}' + sLineBreak +
+    '{$REFERENCEINFO OFF}' + sLineBreak +
+    '{$SAFEDIVIDE OFF}' + sLineBreak +
+    '{$STACKFRAMES OFF}' + sLineBreak +
+    '{$TYPEDADDRESS OFF}' + sLineBreak +
+    '{$VARSTRINGCHECKS ON}' + sLineBreak +
+    '{$WRITEABLECONST OFF}' + sLineBreak +
+    '{$MINENUMSIZE 1}' + sLineBreak +
+    '{$IMAGEBASE $400000}' + sLineBreak +
+    '{$DEFINE RELEASE}' + sLineBreak +
+    '{$ENDIF IMPLICITBUILDING}' + sLineBreak +
+    '{$RUNONLY}' + sLineBreak +
+    '{$IMPLICITBUILD OFF}' + sLineBreak +
+    '' + sLineBreak +
+    'requires' + sLineBreak +
+    '  rtl;' + sLineBreak +
+    '' + sLineBreak +
+    'contains' + sLineBreak +
+    '%s;' + sLineBreak +
+    'end.';
 
 const
   { Dot-delimited name SEGMENTS marking a unit as belonging to a non-Windows

@@ -972,6 +972,30 @@ var
     SetString(Result, LP, LN);
   end;
 
+  // The SYMBOL a $IFDEF/$IFNDEF/$DEFINE/$UNDEF names: the leading identifier
+  // of the argument, whatever follows it ignored - dcc-probed (35.0 and 37.0
+  // agree): `{$ifdef CPU386)}` tests CPU386, `{$define FOO BAR}` defines FOO
+  // only. Delphi 11's getmem.inc ships the stray paren, and reading the whole
+  // argument as the name put Win32 on the Win64 branch (Move8 undeclared).
+  function SymbolArg: string;
+  var
+    LP: PChar;
+    LN, LIdent: Integer;
+  begin
+    LP := LText + LNameLen;
+    LN := LLen - LNameLen;
+    while (LN > 0) and (LP^ <= ' ') do
+    begin
+      Inc(LP);
+      Dec(LN);
+    end;
+    LIdent := 0;
+    while (LIdent < LN) and
+          CharInSet(LP[LIdent], ['A'..'Z', 'a'..'z', '0'..'9', '_']) do
+      Inc(LIdent);
+    SetString(Result, LP, LIdent);
+  end;
+
 begin
   // The directive body as a SLICE of the file source - this runs for every
   // {$...} token, including those inside skipped regions, and the old
@@ -1011,7 +1035,7 @@ begin
   // ---- conditionals (always processed, active or not) ----
   if LKind = pdIfdef then
   begin
-    LArg := Arg;
+    LArg := SymbolArg;
     LParent := Active;
     LTaken := LParent and FDefines.IsDefined(LArg);
     FCondParentActive.Add(LParent);
@@ -1022,7 +1046,7 @@ begin
   else if LKind = pdIfndef then
   begin
     LParent := Active;
-    LTaken := LParent and not FDefines.IsDefined(Arg);
+    LTaken := LParent and not FDefines.IsDefined(SymbolArg);
     FCondParentActive.Add(LParent);
     FCondAnyTaken.Add(LTaken);
     FCondThisActive.Add(LTaken);
@@ -1105,9 +1129,9 @@ begin
   else if not Active then
     // ignore
   else if LKind = pdDefine then
-    FDefines.Define(Arg)
+    FDefines.Define(SymbolArg)
   else if LKind = pdUndef then
-    FDefines.Undefine(Arg)
+    FDefines.Undefine(SymbolArg)
   else if LKind = pdInclude then
   begin
     LArg := Arg;
