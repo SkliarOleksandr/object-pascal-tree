@@ -1026,6 +1026,39 @@ begin
       Exit((AHits[LIdx].Kind = AKind) and (AHits[LIdx].Active = AActive));
 end;
 
+// A FindDefines / DefinesAt row by NAME and origin; for a unit row the file,
+// line and col are checked too (a base row's position is the main module's
+// header or nothing, which the caller checks by hand where it matters).
+function HasSite(const ASites: TArray<TPasDefineSite>; const AName: string;
+  AOrigin: TPasDefineOrigin; AActive: Boolean; const AFile: string = '';
+  ALine: Integer = 0; ACol: Integer = 0): Boolean;
+var
+  LIdx: Integer;
+begin
+  Result := False;
+  for LIdx := 0 to High(ASites) do
+    if SameText(ASites[LIdx].Name, AName) and
+       (ASites[LIdx].Origin = AOrigin) and
+       (ASites[LIdx].Active = AActive) and
+       ((AOrigin <> doUnit) or
+        (SameText(TPath.GetFileName(ASites[LIdx].Hit.FilePath), AFile) and
+         (ASites[LIdx].Hit.Line = ALine) and
+         (ASites[LIdx].Hit.Col = ACol))) then
+      Exit(True);
+end;
+
+// How many rows carry AName at all (any origin, any activity).
+function SiteCount(const ASites: TArray<TPasDefineSite>;
+  const AName: string): Integer;
+var
+  LIdx: Integer;
+begin
+  Result := 0;
+  for LIdx := 0 to High(ASites) do
+    if SameText(ASites[LIdx].Name, AName) then
+      Inc(Result);
+end;
+
 // One Find Overrides row: the declaring class, its kind, and the LINE its
 // declaration sits on (the column is the class body's own indentation, which
 // the fixture comments already pin for the rows that matter).
@@ -1149,6 +1182,7 @@ var
   LDefMid, LRaw: Integer;
   LDefRefs: TArray<TPasDefineRef>;
   LDefHits: TArray<TPasDefineHit>;
+  LSites: TArray<TPasDefineSite>;
   LRTarget: TPasNavTarget;
 begin
   GCounter.Init;
@@ -1655,6 +1689,54 @@ begin
         and not GNav.IsProjectDefined('NAVFOO'));
       Ok('FindDefineReferences: WIN32 - the one Defined() row',
         (Length(GNav.FindDefineReferences('WIN32')) = 1));
+
+      // FindDefines: every $DEFINE site (dead ones flagged), the include's
+      // too, then the platform set - no main module here, so a base row has
+      // no position. No project defines were given to the ctor.
+      LSites := GNav.FindDefines;
+      Ok('FindDefines: $DEFINE NAVFOO row (NavDef.pas 2:10, active)',
+        HasSite(LSites, 'NAVFOO', doUnit, True, 'NavDef.pas', 2, 10));
+      Ok('FindDefines: the include''s $DEFINE NAVINC (NavDef.inc 2:10)',
+        HasSite(LSites, 'NAVINC', doUnit, True, 'NavDef.inc', 2, 10));
+      Ok('FindDefines: the dead $DEFINE NAVBAR is listed INACTIVE',
+        HasSite(LSites, 'NAVBAR', doUnit, False, 'NavDef.pas', 11, 10));
+      Ok('FindDefines: WIN32 is a platform row',
+        HasSite(LSites, 'WIN32', doPlatform, True) and
+        HasSite(LSites, 'MSWINDOWS', doPlatform, True));
+      Ok('FindDefines: no project rows (none given), no $UNDEF rows',
+        not HasSite(LSites, 'WIN32', doProject, True) and
+        (SiteCount(LSites, 'NAVFOO') = 1));
+      Ok('FindDefines: a platform row names itself and has no position here',
+        (Length(LSites) > 0) and (LSites[High(LSites)].Origin = doPlatform)
+        and (LSites[High(LSites)].Hit.Snippet = LSites[High(LSites)].Name)
+        and (LSites[High(LSites)].Hit.FilePath = '') and
+        (LSites[High(LSites)].Hit.HiTo = Length(LSites[High(LSites)].Name)));
+      Ok('FindDefines: unit rows first (by file), platform rows last',
+        (Length(LSites) > 3) and (LSites[0].Origin = doUnit) and
+        SameText(TPath.GetFileName(LSites[0].Hit.FilePath), 'NavDef.inc') and
+        (LSites[High(LSites)].Origin = doPlatform));
+
+      // DefinesAt: what an $IFDEF at the cursor would see.
+      LSites := GNav.DefinesAt(LDefMid, 5, 1);   // the $IFDEF line
+      Ok('DefinesAt line 5: NAVFOO from line 2, NAVINC from the include',
+        HasSite(LSites, 'NAVFOO', doUnit, True, 'NavDef.pas', 2, 10) and
+        HasSite(LSites, 'NAVINC', doUnit, True, 'NavDef.inc', 2, 10));
+      Ok('DefinesAt line 5: the dead NAVBAR is not in effect',
+        SiteCount(LSites, 'NAVBAR') = 0);
+      Ok('DefinesAt line 5: platform WIN32 still there, once',
+        HasSite(LSites, 'WIN32', doPlatform, True) and
+        (SiteCount(LSites, 'WIN32') = 1));
+      LSites := GNav.DefinesAt(LDefMid, 1, 1);   // before the $DEFINE
+      Ok('DefinesAt line 1: nothing unit-level yet',
+        (SiteCount(LSites, 'NAVFOO') = 0) and (SiteCount(LSites, 'NAVINC') = 0)
+        and HasSite(LSites, 'WIN32', doPlatform, True));
+      LSites := GNav.DefinesAt(LDefMid, 19, 1);  // after $UNDEF NAVFOO
+      Ok('DefinesAt line 19: $UNDEF took NAVFOO out, NAVINC stays',
+        (SiteCount(LSites, 'NAVFOO') = 0) and
+        HasSite(LSites, 'NAVINC', doUnit, True, 'NavDef.inc', 2, 10));
+      Ok('DefinesAt: no model (-1) -> the base set alone',
+        (SiteCount(GNav.DefinesAt(-1, 0, 0), 'NAVFOO') = 0) and
+        HasSite(GNav.DefinesAt(-1, 0, 0), 'WIN32', doPlatform, True));
 
       // TBytes: a used unit (NavC) declares it for real. Originally this
       // exercised SymbolAt's ResolveRealDecl REDIRECT (TBytes was seeded,
@@ -2589,6 +2671,22 @@ begin
         GNav.GotoDefine(GMidB, 6, 9, {out} LRTarget) and
         SameText(TPath.GetFileName(LRTarget.FilePath), 'NavMain.dpr') and
         (LRTarget.Line = 1) and (LRTarget.Col = 9));
+      // FindDefines / DefinesAt with a MAIN MODULE: a platform row lands on
+      // the program header, exactly where GotoDefine sends a project define.
+      LSites := GNav.FindDefines;
+      Ok('project: FindDefines lists the .dpr''s own $DEFINE',
+        HasSite(LSites, 'NAVMAINDEF', doUnit, True, 'NavMain.dpr', 3, 10));
+      Ok('project: a platform row points at the program header',
+        HasSite(LSites, 'WIN32', doPlatform, True) and
+        (Length(LSites) > 0) and (LSites[High(LSites)].Origin = doPlatform)
+        and SameText(TPath.GetFileName(LSites[High(LSites)].Hit.FilePath),
+          'NavMain.dpr') and (LSites[High(LSites)].Hit.Line = 1) and
+        (LSites[High(LSites)].Hit.Col = 9));
+      LSites := GNav.DefinesAt(GNav.ModelIdOf(TPath.Combine(LDir,
+        'NavMain.dpr')), 7, 1);
+      Ok('project: DefinesAt in the .dpr sees NAVMAINDEF and WIN32',
+        HasSite(LSites, 'NAVMAINDEF', doUnit, True, 'NavMain.dpr', 3, 10) and
+        HasSite(LSites, 'WIN32', doPlatform, True));
       // Either segment of the dotted, namespace-prefixed name opens the file.
       CheckNav('project uses: Deep.NavX -> namespace-prefixed file', 2, 27,
         'Deep', 'Wide.Deep.NavX.pas', 1, 6);

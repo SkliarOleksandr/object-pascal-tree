@@ -77,6 +77,26 @@ type
     Active: Boolean;
   end;
 
+  { One DEFINITION of a conditional symbol (FindDefines / DefinesAt): where
+    the name gets its value from. doUnit is a live `$DEFINE X` in a unit or
+    its include - Hit is the name inside it, exactly as FindDefineReferences
+    positions a row. doProject is a `.dproj` / command-line define, doPlatform
+    one of the compiler's predefined symbols (MSWINDOWS, CPUX64, VERnnn...):
+    neither has a source site, so Hit points at the MAIN MODULE's header
+    (the same landing GotoDefine uses) with Snippet = the name itself and
+    HiFrom/HiTo spanning it, so a host can show the row like any other. In
+    an analysis with no main module Hit.FilePath is '' and Line/Col are 0 -
+    a row to list, nothing to jump to. Active is False for a `$DEFINE` in a
+    dead branch (FindDefines lists those too, flagged, as FindDefineReferences
+    does); DefinesAt never returns one. }
+  TPasDefineOrigin = (doUnit, doProject, doPlatform);
+  TPasDefineSite = record
+    Hit: TPasRefHit;
+    Name: string;
+    Origin: TPasDefineOrigin;
+    Active: Boolean;
+  end;
+
   { One text replacement produced by PlanRename - the SAME identifier
     positions Find References reports (the declaration plus every resolved
     USE), turned into edits. Line/Col/Len address the OLD identifier in the
@@ -298,6 +318,18 @@ type
     // The DefineRefs index of the name under the caret (main file only), or
     // -1; the model is hydrated on the way (its LineStarts are needed).
     function DefineRefIndexAt(AMid, ALine, ACol: Integer): Integer;
+    // The main module's header (program/library/package name) as a target -
+    // where a project or platform define "comes from". False in an analysis
+    // with no main module (a bare directory of units).
+    function MainModuleTarget(const AName: string;
+      out ATarget: TPasNavTarget): Boolean;
+    // A doProject / doPlatform row for AName: the main module header (or no
+    // position at all) with the name as its own snippet.
+    function BaseDefineSite(const AName: string;
+      AOrigin: TPasDefineOrigin): TPasDefineSite;
+    // Sorts unit sites by file/line/col and collapses a shared include's
+    // duplicate rows (active wins), in place.
+    procedure SortAndCollapseSites(var ASites: TArray<TPasDefineSite>);
     procedure HitFromDefineRef(LM: TPasSemaModel; const ARef: TPasDefineRef;
       out AHit: TPasRefHit);
     // Declaration<->implementation toggle helpers (all pure CST walks - no
@@ -547,6 +579,25 @@ type
     // True when AName is defined by the PROJECT - the platform's predefined
     // set, the .dproj, the command line - before any unit's own `$DEFINE`.
     function IsProjectDefined(const AName: string): Boolean;
+    { Find All Defines: every `$DEFINE X` site across every loaded model,
+      live or dead (Active tells), sorted by file/line/col with a shared
+      include's copies collapsed as FindDefineReferences does - then the
+      project's own defines (doProject) and the platform's predefined set
+      (doPlatform), each sorted by name, each one row with no source site
+      (see TPasDefineSite). Needs no cursor: it is a project-wide inventory. }
+    function FindDefines: TArray<TPasDefineSite>;
+    { Defines at cursor: the conditional symbols IN EFFECT at (ALine, ACol)
+      of model AMid's main file - what an `$IFDEF` written there would see.
+      One row per name: the LAST live `$DEFINE X` before the cursor in
+      preprocessing order (an include's directives count where its `$I` sat)
+      that no later live `$UNDEF X` cancelled, else the project / platform
+      define of that name unless a `$UNDEF` before the cursor cancelled
+      that. Unit rows first (by file/line/col), then project, then platform
+      names. A `$DEFINE` of a name the project also defines is ONE row, the
+      unit's - the nearest definition, as GotoDefine lands. AMid < 0 (the
+      file has no model) returns the base set alone, so a host can offer the
+      command everywhere. Never a dead-branch row. }
+    function DefinesAt(AMid, ALine, ACol: Integer): TArray<TPasDefineSite>;
     { Find Overrides, part one: the cursor is on a CLASS METHOD (its
       declaration, its implementation header, or a use of it) whose override
       chain can be searched - the Enabled test for the command, and the
@@ -2326,17 +2377,195 @@ begin
   // Refuses only when the analysis has no program/library/package root at
   // all (a bare directory of units).
   if IsProjectDefined(LName) then
-    for LDef := 0 to FProj.ModelCount - 1 do
-      if (Length(FProj.Model(LDef).Tree.Nodes) > 0) and
-         (FProj.Model(LDef).Tree.Nodes[0].Kind in
-            [nkProgram, nkLibrary, nkPackage]) and
-         TargetForUnitId(LDef, LName, ATarget) then
-        Exit(True);
+    Result := MainModuleTarget(LName, ATarget);
+end;
+
+function TPasNavigator.MainModuleTarget(const AName: string;
+  out ATarget: TPasNavTarget): Boolean;
+var
+  LMid: Integer;
+begin
+  Result := False;
+  for LMid := 0 to FProj.ModelCount - 1 do
+    if (Length(FProj.Model(LMid).Tree.Nodes) > 0) and
+       (FProj.Model(LMid).Tree.Nodes[0].Kind in
+          [nkProgram, nkLibrary, nkPackage]) and
+       TargetForUnitId(LMid, AName, ATarget) then
+      Exit(True);
 end;
 
 function TPasNavigator.IsProjectDefined(const AName: string): Boolean;
 begin
   Result := FProj.IsBaseDefined(AName);
+end;
+
+function TPasNavigator.BaseDefineSite(const AName: string;
+  AOrigin: TPasDefineOrigin): TPasDefineSite;
+var
+  LTarget: TPasNavTarget;
+begin
+  Result := Default(TPasDefineSite);
+  Result.Name := AName;
+  Result.Origin := AOrigin;
+  Result.Active := True;
+  if MainModuleTarget(AName, LTarget) then
+  begin
+    Result.Hit.FilePath := LTarget.FilePath;
+    Result.Hit.Line := LTarget.Line;
+    Result.Hit.Col := LTarget.Col;
+  end;
+  // The name IS the row: there is no source line to quote.
+  Result.Hit.Snippet := AName;
+  Result.Hit.HiFrom := 0;
+  Result.Hit.HiTo := Length(AName);
+end;
+
+procedure TPasNavigator.SortAndCollapseSites(
+  var ASites: TArray<TPasDefineSite>);
+var
+  LIdx, LOut: Integer;
+begin
+  TArray.Sort<TPasDefineSite>(ASites, TComparer<TPasDefineSite>.Construct(
+    function(const A, B: TPasDefineSite): Integer
+    begin
+      Result := CompareText(A.Hit.FilePath, B.Hit.FilePath);
+      if Result = 0 then
+        Result := A.Hit.Line - B.Hit.Line;
+      if Result = 0 then
+        Result := A.Hit.Col - B.Hit.Col;
+    end));
+  // A shared include is preprocessed once per including unit - one row per
+  // site, active if any including unit reached it (FindDefineReferences'
+  // rule).
+  LOut := 0;
+  for LIdx := 0 to High(ASites) do
+    if (LOut > 0) and
+       SameText(ASites[LOut - 1].Hit.FilePath, ASites[LIdx].Hit.FilePath) and
+       (ASites[LOut - 1].Hit.Line = ASites[LIdx].Hit.Line) and
+       (ASites[LOut - 1].Hit.Col = ASites[LIdx].Hit.Col) then
+      ASites[LOut - 1].Active := ASites[LOut - 1].Active or ASites[LIdx].Active
+    else
+    begin
+      ASites[LOut] := ASites[LIdx];
+      Inc(LOut);
+    end;
+  SetLength(ASites, LOut);
+end;
+
+function TPasNavigator.FindDefines: TArray<TPasDefineSite>;
+var
+  LSites: TList<TPasDefineSite>;
+  LMi, LIdx: Integer;
+  LM: TPasSemaModel;
+  LSite: TPasDefineSite;
+  LProject, LPlatform: TArray<string>;
+  LName: string;
+begin
+  LSites := TList<TPasDefineSite>.Create;
+  try
+    for LMi := 0 to FProj.ModelCount - 1 do
+    begin
+      LM := FProj.Model(LMi);
+      // The kind test reads the retained DefineRefs; hydration (for the
+      // snippet) only on the first `$DEFINE`, as FindDefineReferences does.
+      for LIdx := 0 to High(LM.Tree.Source.DefineRefs) do
+        if (LM.Tree.Source.DefineRefs[LIdx].Kind = drDefine) and
+           FProj.EnsureHydrated(LMi) then
+        begin
+          HitFromDefineRef(LM, LM.Tree.Source.DefineRefs[LIdx], LSite.Hit);
+          LSite.Name := LM.Tree.Source.DefineRefs[LIdx].Name;
+          LSite.Origin := doUnit;
+          LSite.Active := LM.Tree.Source.DefineRefs[LIdx].Active;
+          LSites.Add(LSite);
+        end;
+    end;
+    Result := LSites.ToArray;
+  finally
+    LSites.Free;
+  end;
+  SortAndCollapseSites(Result);
+  FProj.BaseDefineNames({out} LProject, {out} LPlatform);
+  for LName in LProject do
+    Result := Result + [BaseDefineSite(LName, doProject)];
+  for LName in LPlatform do
+    Result := Result + [BaseDefineSite(LName, doPlatform)];
+end;
+
+function TPasNavigator.DefinesAt(AMid, ALine,
+  ACol: Integer): TArray<TPasDefineSite>;
+var
+  LM: TPasSemaModel;
+  LTS: TPasTokenStream;
+  LOffset, LIdx: Integer;
+  // name -> index of the last live $DEFINE in effect; a name in LUndone
+  // had a live $UNDEF after its last definition (which also cancels the
+  // project / platform define of that name).
+  LInEffect: TDictionary<string, Integer>;
+  LUndone: TDictionary<string, Boolean>;
+  LSite: TPasDefineSite;
+  LProject, LPlatform: TArray<string>;
+  LName: string;
+begin
+  Result := nil;
+  LInEffect := TDictionary<string, Integer>.Create(TIStringComparer.Ordinal);
+  LUndone := TDictionary<string, Boolean>.Create(TIStringComparer.Ordinal);
+  try
+    if (AMid >= 0) and (AMid < FProj.ModelCount) and
+       FProj.EnsureHydrated(AMid) then
+    begin
+      LM := FProj.Model(AMid);
+      LTS := LM.Tree.Source.Files[0];
+      if (ALine >= 1) and (ALine - 1 <= High(LTS.LineStarts)) and (ACol >= 1)
+      then
+        LOffset := LTS.LineStarts[ALine - 1] + (ACol - 1)
+      else
+        LOffset := MaxInt;   // past the end: everything the unit defines
+      // Processing order: an include's directives (FileId <> 0) sit between
+      // the main file's own, so the walk stops at the first MAIN-file
+      // directive past the cursor and everything before it has run.
+      for LIdx := 0 to High(LM.Tree.Source.DefineRefs) do
+        with LM.Tree.Source.DefineRefs[LIdx] do
+        begin
+          if (FileId = 0) and (Start > LOffset) then
+            Break;
+          if not Active then
+            Continue;
+          case Kind of
+            drDefine:
+              begin
+                LInEffect.AddOrSetValue(Name, LIdx);
+                LUndone.Remove(Name);
+              end;
+            drUndef:
+              begin
+                LInEffect.Remove(Name);
+                LUndone.AddOrSetValue(Name, True);
+              end;
+          end;
+        end;
+      for LIdx in LInEffect.Values do
+      begin
+        HitFromDefineRef(LM, LM.Tree.Source.DefineRefs[LIdx], LSite.Hit);
+        LSite.Name := LM.Tree.Source.DefineRefs[LIdx].Name;
+        LSite.Origin := doUnit;
+        LSite.Active := True;
+        Result := Result + [LSite];
+      end;
+      SortAndCollapseSites(Result);
+    end;
+    FProj.BaseDefineNames({out} LProject, {out} LPlatform);
+    for LName in LProject do
+      if not LInEffect.ContainsKey(LName) and not LUndone.ContainsKey(LName)
+      then
+        Result := Result + [BaseDefineSite(LName, doProject)];
+    for LName in LPlatform do
+      if not LInEffect.ContainsKey(LName) and not LUndone.ContainsKey(LName)
+      then
+        Result := Result + [BaseDefineSite(LName, doPlatform)];
+  finally
+    LUndone.Free;
+    LInEffect.Free;
+  end;
 end;
 
 { ---- Find Overrides ----------------------------------------------------

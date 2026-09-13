@@ -577,6 +577,22 @@ object frmMain: TfrmMain
       OnExecute = FindDestructionsActionExecute
       OnUpdate = FindDestructionsActionUpdate
     end
+    object FindDefinesAction: TAction
+      Caption = 'Defines'
+      Hint =
+        'Every {$DEFINE X} in the project, dead branches flagged, grouped' +
+        ' by file - plus the project'#39's and the platform'#39's own defines'
+      OnExecute = FindDefinesActionExecute
+      OnUpdate = FindDefinesActionUpdate
+    end
+    object FindDefinesAtAction: TAction
+      Caption = 'Defines at cursor'
+      Hint =
+        'The conditional symbols in effect at the caret - what an $IFDEF ' +
+        'written there would see, each pointing at its last definition'
+      OnExecute = FindDefinesAtActionExecute
+      OnUpdate = FindDefinesAtActionUpdate
+    end
     object RenameAction: TAction
       Caption = 'Rename...'
       Hint = 
@@ -627,6 +643,15 @@ object frmMain: TfrmMain
       end
       object FindDestructions1: TMenuItem
         Action = FindDestructionsAction
+      end
+      object FindDefinesSep1: TMenuItem
+        Caption = '-'
+      end
+      object FindDefines1: TMenuItem
+        Action = FindDefinesAction
+      end
+      object FindDefinesAt1: TMenuItem
+        Action = FindDefinesAtAction
       end
     end
     object Rename1: TMenuItem

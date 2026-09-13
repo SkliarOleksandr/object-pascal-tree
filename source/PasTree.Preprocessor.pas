@@ -228,6 +228,9 @@ type
     procedure Undefine(const AName: string);
     function IsDefined(const AName: string): Boolean;
     function Clone: TPasDefines;
+    // Every defined name, sorted case-insensitively - the enumeration a
+    // "list all defines" command needs; nothing in preprocessing reads it.
+    function Names: TArray<string>;
   end;
 
   { Answers a `$IF Declared(X)` guard. The preprocessor cannot: the symbol
@@ -683,6 +686,12 @@ end;
 function TPasDefines.IsDefined(const AName: string): Boolean;
 begin
   Result := FMap.ContainsKey(Trim(AName));
+end;
+
+function TPasDefines.Names: TArray<string>;
+begin
+  Result := FMap.Keys.ToArray;
+  TArray.Sort<string>(Result, TIStringComparer.Ordinal);
 end;
 
 function TPasDefines.Clone: TPasDefines;

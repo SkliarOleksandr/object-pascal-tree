@@ -102,6 +102,10 @@ type
 
   TFindRefGroup = record
     FilePath: string;
+    // What the group row says: the file name, or - for a Find All Defines
+    // page - the caller's own key ("Project defines", "Platform defines"),
+    // since those rows share the main module's path with nothing to group by.
+    Caption: string;
     FirstHit, Count: Integer;   // Hits is sorted (FilePath, Line) already
   end;
 
@@ -128,7 +132,8 @@ type
   end;
 
   TSearchTabKind = (stkRefs, stkRename, stkOverrides, stkImpls,
-    stkDescendants, stkAssigns, stkCreations, stkDestructions);
+    stkDescendants, stkAssigns, stkCreations, stkDestructions,
+    stkDefines, stkDefinesAt);
 
   TFindRefTab = class(TTabSheet)
   public
@@ -139,7 +144,9 @@ type
     // target (FNav.UnitAt), not a symbol; SymSym = -2 means this is a
     // BUILTIN-name search (FNav.BuiltinNameAt) and SymBuiltinName is what
     // actually gets compared, SymMid being meaningless there; SymSym = -3 is
-    // the same for a CONDITIONAL-SYMBOL search (FNav.DefineAt).
+    // the same for a CONDITIONAL-SYMBOL search (FNav.DefineAt); SymSym = -4
+    // and -5 are the two cursor-free define pages (Find All Defines /
+    // Defines at cursor), one page each, told apart by Kind.
     SymMid, SymSym: Integer;
     SymBuiltinName: string;
     { WHICH question this page answers about (SymMid, SymSym). Six answers
@@ -255,6 +262,11 @@ type
     FindCreations1: TMenuItem;
     FindDestructionsAction: TAction;
     FindDestructions1: TMenuItem;
+    FindDefinesSep1: TMenuItem;
+    FindDefinesAction: TAction;
+    FindDefines1: TMenuItem;
+    FindDefinesAtAction: TAction;
+    FindDefinesAt1: TMenuItem;
     FindAll1: TMenuItem;
     RenameAction: TAction;
     Rename1: TMenuItem;
@@ -320,6 +332,10 @@ type
     procedure FindCreationsActionExecute(Sender: TObject);
     procedure FindDestructionsActionUpdate(Sender: TObject);
     procedure FindDestructionsActionExecute(Sender: TObject);
+    procedure FindDefinesActionUpdate(Sender: TObject);
+    procedure FindDefinesActionExecute(Sender: TObject);
+    procedure FindDefinesAtActionUpdate(Sender: TObject);
+    procedure FindDefinesAtActionExecute(Sender: TObject);
     procedure RenameActionUpdate(Sender: TObject);
     procedure RenameActionExecute(Sender: TObject);
     procedure pgcBottomMouseDown(Sender: TObject; Button: TMouseButton;
@@ -550,10 +566,15 @@ type
       const APrefix: string): TFindRefDisplay;
     { APrefixes, when given, replaces the per-row "Line N: " prefix one row
       at a time (same length as AHits) - what a Find Overrides page shows
-      instead. }
+      instead. AGroupKeys, when given (same length), replaces the FILE as
+      what consecutive rows are grouped by and what the group row says -
+      a Find All Defines page groups its project/platform rows under their
+      own captions. AFlat drops the group rows altogether: every hit sits at
+      the root - a Defines-at-cursor page, one row per name. }
     procedure PopulateFindRefTab(LTab: TFindRefTab; const ACaption: string;
       const AHits: TArray<TPasRefHit>; AHasDecl: Boolean;
-      const ADeclHit: TPasRefHit; const APrefixes: TArray<string> = nil);
+      const ADeclHit: TPasRefHit; const APrefixes: TArray<string> = nil;
+      const AGroupKeys: TArray<string> = nil; AFlat: Boolean = False);
     function MakeRun(const AText: string; AColor: TColor;
       ABold, AUnderline: Boolean): TPasRefRun;
     procedure DrawRefRuns(ACanvas: TCanvas; const ACellRect: TRect;
@@ -1567,6 +1588,128 @@ begin
   pgcBottom.ActivePage := LTab;
 end;
 
+{ Find All Defines / Defines at cursor. No identity at the caret - the first
+  is a project-wide inventory of every `$DEFINE X` (dead ones flagged) plus
+  the project's and the platform's own defines; the second is the set IN
+  EFFECT where the caret is, one row per name, pointing at the definition an
+  `$IFDEF` written there would see (FNav.DefinesAt). Both are always offered:
+  the first needs only an analysis, the second an editor - a file with no
+  model still gets the project/platform set. Each has exactly ONE page
+  (sentinel keys -4 / -5, see TFindRefTab), refreshed on every call. }
+
+// Turns define sites into the tab's rows: unit rows keep their "Line N: "
+// prefix (dead ones say so) and group by FILE; project/platform rows have no
+// prefix and group under their own captions - the name is the whole row.
+procedure DefineSiteRows(const ASites: TArray<TPasDefineSite>;
+  out AHits: TArray<TPasRefHit>; out APrefixes, AGroupKeys: TArray<string>);
+var
+  LIdx: Integer;
+begin
+  SetLength(AHits, Length(ASites));
+  SetLength(APrefixes, Length(ASites));
+  SetLength(AGroupKeys, Length(ASites));
+  for LIdx := 0 to High(ASites) do
+  begin
+    AHits[LIdx] := ASites[LIdx].Hit;
+    case ASites[LIdx].Origin of
+      doUnit:
+        begin
+          APrefixes[LIdx] := Format('Line %d: ', [ASites[LIdx].Hit.Line]);
+          if not ASites[LIdx].Active then
+            APrefixes[LIdx] := Format('Line %d [inactive]: ',
+              [ASites[LIdx].Hit.Line]);
+          AGroupKeys[LIdx] := ASites[LIdx].Hit.FilePath;
+        end;
+      doProject:
+        begin
+          APrefixes[LIdx] := 'project: ';
+          AGroupKeys[LIdx] := 'Project defines';
+        end;
+    else
+      APrefixes[LIdx] := 'platform: ';
+      AGroupKeys[LIdx] := 'Platform defines';
+    end;
+  end;
+  // A file key shows as its file name, a caption key as itself.
+  for LIdx := 0 to High(AGroupKeys) do
+    if ASites[LIdx].Origin = doUnit then
+      AGroupKeys[LIdx] := TPath.GetFileName(AGroupKeys[LIdx]);
+end;
+
+procedure TfrmMain.FindDefinesActionUpdate(Sender: TObject);
+begin
+  TAction(Sender).Enabled := Assigned(FNav);
+end;
+
+procedure TfrmMain.FindDefinesActionExecute(Sender: TObject);
+var
+  LSites: TArray<TPasDefineSite>;
+  LHits: TArray<TPasRefHit>;
+  LPrefixes, LKeys: TArray<string>;
+  LTab: TFindRefTab;
+  LIdx, LUnit, LProject, LPlatform: Integer;
+begin
+  if not Assigned(FNav) then
+    Exit;
+  LSites := FNav.FindDefines;
+  DefineSiteRows(LSites, {out} LHits, {out} LPrefixes, {out} LKeys);
+  LUnit := 0;
+  LProject := 0;
+  LPlatform := 0;
+  for LIdx := 0 to High(LSites) do
+    case LSites[LIdx].Origin of
+      doUnit: Inc(LUnit);
+      doProject: Inc(LProject);
+    else
+      Inc(LPlatform);
+    end;
+  LTab := SearchTabFor(-1, -4, stkDefines);
+  PopulateFindRefTab(LTab,
+    Format('Defines (%d in units, %d project, %d platform)',
+      [LUnit, LProject, LPlatform]), LHits, False, Default(TPasRefHit),
+    LPrefixes, LKeys);
+  pgcBottom.ActivePage := LTab;
+end;
+
+procedure TfrmMain.FindDefinesAtActionUpdate(Sender: TObject);
+var
+  LLine, LCol: Integer;
+  LFilePath: string;
+  LEditor: TSynEdit;
+begin
+  TAction(Sender).Enabled := Assigned(FNav) and
+    ActiveEditorPos(LFilePath, LEditor, LLine, LCol);
+end;
+
+procedure TfrmMain.FindDefinesAtActionExecute(Sender: TObject);
+var
+  LLine, LCol, LIdx: Integer;
+  LFilePath: string;
+  LEditor: TSynEdit;
+  LSites: TArray<TPasDefineSite>;
+  LHits: TArray<TPasRefHit>;
+  LPrefixes, LKeys: TArray<string>;
+  LTab: TFindRefTab;
+begin
+  if not Assigned(FNav) or
+     not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
+    Exit;
+  // ModelIdOf is -1 for a file outside the analysis: DefinesAt then lists
+  // the project/platform set alone, which is still the honest answer.
+  LSites := FNav.DefinesAt(FNav.ModelIdOf(LFilePath), LLine, LCol);
+  DefineSiteRows(LSites, {out} LHits, {out} LPrefixes, {out} LKeys);
+  // Flat page: a unit row says where its $DEFINE is, since no group does.
+  for LIdx := 0 to High(LSites) do
+    if LSites[LIdx].Origin = doUnit then
+      LPrefixes[LIdx] := Format('%s (Line %d): ',
+        [TPath.GetFileName(LSites[LIdx].Hit.FilePath), LSites[LIdx].Hit.Line]);
+  LTab := SearchTabFor(-1, -5, stkDefinesAt);
+  PopulateFindRefTab(LTab, Format('Defines at %s:%d (%d)',
+    [TPath.GetFileName(LFilePath), LLine, Length(LHits)]), LHits, False,
+    Default(TPasRefHit), LPrefixes, nil, True);
+  pgcBottom.ActivePage := LTab;
+end;
+
 // Rename covers the same two identities Find References does MINUS the third:
 // a symbol, or a unit (its header + every `uses` item). A compiler builtin is
 // never renameable - the name is the compiler's, so there is nothing to edit
@@ -1873,7 +2016,18 @@ end;
 // since a refresh IS a rebuild (the analysis may have changed underneath).
 procedure TfrmMain.PopulateFindRefTab(LTab: TFindRefTab;
   const ACaption: string; const AHits: TArray<TPasRefHit>; AHasDecl: Boolean;
-  const ADeclHit: TPasRefHit; const APrefixes: TArray<string>);
+  const ADeclHit: TPasRefHit; const APrefixes: TArray<string>;
+  const AGroupKeys: TArray<string>; AFlat: Boolean);
+
+  // What row LIdx is grouped by: the caller's key, else the file.
+  function KeyOf(AIdx: Integer): string;
+  begin
+    if AIdx <= High(AGroupKeys) then
+      Result := AGroupKeys[AIdx]
+    else
+      Result := AHits[AIdx].FilePath;
+  end;
+
 var
   LGroup: TFindRefGroup;
   LIdx, LStart: Integer;
@@ -1901,10 +2055,13 @@ begin
   while LIdx < Length(AHits) do
   begin
     LStart := LIdx;
-    while (LIdx < Length(AHits)) and
-          SameText(AHits[LIdx].FilePath, AHits[LStart].FilePath) do
+    while (LIdx < Length(AHits)) and SameText(KeyOf(LIdx), KeyOf(LStart)) do
       Inc(LIdx);
     LGroup.FilePath := AHits[LStart].FilePath;
+    if LStart <= High(AGroupKeys) then
+      LGroup.Caption := AGroupKeys[LStart]
+    else
+      LGroup.Caption := TPath.GetFileName(AHits[LStart].FilePath);
     LGroup.FirstHit := LStart;
     LGroup.Count := LIdx - LStart;
     LTab.Groups := LTab.Groups + [LGroup];
@@ -1936,20 +2093,28 @@ begin
       PPasRefNodeData(LTab.Tree.GetNodeData(LDeclNode)).Kind := rnDecl;
       PPasRefNodeData(LTab.Tree.GetNodeData(LDeclNode)).Index := 0;
     end;
-    for LIdx := 0 to High(LTab.Groups) do
-    begin
-      LGroupNode := LTab.Tree.AddChild(nil);
-      PPasRefNodeData(LTab.Tree.GetNodeData(LGroupNode)).Kind := rnGroup;
-      PPasRefNodeData(LTab.Tree.GetNodeData(LGroupNode)).Index := LIdx;
-      for LStart := LTab.Groups[LIdx].FirstHit to
-        LTab.Groups[LIdx].FirstHit + LTab.Groups[LIdx].Count - 1 do
+    if AFlat then
+      for LIdx := 0 to High(AHits) do
       begin
-        LHitNode := LTab.Tree.AddChild(LGroupNode);
+        LHitNode := LTab.Tree.AddChild(nil);
         PPasRefNodeData(LTab.Tree.GetNodeData(LHitNode)).Kind := rnHit;
-        PPasRefNodeData(LTab.Tree.GetNodeData(LHitNode)).Index := LStart;
+        PPasRefNodeData(LTab.Tree.GetNodeData(LHitNode)).Index := LIdx;
+      end
+    else
+      for LIdx := 0 to High(LTab.Groups) do
+      begin
+        LGroupNode := LTab.Tree.AddChild(nil);
+        PPasRefNodeData(LTab.Tree.GetNodeData(LGroupNode)).Kind := rnGroup;
+        PPasRefNodeData(LTab.Tree.GetNodeData(LGroupNode)).Index := LIdx;
+        for LStart := LTab.Groups[LIdx].FirstHit to
+          LTab.Groups[LIdx].FirstHit + LTab.Groups[LIdx].Count - 1 do
+        begin
+          LHitNode := LTab.Tree.AddChild(LGroupNode);
+          PPasRefNodeData(LTab.Tree.GetNodeData(LHitNode)).Kind := rnHit;
+          PPasRefNodeData(LTab.Tree.GetNodeData(LHitNode)).Index := LStart;
+        end;
+        LTab.Tree.Expanded[LGroupNode] := True;
       end;
-      LTab.Tree.Expanded[LGroupNode] := True;
-    end;
   finally
     LTab.Tree.EndUpdate;
   end;
@@ -1973,8 +2138,8 @@ begin
     rnDecl:
       CellText := LTab.DeclDisplay.Text;
     rnGroup:
-      CellText := Format('%s [%d]', [TPath.GetFileName(
-        LTab.Groups[LData.Index].FilePath), LTab.Groups[LData.Index].Count]);
+      CellText := Format('%s [%d]', [LTab.Groups[LData.Index].Caption,
+        LTab.Groups[LData.Index].Count]);
   else
     CellText := LTab.Display[LData.Index].Text;
   end;
@@ -2010,6 +2175,10 @@ begin
   else
     Exit;   // rnGroup: nothing to navigate to
   end;
+  // A project/platform define row in an analysis with no main module has
+  // nothing to land on (TPasDefineSite) - a row to read, not to follow.
+  if LHit.FilePath = '' then
+    Exit;
   NavigateTo(LHit.FilePath, LHit.Line, LHit.Col);
 end;
 
@@ -2044,8 +2213,7 @@ begin
       begin
         if (LData.Index < 0) or (LData.Index > High(LTab.Groups)) then
           Exit;
-        LGroupNameLen :=
-          Length(TPath.GetFileName(LTab.Groups[LData.Index].FilePath));
+        LGroupNameLen := Length(LTab.Groups[LData.Index].Caption);
         if LGroupNameLen >= Length(Text) then
           Exit;   // malformed -- keep VST's own draw rather than guess
         LRuns := [

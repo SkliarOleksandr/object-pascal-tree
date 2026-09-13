@@ -1148,6 +1148,13 @@ type
       line) - i.e. defined before any unit's own `$DEFINE` runs. The
       navigator's IsProjectDefined: such a name has no source site to go to. }
     function IsBaseDefined(const AName: string): Boolean;
+    { The base define set SPLIT by where each name came from, both sorted
+      case-insensitively: AProject is the ctor's extra defines (.dproj /
+      command line, deduplicated, trimmed), APlatform the predefined set
+      minus those - a name given by both is the project's. Together they are
+      exactly what IsBaseDefined answers True for. The navigator's
+      FindDefines / DefinesAt list them as the rows no `$DEFINE` owns. }
+    procedure BaseDefineNames(out AProject, APlatform: TArray<string>);
   private
     procedure GuardNotReleased(const AEntry: string);
   end;
@@ -15367,6 +15374,32 @@ end;
 function TPasSemaProject.IsBaseDefined(const AName: string): Boolean;
 begin
   Result := FDefines.IsDefined(AName);
+end;
+
+procedure TPasSemaProject.BaseDefineNames(out AProject,
+  APlatform: TArray<string>);
+var
+  LExtra: TPasDefines;
+  LName: string;
+  LPlat: TList<string>;
+begin
+  // FExtraDefines is verbatim (duplicates, whitespace); a TPasDefines folds
+  // both the way the preprocessor did when it took them.
+  LExtra := TPasDefines.Create;
+  LPlat := TList<string>.Create;
+  try
+    for LName in FExtraDefines do
+      if Trim(LName) <> '' then
+        LExtra.Define(LName);
+    AProject := LExtra.Names;
+    for LName in FDefines.Names do
+      if not LExtra.IsDefined(LName) then
+        LPlat.Add(LName);
+    APlatform := LPlat.ToArray;
+  finally
+    LPlat.Free;
+    LExtra.Free;
+  end;
 end;
 
 function TPasSemaProject.EnsureHydrated(AMid: Integer): Boolean;

@@ -260,6 +260,9 @@ rest in the order this document describes them:
 - `Find All > Assignments` (§7 - `AssignableAt`)
 - `Find All > Creations` (§8 - `ClassAt`)
 - `Find All > Destructions` (§8 - `ClassAt`)
+- a separator, then the two cursor-free define inventories (§10):
+  `Find All > Defines` (`FindDefines`) and `Find All > Defines at cursor`
+  (`DefinesAt`) - always enabled, no identity at the caret
 
 `Implementations` and `Descendants` have no modifier and one answer each:
 Descendants the whole transitive tree, Implementations the classes that
@@ -275,9 +278,9 @@ gated-out entry stays visible but disabled (the IDE greys out inapplicable
 Refactor items the same way) so the submenu's shape never shifts with the
 caret. Every command opens its own results page: `TFindRefTab.Kind`
 (`stkRefs`, `stkRename`, `stkOverrides`, `stkImpls`, `stkDescendants`,
-`stkAssigns`, `stkCreations`, `stkDestructions`) is part of the page
-identity, so a repeated search refreshes its own page and eight answers
-about one symbol never overwrite each other.
+`stkAssigns`, `stkCreations`, `stkDestructions`, `stkDefines`,
+`stkDefinesAt`) is part of the page identity, so a repeated search refreshes
+its own page and eight answers about one symbol never overwrite each other.
 
 ## 4. Find Overrides (`TPasNavigator.MethodAt`/`FindOverrides` + demo wiring)
 
@@ -572,3 +575,80 @@ after `BuiltinNameAt` in each:
 - rename: `DefineAt` true -> refuse, the same way a builtin is refused.
 
 `cMinPasTreeVersion` moves to 0.27.0.
+
+## 10. Find All Defines / Defines at cursor (`TPasNavigator.FindDefines`/`DefinesAt` + demo wiring)
+
+Status: IMPLEMENTED (PasTree 0.28.0) - `FindDefines`, `DefinesAt` and the
+`TPasDefineSite` row in `source/PasTree.Sema.Nav.pas`,
+`TPasSemaProject.BaseDefineNames` and `TPasDefines.Names` underneath, wired
+into the demo as `Find All > Defines` and `Find All > Defines at cursor`,
+regression-covered by `tests/SemaNavSmoke.dpr` (fixtures `NavDef` +
+`NavDef.inc`, and the `NavMain` project for the main-module landing).
+
+Two inventories of the fourth identity (§9) that need NO identity at the
+caret, so both commands are always offered. Both read the preprocessor's
+retained `DefineRefs` (never the text) plus the project's base define set,
+which `BaseDefineNames` splits into the `.dproj` / command-line names and
+the platform's predefined ones.
+
+**`FindDefines`** is the project-wide list: every `$DEFINE X` site in every
+loaded model, live or dead (`Active`), sorted by file/line/col with a shared
+include's copies collapsed as `FindDefineReferences` does - then one row per
+project define, then one per platform define, each sorted by name. A row
+is a `TPasDefineSite`: the `TPasRefHit`, the name and an origin (`doUnit` /
+`doProject` / `doPlatform`). A unit row is positioned on the name inside its
+directive, as a §9 row is; a project or platform row has no source site, so
+its hit points at the MAIN MODULE's header (where `GotoDefine` sends a
+project define, §9 row 7) with `Snippet` = the name itself and `HiFrom` /
+`HiTo` spanning it, so a host shows it like any other row. In an analysis
+with no main module the hit's `FilePath` is `''` and `Line`/`Col` are 0 - a
+row to read, nothing to jump to (the demo ignores a double-click on it).
+
+**`DefinesAt(AMid, ALine, ACol)`** is the set IN EFFECT at the cursor of a
+model's main file - what an `$IFDEF` written there would see. It replays the
+model's `DefineRefs` in preprocessing order up to the first main-file
+directive past the cursor (an include's directives count where its `$I`
+sat): a live `$DEFINE X` puts X in effect at that site, a live `$UNDEF X`
+takes it out AND cancels the project / platform define of that name; dead
+directives change nothing. One row per name, the LAST definition winning, so
+a name defined by both the project and the unit is one row, the unit's - the
+nearest definition, as `GotoDefine` lands. Unit rows first (by file), then
+project, then platform names. `AMid < 0` (the file has no model) returns the
+base set alone, so a host can offer the command in every editor.
+
+| # | Shape | Row | Status |
+|---|-------|-----|--------|
+| 1 | `{$DEFINE X}` in a unit | `FindDefines`: a row per site; `DefinesAt`: the last one before the cursor | OK |
+| 2 | `{$DEFINE X}` in an include | row in the `.inc`, once however many units include it | OK |
+| 3 | `{$DEFINE X}` in a dead branch | `FindDefines` lists it `Active = False` (demo: `[inactive]`); `DefinesAt` never | OK |
+| 4 | `{$UNDEF X}` before the cursor | not a row anywhere; takes X out of `DefinesAt`, a project define too | OK |
+| 5 | A `.dproj` / command-line define | `doProject` row, main-module header, once | OK |
+| 6 | A platform define (`MSWINDOWS`, `CPUX64`, `VERnnn`...) | `doPlatform` row, same shape | OK |
+| 7 | A name both project- and unit-defined | `FindDefines`: both rows (they are two facts); `DefinesAt`: the unit's alone | OK |
+| 8 | Cursor in an opened `.inc` | `DefinesAt` gets `AMid < 0` - base set only (an include has no model, the README's To-do) | GAP, as §9 row 10 |
+| 9 | Defines that a USED unit made | - | none: a `$DEFINE` is unit-local, dcc's rule |
+
+The demo shows `Find All > Defines` in the grouped Find-References shape -
+files as groups, then `Project defines [n]` and `Platform defines [n]` as
+two groups of their own (`PopulateFindRefTab` took an `AGroupKeys`
+parameter for this) - and `Defines at cursor` as a FLAT list, one row per
+name prefixed with the defining file and line (`AFlat`). Each command has
+exactly one page (`SymSym` sentinels -4 / -5), refreshed on every call.
+
+### pastree-lsp hand-off
+
+No protocol surface maps onto "list all defines" directly; two candidates:
+
+- `workspace/symbol` with a query the server recognizes (`$DEFINE` or
+  `define:`) answered from `FindDefines`, each row a `SymbolInformation`
+  whose location is the site (project / platform rows: the main-module
+  header, or omitted when `FilePath = ''`) - cheap and every client shows it.
+- A custom request (`pastree/definesAt` with a text document position ->
+  `DefinesAt`) for the at-cursor set, since no standard request carries a
+  position and returns an inventory; a code-lens or hover on a `$IFDEF` line
+  could surface the same answer without a new request.
+
+`TPasSemaProject.BaseDefineNames` is public so a server can also answer
+"what does the project define" without a navigator, e.g. in its
+`initialize` log. `cMinPasTreeVersion` moves to 0.28.0 only if one of these
+is taken up; nothing in the existing handlers changes.
