@@ -518,6 +518,13 @@ type
       include (an include has no model - the README's own To-do). }
     function DefineAt(AMid, ALine, ACol: Integer; out AName: string;
       out ARawToken: Integer): Boolean;
+    { DefineAt's companion for a host that underlines: the NAME's own span
+      inside the directive, as [AStart, AStart + ALen) offsets into the
+      model's main-file text - the directive is one raw token, and a link
+      over the whole $IFDEF X (braces included) reads as if the keyword
+      were clickable. }
+    function DefineSpanAt(AMid, ALine, ACol: Integer;
+      out AStart, ALen: Integer): Boolean;
     { Every mention of the conditional symbol AName across every loaded model
       (case-insensitive, as dcc compares them), sorted by file/line/col. The
       `$DEFINE`/`$UNDEF` sites are IN the list - each is a reference, and a
@@ -529,9 +536,12 @@ type
     { Go to Definition on a conditional symbol: the nearest PRECEDING active
       $DEFINE X in the same model, in preprocessing order (an include's
       directives count where its $I sat), since that is the site whose
-      effect the cursor's directive sees. False when there is none - either
-      the name comes from the project/platform (IsProjectDefined says so; it
-      has no source site), or it is simply never defined. }
+      effect the cursor's directive sees. A PROJECT/platform define
+      (IsProjectDefined) has no such site, so the target is the main
+      module's header (program/library/package name) - the project is where
+      it comes from, as System.pas is for a builtin. False only when the
+      name is never defined anywhere, or a project define is asked in an
+      analysis with no main module. }
     function GotoDefine(AMid, ALine, ACol: Integer;
       out ATarget: TPasNavTarget): Boolean;
     // True when AName is defined by the PROJECT - the platform's predefined
@@ -2213,6 +2223,20 @@ begin
   Result := True;
 end;
 
+function TPasNavigator.DefineSpanAt(AMid, ALine, ACol: Integer;
+  out AStart, ALen: Integer): Boolean;
+var
+  LIdx: Integer;
+begin
+  LIdx := DefineRefIndexAt(AMid, ALine, ACol);
+  Result := LIdx >= 0;
+  if Result then
+  begin
+    AStart := FProj.Model(AMid).Tree.Source.DefineRefs[LIdx].Start;
+    ALen := FProj.Model(AMid).Tree.Source.DefineRefs[LIdx].Len;
+  end;
+end;
+
 function TPasNavigator.FindDefineReferences(
   const AName: string): TArray<TPasDefineHit>;
 var
@@ -2295,6 +2319,19 @@ begin
         ATarget.Name := Name;
         Exit(True);
       end;
+  // A PROJECT define (.dproj, command line, platform) has no $DEFINE anywhere,
+  // but it does have a home: the project itself. Land on the main module's
+  // header - the same convention as a builtin landing in System.pas - so the
+  // link is always live and the jump says "this comes from the project".
+  // Refuses only when the analysis has no program/library/package root at
+  // all (a bare directory of units).
+  if IsProjectDefined(LName) then
+    for LDef := 0 to FProj.ModelCount - 1 do
+      if (Length(FProj.Model(LDef).Tree.Nodes) > 0) and
+         (FProj.Model(LDef).Tree.Nodes[0].Kind in
+            [nkProgram, nkLibrary, nkPackage]) and
+         TargetForUnitId(LDef, LName, ATarget) then
+        Exit(True);
 end;
 
 function TPasNavigator.IsProjectDefined(const AName: string): Boolean;

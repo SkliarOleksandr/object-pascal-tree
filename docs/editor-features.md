@@ -546,7 +546,7 @@ closed units and rehydrates only for the rows it reports.
 | 4 | A directive inside a DEAD branch (`{$IFNDEF X} {$DEFINE Y} {$ENDIF}` with X on) | row, `Active = False`; the demo prefixes it `[inactive]` | OK |
 | 5 | A directive inside an include | row in the `.inc`; an include shared by N units produces one row, not N (collapsed by file/line/col, active if any including unit reached it) | OK |
 | 6 | Go to Definition (ctrl+click on the name) | the nearest PRECEDING active `$DEFINE X` in the same model, in preprocessing order (an include's directives count where its `$I` sat) | OK |
-| 7 | A project / platform define (`WIN32`, `MSWINDOWS`, a `.dproj` `DCC_Define`) | rows for every mention; no definition target - `IsProjectDefined` says why, the demo's caption says `[project define]` | OK (by design) |
+| 7 | A project / platform define (`WIN32`, `MSWINDOWS`, a `.dproj` `DCC_Define`) | rows for every mention; Go to Definition lands on the MAIN MODULE's header (the program/library/package name) - the project is where it comes from, as System.pas is for a builtin; `IsProjectDefined` tells the two apart, the demo's caption says `[project define]`. No target only in an analysis without a main module (a bare directory of units) | OK (0.27.2) |
 | 8 | `{$IFOPT X+}`, switch directives | - | not a conditional symbol, not a row |
 | 9 | The directive WORD (`IFDEF`, `DEFINE`) under the cursor | `DefineAt` declines - only the name is the symbol | OK (by design) |
 | 10 | Ctrl+click on a directive inside an opened `.inc` | - | GAP - an include has no model (the README's To-do) |

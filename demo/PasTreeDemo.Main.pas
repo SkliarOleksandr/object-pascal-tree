@@ -366,6 +366,11 @@ type
     FSemaProject: TPasSemaProject; // kept alive after RunParse (navigation)
     FNav: TPasNavigator;           // go-to-declaration over FSemaProject
     FLinkTab: TObject;             // TSourceTab currently showing a link
+    // The sub-span of the NEXT link, as absolute buffer offsets, or -1 for
+    // the whole token range - written by the resolver that found the link
+    // (ResolveAt's define branch: the name inside a one-token directive),
+    // read by SetLink. Reset by every resolver on entry.
+    FLinkSubFrom, FLinkSubTo: Integer;
     // Back/Forward. The list and its rules live in PasTreeDemo.NavHistory;
     // FNavBusy suppresses RECORDING while Back/Forward is itself jumping.
     FNavHistory: TNavHistory;
@@ -3215,8 +3220,11 @@ var
   LBC: TBufferCoord;
   LIdent: TPasNavIdent;
   LName: string;
+  LSubStart, LSubLen: Integer;
 begin
   Result := False;
+  FLinkSubFrom := -1;
+  FLinkSubTo := -1;
   if FAnalyzing or (FNav = nil) then
     Exit;
   LTab := TSourceTab(AEditor.Parent);
@@ -3235,6 +3243,13 @@ begin
     begin
       ARawFrom := LRaw;
       ARawTo := LRaw;
+      // Underline the NAME only, not the `{$IFDEF` and `}` around it.
+      if FNav.DefineSpanAt(LMid, LBC.Line, LBC.Char, {out} LSubStart,
+           {out} LSubLen) then
+      begin
+        FLinkSubFrom := LSubStart;
+        FLinkSubTo := LSubStart + LSubLen;
+      end;
       Result := True;
     end;
     Exit;
@@ -3269,6 +3284,8 @@ var
   LFrom, LTo: Integer;
 begin
   Result := False;
+  FLinkSubFrom := -1;
+  FLinkSubTo := -1;
   if not (AEditor.Parent is TSourceTab) then
     Exit;
   LTab := TSourceTab(AEditor.Parent);
@@ -3297,11 +3314,11 @@ var
   LTab: TSourceTab;
 begin
   if (FLinkTab = ATab) and TSourceTab(ATab).PasTreeHL.LinkRangeEquals(AFrom,
-    ATo) then
+    ATo, FLinkSubFrom, FLinkSubTo) then
     Exit;
   ClearLink;
   LTab := TSourceTab(ATab);
-  LTab.PasTreeHL.SetLinkRange(AFrom, ATo);
+  LTab.PasTreeHL.SetLinkRange(AFrom, ATo, FLinkSubFrom, FLinkSubTo);
   LTab.Editor.Cursor := crHandPoint;
   LTab.Editor.Invalidate;
   FLinkTab := ATab;

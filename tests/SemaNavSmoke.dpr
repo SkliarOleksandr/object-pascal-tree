@@ -702,8 +702,9 @@ const
     '{$DEFINE NAVMAINDEF}'#10 +                // 3  NAVMAINDEF col 10
     '{$IFDEF NAVMAINDEF}'#10 +                 // 4  NAVMAINDEF col 9
     '{$ENDIF}'#10 +                            // 5
-    'begin'#10 +                               // 6
-    'end.'#10;                                 // 7
+    '{$IFDEF WIN32}{$ENDIF}'#10 +              // 6  WIN32 col 9 (project define)
+    'begin'#10 +                               // 7
+    'end.'#10;                                 // 8
   UNIT_E =
     'unit Wide.NavE;'#10 +                     // 1
     'interface'#10 +                           // 2
@@ -1646,7 +1647,8 @@ begin
         not GNav.GotoDefine(LDefMid, 2, 10, {out} LRTarget));
       Ok('GotoDefine: NAVBAR - its only $DEFINE is dead, so no target',
         not GNav.GotoDefine(LDefMid, 13, 34, {out} LRTarget));
-      Ok('GotoDefine: WIN32 - a project define has no source site',
+      // AnalyzeDirectory: units only, no main module - nothing to land on.
+      Ok('GotoDefine: WIN32 - project define, no main module here',
         not GNav.GotoDefine(LDefMid, 15, 18, {out} LRTarget));
       Ok('IsProjectDefined: WIN32 yes, NAVFOO no',
         GNav.IsProjectDefined('WIN32') and GNav.IsProjectDefined('mswindows')
@@ -2574,13 +2576,19 @@ begin
       // The PROGRAM model (AnalyzeProject's root) keeps its DefineRefs too -
       // the .dpr is where a project's own defines usually sit.
       Ok('project: root program records its DefineRefs',
-        Length(GProj.Model(GMidB).Tree.Source.DefineRefs) = 2);
+        Length(GProj.Model(GMidB).Tree.Source.DefineRefs) = 3);
       Ok('project: DefineAt on the root program',
         GNav.DefineAt(GMidB, 4, 9, {out} LRName, {out} LRaw) and
         (LRName = 'NAVMAINDEF'));
       Ok('project: GotoDefine on the root program -> line 3 col 10',
         GNav.GotoDefine(GMidB, 4, 9, {out} LRTarget) and
         (LRTarget.Line = 3) and (LRTarget.Col = 10));
+      // A PROJECT define lands on the main module's header (the program
+      // name), the way a builtin lands in System.pas.
+      Ok('project: GotoDefine on WIN32 -> the program header',
+        GNav.GotoDefine(GMidB, 6, 9, {out} LRTarget) and
+        SameText(TPath.GetFileName(LRTarget.FilePath), 'NavMain.dpr') and
+        (LRTarget.Line = 1) and (LRTarget.Col = 9));
       // Either segment of the dotted, namespace-prefixed name opens the file.
       CheckNav('project uses: Deep.NavX -> namespace-prefixed file', 2, 27,
         'Deep', 'Wide.Deep.NavX.pas', 1, 6);

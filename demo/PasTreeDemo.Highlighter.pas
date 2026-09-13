@@ -141,6 +141,15 @@ type
     FLinkAttri: TSynHighlighterAttributes;
     FLinkFrom: Integer;            // raw token idx range shown as a
     FLinkTo: Integer;              // ctrl+hover link (inclusive); -1 = none
+    { Optional SUB-SPAN of a one-token link, as absolute buffer offsets
+      [FLinkSubFrom, FLinkSubTo): only this slice of the token underlines.
+      A conditional directive is ONE raw token ($IFDEF No_JclDebug, braces
+      included) and
+      the link is its NAME - underlining the keyword and braces too reads as
+      if they were the clickable thing. -1 = the whole token, the default. }
+    FLinkSubFrom: Integer;
+    FLinkSubTo: Integer;
+    FCurInLinkSub: Boolean;        // Next: the piece just reported IS the slice
     FInactiveAttri: TSynHighlighterAttributes;
     { "Highlight other occurrences of the selected identifier" - plain NAME
       match (no semantic resolution), see SetSameIdentHighlight. }
@@ -186,8 +195,10 @@ type
       token range covering every segment + dot, so hovering ANY part of it
       links and underlines the WHOLE qualified name, not just one word.
       AFrom = -1 clears the link. The HOST invalidates the editor on change. }
-    procedure SetLinkRange(AFrom, ATo: Integer);
-    function LinkRangeEquals(AFrom, ATo: Integer): Boolean;
+    procedure SetLinkRange(AFrom, ATo: Integer; ASubFrom: Integer = -1;
+      ASubTo: Integer = -1);
+    function LinkRangeEquals(AFrom, ATo: Integer; ASubFrom: Integer = -1;
+      ASubTo: Integer = -1): Boolean;
     { Diagnostics from the last tokenize pass (unterminated string/comment/
       directive, invalid char, ...) - handy for a future "N issues" readout. }
     function LexerDiagnosticCount: Integer;
@@ -294,6 +305,8 @@ begin
   AddAttribute(FLinkAttri);
   FLinkFrom := -1;
   FLinkTo := -1;
+  FLinkSubFrom := -1;
+  FLinkSubTo := -1;
 
   FInactiveAttri := TSynHighlighterAttributes.Create('Inactive',
     'Inactive $IFDEF''d-out code');
@@ -379,15 +392,20 @@ begin
   FDirty := True;
 end;
 
-procedure TPasTreeSynHighlighter.SetLinkRange(AFrom, ATo: Integer);
+procedure TPasTreeSynHighlighter.SetLinkRange(AFrom, ATo: Integer;
+  ASubFrom, ASubTo: Integer);
 begin
   FLinkFrom := AFrom;
   FLinkTo := ATo;
+  FLinkSubFrom := ASubFrom;
+  FLinkSubTo := ASubTo;
 end;
 
-function TPasTreeSynHighlighter.LinkRangeEquals(AFrom, ATo: Integer): Boolean;
+function TPasTreeSynHighlighter.LinkRangeEquals(AFrom, ATo: Integer;
+  ASubFrom, ASubTo: Integer): Boolean;
 begin
-  Result := (FLinkFrom = AFrom) and (FLinkTo = ATo);
+  Result := (FLinkFrom = AFrom) and (FLinkTo = ATo) and
+    (FLinkSubFrom = ASubFrom) and (FLinkSubTo = ASubTo);
 end;
 
 function TPasTreeSynHighlighter.RawTokenAt(ALine, ACol: Integer): Integer;
@@ -735,7 +753,8 @@ begin
   // a `uses` clause's dotted unit name (System.SysUtils) links as ONE span
   // covering the dot too, so the whole qualified name underlines together.
   if (FLinkFrom >= 0) and (FCurTokenAbsIdx >= FLinkFrom) and
-     (FCurTokenAbsIdx <= FLinkTo) then
+     (FCurTokenAbsIdx <= FLinkTo) and
+     ((FLinkSubFrom < 0) or FCurInLinkSub) then
     Exit(FLinkAttri);
   if FCurUnterminated then
     Exit(FErrorAttri);
@@ -819,6 +838,30 @@ begin
     LTokStartAbs := FLineStartAbs;   // token started on an earlier line
   if LTokEndAbs > LLineEndAbs then
     LTokEndAbs := LLineEndAbs;       // token continues onto a later line
+  // Resume INSIDE a token already partly reported (a sub-span split below
+  // leaves FCurTokenIdx on the same token, positioned at the cut).
+  if LTokStartAbs < FLineStartAbs + Run then
+    LTokStartAbs := FLineStartAbs + Run;
+
+  // The linked token with a sub-span: report it as up to three pieces -
+  // before the slice, the slice, after it - so only the slice paints as
+  // the link. Each call reports ONE piece and leaves the token current.
+  FCurInLinkSub := False;
+  if (FLinkSubFrom >= 0) and (FCurTokenIdx >= FLinkFrom) and
+     (FCurTokenIdx <= FLinkTo) then
+  begin
+    if LTokStartAbs < FLinkSubFrom then
+    begin
+      if LTokEndAbs > FLinkSubFrom then
+        LTokEndAbs := FLinkSubFrom;
+    end
+    else if LTokStartAbs < FLinkSubTo then
+    begin
+      if LTokEndAbs > FLinkSubTo then
+        LTokEndAbs := FLinkSubTo;
+      FCurInLinkSub := True;
+    end;
+  end;
 
   fTokenPos := LTokStartAbs - FLineStartAbs;
   Run := LTokEndAbs - FLineStartAbs;
@@ -826,7 +869,7 @@ begin
   FCurUnterminated := tfUnterminated in LTok.Flags;
   FCurTokenAbsIdx := FCurTokenIdx; // raw index of LTok, before the Inc below
 
-  if LTok.EndPos <= LLineEndAbs then
+  if (LTok.EndPos <= LLineEndAbs) and (LTokEndAbs >= LTok.EndPos) then
     Inc(FCurTokenIdx)
   // else: token continues past this line - keep FCurTokenIdx so the next
   // DoSetLine (next line) re-locates and keeps clipping the same token.
