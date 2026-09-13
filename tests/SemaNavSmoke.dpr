@@ -309,6 +309,39 @@ const
     'end;'#10 +                                 // 16
     'end.'#10;                                  // 11
 
+  { Conditional-symbol fixtures (DefineAt / FindDefineReferences /
+    GotoDefine). NAVFOO is defined on line 2, so the $IFNDEF branch (lines
+    10-12) is DEAD - its $DEFINE NAVBAR is recorded but inactive - which in
+    turn makes the $IF on line 13 False and the $ELSEIF live. NavDef.inc is
+    pulled in on line 3 and mentions NAVFOO once more. WIN32 is the project's
+    own (platform) define: one reference, no source site. }
+  UNIT_DEF =
+    'unit NavDef;'#10 +                                    // 1
+    '{$DEFINE NAVFOO}'#10 +                                // 2  NAVFOO col 10
+    '{$I NavDef.inc}'#10 +                                 // 3
+    'interface'#10 +                                       // 4
+    '{$IFDEF NAVFOO}'#10 +                                 // 5  NAVFOO col 9
+    'const A = 1;'#10 +                                    // 6
+    '{$ELSE}'#10 +                                         // 7
+    'const A = 2;'#10 +                                    // 8
+    '{$ENDIF}'#10 +                                        // 9
+    '{$IFNDEF navfoo}'#10 +                                // 10 navfoo col 10
+    '{$DEFINE NAVBAR}'#10 +                                // 11 NAVBAR col 10 (dead)
+    '{$ENDIF}'#10 +                                        // 12
+    '{$IF Defined(NAVFOO) and Defined(NAVBAR)}'#10 +       // 13 NAVFOO col 14, NAVBAR col 34
+    'const B = 1;'#10 +                                    // 14
+    '{$ELSEIF Defined(WIN32)}'#10 +                        // 15 WIN32 col 18
+    'const B = 2;'#10 +                                    // 16
+    '{$ENDIF}'#10 +                                        // 17
+    '{$UNDEF NAVFOO}'#10 +                                 // 18 NAVFOO col 9
+    'implementation'#10 +                                  // 19
+    'end.'#10;                                             // 20
+
+  INC_DEF =
+    '{$IFDEF NAVFOO}'#10 +                                 // 1  NAVFOO col 9
+    '{$DEFINE NAVINC}'#10 +                                // 2
+    '{$ENDIF}'#10;                                         // 3
+
   // Line/col layout matters: the checks below address exact positions.
   UNIT_A =
     'unit NavA;'#10 +                          // 1
@@ -666,8 +699,11 @@ const
     'program NavMain;'#10 +                    // 1
     'uses NavB, NavE, OldNavF, Deep.NavX;'#10 + // 2  NavE col 12, OldNavF col
                                                 //    18, Deep col 27
-    'begin'#10 +                               // 3
-    'end.'#10;                                 // 4
+    '{$DEFINE NAVMAINDEF}'#10 +                // 3  NAVMAINDEF col 10
+    '{$IFDEF NAVMAINDEF}'#10 +                 // 4  NAVMAINDEF col 9
+    '{$ENDIF}'#10 +                            // 5
+    'begin'#10 +                               // 6
+    'end.'#10;                                 // 7
   UNIT_E =
     'unit Wide.NavE;'#10 +                     // 1
     'interface'#10 +                           // 2
@@ -975,6 +1011,20 @@ begin
       Exit(True);
 end;
 
+// The FindDefineReferences row at (file, line, col), with its kind and
+// activity checked too.
+function HasDefHitAt(const AHits: TArray<TPasDefineHit>; const AFile: string;
+  ALine, ACol: Integer; AKind: TPasDefineRefKind; AActive: Boolean): Boolean;
+var
+  LIdx: Integer;
+begin
+  Result := False;
+  for LIdx := 0 to High(AHits) do
+    if SameText(TPath.GetFileName(AHits[LIdx].Hit.FilePath), AFile) and
+       (AHits[LIdx].Hit.Line = ALine) and (AHits[LIdx].Hit.Col = ACol) then
+      Exit((AHits[LIdx].Kind = AKind) and (AHits[LIdx].Active = AActive));
+end;
+
 // One Find Overrides row: the declaring class, its kind, and the LINE its
 // declaration sits on (the column is the class body's own indentation, which
 // the fixture comments already pin for the rows that matter).
@@ -1095,6 +1145,10 @@ var
   LEdits: TArray<TPasRenameEdit>;
   LMidRen, LIdx: Integer;
   LErr, LFileName: string;
+  LDefMid, LRaw: Integer;
+  LDefRefs: TArray<TPasDefineRef>;
+  LDefHits: TArray<TPasDefineHit>;
+  LRTarget: TPasNavTarget;
 begin
   GCounter.Init;
   LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_nav');
@@ -1123,6 +1177,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavCD.pas'), UNIT_CD);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRen.pas'), UNIT_REN);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRenP.pas'), UNIT_RENP);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavDef.pas'), UNIT_DEF);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavDef.inc'), INC_DEF);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -1500,6 +1556,103 @@ begin
       Ok('BuiltinNameAt: declines when a real declaration exists (TBytes)',
         not GNav.BuiltinNameAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavB.pas')),
           9, 6, {out} LRName));
+
+      // ---- DefineAt / FindDefineReferences / GotoDefine (the fourth
+      // identity: conditional symbols). Fixture NavDef + NavDef.inc. ----
+      LDefMid := GNav.ModelIdOf(TPath.Combine(LDir, 'NavDef.pas'));
+      Ok('NavDef model found', LDefMid >= 0);
+      // The preprocessor's own record: 8 mentions in the unit + 2 in the
+      // include, processing order, the include's landing where its $I sat.
+      LDefRefs := GProj.Model(LDefMid).Tree.Source.DefineRefs;
+      Ok('DefineRefs: ten mentions recorded', Length(LDefRefs) = 10);
+      Ok('DefineRefs: [0] = $DEFINE NAVFOO, active, name span only',
+        (Length(LDefRefs) > 0) and (LDefRefs[0].Kind = drDefine) and
+        (LDefRefs[0].Name = 'NAVFOO') and LDefRefs[0].Active and
+        (LDefRefs[0].FileId = 0) and (LDefRefs[0].Len = 6));
+      Ok('DefineRefs: [1..2] are the include''s (FileId 1), where the $I sat',
+        (Length(LDefRefs) > 2) and (LDefRefs[1].Kind = drIfdef) and
+        (LDefRefs[1].FileId = 1) and (LDefRefs[1].Name = 'NAVFOO') and
+        (LDefRefs[2].Kind = drDefine) and (LDefRefs[2].FileId = 1) and
+        (LDefRefs[2].Name = 'NAVINC') and LDefRefs[2].Active);
+      Ok('DefineRefs: $IFNDEF keeps the spelling as written',
+        (Length(LDefRefs) > 4) and (LDefRefs[4].Kind = drIfndef) and
+        (LDefRefs[4].Name = 'navfoo'));
+      Ok('DefineRefs: the dead branch''s $DEFINE NAVBAR is recorded INACTIVE',
+        (Length(LDefRefs) > 5) and (LDefRefs[5].Kind = drDefine) and
+        (LDefRefs[5].Name = 'NAVBAR') and not LDefRefs[5].Active);
+      Ok('DefineRefs: both Defined() of the $IF, the short-circuited one too',
+        (Length(LDefRefs) > 7) and (LDefRefs[6].Kind = drDefined) and
+        (LDefRefs[6].Name = 'NAVFOO') and (LDefRefs[7].Kind = drDefined) and
+        (LDefRefs[7].Name = 'NAVBAR') and
+        (LDefRefs[7].Start - LDefRefs[6].Start = 20));
+      Ok('DefineRefs: $ELSEIF Defined(WIN32) is live (the $IF was False)',
+        (Length(LDefRefs) > 8) and (LDefRefs[8].Kind = drDefined) and
+        (LDefRefs[8].Name = 'WIN32') and LDefRefs[8].Active);
+      Ok('DefineRefs: $UNDEF last', (Length(LDefRefs) = 10) and
+        (LDefRefs[9].Kind = drUndef) and (LDefRefs[9].Name = 'NAVFOO'));
+
+      // DefineAt: on the name, at its end, and NOT on the directive word.
+      Ok('DefineAt: on NAVFOO in $IFDEF (line 5)',
+        GNav.DefineAt(LDefMid, 5, 9, {out} LRName, {out} LRaw) and
+        (LRName = 'NAVFOO') and (LRaw >= 0));
+      Ok('DefineAt: caret one past the name still counts',
+        GNav.DefineAt(LDefMid, 5, 15, {out} LRName, {out} LRaw));
+      Ok('DefineAt: two past declines',
+        not GNav.DefineAt(LDefMid, 5, 16, {out} LRName, {out} LRaw));
+      Ok('DefineAt: the directive word is not the symbol',
+        not GNav.DefineAt(LDefMid, 5, 3, {out} LRName, {out} LRaw));
+      Ok('DefineAt: Defined(NAVBAR) inside a $IF expression',
+        GNav.DefineAt(LDefMid, 13, 34, {out} LRName, {out} LRaw) and
+        (LRName = 'NAVBAR'));
+      Ok('DefineAt: an ordinary identifier declines (const A, line 6)',
+        not GNav.DefineAt(LDefMid, 6, 7, {out} LRName, {out} LRaw));
+
+      // FindDefineReferences: case-insensitive, include rows included,
+      // $DEFINE/$UNDEF rows included, kinds and activity carried.
+      LDefHits := GNav.FindDefineReferences('navfoo');
+      Ok('FindDefineReferences: NAVFOO - six mentions', Length(LDefHits) = 6);
+      Ok('FindDefineReferences: NAVFOO - the $DEFINE row',
+        HasDefHitAt(LDefHits, 'NavDef.pas', 2, 10, drDefine, True));
+      Ok('FindDefineReferences: NAVFOO - $IFDEF row',
+        HasDefHitAt(LDefHits, 'NavDef.pas', 5, 9, drIfdef, True));
+      Ok('FindDefineReferences: NAVFOO - lower-case $IFNDEF row',
+        HasDefHitAt(LDefHits, 'NavDef.pas', 10, 10, drIfndef, True));
+      Ok('FindDefineReferences: NAVFOO - Defined() row',
+        HasDefHitAt(LDefHits, 'NavDef.pas', 13, 14, drDefined, True));
+      Ok('FindDefineReferences: NAVFOO - $UNDEF row',
+        HasDefHitAt(LDefHits, 'NavDef.pas', 18, 9, drUndef, True));
+      Ok('FindDefineReferences: NAVFOO - the include''s row',
+        HasDefHitAt(LDefHits, 'NavDef.inc', 1, 9, drIfdef, True));
+      Ok('FindDefineReferences: snippet highlight spans the name',
+        (Length(LDefHits) > 0) and
+        (LDefHits[0].Hit.HiTo - LDefHits[0].Hit.HiFrom = 6));
+      LDefHits := GNav.FindDefineReferences('NAVBAR');
+      Ok('FindDefineReferences: NAVBAR - dead $DEFINE flagged inactive',
+        (Length(LDefHits) = 2) and
+        HasDefHitAt(LDefHits, 'NavDef.pas', 11, 10, drDefine, False) and
+        HasDefHitAt(LDefHits, 'NavDef.pas', 13, 34, drDefined, True));
+      Ok('FindDefineReferences: unknown name - nothing',
+        Length(GNav.FindDefineReferences('NAVNOPE')) = 0);
+
+      // GotoDefine: the nearest preceding ACTIVE $DEFINE, or nothing.
+      Ok('GotoDefine: $IFDEF NAVFOO -> line 2 col 10',
+        GNav.GotoDefine(LDefMid, 5, 9, {out} LRTarget) and
+        SameText(TPath.GetFileName(LRTarget.FilePath), 'NavDef.pas') and
+        (LRTarget.Line = 2) and (LRTarget.Col = 10) and
+        (LRTarget.Name = 'NAVFOO'));
+      Ok('GotoDefine: from the $UNDEF too',
+        GNav.GotoDefine(LDefMid, 18, 9, {out} LRTarget) and (LRTarget.Line = 2));
+      Ok('GotoDefine: the $DEFINE itself has nothing before it',
+        not GNav.GotoDefine(LDefMid, 2, 10, {out} LRTarget));
+      Ok('GotoDefine: NAVBAR - its only $DEFINE is dead, so no target',
+        not GNav.GotoDefine(LDefMid, 13, 34, {out} LRTarget));
+      Ok('GotoDefine: WIN32 - a project define has no source site',
+        not GNav.GotoDefine(LDefMid, 15, 18, {out} LRTarget));
+      Ok('IsProjectDefined: WIN32 yes, NAVFOO no',
+        GNav.IsProjectDefined('WIN32') and GNav.IsProjectDefined('mswindows')
+        and not GNav.IsProjectDefined('NAVFOO'));
+      Ok('FindDefineReferences: WIN32 - the one Defined() row',
+        (Length(GNav.FindDefineReferences('WIN32')) = 1));
 
       // TBytes: a used unit (NavC) declares it for real. Originally this
       // exercised SymbolAt's ResolveRealDecl REDIRECT (TBytes was seeded,
@@ -2418,6 +2571,16 @@ begin
 
 
       GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavMain.dpr'));
+      // The PROGRAM model (AnalyzeProject's root) keeps its DefineRefs too -
+      // the .dpr is where a project's own defines usually sit.
+      Ok('project: root program records its DefineRefs',
+        Length(GProj.Model(GMidB).Tree.Source.DefineRefs) = 2);
+      Ok('project: DefineAt on the root program',
+        GNav.DefineAt(GMidB, 4, 9, {out} LRName, {out} LRaw) and
+        (LRName = 'NAVMAINDEF'));
+      Ok('project: GotoDefine on the root program -> line 3 col 10',
+        GNav.GotoDefine(GMidB, 4, 9, {out} LRTarget) and
+        (LRTarget.Line = 3) and (LRTarget.Col = 10));
       // Either segment of the dotted, namespace-prefixed name opens the file.
       CheckNav('project uses: Deep.NavX -> namespace-prefixed file', 2, 27,
         'Deep', 'Wide.Deep.NavX.pas', 1, 6);

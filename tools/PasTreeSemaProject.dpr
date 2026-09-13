@@ -33,6 +33,11 @@ program PasTreeSemaProject;
          instead of only the histogram. Suppresses the per-unit model dump,
          which is what stdout normally carries.
 
+  -defines  after the analysis, list every conditional-symbol mention the
+         preprocessor recorded for the ROOT file (TPasPreprocessed.DefineRefs)
+         and probe TPasNavigator.DefineAt / GotoDefine at each - the headless
+         twin of Find References / ctrl+click on a define in the .dpr.
+
   -overrides:TClass.Method / -impls:IIntf.Method  (repeatable) after the
          analysis, run the demo's Find Overrides / Find Implementations for
          that method (found by NAME over the closure - every declaration of
@@ -50,6 +55,7 @@ program PasTreeSemaProject;
 
 uses
   System.SysUtils,
+  System.StrUtils,
   System.Math,
   System.Diagnostics,
   System.Threading,
@@ -96,6 +102,9 @@ var
   GRelease: Boolean;   // -release: exercise ReleaseTransientMaps, report held
   GDemote: Boolean;    // -demote: stage 2 on top (DemoteClosedUnits)
   GRehydrate: Boolean; // -rehydrate: after -demote, EnsureHydrated EVERY model
+  GDefines: Boolean;   // -defines: dump the ROOT model's DefineRefs and probe
+                       // DefineAt/GotoDefine on each (the headless twin of
+                       // Find References on a conditional symbol)
                        // and report failures - the stream-reproducibility
                        // check over a real closure (includes, $IF oracle,
                        // recovered encodings), which no fixture can cover.
@@ -130,6 +139,65 @@ begin
 end;
 
 // TDictionary has no GetValueOrDefault in this RTL - one-liner instead.
+{ -defines: the root model's DefineRefs, each probed through the navigator
+  the way an editor would ask (DefineAt at the name's own position, then
+  GotoDefine). A row that the preprocessor recorded but DefineAt refuses is
+  exactly the shape this exists to catch. }
+procedure ReportDefines(const ARootPath: string);
+const
+  KINDS: array[TPasDefineRefKind] of string =
+    ('DEFINE', 'UNDEF', 'IFDEF', 'IFNDEF', 'Defined');
+var
+  LNav: TPasNavigator;
+  LMid, LIdx, LLine, LCol, LRaw: Integer;
+  LM: TPasSemaModel;
+  LRef: TPasDefineRef;
+  LName, LProbe: string;
+  LTarget: TPasNavTarget;
+begin
+  LNav := TPasNavigator.Create(GProj);
+  try
+    LMid := LNav.ModelIdOf(ARootPath);
+    Writeln(ErrOutput, Format('=== defines: root %s -> model %d ===',
+      [TPath.GetFileName(ARootPath), LMid]));
+    if LMid < 0 then
+      Exit;
+    LM := GProj.Model(LMid);
+    Writeln(ErrOutput, Format('  %d DefineRefs, %d file(s), demoted=%s',
+      [Length(LM.Tree.Source.DefineRefs), Length(LM.Tree.Source.Files),
+       BoolToStr(LM.Demoted, True)]));
+    for LIdx := 0 to High(LM.Tree.Source.DefineRefs) do
+    begin
+      LRef := LM.Tree.Source.DefineRefs[LIdx];
+      GProj.EnsureHydrated(LMid);
+      LM.Tree.Source.Files[LRef.FileId].OffsetToLineCol(LRef.Start, LLine, LCol);
+      LProbe := '';
+      if LRef.FileId = 0 then
+      begin
+        if LNav.DefineAt(LMid, LLine, LCol, LName, LRaw) then
+        begin
+          LProbe := Format('DefineAt=%s raw=%d', [LName, LRaw]);
+          if LNav.GotoDefine(LMid, LLine, LCol, LTarget) then
+            LProbe := LProbe + Format(' -> %s(%d,%d)',
+              [TPath.GetFileName(LTarget.FilePath), LTarget.Line, LTarget.Col])
+          else if LNav.IsProjectDefined(LRef.Name) then
+            LProbe := LProbe + ' -> project define'
+          else
+            LProbe := LProbe + ' -> no $DEFINE before it';
+        end
+        else
+          LProbe := 'DefineAt REFUSED';
+      end;
+      Writeln(ErrOutput, Format('  %s(%d,%d) %-7s %-24s %s %s',
+        [TPath.GetFileName(LM.Tree.Source.FileNames[LRef.FileId]), LLine, LCol,
+         KINDS[LRef.Kind], LRef.Name,
+         IfThen(LRef.Active, 'active  ', 'inactive'), LProbe]));
+    end;
+  finally
+    LNav.Free;
+  end;
+end;
+
 procedure Bump(ACounts: TDictionary<string, Integer>; const AName: string);
 var
   LN: Integer;
@@ -384,6 +452,8 @@ begin
       GSW := TStopwatch.StartNew;
       GProj.AnalyzeStaged([LD.MainSource], []);
       GSW.Stop;
+      if GDefines then
+        ReportDefines(LD.MainSource);
 
       LTotalLines := 0; LTotalChars := 0; LTotalFiles := 0;
       LListed := 0; LOther := 0;
@@ -629,6 +699,8 @@ begin
         GDemote := True
       else if SameText(ParamStr(GIdx), '-rehydrate') then
         GRehydrate := True
+      else if SameText(ParamStr(GIdx), '-defines') then
+        GDefines := True
       else if ParamStr(GIdx).StartsWith('-p:', True) then
         TryParsePlatformName(Copy(ParamStr(GIdx), 4, MaxInt), GPlatform)
       else if ParamStr(GIdx).StartsWith('-studio:', True) then

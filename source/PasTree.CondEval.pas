@@ -87,6 +87,13 @@ type
     AbortTrue: Boolean;
   end;
 
+  // One `Defined(X)` argument's span, relative to the expression text
+  // EvalCondText was given - the preprocessor turns it into a TPasDefineRef.
+  TPasCondSpan = record
+    Start: Integer;
+    Len: Integer;
+  end;
+
   TPasCondContext = record
     // Inputs.
     Defines: TPasDefines;            // nil tolerated (tree-eval of const
@@ -101,6 +108,10 @@ type
     // Outputs.
     UnknownDeclared: TArray<string>; // Declared() names nobody answered
     UnknownSymbols: TArray<TPasUnresolvedSymbol>; // ...and symbol questions
+    // Every Defined(<ident>) the expression CONTAINS, source order - a walk
+    // of the tree, not a by-product of evaluation, which short-circuits.
+    // EvalCondText fills it; EvalCondNode never touches it.
+    DefinedSpans: TArray<TPasCondSpan>;
   end;
 
 { Evaluates the expression rooted at ANode. Never raises; anything it cannot
@@ -930,6 +941,43 @@ begin
   end;
 end;
 
+// Appends the span of every `Defined(<ident>)` argument under ANode to
+// ASpans. Source order (a pre-order walk of a source-ordered tree).
+procedure CollectDefinedSpans(const ATree: TPasTree; ANode: Integer;
+  var ASpans: TArray<TPasCondSpan>);
+var
+  LCallee, LArg, LChild, LTok: Integer;
+  LSpan: TPasCondSpan;
+begin
+  if ANode = NIL_NODE then
+    Exit;
+  if ATree.Nodes[ANode].Kind = nkCall then
+  begin
+    LCallee := ATree.Nodes[ANode].FirstChild;
+    if (LCallee <> NIL_NODE) and (ATree.Nodes[LCallee].Kind = nkIdent) and
+       SameText(ATree.NodeText(LCallee), 'Defined') then
+    begin
+      LArg := ATree.Nodes[LCallee].NextSibling;
+      if (LArg <> NIL_NODE) and (ATree.Nodes[LArg].Kind = nkIdent) then
+      begin
+        LTok := ATree.Nodes[LArg].FirstToken;
+        if (LTok >= 0) and (LTok <= High(ATree.Source.Visible)) then
+        begin
+          LSpan.Start := ATree.Source.VisibleToken(LTok).Start;
+          LSpan.Len := ATree.Source.VisibleToken(LTok).Len;
+          ASpans := ASpans + [LSpan];
+        end;
+      end;
+    end;
+  end;
+  LChild := ATree.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    CollectDefinedSpans(ATree, LChild, ASpans);
+    LChild := ATree.Nodes[LChild].NextSibling;
+  end;
+end;
+
 function EvalCondText(const AExpr: string; var ACtx: TPasCondContext;
   out ABadExpr: Boolean): TPasCondValue;
 var
@@ -939,6 +987,8 @@ var
 begin
   LTree := TPasParser.ParseExpressionText(AExpr, LRoot, LDiags);
   ABadExpr := Length(LDiags) > 0;
+  ACtx.DefinedSpans := nil;
+  CollectDefinedSpans(LTree, LRoot, ACtx.DefinedSpans);
   Result := EvalCondNode(LTree, LRoot, ACtx);
   if ABadExpr then
     Result := MkBool(False);

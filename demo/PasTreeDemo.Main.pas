@@ -138,7 +138,8 @@ type
     // FindReferencesActionExecute). SymSym = -1 means SymMid is a UNIT
     // target (FNav.UnitAt), not a symbol; SymSym = -2 means this is a
     // BUILTIN-name search (FNav.BuiltinNameAt) and SymBuiltinName is what
-    // actually gets compared, SymMid being meaningless there.
+    // actually gets compared, SymMid being meaningless there; SymSym = -3 is
+    // the same for a CONDITIONAL-SYMBOL search (FNav.DefineAt).
     SymMid, SymSym: Integer;
     SymBuiltinName: string;
     { WHICH question this page answers about (SymMid, SymSym). Six answers
@@ -521,6 +522,10 @@ type
     // The third identity: a compiler-seeded builtin with no declaration
     // anywhere (FNav.BuiltinNameAt) -- a NAME, not a (unit, symbol) pair.
     function ActiveBuiltinTarget(out AName: string): Boolean;
+    // The fourth identity: a conditional symbol - the name inside a $DEFINE /
+    // $UNDEF / $IFDEF / $IFNDEF / Defined() directive (FNav.DefineAt). A NAME
+    // too, and one no unit owns.
+    function ActiveDefineTarget(out AName: string): Boolean;
     function FindExistingSearchTab(ATMid, ASym: Integer;
       const ABuiltinName: string = '';
       AKind: TSearchTabKind = stkRefs): TFindRefTab;
@@ -1051,13 +1056,29 @@ begin
   Result := FNav.BuiltinNameAt(LMid, LLine, LCol, AName);
 end;
 
+function TfrmMain.ActiveDefineTarget(out AName: string): Boolean;
+var
+  LFilePath: string;
+  LEditor: TSynEdit;
+  LMid, LLine, LCol, LRaw: Integer;
+begin
+  Result := False;
+  if not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
+    Exit;
+  LMid := FNav.ModelIdOf(LFilePath);
+  if LMid < 0 then
+    Exit;
+  Result := FNav.DefineAt(LMid, LLine, LCol, AName, LRaw);
+end;
+
 procedure TfrmMain.FindReferencesActionUpdate(Sender: TObject);
 var
   LTMid, LSym: Integer;
   LName: string;
 begin
   TAction(Sender).Enabled := ActiveSymbolTarget(LTMid, LSym, LName) or
-    ActiveUnitTarget(LTMid, LName) or ActiveBuiltinTarget(LName);
+    ActiveUnitTarget(LTMid, LName) or ActiveBuiltinTarget(LName) or
+    ActiveDefineTarget(LName);
 end;
 
 // A repeated search for the SAME identity (not just the same spelling - two
@@ -1085,7 +1106,9 @@ begin
       Continue;
     if ABuiltinName <> '' then
     begin
-      if (LTab.SymSym = -2) and SameText(LTab.SymBuiltinName, ABuiltinName)
+      // ASym is the -2 / -3 sentinel: a builtin and a conditional symbol
+      // spelled alike are two different searches.
+      if (LTab.SymSym = ASym) and SameText(LTab.SymBuiltinName, ABuiltinName)
       then
         Exit(LTab);
     end
@@ -1107,16 +1130,33 @@ begin
   Result.Kind := AKind;
 end;
 
+// A Find References row prefix for one conditional-symbol mention: what the
+// directive was, and whether the compiler ever reached it.
+function DefineHitPrefix(const AHit: TPasDefineHit): string;
+const
+  KINDS: array[TPasDefineRefKind] of string =
+    ('$DEFINE', '$UNDEF', '$IFDEF', '$IFNDEF', 'Defined()');
+begin
+  Result := Format('Line %d: %s', [AHit.Hit.Line, KINDS[AHit.Kind]]);
+  if not AHit.Active then
+    Result := Result + ' [inactive]';
+  Result := Result + ': ';
+end;
+
 procedure TfrmMain.FindReferencesActionExecute(Sender: TObject);
 var
-  LTMid, LSym: Integer;
-  LName, LBuiltinName: string;
+  LTMid, LSym, LIdx: Integer;
+  LName, LBuiltinName, LCaption: string;
   LTab: TFindRefTab;
   LDeclHit: TPasRefHit;
   LHasDecl: Boolean;
   LHits: TArray<TPasRefHit>;
+  LDefHits: TArray<TPasDefineHit>;
+  LPrefixes: TArray<string>;
 begin
   LBuiltinName := '';
+  LPrefixes := nil;
+  LCaption := '';
   if ActiveSymbolTarget(LTMid, LSym, LName) then
   begin
     LHasDecl := FNav.DeclHit(LTMid, LSym, {out} LDeclHit);
@@ -1141,6 +1181,28 @@ begin
     LHasDecl := False;   // a builtin has no declaration site anywhere
     LHits := FNav.FindBuiltinReferences(LName);
   end
+  else if ActiveDefineTarget(LName) then
+  begin
+    // A conditional symbol: a name, like a builtin, so the same placeholders
+    // with its own sentinel. The $DEFINE sites are rows of their own (there
+    // can be several, or none - a project define has no source site, which
+    // the caption says), so there is no single declaration row.
+    LTMid := -1;
+    LSym := -3;
+    LBuiltinName := LName;
+    LHasDecl := False;
+    LDefHits := FNav.FindDefineReferences(LName);
+    SetLength(LHits, Length(LDefHits));
+    SetLength(LPrefixes, Length(LDefHits));
+    for LIdx := 0 to High(LDefHits) do
+    begin
+      LHits[LIdx] := LDefHits[LIdx].Hit;
+      LPrefixes[LIdx] := DefineHitPrefix(LDefHits[LIdx]);
+    end;
+    LCaption := Format('Search for define ''%s'' (%d)', [LName, Length(LHits)]);
+    if FNav.IsProjectDefined(LName) then
+      LCaption := LCaption + ' [project define]';
+  end
   else
     Exit;
   LTab := FindExistingSearchTab(LTMid, LSym, LBuiltinName);
@@ -1153,8 +1215,9 @@ begin
     LTab.SymBuiltinName := LBuiltinName;
     LTab.Kind := stkRefs;
   end;
-  PopulateFindRefTab(LTab, Format('Search for ''%s'' (%d)',
-    [LName, Length(LHits)]), LHits, LHasDecl, LDeclHit);
+  if LCaption = '' then
+    LCaption := Format('Search for ''%s'' (%d)', [LName, Length(LHits)]);
+  PopulateFindRefTab(LTab, LCaption, LHits, LHasDecl, LDeclHit, LPrefixes);
   pgcBottom.ActivePage := LTab;
 end;
 
@@ -3148,9 +3211,10 @@ function TfrmMain.ResolveAt(AEditor: TSynEdit; X, Y: Integer;
   out ARawFrom, ARawTo: Integer; out ATarget: TPasNavTarget): Boolean;
 var
   LTab: TSourceTab;
-  LMid: Integer;
+  LMid, LRaw: Integer;
   LBC: TBufferCoord;
   LIdent: TPasNavIdent;
+  LName: string;
 begin
   Result := False;
   if FAnalyzing or (FNav = nil) then
@@ -3161,7 +3225,20 @@ begin
     Exit;   // file not part of the last analysis
   LBC := AEditor.DisplayToBufferPos(AEditor.PixelsToRowColumn(X, Y));
   if not FNav.IdentAt(LMid, LBC.Line, LBC.Char, {out} LIdent) then
+  begin
+    // Not an identifier: the name inside a conditional directive, whose
+    // target is the $DEFINE it sees (FNav.GotoDefine). The whole directive
+    // is one raw token, so that is the link range.
+    if FNav.DefineAt(LMid, LBC.Line, LBC.Char, {out} LName, {out} LRaw) and
+       (LRaw >= 0) and
+       FNav.GotoDefine(LMid, LBC.Line, LBC.Char, {out} ATarget) then
+    begin
+      ARawFrom := LRaw;
+      ARawTo := LRaw;
+      Result := True;
+    end;
     Exit;
+  end;
   if not FNav.ResolveDecl(LMid, LIdent.Node, {out} ATarget) then
     Exit;
   ARawFrom := LIdent.RawToken;

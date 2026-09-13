@@ -122,6 +122,26 @@ type
     Bytes: Integer;   // 1, 2, 4, 8 or 16
   end;
 
+  // One mention of a CONDITIONAL SYMBOL by name - the operand of $DEFINE /
+  // $UNDEF / $IFDEF / $IFNDEF, or the argument of `Defined(X)` inside a $IF
+  // or $ELSEIF expression. Recorded for every directive the preprocessor
+  // walks, ACTIVE OR NOT (an $IFDEF nested in a dead branch is still a
+  // reference a search must show, flagged so the reader can tell), in
+  // PROCESSING order - an include's directives land where its {$I} was hit,
+  // so "the nearest preceding $DEFINE" is a backward scan of this array.
+  // Start/Len span the NAME as written in Files[FileId].Source, never the
+  // whole directive. This is what Find References / Go to Definition on a
+  // define read; nothing in parsing or resolution does.
+  TPasDefineRefKind = (drDefine, drUndef, drIfdef, drIfndef, drDefined);
+  TPasDefineRef = record
+    FileId: Integer;
+    Start: Integer;
+    Len: Integer;
+    Name: string;
+    Kind: TPasDefineRefKind;
+    Active: Boolean;   // the directive itself sits in live code
+  end;
+
   // What an oracle hands back for a symbol question. A constant is not always
   // a number: the version-guard idiom compares STRINGS -- Indy's
   // `$IF gsIdVersion >= '10.5.5'` -- and a numeric-only answer has to refuse
@@ -171,6 +191,10 @@ type
     // {$A}/{$ALIGN} state changes, ascending by VisIndex; empty for the
     // overwhelming majority of units (the default is 8).
     AlignEvents: TArray<TPasAlignEvent>;
+    // Every conditional-symbol mention, processing order - see TPasDefineRef.
+    // Retained across DemoteText (it is not text), so a project-wide define
+    // search never rehydrates a unit just to test a name.
+    DefineRefs: TArray<TPasDefineRef>;
     function VisibleToken(AIndex: Integer): TPasToken;
     function VisibleText(AIndex: Integer): string;
     { SameText(VisibleText(AIndex), AWord) without materializing the text -
@@ -269,6 +293,7 @@ type
     FMinEnumEvents: TList<TPasMinEnumEvent>;
     FAlign: Integer;
     FAlignEvents: TList<TPasAlignEvent>;
+    FDefineRefs: TList<TPasDefineRef>;
     FSwitchStack: TStack<TPasOptState>;
     FFileNames: TList<string>;
     FFiles: TList<TPasTokenStream>;
@@ -306,8 +331,12 @@ type
     procedure SetMinEnumSize(AValue: Integer);
     procedure SetAlign(AValue: Integer);
     procedure ApplyRtti(const AArg: string);
-    function EvalIfExpression(const AExpr: string; AFileId: Integer;
-      const AToken: TPasToken): Boolean;
+    // AExprStart: file offset of AExpr's first character, so the
+    // `Defined(X)` spans CondEval reports relative to the text can be recorded
+    // as DefineRefs in file coordinates. AActive: the enclosing state, the
+    // flag those refs carry.
+    function EvalIfExpression(const AExpr: string; AFileId, AExprStart: Integer;
+      AActive: Boolean; const AToken: TPasToken): Boolean;
   public
     { APointerBytes/AExtendedBytes parameterize SizeOf() in $IF expressions
       for the target platform (Win32: 4/10; 64-bit targets: 8/8). }
@@ -683,6 +712,7 @@ begin
   FScopedEnumsEvents := TList<TPasScopedEnumsEvent>.Create;
   FMinEnumEvents := TList<TPasMinEnumEvent>.Create;
   FAlignEvents := TList<TPasAlignEvent>.Create;
+  FDefineRefs := TList<TPasDefineRef>.Create;
   FFileNames := TList<string>.Create;
   FFiles := TList<TPasTokenStream>.Create;
   FVisible := TList<TPasVisibleToken>.Create;
@@ -758,6 +788,7 @@ begin
   FScopedEnumsEvents.Free;
   FMinEnumEvents.Free;
   FAlignEvents.Free;
+  FDefineRefs.Free;
   FSwitchStack.Free;
   inherited;
 end;
@@ -857,6 +888,7 @@ begin
   FMinEnumEvents.Clear;
   FAlign := 8;                   // dcc default ({$A8}); unit-local likewise
   FAlignEvents.Clear;
+  FDefineRefs.Clear;
   FRttiState := Default(TPasRttiState);   // Mode = rmInherit, the dcc default
   FVarPropSetter := False;                // dcc default: OFF (13.1.6)
 
@@ -892,6 +924,7 @@ begin
   Result.UnresolvedSymbols := FUnresolvedSymbols.ToArray;
   Result.MinEnumEvents := FMinEnumEvents.ToArray;
   Result.AlignEvents := FAlignEvents.ToArray;
+  Result.DefineRefs := FDefineRefs.ToArray;
   SetLength(Result.Skipped, FSkipped.Count);
   for LIdx := 0 to FSkipped.Count - 1 do
     Result.Skipped[LIdx] := FSkipped[LIdx].ToArray;
@@ -954,6 +987,9 @@ var
   LTop: Integer;
   LSwitch: Char;
   LWant: Boolean;
+  // File offset of Arg's / SymbolArg's first character, set by each call -
+  // the DefineRefs need the name in file coordinates.
+  LArgStart, LSymLen: Integer;
 
   // The argument after the name run, left-trimmed (the right edge was trimmed
   // with the body) - materialized ONLY by the branches that consume one.
@@ -969,7 +1005,26 @@ var
       Inc(LP);
       Dec(LN);
     end;
+    LArgStart := LP - PChar(Pointer(FFiles[AFileId].Source));
     SetString(Result, LP, LN);
+  end;
+
+  // Records the symbol SymbolArg just isolated (LArgStart/LSymLen) as one
+  // TPasDefineRef. Nothing is recorded for an empty name (`{$IFDEF}`).
+  procedure AddSymbolRef(const AName: string; AKind: TPasDefineRefKind;
+    AActive: Boolean);
+  var
+    LRef: TPasDefineRef;
+  begin
+    if LSymLen = 0 then
+      Exit;
+    LRef.FileId := AFileId;
+    LRef.Start := LArgStart;
+    LRef.Len := LSymLen;
+    LRef.Name := AName;
+    LRef.Kind := AKind;
+    LRef.Active := AActive;
+    FDefineRefs.Add(LRef);
   end;
 
   // The SYMBOL a $IFDEF/$IFNDEF/$DEFINE/$UNDEF names: the leading identifier
@@ -993,6 +1048,8 @@ var
     while (LIdent < LN) and
           CharInSet(LP[LIdent], ['A'..'Z', 'a'..'z', '0'..'9', '_']) do
       Inc(LIdent);
+    LArgStart := LP - PChar(Pointer(FFiles[AFileId].Source));
+    LSymLen := LIdent;
     SetString(Result, LP, LIdent);
   end;
 
@@ -1037,6 +1094,7 @@ begin
   begin
     LArg := SymbolArg;
     LParent := Active;
+    AddSymbolRef(LArg, drIfdef, LParent);
     LTaken := LParent and FDefines.IsDefined(LArg);
     FCondParentActive.Add(LParent);
     FCondAnyTaken.Add(LTaken);
@@ -1045,8 +1103,10 @@ begin
   end
   else if LKind = pdIfndef then
   begin
+    LArg := SymbolArg;
     LParent := Active;
-    LTaken := LParent and not FDefines.IsDefined(SymbolArg);
+    AddSymbolRef(LArg, drIfndef, LParent);
+    LTaken := LParent and not FDefines.IsDefined(LArg);
     FCondParentActive.Add(LParent);
     FCondAnyTaken.Add(LTaken);
     FCondThisActive.Add(LTaken);
@@ -1055,7 +1115,9 @@ begin
   else if LKind = pdIf then
   begin
     LParent := Active;
-    LTaken := LParent and EvalIfExpression(Arg, AFileId, AToken);
+    LArg := Arg;
+    LTaken := LParent and
+      EvalIfExpression(LArg, AFileId, LArgStart, LParent, AToken);
     FCondParentActive.Add(LParent);
     FCondAnyTaken.Add(LTaken);
     FCondThisActive.Add(LTaken);
@@ -1087,8 +1149,10 @@ begin
       Diag(ppUnbalancedElse, AFileId, AToken.Start, AToken.Len)
     else
     begin
+      LArg := Arg;
       LTaken := FCondParentActive[LTop] and not FCondAnyTaken[LTop] and
-        EvalIfExpression(Arg, AFileId, AToken);
+        EvalIfExpression(LArg, AFileId, LArgStart, FCondParentActive[LTop],
+          AToken);
       FCondThisActive[LTop] := LTaken;
       if LTaken then
         FCondAnyTaken[LTop] := True;
@@ -1125,13 +1189,26 @@ begin
       FCondSeenElse.Delete(LTop);
     end;
   end
+  // $DEFINE/$UNDEF are RECORDED whether active or not (a search must show a
+  // dead branch's define, flagged) but APPLIED only in live code.
+  else if LKind in [pdDefine, pdUndef] then
+  begin
+    LArg := SymbolArg;
+    LParent := Active;
+    if LKind = pdDefine then
+      AddSymbolRef(LArg, drDefine, LParent)
+    else
+      AddSymbolRef(LArg, drUndef, LParent);
+    if not LParent then
+      // ignore
+    else if LKind = pdDefine then
+      FDefines.Define(LArg)
+    else
+      FDefines.Undefine(LArg);
+  end
   // ---- everything below acts only in active regions ----
   else if not Active then
     // ignore
-  else if LKind = pdDefine then
-    FDefines.Define(SymbolArg)
-  else if LKind = pdUndef then
-    FDefines.Undefine(SymbolArg)
   else if LKind = pdInclude then
   begin
     LArg := Arg;
@@ -1583,7 +1660,8 @@ end;
 // which is dcc's own behavior (System.ObjAuto.pas ships
 // '$IF SizeOf(Extended) >= 10)' with a stray closing paren).
 function TPasPreprocessor.EvalIfExpression(const AExpr: string;
-  AFileId: Integer; const AToken: TPasToken): Boolean;
+  AFileId, AExprStart: Integer; AActive: Boolean;
+  const AToken: TPasToken): Boolean;
 var
   LCtx: TPasCondContext;
   LValue: TPasCondValue;
@@ -1591,6 +1669,7 @@ var
   LName: string;
   LSym: TPasUnresolvedSymbol;
   LIdx: Integer;
+  LRef: TPasDefineRef;
 begin
   LCtx := Default(TPasCondContext);
   LCtx.Defines := FDefines;
@@ -1600,6 +1679,20 @@ begin
   LCtx.PointerBytes := FPointerBytes;
   LCtx.ExtendedBytes := FExtendedBytes;
   LValue := EvalCondText(AExpr, LCtx, LBad);
+  // Every Defined(X) the expression MENTIONS (a tree walk in CondEval, not
+  // the evaluation - `Defined(A) and Defined(B)` short-circuits past B when A
+  // is off, and B is still a reference).
+  for LIdx := 0 to High(LCtx.DefinedSpans) do
+  begin
+    LRef.FileId := AFileId;
+    LRef.Start := AExprStart + LCtx.DefinedSpans[LIdx].Start;
+    LRef.Len := LCtx.DefinedSpans[LIdx].Len;
+    SetString(LRef.Name, PChar(Pointer(AExpr)) + LCtx.DefinedSpans[LIdx].Start,
+      LRef.Len);
+    LRef.Kind := drDefined;
+    LRef.Active := AActive;
+    FDefineRefs.Add(LRef);
+  end;
   // Unanswered Declared() names and symbol questions feed the second pass
   // (RunDeclaredPass) - but only when they could still CHANGE anything: a
   // verdict settled by a clean side alone (`False and Declared(X)`) is final

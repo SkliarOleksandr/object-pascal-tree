@@ -517,3 +517,58 @@ text says - the table's "not a row" lines are runtime facts.
 `CanonTypeX` (alias links followed) was made public on `TPasSemaProject` for
 row 7's comparison; it was private before because only overload typing
 needed it.
+
+## 9. Find References / Go to Definition for conditional symbols (`TPasNavigator.DefineAt`/`FindDefineReferences`/`GotoDefine` + demo wiring)
+
+Status: IMPLEMENTED (PasTree 0.27.0) - `DefineAt`, `FindDefineReferences`,
+`GotoDefine`, `IsProjectDefined` in `source/PasTree.Sema.Nav.pas`, the
+`DefineRefs` record in `source/PasTree.Preprocessor.pas`, wired into the
+demo's Find References command and ctrl+click, regression-covered by
+`tests/SemaNavSmoke.dpr` (fixture `NavDef` + `NavDef.inc`).
+
+The FOURTH identity next to symbol / unit / builtin (§2.1): the NAME in
+`$DEFINE X`, `$UNDEF X`, `$IFDEF X`, `$IFNDEF X` and `Defined(X)` inside a
+`$IF` / `$ELSEIF`. A conditional symbol has no symbol-table entry, no AST
+node and no owning unit - a `$DEFINE` is unit-local, a `.dproj` or platform
+define is global, and one name is routinely both - so, like a builtin, the
+name is the only identity. Everything reads the preprocessor's own record,
+never the text: `TPasPreprocessed.DefineRefs` lists every mention the
+preprocessor walked, ACTIVE OR NOT, with the name's span, its kind and
+whether the directive sat in live code. It is retained across `DemoteText`
+(it is not text), so a project-wide search tests names without rehydrating
+closed units and rehydrates only for the rows it reports.
+
+| # | Shape | Row / target | Status |
+|---|-------|--------------|--------|
+| 1 | `{$DEFINE X}` / `{$UNDEF X}` | a row each (they ARE references; a name may have several sites or none), positioned on the name | OK |
+| 2 | `{$IFDEF X}` / `{$IFNDEF x}` | row; comparison is case-insensitive as dcc's is; the row keeps the spelling as written | OK |
+| 3 | `Defined(X)` in `$IF` / `$ELSEIF`, every occurrence - `Defined(A) and Defined(B)` lists B even when A is off and dcc never evaluated B | row (a tree walk in `PasTree.CondEval`, not a by-product of evaluation) | OK |
+| 4 | A directive inside a DEAD branch (`{$IFNDEF X} {$DEFINE Y} {$ENDIF}` with X on) | row, `Active = False`; the demo prefixes it `[inactive]` | OK |
+| 5 | A directive inside an include | row in the `.inc`; an include shared by N units produces one row, not N (collapsed by file/line/col, active if any including unit reached it) | OK |
+| 6 | Go to Definition (ctrl+click on the name) | the nearest PRECEDING active `$DEFINE X` in the same model, in preprocessing order (an include's directives count where its `$I` sat) | OK |
+| 7 | A project / platform define (`WIN32`, `MSWINDOWS`, a `.dproj` `DCC_Define`) | rows for every mention; no definition target - `IsProjectDefined` says why, the demo's caption says `[project define]` | OK (by design) |
+| 8 | `{$IFOPT X+}`, switch directives | - | not a conditional symbol, not a row |
+| 9 | The directive WORD (`IFDEF`, `DEFINE`) under the cursor | `DefineAt` declines - only the name is the symbol | OK (by design) |
+| 10 | Ctrl+click on a directive inside an opened `.inc` | - | GAP - an include has no model (the README's To-do) |
+| 11 | Rename of a conditional symbol | - | not offered: the `.dproj` and the command line own part of the identity |
+
+`DefineAt` accepts the caret one past the name's end, as `IdentAt` does for
+an identifier; two past declines. It also hands back the directive's raw
+token, which is the whole `{$...}` - the range the demo underlines.
+
+### pastree-lsp hand-off
+
+Not a new protocol surface. The server's `HandleReferences`,
+`HandleDefinition` and the rename block-check already try the identities in
+order (`UnitAt`, `SymbolAt`, `BuiltinNameAt`); this is one more `else if`
+after `BuiltinNameAt` in each:
+
+- references: `DefineAt` -> `FindDefineReferences`, each `TPasDefineHit.Hit`
+  a `TPasRefHit` as before; `Kind`/`Active` are extra and may be dropped or
+  carried into the item's context.
+- definition: `DefineAt` -> `GotoDefine` (a single target, possibly none;
+  `IsProjectDefined` distinguishes "project define" from "never defined" if
+  the server wants to say so).
+- rename: `DefineAt` true -> refuse, the same way a builtin is refused.
+
+`cMinPasTreeVersion` moves to 0.27.0.

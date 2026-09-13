@@ -102,6 +102,8 @@ const
   MAIN_DPR =
     'program App;'#10 +
     'uses UnitA, UnitB;'#10 +
+    '{$DEFINE APPDEF}'#10 +      // the staged root keeps its DefineRefs
+    '{$IFDEF APPDEF}{$ENDIF}'#10 +
     'begin'#10 +
     'end.'#10;
   // UnitA: interface exposes TThing + KA; its IMPLEMENTATION uses UnitC - an
@@ -198,6 +200,14 @@ begin
          (LStaged.ModuleStatus(LMid) <> msCrossReady) then
         LAllCross := False;
     Ok('staged: all non-System units reached msCrossReady', LAllCross);
+    // The root program of a STAGED run keeps the preprocessor's DefineRefs
+    // (the LSP server analyzes this way; Find References on a define in the
+    // .dpr reads them).
+    var LRootRefs := 0;
+    for LMid := 0 to LStaged.ModelCount - 1 do
+      if LStaged.Model(LMid).UnitNameLower = 'app' then
+        LRootRefs := Length(LStaged.Model(LMid).Tree.Source.DefineRefs);
+    Ok('staged: root program records both DefineRefs', LRootRefs = 2);
 
     // Wave-2 discovery: UnitC is an implementation-only dependency of UnitA,
     // invisible to the interface wave - it must still be loaded.

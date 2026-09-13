@@ -69,6 +69,14 @@ type
     HiFrom, HiTo: Integer;   // 0-based offsets into Snippet to highlight
   end;
 
+  // One mention of a conditional symbol (FindDefineReferences): the row plus
+  // what the directive was and whether the compiler ever reached it.
+  TPasDefineHit = record
+    Hit: TPasRefHit;
+    Kind: TPasDefineRefKind;
+    Active: Boolean;
+  end;
+
   { One text replacement produced by PlanRename - the SAME identifier
     positions Find References reports (the declaration plus every resolved
     USE), turned into edits. Line/Col/Len address the OLD identifier in the
@@ -287,6 +295,11 @@ type
     function IsOwnUnitNameNode(LM: TPasSemaModel; ANode: Integer): Boolean;
     function HitFromNode(LM: TPasSemaModel; ANode: Integer;
       out AHit: TPasRefHit): Boolean;
+    // The DefineRefs index of the name under the caret (main file only), or
+    // -1; the model is hydrated on the way (its LineStarts are needed).
+    function DefineRefIndexAt(AMid, ALine, ACol: Integer): Integer;
+    procedure HitFromDefineRef(LM: TPasSemaModel; const ARef: TPasDefineRef;
+      out AHit: TPasRefHit);
     // Declaration<->implementation toggle helpers (all pure CST walks - no
     // dependency on the resolver's symbol table, so a redeclaration or an
     // unusual overload shape can never break navigation, only miss it).
@@ -490,6 +503,40 @@ type
     // Every reference bound to a compiler-seeded builtin named AName, across
     // every loaded model.
     function FindBuiltinReferences(const AName: string): TArray<TPasRefHit>;
+    { The FOURTH identity: a CONDITIONAL SYMBOL - the name in $DEFINE X,
+      $UNDEF X, $IFDEF X, $IFNDEF X or `Defined(X)` inside a $IF / $ELSEIF. It has no symbol, no AST node and no unit that owns it: a
+      `$DEFINE` is unit-local, a .dproj or platform define is global, and the
+      same name can be both. Like a builtin, the NAME is the only identity,
+      and the search reads the preprocessor's own DefineRefs (recorded for
+      every directive it walked, dead branches included) - never the text.
+
+      DefineAt: the cursor sits ON THE NAME inside such a directive of the
+      model's main file (the caret one past the name's end counts, as an
+      editor's does). ARawToken is the directive's raw token in Files[0], the
+      range a host underlines for ctrl+click. Refuses everywhere else - in
+      particular on the directive word itself, and on a directive inside an
+      include (an include has no model - the README's own To-do). }
+    function DefineAt(AMid, ALine, ACol: Integer; out AName: string;
+      out ARawToken: Integer): Boolean;
+    { Every mention of the conditional symbol AName across every loaded model
+      (case-insensitive, as dcc compares them), sorted by file/line/col. The
+      `$DEFINE`/`$UNDEF` sites are IN the list - each is a reference, and a
+      name can have several of them or none. An include shared by N units is
+      preprocessed N times; the identical rows this produces are collapsed.
+      Active is False for a directive that sat inside a dead branch: still a
+      reference, but one the compiler never acted on. }
+    function FindDefineReferences(const AName: string): TArray<TPasDefineHit>;
+    { Go to Definition on a conditional symbol: the nearest PRECEDING active
+      $DEFINE X in the same model, in preprocessing order (an include's
+      directives count where its $I sat), since that is the site whose
+      effect the cursor's directive sees. False when there is none - either
+      the name comes from the project/platform (IsProjectDefined says so; it
+      has no source site), or it is simply never defined. }
+    function GotoDefine(AMid, ALine, ACol: Integer;
+      out ATarget: TPasNavTarget): Boolean;
+    // True when AName is defined by the PROJECT - the platform's predefined
+    // set, the .dproj, the command line - before any unit's own `$DEFINE`.
+    function IsProjectDefined(const AName: string): Boolean;
     { Find Overrides, part one: the cursor is on a CLASS METHOD (its
       declaration, its implementation header, or a use of it) whose override
       chain can be searched - the Enabled test for the command, and the
@@ -2090,6 +2137,169 @@ begin
       if Result = 0 then
         Result := A.Col - B.Col;
     end));
+end;
+
+{ ---- Conditional symbols (the fourth identity) -------------------------- }
+
+function TPasNavigator.DefineRefIndexAt(AMid, ALine, ACol: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LTS: TPasTokenStream;
+  LOffset, LIdx: Integer;
+begin
+  Result := -1;
+  if (AMid < 0) or (AMid >= FProj.ModelCount) or
+     not FProj.EnsureHydrated(AMid) then
+    Exit;
+  LM := FProj.Model(AMid);
+  LTS := LM.Tree.Source.Files[0];
+  if (ALine < 1) or (ALine - 1 > High(LTS.LineStarts)) or (ACol < 1) then
+    Exit;
+  LOffset := LTS.LineStarts[ALine - 1] + (ACol - 1);
+  for LIdx := 0 to High(LM.Tree.Source.DefineRefs) do
+    with LM.Tree.Source.DefineRefs[LIdx] do
+      // End INCLUSIVE: a caret one past the name (double-click, End key)
+      // still means this name, as it does for an identifier in every editor.
+      if (FileId = 0) and (LOffset >= Start) and (LOffset <= Start + Len) then
+        Exit(LIdx);
+end;
+
+procedure TPasNavigator.HitFromDefineRef(LM: TPasSemaModel;
+  const ARef: TPasDefineRef; out AHit: TPasRefHit);
+var
+  LTS: TPasTokenStream;
+begin
+  LTS := LM.Tree.Source.Files[ARef.FileId];
+  AHit.FilePath := LM.Tree.Source.FileNames[ARef.FileId];
+  LTS.OffsetToLineCol(ARef.Start, AHit.Line, AHit.Col);
+  AHit.Snippet := LTS.LineText(AHit.Line);
+  AHit.HiFrom := AHit.Col - 1;
+  AHit.HiTo := AHit.HiFrom + ARef.Len;
+end;
+
+function TPasNavigator.DefineAt(AMid, ALine, ACol: Integer;
+  out AName: string; out ARawToken: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LTS: TPasTokenStream;
+  LIdx, LLo, LHi, LMidTok, LStart: Integer;
+begin
+  Result := False;
+  LIdx := DefineRefIndexAt(AMid, ALine, ACol);
+  if LIdx < 0 then
+    Exit;
+  LM := FProj.Model(AMid);
+  AName := LM.Tree.Source.DefineRefs[LIdx].Name;
+  LStart := LM.Tree.Source.DefineRefs[LIdx].Start;
+  // The raw token holding the name's offset - the whole directive is one
+  // token, so this is the underline range.
+  LTS := LM.Tree.Source.Files[0];
+  ARawToken := -1;
+  LLo := 0;
+  LHi := High(LTS.Tokens);
+  while LLo <= LHi do
+  begin
+    LMidTok := (LLo + LHi) div 2;
+    if LTS.Tokens[LMidTok].Start > LStart then
+      LHi := LMidTok - 1
+    else if LTS.Tokens[LMidTok].EndPos <= LStart then
+      LLo := LMidTok + 1
+    else
+    begin
+      ARawToken := LMidTok;
+      Break;
+    end;
+  end;
+  Result := True;
+end;
+
+function TPasNavigator.FindDefineReferences(
+  const AName: string): TArray<TPasDefineHit>;
+var
+  LHits: TList<TPasDefineHit>;
+  LMi, LIdx, LOut: Integer;
+  LM: TPasSemaModel;
+  LHit: TPasDefineHit;
+begin
+  LHits := TList<TPasDefineHit>.Create;
+  try
+    for LMi := 0 to FProj.ModelCount - 1 do
+    begin
+      LM := FProj.Model(LMi);
+      // The name test reads the retained DefineRefs; hydration (for the
+      // snippet) only on the first match, as FindBuiltinReferences does.
+      for LIdx := 0 to High(LM.Tree.Source.DefineRefs) do
+        if SameText(LM.Tree.Source.DefineRefs[LIdx].Name, AName) and
+           FProj.EnsureHydrated(LMi) then
+        begin
+          HitFromDefineRef(LM, LM.Tree.Source.DefineRefs[LIdx], LHit.Hit);
+          LHit.Kind := LM.Tree.Source.DefineRefs[LIdx].Kind;
+          LHit.Active := LM.Tree.Source.DefineRefs[LIdx].Active;
+          LHits.Add(LHit);
+        end;
+    end;
+    Result := LHits.ToArray;
+  finally
+    LHits.Free;
+  end;
+  TArray.Sort<TPasDefineHit>(Result, TComparer<TPasDefineHit>.Construct(
+    function(const A, B: TPasDefineHit): Integer
+    begin
+      Result := CompareText(A.Hit.FilePath, B.Hit.FilePath);
+      if Result = 0 then
+        Result := A.Hit.Line - B.Hit.Line;
+      if Result = 0 then
+        Result := A.Hit.Col - B.Hit.Col;
+    end));
+  // A shared include is preprocessed once per including unit - collapse the
+  // identical rows (same file, line, col; sorted, so they are adjacent). An
+  // ACTIVE copy wins over an inactive one: the directive was reached from at
+  // least one unit.
+  LOut := 0;
+  for LIdx := 0 to High(Result) do
+    if (LOut > 0) and
+       SameText(Result[LOut - 1].Hit.FilePath, Result[LIdx].Hit.FilePath) and
+       (Result[LOut - 1].Hit.Line = Result[LIdx].Hit.Line) and
+       (Result[LOut - 1].Hit.Col = Result[LIdx].Hit.Col) then
+      Result[LOut - 1].Active := Result[LOut - 1].Active or Result[LIdx].Active
+    else
+    begin
+      Result[LOut] := Result[LIdx];
+      Inc(LOut);
+    end;
+  SetLength(Result, LOut);
+end;
+
+function TPasNavigator.GotoDefine(AMid, ALine, ACol: Integer;
+  out ATarget: TPasNavTarget): Boolean;
+var
+  LM: TPasSemaModel;
+  LIdx, LDef: Integer;
+  LName: string;
+begin
+  Result := False;
+  LIdx := DefineRefIndexAt(AMid, ALine, ACol);
+  if LIdx < 0 then
+    Exit;
+  LM := FProj.Model(AMid);
+  LName := LM.Tree.Source.DefineRefs[LIdx].Name;
+  for LDef := LIdx - 1 downto 0 do
+    with LM.Tree.Source.DefineRefs[LDef] do
+      if (Kind = drDefine) and Active and SameText(Name, LName) then
+      begin
+        ATarget := Default(TPasNavTarget);
+        ATarget.UnitId := AMid;
+        ATarget.FilePath := LM.Tree.Source.FileNames[FileId];
+        LM.Tree.Source.Files[FileId].OffsetToLineCol(Start, ATarget.Line,
+          ATarget.Col);
+        ATarget.Name := Name;
+        Exit(True);
+      end;
+end;
+
+function TPasNavigator.IsProjectDefined(const AName: string): Boolean;
+begin
+  Result := FProj.IsBaseDefined(AName);
 end;
 
 { ---- Find Overrides ----------------------------------------------------

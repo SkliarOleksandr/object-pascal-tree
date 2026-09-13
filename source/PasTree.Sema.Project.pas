@@ -1143,6 +1143,11 @@ type
       from the host's nav/completion thread only, like every other read of a
       finished project. }
     function EnsureHydrated(AMid: Integer): Boolean;
+    { True when AName is in the project's BASE define set - the platform's
+      predefined symbols plus the ctor's extra defines (.dproj / command
+      line) - i.e. defined before any unit's own `$DEFINE` runs. The
+      navigator's IsProjectDefined: such a name has no source site to go to. }
+    function IsBaseDefined(const AName: string): Boolean;
   private
     procedure GuardNotReleased(const AEntry: string);
   end;
@@ -15357,6 +15362,11 @@ begin
     LKeep.Free;
   end;
   FTransientReleased := True;
+end;
+
+function TPasSemaProject.IsBaseDefined(const AName: string): Boolean;
+begin
+  Result := FDefines.IsDefined(AName);
 end;
 
 function TPasSemaProject.EnsureHydrated(AMid: Integer): Boolean;

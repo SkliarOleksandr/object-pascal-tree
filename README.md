@@ -1772,6 +1772,14 @@ Still open, roughly in the order we're tackling it:
   consumer of data already computed. This is also the direct PREREQUISITE
   for Rename Symbol below (rename = find references + apply edits) - build
   this first.
+- ~~**Find References / Go to Definition for conditional symbols**~~ - DONE
+  (`TPasNavigator.DefineAt` / `FindDefineReferences` / `GotoDefine`, 0.27.0):
+  the name in `$DEFINE`/`$UNDEF`/`$IFDEF`/`$IFNDEF`/`Defined()` is a fourth
+  identity next to symbol, unit and builtin. It reads the preprocessor's own
+  record of every directive it walked (`TPasPreprocessed.DefineRefs`, dead
+  branches included and flagged), never the text; ctrl+click goes to the
+  nearest preceding `$DEFINE`, and a project/platform define is reported as
+  such rather than as "not found". See `docs/editor-features.md` §9.
 - ~~**Rename symbol** (Ctrl+Shift+E)~~ - DONE (`TPasNavigator.PlanRename` /
   `PlanUnitRename`, demo ctrl+shift+E / context menu): renames the
   declaration and every reference to it project-wide off the same resolved
