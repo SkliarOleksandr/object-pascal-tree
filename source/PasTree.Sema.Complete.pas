@@ -187,6 +187,24 @@ type
     OpenCol: Integer;
     ArgIndex: Integer;    // active argument: top-level commas before caret
     Targets: TArray<TPasCallTarget>;
+    { The nkCall node the caret is inside, NIL_NODE when the call was
+      recovered from a broken parse (the `ident(` shape). A host that wants
+      the ARGUMENT nodes - to annotate them, to count them - reads the
+      tree from here rather than re-walking tokens (0.29.0). }
+    CallNode: Integer;
+    { The overload the RESOLVER bound the call to - SelectOverload's arity
+      and type-score winner (or the RefMap/ExtRefMap binding of the name) -
+      as one of Targets' (Mid, Sym) pairs; BoundSym = NIL_SYM when nothing
+      bound. Targets lists the whole family, this says which member of it
+      the call is a call OF - the one question a family cannot answer. }
+    BoundMid: Integer;
+    BoundSym: Integer;
+    { True when (BoundMid, BoundSym) is the resolver's CallTarget for
+      CallNode - a choice made over the ARGUMENTS. False when the name was
+      bound by lookup alone (a bridged cross-unit name, a member found by
+      name): then BoundSym is the family's head, not a selection, and a
+      host that must pick one overload has to do its own arity match. }
+    BoundExact: Boolean;
   end;
 
   { Per-model caret queries and candidate collection. Build one per model
@@ -3036,6 +3054,9 @@ var
 begin
   Result := False;
   AInfo := Default(TPasCallInfo);
+  AInfo.CallNode := NIL_NODE;
+  AInfo.BoundMid := -1;
+  AInfo.BoundSym := NIL_SYM;
   if not CaretOffset(ALine, ACol, LOffset) then
     Exit;
   if LOffset = 0 then
@@ -3064,6 +3085,7 @@ begin
   LCtx := NIL_INST;
   LResolved := False;
   LFound := False;
+  LCallNode := NIL_NODE;
   while (LRaw >= 0) and (LSteps < 4096) and not LFound do
   begin
     case LTS.Tokens[LRaw].Kind of
@@ -3148,8 +3170,16 @@ begin
 
   LTS.OffsetToLineCol(LTS.Tokens[LOpen].Start, AInfo.OpenLine, AInfo.OpenCol);
   AInfo.ArgIndex := LArgs;
+  AInfo.CallNode := LCallNode;
+  AInfo.BoundExact := (LCallNode <> NIL_NODE) and
+    (FModel.CallTarget.ContainsKey(LCallNode) or
+     FModel.CallTargetX.ContainsKey(LCallNode));
   if LResolved then
+  begin
+    AInfo.BoundMid := LMid;
+    AInfo.BoundSym := LSym;
     AddCallTargets(LMid, LSym, LCtx, AInfo);
+  end;
   Result := True;
 end;
 
