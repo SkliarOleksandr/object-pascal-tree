@@ -15,9 +15,14 @@ unit PasTree.Lexer;
     still lexed normally so conditional compilation keeps working.
     Known limitation: a bare `end` inside a skipped $IFDEF branch of an
     asm body would close the asm block at the raw-lexing level.
-  - The caret control-char notation (^M) is NOT resolved here: `^` is
-    always tkCaret; the parser decides caret-char vs dereference by
-    position and adjacency (spec B.6.2).
+  - Caret control chars (spec B.6.2): `^` + a LETTER stays tkCaret +
+    tkIdentifier (`^M` and the pointer type `^TFoo` are the same two
+    tokens; only the parser knows expression from type position). `^` +
+    a non-letter char - `^[ ^^ ^? ^1 ^'` - is one tkCaretChar token, but
+    only when the previous significant token cannot end an operand:
+    `P^[0]`, `A[1]^^` and `nil^` are still derefs. dcc also takes
+    whitespace after the caret (`^ ` = chr 96); that is NOT mirrored - a
+    token spanning a newline would break every line-based consumer.
 }
 
 interface
@@ -40,6 +45,8 @@ type
     FInAsm: Boolean;
     procedure Emit(AKind: TPasTokenKind; AStart: Integer;
       AFlags: TPasTokenFlags = []);
+    function PrevEndsOperand: Boolean;
+    function IsCaretCharHere: Boolean;
     procedure Diag(ACode: TPasDiagCode; AStart, ALen: Integer);
     function CharAt(AIndex: Integer): Char; inline;
     function IsIdentRun(AIndex: Integer): Boolean;
@@ -157,6 +164,54 @@ begin
   FTokens[FTokenCount].Start := AStart;
   FTokens[FTokenCount].Len := FPos - AStart;
   Inc(FTokenCount);
+end;
+
+function TPasLexer.PrevEndsOperand: Boolean;
+var
+  LIdx: Integer;
+begin
+  // Can the token before FPos end an operand, making a `^` here a postfix
+  // dereference? A one-letter identifier glued to a caret (`^M`) is itself
+  // a caret char when THAT caret was in operand position, so the question
+  // moves to the token before it: `^M^J` is two chars, `X^M^J` two derefs.
+  LIdx := FTokenCount - 1;
+  repeat
+    while (LIdx >= 0) and (FTokens[LIdx].Kind in [tkWhitespace,
+      tkCommentLine, tkCommentBrace, tkCommentParen, tkDirective]) do
+      Dec(LIdx);
+    if LIdx < 0 then
+      Exit(False);
+    if (FTokens[LIdx].Kind = tkIdentifier) and (FTokens[LIdx].Len = 1) and
+       (LIdx > 0) and (FTokens[LIdx - 1].Kind = tkCaret) and
+       (FTokens[LIdx - 1].Start + 1 = FTokens[LIdx].Start) then
+      Dec(LIdx, 2)
+    else
+      Exit(FTokens[LIdx].Kind in [tkIdentifier, tkRParen, tkRBracket,
+        tkCaret, tkNil, tkInherited, tkString, tkIntLiteral, tkRealLiteral]);
+  until False;
+end;
+
+function TPasLexer.IsCaretCharHere: Boolean;
+var
+  LCh: Char;
+begin
+  // FPos is just past a `^`. A caret control char (B.6.2) when the next
+  // char is a printable non-letter (`^[ ^^ ^? ^1 ^'`) and the caret is in
+  // operand position - nothing before it that could end an operand and
+  // make it a postfix dereference (`P^[0]`, `A[1]^^`, `nil^`). Letters
+  // are left to the parser: `^M` and the pointer type `^TFoo` lex the
+  // same and only the parser knows expression from type position.
+  // Whitespace after the caret (dcc: `^ ` = chr 96) is deliberately not
+  // taken - a token spanning a newline would break line-based consumers.
+  // Comment and directive openers stay openers: Vcl.Outline.pas writes
+  // `{$IFNDEF CLR}^{$ENDIF}TBitmap`, a pointer type with a directive glued
+  // to the caret; `^{` there is not chr 59.
+  LCh := CharAt(FPos);
+  if (LCh <= #32) or (LCh > #127) or (LCh = '&') or (LCh = '{') or
+     (LCh = '(') or ((LCh = '/') and (CharAt(FPos + 1) = '/')) or
+     IsIdentStart(LCh) then
+    Exit(False);
+  Result := not PrevEndsOperand;
 end;
 
 procedure TPasLexer.Diag(ACode: TPasDiagCode; AStart, ALen: Integer);
@@ -766,7 +821,14 @@ begin
     '=': Emit(tkEqual, LStart);
     ',': Emit(tkComma, LStart);
     ';': Emit(tkSemicolon, LStart);
-    '^': Emit(tkCaret, LStart);
+    '^':
+      if IsCaretCharHere then
+      begin
+        Inc(FPos);
+        Emit(tkCaretChar, LStart);
+      end
+      else
+        Emit(tkCaret, LStart);
     '@': Emit(tkAt, LStart);
     '[': Emit(tkLBracket, LStart);
     ']': Emit(tkRBracket, LStart);

@@ -518,6 +518,9 @@ const
     '  var LS2 := '''';'#10 +
     '  var LS3 := ''a''#0;'#10 +
     '  var LCh2 := ^M;'#10 +
+    '  var LCh3 := ^[;'#10 +
+    '  var LCrLf := ^M^J;'#10 +
+    '  var LMix := ''a''^[;'#10 +
     '  var LChain := LItem;'#10 +
     '  var LNil := nil;'#10 +
     '  var LT := TBox;'#10 +
@@ -1805,6 +1808,9 @@ begin
     Eq('literal: ''a''#0 (two pieces) is string', XTypeOf(LE, 'LS3'),
       'string');
     Eq('literal: ^M is Char', XTypeOf(LE, 'LCh2'), 'Char');
+    Eq('literal: ^[ is Char', XTypeOf(LE, 'LCh3'), 'Char');
+    Eq('literal: ^M^J is string', XTypeOf(LE, 'LCrLf'), 'string');
+    Eq('literal: quoted + caret is string', XTypeOf(LE, 'LMix'), 'string');
     Eq('3.1.3: an inferred var initialised from another inferred var',
       XTypeOf(LE, 'LChain'), 'TItem');
     Eq('3.1.3: nil gives no type', XTypeOf(LE, 'LNil'), '?');

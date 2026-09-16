@@ -251,6 +251,17 @@ same-arity overloads differing only in modifiers can mis-pair.
   the consumer's job.
 
 ### B.6.2 Caret control characters
-- the raw lexer always emits `^` as its own token; caret control-char vs
-  pointer dereference is decided by the parser positionally.
+- `^` + a letter (`^M`) is two raw tokens, caret and identifier; the parser
+  decides caret char vs pointer type vs dereference positionally. `^` + a
+  printable non-letter (`^[ ^^ ^? ^1`) is one `tkCaretChar` token when the
+  caret cannot be a postfix dereference.
+- dcc also takes whitespace after the caret (`^ ` is chr 96, `^` + CR is
+  `M`); PasTree reports "control character expected" instead - a token
+  spanning a newline would break every line-based consumer, and no real
+  code writes it.
+- `^{`, `^(` and `^//` are not caret chars either: `{`, `(*` and `//` keep
+  opening comments and directives, because real code glues a directive to a
+  pointer-type caret (`{$IFNDEF CLR}^{$ENDIF}TBitmap` in the VCL).
+- `^Mx` is diagnosed as one node over `^Mx` ("takes exactly one character")
+  rather than split into `^M` and a stray `x` as dcc does.
 

@@ -12004,7 +12004,7 @@ var
   LTxt: string;
   LTok, LIdx, LUnits, LFrac: Integer;
   LU: UInt64;
-  LHasExp, LInFrac: Boolean;
+  LHasExp, LInFrac, LSkipLetter: Boolean;
   LVal: Extended;
 begin
   Result := XNil;
@@ -12091,15 +12091,28 @@ begin
       begin
         // Count UTF-16 units over every visible token of the node.
         LUnits := 0;
+        LSkipLetter := False;
         for LTok := LM.Tree.Nodes[ANode].FirstToken to
             LM.Tree.Nodes[ANode].LastToken do
         begin
           if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
             Exit;
+          if LSkipLetter then
+          begin
+            LSkipLetter := False;
+            Continue;
+          end;
           LTxt := LM.Tree.Source.VisibleText(LTok);
           if LTxt = '' then
             Exit;
-          if LTxt[1] = '#' then
+          if LTxt[1] = '^' then
+          begin
+            // Caret char (B.6.2): `^[` is one token, `^M` is `^` plus a
+            // one-letter identifier token - one unit either way.
+            LSkipLetter := Length(LTxt) = 1;
+            Inc(LUnits);
+          end
+          else if LTxt[1] = '#' then
           begin
             // #nnn / #$hh / #%bbb - one unit unless the value needs a
             // surrogate pair.

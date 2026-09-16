@@ -35,6 +35,7 @@ type
     tkStringLiteral,     // '...' with '' escapes; single line
     tkMultilineString,   // '''...''' (Delphi 12+), whole block as one token
     tkControlChar,       // #13, #$0A, #%1010
+    tkCaretChar,         // ^[  ^^  ^?  - caret + one non-letter char (B.6.2); ^M stays tkCaret + tkIdentifier
     tkAsmChunk,          // opaque BASM text between trivia inside asm...end
 
     // ---- punctuation ------------------------------------------------------

@@ -102,6 +102,12 @@ type
     function AtGenericClose: Boolean;
     function IsWord(const AWord: string): Boolean;
     function AdjacentNext: Boolean;
+    function AdjacentPrev: Boolean;
+    function CaretLetterNext: Boolean;
+    function CaretWidth: Integer;
+    function StringElementFollows(AIdx: Integer): Boolean;
+    procedure SkipCaret;
+    procedure SkipStringElements;
     procedure Error(const AMsg: string);
     // expressions
     function ParseExpression: Integer;
@@ -340,6 +346,65 @@ begin
     (FSrc.Visible[FPos + 1].TokenIndex = FSrc.Visible[FPos].TokenIndex + 1);
 end;
 
+function TPasParser.AdjacentPrev: Boolean;
+begin
+  Result := (FPos > 0) and
+    (FSrc.Visible[FPos - 1].FileId = FSrc.Visible[FPos].FileId) and
+    (FSrc.Visible[FPos - 1].TokenIndex = FSrc.Visible[FPos].TokenIndex - 1);
+end;
+
+function TPasParser.CaretLetterNext: Boolean;
+begin
+  // At a tkCaret: is this `^M` - a raw-adjacent one-character identifier?
+  Result := AdjacentNext and (PeekKind(1) = tkIdentifier) and
+    (FSrc.VisibleToken(FPos + 1).Len = 1);
+end;
+
+function TPasParser.CaretWidth: Integer;
+begin
+  // Tokens one caret element occupies: `^[` is one, `^M` is two.
+  if CurKind = tkCaretChar then
+    Result := 1
+  else
+    Result := 2;
+end;
+
+procedure TPasParser.SkipCaret;
+begin
+  if CurKind = tkCaret then
+    Next;
+  Next;
+end;
+
+function TPasParser.StringElementFollows(AIdx: Integer): Boolean;
+var
+  LKind: TPasTokenKind;
+begin
+  // Does another string element (B.6.1) start at visible index AIdx?
+  if AIdx > FLast then
+    Exit(False);
+  LKind := FSrc.VisibleToken(AIdx).Kind;
+  Result := LKind in [tkStringLiteral, tkMultilineString, tkControlChar,
+    tkCaretChar];
+  if (not Result) and (LKind = tkCaret) and (AIdx < FLast) and
+     (FSrc.VisibleToken(AIdx + 1).Kind = tkIdentifier) and
+     (FSrc.VisibleToken(AIdx + 1).Len = 1) and
+     (FSrc.Visible[AIdx + 1].FileId = FSrc.Visible[AIdx].FileId) and
+     (FSrc.Visible[AIdx + 1].TokenIndex = FSrc.Visible[AIdx].TokenIndex + 1)
+  then
+    Result := True;
+end;
+
+procedure TPasParser.SkipStringElements;
+begin
+  // Consume every adjacent string element after the first one.
+  while StringElementFollows(FPos) do
+    if CurKind = tkCaret then
+      SkipCaret
+    else
+      Next;
+end;
+
 procedure TPasParser.Error(const AMsg: string);
 begin
   if FDiagCount = Length(FDiags) then
@@ -498,9 +563,7 @@ begin
         // (Data.Cloud.AmazonAPI.pas).
         Result := FB.AddNode(nkStrLit, NIL_NODE, LStart);
         Next;
-        while CurKind in [tkStringLiteral, tkMultilineString, tkControlChar]
-        do
-          Next;
+        SkipStringElements;
         FB.SetLast(Result, FPos - 1);
         Exit(ParseSelectors(Result));
       end;
@@ -512,23 +575,40 @@ begin
         Next;
         Exit(ParseSelectors(Result));
       end;
-    tkCaret:
+    tkCaret, tkCaretChar:
       begin
-        // Operand position: caret control char (B.6.2), e.g. ^M - the
-        // letter must be raw-adjacent to the caret (no trivia between).
-        LNode := FB.AddNode(nkCaretChar, NIL_NODE, LStart);
-        if AdjacentNext and (PeekKind(1) = tkIdentifier) then
+        // Operand position: caret control char (B.6.2). `^[ ^^ ^?` arrive
+        // as one tkCaretChar token from the lexer; `^M` is tkCaret plus a
+        // raw-adjacent ONE-letter identifier (dcc takes exactly one char:
+        // `^Mx` is `^M` followed by a stray `x`). Either kind is a string
+        // element and folds with adjacent '..', #n and further carets:
+        // ^M^J, 'ab'^M#10'cd' are ONE literal (B.6.1).
+        if (CurKind = tkCaret) and not CaretLetterNext then
         begin
+          LNode := FB.AddNode(nkCaretChar, NIL_NODE, LStart);
           Next;
-          Next;
-        end
-        else
-        begin
-          Next;
-          Error('control character expected after "^"');
+          if (CurKind = tkIdentifier) and AdjacentPrev then
+          begin
+            Error('"^" takes exactly one character');
+            Next;
+          end
+          else
+            Error('control character expected after "^"');
+          FB.SetLast(LNode, FPos - 1);
+          Exit(LNode);
         end;
-        FB.SetLast(LNode, FPos - 1);
-        Exit(LNode);
+        if not StringElementFollows(FPos + CaretWidth) then
+        begin
+          LNode := FB.AddNode(nkCaretChar, NIL_NODE, LStart);
+          SkipCaret;
+          FB.SetLast(LNode, FPos - 1);
+          Exit(LNode);
+        end;
+        Result := FB.AddNode(nkStrLit, NIL_NODE, LStart);
+        SkipCaret;
+        SkipStringElements;
+        FB.SetLast(Result, FPos - 1);
+        Exit(ParseSelectors(Result));
       end;
     tkLParen:
       begin
@@ -913,6 +993,7 @@ begin
               if not (LKind in [tkIdentifier, tkIntLiteral, tkRealLiteral,
                 tkStringLiteral, tkMultilineString, tkControlChar, tkNil,
                 tkNot, tkAt, tkInherited, tkPlus, tkMinus, tkCaret,
+                tkCaretChar,
                 tkLBracket, tkIf, tkProcedure, tkFunction, tkString]) then
                 Exit(LIdx + 1);
             end;

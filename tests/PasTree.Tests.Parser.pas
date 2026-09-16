@@ -29,7 +29,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..81] of TPasCaseRow = (
+  STMT_CASES: array[0..90] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -110,6 +110,30 @@ const
      Expected: 'Block(Assign(Ident''S'' StrLit''''Hi''''))'; ExpectDiags: 0),
     (Section: 'B.6.2'; Name: 'caret char'; Source: 'C := ^M;';
      Expected: 'Block(Assign(Ident''C'' CaretChar''^''))'; ExpectDiags: 0),
+    (Section: 'B.6.2'; Name: 'caret bracket'; Source: 'C := ^[;';
+     Expected: 'Block(Assign(Ident''C'' CaretChar''^[''))'; ExpectDiags: 0),
+    (Section: 'B.6.2'; Name: 'caret del'; Source: 'C := ^?;';
+     Expected: 'Block(Assign(Ident''C'' CaretChar''^?''))'; ExpectDiags: 0),
+    (Section: 'B.6.2'; Name: 'caret quote does not open a string';
+     Source: 'C := ^'';';
+     Expected: 'Block(Assign(Ident''C'' CaretChar''^''''))'; ExpectDiags: 0),
+    (Section: 'B.6.2'; Name: 'caret chain folds'; Source: 'S := ^M^J^_^]^^;';
+     Expected: 'Block(Assign(Ident''S'' StrLit''^''))'; ExpectDiags: 0),
+    (Section: 'B.6.2'; Name: 'caret folds with quoted and #n';
+     Source: 'S := ''ab''^M#10''cd''^[;';
+     Expected: 'Block(Assign(Ident''S'' StrLit''''ab''''))'; ExpectDiags: 0),
+    (Section: 'B.6.2'; Name: 'caret takes one char'; Source: 'C := ^Mx;';
+     Expected: 'Block(Assign(Ident''C'' CaretChar''^''))'; ExpectDiags: 1),
+    (Section: 'B.6.2'; Name: 'double deref is not ^^'; Source: 'X := P^^;';
+     Expected: 'Block(Assign(Ident''X'' Deref(Deref(Ident''P''))))';
+     ExpectDiags: 0),
+    (Section: 'B.6.2'; Name: 'deref then index is not ^['; Source: 'X := P^[0];';
+     Expected: 'Block(Assign(Ident''X'' Index(Deref(Ident''P'') IntLit''0'')))';
+     ExpectDiags: 0),
+    (Section: 'B.6.2'; Name: 'caret range in set'; Source: 'if C in [^A..^Z, ^[] then;';
+     Expected: 'Block(IfStmt(BinaryOp''in''(Ident''C'' SetCtor(Range(' +
+       'CaretChar''^'' CaretChar''^'') CaretChar''^['')) EmptyStmt))';
+     ExpectDiags: 0),
     (Section: 'B.9'; Name: 'set ctor';
      Source: 'if C in [''a''..''z'', ''0''] then;';
      Expected: 'Block(IfStmt(BinaryOp''in''(Ident''C'' SetCtor(Range(' +

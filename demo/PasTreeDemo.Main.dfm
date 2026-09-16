@@ -403,6 +403,8 @@ object frmMain: TfrmMain
           Gutter.Font.Quality = fqClearTypeNatural
           Gutter.Bands = <>
           ScrollbarAnnotations = <>
+          ExplicitWidth = 902
+          ExplicitHeight = 419
         end
       end
     end

@@ -3325,6 +3325,8 @@ begin
   LTab.PageControl := pgc;
   LTab.Caption := TPath.GetFileName(APath);
 
+  StringReplace('aaaa', ^M^J, '', []);
+
   Result := TSynEdit.Create(LTab);
   Result.Parent := LTab;
   Result.Align := alClient;

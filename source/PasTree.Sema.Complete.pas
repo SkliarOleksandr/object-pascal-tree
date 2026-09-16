@@ -669,7 +669,7 @@ begin
            (tfUnterminated in LTS.Tokens[LRaw].Flags)) and
           (LKind in [tkCommentLine, tkCommentBrace, tkCommentParen,
             tkDirective, tkStringLiteral, tkMultilineString, tkControlChar,
-            tkIntLiteral, tkRealLiteral, tkAsmChunk, tkUnknown]) then
+            tkCaretChar, tkIntLiteral, tkRealLiteral, tkAsmChunk, tkUnknown]) then
     Exit;
 
   if AInfo.Kind = ckNone then

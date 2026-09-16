@@ -788,7 +788,7 @@ begin
           Result := FSameIdentAttri;
         end;
       end;
-    tkIntLiteral, tkRealLiteral, tkControlChar:
+    tkIntLiteral, tkRealLiteral, tkControlChar, tkCaretChar:
       Result := FNumberAttri;
     tkStringLiteral, tkMultilineString:
       Result := FStringAttri;
