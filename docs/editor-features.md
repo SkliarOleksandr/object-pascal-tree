@@ -76,9 +76,16 @@ qualified expression highlights only itself.
    closure from the main source is loaded, and EVERY loaded model gets the
    cross passes - not just the main file (which is `AnalyzeFile`'s narrower
    contract, kept for tools).
-6. **Unit-file resolution** (`ResolveUnit`, rows 11-13): `in`-path ->
-   `<dotted>.pas`/`<leaf>.pas` against referring dir + search paths ->
-   **unit aliases** -> **namespace prefixes** (`-NS` order) -> basename index.
+6. **Unit-file resolution** (`ResolveUnit`, rows 11-13): **pinned units**
+   (a program's `in`-path once resolved, the host's `PinUnitFile` list - the
+   .dproj's own units; they locate a unit for the WHOLE project, dcc
+   semantics) -> `in`-path -> **unit aliases** -> `<dotted>.pas` against the
+   **project dir** (dcc's implicit current directory), then the search paths
+   in order, then the referring dir as a fallback -> **namespace prefixes**
+   (`-NS` order) -> `<leaf>.pas` -> basename index. The project dir and the
+   pins are what let a patched copy of a library unit inside the project
+   shadow the original for every importer (0.31.0; pinned in
+   `SemaProjectSmoke` "shadow/*").
 7. **Search path assembly** (demo, row 11): project dir + .dproj
    DCC_UnitSearchPath + the IDE's REAL resolution sources, read from the
    registry (`HKCU\SOFTWARE\Embarcadero\BDS\<ver>`): `Library\<Platform>\

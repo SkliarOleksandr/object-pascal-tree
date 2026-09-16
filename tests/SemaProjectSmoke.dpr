@@ -6643,6 +6643,111 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { Shadowing a library unit with a patched copy, the three ways a project
+    does it - dcc semantics, all verified against the compiler:
+      (1) the copy sits in the PROJECT DIRECTORY, listed nowhere: dcc's
+          implicit current directory beats every -U path;
+      (2) the program says `Foo in 'patched\Foo.pas'`: the in-path locates Foo
+          for the WHOLE project, so a library unit importing Foo by bare name
+          gets the patched one too - whichever order the program lists them;
+      (3) a host pins the project's file list (a .dproj's DCCReference).
+    Before 0.31.0 all three resolved the library's ORIGINAL for every importer
+    but the program itself, so the closure held two Foos and every library
+    unit was analyzed against the wrong one - reported as E2003 in the
+    patched member's users, three units away from the cause. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_shadow');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(TPath.Combine(LDir, 'lib'));
+  TDirectory.CreateDirectory(TPath.Combine(LDir, 'proj'));
+  TDirectory.CreateDirectory(TPath.Combine(LDir, 'proj\patched'));
+  TFile.WriteAllText(TPath.Combine(LDir, 'lib\ShFoo.pas'),
+    'unit ShFoo;'#10'interface'#10 +
+    'type TShFoo = class'#10'  procedure Orig;'#10'end;'#10 +
+    'implementation'#10'procedure TShFoo.Orig; begin end;'#10'end.'#10);
+  // The library's own consumer of the patched member: compiles only against
+  // the patched copy.
+  TFile.WriteAllText(TPath.Combine(LDir, 'lib\ShBar.pas'),
+    'unit ShBar;'#10'interface'#10'uses ShFoo;'#10 +
+    'procedure UseFoo(F: TShFoo);'#10 +
+    'implementation'#10 +
+    'procedure UseFoo(F: TShFoo);'#10'begin'#10'  F.Patched;'#10'end;'#10 +
+    'end.'#10);
+  const SH_PATCHED =
+    'unit ShFoo;'#10'interface'#10 +
+    'type TShFoo = class'#10'  procedure Orig;'#10'  procedure Patched;'#10 +
+    'end;'#10 +
+    'implementation'#10'procedure TShFoo.Orig; begin end;'#10 +
+    'procedure TShFoo.Patched; begin end;'#10'end.'#10;
+
+  // (1) beside the .dpr, no in-path, no search-path entry.
+  TFile.WriteAllText(TPath.Combine(LDir, 'proj\ShFoo.pas'), SH_PATCHED);
+  TFile.WriteAllText(TPath.Combine(LDir, 'proj\ShApp.dpr'),
+    'program ShApp;'#10'uses ShBar;'#10'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [TPath.Combine(LDir, 'lib')], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'proj\ShApp.dpr'));
+    Ok('shadow/projdir: ShFoo resolves to the copy in the project directory',
+      (MidByName('shfoo') >= 0) and
+      SameText(GProj.ModelFile(MidByName('shfoo')),
+        TPath.Combine(LDir, 'proj\ShFoo.pas')));
+    Ok('shadow/projdir: the library original is not in the closure',
+      GProj.ModelIdOf(TPath.Combine(LDir, 'lib\ShFoo.pas')) < 0);
+    Ok('shadow/projdir: the library importer binds the patched member',
+      (MidByName('shbar') >= 0) and
+      (DiagCount(ModelByName('shbar'), 'E2003') = 0) and
+      CrossRefTo(ModelByName('shbar'), 'Patched', 'Patched'));
+  finally
+    GProj.Free;
+  end;
+  TFile.Delete(TPath.Combine(LDir, 'proj\ShFoo.pas'));
+
+  // (2) an in-path, with the importer listed BEFORE the located unit - the
+  // order that breaks a first-come resolution.
+  TFile.WriteAllText(TPath.Combine(LDir, 'proj\patched\ShFoo.pas'), SH_PATCHED);
+  TFile.WriteAllText(TPath.Combine(LDir, 'proj\ShApp.dpr'),
+    'program ShApp;'#10'uses ShBar, ShFoo in ''patched\ShFoo.pas'';'#10 +
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [TPath.Combine(LDir, 'lib')], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'proj\ShApp.dpr'));
+    Ok('shadow/in-path: ShFoo resolves to the located copy',
+      (MidByName('shfoo') >= 0) and
+      SameText(GProj.ModelFile(MidByName('shfoo')),
+        TPath.Combine(LDir, 'proj\patched\ShFoo.pas')));
+    Ok('shadow/in-path: the library original is not in the closure',
+      GProj.ModelIdOf(TPath.Combine(LDir, 'lib\ShFoo.pas')) < 0);
+    Ok('shadow/in-path: the library importer binds the patched member',
+      (MidByName('shbar') >= 0) and
+      (DiagCount(ModelByName('shbar'), 'E2003') = 0) and
+      CrossRefTo(ModelByName('shbar'), 'Patched', 'Patched'));
+  finally
+    GProj.Free;
+  end;
+
+  // (3) no in-path at all: the host pins the project's file list.
+  TFile.WriteAllText(TPath.Combine(LDir, 'proj\ShApp.dpr'),
+    'program ShApp;'#10'uses ShBar;'#10'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [TPath.Combine(LDir, 'lib')], []);
+  try
+    GProj.PinUnitFile(TPath.Combine(LDir, 'proj\patched\ShFoo.pas'));
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'proj\ShApp.dpr'));
+    Ok('shadow/pinned: ShFoo resolves to the pinned file',
+      (MidByName('shfoo') >= 0) and
+      SameText(GProj.ModelFile(MidByName('shfoo')),
+        TPath.Combine(LDir, 'proj\patched\ShFoo.pas')));
+    Ok('shadow/pinned: the library original is not in the closure',
+      GProj.ModelIdOf(TPath.Combine(LDir, 'lib\ShFoo.pas')) < 0);
+    Ok('shadow/pinned: the library importer binds the patched member',
+      (MidByName('shbar') >= 0) and
+      (DiagCount(ModelByName('shbar'), 'E2003') = 0) and
+      CrossRefTo(ModelByName('shbar'), 'Patched', 'Patched'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
 end.

@@ -78,6 +78,23 @@ type
     FRecoveredLock: TObject;
     FSearchNames: TArray<string>;   // SearchPathUnitNames' cache
     FSearchNamesBuilt: Boolean;
+    // Units LOCATED for the whole project - unit name (lower) -> full path.
+    // dcc semantics: a `uses Foo in 'patched\Foo.pas'` in the program file
+    // decides where Foo lives for EVERY unit that imports it, not just for
+    // the program; the IDE's project file list (DCCReference) means the same
+    // thing. Consulted before any path probing, because this is how a
+    // project SHADOWS a third-party unit with a patched copy that sits in no
+    // search path at all - and without it the third-party units importing
+    // Foo resolved the ORIGINAL from the library path, so the closure held
+    // two different Foos and analyzed everything foreign against the wrong
+    // one. Filled by ResolveUnit itself (an in-path resolving) and by PinUnit.
+    FPinned: TDictionary<string, string>;
+    // The project's own directory - dcc's implicit "current directory",
+    // searched BEFORE every -U path. A patched copy dropped beside the .dpr
+    // is found there by the IDE without any search-path entry; it must be
+    // found here too, ahead of the library paths. '' = none (a directory
+    // root, an open-documents-only host).
+    FProjectDir: string;
     function TryFile(const ADir, AName: string; out AResolved: string): Boolean;
     function DirIndex(const ADir: string): TDictionary<string, string>;
     procedure EnsureSearchIndex;
@@ -96,6 +113,17 @@ type
     { Unit aliases (dcc -A / DCC_UnitAlias): a whole-name match rewrites the
       unit name BEFORE resolution (WinTypes -> Winapi.Windows). }
     procedure AddUnitAlias(const AAlias, AReal: string);
+    { Locates AUnitName at APath for the whole project, ahead of every path
+      lookup (see FPinned). What a program's `in 'path'` clause does in dcc;
+      a host hands the project file's own unit list through here. The FIRST
+      pin for a name wins - a later, different location is dcc's "unit found
+      in two places", and the program's word stays authoritative. }
+    procedure PinUnit(const AUnitName, APath: string);
+    { The project directory - searched before the search paths, as dcc's
+      implicit current directory is (see FProjectDir). The analysis drivers
+      set it from the main file when a host has not. }
+    procedure SetProjectDir(const ADir: string);
+    function ProjectDir: string;
     { A canonical signature of everything that decides WHICH file a unit name
       resolves to: search paths (in order - order is priority), namespaces (in
       order - tried in order), aliases (sorted - a dictionary has no order).
@@ -211,6 +239,7 @@ begin
   FDirIndexes.Free;
   FSearchIndex.Free;
   FAliases.Free;
+  FPinned.Free;
   FBuffers.Free;
   FIncludeIndex.Free;
   FUnitIndex.Free;
@@ -272,13 +301,37 @@ begin
   FAliases.AddOrSetValue(LowerCase(AAlias), AReal);
 end;
 
+procedure TPasSourceManager.PinUnit(const AUnitName, APath: string);
+begin
+  if (AUnitName = '') or (APath = '') then
+    Exit;
+  if FPinned = nil then
+    FPinned := TDictionary<string, string>.Create;
+  FPinned.TryAdd(LowerCase(AUnitName), TPath.GetFullPath(APath));
+end;
+
+procedure TPasSourceManager.SetProjectDir(const ADir: string);
+begin
+  if ADir = '' then
+    FProjectDir := ''
+  else
+    FProjectDir := ExcludeTrailingPathDelimiter(TPath.GetFullPath(ADir));
+end;
+
+function TPasSourceManager.ProjectDir: string;
+begin
+  Result := FProjectDir;
+end;
+
 function TPasSourceManager.ConfigSignature: string;
 var
   LItem: string;
   LPairs: TArray<string>;
   LPair: TPair<string, string>;
 begin
-  Result := '';
+  // The project directory is a search path in all but name (FindUnitFile
+  // probes it first), so it decides resolution exactly as the paths do.
+  Result := LowerCase(FProjectDir) + '|';
   for LItem in FSearchPaths do
     Result := Result + LItem + #1;
   Result := Result + '|';
@@ -426,6 +479,15 @@ begin
   // The fallback stays because it is strictly more tolerant than dcc: a unit
   // reached from a directory NOBODY listed is an F1027 for dcc, and an F1027
   // here GATES its importers' diagnostics rather than reporting them.
+  //
+  // And before the search paths, the PROJECT DIRECTORY: dcc's implicit
+  // current directory, ahead of every -U entry (dcc-verified: a Foo.pas
+  // beside the .dpr beats the Foo.pas on the search path, no path entry
+  // needed). The IDE compiles such a copy; this used to resolve the library's.
+  if (FProjectDir <> '') and
+     DirIndex(FProjectDir).TryGetValue(LowerCase(AUnitName) + '.pas',
+       AResolved) then
+    Exit(True);
   if FSearchIndex.TryGetValue(LowerCase(AUnitName) + '.pas', AResolved) then
     Exit(True);
   Result := DirIndex(AFromDir).TryGetValue(LowerCase(AUnitName) + '.pas',
@@ -449,19 +511,37 @@ begin
   else
     LDir := TPath.GetDirectoryName(AFromFile);
 
-  // 1. Explicit `in 'path'`.
+  // 0. A unit already LOCATED for the project (see FPinned) - the program's
+  // in-path or the project file's unit list - beats every lookup below, the
+  // referring unit's own in-path included: dcc reports a unit found in two
+  // places rather than resolving it twice, and the program's word wins.
+  if (FPinned <> nil) and
+     FPinned.TryGetValue(LowerCase(AUnitName), AResolved) then
+    Exit(True);
+
+  // 1. Explicit `in 'path'`. Whatever it resolves to is pinned for the whole
+  // project: the next importer of this unit, however it spells the lookup,
+  // gets THIS file.
   if AInPath <> '' then
   begin
     if TPath.IsPathRooted(AInPath) and TFile.Exists(AInPath) then
     begin
       AResolved := TPath.GetFullPath(AInPath);
+      PinUnit(AUnitName, AResolved);
       Exit(True);
     end;
-    if TryFile(LDir, AInPath, AResolved) then
+    if TryFile(LDir, AInPath, AResolved) or
+       TryFile(FProjectDir, AInPath, AResolved) then
+    begin
+      PinUnit(AUnitName, AResolved);
       Exit(True);
+    end;
     for LDir in FSearchPaths do
       if TryFile(LDir, AInPath, AResolved) then
+      begin
+        PinUnit(AUnitName, AResolved);
         Exit(True);
+      end;
     // Restore the ANCHOR directory the loop above just used LDir for. The
     // reset used to be gated on AFromFile <> '', which left an empty-anchor
     // caller with the LAST SEARCH PATH as its "referring directory" for

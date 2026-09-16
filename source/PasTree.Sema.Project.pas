@@ -339,6 +339,7 @@ type
     function ComputeUpgrade(const ASource: TPasPreprocessed;
       out AErrClass, AErrMsg: string): TPasSemaModel;
     procedure RegisterUnitName(AId: Integer);
+    procedure DefaultProjectDirFrom(const AMainFile: string);
     function LoadedUnitByName(const AName: string): Integer;
     procedure ResolveUses(AId: Integer);
     function SeedDeclaredQuery: TPasDeclaredQuery;
@@ -817,6 +818,18 @@ type
       resolution. Set BEFORE analyzing. }
     procedure SetNamespaces(const ANamespaces: TArray<string>);
     procedure AddUnitAlias(const AAlias, AReal: string);
+    { Where a unit LIVES for this project, ahead of every search path: the
+      project file's own unit list (a .dproj's DCCReference rows, a host that
+      knows them). The unit name is the file's base name. A program's
+      `in 'path'` clauses pin themselves as they resolve; this is for the
+      units the IDE finds through the project directory or the file list and
+      dcc through the -U order, where a copy in the project's tree must
+      SHADOW the library's original. Set BEFORE analyzing. }
+    procedure PinUnitFile(const APath: string);
+    { The project directory - dcc's implicit current directory, probed before
+      the search paths. The drivers derive it from the main file when a host
+      has not set it; a host with a .dproj sets it from there. }
+    procedure SetProjectDir(const ADir: string);
     { Parse reuse across rebuilds (incremental plan, stage A): adopt ADonor -
       the host's still-alive LAST-GOOD project - as a parse donor for the NEXT
       Analyze* call on this project. For every file whose donor model is a
@@ -1580,6 +1593,27 @@ end;
 procedure TPasSemaProject.AddUnitAlias(const AAlias, AReal: string);
 begin
   FSM.AddUnitAlias(AAlias, AReal);
+end;
+
+procedure TPasSemaProject.PinUnitFile(const APath: string);
+begin
+  if APath = '' then
+    Exit;
+  FSM.PinUnit(TPath.GetFileNameWithoutExtension(APath), APath);
+end;
+
+procedure TPasSemaProject.SetProjectDir(const ADir: string);
+begin
+  FSM.SetProjectDir(ADir);
+end;
+
+// The main file's directory as the project directory, unless the host set
+// one: every driver that starts from a main file calls this, so a bare
+// AnalyzeProject(x.dpr) behaves as dcc run from x.dpr's directory would.
+procedure TPasSemaProject.DefaultProjectDirFrom(const AMainFile: string);
+begin
+  if (FSM.ProjectDir = '') and (AMainFile <> '') then
+    FSM.SetProjectDir(TPath.GetDirectoryName(TPath.GetFullPath(AMainFile)));
 end;
 
 function TPasSemaProject.EnsureSystemUnit: Integer;
@@ -13673,6 +13707,7 @@ var
   LPath: string;
 begin
   GuardNotReleased('AnalyzeFile');
+  DefaultProjectDirFrom(AMainFile);
   // The donor is consumed by exactly THIS run, cancelled/failed exits
   // included: after the build the host frees it, and the only post-build
   // LoadFile routes (the memoized Ensure* pair) must never see a dangling
@@ -15581,6 +15616,7 @@ var
 
 begin
   GuardNotReleased('AnalyzeProject');
+  DefaultProjectDirFrom(AMainFile);
   FStageTimings := '';
   LSW := TStopwatch.StartNew;
   try   // donor lifetime - see AnalyzeFile
@@ -15803,6 +15839,10 @@ var
 
 begin
   GuardNotReleased('AnalyzeStaged');
+  // One root is a project's main file (the LSP host with a configured
+  // project); several are open documents, which have no project directory.
+  if Length(ARoots) = 1 then
+    DefaultProjectDirFrom(ARoots[0]);
   Result := -1;
   FStageTimings := '';
   LProgress := Default(TPasStagedProgress);

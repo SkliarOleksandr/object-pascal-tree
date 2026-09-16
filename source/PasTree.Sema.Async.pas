@@ -104,6 +104,8 @@ type
     { Configuration forwarded to the project. Call BEFORE Start. }
     procedure SetNamespaces(const ANamespaces: TArray<string>);
     procedure AddUnitAlias(const AAlias, AReal: string);
+    procedure PinUnitFile(const APath: string);
+    procedure SetProjectDir(const ADir: string);
     { Parse reuse - forwarded to TPasSemaProject.AdoptParseDonor (see there
       for the config gate and what a hit reuses). Call BEFORE Start, after
       the other configuration calls (the gate compares namespaces/aliases):
@@ -231,6 +233,16 @@ end;
 procedure TPasAsyncSession.SetNamespaces(const ANamespaces: TArray<string>);
 begin
   FProject.SetNamespaces(ANamespaces);
+end;
+
+procedure TPasAsyncSession.PinUnitFile(const APath: string);
+begin
+  FProject.PinUnitFile(APath);
+end;
+
+procedure TPasAsyncSession.SetProjectDir(const ADir: string);
+begin
+  FProject.SetProjectDir(ADir);
 end;
 
 procedure TPasAsyncSession.AddUnitAlias(const AAlias, AReal: string);
