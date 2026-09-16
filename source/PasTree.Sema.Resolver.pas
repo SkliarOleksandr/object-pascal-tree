@@ -130,11 +130,13 @@ type
     function FindMemberUpChain(ATypeSym: Integer;
       const ANameLower: string): Integer;
     function AncestorTypeSym(ATypeSym: Integer): Integer;
+    function AncestryLeavesUnit(ATypeSym: Integer): Boolean;
     function IsArrayPropDesignator(ABaseNode: Integer): Boolean;
     function DefaultArrayPropTypeSym(ATypeSym: Integer): Integer;
     function WithTargetTypeSym(ANode: Integer): Integer;
     function PointeeTypeSym(ATypeSym: Integer): Integer;
     function ElementTypeOf(ABaseNode: Integer): Integer;
+    function ElementOfTypeSym(ATypeSym: Integer): Integer;
     procedure RepointScope(ANode, ANewScope: Integer);
     procedure UnbindShadowedByWith(ANode, AWithScope: Integer);
     procedure ResolveOneWithStmt(AWith: Integer);
@@ -2313,6 +2315,58 @@ begin
   end;
 end;
 
+{ True when ATypeSym's member set does NOT end inside this unit: its ancestor
+  chain continues where AncestorTypeSym cannot follow. For a class that is the
+  common case, not the exception - an explicit ancestor declared in another
+  unit (`TMy = class(TControl)`), or no clause at all, which means the implicit
+  TObject (11.1.1); an interface likewise inherits IInterface (14.1.1). A
+  record or a legacy object without a heritage clause has no ancestor, so its
+  chain is complete.
+
+  Asked ONLY at the point where AncestorTypeSym answers NIL_SYM, so "has a
+  heritage clause" here means "has one that did not resolve to a same-unit
+  type" - which is exactly the cross-unit case.
+
+  Why it matters (5.7): a with-target member outranks every other name in
+  scope, INHERITED members included. ResolveOneWithStmt opens a same-unit
+  target's own scope, so the body reads as fully resolved intra-unit - yet the
+  inherited members are not in that scope, and a body name that Phase 1 bound
+  to a local, a parameter or the enclosing class's field of the same name kept
+  that binding, confidently: `with C do Name := 'x'` with `C: TMy`,
+  `TMy = class(TControl)` and a local `Name: Integer` was a false E2010, and
+  neither the typer (no WithUnopened flag) nor the with pass (the node was
+  bound, the body not "unopened") ever revisited it. dcc compiles that line:
+  Name is TControl.Name. }
+function TPasSemaResolver.AncestryLeavesUnit(ATypeSym: Integer): Boolean;
+var
+  LScope, LOwner, LChild: Integer;
+begin
+  Result := False;
+  if ATypeSym = NIL_SYM then
+    Exit;
+  LScope := FModel.Symbols[ATypeSym].MemberScope;
+  if LScope = NIL_SCOPE then
+    Exit;
+  LOwner := FModel.Scopes[LScope].OwnerNode;
+  if LOwner = NIL_NODE then
+    Exit;
+  case KindOf(LOwner) of
+    nkClassType, nkInterfaceType:
+      Result := True;   // implicit root or an unresolved explicit ancestor
+    nkObjectType:
+      begin
+        // No implicit root (11.5): only an unresolved explicit ancestor.
+        LChild := FirstChild(LOwner);
+        while LChild <> NIL_NODE do
+        begin
+          if KindOf(LChild) in [nkIdent, nkMember, nkTypeArgs] then
+            Exit(True);
+          LChild := NextSib(LChild);
+        end;
+      end;
+  end;
+end;
+
 // ANameLower on ATypeSym's OWN member scope, or (same-unit only) an
 // ancestor's - see AncestorTypeSym. Depth-capped defensively; real
 // hierarchies are nowhere near this deep.
@@ -2551,6 +2605,29 @@ begin
       // Hence the fallback to the pass-through.
       begin
         Result := ElementTypeOf(FirstChild(ANode));
+        // MULTI-INDEX: `with M[I, J] do` is ONE nkIndex with two index
+        // children, one level per index (`M[I][J]` is two nodes of one each).
+        // Over `TMatrix = array of TRow; TRow = array of TRec` the first peel
+        // yields the NAMED row type, so peel it again per extra index; an
+        // inline `array of array of T` was already descended to T by
+        // ElementTypeOf, and a NIL_SYM answer keeps what the last peel gave.
+        // Same shape the project typer fixes with IndexResultX (a reporting
+        // library's `with FData[iPart, High(FData[iPart])] do X`).
+        if (Result <> NIL_SYM) and not IsArrayPropDesignator(FirstChild(ANode))
+        then
+        begin
+          LBase := NextSib(FirstChild(ANode));   // first index
+          if LBase <> NIL_NODE then
+            LBase := NextSib(LBase);              // second index onward
+          while (LBase <> NIL_NODE) and (Result <> NIL_SYM) do
+          begin
+            LHead := ElementOfTypeSym(Result);
+            if LHead = NIL_SYM then
+              Break;
+            Result := LHead;
+            LBase := NextSib(LBase);
+          end;
+        end;
         // Not an array, but a CLASS/record with a DEFAULT array property is
         // indexable all the same, and then the element type is that
         // property's - `with Values[I - 1] do`, where Values is a
@@ -2675,7 +2752,7 @@ function TPasSemaResolver.ElementTypeOf(ABaseNode: Integer): Integer;
   end;
 
 var
-  LSym, LDef, LDepth: Integer;
+  LSym: Integer;
 begin
   // 1. The base designator's own declared type node (inline array case).
   LSym := DesignatorHead(ABaseNode);
@@ -2686,7 +2763,59 @@ begin
       Exit;
   end;
   // 2. The named type it resolves to, chasing aliases to a definition.
-  LSym := WithTargetTypeSym(ABaseNode);
+  Result := ElementOfTypeSym(WithTargetTypeSym(ABaseNode));
+end;
+
+
+{ Step 2 of ElementTypeOf on its own: the element type of a NAMED array type,
+  chasing alias links to the `array ... of T` definition. Separate so a
+  MULTI-INDEX with target can peel one level per index: `with M[I, J] do` over
+  `TMatrix = array of TRow; TRow = array of TRec` is one nkIndex with two
+  indices, and the first peel yields TRow, a named type this function then
+  peels again. NIL_SYM when the type is not an array (or the element is an
+  inline nesting, which ElemOfArrayNode already descended). }
+function TPasSemaResolver.ElementOfTypeSym(ATypeSym: Integer): Integer;
+
+  function ElemOfArrayNode(ANode: Integer): Integer;
+  var
+    LChild, LLast: Integer;
+  begin
+    Result := NIL_SYM;
+    if (ANode = NIL_NODE) or (KindOf(ANode) <> nkArrayType) or
+       (FTree.Nodes[ANode].Aux = 1) then
+      Exit;
+    LChild := FirstChild(ANode);
+    LLast := NIL_NODE;
+    while LChild <> NIL_NODE do
+    begin
+      LLast := LChild;
+      LChild := NextSib(LChild);
+    end;
+    while (LLast <> NIL_NODE) and (KindOf(LLast) = nkArrayType) and
+          (FTree.Nodes[LLast].Aux <> 1) do
+    begin
+      LChild := FirstChild(LLast);
+      LLast := NIL_NODE;
+      while LChild <> NIL_NODE do
+      begin
+        LLast := LChild;
+        LChild := NextSib(LChild);
+      end;
+    end;
+    if (LLast <> NIL_NODE) and (KindOf(LLast) in [nkRecordType, nkClassType,
+       nkInterfaceType, nkObjectType]) then
+    begin
+      if (LLast <= High(FNodeScope)) and (FNodeScope[LLast] <> NIL_SCOPE) then
+        Result := FModel.Scopes[FNodeScope[LLast]].StructSym;
+      Exit;
+    end;
+    Result := DesignatorHead(LLast);
+  end;
+
+var
+  LSym, LDef, LDepth: Integer;
+begin
+  LSym := ATypeSym;
   for LDepth := 1 to 32 do
   begin
     if (LSym = NIL_SYM) or (FModel.Symbols[LSym].DeclNode = NIL_NODE) then
@@ -2877,12 +3006,23 @@ begin
     end;
     var LChain: TArray<Integer> := nil;
     var LChainDepth := 0;
+    var LNext: Integer;
     while (LTypeSym <> NIL_SYM) and (LChainDepth < 32) do
     begin
       Inc(LChainDepth);
       if FModel.Symbols[LTypeSym].MemberScope <> NIL_SCOPE then
         LChain := LChain + [LTypeSym];
-      LTypeSym := AncestorTypeSym(LTypeSym);
+      LNext := AncestorTypeSym(LTypeSym);
+      // The chain ends here, but the TYPE's ancestry does not: an ancestor in
+      // another unit (or the implicit TObject/IInterface) holds members this
+      // scope will never contain, and any one of them may shadow a body name
+      // Phase 1 bound elsewhere. So this target is only HALF open - the same
+      // tentative state as a target with no nameable type at all, and it
+      // needs the same two consequences (typer quiet, with pass revisits
+      // bound names). See AncestryLeavesUnit for the false E2010 this cost.
+      if (LNext = NIL_SYM) and AncestryLeavesUnit(LTypeSym) then
+        LAnyUnopened := True;
+      LTypeSym := LNext;
     end;
     if Length(LChain) = 0 then
     begin

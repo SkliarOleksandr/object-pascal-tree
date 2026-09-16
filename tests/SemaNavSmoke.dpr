@@ -27,6 +27,7 @@ uses
   PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas',
   PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
   PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas',
+  PasTree.Outline in '..\source\PasTree.Outline.pas',
   PasTree.TestKit in 'PasTree.TestKit.pas';
 
 const
@@ -944,6 +945,47 @@ const
     'end;'#10 +                                // 36
     'end.'#10;                                 // 37
 
+  { PasModuleOutline fixture: every declaration shape the outline lists (a
+    class with fields, methods, properties; a generic record; a distinct
+    alias; plain and typed constants; a two-name var; a declaration from an
+    include; bodies in the implementation), each on a known line. }
+  UNIT_OUT =
+    'unit NavOut;'#10 +                                          // 1
+    'interface'#10 +                                             // 2
+    'uses NavG;'#10 +                                            // 3
+    'type'#10 +                                                  // 4
+    '  TShape = class'#10 +                                      // 5
+    '  private'#10 +                                             // 6
+    '    FA, FB: Integer;'#10 +                                  // 7
+    '  public'#10 +                                              // 8
+    '    constructor Create;'#10 +                               // 9
+    '    class function Kind: string; virtual;'#10 +             // 10
+    '    property A: Integer read FA;'#10 +                      // 11
+    '    property Items[I: Integer]: Integer read FA;'#10 +      // 12
+    '  end;'#10 +                                                // 13
+    '  TList<T> = record'#10 +                                   // 14
+    '    Data: array of T;'#10 +                                 // 15
+    '  end;'#10 +                                                // 16
+    '  TAlias = type Integer;'#10 +                              // 17
+    'const'#10 +                                                 // 18
+    '  MaxN = 10;'#10 +                                          // 19
+    '  Sizes: array[0..1] of Integer = (1, 2);'#10 +             // 20
+    'var'#10 +                                                   // 21
+    '  GCount, GTotal: Integer;'#10 +                            // 22
+    '{$I NavOut.inc}'#10 +                                       // 23
+    'function Twice(X: Integer): Integer;'#10 +                  // 24
+    'implementation'#10 +                                        // 25
+    'uses NavH;'#10 +                                            // 26
+    'constructor TShape.Create;'#10 +                            // 27
+    'begin end;'#10 +                                            // 28
+    'class function TShape.Kind: string; begin Result := ''''; end;'#10 + // 29
+    'function Twice(X: Integer): Integer; begin Result := X * 2; end;'#10 + // 30
+    'procedure FromInc; begin end;'#10 +                         // 31
+    'initialization'#10 +                                        // 32
+    'end.'#10;                                                   // 33
+  INC_OUT =
+    'procedure FromInc;'#10;                                     // inc 1
+
 var
   GProj: TPasSemaProject;
   GNav: TPasNavigator;
@@ -1156,6 +1198,32 @@ end;
 
 // Implementation -> declaration: cursor at (ALine,ACol), expect the
 // declaration's own name at AWantLine.
+// One outline row, every field that a picker would print or jump by.
+procedure CheckOut(const AOut: TArray<TPasOutlineEntry>; AIdx: Integer;
+  AKind: TPasOutlineKind; const AHead, AOwner, AName, ADetail: string;
+  ALine, ACol: Integer; AIsImpl: Boolean);
+var
+  LCase: string;
+begin
+  LCase := Format('outline[%d] %s %s', [AIdx, AHead, AName]);
+  if AIdx > High(AOut) then
+  begin
+    Ok(LCase + ': row exists', False);
+    Exit;
+  end;
+  with AOut[AIdx] do
+    Ok(LCase, (Kind = AKind) and (Head = AHead) and (Owner = AOwner) and
+      (Name = AName) and (Detail = ADetail) and (Line = ALine) and
+      (Col = ACol) and (IsImpl = AIsImpl));
+  if not ((AOut[AIdx].Kind = AKind) and (AOut[AIdx].Head = AHead) and
+          (AOut[AIdx].Owner = AOwner) and (AOut[AIdx].Name = AName) and
+          (AOut[AIdx].Detail = ADetail) and (AOut[AIdx].Line = ALine) and
+          (AOut[AIdx].Col = ACol) and (AOut[AIdx].IsImpl = AIsImpl)) then
+    Writeln(Format('    got: %s|%s|%s|%s| %d:%d impl=%s',
+      [AOut[AIdx].Head, AOut[AIdx].Owner, AOut[AIdx].Name, AOut[AIdx].Detail,
+       AOut[AIdx].Line, AOut[AIdx].Col, BoolToStr(AOut[AIdx].IsImpl, True)]));
+end;
+
 procedure CheckDecl(const ACase: string; ALine, ACol, AWantLine: Integer);
 var
   LTarget: TPasNavTarget;
@@ -1214,6 +1282,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRenP.pas'), UNIT_RENP);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDef.pas'), UNIT_DEF);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDef.inc'), INC_DEF);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavOut.pas'), UNIT_OUT);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavOut.inc'), INC_OUT);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -2444,6 +2514,79 @@ begin
       LHits := GNav.FindDestructions(LRTMid, LRSym);
       Ok('FindDestructions: TCdSub - `S.Free` only',
         (Length(LHits) = 1) and HasHitAt(LHits, 'NavCD.pas', 27, 3));
+
+      // PasModuleOutline: source order, every declaration shape, landmarks,
+      // include-file positions, implementation rows.
+      var LMidOut := GNav.ModelIdOf(TPath.Combine(LDir, 'NavOut.pas'));
+      Ok('outline: NavOut model found', LMidOut >= 0);
+      if LMidOut >= 0 then
+      begin
+        var LOut := PasModuleOutline(GProj.Model(LMidOut).Tree);
+        Ok('outline: 29 rows', Length(LOut) = 29);
+        CheckOut(LOut, 0, okModule, 'unit', '', 'NavOut', '', 1, 6, False);
+        CheckOut(LOut, 1, okSection, 'interface', '', '', '', 2, 1, False);
+        CheckOut(LOut, 2, okUses, 'uses', '', '', '', 3, 1, False);
+        CheckOut(LOut, 3, okKeyword, 'type', '', '', '', 4, 1, False);
+        CheckOut(LOut, 4, okType, 'type', '', 'TShape', '= class', 5, 3, False);
+        CheckOut(LOut, 5, okVar, 'field', 'TShape', 'FA', ': Integer', 7, 5,
+          False);
+        CheckOut(LOut, 6, okVar, 'field', 'TShape', 'FB', ': Integer', 7, 9,
+          False);
+        CheckOut(LOut, 7, okRoutine, 'constructor', 'TShape', 'Create', '',
+          9, 17, False);
+        CheckOut(LOut, 8, okRoutine, 'class function', 'TShape', 'Kind',
+          ': string', 10, 20, False);
+        CheckOut(LOut, 9, okProperty, 'property', 'TShape', 'A', ': Integer',
+          11, 14, False);
+        CheckOut(LOut, 10, okProperty, 'property', 'TShape', 'Items',
+          '[I: Integer]: Integer', 12, 14, False);
+        CheckOut(LOut, 11, okType, 'type', '', 'TList<T>', '= record', 14, 3,
+          False);
+        CheckOut(LOut, 12, okVar, 'field', 'TList<T>', 'Data',
+          ': array of T', 15, 5, False);
+        CheckOut(LOut, 13, okType, 'type', '', 'TAlias', '= type Integer',
+          17, 3, False);
+        CheckOut(LOut, 14, okKeyword, 'const', '', '', '', 18, 1, False);
+        CheckOut(LOut, 15, okConst, 'const', '', 'MaxN', '= 10', 19, 3, False);
+        CheckOut(LOut, 16, okConst, 'const', '', 'Sizes',
+          ': array[0..1] of Integer', 20, 3, False);
+        CheckOut(LOut, 17, okKeyword, 'var', '', '', '', 21, 1, False);
+        CheckOut(LOut, 18, okVar, 'var', '', 'GCount', ': Integer', 22, 3,
+          False);
+        CheckOut(LOut, 19, okVar, 'var', '', 'GTotal', ': Integer', 22, 11,
+          False);
+        // The include's declaration reports the INCLUDE file and ITS line.
+        CheckOut(LOut, 20, okRoutine, 'procedure', '', 'FromInc', '', 1, 11,
+          False);
+        Ok('outline: include row names the .inc file',
+          (Length(LOut) > 20) and
+          SameText(TPath.GetFileName(LOut[20].FilePath), 'NavOut.inc'));
+        Ok('outline: main-file row names the .pas file',
+          (Length(LOut) > 19) and
+          SameText(TPath.GetFileName(LOut[19].FilePath), 'NavOut.pas'));
+        CheckOut(LOut, 21, okRoutine, 'function', '', 'Twice',
+          '(X: Integer): Integer', 24, 10, False);
+        CheckOut(LOut, 22, okSection, 'implementation', '', '', '', 25, 1,
+          False);
+        CheckOut(LOut, 23, okUses, 'uses', '', '', '', 26, 1, False);
+        // Implementation headers: the dotted name gives the owner, the
+        // body makes the row an implementation.
+        CheckOut(LOut, 24, okRoutine, 'constructor', 'TShape', 'Create', '',
+          27, 13, True);
+        CheckOut(LOut, 25, okRoutine, 'class function', 'TShape', 'Kind',
+          ': string', 29, 16, True);
+        CheckOut(LOut, 26, okRoutine, 'function', '', 'Twice',
+          '(X: Integer): Integer', 30, 10, True);
+        CheckOut(LOut, 27, okRoutine, 'procedure', '', 'FromInc', '', 31, 11,
+          True);
+        CheckOut(LOut, 28, okSection, 'initialization', '', '', '', 32, 1,
+          False);
+        Ok('outline: sections are tagged',
+          (Length(LOut) = 29) and (LOut[4].Section = osInterface) and
+          (LOut[21].Section = osInterface) and
+          (LOut[24].Section = osImplementation) and
+          (LOut[28].Section = osInitialization));
+      end;
     finally
       GNav.Free;
     end;

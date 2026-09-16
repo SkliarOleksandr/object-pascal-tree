@@ -21,6 +21,11 @@ uses
   PasTree.Sema.Model;
 
 type
+  // The type, as one of THIS model's symbols, of an ident the model itself no
+  // longer binds (its binding lives in ExtRefMap) - NIL_SYM when it cannot be
+  // named in this model's terms. Supplied by the project for recheck mode.
+  TSemaExtTypeFunc = reference to function(ANode: Integer): Integer;
+
   TPasSemaTyper = class
   private
     M: TPasSemaModel;
@@ -72,10 +77,20 @@ type
     function IsTypeNameOperand(N: Integer): Boolean;
     procedure CheckAssign(N: Integer);
     function TypeNode(N: Integer): Integer;
+    procedure Prepare;
     procedure Run;
+  private
+    // RECHECK mode (see RecheckWithBodies): the with-body suppression in Diag
+    // is off, and an ident this model no longer binds (RefMap cleared by the
+    // project's commit, ExtRefMap holding the cross-unit member) is typed
+    // through the host's callback instead of read as "unknown".
+    FRecheck: Boolean;
+    FExtTypeOf: TSemaExtTypeFunc;
   public
     class procedure Check(AModel: TPasSemaModel;
       APlatform: TPasPlatform = pfWin32); static;
+    class procedure RecheckWithBodies(AModel: TPasSemaModel;
+      APlatform: TPasPlatform; const AExtTypeOf: TSemaExtTypeFunc); static;
   end;
 
 implementation
@@ -642,7 +657,14 @@ var
 begin
   LSym := M.RefMap[N];
   if LSym = NIL_SYM then
-    Exit(NIL_SYM);   // external / unresolved
+  begin
+    // External / unresolved - unless the host can name the external binding's
+    // type in THIS model's terms (recheck mode; a builtin, or a type declared
+    // here). NIL_SYM otherwise, as before.
+    if Assigned(FExtTypeOf) then
+      Exit(FExtTypeOf(N));
+    Exit(NIL_SYM);
+  end;
   case M.Symbols[LSym].Kind of
     skVar, skConst, skField, skParam, skRoutine, skProperty, skEnumValue:
       begin
@@ -1370,7 +1392,12 @@ begin
   // it (see TPasSemaModel.WithUnopened). Type-checking a guess produces
   // confident nonsense, e.g. E2010 'Double' vs 'string' where the real member
   // is a string, so withhold every diagnostic over such a node instead.
-  if M.InUnopenedWithBody(ANode) then
+  //
+  // Withheld, not dropped: once the project's with pass has committed the
+  // real bindings, RecheckWithBodies re-types exactly these bodies with the
+  // suppression off, so a GENUINE error there is still reported - later, and
+  // against the right binding.
+  if not FRecheck and M.InUnopenedWithBody(ANode) then
     Exit;
   LFile := 0; LLine := 0; LCol := 0;
   LTok := T.Nodes[ANode].FirstToken;
@@ -1501,7 +1528,57 @@ begin
     CheckAssign(N);
 end;
 
-procedure TPasSemaTyper.Run;
+{ The bodies of the model's WithUnopened statements, re-typed after the
+  project's with pass has committed the bindings the intra-unit pass could only
+  guess at (see TPasSemaModel.WithUnopened). Every diagnostic Diag withheld in
+  the first pass over these bodies is decided here instead - a genuine
+  `with C do Local := 'x'` (Local an Integer, not a member of anything) was
+  simply never reported before this existed, in every with over a cross-unit
+  or half-open target type.
+
+  OUTERMOST bodies only: a with nested inside another unopened with's body is
+  re-typed as part of the outer body's walk, and walking it again would emit
+  its diagnostics twice. TypeNode's own bottom-up walk is what re-runs, so the
+  checks that ride on it (CheckAssign) are what this recovers; the whole-tree
+  sweeps (CheckConditionTypes, CheckOrdinalTypePositions, CheckSetCardinality)
+  are not re-run - they would re-report everything OUTSIDE the bodies too. }
+class procedure TPasSemaTyper.RecheckWithBodies(AModel: TPasSemaModel;
+  APlatform: TPasPlatform; const AExtTypeOf: TSemaExtTypeFunc);
+var
+  LT: TPasSemaTyper;
+  LIdx, LWith, LBody: Integer;
+begin
+  if Length(AModel.WithUnopened) = 0 then
+    Exit;
+  LT := TPasSemaTyper.Create;
+  try
+    LT.M := AModel;
+    LT.T := AModel.Tree;
+    LT.FPlatform := APlatform;
+    LT.FRecheck := True;
+    LT.FExtTypeOf := AExtTypeOf;
+    LT.Prepare;
+    for LIdx := 0 to High(AModel.WithUnopened) do
+    begin
+      LWith := AModel.WithUnopened[LIdx];
+      if (LWith < 0) or (LWith > High(AModel.Tree.Nodes)) or
+         AModel.InUnopenedWithBody(LWith) then
+        Continue;
+      LBody := AModel.Tree.Nodes[LWith].FirstChild;
+      while (LBody <> NIL_NODE) and
+            (AModel.Tree.Nodes[LBody].NextSibling <> NIL_NODE) do
+        LBody := AModel.Tree.Nodes[LBody].NextSibling;
+      if LBody <> NIL_NODE then
+        LT.TypeNode(LBody);
+    end;
+  finally
+    LT.Free;
+  end;
+end;
+
+// The builtin-symbol cache and the type categories - what both Run and
+// RecheckWithBodies need before the first TypeNode.
+procedure TPasSemaTyper.Prepare;
 var
   LIdx: Integer;
 begin
@@ -1523,6 +1600,11 @@ begin
       else if M.Symbols[LIdx].NameLower = 'shortstring' then SStr := LIdx;
 
   CategorizeTypes;
+end;
+
+procedure TPasSemaTyper.Run;
+begin
+  Prepare;
   CheckOrdinalTypePositions;   // needs CategorizeTypes - see its own header
   CheckSetCardinality;         // needs RefMap only - see its own header
   TypeNode(0);

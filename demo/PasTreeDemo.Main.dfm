@@ -43,6 +43,7 @@ object frmMain: TfrmMain
     Align = alTop
     BevelOuter = bvNone
     TabOrder = 0
+    ExplicitWidth = 1174
     object btnOpen: TButton
       Left = 8
       Top = 7
@@ -231,6 +232,8 @@ object frmMain: TfrmMain
     BevelOuter = bvNone
     ShowCaption = False
     TabOrder = 2
+    ExplicitTop = 539
+    ExplicitWidth = 1174
     object pgcBottom: TPageControl
       Left = 0
       Top = 0
@@ -241,6 +244,7 @@ object frmMain: TfrmMain
       PopupMenu = BottomTabsPopupMenu
       TabOrder = 0
       OnMouseDown = pgcBottomMouseDown
+      ExplicitWidth = 1174
       object tsMessages: TTabSheet
         Caption = 'Messages'
         object Panel1: TPanel
@@ -252,6 +256,7 @@ object frmMain: TfrmMain
           BevelOuter = bvNone
           ShowCaption = False
           TabOrder = 0
+          ExplicitWidth = 1166
           object chkShowErrors: TCheckBox
             Left = 8
             Top = 6
@@ -272,7 +277,7 @@ object frmMain: TfrmMain
           Left = 0
           Top = 25
           Width = 1172
-          Height = 108
+          Height = 109
           Align = alClient
           DefaultNodeHeight = 19
           Header.AutoSizeIndex = 0
@@ -299,14 +304,18 @@ object frmMain: TfrmMain
     BevelOuter = bvNone
     ShowCaption = False
     TabOrder = 3
+    ExplicitWidth = 910
+    ExplicitHeight = 462
     object pgc: TPageControl
       Left = 0
       Top = 0
       Width = 916
       Height = 446
-      ActivePage = tsJson
+      ActivePage = tsCoverage
       Align = alClient
       TabOrder = 0
+      ExplicitWidth = 910
+      ExplicitHeight = 429
       object tsJson: TTabSheet
         Caption = 'AST JSON'
         TabVisible = False
@@ -336,6 +345,8 @@ object frmMain: TfrmMain
           IndentGuides.Visible = False
           IndentGuides.StructureHighlight = False
           ScrollbarAnnotations = <>
+          ExplicitWidth = 902
+          ExplicitHeight = 419
         end
       end
       object tsSema: TTabSheet
@@ -404,6 +415,8 @@ object frmMain: TfrmMain
       BevelOuter = bvNone
       ShowCaption = False
       TabOrder = 1
+      ExplicitTop = 429
+      ExplicitWidth = 910
       object lblProgress: TPanel
         AlignWithMargins = True
         Left = 784
@@ -414,6 +427,7 @@ object frmMain: TfrmMain
         BevelOuter = bvLowered
         Caption = 'progress'
         TabOrder = 4
+        ExplicitLeft = 778
       end
       object lblDiagCount: TPanel
         AlignWithMargins = True
@@ -425,6 +439,7 @@ object frmMain: TfrmMain
         BevelOuter = bvLowered
         Caption = 'errors'
         TabOrder = 5
+        ExplicitLeft = 643
       end
       object btnShowASTJson: TButton
         Left = 4
@@ -504,6 +519,14 @@ object frmMain: TfrmMain
       OnExecute = ViewUnitActionExecute
       OnUpdate = ViewUnitActionUpdate
     end
+    object GoToAction: TAction
+      Caption = 'Go To...'
+      Hint = 
+        'Every declaration and routine body of the active module in sourc' +
+        'e order; a number goes to that line'
+      OnExecute = GoToActionExecute
+      OnUpdate = GoToActionUpdate
+    end
     object OpenFileAtCursorAction: TAction
       Caption = 'Open File at Cursor'
       Hint = 
@@ -579,7 +602,7 @@ object frmMain: TfrmMain
     end
     object FindDefinesAction: TAction
       Caption = 'Defines'
-      Hint =
+      Hint = 
         'Every {$DEFINE X} in the project, dead branches flagged, grouped' +
         ' by file - plus the project'#39's and the platform'#39's own defines'
       OnExecute = FindDefinesActionExecute
@@ -587,7 +610,7 @@ object frmMain: TfrmMain
     end
     object FindDefinesAtAction: TAction
       Caption = 'Defines at cursor'
-      Hint =
+      Hint = 
         'The conditional symbols in effect at the caret - what an $IFDEF ' +
         'written there would see, each pointing at its last definition'
       OnExecute = FindDefinesAtActionExecute
@@ -620,6 +643,9 @@ object frmMain: TfrmMain
     end
     object GotoDeclaration1: TMenuItem
       Action = GotoDeclAction
+    end
+    object GoTo1: TMenuItem
+      Action = GoToAction
     end
     object FindAll1: TMenuItem
       Caption = 'Find All'

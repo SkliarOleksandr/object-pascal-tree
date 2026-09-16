@@ -652,3 +652,84 @@ No protocol surface maps onto "list all defines" directly; two candidates:
 "what does the project define" without a navigator, e.g. in its
 `initialize` log. `cMinPasTreeVersion` moves to 0.28.0 only if one of these
 is taken up; nothing in the existing handlers changes.
+
+## 11. Go To - the module outline picker (`PasTree.Outline.PasModuleOutline` + demo `PasTreeDemo.GoToPicker`)
+
+Status: IMPLEMENTED (PasTree 0.30.0) - `source/PasTree.Outline.pas` is the
+list, `demo/PasTreeDemo.GoToPicker.pas` the dialog, Ctrl+G / `Go To...` in the
+source popup menu the wiring.
+
+What the RAD Studio "Navigator - Go To" dialog does for one module: every
+declaration and every routine body, in SOURCE ORDER, plus the landmarks a
+reader steers by; type to filter, Enter or a double-click jumps. A filter
+that is nothing but digits adds a `line N` row on top, so the same box is
+go-to-line as well.
+
+### 11.1 The outline (`PasModuleOutline(ATree)`)
+
+AST only, no semantics: it reads the parse tree of one module and nothing
+else, so it works on a module the resolver has not finished, on a module
+with parse errors (the declarations around the damaged one are listed), and
+it costs one walk of the tree. Consequences a host should know:
+
+- a declaration behind an inactive `$IFDEF` is absent - the preprocessor
+  never handed it to the parser;
+- a routine's declaration and its body are TWO rows (`IsImpl` tells them
+  apart), paired by nothing but their names - the semantic pairing stays
+  `GotoImplementation`'s job;
+- a declaration that arrived through an `$I` include reports the include
+  file's path and line (`FilePath`/`Line`/`Col` are of the NAME, in whatever
+  file it sits) - the same landing ctrl+click gives.
+
+Rows, in the order they appear in the source:
+
+| Kind | Rows | Head / Owner / Name / Detail |
+|------|------|------------------------------|
+| `okModule` | the `unit`/`program`/`library`/`package` header | `unit` / - / `Foo.Bar` / - |
+| `okSection` | `interface`, `implementation`, `initialization`, `finalization`, a program's main `begin` | the word / - / - / - |
+| `okUses` | each uses (package: requires/contains) clause | `uses` / - / - / - |
+| `okKeyword` | each MODULE-LEVEL `type`/`const`/`resourcestring`/`var`/`threadvar`/`label`/`exports` word as written (not a struct body's, not a recovery section's) | the word / - / - / - |
+| `okType` | every type declaration, nested ones included | `type` / `TOuter` / `TList<T>` / `= class`, `= record`, `= interface`, `= class helper`, `= type Integer`, `= array of Byte`... |
+| `okVar` | one row PER NAME of `A, B: T`; fields (`field`), `class var`, module `var`/`threadvar`; variant-part fields too | head / `TFoo` / `FA` / `: Integer` |
+| `okConst` | `const`/`resourcestring`, class constants | head / owner / `MaxN` / `= 10` or `: T` when typed |
+| `okProperty` | `property` / `class property`, bare redeclarations included | head / `TFoo` / `Items` / `[I: Integer]: Integer` |
+| `okRoutine` | headers in structs and at module level; `class` methods carry `class ` in the head; an implementation header's dotted name yields the owner (`TOuter.TInner`, `TList<T>`) | `class function` / `TShape` / `Kind` / `(A: X): Y` |
+
+Not listed on purpose: enumeration values (they drown the list they sit
+in), routine-local declarations and nested routines (the body is one row),
+parameters, method-resolution clauses, visibility words, attributes.
+`Detail` collapses whitespace and cuts at 80 characters.
+
+### 11.2 The dialog (demo)
+
+- Owner-drawn rows: head word and detail in the quiet colour, the name in
+  the text colour with the matched letters in bold, then `(declaration;
+  interface section)` for a routine header, `(interface section)` for any
+  other declaration, nothing for an implementation row or a landmark.
+- Filter = case-insensitive substring over the name column (`Owner.Name`, or
+  the head word for a landmark - so `impl` finds `implementation`). Digits
+  only: `line N` first (clamped to the module's line count), then the rows
+  whose names contain the digits.
+- Five boxes filter by kind (Types, Vars / Fields, Consts, Routines,
+  Properties); landmarks always show. Size and boxes persist in the
+  settings file (`GoToWidth`, `GoToHeight`, `GoToKinds`).
+- On open, the last row at or above the caret in the module's own file is
+  selected (rows from includes carry other line numbers and do not compete),
+  so Ctrl+G with an empty box answers "where am I".
+- Up/Down/PgUp/PgDn move the list while the caret stays in the filter box.
+- The outline is read off the ANALYZED tree of the tab's file (rehydrated
+  on demand), under the same `FAnalyzing`/`FNav` guard as every other
+  reader - positions refer to the source as analyzed, like ctrl+click.
+
+### pastree-lsp hand-off
+
+`textDocument/documentSymbol` is this list almost one-to-one:
+`PasModuleOutline` on the document's model tree, each `okType`/`okVar`/
+`okConst`/`okProperty`/`okRoutine` row a `SymbolInformation` (flat form -
+the order and the `Owner` prefix give the client all it shows; the
+hierarchical `DocumentSymbol` form needs a range per struct, which the
+`nkTypeDecl` node's span provides if wanted). Landmarks (`okSection`,
+`okUses`, `okKeyword`) have no `SymbolKind`; skip them or map `okModule` to
+`Module`. Rows whose `FilePath` is not the document's own (an include) are
+dropped for `documentSymbol`, which is per-document. `cMinPasTreeVersion`
+moves to 0.30.0 when this is taken up.

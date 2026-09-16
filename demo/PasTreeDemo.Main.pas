@@ -33,6 +33,7 @@ uses
   PasTree.Sema.Dump, PasTree.Version, VirtualTrees.BaseAncestorVCL, VirtualTrees.BaseTree, VirtualTrees.AncestorVCL, SynEditCodeFolding,
   PasTreeDemo.Highlighter, PasTreeDemo.Settings, PasTreeDemo.NavHistory,
   PasTreeDemo.Includes, PasTreeDemo.UnitList, PasTreeDemo.UnitPicker,
+  PasTreeDemo.GoToPicker, PasTree.Outline,
   PasTreeDemo.Coverage,
   Vcl.Menus, System.Actions, Vcl.ActnList, SynEditMiscClasses, SynEditSearch;
   // System
@@ -240,6 +241,8 @@ type
     btnParseVcl: TButton;
     btnParseFmx: TButton;
     ViewUnitAction: TAction;
+    GoToAction: TAction;
+    GoTo1: TMenuItem;
     btnViewUnit: TButton;
     FilesPopupMenu: TPopupMenu;
     ViewUnit1: TMenuItem;
@@ -318,6 +321,8 @@ type
     procedure btnParseFmxClick(Sender: TObject);
     procedure ViewUnitActionUpdate(Sender: TObject);
     procedure ViewUnitActionExecute(Sender: TObject);
+    procedure GoToActionUpdate(Sender: TObject);
+    procedure GoToActionExecute(Sender: TObject);
     procedure FindReferencesActionUpdate(Sender: TObject);
     procedure FindReferencesActionExecute(Sender: TObject);
     procedure FindOverridesActionUpdate(Sender: TObject);
@@ -2695,6 +2700,9 @@ begin
   // people reach for when ctrl+click cannot help - an include file, or a unit
   // whose source the analysis never loaded.
   OpenFileAtCursorAction.ShortCut := Vcl.Menus.ShortCut(VK_RETURN, [ssCtrl]);
+  // Go To (the module outline picker): the IDE's own key for go-to-line,
+  // which this dialog is too when the filter is a number.
+  GoToAction.ShortCut := Vcl.Menus.ShortCut(Ord('G'), [ssCtrl]);
   // The conventional pair, matching every browser and IDE.
   NavBackAction.ShortCut := Vcl.Menus.ShortCut(VK_LEFT, [ssAlt]);
   NavForwardAction.ShortCut := Vcl.Menus.ShortCut(VK_RIGHT, [ssAlt]);
@@ -3272,6 +3280,8 @@ begin
   LTab := TSourceTab.Create(pgc);
   LTab.PageControl := pgc;
   LTab.Caption := TPath.GetFileName(APath);
+  LTab.Hint := APath;
+  LTab.ShowHint := True;
 
   Result := TSynEdit.Create(LTab);
   Result.Parent := LTab;
@@ -5407,6 +5417,46 @@ begin
   LData := PPasNodeData(Sender.GetNodeData(Node));
   if (LData <> nil) and (LData.Index >= 0) and (LData.Index < FFileList.Count) then
     OpenFileTab(FFileList[LData.Index]);
+end;
+
+{ Go To (Ctrl+G) - a modal picker over the ACTIVE module's outline: every
+  declaration and routine body in source order, the section landmarks, and
+  `line N` when the filter is a number. See PasTreeDemo.GoToPicker / PasTree.Outline.
+
+  The outline is read off the ANALYZED tree (the model FNav knows for the
+  tab's file), under the same FAnalyzing/FNav guard every other reader here
+  uses - so, like ctrl+click, it refers to the source as analyzed; a buffer
+  edited since re-analyzes first. A demoted model is rehydrated on demand,
+  the way TPasNavigator.TargetFromNode does before reading positions. }
+procedure TfrmMain.GoToActionUpdate(Sender: TObject);
+begin
+  GoToAction.Enabled := not FAnalyzing and Assigned(FNav) and
+    Assigned(pgc.ActivePage) and (pgc.ActivePage is TSourceTab);
+end;
+
+procedure TfrmMain.GoToActionExecute(Sender: TObject);
+var
+  LTab: TSourceTab;
+  LMid: Integer;
+  LEntries: TArray<TPasOutlineEntry>;
+  LFile: string;
+  LLine, LCol: Integer;
+begin
+  if FAnalyzing or not Assigned(FNav) or not Assigned(FSemaProject) or
+     not Assigned(pgc.ActivePage) or not (pgc.ActivePage is TSourceTab) then
+    Exit;
+  LTab := TSourceTab(pgc.ActivePage);
+  LMid := FNav.ModelIdOf(LTab.FilePath);
+  if (LMid < 0) or not FSemaProject.EnsureHydrated(LMid) then
+  begin
+    ShowMessage('This file is not part of the analyzed project.');
+    Exit;
+  end;
+  LEntries := PasModuleOutline(FSemaProject.Model(LMid).Tree);
+  if ShowGoTo(Self, LEntries, LTab.FilePath, LTab.Editor.CaretY,
+       LTab.Editor.Lines.Count, FSettings, {out} LFile, {out} LLine,
+       {out} LCol) then
+    NavigateTo(LFile, LLine, LCol);
 end;
 
 { View Unit (Ctrl+F12) - a modal picker over the project's units.

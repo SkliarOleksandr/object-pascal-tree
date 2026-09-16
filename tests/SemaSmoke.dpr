@@ -2457,6 +2457,109 @@ begin
     HasSym('IA', skType) and HasSym('IB', skType) and
     (SymCountOf('ib', skField) = 0));
 
+  // ---- 5.7: the HALF-OPEN with. A target whose type is declared here but
+  // whose ancestry continues elsewhere (an ancestor in another unit, or the
+  // implicit TObject / IInterface) has inherited members this model cannot
+  // see, so the with must be recorded as WithUnopened - that is what makes the
+  // project's with pass revisit the body's Phase-1 bindings and the typer hold
+  // its diagnostics. A record or a clause-less legacy object has no such tier
+  // and must NOT be marked (its genuine errors stay reported). ----
+  Analyze('unit U; interface implementation'#10 +
+    'type TPlain = class end;'#10 +
+    'procedure P(C: TPlain); begin with C do Free; end;'#10 +
+    'end.');
+  Ok('halfopen: a clause-less class (implicit TObject) marks WithUnopened',
+    Length(GModel.WithUnopened) = 1);
+  GModel.Free;
+  Analyze('unit U; interface uses Other; implementation'#10 +
+    'type TMy = class(TOther) end;'#10 +
+    'procedure P(C: TMy); begin with C do X := 1; end;'#10 +
+    'end.');
+  Ok('halfopen: a class over a cross-unit ancestor marks WithUnopened',
+    Length(GModel.WithUnopened) = 1);
+  GModel.Free;
+  Analyze('unit U; interface implementation'#10 +
+    'type TB = class end; TD = class(TB) end;'#10 +
+    'procedure P(C: TD); begin with C do Free; end;'#10 +
+    'end.');
+  Ok('halfopen: a same-unit chain still ends at the implicit TObject',
+    Length(GModel.WithUnopened) = 1);
+  GModel.Free;
+  Analyze('unit U; interface implementation'#10 +
+    'type IMy = interface procedure Go; end;'#10 +
+    'procedure P(I: IMy); begin with I do Go; end;'#10 +
+    'end.');
+  Ok('halfopen: an interface (implicit IInterface) marks WithUnopened',
+    Length(GModel.WithUnopened) = 1);
+  GModel.Free;
+  Analyze('unit U; interface implementation'#10 +
+    'type TRec = record A: Integer; end;'#10 +
+    'procedure P; var R: TRec; A: string; begin with R do A := ''x''; end;'#10 +
+    'end.');
+  Ok('halfopen: a record is fully open - not marked',
+    Length(GModel.WithUnopened) = 0);
+  Ok('halfopen: ...so its genuine E2010 is still reported',
+    DiagCount('E2010') = 1);
+  GModel.Free;
+  Analyze('unit U; interface implementation'#10 +
+    'type TObj = object A: Integer; end;'#10 +
+    'procedure P; var O: TObj; A: string; begin with O do A := ''x''; end;'#10 +
+    'end.');
+  Ok('halfopen: a clause-less legacy object has no implicit root - not marked',
+    Length(GModel.WithUnopened) = 0);
+  Ok('halfopen: ...and its genuine E2010 is still reported',
+    DiagCount('E2010') = 1);
+  GModel.Free;
+
+  // ---- 5.7: the implicit names. A target member named Result or Self
+  // outranks the routine's result slot / the instance reference (both
+  // dcc64-verified: a field named Self is legal, `with R do Self := 5`
+  // compiles). Same-unit record, so the intra-unit pass alone must bind
+  // them - to the FIELD, with no diagnostic. ----
+  Analyze('unit U; interface implementation'#10 +
+    'type TRec = record Result: Integer; Self: Integer; end;'#10 +
+    'type TCls = class function M(var R: TRec): Boolean; end;'#10 +
+    'function TCls.M(var R: TRec): Boolean;'#10 +
+    'begin with R do begin Result := 0; Self := 5; end; end;'#10 +
+    'end.');
+  Ok('implicit names: no diags - Result/Self are the record''s fields',
+    Length(GModel.Diags) = 0);
+  Ok('implicit names: Result binds to the field', RefResolvesTo('Result', 'Result'));
+  Ok('implicit names: Self binds to the field', RefResolvesTo('Self', 'Self'));
+  GModel.Free;
+
+  // ---- 5.7: MULTI-INDEX with targets over NAMED array types, intra-unit.
+  // `M[I, J]` is one nkIndex with two indices; one level per index. The
+  // shadowing local `X: string` makes a wrong peel visible: bound to the local,
+  // `X := 1` is an E2010; bound to the record field it is clean. ----
+  const SRC_MATRIX_HEAD =
+    'unit U; interface implementation'#10 +
+    'type'#10 +
+    '  TRec = record X, Y: Integer; end;'#10 +
+    '  TRow = array of TRec;'#10 +
+    '  TMat = array of TRow;'#10 +
+    '  TCube = array of TMat;'#10 +
+    '  TFixRow = array[0..1, 0..1] of TRow;'#10 +
+    '  TInl3 = array of array of array of TRec;'#10;
+  for var LCase in [
+    'procedure P(M: TMat); var X: string; begin with M[0, 1] do X := 1; end;',
+    'procedure P(C: TCube); var X: string; begin with C[0, 1, 2] do X := 1; end;',
+    'procedure P(C: TCube); var X: string; begin with C[0][1, 2] do X := 1; end;',
+    'procedure P(C: TCube); var X: string; begin with C[0, 1][2] do X := 1; end;',
+    'procedure P(F: TFixRow); var X: string; begin with F[0, 1, 2] do X := 1; end;',
+    'procedure P(F: TInl3); var X: string; begin with F[0, 1, 2] do X := 1; end;',
+    'procedure P(F: array of TMat); var X: string; begin with F[0, 1, 2] do X := 1; end;'
+  ] do
+  begin
+    Analyze(SRC_MATRIX_HEAD + LCase + #10'end.');
+    Ok('matrix: no diags - ' + Copy(LCase, Pos('with', LCase), 22),
+      Length(GModel.Diags) = 0);
+    Ok('matrix: X bound to the record field, not the local - ' +
+      Copy(LCase, Pos('with', LCase), 22),
+      RefResolvesTo('X', 'X') and (GModel.WithUnopened = nil));
+    GModel.Free;
+  end;
+
   if GCounter.Finish('SemaSmoke') then
     ExitCode := 1;
   GPP.Free;

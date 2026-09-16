@@ -588,6 +588,7 @@ type
       var APending: TArray<TPasInhPending>; AEmit: Boolean;
       var AUnresolved: TArray<Integer>);
     procedure RunWithPass(ACount: Integer);
+    procedure RecheckWithBodies(const AIds: TArray<Integer>);
     function ArityOfTypeSym(AMid, ASym: Integer): Integer;
     function FindTypeInSelfArity(AId: Integer; const ANameLower: string;
       AArity: Integer; out ASym: Integer): Boolean;
@@ -1179,6 +1180,7 @@ uses
   PasTree.Parser,
   PasTree.CondEval,
   PasTree.Sema.Resolver,
+  PasTree.Sema.Types,
   PasTree.Sema.Diagnostics;
 
 const
@@ -10624,10 +10626,17 @@ begin
       Exit;
     case FModels[LCur.UnitId].Tree.Nodes[LDef].Kind of
       nkPointerType:
-        Exit(ResolveTypeExpr(LCur.UnitId,
-          FModels[LCur.UnitId].Tree.Nodes[LDef].FirstChild));
+        // Closed over the POINTER's own frame: `ParrayofT = ^arrayofT` nested
+        // in TList<T>, reached as `L.PList` on a TList<TRec>, points at an
+        // `array of T` whose T is TRec only through that frame. Dropping it
+        // here typed `PList^[I].X` as a member of an OPEN T - undeclared,
+        // 28 sites in one FMX library's graphics unit, while the frame-less
+        // `List[I].X` right beside it was fine.
+        Exit(SubstX(ResolveTypeExpr(LCur.UnitId,
+          FModels[LCur.UnitId].Tree.Nodes[LDef].FirstChild), LCur.Inst, 0));
       nkIdent, nkMember, nkTypeArgs:
-        LCur := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
+        LCur := SubstX(ResolveTypeExpr(LCur.UnitId, LDef),
+          LCur.Inst, 0);   // alias link, same frame
     else
       Exit;
     end;
@@ -12416,10 +12425,39 @@ begin
     // for a non-array, which is the array-PROPERTY case: such a property's
     // declared type is ALREADY its element type, so indexing must not peel a
     // level - hence the pass-through fallback.
+    //
+    // MULTI-INDEX: `with FData[iPart, High(FData[iPart])] do` over
+    // `TDoublePointMatrix = array of TDoublePointArray` (a reporting library's
+    // map helpers) is ONE nkIndex with TWO index children, and each index peels
+    // a level. ElementX peels exactly one, so the target typed as the ROW
+    // array and X/Y in the body were undeclared. IndexResultX - what CrossType
+    // already uses for the same designator as an expression - counts the
+    // indices; it is tried first only when there is more than one, so the
+    // single-index shapes keep the exact path (array property, inline pointer
+    // slot, default array property) they were tuned on.
     nkIndex:
       begin
         LBase := LM.Tree.Nodes[ANode].FirstChild;
-        Result := ElementX(AId, LBase);
+        Result := XNil;
+        if LBase <> NIL_NODE then
+        begin
+          LSym := 0;
+          LName := LM.Tree.Nodes[LBase].NextSibling;
+          while LName <> NIL_NODE do
+          begin
+            Inc(LSym);
+            LName := LM.Tree.Nodes[LName].NextSibling;
+          end;
+          // Not for an ARRAY PROPERTY base: its brackets are the property's
+          // own parameters, and its declared type is already the result.
+          if (LSym > 1) and
+             not (DesignatorSymX(AId, LBase, LMemMid, LMemSym) and
+                  PropertyHasParams(LMemMid, LMemSym)) then
+            Result := IndexResultX(AId, LBase, WithTargetTypeX(AId, LBase),
+              LSym);
+        end;
+        if not XValid(Result) then
+          Result := ElementX(AId, LBase);
         if not XValid(Result) then
           Result := WithTargetTypeX(AId, LBase);
       end;
@@ -12910,12 +12948,18 @@ begin
       // name when its with target went unopened, to OVERRIDE a wrong guess.
       //
       // The NAME is computed here, once - the pass itself re-reads this list
-      // on every fixpoint round. 'result'/'self' are skipped at the source:
-      // both passes Continue on them with no side effects, and a with body
-      // mentions Result constantly.
+      // on every fixpoint round. Neither 'result' nor 'self' is skipped,
+      // although a with body mentions both constantly: a target MEMBER of
+      // that name outranks the implicit one (5.7, dcc-verified in the spec
+      // for Result; a field named Self is legal too and `with R do Self := 5`
+      // compiles against it). The Result shape is everywhere in message
+      // handlers - `with Message do ... Result := 0` over a TWMMouse, whose
+      // `Result: LRESULT` field is what that name means (a tree-view library,
+      // 6 sites in one unit). Skipping it left Result bound to the function's
+      // Boolean and, once the recheck stage started deciding withheld
+      // verdicts, a false E2010 on every one. A miss costs one member lookup
+      // per mention per round; a hit is the only correct answer.
       LName := LM.Tree.NodeNameLower(LNode);
-      if (LName = 'result') or (LName = 'self') then
-        Continue;
       LWith[LWithN] := LNode;
       LWithNames[LWithN] := LName;
       Inc(LWithN);
@@ -13397,8 +13441,13 @@ begin
       APending[LPendCount] := LPend;
       Inc(LPendCount);
     end
-    else if LBound then
-      Continue   // no with member by that name: Phase 1's binding stands
+    else if LBound or (LNameLower = 'self') then
+      // No with member by that name: Phase 1's binding stands. `Self` is
+      // the one name that is legitimately UNBOUND here - nothing declares it
+      // (11.3.3) - and it is in this list only so a target member named Self
+      // can win; a miss means the ordinary instance reference, never E2003
+      // (2245 false ones on one project the first time it was listed).
+      Continue
     else
     begin
       // The member walk is hoisted out of the condition it used to sit in, so
@@ -13552,6 +13601,69 @@ begin
     if LRound >= MAX_ROUNDS then
       LEmit := True;
   end;
+  var LAll: TArray<Integer>;
+  SetLength(LAll, ACount);
+  for LIdx := 0 to ACount - 1 do
+    LAll[LIdx] := LIdx;
+  RecheckWithBodies(LAll);
+end;
+
+{ The with-body diagnostics the intra-unit typer WITHHELD (TPasSemaTyper.Diag
+  over a WithUnopened body), decided now that the with pass has committed the
+  bindings it was waiting for. Per model, in parallel: the recheck writes only
+  its own model's Diags/ExprType and reads other models' Symbols, which are
+  frozen by now.
+
+  The intra-unit typer knows this model's symbols only, so an ident the commit
+  moved to ExtRefMap would read as "unknown type" and every check over it would
+  stay silent - `with C do Name := 5` with the inherited `Name: string`. The
+  callback names the external binding's type in THIS model's terms where that
+  is possible: the frame-substituted member type the with pass recorded
+  (ExprTypeX), else the member's declared TypeSym; a BUILTIN maps to this
+  model's own seed of the same name, a type declared in this model is itself,
+  anything else stays unknown (and the check stays silent, as before). }
+procedure TPasSemaProject.RecheckWithBodies(const AIds: TArray<Integer>);
+begin
+  ForEachIndex(High(AIds), 'withcheck',
+    procedure(AIdx: Integer)
+    var
+      LMid: Integer;
+      LM: TPasSemaModel;
+    begin
+      LMid := AIds[AIdx];
+      LM := FModels[LMid];
+      if Length(LM.WithUnopened) = 0 then
+        Exit;
+      TPasSemaTyper.RecheckWithBodies(LM, FPlatform,
+        function(ANode: Integer): Integer
+        var
+          LExt: TPasExtRef;
+          LX: TSemaXType;
+          LTypeSym: Integer;
+          LTM: TPasSemaModel;
+        begin
+          Result := NIL_SYM;
+          if not LM.ExtRefMap.TryGetValue(ANode, LExt) then
+            Exit;
+          if not (LM.ExprTypeX.TryGetValue(ANode, LX) and XValid(LX)) then
+          begin
+            if (LExt.UnitId < 0) or (LExt.UnitId >= FModels.Count) then
+              Exit;
+            LTM := FModels[LExt.UnitId];
+            if (LExt.Sym < 0) or (LExt.Sym >= LTM.SymCount) then
+              Exit;
+            LTypeSym := LTM.Symbols[LExt.Sym].TypeSym;
+            if LTypeSym = NIL_SYM then
+              Exit;
+            LX := XPlain(LExt.UnitId, LTypeSym);
+          end;
+          if LX.UnitId = LMid then
+            Exit(LX.Sym);
+          LTM := FModels[LX.UnitId];
+          if LTM.Symbols[LX.Sym].Kind = skBuiltinType then
+            Result := BuiltinX(LMid, LTM.Symbols[LX.Sym].NameLower).Sym;
+        end);
+    end);
 end;
 
 function TPasSemaProject.AnalyzeFile(const AMainFile: string): Integer;
@@ -14438,6 +14550,7 @@ begin
     if LRound >= MAX_ROUNDS then
       LEmit := True;
   end;
+  RecheckWithBodies(AIds);
   Lap('with');
   // RunCallChecksPass over the set: the deferred-write buffers are sized to
   // the whole model table (CheckCalls indexes them by model id) and created

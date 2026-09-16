@@ -199,9 +199,13 @@ type
     UsesByName: TDictionary<string, Integer>;
     AllUsesResolved: Boolean;       // gates E2003 (set by the project driver)
     UnitNameLower: string;          // this unit's own name, lower-cased
-    // nkWithStmt nodes whose target type could NOT be resolved intra-unit, so
-    // their member scope was never opened (PasTree.Sema.Resolver.
-    // ResolveOneWithStmt). Inside such a body ANY unqualified name might be a
+    // nkWithStmt nodes whose target member set is NOT fully known intra-unit:
+    // the target's type could not be resolved at all, OR it resolved to a
+    // same-unit struct whose ancestry continues in another unit (a class
+    // derived from a cross-unit base, or from the implicit TObject) - see
+    // PasTree.Sema.Resolver.ResolveOneWithStmt and AncestryLeavesUnit. In the
+    // second case the target's OWN scope is open, but the inherited members
+    // are not in it. Inside such a body ANY unqualified name might be a
     // member of the target - a member that shadows everything else (ch.05
     // sec. 5.7, dcc-verified against a class field, a local, a parameter, a
     // same-unit global, and even an inline var declared in the body itself).

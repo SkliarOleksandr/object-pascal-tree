@@ -509,6 +509,15 @@ begin
   GCounter.Ok('M.| lists the own method', Has('Own'));
   GCounter.Ok('M.| lists the inherited method', Has('Pub'));
 
+  // Inside a HALF-OPEN with body (5.7): TMy is declared in the overlay, its
+  // ancestor TBase in exta. The body must offer the own member AND the
+  // inherited ones - the with is recorded as WithUnopened for exactly this
+  // reason, and the with-target path reads the bridged type's members.
+  ProjCase(PROJ_HEAD + '  with M do begin |'#10'  end;'#10 + PROJ_TAIL);
+  GCounter.Ok('with M do | lists the own method', Has('Own'));
+  GCounter.Ok('with M do | lists the inherited public method', Has('Pub'));
+  GCounter.Ok('with M do | lists the inherited property', Has('Prop'));
+
   // Class-side (type reference): constructors and class methods, not
   // instance members.
   ProjCase(PROJ_HEAD + '  TBase.|'#10 + PROJ_TAIL);

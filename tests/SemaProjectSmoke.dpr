@@ -860,11 +860,19 @@ const
     // only search path is that directory, so an RTL import would not resolve and
     // the fixture would pass for the wrong reason. Same two-hop shape.
     '  TBaseList<T> = class'#10 +
+    // TList<T>'s own shape: a NESTED pointer type to a nested `array of T`,
+    // exposed as `PList`. Reached on a TBaseList<TAttr> the pointee is an
+    // `array of T` whose T is TAttr only through the pointer's frame.
+    '  public type'#10 +
+    '    arrayofT = array of T;'#10 +
+    '    ParrayofT = ^arrayofT;'#10 +
     '  private'#10 +
+    '    FPList: ParrayofT;'#10 +
     '    function GetItem(AIndex: Integer): T;'#10 +
     '  public'#10 +
     '    function Count: Integer;'#10 +
     '    property Items[AIndex: Integer]: T read GetItem; default;'#10 +
+    '    property PList: ParrayofT read FPList;'#10 +
     '  end;'#10 +
     '  TObjList<T> = class(TBaseList<T>)'#10 +       // middle hop, no default
     '  end;'#10 +
@@ -898,6 +906,14 @@ const
     '    with L[I] do'#10 +
     '      if Which = 0 then'#10 +
     '        Name := ''x'';'#10 +
+    // Through the nested pointer-to-array (TList<T>.PList in the RTL): the
+    // pointee must keep the instantiation frame, or `^[I].Which` is a member
+    // of an OPEN T - 28 false member reports in one FMX library's graphics
+    // unit, with the frame-less `List[I].X` right beside them fine. Both the
+    // direct spelling and the inferred inline var (`var LL := L.PList`).
+    '  L.PList^[0].Which := 1;'#10 +
+    '  var LL := L.PList;'#10 +
+    '  LL^[0].Name := ''y'';'#10 +
     'end;'#10 +
     'end.'#10;
 
@@ -1882,6 +1898,174 @@ const
     'procedure MGlobal; begin with GR do Shared := ''x''; end;'#10 +
     'end.'#10;
 
+  // The HALF-OPEN with: the target's type is declared in THIS unit, so the
+  // intra-unit pass opens its scope - but its ancestor lives in another unit,
+  // and the INHERITED members are not in that scope. 5.7 still says a target
+  // member outranks everything, inherited or not; dcc-verified: all four
+  // bodies below compile, `Name` meaning UWBase.TBase.Name (string) and `Tag`
+  // meaning TBase.Tag (Integer) in each. Before AncestryLeavesUnit these
+  // bindings were never revisited (the with was not "unopened", the node was
+  // bound) and every one was a confident false E2010.
+  UNIT_WBASE =
+    'unit UWBase;'#10'interface'#10 +
+    'type'#10 +
+    '  TSubRec = record Y: Integer; end;'#10 +
+    '  TBase = class Name: string; Tag: Integer; Sub: TSubRec; end;'#10 +
+    '  IBase = interface function Count: Integer; end;'#10 +
+    '  TObjBase = object Tag: Integer; end;'#10 +
+    '  TMsg = record Result: Integer; end;'#10 +     // a message record
+    '  TRecSelf = record Self: Integer; end;'#10 +   // legal, dcc-verified
+    'implementation'#10'end.'#10;
+
+  // Every body compiles under dcc64 37.0 with the shadowing name in scope - the
+  // inherited member wins each time. Three ancestry tiers are covered: a
+  // class over a cross-unit class, an interface over a cross-unit interface,
+  // a legacy object over a cross-unit object, and a class with NO clause at
+  // all, whose implicit TObject (mock System.pas) supplies ClassName.
+  UNIT_WINH =
+    'unit UWInh;'#10'interface'#10'uses UWBase;'#10 +
+    'type'#10 +
+    '  TMy = class(TBase) end;'#10 +                 // same-unit descendant
+    '  IMy = interface(IBase) end;'#10 +
+    '  TObjMy = object(TObjBase) end;'#10 +
+    '  TPlain = class end;'#10 +                     // implicit TObject
+    '  TRec = record A: Integer; end;'#10 +
+    '  TProc = reference to procedure;'#10 +
+    '  TCls = class'#10 +
+    '    Tag: string;'#10 +                          // (a) enclosing class field
+    '    procedure M(C: TMy);'#10 +
+    '  end;'#10 +
+    'var'#10 +
+    '  Name: Integer;'#10 +                          // (d) unit global
+    'implementation'#10 +
+    // Bare `Tag` is the inherited member; `Self.Tag` is still the class
+    // field, and the bare Self (no member of that name on TMy) is neither an
+    // E2003 nor rebound - it was 2245 false E2003 on one project the first
+    // time the with pass considered the name at all.
+    'procedure TCls.M(C: TMy);'#10 +
+    'begin with C do begin Tag := 5; Self.Tag := ''x''; end; end;'#10 +
+    'procedure PLocal;'#10 +
+    'var C: TMy; Name: Integer;'#10 +               // (b) local
+    'begin with C do Name := ''x''; end;'#10 +
+    'procedure PParam(C: TMy; Name: Integer);'#10 + // (c) parameter
+    'begin with C do Name := ''x''; end;'#10 +
+    'procedure PGlobal(C: TMy);'#10 +               // (d) the unit global
+    'begin with C do Name := ''x''; end;'#10 +
+    'procedure PMixed;'#10 +
+    'var R: TRec; C: TMy; Name: Integer;'#10 +      // (e) same-unit record first
+    'begin with R, C do Name := ''x''; end;'#10 +
+    'procedure PClosure;'#10 +
+    'var C: TMy; P: TProc; Name: Integer;'#10 +     // (f) inside a closure
+    'begin with C do P := procedure begin Name := ''x''; end; end;'#10 +
+    'procedure PNested(C: TMy);'#10 +
+    'var Y: string;'#10 +                           // (g) nested with, inner
+    'begin with C do with Sub do Y := 1; end;'#10 + //     target inherited
+    'procedure PMulti(C: TMy);'#10 +
+    'var Y: string;'#10 +                           // (h) later target inherited
+    'begin with C, Sub do Y := 1; end;'#10 +
+    'function PIntf(I: IMy): Integer;'#10 +
+    'var Count: string;'#10 +                       // (i) interface ancestry
+    'begin with I do Result := Count; end;'#10 +
+    'procedure PObj(var O: TObjMy);'#10 +
+    'var Tag: string;'#10 +                         // (j) legacy object ancestry
+    'begin with O do Tag := 5; end;'#10 +
+    'function PPlain(P: TPlain): string;'#10 +
+    'var ClassName: Integer;'#10 +                  // (k) implicit TObject
+    'begin with P do Result := ClassName; end;'#10 +
+    // (l) a target MEMBER named Result outranks the function's own result
+    // slot (5.7) - the message-handler shape `with Message do Result := 0`
+    // inside a Boolean function. The with pass used to skip the name
+    // 'result' altogether; the recheck stage then reported Boolean := 0.
+    'function PMsg(var M: TMsg): Boolean;'#10 +
+    'begin with M do Result := 0; end;'#10 +
+    // (m) the same for Self: a field named Self is legal and the with member
+    // wins over the implicit instance reference (dcc64 37.0 compiles it).
+    'procedure PSelf(var R: TRecSelf);'#10 +
+    'begin with R do Self := 5; end;'#10 +
+    'end.'#10;
+
+  // GENUINE errors inside with bodies must still be reported, whatever the
+  // target's tier:
+  //  - a RECORD's member set is complete where it is declared, its with is
+  //    fully open and the intra-unit typer reports it directly;
+  //  - in a HALF-OPEN body (class over a cross-unit ancestor) the intra-unit
+  //    typer WITHHOLDS its verdicts, and TPasSemaProject.RecheckWithBodies
+  //    decides them after the with pass has committed the real bindings -
+  //    both for a name that stayed local (Local) and for one the pass moved
+  //    to the inherited cross-unit member (Name: string := 5);
+  //  - a with nested in a half-open body is re-typed ONCE (the outer walk
+  //    covers it), so its error is reported once, not twice.
+  // Before the recheck existed the three half-open errors were never
+  // reported at all.
+  UNIT_WGENUINE =
+    'unit UWGenuine;'#10'interface'#10'uses UWBase;'#10 +
+    'type'#10 +
+    '  TMy = class(TBase) end;'#10 +
+    '  TRec = record A: Integer; end;'#10 +
+    'implementation'#10 +
+    'procedure PRec;'#10 +
+    'var R: TRec; A: string;'#10 +
+    'begin with R do A := ''x''; end;'#10 +          // member A is Integer
+    'procedure PInh(C: TMy);'#10 +
+    'var Local: Integer;'#10 +
+    'begin with C do Local := ''x''; end;'#10 +      // not a member anywhere
+    'procedure PInh2(C: TMy);'#10 +
+    'begin with C do Name := 5; end;'#10 +           // inherited Name: string
+    'procedure PInhNested(C: TMy);'#10 +
+    'var Local: Integer;'#10 +
+    'begin with C do with Sub do Local := ''x''; end;'#10 +
+    'end.'#10;
+
+  // MULTI-INDEX with target: `with M[I, J] do` is ONE nkIndex with TWO index
+  // children, and each index peels an array level. Over a NAMED row type
+  // (`TMatrix = array of TRow`) the old single peel opened the ROW, and X/Y in
+  // the body were false E2003 (a reporting library's map helpers, `with
+  // FData[iPart, High(FData[iPart])] do`). dcc-verified: all five compile.
+  // Three tiers on purpose - the matrix cross-unit (project typer only), the
+  // matrix same-unit with a cross-unit element, and everything same-unit
+  // (intra-unit typer) - plus an open-array parameter and the chained `[I][J]`
+  // spelling, which was never broken and must stay so.
+  UNIT_WGEO =
+    'unit UWGeo;'#10'interface'#10 +
+    'type'#10 +
+    '  TDoublePoint = record X, Y: Double; end;'#10 +
+    '  TDoublePointArray = array of TDoublePoint;'#10 +
+    '  TDoublePointMatrix = array of TDoublePointArray;'#10 +
+    'implementation'#10'end.'#10;
+
+  UNIT_WMATRIX =
+    'unit UWMatrix;'#10'interface'#10'uses UWGeo;'#10 +
+    'type'#10 +
+    '  TLocalRow = array of TDoublePoint;'#10 +
+    '  TLocalMatrix = array of TLocalRow;'#10 +
+    '  TLocalRec = record X, Y: Double; end;'#10 +
+    '  TLocalRow2 = array of TLocalRec;'#10 +
+    '  TLocalMatrix2 = array of TLocalRow2;'#10 +
+    '  TLocalCube = array of TLocalMatrix2;'#10 +
+    '  TLocalFixRow = array[0..1, 0..1] of TLocalRow2;'#10 +
+    'implementation'#10 +
+    'function F1(const M: TDoublePointMatrix): Boolean;'#10 +
+    'begin with M[0, High(M[0])] do Result := (X = 1) and (Y = 2); end;'#10 +
+    'function F2(const M: TLocalMatrix): Boolean;'#10 +
+    'begin with M[0, 1] do Result := (X = 1) and (Y = 2); end;'#10 +
+    'function F3(const M: TLocalMatrix2): Boolean;'#10 +
+    'begin with M[0, 1] do Result := (X = 1) and (Y = 2); end;'#10 +
+    'function F4(const M: array of TLocalRow2): Boolean;'#10 +
+    'begin with M[0, 1] do Result := (X = 1) and (Y = 2); end;'#10 +
+    'function F5(const M: TLocalMatrix2): Boolean;'#10 +
+    'begin with M[0][1] do Result := (X = 1) and (Y = 2); end;'#10 +
+    // Three levels, in every spelling: one list, chained-then-list,
+    // list-then-chained, and a fixed 2-D array of a named dynamic row.
+    'function F6(const C: TLocalCube): Boolean;'#10 +
+    'begin with C[0, 1, 2] do Result := (X = 1) and (Y = 2); end;'#10 +
+    'function F7(const C: TLocalCube): Boolean;'#10 +
+    'begin with C[0][1, 2] do Result := (X = 1) and (Y = 2); end;'#10 +
+    'function F8(const C: TLocalCube): Boolean;'#10 +
+    'begin with C[0, 1][2] do Result := (X = 1) and (Y = 2); end;'#10 +
+    'function F9(const F: TLocalFixRow): Boolean;'#10 +
+    'begin with F[0, 1, 2] do Result := (X = 1) and (Y = 2); end;'#10 +
+    'end.'#10;
+
   // 1.2.4: SysInit is implicitly visible to every OTHER unit, exactly like
   // System, via EnsureSysInitUnit's own ResolveUnit('SysInit', ...) lookup --
   // never tested at all before this (mirrors UNIT_SYS/UNIT_E's proof of the
@@ -2118,6 +2302,11 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWith.pas'), UNIT_WITH);
   TFile.WriteAllText(TPath.Combine(LDir, 'UWRec.pas'), UNIT_WREC);
   TFile.WriteAllText(TPath.Combine(LDir, 'UWShadow.pas'), UNIT_WSHADOW);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UWBase.pas'), UNIT_WBASE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UWInh.pas'), UNIT_WINH);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UWGenuine.pas'), UNIT_WGENUINE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UWGeo.pas'), UNIT_WGEO);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UWMatrix.pas'), UNIT_WMATRIX);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitTObj.pas'), UNIT_TOBJ);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitQual.pas'), UNIT_QUAL);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNABase.pas'), UNIT_NABASE);
@@ -2334,6 +2523,68 @@ begin
     // references get re-pointed.
     Ok('WithShadow: the local Shared declarations are still declared',
       SymCountOf(LWSh, 'shared', skField) = 1);
+
+    // The half-open with (see UNIT_WINH): an INHERITED cross-unit member of a
+    // same-unit target type still outranks the enclosing field / local, in
+    // the plain, mixed-target and closure bodies alike.
+    var LWInh := ModelByName('uwinh');
+    Ok('WithInh: unit loaded', Assigned(LWInh));
+    Ok('WithInh: no diagnostics at all', Length(LWInh.Diags) = 0);
+    Ok('WithInh: all 5 Name refs (local/param/global/mixed/closure) bind to '
+      + 'UWBase.TBase.Name',
+      CrossRefCountInUnit(LWInh, 'Name', 'Name', 'uwbase') = 5);
+    Ok('WithInh: both Tag refs bind into UWBase - the class field body to '
+      + 'TBase.Tag, the legacy object body to TObjBase.Tag',
+      CrossRefCountInUnit(LWInh, 'Tag', 'Tag', 'uwbase') = 2);
+    Ok('WithInh: Y in the nested and the multi-target body binds to '
+      + 'UWBase.TSubRec.Y',
+      CrossRefCountInUnit(LWInh, 'Y', 'Y', 'uwbase') = 2);
+    Ok('WithInh: Count over the interface binds to UWBase.IBase.Count',
+      CrossRefCountInUnit(LWInh, 'Count', 'Count', 'uwbase') = 1);
+    Ok('WithInh: ClassName over the clause-less class binds to System''s '
+      + 'TObject',
+      CrossRefCountInUnit(LWInh, 'ClassName', 'ClassName', 'system') = 1);
+    Ok('WithInh: Result in the message-record body binds to UWBase.TMsg.Result, '
+      + 'not the function''s result slot',
+      CrossRefCountInUnit(LWInh, 'Result', 'Result', 'uwbase') = 1);
+    Ok('WithInh: Self in the record body binds to UWBase.TRecSelf.Self',
+      CrossRefCountInUnit(LWInh, 'Self', 'Self', 'uwbase') = 1);
+    Ok('WithInh: no shadowed reference stays bound locally - except the '
+      + 'qualified Self.Tag, which IS the class field',
+      (LocalRefCount(LWInh, 'Name') + LocalRefCount(LWInh, 'Y') +
+       LocalRefCount(LWInh, 'Count') + LocalRefCount(LWInh, 'ClassName') = 0)
+      and (LocalRefCount(LWInh, 'Tag') = 1));
+    Ok('WithInh: a bare Self with no such member is left alone - no E2003, '
+      + 'no binding',
+      LocalRefCount(LWInh, 'Self') + CrossRefCountInUnit(LWInh, 'Self', 'Self',
+        'uwbase') = 1);   // the one in PSelf only
+    // The declarations of the shadowing names survive - only references move.
+    Ok('WithInh: the shadowing declarations are still declared',
+      (SymCountOf(LWInh, 'tag', skField) = 1) and
+      (SymCountOf(LWInh, 'name', skVar) >= 1));
+    // Genuine errors in with bodies still fire - see UNIT_WGENUINE.
+    var LWGen := ModelByName('uwgenuine');
+    Ok('WithGenuine: unit loaded', Assigned(LWGen));
+    Ok('WithGenuine: exactly 4 E2010 - record body, half-open local, '
+      + 'half-open inherited member, nested (once) - and nothing else',
+      (DiagCount(LWGen, 'E2010') = 4) and (Length(LWGen.Diags) = 4));
+    Ok('WithGenuine: the inherited-member error names the REAL types - '
+      + 'string := Integer',
+      DiagHasText(LWGen, 'E2010', '''string'' and ''Integer'''));
+    Ok('WithGenuine: Name in the error body still binds to UWBase.TBase.Name',
+      CrossRefCountInUnit(LWGen, 'Name', 'Name', 'uwbase') = 1);
+
+    // Multi-index with targets (see UNIT_WMATRIX): every X/Y in the nine
+    // bodies must bind - 2 bodies over UWGeo's TDoublePoint (F1, F2), 7 over
+    // the local TLocalRec (F3..F9, the last four three levels deep).
+    var LWMat := ModelByName('uwmatrix');
+    Ok('WithMatrix: unit loaded', Assigned(LWMat));
+    Ok('WithMatrix: no diagnostics at all', Length(LWMat.Diags) = 0);
+    Ok('WithMatrix: X/Y over the cross-unit element bind into UWGeo (2+2)',
+      CrossRefCountInUnit(LWMat, 'X', 'X', 'uwgeo') +
+      CrossRefCountInUnit(LWMat, 'Y', 'Y', 'uwgeo') = 4);
+    Ok('WithMatrix: X/Y over the same-unit element bind locally (7+7)',
+      LocalRefCount(LWMat, 'X') + LocalRefCount(LWMat, 'Y') = 14);
 
     // Module status / snapshot API: AnalyzeDirectory takes the directory's
     // own units all the way to msCrossReady, and TryGetSnapshot gates on the
@@ -2664,6 +2915,10 @@ begin
     Ok('genlist: no diags at all', Length(LGL.Diags) = 0);
     Ok('genlist: the with body sees the ELEMENT type, not the open parameter',
       CrossRefTo(LGL, 'Which', 'Which') and CrossRefTo(LGL, 'Name', 'Name'));
+    Ok('genlist: PList^[0].Which and the inferred LL^[0].Name bind too - the '
+      + 'pointee keeps the frame (2 Which + 2 Name)',
+      (CrossRefCountInUnit(LGL, 'Which', 'Which', 'unitgenlist') = 2) and
+      (CrossRefCountInUnit(LGL, 'Name', 'Name', 'unitgenlist') = 2));
 
     // The same ancestry named from INSIDE the descendant: `with Items[I] do`.
     var LGS := ModelByName('unitgenself');
