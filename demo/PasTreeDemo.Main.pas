@@ -357,6 +357,13 @@ type
   private
     FFileList: TStringList;  // full paths shown in the tree
     FOpenFiles: TStringList; // path -> TTabSheet (Objects)
+    FTabHintIndex: Integer;  // tab whose path hint pgc currently carries
+    { The tree and the tabs each drive the other (a tree selection opens a
+      tab, an activated tab selects the tree node), so whichever side moves
+      first owns the round trip and the other's handler does nothing. One
+      flag, not two: the point is to break the cycle, not to know where it
+      started. }
+    FTabTreeSync: Boolean;
     { Renamed text for files that have NO tab open - lower path -> full text.
       A rename must not open a tab per touched file (a name used across a
       closure would open dozens), but the edits still have to be visible to
@@ -642,6 +649,16 @@ type
     procedure ClearLink;
     procedure EditorMouseMove(Sender: TObject; Shift: TShiftState;
       X, Y: Integer);
+    { The tab STRIP belongs to the page control, not to the sheets, so a
+      TTabSheet.Hint is never shown - over the strip the mouse is over pgc.
+      This tracks the tab under the cursor and moves that sheet's full path
+      onto pgc's own Hint. }
+    procedure PgcMouseMove(Sender: TObject; Shift: TShiftState;
+      X, Y: Integer);
+    // Activating a source tab selects its file in the project tree - without
+    // taking the focus off whatever the user is using (see SelectTreeFile).
+    procedure PgcChange(Sender: TObject);
+    procedure SelectTreeFile(const APath: string);
     procedure EditorMouseDown(Sender: TObject; Button: TMouseButton;
       Shift: TShiftState; X, Y: Integer);
     procedure EditorKeyUp(Sender: TObject; var Key: Word;
@@ -2635,6 +2652,11 @@ begin
   // The mouse's back/forward buttons never reach a control's OnMouseDown -
   // see AppMessage.
   Application.OnMessage := AppMessage;
+  // A source tab's full path, shown as a hint over its tab (PgcMouseMove).
+  FTabHintIndex := -1;
+  pgc.ShowHint := True;
+  pgc.OnMouseMove := PgcMouseMove;
+  pgc.OnChange := PgcChange;
   FPlatform := pfWin32;
   FCompilerVersion := DEFAULT_COMPILER_VERSION;
   // Debounces re-analysis while typing: an edit (re)starts the timer, and only
@@ -3198,13 +3220,35 @@ begin
   RefreshFileNodes;
 end;
 
+{ Orders the file tree: the main source first (a project has exactly one
+  .dpr/.dpk and it is the entry point every other file hangs off), then the
+  rest by path, case-insensitively, as a plain TStringList.Sort would. }
+function CompareProjectFiles(AList: TStringList; AIdx1, AIdx2: Integer): Integer;
+
+  function MainSourceRank(const APath: string): Integer;
+  var
+    LExt: string;
+  begin
+    LExt := LowerCase(TPath.GetExtension(APath));
+    if (LExt = '.dpr') or (LExt = '.dpk') then
+      Result := 0
+    else
+      Result := 1;
+  end;
+
+begin
+  Result := MainSourceRank(AList[AIdx1]) - MainSourceRank(AList[AIdx2]);
+  if Result = 0 then
+    Result := AnsiCompareText(AList[AIdx1], AList[AIdx2]);
+end;
+
 // Sorts FFileList and rebuilds the file tree's nodes from it. Shared by
 // PopulateTree and AdoptProjectMembers (which grows the list after analysis).
 procedure TfrmMain.RefreshFileNodes;
 var
   LNode: PVirtualNode;
 begin
-  FFileList.Sort;
+  FFileList.CustomSort(CompareProjectFiles);
   vstFiles.BeginUpdate;
   try
     vstFiles.Clear;
@@ -3280,13 +3324,14 @@ begin
   LTab := TSourceTab.Create(pgc);
   LTab.PageControl := pgc;
   LTab.Caption := TPath.GetFileName(APath);
-  LTab.Hint := APath;
-  LTab.ShowHint := True;
 
   Result := TSynEdit.Create(LTab);
   Result.Parent := LTab;
   Result.Align := alClient;
   Result.Gutter.ShowLineNumbers := True;
+  // A control with an empty Hint inherits its parent's, so without this the
+  // tab's path hint would also pop up over the text itself.
+  Result.ShowHint := False;
   Result.Font.Name := 'Consolas';
   Result.UseCodeFolding := True;
   // go-to-declaration: ctrl+hover shows a link, ctrl+click jumps.
@@ -3513,6 +3558,78 @@ begin
   LTab.Editor.Cursor := crIBeam;
   LTab.Editor.Invalidate;
   FLinkTab := nil;
+end;
+
+{ Selects APath's node in the project tree, and nothing else: no SetFocus
+  (the user is typing in the editor or clicking a tab - the tree must not take
+  the caret), and no work at all when that node is already the selection, so
+  re-activating the same tab raises no tree events. }
+procedure TfrmMain.SelectTreeFile(const APath: string);
+var
+  LNode: PVirtualNode;
+  LData: PPasNodeData;
+begin
+  LNode := vstFiles.GetFirst;
+  while LNode <> nil do
+  begin
+    LData := PPasNodeData(vstFiles.GetNodeData(LNode));
+    if (LData <> nil) and (LData.Index >= 0) and
+       (LData.Index < FFileList.Count) and
+       SameText(FFileList[LData.Index], APath) then
+      Break;
+    LNode := vstFiles.GetNext(LNode);
+  end;
+  if LNode = nil then
+    Exit;   // a tab for a file the tree does not list (e.g. an RTL unit)
+  if (vstFiles.FocusedNode = LNode) and (vstFiles.SelectedCount = 1) and
+     vstFiles.Selected[LNode] then
+    Exit;
+  vstFiles.ClearSelection;
+  vstFiles.FocusedNode := LNode;      // the focused NODE, not the keyboard focus
+  vstFiles.Selected[LNode] := True;
+  vstFiles.ScrollIntoView(LNode, False);
+end;
+
+procedure TfrmMain.PgcChange(Sender: TObject);
+begin
+  if FTabTreeSync then
+    Exit;   // the tree started this round trip - see FTabTreeSync
+  if not (pgc.ActivePage is TSourceTab) then
+    Exit;   // AST JSON / Semantics / a search page: leave the tree alone
+  FTabTreeSync := True;
+  try
+    SelectTreeFile(TSourceTab(pgc.ActivePage).FilePath);
+  finally
+    FTabTreeSync := False;
+  end;
+end;
+
+procedure TfrmMain.PgcMouseMove(Sender: TObject; Shift: TShiftState;
+  X, Y: Integer);
+var
+  LIdx: Integer;
+  LHint: string;
+begin
+  { IndexOfTabAt counts the VISIBLE tabs, while Pages[] counts every page -
+    and pgc keeps tsJson/tsSema hidden (TabVisible := False, SetupControls),
+    so the two disagree by however many hidden pages come first. TTabSheet's
+    own TabIndex is the visible-tab number, which is exactly the mapping. }
+  LIdx := pgc.IndexOfTabAt(X, Y);
+  if LIdx = FTabHintIndex then
+    Exit;   // same tab: leave the hint alone, or every move re-shows it
+  FTabHintIndex := LIdx;
+  LHint := '';
+  for var LPageIdx := 0 to pgc.PageCount - 1 do
+    if (pgc.Pages[LPageIdx].TabIndex = LIdx) and
+       (pgc.Pages[LPageIdx] is TSourceTab) then
+    begin
+      LHint := TSourceTab(pgc.Pages[LPageIdx]).FilePath;
+      Break;
+    end;
+  pgc.Hint := LHint;
+  // A hint already on screen would keep the previous tab's text until it
+  // times out; cancelling makes the next tab's path appear at once.
+  Application.CancelHint;
 end;
 
 procedure TfrmMain.EditorMouseMove(Sender: TObject; Shift: TShiftState;
@@ -5412,11 +5529,18 @@ procedure TfrmMain.vstFilesChange(Sender: TBaseVirtualTree; Node: PVirtualNode);
 var
   LData: PPasNodeData;
 begin
-  if Node = nil then
-    Exit;
+  if (Node = nil) or FTabTreeSync then
+    Exit;   // FTabTreeSync: a tab activation is selecting this node itself
   LData := PPasNodeData(Sender.GetNodeData(Node));
   if (LData <> nil) and (LData.Index >= 0) and (LData.Index < FFileList.Count) then
-    OpenFileTab(FFileList[LData.Index]);
+  begin
+    FTabTreeSync := True;   // OpenFileTab activates a tab: PgcChange stays out
+    try
+      OpenFileTab(FFileList[LData.Index]);
+    finally
+      FTabTreeSync := False;
+    end;
+  end;
 end;
 
 { Go To (Ctrl+G) - a modal picker over the ACTIVE module's outline: every
