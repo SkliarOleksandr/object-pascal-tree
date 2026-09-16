@@ -102,6 +102,7 @@ var
   GRelease: Boolean;   // -release: exercise ReleaseTransientMaps, report held
   GDemote: Boolean;    // -demote: stage 2 on top (DemoteClosedUnits)
   GRehydrate: Boolean; // -rehydrate: after -demote, EnsureHydrated EVERY model
+  GOutline: Boolean;   // -outline: TPasNavigator.ProjectOutline over the .dproj files, row count + first rows (the Go To project tab, headless)
   GDefines: Boolean;   // -defines: dump the ROOT model's DefineRefs and probe
                        // DefineAt/GotoDefine on each (the headless twin of
                        // Find References on a conditional symbol)
@@ -599,6 +600,35 @@ begin
             [LFail, GProj.ModelCount, MemoryText(AllocatedBytes)]));
         end;
       end;
+      if GOutline then
+      begin
+        // The Go To project tab, headless: the .dproj's files that have a
+        // model, ProjectOutline over them (after -release/-demote when
+        // given - the demo's state), the count and the first rows.
+        var LONav := TPasNavigator.Create(GProj);
+        try
+          var LOMids: TArray<Integer> := nil;
+          var LOMiss := 0;
+          for var LOF in LD.Files do
+          begin
+            var LOMid := LONav.ModelIdOf(LOF);
+            if LOMid >= 0 then
+              LOMids := LOMids + [LOMid]
+            else
+              Inc(LOMiss);
+          end;
+          var LORows := LONav.ProjectOutline(LOMids);
+          Writeln(ErrOutput, Format(
+            '  outline: %d dproj file(s), %d with a model, %d without; %d row(s)',
+            [Length(LD.Files), Length(LOMids), LOMiss, Length(LORows)]));
+          for var LOI := 0 to Min(High(LORows), 7) do
+            Writeln(ErrOutput, Format('    %s %s%s  [%s]', [LORows[LOI].Head,
+              LORows[LOI].Owner + IfThen(LORows[LOI].Owner <> '', '.', ''),
+              LORows[LOI].Name, LORows[LOI].UnitName]));
+        finally
+          LONav.Free;
+        end;
+      end;
       if LTotalLines > 0 then
         Writeln(ErrOutput, Format(
           '  source: %s lines, %.1f MB, %s file(s) - %s lines/s',
@@ -699,6 +729,8 @@ begin
         GDemote := True
       else if SameText(ParamStr(GIdx), '-rehydrate') then
         GRehydrate := True
+      else if SameText(ParamStr(GIdx), '-outline') then
+        GOutline := True
       else if SameText(ParamStr(GIdx), '-defines') then
         GDefines := True
       else if ParamStr(GIdx).StartsWith('-p:', True) then

@@ -142,6 +142,25 @@ type
     Active: Boolean;   // the directive itself sits in live code
   end;
 
+  // One `{$I file}` / `{$INCLUDE file}` directive SITE, in the includer's file
+  // coordinates - what a Go To list shows as an `include` row and what a jump
+  // to "where is this file pulled in" lands on. Recorded whether or not the
+  // include loaded: IncludedFileId is the pulled-in file's index into Files,
+  // or -1 when it was not found, cycled or nested too deep (the diagnostic
+  // says which). VisIndex is the index the FIRST visible token of the
+  // included text would take (= Visible count when the directive was met),
+  // so a source-ordered list can slot the row between the tokens around it.
+  // Retained across DemoteText like DefineRefs (it is not text).
+  TPasIncludeRef = record
+    FileId: Integer;          // the includer
+    Start: Integer;           // the directive's offset in that file
+    Len: Integer;
+    Arg: string;              // the file name as written
+    Path: string;             // resolved full path; '' when not found
+    IncludedFileId: Integer;  // index into Files; -1 when not loaded
+    VisIndex: Integer;
+  end;
+
   // What an oracle hands back for a symbol question. A constant is not always
   // a number: the version-guard idiom compares STRINGS -- Indy's
   // `$IF gsIdVersion >= '10.5.5'` -- and a numeric-only answer has to refuse
@@ -195,6 +214,9 @@ type
     // Retained across DemoteText (it is not text), so a project-wide define
     // search never rehydrates a unit just to test a name.
     DefineRefs: TArray<TPasDefineRef>;
+    // Every `{$I}`/`{$INCLUDE}` directive site, processing order - see
+    // TPasIncludeRef. Retained across DemoteText for the same reason.
+    IncludeRefs: TArray<TPasIncludeRef>;
     function VisibleToken(AIndex: Integer): TPasToken;
     function VisibleText(AIndex: Integer): string;
     { SameText(VisibleText(AIndex), AWord) without materializing the text -
@@ -297,6 +319,7 @@ type
     FAlign: Integer;
     FAlignEvents: TList<TPasAlignEvent>;
     FDefineRefs: TList<TPasDefineRef>;
+    FIncludeRefs: TList<TPasIncludeRef>;
     FSwitchStack: TStack<TPasOptState>;
     FFileNames: TList<string>;
     FFiles: TList<TPasTokenStream>;
@@ -722,6 +745,7 @@ begin
   FMinEnumEvents := TList<TPasMinEnumEvent>.Create;
   FAlignEvents := TList<TPasAlignEvent>.Create;
   FDefineRefs := TList<TPasDefineRef>.Create;
+  FIncludeRefs := TList<TPasIncludeRef>.Create;
   FFileNames := TList<string>.Create;
   FFiles := TList<TPasTokenStream>.Create;
   FVisible := TList<TPasVisibleToken>.Create;
@@ -798,6 +822,7 @@ begin
   FMinEnumEvents.Free;
   FAlignEvents.Free;
   FDefineRefs.Free;
+  FIncludeRefs.Free;
   FSwitchStack.Free;
   inherited;
 end;
@@ -898,6 +923,7 @@ begin
   FAlign := 8;                   // dcc default ({$A8}); unit-local likewise
   FAlignEvents.Clear;
   FDefineRefs.Clear;
+  FIncludeRefs.Clear;
   FRttiState := Default(TPasRttiState);   // Mode = rmInherit, the dcc default
   FVarPropSetter := False;                // dcc default: OFF (13.1.6)
 
@@ -934,6 +960,7 @@ begin
   Result.MinEnumEvents := FMinEnumEvents.ToArray;
   Result.AlignEvents := FAlignEvents.ToArray;
   Result.DefineRefs := FDefineRefs.ToArray;
+  Result.IncludeRefs := FIncludeRefs.ToArray;
   SetLength(Result.Skipped, FSkipped.Count);
   for LIdx := 0 to FSkipped.Count - 1 do
     Result.Skipped[LIdx] := FSkipped[LIdx].ToArray;
@@ -1284,15 +1311,30 @@ procedure TPasPreprocessor.HandleInclude(AFileId: Integer;
   const AToken: TPasToken; const AArg: string);
 var
   LResolved, LKey: string;
-  LNewId: Integer;
+  LNewId, LRefIdx: Integer;
   LStream: TPasTokenStream;
+  LRef: TPasIncludeRef;
 begin
+  // The site is recorded FIRST, whatever becomes of the file: a Go To list
+  // shows the directive that is there, and a broken include is the one a
+  // reader most wants to jump to. IncludedFileId is patched in below once
+  // the file has an id.
+  LRef.FileId := AFileId;
+  LRef.Start := AToken.Start;
+  LRef.Len := AToken.Len;
+  LRef.Arg := AArg;
+  LRef.Path := '';
+  LRef.IncludedFileId := -1;
+  LRef.VisIndex := FVisible.Count;
+  LRefIdx := FIncludeRefs.Add(LRef);
   if not FSourceManager.ResolveInclude(FFileNames[AFileId], AArg, LResolved)
   then
   begin
     Diag(ppIncludeNotFound, AFileId, AToken.Start, AToken.Len, AArg);
     Exit;
   end;
+  LRef.Path := LResolved;
+  FIncludeRefs[LRefIdx] := LRef;
   LKey := LowerCase(LResolved);
   if FIncludePathStack.Contains(LKey) then
   begin
@@ -1313,6 +1355,8 @@ begin
   FFiles.Add(LStream);
   FSkipped.Add(TList<TPasSkippedRegion>.Create);
   LNewId := FFiles.Count - 1;
+  LRef.IncludedFileId := LNewId;
+  FIncludeRefs[LRefIdx] := LRef;
 
   FIncludePathStack.Add(LKey);
   try

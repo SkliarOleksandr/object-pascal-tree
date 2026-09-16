@@ -2522,70 +2522,156 @@ begin
       if LMidOut >= 0 then
       begin
         var LOut := PasModuleOutline(GProj.Model(LMidOut).Tree);
-        Ok('outline: 29 rows', Length(LOut) = 29);
+        Ok('outline: 27 rows', Length(LOut) = 27);
         CheckOut(LOut, 0, okModule, 'unit', '', 'NavOut', '', 1, 6, False);
         CheckOut(LOut, 1, okSection, 'interface', '', '', '', 2, 1, False);
         CheckOut(LOut, 2, okUses, 'uses', '', '', '', 3, 1, False);
-        CheckOut(LOut, 3, okKeyword, 'type', '', '', '', 4, 1, False);
-        CheckOut(LOut, 4, okType, 'type', '', 'TShape', '= class', 5, 3, False);
-        CheckOut(LOut, 5, okVar, 'field', 'TShape', 'FA', ': Integer', 7, 5,
+        CheckOut(LOut, 3, okType, 'type', '', 'TShape', '= class', 5, 3, False);
+        CheckOut(LOut, 4, okVar, 'field', 'TShape', 'FA', ': Integer', 7, 5,
           False);
-        CheckOut(LOut, 6, okVar, 'field', 'TShape', 'FB', ': Integer', 7, 9,
+        CheckOut(LOut, 5, okVar, 'field', 'TShape', 'FB', ': Integer', 7, 9,
           False);
-        CheckOut(LOut, 7, okRoutine, 'constructor', 'TShape', 'Create', '',
+        CheckOut(LOut, 6, okRoutine, 'constructor', 'TShape', 'Create', '',
           9, 17, False);
-        CheckOut(LOut, 8, okRoutine, 'class function', 'TShape', 'Kind',
+        CheckOut(LOut, 7, okRoutine, 'class function', 'TShape', 'Kind',
           ': string', 10, 20, False);
-        CheckOut(LOut, 9, okProperty, 'property', 'TShape', 'A', ': Integer',
+        CheckOut(LOut, 8, okProperty, 'property', 'TShape', 'A', ': Integer',
           11, 14, False);
-        CheckOut(LOut, 10, okProperty, 'property', 'TShape', 'Items',
+        CheckOut(LOut, 9, okProperty, 'property', 'TShape', 'Items',
           '[I: Integer]: Integer', 12, 14, False);
-        CheckOut(LOut, 11, okType, 'type', '', 'TList<T>', '= record', 14, 3,
+        CheckOut(LOut, 10, okType, 'type', '', 'TList<T>', '= record', 14, 3,
           False);
-        CheckOut(LOut, 12, okVar, 'field', 'TList<T>', 'Data',
+        CheckOut(LOut, 11, okVar, 'field', 'TList<T>', 'Data',
           ': array of T', 15, 5, False);
-        CheckOut(LOut, 13, okType, 'type', '', 'TAlias', '= type Integer',
+        CheckOut(LOut, 12, okType, 'type', '', 'TAlias', '= type Integer',
           17, 3, False);
-        CheckOut(LOut, 14, okKeyword, 'const', '', '', '', 18, 1, False);
-        CheckOut(LOut, 15, okConst, 'const', '', 'MaxN', '= 10', 19, 3, False);
-        CheckOut(LOut, 16, okConst, 'const', '', 'Sizes',
+        CheckOut(LOut, 13, okConst, 'const', '', 'MaxN', '= 10', 19, 3, False);
+        CheckOut(LOut, 14, okConst, 'const', '', 'Sizes',
           ': array[0..1] of Integer', 20, 3, False);
-        CheckOut(LOut, 17, okKeyword, 'var', '', '', '', 21, 1, False);
-        CheckOut(LOut, 18, okVar, 'var', '', 'GCount', ': Integer', 22, 3,
+        CheckOut(LOut, 15, okVar, 'var', '', 'GCount', ': Integer', 22, 3,
           False);
-        CheckOut(LOut, 19, okVar, 'var', '', 'GTotal', ': Integer', 22, 11,
+        CheckOut(LOut, 16, okVar, 'var', '', 'GTotal', ': Integer', 22, 11,
           False);
+        // The `{$I NavOut.inc}` directive is a row of its own, positioned on
+        // the directive in the INCLUDER, slotted right before the first row
+        // the included text produces.
+        CheckOut(LOut, 17, okInclude, 'include', '', 'NavOut.inc', '', 23, 1,
+          False);
+        Ok('outline: include row names the .pas file and the ref index',
+          (Length(LOut) > 17) and
+          SameText(TPath.GetFileName(LOut[17].FilePath), 'NavOut.pas') and
+          (LOut[17].Node = 0) and (LOut[17].Section = osNone));
         // The include's declaration reports the INCLUDE file and ITS line.
-        CheckOut(LOut, 20, okRoutine, 'procedure', '', 'FromInc', '', 1, 11,
+        CheckOut(LOut, 18, okRoutine, 'procedure', '', 'FromInc', '', 1, 11,
           False);
         Ok('outline: include row names the .inc file',
-          (Length(LOut) > 20) and
-          SameText(TPath.GetFileName(LOut[20].FilePath), 'NavOut.inc'));
+          (Length(LOut) > 18) and
+          SameText(TPath.GetFileName(LOut[18].FilePath), 'NavOut.inc'));
         Ok('outline: main-file row names the .pas file',
-          (Length(LOut) > 19) and
-          SameText(TPath.GetFileName(LOut[19].FilePath), 'NavOut.pas'));
-        CheckOut(LOut, 21, okRoutine, 'function', '', 'Twice',
+          (Length(LOut) > 16) and
+          SameText(TPath.GetFileName(LOut[16].FilePath), 'NavOut.pas'));
+        CheckOut(LOut, 19, okRoutine, 'function', '', 'Twice',
           '(X: Integer): Integer', 24, 10, False);
-        CheckOut(LOut, 22, okSection, 'implementation', '', '', '', 25, 1,
+        CheckOut(LOut, 20, okSection, 'implementation', '', '', '', 25, 1,
           False);
-        CheckOut(LOut, 23, okUses, 'uses', '', '', '', 26, 1, False);
+        CheckOut(LOut, 21, okUses, 'uses', '', '', '', 26, 1, False);
         // Implementation headers: the dotted name gives the owner, the
         // body makes the row an implementation.
-        CheckOut(LOut, 24, okRoutine, 'constructor', 'TShape', 'Create', '',
+        CheckOut(LOut, 22, okRoutine, 'constructor', 'TShape', 'Create', '',
           27, 13, True);
-        CheckOut(LOut, 25, okRoutine, 'class function', 'TShape', 'Kind',
+        CheckOut(LOut, 23, okRoutine, 'class function', 'TShape', 'Kind',
           ': string', 29, 16, True);
-        CheckOut(LOut, 26, okRoutine, 'function', '', 'Twice',
+        CheckOut(LOut, 24, okRoutine, 'function', '', 'Twice',
           '(X: Integer): Integer', 30, 10, True);
-        CheckOut(LOut, 27, okRoutine, 'procedure', '', 'FromInc', '', 31, 11,
+        CheckOut(LOut, 25, okRoutine, 'procedure', '', 'FromInc', '', 31, 11,
           True);
-        CheckOut(LOut, 28, okSection, 'initialization', '', '', '', 32, 1,
+        CheckOut(LOut, 26, okSection, 'initialization', '', '', '', 32, 1,
           False);
         Ok('outline: sections are tagged',
-          (Length(LOut) = 29) and (LOut[4].Section = osInterface) and
-          (LOut[21].Section = osInterface) and
-          (LOut[24].Section = osImplementation) and
-          (LOut[28].Section = osInitialization));
+          (Length(LOut) = 27) and (LOut[3].Section = osInterface) and
+          (LOut[19].Section = osInterface) and
+          (LOut[22].Section = osImplementation) and
+          (LOut[26].Section = osInitialization));
+
+        // ProjectOutline: the same unit's declarations off the SYMBOL TABLE
+        // - no landmarks, one row per routine, owners from the struct
+        // scope chain, and the landing through DeclHit.
+        var LPO := GNav.ProjectOutline([LMidOut]);
+        Ok('project outline: 18 rows', Length(LPO) = 18);
+        var LPOk := Length(LPO) = 18;
+        if LPOk then
+        begin
+          // The model opens with its header row and its include sites, both
+          // without a symbol; their landings are the two dedicated calls.
+          var LPTarget: TPasNavTarget;
+          Ok('project outline: unit row first',
+            (LPO[0].Kind = okModule) and (LPO[0].Head = 'unit') and
+            (LPO[0].Name = 'NavOut') and (LPO[0].Sym = -1) and
+            (LPO[0].UnitId = LMidOut));
+          Ok('project outline: UnitHeaderTarget lands on the header name',
+            GNav.UnitHeaderTarget(LPO[0].UnitId, {out} LPTarget) and
+            (LPTarget.Line = 1) and (LPTarget.Col = 6) and
+            SameText(TPath.GetFileName(LPTarget.FilePath), 'NavOut.pas'));
+          Ok('project outline: include row second',
+            (LPO[1].Kind = okInclude) and (LPO[1].Head = 'include') and
+            (LPO[1].Name = 'NavOut.inc') and (LPO[1].Detail = '') and
+            (LPO[1].Node = 0) and (LPO[1].Sym = -1));
+          Ok('project outline: IncludeSiteTarget lands on the directive',
+            GNav.IncludeSiteTarget(LPO[1].UnitId, LPO[1].Node,
+              {out} LPTarget) and
+            (LPTarget.Line = 23) and (LPTarget.Col = 1) and
+            SameText(TPath.GetFileName(LPTarget.FilePath), 'NavOut.pas'));
+          Ok('project outline: a bad include index is refused',
+            not GNav.IncludeSiteTarget(LMidOut, 5, {out} LPTarget));
+          Ok('project outline: TShape type',
+            (LPO[2].Kind = okType) and (LPO[2].Head = 'type') and
+            (LPO[2].Owner = '') and (LPO[2].Name = 'TShape') and
+            (LPO[2].Section = osInterface) and (LPO[2].UnitId = LMidOut) and
+            (LPO[2].UnitName = 'NavOut') and (LPO[2].Sym >= 0) and
+            (LPO[2].Line = 0));
+          Ok('project outline: TShape.FA field',
+            (LPO[3].Kind = okVar) and (LPO[3].Head = 'field') and
+            (LPO[3].Owner = 'TShape') and (LPO[3].Name = 'FA'));
+          Ok('project outline: TShape.Create constructor',
+            (LPO[5].Kind = okRoutine) and (LPO[5].Head = 'constructor') and
+            (LPO[5].Owner = 'TShape') and (LPO[5].Name = 'Create'));
+          Ok('project outline: TShape.Kind function',
+            (LPO[6].Kind = okRoutine) and (LPO[6].Head = 'function') and
+            (LPO[6].Owner = 'TShape') and (LPO[6].Name = 'Kind'));
+          Ok('project outline: TShape.Items property',
+            (LPO[8].Kind = okProperty) and (LPO[8].Owner = 'TShape') and
+            (LPO[8].Name = 'Items'));
+          Ok('project outline: TList<T> owns Data',
+            (LPO[9].Kind = okType) and (LPO[9].Name = 'TList') and
+            (LPO[10].Kind = okVar) and (LPO[10].Owner = 'TList') and
+            (LPO[10].Name = 'Data'));
+          Ok('project outline: MaxN const, GCount var',
+            (LPO[12].Kind = okConst) and (LPO[12].Name = 'MaxN') and
+            (LPO[14].Kind = okVar) and (LPO[14].Head = 'var') and
+            (LPO[14].Name = 'GCount'));
+          // The landing: DeclHit on the row's (UnitId, Sym) gives the
+          // declared name's position - TShape at 5:3 like the module row.
+          var LPHit: TPasRefHit;
+          Ok('project outline: DeclHit lands on TShape',
+            GNav.DeclHit(LPO[2].UnitId, LPO[2].Sym, {out} LPHit) and
+            (LPHit.Line = 5) and (LPHit.Col = 3) and
+            SameText(TPath.GetFileName(LPHit.FilePath), 'NavOut.pas'));
+        end;
+        // Past the two landmark rows every row is a declaration; the routine
+        // rows are ONE each.
+        var LPOFrom := 0;
+        for var LPI := 2 to High(LPO) do
+        begin
+          if not (LPO[LPI].Kind in [okType, okVar, okConst, okProperty,
+                  okRoutine]) then
+            LPOFrom := -1;
+          if (LPO[LPI].Kind = okRoutine) and (LPO[LPI].Name = 'Twice') then
+            Inc(LPOFrom);
+        end;
+        Ok('project outline: declarations only, Twice once',
+          LPOFrom = 1);
+        Ok('project outline: an out-of-range model is skipped',
+          Length(GNav.ProjectOutline([-1, 100000])) = 0);
       end;
     finally
       GNav.Free;

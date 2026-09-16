@@ -6,9 +6,11 @@ unit PasTree.Outline;
   Every declaration a parsed module makes (types, their members, variables,
   constants, properties, routine headers AND routine bodies), plus the
   structural landmarks a reader steers by (the module header, `interface`,
-  `implementation`, `uses`, each `type`/`const`/`var` keyword), as a flat
-  list in the order they appear in the source. This is what a "Go To" picker
-  or an LSP documentSymbol response lists.
+  `implementation`, `uses`), as a flat list in the order they appear in the
+  source. This is what a "Go To" picker or an LSP documentSymbol response
+  lists. The PROJECT-wide counterpart, one list over every unit's retained
+  symbol table, is TPasNavigator.ProjectOutline (PasTree.Sema.Nav); it
+  returns the same record so a picker draws both with one row painter.
 
   AST ONLY, no semantics. The walk reads the parse tree and nothing else, so
   it works on a module the resolver has not seen yet, on a module with parse
@@ -41,11 +43,17 @@ type
     okSection: `interface`, `implementation`, `initialization`,
       `finalization`, a program's main `begin`.
     okUses: a uses/requires/contains clause.
-    okKeyword: a module-level `type`/`const`/`resourcestring`/`var`/
-      `threadvar`/`label`/`exports` word - a landmark, not a declaration.
+    okInclude: an $I / $INCLUDE directive - a landmark whose
+      row sits where the directive is; Name is the file as written, Node is
+      the index into TPasPreprocessed.IncludeRefs, the position the
+      directive's own. Listed whether or not the file loaded (Detail says
+      `(not found)` when it did not).
     okType/okVar/okConst/okProperty/okRoutine: declarations. A field is an
-      okVar with an Owner; a method an okRoutine with an Owner. }
-  TPasOutlineKind = (okModule, okSection, okUses, okKeyword, okType, okVar,
+      okVar with an Owner; a method an okRoutine with an Owner.
+    The module-level `type`/`const`/`var` words are NOT rows (since 0.32.0):
+    a reader steers by the sections and the declarations, and a `var` word
+    between every group of them was noise in a filtered list. }
+  TPasOutlineKind = (okModule, okSection, okUses, okInclude, okType, okVar,
     okConst, okProperty, okRoutine);
 
   TPasOutlineSection = (osNone, osInterface, osImplementation,
@@ -61,7 +69,7 @@ type
       'TList<T>') for a member or a method body header; '' at module level. }
     Owner: string;
     { The declared name, generic parameters included ('TList<T>'). '' for a
-      landmark that has none (okSection, okUses, okKeyword). }
+      landmark that has none (okSection, okUses). }
     Name: string;
     { What a host prints after the name, in a quieter colour: a routine's
       parameter list and result (`(const A: X): Y`), a variable's `: T`, a
@@ -73,9 +81,20 @@ type
     { A routine header WITH a body: the implementation of a declaration made
       elsewhere (or a plain implementation-only routine). }
     IsImpl: Boolean;
-    Node: Integer;        // the declaration node (nkRoutine, nkTypeDecl...)
+    Node: Integer;        // the declaration node (nkRoutine, nkTypeDecl...);
+                          // an okInclude row: its IncludeRefs index
     FilePath: string;     // the file the NAME sits in (may be an include)
     Line, Col: Integer;   // 1-based, of the name (or the landmark's keyword)
+    { PROJECT rows only (TPasNavigator.ProjectOutline): the model the symbol
+      lives in, its symbol index, and the unit's name for display. A module
+      outline row has UnitId = -1, Sym = -1, UnitName = ''. A project row
+      carries NO position (Line = Col = 0; FilePath = the unit's main file):
+      the list is built from the retained symbol table so it costs nothing
+      on a demoted unit, and the host asks TPasNavigator.DeclHit(UnitId,
+      Sym) for the landing when a row is chosen. }
+    UnitId: Integer;
+    Sym: Integer;
+    UnitName: string;
   end;
 
 { The module's outline, in source order. Empty for a tree with no nodes. }
@@ -91,6 +110,7 @@ type
   private
     FTree: TPasTree;
     FItems: TArray<TPasOutlineEntry>;
+    FKeys: TArray<Integer>;   // per item: the name's Visible index (sort key)
     FCount: Integer;
     FSection: TPasOutlineSection;
     function Kind(ANode: Integer): TPasNodeKind; inline;
@@ -100,7 +120,8 @@ type
     function TokenKindBefore(ANode: Integer): TPasTokenKind;
     function SpanText(ANode: Integer): string;
     function PosOf(ANode: Integer; out AFile: string;
-      out ALine, ACol: Integer): Boolean;
+      out ALine, ACol, AVisTok: Integer): Boolean;
+    procedure MergeIncludes;
     procedure Emit(AKind: TPasOutlineKind; const AHead, AOwner, AName,
       ADetail: string; AIsImpl: Boolean; ANode, APosNode: Integer);
     procedure WalkRoot;
@@ -166,6 +187,7 @@ begin
   FSection := osNone;
   if Length(FTree.Nodes) > 0 then
     WalkRoot;
+  MergeIncludes;
   SetLength(FItems, FCount);
   Result := FItems;
 end;
@@ -219,18 +241,17 @@ end;
 // TPasNavigator.TargetFromNode computes, so a picker row and a ctrl+click on
 // the same name agree. False for a node without tokens (nothing to jump to).
 function TOutlineWalker.PosOf(ANode: Integer; out AFile: string;
-  out ALine, ACol: Integer): Boolean;
+  out ALine, ACol, AVisTok: Integer): Boolean;
 var
-  LVisTok: Integer;
   LVis: TPasVisibleToken;
 begin
   Result := False;
   if ANode = NIL_NODE then
     Exit;
-  LVisTok := FTree.NodeLeftmostVis(ANode);
-  if (LVisTok < 0) or (LVisTok > High(FTree.Source.Visible)) then
+  AVisTok := FTree.NodeLeftmostVis(ANode);
+  if (AVisTok < 0) or (AVisTok > High(FTree.Source.Visible)) then
     Exit;
-  LVis := FTree.Source.Visible[LVisTok];
+  LVis := FTree.Source.Visible[AVisTok];
   if (LVis.FileId < 0) or (LVis.FileId > High(FTree.Source.Files)) then
     Exit;
   var LTS := FTree.Source.Files[LVis.FileId];
@@ -245,8 +266,9 @@ procedure TOutlineWalker.Emit(AKind: TPasOutlineKind; const AHead, AOwner,
   AName, ADetail: string; AIsImpl: Boolean; ANode, APosNode: Integer);
 var
   LEntry: TPasOutlineEntry;
+  LKey: Integer;
 begin
-  if not PosOf(APosNode, LEntry.FilePath, LEntry.Line, LEntry.Col) then
+  if not PosOf(APosNode, LEntry.FilePath, LEntry.Line, LEntry.Col, LKey) then
     Exit;
   LEntry.Kind := AKind;
   LEntry.Head := AHead;
@@ -256,10 +278,69 @@ begin
   LEntry.Section := FSection;
   LEntry.IsImpl := AIsImpl;
   LEntry.Node := ANode;
+  LEntry.UnitId := -1;
+  LEntry.Sym := -1;
+  LEntry.UnitName := '';
   if FCount = Length(FItems) then
+  begin
     SetLength(FItems, FCount * 2 + 32);
+    SetLength(FKeys, Length(FItems));
+  end;
   FItems[FCount] := LEntry;
+  FKeys[FCount] := LKey;
   Inc(FCount);
+end;
+
+// The include directives, slotted into the walk's rows by stream position: a
+// directive's VisIndex is where its file's first token landed (or would have),
+// so it goes before the first row whose name token is at or past it - the
+// included file's own first declaration comes right after its directive, a
+// directive at the end of a section before the next section's row. The row
+// is positioned on the directive itself, in the INCLUDER's file.
+procedure TOutlineWalker.MergeIncludes;
+var
+  LRefs: TArray<TPasIncludeRef>;
+  LIdx, LAt, LMove: Integer;
+  LEntry: TPasOutlineEntry;
+  LTS: TPasTokenStream;
+begin
+  LRefs := FTree.Source.IncludeRefs;
+  if Length(LRefs) = 0 then
+    Exit;
+  SetLength(FItems, FCount + Length(LRefs));
+  SetLength(FKeys, Length(FItems));
+  LAt := 0;
+  for LIdx := 0 to High(LRefs) do
+  begin
+    if (LRefs[LIdx].FileId < 0) or
+       (LRefs[LIdx].FileId > High(FTree.Source.Files)) then
+      Continue;
+    LTS := FTree.Source.Files[LRefs[LIdx].FileId];
+    LEntry := Default(TPasOutlineEntry);
+    LEntry.Kind := okInclude;
+    LEntry.Head := 'include';
+    LEntry.Name := LRefs[LIdx].Arg;
+    if LRefs[LIdx].IncludedFileId < 0 then
+      LEntry.Detail := '(not found)';
+    LEntry.Section := osNone;
+    LEntry.Node := LIdx;
+    LEntry.UnitId := -1;
+    LEntry.Sym := -1;
+    LEntry.FilePath := FTree.Source.FileNames[LRefs[LIdx].FileId];
+    LTS.OffsetToLineCol(LRefs[LIdx].Start, LEntry.Line, LEntry.Col);
+    // Refs come in processing order, so the insertion point only moves on.
+    while (LAt < FCount) and (FKeys[LAt] < LRefs[LIdx].VisIndex) do
+      Inc(LAt);
+    for LMove := FCount downto LAt + 1 do
+    begin
+      FItems[LMove] := FItems[LMove - 1];
+      FKeys[LMove] := FKeys[LMove - 1];
+    end;
+    FItems[LAt] := LEntry;
+    FKeys[LAt] := LRefs[LIdx].VisIndex;
+    Inc(FCount);
+    Inc(LAt);
+  end;
 end;
 
 procedure TOutlineWalker.WalkRoot;
@@ -360,11 +441,6 @@ begin
       end;
     nkTypeSec:
       begin
-        // The keyword is a landmark only when it was actually written -
-        // the parser's recovery opens a HEADLESS section on a stray
-        // declaration head, whose first token is the declaration itself.
-        if (AOwner = '') and FTree.NodeTextEquals(ANode, 'type') then
-          Emit(okKeyword, 'type', '', '', '', False, ANode, ANode);
         LChild := FirstChild(ANode);
         while LChild <> NIL_NODE do
         begin
@@ -378,9 +454,6 @@ begin
         LHead := LowerCase(FTree.NodeText(ANode));
         if not ((LHead = 'const') or (LHead = 'resourcestring')) then
           LHead := 'const';   // headless recovery section
-        if (AOwner = '') and
-           FTree.NodeTextEquals(ANode, LHead) then
-          Emit(okKeyword, LHead, '', '', '', False, ANode, ANode);
         LChild := FirstChild(ANode);
         while LChild <> NIL_NODE do
         begin
@@ -398,11 +471,6 @@ begin
           LHead := LowerCase(FTree.NodeText(ANode));
           if not ((LHead = 'var') or (LHead = 'threadvar')) then
             LHead := 'var';
-          // Module level: the keyword row. A struct body's `var` marker was
-          // eaten by the member-list parser (FirstToken is the first NAME),
-          // and a headless recovery section starts on a name too.
-          if (AOwner = '') and FTree.NodeTextEquals(ANode, LHead) then
-            Emit(okKeyword, LHead, '', '', '', False, ANode, ANode);
           if AOwner <> '' then
             LHead := 'field';
         end;
@@ -414,12 +482,6 @@ begin
           LChild := NextSib(LChild);
         end;
       end;
-    nkLabelSec:
-      if AOwner = '' then
-        Emit(okKeyword, 'label', '', '', '', False, ANode, ANode);
-    nkExportsClause:
-      if AOwner = '' then
-        Emit(okKeyword, 'exports', '', '', '', False, ANode, ANode);
     nkRoutine:
       Routine(ANode, AOwner);
     nkPropertyDecl:
@@ -429,8 +491,8 @@ begin
       VarDecl(ANode, AOwner, 'field');
     nkVariantPart:
       WalkVariant(ANode, AOwner);
-    // nkVisibility, nkAttrGroup, nkMethodResolution, nkGuid, heritage type
-    // refs, hint directives: nothing to list.
+    // nkVisibility, nkAttrGroup, nkMethodResolution, nkGuid, nkLabelSec,
+    // nkExportsClause, heritage type refs, hint directives: nothing to list.
   end;
 end;
 

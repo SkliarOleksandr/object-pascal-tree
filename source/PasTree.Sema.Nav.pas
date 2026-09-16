@@ -25,6 +25,7 @@ uses
   PasTree.Types,
   PasTree.Preprocessor,
   PasTree.Ast,
+  PasTree.Outline,
   PasTree.Sema.Model,
   PasTree.Sema.Project;
 
@@ -586,6 +587,48 @@ type
       (doPlatform), each sorted by name, each one row with no source site
       (see TPasDefineSite). Needs no cursor: it is a project-wide inventory. }
     function FindDefines: TArray<TPasDefineSite>;
+    { Go To over the PROJECT: every declaration the given models make at
+      module level or as a struct member, as TPasOutlineEntry rows - the
+      same record PasModuleOutline fills for one module, so a picker paints
+      both lists with one row painter. Models in AMids order, declarations
+      in symbol-table (= collection) order within a model.
+
+      Built from the RETAINED symbol table, never from text: a demoted unit
+      (DemoteClosedUnits) costs nothing here, and a 500-unit project answers
+      in one pass over its symbols. What that buys is paid for in the row:
+      Detail is '' (a signature needs the tokens), Line/Col are 0, FilePath
+      is the unit's MAIN file; the landing is DeclHit(UnitId, Sym), which
+      rehydrates that one unit when the row is chosen. Head words come from
+      the symbol kind (`type`, `var`/`class var`, `field`, `const`,
+      `property`/`class property`) and, for a routine, from RoutineHead
+      (`constructor`, `class function`...). Owner is the enclosing struct
+      chain (`TOuter.TInner`), Section osInterface or osImplementation from
+      the scope the declaration sits in.
+
+      Each model opens with its header row (okModule, `unit`/`program`/...
+      by the root node kind, named after the FILE - the header's own
+      spelling is text; landing = UnitHeaderTarget) and its include
+      directives (okInclude, one per IncludeRefs site, Node = the index,
+      `(not found)` in Detail for one that did not load; landing =
+      IncludeSiteTarget). Both are Sym = -1.
+
+      Not listed: parameters, locals, nested routines, enumeration values,
+      generic parameters, labels, unit references, builtins - the same
+      exclusions as the module outline - and no section or uses rows: those
+      are one module's shape, not a project's. A routine is ONE row, its
+      declaration (an implementation-only routine's header is that
+      declaration); GotoImplementation takes it from there. }
+    function ProjectOutline(const AMids: TArray<Integer>):
+      TArray<TPasOutlineEntry>;
+    { The landing of a ProjectOutline row that is not a symbol: the module
+      header (okModule - the unit's own name, or 1:1 of its main file when
+      the header has no name node) and an include directive (okInclude -
+      the directive itself, in the includer's file; ANode = the row's Node =
+      the IncludeRefs index). Both hydrate the one unit, like DeclHit. }
+    function UnitHeaderTarget(AUid: Integer;
+      out ATarget: TPasNavTarget): Boolean;
+    function IncludeSiteTarget(AMid, AIncludeIdx: Integer;
+      out ATarget: TPasNavTarget): Boolean;
     { Defines at cursor: the conditional symbols IN EFFECT at (ALine, ACol)
       of model AMid's main file - what an `$IFDEF` written there would see.
       One row per name: the LAST live `$DEFINE X` before the cursor in
@@ -2489,6 +2532,180 @@ begin
     Result := Result + [BaseDefineSite(LName, doProject)];
   for LName in LPlatform do
     Result := Result + [BaseDefineSite(LName, doPlatform)];
+end;
+
+function TPasNavigator.ProjectOutline(const AMids: TArray<Integer>):
+  TArray<TPasOutlineEntry>;
+const
+  HEADS: array[TPasRoutineHead] of string = ('routine', 'procedure',
+    'function', 'constructor', 'destructor', 'operator');
+var
+  LList: TList<TPasOutlineEntry>;
+  LMid, LSym, LScope, LRoot: Integer;
+  LM: TPasSemaModel;
+  LE: TPasOutlineEntry;
+  LUnitName: string;
+
+  // The enclosing struct chain of a member scope, outer first
+  // (`TOuter.TInner`): each sckStruct scope carries its own type symbol
+  // (StructSym, stamped at collect time), whose Scope is the next level up.
+  function OwnerOf(AScope: Integer): string;
+  var
+    LSt: Integer;
+  begin
+    Result := '';
+    while (AScope <> NIL_SCOPE) and (LM.Scopes[AScope].Kind = sckStruct) do
+    begin
+      LSt := LM.Scopes[AScope].StructSym;
+      if LSt = NIL_SYM then
+        Break;
+      if Result = '' then
+        Result := LM.Symbols[LSt].Name
+      else
+        Result := LM.Symbols[LSt].Name + '.' + Result;
+      AScope := LM.Symbols[LSt].Scope;
+    end;
+  end;
+
+  // The module-level scope a member scope chain ends in: sckUnit /
+  // sckImplementation for the rows this list keeps; anything else (a routine's
+  // locals, a nested routine's struct, an enum) is NOT a project-level
+  // declaration and the row is dropped.
+  function RootScopeOf(AScope: Integer): Integer;
+  begin
+    Result := AScope;
+    while (Result <> NIL_SCOPE) and
+          (LM.Scopes[Result].Kind in [sckStruct, sckGenericParams]) do
+      Result := LM.Scopes[Result].Parent;
+  end;
+
+begin
+  LList := TList<TPasOutlineEntry>.Create;
+  try
+    for LMid in AMids do
+    begin
+      if (LMid < 0) or (LMid >= FProj.ModelCount) then
+        Continue;
+      LM := FProj.Model(LMid);
+      LUnitName := ChangeFileExt(ExtractFileName(FProj.ModelFile(LMid)), '');
+      // The module header row first - the unit itself is a place to go -
+      // named after the file (the header's own spelling needs text), with
+      // the head word the root node kind gives (retained through demotion).
+      LE := Default(TPasOutlineEntry);
+      LE.Kind := okModule;
+      LE.Head := 'unit';
+      if Length(LM.Tree.Nodes) > 0 then
+        case LM.Tree.Nodes[0].Kind of
+          nkProgram: LE.Head := 'program';
+          nkLibrary: LE.Head := 'library';
+          nkPackage: LE.Head := 'package';
+        end;
+      LE.Name := LUnitName;
+      LE.Node := 0;
+      LE.FilePath := FProj.ModelFile(LMid);
+      LE.UnitId := LMid;
+      LE.Sym := -1;
+      LE.UnitName := LUnitName;
+      LList.Add(LE);
+      // Then its include directives (retained sites, no text needed), then
+      // the declarations.
+      for LSym := 0 to High(LM.Tree.Source.IncludeRefs) do
+      begin
+        LE := Default(TPasOutlineEntry);
+        LE.Kind := okInclude;
+        LE.Head := 'include';
+        LE.Name := LM.Tree.Source.IncludeRefs[LSym].Arg;
+        if LM.Tree.Source.IncludeRefs[LSym].IncludedFileId < 0 then
+          LE.Detail := '(not found)';
+        LE.Node := LSym;
+        LE.FilePath := FProj.ModelFile(LMid);
+        LE.UnitId := LMid;
+        LE.Sym := -1;
+        LE.UnitName := LUnitName;
+        LList.Add(LE);
+      end;
+      // SymCount, not High(Symbols): the array carries capacity slack past
+      // the last declared symbol (see TPasSemaModel.GrowSyms).
+      for LSym := 0 to LM.SymCount - 1 do
+      begin
+        if not (LM.Symbols[LSym].Kind in [skType, skVar, skConst, skField,
+                skRoutine, skProperty]) then
+          Continue;
+        if (LM.Symbols[LSym].DeclNode = NIL_NODE) or
+           (sfBuiltin in LM.Symbols[LSym].Flags) then
+          Continue;
+        LScope := LM.Symbols[LSym].Scope;
+        if (LScope < 0) or (LScope >= LM.Scopes.Count) then
+          Continue;
+        LRoot := RootScopeOf(LScope);
+        if (LRoot = NIL_SCOPE) or
+           not (LM.Scopes[LRoot].Kind in [sckUnit, sckImplementation]) then
+          Continue;
+        LE := Default(TPasOutlineEntry);
+        case LM.Symbols[LSym].Kind of
+          skType: begin LE.Kind := okType; LE.Head := 'type'; end;
+          skVar: begin LE.Kind := okVar; LE.Head := 'var'; end;
+          skField: begin LE.Kind := okVar; LE.Head := 'field'; end;
+          skConst: begin LE.Kind := okConst; LE.Head := 'const'; end;
+          skProperty: begin LE.Kind := okProperty; LE.Head := 'property'; end;
+        else
+          LE.Kind := okRoutine;
+          LE.Head := HEADS[LM.RoutineHead(LSym)];
+        end;
+        LE.Owner := OwnerOf(LScope);
+        LE.Name := LM.Symbols[LSym].Name;
+        if LM.Scopes[LRoot].Kind = sckImplementation then
+          LE.Section := osImplementation
+        else
+          LE.Section := osInterface;
+        LE.Node := LM.Symbols[LSym].DeclNode;
+        LE.FilePath := FProj.ModelFile(LMid);
+        LE.UnitId := LMid;
+        LE.Sym := LSym;
+        LE.UnitName := LUnitName;
+        LList.Add(LE);
+      end;
+    end;
+    Result := LList.ToArray;
+  finally
+    LList.Free;
+  end;
+end;
+
+function TPasNavigator.UnitHeaderTarget(AUid: Integer;
+  out ATarget: TPasNavTarget): Boolean;
+begin
+  Result := (AUid >= 0) and (AUid < FProj.ModelCount) and
+    TargetForUnitId(AUid,
+      ChangeFileExt(ExtractFileName(FProj.ModelFile(AUid)), ''), ATarget);
+end;
+
+function TPasNavigator.IncludeSiteTarget(AMid, AIncludeIdx: Integer;
+  out ATarget: TPasNavTarget): Boolean;
+var
+  LM: TPasSemaModel;
+  LRef: TPasIncludeRef;
+  LTS: TPasTokenStream;
+begin
+  Result := False;
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
+    Exit;
+  LM := FProj.Model(AMid);
+  if (AIncludeIdx < 0) or (AIncludeIdx > High(LM.Tree.Source.IncludeRefs)) then
+    Exit;
+  // The line/col conversion needs the includer's text: hydrate, and refuse
+  // rather than guess when the file changed underneath.
+  if not FProj.EnsureHydrated(AMid) then
+    Exit;
+  LRef := LM.Tree.Source.IncludeRefs[AIncludeIdx];
+  if (LRef.FileId < 0) or (LRef.FileId > High(LM.Tree.Source.Files)) then
+    Exit;
+  LTS := LM.Tree.Source.Files[LRef.FileId];
+  ATarget.UnitId := AMid;
+  ATarget.FilePath := LM.Tree.Source.FileNames[LRef.FileId];
+  LTS.OffsetToLineCol(LRef.Start, ATarget.Line, ATarget.Col);
+  ATarget.Name := LRef.Arg;
+  Result := True;
 end;
 
 function TPasNavigator.DefinesAt(AMid, ALine,

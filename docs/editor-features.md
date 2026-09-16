@@ -660,17 +660,20 @@ No protocol surface maps onto "list all defines" directly; two candidates:
 `initialize` log. `cMinPasTreeVersion` moves to 0.28.0 only if one of these
 is taken up; nothing in the existing handlers changes.
 
-## 11. Go To - the module outline picker (`PasTree.Outline.PasModuleOutline` + demo `PasTreeDemo.GoToPicker`)
+## 11. Go To - the module and project outline picker (`PasTree.Outline.PasModuleOutline`, `TPasNavigator.ProjectOutline` + demo `PasTreeDemo.GoToPicker`)
 
-Status: IMPLEMENTED (PasTree 0.30.0) - `source/PasTree.Outline.pas` is the
-list, `demo/PasTreeDemo.GoToPicker.pas` the dialog, Ctrl+G / `Go To...` in the
-source popup menu the wiring.
+Status: IMPLEMENTED (PasTree 0.30.0; project tab and no keyword rows in
+0.32.0) - `source/PasTree.Outline.pas` is the module list,
+`TPasNavigator.ProjectOutline` in `source/PasTree.Sema.Nav.pas` the project
+list, `demo/PasTreeDemo.GoToPicker.pas` the dialog, Ctrl+G / `Go To...` in
+the source popup menu the wiring.
 
 What the RAD Studio "Navigator - Go To" dialog does for one module: every
 declaration and every routine body, in SOURCE ORDER, plus the landmarks a
 reader steers by; type to filter, Enter or a double-click jumps. A filter
 that is nothing but digits adds a `line N` row on top, so the same box is
-go-to-line as well.
+go-to-line as well. A second tab widens the same box to the whole project
+(11.3).
 
 ### 11.1 The outline (`PasModuleOutline(ATree)`)
 
@@ -695,7 +698,7 @@ Rows, in the order they appear in the source:
 | `okModule` | the `unit`/`program`/`library`/`package` header | `unit` / - / `Foo.Bar` / - |
 | `okSection` | `interface`, `implementation`, `initialization`, `finalization`, a program's main `begin` | the word / - / - / - |
 | `okUses` | each uses (package: requires/contains) clause | `uses` / - / - / - |
-| `okKeyword` | each MODULE-LEVEL `type`/`const`/`resourcestring`/`var`/`threadvar`/`label`/`exports` word as written (not a struct body's, not a recovery section's) | the word / - / - / - |
+| `okInclude` | each `$I` / `$INCLUDE` directive (0.33.0), positioned on the directive in the INCLUDER and slotted before the first row the included text produces; listed even when the file did not load | `include` / - / the name as written / `(not found)` when it did not load |
 | `okType` | every type declaration, nested ones included | `type` / `TOuter` / `TList<T>` / `= class`, `= record`, `= interface`, `= class helper`, `= type Integer`, `= array of Byte`... |
 | `okVar` | one row PER NAME of `A, B: T`; fields (`field`), `class var`, module `var`/`threadvar`; variant-part fields too | head / `TFoo` / `FA` / `: Integer` |
 | `okConst` | `const`/`resourcestring`, class constants | head / owner / `MaxN` / `= 10` or `: T` when typed |
@@ -704,8 +707,16 @@ Rows, in the order they appear in the source:
 
 Not listed on purpose: enumeration values (they drown the list they sit
 in), routine-local declarations and nested routines (the body is one row),
-parameters, method-resolution clauses, visibility words, attributes.
-`Detail` collapses whitespace and cuts at 80 characters.
+parameters, method-resolution clauses, visibility words, attributes. Since
+0.32.0 the module-level `type`/`const`/`var` words are not rows either: a
+reader steers by the sections and the declarations, and a `var` word between
+every group of them was noise in a filtered list (the enum member
+`okKeyword` is gone). `Detail` collapses whitespace and cuts at 80
+characters.
+
+Every row also carries `UnitId`, `Sym` and `UnitName`, all unset here (-1,
+-1, `''`) - they are the project list's fields (11.3), present so both lists
+are one record.
 
 ### 11.2 The dialog (demo)
 
@@ -717,16 +728,84 @@ parameters, method-resolution clauses, visibility words, attributes.
   the head word for a landmark - so `impl` finds `implementation`). Digits
   only: `line N` first (clamped to the module's line count), then the rows
   whose names contain the digits.
-- Five boxes filter by kind (Types, Vars / Fields, Consts, Routines,
-  Properties); landmarks always show. Size and boxes persist in the
-  settings file (`GoToWidth`, `GoToHeight`, `GoToKinds`).
+- A right-aligned `:N` line column on rows that carry a position (the module tab; project rows have none until chosen); the row text is clipped short of it.
+- Kind boxes: `All` (the default, one set test per row) or a subset of
+  Types, Vars / Fields, Consts, Routines, Properties - ticking a kind
+  unticks All, ticking All clears the kinds, unticking the last kind falls
+  back to All; landmarks always show. A status bar counts rows shown of rows
+  listed on the current tab. Size and boxes persist in the settings file
+  (`GoToWidth`, `GoToHeight`, `GoToKinds`; bit 32 = All).
+- The filter box sits above the tabs: one box, both lists.
 - On open, the last row at or above the caret in the module's own file is
   selected (rows from includes carry other line numbers and do not compete),
   so Ctrl+G with an empty box answers "where am I".
-- Up/Down/PgUp/PgDn move the list while the caret stays in the filter box.
+- Up/Down/PgUp/PgDn move the list while the caret stays in the filter box;
+  Ctrl+Tab flips between the two tabs with the filter text kept.
+- The list box is virtual (`lbVirtualOwnerDraw`): a row is painted on
+  demand from the filtered row array, so a project's tens of thousands of
+  rows cost nothing to list and each keystroke is one filter pass.
 - The outline is read off the ANALYZED tree of the tab's file (rehydrated
   on demand), under the same `FAnalyzing`/`FNav` guard as every other
   reader - positions refer to the source as analyzed, like ctrl+click.
+
+### 11.3 The project tab (`TPasNavigator.ProjectOutline(AMids)`)
+
+The dialog's second tab, named after the project file, lists every
+declaration of every project unit: what the module tab shows for one file,
+for all of them at once, filtered by the same box and the same kind boxes.
+
+The list is built from the RETAINED symbol table, never from text - that is
+the design decision the tab rests on. A closed unit's text layer is gone
+(`DemoteClosedUnits`, `docs/incremental-analysis.md`); reading positions or
+signatures off it would mean re-preprocessing hundreds of units on Ctrl+G
+and creeping the memory that demotion freed. So a project row has:
+
+- `Kind`/`Head` from the symbol kind (`type`; `var`; `field`; `const`;
+  `property`) and, for a routine, from `TPasSemaModel.RoutineHead`
+  (`procedure`, `function`, `constructor`, `destructor`, `operator`; the
+  `class` prefix is NOT known without text, so a class method reads as a
+  plain `function`);
+- `Owner` = the enclosing struct chain off the scope's `StructSym`
+  (`TOuter.TInner`); `Name` = the symbol's spelling (a generic type without
+  its `<T>`);
+- `Section` = `osInterface` or `osImplementation` from the root scope the
+  declaration sits under;
+- `Detail = ''`, `Line = Col = 0`, `FilePath` = the unit's MAIN file;
+- `UnitId`, `Sym` = the model and symbol index; `UnitName` = the file's
+  base name, painted after the name so the row says where it is from.
+
+Each model opens with two kinds of landmark row (0.33.0), both `Sym = -1`:
+its header (`okModule`; `unit`/`program`/`library`/`package` by the root
+node kind, named after the FILE since the header's own spelling is text;
+landing = `UnitHeaderTarget(UnitId)`, the name in the header) and one row per
+`$I`/`$INCLUDE` directive (`okInclude`; `Node` = the index into
+`TPasPreprocessed.IncludeRefs`, `(not found)` in `Detail` for one that did
+not load; landing = `IncludeSiteTarget(UnitId, Node)`, the directive in the
+includer). `IncludeRefs` is new in 0.33.0: the preprocessor records every
+directive site (includer file, offset, the name as written, the resolved
+path, the included file's id or -1, and the Visible index its text starts
+at) and keeps it through `DemoteText` like `DefineRefs`, which is what lets
+the project list show includes without text.
+
+The landing is `DeclHit(UnitId, Sym)` when a declaration row is chosen - the same call
+Find References pins its declaration row with - which rehydrates that ONE
+unit. The dialog takes the resolver as a callback (`TGoToResolve`) so the
+picker stays a presentation unit; a declaration that cannot be placed keeps
+the dialog open rather than landing somewhere else.
+
+Listed: symbols of kind type/var/field/const/routine/property whose scope
+chain (through struct and generic-parameter scopes) ends in the unit's
+interface or implementation scope. Not listed: parameters, locals, nested
+routines, enumeration values, generic parameters, labels, unit references,
+builtins - and no landmarks, which are one module's shape. A routine is ONE
+row, its declaration (the interface header, or the implementation header of
+an implementation-only routine); `GotoImplementation` takes it from there.
+
+Model order is `AMids` order (the demo passes its project tree's files that
+have a model - library units reached through the search path are not project
+files); within a model, symbol-table order, which is collection order. The
+demo asks for the list lazily, on the first switch to the tab, and holds it
+for the dialog's lifetime; no `line N` row on this tab.
 
 ### pastree-lsp hand-off
 
@@ -736,7 +815,16 @@ parameters, method-resolution clauses, visibility words, attributes.
 the order and the `Owner` prefix give the client all it shows; the
 hierarchical `DocumentSymbol` form needs a range per struct, which the
 `nkTypeDecl` node's span provides if wanted). Landmarks (`okSection`,
-`okUses`, `okKeyword`) have no `SymbolKind`; skip them or map `okModule` to
-`Module`. Rows whose `FilePath` is not the document's own (an include) are
-dropped for `documentSymbol`, which is per-document. `cMinPasTreeVersion`
-moves to 0.30.0 when this is taken up.
+`okUses`) have no `SymbolKind`; skip them or map `okModule` to `Module`.
+Rows whose `FilePath` is not the document's own (an include) are dropped for
+`documentSymbol`, which is per-document. `cMinPasTreeVersion` moves to
+0.30.0 when this is taken up; 0.32.0 removed `okKeyword` from the enum, so a
+server mapping the kinds must be built against 0.32.0 or later.
+
+`workspace/symbol` is `ProjectOutline` over every model the server counts
+as the workspace (the project files, or all models for an RTL-inclusive
+search), filtered by the query the client sends, each row a
+`SymbolInformation` whose `location` comes from `DeclHit(UnitId, Sym)` -
+resolve it only for the rows returned (the protocol caps the result, so a
+few hundred `DeclHit` calls, not one per declaration), and the
+`containerName` is `Owner` or, when empty, `UnitName`.

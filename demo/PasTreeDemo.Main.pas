@@ -4652,7 +4652,10 @@ begin
   if LEditor = nil then
     Exit;
   LEditor.CaretXY := BufferCoord(ACol, ALine);
-  LEditor.EnsureCursorPosVisible;
+  // Centred, not merely visible: a jump (Go To, ctrl+click, Back/Forward)
+  // lands on a declaration the reader has not seen, and the lines around it
+  // are the context - at the window's edge half of them are off-screen.
+  LEditor.EnsureCursorPosVisibleEx(True);
   if LEditor.CanFocus then
     LEditor.SetFocus;
   if FNavBusy then
@@ -5543,9 +5546,11 @@ begin
   end;
 end;
 
-{ Go To (Ctrl+G) - a modal picker over the ACTIVE module's outline: every
-  declaration and routine body in source order, the section landmarks, and
-  `line N` when the filter is a number. See PasTreeDemo.GoToPicker / PasTree.Outline.
+{ Go To (Ctrl+G) - a modal picker with two tabs: the ACTIVE module's outline
+  (every declaration and routine body in source order, the section landmarks,
+  `line N` when the filter is a number) and the PROJECT's declarations (every
+  project file's symbol table, built on the first switch to that tab). See
+  PasTreeDemo.GoToPicker / PasTree.Outline / TPasNavigator.ProjectOutline.
 
   The outline is read off the ANALYZED tree (the model FNav knows for the
   tab's file), under the same FAnalyzing/FNav guard every other reader here
@@ -5563,7 +5568,7 @@ var
   LTab: TSourceTab;
   LMid: Integer;
   LEntries: TArray<TPasOutlineEntry>;
-  LFile: string;
+  LFile, LProjectName: string;
   LLine, LCol: Integer;
 begin
   if FAnalyzing or not Assigned(FNav) or not Assigned(FSemaProject) or
@@ -5577,9 +5582,63 @@ begin
     Exit;
   end;
   LEntries := PasModuleOutline(FSemaProject.Model(LMid).Tree);
+  LProjectName := TPath.GetFileName(FProjectFile);
+  if LProjectName = '' then
+    LProjectName := TPath.GetFileName(FMainSource);
   if ShowGoTo(Self, LEntries, LTab.FilePath, LTab.Editor.CaretY,
-       LTab.Editor.Lines.Count, FSettings, {out} LFile, {out} LLine,
-       {out} LCol) then
+       LTab.Editor.Lines.Count, LProjectName,
+       // The project tab's list, asked for on the first switch to it: the
+       // declarations of every file in the project tree that has a model
+       // (library units reached through the search path are not project
+       // files and are not listed). Symbol-table only, so demoted units
+       // cost nothing here.
+       function: TArray<TPasOutlineEntry>
+       var
+         LMids: TArray<Integer>;
+         LIdx, LFileMid: Integer;
+       begin
+         LMids := nil;
+         for LIdx := 0 to FFileList.Count - 1 do
+         begin
+           LFileMid := FNav.ModelIdOf(FFileList[LIdx]);
+           if LFileMid >= 0 then
+             LMids := LMids + [LFileMid];
+         end;
+         Result := FNav.ProjectOutline(LMids);
+       end,
+       // A project row's landing: the declared name's position, rehydrating
+       // that one unit if it was demoted - the same call Find References
+       // pins its declaration row with.
+       function(const AEntry: TPasOutlineEntry; out AFile: string;
+         out ALine, ACol: Integer): Boolean
+       var
+         LHit: TPasRefHit;
+         LTarget: TPasNavTarget;
+       begin
+         case AEntry.Kind of
+           okModule:
+             Result := FNav.UnitHeaderTarget(AEntry.UnitId, {out} LTarget);
+           okInclude:
+             Result := FNav.IncludeSiteTarget(AEntry.UnitId, AEntry.Node,
+               {out} LTarget);
+         else
+           Result := FNav.DeclHit(AEntry.UnitId, AEntry.Sym, {out} LHit);
+           if Result then
+           begin
+             AFile := LHit.FilePath;
+             ALine := LHit.Line;
+             ACol := LHit.Col;
+           end;
+           Exit;
+         end;
+         if Result then
+         begin
+           AFile := LTarget.FilePath;
+           ALine := LTarget.Line;
+           ACol := LTarget.Col;
+         end;
+       end,
+       FSettings, {out} LFile, {out} LLine, {out} LCol) then
     NavigateTo(LFile, LLine, LCol);
 end;
 
