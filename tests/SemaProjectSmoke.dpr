@@ -1572,6 +1572,24 @@ const
     so RefMap is empty for it and the qualifier typed as nothing - losing the
     whole with scope, and with it every member in the body. Inside a method its
     type is the enclosing struct. Real shape: `with Self.TreeViewControl do`. }
+  { B.11: the keyword types QUALIFIED by their unit - `System.string` in a
+    generic argument (a DI library's converter table writes
+    `Nullable<System.string>`), in a type alias and on a variable, and
+    `System.file` beside it. dcc compiles all four (probed dcc64 35.0). The
+    parser used to take only an identifier after the dot, which the parser
+    suite pins; this fixture pins the OTHER half - that the qualified keyword
+    then resolves like the bare one and raises nothing. }
+  UNIT_QUALKW =
+    'unit UnitQualKw;'#10'interface'#10 +
+    'type'#10 +
+    '  TStrs = TArray<System.string>;'#10 +
+    '  TStr = System.string;'#10 +
+    '  TRaw = System.file;'#10 +
+    'var'#10 +
+    '  GName: System.string;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
   UNIT_SELFBASE =
     'unit UnitSelfBase;'#10'interface'#10 +
     'type'#10 +
@@ -2316,6 +2334,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitSelfTypedUse.pas'),
     UNIT_SELFTYPEDUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitSelfBase.pas'), UNIT_SELFBASE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitQualKw.pas'), UNIT_QUALKW);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitSelfUse.pas'), UNIT_SELFUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitProcVarBase.pas'),
     UNIT_PROCVARBASE);
@@ -2799,6 +2818,12 @@ begin
     Ok('selftyped: the member types to the TYPE, not to itself',
       CrossRefTo(LSt, 'T', 'T'));
 
+    // B.11: `System.string` / `System.file` - the qualified keyword types.
+    var LQk := ModelByName('unitqualkw');
+    Ok('qualkw: UnitQualKw loaded', Assigned(LQk));
+    Ok('qualkw: no diags at all', Length(LQk.Diags) = 0);
+    Ok('qualkw: uses fully resolved', LQk.AllUsesResolved);
+
     // An explicit Self as the with target's base.
     var LSlf := ModelByName('unitselfuse');
     Ok('self-target: UnitSelfUse loaded', Assigned(LSlf));
@@ -3139,6 +3164,64 @@ begin
     GProj.AnalyzeDirectory(LDir);
     Ok('members: ON reports it once, and only the bad one',
       DiagCount(ModelByName('memuser'), 'E2003') = 1);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  { An ARRAY property republished by a bare redeclaration (`property Items;
+    default;`), the ancestor's declaration PRIVATE and in another unit - a web
+    framework's JWT claims. The redeclaration writes neither type nor index
+    parameters, so PropertyHasParams asked of it said "not an array property";
+    the brackets then indexed the property's string type down to Char and the
+    member after them was a false E2003 (members ON). PropertyHasParams now
+    climbs the same chain SymDeclTypeX types by. Both spellings are pinned -
+    the explicit `.Items[K]` and the default indexer `[K]` - and the member
+    behind the brackets must RESOLVE, not merely stay quiet. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_redeclidx');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'RedHost.pas'),
+    'unit RedHost;'#10'interface'#10 +
+    'type'#10 +
+    '  TItem = class'#10 +
+    '    Good: Integer;'#10 +
+    '  end;'#10 +
+    '  TBase = class'#10 +
+    '  private'#10 +
+    '    function GetItem(const Key: string): TItem;'#10 +
+    '    property Items[const Key: string]: TItem read GetItem; default;'#10 +
+    '  end;'#10 +
+    '  TDer = class(TBase)'#10 +
+    '  public'#10 +
+    '    property Items; default;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TBase.GetItem(const Key: string): TItem;'#10 +
+    'begin Result := nil; end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'RedUser.pas'),
+    'unit RedUser;'#10'interface'#10'uses RedHost;'#10 +
+    'procedure P;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var D: TDer; K: string;'#10 +
+    'begin'#10 +
+    '  D.Items[K].Good := 1;'#10 +
+    '  D[K].Good := 2;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    var LRu := ModelByName('reduser');
+    Ok('redecl index: RedUser loaded', Assigned(LRu));
+    Ok('redecl index: no diags with members ON', Length(LRu.Diags) = 0);
+    Ok('redecl index: the member behind the brackets resolves to TItem.Good',
+      CrossRefTo(LRu, 'Good', 'Good'));
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

@@ -11324,12 +11324,29 @@ end;
 function TPasSemaProject.PropertyHasParams(AMid, ASym: Integer): Boolean;
 var
   LM: TPasSemaModel;
-  LDecl, LChild: Integer;
+  LDecl, LChild, LDepth, LPrevMid, LPrevSym: Integer;
 begin
   Result := False;
   LM := FModels[AMid];
   if (ASym = NIL_SYM) or (LM.Symbols[ASym].Kind <> skProperty) then
     Exit;
+  // A bare REDECLARATION (`property Items; default;`) writes neither type nor
+  // parameters - they are the inherited declaration's, so the question is
+  // asked there, one link at a time up the same chain SymDeclTypeX types by.
+  // Asked of the redeclaration itself the answer was False, the brackets then
+  // indexed the property's STRING type down to Char, and `.IsEmpty` on the
+  // result was a false E2003 (a web framework's JWT claims: `Items[Key]`
+  // republished public from a private ancestor property).
+  for LDepth := 1 to 32 do
+  begin
+    if LM.Symbols[ASym].TypeNode <> NIL_NODE then
+      Break;
+    if not PropertyRedeclPrev(AMid, ASym, LPrevMid, LPrevSym) then
+      Break;
+    AMid := LPrevMid;
+    ASym := LPrevSym;
+    LM := FModels[AMid];
+  end;
   // The symbol's DeclNode is the property's NAME node; the parameter list is a
   // sibling of it under the nkPropertyDecl - same shape IsDefaultArrayProp
   // walks.

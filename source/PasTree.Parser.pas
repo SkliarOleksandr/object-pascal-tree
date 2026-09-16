@@ -967,7 +967,10 @@ begin
             LNode := FB.AddNode(nkMember, NIL_NODE, FPos);
             FB.Adopt(LNode, Result);
             Next;
-            if CurKind = tkIdentifier then
+            // The keyword types qualify like any other System name:
+            // `Nullable<System.string>` (a DI library's converter table) and
+            // `System.file` both compile (probed dcc64 35.0, 2026-09-16).
+            if CurKind in [tkIdentifier, tkString, tkFile] then
             begin
               LChild := FB.AddNode(nkIdent, NIL_NODE, FPos);
               Next;

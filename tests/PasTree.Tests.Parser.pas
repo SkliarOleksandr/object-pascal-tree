@@ -601,7 +601,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..136] of TPasCaseRow = (
+  DECL_CASES: array[0..137] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -643,6 +643,15 @@ const
      Source: 'type A = TList<Integer>;';
      Expected: 'TypeSec(TypeDecl(Ident''A'' TypeArgs(Ident''TList'' ' +
        'Ident''Integer'')))'; ExpectDiags: 0),
+    // B.11: the keyword types qualify like any other System name -
+    // `Nullable<System.string>` in a DI library's converter table, and
+    // `System.file` too (probed dcc64 35.0). The dotted segment after `.`
+    // took only an identifier, so the whole call became three E2029s.
+    (Section: 'B.11'; Name: 'a keyword type qualified by its unit';
+     Source: 'type A = TArray<System.string>; B = System.file;';
+     Expected: 'TypeSec(TypeDecl(Ident''A'' TypeArgs(Ident''TArray'' ' +
+       'Member(Ident''System'' Ident''string''))) TypeDecl(Ident''B'' ' +
+       'Member(Ident''System'' Ident''file'')))'; ExpectDiags: 0),
     (Section: '2.5.1'; Name: 'recovery: a missing ; resyncs at the next head';
      Source: 'type A = Integer B = Byte; C = Word;';
      Expected: 'TypeSec(TypeDecl(Ident''A'' Ident''Integer'') ' +
