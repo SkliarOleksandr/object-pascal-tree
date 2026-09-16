@@ -3145,6 +3145,63 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { A method resolution clause (14.2.2) whose class-method name exists NOWHERE
+    - and dcc compiles it. Probed dcc32 37.0, undocumented: when an inherited
+    member already satisfies the interface method AND that member is declared
+    in an ancestor that itself lists interfaces (any), the clause is silently
+    ignored - even through a plain class in between. A member declared in an
+    interface-less ancestor gives E2003 for the same clause. A
+    third-party layout unit ships two of the legal shape - two false E2003. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_mrclause');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'MrcIfaces.pas'),
+    'unit MrcIfaces;'#10'interface'#10 +
+    'type'#10 +
+    '  IBar = interface'#10'    function GetY: Integer;'#10'  end;'#10 +
+    '  IFoo = interface'#10'    function GetX(A: Integer): Integer;'#10'  end;'#10 +
+    // TRoot instead of TInterfacedObject: no RTL on this fixture's path, and an
+    // unresolved ancestor would gate E2003 for the control class too
+    '  TRoot = class end;'#10 +
+    '  TBase = class(TRoot, IBar)'#10 +
+    '    function GetY: Integer;'#10 +
+    '    function GetX(A: Integer): Integer;'#10 +
+    '  end;'#10 +
+    '  TPlain = class(TRoot)'#10 +
+    '    function GetX(A: Integer): Integer;'#10 +
+    '  end;'#10 +
+    '  TMid = class(TBase) end;'#10 +
+    'implementation'#10 +
+    'function TBase.GetY: Integer; begin Result := 0; end;'#10 +
+    'function TBase.GetX(A: Integer): Integer; begin Result := 0; end;'#10 +
+    'function TPlain.GetX(A: Integer): Integer; begin Result := 0; end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'MrcUser.pas'),
+    'unit MrcUser;'#10'interface'#10'uses MrcIfaces;'#10 +
+    'type'#10 +
+    // legal for dcc: GetX comes from TBase, which declares IBar - through TMid
+    '  TDer = class(TMid, IFoo)'#10 +
+    '    function IFoo.GetX = NoSuchMethod;'#10 +
+    '  end;'#10 +
+    // E2003 for dcc: GetX comes from TPlain, which declares no interfaces
+    '  TDer2 = class(TPlain, IFoo)'#10 +
+    '    function IFoo.GetX = NoSuchMethod2;'#10 +
+    '  end;'#10 +
+    'implementation'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    Ok('method resolution clause: ignored target (member from an interface-declaring ancestor) is silent, the plain one is E2003 - exactly one',
+      DiagCount(ModelByName('mrcuser'), 'E2003') = 1);
+    Ok('method resolution clause: the one E2003 names NoSuchMethod2',
+      DiagHasText(ModelByName('mrcuser'), 'E2003', 'NoSuchMethod2'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   { A compiler-SEEDED name shadowed by an INHERITED member. dcc-probed both
     ways: a class with a `Text` property compiles `Text.IsEmpty` in a method
     body - the member beats the predefined FILE type - and `var F: Text;` in

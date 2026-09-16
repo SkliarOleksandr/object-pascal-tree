@@ -603,6 +603,8 @@ type
       ANode: Integer; const ANameLower: string; var AUnit, ASym: Integer);
     function IsAttributeTypeRef(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function IsMagicAttributeRef(AModel: TPasSemaModel; ANode: Integer): Boolean;
+    function IgnoredResolutionTarget(AModel: TPasSemaModel; ANode: Integer;
+      AId: Integer): Boolean;
     function UsesUnitOf(AId, ASym: Integer): Integer;
     function LocalHead(AModel: TPasSemaModel; ANode: Integer): Integer;
     function QualifiedText(AId, ANode: Integer): string;
@@ -5010,6 +5012,94 @@ begin
   end;
 end;
 
+{ Is ANode the CLASS-METHOD name of a method resolution clause (14.2.2,
+  `function IFoo.GetX = Impl;`) in a shape where dcc does not look the name
+  up at all?
+
+  dcc-probed (dcc32 37.0, 2026-09-16, undocumented; spec 14.2.2): when the
+  interface method is ALREADY SATISFIED by an inherited member, and that
+  member is declared in an ancestor which itself declares an interface list
+  (any interface, related or not), `function IFoo.GetX = NoSuchMethod;`
+  compiles and the clause is ignored - the inherited method answers the
+  interface call. The same clause is E2003 when the member's declaring
+  ancestor lists no interfaces (even if another ancestor does), or when
+  nothing implements the method. A third-party layout unit ships two such
+  clauses, naming a method that exists nowhere.
+
+  Two probes pin the shape: GetX declared in `TRoot = class(TObj, IBar)`
+  is ignored through a plain `TBase = class(TRoot)` in between; GetX declared
+  in that plain TBase under the same TRoot is E2003. }
+function TPasSemaProject.IgnoredResolutionTarget(AModel: TPasSemaModel;
+  ANode: Integer; AId: Integer): Boolean;
+var
+  LClause, LClass, LChild, LMethod, LDef, LRefs: Integer;
+  LMemMid, LMemSym, LCtx, LOwner: Integer;
+  LAnc: TSemaXType;
+  LAM: TPasSemaModel;
+begin
+  Result := False;
+  LClause := AModel.Tree.Nodes[ANode].Parent;
+  if (LClause = NIL_NODE) or
+     (AModel.Tree.Nodes[LClause].Kind <> nkMethodResolution) or
+     (AModel.Tree.Nodes[ANode].NextSibling <> NIL_NODE) then
+    Exit;   // not the clause's last segment
+  // The interface's method: the ident segment right before the target
+  // (segments are flat siblings - see the resolver's nkMethodResolution).
+  LMethod := NIL_NODE;
+  LChild := AModel.Tree.Nodes[LClause].FirstChild;
+  while (LChild <> NIL_NODE) and (LChild <> ANode) do
+  begin
+    if AModel.Tree.Nodes[LChild].Kind = nkIdent then
+      LMethod := LChild;
+    LChild := AModel.Tree.Nodes[LChild].NextSibling;
+  end;
+  if (LMethod = NIL_NODE) or (LMethod = AModel.Tree.Nodes[LClause].FirstChild) then
+    Exit;   // no separate method segment
+  // The enclosing class declaration: the clause sits among its members,
+  // possibly under a visibility section.
+  LClass := AModel.Tree.Nodes[LClause].Parent;
+  while (LClass <> NIL_NODE) and
+        (AModel.Tree.Nodes[LClass].Kind <> nkClassType) do
+    LClass := AModel.Tree.Nodes[LClass].Parent;
+  if LClass = NIL_NODE then
+    Exit;
+  // Its heritage clause's FIRST type reference is the ancestor (the
+  // convention AncestorOfX and CollectStruct share).
+  LChild := AModel.Tree.Nodes[LClass].FirstChild;
+  while (LChild <> NIL_NODE) and not (AModel.Tree.Nodes[LChild].Kind in
+    [nkIdent, nkMember, nkTypeArgs]) do
+    LChild := AModel.Tree.Nodes[LChild].NextSibling;
+  if LChild = NIL_NODE then
+    Exit;   // implicit TObject: nothing inherited satisfies the method
+  LAnc := ResolveTypeExprNested(AId, LChild);
+  if not XValid(LAnc) then
+    Exit;
+  // The inherited member of that name, and the struct that declares it.
+  if not FindMemberX(AId, LAnc, AModel.Tree.NodeNameLower(LMethod),
+       LMemMid, LMemSym, LCtx) then
+    Exit;
+  LAM := FModels[LMemMid];
+  if LAM.Symbols[LMemSym].Kind <> skRoutine then
+    Exit;
+  LOwner := LAM.Scopes[LAM.Symbols[LMemSym].Scope].StructSym;
+  if LOwner = NIL_SYM then
+    Exit;
+  LDef := TypeDefNodeOf(LMemMid, LOwner);
+  if (LDef = NIL_NODE) or (LAM.Tree.Nodes[LDef].Kind <> nkClassType) then
+    Exit;
+  // Ancestor first, then the interfaces it implements: two or more leading
+  // type references mean the declaring class lists at least one.
+  LRefs := 0;
+  LChild := LAM.Tree.Nodes[LDef].FirstChild;
+  while (LChild <> NIL_NODE) and (LAM.Tree.Nodes[LChild].Kind in
+    [nkIdent, nkMember, nkTypeArgs]) do
+  begin
+    Inc(LRefs);
+    LChild := LAM.Tree.Nodes[LChild].NextSibling;
+  end;
+  Result := LRefs >= 2;
+end;
+
 procedure TPasSemaProject.EmitE2003(AModel: TPasSemaModel; ANode: Integer;
   AId: Integer = -1);
 var
@@ -5023,6 +5113,11 @@ begin
   // false positive. Gated here rather than at the call sites because several
   // passes reach this verdict; CheckAttributes exempts the same set.
   if IsMagicAttributeRef(AModel, ANode) then
+    Exit;
+  // The class-method name of a method resolution clause that dcc silently
+  // IGNORES - see IgnoredResolutionTarget. Two rows in a third-party layout
+  // unit, and that unit compiles.
+  if (AId >= 0) and IgnoredResolutionTarget(AModel, ANode, AId) then
     Exit;
   // The enclosing struct's ancestry decides whether this verdict is knowable
   // at all - see UnknownAncestryX. AId is the model's own index, which this
