@@ -12,7 +12,11 @@ unit PasTree.Lexer;
     always tkIdentifier (B.3).
   - asm...end switches to BASM mode (spec 6.10): body text is emitted as
     opaque tkAsmChunk tokens, BUT comments and directives inside asm are
-    still lexed normally so conditional compilation keeps working.
+    still lexed normally so conditional compilation keeps working. An
+    `asm` opened inside a conditional branch is closed by that branch's
+    `$ELSE`/`$ELSEIF` (NoteDirective): the alternative branch is Pascal
+    text sharing the routine's `end`, and without this it lexed as asm
+    chunks even when the asm branch was dead.
     Known limitation: a bare `end` inside a skipped $IFDEF branch of an
     asm body would close the asm block at the raw-lexing level.
   - Caret control chars (spec B.6.2): `^` + a LETTER stays tkCaret +
@@ -43,6 +47,12 @@ type
     FDiags: TArray<TPasDiagnostic>;
     FDiagCount: Integer;
     FInAsm: Boolean;
+    // Conditional nesting seen so far (a raw count - the lexer does not know
+    // which branch is live) and the depth the open `asm` started at; see
+    // NoteDirective for what the pair is for.
+    FCondDepth: Integer;
+    FAsmCondDepth: Integer;
+    procedure NoteDirective(ANameStart: Integer);
     procedure Emit(AKind: TPasTokenKind; AStart: Integer;
       AFlags: TPasTokenFlags = []);
     function PrevEndsOperand: Boolean;
@@ -103,9 +113,13 @@ end;
 
 function IsWhitespace(ACh: Char): Boolean; inline;
 begin
-  // #12 = form feed, #26 = legacy DOS EOF marker
-  Result := (ACh = ' ') or (ACh = #9) or (ACh = #13) or (ACh = #10) or
-    (ACh = #12) or (ACh = #26) or (ACh = #11);
+  // Every C0 control character is whitespace for dcc, not only the printing
+  // ones (#9 #10 #11 #12 #13, #26 = legacy DOS EOF marker): a stray #$12
+  // after a semicolon in a PDF-viewer library unit, #1, #31 and even an
+  // embedded #0 compile silently (probed dcc64 35.0, 2026-09-16); only #$7F
+  // is E2038. Lexing them as tkUnknown made the parser report a declaration
+  // expected at an invisible character.
+  Result := (ACh = ' ') or (ACh < #32);
 end;
 
 { TPasLexer }
@@ -339,6 +353,8 @@ begin
     LKind := tkDirective
   else
     LKind := tkCommentBrace;
+  if LKind = tkDirective then
+    NoteDirective(FPos + 1);
   while (FPos < FLen) and (FBase[FPos] <> '}') do
     Inc(FPos);
   if FPos < FLen then
@@ -356,6 +372,42 @@ begin
   end;
 end;
 
+procedure TPasLexer.NoteDirective(ANameStart: Integer);
+
+  function IsName(const AUpper: string): Boolean;
+  var
+    LIdx: Integer;
+  begin
+    for LIdx := 1 to Length(AUpper) do
+      if UpCase(CharAt(ANameStart + LIdx - 1)) <> AUpper[LIdx] then
+        Exit(False);
+    Result := not IsIdentChar(CharAt(ANameStart + Length(AUpper)));
+  end;
+
+begin
+  // Tracks conditional depth so an `asm` opened INSIDE a conditional branch
+  // is closed by that branch's $ELSE/$ELSEIF, not by the shared `end` after
+  // $IFEND. The shape (both branches of one routine, a Win32 asm body and a
+  // portable Pascal one):
+  //   function F: Integer;
+  //   {$IF defined(WIN32)} asm ... {$ELSE} const ... begin ... {$IFEND} end;
+  // Lexing runs before the preprocessor decides the branch, so on Win64 the
+  // dead `asm` still switched the mode and the live Pascal branch came out
+  // as tkAsmChunk tokens - 74 parse errors in one unit. An $ELSE at a DEEPER
+  // depth (a conditional inside the asm body) leaves the mode alone, and one
+  // at depth 0 cannot belong to anything.
+  if IsName('IF') or IsName('IFDEF') or IsName('IFNDEF') or IsName('IFOPT') then
+    Inc(FCondDepth)
+  else if IsName('ENDIF') or IsName('IFEND') then
+  begin
+    if FCondDepth > 0 then
+      Dec(FCondDepth);
+  end
+  else if IsName('ELSE') or IsName('ELSEIF') then
+    if FInAsm and (FCondDepth > 0) and (FCondDepth = FAsmCondDepth) then
+      FInAsm := False;
+end;
+
 procedure TPasLexer.LexParenOrCommentOrLegacyBracket;
 var
   LStart: Integer;
@@ -370,6 +422,8 @@ begin
           LKind := tkDirective
         else
           LKind := tkCommentParen;
+        if LKind = tkDirective then
+          NoteDirective(FPos + 1);
         while (FPos < FLen) and
           not ((FBase[FPos] = '*') and (CharAt(FPos + 1) = ')')) do
           Inc(FPos);
@@ -604,9 +658,15 @@ begin
       Include(LFlags, tfHasSeparator);
     Inc(FPos);
   end;
-  // Fraction: '.' only when followed by a digit - guards '..' ranges and
-  // member access on literals (42.ToString).
-  if (CharAt(FPos) = '.') and IsDigit(CharAt(FPos + 1)) then
+  // Fraction: '.' followed by a digit, or by nothing that could start a
+  // different token - guards '..' ranges and member access on literals
+  // (42.ToString; dcc reads `100.e2` as member access too, not as a real).
+  // The fraction may be EMPTY: `100. - X` and `1.;` are real literals for
+  // dcc (probed 2026-09-16), and the spec's B.5.2 grammar is narrower than
+  // the compiler here.
+  if (CharAt(FPos) = '.') and
+     (IsDigit(CharAt(FPos + 1)) or
+      ((CharAt(FPos + 1) <> '.') and not IsIdentStart(CharAt(FPos + 1)))) then
   begin
     LIsReal := True;
     Inc(FPos); // '.'
@@ -709,7 +769,10 @@ begin
   LKind := KeywordKind(FBase + LNameStart, FPos - LNameStart);
   Emit(LKind, LStart);
   if LKind = tkAsm then
+  begin
     FInAsm := True;
+    FAsmCondDepth := FCondDepth;
+  end;
 end;
 
 procedure TPasLexer.LexAsmToken;

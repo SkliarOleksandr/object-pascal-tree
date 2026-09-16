@@ -13,6 +13,9 @@ unit PasTree.Sema.Diagnostics;
 
 interface
 
+uses
+  PasTree.Types;
+
 type
   TSemaDiag = record
     Code: string;      // e.g. 'E2004'
@@ -101,10 +104,105 @@ function MakeDiag(const ACode, AMsg: string; ADeclNode, AFileId, ALine,
   the PP* pair spelled out. }
 function DiagSeverityLabel(const ACode: string): string;
 
+{ The lexer's diagnostics, worded as dcc words them (probed dcc64 35.0,
+  2026-09-16): an unterminated string is E2052, an unterminated comment E2057
+  naming the line it opened on, a stray byte E2038 with the character and its
+  code, a `#` with no value E2026. Two are NOT errors for dcc - a bare `$` or
+  `%` with no digits compiles as the literal 0 - so they are reported as the
+  advisory WLEX, because the text almost certainly is not what was meant
+  (`%@461` in a demo sample) yet dcc would accept it. Returns the code and the
+  code-prefixed message the way MakeDiag wants them; AStartLine is the
+  1-based line of the diagnostic's own start, used by E2057. }
+procedure LexDiagText(const ADiag: TPasDiagnostic; const AStream: TPasTokenStream;
+  AStartLine: Integer; out ACode, AMsg: string);
+
+{ True for a diagnostic that the lexer or the parser raised - a SYNTAX
+  finding, dcc's "expected but found" family - as opposed to one the semantic
+  passes raised over a well-formed tree. Hosts filter on it: the demo has one
+  checkbox for each family. The test is by code, so TSemaDiag keeps its shape
+  for the consumers that already read it (pastree-lsp). }
+function IsSyntaxDiagCode(const ACode: string): Boolean;
+
 implementation
 
 uses
   System.SysUtils;
+
+procedure LexDiagText(const ADiag: TPasDiagnostic; const AStream: TPasTokenStream;
+  AStartLine: Integer; out ACode, AMsg: string);
+var
+  LCh: Char;
+begin
+  case ADiag.Code of
+    dcInvalidChar:
+      begin
+        ACode := 'E2038';
+        if (ADiag.Start >= 0) and (ADiag.Start < Length(AStream.Source)) then
+          LCh := AStream.Source[ADiag.Start + 1]
+        else
+          LCh := #0;
+        AMsg := Format('E2038 Illegal character in input file: ''%s'' (#$%.2X)',
+          [LCh, Ord(LCh)]);
+      end;
+    dcInvalidAmpersand:
+      begin
+        ACode := 'E2029';
+        AMsg := 'E2029 Identifier expected after ''&''';
+      end;
+    dcMissingHexDigits:
+      begin
+        ACode := 'WLEX';
+        AMsg := 'WLEX ''$'' with no hexadecimal digits reads as 0';
+      end;
+    dcMissingBinDigits:
+      begin
+        ACode := 'WLEX';
+        AMsg := 'WLEX ''%'' with no binary digits reads as 0';
+      end;
+    dcMissingControlCharValue:
+      begin
+        ACode := 'E2026';
+        AMsg := 'E2026 Constant expression expected';
+      end;
+    dcUnterminatedString, dcUnterminatedMultilineString:
+      begin
+        ACode := 'E2052';
+        AMsg := 'E2052 Unterminated string';
+      end;
+    dcUnterminatedComment:
+      begin
+        ACode := 'E2057';
+        AMsg := Format('E2057 Unexpected end of file in comment started on ' +
+          'line %d', [AStartLine]);
+      end;
+    dcUnterminatedDirective:
+      begin
+        ACode := 'E2057';
+        AMsg := Format('E2057 Unexpected end of file in compiler directive ' +
+          'started on line %d', [AStartLine]);
+      end;
+    dcUnterminatedAsm:
+      begin
+        ACode := 'E2029';
+        AMsg := 'E2029 ''END'' expected but end of file found';
+      end;
+    dcInconsistentIndentChars:
+      begin
+        ACode := 'E2657';
+        AMsg := 'E2657 Inconsistent indentation characters in multiline string';
+      end;
+  else
+    ACode := 'E2029';
+    AMsg := 'E2029 Lexical error';
+  end;
+end;
+
+function IsSyntaxDiagCode(const ACode: string): Boolean;
+begin
+  Result := (ACode = 'E2029') or (ACode = 'E2038') or (ACode = 'E2052') or
+    (ACode = 'E2057') or (ACode = 'E2026') or (ACode = 'E2657') or
+    (ACode = 'WLEX');
+end;
 
 function MakeDiag(const ACode, AMsg: string; ADeclNode, AFileId, ALine,
   ACol: Integer): TSemaDiag;

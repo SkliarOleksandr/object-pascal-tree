@@ -618,7 +618,11 @@ Still open, roughly in the order we're tackling it:
   **The demo turns it on unconditionally**, and there is no checkbox for it: this
   host's job is to show what the analyzer still gets wrong, and a switch that
   hides a real gap also hides progress towards closing it. *Show Errors* then
-  means all of them, and stays a pure DISPLAY filter - toggling it re-filters the
+  means all of the semantic ones, and its sibling *Syntax Errors* (on by
+  default) the lexer's and the parser's - dcc's "expected but found" family,
+  classified by code in `IsSyntaxDiagCode`; the two are read differently, a
+  syntax row being a fact dcc agrees with and a semantic row possibly our own
+  gap. Both stay pure DISPLAY filters - toggling re-filters the
   list instead of costing a re-analysis, which is what a control that changed the
   analysis would have cost (15 s on the client project). Until member binding is
   overload- and generic-aware, expect that list to be long and mostly binding

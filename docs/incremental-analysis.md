@@ -202,6 +202,7 @@ from a slow analyzer.
 
 | reason | meaning |
 |---|---|
+| `released-maps` | the host called `ReleaseTransientMaps` or `DemoteClosedUnits` on this project; every other `Analyze*` raises on it, the module path refuses so the host can fall back to a fresh project |
 | `unknown-file`, `not-full` | not an analyzed unit of this project |
 | `demoted` | the model's text layer was freed (see the memory dial below) |
 | `parse-failed` | unparsable now; the closure changed, a rebuild's job |

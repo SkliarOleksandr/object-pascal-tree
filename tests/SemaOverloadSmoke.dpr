@@ -37,6 +37,7 @@ begin
   LPre := GPP.ProcessText('test.pas', ASource);
   GTree := TPasParser.ParseFile(LPre, LDiags);
   GModel := TPasSemaResolver.Analyze(GTree);
+  GModel.AddParseDiags(LDiags);   // as TPasSemaProject does after every parse
 end;
 
 function DiagCount(const ACode: string): Integer;
@@ -139,6 +140,8 @@ const
     'procedure Plain;'#10'var I: Integer;'#10'begin'#10 +
     '  Foo(1);'#10 +           // E2035
     '  I := Bar(1);'#10 +      // E2034
+    '  Foo(1, &4M4);'#10 +     // parse error only: `)` never came, no arity check
+    '  Foo(1 +, 2);'#10 +      // same
     'end;'#10'end.'#10;
 
 begin
@@ -154,6 +157,7 @@ begin
   Ok('E2035 x1 (too few)', DiagCount('E2035') = 1);
   Ok('E2034 x2 (too many)', DiagCount('E2034') = 2);
   Ok('no bogus type errors', (DiagCount('E2010') = 0) and (DiagCount('E2015') = 0));
+  Ok('clean source: no E2029', DiagCount('E2029') = 0);
   GModel.Free;
 
   // A call inside a method may really be an inherited member, so the arity
@@ -169,6 +173,10 @@ begin
   Analyze(SRC_PLAIN);
   Ok('outside a struct the check still fires: E2035 x1',
     DiagCount('E2035') = 1);
+  Ok('a truncated argument list is a parse error, not E2035 (&4M4)',
+    DiagCount('E2035') = 1);
+  Ok('...and the parse error IS reported: E2029 at each cut list',
+    DiagCount('E2029') >= 2);
   Ok('outside a struct the check still fires: E2034 x1',
     DiagCount('E2034') = 1);
   GModel.Free;

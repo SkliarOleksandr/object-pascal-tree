@@ -855,12 +855,24 @@ end;
 
 function TPasParser.ParseArgList(ACall: Integer): Integer;
 var
-  LArg, LWrap: Integer;
+  LArg, LWrap, LDepth: Integer;
 begin
   // At '('.
   Next;
+  // A comma PROMISES an argument: `F(1,)`, `F(,1)` and `F(1,,2)` are each
+  // one E2029 for dcc. The loop therefore runs per slot, not per present
+  // expression - an empty slot is reported once, marked with an nkError (so
+  // CheckCalls does not count it), and the list goes on at the next comma
+  // rather than breaking out and cascading into `")" expected`.
   while (CurKind <> tkRParen) and (CurKind <> tkEndOfFile) do
   begin
+    if CurKind = tkComma then
+    begin
+      Error('expression expected, found "' + CurText + '"');
+      FB.Adopt(ACall, FB.AddNode(nkError, NIL_NODE, FPos));
+      Next;
+      Continue;
+    end;
     LArg := ParseExpression;
     if CurKind = tkColon then
     begin
@@ -880,12 +892,48 @@ begin
     else
       LArg := MaybeNamedArg(LArg);
     FB.Adopt(ACall, LArg);
-    if CurKind = tkComma then
-      Next
-    else
+    if CurKind <> tkComma then
       Break;
+    Next;
+    if CurKind = tkRParen then
+    begin
+      // Trailing comma: the promised argument never came.
+      Error('expression expected, found "' + CurText + '"');
+      FB.Adopt(ACall, FB.AddNode(nkError, NIL_NODE, FPos));
+    end;
   end;
-  Expect(tkRParen, '")"');
+  if not Expect(tkRParen, '")"') then
+  begin
+    // The list was cut short by a syntax error (`&4M4`, `%@461`, `4 +,`):
+    // what was collected is not the argument count. The marker lets
+    // CheckCalls skip the arity check instead of adding a false E2035 to the
+    // parse error. Then RESYNC to the list's own `)`: the garbage is inside
+    // the parentheses, and leaving it there made the statement loop report
+    // `";" expected` on the same token - two errors for one typo where dcc
+    // reports one. Nested brackets are balanced so `F(1 G(2), 3)` closes at
+    // the right paren; a `;`, a statement keyword or the file's end stops
+    // the skip so a missing `)` cannot swallow the rest of the block.
+    FB.Adopt(ACall, FB.AddNode(nkError, NIL_NODE, FPos));
+    LDepth := 0;
+    while not (CurKind in [tkSemicolon, tkEndOfFile, tkEnd, tkElse, tkBegin,
+      tkIf, tkWhile, tkFor, tkRepeat, tkUntil, tkCase, tkTry, tkWith,
+      tkRaise, tkGoto, tkAsm]) do
+    begin
+      case CurKind of
+        tkLParen, tkLBracket:
+          Inc(LDepth);
+        tkRParen, tkRBracket:
+          begin
+            if LDepth = 0 then
+              Break;
+            Dec(LDepth);
+          end;
+      end;
+      Next;
+    end;
+    if CurKind = tkRParen then
+      Next;
+  end;
   FB.SetLast(ACall, FPos - 1);
   Result := ACall;
 end;
@@ -3167,7 +3215,7 @@ end;
 
 function TPasParser.ParseConstSection(AHeadless: Boolean): Integer;
 var
-  LDecl, LAttrs: Integer;
+  LDecl, LAttrs, LType, LProbe: Integer;
   LHasType, LHasEq: Boolean;
 begin
   // 3.2: const/resourcestring entries.
@@ -3196,9 +3244,28 @@ begin
       begin
         FInitFollows := True;
         try
-          FB.Adopt(LDecl, ParseTypeExpr);
+          LType := ParseTypeExpr;
         finally
           FInitFollows := False;
+        end;
+        FB.Adopt(LDecl, LType);
+        // A typed procedural constant may carry its calling convention
+        // between the type and the initializer, after a semicolon:
+        //   exec: procedure(); cdecl = nil;   (an image library's plugin unit)
+        // dcc accepts it (probed 2026-09-16). The var-section twin lives in
+        // ConsumeTrailingDirectives; here only the shape `; directive+ =` is
+        // taken, and only after a procedural type, so a missing initializer
+        // followed by a constant that happens to be NAMED like a directive
+        // (`index = 3`) still recovers as its own declaration.
+        if (CurKind = tkSemicolon) and (FB.Kind(LType) = nkProcType) then
+        begin
+          LProbe := FPos + 1;
+          while (LProbe <= FLast) and IsDirectiveWord(LProbe) do
+            Inc(LProbe);
+          if (LProbe > FPos + 1) and (LProbe <= FLast) and
+             (FSrc.VisibleToken(LProbe).Kind = tkEqual) then
+            while FPos < LProbe do
+              Next;
         end;
       end;
     end;

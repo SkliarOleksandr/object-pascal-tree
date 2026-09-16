@@ -1917,6 +1917,7 @@ begin
       LPre := FPP.Process(LFull);
       LTree := TPasParser.ParseFile(LPre, LDiags);
       LModel := TPasSemaResolver.Analyze(LTree, False, FPlatform);
+      LModel.AddParseDiags(LDiags);
     end;
   except
     on Exception do
@@ -3443,6 +3444,7 @@ begin
           LDone[AIndex] := TPasSemaResolver.Analyze(
             TPasParser.ParseFile(LPP.Process(FFiles[LCand[AIndex]]), LDiags),
             False, FPlatform);
+          LDone[AIndex].AddParseDiags(LDiags);
         except
           // Keep the first-pass model. A unit that parsed once and throws now
           // is a defect, but the wrong branch is still better than no unit at
@@ -3827,6 +3829,7 @@ begin
             LDone[AIndex] := TPasSemaResolver.Analyze(LTree,
               {ASkipTyper} AInterfaceOnly and (Length(LTree.Nodes) > 0) and
               (LTree.Nodes[0].Kind = nkUnit), FPlatform);
+            LDone[AIndex].AddParseDiags(LDiags);
           end;
         except
           on E: Exception do
@@ -3935,6 +3938,7 @@ begin
       Result := TPasSemaResolver.Analyze(LTree,
         {ASkipTyper} AIntf and (Length(LTree.Nodes) > 0) and
         (LTree.Nodes[0].Kind = nkUnit), FPlatform);
+      Result.AddParseDiags(LDiags);
     finally
       ReturnPP(LPP);
     end;
@@ -3961,6 +3965,7 @@ begin
   try
     Result := TPasSemaResolver.Analyze(
       TPasParser.ParseFile(ASource, LDiags, False), False, FPlatform);
+    Result.AddParseDiags(LDiags);
   except
     on E: Exception do
     begin
@@ -5307,11 +5312,18 @@ begin
 
     LArgCount := 0;
     LArg := LModel.Tree.Nodes[LCallee].NextSibling;
+    LSkip := False;
     while LArg <> NIL_NODE do
     begin
+      // ParseArgList adopts an nkError when `)` never came: the parse
+      // error is already reported and the count means nothing.
+      if LModel.Tree.Nodes[LArg].Kind = nkError then
+        LSkip := True;
       Inc(LArgCount);
       LArg := LModel.Tree.Nodes[LArg].NextSibling;
     end;
+    if LSkip then
+      Continue;
 
     LMinReq := MaxInt; LMaxTot := -1;
     LAnyFit := False; LAnyVariadic := False; LHaveAny := False; LSkip := False;
@@ -15243,7 +15255,12 @@ var
   end;
 
 begin
-  GuardNotReleased('AnalyzeModuleOnly');
+  // Not the raising guard the other entry points use: the module path is
+  // the one Analyze* whose caller has a fallback (the full rebuild), and a
+  // host that demoted its project - the demo's synchronous Run Parse did -
+  // deserves a refusal it can log, not an exception per keystroke.
+  if FTransientReleased then
+    Exit(Refuse('released-maps'));
   // No `Result := False` here: every exit below goes through Refuse (which
   // returns False and records why) or sets Result explicitly.
   FStageTimings := '';
@@ -15263,6 +15280,7 @@ begin
     LPre := FPP.Process(LFull);
     LTree := TPasParser.ParseFile(LPre, LDiags);
     LNew := TPasSemaResolver.Analyze(LTree, False, FPlatform);
+    LNew.AddParseDiags(LDiags);
   except
     // Unparsable now: the full path records that as a known-bad file with a
     // negative-cache entry and a changed closure - a rebuild's job, not ours.

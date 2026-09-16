@@ -67,6 +67,7 @@ type
     function ArrayBoundType(ADef: Integer): Integer;
     function ParamsOf(AScope: Integer): TArray<Integer>;
     function ArgCount(ACall: Integer): Integer;
+    function ArgListTruncated(ACall: Integer): Boolean;
     function ScoreArgs(ACall: Integer; const AParams: TArray<Integer>): Integer;
     function IsVarargs(AScope: Integer): Boolean;
     function SelectOverload(ACall, AHead: Integer): Integer;
@@ -825,6 +826,20 @@ begin
   end;
 end;
 
+function TPasSemaTyper.ArgListTruncated(ACall: Integer): Boolean;
+var
+  LArg: Integer;
+begin
+  Result := False;
+  LArg := Sib(Child(ACall));
+  while LArg <> NIL_NODE do
+  begin
+    if Kind(LArg) = nkError then
+      Exit(True);
+    LArg := Sib(LArg);
+  end;
+end;
+
 // Sum a conservative match score of the call's args against a param list.
 // Takes the params the caller already built (SelectOverload had called
 // ParamsOf twice per fitting candidate - one TArray allocation each).
@@ -977,8 +992,10 @@ begin
     (M.EnclosingStructSym(ACall) = NIL_SYM);
 
   // Deterministic arg-count diagnostic (independent of implicit rules).
+  // Not on a list the parser cut short (`Foo(1, &4M4)` - ParseArgList adopts
+  // an nkError when `)` never came): the parse error is the diagnostic.
   if LGlobal and LAllHaveParams and not LAnyVariadic and not LAnyFit and
-     (LMaxTot >= 0) then
+     (LMaxTot >= 0) and not ArgListTruncated(ACall) then
   begin
     if LArgs < LMinReq then
       Diag('E2035', SE2035_NotEnoughActualParams, ACall)

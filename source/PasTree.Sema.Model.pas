@@ -19,6 +19,7 @@ uses
   PasTree.Types,
   PasTree.Preprocessor,
   PasTree.Ast,
+  PasTree.Parser,
   PasTree.Sema.Diagnostics;
 
 const
@@ -365,6 +366,12 @@ type
       demoted. }
     function TryRehydrate(const APre: TPasPreprocessed): Boolean;
     procedure AddDiag(const ADiag: TSemaDiag);
+    { The parser's own diagnostics, folded in as E2029 rows at the token they
+      name. Without this a syntax error is INVISIBLE to every host that reads
+      Diags - the demo showed only the false E2035 the truncated call caused,
+      and nothing once that was fixed. dcc's nearest code: E2029 is its
+      "X expected but Y found". }
+    procedure AddParseDiags(const ADiags: TArray<TPasParseDiag>);
     { Cuts Diags back to its filled prefix. The project driver calls this at
       the end of every analysis entry point, BEFORE any consumer enumerates
       Diags with Length/High. }
@@ -1085,6 +1092,47 @@ begin
     SetLength(Diags, FDiagCount * 2 + 8);
   Diags[FDiagCount] := ADiag;
   Inc(FDiagCount);
+end;
+
+procedure TPasSemaModel.AddParseDiags(const ADiags: TArray<TPasParseDiag>);
+var
+  LIdx, LTok, LLine, LCol, LFile: Integer;
+  LCode, LMsg: string;
+  LVis: TPasVisibleToken;
+begin
+  for LIdx := 0 to High(ADiags) do
+  begin
+    LTok := ADiags[LIdx].VisIndex;
+    if (LTok < 0) or (LTok > High(Tree.Source.Visible)) then
+      Continue;
+    LVis := Tree.Source.Visible[LTok];
+    Tree.Source.Files[LVis.FileId].OffsetToLineCol(
+      Tree.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start, LLine, LCol);
+    AddDiag(MakeDiag('E2029', 'E2029 ' + ADiags[LIdx].Msg, NIL_NODE,
+      LVis.FileId, LLine, LCol));
+  end;
+  // The LEXER's diagnostics too, from every file of the model (includes have
+  // their own token stream and their own FileId). Until now only the demo's
+  // highlighter read them, so a bare `%` before garbage surfaced as nothing
+  // but the parser's `")" expected` one token later. Same entry point as the
+  // parser's rows so every parse path - first, incremental, rehydrated -
+  // carries them alike.
+  for LFile := 0 to High(Tree.Source.Files) do
+    for LIdx := 0 to High(Tree.Source.Files[LFile].Diagnostics) do
+    begin
+      // Not from a skipped `$IFDEF` branch: dcc never lexes that text, so
+      // `Windows only!` under `{$IFDEF Linux}` is not an E2038 (a real
+      // client unit). The lexer runs before the preprocessor and cannot
+      // know; the skip map is the place that does.
+      if Tree.Source.IsSkipped(LFile,
+           Tree.Source.Files[LFile].Diagnostics[LIdx].Start) then
+        Continue;
+      Tree.Source.Files[LFile].OffsetToLineCol(
+        Tree.Source.Files[LFile].Diagnostics[LIdx].Start, LLine, LCol);
+      LexDiagText(Tree.Source.Files[LFile].Diagnostics[LIdx],
+        Tree.Source.Files[LFile], LLine, LCode, LMsg);
+      AddDiag(MakeDiag(LCode, LMsg, NIL_NODE, LFile, LLine, LCol));
+    end;
 end;
 
 procedure TPasSemaModel.TrimDiags;

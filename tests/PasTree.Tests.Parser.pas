@@ -29,7 +29,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..90] of TPasCaseRow = (
+  STMT_CASES: array[0..98] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -67,8 +67,8 @@ const
     // syntax error it always was (an assignment is not an expression).
     (Section: '4.11.3'; Name: 'named argument needs a bare name';
      Source: 'Charts.Add(A.B := R);';
-     Expected: 'Block(Assign(Call(Member(Ident''Charts'' Ident''Add'') ' +
-       'Member(Ident''A'' Ident''B'')) Ident''R''))'; ExpectDiags: 2),
+     Expected: 'Block(ExprStmt(Call(Member(Ident''Charts'' Ident''Add'') ' +
+       'Member(Ident''A'' Ident''B'') Error)))'; ExpectDiags: 1),
 
     // ---- 4.x expressions & precedence ----
     (Section: '4.2'; Name: 'precedence'; Source: 'X := A + B * C;';
@@ -110,6 +110,36 @@ const
      Expected: 'Block(Assign(Ident''S'' StrLit''''Hi''''))'; ExpectDiags: 0),
     (Section: 'B.6.2'; Name: 'caret char'; Source: 'C := ^M;';
      Expected: 'Block(Assign(Ident''C'' CaretChar''^''))'; ExpectDiags: 0),
+    (Section: '5.1.2'; Name: 'truncated arg list carries an Error child';
+     Source: 'F(1, &4M4);';
+     Expected: 'Block(ExprStmt(Call(Ident''F'' IntLit''1'' IntLit''&4'' Error)))';
+     ExpectDiags: 1),
+    // A comma promises an argument (dcc: one E2029 per shape). The empty
+    // slot is an Error child so CheckCalls does not count it, and the list
+    // continues instead of cascading into `")" expected` / `";" expected`.
+    (Section: '5.1.2'; Name: 'trailing comma in an arg list';
+     Source: 'F(1,);';
+     Expected: 'Block(ExprStmt(Call(Ident''F'' IntLit''1'' Error)))';
+     ExpectDiags: 1),
+    (Section: '5.1.2'; Name: 'leading comma in an arg list';
+     Source: 'F(,1);';
+     Expected: 'Block(ExprStmt(Call(Ident''F'' Error IntLit''1'')))';
+     ExpectDiags: 1),
+    (Section: '5.1.2'; Name: 'empty middle slot in an arg list';
+     Source: 'F(1,,2);';
+     Expected: 'Block(ExprStmt(Call(Ident''F'' IntLit''1'' Error IntLit''2'')))';
+     ExpectDiags: 1),
+    // Garbage AFTER an argument: one `")" expected`, then a resync to the
+    // list's own `)` so the statement loop does not add `";" expected` on
+    // the same token (dcc reports one error). Nested brackets are balanced.
+    (Section: '5.1.2'; Name: 'garbage after an argument resyncs to the paren';
+     Source: 'F(1 2);';
+     Expected: 'Block(ExprStmt(Call(Ident''F'' IntLit''1'' Error)))';
+     ExpectDiags: 1),
+    (Section: '5.1.2'; Name: 'arg-list resync balances nested brackets';
+     Source: 'F(1 G(2, [3]), 4);';
+     Expected: 'Block(ExprStmt(Call(Ident''F'' IntLit''1'' Error)))';
+     ExpectDiags: 1),
     (Section: 'B.6.2'; Name: 'caret bracket'; Source: 'C := ^[;';
      Expected: 'Block(Assign(Ident''C'' CaretChar''^[''))'; ExpectDiags: 0),
     (Section: 'B.6.2'; Name: 'caret del'; Source: 'C := ^?;';
@@ -548,10 +578,28 @@ const
      Source: 'B := V.AsType<Integer>=5;';
      Expected: 'Block(Assign(Ident''B'' BinaryOp''>=''(TypeArgs(Member(' +
        'Ident''V'' Ident''AsType'') Ident''Integer'') IntLit''5'')))';
+     ExpectDiags: 0),
+    // B.5.2: dcc takes an EMPTY fraction - `100.` is a real literal when the
+    // dot is followed by nothing that could start another token (a report
+    // builder in the client writes `100. - ARightPadding`). `100.e2` stays
+    // member access on an integer, as dcc reads it.
+    (Section: 'B.5.2'; Name: 'real literal with an empty fraction';
+     Source: 'X := 100. - 3;';
+     Expected: 'Block(Assign(Ident''X'' BinaryOp''-''(RealLit''100.'' ' +
+       'IntLit''3'')))';
+     ExpectDiags: 0),
+    // B.2: every control character #0..#31 is whitespace for dcc - a stray
+    // #$12 after a semicolon (a PDF-viewer library unit) and an embedded #1
+    // compile silently. Lexed as tkUnknown they surfaced as "declaration
+    // expected, found """ at an invisible character.
+    (Section: 'B.2'; Name: 'control characters are whitespace';
+     Source: 'X := 1;'#$12' Y :='#1'2;';
+     Expected: 'Block(Assign(Ident''X'' IntLit''1'') Assign(Ident''Y'' ' +
+       'IntLit''2''))';
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..135] of TPasCaseRow = (
+  DECL_CASES: array[0..136] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1519,6 +1567,15 @@ const
      Source: 'const C = ((1.0/2) / 3);';
      Expected: 'ConstSec''const''(ConstDecl(Ident''C'' Paren(BinaryOp''/''(' +
        'Paren(BinaryOp''/''(RealLit''1.0'' IntLit''2'')) IntLit''3''))))';
+     ExpectDiags: 0),
+    // 3.2 + 6.6: a typed procedural CONSTANT with its calling convention
+    // between the type and the initializer (an image library's plugin unit
+    // writes `exec: procedure(); cdecl = nil;`); dcc accepts the shape.
+    (Section: '3.2'; Name: 'typed proc const carries a calling convention '
+       + 'before the initializer';
+     Source: 'const exec: procedure(); cdecl = nil;';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''exec'' ProcType(Params) ' +
+       'NilLit))';
      ExpectDiags: 0)
   );
 
@@ -1903,6 +1960,47 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
       end;
   end;
 
+  { 6.10 + 1.3: an `asm` in a DEAD conditional branch must not leave the
+    lexer in BASM mode for the live Pascal branch that shares the routine's
+    `end` - the two-body routine shape of a fast-code library (an $IF on
+    WIN32 around an asm body, an $ELSE with the Pascal body, one shared end).
+    The lexer runs before the branch is decided; NoteDirective closes the asm
+    at the $ELSE of the same conditional depth. A conditional INSIDE an asm
+    body (deeper $ELSE) must keep the mode - the second routine checks that. }
+  function DeadAsmBranchCase: TPasCustomCase;
+  begin
+    Result.Section := '6.10';
+    Result.Name := 'dead asm branch does not swallow the live Pascal branch';
+    Result.Run :=
+      function: TPasCheckResult
+      const
+        SRC =
+          'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+          'function F: Integer;'#13#10'{$IFDEF NOPE_ASM}'#13#10 +
+          'asm'#13#10'  mov eax, 1'#13#10'{$ELSE}'#13#10'const'#13#10 +
+          '  K = 1;'#13#10'begin'#13#10'  Result := K;'#13#10'{$ENDIF}'#13#10 +
+          'end;'#13#10 +
+          'function G: Integer;'#13#10'asm'#13#10'{$IFDEF NOPE_ASM}'#13#10 +
+          '  mov eax, 1'#13#10'{$ELSE}'#13#10'  mov eax, 2'#13#10 +
+          '{$ENDIF}'#13#10'end;'#13#10 +
+          'end.'#13#10;
+      var
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+      begin
+        LPre := GPP.ProcessText('u.pas', SRC);
+        LTree := TPasParser.ParseFile(LPre, LDiags);
+        Result := CheckDump(SRC, 'Unit(Ident''U'' InterfaceSec ' +
+          'ImplementationSec(Routine''function''(Ident''F'' Ident''Integer'' ' +
+          'RoutineBody(' +
+          'ConstSec''const''(ConstDecl(Ident''K'' IntLit''1'')) ' +
+          'Block(Assign(Ident''Result'' Ident''K'')))) ' +
+          'Routine''function''(Ident''G'' Ident''Integer'' RoutineBody(AsmStmt))))',
+          LTree.Dump(0), LDiags, 0);
+      end;
+  end;
+
   { 1.1.2: the UNIT file's own top-level shape -- name, interface and
     implementation sections both present as children of the root. }
   function UnitFileCase: TPasCustomCase;
@@ -2037,7 +2135,8 @@ var
   LPlatform: TPasPlatform;
 begin
   Result := [];
-  Result := Result + [ProgramFileCase, UnitFileCase, NestedRoutineCase,
+  Result := Result + [ProgramFileCase, UnitFileCase, DeadAsmBranchCase,
+    NestedRoutineCase,
     FullBlockCase];
   for LPlatform := Low(TPasPlatform) to High(TPasPlatform) do
     Result := Result + [PlatformCase(LPlatform)];
