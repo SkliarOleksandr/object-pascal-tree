@@ -859,11 +859,19 @@ var
 begin
   // At '('.
   Next;
-  // A comma PROMISES an argument: `F(1,)`, `F(,1)` and `F(1,,2)` are each
-  // one E2029 for dcc. The loop therefore runs per slot, not per present
-  // expression - an empty slot is reported once, marked with an nkError (so
-  // CheckCalls does not count it), and the list goes on at the next comma
-  // rather than breaking out and cascading into `")" expected`.
+  // A comma PROMISES an argument: `F(,1)` and `F(1,,2)` are each one E2029
+  // for dcc. The loop therefore runs per slot, not per present expression -
+  // an empty slot is reported once, marked with an nkError (so CheckCalls
+  // does not count it), and the list goes on at the next comma rather than
+  // breaking out and cascading into `")" expected`.
+  //
+  // A TRAILING comma is different (6.2.5, dcc-probed 36.0/37.0): `H(1, 2,)`
+  // COMPILES when the callee is not overloaded, every parameter is supplied
+  // and the last one has a default - the empty slot reads as "the default,
+  // already given". Real code ships it. Anything else is E2029 (a parameter
+  // still due) or E2034 (no default, or overloaded) - verdicts that need the
+  // callee, so the parser stays silent and adopts an nkMissing as the last
+  // child; SelectOverload and CheckCalls read it and decide.
   while (CurKind <> tkRParen) and (CurKind <> tkEndOfFile) do
   begin
     if CurKind = tkComma then
@@ -896,11 +904,7 @@ begin
       Break;
     Next;
     if CurKind = tkRParen then
-    begin
-      // Trailing comma: the promised argument never came.
-      Error('expression expected, found "' + CurText + '"');
-      FB.Adopt(ACall, FB.AddNode(nkError, NIL_NODE, FPos));
-    end;
+      FB.Adopt(ACall, FB.AddNode(nkMissing, NIL_NODE, FPos));   // trailing comma
   end;
   if not Expect(tkRParen, '")"') then
   begin

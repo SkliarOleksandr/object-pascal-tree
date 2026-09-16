@@ -5197,7 +5197,7 @@ var
   LModel: TPasSemaModel;
   LNode, LCallee, LArg, LArgCount, LLocalHead, LUid, LS, LIdx: Integer;
   LMinReq, LMaxTot, LStruct: Integer;
-  LAnyFit, LAnyVariadic, LHaveAny, LSkip: Boolean;
+  LAnyFit, LAnyVariadic, LHaveAny, LSkip, LTrailing: Boolean;
   LName: string;
   LExt: TPasExtRef;
   // The uses-sweep result depends only on the callee NAME (the uses list is
@@ -5230,7 +5230,8 @@ var
         LAnyVariadic := True;
       if LReq < LMinReq then LMinReq := LReq;
       if LTot > LMaxTot then LMaxTot := LTot;
-      if LVariadic or ((LArgCount >= LReq) and (LArgCount <= LTot)) then
+      if LVariadic or
+         TPasSemaTyper.ArityFits(LArgCount, LReq, LTot, LTrailing) then
         LAnyFit := True;
       LCand := FModels[AMid].Symbols[LCand].NextOverload;
     end;
@@ -5313,13 +5314,19 @@ begin
     LArgCount := 0;
     LArg := LModel.Tree.Nodes[LCallee].NextSibling;
     LSkip := False;
+    LTrailing := False;
     while LArg <> NIL_NODE do
     begin
       // ParseArgList adopts an nkError when `)` never came: the parse
-      // error is already reported and the count means nothing.
-      if LModel.Tree.Nodes[LArg].Kind = nkError then
-        LSkip := True;
-      Inc(LArgCount);
+      // error is already reported and the count means nothing. An nkMissing
+      // is a trailing comma (`F(1, 2,)`): not an argument, but it changes
+      // the fit rule - see TPasSemaTyper.ArityFits.
+      case LModel.Tree.Nodes[LArg].Kind of
+        nkError:   LSkip := True;
+        nkMissing: LTrailing := True;
+      else
+        Inc(LArgCount);
+      end;
       LArg := LModel.Tree.Nodes[LArg].NextSibling;
     end;
     if LSkip then
@@ -5378,8 +5385,8 @@ begin
           if LSweep.Arities[LIdx].Tot > LMaxTot then
             LMaxTot := LSweep.Arities[LIdx].Tot;
           if LSweep.Arities[LIdx].Variadic or
-             ((LArgCount >= LSweep.Arities[LIdx].Req) and
-              (LArgCount <= LSweep.Arities[LIdx].Tot)) then
+             TPasSemaTyper.ArityFits(LArgCount, LSweep.Arities[LIdx].Req,
+               LSweep.Arities[LIdx].Tot, LTrailing) then
             LAnyFit := True;
         end;
     end;
@@ -5418,7 +5425,16 @@ begin
         LModel.ExtRefMap.AddOrSetValue(LCallee, LExt);
       Continue;
     end;
-    if LArgCount < LMinReq then
+    // Trailing comma: a parameter still due is E2029, otherwise E2034 (no
+    // default to stand in) - dcc's verdicts, see TPasSemaTyper.ArityFits.
+    if LTrailing then
+    begin
+      if LArgCount < LMaxTot then
+        EmitAt(LModel, LNode, 'E2029', SE2029_ExpressionExpectedRParen)
+      else
+        EmitAt(LModel, LNode, 'E2034', SE2034_TooManyActualParams);
+    end
+    else if LArgCount < LMinReq then
       EmitAt(LModel, LNode, 'E2035', SE2035_NotEnoughActualParams)
     else if LArgCount > LMaxTot then
       EmitAt(LModel, LNode, 'E2034', SE2034_TooManyActualParams);

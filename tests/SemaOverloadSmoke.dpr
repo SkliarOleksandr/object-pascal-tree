@@ -127,6 +127,30 @@ const
     '  I := Bar(1);'#10 +      // the inherited TBase.Bar(A) - not 1 arg over
     'end;'#10'end.'#10;
 
+  { A TRAILING COMMA at the call site (6.2.5, dcc-probed 36.0/37.0): the
+    parser accepts it and leaves an nkMissing; the arity check gives dcc's
+    verdict. `H(1, 2,)` compiles (every parameter supplied, the last has a
+    default); `G(True, 1,)` is E2029 (a parameter still due); `P(1, 2,)` is
+    E2034 (no default on the last parameter); `Q(1, 2, 3,)` is E2034 (too
+    many). The client ships two of the legal shape - they were false E2029. }
+  SRC_TRAILING =
+    'unit U;'#10'interface'#10 +
+    'procedure H(A: Integer; B: Integer = 0);'#10 +
+    'procedure G(A: Boolean; B: Integer = 0; C: Integer = 0);'#10 +
+    'procedure P(A, B: Integer);'#10 +
+    'procedure Q(A, B: Integer);'#10 +
+    'implementation'#10 +
+    'procedure H(A: Integer; B: Integer = 0); begin end;'#10 +
+    'procedure G(A: Boolean; B: Integer = 0; C: Integer = 0); begin end;'#10 +
+    'procedure P(A, B: Integer); begin end;'#10 +
+    'procedure Q(A, B: Integer); begin end;'#10 +
+    'procedure Plain;'#10'begin'#10 +
+    '  H(1, 2,);'#10 +        // legal
+    '  G(True, 1,);'#10 +     // E2029
+    '  P(1, 2,);'#10 +        // E2034
+    '  Q(1, 2, 3,);'#10 +     // E2034
+    'end;'#10'end.'#10;
+
   { The same unit and the same globals, called from OUTSIDE any struct: here
     the globals really are the only candidates, so both diagnostics must
     still fire - dcc reports exactly these two. }
@@ -179,6 +203,15 @@ begin
     DiagCount('E2029') >= 2);
   Ok('outside a struct the check still fires: E2034 x1',
     DiagCount('E2034') = 1);
+  GModel.Free;
+
+  Analyze(SRC_TRAILING);
+  Ok('trailing comma: H(1, 2,) with a defaulted last parameter is legal, ' +
+    'G(True, 1,) with one still due is E2029 - exactly one E2029',
+    DiagCount('E2029') = 1);
+  Ok('trailing comma: P(1, 2,) without a default and Q(1, 2, 3,) are E2034 x2',
+    DiagCount('E2034') = 2);
+  Ok('trailing comma: no E2035 anywhere', DiagCount('E2035') = 0);
   GModel.Free;
 
   if GCounter.Finish('SemaOverloadSmoke') then

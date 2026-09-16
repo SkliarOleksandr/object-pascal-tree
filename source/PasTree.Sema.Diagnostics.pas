@@ -63,6 +63,11 @@ const
     'F1027 Unit not found: ''%s'' (no source on the search path)';
   SE2034_TooManyActualParams  = 'E2034 Too many actual parameters';
   SE2035_NotEnoughActualParams = 'E2035 Not enough actual parameters';
+  // A trailing comma in a call (`F(1,)`) with a parameter still due: dcc's
+  // syntax wording, from the arity check - the parser accepts the comma
+  // (6.2.5, it compiles when the last parameter has a default).
+  SE2029_ExpressionExpectedRParen =
+    'E2029 Expression expected but '')'' found';
   // Generic type-parameter constraints (16.4.1). Wording and codes verified
   // against dcc32 37.0; the single %s is the PARAMETER name (E2515 takes the
   // constraint type name second).

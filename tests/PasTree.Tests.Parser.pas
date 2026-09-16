@@ -117,10 +117,12 @@ const
     // A comma promises an argument (dcc: one E2029 per shape). The empty
     // slot is an Error child so CheckCalls does not count it, and the list
     // continues instead of cascading into `")" expected` / `";" expected`.
-    (Section: '5.1.2'; Name: 'trailing comma in an arg list';
+    // A TRAILING comma is not a parse error (6.2.5: `H(1, 2,)` compiles when
+    // the last parameter has a default) - a Missing child, verdict in sema.
+    (Section: '6.2.5'; Name: 'trailing comma in an arg list is not a parse error';
      Source: 'F(1,);';
-     Expected: 'Block(ExprStmt(Call(Ident''F'' IntLit''1'' Error)))';
-     ExpectDiags: 1),
+     Expected: 'Block(ExprStmt(Call(Ident''F'' IntLit''1'' Missing)))';
+     ExpectDiags: 0),
     (Section: '5.1.2'; Name: 'leading comma in an arg list';
      Source: 'F(,1);';
      Expected: 'Block(ExprStmt(Call(Ident''F'' Error IntLit''1'')))';

@@ -68,6 +68,7 @@ type
     function ParamsOf(AScope: Integer): TArray<Integer>;
     function ArgCount(ACall: Integer): Integer;
     function ArgListTruncated(ACall: Integer): Boolean;
+    function TrailingSlot(ACall: Integer): Boolean;
     function ScoreArgs(ACall: Integer; const AParams: TArray<Integer>): Integer;
     function IsVarargs(AScope: Integer): Boolean;
     function SelectOverload(ACall, AHead: Integer): Integer;
@@ -88,6 +89,9 @@ type
     FRecheck: Boolean;
     FExtTypeOf: TSemaExtTypeFunc;
   public
+    // Shared with the project pass (CheckCalls): one arity rule, one place.
+    class function ArityFits(AArgs, AReq, ATot: Integer;
+      ATrailing: Boolean): Boolean; static;
     class procedure Check(AModel: TPasSemaModel;
       APlatform: TPasPlatform = pfWin32); static;
     class procedure RecheckWithBodies(AModel: TPasSemaModel;
@@ -813,6 +817,9 @@ begin
     end;
 end;
 
+// Present arguments only: the nkMissing a trailing comma leaves as the last
+// child (`F(1, 2,)`, see ParseArgList) is not an argument - TrailingSlot
+// reports it, and the arity rule changes with it.
 function TPasSemaTyper.ArgCount(ACall: Integer): Integer;
 var
   LArg: Integer;
@@ -821,9 +828,40 @@ begin
   LArg := Sib(Child(ACall));   // first child is the callee
   while LArg <> NIL_NODE do
   begin
-    Inc(Result);
+    if Kind(LArg) <> nkMissing then
+      Inc(Result);
     LArg := Sib(LArg);
   end;
+end;
+
+function TPasSemaTyper.TrailingSlot(ACall: Integer): Boolean;
+var
+  LArg: Integer;
+begin
+  Result := False;
+  LArg := Sib(Child(ACall));
+  while LArg <> NIL_NODE do
+  begin
+    if Kind(LArg) = nkMissing then
+      Exit(True);
+    LArg := Sib(LArg);
+  end;
+end;
+
+// Does a candidate with (AReq, ATot) parameters admit AArgs present arguments?
+// Plain: AReq <= AArgs <= ATot. After a trailing comma (6.2.5, dcc-probed):
+// only when every parameter is supplied AND the last one has a default -
+// the empty slot is the default, already given. dcc also refuses the comma
+// on an OVERLOADED callee (E2034 even when one candidate fits); not modelled
+// here, since the candidate set is rarely provably complete - a tolerant miss
+// beats a false E2034.
+class function TPasSemaTyper.ArityFits(AArgs, AReq, ATot: Integer;
+  ATrailing: Boolean): Boolean;
+begin
+  if ATrailing then
+    Result := (AArgs = ATot) and (AReq < ATot)
+  else
+    Result := (AArgs >= AReq) and (AArgs <= ATot);
 end;
 
 function TPasSemaTyper.ArgListTruncated(ACall: Integer): Boolean;
@@ -913,8 +951,10 @@ var
   LAnyFit, LAllHaveParams, LAnyVariadic, LVariadic: Boolean;
   LParams: TArray<Integer>;
   LP, LIfaceHead: Integer;
+  LTrailing: Boolean;
 begin
   LArgs := ArgCount(ACall);
+  LTrailing := TrailingSlot(ACall);
   LBest := AHead; LBestScore := -1;
   LAnyFit := False; LAllHaveParams := True; LAnyVariadic := False;
   LMinReq := MaxInt; LMaxTot := -1;
@@ -942,7 +982,7 @@ begin
         LAnyVariadic := True;
       if LReq < LMinReq then LMinReq := LReq;
       if LTot > LMaxTot then LMaxTot := LTot;
-      if LVariadic or ((LArgs >= LReq) and (LArgs <= LTot)) then
+      if LVariadic or ArityFits(LArgs, LReq, LTot, LTrailing) then
       begin
         LAnyFit := True;
         LScore := ScoreArgs(ACall, LParams);
@@ -997,7 +1037,17 @@ begin
   if LGlobal and LAllHaveParams and not LAnyVariadic and not LAnyFit and
      (LMaxTot >= 0) and not ArgListTruncated(ACall) then
   begin
-    if LArgs < LMinReq then
+    // After a trailing comma the verdict is dcc's: a parameter still due is
+    // E2029 (the comma promised it), anything else E2034 (no default to
+    // stand in, or too many).
+    if LTrailing then
+    begin
+      if LArgs < LMaxTot then
+        Diag('E2029', SE2029_ExpressionExpectedRParen, ACall)
+      else
+        Diag('E2034', SE2034_TooManyActualParams, ACall);
+    end
+    else if LArgs < LMinReq then
       Diag('E2035', SE2035_NotEnoughActualParams, ACall)
     else if LArgs > LMaxTot then
       Diag('E2034', SE2034_TooManyActualParams, ACall);
