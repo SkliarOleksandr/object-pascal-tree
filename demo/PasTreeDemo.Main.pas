@@ -47,12 +47,17 @@ type
   PPasNodeData = ^TPasNodeData;
 
   // One message-window row. mkStatus rows (Opened project, Done: N units...)
-  // are always shown; mkError rows are gated by chkShowErrors and carry a
-  // navigation target (FilePath/Line/Col - resolved from the diagnostic's OWN
-  // FileId at log time, which for an $I-included file is NOT the unit's main
-  // file, so it must be captured here rather than re-derived at double-click
-  // time). Kind will grow mkWarning/mkHint later (same navigation shape).
-  TPasMsgKind = (mkStatus, mkError);
+  // are always shown; mkError rows (semantic findings) are gated by
+  // chkShowErrors, mkSyntax rows (the lexer's and the parser's - dcc's
+  // "expected but found" family, see IsSyntaxDiagCode) by chkShowSyntax. Two
+  // gates because the two families are read differently: a syntax row is a
+  // fact dcc would agree with, a semantic row on an error-tolerant analysis
+  // may be our own gap, and one wants to look at each without the other.
+  // Both carry a navigation target (FilePath/Line/Col - resolved from the
+  // diagnostic's OWN FileId at log time, which for an $I-included file is NOT
+  // the unit's main file, so it must be captured here rather than re-derived
+  // at double-click time). Kind will grow mkWarning/mkHint later.
+  TPasMsgKind = (mkStatus, mkError, mkSyntax);
   TPasMsgRow = record
     Kind: TPasMsgKind;
     Text: string;
@@ -229,6 +234,7 @@ type
     pnlBottom: TPanel;
     Panel1: TPanel;
     chkShowErrors: TCheckBox;
+    chkShowSyntax: TCheckBox;
     pnlSrc: TPanel;
     Panel2: TPanel;
     btnShowASTJson: TButton;
@@ -283,6 +289,7 @@ type
     procedure btnShowCoverageClick(Sender: TObject);
     procedure btnStopClick(Sender: TObject);
     procedure chkShowErrorsClick(Sender: TObject);
+    procedure chkShowSyntaxClick(Sender: TObject);
     procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     procedure vstFilesGetText(Sender: TBaseVirtualTree; Node: PVirtualNode;
       Column: TColumnIndex; TextType: TVSTTextType; var CellText: string);
@@ -633,9 +640,10 @@ type
     procedure ReparseTimerTick(Sender: TObject);
     procedure LogRow(AKind: TPasMsgKind; const AText, AFilePath: string;
       ALine, ACol: Integer);
+    function RowVisible(AKind: TPasMsgKind): Boolean;
     procedure Log(const AText: string);
     procedure LogError(const AFilePath: string; ALine, ACol: Integer;
-      const AText: string);
+      const AText, ACode: string);
     procedure RefreshFileNodes;
     procedure AdoptProjectMembers(AMainId: Integer);
     procedure ClearMessages;
@@ -2857,7 +2865,7 @@ begin
   LRow.Line := ALine;
   LRow.Col := ACol;
   FMsgLog.Add(LRow);
-  if (AKind = mkStatus) or chkShowErrors.Checked then
+  if RowVisible(AKind) then
   begin
     FMsgVisible.Add(FMsgLog.Count - 1);
     LNode := vtMessages.AddChild(nil);
@@ -2874,9 +2882,12 @@ end;
 // A diagnostic row - the future hint/warning entry points will call LogRow
 // directly with mkWarning/mkHint once those severities exist.
 procedure TfrmMain.LogError(const AFilePath: string; ALine, ACol: Integer;
-  const AText: string);
+  const AText, ACode: string);
 begin
-  LogRow(mkError, AText, AFilePath, ALine, ACol);
+  if IsSyntaxDiagCode(ACode) then
+    LogRow(mkSyntax, AText, AFilePath, ALine, ACol)
+  else
+    LogRow(mkError, AText, AFilePath, ALine, ACol);
 end;
 
 procedure TfrmMain.ClearMessages;
@@ -2898,7 +2909,7 @@ var
 begin
   FMsgVisible.Clear;
   for LIdx := 0 to FMsgLog.Count - 1 do
-    if (FMsgLog[LIdx].Kind = mkStatus) or chkShowErrors.Checked then
+    if RowVisible(FMsgLog[LIdx].Kind) then
       FMsgVisible.Add(LIdx);
   vtMessages.BeginUpdate;
   try
@@ -3001,6 +3012,23 @@ end;
 procedure TfrmMain.chkShowErrorsClick(Sender: TObject);
 begin
   RebuildVisibleMessages;
+end;
+
+procedure TfrmMain.chkShowSyntaxClick(Sender: TObject);
+begin
+  RebuildVisibleMessages;
+end;
+
+// The one place the two checkboxes are read - LogRow for a new row,
+// RebuildVisibleMessages for the history - so they cannot drift apart.
+function TfrmMain.RowVisible(AKind: TPasMsgKind): Boolean;
+begin
+  case AKind of
+    mkError: Result := chkShowErrors.Checked;
+    mkSyntax: Result := chkShowSyntax.Checked;
+  else
+    Result := True;
+  end;
 end;
 
 procedure TfrmMain.vtMessagesGetText(Sender: TBaseVirtualTree;
@@ -4119,7 +4147,8 @@ begin
           Format('[%s] %s(%d,%d): %s',
             [DiagSeverityLabel(LModel.Diags[LDIdx].Code),
              TPath.GetFileName(LDiagFile), LModel.Diags[LDIdx].Line,
-             LModel.Diags[LDIdx].Col, LModel.Diags[LDIdx].Msg]));
+             LModel.Diags[LDIdx].Col, LModel.Diags[LDIdx].Msg]),
+          LModel.Diags[LDIdx].Code);
       end;
     end;
   finally
@@ -4932,6 +4961,11 @@ const
   SET_THREADING = 'Threading';
   SET_HIGHLIGHTCOLOR = 'HighlightColor';
   SET_STUDIO = 'Studio';   // BDS version of the selected install, e.g. 22.0
+  // The two message filters. Display-only state, yet worth remembering: the
+  // list is what one comes back to, and re-ticking both after every start is
+  // the kind of friction that gets a box left unticked and a row unseen.
+  SET_SHOWERRORS = 'ShowErrors';
+  SET_SHOWSYNTAX = 'ShowSyntax';
 
 procedure TfrmMain.LoadSettings;
 begin
@@ -4946,6 +4980,10 @@ begin
   FIdentHighlightColor := TColor(FSettings.ReadInt(SET_HIGHLIGHTCOLOR,
     Integer(FIdentHighlightColor)));
   cbHighlightColor.Selected := FIdentHighlightColor;
+  chkShowErrors.Checked := FSettings.ReadInt(SET_SHOWERRORS,
+    Ord(chkShowErrors.Checked)) <> 0;
+  chkShowSyntax.Checked := FSettings.ReadInt(SET_SHOWSYNTAX,
+    Ord(chkShowSyntax.Checked)) <> 0;
   // The remembered RAD Studio, matched by BDS version so a stale .ini (the
   // install was removed) falls back to PopulateStudios' default silently.
   var LStudio := FSettings.ReadString(SET_STUDIO, '');
@@ -4968,6 +5006,8 @@ begin
   FSettings.WriteInt(SET_HIGHLIGHTER, cbHighlighter.ItemIndex);
   FSettings.WriteInt(SET_THREADING, cbThreading.ItemIndex);
   FSettings.WriteInt(SET_HIGHLIGHTCOLOR, Integer(FIdentHighlightColor));
+  FSettings.WriteInt(SET_SHOWERRORS, Ord(chkShowErrors.Checked));
+  FSettings.WriteInt(SET_SHOWSYNTAX, Ord(chkShowSyntax.Checked));
   if (cbStudio.ItemIndex >= 0) and (cbStudio.ItemIndex <= High(FStudios)) then
     FSettings.WriteString(SET_STUDIO, FormatFloat('0.0',
       FStudios[cbStudio.ItemIndex].Version, TFormatSettings.Invariant));

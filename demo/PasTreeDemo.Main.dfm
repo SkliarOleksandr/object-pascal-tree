@@ -272,6 +272,23 @@ object frmMain: TfrmMain
             TabOrder = 0
             OnClick = chkShowErrorsClick
           end
+          object chkShowSyntax: TCheckBox
+            Left = 112
+            Top = 6
+            Width = 105
+            Height = 17
+            Hint = 
+              'Show the lexer''s and the parser''s diagnostics - unterminated st' +
+              'rings, illegal characters, "expected but found". Filters this l' +
+              'ist only - nothing is re-analyzed.'
+            Caption = 'Syntax Errors'
+            Checked = True
+            ParentShowHint = False
+            ShowHint = True
+            State = cbChecked
+            TabOrder = 1
+            OnClick = chkShowSyntaxClick
+          end
         end
         object vtMessages: TVirtualStringTree
           Left = 0
