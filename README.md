@@ -343,10 +343,10 @@ usable.
 | `source/` | the library: `PasTree.Types`, `PasTree.SourceManager`, `PasTree.Lexer`, `PasTree.Preprocessor`, `PasTree.Ast`, `PasTree.Parser`, `PasTree.DProj`, `PasTree.Platforms`, `PasTree.Ast.Json`, `PasTree.Project`, and the semantic layer `PasTree.Sema.*` (`Model`, `Resolver`, `Types`, `Project`, `Builtins`, `Nav`, `Async`, `Diagnostics`, `Dump`) |
 | `source/PasTree.Version.pas` | this library's semver (`PasTreeVersion`), `CompareVersions`, and `BinaryBuiltOn`. Deliberately a standalone unit that pulls in nothing else, so a consumer can report which PasTree it is built against without linking the analysis machinery - which is how the LSP server can put it in its `serverInfo` |
 | `demo/` | `PasTreeDemo` - a VCL host (SynEdit + VirtualTreeView) exercising the highlighter and navigation features interactively over real projects |
-| `tests/` | 13 DUnitX-style smoke suites (`ParserSmoke`, `StagedParseSmoke`, `DProjSmoke`, `SemaSmoke`, `SemaTypeSmoke`, `SemaXTypeSmoke`, `SemaOverloadSmoke`, `SemaProjectSmoke`, `SemaNavSmoke`, `AsyncSmoke`, `UnitListSmoke`, `NavHistorySmoke`, `DemoSettingsSmoke`) plus golden JSON trees and full-corpus runs. **`tests\build.bat` builds and runs all of them** - use it rather than hand-rolling `dcc32` lines: the last three link demo units through relative `in` paths and compile only with the current directory set to `tests\` |
+| `tests/` | 16 DUnitX-style smoke suites (`ParserSmoke`, `ResilienceSmoke`, `StagedParseSmoke`, `DProjSmoke`, `SemaSmoke`, `SemaTypeSmoke`, `SemaXTypeSmoke`, `SemaOverloadSmoke`, `SemaProjectSmoke`, `SemaNavSmoke`, `SemaCompleteSmoke`, `AsyncSmoke`, `UnitListSmoke`, `NavHistorySmoke`, `DemoSettingsSmoke`, `DcuSmoke`) plus golden JSON trees and full-corpus runs. **`tests\build.bat` builds and runs all of them** - use it rather than hand-rolling `dcc32` lines: the last three link demo units through relative `in` paths and compile only with the current directory set to `tests\` |
 | `out/` | every build's `.dcu`, under `out\dcu\win32` and `out\dcu\win64`. Intermediate output that nothing reads between runs (every build passes `-B`), kept in one place so it is trivial to delete and to leave out of a backup. Split by platform because the same units compile both ways and `PasTree.Types.dcu` would otherwise exist twice under one name |
-| `tools/` | CLI drivers per pipeline stage (`PasTreeLex`, `PasTreePP`, `PasTreeParse`, `PasTreeJson`, `PasTreeSema`, `PasTreeSemaProject`) and the node-kinds generator |
-| `docs/` | `incremental-analysis.md` - how a single edit is re-analyzed without rebuilding the closure: the parse donor, `AnalyzeModuleOnly`, the guards, every reason a fast path is refused, and what is still open. `editor-features.md` - the living IDE-parity spec for the demo's editor features. `coverage.md` - every place PasTree knowingly implements LESS than `object-pascal-spec` describes, keyed by spec section; the spec itself stays a description of the LANGUAGE, so a gap in this parser is recorded here, beside the code that closes it |
+| `tools/` | CLI drivers per pipeline stage (`PasTreeLex`, `PasTreePP`, `PasTreeParse`, `PasTreeJson`, `PasTreeSema`, `PasTreeSemaProject`), `PasTreeDcu` (a `.dcu` -> interface source, a raw dump, or the read-and-parse sweep over a library directory - the `.dcu` reader's regression gate) and the node-kinds generator |
+| `docs/` | `incremental-analysis.md` - how a single edit is re-analyzed without rebuilding the closure: the parse donor, `AnalyzeModuleOnly`, the guards, every reason a fast path is refused, and what is still open. `editor-features.md` - the living IDE-parity spec for the demo's editor features. `coverage.md` - every place PasTree knowingly implements LESS than `object-pascal-spec` describes, keyed by spec section; the spec itself stays a description of the LANGUAGE, so a gap in this parser is recorded here, beside the code that closes it. `dcu-reader.md` - the `.dcu` format findings (Delphi 11 -> 12/13 deltas, all additive), the decision to write our own reader with the patched public parser as the oracle, and what was built: the reader, the interface printer, the source-manager fallback, what the generated text does and does not carry, the gates |
 
 ### Line endings: CRLF for everything Delphi and cmd.exe read
 
@@ -1426,7 +1426,10 @@ Still open, roughly in the order we're tackling it:
   - a method-resolution clause whose right-hand side is declared nowhere in the
   shipped sources, which `dcc` reports identically on a reduced probe. Down
   from 899 on 2026-07-28. Its 2121-unit Win64 server reports **zero**, down
-  from 94 the same day.
+  from 94 the same day. **2026-09-17: the client is at zero too** - the two
+  true positives went with v0.36.1 (dcc ignores that clause), and the five
+  `F1027`s with the `.dcu` reader (v0.37.0): the charting library's units
+  are now analyzed from their compiled form, 3767 units in 5.4 s.
 - **Two `with`-target diagnostics we accept where dcc refuses**, both found by
   auditing 5.7 against the implementation rather than by the corpus, and both
   missing-diagnostic rather than false-positive:
@@ -1576,7 +1579,15 @@ Still open, roughly in the order we're tackling it:
   reading the required project's paths. Worth doing before the source-less-unit
   work below, because it costs a `.dpk` parse and removes a whole class of
   reports that look like ours and are not.
-- **Units with no source (`.dcu`-only third-party libraries).** The blocker for
+- ~~**Units with no source (`.dcu`-only third-party libraries).**~~ **Done on
+  2026-09-17 (v0.37.0), stage 3 straight away: see `docs/dcu-reader.md`.** A
+  unit with no `.pas` on any path is read from its `.dcu`
+  (`source/PasTree.Dcu.pas`, Delphi 11 to 13, Win32 and Win64), printed as an
+  interface-only unit (`source/PasTree.Dcu.Source.pas`) and analyzed like any
+  other; navigation lands in that generated text, read-only. All 10,199 units
+  of the three installed Studios' `lib` directories read and parse; the client
+  project went **7 -> 0** diagnostics. The original item follows for the
+  record. The blocker for
   real projects: the client project pulls in several large third-party component
   suites, and where only `.dcu` ships, every importer gets an `F1027` and - far
   worse - its diagnostics are then gated off entirely by the `AllUsesResolved`
@@ -1599,7 +1610,7 @@ Still open, roughly in the order we're tackling it:
      anywhere** in the Studio tree. A `.hpp` reader would close that cluster
      without touching the `.dcu` format at all - and those 5 are now the only
      project-file diagnostics that corpus has.
-  3. **A `.dcu` reader.** ⚠️ *Do not budget this as a small job.* The format is
+  3. **A `.dcu` reader.** **Probed 2026-09-17, decided: see `docs/dcu-reader.md`** - the gap to 13.0 turned out to be a handful of additive fields, and the public parser, patched, decodes the whole RTL of three Studios; it stays as the oracle for a reader of our own. The original budget warning below is kept for the record. ⚠️ *Do not budget this as a small job.* The format is
      undocumented, proprietary, and changes with essentially every compiler
      release - a version magic at the head and per-version tag tables. The
      public knowledge is reverse-engineered (`dcu32int`, IDR), lags current

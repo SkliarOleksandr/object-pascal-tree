@@ -3013,6 +3013,16 @@ begin
     // Only a specifier WORD opens a specifier. `r` half-typed before the next
     // member's `function GetP...` used to become a specifier whose expression
     // swallowed that member as an anonymous method.
+    // A hint directive sits BEFORE the property's semicolon - `property P:
+    // Integer read FP deprecated;` - the one place a hint is not after a `;`
+    // (dcc-probed 2026-09-17: `read FP; deprecated;` is an error). It ends
+    // the specifiers; ParseHintsOpt takes it and whatever hints follow.
+    if IsWord('deprecated') or IsWord('platform') or IsWord('experimental') or
+       (CurKind = tkLibrary) then
+    begin
+      ParseHintsOpt(Result);
+      Break;
+    end;
     if (CurKind = tkIdentifier) and (IsWord('read') or IsWord('write') or
        IsWord('index') or IsWord('stored') or IsWord('default') or
        IsWord('nodefault') or IsWord('implements') or IsWord('readonly') or

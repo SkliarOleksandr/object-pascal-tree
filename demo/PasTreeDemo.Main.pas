@@ -3427,6 +3427,10 @@ begin
   LTab.Editor := Result;
   LTab.PasTreeHL := LHL;
   LTab.FilePath := TPath.GetFullPath(APath);
+  // A compiled unit's tab shows the interface text PasTree generated from
+  // its .dcu (LoadFileTolerant above) - generated text, not a file anyone
+  // can save, so it is read-only.
+  Result.ReadOnly := TPasSourceManager.IsDcuPath(LTab.FilePath);
   FCompl.AddEditor(Result);   // code completion (ctrl+space / after `.`)
   // Keeps recorded positions in THIS file pointing at the same text as it is
   // edited. Created after FilePath is known and after the initial load, and

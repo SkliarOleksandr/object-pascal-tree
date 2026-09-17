@@ -52,6 +52,22 @@ type
     // 5.5s of a 6.7s real-project analysis before this index, ~0 after.
     FSearchIndex: TDictionary<string, string>;
     FDirIndexes: TObjectDictionary<string, TDictionary<string, string>>;
+    // Compiled units on the search paths (a `.dcu` basename, lower, without
+    // its extension -> full path; first path wins), built with FSearchIndex.
+    // The LAST resort of ResolveUnit: a unit with no .pas anywhere is read
+    // from its .dcu (PasTree.Dcu) and analyzed from the interface source
+    // PasTree.Dcu.Source prints for it - README "units with no source". A
+    // .pas anywhere on the paths beats a .dcu anywhere, so a library that
+    // ships both is still analyzed from its source.
+    FDcuIndex: TDictionary<string, string>;
+    // The generated interface text per .dcu path (lower), so a unit's text
+    // is generated once per analysis whatever the number of readers (the
+    // parse workers, a later rehydration). Guarded by FDcuLock.
+    FDcuTexts: TDictionary<string, string>;
+    // Why a .dcu could not be read (path lower -> message): the F1027 an
+    // importer then reports names the real cause instead of "no source".
+    FDcuFailures: TDictionary<string, string>;
+    FDcuLock: TObject;
     // In-memory file-content repository, filled by Prefetch (below): LoadText
     // serves from here before touching the disk. Same lifetime as this
     // manager - one analysis run - so no external-change invalidation is
@@ -100,6 +116,8 @@ type
     procedure EnsureSearchIndex;
     function FindUnitFile(const AUnitName, AFromDir: string;
       out AResolved: string): Boolean;
+    function FindDcuFile(const AUnitName: string; out AResolved: string): Boolean;
+    function DcuText(const APath: string): string;
     function ReadFileText(const APath: string): string;
     function DecodeText(const ABytes: TBytes; const APath: string): string;
     procedure NoteRecovered(const APath, AHow: string);
@@ -195,6 +213,13 @@ type
       the bad byte may not be what the author wrote, and staying silent about
       it once cost ~1700 downstream false reports. }
     function RecoveryNote(const APath: string): string;
+    { True when APath is a compiled unit ResolveUnit fell back to (its text
+      is generated, see FDcuIndex): a host shows it read-only, and the
+      analyzer's importer reports DcuFailure when LoadText raised. }
+    class function IsDcuPath(const APath: string): Boolean; static;
+    { Why the .dcu at APath could not be read in this analysis, '' when it
+      could (or was never asked for). }
+    function DcuFailure(const APath: string): string;
     { The decode itself, without an instance. Exposed because a HOST must show
       the reader exactly the text the analysis ran on: a separate loader is a
       second source of truth, and the two disagree precisely on the files that
@@ -217,7 +242,9 @@ implementation
 uses
   System.Classes,
   System.IOUtils,
-  PasTree.Lexer;
+  PasTree.Lexer,
+  PasTree.Dcu,
+  PasTree.Dcu.Source;
 
 { TPasSourceManager }
 
@@ -227,10 +254,15 @@ begin
   FSearchPaths := ASearchPaths;
   FRecoveredLock := TObject.Create;
   FIncludeLock := TObject.Create;
+  FDcuLock := TObject.Create;
 end;
 
 destructor TPasSourceManager.Destroy;
 begin
+  FDcuFailures.Free;
+  FDcuTexts.Free;
+  FDcuIndex.Free;
+  FDcuLock.Free;
   FRecovered.Free;
   FRecoveredLock.Free;
   FIncludeStreams.Free;
@@ -423,22 +455,116 @@ begin
   if FSearchIndex <> nil then
     Exit;
   FSearchIndex := TDictionary<string, string>.Create;
+  FDcuIndex := TDictionary<string, string>.Create;
   // Enumerate every search path CONCURRENTLY (a cold directory listing is
   // latency-bound, like a cold file read - see Prefetch) into per-path
   // slots, then merge SEQUENTIALLY in path order: first path wins, the
-  // same priority the sequential probing loop had.
+  // same priority the sequential probing loop had. One listing per path
+  // serves both indexes - the .dcu rows are filtered out of it below.
   SetLength(LListings, Length(FSearchPaths));
   TParallel.&For(0, High(FSearchPaths),
     procedure(AIndex: Integer)
     begin
       if TDirectory.Exists(FSearchPaths[AIndex]) then
-        LListings[AIndex] := TDirectory.GetFiles(FSearchPaths[AIndex], '*.pas')
+        LListings[AIndex] := TDirectory.GetFiles(FSearchPaths[AIndex],
+          TSearchOption.soTopDirectoryOnly,
+          function(const APath: string; const ASearchRec: TSearchRec): Boolean
+          var
+            LExt: string;
+          begin
+            LExt := TPath.GetExtension(ASearchRec.Name);
+            Result := SameText(LExt, '.pas') or SameText(LExt, '.dcu');
+          end)
       else
         LListings[AIndex] := nil;
     end);
   for LIdx := 0 to High(LListings) do
     for LFile in LListings[LIdx] do
-      FSearchIndex.TryAdd(LowerCase(TPath.GetFileName(LFile)), LFile);
+      if SameText(TPath.GetExtension(LFile), '.dcu') then
+        FDcuIndex.TryAdd(
+          LowerCase(TPath.GetFileNameWithoutExtension(LFile)), LFile)
+      else
+        FSearchIndex.TryAdd(LowerCase(TPath.GetFileName(LFile)), LFile);
+end;
+
+// The .dcu of a unit name, exactly as spelled: no leaf tolerance and no
+// referring-directory probe - a compiled unit is a library artifact, and the
+// library's directory is on the search path or the unit is not available.
+function TPasSourceManager.FindDcuFile(const AUnitName: string;
+  out AResolved: string): Boolean;
+begin
+  EnsureSearchIndex;
+  Result := FDcuIndex.TryGetValue(LowerCase(AUnitName), AResolved);
+end;
+
+class function TPasSourceManager.IsDcuPath(const APath: string): Boolean;
+begin
+  Result := SameText(TPath.GetExtension(APath), '.dcu');
+end;
+
+function TPasSourceManager.DcuFailure(const APath: string): string;
+begin
+  Result := '';
+  TMonitor.Enter(FDcuLock);
+  try
+    if FDcuFailures <> nil then
+      FDcuFailures.TryGetValue(LowerCase(TPath.GetFullPath(APath)), Result);
+  finally
+    TMonitor.Exit(FDcuLock);
+  end;
+end;
+
+// The interface source of a compiled unit, generated once per path and
+// path. A failure is remembered for DcuFailure and re-raised: the caller's
+// tolerant load path (TPasSemaProject.LoadFile) turns it into the
+// importer's F1027, which then names this message.
+function TPasSourceManager.DcuText(const APath: string): string;
+var
+  LKey, LMsg: string;
+  LUnit: TPasDcuUnit;
+begin
+  LKey := LowerCase(TPath.GetFullPath(APath));
+  TMonitor.Enter(FDcuLock);
+  try
+    if (FDcuTexts <> nil) and FDcuTexts.TryGetValue(LKey, Result) then
+      Exit;
+    if (FDcuFailures <> nil) and FDcuFailures.TryGetValue(LKey, LMsg) then
+      raise EPasDcuError.Create(LMsg);
+  finally
+    TMonitor.Exit(FDcuLock);
+  end;
+  // Read and print OUTSIDE the lock (two workers racing to the same unit at
+  // worst generate it twice; the loser adopts the winner's text).
+  try
+    LUnit := LoadDcu(APath);
+    try
+      Result := DcuInterfaceSource(LUnit);
+    finally
+      LUnit.Free;
+    end;
+  except
+    on E: Exception do
+    begin
+      TMonitor.Enter(FDcuLock);
+      try
+        if FDcuFailures = nil then
+          FDcuFailures := TDictionary<string, string>.Create;
+        FDcuFailures.AddOrSetValue(LKey, E.Message);
+      finally
+        TMonitor.Exit(FDcuLock);
+      end;
+      raise;
+    end;
+  end;
+  TMonitor.Enter(FDcuLock);
+  try
+    if FDcuTexts = nil then
+      FDcuTexts := TDictionary<string, string>.Create;
+    if not FDcuTexts.TryAdd(LKey, Result) then
+      Result := FDcuTexts[LKey];
+  finally
+    TMonitor.Exit(FDcuLock);
+  end;
 end;
 
 function TPasSourceManager.SearchPathUnitNames: TArray<string>;
@@ -450,7 +576,7 @@ begin
   begin
     FSearchNamesBuilt := True;
     EnsureSearchIndex;
-    SetLength(FSearchNames, FSearchIndex.Count);
+    SetLength(FSearchNames, FSearchIndex.Count + FDcuIndex.Count);
     LIdx := 0;
     // The VALUES carry the original-case filenames; the keys are lowered.
     for LPath in FSearchIndex.Values do
@@ -458,6 +584,15 @@ begin
       FSearchNames[LIdx] := TPath.GetFileNameWithoutExtension(LPath);
       Inc(LIdx);
     end;
+    // A unit that exists only compiled is still a unit a `uses` can name.
+    for LPath in FDcuIndex.Values do
+      if not FSearchIndex.ContainsKey(
+           LowerCase(TPath.GetFileNameWithoutExtension(LPath)) + '.pas') then
+      begin
+        FSearchNames[LIdx] := TPath.GetFileNameWithoutExtension(LPath);
+        Inc(LIdx);
+      end;
+    SetLength(FSearchNames, LIdx);
   end;
   Result := FSearchNames;
 end;
@@ -605,6 +740,15 @@ begin
         Exit(True);
       end;
   end;
+
+  // 7. No source anywhere: a compiled unit on the search paths, as spelled
+  // and then with the namespace prefixes - what dcc itself compiles against
+  // when a library ships .dcu only. See FDcuIndex for what happens next.
+  if FindDcuFile(LUnitName, AResolved) then
+    Exit(True);
+  for LName in FNamespaces do
+    if (LName <> '') and FindDcuFile(LName + '.' + LUnitName, AResolved) then
+      Exit(True);
 
   Result := False;
 end;
@@ -789,7 +933,20 @@ end;
 class function TPasSourceManager.LoadFileTolerant(const APath: string): string;
 var
   LHow: string;
+  LUnit: TPasDcuUnit;
 begin
+  // A host opening a compiled unit sees the same generated text the
+  // analysis ran on - generated afresh here, since a class function has no
+  // instance cache; it is one unit, on a user action.
+  if IsDcuPath(APath) then
+  begin
+    LUnit := LoadDcu(APath);
+    try
+      Exit(DcuInterfaceSource(LUnit));
+    finally
+      LUnit.Free;
+    end;
+  end;
   Result := DecodeBytes(TFile.ReadAllBytes(APath), LHow);
 end;
 
@@ -885,6 +1042,11 @@ begin
     if FBuffers.TryGetValue(LKey, LEntry) then
       Exit(LEntry.Text);
   end;
+  // A compiled unit's "text" is generated from its declarations - checked
+  // before the byte cache, which a Prefetch of the closure may have filled
+  // with the binary.
+  if IsDcuPath(APath) then
+    Exit(DcuText(APath));
   if (FContentCache <> nil) and FContentCache.TryGetValue(LKey, LRaw) then
     Exit(DecodeText(LRaw, APath));
   Result := ReadFileText(APath);

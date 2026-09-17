@@ -4356,6 +4356,7 @@ begin
   LModel.AllUsesResolved := True;
   for LIdx := 0 to High(LModel.UsesList) do
   begin
+    LPath := '';
     if FSM.ResolveUnit(LModel.UsesList[LIdx].NameFull,
       LModel.UsesList[LIdx].InPath, FFiles[AId], LPath) then
       LUid := LoadFile(LPath)
@@ -4380,8 +4381,16 @@ begin
       // that every undeclared identifier in this unit was being suppressed as
       // a consequence. A unit could look clean when it had simply not been
       // checked. Anchored on the `uses` name node so a host can navigate to it.
-      EmitAt(LModel, LModel.UsesList[LIdx].NameNode, 'F1027',
-        Format(SF1027_UnitSourceNotFound, [LModel.UsesList[LIdx].NameFull]));
+      // A unit that resolved to a .dcu the reader refused says so (see
+      // TPasSourceManager.DcuFailure): the fix is a reader version, not a path.
+      if (LPath <> '') and TPasSourceManager.IsDcuPath(LPath) and
+         (FSM.DcuFailure(LPath) <> '') then
+        EmitAt(LModel, LModel.UsesList[LIdx].NameNode, 'F1027',
+          Format(SF1027_UnitDcuUnreadable, [LModel.UsesList[LIdx].NameFull,
+            FSM.DcuFailure(LPath)]))
+      else
+        EmitAt(LModel, LModel.UsesList[LIdx].NameNode, 'F1027',
+          Format(SF1027_UnitSourceNotFound, [LModel.UsesList[LIdx].NameFull]));
     end;
   end;
   // The by-name index UnitNameOf reads - see the field. TryAdd in ascending

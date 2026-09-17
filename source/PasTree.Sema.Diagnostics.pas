@@ -61,6 +61,13 @@ const
   // a library shipped as .dcu only builds fine and is still unanalyzable here.
   SF1027_UnitSourceNotFound =
     'F1027 Unit not found: ''%s'' (no source on the search path)';
+  // The same F1027 when the search path HAS the unit compiled but the .dcu
+  // reader could not read it (a compiler version it does not know, a
+  // record it cannot follow): the message names that, because "no source"
+  // would send the reader looking for a file that is not the problem.
+  SF1027_UnitDcuUnreadable =
+    'F1027 Unit not found: ''%s'' (no source on the search path; its .dcu ' +
+    'could not be read: %s)';
   SE2034_TooManyActualParams  = 'E2034 Too many actual parameters';
   SE2035_NotEnoughActualParams = 'E2035 Not enough actual parameters';
   // A trailing comma in a call (`F(1,)`) with a parameter still due: dcc's

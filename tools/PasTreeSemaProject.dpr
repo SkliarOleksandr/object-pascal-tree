@@ -65,6 +65,8 @@ uses
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
+  PasTree.Dcu in '..\source\PasTree.Dcu.pas',
+  PasTree.Dcu.Source in '..\source\PasTree.Dcu.Source.pas',
   PasTree.Preprocessor in '..\source\PasTree.Preprocessor.pas',
   PasTree.Platforms in '..\source\PasTree.Platforms.pas',
   PasTree.Ast in '..\source\PasTree.Ast.pas',

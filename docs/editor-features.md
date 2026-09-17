@@ -36,6 +36,16 @@ preprocessor + parser - not regex approximations.
 Parity target: **ctrl+click on ANY identifier navigates to the place it is
 declared**, exactly like the RAD Studio IDE. "Any" means all of:
 
+**A unit that ships compiled only (v0.37.0).** When no `.pas` exists for a
+unit anywhere on the paths, the analysis reads its `.dcu` and works on the
+interface source PasTree generates from it (`docs/dcu-reader.md`). Every row
+below then lands in that generated text: the target's `FilePath` is the
+`.dcu` path, `Line`/`Col` are positions in the text `TPasSourceManager.
+LoadFileTolerant` returns for it, and a host shows the tab read-only
+(`TPasSourceManager.IsDcuPath`; the demo does). The IDE itself has nothing to
+open there; this is one place the demo does more than the IDE, and the header
+comment of the generated text says what it is and what it could not carry.
+
 | # | Identifier class | Target | Status |
 |---|------------------|--------|--------|
 | 1 | Local/global var, const, type, routine, param, field (same unit) | its declaration | OK |
