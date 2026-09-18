@@ -193,3 +193,93 @@ compare that record's bytes in both files, the extra bytes are the new
 field. Then raise the accepted version range - never before the sweep is
 green. The patched public parser in `local/dcu32int/` remains the oracle for
 a record whose meaning is in doubt.
+
+## Known gaps, for a future session
+
+Three different kinds, not one. Keep them apart - the fix, and whether a fix
+is even possible, differs by kind.
+
+**1. In the file; this reader does not decode it yet.**
+
+- **Typed-constant values and resourcestring text.** Both live in the data
+  block (`$6C`/`drCBlock`) with the fixup table (`$6D`/`drFixUp`); the reader
+  currently skips both for their length only (`SkipFixups`,
+  `TPasDcuReader.Load`'s `drCBlock` case). The oracle decodes this
+  (`TUnit.ShowGlobalTypeValue` in `local/dcu32int/voss/DCU32.pas`) for
+  ordinals, floats and strings; records and arrays go through the same
+  routine recursively. A reader-side decode needs the fixup table read for
+  real (currently `SkipFixups` throws its offsets away) and a value walker
+  keyed by the constant's type, mirroring `ConstValueText` but reading bytes
+  out of the data block at a fixup-resolved offset instead of out of the
+  record itself.
+- **Class/method modifier bits we read but never interpret:** `ClassFlags`
+  (`BX`/`B04` in `ReadClassDef`) almost certainly carry `abstract`/`sealed`;
+  `ProcFlags` on a method likely carries `reintroduce`; `arFinalFlag` ($C2)
+  is read and dropped in `ReadDeclList` with no effect at all - it is
+  probably a method's `final`. Method: compile two units differing in
+  exactly one such modifier, diff the tag-traced byte streams
+  (`DCU_TRACE=1` on the oracle, or this reader's own `ATrace` callback), find
+  which bit flips.
+- **Generic parameter names via self-instantiation is a fallback, not a
+  read.** The DCU does not link an A6 parameter-list entry to the type
+  declaration it belongs to; `GenericParamNames` in
+  `PasTree.Dcu.Source.pas` guesses from the unit's own instantiation of the
+  generic, then from member reference order, then `T1..Tn`. Works on the
+  whole RTL sweep but is inference, not extraction - a generic never
+  self-instantiated and never referencing its own parameter in a
+  recoverable position would print wrong names.
+
+**2. Not in the file; no read can recover it.**
+
+- **`{$SCOPEDENUMS}`.** An enum's members are ordinary named constants in
+  the DCU with no scoping bit; the printer emits them unscoped
+  (`TColor = (cRed, cGreen)`, never `TColor.cRed`). This is a strict
+  superset for name resolution (an unscoped member resolves everywhere a
+  scoped one would, plus bare), so it never causes a false `E2003` - but a
+  real source file relying on scoping to allow `TFoo.cRed` alongside a
+  same-named `cRed` elsewhere would not compile against the generated text
+  the same way it compiles against the real unit.
+- **`array of const`'s element type.** The DCU stores this parameter as a
+  plain open array of `TVarRec`; the printer recognizes the pattern
+  (`ParamsText` in `PasTree.Dcu.Source.pas`) and spells it `array of const`,
+  but nothing in the file distinguishes "the source literally wrote `array
+  of const`" from "the source wrote `array of TVarRec`" - they compile to
+  the same thing, and only the former is legal source. Not worth chasing:
+  the two are interchangeable at every call site that matters.
+- **Comments, and any order the compiler was free to reshuffle.** Obvious,
+  but worth stating: the generated text is not a decompilation of the
+  source, it is a text that declares the same things. Byte-identical
+  round-trip against the original `.pas` is not a goal and was never tested
+  for.
+
+**3. Outside the verified range; extending it is mechanical, not free.**
+
+- **Version bytes below `$23` (pre-Delphi-11) and above `$25` (Delphi 14+
+  when it exists).** `DcuVersionSupported` refuses them by construction.
+  The reader's `Ver >= verXxx` structure (mirroring the oracle's) would
+  probably extend downward with few changes - the additive-fields pattern
+  the probe found for 11->12->13 suggests older deltas are removals, not a
+  different shape - but nothing here has run against a Delphi 10.x or
+  earlier `.dcu` even once, so "probably" is doing real work in that
+  sentence. Extending upward for a future compiler is the documented
+  trace-diff method above; extending downward would need old installs to
+  test against, which is a different kind of blocker.
+- **Platforms other than Win32/Win64.** `DcuPlatformSupported` only accepts
+  `$03`/`$23`. The oracle's magic table has entries for OSX32/64, Android
+  32/64, iOS device/simulator, Linux64 - PasTree itself is Windows-only
+  today, so there was no reason to test them, but if that changes, the
+  platform byte -> `TPasDcuPlatform` mapping in `DcuHeader` is where they
+  would be added, following the oracle's `ReadMagic` table verbatim.
+- **A class helper vs. a record helper, for a helper of an imported type.**
+  A helper is stored as a metaclass whose target (`hCl`/`MetaClassIdx`) is
+  the helped type; `PrintStructured` in `PasTree.Dcu.Source.pas` decides
+  "class helper" vs "record helper" by checking whether the helped type's
+  OWN type-table entry says `tkClass`/`tkMetaClass` - which works when the
+  helped type is defined in the same unit, but an imported type's entry
+  (`tkImport`) carries only a name, not its kind, so the guess defaults to
+  "record helper" for any helper of an imported type. Fixable in principle
+  by reading the OTHER unit's `.dcu` to learn what its type actually is -
+  every `.dcu` this reader has seen sits in one of a handful of library
+  directories, so a second `LoadDcu` call keyed by the uses-list unit name
+  is plausible - but nothing does that today, and it is a real second read
+  per ambiguous case, not a table lookup.
