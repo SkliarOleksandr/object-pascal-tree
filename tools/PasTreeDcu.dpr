@@ -92,6 +92,13 @@ begin
     Write(' deprecated ''', ADecl.DeprecatedMsg, '''');
   if Length(ADecl.GenericParamTypes) > 0 then
     Write(' generic(', Length(ADecl.GenericParamTypes), ')');
+  if ADecl.DataSize >= 0 then
+  begin
+    Write(' data@', IntToHex(ADecl.DataOffset, 1), '[', ADecl.DataSize, ']=');
+    for var LB := ADecl.DataOffset to ADecl.DataOffset + ADecl.DataSize - 1 do
+      if LB < Length(AUnit.DataBlock) then
+        Write(IntToHex(AUnit.DataBlock[LB], 2), ' ');
+  end;
   Writeln;
   if ADecl.Args <> nil then
     for LSub in ADecl.Args do
@@ -166,6 +173,10 @@ begin
   Writeln('--- decls');
   for LDecl in AUnit.Decls do
     DumpDecl(AUnit, LDecl, '');
+  Writeln('--- fixups (data block ', Length(AUnit.DataBlock), ' bytes)');
+  for LIdx := 0 to High(AUnit.Fixups) do
+    Writeln('  @', IntToHex(AUnit.Fixups[LIdx].Offset, 1), ' kind=',
+      AUnit.Fixups[LIdx].Kind, ' slot=#', IntToHex(AUnit.Fixups[LIdx].Slot, 1));
   for LIdx := 0 to High(AUnit.Warnings) do
     Writeln('warning: ', AUnit.Warnings[LIdx]);
 end;

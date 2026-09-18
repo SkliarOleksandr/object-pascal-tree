@@ -18,19 +18,19 @@ unit PasTree.Dcu.Source;
   procedural types, generics with their parameters, helpers, anonymous method
   types), variables, routine headers with calling convention and default
   parameter values, members with visibility, property accessors, index,
-  stored, default. Three things a .dcu stores only as compiled data are NOT
-  reconstructed, and the text says so where they would be:
-  - a typed constant (`const X: T = ...`) is printed as `var X: T;` - the
-    type is right, the value is in the data block this reader never decodes;
-  - a resourcestring is printed with an empty value;
-  - a type the reader could not resolve is spelled __PasTreeUnresolved, an
-    identifier that is declared nowhere, so its every use is an honest
-    E2003 in the generated unit rather than a silently wrong binding. The
-    header comment lists them.
-  Visibility below `private` (strict private/protected), `abstract` and
-  `sealed` on classes, `reintroduce`, `abstract` and `final` on methods are
-  not stored in a form this reader knows and are left out; a caller must not
-  rely on their absence.
+  stored, default, strict visibility, `sealed` classes, `abstract` and
+  `final` methods. Typed constants and resourcestrings print with their
+  values, read out of the unit's data block through the fixup table (the
+  section "Values in the data block" below); a value whose type this cannot
+  lay out falls back to `var X: T;` with the reason in a comment, so the type
+  is right even then. A type the reader could not resolve is spelled
+  __PasTreeUnresolved, an identifier that is declared nowhere, so its every
+  use is an honest E2003 in the generated unit rather than a silently wrong
+  binding; the header comment lists them. Two things the file does not
+  store are left out: `reintroduce` (a warning suppressor, no bit), and
+  `abstract` on a class (the one bit that exists is also set for any class
+  with an abstract method in its ancestry, so it cannot be attributed to the
+  keyword).
 
   NAMES FROM OTHER UNITS are printed bare when only one unit reachable from
   the interface uses clause (or this unit) declares that name, and qualified
@@ -70,6 +70,7 @@ implementation
 
 uses
   System.Math,
+  System.IOUtils,
   System.StrUtils,
   System.Generics.Defaults;
 
@@ -104,6 +105,10 @@ type
     // The instantiation record (tkGenericInst) that produced each expanded
     // generic type (its InstFullIdx), for spelling a reference to the latter.
     FInstOfFull: TDictionary<Integer, TPasDcuType>;
+    FTypedConstReason: string;
+    // Other units' .dcu files read for the layout of imported types, by
+    // lowercase unit name; nil for one that is not beside this file.
+    FForeign: TObjectDictionary<string, TPasDcuUnit>;
     procedure Line(const AText: string);
     procedure Blank;
     function Pad: string;
@@ -117,6 +122,7 @@ type
     procedure BuildNameSources;
     function NeedsQualifier(const ARawName: string): Boolean;
     function ImportRef(AType: TPasDcuType): string;
+    function SystemAlias(const AName: string): string;
     function OwnRef(AType: TPasDcuType): string;
     function InstRef(AType: TPasDcuType): string;
     function GenericParamNames(AType: TPasDcuType): TArray<string>;
@@ -129,9 +135,26 @@ type
     function StringLiteral(const AText: string): string;
     function FloatLiteral(const ABytes: TBytes; AScale: Integer): string;
     function StringConstText(const ABytes: TBytes; AUnicode: Boolean): string;
-    function OrdinalText(ATypeIdx: Integer; AValue: Int64): string;
-    function SetText(ASetType: TPasDcuType; const ABytes: TBytes): string;
+    function OrdinalText(ATypeIdx: Integer; AValue: Int64): string; overload;
+    function OrdinalText(AUnit: TPasDcuUnit; ATypeIdx: Integer; AValue: Int64): string; overload;
+    function SetText(ASetType: TPasDcuType; const ABytes: TBytes): string; overload;
+    function SetText(AUnit: TPasDcuUnit; ASetType: TPasDcuType; const ABytes: TBytes): string; overload;
     function ConstValueText(AConst: TPasDcuDecl; ATypeIdx: Integer): string;
+    // values in the data block (typed constants)
+    function PtrSize: Integer;
+    function ImportSize(const ALowerName: string): Integer;
+    function ForeignUnit(AOwner: TPasDcuUnit; AUnitIdx: Integer): TPasDcuUnit;
+    function ResolveImport(var AUnit: TPasDcuUnit; var AIdx: Integer): Boolean;
+    function EnumMemberName(AUnit: TPasDcuUnit; AEnumIdx: Integer; AValue: Int64;
+      out AName: string): Boolean;
+    function SizeOfType(AUnit: TPasDcuUnit; AIdx: Integer): Integer;
+    function DataInt(AOfs, ASize: Integer; ASigned: Boolean): Int64;
+    function DataStringAt(ASlot, AOfs: Integer; AUnicode: Boolean): string;
+    function TryPointerValue(AOfs: Integer; AMode: Integer; out AText: string): Boolean;
+    function TryDataValue(AUnit: TPasDcuUnit; ATypeIdx, AOfs, AAvail: Integer;
+      out AText: string): Boolean;
+    function ResStringValue(ADecl: TPasDcuDecl): string;
+    function TailIsBlankOrSectionWord: Boolean;
     // sections and declarations
     procedure Section(ASection: TSection);
     procedure CloseTypeBlock;
@@ -153,6 +176,7 @@ type
     function DefaultAllowed(AType: TPasDcuType): Boolean;
     procedure PrintRoutine(ADecl: TPasDcuDecl);
     procedure PrintConst(ADecl: TPasDcuDecl);
+    procedure PrintTypedConst(ADecl: TPasDcuDecl);
     procedure PrintVar(ADecl: TPasDcuDecl; ASection: TSection);
     procedure CollectEnumMembers;
     function Modifiers(ADecl: TPasDcuDecl): string;
@@ -167,8 +191,8 @@ type
 
 const
   cIndentStep = 2;
-  cVisibilityWords: array[0..3] of string = ('private', 'public', 'protected',
-    'published');
+  cVisibilityWords: array[0..5] of string = ('private', 'public', 'protected',
+    'published', 'strict private', 'strict protected');
 
 function DcuInterfaceSource(AUnit: TPasDcuUnit): string;
 var
@@ -201,6 +225,7 @@ begin
   FNameSources := TDictionary<string, Integer>.Create;
   FEnumMembers := TObjectDictionary<Integer, TList<TPasDcuDecl>>.Create([doOwnsValues]);
   FConsumed := TDictionary<TPasDcuDecl, Boolean>.Create;
+  FForeign := TObjectDictionary<string, TPasDcuUnit>.Create([doOwnsValues]);
   FDeclared := TDictionary<Integer, Boolean>.Create;
   FDefined := TDictionary<Integer, Boolean>.Create;
   FPrinting := TDictionary<Integer, Boolean>.Create;
@@ -212,6 +237,7 @@ end;
 
 destructor TPasDcuPrinter.Destroy;
 begin
+  FForeign.Free;
   FInstOfFull.Free;
   FGenericNames.Free;
   FUnresolved.Free;
@@ -232,7 +258,13 @@ begin
 end;
 
 procedure TPasDcuPrinter.Blank;
+var
+  LLen: Integer;
 begin
+  // Never two empty lines in a row, whoever asks.
+  LLen := FOut.Length;
+  if (LLen >= 4) and (FOut[LLen - 1] = #10) and (FOut[LLen - 3] = #10) then
+    Exit;
   FOut.Append(#13#10);
 end;
 
@@ -363,6 +395,22 @@ begin
   Result := FNameSources.TryGetValue(LowerCase(ARawName), LN) and (LN > 1);
 end;
 
+// `@AnsiChr` -> `AnsiChar`: the compiler's own names for the character types
+// and their pointers, as System exports them for its own use.
+function TPasDcuPrinter.SystemAlias(const AName: string): string;
+begin
+  if SameText(AName, '@AnsiChr') then
+    Result := 'AnsiChar'
+  else if SameText(AName, '@PAnsiChr') then
+    Result := 'PAnsiChar'
+  else if SameText(AName, '@WideChr') then
+    Result := 'WideChar'
+  else if SameText(AName, '@PWideChr') then
+    Result := 'PWideChar'
+  else
+    Result := AName;
+end;
+
 function TPasDcuPrinter.ImportRef(AType: TPasDcuType): string;
 var
   LRaw: string;
@@ -373,6 +421,15 @@ begin
     LRaw := AType.Name;
   if LRaw = '' then
     Exit(Unresolved(Format('imported type #%d has no name', [AType.Index])));
+  // System's internal spellings of the character types, which the compiler
+  // writes into other units' imports (`array[0..128] of @AnsiChr` in SysInit).
+  if LRaw[1] = '@' then
+  begin
+    LRaw := SystemAlias(LRaw);
+    if LRaw[1] = '@' then
+      Exit(Unresolved(Format('compiler-internal type %s', [LRaw])));
+    Exit(LRaw);
+  end;
   Result := StripArity(LRaw);
   // `string` is a reserved word: System.string is not a spelling.
   if SameText(Result, 'string') then
@@ -921,26 +978,43 @@ end;
 // An ordinal of the given type as source: an enumeration member's name, a
 // character, True/False, or the number.
 function TPasDcuPrinter.OrdinalText(ATypeIdx: Integer; AValue: Int64): string;
+begin
+  Result := OrdinalText(FUnit, ATypeIdx, AValue);
+end;
+
+// The same for a type of AUnit - this unit, or another unit's .dcu loaded to
+// learn the layout of an imported type (ForeignUnit); the member names of a
+// foreign enumeration are looked up in that unit's declarations.
+function TPasDcuPrinter.OrdinalText(AUnit: TPasDcuUnit; ATypeIdx: Integer;
+  AValue: Int64): string;
 var
   LType, LBase: TPasDcuType;
   LMembers: TList<TPasDcuDecl>;
   LMember: TPasDcuDecl;
   LName: string;
+  LOther: TPasDcuUnit;
+  LOtherIdx: Integer;
 begin
-  LType := FUnit.TypeAt(ATypeIdx);
+  LType := AUnit.TypeAt(ATypeIdx);
   if LType <> nil then
   begin
     // A subrange of something: render as the something.
     if (LType.Kind = tkRange) and (LType.BaseIdx <> ATypeIdx) and
        (LType.BaseIdx > 0) then
     begin
-      LBase := FUnit.TypeAt(LType.BaseIdx);
+      LBase := AUnit.TypeAt(LType.BaseIdx);
       if (LBase <> nil) and (LBase.Kind in [tkEnum, tkImport]) then
-        Exit(OrdinalText(LType.BaseIdx, AValue));
+        Exit(OrdinalText(AUnit, LType.BaseIdx, AValue));
     end;
     case LType.Kind of
       tkEnum:
         begin
+          if AUnit <> FUnit then
+          begin
+            if EnumMemberName(AUnit, LType.Index, AValue, LName) then
+              Exit(Esc(LName));
+            Exit(IntToStr(AValue));
+          end;
           if FEnumMembers.TryGetValue(LType.Index, LMembers) then
             for LMember in LMembers do
               if LMember.ValueInt = AValue then
@@ -990,10 +1064,18 @@ begin
                   (LName <> 'uint32') and (LName <> 'fixedint') and
                   (LName <> 'fixeduint') and (LName <> 'intptr') and
                   (LName <> 'uintptr') then
-            // An imported ordinal type that is not a number (an enumeration
-            // declared in another unit, whose member names live there): a
-            // typed cast keeps both the value and the type.
-            Exit(Format('%s(%d)', [ImportRef(LType), AValue]));
+          begin
+            // An imported ordinal type that is not a number: an enumeration
+            // declared in another unit, whose member names live there. Read
+            // that unit when it is at hand; else a typed cast keeps both the
+            // value and the type.
+            LOther := AUnit;
+            LOtherIdx := ATypeIdx;
+            if ResolveImport(LOther, LOtherIdx) then
+              Exit(OrdinalText(LOther, LOtherIdx, AValue));
+            if AUnit = FUnit then
+              Exit(Format('%s(%d)', [ImportRef(LType), AValue]));
+          end;
         end;
       tkPointer, tkClass, tkInterface, tkClassRef, tkDynArray, tkString,
       tkProcType, tkMetaClass, tkGenericInst:
@@ -1007,6 +1089,12 @@ end;
 // A set constant's bytes as `[a, b, c]`; the bytes cover the set's storage
 // from element SetStart * 8 up.
 function TPasDcuPrinter.SetText(ASetType: TPasDcuType; const ABytes: TBytes): string;
+begin
+  Result := SetText(FUnit, ASetType, ABytes);
+end;
+
+function TPasDcuPrinter.SetText(AUnit: TPasDcuUnit; ASetType: TPasDcuType;
+  const ABytes: TBytes): string;
 var
   LIdx, LBit, LOrd: Integer;
   LItems: TList<string>;
@@ -1025,7 +1113,7 @@ begin
           if ASetType <> nil then
             Inc(LOrd, ASetType.SetStart * 8);
           if LBaseIdx > 0 then
-            LItems.Add(OrdinalText(LBaseIdx, LOrd))
+            LItems.Add(OrdinalText(AUnit, LBaseIdx, LOrd))
           else
             LItems.Add(IntToStr(LOrd));
         end;
@@ -1124,6 +1212,553 @@ begin
       end;
   end;
   Result := Unresolved(Format('constant %s of kind %d', [AConst.Name, AConst.ValueKind]));
+end;
+
+{ Values in the data block }
+
+// A typed constant's bytes sit in the unit's data block between its fxStart
+// fixup and the next one (TPasDcuDecl.DataOffset/DataSize). Scalars are
+// stored as the target platform lays them out; a string, PChar, procedural
+// or class value is a pointer-sized slot whose fixup names the address slot
+// it points into (a string literal block, a routine, a VMT) and whose bytes
+// are the offset within it - a UnicodeString/AnsiString pointer lands 12
+// bytes into its block, past the StrRec header. Records and arrays recurse
+// through their fields and elements.
+//
+// A type imported from another unit carries only its name here, not its
+// layout. System's types are known by name (ImportSize); any other import
+// is looked up in that unit's own .dcu beside this file (ForeignUnit), so
+// `const Key: TPropertyKey = (...)` in a Winapi unit reads its fields from
+// Winapi.PropSys.dcu. Every routine below therefore takes the unit whose
+// type table an index belongs to; the bytes and fixups are always this
+// unit's. Anything this cannot follow makes the declaration fall back to
+// `var X: T;` with the reason in a comment.
+
+function TPasDcuPrinter.PtrSize: Integer;
+begin
+  if FUnit.Platform = dcuWin64 then
+    Result := 8
+  else
+    Result := 4;
+end;
+
+// The storage size of a System type known only by name (an import carries
+// no size), 0 when the name is not one this table knows.
+function TPasDcuPrinter.ImportSize(const ALowerName: string): Integer;
+begin
+  Result := 0;
+  if (ALowerName = 'byte') or (ALowerName = 'shortint') or (ALowerName = 'int8') or
+     (ALowerName = 'uint8') or (ALowerName = 'boolean') or (ALowerName = 'bytebool') or
+     (ALowerName = 'ansichar') or (ALowerName = 'utf8char') then
+    Result := 1
+  else if (ALowerName = 'word') or (ALowerName = 'smallint') or (ALowerName = 'int16') or
+     (ALowerName = 'uint16') or (ALowerName = 'wordbool') or (ALowerName = 'char') or
+     (ALowerName = 'widechar') then
+    Result := 2
+  else if (ALowerName = 'integer') or (ALowerName = 'cardinal') or (ALowerName = 'longint') or
+     (ALowerName = 'longword') or (ALowerName = 'int32') or (ALowerName = 'uint32') or
+     (ALowerName = 'fixedint') or (ALowerName = 'fixeduint') or (ALowerName = 'longbool') or
+     (ALowerName = 'single') or (ALowerName = 'hresult') or (ALowerName = 'ucs4char') then
+    Result := 4
+  else if (ALowerName = 'int64') or (ALowerName = 'uint64') or (ALowerName = 'double') or
+     (ALowerName = 'currency') or (ALowerName = 'comp') or (ALowerName = 'real') or
+     (ALowerName = 'tdatetime') or (ALowerName = 'tdate') or (ALowerName = 'ttime') then
+    Result := 8
+  else if ALowerName = 'tguid' then
+    Result := 16
+  else if ALowerName = 'extended' then
+  begin
+    if FUnit.Platform = dcuWin64 then
+      Result := 8
+    else
+      Result := 10;
+  end
+  else if (ALowerName = 'pointer') or (ALowerName = 'nativeint') or (ALowerName = 'nativeuint') or
+     (ALowerName = 'intptr') or (ALowerName = 'uintptr') or (ALowerName = 'string') or
+     (ALowerName = 'unicodestring') or (ALowerName = 'ansistring') or (ALowerName = 'widestring') or
+     (ALowerName = 'rawbytestring') or (ALowerName = 'utf8string') or (ALowerName = 'pchar') or
+     (ALowerName = 'pansichar') or (ALowerName = 'pwidechar') or (ALowerName = 'tclass') or
+     (ALowerName = 'tobject') or (ALowerName = 'iinterface') or (ALowerName = 'iunknown') or
+     (ALowerName = 'thandle') then
+    Result := PtrSize;
+end;
+
+// The .dcu of the unit that entry AUnitIdx of AOwner's uses list names,
+// read from the directory this file is in; nil when it is not there or
+// cannot be read. Cached for the printer's lifetime.
+function TPasDcuPrinter.ForeignUnit(AOwner: TPasDcuUnit; AUnitIdx: Integer): TPasDcuUnit;
+var
+  LUses: TPasDcuUses;
+  LKey, LPath: string;
+begin
+  LUses := AOwner.UsesOf(AUnitIdx);
+  if (LUses = nil) or (LUses.Name = '') then
+    Exit(nil);
+  LKey := LowerCase(LUses.Name);
+  if SameText(LUses.Name, FUnit.UnitName) then
+    Exit(FUnit);
+  if FForeign.TryGetValue(LKey, Result) then
+    Exit;
+  Result := nil;
+  LPath := TPath.Combine(TPath.GetDirectoryName(FUnit.FileName), LUses.Name + '.dcu');
+  if FileExists(LPath) then
+    try
+      Result := LoadDcu(LPath);
+    except
+      on E: Exception do
+        Result := nil;
+    end;
+  FForeign.Add(LKey, Result);
+end;
+
+// Follows an import to the definition it names: on return AUnit/AIdx name
+// a type that is not itself an import. False when the defining unit is not
+// at hand or does not declare the name (generics carry an arity suffix and
+// are not followed).
+function TPasDcuPrinter.ResolveImport(var AUnit: TPasDcuUnit; var AIdx: Integer): Boolean;
+var
+  LType: TPasDcuType;
+  LOther: TPasDcuUnit;
+  LDecl: TPasDcuDecl;
+  LHops: Integer;
+begin
+  Result := False;
+  for LHops := 1 to 8 do
+  begin
+    LType := AUnit.TypeAt(AIdx);
+    if LType = nil then
+      Exit;
+    if LType.Kind <> tkImport then
+      Exit(True);
+    if (LType.ImportName = '') or (LType.ImportName.IndexOf('`') >= 0) then
+      Exit;
+    LOther := ForeignUnit(AUnit, LType.UnitIdx);
+    if LOther = nil then
+      Exit;
+    AUnit := nil;
+    for LDecl in LOther.Decls do
+      if (LDecl.Kind = dkType) and SameText(LDecl.Name, LType.ImportName) then
+      begin
+        AUnit := LOther;
+        AIdx := LDecl.TypeIdx;
+        Break;
+      end;
+    if AUnit = nil then
+      Exit;
+  end;
+end;
+
+// The name of the member of enumeration AEnumIdx (a type of AUnit) with
+// ordinal AValue: an enumeration's members are the unit's constants typed
+// by it.
+function TPasDcuPrinter.EnumMemberName(AUnit: TPasDcuUnit; AEnumIdx: Integer;
+  AValue: Int64; out AName: string): Boolean;
+var
+  LDecl: TPasDcuDecl;
+begin
+  for LDecl in AUnit.Decls do
+    if (LDecl.Kind = dkConst) and (LDecl.TypeIdx = AEnumIdx) and
+       (LDecl.ValueKind = 0) and (Length(LDecl.ValueBytes) = 0) and
+       (LDecl.ValueInt = AValue) and not IsHidden(LDecl.Name) then
+    begin
+      AName := LDecl.BareName;
+      Exit(True);
+    end;
+  Result := False;
+end;
+
+function TPasDcuPrinter.SizeOfType(AUnit: TPasDcuUnit; AIdx: Integer): Integer;
+var
+  LType: TPasDcuType;
+  LOther: TPasDcuUnit;
+  LOtherIdx: Integer;
+begin
+  LType := AUnit.TypeAt(AIdx);
+  if LType = nil then
+    Exit(0);
+  case LType.Kind of
+    tkImport:
+      begin
+        Result := ImportSize(LowerCase(SystemAlias(LType.ImportName)));
+        if Result = 0 then
+        begin
+          LOther := AUnit;
+          LOtherIdx := AIdx;
+          if ResolveImport(LOther, LOtherIdx) then
+            Result := SizeOfType(LOther, LOtherIdx);
+        end;
+      end;
+    tkPointer, tkClass, tkClassRef, tkInterface, tkDynArray, tkString,
+    tkMetaClass, tkGenericInst:
+      Result := PtrSize;
+    tkProcType:
+      if (LType.ProcFlags and ptOfObject) <> 0 then
+        Result := 2 * PtrSize
+      else
+        Result := PtrSize;
+  else
+    Result := Integer(LType.Size);
+  end;
+end;
+
+function TPasDcuPrinter.DataInt(AOfs, ASize: Integer; ASigned: Boolean): Int64;
+var
+  LIdx: Integer;
+begin
+  Result := 0;
+  for LIdx := ASize - 1 downto 0 do
+    Result := (Result shl 8) or FUnit.DataBlock[AOfs + LIdx];
+  if ASigned and (ASize < 8) and ((Result shr (ASize * 8 - 1)) and 1 <> 0) then
+    Result := Result - (Int64(1) shl (ASize * 8));
+end;
+
+// The characters a pointer into a string literal block points at: AOfs is
+// the byte offset inside the block's bytes. A StrRec header right before it
+// (element size at -10, refcount -1 at -8, length at -4) gives the length;
+// a bare run of characters ends at its terminator.
+function TPasDcuPrinter.DataStringAt(ASlot, AOfs: Integer; AUnicode: Boolean): string;
+var
+  LBlock: TPasDcuDecl;
+  LStart, LEnd, LLimit, LLen, LElem: Integer;
+  LBytes: TBytes;
+begin
+  Result := '';
+  LBlock := FUnit.AddrAt(ASlot);
+  if (LBlock = nil) or (LBlock.DataSize < 0) then
+    raise EPasDcuError.CreateFmt('string block #%x has no data', [ASlot]);
+  LStart := LBlock.DataOffset + AOfs;
+  LLimit := LBlock.DataOffset + LBlock.DataSize;
+  if (AOfs < 0) or (LStart > LLimit) then
+    raise EPasDcuError.CreateFmt('string offset %d outside block #%x', [AOfs, ASlot]);
+  LEnd := -1;
+  if (AOfs >= 12) and (FUnit.DataBlock[LStart - 8] = $FF) and
+     (FUnit.DataBlock[LStart - 7] = $FF) and (FUnit.DataBlock[LStart - 6] = $FF) and
+     (FUnit.DataBlock[LStart - 5] = $FF) then
+  begin
+    LElem := FUnit.DataBlock[LStart - 10] or (FUnit.DataBlock[LStart - 9] shl 8);
+    LLen := PInteger(@FUnit.DataBlock[LStart - 4])^;
+    if (LElem in [1, 2]) and (LLen >= 0) and (LStart + LLen * LElem <= LLimit) then
+    begin
+      AUnicode := LElem = 2;
+      LEnd := LStart + LLen * LElem;
+    end;
+  end;
+  if LEnd < 0 then
+  begin
+    LEnd := LStart;
+    if AUnicode then
+      while (LEnd + 1 < LLimit) and
+            ((FUnit.DataBlock[LEnd] <> 0) or (FUnit.DataBlock[LEnd + 1] <> 0)) do
+        Inc(LEnd, 2)
+    else
+      while (LEnd < LLimit) and (FUnit.DataBlock[LEnd] <> 0) do
+        Inc(LEnd);
+  end;
+  if LEnd <= LStart then
+    Exit;
+  LBytes := Copy(FUnit.DataBlock, LStart, LEnd - LStart);
+  if AUnicode then
+    Result := TEncoding.Unicode.GetString(LBytes)
+  else
+    Result := TEncoding.ANSI.GetString(LBytes);
+end;
+
+// A pointer-sized value at AOfs. AMode: 0 = a plain pointer (nil, @Name, a
+// class name for a VMT, a routine's name for a procedural type), 1 = a
+// UnicodeString, 2 = an AnsiString, 3 = a PWideChar literal, 4 = a
+// PAnsiChar literal.
+function TPasDcuPrinter.TryPointerValue(AOfs: Integer; AMode: Integer;
+  out AText: string): Boolean;
+var
+  LFix, LSlot: Integer;
+  LValue: Int64;
+  LTarget: TPasDcuDecl;
+begin
+  Result := False;
+  LValue := DataInt(AOfs, PtrSize, False);
+  LFix := FUnit.PointerFixupAt(AOfs);
+  if LFix < 0 then
+  begin
+    if LValue <> 0 then
+      Exit;
+    if AMode in [1, 2] then
+      AText := ''''''
+    else
+      AText := 'nil';
+    Exit(True);
+  end;
+  LSlot := FUnit.Fixups[LFix].Slot;
+  case AMode of
+    1, 3: AText := StringLiteral(DataStringAt(LSlot, Integer(LValue), True));
+    2, 4: AText := StringLiteral(DataStringAt(LSlot, Integer(LValue), False));
+  else
+    LTarget := FUnit.AddrAt(LSlot);
+    if (LTarget = nil) or (LValue <> 0) and (LTarget.Kind <> dkVmt) then
+      Exit;
+    case LTarget.Kind of
+      dkVmt:
+        // `.TFoo`: the class reference is the class name.
+        if LTarget.Name.StartsWith('.') then
+          AText := Esc(LTarget.Name.Substring(1))
+        else
+          Exit;
+      dkRoutine:
+        if LTarget.IsUnnamed or IsHidden(LTarget.Name) or (LTarget.ClassSlot <> 0) then
+          Exit
+        else
+          AText := Esc(LTarget.Name);
+      dkVar, dkTypedConst:
+        if IsHidden(LTarget.Name) or (LTarget.Name.IndexOf('.') >= 0) then
+          Exit
+        else
+          AText := '@' + Esc(LTarget.Name);
+    else
+      Exit;
+    end;
+  end;
+  Result := True;
+end;
+
+function TPasDcuPrinter.TryDataValue(AUnit: TPasDcuUnit; ATypeIdx, AOfs, AAvail: Integer;
+  out AText: string): Boolean;
+var
+  LType, LIndex: TPasDcuType;
+  LName: string;
+  LSize, LCount, LElemSize, LIdx: Integer;
+  LItems: TList<string>;
+  LItem: string;
+  LMember: TPasDcuDecl;
+  LGuid: TGUID;
+  LOther: TPasDcuUnit;
+  LOtherIdx: Integer;
+begin
+  Result := False;
+  AText := '';
+  LType := AUnit.TypeAt(ATypeIdx);
+  if LType = nil then
+    Exit;
+  LSize := SizeOfType(AUnit, ATypeIdx);
+  if (LSize <= 0) or (LSize > AAvail) or (AOfs + LSize > Length(FUnit.DataBlock)) then
+    Exit;
+  case LType.Kind of
+    tkImport:
+      begin
+        LName := LowerCase(SystemAlias(LType.ImportName));
+        if ImportSize(LName) = 0 then
+        begin
+          // Not a System type: read its definition from its own unit.
+          LOther := AUnit;
+          LOtherIdx := ATypeIdx;
+          if ResolveImport(LOther, LOtherIdx) then
+            Exit(TryDataValue(LOther, LOtherIdx, AOfs, AAvail, AText));
+          Exit;
+        end;
+        if (LName = 'string') or (LName = 'unicodestring') then
+          Exit(TryPointerValue(AOfs, 1, AText));
+        if (LName = 'ansistring') or (LName = 'rawbytestring') or (LName = 'utf8string') then
+          Exit(TryPointerValue(AOfs, 2, AText));
+        if (LName = 'pchar') or (LName = 'pwidechar') then
+          Exit(TryPointerValue(AOfs, 3, AText));
+        if LName = 'pansichar' then
+          Exit(TryPointerValue(AOfs, 4, AText));
+        if LName = 'widestring' then
+          Exit;   // a BSTR: not a literal block this reader follows
+        if LName = 'tguid' then
+        begin
+          Move(FUnit.DataBlock[AOfs], LGuid, 16);
+          AText := '''' + GUIDToString(LGuid) + '''';
+          Exit(True);
+        end;
+        if LName = 'currency' then
+        begin
+          AText := FloatToStrF(DataInt(AOfs, 8, True) / 10000, ffGeneral, 17, 0,
+            TFormatSettings.Invariant);
+          if (AText.IndexOf('.') < 0) and (AText.IndexOf('E') < 0) then
+            AText := AText + '.0';
+          Exit(True);
+        end;
+        if (LName = 'single') or (LName = 'double') or (LName = 'extended') or
+           (LName = 'real') or (LName = 'tdatetime') or (LName = 'tdate') or
+           (LName = 'ttime') then
+        begin
+          AText := FloatLiteral(Copy(FUnit.DataBlock, AOfs, LSize), 1);
+          Exit(True);
+        end;
+        if LName = 'comp' then
+        begin
+          AText := IntToStr(DataInt(AOfs, 8, True)) + '.0';
+          Exit(True);
+        end;
+        if (LName = 'nativeint') or (LName = 'intptr') then
+        begin
+          AText := IntToStr(DataInt(AOfs, LSize, True));
+          Exit(True);
+        end;
+        if (LName = 'nativeuint') or (LName = 'uintptr') or (LName = 'thandle') then
+        begin
+          AText := IntToStr(DataInt(AOfs, LSize, False));
+          Exit(True);
+        end;
+        if (LName = 'pointer') or (LName = 'tclass') or (LName = 'tobject') or
+           (LName = 'iinterface') or (LName = 'iunknown') then
+          Exit(TryPointerValue(AOfs, 0, AText));
+        // An ordinal: signed when the name says so.
+        AText := OrdinalText(AUnit, ATypeIdx, DataInt(AOfs, LSize,
+          (LName = 'shortint') or (LName = 'smallint') or (LName = 'integer') or
+          (LName = 'longint') or (LName = 'int8') or (LName = 'int16') or
+          (LName = 'int32') or (LName = 'int64') or (LName = 'fixedint') or
+          (LName = 'hresult')));
+        Exit(True);
+      end;
+    tkRange, tkEnum:
+      begin
+        AText := OrdinalText(AUnit, ATypeIdx, DataInt(AOfs, LSize, LType.Low < 0));
+        Exit(True);
+      end;
+    tkFloat:
+      begin
+        case LType.FloatKind of
+          4:   // Comp
+            AText := IntToStr(DataInt(AOfs, 8, True)) + '.0';
+          5:   // Currency, stored scaled by 10000
+            begin
+              AText := FloatToStrF(DataInt(AOfs, 8, True) / 10000, ffGeneral, 17, 0,
+                TFormatSettings.Invariant);
+              if (AText.IndexOf('.') < 0) and (AText.IndexOf('E') < 0) then
+                AText := AText + '.0';
+            end;
+        else
+          AText := FloatLiteral(Copy(FUnit.DataBlock, AOfs, LSize), 1);
+        end;
+        Exit(True);
+      end;
+    tkSet:
+      begin
+        AText := SetText(AUnit, LType, Copy(FUnit.DataBlock, AOfs, LSize));
+        Exit(True);
+      end;
+    tkShortString:
+      begin
+        LCount := FUnit.DataBlock[AOfs];
+        if LCount >= LSize then
+          Exit;
+        AText := StringLiteral(TEncoding.ANSI.GetString(FUnit.DataBlock, AOfs + 1, LCount));
+        Exit(True);
+      end;
+    tkString:
+      // A named string type: `$52` is AnsiString, the others hold WideChars.
+      Exit(TryPointerValue(AOfs, IfThen(LType.Tag = $52, 2, 1), AText));
+    tkPointer, tkClassRef, tkClass, tkMetaClass:
+      Exit(TryPointerValue(AOfs, 0, AText));
+    tkInterface, tkDynArray, tkGenericInst:
+      begin
+        if DataInt(AOfs, LSize, False) <> 0 then
+          Exit;
+        AText := 'nil';
+        Exit(True);
+      end;
+    tkProcType:
+      begin
+        if (LType.ProcFlags and ptOfObject) <> 0 then
+        begin
+          // A method pointer: only nil is a literal.
+          for LIdx := 0 to LSize - 1 do
+            if FUnit.DataBlock[AOfs + LIdx] <> 0 then
+              Exit;
+          AText := 'nil';
+          Exit(True);
+        end;
+        Exit(TryPointerValue(AOfs, 0, AText));
+      end;
+    tkArray:
+      begin
+        LElemSize := SizeOfType(AUnit, LType.ElemIdx);
+        if LElemSize <= 0 then
+          Exit;
+        LIndex := AUnit.TypeAt(LType.IndexIdx);
+        if (LIndex <> nil) and (LIndex.Kind in [tkRange, tkEnum]) then
+          LCount := Integer(LIndex.High - LIndex.Low + 1)
+        else
+          LCount := LSize div LElemSize;
+        if (LCount <= 0) or (LCount * LElemSize > LSize) then
+          Exit;
+        LItems := TList<string>.Create;
+        try
+          for LIdx := 0 to LCount - 1 do
+          begin
+            if not TryDataValue(AUnit, LType.ElemIdx, AOfs + LIdx * LElemSize, LElemSize, LItem) then
+              Exit;
+            LItems.Add(LItem);
+          end;
+          AText := '(' + string.Join(', ', LItems.ToArray) + ')';
+        finally
+          LItems.Free;
+        end;
+        Exit(True);
+      end;
+    tkRecord:
+      begin
+        if LType.Members = nil then
+          Exit;
+        LItems := TList<string>.Create;
+        try
+          for LMember in LType.Members do
+            if LMember.Kind = dkField then
+            begin
+              if IsHidden(LMember.Name) or (LMember.Offset < 0) then
+                Exit;
+              if not TryDataValue(AUnit, LMember.TypeIdx, AOfs + LMember.Offset,
+                   LSize - LMember.Offset, LItem) then
+                Exit;
+              LItems.Add(Esc(LMember.Name) + ': ' + LItem);
+            end
+            else if LMember.Kind in [dkMethod, dkProperty, dkClassVar, dkConst, dkType,
+                                     dkConstructor, dkDestructor, dkCopy] then
+              // methods, properties and nested declarations take no storage
+            else
+              Exit;
+          if LItems.Count = 0 then
+            Exit;
+          AText := '(' + string.Join('; ', LItems.ToArray) + ')';
+        finally
+          LItems.Free;
+        end;
+        Exit(True);
+      end;
+  end;
+end;
+
+// A resourcestring's text is the unnamed constant (`.`) the compiler writes
+// into the slot right after it.
+function TPasDcuPrinter.ResStringValue(ADecl: TPasDcuDecl): string;
+var
+  LValue: TPasDcuDecl;
+begin
+  LValue := FUnit.AddrAt(ADecl.Slot + 1);
+  if (LValue <> nil) and (LValue.Kind = dkConst) and (LValue.Name = '.') and
+     (LValue.ValueKind in [1, 5]) then
+    Result := StringLiteral(StringConstText(LValue.ValueBytes, LValue.ValueKind = 5))
+  else
+    Result := Unresolved(Format('resourcestring %s has no value record', [ADecl.Name]));
+end;
+
+// True when the text so far ends with an empty line or a section word
+// (`type`), so a blank separator before a class would double up.
+function TPasDcuPrinter.TailIsBlankOrSectionWord: Boolean;
+var
+  LLen, LPos: Integer;
+  LLast: string;
+begin
+  LLen := FOut.Length;
+  if LLen < 2 then
+    Exit(True);
+  if (LLen >= 4) and (FOut[LLen - 1] = #10) and (FOut[LLen - 3] = #10) then
+    Exit(True);
+  LPos := LLen - 3;
+  while (LPos >= 0) and (FOut[LPos] <> #10) do
+    Dec(LPos);
+  LLast := FOut.ToString(LPos + 1, LLen - 2 - (LPos + 1));
+  Result := (LLast = 'type') or (LLast = 'interface');
 end;
 
 { Sections }
@@ -1521,6 +2156,12 @@ begin
         lfDynamic: LText := LText + ' dynamic;';
         lfMessage: LText := LText + Format(' message %d;', [AMember.TypeIdx and $FFFF]);
       end;
+    if (LRoutine <> nil) and ((LRoutine.ProcFlags and pfAbstract) <> 0) and
+       ((AMember.LocFlags and lfMethodKind) <> 0) then
+      LText := LText + ' abstract;';
+    if (LRoutine <> nil) and ((LRoutine.ProcFlags and pfFinal) <> 0) and
+       ((AMember.LocFlags and lfOverride) <> 0) then
+      LText := LText + ' final;';
     // A class method without Self is static (Delphi XE7+ stores it so).
     if AMember.IsClassMember and (LRoutine <> nil) and not LIsOperator then
     begin
@@ -1813,6 +2454,8 @@ procedure TPasDcuPrinter.PrintStructured(AType: TPasDcuType; const AHead: string
 var
   LHead, LWord, LParent, LGuid: string;
   LParentType, LHelped: TPasDcuType;
+  LHelpedUnit: TPasDcuUnit;
+  LHelpedIdx: Integer;
   LIdx: Integer;
   LInvoke: TPasDcuDecl;
   LProcType: TPasDcuType;
@@ -1831,6 +2474,8 @@ begin
       tkClass:
         begin
           LHead := AHead + ' = class';
+          if (AType.ClassFlags[3] and cfSealed) <> 0 then
+            LHead := LHead + ' sealed';
           LParent := '';
           if AType.ParentIdx <> 0 then
             LParent := TypeRef(AType.ParentIdx);
@@ -1855,6 +2500,13 @@ begin
           // helped type; its parent is System's TClassHelperBase unless the
           // helper itself descends from another helper.
           LHelped := FUnit.TypeAt(AType.MetaClassIdx);
+          // An imported helped type carries only its name here; its own unit's
+          // .dcu beside this file says whether it is a class.
+          LHelpedUnit := FUnit;
+          LHelpedIdx := AType.MetaClassIdx;
+          if (LHelped <> nil) and (LHelped.Kind = tkImport) and
+             ResolveImport(LHelpedUnit, LHelpedIdx) then
+            LHelped := LHelpedUnit.TypeAt(LHelpedIdx);
           if (LHelped <> nil) and (LHelped.Kind in [tkClass, tkMetaClass]) then
             LWord := 'class helper'
           else
@@ -1942,6 +2594,9 @@ var
     else
       LNew := 0;
     end;
+    // The strict bit sits beside the scope: `strict private`, `strict protected`.
+    if ((AMember.LocFlagsX and lfStrict) <> 0) and (LNew in [0, 2]) then
+      LNew := LNew div 2 + 4;
     if LNew <> LVis then
     begin
       LVis := LNew;
@@ -1991,7 +2646,7 @@ begin
   LIsIntf := AType.Kind = tkInterface;
   LVis := -1;
   LSub := subNone;
-  FIndent := FIndent + 2 * cIndentStep;
+  FIndent := FIndent + cIndentStep;
   try
     for LMember in AType.Members do
     begin
@@ -2060,7 +2715,7 @@ begin
       end;
     end;
   finally
-    FIndent := FIndent - 2 * cIndentStep;
+    FIndent := FIndent - cIndentStep;
   end;
 end;
 
@@ -2093,7 +2748,15 @@ begin
   begin
     FDefined.AddOrSetValue(LType.Index, True);
     if LType.Kind in [tkRecord, tkObject, tkClass, tkMetaClass, tkInterface] then
-      PrintStructured(LType, LHead)
+    begin
+      // A structured type stands apart from its neighbours by one blank line
+      // on each side; a run of one-line aliases stays compact.
+      if not AInBody and not TailIsBlankOrSectionWord then
+        Blank;
+      PrintStructured(LType, LHead);
+      if not AInBody then
+        Blank;
+    end
     else if LType.Kind = tkImport then
       // `TFoo = type Other.TBar`: an imported definition under a new name.
       Line(LHead + ' = ' + ImportRef(LType) + ';')
@@ -2142,8 +2805,44 @@ begin
   else
     LText := LText + Modifiers(ADecl) + ';';
   if ADecl.Kind = dkTypedConst then
-    LText := LText + ' { typed constant; the value is compiled data this reader does not decode }';
+    LText := LText + ' { typed constant; its value could not be decoded: ' + FTypedConstReason + ' }';
   Line(LText);
+end;
+
+// `const X: T = <value>;` when the value can be read out of the data block,
+// else `var X: T;` with the reason - the type stays right either way.
+procedure TPasDcuPrinter.PrintTypedConst(ADecl: TPasDcuDecl);
+var
+  LText, LValue: string;
+  LOk: Boolean;
+begin
+  if ADecl.DataSize < 0 then
+    FTypedConstReason := 'no data range in the fixup table'
+  else
+  begin
+    try
+      LOk := TryDataValue(FUnit, ADecl.TypeIdx, ADecl.DataOffset, ADecl.DataSize, LValue);
+      FTypedConstReason := 'the layout of ' + TypeRef(ADecl.TypeIdx) + ' is not one this reader decodes';
+    except
+      on E: EPasDcuError do
+      begin
+        LOk := False;
+        FTypedConstReason := E.Message;
+      end;
+    end;
+    if LOk then
+    begin
+      Section(secConst);
+      LText := Esc(ADecl.Name) + ': ' + TypeRef(ADecl.TypeIdx) + ' = ' + LValue;
+      if LText.Contains(': procedure') or LText.Contains(': function') then
+        Line(LText + ';')
+      else
+        Line(LText + Modifiers(ADecl) + ';');
+      Exit;
+    end;
+  end;
+  Note('typed constant %s: %s', [ADecl.Name, FTypedConstReason]);
+  PrintVar(ADecl, secVar);
 end;
 
 procedure TPasDcuPrinter.PrintRoutine(ADecl: TPasDcuDecl);
@@ -2183,7 +2882,7 @@ begin
       if ADecl.IsInterfaceVisible and not IsHidden(ADecl.Name) then
       begin
         Section(secResString);
-        Line(ADecl.Name + ' = ''''; { the text is compiled data this reader does not decode }');
+        Line(Esc(ADecl.Name) + ' = ' + ResStringValue(ADecl) + Modifiers(ADecl) + ';');
       end;
     // A dotted name is a class variable's storage (`TThread.FCurrentThread`),
     // printed inside its class.
@@ -2198,7 +2897,7 @@ begin
     dkTypedConst:
       if ADecl.IsInterfaceVisible and not IsHidden(ADecl.Name) and
          (ADecl.Name.IndexOf('.') < 0) then
-        PrintVar(ADecl, secVar);
+        PrintTypedConst(ADecl);
     dkRoutine:
       // The unit's initialization and finalization parts are stored as
       // routines of those names; they are not declarations.
@@ -2235,10 +2934,10 @@ begin
   Blank;
   Line('{ Interface section reconstructed by PasTree from');
   Line('  ' + FUnit.FileName);
-  Line(Format('  (compiled by %s for %s). Declarations only: the values of typed',
+  Line(Format('  (compiled by %s for %s). Declarations only, with the values of',
     [DcuVersionName(FUnit.VersionByte), LPlatform]));
-  Line('  constants and resource strings are compiled data this text does not');
-  Line('  carry, and there is no implementation. Generated text, not a source file.');
+  Line('  constants read out of the compiled data; there is no implementation.');
+  Line('  Generated text, not a source file.');
   LHeaderEnd := FOut.Length;
   Line('}');
   Blank;

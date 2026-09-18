@@ -175,6 +175,10 @@ type
     CaiFlags: Integer;         // $1 deprecated, $2 platform, $4 library
     HasDeprecated: Boolean;
     DeprecatedMsg: string;
+    // the bytes in the data block a typed constant or string block owns,
+    // assigned from the fixup table after the load; DataSize -1 = none
+    DataOffset: Integer;
+    DataSize: Integer;
     // dkCopy
     BaseSlot: Integer;
     Base: TPasDcuDecl;
@@ -254,6 +258,15 @@ type
     function IsStructured: Boolean;
   end;
 
+  { One row of the fixup table: the data-block offset that holds a pointer,
+    what kind of reference it is (fxStart/fxEnd bracket a declaration's
+    bytes, the others patch a pointer), and the address slot it names. }
+  TPasDcuFixup = record
+    Offset: Cardinal;
+    Kind: Byte;
+    Slot: Integer;
+  end;
+
   TPasDcuUsesSection = (usInterface, usImplementation, usDll);
 
   TPasDcuUses = class
@@ -282,6 +295,8 @@ type
     Types: TObjectList<TPasDcuType>;   // 1-based through TypeAt; [0] is index 1
     Addrs: TList<TPasDcuDecl>;         // 1-based through AddrAt; a slot may be nil
     Decls: TList<TPasDcuDecl>;         // the main declaration list, in file order
+    DataBlock: TBytes;                 // the $6C block: typed constants, string literals, RTTI
+    Fixups: TArray<TPasDcuFixup>;      // the $6D table, offsets absolute and ascending
     Warnings: TArray<string>;
     constructor Create;
     destructor Destroy; override;
@@ -290,6 +305,9 @@ type
     function AddrAt(ASlot: Integer): TPasDcuDecl;     // nil when out of range or empty
     { The uses entry a slot or type belongs to, nil when it is the unit's own. }
     function UsesOf(AUnitIdx: Integer): TPasDcuUses;
+    { The fixup that patches a pointer stored at exactly AOffset of the data
+      block (a start/end bracket is not one); -1 when none. }
+    function PointerFixupAt(AOffset: Integer): Integer;
   end;
 
   TPasDcuTraceProc = reference to procedure(const ALine: string);
@@ -329,11 +347,26 @@ const
   lfPublic = $02;
   lfProtected = $04;
   lfPublished = $0A;
+  lfStrict = $10;        // with lfPrivate / lfProtected: `strict private` / `strict protected`
   // A parameter's LocFlags low bits: $1 = const.
   lfParamConst = $01;
   // VProc bits of a routine header.
   pfOverload = $800;
   pfInline = $2000000;
+  pfAbstract = $20;      // a method header's `abstract` (probed 2026-09-18: 6C vs 4C)
+  pfFinal = $40000;      // a method header's `final` (4004C vs 4C)
+  // B04 of a class definition (probed 2026-09-18).
+  cfSealed = $40;
+  // $4 is set for `class abstract` AND for any class with an abstract method
+  // somewhere in its ancestry, implemented or not (TFromAbsMethod, which
+  // overrides the only abstract method, still carries it) - it cannot be
+  // attributed to the keyword and is not printed.
+  cfAbstractOrInherits = $4;
+  // Fixup kinds: a declaration's bytes in the data block run from its
+  // fxStart row to the next fxStart/fxEnd row; every other kind patches a
+  // pointer at that offset with the address of the slot it names.
+  fxStart = 0;
+  fxEnd = 1;
   // NDX0 of a procedure type.
   ptOfObject = $10;
   // ConstAddInfo flags.
@@ -559,7 +592,8 @@ type
     procedure ReadTemplateArgDef;
     procedure ReadTemplateCall;
     // skipped tables
-    procedure SkipFixups;
+    procedure ReadFixups;
+    procedure AssignDataRanges;
     procedure SkipCodeLines;
     procedure SkipLineRanges;
     procedure SkipStrucScope;
@@ -581,6 +615,7 @@ begin
   inherited Create;
   UnitIdx := -1;
   IntfIdx := -1;
+  DataSize := -1;
 end;
 
 destructor TPasDcuDecl.Destroy;
@@ -694,6 +729,31 @@ begin
     Result := nil
   else
     Result := Addrs[ASlot - 1];
+end;
+
+function TPasDcuUnit.PointerFixupAt(AOffset: Integer): Integer;
+var
+  LLo, LHi, LMid: Integer;
+begin
+  // Offsets ascend; several rows may share one offset (a start bracket and
+  // the pointer it opens with), so find the first and scan forward.
+  LLo := 0;
+  LHi := High(Fixups);
+  while LLo < LHi do
+  begin
+    LMid := (LLo + LHi) div 2;
+    if Fixups[LMid].Offset < Cardinal(AOffset) then
+      LLo := LMid + 1
+    else
+      LHi := LMid;
+  end;
+  while (LLo <= High(Fixups)) and (Fixups[LLo].Offset = Cardinal(AOffset)) do
+  begin
+    if not (Fixups[LLo].Kind in [fxStart, fxEnd]) then
+      Exit(LLo);
+    Inc(LLo);
+  end;
+  Result := -1;
 end;
 
 function TPasDcuUnit.UsesOf(AUnitIdx: Integer): TPasDcuUses;
@@ -2279,19 +2339,64 @@ end;
 
 { Tables read only for their length }
 
-procedure TPasDcuReader.SkipFixups;
+procedure TPasDcuReader.ReadFixups;
 var
   LCount, LIdx: Integer;
+  LOfs: Cardinal;
 begin
   if FFixupsSeen then
     Error('Second fixup table');
   FFixupsSeen := True;
   LCount := ReadUIndex;
-  for LIdx := 1 to LCount do
+  SetLength(FUnit.Fixups, LCount);
+  LOfs := 0;
+  for LIdx := 0 to LCount - 1 do
   begin
-    ReadUIndex;                  // offset delta
-    ReadByte;                    // kind
-    ReadUIndex;                  // target slot
+    Inc(LOfs, Cardinal(ReadUIndex));           // offsets are stored as deltas
+    if LOfs > Cardinal(Length(FUnit.DataBlock)) then
+      Error('Fixup offset $%x beyond the data block ($%x)',
+        [LOfs, Length(FUnit.DataBlock)]);
+    FUnit.Fixups[LIdx].Offset := LOfs;
+    FUnit.Fixups[LIdx].Kind := ReadByte;
+    FUnit.Fixups[LIdx].Slot := ReadUIndex;
+  end;
+end;
+
+// A declaration owns the data-block bytes from its fxStart row to the next
+// fxStart or fxEnd row. A string literal block (drStrConstRec) already
+// carries its own offset and size in the record; the two agree, and the
+// fixup rows are the only source for a typed constant.
+procedure TPasDcuReader.AssignDataRanges;
+var
+  LIdx, LStart: Integer;
+  LDecl: TPasDcuDecl;
+begin
+  LStart := -1;
+  for LIdx := 0 to High(FUnit.Fixups) do
+    if FUnit.Fixups[LIdx].Kind in [fxStart, fxEnd] then
+    begin
+      if LStart >= 0 then
+      begin
+        LDecl := FUnit.AddrAt(FUnit.Fixups[LStart].Slot);
+        if (LDecl <> nil) and (LDecl.DataSize < 0) then
+        begin
+          LDecl.DataOffset := Integer(FUnit.Fixups[LStart].Offset);
+          LDecl.DataSize := Integer(FUnit.Fixups[LIdx].Offset) - LDecl.DataOffset;
+        end;
+      end;
+      if FUnit.Fixups[LIdx].Kind = fxStart then
+        LStart := LIdx
+      else
+        LStart := -1;
+    end;
+  if LStart >= 0 then
+  begin
+    LDecl := FUnit.AddrAt(FUnit.Fixups[LStart].Slot);
+    if (LDecl <> nil) and (LDecl.DataSize < 0) then
+    begin
+      LDecl.DataOffset := Integer(FUnit.Fixups[LStart].Offset);
+      LDecl.DataSize := Length(FUnit.DataBlock) - LDecl.DataOffset;
+    end;
   end;
 end;
 
@@ -2591,9 +2696,9 @@ begin
             if FDataBlockSeen then
               Error('Second data block');
             FDataBlockSeen := True;
-            Skip(ReadUIndex);
+            FUnit.DataBlock := ReadBytes(ReadUIndex);
           end;
-        drFixUp: SkipFixups;
+        drFixUp: ReadFixups;
         drCodeLines: SkipCodeLines;
         drLinNum: SkipLineRanges;
         drStrucScope: SkipStrucScope;
@@ -2713,6 +2818,7 @@ begin
   // fixups; stopping anywhere earlier means a record it did not understand.
   if not (FDataBlockSeen and FFixupsSeen) then
     Error('Unknown record ended the declaration list');
+  AssignDataRanges;
 end;
 
 end.

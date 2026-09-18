@@ -1,6 +1,6 @@
 # Reading `.dcu` files: findings, the decision, what was built
 
-Status: **shipped 2026-09-17 (v0.37.0)** - `source/PasTree.Dcu.pas` reads a
+Status: **shipped 2026-09-17 (v0.37.0), values and modifiers added 2026-09-18 (v0.38.0)** - `source/PasTree.Dcu.pas` reads a
 compiled unit, `source/PasTree.Dcu.Source.pas` prints its interface section,
 and `TPasSourceManager` falls back to a `.dcu` when no `.pas` exists for a
 unit name. This is README stage 3 of "units with no source": when a
@@ -114,8 +114,9 @@ on such a unit without knowing where it came from.
   `$23`..`$25` (Delphi 11, 12, 13) on Win32 and Win64 and refuses anything
   else by name (`DcuVersionName`). Reads the header, the source-file list,
   the three uses lists with their imports, and the declaration list with
-  every record kind the three Studios write; skips the data block, fixups,
-  line tables, debug tables and inline bodies for their length only. The
+  every record kind the three Studios write; keeps the data block and the
+  fixup table (the values of typed constants are read from them, see below)
+  and skips line tables, debug tables and inline bodies for their length only. The
   three tables (address slots, type entries, uses) are reproduced exactly,
   including the two numbering rules the probe found (`DropLastAddr`,
   `ReserveAddr`). `LoadDcu(path, trace)` gives the `<offset> <tag>` stream
@@ -148,23 +149,64 @@ on such a unit without knowing where it came from.
   its importer's `F1027` say so: `its .dcu could not be read: Delphi 10.4 is
   not supported` (`SF1027_UnitDcuUnreadable`) rather than "no source".
 
-**What the text does not carry, said where it would be.** A typed constant
-is printed as `var X: T;` with a comment - its value is compiled data this
-reader does not decode. A resourcestring gets an empty value. A type the
+**What the text does not carry, said where it would be.** A type the
 printer cannot resolve is spelled `__PasTreeUnresolved`, declared nowhere, so
 each use is an honest `E2003` in the generated unit; the header comment lists
-every such fallback. Strict visibility, `abstract`/`sealed` on classes,
-`reintroduce`/`abstract`/`final` on methods and enumeration scoping are not
-stored in a form the reader knows and are left out. A generic type's
-parameter names are not stored beside it: they are recovered from the unit's
-own instantiation of the type with its parameters, else from the parameter
-types its members mention, else synthesized - members always print the same
-entries, so header and body agree. Whether a helper is a class or a record
-helper is decided by the helped type's kind (an imported class cannot be
-told from an imported record; it is printed as a record helper, which the
-resolver treats the same).
+every such fallback. A typed constant whose value cannot be laid out (see
+"Values in the data block" below) is printed as `var X: T;` with the reason in
+a comment, so its type is right even then. `reintroduce` on a method and
+`abstract` on a class are not in the file (see the gaps) and are left out;
+enumeration scoping is not either. A generic type's parameter names are not
+stored beside it: they are recovered from the unit's own instantiation of
+the type with its parameters, else from the parameter types its members
+mention, else synthesized - members always print the same entries, so header
+and body agree.
 
-**Gates, all green on 2026-09-17.**
+**Values in the data block (added 2026-09-18, v0.38.0).** A typed constant's
+bytes, a string literal's characters and a class's VMT all live in the `$6C`
+data block, and the `$6D` fixup table says where: a row of kind 0 (`fxStart`)
+opens the bytes of the declaration whose address slot it names, the next
+kind 0 or kind 1 (`fxEnd`) row closes them, and every other kind patches a
+pointer-sized slot at that offset with the address of the slot it names
+(kind 4 on Win32, 14 on Win64 - the reader does not care which). The reader
+keeps the block (`TPasDcuUnit.DataBlock`), reads the table for real
+(`Fixups`, offsets made absolute) and assigns every declaration its range
+(`DataOffset`/`DataSize`). The printer's `TryDataValue` walks a value by its
+type: ordinals, enumerations (member names), Booleans, characters, sets,
+Single/Double/Extended (10 bytes on Win32, 8 on Win64), Currency (scaled by
+10000), Comp, ShortString, static arrays, records (field by field, in
+`(X: 1; Y: 2)` form), `TGUID` as its string literal, and the pointer-shaped
+kinds - `string`/`AnsiString` (the pointer lands 12 bytes into the literal
+block, past its StrRec header), `PChar`/`PAnsiChar` (a bare run of
+characters), `nil`, a routine's name for a procedural type, a class name for
+a class reference (the fixup names the `.TFoo` VMT declaration), `@Var`. A
+resourcestring's text is the unnamed `.` constant in the slot right after it.
+
+An imported type carries only its name in this file. System's types are
+known by name (`ImportSize`, with the compiler's own `@AnsiChr`/`@PAnsiChr`
+spellings mapped back); any other import is followed into **its own unit's
+`.dcu` beside this file** (`ForeignUnit`/`ResolveImport`, cached per
+printer), which is what turns `const PKEY_X: TPropertyKey = ...` in a Winapi
+unit into `(fmtid: '{...}'; pid: 7)` and reads `TColor` arrays, imported
+enumerations and sets with their member names. The same lookup decides
+whether a helper of an imported type is a class or a record helper (25 of
+the RTL's 75 helpers were printed as record helpers before). Over the Delphi
+13 Win64 RTL, 14,473 typed constants print with a value and 58 fall back -
+33 are `DBID` (a record with a variant part), the rest are pointer values
+into things this reader does not name (a `Pointer` whose fixup targets an
+imported routine, `DPI_AWARENESS_CONTEXT(-1)`, a `WideString`).
+
+**Modifiers, probed 2026-09-18** by compiling one-difference units and
+reading the dumps: `strict` is bit `$10` of a member's normalized flag word
+beside the scope (`$10` strict private, `$14` strict protected; records
+too); a method header's `VProc` carries `abstract` as `$20` and `final` as
+`$40000`; a class definition's `B04` carries `sealed` as `$40`. Its `$4` is
+NOT the `abstract` keyword: it is also set on every class with an abstract
+method anywhere in its ancestry, including one that overrides that method,
+so it is not printed. `reintroduce` leaves no trace at all (the header and
+the member row are byte-identical with and without it).
+
+**Gates, all green on 2026-09-17 and again on 2026-09-18 (v0.38.0: 10,199 units read and parsed, `DcuSmoke` 126 checks, client project 0 diagnostics).**
 - Reader + printer + parser over every `lib\<platform>\release` of Studio
   22.0, 23.0 and 37.0, Win32 and Win64: 10,199 units read to the end, 10,199
   generated sources with zero syntax diagnostics (`tools\PasTreeDcu.exe <dir>
@@ -201,25 +243,18 @@ is even possible, differs by kind.
 
 **1. In the file; this reader does not decode it yet.**
 
-- **Typed-constant values and resourcestring text.** Both live in the data
-  block (`$6C`/`drCBlock`) with the fixup table (`$6D`/`drFixUp`); the reader
-  currently skips both for their length only (`SkipFixups`,
-  `TPasDcuReader.Load`'s `drCBlock` case). The oracle decodes this
-  (`TUnit.ShowGlobalTypeValue` in `local/dcu32int/voss/DCU32.pas`) for
-  ordinals, floats and strings; records and arrays go through the same
-  routine recursively. A reader-side decode needs the fixup table read for
-  real (currently `SkipFixups` throws its offsets away) and a value walker
-  keyed by the constant's type, mirroring `ConstValueText` but reading bytes
-  out of the data block at a fixup-resolved offset instead of out of the
-  record itself.
-- **Class/method modifier bits we read but never interpret:** `ClassFlags`
-  (`BX`/`B04` in `ReadClassDef`) almost certainly carry `abstract`/`sealed`;
-  `ProcFlags` on a method likely carries `reintroduce`; `arFinalFlag` ($C2)
-  is read and dropped in `ReadDeclList` with no effect at all - it is
-  probably a method's `final`. Method: compile two units differing in
-  exactly one such modifier, diff the tag-traced byte streams
-  (`DCU_TRACE=1` on the oracle, or this reader's own `ATrace` callback), find
-  which bit flips.
+- **Typed constants the value walker refuses** (58 of 14,531 in the Delphi
+  13 Win64 RTL, all listed in each unit's header comment): a record with a
+  variant part (`DBID` in Winapi.OleDB - the overlapping fields would print
+  as one flat tuple, which is not a legal initializer), a `Pointer` or
+  procedural value whose fixup targets an imported routine (`SysInit`'s
+  delay-load hooks - the target is a `dkImport` row, which `TryPointerValue`
+  does not name), a pointer type holding a non-nil literal without a fixup
+  (`DPI_AWARENESS_CONTEXT(-1)`, printable as a typed cast), and `WideString`
+  (a BSTR literal block this reader does not follow). Each is a small case
+  in `TryDataValue` / `TryPointerValue` in `PasTree.Dcu.Source.pas`; the
+  tally recipe is `PasTreeDcu <unit> -src` over `lib\win64\release` and a
+  grep for `could not be decoded`.
 - **Generic parameter names via self-instantiation is a fallback, not a
   read.** The DCU does not link an A6 parameter-list entry to the type
   declaration it belongs to; `GenericParamNames` in
@@ -230,6 +265,17 @@ is even possible, differs by kind.
   recoverable position would print wrong names.
 
 **2. Not in the file; no read can recover it.**
+
+- **`reintroduce`.** Probed 2026-09-18: a method declared with and without
+  it produces byte-identical header and member rows. It only silences
+  W1010 and the compiler keeps nothing of it.
+- **`abstract` on a class.** The one candidate bit (`$4` of `B04`) is set
+  for `class abstract` AND for any class with an abstract method somewhere
+  in its ancestry, implemented or not (`TFromAbsMethod`, which overrides the
+  only abstract method, still carries it). A class that is abstract by
+  keyword alone cannot be told from one that merely inherits from an
+  abstract-method class, so the keyword is not printed; instantiating such a
+  class would be `E2402` against the real unit and nothing against the text.
 
 - **`{$SCOPEDENUMS}`.** An enum's members are ordinary named constants in
   the DCU with no scoping bit; the printer emits them unscoped
@@ -270,16 +316,3 @@ is even possible, differs by kind.
   today, so there was no reason to test them, but if that changes, the
   platform byte -> `TPasDcuPlatform` mapping in `DcuHeader` is where they
   would be added, following the oracle's `ReadMagic` table verbatim.
-- **A class helper vs. a record helper, for a helper of an imported type.**
-  A helper is stored as a metaclass whose target (`hCl`/`MetaClassIdx`) is
-  the helped type; `PrintStructured` in `PasTree.Dcu.Source.pas` decides
-  "class helper" vs "record helper" by checking whether the helped type's
-  OWN type-table entry says `tkClass`/`tkMetaClass` - which works when the
-  helped type is defined in the same unit, but an imported type's entry
-  (`tkImport`) carries only a name, not its kind, so the guess defaults to
-  "record helper" for any helper of an imported type. Fixable in principle
-  by reading the OTHER unit's `.dcu` to learn what its type actually is -
-  every `.dcu` this reader has seen sits in one of a handful of library
-  directories, so a second `LoadDcu` call keyed by the uses-list unit name
-  is plausible - but nothing does that today, and it is a real second read
-  per ambiguous case, not a table lookup.

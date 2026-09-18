@@ -48,7 +48,7 @@ uses
   PasTree.TestKit in 'PasTree.TestKit.pas';
 
 const
-  FIXTURE: array[0..67] of string = (
+  FIXTURE: array[0..78] of string = (
     'unit DcuFix;',
     'interface',
     'uses System.SysUtils, System.Classes;',
@@ -76,6 +76,8 @@ const
     '    TKind = (skRound, skSquare);',
     '  private',
     '    FTag: Integer;',
+    '  strict private',
+    '    FSecret: Integer;',
     '    function GetArea: Double;',
     '  protected',
     '    class var FCount: Integer;',
@@ -83,13 +85,15 @@ const
     '    const DefaultTag = 7;',
     '    procedure Draw; virtual;',
     '    class function Kind: TKind; virtual;',
+    '    procedure Reset; virtual; abstract;',
     '    property Area: Double read GetArea;',
     '    property Tag: Integer read FTag write FTag default 7;',
     '  end;',
-    '  TCircle = class(TShape)',
+    '  TCircle = class sealed(TShape)',
     '  public',
     '    constructor Create(ARadius: Double = 1.5);',
-    '    procedure Draw; override;',
+    '    procedure Draw; override; final;',
+    '    procedure Reset; override;',
     '  end;',
     '  TBox<T> = class(TObject)',
     '  private',
@@ -107,6 +111,12 @@ const
     '  end;',
     'var',
     '  GCount: Integer;',
+    'const',
+    '  KTypedStr: string = ''Typed'';',
+    '  KTypedVec: TVec = (X: 1; Y: 2);',
+    '  KTypedSet: TColors = [cRed, cBlue];',
+    '  KTypedGrid: TGrid = (1, 2, 3, 4);',
+    '  KTypedClass: TClass = TCircle;',
     'function Sum(const A: array of Integer): Integer;',
     'procedure Log(const S: string; Level: Integer = 3); overload;',
     'procedure Log(const S: string; const Args: array of const); overload;',
@@ -116,6 +126,7 @@ const
     'class function TShape.Kind: TKind; begin Result := skRound; end;',
     'constructor TCircle.Create(ARadius: Double); begin inherited Create; end;',
     'procedure TCircle.Draw; begin inherited; end;',
+    'procedure TCircle.Reset; begin end;',
     'function TBox<T>.Get: T; begin Result := FItem; end;');
   FIXTURE_TAIL: array[0..7] of string = (
     'procedure TBox<T>.Put(const AItem: T); begin FItem := AItem; end;',
@@ -338,9 +349,14 @@ begin
     Ok(ATag + ': string constant', LSrc.Contains('KName = ''PasTree'';'));
     Ok(ATag + ': float constant', LSrc.Contains('KPi = 3.25;'));
     Ok(ATag + ': typed constant as a typed variable',
-      LSrc.Contains('KTyped: Integer; { typed constant'));
-    Ok(ATag + ': resourcestring with an empty value',
-      LSrc.Contains('SHello = ''''; {'));
+      LSrc.Contains('KTyped: Integer = 5;'));
+    Ok(ATag + ': resourcestring with its text', LSrc.Contains('SHello = ''Hello'';'));
+    Ok(ATag + ': typed string constant', LSrc.Contains('KTypedStr: UnicodeString = ''Typed'';') or
+      LSrc.Contains('KTypedStr: string = ''Typed'';'));
+    Ok(ATag + ': typed record constant', LSrc.Contains('KTypedVec: TVec = (X: 1; Y: 2);'));
+    Ok(ATag + ': typed set constant', LSrc.Contains('KTypedSet: TColors = [cRed, cBlue];'));
+    Ok(ATag + ': typed array constant', LSrc.Contains('KTypedGrid: TGrid = (1, 2, 3, 4);'));
+    Ok(ATag + ': typed class reference constant', LSrc.Contains('KTypedClass: TClass = TCircle;'));
     Ok(ATag + ': enumeration', LSrc.Contains('TColor3 = (cRed, cGreen, cBlue);'));
     Ok(ATag + ': set', LSrc.Contains('TColors = set of TColor3;'));
     Ok(ATag + ': static array', LSrc.Contains('TGrid = array[0..3] of Integer;'));
@@ -362,8 +378,15 @@ begin
     Ok(ATag + ': read-only property', LSrc.Contains('property Area: Double read GetArea;'));
     Ok(ATag + ': property with default',
       LSrc.Contains('property Tag: Integer read FTag write FTag default 7;'));
-    Ok(ATag + ': visibility words', LSrc.Contains('    private') and
-      LSrc.Contains('    protected') and LSrc.Contains('    public'));
+    Ok(ATag + ': visibility words at the class column', LSrc.Contains(#13#10'  private'#13#10) and
+      LSrc.Contains(#13#10'  protected'#13#10) and LSrc.Contains(#13#10'  public'#13#10) and
+      LSrc.Contains(#13#10'  strict private'#13#10'    FSecret: Integer;'));
+    Ok(ATag + ': sealed class, abstract and final methods',
+      LSrc.Contains('TCircle = class sealed(TShape)') and
+      LSrc.Contains('procedure Reset; virtual; abstract;') and
+      LSrc.Contains('procedure Draw; override; final;'));
+    Ok(ATag + ': one blank line between structured types',
+      LSrc.Contains('  end;'#13#10#13#10'  TCircle = class') and not LSrc.Contains(#13#10#13#10#13#10));
     Ok(ATag + ': override', LSrc.Contains('procedure Draw; override;'));
     Ok(ATag + ': constructor with a float default',
       LSrc.Contains('constructor Create(ARadius: Double = 1.5);'));
