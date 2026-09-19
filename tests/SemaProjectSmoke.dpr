@@ -2086,6 +2086,258 @@ const
     'begin with F[0, 1, 2] do Result := (X = 1) and (Y = 2); end;'#10 +
     'end.'#10;
 
+  // 5.7, the three target shapes an FMX grid library reported in one run
+  // (60 false E2003 over 6 units, 2026-09-19), all dcc64 37.0-compiled as a
+  // fixture: a generic CLASS instantiation qualifying a static class function
+  // (`TFactory<TThing>.CreateWithParent(P)` - T is the result), a generic
+  // METHOD with written type arguments (`CreateControlWith<TThing>(a, b)`),
+  // and an inner target `Footers.Add` whose head is a member of the OUTER
+  // target AND the last segment of a used dotted unit name (`UWLib.Footers`).
+  // The first two were designator forms the with-target typer lacked and the
+  // expression walk had - which is why the target typer now IS that walk;
+  // the third was the unit-qualifier text match outranking the with scope.
+  UNIT_WGEN =
+    'unit UWGen;'#10'interface'#10 +
+    'type'#10 +
+    '  TObj = class'#10 +
+    '  public'#10 +
+    '    constructor Create(AOwner: TObj); virtual;'#10 +
+    '  end;'#10 +
+    '  TThing = class(TObj)'#10 +
+    '  private'#10 +
+    '    FStyleName: string;'#10 +
+    '    FWrapMode: Integer;'#10 +
+    '  public'#10 +
+    '    property StyleName: string read FStyleName write FStyleName;'#10 +
+    '    property WrapMode: Integer read FWrapMode write FWrapMode;'#10 +
+    '  end;'#10 +
+    '  TThingHelper = class helper for TThing'#10 +
+    '  private'#10 +
+    '    function GetRefSelf: TThing;'#10 +
+    '  public'#10 +
+    '    property RefSelf: TThing read GetRefSelf;'#10 +
+    '  end;'#10 +
+    '  TFactory<T: TThing> = class'#10 +
+    '  public'#10 +
+    '    class function CreateWithParent(AParent: TObj): T; static;'#10 +
+    '  end;'#10 +
+    '  TGenericHelper = class'#10 +
+    '    class function CreateControlWith<T: TThing>(AOwner: TObj; AParent: TObj): T; overload;'#10 +
+    '    class function CreateControlWith<T: TThing>(AOwner: TObj; AParent: TThing): T; overload;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'constructor TObj.Create(AOwner: TObj);'#10 +
+    'begin inherited Create; end;'#10 +
+    'function TThingHelper.GetRefSelf: TThing;'#10 +
+    'begin Result := Self; end;'#10 +
+    'class function TFactory<T>.CreateWithParent(AParent: TObj): T;'#10 +
+    'begin Result := T.Create(AParent); end;'#10 +
+    'class function TGenericHelper.CreateControlWith<T>(AOwner: TObj; AParent: TObj): T;'#10 +
+    'begin Result := T.Create(AOwner); end;'#10 +
+    'class function TGenericHelper.CreateControlWith<T>(AOwner: TObj; AParent: TThing): T;'#10 +
+    'begin Result := T.Create(AOwner); end;'#10 +
+    'end.'#10;
+
+  // A DOTTED unit name whose last segment, `Footers`, is also a member name
+  // of the column classes below (file UWLib.Footers.pas).
+  UNIT_WFOOTERS =
+    'unit UWLib.Footers;'#10'interface'#10'uses UWGen;'#10 +
+    'type'#10 +
+    '  TBaseColumnFootersEh = class;'#10 +            // forward, as the library writes it
+    '  TBaseColumnFooterEh = class(TObj)'#10 +
+    '  private'#10 +
+    '    FAggregateFunction: Integer;'#10 +
+    '    FHorzAlign: Integer;'#10 +
+    '  public'#10 +
+    '    property AggregateFunction: Integer read FAggregateFunction write FAggregateFunction;'#10 +
+    '    property HorzAlign: Integer read FHorzAlign write FHorzAlign;'#10 +
+    '  end;'#10 +
+    '  TBaseColumnFootersEh = class(TObj)'#10 +
+    '  public'#10 +
+    '    function Add: TBaseColumnFooterEh;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TBaseColumnFootersEh.Add: TBaseColumnFooterEh;'#10 +
+    'begin Result := TBaseColumnFooterEh.Create(Self); end;'#10 +
+    'end.'#10;
+
+  UNIT_WCOLS =
+    'unit UWCols;'#10'interface'#10'uses UWGen, UWLib.Footers;'#10 +
+    'type'#10 +
+    '  TColumnFootersEh = class(TBaseColumnFootersEh)'#10 +
+    '  end;'#10 +
+    '  TBaseColumnEh = class(TObj)'#10 +
+    '  private'#10 +
+    '    FFooters: TBaseColumnFootersEh;'#10 +
+    '    FHorzAlign: Integer;'#10 +
+    '  public'#10 +
+    '    property Footers: TBaseColumnFootersEh read FFooters;'#10 +
+    '    property HorzAlign: Integer read FHorzAlign write FHorzAlign;'#10 +
+    '  end;'#10 +
+    '  TColumnEh = class(TBaseColumnEh)'#10 +
+    '  private'#10 +
+    '    function GetFooters: TColumnFootersEh;'#10 +
+    '  public'#10 +
+    '    property Footers: TColumnFootersEh read GetFooters;'#10 +  // typed redeclaration
+    '  end;'#10 +
+    '  TStringColumnEh = class(TColumnEh)'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TColumnEh.GetFooters: TColumnFootersEh;'#10 +
+    'begin Result := TColumnFootersEh(inherited Footers); end;'#10 +
+    'end.'#10;
+
+  UNIT_WGENUSE =
+    'unit UWGenUse;'#10'interface'#10 +
+    'uses UWGen, UWCols, UWLib.Footers;'#10 +
+    'type'#10 +
+    '  TBuilder = class(TObj)'#10 +
+    '  public'#10 +
+    '    procedure Build(AParent: TObj);'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TBuilder.Build(AParent: TObj);'#10 +
+    'var'#10 +
+    '  LObj: TThing;'#10 +
+    'begin'#10 +
+    '  with TFactory<TThing>.CreateWithParent(AParent) do'#10 +   // 13 generic class instantiation
+    '  begin'#10 +
+    '    StyleName := ''a'';'#10 +
+    '    WrapMode := 1;'#10 +
+    '    LObj := RefSelf;'#10 +                                    // 17 helper member
+    '  end;'#10 +
+    '  with TGenericHelper.CreateControlWith<TThing>(Self, AParent) do'#10 +   // 19 generic method
+    '  begin'#10 +
+    '    WrapMode := 2;'#10 +
+    '    LObj := RefSelf;'#10 +
+    '  end;'#10 +
+    '  with TStringColumnEh.Create(Self) do'#10 +
+    '  begin'#10 +
+    '    with Footers.Add do'#10 +                                 // 26 member that names a used unit
+    '    begin'#10 +
+    '      AggregateFunction := 3;'#10 +
+    '      HorzAlign := 4;'#10 +                                   // 29 the footer's, not the column's
+    '    end;'#10 +
+    '    HorzAlign := 5;'#10 +                                     // 31 the column's
+    '  end;'#10 +
+    '  if LObj = nil then Exit;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  // 5.7, the remaining target forms of the spec's table that only the corpora
+  // used to guard (each one a real false-E2003 source once): the arity-0
+  // overload reached through a CROSS-unit binding (dxRibbon's `with
+  // GetScreenBounds do`), a target that also names a used unit (`with
+  // ZStream, ZLIB do`, Vcl.Imaging.pngimage), an inferred inline var, a
+  // procedural-type value called with arguments, a cast to a NESTED type
+  // through its outer one, a constructor through a class reference,
+  // `Default(T)`, the with scope inside an anonymous method, a record helper
+  // member, and a bare class TYPE NAME. The negative rules (parentheses
+  // demote to a value, `with P do` without `^` is E2018) are not modelled and
+  // therefore not asserted - see docs/coverage.md 5.7.
+  UNIT_WOVL1 =
+    'unit UWOvl1;'#10'interface'#10 +
+    'type'#10 +
+    '  TRectLike = record Left, Right: Integer; end;'#10 +
+    '  TRectLikeHelper = record helper for TRectLike'#10 +
+    '    function Width: Integer;'#10 +
+    '  end;'#10 +
+    '  TZLibRec = record next_out: Integer; end;'#10 +
+    '  TZStreamRec = record ZLIB: TZLibRec; end;'#10 +
+    '  TBaseA = class'#10 +
+    '    function GetScreenBounds: TRectLike; overload; virtual;'#10 +
+    '    function GetScreenBounds(out ABounds: TRectLike): Boolean; overload; virtual;'#10 +
+    '  end;'#10 +
+    '  TOuter = class'#10 +
+    '  type'#10 +
+    '    TInner = class Sz: Integer; end;'#10 +
+    '  end;'#10 +
+    '  TAny = class end;'#10 +
+    '  TRectObj = class'#10 +
+    '    Top: Integer;'#10 +
+    '    constructor Create;'#10 +
+    '    class procedure ClassTick;'#10 +
+    '  end;'#10 +
+    '  TRectCls = class of TRectObj;'#10 +
+    '  TGateway = reference to function(A: Boolean): TRectLike;'#10 +
+    'function MakeRect: TRectLike;'#10 +
+    'function GetCls: TRectCls;'#10 +
+    'var GGate: TGateway;'#10 +
+    'implementation'#10 +
+    'function TRectLikeHelper.Width: Integer;'#10 +
+    'begin Result := Right - Left; end;'#10 +
+    'function TBaseA.GetScreenBounds: TRectLike;'#10 +
+    'begin Result.Left := 0; Result.Right := 0; end;'#10 +
+    'function TBaseA.GetScreenBounds(out ABounds: TRectLike): Boolean;'#10 +
+    'begin ABounds := GetScreenBounds; Result := True; end;'#10 +
+    'constructor TRectObj.Create;'#10 +
+    'begin Top := 0; end;'#10 +
+    'class procedure TRectObj.ClassTick;'#10 +
+    'begin end;'#10 +
+    'function MakeRect: TRectLike;'#10 +
+    'begin Result.Left := 0; Result.Right := 0; end;'#10 +
+    'function GetCls: TRectCls;'#10 +
+    'begin Result := TRectObj; end;'#10 +
+    'end.'#10;
+
+  // The override sits in a MIDDLE unit, so the leaf binds the name cross-unit
+  // (ExtRefMap, the inherited pass) - the reading PreferParamlessOverload
+  // used to miss.
+  UNIT_WOVL2 =
+    'unit UWOvl2;'#10'interface'#10'uses UWOvl1;'#10 +
+    'type'#10 +
+    '  TMidA = class(TBaseA)'#10 +
+    '    function GetScreenBounds(out ABounds: TRectLike): Boolean; override;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TMidA.GetScreenBounds(out ABounds: TRectLike): Boolean;'#10 +
+    'begin Result := inherited GetScreenBounds(ABounds); end;'#10 +
+    'end.'#10;
+
+  UNIT_ZLIB =
+    'unit ZLIB;'#10'interface'#10 +
+    'const ZLibVersion = 1;'#10 +
+    'implementation'#10'end.'#10;
+
+  UNIT_WOVLUSE =
+    'unit UWOvlUse;'#10'interface'#10 +
+    'uses ZLIB, UWOvl1, UWOvl2;'#10 +
+    'type'#10 +
+    '  TProc = reference to procedure;'#10 +
+    '  TLeaf = class(TMidA)'#10 +
+    '    procedure Go(var ZStream: TZStreamRec; O: TAny; R: TRectLike);'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TLeaf.Go(var ZStream: TZStreamRec; O: TAny; R: TRectLike);'#10 +
+    'var'#10 +
+    '  X, N: Integer;'#10 +
+    '  P: TProc;'#10 +
+    'begin'#10 +
+    '  with GetScreenBounds do'#10 +             // 13 arity-0 overload, cross-unit binding
+    '    X := (Left + Right) div 2;'#10 +
+    '  with ZStream, ZLIB do'#10 +              // 15 the second target names a used unit
+    '    next_out := 1;'#10 +
+    '  var L := MakeRect;'#10 +
+    '  with L do'#10 +                          // 18 inferred inline var
+    '    X := Left;'#10 +
+    '  with GGate(True) do'#10 +                // 20 procedural value called
+    '    X := Left;'#10 +
+    '  with TOuter.TInner(O) do'#10 +           // 22 cast to a nested type
+    '    Sz := 1;'#10 +
+    '  with GetCls.Create do'#10 +              // 24 constructor through a class reference
+    '    Top := 1;'#10 +
+    '  with Default(TRectLike) do'#10 +         // 26 intrinsic
+    '    X := Left;'#10 +
+    '  with R do'#10 +
+    '    P := procedure begin X := Left; end;'#10 +   // 29 with scope inside a closure
+    '  with R do'#10 +
+    '    N := Width;'#10 +                      // 31 record helper member
+    '  with TRectObj do'#10 +                   // 32 bare class type name
+    '    ClassTick;'#10 +
+    '  if (X = 0) or (N = 0) then Exit;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // 1.2.4: SysInit is implicitly visible to every OTHER unit, exactly like
   // System, via EnsureSysInitUnit's own ResolveUnit('SysInit', ...) lookup --
   // never tested at all before this (mirrors UNIT_SYS/UNIT_E's proof of the
@@ -2327,6 +2579,14 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UWGenuine.pas'), UNIT_WGENUINE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UWGeo.pas'), UNIT_WGEO);
   TFile.WriteAllText(TPath.Combine(LDir, 'UWMatrix.pas'), UNIT_WMATRIX);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UWGen.pas'), UNIT_WGEN);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UWLib.Footers.pas'), UNIT_WFOOTERS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UWCols.pas'), UNIT_WCOLS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UWGenUse.pas'), UNIT_WGENUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UWOvl1.pas'), UNIT_WOVL1);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UWOvl2.pas'), UNIT_WOVL2);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ZLIB.pas'), UNIT_ZLIB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UWOvlUse.pas'), UNIT_WOVLUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitTObj.pas'), UNIT_TOBJ);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitQual.pas'), UNIT_QUAL);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNABase.pas'), UNIT_NABASE);
@@ -2606,6 +2866,52 @@ begin
       CrossRefCountInUnit(LWMat, 'Y', 'Y', 'uwgeo') = 4);
     Ok('WithMatrix: X/Y over the same-unit element bind locally (7+7)',
       LocalRefCount(LWMat, 'X') + LocalRefCount(LWMat, 'Y') = 14);
+
+    // The generic-target and unit-named-member shapes (see UNIT_WGENUSE).
+    // Every name is pinned to the unit that declares it, so the checks
+    // cannot pass by merely staying quiet.
+    var LWG := ModelByName('uwgenuse');
+    Ok('WithGen: unit loaded', Assigned(LWG));
+    Ok('WithGen: no diagnostics at all', Length(LWG.Diags) = 0);
+    Ok('WithGen: WrapMode binds to UWGen.TThing.WrapMode through the generic '
+      + 'class instantiation AND the generic method (2)',
+      CrossRefCountInUnit(LWG, 'WrapMode', 'WrapMode', 'uwgen') = 2);
+    Ok('WithGen: StyleName binds through the instantiation',
+      CrossRefCountInUnit(LWG, 'StyleName', 'StyleName', 'uwgen') = 1);
+    Ok('WithGen: the HELPER property RefSelf binds in both bodies',
+      CrossRefCountInUnit(LWG, 'RefSelf', 'RefSelf', 'uwgen') = 2);
+    Ok('WithGen: Footers is the column''s member, not the UWLib.Footers unit',
+      CrossRefCountInUnit(LWG, 'Footers', 'Footers', 'uwcols') = 1);
+    Ok('WithGen: AggregateFunction binds through Footers.Add into the footer',
+      CrossRefCountInUnit(LWG, 'AggregateFunction', 'AggregateFunction',
+        'uwlib.footers') = 1);
+    Ok('WithGen: HorzAlign - the inner body''s to the footer, the outer''s '
+      + 'to the column',
+      (CrossRefCountInUnit(LWG, 'HorzAlign', 'HorzAlign', 'uwlib.footers')
+       = 1) and
+      (CrossRefCountInUnit(LWG, 'HorzAlign', 'HorzAlign', 'uwcols') = 1));
+
+    // The rest of the spec's target table (see UNIT_WOVLUSE). Every member
+    // is declared in UWOvl1 and reachable ONLY through its with scope.
+    var LWO := ModelByName('uwovluse');
+    Ok('WithOvl: unit loaded', Assigned(LWO));
+    Ok('WithOvl: no diagnostics at all', Length(LWO.Diags) = 0);
+    Ok('WithOvl: Left binds to UWOvl1.TRectLike.Left in all 5 bodies - '
+      + 'arity-0 overload, inline var, procedural call, Default, closure',
+      CrossRefCountInUnit(LWO, 'Left', 'Left', 'uwovl1') = 5);
+    Ok('WithOvl: Right through the arity-0 overload, not the Boolean override',
+      CrossRefCountInUnit(LWO, 'Right', 'Right', 'uwovl1') = 1);
+    Ok('WithOvl: the second target ZLIB is the field, and next_out binds',
+      (CrossRefCountInUnit(LWO, 'ZLIB', 'ZLIB', 'uwovl1') = 1) and
+      (CrossRefCountInUnit(LWO, 'next_out', 'next_out', 'uwovl1') = 1));
+    Ok('WithOvl: Sz through the cast to a nested type',
+      CrossRefCountInUnit(LWO, 'Sz', 'Sz', 'uwovl1') = 1);
+    Ok('WithOvl: Top through a constructor on a class reference',
+      CrossRefCountInUnit(LWO, 'Top', 'Top', 'uwovl1') = 1);
+    Ok('WithOvl: Width is the record helper''s',
+      CrossRefCountInUnit(LWO, 'Width', 'Width', 'uwovl1') = 1);
+    Ok('WithOvl: ClassTick through the bare class type name',
+      CrossRefCountInUnit(LWO, 'ClassTick', 'ClassTick', 'uwovl1') = 1);
 
     // Module status / snapshot API: AnalyzeDirectory takes the directory's
     // own units all the way to msCrossReady, and TryGetSnapshot gates on the

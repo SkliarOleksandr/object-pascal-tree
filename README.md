@@ -1367,9 +1367,32 @@ Still open, roughly in the order we're tackling it:
   which is where the assignment-compatibility contract lives.
 
 - ~~**One cross-model expression typer, not two.**~~ **Tried on 2026-07-29 and
-  rejected on measurement - do not repeat it hoping for a different answer.**
+  rejected on measurement; done on 2026-09-19 (v0.39.0) the other way round,
+  and this time it paid.** The record of the first attempt stays below because
+  its measurements are what shaped the second.
 
-  There are two: `CrossType`'s `Walk`, which types every expression node, and
+  What changed: instead of teaching `Walk` the with-typer's kinds AND keeping
+  both, `WithTargetTypeX` now *is* `Walk` - `CrossType` gained a **probe mode**
+  (`TPasXProbe`): the same walk over one subtree, every table write redirected
+  into the probe's own dictionaries, nothing committed, the answer read off the
+  probe. The with pass keeps one probe per unit per round, so a target is typed
+  once per body instead of once per body NAME, and the with-specific rules the
+  old dispatch carried became value-position rules in the walk (`IsWithTarget`
+  for the parameterless overload, `CtorResultX`, the node-based `ElementX`
+  fallback under `nkIndex`, `nkInherited` as a value). `BindTypesX` moved ahead
+  of the with pass - it needs only declaration-site bindings, and the "4
+  symbols the with pass unlocks" below are now read on demand by `DeclTypeX`.
+  Measured on the frozen client (3767 units, `-members`): with 373 -> 342 ms,
+  xtype 618 -> 647 ms, wall 5.5 -> 5.6 s, diagnostics 0 -> 0 with an
+  identical list; the other corpora unchanged; the FMX grid library that
+  prompted it 60 -> 0. The trigger was the fourth corpus in a row to find a
+  designator form `Walk` typed and the with-typer did not (a generic class
+  instantiation as a qualifier, a generic method with written type
+  arguments) - each costing whole with bodies of false E2003. See 5.7 in the
+  spec for the rule this implements: the target's type is the expression
+  typer's answer, and a second typer is where the gaps live.
+
+  There were two: `CrossType`'s `Walk`, which types every expression node, and
   `WithTargetTypeX`, which types a `with` target. They are not
   subset-and-superset - each lacks kinds the other has (`Walk` no `nkIndex`/
   `nkDeref`/`nkBinaryOp`, `WithTargetTypeX` no `nkTypeArgs`/`nkInlineIf`) - so
