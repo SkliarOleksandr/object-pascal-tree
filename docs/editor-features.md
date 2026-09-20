@@ -140,6 +140,7 @@ identifier class does here:
 | 4 | A `forward`/interface routine's PARAMETER, from either header | both headers + the body's uses (a language rule - see 3.4) | OK |
 | 5 | A class method's parameter, from the class body or the implementation | both headers + the body's uses | OK |
 | 6 | A routine NAME with two headers (`forward`, method impl) | both headers + every call site | OK |
+| 6a | ...started FROM a method's qualified implementation header (`procedure TFoo.Bar;`), or from its class qualifier | the same - the header's name is answered structurally, overload-precisely, and the qualifier answers with the class | OK (0.39.1 - `ImplHeaderSym`; that header names no symbol, so `SymbolAt` used to decline it and Rename, Find References and the rest were all dead on the implementation side of every method) |
 | 7 | Implicit `Result` | nothing - refused, no declaration site to rename | OK (by design, 3.3) |
 | 8 | A compiler builtin (`Integer`, `Length`, `True`) | nothing - refused outright | OK (by design, 3.1) |
 | 9 | A UNIT, from its own header name or from any `uses` item (any segment) | the header + every `uses` item project-wide, whole dotted spans | OK (3.8) |
@@ -316,10 +317,19 @@ is either.
 Two walks, both over resolved bindings:
 
 1. **Up**, from the class of the method under the caret through
-   `AncestorOfX`, while each ancestor still declares a same-named method
-   carrying `virtual`/`dynamic`/`override`/`message`. The topmost one is the
-   chain's root - so clicking an `override` halfway down answers for the
-   whole chain, exactly like clicking the root does.
+   `AncestorOfX`, following the SLOT rather than the text: an ancestor that
+   does not declare the name is passed through (the slot is inherited across
+   it, as the method is), one declaring it `override`/`message` is a link,
+   one declaring it `virtual`/`dynamic` without `override` STARTED the slot
+   and is the root (`reintroduce; virtual;` included - anything above it is
+   a different slot this one hides), and an undecorated same-named
+   declaration ends the climb below itself (no `override` can pass through
+   it - E2170). So clicking an `override` anywhere down a chain answers for
+   the whole chain, exactly like clicking the root does. (Until 0.39.1 the
+   climb stopped at the first ancestor WITHOUT a same-named method, so an
+   override whose virtual sat a few quiet ancestors up - a form overriding
+   its base-form library's `DoSaveState` through intermediate forms that
+   never touch it - reported itself as its own root, "1 in 1 units".)
 2. **Down**, over a reverse-heritage index built for that one call from
    every class's `class(TBase)` reference AS THE RESOLVER BOUND IT
    (RefMap/ExtRefMap), then breadth-first. The index is the reason this is
@@ -335,8 +345,9 @@ What each declaration shape does:
 | 3 | `reintroduce` (deliberately NOT an override) | `pokReintroduce` - reported because a reader must not mistake it for one | OK |
 | 4 | A `message <expr>` handler in a descendant - implicitly virtual, and dcc rejects `override` on one | `pokMessage`, matched by name + directive | OK |
 | 5 | A same-named method with NONE of those directives (an ordinary hiding declaration, dcc's W1010) | no row, by design - it shares no slot, and it would drown every `Create`/`Destroy` result | OK (by design) |
-| 6 | A non-virtual method, or a virtual one nothing overrides | its own single `pokRoot` row - the honest "nothing overrides this" | OK |
-| 7 | Started from a qualified implementation header (`procedure TFoo.Bar;`) | the same chain (`MethodAt` takes the decl<->impl hop; the header's own name binds to no symbol, so `SymbolAt` alone declines it) | OK |
+| 6 | A `virtual`/`dynamic` method nothing overrides | its own single `pokRoot` row - the honest "nothing overrides this" | OK |
+| 6a | A method with NONE of the chain directives | `MethodAt` declines - the command is not offered. It cannot be overridden (dcc rejects `override` against it; a same-named descendant declaration only hides it - row 5), so the only row a search could return is the declaration the caret is already on | OK (0.39.1 - it used to be offered on every method in the project and answer with that one row) |
+| 7 | Started from a qualified implementation header (`procedure TFoo.Bar;`), or from anywhere inside the body | the same chain. `SymbolAt` answers for the header's own name directly since 0.39.1 (`ImplHeaderSym`); from inside the body `MethodAt` still takes the decl<->impl hop | OK |
 | 8 | A method of a record, an interface, or a plain routine | `MethodAt` declines - the command is not offered | OK (by design) |
 | 9 | An INTERFACE method's implementors (`TFoo = class(TObject, IBar)`) | - | not this search - a separate command, see §5 |
 | 9a | The CLASSES below this method's class (no method question at all) | - | not this search either - Find Descendants, §6 |

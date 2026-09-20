@@ -109,6 +109,45 @@ const
     'procedure TOvLeaf.Hidden(var M: Integer); begin end;'#10 + // 31
     'procedure TOvSkip.Paint; begin end;'#10 +       // 32
     'end.'#10;                                       // 33
+  { The climb to the root across QUIET ancestors. TGapOne/TGapTwo inherit
+    Save without declaring it - the ordinary shape of any framework (a form's
+    override of the base library's virtual, with intermediate forms that
+    never touch it), and the shape the first climb stopped dead at: it
+    exited on the first ancestor without a same-named method, so TGapLeaf
+    reported itself as its own root. Below the leaf, TReslot STARTS A NEW
+    SLOT (`reintroduce; virtual;`) that TReslotKid overrides: a climb from
+    the kid must stop at TReslot, never run on up to TGapRoot. A unit of its
+    own so the Find Descendants counts over NavOvrA/B stay what they are. }
+  UNIT_OVRC =
+    'unit NavOvrC;'#10 +                             // 1
+    'interface'#10 +                                 // 2
+    'type'#10 +                                      // 3
+    '  TGapRoot = class'#10 +                        // 4
+    '  public'#10 +                                  // 5
+    '    procedure Save; virtual;'#10 +              // 6  Save col 15
+    '  end;'#10 +                                    // 7
+    '  TGapOne = class(TGapRoot)'#10 +               // 8  declares nothing
+    '  end;'#10 +                                    // 9
+    '  TGapTwo = class(TGapOne)'#10 +                // 10 declares nothing
+    '  end;'#10 +                                    // 11
+    '  TGapLeaf = class(TGapTwo)'#10 +               // 12
+    '  public'#10 +                                  // 13
+    '    procedure Save; override;'#10 +             // 14  Save col 15
+    '  end;'#10 +                                    // 15
+    '  TReslot = class(TGapLeaf)'#10 +               // 16
+    '  public'#10 +                                  // 17
+    '    procedure Save; reintroduce; virtual;'#10 + // 18  Save col 15
+    '  end;'#10 +                                    // 19
+    '  TReslotKid = class(TReslot)'#10 +             // 20
+    '  public'#10 +                                  // 21
+    '    procedure Save; override;'#10 +             // 22  Save col 15
+    '  end;'#10 +                                    // 23
+    'implementation'#10 +                            // 24
+    'procedure TGapRoot.Save; begin end;'#10 +       // 25
+    'procedure TGapLeaf.Save; begin end;'#10 +       // 26
+    'procedure TReslot.Save; begin end;'#10 +        // 27
+    'procedure TReslotKid.Save; begin end;'#10 +     // 28
+    'end.'#10;                                       // 29
   UNIT_OVRB =
     'unit NavOvrB;'#10 +                             // 1
     'interface'#10 +                                 // 2
@@ -1278,6 +1317,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavIntfB.pas'), UNIT_INTFB);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOvrA.pas'), UNIT_OVRA);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOvrB.pas'), UNIT_OVRB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavOvrC.pas'), UNIT_OVRC);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavAsg.pas'), UNIT_ASG);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavCD.pas'), UNIT_CD);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRen.pas'), UNIT_REN);
@@ -1626,6 +1666,31 @@ begin
       LHits := GNav.FindReferences(LRTMid, LRSym);
       Ok('FindReferences: Fill(Integer) - exactly its own one call site',
         (Length(LHits) = 1) and HasHitAt(LHits, 'NavOvlUse.pas', 21, 11));
+
+      // A QUALIFIED IMPLEMENTATION HEADER (`function TCup.Fill(...)`). Its
+      // name binds to no symbol - the resolver creates none for it, and both
+      // of SymbolAt's lookups used to come up empty, so Find References,
+      // Rename and the rest were dead on the implementation side of every
+      // method in the project while working on the class-body declaration
+      // two screens up. Answered structurally now (ImplHeaderSym, 0.39.1),
+      // through the same decl<->impl pairing the toggle uses - which is
+      // signature-matched, so the two OVERLOADS below stay apart.
+      Ok('SymbolAt: TCup.Fill(Integer) implementation header',
+        GNav.SymbolAt(GMidB, 10, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Fill'));
+      LHits := GNav.FindReferences(LRTMid, LRSym);
+      Ok('FindReferences: from the impl header - the Integer overload only',
+        (Length(LHits) = 1) and HasHitAt(LHits, 'NavOvlUse.pas', 21, 11));
+      Ok('SymbolAt: TCup.Fill(string) implementation header',
+        GNav.SymbolAt(GMidB, 11, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Fill'));
+      LHits := GNav.FindReferences(LRTMid, LRSym);
+      Ok('FindReferences: from the impl header - the string overload only',
+        (Length(LHits) = 1) and HasHitAt(LHits, 'NavOvlUse.pas', 22, 11));
+      // The CLASS QUALIFIER of the same header is the class, not the method.
+      Ok('SymbolAt: the class qualifier of an implementation header',
+        GNav.SymbolAt(GMidB, 10, 10, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'TCup'));
 
       // The implicit Result: no DeclNode anywhere, yet a real, stable,
       // per-routine symbol - SymbolAt must NOT decline, and the scan must
@@ -2214,6 +2279,61 @@ begin
       Ok('FindOverrides: same chain from a middle override', (Length(LOvs2) = 5)
         and (LOvs2[0].Kind = pokRoot) and (LOvs2[0].Hit.Line = 6));
 
+      // Started from the BOTTOM of the chain, in ANOTHER UNIT: the climb has
+      // to leave NavOvrB entirely to find the root, hydrating NavOvrA to
+      // read its directives on the way. From the class-body declaration and
+      // from the implementation header alike - the whole chain either way,
+      // never "from here down".
+      var LMidOvB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavOvrB.pas'));
+      Ok('NavOvrB model found', LMidOvB >= 0);
+      Ok('MethodAt: TOvFar.Paint (the deepest link, another unit)',
+        GNav.MethodAt(LMidOvB, 7, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Paint'));
+      LOvs2 := GNav.FindOverrides(LRTMid, LRSym);
+      Ok('FindOverrides: the climb crosses OUT of the starting unit to the '
+        + 'root', (Length(LOvs2) = 5) and (LOvs2[0].Kind = pokRoot) and
+        SameText(ExtractFileName(LOvs2[0].Hit.FilePath), 'NavOvrA.pas') and
+        (LOvs2[0].Hit.Line = 6) and
+        HasOvAt(LOvs2, 'NavOvrB.pas', 7, pokOverride, 'TOvFar'));
+      Ok('MethodAt: TOvFar.Paint''s implementation header',
+        GNav.MethodAt(LMidOvB, 17, 19, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Paint'));
+      Ok('FindOverrides: the same whole chain from that impl header',
+        Length(GNav.FindOverrides(LRTMid, LRSym)) = 5);
+
+      // The climb across QUIET ancestors (NavOvrC - see the fixture). The
+      // real report: a form's `DoSaveState; override;` whose virtual sat
+      // three ancestors up in the base-form library, none of the classes
+      // between touching it - the search answered "1 in 1 units", itself.
+      var LMidOvC := GNav.ModelIdOf(TPath.Combine(LDir, 'NavOvrC.pas'));
+      Ok('NavOvrC model found', LMidOvC >= 0);
+      Ok('MethodAt: TGapLeaf.Save (override, root two quiet ancestors up)',
+        GNav.MethodAt(LMidOvC, 14, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Save'));
+      LOvs2 := GNav.FindOverrides(LRTMid, LRSym);
+      Ok('FindOverrides: the climb passes through ancestors that do not '
+        + 'declare the name - root is TGapRoot',
+        (Length(LOvs2) >= 2) and (LOvs2[0].Kind = pokRoot) and
+        SameText(LOvs2[0].TypeName, 'TGapRoot') and (LOvs2[0].Hit.Line = 6)
+        and HasOvAt(LOvs2, 'NavOvrC.pas', 14, pokOverride, 'TGapLeaf'));
+      // `reintroduce; virtual;` STARTS a new slot: from its override the
+      // climb stops there, and from the reslot itself there is no climb.
+      Ok('MethodAt: TReslotKid.Save (overrides a reintroduced slot)',
+        GNav.MethodAt(LMidOvC, 22, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Save'));
+      LOvs2 := GNav.FindOverrides(LRTMid, LRSym);
+      Ok('FindOverrides: the climb stops at the class that STARTED the slot',
+        (Length(LOvs2) = 2) and (LOvs2[0].Kind = pokRoot) and
+        SameText(LOvs2[0].TypeName, 'TReslot') and
+        HasOvAt(LOvs2, 'NavOvrC.pas', 22, pokOverride, 'TReslotKid'));
+      Ok('MethodAt: TReslot.Save (reintroduce; virtual - a root itself)',
+        GNav.MethodAt(LMidOvC, 18, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Save'));
+      LOvs2 := GNav.FindOverrides(LRTMid, LRSym);
+      Ok('FindOverrides: a reintroduced virtual does not climb above itself',
+        (Length(LOvs2) = 2) and (LOvs2[0].Kind = pokRoot) and
+        SameText(LOvs2[0].TypeName, 'TReslot'));
+
       // Started from the IMPLEMENTATION header: MethodAt normalizes to the
       // declaration-side symbol, so the chain is the same one again.
       Ok('MethodAt: TOvBase.Paint''s implementation header',
@@ -2233,14 +2353,18 @@ begin
         (LOvs[0].Hit.Line = 13) and
         HasOvAt(LOvs, 'NavOvrA.pas', 18, pokMessage, 'TOvLeaf'));
 
-      // A non-virtual method is still a method: the command is enabled and
-      // the answer is the honest one-row "nothing overrides this".
-      Ok('MethodAt: TOvBase.Plain (a non-virtual method)',
-        GNav.MethodAt(LMidOvA, 7, 15, {out} LRTMid, {out} LRSym,
-          {out} LRName) and SameText(LRName, 'Plain'));
-      LOvs := GNav.FindOverrides(LRTMid, LRSym);
-      Ok('FindOverrides: a non-virtual method is its own single row',
-        (Length(LOvs) = 1) and (LOvs[0].Kind = pokRoot));
+      // A non-virtual method CANNOT be overridden - dcc rejects `override`
+      // against it and a same-named descendant declaration merely hides it -
+      // so the only row a chain search could ever return is the declaration
+      // the caret is already on. MethodAt declines, from EITHER header, and
+      // a host gating on it stops offering the command over every method in
+      // the project (0.39.1).
+      Ok('MethodAt: declines TOvBase.Plain (a non-virtual method)',
+        not GNav.MethodAt(LMidOvA, 7, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName));
+      Ok('MethodAt: declines a non-virtual implementation header',
+        not GNav.MethodAt(LMidOvA, 26, 19, {out} LRTMid, {out} LRSym,
+          {out} LRName));
       // ---- Find Implementations (InterfaceMethodAt + FindImplementations) --
       var LMidIA := GNav.ModelIdOf(TPath.Combine(LDir, 'NavIntfA.pas'));
       Ok('NavIntfA model found', LMidIA >= 0);
@@ -2407,7 +2531,6 @@ begin
       // command answers the same rows (the VirtualTrees shape:
       // `TVTBaseAncestor = TVTBaseAncestorVcl;` then
       // `class abstract(TVTBaseAncestor)`).
-      var LMidOvB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavOvrB.pas'));
       var LAMid, LASym: Integer;
       Ok('TypeAt: a type alias, at its declaration, is the class it names',
         GNav.TypeAt(LMidOvB, 13, 3, {out} LAMid, {out} LASym, {out} LRName) and

@@ -365,6 +365,7 @@ type
       ARoutine: Integer): TArray<Integer>;
     function PeerDeclSym(AMid, ASym: Integer): Integer;
     function PeerRoutineNameNode(AMid, ASym: Integer): Integer;
+    function ImplHeaderSym(AMid, ANode: Integer; out ASym: Integer): Boolean;
     function UnitNameHit(LM: TPasSemaModel; ANode: Integer;
       out AHit: TPasRefHit): Boolean;
     function UnitNameOfModel(AUid: Integer): string;
@@ -375,6 +376,7 @@ type
     // Find Overrides / Find Implementations (see FindOverrides and
     // FindImplementations for the whole shape).
     function OvDirsOf(AMid, ARoutineNode: Integer): TPasOvDirs;
+    function OvIsDispatchable(AMid, ASym: Integer): Boolean;
     function OvStructOfMethod(AMid, ASym: Integer;
       out AStructSym: Integer): Boolean;
     function OvStructDefNode(AMid, AStructSym: Integer;
@@ -388,6 +390,8 @@ type
       out ABMid, ABSym: Integer): Boolean;
     procedure OvBuildTypeEdges(
       AIndex: TDictionary<string, TArray<TOvEdge>>);
+    function OvDirsNamed(AMid, AStructSym: Integer;
+      const ANameLower: string; out ADirs: TPasOvDirs): Boolean;
     procedure OvClimbToRoot(var AMid, AStructSym: Integer;
       const ANameLower: string);
     procedure OvCollectFrom(AMid, AStructSym: Integer;
@@ -654,6 +658,14 @@ type
       (`property Items;` republishing an inherited property - pokRedeclared),
       and ATMid/ASym come back unchanged, a property having no
       implementation-side twin.
+
+      Only a DISPATCHABLE method: one declared virtual, dynamic, override,
+      message or reintroduce (OvIsDispatchable). An undecorated one cannot
+      be overridden at all - dcc rejects `override` against it, and a
+      same-named declaration in a descendant merely HIDES it - so the only
+      row a chain search could return for it is the declaration the caret is
+      already on, and a host gating on this used to offer the command over
+      every method in the project.
 
       False for anything else: a plain routine, a record or interface method
       (a record has no VMT; an interface's implementors are a different
@@ -1484,6 +1496,14 @@ begin
   LCache := CacheOf(AMid);
   if LCache.DeclSymOfNode.TryGetValue(LIdent.Node, ASym) and
      (FProj.Model(AMid).Symbols[ASym].Kind <> skUnitRef) then
+  begin
+    ATMid := AMid;
+    AName := FProj.Model(AMid).Symbols[ASym].Name;
+    Exit(True);
+  end;
+  // A qualified implementation HEADER, whose own name binds to nothing at
+  // all - see ImplHeaderSym for why, and why it is answered structurally.
+  if ImplHeaderSym(AMid, LIdent.Node, ASym) then
   begin
     ATMid := AMid;
     AName := FProj.Model(AMid).Symbols[ASym].Name;
@@ -2829,6 +2849,43 @@ begin
   end;
 end;
 
+{ True when ASym (a declaration-side method symbol) carries a directive that
+  puts it in an override chain AT ALL: virtual/dynamic starts one, override
+  and message continue one, reintroduce is the declaration that deliberately
+  leaves one - the four shapes OvCollectFrom knows, plus the dynamic twin of
+  virtual.
+
+  This is MethodAt's gate, and the reason it has one: an UNDECORATED method
+  cannot be overridden (dcc rejects `override` against it, and a same-named
+  descendant declaration merely hides it - see OvCollectFrom), so the only
+  row Find Overrides could ever produce for it is the declaration the caret
+  is already on. Without this the command was offered on every method in
+  every class in the project and answered "declared here, nowhere else" for
+  most of them.
+
+  Reads directive TEXT, so the model must be hydrated - an unreadable one
+  decides False rather than offering a command whose whole answer would come
+  out of the same unreadable text. }
+function TPasNavigator.OvIsDispatchable(AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LDecl: Integer;
+begin
+  Result := False;
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
+    Exit;
+  if not FProj.EnsureHydrated(AMid) then
+    Exit;
+  LM := FProj.Model(AMid);
+  if (ASym < 0) or (ASym >= LM.SymCount) then
+    Exit;
+  LDecl := LM.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  Result := OvDirsOf(AMid, RTEnclosingRoutine(LM, LDecl)) *
+    [odVirtual, odDynamic, odOverride, odMessage, odReintroduce] <> [];
+end;
+
 { The class (or `object`) type symbol a METHOD symbol belongs to, from either
   side of the decl/impl pair: a declaration-side symbol lives directly in the
   struct's member scope, an implementation-side one (`procedure TFoo.Bar;`)
@@ -3075,48 +3132,102 @@ begin
   end;
 end;
 
+{ The chain directives on every method named ANameLower that AStructSym
+  itself declares, merged into one set; [] when it declares none. False
+  when the model's text cannot be read back (a demoted unit that would not
+  rehydrate), which the climb treats as "stop here rather than guess" -
+  directives are text, and an unreadable set looks exactly like an
+  undecorated declaration. }
+function TPasNavigator.OvDirsNamed(AMid, AStructSym: Integer;
+  const ANameLower: string; out ADirs: TPasOvDirs): Boolean;
+var
+  LM: TPasSemaModel;
+  LSyms: TArray<Integer>;
+  LIdx, LDef: Integer;
+begin
+  ADirs := [];
+  LSyms := OvMethodsNamed(AMid, AStructSym, ANameLower);
+  if Length(LSyms) = 0 then
+    Exit(True);
+  Result := FProj.EnsureHydrated(AMid);
+  if not Result then
+    Exit;
+  LM := FProj.Model(AMid);
+  for LIdx := 0 to High(LSyms) do
+  begin
+    LDef := LM.Symbols[LSyms[LIdx]].DeclNode;
+    if LDef <> NIL_NODE then
+      ADirs := ADirs + OvDirsOf(AMid, RTEnclosingRoutine(LM, LDef));
+  end;
+end;
+
 { Climb from (AMid, AStructSym) to the class that INTRODUCED the slot for
-  ANameLower: the topmost ancestor still declaring a same-named method with
-  virtual/dynamic/override/message on it. Stops at the first ancestor that
-  does not (or that this closure cannot reach), leaving the last class that
-  did - so clicking an `override` halfway down a chain answers for the same
-  chain as clicking its root. AMid/AStructSym are left untouched when the
-  clicked class is already the root. }
+  ANameLower, so that clicking an `override` anywhere down a chain answers
+  for the same chain as clicking its root. AMid/AStructSym come back as the
+  root class; untouched when the clicked class already is one.
+
+  The slot is a language object, and the climb follows its rules rather than
+  the text's adjacency:
+
+  - A class that declares the name `virtual`/`dynamic` and NOT `override`
+    STARTS a slot (`reintroduce; virtual;` too). It is the root, and
+    whatever an ancestor declares under the same name is a DIFFERENT slot
+    that this one hides - so the climb stops here, and never begins when the
+    clicked class itself is such a declaration.
+  - A class that declares it `override` (or `message` - dispatched through
+    the message table, same shape for this purpose) is a LINK: remembered as
+    the best root so far, and the climb goes on above it.
+  - A class that does not declare the name at all is PASSED THROUGH: the
+    slot is inherited across it exactly as the method is. This is the case
+    the first version of this climb got wrong - it stopped at the first
+    ancestor without a same-named method, so an `override` whose virtual
+    root sat two or three quiet ancestors up (a form's `DoSaveState`
+    overriding the base-form library's, through intermediate forms that
+    never touch it - the ordinary shape in any framework) reported itself
+    as its own root, "1 in 1 units". 0.39.1.
+  - A class that declares it UNDECORATED ends the climb below itself: an
+    `override` cannot pass through a non-virtual method (dcc E2170), so the
+    chain the clicked method belongs to must have been rooted already at
+    the last link found - or, if none was, in the clicked class itself.
+  - An ancestor this closure cannot see (or a hierarchy deeper than any real
+    one - the bound is a cycle guard against broken heritage spellings, not
+    a limit on real code) ends the climb at the last link found: the honest
+    answer is the topmost class that could be read, and the root row's
+    class name says which that was. }
 procedure TPasNavigator.OvClimbToRoot(var AMid, AStructSym: Integer;
   const ANameLower: string);
+const
+  CHAIN_DIRS = [odVirtual, odDynamic, odOverride, odMessage];
+  STARTS_SLOT = [odVirtual, odDynamic];
 var
   LX: TSemaXType;
-  LDepth, LIdx, LDef: Integer;
-  LSyms: TArray<Integer>;
-  LFound: Boolean;
+  LDepth: Integer;
+  LDirs: TPasOvDirs;
 begin
+  // The clicked class itself: a slot that starts here has nothing above it
+  // to climb to.
+  if not OvDirsNamed(AMid, AStructSym, ANameLower, LDirs) then
+    Exit;
+  if (LDirs * STARTS_SLOT <> []) and not (odOverride in LDirs) then
+    Exit;
   LX := XPlain(AMid, AStructSym);
-  for LDepth := 1 to 32 do
+  for LDepth := 1 to 64 do
   begin
     LX := FProj.AncestorOfX(LX);
     if not XValid(LX) then
       Exit;
     if OvClassDefNode(LX.UnitId, LX.Sym) = NIL_NODE then
       Exit;
-    LSyms := OvMethodsNamed(LX.UnitId, LX.Sym, ANameLower);
-    if Length(LSyms) = 0 then
-      Exit;
-    if not FProj.EnsureHydrated(LX.UnitId) then
+    if not OvDirsNamed(LX.UnitId, LX.Sym, ANameLower, LDirs) then
       Exit;   // directives unreadable there - stop rather than guess
-    LFound := False;
-    for LIdx := 0 to High(LSyms) do
-    begin
-      LDef := FProj.Model(LX.UnitId).Symbols[LSyms[LIdx]].DeclNode;
-      if LDef <> NIL_NODE then
-        LDef := RTEnclosingRoutine(FProj.Model(LX.UnitId), LDef);
-      if OvDirsOf(LX.UnitId, LDef) *
-         [odVirtual, odDynamic, odOverride, odMessage] <> [] then
-        LFound := True;
-    end;
-    if not LFound then
-      Exit;
+    if LDirs = [] then
+      Continue;   // does not touch the name: the slot is inherited across it
+    if LDirs * CHAIN_DIRS = [] then
+      Exit;   // undecorated: a hiding declaration, no chain passes through
     AMid := LX.UnitId;
     AStructSym := LX.Sym;
+    if (LDirs * STARTS_SLOT <> []) and not (odOverride in LDirs) then
+      Exit;   // the slot starts here - the root
   end;
 end;
 
@@ -3177,15 +3288,17 @@ var
   LStruct, LIdx: Integer;
   LSyms: TArray<Integer>;
   LTarget: TPasNavTarget;
+  LKnown: Boolean;
 begin
   Result := False;
   if not SymbolAt(AMid, ALine, ACol, ATMid, ASym, AName) then
   begin
-    // A qualified implementation HEADER (`procedure TFoo.Bar;`): its name
-    // binds to no symbol of its own, so SymbolAt declines it - and it is one
-    // of the two places a reader most wants this command. The decl<->impl
-    // toggle already knows the way across, and it is a pure CST match rather
-    // than a second identity, so the hop cannot disagree with itself.
+    // Anywhere INSIDE a method's body: the command is about the method the
+    // caret is in, and the decl<->impl toggle already knows the way out to
+    // its declaration. A pure CST match rather than a second identity, so
+    // the hop cannot disagree with itself. (The implementation HEADER's own
+    // name used to need this too; SymbolAt answers for it directly now -
+    // see ImplHeaderSym.)
     if not GotoDeclaration(AMid, ALine, ACol, {out} LTarget) then
       Exit;
     if not SymbolAt(LTarget.UnitId, LTarget.Line, LTarget.Col,
@@ -3209,14 +3322,32 @@ begin
     Exit;
   // Already a declaration-side symbol (the common case, a click in the class
   // body or on a use of the method) - keep it, so a specific overload keeps
-  // its own directives. Otherwise the click was on the implementation and any
-  // of the overloads is as good an entry to the chain as another: they share
-  // the name the chain is searched by.
+  // its own directives.
+  LKnown := False;
   for LIdx := 0 to High(LSyms) do
     if LSyms[LIdx] = ASym then
-      Break
-    else if LIdx = High(LSyms) then
-      ASym := LSyms[0];
+    begin
+      LKnown := True;
+      Break;
+    end;
+  if not LKnown then
+  begin
+    // The click reached the implementation side without pinning one
+    // overload. They share the name the chain is searched by, so any is an
+    // entry - but prefer one that is actually IN a chain, or a class with
+    // `Draw; virtual;` beside `Draw(A: Integer);` would answer by whichever
+    // came first in the source.
+    ASym := LSyms[0];
+    for LIdx := 0 to High(LSyms) do
+      if OvIsDispatchable(ATMid, LSyms[LIdx]) then
+      begin
+        ASym := LSyms[LIdx];
+        Break;
+      end;
+  end;
+  // An undecorated method has no chain to report - see OvIsDispatchable.
+  if not OvIsDispatchable(ATMid, ASym) then
+    Exit;
   AName := LM.Symbols[ASym].Name;
   Result := True;
 end;
@@ -4917,6 +5048,80 @@ begin
     Exit;
   if RTSegments(LM, LPeer, LQualIdents, LNameNode) then
     Result := LNameNode;
+end;
+
+{ The symbol a click on a QUALIFIED IMPLEMENTATION HEADER (`procedure
+  TFoo.Bar;`) is about, or False.
+
+  That header names nothing the resolver ever binds: the class qualifier and
+  the method name are plain CST identifiers, the body reaches its class
+  through the routine scope's own StructSym rather than through either node,
+  and no symbol anywhere carries one as its DeclNode. So both lookups
+  SymbolAt makes - DeclSymOfNode, then the ordinary reference binding - come
+  up empty on the one line a reader is most likely to be sitting on, and
+  every command gated on SymbolAt (Find References, Rename, Find
+  Assignments, Find Overrides' own References twin) went dead there while Go
+  To Declaration, which pairs the two headers STRUCTURALLY, worked fine.
+  This is that same structural pairing (RoutinePeerNode - what the rename
+  already uses to reach the peer header's name), reused for identity rather
+  than for navigation, so the two can never disagree.
+
+  The METHOD NAME answers with the method - the DECLARATION's symbol, the
+  identity every one of those commands wants, and overload-precise because
+  RoutinePeerNode matches on the parameter signature. The CLASS QUALIFIER
+  answers with the class. Only the LAST qualifier segment does: in
+  `TOuter.TInner.M` an earlier one names an enclosing type this does not
+  climb to, and answering with TInner for a click on TOuter would be a wrong
+  identity rather than a missing one.
+
+  An UNQUALIFIED implementation (a global routine completing its interface
+  declaration, a `forward`) needs none of this - both headers share one
+  symbol, whose DeclNode is the declaration, and DeclSymOfNode already
+  finds it from either side. }
+function TPasNavigator.ImplHeaderSym(AMid, ANode: Integer;
+  out ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LCache: TNavCache;
+  LRoutine, LNameNode, LPeer, LPeerName, LMeth, LScope: Integer;
+  LQualIdents, LPeerQuals: TArray<Integer>;
+begin
+  Result := False;
+  ASym := NIL_SYM;
+  if AMid < 0 then
+    Exit;
+  LM := FProj.Model(AMid);
+  LRoutine := LM.Tree.Nodes[ANode].Parent;
+  if (LRoutine = NIL_NODE) or (LM.Tree.Nodes[LRoutine].Kind <> nkRoutine) then
+    Exit;
+  if RTFindChildKind(LM, LRoutine, nkRoutineBody) = NIL_NODE then
+    Exit;   // a declaration, not an implementation - nothing to pair with
+  if not RTSegments(LM, LRoutine, LQualIdents, LNameNode) then
+    Exit;
+  if LQualIdents = nil then
+    Exit;   // unqualified - one symbol for both headers, already found
+  if (ANode <> LNameNode) and
+     (ANode <> LQualIdents[High(LQualIdents)]) then
+    Exit;   // an outer qualifier segment, or not a header segment at all
+  LPeer := RoutinePeerNode(AMid, LRoutine);
+  if (LPeer = NIL_NODE) or
+     not RTSegments(LM, LPeer, LPeerQuals, LPeerName) then
+    Exit;
+  LCache := CacheOf(AMid);
+  if not LCache.DeclSymOfNode.TryGetValue(LPeerName, LMeth) then
+    Exit;
+  if ANode = LNameNode then
+  begin
+    ASym := LMeth;
+    Exit(True);
+  end;
+  // The qualifier: the struct whose member scope declares that method.
+  LScope := LM.Symbols[LMeth].Scope;
+  if (LScope < 0) or (LScope >= LM.Scopes.Count) or
+     (LM.Scopes[LScope].Kind <> sckStruct) then
+    Exit;
+  ASym := LM.Scopes[LScope].StructSym;
+  Result := ASym <> NIL_SYM;
 end;
 
 { Rename }

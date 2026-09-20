@@ -1277,12 +1277,14 @@ begin
   pgcBottom.ActivePage := LTab;
 end;
 
-{ Find Overrides. One identity only - a class METHOD (FNav.MethodAt, which is
-  also the Enabled test) - and one answer: the chain's virtual root plus every
-  declaration below it that shares the slot. Shown in a Find References-shaped
-  page whose hit rows are prefixed with the declaring CLASS and the reason the
-  row is in the chain, since "which class" is the question an override list
-  answers and the file group above it already says where. }
+{ Find Overrides. One identity only - a DISPATCHABLE class method (FNav.
+  MethodAt, which is also the Enabled test: virtual, dynamic, override,
+  message or reintroduce, since nothing else can be overridden at all) - and
+  one answer: the chain's virtual root plus every declaration below it that
+  shares the slot. Shown in a Find References-shaped page whose hit rows are
+  prefixed with the declaring CLASS and the reason the row is in the chain,
+  since "which class" is the question an override list answers and the file
+  group above it already says where. }
 procedure TfrmMain.FindOverridesActionUpdate(Sender: TObject);
 var
   LTMid, LSym, LLine, LCol: Integer;
