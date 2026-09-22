@@ -1033,6 +1033,20 @@ var
   GCounter: TPasSuiteCounter;
   GMidB: Integer;
 
+{ ASpans is exactly the (Start, Len) pairs of AFlat, in order. }
+function SpansAre(const ASpans: TArray<TPasTextSpan>;
+  const AFlat: array of Integer): Boolean;
+var
+  LIdx: Integer;
+begin
+  Result := Length(ASpans) * 2 = Length(AFlat);
+  if Result then
+    for LIdx := 0 to High(ASpans) do
+      if (ASpans[LIdx].Start <> AFlat[LIdx * 2]) or
+         (ASpans[LIdx].Len <> AFlat[LIdx * 2 + 1]) then
+        Exit(False);
+end;
+
 procedure Ok(const AName: string; ACond: Boolean);
 begin
   GCounter.Ok(AName, ACond);
@@ -2781,6 +2795,28 @@ begin
           (LOut[19].Section = osInterface) and
           (LOut[22].Section = osImplementation) and
           (LOut[26].Section = osInitialization));
+        // DetailTypes (0.41.0): the type names inside each detail, by the
+        // slot they sit in - a parameter's NAME is not one, an array's
+        // bounds are not, an untyped constant's value is not.
+        if Length(LOut) = 27 then
+        begin
+          Ok('outline types: field `: Integer`',
+            SpansAre(LOut[4].DetailTypes, [3, 7]));
+          Ok('outline types: function result `: string`',
+            SpansAre(LOut[7].DetailTypes, [3, 6]));
+          Ok('outline types: indexed property - index type and type, not I',
+            SpansAre(LOut[9].DetailTypes, [5, 7, 15, 7]));
+          Ok('outline types: `: array of T` - the element type',
+            SpansAre(LOut[11].DetailTypes, [12, 1]));
+          Ok('outline types: `= type Integer`',
+            SpansAre(LOut[12].DetailTypes, [8, 7]));
+          Ok('outline types: `= 10` names none',
+            SpansAre(LOut[13].DetailTypes, []));
+          Ok('outline types: `: array[0..1] of Integer` - not the bounds',
+            SpansAre(LOut[14].DetailTypes, [18, 7]));
+          Ok('outline types: `(X: Integer): Integer` - not X',
+            SpansAre(LOut[19].DetailTypes, [5, 7, 15, 7]));
+        end;
 
         // ProjectOutline: the same unit's declarations off the SYMBOL TABLE
         // - no landmarks, one row per routine, owners from the struct
@@ -2848,6 +2884,10 @@ begin
             and (LPO[6].Detail = ': string') and (LPO[2].Detail = '= class')
             and (LPO[5].Detail = '') and (LPO[12].Detail = '')
             and (LPO[13].Detail = ''));
+          Ok('project outline types: every identifier of a `: T` detail',
+            SpansAre(LPO[3].DetailTypes, [3, 7]) and
+            SpansAre(LPO[6].DetailTypes, [3, 6]) and
+            SpansAre(LPO[2].DetailTypes, []));
           // The landing: DeclHit on the row's (UnitId, Sym) gives the
           // declared name's position - TShape at 5:3 like the module row.
           var LPHit: TPasRefHit;

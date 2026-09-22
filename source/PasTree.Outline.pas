@@ -59,6 +59,12 @@ type
   TPasOutlineSection = (osNone, osInterface, osImplementation,
     osInitialization, osFinalization);
 
+  { A run of a detail text: Start 1-based into the string, Len characters. }
+  TPasTextSpan = record
+    Start: Integer;
+    Len: Integer;
+  end;
+
   TPasOutlineEntry = record
     Kind: TPasOutlineKind;
     { The head word as a host prints it before the name: 'unit', 'type',
@@ -95,10 +101,24 @@ type
     UnitId: Integer;
     Sym: Integer;
     UnitName: string;
+    { The type names inside Detail, as 1-based (Start, Len) into Detail, in
+      order, non-overlapping - what a host paints in its type colour, the
+      way an editor's semantic highlighting does (pastree-lsp, 2026-09-22:
+      the Go To picker's detail column). Empty when Detail names no type.
+      The module walk marks them by the SLOT an identifier sits in (see
+      TOutlineWalker.MarkTypes); the project outline marks every identifier
+      of the resolved type text (PasIdentSpans). }
+    DetailTypes: TArray<TPasTextSpan>;
   end;
 
 { The module's outline, in source order. Empty for a tree with no nodes. }
 function PasModuleOutline(const ATree: TPasTree): TArray<TPasOutlineEntry>;
+
+{ The identifier runs of AText from AFrom (1-based) on, as spans - for a
+  detail whose every identifier IS a type name (a resolved type's text:
+  `TList<TItem>`, `TArray<string>`). }
+function PasIdentSpans(const AText: string; AFrom: Integer)
+  : TArray<TPasTextSpan>;
 
 implementation
 
@@ -119,11 +139,16 @@ type
     function TokenKindAfter(ANode: Integer): TPasTokenKind;
     function TokenKindBefore(ANode: Integer): TPasTokenKind;
     function SpanText(ANode: Integer): string;
+    function TypedSpanText(ANode: Integer; ARootIsType: Boolean;
+      ABase: Integer; var ATypes: TArray<TPasTextSpan>): string;
+    procedure MarkTypes(ANode: Integer; AInTypeSlot: Boolean;
+      var AIdents: TArray<Integer>);
     function PosOf(ANode: Integer; out AFile: string;
       out ALine, ACol, AVisTok: Integer): Boolean;
     procedure MergeIncludes;
     procedure Emit(AKind: TPasOutlineKind; const AHead, AOwner, AName,
-      ADetail: string; AIsImpl: Boolean; ANode, APosNode: Integer);
+      ADetail: string; AIsImpl: Boolean; ANode, APosNode: Integer;
+      const ADetailTypes: TArray<TPasTextSpan> = nil);
     procedure WalkRoot;
     procedure WalkDecls(AParent: Integer; const AOwner: string);
     procedure WalkDecl(ANode: Integer; const AOwner: string);
@@ -237,6 +262,231 @@ begin
     Result := Collapse(FTree.NodeSpanText(ANode));
 end;
 
+{ The identifier nodes under ANode that name a TYPE, by the slot they sit in
+  - the tree has no symbols, so this is the syntax's own knowledge of where
+  a type name can stand:
+    - the operand of `set of`, `^`, `class of`, `file of`; every child of a
+      generic argument list (the designator and the arguments);
+    - an array's element type, and a dimension that is a bare name
+      (`array[TEnum]`; `array[0..N]` is a range of constants);
+    - a parameter's type (the child after the colon), not its names and not
+      its default; a procedure type's result;
+    - a dotted name in a type slot: its LAST segment (`TOuter.TInner`,
+      `Vcl.Tabs.TTabSet` - the prefix may be a unit, the tree cannot tell);
+    - the node itself when the caller says the root is a type slot (a
+      field's type, a routine's result, a type alias).
+  Not a type: enum values, a `string[N]`'s N, a range's bounds, default
+  values and constant expressions. }
+procedure TOutlineWalker.MarkTypes(ANode: Integer; AInTypeSlot: Boolean;
+  var AIdents: TArray<Integer>);
+var
+  LChild, LLast: Integer;
+  LNamesDone: Boolean;
+begin
+  if ANode = NIL_NODE then
+    Exit;
+  case Kind(ANode) of
+    nkIdent:
+      if AInTypeSlot then
+        AIdents := AIdents + [ANode];
+    nkMember:
+      begin
+        // Base first (not a type slot - a unit or an outer type, unknown),
+        // the name segment last.
+        LLast := NIL_NODE;
+        LChild := FirstChild(ANode);
+        while LChild <> NIL_NODE do
+        begin
+          LLast := LChild;
+          LChild := NextSib(LChild);
+        end;
+        LChild := FirstChild(ANode);
+        while LChild <> NIL_NODE do
+        begin
+          MarkTypes(LChild, AInTypeSlot and (LChild = LLast), AIdents);
+          LChild := NextSib(LChild);
+        end;
+      end;
+    nkTypeArgs, nkSetType, nkPointerType, nkClassOf, nkFileType,
+    nkConstraint:
+      begin
+        LChild := FirstChild(ANode);
+        while LChild <> NIL_NODE do
+        begin
+          MarkTypes(LChild, True, AIdents);
+          LChild := NextSib(LChild);
+        end;
+      end;
+    nkArrayType:
+      begin
+        // Dimensions, then the element type last.
+        LChild := FirstChild(ANode);
+        while LChild <> NIL_NODE do
+        begin
+          if NextSib(LChild) = NIL_NODE then
+            MarkTypes(LChild, True, AIdents)
+          else
+            MarkTypes(LChild, Kind(LChild) in [nkIdent, nkMember], AIdents);
+          LChild := NextSib(LChild);
+        end;
+      end;
+    nkParam:
+      begin
+        // Attribute groups and names up to the colon, the type after it,
+        // then a default value.
+        LNamesDone := False;
+        LChild := FirstChild(ANode);
+        while LChild <> NIL_NODE do
+        begin
+          if not LNamesDone and (TokenKindBefore(LChild) = tkColon) then
+          begin
+            MarkTypes(LChild, True, AIdents);
+            LNamesDone := True;
+          end;
+          LChild := NextSib(LChild);
+        end;
+      end;
+    nkProcType:
+      begin
+        LChild := FirstChild(ANode);
+        while LChild <> NIL_NODE do
+        begin
+          if Kind(LChild) = nkParams then
+            MarkTypes(LChild, False, AIdents)
+          else if TokenKindBefore(LChild) = tkColon then
+            MarkTypes(LChild, True, AIdents);   // the result type
+          LChild := NextSib(LChild);
+        end;
+      end;
+    nkEnumType, nkRange, nkStringType:
+      ;   // values, bounds, a length: never types
+  else
+    LChild := FirstChild(ANode);
+    while LChild <> NIL_NODE do
+    begin
+      MarkTypes(LChild, False, AIdents);
+      LChild := NextSib(LChild);
+    end;
+  end;
+end;
+
+{ SpanText with its type names located: the same collapse as Collapse, done
+  character by character here so every kept character knows where it landed,
+  then each marked identifier's token is mapped through. Spans are 1-based
+  into the FINAL detail, ABase characters of prefix included (`: `, `= `,
+  or the parameter list a result type follows), and a token the DETAIL_MAX
+  cut removed or split is dropped. The two texts are identical by
+  construction - a token has no whitespace to collapse. }
+function TOutlineWalker.TypedSpanText(ANode: Integer; ARootIsType: Boolean;
+  ABase: Integer; var ATypes: TArray<TPasTextSpan>): string;
+var
+  LFirst, LLast, LStart0, LIdx, LKept, LRel, LVis, LTokIdx: Integer;
+  LFrom, LTo, LV: TPasVisibleToken;
+  LRaw: string;
+  LMap: TArray<Integer>;   // raw 1-based index -> collapsed 1-based, 0 = gone
+  LBuf: TStringBuilder;
+  LInSpace: Boolean;
+  LIdents: TArray<Integer>;
+  LSpan: TPasTextSpan;
+  LTok: TPasToken;
+begin
+  Result := '';
+  if ANode = NIL_NODE then
+    Exit;
+  LFirst := FTree.NodeLeftmostVis(ANode);
+  LLast := FTree.Nodes[ANode].LastToken;
+  if (LFirst < 0) or (LLast < LFirst) or
+     (LLast > High(FTree.Source.Visible)) then
+    Exit;
+  LFrom := FTree.Source.Visible[LFirst];
+  LTo := FTree.Source.Visible[LLast];
+  if LFrom.FileId <> LTo.FileId then
+    Exit;
+  with FTree.Source.Files[LFrom.FileId] do
+  begin
+    LStart0 := Tokens[LFrom.TokenIndex].Start;
+    LRaw := Copy(Source, LStart0 + 1, Tokens[LTo.TokenIndex].EndPos - LStart0);
+  end;
+
+  SetLength(LMap, Length(LRaw) + 1);
+  LBuf := TStringBuilder.Create(Length(LRaw));
+  try
+    LInSpace := False;
+    for LIdx := 1 to Length(LRaw) do
+    begin
+      LMap[LIdx] := 0;
+      if LRaw[LIdx] <= ' ' then
+      begin
+        if not LInSpace and (LBuf.Length > 0) then
+          LBuf.Append(' ');
+        LInSpace := True;
+      end
+      else
+      begin
+        LBuf.Append(LRaw[LIdx]);
+        LMap[LIdx] := LBuf.Length;
+        LInSpace := False;
+      end;
+    end;
+    Result := LBuf.ToString.TrimRight;
+  finally
+    LBuf.Free;
+  end;
+  LKept := Length(Result);
+  if Length(Result) > DETAIL_MAX then
+  begin
+    LKept := DETAIL_MAX - 3;
+    Result := Copy(Result, 1, LKept) + '...';
+  end;
+
+  LIdents := nil;
+  MarkTypes(ANode, ARootIsType, LIdents);
+  for LIdx := 0 to High(LIdents) do
+  begin
+    LVis := FTree.Nodes[LIdents[LIdx]].FirstToken;
+    if (LVis < LFirst) or (LVis > LLast) then
+      Continue;
+    LV := FTree.Source.Visible[LVis];
+    if LV.FileId <> LFrom.FileId then
+      Continue;
+    LTokIdx := LV.TokenIndex;
+    LTok := FTree.Source.Files[LV.FileId].Tokens[LTokIdx];
+    LRel := LTok.Start - LStart0 + 1;
+    if (LRel < 1) or (LRel > Length(LRaw)) or (LMap[LRel] = 0) then
+      Continue;
+    if LMap[LRel] + LTok.Len - 1 > LKept then
+      Continue;   // cut, wholly or in part
+    LSpan.Start := ABase + LMap[LRel];
+    LSpan.Len := LTok.Len;
+    ATypes := ATypes + [LSpan];
+  end;
+end;
+
+function PasIdentSpans(const AText: string; AFrom: Integer)
+  : TArray<TPasTextSpan>;
+var
+  LIdx, LStart: Integer;
+  LSpan: TPasTextSpan;
+begin
+  Result := nil;
+  LIdx := AFrom;
+  while LIdx <= Length(AText) do
+  begin
+    if CharInSet(AText[LIdx], ['A'..'Z', 'a'..'z', '_']) then
+    begin
+      LStart := LIdx;
+      while (LIdx <= Length(AText)) and
+            CharInSet(AText[LIdx], ['A'..'Z', 'a'..'z', '0'..'9', '_']) do
+        Inc(LIdx);
+      LSpan.Start := LStart;
+      LSpan.Len := LIdx - LStart;
+      Result := Result + [LSpan];
+    end
+    else
+      Inc(LIdx);
+  end;
+end;
+
 // File/line/col of a node's leftmost visible token - the same landing
 // TPasNavigator.TargetFromNode computes, so a picker row and a ctrl+click on
 // the same name agree. False for a node without tokens (nothing to jump to).
@@ -263,7 +513,8 @@ begin
 end;
 
 procedure TOutlineWalker.Emit(AKind: TPasOutlineKind; const AHead, AOwner,
-  AName, ADetail: string; AIsImpl: Boolean; ANode, APosNode: Integer);
+  AName, ADetail: string; AIsImpl: Boolean; ANode, APosNode: Integer;
+  const ADetailTypes: TArray<TPasTextSpan>);
 var
   LEntry: TPasOutlineEntry;
   LKey: Integer;
@@ -275,6 +526,7 @@ begin
   LEntry.Owner := AOwner;
   LEntry.Name := AName;
   LEntry.Detail := ADetail;
+  LEntry.DetailTypes := ADetailTypes;
   LEntry.Section := FSection;
   LEntry.IsImpl := AIsImpl;
   LEntry.Node := ANode;
@@ -538,8 +790,10 @@ end;
 procedure TOutlineWalker.TypeDecl(ANode: Integer; const AOwner: string);
 var
   LChild, LName, LTypeExpr: Integer;
-  LNameText, LDetail, LQualified: string;
+  LNameText, LDetail, LQualified, LText: string;
+  LTypes: TArray<TPasTextSpan>;
 begin
+  LTypes := nil;
   // [attrs] name [generic params] TypeExpr
   LChild := FirstChild(ANode);
   while (LChild <> NIL_NODE) and (Kind(LChild) = nkAttrGroup) do
@@ -576,14 +830,18 @@ begin
         else
           LDetail := '= class helper';
     else
-      LDetail := SpanText(LTypeExpr);
-      if LDetail <> '' then
-        if FTree.Nodes[ANode].Aux = 1 then
-          LDetail := '= type ' + LDetail   // distinct alias (2.5.1)
-        else
-          LDetail := '= ' + LDetail;
+      if FTree.Nodes[ANode].Aux = 1 then
+        LDetail := '= type '   // distinct alias (2.5.1)
+      else
+        LDetail := '= ';
+      LText := TypedSpanText(LTypeExpr, True, Length(LDetail), LTypes);
+      if LText = '' then
+        LDetail := ''
+      else
+        LDetail := LDetail + LText;
     end;
-  Emit(okType, 'type', AOwner, LNameText, LDetail, False, ANode, LName);
+  Emit(okType, 'type', AOwner, LNameText, LDetail, False, ANode, LName,
+    LTypes);
   // Members follow their type row, in source order. A forward `class;`
   // has no members; a shorthand `class(TBase);` only heritage refs.
   if (LTypeExpr <> NIL_NODE) and (Kind(LTypeExpr) in [nkClassType,
@@ -600,6 +858,7 @@ var
   LNames: TArray<Integer>;
   LDetail: string;
   LIdx: Integer;
+  LTypes: TArray<TPasTextSpan>;
 begin
   LChild := FirstChild(ANode);
   while (LChild <> NIL_NODE) and (Kind(LChild) = nkAttrGroup) do
@@ -616,12 +875,13 @@ begin
     end;
     LChild := NextSib(LChild);
   end;
-  LDetail := SpanText(LType);
+  LTypes := nil;
+  LDetail := TypedSpanText(LType, True, 2, LTypes);
   if LDetail <> '' then
     LDetail := ': ' + LDetail;
   for LIdx := 0 to High(LNames) do
     Emit(okVar, AHead, AOwner, FTree.NodeText(LNames[LIdx]), LDetail, False,
-      ANode, LNames[LIdx]);
+      ANode, LNames[LIdx], LTypes);
 end;
 
 // `Name = Value` or `Name: T = Value` - the detail is the type when there
@@ -632,6 +892,7 @@ procedure TOutlineWalker.ConstDecl(ANode: Integer; const AOwner,
 var
   LName, LNext: Integer;
   LDetail: string;
+  LTypes: TArray<TPasTextSpan>;
 begin
   LName := FirstChild(ANode);
   while (LName <> NIL_NODE) and (Kind(LName) = nkAttrGroup) do
@@ -640,13 +901,14 @@ begin
     Exit;
   LNext := NextSib(LName);
   LDetail := '';
+  LTypes := nil;
   if LNext <> NIL_NODE then
     if TokenKindAfter(LName) = tkColon then
-      LDetail := ': ' + SpanText(LNext)
+      LDetail := ': ' + TypedSpanText(LNext, True, 2, LTypes)
     else
-      LDetail := '= ' + SpanText(LNext);
+      LDetail := '= ' + SpanText(LNext);   // a value: no type names in it
   Emit(okConst, AHead, AOwner, FTree.NodeText(LName), LDetail, False, ANode,
-    LName);
+    LName, LTypes);
 end;
 
 // A routine header, declared in a struct (AOwner = the struct) or at module
@@ -660,6 +922,7 @@ var
   LHead, LOwner, LName, LDetail: string;
   LIsImpl: Boolean;
   LIdx: Integer;
+  LTypes: TArray<TPasTextSpan>;
 begin
   LHead := LowerCase(FTree.NodeText(ANode));
   if FTree.Nodes[ANode].Aux = 1 then
@@ -713,16 +976,20 @@ begin
   end
   else
     LOwner := AOwner;
-  LDetail := SpanText(LParams);
+  LTypes := nil;
+  LDetail := TypedSpanText(LParams, False, 0, LTypes);
   if LResult <> NIL_NODE then
-    LDetail := LDetail + ': ' + SpanText(LResult);
-  Emit(okRoutine, LHead, LOwner, LName, LDetail, LIsImpl, ANode, LFirstName);
+    LDetail := LDetail + ': ' +
+      TypedSpanText(LResult, True, Length(LDetail) + 2, LTypes);
+  Emit(okRoutine, LHead, LOwner, LName, LDetail, LIsImpl, ANode, LFirstName,
+    LTypes);
 end;
 
 procedure TOutlineWalker.PropertyDecl(ANode: Integer; const AOwner: string);
 var
   LChild, LName, LParams, LType: Integer;
   LHead, LDetail: string;
+  LTypes: TArray<TPasTextSpan>;
 begin
   LHead := 'property';
   if FTree.Nodes[ANode].Aux = 1 then
@@ -746,11 +1013,13 @@ begin
   if (LChild <> NIL_NODE) and (Kind(LChild) <> nkPropSpec) and
      (TokenKindBefore(LChild) = tkColon) then
     LType := LChild;
-  LDetail := SpanText(LParams);
+  LTypes := nil;
+  LDetail := TypedSpanText(LParams, False, 0, LTypes);
   if LType <> NIL_NODE then
-    LDetail := LDetail + ': ' + SpanText(LType);
+    LDetail := LDetail + ': ' +
+      TypedSpanText(LType, True, Length(LDetail) + 2, LTypes);
   Emit(okProperty, LHead, AOwner, FTree.NodeText(LName), LDetail, False,
-    ANode, LName);
+    ANode, LName, LTypes);
 end;
 
 end.

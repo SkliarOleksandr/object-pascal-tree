@@ -2789,6 +2789,12 @@ begin
         LE.Owner := OwnerOf(LScope);
         LE.Name := LM.Symbols[LSym].Name;
         LE.Detail := DetailOf(LSym);
+        // A `: T` detail is a resolved type's text, every identifier in it
+        // a type name; `= class` and the like name none.
+        if LE.Detail.StartsWith(': ') then
+          LE.DetailTypes := PasIdentSpans(LE.Detail, 3)
+        else
+          LE.DetailTypes := nil;
         if LM.Scopes[LRoot].Kind = sckImplementation then
           LE.Section := osImplementation
         else
