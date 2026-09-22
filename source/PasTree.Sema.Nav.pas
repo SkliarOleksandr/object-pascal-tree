@@ -600,7 +600,10 @@ type
       Built from the RETAINED symbol table, never from text: a demoted unit
       (DemoteClosedUnits) costs nothing here, and a 500-unit project answers
       in one pass over its symbols. What that buys is paid for in the row:
-      Detail is '' (a signature needs the tokens), Line/Col are 0, FilePath
+      Detail is what the retained type descriptors say and no more (the
+      resolved type's name after `: `, `= class`/`= record`/`= interface`
+      for a struct type; no parameters, no constant values - a signature
+      needs the tokens; 0.39.2, DetailOf), Line/Col are 0, FilePath
       is the unit's MAIN file; the landing is DeclHit(UnitId, Sym), which
       rehydrates that one unit when the row is chosen. Head words come from
       the symbol kind (`type`, `var`/`class var`, `field`, `const`,
@@ -2599,6 +2602,45 @@ var
       Result := LM.Scopes[Result].Parent;
   end;
 
+  // What the retained descriptors say about a declaration - never its text,
+  // which a demoted unit no longer has (see the header): the resolved type's
+  // name for a var, field, property, typed constant or function result
+  // (DeclTypeX, generic arguments included, cross-unit types by their own
+  // name), the category word for a struct type. Parameters are not
+  // retained, so a function reads `: Integer` and a procedure nothing; an
+  // untyped constant (`MaxN = 10`) has a value, not a type, and reads
+  // nothing rather than an inferred `: Integer` the module tab would not
+  // show. An anonymous type (`array of T`, `set of`) has a synthetic
+  // unnamed symbol and reads nothing. (2026-09-22, Alex: "in project mode
+  // the fields have no type".)
+  function DetailOf(ASym: Integer): string;
+  var
+    LX: TSemaXType;
+    LText: string;
+  begin
+    Result := '';
+    case LM.Symbols[ASym].Kind of
+      skType:
+        case LM.Symbols[ASym].TypeCat of
+          tcClass: Result := '= class';
+          tcRecord: Result := '= record';
+          tcInterface: Result := '= interface';
+        end;
+      skVar, skField, skProperty, skConst, skRoutine:
+        begin
+          if (LM.Symbols[ASym].Kind in [skConst, skRoutine]) and
+             (LM.Symbols[ASym].TypeNode = NIL_NODE) then
+            Exit;
+          LX := FProj.DeclTypeX(LMid, ASym);
+          if not XValid(LX) then
+            Exit;
+          LText := FProj.XTypeText(LX);
+          if (LText <> '') and (LText <> '?') then
+            Result := ': ' + LText;
+        end;
+    end;
+  end;
+
 begin
   LList := TList<TPasOutlineEntry>.Create;
   try
@@ -2674,6 +2716,7 @@ begin
         end;
         LE.Owner := OwnerOf(LScope);
         LE.Name := LM.Symbols[LSym].Name;
+        LE.Detail := DetailOf(LSym);
         if LM.Scopes[LRoot].Kind = sckImplementation then
           LE.Section := osImplementation
         else

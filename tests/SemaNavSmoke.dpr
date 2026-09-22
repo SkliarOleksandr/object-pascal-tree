@@ -2774,6 +2774,16 @@ begin
             (LPO[12].Kind = okConst) and (LPO[12].Name = 'MaxN') and
             (LPO[14].Kind = okVar) and (LPO[14].Head = 'var') and
             (LPO[14].Name = 'GCount'));
+          // Detail off the retained descriptors (0.39.2): the resolved type's
+          // name for a field, a var and a function's result, the category
+          // word for a class; nothing for an untyped constant (its value is
+          // text) or a constructor (no result), and nothing for a typed
+          // constant of an anonymous array type (no name to give).
+          Ok('project outline: details from the descriptors',
+            (LPO[3].Detail = ': Integer') and (LPO[14].Detail = ': Integer')
+            and (LPO[6].Detail = ': string') and (LPO[2].Detail = '= class')
+            and (LPO[5].Detail = '') and (LPO[12].Detail = '')
+            and (LPO[13].Detail = ''));
           // The landing: DeclHit on the row's (UnitId, Sym) gives the
           // declared name's position - TShape at 5:3 like the module row.
           var LPHit: TPasRefHit;

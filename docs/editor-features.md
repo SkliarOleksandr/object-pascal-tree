@@ -791,7 +791,12 @@ and creeping the memory that demotion freed. So a project row has:
   its `<T>`);
 - `Section` = `osInterface` or `osImplementation` from the root scope the
   declaration sits under;
-- `Detail = ''`, `Line = Col = 0`, `FilePath` = the unit's MAIN file;
+- `Detail` = what the retained type descriptors say and no more (0.39.2):
+  the resolved type's name after `: ` for a var, field, property, typed
+  constant or function result (generic arguments included), `= class` /
+  `= record` / `= interface` for a struct type; no parameters and no
+  constant values, which are text; `Line = Col = 0`, `FilePath` = the
+  unit's MAIN file;
 - `UnitId`, `Sym` = the model and symbol index; `UnitName` = the file's
   base name, painted after the name so the row says where it is from.
 
