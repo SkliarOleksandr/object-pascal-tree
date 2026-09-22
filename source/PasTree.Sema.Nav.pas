@@ -245,6 +245,23 @@ type
     UnitId, Sym: Integer;    // the type symbol this row declares
   end;
 
+  { One identifier of a model's MAIN file together with the KIND of the
+    symbol it denotes - what a semantic-highlighting host colors by. A type
+    name is a type wherever it is written (a declaration, `: TFoo`, a cast
+    `TFoo(X)`, `TFoo.Create`, `SizeOf(TFoo)`), which no syntax-only rule can
+    tell apart from a variable in the same position; the resolver already
+    knows, and this is that knowledge, one row per identifier.
+
+    RawToken indexes the main file's own token stream (Tree.Source.Files[0]
+    .Tokens): a host lexing the same text with TPasLexer gets the same
+    indices, so no line/column translation sits between the two. IsDecl marks
+    the token that IS the symbol's declaration name. }
+  TPasSemanticToken = record
+    RawToken: Integer;
+    Kind: TSemaSymbolKind;
+    IsDecl: Boolean;
+  end;
+
   TPasNavigator = class
   private type
     // What OvStructDefNode will accept - a set literal at each call site, so
@@ -675,6 +692,18 @@ type
       search - FindImplementations), a field, a type. }
     function MethodAt(AMid, ALine, ACol: Integer;
       out ATMid, ASym: Integer; out AName: string): Boolean;
+    { Semantic highlighting: every identifier token of model AMid's main file
+      that names a RESOLVED symbol, with that symbol's kind, ascending by
+      token. The identity is exactly the one SymbolAt answers with at that
+      token: a declaration name from the symbol table (its own RefMap binding
+      is incidental - see IsDeclSelfName), a qualified implementation
+      header's method name through ImplHeaderSym, everything else through
+      the RefMap/ExtRefMap read ResolveSymbolAt makes - so what a host colors
+      as a type is what Ctrl+Click would take to a type declaration. An
+      identifier that resolved to nothing is no row, and the host keeps its
+      lexical color there. Includes are not covered (their tokens are not the
+      main file's stream). Hydrates a demoted model, like every query here. }
+    function SemanticTokens(AMid: Integer): TArray<TPasSemanticToken>;
     { Find Overrides, part two: every declaration that shares the VMT (or
       message-table) slot of the method (ATMid, ASym) - the topmost
       declaration that introduced it, plus every `override` below it, across
@@ -1525,6 +1554,49 @@ begin
   end;
   AName := FProj.Model(ATMid).Symbols[ASym].Name;
   Result := True;
+end;
+
+// One pass over the main file's raw tokens rather than over the tree: the
+// cache's VisOfRaw/NodeOfVis already answer "which nkIdent node is this
+// token", and walking tokens gives the ascending order a host merges against
+// its own token stream without a sort. The per-token resolution order is
+// SymbolAt's (declaration name, implementation header, ordinary binding),
+// minus its ResolveRealDecl fallback for a builtin's real declaration - the
+// KIND is the same either way, and the position is not asked for.
+function TPasNavigator.SemanticTokens(AMid: Integer): TArray<TPasSemanticToken>;
+var
+  LCache: TNavCache;
+  LM: TPasSemaModel;
+  LRaw, LVis, LNode, LTMid, LSym, LCount: Integer;
+begin
+  Result := nil;
+  if AMid < 0 then
+    Exit;
+  LCache := CacheOf(AMid);   // hydrates a demoted model first
+  LM := FProj.Model(AMid);
+  LCount := 0;
+  SetLength(Result, Length(LCache.VisOfRaw));  // at most one row per token
+  for LRaw := 0 to High(LCache.VisOfRaw) do
+  begin
+    LVis := LCache.VisOfRaw[LRaw];
+    if (LVis < 0) or not LCache.NodeOfVis.TryGetValue(LVis, LNode) then
+      Continue;   // $IFDEF'd out, or not an identifier node
+    Result[LCount].IsDecl := False;
+    if LCache.DeclSymOfNode.TryGetValue(LNode, LSym) and
+       (LM.Symbols[LSym].Kind <> skUnitRef) then
+    begin
+      LTMid := AMid;
+      Result[LCount].IsDecl := True;
+    end
+    else if ImplHeaderSym(AMid, LNode, LSym) then
+      LTMid := AMid
+    else if not ResolveSymbolAt(AMid, LNode, LTMid, LSym) then
+      Continue;
+    Result[LCount].RawToken := LRaw;
+    Result[LCount].Kind := FProj.Model(LTMid).Symbols[LSym].Kind;
+    Inc(LCount);
+  end;
+  SetLength(Result, LCount);
 end;
 
 // True when ANode (a same-model RefMap hit - never reached for a cross-

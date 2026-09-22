@@ -11,6 +11,10 @@ unit PasTreeDemo.Main;
   the statically-linked build stream the third-party controls from the .dfm.
 }
 
+{$IFDEF DEBUG}
+// for testing
+{$ENDIF}
+
 interface
 
 uses
@@ -197,6 +201,7 @@ type
       host has to set too. }
     chkIncremental: TCheckBox;
     cbHighlightColor: TColorBox; // background color for "same identifier" highlight
+    cbTypeColor: TColorBox;      // foreground color of a TYPE name (semantic)
     splLeft: TSplitter;
     vstFiles: TVirtualStringTree;
     pgc: TPageControl;
@@ -302,6 +307,8 @@ type
     procedure cbHighlighterChange(Sender: TObject);
     procedure cbHighlightColorChange(Sender: TObject);
     procedure cbHighlightColorGetColors(Sender: TCustomColorBox; Items: TStrings);
+    procedure cbTypeColorChange(Sender: TObject);
+    procedure cbTypeColorGetColors(Sender: TCustomColorBox; Items: TStrings);
     procedure FindActionUpdate(Sender: TObject);
     procedure FindActionExecute(Sender: TObject);
     procedure GotoImplActionUpdate(Sender: TObject);
@@ -415,6 +422,9 @@ type
     // (each set from cbHighlightColor; new tabs pick up the current value -
     // see OpenFileTab).
     FIdentHighlightColor: TColor;
+    // Semantic highlighting: the foreground of a TYPE name, same sharing
+    // scheme (cbTypeColor -> every tab's highlighter; see OpenFileTab).
+    FTypeColor: TColor;
     FReparseTimer: TTimer;         // debounces re-analysis after edits
     // Background (non-blocking) analysis. Opening a project and the edit-
     // debounce reanalysis run on FAsyncSession's worker thread; FAsyncTimer
@@ -524,6 +534,11 @@ type
     FLastDefines: TArray<string>;  // defines the LAST analysis ran with
     procedure ApplyHighlighterContext(AHL: TPasTreeSynHighlighter;
       const APath: string);
+    // Semantic highlighting: hand one tab / every open tab the analysis's
+    // token kinds (TPasNavigator.SemanticTokens). Every path that installs a
+    // new FNav calls the Refresh; OpenFileTab applies to the new tab alone.
+    procedure ApplySemanticTokens(ATab: TObject);
+    procedure RefreshSemanticTokens;
     procedure CloseAllTabs;
     // Navigation history - see NavigateTo.
     function CurrentNavPos(out AEntry: TNavHistoryEntry): Boolean;
@@ -772,6 +787,23 @@ const
     (Name: 'Thistle';      Color: $00D8BFD8),
     (Name: 'PowderBlue';   Color: $00E6E0B0),
     (Name: 'Wheat';        Color: $00B3DEF5)
+  );
+
+  // FOREGROUND swatches for a TYPE name (cbTypeColor): dark enough to read
+  // as text on white, distinct from the palette's own Navy (keywords),
+  // Maroon (strings), Purple (numbers) and Green (comments). Teal first =
+  // default; the combo's custom-color entry covers anything else.
+  TYPE_COLORS: array[0..9] of TNamedColor = (
+    (Name: 'Teal';          Color: $00808000),
+    (Name: 'DarkCyan';      Color: $008B8B00),
+    (Name: 'SteelBlue';     Color: $00B48246),
+    (Name: 'RoyalBlue';     Color: $00E16941),
+    (Name: 'DarkOrange';    Color: $00008CFF),
+    (Name: 'Chocolate';     Color: $001E69D2),
+    (Name: 'OliveDrab';     Color: $00238E6B),
+    (Name: 'SeaGreen';      Color: $00578B2E),
+    (Name: 'Indigo';        Color: $0082004B),
+    (Name: 'DarkSlateGray'; Color: $004F4F2F)
   );
 
 // Pascal identifier lexeme: letter/underscore, then letters/digits/
@@ -2809,6 +2841,14 @@ begin
 
   FIdentHighlightColor := IDENT_HIGHLIGHT_COLORS[0].Color; // SandyBrown
   cbHighlightColor.Selected := FIdentHighlightColor;
+  FTypeColor := TYPE_COLORS[0].Color; // Teal
+  // Every color the component knows plus the curated palette on top - set
+  // HERE, not in the .dfm: the IDE re-saves the form with whatever Style the
+  // designer last showed, and a Style set in the .dfm alone came back as
+  // [cbCustomColors] once already. See cbTypeColorGetColors for the order.
+  cbTypeColor.Style := [cbStandardColors, cbExtendedColors, cbSystemColors,
+    cbCustomColor, cbPrettyNames, cbCustomColors];
+  cbTypeColor.Selected := FTypeColor;
 end;
 
 // Re-colors SynEdit's built-in highlighter with PasTreeDemo.Highlighter's own
@@ -2832,8 +2872,11 @@ begin
   AHL.FloatAttri.Foreground := PAS_NUMBER_COLOR;
   AHL.HexAttri.Foreground := PAS_NUMBER_COLOR;
   AHL.AsmAttri.Background := PAS_ASM_BACKGROUND;
-  // Ours never singles out built-in type names - match IdentifierAttri so
-  // TypeAttri doesn't introduce a distinction our highlighter doesn't make.
+  // TSynPasSyn's Type attribute is a fixed WORD LIST of built-in type names
+  // (Integer, string...), ours is the analysis's answer for every type name
+  // in the file (cbTypeColor) - two different things, so the word list is
+  // folded into Identifier rather than shown in the type color and read as
+  // "SynEdit knows fewer types".
   AHL.TypeAttri.Foreground := AHL.IdentifierAttri.Foreground;
   AHL.TypeAttri.Style := AHL.IdentifierAttri.Style;
 end;
@@ -3391,6 +3434,7 @@ begin
   // disagreeing on the same line.
   ApplyHighlighterContext(LHL, APath);
   LHL.SetSameIdentColor(FIdentHighlightColor);
+  LHL.SetTypeColor(FTypeColor);
   if cbHighlighter.ItemIndex = 0 then
     Result.Highlighter := FSynPasHL
   else
@@ -3433,6 +3477,10 @@ begin
   // its .dcu (LoadFileTolerant above) - generated text, not a file anyone
   // can save, so it is read-only.
   Result.ReadOnly := TPasSourceManager.IsDcuPath(LTab.FilePath);
+  // Type names color from the CURRENT analysis when this unit is in it; a
+  // unit outside the closure gets them after the re-analysis below (which
+  // installs a new FNav and refreshes every tab).
+  ApplySemanticTokens(LTab);
   FCompl.AddEditor(Result);   // code completion (ctrl+space / after `.`)
   // Keeps recorded positions in THIS file pointing at the same text as it is
   // edited. Created after FilePath is known and after the initial load, and
@@ -4024,6 +4072,7 @@ begin
       Format('engine=%d;', [LSW.ElapsedMilliseconds]);
     LSW := TStopwatch.StartNew;
     FNav := NewNavigator;
+    RefreshSemanticTokens;
     FAnalyzeOverhead := FAnalyzeOverhead +
       Format('nav=%d;', [LSW.ElapsedMilliseconds]);
     // Same as the async swap: the project is immutable from here on (every
@@ -4454,7 +4503,10 @@ begin
       FAnalyzing := False;
       FAsyncModule := False;
       if Assigned(FSemaProject) and not Assigned(FNav) then
+      begin
         FNav := NewNavigator;
+        RefreshSemanticTokens;
+      end;
     end;
     FreeAndNil(FAsyncSession);   // Destroy waits for the worker to drain
   end;
@@ -4495,7 +4547,10 @@ begin
     FAsyncModule := False;
     FAnalyzing := False;
     if Assigned(FSemaProject) then
+    begin
       FNav := NewNavigator;
+      RefreshSemanticTokens;
+    end;
     if LError <> '' then
       Log('Module reanalysis error: ' + LError);
     if LAccepted then
@@ -4534,6 +4589,7 @@ begin
   if Assigned(FSemaProject) then
   begin
     FNav := NewNavigator;
+    RefreshSemanticTokens;
     // MEMORY-AUDIT sec. 6.4-4 stage 1: this project is now IMMUTABLE for us -
     // every re-analysis goes through a fresh session - so the per-unit maps
     // nothing reads after analysis can go, except for the open tabs'
@@ -4966,6 +5022,7 @@ const
   SET_HIGHLIGHTER = 'Highlighter';
   SET_THREADING = 'Threading';
   SET_HIGHLIGHTCOLOR = 'HighlightColor';
+  SET_TYPECOLOR = 'TypeColor';   // semantic highlighting: a type name's color
   SET_STUDIO = 'Studio';   // BDS version of the selected install, e.g. 22.0
   // The two message filters. Display-only state, yet worth remembering: the
   // list is what one comes back to, and re-ticking both after every start is
@@ -4986,6 +5043,8 @@ begin
   FIdentHighlightColor := TColor(FSettings.ReadInt(SET_HIGHLIGHTCOLOR,
     Integer(FIdentHighlightColor)));
   cbHighlightColor.Selected := FIdentHighlightColor;
+  FTypeColor := TColor(FSettings.ReadInt(SET_TYPECOLOR, Integer(FTypeColor)));
+  cbTypeColor.Selected := FTypeColor;
   chkShowErrors.Checked := FSettings.ReadInt(SET_SHOWERRORS,
     Ord(chkShowErrors.Checked)) <> 0;
   chkShowSyntax.Checked := FSettings.ReadInt(SET_SHOWSYNTAX,
@@ -5012,6 +5071,7 @@ begin
   FSettings.WriteInt(SET_HIGHLIGHTER, cbHighlighter.ItemIndex);
   FSettings.WriteInt(SET_THREADING, cbThreading.ItemIndex);
   FSettings.WriteInt(SET_HIGHLIGHTCOLOR, Integer(FIdentHighlightColor));
+  FSettings.WriteInt(SET_TYPECOLOR, Integer(FTypeColor));
   FSettings.WriteInt(SET_SHOWERRORS, Ord(chkShowErrors.Checked));
   FSettings.WriteInt(SET_SHOWSYNTAX, Ord(chkShowSyntax.Checked));
   if (cbStudio.ItemIndex >= 0) and (cbStudio.ItemIndex <= High(FStudios)) then
@@ -5790,6 +5850,66 @@ begin
     LTab.PasTreeHL.SetSameIdentColor(FIdentHighlightColor);
     LTab.Editor.Invalidate;
   end;
+end;
+
+{ semantic highlighting - type names }
+
+procedure TfrmMain.cbTypeColorGetColors(Sender: TCustomColorBox;
+  Items: TStrings);
+var
+  LColor: TNamedColor;
+begin
+  for LColor in TYPE_COLORS do
+    Items.AddObject(LColor.Name, TObject(LColor.Color));
+end;
+
+// Same broadcast as cbHighlightColorChange: every tab's own highlighter, then
+// a repaint; new tabs take FTypeColor at creation (OpenFileTab).
+procedure TfrmMain.cbTypeColorChange(Sender: TObject);
+var
+  LIdx: Integer;
+  LTab: TSourceTab;
+begin
+  FTypeColor := cbTypeColor.Selected;
+  for LIdx := 0 to FOpenFiles.Count - 1 do
+  begin
+    LTab := TSourceTab(FOpenFiles.Objects[LIdx]);
+    LTab.PasTreeHL.SetTypeColor(FTypeColor);
+    LTab.Editor.Invalidate;
+  end;
+end;
+
+// Hands ONE tab the current analysis's answer for its unit - which raw tokens
+// name a type (TPasNavigator.SemanticTokens). No navigator, or a file outside
+// the analyzed closure: the marks are cleared, so a stale set from a previous
+// project never colors an unrelated file's tokens by index coincidence.
+procedure TfrmMain.ApplySemanticTokens(ATab: TObject);
+var
+  LTab: TSourceTab;
+  LMid: Integer;
+begin
+  LTab := TSourceTab(ATab);
+  if not Assigned(LTab.PasTreeHL) then
+    Exit;
+  LMid := -1;
+  if Assigned(FNav) and (LTab.FilePath <> '') then
+    LMid := FNav.ModelIdOf(LTab.FilePath);
+  if LMid >= 0 then
+    LTab.PasTreeHL.SetSemanticTokens(FNav.SemanticTokens(LMid))
+  else
+    LTab.PasTreeHL.ClearSemanticTokens;
+  LTab.Editor.Invalidate;
+end;
+
+// Every open tab, after a new FNav is installed (the sync RunParse, the async
+// swap, the module fast path, a cancelled module session) - the old marks
+// index the OLD analysis's tokens, which the edit that triggered it has moved.
+procedure TfrmMain.RefreshSemanticTokens;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to FOpenFiles.Count - 1 do
+    ApplySemanticTokens(FOpenFiles.Objects[LIdx]);
 end;
 
 // SynEdit's own selection-change notification - fires for any selection

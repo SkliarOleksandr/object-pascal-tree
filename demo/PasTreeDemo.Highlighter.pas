@@ -62,6 +62,13 @@ unit PasTreeDemo.Highlighter;
   - unlike every other color in this highlighter, which IS a lexer-correctness
   signal straight from TPasTokenKind.
 
+  One SEMANTIC layer on top of all that, and the only color here that does not
+  come from this unit's own lex/parse of the buffer: an identifier the
+  project analysis resolved to a TYPE paints with the Type attribute
+  (SetSemanticTokens, fed by TPasNavigator.SemanticTokens). The host hands the
+  rows over after every analysis; between an edit and the debounced
+  re-analysis they are what the last analysis knew (see SetSemanticTokens).
+
   Demo-only: lives in demo/, not source/, and is created purely at runtime -
   no `Register` procedure, no design-time package.
 }
@@ -83,7 +90,9 @@ uses
   PasTree.Preprocessor,
   PasTree.Ast,
   PasTree.Parser,
-  PasTree.Platforms;
+  PasTree.Platforms,
+  PasTree.Sema.Model,
+  PasTree.Sema.Nav;
 
 const
   { The palette below, named so it can be reused verbatim to re-color
@@ -105,6 +114,11 @@ const
     real Delphi IDE behavior: the whole excluded block goes one flat shade,
     not a de-saturated version of each token's usual color). }
   PAS_INACTIVE_COLOR = clGrayText;
+  { A TYPE name, wherever the resolver says the identifier denotes a type -
+    the first SEMANTIC color: it comes from the analysis (TPasNavigator.
+    SemanticTokens), not from the lexer, and only after an analysis has run.
+    The default is overwritten by SetTypeColor from the main form's combo. }
+  PAS_TYPE_COLOR = clTeal;
 
 type
   TPasTreeSynHighlighter = class(TSynCustomHighlighter)
@@ -157,6 +171,12 @@ type
     FSameIdentName: string;        // '' = feature off for this buffer
     FSameIdentSkipFrom: Integer;   // raw token idx range EXCLUDED from the
     FSameIdentSkipTo: Integer;     // highlight (the selection itself)
+    { Semantic kinds, indexed by RAW token: Ord(TSemaSymbolKind) + 1, 0 =
+      the analysis bound nothing there (or has not run). Written whole by
+      SetSemanticTokens, read for identifier tokens only. }
+    FTypeAttri: TSynHighlighterAttributes;
+    FSemKind: TArray<Byte>;
+    function IsTypeToken: Boolean;
     function IsWeakKeyword: Boolean;
     procedure BuildWeakKeywordSpans(const ATree: TPasTree;
       const APreprocessed: TPasPreprocessed);
@@ -242,6 +262,19 @@ type
       const ASearchPaths, ADefines: TArray<string>; APlatform: TPasPlatform;
       ACompilerVersion: Double = DEFAULT_COMPILER_VERSION);
     procedure SetSameIdentColor(AColor: TColor);
+    { Semantic highlighting. ATokens is TPasNavigator.SemanticTokens for the
+      unit this buffer shows - RAW token indices into the same text, so they
+      line up with this highlighter's own tokenization of it without any
+      translation. Today one kind is colored: an identifier the analysis
+      resolved to a type (skType, skBuiltinType) paints with the Type
+      attribute. The marks are NOT cleared on edit: they stay index-aligned
+      up to the edit point and drift behind it until the debounced
+      re-analysis calls this again - a short, local inaccuracy, against
+      every type in the file flickering to plain on each keystroke. The
+      HOST invalidates the editor on change (same convention as SetLinkRange). }
+    procedure SetSemanticTokens(const ATokens: TArray<TPasSemanticToken>);
+    procedure ClearSemanticTokens;
+    procedure SetTypeColor(AColor: TColor);
   end;
 
 implementation
@@ -319,6 +352,11 @@ begin
   AddAttribute(FSameIdentAttri);
   FSameIdentSkipFrom := -1;
   FSameIdentSkipTo := -1;
+
+  FTypeAttri := TSynHighlighterAttributes.Create('Type',
+    'Type name (from the analysis)');
+  FTypeAttri.Foreground := PAS_TYPE_COLOR; // overwritten by SetTypeColor
+  AddAttribute(FTypeAttri);
 
   SetAttributesOnChange(DefHighlightChange);
 
@@ -457,6 +495,41 @@ end;
 procedure TPasTreeSynHighlighter.SetSameIdentColor(AColor: TColor);
 begin
   FSameIdentAttri.Background := AColor;
+end;
+
+procedure TPasTreeSynHighlighter.SetTypeColor(AColor: TColor);
+begin
+  FTypeAttri.Foreground := AColor;
+end;
+
+procedure TPasTreeSynHighlighter.SetSemanticTokens(
+  const ATokens: TArray<TPasSemanticToken>);
+var
+  LIdx: Integer;
+begin
+  FSemKind := nil;
+  if Length(ATokens) = 0 then
+    Exit;
+  // Ascending by RawToken (SemanticTokens' contract), so the last row sizes
+  // the map; a fresh array, so nothing from the previous analysis survives.
+  SetLength(FSemKind, ATokens[High(ATokens)].RawToken + 1);
+  for LIdx := 0 to High(ATokens) do
+    if ATokens[LIdx].RawToken >= 0 then
+      FSemKind[ATokens[LIdx].RawToken] := Ord(ATokens[LIdx].Kind) + 1;
+end;
+
+procedure TPasTreeSynHighlighter.ClearSemanticTokens;
+begin
+  FSemKind := nil;
+end;
+
+// The CURRENT token (an identifier, per FCurKind) resolved to a type in the
+// last analysis handed over by SetSemanticTokens.
+function TPasTreeSynHighlighter.IsTypeToken: Boolean;
+begin
+  Result := (FCurTokenAbsIdx >= 0) and (FCurTokenAbsIdx < Length(FSemKind)) and
+    (FSemKind[FCurTokenAbsIdx] in
+      [Ord(skType) + 1, Ord(skBuiltinType) + 1]);
 end;
 
 function TPasTreeSynHighlighter.LexerDiagnosticCount: Integer;
@@ -771,6 +844,8 @@ begin
       begin
         if IsWeakKeyword then
           Result := FKeywordAttri
+        else if IsTypeToken then
+          Result := FTypeAttri   // semantic: the analysis says "a type"
         else
           Result := FIdentifierAttri;
         // "Other occurrences of the selected identifier": a plain name

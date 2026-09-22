@@ -1048,6 +1048,56 @@ begin
       Inc(Result);
 end;
 
+// The raw token of model GMidB's main file covering (ALine, ACol) - the
+// same 1-based convention IdentAt takes; -1 when nothing covers it.
+function RawTokenAt(ALine, ACol: Integer): Integer;
+var
+  LTS: TPasTokenStream;
+  LOffset, LIdx: Integer;
+begin
+  Result := -1;
+  LTS := GProj.Model(GMidB).Tree.Source.Files[0];
+  if (ALine < 1) or (ALine - 1 > High(LTS.LineStarts)) then
+    Exit;
+  LOffset := LTS.LineStarts[ALine - 1] + (ACol - 1);
+  for LIdx := 0 to High(LTS.Tokens) do
+    if (LTS.Tokens[LIdx].Start <= LOffset) and
+       (LTS.Tokens[LIdx].EndPos > LOffset) then
+      Exit(LIdx);
+end;
+
+// SemanticTokens has a row for the identifier at (ALine, ACol) with the
+// wanted kind and declaration flag.
+procedure CheckSem(const ACase: string; ALine, ACol: Integer;
+  AWantKind: TSemaSymbolKind; AWantDecl: Boolean);
+var
+  LRows: TArray<TPasSemanticToken>;
+  LRaw, LIdx: Integer;
+begin
+  LRaw := RawTokenAt(ALine, ACol);
+  LRows := GNav.SemanticTokens(GMidB);
+  for LIdx := 0 to High(LRows) do
+    if LRows[LIdx].RawToken = LRaw then
+    begin
+      Ok(ACase + ': kind', LRows[LIdx].Kind = AWantKind);
+      Ok(ACase + ': IsDecl', LRows[LIdx].IsDecl = AWantDecl);
+      Exit;
+    end;
+  Ok(ACase + ': no row for the token', False);
+end;
+
+function SemAscending(AMid: Integer): Boolean;
+var
+  LRows: TArray<TPasSemanticToken>;
+  LIdx: Integer;
+begin
+  LRows := GNav.SemanticTokens(AMid);
+  Result := Length(LRows) > 0;
+  for LIdx := 1 to High(LRows) do
+    if LRows[LIdx].RawToken <= LRows[LIdx - 1].RawToken then
+      Exit(False);
+end;
+
 // IdentAt + ResolveDecl in one step.
 procedure CheckNav(const ACase: string; ALine, ACol: Integer;
   const AWantIdent, AWantFile: string; AWantLine, AWantCol: Integer);
@@ -1335,6 +1385,20 @@ begin
       GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavB.pas'));
       Ok('NavB model found', GMidB >= 0);
       Ok('unknown path -> -1', GNav.ModelIdOf('C:\no\such.pas') = -1);
+
+      // Semantic highlighting: the kind of every resolved identifier, keyed
+      // by raw token. A type is a type in a declaration slot (line 4), a
+      // builtin (line 8), a cross-unit name (line 9) AND in expression
+      // position (`TArray.Sort`, line 27) - the case no syntax rule gets.
+      CheckSem('sem: cross-unit type ref', 4, 9, skType, False);
+      CheckSem('sem: var declaration name', 4, 5, skVar, True);
+      CheckSem('sem: builtin type', 8, 6, skBuiltinType, False);
+      CheckSem('sem: type from a used unit', 9, 6, skType, False);
+      CheckSem('sem: routine declaration name', 6, 11, skRoutine, True);
+      CheckSem('sem: cross-unit member', 13, 11, skField, False);
+      CheckSem('sem: type in expression position', 27, 3, skType, False);
+      Ok('sem: rows ascend by raw token', SemAscending(GMidB));
+      Ok('sem: unknown model -> no rows', GNav.SemanticTokens(-1) = nil);
 
       // Cross-unit type reference: TThing in `var GT: TThing;`.
       CheckNav('type ref', 4, 9, 'TThing', 'NavA.pas', 4, 3);

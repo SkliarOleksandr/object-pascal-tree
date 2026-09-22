@@ -204,6 +204,23 @@ object frmMain: TfrmMain
       Action = ViewUnitAction
       TabOrder = 12
     end
+    object cbTypeColor: TColorBox
+      Left = 1018
+      Top = 42
+      Width = 140
+      Height = 22
+      Hint = 
+        'Color of a TYPE name - semantic highlighting, from the analysis:' +
+        ' every identifier that resolves to a type, wherever it is writte' +
+        'n.'
+      Selected = clScrollBar
+      Style = [cbCustomColors]
+      ParentShowHint = False
+      ShowHint = True
+      TabOrder = 15
+      OnChange = cbTypeColorChange
+      OnGetColors = cbTypeColorGetColors
+    end
   end
   object vstFiles: TVirtualStringTree
     Left = 0
@@ -278,9 +295,9 @@ object frmMain: TfrmMain
             Width = 105
             Height = 17
             Hint = 
-              'Show the lexer''s and the parser''s diagnostics - unterminated st' +
-              'rings, illegal characters, "expected but found". Filters this l' +
-              'ist only - nothing is re-analyzed.'
+              'Show the lexer'#39's and the parser'#39's diagnostics - unterminated str' +
+              'ings, illegal characters, "expected but found". Filters this lis' +
+              't only - nothing is re-analyzed.'
             Caption = 'Syntax Errors'
             Checked = True
             ParentShowHint = False

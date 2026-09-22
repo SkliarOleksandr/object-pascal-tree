@@ -31,6 +31,32 @@ preprocessor + parser - not regex approximations.
     blue underlined link (all token kinds inside the range, including the
     dots of a qualified name). Set on ctrl+hover from `IdentAt`'s span.
 
+1.5 **Semantic type coloring** (`TPasNavigator.SemanticTokens`) - the one
+    color that does not come from the buffer's own lex/parse. After every
+    analysis the host asks the navigator for the unit's identifier tokens
+    with the KIND of the symbol each resolved to (`TPasSemanticToken`: raw
+    token index, `TSemaSymbolKind`, IsDecl), and the highlighter paints an
+    identifier that resolved to a type (`skType`, `skBuiltinType`) with the
+    Type attribute - in a declaration slot, a cast, `TFoo.Create`,
+    `SizeOf(TFoo)` alike, which is exactly what a syntax rule cannot tell
+    from a variable. Identity is `SymbolAt`'s (declaration name from the
+    symbol table, implementation header via `ImplHeaderSym`, otherwise
+    RefMap/ExtRefMap), so what colors as a type is what Ctrl+Click takes
+    to a type. Raw indices line up with the highlighter's own tokenization
+    of the same text, so no position translation sits in between; includes
+    are not covered. An unresolved identifier keeps its lexical color.
+
+    Between an edit and the debounced re-analysis the marks are the LAST
+    analysis's: aligned up to the edit point, drifting behind it for a few
+    hundred ms. Kept rather than cleared, because clearing flickers every
+    type name in the file on each keystroke. The demo's `cbTypeColor` combo
+    picks the color (persisted as `TypeColor`), default Teal. Other kinds
+    (fields, routines, constants...) are in the rows already; coloring them
+    is a highlighter-side choice for later.
+
+    pastree-lsp hand-off: `textDocument/semanticTokens/full` maps one row to
+    one token; `IsDecl` becomes the `declaration` modifier.
+
 ## 2. Go-to-declaration (`source/PasTree.Sema.Nav.pas` + demo wiring)
 
 Parity target: **ctrl+click on ANY identifier navigates to the place it is
