@@ -2672,6 +2672,39 @@ begin
 
   TestIntMap;
 
+  // Phase 1 pools spellings per unit: one heap string per distinct text, a
+  // lower-case name shares its key, and the arena is cut to exact length.
+  Analyze('unit U; interface'#10 +
+    'procedure P(Value: Integer); procedure Q(Value: Integer);'#10 +
+    'var abc: Integer;'#10 +
+    'implementation'#10 +
+    'procedure P(Value: Integer); begin end;'#10 +
+    'procedure Q(Value: Integer); begin end;'#10 +
+    'end.'#10);
+  var LFirst := -1;
+  var LShared := True;
+  var LLowerShared := False;
+  for var LIdx := 0 to GModel.SymCount - 1 do
+  begin
+    if GModel.Symbols[LIdx].NameLower = 'value' then
+      if LFirst < 0 then
+        LFirst := LIdx
+      else if (Pointer(GModel.Symbols[LIdx].Name) <>
+               Pointer(GModel.Symbols[LFirst].Name)) or
+              (Pointer(GModel.Symbols[LIdx].NameLower) <>
+               Pointer(GModel.Symbols[LFirst].NameLower)) then
+        LShared := False;
+    if GModel.Symbols[LIdx].NameLower = 'abc' then
+      LLowerShared := Pointer(GModel.Symbols[LIdx].Name) =
+        Pointer(GModel.Symbols[LIdx].NameLower);
+  end;
+  GCounter.Ok('name pool: every `Value` parameter shares one Name and one key',
+    (LFirst >= 0) and LShared);
+  GCounter.Ok('name pool: a lower-case name is its own key', LLowerShared);
+  GCounter.Ok('name pool: the symbol arena is exact after Phase 1',
+    Length(GModel.Symbols) = GModel.SymCount);
+  GModel.Free;
+
   if GCounter.Finish('SemaSmoke') then
     ExitCode := 1;
   GPP.Free;

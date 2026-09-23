@@ -256,6 +256,26 @@ type
     property Items[AKey: Integer]: V read GetItem write SetItem; default;
   end;
 
+  TSemaPoolSlot = record
+    H: Cardinal;
+    S: string;       // '' = empty slot
+  end;
+
+  { Phase 1's spelling pool (TPasSemaModel.FNamePool): a set of strings,
+    open addressing, the PasNameHash kept per slot, pow2 capacity, at most
+    75% full. Intern returns the pooled instance of AText's spelling (exact,
+    case-sensitive), pooling AText itself the first time. A TDictionary
+    <string, string> in its place cost ~4% of the client's analysis CPU. }
+  TSemaNamePool = record
+  private
+    FSlots: TArray<TSemaPoolSlot>;
+    FCount: Integer;
+    procedure Grow;
+  public
+    function Intern(const AText: string): string;
+    procedure Clear;
+  end;
+
   TSemaScope = class
     Kind: TSemaScopeKind;
     Parent: Integer;                       // scope index; NIL_SCOPE at root
@@ -301,6 +321,16 @@ type
     // to exact length; in-flight readers go through HasDiagAt, which stops
     // at the count.
     FDiagCount: Integer;
+    // Phase 1's spelling pool (BeginNamePool..EndNamePool, around the
+    // resolver's Run): text -> the one heap string AddSymbol hands out for
+    // it. Every symbol used to own two fresh strings, Name and NameLower,
+    // copied out of the token layer - 4.3M heap strings for 1.0M distinct
+    // texts on the client closure (memory audit, 2026-09). Pooling within
+    // the unit keeps 92 of those 191 MB and needs no lock: a model's Phase 1
+    // runs on one thread. Off outside Phase 1 - later symbols (none today)
+    // would simply not be pooled.
+    FNamePool: TSemaNamePool;
+    FNamePoolOn: Boolean;
     procedure GrowSyms;
     function FindByArityDeepH(AScope: Integer; const ANameLower: string;
       AHash: Cardinal; AWantGeneric: Boolean): Integer;
@@ -419,6 +449,10 @@ type
     function AddSymbol(AScope: Integer; AKind: TSemaSymbolKind;
       const AName: string; ADeclNode: Integer;
       const ANameKey: string = ''): Integer;
+    // Brackets Phase 1 (TPasSemaResolver.Analyze): between the two, AddSymbol
+    // shares one heap string per distinct spelling (see FNamePool).
+    procedure BeginNamePool;
+    procedure EndNamePool;
     // Registers NameLower -> symbol in a scope's dictionary + order list.
     procedure BindName(AScope, ASym: Integer);
     // Appends to a scope's declaration-order list WITHOUT (re)binding a name -
@@ -724,6 +758,60 @@ begin
   FSlots := Copy(FSlots);
   if FOrder <> nil then
     FOrder := Copy(FOrder, 0, FOrderCount);
+end;
+
+{ TSemaNamePool }
+
+procedure TSemaNamePool.Grow;
+var
+  LOld: TArray<TSemaPoolSlot>;
+  LIdx, LAt, LMask, LCap: Integer;
+begin
+  LOld := FSlots;
+  LCap := Length(LOld) * 2;
+  if LCap < 64 then
+    LCap := 64;
+  FSlots := nil;
+  SetLength(FSlots, LCap);
+  LMask := LCap - 1;
+  for LIdx := 0 to High(LOld) do
+    if LOld[LIdx].S <> '' then
+    begin
+      LAt := Integer(LOld[LIdx].H and Cardinal(LMask));
+      while FSlots[LAt].S <> '' do
+        LAt := (LAt + 1) and LMask;
+      FSlots[LAt] := LOld[LIdx];
+    end;
+end;
+
+function TSemaNamePool.Intern(const AText: string): string;
+var
+  LHash: Cardinal;
+  LIdx, LMask: Integer;
+begin
+  if AText = '' then
+    Exit('');
+  if (FCount + 1) * 4 > Length(FSlots) * 3 then
+    Grow;
+  LHash := PasNameHash(AText);
+  LMask := High(FSlots);
+  LIdx := Integer(LHash and Cardinal(LMask));
+  while FSlots[LIdx].S <> '' do
+  begin
+    if (FSlots[LIdx].H = LHash) and (FSlots[LIdx].S = AText) then
+      Exit(FSlots[LIdx].S);
+    LIdx := (LIdx + 1) and LMask;
+  end;
+  FSlots[LIdx].H := LHash;
+  FSlots[LIdx].S := AText;
+  Inc(FCount);
+  Result := AText;
+end;
+
+procedure TSemaNamePool.Clear;
+begin
+  FSlots := nil;
+  FCount := 0;
 end;
 
 { TSemaSymList }
@@ -1033,8 +1121,12 @@ end;
 
 procedure TPasSemaModel.GrowSyms;
 begin
+  // Phase 1 cuts the arena to exact length, possibly 0.
   if FSymCount = Length(Symbols) then
-    SetLength(Symbols, Length(Symbols) * 2);
+    if Length(Symbols) < 32 then
+      SetLength(Symbols, 64)
+    else
+      SetLength(Symbols, Length(Symbols) * 2);
 end;
 
 function TPasSemaModel.AddScope(AKind: TSemaScopeKind; AParent,
@@ -1107,11 +1199,26 @@ begin
   Result := FSymCount;
   Inc(FSymCount);
   Symbols[Result].Kind := AKind;
-  Symbols[Result].Name := AName;
-  if ANameKey <> '' then
-    Symbols[Result].NameLower := ANameKey
+  if not FNamePoolOn then
+  begin
+    Symbols[Result].Name := AName;
+    if ANameKey <> '' then
+      Symbols[Result].NameLower := ANameKey
+    else
+      Symbols[Result].NameLower := PasNameKey(AName);
+  end
   else
-    Symbols[Result].NameLower := PasNameKey(AName);
+  begin
+    if ANameKey <> '' then
+      Symbols[Result].NameLower := FNamePool.Intern(ANameKey)
+    else
+      Symbols[Result].NameLower := FNamePool.Intern(PasNameKey(AName));
+    // A lower-case spelling IS its key: one string for both.
+    if AName = Symbols[Result].NameLower then
+      Symbols[Result].Name := Symbols[Result].NameLower
+    else
+      Symbols[Result].Name := FNamePool.Intern(AName);
+  end;
   Symbols[Result].DeclNode := ADeclNode;
   Symbols[Result].Scope := AScope;
   Symbols[Result].TypeSym := NIL_SYM;
@@ -1122,6 +1229,17 @@ begin
   Symbols[Result].MemberScope := NIL_SCOPE;
   Symbols[Result].TypeCat := tcUnknown;
   Symbols[Result].NumRank := 0;
+end;
+
+procedure TPasSemaModel.BeginNamePool;
+begin
+  FNamePoolOn := True;
+end;
+
+procedure TPasSemaModel.EndNamePool;
+begin
+  FNamePoolOn := False;
+  FNamePool.Clear;
 end;
 
 procedure TPasSemaModel.BindName(AScope, ASym: Integer);
