@@ -2027,7 +2027,7 @@ begin
     Exit;
   LM := ProjModel(AUid, 'CollectUnitInterface');
   LScope := LM.InterfaceScope;
-  if (LScope = NIL_SCOPE) or (LM.Scopes[LScope].Symbols = nil) then
+  if (LScope = NIL_SCOPE) or (LM.Scopes[LScope].Symbols.Count = 0) then
     Exit;
   // OWN symbols, not a blind deep walk - the interface scope's Additional
   // joins hold that unit's builtin seeds (a per-model copy every unit has;

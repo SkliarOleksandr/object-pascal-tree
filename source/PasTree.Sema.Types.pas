@@ -792,7 +792,7 @@ end;
 
 function TPasSemaTyper.ParamsOf(AScope: Integer): TArray<Integer>;
 var
-  LList: TList<Integer>;
+  LList: TSemaSymList;
   LIdx, LCount: Integer;
 begin
   // Indexed two-pass (count, size once, fill) - runs per overload candidate;
@@ -801,7 +801,7 @@ begin
   if AScope = NIL_SCOPE then
     Exit;
   LList := M.Scopes[AScope].Symbols;
-  if LList = nil then
+  if LList.Count = 0 then
     Exit;   // lazy scope list - never bound
   LCount := 0;
   for LIdx := 0 to LList.Count - 1 do

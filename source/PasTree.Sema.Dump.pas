@@ -72,7 +72,7 @@ begin
       if AModel.Scopes[LScope].Kind = sckSystem then
       begin
         var LBuiltinCount := 0;
-        if AModel.Scopes[LScope].Symbols <> nil then
+        if AModel.Scopes[LScope].Symbols.Count > 0 then
           LBuiltinCount := AModel.Scopes[LScope].Symbols.Count;
         LSB.AppendFormat('scope#%d %s (builtins: %d)'#10,
           [LScope, ScopeStr(AModel.Scopes[LScope].Kind), LBuiltinCount]);
@@ -81,7 +81,7 @@ begin
       LSB.AppendFormat('scope#%d %s (parent#%d)'#10,
         [LScope, ScopeStr(AModel.Scopes[LScope].Kind),
          AModel.Scopes[LScope].Parent]);
-      if AModel.Scopes[LScope].Symbols = nil then
+      if AModel.Scopes[LScope].Symbols.Count = 0 then
         Continue;
       for LSymIdx in AModel.Scopes[LScope].Symbols do
       begin

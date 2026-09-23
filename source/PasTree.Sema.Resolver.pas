@@ -401,7 +401,7 @@ end;
 function TPasSemaResolver.RoutineParamNameCount(ASym: Integer): Integer;
 var
   LScope, LIdx: Integer;
-  LSyms: TList<Integer>;
+  LSyms: TSemaSymList;
 begin
   // Index loop, not for-in: runs per interface-head candidate when matching
   // impl routines to overload chains, and a for-in over TList allocates.
@@ -410,7 +410,7 @@ begin
   if LScope = NIL_SCOPE then
     Exit;
   LSyms := FModel.Scopes[LScope].Symbols;
-  if LSyms = nil then
+  if LSyms.Count = 0 then
     Exit;
   for LIdx := 0 to LSyms.Count - 1 do
     if FModel.Symbols[LSyms[LIdx]].Kind = skParam then
@@ -847,7 +847,7 @@ begin
     // visibility. Counted rather than returned, because a single child can
     // declare several (a `A, B: Integer` field group, a property's accessors,
     // a nested type and its enum values). Symbols is lazy - nil counts as 0.
-    if FModel.Scopes[LMembers].Symbols <> nil then
+    if FModel.Scopes[LMembers].Symbols.Count > 0 then
       LFirstNew := FModel.Scopes[LMembers].Symbols.Count
     else
       LFirstNew := 0;
@@ -916,7 +916,7 @@ begin
     else
       Collect(LChild, LMembers);   // var/const/type sections, variant parts...
     end;
-    if (LVis <> svDefault) and (FModel.Scopes[LMembers].Symbols <> nil) then
+    if (LVis <> svDefault) and (FModel.Scopes[LMembers].Symbols.Count > 0) then
       for var LNew := LFirstNew to FModel.Scopes[LMembers].Symbols.Count - 1 do
         FModel.Symbols[FModel.Scopes[LMembers].Symbols[LNew]].Visibility := LVis;
     LChild := NextSib(LChild);
@@ -2374,8 +2374,10 @@ function TPasSemaResolver.FindMemberUpChain(ATypeSym: Integer;
   const ANameLower: string): Integer;
 var
   LScope, LDepth: Integer;
+  LHash: Cardinal;
 begin
   Result := NIL_SYM;
+  LHash := PasNameHash(ANameLower);   // once for the whole ancestor climb
   LDepth := 0;
   while (ATypeSym <> NIL_SYM) and (LDepth < 32) do
   begin
@@ -2383,7 +2385,7 @@ begin
     LScope := FModel.Symbols[ATypeSym].MemberScope;
     if LScope <> NIL_SCOPE then
     begin
-      Result := FModel.FindLocal(LScope, ANameLower);
+      Result := FModel.FindLocalH(LScope, ANameLower, LHash);
       if Result <> NIL_SYM then
         Exit;
     end;
@@ -2446,7 +2448,7 @@ end;
 function TPasSemaResolver.DefaultArrayPropTypeSym(ATypeSym: Integer): Integer;
 var
   LScope, LDepth, LIdx, LSym, LDecl, LChild: Integer;
-  LSyms: TList<Integer>;
+  LSyms: TSemaSymList;
   LHasParams, LHasDefault: Boolean;
 begin
   Result := NIL_SYM;
@@ -2463,7 +2465,7 @@ begin
       // and a slice compare - the for-in enumerator and the lowered copy per
       // prop-spec were both allocations on the same per-with-target path.
       LSyms := FModel.Scopes[LScope].Symbols;
-      if LSyms <> nil then
+      if LSyms.Count > 0 then
         for LIdx := 0 to LSyms.Count - 1 do
         begin
           LSym := LSyms[LIdx];
@@ -3388,7 +3390,7 @@ procedure TPasSemaResolver.CheckSlicePositions;
        (FModel.Symbols[LSym].NextOverload <> NIL_SYM) then
       Exit;
     LScope := FModel.Symbols[LSym].MemberScope;
-    if (LScope = NIL_SCOPE) or (FModel.Scopes[LScope].Symbols = nil) then
+    if (LScope = NIL_SCOPE) or (FModel.Scopes[LScope].Symbols.Count = 0) then
       Exit;   // a builtin, or params not recorded
     LSeen := 0;
     for LParam in FModel.Scopes[LScope].Symbols do

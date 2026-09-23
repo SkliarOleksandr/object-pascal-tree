@@ -5223,7 +5223,7 @@ function TPasSemaProject.RoutineArity(AMid, ASym: Integer;
 var
   LM: TPasSemaModel;
   LScope, LS, LIdx, LChild: Integer;
-  LSyms: TList<Integer>;
+  LSyms: TSemaSymList;
   LSawDefault: Boolean;
 begin
   LM := FModels[AMid];
@@ -5238,7 +5238,7 @@ begin
   // for-in over TList mints a heap enumerator each time (same reasoning as
   // ParamsOf/XParamSyms).
   LSyms := LM.Scopes[LScope].Symbols;
-  if LSyms <> nil then
+  if LSyms.Count > 0 then
     for LIdx := 0 to LSyms.Count - 1 do
     begin
       LS := LSyms[LIdx];
@@ -7496,6 +7496,7 @@ var
   LM: TPasSemaModel;
   LScope, LDef, LChild, LDepth, LFound, LRMid, LRSym: Integer;
   LRootName: string;   // the implicit ancestor for a heritage-less struct
+  LHash: Cardinal;     // ANameLower's, once for the whole ancestor climb
 begin
 {$IFDEF PASTREE_MEMBERSTATS}
   // Top-level calls only - the constraint hop re-enters and would double-count.
@@ -7507,6 +7508,7 @@ begin
   AMemSym := NIL_SYM;
   ACtx := NIL_INST;
   LCur := ABase;
+  LHash := PasNameHash(ANameLower);
   for LDepth := 1 to 32 do
   begin
     if not XValid(LCur) then
@@ -7566,7 +7568,7 @@ begin
       // its extended type be seen from any OTHER unit - `M.Twice` in unit B
       // where both TMatrix and its helper live in unit A. The converse (a
       // helper in B for a type in A) goes through HelperMemberHit above.
-      LFound := LM.FindLocalDeep(LScope, ANameLower);
+      LFound := LM.FindLocalDeepH(LScope, ANameLower, LHash);
       // A `class constructor` is never what a NAME means: it runs once,
       // automatically, and cannot be called (15 sec. 15.1.5). It is registered
       // under its name like any routine, though, so `TRegistry.Create` - with
@@ -8234,7 +8236,7 @@ end;
 function TPasSemaProject.XParamSyms(AMid, ASym: Integer): TArray<Integer>;
 var
   LM: TPasSemaModel;
-  LList: TList<Integer>;
+  LList: TSemaSymList;
   LIdx, LCount: Integer;
 begin
   // Indexed two-pass (count, size once, fill): runs per overload candidate,
@@ -8245,7 +8247,7 @@ begin
   if LM.Symbols[ASym].MemberScope = NIL_SCOPE then
     Exit;
   LList := LM.Scopes[LM.Symbols[ASym].MemberScope].Symbols;
-  if LList = nil then
+  if LList.Count = 0 then
     Exit;   // lazy scope list - never bound
   LCount := 0;
   for LIdx := 0 to LList.Count - 1 do
@@ -11356,7 +11358,7 @@ begin
       Exit(XNil);
     LM := FModels[Result.UnitId];
     LScope := LM.Symbols[Result.Sym].MemberScope;
-    if (LScope <> NIL_SCOPE) and (LM.Scopes[LScope].Symbols <> nil) then
+    if (LScope <> NIL_SCOPE) and (LM.Scopes[LScope].Symbols.Count > 0) then
       for LIdx := 0 to LM.Scopes[LScope].Symbols.Count - 1 do
       begin
         LSym := LM.Scopes[LScope].Symbols[LIdx];
@@ -11746,7 +11748,7 @@ begin
       Exit;
     LScope := FModels[LCur.UnitId].Symbols[LCur.Sym].MemberScope;
     if (LScope <> NIL_SCOPE) and
-       (FModels[LCur.UnitId].Scopes[LScope].Symbols <> nil) then
+       (FModels[LCur.UnitId].Scopes[LScope].Symbols.Count > 0) then
       for LIdx := 0 to FModels[LCur.UnitId].Scopes[LScope].Symbols.Count - 1 do
       begin
         LCand := FModels[LCur.UnitId].Scopes[LScope].Symbols[LIdx];
@@ -11801,7 +11803,7 @@ begin
       Exit;
     LM := FModels[LCur.UnitId];
     LScope := LM.Symbols[LCur.Sym].MemberScope;
-    if (LScope <> NIL_SCOPE) and (LM.Scopes[LScope].Symbols <> nil) then
+    if (LScope <> NIL_SCOPE) and (LM.Scopes[LScope].Symbols.Count > 0) then
       for LIdx := 0 to LM.Scopes[LScope].Symbols.Count - 1 do
       begin
         LSym := LM.Scopes[LScope].Symbols[LIdx];
@@ -14220,9 +14222,9 @@ begin
     for LJdx := 0 to High(LSA.Shadowing) do
       if LSA.Shadowing[LJdx] <> LSB.Shadowing[LJdx] then
         Exit(False);
-    if (LSA.Symbols = nil) <> (LSB.Symbols = nil) then
+    if (LSA.Symbols.Count = 0) <> (LSB.Symbols.Count = 0) then
       Exit(False);
-    if LSA.Symbols <> nil then
+    if LSA.Symbols.Count > 0 then
     begin
       if LSA.Symbols.Count <> LSB.Symbols.Count then
         Exit(False);
@@ -14982,7 +14984,7 @@ procedure TPasSemaProject.DiffInterface(AOld, ANew: TPasSemaModel;
     if not LM.Tree.NodeVisRange(ADecl, LFirst, LLast) then
       Exit;
     SetLength(Result, LLast - LFirst + 1);
-    if LM.Scopes[AScope].Symbols = nil then
+    if LM.Scopes[AScope].Symbols.Count = 0 then
       Exit;
     for LMember in LM.Scopes[AScope].Symbols do
     begin

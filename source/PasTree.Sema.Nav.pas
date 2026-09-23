@@ -2000,7 +2000,7 @@ begin
   LM := FProj.Model(AMid);
   LScope := LM.Symbols[AStructSym].MemberScope;
   if (LScope < 0) or (LScope >= LM.Scopes.Count) or
-     (LM.Scopes[LScope].Symbols = nil) then
+     (LM.Scopes[LScope].Symbols.Count = 0) then
     Exit;
   for LIdx := 0 to LM.Scopes[LScope].Symbols.Count - 1 do
   begin
@@ -3119,7 +3119,7 @@ begin
   LM := FProj.Model(AMid);
   LScope := LM.Symbols[AStructSym].MemberScope;
   if (LScope < 0) or (LScope >= LM.Scopes.Count) or
-     (LM.Scopes[LScope].Symbols = nil) then
+     (LM.Scopes[LScope].Symbols.Count = 0) then
     Exit;
   LList := TList<Integer>.Create;
   try

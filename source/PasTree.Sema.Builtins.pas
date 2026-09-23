@@ -371,8 +371,8 @@ type
   // the list below is the Is64Bit intrinsic gate).
   TSeedTemplate = record
     Syms: TArray<TSemaSymbol>;
-    Names: TDictionary<string, Integer>;   // immutable after init
-    Order: TList<Integer>;                 // immutable after init
+    Names: TSemaNames;                     // immutable after init
+    Order: TSemaSymList;                   // immutable after init
   end;
 
 var
@@ -439,11 +439,12 @@ begin
     try
       LScope := SeedSystemScopeOwn(LModel, LPlat);
       GSeedTemplates[LIs64].Syms := Copy(LModel.Symbols, 0, LModel.SymCount);
-      // Steal the containers - the scratch model must not free them.
+      // Take the containers (value types: the arrays are shared by
+      // refcount), cut to exact length - an adopting scope shares them and
+      // must never find spare capacity it could write into in place.
       GSeedTemplates[LIs64].Names := LModel.Scopes[LScope].Names;
       GSeedTemplates[LIs64].Order := LModel.Scopes[LScope].Symbols;
-      LModel.Scopes[LScope].Names := nil;
-      LModel.Scopes[LScope].Symbols := nil;
+      GSeedTemplates[LIs64].Order.MakeUnique;
     finally
       LModel.Free;
     end;
@@ -474,11 +475,6 @@ var
 
 begin
   LSys := AModel.AddScope(sckSystem, NIL_SCOPE, NIL_NODE);
-  // ~180 names land below, in EVERY model: pre-size the lazy containers once
-  // instead of letting the dictionary rehash its way up per unit.
-  AModel.Scopes[LSys].Names := TDictionary<string, Integer>.Create(256);
-  AModel.Scopes[LSys].Symbols := TList<Integer>.Create;
-  AModel.Scopes[LSys].Symbols.Capacity := 224;
 
   // Integers (NumRank by width: 8-bit=1 .. 64-bit=4).
   T('Byte', tcInteger, 1); T('ShortInt', tcInteger, 1);
@@ -717,9 +713,5 @@ initialization
 finalization
   GIntrResult.Free;
   GSigIndex.Free;
-  GSeedTemplates[False].Names.Free;
-  GSeedTemplates[False].Order.Free;
-  GSeedTemplates[True].Names.Free;
-  GSeedTemplates[True].Order.Free;
 
 end.

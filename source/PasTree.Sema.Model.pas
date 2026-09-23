@@ -117,20 +117,92 @@ type
   // (which may be a joined scope, not the one enumeration started from).
   TPasSymEnumProc = reference to procedure(ASym, AScope: Integer);
 
+  // One slot of a TSemaNames table: the key's PasNameHash and the symbol it
+  // names. S = -1 marks an empty slot (table mode only).
+  TSemaNameSlot = record
+    H: Cardinal;
+    S: Integer;
+  end;
+
+  { A scope's names: NameLower -> head symbol index. Replaced a
+    TDictionary<string, Integer> per scope (memory audit, 2026-09):
+    RTL dictionaries grow at 50% load and carry a 96-byte object, so the
+    client closure's 640k named scopes - half of them holding ONE name - cost
+    ~200 B per name. Here there is no object and no stored key: a slot is the
+    key's hash plus the symbol index, and the key itself is read from
+    Symbols[S].NameLower, only when the hash matches.
+
+    Up to CLinearNames names the slots are an exact-length array scanned
+    linearly (no empties); beyond, an open-addressing table, pow2 capacity,
+    at most 75% full, linear probing. The hash is kept per slot for the
+    misses: most lookups walk a scope chain and miss in most of its scopes,
+    and a miss that compared hashes only never touches a symbol record.
+
+    ASyms is the owning model's Symbols array - a table is only meaningful
+    against the model whose symbol indexes it holds (the shared builtin seed
+    qualifies because every adopting model gets the seed symbols at the same
+    indexes, see TPasSemaModel.AdoptSeededSymbols). A value type: copying the
+    record SHARES the slot array, which is what the seed template relies on;
+    writers go through TSemaScope.EnsureOwnedContainers first. }
+  TSemaNames = record
+  private
+    FSlots: TArray<TSemaNameSlot>;
+    FCount: Integer;
+    procedure Rehash(ACapacity: Integer);
+  public
+    function Find(const AKey: string; AHash: Cardinal;
+      const ASyms: TArray<TSemaSymbol>): Integer; inline;
+    // Binds ASyms[ASym].NameLower (hash AHash) to ASym, replacing the symbol
+    // a same-key slot held - TDictionary.AddOrSetValue's contract.
+    procedure AddOrSet(AHash: Cardinal; ASym: Integer;
+      const ASyms: TArray<TSemaSymbol>);
+    procedure MakeUnique;
+    property Count: Integer read FCount;
+  end;
+
+  { A scope's symbols in declaration order - a TList<Integer> without the
+    object: exact length while small, growing by half beyond. The record
+    enumerator makes `for X in Scope.Symbols` allocation-free, which the
+    TList's heap enumerator was not. Same sharing rule as TSemaNames. }
+  TSemaSymList = record
+  public type
+    TEnumerator = record
+    private
+      FItems: TArray<Integer>;
+      FCount, FIdx: Integer;
+      function GetCurrent: Integer; inline;
+    public
+      function MoveNext: Boolean; inline;
+      property Current: Integer read GetCurrent;
+    end;
+  private
+    FItems: TArray<Integer>;
+    FCount: Integer;
+    function GetItem(AIdx: Integer): Integer; inline;
+  public
+    procedure Add(ASym: Integer);
+    procedure Clear;
+    function ToArray: TArray<Integer>;
+    function GetEnumerator: TEnumerator; inline;
+    procedure MakeUnique;
+    property Count: Integer read FCount;
+    property Items[AIdx: Integer]: Integer read GetItem; default;
+  end;
+
   TSemaScope = class
     Kind: TSemaScopeKind;
     Parent: Integer;                       // scope index; NIL_SCOPE at root
     OwnerNode: Integer;                    // CST node that opened this scope
-    // Both LAZY - nil until the first name is bound (most scopes never bind
-    // one). Readers treat nil as empty; TPasSemaModel.BindName creates them.
-    Names: TDictionary<string, Integer>;   // NameLower -> symbol index (head)
-    Symbols: TList<Integer>;               // declaration order
-    // True when Names/Symbols point at containers OWNED ELSEWHERE and shared
-    // read-only across models - today only the builtin seed template
-    // (PasTree.Sema.Builtins). Destroy leaves them alone, and any WRITE goes
-    // through EnsureOwnedContainers first (copy-on-write), so a future pass
-    // that declares into such a scope gets a private copy instead of
-    // corrupting every other model's view.
+    // Both empty (Count 0, no heap) until the first name is bound - most
+    // scopes never bind one; TPasSemaModel.BindName fills them.
+    Names: TSemaNames;                     // NameLower -> symbol index (head)
+    Symbols: TSemaSymList;                 // declaration order
+    // True when Names/Symbols SHARE their arrays with containers owned
+    // elsewhere, read-only across models - today only the builtin seed
+    // template (PasTree.Sema.Builtins). Any WRITE goes through
+    // EnsureOwnedContainers first (copy-on-write), so a future pass that
+    // declares into such a scope gets a private copy instead of corrupting
+    // every other model's view.
     SharedContainers: Boolean;
     Additional: TArray<Integer>;           // joined scopes (system/with/ancestor)
     // Joined scopes checked BEFORE this scope's own names. Exactly one thing
@@ -145,7 +217,6 @@ type
     // cross-unit ancestor walk here.
     StructSym: Integer;
     constructor Create(AKind: TSemaScopeKind; AParent, AOwnerNode: Integer);
-    destructor Destroy; override;
     procedure EnsureOwnedContainers;
   end;
 
@@ -161,6 +232,8 @@ type
     // at the count.
     FDiagCount: Integer;
     procedure GrowSyms;
+    function FindByArityDeepH(AScope: Integer; const ANameLower: string;
+      AHash: Cardinal; AWantGeneric: Boolean): Integer;
   public
     Tree: TPasTree;                 // referenced, not owned
     Symbols: TArray<TSemaSymbol>;
@@ -292,6 +365,16 @@ type
       AScope: Integer): Boolean;
     // Local lookup in one scope (no chain).
     function FindLocal(AScope: Integer; const ANameLower: string): Integer;
+    { FindLocal / FindLocalDeep with the key's PasNameHash supplied by the
+      caller. For every loop that looks ONE name up in a chain of scopes - a
+      parent climb, an ancestor or helper walk, across models too (the hash
+      is a function of the key alone): hash once before the loop. 84% of
+      consecutive lookups on the client closure repeat the previous key, and
+      rehashing it per scope was a third of the lookup cost. }
+    function FindLocalH(AScope: Integer; const ANameLower: string;
+      AHash: Cardinal): Integer; inline;
+    function FindLocalDeepH(AScope: Integer; const ANameLower: string;
+      AHash: Cardinal; ADepth: Integer = 0): Integer;
     // AScope's own names, then its Additional (joined) scopes, most-recently
     // -added first, EACH CHECKED THE SAME WAY (so a joined scope's own
     // joins are reachable too - e.g. a class's member scope has a nested
@@ -387,10 +470,200 @@ type
   `Foo` name the same thing - see the implementation. }
 function PasNameKey(const AName: string): string;
 
+{ The hash TSemaNames keys on: FNV-1a over the key's UTF-16 code units (one
+  step per char, not per byte). Pass a lookup KEY (PasNameKey form). }
+function PasNameHash(const AKey: string): Cardinal; inline;
+
 implementation
 
 uses
   System.SysUtils;
+
+const
+  // Names up to this many: an exact-length array scanned linearly. Measured
+  // on the client closure: 80% of named scopes hold <= 4 names, and a miss
+  // over <= 8 hashes is one cache line.
+  CLinearNames = 8;
+
+// $Q- for the same reason as SourceFingerprint below: the wraparound IS the
+// algorithm, and the checked test build compiles with $Q+.
+{$IFOPT Q+}{$DEFINE PT_RESTORE_Q}{$OVERFLOWCHECKS OFF}{$ENDIF}
+function PasNameHash(const AKey: string): Cardinal;
+var
+  LIdx: Integer;
+begin
+  Result := 2166136261;
+  for LIdx := 1 to Length(AKey) do
+    Result := (Result xor Cardinal(Ord(AKey[LIdx]))) * 16777619;
+end;
+{$IFDEF PT_RESTORE_Q}{$OVERFLOWCHECKS ON}{$UNDEF PT_RESTORE_Q}{$ENDIF}
+
+function SameNameKey(const A, B: string): Boolean; inline;
+begin
+  Result := (Pointer(A) = Pointer(B)) or
+    ((Length(A) = Length(B)) and
+     CompareMem(Pointer(A), Pointer(B), Length(A) * SizeOf(Char)));
+end;
+
+{ TSemaNames }
+
+function TSemaNames.Find(const AKey: string; AHash: Cardinal;
+  const ASyms: TArray<TSemaSymbol>): Integer;
+var
+  LIdx, LMask: Integer;
+begin
+  if FCount <= CLinearNames then
+  begin
+    for LIdx := 0 to FCount - 1 do
+      if (FSlots[LIdx].H = AHash) and
+         SameNameKey(ASyms[FSlots[LIdx].S].NameLower, AKey) then
+        Exit(FSlots[LIdx].S);
+    Exit(NIL_SYM);
+  end;
+  LMask := High(FSlots);
+  LIdx := Integer(AHash and Cardinal(LMask));
+  repeat
+    Result := FSlots[LIdx].S;
+    if Result = NIL_SYM then
+      Exit;   // empty slot: not here
+    if (FSlots[LIdx].H = AHash) and
+       SameNameKey(ASyms[Result].NameLower, AKey) then
+      Exit;
+    LIdx := (LIdx + 1) and LMask;
+  until False;
+end;
+
+procedure TSemaNames.Rehash(ACapacity: Integer);
+var
+  LOld: TArray<TSemaNameSlot>;
+  LIdx, LAt, LMask: Integer;
+begin
+  LOld := FSlots;
+  SetLength(FSlots, 0);
+  SetLength(FSlots, ACapacity);
+  for LIdx := 0 to ACapacity - 1 do
+    FSlots[LIdx].S := NIL_SYM;
+  LMask := ACapacity - 1;
+  for LIdx := 0 to High(LOld) do
+    if LOld[LIdx].S <> NIL_SYM then
+    begin
+      LAt := Integer(LOld[LIdx].H and Cardinal(LMask));
+      while FSlots[LAt].S <> NIL_SYM do
+        LAt := (LAt + 1) and LMask;
+      FSlots[LAt] := LOld[LIdx];
+    end;
+end;
+
+procedure TSemaNames.AddOrSet(AHash: Cardinal; ASym: Integer;
+  const ASyms: TArray<TSemaSymbol>);
+var
+  LIdx, LMask: Integer;
+begin
+  if FCount <= CLinearNames then
+  begin
+    for LIdx := 0 to FCount - 1 do
+      if (FSlots[LIdx].H = AHash) and
+         SameNameKey(ASyms[FSlots[LIdx].S].NameLower, ASyms[ASym].NameLower) then
+      begin
+        FSlots[LIdx].S := ASym;
+        Exit;
+      end;
+    if FCount < CLinearNames then
+    begin
+      SetLength(FSlots, FCount + 1);
+      FSlots[FCount].H := AHash;
+      FSlots[FCount].S := ASym;
+      Inc(FCount);
+      Exit;
+    end;
+    Rehash(16);   // the name after CLinearNames: linear array -> table
+  end;
+  LMask := High(FSlots);
+  LIdx := Integer(AHash and Cardinal(LMask));
+  while FSlots[LIdx].S <> NIL_SYM do
+  begin
+    if (FSlots[LIdx].H = AHash) and
+       SameNameKey(ASyms[FSlots[LIdx].S].NameLower, ASyms[ASym].NameLower) then
+    begin
+      FSlots[LIdx].S := ASym;
+      Exit;
+    end;
+    LIdx := (LIdx + 1) and LMask;
+  end;
+  // A new name. Keep the table at most 75% full so a miss meets an empty
+  // slot within a few probes.
+  if (FCount + 1) * 4 > Length(FSlots) * 3 then
+  begin
+    Rehash(Length(FSlots) * 2);
+    LMask := High(FSlots);
+    LIdx := Integer(AHash and Cardinal(LMask));
+    while FSlots[LIdx].S <> NIL_SYM do
+      LIdx := (LIdx + 1) and LMask;
+  end;
+  FSlots[LIdx].H := AHash;
+  FSlots[LIdx].S := ASym;
+  Inc(FCount);
+end;
+
+procedure TSemaNames.MakeUnique;
+begin
+  FSlots := Copy(FSlots);
+end;
+
+{ TSemaSymList }
+
+function TSemaSymList.TEnumerator.GetCurrent: Integer;
+begin
+  Result := FItems[FIdx];
+end;
+
+function TSemaSymList.TEnumerator.MoveNext: Boolean;
+begin
+  Inc(FIdx);
+  Result := FIdx < FCount;
+end;
+
+function TSemaSymList.GetItem(AIdx: Integer): Integer;
+begin
+  Result := FItems[AIdx];
+end;
+
+function TSemaSymList.GetEnumerator: TEnumerator;
+begin
+  Result.FItems := FItems;
+  Result.FCount := FCount;
+  Result.FIdx := -1;
+end;
+
+procedure TSemaSymList.Add(ASym: Integer);
+begin
+  if FCount = Length(FItems) then
+  begin
+    // Exact while small - most scopes stop at a handful - then by half.
+    if FCount < CLinearNames then
+      SetLength(FItems, FCount + 1)
+    else
+      SetLength(FItems, FCount + FCount div 2);
+  end;
+  FItems[FCount] := ASym;
+  Inc(FCount);
+end;
+
+procedure TSemaSymList.Clear;
+begin
+  FItems := nil;
+  FCount := 0;
+end;
+
+function TSemaSymList.ToArray: TArray<Integer>;
+begin
+  Result := Copy(FItems, 0, FCount);
+end;
+
+procedure TSemaSymList.MakeUnique;
+begin
+  FItems := Copy(FItems, 0, FCount);
+end;
 
 { TSemaScope }
 
@@ -402,40 +675,19 @@ begin
   Parent := AParent;
   OwnerNode := AOwnerNode;
   StructSym := NIL_SYM;
-  // Names/Symbols stay NIL until the first bind (see BindName): scopes are
-  // minted per routine, per block, per with, per enum - and most never
-  // declare a name, so the two eager heap objects per scope were the
-  // dominant small-object count in the analyzer. Every reader treats nil as
-  // empty (FindLocal here; the for-in/Count readers each guard locally).
-end;
-
-destructor TSemaScope.Destroy;
-begin
-  if not SharedContainers then
-  begin
-    Names.Free;
-    Symbols.Free;
-  end;
-  inherited;
+  // Names/Symbols stay empty, with no heap behind them, until the first bind
+  // (see BindName): scopes are minted per routine, per block, per with, per
+  // enum - and most never declare a name.
 end;
 
 procedure TSemaScope.EnsureOwnedContainers;
-var
-  LOwnNames: TDictionary<string, Integer>;
-  LOwnOrder: TList<Integer>;
-  LPair: TPair<string, Integer>;
 begin
   if not SharedContainers then
     Exit;
   // Copy-on-write off the shared seed containers: from here on this scope
   // owns private copies and mutating it is ordinary.
-  LOwnNames := TDictionary<string, Integer>.Create(Names.Count);
-  for LPair in Names do
-    LOwnNames.Add(LPair.Key, LPair.Value);
-  LOwnOrder := TList<Integer>.Create;
-  LOwnOrder.AddRange(Symbols);
-  Names := LOwnNames;
-  Symbols := LOwnOrder;
+  Names.MakeUnique;
+  Symbols.MakeUnique;
   SharedContainers := False;
 end;
 
@@ -579,24 +831,14 @@ end;
 procedure TPasSemaModel.BindName(AScope, ASym: Integer);
 begin
   Scopes[AScope].EnsureOwnedContainers;
-  // Both fields tested INDEPENDENTLY: keying "the containers exist" on Names
-  // alone meant that if AddToOrder's own defensive branch had ever run first,
-  // this would overwrite a non-nil Symbols list and lose its contents.
-  if Scopes[AScope].Names = nil then
-    Scopes[AScope].Names := TDictionary<string, Integer>.Create;
-  if Scopes[AScope].Symbols = nil then
-    Scopes[AScope].Symbols := TList<Integer>.Create;
-  Scopes[AScope].Names.AddOrSetValue(Symbols[ASym].NameLower, ASym);
+  Scopes[AScope].Names.AddOrSet(PasNameHash(Symbols[ASym].NameLower), ASym,
+    Symbols);
   Scopes[AScope].Symbols.Add(ASym);
 end;
 
 procedure TPasSemaModel.AddToOrder(AScope, ASym: Integer);
 begin
   Scopes[AScope].EnsureOwnedContainers;
-  // The callers just hit a FindLocal match in this scope, so the containers
-  // exist; the nil test keeps the method honest if that ever changes.
-  if Scopes[AScope].Symbols = nil then
-    Scopes[AScope].Symbols := TList<Integer>.Create;
   Scopes[AScope].Symbols.Add(ASym);
 end;
 
@@ -620,6 +862,8 @@ end;
 
 function TPasSemaModel.FindLocal(AScope: Integer;
   const ANameLower: string): Integer;
+var
+  LScope: TSemaScope;
 begin
   // ANameLower must ALREADY be a key (PasNameKey / TPasTree.NodeNameLower).
   // Normalizing defensively here instead cost 3.3x total analysis time: this is
@@ -627,15 +871,38 @@ begin
   // call. Cheap-looking belt-and-braces on a hot path is not cheap - the
   // boundary that BUILDS the key is the only place that can normalize for free,
   // because it is already producing a string there.
-  // A scope that never declared anything has no dictionary at all (lazy -
-  // see TSemaScope.Create); the nil test also short-circuits the hash.
-  if (Scopes[AScope].Names = nil) or
-     not Scopes[AScope].Names.TryGetValue(ANameLower, Result) then
-    Result := NIL_SYM;
+  // The empty test comes BEFORE the hash: ~14% of lookups land on a scope
+  // that never declared anything, and hashing first made the replacement of
+  // the per-scope TDictionary measurably slower than the dictionary's own nil
+  // test had been.
+  LScope := Scopes[AScope];
+  if LScope.Names.Count = 0 then
+    Result := NIL_SYM
+  else
+    Result := LScope.Names.Find(ANameLower, PasNameHash(ANameLower), Symbols);
+end;
+
+function TPasSemaModel.FindLocalH(AScope: Integer; const ANameLower: string;
+  AHash: Cardinal): Integer;
+var
+  LScope: TSemaScope;
+begin
+  LScope := Scopes[AScope];
+  if LScope.Names.Count = 0 then
+    Result := NIL_SYM
+  else
+    Result := LScope.Names.Find(ANameLower, AHash, Symbols);
 end;
 
 function TPasSemaModel.FindLocalDeep(AScope: Integer;
   const ANameLower: string; ADepth: Integer): Integer;
+begin
+  Result := FindLocalDeepH(AScope, ANameLower, PasNameHash(ANameLower),
+    ADepth);
+end;
+
+function TPasSemaModel.FindLocalDeepH(AScope: Integer;
+  const ANameLower: string; AHash: Cardinal; ADepth: Integer): Integer;
 var
   LAdd: TArray<Integer>;
   LIdx: Integer;
@@ -659,11 +926,11 @@ begin
   LAdd := Scopes[AScope].Shadowing;
   for LIdx := High(LAdd) downto 0 do
   begin
-    Result := FindLocalDeep(LAdd[LIdx], ANameLower, ADepth + 1);
+    Result := FindLocalDeepH(LAdd[LIdx], ANameLower, AHash, ADepth + 1);
     if Result <> NIL_SYM then
       Exit;
   end;
-  Result := FindLocal(AScope, ANameLower);
+  Result := FindLocalH(AScope, ANameLower, AHash);
   if Result <> NIL_SYM then
     Exit;
   // Joined scopes, most-recently-added first (uses/with priority) - each
@@ -672,7 +939,7 @@ begin
   LAdd := Scopes[AScope].Additional;
   for LIdx := High(LAdd) downto 0 do
   begin
-    Result := FindLocalDeep(LAdd[LIdx], ANameLower, ADepth + 1);
+    Result := FindLocalDeepH(LAdd[LIdx], ANameLower, AHash, ADepth + 1);
     if Result <> NIL_SYM then
       Exit;
   end;
@@ -693,9 +960,8 @@ begin
   LJoins := Scopes[AScope].Shadowing;
   for LIdx := High(LJoins) downto 0 do
     EnumScopeDeep(LJoins[LIdx], AOnSym, ADepth + 1);
-  if Scopes[AScope].Symbols <> nil then
-    for LIdx := 0 to Scopes[AScope].Symbols.Count - 1 do
-      AOnSym(Scopes[AScope].Symbols[LIdx], AScope);
+  for LIdx := 0 to Scopes[AScope].Symbols.Count - 1 do
+    AOnSym(Scopes[AScope].Symbols[LIdx], AScope);
   LJoins := Scopes[AScope].Additional;
   for LIdx := High(LJoins) downto 0 do
     EnumScopeDeep(LJoins[LIdx], AOnSym, ADepth + 1);
@@ -717,6 +983,13 @@ end;
   type it has no business finding. }
 function TPasSemaModel.FindByArityDeep(AScope: Integer;
   const ANameLower: string; AWantGeneric: Boolean): Integer;
+begin
+  Result := FindByArityDeepH(AScope, ANameLower, PasNameHash(ANameLower),
+    AWantGeneric);
+end;
+
+function TPasSemaModel.FindByArityDeepH(AScope: Integer;
+  const ANameLower: string; AHash: Cardinal; AWantGeneric: Boolean): Integer;
 var
   LAdd: TArray<Integer>;
   LIdx, LSym, LDepth: Integer;
@@ -737,11 +1010,11 @@ begin
   LAdd := Scopes[AScope].Shadowing;
   for LIdx := High(LAdd) downto 0 do
   begin
-    Result := FindByArityDeep(LAdd[LIdx], ANameLower, AWantGeneric);
+    Result := FindByArityDeepH(LAdd[LIdx], ANameLower, AHash, AWantGeneric);
     if Result <> NIL_SYM then
       Exit;
   end;
-  LSym := FindLocal(AScope, ANameLower);
+  LSym := FindLocalH(AScope, ANameLower, AHash);
   // Same name, same scope: types chain through NextOverload like routines do,
   // so the other arity declared beside this one is found here. Depth-capped for
   // a malformed chain, like every other walk in this model.
@@ -756,7 +1029,7 @@ begin
   LAdd := Scopes[AScope].Additional;
   for LIdx := High(LAdd) downto 0 do
   begin
-    Result := FindByArityDeep(LAdd[LIdx], ANameLower, AWantGeneric);
+    Result := FindByArityDeepH(LAdd[LIdx], ANameLower, AHash, AWantGeneric);
     if Result <> NIL_SYM then
       Exit;
   end;
@@ -787,11 +1060,13 @@ function TPasSemaModel.ResolveByArityAt(AScope: Integer;
   AWantGeneric: Boolean): Integer;
 var
   LCur: Integer;
+  LHash: Cardinal;
 begin
   LCur := AScope;
+  LHash := PasNameHash(ANameLower);
   while LCur <> NIL_SCOPE do
   begin
-    Result := FindByArityDeep(LCur, ANameLower, AWantGeneric);
+    Result := FindByArityDeepH(LCur, ANameLower, LHash, AWantGeneric);
     if Result <> NIL_SYM then
       if (AAtToken < 0) or (Scopes[LCur].Kind <> sckBlock) or
          not DeclaredAfter(Result, AAtToken) then
@@ -819,11 +1094,13 @@ function TPasSemaModel.ResolveAt(AScope: Integer; const ANameLower: string;
   AAtToken: Integer): Integer;
 var
   LCur: Integer;
+  LHash: Cardinal;
 begin
   LCur := AScope;
+  LHash := PasNameHash(ANameLower);
   while LCur <> NIL_SCOPE do
   begin
-    Result := FindLocalDeep(LCur, ANameLower);
+    Result := FindLocalDeepH(LCur, ANameLower, LHash, 0);
     if Result <> NIL_SYM then
     begin
       if (AAtToken < 0) or (Scopes[LCur].Kind <> sckBlock) or
