@@ -12,7 +12,7 @@ unit PasTree.Sema.Builtins;
   RECORDS are copied per model (so a builtin's identity stays (mid, sym),
   which the helper registry's '~name' canonicalization and every per-model
   seed retry rely on; string fields share their heap data by refcount), while
-  the scope's Names dictionary and order list are the template's own,
+  the scope's Names (names and declaration order) are the template's own,
   referenced read-only by every model. That is safe precisely because they
   are immutable after init - and future-proofed anyway: a write through
   BindName/AddToOrder copy-on-writes them (TSemaScope.EnsureOwnedContainers).
@@ -371,8 +371,7 @@ type
   // the list below is the Is64Bit intrinsic gate).
   TSeedTemplate = record
     Syms: TArray<TSemaSymbol>;
-    Names: TSemaNames;                     // immutable after init
-    Order: TSemaSymList;                   // immutable after init
+    Names: TSemaNames;                     // names + order, immutable after init
   end;
 
 var
@@ -410,7 +409,6 @@ begin
   if AModel.AdoptSeededSymbols(GSeedTemplates[LIs64].Syms, Result) then
   begin
     AModel.Scopes[Result].Names := GSeedTemplates[LIs64].Names;
-    AModel.Scopes[Result].Symbols := GSeedTemplates[LIs64].Order;
     AModel.Scopes[Result].SharedContainers := True;
   end
   else
@@ -443,8 +441,7 @@ begin
       // refcount), cut to exact length - an adopting scope shares them and
       // must never find spare capacity it could write into in place.
       GSeedTemplates[LIs64].Names := LModel.Scopes[LScope].Names;
-      GSeedTemplates[LIs64].Order := LModel.Scopes[LScope].Symbols;
-      GSeedTemplates[LIs64].Order.MakeUnique;
+      GSeedTemplates[LIs64].Names.MakeUnique;
     finally
       LModel.Free;
     end;

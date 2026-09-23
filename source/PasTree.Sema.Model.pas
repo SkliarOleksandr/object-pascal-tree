@@ -124,13 +124,13 @@ type
     S: Integer;
   end;
 
-  { A scope's names: NameLower -> head symbol index. Replaced a
-    TDictionary<string, Integer> per scope (memory audit, 2026-09):
-    RTL dictionaries grow at 50% load and carry a 96-byte object, so the
-    client closure's 640k named scopes - half of them holding ONE name - cost
-    ~200 B per name. Here there is no object and no stored key: a slot is the
-    key's hash plus the symbol index, and the key itself is read from
-    Symbols[S].NameLower, only when the hash matches.
+  { A scope's names AND its declaration order, one record. Names: NameLower
+    -> head symbol index. Replaced a TDictionary<string, Integer> per scope
+    (memory audit, 2026-09): RTL dictionaries grow at 50% load and carry a
+    96-byte object, so the client closure's 640k named scopes - half of them
+    holding ONE name - cost ~200 B per name. Here there is no object and no
+    stored key: a slot is the key's hash plus the symbol index, and the key
+    itself is read from Symbols[S].NameLower, only when the hash matches.
 
     Up to CLinearNames names the slots are an exact-length array scanned
     linearly (no empties); beyond, an open-addressing table, pow2 capacity,
@@ -138,54 +138,65 @@ type
     misses: most lookups walk a scope chain and miss in most of its scopes,
     and a miss that compared hashes only never touches a symbol record.
 
+    ORDER. The linear slots are appended in bind order, so while every bound
+    symbol was a NEW name they already ARE the declaration order and no order
+    list exists (FOrder nil) - true in all but ~3k of the client's 640k named
+    scopes. The first bind that breaks it materializes FOrder from the slots:
+    a same-name bind (an overload replaces the head in its slot), an
+    order-only entry (AddOrder), or the switch to table mode.
+
     ASyms is the owning model's Symbols array - a table is only meaningful
     against the model whose symbol indexes it holds (the shared builtin seed
     qualifies because every adopting model gets the seed symbols at the same
     indexes, see TPasSemaModel.AdoptSeededSymbols). A value type: copying the
-    record SHARES the slot array, which is what the seed template relies on;
+    record SHARES the arrays, which is what the seed template relies on;
     writers go through TSemaScope.EnsureOwnedContainers first. }
   TSemaNames = record
   private
     FSlots: TArray<TSemaNameSlot>;
     FCount: Integer;
+    FOrderCount: Integer;
+    FOrder: TArray<Integer>;       // nil = the slots are the order
     procedure Rehash(ACapacity: Integer);
+    procedure MaterializeOrder;
+    procedure AppendOrder(ASym: Integer);
   public
     function Find(const AKey: string; AHash: Cardinal;
       const ASyms: TArray<TSemaSymbol>): Integer; inline;
     // Binds ASyms[ASym].NameLower (hash AHash) to ASym, replacing the symbol
-    // a same-key slot held - TDictionary.AddOrSetValue's contract.
+    // a same-key slot held - TDictionary.AddOrSetValue's contract - and
+    // appends ASym to the declaration order.
     procedure AddOrSet(AHash: Cardinal; ASym: Integer;
       const ASyms: TArray<TSemaSymbol>);
+    // Declaration order only, no name binding.
+    procedure AddOrder(ASym: Integer);
     procedure MakeUnique;
     property Count: Integer read FCount;
   end;
+  PSemaNames = ^TSemaNames;
 
-  { A scope's symbols in declaration order - a TList<Integer> without the
-    object: exact length while small, growing by half beyond. The record
-    enumerator makes `for X in Scope.Symbols` allocation-free, which the
-    TList's heap enumerator was not. Same sharing rule as TSemaNames. }
+  { A scope's symbols in declaration order: a read-only view over its
+    TSemaNames (Scope.Symbols). No managed field, so taking one per access
+    costs no refcount traffic; valid while the scope lives and unchanged. }
   TSemaSymList = record
   public type
     TEnumerator = record
     private
-      FItems: TArray<Integer>;
-      FCount, FIdx: Integer;
+      FNames: PSemaNames;
+      FIdx: Integer;
       function GetCurrent: Integer; inline;
     public
       function MoveNext: Boolean; inline;
       property Current: Integer read GetCurrent;
     end;
   private
-    FItems: TArray<Integer>;
-    FCount: Integer;
+    FNames: PSemaNames;
     function GetItem(AIdx: Integer): Integer; inline;
+    function GetCount: Integer; inline;
   public
-    procedure Add(ASym: Integer);
-    procedure Clear;
     function ToArray: TArray<Integer>;
     function GetEnumerator: TEnumerator; inline;
-    procedure MakeUnique;
-    property Count: Integer read FCount;
+    property Count: Integer read GetCount;
     property Items[AIdx: Integer]: Integer read GetItem; default;
   end;
 
@@ -249,11 +260,11 @@ type
     Kind: TSemaScopeKind;
     Parent: Integer;                       // scope index; NIL_SCOPE at root
     OwnerNode: Integer;                    // CST node that opened this scope
-    // Both empty (Count 0, no heap) until the first name is bound - most
-    // scopes never bind one; TPasSemaModel.BindName fills them.
+    // Empty (Count 0, no heap) until the first name is bound - most scopes
+    // never bind one; TPasSemaModel.BindName/AddToOrder fill it. Holds the
+    // declaration order too, which Symbols reads.
     Names: TSemaNames;                     // NameLower -> symbol index (head)
-    Symbols: TSemaSymList;                 // declaration order
-    // True when Names/Symbols SHARE their arrays with containers owned
+    // True when Names SHARES its arrays with containers owned
     // elsewhere, read-only across models - today only the builtin seed
     // template (PasTree.Sema.Builtins). Any WRITE goes through
     // EnsureOwnedContainers first (copy-on-write), so a future pass that
@@ -274,6 +285,9 @@ type
     StructSym: Integer;
     constructor Create(AKind: TSemaScopeKind; AParent, AOwnerNode: Integer);
     procedure EnsureOwnedContainers;
+    function GetSymbols: TSemaSymList; inline;
+    // The scope's symbols in declaration order (a view over Names).
+    property Symbols: TSemaSymList read GetSymbols;
   end;
 
   TPasSemaModel = class
@@ -621,7 +635,10 @@ begin
       if (FSlots[LIdx].H = AHash) and
          SameNameKey(ASyms[FSlots[LIdx].S].NameLower, ASyms[ASym].NameLower) then
       begin
+        // The head moves to ASym: the slots stop being the order.
+        MaterializeOrder;
         FSlots[LIdx].S := ASym;
+        AppendOrder(ASym);
         Exit;
       end;
     if FCount < CLinearNames then
@@ -630,9 +647,13 @@ begin
       FSlots[FCount].H := AHash;
       FSlots[FCount].S := ASym;
       Inc(FCount);
+      if FOrder <> nil then
+        AppendOrder(ASym);
       Exit;
     end;
-    Rehash(16);   // the name after CLinearNames: linear array -> table
+    // The name after CLinearNames: linear array -> table, which has no order.
+    MaterializeOrder;
+    Rehash(16);
   end;
   LMask := High(FSlots);
   LIdx := Integer(AHash and Cardinal(LMask));
@@ -642,6 +663,7 @@ begin
        SameNameKey(ASyms[FSlots[LIdx].S].NameLower, ASyms[ASym].NameLower) then
     begin
       FSlots[LIdx].S := ASym;
+      AppendOrder(ASym);
       Exit;
     end;
     LIdx := (LIdx + 1) and LMask;
@@ -659,66 +681,99 @@ begin
   FSlots[LIdx].H := AHash;
   FSlots[LIdx].S := ASym;
   Inc(FCount);
+  AppendOrder(ASym);
+end;
+
+procedure TSemaNames.MaterializeOrder;
+var
+  LIdx: Integer;
+begin
+  if FOrder <> nil then
+    Exit;
+  // The slots are still in bind order (linear mode, every bind a new name):
+  // they become the explicit list. An empty scope yields nil here, and the
+  // AppendOrder that always follows makes it explicit.
+  SetLength(FOrder, FCount);
+  for LIdx := 0 to FCount - 1 do
+    FOrder[LIdx] := FSlots[LIdx].S;
+  FOrderCount := FCount;
+end;
+
+procedure TSemaNames.AppendOrder(ASym: Integer);
+begin
+  if FOrderCount = Length(FOrder) then
+  begin
+    // Exact while small - most scopes stop at a handful - then by half.
+    if FOrderCount < CLinearNames then
+      SetLength(FOrder, FOrderCount + 1)
+    else
+      SetLength(FOrder, FOrderCount + FOrderCount div 2);
+  end;
+  FOrder[FOrderCount] := ASym;
+  Inc(FOrderCount);
+end;
+
+procedure TSemaNames.AddOrder(ASym: Integer);
+begin
+  MaterializeOrder;
+  AppendOrder(ASym);
 end;
 
 procedure TSemaNames.MakeUnique;
 begin
   FSlots := Copy(FSlots);
+  if FOrder <> nil then
+    FOrder := Copy(FOrder, 0, FOrderCount);
 end;
 
 { TSemaSymList }
 
 function TSemaSymList.TEnumerator.GetCurrent: Integer;
 begin
-  Result := FItems[FIdx];
+  if FNames.FOrder = nil then
+    Result := FNames.FSlots[FIdx].S
+  else
+    Result := FNames.FOrder[FIdx];
 end;
 
 function TSemaSymList.TEnumerator.MoveNext: Boolean;
 begin
   Inc(FIdx);
-  Result := FIdx < FCount;
+  if FNames.FOrder = nil then
+    Result := FIdx < FNames.FCount
+  else
+    Result := FIdx < FNames.FOrderCount;
+end;
+
+function TSemaSymList.GetCount: Integer;
+begin
+  if FNames.FOrder = nil then
+    Result := FNames.FCount
+  else
+    Result := FNames.FOrderCount;
 end;
 
 function TSemaSymList.GetItem(AIdx: Integer): Integer;
 begin
-  Result := FItems[AIdx];
+  if FNames.FOrder = nil then
+    Result := FNames.FSlots[AIdx].S
+  else
+    Result := FNames.FOrder[AIdx];
 end;
 
 function TSemaSymList.GetEnumerator: TEnumerator;
 begin
-  Result.FItems := FItems;
-  Result.FCount := FCount;
+  Result.FNames := FNames;
   Result.FIdx := -1;
 end;
 
-procedure TSemaSymList.Add(ASym: Integer);
-begin
-  if FCount = Length(FItems) then
-  begin
-    // Exact while small - most scopes stop at a handful - then by half.
-    if FCount < CLinearNames then
-      SetLength(FItems, FCount + 1)
-    else
-      SetLength(FItems, FCount + FCount div 2);
-  end;
-  FItems[FCount] := ASym;
-  Inc(FCount);
-end;
-
-procedure TSemaSymList.Clear;
-begin
-  FItems := nil;
-  FCount := 0;
-end;
-
 function TSemaSymList.ToArray: TArray<Integer>;
+var
+  LIdx: Integer;
 begin
-  Result := Copy(FItems, 0, FCount);
-end;
-
-procedure TSemaSymList.MakeUnique;
-begin
-  FItems := Copy(FItems, 0, FCount);
+  SetLength(Result, GetCount);
+  for LIdx := 0 to High(Result) do
+    Result[LIdx] := GetItem(LIdx);
 end;
 
 { TPasIntMap<V> }
@@ -935,8 +990,12 @@ begin
   // Copy-on-write off the shared seed containers: from here on this scope
   // owns private copies and mutating it is ordinary.
   Names.MakeUnique;
-  Symbols.MakeUnique;
   SharedContainers := False;
+end;
+
+function TSemaScope.GetSymbols: TSemaSymList;
+begin
+  Result.FNames := @Names;
 end;
 
 { TPasSemaModel }
@@ -1070,13 +1129,12 @@ begin
   Scopes[AScope].EnsureOwnedContainers;
   Scopes[AScope].Names.AddOrSet(PasNameHash(Symbols[ASym].NameLower), ASym,
     Symbols);
-  Scopes[AScope].Symbols.Add(ASym);
 end;
 
 procedure TPasSemaModel.AddToOrder(AScope, ASym: Integer);
 begin
   Scopes[AScope].EnsureOwnedContainers;
-  Scopes[AScope].Symbols.Add(ASym);
+  Scopes[AScope].Names.AddOrder(ASym);
 end;
 
 function TPasSemaModel.AdoptSeededSymbols(const ASyms: TArray<TSemaSymbol>;
