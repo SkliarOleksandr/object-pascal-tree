@@ -189,6 +189,62 @@ type
     property Items[AIdx: Integer]: Integer read GetItem; default;
   end;
 
+  { The Int32-keyed maps a model keeps per node or per symbol (ExtRefMap,
+    CallTarget(X), SymTypeX, ExprTypeX, AnonStructSyms). Replaced a
+    TDictionary<Integer, V> each (memory audit, 2026-09): the RTL dictionary
+    grows at 50% load and stores a hash code per slot, so on the client
+    closure these maps sat at 34-36% load and cost 38-61 B per entry. Here a
+    slot is the key and the value only, pow2 capacity, at most 75% full,
+    linear probing, deletion by backward shift (no tombstones).
+
+    Keys are node or symbol indexes - sequential runs - so the home slot is a
+    Fibonacci hash of the key, not the key itself: an identity hash would lay
+    a run into one contiguous cluster that every miss inside it walks to the
+    end. Low(Integer) marks an empty slot and is the one key it cannot hold.
+
+    The method names and contracts are TDictionary's (TryGetValue writes
+    Default(V) on a miss, Add raises on a duplicate, Items[] raises on a
+    missing key), so callers read the same. A value type: copying the record
+    SHARES the slot array and forks the count - the maps live in model fields
+    and are only ever used in place. A field of a class starts zeroed; a
+    LOCAL one does not (only the array is), so a local needs
+    `:= Default(TPasIntMap<V>)` before first use. }
+  TPasIntMap<V> = record
+  public type
+    TSlot = TPair<Integer, V>;
+    TEnumerator = record
+    private
+      FSlots: TArray<TSlot>;
+      FIdx: Integer;
+      function GetCurrent: TSlot; inline;
+    public
+      function MoveNext: Boolean; inline;
+      property Current: TSlot read GetCurrent;
+    end;
+  private const
+    CEmptyKey = Low(Integer);
+  private
+    FSlots: TArray<TSlot>;
+    FCount: Integer;
+    FShift: Integer;
+    function Home(AKey: Integer): Integer; inline;
+    function IndexOf(AKey: Integer): Integer;
+    procedure Grow;
+    function GetItem(AKey: Integer): V;
+    procedure SetItem(AKey: Integer; const AValue: V);
+  public
+    function TryGetValue(AKey: Integer; var AValue: V): Boolean;
+    function ContainsKey(AKey: Integer): Boolean; inline;
+    procedure AddOrSetValue(AKey: Integer; const AValue: V);
+    procedure Add(AKey: Integer; const AValue: V);
+    procedure Remove(AKey: Integer);
+    // Drops the slot array too: an emptied map holds no heap.
+    procedure Clear;
+    function GetEnumerator: TEnumerator; inline;
+    property Count: Integer read FCount;
+    property Items[AKey: Integer]: V read GetItem write SetItem; default;
+  end;
+
   TSemaScope = class
     Kind: TSemaScopeKind;
     Parent: Integer;                       // scope index; NIL_SCOPE at root
@@ -249,20 +305,20 @@ type
     SystemScope: Integer;
     NodeScope: TArray<Integer>;     // node index -> scope in effect; NIL_SCOPE
     ExprType: TArray<Integer>;      // node index -> type symbol; NIL_SYM = untyped
-    ExtRefMap: TDictionary<Integer, TPasExtRef>; // node -> external symbol
-    CallTarget: TDictionary<Integer, Integer>;   // nkCall node -> chosen routine
+    ExtRefMap: TPasIntMap<TPasExtRef>;           // node -> external symbol
+    CallTarget: TPasIntMap<Integer>;             // nkCall node -> chosen routine
     // Cross-model call target (Phase 3c): the overload CrossType selected by
     // argument types among the merged local + used-units candidate set. Set
     // only when the winner is meaningful beyond CallTarget (cross-unit callee
     // or a real overload choice) - the future overload-precise navigation
     // jump reads this.
-    CallTargetX: TDictionary<Integer, TPasExtRef>;
+    CallTargetX: TPasIntMap<TPasExtRef>;
     // Phase 3c: cross-model typing (filled by the project driver; empty in a
     // standalone per-unit analysis). Entries exist only where they ADD to the
     // intra-unit result: a declared type / expression type that lives in
     // another model, or a generic instantiation of one.
-    SymTypeX: TDictionary<Integer, TSemaXType>;  // symbol -> declared type
-    ExprTypeX: TDictionary<Integer, TSemaXType>; // node -> expression type
+    SymTypeX: TPasIntMap<TSemaXType>;            // symbol -> declared type
+    ExprTypeX: TPasIntMap<TSemaXType>;           // node -> expression type
     UsesList: TArray<TPasUsesRef>;
     { Lower-cased `uses` names -> UnitId, both the full dotted name and its
       last segment, first entry wins - the same answer the ascending scan of
@@ -302,9 +358,9 @@ type
       struct-kind node. The one post-analysis reader of another model's
       NodeScope is ResolveTypeExpr's anonymous-struct branch (an inline
       `record ... end` in a type slot has no name, so RefMap has nothing) -
-      this dictionary is that branch's released-mode answer. Nil until a
-      release; scopes are few, so it is tiny. }
-    AnonStructSyms: TDictionary<Integer, Integer>;
+      this map is that branch's released-mode answer. Empty until a release;
+      scopes are few, so it is tiny. }
+    AnonStructSyms: TPasIntMap<Integer>;
     Demoted: Boolean;
     { True when this model's FINAL token stream came from the declared-pass
       re-preprocess (the per-unit $IF oracle) rather than the plain seeded
@@ -416,8 +472,8 @@ type
       EDITING: ExprType (a nodes-sized array), ExprTypeX and WithUnopened.
       Navigation reads none of them (grep-verified in MEMORY-AUDIT sec. 6.4-4 and
       re-verified 2026-08-23); completion reads them for the ACTIVE file only,
-      which the caller keeps. ExprTypeX stays a live-but-empty dictionary so
-      existing TryGetValue readers need no nil-guard. See
+      which the caller keeps. ExprTypeX is emptied, not dropped, so existing
+      TryGetValue readers need no guard. See
       TPasSemaProject.ReleaseTransientMaps for the contract - this is not
       called during any analysis. }
     procedure ReleaseTransientMaps;
@@ -665,6 +721,198 @@ begin
   FItems := Copy(FItems, 0, FCount);
 end;
 
+{ TPasIntMap<V> }
+
+function TPasIntMap<V>.TEnumerator.GetCurrent: TSlot;
+begin
+  Result := FSlots[FIdx];
+end;
+
+function TPasIntMap<V>.TEnumerator.MoveNext: Boolean;
+begin
+  repeat
+    Inc(FIdx);
+    if FIdx > High(FSlots) then
+      Exit(False);
+  until FSlots[FIdx].Key <> CEmptyKey;
+  Result := True;
+end;
+
+function TPasIntMap<V>.Home(AKey: Integer): Integer;
+begin
+  // Fibonacci hashing: the top bits of key * 2^32/phi. The product is taken
+  // in 64 bits so it cannot overflow under $Q+; the casts truncate, they do
+  // not range-check.
+  Result := Integer(Cardinal(UInt64(Cardinal(AKey)) * $9E3779B9) shr FShift);
+end;
+
+function TPasIntMap<V>.IndexOf(AKey: Integer): Integer;
+var
+  LMask, LKey: Integer;
+begin
+  if FCount = 0 then
+    Exit(-1);
+  LMask := High(FSlots);
+  Result := Home(AKey);
+  repeat
+    LKey := FSlots[Result].Key;
+    if LKey = AKey then
+      Exit;
+    if LKey = CEmptyKey then
+      Exit(-1);
+    Result := (Result + 1) and LMask;
+  until False;
+end;
+
+procedure TPasIntMap<V>.Grow;
+var
+  LOld: TArray<TSlot>;
+  LIdx, LAt, LMask, LCap: Integer;
+begin
+  LOld := FSlots;
+  LCap := Length(LOld) * 2;
+  if LCap < 4 then
+    LCap := 4;
+  FSlots := nil;
+  SetLength(FSlots, LCap);
+  for LIdx := 0 to LCap - 1 do
+    FSlots[LIdx].Key := CEmptyKey;
+  FShift := 32;
+  while (1 shl (32 - FShift)) < LCap do
+    Dec(FShift);
+  LMask := LCap - 1;
+  for LIdx := 0 to High(LOld) do
+    if LOld[LIdx].Key <> CEmptyKey then
+    begin
+      LAt := Home(LOld[LIdx].Key);
+      while FSlots[LAt].Key <> CEmptyKey do
+        LAt := (LAt + 1) and LMask;
+      FSlots[LAt] := LOld[LIdx];
+    end;
+end;
+
+function TPasIntMap<V>.GetItem(AKey: Integer): V;
+var
+  LIdx: Integer;
+begin
+  LIdx := IndexOf(AKey);
+  if LIdx < 0 then
+    raise EListError.CreateFmt('TPasIntMap: key %d not found', [AKey]);
+  Result := FSlots[LIdx].Value;
+end;
+
+procedure TPasIntMap<V>.SetItem(AKey: Integer; const AValue: V);
+var
+  LIdx: Integer;
+begin
+  LIdx := IndexOf(AKey);
+  if LIdx < 0 then
+    raise EListError.CreateFmt('TPasIntMap: key %d not found', [AKey]);
+  FSlots[LIdx].Value := AValue;
+end;
+
+function TPasIntMap<V>.TryGetValue(AKey: Integer; var AValue: V): Boolean;
+var
+  LIdx: Integer;
+begin
+  LIdx := IndexOf(AKey);
+  Result := LIdx >= 0;
+  if Result then
+    AValue := FSlots[LIdx].Value
+  else
+    AValue := Default(V);
+end;
+
+function TPasIntMap<V>.ContainsKey(AKey: Integer): Boolean;
+begin
+  Result := IndexOf(AKey) >= 0;
+end;
+
+procedure TPasIntMap<V>.AddOrSetValue(AKey: Integer; const AValue: V);
+var
+  LIdx, LMask: Integer;
+begin
+  Assert(AKey <> CEmptyKey);
+  if (FCount + 1) * 4 > Length(FSlots) * 3 then
+  begin
+    // Grow only for a NEW key: an overwrite at the threshold must not
+    // double a table that is not getting fuller.
+    LIdx := IndexOf(AKey);
+    if LIdx >= 0 then
+    begin
+      FSlots[LIdx].Value := AValue;
+      Exit;
+    end;
+    Grow;
+  end;
+  LMask := High(FSlots);
+  LIdx := Home(AKey);
+  while FSlots[LIdx].Key <> CEmptyKey do
+  begin
+    if FSlots[LIdx].Key = AKey then
+    begin
+      FSlots[LIdx].Value := AValue;
+      Exit;
+    end;
+    LIdx := (LIdx + 1) and LMask;
+  end;
+  FSlots[LIdx].Key := AKey;
+  FSlots[LIdx].Value := AValue;
+  Inc(FCount);
+end;
+
+procedure TPasIntMap<V>.Add(AKey: Integer; const AValue: V);
+begin
+  if ContainsKey(AKey) then
+    raise EListError.CreateFmt('TPasIntMap: duplicate key %d', [AKey]);
+  AddOrSetValue(AKey, AValue);
+end;
+
+procedure TPasIntMap<V>.Remove(AKey: Integer);
+var
+  LHole, LIdx, LHome, LMask: Integer;
+begin
+  LHole := IndexOf(AKey);
+  if LHole < 0 then
+    Exit;
+  // Backward shift: pull later members of the probe run into the hole when
+  // their home slot does not lie cyclically in (hole, idx] - otherwise a
+  // lookup for them would stop at the hole and miss.
+  LMask := High(FSlots);
+  LIdx := LHole;
+  repeat
+    LIdx := (LIdx + 1) and LMask;
+    if FSlots[LIdx].Key = CEmptyKey then
+      Break;
+    LHome := Home(FSlots[LIdx].Key);
+    if LHole <= LIdx then
+    begin
+      if (LHole < LHome) and (LHome <= LIdx) then
+        Continue;
+    end
+    else if (LHole < LHome) or (LHome <= LIdx) then
+      Continue;
+    FSlots[LHole] := FSlots[LIdx];
+    LHole := LIdx;
+  until False;
+  FSlots[LHole].Key := CEmptyKey;
+  FSlots[LHole].Value := Default(V);
+  Dec(FCount);
+end;
+
+procedure TPasIntMap<V>.Clear;
+begin
+  FSlots := nil;
+  FCount := 0;
+  FShift := 0;
+end;
+
+function TPasIntMap<V>.GetEnumerator: TEnumerator;
+begin
+  Result.FSlots := FSlots;
+  Result.FIdx := -1;
+end;
+
 { TSemaScope }
 
 constructor TSemaScope.Create(AKind: TSemaScopeKind; AParent,
@@ -698,11 +946,6 @@ begin
   inherited Create;
   Tree := ATree;
   Scopes := TObjectList<TSemaScope>.Create(True);
-  ExtRefMap := TDictionary<Integer, TPasExtRef>.Create;
-  CallTarget := TDictionary<Integer, Integer>.Create;
-  CallTargetX := TDictionary<Integer, TPasExtRef>.Create;
-  SymTypeX := TDictionary<Integer, TSemaXType>.Create;
-  ExprTypeX := TDictionary<Integer, TSemaXType>.Create;
   InterfaceScope := NIL_SCOPE;
   SystemScope := NIL_SCOPE;
   AllUsesResolved := False;
@@ -720,12 +963,6 @@ end;
 destructor TPasSemaModel.Destroy;
 begin
   UsesByName.Free;
-  AnonStructSyms.Free;
-  ExprTypeX.Free;
-  SymTypeX.Free;
-  CallTargetX.Free;
-  CallTarget.Free;
-  ExtRefMap.Free;
   Scopes.Free;
   inherited;
 end;
@@ -1138,8 +1375,7 @@ var
 begin
   ExprType := nil;
   WithUnopened := nil;
-  ExprTypeX.Free;
-  ExprTypeX := TDictionary<Integer, TSemaXType>.Create;
+  ExprTypeX.Clear;
   // NodeScope joins the released set - but its one post-analysis consumer
   // (the anonymous-struct branch, see AnonStructSyms) gets a snapshot first.
   // Built from the SCOPES (a few hundred) rather than a scan of every node.
@@ -1152,11 +1388,7 @@ begin
         if (LOwner <> NIL_NODE) and (LOwner <= High(Tree.Nodes)) and
            (Tree.Nodes[LOwner].Kind in [nkRecordType, nkClassType,
              nkInterfaceType, nkObjectType]) then
-        begin
-          if AnonStructSyms = nil then
-            AnonStructSyms := TDictionary<Integer, Integer>.Create;
           AnonStructSyms.AddOrSetValue(LOwner, Scopes[LScope].StructSym);
-        end;
       end;
     NodeScope := nil;
   end;
@@ -1209,8 +1441,9 @@ begin
     if LScope <> NIL_SCOPE then
       Result := Scopes[LScope].StructSym;
   end
-  else if AnonStructSyms <> nil then
-    AnonStructSyms.TryGetValue(ANode, Result);
+  // TryGetValue writes Default = 0 on a miss, and 0 is a real symbol index.
+  else if not AnonStructSyms.TryGetValue(ANode, Result) then
+    Result := NIL_SYM;
 end;
 
 function TPasSemaModel.RoutineHead(ASym: Integer): TPasRoutineHead;

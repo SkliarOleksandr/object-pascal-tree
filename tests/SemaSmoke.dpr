@@ -8,6 +8,7 @@ program SemaSmoke;
 
 uses
   System.SysUtils,
+  System.Generics.Collections,
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
@@ -1150,6 +1151,113 @@ const
     '  Result := N + GCount;'#10 +
     'end;'#10 +
     'end.'#10;
+
+{ TPasIntMap - the model's Int32-keyed maps - against TDictionary as the
+  oracle: a seeded random stream of adds, overwrites, removes and lookups over
+  a narrow key range (so probe runs collide, wrap around the table end and
+  get holes punched in them by the backward-shift delete), then a sequential
+  run - the node-index shape the Fibonacci home slot exists for. }
+procedure TestIntMap;
+var
+  LMap: TPasIntMap<Integer>;
+  LRef: TDictionary<Integer, Integer>;
+  LStep, LKey, LVal, LGot: Integer;
+  LSame, LRaised: Boolean;
+
+  function Agrees: Boolean;
+  var
+    LSeen: Integer;
+  begin
+    Result := LMap.Count = LRef.Count;
+    LSeen := 0;
+    for var LPair in LMap do
+    begin
+      Inc(LSeen);
+      if not LRef.TryGetValue(LPair.Key, LVal) or (LVal <> LPair.Value) then
+        Exit(False);
+    end;
+    Result := Result and (LSeen = LRef.Count);
+  end;
+
+begin
+  LMap := Default(TPasIntMap<Integer>);   // a local: the counts start as garbage
+  LRef := TDictionary<Integer, Integer>.Create;
+  try
+    RandSeed := 20260923;
+    LSame := True;
+    for LStep := 1 to 200000 do
+    begin
+      LKey := Random(3000) - 100;   // negative keys are legal too
+      case Random(4) of
+        0, 1:
+          begin
+            LMap.AddOrSetValue(LKey, LStep);
+            LRef.AddOrSetValue(LKey, LStep);
+          end;
+        2:
+          begin
+            LMap.Remove(LKey);
+            LRef.Remove(LKey);
+          end;
+      else
+        if LMap.TryGetValue(LKey, LGot) <> LRef.TryGetValue(LKey, LVal) then
+          LSame := False
+        else if LGot <> LVal then   // both Default(V) on a miss
+          LSame := False;
+      end;
+      if (LStep mod 5000 = 0) and not Agrees then
+        LSame := False;
+    end;
+    GCounter.Ok('intmap: random stream agrees with TDictionary', LSame and Agrees);
+
+    LMap.Clear;
+    LRef.Clear;
+    for LKey := 0 to 99999 do
+    begin
+      LMap.Add(LKey, LKey * 3);
+      LRef.Add(LKey, LKey * 3);
+    end;
+    for LKey := 0 to 99999 do
+      if LKey mod 3 = 0 then
+      begin
+        LMap.Remove(LKey);
+        LRef.Remove(LKey);
+      end;
+    LSame := Agrees;
+    for LKey := -10 to 100010 do
+      if LMap.ContainsKey(LKey) <> LRef.ContainsKey(LKey) then
+        LSame := False;
+    GCounter.Ok('intmap: sequential keys, every third removed', LSame);
+
+    LMap[1] := 42;
+    GCounter.Ok('intmap: Items[] writes an existing key', LMap[1] = 42);
+    LRaised := False;
+    try
+      LMap.Add(1, 0);
+    except
+      on EListError do
+        LRaised := True;
+    end;
+    GCounter.Ok('intmap: Add raises on a duplicate key', LRaised);
+    LRaised := False;
+    try
+      LGot := LMap[0];   // removed above
+    except
+      on EListError do
+        LRaised := True;
+    end;
+    GCounter.Ok('intmap: Items[] raises on a missing key', LRaised);
+
+    LMap.Clear;
+    LSame := LMap.Count = 0;
+    for var LPair in LMap do
+      LSame := False;
+    GCounter.Ok('intmap: Clear leaves an empty map', LSame and
+      not LMap.TryGetValue(1, LGot) and (LGot = 0));
+  finally
+    LRef.Free;
+  end;
+end;
 
 begin
   GSM := TPasSourceManager.Create([]);
@@ -2561,6 +2669,8 @@ begin
       RefResolvesTo('X', 'X') and (GModel.WithUnopened = nil));
     GModel.Free;
   end;
+
+  TestIntMap;
 
   if GCounter.Finish('SemaSmoke') then
     ExitCode := 1;
