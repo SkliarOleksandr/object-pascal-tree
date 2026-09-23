@@ -146,8 +146,10 @@ type
       resolves to: search paths (in order - order is priority), namespaces (in
       order - tried in order), aliases (sorted - a dictionary has no order).
       Two managers with equal signatures resolve every unit name identically,
-      which is what TPasSemaProject.AdoptParseDonor gates on. }
-    function ConfigSignature: string;
+      which is what TPasSemaProject.AdoptParseDonor gates on. The project
+      directory leads it; AWithProjectDir = False leaves it out, for the gate's
+      check before a run has decided the directory. }
+    function ConfigSignature(AWithProjectDir: Boolean = True): string;
     { In-memory buffer overrides: LoadText returns the given text for APath
       instead of reading the file. Editor hosts push unsaved buffers here so
       analysis sees what's on screen (main file AND its $I includes go through
@@ -355,7 +357,7 @@ begin
   Result := FProjectDir;
 end;
 
-function TPasSourceManager.ConfigSignature: string;
+function TPasSourceManager.ConfigSignature(AWithProjectDir: Boolean): string;
 var
   LItem: string;
   LPairs: TArray<string>;
@@ -363,7 +365,10 @@ var
 begin
   // The project directory is a search path in all but name (FindUnitFile
   // probes it first), so it decides resolution exactly as the paths do.
-  Result := LowerCase(FProjectDir) + '|';
+  if AWithProjectDir then
+    Result := LowerCase(FProjectDir) + '|'
+  else
+    Result := '|';
   for LItem in FSearchPaths do
     Result := Result + LItem + #1;
   Result := Result + '|';

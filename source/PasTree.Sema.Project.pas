@@ -372,6 +372,7 @@ type
       out AErrClass, AErrMsg: string): TPasSemaModel;
     procedure RegisterUnitName(AId: Integer);
     procedure DefaultProjectDirFrom(const AMainFile: string);
+    procedure RecheckDonorProjectDir;
     function LoadedUnitByName(const AName: string): Integer;
     procedure ResolveUses(AId: Integer);
     function SeedDeclaredQuery: TPasDeclaredQuery;
@@ -1660,6 +1661,21 @@ procedure TPasSemaProject.DefaultProjectDirFrom(const AMainFile: string);
 begin
   if (FSM.ProjectDir = '') and (AMainFile <> '') then
     FSM.SetProjectDir(TPath.GetDirectoryName(TPath.GetFullPath(AMainFile)));
+  RecheckDonorProjectDir;
+end;
+
+// The project-directory half of AdoptParseDonor's config gate, run once the
+// run has DECIDED its directory. At adoption a host that sets none still has
+// '' here while the donor's was defaulted by its own run, so comparing then
+// refused every donor of such a host (the demo; the diff harness) - parse
+// reuse silently off from v0.31.0, which added the directory to the
+// signature, until 0.43.1. A donor from another directory is dropped here
+// instead: it would resolve unit names differently.
+procedure TPasSemaProject.RecheckDonorProjectDir;
+begin
+  if (FDonor <> nil) and
+     (FDonor.FSM.ConfigSignature <> FSM.ConfigSignature) then
+    FDonor := nil;
 end;
 
 function TPasSemaProject.EnsureSystemUnit: Integer;
@@ -1865,7 +1881,11 @@ begin
   for LIdx := 0 to High(FExtraDefines) do
     if not SameText(ADonor.FExtraDefines[LIdx], FExtraDefines[LIdx]) then
       Exit(False);
-  if ADonor.FSM.ConfigSignature <> FSM.ConfigSignature then
+  // Without the project directory while this project has none yet: the next
+  // run defaults it from its main file, and RecheckDonorProjectDir compares
+  // it then.
+  if ADonor.FSM.ConfigSignature(FSM.ProjectDir <> '') <>
+     FSM.ConfigSignature(FSM.ProjectDir <> '') then
     Exit(False);
   FDonor := ADonor;
   Result := True;
@@ -16114,7 +16134,9 @@ begin
   // One root is a project's main file (the LSP host with a configured
   // project); several are open documents, which have no project directory.
   if Length(ARoots) = 1 then
-    DefaultProjectDirFrom(ARoots[0]);
+    DefaultProjectDirFrom(ARoots[0])
+  else
+    RecheckDonorProjectDir;
   Result := -1;
   FStageTimings := '';
   LProgress := Default(TPasStagedProgress);

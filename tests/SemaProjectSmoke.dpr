@@ -6218,6 +6218,53 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  // A host that never calls SetProjectDir: every run defaults the project
+  // directory from its main file, the donor's already done, this project's
+  // not yet at adoption. v0.31.0 put the directory into the config gate and
+  // from then on such a donor was ALWAYS refused (the demo, the diff harness).
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_donor_dir');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitDA.pas'),
+    'unit UnitDA;'#10'interface'#10'const DV = 1;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitDB.pas'),
+    'unit UnitDB;'#10'interface'#10'uses UnitDA;'#10 +
+    'const DW = DV;'#10'implementation'#10'end.'#10);
+  LDonor := TPasSemaProject.Create(pfWin32, [LDir], []);
+  GProj := nil;
+  try
+    LDonor.AnalyzeProject(TPath.Combine(LDir, 'UnitDB.pas'));
+    GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+    Ok('donor: adopted although this project''s directory is not decided yet',
+      GProj.AdoptParseDonor(LDonor));
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'UnitDB.pas'));
+    Ok('donor: the defaulted directories match and the parses are reused',
+      (Pos('donormiss=0;', GProj.StageTimings) > 0) and
+      (Pos('donorhits=', GProj.StageTimings) > 0) and
+      (Pos('donorhits=0;', GProj.StageTimings) = 0));
+    GProj.Free;
+    // Same paths, another directory: the gate lets it through at adoption
+    // and drops it once the run has decided its own directory.
+    GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+    GProj.SetProjectDir(TPath.GetTempPath);
+    Ok('donor: a donor from another project directory is refused',
+      not GProj.AdoptParseDonor(LDonor));
+    GProj.Free;
+    GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+    GProj.AdoptParseDonor(LDonor);
+    GProj.AnalyzeStaged([TPath.Combine(LDir, 'UnitDA.pas'),
+      TPath.Combine(LDir, 'UnitDB.pas')], nil);
+    Ok('donor: a directory-less run drops a donor that had one',
+      Pos('donorhits=', GProj.StageTimings) = 0);
+  finally
+    GProj.Free;
+    LDonor.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   // A config MISMATCH must refuse the donor (different extra defines).
   GProj := TPasSemaProject.Create(pfWin32, [TPath.GetTempPath], []);
   try
