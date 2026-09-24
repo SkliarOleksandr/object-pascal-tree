@@ -133,13 +133,16 @@ type
   // whole directive. This is what Find References / Go to Definition on a
   // define read; nothing in parsing or resolution does.
   TPasDefineRefKind = (drDefine, drUndef, drIfdef, drIfndef, drDefined);
+  // Name is POOLED per preprocessor (see TPasSpellingPool): the client closure
+  // has 908k rows over 3101 distinct names. Field order is layout - Name last
+  // makes the record 24 bytes instead of 32.
   TPasDefineRef = record
     FileId: Integer;
     Start: Integer;
     Len: Integer;
-    Name: string;
     Kind: TPasDefineRefKind;
     Active: Boolean;   // the directive itself sits in live code
+    Name: string;
   end;
 
   // One `{$I file}` / `{$INCLUDE file}` directive SITE, in the includer's file
@@ -273,6 +276,20 @@ type
 
   TPasSwitchState = array['A'..'Z'] of Boolean;
 
+  // A preprocessor's conditional-symbol spellings: Intern returns the one heap
+  // string of a slice's exact (case-sensitive) text, so DefineRefs rows share
+  // their Name - and a slice already pooled costs no allocation at all.
+  // Per instance and single-threaded, like the preprocessor itself.
+  // Open addressing, pow2 capacity, at most half full, FNV-1a over the chars.
+  TPasSpellingPool = record
+  private
+    FSlots: TArray<string>;
+    FCount: Integer;
+    procedure Grow;
+  public
+    function Intern(AText: PChar; ALen: Integer): string;
+  end;
+
   // {$RTTI mode METHODS(set) PROPERTIES(set) FIELDS(set)} (19.2.1) -- unlike
   // the single-letter switches this has real grammar to parse, not just an
   // ON/OFF flag: a mode word plus up to three category clauses, each an
@@ -319,6 +336,7 @@ type
     FAlign: Integer;
     FAlignEvents: TList<TPasAlignEvent>;
     FDefineRefs: TList<TPasDefineRef>;
+    FDefineNames: TPasSpellingPool;   // DefineRefs' Name, across runs
     FIncludeRefs: TList<TPasIncludeRef>;
     FSwitchStack: TStack<TPasOptState>;
     FFileNames: TList<string>;
@@ -662,6 +680,66 @@ begin
     else
       LHi := LMid - 1;
   end;
+end;
+
+{ TPasSpellingPool ----------------------------------------------------------- }
+
+// $Q-: the FNV wraparound IS the algorithm, and the checked test build
+// compiles with $Q+ (as PasNameHash in PasTree.Sema.Model).
+{$IFOPT Q+}{$DEFINE PT_RESTORE_Q}{$OVERFLOWCHECKS OFF}{$ENDIF}
+function SpellingHash(AText: PChar; ALen: Integer): Cardinal;
+var
+  LIdx: Integer;
+begin
+  Result := 2166136261;
+  for LIdx := 0 to ALen - 1 do
+    Result := (Result xor Cardinal(Ord(AText[LIdx]))) * 16777619;
+end;
+{$IFDEF PT_RESTORE_Q}{$OVERFLOWCHECKS ON}{$UNDEF PT_RESTORE_Q}{$ENDIF}
+
+procedure TPasSpellingPool.Grow;
+var
+  LOld: TArray<string>;
+  LIdx, LSlot, LMask: Integer;
+begin
+  LOld := FSlots;
+  FSlots := nil;
+  if Length(LOld) = 0 then
+    SetLength(FSlots, 64)
+  else
+    SetLength(FSlots, Length(LOld) * 2);
+  LMask := High(FSlots);
+  for LIdx := 0 to High(LOld) do
+    if Pointer(LOld[LIdx]) <> nil then
+    begin
+      LSlot := Integer(SpellingHash(PChar(Pointer(LOld[LIdx])),
+        Length(LOld[LIdx])) and Cardinal(LMask));
+      while Pointer(FSlots[LSlot]) <> nil do
+        LSlot := (LSlot + 1) and LMask;
+      FSlots[LSlot] := LOld[LIdx];
+    end;
+end;
+
+function TPasSpellingPool.Intern(AText: PChar; ALen: Integer): string;
+var
+  LSlot, LMask: Integer;
+begin
+  if ALen <= 0 then
+    Exit('');
+  if FCount * 2 >= Length(FSlots) then
+    Grow;
+  LMask := High(FSlots);
+  LSlot := Integer(SpellingHash(AText, ALen) and Cardinal(LMask));
+  while Pointer(FSlots[LSlot]) <> nil do
+  begin
+    if (Length(FSlots[LSlot]) = ALen) and
+       CompareMem(Pointer(FSlots[LSlot]), AText, ALen * SizeOf(Char)) then
+      Exit(FSlots[LSlot]);
+    LSlot := (LSlot + 1) and LMask;
+  end;
+  SetString(Result, AText, ALen);
+  FSlots[LSlot] := Result;
+  Inc(FCount);
 end;
 
 { TPasDefines ---------------------------------------------------------------- }
@@ -1086,7 +1164,7 @@ var
       Inc(LIdent);
     LArgStart := LP - PChar(Pointer(FFiles[AFileId].Source));
     LSymLen := LIdent;
-    SetString(Result, LP, LIdent);
+    Result := FDefineNames.Intern(LP, LIdent);
   end;
 
 begin
@@ -1740,8 +1818,8 @@ begin
     LRef.FileId := AFileId;
     LRef.Start := AExprStart + LCtx.DefinedSpans[LIdx].Start;
     LRef.Len := LCtx.DefinedSpans[LIdx].Len;
-    SetString(LRef.Name, PChar(Pointer(AExpr)) + LCtx.DefinedSpans[LIdx].Start,
-      LRef.Len);
+    LRef.Name := FDefineNames.Intern(
+      PChar(Pointer(AExpr)) + LCtx.DefinedSpans[LIdx].Start, LRef.Len);
     LRef.Kind := drDefined;
     LRef.Active := AActive;
     FDefineRefs.Add(LRef);

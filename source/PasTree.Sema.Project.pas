@@ -198,9 +198,10 @@ type
     FPP: TPasPreprocessor;
     // Reusable preprocessors for the parallel load/declared passes: Process
     // fully resets per-run state, so a returned instance is as good as a
-    // fresh one - without paying ~20 container allocations per FILE.
+    // fresh one - without paying ~20 container allocations per FILE. Guarded
+    // by its own monitor (TMonitor.Enter(FPPPool)): the list lives as long as
+    // the project, from the constructor to the destructor.
     FPPPool: TList<TPasPreprocessor>;
-    FPPPoolLock: TCriticalSection;
     // A model that exists only to hold the seeded compiler-provided names, so
     // SeedDeclaredQuery can answer before any real unit is loaded. Same
     // SeedSystemScope call as every other model, so the two cannot drift.
@@ -344,8 +345,10 @@ type
     procedure MarkAllCrossReady;
     procedure TrimAllDiags;
     procedure ReleaseCrossWork;
+    function NewPP: TPasPreprocessor;
     function RentPP: TPasPreprocessor;
     procedure ReturnPP(APP: TPasPreprocessor);
+    procedure TrimPreprocessors;
     function LoadFile(const APath: string): Integer;
     procedure LoadFilesParallel(const APaths: TArray<string>;
       AInterfaceOnly: Boolean = False);
@@ -1454,10 +1457,8 @@ begin
   FExtraDefines := AExtraDefines;   // kept verbatim for AdoptParseDonor's gate
   for LName in AExtraDefines do
     FDefines.Define(LName);
-  FPP := TPasPreprocessor.Create(FSM, FDefines, FCompilerVersion,
-    FInfo.PointerBytes, FInfo.ExtendedBytes);
+  FPP := NewPP;
   FPPPool := TList<TPasPreprocessor>.Create;
-  FPPPoolLock := TCriticalSection.Create;
   FSeedModel := TPasSemaModel.Create(Default(TPasTree));
   FSeedScope := SeedSystemScope(FSeedModel, APlatform);
   FModels := TObjectList<TPasSemaModel>.Create(True);
@@ -1521,7 +1522,6 @@ begin
     for var LPP in FPPPool do
       LPP.Free;
   FPPPool.Free;
-  FPPPoolLock.Free;
   FPP.Free;
   FSeedModel.Free;
   FDefines.Free;
@@ -3750,10 +3750,16 @@ begin
       FStatus[LIdx] := msCrossReady;
 end;
 
+function TPasSemaProject.NewPP: TPasPreprocessor;
+begin
+  Result := TPasPreprocessor.Create(FSM, FDefines, FCompilerVersion,
+    FInfo.PointerBytes, FInfo.ExtendedBytes);
+end;
+
 function TPasSemaProject.RentPP: TPasPreprocessor;
 begin
   Result := nil;
-  FPPPoolLock.Enter;
+  TMonitor.Enter(FPPPool);
   try
     if FPPPool.Count > 0 then
     begin
@@ -3761,11 +3767,10 @@ begin
       FPPPool.Delete(FPPPool.Count - 1);
     end;
   finally
-    FPPPoolLock.Leave;
+    TMonitor.Exit(FPPPool);
   end;
   if Result = nil then
-    Result := TPasPreprocessor.Create(FSM, FDefines, FCompilerVersion,
-      FInfo.PointerBytes, FInfo.ExtendedBytes);
+    Result := NewPP;
   // A previous renter's callbacks must never answer this run's questions.
   Result.OnDeclared := nil;
   Result.OnSymbol := nil;
@@ -3773,12 +3778,36 @@ end;
 
 procedure TPasSemaProject.ReturnPP(APP: TPasPreprocessor);
 begin
-  FPPPoolLock.Enter;
+  TMonitor.Enter(FPPPool);
   try
     FPPPool.Add(APP);
   finally
-    FPPPoolLock.Leave;
+    TMonitor.Exit(FPPPool);
   end;
+end;
+
+// End of an analysis entry point: drop the pooled preprocessors and renew
+// FPP. A reused instance keeps its visible-token list at the largest
+// capacity any file ever needed (the reuse is the point, see Process) - 17
+// instances held 37 MB of it on the client closure for the project's whole
+// life (memory census, 2026-09). The pool refills on demand, and a later
+// EnsureHydrated just creates one.
+procedure TPasSemaProject.TrimPreprocessors;
+var
+  LFree: TArray<TPasPreprocessor>;
+  LPP: TPasPreprocessor;
+begin
+  TMonitor.Enter(FPPPool);
+  try
+    LFree := FPPPool.ToArray;
+    FPPPool.Clear;
+  finally
+    TMonitor.Exit(FPPPool);
+  end;
+  for LPP in LFree do
+    LPP.Free;
+  FreeAndNil(FPP);
+  FPP := NewPP;
 end;
 
 // Cut every model's Diags back to its filled prefix (AddDiag grows with
@@ -14063,6 +14092,7 @@ begin
     TrimAllDiags;
     ReleaseCrossWork;
     ReleaseUsesMemo;
+    TrimPreprocessors;
   finally
     FinishDonor({AReport} False);   // AnalyzeFile carries no StageTimings
   end;
@@ -15755,6 +15785,7 @@ begin
     // Refused: the project was never touched, and the fresh model is ours.
     LNew.Free;
     LAdded.Free;
+    TrimPreprocessors;   // see AnalyzeProject
   end;
 end;
 
@@ -15972,6 +16003,7 @@ begin
     // every closure file that nothing reads from here on - hundreds of MB on
     // a real project) and the include-cache's own stream references.
     FSM.ReleaseAnalysisCaches;
+    TrimPreprocessors;
   finally
     FinishDonor({AReport} True);
   end;
@@ -16073,6 +16105,7 @@ begin
     ReleaseCrossWork;
     ReleaseUsesMemo;
     FSM.ReleaseAnalysisCaches;   // see AnalyzeProject
+    TrimPreprocessors;
   finally
     FinishDonor({AReport} True);
   end;
@@ -16327,6 +16360,7 @@ begin
     // See AnalyzeProject. On a cancelled run the caches stay - the host
     // discards a cancelled project wholesale anyway.
     FSM.ReleaseAnalysisCaches;
+    TrimPreprocessors;
     StageMark('final');
     Recount;
     Report('done');

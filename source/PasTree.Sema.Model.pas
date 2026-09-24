@@ -94,18 +94,22 @@ type
     tcPointer, tcNil, tcEnum, tcSet, tcArray, tcRecord, tcClass, tcInterface,
     tcProc, tcClassOf, tcVariant, tcFile);
 
+  // Field order is LAYOUT: the strings, then the Integers, then the byte-sized
+  // fields packed into the last word - 48 bytes, where Kind declared first
+  // padded the record to 56 (memory census, 2026-09: -22 MB of symbol arrays
+  // on the client closure). Nothing reads the record positionally.
   TSemaSymbol = record
-    Kind: TSemaSymbolKind;
     Name: string;          // original spelling
     NameLower: string;     // case-insensitive key
     DeclNode: Integer;     // CST index; NIL_NODE for builtins
     Scope: Integer;        // owning scope index
     TypeSym: Integer;      // resolved type symbol; NIL_SYM if unbound
     TypeNode: Integer;     // CST node of the declared type expr; NIL_NODE if none
-    Flags: TSemaSymbolFlags;
-    Visibility: TSemaVisibility;
     NextOverload: Integer;  // next routine of the same name in scope; NIL_SYM
     MemberScope: Integer;   // members of a type/unit for A.B lookup; NIL_SCOPE
+    Flags: TSemaSymbolFlags;
+    Kind: TSemaSymbolKind;
+    Visibility: TSemaVisibility;
     TypeCat: TSemaTypeCat;  // category (types only); tcUnknown otherwise
     NumRank: Byte;          // numeric widening rank (int/float families); 0 else
   end;
@@ -276,14 +280,12 @@ type
     procedure Clear;
   end;
 
+  // Field order is LAYOUT, as in TSemaSymbol: the byte-sized and Integer
+  // fields packed behind the VMT, then the managed ones - a 72-byte instance
+  // (80-byte block) where the old order took 88 (96) (memory census, 2026-09:
+  // -20 MB over the client closure's 1.2M scopes).
   TSemaScope = class
     Kind: TSemaScopeKind;
-    Parent: Integer;                       // scope index; NIL_SCOPE at root
-    OwnerNode: Integer;                    // CST node that opened this scope
-    // Empty (Count 0, no heap) until the first name is bound - most scopes
-    // never bind one; TPasSemaModel.BindName/AddToOrder fill it. Holds the
-    // declaration order too, which Symbols reads.
-    Names: TSemaNames;                     // NameLower -> symbol index (head)
     // True when Names SHARES its arrays with containers owned
     // elsewhere, read-only across models - today only the builtin seed
     // template (PasTree.Sema.Builtins). Any WRITE goes through
@@ -291,6 +293,17 @@ type
     // declares into such a scope gets a private copy instead of corrupting
     // every other model's view.
     SharedContainers: Boolean;
+    Parent: Integer;                       // scope index; NIL_SCOPE at root
+    OwnerNode: Integer;                    // CST node that opened this scope
+    // For a METHOD implementation's routine scope: the (innermost) struct
+    // type symbol the qualified name resolved to (TFoo in TFoo.Bar). NIL_SYM
+    // elsewhere. The project driver's inherited-member pass starts its
+    // cross-unit ancestor walk here.
+    StructSym: Integer;
+    // Empty (Count 0, no heap) until the first name is bound - most scopes
+    // never bind one; TPasSemaModel.BindName/AddToOrder fill it. Holds the
+    // declaration order too, which Symbols reads.
+    Names: TSemaNames;                     // NameLower -> symbol index (head)
     Additional: TArray<Integer>;           // joined scopes (system/with/ancestor)
     // Joined scopes checked BEFORE this scope's own names. Exactly one thing
     // needs that order and the spec is explicit about it (15.3.3): a HELPER
@@ -298,11 +311,6 @@ type
     // else joined here - uses, with, ancestors, enums - is a fallback and
     // belongs in Additional. See JoinScopeShadowing.
     Shadowing: TArray<Integer>;
-    // For a METHOD implementation's routine scope: the (innermost) struct
-    // type symbol the qualified name resolved to (TFoo in TFoo.Bar). NIL_SYM
-    // elsewhere. The project driver's inherited-member pass starts its
-    // cross-unit ancestor walk here.
-    StructSym: Integer;
     constructor Create(AKind: TSemaScopeKind; AParent, AOwnerNode: Integer);
     procedure EnsureOwnedContainers;
     function GetSymbols: TSemaSymList; inline;
