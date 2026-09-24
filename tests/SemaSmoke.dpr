@@ -1387,6 +1387,76 @@ begin
     (LS2 = 'Alpha') and (Pointer(LPool.Intern('Alpha')) = Pointer(LS2)));
 end;
 
+// TSemaNames against a reference: head per name (last bind wins) and the
+// declaration order, across the linear capacities 1/3/5/7/8, same-name
+// rebinds, order-only entries and the switch to table mode past CLinearNames.
+procedure TestSemaNamesGrowth;
+var
+  LScope: TSemaScope;
+  LSyms: TArray<TSemaSymbol>;
+  LHead: TDictionary<string, Integer>;
+  LOrder: TList<Integer>;
+  LTrial, LStep, LAlpha, LIdx, LGot: Integer;
+  LName: string;
+  LSame: Boolean;
+  LOrd: TArray<Integer>;
+begin
+  RandSeed := 20260924;
+  LSame := True;
+  LHead := TDictionary<string, Integer>.Create;
+  LOrder := TList<Integer>.Create;
+  try
+    for LTrial := 1 to 600 do
+    begin
+      LAlpha := 1 + LTrial mod 13;    // 1..13 distinct names
+      LScope := TSemaScope.Create(sckBlock, NIL_SCOPE, 0);
+      try
+        LHead.Clear;
+        LOrder.Clear;
+        SetLength(LSyms, 0);
+        SetLength(LSyms, 40);
+        for LStep := 0 to High(LSyms) do
+        begin
+          LName := 'n' + IntToStr(Random(LAlpha));
+          LSyms[LStep].NameLower := LName;
+          if Random(10) = 0 then
+            LScope.Names.AddOrder(LStep)
+          else
+          begin
+            LScope.Names.AddOrSet(PasNameHash(LName), LStep, LSyms);
+            LHead.AddOrSetValue(LName, LStep);
+          end;
+          LOrder.Add(LStep);
+          if LScope.Names.Count <> LHead.Count then
+            LSame := False;
+          for LIdx := 0 to LAlpha - 1 do
+          begin
+            LName := 'n' + IntToStr(LIdx);
+            if not LHead.TryGetValue(LName, LGot) then
+              LGot := NIL_SYM;
+            if LScope.Names.Find(SemaKey(LName), LSyms) <> LGot then
+              LSame := False;
+          end;
+          LOrd := LScope.Symbols.ToArray;
+          if Length(LOrd) <> LOrder.Count then
+            LSame := False
+          else
+            for LIdx := 0 to High(LOrd) do
+              if LOrd[LIdx] <> LOrder[LIdx] then
+                LSame := False;
+        end;
+      finally
+        LScope.Free;
+      end;
+    end;
+  finally
+    LOrder.Free;
+    LHead.Free;
+  end;
+  GCounter.Ok('names: TSemaNames agrees with a dictionary + order list',
+    LSame);
+end;
+
 begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN32']);
@@ -2842,6 +2912,7 @@ begin
 
   TestIntMap;
   TestNameKeys;
+  TestSemaNamesGrowth;
 
   // Phase 1 pools spellings per unit: one heap string per distinct text, a
   // lower-case name shares its key, and the arena is cut to exact length.

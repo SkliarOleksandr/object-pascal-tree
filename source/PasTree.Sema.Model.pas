@@ -163,8 +163,10 @@ type
     stored key: a slot is the key's hash plus the symbol index, and the key
     itself is read from Symbols[S].NameLower, only when the hash matches.
 
-    Up to CLinearNames names the slots are an exact-length array scanned
-    linearly (no empties); beyond, an open-addressing table, pow2 capacity,
+    Up to CLinearNames names the slots are an array scanned linearly over
+    its first Count slots (capacity odd while below CLinearNames, see
+    AddOrSet; a spare slot is empty); beyond, an open-addressing table,
+    pow2 capacity,
     at most 75% full, linear probing. The hash is kept per slot for the
     misses: most lookups walk a scope chain and miss in most of its scopes,
     and a miss that compared hashes only never touches a symbol record.
@@ -885,7 +887,7 @@ end;
 procedure TSemaNames.AddOrSet(AHash: Cardinal; ASym: Integer;
   const ASyms: TArray<TSemaSymbol>);
 var
-  LIdx, LMask: Integer;
+  LIdx, LMask, LCap: Integer;
 begin
   if FCount <= CLinearNames then
   begin
@@ -901,7 +903,26 @@ begin
       end;
     if FCount < CLinearNames then
     begin
-      SetLength(FSlots, FCount + 1);
+      // Capacities 1, 3, 5, 7, CLinearNames. On Win64 a dynarray asks for
+      // 16 + 8 per slot and the memory manager's small blocks (its own
+      // 8-byte header included) come in steps of 16, so 2k+1 slots sit in
+      // the very block 2k take (probed: 1 -> 32, 2..3 -> 48, 4..5 -> 64,
+      // 6..7 -> 80). Growing by one reallocated for nothing every other bind
+      // (2.2 M calls per client analysis, memory census 2026-09). The spare
+      // slot is marked empty, so a reader of the whole array (Rehash) never
+      // takes it for symbol 0.
+      if FCount = Length(FSlots) then
+      begin
+        if FCount = 0 then
+          LCap := 1
+        else if FCount + 2 > CLinearNames then
+          LCap := CLinearNames
+        else
+          LCap := FCount + 2;
+        SetLength(FSlots, LCap);
+        if LCap > FCount + 1 then
+          FSlots[FCount + 1].S := NIL_SYM;
+      end;
       FSlots[FCount].H := AHash;
       FSlots[FCount].S := ASym;
       Inc(FCount);
