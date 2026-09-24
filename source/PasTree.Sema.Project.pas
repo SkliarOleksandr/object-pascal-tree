@@ -180,8 +180,8 @@ type
       (helpers and builtin identity resolve per referring model), so the gap
       between the two is what a shared cache could ever add over a per-model
       one. See local/perf/PasTreeMemberStats.dpr and the lead's write-up for
-      what the numbers turned out to be. }
-    FStatsLock: TCriticalSection;
+      what the numbers turned out to be. The three dictionaries are guarded
+      by TMonitor on FStatsCalls. }
     FStatsPass: string;
     FStatsCalls: TDictionary<string, Integer>;    // pass -> calls
     FStatsKeys: TDictionary<string, Byte>;        // pass|asker|base|name
@@ -291,7 +291,8 @@ type
     // instant, all racing the SAME first-time LoadFile (which mutates the
     // shared FModels/FByPath, neither thread-safe) - real, not
     // hypothetical: reproduced via SemaProjectSmoke's UnitE fixture.
-    FSystemUnitLock: TCriticalSection;
+    // A plain object locked with TMonitor, like FInternalLock.
+    FSystemUnitLock: TObject;
     // Phase 3c: cross-model typing.
     FInstances: TList<TSemaInstance>;
     FInstKeys: TDictionary<TSemaInstance, Integer>;
@@ -310,10 +311,11 @@ type
     // measured 4 ms).
     FModelHelpers: TArray<TArray<TPasHelperReg>>;
     FHelperIdx: TArray<TDictionary<Int64, TPasExtRef>>;   // nil = sees none
-    // Guards ALL FInstances/FInstKeys access: the parallel inherited-member
-    // pass instantiates generics from heritage clauses concurrently (see
-    // Instantiate); a bare TList read during another thread's Add is unsafe.
-    FInstLock: TCriticalSection;
+    // ALL FInstances/FInstKeys access is guarded by TMonitor on FInstances
+    // (alive from the constructor to the destructor): the parallel
+    // inherited-member pass instantiates generics from heritage clauses
+    // concurrently (see Instantiate); a bare TList read during another
+    // thread's Add is unsafe.
     // The cancellation predicate of the CURRENT AnalyzeStaged run, nil
     // otherwise. Set/cleared by AnalyzeStaged only; read by ForEachIndex so a
     // cancel lands MID-PASS instead of waiting for a whole cross pass to
@@ -1467,9 +1469,7 @@ begin
   FByPath := TDictionary<string, Integer>.Create;
   FInstances := TList<TSemaInstance>.Create;
   FInstKeys := TDictionary<TSemaInstance, Integer>.Create(GInstanceComparer);
-  FInstLock := TCriticalSection.Create;
 {$IFDEF PASTREE_MEMBERSTATS}
-  FStatsLock := TCriticalSection.Create;
   FStatsCalls := TDictionary<string, Integer>.Create;
   FStatsKeys := TDictionary<string, Byte>.Create;
   FStatsKeysNoAsker := TDictionary<string, Byte>.Create;
@@ -1486,7 +1486,7 @@ begin
   FSystemUnitResolved := False;
   FSysInitUnitId := -1;
   FSysInitUnitResolved := False;
-  FSystemUnitLock := TCriticalSection.Create;
+  FSystemUnitLock := TObject.Create;
 end;
 
 destructor TPasSemaProject.Destroy;
@@ -1495,9 +1495,7 @@ begin
   FByUnitName.Free;
   FSystemUnitLock.Free;
   ClearHelperIdx;
-  FInstLock.Free;
 {$IFDEF PASTREE_MEMBERSTATS}
-  FStatsLock.Free;
   FStatsCalls.Free;
   FStatsKeys.Free;
   FStatsKeysNoAsker.Free;
@@ -1687,7 +1685,7 @@ begin
   // resolution, never once per token, so the lock is not a hot-path cost; a
   // "check outside, lock, check again" version would just reintroduce the
   // exact race this exists to fix, for a saving that doesn't matter here.
-  FSystemUnitLock.Enter;
+  TMonitor.Enter(FSystemUnitLock);
   try
     if not FSystemUnitResolved then
     begin
@@ -1697,7 +1695,7 @@ begin
     end;
     Result := FSystemUnitId;
   finally
-    FSystemUnitLock.Leave;
+    TMonitor.Exit(FSystemUnitLock);
   end;
 end;
 
@@ -1705,7 +1703,7 @@ function TPasSemaProject.EnsureSysInitUnit: Integer;
 var
   LPath: string;
 begin
-  FSystemUnitLock.Enter;
+  TMonitor.Enter(FSystemUnitLock);
   try
     if not FSysInitUnitResolved then
     begin
@@ -1715,7 +1713,7 @@ begin
     end;
     Result := FSysInitUnitId;
   finally
-    FSystemUnitLock.Leave;
+    TMonitor.Exit(FSystemUnitLock);
   end;
 end;
 
@@ -3851,7 +3849,7 @@ var
   LIdx, LDummy, LTodoCount: Integer;
   LFull, LKey: string;
   LStatus: TPasModuleStatus;
-  LFailLock: TCriticalSection;
+  LFailLock: TObject;   // TMonitor-locked; guards FLoadFailures
 begin
   // Normalize, drop already-loaded/known-bad paths and in-batch duplicates.
   // Pre-sized to the input (survivors <= input), truncated after the loop -
@@ -3881,7 +3879,7 @@ begin
   SetLength(LKeys, LTodoCount);
   if LTodo = nil then
     Exit;
-  LFailLock := TCriticalSection.Create;
+  LFailLock := TObject.Create;
   try
 
   // I/O first, CPU second: pull every file into the source manager's memory
@@ -3938,13 +3936,13 @@ begin
             // cause (an ERangeError inside Phase 1). Tolerating the failure is
             // still right - one bad unit must not sink an analysis - but it has
             // to be tolerated OUT LOUD.
-            LFailLock.Enter;
+            TMonitor.Enter(LFailLock);
             try
               FLoadFailures := FLoadFailures +
                 [Format('%s: %s: %s', [TPath.GetFileName(LTodo[AIndex]),
                   E.ClassName, E.Message])];
             finally
-              LFailLock.Leave;
+              TMonitor.Exit(LFailLock);
             end;
           end;
         end;
@@ -4108,11 +4106,12 @@ function TPasSemaProject.RunLoadEngine(const ASeedLoads: TArray<string>;
 const
   REPORT_EVERY = 64;
 var
-  LQueue: TList<TPasLoadItem>;              // guarded by LLock
-  LResults: TDictionary<Integer, TPasLoadRes>; // guarded by LLock
-  LTake: Integer;                           // guarded by LLock
-  LStop: Boolean;                           // guarded by LLock
-  LLock: TCriticalSection;
+  // LQueue, LResults, LTake and LStop are guarded by TMonitor on LQueue,
+  // which outlives every worker (freed after TTask.WaitForAll).
+  LQueue: TList<TPasLoadItem>;
+  LResults: TDictionary<Integer, TPasLoadRes>;
+  LTake: Integer;
+  LStop: Boolean;
   LWorkEvt, LDoneEvt: TEvent;               // auto-reset kicks; 5 ms fallback
   LTasks: TArray<ITask>;
   LSeen: TDictionary<string, Boolean>;      // driver-only enqueue dedup
@@ -4142,11 +4141,11 @@ var
     LNew.Path := LFull;
     LNew.Key := LKey;
     LNew.Mid := -1;
-    LLock.Enter;
+    TMonitor.Enter(LQueue);
     try
       LQueue.Add(LNew);
     finally
-      LLock.Leave;
+      TMonitor.Exit(LQueue);
     end;
     LWorkEvt.SetEvent;
   end;
@@ -4159,11 +4158,11 @@ var
     LNew.Kind := lkUpgrade;
     LNew.Mid := AMid;
     LNew.Source := FModels[AMid].Tree.Source;
-    LLock.Enter;
+    TMonitor.Enter(LQueue);
     try
       LQueue.Add(LNew);
     finally
-      LLock.Leave;
+      TMonitor.Exit(LQueue);
     end;
     LWorkEvt.SetEvent;
   end;
@@ -4185,7 +4184,6 @@ begin
   LQueue := TList<TPasLoadItem>.Create;
   LResults := TDictionary<Integer, TPasLoadRes>.Create;
   LSeen := TDictionary<string, Boolean>.Create;
-  LLock := TCriticalSection.Create;
   LWorkEvt := TEvent.Create(nil, False, False, '');
   LDoneEvt := TEvent.Create(nil, False, False, '');
   LTasks := nil;
@@ -4222,7 +4220,7 @@ begin
             while True do
             begin
               LMine := -1;
-              LLock.Enter;
+              TMonitor.Enter(LQueue);
               try
                 LExit := LStop;
                 if not LExit and (LTake < LQueue.Count) then
@@ -4232,7 +4230,7 @@ begin
                   LIt := LQueue[LMine];
                 end;
               finally
-                LLock.Leave;
+                TMonitor.Exit(LQueue);
               end;
               if LExit then
                 Break;
@@ -4251,11 +4249,11 @@ begin
                 else
                   LR.Model := ComputeUpgrade(LIt.Source,
                     LR.ErrClass, LR.ErrMsg);
-              LLock.Enter;
+              TMonitor.Enter(LQueue);
               try
                 LResults.Add(LMine, LR);
               finally
-                LLock.Leave;
+                TMonitor.Exit(LQueue);
               end;
               LDoneEvt.SetEvent;
             end;
@@ -4266,13 +4264,13 @@ begin
     LSince := 0;
     while True do
     begin
-      LLock.Enter;
+      TMonitor.Enter(LQueue);
       try
         LHaveItem := LCommit < LQueue.Count;
         if LHaveItem then
           LItem := LQueue[LCommit];
       finally
-        LLock.Leave;
+        TMonitor.Exit(LQueue);
       end;
       if not LHaveItem then
         Break;   // drained; only this thread enqueues, so nothing can appear
@@ -4295,13 +4293,13 @@ begin
       begin
         // Reorder buffer: wait for THE NEXT queue index, not just any result.
         repeat
-          LLock.Enter;
+          TMonitor.Enter(LQueue);
           try
             LHaveRes := LResults.TryGetValue(LCommit, LRes);
             if LHaveRes then
               LResults.Remove(LCommit);
           finally
-            LLock.Leave;
+            TMonitor.Exit(LQueue);
           end;
           if not LHaveRes then
           begin
@@ -4375,11 +4373,11 @@ begin
       end;
     end;
   finally
-    LLock.Enter;
+    TMonitor.Enter(LQueue);
     try
       LStop := True;
     finally
-      LLock.Leave;
+      TMonitor.Exit(LQueue);
     end;
     if LTasks <> nil then
     begin
@@ -4395,7 +4393,6 @@ begin
     LSeen.Free;
     LWorkEvt.Free;
     LDoneEvt.Free;
-    LLock.Free;
   end;
   if Assigned(AAfterCommits) then
     AAfterCommits();
@@ -5696,7 +5693,7 @@ begin
 end;
 
 // Dedup-registers one generic instantiation; returns its instance-table index.
-// LOCKED (FInstLock): the parallel inherited-member pass reaches here through
+// LOCKED (TMonitor on FInstances): the parallel inherited-member pass reaches here through
 // FindMemberX -> ResolveTypeExpr on generic heritage (TList<T> = class(
 // TEnumerable<T>)) with one worker per unit - unguarded, concurrent
 // FInstances.Add corrupted the list (AV on the full-RTL scan). Every other
@@ -5714,25 +5711,25 @@ begin
   LInst.UnitId := ABase.UnitId;
   LInst.Sym := ABase.Sym;
   LInst.Args := AArgs;
-  FInstLock.Enter;
+  TMonitor.Enter(FInstances);
   try
     if FInstKeys.TryGetValue(LInst, Result) then
       Exit;
     Result := FInstances.Add(LInst);
     FInstKeys.Add(LInst, Result);
   finally
-    FInstLock.Leave;
+    TMonitor.Exit(FInstances);
   end;
 end;
 
 // Locked FInstances[AInst] snapshot - see the Instantiate comment.
 function TPasSemaProject.InstanceRead(AInst: Integer): TSemaInstance;
 begin
-  FInstLock.Enter;
+  TMonitor.Enter(FInstances);
   try
     Result := FInstances[AInst];
   finally
-    FInstLock.Leave;
+    TMonitor.Exit(FInstances);
   end;
 end;
 
@@ -10364,11 +10361,11 @@ end;
 
 function TPasSemaProject.InstanceCount: Integer;
 begin
-  FInstLock.Enter;
+  TMonitor.Enter(FInstances);
   try
     Result := FInstances.Count;
   finally
-    FInstLock.Leave;
+    TMonitor.Exit(FInstances);
   end;
 end;
 
@@ -14491,7 +14488,7 @@ var
   LTouched: Boolean;
 begin
   Result := 0;
-  FInstLock.Enter;
+  TMonitor.Enter(FInstances);
   try
     for LIdx := 0 to FInstances.Count - 1 do
     begin
@@ -14523,7 +14520,7 @@ begin
     for LIdx := 0 to FInstances.Count - 1 do
       FInstKeys.Add(FInstances[LIdx], LIdx);
   finally
-    FInstLock.Leave;
+    TMonitor.Exit(FInstances);
   end;
 end;
 
@@ -14536,7 +14533,7 @@ var
 begin
   LBase := Format('%d:%d:%d:%s',
     [ABase.UnitId, ABase.Sym, ABase.Inst, ANameLower]);
-  FStatsLock.Enter;
+  TMonitor.Enter(FStatsCalls);
   try
     if not FStatsCalls.TryGetValue(FStatsPass, LCount) then
       LCount := 0;
@@ -14545,7 +14542,7 @@ begin
     FStatsKeys.AddOrSetValue(LKey, 1);
     FStatsKeysNoAsker.AddOrSetValue(FStatsPass + '|' + LBase, 1);
   finally
-    FStatsLock.Leave;
+    TMonitor.Exit(FStatsCalls);
   end;
 end;
 

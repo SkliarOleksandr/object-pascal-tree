@@ -51,7 +51,7 @@ type
     FCancelFlag: Integer;           // Interlocked 0/1
     FDoneFlag: Integer;             // Interlocked 0/1
     FMainResultId: Integer;
-    FLock: TCriticalSection;        // guards FProgress and FError
+    FLock: TObject;                 // TMonitor; guards FProgress and FError
     FProgress: TPasStagedProgress;
     FError: string;                 // worker exception, if any ('' = none)
     FStarted: Boolean;
@@ -187,7 +187,7 @@ begin
   FCancelFlag := 0;
   FDoneFlag := 0;
   FMainResultId := -1;
-  FLock := TCriticalSection.Create;
+  FLock := TObject.Create;
   FProgress := Default(TPasStagedProgress);
   FStarted := False;
 end;
@@ -202,7 +202,7 @@ begin
   FCancelFlag := 0;
   FDoneFlag := 0;
   FMainResultId := -1;
-  FLock := TCriticalSection.Create;
+  FLock := TObject.Create;
   FProgress := Default(TPasStagedProgress);
   FStarted := False;
   FModuleMode := True;
@@ -301,11 +301,11 @@ begin
         end,
         procedure(AProgress: TPasStagedProgress)
         begin
-          FLock.Enter;
+          TMonitor.Enter(FLock);
           try
             FProgress := AProgress;
           finally
-            FLock.Leave;
+            TMonitor.Exit(FLock);
           end;
         end);
     except
@@ -313,11 +313,11 @@ begin
       // The project stays partial-but-consistent (published slots only).
       on E: Exception do
       begin
-        FLock.Enter;
+        TMonitor.Enter(FLock);
         try
           FError := E.ClassName + ': ' + E.Message;
         finally
-          FLock.Leave;
+          TMonitor.Exit(FLock);
         end;
       end;
     end;
@@ -355,21 +355,21 @@ end;
 
 function TPasAsyncSession.Progress: TPasStagedProgress;
 begin
-  FLock.Enter;
+  TMonitor.Enter(FLock);
   try
     Result := FProgress;
   finally
-    FLock.Leave;
+    TMonitor.Exit(FLock);
   end;
 end;
 
 function TPasAsyncSession.LastError: string;
 begin
-  FLock.Enter;
+  TMonitor.Enter(FLock);
   try
     Result := FError;
   finally
-    FLock.Leave;
+    TMonitor.Exit(FLock);
   end;
 end;
 
