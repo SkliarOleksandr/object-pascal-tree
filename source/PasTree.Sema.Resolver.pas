@@ -113,6 +113,7 @@ type
     procedure CollectVariantPart(ANode, AScope: Integer);
     procedure CollectUsesItem(AItem, AScope: Integer);
     procedure CollectRoutine(ANode, AScope: Integer);
+    function DeclaresInOwnScope(ANode: Integer): Boolean;
     procedure Collect(ANode, AScope: Integer);
     // helpers (ch.15 sec. 15.3) - see JoinHelperScopes for why this is its own
     // pass rather than something CollectStruct could do inline.
@@ -1443,6 +1444,49 @@ begin
   end;
 end;
 
+{ Would Collect declare anything into a scope ANode (a block, a for, an
+  `on` handler) opened for itself? That is: does its subtree hold a node
+  whose Collect case declares into the scope it is handed, short of a node
+  that opens its own scope for everything beneath it?
+
+  Asked because such a scope is almost always empty: 490,717 block scopes on
+  the client closure, 6,316 of them binding a name (memory census, 2026-09).
+  An empty scope in a chain changes no lookup - it has no names, no joins,
+  and the position rule (ResolveAt's DeclaredAfter) only filters names it
+  holds - so a block that declares nothing leaves its nodes in the enclosing
+  scope and costs no TSemaScope, no list slot and no extra level on every
+  lookup walked from inside it.
+
+  The declaring kinds are Collect's own: every case below that calls
+  DeclareSym / AddSymbol / DeclareAnonStruct / a Collect* that declares with
+  the scope it received. Listing one too many only keeps a scope; missing one
+  would put its names in the enclosing scope, so a new declaring case in
+  Collect belongs here too. }
+function TPasSemaResolver.DeclaresInOwnScope(ANode: Integer): Boolean;
+var
+  LChild: Integer;
+begin
+  LChild := FirstChild(ANode);
+  while LChild <> NIL_NODE do
+  begin
+    case KindOf(LChild) of
+      nkInlineVar, nkInlineConst, nkVarDecl, nkConstDecl, nkTypeDecl,
+      nkLabelSec, nkUsesClause, nkVariantPart, nkRoutine, nkMethodResolution,
+      nkRecordType, nkClassType, nkInterfaceType, nkObjectType, nkHelperType,
+      nkEnumType, nkGenericParams:
+        Exit(True);
+      // Their own scope takes everything beneath them.
+      nkBlock, nkForStmt, nkForInStmt, nkExceptOn, nkAnonMethod, nkProcType:
+        ;
+    else
+      if DeclaresInOwnScope(LChild) then
+        Exit(True);
+    end;
+    LChild := NextSib(LChild);
+  end;
+  Result := False;
+end;
+
 procedure TPasSemaResolver.Collect(ANode, AScope: Integer);
 var
   LChild, LName: Integer;
@@ -1705,8 +1749,13 @@ begin
         // A for statement scopes the same way - its `for var I` counter or
         // `for var E in` element lives in the LOOP, so two sibling loops
         // reusing one name are not a redeclaration (dcc behavior).
-        var LBlock := FModel.AddScope(sckBlock, AScope, ANode);
-        FNodeScope[ANode] := LBlock;
+        // Only a block that declares something gets one (DeclaresInOwnScope).
+        var LBlock := AScope;
+        if DeclaresInOwnScope(ANode) then
+        begin
+          LBlock := FModel.AddScope(sckBlock, AScope, ANode);
+          FNodeScope[ANode] := LBlock;
+        end;
         LChild := FirstChild(ANode);
         while LChild <> NIL_NODE do
         begin
@@ -1749,12 +1798,18 @@ begin
       begin
         // 18.1.2 `on [E:] Type do stmt` - the handler variable (named form:
         // 3 children = ident, type, body) is scoped to THIS handler alone.
-        var LOn := FModel.AddScope(sckBlock, AScope, ANode);
-        FNodeScope[ANode] := LOn;
+        // The unnamed form declares nothing and, like a block, gets no scope.
         LChild := FirstChild(ANode);
-        if (LChild <> NIL_NODE) and (KindOf(LChild) = nkIdent) and
-           (NextSib(LChild) <> NIL_NODE) and
-           (NextSib(NextSib(LChild)) <> NIL_NODE) then
+        var LNamed := (LChild <> NIL_NODE) and (KindOf(LChild) = nkIdent) and
+          (NextSib(LChild) <> NIL_NODE) and
+          (NextSib(NextSib(LChild)) <> NIL_NODE);
+        var LOn := AScope;
+        if LNamed or DeclaresInOwnScope(ANode) then
+        begin
+          LOn := FModel.AddScope(sckBlock, AScope, ANode);
+          FNodeScope[ANode] := LOn;
+        end;
+        if LNamed then
         begin
           var LVar := FModel.AddSymbol(LOn, skVar, NodeText(LChild), LChild);
           FModel.Symbols[LVar].TypeNode := NextSib(LChild);

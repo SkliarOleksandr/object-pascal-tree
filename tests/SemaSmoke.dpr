@@ -1286,6 +1286,100 @@ const
     'end;'#10 +
     'end.'#10;
 
+const
+  // D1: only a block / for / `on` that declares something opens a scope.
+  SRC_LAZYBLOCKS =
+    'unit D1;'#10 +
+    'interface'#10 +
+    'implementation'#10 +
+    'var G, W: Integer;'#10 +
+    'procedure P;'#10 +
+    'var X: Integer;'#10 +
+    'begin'#10 +                              // body: declares nothing
+    '  begin'#10 +                            // A: nothing
+    '    X := 1;'#10 +
+    '    begin'#10 +                          // B: declares Y
+    '      var Y := X;'#10 +
+    '      Y := Y + 1;'#10 +
+    '    end;'#10 +
+    '  end;'#10 +
+    '  begin'#10 +                            // C: a sibling Y, no redecl
+    '    G := W;'#10 +                        // W before its block decl: global
+    '    var W := 2;'#10 +
+    '    var Y := W;'#10 +
+    '    G := Y;'#10 +
+    '  end;'#10 +
+    '  for X := 0 to 1 do G := X;'#10 +      // nothing
+    '  for var I := 0 to 1 do G := I;'#10 +  // declares I
+    '  try'#10 +
+    '    G := 0;'#10 +
+    '  except'#10 +
+    '    on TObject do G := 1;'#10 +          // nothing
+    '    on E: TObject do G := 2;'#10 +       // declares E
+    '  end;'#10 +
+    'end;'#10 +
+    'procedure Q;'#10 +
+    'begin'#10 +                              // body: declares Z, in a repeat
+    '  repeat'#10 +
+    '    var Z := 1;'#10 +
+    '    G := Z;'#10 +
+    '  until True;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+// The symbol the AOccurrence-th (0-based, source order) nkIdent spelled
+// AText refers to - a declaration's own name counts as an occurrence too.
+function NthIdentSym(const AText: string; AOccurrence: Integer): Integer;
+var
+  LNode: Integer;
+begin
+  Result := NIL_SYM;
+  for LNode := 0 to High(GModel.RefMap) do
+    if (GTree.Nodes[LNode].Kind = nkIdent) and
+       SameText(GTree.NodeText(LNode), AText) then
+    begin
+      if AOccurrence = 0 then
+        Exit(GModel.RefMap[LNode]);
+      Dec(AOccurrence);
+    end;
+end;
+
+procedure TestLazyBlockScopes;
+var
+  LScope, LBlocks, LY1, LY2, LW: Integer;
+begin
+  Analyze(SRC_LAZYBLOCKS);
+  LBlocks := 0;
+  for LScope := 0 to GModel.Scopes.Count - 1 do
+    if GModel.Scopes[LScope].Kind = sckBlock then
+      Inc(LBlocks);
+  // B, C, `for var I`, `on E:` and Q's body - nothing else.
+  GCounter.Ok('lazyblocks: a scope per declaring block only', LBlocks = 5);
+  GCounter.Ok('lazyblocks: no diags', Length(GModel.Diags) = 0);
+  LY1 := NthIdentSym('Y', 0);
+  LY2 := NthIdentSym('Y', 3);
+  GCounter.Ok('lazyblocks: sibling Y are two symbols in two block scopes',
+    (LY1 <> NIL_SYM) and (LY2 <> NIL_SYM) and (LY1 <> LY2) and
+    (GModel.Scopes[GModel.Symbols[LY1].Scope].Kind = sckBlock) and
+    (GModel.Symbols[LY1].Scope <> GModel.Symbols[LY2].Scope));
+  GCounter.Ok('lazyblocks: a scope under a scopeless block parents to the routine',
+    GModel.Scopes[GModel.Scopes[GModel.Symbols[LY1].Scope].Parent].Kind =
+      sckRoutine);
+  GCounter.Ok('lazyblocks: B''s X and Y := Y + 1 bind',
+    (NthIdentSym('Y', 1) = LY1) and (NthIdentSym('Y', 2) = LY1) and
+    (NthIdentSym('X', 2) <> NIL_SYM) and
+    (GModel.Symbols[NthIdentSym('X', 2)].Kind = skVar));
+  LW := NthIdentSym('W', 1);
+  GCounter.Ok('lazyblocks: W before its block declaration is the global',
+    (LW <> NIL_SYM) and
+    (GModel.Scopes[GModel.Symbols[LW].Scope].Kind = sckImplementation) and
+    (NthIdentSym('W', 3) = NthIdentSym('W', 2)) and
+    (NthIdentSym('W', 2) <> LW));
+  GCounter.Ok('lazyblocks: repeat-list Z binds, E and I declared',
+    (NthIdentSym('Z', 1) <> NIL_SYM) and HasSym('E', skVar) and
+    HasSym('I', skVar));
+end;
+
 procedure TestNameKeys;
 var
   LNode, LSym, LV, LGot, LStep: Integer;
@@ -2913,6 +3007,7 @@ begin
   TestIntMap;
   TestNameKeys;
   TestSemaNamesGrowth;
+  TestLazyBlockScopes;
 
   // Phase 1 pools spellings per unit: one heap string per distinct text, a
   // lower-case name shares its key, and the arena is cut to exact length.
