@@ -33,6 +33,19 @@ type
       Text: string;
       Version: Integer;
     end;
+    // What ResolveUnit's search steps (alias, as spelled, namespaces, leaf,
+    // unit index, .dcu) answer for one unit name, computed once (see
+    // FUnitMemo). The only input that varies per call is the REFERRING
+    // directory, probed after the project dir and the search paths of each
+    // candidate spelling: DirNames are the candidate basenames that the probe
+    // order would have tried there BEFORE reaching Path, in that order. A
+    // call checks them against its own directory first and takes Path when
+    // none is there - exactly the answer the step-by-step probing gave.
+    TUnitMemo = record
+      DirNames: TArray<string>;   // '<candidate>.pas', lower-cased
+      Found: Boolean;
+      Path: string;
+    end;
   private
     FSearchPaths: TArray<string>;
     FNamespaces: TArray<string>;                  // -NS prefixes, in order
@@ -111,10 +124,38 @@ type
     // found here too, ahead of the library paths. '' = none (a directory
     // root, an open-documents-only host).
     FProjectDir: string;
+    // Unit name (lower) -> its resolution (TUnitMemo). A unit is named by
+    // every importer, in several stages, and an unqualified name walks every
+    // -NS prefix before it hits: probing it afresh each time was 17% of all
+    // allocations of a client analysis. Everything the memo derives from is
+    // manager-lifetime already (the search, dir and unit indexes, aliases,
+    // namespaces, project dir), so it lives as long; the setters of the
+    // configuration it depends on clear it (ForgetUnitResolution). Pins and
+    // in-paths are answered BEFORE it and never enter it. Buffers
+    // (SetBuffer) play no part: an overlay cannot make a unit file exist.
+    // Driver-thread only, like the rest of ResolveUnit (DirIndex and FPinned
+    // are unguarded too): every caller - discovery in the load engine,
+    // ResolveUses, EnsureSystemUnit before the parallel passes - runs there.
+    FUnitMemo: TDictionary<string, TUnitMemo>;
+    // The referring file of the last ResolveUnit call and its directory's
+    // index: an importer's uses are resolved in a row, so the directory is
+    // split off and lower-cased once per importer instead of once per probe.
+    FMemoFrom: string;
+    FMemoFromIndex: TDictionary<string, string>;
+    // (including path up to its last separator + #0 + include argument, both
+    // as spelled) -> resolved path, '' for not found. ResolveInclude probes
+    // the file system (TFile.Exists per candidate) and runs for every include
+    // of every includer. Same lifetime as FIncludeStreams and guarded by the same
+    // FIncludeLock - it runs on the parse workers - so a later analysis on
+    // this manager sees a file created in between, as before.
+    FIncludeMemo: TDictionary<string, string>;
     function TryFile(const ADir, AName: string; out AResolved: string): Boolean;
     function DirIndex(const ADir: string): TDictionary<string, string>;
     procedure EnsureSearchIndex;
-    function FindUnitFile(const AUnitName, AFromDir: string;
+    function BuildUnitMemo(const AKey: string): TUnitMemo;
+    function FromDirIndex(const AFromFile: string): TDictionary<string, string>;
+    procedure ForgetUnitResolution;
+    function ResolveIncludeIn(const AIncludingFile, AName: string;
       out AResolved: string): Boolean;
     function FindDcuFile(const AUnitName: string; out AResolved: string): Boolean;
     function DcuText(const APath: string): string;
@@ -248,6 +289,28 @@ uses
   PasTree.Dcu,
   PasTree.Dcu.Source;
 
+// True when AName ends in AExt ('.pas', ASCII, any case) - what
+// SameText(TPath.GetExtension(AName), AExt) answers for an extension without
+// a dot of its own, minus the string GetExtension allocates per file listed.
+function HasExt(const AName, AExt: string): Boolean;
+var
+  LOff, LIdx: Integer;
+  LCh: Char;
+begin
+  LOff := Length(AName) - Length(AExt);
+  if LOff < 0 then
+    Exit(False);
+  for LIdx := 1 to Length(AExt) do
+  begin
+    LCh := AName[LOff + LIdx];
+    if (LCh >= 'A') and (LCh <= 'Z') then
+      LCh := Char(Ord(LCh) + 32);
+    if LCh <> AExt[LIdx] then
+      Exit(False);
+  end;
+  Result := True;
+end;
+
 { TPasSourceManager }
 
 constructor TPasSourceManager.Create(const ASearchPaths: TArray<string>);
@@ -261,6 +324,8 @@ end;
 
 destructor TPasSourceManager.Destroy;
 begin
+  FIncludeMemo.Free;
+  FUnitMemo.Free;
   FDcuFailures.Free;
   FDcuTexts.Free;
   FDcuIndex.Free;
@@ -326,6 +391,7 @@ end;
 procedure TPasSourceManager.SetNamespaces(const ANamespaces: TArray<string>);
 begin
   FNamespaces := ANamespaces;
+  ForgetUnitResolution;
 end;
 
 procedure TPasSourceManager.AddUnitAlias(const AAlias, AReal: string);
@@ -333,6 +399,7 @@ begin
   if FAliases = nil then
     FAliases := TDictionary<string, string>.Create;
   FAliases.AddOrSetValue(LowerCase(AAlias), AReal);
+  ForgetUnitResolution;
 end;
 
 procedure TPasSourceManager.PinUnit(const AUnitName, APath: string);
@@ -350,6 +417,7 @@ begin
     FProjectDir := ''
   else
     FProjectDir := ExcludeTrailingPathDelimiter(TPath.GetFullPath(ADir));
+  ForgetUnitResolution;
 end;
 
 function TPasSourceManager.ProjectDir: string;
@@ -435,6 +503,7 @@ var
   LFile, LKey, LExt: string;
 begin
   FreeAndNil(FUnitIndex);
+  ForgetUnitResolution;
   FUnitIndex := TDictionary<string, string>.Create;
   for LFile in TDirectory.GetFiles(ARoot, '*.*', TSearchOption.soAllDirectories) do
   begin
@@ -474,18 +543,16 @@ begin
         LListings[AIndex] := TDirectory.GetFiles(FSearchPaths[AIndex],
           TSearchOption.soTopDirectoryOnly,
           function(const APath: string; const ASearchRec: TSearchRec): Boolean
-          var
-            LExt: string;
           begin
-            LExt := TPath.GetExtension(ASearchRec.Name);
-            Result := SameText(LExt, '.pas') or SameText(LExt, '.dcu');
+            Result := HasExt(ASearchRec.Name, '.pas') or
+              HasExt(ASearchRec.Name, '.dcu');
           end)
       else
         LListings[AIndex] := nil;
     end);
   for LIdx := 0 to High(LListings) do
     for LFile in LListings[LIdx] do
-      if SameText(TPath.GetExtension(LFile), '.dcu') then
+      if HasExt(LFile, '.dcu') then
         FDcuIndex.TryAdd(
           LowerCase(TPath.GetFileNameWithoutExtension(LFile)), LFile)
       else
@@ -602,61 +669,153 @@ begin
   Result := FSearchNames;
 end;
 
-function TPasSourceManager.FindUnitFile(const AUnitName, AFromDir: string;
-  out AResolved: string): Boolean;
+procedure TPasSourceManager.ForgetUnitResolution;
+begin
+  FreeAndNil(FUnitMemo);
+end;
+
+function TPasSourceManager.FromDirIndex(const AFromFile: string):
+  TDictionary<string, string>;
+begin
+  // AFromFile = '' is legal (see ResolveUnit) and means no referring
+  // directory: DirIndex('') is the empty index.
+  if (FMemoFromIndex = nil) or (AFromFile <> FMemoFrom) then
+  begin
+    if AFromFile = '' then
+      FMemoFromIndex := DirIndex('')
+    else
+      FMemoFromIndex := DirIndex(TPath.GetDirectoryName(AFromFile));
+    FMemoFrom := AFromFile;
+  end;
+  Result := FMemoFromIndex;
+end;
+
+// ResolveUnit's search steps 2-7 for the lower-cased unit name AKey, with the
+// referring directory's probes RECORDED (DirNames) instead of made - see
+// TUnitMemo. Every lookup below is case-insensitive (lower-cased keys), so
+// the lower-cased name answers for every spelling of it.
+function TPasSourceManager.BuildUnitMemo(const AKey: string): TUnitMemo;
+var
+  LMemo: TUnitMemo;
+  LName, LLeaf, LCand, LNs: string;
+  LDot: Integer;
+
+  // One candidate spelling (lower, no extension): project dir, search paths,
+  // then - recorded - the referring dir.
+  function Probe(const ABase: string): Boolean;
+  var
+    LFile: string;
+  begin
+    // SEARCH PATHS FIRST, referring directory only as a fallback. dcc-verified,
+    // and the order matters more than it looks: with `b.pas` and `c.pas`
+    // sitting together in one directory and ANOTHER `c.pas` earlier on the
+    // search path, dcc compiles b against the search-path one - the importer's
+    // own directory carries no priority at all. This is how a project SHADOWS
+    // a third-party unit: it drops a patched copy into its own tree and puts
+    // that directory first. Probing the referring directory first quietly
+    // undid that, and the patched member then read as undeclared at every use
+    // - reported, of course, in the patched file itself, three units away from
+    // the actual mistake.
+    //
+    // The fallback stays because it is strictly more tolerant than dcc: a unit
+    // reached from a directory NOBODY listed is an F1027 for dcc, and an F1027
+    // here GATES its importers' diagnostics rather than reporting them.
+    //
+    // And before the search paths, the PROJECT DIRECTORY: dcc's implicit
+    // current directory, ahead of every -U entry (dcc-verified: a Foo.pas
+    // beside the .dpr beats the Foo.pas on the search path, no path entry
+    // needed). The IDE compiles such a copy; this used to resolve the
+    // library's.
+    LFile := ABase + '.pas';
+    Result := ((FProjectDir <> '') and
+        DirIndex(FProjectDir).TryGetValue(LFile, LMemo.Path)) or
+      FSearchIndex.TryGetValue(LFile, LMemo.Path);
+    if Result then
+      LMemo.Found := True
+    else
+      LMemo.DirNames := LMemo.DirNames + [LFile];
+  end;
+
 begin
   EnsureSearchIndex;
-  // SEARCH PATHS FIRST, referring directory only as a fallback. dcc-verified,
-  // and the order matters more than it looks: with `b.pas` and `c.pas` sitting
-  // together in one directory and ANOTHER `c.pas` earlier on the search path,
-  // dcc compiles b against the search-path one - the importer's own directory
-  // carries no priority at all. This is how a project SHADOWS a third-party
-  // unit: it drops a patched copy into its own tree and puts that directory
-  // first. Probing the referring directory first quietly undid that, and the
-  // patched member then read as undeclared at every use - reported, of course,
-  // in the patched file itself, three units away from the actual mistake.
+  LMemo := Default(TUnitMemo);
+  // 2. Unit alias (dcc -A): a whole-name match rewrites the spelling before
+  // any file lookup (WinTypes -> Winapi.Windows), exactly once (dcc does not
+  // chain aliases).
+  LName := AKey;
+  if (FAliases <> nil) and FAliases.TryGetValue(AKey, LCand) then
+    LName := LowerCase(LCand);
+  LDot := LastDelimiter('.', LName);
+  if LDot > 0 then
+    LLeaf := Copy(LName, LDot + 1, MaxInt)
+  else
+    LLeaf := LName;
+
+  // 3. As spelled: <dotted>.pas on the search paths, then - beyond what dcc
+  // accepts - relative to the referring file. See Probe for the order.
+  if Probe(LName) then
+    Exit(LMemo);
+
+  // 4. Unit-scope namespaces (dcc -NS), IN ORDER, applied to the name AS
+  // SPELLED - dotted or not. `uses Generics.Collections` with -NS System
+  // resolves to System.Generics.Collections.pas, and there is no
+  // Generics.Collections.pas anywhere, so the prefix is the ONLY way to find
+  // it: dcc-verified, compiles with -NSSystem and cannot be explained by any
+  // other rule here. This used to be gated on an unqualified name, which
+  // refused exactly the example the comment cited. Real cost: 16 of the 27
+  // unresolvable imports left on a 3789-unit project were this one line.
   //
-  // The fallback stays because it is strictly more tolerant than dcc: a unit
-  // reached from a directory NOBODY listed is an F1027 for dcc, and an F1027
-  // here GATES its importers' diagnostics rather than reporting them.
-  //
-  // And before the search paths, the PROJECT DIRECTORY: dcc's implicit
-  // current directory, ahead of every -U entry (dcc-verified: a Foo.pas
-  // beside the .dpr beats the Foo.pas on the search path, no path entry
-  // needed). The IDE compiles such a copy; this used to resolve the library's.
-  if (FProjectDir <> '') and
-     DirIndex(FProjectDir).TryGetValue(LowerCase(AUnitName) + '.pas',
-       AResolved) then
-    Exit(True);
-  if FSearchIndex.TryGetValue(LowerCase(AUnitName) + '.pas', AResolved) then
-    Exit(True);
-  Result := DirIndex(AFromDir).TryGetValue(LowerCase(AUnitName) + '.pas',
-    AResolved);
+  // Tried only AFTER the as-spelled lookup above, so a name that names a real
+  // file (Vcl.Forms) can never be captured by a prefix.
+  for LNs in FNamespaces do
+    if (LNs <> '') and Probe(LowerCase(LNs) + '.' + LName) then
+      Exit(LMemo);
+
+  // 5. Leaf-name tolerance for a dotted name (System.SysUtils -> SysUtils.pas
+  // - pre-namespace-era file layouts).
+  if (LDot > 0) and Probe(LLeaf) then
+    Exit(LMemo);
+
+  // 6. Unit index (basename fallback).
+  if FUnitIndex <> nil then
+    if FUnitIndex.TryGetValue(LName + '.pas', LCand) or
+       ((LLeaf <> LName) and FUnitIndex.TryGetValue(LLeaf + '.pas', LCand)) then
+    begin
+      LMemo.Found := True;
+      LMemo.Path := LCand;
+      Exit(LMemo);
+    end;
+
+  // 7. No source anywhere: a compiled unit on the search paths, as spelled
+  // and then with the namespace prefixes - what dcc itself compiles against
+  // when a library ships .dcu only. See FDcuIndex for what happens next.
+  LMemo.Found := FindDcuFile(LName, LMemo.Path);
+  if not LMemo.Found then
+    for LNs in FNamespaces do
+      if (LNs <> '') and FindDcuFile(LNs + '.' + LName, LMemo.Path) then
+      begin
+        LMemo.Found := True;
+        Break;
+      end;
+  if not LMemo.Found then
+    LMemo.Path := '';
+  Result := LMemo;
 end;
 
 function TPasSourceManager.ResolveUnit(const AUnitName, AInPath, AFromFile: string;
   out AResolved: string): Boolean;
 var
-  LDir, LLeaf, LCand, LUnitName: string;
-  LNames: TArray<string>;
-  LName: string;
-  LDot: Integer;
+  LDir, LKey, LFile: string;
+  LMemo: TUnitMemo;
+  LFrom: TDictionary<string, string>;
 begin
-  // AFromFile = '' is legal: "resolve by search paths only, no anchor file"
-  // (e.g. TPasSemaProject.EnsureSystemUnit, which has no referring unit to
-  // anchor from). TPath.GetDirectoryName raises on '' instead of returning
-  // '', so this must be guarded explicitly rather than passed through.
-  if AFromFile = '' then
-    LDir := ''
-  else
-    LDir := TPath.GetDirectoryName(AFromFile);
+  LKey := LowerCase(AUnitName);
 
   // 0. A unit already LOCATED for the project (see FPinned) - the program's
   // in-path or the project file's unit list - beats every lookup below, the
   // referring unit's own in-path included: dcc reports a unit found in two
   // places rather than resolving it twice, and the program's word wins.
-  if (FPinned <> nil) and
-     FPinned.TryGetValue(LowerCase(AUnitName), AResolved) then
+  if (FPinned <> nil) and FPinned.TryGetValue(LKey, AResolved) then
     Exit(True);
 
   // 1. Explicit `in 'path'`. Whatever it resolves to is pinned for the whole
@@ -670,6 +829,14 @@ begin
       PinUnit(AUnitName, AResolved);
       Exit(True);
     end;
+    // AFromFile = '' is legal: "resolve by search paths only, no anchor
+    // file" (e.g. TPasSemaProject.EnsureSystemUnit, which has no referring
+    // unit to anchor from). TPath.GetDirectoryName raises on '' instead of
+    // returning '', so this must be guarded explicitly.
+    if AFromFile = '' then
+      LDir := ''
+    else
+      LDir := TPath.GetDirectoryName(AFromFile);
     if TryFile(LDir, AInPath, AResolved) or
        TryFile(FProjectDir, AInPath, AResolved) then
     begin
@@ -682,80 +849,26 @@ begin
         PinUnit(AUnitName, AResolved);
         Exit(True);
       end;
-    // Restore the ANCHOR directory the loop above just used LDir for. The
-    // reset used to be gated on AFromFile <> '', which left an empty-anchor
-    // caller with the LAST SEARCH PATH as its "referring directory" for
-    // steps 3-5 below.
-    if AFromFile = '' then
-      LDir := ''
-    else
-      LDir := TPath.GetDirectoryName(AFromFile);
   end;
 
-  // 2. Unit alias (dcc -A): a whole-name match rewrites the spelling before
-  // any file lookup (WinTypes -> Winapi.Windows), exactly once (dcc does not
-  // chain aliases).
-  LUnitName := AUnitName;
-  if (FAliases <> nil) and FAliases.TryGetValue(LowerCase(AUnitName), LCand) then
-    LUnitName := LCand;
-
-  // 3. As spelled: <dotted>.pas on the search paths, then - beyond what dcc
-  // accepts - relative to the referring file. See FindUnitFile for the order.
-  if FindUnitFile(LUnitName, LDir, AResolved) then
-    Exit(True);
-
-  // 4. Unit-scope namespaces (dcc -NS), IN ORDER, applied to the name AS
-  // SPELLED - dotted or not. `uses Generics.Collections` with -NS System
-  // resolves to System.Generics.Collections.pas, and there is no
-  // Generics.Collections.pas anywhere, so the prefix is the ONLY way to find
-  // it: dcc-verified, compiles with -NSSystem and cannot be explained by any
-  // other rule here. This used to be gated on an unqualified name, which
-  // refused exactly the example the comment cited. Real cost: 16 of the 27
-  // unresolvable imports left on a 3789-unit project were this one line.
-  //
-  // Tried only AFTER the as-spelled lookup above, so a name that names a real
-  // file (Vcl.Forms) can never be captured by a prefix.
-  for LName in FNamespaces do
-    if (LName <> '') and
-       FindUnitFile(LName + '.' + LUnitName, LDir, AResolved) then
-      Exit(True);
-  LDot := LastDelimiter('.', LUnitName);
-
-  // 5. Leaf-name tolerance for a dotted name (System.SysUtils -> SysUtils.pas
-  // - pre-namespace-era file layouts).
-  if LDot > 0 then
+  // 2-7. The search proper, answered once per unit name (see TUnitMemo);
+  // only the referring directory's candidates are checked per call.
+  if FUnitMemo = nil then
+    FUnitMemo := TDictionary<string, TUnitMemo>.Create;
+  if not FUnitMemo.TryGetValue(LKey, LMemo) then
   begin
-    LLeaf := Copy(LUnitName, LDot + 1, MaxInt);
-    if FindUnitFile(LLeaf, LDir, AResolved) then
-      Exit(True);
-  end
-  else
-    LLeaf := LUnitName;
-
-  // 6. Unit index (basename fallback).
-  if FUnitIndex <> nil then
+    LMemo := BuildUnitMemo(LKey);
+    FUnitMemo.Add(LKey, LMemo);
+  end;
+  if LMemo.DirNames <> nil then
   begin
-    LNames := [LUnitName + '.pas'];
-    if not SameText(LLeaf, LUnitName) then
-      LNames := LNames + [LLeaf + '.pas'];
-    for LName in LNames do
-      if FUnitIndex.TryGetValue(LowerCase(LName), LCand) then
-      begin
-        AResolved := LCand;
+    LFrom := FromDirIndex(AFromFile);
+    for LFile in LMemo.DirNames do
+      if LFrom.TryGetValue(LFile, AResolved) then
         Exit(True);
-      end;
   end;
-
-  // 7. No source anywhere: a compiled unit on the search paths, as spelled
-  // and then with the namespace prefixes - what dcc itself compiles against
-  // when a library ships .dcu only. See FDcuIndex for what happens next.
-  if FindDcuFile(LUnitName, AResolved) then
-    Exit(True);
-  for LName in FNamespaces do
-    if (LName <> '') and FindDcuFile(LName + '.' + LUnitName, AResolved) then
-      Exit(True);
-
-  Result := False;
+  AResolved := LMemo.Path;
+  Result := LMemo.Found;
 end;
 
 procedure TPasSourceManager.BuildIncludeIndex(const ARoot: string);
@@ -763,6 +876,12 @@ var
   LFile, LKey: string;
 begin
   FreeAndNil(FIncludeIndex);
+  TMonitor.Enter(FIncludeLock);
+  try
+    FreeAndNil(FIncludeMemo);   // its misses may be hits now
+  finally
+    TMonitor.Exit(FIncludeLock);
+  end;
   FIncludeIndex := TDictionary<string, string>.Create;
   for LFile in TDirectory.GetFiles(ARoot, '*.inc',
     TSearchOption.soAllDirectories) do
@@ -1095,6 +1214,7 @@ begin
   TMonitor.Enter(FIncludeLock);
   try
     FreeAndNil(FIncludeStreams);
+    FreeAndNil(FIncludeMemo);
   finally
     TMonitor.Exit(FIncludeLock);
   end;
@@ -1103,8 +1223,44 @@ end;
 function TPasSourceManager.ResolveInclude(const AIncludingFile, AName: string;
   out AResolved: string): Boolean;
 var
+  LKey: string;
+begin
+  // The answer depends on the including file's DIRECTORY only, so every unit
+  // of a directory shares one entry per include (see FIncludeMemo). The key
+  // is the including path up to its last separator - equal prefixes give
+  // equal directories whatever TPath.GetDirectoryName makes of them, and
+  // unlike it this cannot raise - kept as spelled, since the resolved path
+  // carries the spelling of both.
+  LKey := Copy(AIncludingFile, 1, LastDelimiter('\/:', AIncludingFile)) +
+    #0 + AName;
+  TMonitor.Enter(FIncludeLock);
+  try
+    if (FIncludeMemo <> nil) and FIncludeMemo.TryGetValue(LKey, AResolved) then
+      Exit(AResolved <> '');
+  finally
+    TMonitor.Exit(FIncludeLock);
+  end;
+  // Probe OUTSIDE the lock (file-system calls); two workers racing to the
+  // same key compute the same answer. A raise (an unusable including path)
+  // leaves no entry behind, so it raises again next time, as it always did.
+  Result := ResolveIncludeIn(AIncludingFile, AName, AResolved);
+  TMonitor.Enter(FIncludeLock);
+  try
+    if FIncludeMemo = nil then
+      FIncludeMemo := TDictionary<string, string>.Create;
+    FIncludeMemo.AddOrSetValue(LKey, AResolved);
+  finally
+    TMonitor.Exit(FIncludeLock);
+  end;
+end;
+
+// ResolveInclude's probing proper, unmemoized.
+function TPasSourceManager.ResolveIncludeIn(const AIncludingFile, AName: string;
+  out AResolved: string): Boolean;
+var
   LName, LCandidate, LDir: string;
 begin
+  AResolved := '';
   LName := Trim(AName);
   if (Length(LName) >= 2) and (LName[1] = '''') and
      (LName[Length(LName)] = '''') then

@@ -7243,6 +7243,72 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { The resolution memos (TPasSourceManager.FUnitMemo, FIncludeMemo). A unit
+    name is searched once and answered for every importer - but the importer's
+    own directory is probed BETWEEN candidate spellings (as spelled, then each
+    -NS prefix), so a memo that ignored it would hand every importer the first
+    importer's answer. Here `UMemo` is a local copy beside importer a (the
+    as-spelled fallback, tried before the prefix) and Ns.UMemo on the search
+    path for everyone else. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sm_memo');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(TPath.Combine(LDir, 'lib'));
+  TDirectory.CreateDirectory(TPath.Combine(LDir, 'a'));
+  TDirectory.CreateDirectory(TPath.Combine(LDir, 'b'));
+  TFile.WriteAllText(TPath.Combine(LDir, 'lib\Ns.UMemo.pas'), 'unit Ns.UMemo;');
+  TFile.WriteAllText(TPath.Combine(LDir, 'a\UMemo.pas'), 'unit UMemo;');
+  var LSM := TPasSourceManager.Create([TPath.Combine(LDir, 'lib')]);
+  try
+    LSM.SetNamespaces(['Ns']);
+    var LRes: string;
+    Ok('memo: importer a gets the copy beside it',
+      LSM.ResolveUnit('UMemo', '', TPath.Combine(LDir, 'a\User.pas'), LRes) and
+      SameText(LRes, TPath.Combine(LDir, 'a\UMemo.pas')));
+    Ok('memo: importer b, same name, gets the prefixed search-path unit',
+      LSM.ResolveUnit('umemo', '', TPath.Combine(LDir, 'b\User.pas'), LRes) and
+      SameText(LRes, TPath.Combine(LDir, 'lib\Ns.UMemo.pas')));
+    Ok('memo: another importer of a''s directory gets a''s copy again',
+      LSM.ResolveUnit('UMEMO', '', TPath.Combine(LDir, 'a\Other.pas'), LRes) and
+      SameText(LRes, TPath.Combine(LDir, 'a\UMemo.pas')));
+    Ok('memo: no referring file = search paths only',
+      LSM.ResolveUnit('UMemo', '', '', LRes) and
+      SameText(LRes, TPath.Combine(LDir, 'lib\Ns.UMemo.pas')));
+    Ok('memo: an unresolvable name answers False with an empty path',
+      not LSM.ResolveUnit('UOld', '', TPath.Combine(LDir, 'b\User.pas'),
+        LRes) and (LRes = ''));
+    // A configuration change after the first answer must not be hidden by it.
+    LSM.AddUnitAlias('UOld', 'UMemo');
+    Ok('memo: an alias added after a miss is honoured',
+      LSM.ResolveUnit('UOld', '', TPath.Combine(LDir, 'b\User.pas'), LRes) and
+      SameText(LRes, TPath.Combine(LDir, 'lib\Ns.UMemo.pas')));
+    LSM.SetNamespaces([]);
+    Ok('memo: namespaces cleared after a hit are honoured',
+      not LSM.ResolveUnit('UMemo', '', TPath.Combine(LDir, 'b\User.pas'),
+        LRes));
+
+    // Includes: keyed by the including DIRECTORY, so a second includer there
+    // shares the answer; a miss lasts until the analysis caches are released.
+    Ok('memo: a missing include is not found',
+      not LSM.ResolveInclude(TPath.Combine(LDir, 'a\User.pas'), 'memo.inc',
+        LRes));
+    TFile.WriteAllText(TPath.Combine(LDir, 'a\memo.inc'), '');
+    LSM.ReleaseAnalysisCaches;
+    Ok('memo: the include is found once the caches are released',
+      LSM.ResolveInclude(TPath.Combine(LDir, 'a\User.pas'), 'memo.inc', LRes) and
+      SameText(LRes, TPath.Combine(LDir, 'a\memo.inc')));
+    Ok('memo: another includer of the directory finds it (quoted argument)',
+      LSM.ResolveInclude(TPath.Combine(LDir, 'a\Other.pas'), '''memo.inc''',
+        LRes) and SameText(LRes, TPath.Combine(LDir, 'a\memo.inc')));
+    Ok('memo: an includer elsewhere does not',
+      not LSM.ResolveInclude(TPath.Combine(LDir, 'b\User.pas'), 'memo.inc',
+        LRes));
+  finally
+    LSM.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
 end.
