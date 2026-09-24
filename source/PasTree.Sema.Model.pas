@@ -136,6 +136,25 @@ type
     S: Integer;
   end;
 
+  { A lookup key BY REFERENCE: Len chars at Text plus the key's PasNameHash.
+    Two sources:
+    - a key STRING (SemaKey): Text is that string's own buffer, compared
+      exactly, so the string must outlive the key - a const parameter or a
+      local does;
+    - an identifier TOKEN (PasNodeKey / SemaSliceKey): Text is the source
+      spelling, '&' already skipped, compared ASCII-folded and hashed folded -
+      exactly the key PasNameKey / TPasTree.NodeNameLower would have built,
+      without building it. Valid while the tree's token layer lives.
+    Name keys were 45% of the analyzer's heap allocations (memory census,
+    2026-09), nearly all of them a lower-cased copy of a token made only to be
+    looked up once and dropped. }
+  TSemaKey = record
+    Text: PChar;
+    Len: Integer;
+    Hash: Cardinal;
+    Raw: Boolean;    // Text is source spelling: fold 'A'..'Z' when comparing
+  end;
+
   { A scope's names AND its declaration order, one record. Names: NameLower
     -> head symbol index. Replaced a TDictionary<string, Integer> per scope
     (memory audit, 2026-09): RTL dictionaries grow at 50% load and carry a
@@ -173,7 +192,7 @@ type
     procedure MaterializeOrder;
     procedure AppendOrder(ASym: Integer);
   public
-    function Find(const AKey: string; AHash: Cardinal;
+    function Find(const AKey: TSemaKey;
       const ASyms: TArray<TSemaSymbol>): Integer; inline;
     // Binds ASyms[ASym].NameLower (hash AHash) to ASym, replacing the symbol
     // a same-key slot held - TDictionary.AddOrSetValue's contract - and
@@ -277,7 +296,9 @@ type
     open addressing, the PasNameHash kept per slot, pow2 capacity, at most
     75% full. Intern returns the pooled instance of AText's spelling (exact,
     case-sensitive), pooling AText itself the first time. A TDictionary
-    <string, string> in its place cost ~4% of the client's analysis CPU. }
+    <string, string> in its place cost ~4% of the client's analysis CPU.
+    A LOCAL pool must be Clear'ed before use: a record local initializes its
+    managed fields only, and a garbage FCount grows the table without end. }
   TSemaNamePool = record
   private
     FSlots: TArray<TSemaPoolSlot>;
@@ -285,7 +306,33 @@ type
     procedure Grow;
   public
     function Intern(const AText: string): string;
+    // Intern of the ALen chars at AText - folded ('A'..'Z' only) when AFold -
+    // without building the string unless the pool does not have it yet.
+    function InternSlice(AText: PChar; ALen: Integer; AFold: Boolean): string;
     procedure Clear;
+  end;
+
+  TSemaKeyIndexSlot = record
+    H: Cardinal;
+    V1: Integer;     // value + 1; 0 = empty slot
+    K: string;
+  end;
+
+  { Key string -> non-negative Integer, looked up by TSemaKey so a probe with a
+    token's key builds no string. Open addressing, pow2 capacity, at most 75%
+    full; TryAdd keeps the FIRST value added for a key (TDictionary.TryAdd).
+    Keys must BE keys (PasNameKey / LowerCase form). A local one must be
+    Clear'ed first, as TSemaNamePool. }
+  TSemaKeyIndex = record
+  private
+    FSlots: TArray<TSemaKeyIndexSlot>;
+    FCount: Integer;
+    procedure Grow;
+  public
+    function TryAdd(const AKey: string; AValue: Integer): Boolean;
+    function TryGet(const AKey: TSemaKey; out AValue: Integer): Boolean;
+    procedure Clear;
+    property Count: Integer read FCount;
   end;
 
   // Field order is LAYOUT, as in TSemaSymbol: the byte-sized and Integer
@@ -348,8 +395,8 @@ type
     FNamePool: TSemaNamePool;
     FNamePoolOn: Boolean;
     procedure GrowSyms;
-    function FindByArityDeepH(AScope: Integer; const ANameLower: string;
-      AHash: Cardinal; AWantGeneric: Boolean): Integer;
+    function FindByArityDeepK(AScope: Integer; const AKey: TSemaKey;
+      AWantGeneric: Boolean): Integer;
   public
     Tree: TPasTree;                 // referenced, not owned
     Symbols: TArray<TSemaSymbol>;
@@ -383,10 +430,12 @@ type
     { Lower-cased `uses` names -> UnitId, both the full dotted name and its
       last segment, first entry wins - the same answer the ascending scan of
       UsesList gives. Built by the project driver's ResolveUses once the ids
-      are assigned (nil until then, and in a standalone per-unit analysis);
-      the scan it replaces ran per namespace-qualifier probe and, on a main
-      form unit with hundreds of `uses`, cost more than the member walk. }
-    UsesByName: TDictionary<string, Integer>;
+      are assigned (UsesIndexed False until then, and in a standalone
+      per-unit analysis); the scan it replaces ran per namespace-qualifier
+      probe and, on a main form unit with hundreds of `uses`, cost more than
+      the member walk. Probed by key, so a bare identifier costs no string. }
+    UsesByName: TSemaKeyIndex;
+    UsesIndexed: Boolean;
     AllUsesResolved: Boolean;       // gates E2003 (set by the project driver)
     UnitNameLower: string;          // this unit's own name, lower-cased
     // nkWithStmt nodes whose target member set is NOT fully known intra-unit:
@@ -470,7 +519,12 @@ type
     // built the key for their own lookup pass it to avoid lowering twice.
     function AddSymbol(AScope: Integer; AKind: TSemaSymbolKind;
       const AName: string; ADeclNode: Integer;
-      const ANameKey: string = ''): Integer;
+      const ANameKey: string = ''): Integer; overload;
+    { The same, named by the identifier token ANameNode (display name = its
+      text, '&' kept; key = AKey, which must be PasNodeKey of that node): no
+      string is built for a spelling the Phase-1 pool already holds. }
+    function AddSymbol(AScope: Integer; AKind: TSemaSymbolKind;
+      ANameNode, ADeclNode: Integer; const AKey: TSemaKey): Integer; overload;
     // Brackets Phase 1 (TPasSemaResolver.Analyze): between the two, AddSymbol
     // shares one heap string per distinct spelling (see FNamePool).
     procedure BeginNamePool;
@@ -491,6 +545,19 @@ type
       AScope: Integer): Boolean;
     // Local lookup in one scope (no chain).
     function FindLocal(AScope: Integer; const ANameLower: string): Integer;
+      overload;
+    { Every lookup below also takes a TSemaKey - the string forms are that
+      overload over SemaKey(ANameLower). A key built once (PasNodeKey over the
+      referring identifier, or SemaKey over a string) carries its hash, so a
+      chain walk over it hashes nothing. }
+    function FindLocal(AScope: Integer; const AKey: TSemaKey): Integer;
+      overload; inline;
+    function FindLocalDeep(AScope: Integer; const AKey: TSemaKey;
+      ADepth: Integer = 0): Integer; overload;
+    function ResolveAt(AScope: Integer; const AKey: TSemaKey;
+      AAtToken: Integer): Integer; overload;
+    function ResolveByArityAt(AScope: Integer; const AKey: TSemaKey;
+      AAtToken: Integer; AWantGeneric: Boolean): Integer; overload;
     { FindLocal / FindLocalDeep with the key's PasNameHash supplied by the
       caller. For every loop that looks ONE name up in a chain of scopes - a
       parent climb, an ancestor or helper walk, across models too (the hash
@@ -509,7 +576,7 @@ type
     // enum values two joins deep). FindLocal alone is one level only; this
     // is what Resolve actually needs at each scope of its PARENT climb.
     function FindLocalDeep(AScope: Integer; const ANameLower: string;
-      ADepth: Integer = 0): Integer;
+      ADepth: Integer = 0): Integer; overload;
     { The ENUMERATING counterpart of FindLocalDeep, for completion: every
       symbol visible through AScope, reported in exactly the order the lookup
       would try them - Shadowing joins (recursive) first, then the scope's own
@@ -521,14 +588,16 @@ type
       ADepth: Integer = 0);
     // Full lookup: self -> additional (reverse) -> parent -> ...
     function Resolve(AScope: Integer; const ANameLower: string): Integer;
+      overload;
+    function Resolve(AScope: Integer; const AKey: TSemaKey): Integer; overload;
     { Resolve honouring block-scope POSITION - see the implementation. Only a
       reference lookup passes a real AAtToken; everything else passes -1. }
     function ResolveAt(AScope: Integer; const ANameLower: string;
-      AAtToken: Integer): Integer;
+      AAtToken: Integer): Integer; overload;
     { ResolveAt restricted to one side of the GENERIC/non-generic split, since
       arity is part of a type's identity. See the implementation. }
     function ResolveByArityAt(AScope: Integer; const ANameLower: string;
-      AAtToken: Integer; AWantGeneric: Boolean): Integer;
+      AAtToken: Integer; AWantGeneric: Boolean): Integer; overload;
     function FindByArityDeep(AScope: Integer; const ANameLower: string;
       AWantGeneric: Boolean): Integer;
     function DeclaredAfter(ASym, AAtToken: Integer): Boolean;
@@ -610,6 +679,24 @@ function PasNameKey(const AName: string): string;
   step per char, not per byte). Pass a lookup KEY (PasNameKey form). }
 function PasNameHash(const AKey: string): Cardinal; inline;
 
+{ A key string as a TSemaKey (see there): AKey must already BE a key. }
+function SemaKey(const AKey: string): TSemaKey; inline;
+{ The key of the ALen source chars at AText: '&' skipped, hashed folded. }
+function SemaSliceKey(AText: PChar; ALen: Integer): TSemaKey;
+{ The key of identifier node ANode of ATree, straight off its token -
+  TPasTree.NodeNameLower's key, not built. Empty (Len 0) where NodeNameLower
+  answers '' (no such node, no token layer). }
+function PasNodeKey(ATree: TPasTree; ANode: Integer): TSemaKey;
+{ Does the key string ANameLower equal AKey? The comparison TSemaNames uses. }
+function SemaKeyEquals(const ANameLower: string; const AKey: TSemaKey): Boolean;
+  inline;
+{ SemaKeyEquals' folding half: the AKey.Len chars at AName (a key) against a
+  Raw key. Out of line - a loop does not inline. }
+function SemaRawKeyEquals(AName: PChar; const AKey: TSemaKey): Boolean;
+{ The key as a string (PasNameKey form) - for the rare caller that must keep
+  or concatenate it. }
+function SemaKeyText(const AKey: TSemaKey): string;
+
 implementation
 
 uses
@@ -632,7 +719,93 @@ begin
   for LIdx := 1 to Length(AKey) do
     Result := (Result xor Cardinal(Ord(AKey[LIdx]))) * 16777619;
 end;
+
+// PasNameHash of the folded slice - the same value PasNameHash gives the
+// string PasNameKey would build from it.
+function FoldedSliceHash(AText: PChar; ALen: Integer): Cardinal;
+var
+  LIdx: Integer;
+  LCh: Char;
+begin
+  Result := 2166136261;
+  for LIdx := 0 to ALen - 1 do
+  begin
+    LCh := AText[LIdx];
+    if (LCh >= 'A') and (LCh <= 'Z') then
+      Inc(LCh, 32);
+    Result := (Result xor Cardinal(Ord(LCh))) * 16777619;
+  end;
+end;
+
+function RawSliceHash(AText: PChar; ALen: Integer): Cardinal;
+var
+  LIdx: Integer;
+begin
+  Result := 2166136261;
+  for LIdx := 0 to ALen - 1 do
+    Result := (Result xor Cardinal(Ord(AText[LIdx]))) * 16777619;
+end;
 {$IFDEF PT_RESTORE_Q}{$OVERFLOWCHECKS ON}{$UNDEF PT_RESTORE_Q}{$ENDIF}
+
+function SemaKey(const AKey: string): TSemaKey;
+begin
+  Result.Text := Pointer(AKey);
+  Result.Len := Length(AKey);
+  Result.Hash := PasNameHash(AKey);
+  Result.Raw := False;
+end;
+
+function SemaSliceKey(AText: PChar; ALen: Integer): TSemaKey;
+begin
+  if (ALen > 0) and (AText^ = '&') then
+  begin
+    Inc(AText);
+    Dec(ALen);
+  end;
+  Result.Text := AText;
+  Result.Len := ALen;
+  Result.Hash := FoldedSliceHash(AText, ALen);
+  Result.Raw := True;
+end;
+
+function PasNodeKey(ATree: TPasTree; ANode: Integer): TSemaKey;
+var
+  LText: PChar;
+  LLen: Integer;
+begin
+  ATree.NodeSlice(ANode, LText, LLen);
+  Result := SemaSliceKey(LText, LLen);
+end;
+
+function SemaRawKeyEquals(AName: PChar; const AKey: TSemaKey): Boolean;
+var
+  LIdx: Integer;
+  LCh: Char;
+begin
+  for LIdx := 0 to AKey.Len - 1 do
+  begin
+    LCh := AKey.Text[LIdx];
+    if (LCh >= 'A') and (LCh <= 'Z') then
+      Inc(LCh, 32);
+    if LCh <> AName[LIdx] then
+      Exit(False);
+  end;
+  Result := True;
+end;
+
+function SemaKeyEquals(const ANameLower: string; const AKey: TSemaKey): Boolean;
+begin
+  // Same instance first: a key taken from a symbol's own (pooled) NameLower.
+  if Length(ANameLower) <> AKey.Len then
+    Result := False
+  else if Pointer(ANameLower) = AKey.Text then
+    Result := True
+  else if AKey.Raw then
+    Result := SemaRawKeyEquals(Pointer(ANameLower), AKey)
+  else
+    Result := CompareMem(Pointer(ANameLower), AKey.Text,
+      AKey.Len * SizeOf(Char));
+end;
 
 function SameNameKey(const A, B: string): Boolean; inline;
 begin
@@ -641,9 +814,28 @@ begin
      CompareMem(Pointer(A), Pointer(B), Length(A) * SizeOf(Char)));
 end;
 
+function SemaKeyText(const AKey: TSemaKey): string;
+var
+  LIdx: Integer;
+  LCh: Char;
+  LOut: PChar;
+begin
+  SetString(Result, AKey.Text, AKey.Len);
+  if AKey.Raw then
+  begin
+    LOut := Pointer(Result);
+    for LIdx := 0 to AKey.Len - 1 do
+    begin
+      LCh := LOut[LIdx];
+      if (LCh >= 'A') and (LCh <= 'Z') then
+        LOut[LIdx] := Char(Ord(LCh) + 32);
+    end;
+  end;
+end;
+
 { TSemaNames }
 
-function TSemaNames.Find(const AKey: string; AHash: Cardinal;
+function TSemaNames.Find(const AKey: TSemaKey;
   const ASyms: TArray<TSemaSymbol>): Integer;
 var
   LIdx, LMask: Integer;
@@ -651,19 +843,19 @@ begin
   if FCount <= CLinearNames then
   begin
     for LIdx := 0 to FCount - 1 do
-      if (FSlots[LIdx].H = AHash) and
-         SameNameKey(ASyms[FSlots[LIdx].S].NameLower, AKey) then
+      if (FSlots[LIdx].H = AKey.Hash) and
+         SemaKeyEquals(ASyms[FSlots[LIdx].S].NameLower, AKey) then
         Exit(FSlots[LIdx].S);
     Exit(NIL_SYM);
   end;
   LMask := High(FSlots);
-  LIdx := Integer(AHash and Cardinal(LMask));
+  LIdx := Integer(AKey.Hash and Cardinal(LMask));
   repeat
     Result := FSlots[LIdx].S;
     if Result = NIL_SYM then
       Exit;   // empty slot: not here
-    if (FSlots[LIdx].H = AHash) and
-       SameNameKey(ASyms[Result].NameLower, AKey) then
+    if (FSlots[LIdx].H = AKey.Hash) and
+       SemaKeyEquals(ASyms[Result].NameLower, AKey) then
       Exit;
     LIdx := (LIdx + 1) and LMask;
   until False;
@@ -840,7 +1032,120 @@ begin
   Result := AText;
 end;
 
+function TSemaNamePool.InternSlice(AText: PChar; ALen: Integer;
+  AFold: Boolean): string;
+var
+  LHash: Cardinal;
+  LIdx, LMask: Integer;
+  LKey: TSemaKey;
+begin
+  if ALen = 0 then
+    Exit('');
+  if (FCount + 1) * 4 > Length(FSlots) * 3 then
+    Grow;
+  // Slots hold exact spellings hashed with PasNameHash, so a folded slice
+  // hashes folded and compares folded - SemaKeyEquals' Raw mode - and an
+  // exact one hashes and compares as is.
+  LKey.Text := AText;
+  LKey.Len := ALen;
+  LKey.Raw := AFold;
+  if AFold then
+    LHash := FoldedSliceHash(AText, ALen)
+  else
+    LHash := RawSliceHash(AText, ALen);
+  LMask := High(FSlots);
+  LIdx := Integer(LHash and Cardinal(LMask));
+  while FSlots[LIdx].S <> '' do
+  begin
+    if (FSlots[LIdx].H = LHash) and SemaKeyEquals(FSlots[LIdx].S, LKey) then
+      Exit(FSlots[LIdx].S);
+    LIdx := (LIdx + 1) and LMask;
+  end;
+  LKey.Hash := LHash;
+  if AFold then
+    Result := SemaKeyText(LKey)
+  else
+    SetString(Result, AText, ALen);
+  FSlots[LIdx].H := LHash;
+  FSlots[LIdx].S := Result;
+  Inc(FCount);
+end;
+
 procedure TSemaNamePool.Clear;
+begin
+  FSlots := nil;
+  FCount := 0;
+end;
+
+{ TSemaKeyIndex }
+
+procedure TSemaKeyIndex.Grow;
+var
+  LOld: TArray<TSemaKeyIndexSlot>;
+  LIdx, LAt, LMask, LCap: Integer;
+begin
+  LOld := FSlots;
+  LCap := Length(LOld) * 2;
+  if LCap < 16 then
+    LCap := 16;
+  FSlots := nil;
+  SetLength(FSlots, LCap);
+  LMask := LCap - 1;
+  for LIdx := 0 to High(LOld) do
+    if LOld[LIdx].V1 <> 0 then
+    begin
+      LAt := Integer(LOld[LIdx].H and Cardinal(LMask));
+      while FSlots[LAt].V1 <> 0 do
+        LAt := (LAt + 1) and LMask;
+      FSlots[LAt] := LOld[LIdx];
+    end;
+end;
+
+function TSemaKeyIndex.TryAdd(const AKey: string; AValue: Integer): Boolean;
+var
+  LHash: Cardinal;
+  LIdx, LMask: Integer;
+begin
+  if (FCount + 1) * 4 > Length(FSlots) * 3 then
+    Grow;
+  LHash := PasNameHash(AKey);
+  LMask := High(FSlots);
+  LIdx := Integer(LHash and Cardinal(LMask));
+  while FSlots[LIdx].V1 <> 0 do
+  begin
+    if (FSlots[LIdx].H = LHash) and (FSlots[LIdx].K = AKey) then
+      Exit(False);
+    LIdx := (LIdx + 1) and LMask;
+  end;
+  FSlots[LIdx].H := LHash;
+  FSlots[LIdx].V1 := AValue + 1;
+  FSlots[LIdx].K := AKey;
+  Inc(FCount);
+  Result := True;
+end;
+
+function TSemaKeyIndex.TryGet(const AKey: TSemaKey;
+  out AValue: Integer): Boolean;
+var
+  LIdx, LMask: Integer;
+begin
+  if FCount = 0 then
+    Exit(False);
+  LMask := High(FSlots);
+  LIdx := Integer(AKey.Hash and Cardinal(LMask));
+  while FSlots[LIdx].V1 <> 0 do
+  begin
+    if (FSlots[LIdx].H = AKey.Hash) and SemaKeyEquals(FSlots[LIdx].K, AKey) then
+    begin
+      AValue := FSlots[LIdx].V1 - 1;
+      Exit(True);
+    end;
+    LIdx := (LIdx + 1) and LMask;
+  end;
+  Result := False;
+end;
+
+procedure TSemaKeyIndex.Clear;
 begin
   FSlots := nil;
   FCount := 0;
@@ -1141,7 +1446,6 @@ end;
 
 destructor TPasSemaModel.Destroy;
 begin
-  UsesByName.Free;
   Scopes.Free;
   inherited;
 end;
@@ -1263,6 +1567,58 @@ begin
   Symbols[Result].NumRank := 0;
 end;
 
+function TPasSemaModel.AddSymbol(AScope: Integer; AKind: TSemaSymbolKind;
+  ANameNode, ADeclNode: Integer; const AKey: TSemaKey): Integer;
+var
+  LText: PChar;
+  LLen, LIdx: Integer;
+  LIsKey: Boolean;
+begin
+  // The display spelling is the whole token ('&' kept, as NodeText gives it);
+  // AKey is the same slice past any '&'. A spelling with no '&' and no
+  // upper-case letter IS its key - one string for both, as in the string
+  // overload.
+  Tree.NodeSlice(ANameNode, LText, LLen);
+  LIsKey := LLen = AKey.Len;
+  if LIsKey then
+    for LIdx := 0 to LLen - 1 do
+      if (LText[LIdx] >= 'A') and (LText[LIdx] <= 'Z') then
+      begin
+        LIsKey := False;
+        Break;
+      end;
+  if not FNamePoolOn then
+  begin
+    var LKeyText := SemaKeyText(AKey);
+    var LName: string;
+    if LIsKey then
+      LName := LKeyText
+    else
+      SetString(LName, LText, LLen);
+    Exit(AddSymbol(AScope, AKind, LName, ADeclNode, LKeyText));
+  end;
+  GrowSyms;
+  Result := FSymCount;
+  Inc(FSymCount);
+  Symbols[Result].Kind := AKind;
+  Symbols[Result].NameLower := FNamePool.InternSlice(AKey.Text, AKey.Len,
+    True);
+  if LIsKey then
+    Symbols[Result].Name := Symbols[Result].NameLower
+  else
+    Symbols[Result].Name := FNamePool.InternSlice(LText, LLen, False);
+  Symbols[Result].DeclNode := ADeclNode;
+  Symbols[Result].Scope := AScope;
+  Symbols[Result].TypeSym := NIL_SYM;
+  Symbols[Result].TypeNode := NIL_NODE;
+  Symbols[Result].Flags := [];
+  Symbols[Result].Visibility := svDefault;
+  Symbols[Result].NextOverload := NIL_SYM;
+  Symbols[Result].MemberScope := NIL_SCOPE;
+  Symbols[Result].TypeCat := tcUnknown;
+  Symbols[Result].NumRank := 0;
+end;
+
 procedure TPasSemaModel.BeginNamePool;
 begin
   FNamePoolOn := True;
@@ -1306,7 +1662,7 @@ begin
 end;
 
 function TPasSemaModel.FindLocal(AScope: Integer;
-  const ANameLower: string): Integer;
+  const AKey: TSemaKey): Integer;
 var
   LScope: TSemaScope;
 begin
@@ -1324,30 +1680,47 @@ begin
   if LScope.Names.Count = 0 then
     Result := NIL_SYM
   else
-    Result := LScope.Names.Find(ANameLower, PasNameHash(ANameLower), Symbols);
+    Result := LScope.Names.Find(AKey, Symbols);
+end;
+
+function TPasSemaModel.FindLocal(AScope: Integer;
+  const ANameLower: string): Integer;
+begin
+  Result := FindLocal(AScope, SemaKey(ANameLower));
 end;
 
 function TPasSemaModel.FindLocalH(AScope: Integer; const ANameLower: string;
   AHash: Cardinal): Integer;
 var
-  LScope: TSemaScope;
+  LKey: TSemaKey;
 begin
-  LScope := Scopes[AScope];
-  if LScope.Names.Count = 0 then
-    Result := NIL_SYM
-  else
-    Result := LScope.Names.Find(ANameLower, AHash, Symbols);
+  LKey.Text := Pointer(ANameLower);
+  LKey.Len := Length(ANameLower);
+  LKey.Hash := AHash;
+  LKey.Raw := False;
+  Result := FindLocal(AScope, LKey);
 end;
 
 function TPasSemaModel.FindLocalDeep(AScope: Integer;
   const ANameLower: string; ADepth: Integer): Integer;
 begin
-  Result := FindLocalDeepH(AScope, ANameLower, PasNameHash(ANameLower),
-    ADepth);
+  Result := FindLocalDeep(AScope, SemaKey(ANameLower), ADepth);
 end;
 
 function TPasSemaModel.FindLocalDeepH(AScope: Integer;
   const ANameLower: string; AHash: Cardinal; ADepth: Integer): Integer;
+var
+  LKey: TSemaKey;
+begin
+  LKey.Text := Pointer(ANameLower);
+  LKey.Len := Length(ANameLower);
+  LKey.Hash := AHash;
+  LKey.Raw := False;
+  Result := FindLocalDeep(AScope, LKey, ADepth);
+end;
+
+function TPasSemaModel.FindLocalDeep(AScope: Integer;
+  const AKey: TSemaKey; ADepth: Integer): Integer;
 var
   LAdd: TArray<Integer>;
   LIdx: Integer;
@@ -1371,11 +1744,11 @@ begin
   LAdd := Scopes[AScope].Shadowing;
   for LIdx := High(LAdd) downto 0 do
   begin
-    Result := FindLocalDeepH(LAdd[LIdx], ANameLower, AHash, ADepth + 1);
+    Result := FindLocalDeep(LAdd[LIdx], AKey, ADepth + 1);
     if Result <> NIL_SYM then
       Exit;
   end;
-  Result := FindLocalH(AScope, ANameLower, AHash);
+  Result := FindLocal(AScope, AKey);
   if Result <> NIL_SYM then
     Exit;
   // Joined scopes, most-recently-added first (uses/with priority) - each
@@ -1384,7 +1757,7 @@ begin
   LAdd := Scopes[AScope].Additional;
   for LIdx := High(LAdd) downto 0 do
   begin
-    Result := FindLocalDeepH(LAdd[LIdx], ANameLower, AHash, ADepth + 1);
+    Result := FindLocalDeep(LAdd[LIdx], AKey, ADepth + 1);
     if Result <> NIL_SYM then
       Exit;
   end;
@@ -1418,6 +1791,11 @@ begin
   Result := ResolveAt(AScope, ANameLower, -1);
 end;
 
+function TPasSemaModel.Resolve(AScope: Integer; const AKey: TSemaKey): Integer;
+begin
+  Result := ResolveAt(AScope, AKey, -1);
+end;
+
 { FindLocalDeep restricted to one side of the generic split - the same-name chain
   first, then the joined scopes. See ResolveByArityAt.
 
@@ -1429,12 +1807,11 @@ end;
 function TPasSemaModel.FindByArityDeep(AScope: Integer;
   const ANameLower: string; AWantGeneric: Boolean): Integer;
 begin
-  Result := FindByArityDeepH(AScope, ANameLower, PasNameHash(ANameLower),
-    AWantGeneric);
+  Result := FindByArityDeepK(AScope, SemaKey(ANameLower), AWantGeneric);
 end;
 
-function TPasSemaModel.FindByArityDeepH(AScope: Integer;
-  const ANameLower: string; AHash: Cardinal; AWantGeneric: Boolean): Integer;
+function TPasSemaModel.FindByArityDeepK(AScope: Integer;
+  const AKey: TSemaKey; AWantGeneric: Boolean): Integer;
 var
   LAdd: TArray<Integer>;
   LIdx, LSym, LDepth: Integer;
@@ -1455,11 +1832,11 @@ begin
   LAdd := Scopes[AScope].Shadowing;
   for LIdx := High(LAdd) downto 0 do
   begin
-    Result := FindByArityDeepH(LAdd[LIdx], ANameLower, AHash, AWantGeneric);
+    Result := FindByArityDeepK(LAdd[LIdx], AKey, AWantGeneric);
     if Result <> NIL_SYM then
       Exit;
   end;
-  LSym := FindLocalH(AScope, ANameLower, AHash);
+  LSym := FindLocal(AScope, AKey);
   // Same name, same scope: types chain through NextOverload like routines do,
   // so the other arity declared beside this one is found here. Depth-capped for
   // a malformed chain, like every other walk in this model.
@@ -1474,7 +1851,7 @@ begin
   LAdd := Scopes[AScope].Additional;
   for LIdx := High(LAdd) downto 0 do
   begin
-    Result := FindByArityDeepH(LAdd[LIdx], ANameLower, AHash, AWantGeneric);
+    Result := FindByArityDeepK(LAdd[LIdx], AKey, AWantGeneric);
     if Result <> NIL_SYM then
       Exit;
   end;
@@ -1503,15 +1880,20 @@ end;
 function TPasSemaModel.ResolveByArityAt(AScope: Integer;
   const ANameLower: string; AAtToken: Integer;
   AWantGeneric: Boolean): Integer;
+begin
+  Result := ResolveByArityAt(AScope, SemaKey(ANameLower), AAtToken,
+    AWantGeneric);
+end;
+
+function TPasSemaModel.ResolveByArityAt(AScope: Integer;
+  const AKey: TSemaKey; AAtToken: Integer; AWantGeneric: Boolean): Integer;
 var
   LCur: Integer;
-  LHash: Cardinal;
 begin
   LCur := AScope;
-  LHash := PasNameHash(ANameLower);
   while LCur <> NIL_SCOPE do
   begin
-    Result := FindByArityDeepH(LCur, ANameLower, LHash, AWantGeneric);
+    Result := FindByArityDeepK(LCur, AKey, AWantGeneric);
     if Result <> NIL_SYM then
       if (AAtToken < 0) or (Scopes[LCur].Kind <> sckBlock) or
          not DeclaredAfter(Result, AAtToken) then
@@ -1537,15 +1919,19 @@ end;
   segment, the aggregate walk). }
 function TPasSemaModel.ResolveAt(AScope: Integer; const ANameLower: string;
   AAtToken: Integer): Integer;
+begin
+  Result := ResolveAt(AScope, SemaKey(ANameLower), AAtToken);
+end;
+
+function TPasSemaModel.ResolveAt(AScope: Integer; const AKey: TSemaKey;
+  AAtToken: Integer): Integer;
 var
   LCur: Integer;
-  LHash: Cardinal;
 begin
   LCur := AScope;
-  LHash := PasNameHash(ANameLower);
   while LCur <> NIL_SCOPE do
   begin
-    Result := FindLocalDeepH(LCur, ANameLower, LHash, 0);
+    Result := FindLocalDeep(LCur, AKey, 0);
     if Result <> NIL_SYM then
     begin
       if (AAtToken < 0) or (Scopes[LCur].Kind <> sckBlock) or

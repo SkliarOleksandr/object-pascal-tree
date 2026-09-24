@@ -1894,7 +1894,7 @@ begin
   while LChild <> NIL_NODE do
   begin
     if (LM.Tree.Nodes[LChild].Kind = nkPropSpec) and
-       SameText(LM.Tree.NodeText(LChild), 'write') then
+       LM.Tree.NodeTextEquals(LChild, 'write') then
       Exit(True);
     LChild := LM.Tree.Nodes[LChild].NextSibling;
   end;

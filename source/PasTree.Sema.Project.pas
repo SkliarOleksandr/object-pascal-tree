@@ -231,8 +231,10 @@ type
     // Lowered names of the work-list nodes, parallel to FInhWork/FWithWork -
     // computed ONCE in EnsureCrossWork's single scan. The with pass re-reads
     // its list on EVERY fixpoint round (up to 8), and each NodeNameLower was
-    // an allocation; a cached name is a refcount bump. Same lifetime and
-    // reset as the lists themselves.
+    // an allocation; a cached name is a refcount bump. Interned per model at
+    // the scan (one string per distinct name, not per mention - 1.26M
+    // mentions on the client closure). Same lifetime and reset as the lists
+    // themselves.
     FInhWorkNames: TArray<TArray<string>>;
     FWithWorkNames: TArray<TArray<string>>;
     FWorkBuilt: TArray<Boolean>;
@@ -762,7 +764,7 @@ type
     procedure ClearHelperIdx;
     function HelperAncestorX(AMid, ASym: Integer): TSemaXType;
     function HelperMemberHit(AFromMid: Integer; const ACur: TSemaXType;
-      const ANameLower: string; out AMemMid, AMemSym: Integer): Boolean;
+      const AKey: TSemaKey; out AMemMid, AMemSym: Integer): Boolean;
     // Cross-model overload selection (CrossType's call typing):
     function XCatOf(const AX: TSemaXType): TSemaTypeCat;
     function XSameType(const A, B: TSemaXType): Boolean;
@@ -1009,7 +1011,12 @@ type
     function FindMemberX(AFromMid: Integer; const ABase: TSemaXType;
       const ANameLower: string;
       out AMemMid, AMemSym: Integer; out ACtx: Integer;
-      ADepth: Integer = 0): Boolean;
+      ADepth: Integer = 0): Boolean; overload;
+    // The same by key - PasNodeKey over the member-name node costs no string.
+    function FindMemberX(AFromMid: Integer; const ABase: TSemaXType;
+      const AKey: TSemaKey;
+      out AMemMid, AMemSym: Integer; out ACtx: Integer;
+      ADepth: Integer = 0): Boolean; overload;
     function IsConstructorSym(AMid, ASym: Integer): Boolean;
     function IsClassCtorDtorSym(AMid, ASym: Integer): Boolean;
     function XParamSyms(AMid, ASym: Integer): TArray<Integer>;
@@ -3233,8 +3240,8 @@ begin
       while LDir <> NIL_NODE do
       begin
         if (LM.Tree.Nodes[LDir].Kind = nkDirective) and
-           (SameText(LM.Tree.NodeText(LDir), 'virtual') or
-            SameText(LM.Tree.NodeText(LDir), 'dynamic')) then
+           (LM.Tree.NodeTextEquals(LDir, 'virtual') or
+            LM.Tree.NodeTextEquals(LDir, 'dynamic')) then
           Exit(True);
         LDir := LM.Tree.Nodes[LDir].NextSibling;
       end;
@@ -4556,9 +4563,8 @@ begin
   // The by-name index UnitNameOf reads - see the field. TryAdd in ascending
   // order keeps the FIRST entry for a name, full name and leaf alike, which
   // is exactly what the scan's early exit returned.
-  LModel.UsesByName.Free;
-  LModel.UsesByName := TDictionary<string, Integer>.Create(
-    2 * Length(LModel.UsesList));
+  LModel.UsesByName.Clear;
+  LModel.UsesIndexed := True;
   for LIdx := 0 to High(LModel.UsesList) do
   begin
     LUid := LModel.UsesList[LIdx].UnitId;
@@ -4998,18 +5004,41 @@ end;
 // purpose but isn't reachable from this unit.
 function TPasSemaProject.QualifiedText(AId, ANode: Integer): string;
 var
-  LM: TPasSemaModel;
-  LBase, LName: Integer;
+  LT: TPasTree;
+  LNode, LLen, LAt, LSegLen: Integer;
+  LSeg, LOut: PChar;
 begin
-  LM := FModels[AId];
-  if LM.Tree.Nodes[ANode].Kind = nkMember then
+  // One allocation, measured then filled from the right - the same shape as
+  // the resolver's QualifiedNameText; the concatenation paid two strings per
+  // segment, per namespace-qualifier probe.
+  LT := FModels[AId].Tree;
+  LLen := 0;
+  LNode := ANode;
+  while LT.Nodes[LNode].Kind = nkMember do
   begin
-    LBase := LM.Tree.Nodes[ANode].FirstChild;
-    LName := LM.Tree.Nodes[LBase].NextSibling;
-    Result := QualifiedText(AId, LBase) + '.' + LM.Tree.NodeText(LName);
-  end
-  else
-    Result := LM.Tree.NodeText(ANode);
+    LT.NodeSlice(LT.Nodes[LT.Nodes[LNode].FirstChild].NextSibling, LSeg,
+      LSegLen);
+    Inc(LLen, LSegLen + 1);
+    LNode := LT.Nodes[LNode].FirstChild;
+  end;
+  LT.NodeSlice(LNode, LSeg, LSegLen);
+  Inc(LLen, LSegLen);
+  SetLength(Result, LLen);
+  LOut := Pointer(Result);
+  LAt := LLen;
+  LNode := ANode;
+  while LT.Nodes[LNode].Kind = nkMember do
+  begin
+    LT.NodeSlice(LT.Nodes[LT.Nodes[LNode].FirstChild].NextSibling, LSeg,
+      LSegLen);
+    Dec(LAt, LSegLen);
+    Move(LSeg^, LOut[LAt], LSegLen * SizeOf(Char));
+    Dec(LAt);
+    LOut[LAt] := '.';
+    LNode := LT.Nodes[LNode].FirstChild;
+  end;
+  LT.NodeSlice(LNode, LSeg, LSegLen);
+  Move(LSeg^, LOut[0], LSegLen * SizeOf(Char));
 end;
 
 // The model id ANode's qualified text names as a UNIT - literally 'System'
@@ -5028,6 +5057,30 @@ var
 begin
   Result := -1;
   LM := FModels[AId];
+  // A bare identifier - most calls, and nearly all of them name no unit - is
+  // answered off its token: the same tests as below, no string built. An
+  // '&'-escaped one takes the string path, where the '&' stays in the text.
+  if LM.Tree.Nodes[ANode].Kind = nkIdent then
+  begin
+    var LP: PChar;
+    var LLen: Integer;
+    LM.Tree.NodeSlice(ANode, LP, LLen);
+    if (LLen > 0) and (LP^ <> '&') then
+    begin
+      if SliceEqualsWord(LP, LLen, LM.UnitNameLower) then
+        Exit(AId);
+      if SliceEqualsWord(LP, LLen, 'system') then
+        Exit(EnsureSystemUnit);
+      if SliceEqualsWord(LP, LLen, 'sysinit') then
+        Exit(EnsureSysInitUnit);
+      if LM.UsesIndexed then
+      begin
+        if not LM.UsesByName.TryGet(SemaSliceKey(LP, LLen), Result) then
+          Result := -1;
+        Exit;
+      end;
+    end;
+  end;
   LText := QualifiedText(AId, ANode);
   // A unit may qualify with its OWN name - Winapi.Windows.pas calls
   // `Winapi.Windows.DrawText(...)` from an overload of DrawText to reach the
@@ -5042,9 +5095,10 @@ begin
     Exit(EnsureSysInitUnit);
   // One lookup where ResolveUses has indexed the clause; the scan below is
   // the same answer for a model that never went through it.
-  if LM.UsesByName <> nil then
+  if LM.UsesIndexed then
   begin
-    if not LM.UsesByName.TryGetValue(LowerCase(LText), Result) then
+    LLeaf := LowerCase(LText);
+    if not LM.UsesByName.TryGet(SemaKey(LLeaf), Result) then
       Result := -1;
     Exit;
   end;
@@ -5244,7 +5298,7 @@ begin
   if not XValid(LAnc) then
     Exit;
   // The inherited member of that name, and the struct that declares it.
-  if not FindMemberX(AId, LAnc, AModel.Tree.NodeNameLower(LMethod),
+  if not FindMemberX(AId, LAnc, PasNodeKey(AModel.Tree, LMethod),
        LMemMid, LMemSym, LCtx) then
     Exit;
   LAM := FModels[LMemMid];
@@ -5466,6 +5520,9 @@ var
   // which are symbol invariants - so a repeat call only re-checks the fit
   // against ITS argument count. Worker-local, no locks.
   LSweeps: TDictionary<string, TSweep>;
+  // LSweeps' keys, one string per distinct callee name rather than per call.
+  LNamePool: TSemaNamePool;
+  LKey: TSemaKey;
   LSweep: TSweep;
 
   procedure Consider(AMid, AHead: Integer);
@@ -5551,6 +5608,7 @@ begin
     Exit;
 
   LSweeps := nil;
+  LNamePool.Clear;   // a local record: FCount is not initialized
   try
   for LNode := 0 to High(LModel.RefMap) do
   begin
@@ -5622,7 +5680,8 @@ begin
     // per-name cache (see LSweeps above).
     if not LSkip then
     begin
-      LName := LModel.Tree.NodeNameLower(LCallee);
+      LKey := PasNodeKey(LModel.Tree, LCallee);
+      LName := LNamePool.InternSlice(LKey.Text, LKey.Len, True);
       if LSweeps = nil then
         LSweeps := TDictionary<string, TSweep>.Create;
       if not LSweeps.TryGetValue(LName, LSweep) then
@@ -5667,7 +5726,7 @@ begin
     LStruct := StructSymOfNode(LModel, LCallee);
     if (LStruct <> NIL_SYM) and
        FindMemberX(AId, XPlain(AId, LStruct),
-         LModel.Tree.NodeNameLower(LCallee), LUid, LS, LIdx) then
+         PasNodeKey(LModel.Tree, LCallee), LUid, LS, LIdx) then
     begin
       // Re-point while we are here: the binding was wrong, not just the arity,
       // and everything downstream (typing, navigation) reads these maps.
@@ -6005,8 +6064,8 @@ var
     Result := XNil;
     for LNode in ANodes do
       if (LM.Tree.Nodes[LNode].FirstChild = NIL_NODE) and
-         (SameText(LM.Tree.NodeText(LNode), 'class') or
-          SameText(LM.Tree.NodeText(LNode), 'constructor')) and
+         (LM.Tree.NodeTextEquals(LNode, 'class') or
+          LM.Tree.NodeTextEquals(LNode, 'constructor')) and
          ResolveRealDecl(AParam.UnitId, 'tobject', LRMid, LRSym) then
         Exit(XPlain(LRMid, LRSym));
   end;
@@ -7500,7 +7559,7 @@ end;
 // fires when the walk STARTS at a helper (a helper is never another type's
 // heritage).
 function TPasSemaProject.HelperMemberHit(AFromMid: Integer;
-  const ACur: TSemaXType; const ANameLower: string;
+  const ACur: TSemaXType; const AKey: TSemaKey;
   out AMemMid, AMemSym: Integer): Boolean;
 var
   LExt: TPasExtRef;
@@ -7553,7 +7612,7 @@ begin
     LScope := FModels[LExt.UnitId].Symbols[LExt.Sym].MemberScope;
     if LScope = NIL_SCOPE then
       Exit;
-    LFound := FModels[LExt.UnitId].FindLocalDeep(LScope, ANameLower);
+    LFound := FModels[LExt.UnitId].FindLocalDeep(LScope, AKey);
     if LFound <> NIL_SYM then
     begin
       AMemMid := LExt.UnitId;
@@ -7609,24 +7668,31 @@ function TPasSemaProject.FindMemberX(AFromMid: Integer;
   const ABase: TSemaXType;
   const ANameLower: string; out AMemMid, AMemSym: Integer;
   out ACtx: Integer; ADepth: Integer): Boolean;
+begin
+  Result := FindMemberX(AFromMid, ABase, SemaKey(ANameLower), AMemMid,
+    AMemSym, ACtx, ADepth);
+end;
+
+function TPasSemaProject.FindMemberX(AFromMid: Integer;
+  const ABase: TSemaXType;
+  const AKey: TSemaKey; out AMemMid, AMemSym: Integer;
+  out ACtx: Integer; ADepth: Integer): Boolean;
 var
   LCur, LNext: TSemaXType;
   LM: TPasSemaModel;
   LScope, LDef, LChild, LDepth, LFound, LRMid, LRSym: Integer;
   LRootName: string;   // the implicit ancestor for a heritage-less struct
-  LHash: Cardinal;     // ANameLower's, once for the whole ancestor climb
 begin
 {$IFDEF PASTREE_MEMBERSTATS}
   // Top-level calls only - the constraint hop re-enters and would double-count.
   if ADepth = 0 then
-    NoteMemberQuery(AFromMid, ABase, ANameLower);
+    NoteMemberQuery(AFromMid, ABase, SemaKeyText(AKey));
 {$ENDIF}
   Result := False;
   AMemMid := NIL_SYM;
   AMemSym := NIL_SYM;
   ACtx := NIL_INST;
   LCur := ABase;
-  LHash := PasNameHash(ANameLower);
   for LDepth := 1 to 32 do
   begin
     if not XValid(LCur) then
@@ -7658,7 +7724,7 @@ begin
       for LNext in ConstraintsOfParamX(LCur) do
         if XValid(LNext) and
            not ((LNext.UnitId = LCur.UnitId) and (LNext.Sym = LCur.Sym)) and
-           FindMemberX(AFromMid, LNext, ANameLower, AMemMid, AMemSym, ACtx,
+           FindMemberX(AFromMid, LNext, AKey, AMemMid, AMemSym, ACtx,
              ADepth + 1) then
           Exit(True);
       Exit;
@@ -7671,7 +7737,7 @@ begin
     // for TBase applies to a TDerived value once the walk reaches TBase.
     // ACtx deliberately NIL_INST: a helper cannot extend an instantiation,
     // so its members' types never involve the target's parameters.
-    if HelperMemberHit(AFromMid, LCur, ANameLower, AMemMid, AMemSym) then
+    if HelperMemberHit(AFromMid, LCur, AKey, AMemMid, AMemSym) then
     begin
       ACtx := NIL_INST;
       Exit(True);
@@ -7686,7 +7752,7 @@ begin
       // its extended type be seen from any OTHER unit - `M.Twice` in unit B
       // where both TMatrix and its helper live in unit A. The converse (a
       // helper in B for a type in A) goes through HelperMemberHit above.
-      LFound := LM.FindLocalDeepH(LScope, ANameLower, LHash);
+      LFound := LM.FindLocalDeep(LScope, AKey);
       // A `class constructor` is never what a NAME means: it runs once,
       // automatically, and cannot be called (15 sec. 15.1.5). It is registered
       // under its name like any routine, though, so `TRegistry.Create` - with
@@ -7865,7 +7931,7 @@ begin
             Exit;
           for var LAncIdx := 0 to High(LRefs) - 1 do
             if FindMemberX(AFromMid,
-                 ResolveTypeExpr(LCur.UnitId, LRefs[LAncIdx]), ANameLower,
+                 ResolveTypeExpr(LCur.UnitId, LRefs[LAncIdx]), AKey,
                  AMemMid, AMemSym, ACtx, ADepth + 1) then
               Exit(True);
           LNext := ResolveTypeExpr(LCur.UnitId, LRefs[High(LRefs)]);
@@ -8153,7 +8219,7 @@ begin
   while LChild <> NIL_NODE do
   begin
     if (LM.Tree.Nodes[LChild].Kind = nkRoutine) and
-       SameText(LM.Tree.NodeText(LChild), 'operator') then
+       LM.Tree.NodeTextEquals(LChild, 'operator') then
     begin
       LNameChild := LM.Tree.Nodes[LChild].FirstChild;
       if LNameChild <> NIL_NODE then
@@ -9473,7 +9539,7 @@ var
     LAnc := AncestorOfX(XPlain(AId, LStruct));
     if not XValid(LAnc) then
       Exit;
-    if not FindMemberX(AId, LAnc, LM.Tree.NodeNameLower(N),
+    if not FindMemberX(AId, LAnc, PasNodeKey(LM.Tree, N),
          LMemMid, LMemSym, LCtx) then
       Exit;
     if LMemMid = AId then
@@ -9891,7 +9957,7 @@ var
             SetCtxAt(N, LMemCtx);
           end
           else if XValid(LBX) and FindMemberX(AId, LBX,
-            LM.Tree.NodeNameLower(LName), LMemMid, LMemSym, LCtx) then
+            PasNodeKey(LM.Tree, LName), LMemMid, LMemSym, LCtx) then
           begin
             // The member walk stops at the FIRST declaration of the name; in
             // a value position that is the parameterless overload when there
@@ -10469,6 +10535,7 @@ var
   LNode, LBase, LName, LHead, LUid, LSym, LMatchNode: Integer;
   LExt: TPasExtRef;
   LNameLower: string;
+  LKey: TSemaKey;
 begin
   LModel := FModels[AId];
   for LNode := 0 to High(LModel.RefMap) do
@@ -10491,7 +10558,7 @@ begin
             if LUid >= 0 then
             begin
               LSym := FModels[LUid].Resolve(FModels[LUid].InterfaceScope,
-                LModel.Tree.NodeNameLower(LName));
+                PasNodeKey(LModel.Tree, LName));
               // Arity is part of the identity (16.1.2) for a QUALIFIED name
               // too: `Unit.TFoo` names the plain class and `Unit.TFoo<T>`
               // the generic, and the by-name lookup answers with whichever
@@ -10528,7 +10595,7 @@ begin
             if LUid >= 0 then
             begin
               LSym := FModels[LUid].Resolve(FModels[LUid].InterfaceScope,
-                LModel.Tree.NodeNameLower(LName));
+                PasNodeKey(LModel.Tree, LName));
               // Arity is part of the identity (16.1.2) for a QUALIFIED name
               // too: `Unit.TFoo` names the plain class and `Unit.TFoo<T>`
               // the generic, and the by-name lookup answers with whichever
@@ -10628,8 +10695,10 @@ begin
           if InsideWithBody(LModel, LNode) or
              InsideLaterWithTarget(LModel, LNode) then
             Continue;
-          LNameLower := LModel.Tree.NodeNameLower(LNode);
-          if (LNameLower = 'result') or (LNameLower = 'self') then
+          // The key first, the string only for a node that gets past the two
+          // cheap exits below.
+          LKey := PasNodeKey(LModel.Tree, LNode);
+          if SemaKeyEquals('result', LKey) or SemaKeyEquals('self', LKey) then
             Continue;   // implicit routine/method names
           // A qualifier segment of a dotted expression that names a real
           // unit (`System` in `System.sLineBreak`; `System`/`SysUtils` in
@@ -10638,6 +10707,7 @@ begin
           // above, generalized to the OTHER side of the dot.
           if QualifierUnitAt(AId, LNode, LMatchNode) >= 0 then
             Continue;
+          LNameLower := SemaKeyText(LKey);
           if FindInUsesMemo(AId, LNameLower, LUid, LSym) then
           begin
             // ARITY is part of a type's identity (16.1.2) and last-uses-wins
@@ -11278,7 +11348,7 @@ begin
     if not XValid(LBX) then
       LBX := ResolveTypeExpr(AId, LBase);
     var LMemMid, LMemSym, LCtx: Integer;
-    if XValid(LBX) and FindMemberX(AId, LBX, LM.Tree.NodeNameLower(LName),
+    if XValid(LBX) and FindMemberX(AId, LBX, PasNodeKey(LM.Tree, LName),
          LMemMid, LMemSym, LCtx) then
     begin
       AMid := LMemMid;
@@ -13255,6 +13325,8 @@ var
   LInh, LWith: TArray<Integer>;
   LInhNames, LWithNames: TArray<string>;
   LName: string;
+  LPool: TSemaNamePool;
+  LKey: TSemaKey;
 begin
   // Fail LOUDLY, naming the contract, instead of the AV an unsized read
   // produces (range checks are off in release; a nil-array index read
@@ -13268,6 +13340,7 @@ begin
       [AId, Length(FWorkBuilt)]);
   if FWorkBuilt[AId] then
     Exit;
+  LPool.Clear;   // a local record: FCount is not initialized
   LM := FModels[AId];
   // High(RefMap) is the node count; both lists are far smaller, but sizing to
   // it once beats growing them incrementally.
@@ -13305,7 +13378,8 @@ begin
       // Boolean and, once the recheck stage started deciding withheld
       // verdicts, a false E2010 on every one. A miss costs one member lookup
       // per mention per round; a hit is the only correct answer.
-      LName := LM.Tree.NodeNameLower(LNode);
+      LKey := PasNodeKey(LM.Tree, LNode);
+      LName := LPool.InternSlice(LKey.Text, LKey.Len, True);
       LWith[LWithN] := LNode;
       LWithNames[LWithN] := LName;
       Inc(LWithN);
@@ -13327,9 +13401,10 @@ begin
       // for BUILTIN bindings was not -- unit refs are bounded by the uses
       // clause, while every Integer and Length is builtin-bound, and queueing
       // those measured +3.6%.
-      LName := LM.Tree.NodeNameLower(LNode);
-      if (LName = 'result') or (LName = 'self') then
+      LKey := PasNodeKey(LM.Tree, LNode);
+      if SemaKeyEquals('result', LKey) or SemaKeyEquals('self', LKey) then
         Continue;
+      LName := LPool.InternSlice(LKey.Text, LKey.Len, True);
       LInh[LInhN] := LNode;
       LInhNames[LInhN] := LName;
       Inc(LInhN);

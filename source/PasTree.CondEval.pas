@@ -955,7 +955,7 @@ begin
   begin
     LCallee := ATree.Nodes[ANode].FirstChild;
     if (LCallee <> NIL_NODE) and (ATree.Nodes[LCallee].Kind = nkIdent) and
-       SameText(ATree.NodeText(LCallee), 'Defined') then
+       ATree.NodeTextEquals(LCallee, 'Defined') then
     begin
       LArg := ATree.Nodes[LCallee].NextSibling;
       if (LArg <> NIL_NODE) and (ATree.Nodes[LArg].Kind = nkIdent) then

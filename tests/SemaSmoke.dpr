@@ -1259,6 +1259,134 @@ begin
   end;
 end;
 
+
+{ Name keys off the token (TSemaKey, v0.48.0) against the string keys they
+  replaced, which stay as the oracle: every identifier's PasNodeKey must
+  carry exactly NodeNameLower's text and PasNameHash, every declared symbol
+  must keep NodeText as its Name and PasNameKey(Name) as its NameLower
+  (AddSymbol's slice path through the Phase-1 pool), and the '&' rule must
+  hold in both directions on the reference side too. Then the two slice
+  containers against TDictionary. }
+const
+  SRC_NAMEKEYS =
+    'unit U;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TMixedCase = class'#10 +
+    '    FValue, fOTHER: Integer;'#10 +
+    '    procedure Run(var &Message: Integer; const &begin: string);'#10 +
+    '  end;'#10 +
+    'var'#10 +
+    '  GLOBAL, lower_only, UPPER_ONLY: Integer;'#10 +
+    'implementation'#10 +
+    'procedure TMixedCase.Run(var &Message: Integer; const &begin: string);'#10 +
+    'begin'#10 +
+    '  MESSAGE := fvalue + FOther + Global + LOWER_ONLY + upper_only;'#10 +
+    '  &message := Length(&BEGIN);'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+procedure TestNameKeys;
+var
+  LNode, LSym, LV, LGot, LStep: Integer;
+  LKey: TSemaKey;
+  LAll, LSame: Boolean;
+  LIdx: TSemaKeyIndex;
+  LRef: TDictionary<string, Integer>;
+  LPool: TSemaNamePool;
+  LS1, LS2: string;
+  LText: string;
+begin
+  Analyze(SRC_NAMEKEYS);
+  LAll := True;
+  for LNode := 0 to High(GTree.Nodes) do
+    if GTree.Nodes[LNode].Kind = nkIdent then
+    begin
+      LKey := PasNodeKey(GTree, LNode);
+      if (SemaKeyText(LKey) <> GTree.NodeNameLower(LNode)) or
+         (LKey.Hash <> PasNameHash(GTree.NodeNameLower(LNode))) or
+         not SemaKeyEquals(GTree.NodeNameLower(LNode), LKey) then
+        LAll := False;
+    end;
+  GCounter.Ok('namekeys: PasNodeKey = NodeNameLower, text and hash', LAll);
+  LAll := True;
+  for LSym := 0 to GModel.SymCount - 1 do
+    if (GModel.Symbols[LSym].DeclNode <> NIL_NODE) and
+       (GTree.Nodes[GModel.Symbols[LSym].DeclNode].Kind = nkIdent) and
+       ((GModel.Symbols[LSym].Name <>
+         GTree.NodeText(GModel.Symbols[LSym].DeclNode)) or
+        (GModel.Symbols[LSym].NameLower <>
+         PasNameKey(GModel.Symbols[LSym].Name))) then
+      LAll := False;
+  GCounter.Ok('namekeys: declared Name = NodeText, NameLower = PasNameKey',
+    LAll);
+  GCounter.Ok('namekeys: MESSAGE and &message bind the &Message param',
+    RefResolvesTo('MESSAGE', '&Message') and
+    RefResolvesTo('&message', '&Message'));
+  GCounter.Ok('namekeys: &BEGIN binds the &begin param',
+    RefResolvesTo('&BEGIN', '&begin'));
+  GCounter.Ok('namekeys: mixed-case field and global references bind',
+    RefResolvesTo('fvalue', 'FValue') and RefResolvesTo('FOther', 'fOTHER') and
+    RefResolvesTo('Global', 'GLOBAL') and
+    RefResolvesTo('LOWER_ONLY', 'lower_only') and
+    RefResolvesTo('upper_only', 'UPPER_ONLY'));
+  GCounter.Ok('namekeys: no diags', Length(GModel.Diags) = 0);
+  GModel.Free;
+
+  // A lower-case key is compared exactly, a slice folded; neither matches a
+  // different length or letter.
+  LText := 'FooBar';
+  GCounter.Ok('namekeys: SemaKeyEquals folds a slice, not a key',
+    SemaKeyEquals('foobar', SemaSliceKey(PChar(LText), 6)) and
+    not SemaKeyEquals('foobar', SemaKey('FooBar')) and
+    not SemaKeyEquals('fooba', SemaSliceKey(PChar(LText), 6)) and
+    not SemaKeyEquals('foobaz', SemaSliceKey(PChar(LText), 6)));
+  LText := '&Foo';
+  GCounter.Ok('namekeys: SemaSliceKey skips one leading &',
+    SemaKeyText(SemaSliceKey(PChar(LText), 4)) = 'foo');
+
+  // TSemaKeyIndex: first add wins, probed by string key and by folded slice.
+  LIdx.Clear;   // a local record: the count starts as garbage
+  LRef := TDictionary<string, Integer>.Create;
+  try
+    RandSeed := 20260924;
+    LSame := True;
+    for LStep := 1 to 20000 do
+    begin
+      LS1 := 'n' + IntToStr(Random(3000));
+      LV := Random(1000);
+      if LIdx.TryAdd(LS1, LV) <> LRef.TryAdd(LS1, LV) then
+        LSame := False;
+      LS2 := 'N' + IntToStr(Random(4000));   // upper-case: a slice probe
+      if LIdx.TryGet(SemaSliceKey(PChar(LS2), Length(LS2)), LGot) <>
+         LRef.TryGetValue(LowerCase(LS2), LV) then
+        LSame := False
+      else if LRef.ContainsKey(LowerCase(LS2)) and (LGot <> LV) then
+        LSame := False;
+    end;
+    for var LPair in LRef do
+      if not LIdx.TryGet(SemaKey(LPair.Key), LGot) or (LGot <> LPair.Value) then
+        LSame := False;
+    GCounter.Ok('namekeys: TSemaKeyIndex agrees with TDictionary',
+      LSame and (LIdx.Count = LRef.Count));
+  finally
+    LRef.Free;
+  end;
+
+  // TSemaNamePool.InternSlice: one instance per spelling, folded and exact
+  // pooled apart, and the same instance Intern hands out.
+  LPool.Clear;
+  LText := 'Alpha alpha ALPHA';
+  LS1 := LPool.InternSlice(PChar(LText), 5, True);
+  LS2 := LPool.InternSlice(PChar(LText) + 12, 5, True);
+  GCounter.Ok('namekeys: InternSlice folded - one instance per key',
+    (LS1 = 'alpha') and (Pointer(LS1) = Pointer(LS2)) and
+    (Pointer(LPool.InternSlice(PChar(LText) + 6, 5, False)) = Pointer(LS1)));
+  LS2 := LPool.InternSlice(PChar(LText), 5, False);
+  GCounter.Ok('namekeys: InternSlice exact keeps the spelling',
+    (LS2 = 'Alpha') and (Pointer(LPool.Intern('Alpha')) = Pointer(LS2)));
+end;
+
 begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN32']);
@@ -2713,6 +2841,7 @@ begin
   end;
 
   TestIntMap;
+  TestNameKeys;
 
   // Phase 1 pools spellings per unit: one heap string per distinct text, a
   // lower-case name shares its key, and the arena is cut to exact length.

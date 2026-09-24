@@ -263,6 +263,10 @@ type
     { Non-allocating SameText(NodeText(AIndex), AWord) - the word-test
       counterpart of SliceEqualsWord for a node's first token. }
     function NodeTextEquals(AIndex: Integer; const AWord: string): Boolean;
+    { NodeText without the copy: the first token's chars in the source
+      (valid while this tree's token layer lives). Nil and 0 exactly where
+      NodeText answers ''. For keys see PasTree.Sema.Model.PasNodeKey. }
+    procedure NodeSlice(AIndex: Integer; out AText: PChar; out ALen: Integer);
     { Compact S-expression dump for golden tests:
       Kind or Kind'text' or Kind(children...). }
     function Dump(AIndex: Integer): string;
@@ -390,6 +394,21 @@ begin
     Exit(False);
   Source.VisibleSlice(Nodes[AIndex].FirstToken, LText, LLen);
   Result := SliceEqualsWord(LText, LLen, AWord);
+end;
+
+procedure TPasTree.NodeSlice(AIndex: Integer; out AText: PChar;
+  out ALen: Integer);
+begin
+  // Same bounds backstop as NodeText.
+  if (AIndex < 0) or (AIndex > High(Nodes)) or
+     (Nodes[AIndex].FirstToken < 0) or
+     (Nodes[AIndex].FirstToken > High(Source.Visible)) then
+  begin
+    AText := nil;
+    ALen := 0;
+  end
+  else
+    Source.VisibleSlice(Nodes[AIndex].FirstToken, AText, ALen);
 end;
 
 function TPasTree.NodeText(AIndex: Integer): string;

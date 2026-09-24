@@ -1442,7 +1442,7 @@ begin
     // NodeNameLower, not LowerCase(Txt()): member keys are PasNameKey-
     // normalized (leading '&' stripped), so the LowerCase form could never
     // find an escaped member like X.&End - and it allocated twice.
-    LMem := M.FindLocal(LScope, T.NodeNameLower(LName));
+    LMem := M.FindLocal(LScope, PasNodeKey(T, LName));
   end;
   if LMem <> NIL_SYM then
     Result := M.Symbols[LMem].TypeSym;

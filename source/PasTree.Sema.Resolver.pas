@@ -74,6 +74,8 @@ type
     function NextSib(ANode: Integer): Integer; inline;
     function NodeText(ANode: Integer): string; inline;
     function NodeNameLower(ANode: Integer): string; inline;
+    // The same name as a lookup key, read off the token (no string).
+    function NodeKey(ANode: Integer): TSemaKey; inline;
     function SkipAttr(AChild: Integer): Integer;
     function IsAttributeTypeRef(ANode: Integer): Boolean;
     function IsBareTypeUse(ANode: Integer): Boolean;
@@ -92,10 +94,10 @@ type
     procedure MarkDeclName(ANode, ASym: Integer);
     { AOverloadOnClash chains onto a same-named, same-kind symbol instead of
       reporting a redeclaration - for the one non-routine case that is legal,
-      a generic type name declared at several ARITIES (16.1.2). }
+      a generic type name declared at several ARITIES (16.1.2). The name is
+      ADeclNode's own token (NodeText), read as a slice. }
     function DeclareSym(AScope: Integer; AKind: TSemaSymbolKind;
-      const AName: string; ADeclNode: Integer;
-      AOverloadOnClash: Boolean = False): Integer;
+      ADeclNode: Integer; AOverloadOnClash: Boolean = False): Integer;
     function GenericArityOfParamsNode(ANode: Integer): Integer;
     function GenericArityOfDecl(ATypeDeclNode: Integer): Integer;
     function GenericArityOfSym(ASym: Integer): Integer;
@@ -250,6 +252,11 @@ end;
 function TPasSemaResolver.NodeNameLower(ANode: Integer): string;
 begin
   Result := FTree.NodeNameLower(ANode);
+end;
+
+function TPasSemaResolver.NodeKey(ANode: Integer): TSemaKey;
+begin
+  Result := PasNodeKey(FTree, ANode);
 end;
 
 function TPasSemaResolver.SkipAttr(AChild: Integer): Integer;
@@ -454,17 +461,17 @@ begin
 end;
 
 function TPasSemaResolver.DeclareSym(AScope: Integer; AKind: TSemaSymbolKind;
-  const AName: string; ADeclNode: Integer;
-  AOverloadOnClash: Boolean): Integer;
+  ADeclNode: Integer; AOverloadOnClash: Boolean): Integer;
 var
   LExisting, LTail, LFileId, LLine, LCol: Integer;
-  LKey: string;
+  LKey: TSemaKey;
 begin
-  // One PasNameKey for both the clash lookup and the symbol's stored key -
-  // this runs per declared symbol.
-  LKey := PasNameKey(AName);
+  // One key off the token for both the clash lookup and the symbol's stored
+  // key - this runs per declared symbol, and a spelling the unit already
+  // declared costs no string at all (AddSymbol's pool takes the slice).
+  LKey := NodeKey(ADeclNode);
   LExisting := FModel.FindLocal(AScope, LKey);
-  Result := FModel.AddSymbol(AScope, AKind, AName, ADeclNode, LKey);
+  Result := FModel.AddSymbol(AScope, AKind, ADeclNode, ADeclNode, LKey);
   if LExisting = NIL_SYM then
     FModel.BindName(AScope, Result)
   else if (FModel.RoutineHead(Result) = rhOperator) <>
@@ -511,7 +518,8 @@ begin
     // genuine redeclaration in the same scope
     NodePos(ADeclNode, LFileId, LLine, LCol);
     FModel.AddDiag(MakeDiag('E2004',
-      Format(SE2004_IdentifierRedeclared, [AName]), ADeclNode, LFileId, LLine,
+      Format(SE2004_IdentifierRedeclared, [NodeText(ADeclNode)]), ADeclNode,
+      LFileId, LLine,
       LCol));
     FModel.AddToOrder(AScope, Result);
   end;
@@ -524,7 +532,9 @@ procedure TPasSemaResolver.DeclareNamesAndType(ADecl, AScope: Integer;
 var
   LChild, LType: Integer;
   LSep: TPasTokenKind;
+  LSmall: array[0..7] of Integer;
   LSyms: TArray<Integer>;
+  LSym: Integer;
   LCount: Integer;
   LDone: Boolean;
   LIdx: Integer;
@@ -541,17 +551,29 @@ begin
     LChild := NextSib(LChild);
   end;
   LType := NIL_NODE;
-  // Count-tracked doubling: `+ [x]` re-copied the array per declared name,
-  // once for every name in every var/field/param group in the closure.
+  // The first eight names in a stack buffer, the rest (rare) spilled to a
+  // count-tracked doubling array: a heap array per var/field/param group was
+  // 1.4M allocations over the client closure, for groups of one or two.
   LSyms := nil;
   LCount := 0;
   LDone := False;
   while (LChild <> NIL_NODE) and (KindOf(LChild) = nkIdent) and not LDone do
   begin
     LSep := SepKindAfter(LChild);
-    if LCount = Length(LSyms) then
-      SetLength(LSyms, LCount * 2 + 4);
-    LSyms[LCount] := DeclareSym(AScope, AKind, NodeText(LChild), LChild);
+    LSym := DeclareSym(AScope, AKind, LChild);
+    if LCount < Length(LSmall) then
+      LSmall[LCount] := LSym
+    else
+    begin
+      if LCount = Length(LSmall) then
+      begin
+        SetLength(LSyms, 2 * Length(LSmall));
+        Move(LSmall[0], LSyms[0], SizeOf(LSmall));
+      end
+      else if LCount = Length(LSyms) then
+        SetLength(LSyms, LCount * 2);
+      LSyms[LCount] := LSym;
+    end;
     Inc(LCount);
     if LSep = tkColon then
     begin
@@ -574,13 +596,20 @@ begin
     else
       LDone := True;  // untyped parameter, or end
   end;
-  for LIdx := 0 to LCount - 1 do
-    FModel.Symbols[LSyms[LIdx]].TypeNode := LType;
   // A parameter with a value after its type has a default (optional argument).
-  if (AKind = skParam) and (LType <> NIL_NODE) and (NextSib(LType) <> NIL_NODE) then
-    for LIdx := 0 to LCount - 1 do
-      FModel.Symbols[LSyms[LIdx]].Flags :=
-        FModel.Symbols[LSyms[LIdx]].Flags + [sfHasDefault];
+  var LHasDefault := (AKind = skParam) and (LType <> NIL_NODE) and
+    (NextSib(LType) <> NIL_NODE);
+  for LIdx := 0 to LCount - 1 do
+  begin
+    if LSyms <> nil then
+      LSym := LSyms[LIdx]
+    else
+      LSym := LSmall[LIdx];
+    FModel.Symbols[LSym].TypeNode := LType;
+    if LHasDefault then
+      FModel.Symbols[LSym].Flags :=
+        FModel.Symbols[LSym].Flags + [sfHasDefault];
+  end;
   NotePendingAggregate(LType);
   // Collect the type expression and anything after it (init / default /
   // absolute) as nested content in this scope, so every node gets a scope.
@@ -707,7 +736,7 @@ begin
   // empty member scope, and every method body of the real class lost its own
   // fields and its inherited members. ~60 false E2003 in that one unit, and it
   // did not reproduce until the fixture also had the non-generic sibling.
-  LExisting := FModel.FindLocal(AScope, NodeNameLower(LName));
+  LExisting := FModel.FindLocal(AScope, NodeKey(LName));
   LMatch := NIL_SYM;
   LProbe := LExisting;
   for LDepth := 1 to 64 do
@@ -739,10 +768,10 @@ begin
     // by argument count; without this the second declaration reused the
     // first's symbol and silently overwrote its member scope, orphaning the
     // first type's members.
-    LSym := DeclareSym(AScope, skType, NodeText(LName), LName,
+    LSym := DeclareSym(AScope, skType, LName,
       {AOverloadOnClash} True)
   else
-    LSym := DeclareSym(AScope, skType, NodeText(LName), LName);
+    LSym := DeclareSym(AScope, skType, LName);
 
   // Generic type params live in a per-type scope so identical names (T, TKey...)
   // across different generic types don't collide in the unit scope.
@@ -891,7 +920,7 @@ begin
           var LN := SkipAttr(FirstChild(LChild));
           var LPropSym := NIL_SYM;
           if (LN <> NIL_NODE) and (KindOf(LN) = nkIdent) then
-            LPropSym := DeclareSym(LMembers, skProperty, NodeText(LN), LN);
+            LPropSym := DeclareSym(LMembers, skProperty, LN);
           // Array-property index parameters (`property Items[Index: Integer]:
           // T read GetItem;`) arrive as an nkParams child, SAME shape as a
           // routine's - but the generic Collect() below has no case for
@@ -1039,7 +1068,7 @@ begin
         // `var C := cRed` inferred nothing and `Pred(cBlue)` could not apply
         // the ordinal rule (4.11). An anonymous enum's values keep no type -
         // the type has no symbol to name.
-        LSym := DeclareSym(LEnum, skEnumValue, NodeText(LName), LName);
+        LSym := DeclareSym(LEnum, skEnumValue, LName);
         if ATypeSym <> NIL_SYM then
           FModel.Symbols[LSym].TypeSym := ATypeSym;
       end;
@@ -1088,7 +1117,7 @@ begin
       LKind := skField
     else
       LKind := skVar;
-    LSym := DeclareSym(AScope, LKind, NodeText(LChild), LChild);
+    LSym := DeclareSym(AScope, LKind, LChild);
     FModel.Symbols[LSym].TypeNode := NextSib(LChild);   // the tag type
     LChild := NextSib(LChild);
   end;
@@ -1120,10 +1149,10 @@ begin
     Exit;
 
   // Register the unit ref once (a unit may appear in both uses sections).
-  LSym := FModel.FindLocal(AScope, NodeNameLower(LLeaf));
+  LSym := FModel.FindLocal(AScope, NodeKey(LLeaf));
   if LSym = NIL_SYM then
   begin
-    LSym := DeclareSym(AScope, skUnitRef, NodeText(LLeaf), LLeaf);
+    LSym := DeclareSym(AScope, skUnitRef, LLeaf);
     FModel.Symbols[LSym].Flags :=
       FModel.Symbols[LSym].Flags + [sfExternalUnresolved];
   end
@@ -1247,10 +1276,10 @@ begin
       var LSeg := LQualIdents[LSegIdx];
       var LCand: Integer;
       if LTy = NIL_SYM then
-        LCand := FModel.Resolve(AScope, NodeNameLower(LSeg))
+        LCand := FModel.Resolve(AScope, NodeKey(LSeg))
       else if FModel.Symbols[LTy].MemberScope <> NIL_SCOPE then
         LCand := FModel.FindLocal(FModel.Symbols[LTy].MemberScope,
-          NodeNameLower(LSeg))
+          NodeKey(LSeg))
       else
         LCand := NIL_SYM;
       if (LCand = NIL_SYM) or (FModel.Symbols[LCand].Kind <> skType) then
@@ -1306,7 +1335,7 @@ begin
        (FindChildKind(ANode, nkParams) = NIL_NODE) then
     begin
       var LDeclSym := FModel.FindLocal(FModel.Symbols[LTy].MemberScope,
-        NodeNameLower(LNameNode));
+        NodeKey(LNameNode));
       if (LDeclSym <> NIL_SYM) and
          (FModel.Symbols[LDeclSym].Kind = skRoutine) and
          (FModel.Symbols[LDeclSym].MemberScope <> NIL_SCOPE) then
@@ -1324,7 +1353,7 @@ begin
     var LLink := NIL_SYM;
     if AScope = FImpl then
     begin
-      var LIntfHead := FModel.FindLocal(FIntf, NodeNameLower(LNameNode));
+      var LIntfHead := FModel.FindLocal(FIntf, NodeKey(LNameNode));
       if (LIntfHead <> NIL_SYM) and
          (FModel.Symbols[LIntfHead].Kind = skRoutine) then
       begin
@@ -1361,7 +1390,7 @@ begin
     end
     else
     begin
-      LRoutineSym := DeclareSym(AScope, skRoutine, NodeText(LNameNode),
+      LRoutineSym := DeclareSym(AScope, skRoutine,
         LNameNode);
       // Parameter scope, so the typer can enumerate this routine's params
       // for overload selection / arity checks.
@@ -1407,7 +1436,8 @@ begin
   if (LResultNode <> NIL_NODE) and
      (FModel.FindLocal(LRoutine, 'result') = NIL_SYM) then
   begin
-    var LRes := FModel.AddSymbol(LRoutine, skVar, 'Result', NIL_NODE);
+    var LRes := FModel.AddSymbol(LRoutine, skVar, 'Result', NIL_NODE,
+      'result');
     FModel.Symbols[LRes].TypeNode := LResultNode;
     FModel.BindName(LRoutine, LRes);
   end;
@@ -1462,7 +1492,7 @@ begin
         end;
         if (LName <> NIL_NODE) and (KindOf(LName) = nkIdent) then
         begin
-          var LSym := DeclareSym(AScope, skConst, NodeText(LName), LName);
+          var LSym := DeclareSym(AScope, skConst, LName);
           var LNext := NextSib(LName);
           // optional ': Type' before '='
           if (LNext <> NIL_NODE) and (SepKindAfter(LName) = tkColon) then
@@ -1504,7 +1534,7 @@ begin
           var LSep := SepKindAfter(LName);
           if LSymCount = Length(LSyms) then
             SetLength(LSyms, LSymCount * 2 + 4);
-          LSyms[LSymCount] := DeclareSym(AScope, LKind, NodeText(LName), LName);
+          LSyms[LSymCount] := DeclareSym(AScope, LKind, LName);
           Inc(LSymCount);
           if LSep = tkComma then
             LName := NextSib(LName)
@@ -1546,7 +1576,7 @@ begin
         while LChild <> NIL_NODE do
         begin
           if KindOf(LChild) = nkIdent then
-            DeclareSym(AScope, skLabel, NodeText(LChild), LChild);
+            DeclareSym(AScope, skLabel, LChild);
           LChild := NextSib(LChild);
         end;
       end;
@@ -1585,7 +1615,8 @@ begin
           if not (KindOf(LChild) in [nkAnonParams, nkRoutineBody]) and
              (FModel.FindLocal(LAnon, 'result') = NIL_SYM) then
           begin
-            var LRes := FModel.AddSymbol(LAnon, skVar, 'Result', NIL_NODE);
+            var LRes := FModel.AddSymbol(LAnon, skVar, 'Result', NIL_NODE,
+              'result');
             FModel.Symbols[LRes].TypeNode := LChild;
             FModel.BindName(LAnon, LRes);
           end;
@@ -1596,7 +1627,8 @@ begin
         // enclosing Result so it cannot leak into the anonymous body.
         if FModel.FindLocal(LAnon, 'result') = NIL_SYM then
         begin
-          var LRes := FModel.AddSymbol(LAnon, skVar, 'Result', NIL_NODE);
+          var LRes := FModel.AddSymbol(LAnon, skVar, 'Result', NIL_NODE,
+            'result');
           FModel.BindName(LAnon, LRes);
         end;
       end;
@@ -1751,7 +1783,7 @@ begin
             var LP := FirstChild(LChild);
             while (LP <> NIL_NODE) and (KindOf(LP) = nkIdent) do
             begin
-              DeclareSym(AScope, skGenericParam, NodeText(LP), LP);
+              DeclareSym(AScope, skGenericParam, LP);
               LP := NextSib(LP);
             end;
             while LP <> NIL_NODE do
@@ -1879,7 +1911,7 @@ var
         LDef := NextSib(LDef);
       if (LDef = NIL_NODE) or (KindOf(LDef) <> nkIdent) then
         Exit;
-      LSym := FModel.Resolve(FNodeScope[LDef], NodeNameLower(LDef));
+      LSym := FModel.Resolve(FNodeScope[LDef], NodeKey(LDef));
     end;
   end;
 
@@ -1898,7 +1930,7 @@ begin
     // Only a bare name is resolvable here (see the INTRA-UNIT note above).
     if (LRef = NIL_NODE) or (KindOf(LRef) <> nkIdent) then
       Continue;
-    LExtSym := FModel.Resolve(FNodeScope[LRef], NodeNameLower(LRef));
+    LExtSym := FModel.Resolve(FNodeScope[LRef], NodeKey(LRef));
     if (LExtSym = NIL_SYM) or (FModel.Symbols[LExtSym].Kind <> skType) then
       Continue;
     // Chase alias links, because the `for` target is often an ALIAS of the
@@ -1989,16 +2021,18 @@ begin
     nkIdent:
       if not FIsDeclName[ANode] and (FModel.RefMap[ANode] = NIL_SYM) then
       begin
-        // Computed ONCE for the whole branch - the arity retry and the
-        // attribute fallback below used to re-lower the same node.
-        var LNameLower := NodeNameLower(ANode);
+        // Computed ONCE for the whole branch - the arity retry reuses it. A key
+        // off the token, not a lowered copy: this is the analyzer's most
+        // frequent lookup (6.7M per client closure, a fifth of all its heap
+        // allocations while it built a string).
+        var LKey := NodeKey(ANode);
         // ResolveAt, not Resolve: this is a REFERENCE, and an inline
         // `var`/`const` is visible only from its own declaration onward
         // (3.1.3). See TPasSemaModel.ResolveAt - the position is only
         // consulted for block scopes, so a routine's classic `var` section and
         // everything above it stay order-independent.
         FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],
-          LNameLower, FTree.Nodes[ANode].FirstToken);
+          LKey, FTree.Nodes[ANode].FirstToken);
         // ARITY is part of a type's identity (16.1.2), and BOTH directions of
         // ignoring that are real - one third-party library's base unit sets both traps:
         // `Pointer<T>` beside the builtin `Pointer` (a BARE name must skip the
@@ -2019,7 +2053,7 @@ begin
              LWantGeneric then
           begin
             LHead := FModel.ResolveByArityAt(FNodeScope[ANode],
-              LNameLower, FTree.Nodes[ANode].FirstToken,
+              LKey, FTree.Nodes[ANode].FirstToken,
               LWantGeneric);
             // NIL_SYM = only the other arity is in scope, which is dcc's error
             // and not a reason to drop the binding we have.
@@ -2090,7 +2124,7 @@ begin
           FModel.RefMap[ANode] := NIL_SYM;
         if (FModel.RefMap[ANode] = NIL_SYM) and IsAttributeTypeRef(ANode) then
           FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],
-            LNameLower + 'attribute', FTree.Nodes[ANode].FirstToken);
+            NodeNameLower(ANode) + 'attribute', FTree.Nodes[ANode].FirstToken);
       end;
 
     nkMethodResolution:
@@ -2119,7 +2153,7 @@ begin
              (FModel.Symbols[LHead].MemberScope <> NIL_SCOPE) then
             for var LI := 1 to High(LSegs) - 1 do
               FModel.RefMap[LSegs[LI]] := FModel.FindLocalDeep(
-                FModel.Symbols[LHead].MemberScope, NodeNameLower(LSegs[LI]));
+                FModel.Symbols[LHead].MemberScope, NodeKey(LSegs[LI]));
         end;
       end;
 
@@ -2139,7 +2173,7 @@ begin
           if LMemScope <> NIL_SCOPE then
           begin
             FModel.RefMap[LName] :=
-              FModel.FindLocalDeep(LMemScope, NodeNameLower(LName));
+              FModel.FindLocalDeep(LMemScope, NodeKey(LName));
             // `TOuter.TInner<T>` beside a nested `TOuter.TInner`: the member
             // lookup answers with the chain head, and arity is part of the
             // identity (16.1.2). The arguments hang off the nkMember's
@@ -2263,7 +2297,7 @@ begin
       if (LNameNode <> NIL_NODE) and (KindOf(LNameNode) = nkIdent) then
       begin
         LFieldSym := FModel.FindLocal(AStructScope,
-          NodeNameLower(LNameNode));
+          NodeKey(LNameNode));
         if LFieldSym <> NIL_SYM then
         begin
           FModel.RefMap[LNameNode] := LFieldSym;
@@ -2964,7 +2998,7 @@ begin
     LParent := FTree.Nodes[ANode].Parent;
     if (LParent = NIL_NODE) or (KindOf(LParent) <> nkMember) or
        (FirstChild(LParent) = ANode) then
-      if FModel.FindLocalDeep(AWithScope, NodeNameLower(ANode)) <> NIL_SYM then
+      if FModel.FindLocalDeep(AWithScope, NodeKey(ANode)) <> NIL_SYM then
         FModel.RefMap[ANode] := NIL_SYM;
   end;
   LChild := FirstChild(ANode);
@@ -3103,20 +3137,39 @@ end;
 
 function TPasSemaResolver.QualifiedNameText(ANode: Integer): string;
 var
-  LBase, LName: Integer;
+  LNode, LLen, LAt, LSegLen: Integer;
+  LSeg: PChar;
+  LOut: PChar;
 begin
-  if ANode = NIL_NODE then
-    Exit('');
-  case KindOf(ANode) of
-    nkMember:
-      begin
-        LBase := FirstChild(ANode);
-        LName := NextSib(LBase);
-        Result := QualifiedNameText(LBase) + '.' + NodeText(LName);
-      end;
-  else
-    Result := NodeText(ANode);
+  // ONE allocation for the whole dotted name: the segments' token slices are
+  // measured, then copied in from the right. The recursive concatenation paid
+  // two strings per segment, per `uses` item. The nkMember chain nests to the
+  // left - its last child is the rightmost segment.
+  LLen := 0;
+  LNode := ANode;
+  while (LNode <> NIL_NODE) and (KindOf(LNode) = nkMember) do
+  begin
+    FTree.NodeSlice(NextSib(FirstChild(LNode)), LSeg, LSegLen);
+    Inc(LLen, LSegLen + 1);
+    LNode := FirstChild(LNode);
   end;
+  FTree.NodeSlice(LNode, LSeg, LSegLen);
+  Inc(LLen, LSegLen);
+  SetLength(Result, LLen);
+  LOut := Pointer(Result);
+  LAt := LLen;
+  LNode := ANode;
+  while (LNode <> NIL_NODE) and (KindOf(LNode) = nkMember) do
+  begin
+    FTree.NodeSlice(NextSib(FirstChild(LNode)), LSeg, LSegLen);
+    Dec(LAt, LSegLen);
+    Move(LSeg^, LOut[LAt], LSegLen * SizeOf(Char));
+    Dec(LAt);
+    LOut[LAt] := '.';
+    LNode := FirstChild(LNode);
+  end;
+  FTree.NodeSlice(LNode, LSeg, LSegLen);
+  Move(LSeg^, LOut[0], LSegLen * SizeOf(Char));
 end;
 
 procedure TPasSemaResolver.CollectRoot(ARoot: Integer);
@@ -3230,8 +3283,8 @@ var
           // check does not claim.
           LCallee := FirstChild(ANode);
           if (LCallee <> NIL_NODE) and (KindOf(LCallee) = nkIdent) and
-             (SameText(NodeText(LCallee), 'Inc') or
-              SameText(NodeText(LCallee), 'Dec')) then
+             (FTree.NodeTextEquals(LCallee, 'Inc') or
+              FTree.NodeTextEquals(LCallee, 'Dec')) then
           begin
             LArg := NextSib(LCallee);
             if (LArg <> NIL_NODE) and (KindOf(LArg) = nkIdent) and
@@ -3540,7 +3593,7 @@ begin
             if KindOf(LChild) = nkParams then
               LHasParams := True
             else if (KindOf(LChild) = nkPropSpec) and
-                    (FTree.NodeNameLower(LChild) = 'default') then
+                    SemaKeyEquals('default', NodeKey(LChild)) then
               LHasDefault := True;
             LChild := NextSib(LChild);
           end;
