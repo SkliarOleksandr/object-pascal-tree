@@ -177,6 +177,19 @@ every CLI driver in `tools/` set it, and the server was simply the one host that
 did not. Building the server with full release flags, for comparison, was worth
 about 2% - inside the noise. One line was the entire difference.
 
+### Considered and parked: the Windows heap as memory manager
+
+The RTL memory manager returns a 1.25 MB block pool to the OS only when every
+block in it is free, and an analysis interleaves what it keeps with what it
+drops, so the pools stay mapped around a few live blocks each. A host can swap
+in a private Windows heap instead (an opt-in unit listed first in the
+program's uses). Measured 2026-09-23 on a 3767-unit closure: analysis wall
+unchanged, CPU -7%, private bytes 3177 -> 2785 MB with the full state kept and
+2447 -> ~1500 MB after `DemoteClosedUnits` - but freeing a whole project
+takes ~2.1 s instead of ~0.5 s. **Not adopted for now**: no host links it, and
+the implementation (the unit, demo wiring, a background free of the replaced
+project) is parked on the branch `perf/mm-retention`.
+
 ## Start from the spec
 
 [object-pascal-spec](https://github.com/SkliarOleksandr/object-pascal-spec) is
