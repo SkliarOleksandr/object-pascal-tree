@@ -583,6 +583,42 @@ const
     'end;'#10 +                                         // 41
     'end.'#10;                                          // 42
 
+  // Toggle on a class carrying ATTRIBUTES (real bug report, an ORM record
+  // class): the nkTypeDecl adopts its nkAttrGroup before the name, and the
+  // enclosing-type chain read that group as the name - so no method of an
+  // attributed class paired with its body in either direction. The nested
+  // attributed class covers the chain's second hop.
+  UNIT_ATTR =
+    'unit NavAttr;'#10 +                            // 1
+    'interface'#10 +                                // 2
+    'type'#10 +                                     // 3
+    '  [TTableAttr(''TEST'')]'#10 +                 // 4
+    '  [TIndexAttr(''PK'', {IsPrimary} True)]'#10 + // 5
+    #10 +                                           // 6
+    '  TRec = class'#10 +                           // 7
+    '  private'#10 +                                // 8
+    '    FName: string;'#10 +                       // 9
+    '  public'#10 +                                 // 10
+    '    [TFieldAttr(1)]'#10 +                      // 11
+    '    property Name: string read FName;'#10 +    // 12
+    '    constructor Create;'#10 +                  // 13  decl
+    '  type'#10 +                                   // 14
+    '    [TInnerAttr]'#10 +                         // 15
+    '    TInner = class'#10 +                       // 16
+    '      procedure Zap;'#10 +                     // 17  nested decl
+    '    end;'#10 +                                 // 18
+    '  end;'#10 +                                   // 19
+    'implementation'#10 +                           // 20
+    'constructor TRec.Create;'#10 +                 // 21
+    'begin'#10 +                                    // 22
+    '  FName := '''';'#10 +                         // 23  <- Create target
+    'end;'#10 +                                     // 24
+    'procedure TRec.TInner.Zap;'#10 +               // 25
+    'begin'#10 +                                    // 26
+    '  Zap;'#10 +                                   // 27  <- Zap target
+    'end;'#10 +                                     // 28
+    'end.'#10;                                      // 29
+
   // Overloads sharing the SAME ARITY but different parameter TYPES - the
   // real bug report (System.SysUtils.AnsiCompareFileName's actual overload
   // set): count-only matching collided all three onto one bucket, and
@@ -1372,6 +1408,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavH.pas'), UNIT_H);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavI.pas'), UNIT_I);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavJ.pas'), UNIT_J);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavAttr.pas'), UNIT_ATTR);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavK.pas'), UNIT_K);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavFI.pas'), UNIT_FI);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOvl.pas'), UNIT_OVL);
@@ -1623,6 +1660,15 @@ begin
         not GNav.GotoImplementation(GMidB, 3, 2, {out} LTarget));
       Ok('unrelated position: no declaration',
         not GNav.GotoDeclaration(GMidB, 3, 2, {out} LTarget));
+
+      // ---- Toggle on an ATTRIBUTED class (real bug report) ----
+      GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavAttr.pas'));
+      Ok('NavAttr model found', GMidB >= 0);
+      CheckImpl('attributed class: decl->impl Create', 13, 17, 23, 3);
+      CheckDecl('attributed class: impl->decl from the Create body', 23, 5, 13);
+      CheckImpl('attributed nested class: decl->impl Zap', 17, 17, 27, 3);
+      CheckDecl('attributed nested class: impl->decl from the Zap body',
+        27, 3, 17);
 
       // ---- Same-arity overloads (real bug report) + comment-only body ----
       GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavJ.pas'));

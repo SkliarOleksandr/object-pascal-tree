@@ -4547,7 +4547,11 @@ begin
     if (LTypeDecl = NIL_NODE) or
        (LM.Tree.Nodes[LTypeDecl].Kind <> nkTypeDecl) then
       Break;
-    LNameNode := LM.Tree.Nodes[LTypeDecl].FirstChild;
+    // An attributed type (`[TableAttr('T')] TFoo = class`) adopts its
+    // nkAttrGroup BEFORE the name (ParseTypeSection) - reading FirstChild
+    // as the name broke the chain, so no method of such a class paired
+    // with its body in either direction.
+    LNameNode := RTSkipAttr(LM, LM.Tree.Nodes[LTypeDecl].FirstChild);
     if (LNameNode = NIL_NODE) or (LM.Tree.Nodes[LNameNode].Kind <> nkIdent)
     then
       Break;
