@@ -2309,6 +2309,48 @@ begin
     (SymCountOf('op_equality', skRoutine) = 1));
   GModel.Free;
 
+  // 9.3.1: a `class operator` name is not a member name. `class operator
+  // Negative` beside `property Negative` (Velthuis.BigIntegers) compiles, as
+  // does a field declared BEFORE an operator of its name - dcc-probed; before
+  // this each pair was a false E2004. Member access must reach the property
+  // and the field, whichever came first.
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10 +
+    '  TBig = record'#10 +
+    '    Positive: Boolean;'#10 +
+    '    function IsNeg: Boolean;'#10 +
+    '    class operator Negative(const V: TBig): TBig;'#10 +
+    '    class operator Positive(const V: TBig): TBig;'#10 +
+    '    property Negative: Boolean read IsNeg;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TBig.IsNeg: Boolean; begin Result := False; end;'#10 +
+    'class operator TBig.Negative(const V: TBig): TBig; begin Result := V; end;'#10 +
+    'class operator TBig.Positive(const V: TBig): TBig; begin Result := V; end;'#10 +
+    'end.'#10);
+  Ok('9.3.1: operator names do not clash with member names',
+    DiagCount('E2004') = 0);
+  Ok('9.3.1: both operators are still declared',
+    (SymCountOf('negative', skRoutine) = 1) and
+    (SymCountOf('positive', skRoutine) = 1));
+  var LBigScope := NIL_SCOPE;
+  for var LIdx := 0 to GModel.SymCount - 1 do
+    if (GModel.Symbols[LIdx].NameLower = 'tbig') and
+       (GModel.Symbols[LIdx].Kind = skType) then
+      LBigScope := GModel.Symbols[LIdx].MemberScope;
+  Ok('9.3.1: the property owns the name it shares with an operator',
+    (LBigScope <> NIL_SCOPE) and
+    (GModel.FindLocal(LBigScope, 'negative') <> NIL_SYM) and
+    (GModel.Symbols[GModel.FindLocal(LBigScope, 'negative')].Kind =
+      skProperty));
+  Ok('9.3.1: so does a field declared before the operator',
+    (LBigScope <> NIL_SCOPE) and
+    (GModel.FindLocal(LBigScope, 'positive') <> NIL_SYM) and
+    (GModel.Symbols[GModel.FindLocal(LBigScope, 'positive')].Kind =
+      skField));
+  GModel.Free;
+
   // MemoryBarrier is compiler-provided (dcc resolves it with an empty uses
   // clause) and was the last unseeded intrinsic that library needed.
   Analyze(

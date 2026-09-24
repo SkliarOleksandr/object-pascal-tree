@@ -466,6 +466,20 @@ begin
   Result := FModel.AddSymbol(AScope, AKind, AName, ADeclNode, LKey);
   if LExisting = NIL_SYM then
     FModel.BindName(AScope, Result)
+  else if (FModel.RoutineHead(Result) = rhOperator) <>
+          (FModel.RoutineHead(LExisting) = rhOperator) then
+  begin
+    // A `class operator` name is not a member name (9.3.1): `class operator
+    // Negative` beside `property Negative` (Velthuis.BigIntegers) or a field,
+    // method or constant of that name compiles, and `R.Negative(A)` is E2003
+    // - dcc-probed. So no clash and no overload chain between the two; the
+    // non-operator owns the name, which is what member access reaches, and
+    // the operator stays in declaration order.
+    if FModel.RoutineHead(Result) = rhOperator then
+      FModel.AddToOrder(AScope, Result)
+    else
+      FModel.BindName(AScope, Result);
+  end
   else if ((AKind = skRoutine) and
            (FModel.Symbols[LExisting].Kind = skRoutine)) or
           (AOverloadOnClash and (FModel.Symbols[LExisting].Kind = AKind)) then
