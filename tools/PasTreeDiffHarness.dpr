@@ -49,6 +49,15 @@ program PasTreeDiffHarness;
   every edit step is REQUIRED to mismatch - a step that compares equal fails
   the run, because a blind comparator makes every green run above worthless.
 
+  -demotetext drops the incremental side's TEXT the way a memory-lean host
+  would: after every build and every accepted module step, every model except
+  the scripted files, the root and anything under a -demotekeep:<dir> gets
+  TPasSemaModel.DemoteText - token layer freed, maps KEPT (unlike
+  DemoteClosedUnits, the project stays re-analyzable). Oracle-stream models
+  keep their text, as DemoteClosedUnits does. The ground truth is never
+  demoted, and ExtRefMap lines then take their node text from the truth
+  model on both sides (it only names the node; a demoted model has none).
+
   Exit code 0 = every step compared equal (or, under -selftest, every edit
   step was caught); 1 otherwise. }
 
@@ -113,6 +122,9 @@ var
   // -selftest state for the CURRENT step: the edited file's pre-edit text,
   // fed to the incremental side only. '' = no divergence this step.
   GStaleKey, GStaleText: string;
+  GDemoteText: Boolean;       // -demotetext: see the header
+  GKeepDirs: TArray<string>;  // -demotekeep:<dir>, lower-cased, trailing '\'
+  GKeepFiles: TDictionary<string, Boolean>;  // scripted files + root, lower
 
 { ---- project construction (both sides identical except the donor) -------- }
 
@@ -145,6 +157,35 @@ begin
     Halt(2);
   end;
   Result.AnalyzeStaged([GRoot], nil);
+end;
+
+// -demotetext: the incremental side after a build or an accepted step. The
+// count of models demoted THIS call rides into the step line - after the
+// first build it is the creep-back (models a step hydrated or rebuilt).
+function DemoteForeign(AProj: TPasSemaProject): Integer;
+var
+  LModel: TPasSemaModel;
+  LPath: string;
+  LKeep: Boolean;
+begin
+  Result := 0;
+  if not GDemoteText then
+    Exit;
+  for var LMid := 0 to AProj.ModelCount - 1 do
+  begin
+    LModel := AProj.Model(LMid);
+    if (LModel = nil) or LModel.Demoted or LModel.OracleStream then
+      Continue;
+    LPath := LowerCase(AProj.ModelFile(LMid));
+    LKeep := GKeepFiles.ContainsKey(LPath);
+    for var LDir in GKeepDirs do
+      if LPath.StartsWith(LDir) then
+        LKeep := True;
+    if LKeep then
+      Continue;
+    LModel.DemoteText;
+    Inc(Result);
+  end;
 end;
 
 { ---- synthetic edits ------------------------------------------------------ }
@@ -496,8 +537,10 @@ begin
   TArray.Sort<string>(Result);
 end;
 
+// ATextModel names the nodes: AModel itself normally, the truth model under
+// -demotetext (same text, same node ids - and a demoted model has no text).
 function ExtLines(AProj: TPasSemaProject;
-  AModel: TPasSemaModel): TArray<string>;
+  AModel, ATextModel: TPasSemaModel): TArray<string>;
 var
   LPair: TPair<Integer, TPasExtRef>;
   LCount: Integer;
@@ -510,7 +553,7 @@ begin
     // the symbol's name ride along so a mismatch line names what to look at.
     Result[LCount] := Format('%d>%s:%d (%s -> %s)', [LPair.Key,
       UnitTag(AProj, LPair.Value.UnitId), LPair.Value.Sym,
-      AModel.Tree.NodeText(LPair.Key),
+      ATextModel.Tree.NodeText(LPair.Key),
       AProj.Model(LPair.Value.UnitId).Symbols[LPair.Value.Sym].Name]);
     Inc(LCount);
   end;
@@ -618,7 +661,12 @@ begin
 
       // ExtRefMap: cross-unit bindings - compared via file PATHS, because
       // model ids are a per-run accident of load order, not an identity.
-      LDelta := FirstDelta(ExtLines(ATruth, LTM), ExtLines(ACand, LCM));
+      if GDemoteText then
+        LDelta := FirstDelta(ExtLines(ATruth, LTM, LTM),
+          ExtLines(ACand, LCM, LTM))
+      else
+        LDelta := FirstDelta(ExtLines(ATruth, LTM, LTM),
+          ExtLines(ACand, LCM, LCM));
       if LDelta <> '' then
         Mismatch(Format('%s: ExtRefMap %s', [LPair.Key, LDelta]));
 
@@ -827,6 +875,11 @@ begin
       GSingleThread := True
     else if SameText(ParamStr(GIdx), '-module') then
       GModuleMode := True
+    else if SameText(ParamStr(GIdx), '-demotetext') then
+      GDemoteText := True
+    else if ParamStr(GIdx).StartsWith('-demotekeep:', True) then
+      GKeepDirs := GKeepDirs + [IncludeTrailingPathDelimiter(LowerCase(
+        TPath.GetFullPath(Copy(ParamStr(GIdx), 13, MaxInt))))]
     else if ParamStr(GIdx).StartsWith('-L', True) then
       GPaths := GPaths + [Copy(ParamStr(GIdx), 3, MaxInt)]
     else if GRoot = '' then
@@ -834,7 +887,8 @@ begin
   if (GRoot = '') or not TFile.Exists(GRoot) then
   begin
     Writeln(ErrOutput, 'usage: PasTreeDiffHarness <root.dpr> [-p:<platform>] '
-      + '[-L<dir>]... [-samples:<N>] [-script:<file>] [-module] [-selftest]');
+      + '[-L<dir>]... [-samples:<N>] [-script:<file>] [-module] [-selftest] '
+      + '[-demotetext [-demotekeep:<dir>]...]');
     Halt(2);
   end;
   GPaths := GPaths + [TPath.GetDirectoryName(GRoot)];
@@ -864,6 +918,13 @@ begin
     end;
   end;
   Writeln(ErrOutput, Format('steps: 1 no-edit + %d edits', [Length(LSteps)]));
+  GKeepFiles := TDictionary<string, Boolean>.Create;
+  GKeepFiles.AddOrSetValue(LowerCase(GRoot), True);
+  for LStep in LSteps do
+    GKeepFiles.AddOrSetValue(LowerCase(LStep.Path), True);
+  if GDemoteText then
+    Writeln(ErrOutput, Format('demotetext: %d model(s) demoted after the ' +
+      'initial build', [DemoteForeign(LCand)]));
 
   // Step 0 - no edit: a pure warm rebuild must reproduce the project exactly.
   for GIdx := 0 to Length(LSteps) do
@@ -936,6 +997,9 @@ begin
       LCand := LNext;
     end;
     var LCandMs := LSW.ElapsedMilliseconds;
+    // Before the compare, so it runs against the demoted side as well.
+    if GDemoteText then
+      LHow := LHow + Format(' demoted+%d', [DemoteForeign(LCand)]);
 
     LSW := TStopwatch.StartNew;
     LTruth := AnalyzeOne(nil);         // ground truth: full fresh pipeline
@@ -955,6 +1019,7 @@ begin
         LCand.Free;
         LCand := LNext;
       end;
+      DemoteForeign(LCand);
     end;
     var LVerdict: string;
     if GStaleKey <> '' then
@@ -1003,6 +1068,7 @@ begin
   end;
   LCand.Free;
   GTexts.Free;
+  GKeepFiles.Free;
 
   if GFailedSteps > 0 then
   begin
