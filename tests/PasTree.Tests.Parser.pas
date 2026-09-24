@@ -601,7 +601,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..137] of TPasCaseRow = (
+  DECL_CASES: array[0..139] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1227,6 +1227,15 @@ const
      Source: 'type TClassRef = class of TObject;';
      Expected: 'TypeSec(TypeDecl(Ident''TClassRef'' ClassOf(' +
        'Ident''TObject'')))'; ExpectDiags: 0),
+    (Section: '15.2.2'; Name: 'type of a class and an interface';
+     Source: 'type TC = type of TForm1; TI = type of IInterface;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassOf#typeof(' +
+       'Ident''TForm1'')) TypeDecl(Ident''TI'' ClassOf#typeof(' +
+       'Ident''IInterface'')))'; ExpectDiags: 0),
+    (Section: '15.2.2'; Name: 'type of interface (no target)';
+     Source: 'type TRef = type of interface; TId = type Integer;';
+     Expected: 'TypeSec(TypeDecl(Ident''TRef'' ClassOf#typeof) ' +
+       'TypeDecl#distinct(Ident''TId'' Ident''Integer''))'; ExpectDiags: 0),
 
     // ---- 16.1.1 / 16.4.1 generics never pinned at the DECLARATION level
     // (16.3 already covers a generic reference in an EXPRESSION) ----

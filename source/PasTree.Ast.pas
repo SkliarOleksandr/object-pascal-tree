@@ -125,7 +125,7 @@ type
     nkFileType,       // file [of T] (10.2.1)
     nkPointerType,    // ^T (10.1.1)
     nkStringType,     // string[N] (7.1.3)
-    nkClassOf,        // class of T (15.2.1)
+    nkClassOf,        // class of T (15.2.1); Aux = 1: type of T (15.2.2)
     nkProcType,       // procedure/function type (6.6.1);
                       // Aux: 1 = of object, 2 = reference to
     nkClassType,      // 11.1.1; Aux: 1 = forward declaration
@@ -731,6 +731,9 @@ begin
     nkClassType:
       if Nodes[AIndex].Aux = 1 then
         Result := Result + '#forward';
+    nkClassOf:
+      if Nodes[AIndex].Aux = 1 then
+        Result := Result + '#typeof';
     nkHelperType:
       if Nodes[AIndex].Aux = 1 then
         Result := Result + '#record';

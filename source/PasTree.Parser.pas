@@ -3173,10 +3173,10 @@ end;
 
 function TPasParser.ParseTypeSection(AHeadless: Boolean): Integer;
 var
-  LDecl, LGen, LAttrs: Integer;
+  LDecl, LGen, LAttrs, LTypeOf: Integer;
   LHasEq: Boolean;
 begin
-  // 2.x: type name<...> = [type] TypeExpr; ...
+  // 2.x: type name<...> = [type] TypeExpr | type of TypeRef; ...
   Result := FB.AddNode(nkTypeSec, NIL_NODE, FPos);
   if not AHeadless then
     Next; // type
@@ -3211,13 +3211,35 @@ begin
       FB.Adopt(Result, LDecl);
       Continue;
     end;
-    if CurKind = tkType then
+    if (CurKind = tkType) and (PeekKind(1) = tkOf) then
     begin
-      // Distinct alias: T = type Base (2.5.1).
-      FB.SetAux(LDecl, 1);
+      // `T = type of X` (15.2.2): an undocumented metaclass form, legal ONLY
+      // as the whole right side of a type declaration (dcc rejects it in a
+      // var declaration) and only over a type NAME - no generic args, no
+      // `string`. A ClassOf node marked Aux = 1, so every consumer of a
+      // class reference reads it as one. `type of interface` (any interface
+      // type) has no target and so no child.
+      LTypeOf := FB.AddNode(nkClassOf, NIL_NODE, FPos);
+      FB.SetAux(LTypeOf, 1);
       Next;
+      Next;
+      if CurKind = tkInterface then
+        Next
+      else
+        FB.Adopt(LTypeOf, ParseTypeRef);
+      FB.SetLast(LTypeOf, FPos - 1);
+      FB.Adopt(LDecl, LTypeOf);
+    end
+    else
+    begin
+      if CurKind = tkType then
+      begin
+        // Distinct alias: T = type Base (2.5.1).
+        FB.SetAux(LDecl, 1);
+        Next;
+      end;
+      FB.Adopt(LDecl, ParseTypeExpr);
     end;
-    FB.Adopt(LDecl, ParseTypeExpr);
     ParseHintsOpt(LDecl);
     FB.SetLast(LDecl, FPos - 1);
     FB.Adopt(Result, LDecl);
