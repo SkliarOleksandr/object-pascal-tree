@@ -37,8 +37,17 @@ For every file whose donor model is a clean full parse of byte-identical text
 (the main file and every `$I` include are re-read and compared exactly), the
 preprocessing, lexing and parse are skipped: Phase 1 runs over the donor's
 tree, which is immutable, and the new model shares its arrays. Everything else
-- edited files, demoted units, oracle-reprocessed streams, units with
-parse-time unresolved `$IF` guards - takes the normal path.
+- edited files, oracle-reprocessed streams, units with parse-time unresolved
+`$IF` guards - takes the normal path.
+
+A DEMOTED donor model (`DemoteText`, `DemoteClosedUnits`) has no text left
+to compare, but its nodes are what the parse costs. Its files are checked
+against the size and fingerprint `DemoteText` recorded; on a match the
+adopting project preprocesses the unit itself (the same seed query the donor
+used, so a demotable stream is reproducible) and grafts the donor's nodes
+onto that stream if it is identical to the one they were parsed from. The
+donor is only read, never rehydrated - it may be serving navigation while the
+rebuild runs.
 
 Why a donor project rather than a standalone cache:
 
@@ -204,14 +213,14 @@ from a slow analyzer.
 |---|---|
 | `released-maps` | the host called `ReleaseTransientMaps` or `DemoteClosedUnits` on this project; every other `Analyze*` raises on it, the module path refuses so the host can fall back to a fresh project |
 | `unknown-file`, `not-full` | not an analyzed unit of this project |
-| `demoted` | the model's text layer was freed (see the memory dial below) |
+| `demoted` | the edited unit is text-demoted and its old stream cannot come back: the file changed with no `SetBuffer` before it (see the memory dial below) |
 | `parse-failed` | unparsable now; the closure changed, a rebuild's job |
 | `unresolved-if` | the stream depends on the `$IF` oracle, i.e. on the whole generation's symbol state - never reproducible per module |
 | `new-dependency(X)` | an import resolves to a file the closure never loaded |
 | `no-clean-boundary-*` | no implementation scope, or the arena is not split cleanly at it |
 | `intf-sym#N`, `intf-scope#N` | the interface prefix moved in a way the redo cannot express |
 | `too-many-consumers(N>L)` | the SELECTED redo set N exceeds `ModuleRedoLimit` (only when a host set one; the default is no ceiling). The number is reported because "too many" alone says nothing about whether the limit is set sensibly |
-| `consumer-demoted` | a consumer to redo has no text layer any more (see the memory dial) |
+| `consumer-demoted` | a text-demoted consumer to redo or to scan could not be rehydrated - its file changed under it (see the memory dial) |
 | `consumer-oracle(<unit>)` | a consumer in the reach has an oracle-built token stream: its `$IF`s may have folded this unit's constants or record sizes, and only a re-preprocess can re-decide them |
 | `instance-unmatched-sym(<name>)` | an instance names a symbol of this unit that the new text no longer declares (a deleted generic, or an overload whose ordinal moved) - see guard 2 |
 
@@ -240,11 +249,42 @@ After an accepted run only the re-analyzed module's diagnostics are new;
 every other module's are untouched, so a host that publishes per-file
 diagnostics republishes one file.
 
-**The memory dial.** `DemoteClosedUnits` frees the text layer of every unit
-that is not open, which is worth a lot of RSS - and a demoted unit is a donor
-MISS and a fast-path refusal. Before 0.9.0 that traded memory for nothing
-measurable; now it trades memory against the latency of every edit. The demo
-exposes the choice as a checkbox; a host has to make it deliberately.
+**The memory dial.** A unit's text layer (token streams, sources, line
+tables) is most of its footprint, and most of a closure is library the user
+never edits. Two ways to drop it:
+
+- `DemoteClosedUnits(AKeep)` frees the text AND the transient maps of every
+  unit not kept, and closes the project: no `Analyze*` may run on it again
+  and the module path refuses (`released-maps`). For a host that rebuilds
+  from scratch on every edit.
+- `DemoteText(AKeep)` (0.47.0) frees the TEXT only. The maps stay, the
+  project stays open, and each path that needs a demoted unit's text gets it
+  back itself: `SetBuffer` rehydrates a demoted unit before overriding it
+  (so the first keystroke in a library file is still a fast-path edit), the
+  module path rehydrates the consumers it scans or redoes before its commit
+  point, and a rebuild grafts a demoted donor's nodes (above). What the cross
+  passes read of a demoted unit they do not redo is symbol-table or Phase-1
+  state - including the few answers that used to come from its text (a
+  routine's head word, `varargs`, a default array property, a generic's
+  keyword constraints: see `sfVarArgs` in `PasTree.Sema.Model`).
+
+Hosts pass their open files plus whatever should stay warm - typically the
+project's own units, so only the library is demoted (the library/project
+split is the host's knowledge, not the project's) - and call it again after
+every build and every accepted module run, since hydration creeps back. The
+demo does exactly that with Incremental on (open tabs + everything under the
+project directory) and keeps `DemoteClosedUnits` with it off.
+
+Measured on the 3767-unit client closure with the library demoted (2062
+units, 250 ms): 2848 -> 2008 MB allocated, 3352 -> 2765 MB private; a
+rehydration costs ~1 ms per unit and all 3767 come back. The differential
+script stays identical step for step and every edit is still a module run,
+including an interface edit OF a library unit. A rebuild adopting the
+demoted project hits 3656 of 3684 parses, as with a full-text donor. With
+EVERYTHING demoted (project units too) the same holds; an interface edit that
+adds a name to the hub unit then rehydrates its whole reach to scan it (~1260
+units, ~270 ms instead of ~170 ms) - which is why the project's own units are
+the natural thing to keep.
 
 ## 3. What it costs (measured, every step verified identical to a full build)
 
@@ -300,7 +340,15 @@ only ever prove the full path.
 - `-selftest`: the negative control. The incremental side is fed the PRE-edit
   text of each step, and every edit step is REQUIRED to mismatch - a blind
   comparator would make every green run above worthless;
-- `-st`: both sides single-threaded, for ruling a concurrency effect in or out.
+- `-st`: both sides single-threaded, for ruling a concurrency effect in or out;
+- `-demotetext`: the incremental side calls `DemoteText` after every build and
+  every accepted step, keeping the scripted files, the root and every unit
+  under a `-demotekeep:<dir>`; `-demotescripted` demotes the scripted files
+  too, so every edit lands on a demoted unit. The ground truth is never
+  demoted. This is the gate that proved text-only demotion needed the
+  Phase-1 facts above: with the library demoted, five cross-model readers
+  answered "no" and a redone consumer bound `TRegistry.Create` to the
+  private `class constructor`.
 
 **A differential gate needs a FROZEN corpus.** Running it against a working
 copy somebody is editing produces exactly the signature of an analyzer defect

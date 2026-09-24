@@ -195,10 +195,11 @@ type
       the current project as a PARSE DONOR. Unchecked, the demo behaves
       exactly as it did before: every edit rebuilds the closure from scratch.
 
-      It also turns DemoteClosedUnits OFF, and that is the real trade this
-      switch exposes: a demoted unit has no text layer, so it is a donor MISS
-      and a fast-path refusal. Memory against edit latency, the dial the LSP
-      host has to set too. }
+      It also swaps DemoteClosedUnits (text AND transient maps, the project
+      closed to further analysis) for DemoteText (the library units' text
+      only - maps kept, the fast path and the donor rebuild rehydrate what
+      they touch): most of the memory saving without giving up the
+      incremental paths. }
     chkIncremental: TCheckBox;
     cbHighlightColor: TColorBox; // background color for "same identifier" highlight
     cbTypeColor: TColorBox;      // foreground color of a TYPE name (semantic)
@@ -539,6 +540,7 @@ type
     // new FNav calls the Refresh; OpenFileTab applies to the new tab alone.
     procedure ApplySemanticTokens(ATab: TObject);
     procedure RefreshSemanticTokens;
+    procedure DemoteLibraryText;
     procedure CloseAllTabs;
     // Navigation history - see NavigateTo.
     function CurrentNavPos(out AEntry: TNavHistoryEntry): Boolean;
@@ -3493,8 +3495,9 @@ begin
   // demoted it (DemoteClosedUnits frees the text layer and the transient maps
   // completion reads, for everything that was not an open tab back then).
   //
-  // With incremental analysis on we do not demote at all, so merely LOOKING at
-  // a unit that is already in the closure must cost nothing - it used to
+  // With incremental analysis on only TEXT is demoted (DemoteText), and every
+  // navigator query rehydrates a unit on its own, so merely LOOKING at a unit
+  // that is already in the closure must cost nothing - it used to
   // rebuild the whole closure per opened tab, which is exactly the progress
   // bar you would see while just clicking through the file list.
   if Assigned(FSemaProject) and
@@ -4075,10 +4078,15 @@ begin
     RefreshSemanticTokens;
     FAnalyzeOverhead := FAnalyzeOverhead +
       Format('nav=%d;', [LSW.ElapsedMilliseconds]);
-    // Same as the async swap: the project is immutable from here on (every
-    // re-analysis builds a fresh one), so drop the closed units' transient
-    // maps - see ReleaseTransientMaps.
-    FSemaProject.DemoteClosedUnits(FOpenFiles.ToStringArray);
+    // Same as the async swap: with incremental analysis off the project is
+    // immutable from here on (every re-analysis builds a fresh one), so the
+    // closed units' transient maps go too - see ReleaseTransientMaps; with
+    // it on, only the library units' text (DemoteText).
+    FLastBuildDemoted := not chkIncremental.Checked;
+    if FLastBuildDemoted then
+      FSemaProject.DemoteClosedUnits(FOpenFiles.ToStringArray)
+    else
+      DemoteLibraryText;
   finally
     FAnalyzing := False;
   end;
@@ -4555,6 +4563,9 @@ begin
       Log('Module reanalysis error: ' + LError);
     if LAccepted then
     begin
+      // The run rehydrated what it needed (the edited unit, redone
+      // consumers) - drop that text again.
+      DemoteLibraryText;
       if FAsyncEditSerial = FEditSerial then
         FDirtyFiles.Clear;   // else: an edit is pending, keep it dirty
       // The label is a PROGRESS indicator and ends where every other path
@@ -4597,12 +4608,16 @@ begin
     // A tab opened later than a build that demoted then re-analyzes to get
     // its unit back in full - and ONLY then (see OpenFileTab).
     //
-    // NOT while chkIncremental is on: a demoted unit has no text layer, so it
-    // is a parse-donor MISS and a fast-path refusal. That is the trade the
-    // switch exists to show - memory against edit latency.
+    // NOT while chkIncremental is on: that closes the project to the module
+    // path and to donor reuse. Incremental hosts demote TEXT only
+    // (DemoteText) - the library units' token layer, which is most of the
+    // memory, while the maps stay and the fast paths rehydrate what they
+    // touch.
     FLastBuildDemoted := not chkIncremental.Checked;
     if FLastBuildDemoted then
-      FSemaProject.DemoteClosedUnits(FOpenFiles.ToStringArray);
+      FSemaProject.DemoteClosedUnits(FOpenFiles.ToStringArray)
+    else
+      DemoteLibraryText;
     if FAsyncEditSerial = FEditSerial then
       FDirtyFiles.Clear;   // this build saw every edit made so far
     FSemaProjectRoot := FMainSource;   // what this project was built from
@@ -5899,6 +5914,36 @@ begin
   else
     LTab.PasTreeHL.ClearSemanticTokens;
   LTab.Editor.Invalidate;
+end;
+
+// Incremental mode's memory cut: the text of every unit that is neither an
+// open tab nor under the project's directory - the library, which is where
+// the text is (RTL/VCL/third-party sources) and what an edit rarely touches.
+// Idempotent; called after every build and every accepted module run.
+procedure TfrmMain.DemoteLibraryText;
+var
+  LKeep: TList<string>;
+  LDir: string;
+begin
+  if not Assigned(FSemaProject) then
+    Exit;
+  LKeep := TList<string>.Create;
+  try
+    LKeep.AddRange(FOpenFiles.ToStringArray);
+    LDir := FProjectDir;
+    if LDir = '' then
+      LDir := TPath.GetDirectoryName(FMainSource);
+    if LDir <> '' then
+    begin
+      LDir := IncludeTrailingPathDelimiter(LowerCase(TPath.GetFullPath(LDir)));
+      for var LMid := 0 to FSemaProject.ModelCount - 1 do
+        if LowerCase(FSemaProject.ModelFile(LMid)).StartsWith(LDir) then
+          LKeep.Add(FSemaProject.ModelFile(LMid));
+    end;
+    FSemaProject.DemoteText(LKeep.ToArray);
+  finally
+    LKeep.Free;
+  end;
 end;
 
 // Every open tab, after a new FNav is installed (the sync RunParse, the async

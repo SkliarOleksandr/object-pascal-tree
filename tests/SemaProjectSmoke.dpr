@@ -2525,6 +2525,34 @@ begin
       Exit(True);
 end;
 
+// A project's analysis outcome WITHOUT reading any text (so a text-demoted
+// project can be fingerprinted too): per unit, sorted - every diagnostic with
+// its position, and every cross-unit binding as node > target unit : symbol.
+function ProjSig(AProj: TPasSemaProject): string;
+var
+  LLines: TList<string>;
+  LModel: TPasSemaModel;
+begin
+  LLines := TList<string>.Create;
+  try
+    for var LMid := 0 to AProj.ModelCount - 1 do
+    begin
+      LModel := AProj.Model(LMid);
+      for var LDi := 0 to High(LModel.Diags) do
+        LLines.Add(Format('%s D %s(%d,%d) %s', [LModel.UnitNameLower,
+          LModel.Diags[LDi].Code, LModel.Diags[LDi].Line,
+          LModel.Diags[LDi].Col, LModel.Diags[LDi].Msg]));
+      for var LPair in LModel.ExtRefMap do
+        LLines.Add(Format('%s X %d>%s:%d', [LModel.UnitNameLower, LPair.Key,
+          AProj.Model(LPair.Value.UnitId).UnitNameLower, LPair.Value.Sym]));
+    end;
+    LLines.Sort;
+    Result := string.Join(#10, LLines.ToArray);
+  finally
+    LLines.Free;
+  end;
+end;
+
 function SymCountOf(AModel: TPasSemaModel; const ANameLower: string;
   AKind: TSemaSymbolKind): Integer;
 begin
@@ -6593,6 +6621,161 @@ begin
       GProj.AnalyzeModuleOnly(TPath.Combine(LDir, 'UnitMB.pas')));
     Ok('module: it reports the missing unit like the full path does',
       DiagCount(ModelByName('unitmb'), 'F1027') = 1);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- Text-only demotion (memory census, stage A2): DemoteText frees the
+  // text of the units a host does not keep, and the module path and the
+  // donor rebuild must answer exactly as with full text. UnitTA holds the
+  // five facts stage A1 found read cross-model from a demoted DECLARING
+  // unit - a class constructor beside instance ones (TRegistry's shape), a
+  // default array property, a keyword constraint and a varargs external -
+  // and UnitTB uses each, plus one name UnitTA does not declare yet. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_demotetext');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  var LTaText :=
+    'unit UnitTA;'#10'interface'#10'type'#10 +
+    '  TReg = class'#10'  private'#10'    class constructor Create;'#10 +
+    '  public'#10'    constructor Create; overload;'#10 +
+    '    constructor Create(A: Integer); overload;'#10 +
+    '    procedure Touch;'#10'  end;'#10 +
+    '  TRegs = class'#10'    function GetItem(I: Integer): TReg;'#10 +
+    '    property Items[I: Integer]: TReg read GetItem; default;'#10 +
+    '  end;'#10 +
+    '  TBox<T: class> = class'#10'  end;'#10 +
+    'function Fmt(A: Integer): Integer; cdecl; varargs; external ''x.dll'';'#10 +
+    'implementation'#10 +
+    'class constructor TReg.Create; begin end;'#10 +
+    'constructor TReg.Create; begin end;'#10 +
+    'constructor TReg.Create(A: Integer); begin end;'#10 +
+    'procedure TReg.Touch; begin end;'#10 +
+    'function TRegs.GetItem(I: Integer): TReg; begin Result := nil; end;'#10 +
+    'end.'#10;
+  var LTbText :=
+    'unit UnitTB;'#10'interface'#10'uses UnitTA;'#10'implementation'#10 +
+    'procedure P;'#10'var'#10'  R: TReg;'#10'  L: TRegs;'#10 +
+    '  B: TBox<Integer>;'#10'begin'#10 +
+    '  R := TReg.Create;'#10'  R.Touch;'#10'  L[0].Touch;'#10 +
+    '  Fmt(1, 2, 3);'#10'  Later := 1;'#10'end;'#10;
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitTA.pas'), LTaText);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitTB.pas'), LTbText + 'end.'#10);
+  var LTaPath := TPath.Combine(LDir, 'UnitTA.pas');
+  var LTbPath := TPath.Combine(LDir, 'UnitTB.pas');
+  var LTcPath := TPath.Combine(LDir, 'UnitTC.pas');
+  TFile.WriteAllText(LTcPath,
+    'unit UnitTC;'#10'interface'#10'implementation'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    var LBase := ProjSig(GProj);
+    Ok('demotetext: the fixture baseline - E2511 for the constraint, the ' +
+      'missing name, no arity error, the default-property member bound',
+      (DiagCount(ModelByName('unittb'), 'E2511') = 1) and
+      (DiagCount(ModelByName('unittb'), 'E2003') = 1) and
+      (DiagCount(ModelByName('unittb'), 'E2034') = 0) and
+      (CrossRefCountInUnit(ModelByName('unittb'), 'Touch', 'Touch',
+        'unitta') = 2));
+
+    GProj.DemoteText([LTbPath]);
+    Ok('demotetext: the unit not kept is demoted, the kept one is not',
+      ModelByName('unitta').Demoted and not ModelByName('unittb').Demoted);
+    Ok('demotetext: the maps stay - the demoted project is still whole',
+      ProjSig(GProj) = LBase);
+
+    // A body edit in the kept consumer re-runs its passes over the DEMOTED
+    // declaring unit - the constructor, default property, constraint and
+    // varargs answers must come from what survives the demotion.
+    GProj.SetBuffer(LTbPath, LTbText +
+      'procedure Q; begin end;'#10'end.'#10, 1);
+    Ok('demotetext: a body edit over a demoted used unit is accepted',
+      GProj.AnalyzeModuleOnly(LTbPath));
+    Ok('demotetext: ... and answers exactly as with full text',
+      ProjSig(GProj) = LBase);
+    Ok('demotetext: ... without rehydrating the used unit',
+      ModelByName('unitta').Demoted);
+
+    // An edit OF a demoted unit: SetBuffer rehydrates it before the overlay
+    // replaces its text, so the module path can diff old against new.
+    GProj.DemoteText([]);
+    GProj.SetBuffer(LTaPath, StringReplace(LTaText, 'end.'#10,
+      'procedure Extra; begin end;'#10'end.'#10, []), 2);
+    Ok('demotetext: SetBuffer rehydrates a demoted unit before overriding it',
+      not ModelByName('unitta').Demoted);
+    Ok('demotetext: a body edit of a (formerly) demoted unit is accepted',
+      GProj.AnalyzeModuleOnly(LTaPath));
+    Ok('demotetext: ... and the consumer is untouched',
+      ProjSig(GProj) = LBase);
+
+    // An interface edit that ADDS the name the demoted consumer mentions:
+    // the consumer must be scanned (text!) and redone - both rehydrate it.
+    GProj.DemoteText([]);
+    GProj.SetBuffer(LTaPath, StringReplace(LTaText, 'implementation'#10,
+      'var Later: Integer;'#10'implementation'#10, []), 3);
+    Ok('demotetext: an interface edit reaching a demoted consumer is ' +
+      'accepted [' + GProj.StageTimings + ']',
+      GProj.AnalyzeModuleOnly(LTaPath));
+    Ok('demotetext: ... the consumer was redone, not refused [' +
+      GProj.StageTimings + ']',
+      Pos('module=2;', GProj.StageTimings) > 0);
+    Ok('demotetext: ... and now binds the new name',
+      (DiagCount(ModelByName('unittb'), 'E2003') = 0) and
+      CrossRefTo(ModelByName('unittb'), 'Later', 'Later'));
+    Ok('demotetext: ... with the other answers unchanged',
+      (DiagCount(ModelByName('unittb'), 'E2511') = 1) and
+      (DiagCount(ModelByName('unittb'), 'E2034') = 0) and
+      (CrossRefCountInUnit(ModelByName('unittb'), 'Touch', 'Touch',
+        'unitta') = 2));
+
+    // A rebuild adopting the demoted project as its parse donor: every
+    // unchanged unit is a HIT (grafted onto a stream the new project
+    // preprocessed itself), the donor stays demoted, the answer is the same.
+    GProj.DemoteText([]);
+    var LBefore := ProjSig(GProj);
+    var LDemotedDonor := GProj;
+    GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+    try
+      // The same overlays the donor analyzed - a differing text is an
+      // ordinary miss, which is not what this case is about.
+      GProj.SetBuffer(LTaPath, StringReplace(LTaText, 'implementation'#10,
+        'var Later: Integer;'#10'implementation'#10, []), 3);
+      GProj.SetBuffer(LTbPath, LTbText +
+        'procedure Q; begin end;'#10'end.'#10, 1);
+      Ok('demotetext: a demoted project is adopted as parse donor',
+        GProj.AdoptParseDonor(LDemotedDonor));
+      GProj.AnalyzeDirectory(LDir);
+      Ok('demotetext: every unit of a demoted donor is a hit [' +
+        GProj.StageTimings + ']',
+        (Pos('donormiss=0;', GProj.StageTimings) > 0) and
+        (Pos('donorhits=0;', GProj.StageTimings) = 0));
+      var LAllDemoted := LDemotedDonor.ModelCount > 0;
+      for var LMid := 0 to LDemotedDonor.ModelCount - 1 do
+        if not LDemotedDonor.Model(LMid).Demoted then
+          LAllDemoted := False;
+      Ok('demotetext: ... the donor was only read, never hydrated',
+        LAllDemoted);
+      Ok('demotetext: ... and the rebuild answers exactly as the donor',
+        ProjSig(GProj) = LBefore);
+    finally
+      GProj.Free;
+      GProj := LDemotedDonor;
+    end;
+
+    // The file changed on DISK with no overlay (UnitTC never had one): the
+    // demoted model's stream cannot come back, so the module path refuses -
+    // a rebuild's job.
+    GProj.DemoteText([]);
+    TFile.WriteAllText(LTcPath,
+      'unit UnitTC;'#10'interface'#10'implementation'#10 +
+      'procedure Z; begin end;'#10'end.'#10);
+    Ok('demotetext: a demoted unit changed on disk is refused, not guessed [' +
+      GProj.StageTimings + ']',
+      not GProj.AnalyzeModuleOnly(LTcPath) and
+      (Pos('refused:demoted', GProj.StageTimings) > 0));
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

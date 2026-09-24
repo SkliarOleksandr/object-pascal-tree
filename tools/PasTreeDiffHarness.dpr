@@ -50,13 +50,15 @@ program PasTreeDiffHarness;
   the run, because a blind comparator makes every green run above worthless.
 
   -demotetext drops the incremental side's TEXT the way a memory-lean host
-  would: after every build and every accepted module step, every model except
-  the scripted files, the root and anything under a -demotekeep:<dir> gets
-  TPasSemaModel.DemoteText - token layer freed, maps KEPT (unlike
-  DemoteClosedUnits, the project stays re-analyzable). Oracle-stream models
-  keep their text, as DemoteClosedUnits does. The ground truth is never
-  demoted, and ExtRefMap lines then take their node text from the truth
-  model on both sides (it only names the node; a demoted model has none).
+  would: after every build and every accepted module step it calls
+  TPasSemaProject.DemoteText with the scripted files, the root and every
+  model under a -demotekeep:<dir> as the keep list - token layer freed, maps
+  KEPT (unlike DemoteClosedUnits, the project stays re-analyzable).
+  -demotescripted leaves the scripted files out of that list, so an edit
+  lands on a demoted unit (SetBuffer's rehydration). The ground truth is
+  never demoted, and ExtRefMap lines then take their node text from the
+  truth model on both sides (it only names the node; a demoted model has
+  none).
 
   Exit code 0 = every step compared equal (or, under -selftest, every edit
   step was caught); 1 otherwise. }
@@ -123,6 +125,7 @@ var
   // fed to the incremental side only. '' = no divergence this step.
   GStaleKey, GStaleText: string;
   GDemoteText: Boolean;       // -demotetext: see the header
+  GDemoteScripted: Boolean;   // -demotescripted: the edited files too
   GKeepDirs: TArray<string>;  // -demotekeep:<dir>, lower-cased, trailing '\'
   GKeepFiles: TDictionary<string, Boolean>;  // scripted files + root, lower
 
@@ -164,28 +167,32 @@ end;
 // first build it is the creep-back (models a step hydrated or rebuilt).
 function DemoteForeign(AProj: TPasSemaProject): Integer;
 var
-  LModel: TPasSemaModel;
+  LKeep: TArray<string>;
   LPath: string;
-  LKeep: Boolean;
+  LBefore: Integer;
 begin
   Result := 0;
   if not GDemoteText then
     Exit;
+  LKeep := GKeepFiles.Keys.ToArray;
+  LBefore := 0;
   for var LMid := 0 to AProj.ModelCount - 1 do
   begin
-    LModel := AProj.Model(LMid);
-    if (LModel = nil) or LModel.Demoted or LModel.OracleStream then
-      Continue;
+    if AProj.Model(LMid).Demoted then
+      Inc(LBefore);
     LPath := LowerCase(AProj.ModelFile(LMid));
-    LKeep := GKeepFiles.ContainsKey(LPath);
     for var LDir in GKeepDirs do
       if LPath.StartsWith(LDir) then
-        LKeep := True;
-    if LKeep then
-      Continue;
-    LModel.DemoteText;
-    Inc(Result);
+      begin
+        LKeep := LKeep + [LPath];
+        Break;
+      end;
   end;
+  AProj.DemoteText(LKeep);
+  for var LMid := 0 to AProj.ModelCount - 1 do
+    if AProj.Model(LMid).Demoted then
+      Inc(Result);
+  Dec(Result, LBefore);
 end;
 
 { ---- synthetic edits ------------------------------------------------------ }
@@ -850,6 +857,8 @@ begin
   GSingleThread := False;
   GRedoLimit := 0;
   GModuleMode := False;
+  GDemoteText := False;
+  GDemoteScripted := False;
   GAccepted := 0;
   GFellBack := 0;
   GAcceptedIntf := 0;
@@ -877,6 +886,8 @@ begin
       GModuleMode := True
     else if SameText(ParamStr(GIdx), '-demotetext') then
       GDemoteText := True
+    else if SameText(ParamStr(GIdx), '-demotescripted') then
+      GDemoteScripted := True
     else if ParamStr(GIdx).StartsWith('-demotekeep:', True) then
       GKeepDirs := GKeepDirs + [IncludeTrailingPathDelimiter(LowerCase(
         TPath.GetFullPath(Copy(ParamStr(GIdx), 13, MaxInt))))]
@@ -888,7 +899,7 @@ begin
   begin
     Writeln(ErrOutput, 'usage: PasTreeDiffHarness <root.dpr> [-p:<platform>] '
       + '[-L<dir>]... [-samples:<N>] [-script:<file>] [-module] [-selftest] '
-      + '[-demotetext [-demotekeep:<dir>]...]');
+      + '[-demotetext [-demotescripted] [-demotekeep:<dir>]...]');
     Halt(2);
   end;
   GPaths := GPaths + [TPath.GetDirectoryName(GRoot)];
@@ -920,8 +931,9 @@ begin
   Writeln(ErrOutput, Format('steps: 1 no-edit + %d edits', [Length(LSteps)]));
   GKeepFiles := TDictionary<string, Boolean>.Create;
   GKeepFiles.AddOrSetValue(LowerCase(GRoot), True);
-  for LStep in LSteps do
-    GKeepFiles.AddOrSetValue(LowerCase(LStep.Path), True);
+  if not GDemoteScripted then
+    for LStep in LSteps do
+      GKeepFiles.AddOrSetValue(LowerCase(LStep.Path), True);
   if GDemoteText then
     Writeln(ErrOutput, Format('demotetext: %d model(s) demoted after the ' +
       'initial build', [DemoteForeign(LCand)]));

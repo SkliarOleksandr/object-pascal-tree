@@ -50,8 +50,16 @@ type
   // (16.1.2), so EVERY type reference in the closure asks the question. Reading
   // it off the declaration there cost +1.7% even in its cheapest structural
   // form; a set membership test costs nothing.
+  // sfVarArgs (a routine whose parameter scope's owner carries `varargs`) and
+  // sfDefaultArrayProp (a property with an index list AND `default`) are
+  // stamped at the end of Phase 1 for the same reason AND because the other
+  // readers are CROSS-model: overload scoring and default-property indexing
+  // ask them of a symbol in whatever unit declares it, and a text-demoted
+  // declaring model has no directive text left to read (stage A1 of the
+  // memory census found both answering "no" there).
   TSemaSymbolFlag = (sfBuiltin, sfExternalUnresolved, sfStrict, sfOverload,
-    sfClassMember, sfForward, sfHasBody, sfHasDefault, sfGeneric);
+    sfClassMember, sfForward, sfHasBody, sfHasDefault, sfGeneric, sfVarArgs,
+    sfDefaultArrayProp);
   TSemaSymbolFlags = set of TSemaSymbolFlag;
 
   // A reference resolved to a symbol in another unit's model.
@@ -396,6 +404,12 @@ type
     // any type derived from it is unreliable - which is why the typer stays
     // quiet over these nodes (see InUnopenedWithBody / TPasSemaTyper.Diag).
     WithUnopened: TArray<Integer>;
+    { Keyword constraint node (`class`, `record`, `constructor` in a generic
+      parameter list - an nkConstraint with no child) -> Ord of its token
+      kind, filled by Phase 1. CheckConstraints reads the DECLARING model's
+      constraints from every instantiating unit, so the answer must survive
+      text demotion; a handful of entries per unit that declares generics. }
+    KeywordConstraints: TPasIntMap<Byte>;
     { MEMORY-AUDIT sec. 6.4-4 stage 2 - TEXT DEMOTION state. When Demoted, the
       token layer is gone: Tree.Source.Visible is nil and every file's
       Source/Tokens/LineStarts are empty; Nodes, RefMap, ExtRefMap, Symbols,
@@ -560,6 +574,16 @@ type
       ever mean "no answer", never a wrong position. False leaves the model
       demoted. }
     function TryRehydrate(const APre: TPasPreprocessed): Boolean;
+    { TryRehydrate's identity test alone, installing nothing: would APre
+      reproduce this demoted model's stream? False on a model that is not
+      demoted. The parse-donor path uses it to graft a DEMOTED donor's nodes
+      onto a stream the adopting project preprocessed itself, leaving the
+      donor untouched (it may be serving other readers). }
+    function DemotedStreamMatches(const APre: TPasPreprocessed): Boolean;
+    { The cheap half, before any preprocessing: does AText (what a run would
+      read for Files[AFileIdx] now) have the demoted file's size and
+      fingerprint? False on a model that is not demoted. }
+    function DemotedFileMatches(AFileIdx: Integer; const AText: string): Boolean;
     procedure AddDiag(const ADiag: TSemaDiag);
     { The parser's own diagnostics, folded in as E2029 rows at the token they
       name. Without this a syntax error is INVISIBLE to every host that reads
@@ -1719,13 +1743,14 @@ begin
   end;
 end;
 
-function TPasSemaModel.TryRehydrate(const APre: TPasPreprocessed): Boolean;
+function TPasSemaModel.DemotedStreamMatches(
+  const APre: TPasPreprocessed): Boolean;
 var
   LIdx: Integer;
 begin
   Result := False;
   if not Demoted then
-    Exit(True);
+    Exit;
   if Length(APre.Visible) <> DemotedVisCount then
     Exit;
   if Length(APre.Files) <> Length(DemotedTokenCounts) then
@@ -1738,6 +1763,25 @@ begin
        (SourceFingerprint(APre.Files[LIdx].Source) <>
         DemotedFileHashes[LIdx]) then
       Exit;
+  Result := True;
+end;
+
+function TPasSemaModel.DemotedFileMatches(AFileIdx: Integer;
+  const AText: string): Boolean;
+begin
+  Result := Demoted and (AFileIdx >= 0) and
+    (AFileIdx <= High(DemotedFileSizes)) and
+    (Length(AText) = DemotedFileSizes[AFileIdx]) and
+    (SourceFingerprint(AText) = DemotedFileHashes[AFileIdx]);
+end;
+
+function TPasSemaModel.TryRehydrate(const APre: TPasPreprocessed): Boolean;
+begin
+  if not Demoted then
+    Exit(True);
+  Result := DemotedStreamMatches(APre);
+  if not Result then
+    Exit;
   Tree.Source := APre;
   Demoted := False;
   DemotedFileSizes := nil;

@@ -144,6 +144,7 @@ type
     procedure CheckForCounters;
     procedure CheckBareRaises;
     procedure CheckSlicePositions;
+    procedure StampRetainedFlags;
     procedure Run;
   public
     { ASkipTyper skips the final expression type-check (Phase 3a) - for
@@ -1755,6 +1756,13 @@ begin
             end;
             while LP <> NIL_NODE do
             begin
+              // A keyword constraint's word, kept past text demotion - see
+              // TPasSemaModel.KeywordConstraints.
+              if (KindOf(LP) = nkConstraint) and (FirstChild(LP) = NIL_NODE) and
+                 (FTree.Nodes[LP].FirstToken >= 0) and
+                 (FTree.Nodes[LP].FirstToken <= High(FTree.Source.Visible)) then
+                FModel.KeywordConstraints.AddOrSetValue(LP,
+                  Ord(FTree.Source.VisibleToken(FTree.Nodes[LP].FirstToken).Kind));
               Collect(LP, AScope);
               LP := NextSib(LP);
             end;
@@ -3483,6 +3491,66 @@ begin
   Walk(0, False);
 end;
 
+{ Directive facts other units ask of this unit's symbols, read off the tree
+  ONCE while the text is here (see sfVarArgs in PasTree.Sema.Model): the
+  asking unit may meet this model text-demoted. Same tests the readers made
+  on the fly - a routine is variadic when the owner of its parameter scope
+  has a `varargs` directive child, a property is a default array property
+  when its declaration has both an index list and a `default` specifier.
+  Runs right after collection: MemberScope is assigned there and nowhere
+  after, and no symbol is added once Phase 1 has collected. }
+procedure TPasSemaResolver.StampRetainedFlags;
+var
+  LSym, LNode, LChild: Integer;
+  LHasParams, LHasDefault: Boolean;
+begin
+  for LSym := 0 to FModel.SymCount - 1 do
+    case FModel.Symbols[LSym].Kind of
+      skRoutine:
+        begin
+          if FModel.Symbols[LSym].MemberScope = NIL_SCOPE then
+            Continue;
+          LNode := FModel.Scopes[FModel.Symbols[LSym].MemberScope].OwnerNode;
+          LChild := FirstChild(LNode);
+          while LChild <> NIL_NODE do
+          begin
+            if (KindOf(LChild) = nkDirective) and
+               FTree.NodeTextEquals(LChild, 'varargs') then
+            begin
+              FModel.Symbols[LSym].Flags :=
+                FModel.Symbols[LSym].Flags + [sfVarArgs];
+              Break;
+            end;
+            LChild := NextSib(LChild);
+          end;
+        end;
+      skProperty:
+        begin
+          LNode := FModel.Symbols[LSym].DeclNode;
+          if LNode = NIL_NODE then
+            Continue;
+          LNode := FTree.Nodes[LNode].Parent;
+          if (LNode = NIL_NODE) or (KindOf(LNode) <> nkPropertyDecl) then
+            Continue;
+          LHasParams := False;
+          LHasDefault := False;
+          LChild := FirstChild(LNode);
+          while LChild <> NIL_NODE do
+          begin
+            if KindOf(LChild) = nkParams then
+              LHasParams := True
+            else if (KindOf(LChild) = nkPropSpec) and
+                    (FTree.NodeNameLower(LChild) = 'default') then
+              LHasDefault := True;
+            LChild := NextSib(LChild);
+          end;
+          if LHasParams and LHasDefault then
+            FModel.Symbols[LSym].Flags :=
+              FModel.Symbols[LSym].Flags + [sfDefaultArrayProp];
+        end;
+    end;
+end;
+
 procedure TPasSemaResolver.Run;
 begin
   FSys := SeedSystemScope(FModel, FPlatform);
@@ -3492,6 +3560,7 @@ begin
   FImpl := FModel.AddScope(sckImplementation, FIntf, 0);
   FModel.InterfaceScope := FIntf;
   CollectRoot(0);
+  StampRetainedFlags; // needs every symbol and param scope - see its header
   JoinHelperScopes;   // must precede Resolve - see its own header
   ResolveNode(0);
   BindTypes;

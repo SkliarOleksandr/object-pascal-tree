@@ -284,6 +284,15 @@ usable.
   chunked parallel upgrading and reusing the interface wave's lex/preprocess
   pass in wave 2 - the two-wave split buys non-blocking, progressively-ready
   analysis without a meaningful throughput cost.
+- **Text-only demotion for incremental hosts** (`DemoteText`, 0.47.0): after
+  a build, a host can free the token layer of every unit it does not keep
+  (typically: keep open files and the project's own units, drop the
+  library) while the project stays open to the single-module fast path and
+  to donor rebuilds - they rehydrate the few units they touch, ~1 ms each.
+  Measured on a 3767-unit closure: 2848 -> 2008 MB allocated, 3352 -> 2765
+  MB private, every differential step still identical to a full build. The
+  trade is first-touch latency per demoted unit; details in
+  `docs/incremental-analysis.md` (the memory dial).
 
 ## Current features
 

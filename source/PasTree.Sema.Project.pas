@@ -370,6 +370,7 @@ type
       text-identical full parse of APath - nil otherwise (normal parse path).
       Counts FDonorHits/FDonorMisses. }
     function TryDonorLoad(const AKey, APath: string): TPasSemaModel;
+    function HydrateModels(const AIds: TArray<Integer>): Boolean;
     // Clears FDonor at the end of the one run that consumed it; AReport
     // appends 'donorhits=..;donormiss=..;' to StageTimings first.
     procedure FinishDonor(AReport: Boolean);
@@ -1200,6 +1201,26 @@ type
       answers degrade to "none", never to a wrong one. Same loud
       no-more-Analyze* contract as ReleaseTransientMaps. }
     procedure DemoteClosedUnits(const AKeepFiles: TArray<string>);
+    { TEXT-ONLY demotion for an INCREMENTAL host (memory census, stage A2):
+      frees the text layer of every model whose file is not in AKeepFiles,
+      exactly as DemoteClosedUnits does, but releases NO map and does not
+      close the project - AnalyzeModuleOnly, and a rebuild adopting this
+      project as its parse donor, keep working. What they need of a demoted
+      model's text they get back themselves: an edited file is rehydrated
+      when SetBuffer first overrides it, a consumer the module path redoes
+      or scans is rehydrated before its turn, and a demoted donor model is
+      matched against a stream the adopting project preprocesses on its own
+      (the donor is never written). Everything else the cross passes read of
+      a foreign model is a symbol-table or Phase-1 fact that survives.
+
+      Hosts pass their open files plus whatever else should stay warm (the
+      project's own units - the library/project split is the host's
+      knowledge, not the project's). Oracle-stream models always keep their
+      text (not reproducible from cold, see TPasSemaModel.OracleStream).
+      Idempotent; call again after every build and every accepted module run
+      - hydration creeps back (navigation, completion, the module path).
+      Single-owner like every other call on a finished project. }
+    procedure DemoteText(const AKeepFiles: TArray<string>);
     { Rehydrates a demoted model's text layer by re-preprocessing its file
       with the SAME oracle the analysis used (DeclaredQueryFor/SymbolQueryFor
       - a declared-pass candidate got its final stream from exactly these,
@@ -1620,7 +1641,20 @@ end;
 
 procedure TPasSemaProject.SetBuffer(const APath, AText: string;
   AVersion: Integer);
+var
+  LMid: Integer;
 begin
+  // A text-demoted model (DemoteText) is rehydrated BEFORE its text is
+  // overridden: right now the loader still serves the text the model was
+  // built from, so the identity check can pass - after the overlay nothing
+  // could ever reproduce the old stream, and AnalyzeModuleOnly would have
+  // to refuse the first keystroke in every library file the user opens.
+  // A failed rehydration changes nothing; the module path refuses then.
+  if (FByPath <> nil) and
+     FByPath.TryGetValue(LowerCase(TPath.GetFullPath(APath)), LMid) and
+     (LMid >= 0) and (LMid < FModels.Count) and (FModels[LMid] <> nil) and
+     FModels[LMid].Demoted and not FTransientReleased then
+    EnsureHydrated(LMid);
   FSM.SetBuffer(APath, AText, AVersion);
 end;
 
@@ -1894,6 +1928,9 @@ var
   LMid, LIdx: Integer;
   LDM: TPasSemaModel;
   LText: string;
+  LPP: TPasPreprocessor;
+  LPre: TPasPreprocessed;
+  LTree: TPasTree;
 begin
   Result := nil;
   if FDonor = nil then
@@ -1904,17 +1941,50 @@ begin
          (FDonor.FStatus[LMid] < msFullReady) then
         Exit;
       LDM := FDonor.FModels[LMid];
-      // Demoted = the text layer is gone; OracleStream = the stream depended
-      // on mid-analysis oracle state and is not a pure function of the text
-      // (the rehydration work proved exactly these two classes non-reusable).
-      if LDM.Demoted or LDM.OracleStream or (Length(LDM.Tree.Nodes) = 0) then
+      // OracleStream = the stream depended on mid-analysis oracle state and
+      // is not a pure function of the text (the rehydration work proved it
+      // non-reusable).
+      if LDM.OracleStream or (Length(LDM.Tree.Nodes) = 0) then
         Exit;
       // A stream with parse-time UNANSWERED $IF questions was re-decided by
       // RunDeclaredPass against the donor generation's models - not reusable
       // (the README's first-pass oracle exclusion, ~a dozen units on the RTL).
+      // Both lists survive DemoteText.
       if (Length(LDM.Tree.Source.UnresolvedDeclared) > 0) or
          (Length(LDM.Tree.Source.UnresolvedSymbols) > 0) then
         Exit;
+      if LDM.Demoted then
+      begin
+        // The donor's TEXT is gone, its nodes are not - and the nodes are
+        // what the parse costs. Every file this run would read must match
+        // the demoted fingerprints first (cheap, and it is the text
+        // validation below for this case); then THIS project preprocesses
+        // the unit - the same seed query the donor's own load used, which is
+        // why a demoted stream is a first-pass stream - and grafts the
+        // donor's nodes onto that stream only if it is identical to the one
+        // they were parsed from. The donor is only READ, never hydrated: it
+        // may be serving navigation while this rebuild runs.
+        if Length(LDM.Tree.Source.FileNames) <>
+           Length(LDM.Tree.Source.Files) then
+          Exit;
+        for LIdx := 0 to High(LDM.Tree.Source.FileNames) do
+          if not LDM.DemotedFileMatches(LIdx,
+               FSM.LoadText(LDM.Tree.Source.FileNames[LIdx])) then
+            Exit;
+        LPP := RentPP;
+        try
+          LPP.OnDeclared := SeedDeclaredQuery();
+          LPre := LPP.Process(APath);
+        finally
+          ReturnPP(LPP);
+        end;
+        if not LDM.DemotedStreamMatches(LPre) then
+          Exit;
+        LTree := LDM.Tree;   // record copy: Nodes shared, Source replaced
+        LTree.Source := LPre;
+        Result := TPasSemaResolver.Analyze(LTree, False, FPlatform);
+        Exit;
+      end;
       // Text validation, main file AND every $I include (FileNames[0] = main,
       // includes appended at resolution, all paths RESOLVED): exact string
       // compare against what THIS run would read (LoadText serves editor-
@@ -5268,7 +5338,7 @@ function TPasSemaProject.RoutineArity(AMid, ASym: Integer;
   out AReq, ATot: Integer; out AVariadic: Boolean): Boolean;
 var
   LM: TPasSemaModel;
-  LScope, LS, LIdx, LChild: Integer;
+  LScope, LS, LIdx: Integer;
   LSyms: TSemaSymList;
   LSawDefault: Boolean;
 begin
@@ -5297,14 +5367,8 @@ begin
           Inc(AReq);
       end;
     end;
-  LChild := LM.Tree.Nodes[LM.Scopes[LScope].OwnerNode].FirstChild;
-  while LChild <> NIL_NODE do
-  begin
-    if (LM.Tree.Nodes[LChild].Kind = nkDirective) and
-       LM.Tree.NodeTextEquals(LChild, 'varargs') then
-      AVariadic := True;
-    LChild := LM.Tree.Nodes[LChild].NextSibling;
-  end;
+  // Stamped by Phase 1 - the directive TEXT may be gone (a demoted model).
+  AVariadic := sfVarArgs in LM.Symbols[ASym].Flags;
   Result := True;
 end;
 
@@ -6190,12 +6254,13 @@ const
     tcSet];
 var
   LM: TPasSemaModel;
-  LNode, LHead, LArgNode, LIdx, LTok: Integer;
+  LNode, LHead, LArgNode, LIdx, LParamSym: Integer;
   LBase, LArgX, LConX: TSemaXType;
   LIdents: TArray<Integer>;
   LCons: TArray<TArray<Integer>>;
   LParamName: string;
   LCat: TSemaTypeCat;
+  LWord: Byte;
 begin
   LM := FModels[AId];
   for LNode := 0 to High(LM.Tree.Nodes) do
@@ -6229,7 +6294,14 @@ begin
       if XValid(LArgX) and (FModels[LArgX.UnitId].Symbols[LArgX.Sym].Kind <>
          skGenericParam) then
       begin
-        LParamName := FModels[LBase.UnitId].Tree.NodeText(LIdents[LIdx]);
+        // The declaring model may be text-demoted: its name node's DECLARED
+        // symbol carries the same spelling (Phase 1 declared it from that
+        // node's text), NodeText is only the fallback.
+        LParamSym := FModels[LBase.UnitId].RefMap[LIdents[LIdx]];
+        if LParamSym <> NIL_SYM then
+          LParamName := FModels[LBase.UnitId].Symbols[LParamSym].Name
+        else
+          LParamName := FModels[LBase.UnitId].Tree.NodeText(LIdents[LIdx]);
         LCat := XCatOf(LArgX);
         for var LC in LCons[LIdx] do
         begin
@@ -6250,16 +6322,16 @@ begin
             Continue;
           end;
           // A keyword constraint: class / record / constructor - reserved
-          // words, so the token KIND is the test (no text copy).
-          LTok := FModels[LBase.UnitId].Tree.Nodes[LC].FirstToken;
-          if (LTok < 0) or
-             (LTok > High(FModels[LBase.UnitId].Tree.Source.Visible)) then
+          // words, so the token KIND is the test, recorded by Phase 1 (the
+          // declaring model may be text-demoted by now).
+          if not FModels[LBase.UnitId].KeywordConstraints.TryGetValue(LC,
+               LWord) then
             Continue;
           if LCat = tcUnknown then
             Continue;   // category not modeled - say nothing
           // NB: qualified kinds - System.TypInfo's TTypeKind also names
           // tkClass/tkRecord and shadows ours in this unit.
-          case FModels[LBase.UnitId].Tree.Source.VisibleToken(LTok).Kind of
+          case PasTree.Types.TPasTokenKind(LWord) of
             PasTree.Types.tkClass:
               if LCat <> tcClass then
                 EmitAt(LM, LArgNode, 'E2511',
@@ -8002,7 +8074,7 @@ end;
 function TPasSemaProject.IsConstructorSym(AMid, ASym: Integer): Boolean;
 var
   LM: TPasSemaModel;
-  LName, LRoutine, LTok: Integer;
+  LName, LRoutine: Integer;
 begin
   Result := False;
   LM := FModels[AMid];
@@ -8014,12 +8086,10 @@ begin
   LRoutine := LM.Tree.Nodes[LName].Parent;
   if (LRoutine = NIL_NODE) or (LM.Tree.Nodes[LRoutine].Kind <> nkRoutine) then
     Exit;
-  LTok := LM.Tree.Nodes[LRoutine].FirstToken;
-  // `constructor` is a reserved word - the token KIND already says it, no
-  // text copy needed (this runs per member hit / per overload candidate).
-  if (LTok >= 0) and (LTok <= High(LM.Tree.Source.Visible)) then
-    Result :=
-      LM.Tree.Source.VisibleToken(LTok).Kind = PasTree.Types.tkConstructor;
+  // The head word through RoutineHead, not the head token: this asks the
+  // DECLARING model, which may be text-demoted - RoutineHead answers from
+  // DemoteText's snapshot there (the token read said "not a constructor").
+  Result := LM.RoutineHead(ASym) = rhConstructor;
 end;
 
 { A `class constructor` / `class destructor` - which is NOT callable at all
@@ -8037,7 +8107,7 @@ end;
 function TPasSemaProject.IsClassCtorDtorSym(AMid, ASym: Integer): Boolean;
 var
   LM: TPasSemaModel;
-  LName, LRoutine, LTok: Integer;
+  LName, LRoutine: Integer;
 begin
   Result := False;
   LM := FModels[AMid];
@@ -8050,11 +8120,8 @@ begin
   if (LRoutine = NIL_NODE) or (LM.Tree.Nodes[LRoutine].Kind <> nkRoutine) or
      (LM.Tree.Nodes[LRoutine].Aux <> 1) then
     Exit;   // not a `class` routine at all - the cheap half of the test first
-  LTok := LM.Tree.Nodes[LRoutine].FirstToken;
-  if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
-    Exit;
-  Result := LM.Tree.Source.VisibleToken(LTok).Kind in
-    [PasTree.Types.tkConstructor, PasTree.Types.tkDestructor];
+  // RoutineHead for the same reason as IsConstructorSym.
+  Result := LM.RoutineHead(ASym) in [rhConstructor, rhDestructor];
 end;
 
 // Type category of a cross-model type - the symbol's own TypeCat, computed by
@@ -11670,8 +11737,8 @@ begin
     LM := FModels[AMid];
   end;
   // The symbol's DeclNode is the property's NAME node; the parameter list is a
-  // sibling of it under the nkPropertyDecl - same shape IsDefaultArrayProp
-  // walks.
+  // sibling of it under the nkPropertyDecl - same shape Phase 1 walks for
+  // sfDefaultArrayProp.
   LDecl := LM.Symbols[ASym].DeclNode;
   if LDecl = NIL_NODE then
     Exit;
@@ -11687,37 +11754,12 @@ begin
   end;
 end;
 
+// Stamped by Phase 1 (TPasSemaResolver.StampRetainedFlags): the specifier
+// TEXT is gone on a demoted declaring model, and this runs per element access.
 function TPasSemaProject.IsDefaultArrayProp(AMid, ASym: Integer): Boolean;
-var
-  LM: TPasSemaModel;
-  LDecl, LChild: Integer;
-  LHasParams, LHasDefault: Boolean;
 begin
-  Result := False;
-  LM := FModels[AMid];
-  if LM.Symbols[ASym].Kind <> skProperty then
-    Exit;
-  // The symbol's DeclNode is the property's NAME node; the specifiers are
-  // siblings of it under the nkPropertyDecl.
-  LDecl := LM.Symbols[ASym].DeclNode;
-  if LDecl = NIL_NODE then
-    Exit;
-  LDecl := LM.Tree.Nodes[LDecl].Parent;
-  if (LDecl = NIL_NODE) or (LM.Tree.Nodes[LDecl].Kind <> nkPropertyDecl) then
-    Exit;
-  LHasParams := False;
-  LHasDefault := False;
-  LChild := LM.Tree.Nodes[LDecl].FirstChild;
-  while LChild <> NIL_NODE do
-  begin
-    if LM.Tree.Nodes[LChild].Kind = nkParams then
-      LHasParams := True
-    else if (LM.Tree.Nodes[LChild].Kind = nkPropSpec) and
-            (LM.Tree.NodeNameLower(LChild) = 'default') then
-      LHasDefault := True;
-    LChild := LM.Tree.Nodes[LChild].NextSibling;
-  end;
-  Result := LHasParams and LHasDefault;
+  Result := (FModels[AMid].Symbols[ASym].Kind = skProperty) and
+    (sfDefaultArrayProp in FModels[AMid].Symbols[ASym].Flags);
 end;
 
 // Does this routine declare a parameter list? Its DeclNode is the NAME node
@@ -15274,6 +15316,7 @@ var
   LNamesByLen: TArray<TArray<string>>;
   LVerdict: TArray<Byte>;               // per reach slot (slot 0 = AId itself)
   LKeys: TArray<TPasRenumberKeys>;      // per reach slot, untouched ones only
+  LScan: TArray<Integer>;               // demoted consumers left to scan
   LIdx, LArg, LRound: Integer;
   LInst: TSemaInstance;
   LAny: Boolean;
@@ -15395,7 +15438,9 @@ begin
         LVerdict[LSlot] := vSelected
       else
         LVerdict[LSlot] := vUntouched;
-      if LVerdict[LSlot] = vUntouched then
+      // A consumer still to be scanned keeps its keys too: it may turn out
+      // untouched once it has text again.
+      if LVerdict[LSlot] in [vUntouched, vNeedsScanButDemoted] then
       begin
         SetLength(LK.ExtRef, LNExt);
         SetLength(LK.CallTarget, LNCall);
@@ -15404,19 +15449,31 @@ begin
         LKeys[LSlot] := LK;
       end;
     end);
+  // The scan reads identifier TEXT, which a text-demoted consumer (DemoteText)
+  // no longer has: rehydrate those, all at once, then scan them. A consumer
+  // whose file changed under it cannot be rehydrated - refused, as before.
+  LScan := nil;
   for LIdx := 1 to High(AReach) do
+    if LVerdict[LIdx] = vNeedsScanButDemoted then
+      LScan := LScan + [AReach[LIdx]];
+  if not HydrateModels(LScan) then
+  begin
+    AWhy := 'consumer-demoted';
+    Exit(False);
+  end;
+  for LIdx := 1 to High(AReach) do
+  begin
+    if (LVerdict[LIdx] = vNeedsScanButDemoted) and
+       TreeMentionsAny(FModels[AReach[LIdx]].Tree, LNamesByLen) then
+      LVerdict[LIdx] := vSelected;
     case LVerdict[LIdx] of
       vSelected:
         ASelected := ASelected + [AReach[LIdx]];
-      vNeedsScanButDemoted:
-        begin
-          AWhy := 'consumer-demoted';
-          Exit(False);
-        end;
     else
       AUntouched := AUntouched + [AReach[LIdx]];
       AUntouchedKeys := AUntouchedKeys + [LKeys[LIdx]];
     end;
+  end;
   Result := True;
 end;
 
@@ -15555,7 +15612,11 @@ begin
   if (LId >= FStatus.Count) or (FStatus[LId] < msFullReady) then
     Exit(Refuse('not-full'));
   LOld := FModels[LId];
-  if (LOld = nil) or LOld.Demoted then
+  // A text-demoted edited module was normally rehydrated by SetBuffer before
+  // its overlay went in. Without one (the file changed on DISK) the loader
+  // already serves the new text and the old stream cannot come back - the
+  // interface diff needs it, so that is a rebuild.
+  if (LOld = nil) or (LOld.Demoted and not EnsureHydrated(LId)) then
     Exit(Refuse('demoted'));
   LNew := nil;
   try
@@ -15675,9 +15736,11 @@ begin
       if (FModuleRedoLimit > 0) and (Length(LIds) > FModuleRedoLimit) then
         Exit(Refuse(Format('too-many-consumers(%d>%d;reach=%d;%s)',
           [Length(LIds), FModuleRedoLimit, LRadius, LCounts])));
-      for LIdx := 1 to High(LIds) do
-        if FModels[LIds[LIdx]].Demoted then
-          Exit(Refuse('consumer-demoted'));
+      // A redone consumer re-runs Phase 1 over its own tree, which needs its
+      // text: a text-demoted one (DemoteText) is rehydrated here, still
+      // before the commit point.
+      if not HydrateModels(Copy(LIds, 1, MaxInt)) then
+        Exit(Refuse('consumer-demoted'));
     end
     else
       LIds := [LId];
@@ -15832,6 +15895,55 @@ begin
     LKeep.Free;
   end;
   FTransientReleased := True;
+end;
+
+procedure TPasSemaProject.DemoteText(const AKeepFiles: TArray<string>);
+var
+  LKeep: TDictionary<Integer, Boolean>;
+  LIdx, LMid: Integer;
+begin
+  LKeep := TDictionary<Integer, Boolean>.Create;
+  try
+    for LIdx := 0 to High(AKeepFiles) do
+      if FByPath.TryGetValue(
+           LowerCase(TPath.GetFullPath(AKeepFiles[LIdx])), LMid) and
+         (LMid >= 0) then
+        LKeep.AddOrSetValue(LMid, True);
+    for LIdx := 0 to FModels.Count - 1 do
+      // Not-yet-full models (a cancelled or refused run) keep their text:
+      // whatever finishes them reads it.
+      if not LKeep.ContainsKey(LIdx) and (FModels[LIdx] <> nil) and
+         not FModels[LIdx].OracleStream and (LIdx < FStatus.Count) and
+         (FStatus[LIdx] >= msFullReady) then
+        FModels[LIdx].DemoteText;
+  finally
+    LKeep.Free;
+  end;
+end;
+
+// Rehydrates every demoted model among AIds, in parallel - distinct models,
+// one worker each (EnsureHydrated writes only its own model and rents its
+// preprocessor from the locked pool). False when any of them could not be
+// rehydrated (its file changed under it): the caller refuses.
+function TPasSemaProject.HydrateModels(const AIds: TArray<Integer>): Boolean;
+var
+  LTodo: TArray<Integer>;
+  LFailed: Integer;
+begin
+  LTodo := nil;
+  for var LMid in AIds do
+    if FModels[LMid].Demoted then
+      LTodo := LTodo + [LMid];
+  if LTodo = nil then
+    Exit(True);
+  LFailed := 0;
+  ParallelFor(High(LTodo),
+    procedure(AIdx: Integer)
+    begin
+      if not EnsureHydrated(LTodo[AIdx]) then
+        AtomicIncrement(LFailed);
+    end);
+  Result := LFailed = 0;
 end;
 
 function TPasSemaProject.IsBaseDefined(const AName: string): Boolean;
