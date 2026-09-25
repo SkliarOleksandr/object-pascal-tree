@@ -18,7 +18,7 @@ The spec keeps exactly one PasTree-facing convention, and it earns its place:
 the `*AST:*` hints, which name the node kind a construct lowers to. Those are
 a vocabulary contract, and `tools/KindsCheck` mechanically cross-checks them.
 
-**Status: as of v0.18.0 (2026-09-07).** A gap is either listed here or it is
+**Status: as of v0.50.0 (2026-09-25).** A gap is either listed here or it is
 not a known gap. When you close one, delete the entry in the same commit.
 
 Not listed here, deliberately: bugs (those are fixed, not documented) and
@@ -87,18 +87,41 @@ README's own section on that).
   compilers): Integer/Cardinal/Int64/UInt64 by magnitude with the sign
   folded, Char for a one-unit string literal, Currency for an exponent-free
   real with at most four fractional digits on a 64-bit target (Extended
-  otherwise). An OPERATOR expression over literals takes the intra-unit
-  typer's category-level answer, which does not fold magnitudes:
-  `var X := 5000000000 + 1` reads Integer where dcc says Int64. The Currency
-  rule was probed on Win64 only; the other 64-bit targets are assumed to
-  share it.
+  otherwise). An OPERATOR initializer is typed from its operands with the
+  4.2.1 rules (OperatorResultX), literals read exactly - `var X :=
+  5000000000 + 1` is an Int64. The Currency rule was probed on Win64 only;
+  the other 64-bit targets are assumed to share it.
 
 ### 3.2.1 True constants
 - a section-level `const C = Expr` is typed from its initializer in the
   declared-type pass (BindTypesX), so another unit's `C.ToString` binds; the
-  same literal, operator and intrinsic (4.11.4) rules as 3.1.3 apply.
+  same literal, operator (4.2.1) and intrinsic (4.11.4) rules as 3.1.3
+  apply, whether the operands are literals or other constants.
+- what PasTree gives a true constant is the type an inline `var X := C`
+  would get - dcc's WIDENED answer - not the constant's own type, which dcc
+  keeps narrower and which is what a member lookup on the constant sees
+  (the spec's 3.2.1 table): an integer constant is sized by its VALUE
+  (`100` finds TShortIntHelper, `200` TByteHelper, `Ord('A')` TWordHelper,
+  `High(Byte)` TByteHelper - here all TIntegerHelper), a Currency-shaped
+  real literal is Currency on Win32 too, `Double(1.5)` is Extended, and a
+  folded `not Byte(5)` is a signed value, not a Byte. Modelling it needs a
+  constant folder, which PasTree does not have; the navigation that results
+  lands on a sibling helper of the same family, never on nothing.
+- a set constructor (`[1, 2]`, `[meA, meB]`) and `nil` give a constant no
+  type: dcc's are anonymous, and nothing in PasTree can name them.
 
 ## 04-expressions-operators.md
+
+### 4.2.1 Result type of an operator expression
+- implemented at the project level (OperatorResultX) for the positions the
+  intra-unit typer leaves untyped - an operand that is a true constant or
+  another unit's name - and for every inline-var initializer. Where the
+  intra-unit typer HAS an answer inside a body it stands, and it is the
+  category-level one: `B + B` over Bytes reads Byte there, not Integer.
+- an arithmetic result over two Bytes or Words is an anonymous subrange of
+  Integer in dcc; PasTree says Integer. `AnsiChar + AnsiChar` (anonymous in
+  dcc) and pointer minus pointer are left untyped; `Cu / Cu` on Win64 is
+  assumed Extended (not probed).
 
 ### 4.11.4 Result types of the value-returning intrinsics
 - the result rules are implemented in both typers from the spec's probe

@@ -3308,10 +3308,16 @@ begin
         end;
       end;
     end;
-    // Recovery, see AtDeclHead.
+    // Recovery, see AtDeclHead. After the `=`, `Name :` is always the next
+    // declaration, but `Name =` only when Name starts a line: `B = S = 'abc';`
+    // is a Boolean constant (an equality comparison is a constant
+    // expression, dcc 37.0), and treating S as the next declaration dropped
+    // the initializer - B typed as nothing and S was declared twice. The
+    // typing state `C3 =` above `C2 = 2;` keeps its recovery.
     LHasEq := Expect(tkEqual, '"="');
     if (not LHasEq and (AtDeclHead or AtSectionBoundary)) or
-       (LHasEq and AtDeclHead([tkEqual, tkColon])) then
+       (LHasEq and (AtDeclHead([tkColon]) or
+        (AtDeclHead([tkEqual]) and TokenStartsLine(FPos)))) then
     begin
       if LHasEq then
         Error('constant expected');

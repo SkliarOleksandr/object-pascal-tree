@@ -1384,6 +1384,112 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // ---- 3.2.1 / 4.2.1: a true constant defined by an OPERATOR over other
+  // constants. Such a constant has no TypeSym, so the intra-unit typer
+  // types `KChA + KChB` as nothing - and before OperatorResultX so did
+  // BindTypesX, and every member reached through the constant went dark
+  // (the report: a string helper method on `Kinds = KindA + KindB` over
+  // Char constants). The Mark helpers tell which type a member lookup
+  // really saw: each returns its own record. Every rule is a dcc 37.0 probe
+  // (both compilers, 2026-09-25). ----
+  UNIT_XKA =
+    'unit XKA;'#10'interface'#10 +
+    'type'#10 +
+    '  TStrMark = record end;'#10 +
+    '  TIntMark = record end;'#10 +
+    '  TI64Mark = record end;'#10 +
+    '  TByteMark = record end;'#10 +
+    '  TBoolMark = record end;'#10 +
+    '  TExtMark = record end;'#10 +
+    '  TStrH = record helper for string function Mark: TStrMark; end;'#10 +
+    '  TIntH = record helper for Integer function Mark: TIntMark; end;'#10 +
+    '  TI64H = record helper for Int64 function Mark: TI64Mark; end;'#10 +
+    '  TByteH = record helper for Byte function Mark: TByteMark; end;'#10 +
+    '  TBoolH = record helper for Boolean function Mark: TBoolMark; end;'#10 +
+    '  TExtH = record helper for Extended function Mark: TExtMark; end;'#10 +
+    '  TKHolder = class'#10 +
+    '  public const'#10 +
+    '    KC = 100000;'#10 +
+    '  end;'#10 +
+    'const'#10 +
+    '  KChA = ''S'';'#10 +
+    '  KChB = ''T'';'#10 +
+    '  KStr = KChA + KChB;'#10 +
+    '  KStr2 = KStr + KChA;'#10 +
+    '  KInt = 100000;'#10 +
+    '  KSum = KInt + 1;'#10 +
+    '  KBig = KInt + 5000000000;'#10 +
+    '  KFold = 5000000000 + 1;'#10 +
+    '  KByte = Byte(5);'#10 +
+    '  KByteSum = KByte + KByte;'#10 +
+    '  KDiv = KInt div 3;'#10 +
+    '  KNeg = -KInt;'#10 +
+    '  KNested = (KInt + 1) * 2;'#10 +
+    '  KReal = KInt / 2;'#10 +
+    '  KRealSum = 1.5 + KInt;'#10 +
+    '  KBool = KInt > 5;'#10 +
+    '  KEq = KStr = ''ST'';'#10 +
+    '  KAnd = KBool and KEq;'#10 +
+    '  KIn = 3 in [1, 2, 3];'#10 +
+    '  KClass = TKHolder.KC;'#10 +
+    'implementation'#10 +
+    'function TStrH.Mark: TStrMark; begin end;'#10 +
+    'function TIntH.Mark: TIntMark; begin end;'#10 +
+    'function TI64H.Mark: TI64Mark; begin end;'#10 +
+    'function TByteH.Mark: TByteMark; begin end;'#10 +
+    'function TBoolH.Mark: TBoolMark; begin end;'#10 +
+    'function TExtH.Mark: TExtMark; begin end;'#10 +
+    'end.'#10;
+
+  // The consumer: members through XKA's constants, a chain of its own over
+  // them, an operator expression as a member BASE, and inline vars.
+  UNIT_XKB =
+    'unit XKB;'#10'interface'#10'uses XKA;'#10 +
+    'const'#10 +
+    '  LStr = KChA + ''x'';'#10 +
+    '  LChain = LStr + KStr2;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var B: Byte; I: Integer; C: Cardinal;'#10 +
+    'begin'#10 +
+    '  var M01 := KStr.Mark;'#10 +
+    '  var M02 := KStr2.Mark;'#10 +
+    '  var M03 := KSum.Mark;'#10 +
+    '  var M04 := KBig.Mark;'#10 +
+    '  var M05 := KBool.Mark;'#10 +
+    '  var M06 := KReal.Mark;'#10 +
+    '  var M08 := LChain.Mark;'#10 +
+    '  var M09 := (KChA + KChB).Mark;'#10 +
+    '  var M10 := KClass.Mark;'#10 +
+    '  var M11 := KEq.Mark;'#10 +
+    '  var V01 := KChA + KChB;'#10 +
+    '  var V02 := 5000000000 + 1;'#10 +
+    '  var V03 := B + B;'#10 +
+    '  var V04 := I + C;'#10 +
+    '  var V05 := not B;'#10 +
+    '  var V06 := KInt > I;'#10 +
+    '  var V07 := -B;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  // The 64-bit side of the real rule: Currency constants stay Currency
+  // through `+`, `/` is Extended.
+  UNIT_XKW =
+    'unit XKW;'#10'interface'#10 +
+    'const'#10 +
+    '  KCur = 1.5;'#10 +
+    '  KCurSum = KCur + 1;'#10 +
+    '  KCurDiv = KCur / 2;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var Cu: Currency; D: Double; S: Single;'#10 +
+    'begin'#10 +
+    '  var W01 := 1.5 + 1.5;'#10 +
+    '  var W02 := Cu + D;'#10 +
+    '  var W03 := S + S;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
 var
   LDir: string;
   LU, LV, LH, LW, LQ, LR, LB, LC, LE, LG, LN: TPasSemaModel;
@@ -1977,6 +2083,109 @@ begin
     Eq('4.11/Win64: Abs(Double) is Extended', XTypeOf(LE, 'W05'), 'Extended');
     Eq('4.11/Win64: Pi is Extended', XTypeOf(LE, 'W06'), 'Extended');
     Eq('4.11/Win64: Sqr(Currency) is Extended', XTypeOf(LE, 'W07'),
+      'Extended');
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- 3.2.1 / 4.2.1: true constants over operators ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype_kop');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XKA.pas'), UNIT_XKA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XKB.pas'), UNIT_XKB);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    LE := ModelByName('xka');
+    LB := ModelByName('xkb');
+    Ok('XKA/XKB loaded', Assigned(LE) and Assigned(LB));
+    Ok('XKA: no diags at all', Length(LE.Diags) = 0);
+    Ok('XKB: no diags at all', Length(LB.Diags) = 0);
+    Eq('3.2.1: Char const + Char const is string', XTypeOf(LE, 'KStr'),
+      'string');
+    Eq('3.2.1: ...and a constant defined from THAT', XTypeOf(LE, 'KStr2'),
+      'string');
+    Eq('3.2.1: Integer const + literal is Integer', XTypeOf(LE, 'KSum'),
+      'Integer');
+    Eq('3.2.1: Integer const + an Int64 literal is Int64',
+      XTypeOf(LE, 'KBig'), 'Int64');
+    Eq('3.2.1: literals are read exactly - 5000000000 + 1 is Int64',
+      XTypeOf(LE, 'KFold'), 'Int64');
+    Eq('3.2.1: Byte + Byte is at least Integer', XTypeOf(LE, 'KByteSum'),
+      'Integer');
+    Eq('3.2.1: div over constants is Integer', XTypeOf(LE, 'KDiv'),
+      'Integer');
+    Eq('3.2.1: unary minus over a constant', XTypeOf(LE, 'KNeg'), 'Integer');
+    Eq('3.2.1: parenthesised operands', XTypeOf(LE, 'KNested'), 'Integer');
+    Eq('3.2.1: / is Extended', XTypeOf(LE, 'KReal'), 'Extended');
+    Eq('3.2.1: a real literal + an Integer const is Extended on Win32',
+      XTypeOf(LE, 'KRealSum'), 'Extended');
+    Eq('3.2.1: a comparison is Boolean', XTypeOf(LE, 'KBool'), 'Boolean');
+    Eq('3.2.1: ...an EQUALITY comparison too (parsed as the initializer, ' +
+      'not as the next declaration)', XTypeOf(LE, 'KEq'), 'Boolean');
+    Eq('3.2.1: and over Boolean constants', XTypeOf(LE, 'KAnd'), 'Boolean');
+    Eq('3.2.1: in over a set constructor is Boolean', XTypeOf(LE, 'KIn'),
+      'Boolean');
+    Eq('3.2.1: a class member constant of another unit',
+      XTypeOf(LE, 'KClass'), 'Integer');
+    Eq('3.2.1: the consumer''s own chain over another unit''s constants',
+      XTypeOf(LB, 'LChain'), 'string');
+    Eq('3.2.1: a string helper binds on the operator-typed constant ' +
+      '(the report)', XTypeOf(LB, 'M01'), 'TStrMark');
+    Eq('3.2.1: ...through a chain of them', XTypeOf(LB, 'M02'), 'TStrMark');
+    Eq('3.2.1: an Integer helper', XTypeOf(LB, 'M03'), 'TIntMark');
+    Eq('3.2.1: an Int64 helper', XTypeOf(LB, 'M04'), 'TI64Mark');
+    Eq('3.2.1: a Boolean helper', XTypeOf(LB, 'M05'), 'TBoolMark');
+    Eq('3.2.1: an Extended helper', XTypeOf(LB, 'M06'), 'TExtMark');
+    Eq('3.2.1: the consumer''s own chain binds too', XTypeOf(LB, 'M08'),
+      'TStrMark');
+    Eq('4.2.1: an operator expression as a member base',
+      XTypeOf(LB, 'M09'), 'TStrMark');
+    Eq('3.2.1: a helper through a class member constant',
+      XTypeOf(LB, 'M10'), 'TIntMark');
+    Eq('3.2.1: a helper through an equality constant', XTypeOf(LB, 'M11'),
+      'TBoolMark');
+    Eq('4.2.1: var := Char const + Char const is string',
+      XTypeOf(LB, 'V01'), 'string');
+    Eq('4.2.1: var := 5000000000 + 1 is Int64 (literals read exactly)',
+      XTypeOf(LB, 'V02'), 'Int64');
+    Eq('4.2.1: var := B + B over Bytes is Integer (dcc: an anonymous ' +
+      'subrange of it)', XTypeOf(LB, 'V03'), 'Integer');
+    Eq('4.2.1: Integer + Cardinal is Int64', XTypeOf(LB, 'V04'), 'Int64');
+    Eq('4.2.1: not keeps a Byte', XTypeOf(LB, 'V05'), 'Byte');
+    Eq('4.2.1: a comparison with a constant is Boolean', XTypeOf(LB, 'V06'),
+      'Boolean');
+    Eq('4.2.1: unary minus of a Byte is Integer', XTypeOf(LB, 'V07'),
+      'Integer');
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype_kop64');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XKW.pas'), UNIT_XKW);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    LE := ModelByName('xkw');
+    Ok('XKW loaded', Assigned(LE));
+    Ok('XKW: no diags at all', Length(LE.Diags) = 0);
+    Eq('3.2.1/Win64: a Currency const + 1 stays Currency',
+      XTypeOf(LE, 'KCurSum'), 'Currency');
+    Eq('3.2.1/Win64: ...but / is Extended', XTypeOf(LE, 'KCurDiv'),
+      'Extended');
+    Eq('4.2.1/Win64: 1.5 + 1.5 is Currency', XTypeOf(LE, 'W01'), 'Currency');
+    Eq('4.2.1/Win64: Currency + Double is Currency', XTypeOf(LE, 'W02'),
+      'Currency');
+    Eq('4.2.1/Win64: Single + Single is Extended', XTypeOf(LE, 'W03'),
       'Extended');
   finally
     GProj.Free;

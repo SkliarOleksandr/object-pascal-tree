@@ -599,6 +599,8 @@ type
     function LiteralTypeX(AMid, ANode: Integer; ANegated: Boolean): TSemaXType;
     function IsSignedLiteral(AMid, ANode: Integer;
       out ALit: Integer; out ANegated: Boolean): Boolean;
+    function OperatorResultX(AMid, AOpNode: Integer;
+      const AL, AR: TSemaXType): TSemaXType;
     function UntypedInitTypeX(AMid, ANode: Integer;
       AFollowForeign: Boolean): TSemaXType;
     function InferredDeclTypeX(AMid, ASym: Integer;
@@ -978,8 +980,10 @@ type
     function WithTargetTypeX(AId, ANode: Integer;
       AProbe: TPasXProbe = nil): TSemaXType;
     { WithTargetTypeX for a designator in INITIALIZER position (3.1.3), with
-      the refusals that keep an inferred declaration from being a guess. }
-    function InitDesignatorTypeX(AMid, ANode: Integer): TSemaXType;
+      the refusals that keep an inferred declaration from being a guess.
+      AFollowForeign as UntypedInitTypeX's. }
+    function InitDesignatorTypeX(AMid, ANode: Integer;
+      AFollowForeign: Boolean = False): TSemaXType;
     function FindInEnclosingWith(AId, ANode: Integer;
       const ANameLower: string; out AUid, ASym: Integer;
       out AX: TSemaXType; AProbe: TPasXProbe = nil): Boolean;
@@ -9579,6 +9583,40 @@ var
     end;
   end;
 
+  { An operator expression's type from its operands (OperatorResultX): a
+    literal operand read exactly (LiteralTypeX), a nested operator in turn,
+    anything else this walk's answer; the walk's own answer for N when the
+    operands say nothing. }
+  function OpX(N: Integer): TSemaXType;
+  var
+    LLit: Integer;
+    LNeg: Boolean;
+  begin
+    Result := XNil;
+    if N = NIL_NODE then
+      Exit;
+    if IsSignedLiteral(AId, N, LLit, LNeg) then
+      Exit(LiteralTypeX(AId, LLit, LNeg));
+    case LM.Tree.Nodes[N].Kind of
+      nkParen:
+        Result := OpX(LM.Tree.Nodes[N].FirstChild);
+      nkBinaryOp:
+        begin
+          LLit := LM.Tree.Nodes[N].FirstChild;
+          if (LLit <> NIL_NODE) and ((LM.Tree.Nodes[N].Aux < 0) or
+             (LM.Tree.Source.VisibleToken(LM.Tree.Nodes[N].Aux).Kind <> tkAs))
+          then
+            Result := OperatorResultX(AId, N, OpX(LLit),
+              OpX(LM.Tree.Nodes[LLit].NextSibling));
+        end;
+      nkUnaryOp:
+        Result := OperatorResultX(AId, N, OpX(LM.Tree.Nodes[N].FirstChild),
+          XNil);
+    end;
+    if not XValid(Result) then
+      Result := GetX(N);
+  end;
+
   { The type an inline declaration INFERS from initializer AInit - this
     walk's own answer for the node (GetX), with the refusals that keep the
     inference from being a guess:
@@ -9623,6 +9661,16 @@ var
       nkCall:
         if (LAmbig <> nil) and LAmbig.ContainsKey(AInit) then
           Exit;
+      // An operator expression: from its operands, where literals are read
+      // exactly - `5000000000 + 1` is an Int64 and `1.5 + 1.5` a Currency on
+      // Win64, where the intra-unit typer says Integer and Extended.
+      nkBinaryOp, nkUnaryOp:
+        begin
+          Result := OpX(AInit);
+          if XValid(Result) and (XCatOf(Result) = tcNil) then
+            Result := XNil;
+          Exit;
+        end;
     end;
     Result := GetX(AInit);
     if XValid(Result) and (XCatOf(Result) = tcNil) then
@@ -10274,11 +10322,16 @@ var
           end;
         end;
 
-      // `Obj as TOwner` - the CAST's type, the right operand. Only `as`: any
-      // other binary operator yields a value whose members nobody walks.
-      // `(Obj as TOwner).Items` and `var K := Obj as TOwner` both typed to
-      // nothing here while `with Obj as TOwner do` worked, because only the
+      // `Obj as TOwner` - the CAST's type, the right operand. `(Obj as
+      // TOwner).Items` and `var K := Obj as TOwner` both typed to nothing
+      // here while `with Obj as TOwner do` worked, because only the
       // with-target typer had the case.
+      //
+      // Any other operator: the intra-unit typer's answer stands when it has
+      // one; where it has none - an operand naming a true constant, another
+      // unit's name - the operands' types this walk computed say
+      // (OperatorResultX). `(CA + CB).CountChar(C)` over two Char constants
+      // and `var S := CA + CB` had nothing to bind the member to.
       nkBinaryOp:
         if (LM.Tree.Nodes[N].Aux >= 0) and
            (LM.Tree.Source.VisibleToken(LM.Tree.Nodes[N].Aux).Kind = tkAs) then
@@ -10287,6 +10340,20 @@ var
           if LBase <> NIL_NODE then
             SetXAt(N, ResolveTypeExprNested(AId,
               LM.Tree.Nodes[LBase].NextSibling));
+        end
+        else if LM.ExprType[N] = NIL_SYM then
+        begin
+          LBX := OpX(N);
+          if XValid(LBX) then
+            SetXAt(N, LBX);
+        end;
+
+      nkUnaryOp:
+        if LM.ExprType[N] = NIL_SYM then
+        begin
+          LBX := OpX(N);
+          if XValid(LBX) then
+            SetXAt(N, LBX);
         end;
 
       // `inherited Canvas` / `inherited GetRect(X)` as a VALUE (12.1.2): the
@@ -12549,6 +12616,193 @@ begin
     nkCaretChar];
 end;
 
+{ The type of the operator expression AOpNode (nkBinaryOp, or nkUnaryOp with
+  AR = XNil) from its OPERANDS' types, for the positions where the intra-unit
+  typer has no answer because an operand is not a type it knows: an operand
+  naming a true constant (3.2.1 - such a constant has no TypeSym, only the
+  SymTypeX this level infers for it), another unit's anything, a literal the
+  typer reads only at category level.
+
+  `const CKinds = CKindA + CKindB;` over two Char constants typed as
+  NOTHING, and so did every constant defined from it: the real report was
+  `CKinds.CountChar(C)` (TStringHelper) going nowhere under Ctrl+Click.
+
+  The rules are dcc 37.0's for an inline `var X := A op B` (4.2.1, probed
+  on both compilers):
+  - integers: at least Integer (`B + B` over Bytes is an anonymous subrange
+    of Integer in dcc, Integer here), a 32-bit signed/unsigned mix is Int64,
+    otherwise the wider operand; `not` keeps its operand's type, `-` floors;
+  - reals: Extended, whatever the operands (`Sg + Sg` included) - except
+    that on a 64-bit target an operation with a Currency operand is
+    Currency; `/` is always Extended;
+  - strings: string when either side is string or Char, AnsiString for
+    AnsiString with AnsiString or AnsiChar;
+  - a pointer plus or minus an integer keeps the pointer's type;
+  - a comparison, `in` and `is` are Boolean whatever they compare.
+  Anything else answers XNil: an operand of unknown type, a record or class
+  operand (an overloaded operator's result is the operator's, 4.12), a
+  Variant, `AnsiChar + AnsiChar` (an anonymous type in dcc). A true
+  constant's OWN dcc type is narrower still - value-sized, `100` a ShortInt
+  for helper lookup - and that is not modelled; see docs/coverage.md,
+  3.2.1. }
+function TPasSemaProject.OperatorResultX(AMid, AOpNode: Integer;
+  const AL, AR: TSemaXType): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LOp: TPasTokenKind;
+  LL, LR: TSemaXType;
+  LcL, LcR: TSemaTypeCat;
+
+  function Rank(const AX: TSemaXType; ACat: TSemaTypeCat): Integer;
+  begin
+    Result := FModels[AX.UnitId].Symbols[AX.Sym].NumRank;
+    // A distinct type (`TMyInt = type Integer`, `TDateTime = type Double`)
+    // or a subrange carries no rank of its own: the family's default.
+    if Result = 0 then
+      if ACat = tcFloat then
+        Result := 2
+      else
+        Result := 3;
+  end;
+
+  function NameIs(const AX: TSemaXType; const ANames: array of string): Boolean;
+  var
+    LName: string;
+  begin
+    Result := False;
+    if not XValid(AX) or
+       (FModels[AX.UnitId].Symbols[AX.Sym].Kind <> skBuiltinType) then
+      Exit;
+    for LName in ANames do
+      if FModels[AX.UnitId].Symbols[AX.Sym].NameLower = LName then
+        Exit(True);
+  end;
+
+  // A real result: Extended, or Currency on a 64-bit target when an operand
+  // is one (Currency arithmetic is integral there - see Abs in 4.11.4).
+  function RealX: TSemaXType;
+  begin
+    if PlatformInfo(FPlatform).Is64Bit and
+       (NameIs(LL, ['currency']) or NameIs(LR, ['currency'])) then
+      Result := BuiltinX(AMid, 'currency')
+    else
+      Result := BuiltinX(AMid, 'extended');
+  end;
+
+  // An integer operand as a result: a rankless one (subrange, distinct
+  // type) and anything narrower than 32 bits is an Integer.
+  function IntFloor(const AX: TSemaXType): TSemaXType;
+  begin
+    if FModels[AX.UnitId].Symbols[AX.Sym].NumRank >= 3 then
+      Result := AX
+    else
+      Result := BuiltinX(AMid, 'integer');
+  end;
+
+  function WiderNum: TSemaXType;
+  var
+    LRL, LRR: Integer;
+  begin
+    if (LcL = tcFloat) or (LcR = tcFloat) then
+      Exit(RealX);
+    LRL := Rank(LL, LcL);
+    LRR := Rank(LR, LcR);
+    if (LRL < 3) and (LRR < 3) then
+      Exit(BuiltinX(AMid, 'integer'));
+    if LRR > LRL then
+      Exit(IntFloor(LR));
+    if LRL > LRR then
+      Exit(IntFloor(LL));
+    // Two 32-bit operands of different signedness meet in Int64.
+    if (LRL = 3) and
+       (NameIs(LL, ['cardinal', 'longword', 'nativeuint']) <>
+        NameIs(LR, ['cardinal', 'longword', 'nativeuint'])) then
+      Exit(BuiltinX(AMid, 'int64'));
+    Result := IntFloor(LL);
+  end;
+
+begin
+  Result := XNil;
+  if (AMid < 0) or (AOpNode = NIL_NODE) then
+    Exit;
+  LM := FModels[AMid];
+  if (LM.Tree.Nodes[AOpNode].Aux < 0) or
+     (LM.Tree.Nodes[AOpNode].Aux > High(LM.Tree.Source.Visible)) then
+    Exit;
+  LOp := LM.Tree.Source.VisibleToken(LM.Tree.Nodes[AOpNode].Aux).Kind;
+  LL := CanonTypeX(AL);
+  LR := CanonTypeX(AR);
+  LcL := XCatOf(LL);
+  LcR := XCatOf(LR);
+  if (LM.Tree.Nodes[AOpNode].Kind = nkBinaryOp) and
+     (LOp in [tkEqual, tkNotEqual, tkLess, tkLessEqual, tkGreater,
+      tkGreaterEqual, tkIn, tkIs]) then
+    Exit(BuiltinX(AMid, 'boolean'));
+  if (LcL in [tcRecord, tcClass, tcInterface, tcVariant]) or
+     (LcR in [tcRecord, tcClass, tcInterface, tcVariant]) then
+    Exit;
+
+  if LM.Tree.Nodes[AOpNode].Kind = nkUnaryOp then
+  begin
+    case LOp of
+      tkMinus, tkPlus:
+        case LcL of
+          tcInteger: Result := IntFloor(LL);
+          tcFloat: Result := RealX;
+        end;
+      tkNot:
+        case LcL of
+          tcBoolean: Result := BuiltinX(AMid, 'boolean');
+          tcInteger: Result := LL;   // `not B` over a Byte is a Byte
+        end;
+      tkAt:
+        Result := BuiltinX(AMid, 'pointer');
+    end;
+    Exit;
+  end;
+
+  case LOp of
+    tkPlus:
+      if (LcL in [tcInteger, tcFloat]) and (LcR in [tcInteger, tcFloat]) then
+        Result := WiderNum
+      else if (LcL in [tcChar, tcString]) and (LcR in [tcChar, tcString]) then
+      begin
+        if NameIs(LL, ['string', 'unicodestring', 'char', 'widechar']) or
+           NameIs(LR, ['string', 'unicodestring', 'char', 'widechar']) then
+          Result := BuiltinX(AMid, 'string')
+        else if (LcL = tcString) and XSameType(LL, LR) then
+          Result := LL
+        else if (NameIs(LL, ['ansistring']) and NameIs(LR, ['ansichar'])) or
+                (NameIs(LL, ['ansichar']) and NameIs(LR, ['ansistring'])) then
+          Result := BuiltinX(AMid, 'ansistring');
+      end
+      else if (LcL = tcSet) and (LcR = tcSet) then
+        Result := LL
+      else if (LcL = tcPointer) and (LcR = tcInteger) then
+        Result := LL
+      else if (LcL = tcInteger) and (LcR = tcPointer) then
+        Result := LR;
+    tkMinus, tkStar:
+      if (LcL in [tcInteger, tcFloat]) and (LcR in [tcInteger, tcFloat]) then
+        Result := WiderNum
+      else if (LcL = tcSet) and (LcR = tcSet) then
+        Result := LL
+      else if (LOp = tkMinus) and (LcL = tcPointer) and (LcR = tcInteger) then
+        Result := LL;
+    tkSlash:
+      if (LcL in [tcInteger, tcFloat]) and (LcR in [tcInteger, tcFloat]) then
+        Result := BuiltinX(AMid, 'extended');
+    tkDiv, tkMod, tkShl, tkShr:
+      if (LcL = tcInteger) and (LcR = tcInteger) then
+        Result := WiderNum;
+    tkAnd, tkOr, tkXor:
+      if (LcL = tcBoolean) and (LcR = tcBoolean) then
+        Result := BuiltinX(AMid, 'boolean')
+      else if (LcL = tcInteger) and (LcR = tcInteger) then
+        Result := WiderNum;
+  end;
+end;
+
 { The type dcc gives a LITERAL where a type is inferred from it (3.1.3, 3.2.1)
   - every rule below is a dcc 37.0 probe, both compilers, not the spec's
   sketch:
@@ -12738,12 +12992,11 @@ end;
   Literals get dcc's exact rule (LiteralTypeX, sign included); a designator
   or call goes through InitDesignatorTypeX - the expression walk plus the
   3.1.3 refusals - and recurses into another inferred declaration of the
-  SAME model; an operator
-  expression takes the intra-unit typer's answer when it has one (Integer for
-  `CI * 2 + 1`, Extended for `/`, Boolean for a comparison) - that typer does
-  not fold magnitudes, so `5000000000 + 1` reads Integer where dcc says
-  Int64, the one documented gap. A set constructor has no NAMEABLE type and
-  answers XNil.
+  SAME model; an operator expression is typed from its operands' own
+  inferred types (OperatorResultX: `CA + CB` over two Char constants is a
+  string, `5000000000 + 1` an Int64, `CI > 5` a Boolean), falling back to the
+  intra-unit typer's category-level answer when an operand types as
+  nothing. A set constructor has no NAMEABLE type and answers XNil.
 
   AFollowForeign: may a designator naming ANOTHER unit's true constant be
   chased into that unit (`const CA = UnitB.CB;`)? That reads unit B's
@@ -12762,7 +13015,8 @@ end;
   Without them the fallback that reads an inferred declaration's type off its
   initializer handed out exactly the guesses the walk refuses - `var LTwo :=
   NeedsTwo` typed Integer at its next use. }
-function TPasSemaProject.InitDesignatorTypeX(AMid, ANode: Integer): TSemaXType;
+function TPasSemaProject.InitDesignatorTypeX(AMid, ANode: Integer;
+  AFollowForeign: Boolean): TSemaXType;
 var
   LProbe: TPasXProbe;
   LM: TPasSemaModel;
@@ -12776,8 +13030,6 @@ begin
   LProbe := TPasXProbe.Create;
   try
     Result := WithTargetTypeX(AMid, ANode, LProbe);
-    if not XValid(Result) then
-      Exit;
     case LM.Tree.Nodes[ANode].Kind of
       nkIdent, nkMember, nkTypeArgs:
         begin
@@ -12816,14 +13068,26 @@ begin
             LTMid := LExt.UnitId;
             LTSym := LExt.Sym;
           end;
-          if LTSym <> NIL_SYM then
-            case FModels[LTMid].Symbols[LTSym].Kind of
-              skType, skBuiltinType, skUnitRef:
-                Result := XNil;
-              skRoutine:
-                if RoutineRequiresArgs(LTMid, LTSym) then
-                  Result := XNil;
-            end;
+          if LTSym = NIL_SYM then
+            Exit;
+          case FModels[LTMid].Symbols[LTSym].Kind of
+            skType, skBuiltinType, skUnitRef:
+              Exit(XNil);
+            skRoutine:
+              if RoutineRequiresArgs(LTMid, LTSym) then
+                Exit(XNil);
+          end;
+          // A TRUE constant the walk found but could not type: its SymTypeX
+          // is filled by BindTypesX in declaration order, so a constant of a
+          // unit not yet bound - or a class member constant, `TFoo.K`, which
+          // the walk reached through a member binding only this probe holds
+          // - comes back empty. Its own initializer says. Another unit's only
+          // when the caller said it is safe (see UntypedInitTypeX).
+          if not XValid(Result) and
+             (FModels[LTMid].Symbols[LTSym].Kind = skConst) and
+             (FModels[LTMid].Symbols[LTSym].TypeNode = NIL_NODE) and
+             ((LTMid = AMid) or AFollowForeign) then
+            Result := InferredDeclTypeX(LTMid, LTSym, AFollowForeign);
         end;
       nkCall:
         if LProbe.FAmbig.ContainsKey(ANode) then
@@ -12838,9 +13102,8 @@ function TPasSemaProject.UntypedInitTypeX(AMid, ANode: Integer;
   AFollowForeign: Boolean): TSemaXType;
 var
   LM: TPasSemaModel;
-  LLit, LName, LSym: Integer;
+  LLit: Integer;
   LNeg: Boolean;
-  LExt: TPasExtRef;
 begin
   Result := XNil;
   if (AMid < 0) or (ANode = NIL_NODE) then
@@ -12855,11 +13118,28 @@ begin
     nkUnaryOp:
       if IsSignedLiteral(AMid, ANode, LLit, LNeg) then
         Result := LiteralTypeX(AMid, LLit, LNeg)
-      else if LM.ExprType[ANode] <> NIL_SYM then
-        Result := XPlain(AMid, LM.ExprType[ANode]);
+      else
+      begin
+        Result := OperatorResultX(AMid, ANode,
+          UntypedInitTypeX(AMid, LM.Tree.Nodes[ANode].FirstChild,
+            AFollowForeign), XNil);
+        if not XValid(Result) and (LM.ExprType[ANode] <> NIL_SYM) then
+          Result := XPlain(AMid, LM.ExprType[ANode]);
+      end;
     nkBinaryOp:
-      if LM.ExprType[ANode] <> NIL_SYM then
-        Result := XPlain(AMid, LM.ExprType[ANode]);
+      begin
+        // The operands' own inferred types first: they know what the
+        // intra-unit typer cannot - a named constant (no TypeSym), another
+        // unit's name, a literal's exact type (`5000000000 + 1` is Int64).
+        LLit := LM.Tree.Nodes[ANode].FirstChild;
+        if LLit <> NIL_NODE then
+          Result := OperatorResultX(AMid, ANode,
+            UntypedInitTypeX(AMid, LLit, AFollowForeign),
+            UntypedInitTypeX(AMid, LM.Tree.Nodes[LLit].NextSibling,
+              AFollowForeign));
+        if not XValid(Result) and (LM.ExprType[ANode] <> NIL_SYM) then
+          Result := XPlain(AMid, LM.ExprType[ANode]);
+      end;
     nkInlineIf:
       begin
         LLit := LM.Tree.Nodes[ANode].FirstChild;   // cond, then, else
@@ -12868,33 +13148,11 @@ begin
             AFollowForeign);
       end;
     nkIdent, nkMember, nkCall, nkIndex, nkDeref, nkTypeArgs, nkInherited:
-      begin
-        Result := InitDesignatorTypeX(AMid, ANode);
-        // A designator naming a TRUE CONSTANT of another unit: its own
-        // SymDeclTypeX is XNil (no type node), and WithTargetTypeX stays
-        // inside this model by design - so the chase into the other unit
-        // happens here, and only when the caller said it is safe.
-        if not XValid(Result) and AFollowForeign and
-           (LM.Tree.Nodes[ANode].Kind in [nkIdent, nkMember]) then
-        begin
-          LName := ANode;
-          if LM.Tree.Nodes[ANode].Kind = nkMember then
-          begin
-            LName := LM.Tree.Nodes[ANode].FirstChild;
-            while (LName <> NIL_NODE) and
-                  (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
-              LName := LM.Tree.Nodes[LName].NextSibling;
-          end;
-          if (LName <> NIL_NODE) and (LM.RefMap[LName] = NIL_SYM) and
-             LM.ExtRefMap.TryGetValue(LName, LExt) then
-          begin
-            LSym := LExt.Sym;
-            if (LSym <> NIL_SYM) and
-               (FModels[LExt.UnitId].Symbols[LSym].Kind = skConst) then
-              Result := InferredDeclTypeX(LExt.UnitId, LSym, True);
-          end;
-        end;
-      end;
+      // A designator naming a TRUE CONSTANT of another unit has no
+      // SymDeclTypeX yet when that unit is bound later, and WithTargetTypeX
+      // stays inside this model by design - InitDesignatorTypeX chases it
+      // into the other unit, and only when the caller said it is safe.
+      Result := InitDesignatorTypeX(AMid, ANode, AFollowForeign);
   end;
   // `nil` has no type to give a declaration (dcc accepts `var P := nil` but
   // nothing can be read off P); an untyped pointer is not a better answer.
