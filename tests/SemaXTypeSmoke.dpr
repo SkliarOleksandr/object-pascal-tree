@@ -1490,6 +1490,73 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // ---- 16.2.1 / 16.5.1: a generic method CALLED with written type
+  // arguments and no required parameters. `GNode.GetData<TThing>` with no
+  // parentheses parses as a type-argument node with no call above it, and
+  // was typed like `TList<Integer>` (nothing); with parentheses the plain
+  // `GetData(): Pointer` overload beside `GetData<T>(): T` won the selection.
+  // The virtual-tree node's shape; both declaration orders; the owner's own
+  // frame (`TGOwner<TThing>.Pair<Integer>` is a TThing). dcc32/dcc64 37.0
+  // probed, 2026-09-25. ----
+  UNIT_XGA =
+    'unit XGA;'#10'interface'#10 +
+    'type'#10 +
+    '  TThing = class'#10 +
+    '  public'#10 +
+    '    Site: Integer;'#10 +
+    '  end;'#10 +
+    '  PGNode = ^TGNode;'#10 +
+    '  TGNode = record'#10 +
+    '    Data: Pointer;'#10 +
+    '    function GetData(): Pointer; overload;'#10 +
+    '    function GetData<T>(): T; overload;'#10 +
+    '    function GetOnly<T>(): T;'#10 +
+    '  end;'#10 +
+    '  TGRev = record'#10 +
+    '    function Get<T>(): T; overload;'#10 +
+    '    function Get(): Pointer; overload;'#10 +
+    '  end;'#10 +
+    '  TGOwner<K> = class'#10 +
+    '    function Pair<T>(): K;'#10 +
+    '  end;'#10 +
+    'var'#10 +
+    '  GNode: TGNode;'#10 +
+    '  GPNode: PGNode;'#10 +
+    '  GRev: TGRev;'#10 +
+    '  GOwner: TGOwner<TThing>;'#10 +
+    'implementation'#10 +
+    'function TGNode.GetData(): Pointer; begin Result := Data; end;'#10 +
+    'function TGNode.GetData<T>(): T; begin Result := Default(T); end;'#10 +
+    'function TGNode.GetOnly<T>(): T; begin Result := Default(T); end;'#10 +
+    'function TGRev.Get<T>(): T; begin Result := Default(T); end;'#10 +
+    'function TGRev.Get(): Pointer; begin Result := nil; end;'#10 +
+    'function TGOwner<K>.Pair<T>(): K; begin Result := Default(K); end;'#10 +
+    'procedure Local;'#10 +
+    'begin'#10 +
+    '  var L01 := GNode.GetData<TThing>;'#10 +
+    '  var L02 := GNode.GetData;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  UNIT_XGB =
+    'unit XGB;'#10'interface'#10 +
+    'implementation'#10 +
+    'uses XGA;'#10 +
+    'procedure P;'#10 +
+    'begin'#10 +
+    '  var G01 := GNode.GetData<TThing>;'#10 +
+    '  var G02 := GNode.GetData<TThing>();'#10 +
+    '  var G03 := GNode.GetData;'#10 +
+    '  var G04 := GPNode.GetData<TThing>;'#10 +
+    '  var G05 := GNode.GetOnly<TThing>;'#10 +
+    '  var G06 := GRev.Get<TThing>;'#10 +
+    '  var G07 := GRev.Get;'#10 +
+    '  var G08 := GOwner.Pair<Integer>;'#10 +
+    '  var G09 := GNode.GetData<TThing>.Site;'#10 +
+    '  var G10 := GRev.Get<TThing>().Site;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
 var
   LDir: string;
   LU, LV, LH, LW, LQ, LR, LB, LC, LE, LG, LN: TPasSemaModel;
@@ -2187,6 +2254,50 @@ begin
       'Currency');
     Eq('4.2.1/Win64: Single + Single is Extended', XTypeOf(LE, 'W03'),
       'Extended');
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- 16.2.1 / 16.5.1: generic method calls with written type arguments ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype_gcall');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XGA.pas'), UNIT_XGA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XGB.pas'), UNIT_XGB);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    LE := ModelByName('xga');
+    LB := ModelByName('xgb');
+    Ok('XGA/XGB loaded', Assigned(LE) and Assigned(LB));
+    Ok('XGA: no diags at all', Length(LE.Diags) = 0);
+    Ok('XGB: no diags at all', Length(LB.Diags) = 0);
+    Eq('16.2.1: a paren-less generic call is its result, same unit',
+      XTypeOf(LE, 'L01'), 'TThing');
+    Eq('16.5.1: ...and the bare name is the PLAIN overload, same unit',
+      XTypeOf(LE, 'L02'), 'Pointer');
+    Eq('16.2.1: a paren-less generic call is its result (no call node)',
+      XTypeOf(LB, 'G01'), 'TThing');
+    Eq('16.5.1: written type arguments pick the generic overload over the ' +
+      'plain one', XTypeOf(LB, 'G02'), 'TThing');
+    Eq('16.5.1: no type arguments - the plain overload', XTypeOf(LB, 'G03'),
+      'Pointer');
+    Eq('16.2.1: through a pointer to the record', XTypeOf(LB, 'G04'),
+      'TThing');
+    Eq('16.2.1: a generic method with no overloads', XTypeOf(LB, 'G05'),
+      'TThing');
+    Eq('16.5.1: the generic declared FIRST', XTypeOf(LB, 'G06'), 'TThing');
+    Eq('16.5.1: ...bare name still the plain one', XTypeOf(LB, 'G07'),
+      'Pointer');
+    Eq('16.2.1: the owner''s frame closes its own parameter',
+      XTypeOf(LB, 'G08'), 'TThing');
+    Eq('16.2.1: a member straight off the paren-less call',
+      XTypeOf(LB, 'G09'), 'Integer');
+    Eq('16.5.1: a member off the parenthesised call', XTypeOf(LB, 'G10'),
+      'Integer');
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

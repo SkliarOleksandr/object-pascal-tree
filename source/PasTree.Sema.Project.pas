@@ -575,6 +575,8 @@ type
       out AMid, ASym: Integer; out AOwner: TSemaXType): Boolean;
     function RoutineHasParams(AMid, ASym: Integer): Boolean;
     function RoutineRequiresArgs(AMid, ASym: Integer): Boolean;
+    function IsGenericRoutine(AMid, ASym: Integer): Boolean;
+    function RoutineTakesNoParams(AMid, ASym: Integer): Boolean;
     function ParamlessOverloadX(const AX: TSemaXType;
       const ANameLower: string; out AMid, ASym, ACtx: Integer): Boolean;
     function ElementX(AId, ABaseNode: Integer): TSemaXType;
@@ -8788,7 +8790,10 @@ var
     LExt: TPasExtRef;
   begin
     LName := ACalleeNode;
-    if LM.Tree.Nodes[LName].Kind = nkMember then
+    // `Obj.M<T>`: the designator is the type-argument node's first child.
+    if LM.Tree.Nodes[LName].Kind = nkTypeArgs then
+      LName := LM.Tree.Nodes[LName].FirstChild;
+    if (LName <> NIL_NODE) and (LM.Tree.Nodes[LName].Kind = nkMember) then
     begin
       LName := LM.Tree.Nodes[LName].FirstChild;
       while (LName <> NIL_NODE) and
@@ -9111,6 +9116,21 @@ var
     end;
   end;
 
+  // The number of type arguments written in the nkTypeArgs node ATypeArgs
+  // (its first child is the designator they follow).
+  function WrittenTypeArgCount(ATypeArgs: Integer): Integer;
+  var
+    LNode: Integer;
+  begin
+    Result := 0;
+    LNode := LM.Tree.Nodes[LM.Tree.Nodes[ATypeArgs].FirstChild].NextSibling;
+    while LNode <> NIL_NODE do
+    begin
+      Inc(Result);
+      LNode := LM.Tree.Nodes[LNode].NextSibling;
+    end;
+  end;
+
   // Cross-model overload selection for a call: walks the resolved head's
   // overload chain and - for a bare-ident callee naming a UNIT-LEVEL routine -
   // merges same-named heads from every resolved used unit (real dcc merges
@@ -9122,6 +9142,14 @@ var
   // type, and the one consumer that must not build on a guess (inline var
   // inference) reads the flag. Two constructors never differ: both yield
   // the class.
+  //
+  // A callee written `Name<...>` admits only the generic candidates with that
+  // many type parameters (16.5.1): `GetData(): Pointer` beside `GetData<T>():
+  // T` in one record both fit zero arguments, and the first - the plain one -
+  // won, so `Node.GetData<TItem>().Site` typed as Pointer and the written
+  // `<TItem>` had nothing to instantiate. When NO candidate passes that
+  // filter the selection runs again without it, as it always did: a generic
+  // this level cannot see the parameters of must not make a call untyped.
   function SelectCallTarget(ACall, ACalleeNode, AHeadMid, AHeadSym,
     ACtx: Integer; out ABestMid, ABestSym: Integer;
     out AAmbiguous: Boolean): Boolean;
@@ -9130,6 +9158,7 @@ var
     LSeenCount: Integer;
     LBestScore: Integer;
     LTypeQualified: Boolean;
+    LTypeArgs: Integer;   // written type-argument count; -1 = no filter
 
     function SameResult(AMid1, ASym1, AMid2, ASym2: Integer): Boolean;
     var
@@ -9183,7 +9212,9 @@ var
         // is the shape - a private `class constructor Create` declared above
         // the public parameterless `constructor Create`, both fitting zero
         // arguments, and the first candidate winning the tie.
-        if IsClassCtorDtorSym(AMid, LCand) then
+        if IsClassCtorDtorSym(AMid, LCand) or
+           ((LTypeArgs >= 0) and
+            (Length(GenericParamIdents(AMid, LCand)) <> LTypeArgs)) then
         begin
           LCand := FModels[AMid].Symbols[LCand].NextOverload;
           Continue;
@@ -9233,6 +9264,9 @@ var
     ABestMid := -1;
     ABestSym := NIL_SYM;
     AAmbiguous := False;
+    LTypeArgs := -1;
+    if LM.Tree.Nodes[ACalleeNode].Kind = nkTypeArgs then
+      LTypeArgs := WrittenTypeArgCount(ACalleeNode);
     // Is the callee qualified by a TYPE (`TMonitor.Enter(X)`) rather than by a
     // value? Then an INSTANCE method is not a candidate at all, and that is the
     // only thing separating some overload pairs: System's TMonitor declares a
@@ -9276,45 +9310,53 @@ var
             [skType, skBuiltinType];
       end;
     end;
-    ConsiderChain(AHeadMid, AHeadSym);
-    // Merge used units' candidates only for a bare unit-level routine name -
-    // methods and nested routines have a closed candidate set (their scope).
-    if (LM.Tree.Nodes[ACalleeNode].Kind = nkIdent) and
-       (FModels[AHeadMid].Scopes[FModels[AHeadMid].Symbols[AHeadSym].Scope].
-        Kind in [sckUnit, sckImplementation]) then
+    // Two passes at most: the second, without the type-argument filter, only
+    // when the first found nothing (see the comment above the function).
+    for var LPass := 0 to 1 do
     begin
-      LHeads := UsesHeads(LM.Tree.NodeNameLower(ACalleeNode));
-      for LIdx := 0 to High(LHeads) do
-        ConsiderChain(LHeads[LIdx].UnitId, LHeads[LIdx].Sym);
-    end;
-    // Nothing in the type's OWN chain fits, so the call means an INHERITED
-    // routine of that name - `TButton.Create(Self)`, where Vcl.StdCtrls'
-    // TButton declares only a parameterless `class constructor Create` and the
-    // one being called is TComponent's `constructor Create(AOwner:
-    // TComponent)`. A binding stops at the first declaration of the name, so
-    // the ancestor's overloads were never candidates and the head stood: the
-    // maps then said `TButton.Create`, and the visibility check believed them
-    // (7 false E2361 on bigflat, plus TRegistry/TEdit/TBluetoothManager).
-    //
-    // Only when nothing fit, which keeps it off the common path entirely: one
-    // FindMemberX from the owner's ANCESTOR, which walks the whole ancestry
-    // itself. A class constructor is not callable at all (15 sec. 15.1.5), so this
-    // is also what stops the analyzer from believing it is.
-    if (ABestSym = NIL_SYM) and (FModels[AHeadMid].Symbols[AHeadSym].Scope <>
-       NIL_SCOPE) then
-    begin
-      LQBase := FModels[AHeadMid].Scopes[
-        FModels[AHeadMid].Symbols[AHeadSym].Scope].StructSym;
-      if LQBase <> NIL_SYM then
+      ConsiderChain(AHeadMid, AHeadSym);
+      // Merge used units' candidates only for a bare unit-level routine name -
+      // methods and nested routines have a closed candidate set (their scope).
+      if (LM.Tree.Nodes[ACalleeNode].Kind = nkIdent) and
+         (FModels[AHeadMid].Scopes[FModels[AHeadMid].Symbols[AHeadSym].Scope].
+          Kind in [sckUnit, sckImplementation]) then
       begin
-        var LAnc := AncestorOfX(XPlain(AHeadMid, LQBase));
-        var LAMid, LASym, LACtx: Integer;
-        if XValid(LAnc) and FindMemberX(AId, LAnc,
-             FModels[AHeadMid].Symbols[AHeadSym].NameLower,
-             LAMid, LASym, LACtx) and
-           (FModels[LAMid].Symbols[LASym].Kind = skRoutine) then
-          ConsiderChain(LAMid, LASym);
+        LHeads := UsesHeads(LM.Tree.NodeNameLower(ACalleeNode));
+        for LIdx := 0 to High(LHeads) do
+          ConsiderChain(LHeads[LIdx].UnitId, LHeads[LIdx].Sym);
       end;
+      // Nothing in the type's OWN chain fits, so the call means an INHERITED
+      // routine of that name - `TButton.Create(Self)`, where Vcl.StdCtrls'
+      // TButton declares only a parameterless `class constructor Create` and
+      // the one being called is TComponent's `constructor Create(AOwner:
+      // TComponent)`. A binding stops at the first declaration of the name, so
+      // the ancestor's overloads were never candidates and the head stood: the
+      // maps then said `TButton.Create`, and the visibility check believed them
+      // (7 false E2361 on bigflat, plus TRegistry/TEdit/TBluetoothManager).
+      //
+      // Only when nothing fit, which keeps it off the common path entirely: one
+      // FindMemberX from the owner's ANCESTOR, which walks the whole ancestry
+      // itself. A class constructor is not callable at all (15 sec. 15.1.5),
+      // so this is also what stops the analyzer from believing it is.
+      if (ABestSym = NIL_SYM) and (FModels[AHeadMid].Symbols[AHeadSym].Scope <>
+         NIL_SCOPE) then
+      begin
+        LQBase := FModels[AHeadMid].Scopes[
+          FModels[AHeadMid].Symbols[AHeadSym].Scope].StructSym;
+        if LQBase <> NIL_SYM then
+        begin
+          var LAnc := AncestorOfX(XPlain(AHeadMid, LQBase));
+          var LAMid, LASym, LACtx: Integer;
+          if XValid(LAnc) and FindMemberX(AId, LAnc,
+               FModels[AHeadMid].Symbols[AHeadSym].NameLower,
+               LAMid, LASym, LACtx) and
+             (FModels[LAMid].Symbols[LASym].Kind = skRoutine) then
+            ConsiderChain(LAMid, LASym);
+        end;
+      end;
+      if (ABestSym <> NIL_SYM) or (LTypeArgs < 0) then
+        Break;
+      LTypeArgs := -1;
     end;
     Result := ABestSym <> NIL_SYM;
   end;
@@ -9327,19 +9369,22 @@ var
     which keeps a genuinely unmatched call typed exactly as it was. }
   procedure RetargetToGeneric(ATypeArgs: Integer; var AMid, ASym: Integer);
   var
-    LWanted, LOwner, LMemMid, LMemSym, LCtx, LNode: Integer;
+    LWanted, LOwner, LMemMid, LMemSym, LCtx: Integer;
     LCur: TSemaXType;
     LNameLower: string;
   begin
-    LWanted := 0;
-    LNode := LM.Tree.Nodes[LM.Tree.Nodes[ATypeArgs].FirstChild].NextSibling;
-    while LNode <> NIL_NODE do
+    LWanted := WrittenTypeArgCount(ATypeArgs);
+    // An overload of the SAME set that fits keeps the call here: a plain
+    // `GetData(): Pointer` declared before `GetData<T>(): T` is the head, and
+    // the selection's own type-argument filter picks the generic sibling.
+    LMemSym := ASym;
+    while (LMemSym <> NIL_SYM) and
+          (FModels[AMid].Symbols[LMemSym].Kind = skRoutine) do
     begin
-      Inc(LWanted);
-      LNode := LM.Tree.Nodes[LNode].NextSibling;
+      if Length(GenericParamIdents(AMid, LMemSym)) = LWanted then
+        Exit;
+      LMemSym := FModels[AMid].Symbols[LMemSym].NextOverload;
     end;
-    if Length(GenericParamIdents(AMid, ASym)) = LWanted then
-      Exit;
     LNameLower := FModels[AMid].Symbols[ASym].NameLower;
     // The candidate moves; AMid/ASym only change once something MATCHES, so a
     // walk that ends in nothing leaves the call exactly as it found it.
@@ -9367,6 +9412,61 @@ var
         Exit;
       end;
     end;
+  end;
+
+  { `Node.GetData<TItem>` with NO parentheses (16.2.1): the ordinary
+    paren-less call of a routine that requires no arguments, type arguments
+    and all. The parser cannot tell - `Id<Args>` before `;` is a type-argument
+    list by the 16.3.1 follower rule, and with no `(` there is no nkCall - so
+    it came out an instantiation, typed through ResolveTypeExpr like
+    `TList<Integer>`, which answers nothing for a routine: `var A :=
+    Node.GetData<TItem>;` left A untyped and `A.Site` had no declaration.
+
+    True when N's designator binds a ROUTINE - N is then a call, never a type
+    expression, typed or not - unless N is the callee of a real nkCall, whose
+    own case types it with its arguments. The candidate is the first
+    overload that is generic with the written number of type parameters and
+    requires no argument (the ancestors' too, the way RetargetToGeneric
+    walks them); the result is its declared type closed over the owner's
+    frame and then over the written arguments (ExplicitMethodFrame). AX stays
+    XNil when no candidate fits. }
+  function TypeArgsCallX(N: Integer; out AX: TSemaXType): Boolean;
+  var
+    LHead, LParent, LMid, LSym, LCand, LWanted, LCtx, LFrame: Integer;
+  begin
+    AX := XNil;
+    Result := False;
+    LHead := LM.Tree.Nodes[N].FirstChild;
+    if LHead = NIL_NODE then
+      Exit;
+    LParent := LM.Tree.Nodes[N].Parent;
+    if (LParent <> NIL_NODE) and (LM.Tree.Nodes[LParent].Kind = nkCall) and
+       (LM.Tree.Nodes[LParent].FirstChild = N) then
+      Exit;
+    if not TargetSym(LHead, LMid, LSym) or
+       (FModels[LMid].Symbols[LSym].Kind <> skRoutine) then
+      Exit;
+    Result := True;
+    LWanted := WrittenTypeArgCount(N);
+    RetargetToGeneric(N, LMid, LSym);
+    LCand := LSym;
+    while (LCand <> NIL_SYM) and
+          (FModels[LMid].Symbols[LCand].Kind = skRoutine) do
+    begin
+      if (Length(GenericParamIdents(LMid, LCand)) = LWanted) and
+         not RoutineRequiresArgs(LMid, LCand) then
+        Break;
+      LCand := FModels[LMid].Symbols[LCand].NextOverload;
+    end;
+    if (LCand = NIL_SYM) or
+       (FModels[LMid].Symbols[LCand].Kind <> skRoutine) then
+      Exit;
+    Repoint(N, LMid, LCand);
+    LCtx := CtxAt(LHead);
+    AX := SubstX(DeclTypeX(LMid, LCand), LCtx, 0);
+    LFrame := ExplicitMethodFrame(AId, LMid, LCand, N, LCtx);
+    if LFrame <> NIL_INST then
+      AX := SubstX(AX, LFrame, 0);
   end;
 
   { Is N the BASE of a member access - `Add` in `Add.Assign(X)`? Then its
@@ -9451,7 +9551,8 @@ var
     else
       Exit;
     if (FModels[LBMid].Symbols[LBSym].Kind <> skRoutine) or
-       not RoutineRequiresArgs(LBMid, LBSym) then
+       not (RoutineRequiresArgs(LBMid, LBSym) or
+            IsGenericRoutine(LBMid, LBSym)) then
       Exit;
     if not ParamlessOverloadX(ABX, LM.Tree.NodeNameLower(LName),
          LMemMid, LMemSym, LCtx) then
@@ -9492,7 +9593,8 @@ var
       LBound := LExt.Sym;
     end;
     if (FModels[LBMid].Symbols[LBound].Kind <> skRoutine) or
-       not RoutineHasParams(LBMid, LBound) then
+       not (RoutineHasParams(LBMid, LBound) or
+            IsGenericRoutine(LBMid, LBound)) then
       Exit;
     LStruct := StructSymOfNode(LM, N);
     if LStruct = NIL_SYM then
@@ -9958,7 +10060,13 @@ var
           SetXAt(N, GetX(LM.Tree.Nodes[N].FirstChild));
 
       nkTypeArgs:
-        SetXAt(N, ResolveTypeExpr(AId, N));
+        if TypeArgsCallX(N, LBX) then
+        begin
+          if XValid(LBX) then
+            SetXAt(N, LBX);
+        end
+        else
+          SetXAt(N, ResolveTypeExpr(AId, N));
 
       nkMember:
         begin
@@ -10016,7 +10124,8 @@ var
             if (FModels[LMemMid].Symbols[LMemSym].Kind = skRoutine) and
                (IsValueQualifier(N) or IsInlineInitializer(N) or
                 IsWithTarget(N)) and
-               RoutineRequiresArgs(LMemMid, LMemSym) and
+               (RoutineRequiresArgs(LMemMid, LMemSym) or
+                IsGenericRoutine(LMemMid, LMemSym)) and
                ParamlessOverloadX(LBX, LM.Tree.NodeNameLower(LName),
                  LBestMid, LBestSym, LMemCtx) then
             begin
@@ -10125,6 +10234,12 @@ var
                 else
                 begin
                   LCtx := CtxAt(LBase);
+                  // `Obj.M<T>(...)`: the owner's frame sits on the designator
+                  // under the type-argument node, not on the node itself.
+                  if (LCtx = NIL_INST) and
+                     (LM.Tree.Nodes[LBase].Kind = nkTypeArgs) and
+                     (LM.Tree.Nodes[LBase].FirstChild <> NIL_NODE) then
+                    LCtx := CtxAt(LM.Tree.Nodes[LBase].FirstChild);
                   // A callee written `Name<...>` cannot mean a NON-generic
                   // routine of that name (16.1.2, the same arity rule types
                   // already get) - and the member walk stops at the FIRST
@@ -11920,6 +12035,28 @@ begin
     (not RoutineArity(AMid, ASym, LReq, LTot, LVariadic) or (LReq > 0));
 end;
 
+{ A GENERIC routine - one that declares its own type parameters. Its bare
+  name never calls it: with no argument nothing can infer the parameters, so
+  a value position (`var P := Rec.Get`) means a plain overload of the name,
+  as a routine that requires arguments does (16.5.1; dcc 37.0 picks the
+  plain `Get(): Pointer` beside `Get<T>(): T` in either declaration order). }
+function TPasSemaProject.IsGenericRoutine(AMid, ASym: Integer): Boolean;
+begin
+  Result := (FModels[AMid].Symbols[ASym].Kind = skRoutine) and
+    (Length(GenericParamIdents(AMid, ASym)) > 0);
+end;
+
+{ No parameters at all - none written, or an empty `()`. }
+function TPasSemaProject.RoutineTakesNoParams(AMid, ASym: Integer): Boolean;
+var
+  LReq, LTot: Integer;
+  LVariadic: Boolean;
+begin
+  Result := not RoutineHasParams(AMid, ASym) or
+    (RoutineArity(AMid, ASym, LReq, LTot, LVariadic) and (LTot = 0) and
+     not LVariadic);
+end;
+
 function TPasSemaProject.RoutineHasParams(AMid, ASym: Integer): Boolean;
 var
   LM: TPasSemaModel;
@@ -11979,7 +12116,8 @@ begin
         LCand := FModels[LCur.UnitId].Scopes[LScope].Symbols[LIdx];
         if (FModels[LCur.UnitId].Symbols[LCand].Kind = skRoutine) and
            (FModels[LCur.UnitId].Symbols[LCand].NameLower = ANameLower) and
-           not RoutineHasParams(LCur.UnitId, LCand) then
+           RoutineTakesNoParams(LCur.UnitId, LCand) and
+           not IsGenericRoutine(LCur.UnitId, LCand) then
         begin
           AMid := LCur.UnitId;
           ASym := LCand;
