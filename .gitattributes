@@ -19,6 +19,10 @@
 # an LF-only file, and every build in this repo goes through one.
 *.bat text eol=crlf
 
+# PowerShell scripts (tools\fidelity.ps1) - CRLF, the Windows convention;
+# pastree-lsp declares the same rule.
+*.ps1 text eol=crlf
+
 # Documentation - LF, which is what every diff viewer expects.
 *.md text eol=lf
 LICENSE text eol=lf

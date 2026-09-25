@@ -109,6 +109,13 @@ begin
   if ADecl.Items <> nil then
     for LSub in ADecl.Items do
       DumpDecl(AUnit, LSub, AIndent + '    item ');
+  // Nested routines and local types: a nested routine's code is a data range
+  // of its own, outside its parent's - without these rows a difference there
+  // shows in the raw bytes and nowhere in the dump (tools\fidelity.ps1
+  // locates differences by these lines).
+  if ADecl.Embedded <> nil then
+    for LSub in ADecl.Embedded do
+      DumpDecl(AUnit, LSub, AIndent + '    emb ');
 end;
 
 procedure DumpUnit(AUnit: TPasDcuUnit);

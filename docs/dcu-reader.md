@@ -236,6 +236,30 @@ field. Then raise the accepted version range - never before the sweep is
 green. The patched public parser in `local/dcu32int/` remains the oracle for
 a record whose meaning is in doubt.
 
+## Comparing two compiles byte for byte
+
+The parser-fidelity harness (`tools\fidelity.ps1` driving
+`tools\PasTreeXform.dpr`) judges a transformed unit by compiling it and the
+original and comparing the two `.dcu` files. Three things in a `.dcu` depend
+on the compile rather than on the text, found when the identity
+transformation (an unchanged copy) first came out different, 2026-09-25:
+
+- **The header's third dword (offset 8) is the time of the COMPILE**, DOS
+  date-time with 2-second resolution - not of any source. Two compiles of the
+  same text in different 2-second windows differ in these four bytes and
+  nowhere else; the comparator masks them.
+- **Every source file record carries that file's mtime**, DOS format: the
+  unit's own (`drSrc`, `$70`), its includes, and a `drUnitInlineSrc` (`$76`)
+  record for every OTHER unit whose inline routines were expanded here - with
+  that unit's source mtime when dcc can find the source on its paths, 0 when
+  it cannot. So a copy needs the original's mtime, and a unit compiled in its
+  own directory (siblings visible) differs from the same unit compiled in
+  isolation (12 of this repository's 25 units).
+- **An `Assert` embeds the full path of its source file** as a string
+  literal, so the same text compiled from two directories differs by the
+  length of the paths (four instantiations of one generic's `Assert` gave 16
+  bytes of code). Both sides of a comparison compile at the same path.
+
 ## Known gaps, for a future session
 
 Three different kinds, not one. Keep them apart - the fix, and whether a fix
@@ -263,6 +287,18 @@ is even possible, differs by kind.
   whole RTL sweep but is inference, not extraction - a generic never
   self-instantiated and never referencing its own parameter in a
   recoverable position would print wrong names.
+- **Nested routines of a routine that holds an anonymous method hang under
+  the wrong owner.** `ReadDeclList` gives an embedded list (`$6A`..`$6B`) to
+  the next procedure record, and there dcc writes the anonymous method's
+  body (`TFoo.M$ActRec.$0$Body`) between the list and `TFoo.M` itself - so
+  `M`'s `Inner` is read as the body's. The file does say whose it is: the
+  `$pdata$` names are mangled with the true owner (`...4TFoo1MEiiiE5Inner...`),
+  and the owner's address slot is numbered before the body's (the `-trace`
+  shows the body's record ADD `#78`, then `TFoo.M`'s FILL `#77`). Only the
+  nesting in
+  `PasTreeDcu -dump` is affected - the interface text never prints a nested
+  routine - and `tools\fidelity.ps1` names such a routine `TFoo.M.Inner`
+  regardless. Found 2026-09-25.
 
 **2. Not in the file; no read can recover it.**
 
