@@ -140,7 +140,9 @@ begin
   LLexer.Run;
 
   Result.Source := LLexer.FSource;
-  SetLength(LLexer.FTokens, LLexer.FTokenCount);
+  // The estimate runs ~1.5x the real count: a SetLength shrink would keep
+  // that whole block (see TPasArrayTrim).
+  TPasArrayTrim.Exact<TPasToken>(LLexer.FTokens, LLexer.FTokenCount);
   Result.Tokens := LLexer.FTokens;
   SetLength(LLexer.FDiags, LLexer.FDiagCount);
   Result.Diagnostics := LLexer.FDiags;

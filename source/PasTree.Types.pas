@@ -217,6 +217,20 @@ function SliceEqualsWord(AText: PChar; ALen: Integer;
 { Builds the line-start offsets table for a source string. }
 function BuildLineStarts(const ASource: string): TArray<Integer>;
 
+type
+  { Cutting a grown array to its count. NOT SetLength(A, Count): the memory
+    manager shrinks a medium or large block by less than half IN PLACE and
+    keeps the whole block, so the growth slack stayed allocated for the life
+    of the array - the census measured 162 MB held for 128 MB of symbols,
+    529 for 484 MB of tree nodes, 488 for 463 MB of tokens (2026-09). Exact
+    allocates the exact array and moves the elements over bitwise (managed
+    fields change owner, no refcount traffic; the old slots are zeroed so
+    releasing the old array finalizes nothing). For arrays nothing points
+    into. }
+  TPasArrayTrim = record
+    class procedure Exact<T>(var A: TArray<T>; ACount: Integer); static;
+  end;
+
 { Bytes currently ALLOCATED through the memory manager - token streams, node
   arenas, models, everything the analysis holds. Walked out of
   GetMemoryManagerState, so it is the process's own accounting rather than an
@@ -431,7 +445,24 @@ begin
     end;
     Inc(LPos);
   end;
-  SetLength(Result, LCount);
+  TPasArrayTrim.Exact<Integer>(Result, LCount);
+end;
+
+{ TPasArrayTrim }
+
+class procedure TPasArrayTrim.Exact<T>(var A: TArray<T>; ACount: Integer);
+var
+  LExact: TArray<T>;
+begin
+  if Length(A) = ACount then
+    Exit;
+  SetLength(LExact, ACount);
+  if ACount > 0 then
+  begin
+    Move(A[0], LExact[0], ACount * SizeOf(T));
+    FillChar(A[0], ACount * SizeOf(T), 0);
+  end;
+  A := LExact;
 end;
 
 { TPasToken }

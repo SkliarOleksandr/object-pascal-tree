@@ -384,16 +384,6 @@ type
   end;
   PSemaScope = ^TSemaScope;
 
-  { Cutting a grown array to its count. NOT SetLength(A, Count): the memory
-    manager shrinks a medium or large block by less than half IN PLACE and
-    keeps the whole block, so the doubling slack stayed allocated - the
-    census measured 162 MB held for 128 MB of symbols and 55 MB for 41 MB of
-    scopes (2026-09). Exact allocates the exact array and moves the elements
-    over. For arrays nothing points into. }
-  TSemaArrayTrim = record
-    class procedure Exact<T>(var A: TArray<T>; ACount: Integer); static;
-  end;
-
   { A model's scopes, indexed by scope id: an array of TSemaScope records
     grown by doubling during Phase 1 and cut to exact length when it ends
     (TPasSemaResolver.Analyze). Items[I] is a POINTER into the array - valid
@@ -1503,27 +1493,8 @@ end;
 
 procedure TSemaScopeList.Trim;
 begin
-  TSemaArrayTrim.Exact<TSemaScope>(FItems, FCount);
-end;
-
-{ TSemaArrayTrim }
-
-class procedure TSemaArrayTrim.Exact<T>(var A: TArray<T>; ACount: Integer);
-var
-  LExact: TArray<T>;
-begin
-  if Length(A) = ACount then
-    Exit;
-  // A fresh exact array, the elements moved over bitwise - managed fields
-  // change owner, no refcount traffic - and the old slots zeroed so
-  // releasing the old array finalizes nothing.
-  SetLength(LExact, ACount);
-  if ACount > 0 then
-  begin
-    Move(A[0], LExact[0], ACount * SizeOf(T));
-    FillChar(A[0], ACount * SizeOf(T), 0);
-  end;
-  A := LExact;
+  // Not SetLength: see TPasArrayTrim.
+  TPasArrayTrim.Exact<TSemaScope>(FItems, FCount);
 end;
 
 procedure TSemaScopeList.Clear;

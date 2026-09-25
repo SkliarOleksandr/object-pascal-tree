@@ -922,7 +922,8 @@ end;
 
 function TPasTreeBuilder.Build(const ASource: TPasPreprocessed): TPasTree;
 begin
-  SetLength(FNodes, FCount);
+  // Not SetLength: a shrink by less than half keeps the block (TPasArrayTrim).
+  TPasArrayTrim.Exact<TPasNode>(FNodes, FCount);
   Result.Nodes := FNodes;
   Result.Source := ASource;
   FNodes := nil;

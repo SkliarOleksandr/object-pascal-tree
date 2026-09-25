@@ -1429,14 +1429,14 @@ begin
   SetLength(LStrs, 100);
   for LIdx := 0 to 36 do
     LStrs[LIdx] := 'v' + IntToStr(LIdx);
-  TSemaArrayTrim.Exact<string>(LStrs, 37);
+  TPasArrayTrim.Exact<string>(LStrs, 37);
   LOk := Length(LStrs) = 37;
   for LIdx := 0 to 36 do
     if (LStrs[LIdx] <> 'v' + IntToStr(LIdx)) or
        (StringRefCount(LStrs[LIdx]) <> 1) then
       LOk := False;
-  TSemaArrayTrim.Exact<string>(LStrs, 0);
-  GCounter.Ok('scopelist: TSemaArrayTrim.Exact moves managed elements',
+  TPasArrayTrim.Exact<string>(LStrs, 0);
+  GCounter.Ok('scopelist: TPasArrayTrim.Exact moves managed elements',
     LOk and (LStrs = nil));
 end;
 
