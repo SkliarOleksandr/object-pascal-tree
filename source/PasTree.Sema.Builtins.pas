@@ -415,7 +415,7 @@ begin
   begin
     // Non-empty arena: the template's name->index map would be wrong. Remove
     // the scope we just minted and seed the classic way.
-    AModel.Scopes.Delete(Result);
+    AModel.Scopes.DropLast;
     Result := SeedSystemScopeOwn(AModel, APlatform);
   end;
 end;

@@ -337,11 +337,20 @@ type
     property Count: Integer read FCount;
   end;
 
-  // Field order is LAYOUT, as in TSemaSymbol: the byte-sized and Integer
-  // fields packed behind the VMT, then the managed ones - a 72-byte instance
-  // (80-byte block) where the old order took 88 (96) (memory census, 2026-09:
-  // -20 MB over the client closure's 1.2M scopes).
-  TSemaScope = class
+  { One scope. A RECORD, stored inline in the model's TSemaScopeList: as a
+    class every scope was its own heap block - a VMT and monitor slot, the
+    block header and a list slot on top of the fields, 88 B per scope where
+    the record is 56, and ~740k heap objects on the client closure to
+    allocate and tear down (memory census, 2026-09).
+
+    Reach it through the list (Model.Scopes[I], a PSemaScope) and never hold
+    that pointer across an AddScope: the list grows by reallocation - the
+    same discipline the Symbols arena has always needed. A local TSemaScope
+    VARIABLE is a copy; writing to it changes nothing in the model.
+
+    Field order is LAYOUT, as in TSemaSymbol: the byte-sized and Integer
+    fields first, then the managed ones. }
+  TSemaScope = record
     Kind: TSemaScopeKind;
     // True when Names SHARES its arrays with containers owned
     // elsewhere, read-only across models - today only the builtin seed
@@ -368,11 +377,46 @@ type
     // else joined here - uses, with, ancestors, enums - is a fallback and
     // belongs in Additional. See JoinScopeShadowing.
     Shadowing: TArray<Integer>;
-    constructor Create(AKind: TSemaScopeKind; AParent, AOwnerNode: Integer);
     procedure EnsureOwnedContainers;
     function GetSymbols: TSemaSymList; inline;
     // The scope's symbols in declaration order (a view over Names).
     property Symbols: TSemaSymList read GetSymbols;
+  end;
+  PSemaScope = ^TSemaScope;
+
+  { Cutting a grown array to its count. NOT SetLength(A, Count): the memory
+    manager shrinks a medium or large block by less than half IN PLACE and
+    keeps the whole block, so the doubling slack stayed allocated - the
+    census measured 162 MB held for 128 MB of symbols and 55 MB for 41 MB of
+    scopes (2026-09). Exact allocates the exact array and moves the elements
+    over. For arrays nothing points into. }
+  TSemaArrayTrim = record
+    class procedure Exact<T>(var A: TArray<T>; ACount: Integer); static;
+  end;
+
+  { A model's scopes, indexed by scope id: an array of TSemaScope records
+    grown by doubling during Phase 1 and cut to exact length when it ends
+    (TPasSemaResolver.Analyze). Items[I] is a POINTER into the array - valid
+    until the next Add, see TSemaScope. Index-checked like the TObjectList it
+    replaced. Lives inside the model object, so it starts zeroed; nothing
+    else may declare one. }
+  TSemaScopeList = record
+  private
+    FItems: TArray<TSemaScope>;
+    FCount: Integer;
+    class procedure RaiseIndex(AIdx, ACount: Integer); static;
+    function GetItem(AIdx: Integer): PSemaScope; inline;
+  public
+    // A new scope: Kind/Parent/OwnerNode as given, StructSym NIL_SYM,
+    // everything else empty. Returns its id.
+    function Add(AKind: TSemaScopeKind; AParent, AOwnerNode: Integer): Integer;
+    // Removes the scope Add returned last (the seed's fallback path).
+    procedure DropLast;
+    // Drops the growth slack.
+    procedure Trim;
+    procedure Clear;
+    property Count: Integer read FCount;
+    property Items[AIdx: Integer]: PSemaScope read GetItem; default;
   end;
 
   TPasSemaModel = class
@@ -402,7 +446,7 @@ type
   public
     Tree: TPasTree;                 // referenced, not owned
     Symbols: TArray<TSemaSymbol>;
-    Scopes: TObjectList<TSemaScope>;
+    Scopes: TSemaScopeList;
     RefMap: TArray<Integer>;        // node index -> symbol index; NIL_SYM
     Diags: TArray<TSemaDiag>;
     // Phase 2: cross-unit state.
@@ -507,7 +551,6 @@ type
     DemotedFileHashes: TArray<Cardinal>;  // FNV-1a over Files[i].Source
     DemotedHeads: TArray<Byte>;           // per symbol: Ord(TPasRoutineHead)
     constructor Create(const ATree: TPasTree);
-    destructor Destroy; override;
 
     function SymCount: Integer;
     function AddScope(AKind: TSemaScopeKind; AParent, AOwnerNode: Integer):
@@ -1414,20 +1457,82 @@ begin
   Result.FIdx := -1;
 end;
 
-{ TSemaScope }
+{ TSemaScopeList }
 
-constructor TSemaScope.Create(AKind: TSemaScopeKind; AParent,
-  AOwnerNode: Integer);
+class procedure TSemaScopeList.RaiseIndex(AIdx, ACount: Integer);
 begin
-  inherited Create;
-  Kind := AKind;
-  Parent := AParent;
-  OwnerNode := AOwnerNode;
-  StructSym := NIL_SYM;
-  // Names/Symbols stay empty, with no heap behind them, until the first bind
-  // (see BindName): scopes are minted per routine, per block, per with, per
-  // enum - and most never declare a name.
+  raise EArgumentOutOfRangeException.CreateFmt(
+    'scope index %d out of range (count %d)', [AIdx, ACount]);
 end;
+
+function TSemaScopeList.GetItem(AIdx: Integer): PSemaScope;
+begin
+  if Cardinal(AIdx) >= Cardinal(FCount) then
+    RaiseIndex(AIdx, FCount);
+  Result := @FItems[AIdx];
+end;
+
+function TSemaScopeList.Add(AKind: TSemaScopeKind; AParent,
+  AOwnerNode: Integer): Integer;
+var
+  LScope: PSemaScope;
+begin
+  if FCount = Length(FItems) then
+    if FCount < 8 then
+      SetLength(FItems, 8)
+    else
+      SetLength(FItems, FCount * 2);
+  Result := FCount;
+  Inc(FCount);
+  // A fresh slot is zeroed (SetLength, or DropLast's Default).
+  LScope := @FItems[Result];
+  LScope.Kind := AKind;
+  LScope.Parent := AParent;
+  LScope.OwnerNode := AOwnerNode;
+  LScope.StructSym := NIL_SYM;
+  // Names/Symbols stay empty, with no heap behind them, until the first bind
+  // (see BindName): scopes are minted per routine, per declaring block, per
+  // with, per enum - and many never declare a name.
+end;
+
+procedure TSemaScopeList.DropLast;
+begin
+  Dec(FCount);
+  FItems[FCount] := Default(TSemaScope);
+end;
+
+procedure TSemaScopeList.Trim;
+begin
+  TSemaArrayTrim.Exact<TSemaScope>(FItems, FCount);
+end;
+
+{ TSemaArrayTrim }
+
+class procedure TSemaArrayTrim.Exact<T>(var A: TArray<T>; ACount: Integer);
+var
+  LExact: TArray<T>;
+begin
+  if Length(A) = ACount then
+    Exit;
+  // A fresh exact array, the elements moved over bitwise - managed fields
+  // change owner, no refcount traffic - and the old slots zeroed so
+  // releasing the old array finalizes nothing.
+  SetLength(LExact, ACount);
+  if ACount > 0 then
+  begin
+    Move(A[0], LExact[0], ACount * SizeOf(T));
+    FillChar(A[0], ACount * SizeOf(T), 0);
+  end;
+  A := LExact;
+end;
+
+procedure TSemaScopeList.Clear;
+begin
+  FItems := nil;
+  FCount := 0;
+end;
+
+{ TSemaScope }
 
 procedure TSemaScope.EnsureOwnedContainers;
 begin
@@ -1450,7 +1555,6 @@ constructor TPasSemaModel.Create(const ATree: TPasTree);
 begin
   inherited Create;
   Tree := ATree;
-  Scopes := TObjectList<TSemaScope>.Create(True);
   InterfaceScope := NIL_SCOPE;
   SystemScope := NIL_SCOPE;
   AllUsesResolved := False;
@@ -1463,12 +1567,6 @@ begin
     RefMap[LIdx] := NIL_SYM;
     ExprType[LIdx] := NIL_SYM;
   end;
-end;
-
-destructor TPasSemaModel.Destroy;
-begin
-  Scopes.Free;
-  inherited;
 end;
 
 function TPasSemaModel.SymCount: Integer;
@@ -1489,7 +1587,7 @@ end;
 function TPasSemaModel.AddScope(AKind: TSemaScopeKind; AParent,
   AOwnerNode: Integer): Integer;
 begin
-  Result := Scopes.Add(TSemaScope.Create(AKind, AParent, AOwnerNode));
+  Result := Scopes.Add(AKind, AParent, AOwnerNode);
 end;
 
 procedure TPasSemaModel.JoinScope(AScope, AAdditional: Integer);
@@ -1685,7 +1783,7 @@ end;
 function TPasSemaModel.FindLocal(AScope: Integer;
   const AKey: TSemaKey): Integer;
 var
-  LScope: TSemaScope;
+  LScope: PSemaScope;
 begin
   // ANameLower must ALREADY be a key (PasNameKey / TPasTree.NodeNameLower).
   // Normalizing defensively here instead cost 3.3x total analysis time: this is

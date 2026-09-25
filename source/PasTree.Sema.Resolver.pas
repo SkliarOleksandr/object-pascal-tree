@@ -210,8 +210,11 @@ begin
     // enumerates it with Length/High, so cut it exact before publishing.
     SetLength(LR.FModel.UsesList, LR.FUsesCount);
     // The symbol arena grew by doubling and nothing adds to it after Phase 1:
-    // exact length drops the slack, 54 of 207 MB on the client closure.
-    SetLength(LR.FModel.Symbols, LR.FModel.SymCount);
+    // exact length drops the slack, 54 of 207 MB on the client closure -
+    // through TSemaArrayTrim, since a plain SetLength shrink kept most of it.
+    TSemaArrayTrim.Exact<TSemaSymbol>(LR.FModel.Symbols, LR.FModel.SymCount);
+    // Likewise the scope array (and nothing adds a scope after Phase 1).
+    LR.FModel.Scopes.Trim;
     Result := LR.FModel;
   finally
     LR.Free;

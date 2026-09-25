@@ -14308,7 +14308,7 @@ var
   LOldScopeN, LNewSymN, LNewScopeN, LIdx, LJdx: Integer;
   LOldImpl, LNewImpl: Integer;
   LA, LB: TSemaSymbol;
-  LSA, LSB: TSemaScope;
+  LSA, LSB: PSemaScope;
 begin
   ASymN := 0;
   AWhy := 'intf-prefix';
@@ -14464,7 +14464,7 @@ var
     // parameter list) are told apart by kind and order under their parent.
     function ScopeIdOf(AScope: Integer): Integer;
     var
-      LSc: TSemaScope;
+      LSc: PSemaScope;
       LStr: string;
       LCount: Integer;
     begin

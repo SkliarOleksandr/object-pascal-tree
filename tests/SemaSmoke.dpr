@@ -1380,6 +1380,66 @@ begin
     HasSym('I', skVar));
 end;
 
+// D2: scopes are records in one array per model; Trim moves them into an
+// exact array bitwise, so the managed fields must survive with their
+// refcounts intact.
+procedure TestScopeList;
+var
+  LList: TSemaScopeList;
+  LSyms: TArray<TSemaSymbol>;
+  LStrs: TArray<string>;
+  LIdx, LId: Integer;
+  LOk, LRaised: Boolean;
+begin
+  LList := Default(TSemaScopeList);   // a local record: zero it first
+  SetLength(LSyms, 20);
+  LOk := True;
+  for LIdx := 0 to 19 do
+  begin
+    LSyms[LIdx].NameLower := 's' + IntToStr(LIdx);
+    LId := LList.Add(sckBlock, LIdx - 1, 100 + LIdx);
+    if LId <> LIdx then
+      LOk := False;
+    LList[LId].Names.AddOrSet(PasNameHash(LSyms[LIdx].NameLower), LIdx, LSyms);
+    LList[LId].Additional := [LIdx, LIdx * 2];
+  end;
+  LList.Trim;
+  for LIdx := 0 to 19 do
+    if (LList[LIdx].Kind <> sckBlock) or (LList[LIdx].Parent <> LIdx - 1) or
+       (LList[LIdx].OwnerNode <> 100 + LIdx) or
+       (LList[LIdx].StructSym <> NIL_SYM) or
+       (LList[LIdx].Names.Find(SemaKey('s' + IntToStr(LIdx)), LSyms) <> LIdx) or
+       (Length(LList[LIdx].Additional) <> 2) or
+       (LList[LIdx].Additional[1] <> LIdx * 2) then
+      LOk := False;
+  LList.DropLast;
+  LRaised := False;
+  try
+    LList[19].Kind := sckBlock;
+  except
+    on EArgumentOutOfRangeException do
+      LRaised := True;
+  end;
+  GCounter.Ok('scopelist: Add/Trim keep every field, DropLast, index check',
+    LOk and (LList.Count = 19) and LRaised and
+    (LList.Add(sckWith, 0, 0) = 19) and (LList[19].Additional = nil) and
+    (LList[19].Names.Count = 0));
+  LList.Clear;
+
+  SetLength(LStrs, 100);
+  for LIdx := 0 to 36 do
+    LStrs[LIdx] := 'v' + IntToStr(LIdx);
+  TSemaArrayTrim.Exact<string>(LStrs, 37);
+  LOk := Length(LStrs) = 37;
+  for LIdx := 0 to 36 do
+    if (LStrs[LIdx] <> 'v' + IntToStr(LIdx)) or
+       (StringRefCount(LStrs[LIdx]) <> 1) then
+      LOk := False;
+  TSemaArrayTrim.Exact<string>(LStrs, 0);
+  GCounter.Ok('scopelist: TSemaArrayTrim.Exact moves managed elements',
+    LOk and (LStrs = nil));
+end;
+
 procedure TestNameKeys;
 var
   LNode, LSym, LV, LGot, LStep: Integer;
@@ -1503,7 +1563,7 @@ begin
     for LTrial := 1 to 600 do
     begin
       LAlpha := 1 + LTrial mod 13;    // 1..13 distinct names
-      LScope := TSemaScope.Create(sckBlock, NIL_SCOPE, 0);
+      LScope := Default(TSemaScope);   // a local record: zero it first
       try
         LHead.Clear;
         LOrder.Clear;
@@ -1540,7 +1600,7 @@ begin
                 LSame := False;
         end;
       finally
-        LScope.Free;
+        LScope := Default(TSemaScope);
       end;
     end;
   finally
@@ -3008,6 +3068,7 @@ begin
   TestNameKeys;
   TestSemaNamesGrowth;
   TestLazyBlockScopes;
+  TestScopeList;
 
   // Phase 1 pools spellings per unit: one heap string per distinct text, a
   // lower-case name shares its key, and the arena is cut to exact length.
