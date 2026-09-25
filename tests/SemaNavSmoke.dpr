@@ -375,6 +375,53 @@ const
     'end;'#10 +                                           // 9
     'end.'#10;                                            // 10
 
+  // Find Destructions and a form's Release (UNIT_FORMS / UNIT_RLS): the VCL
+  // form's Release frees the form; a `Release` of any other class does not -
+  // one not derived from a form, or a form class declaring its own.
+  UNIT_FORMS =
+    'unit Vcl.Forms;'#10 +                                // 1
+    'interface'#10 +                                      // 2
+    'type'#10 +                                           // 3
+    '  TCustomForm = class'#10 +                          // 4
+    '    procedure Release;'#10 +                         // 5
+    '  end;'#10 +                                         // 6
+    '  TForm = class(TCustomForm)'#10 +                   // 7
+    '  end;'#10 +                                         // 8
+    'implementation'#10 +                                 // 9
+    'procedure TCustomForm.Release; begin end;'#10 +      // 10
+    'end.'#10;                                            // 11
+  UNIT_RLS =
+    'unit NavRls;'#10 +                                   // 1
+    'interface'#10 +                                      // 2
+    'uses Vcl.Forms;'#10 +                                // 3
+    'type'#10 +                                           // 4
+    '  TMyForm = class(TForm)'#10 +                       // 5  TMyForm col 3
+    '  end;'#10 +                                         // 6
+    '  TLock = class'#10 +                                // 7  TLock col 3
+    '    procedure Release;'#10 +                         // 8
+    '  end;'#10 +                                         // 9
+    '  TOwnReleaseForm = class(TForm)'#10 +               // 10 col 3
+    '    procedure Release;'#10 +                         // 11
+    '  end;'#10 +                                         // 12
+    'procedure Use;'#10 +                                 // 13
+    'implementation'#10 +                                 // 14
+    'procedure TLock.Release; begin end;'#10 +            // 15
+    'procedure TOwnReleaseForm.Release; begin end;'#10 +  // 16
+    'procedure Use;'#10 +                                 // 17
+    'var F: TMyForm; L: TLock; H: TOwnReleaseForm;'#10 +  // 18
+    'begin'#10 +                                          // 19
+    '  F := TMyForm.Create;'#10 +                         // 20
+    '  F.Release;'#10 +                                   // 21 F col 3
+    '  F.Free;'#10 +                                      // 22 F col 3
+    '  L := TLock.Create;'#10 +                           // 23
+    '  L.Release;'#10 +                                   // 24
+    '  H := TOwnReleaseForm.Create;'#10 +                 // 25
+    '  H.Release;'#10 +                                   // 26
+    '  var G := TMyForm.Create;'#10 +                     // 27
+    '  G.Release;'#10 +                                   // 28 G col 3
+    'end;'#10 +                                           // 29
+    'end.'#10;                                            // 30
+
   // Rename fixture: line 9 uses the SAME symbol TWICE, which is the one
   // shape a per-line rename preview can get wrong - the second edit's
   // highlight has to move by the first one's length delta (see
@@ -3346,6 +3393,48 @@ begin
           LRegFound := True;
       Ok('reg: FindDestructions over a demoted unit - `(Sender as TOwn).Free` '
         + 'found, no access violation', LRegFound);
+    finally
+      GNav.Free;
+    end;
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- Find Destructions and Release (UNIT_FORMS / UNIT_RLS). ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_nav_rls');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), UNIT_SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Vcl.Forms.pas'), UNIT_FORMS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavRls.pas'), UNIT_RLS);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    // Demoted like a real group's library units: the owner test must not
+    // need the text of Vcl.Forms.
+    GProj.DemoteText([]);
+    GNav := TPasNavigator.Create(GProj);
+    try
+      var LMidRls := GNav.ModelIdOf(TPath.Combine(LDir, 'NavRls.pas'));
+      Ok('rls: NavRls model found', LMidRls >= 0);
+      var LRlsT, LRlsS: Integer;
+      var LRlsN: string;
+      GNav.ClassAt(LMidRls, 5, 3, {out} LRlsT, {out} LRlsS, {out} LRlsN);
+      var LRlsHits := GNav.FindDestructions(LRlsT, LRlsS);
+      Ok('rls: TMyForm - `F.Release`, `F.Free` and the inline var''s '
+        + '`G.Release`', (Length(LRlsHits) = 3) and
+        HasHitAt(LRlsHits, 'NavRls.pas', 21, 3) and
+        HasHitAt(LRlsHits, 'NavRls.pas', 22, 3) and
+        HasHitAt(LRlsHits, 'NavRls.pas', 28, 3));
+      GNav.ClassAt(LMidRls, 7, 3, {out} LRlsT, {out} LRlsS, {out} LRlsN);
+      Ok('rls: TLock.Release is not a destruction - not a form',
+        Length(GNav.FindDestructions(LRlsT, LRlsS)) = 0);
+      GNav.ClassAt(LMidRls, 10, 3, {out} LRlsT, {out} LRlsS, {out} LRlsN);
+      Ok('rls: a form class''s OWN Release is not a destruction',
+        Length(GNav.FindDestructions(LRlsT, LRlsS)) = 0);
     finally
       GNav.Free;
     end;

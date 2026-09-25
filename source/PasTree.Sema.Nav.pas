@@ -873,11 +873,15 @@ type
       is a metaclass and the actual class a runtime value. }
     function FindCreations(ATMid, ASym: Integer): TArray<TPasRefHit>;
     { Every place an instance whose STATIC type is exactly this class is
-      released: `X.Free`, `X.Destroy`, `FreeAndNil(X)`, where the designator
-      X types to (ATMid, ASym) - project-wide, positioned on X. `Free` /
-      `Destroy` / `FreeAndNil` are matched as RESOLVED routine symbols by
-      name (TObject's, and any FreeAndNil in scope - System.SysUtils' or a
-      project's own), so a same-named method on an unrelated type is no row.
+      released: `X.Free`, `X.Destroy`, `FreeAndNil(X)`, and for a form
+      `X.Release`, where the designator X types to (ATMid, ASym) - project-
+      wide, positioned on X. `Free` / `Destroy` / `FreeAndNil` are resolved
+      routines matched by NAME (TObject's, any destructor Destroy, any
+      FreeAndNil in scope - System.SysUtils' or a project's own); X's type is
+      what ties the row to the class. `Release` is matched by SYMBOL -
+      TCustomForm.Release (Vcl.Forms) or TCommonCustomForm.Release
+      (FMX.Forms) - since a lock or a pool has a `Release` that frees nothing,
+      and so has a form class that declares its own.
 
       Static type is the honest limit: an instance freed through a variable
       of an ANCESTOR type (`var O: TObject; O := TFoo.Create; O.Free`) is not
@@ -4155,9 +4159,32 @@ var
   LHit: TPasRefHit;
   LNameLower: string;
 
+  // Is (LUid, LSym) a form's own Release - TCustomForm's in Vcl.Forms or
+  // TCommonCustomForm's in FMX.Forms? A form is released that way (it frees
+  // itself once the queued CM_RELEASE is handled, so never inside its own
+  // event handler): on the client group 15 of the 16 sites that freed one
+  // progress form. By the resolved symbol and never by name - a mutex, a
+  // critical section or a pool releases with a `Release` that frees nothing.
+  // The unit is taken from the model's file name: a demoted model has no text.
+  function IsFormRelease: Boolean;
+  var
+    LStruct: Integer;
+    LUnit, LClass: string;
+  begin
+    Result := False;
+    if not OvStructOfMethod(LUid, LSym, LStruct) then
+      Exit;
+    LClass := FProj.Model(LUid).Symbols[LStruct].NameLower;
+    LUnit := LowerCase(ChangeFileExt(ExtractFileName(FProj.ModelFile(LUid)),
+      ''));
+    Result := ((LClass = 'tcustomform') and (LUnit = 'vcl.forms')) or
+      ((LClass = 'tcommoncustomform') and (LUnit = 'fmx.forms'));
+  end;
+
   // The designator being released when ANode is the bound name of one of the
-  // three release shapes, or NIL_NODE: `X.Free` / `X.Destroy` -> X is the
-  // member base; `FreeAndNil(X)` -> X is the first argument.
+  // release shapes, or NIL_NODE: `X.Free` / `X.Destroy` / a form's
+  // `X.Release` -> X is the member base; `FreeAndNil(X)` -> X is the first
+  // argument.
   function ReleasedBy(ANode: Integer): Integer;
   begin
     Result := NIL_NODE;
@@ -4165,7 +4192,8 @@ var
     LParent := LM.Tree.Nodes[ANode].Parent;
     if LParent = NIL_NODE then
       Exit;
-    if (LNameLower = 'free') or (LNameLower = 'destroy') then
+    if (LNameLower = 'free') or (LNameLower = 'destroy') or
+       ((LNameLower = 'release') and IsFormRelease) then
     begin
       if (LM.Tree.Nodes[LParent].Kind = nkMember) and
          (LM.Tree.Nodes[LParent].FirstChild <> ANode) then

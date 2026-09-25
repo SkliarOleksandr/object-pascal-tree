@@ -565,6 +565,9 @@ text says - the table's "not a row" lines are runtime facts.
 | 6 | `LClass.Create` through a class-reference VARIABLE (`LClass: TFooClass`) | - | GAP - the static type is a metaclass, the class a runtime value |
 | 7 | `X.Free`, `X.Destroy`, `FreeAndNil(X)` where the designator X has the STATIC type of the class (aliases followed; `Self.FFoo.Free`, `Items[i].Free` and the like resolve through `WithTargetTypeX`) | Destructions row, positioned on X's own name (FFoo, not Self) | OK |
 | 8 | The release routines themselves | matched as RESOLVED routine symbols named `free`/`destroy`/`freeandnil` - TObject's, System.SysUtils' FreeAndNil, or a project's own; a same-named method on an unrelated type is no row | OK |
+| 8a | `X.Release` on a form - the call bound to `TCustomForm.Release` (Vcl.Forms) or `TCommonCustomForm.Release` (FMX.Forms), which frees the form once its queued CM_RELEASE is handled; the idiomatic way to free a form | Destructions row, like row 7 | OK (0.50.3) |
+| 8b | A `Release` bound to anything else - a lock, a pool, a class not derived from a form, or a form class declaring its own `Release` | no row - matched by SYMBOL, never by name: those free nothing | OK (0.50.3) |
+| 8c | `Action := caFree` in a form's OnClose, then `Close` | - | GAP - whether Close frees is decided at run time |
 | 9 | A `TBar` instance freed through a `TBar`-typed variable (descendant) | no row for TFoo - its static type is TBar, the same rule row 3 applies to creation | OK (by design) |
 | 10 | An instance freed through an ANCESTOR-typed variable (`var O: TObject; O := TFoo.Create; O.Free`) | - | GAP - static type is TObject; would need flow analysis |
 | 11 | Ownership release (`TComponent` owner, `TObjectList` with OwnsObjects, interface refcount) | - | GAP - runtime facts, not in the source text at all |
