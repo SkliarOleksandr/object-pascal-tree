@@ -60,6 +60,15 @@ type
   TPasCaseRows = array of TPasCaseRow;
   TPasCustomCases = array of TPasCustomCase;
 
+  { An extra verdict on the TREE a golden row built, beside its dump: '' when
+    the tree passes, else the failure text. ParserSmoke passes the tree
+    checker here (PasTree.Ast.Check); the kit itself does not depend on it,
+    so the other suites and the demo, which link this unit too, need nothing
+    new. AStatements: the tree came from ParseStatements, not ParseFile.
+    AValid: the parse reported no diagnostic. }
+  TPasTreeVerdict = reference to function(const APre: TPasPreprocessed;
+    const ATree: TPasTree; AStatements, AValid: Boolean): string;
+
   { Shared pass/fail bookkeeping for the OTHER suites (SemaSmoke,
     SemaProjectSmoke, ...): a fixture is built ONCE (a source string, a temp
     project directory) and several `Ok` calls assert different things
@@ -84,17 +93,22 @@ type
   end;
 
 { Runs ARow.Source through ParseStatements and compares the whole tree's dump.
-  The statement-level counterpart of RunDeclCase; see the unit comment. }
-function RunStmtCase(APP: TPasPreprocessor; const ARow: TPasCaseRow):
-  TPasCheckResult;
+  The statement-level counterpart of RunDeclCase; see the unit comment.
+  AVerdict, given, judges the tree as well. }
+function RunStmtCase(APP: TPasPreprocessor; const ARow: TPasCaseRow;
+  const AVerdict: TPasTreeVerdict = nil): TPasCheckResult;
 
-{ Runs ARow.Source through ParseFile, wrapped in a minimal unit ('unit
-  Test; interface <ASource> implementation end.'), and compares the DUMP OF
-  THE INTERFACE SECTION'S OWN CHILDREN, joined by a space -- so Expected
-  stays about the declaration and says nothing about the wrapper. The
-  declaration-level counterpart of RunStmtCase (test-coverage plan step 1). }
-function RunDeclCase(APP: TPasPreprocessor; const ARow: TPasCaseRow):
-  TPasCheckResult;
+{ The minimal unit a declaration row is parsed in: 'unit Test; interface
+  <ASource> implementation end.', one part per line. }
+function DeclCaseText(const ASource: string): string;
+
+{ Runs ARow.Source through ParseFile, wrapped by DeclCaseText, and compares
+  the DUMP OF THE INTERFACE SECTION'S OWN CHILDREN, joined by a space -- so
+  Expected stays about the declaration and says nothing about the wrapper.
+  The declaration-level counterpart of RunStmtCase (test-coverage plan step
+  1). AVerdict, given, judges the whole tree as well. }
+function RunDeclCase(APP: TPasPreprocessor; const ARow: TPasCaseRow;
+  const AVerdict: TPasTreeVerdict = nil): TPasCheckResult;
 
 { Builds a passing/failing TPasCheckResult from a comparison, formatting the
   failure the same way every case family has always formatted it (source /
@@ -135,10 +149,12 @@ function SwitchCase(const ASection, AName, ASource: string; ASwitch: Char;
 
 { Runs every row/case, printing PASS/FAIL to stdout exactly like the suites
   did before this unit existed, and prints the '=== <name>: N passed, M
-  failed ===' footer. This is the whole body of a thin .dpr host now. }
+  failed ===' footer. This is the whole body of a thin .dpr host now.
+  AVerdict, given, judges every STMT/DECL row's tree too. }
 procedure RunSuite(const ASuiteName: string; APP: TPasPreprocessor;
   const AStmtRows, ADeclRows: array of TPasCaseRow;
-  const ACustom: array of TPasCustomCase; out APassed, AFailed: Integer);
+  const ACustom: array of TPasCustomCase; out APassed, AFailed: Integer;
+  const AVerdict: TPasTreeVerdict = nil);
 
 implementation
 
@@ -285,8 +301,27 @@ begin
     end;
 end;
 
-function RunStmtCase(APP: TPasPreprocessor; const ARow: TPasCaseRow):
-  TPasCheckResult;
+// A failing verdict fails the row; its text follows whatever the dump
+// comparison already said.
+procedure ApplyVerdict(var AResult: TPasCheckResult; const ASource: string;
+  const AVerdict: TPasTreeVerdict; const APre: TPasPreprocessed;
+  const ATree: TPasTree; AStatements, AValid: Boolean);
+var
+  LText: string;
+begin
+  if not Assigned(AVerdict) then
+    Exit;
+  LText := AVerdict(APre, ATree, AStatements, AValid);
+  if LText = '' then
+    Exit;
+  if AResult.Passed then
+    AResult.Message := '  source:   ' + ASource + sLineBreak;
+  AResult.Passed := False;
+  AResult.Message := AResult.Message + '  tree check:' + sLineBreak + LText;
+end;
+
+function RunStmtCase(APP: TPasPreprocessor; const ARow: TPasCaseRow;
+  const AVerdict: TPasTreeVerdict): TPasCheckResult;
 var
   LPre: TPasPreprocessed;
   LDiags: TArray<TPasParseDiag>;
@@ -296,12 +331,20 @@ begin
   LTree := TPasParser.ParseStatements(LPre, LDiags);
   Result := CheckDump(ARow.Source, ARow.Expected, LTree.Dump(0), LDiags,
     ARow.ExpectDiags);
+  ApplyVerdict(Result, ARow.Source, AVerdict, LPre, LTree, True,
+    Length(LDiags) = 0);
 end;
 
-function RunDeclCase(APP: TPasPreprocessor; const ARow: TPasCaseRow):
-  TPasCheckResult;
+function DeclCaseText(const ASource: string): string;
 const
   NL = #13#10;
+begin
+  Result := 'unit Test;' + NL + 'interface' + NL + ASource + NL +
+    'implementation' + NL + 'end.' + NL;
+end;
+
+function RunDeclCase(APP: TPasPreprocessor; const ARow: TPasCaseRow;
+  const AVerdict: TPasTreeVerdict): TPasCheckResult;
 var
   LPre: TPasPreprocessed;
   LDiags: TArray<TPasParseDiag>;
@@ -309,9 +352,7 @@ var
   LActual: string;
   LIdx, LChild: Integer;
 begin
-  LPre := APP.ProcessText('test.pas',
-    'unit Test;' + NL + 'interface' + NL + ARow.Source + NL +
-    'implementation' + NL + 'end.' + NL);
+  LPre := APP.ProcessText('test.pas', DeclCaseText(ARow.Source));
   LTree := TPasParser.ParseFile(LPre, LDiags);
   LActual := '';
   for LIdx := 0 to High(LTree.Nodes) do
@@ -329,6 +370,8 @@ begin
     end;
   Result := CheckDump(ARow.Source, ARow.Expected, LActual, LDiags,
     ARow.ExpectDiags);
+  ApplyVerdict(Result, ARow.Source, AVerdict, LPre, LTree, False,
+    Length(LDiags) = 0);
 end;
 
 procedure ReportOne(const AName: string; const AResult: TPasCheckResult;
@@ -346,7 +389,8 @@ end;
 
 procedure RunSuite(const ASuiteName: string; APP: TPasPreprocessor;
   const AStmtRows, ADeclRows: array of TPasCaseRow;
-  const ACustom: array of TPasCustomCase; out APassed, AFailed: Integer);
+  const ACustom: array of TPasCustomCase; out APassed, AFailed: Integer;
+  const AVerdict: TPasTreeVerdict);
 var
   LRow: TPasCaseRow;
   LCustom: TPasCustomCase;
@@ -354,10 +398,10 @@ begin
   APassed := 0;
   AFailed := 0;
   for LRow in AStmtRows do
-    ReportOne(LRow.Section + ' ' + LRow.Name, RunStmtCase(APP, LRow),
+    ReportOne(LRow.Section + ' ' + LRow.Name, RunStmtCase(APP, LRow, AVerdict),
       APassed, AFailed);
   for LRow in ADeclRows do
-    ReportOne(LRow.Section + ' ' + LRow.Name, RunDeclCase(APP, LRow),
+    ReportOne(LRow.Section + ' ' + LRow.Name, RunDeclCase(APP, LRow, AVerdict),
       APassed, AFailed);
   for LCustom in ACustom do
     ReportOne(Trim(LCustom.Section + ' ' + LCustom.Name), LCustom.Run(),
