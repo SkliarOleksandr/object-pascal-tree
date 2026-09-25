@@ -146,10 +146,13 @@ end;
 // The operator's token KIND (Aux points at the operator token). Every
 // operator this typer dispatches on has a dedicated kind, so no text is
 // materialized - the old string version paid a LowerCase(VisibleText(...))
-// copy per binary/unary node in the corpus. tkUnknown when Aux is unset.
+// copy per binary/unary node in the corpus. tkUnknown when Aux is unset, or
+// when the tree has no text (a demoted model - this typer runs in Phase 1 on
+// full text, so that is a caller outside the pipeline; answering "unknown"
+// beats reading a nil token array, see TPasSemaProject.BinaryOpIsAs).
 function TPasSemaTyper.OpKind(N: Integer): TPasTokenKind;
 begin
-  if T.Nodes[N].Aux >= 0 then
+  if (T.Nodes[N].Aux >= 0) and (T.Nodes[N].Aux <= High(T.Source.Visible)) then
     Result := T.Source.VisibleToken(T.Nodes[N].Aux).Kind
   else
     Result := tkUnknown;

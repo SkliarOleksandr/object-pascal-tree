@@ -308,6 +308,73 @@ const
     'end;'#10 +                                 // 30
     'end.'#10;                                  // 31
 
+  { Regressions pastree-mcp found on the client group (2026-09-25), analyzed
+    in a directory of their own with the fixture System above.
+    - Line 31: `TOwn.Create(1, 2)` inside TOwn's own unit. It used to bind to
+      the PARAMETERLESS TObject.Create - the member re-point meant for value
+      positions (`GF.Add.Assign`) ran on every member, callees included.
+    - Line 32: a PARENTHESIZED anonymous method against an `of object` event
+      and a `reference to` overload. It picked the event (declared first,
+      tied on score) - a literal is assignable to a method reference only
+      (spec 17.2.1).
+    - Line 33: the same against a PLAIN procedural type.
+    - Lines 34-35: two `reference to` overloads; the literal's own signature
+      decides, the generic one included (dcc32 37.0 probe). }
+  UNIT_REG =
+    'unit NavReg;'#10 +                                   // 1
+    'interface'#10 +                                      // 2
+    'type'#10 +                                           // 3
+    '  TNotify = procedure(Sender: TObject) of object;'#10 + // 4
+    '  TPlain = procedure(A: Integer);'#10 +              // 5
+    '  TRef = reference to procedure;'#10 +               // 6
+    '  TRefG<T> = reference to procedure(Arg: T);'#10 +   // 7
+    '  TOwn = class'#10 +                                 // 8  TOwn col 3
+    '    constructor Create(A, B: Integer);'#10 +         // 9  Create col 17
+    '  end;'#10 +                                         // 10
+    '  TWorker = class'#10 +                              // 11
+    '    constructor Make(AEvent: TNotify); overload;'#10 + // 12 Make col 17
+    '    constructor Make(AProc: TRef); overload;'#10 +   // 13 Make col 17
+    '    procedure Run(AProc: TPlain); overload;'#10 +    // 14 Run col 15
+    '    procedure Run(AProc: TRef); overload;'#10 +      // 15 Run col 15
+    '    procedure Take(AProc: TRef); overload;'#10 +     // 16 Take col 15
+    '    procedure Take(AProc: TRefG<Integer>); overload;'#10 + // 17 Take col 15
+    '  end;'#10 +                                         // 18
+    'procedure Work;'#10 +                                // 19
+    'implementation'#10 +                                 // 20
+    'constructor TOwn.Create(A, B: Integer); begin end;'#10 + // 21
+    'constructor TWorker.Make(AEvent: TNotify); begin end;'#10 + // 22
+    'constructor TWorker.Make(AProc: TRef); begin end;'#10 + // 23
+    'procedure TWorker.Run(AProc: TPlain); begin end;'#10 + // 24
+    'procedure TWorker.Run(AProc: TRef); begin end;'#10 + // 25
+    'procedure TWorker.Take(AProc: TRef); begin end;'#10 + // 26
+    'procedure TWorker.Take(AProc: TRefG<Integer>); begin end;'#10 + // 27
+    'procedure Work;'#10 +                                // 28
+    'var O: TOwn; W: TWorker;'#10 +                       // 29
+    'begin'#10 +                                          // 30
+    '  O := TOwn.Create(1, 2);'#10 +                      // 31 Create col 13
+    '  W := TWorker.Make((procedure begin end));'#10 +    // 32 Make col 16
+    '  W.Run(procedure begin end);'#10 +                  // 33 Run col 5
+    '  W.Take(procedure(X: Integer) begin end);'#10 +     // 34 Take col 5
+    '  W.Take(procedure begin end);'#10 +                 // 35 Take col 5
+    'end;'#10 +                                           // 36
+    'end.'#10;                                            // 37
+
+  { Find Destructions over a TEXT-DEMOTED unit: typing the released
+    designator `(Sender as TOwn)` read the `as` operator's token, and a
+    demoted model has none - an access violation on every Find Destructions
+    of a project with such a line anywhere in its library. }
+  UNIT_REL =
+    'unit NavRel;'#10 +                                   // 1
+    'interface'#10 +                                      // 2
+    'uses NavReg;'#10 +                                   // 3
+    'procedure ReleaseAs(Sender: TObject);'#10 +          // 4
+    'implementation'#10 +                                 // 5
+    'procedure ReleaseAs(Sender: TObject);'#10 +          // 6
+    'begin'#10 +                                          // 7
+    '  (Sender as TOwn).Free;'#10 +                       // 8
+    'end;'#10 +                                           // 9
+    'end.'#10;                                            // 10
+
   // Rename fixture: line 9 uses the SAME symbol TWICE, which is the one
   // shape a per-line rename preview can get wrong - the second edit's
   // highlight has to move by the first one's length delta (see
@@ -3206,6 +3273,79 @@ begin
         'Deep', 'Wide.Deep.NavX.pas', 1, 6);
       CheckNav('project uses: NavX leaf -> same file', 2, 32, 'NavX',
         'Wide.Deep.NavX.pas', 1, 6);
+    finally
+      GNav.Free;
+    end;
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- Constructor and anonymous-method binding, Find Destructions over a
+  // demoted unit (UNIT_REG / UNIT_REL). A directory of its own: the main one
+  // is gone, and these units would change the counts asserted there. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_nav_reg');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), UNIT_SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavReg.pas'), UNIT_REG);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavRel.pas'), UNIT_REL);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    GNav := TPasNavigator.Create(GProj);
+    try
+      var LMidReg := GNav.ModelIdOf(TPath.Combine(LDir, 'NavReg.pas'));
+      Ok('reg: NavReg model found', LMidReg >= 0);
+      var LRegT, LRegS: Integer;
+      var LRegN: string;
+      var LRegHit: TPasRefHit;
+      Ok('reg: TOwn.Create(1, 2) in its own unit binds TOwn.Create, not the '
+        + 'parameterless TObject.Create',
+        GNav.SymbolAt(LMidReg, 31, 13, {out} LRegT, {out} LRegS, {out} LRegN)
+        and GNav.DeclHit(LRegT, LRegS, {out} LRegHit) and
+        SameText(TPath.GetFileName(LRegHit.FilePath), 'NavReg.pas') and
+        (LRegHit.Line = 9));
+      Ok('reg: TOwn.Create has its reference',
+        GNav.SymbolAt(LMidReg, 9, 17, {out} LRegT, {out} LRegS, {out} LRegN)
+        and HasHitAt(GNav.FindReferences(LRegT, LRegS), 'NavReg.pas', 31, 13));
+      Ok('reg: a parenthesized anonymous method picks the `reference to` '
+        + 'overload, not the `of object` one declared first',
+        GNav.SymbolAt(LMidReg, 32, 16, {out} LRegT, {out} LRegS, {out} LRegN)
+        and GNav.DeclHit(LRegT, LRegS, {out} LRegHit) and
+        (LRegHit.Line = 13));
+      Ok('reg: an anonymous method is not a plain procedural value',
+        GNav.SymbolAt(LMidReg, 33, 5, {out} LRegT, {out} LRegS, {out} LRegN)
+        and GNav.DeclHit(LRegT, LRegS, {out} LRegHit) and
+        (LRegHit.Line = 15));
+      Ok('reg: between two `reference to` overloads a one-parameter literal '
+        + 'picks the generic TRefG<Integer>, declared second',
+        GNav.SymbolAt(LMidReg, 34, 5, {out} LRegT, {out} LRegS, {out} LRegN)
+        and GNav.DeclHit(LRegT, LRegS, {out} LRegHit) and
+        (LRegHit.Line = 17));
+      Ok('reg: ...and a parameterless literal picks TRef',
+        GNav.SymbolAt(LMidReg, 35, 5, {out} LRegT, {out} LRegS, {out} LRegN)
+        and GNav.DeclHit(LRegT, LRegS, {out} LRegHit) and
+        (LRegHit.Line = 16));
+
+      // Everything demoted, then Find Destructions: the probe typing the
+      // released `(Sender as TOwn)` must rehydrate NavRel, not read nil.
+      GProj.DemoteText([]);
+      FreeAndNil(GNav);
+      GNav := TPasNavigator.Create(GProj);
+      Ok('reg: NavRel is demoted before the search',
+        GProj.Model(GNav.ModelIdOf(TPath.Combine(LDir, 'NavRel.pas'))).Demoted);
+      GNav.ClassAt(LMidReg, 8, 3, {out} LRegT, {out} LRegS, {out} LRegN);
+      var LRegHits := GNav.FindDestructions(LRegT, LRegS);
+      var LRegFound := False;
+      for var LH in LRegHits do
+        if SameText(TPath.GetFileName(LH.FilePath), 'NavRel.pas') and
+           (LH.Line = 8) then
+          LRegFound := True;
+      Ok('reg: FindDestructions over a demoted unit - `(Sender as TOwn).Free` '
+        + 'found, no access violation', LRegFound);
     finally
       GNav.Free;
     end;

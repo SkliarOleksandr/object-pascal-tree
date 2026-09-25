@@ -778,6 +778,9 @@ type
     function ExplicitMethodFrame(AId, AMid, ASym, ATypeArgs,
       ACtx: Integer): Integer;
     procedure BindTypesX(AId: Integer);
+    // Is the nkBinaryOp ANode of model AId an `as` cast? Rehydrates a
+    // text-demoted model to read the operator - see the implementation.
+    function BinaryOpIsAs(AId, ANode: Integer): Boolean;
     { The expression pass over one unit (AProbe = nil: the whole tree, results
       committed to the model), or a PROBE over the subtree at ARoot with
       nothing committed - see TPasXProbe and WithTargetTypeX. }
@@ -8664,6 +8667,31 @@ begin
     Result := XNil;
 end;
 
+{ The operator KIND of a binary node is text: Aux is its visible-token index,
+  and a model demoted to its symbol tables (DemoteText, DemoteClosedUnits) has
+  no visible tokens. CrossType read it unguarded, so a PROBE over a demoted
+  unit - Find Destructions typing `(Sender as TObject).Free` in a library unit
+  - read a nil token array (pastree-mcp on the client group, 2026-09-25).
+  Rehydrate on demand rather than guess: the guess "not a cast" would type
+  the designator to nothing and drop the row silently, the worse failure. The
+  cross passes themselves never meet a demoted model (every Analyze* works on
+  full text), so the rehydration only ever runs on a navigation path, and only
+  for a unit that actually has a binary operator where a type is asked. }
+function TPasSemaProject.BinaryOpIsAs(AId, ANode: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LTok: Integer;
+begin
+  LM := FModels[AId];
+  LTok := LM.Tree.Nodes[ANode].Aux;
+  if LTok < 0 then
+    Exit(False);
+  if (LTok > High(LM.Tree.Source.Visible)) and LM.Demoted then
+    EnsureHydrated(AId);
+  Result := (LTok <= High(LM.Tree.Source.Visible)) and
+    (LM.Tree.Source.VisibleToken(LTok).Kind = tkAs);
+end;
+
 { Two modes, one walk. AProbe = nil is the cross-type PASS: LX/LCtxOf are
   nodes-sized arrays, member discoveries go to the model's RefMap and the
   ExtRefMap overlay, call targets to CallTargetX, and the types are persisted
@@ -9015,9 +9043,75 @@ var
   function ScoreCandidate(ACall, AMid, ACand, ACtx: Integer): Integer;
   var
     LParams: TArray<Integer>;
-    LReq, LTot, LIdx, LArg, LArgs: Integer;
+    LReq, LTot, LIdx, LArg, LArgs, LCore: Integer;
     LVariadic: Boolean;
     LArgX, LParX: TSemaXType;
+
+    // The parameter count of a signature node - an nkAnonMethod literal or
+    // an nkProcType - and whether it is a function, read off the scope the
+    // resolver declares its parameters in (both own an sckRoutine scope keyed
+    // by the node; see TPasSemaResolver's nkAnonMethod / nkProcType cases),
+    // so no text is needed. False when that scope cannot be found.
+    function SigShape(AMid, ANode: Integer; out AParams: Integer;
+      out AFunc: Boolean): Boolean;
+    var
+      LSM: TPasSemaModel;
+      LScope, LChild: Integer;
+      LList: TSemaSymList;
+    begin
+      Result := False;
+      AParams := 0;
+      AFunc := False;
+      LSM := FModels[AMid];
+      if (ANode < 0) or (ANode > High(LSM.NodeScope)) then
+        Exit;
+      LScope := LSM.NodeScope[ANode];
+      if (LScope = NIL_SCOPE) or (LScope >= LSM.Scopes.Count) or
+         (LSM.Scopes[LScope].OwnerNode <> ANode) then
+        Exit;
+      LList := LSM.Scopes[LScope].Symbols;
+      for var LI := 0 to LList.Count - 1 do
+        if LSM.Symbols[LList[LI]].Kind = skParam then
+          Inc(AParams);
+      // A result type is the one child that is neither the parameter list
+      // nor a literal's body.
+      LChild := LSM.Tree.Nodes[ANode].FirstChild;
+      while LChild <> NIL_NODE do
+      begin
+        if not (LSM.Tree.Nodes[LChild].Kind in [nkParams, nkAnonParams,
+           nkRoutineBody]) then
+          AFunc := True;
+        LChild := LSM.Tree.Nodes[LChild].NextSibling;
+      end;
+      Result := True;
+    end;
+
+    // Can the anonymous-method literal ALit be passed to a parameter of the
+    // procedural type AX? Only when AX is a `reference to` type (nkProcType
+    // Aux 2 - not 1, `of object`, nor 0, a plain procedural type) with the
+    // same parameter count and the same procedure/function kind (17.2.1).
+    // True whenever a side cannot be read, so an unknown shape never rejects.
+    function LiteralFits(ALit: Integer; const AX: TSemaXType): Boolean;
+    var
+      LCanon: TSemaXType;
+      LDef, LLitN, LRefN: Integer;
+      LLitF, LRefF: Boolean;
+    begin
+      Result := True;
+      LCanon := CanonTypeX(AX);
+      if not XValid(LCanon) then
+        Exit;
+      LDef := TypeDefNodeOf(LCanon.UnitId, LCanon.Sym);
+      if (LDef = NIL_NODE) or
+         (FModels[LCanon.UnitId].Tree.Nodes[LDef].Kind <> nkProcType) then
+        Exit;
+      if FModels[LCanon.UnitId].Tree.Nodes[LDef].Aux <> 2 then
+        Exit(False);
+      if SigShape(AId, ALit, LLitN, LLitF) and
+         SigShape(LCanon.UnitId, LDef, LRefN, LRefF) then
+        Result := (LLitN = LRefN) and (LLitF = LRefF);
+    end;
+
   begin
     LArgs := 0;
     LArg := LM.Tree.Nodes[LM.Tree.Nodes[ACall].FirstChild].NextSibling;
@@ -9038,6 +9132,14 @@ var
     begin
       LArgX := GetX(LArg);
       LParX := SubstX(DeclTypeX(AMid, LParams[LIdx]), ACtx, 0);
+      // The literal tests below look through parentheses: `(procedure begin
+      // ... end)` is how a multi-line anonymous argument is often written,
+      // and the client group's own instance of the TProc case was exactly that.
+      LCore := LArg;
+      while (LCore <> NIL_NODE) and (LM.Tree.Nodes[LCore].Kind = nkParen) do
+        LCore := LM.Tree.Nodes[LCore].FirstChild;
+      if LCore = NIL_NODE then
+        LCore := LArg;
       // An ANONYMOUS METHOD LITERAL rejects the candidate outright, and it is
       // the only mismatch that does. `TThread.Synchronize(nil, procedure ...
       // end)` fits BOTH the public `(const AThread: TThread; AThreadProc:
@@ -9058,8 +9160,21 @@ var
       if XValid(LParX) and
          not (XCatOf(LParX) in [tcProc, tcVariant, tcUnknown]) and
          (FModels[LParX.UnitId].Symbols[LParX.Sym].Kind <> skGenericParam) and
-         ((LM.Tree.Nodes[LArg].Kind = nkAnonMethod) or
+         ((LM.Tree.Nodes[LCore].Kind = nkAnonMethod) or
           IsProcedureDesignator(LArg)) then
+        Exit(-1);
+      // The same literal against a procedural parameter it cannot be passed
+      // to (LiteralFits): a method pointer, a plain procedural type, or a
+      // `reference to` type of another signature. dcc picks the overload the
+      // literal fits, in either declaration order (probed, dcc32 37.0): a UI
+      // unit on the client group declares `Make(..., AEvent: TNotifyEvent =
+      // nil)` beside `Make(..., AProc: TProc)`, both scored 0 on the literal,
+      // and the first - the event one - won the tie, so the TProc overload
+      // had no references (pastree-mcp, 2026-09-25); `Take(TProc)` beside
+      // `Take(TProc<Integer>)` is the same tie between two references.
+      // Provable at the node, like the rule above.
+      if (LM.Tree.Nodes[LCore].Kind = nkAnonMethod) and XValid(LParX) and
+         (XCatOf(LParX) = tcProc) and not LiteralFits(LCore, LParX) then
         Exit(-1);
       if XValid(LArgX) and XValid(LParX) then
         if XSameType(LParX, LArgX) then
@@ -9705,9 +9820,7 @@ var
       nkBinaryOp:
         begin
           LLit := LM.Tree.Nodes[N].FirstChild;
-          if (LLit <> NIL_NODE) and ((LM.Tree.Nodes[N].Aux < 0) or
-             (LM.Tree.Source.VisibleToken(LM.Tree.Nodes[N].Aux).Kind <> tkAs))
-          then
+          if (LLit <> NIL_NODE) and not BinaryOpIsAs(AId, N) then
             Result := OperatorResultX(AId, N, OpX(LLit),
               OpX(LM.Tree.Nodes[LLit].NextSibling));
         end;
@@ -10098,7 +10211,17 @@ var
           // construction: the binding must already be a routine WITH
           // parameters, and the position a qualifier or an inline
           // initializer, before anything is searched.
+          //
+          // The POSITION test was missing from 0.17.0 to 0.50.1 - the call sat
+          // there alone, indented as if under an `if`. So every member name,
+          // a CALLEE too, was re-pointed: `TFoo.Create('a', 'b')` inside
+          // TFoo's own unit went to the parameterless TObject.Create an
+          // ancestor declares, and TFoo's constructor had no references
+          // (pastree-mcp on the client group, 2026-09-25). The same three
+          // positions as the FindMemberX branch below.
           LMemCtx := LBX.Inst;
+          if IsValueQualifier(N) or IsInlineInitializer(N) or IsWithTarget(N)
+          then
             PreferParamlessMember(N, LName, LBX, LSym, LMemCtx);
           if LSym <> NIL_SYM then
           begin
@@ -10448,8 +10571,7 @@ var
       // (OperatorResultX). `(CA + CB).CountChar(C)` over two Char constants
       // and `var S := CA + CB` had nothing to bind the member to.
       nkBinaryOp:
-        if (LM.Tree.Nodes[N].Aux >= 0) and
-           (LM.Tree.Source.VisibleToken(LM.Tree.Nodes[N].Aux).Kind = tkAs) then
+        if BinaryOpIsAs(AId, N) then
         begin
           LBase := LM.Tree.Nodes[N].FirstChild;
           if LBase <> NIL_NODE then
