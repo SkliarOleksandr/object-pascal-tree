@@ -200,6 +200,15 @@ type
       readable back via BufferVersion, never interpreted here. }
     procedure SetBuffer(const APath, AText: string; AVersion: Integer = 0);
     procedure ClearBuffers;
+    { Whether APath can be READ by this analysis: a file on disk, or a buffer
+      SetBuffer gave for a path with no file behind it yet. The second is a
+      unit created in the IDE and never saved - the program's
+      `Unit2 in 'Unit2.pas'` names it the moment it exists, and the editor
+      holds its text. Every gate that asks "is there a unit here" asks this,
+      never TFile.Exists alone: a disk-only gate dropped such a unit from the
+      closure, so it was analyzed nowhere until the first save (a new data
+      module in a real project, 2026-09-25). }
+    function SourceExists(const APath: string): Boolean;
     { The version stamp SetBuffer stored for APath, or -1 when no overlay is
       set for it. An async host compares this against the version it holds
       NOW to recognize a result that was computed from older text. }
@@ -482,6 +491,22 @@ begin
     Result := -1;
 end;
 
+function TPasSourceManager.SourceExists(const APath: string): Boolean;
+begin
+  if TFile.Exists(APath) then
+    Exit(True);
+  Result := False;
+  if (FBuffers = nil) or (APath = '') then
+    Exit;
+  try
+    Result := FBuffers.ContainsKey(LowerCase(TPath.GetFullPath(APath)));
+  except
+    // A path GetFullPath rejects (an `in` string with characters no file
+    // name may hold) names no buffer either.
+    Result := False;
+  end;
+end;
+
 function TPasSourceManager.TryFile(const ADir, AName: string;
   out AResolved: string): Boolean;
 var
@@ -491,7 +516,7 @@ begin
   if (ADir = '') or (AName = '') then
     Exit;
   LCandidate := TPath.Combine(ADir, AName);
-  if TFile.Exists(LCandidate) then
+  if SourceExists(LCandidate) then
   begin
     AResolved := TPath.GetFullPath(LCandidate);
     Result := True;
@@ -823,7 +848,7 @@ begin
   // gets THIS file.
   if AInPath <> '' then
   begin
-    if TPath.IsPathRooted(AInPath) and TFile.Exists(AInPath) then
+    if TPath.IsPathRooted(AInPath) and SourceExists(AInPath) then
     begin
       AResolved := TPath.GetFullPath(AInPath);
       PinUnit(AUnitName, AResolved);

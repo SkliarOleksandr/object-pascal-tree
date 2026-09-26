@@ -7426,6 +7426,79 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { A UNIT THAT EXISTS ONLY AS A BUFFER - created in the IDE, never saved. The
+    IDE writes `NewUnit in 'NewUnit.pas'` into the program the moment the unit
+    is created and holds its text in an editor buffer; no file is written
+    until the first save. Every gate asked TFile.Exists, so the unit resolved
+    nowhere: F1027 in the program and no model at all, i.e. no navigation and
+    no colouring inside it until it was saved (SourceExists). Both spellings
+    of the in-path, relative and rooted, and a second importer that names the
+    unit without one - the program's pin covers it. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_unsaved');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UsUser.pas'),
+    'unit UsUser;'#10'interface'#10'uses UsNew;'#10 +
+    'procedure CallNew;'#10'implementation'#10 +
+    'procedure CallNew;'#10'begin'#10'  NewHello;'#10'end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UsApp.dpr'),
+    'program UsApp;'#10'uses UsNew in ''UsNew.pas'', UsUser,'#10 +
+    '  UsRooted in ''' + TPath.Combine(LDir, 'UsRooted.pas') + ''';'#10 +
+    'begin'#10'  NewHello;'#10'  RootedHello;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.SetBuffer(TPath.Combine(LDir, 'UsNew.pas'),
+      'unit UsNew;'#10'interface'#10'procedure NewHello;'#10 +
+      'implementation'#10'procedure NewHello; begin end;'#10'end.'#10, 1);
+    GProj.SetBuffer(TPath.Combine(LDir, 'UsRooted.pas'),
+      'unit UsRooted;'#10'interface'#10'procedure RootedHello;'#10 +
+      'implementation'#10'procedure RootedHello; begin end;'#10'end.'#10, 1);
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'UsApp.dpr'));
+    Ok('unsaved: the program finds its buffer-only unit (no F1027)',
+      (MidByName('usapp') >= 0) and
+      (DiagCount(ModelByName('usapp'), 'F1027') = 0));
+    Ok('unsaved: the buffer-only unit is in the closure, at its own path',
+      (MidByName('usnew') >= 0) and
+      SameText(GProj.ModelFile(MidByName('usnew')),
+        TPath.Combine(LDir, 'UsNew.pas')));
+    Ok('unsaved: a rooted in-path finds its buffer-only unit too',
+      MidByName('usrooted') >= 0);
+    Ok('unsaved: the program binds the buffer-only unit''s routines',
+      (MidByName('usapp') >= 0) and
+      (DiagCount(ModelByName('usapp'), 'E2003') = 0) and
+      CrossRefTo(ModelByName('usapp'), 'NewHello', 'NewHello') and
+      CrossRefTo(ModelByName('usapp'), 'RootedHello', 'RootedHello'));
+    Ok('unsaved: an importer without an in-path gets the pinned buffer',
+      (MidByName('ususer') >= 0) and
+      (DiagCount(ModelByName('ususer'), 'F1027') = 0) and
+      CrossRefTo(ModelByName('ususer'), 'NewHello', 'NewHello'));
+  finally
+    GProj.Free;
+  end;
+  // The staged driver the async session runs (the LSP server's path) has its
+  // own load gate: the same closure through it.
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.SetBuffer(TPath.Combine(LDir, 'UsNew.pas'),
+      'unit UsNew;'#10'interface'#10'procedure NewHello;'#10 +
+      'implementation'#10'procedure NewHello; begin end;'#10'end.'#10, 1);
+    GProj.SetBuffer(TPath.Combine(LDir, 'UsRooted.pas'),
+      'unit UsRooted;'#10'interface'#10'procedure RootedHello;'#10 +
+      'implementation'#10'procedure RootedHello; begin end;'#10'end.'#10, 1);
+    GProj.AnalyzeStaged([TPath.Combine(LDir, 'UsApp.dpr')], nil);
+    Ok('unsaved/staged: the buffer-only units are in the closure',
+      (MidByName('usnew') >= 0) and (MidByName('usrooted') >= 0));
+    Ok('unsaved/staged: and the program binds them',
+      (MidByName('usapp') >= 0) and
+      (DiagCount(ModelByName('usapp'), 'F1027') = 0) and
+      CrossRefTo(ModelByName('usapp'), 'NewHello', 'NewHello'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   { The resolution memos (TPasSourceManager.FUnitMemo, FIncludeMemo). A unit
     name is searched once and answered for every importer - but the importer's
     own directory is probed BETWEEN candidate spellings (as spelled, then each

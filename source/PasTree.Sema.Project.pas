@@ -2054,7 +2054,8 @@ begin
   LKey := LowerCase(LFull);
   if FByPath.TryGetValue(LKey, Result) then
     Exit;   // includes the -1 negative-cache sentinel for known-bad files
-  if not TFile.Exists(LFull) then
+  // A never-saved unit is a buffer with no file - see SourceExists.
+  if not FSM.SourceExists(LFull) then
     Exit(-1);
   try
     // Donor reuse first - System.pas (this route's eager Ensure* load) is
@@ -3951,7 +3952,7 @@ begin
       LKey := LowerCase(LFull);
       if FByPath.TryGetValue(LKey, LDummy) or LSeen.ContainsKey(LKey) then
         Continue;
-      if not TFile.Exists(LFull) then
+      if not FSM.SourceExists(LFull) then
         Continue;
       LSeen.Add(LKey, True);
       LTodo[LTodoCount] := LFull;
@@ -4219,7 +4220,7 @@ var
     LKey := LowerCase(LFull);
     if FByPath.TryGetValue(LKey, LDummy) or LSeen.ContainsKey(LKey) then
       Exit;
-    if not TFile.Exists(LFull) then
+    if not FSM.SourceExists(LFull) then
       Exit;
     LSeen.Add(LKey, True);
     LNew := Default(TPasLoadItem);
