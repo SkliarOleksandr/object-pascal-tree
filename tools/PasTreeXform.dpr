@@ -46,19 +46,36 @@ program PasTreeXform;
         a designator for dcc (`excluded-at`). Every site is one line of
         sites.txt; -sites: applies a subset (the driver's localizer bisects a
         DIFF down to the node with it).
+    t2  blocks along the tree (plan T2): every statement node in a statement
+        position - a statement list's item, an if's branch, a case branch's
+        body, the body of a loop, a with or an exception handler, the
+        statement a label marks - wrapped in `begin` `end`, an empty one
+        replaced by `begin end`. A correct tree leaves the .dcu identical;
+        an `else` or a statement's end placed differently from dcc changes
+        the code or stops the compile. Not wrapped, counted: an inline var
+        or const (the block would end its scope - `excluded-inline`), a
+        labeled statement itself (its statement is wrapped -
+        `excluded-label`), asm (`excluded-asm`), a call statement standing
+        as a list item (dcc finalizes a discarded managed result at the end
+        of the list - `excluded-call`), in a generic's or an inline
+        routine's body a statement not on one line with the token after it
+        (dcc stores such a body with its lines - `excluded-stored`; both
+        see T2Walk); never a routine's own block or the statement lists of
+        a case-else, a try, an except, a finally or a repeat, which are no
+        statements - their items are.
 
   Usage:
-    PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1 -out:<dir> [-p:<platform>]
+    PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2 -out:<dir> [-p:<platform>]
                  [-D:X;Y]... [-Undef:X;Y]... [-I:<dir>[;<dir>]]...
                  [-sites:<ids>]
-  -sites (ts, t1): only the sites with these ids take their edit - a comma
-  list of ids and ranges, `1-40,57`; the ids are those of the full run, so
-  sites.txt means the same in every run over the same unit.
+  -sites (ts, t1, t2): only the sites with these ids take their edit - a
+  comma list of ids and ranges, `1-40,57`; the ids are those of the full
+  run, so sites.txt means the same in every run over the same unit.
   -Undef takes names out of the define set after the platform's and -D's -
   with -D, a way to try another predefined set without rebuilding.
   -oracle: when a $IF of the unit asked what a bare preprocessor cannot
   answer (Declared, a constant, SizeOf), the stream flattened (t0f) or
-  parsed (ts, t1) is the one a project analysis makes - its first pass
+  parsed (ts, t1, t2) is the one a project analysis makes - its first pass
   answers compiler-provided names, its second asks the loaded units (the
   Declared/SizeOf oracle) - over the -S search paths plus the -I ones. That
   is the stream PasTree analyzes, and the only way to judge the oracle
@@ -69,12 +86,13 @@ program PasTreeXform;
     and the -I directories, so a relative `$I` include resolves as it did;
   - sites.txt, tab-separated: id, kind, operators, span
     `file(line,col)-(line,col)`, routine, the edit, applied (1, or 0 when
-    -sites left it out);
+    -sites left it out); t2's ops column is `<position>:<statement>` -
+    `else:if`, `list::=`, `then:empty`, `on:begin`;
   - on stdout `main <path>` (the transformed unit), one `file <from> <to>`
     per file written, one `idir <from> <to>` per -I directory (the compile
     of the copy searches <to>), `sites <n>` (with `dropped`, `excluded`,
     `applied` counts where they apply), `parse <n>` - the parse diagnostics
-    of the tree ts and t1 edit along; <from> and <to> tab-separated.
+    of the tree ts, t1 and t2 edit along; <from> and <to> tab-separated.
     t0f adds `copy <from> <to>` per extra instance copy of an include (see
     below), `argmap <new> <old>` per include argument rewritten to name one
     (the .dcu records each inclusion under its name as written: the driver
@@ -89,9 +107,10 @@ program PasTreeXform;
     so no untouched byte is ever re-encoded. A file whose bytes do not
     round-trip through its decoding (a lenient U+FFFD recovery) is refused.
 
-  A file included more than once takes no ts or t1 edit (one text serves
+  A file included more than once takes no ts, t1 or t2 edit (one text serves
   several preprocessing states); a site that would need one - or whose
-  parentheses would land in two files - is dropped and counted.
+  parentheses or begin and end would land in two files - is dropped and
+  counted.
   t0f flattens every inclusion on its own, since each has its own state: the
   inclusions whose flattened texts agree share the file, and each different
   text is written to a copy in a `~<n>` directory beside it, its `$I`
@@ -134,10 +153,10 @@ uses
   PasTree.Version in '..\source\PasTree.Version.pas';
 
 type
-  TXformMode = (xmT0, xmTS, xmT0F, xmT1);
+  TXformMode = (xmT0, xmTS, xmT0F, xmT1, xmT2);
 
 const
-  cModeNames: array[TXformMode] of string = ('t0', 'ts', 't0f', 't1');
+  cModeNames: array[TXformMode] of string = ('t0', 'ts', 't0f', 't1', 't2');
 
 type
   // One text insertion into one file, or a replacement of Len characters
@@ -153,8 +172,10 @@ type
     Text: string;
   end;
 
-  // ts and t1: a `(` goes before visible token OpenVis and a `)` after
-  // CloseVis; t0f's sites are diagnostics, OpenVis -1.
+  // ts, t1 and t2: OpenText goes before visible token OpenVis and CloseText
+  // after CloseVis - `(` and `)`, or `begin` and `end` - with their Orders
+  // at an offset other edits share (see AddEdit); an empty CloseText is no
+  // edit. t0f's sites are diagnostics, OpenVis -1.
   TSite = record
     Kind: string;
     Ops: string;
@@ -163,6 +184,11 @@ type
     Edit: string;
     OpenVis: Integer;
     CloseVis: Integer;
+    OpenAfter: Boolean;     // OpenText goes AFTER token OpenVis (t2's empty)
+    OpenText: string;
+    CloseText: string;
+    OpenOrder: Integer;
+    CloseOrder: Integer;
   end;
 
 var
@@ -175,6 +201,14 @@ var
   GExcluded: Integer;                // t1: operators starting a subrange type
   GExcludedCtor: Integer;            // t1: operators starting with `[`
   GExcludedAt: Integer;              // t1: `@` operators
+  GExcludedInline: Integer;          // t2: inline var / const statements
+  GExcludedLabel: Integer;           // t2: labeled statements themselves
+  GExcludedAsm: Integer;             // t2: asm statements
+  GExcludedCall: Integer;            // t2: call statements in a list
+  GExcludedStored: Integer;          // t2: in a stored body, off one line
+  // t2: the last name part, lower case, of every routine declared `inline`
+  // anywhere in the unit (see IsStoredBody).
+  GInlineNames: TDictionary<string, Boolean>;
   GUnitName: string;
   // t0f: per FileId, the file it is written as - its own path, or an
   // instance copy's (see Flatten) - and the counts of the `flatten` line.
@@ -300,6 +334,12 @@ begin
   end;
 end;
 
+{ One text insertion before (AAfter False) or after visible token AVis.
+  AOrder sorts the insertions that meet at one offset, lowest first: ts and
+  t1 put a `)` (0) before a `(` (1), `c)(d`; t2 an empty statement's
+  `begin end` (0), then the `end` of every statement that ends there (1) -
+  an empty statement is the last part of the statement around it, `do;` ->
+  `do begin end end;` - then a `begin` (2). }
 procedure AddEdit(AVis: Integer; AAfter: Boolean; AOrder: Integer;
   const AText: string);
 var
@@ -313,6 +353,16 @@ begin
   LEdit.Order := AOrder;
   LEdit.Text := AText;
   GEdits.Add(LEdit);
+end;
+
+// ts, t1: the site's edit is a pair of parentheses.
+procedure SetParens(var ASite: TSite);
+begin
+  ASite.OpenAfter := False;
+  ASite.OpenText := '(';
+  ASite.OpenOrder := 1;
+  ASite.CloseText := ')';
+  ASite.CloseOrder := 0;
 end;
 
 { TS: the site class of binary op P, 0 when it is not a candidate. P reads
@@ -405,6 +455,7 @@ begin
     end;
     LSite.OpenVis := LFirst;
     LSite.CloseVis := LLast;
+    SetParens(LSite);
     LSite.Kind := GTree.KindName(GTree.Nodes[LP].Kind);
     LSite.Ops := OpText(Child(LP, 0)) + '/' + OpText(LP);
     LSite.Span := SpanText(GTree.NodeLeftmostVis(LP), GTree.Nodes[LP].LastToken);
@@ -514,6 +565,7 @@ begin
   LSite.Edit := '()';
   LSite.OpenVis := LFirst;
   LSite.CloseVis := LLast;
+  SetParens(LSite);
   GSites.Add(LSite);
 end;
 
@@ -586,6 +638,349 @@ begin
   begin
     T1Walk(LChild, LRoutine, ATypeStart);
     LChild := GTree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+{ t2: whether AChild, the AIndex-th child (from 0) of AParent, stands where
+  a statement does: an item of a statement list - a compound statement, a
+  routine's or a program's block, the list of a case-else, a try, an
+  except, a finally or a repeat, an initialization or finalization section
+  - an if's then or else, a case branch's body, the body of a for, a while,
+  a with or an exception handler, the statement a label marks. A statement
+  list itself stands in none: `try`, `except`, `repeat` and the rest
+  bracket it with words of their own. }
+function InStatementPosition(AParent, AIndex, AChild: Integer): Boolean;
+begin
+  case GTree.Nodes[AParent].Kind of
+    nkBlock, nkInitSec, nkFinalSec:
+      Result := True;
+    nkIfStmt, nkCaseSel:
+      Result := AIndex >= 1;
+    nkForStmt, nkForInStmt, nkWhileStmt, nkWithStmt, nkExceptOn,
+    nkLabeledStmt:
+      Result := GTree.Nodes[AChild].NextSibling = NIL_NODE;
+  else
+    Result := False;
+  end;
+end;
+
+{ t2, for the report: where statement AIndex of AParent stands. }
+function PositionName(AParent, AIndex: Integer): string;
+var
+  LUp: Integer;
+begin
+  case GTree.Nodes[AParent].Kind of
+    nkBlock:
+      begin
+        LUp := GTree.Nodes[AParent].Parent;
+        if LUp = NIL_NODE then
+          Exit('list');
+        case GTree.Nodes[LUp].Kind of
+          nkCaseStmt: Result := 'case-else';
+          nkTryStmt: Result := 'try';
+          nkFinallyPart: Result := 'finally';
+          nkExceptPart:
+            if GTree.Nodes[GTree.Nodes[LUp].FirstChild].Kind = nkExceptOn then
+              Result := 'except-else'
+            else
+              Result := 'except';
+          nkRepeatStmt: Result := 'repeat';
+          nkRoutineBody, nkProgram, nkLibrary: Result := 'body';
+        else
+          Result := 'begin';
+        end;
+      end;
+    nkInitSec: Result := 'init';
+    nkFinalSec: Result := 'final';
+    nkIfStmt:
+      if AIndex = 1 then
+        Result := 'then'
+      else
+        Result := 'else';
+    nkCaseSel: Result := 'case';
+    nkExceptOn: Result := 'on';
+    nkLabeledStmt: Result := 'label';
+  else
+    Result := 'do';
+  end;
+end;
+
+{ t2, for the report: the statement's head - `if-else`, `raise-at`... }
+function StatementHead(ANode: Integer): string;
+var
+  LLast: Integer;
+begin
+  LLast := GTree.Nodes[ANode].FirstChild;
+  while (LLast <> NIL_NODE) and (GTree.Nodes[LLast].NextSibling <> NIL_NODE) do
+    LLast := GTree.Nodes[LLast].NextSibling;
+  case GTree.Nodes[ANode].Kind of
+    nkBlock: Result := 'begin';
+    nkEmptyStmt: Result := 'empty';
+    nkAssign: Result := ':=';
+    nkExprStmt: Result := 'call';
+    nkIfStmt:
+      if Child(ANode, 2) <> NIL_NODE then
+        Result := 'if-else'
+      else
+        Result := 'if';
+    nkCaseStmt:
+      if (LLast <> NIL_NODE) and (GTree.Nodes[LLast].Kind = nkBlock) then
+        Result := 'case-else'
+      else
+        Result := 'case';
+    nkForStmt: Result := 'for';
+    nkForInStmt: Result := 'for-in';
+    nkWhileStmt: Result := 'while';
+    nkRepeatStmt: Result := 'repeat';
+    nkWithStmt: Result := 'with';
+    nkGotoStmt: Result := 'goto';
+    nkTryStmt:
+      if (LLast <> NIL_NODE) and (GTree.Nodes[LLast].Kind = nkFinallyPart) then
+        Result := 'try-finally'
+      else
+        Result := 'try-except';
+    nkRaiseStmt:
+      if Child(ANode, 1) <> NIL_NODE then
+        Result := 'raise-at'
+      else
+        Result := 'raise';
+  else
+    Result := GTree.KindName(GTree.Nodes[ANode].Kind);
+  end;
+end;
+
+{ t2: a site wrapping statement ANode (child AIndex of AParent) in `begin`
+  `end`, from its leftmost token to its last. An empty statement owns no
+  token: it becomes `begin end` right AFTER the token before it - the
+  `then`, `else`, `do` or `:` of the statement it ends, whose own `end`
+  goes after the same token and must follow it (`if A then ;` ->
+  `if A then begin end end ;`; placed before the `;` instead, the `begin
+  end` would land outside the if). Dropped and counted like t1's: both
+  ends in one file, not in a file included twice. The words go in with a
+  blank on either side - `do(P).X` and `F(X)else` would glue to them
+  otherwise. }
+procedure AddBlockSite(AParent, AIndex, ANode: Integer; const ARoutine: string);
+var
+  LFirst, LLast, LFileA, LFileB: Integer;
+  LSite: TSite;
+begin
+  if GTree.Nodes[ANode].Kind = nkEmptyStmt then
+  begin
+    LFirst := GTree.Nodes[ANode].FirstToken - 1;
+    LLast := LFirst;
+  end
+  else
+  begin
+    LFirst := GTree.NodeLeftmostVis(ANode);
+    LLast := GTree.Nodes[ANode].LastToken;
+  end;
+  VisOffset(LFirst, LFileA);
+  VisOffset(LLast, LFileB);
+  if (LFileA <> LFileB) or GIncludedTwice[LFileA] then
+  begin
+    Inc(GDropped);
+    Exit;
+  end;
+  LSite.Kind := GTree.KindName(GTree.Nodes[ANode].Kind);
+  LSite.Ops := PositionName(AParent, AIndex) + ':' + StatementHead(ANode);
+  LSite.Span := SpanText(LFirst, LLast);
+  LSite.Routine := ARoutine;
+  LSite.OpenVis := LFirst;
+  LSite.CloseVis := LLast;
+  if GTree.Nodes[ANode].Kind = nkEmptyStmt then
+  begin
+    LSite.Edit := 'begin end after';
+    LSite.OpenAfter := True;
+    LSite.OpenText := ' begin end ';
+    LSite.OpenOrder := 0;
+    LSite.CloseText := '';
+    LSite.CloseOrder := 0;
+  end
+  else
+  begin
+    LSite.Edit := 'begin/end';
+    LSite.OpenAfter := False;
+    LSite.OpenText := ' begin ';
+    LSite.OpenOrder := 2;
+    LSite.CloseText := ' end ';
+    LSite.CloseOrder := 1;
+  end;
+  GSites.Add(LSite);
+end;
+
+{ t2: the last name part of routine ARoutine, lower case - `m` for
+  `function TG<T>.M`. }
+function LastNamePart(ARoutine: Integer): string;
+var
+  LName: string;
+begin
+  LName := RoutineName(ARoutine);
+  Result := LowerCase(Copy(LName, LastDelimiter('.', LName) + 1, MaxInt));
+end;
+
+{ t2: GInlineNames - every routine with an `inline` directive, at its
+  declaration or its implementation (a method's is usually on the one in
+  the class). }
+procedure CollectInlineNames(ANode: Integer);
+var
+  LChild: Integer;
+begin
+  if GTree.Nodes[ANode].Kind = nkRoutine then
+  begin
+    LChild := GTree.Nodes[ANode].FirstChild;
+    while LChild <> NIL_NODE do
+    begin
+      if (GTree.Nodes[LChild].Kind = nkDirective) and
+         SameText(GTree.NodeText(LChild), 'inline') then
+        GInlineNames.AddOrSetValue(LastNamePart(ANode), True);
+      LChild := GTree.Nodes[LChild].NextSibling;
+    end;
+  end;
+  LChild := GTree.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    CollectInlineNames(LChild);
+    LChild := GTree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+{ t2: whether routine ARoutine's body is one dcc STORES in the .dcu - a
+  generic's (its name has generic parameters at any level: `TG<T>.M`,
+  `TFoo.M<T>`, `TOuter<T>.TInner.M`), to be instantiated elsewhere, or an
+  inline routine's, to be expanded elsewhere. A stored body keeps source
+  LINES, whatever -$D, -$L and -$Y say (probed on dcc64 37.0; -$C-, -$O+
+  change nothing either). Around a statement that spans lines, or whose
+  next token lies on another line, a begin/end changes the stored bytes -
+  `FIdx :=` / `3;` / `Result := True;` by 5 bytes in a generic method and
+  in an inline function; a then-branch followed by `else` on the next line
+  in Studio's inline getters and generic methods, where the line comes from
+  the token after the statement, as in the code-lines record, and the
+  begin/end makes that token its `end`. Around a statement that shares one
+  line with the token after it they never did, in any position probed
+  (plan S6, probes pairs-generic*, pairs-inline). A name declared `inline`
+  counts for every routine of that name in the unit: an overload not
+  declared so is left out too, which only costs sites. }
+function IsStoredBody(ARoutine: Integer): Boolean;
+var
+  LChild: Integer;
+begin
+  LChild := GTree.Nodes[ARoutine].FirstChild;
+  while (LChild <> NIL_NODE) and
+        (GTree.Nodes[LChild].Kind in [nkIdent, nkGenericParams, nkTypeArgs]) do
+  begin
+    if GTree.Nodes[LChild].Kind <> nkIdent then
+      Exit(True);
+    LChild := GTree.Nodes[LChild].NextSibling;
+  end;
+  Result := GInlineNames.ContainsKey(LastNamePart(ARoutine));
+end;
+
+// The line visible token AVis starts on, and its file.
+function VisLine(AVis: Integer; out AFileId: Integer): Integer;
+var
+  LCol: Integer;
+begin
+  GPre.Files[GPre.Visible[AVis].FileId].OffsetToLineCol(
+    VisOffset(AVis, AFileId), Result, LCol);
+end;
+
+{ t2: whether statement ANode, AND the token after it, lie on one line - the
+  only shape a stored body takes a begin/end around unchanged (see
+  IsStoredBody). An empty statement: the tokens before and after it. }
+function OnOneLine(ANode: Integer): Boolean;
+var
+  LFirst, LLast, LFile, LLine, LOtherFile: Integer;
+begin
+  if GTree.Nodes[ANode].Kind = nkEmptyStmt then
+  begin
+    LFirst := GTree.Nodes[ANode].FirstToken - 1;
+    LLast := LFirst;
+  end
+  else
+  begin
+    LFirst := GTree.NodeLeftmostVis(ANode);
+    LLast := GTree.Nodes[ANode].LastToken;
+  end;
+  LLine := VisLine(LFirst, LFile);
+  Result := (VisLine(LLast, LOtherFile) = LLine) and (LOtherFile = LFile);
+  if Result and (LLast < High(GPre.Visible)) then
+    Result := (VisLine(LLast + 1, LOtherFile) = LLine) and (LOtherFile = LFile);
+end;
+
+{ t2: every statement of the subtree at ANode as a site, in pre-order (a
+  statement before the ones inside it); ARoutine as in T1Walk. AStored:
+  ANode lies in a stored body (IsStoredBody). AInList: ANode stands as an
+  item of a statement list - directly, or as the statement a label marks
+  that does.
+
+  Besides the kinds never wrapped (see the header), two rules, each from a
+  probe (plan S6):
+  - a CALL statement standing as a list item is not wrapped (counted in
+    GExcludedCall): when the call discards a managed result - a string, an
+    interface, a dynamic array, a record with managed fields - dcc
+    finalizes the temporary holding it at the end of the statement LIST
+    the call stands in (a routine's own list: in its epilogue), so a
+    begin/end of its own moves the finalization up to the call - `S;` /
+    `Y := 1;` differs from `begin S end;` / `Y := 1;` by 17 bytes. A parse
+    cannot tell a function from a procedure, nor a managed result from any
+    other. As the body of an if, a loop, a case branch, a with or an
+    exception handler the temporary is the statement's own and the
+    begin/end changes nothing; under a label it is the label's list's.
+  - in a stored body, a statement that does not share one line with the
+    token after it (counted in GExcludedStored) - see IsStoredBody. }
+procedure T2Walk(ANode: Integer; const ARoutine: string; AStored,
+  AInList: Boolean);
+var
+  LChild, LIndex: Integer;
+  LRoutine: string;
+  LInList: Boolean;
+begin
+  LRoutine := ARoutine;
+  case GTree.Nodes[ANode].Kind of
+    nkAsmStmt:
+      Exit;
+    nkRoutine:
+      begin
+        LRoutine := RoutineName(ANode);
+        if ARoutine <> '' then
+          LRoutine := ARoutine + '.' + LRoutine;
+        // A nested routine or an anonymous method is part of the body it
+        // is written in: stored with it.
+        AStored := AStored or IsStoredBody(ANode);
+      end;
+    nkInitSec:
+      LRoutine := GUnitName;
+    nkFinalSec:
+      LRoutine := 'Finalization';
+  end;
+  LChild := GTree.Nodes[ANode].FirstChild;
+  LIndex := 0;
+  while LChild <> NIL_NODE do
+  begin
+    LInList := (GTree.Nodes[ANode].Kind in [nkBlock, nkInitSec, nkFinalSec]) or
+      ((GTree.Nodes[ANode].Kind = nkLabeledStmt) and AInList and
+       (GTree.Nodes[LChild].NextSibling = NIL_NODE));
+    if InStatementPosition(ANode, LIndex, LChild) then
+      case GTree.Nodes[LChild].Kind of
+        nkInlineVar, nkInlineConst:
+          Inc(GExcludedInline);
+        nkLabeledStmt:
+          Inc(GExcludedLabel);
+        nkAsmStmt:
+          Inc(GExcludedAsm);
+        nkBlock, nkEmptyStmt, nkAssign, nkExprStmt, nkIfStmt, nkCaseStmt,
+        nkForStmt, nkForInStmt, nkWhileStmt, nkRepeatStmt, nkWithStmt,
+        nkGotoStmt, nkTryStmt, nkRaiseStmt:
+          if (GTree.Nodes[LChild].Kind = nkExprStmt) and LInList then
+            Inc(GExcludedCall)
+          else if AStored and not OnOneLine(LChild) then
+            Inc(GExcludedStored)
+          else
+            AddBlockSite(ANode, LIndex, LChild, LRoutine);
+      end;
+    T2Walk(LChild, LRoutine, AStored, LInList);
+    LChild := GTree.Nodes[LChild].NextSibling;
+    Inc(LIndex);
   end;
 end;
 
@@ -1558,6 +1953,7 @@ begin
         else if GArg = 'ts' then GMode := xmTS
         else if GArg = 't0f' then GMode := xmT0F
         else if GArg = 't1' then GMode := xmT1
+        else if GArg = 't2' then GMode := xmT2
         else raise Exception.Create('unknown mode: ' + GArg);
       end
       else if GArg.StartsWith('-Undef:', True) then
@@ -1592,7 +1988,7 @@ begin
     end;
     if (GFile = '') or (GOut = '') then
     begin
-      Writeln(ErrOutput, 'Usage: PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1 ' +
+      Writeln(ErrOutput, 'Usage: PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2 ' +
         '-out:<dir> [-p:<platform>] [-D:X;Y]... [-Undef:X;Y]... ' +
         '[-I:<dir>[;<dir>]]... [-oracle [-S:<dir>[;<dir>]]...] ' +
         '[-sites:<ids>]');
@@ -1612,6 +2008,7 @@ begin
     GEdits := TList<TEdit>.Create;
     GSites := TList<TSite>.Create;
     GArgMap := TDictionary<string, string>.Create;
+    GInlineNames := TDictionary<string, Boolean>.Create;
     GWritten := TDictionary<string, Boolean>.Create;
     GSitesText := TStringList.Create;
     GFileLines := TStringList.Create;
@@ -1660,7 +2057,7 @@ begin
 
       GDiags := nil;
       GApplied := 0;
-      if GMode in [xmTS, xmT1] then
+      if GMode in [xmTS, xmT1, xmT2] then
       begin
         GTree := TPasParser.ParseFile(GPre, GDiags);
         for GIdx := 0 to High(GDiags) do
@@ -1673,15 +2070,21 @@ begin
           else
             Writeln(ErrOutput, 'PARSE <eof>: ', GDiags[GIdx].Msg);
         GUnitName := HeaderName;
-        if GMode = xmTS then
-          VisitRoutines(0, '')
+        case GMode of
+          xmTS: VisitRoutines(0, '');
+          xmT1: T1Walk(0, '', -2);
         else
-          T1Walk(0, '', -2);
+          CollectInlineNames(0);
+          T2Walk(0, '', False, False);
+        end;
         for GIdx := 0 to GSites.Count - 1 do
           if SiteSelected(GIdx + 1) then
           begin
-            AddEdit(GSites[GIdx].OpenVis, False, 1, '(');
-            AddEdit(GSites[GIdx].CloseVis, True, 0, ')');
+            GSite := GSites[GIdx];
+            AddEdit(GSite.OpenVis, GSite.OpenAfter, GSite.OpenOrder,
+              GSite.OpenText);
+            if GSite.CloseText <> '' then
+              AddEdit(GSite.CloseVis, True, GSite.CloseOrder, GSite.CloseText);
             Inc(GApplied);
           end;
       end
@@ -1782,10 +2185,14 @@ begin
       GSitesText.Add(Format('# PasTreeXform %s  mode=%s  platform=%s  ' +
         'files=%d  parse-diagnostics=%d  pp-diagnostics=%d  ' +
         'dropped-sites=%d  excluded-type=%d  excluded-ctor=%d  ' +
-        'excluded-at=%d  applied=%d  stream=%s', [PasTreeVersion,
-        cModeNames[GMode], PlatformName(GPlatform), Length(GPre.FileNames),
-        Length(GDiags), GNonInfo, GDropped, GExcluded, GExcludedCtor,
-        GExcludedAt, GApplied, IfThen(GOracleUsed, 'project', 'preprocessor')]));
+        'excluded-at=%d  excluded-inline=%d  excluded-label=%d  ' +
+        'excluded-asm=%d  excluded-call=%d  excluded-stored=%d  applied=%d  ' +
+        'stream=%s', [PasTreeVersion, cModeNames[GMode],
+        PlatformName(GPlatform), Length(GPre.FileNames), Length(GDiags),
+        GNonInfo, GDropped, GExcluded, GExcludedCtor, GExcludedAt,
+        GExcludedInline, GExcludedLabel, GExcludedAsm, GExcludedCall,
+        GExcludedStored, GApplied, IfThen(GOracleUsed, 'project',
+        'preprocessor')]));
       GSitesText.Add('# ' + GFile);
       GSitesText.Add('# id' + #9 + 'kind' + #9 + 'ops' + #9 + 'span' + #9 +
         'routine' + #9 + 'edit' + #9 + 'applied');
@@ -1815,10 +2222,20 @@ begin
         GLine := GLine + ' excluded-ctor ' + IntToStr(GExcludedCtor);
       if GExcludedAt > 0 then
         GLine := GLine + ' excluded-at ' + IntToStr(GExcludedAt);
-      if GMode in [xmTS, xmT1] then
+      if GExcludedInline > 0 then
+        GLine := GLine + ' excluded-inline ' + IntToStr(GExcludedInline);
+      if GExcludedLabel > 0 then
+        GLine := GLine + ' excluded-label ' + IntToStr(GExcludedLabel);
+      if GExcludedAsm > 0 then
+        GLine := GLine + ' excluded-asm ' + IntToStr(GExcludedAsm);
+      if GExcludedCall > 0 then
+        GLine := GLine + ' excluded-call ' + IntToStr(GExcludedCall);
+      if GExcludedStored > 0 then
+        GLine := GLine + ' excluded-stored ' + IntToStr(GExcludedStored);
+      if GMode in [xmTS, xmT1, xmT2] then
         GLine := GLine + ' applied ' + IntToStr(GApplied);
       Writeln('sites ', GLine);
-      if GMode in [xmTS, xmT1] then
+      if GMode in [xmTS, xmT1, xmT2] then
         Writeln('parse ', Length(GDiags));
       if GOracleUsed and (GMode <> xmT0F) then
         Writeln('stream project');
@@ -1829,6 +2246,7 @@ begin
         Writeln('flatten ', GFlatStats);
       end;
     finally
+      GInlineNames.Free;
       GArgMap.Free;
       GFileLines.Free;
       GSitesText.Free;

@@ -20,9 +20,10 @@
                 lies beside the original, so the copy lacks one it needs -
                 one the preprocessor never read (an include in a branch it
                 skipped and dcc did not, say)
-    NONDET      the .dcu differed, but so do two compiles of the ORIGINAL -
-                dcc itself is not deterministic on this unit under these
-                switches; counted, not judged
+    NONDET      the .dcu differed, but dcc itself is not deterministic on
+                this unit under these switches: the original compiled again
+                gave another .dcu, or the copy compiled again gave the
+                original's; counted, not judged
     TOOL-FAIL   PasTreeXform refused the unit (its message follows)
 
   Mode ts is the selftest: every unit with a site must DIFF and the dump must
@@ -43,6 +44,11 @@
   2 log2(n) compiles per culprit, at most -LocalizeBudget per unit. The
   culprits go on the unit's line and into u\<Unit>\culprits.txt. -Localize
   runs the localizer on a ts selftest too: it must name every planted site.
+
+  Mode t2 judges the parser's STATEMENTS the same way: every statement in a
+  statement position wrapped in begin/end along PasTree's tree (see
+  PasTreeXform) - an else, a case branch or a statement's end placed
+  differently from dcc changes the code; the localizer as for t1.
 
   Rules the compiles follow (both sides alike):
   - dcc by FULL path (the one on PATH may be another version), -$O- (dead
@@ -75,7 +81,7 @@
 #>
 param(
   [Parameter(Mandatory = $true)] [string] $List,
-  [Parameter(Mandatory = $true)] [ValidateSet('t0', 'ts', 't0f', 't1')] [string] $Mode,
+  [Parameter(Mandatory = $true)] [ValidateSet('t0', 'ts', 't0f', 't1', 't2')] [string] $Mode,
   [Parameter(Mandatory = $true)] [string] $Out,
   [string] $Platform = 'Win64',
   [string] $Bds = 'C:\Program Files (x86)\Embarcadero\Studio\37.0',
@@ -100,7 +106,7 @@ param(
   [switch] $Localize,
   [switch] $NoLocalize,
   [int] $LocalizeBudget = 64,
-  # ts, t1: apply only these sites (PasTreeXform -sites:, `1-40,57`) - for
+  # ts, t1, t2: apply only these sites (PasTreeXform -sites:, `1-40,57`) - for
   # probing one site of a unit by hand.
   [string] $Sites = '',
   # Internal: set on a worker (see -Jobs) - the parent's parameters, as JSON;
@@ -119,16 +125,23 @@ if ($Tools -eq '') { $Tools = Join-Path (Split-Path -Parent $MyInvocation.MyComm
 if ($Mode -eq 't0f' -and -not $PSBoundParameters.ContainsKey('Switches') -and $Worker -eq '') {
   $Switches = @()
 }
-# t1 compiles without line tables: the code-lines record ($90) gives code
-# emitted after a lookahead the line of the LOOKAHEAD token - in
+# t1 and t2 compile without line tables: the code-lines record ($90) gives
+# code emitted after a lookahead the line of the LOOKAHEAD token - in
 # `if C then A := A + [X]` / `else` on the next line, part of the
 # concatenation's code sits on the `else` line, and with the parentheses on
-# its own - so a `)` that changes the token after an expression changes the
-# table while the code stays byte-identical (probed on dcc64 37.0: -$D- -$L-
-# together remove the difference, either alone does not). The code is the
-# verdict; no Studio unit tests $IFOPT D or L.
-if ($Mode -eq 't1' -and -not $PSBoundParameters.ContainsKey('Switches') -and $Worker -eq '') {
+# its own - so a `)` or an `end` that changes the token after an expression
+# changes the table while the code stays byte-identical (probed on dcc64
+# 37.0: -$D- -$L- together remove the difference, either alone does not).
+# The code is the verdict; no Studio unit tests $IFOPT D or L.
+# t2 also compiles without symbol reference info: the `$93` record keeps the
+# line of a reference, and the same lookahead rule applies - with
+# `if C then`, `inherited` and `else` on three lines the call's reference is
+# recorded on the `else` line, with `begin inherited end` on its own; -$D-
+# and -$L- leave that record in place, -$Y- removes it (probed on a VCL
+# unit, dcc64 37.0; no Studio unit tests $IFOPT Y).
+if ($Mode -in @('t1', 't2') -and -not $PSBoundParameters.ContainsKey('Switches') -and $Worker -eq '') {
   $Switches = @('-$O-', '-$D-', '-$L-')
+  if ($Mode -eq 't2') { $Switches += '-$Y-' }
 }
 
 if ($Worker -ne '') {
@@ -144,7 +157,7 @@ if ($Worker -ne '') {
   $Localize = [bool]$p.Localize; $NoLocalize = [bool]$p.NoLocalize; $LocalizeBudget = [int]$p.LocalizeBudget
   $Sites = "$($p.Sites)"
 }
-$doLocalize = (-not $NoLocalize) -and ($Mode -eq 't1' -or ($Mode -eq 'ts' -and $Localize))
+$doLocalize = (-not $NoLocalize) -and ($Mode -in @('t1', 't2') -or ($Mode -eq 'ts' -and $Localize))
 if ($Oracle -and $OraclePath.Count -eq 0) {
   # What PasTreeSemaProject -proj adds (StudioSearchPaths there).
   $OraclePath = @('source\rtl\sys', 'source\rtl\common', 'source\rtl\win',
@@ -531,9 +544,10 @@ function Invoke-Unit([string] $u, [string] $work) {
     if ($x.Out -match '(?m)^flatten .*stream=project') { $parts += 'project stream'; $r.ProjectStream = 1 }
     if ($parts.Count -gt 0) { $note = '  [' + ($parts -join '; ') + ']' }
   }
-  if ($Mode -eq 't1') {
-    # The site counts: every operator the tree holds, the ones a subrange
-    # type starts with (not wrapped) and the ones in no single file.
+  if ($Mode -in @('t1', 't2')) {
+    # The site counts: every operator (t1) or statement (t2) the tree holds,
+    # the ones a rule leaves unwrapped (excluded-*) and the ones in no
+    # single file.
     $sl = [regex]::Match($x.Out, '(?m)^sites (\d+)(.*)$')
     $r.AllSites = [int]$sl.Groups[1].Value
     foreach ($m in [regex]::Matches($sl.Groups[2].Value, 'excluded-\w+ (\d+)')) {
@@ -619,14 +633,26 @@ function Invoke-Unit([string] $u, [string] $work) {
   # dcc is not always deterministic: under -$O- one Studio unit (Vcl.Skia)
   # compiles to a different .dcu from one run to the next, the text
   # unchanged (probed: five compiles, three results; with dcc's default
-  # switches it is stable). Before a difference is believed the original is
-  # compiled twice more; a unit whose own compiles disagree is NONDET -
-  # counted, not judged.
-  for ($k = 2; $k -le 3; $k++) {
+  # switches it is stable), and in another (Vcl.ControlList) one byte of a
+  # class's method-resolution entry is garbage: the original takes a rare
+  # value 3 times in 30 compiles, the copy with its blocks another mix (S6).
+  # So before a difference is believed, both sides are compiled four times
+  # more: a unit whose original compiles disagree among themselves, or whose
+  # copy compiles even once to the original's .dcu, is NONDET - counted,
+  # not judged. A variation that rare can still slip through as a DIFF with
+  # no dump difference; such a DIFF is settled by compiling both sides many
+  # times over (S6's repeat.ps1).
+  for ($k = 2; $k -le 5; $k++) {
     $again = Compile-Side $origRoot $work $main $xfRoot $xinc (Join-Path $work "orig$k.dcu")
     if ($again.Exit -ne 0 -or -not (Same-Dcu $a (Join-Path $work "orig$k.dcu\$dcuName"))) {
       $r.Outcome = 'NONDET'
       $r.Line = "NONDET  $leaf  the original compiles to a different .dcu from run to run$note"
+      return [pscustomobject]$r
+    }
+    $againX = Compile-Side $xfRoot $work $main $xfRoot $xinc (Join-Path $work "xf$k.dcu")
+    if ($againX.Exit -eq 0 -and (Same-Dcu $a (Join-Path $work "xf$k.dcu\$dcuName") $argMap)) {
+      $r.Outcome = 'NONDET'
+      $r.Line = "NONDET  $leaf  the copy compiled once to the original's .dcu$note"
       return [pscustomobject]$r
     }
   }
@@ -821,7 +847,11 @@ if ($copyIncomplete -gt 0) { $summary.Add("base-fail with an incomplete copy: $c
 if ($Oracle) { $summary.Add("units whose stream came from the project analysis (-Oracle): $projectStream") }
 $pass = $true
 if ($Mode -eq 't1') {
-  $summary.Add(("t1: sites={0} excluded (subrange type start, [ first)={1} dropped={2} units with parse diagnostics={3}" -f
+  $summary.Add(("t1: sites={0} excluded (subrange type start, [ first, @)={1} dropped={2} units with parse diagnostics={3}" -f
+    $t1.Sites, $t1.Excluded, $t1.Dropped, $t1.ParseUnits))
+}
+if ($Mode -eq 't2') {
+  $summary.Add(("t2: sites={0} excluded (inline var/const, labeled, asm, list calls, stored-body lines)={1} dropped={2} units with parse diagnostics={3}" -f
     $t1.Sites, $t1.Excluded, $t1.Dropped, $t1.ParseUnits))
 }
 if ($doLocalize) {

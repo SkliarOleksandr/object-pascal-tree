@@ -302,8 +302,51 @@ dcc64 37.0):
   (Vcl.Skia) compiled five times from the same text gave three different
   `.dcu` files - two bytes of a class-definition record, once a different
   length. With the default switches the same five compiles agree. The
-  harness therefore compiles the original twice more before it believes a
-  difference, and calls a unit whose own compiles disagree NONDET.
+  harness therefore compiles the original again before it believes a
+  difference, and calls a unit whose own compiles disagree NONDET (since
+  `t2`, both sides four times - see the last point below).
+
+A transformation that inserts `begin`/`end` meets four more, found when every
+statement was first wrapped along the tree (mode `t2`, 2026-09-26, dcc64
+37.0):
+
+- **A call statement's discarded managed result lives until the end of the
+  statement LIST around it.** `S;` for a function returning a string, an
+  interface, a dynamic array or a record with managed fields keeps the
+  result in a temporary that is finalized at the end of the enclosing
+  statement list - a routine's own list: in its epilogue - so
+  `begin S end;` moves the finalization up to the call (17 bytes of code).
+  Under a label the label's list counts; as the body of an if, a loop, a
+  case branch, a with or an exception handler the temporary is the
+  statement's own, and a `begin`/`end` changes nothing. A managed inline
+  variable is finalized at the end of its block the same way.
+- **The symbol-reference record (`$93`) keeps lines under `-$D- -$L-`,**
+  by the same next-token rule as `$90`: with `if C then`, `inherited` and
+  `else` on three lines the call's reference is recorded on the `else`
+  line, written `begin inherited end` on its own. `-$Y-` removes the
+  record, so `t2` compiles with `-$O- -$D- -$L- -$Y-`.
+- **A stored body keeps statement lines, whatever the switches.** The body
+  of a generic routine (kept for instantiation elsewhere) and of an inline
+  one (kept for expansion) records source lines for its statements - where
+  a then-branch is followed by `else` on the next line, the line of that
+  next token, as in `$90`; `-$D-`, `-$L-`, `-$Y-`, `-$C-` and `-$O+` leave
+  them. A `begin`/`end` around a statement that spans lines, or whose next
+  token is on another line, changes the stored bytes (5 to 7); around a
+  statement that shares one line with the token after it it never did.
+- **dcc64 is nondeterministic on one more unit, and rarely.** In a second
+  VCL unit one byte of a method-resolution entry (`function
+  IEnumerator<Integer>.GetCurrent = GetCurrentInt`) of a class declared in
+  the implementation section is garbage: 30 compiles of the same text under
+  `-$O- -$D- -$L- -$Y-` gave one `.dcu` 27 times and, with that byte `$00`
+  instead of `$88`, 3 times; with blocks inserted the text compiles to that
+  second `.dcu` or to a third (the field one byte longer), never to the
+  first. Every routine's code is identical; `-$O-` alone and the default
+  switches show the same kind of variation. It looked like an effect of the
+  blocks until the same text was compiled repeatedly. The harness compiles
+  both sides four times more before it believes a difference - the original
+  must stay alike, the copy must never hit the original's `.dcu` - and a
+  variation this rare still slips through at times: a DIFF with no dump
+  difference is settled by compiling both sides many times over.
 
 ## Known gaps, for a future session
 
