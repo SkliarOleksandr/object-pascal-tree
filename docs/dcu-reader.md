@@ -260,6 +260,28 @@ transformation (an unchanged copy) first came out different, 2026-09-25:
   length of the paths (four instantiations of one generic's `Assert` gave 16
   bytes of code). Both sides of a comparison compile at the same path.
 
+A transformation that removes directives meets three more, found when the
+preprocessor's own decisions were first written into the text (mode `t0f`,
+2026-09-26, dcc64 37.0; the harness keeps each as a probe - see
+`PasTreeXform.dpr`):
+
+- **Every `$IF`/`$ELSEIF` expression is evaluated, in any branch** - a
+  skipped one, one after a taken branch - and each name it finds becomes an
+  import of the unit (`$IF RTLVersion >= 36` imports System's `RTLVersion`,
+  a skipped `$IF SizeOf(T)` imports `T`); the `.dcu` is the same whether the
+  directive stood in a live branch or a dead one. A malformed expression is
+  an error even in a skipped branch. An `$IFDEF`, `$IFNDEF` or `$IFOPT`
+  records nothing.
+- **The text after an `$ELSE`, `$ENDIF` or `$IFEND` is stored when it starts
+  with `!`** (`$ENDIF !AUTOREFCOUNT`, a common RTL comment style) and the
+  state after the directive is live; any other leading character stores
+  nothing, and neither does an `$ELSE` that turns code off. `$REGION` stores
+  its text the same way, byte for byte.
+- **An include file's source record carries its name as written** in the
+  directive (`inc\x.inc`), not the resolved path - so reading one include
+  through a renamed copy changes that record and the header's size field
+  (offset 4), and nothing else.
+
 ## Known gaps, for a future session
 
 Three different kinds, not one. Keep them apart - the fix, and whether a fix
