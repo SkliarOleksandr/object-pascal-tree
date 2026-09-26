@@ -23,6 +23,8 @@ calls neither gets exactly the previous behaviour.
 edit inside a routine body   -> single-module reanalysis   ~20 ms / ~300 ms
 edit in an interface         -> module + the consumers that  ~70 ms / ~0.5 s
                                 can SEE the change
+a new unit imported (New     -> module + the units it pulls    - / ~30 ms
+  Unit in the IDE)              in, nobody else (2b)
 anything refused             -> ordinary rebuild WITH the parse donor
 a different project opened   -> ordinary rebuild
                                         (demo closure / big client closure)
@@ -216,7 +218,10 @@ from a slow analyzer.
 | `demoted` | the edited unit is text-demoted and its old stream cannot come back: the file changed with no `SetBuffer` before it (see the memory dial below) |
 | `parse-failed` | unparsable now; the closure changed, a rebuild's job |
 | `unresolved-if` | the stream depends on the `$IF` oracle, i.e. on the whole generation's symbol state - never reproducible per module |
-| `new-dependency(X)` | an import resolves to a file the closure never loaded |
+| `new-dependency-failed(<file>: <error>)` | a unit the edit newly imports (or one it pulls in) could not be parsed - the full pipeline records it as known-bad, a rebuild's job (see 2b) |
+| `new-dependency-oracle(<unit>)` | a newly imported unit's stream holds unanswered `$IF` questions - the declared pass would re-decide it against the whole generation: the edited unit's own `unresolved-if`, applied to the newcomer |
+| `new-dependency-name(<name>)` | a newly imported unit declares a unit name the closure already has - first loaded wins the by-name index, and a rebuild loads in another order |
+| `new-dependency-seen(<unit> uses <name>)` | another model already names the newcomer in its `uses` (unresolved, or through a spelling a program's `in` pins): a rebuild would resolve that entry to it, so that model would have to be redone too |
 | `no-clean-boundary-*` | no implementation scope, or the arena is not split cleanly at it |
 | `intf-sym#N`, `intf-scope#N` | the interface prefix moved in a way the redo cannot express |
 | `too-many-consumers(N>L)` | the SELECTED redo set N exceeds `ModuleRedoLimit` (only when a host set one; the default is no ceiling). The number is reported because "too many" alone says nothing about whether the limit is set sensibly |
@@ -286,6 +291,61 @@ adds a name to the hub unit then rehydrates its whole reach to scan it (~1260
 units, ~270 ms instead of ~170 ms) - which is why the project's own units are
 the natural thing to keep.
 
+## 2b. A new import is taken in (0.53.0)
+
+An edit whose `uses` gains a unit the closure never loaded used to refuse
+(`new-dependency`). The case that made that expensive is the IDE's File > New >
+Unit: the program gains `UnitN in 'UnitN.pas'` - a unit that exists only as an
+editor buffer until it is saved - and the host rebuilt the closure, 4-5 s on
+the 3768-unit client project, for a unit nothing could depend on yet.
+
+That last fact is the whole argument. The importer is the ONLY existing model
+that can see a newcomer, and the module path redoes it anyway; so the newcomer
+can be loaded, registered and analyzed beside it with nothing else touched:
+
+```
+NewImportsOf     the re-parsed unit's imports that resolve (SourceExists - a
+                 buffer counts) to a path absent from FByPath; a known-bad
+                 path (-1) is not new - ResolveUses answers it with the F1027
+                 a rebuild would, and until 0.53.0 it refused every edit of
+                 its importer
+LoadNewcomers    those files and, breadth first, every not-yet-loaded unit
+                 THEY import: parsed in parallel waves (ComputeLoad, the load
+                 engine's worker), discovered in wave order, registered
+                 nowhere - the project is untouched until the commit point
+guards           NewcomersAdmissible, see the table above
+commit           the newcomers are registered right behind the swap, in
+                 discovery order (ids after every existing model's - the one
+                 difference from a rebuild, and nothing compares ids)
+passes           RunModulePasses over the redo set PLUS the newcomers: no
+                 Phase-1 redo for them (fresh models), everything from
+                 ResolveUses on; the helper registry grows by their slots
+                 instead of being rebuilt
+```
+
+`module=N` stays the redo set of models that were already there; the take-in
+reports itself as `newload=<ms>;` and `newunits=<n>(<names>);`.
+
+Why the guards are what they are. The only way registering a unit changes an
+EXISTING model's view without that model importing it is `uses` resolution:
+another model naming the newcomer - unresolved so far (F1027), or resolved
+elsewhere and redirected by the pin a program's `X in 'path'` sets for the
+whole project (TPasSourceManager.PinUnit), or reached through
+LoadedUnitByName's declared-name index with a namespace prefix. Any such
+model refuses (`new-dependency-seen`): a rebuild would resolve it to the
+newcomer. A newcomer whose declared name the closure already has refuses
+too, because the by-name index keeps the FIRST loaded, and a rebuild loads in
+another order. A newcomer's `$IF` that the seed could not answer refuses
+because only the full pipeline's declared pass can decide it.
+
+Measured on the frozen client closure (3684 units, Win32), every step
+compared with a fresh full build by the differential harness (`newunit`
+kind): a buffer-only unit added to the program is a 24-33 ms module step
+against a 12.1-12.8 s rebuild; one importing System.JSON.Serializers took in
+three units (`newunits=3(...)`) in 38 ms; a body edit of a unit taken in is an
+ordinary module step. `-selftest` catches the newcomer missing on the
+incremental side.
+
 ## 3. What it costs (measured, every step verified identical to a full build)
 
 | closure | body edit | interface edit | full rebuild |
@@ -329,11 +389,14 @@ only ever prove the full path.
   overload link is what changes), `recfield` (a field added to the first
   interface record), `parent` (the first parentless class gets an explicit
   `(TObject)` - a no-op for dcc and for Phase 1, a changed declaration for
-  the diff), and `insert <path>|<line>|<text>` / `replace` for replaying an
-  exact typing sequence. On the client closure every one of these in the hub
-  types unit (1260 models in reach) is a one-module step of ~170-200 ms
-  against a 29 s rebuild; `intfuses` selects the ~80 models that mention the
-  new unit's leaf name;
+  the diff), `insert <path>|<line>|<text>` / `replace` for replaying an
+  exact typing sequence, and `newunit <program>|<Name>[|<uses>]` - the IDE's
+  File > New > Unit: a buffer-only unit beside the program, importing <uses>,
+  and the program's uses clause opening with `<Name> in '<Name>.pas'` (2b; a
+  fallback on it counts as unexpected). On the client closure every one of
+  these in the hub types unit (1260 models in reach) is a one-module step of
+  ~170-200 ms against a 29 s rebuild; `intfuses` selects the ~80 models that
+  mention the new unit's leaf name;
 - default mode: the donor CHAIN (rebuild k adopts rebuild k-1);
 - `-module`: single-module reanalysis, falling back to a donor rebuild on
   refusal, exactly as a host must;
@@ -564,9 +627,10 @@ that used to refuse `instance-into-changed-intf` is a 4-model redo at 1.35 s
 against a 28 s rebuild. Harness kinds `body`/`intf`/`intfuses` on those
 units are the gate.
 
-**D. A new `uses` entry falls back to a rebuild.** The newcomer needs loading,
-Phase 1 and cross passes of its own - bounded work that could be done
-incrementally, but typing an import is rarer than typing code.
+**D. DONE (0.53.0) - a new `uses` entry is taken in.** See 2b. What made it
+matter was not typing an import but the IDE's File > New > Unit, which writes
+the new unit into the program's uses clause: a 4-5 s rebuild on the 3768-unit
+client project for a unit nothing could depend on yet.
 
 **E. Multi-file edits are not expressible.** The entry point takes one path
 while the machinery already redoes a SET, so the natural shape is an overload

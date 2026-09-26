@@ -528,12 +528,39 @@ type
       a 1260-model reach), the threads queuing on the memory manager. }
     class function TreeMentionsAny(const ATree: TPasTree;
       const ANamesByLen: TArray<TArray<string>>): Boolean;
-    { Does every `uses` entry of AModel (a freshly parsed replacement for
-      model AId) resolve to a file the project has ALREADY loaded? A new
-      import changes the closure, which the single-module path cannot do -
-      it would have to load, Phase-1 and cross-analyze the newcomer, i.e. a
-      rebuild. Resolution only (no loading), so a refusal costs nothing. }
-    function UsesAllLoaded(AModel: TPasSemaModel; AId: Integer;
+    { The files AModel (a fresh re-parse of the unit at AFromFile) imports
+      that the closure has never seen: resolved, readable (SourceExists), and
+      absent from FByPath altogether. A path the closure tried and could not
+      parse (FByPath's -1) is not new - ResolveUses answers it with the same
+      F1027 a rebuild would. Resolution only, nothing is loaded. }
+    function NewImportsOf(AModel: TPasSemaModel;
+      const AFromFile: string): TArray<string>;
+    { The module path's TAKE-IN of a new import (0.53.0): parse and Phase-1
+      ASeeds and, breadth first, every not-yet-loaded unit THEY import - the
+      load engine's work for a closure that grows by a few units - WITHOUT
+      registering anything. AModels/APaths come back in discovery order and
+      are the caller's until it registers them past its commit point (freed
+      on a refusal). False = a newcomer failed to parse (AWhy names it): the
+      full pipeline would record it as known-bad, which is a rebuild's job;
+      AModels then still holds what was loaded, for the caller to free. }
+    function LoadNewcomers(const ASeeds: TArray<string>;
+      out AModels: TArray<TPasSemaModel>; out APaths: TArray<string>;
+      out AWhy: string): Boolean;
+    { May the newcomers join the closure with no other model redone? Only the
+      edited unit AId (its fresh re-parse ANew) imports them, so it is the
+      only EXISTING model whose view changes - unless registering them
+      changes how another model's `uses` resolves. False, with the reason in
+      AWhy, for: a newcomer whose stream holds unanswered $IF questions (the
+      declared pass would re-decide it against the whole generation - the
+      edited unit's own unresolved-if exclusion); a declared name the
+      closure already has (first loaded wins the by-name index, and a
+      rebuild loads in another order); and any other model that NAMES a
+      newcomer in its `uses` - by its declared name, through a namespace
+      prefix, or by a spelling a program's `in` pins for the whole project.
+      Such a model resolved that entry to nothing (F1027) or elsewhere, and a
+      rebuild would resolve it to the newcomer. }
+    function NewcomersAdmissible(AId: Integer; ANew: TPasSemaModel;
+      const AModels: TArray<TPasSemaModel>; const APaths: TArray<string>;
       out AWhy: string): Boolean;
     // The per-model pass tail AnalyzeModuleOnly re-runs after the swap: the
     // same sequence AnalyzeFile drives, narrowed to a SET of models (the
@@ -1153,10 +1180,17 @@ type
       back to a full rebuild. Refusals are deliberately generous - an unknown
       or not-yet-full path, a demoted model, a parse failure, a stream with
       unanswered $IF questions (those are re-decided against the whole
-      generation by RunDeclaredPass, not reproducible per module), an
-      interface change of ANY kind, or an instance-table entry naming an
-      implementation-local symbol. A wrong fast path is plausible-but-wrong
-      navigation, the worst bug class here; a needless rebuild costs time.
+      generation by RunDeclaredPass, not reproducible per module), and the
+      rest of the list in docs/incremental-analysis.md. A wrong fast path is
+      plausible-but-wrong navigation, the worst bug class here; a needless
+      rebuild costs time.
+
+      An interface change redoes the consumers that can see it (0.10.0), and
+      a NEW IMPORT - a unit the closure never loaded, the program's uses
+      clause gaining a unit just created in the IDE - is loaded with every
+      not-yet-loaded unit it pulls in and analyzed beside the edited unit
+      (0.53.0): nobody else imports a newcomer, so nothing else is redone.
+      See NewcomersAdmissible for when that still refuses.
 
       What holds it together: every cross-model reference into this unit is a
       (UnitId, Sym) pair naming an INTERFACE symbol, and guard 1 reproduces
@@ -7501,9 +7535,35 @@ var
   LCount, LIdx, LUse, LUid: Integer;
   LChanged, LTarget: TArray<Boolean>;
   LOld: TArray<TPasHelperReg>;
-  LAnyChanged: Boolean;
+  LAnyChanged, LGrown: Boolean;
 begin
   LCount := FModels.Count;
+  // Units the module path just took in (0.53.0) have no slots yet. When every
+  // model past the registry is one of the redone set, the registry grows by
+  // empty slots and step 2 collects them like any redone model - and their
+  // importer, the edited unit, is a redone model too, so step 3 publishes for
+  // it. Anything else past the registry is unexplained: rebuild it whole.
+  if (Length(FModelHelpers) = Length(FHelperIdx)) and
+     (Length(FModelHelpers) > 0) and (Length(FModelHelpers) < LCount) then
+  begin
+    SetLength(LTarget, LCount);   // borrowed as "is redone", reset below
+    for LIdx in AIds do
+      if (LIdx >= 0) and (LIdx < LCount) then
+        LTarget[LIdx] := True;
+    LGrown := True;
+    for LIdx := Length(FModelHelpers) to LCount - 1 do
+      if not LTarget[LIdx] then
+      begin
+        LGrown := False;
+        Break;
+      end;
+    LTarget := nil;
+    if LGrown then
+    begin
+      SetLength(FModelHelpers, LCount);
+      SetLength(FHelperIdx, LCount);
+    end;
+  end;
   if (Length(FModelHelpers) <> LCount) or (Length(FHelperIdx) <> LCount) then
   begin
     BuildHelperMap;
@@ -15216,30 +15276,203 @@ begin
 end;
 {$ENDIF}
 
-function TPasSemaProject.UsesAllLoaded(AModel: TPasSemaModel; AId: Integer;
-  out AWhy: string): Boolean;
+function TPasSemaProject.NewImportsOf(AModel: TPasSemaModel;
+  const AFromFile: string): TArray<string>;
 var
   LIdx, LMid: Integer;
-  LPath: string;
+  LPath, LKey: string;
+  LSeen: TDictionary<string, Boolean>;
 begin
-  AWhy := '';
-  for LIdx := 0 to High(AModel.UsesList) do
-  begin
-    if not FSM.ResolveUnit(AModel.UsesList[LIdx].NameFull,
-      AModel.UsesList[LIdx].InPath, FFiles[AId], LPath) then
+  Result := nil;
+  LSeen := nil;
+  try
+    for LIdx := 0 to High(AModel.UsesList) do
     begin
       // Unresolvable: the full path reports F1027 and carries on, and so does
-      // ours - ResolveUses re-emits it on the new model. Not a refusal.
-      Continue;
+      // ours - ResolveUses re-emits it on the new model. Not a newcomer.
+      if not FSM.ResolveUnit(AModel.UsesList[LIdx].NameFull,
+        AModel.UsesList[LIdx].InPath, AFromFile, LPath) then
+        Continue;
+      LPath := TPath.GetFullPath(LPath);
+      LKey := LowerCase(LPath);
+      // Loaded, or tried and known bad: either way ResolveUses answers it as
+      // a rebuild would. Until 0.53.0 the known-bad case refused too
+      // (new-dependency), so every edit of a unit importing a file that
+      // failed to parse cost a rebuild that failed on it again.
+      if FByPath.TryGetValue(LKey, LMid) then
+        Continue;
+      // LoadFile's own gate: a resolution nothing can read is an F1027.
+      if not FSM.SourceExists(LPath) then
+        Continue;
+      if LSeen = nil then
+        LSeen := TDictionary<string, Boolean>.Create;
+      if LSeen.TryAdd(LKey, True) then
+        Result := Result + [LPath];
     end;
-    if not FByPath.TryGetValue(LowerCase(TPath.GetFullPath(LPath)), LMid) or
-       (LMid < 0) then
-    begin
-      AWhy := 'new-dependency(' + AModel.UsesList[LIdx].NameFull + ')';
-      Exit(False);
-    end;
+  finally
+    LSeen.Free;
   end;
-  Result := True;
+end;
+
+function TPasSemaProject.LoadNewcomers(const ASeeds: TArray<string>;
+  out AModels: TArray<TPasSemaModel>; out APaths: TArray<string>;
+  out AWhy: string): Boolean;
+var
+  LSeen: TDictionary<string, Boolean>;
+  LWave, LNext, LErr: TArray<string>;
+  LRes: TArray<TPasSemaModel>;
+  LIdx, LU: Integer;
+  LPath, LKey: string;
+begin
+  AModels := nil;
+  APaths := nil;
+  AWhy := '';
+  LSeen := TDictionary<string, Boolean>.Create;
+  try
+    LWave := nil;
+    for LPath in ASeeds do
+      if LSeen.TryAdd(LowerCase(LPath), True) then
+        LWave := LWave + [LPath];
+    while LWave <> nil do
+    begin
+      // One wave in parallel, the way the load engine parses: ComputeLoad
+      // rents its preprocessor from the locked pool and writes nothing shared
+      // (TryDonorLoad answers nil at once - no donor outside a rebuild).
+      SetLength(LRes, Length(LWave));
+      SetLength(LErr, Length(LWave));
+      ParallelFor(High(LWave),
+        procedure(AIdx: Integer)
+        var
+          LClass, LMsg: string;
+          LFullDonor: Boolean;
+        begin
+          LRes[AIdx] := ComputeLoad(LWave[AIdx], False, LClass, LMsg,
+            LFullDonor);
+          if LRes[AIdx] = nil then
+            LErr[AIdx] := LClass + ': ' + LMsg;
+        end);
+      // Everything parsed becomes the caller's before anything can refuse,
+      // so a refusal frees the whole take-in in one place.
+      for LIdx := 0 to High(LWave) do
+        if LRes[LIdx] <> nil then
+        begin
+          AModels := AModels + [LRes[LIdx]];
+          APaths := APaths + [LWave[LIdx]];
+        end;
+      for LIdx := 0 to High(LWave) do
+        if LRes[LIdx] = nil then
+        begin
+          AWhy := Format('new-dependency-failed(%s: %s)',
+            [TPath.GetFileName(LWave[LIdx]), LErr[LIdx]]);
+          Exit(False);
+        end;
+      // Discovery in wave order, on this thread (ResolveUnit memoizes and
+      // pins - not thread-safe), with the load engine's gates: loaded or
+      // known bad is not new, and neither is a path nothing can read.
+      LNext := nil;
+      for LIdx := 0 to High(LWave) do
+        for LU := 0 to High(LRes[LIdx].UsesList) do
+          if FSM.ResolveUnit(LRes[LIdx].UsesList[LU].NameFull,
+               LRes[LIdx].UsesList[LU].InPath, LWave[LIdx], LPath) then
+          begin
+            LPath := TPath.GetFullPath(LPath);
+            LKey := LowerCase(LPath);
+            if not FByPath.ContainsKey(LKey) and not LSeen.ContainsKey(LKey) and
+               FSM.SourceExists(LPath) then
+            begin
+              LSeen.Add(LKey, True);
+              LNext := LNext + [LPath];
+            end;
+          end;
+      LWave := LNext;
+    end;
+    Result := True;
+  finally
+    LSeen.Free;
+  end;
+end;
+
+function TPasSemaProject.NewcomersAdmissible(AId: Integer;
+  ANew: TPasSemaModel; const AModels: TArray<TPasSemaModel>;
+  const APaths: TArray<string>; out AWhy: string): Boolean;
+var
+  LNewPaths: TDictionary<string, Boolean>;   // the newcomers' paths, lower
+  LDeclared: TDictionary<string, Boolean>;   // their declared names
+  LNames: TDictionary<string, Boolean>;      // every name that reaches one
+  LIdx, LU, LMid: Integer;
+  LName, LNs: string;
+
+  // Every `uses` entry of AModel that resolves to a newcomer adds the name
+  // it is SPELLED with: a program's `X in 'path'` pins exactly that spelling
+  // for the whole project (TPasSourceManager.PinUnit).
+  procedure AddEntryNames(AModel: TPasSemaModel; const AFrom: string);
+  var
+    LI: Integer;
+    LP: string;
+  begin
+    for LI := 0 to High(AModel.UsesList) do
+      if FSM.ResolveUnit(AModel.UsesList[LI].NameFull,
+           AModel.UsesList[LI].InPath, AFrom, LP) and
+         LNewPaths.ContainsKey(LowerCase(TPath.GetFullPath(LP))) then
+        LNames.AddOrSetValue(LowerCase(AModel.UsesList[LI].NameFull), True);
+  end;
+
+begin
+  AWhy := '';
+  LNewPaths := TDictionary<string, Boolean>.Create;
+  LDeclared := TDictionary<string, Boolean>.Create;
+  LNames := TDictionary<string, Boolean>.Create;
+  try
+    for LIdx := 0 to High(APaths) do
+      LNewPaths.AddOrSetValue(LowerCase(APaths[LIdx]), True);
+    for LIdx := 0 to High(AModels) do
+    begin
+      if (Length(AModels[LIdx].Tree.Source.UnresolvedDeclared) > 0) or
+         (Length(AModels[LIdx].Tree.Source.UnresolvedSymbols) > 0) then
+      begin
+        AWhy := 'new-dependency-oracle(' + AModels[LIdx].UnitNameLower + ')';
+        Exit(False);
+      end;
+      LName := AModels[LIdx].UnitNameLower;
+      if LName = '' then
+        Continue;
+      if ((FByUnitName <> nil) and FByUnitName.ContainsKey(LName)) or
+         not LDeclared.TryAdd(LName, True) then
+      begin
+        AWhy := 'new-dependency-name(' + LName + ')';
+        Exit(False);
+      end;
+      // LoadedUnitByName answers a bare name through a namespace prefix too.
+      LNames.AddOrSetValue(LName, True);
+      for LNs in FNamespaces do
+        if (LNs <> '') and LName.StartsWith(LowerCase(LNs) + '.') then
+          LNames.AddOrSetValue(Copy(LName, Length(LNs) + 2, MaxInt), True);
+    end;
+    AddEntryNames(ANew, FFiles[AId]);
+    for LIdx := 0 to High(AModels) do
+      AddEntryNames(AModels[LIdx], APaths[LIdx]);
+    // The edited unit is redone whatever it names; everyone else keeps the
+    // resolution it has, so no one else may name a newcomer. Every model,
+    // resolved entries included: a pin redirects those as well.
+    for LMid := 0 to FModels.Count - 1 do
+    begin
+      if (LMid = AId) or (FModels[LMid] = nil) then
+        Continue;
+      for LU := 0 to High(FModels[LMid].UsesList) do
+        if LNames.ContainsKey(
+             LowerCase(FModels[LMid].UsesList[LU].NameFull)) then
+        begin
+          AWhy := Format('new-dependency-seen(%s uses %s)',
+            [FModels[LMid].UnitNameLower, FModels[LMid].UsesList[LU].NameFull]);
+          Exit(False);
+        end;
+    end;
+    Result := True;
+  finally
+    LNames.Free;
+    LDeclared.Free;
+    LNewPaths.Free;
+  end;
 end;
 
 function TPasSemaProject.UsesIsInterface(AId, AUseIdx: Integer): Boolean;
@@ -16173,6 +16406,12 @@ var
   LAdded: TDictionary<string, Byte>;
   LRepointed: Integer;
   LDecide: string;            // the split of `decide=`, see Lap
+  // A new import's take-in (see LoadNewcomers): the models are ours until
+  // they are registered past the commit point, and freed on a refusal.
+  LSeeds, LAddPaths: TArray<string>;
+  LAddModels: TArray<TPasSemaModel>;
+  LAddIds: TArray<Integer>;
+  LAddNames: string;
 
   // The decision's own stages, appended as `dec=<stage>:<ms>,...;`.
   procedure Lap(const AName: string);
@@ -16231,6 +16470,9 @@ begin
     end;
   end;
   LAdded := nil;
+  LAddModels := nil;
+  LAddPaths := nil;
+  LAddIds := nil;
   try
     LAdded := TDictionary<string, Byte>.Create;
     // A stream with unanswered $IF questions is re-decided against the WHOLE
@@ -16239,16 +16481,32 @@ begin
     if (Length(LNew.Tree.Source.UnresolvedDeclared) > 0) or
        (Length(LNew.Tree.Source.UnresolvedSymbols) > 0) then
       Exit(Refuse('unresolved-if'));
-    // A new `uses` entry that resolves to a file the closure never loaded
-    // changes the closure itself - a rebuild's job.
-    if not UsesAllLoaded(LNew, LId, LWhy) then
-      Exit(Refuse(LWhy));
+    FStageTimings := Format('parse=%d;', [LSW.ElapsedMilliseconds]);
+    // A NEW `uses` entry - a file the closure never loaded - is TAKEN IN
+    // (0.53.0): loaded with every not-yet-loaded unit it pulls in, then
+    // registered past the commit point and put through the passes beside
+    // this module. Until then it refused (`new-dependency`) and the host
+    // rebuilt the closure - 4-5 s on a 3768-unit project for the IDE's
+    // File > New > Unit, whose program gains `UnitN in 'UnitN.pas'` while
+    // nothing anywhere can depend on UnitN yet. That is exactly why the
+    // take-in is sound: the importer is the one model that can see a
+    // newcomer, and it is redone anyway.
+    LSeeds := NewImportsOf(LNew, LFull);
+    if LSeeds <> nil then
+    begin
+      LSW := TStopwatch.StartNew;
+      if not LoadNewcomers(LSeeds, LAddModels, LAddPaths, LWhy) then
+        Exit(Refuse(LWhy));
+      if not NewcomersAdmissible(LId, LNew, LAddModels, LAddPaths, LWhy) then
+        Exit(Refuse(LWhy));
+      FStageTimings := FStageTimings +
+        Format('newload=%d;', [LSW.ElapsedMilliseconds]);
+    end;
     // The interface prefix decides WHO has to be redone, not whether the fast
     // path may run at all: unchanged, nobody but this module; changed, every
     // model that could see the difference re-runs from Phase 1 (their text is
     // untouched, so no re-parse) and rebuilds its own references - which is
     // why a shifted symbol index harms nobody.
-    FStageTimings := Format('parse=%d;', [LSW.ElapsedMilliseconds]);
     LSW := TStopwatch.StartNew;
     LDecide := '';
     LIntfSame := IntfPrefixSame(LOld, LNew, LOldSymN, LWhy);
@@ -16389,6 +16647,26 @@ begin
     // says "full rebuild", the timing string says where it died, and the
     // exception still propagates to whoever drives the call.
     try
+      // The newcomers join the closure, in discovery order, BEFORE the passes:
+      // ResolveUses must find them in FByPath, or it would LoadFile a second
+      // copy of each. Their ids follow every existing model's where a rebuild
+      // would have interleaved them - the one difference from a rebuild, and
+      // nothing compares ids (the differential harness compares by path).
+      SetLength(LAddIds, Length(LAddModels));
+      for LIdx := 0 to High(LAddModels) do
+      begin
+        LAddIds[LIdx] := RegisterModel(LAddModels[LIdx], LAddPaths[LIdx],
+          msFullReady);
+        LAddModels[LIdx] := nil;   // FModels owns it now
+        FByPath.Add(LowerCase(LAddPaths[LIdx]), LAddIds[LIdx]);
+        RegisterUnitName(LAddIds[LIdx]);
+        if Length(LAddNames) <= 60 then
+        begin
+          if LAddNames <> '' then
+            LAddNames := LAddNames + ',';
+          LAddNames := LAddNames + FModels[LAddIds[LIdx]].UnitNameLower;
+        end;
+      end;
     // Each affected consumer goes back to its OWN Phase-1 state - a fresh
     // Analyze over the tree it already has. No preprocessing, no parse: the
     // tree is unchanged and immutable, and Phase 1 over the same tree is
@@ -16411,9 +16689,14 @@ begin
       for LIdx := 0 to High(LIds) do
         if LIds[LIdx] <= High(FWorkBuilt) then
           FWorkBuilt[LIds[LIdx]] := False;
-      RunModulePasses(LIds, LId, LMap);
+      // The newcomers ride the same pass run: fresh models, so no Phase-1
+      // redo, but everything from ResolveUses on - like the load engine's
+      // units in a rebuild.
+      RunModulePasses(LIds + LAddIds, LId, LMap);
       for LIdx := 0 to High(LIds) do
         SetModuleStatus(LIds[LIdx], msCrossReady);
+      for LIdx := 0 to High(LAddIds) do
+        SetModuleStatus(LAddIds[LIdx], msCrossReady);
     except
       on E: Exception do
       begin
@@ -16434,10 +16717,19 @@ begin
     if LRepointed > 0 then
       FStageTimings := FStageTimings +
         Format('instrepoint=%d;', [LRepointed]);
+    // `module=` stays the redo set of models that were already there; the
+    // take-in is counted and named apart - a host log has to tell "the
+    // program gained a unit" from "an edit redid one more module".
+    if LAddIds <> nil then
+      FStageTimings := FStageTimings +
+        Format('newunits=%d(%s);', [Length(LAddIds), LAddNames]);
     Result := True;
   finally
-    // Refused: the project was never touched, and the fresh model is ours.
+    // Refused: the project was never touched, and the fresh model is ours -
+    // and so is every newcomer the take-in loaded and did not register.
     LNew.Free;
+    for LIdx := 0 to High(LAddModels) do
+      LAddModels[LIdx].Free;
     LAdded.Free;
     TrimPreprocessors;   // see AnalyzeProject
   end;

@@ -41,7 +41,11 @@ program PasTreeDiffHarness;
   <full-path>`, applied in order (blank/comment/const/type land at the end of
   the interface section, intfuses appends a unit to the interface uses,
   member adds a method to the first interface class, parent gives the first
-  parentless class an explicit `(TObject)`).
+  parentless class an explicit `(TObject)`). `newunit <program>|<Name>[|<uses>]`
+  is the IDE's File > New > Unit: a unit that exists only as an editor buffer
+  (<program dir>\<Name>.pas, importing <uses> if given) and the program's uses
+  clause opening with `<Name> in '<Name>.pas'` - the module path TAKES IN such
+  a unit (0.53.0), and a fallback on it is counted as unexpected.
 
   -selftest inverts the exercise to prove the COMPARATOR can see: the
   incremental side is deliberately fed the PRE-EDIT text of each step's
@@ -91,12 +95,14 @@ uses
 type
   TEditKind = (ekBody, ekIntf, ekBlank, ekComment, ekConst, ekType,
     ekImplVar, ekImplVarTop, ekIntfUses, ekMember, ekParent, ekMidType,
-    ekRecField, ekOverload, ekInsert, ekReplace);
+    ekRecField, ekOverload, ekInsert, ekReplace, ekNewUnit);
   TEditStep = record
     Kind: TEditKind;
     Path: string;    // full path of the unit to edit
     InsLine: Integer;  // ekInsert: 1-based line the text goes BEFORE
     InsText: string;   // ekInsert: the line to insert, verbatim
+    UnitName: string;  // ekNewUnit: the new unit; Path is its program
+    UnitUses: string;  // ekNewUnit: its interface uses list, or ''
   end;
 
 const
@@ -512,6 +518,64 @@ begin
   end;
 end;
 
+{ ---- the IDE's File > New > Unit ------------------------------------------ }
+
+// Where the IDE puts the new unit: beside its program, named after itself.
+function NewUnitPath(const AProgram, AName: string): string;
+begin
+  Result := TPath.Combine(TPath.GetDirectoryName(AProgram), AName + '.pas');
+end;
+
+// The new unit's text: the IDE's template plus one routine, so the unit has
+// something of its own to resolve.
+function NewUnitText(const AName, AUses: string): string;
+begin
+  Result := 'unit ' + AName + ';'#13#10#13#10'interface'#13#10#13#10;
+  if AUses <> '' then
+    Result := Result + 'uses ' + AUses + ';'#13#10#13#10;
+  Result := Result + 'procedure ' + AName + 'Proc;'#13#10#13#10 +
+    'implementation'#13#10#13#10 +
+    'procedure ' + AName + 'Proc;'#13#10'begin'#13#10'end;'#13#10#13#10 +
+    'end.'#13#10;
+end;
+
+// The program's side: its first line starting with `uses` gains the new unit
+// as the clause's first entry - whatever the clause's own layout, the entries
+// that followed `uses` follow the new one. False when there is no such line.
+function ApplyNewUnit(const AText, AName: string; out ANewText: string):
+  Boolean;
+var
+  LOut: TList<string>;
+  LLine, LTrim, LIndent, LRest: string;
+begin
+  Result := False;
+  ANewText := AText;
+  LOut := TList<string>.Create;
+  try
+    for LLine in AText.Split([#10]) do
+    begin
+      LTrim := Trim(LLine.TrimRight([#13]));
+      if not Result and LTrim.StartsWith('uses', True) and
+         ((Length(LTrim) = 4) or CharInSet(LTrim[5], [' ', #9])) then
+      begin
+        LIndent := Copy(LLine, 1, Length(LLine) - Length(LLine.TrimLeft));
+        LRest := Trim(Copy(LTrim, 5, MaxInt));
+        LOut.Add(LIndent + 'uses');
+        LOut.Add(LIndent + '  ' + AName + ' in ''' + AName + '.pas'',');
+        if LRest <> '' then
+          LOut.Add(LIndent + '  ' + LRest);
+        Result := True;
+      end
+      else
+        LOut.Add(LLine.TrimRight([#13]));
+    end;
+    if Result then
+      ANewText := string.Join(#13#10, LOut.ToArray);
+  finally
+    LOut.Free;
+  end;
+end;
+
 { ---- comparison ----------------------------------------------------------- }
 
 // path (lower) -> model id, for every loaded model of AProj.
@@ -724,6 +788,7 @@ begin
     ekOverload: Result := 'overload';
     ekInsert: Result := 'insert';
     ekReplace: Result := 'replace';
+    ekNewUnit: Result := 'newunit';
   else
     Result := 'type';
   end;
@@ -797,6 +862,23 @@ begin
       LStep.Path := TPath.GetFullPath(Trim(LParts[0]));
       LStep.InsLine := StrToIntDef(Trim(LParts[1]), 0);
       LStep.InsText := LParts[2];
+      Result := Result + [LStep];
+      Continue;
+    end;
+    if SameText(LKindWord, 'newunit') then
+    begin
+      // newunit <program>|<UnitName>[|<uses list>]
+      var LParts := Copy(LLine, LSpace + 1, MaxInt).Split(['|'], 3);
+      if (Length(LParts) < 2) or (Trim(LParts[1]) = '') then
+      begin
+        Writeln(ErrOutput, 'bad newunit line: ', LLine);
+        Halt(2);
+      end;
+      LStep.Kind := ekNewUnit;
+      LStep.Path := TPath.GetFullPath(Trim(LParts[0]));
+      LStep.UnitName := Trim(LParts[1]);
+      if Length(LParts) = 3 then
+        LStep.UnitUses := Trim(LParts[2]);
       Result := Result + [LStep];
       Continue;
     end;
@@ -933,7 +1015,12 @@ begin
   GKeepFiles.AddOrSetValue(LowerCase(GRoot), True);
   if not GDemoteScripted then
     for LStep in LSteps do
+    begin
       GKeepFiles.AddOrSetValue(LowerCase(LStep.Path), True);
+      if LStep.Kind = ekNewUnit then
+        GKeepFiles.AddOrSetValue(
+          LowerCase(NewUnitPath(LStep.Path, LStep.UnitName)), True);
+    end;
   if GDemoteText then
     Writeln(ErrOutput, Format('demotetext: %d model(s) demoted after the ' +
       'initial build', [DemoteForeign(LCand)]));
@@ -951,8 +1038,12 @@ begin
       LKey := LowerCase(LStep.Path);
       if not GTexts.TryGetValue(LKey, LText) then
         LText := TPasSourceManager.LoadFileTolerant(LStep.Path);
-      if not ApplyEdit(LText, LStep.Kind, GIdx, LNew, LStep.InsLine,
-           LStep.InsText) then
+      if LStep.Kind = ekNewUnit then
+        LOk := ApplyNewUnit(LText, LStep.UnitName, LNew)
+      else
+        LOk := ApplyEdit(LText, LStep.Kind, GIdx, LNew, LStep.InsLine,
+          LStep.InsText);
+      if not LOk then
       begin
         Writeln(ErrOutput, Format('step %d: SKIP (no markers) %s',
           [GIdx, LStep.Path]));
@@ -960,13 +1051,22 @@ begin
       end;
       Inc(GVersion);
       GTexts.AddOrSetValue(LKey, LNew);
+      // The new unit is a buffer on BOTH sides: the ground truth reads every
+      // GTexts entry, and the module side gets it right before its step.
+      if LStep.Kind = ekNewUnit then
+        GTexts.AddOrSetValue(
+          LowerCase(NewUnitPath(LStep.Path, LStep.UnitName)),
+          NewUnitText(LStep.UnitName, LStep.UnitUses));
       if GSelfTest then
       begin
         GStaleKey := LKey;
         GStaleText := LText;   // the incremental side sees PRE-edit text
       end;
-      LLabel := Format('%s %s', [KindName(LStep.Kind),
-        TPath.GetFileName(LStep.Path)]);
+      if LStep.Kind = ekNewUnit then
+        LLabel := Format('%s %s', [KindName(LStep.Kind), LStep.UnitName])
+      else
+        LLabel := Format('%s %s', [KindName(LStep.Kind),
+          TPath.GetFileName(LStep.Path)]);
     end;
 
     LSW := TStopwatch.StartNew;
@@ -976,6 +1076,9 @@ begin
       // Stage B: the SAME project takes the edit as a buffer overlay and
       // re-analyzes the one module. Under -selftest the overlay is the
       // PRE-edit text, so the module the comparator sees is genuinely stale.
+      if LStep.Kind = ekNewUnit then
+        LCand.SetBuffer(NewUnitPath(LStep.Path, LStep.UnitName),
+          NewUnitText(LStep.UnitName, LStep.UnitUses), GVersion);
       if GStaleKey <> '' then
         LCand.SetBuffer(LStep.Path, GStaleText, GVersion)
       else
@@ -1068,7 +1171,7 @@ begin
          LHow.StartsWith('module') then
         Inc(GAcceptedIntf)
       else if (LStep.Kind in [ekBody, ekBlank, ekComment, ekImplVar,
-                             ekImplVarTop]) and
+                             ekImplVarTop, ekNewUnit]) and
               not LHow.StartsWith('module') then
       begin
         LVerdict := LVerdict + ' (unexpected fallback)';

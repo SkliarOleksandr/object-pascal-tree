@@ -2553,6 +2553,24 @@ begin
   end;
 end;
 
+// The ground truth for an incremental step: ProjSig of a FRESH project over
+// ARoot with the same buffer overlays.
+function FreshSig(const ARoot: string; const ASearch: TArray<string>;
+  const APaths, ATexts: array of string): string;
+var
+  LProj: TPasSemaProject;
+begin
+  LProj := TPasSemaProject.Create(pfWin32, ASearch, []);
+  try
+    for var LIdx := 0 to High(APaths) do
+      LProj.SetBuffer(APaths[LIdx], ATexts[LIdx], 1);
+    LProj.AnalyzeProject(ARoot);
+    Result := ProjSig(LProj);
+  finally
+    LProj.Free;
+  end;
+end;
+
 function SymCountOf(AModel: TPasSemaModel; const ANameLower: string;
   AKind: TSemaSymbolKind): Integer;
 begin
@@ -7493,6 +7511,215 @@ begin
       (MidByName('usapp') >= 0) and
       (DiagCount(ModelByName('usapp'), 'F1027') = 0) and
       CrossRefTo(ModelByName('usapp'), 'NewHello', 'NewHello'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  { A NEW IMPORT TAKEN IN BY THE MODULE PATH (0.53.0) - the IDE's File > New >
+    Unit: the program gains `X in 'X.pas'` while nothing else can depend on X
+    yet, so the one model that can see the newcomer is the program, which the
+    module path redoes anyway. Until 0.53.0 this refused (new-dependency) and
+    the host rebuilt the closure: 4-5 s on a 3768-unit project. Here a unit on
+    disk that pulls in a second new unit (the take-in is transitive) and
+    declares a helper the program calls (the helper registry grows instead of
+    being rebuilt), then a unit that exists only as a buffer, then an edit of
+    a unit taken in - every step compared with a fresh AnalyzeProject over the
+    same buffers. Then the three refusals: a unit that already names the
+    newcomer (a rebuild resolves it there, which the fresh project proves), a
+    declared name the closure already has, and a newcomer whose $IF asks the
+    oracle - each with the project left as it was. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_takein');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'TiBase.pas'),
+    'unit TiBase;'#10'interface'#10 +
+    'type TBase = class'#10'  procedure Hello;'#10'end;'#10 +
+    'const BaseC = 1;'#10 +
+    'implementation'#10'procedure TBase.Hello; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'TiUser.pas'),
+    'unit TiUser;'#10'interface'#10'uses TiBase;'#10 +
+    'procedure UseBase;'#10'implementation'#10 +
+    'procedure UseBase;'#10'var B: TBase;'#10'begin'#10 +
+    '  B := nil;'#10'  B.Hello;'#10'end;'#10'end.'#10);
+  // On disk, but out of the closure until the program names it - and TiDeep
+  // only reachable through it.
+  TFile.WriteAllText(TPath.Combine(LDir, 'TiOnDisk.pas'),
+    'unit TiOnDisk;'#10'interface'#10'uses TiBase;'#10 +
+    'type'#10 +
+    '  TDerived = class(TBase)'#10'  end;'#10 +
+    '  TBaseHelper = class helper for TBase'#10 +
+    '    procedure Extra;'#10'  end;'#10 +
+    'function OnDiskHello: Integer;'#10 +
+    'implementation'#10'uses TiDeep;'#10 +
+    'procedure TBaseHelper.Extra; begin end;'#10 +
+    'function OnDiskHello: Integer;'#10'var D: TDerived;'#10'begin'#10 +
+    '  D := nil;'#10'  D.Hello;'#10 +
+    '  Result := DeepValue + BaseC;'#10 +
+    '  NoSuchName := 0;'#10 +
+    'end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'TiDeep.pas'),
+    'unit TiDeep;'#10'interface'#10'function DeepValue: Integer;'#10 +
+    'implementation'#10 +
+    'function DeepValue: Integer; begin Result := 2; end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'TiApp.dpr'),
+    'program TiApp;'#10'uses TiBase, TiUser;'#10 +
+    'begin'#10'  UseBase;'#10'end.'#10);
+  const TI_APP_ONDISK =
+    'program TiApp;'#10 +
+    'uses TiBase, TiUser, TiOnDisk in ''TiOnDisk.pas'';'#10 +
+    'var G: TBase;'#10 +
+    'begin'#10'  UseBase;'#10'  OnDiskHello;'#10 +
+    '  G := nil;'#10'  G.Extra;'#10'end.'#10;
+  const TI_UNSAVED =
+    'unit TiUnsaved;'#10'interface'#10'procedure UnsavedHello;'#10 +
+    'implementation'#10'procedure UnsavedHello; begin end;'#10'end.'#10;
+  const TI_APP_UNSAVED =
+    'program TiApp;'#10 +
+    'uses TiBase, TiUser, TiOnDisk in ''TiOnDisk.pas'','#10 +
+    '  TiUnsaved in ''TiUnsaved.pas'';'#10 +
+    'var G: TBase;'#10 +
+    'begin'#10'  UseBase;'#10'  OnDiskHello;'#10 +
+    '  G := nil;'#10'  G.Extra;'#10'  UnsavedHello;'#10'end.'#10;
+  const TI_DEEP_EDITED =
+    'unit TiDeep;'#10'interface'#10'function DeepValue: Integer;'#10 +
+    'implementation'#10 +
+    'function DeepValue: Integer; begin Result := 3; end;'#10'end.'#10;
+  var LTiApp := TPath.Combine(LDir, 'TiApp.dpr');
+  var LTiUnsaved := TPath.Combine(LDir, 'TiUnsaved.pas');
+  var LTiDeep := TPath.Combine(LDir, 'TiDeep.pas');
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(LTiApp);
+    Ok('takein: the baseline closure does not hold the unit yet',
+      (MidByName('tibase') >= 0) and (MidByName('tiondisk') < 0) and
+      (MidByName('tideep') < 0));
+    var LTiCount := GProj.ModelCount;
+
+    GProj.SetBuffer(LTiApp, TI_APP_ONDISK, 1);
+    // The call BEFORE the check: arguments are evaluated left to right, and a
+    // label reading StageTimings would otherwise show the previous run's.
+    var LTiOk := GProj.AnalyzeModuleOnly(LTiApp);
+    Ok('takein: the program gaining a unit is accepted [' +
+      GProj.StageTimings + ']', LTiOk);
+    Ok('takein: both newcomers are named, the redo set is the program [' +
+      GProj.StageTimings + ']',
+      (Pos('newunits=2(tiondisk,tideep);', GProj.StageTimings) > 0) and
+      (Pos('module=1;', GProj.StageTimings) > 0));
+    Ok('takein: the closure grew by exactly the two units',
+      (GProj.ModelCount = LTiCount + 2) and (MidByName('tiondisk') >= 0) and
+      (MidByName('tideep') >= 0));
+    Ok('takein: the newcomers went through the cross passes',
+      (MidByName('tiondisk') >= 0) and (MidByName('tideep') >= 0) and
+      (GProj.ModuleStatus(MidByName('tiondisk')) = msCrossReady) and
+      (GProj.ModuleStatus(MidByName('tideep')) = msCrossReady));
+    Ok('takein: the program binds the new unit''s routine and its helper',
+      (DiagCount(ModelByName('tiapp'), 'F1027') = 0) and
+      (DiagCount(ModelByName('tiapp'), 'E2003') = 0) and
+      CrossRefTo(ModelByName('tiapp'), 'OnDiskHello', 'OnDiskHello') and
+      CrossRefTo(ModelByName('tiapp'), 'Extra', 'Extra'));
+    Ok('takein: the newcomer binds its own imports, inherited members too',
+      (MidByName('tiondisk') >= 0) and
+      CrossRefTo(ModelByName('tiondisk'), 'DeepValue', 'DeepValue') and
+      CrossRefTo(ModelByName('tiondisk'), 'Hello', 'Hello') and
+      CrossRefTo(ModelByName('tiondisk'), 'BaseC', 'BaseC'));
+    Ok('takein: the newcomer carries its own diagnostics',
+      (MidByName('tiondisk') >= 0) and
+      DiagHasText(ModelByName('tiondisk'), 'E2003', 'NoSuchName'));
+    Ok('takein: the project is the one a fresh build makes',
+      ProjSig(GProj) = FreshSig(LTiApp, [LDir], [LTiApp], [TI_APP_ONDISK]));
+
+    // A unit that exists only as an editor buffer - the IDE's New Unit before
+    // the first save.
+    GProj.SetBuffer(LTiUnsaved, TI_UNSAVED, 2);
+    GProj.SetBuffer(LTiApp, TI_APP_UNSAVED, 3);
+    LTiOk := GProj.AnalyzeModuleOnly(LTiApp);
+    Ok('takein/unsaved: a buffer-only unit is taken in [' +
+      GProj.StageTimings + ']', LTiOk and
+      (Pos('newunits=1(tiunsaved);', GProj.StageTimings) > 0));
+    Ok('takein/unsaved: the program binds it',
+      CrossRefTo(ModelByName('tiapp'), 'UnsavedHello', 'UnsavedHello'));
+    Ok('takein/unsaved: the project is the one a fresh build makes',
+      ProjSig(GProj) = FreshSig(LTiApp, [LDir], [LTiApp, LTiUnsaved],
+        [TI_APP_UNSAVED, TI_UNSAVED]));
+
+    // A unit taken in is an ordinary member of the closure from then on.
+    GProj.SetBuffer(LTiDeep, TI_DEEP_EDITED, 4);
+    LTiOk := GProj.AnalyzeModuleOnly(LTiDeep);
+    Ok('takein/edit: an edit of a taken-in unit is a plain module run [' +
+      GProj.StageTimings + ']', LTiOk and
+      (Pos('module=1;', GProj.StageTimings) > 0) and
+      (Pos('newunits=', GProj.StageTimings) = 0));
+    Ok('takein/edit: the project is the one a fresh build makes',
+      ProjSig(GProj) = FreshSig(LTiApp, [LDir], [LTiApp, LTiUnsaved, LTiDeep],
+        [TI_APP_UNSAVED, TI_UNSAVED, TI_DEEP_EDITED]));
+  finally
+    GProj.Free;
+  end;
+
+  // The refusals. TiLateUser names TiLate before any file or buffer of that
+  // name exists: an F1027 now, and the unit the program's pin resolves it to
+  // once the program names TiLate - so a take-in that left TiLateUser alone
+  // would be wrong.
+  TFile.WriteAllText(TPath.Combine(LDir, 'TiLateUser.pas'),
+    'unit TiLateUser;'#10'interface'#10'uses TiLate;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'TiApp2.dpr'),
+    'program TiApp2;'#10'uses TiLateUser;'#10'begin'#10'end.'#10);
+  // A second unit declaring a name the closure already has.
+  TFile.WriteAllText(TPath.Combine(LDir, 'TiClash.pas'),
+    'unit TiLateUser;'#10'interface'#10'implementation'#10'end.'#10);
+  // A guard only the declared pass can decide.
+  TFile.WriteAllText(TPath.Combine(LDir, 'TiAsks.pas'),
+    'unit TiAsks;'#10'interface'#10 +
+    '{$IF Declared(TLateThing)}'#10'const AskedC = 1;'#10'{$IFEND}'#10 +
+    'implementation'#10'end.'#10);
+  const TI_LATE = 'unit TiLate;'#10'interface'#10'implementation'#10'end.'#10;
+  const TI_APP2_LATE =
+    'program TiApp2;'#10'uses TiLateUser, TiLate in ''TiLate.pas'';'#10 +
+    'begin'#10'end.'#10;
+  var LTiApp2 := TPath.Combine(LDir, 'TiApp2.dpr');
+  var LTiLate := TPath.Combine(LDir, 'TiLate.pas');
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(LTiApp2);
+    Ok('takein/refuse: the early importer reports the unit missing',
+      DiagCount(ModelByName('tilateuser'), 'F1027') = 1);
+    var LTiCount2 := GProj.ModelCount;
+    var LTiSig := ProjSig(GProj);
+    GProj.SetBuffer(LTiLate, TI_LATE, 1);
+    GProj.SetBuffer(LTiApp2, TI_APP2_LATE, 2);
+    var LTiRefused := not GProj.AnalyzeModuleOnly(LTiApp2);
+    Ok('takein/refuse: a unit another model already names is refused [' +
+      GProj.StageTimings + ']', LTiRefused and
+      (Pos('new-dependency-seen(tilateuser uses TiLate)',
+         GProj.StageTimings) > 0));
+    Ok('takein/refuse: and the project is left exactly as it was',
+      (GProj.ModelCount = LTiCount2) and (ProjSig(GProj) = LTiSig));
+    Ok('takein/refuse: a rebuild resolves the early importer to it',
+      Pos('tilateuser D F1027',
+        FreshSig(LTiApp2, [LDir], [LTiLate, LTiApp2], [TI_LATE, TI_APP2_LATE]))
+        = 0);
+
+    GProj.SetBuffer(LTiApp2,
+      'program TiApp2;'#10'uses TiLateUser, TiClash in ''TiClash.pas'';'#10 +
+      'begin'#10'end.'#10, 3);
+    LTiRefused := not GProj.AnalyzeModuleOnly(LTiApp2);
+    Ok('takein/refuse: a declared name the closure has is refused [' +
+      GProj.StageTimings + ']', LTiRefused and
+      (Pos('new-dependency-name(tilateuser)', GProj.StageTimings) > 0) and
+      (GProj.ModelCount = LTiCount2));
+
+    GProj.SetBuffer(LTiApp2,
+      'program TiApp2;'#10'uses TiLateUser, TiAsks in ''TiAsks.pas'';'#10 +
+      'begin'#10'end.'#10, 4);
+    LTiRefused := not GProj.AnalyzeModuleOnly(LTiApp2);
+    Ok('takein/refuse: a newcomer the declared pass would re-decide is ' +
+      'refused [' + GProj.StageTimings + ']', LTiRefused and
+      (Pos('new-dependency-oracle(tiasks)', GProj.StageTimings) > 0) and
+      (GProj.ModelCount = LTiCount2) and (ProjSig(GProj) = LTiSig));
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then
