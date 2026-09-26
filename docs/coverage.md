@@ -123,6 +123,18 @@ README's own section on that).
   dcc) and pointer minus pointer are left untyped; `Cu / Cu` on Win64 is
   assumed Extended (not probed).
 
+### 4.9 Type-test & type-cast operators (`is`, `as`)
+- a type name on the right of `is` ends that operand (`O is TFoo and C` is
+  `(O is TFoo) and C`), any other operand follows the precedence table - and
+  which names are types is not known to the parser, so a NAME-SHAPED operand
+  (an identifier, a dotted chain, type arguments) is taken for a type. dcc
+  compiles one shape that groups otherwise: a name-shaped VALUE whose
+  overloaded operator yields a class reference - `O is R and C` with R a
+  record variable (or a parameterless function returning one) and a `class
+  operator LogicalAnd(...): TClass` is `O is (R and C)` for dcc, `(O is R) and
+  C` in the tree. Written `O is (R) and C` or `O is RA[0] and C` it parses as
+  dcc groups it (dcc64 37.0, probed 2026-09-26).
+
 ### 4.11.4 Result types of the value-returning intrinsics
 - the result rules are implemented in both typers from the spec's probe
   table, with these edges left out: a named subrange whose bounds exceed

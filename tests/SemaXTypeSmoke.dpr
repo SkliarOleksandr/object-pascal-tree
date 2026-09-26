@@ -1449,8 +1449,9 @@ const
     '  LStr = KChA + ''x'';'#10 +
     '  LChain = LStr + KStr2;'#10 +
     'implementation'#10 +
+    'type TXO = class end;'#10 +
     'procedure P;'#10 +
-    'var B: Byte; I: Integer; C: Cardinal;'#10 +
+    'var B: Byte; I: Integer; C: Cardinal; XO: TXO; BO: Boolean;'#10 +
     'begin'#10 +
     '  var M01 := KStr.Mark;'#10 +
     '  var M02 := KStr2.Mark;'#10 +
@@ -1469,6 +1470,8 @@ const
     '  var V05 := not B;'#10 +
     '  var V06 := KInt > I;'#10 +
     '  var V07 := -B;'#10 +
+    '  var V08 := XO is TXO and BO;'#10 +
+    '  var V09 := XO is not TXO or (I > 0);'#10 +
     'end;'#10 +
     'end.'#10;
 
@@ -2228,6 +2231,12 @@ begin
       'Boolean');
     Eq('4.2.1: unary minus of a Byte is Integer', XTypeOf(LB, 'V07'),
       'Integer');
+    // 4.9: a type name ends the right operand of `is` - `XO is TXO and BO`
+    // is `(XO is TXO) and BO`, a Boolean `and` over the test.
+    Eq('4.9: var := O is TFoo and C is Boolean', XTypeOf(LB, 'V08'),
+      'Boolean');
+    Eq('4.9: var := O is not TFoo or (...) is Boolean', XTypeOf(LB, 'V09'),
+      'Boolean');
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

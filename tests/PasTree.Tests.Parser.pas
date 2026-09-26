@@ -29,7 +29,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..98] of TPasCaseRow = (
+  STMT_CASES: array[0..111] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -97,6 +97,79 @@ const
     (Section: '4.9.1'; Name: 'not in'; Source: 'if C not in S then Exit;';
      Expected: 'Block(IfStmt(BinaryOp''in''!(Ident''C'' Ident''S'') ' +
        'ExprStmt(Ident''Exit'')))'; ExpectDiags: 0),
+    // 4.9: a TYPE NAME on the right of `is` ends that operand, and the test
+    // goes on as the LEFT operand of the multiplicative and additive
+    // operators - the one exception dcc makes to the table (dcc64 37.0,
+    // probed 2026-09-26: every shape here compiled, or failed, as its tree
+    // says; `O is TFoo and C = D` printed the value only this grouping
+    // gives). Which names are types is not known to the parser, so a
+    // name-shaped VALUE is taken for one: `O is R and C`, R a record whose
+    // `and` yields a class reference, is `O is (R and C)` for dcc - the limit
+    // docs/coverage.md lists.
+    (Section: '4.9'; Name: 'is: a type name ends the right operand';
+     Source: 'B := O is TFoo and C;';
+     Expected: 'Block(Assign(Ident''B'' BinaryOp''and''(BinaryOp''is''(' +
+       'Ident''O'' Ident''TFoo'') Ident''C'')))'; ExpectDiags: 0),
+    (Section: '4.9'; Name: 'is: the test is a left operand, and binds before or';
+     Source: 'B := O is TFoo or C and D;';
+     Expected: 'Block(Assign(Ident''B'' BinaryOp''or''(BinaryOp''is''(' +
+       'Ident''O'' Ident''TFoo'') BinaryOp''and''(Ident''C'' Ident''D''))))';
+     ExpectDiags: 0),
+    (Section: '4.9'; Name: 'is: the relational loop goes on after it';
+     Source: 'B := O is TFoo and C = D;';
+     Expected: 'Block(Assign(Ident''B'' BinaryOp''=''(BinaryOp''and''(' +
+       'BinaryOp''is''(Ident''O'' Ident''TFoo'') Ident''C'') Ident''D'')))';
+     ExpectDiags: 0),
+    (Section: '4.9'; Name: 'is: the shape the RTL and VCL ship';
+     Source: 'if O is TFoo and (X > 0) then Exit;';
+     Expected: 'Block(IfStmt(BinaryOp''and''(BinaryOp''is''(Ident''O'' ' +
+       'Ident''TFoo'') Paren(BinaryOp''>''(Ident''X'' IntLit''0''))) ' +
+       'ExprStmt(Ident''Exit'')))'; ExpectDiags: 0),
+    (Section: '4.9'; Name: 'is: a qualified generic type name';
+     Source: 'B := O is TBox<Integer>.TInner and C;';
+     Expected: 'Block(Assign(Ident''B'' BinaryOp''and''(BinaryOp''is''(' +
+       'Ident''O'' Member(TypeArgs(Ident''TBox'' Ident''Integer'') ' +
+       'Ident''TInner'')) Ident''C'')))'; ExpectDiags: 0),
+    (Section: '4.9'; Name: 'is: a second is after the continuation';
+     Source: 'B := O is TFoo and P is TBar;';
+     Expected: 'Block(Assign(Ident''B'' BinaryOp''is''(BinaryOp''and''(' +
+       'BinaryOp''is''(Ident''O'' Ident''TFoo'') Ident''P'') ' +
+       'Ident''TBar'')))'; ExpectDiags: 0),
+    (Section: '4.9'; Name: 'is: an inline-if condition';
+     Source: 'B := if O is TFoo and C then X else Y;';
+     Expected: 'Block(Assign(Ident''B'' InlineIf(BinaryOp''and''(' +
+       'BinaryOp''is''(Ident''O'' Ident''TFoo'') Ident''C'') Ident''X'' ' +
+       'Ident''Y'')))'; ExpectDiags: 0),
+    // A parenthesis, a cast and an index are values: `O is (TFoo)` alone
+    // compiles, `O is (TFoo) and C` is E2015 - the table's grouping.
+    (Section: '4.9'; Name: 'is: a parenthesized operand follows the table';
+     Source: 'B := O is (TFoo) and C;';
+     Expected: 'Block(Assign(Ident''B'' BinaryOp''is''(Ident''O'' ' +
+       'BinaryOp''and''(Paren(Ident''TFoo'') Ident''C''))))'; ExpectDiags: 0),
+    (Section: '4.9'; Name: 'is: a cast follows the table';
+     Source: 'B := O is TFooClass(CV) and C;';
+     Expected: 'Block(Assign(Ident''B'' BinaryOp''is''(Ident''O'' ' +
+       'BinaryOp''and''(Call(Ident''TFooClass'' Ident''CV'') ' +
+       'Ident''C''))))'; ExpectDiags: 0),
+    (Section: '4.9'; Name: 'is: an index follows the table';
+     Source: 'B := O is A[0] and C;';
+     Expected: 'Block(Assign(Ident''B'' BinaryOp''is''(Ident''O'' ' +
+       'BinaryOp''and''(Index(Ident''A'' IntLit''0'') Ident''C''))))';
+     ExpectDiags: 0),
+    // The LEFT operand is untouched (`C and O is TFoo` is E2015), and `in`
+    // has no such rule (`X in S and C` is E2015).
+    (Section: '4.9'; Name: 'is: the left operand follows the table';
+     Source: 'B := C and O is TFoo;';
+     Expected: 'Block(Assign(Ident''B'' BinaryOp''is''(BinaryOp''and''(' +
+       'Ident''C'' Ident''O'') Ident''TFoo'')))'; ExpectDiags: 0),
+    (Section: '4.9.1'; Name: 'is not: a type name ends the right operand';
+     Source: 'B := O is not TFoo and C;';
+     Expected: 'Block(Assign(Ident''B'' BinaryOp''and''(BinaryOp''is''!(' +
+       'Ident''O'' Ident''TFoo'') Ident''C'')))'; ExpectDiags: 0),
+    (Section: '4.6'; Name: 'in: the right operand is a simple expression';
+     Source: 'B := X in S and C;';
+     Expected: 'Block(Assign(Ident''B'' BinaryOp''in''(Ident''X'' ' +
+       'BinaryOp''and''(Ident''S'' Ident''C''))))'; ExpectDiags: 0),
     (Section: '4.10'; Name: 'cast-or-call'; Source: 'B := Byte(I);';
      Expected: 'Block(Assign(Ident''B'' Call(Ident''Byte'' Ident''I'')))';
      ExpectDiags: 0),

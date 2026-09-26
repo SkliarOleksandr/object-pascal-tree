@@ -373,6 +373,28 @@ begin
     DiagCount('E2010') = 1);
   GModel.Free;
 
+  // 4.9: a type name ends the right operand of `is`, so `O is TFoo and C` is
+  // `(O is TFoo) and C` - a Boolean `and` over a Boolean test. The tree
+  // `O is (TFoo and C)` left both untyped (`TFoo and C` has no type).
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type TFoo = class end;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var O: TFoo; C, B1, B2: Boolean; X: Integer;'#10 +
+    'begin'#10 +
+    '  B1 := O is TFoo and C;'#10 +
+    '  B2 := O is not TFoo or (X > 0);'#10 +
+    '  if O is TFoo and C then'#10 +
+    '    X := 1;'#10 +
+    'end;'#10'end.'#10);
+  Ok('4.9: the is-and fixture is diagnostic-free', Length(GModel.Diags) = 0);
+  Eq('4.9: O is TFoo and C is Boolean', AssignedType('B1'), 'Boolean');
+  Eq('4.9: O is not TFoo or (...) is Boolean', AssignedType('B2'),
+    'Boolean');
+  Eq('4.9: the test itself is Boolean', BinOpType('is'), 'Boolean');
+  GModel.Free;
+
   if GCounter.Finish('SemaTypeSmoke') then
     ExitCode := 1;
   GPP.Free;

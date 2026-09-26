@@ -113,6 +113,12 @@ type
     function ParseExpression: Integer;
     function ParseSimpleExpr: Integer;
     function ParseTerm: Integer;
+    { The additive and multiplicative loops, continued from an operand already
+      parsed: ParseSimpleExpr and ParseTerm are these over a fresh term and
+      factor. The right side of `is` needs both - see ParseExpression. }
+    function ParseSimpleExprFrom(ALeft: Integer): Integer;
+    function ParseTermFrom(ALeft: Integer): Integer;
+    function IsNameShaped(ANode: Integer): Boolean;
     function ParseFactor: Integer;
     function ParseSelectors(ABase: Integer): Integer;
     function ParseTypeRef: Integer;
@@ -435,7 +441,7 @@ end;
 function TPasParser.ParseExpression: Integer;
 var
   LOp, LRight, LNode: Integer;
-  LNegated: Boolean;
+  LNegated, LTypeTest, LTypeName: Boolean;
 begin
   Result := ParseSimpleExpr;
   while True do
@@ -463,12 +469,33 @@ begin
       Break;
     end;
     Next; // operator
-    if (FSrc.VisibleToken(LOp).Kind = tkIs) and (CurKind = tkNot) then
+    LTypeTest := FSrc.VisibleToken(LOp).Kind = tkIs;
+    LTypeName := False;
+    if LTypeTest and (CurKind = tkNot) then
     begin
       LNegated := True;
       Next;
     end;
-    LRight := ParseSimpleExpr;
+    // The one exception dcc makes to the precedence table (4.9, dcc64 37.0
+    // probed): a TYPE NAME on the right of `is` (`is not` alike) ends that
+    // operand, and the test goes on as the LEFT operand of the multiplicative
+    // and additive operators after it - `O is TFoo and C` is `(O is TFoo) and
+    // C`, `O is TFoo or C and D` is `(O is TFoo) or (C and D)`. Any other
+    // right operand follows the table: `O is TFooClass(CV) and C` is `O is
+    // (TFooClass(CV) and C)`, E2015, while `O is TFooClass(CV)` compiles.
+    // Which names are types is not known here, so a NAME-SHAPED operand is
+    // taken for one; the valid code that groups differently needs a
+    // name-shaped VALUE whose overloaded operator yields a class reference
+    // (`O is R and C`, R a record - docs/coverage.md, 4.9).
+    if LTypeTest then
+    begin
+      LRight := ParseFactor;
+      LTypeName := IsNameShaped(LRight);
+      if not LTypeName then
+        LRight := ParseSimpleExprFrom(ParseTermFrom(LRight));
+    end
+    else
+      LRight := ParseSimpleExpr;
     LNode := FB.AddNode(nkBinaryOp, NIL_NODE, LOp);
     FB.SetAux(LNode, LOp);
     if LNegated then
@@ -477,14 +504,33 @@ begin
     FB.Adopt(LNode, LRight);
     FB.SetLast(LNode, FPos - 1);
     Result := LNode;
+    if LTypeName then
+      Result := ParseSimpleExprFrom(ParseTermFrom(Result));
   end;
 end;
 
+// A type name written as an expression: an Ident, a Member chain over one
+// (`System.TObject`, `TFoo.TInner`) and type arguments on either
+// (`TBox<Integer>`, `TBox<Integer>.TInner`). A call, an index, a deref, a
+// parenthesis or a literal is a value for dcc too: `O is (TFoo)` compiles,
+// `O is (TFoo) and C` is E2015 - the table's grouping.
+function TPasParser.IsNameShaped(ANode: Integer): Boolean;
+begin
+  while (ANode <> NIL_NODE) and (FB.Kind(ANode) in [nkMember, nkTypeArgs]) do
+    ANode := FB.FirstChild(ANode);
+  Result := (ANode <> NIL_NODE) and (FB.Kind(ANode) = nkIdent);
+end;
+
 function TPasParser.ParseSimpleExpr: Integer;
+begin
+  Result := ParseSimpleExprFrom(ParseTerm);
+end;
+
+function TPasParser.ParseSimpleExprFrom(ALeft: Integer): Integer;
 var
   LOp, LRight, LNode: Integer;
 begin
-  Result := ParseTerm;
+  Result := ALeft;
   while CurKind in [tkPlus, tkMinus, tkOr, tkXor] do
   begin
     LOp := FPos;
@@ -500,10 +546,15 @@ begin
 end;
 
 function TPasParser.ParseTerm: Integer;
+begin
+  Result := ParseTermFrom(ParseFactor);
+end;
+
+function TPasParser.ParseTermFrom(ALeft: Integer): Integer;
 var
   LOp, LRight, LNode: Integer;
 begin
-  Result := ParseFactor;
+  Result := ALeft;
   while CurKind in [tkStar, tkSlash, tkDiv, tkMod, tkAnd, tkShl, tkShr, tkAs]
   do
   begin

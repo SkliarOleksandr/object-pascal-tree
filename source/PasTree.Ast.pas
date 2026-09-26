@@ -292,6 +292,7 @@ type
       becomes the first child of an enclosing node, e.g. assignment). }
     procedure Adopt(ANewParent, ANode: Integer);
     function Kind(ANode: Integer): TPasNodeKind;
+    function FirstChild(ANode: Integer): Integer;
     function Build(const ASource: TPasPreprocessed): TPasTree;
   end;
 
@@ -918,6 +919,11 @@ end;
 function TPasTreeBuilder.Kind(ANode: Integer): TPasNodeKind;
 begin
   Result := FNodes[ANode].Kind;
+end;
+
+function TPasTreeBuilder.FirstChild(ANode: Integer): Integer;
+begin
+  Result := FNodes[ANode].FirstChild;
 end;
 
 function TPasTreeBuilder.Build(const ASource: TPasPreprocessed): TPasTree;
