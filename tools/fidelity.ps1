@@ -20,6 +20,9 @@
                 lies beside the original, so the copy lacks one it needs -
                 one the preprocessor never read (an include in a branch it
                 skipped and dcc did not, say)
+    NONDET      the .dcu differed, but so do two compiles of the ORIGINAL -
+                dcc itself is not deterministic on this unit under these
+                switches; counted, not judged
     TOOL-FAIL   PasTreeXform refused the unit (its message follows)
 
   Mode ts is the selftest: every unit with a site must DIFF and the dump must
@@ -30,6 +33,16 @@
   (inactive regions and conditional directives blanked, see PasTreeXform).
   Its lines name the unit's guessed and unreadable $IF expressions, and the
   summary counts them per outcome: a guess in an OK unit went dcc's way.
+
+  Mode t1 judges the PARSER's expressions: every operator node parenthesized
+  along PasTree's tree (see PasTreeXform). On a DIFF or XFORM-FAIL the
+  LOCALIZER names the sites responsible: parentheses around a node dcc groups
+  the same way change nothing, so a subset of the sites differs from the
+  original exactly when it holds a wrong one - the id range is halved and
+  both halves compiled (PasTreeXform -sites:), down to single sites, about
+  2 log2(n) compiles per culprit, at most -LocalizeBudget per unit. The
+  culprits go on the unit's line and into u\<Unit>\culprits.txt. -Localize
+  runs the localizer on a ts selftest too: it must name every planted site.
 
   Rules the compiles follow (both sides alike):
   - dcc by FULL path (the one on PATH may be another version), -$O- (dead
@@ -62,7 +75,7 @@
 #>
 param(
   [Parameter(Mandatory = $true)] [string] $List,
-  [Parameter(Mandatory = $true)] [ValidateSet('t0', 'ts', 't0f')] [string] $Mode,
+  [Parameter(Mandatory = $true)] [ValidateSet('t0', 'ts', 't0f', 't1')] [string] $Mode,
   [Parameter(Mandatory = $true)] [string] $Out,
   [string] $Platform = 'Win64',
   [string] $Bds = 'C:\Program Files (x86)\Embarcadero\Studio\37.0',
@@ -81,6 +94,15 @@ param(
   # -OraclePath - the Studio source trees when none is given.
   [switch] $Oracle,
   [string[]] $OraclePath = @(),
+  # The localizer (see the description): on by default for t1, asked for on
+  # a ts selftest; -NoLocalize turns it off; the budget counts variant
+  # compiles per unit.
+  [switch] $Localize,
+  [switch] $NoLocalize,
+  [int] $LocalizeBudget = 64,
+  # ts, t1: apply only these sites (PasTreeXform -sites:, `1-40,57`) - for
+  # probing one site of a unit by hand.
+  [string] $Sites = '',
   # Internal: set on a worker (see -Jobs) - the parent's parameters, as JSON;
   # -List is then the worker's slice.
   [string] $Worker = ''
@@ -97,6 +119,17 @@ if ($Tools -eq '') { $Tools = Join-Path (Split-Path -Parent $MyInvocation.MyComm
 if ($Mode -eq 't0f' -and -not $PSBoundParameters.ContainsKey('Switches') -and $Worker -eq '') {
   $Switches = @()
 }
+# t1 compiles without line tables: the code-lines record ($90) gives code
+# emitted after a lookahead the line of the LOOKAHEAD token - in
+# `if C then A := A + [X]` / `else` on the next line, part of the
+# concatenation's code sits on the `else` line, and with the parentheses on
+# its own - so a `)` that changes the token after an expression changes the
+# table while the code stays byte-identical (probed on dcc64 37.0: -$D- -$L-
+# together remove the difference, either alone does not). The code is the
+# verdict; no Studio unit tests $IFOPT D or L.
+if ($Mode -eq 't1' -and -not $PSBoundParameters.ContainsKey('Switches') -and $Worker -eq '') {
+  $Switches = @('-$O-', '-$D-', '-$L-')
+}
 
 if ($Worker -ne '') {
   # Arrays do not survive a -File command line; everything but the slice
@@ -108,7 +141,10 @@ if ($Worker -ne '') {
   $Define = & $strings $p.Define; $XformDefine = & $strings $p.XformDefine
   $XformUndefine = & $strings $p.XformUndefine; $Switches = & $strings $p.Switches
   $Base = [bool]$p.Base; $Oracle = [bool]$p.Oracle; $OraclePath = & $strings $p.OraclePath
+  $Localize = [bool]$p.Localize; $NoLocalize = [bool]$p.NoLocalize; $LocalizeBudget = [int]$p.LocalizeBudget
+  $Sites = "$($p.Sites)"
 }
+$doLocalize = (-not $NoLocalize) -and ($Mode -eq 't1' -or ($Mode -eq 'ts' -and $Localize))
 if ($Oracle -and $OraclePath.Count -eq 0) {
   # What PasTreeSemaProject -proj adds (StudioSearchPaths there).
   $OraclePath = @('source\rtl\sys', 'source\rtl\common', 'source\rtl\win',
@@ -321,13 +357,115 @@ function Norm-Name([string] $Name) {
 }
 
 function Read-Sites([string] $Path) {
-  $sites = @()
+  # A list, not `+=`: a t1 unit has tens of thousands of sites.
+  $sites = New-Object System.Collections.Generic.List[object]
   foreach ($line in [IO.File]::ReadAllLines($Path)) {
     if ($line.StartsWith('#') -or $line.Trim() -eq '') { continue }
     $f = $line -split "`t"
-    $sites += [pscustomobject]@{ Id = $f[0]; Kind = $f[1]; Ops = $f[2]; Span = $f[3]; Routine = $f[4] }
+    $sites.Add([pscustomobject]@{ Id = $f[0]; Kind = $f[1]; Ops = $f[2]; Span = $f[3]; Routine = $f[4] })
   }
-  return ,$sites
+  return ,$sites.ToArray()
+}
+
+# PasTreeXform's arguments for unit $u written to $XfOut; $SiteList, when
+# given, is its -sites: (the localizer's subsets).
+function Xform-Args([string] $u, [string] $XfOut, [string] $SiteList = '') {
+  $xa = @($u, "-mode:$Mode", "-out:$XfOut", "-p:$Platform")
+  $xd = @($Define) + @($XformDefine)
+  if ($xd.Count -gt 0) { $xa += ('-D:' + ($xd -join ';')) }
+  if ($XformUndefine.Count -gt 0) { $xa += ('-Undef:' + ($XformUndefine -join ';')) }
+  if ($IncludePath.Count -gt 0) { $xa += ('-I:' + ($IncludePath -join ';')) }
+  if ($Oracle) { $xa += @('-oracle', ('-S:' + ($OraclePath -join ';'))) }
+  if ($SiteList -ne '') { $xa += "-sites:$SiteList" }
+  elseif ($Sites -ne '') { $xa += "-sites:$Sites" }
+  return ,$xa
+}
+
+# The localizer's probe: unit $u with only the sites $Lo..$Hi applied,
+# compiled at the same path as both sides were; 'same' when its .dcu equals
+# the original's, 'diff' when not, 'fail' when it does not compile, 'tool'
+# when PasTreeXform refused.
+function Test-Variant([string] $u, [string] $work, [int] $Lo, [int] $Hi,
+                      [string] $OrigDcu, $ArgMap) {
+  $vRoot = Join-Path $work 'xv'
+  $vDcu = Join-Path $work 'xv.dcu'
+  foreach ($d in @($vRoot, $vDcu)) {
+    if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force }
+  }
+  $x = Invoke-Tool $xform (Xform-Args $u $vRoot "$Lo-$Hi") (Split-Path $u)
+  if ($x.Exit -ne 0) { return 'tool' }
+  $vMain = ([regex]::Match($x.Out, '(?m)^main (.+?)\s*$')).Groups[1].Value
+  $vInc = @()
+  foreach ($m in [regex]::Matches($x.Out, '(?m)^idir [^\t]*\t(.+?)\s*$')) { $vInc += $m.Groups[1].Value }
+  $c = Compile-Side $vRoot $work $vMain $vRoot $vInc $vDcu
+  if ($c.Exit -ne 0) { return 'fail' }
+  $leafDcu = [IO.Path]::GetFileNameWithoutExtension($u) + '.dcu'
+  if (Same-Dcu $OrigDcu (Join-Path $vDcu $leafDcu) $ArgMap) { return 'same' }
+  return 'diff'
+}
+
+# Every site of unit $u whose parentheses make the difference: the id range
+# 1..$Count is known to differ ($Verdict, 'diff' or 'fail'); each range that
+# differs is halved and both halves tried. A range whose halves each compile
+# identically is a culprit only TOGETHER (reported as the range); a range the
+# budget cut short is reported as unresolved. Returns the culprits in id
+# order: Id (or Range), Verdict, and Compiles, the variant count spent.
+function Find-Culprits([string] $u, [string] $work, [int] $Count, [string] $Verdict,
+                       [string] $OrigDcu, $ArgMap) {
+  $found = New-Object System.Collections.Generic.List[object]
+  $todo = New-Object System.Collections.Generic.Stack[object]
+  $todo.Push(@(1, $Count, $Verdict))
+  $budget = $LocalizeBudget
+  $spent = 0
+  while ($todo.Count -gt 0) {
+    $lo, $hi, $v = $todo.Pop()
+    if ($lo -eq $hi) { $found.Add([pscustomobject]@{ Id = $lo; Range = "$lo"; Verdict = $v }); continue }
+    if ($budget -lt 2) {
+      $found.Add([pscustomobject]@{ Id = $lo; Range = "$lo-$hi"; Verdict = 'unresolved' }); continue
+    }
+    $mid = [int][Math]::Floor(($lo + $hi) / 2)
+    $vl = Test-Variant $u $work $lo $mid $OrigDcu $ArgMap
+    $vr = Test-Variant $u $work ($mid + 1) $hi $OrigDcu $ArgMap
+    $budget -= 2; $spent += 2
+    if ($vl -eq 'tool' -or $vr -eq 'tool') {
+      $found.Add([pscustomobject]@{ Id = $lo; Range = "$lo-$hi"; Verdict = 'tool-fail' }); continue
+    }
+    if ($vl -eq 'same' -and $vr -eq 'same') {
+      $found.Add([pscustomobject]@{ Id = $lo; Range = "$lo-$hi"; Verdict = "together-$v" }); continue
+    }
+    # Right first: the stack then hands the left half out first.
+    if ($vr -ne 'same') { $todo.Push(@(($mid + 1), $hi, $vr)) }
+    if ($vl -ne 'same') { $todo.Push(@($lo, $mid, $vl)) }
+  }
+  foreach ($d in @('xv', 'xv.dcu')) {
+    $p = Join-Path $work $d
+    if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force }
+  }
+  return [pscustomobject]@{ Culprits = @($found | Sort-Object Id); Compiles = $spent }
+}
+
+# The localizer's report: the culprits' site lines into culprits.txt, and a
+# short form for the unit's line - the first three, then the count.
+function Report-Culprits($Loc, $Sites, [string] $work) {
+  $byId = @{}
+  foreach ($s in $Sites) { $byId[[int]$s.Id] = $s }
+  $lines = New-Object System.Collections.Generic.List[string]
+  $short = New-Object System.Collections.Generic.List[string]
+  foreach ($c in $Loc.Culprits) {
+    if ($c.Range -eq "$($c.Id)" -and $byId.ContainsKey([int]$c.Id)) {
+      $s = $byId[[int]$c.Id]
+      $lines.Add("$($c.Id)`t$($c.Verdict)`t$($s.Kind)`t$($s.Ops)`t$($s.Span)`t$($s.Routine)")
+      $short.Add("#$($c.Id) $($c.Verdict) $($s.Kind) '$($s.Ops)' $($s.Span)" +
+        $(if ($s.Routine -ne '') { " [$($s.Routine)]" } else { '' }))
+    } else {
+      $lines.Add("$($c.Range)`t$($c.Verdict)")
+      $short.Add("#$($c.Range) $($c.Verdict)")
+    }
+  }
+  [IO.File]::WriteAllLines((Join-Path $work 'culprits.txt'), $lines)
+  $text = (@($short)[0..([Math]::Min(2, $short.Count - 1))]) -join '; '
+  if ($short.Count -gt 3) { $text += " ... ($($short.Count) in all)" }
+  return "culprits ($($Loc.Compiles) compiles): $text"
 }
 
 # Invoke-Unit, with a failure of the harness itself reported as that unit's
@@ -339,7 +477,9 @@ function Invoke-UnitSafe([string] $u, [string] $work) {
     return [pscustomobject]@{ Outcome = 'TOOL-FAIL'
       Line = "TOOL-FAIL  $(Split-Path $u -Leaf)  harness: $($_.Exception.Message)"
       WithSites = 0; Diff = 0; Sites = 0; Named = 0; Broken = 1; Guessed = 0
-      Unreadable = 0; CopyIncomplete = 0; ProjectStream = 0 }
+      Unreadable = 0; CopyIncomplete = 0; ProjectStream = 0; AllSites = 0
+      Excluded = 0; Dropped = 0; ParseDiags = 0; Culprits = 0; Localized = 0
+      Compiles = 0 }
   }
 }
 
@@ -347,7 +487,9 @@ function Invoke-UnitSafe([string] $u, [string] $work) {
 # summary adds up (selftest bookkeeping for ts, the $IF guesses for t0f).
 function Invoke-Unit([string] $u, [string] $work) {
   $r = [ordered]@{ Outcome = ''; Line = ''; WithSites = 0; Diff = 0; Sites = 0
-    Named = 0; Broken = 0; Guessed = 0; Unreadable = 0; CopyIncomplete = 0; ProjectStream = 0 }
+    Named = 0; Broken = 0; Guessed = 0; Unreadable = 0; CopyIncomplete = 0; ProjectStream = 0
+    AllSites = 0; Excluded = 0; Dropped = 0; ParseDiags = 0; Culprits = 0; Localized = 0
+    Compiles = 0 }
   $leaf = Split-Path $u -Leaf
   $stem = [IO.Path]::GetFileNameWithoutExtension($u)
   if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force }
@@ -362,13 +504,7 @@ function Invoke-Unit([string] $u, [string] $work) {
   # The transformation first: it also names every file the unit reads.
   $xfRoot = Join-Path $work 'xf'
   $origRoot = Join-Path $work 'orig'
-  $xa = @($u, "-mode:$Mode", "-out:$xfRoot", "-p:$Platform")
-  $xd = @($Define) + @($XformDefine)
-  if ($xd.Count -gt 0) { $xa += ('-D:' + ($xd -join ';')) }
-  if ($XformUndefine.Count -gt 0) { $xa += ('-Undef:' + ($XformUndefine -join ';')) }
-  if ($IncludePath.Count -gt 0) { $xa += ('-I:' + ($IncludePath -join ';')) }
-  if ($Oracle) { $xa += @('-oracle', ('-S:' + ($OraclePath -join ';'))) }
-  $x = Invoke-Tool $xform $xa (Split-Path $u)
+  $x = Invoke-Tool $xform (Xform-Args $u $xfRoot) (Split-Path $u)
   Set-Content -LiteralPath (Join-Path $work 'xform.log') -Value ($x.Out + $x.Err)
   if ($x.Exit -ne 0) {
     $msg = (($x.Err -split "`r?`n") | Where-Object { $_.Trim() -ne '' } | Select-Object -Last 1)
@@ -394,6 +530,28 @@ function Invoke-Unit([string] $u, [string] $work) {
     if ($copies -gt 0) { $parts += "instance copies $copies (names mapped back)" }
     if ($x.Out -match '(?m)^flatten .*stream=project') { $parts += 'project stream'; $r.ProjectStream = 1 }
     if ($parts.Count -gt 0) { $note = '  [' + ($parts -join '; ') + ']' }
+  }
+  if ($Mode -eq 't1') {
+    # The site counts: every operator the tree holds, the ones a subrange
+    # type starts with (not wrapped) and the ones in no single file.
+    $sl = [regex]::Match($x.Out, '(?m)^sites (\d+)(.*)$')
+    $r.AllSites = [int]$sl.Groups[1].Value
+    foreach ($m in [regex]::Matches($sl.Groups[2].Value, 'excluded-\w+ (\d+)')) {
+      $r.Excluded += [int]$m.Groups[1].Value
+    }
+    $dr = [regex]::Match($sl.Groups[2].Value, 'dropped (\d+)')
+    if ($dr.Success) { $r.Dropped = [int]$dr.Groups[1].Value }
+    $pd = [regex]::Match($x.Out, '(?m)^parse (\d+)')
+    if ($pd.Success) { $r.ParseDiags = [int]$pd.Groups[1].Value }
+    if ($x.Out -match '(?m)^stream project') { $r.ProjectStream = 1 }
+    $parts = @("sites $($r.AllSites)")
+    foreach ($m in [regex]::Matches($sl.Groups[2].Value, '(excluded-\w+) (\d+)')) {
+      $parts += "$($m.Groups[1].Value) $($m.Groups[2].Value)"
+    }
+    if ($r.Dropped -gt 0) { $parts += "dropped $($r.Dropped)" }
+    if ($r.ParseDiags -gt 0) { $parts += "PARSE DIAGNOSTICS $($r.ParseDiags)" }
+    if ($r.ProjectStream -gt 0) { $parts += 'project stream' }
+    $note = '  [' + ($parts -join '; ') + ']'
   }
 
   # The original side: the same files as a plain copy, mirrored the same way,
@@ -431,6 +589,8 @@ function Invoke-Unit([string] $u, [string] $work) {
 
   $xc = Compile-Side $xfRoot $work $main $xfRoot $xinc (Join-Path $work 'xf.dcu')
   Set-Content -LiteralPath (Join-Path $work 'xf.log') -Value $xc.Out
+  $a = Join-Path $work "orig.dcu\$dcuName"
+  $b = Join-Path $work "xf.dcu\$dcuName"
   if ($xc.Exit -ne 0) {
     $r.Outcome = 'XFORM-FAIL'; $r.Line = "XFORM-FAIL  $leaf  $(First-Error $xc.Out)$note"
     if ($Mode -eq 'ts') {
@@ -438,11 +598,14 @@ function Invoke-Unit([string] $u, [string] $work) {
       $r.Broken = 1
       if ($sites.Count -gt 0) { $r.WithSites = 1; $r.Sites = $sites.Count }
     }
+    if ($doLocalize -and $sites.Count -gt 0) {
+      $loc = Find-Culprits $u $work $sites.Count 'fail' $a $argMap
+      $r.Culprits = @($loc.Culprits).Count; $r.Compiles = $loc.Compiles
+      $r.Line += '  ' + (Report-Culprits $loc $sites $work)
+    }
     return [pscustomobject]$r
   }
 
-  $a = Join-Path $work "orig.dcu\$dcuName"
-  $b = Join-Path $work "xf.dcu\$dcuName"
   if (Same-Dcu $a $b $argMap) {
     $r.Outcome = 'OK'; $r.Line = "OK  $leaf$note"
     if ($Mode -eq 'ts' -and $sites.Count -gt 0) {
@@ -451,6 +614,21 @@ function Invoke-Unit([string] $u, [string] $work) {
       $r.Line = "OK  $leaf  SELFTEST-MISS: $($sites.Count) site(s), .dcu identical"
     }
     return [pscustomobject]$r
+  }
+
+  # dcc is not always deterministic: under -$O- one Studio unit (Vcl.Skia)
+  # compiles to a different .dcu from one run to the next, the text
+  # unchanged (probed: five compiles, three results; with dcc's default
+  # switches it is stable). Before a difference is believed the original is
+  # compiled twice more; a unit whose own compiles disagree is NONDET -
+  # counted, not judged.
+  for ($k = 2; $k -le 3; $k++) {
+    $again = Compile-Side $origRoot $work $main $xfRoot $xinc (Join-Path $work "orig$k.dcu")
+    if ($again.Exit -ne 0 -or -not (Same-Dcu $a (Join-Path $work "orig$k.dcu\$dcuName"))) {
+      $r.Outcome = 'NONDET'
+      $r.Line = "NONDET  $leaf  the original compiles to a different .dcu from run to run$note"
+      return [pscustomobject]$r
+    }
   }
 
   $r.Outcome = 'DIFF'
@@ -489,6 +667,18 @@ function Invoke-Unit([string] $u, [string] $work) {
     if ($extra.Count -gt 0) { $line += "  extra: " + ($extra -join ', ') }
     if ($cmp.Other.Count -gt 0) { $line += "  +data: " + ($cmp.Other -join ', ') }
     $r.Line = $line
+  }
+  if ($doLocalize -and $sites.Count -gt 0) {
+    $loc = Find-Culprits $u $work $sites.Count 'diff' $a $argMap
+    $r.Culprits = @($loc.Culprits).Count; $r.Compiles = $loc.Compiles
+    if ($Mode -eq 'ts') {
+      # Every planted site is wrong by construction: the localizer must find
+      # each one ALONE, or it cannot be trusted with a real DIFF.
+      $ids = @($loc.Culprits | Where-Object { $_.Range -eq "$($_.Id)" } | ForEach-Object { [int]$_.Id })
+      $r.Localized = @($sites | Where-Object { $ids -contains [int]$_.Id }).Count
+      if ($r.Localized -lt $sites.Count) { $r.Broken = 1 }
+    }
+    $r.Line += '  ' + (Report-Culprits $loc $sites $work)
   }
   return [pscustomobject]$r
 }
@@ -559,7 +749,8 @@ if ($Jobs -le 1) {
     Tools = $Tools; UnitPath = @($UnitPath); IncludePath = @($IncludePath)
     Define = @($Define); XformDefine = @($XformDefine); XformUndefine = @($XformUndefine)
     Switches = @($Switches); Base = [bool]$Base; Oracle = [bool]$Oracle
-    OraclePath = @($OraclePath) }
+    OraclePath = @($OraclePath); Localize = [bool]$Localize; NoLocalize = [bool]$NoLocalize
+    LocalizeBudget = $LocalizeBudget; Sites = $Sites }
   $paramFile = Join-Path $jobDir 'params.json'
   [IO.File]::WriteAllText($paramFile, ($params | ConvertTo-Json))
   [IO.File]::WriteAllText((Join-Path $Out 'base-fail.json'), ($baseFail | ConvertTo-Json))
@@ -598,18 +789,24 @@ if ($Jobs -le 1) {
 }
 
 $results = New-Object System.Collections.Generic.List[string]
-$counts = [ordered]@{ 'OK' = 0; 'DIFF' = 0; 'XFORM-FAIL' = 0; 'BASE-FAIL' = 0; 'TOOL-FAIL' = 0 }
+$counts = [ordered]@{ 'OK' = 0; 'DIFF' = 0; 'XFORM-FAIL' = 0; 'BASE-FAIL' = 0; 'NONDET' = 0; 'TOOL-FAIL' = 0 }
 $selftest = [ordered]@{ UnitsWithSites = 0; UnitsDiff = 0; Sites = 0; Named = 0; Broken = 0 }
 $guess = [ordered]@{}
 foreach ($k in $counts.Keys) { $guess[$k] = @(0, 0) }
 $copyIncomplete = 0
 $projectStream = 0
 $unreadable = 0
+$t1 = [ordered]@{ Sites = 0; Excluded = 0; Dropped = 0; ParseUnits = 0; Culprits = 0; Compiles = 0 }
+$localized = 0
 foreach ($o in $outcomes) {
   $results.Add($o.Line)
   $counts[$o.Outcome]++
   $selftest.UnitsWithSites += $o.WithSites; $selftest.UnitsDiff += $o.Diff
   $selftest.Sites += $o.Sites; $selftest.Named += $o.Named; $selftest.Broken += $o.Broken
+  $t1.Sites += [int]$o.AllSites; $t1.Excluded += [int]$o.Excluded; $t1.Dropped += [int]$o.Dropped
+  if ([int]$o.ParseDiags -gt 0) { $t1.ParseUnits++ }
+  $t1.Culprits += [int]$o.Culprits; $t1.Compiles += [int]$o.Compiles
+  $localized += [int]$o.Localized
   if ($o.Guessed -gt 0) { $guess[$o.Outcome] = @(($guess[$o.Outcome][0] + 1), ($guess[$o.Outcome][1] + $o.Guessed)) }
   $copyIncomplete += $o.CopyIncomplete
   $projectStream += $o.ProjectStream
@@ -621,11 +818,19 @@ $summary = New-Object System.Collections.Generic.List[string]
 $summary.Add(("mode={0} platform={1} units={2} {3}  ({4:N0} s)" -f $Mode, $Platform,
   $units.Count, (($counts.Keys | ForEach-Object { "$($_.ToLower())=$($counts[$_])" }) -join ' '), $elapsed))
 if ($copyIncomplete -gt 0) { $summary.Add("base-fail with an incomplete copy: $copyIncomplete") }
-if ($Oracle) { $summary.Add("units flattened from the project stream (-Oracle): $projectStream") }
+if ($Oracle) { $summary.Add("units whose stream came from the project analysis (-Oracle): $projectStream") }
 $pass = $true
+if ($Mode -eq 't1') {
+  $summary.Add(("t1: sites={0} excluded (subrange type start, [ first)={1} dropped={2} units with parse diagnostics={3}" -f
+    $t1.Sites, $t1.Excluded, $t1.Dropped, $t1.ParseUnits))
+}
+if ($doLocalize) {
+  $summary.Add(("localizer: culprits={0} variant compiles={1}" -f $t1.Culprits, $t1.Compiles))
+}
 if ($Mode -eq 'ts') {
   $summary.Add(("selftest: units with sites={0} diff={1} sites={2} named={3} broken={4}" -f
     $selftest.UnitsWithSites, $selftest.UnitsDiff, $selftest.Sites, $selftest.Named, $selftest.Broken))
+  if ($doLocalize) { $summary.Add("selftest: sites localized alone=$localized of $($selftest.Sites)") }
   $pass = ($selftest.Broken -eq 0) -and ($counts['TOOL-FAIL'] -eq 0) -and ($selftest.UnitsWithSites -gt 0)
 } else {
   if ($Mode -eq 't0f') {

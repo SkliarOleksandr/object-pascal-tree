@@ -30,27 +30,51 @@ program PasTreeXform;
         shows as a different .dcu or a failed compile.
         sites.txt lists the preprocessor's diagnostics instead of edits: a
         guessed or unreadable $IF is where a DIFF is likeliest to come from.
+    t1  parentheses along the tree (plan T1): every operator node - binary,
+        unary, inline if - wrapped in `(` `)`. A correct tree leaves the
+        .dcu identical; one grouping dcc makes differently changes the code
+        or stops the compile. Only OPERATORS are wrapped: dcc keeps a
+        parenthesized designator as a value of its own - `(@P) := X` is
+        E2064 where `@P := X` assigns a procedural variable, and an inline
+        routine's stored expression tree records `not (A.B)` differently
+        from `not A.B` while the code is the same (plan S5). Not wrapped
+        either, counted instead: an operator that starts a subrange TYPE - a
+        `(` there opens an enumerated type in every type position
+        (`excluded-type`); one whose left edge is a `[...]` constructor -
+        parenthesized, dcc types it without the target, `A := ([X] + A)` is
+        E2008 (`excluded-ctor`); every `@` - `@P` of a procedural variable is
+        a designator for dcc (`excluded-at`). Every site is one line of
+        sites.txt; -sites: applies a subset (the driver's localizer bisects a
+        DIFF down to the node with it).
 
   Usage:
-    PasTreeXform <unit.pas> -mode:t0|ts|t0f -out:<dir> [-p:<platform>]
+    PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1 -out:<dir> [-p:<platform>]
                  [-D:X;Y]... [-Undef:X;Y]... [-I:<dir>[;<dir>]]...
+                 [-sites:<ids>]
+  -sites (ts, t1): only the sites with these ids take their edit - a comma
+  list of ids and ranges, `1-40,57`; the ids are those of the full run, so
+  sites.txt means the same in every run over the same unit.
   -Undef takes names out of the define set after the platform's and -D's -
   with -D, a way to try another predefined set without rebuilding.
-  -oracle (t0f): when a $IF of the unit asked what a bare preprocessor cannot
-  answer (Declared, a constant, SizeOf), the stream flattened is the one a
-  project analysis makes - its first pass answers compiler-provided names,
-  its second asks the loaded units (the Declared/SizeOf oracle) - over the
-  -S search paths plus the -I ones. That is the stream PasTree analyzes, and
-  the only way to judge the oracle against dcc.
+  -oracle: when a $IF of the unit asked what a bare preprocessor cannot
+  answer (Declared, a constant, SizeOf), the stream flattened (t0f) or
+  parsed (ts, t1) is the one a project analysis makes - its first pass
+  answers compiler-provided names, its second asks the loaded units (the
+  Declared/SizeOf oracle) - over the -S search paths plus the -I ones. That
+  is the stream PasTree analyzes, and the only way to judge the oracle
+  against dcc.
 
   Output, all of it under <dir>:
   - the files, mirrored under the common directory of the unit, its includes
     and the -I directories, so a relative `$I` include resolves as it did;
   - sites.txt, tab-separated: id, kind, operators, span
-    `file(line,col)-(line,col)`, routine, the edit;
+    `file(line,col)-(line,col)`, routine, the edit, applied (1, or 0 when
+    -sites left it out);
   - on stdout `main <path>` (the transformed unit), one `file <from> <to>`
     per file written, one `idir <from> <to>` per -I directory (the compile
-    of the copy searches <to>), `sites <n>`; <from> and <to> tab-separated.
+    of the copy searches <to>), `sites <n>` (with `dropped`, `excluded`,
+    `applied` counts where they apply), `parse <n>` - the parse diagnostics
+    of the tree ts and t1 edit along; <from> and <to> tab-separated.
     t0f adds `copy <from> <to>` per extra instance copy of an include (see
     below), `argmap <new> <old>` per include argument rewritten to name one
     (the .dcu records each inclusion under its name as written: the driver
@@ -65,8 +89,9 @@ program PasTreeXform;
     so no untouched byte is ever re-encoded. A file whose bytes do not
     round-trip through its decoding (a lenient U+FFFD recovery) is refused.
 
-  A file included more than once takes no ts edit (one text serves several
-  preprocessing states); a site that would need one is dropped and counted.
+  A file included more than once takes no ts or t1 edit (one text serves
+  several preprocessing states); a site that would need one - or whose
+  parentheses would land in two files - is dropped and counted.
   t0f flattens every inclusion on its own, since each has its own state: the
   inclusions whose flattened texts agree share the file, and each different
   text is written to a copy in a `~<n>` directory beside it, its `$I`
@@ -89,6 +114,7 @@ uses
   System.SysUtils,
   System.Classes,
   System.IOUtils,
+  System.StrUtils,
   System.Generics.Collections,
   System.Generics.Defaults,
   PasTree.Types in '..\source\PasTree.Types.pas',
@@ -108,10 +134,10 @@ uses
   PasTree.Version in '..\source\PasTree.Version.pas';
 
 type
-  TXformMode = (xmT0, xmTS, xmT0F);
+  TXformMode = (xmT0, xmTS, xmT0F, xmT1);
 
 const
-  cModeNames: array[TXformMode] of string = ('t0', 'ts', 't0f');
+  cModeNames: array[TXformMode] of string = ('t0', 'ts', 't0f', 't1');
 
 type
   // One text insertion into one file, or a replacement of Len characters
@@ -127,12 +153,16 @@ type
     Text: string;
   end;
 
+  // ts and t1: a `(` goes before visible token OpenVis and a `)` after
+  // CloseVis; t0f's sites are diagnostics, OpenVis -1.
   TSite = record
     Kind: string;
     Ops: string;
     Span: string;
     Routine: string;
     Edit: string;
+    OpenVis: Integer;
+    CloseVis: Integer;
   end;
 
 var
@@ -142,6 +172,9 @@ var
   GSites: TList<TSite>;
   GIncludedTwice: TArray<Boolean>;   // per FileId: its path occurs twice
   GDropped: Integer;                 // sites refused for an include used twice
+  GExcluded: Integer;                // t1: operators starting a subrange type
+  GExcludedCtor: Integer;            // t1: operators starting with `[`
+  GExcludedAt: Integer;              // t1: `@` operators
   GUnitName: string;
   // t0f: per FileId, the file it is written as - its own path, or an
   // instance copy's (see Flatten) - and the counts of the `flatten` line.
@@ -370,8 +403,8 @@ begin
       Inc(GDropped);
       Exit;
     end;
-    AddEdit(LFirst, False, 1, '(');
-    AddEdit(LLast, True, 0, ')');
+    LSite.OpenVis := LFirst;
+    LSite.CloseVis := LLast;
     LSite.Kind := GTree.KindName(GTree.Nodes[LP].Kind);
     LSite.Ops := OpText(Child(LP, 0)) + '/' + OpText(LP);
     LSite.Span := SpanText(GTree.NodeLeftmostVis(LP), GTree.Nodes[LP].LastToken);
@@ -439,6 +472,169 @@ begin
     VisitRoutines(LChild, AOuter);
     LChild := GTree.Nodes[LChild].NextSibling;
   end;
+end;
+
+{ t1: the operator as the report spells it - `is not` and `not in` from the
+  node's flag, `if` for an inline if. }
+function OpsOf(ANode: Integer): string;
+begin
+  if GTree.Nodes[ANode].Kind = nkInlineIf then
+    Exit('if');
+  Result := OpText(ANode);
+  if nfNegated in GTree.Nodes[ANode].Flags then
+    if Result = 'is' then
+      Result := 'is not'
+    else
+      Result := 'not ' + Result;
+end;
+
+{ t1: a site wrapping ANode's whole span, from its leftmost token (an
+  operator's FirstToken is the operator, not its left edge) to its last.
+  Dropped and counted when the two ends lie in different files or in a file
+  included twice. }
+procedure AddParenSite(const AKind, AOps: string; ANode: Integer;
+  const ARoutine: string);
+var
+  LFirst, LLast, LFileA, LFileB: Integer;
+  LSite: TSite;
+begin
+  LFirst := GTree.NodeLeftmostVis(ANode);
+  LLast := GTree.Nodes[ANode].LastToken;
+  VisOffset(LFirst, LFileA);
+  VisOffset(LLast, LFileB);
+  if (LFileA <> LFileB) or GIncludedTwice[LFileA] then
+  begin
+    Inc(GDropped);
+    Exit;
+  end;
+  LSite.Kind := AKind;
+  LSite.Ops := AOps;
+  LSite.Span := SpanText(LFirst, LLast);
+  LSite.Routine := ARoutine;
+  LSite.Edit := '()';
+  LSite.OpenVis := LFirst;
+  LSite.CloseVis := LLast;
+  GSites.Add(LSite);
+end;
+
+{ t1: every operator node of the subtree at ANode as a site, in pre-order
+  (an operator before its operands). ARoutine names the code the node
+  compiles into, for the report: the dotted routine name the .dcu dump uses
+  ('' outside every body - a constant, a type, a default value; an anonymous
+  method counts as the routine it is written in). ATypeStart is the leftmost
+  token of the enclosing subrange TYPE (-2 outside one): a `(` there makes
+  dcc read an enumerated type, in every type position probed - a type
+  declaration, the type of a var, field, typed constant or inline var, an
+  array index in any dimension, `set of`, `array of` (plan S5, probes
+  ty01..ty28) - so an operator starting there is not wrapped, only counted
+  (GExcluded). Case labels, variant labels, set elements, typed-constant
+  values, default parameters and property specifiers are expressions and
+  take the parentheses.
+
+  Nor is an operator whose left edge is a `[...]` constructor (counted in
+  GExcludedCtor): dcc types a constructor from the TARGET only while the
+  expression is not parenthesized - `A := [X] + A` concatenates dynamic
+  arrays, `A := ([X] + A)` is E2008 and `F(([X] + A))` E2008, `[X]` read as
+  a set; `A + [X]` is typed from A and takes the parentheses (plan S5,
+  probes dynarr). A set expression starting with `[` loses its check with
+  them - it cannot be told from an array at parse time.
+
+  Nor is any `@` (GExcludedAt): of a procedural variable, `@P` is a
+  designator - `@P := GetProcAddress(...)` assigns the variable and `(@P)`
+  is E2064 there, `F(@P)` passes it to a var parameter and `F((@P))` is
+  E2197, and in an inline routine `LPARAM((@P))` is stored differently -
+  and a parse cannot tell a procedural variable from any other. The
+  operator around it is still wrapped: `(@F = nil)`. }
+procedure T1Walk(ANode: Integer; const ARoutine: string; ATypeStart: Integer);
+var
+  LChild: Integer;
+  LRoutine: string;
+begin
+  LRoutine := ARoutine;
+  case GTree.Nodes[ANode].Kind of
+    nkAsmStmt:
+      Exit;
+    nkRoutine:
+      begin
+        LRoutine := RoutineName(ANode);
+        if ARoutine <> '' then
+          LRoutine := ARoutine + '.' + LRoutine;
+      end;
+    nkInitSec:
+      LRoutine := GUnitName;
+    nkFinalSec:
+      LRoutine := 'Finalization';
+    nkSubrange:
+      ATypeStart := GTree.NodeLeftmostVis(ANode);
+    nkBinaryOp, nkUnaryOp, nkInlineIf:
+      begin
+        if GTree.NodeLeftmostVis(ANode) = ATypeStart then
+          Inc(GExcluded)
+        else if GPre.VisibleToken(GTree.NodeLeftmostVis(ANode)).Kind =
+                tkLBracket then
+          Inc(GExcludedCtor)
+        else if (GTree.Nodes[ANode].Kind = nkUnaryOp) and
+                (OpText(ANode) = '@') then
+          Inc(GExcludedAt)
+        else
+          AddParenSite(GTree.KindName(GTree.Nodes[ANode].Kind), OpsOf(ANode),
+            ANode, ARoutine);
+      end;
+  end;
+  LChild := GTree.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    T1Walk(LChild, LRoutine, ATypeStart);
+    LChild := GTree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+type
+  TSiteRange = record
+    Lo, Hi: Integer;
+  end;
+
+var
+  // -sites: the ids (1-based) whose edits are applied; empty = all.
+  GSiteRanges: TList<TSiteRange>;
+
+procedure ParseSiteList(const AText: string);
+var
+  LPart: string;
+  LDash: Integer;
+  LRange: TSiteRange;
+begin
+  for LPart in AText.Split([',']) do
+  begin
+    if Trim(LPart) = '' then
+      Continue;
+    LDash := Pos('-', LPart);
+    if LDash > 0 then
+    begin
+      LRange.Lo := StrToInt(Trim(Copy(LPart, 1, LDash - 1)));
+      LRange.Hi := StrToInt(Trim(Copy(LPart, LDash + 1, MaxInt)));
+    end
+    else
+    begin
+      LRange.Lo := StrToInt(Trim(LPart));
+      LRange.Hi := LRange.Lo;
+    end;
+    GSiteRanges.Add(LRange);
+  end;
+  if GSiteRanges.Count = 0 then
+    raise Exception.Create('-sites: no id given');
+end;
+
+function SiteSelected(AId: Integer): Boolean;
+var
+  LRange: TSiteRange;
+begin
+  if GSiteRanges.Count = 0 then
+    Exit(True);
+  for LRange in GSiteRanges do
+    if (AId >= LRange.Lo) and (AId <= LRange.Hi) then
+      Exit(True);
+  Result := False;
 end;
 
 { t0f: the word of directive token AText, upper-cased, read the way
@@ -1315,7 +1511,7 @@ var
   GDefines: TPasDefines;
   GPP: TPasPreprocessor;
   GDiags: TArray<TPasParseDiag>;
-  GIdx, GJdx, GNonInfo, GOffset: Integer;
+  GIdx, GJdx, GNonInfo, GOffset, GApplied: Integer;
   GSite: TSite;
   GName: string;
   GWritten: TDictionary<string, Boolean>;
@@ -1331,6 +1527,7 @@ begin
     GDefNames := TList<string>.Create;
     GUndefNames := TList<string>.Create;
     GSearch := TList<string>.Create;
+    GSiteRanges := TList<TSiteRange>.Create;
     GOracle := False;
     GOracleUsed := False;
     GProject := nil;
@@ -1349,12 +1546,18 @@ begin
             GSearch.Add(NoSlash(Trim(GName)));
         Continue;
       end;
+      if GArg.StartsWith('-sites:', True) then
+      begin
+        ParseSiteList(Copy(GArg, 8, MaxInt));
+        Continue;
+      end;
       if GArg.StartsWith('-mode:', True) then
       begin
         GArg := LowerCase(Copy(GArg, 7, MaxInt));
         if GArg = 't0' then GMode := xmT0
         else if GArg = 'ts' then GMode := xmTS
         else if GArg = 't0f' then GMode := xmT0F
+        else if GArg = 't1' then GMode := xmT1
         else raise Exception.Create('unknown mode: ' + GArg);
       end
       else if GArg.StartsWith('-Undef:', True) then
@@ -1389,9 +1592,10 @@ begin
     end;
     if (GFile = '') or (GOut = '') then
     begin
-      Writeln(ErrOutput, 'Usage: PasTreeXform <unit.pas> -mode:t0|ts|t0f ' +
+      Writeln(ErrOutput, 'Usage: PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1 ' +
         '-out:<dir> [-p:<platform>] [-D:X;Y]... [-Undef:X;Y]... ' +
-        '[-I:<dir>[;<dir>]]... [-oracle [-S:<dir>[;<dir>]]...]');
+        '[-I:<dir>[;<dir>]]... [-oracle [-S:<dir>[;<dir>]]...] ' +
+        '[-sites:<ids>]');
       ExitCode := 1;
       Exit;
     end;
@@ -1426,6 +1630,27 @@ begin
             GPre.Diagnostics[GIdx].Detail);
         end;
 
+      if GOracle and (GUndefNames.Count > 0) then
+        raise Exception.Create('-Undef cannot reach a project analysis: ' +
+          'use -oracle without it');
+      if GOracle and OracleCouldMatter(GPre) then
+      begin
+        // The stream PasTree really analyzes: the project's first pass
+        // (compiler-provided names answered) and its second, the oracle's.
+        GProject := TPasSemaProject.Create(GPlatform,
+          GSearch.ToArray + GIncDirs.ToArray, GDefNames.ToArray);
+        GProjectId := GProject.AnalyzeProject(GFile);
+        if (GProjectId < 0) or
+           (Length(GProject.Model(GProjectId).Tree.Source.Files) = 0) then
+          raise Exception.Create('the project analysis kept no ' +
+            'preprocessed text of the unit');
+        GPre := GProject.Model(GProjectId).Tree.Source;
+        if not SameText(NoSlash(GPre.FileNames[0]), NoSlash(GFile)) then
+          raise Exception.CreateFmt('the project analyzed %s',
+            [GPre.FileNames[0]]);
+        GOracleUsed := True;
+      end;
+
       SetLength(GIncludedTwice, Length(GPre.FileNames));
       for GIdx := 0 to High(GPre.FileNames) do
         for GJdx := 0 to High(GPre.FileNames) do
@@ -1434,7 +1659,8 @@ begin
             GIncludedTwice[GIdx] := True;
 
       GDiags := nil;
-      if GMode = xmTS then
+      GApplied := 0;
+      if GMode in [xmTS, xmT1] then
       begin
         GTree := TPasParser.ParseFile(GPre, GDiags);
         for GIdx := 0 to High(GDiags) do
@@ -1447,29 +1673,21 @@ begin
           else
             Writeln(ErrOutput, 'PARSE <eof>: ', GDiags[GIdx].Msg);
         GUnitName := HeaderName;
-        VisitRoutines(0, '');
+        if GMode = xmTS then
+          VisitRoutines(0, '')
+        else
+          T1Walk(0, '', -2);
+        for GIdx := 0 to GSites.Count - 1 do
+          if SiteSelected(GIdx + 1) then
+          begin
+            AddEdit(GSites[GIdx].OpenVis, False, 1, '(');
+            AddEdit(GSites[GIdx].CloseVis, True, 0, ')');
+            Inc(GApplied);
+          end;
       end
       else if GMode = xmT0F then
       begin
-        if GOracle and (GUndefNames.Count > 0) then
-          raise Exception.Create('-Undef cannot reach a project analysis: ' +
-            'use -oracle without it');
-        if GOracle and OracleCouldMatter(GPre) then
-        begin
-          // The stream PasTree really analyzes: the project's first pass
-          // (compiler-provided names answered) and its second, the oracle's.
-          GProject := TPasSemaProject.Create(GPlatform,
-            GSearch.ToArray + GIncDirs.ToArray, GDefNames.ToArray);
-          GProjectId := GProject.AnalyzeProject(GFile);
-          if (GProjectId < 0) or
-             (Length(GProject.Model(GProjectId).Tree.Source.Files) = 0) then
-            raise Exception.Create('the project analysis kept no ' +
-              'preprocessed text of the unit');
-          GPre := GProject.Model(GProjectId).Tree.Source;
-          if not SameText(NoSlash(GPre.FileNames[0]), NoSlash(GFile)) then
-            raise Exception.CreateFmt('the project analyzed %s',
-              [GPre.FileNames[0]]);
-          GOracleUsed := True;
+        if GOracleUsed then
           GLiveness :=
             function(const APaths, ATexts: TArray<string>): TPasPreprocessed
             var
@@ -1488,8 +1706,7 @@ begin
               finally
                 LProject.Free;
               end;
-            end;
-        end
+            end
         else
           GLiveness :=
             function(const APaths, ATexts: TArray<string>): TPasPreprocessed
@@ -1527,6 +1744,8 @@ begin
             GPre.Diagnostics[GIdx].Start);
           GSite.Routine := '';
           GSite.Edit := '';
+          GSite.OpenVis := -1;
+          GSite.CloseVis := -1;
           GSites.Add(GSite);
         end;
       end;
@@ -1562,17 +1781,20 @@ begin
 
       GSitesText.Add(Format('# PasTreeXform %s  mode=%s  platform=%s  ' +
         'files=%d  parse-diagnostics=%d  pp-diagnostics=%d  ' +
-        'dropped-sites=%d', [PasTreeVersion, cModeNames[GMode],
-        PlatformName(GPlatform), Length(GPre.FileNames), Length(GDiags),
-        GNonInfo, GDropped]));
+        'dropped-sites=%d  excluded-type=%d  excluded-ctor=%d  ' +
+        'excluded-at=%d  applied=%d  stream=%s', [PasTreeVersion,
+        cModeNames[GMode], PlatformName(GPlatform), Length(GPre.FileNames),
+        Length(GDiags), GNonInfo, GDropped, GExcluded, GExcludedCtor,
+        GExcludedAt, GApplied, IfThen(GOracleUsed, 'project', 'preprocessor')]));
       GSitesText.Add('# ' + GFile);
       GSitesText.Add('# id' + #9 + 'kind' + #9 + 'ops' + #9 + 'span' + #9 +
-        'routine' + #9 + 'edit');
+        'routine' + #9 + 'edit' + #9 + 'applied');
       for GIdx := 0 to GSites.Count - 1 do
       begin
         GSite := GSites[GIdx];
-        GSitesText.Add(Format('%d'#9'%s'#9'%s'#9'%s'#9'%s'#9'%s', [GIdx + 1,
-          GSite.Kind, GSite.Ops, GSite.Span, GSite.Routine, GSite.Edit]));
+        GSitesText.Add(Format('%d'#9'%s'#9'%s'#9'%s'#9'%s'#9'%s'#9'%d',
+          [GIdx + 1, GSite.Kind, GSite.Ops, GSite.Span, GSite.Routine,
+          GSite.Edit, Ord((GSite.OpenVis >= 0) and SiteSelected(GIdx + 1))]));
       end;
       TDirectory.CreateDirectory(GOut);
       GSitesText.WriteBOM := False;
@@ -1587,7 +1809,19 @@ begin
       GLine := IntToStr(GSites.Count);
       if GDropped > 0 then
         GLine := GLine + ' dropped ' + IntToStr(GDropped);
+      if GExcluded > 0 then
+        GLine := GLine + ' excluded-type ' + IntToStr(GExcluded);
+      if GExcludedCtor > 0 then
+        GLine := GLine + ' excluded-ctor ' + IntToStr(GExcludedCtor);
+      if GExcludedAt > 0 then
+        GLine := GLine + ' excluded-at ' + IntToStr(GExcludedAt);
+      if GMode in [xmTS, xmT1] then
+        GLine := GLine + ' applied ' + IntToStr(GApplied);
       Writeln('sites ', GLine);
+      if GMode in [xmTS, xmT1] then
+        Writeln('parse ', Length(GDiags));
+      if GOracleUsed and (GMode <> xmT0F) then
+        Writeln('stream project');
       if GMode = xmT0F then
       begin
         for GName in GArgMap.Keys do
@@ -1608,6 +1842,7 @@ begin
       GDefNames.Free;
       GUndefNames.Free;
       GSearch.Free;
+      GSiteRanges.Free;
       GProject.Free;
     end;
   except

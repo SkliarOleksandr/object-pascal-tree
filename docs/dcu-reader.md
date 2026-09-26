@@ -282,6 +282,29 @@ preprocessor's own decisions were first written into the text (mode `t0f`,
   through a renamed copy changes that record and the header's size field
   (offset 4), and nothing else.
 
+A transformation that inserts parentheses meets three more, found when every
+operator was first parenthesized along the tree (mode `t1`, 2026-09-26,
+dcc64 37.0):
+
+- **The code-lines record (`$90`) can give code the line of the token AFTER
+  the expression that made it.** With `if C then`, `A := A + [X]` and `else`
+  on three lines, part of the concatenation's code is recorded on the
+  `else` line; written `A := (A + [X])`, the next token is the `)` and the
+  code stays on its own line. The code itself is byte-identical. `-$D-`
+  and `-$L-` together remove the table (either alone does not), so `t1`
+  compiles with them.
+- **An inline routine's stored expression tree keeps a parenthesized
+  DESIGNATOR as a node of its own** (inside the `$9C` record's inline
+  info): `not (A.B)` in a routine declared `inline` changes the `.dcu` while
+  the routine's code is identical. Parentheses around an OPERATOR
+  expression are transparent there - `(A = B)` stores what `A = B` does.
+- **dcc64 is not deterministic on every unit under `-$O-`**: one VCL unit
+  (Vcl.Skia) compiled five times from the same text gave three different
+  `.dcu` files - two bytes of a class-definition record, once a different
+  length. With the default switches the same five compiles agree. The
+  harness therefore compiles the original twice more before it believes a
+  difference, and calls a unit whose own compiles disagree NONDET.
+
 ## Known gaps, for a future session
 
 Three different kinds, not one. Keep them apart - the fix, and whether a fix
