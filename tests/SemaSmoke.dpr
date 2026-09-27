@@ -1903,6 +1903,221 @@ begin
   GModel.Free;
 end;
 
+{ 3.1.3: a routine's body holds its parameters, its locals, a function's
+  Result and its enclosing blocks' names - and, for an implementation, the
+  names its declaration and its method-ness bring: parameters and Result an
+  omitted header leaves to the declaration, Self, the method's own type
+  parameters. An inline declaration or a local taking one is E2004. Every
+  source below was compiled with dcc64 37.0 on 2026-09-27 and every count is
+  dcc's own. }
+procedure TestRoutineBodyNames;
+
+  procedure Expect(const AName, ASource: string; ACount: Integer);
+  begin
+    Analyze(ASource);
+    Ok('routinename: ' + AName, DiagCount('E2004') = ACount);
+    GModel.Free;
+  end;
+
+begin
+  Expect('a parameter',
+    'unit U; interface implementation procedure P(G: Integer); ' +
+    'begin var G := 1; if G = 0 then ; end; end.', 1);
+  Expect('a local var, two blocks deep',
+    'unit U; interface implementation procedure P; var G: Integer; ' +
+    'begin begin var G := 1; if G = 0 then ; end; end; end.', 1);
+  Expect('a local const',
+    'unit U; interface implementation procedure P; const G = 1; ' +
+    'begin var G := 2; if G = 0 then ; end; end.', 1);
+  Expect('a local type',
+    'unit U; interface implementation procedure P; type G = Integer; ' +
+    'begin var G := 1; if G = 0 then ; end; end.', 1);
+  Expect('a label',
+    'unit U; interface implementation procedure P; label G; ' +
+    'begin var G := 1; if G = 0 then ; end; end.', 1);
+  Expect('a nested routine',
+    'unit U; interface implementation procedure P; procedure G; begin end; ' +
+    'begin var G := 1; if G = 0 then ; end; end.', 1);
+  Expect('a function''s Result, in a nested block',
+    'unit U; interface implementation function F: Integer; ' +
+    'begin begin var Result := 1; end; end; end.', 1);
+  Expect('an enclosing block''s inline var',
+    'unit U; interface implementation procedure P; begin var G := 1; ' +
+    'begin var G := 2; if G = 0 then ; end; end; end.', 1);
+  Expect('a for-var counter and a local',
+    'unit U; interface implementation procedure P; var I: Integer; ' +
+    'begin for var I := 1 to 2 do ; end; end.', 1);
+  Expect('an exception handler''s variable',
+    'unit U; interface implementation procedure P; begin try except ' +
+    'on G: TObject do begin var G := 1; if G = 0 then ; end; end; end; end.',
+    1);
+  Expect('a nested routine''s parameter',
+    'unit U; interface implementation procedure P; ' +
+    'procedure Q(G: Integer); begin var G := 1; if G = 0 then ; end; ' +
+    'begin Q(1); end; end.', 1);
+  Expect('a record method''s parameter',
+    'unit U; interface implementation type TR = record ' +
+    'procedure M(G: Integer); end; procedure TR.M(G: Integer); ' +
+    'begin var G := 1; if G = 0 then ; end; end.', 1);
+  Expect('an anonymous method''s parameter',
+    'unit U; interface implementation uses System.SysUtils; procedure P; ' +
+    'begin var F: TProc<Integer> := procedure(G: Integer) begin ' +
+    'var G := 1; if G = 0 then ; end; F(1); end; end.', 1);
+  Expect('an anonymous function''s Result',
+    'unit U; interface implementation uses System.SysUtils; procedure P; ' +
+    'begin var F: TFunc<Integer> := function: Integer begin ' +
+    'var Result := 1; end; F(); end; end.', 1);
+
+  // What an implementation header leaves to its declaration.
+  Expect('a declared parameter the header omits',
+    'unit U; interface procedure P(G: Integer); implementation procedure P; ' +
+    'begin var G := 1; if G = 0 then ; end; end.', 1);
+  Expect('a method''s declared parameter the header omits',
+    'unit U; interface type TC = class procedure M(G: Integer); end; ' +
+    'implementation procedure TC.M; begin var G := 1; if G = 0 then ; end; ' +
+    'end.', 1);
+  Expect('a declared Result the header omits',
+    'unit U; interface function F: Integer; implementation function F; ' +
+    'begin var Result := 1; end; end.', 1);
+  Expect('Self in a method',
+    'unit U; interface type TC = class procedure M; end; implementation ' +
+    'procedure TC.M; begin var Self := 1; if Self = 0 then ; end; end.', 1);
+  Expect('Self in a constructor',
+    'unit U; interface type TC = class constructor Create; end; ' +
+    'implementation constructor TC.Create; begin var Self := 1; ' +
+    'if Self = 0 then ; end; end.', 1);
+  Expect('Self in a record method and a helper''s, one each',
+    'unit U; interface type TR = record procedure M; end; ' +
+    'TH = record helper for Integer procedure M; end; implementation ' +
+    'procedure TR.M; begin var Self := 1; if Self = 0 then ; end; ' +
+    'procedure TH.M; begin var Self := 1; if Self = 0 then ; end; end.', 2);
+  Expect('a method''s own type parameter',
+    'unit U; interface type TC = class procedure M<T>; end; implementation ' +
+    'procedure TC.M<T>; begin var T := 1; if T = 0 then ; end; end.', 1);
+
+  // A local, not inline, taking one of those names.
+  Expect('a local var and a parameter',
+    'unit U; interface implementation procedure P(G: Integer); ' +
+    'var G: Integer; begin G := 0; if G = 0 then ; end; end.', 1);
+  Expect('a local var and a method''s declared parameter',
+    'unit U; interface type TC = class procedure M(G: Integer); end; ' +
+    'implementation procedure TC.M; var G: Integer; begin G := 0; ' +
+    'if G = 0 then ; end; end.', 1);
+  Expect('a local var and a declared parameter',
+    'unit U; interface procedure P(G: Integer); implementation procedure P; ' +
+    'var G: Integer; begin G := 0; if G = 0 then ; end; end.', 1);
+  Expect('a local var Result',
+    'unit U; interface implementation function F: Integer; ' +
+    'var Result: Integer; begin Result := 1; end; end.', 1);
+  Expect('a local const Result',
+    'unit U; interface implementation function F: Integer; ' +
+    'const Result = 1; begin end; end.', 1);
+  Expect('a local var and a declared Result',
+    'unit U; interface function F: Integer; implementation function F; ' +
+    'var Result: Integer; begin Result := 0; end; end.', 1);
+  Expect('a local var Self',
+    'unit U; interface type TC = class procedure M; end; implementation ' +
+    'procedure TC.M; var Self: Integer; begin end; end.', 1);
+  Expect('a local var and the method''s own type parameter',
+    'unit U; interface type TC = class procedure M<T>; end; implementation ' +
+    'procedure TC.M<T>; var T: Integer; begin end; end.', 1);
+  Expect('a parameter named Result, once at the body',
+    'unit U; interface function F(Result: Integer): Integer; ' +
+    'implementation function F(Result: Integer): Integer; begin end; end.',
+    1);
+  Expect('a method''s parameter named Result, once at the body',
+    'unit U; interface type TC = class function M(Result: Integer): Integer; ' +
+    'end; implementation function TC.M(Result: Integer): Integer; ' +
+    'begin end; end.', 1);
+
+  Expect('silent: the routine''s own name',
+    'unit U; interface type TC = class function M: Integer; end; ' +
+    'implementation function F: Integer; begin var F := 1; Result := F; ' +
+    'end; procedure P; begin var P := 1; if P = 0 then ; end; ' +
+    'function TC.M: Integer; begin var M := 1; Result := M; end; end.', 0);
+  Expect('silent: Result in a procedure and a procedure literal',
+    'unit U; interface implementation uses System.SysUtils; procedure P; ' +
+    'begin var Result := 1; if Result = 0 then ; ' +
+    'var F: TProc := procedure begin var Result := 2; ' +
+    'if Result = 0 then ; end; F(); end; end.', 0);
+  Expect('silent: a global and a field',
+    'unit U; interface type TC = class FG: Integer; procedure M; end; ' +
+    'implementation var G: Integer; procedure P; begin var G := 1; ' +
+    'if G = 0 then ; end; procedure TC.M; begin begin var FG := 1; ' +
+    'if FG = 0 then ; end; end; end.', 0);
+  Expect('silent: an outer routine''s names from a nested one',
+    'unit U; interface implementation procedure P(G: Integer); ' +
+    'var H: Integer; procedure Q; begin var G := 1; var H := G; ' +
+    'if H = 0 then ; end; begin H := 0; Q; end; end.', 0);
+  Expect('silent: an enclosing routine''s inline var in an anonymous method',
+    'unit U; interface implementation uses System.SysUtils; procedure P; ' +
+    'begin var G := 1; var F: TProc := procedure begin var G := 2; ' +
+    'if G = 0 then ; end; F(); if G = 0 then ; end; end.', 0);
+  Expect('silent: a handler variable over a local and an inline var',
+    'unit U; interface implementation procedure P; var E: Integer; ' +
+    'begin E := 0; var G := 1; if (G = 0) and (E = 0) then ; ' +
+    'try except on E: TObject do ; on G: TObject do ; end; end; end.', 0);
+  Expect('silent: the class''s type parameter',
+    'unit U; interface type TG<T> = class procedure M; end; implementation ' +
+    'procedure TG<T>.M; begin var T := 1; if T = 0 then ; end; end.', 0);
+  Expect('silent: Self of a static method, a nested routine, a literal',
+    'unit U; interface type TC = class class procedure S; static; ' +
+    'procedure M; end; implementation uses System.SysUtils; ' +
+    'class procedure TC.S; begin var Self := 1; if Self = 0 then ; end; ' +
+    'procedure TC.M; procedure L; begin var Self := 1; ' +
+    'if Self = 0 then ; end; begin L; var F: TProc := procedure begin ' +
+    'var Self := 2; if Self = 0 then ; end; F(); end; end.', 0);
+  Expect('silent: a bare method header and another overload''s parameter',
+    'unit U; interface type TC = class procedure M(A: Integer); overload; ' +
+    'procedure M; overload; end; implementation procedure TC.M; ' +
+    'var A: Integer; begin A := 0; if A = 0 then ; end; ' +
+    'procedure TC.M(A: Integer); begin end; end.', 0);
+  Expect('silent: a bare header and another overload''s parameter',
+    'unit U; interface procedure G(A: Integer); overload; procedure G; ' +
+    'overload; implementation procedure G; var A: Integer; begin A := 0; ' +
+    'if A = 0 then ; end; procedure G(A: Integer); begin end; end.', 0);
+  Expect('silent: sibling routines and ended blocks',
+    'unit U; interface implementation procedure P; begin begin var G := 1; ' +
+    'if G = 0 then ; end; repeat var H := 1; if H = 0 then ; until True; ' +
+    'var G := 2; var H := G; if H = 0 then ; end; ' +
+    'procedure Q; var G: Integer; begin G := 0; if G = 0 then ; end; end.', 0);
+
+  // Where: a Result parameter at the implementation, not the declaration.
+  Analyze('unit U;'#10'interface'#10'function F(Result: Integer): Integer;'#10 +
+    'implementation'#10'function F(Result: Integer): Integer;'#10'begin'#10 +
+    'end;'#10'end.'#10);
+  var LAt5 := 0;
+  for var LIdx := 0 to High(GModel.Diags) do
+    if (GModel.Diags[LIdx].Code = 'E2004') and
+       (GModel.Diags[LIdx].Line = 5) then
+      Inc(LAt5);
+  Ok('routinename: a Result parameter reports at the implementation',
+    (DiagCount('E2004') = 1) and (LAt5 = 1) and
+    DiagHasText('E2004', '''Result'''));
+  GModel.Free;
+
+  // Result is in the scope before the body now: a body's reference still
+  // binds to it, and nothing else is typed differently.
+  Analyze('unit U; interface implementation function F: Integer; ' +
+    'begin Result := 1; end; end.');
+  var LRes := NthIdentSym('Result', 0);
+  Ok('routinename: Result binds to the implicit Result',
+    (LRes <> NIL_SYM) and (GModel.Symbols[LRes].DeclNode = NIL_NODE) and
+    (Length(GModel.Diags) = 0));
+  GModel.Free;
+
+  // A bare header of an overloaded name completes the overload without
+  // parameters, not the chain's head: G #2 is the second declaration's.
+  Analyze('unit U; interface procedure G(A: Integer); overload; ' +
+    'procedure G; overload; implementation procedure G; begin end; ' +
+    'procedure G(A: Integer); begin end; end.');
+  Ok('routinename: a bare header completes the overload without parameters',
+    (NthIdentSym('G', 0) <> NthIdentSym('G', 1)) and
+    (NthIdentSym('G', 2) = NthIdentSym('G', 1)) and
+    (NthIdentSym('G', 3) = NthIdentSym('G', 0)));
+  GModel.Free;
+end;
+
 begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN32']);
@@ -1972,6 +2187,8 @@ begin
   TestOwnModuleName;
   // 8c. ...and an inline declaration in the module's body no name it holds
   TestModuleBodyNames;
+  // 8d. ...nor one in a routine's body, nor a local
+  TestRoutineBodyNames;
 
   // 9. call fitting no local overload stays untyped (no bogus E2010)
   Analyze(SRC_NOFIT);

@@ -91,15 +91,15 @@ README's own section on that).
   4.2.1 rules (OperatorResultX), literals read exactly - `var X :=
   5000000000 + 1` is an Int64. The Currency rule was probed on Win64 only;
   the other 64-bit targets are assumed to share it.
-- an inline declaration that takes a name its body already holds is E2004
-  (dcc64 37.0), and PasTree reports it only in the module's own body - the
-  initialization section, a program's or library's main block - and in the
-  finalization section's blocks (RedeclaresBodyName). In a routine's body,
-  named or anonymous, nothing reports: `procedure P(G: Integer); begin var G
-  := 1; end;`, an inline var named like a local, `Result` or an enclosing
-  block's inline var all pass without a diagnostic. Nor does any clash see an
-  unscoped enum's values, in a body or out of one - their scope is joined
-  into the enclosing one, and the lookup reads a scope's own names only.
+- an inline declaration or a routine's local that takes a name its body
+  already holds is E2004 (dcc64 37.0), and PasTree reports it
+  (RedeclaresBodyName, RoutineHolds) but for three shapes that pass without
+  a diagnostic: a parameter named Self, one named like the method's own type
+  parameter - dcc reports both once, at the body's begin - and `Self` in a
+  class method, which a static one does not have and only its declaration
+  says which. Nor does any clash see an unscoped enum's values, in a body or
+  out of one - their scope is joined into the enclosing one, and the lookup
+  reads a scope's own names only.
 
 ### 3.2.1 True constants
 - a section-level `const C = Expr` is typed from its initializer in the

@@ -100,6 +100,7 @@ type
     function FindChildKind(ANode: Integer; AKind: TPasNodeKind): Integer;
     function CountImplParamNames(ARoutineNode: Integer): Integer;
     function RoutineParamNameCount(ASym: Integer): Integer;
+    function BareHeaderTarget(AHead: Integer): Integer;
     procedure NodePos(ANode: Integer; out AFileId, ALine, ACol: Integer);
     // collect
     procedure MarkDeclName(ANode, ASym: Integer);
@@ -108,7 +109,10 @@ type
     function RedeclaresOwnName(AScope: Integer; AKind: TSemaSymbolKind;
       ADeclNode: Integer; const AKey: TSemaKey): Boolean;
     function HoldsName(AScope: Integer; const AKey: TSemaKey): Boolean;
+    function RoutineHolds(ARoutine: Integer; const AKey: TSemaKey): Boolean;
     function RedeclaresBodyName(AScope, ADeclNode: Integer;
+      const AKey: TSemaKey): Boolean;
+    function RedeclaresOuterName(AScope: Integer; AKind: TSemaSymbolKind;
       const AKey: TSemaKey): Boolean;
     { AOverloadOnClash chains onto a same-named, same-kind symbol instead of
       reporting a redeclaration - for the one non-routine case that is legal,
@@ -457,6 +461,32 @@ begin
       Inc(Result);
 end;
 
+{ The declaration an implementation header with no parameter list completes
+  (`procedure TFoo.Bar;`, `procedure P;`): the routine AHead heads or - for an
+  overloaded name - its overload without parameters. An overload's
+  implementation repeats its parameter list, so a bare header can mean only
+  that one (dcc64 37.0: a bare header of `M(A: Integer)` beside `M(B:
+  string)` is E2037). The chain's head is merely whichever overload came
+  first, and joining its parameter scope made them the body's: a local named
+  like one was a false E2004 (RoutineHolds), 19 of them in the third-party
+  trees. No overload without parameters leaves the head, as before. }
+function TPasSemaResolver.BareHeaderTarget(AHead: Integer): Integer;
+var
+  LCand: Integer;
+begin
+  Result := AHead;
+  if (AHead = NIL_SYM) or (FModel.Symbols[AHead].NextOverload = NIL_SYM) then
+    Exit;
+  LCand := AHead;
+  while LCand <> NIL_SYM do
+  begin
+    if (FModel.Symbols[LCand].Kind = skRoutine) and
+       (RoutineParamNameCount(LCand) = 0) then
+      Exit(LCand);
+    LCand := FModel.Symbols[LCand].NextOverload;
+  end;
+end;
+
 procedure TPasSemaResolver.NodePos(ANode: Integer;
   out AFileId, ALine, ACol: Integer);
 var
@@ -557,8 +587,9 @@ begin
   Result := BodyScope(AScope) = FImpl;
 end;
 
-{ For RedeclaresBodyName: whether AScope's own names - FindLocal, its joins
-  unread - hold one an inline declaration may not take. Every kind does but
+{ For the clashes beyond a declaration's own scope (RedeclaresBodyName,
+  RoutineHolds): whether AScope's own names - FindLocal, its joins unread -
+  hold one a declaration may not take. Every kind does but
   two: a used unit's name, which a declaration may hide (1.2.1, DeclareSym's
   skUnitRef branch), and a generic type's, whose declared name carries its
   arity - `type G<T> = class end;` and `var G := 1` in the initialization
@@ -588,43 +619,92 @@ begin
   Result := False;
 end;
 
+{ The names a routine's body holds beyond its scope's own (HoldsName), each
+  E2004 for a local or an inline declaration there (dcc64 37.0, probed
+  2026-09-27):
+  - the declaration's parameters and Result, which an implementation header
+    that omits them reaches through the declaration's own parameter scope -
+    CollectRoutine joins it in. The struct's member scope is joined too and
+    is not the body's: a local may hide a field;
+  - Self, in an instance method's implementation - a routine qualified by
+    its struct (StructSym) that is not a class method. A class method's is
+    not modelled: a static one has none, and only its declaration says so;
+  - the method's own type parameters, not its class's: `procedure TC.M<T>;
+    begin var T := 1; end;` is E2004, the same in `procedure TG<T>.M;`
+    compiles. The two share the scope CollectRoutine opens between the
+    routine and its parent, and a parameter's nkGenericParams tells them
+    apart - the method's own is followed by no other name segment. }
+function TPasSemaResolver.RoutineHolds(ARoutine: Integer;
+  const AKey: TSemaKey): Boolean;
+var
+  LAdd: TArray<Integer>;
+  LIdx, LGen, LSym, LParams, LNext: Integer;
+begin
+  LAdd := FModel.Scopes[ARoutine].Additional;
+  for LIdx := 0 to High(LAdd) do
+    if (FModel.Scopes[LAdd[LIdx]].Kind = sckRoutine) and
+       HoldsName(LAdd[LIdx], AKey) then
+      Exit(True);
+  if (FModel.Scopes[ARoutine].StructSym <> NIL_SYM) and
+     (FTree.Nodes[FModel.Scopes[ARoutine].OwnerNode].Aux <> 1) and
+     SemaKeyEquals('self', AKey) then
+    Exit(True);
+  LGen := FModel.Scopes[ARoutine].Parent;
+  if (LGen <> NIL_SCOPE) and (FModel.Scopes[LGen].Kind = sckGenericParams) and
+     (FModel.Scopes[LGen].OwnerNode = FModel.Scopes[ARoutine].OwnerNode) then
+  begin
+    LSym := FModel.FindLocal(LGen, AKey);
+    if (LSym <> NIL_SYM) and (FModel.Symbols[LSym].Kind = skGenericParam) then
+    begin
+      // ident -> nkGenericParam -> nkGenericParams
+      LParams := FTree.Nodes[FTree.Nodes[FModel.Symbols[LSym].DeclNode]
+        .Parent].Parent;
+      LNext := NextSib(LParams);
+      Exit((LNext = NIL_NODE) or not IsDeclName(LNext));
+    end;
+  end;
+  Result := False;
+end;
+
 { 3.1.3: an inline var, const or `for var` counter may not take a name its
   body already holds - dcc64 37.0 reports E2004 (probed 2026-09-27) where the
-  block rule alone would let it hide the outer name. The module's own body -
-  the initialization section, the legacy `begin` form too, and a program's or
-  library's main block - holds, at any block depth:
-  - the names of its enclosing blocks: an inline declaration above, a `for
-    var` counter, an `on E: T do` variable;
-  - every name of the module, the interface's and the implementation's - the
-    initialization section's top-level inline declarations among them, which
-    share the implementation scope (CollectRoot).
+  block rule alone would let it hide the outer name. At any block depth a
+  body holds the names of its enclosing blocks - an inline declaration above,
+  a `for var` counter, an `on E: T do` variable - and the names of its owner:
+  - a routine's body, named or anonymous: the routine scope's own names -
+    parameters, locals, nested routines, labels, a function's Result - and
+    those RoutineHolds adds;
+  - the module's own body - the initialization section, the legacy `begin`
+    form too, and a program's or library's main block: every name of the
+    module, the interface's and the implementation's - the initialization
+    section's top-level inline declarations among them, which share the
+    implementation scope (CollectRoot).
   The finalization section is a body of its own: only its enclosing blocks
   count there, so its inline vars may take any module-level name, the
   initialization's included.
 
   Silent, because each compiles: a used unit's name and a generic type's
   (HoldsName), a name of an earlier sibling block - out of scope, and never
-  on the walk up - and an anonymous method's parameters and locals, a body of
-  their own.
-
-  dcc holds a routine's body to the same rule against its parameters, its
-  locals and its enclosing blocks (`procedure P(G: Integer); begin var G :=
-  1; end;` is E2004 too). That half is not modelled: BodyScope stops at the
-  routine, and nothing reports.
+  on the walk up - and anything of an enclosing body: a routine's inline var
+  may hide a global or a field, a nested routine's or an anonymous method's
+  its outer routine's names, a routine's own name its body's declarations.
 
   DeclareSym asks only once the declaring scope itself had no clash, so a
   declaration reports one E2004. }
 function TPasSemaResolver.RedeclaresBodyName(AScope, ADeclNode: Integer;
   const AKey: TSemaKey): Boolean;
 var
-  LDecl, LScope: Integer;
+  LDecl, LBody, LScope: Integer;
 begin
   LDecl := FTree.Nodes[ADeclNode].Parent;
   if (LDecl = NIL_NODE) or
-     not (KindOf(LDecl) in [nkInlineVar, nkInlineConst]) or
-     (BodyScope(AScope) <> FImpl) then
+     not (KindOf(LDecl) in [nkInlineVar, nkInlineConst]) then
     Exit(False);
-  // The enclosing blocks, up to the implementation scope.
+  LBody := BodyScope(AScope);
+  if (LBody = NIL_SCOPE) or ((LBody <> FImpl) and
+     (FModel.Scopes[LBody].Kind <> sckRoutine)) then
+    Exit(False);
+  // The enclosing blocks, up to the body's owner.
   LScope := AScope;
   while FModel.Scopes[LScope].Kind = sckBlock do
   begin
@@ -632,10 +712,29 @@ begin
     if (FModel.Scopes[LScope].Kind = sckBlock) and HoldsName(LScope, AKey) then
       Exit(True);
   end;
+  if LBody <> FImpl then
+    // A routine's body block always opens a scope of its own for an inline
+    // declaration (DeclaresInOwnScope), so AScope is never LBody itself.
+    Exit(HoldsName(LBody, AKey) or RoutineHolds(LBody, AKey));
   if FInFinalization then
     Exit(False);
   Result := ((AScope <> FImpl) and HoldsName(FImpl, AKey)) or
     HoldsName(FIntf, AKey);
+end;
+
+{ A declaration its own scope has no clash for, but that takes a name dcc64
+  37.0 counts there all the same (probed 2026-09-27): in a routine's scope, a
+  local - var, const, type, label, nested routine - named like one of those
+  RoutineHolds lists. `procedure TC.M; var G: Integer;` completing a declared
+  `procedure M(G: Integer);` is E2004, and so are `var Self` in a method and
+  `var T` in `procedure TC.M<T>;`. A parameter is left out: a parameter named
+  Self or like the method's own type parameter is E2004 too, reported once at
+  the body's begin, and that is not modelled. }
+function TPasSemaResolver.RedeclaresOuterName(AScope: Integer;
+  AKind: TSemaSymbolKind; const AKey: TSemaKey): Boolean;
+begin
+  Result := (AKind <> skParam) and
+    (FModel.Scopes[AScope].Kind = sckRoutine) and RoutineHolds(AScope, AKey);
 end;
 
 function TPasSemaResolver.DeclareSym(AScope: Integer; AKind: TSemaSymbolKind;
@@ -659,9 +758,10 @@ begin
   if LExisting = NIL_SYM then
   begin
     FModel.BindName(AScope, Result);
-    // No clash in its own scope, but an inline declaration in the module's
-    // body can clash beyond it.
-    if not LOwnName and RedeclaresBodyName(AScope, ADeclNode, LKey) then
+    // No clash in its own scope, but one beyond it: an inline declaration
+    // against its body, a routine's local against its implicit names.
+    if not LOwnName and (RedeclaresBodyName(AScope, ADeclNode, LKey) or
+       RedeclaresOuterName(AScope, AKind, LKey)) then
       ReportRedeclared(ADeclNode);
   end
   else if (FModel.RoutineHead(Result) = rhOperator) <>
@@ -1529,16 +1629,15 @@ begin
     // `(Index: Integer)` but implements bodilessly as `ToggleClickCheck;`,
     // using `Index` freely in its body). Mirrors the SAME idiom the
     // unqualified branch below already honors for global routines - find
-    // the class's own declared method (by name; an overloaded name is left
-    // alone, the same simplification the global-routine path already makes
-    // for LIntfHead) and join ITS param scope in, exactly like the struct's
-    // member scope is joined above.
+    // the class's own declared method (by name; for an overloaded name the
+    // overload without parameters, BareHeaderTarget) and join ITS param scope
+    // in, exactly like the struct's member scope is joined above.
     if (LTy <> NIL_SYM) and (LNameNode <> NIL_NODE) and
        (FModel.Symbols[LTy].MemberScope <> NIL_SCOPE) and
        (FindChildKind(ANode, nkParams) = NIL_NODE) then
     begin
-      var LDeclSym := FModel.FindLocal(FModel.Symbols[LTy].MemberScope,
-        NodeKey(LNameNode));
+      var LDeclSym := BareHeaderTarget(FModel.FindLocal(
+        FModel.Symbols[LTy].MemberScope, NodeKey(LNameNode)));
       if (LDeclSym <> NIL_SYM) and
          (FModel.Symbols[LDeclSym].Kind = skRoutine) and
          (FModel.Symbols[LDeclSym].MemberScope <> NIL_SCOPE) then
@@ -1562,7 +1661,7 @@ begin
       begin
         var LImplPC := CountImplParamNames(ANode);
         if LImplPC < 0 then
-          LLink := LIntfHead                    // params omitted -> completion
+          LLink := BareHeaderTarget(LIntfHead)  // params omitted -> completion
         else
         begin
           var LCand := LIntfHead;               // match the overload by arity
@@ -1623,12 +1722,34 @@ begin
       nkGenericParams, nkRoutineBody, nkDirective, nkAttrGroup:
         Collect(LChild, LRoutine);
     else
+      if LResultNode <> NIL_NODE then
+        Collect(LChild, LRoutine)
+      else
       begin
         // First non-directive/body/generics child after params is the result
         // type (function). Record it for result-type binding.
-        if LResultNode = NIL_NODE then
-          LResultNode := LChild;
+        LResultNode := LChild;
         Collect(LChild, LRoutine);
+        // Functions get the implicit `Result` variable, declared LOCALLY so
+        // it shadows any same-named member of the enclosing class (real dcc
+        // behavior - e.g. TMatch in System.RegularExpressions has a METHOD
+        // named Result, yet `Result := ...` inside its other methods still
+        // means the function result). Declared here, before the body: a
+        // local or an inline var named Result is E2004 (dcc64 37.0), which
+        // DeclareSym reports only against a Result already in the scope. A
+        // parameter named Result is E2004 as well - once, at a body's begin,
+        // where dcc declares Result - so a bodiless declaration stays silent.
+        var LRes := FModel.FindLocal(LRoutine, 'result');
+        if LRes = NIL_SYM then
+        begin
+          LRes := FModel.AddSymbol(LRoutine, skVar, 'Result', NIL_NODE,
+            'result');
+          FModel.Symbols[LRes].TypeNode := LResultNode;
+          FModel.BindName(LRoutine, LRes);
+        end
+        else if (FModel.Symbols[LRes].Kind = skParam) and
+                (FindChildKind(ANode, nkRoutineBody) <> NIL_NODE) then
+          ReportRedeclared(FModel.Symbols[LRes].DeclNode);
       end;
     end;
     LChild := NextSib(LChild);
@@ -1636,19 +1757,6 @@ begin
 
   if (LRoutineSym <> NIL_SYM) and (LResultNode <> NIL_NODE) then
     FModel.Symbols[LRoutineSym].TypeNode := LResultNode;
-
-  // Functions get the implicit `Result` variable, declared LOCALLY so it
-  // shadows any same-named member of the enclosing class (real dcc behavior -
-  // e.g. TMatch in System.RegularExpressions has a METHOD named Result, yet
-  // `Result := ...` inside its other methods still means the function result).
-  if (LResultNode <> NIL_NODE) and
-     (FModel.FindLocal(LRoutine, 'result') = NIL_SYM) then
-  begin
-    var LRes := FModel.AddSymbol(LRoutine, skVar, 'Result', NIL_NODE,
-      'result');
-    FModel.Symbols[LRes].TypeNode := LResultNode;
-    FModel.BindName(LRoutine, LRes);
-  end;
 end;
 
 { Would Collect declare anything into a scope ANode (a block, a for, an
