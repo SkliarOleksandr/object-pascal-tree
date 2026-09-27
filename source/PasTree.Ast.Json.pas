@@ -92,6 +92,10 @@ var
     // dump prints `#strict` for it, while JSON made the two byte-identical.
     if nfNegated in ATree.Nodes[AIndex].Flags then
       LSB.Append(',"negated":true');
+    // Part of a declared name (see nfName): without it `P, T: C` and
+    // `P: T = C` serialize alike, as the dump's `#name` says.
+    if nfName in ATree.Nodes[AIndex].Flags then
+      LSB.Append(',"name":true');
     if ATree.Nodes[AIndex].Aux <> NIL_NODE then
       if not (LKind in [nkUnaryOp, nkBinaryOp]) then
         LSB.AppendFormat(',"aux":%d', [ATree.Nodes[AIndex].Aux]);

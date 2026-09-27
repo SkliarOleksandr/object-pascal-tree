@@ -18,7 +18,9 @@ unit PasTree.Ast.Check;
     silenced: an orphan of any other shape is a violation.
   - I4 the root's span covers the whole visible stream.
   - I6 Aux and Flags inside each kind's domain; an operator's Aux is its own
-    operator token, standing between its operands.
+    operator token, standing between its operands; the names a declaration
+    marks (nfName) open its child list and, in valid code, agree with the
+    separators between and after them (CheckNames).
   - I8, for valid code only: no nkError, and no nkMissing but the one closing
     a trailing comma, `F(A, B,)`.
   - I7 compares two trees of one source: two parses must build the same
@@ -133,9 +135,6 @@ type
   // A rule that applies only while its condition holds (`when:` in the table).
   TPasOwnCond = (
     wcNone,
-    wcAmbiguous,    // a node whose name list's end the children cannot tell
-                    // (plan finding F19): a var or a parameter declaration,
-                    // an inline var, a routine header - see NamesAmbiguous
     wcNoArgs,       // an attribute with no argument child
     wcAfterEnd,     // the token after the final `end.` (csAfterEnd)
     wcOrphanInit    // a token of the initializer a trailing directive drops
@@ -300,8 +299,8 @@ const
            and library) and @any.
     Flags  `-`, or any of: head (only the token at the node's FirstToken),
            once / opt (the node owns exactly one / at most one token of the
-           rule; default: any number), when:<condition> (ambiguous, noargs,
-           afterend, orphaninit - see TPasOwnCond). A rule with a condition
+           rule; default: any number), when:<condition> (noargs, afterend,
+           orphaninit - see TPasOwnCond). A rule with a condition
            takes no count: its tokens count for the rule that covers them
            when the condition does not hold.
     Class  derived | leaf | contract | insig | loss:F<n> - see TPasOwnClass.
@@ -320,9 +319,10 @@ const
     threadvar, F10 directives before a routine header's `;`, F11 before an
     anonymous method's body, F12 a routine's deprecated message, F13 the
     external clause, F14 the exports clause, F15 the GUID literal, F16
-    numeric labels, F17 program parameters, F18 parameter modes, F19 where a
-    name list ends. }
-  OWN_RULE_TEXT: array[0..246] of string = (
+    numeric labels, F17 program parameters, F18 parameter modes. (F19, where
+    a name list ends, is derived since the names carry nfName - I6 checks the
+    flag against the separators.) }
+  OWN_RULE_TEXT: array[0..242] of string = (
     // ---- leaves: the token is the node's own text ----
     'Ident | <ident> @words @keywords | once | leaf | the name as written; ' +
       'a reserved word only after a dot, as an operator name or as the ' +
@@ -429,15 +429,13 @@ const
     'AsmStmt | @any | - | contract | opaque by design (6.10): printed from ' +
       'its own token range',
     'InlineVar | var | head once | derived | the kind',
-    'InlineVar | , : := | when:ambiguous | loss:F19 | where the names end ' +
-      'and whether a type or a value follows: `var X: K` and `var X := K`, ' +
-      '`var X, Y: K` and `var X: Y := K` build the same children',
-    'InlineVar | , | - | derived | between the names',
-    'InlineVar | : | opt | derived | before the type',
-    'InlineVar | := | opt | derived | before the initializer',
+    'InlineVar | , | - | derived | between the names (nfName)',
+    'InlineVar | : | opt | derived | before the type: a child after the ' +
+      'names that is not the initializer',
+    'InlineVar | := | opt | derived | before the initializer (Aux 1)',
     'InlineConst | const | head once | derived | the kind',
-    'InlineConst | : | opt | derived | three children: the type',
-    'InlineConst | = | once | derived | the kind',
+    'InlineConst | : | opt | derived | two children after the name: the type',
+    'InlineConst | = | once | derived | the kind: before the value (Aux 1)',
 
     // ---- compilation units ----
     'Unit | unit | head once | derived | the kind',
@@ -513,10 +511,8 @@ const
     'ConstDecl | = | once | derived | the kind',
     'ConstDecl | ; @routine | - | loss:F2 | the typed-constant twin, ' +
       '`C: procedure; cdecl = nil;`, skips `; cdecl`',
-    'VarDecl | , : = | when:ambiguous | loss:F19 | whether the last child ' +
-      'is an initializer: `P, T: C` and `P: T = C` build the same children',
-    'VarDecl | , | - | derived | between the names',
-    'VarDecl | : | once | derived | the kind',
+    'VarDecl | , | - | derived | between the names (nfName)',
+    'VarDecl | : | once | derived | the kind: after the names',
     'VarDecl | = | opt | derived | before the initializer',
     'VarDecl | absolute | opt | derived | Aux 1',
     'Aggregate | ( | head once | derived | the kind',
@@ -602,11 +598,7 @@ const
     'Routine | procedure function constructor destructor operator | head ' +
       'once | contract | the head word; a `class` before it is the ' +
       'parent''s token (Aux 1)',
-    'Routine | . : | when:ambiguous | loss:F19 | a function with no ' +
-      'parameter list where methods are implemented: a result type named by ' +
-      'a plain identifier reads as one more name segment, `function A.B;` ' +
-      'and `function A: B;` build the same children',
-    'Routine | . | - | derived | between the name segments',
+    'Routine | . | - | derived | between the name segments (nfName)',
     'Routine | : | opt | derived | before the result type',
     'Routine | ; | - | derived | after the header, each directive and the ' +
       'body; the last directive''s may be missing (normalization list)',
@@ -616,11 +608,8 @@ const
       'property',
     'Params | ) ] | once | derived | closes the list',
     'Params | ; | - | derived | between the parameters',
-    'Param | , : = | when:ambiguous | loss:F19 | where the names end: a var, ' +
-      'const or out parameter may be untyped, `(const A, B)` and `(const A: ' +
-      'B)`, and `(A, T: X)` and `(A: T = X)` build the same children',
-    'Param | , | - | derived | between the names',
-    'Param | : | opt | derived | before the type',
+    'Param | , | - | derived | between the names (nfName)',
+    'Param | : | opt | derived | before the type: a child after the names',
     'Param | = | opt | derived | before the default value',
     'Param | const var | opt | loss:F18 | the mode has no mark; only out has ' +
       'one, in Aux (coverage.md 6.2)',
@@ -974,8 +963,6 @@ begin
           LRule.Mult := omOnce
         else if LField = 'opt' then
           LRule.Mult := omOpt
-        else if LField = 'when:ambiguous' then
-          LRule.Cond := wcAmbiguous
         else if LField = 'when:noargs' then
           LRule.Cond := wcNoArgs
         else if LField = 'when:afterend' then
@@ -1127,7 +1114,7 @@ begin
       Result := (AAux = NIL_NODE) or (AAux = 1) or (AAux = 2);
     nkTypeDecl, nkClassType, nkRecordType, nkObjectType, nkHelperType,
     nkClassOf, nkArrayType, nkRoutine, nkMethodResolution, nkPropertyDecl,
-    nkVarDecl, nkVarSec, nkForStmt, nkUsesClause:
+    nkVarDecl, nkVarSec, nkForStmt, nkUsesClause, nkInlineVar, nkInlineConst:
       Result := (AAux = NIL_NODE) or (AAux = 1);
   else
     Result := AAux = NIL_NODE;
@@ -1542,128 +1529,10 @@ var
     Inc(AReport.OrphanCount);
   end;
 
-  // F19: can ANode's children alone not tell where its names end? Count the
-  // readings that fit the same children - K the children but the attribute
-  // groups and hints, R the leading run of nkIdent in K, T the children
-  // after it (a type or a value, never a name). An initializer or a default
-  // allows a single name (dcc: E2196, E2237); only a var, const or out
-  // parameter may be untyped; the first child after the run, C, can be a
-  // type as well as a value when it is a qualified name or a generic
-  // instantiation. Two readings or more:
-  // - var: T = 0 and R = 3, `P, T: C` / `P: T = C`; T = 1, R = 2 and C dual;
-  // - parameter: T = 0 and R = 3, `(A, T: X)` / `(A: T = X)`; T = 0, R >= 2
-  //   and a mode, `(const A, B)` / `(const A: B)`; T = 1, R = 2, C dual;
-  // - inline var: T = 0 and R = 2, `var X: K` / `var X := K`; T = 0 and
-  //   R = 3, `var X, Y: K` / `var X: Y := K`; T = 1, R <= 2 and C dual;
-  // - routine: a `function` (its head word, a contract read: no other
-  //   routine has a result) with no parameter list where a method may be
-  //   implemented - an implementation section, a program or a library - the
-  //   leading run of name segments ending on a plain identifier and holding
-  //   two, and no type after it - `function A.B;` / `function A: B;`.
-  function NamesAmbiguous(ANode: Integer): Boolean;
-  const
-    METHOD_HOMES = [nkImplementationSec, nkProgram, nkLibrary];
-    DUAL_KINDS = [nkMember, nkTypeArgs];
-  var
-    LKid, LIdx, LTok, LRun, LAfter, LIdents: Integer;
-    LFirstAfter: TPasNodeKind;
-    LInRun, LLastIdent: Boolean;
-
-    // A var, const or out mode: out is marked (Aux); var and const are the
-    // first token after the leading attribute groups.
-    function HasMode: Boolean;
-    var
-      LAt, LNum: Integer;
-    begin
-      if ATree.Nodes[ANode].Aux >= 0 then
-        Exit(True);
-      LTok := LLo[ANode];
-      LAt := ATree.Nodes[ANode].FirstChild;
-      for LNum := 1 to LKidCount[ANode] do
-      begin
-        if (Kind(LAt) <> nkAttrGroup) or LEmpty[LAt] or (LLo[LAt] <> LTok) then
-          Break;
-        LTok := LHi[LAt] + 1;
-        LAt := ATree.Nodes[LAt].NextSibling;
-      end;
-      Result := TokKind(LTok) in [tkVar, tkConst];
-    end;
-
-  begin
-    Result := False;
-    LRun := 0;
-    LAfter := 0;
-    LIdents := 0;
-    LInRun := True;
-    LLastIdent := False;
-    LFirstAfter := nkError;
-    LKid := ATree.Nodes[ANode].FirstChild;
-    if Kind(ANode) = nkRoutine then
-    begin
-      if (TokKind(ATree.Nodes[ANode].FirstToken) <> tkFunction) or
-         not LinkOk(ATree.Nodes[ANode].Parent) or
-         not (Kind(ATree.Nodes[ANode].Parent) in METHOD_HOMES) then
-        Exit;
-      for LIdx := 1 to LKidCount[ANode] do
-      begin
-        case Kind(LKid) of
-          nkParams:
-            Exit;
-          nkIdent, nkGenericParams:
-            if LInRun then
-            begin
-              LLastIdent := Kind(LKid) = nkIdent;
-              if LLastIdent then
-                Inc(LIdents);
-            end;
-        else
-          if LInRun then
-          begin
-            LInRun := False;
-            LFirstAfter := Kind(LKid);
-          end;
-        end;
-        LKid := ATree.Nodes[LKid].NextSibling;
-      end;
-      Exit(LLastIdent and (LIdents >= 2) and
-        (LInRun or (LFirstAfter in [nkDirective, nkRoutineBody])));
-    end;
-    for LIdx := 1 to LKidCount[ANode] do
-    begin
-      if not (Kind(LKid) in [nkAttrGroup, nkDirective]) then
-        if LInRun and (Kind(LKid) = nkIdent) then
-          Inc(LRun)
-        else
-        begin
-          if LInRun then
-            LFirstAfter := Kind(LKid);
-          LInRun := False;
-          Inc(LAfter);
-        end;
-      LKid := ATree.Nodes[LKid].NextSibling;
-    end;
-    case Kind(ANode) of
-      nkVarDecl:
-        // absolute (Aux 1): the last child is the alias, the one before it
-        // the type.
-        Result := (ATree.Nodes[ANode].Aux <> 1) and
-          (((LAfter = 0) and (LRun = 3)) or
-           ((LAfter = 1) and (LRun = 2) and (LFirstAfter in DUAL_KINDS)));
-      nkParam:
-        Result := ((LAfter = 0) and ((LRun = 3) or ((LRun >= 2) and HasMode)))
-          or ((LAfter = 1) and (LRun = 2) and (LFirstAfter in DUAL_KINDS));
-      nkInlineVar:
-        Result := ((LAfter = 0) and (LRun in [2, 3])) or
-          ((LAfter = 1) and (LRun <= 2) and (LFirstAfter in DUAL_KINDS));
-    end;
-  end;
-
   // I5: does a rule's node-level condition hold for ANode?
   function CondHolds(ACond: TPasOwnCond; ANode: Integer): Boolean;
   begin
     case ACond of
-      wcAmbiguous:
-        Result := NamesAmbiguous(ANode);
       wcNoArgs:
         Result := LKidCount[ANode] <= 1;
     else
@@ -1909,6 +1778,162 @@ var
     end;
   end;
 
+  // I6 for the names of a declaration (nfName, the plan's F19). The flag sits
+  // only on an nkIdent child of a kind whose names it marks; the marked
+  // children open the child list - attribute groups may stand before and
+  // between them, a routine's generic parameters after their segment - and
+  // nothing after the first other child is marked. In valid code each name
+  // agrees with the token after it: the list separator (`,`, or `.` in a
+  // routine's name) after every name but the last, and after the last the
+  // token that opens what follows - `:` before a type or a result type, `:=`
+  // or `=` before an inline initializer, `(` before the parameters, `=`
+  // before a method resolution's target. An inline var's or const's Aux 1
+  // stands on its initializer: the last child, after `:=` or `=`. Every
+  // consumer read these separators before the flag existed, so a clean run
+  // over a corpus says the flag tells them what the tokens did.
+  procedure CheckNames(ANode: Integer);
+  const
+    NAME_KINDS = [nkVarDecl, nkParam, nkInlineVar, nkInlineConst, nkRoutine,
+      nkMethodResolution];
+  var
+    LKid, LIdx, LNames, LSegEnd, LTail, LNext, LLastTail: Integer;
+    LOpen, LRoutine, LHasInit: Boolean;
+    LListSep, LAfter: TPasTokenKind;
+
+    procedure Say(const AMsg: string);
+    begin
+      AReport.Add(ccFlags, ANode, Site(ANode), KName(ANode) + ' ' + AMsg);
+    end;
+
+    function TokName(AVis: Integer): string;
+    begin
+      if (AVis < 0) or (AVis > LLastVis) then
+        Result := 'nothing'
+      else
+        Result := '`' + OwnTokenCellName(OwnTokenCell(ATree.Source, AVis)) +
+          '`';
+    end;
+
+    // After the last name, AWant is due.
+    procedure Due(AWant: TPasTokenKind; const AWhat: string);
+    begin
+      if LAfter <> AWant then
+        Say(Format('has %s after its last name, where `%s` is due (%s)',
+          [TokName(LSegEnd + 1), OwnTokenCellName(Ord(AWant)), AWhat]));
+    end;
+
+  begin
+    if nfName in ATree.Nodes[ANode].Flags then
+      // nkMissing: a routine's name cut short after a dot (invalid code).
+      if not (Kind(ANode) in [nkIdent, nkMissing]) then
+        Say('carries nfName')
+      else if not LinkOk(ATree.Nodes[ANode].Parent) or
+              not (Kind(ATree.Nodes[ANode].Parent) in NAME_KINDS) then
+        Say('carries nfName outside a declaration whose names it marks');
+    if not (Kind(ANode) in NAME_KINDS) or LBadTok[ANode] then
+      Exit;
+    LRoutine := Kind(ANode) in [nkRoutine, nkMethodResolution];
+    if LRoutine then
+      LListSep := tkDot
+    else
+      LListSep := tkComma;
+    LNames := 0;
+    LSegEnd := -1;         // the name so far ends here, a routine segment's
+                           // generic parameters included
+    LTail := 0;            // children after the names, but attribute groups
+                           // and hints
+    LNext := NIL_NODE;     // the first child after the names
+    LLastTail := NIL_NODE;
+    LOpen := True;
+    LKid := ATree.Nodes[ANode].FirstChild;
+    for LIdx := 1 to LKidCount[ANode] do
+    begin
+      if nfName in ATree.Nodes[LKid].Flags then
+      begin
+        if not LOpen then
+          Say('has a name marked after what follows its names')
+        else if AValid and (LNames > 0) and
+                (TokKind(LSegEnd + 1) <> LListSep) then
+          Say(Format('has %s between two names, where `%s` is due',
+            [TokName(LSegEnd + 1), OwnTokenCellName(Ord(LListSep))]));
+        Inc(LNames);
+        LSegEnd := LHi[LKid];
+      end
+      else if LOpen and ((Kind(LKid) = nkAttrGroup) or (LRoutine and
+              (LNames > 0) and (Kind(LKid) = nkGenericParams))) then
+      begin
+        if Kind(LKid) = nkGenericParams then
+          LSegEnd := LHi[LKid];
+      end
+      else
+      begin
+        if LOpen then
+          LNext := LKid;
+        LOpen := False;
+        if not (Kind(LKid) in [nkAttrGroup, nkDirective]) then
+        begin
+          Inc(LTail);
+          LLastTail := LKid;
+        end;
+      end;
+      LKid := ATree.Nodes[LKid].NextSibling;
+    end;
+    if not AValid then
+      Exit;
+    if LNames = 0 then
+    begin
+      Say('has no name marked');
+      Exit;
+    end;
+    LAfter := TokKind(LSegEnd + 1);
+    if LAfter = LListSep then
+      Say(Format('has %s after its last marked name: a name is not marked',
+        [TokName(LSegEnd + 1)]));
+    case Kind(ANode) of
+      nkVarDecl:
+        Due(tkColon, 'the type');
+      nkParam:
+        if LTail > 0 then
+          Due(tkColon, 'the type')
+        else if not (LAfter in [tkSemicolon, tkRParen, tkRBracket]) then
+          Say(Format('is untyped, but %s follows its last name',
+            [TokName(LSegEnd + 1)]));
+      nkInlineVar, nkInlineConst:
+        begin
+          // Agreement with the tokens, not completeness: the parser takes
+          // `var X, Y;` with neither a type nor an initializer as it is.
+          LHasInit := ATree.Nodes[ANode].Aux = 1;
+          if LHasInit and ((LLastTail = NIL_NODE) or LEmpty[LLastTail] or
+             not (TokKind(LLo[LLastTail] - 1) in [tkAssign, tkEqual])) then
+            Say('has Aux 1, but its last child is no initializer')
+          else if LTail - Ord(LHasInit) > 1 then
+            Say(Format('has %d children after its names', [LTail]))
+          else if LTail - Ord(LHasInit) = 1 then
+            Due(tkColon, 'the type')
+          else if LHasInit then
+            Due(TokKind(LLo[LLastTail] - 1), 'the initializer')
+          else if (LAfter = tkColon) or ((LAfter in [tkAssign, tkEqual]) and
+             not (LinkOk(ATree.Nodes[ANode].Parent) and
+             (Kind(ATree.Nodes[ANode].Parent) = nkForStmt))) then
+            // Neither a type nor an initializer, where the token after the
+            // names opens one - but a for loop's own `:=` after its counter.
+            Say(Format('has neither a type nor an initializer, but %s ' +
+              'follows its names', [TokName(LSegEnd + 1)]));
+        end;
+      nkMethodResolution:
+        Due(tkEqual, 'the implementing method');
+      nkRoutine:
+        if (LNext <> NIL_NODE) and (Kind(LNext) = nkParams) then
+          Due(tkLParen, 'the parameters')
+        else if (LNext <> NIL_NODE) and
+                not (Kind(LNext) in [nkDirective, nkRoutineBody]) then
+          Due(tkColon, 'the result type')
+        else if LAfter in [tkColon, tkLParen, tkLess] then
+          Say(Format('has %s after its name, but nothing it would open',
+            [TokName(LSegEnd + 1)]));
+    end;
+  end;
+
   // I8's nkMissing test, and the shape it recognises.
   procedure CheckMissing(ANode: Integer);
   var
@@ -2065,6 +2090,7 @@ begin
   begin
     LNode := LOrder[LPos];
     CheckAux(LNode);
+    CheckNames(LNode);
     case Kind(LNode) of
       nkError:
         if AValid then

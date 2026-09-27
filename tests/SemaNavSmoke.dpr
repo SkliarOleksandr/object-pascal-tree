@@ -3594,8 +3594,9 @@ begin
       Ok('qual: FindReferences Bar with its implementation header',
         (Length(LHits) = 2) and HasHitAt(LHits, 'NavQual.pas', 23, 17) and
         HasHitAt(LHits, 'NavQualUse.pas', 10, 5));
-      // Demoted, as a real group's units are: the headers are told apart by
-      // their text, which has to come back for them.
+      // Demoted, as a real group's units are: the headers' segments are told
+      // apart by their nfName flags, which a demoted model keeps; the text
+      // comes back for the edits' positions and snippets.
       GProj.DemoteText([]);
       Ok('qual: PlanRename TQFoo on a demoted model - still seven edits',
         GNav.PlanRename(LFooMid, LFooSym, 'TQWide', {out} LEdits,

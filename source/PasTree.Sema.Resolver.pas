@@ -84,6 +84,9 @@ type
     function EnumJoinTarget(AScope: Integer): Integer;
     procedure NotePendingAggregate(ATypeNode: Integer);
     function SepKindAfter(ANode: Integer): TPasTokenKind;
+    // Part of a declared name (nfName): a name of a var, field, parameter or
+    // inline var list, a segment of a routine's name - not its type.
+    function IsDeclName(ANode: Integer): Boolean; inline;
     function QualifiedNameText(ANode: Integer): string;
     procedure CollectRoot(ARoot: Integer);
     function FindChildKind(ANode: Integer; AKind: TPasNodeKind): Integer;
@@ -372,6 +375,11 @@ begin
     Result := tkUnknown;
 end;
 
+function TPasSemaResolver.IsDeclName(ANode: Integer): Boolean;
+begin
+  Result := nfName in FTree.Nodes[ANode].Flags;
+end;
+
 function TPasSemaResolver.FindChildKind(ANode: Integer;
   AKind: TPasNodeKind): Integer;
 begin
@@ -399,18 +407,15 @@ begin
   begin
     if KindOf(LParam) = nkParam then
     begin
+      // The names carry nfName; the type after them does not.
       LChild := SkipAttr(FirstChild(LParam));
-      while (LChild <> NIL_NODE) and (KindOf(LChild) = nkIdent) do
+      while (LChild <> NIL_NODE) and IsDeclName(LChild) do
       begin
         Inc(Result);
-        if SepKindAfter(LChild) = tkColon then
-          Break;                       // last name; the type follows
         // SkipAttr: an attribute group can sit mid-list (see
         // DeclareNamesAndType), and undercounting names here mismatches an
         // implementation against the wrong interface overload.
-        LChild := SkipAttr(NextSib(LChild));   // ',' -> next name
-        if (LChild <> NIL_NODE) and (KindOf(LChild) <> nkIdent) then
-          Break;
+        LChild := SkipAttr(NextSib(LChild));
       end;
     end;
     LParam := NextSib(LParam);
@@ -535,12 +540,10 @@ procedure TPasSemaResolver.DeclareNamesAndType(ADecl, AScope: Integer;
   AKind: TSemaSymbolKind);
 var
   LChild, LType: Integer;
-  LSep: TPasTokenKind;
   LSmall: array[0..7] of Integer;
   LSyms: TArray<Integer>;
   LSym: Integer;
   LCount: Integer;
-  LDone: Boolean;
   LIdx: Integer;
 begin
   // Attribute groups are VISITED, not just skipped - the exact bug class
@@ -560,10 +563,9 @@ begin
   // 1.4M allocations over the client closure, for groups of one or two.
   LSyms := nil;
   LCount := 0;
-  LDone := False;
-  while (LChild <> NIL_NODE) and (KindOf(LChild) = nkIdent) and not LDone do
+  // The names carry nfName (PasTree.Ast); what follows them does not.
+  while (LChild <> NIL_NODE) and IsDeclName(LChild) do
   begin
-    LSep := SepKindAfter(LChild);
     LSym := DeclareSym(AScope, AKind, LChild);
     if LCount < Length(LSmall) then
       LSmall[LCount] := LSym
@@ -579,27 +581,22 @@ begin
       LSyms[LCount] := LSym;
     end;
     Inc(LCount);
-    if LSep = tkColon then
+    // Step over - and VISIT - any attribute group sitting MID-LIST:
+    // `const [Ref] CLSID, [Ref] IID: TGUID` is a shape the parser emits for
+    // a real RTL unit, and stopping there left every later name in the
+    // group undeclared AND the whole group untyped (LType stays NIL_NODE).
+    LChild := NextSib(LChild);
+    while (LChild <> NIL_NODE) and (KindOf(LChild) = nkAttrGroup) do
     begin
-      LType := NextSib(LChild);
-      LDone := True;
-    end
-    else if LSep = tkComma then
-    begin
-      // Step over - and VISIT - any attribute group sitting MID-LIST:
-      // `const [Ref] CLSID, [Ref] IID: TGUID` is a shape the parser emits for
-      // a real RTL unit, and stopping there left every later name in the
-      // group undeclared AND the whole group untyped (LType stays NIL_NODE).
+      Collect(LChild, AScope);
       LChild := NextSib(LChild);
-      while (LChild <> NIL_NODE) and (KindOf(LChild) = nkAttrGroup) do
-      begin
-        Collect(LChild, AScope);
-        LChild := NextSib(LChild);
-      end;
-    end
-    else
-      LDone := True;  // untyped parameter, or end
+    end;
   end;
+  // The type is the child right after the names - none for an untyped
+  // parameter, or for a declaration cut short (`var A: ;` while typing).
+  if (LCount > 0) and (LChild <> NIL_NODE) and
+     not (KindOf(LChild) in [nkDirective, nkAttrGroup]) then
+    LType := LChild;
   // A parameter with a value after its type has a default (optional argument).
   var LHasDefault := (AKind = skParam) and (LType <> NIL_NODE) and
     (NextSib(LType) <> NIL_NODE);
@@ -1201,31 +1198,34 @@ begin
   LResultNode := NIL_NODE;
 
   // Parse the (possibly dotted, possibly generic) name: each segment is
-  // `ident [<...>]`; a '.' after a segment means it is a qualifier (TFoo. /
-  // TList<T>.), so the *last* segment's ident is the routine name. A ':' or '('
-  // ends the name (result type / parameters follow). Qualified names are method
+  // `ident [<...>]`, marked nfName; a segment followed by another is a
+  // qualifier (TFoo. / TList<T>.), so the *last* segment's ident is the
+  // routine name - none when it is the nkMissing of a header cut short after
+  // a dot (`procedure TFoo.` while typing). Qualified names are method
   // implementations of existing declarations - do not redeclare them.
   LChild := SkipAttr(FirstChild(ANode));
   LNameNode := NIL_NODE;
   LQualified := False;
-  while (LChild <> NIL_NODE) and (KindOf(LChild) = nkIdent) do
+  while (LChild <> NIL_NODE) and IsDeclName(LChild) do
   begin
+    if KindOf(LChild) = nkMissing then
+    begin
+      LChild := NextSib(LChild);
+      Break;
+    end;
     LSegIdent := LChild;
     LSegLast := LChild;
     LChild := NextSib(LChild);
-    // A following nkGenericParams/nkTypeArgs belongs to THIS segment only when
-    // the segment ident is immediately followed by '<' - `TThreadList<T>.` or
-    // `Foo<T>(...)`. Without the separator check, `function LockList:
-    // TList<T>;` had its RESULT TYPE eaten as segment generic-args: nkTypeArgs
-    // follows the name ident either way, only the ':' between them tells the
-    // two shapes apart. The result node then never registered, the routine
-    // symbol's TypeNode stayed NIL, and every consumer of the result type -
-    // most visibly `with FThreads.LockList do Count` (System.Threading) -
-    // dead-ended. Every function returning a generic instantiation was
-    // affected.
-    while (LChild <> NIL_NODE) and
-          (KindOf(LChild) in [nkGenericParams, nkTypeArgs]) and
-          (SepKindAfter(LSegLast) = tkLess) do
+    // A segment's own generic parameters follow it - `TThreadList<T>.` or
+    // `Foo<T>(...)` - as nkGenericParams, which no result type ever is: in
+    // `function LockList: TList<T>;` the name ends at LockList (the only
+    // marked segment) and TList<T> is the nkTypeArgs of the result. That
+    // result type once got eaten as segment generic-args (the two shapes
+    // were told apart by the ':' alone); the result node then never
+    // registered, the routine symbol's TypeNode stayed NIL, and every
+    // consumer of the result type - most visibly `with FThreads.LockList do
+    // Count` (System.Threading) - dead-ended.
+    while (LChild <> NIL_NODE) and (KindOf(LChild) = nkGenericParams) do
     begin
       // Generic params get a scope of their OWN, between the routine and its
       // enclosing one - not the routine scope itself. A PARAMETER may reuse a
@@ -1245,7 +1245,8 @@ begin
       LSegLast := LChild;
       LChild := NextSib(LChild);
     end;
-    if SepKindAfter(LSegLast) = tkDot then
+    // Another segment after this one - a missing one included: a qualifier.
+    if (LChild <> NIL_NODE) and IsDeclName(LChild) then
     begin
       LQualified := True;          // qualifier segment; ident is a type ref
       LQualIdents := LQualIdents + [LSegIdent];  // full chain, outer -> inner
@@ -1564,50 +1565,42 @@ begin
         // (real bug: System.SysUtils' `var V, S: string`, System.TypInfo's
         // `var sType, sEnum: string`).
         //
-        // Same names-then-':'-then-type walk DeclareNamesAndType does for a
-        // var section, deliberately NOT reusing it: an inline var's tail may
-        // be an INITIALIZER with no type at all (`var Name := Expr;`), and
-        // that routine anchors its tail walk on the type node, so the
-        // initializer would go uncollected.
+        // Same names-then-type walk DeclareNamesAndType does for a var
+        // section, deliberately NOT reusing it: an inline var's tail may be
+        // an INITIALIZER with no type at all (`var Name := Expr;`), and that
+        // routine anchors its tail walk on the type node, so the initializer
+        // would go uncollected.
         var LKind := skVar;
         if KindOf(ANode) = nkInlineConst then
           LKind := skConst;
         var LSyms: TArray<Integer> := nil;
         var LSymCount := 0;
         var LType := NIL_NODE;
+        // The names carry nfName; LName ends on the first child after them.
         LName := FirstChild(ANode);
-        while (LName <> NIL_NODE) and (KindOf(LName) = nkIdent) do
+        while (LName <> NIL_NODE) and IsDeclName(LName) do
         begin
-          var LSep := SepKindAfter(LName);
           if LSymCount = Length(LSyms) then
             SetLength(LSyms, LSymCount * 2 + 4);
           LSyms[LSymCount] := DeclareSym(AScope, LKind, LName);
           Inc(LSymCount);
-          if LSep = tkComma then
-            LName := NextSib(LName)
-          else
-          begin
-            // ':' -> the shared type follows; ':=' (one token, tkAssign,
-            // never tkColon) or anything else -> no type, the tail is an
-            // initializer.
-            if LSep = tkColon then
-              LType := NextSib(LName);
-            Break;
-          end;
+          LName := NextSib(LName);
         end;
+        // The type, unless that child is the initializer: Aux 1 says the
+        // last child is one, so a single child after the names is the type
+        // only without it (`var X: K` / `var X := K`).
+        if (LName <> NIL_NODE) and not ((FTree.Nodes[ANode].Aux = 1) and
+           (NextSib(LName) = NIL_NODE)) then
+          LType := LName;
         for var LIdx := 0 to LSymCount - 1 do
           FModel.Symbols[LSyms[LIdx]].TypeNode := LType;
         NotePendingAggregate(LType);
         // Everything after the last NAME - the type expression and/or the
         // initializer - is ordinary content of this scope.
-        if LName <> NIL_NODE then
+        while LName <> NIL_NODE do
         begin
-          var LRest := NextSib(LName);
-          while LRest <> NIL_NODE do
-          begin
-            Collect(LRest, AScope);
-            LRest := NextSib(LRest);
-          end;
+          Collect(LName, AScope);
+          LName := NextSib(LName);
         end;
       end;
 

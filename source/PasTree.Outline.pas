@@ -136,6 +136,9 @@ type
     function Kind(ANode: Integer): TPasNodeKind; inline;
     function FirstChild(ANode: Integer): Integer; inline;
     function NextSib(ANode: Integer): Integer; inline;
+    // Part of a declared name (nfName): a name of a var or parameter list,
+    // a segment of a routine's name - never its type.
+    function IsName(ANode: Integer): Boolean; inline;
     function TokenKindAfter(ANode: Integer): TPasTokenKind;
     function TokenKindBefore(ANode: Integer): TPasTokenKind;
     function SpanText(ANode: Integer): string;
@@ -232,8 +235,13 @@ begin
   Result := FTree.Nodes[ANode].NextSibling;
 end;
 
-// The visible token right after a node's span - the resolver's own test for
-// "is this the last name before the colon" (SepKindAfter).
+function TOutlineWalker.IsName(ANode: Integer): Boolean;
+begin
+  Result := nfName in FTree.Nodes[ANode].Flags;
+end;
+
+// The visible token right after a node's span: `:` after a constant's name
+// means a typed constant.
 function TOutlineWalker.TokenKindAfter(ANode: Integer): TPasTokenKind;
 var
   LNext: Integer;
@@ -332,13 +340,14 @@ begin
       end;
     nkParam:
       begin
-        // Attribute groups and names up to the colon, the type after it,
-        // then a default value.
+        // Attribute groups and the names (nfName), the type right after
+        // them, then a default value.
         LNamesDone := False;
         LChild := FirstChild(ANode);
         while LChild <> NIL_NODE do
         begin
-          if not LNamesDone and (TokenKindBefore(LChild) = tkColon) then
+          if not LNamesDone and not IsName(LChild) and
+             (Kind(LChild) <> nkAttrGroup) then
           begin
             MarkTypes(LChild, True, AIdents);
             LNamesDone := True;
@@ -849,9 +858,9 @@ begin
     WalkMembers(LTypeExpr, LQualified);
 end;
 
-// `A, B: T` - one row per name. The names are the leading nkIdent children;
-// the last one is the ident followed by ':' (the type may itself be a bare
-// nkIdent, so the shape alone cannot tell the two apart - the separator can).
+// `A, B: T` - one row per name. The names are the leading children marked
+// nfName (the type may itself be a bare nkIdent, so the kinds alone cannot
+// tell the two apart); the type is the child right after them.
 procedure TOutlineWalker.VarDecl(ANode: Integer; const AOwner, AHead: string);
 var
   LChild, LType: Integer;
@@ -865,16 +874,16 @@ begin
     LChild := NextSib(LChild);
   LNames := nil;
   LType := NIL_NODE;
-  while (LChild <> NIL_NODE) and (Kind(LChild) = nkIdent) do
+  while (LChild <> NIL_NODE) and IsName(LChild) do
   begin
     LNames := LNames + [LChild];
-    if TokenKindAfter(LChild) = tkColon then
-    begin
-      LType := NextSib(LChild);
-      Break;
-    end;
     LChild := NextSib(LChild);
   end;
+  // An nkError there is the parser's placeholder for a type it did not find
+  // (`var A;` under recovery): no type to show.
+  if (LNames <> nil) and (LChild <> NIL_NODE) and
+     not (Kind(LChild) in [nkDirective, nkError]) then
+    LType := LChild;
   LTypes := nil;
   LDetail := TypedSpanText(LType, True, 2, LTypes);
   if LDetail <> '' then
@@ -936,11 +945,13 @@ begin
   while LChild <> NIL_NODE do
   begin
     case Kind(LChild) of
-      nkIdent:
-        // A name segment - unless it is the result type (`: Integer`),
-        // which is an nkIdent too, told apart by the colon before it.
-        if (LParams = NIL_NODE) and (TokenKindBefore(LChild) <> tkColon) then
+      nkIdent, nkMissing:
+        // A name segment (nfName) - or the result type (`: Integer`), an
+        // nkIdent too.
+        if IsName(LChild) then
         begin
+          if Kind(LChild) = nkMissing then
+            Exit;   // `procedure TFoo.` cut short: no name to list yet
           LSegments := LSegments + [FTree.NodeText(LChild)];
           if LFirstName = NIL_NODE then
             LFirstName := LChild;
@@ -959,8 +970,8 @@ begin
         LIsImpl := True;
     else
       // The result type in any other shape (a qualified name, `array of`,
-      // a string type...): the child introduced by ':'.
-      if (LResult = NIL_NODE) and (TokenKindBefore(LChild) = tkColon) then
+      // a string type...): the one child that is none of the above.
+      if LResult = NIL_NODE then
         LResult := LChild;
     end;
     LChild := NextSib(LChild);

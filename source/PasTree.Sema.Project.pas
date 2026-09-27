@@ -11723,18 +11723,16 @@ end;
   type PARAMETER, so `TFunc<IValue>` only yields IValue once AX's own
   instantiation is applied. }
 { Does every parameter in AParams carry a default value, so that the routine
-  can be called with no arguments at all? Read off the TOKENS rather than the
-  node shape: a default is the only thing that can put an `=` inside a
-  parameter declaration (a type expression never contains one), while the node
-  shape cannot tell `X: TFoo` from `X: TFoo = nil` without knowing which
-  trailing child is a type and which an expression - and both can be an
-  nkIdent. An empty list answers True, which is the same "callable bare" the
-  no-list case already gets. }
+  can be called with no arguments at all? A parameter's names carry nfName
+  and are followed by its type, then its default: a default is a SECOND child
+  after the names (`X: TFoo = nil`; `X: TFoo` has one, an untyped `var X`
+  none). Node flags only, so a demoted model answers too - the `=` token this
+  was once read from is gone there. An empty list answers True, which is the
+  same "callable bare" the no-list case already gets. }
 function TPasSemaProject.AllParamsDefaulted(AMid, AParams: Integer): Boolean;
 var
   LM: TPasSemaModel;
-  LParam, LTok: Integer;
-  LHasDefault: Boolean;
+  LParam, LChild, LAfter: Integer;
 begin
   LM := FModels[AMid];
   LParam := LM.Tree.Nodes[AParams].FirstChild;
@@ -11742,17 +11740,16 @@ begin
   begin
     if LM.Tree.Nodes[LParam].Kind = nkParam then
     begin
-      LHasDefault := False;
-      for LTok := LM.Tree.Nodes[LParam].FirstToken to
-                  LM.Tree.Nodes[LParam].LastToken do
-        if (LTok >= 0) and (LTok <= High(LM.Tree.Source.Visible)) and
-           (LM.Tree.Source.VisibleToken(LTok).Kind = PasTree.Types.tkEqual)
-        then
-        begin
-          LHasDefault := True;
-          Break;
-        end;
-      if not LHasDefault then
+      LAfter := 0;
+      LChild := LM.Tree.Nodes[LParam].FirstChild;
+      while LChild <> NIL_NODE do
+      begin
+        if not (nfName in LM.Tree.Nodes[LChild].Flags) and
+           (LM.Tree.Nodes[LChild].Kind <> nkAttrGroup) then
+          Inc(LAfter);
+        LChild := LM.Tree.Nodes[LChild].NextSibling;
+      end;
+      if LAfter < 2 then
         Exit(False);
     end;
     LParam := LM.Tree.Nodes[LParam].NextSibling;

@@ -91,8 +91,11 @@ type
     nkFinallyPart,
     nkRaiseStmt,      // 18.3.1: [expr [at-expr]]
     nkAsmStmt,        // 6.10: opaque BASM token range
-    nkInlineVar,      // 3.1.3: name, [type], [init]
-    nkInlineConst,    // 3.1.3 const form
+    nkInlineVar,      // 3.1.3: names (nfName), [type], [init]; Aux = 1 when
+                      // the last child is the `:=` initializer - the names
+                      // alone leave `var X: K` / `var X := K` open
+    nkInlineConst,    // 3.1.3 const form: name (nfName), [type], value; Aux
+                      // as nkInlineVar's (1 in valid code: the value is due)
 
     // ---- compilation units (spec ch.01) ----
     nkUnit,           // 1.1.2: name, [uses], interface, implementation, ...
@@ -112,7 +115,8 @@ type
     nkTypeDecl,       // name [generic params] = [type-mark] TypeExpr;
                       // Aux = 1 for distinct alias (= type X, 2.5.1)
     nkConstDecl,      // name [: type] = init [hints]
-    nkVarDecl,        // names... : type [absolute X | = init]; also fields
+    nkVarDecl,        // names (nfName) : type [absolute X | = init]; also
+                      // fields
     nkAggregate,      // typed-const initializer ( ... ) (3.2.2)
     nkAggregateField, //   name: value element
 
@@ -139,8 +143,9 @@ type
     // ---- members & routines (spec ch.06/11/13) ----
     nkVisibility,     // 11.2.1: Aux encodes level; strict via flag
     nkRoutine,        // procedure/function/constructor/destructor/operator;
-                      // children: name, [generic params], [params], [result
-                      // type], directives..., [body]
+                      // children: name segments (nfName), each with its
+                      // [generic params], [params], [result type],
+                      // directives..., [body]
     nkParams,
     // 6.2. Aux = the visible-token index of an `out` modifier, -1 otherwise.
     // `var` and `const` need no such mark: they are reserved words and a lexer
@@ -172,7 +177,25 @@ type
 
   TPasNodeFlag = (
     nfError,      // subtree contains a parse error
-    nfNegated     // is not / not in (4.9.1)
+    nfNegated,    // is not / not in (4.9.1)
+    // An nkIdent that is part of a declared NAME, in the declarations whose
+    // children cannot tell a name from a type or a value by position: each
+    // name of an nkVarDecl, nkParam, nkInlineVar or nkInlineConst list, and
+    // each segment of an nkRoutine's (or nkMethodResolution's) dotted name.
+    // `P, T: C` and `P: T = C` build the same three nkIdent children,
+    // `(const A, B)` and `(const A: B)` the same two, `function A.B;` and
+    // `function A: B;` the same two - only the separators between them said
+    // where the names end, and this flag is how the tree says it (3.1.1,
+    // 6.1.1). Attribute groups may sit between a parameter's names (`const
+    // [Ref] A, [Ref] B: TGUID`), generic parameters after a routine's segment
+    // (`TList<T>.Add`); everything after the last name is the type, the
+    // value, the result type and so on, as the kind's comment says. Other
+    // declarations hold their name by position - their first nkIdent child
+    // - and do not carry the flag. In invalid code only, a routine's name cut
+    // short after a dot (`procedure TFoo.` while typing) ends in an nkMissing
+    // segment that carries it too: the segments before it are qualifiers,
+    // and there is no name.
+    nfName
   );
   TPasNodeFlags = set of TPasNodeFlag;
 
@@ -780,6 +803,9 @@ begin
     nkVarDecl:
       if Nodes[AIndex].Aux = 1 then
         Result := Result + '#absolute';
+    nkInlineVar, nkInlineConst:
+      if Nodes[AIndex].Aux = 1 then
+        Result := Result + '#init';
     nkParam:
       if Nodes[AIndex].Aux >= 0 then
         Result := Result + '#out';
@@ -793,6 +819,10 @@ begin
         amaUnsafe: Result := Result + '#unsafe';
       end;
   end;
+  // Printed on whatever node carries it, not only on an nkIdent: a flag
+  // where it does not belong must show in the dump, not hide.
+  if nfName in Nodes[AIndex].Flags then
+    Result := Result + '#name';
   LChildren := '';
   LChild := Nodes[AIndex].FirstChild;
   while LChild <> NIL_NODE do

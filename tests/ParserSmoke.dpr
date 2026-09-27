@@ -200,14 +200,145 @@ begin
         Result := LossCase(APP, 'type TFn = procedure; stdcall;', 'F2', 1,
           'stdcall');
       end),
-    // F19 counts the separators of a declaration whose children cannot
-    // tell where its names end - `P, T: C` reads as `P: T = C` too - and
-    // not those of one they can: an Integer literal is no type.
-    OwnCase('F19 counts only the ambiguous declarations',
+    // F19 is no loss any more: the names carry nfName, so the separators of
+    // `P, T: C` and `P: T = C` are derived and no rule counts them.
+    OwnCase('F19: where the names end is derived',
       function: TPasCheckResult
       begin
-        Result := LossCase(APP, 'var P, T: C; Q: Integer = 5;', 'F19', 2,
-          ',');
+        Result := LossCase(APP, 'var P, T: C; Q: Integer = 5;', 'F19', 0, '');
+      end)
+  ];
+end;
+
+type
+  TTreeMutation = reference to procedure(var ATree: TPasTree);
+
+// The first node of AKind whose first token reads AText.
+function NodeOf(const ATree: TPasTree; AKind: TPasNodeKind;
+  const AText: string): Integer;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to High(ATree.Nodes) do
+    if (ATree.Nodes[LIdx].Kind = AKind) and
+       SameText(ATree.NodeText(LIdx), AText) then
+      Exit(LIdx);
+  Result := NIL_NODE;
+end;
+
+{ I6's name check must be able to fail. ASource parses clean - as statements
+  when AStatements, else as a file - and checks clean; AMutate then breaks
+  the tree the way a parser defect would (a name left unmarked, a type
+  marked, the initializer mark lost), and the checker must report I6.flags
+  and nothing else, the first message saying ASays. }
+function NameCase(APP: TPasPreprocessor; const ASource: string;
+  AStatements: Boolean; const AMutate: TTreeMutation;
+  const ASays: string): TPasCheckResult;
+var
+  LPre: TPasPreprocessed;
+  LDiags: TArray<TPasParseDiag>;
+  LTree: TPasTree;
+  LReport, LBroken: TPasCheckReport;
+begin
+  LPre := APP.ProcessText('test.pas', ASource);
+  if AStatements then
+    LTree := TPasParser.ParseStatements(LPre, LDiags)
+  else
+    LTree := TPasParser.ParseFile(LPre, LDiags);
+  LReport.Init;
+  CheckTree(LTree, Length(LDiags) = 0, LReport);
+  AMutate(LTree);
+  LBroken.Init;
+  CheckTree(LTree, True, LBroken);
+  Result.Passed := (Length(LDiags) = 0) and (LReport.Total = 0) and
+    (LBroken.Total > 0) and (LBroken.Counts[ccFlags] = LBroken.Total) and
+    (Pos(ASays, LBroken.Violations[0].Msg) > 0);
+  Result.Message := '';
+  if not Result.Passed then
+    Result.Message := Format('  %s: %d diagnostics, %d violations before ' +
+      'the change, %d after (%d I6.flags); the first should say "%s":',
+      [ASource, Length(LDiags), LReport.Total, LBroken.Total,
+       LBroken.Counts[ccFlags], ASays]) + sLineBreak +
+      CheckReportText(LTree, LBroken);
+end;
+
+function NameFlagCase(const AName: string;
+  const ARun: TFunc<TPasCheckResult>): TPasCustomCase;
+begin
+  Result.Section := 'I6';
+  Result.Name := AName;
+  Result.Run := ARun;
+end;
+
+{ The names a declaration marks (nfName) against its separators: every
+  consumer read the separators before the flag existed, so the check that the
+  two agree is what makes the flag trustworthy - and it must be able to say
+  so when they do not. }
+function BuildNameFlagCases(APP: TPasPreprocessor): TPasCustomCases;
+begin
+  Result := [
+    // `P, T: C`: T left unmarked reads as P's type.
+    NameFlagCase('a name left unmarked is a violation',
+      function: TPasCheckResult
+      begin
+        Result := NameCase(APP, DeclCaseText('var P, T: C;'), False,
+          procedure(var ATree: TPasTree)
+          var
+            LNode: Integer;
+          begin
+            LNode := NodeOf(ATree, nkIdent, 'T');
+            ATree.Nodes[LNode].Flags := ATree.Nodes[LNode].Flags - [nfName];
+          end, 'a name is not marked');
+      end),
+    // `P: T = C`: the type marked reads as a second name.
+    NameFlagCase('a type marked as a name is a violation',
+      function: TPasCheckResult
+      begin
+        Result := NameCase(APP, DeclCaseText('var P: T = C;'), False,
+          procedure(var ATree: TPasTree)
+          var
+            LNode: Integer;
+          begin
+            LNode := NodeOf(ATree, nkIdent, 'T');
+            ATree.Nodes[LNode].Flags := ATree.Nodes[LNode].Flags + [nfName];
+          end, 'between two names');
+      end),
+    // `function A.B;`: B unmarked reads as A's result type, `function A: B;`.
+    NameFlagCase('a routine segment left unmarked is a violation',
+      function: TPasCheckResult
+      begin
+        Result := NameCase(APP, 'unit Test;'#13#10'interface'#13#10 +
+          'implementation'#13#10'function A.B;'#13#10'begin'#13#10 +
+          'end;'#13#10'end.'#13#10, False,
+          procedure(var ATree: TPasTree)
+          var
+            LNode: Integer;
+          begin
+            LNode := NodeOf(ATree, nkIdent, 'B');
+            ATree.Nodes[LNode].Flags := ATree.Nodes[LNode].Flags - [nfName];
+          end, 'a name is not marked');
+      end),
+    // `var X := K`: without Aux 1, K reads as the type, `var X: K`.
+    NameFlagCase('an inline initializer without its mark is a violation',
+      function: TPasCheckResult
+      begin
+        Result := NameCase(APP, 'var X := K;', True,
+          procedure(var ATree: TPasTree)
+          begin
+            ATree.Nodes[NodeOf(ATree, nkInlineVar, 'var')].Aux := NIL_NODE;
+          end, 'where `:` is due');
+      end),
+    NameFlagCase('nfName off an identifier is a violation',
+      function: TPasCheckResult
+      begin
+        Result := NameCase(APP, DeclCaseText('var P: T;'), False,
+          procedure(var ATree: TPasTree)
+          var
+            LNode: Integer;
+          begin
+            LNode := NodeOf(ATree, nkVarSec, 'var');
+            ATree.Nodes[LNode].Flags := ATree.Nodes[LNode].Flags + [nfName];
+          end, 'carries nfName');
       end)
   ];
 end;
@@ -224,7 +355,8 @@ begin
   try
     RunSuite('ParserSmoke', GPP, STMT_CASES, DECL_CASES,
       BuildCustomCases(GPP, GSM) + BuildRoundtripCases +
-      BuildPreprocessorCases(GPP) + BuildOwnTokenCases(GPP), GPassed,
+      BuildPreprocessorCases(GPP) + BuildOwnTokenCases(GPP) +
+      BuildNameFlagCases(GPP), GPassed,
       GFailed, TreeVerdict);
     if GFailed > 0 then
       ExitCode := 1;

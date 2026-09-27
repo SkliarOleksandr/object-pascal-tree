@@ -143,6 +143,10 @@ type
     function ParseTryStmt: Integer;
     function ParseInlineVar(AConst: Boolean): Integer;
     // declarations (spec ch.01/02/03/06/09/11/13/14/15/16)
+    { An nkIdent over the current token, marked as part of a declared name
+      (nfName, PasTree.Ast): a name of a var, field, parameter or inline var
+      list, or a segment of a routine's name. Neither adopted nor consumed. }
+    function AddName: Integer;
     function ParseQualifiedName: Integer;
     function ParseUsesClause: Integer;
     function ParseAttrGroups: Integer;
@@ -1293,7 +1297,9 @@ begin
     Next;
     if CurKind = tkIdentifier then
     begin
-      FB.Adopt(LVar, FB.AddNode(nkIdent, NIL_NODE, FPos));
+      // The counter's `:=` is the loop's own, not an initializer: Aux stays
+      // unset.
+      FB.Adopt(LVar, AddName);
       Next;
     end
     else
@@ -1430,15 +1436,17 @@ begin
   Next;
   if CurKind = tkIdentifier then
   begin
-    FB.Adopt(Result, FB.AddNode(nkIdent, NIL_NODE, FPos));
+    FB.Adopt(Result, AddName);
     Next;
-    // Inline vars may declare several names: var V, S: string; (10.3+)
+    // Inline vars may declare several names: var V, S: string; (10.3+). An
+    // inline const takes one (`const A, B = 5` is E2029) - read alike, for
+    // the recovery.
     while CurKind = tkComma do
     begin
       Next;
       if CurKind = tkIdentifier then
       begin
-        FB.Adopt(Result, FB.AddNode(nkIdent, NIL_NODE, FPos));
+        FB.Adopt(Result, AddName);
         Next;
       end
       else
@@ -1465,6 +1473,9 @@ begin
   end;
   if (CurKind = tkAssign) or (AConst and (CurKind = tkEqual)) then
   begin
+    // The last child is the initializer (Aux 1): with one name and one child
+    // after it, nothing else tells `var X: K` from `var X := K`.
+    FB.SetAux(Result, 1);
     Next;
     // Recovery: `var A :=` with the initializer not yet typed, and the NEXT
     // statement (or the block's end) already on the following line. The
@@ -1677,6 +1688,12 @@ begin
 end;
 
 { TPasParser - declarations ------------------------------------------------- }
+
+function TPasParser.AddName: Integer;
+begin
+  Result := FB.AddNode(nkIdent, NIL_NODE, FPos);
+  FB.AddFlag(Result, nfName);
+end;
 
 function TPasParser.ParseQualifiedName: Integer;
 var
@@ -2365,14 +2382,14 @@ begin
   while CurKind = tkIdentifier do
   begin
     LDecl := FB.AddNode(nkVarDecl, NIL_NODE, FPos);
-    FB.Adopt(LDecl, FB.AddNode(nkIdent, NIL_NODE, FPos));
+    FB.Adopt(LDecl, AddName);
     Next;
     while CurKind = tkComma do
     begin
       Next;
       if CurKind = tkIdentifier then
       begin
-        FB.Adopt(LDecl, FB.AddNode(nkIdent, NIL_NODE, FPos));
+        FB.Adopt(LDecl, AddName);
         Next;
       end
       else
@@ -2611,7 +2628,7 @@ begin
     end;
     if CurKind = tkIdentifier then
     begin
-      FB.Adopt(LParam, FB.AddNode(nkIdent, NIL_NODE, FPos));
+      FB.Adopt(LParam, AddName);
       Next;
       while CurKind = tkComma do
       begin
@@ -2623,7 +2640,7 @@ begin
           FB.Adopt(LParam, LAttrs);
         if CurKind = tkIdentifier then
         begin
-          FB.Adopt(LParam, FB.AddNode(nkIdent, NIL_NODE, FPos));
+          FB.Adopt(LParam, AddName);
           Next;
         end;
       end;
@@ -2959,14 +2976,16 @@ begin
   // Name: segments with optional generic params (impl headers, 16.3).
   // Operators may be named by reserved words: class operator In(...)
   // (FMX.Graphics.pas).
+  // Every segment is marked (nfName): `function A.B;` and `function A: B;`
+  // build the same two nkIdent children otherwise.
   if LIsOperator and IsKeyword(CurKind) then
   begin
-    FB.Adopt(Result, FB.AddNode(nkIdent, NIL_NODE, FPos));
+    FB.Adopt(Result, AddName);
     Next;
   end
   else if (CurKind = tkIdentifier) and (PeekKind(1) <> tkEqual) then
   begin
-    LSeg := FB.AddNode(nkIdent, NIL_NODE, FPos);
+    LSeg := AddName;
     Next;
     FB.Adopt(Result, LSeg);
     LGen := ParseGenericParamsOpt;
@@ -2980,7 +2999,7 @@ begin
       if (CurKind = tkIdentifier) or (LIsOperator and IsKeyword(CurKind))
       then
       begin
-        FB.Adopt(Result, FB.AddNode(nkIdent, NIL_NODE, FPos));
+        FB.Adopt(Result, AddName);
         Next;
         LGen := ParseGenericParamsOpt;
         if LGen <> NIL_NODE then
@@ -2988,6 +3007,13 @@ begin
       end
       else
       begin
+        // `procedure TFoo.` cut short while typing: the dot made TFoo a
+        // qualifier, and a missing segment (nfName, zero-width, nothing
+        // consumed) keeps it one - with TFoo the last marked segment, the
+        // header would read as a routine NAMED TFoo.
+        LSeg := FB.AddNode(nkMissing, NIL_NODE, FPos);
+        FB.AddFlag(LSeg, nfName);
+        FB.Adopt(Result, LSeg);
         Error('name expected');
         Break;
       end;
@@ -3474,14 +3500,14 @@ begin
     LDecl := FB.AddNode(nkVarDecl, NIL_NODE, FPos);
     if LAttrs <> NIL_NODE then
       FB.Adopt(LDecl, LAttrs);
-    FB.Adopt(LDecl, FB.AddNode(nkIdent, NIL_NODE, FPos));
+    FB.Adopt(LDecl, AddName);
     Next;
     while CurKind = tkComma do
     begin
       Next;
       if CurKind = tkIdentifier then
       begin
-        FB.Adopt(LDecl, FB.AddNode(nkIdent, NIL_NODE, FPos));
+        FB.Adopt(LDecl, AddName);
         Next;
       end
       else

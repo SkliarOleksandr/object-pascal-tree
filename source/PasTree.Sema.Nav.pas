@@ -360,7 +360,7 @@ type
     function RTFindChildKind(LM: TPasSemaModel; ANode: Integer;
       AKind: TPasNodeKind): Integer;
     function RTSkipAttr(LM: TPasSemaModel; AChild: Integer): Integer;
-    function RTSepAfter(LM: TPasSemaModel; ANode: Integer): TPasTokenKind;
+    function RTIsName(LM: TPasSemaModel; ANode: Integer): Boolean;
     function RTSegments(LM: TPasSemaModel; ANode: Integer;
       out AQualIdents: TArray<Integer>; out ANameNode: Integer): Boolean;
     function RTSpanText(LM: TPasSemaModel; ANode: Integer): string;
@@ -1821,7 +1821,6 @@ begin
   if (ATMid < 0) or (ATMid >= FProj.ModelCount) then
     Exit;
   begin
-    FProj.EnsureHydrated(ATMid);
     for LMi := 0 to FProj.ModelCount - 1 do
     begin
       LM := FProj.Model(LMi);
@@ -1829,12 +1828,13 @@ begin
       // actually holds a hit pays a rehydration, so references to a hot RTL
       // symbol re-preprocess the units that USE it, not the whole closure.
       // A model that fails to rehydrate contributes no hits (HitFromNode's
-      // bounds guards) rather than wrong ones. The DECLARING model is the one
-      // exception, hydrated before the loop: IsDeclSelfName below reads the
-      // text layer (RTSepAfter -> Source.Visible), and on a demoted model
-      // every separator reads back tkUnknown, mispicking the segments of a
-      // `TFoo.Bar` implementation header - spurious self-name hits for
-      // methods, dropped qualifier hits for types.
+      // bounds guards) rather than wrong ones. The DECLARING model is no
+      // exception: IsDeclSelfName tells the segments of a `TFoo.Bar`
+      // implementation header apart by their nfName flags, which a demoted
+      // model keeps. (It once read the separators between them, which a
+      // demoted model reads back as tkUnknown - spurious self-name hits for
+      // methods, dropped qualifier hits for types - so that model was
+      // hydrated before the loop.)
       if LMi = ATMid then
         for LNode := 0 to High(LM.RefMap) do
           if (LM.RefMap[LNode] = ASym) and
@@ -4444,45 +4444,37 @@ begin
     Result := LM.Tree.Nodes[Result].NextSibling;
 end;
 
-// Kind, not text: both consumers test a single punctuation token, and the
-// kind answers without a string copy (mirrors the resolver's SepKindAfter).
-function TPasNavigator.RTSepAfter(LM: TPasSemaModel;
-  ANode: Integer): TPasTokenKind;
-var
-  LNext: Integer;
+// Part of a declared name (nfName, PasTree.Ast): a name of a parameter list,
+// a segment of a routine's name. A node flag - it reads the same on a
+// demoted model, whose text layer is gone.
+function TPasNavigator.RTIsName(LM: TPasSemaModel; ANode: Integer): Boolean;
 begin
-  LNext := LM.Tree.Nodes[ANode].LastToken + 1;
-  if (LNext >= 0) and (LNext <= High(LM.Tree.Source.Visible)) then
-    Result := LM.Tree.Source.VisibleToken(LNext).Kind
-  else
-    Result := tkUnknown;
+  Result := nfName in LM.Tree.Nodes[ANode].Flags;
 end;
 
 // Mirrors CollectRoutine's own name-segment walk exactly (PasTree.Sema.
-// Resolver.pas): each segment is `ident [<generic params/type args>]`; a
-// '.' after a segment means it's a QUALIFIER (the last segment is the real
-// name). Declarations are always unqualified (AQualIdents = []); a qualified
-// method implementation is the one shape that isn't.
+// Resolver.pas): each segment is `ident [<generic params>]`, marked nfName;
+// a segment followed by another is a QUALIFIER (the last segment is the real
+// name, and there is none when it is the nkMissing of `procedure TFoo.` cut
+// short). Declarations are always unqualified (AQualIdents = []); a
+// qualified method implementation is the one shape that isn't.
 function TPasNavigator.RTSegments(LM: TPasSemaModel; ANode: Integer;
   out AQualIdents: TArray<Integer>; out ANameNode: Integer): Boolean;
 var
-  LChild, LSegIdent, LSegLast: Integer;
+  LChild, LSegIdent: Integer;
 begin
   AQualIdents := nil;
   ANameNode := NIL_NODE;
   LChild := RTSkipAttr(LM, LM.Tree.Nodes[ANode].FirstChild);
-  while (LChild <> NIL_NODE) and (LM.Tree.Nodes[LChild].Kind = nkIdent) do
+  while (LChild <> NIL_NODE) and RTIsName(LM, LChild) and
+        (LM.Tree.Nodes[LChild].Kind = nkIdent) do
   begin
     LSegIdent := LChild;
-    LSegLast := LChild;
     LChild := LM.Tree.Nodes[LChild].NextSibling;
     while (LChild <> NIL_NODE) and
-          (LM.Tree.Nodes[LChild].Kind in [nkGenericParams, nkTypeArgs]) do
-    begin
-      LSegLast := LChild;
+          (LM.Tree.Nodes[LChild].Kind = nkGenericParams) do
       LChild := LM.Tree.Nodes[LChild].NextSibling;
-    end;
-    if RTSepAfter(LM, LSegLast) = tkDot then
+    if (LChild <> NIL_NODE) and RTIsName(LM, LChild) then
       AQualIdents := AQualIdents + [LSegIdent]
     else
     begin
@@ -4554,22 +4546,18 @@ begin
   begin
     if LM.Tree.Nodes[LParam].Kind = nkParam then
     begin
+      // The names (nfName), attribute groups between them skipped - `const
+      // [Ref] A, [Ref] B: TGUID` is two slots - then the type, if any.
       LChild := RTSkipAttr(LM, LM.Tree.Nodes[LParam].FirstChild);
       LNameCount := 0;
       LType := NIL_NODE;
-      while (LChild <> NIL_NODE) and (LM.Tree.Nodes[LChild].Kind = nkIdent) do
+      while (LChild <> NIL_NODE) and RTIsName(LM, LChild) do
       begin
         Inc(LNameCount);
-        if RTSepAfter(LM, LChild) = tkColon then
-        begin
-          LType := LM.Tree.Nodes[LChild].NextSibling;
-          Break;
-        end;
-        LChild := LM.Tree.Nodes[LChild].NextSibling;
-        if (LChild <> NIL_NODE) and (LM.Tree.Nodes[LChild].Kind <> nkIdent)
-        then
-          Break;
+        LChild := RTSkipAttr(LM, LM.Tree.Nodes[LChild].NextSibling);
       end;
+      if LNameCount > 0 then
+        LType := LChild;
       if LType <> NIL_NODE then
         LTypeText := LowerCase(RTSpanText(LM, LType))
       else
@@ -5138,18 +5126,16 @@ begin
   begin
     if LM.Tree.Nodes[LParam].Kind = nkParam then
     begin
+      // The names carry nfName; the TYPE after them is a reference, never a
+      // parameter name.
       LChild := RTSkipAttr(LM, LM.Tree.Nodes[LParam].FirstChild);
-      while (LChild <> NIL_NODE) and (LM.Tree.Nodes[LChild].Kind = nkIdent) do
+      while (LChild <> NIL_NODE) and RTIsName(LM, LChild) do
       begin
         if LCount = Length(Result) then
           SetLength(Result, LCount * 2 + 8);
         Result[LCount] := LChild;
         Inc(LCount);
-        // A colon ends the name list of this group - what follows is the
-        // TYPE, which is a reference, never a parameter name.
-        if RTSepAfter(LM, LChild) = tkColon then
-          Break;
-        LChild := LM.Tree.Nodes[LChild].NextSibling;
+        LChild := RTSkipAttr(LM, LM.Tree.Nodes[LChild].NextSibling);
       end;
     end;
     LParam := LM.Tree.Nodes[LParam].NextSibling;
