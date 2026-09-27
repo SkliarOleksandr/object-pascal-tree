@@ -9354,13 +9354,13 @@ var
       for var LI := 0 to LList.Count - 1 do
         if LSM.Symbols[LList[LI]].Kind = skParam then
           Inc(AParams);
-      // A result type is the one child that is neither the parameter list
-      // nor a literal's body.
+      // A result type is the one child that is neither the parameter list,
+      // a directive (`procedure stdcall`) nor a literal's body.
       LChild := LSM.Tree.Nodes[ANode].FirstChild;
       while LChild <> NIL_NODE do
       begin
         if not (LSM.Tree.Nodes[LChild].Kind in [nkParams, nkAnonParams,
-           nkRoutineBody]) then
+           nkDirective, nkRoutineBody]) then
           AFunc := True;
         LChild := LSM.Tree.Nodes[LChild].NextSibling;
       end;
@@ -11780,8 +11780,9 @@ begin
       nkProcType:
         begin
           LChild := LM.Tree.Nodes[LDef].FirstChild;
-          if LChild = NIL_NODE then
-            Exit;   // `procedure` with neither parameters nor a result
+          if (LChild = NIL_NODE) or
+             (LM.Tree.Nodes[LChild].Kind = nkDirective) then
+            Exit;   // `procedure [stdcall]`: neither parameters nor a result
           // Takes parameters - but a parameter with a DEFAULT still lets the
           // name be written bare, and dcc calls it then:
           // `TVTStyleServicesFunc = function(AControl: TControl = nil):
@@ -11797,7 +11798,8 @@ begin
           begin
             // Skip the list; the result type is the next child.
             LChild := LM.Tree.Nodes[LChild].NextSibling;
-            if LChild = NIL_NODE then
+            if (LChild = NIL_NODE) or
+               (LM.Tree.Nodes[LChild].Kind = nkDirective) then
               Exit;   // a `procedure(...)` type: no result to take a member of
           end;
           Exit(SubstX(ResolveTypeExpr(LCur.UnitId, LChild), LCur.Inst, 0));

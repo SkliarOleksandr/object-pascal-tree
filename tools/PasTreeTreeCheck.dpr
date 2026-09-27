@@ -64,8 +64,8 @@ const
   MAX_SITES = 5;
   // A histogram entry per (kind, cell, head or not, variant): variant 0 is
   // the rule without a condition (or none), 1 a conditioned rule of the
-  // kind, 2 and 3 the two `*` rules (after end., dropped initializer).
-  VARIANTS = 4;
+  // kind, 2 the `*` rule (after end.).
+  VARIANTS = 3;
 
 type
   TTotals = record
@@ -129,7 +129,6 @@ begin
     case OwnRule(LIdx).Cond of
       wcNone: GRuleVariant[LIdx] := 0;
       wcAfterEnd: GRuleVariant[LIdx] := 2;
-      wcOrphanInit: GRuleVariant[LIdx] := 3;
     else
       GRuleVariant[LIdx] := 1;
     end;

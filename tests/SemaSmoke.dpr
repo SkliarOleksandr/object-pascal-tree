@@ -1745,6 +1745,39 @@ end;
   the finalization section is a body of its own and holds only the latter.
   Every source below was compiled with dcc64 37.0 on 2026-09-27 and every
   count is dcc's own. }
+{ A directive is a node (the parser-fidelity plan, F1/F2/F11): a procedural
+  type's convention, an anonymous method's, and the initializer after a
+  procedural variable's `; cdecl` - dcc64 37.0 compiles the source. The
+  initializer is the declaration's now, so its names resolve; and a
+  procedure literal's nkDirective is not its result type. }
+procedure TestProcDirectives;
+var
+  LBadResult: Boolean;
+begin
+  Analyze('unit U; interface'#10 +
+    'type TP = reference to procedure stdcall;'#10 +
+    'procedure CP; cdecl;'#10 +
+    'var G: procedure; cdecl = CP;'#10 +
+    'procedure Q;'#10 +
+    'implementation'#10 +
+    'procedure CP; begin end;'#10 +
+    'procedure Q; var P: TP; begin P := procedure stdcall begin end; P; ' +
+    'G; end;'#10 +
+    'end.'#10);
+  Ok('procdir: no diagnostics', Length(GModel.Diags) = 0);
+  Ok('procdir: the initializer after `; cdecl` resolves',
+    RefResolvesTo('CP', 'CP'));
+  LBadResult := False;
+  for var LIdx := 0 to GModel.SymCount - 1 do
+    if (GModel.Symbols[LIdx].NameLower = 'result') and
+       (GModel.Symbols[LIdx].TypeNode <> NIL_NODE) and
+       (GModel.Tree.Nodes[GModel.Symbols[LIdx].TypeNode].Kind = nkDirective) then
+      LBadResult := True;
+  Ok('procdir: a procedure literal''s convention is no result type',
+    not LBadResult);
+  GModel.Free;
+end;
+
 procedure TestModuleBodyNames;
 
   procedure Expect(const AName, ASource: string; ACount: Integer);
@@ -2401,6 +2434,8 @@ begin
   TestEnumValueNames;
   // 8f. ...and the implementation takes no interface name
   TestInterfaceNames;
+  // 8g. directives are nodes: the initializer after them resolves
+  TestProcDirectives;
 
   // 9. call fitting no local overload stays untyped (no bogus E2010)
   Analyze(SRC_NOFIT);

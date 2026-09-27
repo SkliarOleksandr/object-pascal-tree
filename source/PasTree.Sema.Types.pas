@@ -1108,8 +1108,8 @@ begin
           LChild := Child(LDef);
           if (LChild <> NIL_NODE) and (Kind(LChild) = nkParams) then
             LChild := Sib(LChild);   // the result type follows the list
-          if LChild = NIL_NODE then
-            Exit;   // a procedure type: no result
+          if (LChild = NIL_NODE) or (Kind(LChild) = nkDirective) then
+            Exit;   // a procedure type (`procedure stdcall`): no result
           Exit(Head(LChild));
         end;
     else

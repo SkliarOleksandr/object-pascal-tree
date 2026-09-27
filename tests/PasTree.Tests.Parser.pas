@@ -29,7 +29,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..117] of TPasCaseRow = (
+  STMT_CASES: array[0..124] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -708,10 +708,54 @@ const
     (Section: '3.1.3'; Name: 'F19 recovery: names with neither type nor value';
      Source: 'var X, Y;';
      Expected: 'Block(InlineVar(Ident''X''#name Ident''Y''#name))';
+     ExpectDiags: 0),
+
+    // ---- F2, F11 (the parser-fidelity plan): a directive is a node. An
+    // anonymous method's before its body; an inline var's or const's
+    // procedural type takes a run after its `;` - a convention starts it,
+    // whatever follows, as dcc64 37.0 reads it (6.6.1, 17.2.1) ----
+    (Section: '17.2.1'; Name: 'F11: a convention before the body';
+     Source: 'F := function(A: Integer): Integer stdcall begin Result := A ' +
+       'end;';
+     Expected: 'Block(Assign(Ident''F'' AnonMethod(Params(Param(Ident''A''#name ' +
+       'Ident''Integer'')) Ident''Integer'' Directive''stdcall'' ' +
+       'RoutineBody(Block(Assign(Ident''Result'' Ident''A''))))))';
+     ExpectDiags: 0),
+    (Section: '17.2.1'; Name: 'F11: a procedure with a convention';
+     Source: 'P := procedure cdecl begin end;';
+     Expected: 'Block(Assign(Ident''P'' AnonMethod(Directive''cdecl'' ' +
+       'RoutineBody(Block))))';
+     ExpectDiags: 0),
+    (Section: '6.6.1'; Name: 'F2: an inline var''s run, then its initializer';
+     Source: 'var P: procedure; stdcall := SP;';
+     Expected: 'Block(InlineVar#init(Ident''P''#name ' +
+       'ProcType(Directive''stdcall'') Ident''SP''))';
+     ExpectDiags: 0),
+    (Section: '6.6.1'; Name: 'F2: an inline var''s run at the list''s end';
+     Source: 'var P: procedure; stdcall';
+     Expected: 'Block(InlineVar(Ident''P''#name ' +
+       'ProcType(Directive''stdcall'')))';
+     ExpectDiags: 0),
+    // A routine named pascal is not called: dcc takes the word as P's.
+    (Section: '6.6.1'; Name: 'F2: a convention after the ; is the type''s';
+     Source: 'var P: procedure; pascal; X;';
+     Expected: 'Block(InlineVar(Ident''P''#name ProcType(Directive''pascal'')) ' +
+       'ExprStmt(Ident''X''))';
+     ExpectDiags: 0),
+    // varargs starts no run: the statement calls a routine named varargs.
+    (Section: '6.6.1'; Name: 'F2: varargs after the ; is a statement';
+     Source: 'var P: procedure; varargs;';
+     Expected: 'Block(InlineVar(Ident''P''#name ProcType) ' +
+       'ExprStmt(Ident''varargs''))';
+     ExpectDiags: 0),
+    (Section: '6.6.1'; Name: 'F2: an inline const''s run, then its value';
+     Source: 'const C: procedure; cdecl = CP;';
+     Expected: 'Block(InlineConst#init(Ident''C''#name ' +
+       'ProcType(Directive''cdecl'') Ident''CP''))';
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..164] of TPasCaseRow = (
+  DECL_CASES: array[0..194] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -783,7 +827,8 @@ const
      ExpectDiags: 2),
     (Section: '6.6.1'; Name: 'recovery: a real procedural type still parses';
      Source: 'type S = procedure stdcall;';
-     Expected: 'TypeSec(TypeDecl(Ident''S'' ProcType))'; ExpectDiags: 0),
+     Expected: 'TypeSec(TypeDecl(Ident''S'' ProcType(Directive''stdcall'')))';
+     ExpectDiags: 0),
     (Section: '6.1'; Name: 'recovery: a bare routine keyword keeps the next decl';
      Source: 'type A = Byte;'#10'function'#10'B = Integer;';
      Expected: 'TypeSec(TypeDecl(Ident''A'' Ident''Byte'')) Routine''function'' ' +
@@ -1815,8 +1860,8 @@ const
     (Section: '3.2'; Name: 'typed proc const carries a calling convention '
        + 'before the initializer';
      Source: 'const exec: procedure(); cdecl = nil;';
-     Expected: 'ConstSec''const''(ConstDecl(Ident''exec'' ProcType(Params) ' +
-       'NilLit))';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''exec'' ProcType(Params ' +
+       'Directive''cdecl'') NilLit))';
      ExpectDiags: 0),
 
     // ---- F19 (the parser-fidelity plan): where a name list ends. Each pair
@@ -1867,7 +1912,194 @@ const
     (Section: '6.1.1'; Name: 'F19 recovery: a name cut short after the dot';
      Source: 'procedure TFoo.;';
      Expected: 'Routine''procedure''(Ident''TFoo''#name Missing#name)';
-     ExpectDiags: 1)
+     ExpectDiags: 1),
+
+    // ---- F1, F2, F10 (the parser-fidelity plan): every directive is an
+    // nkDirective child. A procedural type's are written into it (before and
+    // after `of object`) or, where it closes a declaration's type, after a
+    // `;` - one run, started by a convention, far or near; the initializer
+    // after it is the declaration's. A routine's may precede its header's
+    // `;`. Every source dcc64 37.0 compiles, but the recovery rows (6.5.1,
+    // 6.6.1) ----
+    (Section: '6.6.1'; Name: 'F2: a convention after the type''s ;';
+     Source: 'type TFn = function(A: Integer): Integer; stdcall;';
+     Expected: 'TypeSec(TypeDecl(Ident''TFn'' ' +
+       'ProcType(Params(Param(Ident''A''#name Ident''Integer'')) ' +
+       'Ident''Integer'' Directive''stdcall'')))';
+     ExpectDiags: 0),
+    (Section: '6.6.1'; Name: 'F2: a run of two after the ;';
+     Source: 'var V: function(A: Integer): Integer; cdecl varargs;';
+     Expected: 'VarSec''var''(VarDecl(Ident''V''#name ' +
+       'ProcType(Params(Param(Ident''A''#name Ident''Integer'')) ' +
+       'Ident''Integer'' Directive''cdecl'' Directive''varargs'')))';
+     ExpectDiags: 0),
+    (Section: '6.6.1'; Name: 'F2: before and after of object';
+     Source: 'type T = procedure stdcall of object stdcall;';
+     Expected: 'TypeSec(TypeDecl(Ident''T'' ' +
+       'ProcType#ofobject(Directive''stdcall'' Directive''stdcall'')))';
+     ExpectDiags: 0),
+    // The last convention wins for dcc (cdecl here); the tree keeps both.
+    (Section: '6.6.1'; Name: 'F2: written in and after the ;';
+     Source: 'type T = procedure of object stdcall; cdecl;';
+     Expected: 'TypeSec(TypeDecl(Ident''T'' ' +
+       'ProcType#ofobject(Directive''stdcall'' Directive''cdecl'')))';
+     ExpectDiags: 0),
+    (Section: '6.6.1'; Name: 'F2: reference to, written in';
+     Source: 'type T = reference to procedure stdcall;';
+     Expected: 'TypeSec(TypeDecl(Ident''T'' ' +
+       'ProcType#reference(Directive''stdcall'')))';
+     ExpectDiags: 0),
+    // dcc: E2029 - `reference to` takes no run after its `;`.
+    (Section: '6.6.1'; Name: 'F2 recovery: no run after reference to''s ;';
+     Source: 'type T = reference to procedure; stdcall;';
+     Expected: 'TypeSec(TypeDecl(Ident''T'' ProcType#reference) ' +
+       'TypeDecl(Ident''stdcall'' Error))';
+     ExpectDiags: 3),
+    (Section: '3.1.2'; Name: 'F1: the initializer after the run';
+     Source: 'var P: procedure; cdecl = nil;';
+     Expected: 'VarSec''var''(VarDecl(Ident''P''#name ' +
+       'ProcType(Directive''cdecl'') NilLit))';
+     ExpectDiags: 0),
+    (Section: '3.1.2'; Name: 'F1: a routine as the initializer, then a var';
+     Source: 'var V: procedure; cdecl = CP; W: Integer = 5;';
+     Expected: 'VarSec''var''(VarDecl(Ident''V''#name ' +
+       'ProcType(Directive''cdecl'') Ident''CP'') ' +
+       'VarDecl(Ident''W''#name Ident''Integer'' IntLit''5''))';
+     ExpectDiags: 0),
+    (Section: '3.1.2'; Name: 'F1: a hint after the initializer';
+     Source: 'var V: procedure; cdecl = nil platform;';
+     Expected: 'VarSec''var''(VarDecl(Ident''V''#name ' +
+       'ProcType(Directive''cdecl'') NilLit Directive''platform''))';
+     ExpectDiags: 0),
+    // dcc warns W1001 of T: the hint is the declaration's, not the type's.
+    (Section: '6.6.1'; Name: 'F2: a hint after the type is the declaration''s';
+     Source: 'type T = procedure library;';
+     Expected: 'TypeSec(TypeDecl(Ident''T'' ProcType Directive''library''))';
+     ExpectDiags: 0),
+    (Section: '8.1'; Name: 'F2: an array''s procedural element takes the run';
+     Source: 'var A: array[0..1] of procedure; stdcall;';
+     Expected: 'VarSec''var''(VarDecl(Ident''A''#name ' +
+       'ArrayType(Subrange(IntLit''0'' IntLit''1'') ' +
+       'ProcType(Directive''stdcall''))))';
+     ExpectDiags: 0),
+    (Section: '8.1'; Name: 'F2: a typed constant array, the run, the value';
+     Source: 'const A: array[0..0] of procedure; cdecl = (CP);';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''A'' ' +
+       'ArrayType(Subrange(IntLit''0'' IntLit''0'') ' +
+       'ProcType(Directive''cdecl'')) Paren(Ident''CP'')))';
+     ExpectDiags: 0),
+    (Section: '8.1'; Name: 'F2: under packed too';
+     Source: 'var A: packed array[0..1] of procedure; stdcall;';
+     Expected: 'VarSec''var''(VarDecl(Ident''A''#name ' +
+       'ArrayType(Subrange(IntLit''0'' IntLit''1'') ' +
+       'ProcType(Directive''stdcall''))))';
+     ExpectDiags: 0),
+    (Section: '9.1.1'; Name: 'F2: the last field''s run before the end';
+     Source: 'type R = record F: procedure; stdcall end;';
+     Expected: 'TypeSec(TypeDecl(Ident''R'' RecordType(VarDecl(Ident''F''#name ' +
+       'ProcType(Directive''stdcall'')))))';
+     ExpectDiags: 0),
+    (Section: '9.1.1'; Name: 'F2: a field''s run, then a field';
+     Source: 'type R = record F: procedure; stdcall; G: Integer; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''R'' RecordType(VarDecl(Ident''F''#name ' +
+       'ProcType(Directive''stdcall'')) VarDecl(Ident''G''#name ' +
+       'Ident''Integer''))))';
+     ExpectDiags: 0),
+    (Section: '9.1.3'; Name: 'F2: a variant field''s run before the )';
+     Source: 'type R = record case Integer of 0: (F: procedure; stdcall); 1: ' +
+       '(G: Pointer); end;';
+     Expected: 'TypeSec(TypeDecl(Ident''R'' ' +
+       'RecordType(VariantPart(Ident''Integer'' ' +
+       'VariantBranch(IntLit''0'' VarDecl(Ident''F''#name ' +
+       'ProcType(Directive''stdcall''))) VariantBranch(IntLit''1'' ' +
+       'VarDecl(Ident''G''#name Ident''Pointer''))))))';
+     ExpectDiags: 0),
+    (Section: '11.2'; Name: 'F2: a class field''s run, then a method';
+     Source: 'type TC = class F: procedure; stdcall; procedure M; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(VarDecl(Ident''F''#name ' +
+       'ProcType(Directive''stdcall'')) ' +
+       'Routine''procedure''(Ident''M''#name))))';
+     ExpectDiags: 0),
+    (Section: '11.2'; Name: 'F2: a class var''s run before the end';
+     Source: 'type TC = class class var F: procedure; stdcall end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ' +
+       'ClassType(VarSec#class(VarDecl(Ident''F''#name ' +
+       'ProcType(Directive''stdcall''))))))';
+     ExpectDiags: 0),
+    // A struct body's var section ends at the `end` like a field list.
+    (Section: '11.2'; Name: 'a class var before the end, no ;';
+     Source: 'type TC = class class var F: Integer end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ' +
+       'ClassType(VarSec#class(VarDecl(Ident''F''#name ' +
+       'Ident''Integer'')))))';
+     ExpectDiags: 0),
+    (Section: '9.1.1'; Name: 'a record var section before the end, no ;';
+     Source: 'type R = record var F: Integer end;';
+     Expected: 'TypeSec(TypeDecl(Ident''R'' ' +
+       'RecordType(VarSec''f''(VarDecl(Ident''F''#name ' +
+       'Ident''Integer'')))))';
+     ExpectDiags: 0),
+    // Only a convention, far or near starts a run: varargs names a var.
+    (Section: '6.6.1'; Name: 'F2: varargs after the ; is the next var';
+     Source: 'var V: procedure; varargs: Integer;';
+     Expected: 'VarSec''var''(VarDecl(Ident''V''#name ProcType) ' +
+       'VarDecl(Ident''varargs''#name Ident''Integer''))';
+     ExpectDiags: 0),
+    // One run: a second convention after its `;` names the next var.
+    (Section: '6.6.1'; Name: 'F2: one run, then a var named cdecl';
+     Source: 'var V: procedure; stdcall; cdecl: Integer;';
+     Expected: 'VarSec''var''(VarDecl(Ident''V''#name ' +
+       'ProcType(Directive''stdcall'')) VarDecl(Ident''cdecl''#name ' +
+       'Ident''Integer''))';
+     ExpectDiags: 0),
+    (Section: '6.6.1'; Name: 'F2: one run, then a type named stdcall';
+     Source: 'type T = procedure; cdecl; stdcall = Integer;';
+     Expected: 'TypeSec(TypeDecl(Ident''T'' ProcType(Directive''cdecl'')) ' +
+       'TypeDecl(Ident''stdcall'' Ident''Integer''))';
+     ExpectDiags: 0),
+    (Section: '3.2'; Name: 'F2: a constant named cdecl after a typed one';
+     Source: 'const C: procedure = nil; cdecl = 5;';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''C'' ProcType NilLit) ' +
+       'ConstDecl(Ident''cdecl'' IntLit''5''))';
+     ExpectDiags: 0),
+    // B.4.2: a directive word naming the next declaration starts no run.
+    (Section: 'B.4.2'; Name: 'F2: Unsafe after a procedural type is a type';
+     Source: 'type T = procedure; Unsafe = class end;';
+     Expected: 'TypeSec(TypeDecl(Ident''T'' ProcType) TypeDecl(Ident''Unsafe'' ' +
+       'ClassType))';
+     ExpectDiags: 0),
+    (Section: '6.5.1'; Name: 'F10: a convention before the header''s ;';
+     Source: 'function F: Boolean stdcall;';
+     Expected: 'Routine''function''(Ident''F''#name Ident''Boolean'' ' +
+       'Directive''stdcall'')';
+     ExpectDiags: 0),
+    (Section: '6.5.1'; Name: 'F10: a run of two before the header''s ;';
+     Source: 'function printf(Fmt: PAnsiChar): Integer cdecl varargs; external ' +
+       '''msvcrt.dll'';';
+     Expected: 'Routine''function''(Ident''printf''#name ' +
+       'Params(Param(Ident''Fmt''#name Ident''PAnsiChar'')) ' +
+       'Ident''Integer'' Directive''cdecl'' Directive''varargs'' ' +
+       'Directive''external''(StrLit''''msvcrt.dll''''))';
+     ExpectDiags: 0),
+    (Section: '6.5.1'; Name: 'F10: a method''s convention before its ;';
+     Source: 'type TC = class procedure M stdcall; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ' +
+       'ClassType(Routine''procedure''(Ident''M''#name ' +
+       'Directive''stdcall''))))';
+     ExpectDiags: 0),
+    (Section: '6.5.1'; Name: 'F10: before the ; and after it';
+     Source: 'procedure P(A: Integer) stdcall; overload;';
+     Expected: 'Routine''procedure''(Ident''P''#name ' +
+       'Params(Param(Ident''A''#name Ident''Integer'')) ' +
+       'Directive''stdcall'' Directive''overload'')';
+     ExpectDiags: 0),
+    // dcc: E2029 - no run after a type that is not procedural; it was once
+    // taken silently.
+    (Section: '6.6.1'; Name: 'F2 recovery: no run after an Integer''s ;';
+     Source: 'type T = Integer; stdcall;';
+     Expected: 'TypeSec(TypeDecl(Ident''T'' Ident''Integer'') ' +
+       'TypeDecl(Ident''stdcall'' Error))';
+     ExpectDiags: 3)
   );
 
 { Builds every case that is not a plain dump comparison: the platform matrix

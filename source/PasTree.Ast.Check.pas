@@ -92,9 +92,6 @@ type
                           // behind when an arithmetic operator after it makes
                           // the whole a constant expression that is re-read
                           // from the start (`array[B-1..B]`)
-    csDirectiveInit,      // `X: procedure; cdecl = nil;` - an initializer
-                          // after a trailing directive, parsed and dropped
-                          // (plan finding F1)
     // Reachable, and recognised:
     csTrailingComma,      // the nkMissing closing `F(A, B,)`
     csAfterEnd,           // visible text after the final `end.`: dcc ignores
@@ -136,9 +133,7 @@ type
   TPasOwnCond = (
     wcNone,
     wcNoArgs,       // an attribute with no argument child
-    wcAfterEnd,     // the token after the final `end.` (csAfterEnd)
-    wcOrphanInit    // a token of the initializer a trailing directive drops
-                    // (csDirectiveInit)
+    wcAfterEnd      // the token after the final `end.` (csAfterEnd)
   );
 
   { One rule of the own-token table, parsed from its line. }
@@ -276,8 +271,8 @@ const
     'I8.error', 'I8.missing');
   CHECK_SHAPE_NAMES: array[TPasCheckShape] of string = (
     'orphan: context keyword', 'orphan: type reference re-read',
-    'orphan: initializer after a trailing directive', 'trailing comma',
-    'text after end.', 'fused >= as type-argument close and =');
+    'trailing comma', 'text after end.',
+    'fused >= as type-argument close and =');
 
   PUNCT_TEXT: array[tkPlus..tkAssign] of string = (
     '+', '-', '*', '/', '=', '<>', '<', '>', '<=', '>=', '(', ')', '[', ']',
@@ -299,8 +294,8 @@ const
            and library) and @any.
     Flags  `-`, or any of: head (only the token at the node's FirstToken),
            once / opt (the node owns exactly one / at most one token of the
-           rule; default: any number), when:<condition> (noargs, afterend,
-           orphaninit - see TPasOwnCond). A rule with a condition
+           rule; default: any number), when:<condition> (noargs, afterend
+           - see TPasOwnCond). A rule with a condition
            takes no count: its tokens count for the rule that covers them
            when the condition does not hold.
     Class  derived | leaf | contract | insig | loss:F<n> - see TPasOwnClass.
@@ -314,15 +309,16 @@ const
     set brings in. Two rules claiming one cell alike is a table error.
 
     The finding numbers are the plan's (local/PARSER-FIDELITY-PLAN.md, a
-    working paper): F1 the dropped initializer, F2 calling conventions of
-    procedural types, F3 packed, F4 class abstract/sealed, F9 class
-    threadvar, F10 directives before a routine header's `;`, F11 before an
-    anonymous method's body, F12 a routine's deprecated message, F13 the
-    external clause, F14 the exports clause, F15 the GUID literal, F16
-    numeric labels, F17 program parameters, F18 parameter modes. (F19, where
-    a name list ends, is derived since the names carry nfName - I6 checks the
-    flag against the separators.) }
-  OWN_RULE_TEXT: array[0..242] of string = (
+    working paper): F3 packed, F4 class abstract/sealed, F9 class threadvar,
+    F12 a routine's deprecated message, F13 the external clause, F14 the
+    exports clause, F15 the GUID literal, F16 numeric labels, F17 program
+    parameters, F18 parameter modes. (F19, where a name list ends, is derived
+    since the names carry nfName - I6 checks the flag against the
+    separators. F1, F2, F10 and F11 are gone too: every directive of a
+    procedural type, of a routine header before its `;` and of an anonymous
+    method is an nkDirective child, and the initializer after a procedural
+    type's directives is its declaration's.) }
+  OWN_RULE_TEXT: array[0..234] of string = (
     // ---- leaves: the token is the node's own text ----
     'Ident | <ident> @words @keywords | once | leaf | the name as written; ' +
       'a reserved word only after a dot, as an operator name or as the ' +
@@ -372,8 +368,6 @@ const
     'AnonMethod | procedure function | head once | derived | function when ' +
       'a result type child is there',
     'AnonMethod | : | opt | derived | before the result type',
-    'AnonMethod | @routine | - | loss:F11 | a calling convention before the ' +
-      'body, `function(...): T stdcall begin`, is skipped',
     'NamedArg | := | head once | derived | the kind',
 
     // ---- statements ----
@@ -478,19 +472,12 @@ const
     // ---- declaration sections ----
     'TypeSec | type | head once | derived | the kind',
     'TypeSec | ; | - | derived | after each declaration',
-    'TypeSec | @routine | - | loss:F2 | a calling convention after the ; of ' +
-      'a procedural type, `TFn = function: T; stdcall;`, is skipped',
     'ConstSec | const resourcestring | head once | contract | the head word',
     'ConstSec | ; | - | derived | after each declaration',
     'VarSec | var threadvar | head opt | contract | the head word; a class ' +
       'var run and a section in a struct body have none (F9)',
-    'VarSec | ; | - | derived | after each declaration',
-    'VarSec | @routine | - | loss:F2 | a calling convention after the ; of a ' +
-      'procedural variable, `P: procedure; stdcall;`, is skipped',
-    'VarSec | = | - | loss:F1 | the = of an initializer after such a ' +
-      'convention, `P: procedure; cdecl = nil;`',
-    '* | @any | when:orphaninit | loss:F1 | a token of that initializer: ' +
-      'parsed and never adopted',
+    'VarSec | ; | - | derived | after each declaration; the last of a class ' +
+      'var run or a struct body''s var section may stop at the end',
     'LabelSec | label | head once | derived | the kind',
     'LabelSec | , | - | derived | between the labels',
     'LabelSec | ; | once | derived | the kind',
@@ -509,8 +496,6 @@ const
     'ConstDecl | : | opt | derived | two children after the name: the type ' +
       'and the value',
     'ConstDecl | = | once | derived | the kind',
-    'ConstDecl | ; @routine | - | loss:F2 | the typed-constant twin, ' +
-      '`C: procedure; cdecl = nil;`, skips `; cdecl`',
     'VarDecl | , | - | derived | between the names (nfName)',
     'VarDecl | : | once | derived | the kind: after the names',
     'VarDecl | = | opt | derived | before the initializer',
@@ -551,8 +536,9 @@ const
     'ProcType | : | opt | derived | before the result type',
     'ProcType | of | opt | derived | Aux 1: of object',
     'ProcType | object | opt | derived | Aux 1: of object',
-    'ProcType | @routine | - | loss:F2 | a calling convention written into ' +
-      'the type, `procedure stdcall`, is skipped',
+    'ProcType | ; | opt | insig | before the directives when they follow the ' +
+      'type, `procedure; stdcall`: one type with `procedure stdcall` ' +
+      '(normalization list)',
     'ClassType | class | head once | derived | the kind',
     'ClassType RecordType ObjectType HelperType | class | - | derived | ' +
       'before each member whose Aux is 1: class method, property, var',
@@ -568,8 +554,6 @@ const
       'its ancestors, `class(TBase);` - no mark (normalization list)',
     'ClassType | abstract sealed | - | loss:F4 | `class abstract` and ' +
       '`class sealed` are skipped',
-    'ClassType RecordType ObjectType | @routine | - | loss:F2 | a calling ' +
-      'convention after the ; of a procedural field is skipped',
     'ClassType RecordType HelperType | var | - | derived | the head of a ' +
       'VarSec child, outside its span: var (Aux nil) or class var (Aux 1) ' +
       '(F9)',
@@ -601,9 +585,9 @@ const
     'Routine | . | - | derived | between the name segments (nfName)',
     'Routine | : | opt | derived | before the result type',
     'Routine | ; | - | derived | after the header, each directive and the ' +
-      'body; the last directive''s may be missing (normalization list)',
-    'Routine | @routine | - | loss:F10 | a directive before the header''s ;, ' +
-      '`function F: Bool stdcall;`, is skipped',
+      'body; the last directive''s may be missing, and the header''s may ' +
+      'follow directives written before it, `function F: Bool stdcall;` ' +
+      '(normalization list)',
     'Params | ( [ | head once | derived | [ for the index parameters of a ' +
       'property',
     'Params | ) ] | once | derived | closes the list',
@@ -967,8 +951,6 @@ begin
           LRule.Cond := wcNoArgs
         else if LField = 'when:afterend' then
           LRule.Cond := wcAfterEnd
-        else if LField = 'when:orphaninit' then
-          LRule.Cond := wcOrphanInit
         else
           Fail('no flag ' + LField);
 
@@ -993,8 +975,8 @@ begin
       // named kinds; a count belongs to the rule without a condition.
       if (LRule.Cond <> wcNone) and (LRule.Mult <> omMany) then
         Fail('a rule with a condition takes no count')
-      else if LRule.AllKinds <> (LRule.Cond in [wcAfterEnd, wcOrphanInit]) then
-        Fail('`*` goes with when:afterend or when:orphaninit, and they with it')
+      else if LRule.AllKinds <> (LRule.Cond = wcAfterEnd) then
+        Fail('`*` goes with when:afterend, and it with `*`')
       else if LRule.AllKinds then
       begin
         if LRule.Kinds <> [] then
@@ -1145,9 +1127,7 @@ var
   // stopped it.
   LKidCount: TArray<Integer>;
   LKids: TArray<Integer>;   // SettlePlaceholders' scratch: one child list
-  // I5: the tokens of csDirectiveInit orphans (nil while there is none), and
-  // the token after the final `end.` (-1: no csAfterEnd).
-  LInOrphanInit: TArray<Boolean>;
+  // I5: the token after the final `end.` (-1: no csAfterEnd).
   LAfterEnd: Integer;
   LNode, LPos, LSize: Integer;
   LRec: TPasNode;
@@ -1210,13 +1190,6 @@ var
       if SliceEqualsWord(LText, LLen, LWord) then
         Exit(True);
     Result := False;
-  end;
-
-  // TPasParser.IsDirectiveWord's test, from the token alone.
-  function DirectiveWordAt(AVis: Integer): Boolean;
-  begin
-    Result := (TokKind(AVis) in [tkInline, tkLibrary]) or
-      WordAt(AVis, ROUTINE_DIRECTIVE_WORDS);
   end;
 
   // Depth-first from ARoot over the child lists, marking AState; appends to
@@ -1489,7 +1462,6 @@ var
   procedure ClassifyOrphan(ARoot, ASize: Integer);
   var
     LOrphan: TPasCheckOrphan;
-    LTok: Integer;
   begin
     LOrphan.Root := ARoot;
     LOrphan.Size := ASize;
@@ -1499,10 +1471,6 @@ var
        (ATree.Nodes[ARoot].FirstToken = ATree.Nodes[ARoot].LastToken) and
        WordAt(ATree.Nodes[ARoot].FirstToken, CONTEXT_WORDS) then
       LOrphan.Shape := csContextKeyword
-    else if not LEmpty[ARoot] and (LLo[ARoot] >= 2) and
-       (TokKind(LLo[ARoot] - 1) = tkEqual) and
-       DirectiveWordAt(LLo[ARoot] - 2) then
-      LOrphan.Shape := csDirectiveInit
     else if not LEmpty[ARoot] and (TokKind(LHi[ARoot] + 1) in REREAD_TOKENS)
        and ReReadCovers(ARoot) then
       LOrphan.Shape := csTypeRefReread
@@ -1514,15 +1482,6 @@ var
       AReport.Add(ccOrphan, ARoot, Site(ARoot), Format(
         'unreachable %s subtree, %d node(s), of no known shape',
         [KName(ARoot), ASize]));
-    // I5: the dropped initializer's tokens are owned by whatever reachable
-    // node spans them; its own rule classifies them (wcOrphanInit).
-    if LOrphan.Known and (LOrphan.Shape = csDirectiveInit) then
-    begin
-      if LInOrphanInit = nil then
-        SetLength(LInOrphanInit, LLastVis + 1);
-      for LTok := LLo[ARoot] to LHi[ARoot] do
-        LInOrphanInit[LTok] := True;
-    end;
     if AReport.OrphanCount = Length(AReport.Orphans) then
       SetLength(AReport.Orphans, AReport.OrphanCount * 2 + 8);
     AReport.Orphans[AReport.OrphanCount] := LOrphan;
@@ -1555,9 +1514,6 @@ var
     if (ATok = LAfterEnd) and (ANode = 0) and
        (GOwnGlobal[wcAfterEnd] >= 0) then
       Exit(GOwnGlobal[wcAfterEnd]);
-    if (LInOrphanInit <> nil) and LInOrphanInit[ATok] and
-       (GOwnGlobal[wcOrphanInit] >= 0) then
-      Exit(GOwnGlobal[wcOrphanInit]);
     LKind := Kind(ANode);
     LHead := ATok = ATree.Nodes[ANode].FirstToken;
     APrimary := GOwnPrimary[OwnSlot(LKind, ACell, LHead)];
@@ -1979,7 +1935,6 @@ begin
   SetLength(LOwner, LLastVis + 1);
   for LPos := 0 to LLastVis do
     LOwner[LPos] := NIL_NODE;
-  LInOrphanInit := nil;
   LAfterEnd := -1;
 
   // I1, indices. A node whose tokens are out of range stays out of every

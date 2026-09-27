@@ -4626,6 +4626,54 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { A directive is not a result type (the parser-fidelity plan, F2/F11): a
+    `procedure stdcall` literal is a procedure, and so is a `reference to
+    procedure stdcall` type. Read as functions, both fitted the PRIVATE
+    function overload declared first - an E2361 and the wrong target. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_anondir');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ADHost.pas'),
+    'unit ADHost;'#10'interface'#10 +
+    'type'#10 +
+    '  TFuncRef = reference to function: Integer stdcall;'#10 +
+    '  TProcRef = reference to procedure stdcall;'#10 +
+    '  TSync = class'#10 +
+    '  private'#10 +
+    '    class procedure Run(AFunc: TFuncRef); overload;'#10 +
+    '  public'#10 +
+    '    class procedure Run(AProc: TProcRef); overload;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'class procedure TSync.Run(AFunc: TFuncRef);'#10'begin end;'#10 +
+    'class procedure TSync.Run(AProc: TProcRef);'#10'begin end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ADUse.pas'),
+    'unit ADUse;'#10'interface'#10'uses ADHost;'#10 +
+    'procedure P;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'begin'#10 +
+    '  TSync.Run(procedure stdcall'#10 +
+    '    begin'#10 +
+    '    end);'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportVisibility := True;
+    GProj.AnalyzeDirectory(LDir);
+    Ok('anondir: a procedure literal with a convention is a procedure',
+      DiagCount(ModelByName('aduse'), 'E2361') = 0);
+    Ok('anondir: ...and the call binds to the procedure overload',
+      CrossRefTo(ModelByName('aduse'), 'Run', 'Run'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   { 16.4.1: a value typed by an unbound type PARAMETER has the members its
     CONSTRAINT guarantees. System.Win.WinRT's `class var FFactory: F` with
     `F: IInspectable` is the shape - every `FFactory._AddRef` there was a false

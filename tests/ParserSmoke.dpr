@@ -193,12 +193,36 @@ begin
           N(nkExprStmt, 4, 4, 1), N(nkIdent, 4, 4, 3)]), 1, 0,
           'IfStmt owning two then');
       end),
-    // The parser's own tree: `stdcall` after the `;` is F2, counted.
+    // The parser's own tree: a parameter's `const` is F18, counted.
     OwnCase('a loss is counted, not a violation',
       function: TPasCheckResult
       begin
-        Result := LossCase(APP, 'type TFn = procedure; stdcall;', 'F2', 1,
-          'stdcall');
+        Result := LossCase(APP, 'procedure P(const A: Integer);', 'F18', 1,
+          'const');
+      end),
+    // F1, F2 and F10 are no loss any more: the directives are nkDirective
+    // children, the `;` before a procedural type's run is its own token,
+    // and the initializer after the run is the declaration's - every token
+    // covered, none counted.
+    OwnCase('F2: a procedural type''s directives are nodes',
+      function: TPasCheckResult
+      begin
+        Result := LossCase(APP, 'type TFn = procedure; stdcall; ' +
+          'TG = function(A: Integer): Integer cdecl varargs; ' +
+          'TH = procedure stdcall of object;', 'F2', 0, '');
+      end),
+    OwnCase('F1: the initializer after the directives is adopted',
+      function: TPasCheckResult
+      begin
+        Result := LossCase(APP, 'var P: procedure; cdecl = nil; ' +
+          'Q: array[0..1] of procedure; stdcall;', 'F1', 0, '');
+      end),
+    OwnCase('F10: directives before a header''s ; are nodes',
+      function: TPasCheckResult
+      begin
+        Result := LossCase(APP, 'function F: Boolean stdcall; ' +
+          'function G(A: PAnsiChar): Integer cdecl varargs; external ''m'';',
+          'F10', 0, '');
       end),
     // F19 is no loss any more: the names carry nfName, so the separators of
     // `P, T: C` and `P: T = C` are derived and no rule counts them.

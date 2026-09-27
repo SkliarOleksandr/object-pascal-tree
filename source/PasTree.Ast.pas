@@ -64,7 +64,9 @@ type
     nkRange,          // a..b (case labels, set elements)
     nkInlineIf,       // if c then a else b expression (5.4.1)
     nkInherited,      // inherited [name] (12.1.2)
-    nkAnonMethod,     // anonymous method literal (17.2.1); minimal v1
+    nkAnonMethod,     // anonymous method literal (17.2.1): [params], [result
+                      // type], nkDirective... (`stdcall` before the body),
+                      // nkRoutineBody
     nkAnonParams,     // RETIRED (anon methods emit real nkParams now); kept
                       // so existing kind ordinals stay stable
 
@@ -130,7 +132,9 @@ type
     nkPointerType,    // ^T (10.1.1)
     nkStringType,     // string[N] (7.1.3)
     nkClassOf,        // class of T (15.2.1); Aux = 1: type of T (15.2.2)
-    nkProcType,       // procedure/function type (6.6.1);
+    nkProcType,       // procedure/function type (6.6.1): [params], [result
+                      // type], nkDirective... (the calling convention and
+                      // the rest, written into the type or after a `;`);
                       // Aux: 1 = of object, 2 = reference to
     nkClassType,      // 11.1.1; Aux: 1 = forward declaration
     nkRecordType,     // 9.x
@@ -145,7 +149,8 @@ type
     nkRoutine,        // procedure/function/constructor/destructor/operator;
                       // children: name segments (nfName), each with its
                       // [generic params], [params], [result type],
-                      // directives..., [body]
+                      // directives... (before the header's `;` and after
+                      // it, alike), [body]
     nkParams,
     // 6.2. Aux = the visible-token index of an `out` modifier, -1 otherwise.
     // `var` and `const` need no such mark: they are reserved words and a lexer

@@ -20,7 +20,10 @@ preprocessor + parser - not regex approximations.
     ONLY where the AST proves them to be directives (nkDirective /
     nkVisibility / nkPropSpec node spans). The same words as plain
     identifiers stay identifier-colored. Requires a successful parse;
-    falls back to the flat 59-word `DIRECTIVE_WORDS` list otherwise.
+    falls back to the flat 59-word `DIRECTIVE_WORDS` list otherwise. Every
+    directive the parser takes is a node - a procedural type's (`procedure
+    stdcall`, `function: T; cdecl`), one before a routine header's `;` and
+    one before an anonymous method's body included (0.60.0).
 
 1.3 **Inactive-code greying** - tokens inside `$IFDEF`'d-out regions
     (`TPasPreprocessed.Skipped`) render `clGrayText`, checked before any

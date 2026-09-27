@@ -2088,7 +2088,10 @@ begin
             LChild := NextSib(LChild);
             Continue;
           end;
-          if not (KindOf(LChild) in [nkAnonParams, nkRoutineBody]) and
+          // The result type is the child that is neither the parameters, a
+          // directive (`procedure stdcall begin`) nor the body.
+          if not (KindOf(LChild) in [nkAnonParams, nkDirective,
+             nkRoutineBody]) and
              (FModel.FindLocal(LAnon, 'result') = NIL_SYM) then
           begin
             var LRes := FModel.AddSymbol(LAnon, skVar, 'Result', NIL_NODE,

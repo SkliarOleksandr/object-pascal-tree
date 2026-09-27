@@ -64,6 +64,12 @@ type
     // (see ParseTypeExpr for where, and where not). Read and cleared by
     // ParseTypeExpr on entry.
     FEqEndsBound: Boolean;
+    // Set while parsing the declared type of a declaration - a type, a
+    // variable of any section, a field, a typed or inline constant, an inline
+    // var: a procedural type that closes it may take a directive run after a
+    // `;` (see ParseProcTypeExpr). Read and cleared by ParseTypeExpr on entry,
+    // like FEqEndsBound.
+    FProcTail: Boolean;
     FStuckCount: Integer;
     // Watchdogs (see notes on ParseGuard):
     FFuel: Int64;              // decremented in CurKind; trips at 0
@@ -153,8 +159,14 @@ type
     procedure ParseHintsOpt(ANode: Integer);
     function ParseTypeExpr: Integer;
     function ParseEnumType: Integer;
-    function ParseArrayType(AEqualEnds: Boolean): Integer;
-    function ParseProcTypeExpr(ARefTo: Boolean): Integer;
+    function ParseArrayType(AEqualEnds, AProcTail: Boolean): Integer;
+    function ParseProcTypeExpr(ARefTo, ATail: Boolean): Integer;
+    { A run of directive words at the cursor, each an nkDirective of AOwner -
+      a routine's before its header's `;`, an anonymous method's before its
+      body, a procedural type's. AHints: the hint words (deprecated,
+      platform, experimental, library) belong to the run too; after a
+      procedural type they are the declaration's (ParseHintsOpt). }
+    procedure ParseDirectiveRun(AOwner: Integer; AHints: Boolean);
     function ParseClassLike(AHeadKind: TPasTokenKind): Integer;
     procedure ParseMemberList(AOwner: Integer);
     procedure ParseVariantPart(AOwner: Integer);
@@ -175,6 +187,8 @@ type
     function DirectiveNameStartsDecl: Boolean;
     function IsDirectiveWord: Boolean; overload;
     function IsDirectiveWord(AVisIndex: Integer): Boolean; overload;
+    function IsHintWord(AVisIndex: Integer): Boolean;
+    function IsCallConvStarter(AVisIndex: Integer): Boolean;
     function IsVisibilityWord: Boolean;
     { Error recovery inside a type / const / var section.
 
@@ -219,7 +233,6 @@ type
     function AtLineDeclHead: Boolean;
     procedure SkipToDeclHead;
     procedure MarkContextKeyword;
-    procedure ConsumeTrailingDirectives(AAllowInitializer: Boolean);
     procedure ParseDeclSections(AParent: Integer; AAllowBodies: Boolean;
       const ATerminators: array of TPasTokenKind);
   public
@@ -775,10 +788,12 @@ begin
           Next;
           FB.Adopt(LNode, ParseTypeRef);
         end;
-        // Inline conventions before the body are legal:
-        // function(AResult: HResult): HResult stdcall begin (Vcl.Edge.pas)
-        while IsDirectiveWord do
-          Next;
+        // Directives before the body, each a child (6.5.1, 17.2.1):
+        // function(AResult: HResult): HResult stdcall begin (Vcl.Edge.pas).
+        // dcc64 37.0 takes the conventions, far, near, export, assembler and
+        // varargs there, and the method's type follows them (a stdcall one
+        // assigned to a plain `reference to` is E2010).
+        ParseDirectiveRun(LNode, True);
         // The body is a full routine body: anonymous methods may declare
         // locals - function(...): TValue var fx: Extended; begin ... end
         // (System.Bindings.EvalSys.pas) - and even nested routines.
@@ -1463,12 +1478,18 @@ begin
     // Byte;` and `var S: set of Byte;` are dcc64-valid and used to be a hard
     // "type expected" here (3.1.3). An inline const's `=` introduces its
     // value, as a typed constant's does (dcc wants a type NAME there - E2622
-    // - so this only shapes the recovery; see ParseTypeExpr).
+    // - so this only shapes the recovery; see ParseTypeExpr). A procedural
+    // type may take its directives after a `;` here too, and an inline const
+    // does take one: `var P: procedure; stdcall := SP;`, `const C:
+    // procedure; cdecl = CP;` and `var P: procedure; stdcall end` compile
+    // (dcc64 37.0).
     FEqEndsBound := AConst;
+    FProcTail := True;
     try
       FB.Adopt(Result, ParseTypeExpr);
     finally
       FEqEndsBound := False;
+      FProcTail := False;
     end;
   end;
   if (CurKind = tkAssign) or (AConst and (CurKind = tkEqual)) then
@@ -1848,7 +1869,7 @@ end;
 function TPasParser.ParseTypeExpr: Integer;
 var
   LNode, LExpr, LStart: Integer;
-  LEqEnds: Boolean;
+  LEqEnds, LProcTail: Boolean;
 begin
   if not EnterGuard then
   begin
@@ -1857,10 +1878,13 @@ begin
     LeaveGuard;
     Exit;
   end;
-  // The flag is this type's alone: a nested type sees it only where it
-  // closes this one (set of, an array's element).
+  // The flags are this type's alone: a nested type sees them only where it
+  // closes this one (set of, an array's element; FProcTail also under
+  // `packed` - `var A: packed array[0..1] of procedure; stdcall;` compiles).
   LEqEnds := FEqEndsBound;
   FEqEndsBound := False;
+  LProcTail := FProcTail;
+  FProcTail := False;
   try
   // The head of the NEXT declaration, on its own line, where a type was due:
   // the author has not typed the type yet (`E` above `Reserve: ...`, `TArr =
@@ -1875,10 +1899,11 @@ begin
     tkPacked:
       begin
         Next; // packing recorded implicitly by the token span
-        Exit(ParseTypeExpr);   // the flag stays off under `packed` - see above
+        FProcTail := LProcTail;
+        Exit(ParseTypeExpr);   // FEqEndsBound stays off under `packed` - see above
       end;
     tkArray:
-      Exit(ParseArrayType(LEqEnds));
+      Exit(ParseArrayType(LEqEnds, LProcTail));
     tkSet:
       begin
         LNode := FB.AddNode(nkSetType, NIL_NODE, FPos);
@@ -1938,7 +1963,7 @@ begin
         Exit(FB.AddNode(nkError, NIL_NODE, FPos));
       end
       else
-        Exit(ParseProcTypeExpr(False));
+        Exit(ParseProcTypeExpr(False, LProcTail));
     tkLParen:
       Exit(ParseEnumType);
     tkString:
@@ -1965,7 +1990,9 @@ begin
           MarkContextKeyword; // color 'reference' (lexed as an identifier)
           Next; // reference
           Next; // to
-          Exit(ParseProcTypeExpr(True));
+          // No directive run after a `;` (`reference to procedure; stdcall;`
+          // is E2029, dcc64 37.0) - only the one written into the type.
+          Exit(ParseProcTypeExpr(True, False));
         end;
         // Type-context: generics always bind (16.3); may be a subrange lo.
         LStart := FPos;
@@ -2067,10 +2094,10 @@ begin
   FB.SetLast(Result, FPos - 1);
 end;
 
-// AEqualEnds: the array closes a var's or typed constant's type, so its
-// element type does too (see ParseTypeExpr); the index types, inside their
-// brackets, never do.
-function TPasParser.ParseArrayType(AEqualEnds: Boolean): Integer;
+// AEqualEnds, AProcTail: the array closes a var's or typed constant's type
+// (a declaration's type), so its element type does too (see ParseTypeExpr);
+// the index types, inside their brackets, never do.
+function TPasParser.ParseArrayType(AEqualEnds, AProcTail: Boolean): Integer;
 begin
   // 8.1/8.2: array [dims] of (const | T)
   Result := FB.AddNode(nkArrayType, NIL_NODE, FPos);
@@ -2097,14 +2124,43 @@ begin
   else
   begin
     FEqEndsBound := AEqualEnds;
+    FProcTail := AProcTail;
     FB.Adopt(Result, ParseTypeExpr);
   end;
   FB.SetLast(Result, FPos - 1);
 end;
 
-function TPasParser.ParseProcTypeExpr(ARefTo: Boolean): Integer;
+{ 6.6.1 procedural types; of object / reference to variants. Every directive
+  is an nkDirective child after the parameters and the result type, in the
+  order written - dcc64 37.0 takes them in two places (probed 2026-09-27):
+
+  - written into the type, before and after `of object`: `procedure stdcall`,
+    `function(A: Integer): Integer cdecl`, `procedure stdcall of object`. The
+    conventions (register pascal cdecl stdcall safecall winapi), far, near,
+    varargs, overload, export and assembler; a hint after the type is the
+    DECLARATION's (`T = procedure library;` warns W1001 of T), so the run
+    leaves the hint words to ParseHintsOpt.
+  - after a `;`, where the type closes a declaration's type (ATail - a type,
+    a variable, a field, a typed or inline constant, an inline var, directly
+    or as an array's element): `TFn = function: T; stdcall;`, `P: procedure;
+    cdecl = nil;`, `A: array[0..1] of procedure; stdcall;`. One run, and
+    only a convention, far or near starts it - taken whatever follows, as dcc
+    does: after `var P: procedure;` a statement `pascal;` is P's convention,
+    not a call, while `varargs: Integer` is the next variable. The run ends
+    where the declaration goes on: `;`, the `=` or `:=` of an initializer, a
+    field list's `end` or `)`. Not after `reference to` (E2029). The run was
+    once read by the SECTION after any declaration's `;`, and a directive
+    word naming the next declaration went with it: a component suite's
+    `Unsafe = class` after a method, and everything after it - 283 false
+    E2003. Behind a procedural type only, and from a convention on, no
+    declaration can be reached.
+
+  The `;` of the second form is the type's own token - `procedure; stdcall`
+  and `procedure stdcall` are one type, and the printer's normalization list
+  says so. The last convention wins (`procedure stdcall; cdecl` is cdecl);
+  the tree keeps every one. }
+function TPasParser.ParseProcTypeExpr(ARefTo, ATail: Boolean): Integer;
 begin
-  // 6.6.1 procedural types; of object / reference to variants.
   Result := FB.AddNode(nkProcType, NIL_NODE, FPos);
   if ARefTo then
     FB.SetAux(Result, 2);
@@ -2116,17 +2172,34 @@ begin
     Next;
     FB.Adopt(Result, ParseTypeExpr);
   end;
+  ParseDirectiveRun(Result, False);
   if (CurKind = tkOf) and (PeekKind(1) = tkObject) then
   begin
     FB.SetAux(Result, 1);
     Next;
     Next;
+    ParseDirectiveRun(Result, False);
   end;
-  // Inline calling convention without a separating semicolon:
-  // TFoo = procedure stdcall;
-  while IsDirectiveWord do
-    Next;
+  if ATail and not ARefTo and (CurKind = tkSemicolon) and
+     IsCallConvStarter(FPos + 1) then
+  begin
+    Next; // ';'
+    ParseDirectiveRun(Result, False);
+  end;
   FB.SetLast(Result, FPos - 1);
+end;
+
+procedure TPasParser.ParseDirectiveRun(AOwner: Integer; AHints: Boolean);
+var
+  LDir: Integer;
+begin
+  while IsDirectiveWord and (AHints or not IsHintWord(FPos)) do
+  begin
+    LDir := FB.AddNode(nkDirective, NIL_NODE, FPos);
+    Next;
+    FB.SetLast(LDir, FPos - 1);
+    FB.Adopt(AOwner, LDir);
+  end;
 end;
 
 function TPasParser.ParseClassLike(AHeadKind: TPasTokenKind): Integer;
@@ -2406,7 +2479,15 @@ begin
         Continue;
       Break;
     end;
-    FB.Adopt(LDecl, ParseTypeExpr);
+    // A procedural field may take its directives after a `;`, the last
+    // field of a list before the `end` or `)` too: `F: procedure; stdcall
+    // end` (see ParseProcTypeExpr).
+    FProcTail := True;
+    try
+      FB.Adopt(LDecl, ParseTypeExpr);
+    finally
+      FProcTail := False;
+    end;
     ParseHintsOpt(LDecl);
     FB.SetLast(LDecl, FPos - 1);
     FB.Adopt(AOwner, LDecl);
@@ -2414,7 +2495,6 @@ begin
       Next
     else
       Break;
-    ConsumeTrailingDirectives(False);
     if AtAny(ATerminators) then
       Break;
     // Non-field successor ends the field run (methods, visibility, ...).
@@ -2685,9 +2765,8 @@ end;
   plus everything the interface declared AFTER it - was lost. 156 `Unsafe` and
   127 `EdxException` false E2003 across one component library, from one word.
 
-  ParseTypeDirectives already applies the same discipline by a different route
-  ("the run must terminate with ';' - otherwise the word is the next
-  declaration's name"); this is the routine-directive side of it. }
+  A procedural type's directives after a `;` avoid the trap by a different
+  route: only a calling convention starts that run (ParseProcTypeExpr). }
 function TPasParser.DirectiveNameStartsDecl: Boolean;
 begin
   Result := (CurKind = tkIdentifier) and (FPos < FLast) and
@@ -2722,6 +2801,52 @@ begin
               High(PasTree.Types.ROUTINE_DIRECTIVE_WORDS) do
     if SliceEqualsWord(LText, LLen, PasTree.Types.ROUTINE_DIRECTIVE_WORDS[LIdx])
     then
+      Exit(True);
+  Result := False;
+end;
+
+// A hint directive (2.5.2): deprecated, platform, experimental - identifiers
+// - or the reserved word library.
+function TPasParser.IsHintWord(AVisIndex: Integer): Boolean;
+var
+  LText: PChar;
+  LLen: Integer;
+begin
+  if AVisIndex > FLast then
+    AVisIndex := FLast;
+  case FSrc.VisibleToken(AVisIndex).Kind of
+    tkLibrary:
+      Exit(True);
+    tkIdentifier:
+      begin
+        FSrc.VisibleSlice(AVisIndex, LText, LLen);
+        Result := SliceEqualsWord(LText, LLen, 'deprecated') or
+          SliceEqualsWord(LText, LLen, 'platform') or
+          SliceEqualsWord(LText, LLen, 'experimental');
+      end;
+  else
+    Result := False;
+  end;
+end;
+
+// What starts a procedural type's directive run after a `;` (dcc64 37.0,
+// see ParseProcTypeExpr): a calling convention, far or near - never varargs,
+// overload, export or assembler, which may only follow one.
+function TPasParser.IsCallConvStarter(AVisIndex: Integer): Boolean;
+const
+  STARTERS: array[0..7] of string = ('register', 'pascal', 'cdecl',
+    'stdcall', 'safecall', 'winapi', 'far', 'near');
+var
+  LText: PChar;
+  LLen: Integer;
+  LWord: string;
+begin
+  if (AVisIndex > FLast) or
+     (FSrc.VisibleToken(AVisIndex).Kind <> tkIdentifier) then
+    Exit(False);
+  FSrc.VisibleSlice(AVisIndex, LText, LLen);
+  for LWord in STARTERS do
+    if SliceEqualsWord(LText, LLen, LWord) then
       Exit(True);
   Result := False;
 end;
@@ -2820,65 +2945,6 @@ begin
   FB.AddNode(nkDirective, NIL_NODE, FPos);   // FirstToken = LastToken = FPos
 end;
 
-procedure TPasParser.ConsumeTrailingDirectives(AAllowInitializer: Boolean);
-
-  function IsDirectiveWordAt(AIdx: Integer): Boolean;
-  var
-    LSave: Integer;
-  begin
-    LSave := FPos;
-    FPos := AIdx;
-    Result := IsDirectiveWord;
-    FPos := LSave;
-  end;
-
-var
-  LProbe: Integer;
-begin
-  // Post-semicolon directives after procedural-type declarations. Runs of
-  // several directives without separators are legal:
-  //   TFn = function(...): X; stdcall;
-  //   curl_formadd: function(...): CURLFORMcode; cdecl varargs;
-  // The run must terminate with ';' - otherwise the word is the next
-  // declaration's name (e.g. a variable named `index`), and we leave it.
-  while IsDirectiveWord do
-  begin
-    LProbe := FPos;
-    while (LProbe <= FLast) and IsDirectiveWordAt(LProbe) do
-      Inc(LProbe);
-    if (LProbe <= FLast) and
-       (FSrc.VisibleToken(LProbe).Kind = tkStringLiteral) then
-      Inc(LProbe);
-    // Initialized procedural-type variables put the initializer AFTER the
-    // convention: `X: procedure; cdecl = nil;` (IdSSLOpenSSLHeaders.pas).
-    //
-    // AAllowInitializer gates it, and the gate is the whole point: in a TYPE or
-    // CONST section an identifier followed by '=' is the NEXT DECLARATION, not
-    // an initializer - and if that identifier happens to be a directive word,
-    // this branch swallowed the entire declaration. That same core unit
-    // declares `Unsafe = class`, so `Unsafe`, everything the interface declared
-    // after it, and every use of any of it across the library became a false
-    // E2003 - 283 of them from this one branch. Only a VAR section can
-    // legitimately reach an '=' here.
-    if AAllowInitializer and
-       (LProbe <= FLast) and (FSrc.VisibleToken(LProbe).Kind = tkEqual) then
-    begin
-      while FPos < LProbe do
-        Next;
-      Next; // '='
-      ParseConstInitializer(True);
-      Expect(tkSemicolon, '";"');
-      Continue;
-    end;
-    if (LProbe > FLast) or (FSrc.VisibleToken(LProbe).Kind <> tkSemicolon)
-    then
-      Break;
-    while FPos < LProbe do
-      Next;
-    Expect(tkSemicolon, '";"');
-  end;
-end;
-
 function TPasParser.ParseRoutineDirectives(ARoutine: Integer): Boolean;
 var
   LDir: Integer;
@@ -2961,7 +3027,7 @@ end;
 
 function TPasParser.ParseRoutine(AClassMethod, AAllowBody: Boolean): Integer;
 var
-  LSeg, LGen, LRes: Integer;
+  LSeg, LGen, LRes, LProbe: Integer;
   LIsOperator: Boolean;
 begin
   // 6.1: [class] procedure|function|constructor|destructor|operator
@@ -3059,10 +3125,17 @@ begin
     LRes := ParseTypeExpr;
     FB.Adopt(Result, LRes);
   end;
-  // Calling convention without a separating semicolon:
-  // function Foo(...): Bool stdcall;  (System.SysUtils.pas)
-  while IsDirectiveWord and (PeekKind(1) = tkSemicolon) do
-    Next;
+  // Directives before the header's `;`, children like the ones after it:
+  // `function Foo(...): Bool stdcall;` (System.SysUtils.pas), `function
+  // printf(...): Integer cdecl varargs;`. dcc64 37.0 takes the conventions,
+  // far, near, overload, varargs, export and assembler there (6.5.1); the
+  // run must end at the `;`, or it is left alone.
+  LProbe := FPos;
+  while (LProbe <= FLast) and IsDirectiveWord(LProbe) do
+    Inc(LProbe);
+  if (LProbe > FPos) and (LProbe <= FLast) and
+     (FSrc.VisibleToken(LProbe).Kind = tkSemicolon) then
+    ParseDirectiveRun(Result, True);
   Expect(tkSemicolon, '";"');
   if not ParseRoutineDirectives(Result) then
     if AAllowBody then
@@ -3364,14 +3437,20 @@ begin
         FB.SetAux(LDecl, 1);
         Next;
       end;
-      FB.Adopt(LDecl, ParseTypeExpr);
+      // `TFn = function: T; stdcall;` - the run after the `;` is the
+      // procedural type's (see ParseProcTypeExpr).
+      FProcTail := True;
+      try
+        FB.Adopt(LDecl, ParseTypeExpr);
+      finally
+        FProcTail := False;
+      end;
     end;
     ParseHintsOpt(LDecl);
     FB.SetLast(LDecl, FPos - 1);
     FB.Adopt(Result, LDecl);
     if not Expect(tkSemicolon, '";"') then
       SkipToDeclHead;
-    ConsumeTrailingDirectives(False);   // a type decl name may BE a directive word
     if IsVisibilityWord then
       Break;
   end;
@@ -3380,7 +3459,7 @@ end;
 
 function TPasParser.ParseConstSection(AHeadless: Boolean): Integer;
 var
-  LDecl, LAttrs, LType, LProbe: Integer;
+  LDecl, LAttrs: Integer;
   LHasType, LHasEq: Boolean;
 begin
   // 3.2: const/resourcestring entries.
@@ -3407,32 +3486,19 @@ begin
         Error('type expected')
       else
       begin
+        // A typed procedural constant may carry its calling convention after
+        // a `;`, before the initializer - `exec: procedure(); cdecl = nil;`
+        // (an image library's plugin unit): the procedural type's run (see
+        // ParseProcTypeExpr).
         FInitFollows := True;
         FEqEndsBound := True;
+        FProcTail := True;
         try
-          LType := ParseTypeExpr;
+          FB.Adopt(LDecl, ParseTypeExpr);
         finally
           FInitFollows := False;
           FEqEndsBound := False;
-        end;
-        FB.Adopt(LDecl, LType);
-        // A typed procedural constant may carry its calling convention
-        // between the type and the initializer, after a semicolon:
-        //   exec: procedure(); cdecl = nil;   (an image library's plugin unit)
-        // dcc accepts it (probed 2026-09-16). The var-section twin lives in
-        // ConsumeTrailingDirectives; here only the shape `; directive+ =` is
-        // taken, and only after a procedural type, so a missing initializer
-        // followed by a constant that happens to be NAMED like a directive
-        // (`index = 3`) still recovers as its own declaration.
-        if (CurKind = tkSemicolon) and (FB.Kind(LType) = nkProcType) then
-        begin
-          LProbe := FPos + 1;
-          while (LProbe <= FLast) and IsDirectiveWord(LProbe) do
-            Inc(LProbe);
-          if (LProbe > FPos + 1) and (LProbe <= FLast) and
-             (FSrc.VisibleToken(LProbe).Kind = tkEqual) then
-            while FPos < LProbe do
-              Next;
+          FProcTail := False;
         end;
       end;
     end;
@@ -3459,7 +3525,6 @@ begin
     FB.Adopt(Result, LDecl);
     if not Expect(tkSemicolon, '";"') then
       SkipToDeclHead;
-    ConsumeTrailingDirectives(False);   // ditto for a const name
     if IsVisibilityWord then
       Break;
   end;
@@ -3524,13 +3589,18 @@ begin
       FB.Adopt(Result, LDecl);
       Continue;
     end;
+    // A procedural variable may take its directives after a `;`, and its
+    // initializer after them: `P: procedure; cdecl = nil;` (see
+    // ParseProcTypeExpr) - the initializer is this declaration's, as any.
     FInitFollows := True;
     FEqEndsBound := not (AClassVar or AInStruct);
+    FProcTail := True;
     try
       FB.Adopt(LDecl, ParseTypeExpr);
     finally
       FInitFollows := False;
       FEqEndsBound := False;
+      FProcTail := False;
     end;
     // Hints may sit BETWEEN the type and the initializer:
     // Default8087CW: Word platform = $033F;  (System.pas)
@@ -3550,13 +3620,15 @@ begin
       FB.Adopt(LDecl, ParseConstInitializer(True));
     end;
     ParseHintsOpt(LDecl);
-    // Exported-var conventions: `var X: T; cvar; external ...` are C++-ish;
-    // plain hint loop already consumed deprecated/platform.
     FB.SetLast(LDecl, FPos - 1);
     FB.Adopt(Result, LDecl);
+    // In a struct body the last declaration may stop at the `end`, as a
+    // field does: `class var F: Integer end` and `record var F: Integer end`
+    // compile (dcc64 37.0).
+    if (AClassVar or AInStruct) and (CurKind = tkEnd) then
+      Break;
     if not Expect(tkSemicolon, '";"') then
       SkipToDeclHead;
-    ConsumeTrailingDirectives(True);
   end;
   FB.SetLast(Result, FPos - 1);
 end;
