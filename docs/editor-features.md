@@ -167,6 +167,7 @@ identifier class does here:
 | 5 | A class method's parameter, from the class body or the implementation | both headers + the body's uses | OK |
 | 6 | A routine NAME with two headers (`forward`, method impl) | both headers + every call site | OK |
 | 6a | ...started FROM a method's qualified implementation header (`procedure TFoo.Bar;`), or from its class qualifier | the same - the header's name is answered structurally, overload-precisely, and the qualifier answers with the class | OK (0.39.1 - `ImplHeaderSym`; that header names no symbol, so `SymbolAt` used to decline it and Rename, Find References and the rest were all dead on the implementation side of every method) |
+| 6b | A TYPE whose methods are implemented as `procedure TFoo.Bar;` - nested (`TOuter.TInner.Zap`), generic (`TBox<T>.Put`) and record methods included | declaration + every use + its name in every implementation header it qualifies, only the segment that names it | OK (0.56.0 - `ImplQualifierNodes`; the resolver binds no qualifier segment, so until then a class rename left every method implementation spelling the old name: E2003 on each) |
 | 7 | Implicit `Result` | nothing - refused, no declaration site to rename | OK (by design, 3.3) |
 | 8 | A compiler builtin (`Integer`, `Length`, `True`) | nothing - refused outright | OK (by design, 3.1) |
 | 9 | A UNIT, from its own header name or from any `uses` item (any segment) | the header + every `uses` item project-wide, whole dotted spans | OK (3.8) |
@@ -207,11 +208,17 @@ identifier class does here:
     a `forward` routine and a class method alike. Each header declares its
     OWN parameter symbols, and a routine's two headers are one symbol whose
     second spelling Find References deliberately never reports (a header is
-    not a use). So the plan reaches past the reference list in exactly two
-    structural ways, both language rules rather than heuristics: a
+    not a use). So the plan reaches past the reference list in exactly three
+    structural ways, all language rules rather than heuristics: a
     parameter's counterpart in the peer header, paired by POSITION in the
-    parameter list (never by name - the name is what is changing), and the
-    peer header's own routine name. Nothing else.
+    parameter list (never by name - the name is what is changing), the peer
+    header's own routine name, and a type's name wherever it qualifies an
+    implementation header (`ImplQualifierNodes` - identity from the routine
+    scope's `StructSym`, read back outward through the declaring struct
+    scopes, never from the text). Nothing else. The last two are what
+    `FindReferences(..., AImplHeaders = True)` adds, which is how the plan
+    takes them; a host shows them in a references list only when it asks -
+    by default a form's class would list a row per event handler.
 
 3.5 **Not checked**: whether the new name COLLIDES with something already
     visible at an edit site. Object Pascal scoping makes that a full

@@ -382,6 +382,7 @@ type
       ARoutine: Integer): TArray<Integer>;
     function PeerDeclSym(AMid, ASym: Integer): Integer;
     function PeerRoutineNameNode(AMid, ASym: Integer): Integer;
+    function ImplQualifierNodes(AMid, ASym: Integer): TArray<Integer>;
     function ImplHeaderSym(AMid, ANode: Integer; out ASym: Integer): Boolean;
     function UnitNameHit(LM: TPasSemaModel; ANode: Integer;
       out AHit: TPasRefHit): Boolean;
@@ -453,7 +454,13 @@ type
     // Every place ASym (declared in model ATMid) is actually USED, by
     // resolved symbol identity - never a text search. See the
     // implementation comment for what that does and does not cover.
-    function FindReferences(ATMid, ASym: Integer): TArray<TPasRefHit>;
+    // AImplHeaders adds the places an implementation header spells the name
+    // without using it: a type's name qualifying its methods' implementation
+    // headers (`procedure TFoo.Bar;`), a routine's own implementation header.
+    // Off by default - a form's class would list one row per event handler.
+    // PlanRename always takes them (ImplQualifierNodes, PeerRoutineNameNode).
+    function FindReferences(ATMid, ASym: Integer;
+      AImplHeaders: Boolean = False): TArray<TPasRefHit>;
     // The declaration site FindReferences itself always excludes (see its
     // own comment) - a separate call because a host that wants "where is
     // this defined, plus every use" (Find References' own results list,
@@ -464,10 +471,11 @@ type
     // this is the same test repeated so the two can never disagree).
     function DeclHit(ATMid, ASym: Integer; out AHit: TPasRefHit): Boolean;
     { Rename: the whole edit set for giving (ATMid, ASym) a new name -
-      DeclHit + FindReferences, nothing else. Deliberately the SAME identity
-      search Find References runs, so a rename can never touch a
-      same-spelled unrelated symbol, and never reaches further than the
-      references panel already showed.
+      DeclHit + FindReferences(AImplHeaders = True), plus a parameter's twin
+      in the peer header (PeerDeclSym). Deliberately the SAME identity search
+      Find References runs, so a rename can never touch a same-spelled
+      unrelated symbol; what it takes beyond the default references list is
+      only what the language makes the two headers of a routine repeat.
 
       False (AError set, AEdits empty) when the new name is not a legal
       Object Pascal identifier, is a reserved word, is the current name
@@ -1715,12 +1723,27 @@ end;
   same-unit reference can still be recorded there rather than in RefMap,
   though in practice the resolver never double-writes a node into both -
   CrossResolve's own guard skips a node whose RefMap entry is already set). }
-function TPasNavigator.FindReferences(ATMid, ASym: Integer): TArray<TPasRefHit>;
+function TPasNavigator.FindReferences(ATMid, ASym: Integer;
+  AImplHeaders: Boolean): TArray<TPasRefHit>;
 var
   LHits: TList<TPasRefHit>;
   LChain: TArray<TPasExtRef>;
-  LIdx: Integer;
+  LIdx, LNode: Integer;
   LHit: TPasRefHit;
+  LM: TPasSemaModel;
+  LNodes: TArray<Integer>;
+
+  function HitListed(AList: TList<TPasRefHit>; const AHit: TPasRefHit): Boolean;
+  var
+    LOld: TPasRefHit;
+  begin
+    for LOld in AList do
+      if (LOld.Line = AHit.Line) and (LOld.Col = AHit.Col) and
+         SameText(LOld.FilePath, AHit.FilePath) then
+        Exit(True);
+    Result := False;
+  end;
+
 begin
   LHits := TList<TPasRefHit>.Create;
   try
@@ -1745,6 +1768,24 @@ begin
            DeclHit(LChain[LIdx].UnitId, LChain[LIdx].Sym, LHit) then
           LHits.Add(LHit);
       end;
+    // The implementation headers that spell the name without using it - a
+    // type's in its methods' qualifiers, a routine's own in its
+    // implementation. All in the declaring model. A position the scan above
+    // already reported (should a future resolver bind one) is not repeated -
+    // by position, not by RefMap: an unqualified routine's own header IS in
+    // RefMap and was filtered out above (IsDeclSelfName).
+    if AImplHeaders and (ATMid >= 0) and (ATMid < FProj.ModelCount) then
+    begin
+      LNodes := ImplQualifierNodes(ATMid, ASym);
+      LNode := PeerRoutineNameNode(ATMid, ASym);
+      if LNode <> NIL_NODE then
+        LNodes := LNodes + [LNode];
+      LM := FProj.Model(ATMid);
+      for LNode in LNodes do
+        if FProj.EnsureHydrated(ATMid) and HitFromNode(LM, LNode, LHit) and
+           not HitListed(LHits, LHit) then
+          LHits.Add(LHit);
+    end;
     Result := LHits.ToArray;
   finally
     LHits.Free;
@@ -5203,6 +5244,70 @@ begin
     Result := LNameNode;
 end;
 
+{ Every qualifier segment, in a qualified implementation header, that names
+  the TYPE ASym: the `TFoo` of `procedure TFoo.Bar;`, both segments of
+  `TOuter.TInner.Zap` where each names the one searched for, `TBox` in
+  `TBox<T>.Put`. In model AMid only - a method is implemented in the unit
+  that declares its type, $I includes being the same model.
+
+  No symbol-identity scan reaches them: the resolver resolves the qualifier
+  chain to give the body its StructSym and binds none of its segments (see
+  ImplHeaderSym). So a rename that stopped at FindReferences renamed the
+  class and left every method implementation spelling the old name - E2003
+  on each of them.
+
+  Identity comes from that same StructSym, never from the text: a routine
+  scope's StructSym is the innermost type of its qualifier chain, and each
+  segment further out is the type whose member scope declares the one after
+  it (the resolver looked each next segment up there), so the chain is read
+  back innermost first through the declaring struct scopes. A header whose
+  chain did not resolve has no StructSym and names nothing here. Only
+  sckRoutine scopes are read: a generic header's type-parameter scope
+  carries the same StructSym and would count the header twice. }
+function TPasNavigator.ImplQualifierNodes(AMid, ASym: Integer): TArray<Integer>;
+var
+  LM: TPasSemaModel;
+  LScope, LSeg, LTy, LNameNode, LOuter: Integer;
+  LQualIdents: TArray<Integer>;
+begin
+  Result := nil;
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
+    Exit;
+  LM := FProj.Model(AMid);
+  if (ASym < 0) or (ASym >= LM.SymCount) or
+     (LM.Symbols[ASym].Kind <> skType) then
+    Exit;
+  // RTSegments tells a qualifier from the name by the separator after it,
+  // which a demoted model reads back as tkUnknown - every header would look
+  // unqualified and the rename would silently miss them all.
+  if not FProj.EnsureHydrated(AMid) then
+    Exit;
+  for LScope := 0 to LM.Scopes.Count - 1 do
+  begin
+    if (LM.Scopes[LScope].Kind <> sckRoutine) or
+       (LM.Scopes[LScope].StructSym = NIL_SYM) then
+      Continue;
+    if not RTSegments(LM, LM.Scopes[LScope].OwnerNode, LQualIdents,
+       LNameNode) then
+      Continue;
+    LTy := LM.Scopes[LScope].StructSym;
+    for LSeg := High(LQualIdents) downto 0 do
+    begin
+      if LTy = ASym then
+        Result := Result + [LQualIdents[LSeg]];
+      // The type one segment further out: the struct whose member scope
+      // declares LTy. Anything else - a top-level type - ends the chain.
+      LOuter := LM.Symbols[LTy].Scope;
+      if (LOuter < 0) or (LOuter >= LM.Scopes.Count) or
+         (LM.Scopes[LOuter].Kind <> sckStruct) then
+        Break;
+      LTy := LM.Scopes[LOuter].StructSym;
+      if LTy = NIL_SYM then
+        Break;
+    end;
+  end;
+end;
+
 { The symbol a click on a QUALIFIED IMPLEMENTATION HEADER (`procedure
   TFoo.Bar;`) is about, or False.
 
@@ -5583,33 +5688,14 @@ var
   LIdx, LStart, LRun, LDelta, LNewLen, LPeer: Integer;
   LLine: string;
 
-  // One CST node's own position, as an edit - for the peer routine header,
-  // which is the same symbol and therefore not reachable through any
-  // symbol-identity scan (see PeerRoutineNameNode).
-  procedure AddNodeEdit(AList: TList<TPasRenameEdit>; ANode: Integer);
-  var
-    LHit: TPasRefHit;
-    LEdit: TPasRenameEdit;
-  begin
-    if (ANode = NIL_NODE) or
-       not HitFromNode(FProj.Model(ATMid), ANode, LHit) then
-      Exit;
-    LEdit.FilePath := LHit.FilePath;
-    LEdit.Line := LHit.Line;
-    LEdit.Col := LHit.Col;
-    LEdit.Len := LHit.HiTo - LHit.HiFrom;
-    LEdit.OldText := Copy(LHit.Snippet, LHit.HiFrom + 1, LEdit.Len);
-    LEdit.IsDecl := False;
-    LEdit.Snippet := LHit.Snippet;
-    LEdit.HiFrom := LHit.HiFrom;
-    LEdit.HiTo := LHit.HiTo;
-    AList.Add(LEdit);
-  end;
-
   // One symbol's own declaration + every use, as edits. AMarkDecl flags the
   // declaration row for a host to pin at the top of its results; only the
   // symbol the user actually clicked gets it, so a peer header's own
-  // parameter declaration lists as an ordinary edit.
+  // parameter declaration lists as an ordinary edit. The uses come WITH the
+  // implementation headers (FindReferences' AImplHeaders): the peer header's
+  // own routine name, and a type's name in every `TFoo.Bar` it qualifies -
+  // neither is a use, and a rename that skipped either leaves code that no
+  // longer compiles (E2037 on the header, E2003 on every method).
   procedure AddSymEdits(AList: TList<TPasRenameEdit>; AMid, ASymbol: Integer;
     AMarkDecl: Boolean);
   var
@@ -5631,7 +5717,7 @@ var
       LEdit.HiTo := LHit.HiTo;
       AList.Add(LEdit);
     end;
-    LHits := FindReferences(AMid, ASymbol);
+    LHits := FindReferences(AMid, ASymbol, True);
     for LI := 0 to High(LHits) do
     begin
       LEdit.FilePath := LHits[LI].FilePath;
@@ -5695,7 +5781,6 @@ begin
     AddSymEdits(LList, ATMid, ASym, True);
     if (LPeer <> NIL_SYM) and (LPeer <> ASym) then
       AddSymEdits(LList, ATMid, LPeer, False);
-    AddNodeEdit(LList, PeerRoutineNameNode(ATMid, ASym));
     LArr := LList.ToArray;
   finally
     LList.Free;

@@ -422,6 +422,67 @@ const
     'end;'#10 +                                           // 29
     'end.'#10;                                            // 30
 
+  { A type's name in its methods' QUALIFIED IMPLEMENTATION HEADERS. No
+    symbol-identity scan reaches those - the resolver binds none of a
+    qualifier's segments - so a rename of TQFoo used to leave every
+    `procedure TQFoo.X` spelling the old name. A nested type (both segments
+    of line 30 name a different type), a generic one and a record are here
+    too, and NavQualUse holds the ordinary uses. }
+  UNIT_QUAL =
+    'unit NavQual;'#10 +                                  // 1
+    'interface'#10 +                                      // 2
+    'type'#10 +                                           // 3
+    '  TQFoo = class'#10 +                                // 4  TQFoo col 3
+    '  public'#10 +                                       // 5
+    '    type'#10 +                                       // 6
+    '      TQIn = class'#10 +                             // 7  TQIn col 7
+    '        procedure Zip;'#10 +                         // 8
+    '      end;'#10 +                                     // 9
+    '  public'#10 +                                       // 10
+    '    procedure Bar;'#10 +                             // 11 Bar col 15
+    '    function Baz(A: Integer): Integer;'#10 +         // 12
+    '  end;'#10 +                                         // 13
+    '  TQBox<T> = class'#10 +                             // 14 TQBox col 3
+    '    procedure Put(const AItem: T);'#10 +             // 15
+    '  end;'#10 +                                         // 16
+    '  TQRec = record'#10 +                               // 17 TQRec col 3
+    '    procedure Clear;'#10 +                           // 18
+    '  end;'#10 +                                         // 19
+    'var'#10 +                                            // 20
+    '  GQ: TQFoo;'#10 +                                   // 21 TQFoo col 7
+    'implementation'#10 +                                 // 22
+    'procedure TQFoo.Bar;'#10 +                           // 23 col 11, Bar 17
+    'begin'#10 +                                          // 24
+    'end;'#10 +                                           // 25
+    'function TQFoo.Baz(A: Integer): Integer;'#10 +       // 26 TQFoo col 10
+    'begin'#10 +                                          // 27
+    '  Result := A;'#10 +                                 // 28
+    'end;'#10 +                                           // 29
+    'procedure TQFoo.TQIn.Zip;'#10 +                      // 30 col 11, TQIn 17
+    'begin'#10 +                                          // 31
+    'end;'#10 +                                           // 32
+    'procedure TQBox<T>.Put(const AItem: T);'#10 +        // 33 TQBox col 11
+    'begin'#10 +                                          // 34
+    'end;'#10 +                                           // 35
+    'procedure TQRec.Clear;'#10 +                         // 36 TQRec col 11
+    'begin'#10 +                                          // 37
+    'end;'#10 +                                           // 38
+    'end.'#10;                                            // 39
+
+  UNIT_QUALUSE =
+    'unit NavQualUse;'#10 +                               // 1
+    'interface'#10 +                                      // 2
+    'uses NavQual;'#10 +                                  // 3
+    'procedure Go;'#10 +                                  // 4
+    'implementation'#10 +                                 // 5
+    'procedure Go;'#10 +                                  // 6
+    'var F: TQFoo;'#10 +                                  // 7  TQFoo col 8
+    'begin'#10 +                                          // 8
+    '  F := TQFoo.Create;'#10 +                           // 9  TQFoo col 8
+    '  F.Bar;'#10 +                                       // 10 Bar col 5
+    'end;'#10 +                                           // 11
+    'end.'#10;                                            // 12
+
   // Rename fixture: line 9 uses the SAME symbol TWICE, which is the one
   // shape a per-line rename preview can get wrong - the second edit's
   // highlight has to move by the first one's length delta (see
@@ -3435,6 +3496,112 @@ begin
       GNav.ClassAt(LMidRls, 10, 3, {out} LRlsT, {out} LRlsS, {out} LRlsN);
       Ok('rls: a form class''s OWN Release is not a destruction',
         Length(GNav.FindDestructions(LRlsT, LRlsS)) = 0);
+    finally
+      GNav.Free;
+    end;
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- A type's name in qualified implementation headers (UNIT_QUAL /
+  // UNIT_QUALUSE): Rename takes every `TQFoo.X`, Find References lists them
+  // only when asked (AImplHeaders). A directory of its own, as above. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_nav_qual');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), UNIT_SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavQual.pas'), UNIT_QUAL);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavQualUse.pas'), UNIT_QUALUSE);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    GNav := TPasNavigator.Create(GProj);
+    try
+      var LMidQ := GNav.ModelIdOf(TPath.Combine(LDir, 'NavQual.pas'));
+      Ok('qual: NavQual model found', LMidQ >= 0);
+      Ok('qual: SymbolAt TQFoo',
+        GNav.SymbolAt(LMidQ, 4, 3, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'TQFoo'));
+      var LFooMid := LRTMid;
+      var LFooSym := LRSym;
+      // Find References as it always was: the three uses, no header.
+      LHits := GNav.FindReferences(LFooMid, LFooSym);
+      Ok('qual: FindReferences TQFoo - the three uses, no header',
+        (Length(LHits) = 3) and HasHitAt(LHits, 'NavQual.pas', 21, 7) and
+        HasHitAt(LHits, 'NavQualUse.pas', 7, 8) and
+        HasHitAt(LHits, 'NavQualUse.pas', 9, 8));
+      // Asked for: the three headers TQFoo qualifies as well - the nested
+      // type's outer segment among them.
+      LHits := GNav.FindReferences(LFooMid, LFooSym, True);
+      Ok('qual: FindReferences TQFoo with the implementation headers',
+        (Length(LHits) = 6) and HasHitAt(LHits, 'NavQual.pas', 23, 11) and
+        HasHitAt(LHits, 'NavQual.pas', 26, 10) and
+        HasHitAt(LHits, 'NavQual.pas', 30, 11));
+      Ok('qual: PlanRename TQFoo - decl, three uses, three headers',
+        GNav.PlanRename(LFooMid, LFooSym, 'TQWide', {out} LEdits,
+          {out} LErr) and (Length(LEdits) = 7) and (LErr = ''));
+      Ok('qual: PlanRename TQFoo - the headers, previewed',
+        HasEdit(LEdits, 'NavQual.pas', 23, 11, 'procedure TQWide.Bar;',
+          10, 16) and
+        HasEdit(LEdits, 'NavQual.pas', 26, 10,
+          'function TQWide.Baz(A: Integer): Integer;', 9, 15) and
+        HasEdit(LEdits, 'NavQual.pas', 30, 11, 'procedure TQWide.TQIn.Zip;',
+          10, 16));
+      // From the qualifier itself (ImplHeaderSym): the same class, the same
+      // plan.
+      Ok('qual: SymbolAt the qualifier of TQFoo.Bar',
+        GNav.SymbolAt(LMidQ, 23, 11, {out} LRTMid, {out} LRSym,
+          {out} LRName) and (LRTMid = LFooMid) and (LRSym = LFooSym));
+      // The nested type: only the segment that names IT.
+      Ok('qual: SymbolAt TQIn',
+        GNav.SymbolAt(LMidQ, 7, 7, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'TQIn'));
+      Ok('qual: PlanRename TQIn - decl and its own segment, not TQFoo''s',
+        GNav.PlanRename(LRTMid, LRSym, 'TQInner', {out} LEdits,
+          {out} LErr) and (Length(LEdits) = 2) and
+        HasEdit(LEdits, 'NavQual.pas', 30, 17,
+          'procedure TQFoo.TQInner.Zip;', 16, 23));
+      // A generic type: the name, never its type parameter list.
+      Ok('qual: SymbolAt TQBox',
+        GNav.SymbolAt(LMidQ, 14, 3, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'TQBox'));
+      Ok('qual: PlanRename TQBox<T> - decl and the header',
+        GNav.PlanRename(LRTMid, LRSym, 'TQCrate', {out} LEdits,
+          {out} LErr) and (Length(LEdits) = 2) and
+        HasEdit(LEdits, 'NavQual.pas', 33, 11,
+          'procedure TQCrate<T>.Put(const AItem: T);', 10, 17));
+      // A record's methods are qualified the same way.
+      Ok('qual: SymbolAt TQRec',
+        GNav.SymbolAt(LMidQ, 17, 3, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'TQRec'));
+      Ok('qual: PlanRename TQRec - decl and the header',
+        GNav.PlanRename(LRTMid, LRSym, 'TQRow', {out} LEdits,
+          {out} LErr) and (Length(LEdits) = 2) and
+        HasEdit(LEdits, 'NavQual.pas', 36, 11, 'procedure TQRow.Clear;',
+          10, 15));
+      // A METHOD: AImplHeaders adds its own implementation header to the
+      // call site; without it, the call site alone, as ever.
+      Ok('qual: SymbolAt Bar',
+        GNav.SymbolAt(LMidQ, 11, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Bar'));
+      LHits := GNav.FindReferences(LRTMid, LRSym);
+      Ok('qual: FindReferences Bar - the call site only',
+        (Length(LHits) = 1) and HasHitAt(LHits, 'NavQualUse.pas', 10, 5));
+      LHits := GNav.FindReferences(LRTMid, LRSym, True);
+      Ok('qual: FindReferences Bar with its implementation header',
+        (Length(LHits) = 2) and HasHitAt(LHits, 'NavQual.pas', 23, 17) and
+        HasHitAt(LHits, 'NavQualUse.pas', 10, 5));
+      // Demoted, as a real group's units are: the headers are told apart by
+      // their text, which has to come back for them.
+      GProj.DemoteText([]);
+      Ok('qual: PlanRename TQFoo on a demoted model - still seven edits',
+        GNav.PlanRename(LFooMid, LFooSym, 'TQWide', {out} LEdits,
+          {out} LErr) and (Length(LEdits) = 7) and
+        HasEdit(LEdits, 'NavQual.pas', 30, 11, 'procedure TQWide.TQIn.Zip;',
+          10, 16));
     finally
       GNav.Free;
     end;
