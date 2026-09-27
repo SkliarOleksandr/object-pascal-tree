@@ -176,7 +176,10 @@ identifier class does here:
 | 12 | Anything declared in a LIBRARY source (RTL/VCL/third-party) | nothing - refused whole, naming the file | OK (by design, 3.9) |
 | 13 | A property REDECLARED bare in descendants (`property Items;` promoting visibility, changing accessors or streaming specifiers - no type written), from any link | every declaration of the chain + every use bound to any of them; Find References shows the same set (the other links' declaration names are hits). A redeclaration WITH a type is a NEW property hiding the inherited one (dcc-probed 2026-09-09) - it and everything below it stay out | OK (0.21.0) |
 | 13 | Anything whose declaration or ANY use sits in a read-only file | nothing - refused whole, naming the file | OK (by design, 3.9) |
-| 14 | Name-collision detection at an edit site | - | GAP (deliberate - see 3.5) |
+| 13a | A component, handler or class a FORM FILE names (`object X: TC`, `OnClick = X`, `FocusControl = X`, `DataModule1.X`) | the form-file sites too, bound by TReader's rules | OK (0.59.0 - 3.9a) |
+| 13b | A component whose handlers are named after it (`Button1Click` on Button1's OnClick), or whose caption reads its name | the handlers renamed with it everywhere, the caption follows - as the form designer does | OK (0.59.0 - 3.9a) |
+| 13c | A published property or an enum value a form file spells; a binary form file | nothing - refused whole, naming the file and line | OK (by design, 3.9a) |
+| 14 | Name-collision detection at an edit site | - | GAP (deliberate - see 3.5; form-file collisions ARE checked, 3.9a) |
 | 15 | Identifier inside an opened `$I` include file | - | GAP (`IdentAt` is main-file-only, same limit go-to-declaration has) |
 
 3.1 **Scope.** Two identities: a symbol (`SymbolAt` -> `PlanRename`) and a
@@ -295,6 +298,55 @@ identifier class does here:
     A host can call `RenameBlockReason(APath)` itself to gate its command
     before asking for a new name; the demo's `Rename...` is disabled while
     the caret sits in a blocked file.
+
+3.9a **FORM FILES** (0.59.0 - `PasTree.Dfm`, `PasTree.Sema.Dfm`,
+    `FindFormSites`, `FindReferences(..., AFormFiles)`, `PlanRename`'s form
+    edits; `tests/DfmSmoke.dpr`). A `.dfm`/`.fmx` names Pascal symbols and
+    the RTL binds them at run time BY NAME only, so a rename that skipped one
+    compiles and then fails when the form is created (a handler TReader
+    cannot find is EReadError; a component whose field was renamed stays nil
+    silently).
+
+    - *Reading* is `System.Classes.TParser`, walked as ObjectTextToBinary
+      walks it (`PasTree.Dfm`, a copy of its Convert* procedures that records
+      positions instead of writing binary) - what counts as a form file is
+      exactly what the RTL accepts. No round trip: the identifier bytes are
+      edited in place. A binary form file is converted in memory, listed,
+      and refused for a rename. Docs are cached by path + size + write time.
+    - *Binding* is TReader's rules (`PasTree.Sema.Dfm`): `object X: TC` is
+      the published field X of the LOOKUP ROOT's class - the form, or inside
+      `inline F: TFrame1` the frame; a handler is a published method of the
+      ROOT class, inline or not; `A.B.C` starts at a component of the lookup
+      root, else at another module's root Name. Published means svPublished
+      or svDefault (a TPersistent descendant compiles with $M+).
+    - *References*: `FindFormSites` returns each site with what it IS
+      (`TPasFormSiteKind`: component / class / handler / componentRef), the
+      component it is on, the property it is the value of, and how it is
+      reached (`TPasFormSiteVia`: own / inline / module - for a host whose
+      forms a live designer holds, which propagates a rename differently
+      along each). `FindReferences` lists them only when asked
+      (`AFormFiles`): it reads every form file, and a caret highlight must
+      not pay for that.
+    - *Rename* takes them always and refuses whole (`SitesOf(ARename)`,
+      `RenameRefusal`): a form file that may name the symbol but cannot be
+      read or bound, a binary one, a published PROPERTY or an enum VALUE a
+      form file spells (bound through a property's type, not resolved yet),
+      a non-ASCII new name for a form file without a UTF-8 BOM, a member or
+      component of the new name a streaming form already has.
+    - *A component's rename carries along* what the form designer does when
+      its Name changes (`CarriedBy`, `TPasCarriedRename` through the
+      `PlanRename` overload with `ACarried`): each handler NAMED AFTER it on
+      its own events - its name + the event's without "On" - renamed with it
+      everywhere, and a `Caption`/`Text` reading exactly its old name
+      (TControl.SetName's csSetCaption; an action's only without an `Action`
+      link, as TContainedAction.SetName; `EditLabel.Caption` of a
+      TLabeledEdit). A handler whose own rename would be refused keeps its
+      name - it is bound by name wherever it is linked, so that never breaks.
+      Each such edit writes its own `NewText`, which every plan's edits now
+      carry.
+    - `FormRoleOf` says where a symbol lives in the form files: what it is
+      there, the class declaring it, and the form file whose ROOT is that
+      class - the one a host's live designer holds it in.
 
 
 ## 3.10 Demo menu: one `Find All` submenu

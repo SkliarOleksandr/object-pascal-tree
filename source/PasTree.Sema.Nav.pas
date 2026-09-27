@@ -27,7 +27,8 @@ uses
   PasTree.Ast,
   PasTree.Outline,
   PasTree.Sema.Model,
-  PasTree.Sema.Project;
+  PasTree.Sema.Project,
+  PasTree.Sema.Dfm;
 
 type
   // The identifier under a position, in a model's MAIN file (FileId 0).
@@ -109,16 +110,46 @@ type
 
     A host applying these must walk each file's edits from the LAST position
     backwards (they arrive sorted ascending), or shift by hand: two edits on
-    one line move each other whenever the name changes length. }
+    one line move each other whenever the name changes length.
+
+    An edit in a FORM FILE (.dfm/.fmx - see PasTree.Sema.Dfm) is an ordinary
+    text edit too, and says what it is besides: FormKind is not fskNone,
+    FormObject names the component it belongs to ('' for the form itself),
+    FormVia how the site reaches the symbol and FormProp the property it is
+    the value of. A host whose form files are held by a live designer applies
+    those through the designer instead - that is what those fields are for.
+
+    NewText is what replaces OldText, and it is NOT always the requested
+    name: a unit rename writes the full dotted name at one site and the bare
+    leaf at another, and a component's rename carries its handlers along
+    under their own new names (Button1Click -> OKButtonClick - see
+    TPasCarriedRename). }
   TPasRenameEdit = record
     FilePath: string;
     Line, Col: Integer;      // 1-based, of the OLD identifier
     Len: Integer;            // length of the OLD identifier
     OldText: string;         // the exact text being replaced, for a host's
                              // own "has the buffer moved since?" check
+    NewText: string;
     IsDecl: Boolean;         // this is the declaration site itself
     Snippet: string;         // the line AFTER all of its own edits
     HiFrom, HiTo: Integer;   // 0-based offsets of the NEW name in Snippet
+    FormKind: TPasFormSiteKind;  // fskNone for a Pascal source edit
+    FormObject: string;
+    FormVia: TPasFormSiteVia;
+    FormProp: string;
+  end;
+
+  { A rename PlanRename CARRIED ALONG with the one it was asked for: a
+    handler named after a renamed component - Button1Click on Button1's
+    OnClick becomes OKButtonClick when Button1 becomes OKButton - which is
+    what the form designer does to it (TPasFormBinder.CarriedBy has the
+    rule). Its edits are in the plan with the rest, under their own NewText;
+    this record says what they rename, for a host that must do the same
+    through a live designer. Role says whose method it is. }
+  TPasCarriedRename = record
+    OldName, NewName: string;
+    Role: TPasFormRole;
   end;
 
   { What makes one row of a Find Overrides result the answer it is - the
@@ -316,6 +347,10 @@ type
     FLibraryPaths: TArray<string>;
     FByPath: TDictionary<string, Integer>;       // full lower path -> model id
     FCaches: TObjectDictionary<Integer, TNavCache>;
+    // The project's form files, bound - created on the first search that can
+    // reach one (FormBinder), dropped when LibraryPaths changes.
+    FForms: TPasFormBinder;
+    function FormBinder: TPasFormBinder;
     function CacheOf(AMid: Integer): TNavCache;
     function TargetFromNode(AMid, ANode: Integer; const AName: string;
       out ATarget: TPasNavTarget): Boolean;
@@ -459,8 +494,18 @@ type
     // headers (`procedure TFoo.Bar;`), a routine's own implementation header.
     // Off by default - a form's class would list one row per event handler.
     // PlanRename always takes them (ImplQualifierNodes, PeerRoutineNameNode).
+    // AFormFiles adds the places the project's FORM FILES name it - a
+    // component's `object X: TC`, a handler's `OnClick = X`, a component
+    // reference, a class in an object header (FindFormSites). Off by default
+    // because it reads every form file of the project: a caller on a hot
+    // path (a highlight on every caret move) must not pay for it.
     function FindReferences(ATMid, ASym: Integer;
-      AImplHeaders: Boolean = False): TArray<TPasRefHit>;
+      AImplHeaders: Boolean = False;
+      AFormFiles: Boolean = False): TArray<TPasRefHit>;
+    { The form-file half of a reference search with what each site IS - see
+      PasTree.Sema.Dfm for the binding rules, which are TReader's. Sorted by
+      file, line, column. }
+    function FindFormSites(ATMid, ASym: Integer): TArray<TPasFormSite>;
     // The declaration site FindReferences itself always excludes (see its
     // own comment) - a separate call because a host that wants "where is
     // this defined, plus every use" (Find References' own results list,
@@ -485,14 +530,41 @@ type
       limits (a library tree, a read-only file - see RenameBlockReason).
       AError is host-displayable text.
 
+      FORM FILES are part of the plan (FindFormSites; FormKind marks those
+      edits), and bring refusals of their own: a form file that may name the
+      symbol but cannot be read or bound, a binary one, a published property
+      or an enum value spelled in one (not bound yet), a new name that
+      collides with a member or a component a streaming form already has
+      (TPasFormBinder.RenameRefusal). A rename that left a form file behind
+      would compile and then fail when the form is created.
+
+      A COMPONENT's rename does what the form designer does to one (see
+      TPasFormBinder.CarriedBy): its handlers named after it are renamed
+      with it - declaration, implementation header, every call, every form
+      file link - and a caption that read its name follows. ACarried lists
+      those handler renames. One whose new name would be refused on its own
+      (it collides, a form file that links it cannot be read) is left out
+      and keeps its name: a handler is bound by name wherever it is linked,
+      so not renaming it never breaks anything.
+
       What this does NOT do: it does not check whether the new name COLLIDES
       with something already visible at each edit site (Object Pascal
-      scoping makes that a full re-resolution question, not a lookup), and
-      it does not touch files - a host applies the edits and re-analyzes.
+      scoping makes that a full re-resolution question, not a lookup) -
+      beyond the form-file collisions above - and it does not touch files: a
+      host applies the edits and re-analyzes.
       Renaming a UNIT is not this API either (that is a file rename plus
       every `uses` clause - see FindUnitReferences). }
     function PlanRename(ATMid, ASym: Integer; const ANewName: string;
       out AEdits: TArray<TPasRenameEdit>; out AError: string): Boolean;
+      overload;
+    function PlanRename(ATMid, ASym: Integer; const ANewName: string;
+      out AEdits: TArray<TPasRenameEdit>;
+      out ACarried: TArray<TPasCarriedRename>; out AError: string): Boolean;
+      overload;
+    { Where (ATMid, ASym) lives in the project's form files - see
+      TPasFormRole. For a host that must know which form's live designer owns
+      a symbol before renaming it. }
+    function FormRoleOf(ATMid, ASym: Integer): TPasFormRole;
     { The UNIT counterpart of PlanRename: ATargetMid's own header name plus
       every `uses` item across the project that resolved to it (the same two
       answers UnitDeclHit/FindUnitReferences give, as edits). A dotted new
@@ -983,9 +1055,32 @@ end;
 
 destructor TPasNavigator.Destroy;
 begin
+  FForms.Free;
   FCaches.Free;
   FByPath.Free;
   inherited;
+end;
+
+function TPasNavigator.FormBinder: TPasFormBinder;
+begin
+  if FForms = nil then
+    FForms := TPasFormBinder.Create(FProj, FLibraryPaths);
+  Result := FForms;
+end;
+
+function TPasNavigator.FindFormSites(ATMid, ASym: Integer):
+  TArray<TPasFormSite>;
+var
+  LError: string;
+begin
+  Result := FormBinder.SitesOf(ATMid, ASym, False, LError);
+end;
+
+function TPasNavigator.FormRoleOf(ATMid, ASym: Integer): TPasFormRole;
+begin
+  if (ATMid < 0) or (ATMid >= FProj.ModelCount) or (ASym = NIL_SYM) then
+    Exit(Default(TPasFormRole));
+  Result := FormBinder.RoleOf(ATMid, ASym);
 end;
 
 function TPasNavigator.ModelIdOf(const APath: string): Integer;
@@ -1724,7 +1819,7 @@ end;
   though in practice the resolver never double-writes a node into both -
   CrossResolve's own guard skips a node whose RefMap entry is already set). }
 function TPasNavigator.FindReferences(ATMid, ASym: Integer;
-  AImplHeaders: Boolean): TArray<TPasRefHit>;
+  AImplHeaders, AFormFiles: Boolean): TArray<TPasRefHit>;
 var
   LHits: TList<TPasRefHit>;
   LChain: TArray<TPasExtRef>;
@@ -1732,6 +1827,7 @@ var
   LHit: TPasRefHit;
   LM: TPasSemaModel;
   LNodes: TArray<Integer>;
+  LSite: TPasFormSite;
 
   function HitListed(AList: TList<TPasRefHit>; const AHit: TPasRefHit): Boolean;
   var
@@ -1786,6 +1882,19 @@ begin
            not HitListed(LHits, LHit) then
           LHits.Add(LHit);
     end;
+    // The form files - positions in files no model holds, so no overlap with
+    // the scans above is possible.
+    if AFormFiles then
+      for LSite in FindFormSites(ATMid, ASym) do
+      begin
+        LHit.FilePath := LSite.FilePath;
+        LHit.Line := LSite.Line;
+        LHit.Col := LSite.Col;
+        LHit.Snippet := LSite.Snippet;
+        LHit.HiFrom := LSite.HiFrom;
+        LHit.HiTo := LSite.HiTo;
+        LHits.Add(LHit);
+      end;
     Result := LHits.ToArray;
   finally
     LHits.Free;
@@ -5385,6 +5494,8 @@ begin
         TPath.GetFullPath(Trim(LDir)))));
     end;
     FLibraryPaths := LList.ToArray;
+    // The binder listed its form files against the old trees.
+    FreeAndNil(FForms);
   finally
     LList.Free;
   end;
@@ -5524,11 +5635,13 @@ var
   procedure AddHit(const AHitRec: TPasRefHit; const AText: string;
     AIsDecl: Boolean);
   begin
+    LEdit := Default(TPasRenameEdit);
     LEdit.FilePath := AHitRec.FilePath;
     LEdit.Line := AHitRec.Line;
     LEdit.Col := AHitRec.Col;
     LEdit.Len := AHitRec.HiTo - AHitRec.HiFrom;
     LEdit.OldText := Copy(AHitRec.Snippet, AHitRec.HiFrom + 1, LEdit.Len);
+    LEdit.NewText := AText;
     LEdit.IsDecl := AIsDecl;
     // The preview is built here rather than by the shared per-line pass
     // PlanRename uses: two `uses` items on one line can be replaced by
@@ -5668,11 +5781,52 @@ function TPasNavigator.PlanRename(ATMid, ASym: Integer;
   const ANewName: string; out AEdits: TArray<TPasRenameEdit>;
   out AError: string): Boolean;
 var
+  LCarried: TArray<TPasCarriedRename>;
+begin
+  Result := PlanRename(ATMid, ASym, ANewName, AEdits, LCarried, AError);
+end;
+
+function TPasNavigator.PlanRename(ATMid, ASym: Integer;
+  const ANewName: string; out AEdits: TArray<TPasRenameEdit>;
+  out ACarried: TArray<TPasCarriedRename>; out AError: string): Boolean;
+var
   LDecl: TPasRefHit;
   LList: TList<TPasRenameEdit>;
   LArr: TArray<TPasRenameEdit>;
-  LIdx, LStart, LRun, LDelta, LNewLen, LPeer: Integer;
+  LIdx, LStart, LRun, LDelta, LPeer: Integer;
   LLine: string;
+  LSites, LHSites, LCaptions: TArray<TPasFormSite>;
+  LHandlers: TArray<TPasCarriedHandler>;
+  LHandler: TPasCarriedHandler;
+  LCarry: TPasCarriedRename;
+  LHError: string;
+
+  // The form sites of one rename, as edits writing ANewText.
+  procedure AddFormEdits(AList: TList<TPasRenameEdit>;
+    const ASites: TArray<TPasFormSite>; const ANewText: string);
+  var
+    LSite: TPasFormSite;
+    LFormEdit: TPasRenameEdit;
+  begin
+    for LSite in ASites do
+    begin
+      LFormEdit := Default(TPasRenameEdit);
+      LFormEdit.FilePath := LSite.FilePath;
+      LFormEdit.Line := LSite.Line;
+      LFormEdit.Col := LSite.Col;
+      LFormEdit.Len := LSite.Len;
+      LFormEdit.OldText := LSite.OldText;
+      LFormEdit.NewText := ANewText;
+      LFormEdit.Snippet := LSite.Snippet;
+      LFormEdit.HiFrom := LSite.HiFrom;
+      LFormEdit.HiTo := LSite.HiTo;
+      LFormEdit.FormKind := LSite.Kind;
+      LFormEdit.FormObject := LSite.ObjectName;
+      LFormEdit.FormVia := LSite.Via;
+      LFormEdit.FormProp := LSite.PropName;
+      AList.Add(LFormEdit);
+    end;
+  end;
 
   // One symbol's own declaration + every use, as edits. AMarkDecl flags the
   // declaration row for a host to pin at the top of its results; only the
@@ -5683,13 +5837,15 @@ var
   // neither is a use, and a rename that skipped either leaves code that no
   // longer compiles (E2037 on the header, E2003 on every method).
   procedure AddSymEdits(AList: TList<TPasRenameEdit>; AMid, ASymbol: Integer;
-    AMarkDecl: Boolean);
+    AMarkDecl: Boolean; const ANewText: string);
   var
     LHits: TArray<TPasRefHit>;
     LHit: TPasRefHit;
     LEdit: TPasRenameEdit;
     LI: Integer;
   begin
+    LEdit := Default(TPasRenameEdit);   // FormKind fskNone: Pascal edits
+    LEdit.NewText := ANewText;
     if DeclHit(AMid, ASymbol, {out} LHit) then
     begin
       LEdit.FilePath := LHit.FilePath;
@@ -5723,6 +5879,7 @@ var
 begin
   Result := False;
   AEdits := nil;
+  ACarried := nil;
   AError := '';
   if (ATMid < 0) or (ASym = NIL_SYM) then
   begin
@@ -5762,11 +5919,44 @@ begin
   // must keep spelling the parameter the same way.
   LPeer := PeerDeclSym(ATMid, ASym);
 
+  // The form files that name it - with their own refusals, which decide
+  // before anything is planned (see the declaration's comment).
+  LSites := FormBinder.SitesOf(ATMid, ASym, True, AError);
+  if AError <> '' then
+    Exit;
+  AError := FormBinder.RenameRefusal(ATMid, ASym, ANewName, LSites);
+  if AError <> '' then
+    Exit;
+  // What a component's rename carries along (the declaration's comment).
+  FormBinder.CarriedBy(ATMid, ASym, ANewName, LSites, LHandlers, LCaptions);
+
   LList := TList<TPasRenameEdit>.Create;
   try
-    AddSymEdits(LList, ATMid, ASym, True);
+    AddSymEdits(LList, ATMid, ASym, True, ANewName);
     if (LPeer <> NIL_SYM) and (LPeer <> ASym) then
-      AddSymEdits(LList, ATMid, LPeer, False);
+      AddSymEdits(LList, ATMid, LPeer, False, ANewName);
+    AddFormEdits(LList, LSites, ANewName);
+    AddFormEdits(LList, LCaptions, ANewName);
+    for LHandler in LHandlers do
+    begin
+      // Each handler under the same refusals as a rename of its own; one
+      // that would be refused keeps its name (see the declaration).
+      if not IsValidRenameName(LHandler.NewName) or
+         (sfBuiltin in FProj.Model(LHandler.TMid).Symbols[LHandler.TSym].Flags) then
+        Continue;
+      LHSites := FormBinder.SitesOf(LHandler.TMid, LHandler.TSym, True, LHError);
+      if LHError = '' then
+        LHError := FormBinder.RenameRefusal(LHandler.TMid, LHandler.TSym,
+          LHandler.NewName, LHSites);
+      if LHError <> '' then
+        Continue;
+      AddSymEdits(LList, LHandler.TMid, LHandler.TSym, False, LHandler.NewName);
+      AddFormEdits(LList, LHSites, LHandler.NewName);
+      LCarry.OldName := FProj.Model(LHandler.TMid).Symbols[LHandler.TSym].Name;
+      LCarry.NewName := LHandler.NewName;
+      LCarry.Role := FormBinder.RoleOf(LHandler.TMid, LHandler.TSym);
+      ACarried := ACarried + [LCarry];
+    end;
     LArr := LList.ToArray;
   finally
     LList.Free;
@@ -5808,7 +5998,6 @@ begin
       Exit;
   end;
 
-  LNewLen := Length(ANewName);
   LIdx := 0;
   while LIdx <= High(LArr) do
   begin
@@ -5818,12 +6007,13 @@ begin
     while (LIdx <= High(LArr)) and (LArr[LIdx].Line = LArr[LStart].Line) and
           SameText(LArr[LIdx].FilePath, LArr[LStart].FilePath) do
     begin
-      // 1-based Copy offsets, from the 0-based hit offsets.
-      LLine := Copy(LLine, 1, LArr[LIdx].HiFrom + LDelta) + ANewName +
-        Copy(LLine, LArr[LIdx].HiTo + LDelta + 1, MaxInt);
+      // 1-based Copy offsets, from the 0-based hit offsets. Each edit writes
+      // its OWN text: a carried handler's is not the requested name.
+      LLine := Copy(LLine, 1, LArr[LIdx].HiFrom + LDelta) +
+        LArr[LIdx].NewText + Copy(LLine, LArr[LIdx].HiTo + LDelta + 1, MaxInt);
       LArr[LIdx].HiFrom := LArr[LIdx].HiFrom + LDelta;
-      LArr[LIdx].HiTo := LArr[LIdx].HiFrom + LNewLen;
-      Inc(LDelta, LNewLen - LArr[LIdx].Len);
+      LArr[LIdx].HiTo := LArr[LIdx].HiFrom + Length(LArr[LIdx].NewText);
+      Inc(LDelta, Length(LArr[LIdx].NewText) - LArr[LIdx].Len);
       Inc(LIdx);
     end;
     for LRun := LStart to LIdx - 1 do
