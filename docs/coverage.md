@@ -54,6 +54,11 @@ README's own section on that).
 ### 2.2.4 Enumerated types
 - the layout oracle refuses enums containing negative
   explicit ordinals, so a `$IF SizeOf(...)` over such an enum stays a guess.
+- an unscoped enum's value that takes a name already declared where it
+  counts - or that a later declaration takes - is E2004, but not for an enum
+  written after an include that did not load: that file may switch
+  SCOPEDENUMS on, so its values clash with nothing (CollectEnum). dcc would
+  stop at the missing include anyway.
 
 ### 2.5.1 Type aliases - weak vs. distinct
 - the parser marks distinctness (Aux=1) but no semantic
@@ -97,9 +102,7 @@ README's own section on that).
   a diagnostic: a parameter named Self, one named like the method's own type
   parameter - dcc reports both once, at the body's begin - and `Self` in a
   class method, which a static one does not have and only its declaration
-  says which. Nor does any clash see an unscoped enum's values, in a body or
-  out of one - their scope is joined into the enclosing one, and the lookup
-  reads a scope's own names only.
+  says which.
 
 ### 3.2.1 True constants
 - a section-level `const C = Expr` is typed from its initializer in the

@@ -66,6 +66,18 @@ type
     // and, the flag, RedeclaresBodyName.
     FOwnName: string;
     FInFinalization: Boolean;
+    // The unscoped enum values declared so far, by the scope each counts in
+    // (CollectEnum): FEnumAt[scope] is 1 + its FEnumValues entry, 0 for none.
+    // Collect-time only, for HoldsEnumValue.
+    FEnumAt: TArray<Integer>;
+    FEnumValues: TArray<TSemaNames>;
+    // The visible index of the first include that did not load (MaxInt for
+    // none): an enum past it may be scoped by that file, and CollectEnum
+    // skips its values' clash checks.
+    FEnumsUncertainFrom: Integer;
+    // The declaration nodes reported E2004 - one report per declaration,
+    // whichever check finds it first (ReportRedeclared). Sized on the first.
+    FReported: TArray<Boolean>;
     FNodeScope: TArray<Integer>;
     FIsDeclName: TArray<Boolean>;
     FPendingAggr: TArray<TPasPendingAggr>;
@@ -108,12 +120,14 @@ type
     function BodyScope(AScope: Integer): Integer;
     function RedeclaresOwnName(AScope: Integer; AKind: TSemaSymbolKind;
       ADeclNode: Integer; const AKey: TSemaKey): Boolean;
+    function HoldsEnumValue(AScope: Integer; const AKey: TSemaKey): Boolean;
+    procedure AddEnumValue(AScope, ASym: Integer);
     function HoldsName(AScope: Integer; const AKey: TSemaKey): Boolean;
     function RoutineHolds(ARoutine: Integer; const AKey: TSemaKey): Boolean;
     function RedeclaresBodyName(AScope, ADeclNode: Integer;
       const AKey: TSemaKey): Boolean;
     function RedeclaresOuterName(AScope: Integer; AKind: TSemaSymbolKind;
-      const AKey: TSemaKey): Boolean;
+      ADeclNode: Integer; const AKey: TSemaKey): Boolean;
     { AOverloadOnClash chains onto a same-named, same-kind symbol instead of
       reporting a redeclaration - for the one non-routine case that is legal,
       a generic type name declared at several ARITIES (16.1.2). The name is
@@ -518,6 +532,14 @@ procedure TPasSemaResolver.ReportRedeclared(ADeclNode: Integer);
 var
   LFileId, LLine, LCol: Integer;
 begin
+  // dcc reports a declaration once however many names it clashes with, and
+  // the checks overlap: a duplicate enum value is both a same-scope clash
+  // and a second value in the scope the two count in.
+  if FReported = nil then
+    SetLength(FReported, Length(FTree.Nodes));
+  if FReported[ADeclNode] then
+    Exit;
+  FReported[ADeclNode] := True;
   NodePos(ADeclNode, LFileId, LLine, LCol);
   FModel.AddDiag(MakeDiag('E2004',
     Format(SE2004_IdentifierRedeclared, [NodeText(ADeclNode)]), ADeclNode,
@@ -587,9 +609,38 @@ begin
   Result := BodyScope(AScope) = FImpl;
 end;
 
+{ 2.2.4: an unscoped enum's values are declared where the enum counts as
+  declared - past every type enclosing it, CollectEnum's LOwnScope - and
+  there they clash like any other name (dcc64 37.0, probed 2026-09-27): with
+  a declaration of the same name before or after, in either section of a
+  unit, and with another enum's value. Resolution reaches them through the
+  enum scope joined in, which no clash lookup reads (FindLocal), so this
+  index holds them for the checks alone. }
+function TPasSemaResolver.HoldsEnumValue(AScope: Integer;
+  const AKey: TSemaKey): Boolean;
+begin
+  Result := (AScope >= 0) and (AScope < Length(FEnumAt)) and
+    (FEnumAt[AScope] > 0) and
+    (FEnumValues[FEnumAt[AScope] - 1].Find(AKey, FModel.Symbols) <> NIL_SYM);
+end;
+
+procedure TPasSemaResolver.AddEnumValue(AScope, ASym: Integer);
+begin
+  if AScope >= Length(FEnumAt) then
+    SetLength(FEnumAt, FModel.Scopes.Count);
+  if FEnumAt[AScope] = 0 then
+  begin
+    SetLength(FEnumValues, Length(FEnumValues) + 1);
+    FEnumAt[AScope] := Length(FEnumValues);
+  end;
+  FEnumValues[FEnumAt[AScope] - 1].AddOrSet(
+    PasNameHash(FModel.Symbols[ASym].NameLower), ASym, FModel.Symbols);
+end;
+
 { For the clashes beyond a declaration's own scope (RedeclaresBodyName,
-  RoutineHolds): whether AScope's own names - FindLocal, its joins unread -
-  hold one a declaration may not take. Every kind does but
+  RoutineHolds, CollectEnum): whether AScope's own names - FindLocal, its
+  joins unread - or the unscoped enum values that count in it
+  (HoldsEnumValue) hold one a declaration may not take. Every kind does but
   two: a used unit's name, which a declaration may hide (1.2.1, DeclareSym's
   skUnitRef branch), and a generic type's, whose declared name carries its
   arity - `type G<T> = class end;` and `var G := 1` in the initialization
@@ -616,7 +667,7 @@ begin
     end;
     LSym := FModel.Symbols[LSym].NextOverload;
   end;
-  Result := False;
+  Result := HoldsEnumValue(AScope, AKey);
 end;
 
 { The names a routine's body holds beyond its scope's own (HoldsName), each
@@ -723,16 +774,24 @@ begin
 end;
 
 { A declaration its own scope has no clash for, but that takes a name dcc64
-  37.0 counts there all the same (probed 2026-09-27): in a routine's scope, a
-  local - var, const, type, label, nested routine - named like one of those
-  RoutineHolds lists. `procedure TC.M; var G: Integer;` completing a declared
-  `procedure M(G: Integer);` is E2004, and so are `var Self` in a method and
-  `var T` in `procedure TC.M<T>;`. A parameter is left out: a parameter named
-  Self or like the method's own type parameter is E2004 too, reported once at
-  the body's begin, and that is not modelled. }
+  37.0 counts there all the same (probed 2026-09-27):
+  - an unscoped enum's value declared before it and counting in its scope
+    (HoldsEnumValue) - `type TE = (G, H); var G: Integer;`, a nested type's
+    enum included. Not for a generic type, whose name carries its arity; the
+    other order, the value after the name, is CollectEnum's;
+  - in a routine's scope, a local - var, const, type, label, nested routine -
+    named like one of those RoutineHolds lists. `procedure TC.M; var G:
+    Integer;` completing a declared `procedure M(G: Integer);` is E2004, and
+    so are `var Self` in a method and `var T` in `procedure TC.M<T>;`. A
+    parameter is left out: a parameter named Self or like the method's own
+    type parameter is E2004 too, reported once at the body's begin, and that
+    is not modelled. }
 function TPasSemaResolver.RedeclaresOuterName(AScope: Integer;
-  AKind: TSemaSymbolKind; const AKey: TSemaKey): Boolean;
+  AKind: TSemaSymbolKind; ADeclNode: Integer; const AKey: TSemaKey): Boolean;
 begin
+  if HoldsEnumValue(AScope, AKey) and not ((AKind = skType) and
+     (GenericArityOfDecl(FTree.Nodes[ADeclNode].Parent) > 0)) then
+    Exit(True);
   Result := (AKind <> skParam) and
     (FModel.Scopes[AScope].Kind = sckRoutine) and RoutineHolds(AScope, AKey);
 end;
@@ -761,7 +820,7 @@ begin
     // No clash in its own scope, but one beyond it: an inline declaration
     // against its body, a routine's local against its implicit names.
     if not LOwnName and (RedeclaresBodyName(AScope, ADeclNode, LKey) or
-       RedeclaresOuterName(AScope, AKind, LKey)) then
+       RedeclaresOuterName(AScope, AKind, ADeclNode, LKey)) then
       ReportRedeclared(ADeclNode);
   end
   else if (FModel.RoutineHead(Result) = rhOperator) <>
@@ -1349,6 +1408,14 @@ begin
     while (LOwnScope <> NIL_SCOPE) and
           (FModel.Scopes[LOwnScope].Kind in [sckStruct, sckGenericParams]) do
       LOwnScope := FModel.Scopes[LOwnScope].Parent;
+    // Past an include that did not load, the enum may be scoped after all:
+    // that file may switch SCOPEDENUMS on, and read unscoped a scoped enum
+    // clashes with every same-named value around it. A component suite's
+    // rich-edit include is exactly `{$SCOPEDENUMS ON}`, and a search path
+    // without it made 98 false E2004 in one project. The values still join
+    // in for resolution, as before; only the clash checks stand down.
+    if FTree.Nodes[ANode].FirstToken >= FEnumsUncertainFrom then
+      LOwnScope := NIL_SCOPE;
   end;
   LChild := FirstChild(ANode);
   while LChild <> NIL_NODE do
@@ -1367,9 +1434,17 @@ begin
         LSym := DeclareSym(LEnum, skEnumValue, LName);
         if ATypeSym <> NIL_SYM then
           FModel.Symbols[LSym].TypeSym := ATypeSym;
-        if (LOwnScope <> NIL_SCOPE) and RedeclaresOwnName(LOwnScope,
-           skEnumValue, LName, NodeKey(LName)) then
-          ReportRedeclared(LName);
+        // Where the value counts, it clashes with the module's own name and
+        // with whatever is there already - a declaration or another value
+        // (HoldsName); what comes after asks HoldsEnumValue in DeclareSym.
+        if LOwnScope <> NIL_SCOPE then
+        begin
+          var LKey := NodeKey(LName);
+          if RedeclaresOwnName(LOwnScope, skEnumValue, LName, LKey) or
+             HoldsName(LOwnScope, LKey) then
+            ReportRedeclared(LName);
+          AddEnumValue(LOwnScope, LSym);
+        end;
       end;
       LVal := NextSib(LName);
       while LVal <> NIL_NODE do
@@ -3539,9 +3614,14 @@ end;
 
 procedure TPasSemaResolver.CollectRoot(ARoot: Integer);
 var
-  LChild, LNameNode: Integer;
+  LChild, LNameNode, LIdx: Integer;
 begin
   FNodeScope[ARoot] := FImpl;
+  FEnumsUncertainFrom := MaxInt;
+  for LIdx := 0 to High(FTree.Source.IncludeRefs) do
+    if (FTree.Source.IncludeRefs[LIdx].IncludedFileId < 0) and
+       (FTree.Source.IncludeRefs[LIdx].VisIndex < FEnumsUncertainFrom) then
+      FEnumsUncertainFrom := FTree.Source.IncludeRefs[LIdx].VisIndex;
   // First child is the compilation unit's own name - a definition, not a
   // reference. Record it and leave it without a scope so no pass resolves it.
   LNameNode := FirstChild(ARoot);

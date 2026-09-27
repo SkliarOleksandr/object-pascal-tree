@@ -2118,6 +2118,115 @@ begin
   GModel.Free;
 end;
 
+{ 2.2.4: an unscoped enum's values are declared where the enum counts as
+  declared - past every type enclosing it - and clash there with any name,
+  before or after, and with another enum's values. Every source below was
+  compiled with dcc64 37.0 on 2026-09-27 and every count is dcc's own. }
+procedure TestEnumValueNames;
+
+  procedure Expect(const AName, ASource: string; ACount: Integer);
+  begin
+    Analyze(ASource);
+    Ok('enumname: ' + AName, DiagCount('E2004') = ACount);
+    GModel.Free;
+  end;
+
+begin
+  Expect('a value, then a var',
+    'unit U; interface type TE = (G, H); var G: Integer; implementation end.',
+    1);
+  Expect('a var, then a value',
+    'unit U; interface var G: Integer; type TE = (G, H); implementation end.',
+    1);
+  Expect('two enums'' values',
+    'unit U; interface type TA = (G, H); TB = (G, K); implementation end.', 1);
+  Expect('a value, then a const',
+    'unit U; interface type TE = (G, H); const G = 1; implementation end.',
+    1);
+  Expect('a value, then a type',
+    'unit U; interface type TE = (G, H); G = Integer; implementation end.',
+    1);
+  Expect('an enum named like its own value',
+    'unit U; interface type G = (G, H); implementation end.', 1);
+  Expect('a duplicate value in one enum, once',
+    'unit U; interface type TE = (G, H, G); implementation end.', 1);
+  Expect('a class-nested enum''s value and a unit var',
+    'unit U; interface type TC = class type TE = (G, H); end; ' +
+    'var G: Integer; implementation end.', 1);
+  Expect('two classes'' nested enums',
+    'unit U; interface type TC = class type TE = (G, H); end; ' +
+    'TD = class type TF = (G, K); end; implementation end.', 1);
+  Expect('a generic class''s nested enum and a unit var',
+    'unit U; interface type TG<T> = class type TE = (G, H); end; ' +
+    'var G: Integer; implementation end.', 1);
+  Expect('a record field''s anonymous enum and a unit var',
+    'unit U; interface type TR = record F: (G, H); end; var G: Integer; ' +
+    'implementation end.', 1);
+  Expect('a variant part''s tag enum and a unit var',
+    'unit U; interface type TR = record case K: (G, H) of G: (A: Integer); ' +
+    'H: (B: Integer); end; var G2: Integer; G: Integer; implementation end.',
+    1);
+  Expect('a var''s anonymous enum and a later var',
+    'unit U; interface var E: (G, H); G: Integer; implementation end.', 1);
+  Expect('a set type''s anonymous enum and a named one',
+    'unit U; interface type TE = (G, H); var S: set of (G2, G); ' +
+    'implementation end.', 1);
+  Expect('a program''s enum and var',
+    'program P; type TE = (G, H); var G: Integer; begin end.', 1);
+  Expect('a parameter and a local enum''s value',
+    'unit U; interface implementation procedure P(G: Integer); ' +
+    'type TE = (G, H); begin end; end.', 1);
+  Expect('two local enums'' values',
+    'unit U; interface implementation procedure P; type TA = (G, H); ' +
+    'TB = (G, K); begin end; end.', 1);
+  Expect('a local anonymous enum and a local var',
+    'unit U; interface implementation procedure P; var E: (G, H); ' +
+    'G: Integer; begin end; end.', 1);
+  Expect('a local enum''s value and an inline var',
+    'unit U; interface implementation procedure P; type TE = (G, H); ' +
+    'begin var G := 1; if G = 0 then ; end; end.', 1);
+  Expect('an interface value and an initialization inline var',
+    'unit U; interface type TE = (G, H); implementation initialization ' +
+    'var G := 1; if G = 0 then ; end.', 1);
+
+  Expect('silent: scoped enums',
+    'unit U; interface {$SCOPEDENUMS ON} type TA = (G, H); TB = (G, K); ' +
+    'var G: Integer; implementation end.', 0);
+  Expect('silent: a used unit''s name',
+    'unit U; interface uses B; type TE = (B, C); implementation end.', 0);
+  Expect('silent: a generic type',
+    'unit U; interface type TE = (G, H); G<T> = class end; ' +
+    'implementation end.', 0);
+  Expect('silent: an alias of the enum',
+    'unit U; interface type TE = (G, H); TF = TE; implementation end.', 0);
+  Expect('silent: a member of the class nesting the enum',
+    'unit U; interface type TC = class type TE = (G, H); var G: Integer; ' +
+    'end; TD = class type TF = (K, L); procedure K; end; implementation ' +
+    'procedure TD.K; begin end; end.', 0);
+  Expect('silent: a field of another class',
+    'unit U; interface type TE = (G, H); TC = class G: Integer; end; ' +
+    'TD = class type TF = (K, L); end; TX = class K: Integer; end; ' +
+    'implementation end.', 0);
+  Expect('silent: a routine''s own names beside a unit''s values',
+    'unit U; interface type TE = (G, H); TC = class type TF = (K, L); end; ' +
+    'procedure P(H: Integer); implementation procedure P(H: Integer); ' +
+    'var G: Integer; begin G := 0; var K := G; if K = 0 then ; end; end.',
+    0);
+  Expect('silent: a routine''s local enum and a unit var',
+    'unit U; interface var G: Integer; implementation procedure P; ' +
+    'type TE = (G, H); begin end; end.', 0);
+
+  // Past an include that did not load, the enums may be scoped by it, and
+  // theirs clash with nothing; before it they still do. (No dcc count: dcc
+  // stops at the missing include, F1026.)
+  Analyze('unit U; interface type TA = (G, H); TB = (G, K); ' +
+    '{$I missing.inc} type TC = (X, Y); TD = (X, Z); var Y: Integer; ' +
+    'implementation end.');
+  Ok('enumname: only the enums before an include that did not load clash',
+    DiagCount('E2004') = 1);
+  GModel.Free;
+end;
+
 begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN32']);
@@ -2189,6 +2298,8 @@ begin
   TestModuleBodyNames;
   // 8d. ...nor one in a routine's body, nor a local
   TestRoutineBodyNames;
+  // 8e. ...and an unscoped enum's values are names where they count
+  TestEnumValueNames;
 
   // 9. call fitting no local overload stays untyped (no bogus E2010)
   Analyze(SRC_NOFIT);
