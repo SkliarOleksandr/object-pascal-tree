@@ -348,6 +348,39 @@ statement was first wrapped along the tree (mode `t2`, 2026-09-26, dcc64
   variation this rare still slips through at times: a DIFF with no dump
   difference is settled by compiling both sides many times over.
 
+The same harness run over third-party libraries built through their own
+packages, a large application and Win32 (2026-09-26/27, dcc64 and dcc32
+37.0) met six more:
+
+- **A switch set in the source overrides the command line.** An include
+  that turns `DEFINITIONINFO` on brings back a record that keeps lines: a
+  then-branch that constructs a generic class of the unit's own,
+  `X := TField<Int64>.Create(...)` with `else` on the next line, records the
+  `else`'s line - and moving that `else` up one line, no block at all,
+  changes the same byte a `begin`/`end` does. The harness takes a site in
+  such a unit only where no recorded line can move.
+- **dcc64 without `-M` or `-B` compiles a program but writes no unit
+  `.dcu`.** The build that makes a library's `.dcu` files needs `-M` (or
+  `-B`, which also recompiles every library source it finds).
+- **With a unit's source findable on the unit path, dcc checks that unit's
+  include files before it trusts its `.dcu`.** A used library unit whose
+  include (`jcl.inc`) is not on the `-I` path is recompiled, and fails - so a
+  unit compiled standalone gets `.dcu` directories only on its unit path.
+- **An `-I` directory that does not exist is skipped** (hint H2675), also
+  where it would have resolved a relative include: `{$I ..\X.INC}` found
+  through `dir\..\X.INC` fails when `dir` is absent, although `X.INC` is.
+- **Two units do not compile standalone for reasons of their own:** a unit
+  in a cycle whose partner's `.dcu` records a generic method's version
+  (F2051 "compiled with a different version" - also when only the switches
+  of the new compile differ from the partner's), and three units of the
+  application on which dcc64 crashes standalone (F2084 internal error, AV)
+  while the whole program compiles.
+- **dcc32 is nondeterministic on Vcl.Skia under its default switches too**
+  (dcc64 was stable there): the original's own compiles disagree. Under
+  `-$O- -$D- -$L- -$Y-` the original stays alike and the copy with blocks
+  varies in two bytes of a class-definition record (eleven values in twelve
+  compiles) - garbage, not the tree.
+
 ## Known gaps, for a future session
 
 Three different kinds, not one. Keep them apart - the fix, and whether a fix

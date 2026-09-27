@@ -43,7 +43,12 @@ program PasTreeXform;
         (`excluded-type`); one whose left edge is a `[...]` constructor -
         parenthesized, dcc types it without the target, `A := ([X] + A)` is
         E2008 (`excluded-ctor`); every `@` - `@P` of a procedural variable is
-        a designator for dcc (`excluded-at`). Every site is one line of
+        a designator for dcc (`excluded-at`); one that starts the value of a
+        typed constant or an initialized variable, an aggregate element or a
+        record constant's field value - a `(` there opens an aggregate
+        (`excluded-init`, see CollectInitStarts); in a unit whose own text turns
+        debug info on, an operator whose last token does not share a line
+        with the next (`excluded-lines`, see LinesKept). Every site is one line of
         sites.txt; -sites: applies a subset (the driver's localizer bisects a
         DIFF down to the node with it).
     t2  blocks along the tree (plan T2): every statement node in a statement
@@ -59,8 +64,10 @@ program PasTreeXform;
         as a list item (dcc finalizes a discarded managed result at the end
         of the list - `excluded-call`), in a generic's or an inline
         routine's body a statement not on one line with the token after it
-        (dcc stores such a body with its lines - `excluded-stored`; both
-        see T2Walk); never a routine's own block or the statement lists of
+        (dcc stores such a body with its lines - `excluded-stored`), the
+        same in a unit whose own text turns debug or symbol info on
+        (`excluded-lines`, see LinesKept; all three see T2Walk); never a
+        routine's own block or the statement lists of
         a case-else, a try, an except, a finally or a repeat, which are no
         statements - their items are.
 
@@ -77,7 +84,8 @@ program PasTreeXform;
   answer (Declared, a constant, SizeOf), the stream flattened (t0f) or
   parsed (ts, t1, t2) is the one a project analysis makes - its first pass
   answers compiler-provided names, its second asks the loaded units (the
-  Declared/SizeOf oracle) - over the -S search paths plus the -I ones. That
+  Declared/SizeOf oracle) - over the -S search paths plus the -I ones, with
+  the -NS:X;Y unit scope names (default: the IDE's for the platform). That
   is the stream PasTree analyzes, and the only way to judge the oracle
   against dcc.
 
@@ -206,6 +214,13 @@ var
   GExcludedAsm: Integer;             // t2: asm statements
   GExcludedCall: Integer;            // t2: call statements in a list
   GExcludedStored: Integer;          // t2: in a stored body, off one line
+  GExcludedLines: Integer;           // t1, t2: line info on in the source
+  GExcludedInit: Integer;            // t1: operators starting an initializer
+  // t1: the first visible token of every initializer value (see
+  // CollectInitStarts)
+  GInitStarts: TDictionary<Integer, Boolean>;
+  // t1, t2: the unit's own text turns line-keeping info on (see LinesKept)
+  GLinesKept: Boolean;
   // t2: the last name part, lower case, of every routine declared `inline`
   // anywhere in the unit (see IsStoredBody).
   GInlineNames: TDictionary<string, Boolean>;
@@ -355,13 +370,33 @@ begin
   GEdits.Add(LEdit);
 end;
 
-// ts, t1: the site's edit is a pair of parentheses.
+// The text of visible token AVis.
+function VisText(AVis: Integer): string;
+var
+  LTok: TPasVisibleToken;
+begin
+  LTok := GPre.Visible[AVis];
+  Result := GPre.Files[LTok.FileId].TokenText(LTok.TokenIndex);
+end;
+
+{ ts, t1: the site's edit is a pair of parentheses - with a space where the
+  paren would fuse with its neighbour into another token: `.)` is the digraph
+  of `]` and `(.` of `[`, `(*` opens a comment. A real literal written with a
+  trailing dot, `100.` (an application's report code: `... *` / `100. - X`),
+  parenthesized to `100.)` read as `100` and `]` - E2029 (plan S7). }
 procedure SetParens(var ASite: TSite);
+var
+  LText: string;
 begin
   ASite.OpenAfter := False;
   ASite.OpenText := '(';
+  LText := VisText(ASite.OpenVis);
+  if (LText <> '') and CharInSet(LText[1], ['.', '*']) then
+    ASite.OpenText := '( ';
   ASite.OpenOrder := 1;
   ASite.CloseText := ')';
+  if VisText(ASite.CloseVis).EndsWith('.') then
+    ASite.CloseText := ' )';
   ASite.CloseOrder := 0;
 end;
 
@@ -596,7 +631,86 @@ end;
   is E2064 there, `F(@P)` passes it to a var parameter and `F((@P))` is
   E2197, and in an inline routine `LPARAM((@P))` is stored differently -
   and a parse cannot tell a procedural variable from any other. The
-  operator around it is still wrapped: `(@F = nil)`. }
+  operator around it is still wrapped: `(@F = nil)`.
+
+  Nor an operator that starts an initializer's value (GExcludedInit, see
+  CollectInitStarts).
+
+  Nor, in a unit whose own text turns D or L on (GLinesKept, see
+  LinesKept), an operator whose last token does not share a line with the
+  next (GExcludedLines). }
+function EndsOnLineOfNext(ANode: Integer): Boolean; forward;
+
+{ t1: the first token of every value where a `(` opens an AGGREGATE when
+  the value's type is structured - the value of a typed constant or of an
+  initialized variable, an element of an aggregate, the value of a record
+  constant's field. An array of Char takes a string expression there, and
+  parenthesized it is a one-element array constant: `C: array[0..5] of
+  AnsiChar = 'abc' + 'def'` compiles, `= ('abc' + 'def')` is E2010
+  'AnsiChar' and 'string', in each of the four positions; `(1 + 2)` for an
+  Integer, a string, a set or a Byte element compiles (plan S7, probes
+  init-paren; mORMot's char tables). A parse cannot tell a structured type
+  from a scalar one behind a name, so every such value start is recorded;
+  an untyped constant's value takes the parentheses (no aggregate there). }
+procedure CollectInitStarts(ANode: Integer);
+var
+  LChild, LFirst: Integer;
+  LTyped: Boolean;
+begin
+  case GTree.Nodes[ANode].Kind of
+    nkConstDecl, nkVarDecl:
+      begin
+        // A constant is typed when a `:` follows its name; a variable with
+        // an initializer always is. The value is the child right after `=`.
+        LTyped := GTree.Nodes[ANode].Kind = nkVarDecl;
+        if not LTyped then
+        begin
+          LChild := GTree.Nodes[ANode].FirstChild;
+          while (LChild <> NIL_NODE) and (GTree.Nodes[LChild].Kind <> nkIdent) do
+            LChild := GTree.Nodes[LChild].NextSibling;
+          LTyped := (LChild <> NIL_NODE) and
+            (GTree.Nodes[LChild].LastToken < High(GPre.Visible)) and
+            (GPre.VisibleToken(GTree.Nodes[LChild].LastToken + 1).Kind = tkColon);
+        end;
+        if LTyped then
+        begin
+          LChild := GTree.Nodes[ANode].FirstChild;
+          while LChild <> NIL_NODE do
+          begin
+            LFirst := GTree.NodeLeftmostVis(LChild);
+            if (LFirst > 0) and (GPre.VisibleToken(LFirst - 1).Kind = tkEqual) then
+              GInitStarts.AddOrSetValue(LFirst, True);
+            LChild := GTree.Nodes[LChild].NextSibling;
+          end;
+        end;
+      end;
+    nkAggregate:
+      begin
+        LChild := GTree.Nodes[ANode].FirstChild;
+        while LChild <> NIL_NODE do
+        begin
+          if GTree.Nodes[LChild].Kind <> nkAggregateField then
+            GInitStarts.AddOrSetValue(GTree.NodeLeftmostVis(LChild), True);
+          LChild := GTree.Nodes[LChild].NextSibling;
+        end;
+      end;
+    nkAggregateField:
+      begin
+        LChild := GTree.Nodes[ANode].FirstChild;       // the field name
+        if LChild <> NIL_NODE then
+          LChild := GTree.Nodes[LChild].NextSibling;   // its value
+        if LChild <> NIL_NODE then
+          GInitStarts.AddOrSetValue(GTree.NodeLeftmostVis(LChild), True);
+      end;
+  end;
+  LChild := GTree.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    CollectInitStarts(LChild);
+    LChild := GTree.Nodes[LChild].NextSibling;
+  end;
+end;
+
 procedure T1Walk(ANode: Integer; const ARoutine: string; ATypeStart: Integer);
 var
   LChild: Integer;
@@ -625,9 +739,13 @@ begin
         else if GPre.VisibleToken(GTree.NodeLeftmostVis(ANode)).Kind =
                 tkLBracket then
           Inc(GExcludedCtor)
+        else if GInitStarts.ContainsKey(GTree.NodeLeftmostVis(ANode)) then
+          Inc(GExcludedInit)
         else if (GTree.Nodes[ANode].Kind = nkUnaryOp) and
                 (OpText(ANode) = '@') then
           Inc(GExcludedAt)
+        else if GLinesKept and not EndsOnLineOfNext(ANode) then
+          Inc(GExcludedLines)
         else
           AddParenSite(GTree.KindName(GTree.Nodes[ANode].Kind), OpsOf(ANode),
             ANode, ARoutine);
@@ -907,6 +1025,20 @@ begin
     Result := (VisLine(LLast + 1, LOtherFile) = LLine) and (LOtherFile = LFile);
 end;
 
+{ t1: whether the last token of node ANode and the token after it lie on
+  one line - the `)` then leaves every line the unit records as it was (see
+  LinesKept). }
+function EndsOnLineOfNext(ANode: Integer): Boolean;
+var
+  LLast, LFile, LOtherFile: Integer;
+begin
+  LLast := GTree.Nodes[ANode].LastToken;
+  Result := (LLast >= High(GPre.Visible)) or
+    ((VisLine(LLast + 1, LOtherFile) = VisLine(LLast, LFile)) and
+     (LOtherFile = LFile));
+end;
+
+
 { t2: every statement of the subtree at ANode as a site, in pre-order (a
   statement before the ones inside it); ARoutine as in T1Walk. AStored:
   ANode lies in a stored body (IsStoredBody). AInList: ANode stands as an
@@ -927,7 +1059,9 @@ end;
     exception handler the temporary is the statement's own and the
     begin/end changes nothing; under a label it is the label's list's.
   - in a stored body, a statement that does not share one line with the
-    token after it (counted in GExcludedStored) - see IsStoredBody. }
+    token after it (counted in GExcludedStored) - see IsStoredBody; the
+    same in a unit whose own text turns D, L or Y on (GLinesKept, counted
+    in GExcludedLines) - see LinesKept. }
 procedure T2Walk(ANode: Integer; const ARoutine: string; AStored,
   AInList: Boolean);
 var
@@ -975,6 +1109,8 @@ begin
             Inc(GExcludedCall)
           else if AStored and not OnOneLine(LChild) then
             Inc(GExcludedStored)
+          else if GLinesKept and not OnOneLine(LChild) then
+            Inc(GExcludedLines)
           else
             AddBlockSite(ANode, LIndex, LChild, LRoutine);
       end;
@@ -1094,6 +1230,104 @@ begin
   Result := (AWord = 'IF') or (AWord = 'IFDEF') or (AWord = 'IFNDEF') or
     (AWord = 'IFOPT') or (AWord = 'ELSEIF') or (AWord = 'ELSE') or
     (AWord = 'ENDIF') or (AWord = 'IFEND');
+end;
+
+{ Whether directive token AText turns on a switch of ALetters, from the
+  family whose records keep source lines: D (DEBUGINFO), L (LOCALSYMBOLS),
+  Y (REFERENCEINFO; YD and DEFINITIONINFO turn it on for definitions) -
+  `$D+`, `$O-,Y+`, `$YD`, `$DEFINITIONINFO ON` (braces left out here: a
+  directive in a brace comment ends it). `$L file.obj` and `$D text` are
+  other directives. }
+function LineInfoOn(const AText: string; const ALetters: TSysCharSet): Boolean;
+var
+  LWord, LBody: string;
+  LStart, LIdx: Integer;
+begin
+  LWord := DirectiveWord(AText, LStart);
+  LBody := UpperCase(DirectiveTrail(AText));
+  if (LWord = 'DEBUGINFO') or (LWord = 'LOCALSYMBOLS') or
+     (LWord = 'REFERENCEINFO') or (LWord = 'DEFINITIONINFO') then
+  begin
+    if not (LBody.StartsWith('ON') and
+            ((Length(LBody) = 2) or not CharInSet(LBody[3], ['A'..'Z']))) then
+      Exit(False);
+    if LWord[1] = 'R' then
+      Exit(CharInSet('Y', ALetters))
+    else if LWord[1] = 'D' then
+      if LWord = 'DEBUGINFO' then
+        Exit(CharInSet('D', ALetters))
+      else
+        Exit(CharInSet('Y', ALetters));
+    Exit(CharInSet('L', ALetters));
+  end;
+  if LWord = 'YD' then
+    Exit(CharInSet('Y', ALetters));
+  Result := False;
+  if Length(LWord) <> 1 then
+    Exit;
+  // The short form, a comma list: X+ X- YD Zn ...
+  LBody := LWord + LBody;
+  LIdx := 1;
+  while LIdx < Length(LBody) do
+  begin
+    if not CharInSet(LBody[LIdx], ['A'..'Z']) then
+      Exit;
+    if CharInSet(LBody[LIdx + 1], ['+', '-']) then
+    begin
+      if (LBody[LIdx + 1] = '+') and CharInSet(LBody[LIdx], ALetters) then
+        Exit(True);
+    end
+    else if (LBody[LIdx] = 'Y') and (LBody[LIdx + 1] = 'D') then
+    begin
+      if CharInSet('Y', ALetters) then
+        Exit(True);
+    end
+    else if not CharInSet(LBody[LIdx + 1], ['0'..'9']) then
+      Exit;
+    Inc(LIdx, 2);
+    while (LIdx <= Length(LBody)) and
+          CharInSet(LBody[LIdx], ['0'..'9', ',', ' ', #9]) do
+      Inc(LIdx);
+  end;
+end;
+
+{ t1, t2 (rule R3): whether the unit's own text - the unit or an include,
+  outside every region the preprocessor skipped - turns on a switch of
+  ALetters (see LineInfoOn). The harness compiles t1 with -$D- -$L- and t2
+  with -$Y- as well, because those records keep the line of the token AFTER
+  a construct (plan S5, S6); a directive in the source overrides the
+  command line. Spring4D's include turns DEFINITIONINFO on: a then-branch
+  constructing a generic of the unit's own, `X := TField<Int64>.Create(...)`
+  with `else` on the next line, records the `else`'s line, and its
+  begin/end - or moving the `else` up a line, no block at all - changes one
+  byte (plan S7, probes geninst3 yd-*, and the unit itself). Such a unit
+  takes a site only where no recorded line can move: t2 a statement on one
+  line with the token after it (as in a stored body), t1 an operator whose
+  last token shares a line with the next. A whole unit, whatever the
+  directive's position - conservative, and rare (no Studio unit). }
+function LinesKept(const ALetters: TSysCharSet): Boolean;
+var
+  LFile, LTok, LStart: Integer;
+  LRegion: TPasSkippedRegion;
+  LLive: Boolean;
+begin
+  for LFile := 0 to High(GPre.Files) do
+    for LTok := 0 to High(GPre.Files[LFile].Tokens) do
+      if (GPre.Files[LFile].Tokens[LTok].Kind = tkDirective) and
+         LineInfoOn(GPre.Files[LFile].TokenText(LTok), ALetters) then
+      begin
+        LStart := GPre.Files[LFile].Tokens[LTok].Start;
+        LLive := True;
+        for LRegion in GPre.Skipped[LFile] do
+          if (LStart >= LRegion.Start) and (LStart < LRegion.EndPos) then
+          begin
+            LLive := False;
+            Break;
+          end;
+        if LLive then
+          Exit(True);
+      end;
+  Result := False;
 end;
 
 const
@@ -1911,6 +2145,21 @@ var
   GName: string;
   GWritten: TDictionary<string, Boolean>;
   GSitesText, GFileLines: TStringList;
+  GNamespaces: TArray<string>;
+  GHasNamespaces: Boolean;
+
+{ -oracle: the unit scope names the project analysis resolves a unit name
+  with - the compile's own (-NS:, the driver passes dcc's), else the IDE's
+  default for the platform. Without them `uses AnsiStrings` found nothing
+  and a `$IF Declared(StrScan)` after it stayed a guess (plan S7: a harness
+  defect, not PasTree's - every other tool sets them). }
+function ProjectNamespaces: TArray<string>;
+begin
+  if GHasNamespaces then
+    Result := GNamespaces
+  else
+    Result := PasDefaultNamespaces(GPlatform);
+end;
 
 begin
   try
@@ -1939,6 +2188,15 @@ begin
         for GName in Copy(GArg, 4, MaxInt).Split([';']) do
           if Trim(GName) <> '' then
             GSearch.Add(NoSlash(Trim(GName)));
+        Continue;
+      end;
+      if GArg.StartsWith('-NS:', True) then
+      begin
+        GNamespaces := nil;
+        for GName in Copy(GArg, 5, MaxInt).Split([';']) do
+          if Trim(GName) <> '' then
+            GNamespaces := GNamespaces + [Trim(GName)];
+        GHasNamespaces := True;
         Continue;
       end;
       if GArg.StartsWith('-sites:', True) then
@@ -2009,6 +2267,7 @@ begin
     GSites := TList<TSite>.Create;
     GArgMap := TDictionary<string, string>.Create;
     GInlineNames := TDictionary<string, Boolean>.Create;
+    GInitStarts := TDictionary<Integer, Boolean>.Create;
     GWritten := TDictionary<string, Boolean>.Create;
     GSitesText := TStringList.Create;
     GFileLines := TStringList.Create;
@@ -2036,6 +2295,7 @@ begin
         // (compiler-provided names answered) and its second, the oracle's.
         GProject := TPasSemaProject.Create(GPlatform,
           GSearch.ToArray + GIncDirs.ToArray, GDefNames.ToArray);
+        GProject.SetNamespaces(ProjectNamespaces);
         GProjectId := GProject.AnalyzeProject(GFile);
         if (GProjectId < 0) or
            (Length(GProject.Model(GProjectId).Tree.Source.Files) = 0) then
@@ -2072,8 +2332,14 @@ begin
         GUnitName := HeaderName;
         case GMode of
           xmTS: VisitRoutines(0, '');
-          xmT1: T1Walk(0, '', -2);
+          xmT1:
+            begin
+              GLinesKept := LinesKept(['D', 'L']);
+              CollectInitStarts(0);
+              T1Walk(0, '', -2);
+            end;
         else
+          GLinesKept := LinesKept(['D', 'L', 'Y']);
           CollectInlineNames(0);
           T2Walk(0, '', False, False);
         end;
@@ -2100,6 +2366,7 @@ begin
               LProject := TPasSemaProject.Create(GPlatform,
                 GSearch.ToArray + GIncDirs.ToArray, GDefNames.ToArray);
               try
+                LProject.SetNamespaces(ProjectNamespaces);
                 for LIdx := 0 to High(APaths) do
                   LProject.SetBuffer(APaths[LIdx], ATexts[LIdx]);
                 LId := LProject.AnalyzeProject(GFile);
@@ -2186,12 +2453,13 @@ begin
         'files=%d  parse-diagnostics=%d  pp-diagnostics=%d  ' +
         'dropped-sites=%d  excluded-type=%d  excluded-ctor=%d  ' +
         'excluded-at=%d  excluded-inline=%d  excluded-label=%d  ' +
-        'excluded-asm=%d  excluded-call=%d  excluded-stored=%d  applied=%d  ' +
-        'stream=%s', [PasTreeVersion, cModeNames[GMode],
-        PlatformName(GPlatform), Length(GPre.FileNames), Length(GDiags),
-        GNonInfo, GDropped, GExcluded, GExcludedCtor, GExcludedAt,
-        GExcludedInline, GExcludedLabel, GExcludedAsm, GExcludedCall,
-        GExcludedStored, GApplied, IfThen(GOracleUsed, 'project',
+        'excluded-asm=%d  excluded-call=%d  excluded-stored=%d  ' +
+        'excluded-lines=%d  excluded-init=%d  applied=%d  stream=%s',
+        [PasTreeVersion, cModeNames[GMode], PlatformName(GPlatform),
+        Length(GPre.FileNames), Length(GDiags), GNonInfo, GDropped, GExcluded,
+        GExcludedCtor, GExcludedAt, GExcludedInline, GExcludedLabel,
+        GExcludedAsm, GExcludedCall, GExcludedStored, GExcludedLines,
+        GExcludedInit, GApplied, IfThen(GOracleUsed, 'project',
         'preprocessor')]));
       GSitesText.Add('# ' + GFile);
       GSitesText.Add('# id' + #9 + 'kind' + #9 + 'ops' + #9 + 'span' + #9 +
@@ -2232,6 +2500,10 @@ begin
         GLine := GLine + ' excluded-call ' + IntToStr(GExcludedCall);
       if GExcludedStored > 0 then
         GLine := GLine + ' excluded-stored ' + IntToStr(GExcludedStored);
+      if GExcludedLines > 0 then
+        GLine := GLine + ' excluded-lines ' + IntToStr(GExcludedLines);
+      if GExcludedInit > 0 then
+        GLine := GLine + ' excluded-init ' + IntToStr(GExcludedInit);
       if GMode in [xmTS, xmT1, xmT2] then
         GLine := GLine + ' applied ' + IntToStr(GApplied);
       Writeln('sites ', GLine);
@@ -2246,6 +2518,7 @@ begin
         Writeln('flatten ', GFlatStats);
       end;
     finally
+      GInitStarts.Free;
       GInlineNames.Free;
       GArgMap.Free;
       GFileLines.Free;

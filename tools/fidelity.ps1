@@ -87,6 +87,12 @@ param(
   [string] $Bds = 'C:\Program Files (x86)\Embarcadero\Studio\37.0',
   [string[]] $UnitPath = @(),
   [string[]] $IncludePath = @(),
+  # where dcc looks for the object files a `$L` links, before the shipped
+  # ones (a corpus's own .obj - the copies hold only what the unit reads)
+  [string[]] $ObjectPath = @(),
+  # runtime packages the compiles use (dcc -LU): a design-time unit finds
+  # DesignIntf or ToolsAPI only inside designide.dcp
+  [string[]] $Packages = @(),
   [string[]] $Define = @(),
   [string[]] $XformDefine = @(),
   [string[]] $XformUndefine = @(),
@@ -151,6 +157,7 @@ if ($Worker -ne '') {
   $strings = { param($v) @($v | Where-Object { $_ -ne $null -and "$_" -ne '' } | ForEach-Object { "$_" }) }
   $Platform = $p.Platform; $Bds = $p.Bds; $Namespaces = $p.Namespaces; $Tools = $p.Tools
   $UnitPath = & $strings $p.UnitPath; $IncludePath = & $strings $p.IncludePath
+  $ObjectPath = & $strings $p.ObjectPath; $Packages = & $strings $p.Packages
   $Define = & $strings $p.Define; $XformDefine = & $strings $p.XformDefine
   $XformUndefine = & $strings $p.XformUndefine; $Switches = & $strings $p.Switches
   $Base = [bool]$p.Base; $Oracle = [bool]$p.Oracle; $OraclePath = & $strings $p.OraclePath
@@ -203,9 +210,10 @@ function Invoke-Dcc([string] $Dir, [string] $File, [string] $DcuDir,
   # -O: the object files a `$L` links ship beside the .dcu files, and dcc
   # looks for them on the object path, not the unit path.
   $a = @('-Q') + $Switches + @("-NS$Namespaces",
-    ('-U' + (($UnitDirs + @($lib)) -join ';')), "-O$lib", "-N0$DcuDir")
+    ('-U' + (($UnitDirs + @($lib)) -join ';')), ('-O' + ((@($ObjectPath) + @($lib)) -join ';')), "-N0$DcuDir")
   if ($IncDirs.Count -gt 0) { $a += ('-I' + ($IncDirs -join ';')) }
   if ($Define.Count -gt 0) { $a += ('-D' + ($Define -join ';')) }
+  if (@($Packages).Count -gt 0) { $a += ('-LU' + ($Packages -join ';')) }
   $a += $File
   Invoke-Tool $dcc $a $Dir
 }
@@ -277,6 +285,13 @@ function Compile-Side([string] $SideRoot, [string] $Work, [string] $Main,
   $ccInc = @($IncDirs | ForEach-Object { & $toCc $_ })
   [IO.Directory]::Move($SideRoot, $cc)
   try {
+    # Every include directory exists in the copy, empty where no file of it
+    # was read: dcc resolves `{$I ..\X.INC}` against each -I directory too,
+    # `_avi\..\X.INC`, and skips one that does not exist (H2675) - 19 server
+    # units found their include through a directory they read nothing from.
+    foreach ($d in $ccInc) {
+      if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+    }
     Invoke-Dcc (Split-Path $ccMain) (Split-Path $ccMain -Leaf) $DcuDir $unitDirs $ccInc
   } finally {
     [IO.Directory]::Move($cc, $SideRoot)
@@ -388,7 +403,7 @@ function Xform-Args([string] $u, [string] $XfOut, [string] $SiteList = '') {
   if ($xd.Count -gt 0) { $xa += ('-D:' + ($xd -join ';')) }
   if ($XformUndefine.Count -gt 0) { $xa += ('-Undef:' + ($XformUndefine -join ';')) }
   if ($IncludePath.Count -gt 0) { $xa += ('-I:' + ($IncludePath -join ';')) }
-  if ($Oracle) { $xa += @('-oracle', ('-S:' + ($OraclePath -join ';'))) }
+  if ($Oracle) { $xa += @('-oracle', ('-S:' + ($OraclePath -join ';')), "-NS:$Namespaces") }
   if ($SiteList -ne '') { $xa += "-sites:$SiteList" }
   elseif ($Sites -ne '') { $xa += "-sites:$Sites" }
   return ,$xa
@@ -772,7 +787,8 @@ if ($Jobs -le 1) {
   if (Test-Path -LiteralPath $jobDir) { Remove-Item -LiteralPath $jobDir -Recurse -Force }
   New-Item -ItemType Directory -Force -Path $jobDir | Out-Null
   $params = [ordered]@{ Platform = $Platform; Bds = $Bds; Namespaces = $Namespaces
-    Tools = $Tools; UnitPath = @($UnitPath); IncludePath = @($IncludePath)
+    Tools = $Tools; UnitPath = @($UnitPath); IncludePath = @($IncludePath); ObjectPath = @($ObjectPath)
+    Packages = @($Packages)
     Define = @($Define); XformDefine = @($XformDefine); XformUndefine = @($XformUndefine)
     Switches = @($Switches); Base = [bool]$Base; Oracle = [bool]$Oracle
     OraclePath = @($OraclePath); Localize = [bool]$Localize; NoLocalize = [bool]$NoLocalize
@@ -847,11 +863,11 @@ if ($copyIncomplete -gt 0) { $summary.Add("base-fail with an incomplete copy: $c
 if ($Oracle) { $summary.Add("units whose stream came from the project analysis (-Oracle): $projectStream") }
 $pass = $true
 if ($Mode -eq 't1') {
-  $summary.Add(("t1: sites={0} excluded (subrange type start, [ first, @)={1} dropped={2} units with parse diagnostics={3}" -f
+  $summary.Add(("t1: sites={0} excluded (subrange type start, [ first, @, initializer start, source line info)={1} dropped={2} units with parse diagnostics={3}" -f
     $t1.Sites, $t1.Excluded, $t1.Dropped, $t1.ParseUnits))
 }
 if ($Mode -eq 't2') {
-  $summary.Add(("t2: sites={0} excluded (inline var/const, labeled, asm, list calls, stored-body lines)={1} dropped={2} units with parse diagnostics={3}" -f
+  $summary.Add(("t2: sites={0} excluded (inline var/const, labeled, asm, list calls, stored-body lines, source line info)={1} dropped={2} units with parse diagnostics={3}" -f
     $t1.Sites, $t1.Excluded, $t1.Dropped, $t1.ParseUnits))
 }
 if ($doLocalize) {
