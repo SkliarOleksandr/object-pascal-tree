@@ -2227,6 +2227,105 @@ begin
   GModel.Free;
 end;
 
+{ 1.1.2: a unit's two sections are one scope for its own names - an
+  implementation declaration or enum value taking an interface name is
+  E2004, but for a used unit's name, a routine's implementation or added
+  overload, and a type of another arity. Every source below was compiled
+  with dcc64 37.0 on 2026-09-27 and every count is dcc's own. }
+procedure TestInterfaceNames;
+
+  procedure Expect(const AName, ASource: string; ACount: Integer);
+  begin
+    Analyze(ASource);
+    Ok('intfname: ' + AName, DiagCount('E2004') = ACount);
+    GModel.Free;
+  end;
+
+begin
+  Expect('a var',
+    'unit U; interface var G: Integer; implementation var G: Integer; end.',
+    1);
+  Expect('a const and a type',
+    'unit U; interface const G = 1; implementation type G = Integer; end.', 1);
+  Expect('a routine and a var after its body',
+    'unit U; interface procedure G; implementation procedure G; begin end; ' +
+    'var G: Integer; end.', 1);
+  Expect('a var and a routine',
+    'unit U; interface var G: Integer; implementation procedure G; ' +
+    'begin end; end.', 1);
+  Expect('a type and a routine',
+    'unit U; interface type G = Integer; implementation procedure G; ' +
+    'begin end; end.', 1);
+  Expect('a class and a class',
+    'unit U; interface type TC = class end; implementation ' +
+    'type TC = class end; end.', 1);
+  Expect('a class and a var',
+    'unit U; interface type TC = class end; implementation var TC: Integer; ' +
+    'end.', 1);
+  Expect('a const and a resourcestring',
+    'unit U; interface const G = 1; implementation resourcestring G = ''x''; ' +
+    'end.', 1);
+  Expect('a threadvar and a var',
+    'unit U; interface threadvar G: Integer; implementation var G: Integer; ' +
+    'end.', 1);
+  Expect('a var and a label',
+    'unit U; interface var G: Integer; implementation label G; end.', 1);
+  Expect('a generic type of the same arity',
+    'unit U; interface type G<T> = class end; implementation ' +
+    'type G<T> = class end; end.', 1);
+  Expect('an interface value and an implementation var',
+    'unit U; interface type TE = (G, H); implementation var G: Integer; end.',
+    1);
+  Expect('an interface var and an implementation value',
+    'unit U; interface var G: Integer; implementation type TE = (G, H); end.',
+    1);
+  Expect('an interface value and an implementation label',
+    'unit U; interface type TE = (G, H); implementation label G; end.', 1);
+  Expect('an interface value and an implementation routine',
+    'unit U; interface type TE = (G, H); implementation procedure G; ' +
+    'begin end; end.', 1);
+  Expect('two sections'' enums',
+    'unit U; interface type TE = (G, H); implementation type TF = (K, G); ' +
+    'end.', 1);
+  Expect('two sections'' class-nested enums',
+    'unit U; interface type TC = class type TE = (G, H); end; implementation ' +
+    'type TD = class type TF = (G, K); end; end.', 1);
+  Expect('an interface var and an implementation class-nested value',
+    'unit U; interface var G: Integer; implementation type TC = class ' +
+    'type TE = (G, H); end; end.', 1);
+
+  Expect('silent: an overload the implementation adds',
+    'unit U; interface procedure G(A: Integer); overload; implementation ' +
+    'procedure G(A: string); overload; begin end; ' +
+    'procedure G(A: Integer); begin end; end.', 0);
+  Expect('silent: a used unit''s name',
+    'unit U; interface uses B; implementation var B: Integer; end.', 0);
+  Expect('silent: an implementation uses entry',
+    'unit U; interface var B: Integer; implementation uses B; end.', 0);
+  Expect('silent: a generic type and a plain one',
+    'unit U; interface type G<T> = class end; implementation ' +
+    'type G = Integer; end.', 0);
+  Expect('silent: a plain type and a generic one',
+    'unit U; interface type G = Integer; implementation ' +
+    'type G<T> = class end; end.', 0);
+  Expect('silent: an interface generic and an implementation value',
+    'unit U; interface type G<T> = class end; implementation ' +
+    'type TE = (G, H); end.', 0);
+  Expect('silent: a method''s name and an implementation var',
+    'unit U; interface type TC = class procedure M; end; implementation ' +
+    'procedure TC.M; begin end; var M: Integer; end.', 0);
+  Expect('silent: a field of an implementation class',
+    'unit U; interface var G: Integer; implementation type TC = class ' +
+    'G: Integer; end; end.', 0);
+  Expect('silent: two classes'' methods',
+    'unit U; interface type TC = class procedure M; end; implementation ' +
+    'procedure TC.M; begin end; type TD = class procedure M; end; ' +
+    'procedure TD.M; begin end; end.', 0);
+  Expect('silent: a routine''s local',
+    'unit U; interface const G = 1; implementation procedure P; ' +
+    'const G = 2; begin end; end.', 0);
+end;
+
 begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN32']);
@@ -2300,6 +2399,8 @@ begin
   TestRoutineBodyNames;
   // 8e. ...and an unscoped enum's values are names where they count
   TestEnumValueNames;
+  // 8f. ...and the implementation takes no interface name
+  TestInterfaceNames;
 
   // 9. call fitting no local overload stays untyped (no bogus E2010)
   Analyze(SRC_NOFIT);

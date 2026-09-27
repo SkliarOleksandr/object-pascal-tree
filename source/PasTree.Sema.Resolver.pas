@@ -126,6 +126,8 @@ type
     function RoutineHolds(ARoutine: Integer; const AKey: TSemaKey): Boolean;
     function RedeclaresBodyName(AScope, ADeclNode: Integer;
       const AKey: TSemaKey): Boolean;
+    function InterfaceHolds(AKind: TSemaSymbolKind; ADeclNode: Integer;
+      const AKey: TSemaKey): Boolean;
     function RedeclaresOuterName(AScope: Integer; AKind: TSemaSymbolKind;
       ADeclNode: Integer; const AKey: TSemaKey): Boolean;
     { AOverloadOnClash chains onto a same-named, same-kind symbol instead of
@@ -773,8 +775,51 @@ begin
     HoldsName(FIntf, AKey);
 end;
 
+{ 1.1.2: a unit's two sections are one scope for its own names - an
+  implementation-section declaration that takes an interface name is E2004
+  (dcc64 37.0, probed 2026-09-27): `interface var G: Integer; implementation
+  var G: Integer;`, and so for a const, type, label, routine or enum value
+  (CollectEnum asks for those) against an interface declaration or enum
+  value (HoldsName) - but for three kinds of pair:
+  - a used unit's name on either side: an interface one may be hidden
+    (1.2.1), and `implementation uses B` beside an interface `var B`
+    compiles;
+  - two routines: the implementation of an interface routine, or an
+    overload the implementation adds - dcc words their mismatches as E2037
+    and E2267, never E2004;
+  - two types of different arity, generic on either side; a generic type
+    of the same arity clashes. }
+function TPasSemaResolver.InterfaceHolds(AKind: TSemaSymbolKind;
+  ADeclNode: Integer; const AKey: TSemaKey): Boolean;
+var
+  LSym, LArity: Integer;
+begin
+  if AKind = skUnitRef then
+    Exit(False);
+  LSym := FModel.FindLocal(FIntf, AKey);
+  if (AKind = skRoutine) and (LSym <> NIL_SYM) and
+     (FModel.Symbols[LSym].Kind = skRoutine) then
+    Exit(False);
+  LArity := 0;
+  if AKind = skType then
+    LArity := GenericArityOfDecl(FTree.Nodes[ADeclNode].Parent);
+  if LArity = 0 then
+    Exit(HoldsName(FIntf, AKey));
+  // A generic type clashes only with a type of its own arity - the chain
+  // holds a name's arities (CollectTypeDecl).
+  while LSym <> NIL_SYM do
+  begin
+    if (FModel.Symbols[LSym].Kind = skType) and
+       (GenericArityOfSym(LSym) = LArity) then
+      Exit(True);
+    LSym := FModel.Symbols[LSym].NextOverload;
+  end;
+  Result := False;
+end;
+
 { A declaration its own scope has no clash for, but that takes a name dcc64
   37.0 counts there all the same (probed 2026-09-27):
+  - in the implementation section, an interface name (InterfaceHolds);
   - an unscoped enum's value declared before it and counting in its scope
     (HoldsEnumValue) - `type TE = (G, H); var G: Integer;`, a nested type's
     enum included. Not for a generic type, whose name carries its arity; the
@@ -789,6 +834,8 @@ end;
 function TPasSemaResolver.RedeclaresOuterName(AScope: Integer;
   AKind: TSemaSymbolKind; ADeclNode: Integer; const AKey: TSemaKey): Boolean;
 begin
+  if (AScope = FImpl) and InterfaceHolds(AKind, ADeclNode, AKey) then
+    Exit(True);
   if HoldsEnumValue(AScope, AKey) and not ((AKind = skType) and
      (GenericArityOfDecl(FTree.Nodes[ADeclNode].Parent) > 0)) then
     Exit(True);
@@ -1436,12 +1483,15 @@ begin
           FModel.Symbols[LSym].TypeSym := ATypeSym;
         // Where the value counts, it clashes with the module's own name and
         // with whatever is there already - a declaration or another value
-        // (HoldsName); what comes after asks HoldsEnumValue in DeclareSym.
+        // (HoldsName), in the implementation an interface one too
+        // (InterfaceHolds); what comes after asks HoldsEnumValue in
+        // DeclareSym.
         if LOwnScope <> NIL_SCOPE then
         begin
           var LKey := NodeKey(LName);
           if RedeclaresOwnName(LOwnScope, skEnumValue, LName, LKey) or
-             HoldsName(LOwnScope, LKey) then
+             HoldsName(LOwnScope, LKey) or ((LOwnScope = FImpl) and
+             InterfaceHolds(skEnumValue, LName, LKey)) then
             ReportRedeclared(LName);
           AddEnumValue(LOwnScope, LSym);
         end;
