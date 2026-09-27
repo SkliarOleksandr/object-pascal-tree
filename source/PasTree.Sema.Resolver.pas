@@ -6,8 +6,10 @@ unit PasTree.Sema.Resolver;
   Passes over the immutable CST, in order:
     1. Collect         - open scopes (unit / struct / routine / block), add a
                           symbol for every declaration, chain routine
-                          overloads, and flag same-scope duplicates and
-                          redeclarations of the module's own name (E2004).
+                          overloads, and flag same-scope duplicates,
+                          redeclarations of the module's own name and inline
+                          declarations taking a name the module's body
+                          already holds (E2004).
     2. Resolve         - bind each identifier/member reference to a symbol via
                           the scope chain. Unresolved refs (e.g. names from a
                           not-yet-indexed used unit, or a `with`-target's
@@ -60,8 +62,8 @@ type
     FIntf: Integer;   // interface scope (importable)
     FImpl: Integer;   // implementation scope (parent = FIntf)
     // The module's own name as a lookup key, '' for a dotted one, and whether
-    // CollectRoot is inside the finalization section - both for
-    // RedeclaresOwnName.
+    // CollectRoot is inside the finalization section - for RedeclaresOwnName
+    // and, the flag, RedeclaresBodyName.
     FOwnName: string;
     FInFinalization: Boolean;
     FNodeScope: TArray<Integer>;
@@ -102,8 +104,12 @@ type
     // collect
     procedure MarkDeclName(ANode, ASym: Integer);
     procedure ReportRedeclared(ADeclNode: Integer);
+    function BodyScope(AScope: Integer): Integer;
     function RedeclaresOwnName(AScope: Integer; AKind: TSemaSymbolKind;
       ADeclNode: Integer; const AKey: TSemaKey): Boolean;
+    function HoldsName(AScope: Integer; const AKey: TSemaKey): Boolean;
+    function RedeclaresBodyName(AScope, ADeclNode: Integer;
+      const AKey: TSemaKey): Boolean;
     { AOverloadOnClash chains onto a same-named, same-kind symbol instead of
       reporting a redeclaration - for the one non-routine case that is legal,
       a generic type name declared at several ARITIES (16.1.2). The name is
@@ -488,6 +494,19 @@ begin
     LFileId, LLine, LCol));
 end;
 
+{ Where the blocks of a statement part lead up to - Collect's nkBlock case
+  opens each as a child of the scope around it: the implementation scope from
+  the initialization section, the finalization section and a program's or
+  library's main block, a routine's own scope from its body - a named
+  routine's or an anonymous method's. Collect-time only: the with pass later
+  slots a scope of its own in between. }
+function TPasSemaResolver.BodyScope(AScope: Integer): Integer;
+begin
+  Result := AScope;
+  while (Result <> NIL_SCOPE) and (FModel.Scopes[Result].Kind = sckBlock) do
+    Result := FModel.Scopes[Result].Parent;
+end;
+
 { 1.1.2: a module whose name is ONE identifier declares that name in its own
   global scope, so a declaration spelled like it - in any case, with or
   without `&` - is E2004 (dcc64 37.0, probed 2026-09-27). No same-scope clash
@@ -522,8 +541,6 @@ end;
   nearly every name fails it at the length compare. }
 function TPasSemaResolver.RedeclaresOwnName(AScope: Integer;
   AKind: TSemaSymbolKind; ADeclNode: Integer; const AKey: TSemaKey): Boolean;
-var
-  LScope: Integer;
 begin
   if (FOwnName = '') or not SemaKeyEquals(FOwnName, AKey) or
      (AKind = skUnitRef) then
@@ -535,13 +552,90 @@ begin
     Exit(True);
   if FInFinalization then
     Exit(False);
-  // Up through the blocks a statement part opens: they reach the
-  // implementation scope only from the initialization section or a main
-  // block, and stop at a routine - a named one or an anonymous method.
+  // The implementation scope itself, or a block of the initialization section
+  // or of a main block - never one of a routine's, named or anonymous.
+  Result := BodyScope(AScope) = FImpl;
+end;
+
+{ For RedeclaresBodyName: whether AScope's own names - FindLocal, its joins
+  unread - hold one an inline declaration may not take. Every kind does but
+  two: a used unit's name, which a declaration may hide (1.2.1, DeclareSym's
+  skUnitRef branch), and a generic type's, whose declared name carries its
+  arity - `type G<T> = class end;` and `var G := 1` in the initialization
+  section compile together (dcc64 37.0). A type's other arities are on its
+  chain (CollectTypeDecl). }
+function TPasSemaResolver.HoldsName(AScope: Integer;
+  const AKey: TSemaKey): Boolean;
+var
+  LSym, LDepth: Integer;
+begin
+  LSym := FModel.FindLocal(AScope, AKey);
+  for LDepth := 1 to 64 do
+  begin
+    if LSym = NIL_SYM then
+      Break;
+    case FModel.Symbols[LSym].Kind of
+      skUnitRef:
+        ;
+      skType:
+        if not (sfGeneric in FModel.Symbols[LSym].Flags) then
+          Exit(True);
+    else
+      Exit(True);
+    end;
+    LSym := FModel.Symbols[LSym].NextOverload;
+  end;
+  Result := False;
+end;
+
+{ 3.1.3: an inline var, const or `for var` counter may not take a name its
+  body already holds - dcc64 37.0 reports E2004 (probed 2026-09-27) where the
+  block rule alone would let it hide the outer name. The module's own body -
+  the initialization section, the legacy `begin` form too, and a program's or
+  library's main block - holds, at any block depth:
+  - the names of its enclosing blocks: an inline declaration above, a `for
+    var` counter, an `on E: T do` variable;
+  - every name of the module, the interface's and the implementation's - the
+    initialization section's top-level inline declarations among them, which
+    share the implementation scope (CollectRoot).
+  The finalization section is a body of its own: only its enclosing blocks
+  count there, so its inline vars may take any module-level name, the
+  initialization's included.
+
+  Silent, because each compiles: a used unit's name and a generic type's
+  (HoldsName), a name of an earlier sibling block - out of scope, and never
+  on the walk up - and an anonymous method's parameters and locals, a body of
+  their own.
+
+  dcc holds a routine's body to the same rule against its parameters, its
+  locals and its enclosing blocks (`procedure P(G: Integer); begin var G :=
+  1; end;` is E2004 too). That half is not modelled: BodyScope stops at the
+  routine, and nothing reports.
+
+  DeclareSym asks only once the declaring scope itself had no clash, so a
+  declaration reports one E2004. }
+function TPasSemaResolver.RedeclaresBodyName(AScope, ADeclNode: Integer;
+  const AKey: TSemaKey): Boolean;
+var
+  LDecl, LScope: Integer;
+begin
+  LDecl := FTree.Nodes[ADeclNode].Parent;
+  if (LDecl = NIL_NODE) or
+     not (KindOf(LDecl) in [nkInlineVar, nkInlineConst]) or
+     (BodyScope(AScope) <> FImpl) then
+    Exit(False);
+  // The enclosing blocks, up to the implementation scope.
   LScope := AScope;
-  while (LScope <> NIL_SCOPE) and (FModel.Scopes[LScope].Kind = sckBlock) do
+  while FModel.Scopes[LScope].Kind = sckBlock do
+  begin
     LScope := FModel.Scopes[LScope].Parent;
-  Result := LScope = FImpl;
+    if (FModel.Scopes[LScope].Kind = sckBlock) and HoldsName(LScope, AKey) then
+      Exit(True);
+  end;
+  if FInFinalization then
+    Exit(False);
+  Result := ((AScope <> FImpl) and HoldsName(FImpl, AKey)) or
+    HoldsName(FIntf, AKey);
 end;
 
 function TPasSemaResolver.DeclareSym(AScope: Integer; AKind: TSemaSymbolKind;
@@ -563,7 +657,13 @@ begin
   LExisting := FModel.FindLocal(AScope, LKey);
   Result := FModel.AddSymbol(AScope, AKind, ADeclNode, ADeclNode, LKey);
   if LExisting = NIL_SYM then
-    FModel.BindName(AScope, Result)
+  begin
+    FModel.BindName(AScope, Result);
+    // No clash in its own scope, but an inline declaration in the module's
+    // body can clash beyond it.
+    if not LOwnName and RedeclaresBodyName(AScope, ADeclNode, LKey) then
+      ReportRedeclared(ADeclNode);
+  end
   else if (FModel.RoutineHead(Result) = rhOperator) <>
           (FModel.RoutineHead(LExisting) = rhOperator) then
   begin
@@ -1841,13 +1941,16 @@ begin
       // name, it exists only to carry the member scope.
       CollectStruct(ANode, AScope, DeclareAnonStruct(AScope, ANode));
 
-    nkBlock, nkForStmt, nkForInStmt:
+    nkBlock, nkForStmt, nkForInStmt, nkFinalSec:
       begin
         // Inline vars are block-scoped: give each begin..end its own scope so
         // the same name in sibling blocks does not read as a redeclaration.
         // A for statement scopes the same way - its `for var I` counter or
         // `for var E in` element lives in the LOOP, so two sibling loops
-        // reusing one name are not a redeclaration (dcc behavior).
+        // reusing one name are not a redeclaration (dcc behavior). So does
+        // the finalization section, a body of its own whose inline vars may
+        // take a module-level name (RedeclaresBodyName) - in the
+        // implementation scope they would clash with it.
         // Only a block that declares something gets one (DeclaresInOwnScope).
         var LBlock := AScope;
         if DeclaresInOwnScope(ANode) then
@@ -3356,8 +3459,10 @@ begin
           Collect(LChild, FImpl);
         nkFinalSec:
           begin
-            // Its inline vars share the implementation scope here, but may
-            // take the module's own name - see RedeclaresOwnName.
+            // A body of its own: its inline vars get a block scope (Collect)
+            // and may take any module-level name, the module's own included -
+            // see RedeclaresBodyName and RedeclaresOwnName. The initialization
+            // section's share the implementation scope.
             FInFinalization := True;
             Collect(LChild, FImpl);
             FInFinalization := False;

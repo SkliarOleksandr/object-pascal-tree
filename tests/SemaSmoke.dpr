@@ -1738,6 +1738,171 @@ begin
   GModel.Free;
 end;
 
+{ 3.1.3: an inline var, const or `for var` counter may not take a name its
+  body already holds. The module's own body - the initialization section, the
+  legacy `begin` form, a program's or library's main block - holds, at any
+  block depth, every module-level name and the names of its enclosing blocks;
+  the finalization section is a body of its own and holds only the latter.
+  Every source below was compiled with dcc64 37.0 on 2026-09-27 and every
+  count is dcc's own. }
+procedure TestModuleBodyNames;
+
+  procedure Expect(const AName, ASource: string; ACount: Integer);
+  begin
+    Analyze(ASource);
+    Ok('bodyname: ' + AName, DiagCount('E2004') = ACount);
+    GModel.Free;
+  end;
+
+begin
+  // The report's five sources: the first missed, the last two false.
+  Expect('an initialization inline var and an interface var',
+    'unit U; interface var G: Integer; implementation initialization ' +
+    'var G := 1; if G = 0 then ; end.', 1);
+  Expect('a block of the initialization section and an implementation var',
+    'unit U; interface implementation var G: Integer; initialization ' +
+    'begin var G := 1; if G = 0 then ; end; end.', 1);
+  Expect('a program''s main block and its var',
+    'program P; var G: Integer; begin var G := 1; if G = 0 then ; end.', 1);
+  Expect('an initialization inline var and an implementation var',
+    'unit U; interface implementation var G: Integer; initialization ' +
+    'var G := 1; if G = 0 then ; end.', 1);
+  Expect('silent: a finalization inline var and an implementation var',
+    'unit U; interface implementation var G: Integer; initialization ' +
+    'finalization var G := 1; if G = 0 then ; end.', 0);
+
+  // Any depth, any statement that opens a block, every declaring form.
+  Expect('the legacy begin form, two blocks deep',
+    'unit U; interface var G: Integer; implementation ' +
+    'begin begin var G := 1; if G = 0 then ; end; end.', 1);
+  Expect('a try part',
+    'unit U; interface var G: Integer; implementation initialization ' +
+    'try var G := 1; if G = 0 then ; finally end; end.', 1);
+  Expect('a with body',
+    'unit U; interface var G: Integer; implementation ' +
+    'type TR = record A: Integer; end; var R: TR; initialization ' +
+    'with R do begin var G := 1; if G = 0 then ; end; end.', 1);
+  Expect('an exception handler''s body',
+    'unit U; interface var G: Integer; implementation initialization ' +
+    'try except on E: TObject do begin var G := 1; if G = 0 then ; end; ' +
+    'end; end.', 1);
+  Expect('a for-var counter in a block',
+    'unit U; interface var G: Integer; implementation initialization ' +
+    'begin for var G := 1 to 2 do ; end; end.', 1);
+  Expect('a for-in element',
+    'unit U; interface var G: Char; implementation initialization ' +
+    'for var G in ''ab'' do ; end.', 1);
+  Expect('an inline const and a routine',
+    'unit U; interface procedure G; implementation procedure G; begin end; ' +
+    'initialization begin const G = 1; if G = 0 then ; end; end.', 1);
+  Expect('a type',
+    'unit U; interface type G = Integer; implementation initialization ' +
+    'begin var G := 1; if G = 0 then ; end; end.', 1);
+  Expect('a label',
+    'unit U; interface implementation label G; initialization ' +
+    'begin var G := 1; if G = 0 then ; end; end.', 1);
+  Expect('a library''s main block',
+    'library L; var G: Integer; begin var G := 1; if G = 0 then ; end.', 1);
+  Expect('a nested const of a program''s main block',
+    'program P; const G = 1; begin begin const G = 2; if G = 0 then ; end; ' +
+    'end.', 1);
+  Expect('two inline vars and an interface var, one each',
+    'unit U; interface var G: Integer; implementation initialization ' +
+    'var G := 1; var G := 2; end.', 2);
+  Expect('a generic type beside a plain one',
+    'unit U; interface type G<T> = class end; G = Integer; ' +
+    'implementation initialization var G := 1; if G = 0 then ; end.', 1);
+
+  // The enclosing blocks of the same body.
+  Expect('a block and the section''s own inline var',
+    'unit U; interface implementation initialization var G := 1; ' +
+    'begin var G := 2; if G = 0 then ; end; end.', 1);
+  Expect('two nested blocks',
+    'unit U; interface implementation initialization begin var G := 1; ' +
+    'begin var G := 2; if G = 0 then ; end; end; end.', 1);
+  Expect('a block and a main block''s own inline var',
+    'program P; begin var G := 1; begin var G := 2; if G = 0 then ; end; ' +
+    'end.', 1);
+  Expect('nested for-var counters',
+    'unit U; interface implementation initialization ' +
+    'for var G := 1 to 2 do for var G := 1 to 2 do ; end.', 1);
+  Expect('an exception handler''s variable',
+    'unit U; interface implementation initialization try except ' +
+    'on G: TObject do begin var G := 1; if G = 0 then ; end; end; end.', 1);
+  Expect('a block of the finalization section and its own inline var',
+    'unit U; interface implementation initialization finalization ' +
+    'var G := 1; if G = 0 then ; begin var G := 2; if G = 0 then ; end; ' +
+    'end.', 1);
+  Expect('an exception handler''s variable in the finalization section',
+    'unit U; interface implementation initialization finalization ' +
+    'try except on G: TObject do begin var G := 1; if G = 0 then ; end; ' +
+    'end; end.', 1);
+
+  Expect('silent: a finalization inline var and an interface var',
+    'unit U; interface var G: Integer; implementation initialization ' +
+    'finalization var G := 1; if G = 0 then ; end.', 0);
+  Expect('silent: a finalization inline var and the initialization''s',
+    'unit U; interface implementation initialization var G := 1; ' +
+    'if G = 0 then ; finalization var G := 2; if G = 0 then ; end.', 0);
+  Expect('silent: a finalization block and for-var, an implementation var',
+    'unit U; interface implementation var G: Integer; initialization ' +
+    'finalization begin var G := 1; if G = 0 then ; end; ' +
+    'for var G := 1 to 2 do ; end.', 0);
+  Expect('silent: a name whose block or loop has ended',
+    'unit U; interface implementation initialization ' +
+    'begin var G := 1; if G = 0 then ; end; for var G := 1 to 2 do ; ' +
+    'var G := 3; if G = 0 then ; end.', 0);
+  Expect('silent: sibling blocks and sibling loops',
+    'unit U; interface implementation initialization ' +
+    'begin var G := 1; if G = 0 then ; end; ' +
+    'begin var G := 2; if G = 0 then ; end; ' +
+    'for var G := 1 to 2 do ; for var G := 1 to 2 do ; end.', 0);
+  Expect('silent: a used unit''s name',
+    'unit U; interface uses B; implementation initialization ' +
+    'begin var B := 1; if B = 0 then ; end; end.', 0);
+  Expect('silent: a program''s used unit''s name',
+    'program P; uses B; begin var B := 1; if B = 0 then ; end.', 0);
+  Expect('silent: a generic type',
+    'unit U; interface type G<T> = class end; implementation ' +
+    'initialization begin var G := 1; if G = 0 then ; end; end.', 0);
+  Expect('silent: an anonymous method''s parameter and local',
+    'unit U; interface var G: Integer; implementation ' +
+    'type TP = reference to procedure(G: Integer); initialization ' +
+    'var Q: TP := procedure(G: Integer) begin end; ' +
+    'var Q2: TP := procedure(A: Integer) begin var G := A; ' +
+    'if G = 0 then ; end; Q(1); Q2(2); end.', 0);
+  Expect('silent: an exception handler''s variable and a module var',
+    'unit U; interface var G: Integer; implementation initialization ' +
+    'try except on G: TObject do ; end; end.', 0);
+  Expect('silent: a routine''s inline var and a module var',
+    'unit U; interface var G: Integer; implementation procedure R; ' +
+    'begin var G := 1; if G = 0 then ; end; initialization R; end.', 0);
+
+  // Where: at the inline declaration, not at the name it takes.
+  Analyze('unit U;'#10'interface'#10'var G: Integer;'#10'implementation'#10 +
+    'initialization'#10'  var G := 1;'#10'  if G = 0 then ;'#10'end.'#10);
+  var LAt6 := 0;
+  for var LIdx := 0 to High(GModel.Diags) do
+    if (GModel.Diags[LIdx].Code = 'E2004') and
+       (GModel.Diags[LIdx].Line = 6) then
+      Inc(LAt6);
+  Ok('bodyname: reported once, on the inline var''s line',
+    (DiagCount('E2004') = 1) and (LAt6 = 1) and DiagHasText('E2004', '''G'''));
+  GModel.Free;
+
+  // A finalization's inline var is its own, in a block scope: the reference
+  // after it binds there, not to the implementation var it may now hide.
+  Analyze('unit U;'#10'interface'#10'implementation'#10'var G: Integer;'#10 +
+    'initialization'#10'finalization'#10'  var G := 1;'#10 +
+    '  if G = 0 then ;'#10'end.'#10);
+  var LOwn := NthIdentSym('G', 1);
+  Ok('bodyname: a finalization''s G binds to its own inline var',
+    (LOwn <> NIL_SYM) and (LOwn <> NthIdentSym('G', 0)) and
+    (NthIdentSym('G', 2) = LOwn) and
+    (GModel.Scopes[GModel.Symbols[LOwn].Scope].Kind = sckBlock));
+  GModel.Free;
+end;
+
 begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN32']);
@@ -1805,6 +1970,8 @@ begin
 
   // 8b. ...but a declaration never takes the module's OWN name
   TestOwnModuleName;
+  // 8c. ...and an inline declaration in the module's body no name it holds
+  TestModuleBodyNames;
 
   // 9. call fitting no local overload stays untyped (no bogus E2010)
   Analyze(SRC_NOFIT);
