@@ -350,7 +350,16 @@ statement was first wrapped along the tree (mode `t2`, 2026-09-26, dcc64
 
 The same harness run over third-party libraries built through their own
 packages, a large application and Win32 (2026-09-26/27, dcc64 and dcc32
-37.0) met six more:
+37.0) met seven more:
+
+- **An `Assert` passes the line of the token AFTER its call.** With
+  `if C then`, `Assert(X)` and `else` on three lines the failure reports the
+  `else`'s line - the line is a constant argument of `System._Assert` in
+  the code (`mov r8d, <line>` on Win64); with the `;` on the next line, that
+  line. So under `-$D- -$L- -$Y-` too, a `begin`/`end` whose `end` follows
+  the `)` directly changes the code, and `t2` puts its `end` right before
+  the token after the statement instead, on that token's line. An
+  assignment in the same shape compiles identically either way.
 
 - **A switch set in the source overrides the command line.** An include
   that turns `DEFINITIONINFO` on brings back a record that keeps lines: a

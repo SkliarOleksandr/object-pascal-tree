@@ -55,7 +55,9 @@ program PasTreeXform;
         position - a statement list's item, an if's branch, a case branch's
         body, the body of a loop, a with or an exception handler, the
         statement a label marks - wrapped in `begin` `end`, an empty one
-        replaced by `begin end`. A correct tree leaves the .dcu identical;
+        replaced by `begin end`; the `end` goes right before the token
+        after the statement, whose line dcc gives an Assert (see
+        AddBlockSite). A correct tree leaves the .dcu identical;
         an `else` or a statement's end placed differently from dcc changes
         the code or stops the compile. Not wrapped, counted: an inline var
         or const (the block would end its scope - `excluded-inline`), a
@@ -193,6 +195,7 @@ type
     OpenVis: Integer;
     CloseVis: Integer;
     OpenAfter: Boolean;     // OpenText goes AFTER token OpenVis (t2's empty)
+    CloseBefore: Boolean;   // CloseText goes BEFORE token CloseVis (t2's end)
     OpenText: string;
     CloseText: string;
     OpenOrder: Integer;
@@ -389,6 +392,7 @@ var
   LText: string;
 begin
   ASite.OpenAfter := False;
+  ASite.CloseBefore := False;
   ASite.OpenText := '(';
   LText := VisText(ASite.OpenVis);
   if (LText <> '') and CharInSet(LText[1], ['.', '*']) then
@@ -868,15 +872,19 @@ begin
 end;
 
 { t2: a site wrapping statement ANode (child AIndex of AParent) in `begin`
-  `end`, from its leftmost token to its last. An empty statement owns no
-  token: it becomes `begin end` right AFTER the token before it - the
-  `then`, `else`, `do` or `:` of the statement it ends, whose own `end`
-  goes after the same token and must follow it (`if A then ;` ->
-  `if A then begin end end ;`; placed before the `;` instead, the `begin
-  end` would land outside the if). Dropped and counted like t1's: both
-  ends in one file, not in a file included twice. The words go in with a
-  blank on either side - `do(P).X` and `F(X)else` would glue to them
-  otherwise. }
+  `end`: the `begin` right before its leftmost token, the `end` right BEFORE
+  the token after it, on that token's line. dcc takes a line from the token
+  that follows a statement, and Assert passes it to the code: a then-branch
+  `Assert(X)` with `else` on the next line reports the `else`'s line, and an
+  `end` right after the `)` would give the Assert a line of its own (plan
+  S7, probes assert-line). When the token after lies in another file, the
+  `end` goes right after the statement. An empty statement owns no token:
+  it becomes `begin end` right AFTER the token before it - the `then`,
+  `else`, `do` or `:` of the statement it ends, ahead of that statement's
+  own `end` (`if A then ;` -> `if A then begin end  end ;`). Dropped and
+  counted like t1's: both ends in one file, not in a file included twice.
+  The words go in with a blank on either side - `do(P).X` and `F(X)else`
+  would glue to them otherwise. }
 procedure AddBlockSite(AParent, AIndex, ANode: Integer; const ARoutine: string);
 var
   LFirst, LLast, LFileA, LFileB: Integer;
@@ -905,6 +913,7 @@ begin
   LSite.Routine := ARoutine;
   LSite.OpenVis := LFirst;
   LSite.CloseVis := LLast;
+  LSite.CloseBefore := False;
   if GTree.Nodes[ANode].Kind = nkEmptyStmt then
   begin
     LSite.Edit := 'begin end after';
@@ -922,6 +931,15 @@ begin
     LSite.OpenOrder := 2;
     LSite.CloseText := ' end ';
     LSite.CloseOrder := 1;
+    if LLast < High(GPre.Visible) then
+    begin
+      VisOffset(LLast + 1, LFileB);
+      if LFileB = LFileA then
+      begin
+        LSite.CloseVis := LLast + 1;
+        LSite.CloseBefore := True;
+      end;
+    end;
   end;
   GSites.Add(LSite);
 end;
@@ -2350,7 +2368,8 @@ begin
             AddEdit(GSite.OpenVis, GSite.OpenAfter, GSite.OpenOrder,
               GSite.OpenText);
             if GSite.CloseText <> '' then
-              AddEdit(GSite.CloseVis, True, GSite.CloseOrder, GSite.CloseText);
+              AddEdit(GSite.CloseVis, not GSite.CloseBefore, GSite.CloseOrder,
+                GSite.CloseText);
             Inc(GApplied);
           end;
       end
