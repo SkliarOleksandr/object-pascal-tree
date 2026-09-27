@@ -1611,6 +1611,133 @@ begin
     LSame);
 end;
 
+{ 1.1.2: a module whose name is ONE identifier declares it in its own global
+  scope, so a declaration of that name there is E2004 - and nowhere nested,
+  nowhere in a module with a dotted name. Every source below was compiled with
+  dcc64 37.0 on 2026-09-27 and every count is dcc's own: one E2004 per
+  declaration, every header of a routine or a forward class included. }
+procedure TestOwnModuleName;
+
+  procedure Expect(const AName, ASource: string; ACount: Integer);
+  begin
+    Analyze(ASource);
+    Ok('ownname: ' + AName, DiagCount('E2004') = ACount);
+    GModel.Free;
+  end;
+
+begin
+  Expect('a var in the interface',
+    'unit U; interface var U: Integer; implementation end.', 1);
+  Expect('a var in the implementation, spelled in another case',
+    'unit Abc; interface implementation var aBC: Integer; end.', 1);
+  Expect('a threadvar',
+    'unit U; interface threadvar U: Integer; implementation end.', 1);
+  Expect('a const', 'unit U; interface const U = 1; implementation end.', 1);
+  Expect('a resourcestring',
+    'unit U; interface resourcestring U = ''x''; implementation end.', 1);
+  Expect('a label', 'unit U; interface implementation label U; end.', 1);
+  Expect('a type', 'unit U; interface type U = Integer; implementation end.',
+    1);
+  Expect('a forward class and its completion, one each',
+    'unit U; interface type U = class; U = class end; implementation end.',
+    2);
+  Expect('two overloads, at all four headers',
+    'unit U; interface procedure U; overload; ' +
+    'procedure U(A: Integer); overload; implementation ' +
+    'procedure U; begin end; procedure U(A: Integer); begin end; end.', 4);
+  Expect('a forward routine and its body',
+    'unit U; interface implementation procedure U; forward; ' +
+    'procedure U; begin end; end.', 2);
+  Expect('an enum value',
+    'unit U; interface implementation type TE = (U, V); end.', 1);
+  Expect('an anonymous enum''s value in a record field',
+    'unit U; interface type TR = record F: (U, V); end; implementation end.',
+    1);
+  Expect('the value of an enum nested in a generic class',
+    'unit U; interface type TG<T> = class type TE = (U, V); end; ' +
+    'implementation end.', 1);
+  Expect('one escaped name of a list',
+    'unit U; interface var X, &U, Y: Integer; implementation end.', 1);
+  Expect('an inline var in a block of the initialization section',
+    'unit U; interface implementation initialization ' +
+    'begin var U := 1; if U = 0 then ; end; end.', 1);
+  Expect('a for-var counter of the initialization section',
+    'unit U; interface implementation initialization ' +
+    'for var U := 1 to 2 do ; end.', 1);
+  Expect('a program''s var', 'program P; var P: Integer; begin end.', 1);
+  Expect('an inline var of a program''s main block',
+    'program P; begin var P := 1; if P = 0 then ; end.', 1);
+  Expect('a library''s routine',
+    'library L; procedure L; begin end; begin end.', 1);
+  Expect('a duplicate, once per declaration',
+    'unit U; interface var U: Integer; U: Integer; implementation end.', 2);
+
+  Expect('silent: fields, a method, a property, a generic parameter, ' +
+    'parameters and locals',
+    'unit U; interface type T1 = class U: Integer; end; ' +
+    'T2 = class procedure U; end; ' +
+    'T3 = class FX: Integer; property U: Integer read FX; end; ' +
+    'TR = record U: Integer; end; TG<U> = class end; ' +
+    'procedure P(U: Integer); implementation procedure T2.U; begin end; ' +
+    'procedure P(U: Integer); begin end; ' +
+    'procedure Q; const U = 1; type TL = Integer; begin if U = 0 then ; end; ' +
+    'procedure W; begin var U := 1; if U = 0 then ; end; end.', 0);
+  Expect('silent: a generic type',
+    'unit U; interface type U<T> = class end; implementation end.', 0);
+  Expect('silent: a dotted unit',
+    'unit NS.U; interface var U, NS: Integer; type TU = (Sub, X); ' +
+    'implementation end.', 0);
+  Expect('silent: a middle segment of a dotted unit',
+    'unit NS.Sub.U; interface var Sub: Integer; implementation end.', 0);
+  Expect('silent: a dotted program',
+    'program NS.P; var P: Integer; begin end.', 0);
+  Expect('silent: an inline var of the finalization section',
+    'unit U; interface implementation initialization finalization ' +
+    'var U := 1; if U = 0 then ; end.', 0);
+  Expect('silent: a block and a for-var of the finalization section',
+    'unit U; interface implementation initialization finalization ' +
+    'begin var U := 1; if U = 0 then ; end; for var U := 1 to 2 do ; end.',
+    0);
+  Expect('silent: an anonymous method''s parameter and local',
+    'unit U; interface implementation ' +
+    'type TP = reference to procedure(U: Integer); ' +
+    'TQ = reference to procedure; initialization ' +
+    'var Q: TP := procedure(U: Integer) begin end; ' +
+    'var Q2: TQ := procedure begin var U := 1; if U = 0 then ; end; ' +
+    'Q(1); Q2(); end.', 0);
+  Expect('silent: an exception handler''s variable',
+    'unit U; interface implementation initialization ' +
+    'try except on U: TObject do ; end; end.', 0);
+  Expect('silent: a scoped enum''s value',
+    'unit U; interface {$SCOPEDENUMS ON} type TE = (U, V); ' +
+    'implementation end.', 0);
+  Expect('silent: a uses entry ending in the module''s name',
+    'unit A; interface uses NS.A; implementation end.', 0);
+  // 1.2.1: hiding a USED unit's name stays legal.
+  Expect('silent: a var hiding a used unit''s name',
+    'unit U; interface uses B; var B: Integer; implementation end.', 0);
+  Expect('silent: the name as a qualifier',
+    'unit U; interface implementation procedure P; begin end; ' +
+    'initialization U.P; end.', 0);
+
+  // Where: at each header's own name, not once for the routine.
+  Analyze('unit U;'#10'interface'#10'procedure u;'#10'implementation'#10 +
+    'procedure U; begin end;'#10'end.'#10);
+  var LAt3 := 0;
+  var LAt5 := 0;
+  for var LIdx := 0 to High(GModel.Diags) do
+    if GModel.Diags[LIdx].Code = 'E2004' then
+      case GModel.Diags[LIdx].Line of
+        3: Inc(LAt3);
+        5: Inc(LAt5);
+      end;
+  Ok('ownname: an interface routine reports at both headers, on each line',
+    (DiagCount('E2004') = 2) and (LAt3 = 1) and (LAt5 = 1));
+  Ok('ownname: each message names its own header''s spelling',
+    DiagHasText('E2004', '''u''') and DiagHasText('E2004', '''U'''));
+  GModel.Free;
+end;
+
 begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN32']);
@@ -1675,6 +1802,9 @@ begin
   Ok('unit-hide: no E2004', DiagCount('E2004') = 0);
   Ok('unit-hide: Qos is the type', HasSym('Qos', skType));
   GModel.Free;
+
+  // 8b. ...but a declaration never takes the module's OWN name
+  TestOwnModuleName;
 
   // 9. call fitting no local overload stays untyped (no bogus E2010)
   Analyze(SRC_NOFIT);

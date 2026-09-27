@@ -6,7 +6,8 @@ unit PasTree.Sema.Resolver;
   Passes over the immutable CST, in order:
     1. Collect         - open scopes (unit / struct / routine / block), add a
                           symbol for every declaration, chain routine
-                          overloads, and flag same-scope duplicates (E2004).
+                          overloads, and flag same-scope duplicates and
+                          redeclarations of the module's own name (E2004).
     2. Resolve         - bind each identifier/member reference to a symbol via
                           the scope chain. Unresolved refs (e.g. names from a
                           not-yet-indexed used unit, or a `with`-target's
@@ -58,6 +59,11 @@ type
     FSys: Integer;
     FIntf: Integer;   // interface scope (importable)
     FImpl: Integer;   // implementation scope (parent = FIntf)
+    // The module's own name as a lookup key, '' for a dotted one, and whether
+    // CollectRoot is inside the finalization section - both for
+    // RedeclaresOwnName.
+    FOwnName: string;
+    FInFinalization: Boolean;
     FNodeScope: TArray<Integer>;
     FIsDeclName: TArray<Boolean>;
     FPendingAggr: TArray<TPasPendingAggr>;
@@ -95,6 +101,9 @@ type
     procedure NodePos(ANode: Integer; out AFileId, ALine, ACol: Integer);
     // collect
     procedure MarkDeclName(ANode, ASym: Integer);
+    procedure ReportRedeclared(ADeclNode: Integer);
+    function RedeclaresOwnName(AScope: Integer; AKind: TSemaSymbolKind;
+      ADeclNode: Integer; const AKey: TSemaKey): Boolean;
     { AOverloadOnClash chains onto a same-named, same-kind symbol instead of
       reporting a redeclaration - for the one non-routine case that is legal,
       a generic type name declared at several ARITIES (16.1.2). The name is
@@ -469,16 +478,88 @@ begin
   end;
 end;
 
+procedure TPasSemaResolver.ReportRedeclared(ADeclNode: Integer);
+var
+  LFileId, LLine, LCol: Integer;
+begin
+  NodePos(ADeclNode, LFileId, LLine, LCol);
+  FModel.AddDiag(MakeDiag('E2004',
+    Format(SE2004_IdentifierRedeclared, [NodeText(ADeclNode)]), ADeclNode,
+    LFileId, LLine, LCol));
+end;
+
+{ 1.1.2: a module whose name is ONE identifier declares that name in its own
+  global scope, so a declaration spelled like it - in any case, with or
+  without `&` - is E2004 (dcc64 37.0, probed 2026-09-27). No same-scope clash
+  can catch it: the name is never a symbol, CollectRoot leaves it scopeless.
+
+  Reported: whatever lands in the interface or the implementation scope - a
+  var, threadvar, const, resourcestring, label, non-generic type or routine -
+  and an inline var, const or `for var` counter at any depth of the
+  initialization section or of a program's or library's main block, the
+  module's own body to dcc. Every header reports: an overload, a forward and
+  its body, an interface routine and its implementation, a forward class and
+  its completion - so CollectRoutine and CollectTypeDecl ask again for the
+  headers that reuse a symbol instead of declaring one. An unscoped enum's
+  value counts as declared outside every type enclosing the enum, and
+  CollectEnum passes that scope.
+
+  Silent, because each of these compiles:
+  - a nested scope: a routine's locals (inline ones too) and parameters, a
+    field, method or property, a generic parameter, an anonymous method's
+    parameters and locals even in the initialization section, and an `on E:
+    T do` variable (added without DeclareSym);
+  - the finalization section's inline vars, unlike the initialization's;
+  - a generic type (`type U<T> = class end;` in unit U) - its declared name
+    carries its arity;
+  - a uses entry whose last segment is the module's name (`unit A; uses
+    NS.A;`). The other side of 1.2.1: a declaration may hide a USED unit's
+    name (DeclareSym's skUnitRef branch), never its own module's;
+  - anything in a module with a DOTTED name, which is no single identifier -
+    FOwnName is '' there.
+
+  The name test comes first: DeclareSym asks once per declared symbol, and
+  nearly every name fails it at the length compare. }
+function TPasSemaResolver.RedeclaresOwnName(AScope: Integer;
+  AKind: TSemaSymbolKind; ADeclNode: Integer; const AKey: TSemaKey): Boolean;
+var
+  LScope: Integer;
+begin
+  if (FOwnName = '') or not SemaKeyEquals(FOwnName, AKey) or
+     (AKind = skUnitRef) then
+    Exit(False);
+  if (AKind = skType) and
+     (GenericArityOfDecl(FTree.Nodes[ADeclNode].Parent) > 0) then
+    Exit(False);
+  if AScope = FIntf then
+    Exit(True);
+  if FInFinalization then
+    Exit(False);
+  // Up through the blocks a statement part opens: they reach the
+  // implementation scope only from the initialization section or a main
+  // block, and stop at a routine - a named one or an anonymous method.
+  LScope := AScope;
+  while (LScope <> NIL_SCOPE) and (FModel.Scopes[LScope].Kind = sckBlock) do
+    LScope := FModel.Scopes[LScope].Parent;
+  Result := LScope = FImpl;
+end;
+
 function TPasSemaResolver.DeclareSym(AScope: Integer; AKind: TSemaSymbolKind;
   ADeclNode: Integer; AOverloadOnClash: Boolean): Integer;
 var
-  LExisting, LTail, LFileId, LLine, LCol: Integer;
+  LExisting, LTail: Integer;
   LKey: TSemaKey;
+  LOwnName: Boolean;
 begin
   // One key off the token for both the clash lookup and the symbol's stored
   // key - this runs per declared symbol, and a spelling the unit already
   // declared costs no string at all (AddSymbol's pool takes the slice).
   LKey := NodeKey(ADeclNode);
+  // One E2004 per declaration: when it redeclares the module's name, a
+  // same-scope clash below adds nothing.
+  LOwnName := RedeclaresOwnName(AScope, AKind, ADeclNode, LKey);
+  if LOwnName then
+    ReportRedeclared(ADeclNode);
   LExisting := FModel.FindLocal(AScope, LKey);
   Result := FModel.AddSymbol(AScope, AKind, ADeclNode, ADeclNode, LKey);
   if LExisting = NIL_SYM then
@@ -525,11 +606,8 @@ begin
   else
   begin
     // genuine redeclaration in the same scope
-    NodePos(ADeclNode, LFileId, LLine, LCol);
-    FModel.AddDiag(MakeDiag('E2004',
-      Format(SE2004_IdentifierRedeclared, [NodeText(ADeclNode)]), ADeclNode,
-      LFileId, LLine,
-      LCol));
+    if not LOwnName then
+      ReportRedeclared(ADeclNode);
     FModel.AddToOrder(AScope, Result);
   end;
   MarkDeclName(ADeclNode, Result);
@@ -760,6 +838,10 @@ begin
     // DeclNode must reach the real definition so ancestor/generic-param walks
     // (TypeDefNode and the project's cross typer) see heritage and params.
     FModel.Symbols[LSym].DeclNode := LName;
+    // Not a new symbol, but a declaration all the same: `type U = class; U =
+    // class end;` in unit U is two E2004, one per half.
+    if RedeclaresOwnName(AScope, skType, LName, NodeKey(LName)) then
+      ReportRedeclared(LName);
   end
   else if (LExisting <> NIL_SYM) and
           (FModel.Symbols[LExisting].Kind = skType) then
@@ -1022,7 +1104,7 @@ end;
 
 procedure TPasSemaResolver.CollectEnum(ANode, AOuter, ATypeSym: Integer);
 var
-  LEnum, LChild, LName, LVal, LSym: Integer;
+  LEnum, LChild, LName, LVal, LSym, LOwnScope: Integer;
 begin
   // Each enum gets its own scope, so values of different enums never share a
   // scope (no false redeclaration). The scope is also joined into the
@@ -1052,9 +1134,22 @@ begin
   // while a NAMED enum's do not. ATypeSym = NIL_SYM is exactly that case - an
   // enum reached through the generic Collect fallthrough rather than as a named
   // type declaration's own definition.
+  //
+  // LOwnScope is where an unscoped enum's values count as declared for the
+  // module's own name (RedeclaresOwnName): past every enclosing type, a generic
+  // one's parameter scope included. dcc64 37.0 reports E2004 for a value named
+  // like unit U in `F: (U, V)` inside a record and in `TE = (U, V)` nested in a
+  // class, `TG<T>` too; a scoped enum's value clashes with nothing outside it.
+  LOwnScope := NIL_SCOPE;
   if (ATypeSym = NIL_SYM) or
      not FTree.Source.ScopedEnumsAt(FTree.Nodes[ANode].FirstToken) then
+  begin
     FModel.JoinScope(EnumJoinTarget(AOuter), LEnum);
+    LOwnScope := AOuter;
+    while (LOwnScope <> NIL_SCOPE) and
+          (FModel.Scopes[LOwnScope].Kind in [sckStruct, sckGenericParams]) do
+      LOwnScope := FModel.Scopes[LOwnScope].Parent;
+  end;
   LChild := FirstChild(ANode);
   while LChild <> NIL_NODE do
   begin
@@ -1072,6 +1167,9 @@ begin
         LSym := DeclareSym(LEnum, skEnumValue, LName);
         if ATypeSym <> NIL_SYM then
           FModel.Symbols[LSym].TypeSym := ATypeSym;
+        if (LOwnScope <> NIL_SCOPE) and RedeclaresOwnName(LOwnScope,
+           skEnumValue, LName, NodeKey(LName)) then
+          ReportRedeclared(LName);
       end;
       LVal := NextSib(LName);
       while LVal <> NIL_NODE do
@@ -1386,6 +1484,11 @@ begin
       if FindChildKind(ANode, nkRoutineBody) <> NIL_NODE then
         FModel.Symbols[LLink].Flags := FModel.Symbols[LLink].Flags + [sfHasBody];
       MarkDeclName(LNameNode, LLink);
+      // No new symbol, but dcc reports the module's own name at this header
+      // too - `procedure U;` in both sections of unit U is two E2004.
+      if RedeclaresOwnName(AScope, skRoutine, LNameNode,
+         NodeKey(LNameNode)) then
+        ReportRedeclared(LNameNode);
       // Same gap as the qualified branch above, for a global routine: params
       // omitted here means nothing else ever declares them for THIS body -
       // join the matched declaration's own param scope in.
@@ -3235,6 +3338,9 @@ begin
   begin
     FModel.UnitNameLower := LowerCase(QualifiedNameText(LNameNode));
     FIsDeclName[LNameNode] := True;
+    // Only an undotted name is declared in the module's own scope.
+    if KindOf(LNameNode) = nkIdent then
+      FOwnName := NodeNameLower(LNameNode);
   end
   else
     LNameNode := NIL_NODE;
@@ -3248,8 +3354,16 @@ begin
           Collect(LChild, FIntf);
         nkImplementationSec:
           Collect(LChild, FImpl);
+        nkFinalSec:
+          begin
+            // Its inline vars share the implementation scope here, but may
+            // take the module's own name - see RedeclaresOwnName.
+            FInFinalization := True;
+            Collect(LChild, FImpl);
+            FInFinalization := False;
+          end;
       else
-        Collect(LChild, FImpl);   // uses / decls / init / finalization / block
+        Collect(LChild, FImpl);   // uses / decls / init / block
       end;
     LChild := NextSib(LChild);
   end;
