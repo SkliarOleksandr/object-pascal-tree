@@ -674,7 +674,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..139] of TPasCaseRow = (
+  DECL_CASES: array[0..155] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1644,6 +1644,95 @@ const
      Expected: 'VarSec''var''(VarDecl(Ident''A'' ArrayType(Subrange(' +
        'BinaryOp''-''(Ident''B'' IntLit''1'') Ident''B'') ' +
        'Ident''Integer'')))'; ExpectDiags: 0),
+    // 2.2.5: where the upper bound ends (dcc64 37.0, probed 2026-09-27; plan
+    // finding F6). In the declared type of a var-section variable or a typed
+    // constant a top-level `=` ends the upper bound of the subrange that
+    // closes the type - the initializer follows. The bound used to take it:
+    // `var V: 0..31 = 7;` was the type `0..(31 = 7)` with no initializer and
+    // no diagnostic, and the typed constants were parse errors.
+    (Section: '2.2.5'; Name: 'typed constant of a subrange type';
+     Source: 'const A: 0..31 = 5;';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''A'' Subrange(' +
+       'IntLit''0'' IntLit''31'') IntLit''5''))'; ExpectDiags: 0),
+    (Section: '2.2.5'; Name: 'initialized variable of a subrange type';
+     Source: 'var V: 0..31 = 7;';
+     Expected: 'VarSec''var''(VarDecl(Ident''V'' Subrange(' +
+       'IntLit''0'' IntLit''31'') IntLit''7''))'; ExpectDiags: 0),
+    (Section: '2.2.5'; Name: 'initialized variable, name-headed bounds';
+     Source: 'var V: L..M = 7;';
+     Expected: 'VarSec''var''(VarDecl(Ident''V'' Subrange(' +
+       'Ident''L'' Ident''M'') IntLit''7''))'; ExpectDiags: 0),
+    (Section: '2.2.5'; Name: 'typed constant, set of a subrange';
+     Source: 'const S: set of 0..31 = [1, 2];';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''S'' SetType(Subrange(' +
+       'IntLit''0'' IntLit''31'')) SetCtor(IntLit''1'' IntLit''2'')))';
+     ExpectDiags: 0),
+    (Section: '2.2.5'; Name: 'typed constant, array of set of a subrange';
+     Source: 'const B: array[Boolean] of set of 0..31 = ([1], [2]);';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''B'' ArrayType(' +
+       'Ident''Boolean'' SetType(Subrange(IntLit''0'' IntLit''31''))) ' +
+       'Aggregate(SetCtor(IntLit''1'') SetCtor(IntLit''2''))))';
+     ExpectDiags: 0),
+    // Only `=` ends it: `<` chains on, as the probe's value (True) showed.
+    (Section: '2.2.5'; Name: 'typed constant, a relational upper bound';
+     Source: 'const A: False..1 < 2 = True;';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''A'' Subrange(' +
+       'Ident''False'' BinaryOp''<''(IntLit''1'' IntLit''2'')) ' +
+       'Ident''True''))'; ExpectDiags: 0),
+    // Everywhere else the bound is a whole expression, `=` included.
+    (Section: '2.2.5'; Name: 'type declaration: the upper bound takes =';
+     Source: 'type T = False..1 = 1;';
+     Expected: 'TypeSec(TypeDecl(Ident''T'' Subrange(Ident''False'' ' +
+       'BinaryOp''=''(IntLit''1'' IntLit''1''))))'; ExpectDiags: 0),
+    (Section: '2.2.5'; Name: 'typed constant: the LOWER bound takes =';
+     Source: 'const A: 1 = 1..True = True;';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''A'' Subrange(' +
+       'BinaryOp''=''(IntLit''1'' IntLit''1'') Ident''True'') ' +
+       'Ident''True''))'; ExpectDiags: 0),
+    (Section: '2.2.5'; Name: 'typed constant: an index bound takes =';
+     Source: 'const A: array[False..1 = 1] of Integer = (1, 2);';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''A'' ArrayType(Subrange(' +
+       'Ident''False'' BinaryOp''=''(IntLit''1'' IntLit''1'')) ' +
+       'Ident''Integer'') Aggregate(IntLit''1'' IntLit''2'')))';
+     ExpectDiags: 0),
+    (Section: '2.2.5'; Name: 'initialized variable: index takes =, element not';
+     Source: 'var A: array[False..1 = 1] of 0..31 = (1, 2);';
+     Expected: 'VarSec''var''(VarDecl(Ident''A'' ArrayType(Subrange(' +
+       'Ident''False'' BinaryOp''=''(IntLit''1'' IntLit''1'')) ' +
+       'Subrange(IntLit''0'' IntLit''31'')) Aggregate(IntLit''1'' ' +
+       'IntLit''2'')))'; ExpectDiags: 0),
+    (Section: '2.2.5'; Name: 'record field: the upper bound takes =';
+     Source: 'type TR = record F: False..1 = 1; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(VarDecl(Ident''F'' ' +
+       'Subrange(Ident''False'' BinaryOp''=''(IntLit''1'' ' +
+       'IntLit''1''))))))'; ExpectDiags: 0),
+    (Section: '2.2.5'; Name: 'class var: the upper bound takes =';
+     Source: 'type TC = class class var F: False..1 = 1; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(VarSec#class(' +
+       'VarDecl(Ident''F'' Subrange(Ident''False'' BinaryOp''=''(' +
+       'IntLit''1'' IntLit''1'')))))))'; ExpectDiags: 0),
+    (Section: '2.2.5'; Name: 'var section in a class: the upper bound takes =';
+     Source: 'type TC = class var F: False..1 = 1; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(VarSec''f''(' +
+       'VarDecl(Ident''F'' Subrange(Ident''False'' BinaryOp''=''(' +
+       'IntLit''1'' IntLit''1'')))))))'; ExpectDiags: 0),
+    // Under `packed` the bound takes `=` again: no initializer here (dcc
+    // compiles both), and `packed array[0..1] of 0..31 = (3, 4)` is E2029.
+    (Section: '2.2.5'; Name: 'packed array element: the upper bound takes =';
+     Source: 'var V: packed array[0..1] of False..1 = 1;';
+     Expected: 'VarSec''var''(VarDecl(Ident''V'' ArrayType(Subrange(' +
+       'IntLit''0'' IntLit''1'') Subrange(Ident''False'' BinaryOp''=''(' +
+       'IntLit''1'' IntLit''1'')))))'; ExpectDiags: 0),
+    (Section: '2.2.5'; Name: 'packed set: the upper bound takes =';
+     Source: 'var V: packed set of False..1 = 1;';
+     Expected: 'VarSec''var''(VarDecl(Ident''V'' SetType(Subrange(' +
+       'Ident''False'' BinaryOp''=''(IntLit''1'' IntLit''1'')))))';
+     ExpectDiags: 0),
+    (Section: '2.2.5'; Name: 'class constant: = ends the upper bound';
+     Source: 'type TC = class const C: 0..31 = 5; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(ConstSec''const''(' +
+       'ConstDecl(Ident''C'' Subrange(IntLit''0'' IntLit''31'') ' +
+       'IntLit''5'')))))'; ExpectDiags: 0),
     // A stray reserved word in MEMBER position used to consume nothing, so
     // the member loop spun until the fuel watchdog abandoned the rest of the
     // FILE. One error, one token, and the declarations after it survive.

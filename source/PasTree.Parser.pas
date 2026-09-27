@@ -57,6 +57,13 @@ type
     // (`array[..] of` NEWLINE `TClass = (nil, ...)`), not the next
     // declaration - 4 false E2004 before this guard.
     FInitFollows: Boolean;
+    // Set while parsing the declared type of a var-section variable or a
+    // typed constant (a declaration-level var or threadvar, any const
+    // section), where `=` may introduce the initializer: `=` then ends the
+    // upper bound of the subrange that closes the type, and only that bound
+    // (see ParseTypeExpr for where, and where not). Read and cleared by
+    // ParseTypeExpr on entry.
+    FEqEndsBound: Boolean;
     FStuckCount: Integer;
     // Watchdogs (see notes on ParseGuard):
     FFuel: Int64;              // decremented in CurKind; trips at 0
@@ -110,7 +117,7 @@ type
     procedure SkipStringElements;
     procedure Error(const AMsg: string);
     // expressions
-    function ParseExpression: Integer;
+    function ParseExpression(AEqualEnds: Boolean = False): Integer;
     function ParseSimpleExpr: Integer;
     function ParseTerm: Integer;
     { The additive and multiplicative loops, continued from an operand already
@@ -142,7 +149,7 @@ type
     procedure ParseHintsOpt(ANode: Integer);
     function ParseTypeExpr: Integer;
     function ParseEnumType: Integer;
-    function ParseArrayType: Integer;
+    function ParseArrayType(AEqualEnds: Boolean): Integer;
     function ParseProcTypeExpr(ARefTo: Boolean): Integer;
     function ParseClassLike(AHeadKind: TPasTokenKind): Integer;
     procedure ParseMemberList(AOwner: Integer);
@@ -157,7 +164,8 @@ type
     function ParseProperty(AClassProp: Boolean): Integer;
     function ParseTypeSection(AHeadless: Boolean = False): Integer;
     function ParseConstSection(AHeadless: Boolean = False): Integer;
-    function ParseVarSection(AClassVar: Boolean): Integer;
+    function ParseVarSection(AClassVar: Boolean;
+      AInStruct: Boolean = False): Integer;
     function ParseConstInitializer(AHasType: Boolean): Integer;
     function ParseExportsClause: Integer;
     function DirectiveNameStartsDecl: Boolean;
@@ -438,7 +446,13 @@ end;
 
 { TPasParser - expressions --------------------------------------------------- }
 
-function TPasParser.ParseExpression: Integer;
+// AEqualEnds: a top-level `=` ends the expression instead of comparing - the
+// upper bound of a subrange that closes a var's or typed constant's type,
+// where `=` introduces the initializer (see ParseTypeExpr). The other
+// relational operators still chain: `const A: False..1 < 2 = True;` has the
+// bound `1 < 2`. A `=` inside parentheses or brackets is the nested
+// expression's own.
+function TPasParser.ParseExpression(AEqualEnds: Boolean): Integer;
 var
   LOp, LRight, LNode: Integer;
   LNegated, LTypeTest, LTypeName: Boolean;
@@ -450,7 +464,11 @@ begin
     case CurKind of
       tkEqual, tkNotEqual, tkLess, tkGreater, tkLessEqual, tkGreaterEqual,
       tkIn:
-        LOp := FPos;
+        begin
+          if AEqualEnds and (CurKind = tkEqual) then
+            Break;
+          LOp := FPos;
+        end;
       tkIs:
         begin
           LOp := FPos;
@@ -1435,8 +1453,15 @@ begin
     // ParseTypeExpr, not ParseTypeRef: an inline var may be given a
     // STRUCTURAL type, exactly like any other var - `var A: array[0..1] of
     // Byte;` and `var S: set of Byte;` are dcc64-valid and used to be a hard
-    // "type expected" here (3.1.3).
-    FB.Adopt(Result, ParseTypeExpr);
+    // "type expected" here (3.1.3). An inline const's `=` introduces its
+    // value, as a typed constant's does (dcc wants a type NAME there - E2622
+    // - so this only shapes the recovery; see ParseTypeExpr).
+    FEqEndsBound := AConst;
+    try
+      FB.Adopt(Result, ParseTypeExpr);
+    finally
+      FEqEndsBound := False;
+    end;
   end;
   if (CurKind = tkAssign) or (AConst and (CurKind = tkEqual)) then
   begin
@@ -1791,9 +1816,22 @@ begin
   FB.SetLast(ANode, FPos - 1);
 end;
 
+{ Where a subrange's upper bound ends (2.2.5, dcc64 37.0 probed 2026-09-27):
+  in the declared type of a var-section variable or a typed constant
+  (FEqEndsBound) a top-level `=` ends the upper bound of the subrange that
+  closes the type - directly, or as the element of `set of` or of an array -
+  since the initializer follows: `const A: 0..31 = 5;`, `var V: 0..31 = 7;`,
+  `const S: set of 0..31 = [1];`. Everywhere else the bound is a whole
+  expression, `=` included: a type declaration (`T = False..1 = 1` has the
+  bound `1 = 1`), a field of a record or class, a class var, the lower bound
+  (`const A: 1 = 1..True = True;` compiles), an array index inside its
+  brackets (`const A: array[False..1 = 1] of Integer = (1, 2);`) and
+  anything under `packed` - `var V: packed array[0..1] of False..1 = 1;`
+  compiles with no initializer, and `... of 0..31 = (3, 4);` is E2029. }
 function TPasParser.ParseTypeExpr: Integer;
 var
   LNode, LExpr, LStart: Integer;
+  LEqEnds: Boolean;
 begin
   if not EnterGuard then
   begin
@@ -1802,6 +1840,10 @@ begin
     LeaveGuard;
     Exit;
   end;
+  // The flag is this type's alone: a nested type sees it only where it
+  // closes this one (set of, an array's element).
+  LEqEnds := FEqEndsBound;
+  FEqEndsBound := False;
   try
   // The head of the NEXT declaration, on its own line, where a type was due:
   // the author has not typed the type yet (`E` above `Reserve: ...`, `TArr =
@@ -1816,15 +1858,16 @@ begin
     tkPacked:
       begin
         Next; // packing recorded implicitly by the token span
-        Exit(ParseTypeExpr);
+        Exit(ParseTypeExpr);   // the flag stays off under `packed` - see above
       end;
     tkArray:
-      Exit(ParseArrayType);
+      Exit(ParseArrayType(LEqEnds));
     tkSet:
       begin
         LNode := FB.AddNode(nkSetType, NIL_NODE, FPos);
         Next;
         Expect(tkOf, '"of"');
+        FEqEndsBound := LEqEnds;
         FB.Adopt(LNode, ParseTypeExpr);
         FB.SetLast(LNode, FPos - 1);
         Exit(LNode);
@@ -1933,7 +1976,7 @@ begin
           LNode := FB.AddNode(nkSubrange, NIL_NODE, FPos);
           FB.Adopt(LNode, LExpr);
           Next;
-          FB.Adopt(LNode, ParseExpression);
+          FB.Adopt(LNode, ParseExpression(LEqEnds));
           FB.SetLast(LNode, FPos - 1);
           Exit(LNode);
         end;
@@ -1952,7 +1995,7 @@ begin
       if AtLineDeclHead then
         Error('expression expected')
       else
-        FB.Adopt(LNode, ParseExpression);
+        FB.Adopt(LNode, ParseExpression(LEqEnds));
       FB.SetLast(LNode, FPos - 1);
       Exit(LNode);
     end;
@@ -2007,7 +2050,10 @@ begin
   FB.SetLast(Result, FPos - 1);
 end;
 
-function TPasParser.ParseArrayType: Integer;
+// AEqualEnds: the array closes a var's or typed constant's type, so its
+// element type does too (see ParseTypeExpr); the index types, inside their
+// brackets, never do.
+function TPasParser.ParseArrayType(AEqualEnds: Boolean): Integer;
 begin
   // 8.1/8.2: array [dims] of (const | T)
   Result := FB.AddNode(nkArrayType, NIL_NODE, FPos);
@@ -2032,7 +2078,10 @@ begin
     Next;
   end
   else
+  begin
+    FEqEndsBound := AEqualEnds;
     FB.Adopt(Result, ParseTypeExpr);
+  end;
   FB.SetLast(Result, FPos - 1);
 end;
 
@@ -2278,7 +2327,7 @@ begin
       tkVar, tkThreadvar:
         begin
           Next; // section marker inside a class body
-          FB.Adopt(AOwner, ParseVarSection(False));
+          FB.Adopt(AOwner, ParseVarSection(False, True));
         end;
       tkCase:
         ParseVariantPart(AOwner);
@@ -3333,10 +3382,12 @@ begin
       else
       begin
         FInitFollows := True;
+        FEqEndsBound := True;
         try
           LType := ParseTypeExpr;
         finally
           FInitFollows := False;
+          FEqEndsBound := False;
         end;
         FB.Adopt(LDecl, LType);
         // A typed procedural constant may carry its calling convention
@@ -3389,12 +3440,17 @@ begin
   FB.SetLast(Result, FPos - 1);
 end;
 
-function TPasParser.ParseVarSection(AClassVar: Boolean): Integer;
+function TPasParser.ParseVarSection(AClassVar: Boolean;
+  AInStruct: Boolean): Integer;
 var
   LDecl, LAttrs: Integer;
   LHasColon: Boolean;
 begin
-  // 3.1: var/threadvar entries; also used for class var sections.
+  // 3.1: var/threadvar entries; also used for class var sections and for a
+  // `var` section in a record or class body (AInStruct). Those two declare
+  // FIELDS for dcc: no initializer can follow, and a subrange's upper bound
+  // takes a `=` like a field's does (`class var F: False..1 = 1;` compiles,
+  // dcc64 37.0) - see ParseTypeExpr.
   //
   // A `class var` section RUNS ON exactly like a `var` one: it ends at the
   // next visibility word, section keyword or member, not after its first
@@ -3443,10 +3499,12 @@ begin
       Continue;
     end;
     FInitFollows := True;
+    FEqEndsBound := not (AClassVar or AInStruct);
     try
       FB.Adopt(LDecl, ParseTypeExpr);
     finally
       FInitFollows := False;
+      FEqEndsBound := False;
     end;
     // Hints may sit BETWEEN the type and the initializer:
     // Default8087CW: Word platform = $033F;  (System.pas)
