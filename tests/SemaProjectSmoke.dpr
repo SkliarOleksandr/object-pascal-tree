@@ -1039,6 +1039,47 @@ const
     'implementation'#10 +
     'end.'#10;
 
+  { `$IF Declared(X)` over the unit's OWN names answers BY POSITION, as dcc
+    does (1.3.2; probed on dcc64 37.0, plan finding F21): a name declared
+    ABOVE the directive and in scope there is declared - a forward
+    declaration counts, the unit's own name too - while one declared below,
+    a local of another routine and a generic's bare name are not. Each guard
+    decides whether a declaration exists, so the model says which way it
+    went. Before, the own scope was left out whole and every one of these
+    read False. }
+  UNIT_DCLPOS =
+    'unit UnitDclPos;'#10'interface'#10'uses UnitDclBase;'#10 +
+    '{$IF Declared(TPosLater)} const SawLaterEarly = 1; {$IFEND}'#10 +
+    // The FMX.Skia.Canvas shape: the first pass guesses the imported name
+    // undeclared and declares TPosWorkaround; the second pass knows the
+    // import and drops it - so the later own-name guard must read the
+    // SECOND stream, not the first-pass model (RunDeclaredPass's rounds).
+    '{$IF not Declared(TKnownThing)}'#10'type TPosWorkaround = Integer;'#10 +
+    '{$IFEND}'#10 +
+    '{$IF Declared(TPosWorkaround)} const SawWorkaround = 1; {$IFEND}'#10 +
+    'type'#10 +
+    '  TPosEarly = Integer;'#10 +
+    '  TPosGen<T> = class end;'#10 +
+    '  TPosFwd = class;'#10 +
+    '{$IF Declared(TPosFwd)} TPosSawFwd = Byte; {$IFEND}'#10 +
+    '  TPosFwd = class end;'#10 +
+    '{$IF Declared(TPosEarly)} const SawEarly = 1; {$IFEND}'#10 +
+    '{$IF not Declared(TPosOwn)}'#10'type TPosOwn = Integer;'#10'{$IFEND}'#10 +
+    '{$IF Declared(TPosOwn)} const SawOwn = 1; {$IFEND}'#10 +
+    '{$IF Declared(TPosGen)} const SawGen = 1; {$IFEND}'#10 +
+    '{$IF Declared(UnitDclPos)} const SawUnitName = 1; {$IFEND}'#10 +
+    'type'#10'  TPosLater = Integer;'#10 +
+    'procedure Use;'#10 +
+    'implementation'#10 +
+    'procedure Other;'#10'var'#10'  LocOther: Integer;'#10'begin'#10 +
+    '  LocOther := 0;'#10'  if LocOther = 0 then ;'#10'end;'#10 +
+    'procedure Use;'#10'var'#10'  LocUse: Integer;'#10'begin'#10 +
+    '  LocUse := 0;'#10 +
+    '  {$IF Declared(LocUse)} var SawLocal := LocUse; {$IFEND}'#10 +
+    '  {$IF Declared(LocOther)} var SawForeign := LocUse; {$IFEND}'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   { A NESTED type of a generic, returned by one of its own members: the frame
     has to travel WITH the type, because that type has no arguments of its own
     yet its definition is written in the enclosing generic's parameters.
@@ -2676,6 +2717,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitIfaceRoot.pas'), UNIT_IFACEROOT);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitDclBase.pas'), UNIT_DCLBASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitDclUse.pas'), UNIT_DCLUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitDclPos.pas'), UNIT_DCLPOS);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNGBase.pas'), UNIT_NGBASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNGUse.pas'), UNIT_NGUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWX.pas'), UNIT_WX);
@@ -3343,6 +3385,33 @@ begin
       Length(LDC.Diags) = 0);
     Ok('declared: a guard whose name is NOT declared still takes its text',
       SymCountOf(LDC, 'tfallback', skType) = 1);
+
+    // ...and over the unit's OWN names, by position (see UNIT_DCLPOS).
+    var LDP := ModelByName('unitdclpos');
+    Ok('declared-pos: UnitDclPos loaded', Assigned(LDP));
+    Ok('declared-pos: no diags at all', Assigned(LDP) and (Length(LDP.Diags) = 0));
+    Ok('declared-pos: a name declared BELOW the guard is not declared',
+      Assigned(LDP) and (SymCountOf(LDP, 'sawlaterearly', skConst) = 0));
+    Ok('declared-pos: a name declared ABOVE the guard is declared',
+      Assigned(LDP) and (SymCountOf(LDP, 'sawearly', skConst) = 1));
+    Ok('declared-pos: a forward declaration above counts',
+      Assigned(LDP) and (SymCountOf(LDP, 'tpossawfwd', skType) = 1));
+    Ok('declared-pos: a name inside its own not-Declared guard is taken',
+      Assigned(LDP) and (SymCountOf(LDP, 'tposown', skType) = 1));
+    Ok('declared-pos: ...and declared after that guard',
+      Assigned(LDP) and (SymCountOf(LDP, 'sawown', skConst) = 1));
+    Ok('declared-pos: a generic''s bare name is not declared',
+      Assigned(LDP) and (SymCountOf(LDP, 'sawgen', skConst) = 0));
+    Ok('declared-pos: the unit''s own name is declared',
+      Assigned(LDP) and (SymCountOf(LDP, 'sawunitname', skConst) = 1));
+    Ok('declared-pos: the routine''s own local is declared in its body',
+      Assigned(LDP) and (SymCountOf(LDP, 'sawlocal', skVar) = 1));
+    Ok('declared-pos: another routine''s local is not',
+      Assigned(LDP) and (SymCountOf(LDP, 'sawforeign', skVar) = 0));
+    Ok('declared-pos: a guard flipped by the second pass drops its declaration',
+      Assigned(LDP) and (SymCountOf(LDP, 'tposworkaround', skType) = 0));
+    Ok('declared-pos: ...and a later guard reads the stream it produced',
+      Assigned(LDP) and (SymCountOf(LDP, 'sawworkaround', skConst) = 0));
 
     // A NESTED type of a generic carries the frame it was reached through.
     var LNG := ModelByName('unitnguse');

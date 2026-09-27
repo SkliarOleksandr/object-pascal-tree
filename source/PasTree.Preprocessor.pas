@@ -63,6 +63,16 @@ type
     Name: string;
   end;
 
+  // One `$IF Declared(X)` ask nobody could answer, and where it stood: the
+  // directive's file (an index into FileNames) and offset. Every ask is kept,
+  // duplicates too - dcc answers a unit's OWN names by position (1.3.2), so
+  // one name can be declared at one ask and not yet at an earlier one.
+  TPasDeclaredAsk = record
+    Name: string;
+    FileId: Integer;
+    Offset: Integer;
+  end;
+
   TPasPPDiagnostic = record
     Code: TPasPPDiagCode;
     FileId: Integer;
@@ -204,6 +214,9 @@ type
     // the run had no OnDeclared to ask - which is the signal a caller with a
     // symbol table uses to decide the unit is worth preprocessing again.
     UnresolvedDeclared: TArray<string>;
+    // The same asks with their positions, processing order - see
+    // TPasDeclaredAsk.
+    DeclaredAsks: TArray<TPasDeclaredAsk>;
     // Same contract for the symbol questions (const values, SizeOf, Length)
     // no OnSymbol could answer - see TPasUnresolvedSymbol.
     UnresolvedSymbols: TArray<TPasUnresolvedSymbol>;
@@ -270,9 +283,19 @@ type
     answer when it could. A query that knows only the compiler-provided names
     can run on the FIRST pass - it needs no models - and takes the big RTL
     units out of the second pass entirely, which is most of what that pass
-    would otherwise cost. }
+    would otherwise cost.
+
+    APos says where the directive stands. dcc answers the asking unit's OWN
+    names by position - declared above the directive and in scope there -
+    so an oracle that answers those needs it; one that answers only from
+    outside the unit ignores it. }
+  TPasCondPos = record
+    FileName: string;    // as the preprocessed unit's FileNames spells it
+    Offset: Integer;     // the directive's offset in that file
+  end;
+
   TPasDeclaredQuery = reference to function(const AName: string;
-    out ADeclared: Boolean): Boolean;
+    const APos: TPasCondPos; out ADeclared: Boolean): Boolean;
 
   TPasSwitchState = array['A'..'Z'] of Boolean;
 
@@ -356,6 +379,7 @@ type
     FOnDeclared: TPasDeclaredQuery;
     FOnSymbol: TPasCondSymbolQuery;
     FUnresolvedDeclared: TList<string>;
+    FDeclaredAsks: TList<TPasDeclaredAsk>;
     FUnresolvedSymbols: TList<TPasUnresolvedSymbol>;
     function Active: Boolean;
     procedure Diag(ACode: TPasPPDiagCode; AFileId, AStart, ALen: Integer;
@@ -831,6 +855,7 @@ begin
   FDiags := TList<TPasPPDiagnostic>.Create;
   FIncludePathStack := TList<string>.Create;
   FUnresolvedDeclared := TList<string>.Create;
+  FDeclaredAsks := TList<TPasDeclaredAsk>.Create;
   FUnresolvedSymbols := TList<TPasUnresolvedSymbol>.Create;
   FCondParentActive := TList<Boolean>.Create;
   FCondAnyTaken := TList<Boolean>.Create;
@@ -890,6 +915,7 @@ begin
   FCondParentActive.Free;
   FIncludePathStack.Free;
   FUnresolvedDeclared.Free;
+  FDeclaredAsks.Free;
   FUnresolvedSymbols.Free;
   FDiags.Free;
   FSkipped.Free;
@@ -988,6 +1014,7 @@ begin
   FDiags.Clear;
   FIncludePathStack.Clear;
   FUnresolvedDeclared.Clear;
+  FDeclaredAsks.Clear;
   FUnresolvedSymbols.Clear;
   FCondParentActive.Clear;
   FCondAnyTaken.Clear;
@@ -1034,6 +1061,7 @@ begin
   Result.Diagnostics := FDiags.ToArray;
   Result.ScopedEnumsEvents := FScopedEnumsEvents.ToArray;
   Result.UnresolvedDeclared := FUnresolvedDeclared.ToArray;
+  Result.DeclaredAsks := FDeclaredAsks.ToArray;
   Result.UnresolvedSymbols := FUnresolvedSymbols.ToArray;
   Result.MinEnumEvents := FMinEnumEvents.ToArray;
   Result.AlignEvents := FAlignEvents.ToArray;
@@ -1801,10 +1829,13 @@ var
   LSym: TPasUnresolvedSymbol;
   LIdx: Integer;
   LRef: TPasDefineRef;
+  LAsk: TPasDeclaredAsk;
 begin
   LCtx := Default(TPasCondContext);
   LCtx.Defines := FDefines;
   LCtx.OnDeclared := FOnDeclared;
+  LCtx.DirPos.FileName := FFileNames[AFileId];
+  LCtx.DirPos.Offset := AToken.Start;
   LCtx.OnSymbol := FOnSymbol;
   LCtx.CompilerVersion := FCompilerVersion;
   LCtx.PointerBytes := FPointerBytes;
@@ -1834,8 +1865,14 @@ begin
   if LBad or LValue.Guessed then
   begin
     for LName in LCtx.UnknownDeclared do
+    begin
       if FUnresolvedDeclared.IndexOf(LName) < 0 then
         FUnresolvedDeclared.Add(LName);
+      LAsk.Name := LName;
+      LAsk.FileId := AFileId;
+      LAsk.Offset := AToken.Start;
+      FDeclaredAsks.Add(LAsk);
+    end;
     for LSym in LCtx.UnknownSymbols do
     begin
       LSeen := False;

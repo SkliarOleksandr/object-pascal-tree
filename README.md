@@ -1591,9 +1591,15 @@ Still open, roughly in the order we're tackling it:
   The two-stage split is what makes it affordable: the commonest guards
   (`DECLARED(AnsiChar)`, `declared(UInt64)`) sit in the largest RTL units, and
   answering them in stage one took the second pass from 7 units to 2 and a +4%
-  regression to nothing. ONE round, deliberately - see the code for what that
-  gives up. The query also excludes the unit's OWN declarations, without which
-  the idiom it exists for (`{$IF not declared(X)} X = ...`) would oscillate.
+  regression to nothing. ONE round across units, deliberately - see the code
+  for what that gives up. The unit's OWN declarations answer by position, as
+  dcc does (2026-09-27): a name declared above the directive and in scope
+  there - a local in its routine's body included - is declared. Counting the
+  own scope whole would make the idiom it exists for (`{$IF not declared(X)}
+  X = ...`) oscillate; a guarded declaration always lies below its guard, so
+  the positional rule cannot. An earlier guard the pass itself flips can
+  still move a declaration a later guard reads, so a unit is re-decided until
+  its own-name answers agree with the stream they produced.
 - **An AST printer, and the two very different tests it enables.** Item 2 of the
   definition of done is a *token*-level roundtrip (concatenated tokens + trivia
   == source, byte-for-byte), which proves the LEXER lossless and says nothing

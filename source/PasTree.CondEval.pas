@@ -100,6 +100,8 @@ type
                                      // initializers has no define set; a
                                      // Defined() there just guesses)
     OnDeclared: TPasDeclaredQuery;   // nil = nobody can answer Declared()
+    DirPos: TPasCondPos;             // where the directive stands - passed
+                                     // to OnDeclared (see TPasCondPos)
     OnSymbol: TPasCondSymbolQuery;   // nil = nobody can answer const/SizeOf/
                                      // Length questions (the first pass)
     CompilerVersion: Double;         // answers RTLVersion too (equal since XE2)
@@ -626,7 +628,8 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       LArgName := DottedNameOf(ATree, LArg);
       if LArgName = '' then
         Exit;
-      if Assigned(ACtx.OnDeclared) and ACtx.OnDeclared(LArgName, LKnown) then
+      if Assigned(ACtx.OnDeclared) and
+         ACtx.OnDeclared(LArgName, ACtx.DirPos, LKnown) then
         // Somebody with a symbol table answered - see TPasDeclaredQuery.
         // Not recorded, because it is not a guess.
         Result := MkBool(LKnown)

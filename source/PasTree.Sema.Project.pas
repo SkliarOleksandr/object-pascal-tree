@@ -151,6 +151,15 @@ type
     function XOf(ANode: Integer): TSemaXType;
   end;
 
+  // One answer the unit's OWN declarations gave a `$IF Declared(X)` in a
+  // round of the second preprocessing pass - kept so the round can be checked
+  // against the model it produced (see RunDeclaredPass).
+  TPasOwnAnswer = record
+    NameLower: string;
+    Pos: TPasCondPos;
+    Answer: Boolean;
+  end;
+
   TPasSemaProject = class
   private
     FPlatform: TPasPlatform;
@@ -384,7 +393,10 @@ type
     function LoadedUnitByName(const AName: string): Integer;
     procedure ResolveUses(AId: Integer);
     function SeedDeclaredQuery: TPasDeclaredQuery;
-    function DeclaredQueryFor(AId: Integer): TPasDeclaredQuery;
+    function DeclaredQueryFor(AId: Integer; AOwn: TPasSemaModel = nil;
+      ALog: TList<TPasOwnAnswer> = nil): TPasDeclaredQuery;
+    function OwnDeclaredBefore(AM: TPasSemaModel; const ANameLower: string;
+      const APos: TPasCondPos): Boolean;
     procedure RunDeclaredPass(ACount: Integer);
     procedure InjectGuessedIfDiags(ACount: Integer);
     procedure InjectGuessedIfDiagsOne(AId: Integer);
@@ -2136,7 +2148,8 @@ end;
 function TPasSemaProject.SeedDeclaredQuery: TPasDeclaredQuery;
 begin
   Result :=
-    function(const AName: string; out ADeclared: Boolean): Boolean
+    function(const AName: string; const APos: TPasCondPos;
+      out ADeclared: Boolean): Boolean
     begin
       ADeclared := FSeedModel.FindLocal(FSeedScope, LowerCase(AName)) <> NIL_SYM;
       Result := ADeclared;
@@ -2145,26 +2158,36 @@ end;
 
 { Answers a `$IF Declared(X)` guard on behalf of unit AId.
 
-  Deliberately NOT the unit's own declarations, only what it can see from
-  outside: its own imports, the implicit System and SysInit units, and the
-  compiler-provided seed. Including the unit's own scope would make the answer
-  depend on the branch the previous pass took, which is exactly what this pass
-  is re-deciding - `TSomething = QWord` inside the guarded text would report
+  What the unit sees from outside - its own imports, the implicit System and
+  SysInit units, the compiler-provided seed - answers wherever the guard
+  stands. The unit's OWN declarations answer by position, as dcc does
+  (OwnDeclaredBefore): only one written above the directive and in scope
+  there counts. Counting the own scope whole would make the answer depend on
+  the branch the previous pass took, which is exactly what this pass is
+  re-deciding - `TSomething = QWord` inside the guarded text would report
   TSomething as declared, flip the branch, remove the declaration, and the two
-  readings would trade places forever.
+  readings would trade places forever; the guarded text always lies BELOW its
+  guard, so the positional rule never counts it.
 
   The seed is consulted through SystemScope rather than InterfaceScope for the
   same reason: InterfaceScope JOINS the seed, so asking it would drag the
-  unit's own names back in. And each lookup rejects a hit in AId itself, which
-  is how System.pas asking `Declared(RTLVersion132)` about its OWN const stops
-  being self-referential - FindInSystemUnit reaches exactly that scope. }
-function TPasSemaProject.DeclaredQueryFor(AId: Integer): TPasDeclaredQuery;
+  unit's own names back in whole. And each outside lookup rejects a hit in AId
+  itself - System.pas asking `Declared(RTLVersion132)` about its OWN const
+  goes through the positional rule instead, like any unit's own name.
+
+  AOwn: the model the own names are read from - the unit's registered one
+  when nil, a previous round's in RunDeclaredPass. ALog, when given, collects
+  every answer the own names gave. }
+function TPasSemaProject.DeclaredQueryFor(AId: Integer; AOwn: TPasSemaModel;
+  ALog: TList<TPasOwnAnswer>): TPasDeclaredQuery;
 begin
   Result :=
-    function(const AName: string; out ADeclared: Boolean): Boolean
+    function(const AName: string; const APos: TPasCondPos;
+      out ADeclared: Boolean): Boolean
     var
       LLower: string;
       LUid, LSym: Integer;
+      LAnswer: TPasOwnAnswer;
     begin
       LLower := LowerCase(AName);
       ADeclared :=
@@ -2173,8 +2196,154 @@ begin
         (FindInSysInitUnit(LLower, LUid, LSym) and (LUid <> AId)) or
         ((FModels[AId].SystemScope <> NIL_SCOPE) and
          (FModels[AId].Resolve(FModels[AId].SystemScope, LLower) <> NIL_SYM));
+      if not ADeclared then
+      begin
+        if AOwn <> nil then
+          ADeclared := OwnDeclaredBefore(AOwn, LLower, APos)
+        else
+          ADeclared := OwnDeclaredBefore(FModels[AId], LLower, APos);
+        if ALog <> nil then
+        begin
+          LAnswer.NameLower := LLower;
+          LAnswer.Pos := APos;
+          LAnswer.Answer := ADeclared;
+          ALog.Add(LAnswer);
+        end;
+      end;
       Result := True;   // this one always has an answer
     end;
+end;
+
+{ The positional half of DeclaredQueryFor: is ANameLower declared in AM's
+  own text ABOVE the directive at APos, and in scope there? dcc's rule
+  (1.3.2, probed on dcc64 37.0): a name written above the directive - in the
+  interface, in the implementation, or as a local, a parameter or a field of
+  the routine whose body holds the directive - is declared; one written
+  below, a local of another routine or of a nested one, an inline var above
+  its own declaration and a generic's bare name are not.
+
+  Read off a model of the unit - the pass being re-decided, or a previous
+  round of it: the position maps to the first visible token after the
+  directive in that model's stream, the scope in effect there comes from
+  NodeScope, and a declaration counts when it starts before that token. A
+  guarded declaration lies below its guard, so this cannot feed on its own
+  answer; an EARLIER guard the pass flips, adding or removing a declaration
+  above, is what RunDeclaredPass's rounds catch. Answers False where the
+  position cannot be placed - a file the model does not have, or has twice
+  (which inclusion is not known here), or a model whose NodeScope is gone. }
+function TPasSemaProject.OwnDeclaredBefore(AM: TPasSemaModel;
+  const ANameLower: string; const APos: TPasCondPos): Boolean;
+var
+  LM: TPasSemaModel;
+  LFile, LIdx, LVis, LLastOfFile, LNode, LChild, LScope, LSym, LDecl: Integer;
+  LDeeper: Boolean;
+
+  // A type completed BELOW whose forward declaration (`TFoo = class;`)
+  // stands above: the completion moved DeclNode to itself, the forward's
+  // name still maps to the symbol.
+  function ForwardAbove(ASym: Integer): Boolean;
+  var
+    LN, LName: Integer;
+  begin
+    Result := False;
+    if LM.Symbols[ASym].Kind <> skType then
+      Exit;
+    for LN := 0 to High(LM.Tree.Nodes) do
+      if LM.Tree.Nodes[LN].Kind = nkTypeDecl then
+      begin
+        LName := LM.Tree.Nodes[LN].FirstChild;
+        while (LName <> NIL_NODE) and
+              (LM.Tree.Nodes[LName].Kind = nkAttrGroup) do
+          LName := LM.Tree.Nodes[LName].NextSibling;
+        if (LName <> NIL_NODE) and (LName <= High(LM.RefMap)) and
+           (LM.RefMap[LName] = ASym) and
+           (LM.Tree.Nodes[LName].FirstToken < LVis) then
+          Exit(True);
+      end;
+  end;
+
+begin
+  Result := False;
+  LM := AM;
+  if (LM = nil) or (LM.NodeScope = nil) or (APos.FileName = '') or
+     (Length(LM.Tree.Nodes) = 0) then
+    Exit;
+  // The unit's own name: its header stands above every directive.
+  if (LM.UnitNameLower <> '') and (ANameLower = LM.UnitNameLower) then
+    Exit(True);
+  LFile := -1;
+  for LIdx := 0 to High(LM.Tree.Source.FileNames) do
+    if SameText(LM.Tree.Source.FileNames[LIdx], APos.FileName) then
+    begin
+      if LFile >= 0 then
+        Exit;
+      LFile := LIdx;
+    end;
+  if LFile < 0 then
+    Exit;
+  // The first visible token of that file at or after the directive - or,
+  // with none left in the file, the token after its last one.
+  LVis := -1;
+  LLastOfFile := -1;
+  for LIdx := 0 to High(LM.Tree.Source.Visible) do
+    if LM.Tree.Source.Visible[LIdx].FileId = LFile then
+    begin
+      if LM.Tree.Source.Files[LFile].Tokens[
+           LM.Tree.Source.Visible[LIdx].TokenIndex].Start >= APos.Offset then
+      begin
+        LVis := LIdx;
+        Break;
+      end;
+      LLastOfFile := LIdx;
+    end;
+  if LVis < 0 then
+  begin
+    if LLastOfFile < 0 then
+      Exit;
+    LVis := LLastOfFile + 1;
+  end;
+  // The innermost node over that token, then the scope in effect there.
+  LNode := 0;
+  repeat
+    LDeeper := False;
+    LChild := LM.Tree.Nodes[LNode].FirstChild;
+    while LChild <> NIL_NODE do
+    begin
+      if (LM.Tree.NodeLeftmostVis(LChild) <= LVis) and
+         (LVis <= LM.Tree.Nodes[LChild].LastToken) then
+      begin
+        LNode := LChild;
+        LDeeper := True;
+        Break;
+      end;
+      LChild := LM.Tree.Nodes[LChild].NextSibling;
+    end;
+  until not LDeeper;
+  LScope := NIL_SCOPE;
+  while (LNode <> NIL_NODE) and (LScope = NIL_SCOPE) do
+  begin
+    if LNode <= High(LM.NodeScope) then
+      LScope := LM.NodeScope[LNode];
+    LNode := LM.Tree.Nodes[LNode].Parent;
+  end;
+  // Out through the scopes, each declaration checked for its position.
+  while LScope <> NIL_SCOPE do
+  begin
+    LSym := LM.FindLocalDeep(LScope, ANameLower);
+    while LSym <> NIL_SYM do
+    begin
+      if not (sfGeneric in LM.Symbols[LSym].Flags) then
+      begin
+        LDecl := LM.Symbols[LSym].DeclNode;
+        // No node: compiler-provided, declared everywhere.
+        if (LDecl = NIL_NODE) or ((LDecl <= High(LM.Tree.Nodes)) and
+           (LM.Tree.Nodes[LDecl].FirstToken < LVis)) or ForwardAbove(LSym) then
+          Exit(True);
+      end;
+      LSym := LM.Symbols[LSym].NextOverload;
+    end;
+    LScope := LM.Scopes[LScope].Parent;
+  end;
 end;
 
 { The `$IF` symbol oracle (const values / SizeOf / Length - see
@@ -3556,10 +3725,12 @@ var
   LDone: TArray<TPasSemaModel>;
   LIdx, LU: Integer;
   LPaths: TArray<string>;
-  LPath, LName: string;
+  LPath: string;
   LQuery: TPasDeclaredQuery;
   LSymQuery: TPasCondSymbolQuery;
   LUnsym: TPasUnresolvedSymbol;
+  LAsk: TPasDeclaredAsk;
+  LPos: TPasCondPos;
   LAnswer, LIsCand: Boolean;
   LNum: TPasSymbolValue;
 begin
@@ -3580,15 +3751,21 @@ begin
   for LIdx := 0 to ACount - 1 do
   begin
     LIsCand := False;
-    if Length(FModels[LIdx].Tree.Source.UnresolvedDeclared) > 0 then
+    // Every ask at its own position: the unit's own names answer by where
+    // the guard stands (OwnDeclaredBefore).
+    if Length(FModels[LIdx].Tree.Source.DeclaredAsks) > 0 then
     begin
       LQuery := DeclaredQueryFor(LIdx);
-      for LName in FModels[LIdx].Tree.Source.UnresolvedDeclared do
-        if LQuery(LName, LAnswer) and LAnswer then
+      for LAsk in FModels[LIdx].Tree.Source.DeclaredAsks do
+      begin
+        LPos.FileName := FModels[LIdx].Tree.Source.FileNames[LAsk.FileId];
+        LPos.Offset := LAsk.Offset;
+        if LQuery(LAsk.Name, LPos, LAnswer) and LAnswer then
         begin
           LIsCand := True;
           Break;
         end;
+      end;
     end;
     if not LIsCand and
        (Length(FModels[LIdx].Tree.Source.UnresolvedSymbols) > 0) then
@@ -3619,25 +3796,62 @@ begin
     var
       LPP: TPasPreprocessor;
       LDiags: TArray<TPasParseDiag>;
+      LLog: TList<TPasOwnAnswer>;
+      LBase, LNew: TPasSemaModel;
+      LRound, LA: Integer;
+      LStable: Boolean;
     begin
       LDone[AIndex] := nil;
+      LBase := nil;
       LPP := RentPP;
+      LLog := TList<TPasOwnAnswer>.Create;
       try
         try
-          LPP.OnDeclared := DeclaredQueryFor(LCand[AIndex]);
-          LPP.OnSymbol := SymbolQueryFor(LCand[AIndex]);
-          LDone[AIndex] := TPasSemaResolver.Analyze(
-            TPasParser.ParseFile(LPP.Process(FFiles[LCand[AIndex]]), LDiags),
-            False, FPlatform);
-          LDone[AIndex].AddParseDiags(LDiags);
+          // Rounds, until the unit's own-name answers agree with the stream
+          // they produced. The first answers from the first-pass model; an
+          // earlier guard that this pass flips can add or remove a
+          // declaration a later guard asks about (FMX.Skia.Canvas: a record
+          // declared under `not Declared(RTLVersion132)`, which the first
+          // pass guessed True and the imports answer False, is what a later
+          // `Declared(<that record>)` guard reads), so each further round
+          // answers from the previous one's model. Decisions settle top down
+          // - a guard reads only declarations above it - so a round or two.
+          for LRound := 1 to 4 do
+          begin
+            LLog.Clear;
+            LPP.OnDeclared := DeclaredQueryFor(LCand[AIndex], LBase, LLog);
+            LPP.OnSymbol := SymbolQueryFor(LCand[AIndex]);
+            LNew := TPasSemaResolver.Analyze(
+              TPasParser.ParseFile(LPP.Process(FFiles[LCand[AIndex]]), LDiags),
+              False, FPlatform);
+            LNew.AddParseDiags(LDiags);
+            LStable := True;
+            for LA := 0 to LLog.Count - 1 do
+              if OwnDeclaredBefore(LNew, LLog[LA].NameLower, LLog[LA].Pos) <>
+                 LLog[LA].Answer then
+              begin
+                LStable := False;
+                Break;
+              end;
+            LBase.Free;   // the previous round's model; nil on the first
+            LBase := LNew;
+            if LStable then
+              Break;
+          end;
+          LDone[AIndex] := LBase;
+          LBase := nil;
         except
           // Keep the first-pass model. A unit that parsed once and throws now
           // is a defect, but the wrong branch is still better than no unit at
           // all - an unloadable unit gates every importer.
           on Exception do
+          begin
+            LBase.Free;
             LDone[AIndex] := nil;
+          end;
         end;
       finally
+        LLog.Free;
         ReturnPP(LPP);
       end;
     end,
@@ -3769,6 +3983,7 @@ var
   LName: string;
   LNum: TPasSymbolValue;
   LDeclAnswer: Boolean;
+  LDeclPos: TPasCondPos;
 begin
   if not FReportGuessedIfs then
     Exit;
@@ -3798,7 +4013,12 @@ begin
           if LM.Tree.Source.Diagnostics[LDIdx].Unanswered[LQIdx].Query =
              sqDeclared then
           begin
-            if not LDeclQuery(LName, LDeclAnswer) then
+            // Where the flagged directive stands - the own-name half answers
+            // by position (see OwnDeclaredBefore).
+            LDeclPos.FileName := LM.Tree.Source.FileNames[
+              LM.Tree.Source.Diagnostics[LDIdx].FileId];
+            LDeclPos.Offset := LM.Tree.Source.Diagnostics[LDIdx].Start;
+            if not LDeclQuery(LName, LDeclPos, LDeclAnswer) then
               LOpen := LOpen + ['Declared(' + LName + ')'];
           end
           else if not LSymQuery(
