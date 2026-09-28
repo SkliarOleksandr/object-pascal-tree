@@ -419,6 +419,8 @@ type
     function PeerRoutineNameNode(AMid, ASym: Integer): Integer;
     function ImplQualifierNodes(AMid, ASym: Integer): TArray<Integer>;
     function ImplHeaderSym(AMid, ANode: Integer; out ASym: Integer): Boolean;
+    function SymbolOfIdentNode(AMid, ANode: Integer;
+      out ATMid, ASym: Integer; out AName: string): Boolean;
     function UnitNameHit(LM: TPasSemaModel; ANode: Integer;
       out AHit: TPasRefHit): Boolean;
     function UnitNameOfModel(AUid: Integer): string;
@@ -486,6 +488,13 @@ type
     // searches for, and the Enabled test for the command that starts one.
     function SymbolAt(AMid, ALine, ACol: Integer;
       out ATMid, ASym: Integer; out AName: string): Boolean;
+    // SymbolAt for a position in ANY file of model AMid's source: its main
+    // file or an include it pulls in (), AFile as the model's source names
+    // it (case-insensitive, full path). An include pulled in twice answers for
+    // its first inclusion. A position in an include had no answer at all -
+    // SymbolAt reads the main file - while Find References lists its rows.
+    function SymbolAtFile(AMid: Integer; const AFile: string; ALine,
+      ACol: Integer; out ATMid, ASym: Integer; out AName: string): Boolean;
     // Every place ASym (declared in model ATMid) is actually USED, by
     // resolved symbol identity - never a text search. See the
     // implementation comment for what that does and does not cover.
@@ -1624,12 +1633,19 @@ function TPasNavigator.SymbolAt(AMid, ALine, ACol: Integer;
   out ATMid, ASym: Integer; out AName: string): Boolean;
 var
   LIdent: TPasNavIdent;
+begin
+  Result := IdentAt(AMid, ALine, ACol, LIdent) and
+    SymbolOfIdentNode(AMid, LIdent.Node, ATMid, ASym, AName);
+end;
+
+// SymbolAt's resolution of an identifier node, wherever the node's token is.
+function TPasNavigator.SymbolOfIdentNode(AMid, ANode: Integer;
+  out ATMid, ASym: Integer; out AName: string): Boolean;
+var
   LCache: TNavCache;
   LFbMid, LFbSym: Integer;
 begin
   Result := False;
-  if not IdentAt(AMid, ALine, ACol, LIdent) then
-    Exit;
   // The DECLARATION site itself - a type's own name, a field, a routine
   // header (interface OR implementation; each overload's own DeclNode is
   // distinct and reliable, unlike the ordinary REFERENCE binding those
@@ -1642,7 +1658,7 @@ begin
   // (CollectUsesItem), but that symbol means nothing outside the referring
   // unit - UnitAt/FindUnitReferences is the right tool for it, not this.
   LCache := CacheOf(AMid);
-  if LCache.DeclSymOfNode.TryGetValue(LIdent.Node, ASym) and
+  if LCache.DeclSymOfNode.TryGetValue(ANode, ASym) and
      (FProj.Model(AMid).Symbols[ASym].Kind <> skUnitRef) then
   begin
     ATMid := AMid;
@@ -1651,13 +1667,13 @@ begin
   end;
   // A qualified implementation HEADER, whose own name binds to nothing at
   // all - see ImplHeaderSym for why, and why it is answered structurally.
-  if ImplHeaderSym(AMid, LIdent.Node, ASym) then
+  if ImplHeaderSym(AMid, ANode, ASym) then
   begin
     ATMid := AMid;
     AName := FProj.Model(AMid).Symbols[ASym].Name;
     Exit(True);
   end;
-  if not ResolveSymbolAt(AMid, LIdent.Node, ATMid, ASym) then
+  if not ResolveSymbolAt(AMid, ANode, ATMid, ASym) then
     Exit;
   if (FProj.Model(ATMid).Symbols[ASym].DeclNode = NIL_NODE) and
      not SameText(FProj.Model(ATMid).Symbols[ASym].Name, 'Result') then
@@ -1670,6 +1686,68 @@ begin
   end;
   AName := FProj.Model(ATMid).Symbols[ASym].Name;
   Result := True;
+end;
+
+function TPasNavigator.SymbolAtFile(AMid: Integer; const AFile: string;
+  ALine, ACol: Integer; out ATMid, ASym: Integer; out AName: string): Boolean;
+var
+  LM: TPasSemaModel;
+  LFileId, LOffset, LLo, LHi, LMidTok, LRaw, LVis, LNode: Integer;
+  LTS: TPasTokenStream;
+  LFull: string;
+begin
+  Result := False;
+  if AMid < 0 then
+    Exit;
+  FProj.EnsureHydrated(AMid);
+  LM := FProj.Model(AMid);
+  LFull := ExpandFileName(AFile);
+  LFileId := -1;
+  for var LIdx := 0 to High(LM.Tree.Source.FileNames) do
+    if SameText(ExpandFileName(LM.Tree.Source.FileNames[LIdx]), LFull) then
+    begin
+      LFileId := LIdx;
+      Break;
+    end;
+  if LFileId = 0 then
+    Exit(SymbolAt(AMid, ALine, ACol, ATMid, ASym, AName));
+  if (LFileId < 0) or (LFileId > High(LM.Tree.Source.Files)) then
+    Exit;
+  LTS := LM.Tree.Source.Files[LFileId];
+  if (ALine < 1) or (ALine - 1 > High(LTS.LineStarts)) or (ACol < 1) then
+    Exit;
+  LOffset := LTS.LineStarts[ALine - 1] + (ACol - 1);
+  LLo := 0;
+  LHi := High(LTS.Tokens);
+  LRaw := -1;
+  while LLo <= LHi do
+  begin
+    LMidTok := (LLo + LHi) div 2;
+    if LTS.Tokens[LMidTok].Start > LOffset then
+      LHi := LMidTok - 1
+    else if LTS.Tokens[LMidTok].EndPos <= LOffset then
+      LLo := LMidTok + 1
+    else
+    begin
+      LRaw := LMidTok;
+      Break;
+    end;
+  end;
+  if (LRaw < 0) or (LTS.Tokens[LRaw].Kind <> tkIdentifier) then
+    Exit;
+  // The cache maps the main file's tokens only; an include's are few enough
+  // to look up in the visible stream directly.
+  LVis := -1;
+  for var LIdx := 0 to High(LM.Tree.Source.Visible) do
+    if (LM.Tree.Source.Visible[LIdx].FileId = LFileId) and
+       (LM.Tree.Source.Visible[LIdx].TokenIndex = LRaw) then
+    begin
+      LVis := LIdx;
+      Break;
+    end;
+  if (LVis < 0) or not CacheOf(AMid).NodeOfVis.TryGetValue(LVis, LNode) then
+    Exit;
+  Result := SymbolOfIdentNode(AMid, LNode, ATMid, ASym, AName);
 end;
 
 // One pass over the main file's raw tokens rather than over the tree: the

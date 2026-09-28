@@ -2997,6 +2997,22 @@ begin
       // include-file positions, implementation rows.
       var LMidOut := GNav.ModelIdOf(TPath.Combine(LDir, 'NavOut.pas'));
       Ok('outline: NavOut model found', LMidOut >= 0);
+      // A position in an INCLUDE file resolves as one in the unit does.
+      var LIncT, LIncS: Integer;
+      var LIncN: string;
+      var LIncHit: TPasRefHit;
+      Ok('include: a declaration in an included file, by its own position',
+        GNav.SymbolAtFile(LMidOut, TPath.Combine(LDir, 'NavOut.inc'), 1, 11,
+        LIncT, LIncS, LIncN) and SameText(LIncN, 'FromInc') and
+        GNav.DeclHit(LIncT, LIncS, LIncHit) and
+        SameText(TPath.GetFileName(LIncHit.FilePath), 'NavOut.inc') and
+        (LIncHit.Line = 1));
+      Ok('include: the main file through SymbolAtFile is SymbolAt',
+        GNav.SymbolAtFile(LMidOut, TPath.Combine(LDir, 'NavOut.pas'), 31, 11,
+        LIncT, LIncS, LIncN) and SameText(LIncN, 'FromInc'));
+      Ok('include: a file the model does not pull in answers nothing',
+        not GNav.SymbolAtFile(LMidOut, TPath.Combine(LDir, 'NavDef.inc'), 1,
+        1, LIncT, LIncS, LIncN));
       if LMidOut >= 0 then
       begin
         var LOut := PasModuleOutline(GProj.Model(LMidOut).Tree);
