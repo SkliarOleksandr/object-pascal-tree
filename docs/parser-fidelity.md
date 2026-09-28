@@ -155,14 +155,13 @@ Written down, not pretended away:
 
 ## 4. Where it stands
 
-As of 2026-09-28 (v0.64.0):
+As of 2026-09-28 (v0.64.2):
 
 - the tree checker and the printer, over the Studio 37 source, two
   flattened RTL corpora and two trees of third-party libraries - about 93M
   tokens: no violation of any invariant and no token outside the own-token
   table in any clean file; no token the print misses or misplaces (T3);
-  every file parses back to its own tree (T3r) but where one recovery
-  heuristic reads a line break in valid code (F28);
+  every file parses back to its own tree (T3r), in both layouts;
 - the harness, `t0f`, `t1` and `t2`: over the self-host, the Studio units
   (rtl, vcl, fmx; Win64 and Win32), four third-party libraries and two
   applications (one of them partially - its build cannot be reproduced
@@ -189,7 +188,6 @@ minus before a member call - agree with dcc everywhere they were met.
 | F23 | the source manager | an include inside an include is looked up beside the including file; dcc looks beside the main unit |
 | F25 | the oracle's input | a shipped RTL unit built with a define no project has: its constants (the vmt offsets on Win64) evaluate otherwise |
 | F26 | the lexer | an `asm` in a dead branch no `$ELSE` of its own depth follows keeps BASM mode past the `$ENDIF` |
-| F28 | parser recovery | `case` alone on its line before a variant part's tag reads as the recovery shape - a parse error on valid code no corpus writes, found by T3r |
 | F29, F30 | the tree | `procedure stdcall` vs `procedure; stdcall`, a unit's `begin` vs `initialization`: one program, different `.dcu` bytes |
 
 Fixed on the way, each by its own reviewed change: a subrange bound that
@@ -197,8 +195,11 @@ swallowed an initializer's `=` (F6, silent on a variable), directives of a
 procedural type or a routine header that left no node (F1, F2, F10, F11,
 F27 - several were parse errors on valid code, one misread a directive as
 a call), where a declaration's name list ends (F19), `Declared` of a unit's
-own earlier declaration (F21, positional as dcc) and the right operand of
-`is` (F24 - `O is TFoo and C` was `O is (TFoo and C)`).
+own earlier declaration (F21, positional as dcc), the right operand of
+`is` (F24 - `O is TFoo and C` was `O is (TFoo and C)`) and two recovery
+rules that read a line break inside a variant part (F28 - `case` NEWLINE
+`Tag: Byte of`, and a qualified label's member on the next line, were
+parse errors on valid code; T3r's token-per-line print found them).
 
 ## 5. The gate
 

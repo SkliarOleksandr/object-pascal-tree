@@ -775,7 +775,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..199] of TPasCaseRow = (
+  DECL_CASES: array[0..208] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1255,6 +1255,78 @@ const
        'Ident''Integer'' VariantBranch(IntLit''0'' VarDecl(Ident''X''#name ' +
        'Ident''Integer'')) VariantBranch(IntLit''1'' VarDecl(Ident''Y''#name ' +
        'Ident''Single''))))))'; ExpectDiags: 0),
+    // The tag may start the line after `case` (dcc64 37.0, probed 2026-09-28;
+    // plan finding F28). A recovery rule took any `Ident :` starting that
+    // line for the next field - `case` typed above `Reserve: array...` - and
+    // made the valid shape a parse error. A branch label's `:` after an `of`,
+    // before any `;` / `end`, is what tells the tag.
+    (Section: '9.1.3'; Name: 'variant tag on the line after case';
+     Source: 'type TR = record A: Integer; case'#13#10 +
+       '  Tag: Byte of 0: (B: Integer); 1: (C: Word); end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(VarDecl(Ident''A''#name ' +
+       'Ident''Integer'') VariantPart(Ident''Tag'' Ident''Byte'' ' +
+       'VariantBranch(IntLit''0'' VarDecl(Ident''B''#name ' +
+       'Ident''Integer'')) VariantBranch(IntLit''1'' ' +
+       'VarDecl(Ident''C''#name Ident''Word''))))))'; ExpectDiags: 0),
+    (Section: '9.1.3'; Name: 'variant tag, its colon on the next line';
+     Source: 'type TR = record case'#13#10'  Tag'#13#10 +
+       '  : Byte of 0: (B: Integer); end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(VariantPart(Ident''Tag'' ' +
+       'Ident''Byte'' VariantBranch(IntLit''0'' VarDecl(Ident''B''#name ' +
+       'Ident''Integer''))))))'; ExpectDiags: 0),
+    (Section: '9.1.3'; Name: 'variant tag on the next line, an enum type';
+     Source: 'type TR = record case'#13#10 +
+       '  Kind: (kA, kB) of kA: (B: Integer); kB: (C: Double); end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' ' +
+       'RecordType(VariantPart(Ident''Kind'' ' +
+       'EnumType(EnumValue(Ident''kA'') EnumValue(Ident''kB'')) ' +
+       'VariantBranch(Ident''kA'' VarDecl(Ident''B''#name ' +
+       'Ident''Integer'')) VariantBranch(Ident''kB'' ' +
+       'VarDecl(Ident''C''#name Ident''Double''))))))'; ExpectDiags: 0),
+    (Section: '9.1.3'; Name: 'variant tag on the next line, a set type';
+     Source: 'type TR = record case'#13#10 +
+       '  S: set of Byte of [1]: (C: Integer); end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(VariantPart(Ident''S'' ' +
+       'SetType(Ident''Byte'') VariantBranch(SetCtor(IntLit''1'') ' +
+       'VarDecl(Ident''C''#name Ident''Integer''))))))'; ExpectDiags: 0),
+    (Section: '9.1.3'; Name: 'variant tag on the next line, a nested part';
+     Source: 'type TR = record case Integer of'#13#10 +
+       '  0: (A: Byte; case'#13#10'    Sub: Word of 0: (B: Integer));'#13#10 +
+       '  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' ' +
+       'RecordType(VariantPart(Ident''Integer'' ' +
+       'VariantBranch(IntLit''0'' VarDecl(Ident''A''#name Ident''Byte'') ' +
+       'VariantPart(Ident''Sub'' Ident''Word'' VariantBranch(IntLit''0'' ' +
+       'VarDecl(Ident''B''#name Ident''Integer''))))))))'; ExpectDiags: 0),
+    // A qualified label's member on the next line is the label's - it is
+    // followed by `: (` - not the next field's head.
+    (Section: '9.1.3'; Name: 'variant label, member on the next line';
+     Source: 'type TR = record case K: TK of TK.'#13#10 +
+       '  kA: (B: Integer); TK.'#13#10'  kB: (C: Word); end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(VariantPart(Ident''K'' ' +
+       'Ident''TK'' VariantBranch(Member(Ident''TK'' Ident''kA'') ' +
+       'VarDecl(Ident''B''#name Ident''Integer'')) ' +
+       'VariantBranch(Member(Ident''TK'' Ident''kB'') ' +
+       'VarDecl(Ident''C''#name Ident''Word''))))))'; ExpectDiags: 0),
+    // The recovery it was for stays: `case` typed above a field.
+    (Section: '9.1.3'; Name: 'case typed above a field (recovery)';
+     Source: 'type TR = record case'#13#10 +
+       '  Reserve: array[0..3] of Byte;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(VariantPart ' +
+       'VarDecl(Ident''Reserve''#name ArrayType(Subrange(IntLit''0'' ' +
+       'IntLit''3'') Ident''Byte'')))))'; ExpectDiags: 1),
+    (Section: '9.1.3'; Name: 'case typed above a procedural field (recovery)';
+     Source: 'type TR = record case'#13#10 +
+       '  F: function: Integer of object;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(VariantPart ' +
+       'VarDecl(Ident''F''#name ProcType#ofobject(Ident''Integer'')))))'; ExpectDiags: 1),
+    (Section: '9.1.3'; Name: 'variant label typed above a field (recovery)';
+     Source: 'type TR = record case K: TK of TK.'#13#10 +
+       '  Reserve: array[0..3] of Byte;'#13#10'  end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(VariantPart(Ident''K'' ' +
+       'Ident''TK'' VariantBranch(Member(Ident''TK''))) ' +
+       'VarDecl(Ident''Reserve''#name ArrayType(Subrange(IntLit''0'' ' +
+       'IntLit''3'') Ident''Byte'')))))'; ExpectDiags: 2),
 
     // ---- 9.3.1 class operator declarations ----
     (Section: '9.3.1'; Name: 'class operator';

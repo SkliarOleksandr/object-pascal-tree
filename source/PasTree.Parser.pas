@@ -70,6 +70,10 @@ type
     // `;` (see ParseProcTypeExpr). Read and cleared by ParseTypeExpr on entry,
     // like FEqEndsBound.
     FProcTail: Boolean;
+    // Set while parsing a variant branch's labels: a member name starting its
+    // line before `: (` is the label's (`TKind.` NEWLINE `A: (...)`), not the
+    // next field's head (see ParseSelectors).
+    FVariantLabels: Boolean;
     FStuckCount: Integer;
     // Watchdogs (see notes on ParseGuard):
     FFuel: Int64;              // decremented in CurKind; trips at 0
@@ -231,6 +235,10 @@ type
     { An identifier that starts its line and is followed by `=` or `:` - the
       head of the NEXT declaration, seen from inside an unfinished one. }
     function AtLineDeclHead: Boolean;
+    { At `Ident :` after a variant part's `case`: True when an `of` and then
+      a branch label's `:` follow at depth 0 before a `;`, `end` or an
+      unbalanced `)` - the identifier is the tag, whatever line it starts. }
+    function VariantTagAhead: Boolean;
     procedure SkipToDeclHead;
     procedure MarkContextKeyword;
     procedure ParseDeclSections(AParent: Integer; AAllowBodies: Boolean;
@@ -834,9 +842,12 @@ begin
           // as member names: TAnimationType.In (FMX declares `&In` but
           // call sites write `.In`). Accept any keyword here - but not the
           // next declaration's head on its own line (`array[1.` typed above
-          // `Reserve: ...`): that name is not consumed.
+          // `Reserve: ...`): that name is not consumed. A variant branch's
+          // label is followed by `: (` (`TKind.` NEWLINE `A: (B: Integer)`,
+          // dcc64 37.0), a field never.
           if ((CurKind = tkIdentifier) or IsKeyword(CurKind)) and
-             not AtLineDeclHead then
+             (not AtLineDeclHead or (FVariantLabels and
+              (PeekKind(1) = tkColon) and (PeekKind(2) = tkLParen))) then
           begin
             LChild := FB.AddNode(nkIdent, NIL_NODE, FPos);
             Next;
@@ -2510,14 +2521,16 @@ end;
 procedure TPasParser.ParseVariantPart(AOwner: Integer);
 var
   LPart, LBranch: Integer;
+  LLabels: Boolean;
 begin
   // 9.1.3: case [tag:] OrdinalType of const,...: ( fields [variant] ); ...
   LPart := FB.AddNode(nkVariantPart, NIL_NODE, FPos);
   Next; // case
   // `case` alone above `Reserve: array...` while typing: that field is not
-  // the tag (a tag never starts the next line). An empty variant part, the
-  // field stays a field.
-  if AtLineDeclHead then
+  // the tag. An empty variant part, the field stays a field. The line break
+  // alone does not tell them apart - `case` NEWLINE `Tag: Byte of` is valid
+  // (dcc64 37.0) - what follows does (VariantTagAhead).
+  if AtLineDeclHead and not VariantTagAhead then
   begin
     Error('variant tag expected');
     FB.SetLast(LPart, FPos - 1);
@@ -2559,13 +2572,19 @@ begin
     end;
     LBranch := FB.AddNode(nkVariantBranch, NIL_NODE, FPos);
     // labels
-    repeat
-      FB.Adopt(LBranch, ParseExpression);
-      if CurKind = tkComma then
-        Next
-      else
-        Break;
-    until False;
+    LLabels := FVariantLabels;
+    FVariantLabels := True;
+    try
+      repeat
+        FB.Adopt(LBranch, ParseExpression);
+        if CurKind = tkComma then
+          Next
+        else
+          Break;
+      until False;
+    finally
+      FVariantLabels := LLabels;
+    end;
     // An unfinished branch (`0` typed, nothing after it yet): the fields
     // behind it are the record's, not this branch's - stop before them.
     if not Expect(tkColon, '":"') or not Expect(tkLParen, '"("') then
@@ -2896,6 +2915,50 @@ begin
   Result := (FParamDepth = 0) and (FBlockDepth = 0) and (CurKind = tkIdentifier) and
     ((PeekKind(1) = tkColon) or ((PeekKind(1) = tkEqual) and not FInitFollows)) and
     not IsVisibilityWord and TokenStartsLine(FPos);
+end;
+
+function TPasParser.VariantTagAhead: Boolean;
+var
+  LIdx, LDepth: Integer;
+  LOf: Boolean;
+begin
+  // A variant part has at least one branch, `Label: (`, so a valid one puts
+  // a `:` at depth 0 after the tag type's `of` before anything that ends a
+  // field (9.1.3, probed). The tag type may be any type - `set of Byte of`
+  // compiles - so an `of` alone cannot tell: `Reserve: array[0..3] of Byte;`
+  // reaches its `;` first, `F: function: Integer;` has its `:` before any
+  // `of`. Pure lookahead from past `Ident :`.
+  Result := False;
+  if PeekKind(1) <> tkColon then
+    Exit;
+  LIdx := FPos + 2;
+  LDepth := 0;
+  LOf := False;
+  while LIdx <= FLast do
+  begin
+    case FSrc.VisibleToken(LIdx).Kind of
+      tkLParen, tkLBracket:
+        Inc(LDepth);
+      tkRParen, tkRBracket:
+        begin
+          if LDepth = 0 then
+            Exit;
+          Dec(LDepth);
+        end;
+      tkOf:
+        if LDepth = 0 then
+          LOf := True;
+      tkColon:
+        if LDepth = 0 then
+          Exit(LOf);
+      tkSemicolon:
+        if LDepth = 0 then
+          Exit;
+      tkEnd, tkEndOfFile:
+        Exit;
+    end;
+    Inc(LIdx);
+  end;
 end;
 
 function TPasParser.AtSectionBoundary: Boolean;
