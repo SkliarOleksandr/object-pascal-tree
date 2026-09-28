@@ -8,8 +8,8 @@ program PasTreePrint;
 
   - T3: the print against the visible stream it was parsed from - every
     token regenerated or copied at its place, modulo PRINT_NORMALIZATION.
-    A token the print lacks is a filed LOSS (counted per plan finding) or a
-    DEFECT (reported).
+    A token the tree does not hold is read as a filed LOSS (counted per plan
+    finding); a token the print misses or misplaces is a DEFECT (reported).
   - T3r: the print rendered one token per line and on one line, each parsed
     back; both trees must fingerprint as the original.
 
@@ -62,7 +62,7 @@ type
   TTotals = record
     Files, Clean, Exceptions: Int64;
     Original, Normalized, Printed, Matched, Spans, Losses, Defects: Int64;
-    T3Files, T3rFiles, T3rSkipped: Int64;
+    T3Files, T3rFiles: Int64;
   end;
 
 var
@@ -129,9 +129,6 @@ begin
       LSite := VisSiteText(LTree.Source, High(LTree.Source.Visible));
     if LResult.Sites[LIdx].Finding <> '' then
     begin
-      if not GLosses.TryGetValue(LResult.Sites[LIdx].Finding, LCount) then
-        LCount := 0;
-      GLosses.AddOrSetValue(LResult.Sites[LIdx].Finding, LCount + 1);
       if not GLossSites.ContainsKey(LResult.Sites[LIdx].Finding) then
         GLossSites.Add(LResult.Sites[LIdx].Finding, ALabel + LSite);
     end
@@ -142,13 +139,14 @@ begin
     end;
   end;
 
-  // A print that lacks a filed loss is another program: its round trip
-  // says nothing new.
-  if LResult.Losses > 0 then
+  for LIdx := 0 to High(LResult.LossCounts) do
   begin
-    Inc(GTotals.T3rSkipped);
-    Exit;
+    if not GLosses.TryGetValue(LResult.LossCounts[LIdx].Finding, LCount) then
+      LCount := 0;
+    GLosses.AddOrSetValue(LResult.LossCounts[LIdx].Finding,
+      LCount + LResult.LossCounts[LIdx].Count);
   end;
+
   if not CheckT3r(LTree,
     function(const AText: string; out ATree: TPasTree; out ADiags,
       ADiagVis: Integer; out AFirstDiag: string): Boolean
@@ -326,9 +324,9 @@ begin
   Writeln(Format('Files: %d, parsed clean: %d, exceptions: %d',
     [GTotals.Files, GTotals.Clean, GTotals.Exceptions]));
   Writeln(Format('T3: %d original tokens, %d normalized (%s); %d printed ' +
-    'items, %d matched (%d copied from a span), %d losses, %d defects in ' +
-    '%d files',
-    [GTotals.Original, GTotals.Normalized, 'N1-N5', GTotals.Printed,
+    'items, %d matched (%d copied from a span, %d read as a filed loss), ' +
+    '%d defects in %d files',
+    [GTotals.Original, GTotals.Normalized, 'N1-N11', GTotals.Printed,
      GTotals.Matched, GTotals.Spans, GTotals.Losses, GTotals.Defects,
      GTotals.T3Files]));
   LKeys := GLosses.Keys.ToArray;
@@ -336,10 +334,8 @@ begin
   for LKey in LKeys do
     Writeln(Format('  loss %s: %d (first %s)',
       [LKey, GLosses[LKey], GLossSites[LKey]]));
-  Writeln(Format('T3r: %d of %d clean files round-trip, %d fail, %d not ' +
-    'tried (a filed loss in the print)',
-    [GTotals.Clean - GTotals.T3rFiles - GTotals.T3rSkipped, GTotals.Clean,
-     GTotals.T3rFiles, GTotals.T3rSkipped]));
+  Writeln(Format('T3r: %d of %d clean files round-trip, %d fail',
+    [GTotals.Clean - GTotals.T3rFiles, GTotals.Clean, GTotals.T3rFiles]));
   Writeln(Format('Elapsed: %.1f s', [AElapsedMs / 1000]));
 end;
 

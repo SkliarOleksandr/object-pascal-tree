@@ -45,8 +45,8 @@ var
   GVerdictPP: TPasPreprocessor;
 
 // T3 and T3r (PasTree.Printer) over a clean row: the structural print matches
-// the row's tokens but for a filed loss and, when nothing is lost, parses back
-// in both layouts to the same tree. '' when both hold.
+// the row's tokens (a filed loss read in place) and parses back in both
+// layouts to the same tree. '' when both hold.
 function PrintVerdict(const ATree: TPasTree; AStatements: Boolean): string;
 var
   LT3: TPasT3Result;
@@ -60,7 +60,7 @@ begin
         Result := Result + '    ' +
           VisSiteText(ATree.Source, LT3.Sites[LIdx].Vis) + ': T3: ' +
           LT3.Sites[LIdx].Msg + sLineBreak;
-  if (LT3.Losses = 0) and not CheckT3r(ATree,
+  if not CheckT3r(ATree,
     function(const AText: string; out ABack: TPasTree; out ADiags,
       ADiagVis: Integer; out AFirstDiag: string): Boolean
     var

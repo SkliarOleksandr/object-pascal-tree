@@ -7,17 +7,21 @@ unit PasTree.Printer;
   tests nothing. This printer regenerates the source from the TREE: keywords
   and punctuation from Kind, Aux, Flags and the order of the children, text
   only from a leaf's own tokens and from the contract reads of the own-token
-  table (PasTree.Ast.Check) - the operator token an nkUnaryOp's or
-  nkBinaryOp's Aux names, and asm's opaque range. What the tree does not
-  hold it cannot print, and T3 - the printed sequence against the visible
-  stream the tree was parsed from - finds exactly those places.
+  table (PasTree.Ast.Check) - the head word of a routine, a directive, a
+  property specifier, a const or var section and a constraint, the operator
+  token an nkUnaryOp's or nkBinaryOp's Aux names, and asm's opaque range.
 
-  Templates exist for the expression and statement kinds (PasTemplatedKind).
-  A node of any other kind - the declarations, for now - prints FROM ITS
-  SPAN: its own tokens verbatim and its children in their places, each child
-  through its own template. Its items are marked pcSpan, so a comparison can
-  tell a copied token from a regenerated one, and the templates are
-  exercised inside declarations too (a constant's value, a routine's body).
+  Every kind has a template but nkError (and the retired nkAnonParams),
+  which print FROM THEIR SPAN: own tokens verbatim, children through their
+  templates, the items marked pcSpan. Valid code has none.
+
+  What the tree does not hold - the filed LOSSES of the own-token table
+  (`packed`, a parameter's `var` / `const`, `class sealed`, a numeric label,
+  ...) - the printer reads from the token that holds it, at its place among
+  the node's children, and marks it pcLoss. So the print is the same
+  program, T3r can judge every file, and the loss list is exactly the set of
+  pcLoss items: T3 counts them per finding and reports a filed loss the
+  print did NOT read as a defect.
 
   The canonical form. Where the grammar allows several spellings of one tree
   the printer writes one of them:
@@ -25,27 +29,41 @@ unit PasTree.Printer;
     the last; one after every case selector and every exception handler,
     the last included - it keeps a case's or an except part's `else` from
     reading as an if's (`1: if C then A; else B`);
+  - one `;` after every field of a record, class, object or variant, every
+    declaration of a var section, every variant, a routine's header, each
+    of its directives and its body, a property's specifiers;
   - keywords in lower case;
-  - a `>=` the lexer fused from type arguments' closing `>` and an `=`
-    operator (`V.AsType<T>=5`) as the two tokens it stands for.
+  - a `>=` the lexer fused from type arguments' or generic parameters'
+    closing `>` and an `=` (`V.AsType<T>=5`, `TFoo<T>= class`) as the two
+    tokens it stands for;
+  - a unit's `begin ... end.` as `initialization ... end.`;
+  - `class(TBase);` as `class(TBase) end;`;
+  - a procedural type's directives after its `of object`, behind a `;` when
+    a calling convention, far or near starts them (`procedure; stdcall`,
+    the one form a following declaration named like a convention cannot
+    join) and written into the type otherwise (`procedure varargs`, and
+    after `reference to`, which takes no `;`);
+  - no `;` after a record constant's last field value;
+  - one bracket pair per attribute group, `[A, B]`, and no `()` after an
+    attribute without arguments.
   The comparison maps the ORIGINAL onto the same form - PRINT_NORMALIZATION,
   one entry per rule with its reason - and does nothing else.
 
   T3 (CompareT3): the printed items against the visible stream, one by one.
   A regenerated keyword or punctuation matches a token of the same text
-  (case-insensitively) that its own node owns; a leaf, contract or span item
-  matches the very token it was read from. A token the print lacks is a LOSS
-  when the own-token table files it as one (a plan finding - inside
-  statements that is F16, the numeric label) and a DEFECT otherwise.
+  (case-insensitively) that its own node owns - or, for the few tokens the
+  own-token table gives to a parent (`class` before a member, a struct's
+  `var`, `reference to`), that parent; a leaf, contract, loss or span item
+  matches the very token it was read from. Anything else is a DEFECT.
 
   T3r (CheckT3r): parse(print(tree)) = tree. The print is rendered in two
   layouts, one token per line and everything on one line, and each is parsed
   back; both trees must fingerprint (TreeFingerprint) exactly as the
   original. It compares the parser with itself, so it is blind to what both
-  parses share - a dropped fact, a consistent misreading: those take the
-  original tokens (T3) and dcc. What it shows is that the canonical form is
-  the same program for the parser, and that the tree of valid code does not
-  depend on its layout (some recovery heuristics read line breaks).
+  parses share - a consistent misreading: that takes dcc. What it shows is
+  that the canonical form is the same program for the parser, and that the
+  tree of valid code does not depend on its layout (some recovery
+  heuristics read line breaks).
 
   Valid code only: every function here assumes a parse that reported no
   diagnostic. An nkError prints from its span.
@@ -61,11 +79,13 @@ uses
 type
   TPasPrintClass = (
     pcDerived,     // a keyword or punctuation regenerated from the tree
-    pcSeparator,   // a statement list's `;`: derived, but T3 compares the
-                   // lists without them (PRINT_NORMALIZATION, N1)
+    pcSeparator,   // a list's `;`: derived, but T3 compares the lists without
+                   // them (PRINT_NORMALIZATION, N1)
     pcLeaf,        // a leaf node's own token: a name or a literal
-    pcContract,    // read from a token by a documented rule: the operator
-                   // an Aux names, asm's opaque range
+    pcContract,    // read from a token by a documented rule: a head word, the
+                   // operator an Aux names, asm's opaque range
+    pcLoss,        // read from a token that holds a fact the tree does not: a
+                   // filed loss of the own-token table
     pcSpan         // an own token of a node without a template, verbatim
   );
 
@@ -95,24 +115,47 @@ type
 const
   { What T3 does to the ORIGINAL stream before comparing, and why each is
     allowed. The printer writes the canonical form directly. }
-  PRINT_NORMALIZATION: array[0..4] of string = (
-    'N1 list separators: every `;` a statement list owns (nkBlock, ' +
-      'nkCaseStmt, nkExceptPart) is dropped, and so is every separator the ' +
-      'printer writes - a run of them is one, one before end / else / until ' +
-      'is none, and the canonical ones are derived from the children',
+  PRINT_NORMALIZATION: array[0..10] of string = (
+    'N1 list separators: every `;` a statement or declaration list owns ' +
+      '(nkBlock, nkCaseStmt, nkExceptPart, nkInitSec, nkFinalSec; nkClassType, ' +
+      'nkRecordType, nkObjectType, nkHelperType, nkInterfaceType, ' +
+      'nkVariantPart, nkVariantBranch, nkVarSec, nkRoutine, nkPropertyDecl) ' +
+      'is dropped, and so is every separator the printer writes - a run of ' +
+      'them is one, the one before end / else / until / ) is optional, a ' +
+      'routine''s directive may stand before its header''s `;` or after it, ' +
+      'and the canonical ones are derived from the children',
     'N2 fused >=: the `>=` an nkBinaryOp names when type arguments on its ' +
-      'left ended in it (`V.AsType<T>=5`) is the `>` closing them and the ' +
-      '`=` operator: the lexer fused two tokens the grammar reads apart',
+      'left ended in it (`V.AsType<T>=5`), and the one an nkTypeDecl owns ' +
+      'after generic parameters (`TFoo<T>= class`), are the `>` closing them ' +
+      'and the `=`: the lexer fused two tokens the grammar reads apart',
     'N3 keyword case: a regenerated keyword, directive word or punctuation ' +
       'matches its token case-insensitively (dcc reads them so); leaves and ' +
-      'copied tokens match exactly',
+      'tokens read as written match exactly',
     'N4 the <eof> sentinel a root span ends on is no token of the source',
     'N5 text after the final `end.` is ignored by dcc; the root owns its ' +
-      'first token only (csAfterEnd)'
+      'first token only (csAfterEnd)',
+    'N6 insignificant tokens (class insig of the own-token table) are ' +
+      'dropped: the `;` of `procedure; stdcall` - one type with `procedure ' +
+      'stdcall`; the printer''s is a separator - and the `()` of an ' +
+      'attribute without arguments, `[A()]` = `[A]`',
+    'N7 a unit''s `begin ... end.` opens the same section as ' +
+      '`initialization`: its `begin` reads as `initialization`',
+    'N8 attribute groups: `][` inside one nkAttrGroup reads as `,` - the ' +
+      'tree keeps one group, `[A][B]` = `[A, B]`',
+    'N9 `class(TBase);` - a class, object or interface type that stops at ' +
+      'its ancestors - declares the type `class(TBase) end` does: a virtual ' +
+      '`end` after its last token',
+    'N10 a procedural type''s directives written before its `of object` ' +
+      '(`procedure stdcall of object`) are the type''s as the ones after it ' +
+      'are (dcc64 37.0): the `of object` reads as if it stood before the ' +
+      'first of them',
+    'N11 a record constant''s last field value may be followed by a `;` ' +
+      'before its `)`, `(X: 1; Y: 2;)` (dcc64 37.0 compiles it): an ' +
+      'nkAggregate''s `;` right before its `)` is dropped'
   );
 
-{ The kinds the printer has a template for: every expression and statement
-  kind. Any other kind prints from its span (pcSpan). }
+{ The kinds the printer has a template for: every kind but nkError and the
+  retired nkAnonParams, which print from their span (pcSpan). }
 function PasTemplatedKind(AKind: TPasNodeKind): Boolean;
 
 { The token sequence of ANode's subtree, regenerated. }
@@ -133,31 +176,42 @@ type
     Msg: string;
   end;
 
+  // One filed loss finding the print read: how many tokens, the first one.
+  TPasT3Loss = record
+    Finding: string;
+    Count: Integer;
+    FirstVis: Integer;
+  end;
+
   TPasT3Result = record
     Original: Integer;   // tokens in the root's span
-    Normalized: Integer; // of them dropped or split by PRINT_NORMALIZATION
+    Normalized: Integer; // of them dropped, split or moved by PRINT_NORMALIZATION
     Printed: Integer;    // printed items compared (separators excluded)
     Matched: Integer;    // printed items that matched their token
     Spans: Integer;      // of them copied by a node without a template
-    Losses: Integer;     // original tokens a filed loss explains
+    Losses: Integer;     // of them read as a filed loss
+    LossCounts: TArray<TPasT3Loss>;   // the losses per finding
     Defects: Integer;    // mismatches nothing explains
-    Sites: TArray<TPasT3Site>;   // the first ones, losses and defects
+    Sites: TArray<TPasT3Site>;   // the first defects, the first loss of each
+                                 // finding
     // Per item of PrintNode's list (separators included): the visible token
     // it matched, -1 when none - the layout plSource reads.
     ItemAt: TArray<Integer>;
   end;
 
 { T3 over the subtree of ARoot (0: the whole tree). True when no defect was
-  found; AResult.Sites keeps the first AMaxSites losses and defects. }
+  found; AResult.Sites keeps the first AMaxSites defects and the first loss
+  of each finding. }
 function CompareT3(const ATree: TPasTree; ARoot: Integer;
   out AResult: TPasT3Result; AMaxSites: Integer = 20): Boolean;
 
 { One line per reachable node, preorder, indented by depth: the kind, its
   flags, its Aux (an operator's by the operator's text, a parameter's `out`
-  by the word - never a token index) and its own tokens' texts - for a leaf,
-  asm and every kind without a template; the own tokens of a template's kind
-  are regenerated and do not count. Two trees of one program in two layouts
-  fingerprint alike. ANodes[i] is the node of line i. }
+  by the word - never a token index) and the texts of its own tokens that
+  are facts - a leaf's, a contract read's, a filed loss's, and every own
+  token of a kind without a template; regenerated tokens do not count. Two
+  trees of one program in two layouts fingerprint alike. ANodes[i] is the
+  node of line i. }
 function TreeFingerprint(const ATree: TPasTree): TArray<string>; overload;
 function TreeFingerprint(const ATree: TPasTree;
   out ANodes: TArray<Integer>): TArray<string>; overload;
@@ -184,27 +238,33 @@ uses
   PasTree.Ast.Check;
 
 const
-  TEMPLATED_KINDS = [
-    nkMissing,
-    nkIdent, nkIntLit, nkRealLit, nkStrLit, nkNilLit, nkCaretChar,
-    nkUnaryOp, nkBinaryOp, nkParen, nkCall, nkFormattedArg, nkIndex,
-    nkMember, nkDeref, nkTypeArgs, nkSetCtor, nkRange, nkInlineIf,
-    nkInherited, nkAnonMethod, nkNamedArg,
-    nkBlock, nkEmptyStmt, nkAssign, nkExprStmt, nkIfStmt, nkCaseStmt,
-    nkCaseSel, nkCaseLabels, nkForStmt, nkForInStmt, nkWhileStmt,
-    nkRepeatStmt, nkWithStmt, nkGotoStmt, nkLabeledStmt, nkTryStmt,
-    nkExceptPart, nkExceptOn, nkFinallyPart, nkRaiseStmt, nkAsmStmt,
-    nkInlineVar, nkInlineConst];
+  // Print from their span: no template.
+  SPAN_KINDS = [nkError, nkAnonParams];
   // Leaves print their own tokens; their texts are the node.
   LEAF_KINDS = [nkIdent, nkIntLit, nkRealLit, nkStrLit, nkCaretChar];
-  // The statement lists whose `;` are separators (N1).
-  LIST_KINDS = [nkBlock, nkCaseStmt, nkExceptPart];
+  // The lists whose `;` are separators (N1).
+  LIST_KINDS = [nkBlock, nkCaseStmt, nkExceptPart, nkInitSec, nkFinalSec,
+    nkClassType, nkRecordType, nkObjectType, nkHelperType, nkInterfaceType,
+    nkVariantPart, nkVariantBranch, nkVarSec, nkRoutine, nkPropertyDecl];
   ZERO_WIDTH = [nkEmptyStmt, nkMissing];
   UNIT_KINDS = [nkUnit, nkProgram, nkLibrary, nkPackage];
+  // The bodies whose members may be `class` ones, and whose var sections
+  // have their head word outside their span (the own-token table).
+  STRUCT_KINDS = [nkClassType, nkRecordType, nkObjectType, nkHelperType,
+    nkInterfaceType];
+  // A type reference: an ancestor, a helper's target.
+  TYPEREF_KINDS = [nkIdent, nkMember, nkTypeArgs, nkError];
+  // What a struct body holds before its `end`.
+  MEMBER_KINDS = [nkVisibility, nkAttrGroup, nkRoutine, nkPropertyDecl,
+    nkTypeSec, nkConstSec, nkVarSec, nkVarDecl, nkVariantPart,
+    nkMethodResolution];
+  VISIBILITY_TEXT: array[1..5] of string = ('private', 'protected', 'public',
+    'published', 'automated');
 
 var
-  // Per own-token rule, read once: a loss's finding ('' for any other
-  // class), and whether it is the text-after-end rule.
+  // Per own-token rule, read once: its class, a loss's finding ('' for any
+  // other class), and whether it is the text-after-end rule.
+  GRuleCls: TArray<TPasOwnClass>;
   GRuleFinding: TArray<string>;
   GRuleAfterEnd: TArray<Boolean>;
 
@@ -213,20 +273,42 @@ var
   LIdx: Integer;
   LRule: TPasOwnRule;
 begin
+  SetLength(GRuleCls, OwnRuleCount);
   SetLength(GRuleFinding, OwnRuleCount);
   SetLength(GRuleAfterEnd, OwnRuleCount);
   for LIdx := 0 to OwnRuleCount - 1 do
   begin
     LRule := OwnRule(LIdx);
+    GRuleCls[LIdx] := LRule.Cls;
     if LRule.Cls = ocLoss then
       GRuleFinding[LIdx] := LRule.Finding;
     GRuleAfterEnd[LIdx] := LRule.Cond = wcAfterEnd;
   end;
 end;
 
+function IsLossRule(ARule: Integer): Boolean; inline;
+begin
+  Result := (ARule >= 0) and (GRuleCls[ARule] = ocLoss);
+end;
+
+// What may start a procedural type's directive run after a `;` (dcc64 37.0,
+// the parser's IsCallConvStarter): a calling convention, far or near.
+function IsConventionStarter(const AWord: string): Boolean;
+const
+  STARTERS: array[0..7] of string = ('register', 'pascal', 'cdecl',
+    'stdcall', 'safecall', 'winapi', 'far', 'near');
+var
+  LWord: string;
+begin
+  for LWord in STARTERS do
+    if SameText(AWord, LWord) then
+      Exit(True);
+  Result := False;
+end;
+
 function PasTemplatedKind(AKind: TPasNodeKind): Boolean;
 begin
-  Result := AKind in TEMPLATED_KINDS;
+  Result := not (AKind in SPAN_KINDS);
 end;
 
 function LastChild(const ATree: TPasTree; ANode: Integer): Integer;
@@ -280,27 +362,134 @@ begin
   end;
 end;
 
+{ Ownership }
+
+type
+  // Who owns each visible token (-1: nobody), by which own-token rule, and
+  // each node's own tokens in order (CSR: OwnStart[n] .. OwnStart[n + 1] - 1
+  // index Own).
+  TOwnership = record
+    Owner, Rule: TArray<Integer>;
+    OwnStart, Own: TArray<Integer>;
+    procedure Build(const ATree: TPasTree);
+  end;
+
+procedure TOwnership.Build(const ATree: TPasTree);
+var
+  LReport: TPasCheckReport;
+  LOwner, LRule: TArray<Integer>;
+  LStart, LOwn, LFill: TArray<Integer>;
+  LIdx, LNode: Integer;
+begin
+  SetLength(LOwner, Length(ATree.Source.Visible));
+  SetLength(LRule, Length(ATree.Source.Visible));
+  for LIdx := 0 to High(LOwner) do
+  begin
+    LOwner[LIdx] := -1;
+    LRule[LIdx] := -1;
+  end;
+  LReport.Init(1);
+  CheckTree(ATree, True, LReport,
+    procedure(ANode, AVisIndex, ACell, ARule: Integer)
+    begin
+      LOwner[AVisIndex] := ANode;
+      LRule[AVisIndex] := ARule;
+    end);
+  SetLength(LStart, Length(ATree.Nodes) + 1);
+  for LIdx := 0 to High(LOwner) do
+    if LOwner[LIdx] >= 0 then
+      Inc(LStart[LOwner[LIdx] + 1]);
+  for LIdx := 1 to High(LStart) do
+    Inc(LStart[LIdx], LStart[LIdx - 1]);
+  SetLength(LOwn, LStart[High(LStart)]);
+  LFill := Copy(LStart);
+  for LIdx := 0 to High(LOwner) do
+  begin
+    LNode := LOwner[LIdx];
+    if LNode >= 0 then
+    begin
+      LOwn[LFill[LNode]] := LIdx;
+      Inc(LFill[LNode]);
+    end;
+  end;
+  Owner := LOwner;
+  Rule := LRule;
+  OwnStart := LStart;
+  Own := LOwn;
+end;
+
 { TPrinter }
 
 type
   TPrinter = record
     T: TPasTree;
+    Own: TOwnership;
+    // Per node: the next of its own tokens Losses has not looked at.
+    LossPos: TArray<Integer>;
     Items: TPasPrintItems;
     Count: Integer;
+    function Kind(ANode: Integer): TPasNodeKind; inline;
+    function Next(ANode: Integer): Integer; inline;
+    function Left(ANode: Integer): Integer;
     procedure Add(const AText: string; ACls: TPasPrintClass; ANode,
       AVis: Integer; AGlue: Boolean);
     procedure Kw(const AText: string; ANode: Integer);
     procedure Sep(ANode: Integer);
     procedure Tok(AVis: Integer; ACls: TPasPrintClass; ANode: Integer;
       AGlue: Boolean);
+    procedure Head(ANode: Integer);
     procedure OwnRange(ANode: Integer; ACls: TPasPrintClass; AGlued: Boolean);
+    procedure Losses(ANode, ALimit: Integer);
+    function NextLoss(ANode: Integer): Integer;
+    procedure Child(ANode, AChild: Integer);
     procedure Span(ANode: Integer);
     procedure ListFrom(AChild: Integer; const ASep: string; AParent: Integer);
+    function ListUntil(AChild, AStop: Integer; const ASep: string;
+      AParent: Integer): Integer;
     procedure Block(ANode: Integer);
+    procedure Statements(ANode: Integer);
     procedure InlineDecl(ANode: Integer; AConst: Boolean);
     procedure AnonMethod(ANode: Integer);
+    // declarations
+    procedure Decls(ANode, AChild, AStop: Integer);
+    function TrailingFrom(AChild: Integer): Integer;
+    procedure UnitLike(ANode: Integer);
+    procedure UsesClause(ANode: Integer);
+    procedure LabelSec(ANode: Integer);
+    procedure TypeDecl(ANode: Integer);
+    procedure ConstDecl(ANode: Integer);
+    procedure VarSec(ANode: Integer);
+    procedure VarDecl(ANode: Integer);
+    procedure Aggregate(ANode: Integer);
+    procedure ArrayType(ANode: Integer);
+    procedure ProcType(ANode: Integer);
+    procedure StructType(ANode: Integer);
+    procedure Routine(ANode: Integer);
+    function RoutineName(ANode, AChild: Integer): Integer;
+    procedure Params(ANode: Integer);
+    procedure Param(ANode: Integer);
+    procedure PropertyDecl(ANode: Integer);
+    procedure PropSpec(ANode: Integer);
+    procedure VariantPart(ANode: Integer);
+    procedure VariantBranch(ANode: Integer);
+    procedure GenericParam(ANode: Integer);
     procedure Emit(ANode: Integer);
   end;
+
+function TPrinter.Kind(ANode: Integer): TPasNodeKind;
+begin
+  Result := T.Nodes[ANode].Kind;
+end;
+
+function TPrinter.Next(ANode: Integer): Integer;
+begin
+  Result := T.Nodes[ANode].NextSibling;
+end;
+
+function TPrinter.Left(ANode: Integer): Integer;
+begin
+  Result := T.NodeLeftmostVis(ANode);
+end;
 
 procedure TPrinter.Add(const AText: string; ACls: TPasPrintClass; ANode,
   AVis: Integer; AGlue: Boolean);
@@ -336,6 +525,12 @@ begin
   Add(T.Source.VisibleText(AVis), ACls, ANode, AVis, AGlue);
 end;
 
+// The head word at FirstToken: a contract read.
+procedure TPrinter.Head(ANode: Integer);
+begin
+  Tok(T.Nodes[ANode].FirstToken, pcContract, ANode, False);
+end;
+
 // Every token of ANode's span, as one glued run when AGlued: a leaf that
 // spans several string elements, asm's range.
 procedure TPrinter.OwnRange(ANode: Integer; ACls: TPasPrintClass;
@@ -346,6 +541,53 @@ begin
   LFirst := T.NodeLeftmostVis(ANode);
   for LVis := LFirst to T.Nodes[ANode].LastToken do
     Tok(LVis, ACls, ANode, AGlued and (LVis > LFirst));
+end;
+
+{ ANode's own tokens that hold a filed loss, from where the last call
+  stopped up to (not including) the visible index ALimit, read as written.
+  Templates call it where such a token stands among their children - Child
+  before every child, and Emit once more at the node's end. }
+procedure TPrinter.Losses(ANode, ALimit: Integer);
+var
+  LPos, LVis: Integer;
+begin
+  LPos := LossPos[ANode];
+  while LPos < Own.OwnStart[ANode + 1] do
+  begin
+    LVis := Own.Own[LPos];
+    if LVis >= ALimit then
+      Break;
+    if IsLossRule(Own.Rule[LVis]) then
+      Tok(LVis, pcLoss, ANode, False);
+    Inc(LPos);
+  end;
+  LossPos[ANode] := LPos;
+end;
+
+// The visible index of ANode's next own loss token Losses has not read; -1
+// when none is left. Reads nothing.
+function TPrinter.NextLoss(ANode: Integer): Integer;
+var
+  LPos: Integer;
+begin
+  LPos := LossPos[ANode];
+  while LPos < Own.OwnStart[ANode + 1] do
+  begin
+    if IsLossRule(Own.Rule[Own.Own[LPos]]) then
+      Exit(Own.Own[LPos]);
+    Inc(LPos);
+  end;
+  Result := -1;
+end;
+
+// One child of ANode: the losses of ANode before it, then the child.
+procedure TPrinter.Child(ANode, AChild: Integer);
+begin
+  if AChild = NIL_NODE then
+    Exit;
+  if not IsEmptyNode(T, AChild) then
+    Losses(ANode, Left(AChild));
+  Emit(AChild);
 end;
 
 procedure TPrinter.Span(ANode: Integer);
@@ -385,18 +627,27 @@ end;
 // AChild and every sibling after it, ASep between them.
 procedure TPrinter.ListFrom(AChild: Integer; const ASep: string;
   AParent: Integer);
+begin
+  ListUntil(AChild, NIL_NODE, ASep, AParent);
+end;
+
+// AChild and its siblings up to (not including) AStop, ASep between them;
+// AStop is returned.
+function TPrinter.ListUntil(AChild, AStop: Integer; const ASep: string;
+  AParent: Integer): Integer;
 var
   LFirst: Boolean;
 begin
   LFirst := True;
-  while AChild <> NIL_NODE do
+  while (AChild <> NIL_NODE) and (AChild <> AStop) do
   begin
     if not LFirst then
       Kw(ASep, AParent);
-    Emit(AChild);
+    Child(AParent, AChild);
     LFirst := False;
-    AChild := T.Nodes[AChild].NextSibling;
+    AChild := Next(AChild);
   end;
+  Result := AStop;
 end;
 
 { An nkBlock's head and tail come from where it stands (the own-token table:
@@ -408,9 +659,8 @@ end;
   - anywhere else - a statement, a routine body: `begin ... end`. }
 procedure TPrinter.Block(ANode: Integer);
 var
-  LParent, LChild: Integer;
+  LParent: Integer;
   LHead, LTail: string;
-  LFirst: Boolean;
 begin
   LParent := T.Nodes[ANode].Parent;
   LHead := 'begin';
@@ -445,6 +695,17 @@ begin
     end;
   if LHead <> '' then
     Kw(LHead, ANode);
+  Statements(ANode);
+  if LTail <> '' then
+    Kw(LTail, ANode);
+end;
+
+// ANode's children as a statement list: one separator between them.
+procedure TPrinter.Statements(ANode: Integer);
+var
+  LChild: Integer;
+  LFirst: Boolean;
+begin
   LFirst := True;
   LChild := T.Nodes[ANode].FirstChild;
   while LChild <> NIL_NODE do
@@ -453,10 +714,8 @@ begin
       Sep(ANode);
     Emit(LChild);
     LFirst := False;
-    LChild := T.Nodes[LChild].NextSibling;
+    LChild := Next(LChild);
   end;
-  if LTail <> '' then
-    Kw(LTail, ANode);
 end;
 
 { `var` names (nfName), [`:` type], [`:=` initializer - Aux 1 says the last
@@ -479,19 +738,19 @@ begin
       Kw(',', ANode);
     Emit(LChild);
     LFirst := False;
-    LChild := T.Nodes[LChild].NextSibling;
+    LChild := Next(LChild);
   end;
   LInit := T.Nodes[ANode].Aux = 1;
   LRest := 0;
   if LChild <> NIL_NODE then
-    LRest := 1 + Ord(T.Nodes[LChild].NextSibling <> NIL_NODE);
+    LRest := 1 + Ord(Next(LChild) <> NIL_NODE);
   // Two children after the names: the type, then the value. One: the value
   // when Aux says so, else the type.
   if (LRest = 2) or ((LRest = 1) and not LInit) then
   begin
     Kw(':', ANode);
     Emit(LChild);
-    LChild := T.Nodes[LChild].NextSibling;
+    LChild := Next(LChild);
   end;
   if (LChild <> NIL_NODE) and LInit then
   begin
@@ -504,8 +763,7 @@ begin
 end;
 
 { [params], [result type], directives, body: `function` when a result type
-  is there. The parameter list and the directives print from their spans
-  for now; the body's statements through the templates. }
+  is there. }
 procedure TPrinter.AnonMethod(ANode: Integer);
 var
   LChild: Integer;
@@ -515,10 +773,9 @@ begin
   LChild := T.Nodes[ANode].FirstChild;
   while LChild <> NIL_NODE do
   begin
-    if not (T.Nodes[LChild].Kind in [nkParams, nkDirective, nkRoutineBody])
-    then
+    if not (Kind(LChild) in [nkParams, nkDirective, nkRoutineBody]) then
       LFunction := True;
-    LChild := T.Nodes[LChild].NextSibling;
+    LChild := Next(LChild);
   end;
   if LFunction then
     Kw('function', ANode)
@@ -527,11 +784,717 @@ begin
   LChild := T.Nodes[ANode].FirstChild;
   while LChild <> NIL_NODE do
   begin
-    if not (T.Nodes[LChild].Kind in [nkParams, nkDirective, nkRoutineBody])
-    then
+    if not (Kind(LChild) in [nkParams, nkDirective, nkRoutineBody]) then
       Kw(':', ANode);
     Emit(LChild);
-    LChild := T.Nodes[LChild].NextSibling;
+    LChild := Next(LChild);
+  end;
+end;
+
+{ ---- declarations ---- }
+
+{ A declaration list from AChild up to (not including) AStop: a section's,
+  a routine body's, a unit's, a struct body's or a variant's. A member with
+  Aux 1 is a `class` one, and the `class` is the list owner's token; so is a
+  struct body's var section's head, `var` - or `threadvar`, a filed loss
+  (F9). A field is followed by a separator. }
+procedure TPrinter.Decls(ANode, AChild, AStop: Integer);
+var
+  LKind: TPasNodeKind;
+  LStruct, LFields: Boolean;
+  LBefore: Integer;
+begin
+  LStruct := Kind(ANode) in STRUCT_KINDS;
+  LFields := LStruct or (Kind(ANode) = nkVariantBranch);
+  while (AChild <> NIL_NODE) and (AChild <> AStop) do
+  begin
+    LKind := Kind(AChild);
+    if (LKind in [nkRoutine, nkPropertyDecl, nkVarSec]) and
+       (T.Nodes[AChild].Aux = 1) then
+      Kw('class', ANode);
+    if LStruct and (LKind = nkVarSec) then
+    begin
+      LBefore := Left(AChild) - 1;
+      if (LBefore >= 0) and (Own.Owner[LBefore] = ANode) and
+         IsLossRule(Own.Rule[LBefore]) then
+        Losses(ANode, LBefore + 1)
+      else
+        Kw('var', ANode);
+    end;
+    Child(ANode, AChild);
+    if LFields and (LKind = nkVarDecl) then
+      Sep(ANode);
+    AChild := Next(AChild);
+  end;
+end;
+
+// The first of AChild and its siblings from which on no member follows: a
+// struct's `align` expression and its hints after `end`.
+function TPrinter.TrailingFrom(AChild: Integer): Integer;
+begin
+  Result := NIL_NODE;
+  while AChild <> NIL_NODE do
+  begin
+    if Kind(AChild) in MEMBER_KINDS then
+      Result := NIL_NODE
+    else if Result = NIL_NODE then
+      Result := AChild;
+    AChild := Next(AChild);
+  end;
+end;
+
+{ unit Name [hints]; sections end.
+  program Name [params: F17]; [uses] declarations [begin ...] end.
+  package Name; requires/contains clauses end. }
+procedure TPrinter.UnitLike(ANode: Integer);
+var
+  LChild: Integer;
+begin
+  case Kind(ANode) of
+    nkUnit: Kw('unit', ANode);
+    nkProgram: Kw('program', ANode);
+    nkLibrary: Kw('library', ANode);
+  else
+    Kw('package', ANode);
+  end;
+  LChild := T.Nodes[ANode].FirstChild;
+  Child(ANode, LChild);
+  if LChild <> NIL_NODE then
+    LChild := Next(LChild);
+  if Kind(ANode) = nkUnit then
+    while (LChild <> NIL_NODE) and (Kind(LChild) = nkDirective) do
+    begin
+      Child(ANode, LChild);
+      LChild := Next(LChild);
+    end;
+  // A program's parameters (F17) stand before the `;`.
+  if LChild <> NIL_NODE then
+    Losses(ANode, Left(LChild))
+  else
+    Losses(ANode, T.Nodes[ANode].LastToken);
+  Kw(';', ANode);
+  Decls(ANode, LChild, NIL_NODE);
+  Kw('end', ANode);
+  Kw('.', ANode);
+end;
+
+procedure TPrinter.UsesClause(ANode: Integer);
+var
+  LParent: Integer;
+begin
+  LParent := T.Nodes[ANode].Parent;
+  if (LParent <> NIL_NODE) and (Kind(LParent) = nkPackage) then
+  begin
+    if T.Nodes[ANode].Aux = 1 then
+      Kw('requires', ANode)
+    else
+      Kw('contains', ANode);
+  end
+  else
+    Kw('uses', ANode);
+  ListFrom(T.Nodes[ANode].FirstChild, ',', ANode);
+  Kw(';', ANode);
+end;
+
+// `label` labels `;` - a name label is a child, a numeric one a filed loss
+// (F16): both in their order, commas between.
+procedure TPrinter.LabelSec(ANode: Integer);
+var
+  LChild, LLoss: Integer;
+  LFirst: Boolean;
+begin
+  Kw('label', ANode);
+  LChild := T.Nodes[ANode].FirstChild;
+  LFirst := True;
+  while True do
+  begin
+    LLoss := NextLoss(ANode);
+    if (LChild = NIL_NODE) and (LLoss < 0) then
+      Break;
+    if not LFirst then
+      Kw(',', ANode);
+    LFirst := False;
+    if (LChild <> NIL_NODE) and ((LLoss < 0) or (Left(LChild) < LLoss)) then
+    begin
+      Emit(LChild);
+      LChild := Next(LChild);
+    end
+    else
+      Losses(ANode, LLoss + 1);
+  end;
+  Kw(';', ANode);
+end;
+
+{ [attributes] Name [generic params] = [type] Type [hints]; Aux 1 is the
+  distinct alias `= type X`. `packed` is a filed loss before the type (F3). }
+procedure TPrinter.TypeDecl(ANode: Integer);
+var
+  LChild: Integer;
+begin
+  LChild := T.Nodes[ANode].FirstChild;
+  while (LChild <> NIL_NODE) and (Kind(LChild) = nkAttrGroup) do
+  begin
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
+  Child(ANode, LChild);
+  if LChild <> NIL_NODE then
+    LChild := Next(LChild);
+  if (LChild <> NIL_NODE) and (Kind(LChild) = nkGenericParams) then
+  begin
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
+  Kw('=', ANode);
+  if T.Nodes[ANode].Aux = 1 then
+    Kw('type', ANode);
+  while LChild <> NIL_NODE do
+  begin
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
+end;
+
+// [attributes] Name [: Type] = value [hints].
+procedure TPrinter.ConstDecl(ANode: Integer);
+var
+  LChild, LAfter: Integer;
+begin
+  LChild := T.Nodes[ANode].FirstChild;
+  while (LChild <> NIL_NODE) and (Kind(LChild) = nkAttrGroup) do
+  begin
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
+  Child(ANode, LChild);
+  if LChild <> NIL_NODE then
+    LChild := Next(LChild);
+  if LChild <> NIL_NODE then
+  begin
+    LAfter := Next(LChild);
+    if (LAfter <> NIL_NODE) and (Kind(LAfter) <> nkDirective) then
+    begin
+      Kw(':', ANode);
+      Child(ANode, LChild);
+      LChild := LAfter;
+    end;
+  end;
+  Kw('=', ANode);
+  while LChild <> NIL_NODE do
+  begin
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
+end;
+
+{ The head word - but in a struct body, where the list owner prints it - and
+  every declaration with a separator after it. }
+procedure TPrinter.VarSec(ANode: Integer);
+var
+  LChild, LParent: Integer;
+begin
+  LParent := T.Nodes[ANode].Parent;
+  if (LParent = NIL_NODE) or not (Kind(LParent) in STRUCT_KINDS) then
+    Head(ANode);
+  LChild := T.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    Child(ANode, LChild);
+    if Kind(LChild) = nkVarDecl then
+      Sep(ANode);
+    LChild := Next(LChild);
+  end;
+end;
+
+{ [attributes] names (nfName) : Type, then in their order hints and the
+  initializer - `= value`, or `absolute X` when Aux is 1. }
+procedure TPrinter.VarDecl(ANode: Integer);
+var
+  LChild: Integer;
+  LFirst: Boolean;
+begin
+  LChild := T.Nodes[ANode].FirstChild;
+  while (LChild <> NIL_NODE) and (Kind(LChild) = nkAttrGroup) do
+  begin
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
+  LFirst := True;
+  while (LChild <> NIL_NODE) and (nfName in T.Nodes[LChild].Flags) do
+  begin
+    if not LFirst then
+      Kw(',', ANode);
+    Child(ANode, LChild);
+    LFirst := False;
+    LChild := Next(LChild);
+  end;
+  if LChild = NIL_NODE then
+    Exit;
+  Kw(':', ANode);
+  Child(ANode, LChild);
+  LChild := Next(LChild);
+  while LChild <> NIL_NODE do
+  begin
+    if Kind(LChild) <> nkDirective then
+      if T.Nodes[ANode].Aux = 1 then
+        Kw('absolute', ANode)
+      else
+        Kw('=', ANode);
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
+end;
+
+// ( elements ): `;` after a record field's element, `,` otherwise.
+procedure TPrinter.Aggregate(ANode: Integer);
+var
+  LChild, LPrev: Integer;
+begin
+  Kw('(', ANode);
+  LPrev := NIL_NODE;
+  LChild := T.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LPrev <> NIL_NODE then
+      if Kind(LPrev) = nkAggregateField then
+        Kw(';', ANode)
+      else
+        Kw(',', ANode);
+    Child(ANode, LChild);
+    LPrev := LChild;
+    LChild := Next(LChild);
+  end;
+  Kw(')', ANode);
+end;
+
+{ array [index types] of Element; Aux 1: array of const, every child an
+  index type. }
+procedure TPrinter.ArrayType(ANode: Integer);
+var
+  LChild, LElem: Integer;
+begin
+  Kw('array', ANode);
+  LChild := T.Nodes[ANode].FirstChild;
+  if T.Nodes[ANode].Aux = 1 then
+    LElem := NIL_NODE
+  else
+    LElem := LastChild(T, ANode);
+  if (LChild <> NIL_NODE) and (LChild <> LElem) then
+  begin
+    Kw('[', ANode);
+    ListUntil(LChild, LElem, ',', ANode);
+    Kw(']', ANode);
+  end;
+  Kw('of', ANode);
+  if T.Nodes[ANode].Aux = 1 then
+    Kw('const', ANode)
+  else
+    Child(ANode, LElem);
+end;
+
+{ [reference to] procedure|function [params] [: result] [of object]
+  directives - `reference to` is the parent's token (Aux 2), `function` when
+  a result type is there; the directives after its `of object` (N6, N10). }
+procedure TPrinter.ProcType(ANode: Integer);
+var
+  LChild, LParent: Integer;
+  LFunction: Boolean;
+begin
+  if T.Nodes[ANode].Aux = 2 then
+  begin
+    LParent := T.Nodes[ANode].Parent;
+    Kw('reference', LParent);
+    Kw('to', LParent);
+  end;
+  LFunction := False;
+  LChild := T.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if not (Kind(LChild) in [nkParams, nkDirective]) then
+      LFunction := True;
+    LChild := Next(LChild);
+  end;
+  if LFunction then
+    Kw('function', ANode)
+  else
+    Kw('procedure', ANode);
+  LChild := T.Nodes[ANode].FirstChild;
+  while (LChild <> NIL_NODE) and (Kind(LChild) <> nkDirective) do
+  begin
+    if Kind(LChild) <> nkParams then
+      Kw(':', ANode);
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
+  if T.Nodes[ANode].Aux = 1 then
+  begin
+    Kw('of', ANode);
+    Kw('object', ANode);
+  end;
+  // After a `;` when a convention starts the run: written into the type, a
+  // declaration after it whose name is a convention would join the run
+  // (`var V: procedure stdcall; cdecl: Integer;` is an error, `procedure;
+  // stdcall; cdecl: Integer` two variables). Not after `reference to`, which
+  // takes no run after a `;` (E2029).
+  if (LChild <> NIL_NODE) and (T.Nodes[ANode].Aux <> 2) and
+     IsConventionStarter(T.Source.VisibleText(T.Nodes[LChild].FirstToken))
+  then
+    Sep(ANode);
+  while LChild <> NIL_NODE do
+  begin
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
+end;
+
+{ class / record / object / interface / helper:
+    class [abstract | sealed: F4] [(ancestors)] members end [hints]
+    record members end [align X] [hints]
+    object [(ancestor)] members end [hints]
+    interface | dispinterface [(ancestor)] [GUID] members end [hints]
+    class | record helper [(ancestor)] for T members end [hints]
+  A forward declaration (Aux) is the head word alone. }
+procedure TPrinter.StructType(ANode: Integer);
+var
+  LKind: TPasNodeKind;
+  LChild, LTarget, LStop, LLast: Integer;
+begin
+  LKind := Kind(ANode);
+  case LKind of
+    nkClassType: Kw('class', ANode);
+    nkRecordType: Kw('record', ANode);
+    nkObjectType: Kw('object', ANode);
+    nkInterfaceType:
+      if T.Nodes[ANode].Aux and 1 <> 0 then
+        Kw('dispinterface', ANode)
+      else
+        Kw('interface', ANode);
+  else
+    if T.Nodes[ANode].Aux = 1 then
+      Kw('record', ANode)
+    else
+      Kw('class', ANode);
+    Kw('helper', ANode);
+  end;
+  if ((LKind = nkClassType) and (T.Nodes[ANode].Aux = 1)) or
+     ((LKind = nkInterfaceType) and (T.Nodes[ANode].Aux and 2 <> 0)) then
+    Exit;
+  // `class sealed` / `class abstract` (F4) follow the head word.
+  LLast := T.Nodes[ANode].FirstToken + 1;
+  while (LLast <= T.Nodes[ANode].LastToken) and
+        (Own.Owner[LLast] = ANode) and IsLossRule(Own.Rule[LLast]) do
+    Inc(LLast);
+  Losses(ANode, LLast);
+  LChild := T.Nodes[ANode].FirstChild;
+  // The leading type references: the ancestors; a helper's last one is its
+  // target.
+  if LKind <> nkRecordType then
+  begin
+    LLast := NIL_NODE;
+    LStop := LChild;
+    while (LStop <> NIL_NODE) and (Kind(LStop) in TYPEREF_KINDS) do
+    begin
+      LLast := LStop;
+      LStop := Next(LStop);
+    end;
+    LTarget := LStop;
+    if LKind = nkHelperType then
+      LTarget := LLast;
+    if (LChild <> NIL_NODE) and (LChild <> LTarget) then
+    begin
+      Kw('(', ANode);
+      ListUntil(LChild, LTarget, ',', ANode);
+      Kw(')', ANode);
+    end;
+    if LKind = nkHelperType then
+    begin
+      Kw('for', ANode);
+      Child(ANode, LTarget);
+    end;
+    LChild := LStop;
+    if (LChild <> NIL_NODE) and (Kind(LChild) = nkGuid) then
+    begin
+      Child(ANode, LChild);
+      LChild := Next(LChild);
+    end;
+  end;
+  LStop := TrailingFrom(LChild);
+  Decls(ANode, LChild, LStop);
+  Kw('end', ANode);
+  LChild := LStop;
+  if (LChild <> NIL_NODE) and (Kind(LChild) <> nkDirective) then
+  begin
+    Kw('align', ANode);
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
+  while LChild <> NIL_NODE do
+  begin
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
+end;
+
+// A routine's or a method resolution's dotted name from AChild: segments
+// (nfName) with their generic parameters, `.` between. Returns the child
+// after it.
+function TPrinter.RoutineName(ANode, AChild: Integer): Integer;
+var
+  LFirst: Boolean;
+begin
+  LFirst := True;
+  while (AChild <> NIL_NODE) and ((nfName in T.Nodes[AChild].Flags) or
+        (Kind(AChild) = nkGenericParams)) do
+  begin
+    if nfName in T.Nodes[AChild].Flags then
+    begin
+      if not LFirst then
+        Kw('.', ANode);
+      LFirst := False;
+    end;
+    Child(ANode, AChild);
+    AChild := Next(AChild);
+  end;
+  Result := AChild;
+end;
+
+{ head Name [params] [: result]; directive; ... [body;] - the head word read
+  (a `class` before it is the list owner's), a separator after the header,
+  every directive and the body (N1: a directive written before the header's
+  `;` is the same directive). }
+procedure TPrinter.Routine(ANode: Integer);
+var
+  LChild: Integer;
+  LHeader: Boolean;
+begin
+  Head(ANode);
+  LChild := RoutineName(ANode, T.Nodes[ANode].FirstChild);
+  LHeader := True;
+  while LChild <> NIL_NODE do
+  begin
+    case Kind(LChild) of
+      nkParams:
+        Child(ANode, LChild);
+      nkDirective, nkRoutineBody:
+        begin
+          if LHeader then
+            Sep(ANode);
+          LHeader := False;
+          Child(ANode, LChild);
+          Sep(ANode);
+        end;
+    else
+      Kw(':', ANode);
+      Child(ANode, LChild);
+    end;
+    LChild := Next(LChild);
+  end;
+  if LHeader then
+    Sep(ANode);
+end;
+
+// ( params ; ... ) - `[ ]` for a property's index parameters.
+procedure TPrinter.Params(ANode: Integer);
+var
+  LProp: Boolean;
+begin
+  LProp := (T.Nodes[ANode].Parent <> NIL_NODE) and
+    (Kind(T.Nodes[ANode].Parent) = nkPropertyDecl);
+  if LProp then
+    Kw('[', ANode)
+  else
+    Kw('(', ANode);
+  ListFrom(T.Nodes[ANode].FirstChild, ';', ANode);
+  if LProp then
+    Kw(']', ANode)
+  else
+    Kw(')', ANode);
+end;
+
+{ [attributes] [var | const: F18] [out] names (nfName, each may carry
+  attributes) [: Type [= default]]. `out` is Aux's. }
+procedure TPrinter.Param(ANode: Integer);
+var
+  LChild, LLastName: Integer;
+  LSeenName, LPrevName: Boolean;
+begin
+  LLastName := NIL_NODE;
+  LChild := T.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if nfName in T.Nodes[LChild].Flags then
+      LLastName := LChild;
+    LChild := Next(LChild);
+  end;
+  LChild := T.Nodes[ANode].FirstChild;
+  LSeenName := False;
+  LPrevName := False;
+  while (LChild <> NIL_NODE) and (LLastName <> NIL_NODE) do
+  begin
+    if LPrevName then
+      Kw(',', ANode);
+    if (nfName in T.Nodes[LChild].Flags) and not LSeenName then
+    begin
+      if not IsEmptyNode(T, LChild) then
+        Losses(ANode, Left(LChild));
+      if T.Nodes[ANode].Aux >= 0 then
+        Kw('out', ANode);
+    end;
+    Child(ANode, LChild);
+    LPrevName := nfName in T.Nodes[LChild].Flags;
+    LSeenName := LSeenName or LPrevName;
+    if LChild = LLastName then
+    begin
+      LChild := Next(LChild);
+      Break;
+    end;
+    LChild := Next(LChild);
+  end;
+  if LChild <> NIL_NODE then
+  begin
+    Kw(':', ANode);
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+    if LChild <> NIL_NODE then
+    begin
+      Kw('=', ANode);
+      Child(ANode, LChild);
+    end;
+  end;
+end;
+
+{ property Name [index params] [: Type] specifiers [hints]; [default;]
+  [hints;] - the head `class` is the list owner's (Aux 1). A specifier
+  `default` with no value is always the trailing one, which owns its `;`
+  (`read G default;` is E2029, dcc64 37.0). }
+procedure TPrinter.PropertyDecl(ANode: Integer);
+var
+  LChild: Integer;
+  LClosed: Boolean;
+
+  function TrailingDefault(ASpec: Integer): Boolean;
+  begin
+    Result := (Kind(ASpec) = nkPropSpec) and
+      (T.Nodes[ASpec].FirstChild = NIL_NODE) and
+      SameText(T.Source.VisibleText(T.Nodes[ASpec].FirstToken), 'default');
+  end;
+
+begin
+  Kw('property', ANode);
+  LChild := T.Nodes[ANode].FirstChild;
+  Child(ANode, LChild);
+  if LChild <> NIL_NODE then
+    LChild := Next(LChild);
+  if (LChild <> NIL_NODE) and (Kind(LChild) = nkParams) then
+  begin
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
+  if (LChild <> NIL_NODE) and not (Kind(LChild) in [nkPropSpec, nkDirective])
+  then
+  begin
+    Kw(':', ANode);
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
+  LClosed := False;
+  while LChild <> NIL_NODE do
+  begin
+    if TrailingDefault(LChild) then
+    begin
+      if not LClosed then
+        Sep(ANode);
+      LClosed := True;
+      Child(ANode, LChild);
+      LClosed := LClosed and (Next(LChild) = NIL_NODE);
+    end
+    else
+      Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
+  if not LClosed then
+    Sep(ANode);
+end;
+
+// The specifier word, its values with `,` between; the trailing `default`
+// with its `;`.
+procedure TPrinter.PropSpec(ANode: Integer);
+begin
+  Head(ANode);
+  ListFrom(T.Nodes[ANode].FirstChild, ',', ANode);
+  if (T.Nodes[ANode].FirstChild = NIL_NODE) and
+     SameText(T.Source.VisibleText(T.Nodes[ANode].FirstToken), 'default') then
+    Kw(';', ANode);
+end;
+
+// case [Tag :] Type of branches - a separator after every branch.
+procedure TPrinter.VariantPart(ANode: Integer);
+var
+  LChild, LAfter: Integer;
+begin
+  Kw('case', ANode);
+  LChild := T.Nodes[ANode].FirstChild;
+  if LChild <> NIL_NODE then
+  begin
+    LAfter := Next(LChild);
+    if (LAfter <> NIL_NODE) and (Kind(LAfter) <> nkVariantBranch) then
+    begin
+      Child(ANode, LChild);
+      Kw(':', ANode);
+      LChild := LAfter;
+    end;
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
+  Kw('of', ANode);
+  while LChild <> NIL_NODE do
+  begin
+    Child(ANode, LChild);
+    Sep(ANode);
+    LChild := Next(LChild);
+  end;
+end;
+
+// labels : ( fields )
+procedure TPrinter.VariantBranch(ANode: Integer);
+var
+  LChild: Integer;
+begin
+  LChild := T.Nodes[ANode].FirstChild;
+  while (LChild <> NIL_NODE) and
+        not (Kind(LChild) in [nkVarDecl, nkVariantPart]) do
+  begin
+    if LChild <> T.Nodes[ANode].FirstChild then
+      Kw(',', ANode);
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
+  Kw(':', ANode);
+  Kw('(', ANode);
+  Decls(ANode, LChild, NIL_NODE);
+  Kw(')', ANode);
+end;
+
+// names , ... [: constraints , ...]
+procedure TPrinter.GenericParam(ANode: Integer);
+var
+  LChild: Integer;
+  LFirst: Boolean;
+begin
+  LChild := T.Nodes[ANode].FirstChild;
+  LFirst := True;
+  while (LChild <> NIL_NODE) and (Kind(LChild) <> nkConstraint) do
+  begin
+    if not LFirst then
+      Kw(',', ANode);
+    Child(ANode, LChild);
+    LFirst := False;
+    LChild := Next(LChild);
+  end;
+  if LChild <> NIL_NODE then
+  begin
+    Kw(':', ANode);
+    ListFrom(LChild, ',', ANode);
   end;
 end;
 
@@ -645,7 +1608,7 @@ begin
         ListFrom(C0, ',', ANode);
         Kw(']', ANode);
       end;
-    nkRange:
+    nkRange, nkSubrange:
       begin
         Emit(C0);
         Kw('..', ANode);
@@ -778,13 +1741,13 @@ begin
     nkGotoStmt:
       begin
         Kw('goto', ANode);
-        // A numeric label has no node (F16): nothing to print.
+        // A numeric label has no node (F16): the loss read at the end.
         if C0 <> NIL_NODE then
           Emit(C0);
       end;
     nkLabeledStmt:
       // Two children: the label's name and the statement; one: a numeric
-      // label, which has no node (F16).
+      // label, which has no node (F16) - read before the `:`.
       if C1 <> NIL_NODE then
       begin
         Emit(C0);
@@ -793,6 +1756,10 @@ begin
       end
       else
       begin
+        if (C0 <> NIL_NODE) and not IsEmptyNode(T, C0) then
+          Losses(ANode, Left(C0))
+        else
+          Losses(ANode, T.Nodes[ANode].LastToken + 1);
         Kw(':', ANode);
         Emit(C0);
       end;
@@ -859,22 +1826,286 @@ begin
       InlineDecl(ANode, False);
     nkInlineConst:
       InlineDecl(ANode, True);
+
+    // ---- compilation units ----
+    nkUnit, nkProgram, nkLibrary, nkPackage:
+      UnitLike(ANode);
+    nkUsesClause:
+      UsesClause(ANode);
+    nkUsesItem:
+      begin
+        Child(ANode, C0);
+        if C1 <> NIL_NODE then
+        begin
+          Kw('in', ANode);
+          Child(ANode, C1);
+        end;
+      end;
+    nkInterfaceSec:
+      begin
+        Kw('interface', ANode);
+        Decls(ANode, C0, NIL_NODE);
+      end;
+    nkImplementationSec:
+      begin
+        Kw('implementation', ANode);
+        Decls(ANode, C0, NIL_NODE);
+      end;
+    nkInitSec:
+      begin
+        // N7: a unit's `begin` opens the same section.
+        Kw('initialization', ANode);
+        Statements(ANode);
+      end;
+    nkFinalSec:
+      begin
+        Kw('finalization', ANode);
+        Statements(ANode);
+      end;
+    nkExportsClause:
+      begin
+        Kw('exports', ANode);
+        ListFrom(C0, ',', ANode);
+        Kw(';', ANode);
+      end;
+    nkExportsItem:
+      // Name [params], then its `index` / `name` clauses and `resident` -
+      // which of the values is which is a filed loss (F14), read in place.
+      begin
+        LChild := C0;
+        while LChild <> NIL_NODE do
+        begin
+          Child(ANode, LChild);
+          LChild := Next(LChild);
+        end;
+      end;
+
+    // ---- declaration sections ----
+    nkTypeSec:
+      begin
+        Kw('type', ANode);
+        LChild := C0;
+        while LChild <> NIL_NODE do
+        begin
+          Child(ANode, LChild);
+          if Kind(LChild) = nkTypeDecl then
+            Kw(';', ANode);
+          LChild := Next(LChild);
+        end;
+      end;
+    nkConstSec:
+      begin
+        Head(ANode);
+        LChild := C0;
+        while LChild <> NIL_NODE do
+        begin
+          Child(ANode, LChild);
+          if Kind(LChild) = nkConstDecl then
+            Kw(';', ANode);
+          LChild := Next(LChild);
+        end;
+      end;
+    nkVarSec:
+      VarSec(ANode);
+    nkLabelSec:
+      LabelSec(ANode);
+    nkTypeDecl:
+      TypeDecl(ANode);
+    nkConstDecl:
+      ConstDecl(ANode);
+    nkVarDecl:
+      VarDecl(ANode);
+    nkAggregate:
+      Aggregate(ANode);
+    nkAggregateField:
+      begin
+        Child(ANode, C0);
+        Kw(':', ANode);
+        Child(ANode, C1);
+      end;
+
+    // ---- type expressions ----
+    nkEnumType:
+      begin
+        Kw('(', ANode);
+        ListFrom(C0, ',', ANode);
+        Kw(')', ANode);
+      end;
+    nkEnumValue:
+      begin
+        Child(ANode, C0);
+        if C1 <> NIL_NODE then
+        begin
+          Kw('=', ANode);
+          Child(ANode, C1);
+        end;
+      end;
+    nkArrayType:
+      ArrayType(ANode);
+    nkSetType:
+      begin
+        Kw('set', ANode);
+        Kw('of', ANode);
+        Child(ANode, C0);
+      end;
+    nkFileType:
+      begin
+        Kw('file', ANode);
+        if C0 <> NIL_NODE then
+        begin
+          Kw('of', ANode);
+          Child(ANode, C0);
+        end;
+      end;
+    nkPointerType:
+      begin
+        Kw('^', ANode);
+        Child(ANode, C0);
+      end;
+    nkStringType:
+      begin
+        Kw('string', ANode);
+        Kw('[', ANode);
+        Child(ANode, C0);
+        Kw(']', ANode);
+      end;
+    nkClassOf:
+      // Aux 1: `type of X`, `type of interface` without a child.
+      if T.Nodes[ANode].Aux = 1 then
+      begin
+        Kw('type', ANode);
+        Kw('of', ANode);
+        if C0 <> NIL_NODE then
+          Child(ANode, C0)
+        else
+          Kw('interface', ANode);
+      end
+      else
+      begin
+        Kw('class', ANode);
+        Kw('of', ANode);
+        Child(ANode, C0);
+      end;
+    nkProcType:
+      ProcType(ANode);
+    nkClassType, nkRecordType, nkInterfaceType, nkObjectType, nkHelperType:
+      StructType(ANode);
+    nkGuid:
+      begin
+        Kw('[', ANode);
+        Child(ANode, C0);
+        // A GUID written as a literal has no leaf (F15).
+        Losses(ANode, T.Nodes[ANode].LastToken + 1);
+        Kw(']', ANode);
+      end;
+
+    // ---- members and routines ----
+    nkVisibility:
+      begin
+        if nfNegated in T.Nodes[ANode].Flags then
+          Kw('strict', ANode);
+        if (T.Nodes[ANode].Aux >= Low(VISIBILITY_TEXT)) and
+           (T.Nodes[ANode].Aux <= High(VISIBILITY_TEXT)) then
+          Kw(VISIBILITY_TEXT[T.Nodes[ANode].Aux], ANode);
+      end;
+    nkRoutine:
+      Routine(ANode);
+    nkParams:
+      Params(ANode);
+    nkParam:
+      Param(ANode);
+    nkDirective:
+      // The word, then its values - which value of `external` is the
+      // library, the name or the index is a filed loss (F13), and so is the
+      // message of a routine's `deprecated` (F12): read in place.
+      begin
+        Head(ANode);
+        LChild := C0;
+        while LChild <> NIL_NODE do
+        begin
+          Child(ANode, LChild);
+          LChild := Next(LChild);
+        end;
+      end;
+    nkPropertyDecl:
+      PropertyDecl(ANode);
+    nkPropSpec:
+      PropSpec(ANode);
+    nkMethodResolution:
+      begin
+        Head(ANode);
+        LChild := RoutineName(ANode, C0);
+        Kw('=', ANode);
+        Child(ANode, LChild);
+        Kw(';', ANode);
+      end;
+    nkVariantPart:
+      VariantPart(ANode);
+    nkVariantBranch:
+      VariantBranch(ANode);
+    nkGenericParams:
+      begin
+        Kw('<', ANode);
+        ListFrom(C0, ';', ANode);
+        Kw('>', ANode);
+      end;
+    nkGenericParam:
+      GenericParam(ANode);
+    nkConstraint:
+      // A type constraint is its child; `class`, `record`, `constructor`
+      // the head word.
+      if C0 <> NIL_NODE then
+        Child(ANode, C0)
+      else
+        Head(ANode);
+    nkAttrGroup:
+      begin
+        Kw('[', ANode);
+        ListFrom(C0, ',', ANode);
+        Kw(']', ANode);
+      end;
+    nkAttribute:
+      begin
+        Child(ANode, C0);
+        if C1 <> NIL_NODE then
+        begin
+          Kw('(', ANode);
+          ListFrom(C1, ',', ANode);
+          Kw(')', ANode);
+        end;
+      end;
+    nkRoutineBody:
+      Decls(ANode, C0, NIL_NODE);
   else
     Span(ANode);
   end;
+  // What a template left of the node's filed losses stands at its end.
+  if not (LKind in SPAN_KINDS) then
+    Losses(ANode, MaxInt);
 end;
 
-function PrintNode(const ATree: TPasTree; ANode: Integer): TPasPrintItems;
+function PrintWith(const ATree: TPasTree; const AOwn: TOwnership;
+  ANode: Integer): TPasPrintItems;
 var
   LP: TPrinter;
 begin
   LP.T := ATree;
+  LP.Own := AOwn;
+  LP.LossPos := Copy(AOwn.OwnStart);
   LP.Items := nil;
   LP.Count := 0;
   if (ANode >= 0) and (ANode <= High(ATree.Nodes)) then
     LP.Emit(ANode);
   SetLength(LP.Items, LP.Count);
   Result := LP.Items;
+end;
+
+function PrintNode(const ATree: TPasTree; ANode: Integer): TPasPrintItems;
+var
+  LOwn: TOwnership;
+begin
+  LOwn.Build(ATree);
+  Result := PrintWith(ATree, LOwn, ANode);
 end;
 
 // The original text between two glued tokens reduced to its line breaks:
@@ -995,62 +2226,6 @@ begin
   end;
 end;
 
-{ Ownership }
-
-type
-  // Who owns each visible token (-1: nobody), by which own-token rule, and
-  // each node's own tokens in order (CSR: OwnStart[n] .. OwnStart[n + 1] - 1
-  // index Own).
-  TOwnership = record
-    Owner, Rule: TArray<Integer>;
-    OwnStart, Own: TArray<Integer>;
-    procedure Build(const ATree: TPasTree);
-  end;
-
-procedure TOwnership.Build(const ATree: TPasTree);
-var
-  LReport: TPasCheckReport;
-  LOwner, LRule: TArray<Integer>;
-  LStart, LOwn, LFill: TArray<Integer>;
-  LIdx, LNode: Integer;
-begin
-  SetLength(LOwner, Length(ATree.Source.Visible));
-  SetLength(LRule, Length(ATree.Source.Visible));
-  for LIdx := 0 to High(LOwner) do
-  begin
-    LOwner[LIdx] := -1;
-    LRule[LIdx] := -1;
-  end;
-  LReport.Init(1);
-  CheckTree(ATree, True, LReport,
-    procedure(ANode, AVisIndex, ACell, ARule: Integer)
-    begin
-      LOwner[AVisIndex] := ANode;
-      LRule[AVisIndex] := ARule;
-    end);
-  SetLength(LStart, Length(ATree.Nodes) + 1);
-  for LIdx := 0 to High(LOwner) do
-    if LOwner[LIdx] >= 0 then
-      Inc(LStart[LOwner[LIdx] + 1]);
-  for LIdx := 1 to High(LStart) do
-    Inc(LStart[LIdx], LStart[LIdx - 1]);
-  SetLength(LOwn, LStart[High(LStart)]);
-  LFill := Copy(LStart);
-  for LIdx := 0 to High(LOwner) do
-  begin
-    LNode := LOwner[LIdx];
-    if LNode >= 0 then
-    begin
-      LOwn[LFill[LNode]] := LIdx;
-      Inc(LFill[LNode]);
-    end;
-  end;
-  Owner := LOwner;
-  Rule := LRule;
-  OwnStart := LStart;
-  Own := LOwn;
-end;
-
 { T3 }
 
 type
@@ -1069,8 +2244,13 @@ var
   LPFrom: TArray<Integer>;  // LP's item -> its index in LItems
   LO: TArray<TOrigTok>;
   LOAt: TArray<Integer>;    // visible index -> its first entry in LO, -1
+  LSkip: TArray<Boolean>;   // N8, N10: a token read elsewhere
+  LMoveBefore: TArray<Integer>;  // N10: the `of` read before this token
+  LEndAfter: TArray<Boolean>;    // N9: a virtual `end` after this token
   LOCount, LPCount, LIdx, LVis, LFirst, LLast, LI, LJ, LK: Integer;
-  LOwner: Integer;
+  LOwner, LRule, LNode, LOf, LChild, LSites: Integer;
+  LTok: TPasTokenKind;
+  LHasEnd: Boolean;
 
   procedure AddO(AVis: Integer; const AText: string; ASplit: Integer);
   begin
@@ -1091,13 +2271,32 @@ var
     LN: Integer;
   begin
     LN := Length(AResult.Sites);
-    if LN >= AMaxSites then
-      Exit;
     SetLength(AResult.Sites, LN + 1);
     AResult.Sites[LN].Vis := AVis;
     AResult.Sites[LN].Item := AItem;
     AResult.Sites[LN].Finding := AFinding;
     AResult.Sites[LN].Msg := AMsg;
+  end;
+
+  // A loss read: counted per finding, the first of each kept as a site.
+  procedure CountLoss(AVis: Integer; const AFinding: string);
+  var
+    LN: Integer;
+  begin
+    Inc(AResult.Losses);
+    for LN := 0 to High(AResult.LossCounts) do
+      if AResult.LossCounts[LN].Finding = AFinding then
+      begin
+        Inc(AResult.LossCounts[LN].Count);
+        Exit;
+      end;
+    LN := Length(AResult.LossCounts);
+    SetLength(AResult.LossCounts, LN + 1);
+    AResult.LossCounts[LN].Finding := AFinding;
+    AResult.LossCounts[LN].Count := 1;
+    AResult.LossCounts[LN].FirstVis := AVis;
+    Site(AVis, -1, AFinding, Format('`%s` read as the filed loss %s',
+      [ATree.Source.VisibleText(AVis), AFinding]));
   end;
 
   function Matches(const AItem: TPasPrintItem; const AOrig: TOrigTok): Boolean;
@@ -1107,10 +2306,12 @@ var
         (AItem.Text = AOrig.Text)
     else
       // N3; and the token must be the printing node's own - but the `>`
-      // half of a fused `>=`, which the operator owns (N2).
-      Result := (AOrig.Split <> 2) and SameText(AItem.Text, AOrig.Text) and
+      // half of a fused `>=`, which the operator or the type declaration
+      // owns (N2).
+      Result := SameText(AItem.Text, AOrig.Text) and
         ((AOrig.Owner = AItem.Node) or
-         ((AOrig.Split = 1) and (ATree.Nodes[AItem.Node].Kind = nkTypeArgs)));
+         ((AOrig.Split = 1) and
+          (ATree.Nodes[AItem.Node].Kind in [nkTypeArgs, nkGenericParams])));
   end;
 
   function ItemText(AItem: Integer): string;
@@ -1131,42 +2332,144 @@ var
         ATree.KindName(ATree.Nodes[LO[AEntry].Owner].Kind);
   end;
 
+  function OwnsTokenOf(ANode: Integer; AKind: TPasTokenKind): Integer;
+  var
+    LPos: Integer;
+  begin
+    for LPos := LOwn.OwnStart[ANode] to LOwn.OwnStart[ANode + 1] - 1 do
+      if ATree.Source.VisibleToken(LOwn.Own[LPos]).Kind = AKind then
+        Exit(LOwn.Own[LPos]);
+    Result := -1;
+  end;
+
+  procedure Defect(AVis, AItem: Integer; const AMsg: string);
+  begin
+    Inc(AResult.Defects);
+    if LSites < AMaxSites then
+    begin
+      Inc(LSites);
+      Site(AVis, AItem, '', AMsg);
+    end;
+  end;
+
 begin
   AResult := Default(TPasT3Result);
   if (ARoot < 0) or (ARoot > High(ATree.Nodes)) then
     Exit(False);
   LOwn.Build(ATree);
-  // The original, normalized.
+  LSites := 0;
   LFirst := ATree.NodeLeftmostVis(ARoot);
   LLast := ATree.Nodes[ARoot].LastToken;
   SetLength(LOAt, Length(ATree.Source.Visible));
+  SetLength(LSkip, Length(ATree.Source.Visible));
+  SetLength(LMoveBefore, Length(ATree.Source.Visible));
+  SetLength(LEndAfter, Length(ATree.Source.Visible));
   for LIdx := 0 to High(LOAt) do
+  begin
     LOAt[LIdx] := -1;
+    LMoveBefore[LIdx] := -1;
+  end;
+  // N9 and N10 are decided per node, before the stream is read.
+  for LNode := 0 to High(ATree.Nodes) do
+    case ATree.Nodes[LNode].Kind of
+      nkClassType, nkObjectType, nkInterfaceType:
+        begin
+          if ((ATree.Nodes[LNode].Kind = nkClassType) and
+              (ATree.Nodes[LNode].Aux = 1)) or
+             ((ATree.Nodes[LNode].Kind = nkInterfaceType) and
+              (ATree.Nodes[LNode].Aux and 2 <> 0)) or
+             (LOwn.OwnStart[LNode] = LOwn.OwnStart[LNode + 1]) then
+            Continue;
+          LHasEnd := OwnsTokenOf(LNode, tkEnd) >= 0;
+          if not LHasEnd and (ATree.Nodes[LNode].LastToken >= 0) and
+             (ATree.Nodes[LNode].LastToken <= High(LEndAfter)) then
+            LEndAfter[ATree.Nodes[LNode].LastToken] := True;
+        end;
+      nkProcType:
+        if ATree.Nodes[LNode].Aux = 1 then
+        begin
+          LOf := OwnsTokenOf(LNode, tkOf);
+          if LOf < 0 then
+            Continue;
+          LChild := ATree.Nodes[LNode].FirstChild;
+          while (LChild <> NIL_NODE) and
+                (ATree.Nodes[LChild].Kind <> nkDirective) do
+            LChild := ATree.Nodes[LChild].NextSibling;
+          if (LChild <> NIL_NODE) and (ATree.NodeLeftmostVis(LChild) < LOf)
+          then
+          begin
+            LMoveBefore[ATree.NodeLeftmostVis(LChild)] := LOf;
+            LSkip[LOf] := True;
+            LSkip[LOf + 1] := True;
+          end;
+        end;
+    end;
+  // The original, normalized.
   LO := nil;
   LOCount := 0;
   for LVis := LFirst to LLast do
   begin
     Inc(AResult.Original);
     LOwner := LOwn.Owner[LVis];
-    if ATree.Source.VisibleToken(LVis).Kind = tkEndOfFile then
+    LRule := LOwn.Rule[LVis];
+    LTok := ATree.Source.VisibleToken(LVis).Kind;
+    if LMoveBefore[LVis] >= 0 then
+    begin
+      // N10: `of object` before the directives.
+      AddO(LMoveBefore[LVis], 'of', 0);
+      AddO(LMoveBefore[LVis] + 1,
+        ATree.Source.VisibleText(LMoveBefore[LVis] + 1), 0);
+    end;
+    if LSkip[LVis] then
+      Inc(AResult.Normalized)                                        // N8 N10
+    else if LTok = tkEndOfFile then
       Inc(AResult.Normalized)                                        // N4
-    else if (LOwn.Rule[LVis] >= 0) and GRuleAfterEnd[LOwn.Rule[LVis]] then
+    else if (LRule >= 0) and GRuleAfterEnd[LRule] then
       Inc(AResult.Normalized)                                        // N5
     else if (LOwner >= 0) and (ATree.Nodes[LOwner].Kind in LIST_KINDS) and
-       (ATree.Source.VisibleToken(LVis).Kind = tkSemicolon) then
+       (LTok = tkSemicolon) then
       Inc(AResult.Normalized)                                        // N1
-    else if (LOwner >= 0) and (ATree.Nodes[LOwner].Aux = LVis) and
-       IsFusedGreaterEqual(ATree, LOwner) then
+    else if (LOwner >= 0) and (LTok = tkGreaterEqual) and
+       (((ATree.Nodes[LOwner].Aux = LVis) and
+         IsFusedGreaterEqual(ATree, LOwner)) or
+        (ATree.Nodes[LOwner].Kind = nkTypeDecl)) then
     begin
       Inc(AResult.Normalized);                                       // N2
       AddO(LVis, '>', 1);
       AddO(LVis, '=', 2);
     end
+    else if (LOwner >= 0) and (ATree.Nodes[LOwner].Kind = nkInitSec) and
+       (LTok = tkBegin) then
+    begin
+      Inc(AResult.Normalized);                                       // N7
+      AddO(LVis, 'initialization', 0);
+    end
+    else if (LRule >= 0) and (GRuleCls[LRule] = ocInsignificant) then
+      Inc(AResult.Normalized)                                        // N6
+    else if (LOwner >= 0) and (ATree.Nodes[LOwner].Kind = nkAggregate) and
+       (LTok = tkSemicolon) and (LVis < LLast) and
+       (LOwn.Owner[LVis + 1] = LOwner) and
+       (ATree.Source.VisibleToken(LVis + 1).Kind = tkRParen) then
+      Inc(AResult.Normalized)                                        // N11
+    else if (LOwner >= 0) and (ATree.Nodes[LOwner].Kind = nkAttrGroup) and
+       (LTok = tkRBracket) and (LVis < LLast) and
+       (LOwn.Owner[LVis + 1] = LOwner) and
+       (ATree.Source.VisibleToken(LVis + 1).Kind = tkLBracket) then
+    begin
+      Inc(AResult.Normalized);                                       // N8
+      AddO(LVis, ',', 0);
+      LSkip[LVis + 1] := True;
+    end
     else
       AddO(LVis, ATree.Source.VisibleText(LVis), 0);
+    if LEndAfter[LVis] then
+    begin
+      Inc(AResult.Normalized);                                       // N9
+      AddO(LVis, 'end', 3);
+    end;
   end;
   // The print, without its separators (N1).
-  LItems := PrintNode(ATree, ARoot);
+  LItems := PrintWith(ATree, LOwn, ARoot);
   SetLength(LP, Length(LItems));
   SetLength(LPFrom, Length(LItems));
   SetLength(AResult.ItemAt, Length(LItems));
@@ -1183,8 +2486,8 @@ begin
   end;
   SetLength(LP, LPCount);
   AResult.Printed := LPCount;
-  // Side by side; a filed loss skips its token, a defect resynchronizes at
-  // the next printed item that was read from a token.
+  // Side by side; a defect resynchronizes at the next printed item that was
+  // read from a token.
   LI := 0;
   LJ := 0;
   while (LI < LPCount) or (LJ < LOCount) do
@@ -1193,31 +2496,29 @@ begin
     begin
       Inc(AResult.Matched);
       AResult.ItemAt[LPFrom[LI]] := LO[LJ].Vis;
-      if LP[LI].Cls = pcSpan then
-        Inc(AResult.Spans);
+      case LP[LI].Cls of
+        pcSpan:
+          Inc(AResult.Spans);
+        pcLoss:
+          CountLoss(LO[LJ].Vis, GRuleFinding[LO[LJ].Rule]);
+      end;
       Inc(LI);
       Inc(LJ);
       Continue;
     end;
-    if (LJ < LOCount) and (LO[LJ].Rule >= 0) and
-       (GRuleFinding[LO[LJ].Rule] <> '') then
-    begin
-      Inc(AResult.Losses);
-      Site(LO[LJ].Vis, LI, GRuleFinding[LO[LJ].Rule],
-        Format('%s is not printed: a filed loss', [OrigText(LJ)]));
-      Inc(LJ);
-      Continue;
-    end;
-    Inc(AResult.Defects);
     if LJ < LOCount then
       LVis := LO[LJ].Vis
     else
       LVis := -1;
-    if LI < LPCount then
-      Site(LVis, LI, '', Format('printed %s where the original has %s',
+    if (LJ < LOCount) and IsLossRule(LO[LJ].Rule) then
+      Defect(LVis, LI, Format('%s, the filed loss %s, is not read where ' +
+        'the print has %s', [OrigText(LJ), GRuleFinding[LO[LJ].Rule],
+        ItemText(LI)]))
+    else if LI < LPCount then
+      Defect(LVis, LI, Format('printed %s where the original has %s',
         [ItemText(LI), OrigText(LJ)]))
     else
-      Site(LVis, -1, '', Format('the print ends where the original has %s',
+      Defect(LVis, -1, Format('the print ends where the original has %s',
         [OrigText(LJ)]));
     // Resync: the next printed item read from a token still ahead.
     LK := LI + 1;
@@ -1261,7 +2562,7 @@ function TreeFingerprint(const ATree: TPasTree;
 var
   LOwn: TOwnership;
   LStack, LDepth: TArray<Integer>;
-  LTop, LNode, LDep, LCount, LIdx, LVis, LChild, LN: Integer;
+  LTop, LNode, LDep, LCount, LIdx, LVis, LChild, LN, LRule: Integer;
   LLine, LText: string;
   LKind: TPasNodeKind;
   LKids: TArray<Integer>;
@@ -1305,17 +2606,29 @@ begin
     else
       LLine := LLine + ' aux=' + IntToStr(ATree.Nodes[LNode].Aux);
     end;
-    // The own tokens, but a template's regenerated ones.
-    if (LKind in LEAF_KINDS) or (LKind = nkAsmStmt) or
-       not (LKind in TEMPLATED_KINDS) then
+    // The own tokens that are facts: a leaf's, a contract read's (asm's
+    // range, a head word), a filed loss's, one no rule classifies - and
+    // every own token of a kind without a template. An operator's is its
+    // op= above; derived and insignificant tokens are regenerated.
+    if not (LKind in [nkUnaryOp, nkBinaryOp]) then
       for LIdx := LOwn.OwnStart[LNode] to LOwn.OwnStart[LNode + 1] - 1 do
       begin
         LVis := LOwn.Own[LIdx];
+        LRule := LOwn.Rule[LVis];
         if (ATree.Source.VisibleToken(LVis).Kind = tkEndOfFile) or
-           ((LOwn.Rule[LVis] >= 0) and GRuleAfterEnd[LOwn.Rule[LVis]]) then
+           ((LRule >= 0) and GRuleAfterEnd[LRule]) then
+          Continue;
+        if not (LKind in SPAN_KINDS) and (LRule >= 0) and
+           not (GRuleCls[LRule] in [ocLeaf, ocContract, ocLoss]) then
           Continue;
         LText := ATree.Source.VisibleText(LVis);
-        if IsKeyword(ATree.Source.VisibleToken(LVis).Kind) then
+        // A keyword, and a directive word read by contract or as a loss,
+        // in any case (N3) - but in asm, whose range is copied as written
+        // and lexed anew (an identifier here may be a chunk there).
+        if (LKind <> nkAsmStmt) and
+           (IsKeyword(ATree.Source.VisibleToken(LVis).Kind) or
+            ((ATree.Source.VisibleToken(LVis).Kind = tkIdentifier) and
+             (LRule >= 0) and (GRuleCls[LRule] in [ocContract, ocLoss]))) then
           LText := LowerCase(LText);
         // An asm range is its text, whitespace aside: where the lexer cuts
         // it into chunks depends on the directives around it (an `asm` in

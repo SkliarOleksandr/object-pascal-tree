@@ -53,9 +53,60 @@ the flags mean. The expression and statement kinds read as follows (`c0`,
 | nkInlineVar | `var` names (nfName), [`:` type], [`:=` value when Aux is 1] |
 | nkInlineConst | `const` name (nfName), [`:` type], `=` value |
 
-Declarations follow the table and the kind comments too; where a list of
-names ends is marked on the names themselves (nfName), never by the
-separators after them.
+The declaration kinds read as follows. Where a list of names ends is marked
+on the names themselves (nfName), never by the separators after them; "a
+type reference" is an nkIdent, nkMember or nkTypeArgs.
+
+| Kind | Reads as |
+|---|---|
+| nkUnit | `unit c0` [hints: nkDirective...] `;` interface, implementation, [initialization], [finalization] `end.` |
+| nkProgram, nkLibrary | `program` / `library c0` (parameters: see 4) `;` [uses] declarations [main nkBlock] `end.` |
+| nkPackage | `package c0 ;` its requires / contains clauses `end.` |
+| nkUsesClause | `uses c0, ... ;` - in a package `requires` (Aux 1) or `contains` |
+| nkUsesItem | `c0 [in c1]` |
+| nkInterfaceSec, nkImplementationSec | `interface` / `implementation` [uses] declarations |
+| nkInitSec, nkFinalSec | `initialization` / `finalization` statements, `;` between |
+| nkExportsClause | `exports c0, ... ;` - see 4 for its items |
+| nkTypeSec | `type` then each nkTypeDecl followed by `;` |
+| nkConstSec | the head word (see 3), each nkConstDecl followed by `;` |
+| nkVarSec | the head word (see 3), each nkVarDecl followed by `;` |
+| nkLabelSec | `label` labels `, ... ;` - see 4 for numeric labels |
+| nkTypeDecl | [attributes] name [nkGenericParams] `=` [`type` when Aux is 1] type [hints] |
+| nkConstDecl | [attributes] name [`: type` - two children after the name before the hints] `=` value [hints] |
+| nkVarDecl | [attributes] names (nfName) `:` type, then in their order hints and the initializer - `= value`, or `absolute X` when Aux is 1; also a field |
+| nkAggregate | `( c0, ... )` - `;` after an nkAggregateField child, `,` otherwise |
+| nkAggregateField | `c0 : c1` |
+| nkSubrange | `c0 .. c1` |
+| nkEnumType, nkEnumValue | `( c0, ... )`; `c0 [= c1]` |
+| nkArrayType | `array [` index types `, ... ] of` element - no brackets without index types; Aux 1: `of const`, every child an index type |
+| nkSetType, nkFileType, nkPointerType, nkStringType | `set of c0`; `file [of c0]`; `^c0`; `string[c0]` |
+| nkClassOf | `class of c0`; Aux 1: `type of c0`, `type of interface` without a child |
+| nkProcType | [`reference to` - Aux 2, see 5] `procedure` / `function` (a result-type child present), [nkParams], [`:` result type], [`of object` - Aux 1], nkDirective... |
+| nkClassType | `class` [(ancestors: the leading type references)] members `end` [hints]; Aux 1: the forward `class` alone |
+| nkRecordType | `record` members `end` [`align` the first non-member child] [hints] |
+| nkObjectType | `object` [(ancestor)] members `end` [hints] |
+| nkInterfaceType | `interface`, `dispinterface` when Aux bit 1 is set, [(ancestor)] [nkGuid] members `end` [hints]; Aux bit 2: forward, the head alone |
+| nkHelperType | `class helper` (`record helper` when Aux is 1) [(ancestor)] `for` the last leading type reference, members `end` [hints] |
+| nkGuid | `[ c0 ]` - see 4 for a literal |
+| nkVisibility | [`strict` - nfNegated] the word Aux 1..5 names: private, protected, public, published, automated |
+| nkRoutine | the head word (see 3), the name segments (nfName) each with its [nkGenericParams], `.` between, [nkParams], [`:` result type] `;`, each nkDirective followed by `;`, [nkRoutineBody `;`] |
+| nkParams | `( c0; ... )` - `[ ... ]` for a property's index parameters |
+| nkParam | [attributes] (mode: see 4) [`out` - Aux] names (nfName; attributes may stand between them) [`:` type [`=` default]] |
+| nkDirective | the word (see 3), then its children - its values |
+| nkPropertyDecl | `property` name [nkParams] [`:` type] specifiers [hints] `;` [the trailing `default;`] |
+| nkPropSpec | the word (see 3), its values `, ...`; `default` with no value is the trailing `default;` of an array property and owns its `;` |
+| nkMethodResolution | the head word, the segments `.` between, `=` the last child `;` |
+| nkVariantPart | `case` [tag `:`] type `of` branches `;` each - the tag when two children come before the branches |
+| nkVariantBranch | labels `, ... : (` fields - each nkVarDecl followed by `;` - [nkVariantPart] `)` |
+| nkGenericParams, nkGenericParam | `< c0; ... >`; names `, ...` [`:` nkConstraint `, ...`] |
+| nkConstraint | its child, or its head word (see 3) |
+| nkAttrGroup, nkAttribute | `[ c0, ... ]`; `c0 [( args, ... )]` |
+| nkRoutineBody | local declarations, then the nkBlock (`begin ... end`) or the nkAsmStmt |
+
+A member with Aux 1 - a routine, a property, a struct body's var section -
+is a `class` one; the `class` is the token of the list it stands in (see 5).
+A struct body's var section starts at its first name: its `var` is the
+struct's token too.
 
 ## 2. Leaf text
 
@@ -87,7 +138,10 @@ fact was missing from the tree and belongs in section 4 until it is added.
 ## 4. What the tree does not hold yet
 
 Each is a token only it holds, filed under its finding in the own-token table
-(class `loss`). A consumer that needs one reads the token, and knows it does.
+(class `loss`). A consumer that needs one reads the token, and knows it does -
+the printer does exactly that: it reads each such token where it stands
+among its node's children and marks the item as a loss, so its print is the
+same program, and T3 counts the losses per finding.
 
 | Finding | Not in the tree |
 |---|---|
@@ -106,8 +160,11 @@ Each is a token only it holds, filed under its finding in the own-token table
 
 - nkMember's FirstToken is its dot; its left edge is `NodeLeftmostVis`.
 - `class` before a member routine, property or `class var` is the enclosing
-  type's token; the member has Aux 1.
-- `reference to` lies outside its nkProcType's span (Aux 2).
+  type's token - or, before a class method's implementation, the section's
+  or program's; the member has Aux 1. The `var` of a struct body's var
+  section is the struct's token.
+- `reference to` lies outside its nkProcType's span (Aux 2): the enclosing
+  type declaration's tokens.
 - An empty node owns no token: nkEmptyStmt and nkMissing stand BEFORE their
   FirstToken, and a node whose LastToken is FirstToken - 1 holds nothing.
 - A root ends on the token after its final `end.` - the end sentinel, or
@@ -123,12 +180,26 @@ original onto it (`PRINT_NORMALIZATION` in `PasTree.Printer`):
   `end` / `until` / `else`; the printer writes one after every case selector
   and exception handler, because the one before a case's or an except part's
   `else` decides whose `else` it is;
+- declaration lists: the `;` after the last field of a record, class, object
+  or variant and after the last declaration of a struct body's var section
+  may be missing before `end` or `)`; the printer writes one after every
+  field, every variant, a routine's header, each of its directives and its
+  body - a directive written before the header's `;`, `function F: Bool
+  stdcall;`, is the same directive;
 - keywords and directive words in any case;
-- a fused `>=` after type arguments as `>` and `=`;
-- in declarations (the printer does not regenerate them yet): `[A][B]` and
-  `[A, B]`, `[A()]` and `[A]`, `class(TBase);` and `class(TBase) end;`, a
-  unit's `begin` for `initialization`, `procedure; stdcall` and
-  `procedure stdcall`.
+- a fused `>=` after type arguments or generic parameters (`TFoo<T>= class`)
+  as `>` and `=`;
+- `[A][B]` and `[A, B]` (one nkAttrGroup), `[A()]` and `[A]`;
+- `class(TBase);` and `class(TBase) end;`;
+- a unit's `begin` for `initialization`;
+- a procedural type's directives written into the type (`procedure
+  stdcall`, before or after `of object`) or after a `;` (`procedure;
+  stdcall`): the printer writes them after `of object`, behind a `;` when a
+  calling convention, `far` or `near` starts them - written into the type,
+  a declaration after it whose name is a convention would join the run
+  (`var V: procedure; stdcall; cdecl: Integer;` declares two variables) -
+  and into the type otherwise and after `reference to`, which takes no `;`;
+- a record constant's `;` after its last field value, `(X: 1; Y: 2;)`.
 
 ## 7. How it is checked
 
@@ -137,8 +208,9 @@ original onto it (`PRINT_NORMALIZATION` in `PasTree.Printer`):
   every corpus. A token no rule covers fails.
 - `PasTreePrint` (tools) and ParserSmoke, per golden row: T3 prints each
   clean file from its tree and compares the print with the visible stream,
-  token for token - a token the print misses or misplaces is a defect, but
-  for a filed loss; T3r renders the print one token per line and all on one
+  token for token - a token the print misses or misplaces is a defect, and
+  so is a filed loss the print did not read; T3r renders the print one token
+  per line and all on one
   line, parses both back and compares their trees with the original,
   fingerprint for fingerprint.
 - Neither sees a grouping the parser gets wrong CONSISTENTLY - a dangling

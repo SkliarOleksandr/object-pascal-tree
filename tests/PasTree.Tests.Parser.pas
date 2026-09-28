@@ -775,7 +775,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..194] of TPasCaseRow = (
+  DECL_CASES: array[0..199] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -2119,7 +2119,37 @@ const
      Source: 'type T = Integer; stdcall;';
      Expected: 'TypeSec(TypeDecl(Ident''T'' Ident''Integer'') ' +
        'TypeDecl(Ident''stdcall'' Error))';
-     ExpectDiags: 3)
+     ExpectDiags: 3),
+    // The printer's canonical forms (parser fidelity S9): each spelling below
+    // is one tree with the printer's, which T3 maps and T3r parses back.
+    (Section: '19.3.2'; Name: 'S9: two bracket groups are one group';
+     Source: 'type [A][B(1)] T = Integer;';
+     Expected: 'TypeSec(TypeDecl(AttrGroup(Attribute(Ident''A'') ' +
+       'Attribute(Ident''B'' IntLit''1'')) Ident''T'' Ident''Integer''))';
+     ExpectDiags: 0),
+    (Section: '11.1.1'; Name: 'S9: a class that stops at its ancestors';
+     Source: 'type TC = class(TObject); TD = class(TC, IInterface);';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(Ident''TObject'')) ' +
+       'TypeDecl(Ident''TD'' ClassType(Ident''TC'' Ident''IInterface'')))';
+     ExpectDiags: 0),
+    (Section: '3.2.2'; Name: 'S9: a record constant''s last value and ;';
+     Source: 'const C: TR = (X: 1; Y: (A: 2;););';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''C'' Ident''TR'' ' +
+       'Aggregate(AggregateField(Ident''X'' IntLit''1'') ' +
+       'AggregateField(Ident''Y'' Aggregate(AggregateField(Ident''A'' ' +
+       'IntLit''2''))))))';
+     ExpectDiags: 0),
+    (Section: '9.1'; Name: 'S9: a record''s alignment and hint after end';
+     Source: 'type TR = packed record X: Integer end align 16 platform;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(VarDecl(' +
+       'Ident''X''#name Ident''Integer'') IntLit''16'' Directive''platform'')))';
+     ExpectDiags: 0),
+    (Section: '1.1.3'; Name: 'S9: exports with index, name and resident';
+     Source: 'procedure P; exports P index 3 name ''Q'' resident, P;';
+     Expected: 'Routine''procedure''(Ident''P''#name) ExportsClause(' +
+       'ExportsItem(Ident''P'' IntLit''3'' StrLit''''Q'''') ' +
+       'ExportsItem(Ident''P''))';
+     ExpectDiags: 0)
   );
 
 { Builds every case that is not a plain dump comparison: the platform matrix

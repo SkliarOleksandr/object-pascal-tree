@@ -1622,12 +1622,14 @@ Still open, roughly in the order we're tackling it:
     This is the real payoff: a wrong binding stops being invisible and becomes
     a compile error or a binary difference.
   Started 2026-09-28 (v0.61.0): `PasTree.Printer` prints expressions and
-  statements from the tree alone and declarations, for now, from their spans;
-  over the Studio source, both flat RTL corpora and the third-party trees
-  (~90M tokens) the print misses or misplaces no token but the filed losses,
-  and parses back to the same tree in both layouts but where one recovery
-  heuristic reads a line break in valid code (`case` alone on its line in a
-  variant record). The contract it follows is `docs/tree-contract.md`.
+  statements from the tree alone, and since v0.63.0 declarations too - the
+  whole unit, with the tokens the tree does not hold yet (`packed`, a
+  parameter's `var`/`const`, ...) read in place and counted as losses. Over
+  the Studio source, both flat RTL corpora and the third-party trees (~90M
+  tokens) the print misses or misplaces no token, and parses back to the
+  same tree in both layouts but where one recovery heuristic reads a line
+  break in valid code (`case` alone on its line in a variant record). The
+  contract it follows is `docs/tree-contract.md`.
 - **A real formatter for Delphi code, built on the structural printer.** The
   printer regenerates a unit from its tree, but lays it out only for
   checking - one token per line, all on one line, or on the original's lines.
@@ -1637,8 +1639,6 @@ Still open, roughly in the order we're tackling it:
   identifier case, `begin` placement - as a configurable style, with the
   options a user of the IDE's own formatter expects. What it needs beyond
   what exists:
-  - declaration templates (the printer copies declarations from their spans
-    today - parser-fidelity step S9);
   - trivia: comments re-attached to the nodes they belong to (a doc comment
     to its declaration, a trailing comment to its line, a comment between
     statements to the one after it), and conditional directives with the

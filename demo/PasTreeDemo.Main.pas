@@ -3028,11 +3028,11 @@ begin
   pgc.ActivePage := tsJson;
 end;
 
-{ The main unit printed from its tree (PasTree.Printer): expressions and
-  statements regenerated from the node kinds, declarations - for now - copied
-  from their spans, every token where the token it stands for stands in the
-  source, so the print reads line by line beside it (no comments, no
-  directives, keywords in lower case, one `;` between statements). The
+{ The main unit printed from its tree (PasTree.Printer): every token
+  regenerated from the node kinds - a filed loss read from its token, in its
+  place - and put where the token it stands for stands in the source, so the
+  print reads line by line beside it (no comments, no directives, keywords in
+  lower case, the canonical `;`). The
   printer's own checks go to the messages: T3, the print against the parsed
   tokens, and T3r, the print parsed back in its two canonical layouts. }
 procedure TfrmMain.btnShowPrintClick(Sender: TObject);
@@ -3072,23 +3072,22 @@ begin
   if Length(LDiags) > 0 then
     Log(Format('AST Print: the parse reported %d diagnostics - the print ' +
       'and its checks are meant for valid code.', [Length(LDiags)]));
-  Log(Format('AST Print T3: %d tokens, %d printed, %d matched (%d copied ' +
-    'from a declaration''s span), %d filed losses, %d defects.',
-    [LT3.Original, LT3.Printed, LT3.Matched, LT3.Spans, LT3.Losses,
-     LT3.Defects]));
+  Log(Format('AST Print T3: %d tokens, %d printed, %d matched (%d read ' +
+    'as a filed loss), %d defects.',
+    [LT3.Original, LT3.Printed, LT3.Matched, LT3.Losses, LT3.Defects]));
+  for LIdx := 0 to High(LT3.LossCounts) do
+    Log(Format('  loss %s: %d, the first at %s',
+      [LT3.LossCounts[LIdx].Finding, LT3.LossCounts[LIdx].Count,
+       VisSiteText(LTree.Source, LT3.LossCounts[LIdx].FirstVis)]));
   for LIdx := 0 to High(LT3.Sites) do
-  begin
-    LSite := VisSiteText(LTree.Source, LT3.Sites[LIdx].Vis);
-    if LT3.Sites[LIdx].Finding <> '' then
-      Log(Format('  %s: loss %s: %s', [LSite, LT3.Sites[LIdx].Finding,
-        LT3.Sites[LIdx].Msg]))
-    else
+    if LT3.Sites[LIdx].Finding = '' then
+    begin
+      LSite := VisSiteText(LTree.Source, LT3.Sites[LIdx].Vis);
       Log(Format('  %s: defect: %s', [LSite, LT3.Sites[LIdx].Msg]));
-  end;
-  if (Length(LDiags) > 0) or (LT3.Losses > 0) then
+    end;
+  if Length(LDiags) > 0 then
   begin
-    Log('AST Print T3r: not tried (not valid code, or a filed loss makes ' +
-      'the print another program).');
+    Log('AST Print T3r: not tried (not valid code).');
     Exit;
   end;
   // The print has no directives: a preprocessor with no defines reads it.
