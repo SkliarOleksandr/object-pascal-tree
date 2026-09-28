@@ -464,6 +464,8 @@ type
     function PropertyChain(ATMid, ASym: Integer): TArray<TPasExtRef>;
     procedure CollectReferencesOf(ATMid, ASym: Integer;
       AHits: TList<TPasRefHit>; AAssignOnly: Boolean = False);
+    procedure CollectReferencesOfAll(const ASyms: TArray<TPasExtRef>;
+      AHits: TList<TPasRefHit>);
     // Find Assignments.
     function IsAssignTarget(LM: TPasSemaModel; ANode: Integer): Boolean;
     function PropertyIsWritable(AMid, ASym: Integer): Boolean;
@@ -1944,13 +1946,16 @@ begin
     if Length(LChain) <= 1 then
       CollectReferencesOf(ATMid, ASym, LHits)
     else
+    begin
+      // One pass over the closure for the whole chain: a VCL property is
+      // republished by a hundred classes, and a scan per link cost 8-10 s
+      // per question on a 4,000-unit group.
+      CollectReferencesOfAll(LChain, LHits);
       for LIdx := 0 to High(LChain) do
-      begin
-        CollectReferencesOf(LChain[LIdx].UnitId, LChain[LIdx].Sym, LHits);
         if ((LChain[LIdx].UnitId <> ATMid) or (LChain[LIdx].Sym <> ASym)) and
            DeclHit(LChain[LIdx].UnitId, LChain[LIdx].Sym, LHit) then
           LHits.Add(LHit);
-      end;
+    end;
     // The implementation headers that spell the name without using it - a
     // type's in its methods' qualifiers, a routine's own in its
     // implementation. All in the declaring model. A position the scan above
@@ -2046,6 +2051,57 @@ begin
            HitFromNode(LM, LPair.Key, LHit) then
           LHits.Add(LHit);
     end;
+  end;
+end;
+
+// CollectReferencesOf for several symbols in one pass over the models - the
+// same two maps, the same rules, each symbol's own-model RefMap read in its
+// declaring model only.
+procedure TPasNavigator.CollectReferencesOfAll(const ASyms: TArray<TPasExtRef>;
+  AHits: TList<TPasRefHit>);
+var
+  LWanted: TDictionary<Int64, Boolean>;
+  LOwn: TDictionary<Integer, Boolean>;   // declaring models
+  LM: TPasSemaModel;
+  LNode, LSym: Integer;
+  LPair: TPair<Integer, TPasExtRef>;
+  LHit: TPasRefHit;
+
+  function Key(AMid, ASym: Integer): Int64;
+  begin
+    Result := (Int64(AMid) shl 32) or Cardinal(ASym);
+  end;
+
+begin
+  LWanted := TDictionary<Int64, Boolean>.Create;
+  LOwn := TDictionary<Integer, Boolean>.Create;
+  try
+    for var LRef in ASyms do
+      if (LRef.UnitId >= 0) and (LRef.UnitId < FProj.ModelCount) then
+      begin
+        LWanted.AddOrSetValue(Key(LRef.UnitId, LRef.Sym), True);
+        LOwn.AddOrSetValue(LRef.UnitId, True);
+      end;
+    for var LMi := 0 to FProj.ModelCount - 1 do
+    begin
+      LM := FProj.Model(LMi);
+      if LOwn.ContainsKey(LMi) then
+        for LNode := 0 to High(LM.RefMap) do
+        begin
+          LSym := LM.RefMap[LNode];
+          if (LSym <> NIL_SYM) and LWanted.ContainsKey(Key(LMi, LSym)) and
+             not IsDeclSelfName(LM, LSym, LNode) and
+             FProj.EnsureHydrated(LMi) and HitFromNode(LM, LNode, LHit) then
+            AHits.Add(LHit);
+        end;
+      for LPair in LM.ExtRefMap do
+        if LWanted.ContainsKey(Key(LPair.Value.UnitId, LPair.Value.Sym)) and
+           FProj.EnsureHydrated(LMi) and HitFromNode(LM, LPair.Key, LHit) then
+          AHits.Add(LHit);
+    end;
+  finally
+    LOwn.Free;
+    LWanted.Free;
   end;
 end;
 
