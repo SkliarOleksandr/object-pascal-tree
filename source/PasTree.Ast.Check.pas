@@ -536,9 +536,9 @@ const
     'ProcType | : | opt | derived | before the result type',
     'ProcType | of | opt | derived | Aux 1: of object',
     'ProcType | object | opt | derived | Aux 1: of object',
-    'ProcType | ; | opt | insig | before the directives when they follow the ' +
-      'type, `procedure; stdcall`: one type with `procedure stdcall` ' +
-      '(normalization list)',
+    'ProcType | ; | opt | derived | before the directive child whose Aux ' +
+      'is 1, `procedure; stdcall` (F29: one type with `procedure stdcall`, ' +
+      'not one .dcu)',
     'ClassType | class | head once | derived | the kind',
     'ClassType RecordType ObjectType HelperType | class | - | derived | ' +
       'before each member whose Aux is 1: class method, property, var',
@@ -1096,7 +1096,8 @@ begin
       Result := (AAux = NIL_NODE) or (AAux = 1) or (AAux = 2);
     nkTypeDecl, nkClassType, nkRecordType, nkObjectType, nkHelperType,
     nkClassOf, nkArrayType, nkRoutine, nkMethodResolution, nkPropertyDecl,
-    nkVarDecl, nkVarSec, nkForStmt, nkUsesClause, nkInlineVar, nkInlineConst:
+    nkVarDecl, nkVarSec, nkForStmt, nkUsesClause, nkInlineVar, nkInlineConst,
+    nkDirective:
       Result := (AAux = NIL_NODE) or (AAux = 1);
   else
     Result := AAux = NIL_NODE;
@@ -1731,6 +1732,27 @@ var
           AReport.Add(ccFlags, ANode, Site(ANode),
             'Visibility is marked strict but does not read `strict ' +
             'private` or `strict protected`');
+      // Aux 1 marks a procedural type's first directive after its `;` (F29):
+      // on no other directive, and on that one always - inside the type's
+      // span a `;` right before a directive is the type's own.
+      nkDirective:
+        if (ATree.Nodes[ANode].Parent = NIL_NODE) or
+           (Kind(ATree.Nodes[ANode].Parent) <> nkProcType) then
+        begin
+          if LAux = 1 then
+            AReport.Add(ccAux, ANode, Site(ANode),
+              'Directive has Aux 1 outside a procedural type');
+        end
+        else if (LAux = 1) <>
+           ((ATree.Nodes[ANode].FirstToken - 1 >
+             ATree.Nodes[ATree.Nodes[ANode].Parent].FirstToken) and
+            (TokKind(ATree.Nodes[ANode].FirstToken - 1) = tkSemicolon)) then
+          if LAux = 1 then
+            AReport.Add(ccAux, ANode, Site(ANode),
+              'Directive of a procedural type has Aux 1 but follows no `;`')
+          else
+            AReport.Add(ccAux, ANode, Site(ANode),
+              'Directive of a procedural type follows its `;` without Aux 1');
     end;
   end;
 

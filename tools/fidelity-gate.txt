@@ -25,9 +25,8 @@ studio * FMX.ZOrder.Win.pas BASE-FAIL a generic cycle with FMX.Presentation.Win:
 # variation rare enough to slip past the harness's recompiles reads as DIFF:
 studio t1,t2,t3x Vcl.ControlList.pas OK|DIFF|NONDET one byte of a method-resolution entry differs in about 1 of 10 compiles of the original alone
 
-# Spellings the tree does not keep and dcc writes apart in bytes the code does
-# not depend on (docs/tree-contract.md sec. 6, docs/dcu-reader.md).
-studio t3,t3x Winapi.Penwin.pas DIFF F29: `procedure stdcall` vs `procedure; stdcall` with a result type from another unit and EXTERNALSYM - two records of the type's entry in the other order
+# A spelling the tree does not keep and dcc writes apart in bytes the code
+# does not depend on (docs/tree-contract.md sec. 6, docs/dcu-reader.md).
 studio t3 System.Win.InternetExplorer.pas DIFF F30: a unit's `begin` printed as `initialization` - other line records under $D+ $L+
 studio t3 Winapi.OpenGL.PkgHelper.pas DIFF F30: as System.Win.InternetExplorer
 

@@ -134,7 +134,8 @@ type
     nkClassOf,        // class of T (15.2.1); Aux = 1: type of T (15.2.2)
     nkProcType,       // procedure/function type (6.6.1): [params], [result
                       // type], nkDirective... (the calling convention and
-                      // the rest, written into the type or after a `;`);
+                      // the rest, written into the type or after a `;` -
+                      // the first one after the `;` has Aux 1);
                       // Aux: 1 = of object, 2 = reference to
     nkClassType,      // 11.1.1; Aux: 1 = forward declaration
     nkRecordType,     // 9.x
@@ -158,7 +159,9 @@ type
     // (B.4.2) - legal as an identifier elsewhere - so the only thing that can
     // prove this one MEANS the modifier is the parser, here.
     nkParam,
-    nkDirective,      // routine directive (+ optional args as children)
+    nkDirective,      // routine directive (+ optional args as children);
+                      // Aux = 1 on a procedural type's first directive
+                      // after its `;` (`procedure; stdcall`, F29)
     nkPropertyDecl,   // 13.1.1: name, [index params], [type], specifiers
     nkPropSpec,       // read/write/index/stored/default/implements + expr
     nkMethodResolution, // 14.2.2: IFace.Method = ImplName
@@ -754,8 +757,14 @@ begin
         if nfNegated in Nodes[AIndex].Flags then
           Result := Result + '#strict';
       end;
-    nkConstSec, nkDirective, nkPropSpec:
+    nkConstSec, nkPropSpec:
       Result := Result + '''' + LowerCase(NodeText(AIndex)) + '''';
+    nkDirective:
+      begin
+        Result := Result + '''' + LowerCase(NodeText(AIndex)) + '''';
+        if Nodes[AIndex].Aux = 1 then
+          Result := Result + '#semi';
+      end;
     // 16.4.1: a `class`/`record`/`constructor` constraint is a bare
     // keyword with no child of its own (ParseGenericParamsOpt just
     // Nexts past it); a SPECIFIC-type constraint (`T: IInterface`) adopts

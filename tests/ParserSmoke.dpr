@@ -307,10 +307,11 @@ end;
   when AStatements, else as a file - and checks clean; AMutate then breaks
   the tree the way a parser defect would (a name left unmarked, a type
   marked, the initializer mark lost), and the checker must report I6.flags
-  and nothing else, the first message saying ASays. }
+  and nothing else (AClass: I6.aux for an Aux mark), the first message
+  saying ASays. }
 function NameCase(APP: TPasPreprocessor; const ASource: string;
   AStatements: Boolean; const AMutate: TTreeMutation;
-  const ASays: string): TPasCheckResult;
+  const ASays: string; AClass: TPasCheckClass = ccFlags): TPasCheckResult;
 var
   LPre: TPasPreprocessed;
   LDiags: TArray<TPasParseDiag>;
@@ -328,14 +329,14 @@ begin
   LBroken.Init;
   CheckTree(LTree, True, LBroken);
   Result.Passed := (Length(LDiags) = 0) and (LReport.Total = 0) and
-    (LBroken.Total > 0) and (LBroken.Counts[ccFlags] = LBroken.Total) and
+    (LBroken.Total > 0) and (LBroken.Counts[AClass] = LBroken.Total) and
     (Pos(ASays, LBroken.Violations[0].Msg) > 0);
   Result.Message := '';
   if not Result.Passed then
     Result.Message := Format('  %s: %d diagnostics, %d violations before ' +
-      'the change, %d after (%d I6.flags); the first should say "%s":',
+      'the change, %d after (%d %s); the first should say "%s":',
       [ASource, Length(LDiags), LReport.Total, LBroken.Total,
-       LBroken.Counts[ccFlags], ASays]) + sLineBreak +
+       LBroken.Counts[AClass], CheckClassName(AClass), ASays]) + sLineBreak +
       CheckReportText(LTree, LBroken);
 end;
 
@@ -416,6 +417,40 @@ begin
             LNode := NodeOf(ATree, nkVarSec, 'var');
             ATree.Nodes[LNode].Flags := ATree.Nodes[LNode].Flags + [nfName];
           end, 'carries nfName');
+      end),
+    // F29: the `;` of `procedure; stdcall` is derived from the directive's
+    // Aux 1 - lost, the print writes `procedure stdcall`, one type but not
+    // one .dcu; set on a directive written in, it writes a `;` there.
+    NameFlagCase('a directive after the type''s ; without Aux 1 is a violation',
+      function: TPasCheckResult
+      begin
+        Result := NameCase(APP, DeclCaseText('type T = procedure; stdcall;'),
+          False,
+          procedure(var ATree: TPasTree)
+          begin
+            ATree.Nodes[NodeOf(ATree, nkDirective, 'stdcall')].Aux := NIL_NODE;
+          end, 'without Aux 1', ccAux);
+      end),
+    NameFlagCase('Aux 1 on a directive written into the type is a violation',
+      function: TPasCheckResult
+      begin
+        Result := NameCase(APP, DeclCaseText('type T = procedure stdcall;'),
+          False,
+          procedure(var ATree: TPasTree)
+          begin
+            ATree.Nodes[NodeOf(ATree, nkDirective, 'stdcall')].Aux := 1;
+          end, 'follows no', ccAux);
+      end),
+    NameFlagCase('Aux 1 on a routine''s directive is a violation',
+      function: TPasCheckResult
+      begin
+        Result := NameCase(APP, 'unit Test;'#13#10'interface'#13#10 +
+          'procedure P; stdcall;'#13#10'implementation'#13#10 +
+          'procedure P;'#13#10'begin'#13#10'end;'#13#10'end.'#13#10, False,
+          procedure(var ATree: TPasTree)
+          begin
+            ATree.Nodes[NodeOf(ATree, nkDirective, 'stdcall')].Aux := 1;
+          end, 'outside a procedural type', ccAux);
       end)
   ];
 end;

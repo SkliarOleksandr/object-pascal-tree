@@ -169,8 +169,9 @@ type
       a routine's before its header's `;`, an anonymous method's before its
       body, a procedural type's. AHints: the hint words (deprecated,
       platform, experimental, library) belong to the run too; after a
-      procedural type they are the declaration's (ParseHintsOpt). }
-    procedure ParseDirectiveRun(AOwner: Integer; AHints: Boolean);
+      procedural type they are the declaration's (ParseHintsOpt). The first
+      directive of the run, NIL_NODE when there is none. }
+    function ParseDirectiveRun(AOwner: Integer; AHints: Boolean): Integer;
     function ParseClassLike(AHeadKind: TPasTokenKind): Integer;
     procedure ParseMemberList(AOwner: Integer);
     procedure ParseVariantPart(AOwner: Integer);
@@ -2166,9 +2167,12 @@ end;
     E2003. Behind a procedural type only, and from a convention on, no
     declaration can be reached.
 
-  The `;` of the second form is the type's own token - `procedure; stdcall`
-  and `procedure stdcall` are one type, and the printer's normalization list
-  says so. The last convention wins (`procedure stdcall; cdecl` is cdecl);
+  The `;` of the second form is the type's own token, and the first directive
+  after it has Aux 1. `procedure; stdcall` and `procedure stdcall` are one
+  type, but not one `.dcu`: with a result type that names an alias and an
+  EXTERNALSYM or NODEFINE directive naming the type dcc writes two records
+  of its entry in the other order (F29), so the tree keeps which was
+  written. The last convention wins (`procedure stdcall; cdecl` is cdecl);
   the tree keeps every one. }
 function TPasParser.ParseProcTypeExpr(ARefTo, ATail: Boolean): Integer;
 begin
@@ -2195,21 +2199,25 @@ begin
      IsCallConvStarter(FPos + 1) then
   begin
     Next; // ';'
-    ParseDirectiveRun(Result, False);
+    FB.SetAux(ParseDirectiveRun(Result, False), 1);
   end;
   FB.SetLast(Result, FPos - 1);
 end;
 
-procedure TPasParser.ParseDirectiveRun(AOwner: Integer; AHints: Boolean);
+function TPasParser.ParseDirectiveRun(AOwner: Integer; AHints: Boolean):
+  Integer;
 var
   LDir: Integer;
 begin
+  Result := NIL_NODE;
   while IsDirectiveWord and (AHints or not IsHintWord(FPos)) do
   begin
     LDir := FB.AddNode(nkDirective, NIL_NODE, FPos);
     Next;
     FB.SetLast(LDir, FPos - 1);
     FB.Adopt(AOwner, LDir);
+    if Result = NIL_NODE then
+      Result := LDir;
   end;
 end;
 

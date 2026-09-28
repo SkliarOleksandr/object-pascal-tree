@@ -81,7 +81,7 @@ type reference" is an nkIdent, nkMember or nkTypeArgs.
 | nkArrayType | `array [` index types `, ... ] of` element - no brackets without index types; Aux 1: `of const`, every child an index type |
 | nkSetType, nkFileType, nkPointerType, nkStringType | `set of c0`; `file [of c0]`; `^c0`; `string[c0]` |
 | nkClassOf | `class of c0`; Aux 1: `type of c0`, `type of interface` without a child |
-| nkProcType | [`reference to` - Aux 2, see 5] `procedure` / `function` (a result-type child present), [nkParams], [`:` result type], [`of object` - Aux 1], nkDirective... |
+| nkProcType | [`reference to` - Aux 2, see 5] `procedure` / `function` (a result-type child present), [nkParams], [`:` result type], [`of object` - Aux 1], nkDirective... - a `;` before the one whose Aux is 1 (`procedure; stdcall`) |
 | nkClassType | `class` [(ancestors: the leading type references)] members `end` [hints]; Aux 1: the forward `class` alone |
 | nkRecordType | `record` members `end` [`align` the first non-member child] [hints] |
 | nkObjectType | `object` [(ancestor)] members `end` [hints] |
@@ -92,7 +92,7 @@ type reference" is an nkIdent, nkMember or nkTypeArgs.
 | nkRoutine | the head word (see 3), the name segments (nfName) each with its [nkGenericParams], `.` between, [nkParams], [`:` result type] `;`, each nkDirective followed by `;`, [nkRoutineBody `;`] |
 | nkParams | `( c0; ... )` - `[ ... ]` for a property's index parameters |
 | nkParam | [attributes] (mode: see 4) [`out` - Aux] names (nfName; attributes may stand between them) [`:` type [`=` default]] |
-| nkDirective | the word (see 3), then its children - its values |
+| nkDirective | the word (see 3), then its children - its values; Aux 1 only in an nkProcType, see there |
 | nkPropertyDecl | `property` name [nkParams] [`:` type] specifiers [hints] `;` [the trailing `default;`] |
 | nkPropSpec | the word (see 3), its values `, ...`; `default` with no value is the trailing `default;` of an array property and owns its `;` |
 | nkMethodResolution | the head word, the segments `.` between, `=` the last child `;` |
@@ -192,24 +192,20 @@ original onto it (`PRINT_NORMALIZATION` in `PasTree.Printer`):
 - `[A][B]` and `[A, B]` (one nkAttrGroup), `[A()]` and `[A]`;
 - `class(TBase);` and `class(TBase) end;`;
 - a unit's `begin` for `initialization`;
-- a procedural type's directives written into the type (`procedure
-  stdcall`, before or after `of object`) or after a `;` (`procedure;
-  stdcall`): the printer writes them after `of object`, behind a `;` when a
-  calling convention, `far` or `near` starts them - written into the type,
-  a declaration after it whose name is a convention would join the run
-  (`var V: procedure; stdcall; cdecl: Integer;` declares two variables) -
-  and into the type otherwise and after `reference to`, which takes no `;`;
+- a procedural type's directives written before or after its `of object`
+  (`procedure stdcall of object`): the printer writes them after it. Where
+  the `;` of `procedure; stdcall` stands the tree keeps (the directive after
+  it has Aux 1, F29) - one program either way, but not one `.dcu`;
 - a record constant's `;` after its last field value, `(X: 1; Y: 2;)`.
 
 Same program for dcc, the reprint through it says (T3x) - but not always the
-same `.dcu`: dcc writes three of these apart in bytes the code does not
+same `.dcu`: dcc writes two of these apart in bytes the code does not
 depend on. A list's last `;` before an `end` on the next line gives the
 statement's end another line (the reprint keeps such `;`s where they
 stand); a unit's `begin` and `initialization` give the section other line
-records under `$D+ $L+`; and `procedure stdcall` and `procedure; stdcall`
-order two records of the type's entry differently when its result type
-aliases another unit's type and `{$EXTERNALSYM}` names it. The tree keeps
-neither of the last two; `docs/dcu-reader.md` has the probes.
+records under `$D+ $L+` - the tree does not keep that one yet (F30).
+`docs/dcu-reader.md` has the probes, and the one for `procedure stdcall`
+and `procedure; stdcall`, which the tree now keeps apart.
 
 ## 7. How it is checked
 

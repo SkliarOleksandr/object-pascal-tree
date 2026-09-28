@@ -400,16 +400,20 @@ packages, a large application and Win32 (2026-09-26/27, dcc64 and dcc32
   is the `;` in the first and the `end` in the second. A rewrite that drops
   such a `;` changes the `.dcu`; the structural printer's in-place reprint
   keeps the list `;`s it does not need.
-- **Two spellings the tree takes as one are not one `.dcu`.** A procedural
-  type's directive written into the type or after a `;` - `T = function(P:
-  Integer): BOOL stdcall;` and `...: BOOL; stdcall;` - declare the same type,
-  but with a result type that aliases another unit's type (`BOOL`) and an
-  `{$EXTERNALSYM T}` after it the `.dcu` lists two records of T's entry in
-  the other order (a single-line signature without the directive, or an
-  `Integer` result, stays byte-identical). And a unit's `begin ... end.`
-  and `initialization ... end.` compile to the same code but different line
+- **One program is not always one `.dcu`.** A procedural type's directive
+  written into the type or after a `;` - `T = function(P: Integer): BOOL
+  stdcall;` and `...: BOOL; stdcall;` - declare the same type, but when the
+  result type is named through an alias (`BOOL`, `DWORD`, a unit's own
+  `MyI = Integer`; not a distinct `type Integer`, not `LongBool` itself)
+  and an `{$EXTERNALSYM T}` or `{$NODEFINE T}` names the type, the `.dcu`
+  lists two records of T's entry in the other order - debug information
+  on or off, on both platforms, with `far` after the `;` too. Without the
+  directive, with another result type, or with the directives before or
+  after `of object`, it stays byte-identical; columns never matter. The
+  tree keeps where the `;` stands (F29). And a unit's `begin ... end.` and
+  `initialization ... end.` compile to the same code but different line
   records under `$D+ $L+` (identical under `-$D- -$L-`), an empty section
-  too. The dump shows neither: only the raw bytes differ.
+  too (F30). The dump shows neither: only the raw bytes differ.
 
 ## Known gaps, for a future session
 

@@ -135,9 +135,7 @@ const
     'N5 text after the final `end.` is ignored by dcc; the root owns its ' +
       'first token only (csAfterEnd)',
     'N6 insignificant tokens (class insig of the own-token table) are ' +
-      'dropped: the `;` of `procedure; stdcall` - one type with `procedure ' +
-      'stdcall`; the printer''s is a separator - and the `()` of an ' +
-      'attribute without arguments, `[A()]` = `[A]`',
+      'dropped: the `()` of an attribute without arguments, `[A()]` = `[A]`',
     'N7 a unit''s `begin ... end.` opens the same section as ' +
       '`initialization`: its `begin` reads as `initialization`',
     'N8 attribute groups: `][` inside one nkAttrGroup reads as `,` - the ' +
@@ -289,21 +287,6 @@ end;
 function IsLossRule(ARule: Integer): Boolean; inline;
 begin
   Result := (ARule >= 0) and (GRuleCls[ARule] = ocLoss);
-end;
-
-// What may start a procedural type's directive run after a `;` (dcc64 37.0,
-// the parser's IsCallConvStarter): a calling convention, far or near.
-function IsConventionStarter(const AWord: string): Boolean;
-const
-  STARTERS: array[0..7] of string = ('register', 'pascal', 'cdecl',
-    'stdcall', 'safecall', 'winapi', 'far', 'near');
-var
-  LWord: string;
-begin
-  for LWord in STARTERS do
-    if SameText(AWord, LWord) then
-      Exit(True);
-  Result := False;
 end;
 
 function PasTemplatedKind(AKind: TPasNodeKind): Boolean;
@@ -1094,7 +1077,8 @@ end;
 
 { [reference to] procedure|function [params] [: result] [of object]
   directives - `reference to` is the parent's token (Aux 2), `function` when
-  a result type is there; the directives after its `of object` (N6, N10). }
+  a result type is there; the directives after its `of object` (N10), the
+  `;` before the one with Aux 1. }
 procedure TPrinter.ProcType(ANode: Integer);
 var
   LChild, LParent: Integer;
@@ -1131,17 +1115,15 @@ begin
     Kw('of', ANode);
     Kw('object', ANode);
   end;
-  // After a `;` when a convention starts the run: written into the type, a
-  // declaration after it whose name is a convention would join the run
-  // (`var V: procedure stdcall; cdecl: Integer;` is an error, `procedure;
-  // stdcall; cdecl: Integer` two variables). Not after `reference to`, which
-  // takes no run after a `;` (E2029).
-  if (LChild <> NIL_NODE) and (T.Nodes[ANode].Aux <> 2) and
-     IsConventionStarter(T.Source.VisibleText(T.Nodes[LChild].FirstToken))
-  then
-    Sep(ANode);
+  // The `;` where it was written, before the directive with Aux 1 (F29: one
+  // type either way, not one .dcu). The parser takes it only before a
+  // convention, far or near and never after `reference to`, so the print
+  // reads back as the tree: `var V: procedure; stdcall; cdecl: Integer;` is
+  // two variables, `procedure stdcall; cdecl: Integer` an error.
   while LChild <> NIL_NODE do
   begin
+    if T.Nodes[LChild].Aux = 1 then
+      Kw(';', ANode);
     Child(ANode, LChild);
     LChild := Next(LChild);
   end;
