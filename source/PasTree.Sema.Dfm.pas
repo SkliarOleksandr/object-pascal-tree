@@ -20,7 +20,9 @@ unit PasTree.Sema.Dfm;
     the unit the form file belongs to.
   - The lookup root is the form - except inside `inline F: TFrame1`, where it
     is the frame (csInline -> FLookupRoot := the frame): the frame's children
-    are fields of TFrame1.
+    are fields of TFrame1. A descendant host reopens F as `inherited F`, and
+    that block is the frame's too - csInline is the component's, set by the
+    ancestor's form that created it (IsInlineObj).
   - `OnClick = M` - M is a published METHOD of the ROOT's class
     (Root.MethodAddress), inline frame or not: a handler set on a frame's
     button in the HOST form is a method of the host.
@@ -56,8 +58,8 @@ unit PasTree.Sema.Dfm;
 
   HOW A SITE IS REACHED (TPasFormSiteVia) is recorded for the same host: the
   designer propagates a rename to a form's own components, to its loaded
-  descendants and across modules, but whether it follows into an inline
-  frame's block was never measured.
+  descendants, across modules, and into its hosts' inline blocks (measured
+  in RAD Studio 13, pastree-lsp local/DFM-PLAN.md, spike run 5).
 
   WHAT IS NOT BOUND YET, AND IS REFUSED RATHER THAN SKIPPED. Property NAMES
   (`Caption = ...`, `Font.Name`) and enum VALUES bind through a property's
@@ -195,6 +197,8 @@ type
       RootClass: TSemaXType;
       ObjDone: TArray<Boolean>;
       ObjClass: TArray<TSemaXType>;
+      // IsInlineObj, memoized: 0 not yet known, 1 no, 2 yes.
+      ObjInline: TArray<Byte>;
     end;
     TSymShape = (ssNone, ssField, ssMethod, ssClass, ssProperty, ssEnumValue);
   private
@@ -211,8 +215,10 @@ type
     procedure EnsureRootNames;
     function TypeInUnit(AMid: Integer; const ANameLower: string): TSemaXType;
     function RootClassOf(AEntry: TFormEntry): TSemaXType;
-    function HeaderLookupRoot(ADoc: TPasDfmDoc; AObj: Integer): Integer;
-    function InnerLookupRoot(ADoc: TPasDfmDoc; AObj: Integer): Integer;
+    function RootEntryOfClass(const AClass: TSemaXType): TFormEntry;
+    function IsInlineObj(AEntry: TFormEntry; AObj: Integer): Boolean;
+    function HeaderLookupRoot(AEntry: TFormEntry; AObj: Integer): Integer;
+    function InnerLookupRoot(AEntry: TFormEntry; AObj: Integer): Integer;
     function ObjClassOf(AEntry: TFormEntry; AObj: Integer): TSemaXType;
     function FieldIn(AMid: Integer; const AClass: TSemaXType;
       const ANameLower: string; out AFMid, AFSym: Integer): Boolean;
@@ -227,7 +233,7 @@ type
     function ValueTarget(AEntry: TFormEntry; AIdent: Integer;
       out ATMid, ATSym: Integer; out AIsMethod: Boolean;
       out AVia: TPasFormSiteVia): Boolean; overload;
-    function HeaderVia(ADoc: TPasDfmDoc; AObj: Integer): TPasFormSiteVia;
+    function HeaderVia(AEntry: TFormEntry; AObj: Integer): TPasFormSiteVia;
     function SiteOf(AEntry: TFormEntry; AIdent: Integer;
       AKind: TPasFormSiteKind; AVia: TPasFormSiteVia): TPasFormSite;
     function EntryOf(const APath: string): TFormEntry;
@@ -401,8 +407,11 @@ procedure TPasFormBinder.Refresh;
 var
   LEntry: TFormEntry;
   LDoc: IPasDfmDoc;
+  LChanged: Boolean;
+  LIdx: Integer;
 begin
   EnsureListed;
+  LChanged := False;
   for LEntry in FForms do
   begin
     LDoc := PasDfmLoad(LEntry.Path);
@@ -416,9 +425,22 @@ begin
       LEntry.ObjDone := nil;
       SetLength(LEntry.ObjDone, Length(LDoc.Doc.Objects));
       SetLength(LEntry.ObjClass, Length(LDoc.Doc.Objects));
+      LEntry.ObjInline := nil;
+      SetLength(LEntry.ObjInline, Length(LDoc.Doc.Objects));
       FRootNamesBuilt := False;
+      LChanged := True;
     end;
   end;
+  // What an object IS depends on other form files too - an `inherited F` is
+  // an inline frame when its ancestor's form says so (IsInlineObj) - so one
+  // changed file forgets every object's class and inline state.
+  if LChanged then
+    for LEntry in FForms do
+      for LIdx := 0 to High(LEntry.ObjDone) do
+      begin
+        LEntry.ObjDone[LIdx] := False;
+        LEntry.ObjInline[LIdx] := 0;
+      end;
 end;
 
 // The entry's doc as of the last Refresh.
@@ -498,28 +520,122 @@ begin
   Result := AEntry.RootClass;
 end;
 
-// The object whose class a component's NAME is looked up in: the nearest
-// enclosing inline frame, else the root.
-function TPasFormBinder.HeaderLookupRoot(ADoc: TPasDfmDoc;
-  AObj: Integer): Integer;
+// The form entry whose ROOT is of class AClass, or nil - the form file that
+// class streams itself from (InitInheritedComponent reads one per class).
+function TPasFormBinder.RootEntryOfClass(const AClass: TSemaXType): TFormEntry;
+var
+  LEntry: TFormEntry;
 begin
-  Result := ADoc.Objects[AObj].Parent;
-  while (Result > 0) and (ADoc.Objects[Result].Kind <> dokInline) do
-    Result := ADoc.Objects[Result].Parent;
+  Result := nil;
+  if not XValid(AClass) then
+    Exit;
+  for LEntry in FForms do
+    if SameType(RootClassOf(LEntry), AClass) then
+      Exit(LEntry);
+end;
+
+{ WHETHER AObj'S BLOCK IS AN INLINE FRAME'S - the lookup root inside it is
+  then the frame. TReader switches FLookupRoot on the COMPONENT's csInline
+  (ReadComponent: `if csInline in Result.ComponentState then FLookupRoot :=
+  Result`), and csInline is set by the stream that CREATED the component
+  with ffInline. So `inline F` says it itself, and `inherited F` - a
+  descendant reopening its ancestor's F - says nothing: F is inline when the
+  ancestor's form file that created it wrote `inline F`. That form is found
+  up the class chain of the class that owns F (the lookup root's): the
+  form's own ancestors for a component of the form, the frame class itself
+  (then its ancestors) for a component inside a frame - the first form file
+  of the chain holding F as `object` or `inline` created it; `inherited`
+  there sends the search one class further up.
+
+  Until 0.63.1 only `inline` counted, and every component inside an
+  `inherited Frame1` block of a descendant host was looked up in the host's
+  class and bound to nothing - silently: a rename of the frame's component
+  left `inherited FrameButton` in the descendant's form file, which then
+  fails to load ("Ancestor for 'FrameButton' not found" when the form is
+  created). Found by Alex on 2026-09-28, local/dfmspike's SpikeChild.dfm. }
+function TPasFormBinder.IsInlineObj(AEntry: TFormEntry; AObj: Integer): Boolean;
+var
+  LDoc, LAncDoc: TPasDfmDoc;
+  LOwnerObj, LIdx, LGuard: Integer;
+  LClass: TSemaXType;
+  LAnc: TFormEntry;
+  LName: string;
+  LFound, LAnswer: Boolean;
+begin
+  Result := False;
+  LDoc := DocOf(AEntry);
+  if (AObj <= 0) or (AObj > High(LDoc.Objects)) then
+    Exit;
+  case LDoc.Objects[AObj].Kind of
+    dokInline:
+      Exit(True);
+    dokObject:
+      Exit(False);
+  end;
+  if AEntry.ObjInline[AObj] <> 0 then
+    Exit(AEntry.ObjInline[AObj] = 2);
+  AEntry.ObjInline[AObj] := 1;   // "no" while it is worked out: no cycle
+  LName := LDoc.ObjectName(AObj);
+  LOwnerObj := HeaderLookupRoot(AEntry, AObj);
+  LClass := ObjClassOf(AEntry, LOwnerObj);
+  // A component of the form: created by an ANCESTOR's form file - this one
+  // only reopens it. A component inside a frame: by the frame's own.
+  if LOwnerObj = 0 then
+    LClass := FProj.CanonTypeX(FProj.AncestorOfX(LClass));
+  LAnswer := False;
+  LGuard := 0;
+  while XValid(LClass) and (LGuard < 64) do
+  begin
+    LAnc := RootEntryOfClass(LClass);
+    if (LAnc <> nil) and (LAnc <> AEntry) then
+    begin
+      LAncDoc := DocOf(LAnc);
+      LFound := False;
+      for LIdx := 1 to High(LAncDoc.Objects) do
+        if SameText(LAncDoc.ObjectName(LIdx), LName) and
+           (HeaderLookupRoot(LAnc, LIdx) = 0) then
+        begin
+          LFound := LAncDoc.Objects[LIdx].Kind <> dokInherited;
+          if LFound then
+            LAnswer := LAncDoc.Objects[LIdx].Kind = dokInline;
+          Break;
+        end;
+      if LFound then
+        Break;
+    end;
+    LClass := FProj.CanonTypeX(FProj.AncestorOfX(LClass));
+    Inc(LGuard);
+  end;
+  if LAnswer then
+    AEntry.ObjInline[AObj] := 2;
+  Result := LAnswer;
+end;
+
+// The object whose class a component's NAME is looked up in: the nearest
+// enclosing inline frame (IsInlineObj), else the root.
+function TPasFormBinder.HeaderLookupRoot(AEntry: TFormEntry;
+  AObj: Integer): Integer;
+var
+  LDoc: TPasDfmDoc;
+begin
+  LDoc := DocOf(AEntry);
+  Result := LDoc.Objects[AObj].Parent;
+  while (Result > 0) and not IsInlineObj(AEntry, Result) do
+    Result := LDoc.Objects[Result].Parent;
   if Result < 0 then
     Result := 0;
 end;
 
 // The lookup root in effect INSIDE the object's block - itself for an inline
 // frame (its properties' component references are the frame's).
-function TPasFormBinder.InnerLookupRoot(ADoc: TPasDfmDoc;
+function TPasFormBinder.InnerLookupRoot(AEntry: TFormEntry;
   AObj: Integer): Integer;
 begin
   if AObj <= 0 then
     Exit(0);
-  if ADoc.Objects[AObj].Kind = dokInline then
+  if IsInlineObj(AEntry, AObj) then
     Exit(AObj);
-  Result := HeaderLookupRoot(ADoc, AObj);
+  Result := HeaderLookupRoot(AEntry, AObj);
 end;
 
 { An object's class: the root's is the unit's class; any other's is the type
@@ -546,7 +662,7 @@ begin
   LClassName := LDoc.ObjectClassName(AObj);
   LName := LowerCase(LDoc.ObjectName(AObj));
   LFieldType := XNil;
-  LOwner := ObjClassOf(AEntry, HeaderLookupRoot(LDoc, AObj));
+  LOwner := ObjClassOf(AEntry, HeaderLookupRoot(AEntry, AObj));
   if (LName <> '') and XValid(LOwner) and
      FieldIn(AEntry.Mid, LOwner, LName, LFMid, LFSym) then
     LFieldType := FieldClass(LFMid, LFSym);
@@ -677,10 +793,10 @@ end;
 
 // The path a component's own header is reached by: inside an inline frame's
 // block its name is a field of the frame, not of the form.
-function TPasFormBinder.HeaderVia(ADoc: TPasDfmDoc;
+function TPasFormBinder.HeaderVia(AEntry: TFormEntry;
   AObj: Integer): TPasFormSiteVia;
 begin
-  if (AObj > 0) and (HeaderLookupRoot(ADoc, AObj) > 0) then
+  if (AObj > 0) and (HeaderLookupRoot(AEntry, AObj) > 0) then
     Result := fsvInline
   else
     Result := fsvOwn;
@@ -729,10 +845,10 @@ begin
   LDoc := DocOf(AEntry);
   LId := LDoc.Idents[AIdent];
   LFirst := AIdent - LId.Seg;
-  LClass := ObjClassOf(AEntry, InnerLookupRoot(LDoc, LId.Obj));
+  LClass := ObjClassOf(AEntry, InnerLookupRoot(AEntry, LId.Obj));
   LName := LowerCase(LDoc.IdentText(LFirst));
   // A value inside an inline frame's block is resolved against the frame.
-  if InnerLookupRoot(LDoc, LId.Obj) > 0 then
+  if InnerLookupRoot(AEntry, LId.Obj) > 0 then
     AVia := fsvInline
   else
     AVia := fsvOwn;
@@ -875,7 +991,7 @@ begin
               dirObjectName:
                 if LId.Obj > 0 then
                 begin
-                  LClass := ObjClassOf(LEntry, HeaderLookupRoot(LDoc, LId.Obj));
+                  LClass := ObjClassOf(LEntry, HeaderLookupRoot(LEntry, LId.Obj));
                   if not XValid(LClass) then
                   begin
                     if ARename then
@@ -889,7 +1005,7 @@ begin
                   else if FieldIn(LEntry.Mid, LClass, LNameLower, LTMid,
                     LTSym) and (LTMid = ATMid) and (LTSym = ASym) then
                     LList.Add(SiteOf(LEntry, LIdx, fskComponent,
-                      HeaderVia(LDoc, LId.Obj)));
+                      HeaderVia(LEntry, LId.Obj)));
                 end;
               dirValue:
                 if ValueTarget(LEntry, LIdx, LTMid, LTSym, LIsMethod, LVia) and
@@ -941,8 +1057,8 @@ begin
               LClass := ObjClassOf(LEntry, LId.Obj);
               // An inline object's class is the frame's, named in the host.
               if (LId.Obj > 0) and
-                 ((LDoc.Objects[LId.Obj].Kind = dokInline) or
-                  (HeaderLookupRoot(LDoc, LId.Obj) > 0)) then
+                 (IsInlineObj(LEntry, LId.Obj) or
+                  (HeaderLookupRoot(LEntry, LId.Obj) > 0)) then
                 LVia := fsvInline
               else
                 LVia := fsvOwn;
@@ -1058,7 +1174,7 @@ begin
         TPath.GetFileName(FProj.ModelFile(LMMid))]));
     end;
     for LObj := 1 to High(LDoc.Objects) do
-      if (HeaderLookupRoot(LDoc, LObj) = 0) and
+      if (HeaderLookupRoot(LEntry, LObj) = 0) and
          SameText(LDoc.ObjectName(LObj), ANewName) then
         Exit(Format('%s already has a component named "%s" - rename ' +
           'refused, nothing planned.', [TPath.GetFileName(LEntry.Path),
@@ -1247,7 +1363,7 @@ begin
       LO.FieldSym := NIL_SYM;
       if (LObj > 0) and (LO.Name <> '') then
       begin
-        LOwner := ObjClassOf(LEntry, HeaderLookupRoot(LDoc, LObj));
+        LOwner := ObjClassOf(LEntry, HeaderLookupRoot(LEntry, LObj));
         if FieldIn(LEntry.Mid, LOwner, LowerCase(LO.Name), LTMid, LTSym) then
         begin
           LO.FieldMid := LTMid;
@@ -1279,7 +1395,7 @@ begin
         LB.Via := LVia;
       end
       else if not XValid(AInfo.RootClass) or not XValid(ObjClassOf(LEntry,
-        InnerLookupRoot(LDoc, LId.Obj))) then
+        InnerLookupRoot(LEntry, LId.Obj))) then
         Continue   // nothing to look the name up in: unknown, not missing
       else if (LId.SegCount = 1) and IsEventProp(LDoc, LId.Prop) then
       begin

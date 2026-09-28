@@ -388,6 +388,101 @@ const
     '  end' + CRLF +                                             // 4
     'end' + CRLF;                                                // 5
 
+  // A frame embedded in a host, and the host's descendant and grandchild
+  // reopening it as `inherited Pane1` - the frame's block all the same (the
+  // component is csInline since the host's `inline` created it). Panel1 is
+  // the control case: a plain `inherited` object, its children the form's.
+  UNIT_PANE =
+    'unit FixPane;'#10 +                                         // 1
+    'interface'#10 +                                             // 2
+    'uses FixVcl;'#10 +                                          // 3
+    'type'#10 +                                                  // 4
+    '  TFixPane = class(TFrame)'#10 +                            // 5
+    '    PaneEdit: TEdit;'#10 +                                  // 6  col 5
+    '  end;'#10 +                                                // 7
+    'implementation'#10 +                                        // 8
+    '{$R *.dfm}'#10 +                                            // 9
+    'end.'#10;                                                   // 10
+
+  DFM_PANE =
+    'object FixPane: TFixPane' + CRLF +                          // 1
+    '  object PaneEdit: TEdit' + CRLF +                          // 2  col 10
+    '  end' + CRLF +                                             // 3
+    'end' + CRLF;                                                // 4
+
+  UNIT_HOST =
+    'unit FixHost;'#10 +                                         // 1
+    'interface'#10 +                                             // 2
+    'uses FixVcl, FixPane;'#10 +                                 // 3
+    'type'#10 +                                                  // 4
+    '  TFixHostForm = class(TForm)'#10 +                         // 5
+    '    Panel1: TWinControl;'#10 +                              // 6
+    '    HostEdit: TEdit;'#10 +                                  // 7  col 5
+    '    Pane1: TFixPane;'#10 +                                  // 8  col 5
+    '    procedure HostPaneClick(Sender: TObject);'#10 +         // 9  col 15
+    '  end;'#10 +                                                // 10
+    'implementation'#10 +                                        // 11
+    '{$R *.dfm}'#10 +                                            // 12
+    'procedure TFixHostForm.HostPaneClick(Sender: TObject);'#10 + // 13
+    'begin'#10 +                                                 // 14
+    'end;'#10 +                                                  // 15
+    'end.'#10;                                                   // 16
+
+  DFM_HOST =
+    'object FixHostForm: TFixHostForm' + CRLF +                  // 1
+    '  object Panel1: TWinControl' + CRLF +                      // 2
+    '    object HostEdit: TEdit' + CRLF +                        // 3  col 12
+    '    end' + CRLF +                                           // 4
+    '  end' + CRLF +                                             // 5
+    '  inline Pane1: TFixPane' + CRLF +                          // 6  Pane1 col 10
+    '  end' + CRLF +                                             // 7
+    'end' + CRLF;                                                // 8
+
+  UNIT_HOSTKID =
+    'unit FixHostKid;'#10 +                                      // 1
+    'interface'#10 +                                             // 2
+    'uses FixVcl, FixHost;'#10 +                                 // 3
+    'type'#10 +                                                  // 4
+    '  TFixHostKidForm = class(TFixHostForm)'#10 +               // 5
+    '  end;'#10 +                                                // 6
+    'implementation'#10 +                                        // 7
+    '{$R *.dfm}'#10 +                                            // 8
+    'end.'#10;                                                   // 9
+
+  DFM_HOSTKID =
+    'inherited FixHostKidForm: TFixHostKidForm' + CRLF +         // 1
+    '  inherited Panel1: TWinControl' + CRLF +                   // 2
+    '    inherited HostEdit: TEdit' + CRLF +                     // 3  col 15
+    '      Text = ''k''' + CRLF +                                // 4
+    '    end' + CRLF +                                           // 5
+    '  end' + CRLF +                                             // 6
+    '  inherited Pane1: TFixPane' + CRLF +                       // 7  Pane1 col 13
+    '    inherited PaneEdit: TEdit' + CRLF +                     // 8  col 15
+    '      OnClick = HostPaneClick' + CRLF +                     // 9  col 17
+    '    end' + CRLF +                                           // 10
+    '  end' + CRLF +                                             // 11
+    'end' + CRLF;                                                // 12
+
+  UNIT_HOSTGRAND =
+    'unit FixHostGrand;'#10 +                                    // 1
+    'interface'#10 +                                             // 2
+    'uses FixVcl, FixHostKid;'#10 +                              // 3
+    'type'#10 +                                                  // 4
+    '  TFixHostGrandForm = class(TFixHostKidForm)'#10 +          // 5
+    '  end;'#10 +                                                // 6
+    'implementation'#10 +                                        // 7
+    '{$R *.dfm}'#10 +                                            // 8
+    'end.'#10;                                                   // 9
+
+  DFM_HOSTGRAND =
+    'inherited FixHostGrandForm: TFixHostGrandForm' + CRLF +     // 1
+    '  inherited Pane1: TFixPane' + CRLF +                       // 2
+    '    inherited PaneEdit: TEdit' + CRLF +                     // 3  col 15
+    '      Text = ''g''' + CRLF +                                // 4
+    '    end' + CRLF +                                           // 5
+    '  end' + CRLF +                                             // 6
+    'end' + CRLF;                                                // 7
+
 var
   GCounter: TPasSuiteCounter;
   GProj: TPasSemaProject;
@@ -944,6 +1039,52 @@ begin
     15, 'GrandClick', LEdits, LError) and LError.Contains('ancestor'));
 end;
 
+{ `inherited Pane1` in a descendant host is the frame's block: its children
+  are the frame's fields, as in the host's `inline Pane1` - two levels down
+  too. Until 0.63.1 they bound to nothing and a rename left them behind. }
+procedure InheritedInlineChecks;
+var
+  LSites: TArray<TPasFormSite>;
+  LEdits: TArray<TPasRenameEdit>;
+  LError: string;
+  LInfo: TPasFormInfo;
+  LIdx: Integer;
+begin
+  LSites := Sites('FixPane.pas', 6, 5);    // PaneEdit
+  Ok('inherited inline: the frame''s field in both descendant hosts',
+    (Length(LSites) = 3) and
+    HasSite(LSites, 'FixPane.dfm', 2, 10, fskComponent, 'PaneEdit') and
+    HasSite(LSites, 'FixHostKid.dfm', 8, 15, fskComponent, 'PaneEdit') and
+    HasSite(LSites, 'FixHostGrand.dfm', 3, 15, fskComponent, 'PaneEdit'));
+  Ok('inherited inline: reached inline, as in the host',
+    SiteVia(LSites, 'FixHostKid.dfm', 8, 15, fsvInline) and
+    SiteVia(LSites, 'FixHostGrand.dfm', 3, 15, fsvInline));
+  LSites := Sites('FixHost.pas', 7, 5);    // HostEdit
+  Ok('a plain inherited object''s child stays the form''s',
+    (Length(LSites) = 2) and
+    HasSite(LSites, 'FixHost.dfm', 3, 12, fskComponent, 'HostEdit') and
+    HasSite(LSites, 'FixHostKid.dfm', 3, 15, fskComponent, 'HostEdit') and
+    SiteVia(LSites, 'FixHostKid.dfm', 3, 15, fsvOwn));
+  LSites := Sites('FixHost.pas', 9, 15);   // HostPaneClick
+  Ok('a host handler linked inside the inherited inline block',
+    (Length(LSites) = 1) and
+    HasSite(LSites, 'FixHostKid.dfm', 9, 17, fskHandler, 'PaneEdit') and
+    SiteVia(LSites, 'FixHostKid.dfm', 9, 17, fsvInline));
+  Ok('inherited inline: a rename of the frame''s field reaches both',
+    Plan('FixPane.pas', 6, 5, 'NameBox', LEdits, LError) and
+    (FormEdits(LEdits) = 3) and
+    HasEdit(LEdits, 'FixHostKid.dfm', 8, 15, fskComponent,
+      '    inherited NameBox: TEdit') and
+    HasEdit(LEdits, 'FixHostGrand.dfm', 3, 15, fskComponent,
+      '    inherited NameBox: TEdit'));
+  Ok('describe: an inherited inline block''s child fills the frame''s field',
+    GNav.DescribeForm(FilePath('FixHostKid.dfm'), LInfo));
+  LIdx := FormObj(LInfo, 'PaneEdit');
+  Ok('describe: PaneEdit is TFixPane.PaneEdit', (LIdx > 0) and
+    IsSymAt(LInfo.Objects[LIdx].FieldMid, LInfo.Objects[LIdx].FieldSym,
+    'FixPane.pas', 6, 5));
+end;
+
 procedure DescribeChecks;
 var
   LInfo: TPasFormInfo;
@@ -1042,6 +1183,15 @@ begin
   TFile.WriteAllText(FilePath('FixBroken.dfm'), DFM_BROKEN, TEncoding.ASCII);
   TFile.WriteAllText(FilePath('FixCap.pas'), UNIT_CAP);
   TFile.WriteAllText(FilePath('FixCap.dfm'), DFM_CAP, TEncoding.ASCII);
+  TFile.WriteAllText(FilePath('FixPane.pas'), UNIT_PANE);
+  TFile.WriteAllText(FilePath('FixPane.dfm'), DFM_PANE, TEncoding.ASCII);
+  TFile.WriteAllText(FilePath('FixHost.pas'), UNIT_HOST);
+  TFile.WriteAllText(FilePath('FixHost.dfm'), DFM_HOST, TEncoding.ASCII);
+  TFile.WriteAllText(FilePath('FixHostKid.pas'), UNIT_HOSTKID);
+  TFile.WriteAllText(FilePath('FixHostKid.dfm'), DFM_HOSTKID, TEncoding.ASCII);
+  TFile.WriteAllText(FilePath('FixHostGrand.pas'), UNIT_HOSTGRAND);
+  TFile.WriteAllText(FilePath('FixHostGrand.dfm'), DFM_HOSTGRAND,
+    TEncoding.ASCII);
 
   GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
   try
@@ -1054,6 +1204,7 @@ begin
       CarryChecks;
       DescribeChecks;
       AncestorChecks;
+      InheritedInlineChecks;
     finally
       GNav.Free;
     end;
