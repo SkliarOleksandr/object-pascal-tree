@@ -307,6 +307,26 @@ const
     '{$R *.dfm}'#10 +                                            // 9
     'end.'#10;                                                   // 10
 
+  // A descendant with no form file of its own that REDECLARES the handler its
+  // ancestors' forms bind by name: an instance of it reads FixBase.dfm and
+  // FixChild.dfm, and MethodAddress finds its own Button1Click.
+  UNIT_GRAND =
+    'unit FixGrand;'#10 +                                        // 1
+    'interface'#10 +                                             // 2
+    'uses FixVcl, FixChild;'#10 +                                // 3
+    'type'#10 +                                                  // 4
+    '  TFixGrandForm = class(TFixChildForm)'#10 +                // 5
+    '    procedure Button1Click(Sender: TObject);'#10 +          // 6  col 15
+    '  end;'#10 +                                                // 7
+    'implementation'#10 +                                        // 8
+    'procedure TFixGrandForm.Button1Click(Sender: TObject);'#10 + // 9
+    'begin'#10 +                                                 // 10
+    'end;'#10 +                                                  // 11
+    'end.'#10;                                                   // 12
+
+  // Button3 and Label3 have no field, and name what nothing answers: a
+  // handler no class of the chain declares, a component path whose head is
+  // no component and no module (DescribeForm lists both as unbound).
   DFM_CHILD =
     'inherited FixChildForm: TFixChildForm' + CRLF +             // 1
     '  inherited Button1: TButton' + CRLF +                      // 2  Button1 col 13
@@ -315,7 +335,13 @@ const
     '  object Button2: TButton' + CRLF +                         // 5  Button2 col 10
     '    OnClick = Button1Click' + CRLF +                        // 6  col 15
     '  end' + CRLF +                                             // 7
-    'end' + CRLF;                                                // 8
+    '  object Button3: TButton' + CRLF +                         // 8
+    '    OnClick = MissingClick' + CRLF +                        // 9
+    '  end' + CRLF +                                             // 10
+    '  object Label3: TLabel' + CRLF +                           // 11
+    '    FocusControl = Nowhere.Edit1' + CRLF +                  // 12
+    '  end' + CRLF +                                             // 13
+    'end' + CRLF;                                                // 14
 
   UNIT_BIN =
     'unit FixBin;'#10 +                                          // 1
@@ -869,6 +895,130 @@ begin
     SameText(TPath.GetFileName(LRole.FormFile), 'FixChild.dfm'));
 end;
 
+function FormObj(const AInfo: TPasFormInfo; const AName: string): Integer;
+begin
+  for var LIdx := 0 to High(AInfo.Objects) do
+    if SameText(AInfo.Objects[LIdx].Name, AName) then
+      Exit(LIdx);
+  Result := -1;
+end;
+
+// The binding of AObject's property AProp, -1 for none.
+function FormBinding(const AInfo: TPasFormInfo; const AObject,
+  AProp: string): Integer;
+begin
+  for var LIdx := 0 to High(AInfo.Bindings) do
+    if SameText(AInfo.Objects[AInfo.Bindings[LIdx].Obj].Name, AObject) and
+       SameText(AInfo.Bindings[LIdx].PropName, AProp) then
+      Exit(LIdx);
+  Result := -1;
+end;
+
+// Whether (AMid, ASym) is the symbol at ALine, ACol of AFile.
+function IsSymAt(AMid, ASym: Integer; const AFile: string;
+  ALine, ACol: Integer): Boolean;
+var
+  LTMid, LSym: Integer;
+begin
+  Result := (ASym <> NIL_SYM) and SymAt(AFile, ALine, ACol, LTMid, LSym) and
+    (LTMid = AMid) and (LSym = ASym);
+end;
+
+procedure AncestorChecks;
+var
+  LSites: TArray<TPasFormSite>;
+  LEdits: TArray<TPasRenameEdit>;
+  LError: string;
+begin
+  LSites := Sites('FixGrand.pas', 6, 15);   // TFixGrandForm.Button1Click
+  Ok('a redeclared handler: bound by both ancestors'' forms, by name',
+    (Length(LSites) = 2) and
+    HasSite(LSites, 'FixBase.dfm', 8, 15, fskHandler, 'Button1') and
+    HasSite(LSites, 'FixChild.dfm', 6, 15, fskHandler, 'Button2') and
+    SiteVia(LSites, 'FixBase.dfm', 8, 15, fsvAncestor) and
+    SiteVia(LSites, 'FixChild.dfm', 6, 15, fsvAncestor));
+  LSites := Sites('FixBase.pas', 11, 15);   // TFixBaseForm.Button1Click
+  Ok('the ancestor''s handler keeps its own forms'' lines',
+    (Length(LSites) = 2) and SiteVia(LSites, 'FixBase.dfm', 8, 15, fsvOwn));
+  Ok('a redeclared handler''s rename is refused', not Plan('FixGrand.pas', 6,
+    15, 'GrandClick', LEdits, LError) and LError.Contains('ancestor'));
+end;
+
+procedure DescribeChecks;
+var
+  LInfo: TPasFormInfo;
+  LIdx: Integer;
+begin
+  Ok('describe: a base form reads whole', GNav.DescribeForm(
+    FilePath('FixBase.dfm'), LInfo) and (LInfo.Error = '') and
+    not LInfo.IsBinary and (Length(LInfo.Objects) = 8) and
+    (LInfo.Objects[0].Parent = -1) and (LInfo.Objects[0].FieldSym = NIL_SYM));
+  LIdx := FormObj(LInfo, 'Button1');
+  Ok('describe: a component fills its field', (LIdx > 0) and
+    (LInfo.Objects[LIdx].Line = 6) and (LInfo.Objects[LIdx].ClassName =
+    'TButton') and IsSymAt(LInfo.Objects[LIdx].FieldMid,
+    LInfo.Objects[LIdx].FieldSym, 'FixBase.pas', 7, 5));
+  LIdx := FormObj(LInfo, 'FrameEdit');
+  Ok('describe: an inline frame''s child fills the frame''s field',
+    (LIdx > 0) and (LInfo.Objects[LIdx].Kind = dokInherited) and
+    (LInfo.Objects[LInfo.Objects[LIdx].Parent].Name = 'Frame11') and
+    (LInfo.Objects[LInfo.Objects[LIdx].Parent].Kind = dokInline) and
+    IsSymAt(LInfo.Objects[LIdx].FieldMid, LInfo.Objects[LIdx].FieldSym,
+    'FixFrame.pas', 6, 5));
+  Ok('describe: five values name symbols, alClient is none',
+    (Length(LInfo.Bindings) = 5) and (FormBinding(LInfo, 'Edit1', 'Align') < 0));
+  LIdx := FormBinding(LInfo, 'Button1', 'OnClick');
+  Ok('describe: a handler', (LIdx >= 0) and LInfo.Bindings[LIdx].IsMethod and
+    (LInfo.Bindings[LIdx].Line = 8) and IsSymAt(LInfo.Bindings[LIdx].TMid,
+    LInfo.Bindings[LIdx].TSym, 'FixBase.pas', 11, 15));
+  LIdx := FormBinding(LInfo, 'Button1', 'Action');
+  Ok('describe: a module''s component, by its root Name', (LIdx >= 0) and
+    not LInfo.Bindings[LIdx].IsMethod and
+    (LInfo.Bindings[LIdx].Value = 'FixData.Action1') and
+    (LInfo.Bindings[LIdx].Via = fsvModule) and IsSymAt(
+    LInfo.Bindings[LIdx].TMid, LInfo.Bindings[LIdx].TSym, 'FixData.pas', 6, 5));
+  LIdx := FormBinding(LInfo, 'Label2', 'FocusControl');
+  Ok('describe: a path into an inline frame', (LIdx >= 0) and
+    IsSymAt(LInfo.Bindings[LIdx].TMid, LInfo.Bindings[LIdx].TSym,
+    'FixFrame.pas', 6, 5));
+  LIdx := FormBinding(LInfo, 'FrameButton', 'OnClick');
+  Ok('describe: a handler set in an inline block is the host''s',
+    (LIdx >= 0) and (LInfo.Bindings[LIdx].Via = fsvInline) and
+    IsSymAt(LInfo.Bindings[LIdx].TMid, LInfo.Bindings[LIdx].TSym,
+    'FixBase.pas', 12, 15));
+
+  Ok('describe: an inherited form lists its own file''s objects',
+    GNav.DescribeForm(FilePath('FixChild.dfm'), LInfo) and
+    (Length(LInfo.Objects) = 5) and (FormObj(LInfo, 'Button1') > 0) and
+    (LInfo.Objects[FormObj(LInfo, 'Button1')].Kind = dokInherited) and
+    IsSymAt(LInfo.Objects[FormObj(LInfo, 'Button1')].FieldMid,
+    LInfo.Objects[FormObj(LInfo, 'Button1')].FieldSym, 'FixBase.pas', 7, 5));
+  LIdx := FormBinding(LInfo, 'Button2', 'OnClick');
+  Ok('describe: the ancestor''s handler', (LIdx >= 0) and IsSymAt(
+    LInfo.Bindings[LIdx].TMid, LInfo.Bindings[LIdx].TSym, 'FixBase.pas', 11,
+    15));
+  LIdx := FormBinding(LInfo, 'Button3', 'OnClick');
+  Ok('describe: a handler no class declares is unbound', (LIdx >= 0) and
+    LInfo.Bindings[LIdx].IsMethod and (LInfo.Bindings[LIdx].TSym = NIL_SYM) and
+    (LInfo.Bindings[LIdx].Value = 'MissingClick'));
+  LIdx := FormBinding(LInfo, 'Label3', 'FocusControl');
+  Ok('describe: a path nothing answers is unbound', (LIdx >= 0) and
+    not LInfo.Bindings[LIdx].IsMethod and
+    (LInfo.Bindings[LIdx].TSym = NIL_SYM) and
+    (LInfo.Bindings[LIdx].Value = 'Nowhere.Edit1'));
+  Ok('describe: a component with no field', (FormObj(LInfo, 'Button3') > 0)
+    and (LInfo.Objects[FormObj(LInfo, 'Button3')].FieldSym = NIL_SYM));
+
+  Ok('describe: a binary form file says so', GNav.DescribeForm(
+    FilePath('FixBin.dfm'), LInfo) and LInfo.IsBinary and
+    (FormBinding(LInfo, 'BinButton', 'OnClick') >= 0));
+  Ok('describe: a malformed one, with what was read', GNav.DescribeForm(
+    FilePath('FixBroken.dfm'), LInfo) and (LInfo.Error <> '') and
+    (FormObj(LInfo, 'BrokenButton') > 0));
+  Ok('describe: no form file of the project', not GNav.DescribeForm(
+    FilePath('NoSuch.dfm'), LInfo) and (LInfo.Error <> ''));
+end;
+
 begin
   GCounter.Init;
   GDir := TPath.Combine(TPath.GetTempPath, 'pastree_dfm_smoke');
@@ -884,6 +1034,7 @@ begin
   TFile.WriteAllText(FilePath('FixBase.pas'), UNIT_BASE);
   TFile.WriteAllText(FilePath('FixBase.dfm'), DFM_BASE, TEncoding.ASCII);
   TFile.WriteAllText(FilePath('FixChild.pas'), UNIT_CHILD);
+  TFile.WriteAllText(FilePath('FixGrand.pas'), UNIT_GRAND);
   TFile.WriteAllText(FilePath('FixChild.dfm'), DFM_CHILD, TEncoding.ASCII);
   TFile.WriteAllText(FilePath('FixBin.pas'), UNIT_BIN);
   WriteBinaryForm(FilePath('FixBin.dfm'), DFM_BIN_TEXT);
@@ -901,6 +1052,8 @@ begin
       SiteChecks;
       RenameChecks;
       CarryChecks;
+      DescribeChecks;
+      AncestorChecks;
     finally
       GNav.Free;
     end;

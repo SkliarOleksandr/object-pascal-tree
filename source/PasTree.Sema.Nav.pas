@@ -565,6 +565,9 @@ type
       TPasFormRole. For a host that must know which form's live designer owns
       a symbol before renaming it. }
     function FormRoleOf(ATMid, ASym: Integer): TPasFormRole;
+    { One form file of the project whole - its objects, their classes and
+      fields, the values naming symbols (TPasFormBinder.DescribeForm). }
+    function DescribeForm(const APath: string; out AInfo: TPasFormInfo): Boolean;
     { The UNIT counterpart of PlanRename: ATargetMid's own header name plus
       every `uses` item across the project that resolved to it (the same two
       answers UnitDeclHit/FindUnitReferences give, as edits). A dotted new
@@ -1074,6 +1077,12 @@ var
   LError: string;
 begin
   Result := FormBinder.SitesOf(ATMid, ASym, False, LError);
+end;
+
+function TPasNavigator.DescribeForm(const APath: string;
+  out AInfo: TPasFormInfo): Boolean;
+begin
+  Result := FormBinder.DescribeForm(APath, AInfo);
 end;
 
 function TPasNavigator.FormRoleOf(ATMid, ASym: Integer): TPasFormRole;

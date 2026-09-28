@@ -24,6 +24,12 @@ unit PasTree.Sema.Dfm;
   - `OnClick = M` - M is a published METHOD of the ROOT's class
     (Root.MethodAddress), inline frame or not: a handler set on a frame's
     button in the HOST form is a method of the host.
+  - The Root is the INSTANCE being created, and a descendant's instance
+    reads every ancestor's form file too (InitInheritedComponent): a line
+    of an ancestor's form binds, for a descendant that redeclares M, the
+    descendant's M (fsvAncestor). Such a line binds the ancestor's M for
+    the ancestor's own forms at the same time, so a rename of either
+    cannot rewrite it and is refused.
   - `FocusControl = X` - a component owned by the lookup root, i.e. its field.
   - `P = A.B.C` - A is a component of the lookup root, else the Name of
     another module's ROOT (a data module referenced from a form - the global
@@ -90,7 +96,12 @@ type
     fsvOwn,     // the form's own lookup root: its components, its handlers
     fsvInline,  // inside an inline frame's block, or through a component
                 // path (`Frame1.Edit1`)
-    fsvModule); // through another module's root Name (`DataModule1.Table1`)
+    fsvModule,  // through another module's root Name (`DataModule1.Table1`)
+    fsvAncestor); // an ANCESTOR's form file binding the handler by name: a
+                // descendant's instance reads it too, and its MethodAddress
+                // finds the descendant's own method of that name - a line
+                // that also binds the ancestor's method for the ancestor's
+                // own forms, so a rename can never rewrite it
 
   TPasFormSite = record
     FilePath: string;
@@ -130,6 +141,48 @@ type
   TPasCarriedHandler = record
     TMid, TSym: Integer;
     NewName: string;
+  end;
+
+  // One object of a form file, bound (DescribeForm).
+  TPasFormObject = record
+    Obj: Integer;              // its index in the document's Objects
+    Parent: Integer;           // the enclosing object's Obj; -1 for the root
+    Kind: TPasDfmObjectKind;
+    Name, ClassName: string;   // as written; Name '' for an unnamed object
+    Line: Integer;             // of its header, 1-based
+    ClassX: TSemaXType;        // the class it is (ObjClassOf); XNil when unknown
+    // The published field its name fills - of the lookup root's class, the
+    // nearest inline frame's inside one (FieldAddress). NIL_SYM for the root,
+    // an unnamed object and a component no field is declared for.
+    FieldMid, FieldSym: Integer;
+  end;
+
+  { An identifier VALUE of a form file that names a symbol - a handler
+    (`OnClick = M`), a component (`FocusControl = X`, `DataSource = DM.X`) -
+    or one that should and names nothing: an event property whose value no
+    published method of the root has (the form fails to load), a component
+    path whose head or segment no field answers. A value that is none of
+    these (`Align = alClient`, `Visible = True`) is not one. }
+  TPasFormBinding = record
+    Obj: Integer;              // the object whose property it is
+    PropName: string;          // `OnClick`, `FocusControl`, `Items.Action`
+    Value: string;             // as written: `btnSaveClick`, `dmData.pmActions`
+    Line: Integer;             // 1-based
+    IsMethod: Boolean;         // a handler (or an event whose method is missing)
+    // The symbol it binds; TSym = NIL_SYM when it binds nothing.
+    TMid, TSym: Integer;
+    Via: TPasFormSiteVia;
+  end;
+
+  // A form file as TReader would bind it (DescribeForm).
+  TPasFormInfo = record
+    FilePath: string;
+    // '' when it was read whole; else why not, and what was read before.
+    Error: string;
+    IsBinary: Boolean;         // lines are of the converted text
+    RootClass: TSemaXType;     // the class of the unit the file belongs to
+    Objects: TArray<TPasFormObject>;     // in file order, the root first
+    Bindings: TArray<TPasFormBinding>;   // in file order
   end;
 
   TPasFormBinder = class
@@ -233,6 +286,14 @@ type
       out ACaptions: TArray<TPasFormSite>);
     { See TPasFormRole. }
     function RoleOf(ATMid, ASym: Integer): TPasFormRole;
+    { One form file of the project, whole: every object with its class and
+      the published field it fills, and every value that names a symbol,
+      bound as SitesOf binds them - what the Object Inspector shows for the
+      form, without its plain properties. An inherited form's objects are
+      its own file's only (`inherited X` reopens the ancestor's X); the
+      ancestor form is RoleOf(the ancestor class).FormFile. False, with
+      AInfo.Error set, for a path that is no form file of the project. }
+    function DescribeForm(const APath: string; out AInfo: TPasFormInfo): Boolean;
   end;
 
 implementation
@@ -850,7 +911,29 @@ begin
               end
               else if ValueTarget(LEntry, LIdx, LTMid, LTSym, LIsMethod,
                 LVia) and LIsMethod and (LTMid = ATMid) and (LTSym = ASym) then
-                LList.Add(SiteOf(LEntry, LIdx, fskHandler, LVia));
+                LList.Add(SiteOf(LEntry, LIdx, fskHandler, LVia))
+              // An ANCESTOR's form: an instance of the method's class reads
+              // it too (InitInheritedComponent, one resource per class), and
+              // the reader's Root is that instance - MethodAddress finds this
+              // method by the name, not the ancestor's own.
+              else if IsEventProp(LDoc, LId.Prop) and XValid(LOwner) and
+                not SameType(FProj.CanonTypeX(LOwner), RootClassOf(LEntry)) and
+                FProj.XDescendsFrom(LOwner, RootClassOf(LEntry)) and
+                MethodIn(ATMid, LOwner, LNameLower, LTMid, LTSym) and
+                (LTMid = ATMid) and (LTSym = ASym) then
+              begin
+                if ARename then
+                begin
+                  AError := Format('%s binds "%s" by name in an ancestor''s ' +
+                    'form, for %s as well as for the ancestor''s own forms - ' +
+                    'renaming it would leave that event running the ' +
+                    'ancestor''s method; rename refused, nothing planned.',
+                    [Where, LDoc.IdentText(LIdx),
+                    FProj.Model(LOwner.UnitId).Symbols[LOwner.Sym].Name]);
+                  Exit;
+                end;
+                LList.Add(SiteOf(LEntry, LIdx, fskHandler, fsvAncestor));
+              end;
             end;
           ssClass:
             if LId.Role = dirClassName then
@@ -1113,6 +1196,116 @@ begin
       Break;
     end;
   end;
+end;
+
+function TPasFormBinder.DescribeForm(const APath: string;
+  out AInfo: TPasFormInfo): Boolean;
+var
+  LEntry: TFormEntry;
+  LDoc: TPasDfmDoc;
+  LObjects: TList<TPasFormObject>;
+  LBindings: TList<TPasFormBinding>;
+  LO: TPasFormObject;
+  LB: TPasFormBinding;
+  LId: TPasDfmIdent;
+  LOwner: TSemaXType;
+  LTMid, LTSym, LFirst: Integer;
+  LIsMethod: Boolean;
+  LVia: TPasFormSiteVia;
+begin
+  AInfo := Default(TPasFormInfo);
+  AInfo.FilePath := APath;
+  AInfo.RootClass := XNil;
+  Refresh;
+  LEntry := EntryOf(APath);
+  if LEntry = nil then
+  begin
+    AInfo.Error := 'not a form file of the project';
+    Exit(False);
+  end;
+  LDoc := DocOf(LEntry);
+  AInfo.FilePath := LEntry.Path;
+  AInfo.Error := LDoc.Error;
+  AInfo.IsBinary := LDoc.IsBinary;
+  AInfo.RootClass := RootClassOf(LEntry);
+  LObjects := TList<TPasFormObject>.Create;
+  LBindings := TList<TPasFormBinding>.Create;
+  try
+    for var LObj := 0 to High(LDoc.Objects) do
+    begin
+      LO := Default(TPasFormObject);
+      LO.Obj := LObj;
+      LO.Parent := LDoc.Objects[LObj].Parent;
+      LO.Kind := LDoc.Objects[LObj].Kind;
+      LO.Name := LDoc.ObjectName(LObj);
+      LO.ClassName := LDoc.ObjectClassName(LObj);
+      if LDoc.Objects[LObj].ClassIdent >= 0 then
+        LO.Line := LDoc.LineOf(
+          LDoc.Idents[LDoc.Objects[LObj].ClassIdent].Offset);
+      LO.ClassX := ObjClassOf(LEntry, LObj);
+      LO.FieldMid := NIL_SYM;
+      LO.FieldSym := NIL_SYM;
+      if (LObj > 0) and (LO.Name <> '') then
+      begin
+        LOwner := ObjClassOf(LEntry, HeaderLookupRoot(LDoc, LObj));
+        if FieldIn(LEntry.Mid, LOwner, LowerCase(LO.Name), LTMid, LTSym) then
+        begin
+          LO.FieldMid := LTMid;
+          LO.FieldSym := LTSym;
+        end;
+      end;
+      LObjects.Add(LO);
+    end;
+    // A value's LAST segment binds the whole path (ValueTarget walks it).
+    for var LIdx := 0 to High(LDoc.Idents) do
+    begin
+      LId := LDoc.Idents[LIdx];
+      if (LId.Role <> dirValue) or (LId.Seg <> LId.SegCount - 1) or
+         (LId.Prop < 0) then
+        Continue;
+      LB := Default(TPasFormBinding);
+      LB.Obj := LId.Obj;
+      LB.PropName := LDoc.PropPath(LId.Prop);
+      LFirst := LIdx - LId.Seg;
+      LB.Value := LDoc.IdentText(LFirst);
+      for var LS := LFirst + 1 to LIdx do
+        LB.Value := LB.Value + '.' + LDoc.IdentText(LS);
+      LB.Line := LDoc.LineOf(LDoc.Idents[LFirst].Offset);
+      if ValueTarget(LEntry, LIdx, LTMid, LTSym, LIsMethod, LVia) then
+      begin
+        LB.IsMethod := LIsMethod;
+        LB.TMid := LTMid;
+        LB.TSym := LTSym;
+        LB.Via := LVia;
+      end
+      else if not XValid(AInfo.RootClass) or not XValid(ObjClassOf(LEntry,
+        InnerLookupRoot(LDoc, LId.Obj))) then
+        Continue   // nothing to look the name up in: unknown, not missing
+      else if (LId.SegCount = 1) and IsEventProp(LDoc, LId.Prop) then
+      begin
+        // An event naming no method the root has: EReadError when it loads.
+        LB.IsMethod := True;
+        LB.TMid := NIL_SYM;
+        LB.TSym := NIL_SYM;
+      end
+      else if LId.SegCount > 1 then
+      begin
+        // `A.B` is a component path, never an enum value: one nothing answers
+        // is a reference left dangling.
+        LB.TMid := NIL_SYM;
+        LB.TSym := NIL_SYM;
+      end
+      else
+        Continue;   // `alClient`, `True`: a property's value, not a name
+      LBindings.Add(LB);
+    end;
+    AInfo.Objects := LObjects.ToArray;
+    AInfo.Bindings := LBindings.ToArray;
+  finally
+    LBindings.Free;
+    LObjects.Free;
+  end;
+  Result := True;
 end;
 
 end.

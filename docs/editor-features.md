@@ -350,6 +350,15 @@ identifier class does here:
     - `FormRoleOf` says where a symbol lives in the form files: what it is
       there, the class declaring it, and the form file whose ROOT is that
       class - the one a host's live designer holds it in.
+    - `DescribeForm` (0.62.0) answers per FORM what the others answer per
+      symbol: every object of one form file with its class and the published
+      field its name fills, and every value naming a symbol - a handler, a
+      component, a path into an inline frame or another module - bound by
+      the same rules. A value that should name something and does not is
+      listed unbound: an event whose method the root class lacks (EReadError
+      when the form loads), a component path nothing answers. An inherited
+      form lists its own file only; its ancestor's form is `FormRoleOf` of
+      the ancestor class.
 
 
 ## 3.10 Demo menu: one `Find All` submenu
