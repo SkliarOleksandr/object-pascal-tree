@@ -200,16 +200,25 @@ type
       // IsInlineObj, memoized: 0 not yet known, 1 no, 2 yes.
       ObjInline: TArray<Byte>;
     end;
+    // A directory holding analyzed units, as EnsureListed last listed it.
+    TFormDir = class
+      Path: string;
+      Stamp: Int64;               // its last write time then (DirStamp)
+      Mids: TArray<Integer>;      // the analyzed units in it
+    end;
     TSymShape = (ssNone, ssField, ssMethod, ssClass, ssProperty, ssEnumValue);
   private
     FProj: TPasSemaProject;
     FLibraryPaths: TArray<string>;
     FForms: TObjectList<TFormEntry>;
+    FDirs: TObjectList<TFormDir>;
+    FFormOfMid: TDictionary<Integer, TFormEntry>;
     FListed: Boolean;
     FRootNames: TDictionary<string, TArray<Integer>>;
     FRootNamesBuilt: Boolean;
     function IsLibrary(const APath: string): Boolean;
     procedure EnsureListed;
+    procedure ListDir(ADir: TFormDir);
     procedure Refresh;
     function DocOf(AEntry: TFormEntry): TPasDfmDoc;
     procedure EnsureRootNames;
@@ -305,6 +314,9 @@ type
 implementation
 
 uses
+{$IFDEF MSWINDOWS}
+  Winapi.Windows,
+{$ENDIF}
   System.StrUtils,
   System.IOUtils,
   System.Generics.Defaults;
@@ -318,12 +330,16 @@ begin
   FProj := AProject;
   FLibraryPaths := ALibraryPaths;
   FForms := TObjectList<TFormEntry>.Create(True);
+  FDirs := TObjectList<TFormDir>.Create(True);
+  FFormOfMid := TDictionary<Integer, TFormEntry>.Create;
   FRootNames := TDictionary<string, TArray<Integer>>.Create;
 end;
 
 destructor TPasFormBinder.Destroy;
 begin
   FRootNames.Free;
+  FFormOfMid.Free;
+  FDirs.Free;
   FForms.Free;
   inherited;
 end;
@@ -341,48 +357,104 @@ begin
       Exit(True);
 end;
 
+// A directory's last write time, 0 when it cannot be read: creating,
+// deleting or renaming a file in it moves it, writing a file does not. One
+// file system call - Refresh asks it of every unit directory on every query.
+function DirStamp(const APath: string): Int64;
+{$IFDEF MSWINDOWS}
+var
+  LData: TWin32FileAttributeData;
+begin
+  if GetFileAttributesEx(PChar(APath), GetFileExInfoStandard, @LData) then
+    Result := (Int64(LData.ftLastWriteTime.dwHighDateTime) shl 32) or
+      LData.ftLastWriteTime.dwLowDateTime
+  else
+    Result := 0;
+end;
+{$ELSE}
+begin
+  try
+    Result := Trunc(TDirectory.GetLastWriteTimeUtc(APath) * 86400000.0);
+  except
+    Result := 0;
+  end;
+end;
+{$ENDIF}
+
 { The project's form files: each analyzed unit's `.dfm` / `.fmx` sibling.
-  Found by listing each unit DIRECTORY once rather than probing two names per
-  unit - a large project has a few hundred directories and a few thousand
-  units. }
+  Found by listing each unit DIRECTORY rather than probing two names per unit
+  - a large project has a few hundred directories and a few thousand units.
+  Each directory's write time is kept, and Refresh lists a directory again
+  when it moved: a form file written after the listing - the unit first and
+  its form next, as an agent writes them, or one brought back by a checkout -
+  would otherwise not be a form file of the project for as long as the binder
+  lives, and every handler it binds would read unbound. }
 procedure TPasFormBinder.EnsureListed;
 var
-  LDirs: TDictionary<string, TDictionary<string, string>>;
+  LByPath: TDictionary<string, TFormDir>;
   LMid: Integer;
-  LUnit, LDir, LKey, LFound, LFile: string;
-  LNames: TDictionary<string, string>;
-  LEntry: TFormEntry;
-  LExt: string;
+  LUnit, LKey: string;
+  LDir: TFormDir;
 begin
   if FListed then
     Exit;
   FListed := True;
-  LDirs := TObjectDictionary<string, TDictionary<string, string>>.Create(
-    [doOwnsValues]);
+  LByPath := TDictionary<string, TFormDir>.Create;
   try
     for LMid := 0 to FProj.ModelCount - 1 do
     begin
       LUnit := FProj.ModelFile(LMid);
       if (LUnit = '') or IsLibrary(LUnit) then
         Continue;
-      LDir := LowerCase(ExtractFileDir(LUnit));
-      if not LDirs.TryGetValue(LDir, LNames) then
+      LKey := LowerCase(ExtractFileDir(LUnit));
+      if not LByPath.TryGetValue(LKey, LDir) then
       begin
-        LNames := TDictionary<string, string>.Create;
-        LDirs.Add(LDir, LNames);
-        try
-          if TDirectory.Exists(ExtractFileDir(LUnit)) then
-            for LFile in TDirectory.GetFiles(ExtractFileDir(LUnit)) do
-            begin
-              LExt := LowerCase(ExtractFileExt(LFile));
-              if (LExt = '.dfm') or (LExt = '.fmx') then
-                LNames.AddOrSetValue(LowerCase(ExtractFileName(LFile)), LFile);
-            end;
-        except
-          // An unlistable directory has no form files we could read anyway.
-        end;
+        LDir := TFormDir.Create;
+        LDir.Path := ExtractFileDir(LUnit);
+        FDirs.Add(LDir);
+        LByPath.Add(LKey, LDir);
       end;
-      LKey := LowerCase(ChangeFileExt(ExtractFileName(LUnit), ''));
+      LDir.Mids := LDir.Mids + [LMid];
+    end;
+  finally
+    LByPath.Free;
+  end;
+  for LDir in FDirs do
+  begin
+    LDir.Stamp := DirStamp(LDir.Path);
+    ListDir(LDir);
+  end;
+end;
+
+// Adds an entry for each unit of ADir that has a form file beside it now and
+// none yet. An entry is never removed - a form file that vanishes reads as a
+// failed document (Refresh), and one that comes back is read again.
+procedure TPasFormBinder.ListDir(ADir: TFormDir);
+var
+  LNames: TDictionary<string, string>;
+  LFile, LExt, LKey, LFound: string;
+  LMid: Integer;
+  LEntry: TFormEntry;
+begin
+  LNames := TDictionary<string, string>.Create;
+  try
+    try
+      if TDirectory.Exists(ADir.Path) then
+        for LFile in TDirectory.GetFiles(ADir.Path) do
+        begin
+          LExt := LowerCase(ExtractFileExt(LFile));
+          if (LExt = '.dfm') or (LExt = '.fmx') then
+            LNames.AddOrSetValue(LowerCase(ExtractFileName(LFile)), LFile);
+        end;
+    except
+      // An unlistable directory has no form files we could read anyway.
+    end;
+    for LMid in ADir.Mids do
+    begin
+      if FFormOfMid.ContainsKey(LMid) then
+        Continue;
+      LKey := LowerCase(ChangeFileExt(ExtractFileName(FProj.ModelFile(LMid)),
+        ''));
       if LNames.TryGetValue(LKey + '.dfm', LFound) or
          LNames.TryGetValue(LKey + '.fmx', LFound) then
       begin
@@ -391,10 +463,11 @@ begin
         LEntry.Path := LFound;
         LEntry.RootClass := XNil;
         FForms.Add(LEntry);
+        FFormOfMid.Add(LMid, LEntry);
       end;
     end;
   finally
-    LDirs.Free;
+    LNames.Free;
   end;
 end;
 
@@ -409,7 +482,19 @@ var
   LDoc: IPasDfmDoc;
   LChanged: Boolean;
   LIdx: Integer;
+  LDir: TFormDir;
+  LStamp: Int64;
 begin
+  if FListed then
+    for LDir in FDirs do
+    begin
+      LStamp := DirStamp(LDir.Path);
+      if LStamp <> LDir.Stamp then
+      begin
+        LDir.Stamp := LStamp;
+        ListDir(LDir);   // a new entry has no doc yet: the loop below reads it
+      end;
+    end;
   EnsureListed;
   LChanged := False;
   for LEntry in FForms do

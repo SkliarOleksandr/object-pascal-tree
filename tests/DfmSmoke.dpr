@@ -483,6 +483,31 @@ const
     '  end' + CRLF +                                             // 6
     'end' + CRLF;                                                // 7
 
+  // Written AFTER the binder listed the directory: the unit first, its form
+  // file next, as an agent writes them.
+  UNIT_LATE =
+    'unit FixLate;'#10 +                                         // 1
+    'interface'#10 +                                             // 2
+    'uses FixVcl;'#10 +                                          // 3
+    'type'#10 +                                                  // 4
+    '  TFixLateForm = class(TForm)'#10 +                         // 5
+    '    LateButton: TButton;'#10 +                              // 6
+    '    procedure LateButtonClick(Sender: TObject);'#10 +       // 7  col 15
+    '  end;'#10 +                                                // 8
+    'implementation'#10 +                                        // 9
+    '{$R *.dfm}'#10 +                                            // 10
+    'procedure TFixLateForm.LateButtonClick(Sender: TObject);'#10 + // 11
+    'begin'#10 +                                                 // 12
+    'end;'#10 +                                                  // 13
+    'end.'#10;                                                   // 14
+
+  DFM_LATE =
+    'object FixLateForm: TFixLateForm' + CRLF +                  // 1
+    '  object LateButton: TButton' + CRLF +                      // 2
+    '    OnClick = LateButtonClick' + CRLF +                     // 3  col 15
+    '  end' + CRLF +                                             // 4
+    'end' + CRLF;                                                // 5
+
 var
   GCounter: TPasSuiteCounter;
   GProj: TPasSemaProject;
@@ -1160,6 +1185,33 @@ begin
     FilePath('NoSuch.dfm'), LInfo) and (LInfo.Error <> ''));
 end;
 
+{ A form file that appears after the binder listed its directory is read -
+  the directory's write time moved - and one deleted and brought back, as a
+  checkout does, is read again. }
+procedure LateChecks;
+var
+  LInfo: TPasFormInfo;
+  LIdx: Integer;
+begin
+  Ok('late: no form file yet', not GNav.DescribeForm(FilePath('FixLate.dfm'),
+    LInfo));
+  TFile.WriteAllText(FilePath('FixLate.dfm'), DFM_LATE, TEncoding.ASCII);
+  Ok('late: a form file written after the listing is read',
+    GNav.DescribeForm(FilePath('FixLate.dfm'), LInfo) and
+    (LInfo.Error = ''));
+  LIdx := FormBinding(LInfo, 'LateButton', 'OnClick');
+  Ok('late: its handler bound', (LIdx >= 0) and IsSymAt(
+    LInfo.Bindings[LIdx].TMid, LInfo.Bindings[LIdx].TSym, 'FixLate.pas', 7,
+    15));
+  Ok('late: the handler''s sites hold it', HasSite(Sites('FixLate.pas', 7, 15),
+    'FixLate.dfm', 3, 15, fskHandler, 'LateButton'));
+  TFile.Delete(FilePath('FixLate.dfm'));
+  Ok('late: deleted, no site', Length(Sites('FixLate.pas', 7, 15)) = 0);
+  TFile.WriteAllText(FilePath('FixLate.dfm'), DFM_LATE, TEncoding.ASCII);
+  Ok('late: brought back, read again', HasSite(Sites('FixLate.pas', 7, 15),
+    'FixLate.dfm', 3, 15, fskHandler, 'LateButton'));
+end;
+
 begin
   GCounter.Init;
   GDir := TPath.Combine(TPath.GetTempPath, 'pastree_dfm_smoke');
@@ -1192,6 +1244,7 @@ begin
   TFile.WriteAllText(FilePath('FixHostGrand.pas'), UNIT_HOSTGRAND);
   TFile.WriteAllText(FilePath('FixHostGrand.dfm'), DFM_HOSTGRAND,
     TEncoding.ASCII);
+  TFile.WriteAllText(FilePath('FixLate.pas'), UNIT_LATE);
 
   GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
   try
@@ -1205,6 +1258,7 @@ begin
       DescribeChecks;
       AncestorChecks;
       InheritedInlineChecks;
+      LateChecks;
     finally
       GNav.Free;
     end;
