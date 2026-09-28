@@ -87,9 +87,11 @@ type
     fskClass,         // `object X: TC` - the class
     fskHandler,       // `OnClick = X`
     fskComponentRef,  // `FocusControl = X`, `DataSource = DM.X`
-    fskCaption);      // `Caption = 'X'` - a renamed component's caption that
+    fskCaption,       // `Caption = 'X'` - a renamed component's caption that
                       // read its name, and follows it (CarriedBy); never a
                       // reference, only ever part of a rename
+    fskProperty);     // `Caption = ...` - a line setting the published property
+                      // (reference searches only: a rename is still refused)
 
   { HOW a site reaches its symbol - which matters to a host that applies form
     edits through a live designer, because the designer propagates a rename
@@ -257,6 +259,7 @@ type
     function SiteOf(AEntry: TFormEntry; AIdent: Integer;
       AKind: TPasFormSiteKind; AVia: TPasFormSiteVia): TPasFormSite;
     function EntryOf(const APath: string): TFormEntry;
+    function SameProperty(AMid1, ASym1, AMid2, ASym2: Integer): Boolean;
     function CreatedIn(const AClass: TSemaXType; const ANameLower: string;
       out AObjClass: TSemaXType): Boolean;
     function ReachedByName(AEntry: TFormEntry; AIdent: Integer): Boolean;
@@ -844,8 +847,10 @@ begin
   case LSym.Kind of
     skField, skRoutine, skProperty:
       begin
-        if (LSym.Scope = NIL_SCOPE) or
-           not (LSym.Visibility in [svDefault, svPublished]) then
+        // A property of any visibility: a descendant republishes a protected
+        // one (`property Caption;`), and a form file sets it through that.
+        if (LSym.Scope = NIL_SCOPE) or ((LSym.Kind <> skProperty) and
+           not (LSym.Visibility in [svDefault, svPublished])) then
           Exit;
         LOwner := LM.Scopes[LSym.Scope].StructSym;
         if LOwner = NIL_SYM then
@@ -1040,6 +1045,30 @@ begin
   Result.IsUtf8 := LDoc.Encoding = dfeUtf8;
 end;
 
+// Whether two property declarations are one property: each followed up its
+// bare redeclarations (`property X;`) to the declaration that writes the type.
+function TPasFormBinder.SameProperty(AMid1, ASym1, AMid2, ASym2: Integer): Boolean;
+
+  procedure Up(var AMid, ASym: Integer);
+  var
+    LPMid, LPSym, LDepth: Integer;
+  begin
+    for LDepth := 1 to 32 do
+    begin
+      if not FProj.IsBarePropertyRedecl(AMid, ASym) or
+         not FProj.PropertyRedeclPrev(AMid, ASym, LPMid, LPSym) then
+        Exit;
+      AMid := LPMid;
+      ASym := LPSym;
+    end;
+  end;
+
+begin
+  Up(AMid1, ASym1);
+  Up(AMid2, ASym2);
+  Result := (AMid1 = AMid2) and (ASym1 = ASym2);
+end;
+
 { Whether a form file of AClass's chain - its own, then its ancestors' -
   creates a component named ANameLower at its top (not inside an inline
   frame's block), and of which class. A component needs no field to exist:
@@ -1139,7 +1168,7 @@ var
   LList: TList<TPasFormSite>;
   LEntry: TFormEntry;
   LDoc: TPasDfmDoc;
-  LIdx, LTMid, LTSym: Integer;
+  LIdx, LTMid, LTSym, LCtx: Integer;
   LId: TPasDfmIdent;
   LIsMethod: Boolean;
   LVia: TPasFormSiteVia;
@@ -1268,7 +1297,31 @@ begin
               end;
             end;
           ssProperty:
-            if ARename and (LId.Role = dirPropName) then
+            // A reference search: a line setting the property on an object
+            // whose class HAS it - found from that class, a bare
+            // redeclaration taken for the property it republishes, as
+            // FindReferences takes it. TReader sets it by name: rename or
+            // remove the property and the form fails to load, after a clean
+            // compile. A sub-property (`Font.Name`) and an item's property
+            // are not bound yet (their object's class is not the one read).
+            if not ARename and (LId.Role = dirPropName) and (LId.Seg = 0) and
+               not LId.InItem then
+            begin
+              LClass := ObjClassOf(LEntry, LId.Obj);
+              if XValid(LClass) and FProj.FindMemberX(LEntry.Mid, LClass,
+                 LNameLower, LTMid, LTSym, LCtx) and (LTMid >= 0) and
+                 (LTSym <> NIL_SYM) and
+                 (FProj.Model(LTMid).Symbols[LTSym].Kind = skProperty) and
+                 (FProj.Model(LTMid).Symbols[LTSym].Visibility in [svDefault,
+                 svPublished]) and SameProperty(LTMid, LTSym, ATMid, ASym) then
+                LList.Add(SiteOf(LEntry, LIdx, fskProperty,
+                  HeaderVia(LEntry, LId.Obj)));
+            end
+            // A rename: refused where a form file may set it - for a published
+            // property, as before properties of any visibility were searched.
+            else if ARename and (LId.Role = dirPropName) and
+              (FProj.Model(ATMid).Symbols[ASym].Visibility in [svDefault,
+              svPublished]) then
             begin
               // Excluded only when it is certainly some OTHER class's
               // property: a direct property of an object whose class is

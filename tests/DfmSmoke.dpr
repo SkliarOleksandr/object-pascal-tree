@@ -1289,6 +1289,32 @@ begin
     FilePath('NoSuch.dfm'), LInfo) and (LInfo.Error <> ''));
 end;
 
+{ A published property's form lines, for a reference search: TReader sets it
+  by name, so a rename or a removal fails when the form loads. }
+procedure PropChecks;
+var
+  LSites: TArray<TPasFormSite>;
+begin
+  LSites := Sites('FixFrame.pas', 12, 14);
+  Ok('prop: a frame''s property set on its inline instance',
+    (Length(LSites) = 1) and HasSite(LSites, 'FixBase.dfm', 17, 5,
+    fskProperty, 'Frame11'));
+  LSites := Sites('FixVcl.pas', 23, 14);
+  Ok('prop: TControl.Align, set on an edit', (Length(LSites) = 1) and
+    HasSite(LSites, 'FixBase.dfm', 11, 5, fskProperty, 'Edit1'));
+  LSites := Sites('FixVcl.pas', 36, 14);
+  Ok('prop: TEdit.Text inside an inline frame''s block', HasSite(LSites,
+    'FixBase.dfm', 19, 7, fskProperty, 'FrameEdit'));
+  LSites := Sites('FixVcl.pas', 25, 14);
+  Ok('prop: TControl.Caption on the form''s root and a button',
+    HasSite(LSites, 'FixBase.dfm', 2, 3, fskProperty, 'FixBaseForm') and
+    HasSite(LSites, 'FixCap.dfm', 4, 5, fskProperty, 'CapButton'));
+  Ok('prop: ...not an action''s Caption (TAction has none here), nor an '
+    + 'item''s', not HasSite(LSites, 'FixData.dfm', 4, 5, fskProperty,
+    'Action1') and not HasSite(LSites, 'FixColl.dfm', 13, 9, fskProperty,
+    'Grid'));
+end;
+
 procedure DockChecks;
 var
   LInfo: TPasFormInfo;
@@ -1446,6 +1472,7 @@ begin
       InheritedInlineChecks;
       CollChecks;
       DockChecks;
+      PropChecks;
       LateChecks;
     finally
       GNav.Free;
