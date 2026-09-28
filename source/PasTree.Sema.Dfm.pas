@@ -886,9 +886,9 @@ begin
     Exit;
   LLast := ADoc.IdentText(ADoc.Props[AProp].FirstIdent +
     ADoc.Props[AProp].SegCount - 1);
-  // `On` and then an upper-case letter, as every event is named: TdxBar's
-  // Boolean `OneOnRow = True` was taken for an event whose method is gone,
-  // "the form fails to load", on 49 lines of forms that load.
+  // `On` and then an upper-case letter, as every event is named: a toolbar
+  // component's Boolean `OneOnRow = True` was taken for an event whose
+  // method is gone, "the form fails to load", on 49 lines of forms that load.
   Result := (Length(LLast) > 2) and StartsText('On', LLast) and
     CharInSet(LLast[3], ['A'..'Z', '_']);
 end;
