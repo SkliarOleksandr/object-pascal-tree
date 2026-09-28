@@ -167,10 +167,14 @@ type
     these (`Align = alClient`, `Visible = True`) is not one. }
   TPasFormBinding = record
     Obj: Integer;              // the object whose property it is
-    PropName: string;          // `OnClick`, `FocusControl`, `Items.Action`
+    PropName: string;          // `OnClick`, `FocusControl`, `Items[0].Action`
     Value: string;             // as written: `btnSaveClick`, `dmData.pmActions`
     Line: Integer;             // 1-based
     IsMethod: Boolean;         // a handler (or an event whose method is missing)
+    // `OnClick = nil`: the event runs nothing - what the designer writes when
+    // a descendant clears the handler its ancestor's form binds. TSym is
+    // NIL_SYM, and it is not a missing method.
+    Cleared: Boolean;
     // The symbol it binds; TSym = NIL_SYM when it binds nothing.
     TMid, TSym: Integer;
     Via: TPasFormSiteVia;
@@ -182,6 +186,9 @@ type
     // '' when it was read whole; else why not, and what was read before.
     Error: string;
     IsBinary: Boolean;         // lines are of the converted text
+    // The first line after the root's `end`, 0 when nothing follows it: dcc
+    // reads one object, so what is written from there is not bound.
+    TrailingLine: Integer;
     RootClass: TSemaXType;     // the class of the unit the file belongs to
     Objects: TArray<TPasFormObject>;     // in file order, the root first
     Bindings: TArray<TPasFormBinding>;   // in file order
@@ -865,7 +872,11 @@ begin
     Exit;
   LLast := ADoc.IdentText(ADoc.Props[AProp].FirstIdent +
     ADoc.Props[AProp].SegCount - 1);
-  Result := (Length(LLast) > 2) and StartsText('On', LLast);
+  // `On` and then an upper-case letter, as every event is named: TdxBar's
+  // Boolean `OneOnRow = True` was taken for an event whose method is gone,
+  // "the form fails to load", on 49 lines of forms that load.
+  Result := (Length(LLast) > 2) and StartsText('On', LLast) and
+    CharInSet(LLast[3], ['A'..'Z', '_']);
 end;
 
 function TPasFormBinder.ValueTarget(AEntry: TFormEntry; AIdent: Integer;
@@ -1428,6 +1439,7 @@ begin
   AInfo.FilePath := LEntry.Path;
   AInfo.Error := LDoc.Error;
   AInfo.IsBinary := LDoc.IsBinary;
+  AInfo.TrailingLine := LDoc.TrailingLine;
   AInfo.RootClass := RootClassOf(LEntry);
   LObjects := TList<TPasFormObject>.Create;
   LBindings := TList<TPasFormBinding>.Create;
@@ -1466,7 +1478,7 @@ begin
         Continue;
       LB := Default(TPasFormBinding);
       LB.Obj := LId.Obj;
-      LB.PropName := LDoc.PropPath(LId.Prop);
+      LB.PropName := LDoc.ItemPath(LId.Prop);
       LFirst := LIdx - LId.Seg;
       LB.Value := LDoc.IdentText(LFirst);
       for var LS := LFirst + 1 to LIdx do
@@ -1479,9 +1491,21 @@ begin
         LB.TSym := LTSym;
         LB.Via := LVia;
       end
+      else if (LId.SegCount = 1) and SameText(LB.Value, 'nil') and
+        IsEventProp(LDoc, LId.Prop) then
+      begin
+        // Cleared: TReader sets the event to nil - nothing is missing.
+        LB.IsMethod := True;
+        LB.Cleared := True;
+        LB.TMid := NIL_SYM;
+        LB.TSym := NIL_SYM;
+      end
       else if not XValid(AInfo.RootClass) or not XValid(ObjClassOf(LEntry,
         InnerLookupRoot(LEntry, LId.Obj))) then
         Continue   // nothing to look the name up in: unknown, not missing
+      else if (LId.SegCount = 1) and (SameText(LB.Value, 'True') or
+        SameText(LB.Value, 'False')) then
+        Continue   // a Boolean's value, whatever the property is called
       else if (LId.SegCount = 1) and IsEventProp(LDoc, LId.Prop) then
       begin
         // An event naming no method the root has: EReadError when it loads.

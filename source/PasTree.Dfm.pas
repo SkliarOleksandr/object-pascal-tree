@@ -79,6 +79,10 @@ type
     FirstIdent: Integer; // its first name segment, in Idents
     SegCount: Integer;
     InItem: Boolean;
+    // Inside a collection item: the collection property (an index into
+    // Props) and the item's 0-based position in it. -1 otherwise. Two items
+    // setting the same event are two bindings, not one (ItemPath).
+    Owner, Item: Integer;
     // A value that is ONE string token (`Caption = 'Button1'`, not a `+`
     // concatenation): the byte offset of that token - its opening quote or
     // `#`. -1 for any other value. What a rename needs to follow a caption
@@ -115,10 +119,21 @@ type
     // '' when the whole file was read. Otherwise why not, and Objects/Props/
     // Idents hold what was read before that point.
     Error: string;
+    // The byte offset of the first token after the root object's `end`; 0
+    // when nothing follows it (the root comes first, so no token after it
+    // is at 0). dcc's form conversion reads one object and drops the rest,
+    // so nothing there is bound at run time; it is not read here either
+    // (TrailingLine, MentionsTrailing).
+    TrailingOffset: Integer;
     Objects: TArray<TPasDfmObject>;
     Props: TArray<TPasDfmProp>;
     Idents: TArray<TPasDfmIdent>;
     function Doc: TPasDfmDoc;
+    // The line TrailingOffset is on; 0 when nothing follows the root.
+    function TrailingLine: Integer;
+    // Whether the text after the root's `end` spells ANameLower as a word -
+    // what "no form file names it" owes a reader who greps the file.
+    function MentionsTrailing(const ANameLower: string): Boolean;
     // The identifier's text as written.
     function IdentText(AIdx: Integer): string;
     // Every identifier spelled ANameLower (case-insensitively - form files
@@ -133,6 +148,9 @@ type
     function ObjectName(AObj: Integer): string;          // '' for an unnamed object
     function ObjectClassName(AObj: Integer): string;
     function PropPath(AProp: Integer): string;           // `Font.Name`
+    // PropPath with the collection items it sits in, from the object down:
+    // `Items[2].OnPrintText`, `Columns[0].Items[1].Action`.
+    function ItemPath(AProp: Integer): string;
     // Whether property AProp's value is exactly AText, written as ONE plain
     // quoted literal - `'Button1'`: no `#nnn`, no doubled quote, no `+` - so
     // that the bytes between the quotes ARE the text and can be rewritten in
@@ -205,7 +223,8 @@ type
     function AddObject(const AObj: TPasDfmObject): Integer;
     procedure SkipOrderModifier;
     procedure ReadObject(AParent: Integer);
-    procedure ReadProperty(AObj: Integer; AInItem: Boolean);
+    procedure ReadProperty(AObj: Integer; AInItem: Boolean;
+      AOwner: Integer = -1; AItem: Integer = -1);
     procedure ReadValue(AObj, AProp: Integer; AInItem, ATop: Boolean);
   public
     procedure Run(ADoc: TPasDfmDoc);
@@ -360,7 +379,8 @@ begin
 end;
 
 // ConvertProperty.
-procedure TPasDfmReader.ReadProperty(AObj: Integer; AInItem: Boolean);
+procedure TPasDfmReader.ReadProperty(AObj: Integer; AInItem: Boolean;
+  AOwner: Integer = -1; AItem: Integer = -1);
 var
   LProp: TPasDfmProp;
   LIdx, LSeg: Integer;
@@ -369,6 +389,8 @@ begin
   LIdx := FPropCount;
   LProp.Obj := AObj;
   LProp.InItem := AInItem;
+  LProp.Owner := AOwner;
+  LProp.Item := AItem;
   LProp.FirstIdent := FIdentCount;
   LProp.SegCount := 0;
   LProp.StrOffset := -1;
@@ -399,7 +421,7 @@ end;
 // own value, as opposed to an element of a `( ... )` list.
 procedure TPasDfmReader.ReadValue(AObj, AProp: Integer; AInItem, ATop: Boolean);
 var
-  LOffset: Integer;
+  LOffset, LItem: Integer;
   LSingle: Boolean;
 begin
   if CharInSet(FParser.Token, [System.Classes.toString, toWString]) then
@@ -458,14 +480,16 @@ begin
     '<':
       begin
         FParser.NextToken;
+        LItem := 0;
         while FParser.Token <> '>' do
         begin
           FParser.CheckTokenSymbol('item');
           FParser.NextToken;
           SkipOrderModifier;
           while not FParser.TokenSymbolIs('end') do
-            ReadProperty(AObj, True);
+            ReadProperty(AObj, True, AProp, LItem);
           FParser.NextToken;
+          Inc(LItem);
         end;
       end;
   else
@@ -486,6 +510,11 @@ begin
       FParser := TParser.Create(LStream);
       try
         ReadObject(-1);
+        // dcc's conversion reads ONE object and ignores the rest: text after
+        // the root's `end` - a stray `end` closing it early - never reaches
+        // the executable, and whatever it binds is not bound.
+        if FParser.Token <> toEOF then
+          ADoc.TrailingOffset := FParser.SourcePos;
       finally
         FreeAndNil(FParser);
       end;
@@ -583,6 +612,36 @@ begin
     Length(Bytes) - BomLen))) > 0;
 end;
 
+function TPasDfmDoc.TrailingLine: Integer;
+begin
+  if TrailingOffset <= 0 then
+    Exit(0);
+  Result := LineOf(TrailingOffset);
+end;
+
+function TPasDfmDoc.MentionsTrailing(const ANameLower: string): Boolean;
+var
+  LText: string;
+  LAt: Integer;
+begin
+  Result := False;
+  if (TrailingOffset <= 0) or (ANameLower = '') then
+    Exit;
+  LText := LowerCase(DecodeRange(TrailingOffset, Length(Bytes) -
+    TrailingOffset));
+  LAt := Pos(ANameLower, LText);
+  while LAt > 0 do
+  begin
+    // A whole word: `OnClick = SaveClick` names SaveClick, not Save.
+    if ((LAt = 1) or not CharInSet(LText[LAt - 1], ['a'..'z', '0'..'9', '_']))
+       and ((LAt + Length(ANameLower) > Length(LText)) or
+       not CharInSet(LText[LAt + Length(ANameLower)], ['a'..'z', '0'..'9',
+       '_'])) then
+      Exit(True);
+    LAt := Pos(ANameLower, LText, LAt + 1);
+  end;
+end;
+
 function TPasDfmDoc.LineOf(AOffset: Integer): Integer;
 var
   LLo, LHi, LMid: Integer;
@@ -652,6 +711,22 @@ begin
     if LSeg > 0 then
       Result := Result + '.';
     Result := Result + IdentText(Props[AProp].FirstIdent + LSeg);
+  end;
+end;
+
+function TPasDfmDoc.ItemPath(AProp: Integer): string;
+var
+  LDepth: Integer;
+begin
+  Result := PropPath(AProp);
+  LDepth := 0;
+  while (AProp >= 0) and (AProp <= High(Props)) and (Props[AProp].Owner >= 0)
+    and (LDepth < 64) do
+  begin
+    Result := Format('%s[%d].%s', [PropPath(Props[AProp].Owner),
+      Props[AProp].Item, Result]);
+    AProp := Props[AProp].Owner;
+    Inc(LDepth);
   end;
 end;
 

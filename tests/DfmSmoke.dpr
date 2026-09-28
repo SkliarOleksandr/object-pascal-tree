@@ -483,6 +483,48 @@ const
     '  end' + CRLF +                                             // 6
     'end' + CRLF;                                                // 7
 
+  // What a real form holds and a naive reader gets wrong: a Boolean named
+  // like an event, an event cleared with nil, the items of one collection
+  // binding one event each, and text after the root's `end` - which dcc's
+  // conversion drops, so nothing there binds.
+  UNIT_COLL =
+    'unit FixColl;'#10 +                                         // 1
+    'interface'#10 +                                             // 2
+    'uses FixVcl;'#10 +                                          // 3
+    'type'#10 +                                                  // 4
+    '  TFixCollForm = class(TForm)'#10 +                         // 5
+    '    Grid: TButton;'#10 +                                    // 6
+    '    procedure PrintA(Sender: TObject);'#10 +                // 7  col 15
+    '    procedure PrintB(Sender: TObject);'#10 +                // 8  col 15
+    '  end;'#10 +                                                // 9
+    'implementation'#10 +                                        // 10
+    '{$R *.dfm}'#10 +                                            // 11
+    'procedure TFixCollForm.PrintA(Sender: TObject); begin end;'#10 + // 12
+    'procedure TFixCollForm.PrintB(Sender: TObject); begin end;'#10 + // 13
+    'end.'#10;                                                   // 14
+
+  DFM_COLL =
+    'object FixCollForm: TFixCollForm' + CRLF +                  // 1
+    '  OneOnRow = True' + CRLF +                                 // 2
+    '  object Grid: TButton' + CRLF +                            // 3
+    '    OnClick = nil' + CRLF +                                 // 4
+    '    Items = <' + CRLF +                                     // 5
+    '      item' + CRLF +                                        // 6
+    '        OnPrint = PrintA' + CRLF +                          // 7  col 19
+    '      end' + CRLF +                                         // 8
+    '      item' + CRLF +                                        // 9
+    '        OnPrint = PrintB' + CRLF +                          // 10 col 19
+    '      end' + CRLF +                                         // 11
+    '      item' + CRLF +                                        // 12
+    '        Caption = ''x''' + CRLF +                           // 13
+    '      end>' + CRLF +                                        // 14
+    '  end' + CRLF +                                             // 15
+    'end' + CRLF +                                               // 16
+    '  object Stray: TButton' + CRLF +                           // 17
+    '    OnClick = PrintA' + CRLF +                              // 18
+    '  end' + CRLF +                                             // 19
+    'end' + CRLF;                                                // 20
+
   // Written AFTER the binder listed the directory: the unit first, its form
   // file next, as an agent writes them.
   UNIT_LATE =
@@ -1185,6 +1227,43 @@ begin
     FilePath('NoSuch.dfm'), LInfo) and (LInfo.Error <> ''));
 end;
 
+procedure CollChecks;
+var
+  LInfo: TPasFormInfo;
+  LIdx: Integer;
+  LDoc: IPasDfmDoc;
+begin
+  Ok('coll: described whole, the text after the root''s end said',
+    GNav.DescribeForm(FilePath('FixColl.dfm'), LInfo) and (LInfo.Error = '')
+    and (LInfo.TrailingLine = 17));
+  Ok('coll: a Boolean named like an event is no event',
+    FormBinding(LInfo, 'FixCollForm', 'OneOnRow') < 0);
+  LIdx := FormBinding(LInfo, 'Grid', 'OnClick');
+  Ok('coll: `OnClick = nil` is cleared, not a missing method', (LIdx >= 0)
+    and LInfo.Bindings[LIdx].IsMethod and LInfo.Bindings[LIdx].Cleared and
+    (LInfo.Bindings[LIdx].TSym = NIL_SYM));
+  LIdx := FormBinding(LInfo, 'Grid', 'Items[0].OnPrint');
+  Ok('coll: the first item''s event, by its index', (LIdx >= 0) and
+    (LInfo.Bindings[LIdx].Line = 7) and IsSymAt(LInfo.Bindings[LIdx].TMid,
+    LInfo.Bindings[LIdx].TSym, 'FixColl.pas', 7, 15));
+  LIdx := FormBinding(LInfo, 'Grid', 'Items[1].OnPrint');
+  Ok('coll: the second item''s event, a binding of its own', (LIdx >= 0) and
+    (LInfo.Bindings[LIdx].Line = 10) and IsSymAt(LInfo.Bindings[LIdx].TMid,
+    LInfo.Bindings[LIdx].TSym, 'FixColl.pas', 8, 15));
+  Ok('coll: nothing after the root''s end is read',
+    (FormObj(LInfo, 'Stray') < 0) and (Length(LInfo.Bindings) = 3));
+  Ok('coll: PrintA''s site is the item''s line, not the stray one',
+    HasSite(Sites('FixColl.pas', 7, 15), 'FixColl.dfm', 7, 19, fskHandler,
+    'Grid') and (Length(Sites('FixColl.pas', 7, 15)) = 1));
+  LDoc := PasDfmLoad(FilePath('FixColl.dfm'));
+  Ok('coll: the stray text names PrintA as a word, not Print',
+    LDoc.Doc.MentionsTrailing('printa') and
+    not LDoc.Doc.MentionsTrailing('print'));
+  LDoc := PasDfmLoad(FilePath('FixBase.dfm'));
+  Ok('coll: a form with nothing after its root', (LDoc.Doc.TrailingLine = 0)
+    and not LDoc.Doc.MentionsTrailing('button1'));
+end;
+
 { A form file that appears after the binder listed its directory is read -
   the directory's write time moved - and one deleted and brought back, as a
   checkout does, is read again. }
@@ -1245,6 +1324,8 @@ begin
   TFile.WriteAllText(FilePath('FixHostGrand.dfm'), DFM_HOSTGRAND,
     TEncoding.ASCII);
   TFile.WriteAllText(FilePath('FixLate.pas'), UNIT_LATE);
+  TFile.WriteAllText(FilePath('FixColl.pas'), UNIT_COLL);
+  TFile.WriteAllText(FilePath('FixColl.dfm'), DFM_COLL, TEncoding.ASCII);
 
   GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
   try
@@ -1258,6 +1339,7 @@ begin
       DescribeChecks;
       AncestorChecks;
       InheritedInlineChecks;
+      CollChecks;
       LateChecks;
     finally
       GNav.Free;
