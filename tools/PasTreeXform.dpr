@@ -72,12 +72,29 @@ program PasTreeXform;
         routine's own block or the statement lists of
         a case-else, a try, an except, a finally or a repeat, which are no
         statements - their items are.
+    t3  the unit printed from its tree (plan T3, PasTree.Printer) IN PLACE:
+        each item of the print written into the slot of the token T3
+        matched it to, in print order (see T3Walk) - every keyword and
+        punctuation regenerated, the canonical spellings of the printer's
+        normalization list applied, the filed losses read where they stand;
+        everything else of every file kept byte for byte, so each token
+        stays on its line and the directives, the inactive code and the
+        include files stay what they are. A list's `;` the print does not
+        need stays too (dcc gives a statement's end the line of the token
+        after it). A correct tree and printer leave the .dcu identical.
+        One site per node whose slots change; a case-only change (a
+        keyword in lower case) is always applied. Refused when the unit
+        does not parse clean or its print has a T3 defect.
+    t3x t3 with t1's parentheses and t2's blocks over the print - the plan's
+        final gate: the unit printed from its tree alone, fully
+        parenthesized and fully blocked, compiled by dcc to the same .dcu.
+        t3's sites first, then t1's, then t2's; both under t2's line rule.
 
   Usage:
-    PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2 -out:<dir> [-p:<platform>]
+    PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2|t3|t3x -out:<dir> [-p:<platform>]
                  [-D:X;Y]... [-Undef:X;Y]... [-I:<dir>[;<dir>]]...
                  [-sites:<ids>]
-  -sites (ts, t1, t2): only the sites with these ids take their edit - a
+  -sites (ts, t1, t2, t3, t3x): only the sites with these ids take their edit - a
   comma list of ids and ranges, `1-40,57`; the ids are those of the full
   run, so sites.txt means the same in every run over the same unit.
   -Undef takes names out of the define set after the platform's and -D's -
@@ -155,6 +172,8 @@ uses
   PasTree.Platforms in '..\source\PasTree.Platforms.pas',
   PasTree.Ast in '..\source\PasTree.Ast.pas',
   PasTree.Parser in '..\source\PasTree.Parser.pas',
+  PasTree.Ast.Check in '..\source\PasTree.Ast.Check.pas',
+  PasTree.Printer in '..\source\PasTree.Printer.pas',
   PasTree.Sema.Diagnostics in '..\source\PasTree.Sema.Diagnostics.pas',
   PasTree.Sema.Model in '..\source\PasTree.Sema.Model.pas',
   PasTree.Sema.Builtins in '..\source\PasTree.Sema.Builtins.pas',
@@ -163,10 +182,14 @@ uses
   PasTree.Version in '..\source\PasTree.Version.pas';
 
 type
-  TXformMode = (xmT0, xmTS, xmT0F, xmT1, xmT2);
+  TXformMode = (xmT0, xmTS, xmT0F, xmT1, xmT2, xmT3, xmT3X);
 
 const
-  cModeNames: array[TXformMode] of string = ('t0', 'ts', 't0f', 't1', 't2');
+  cModeNames: array[TXformMode] of string = ('t0', 'ts', 't0f', 't1', 't2',
+    't3', 't3x');
+  // t3: a print slot's replacement sorts after every insertion at its offset
+  // - a `(` or a `begin` that opens there, an `end` closing before it.
+  cSlotOrder = 100;
 
 type
   // One text insertion into one file, or a replacement of Len characters
@@ -185,7 +208,8 @@ type
   // ts, t1 and t2: OpenText goes before visible token OpenVis and CloseText
   // after CloseVis - `(` and `)`, or `begin` and `end` - with their Orders
   // at an offset other edits share (see AddEdit); an empty CloseText is no
-  // edit. t0f's sites are diagnostics, OpenVis -1.
+  // edit. t0f's sites are diagnostics, OpenVis -1. A t3 site is its Edits,
+  // the print's replacements of one node's slots (see T3Walk).
   TSite = record
     Kind: string;
     Ops: string;
@@ -200,6 +224,7 @@ type
     CloseText: string;
     OpenOrder: Integer;
     CloseOrder: Integer;
+    Edits: TArray<TEdit>;
   end;
 
 var
@@ -219,6 +244,9 @@ var
   GExcludedStored: Integer;          // t2: in a stored body, off one line
   GExcludedLines: Integer;           // t1, t2: line info on in the source
   GExcludedInit: Integer;            // t1: operators starting an initializer
+  GExcludedPrint: Integer;           // t3: slots kept, in an include used twice
+  GPrintCase: TList<TEdit>;          // t3: keyword case alone, always applied
+  GPrintStats: string;               // t3: the `print` line's counts
   // t1: the first visible token of every initializer value (see
   // CollectInitStarts)
   GInitStarts: TDictionary<Integer, Boolean>;
@@ -1428,6 +1456,286 @@ begin
   end;
 end;
 
+{ t3 and t3x: the unit printed from its tree (PasTree.Printer) IN PLACE. The
+  print is a sequence of items, each read from the tree; T3 (CompareT3)
+  matched every one but the separators to the visible token it stands for.
+  Each item goes into that token's SLOT - the token's own characters - in
+  print order: an item whose token lies before one already filled (the print
+  reorders a few spellings, PRINT_NORMALIZATION N10) joins the last filled
+  slot; a separator takes a `;` the original has between the items around
+  it and the print dropped (N1), else it opens the next item's slot. A slot
+  with several items joins them with blanks; a slot no item reached - a `;`
+  or a spelling the canonical form drops - becomes blanks, its line breaks
+  kept. Everything else of the file stays byte for byte: comments,
+  directives, inactive code, every token on its line (dcc keeps lines, not
+  columns - probe s10\probes\col), so dcc compiles the print with the
+  unit's own switches and include files.
+  A slot whose text changes only in case - a keyword regenerated in lower
+  case - takes its edit always; every other change is one site per node
+  (the node of the items moved into a slot, or the owner of a token the
+  print dropped), so a subset of the sites is a valid program and the
+  localizer can bisect them. A slot in a file included twice keeps its
+  token (excluded-print). The print must be T3-clean: a defect is refused. }
+procedure T3Walk;
+var
+  LItems: TPasPrintItems;
+  LT3: TPasT3Result;
+  LReport: TPasCheckReport;
+  LOwner, LKey, LNextAt, LSiteOf, LFirstOf, LLastOf: TArray<Integer>;
+  LText: TArray<string>;
+  LOrig: string;
+  LHas, LMatched: TArray<Boolean>;
+  LCursor, LIdx, LVis, LSlot, LFile, LStart, LLen, LLast, LFirst, LNode,
+    LChanged, LMoved, LSepOwn, LSepNew, LKeptSep: Integer;
+  LNew, LSrc: string;
+  LEdit: TEdit;
+  LSite: TSite;
+  LSites: TList<TSite>;
+
+  procedure Place(ASlot, AItem: Integer; AMoved: Boolean);
+  begin
+    if LText[ASlot] <> '' then
+      LText[ASlot] := LText[ASlot] + ' ';
+    LText[ASlot] := LText[ASlot] + LItems[AItem].Text;
+    LHas[ASlot] := True;
+    // The slot's site is the node of the item moved into it, else of its
+    // first item.
+    if AMoved then
+    begin
+      Inc(LMoved);
+      LKey[ASlot] := LItems[AItem].Node;
+    end
+    else if LKey[ASlot] < 0 then
+      LKey[ASlot] := LItems[AItem].Node;
+  end;
+
+  function EnclosingRoutine(ANode: Integer): string;
+  begin
+    Result := '';
+    while ANode <> NIL_NODE do
+    begin
+      case GTree.Nodes[ANode].Kind of
+        nkRoutine:
+          if Result = '' then
+            Result := RoutineName(ANode)
+          else
+            Result := RoutineName(ANode) + '.' + Result;
+        nkInitSec:
+          if Result = '' then
+            Result := GUnitName;
+        nkFinalSec:
+          if Result = '' then
+            Result := 'Finalization';
+      end;
+      ANode := GTree.Nodes[ANode].Parent;
+    end;
+  end;
+
+  function IsBlank(AChar: Char): Boolean;
+  begin
+    Result := CharInSet(AChar, [' ', #9, #10, #13]);
+  end;
+
+begin
+  LItems := PrintNode(GTree, 0);
+  if not CompareT3(GTree, 0, LT3, 1) then
+    raise Exception.CreateFmt('the print has %d T3 defects, the first at ' +
+      '%s: %s', [LT3.Defects, VisSiteText(GPre, LT3.Sites[0].Vis),
+      LT3.Sites[0].Msg]);
+  SetLength(LOwner, Length(GPre.Visible));
+  for LIdx := 0 to High(LOwner) do
+    LOwner[LIdx] := -1;
+  LReport.Init(1);
+  CheckTree(GTree, True, LReport,
+    procedure(ANode, AVisIndex, ACell, ARule: Integer)
+    begin
+      LOwner[AVisIndex] := ANode;
+    end);
+  SetLength(LText, Length(GPre.Visible));
+  SetLength(LHas, Length(GPre.Visible));
+  SetLength(LMatched, Length(GPre.Visible));
+  SetLength(LKey, Length(GPre.Visible));
+  for LIdx := 0 to High(LKey) do
+    LKey[LIdx] := -1;
+  for LIdx := 0 to High(LItems) do
+    if LT3.ItemAt[LIdx] >= 0 then
+      LMatched[LT3.ItemAt[LIdx]] := True;
+  // Per item: the token the next matched item stands for (-1: none).
+  SetLength(LNextAt, Length(LItems) + 1);
+  LNextAt[Length(LItems)] := -1;
+  for LIdx := High(LItems) downto 0 do
+    if LT3.ItemAt[LIdx] >= 0 then
+      LNextAt[LIdx] := LT3.ItemAt[LIdx]
+    else
+      LNextAt[LIdx] := LNextAt[LIdx + 1];
+  LCursor := -1;
+  LMoved := 0;
+  LSepOwn := 0;
+  LSepNew := 0;
+  LKeptSep := 0;
+  for LIdx := 0 to High(LItems) do
+  begin
+    LVis := LT3.ItemAt[LIdx];
+    if LVis < 0 then
+    begin
+      if LItems[LIdx].Cls <> pcSeparator then
+        raise Exception.CreateFmt('print item %d (%s) matched no token',
+          [LIdx, LItems[LIdx].Text]);
+      // The original's own `;` between the items around it, dropped by N1.
+      LSlot := -1;
+      LLast := LNextAt[LIdx + 1];
+      if LLast < 0 then
+        LLast := High(GPre.Visible);
+      for LVis := LCursor + 1 to LLast - 1 do
+        if (GPre.VisibleToken(LVis).Kind = tkSemicolon) and
+           not LMatched[LVis] and not LHas[LVis] then
+        begin
+          LSlot := LVis;
+          Break;
+        end;
+      if LSlot >= 0 then
+      begin
+        Inc(LSepOwn);
+        Place(LSlot, LIdx, False);
+        LKey[LSlot] := LItems[LIdx].Node;
+        LCursor := LSlot;
+      end
+      else
+      begin
+        // It opens the next item's slot - or, with none left, joins the last.
+        Inc(LSepNew);
+        LSlot := LNextAt[LIdx + 1];
+        if (LSlot < 0) or (LSlot < LCursor) then
+          LSlot := LCursor;
+        if LSlot < 0 then
+          raise Exception.Create('a separator before any token');
+        Place(LSlot, LIdx, True);
+        if LSlot > LCursor then
+          LCursor := LSlot;
+      end;
+      Continue;
+    end;
+    if LVis >= LCursor then
+    begin
+      Place(LVis, LIdx, False);
+      LCursor := LVis;
+    end
+    else
+      Place(LCursor, LIdx, True);
+  end;
+
+  // The edits, slot by slot; the sites by key node, in the order of their
+  // first slot.
+  LSites := TList<TSite>.Create;
+  try
+    SetLength(LSiteOf, Length(GTree.Nodes));
+    for LIdx := 0 to High(LSiteOf) do
+      LSiteOf[LIdx] := -1;
+    SetLength(LFirstOf, 0);
+    SetLength(LLastOf, 0);
+    LFirst := GTree.NodeLeftmostVis(0);
+    LLast := GTree.Nodes[0].LastToken;
+    // A root stops on the token after its final `.` (N4, N5): untouched.
+    if GTree.Nodes[0].Kind in [nkUnit, nkProgram, nkLibrary, nkPackage] then
+      Dec(LLast);
+    LChanged := 0;
+    for LVis := LFirst to LLast do
+    begin
+      if GPre.VisibleToken(LVis).Kind = tkEndOfFile then
+        Continue;
+      LNew := '';
+      if LHas[LVis] then
+        LNew := LText[LVis]
+      else if (GPre.VisibleToken(LVis).Kind = tkSemicolon) and
+         (LOwner[LVis] >= 0) and
+         (GTree.Nodes[LOwner[LVis]].Kind in [nkBlock, nkCaseStmt, nkExceptPart,
+           nkInitSec, nkFinalSec, nkClassType, nkRecordType, nkObjectType,
+           nkHelperType, nkInterfaceType, nkVariantPart, nkVariantBranch,
+           nkVarSec, nkRoutine, nkPropertyDecl]) then
+      begin
+        // A list's `;` the print does not need (N1) stays: dcc gives the code
+        // at a statement's end the line of the token AFTER it - an Assert's
+        // line, the line tables, a stored body - and dropping `S;` before an
+        // `end` on the next line moves that token there.
+        Inc(LKeptSep);
+        Continue;
+      end;
+      LOrig := VisText(LVis);
+      if LNew = LOrig then
+        Continue;
+      LStart := VisOffset(LVis, LFile);
+      LLen := VisEnd(LVis, LFile) - LStart;
+      if GIncludedTwice[LFile] then
+      begin
+        Inc(GExcludedPrint);
+        Continue;
+      end;
+      LSrc := GPre.Files[LFile].Source;
+      LEdit := MakeEdit(LFile, LStart, LLen, LNew);
+      LEdit.Order := cSlotOrder;
+      if SameText(LNew, LOrig) then
+      begin
+        GPrintCase.Add(LEdit);
+        Continue;
+      end;
+      Inc(LChanged);
+      if LNew = '' then
+        LEdit.Text := Blank(LSrc, LStart, LLen)
+      else
+      begin
+        // Apart from the characters around it, which stay as they were.
+        if (LStart > 0) and not IsBlank(LSrc[LStart]) then
+          LEdit.Text := ' ' + LEdit.Text;
+        if (LStart + LLen < Length(LSrc)) and
+           not IsBlank(LSrc[LStart + LLen + 1]) then
+          LEdit.Text := LEdit.Text + ' ';
+      end;
+      LNode := LKey[LVis];
+      if LNode < 0 then
+        LNode := LOwner[LVis];
+      if LNode < 0 then
+        LNode := 0;
+      if LSiteOf[LNode] < 0 then
+      begin
+        LSite := Default(TSite);
+        LSite.Kind := 'print';
+        LSite.Ops := GTree.KindName(GTree.Nodes[LNode].Kind);
+        LSite.Routine := EnclosingRoutine(LNode);
+        LSite.OpenVis := LVis;
+        LSite.CloseVis := LVis;
+        LSite.CloseText := '';
+        LSite.Edit := '';
+        LSiteOf[LNode] := LSites.Count;
+        LSites.Add(LSite);
+        SetLength(LFirstOf, LSites.Count);
+        SetLength(LLastOf, LSites.Count);
+        LFirstOf[LSites.Count - 1] := LVis;
+      end;
+      LSite := LSites[LSiteOf[LNode]];
+      LSite.Edits := LSite.Edits + [LEdit];
+      if LSite.Edit <> '' then
+        LSite.Edit := LSite.Edit + ' ';
+      LSite.Edit := LSite.Edit + '`' + LOrig + '`->`' + LNew + '`';
+      LSites[LSiteOf[LNode]] := LSite;
+      LLastOf[LSiteOf[LNode]] := LVis;
+    end;
+    for LIdx := 0 to LSites.Count - 1 do
+    begin
+      LSite := LSites[LIdx];
+      LSite.Span := SpanText(LFirstOf[LIdx], LLastOf[LIdx]);
+      LSite.Edit := LSite.Edit.Replace(#9, ' ').Replace(#13, ' ').
+        Replace(#10, ' ');
+      GSites.Add(LSite);
+    end;
+    GPrintStats := Format('items=%d losses=%d slots-changed=%d case=%d ' +
+      'moved=%d separators-own=%d separators-new=%d separators-kept=%d',
+      [Length(LItems), LT3.Losses, LChanged, GPrintCase.Count, LMoved,
+      LSepOwn, LSepNew, LKeptSep]);
+  finally
+    LSites.Free;
+  end;
+end;
+
 // The argument of include directive AText (`$I x` in braces, or `INCLUDE x`
 // in parens and stars): its offset in AText (0-based) and length, the
 // delimiters and blanks outside.
@@ -2160,6 +2468,7 @@ var
   GDiags: TArray<TPasParseDiag>;
   GIdx, GJdx, GNonInfo, GOffset, GApplied: Integer;
   GSite: TSite;
+  GEdit: TEdit;
   GName: string;
   GWritten: TDictionary<string, Boolean>;
   GSitesText, GFileLines: TStringList;
@@ -2230,6 +2539,8 @@ begin
         else if GArg = 't0f' then GMode := xmT0F
         else if GArg = 't1' then GMode := xmT1
         else if GArg = 't2' then GMode := xmT2
+        else if GArg = 't3' then GMode := xmT3
+        else if GArg = 't3x' then GMode := xmT3X
         else raise Exception.Create('unknown mode: ' + GArg);
       end
       else if GArg.StartsWith('-Undef:', True) then
@@ -2264,7 +2575,7 @@ begin
     end;
     if (GFile = '') or (GOut = '') then
     begin
-      Writeln(ErrOutput, 'Usage: PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2 ' +
+      Writeln(ErrOutput, 'Usage: PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2|t3|t3x ' +
         '-out:<dir> [-p:<platform>] [-D:X;Y]... [-Undef:X;Y]... ' +
         '[-I:<dir>[;<dir>]]... [-oracle [-S:<dir>[;<dir>]]...] ' +
         '[-sites:<ids>]');
@@ -2282,6 +2593,7 @@ begin
     GPP := TPasPreprocessor.Create(GSM, GDefines, DEFAULT_COMPILER_VERSION,
       GInfo.PointerBytes, GInfo.ExtendedBytes);
     GEdits := TList<TEdit>.Create;
+    GPrintCase := TList<TEdit>.Create;
     GSites := TList<TSite>.Create;
     GArgMap := TDictionary<string, string>.Create;
     GInlineNames := TDictionary<string, Boolean>.Create;
@@ -2335,7 +2647,7 @@ begin
 
       GDiags := nil;
       GApplied := 0;
-      if GMode in [xmTS, xmT1, xmT2] then
+      if GMode in [xmTS, xmT1, xmT2, xmT3, xmT3X] then
       begin
         GTree := TPasParser.ParseFile(GPre, GDiags);
         for GIdx := 0 to High(GDiags) do
@@ -2348,6 +2660,10 @@ begin
           else
             Writeln(ErrOutput, 'PARSE <eof>: ', GDiags[GIdx].Msg);
         GUnitName := HeaderName;
+        // The printer is for valid code only.
+        if (GMode in [xmT3, xmT3X]) and (Length(GDiags) > 0) then
+          raise Exception.CreateFmt('the unit parses with %d diagnostics: no ' +
+            'print', [Length(GDiags)]);
         case GMode of
           xmTS: VisitRoutines(0, '');
           xmT1:
@@ -2356,20 +2672,41 @@ begin
               CollectInitStarts(0);
               T1Walk(0, '', -2);
             end;
+          xmT2:
+            begin
+              GLinesKept := LinesKept(['D', 'L', 'Y']);
+              CollectInlineNames(0);
+              T2Walk(0, '', False, False);
+            end;
+          xmT3:
+            T3Walk;
         else
+          // t3x: the print, then t1's parentheses and t2's blocks over it -
+          // their sites after its own, under t2's line rule for both.
+          T3Walk;
           GLinesKept := LinesKept(['D', 'L', 'Y']);
+          CollectInitStarts(0);
+          T1Walk(0, '', -2);
           CollectInlineNames(0);
           T2Walk(0, '', False, False);
         end;
+        for GEdit in GPrintCase do
+          GEdits.Add(GEdit);
         for GIdx := 0 to GSites.Count - 1 do
           if SiteSelected(GIdx + 1) then
           begin
             GSite := GSites[GIdx];
-            AddEdit(GSite.OpenVis, GSite.OpenAfter, GSite.OpenOrder,
-              GSite.OpenText);
-            if GSite.CloseText <> '' then
-              AddEdit(GSite.CloseVis, not GSite.CloseBefore, GSite.CloseOrder,
-                GSite.CloseText);
+            if Length(GSite.Edits) > 0 then
+              for GEdit in GSite.Edits do
+                GEdits.Add(GEdit)
+            else
+            begin
+              AddEdit(GSite.OpenVis, GSite.OpenAfter, GSite.OpenOrder,
+                GSite.OpenText);
+              if GSite.CloseText <> '' then
+                AddEdit(GSite.CloseVis, not GSite.CloseBefore,
+                  GSite.CloseOrder, GSite.CloseText);
+            end;
             Inc(GApplied);
           end;
       end
@@ -2473,13 +2810,16 @@ begin
         'dropped-sites=%d  excluded-type=%d  excluded-ctor=%d  ' +
         'excluded-at=%d  excluded-inline=%d  excluded-label=%d  ' +
         'excluded-asm=%d  excluded-call=%d  excluded-stored=%d  ' +
-        'excluded-lines=%d  excluded-init=%d  applied=%d  stream=%s',
+        'excluded-lines=%d  excluded-init=%d  excluded-print=%d  ' +
+        'applied=%d  stream=%s',
         [PasTreeVersion, cModeNames[GMode], PlatformName(GPlatform),
         Length(GPre.FileNames), Length(GDiags), GNonInfo, GDropped, GExcluded,
         GExcludedCtor, GExcludedAt, GExcludedInline, GExcludedLabel,
         GExcludedAsm, GExcludedCall, GExcludedStored, GExcludedLines,
-        GExcludedInit, GApplied, IfThen(GOracleUsed, 'project',
+        GExcludedInit, GExcludedPrint, GApplied, IfThen(GOracleUsed, 'project',
         'preprocessor')]));
+      if GMode in [xmT3, xmT3X] then
+        GSitesText.Add('# print ' + GPrintStats);
       GSitesText.Add('# ' + GFile);
       GSitesText.Add('# id' + #9 + 'kind' + #9 + 'ops' + #9 + 'span' + #9 +
         'routine' + #9 + 'edit' + #9 + 'applied');
@@ -2523,11 +2863,15 @@ begin
         GLine := GLine + ' excluded-lines ' + IntToStr(GExcludedLines);
       if GExcludedInit > 0 then
         GLine := GLine + ' excluded-init ' + IntToStr(GExcludedInit);
-      if GMode in [xmTS, xmT1, xmT2] then
+      if GExcludedPrint > 0 then
+        GLine := GLine + ' excluded-print ' + IntToStr(GExcludedPrint);
+      if GMode in [xmTS, xmT1, xmT2, xmT3, xmT3X] then
         GLine := GLine + ' applied ' + IntToStr(GApplied);
       Writeln('sites ', GLine);
-      if GMode in [xmTS, xmT1, xmT2] then
+      if GMode in [xmTS, xmT1, xmT2, xmT3, xmT3X] then
         Writeln('parse ', Length(GDiags));
+      if GMode in [xmT3, xmT3X] then
+        Writeln('print ', GPrintStats);
       if GOracleUsed and (GMode <> xmT0F) then
         Writeln('stream project');
       if GMode = xmT0F then
@@ -2538,6 +2882,7 @@ begin
       end;
     finally
       GInitStarts.Free;
+      GPrintCase.Free;
       GInlineNames.Free;
       GArgMap.Free;
       GFileLines.Free;

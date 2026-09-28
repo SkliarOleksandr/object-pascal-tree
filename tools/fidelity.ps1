@@ -50,6 +50,13 @@
   PasTreeXform) - an else, a case branch or a statement's end placed
   differently from dcc changes the code; the localizer as for t1.
 
+  Mode t3 judges the tree's COMPLETENESS and the structural printer: the
+  unit printed from its tree, in place of its own tokens (see PasTreeXform),
+  compiled with dcc's default switches - a spelling the printer takes for
+  another that dcc does not, or a fact the tree lost, changes the .dcu. Mode
+  t3x adds t1's parentheses and t2's blocks over the print, under t2's
+  switches: the plan's final gate. The localizer as for t1 over their sites.
+
   Rules the compiles follow (both sides alike):
   - dcc by FULL path (the one on PATH may be another version), -$O- (dead
     store elimination hides wrong trees) - but t0f takes dcc's defaults, the
@@ -81,7 +88,7 @@
 #>
 param(
   [Parameter(Mandatory = $true)] [string] $List,
-  [Parameter(Mandatory = $true)] [ValidateSet('t0', 'ts', 't0f', 't1', 't2')] [string] $Mode,
+  [Parameter(Mandatory = $true)] [ValidateSet('t0', 'ts', 't0f', 't1', 't2', 't3', 't3x')] [string] $Mode,
   [Parameter(Mandatory = $true)] [string] $Out,
   [string] $Platform = 'Win64',
   [string] $Bds = 'C:\Program Files (x86)\Embarcadero\Studio\37.0',
@@ -145,9 +152,17 @@ if ($Mode -eq 't0f' -and -not $PSBoundParameters.ContainsKey('Switches') -and $W
 # recorded on the `else` line, with `begin inherited end` on its own; -$D-
 # and -$L- leave that record in place, -$Y- removes it (probed on a VCL
 # unit, dcc64 37.0; no Studio unit tests $IFOPT Y).
-if ($Mode -in @('t1', 't2') -and -not $PSBoundParameters.ContainsKey('Switches') -and $Worker -eq '') {
+if ($Mode -in @('t1', 't2', 't3x') -and -not $PSBoundParameters.ContainsKey('Switches') -and $Worker -eq '') {
   $Switches = @('-$O-', '-$D-', '-$L-')
-  if ($Mode -eq 't2') { $Switches += '-$Y-' }
+  if ($Mode -in @('t2', 't3x')) { $Switches += '-$Y-' }
+}
+# t3 - the print in place, every token on its line, nothing added - takes
+# dcc's own defaults like t0f: line tables and symbol info on, the strictest
+# judge of a print that must change nothing but spellings (dcc keeps lines,
+# not columns: probe s10\probes\col). t3x adds t1's and t2's edits and their
+# switches.
+if ($Mode -eq 't3' -and -not $PSBoundParameters.ContainsKey('Switches') -and $Worker -eq '') {
+  $Switches = @()
 }
 
 if ($Worker -ne '') {
@@ -164,7 +179,7 @@ if ($Worker -ne '') {
   $Localize = [bool]$p.Localize; $NoLocalize = [bool]$p.NoLocalize; $LocalizeBudget = [int]$p.LocalizeBudget
   $Sites = "$($p.Sites)"
 }
-$doLocalize = (-not $NoLocalize) -and ($Mode -in @('t1', 't2') -or ($Mode -eq 'ts' -and $Localize))
+$doLocalize = (-not $NoLocalize) -and ($Mode -in @('t1', 't2', 't3', 't3x') -or ($Mode -eq 'ts' -and $Localize))
 if ($Oracle -and $OraclePath.Count -eq 0) {
   # What PasTreeSemaProject -proj adds (StudioSearchPaths there).
   $OraclePath = @('source\rtl\sys', 'source\rtl\common', 'source\rtl\win',
@@ -559,10 +574,10 @@ function Invoke-Unit([string] $u, [string] $work) {
     if ($x.Out -match '(?m)^flatten .*stream=project') { $parts += 'project stream'; $r.ProjectStream = 1 }
     if ($parts.Count -gt 0) { $note = '  [' + ($parts -join '; ') + ']' }
   }
-  if ($Mode -in @('t1', 't2')) {
+  if ($Mode -in @('t1', 't2', 't3', 't3x')) {
     # The site counts: every operator (t1) or statement (t2) the tree holds,
     # the ones a rule leaves unwrapped (excluded-*) and the ones in no
-    # single file.
+    # single file; t3's are the print's changed spellings, one per node.
     $sl = [regex]::Match($x.Out, '(?m)^sites (\d+)(.*)$')
     $r.AllSites = [int]$sl.Groups[1].Value
     foreach ($m in [regex]::Matches($sl.Groups[2].Value, 'excluded-\w+ (\d+)')) {
@@ -869,6 +884,10 @@ if ($Mode -eq 't1') {
 if ($Mode -eq 't2') {
   $summary.Add(("t2: sites={0} excluded (inline var/const, labeled, asm, list calls, stored-body lines, source line info)={1} dropped={2} units with parse diagnostics={3}" -f
     $t1.Sites, $t1.Excluded, $t1.Dropped, $t1.ParseUnits))
+}
+if ($Mode -in @('t3', 't3x')) {
+  $summary.Add(("{4}: sites={0} excluded (t1, t2 rules; print slots in an include used twice)={1} dropped={2} units with parse diagnostics={3}" -f
+    $t1.Sites, $t1.Excluded, $t1.Dropped, $t1.ParseUnits, $Mode))
 }
 if ($doLocalize) {
   $summary.Add(("localizer: culprits={0} variant compiles={1}" -f $t1.Culprits, $t1.Compiles))

@@ -201,6 +201,16 @@ original onto it (`PRINT_NORMALIZATION` in `PasTree.Printer`):
   and into the type otherwise and after `reference to`, which takes no `;`;
 - a record constant's `;` after its last field value, `(X: 1; Y: 2;)`.
 
+Same program for dcc, the reprint through it says (T3x) - but not always the
+same `.dcu`: dcc writes three of these apart in bytes the code does not
+depend on. A list's last `;` before an `end` on the next line gives the
+statement's end another line (the reprint keeps such `;`s where they
+stand); a unit's `begin` and `initialization` give the section other line
+records under `$D+ $L+`; and `procedure stdcall` and `procedure; stdcall`
+order two records of the type's entry differently when its result type
+aliases another unit's type and `{$EXTERNALSYM}` names it. The tree keeps
+neither of the last two; `docs/dcu-reader.md` has the probes.
+
 ## 7. How it is checked
 
 - `PasTreeTreeCheck` (tools): every token every node owns is covered by a
