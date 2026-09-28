@@ -98,6 +98,29 @@ type
       APlatform: TPasPlatform; const AExtTypeOf: TSemaExtTypeFunc); static;
   end;
 
+{ Overload scoring rules shared by the unit's typer (ScoreArgs) and the
+  project's cross-unit selection (ScoreCandidate), so one call scores alike
+  whichever pass decides it.
+
+  IsOneCharLiteral: AText - a string literal's text - is ONE character: 'x',
+  '''', #65, #$41, ^M. dcc gives such a literal the type Char (B.6.1), and it
+  converts to a string too. Both passes type every literal `string`, so it
+  scored the string overload of `P(C: Char)` / `P(const S: string)` exact and
+  the Char one nothing - and dcc picks the Char one. A Char parameter scores
+  it 3, above the string's exact 2, which leaves every pair without a Char
+  overload as it was (`P(PChar)` / `P(string)` still picks the string one).
+
+  IsScalarToReference: an argument of a scalar category (integer, float,
+  Boolean, Char, string) cannot be passed to a class, interface or
+  class-reference parameter at all - not assignable, no conversion - so the
+  candidate is rejected rather than scored "assignable". The conservative
+  rule allowed every non-scalar destination, and an Integer argument tied
+  `F(const A: IFoo)` with `F(A: TId)` (`TId = type Integer`): the first
+  declared won, and its sibling's calls were listed as its references. A
+  record parameter is not in the rule: a string constant converts to TGUID. }
+function IsOneCharLiteral(const AText: string): Boolean;
+function IsScalarToReference(ADst, ASrc: TSemaTypeCat): Boolean;
+
 implementation
 
 uses
@@ -106,6 +129,61 @@ uses
   PasTree.Preprocessor,
   PasTree.Sema.Builtins,
   PasTree.Sema.Diagnostics;
+
+function IsOneCharLiteral(const AText: string): Boolean;
+var
+  LIdx, LLen, LUnits: Integer;
+begin
+  LUnits := 0;
+  LIdx := 1;
+  LLen := Length(AText);
+  while LIdx <= LLen do
+  begin
+    case AText[LIdx] of
+      '''':
+        begin
+          Inc(LIdx);
+          while LIdx <= LLen do
+          begin
+            if AText[LIdx] = '''' then
+            begin
+              if (LIdx < LLen) and (AText[LIdx + 1] = '''') then
+                Inc(LIdx)   // a doubled quote: one character
+              else
+                Break;      // the closing quote
+            end;
+            Inc(LUnits);
+            Inc(LIdx);
+          end;
+          Inc(LIdx);        // past the closing quote
+        end;
+      '#':
+        begin
+          Inc(LIdx);
+          while (LIdx <= LLen) and CharInSet(AText[LIdx], ['0'..'9', 'a'..'f',
+             'A'..'F', '$', '%', '_']) do
+            Inc(LIdx);
+          Inc(LUnits);
+        end;
+      '^':
+        begin
+          Inc(LIdx, 2);
+          Inc(LUnits);
+        end;
+    else
+      Exit(False);   // a multiline string, whitespace, anything else
+    end;
+    if LUnits > 1 then
+      Exit(False);
+  end;
+  Result := LUnits = 1;
+end;
+
+function IsScalarToReference(ADst, ASrc: TSemaTypeCat): Boolean;
+begin
+  Result := (ASrc in [tcInteger, tcFloat, tcBoolean, tcChar, tcString]) and
+    (ADst in [tcClass, tcInterface, tcClassOf]);
+end;
 
 class procedure TPasSemaTyper.Check(AModel: TPasSemaModel;
   APlatform: TPasPlatform = pfWin32);
@@ -897,8 +975,15 @@ begin
     LAt := M.ExprType[LArg];
     LPt := M.Symbols[AParams[LIdx]].TypeSym;
     if (LAt <> NIL_SYM) and (LPt <> NIL_SYM) then
-      if LAt = LPt then
+      // A one-character literal is typed `string` here but is a Char
+      // constant (see IsOneCharLiteral).
+      if (Kind(LArg) = nkStrLit) and (CatOf(LPt) = tcChar) and
+         IsOneCharLiteral(Txt(LArg)) then
+        Inc(Result, 3)
+      else if LAt = LPt then
         Inc(Result, 2)
+      else if IsScalarToReference(CatOf(LPt), CatOf(LAt)) then
+        Exit(-1)
       else if Assignable(LPt, LAt) then
         Inc(Result, 1);
     LArg := Sib(LArg);

@@ -218,6 +218,13 @@ same-arity overloads differing only in modifiers can mis-pair.
   the first candidate. A tie between candidates with DIFFERENT result types
   is recorded (CrossType's LAmbig) and refuses inline-var inference from the
   call, but the call node itself still carries the first candidate's type.
+  Two corners are decided rather than scored: a scalar argument (integer,
+  float, Boolean, Char, string) rejects a class, interface or class-reference
+  parameter, and a one-character literal - a Char constant - scores a Char
+  parameter above the string one (both passes type literals `string`). A
+  distinct alias (`TId = type Integer`) is still only "assignable" from its
+  base, so it wins over an overload the argument fits no better, not over
+  an exact one.
 - a bare routine name in a value position - a member qualifier or an inline
   initializer - means the parameterless overload (6.6.1); the same rule is
   NOT applied in other value positions (an argument, an assignment's right

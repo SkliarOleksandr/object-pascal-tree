@@ -9458,7 +9458,12 @@ var
          (XCatOf(LParX) = tcProc) and not LiteralFits(LCore, LParX) then
         Exit(-1);
       if XValid(LArgX) and XValid(LParX) then
-        if XSameType(LParX, LArgX) then
+        // A one-character literal is a Char constant (IsOneCharLiteral).
+        if (LM.Tree.Nodes[LCore].Kind = nkStrLit) and
+           (XCatOf(CanonTypeX(LParX)) = tcChar) and
+           IsOneCharLiteral(LM.Tree.NodeText(LCore)) then
+          Inc(Result, 3)
+        else if XSameType(LParX, LArgX) then
           Inc(Result, 2)
         else
         begin
@@ -9503,6 +9508,10 @@ var
                   ((XCatOf(LCanonArg) = tcArray) and
                    (XCatOf(LCanonPar) in [tcRecord, tcClass, tcInterface]) and
                    not HasConversionOperator(LCanonPar)) then
+            Exit(-1)
+          // A scalar where a class, an interface or a class reference is
+          // wanted (IsScalarToReference).
+          else if IsScalarToReference(XCatOf(LCanonPar), XCatOf(LCanonArg)) then
             Exit(-1)
           else if XAssignableX(LParX, LArgX) then
             Inc(Result, 1);

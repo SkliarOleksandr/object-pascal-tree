@@ -375,6 +375,60 @@ const
     'end;'#10 +                                           // 9
     'end.'#10;                                            // 10
 
+  { Overload selection that dcc decides by the argument's type and PasTree
+    used to leave to declaration order (pastree-mcp's deep testing on the
+    client group, 2026-09-28; the compiler's W1000 was the oracle):
+    - an Integer argument cannot be passed to an interface parameter, so
+      `Bal(I, 0)` is the `TId = type Integer` overload, declared second -
+      it tied with the interface one as "assignable" and the first won;
+    - a one-character literal is a Char constant, so `PosC('.', S)` is the
+      Char overload - typed `string`, it scored the string one exact.
+    The same calls in the declaring unit (the unit's own typer) and in
+    another one (the project's cross-unit selection). }
+  UNIT_ARGSEL =
+    'unit NavArg;'#10 +                                   // 1
+    'interface'#10 +                                      // 2
+    'type'#10 +                                           // 3
+    '  TId = type Integer;'#10 +                          // 4
+    '  IThing = interface'#10 +                           // 5
+    '  end;'#10 +                                         // 6
+    'function Bal(const A: IThing; const B: IThing = nil): Integer; overload;'#10 + // 7 Bal col 10
+    'function Bal(A, B: TId): Integer; overload;'#10 +    // 8  Bal col 10
+    'function PosC(C: Char; const S: string): Integer; overload;'#10 + // 9 PosC col 10
+    'function PosC(const Sub, S: string): Integer; overload;'#10 + // 10 PosC col 10
+    'procedure Local;'#10 +                               // 11
+    'implementation'#10 +                                 // 12
+    'function Bal(const A: IThing; const B: IThing = nil): Integer; begin Result := 0; end;'#10 + // 13
+    'function Bal(A, B: TId): Integer; begin Result := 0; end;'#10 + // 14
+    'function PosC(C: Char; const S: string): Integer; begin Result := 0; end;'#10 + // 15
+    'function PosC(const Sub, S: string): Integer; begin Result := 0; end;'#10 + // 16
+    'procedure Local;'#10 +                               // 17
+    'var I: Integer; S: string;'#10 +                     // 18
+    'begin'#10 +                                          // 19
+    '  I := Bal(I, 0);'#10 +                              // 20 Bal col 8
+    '  I := PosC(''.'', S);'#10 +                         // 21 PosC col 8
+    '  I := PosC(''ab'', S);'#10 +                        // 22 PosC col 8
+    '  I := PosC(#65, S);'#10 +                           // 23 PosC col 8
+    'end;'#10 +                                           // 24
+    'end.'#10;                                            // 25
+
+  UNIT_ARGSELUSE =
+    'unit NavArgUse;'#10 +                                // 1
+    'interface'#10 +                                      // 2
+    'uses NavArg;'#10 +                                   // 3
+    'procedure Remote;'#10 +                              // 4
+    'implementation'#10 +                                 // 5
+    'procedure Remote;'#10 +                              // 6
+    'var I: Integer; S: string; T: IThing;'#10 +          // 7
+    'begin'#10 +                                          // 8
+    '  I := Bal(I, 0);'#10 +                              // 9  Bal col 8
+    '  I := Bal(T);'#10 +                                 // 10 Bal col 8
+    '  I := PosC(''.'', S);'#10 +                         // 11 PosC col 8
+    '  I := PosC(S, S);'#10 +                             // 12 PosC col 8
+    '  I := PosC('''''''', S);'#10 +                      // 13 PosC col 8
+    'end;'#10 +                                           // 14
+    'end.'#10;                                            // 15
+
   // Find Destructions and a form's Release (UNIT_FORMS / UNIT_RLS): the VCL
   // form's Release frees the form; a `Release` of any other class does not -
   // one not derived from a form, or a form class declaring its own.
@@ -3454,6 +3508,65 @@ begin
           LRegFound := True;
       Ok('reg: FindDestructions over a demoted unit - `(Sender as TOwn).Free` '
         + 'found, no access violation', LRegFound);
+    finally
+      GNav.Free;
+    end;
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- Overload selection by argument type (UNIT_ARGSEL / UNIT_ARGSELUSE). ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_nav_argsel');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), UNIT_SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavArg.pas'), UNIT_ARGSEL);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavArgUse.pas'), UNIT_ARGSELUSE);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    GNav := TPasNavigator.Create(GProj);
+    try
+      var LOvl := GNav.ModelIdOf(TPath.Combine(LDir, 'NavArg.pas'));
+      var LOvlUse := GNav.ModelIdOf(TPath.Combine(LDir, 'NavArgUse.pas'));
+      Ok('ovl: both models found', (LOvl >= 0) and (LOvlUse >= 0));
+      var LOT, LOS: Integer;
+      var LON: string;
+      var LOHit: TPasRefHit;
+      // The overload a call at (ALine, ACol) of AMid binds: its declaration
+      // line in NavArg, 0 when it binds nothing.
+      var LBound: TFunc<Integer, Integer, Integer, Integer> :=
+        function(AMid, ALine, ACol: Integer): Integer
+        begin
+          Result := 0;
+          if GNav.SymbolAt(AMid, ALine, ACol, LOT, LOS, LON) and
+             GNav.DeclHit(LOT, LOS, LOHit) then
+            Result := LOHit.Line;
+        end;
+      Ok('ovl: an Integer argument picks the `type Integer` overload, not the '
+        + 'interface one declared first - same unit', LBound(LOvl, 20, 8) = 8);
+      Ok('ovl: ...and from another unit', LBound(LOvlUse, 9, 8) = 8);
+      Ok('ovl: an interface argument still picks the interface overload',
+        LBound(LOvlUse, 10, 8) = 7);
+      Ok('ovl: a one-character literal picks the Char overload - same unit',
+        LBound(LOvl, 21, 8) = 9);
+      Ok('ovl: a two-character literal picks the string overload',
+        LBound(LOvl, 22, 8) = 10);
+      Ok('ovl: #65 picks the Char overload', LBound(LOvl, 23, 8) = 9);
+      Ok('ovl: a one-character literal from another unit picks Char',
+        LBound(LOvlUse, 11, 8) = 9);
+      Ok('ovl: a string variable picks the string overload',
+        LBound(LOvlUse, 12, 8) = 10);
+      Ok('ovl: an escaped quote is one character - Char',
+        LBound(LOvlUse, 13, 8) = 9);
+      Ok('ovl: the TId overload''s references are its two calls',
+        GNav.SymbolAt(LOvl, 8, 10, LOT, LOS, LON) and
+        HasHitAt(GNav.FindReferences(LOT, LOS), 'NavArg.pas', 20, 8) and
+        HasHitAt(GNav.FindReferences(LOT, LOS), 'NavArgUse.pas', 9, 8) and
+        not HasHitAt(GNav.FindReferences(LOT, LOS), 'NavArgUse.pas', 10, 8));
     finally
       GNav.Free;
     end;
