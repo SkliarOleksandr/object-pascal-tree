@@ -483,6 +483,68 @@ const
     '  end' + CRLF +                                             // 6
     'end' + CRLF;                                                // 7
 
+  // Component paths TReader resolves by NAME (probed, dcc32 37.0 - all three
+  // bind at run time): a frame's component with no field, a path headed by
+  // the frame's own name inside its block, a sibling frame's component from
+  // inside another frame's block.
+  UNIT_TRAY =
+    'unit FixTray;'#10 +                                         // 1
+    'interface'#10 +                                             // 2
+    'uses FixVcl;'#10 +                                          // 3
+    'type'#10 +                                                  // 4
+    '  TFixTray = class(TFrame)'#10 +                            // 5
+    '    TrayLabel: TLabel;'#10 +                                // 6
+    '    TrayEdit: TEdit;'#10 +                                  // 7  col 5
+    '  end;'#10 +                                                // 8
+    'implementation'#10 +                                        // 9
+    '{$R *.dfm}'#10 +                                            // 10
+    'end.'#10;                                                   // 11
+
+  DFM_TRAY =
+    'object FixTray: TFixTray' + CRLF +                          // 1
+    '  object TrayLabel: TLabel' + CRLF +                        // 2
+    '  end' + CRLF +                                             // 3
+    '  object TrayEdit: TEdit' + CRLF +                          // 4
+    '  end' + CRLF +                                             // 5
+    '  object TrayGhost: TEdit' + CRLF +                         // 6  no field
+    '  end' + CRLF +                                             // 7
+    'end' + CRLF;                                                // 8
+
+  UNIT_DOCK =
+    'unit FixDock;'#10 +                                         // 1
+    'interface'#10 +                                             // 2
+    'uses FixVcl, FixTray;'#10 +                                 // 3
+    'type'#10 +                                                  // 4
+    '  TFixDockForm = class(TForm)'#10 +                         // 5
+    '    Label1: TLabel;'#10 +                                   // 6
+    '    Tray1: TFixTray;'#10 +                                  // 7
+    '    Tray2: TFixTray;'#10 +                                  // 8
+    '    Label3: TLabel;'#10 +                                   // 9
+    '  end;'#10 +                                                // 10
+    'implementation'#10 +                                        // 11
+    '{$R *.dfm}'#10 +                                            // 12
+    'end.'#10;                                                   // 13
+
+  DFM_DOCK =
+    'object FixDockForm: TFixDockForm' + CRLF +                  // 1
+    '  object Label1: TLabel' + CRLF +                           // 2
+    '    FocusControl = Tray1.TrayGhost' + CRLF +                // 3
+    '  end' + CRLF +                                             // 4
+    '  inline Tray1: TFixTray' + CRLF +                          // 5
+    '    inherited TrayLabel: TLabel' + CRLF +                   // 6
+    '      FocusControl = Tray1.TrayEdit' + CRLF +               // 7  TrayEdit col 28
+    '    end' + CRLF +                                           // 8
+    '  end' + CRLF +                                             // 9
+    '  inline Tray2: TFixTray' + CRLF +                          // 10
+    '    inherited TrayLabel: TLabel' + CRLF +                   // 11
+    '      FocusControl = Tray1.TrayEdit' + CRLF +               // 12 TrayEdit col 28
+    '    end' + CRLF +                                           // 13
+    '  end' + CRLF +                                             // 14
+    '  object Label3: TLabel' + CRLF +                           // 15
+    '    FocusControl = Tray1.Nowhere' + CRLF +                  // 16
+    '  end' + CRLF +                                             // 17
+    'end' + CRLF;                                                // 18
+
   // What a real form holds and a naive reader gets wrong: a Boolean named
   // like an event, an event cleared with nil, the items of one collection
   // binding one event each, and text after the root's `end` - which dcc's
@@ -1227,6 +1289,45 @@ begin
     FilePath('NoSuch.dfm'), LInfo) and (LInfo.Error <> ''));
 end;
 
+procedure DockChecks;
+var
+  LInfo: TPasFormInfo;
+
+  // The binding written on line ALine, -1 for none.
+  function AtLine(ALine: Integer): Integer;
+  begin
+    for var LI := 0 to High(LInfo.Bindings) do
+      if LInfo.Bindings[LI].Line = ALine then
+        Exit(LI);
+    Result := -1;
+  end;
+
+var
+  LIdx: Integer;
+  LSites: TArray<TPasFormSite>;
+begin
+  Ok('dock: described', GNav.DescribeForm(FilePath('FixDock.dfm'), LInfo) and
+    (LInfo.Error = '') and (Length(LInfo.Bindings) = 4));
+  LIdx := AtLine(3);
+  Ok('dock: a frame''s component with no field is reached by name', (LIdx >= 0)
+    and (LInfo.Bindings[LIdx].TSym = NIL_SYM) and LInfo.Bindings[LIdx].NoField);
+  LIdx := AtLine(7);
+  Ok('dock: inside a frame''s block, a path headed by the frame''s own name',
+    (LIdx >= 0) and IsSymAt(LInfo.Bindings[LIdx].TMid,
+    LInfo.Bindings[LIdx].TSym, 'FixTray.pas', 7, 5));
+  LIdx := AtLine(12);
+  Ok('dock: inside a frame''s block, a sibling frame''s component',
+    (LIdx >= 0) and IsSymAt(LInfo.Bindings[LIdx].TMid,
+    LInfo.Bindings[LIdx].TSym, 'FixTray.pas', 7, 5));
+  LIdx := AtLine(16);
+  Ok('dock: a path nothing answers still dangles', (LIdx >= 0) and
+    (LInfo.Bindings[LIdx].TSym = NIL_SYM) and not LInfo.Bindings[LIdx].NoField);
+  LSites := Sites('FixTray.pas', 7, 5);
+  Ok('dock: the field''s sites hold both frame-block lines',
+    HasSite(LSites, 'FixDock.dfm', 7, 28, fskComponentRef, 'TrayLabel') and
+    HasSite(LSites, 'FixDock.dfm', 12, 28, fskComponentRef, 'TrayLabel'));
+end;
+
 procedure CollChecks;
 var
   LInfo: TPasFormInfo;
@@ -1324,6 +1425,10 @@ begin
   TFile.WriteAllText(FilePath('FixHostGrand.dfm'), DFM_HOSTGRAND,
     TEncoding.ASCII);
   TFile.WriteAllText(FilePath('FixLate.pas'), UNIT_LATE);
+  TFile.WriteAllText(FilePath('FixTray.pas'), UNIT_TRAY);
+  TFile.WriteAllText(FilePath('FixTray.dfm'), DFM_TRAY, TEncoding.ASCII);
+  TFile.WriteAllText(FilePath('FixDock.pas'), UNIT_DOCK);
+  TFile.WriteAllText(FilePath('FixDock.dfm'), DFM_DOCK, TEncoding.ASCII);
   TFile.WriteAllText(FilePath('FixColl.pas'), UNIT_COLL);
   TFile.WriteAllText(FilePath('FixColl.dfm'), DFM_COLL, TEncoding.ASCII);
 
@@ -1340,6 +1445,7 @@ begin
       AncestorChecks;
       InheritedInlineChecks;
       CollChecks;
+      DockChecks;
       LateChecks;
     finally
       GNav.Free;

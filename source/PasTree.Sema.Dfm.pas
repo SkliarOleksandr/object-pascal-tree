@@ -175,6 +175,10 @@ type
     // a descendant clears the handler its ancestor's form binds. TSym is
     // NIL_SYM, and it is not a missing method.
     Cleared: Boolean;
+    // A component path that reaches a component by NAME - one the form files
+    // create with no field declared for it: it binds at run time, and TSym
+    // is NIL_SYM because there is no symbol to bind to.
+    NoField: Boolean;
     // The symbol it binds; TSym = NIL_SYM when it binds nothing.
     TMid, TSym: Integer;
     Via: TPasFormSiteVia;
@@ -253,6 +257,9 @@ type
     function SiteOf(AEntry: TFormEntry; AIdent: Integer;
       AKind: TPasFormSiteKind; AVia: TPasFormSiteVia): TPasFormSite;
     function EntryOf(const APath: string): TFormEntry;
+    function CreatedIn(const AClass: TSemaXType; const ANameLower: string;
+      out AObjClass: TSemaXType): Boolean;
+    function ReachedByName(AEntry: TFormEntry; AIdent: Integer): Boolean;
   public
     { ALibraryPaths as TPasNavigator keeps them (full, lower case, trailing
       delimiter): a form file under one of them is never read - a library's
@@ -978,6 +985,18 @@ begin
     AVia := fsvInline;   // `Frame1.Edit1`: a field of the component's class
     Exit(Walk(FieldClass(ATMid, ATSym)));
   end;
+  // ...else, inside an inline frame's block, a component of the FORM: what
+  // the frame does not resolve, TReader resolves from the root - the frame
+  // named by its own name (`Frame1.Edit1` inside Frame1's block), a sibling
+  // frame's component (probed, dcc32 37.0: both bind at run time)...
+  if (InnerLookupRoot(AEntry, LId.Obj) > 0) and FieldIn(AEntry.Mid,
+     RootClassOf(AEntry), LName, ATMid, ATSym) then
+  begin
+    if LId.Seg = 0 then
+      Exit(True);
+    if Walk(FieldClass(ATMid, ATSym)) then
+      Exit(True);
+  end;
   // ...else another module's root, by Name. Several forms may share one;
   // the first through which the path resolves wins.
   if LId.Seg = 0 then
@@ -1019,6 +1038,86 @@ begin
     Result.PropName := LDoc.PropPath(LId.Prop);
   Result.IsBinary := LDoc.IsBinary;
   Result.IsUtf8 := LDoc.Encoding = dfeUtf8;
+end;
+
+{ Whether a form file of AClass's chain - its own, then its ancestors' -
+  creates a component named ANameLower at its top (not inside an inline
+  frame's block), and of which class. A component needs no field to exist:
+  TReader creates it, and FindComponent finds it by Name. }
+function TPasFormBinder.CreatedIn(const AClass: TSemaXType;
+  const ANameLower: string; out AObjClass: TSemaXType): Boolean;
+var
+  LK: TSemaXType;
+  LEntry: TFormEntry;
+  LDoc: TPasDfmDoc;
+  LIdx, LGuard: Integer;
+begin
+  AObjClass := XNil;
+  LK := AClass;
+  LGuard := 0;
+  while XValid(LK) and (LGuard < 64) do
+  begin
+    LEntry := RootEntryOfClass(LK);
+    if LEntry <> nil then
+    begin
+      LDoc := DocOf(LEntry);
+      for LIdx := 1 to High(LDoc.Objects) do
+        if SameText(LDoc.ObjectName(LIdx), ANameLower) and
+           (HeaderLookupRoot(LEntry, LIdx) = 0) then
+        begin
+          AObjClass := ObjClassOf(LEntry, LIdx);
+          Exit(True);
+        end;
+    end;
+    LK := FProj.CanonTypeX(FProj.AncestorOfX(LK));
+    Inc(LGuard);
+  end;
+  Result := False;
+end;
+
+{ Whether the component path ending at AIdent names a component that exists
+  at run time though no field chain reaches it: a segment is a field, else a
+  component the form files of the class so far create (CreatedIn) - what
+  FindNestedComponent walks by Name. From the lookup root, and inside an
+  inline frame's block from the form's root too (see ValueTarget). A frame's
+  component the designer left without a field read as a dangling reference
+  (probed, dcc32 37.0: it binds). }
+function TPasFormBinder.ReachedByName(AEntry: TFormEntry;
+  AIdent: Integer): Boolean;
+var
+  LDoc: TPasDfmDoc;
+  LId: TPasDfmIdent;
+  LFirst: Integer;
+
+  function From(const AClass: TSemaXType): Boolean;
+  var
+    LC, LNext: TSemaXType;
+    LS, LFMid, LFSym: Integer;
+    LName: string;
+  begin
+    Result := False;
+    LC := AClass;
+    for LS := 0 to LId.Seg do
+    begin
+      if not XValid(LC) then
+        Exit;
+      LName := LowerCase(LDoc.IdentText(LFirst + LS));
+      if FieldIn(AEntry.Mid, LC, LName, LFMid, LFSym) then
+        LC := FieldClass(LFMid, LFSym)
+      else if CreatedIn(LC, LName, LNext) then
+        LC := LNext   // not CreatedIn(LC, ..., LC): the out clears the const
+      else
+        Exit;
+    end;
+    Result := True;
+  end;
+
+begin
+  LDoc := DocOf(AEntry);
+  LId := LDoc.Idents[AIdent];
+  LFirst := AIdent - LId.Seg;
+  Result := From(ObjClassOf(AEntry, InnerLookupRoot(AEntry, LId.Obj))) or
+    ((InnerLookupRoot(AEntry, LId.Obj) > 0) and From(RootClassOf(AEntry)));
 end;
 
 function TPasFormBinder.EntryOf(const APath: string): TFormEntry;
@@ -1519,6 +1618,7 @@ begin
         // is a reference left dangling.
         LB.TMid := NIL_SYM;
         LB.TSym := NIL_SYM;
+        LB.NoField := ReachedByName(LEntry, LIdx);
       end
       else
         Continue;   // `alClient`, `True`: a property's value, not a name
