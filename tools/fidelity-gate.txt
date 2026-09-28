@@ -1,0 +1,49 @@
+# The fidelity gate's expectations (tools\fidelity-gate.ps1): every outcome
+# other than OK that is known and explained today. A unit no line names must
+# be OK. Keep the reason with every line - an unexplained exception is the
+# thing the gate exists to refuse. Finding ids are those of
+# docs/tree-contract.md and docs/parser-fidelity.md.
+#
+# <corpus> <stages> <unit or file> <outcomes> <why>
+#   corpus    self | studio (an extra corpus lists its own, in its file)
+#   stages    * or a comma list of t0f t1 t2 t3 t3x; or, for the tree stage
+#             (the file relative to the tree it was read from - the Studio
+#             source root, the repository's source\ ...), parse (the file
+#             parses with diagnostics) or t3r (its print does not parse back)
+#   outcomes  a | list of OK DIFF XFORM-FAIL BASE-FAIL NONDET TOOL-FAIL, or
+#             FAIL for parse and t3r
+
+# The units dcc does not compile standalone - never judged.
+studio * System.pas BASE-FAIL reserved unit name (E2272): only the RTL's own build compiles it
+studio * SysInit.pas BASE-FAIL reserved unit name (E2272)
+studio * System.Generics.Collections.pas BASE-FAIL a unit cycle through System.Rtti: F2613 standalone
+studio * FMX.ZOrder.pas BASE-FAIL a unit cycle with FMX.ZOrder.Win: F2613 standalone
+studio * FMX.ZOrder.Win.pas BASE-FAIL a generic cycle with FMX.Presentation.Win: F2051 standalone
+
+# dcc itself. A NONDET outcome needs no line - the gate shows it and never
+# fails on it (Vcl.Skia under -$O-, and once System.Variants under t0f). A
+# variation rare enough to slip past the harness's recompiles reads as DIFF:
+studio t1,t2,t3x Vcl.ControlList.pas OK|DIFF|NONDET one byte of a method-resolution entry differs in about 1 of 10 compiles of the original alone
+
+# Spellings the tree does not keep and dcc writes apart in bytes the code does
+# not depend on (docs/tree-contract.md sec. 6, docs/dcu-reader.md).
+studio t3,t3x Winapi.Penwin.pas DIFF F29: `procedure stdcall` vs `procedure; stdcall` with a result type from another unit and EXTERNALSYM - two records of the type's entry in the other order
+studio t3 System.Win.InternetExplorer.pas DIFF F30: a unit's `begin` printed as `initialization` - other line records under $D+ $L+
+studio t3 Winapi.OpenGL.PkgHelper.pas DIFF F30: as System.Win.InternetExplorer
+
+# The files of the tree stage that do not parse clean under Win64.
+studio parse rtl\posix\Posix.SysSocket.pas FAIL a POSIX-only unit read under the Win64 defines: dcc never compiles it there
+
+# T3r: a recovery heuristic that reads a line break in valid code - `case`
+# alone on its line before a variant part's tag (F28) - breaks the
+# token-per-line print's parse back.
+studio t3r rtl\common\System.Curl.pas FAIL F28
+studio t3r rtl\common\System.Hash.pas FAIL F28
+studio t3r rtl\common\System.Masks.pas FAIL F28
+studio t3r rtl\common\System.Win.ObjComAuto.pas FAIL F28
+studio t3r rtl\net\System.Beacon.Common.pas FAIL F28
+studio t3r rtl\net\System.Beacon.pas FAIL F28
+studio t3r rtl\win\Winapi.MMSystem.pas FAIL F28
+studio t3r rtl\win\Winapi.Windows.pas FAIL F28
+studio t3r rtl\win\Winapi.WinSpool.pas FAIL F28
+studio t3r DUnit\Contrib\DUnitWizard\Source\DelphiExperts\Common\XPKeyWords.pas FAIL F28

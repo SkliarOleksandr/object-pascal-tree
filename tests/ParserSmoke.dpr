@@ -13,9 +13,11 @@ program ParserSmoke;
   same arena, and for a DECL row the interface-only parse must be a prefix of
   the full one. A clean row is also printed from its tree (PasTree.Printer):
   T3, the print against the row's tokens, and T3r, the print parsed back in
-  two layouts. A violation fails the row, whatever its dump says.
-  BuildOwnTokenCases holds the table itself to account: it parses, and I5
-  fails on trees built by hand to break it.
+  two layouts. A violation fails the row, whatever its dump says. The custom
+  cases that parse a tree of their own (BuildCustomCases: whole units,
+  programs, packages, every platform's define set) get the same verdict
+  through GCustomTreeVerdict. BuildOwnTokenCases holds the table itself to
+  account: it parses, and I5 fails on trees built by hand to break it.
 }
 
 {$APPTYPE CONSOLE}
@@ -428,6 +430,7 @@ begin
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN64']);
   GPP := TPasPreprocessor.Create(GSM, GDefines);
   GVerdictPP := GPP;
+  GCustomTreeVerdict := TreeVerdict;
   try
     RunSuite('ParserSmoke', GPP, STMT_CASES, DECL_CASES,
       BuildCustomCases(GPP, GSM) + BuildRoundtripCases +

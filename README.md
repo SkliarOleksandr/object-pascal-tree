@@ -367,8 +367,8 @@ usable.
 | `demo/` | `PasTreeDemo` - a VCL host (SynEdit + VirtualTreeView) exercising the highlighter and navigation features interactively over real projects |
 | `tests/` | 16 DUnitX-style smoke suites (`ParserSmoke`, `ResilienceSmoke`, `StagedParseSmoke`, `DProjSmoke`, `SemaSmoke`, `SemaTypeSmoke`, `SemaXTypeSmoke`, `SemaOverloadSmoke`, `SemaProjectSmoke`, `SemaNavSmoke`, `SemaCompleteSmoke`, `AsyncSmoke`, `UnitListSmoke`, `NavHistorySmoke`, `DemoSettingsSmoke`, `DcuSmoke`) plus golden JSON trees and full-corpus runs. **`tests\build.bat` builds and runs all of them** - use it rather than hand-rolling `dcc32` lines: the last three link demo units through relative `in` paths and compile only with the current directory set to `tests\` |
 | `out/` | every build's `.dcu`, under `out\dcu\win32` and `out\dcu\win64`. Intermediate output that nothing reads between runs (every build passes `-B`), kept in one place so it is trivial to delete and to leave out of a backup. Split by platform because the same units compile both ways and `PasTree.Types.dcu` would otherwise exist twice under one name |
-| `tools/` | CLI drivers per pipeline stage (`PasTreeLex`, `PasTreePP`, `PasTreeParse`, `PasTreeJson`, `PasTreeSema`, `PasTreeSemaProject`), `PasTreeTreeCheck` (the tree checker over a directory or the golden rows: every invariant violation, a per-kind histogram of the tokens each node kind owns with the own-token table's class for each, and the loss list), `PasTreePrint` (the structural printer over a directory or the golden rows: every token the print misses or misplaces, the filed losses per finding, and every file whose print does not parse back to the same tree), `PasTreeDcu` (a `.dcu` -> interface source, a raw dump, or the read-and-parse sweep over a library directory - the `.dcu` reader's regression gate), the node-kinds generator, and the compile-compare harness: `PasTreeXform` rewrites a unit along its tree - parenthesizes every operator (`t1`), wraps every statement in `begin`/`end` (`t2`), reprints it from its tree in place of its own tokens (`t3`, and `t3x` with both), or writes the preprocessor's decisions into the text (`t0f`) - `fidelity.ps1` compiles original and rewrite under dcc and compares the `.dcu` bytes (identical exactly when the tree, or the preprocessor, agrees with dcc), naming the differing routine from the dump and, through its localizer (the rewrite's sites bisected by recompiling), the node |
-| `docs/` | `tree-contract.md` - what a consumer may read from the tree and from where: the tokens every kind regenerates, the leaf texts, the few documented reads of a token, the facts the tree still does not hold, and how each claim is checked. `incremental-analysis.md` - how a single edit is re-analyzed without rebuilding the closure: the parse donor, `AnalyzeModuleOnly`, the guards, every reason a fast path is refused, and what is still open. `editor-features.md` - the living IDE-parity spec for the demo's editor features. `coverage.md` - every place PasTree knowingly implements LESS than `object-pascal-spec` describes, keyed by spec section; the spec itself stays a description of the LANGUAGE, so a gap in this parser is recorded here, beside the code that closes it. `dcu-reader.md` - the `.dcu` format findings (Delphi 11 -> 12/13 deltas, all additive), the decision to write our own reader with the patched public parser as the oracle, and what was built: the reader, the interface printer, the source-manager fallback, what the generated text does and does not carry, the gates |
+| `tools/` | CLI drivers per pipeline stage (`PasTreeLex`, `PasTreePP`, `PasTreeParse`, `PasTreeJson`, `PasTreeSema`, `PasTreeSemaProject`), `PasTreeTreeCheck` (the tree checker over a directory or the golden rows: every invariant violation, a per-kind histogram of the tokens each node kind owns with the own-token table's class for each, and the loss list), `PasTreePrint` (the structural printer over a directory or the golden rows: every token the print misses or misplaces, the filed losses per finding, and every file whose print does not parse back to the same tree), `PasTreeDcu` (a `.dcu` -> interface source, a raw dump, or the read-and-parse sweep over a library directory - the `.dcu` reader's regression gate), the node-kinds generator, and the compile-compare harness: `PasTreeXform` rewrites a unit along its tree - parenthesizes every operator (`t1`), wraps every statement in `begin`/`end` (`t2`), reprints it from its tree in place of its own tokens (`t3`, and `t3x` with both), or writes the preprocessor's decisions into the text (`t0f`) - `fidelity.ps1` compiles original and rewrite under dcc and compares the `.dcu` bytes (identical exactly when the tree, or the preprocessor, agrees with dcc), naming the differing routine from the dump and, through its localizer (the rewrite's sites bisected by recompiling), the node - and `fidelity-gate.ps1` runs all of it as one command before a parser, preprocessor or printer change is committed: the tools built with range checks, the comparator's selftest, the tree checker and the printer over the golden rows, the repository and the Studio source, every rewrite over the self-host, the Studio RTL and any extra corpus, each outcome judged against the known exceptions in `fidelity-gate.txt` |
+| `docs/` | `parser-fidelity.md` - how the tree is proven dcc's: the three claims (coverage, structure, completeness), the checks without a compiler and the compile-compare harness through it, the rules its rewrites follow, what none of it can see, where it stands, the findings still open, and the gate. `tree-contract.md` - what a consumer may read from the tree and from where: the tokens every kind regenerates, the leaf texts, the few documented reads of a token, the facts the tree still does not hold, and how each claim is checked. `incremental-analysis.md` - how a single edit is re-analyzed without rebuilding the closure: the parse donor, `AnalyzeModuleOnly`, the guards, every reason a fast path is refused, and what is still open. `editor-features.md` - the living IDE-parity spec for the demo's editor features. `coverage.md` - every place PasTree knowingly implements LESS than `object-pascal-spec` describes, keyed by spec section; the spec itself stays a description of the LANGUAGE, so a gap in this parser is recorded here, beside the code that closes it. `dcu-reader.md` - the `.dcu` format findings (Delphi 11 -> 12/13 deltas, all additive), the decision to write our own reader with the patched public parser as the oracle, and what was built: the reader, the interface printer, the source-manager fallback, what the generated text does and does not carry, the gates |
 
 ### Line endings: CRLF for everything Delphi and cmd.exe read
 
@@ -1629,7 +1629,11 @@ Still open, roughly in the order we're tackling it:
   tokens) the print misses or misplaces no token, and parses back to the
   same tree in both layouts but where one recovery heuristic reads a line
   break in valid code (`case` alone on its line in a variant record). The
-  contract it follows is `docs/tree-contract.md`.
+  contract it follows is `docs/tree-contract.md`. Since v0.64.0 the reprint
+  goes through dcc too - the whole unit printed from its tree compiles to
+  the original's `.dcu` - and the verbatim rung is closed as definition of
+  done item 5 (`docs/parser-fidelity.md`); the qualified rung is what is
+  left, one more rewrite for the same harness.
 - **A real formatter for Delphi code, built on the structural printer.** The
   printer regenerates a unit from its tree, but lays it out only for
   checking - one token per line, all on one line, or on the original's lines.
@@ -1973,6 +1977,21 @@ Still open, roughly in the order we're tackling it:
    opt-in member flag either. What is left anywhere is a unit whose source
    genuinely is not on the search path, plus one confirmed true positive. See
    the To-do for what holding that now depends on.
+5. **The tree is the compiler's.** Over the self-host and the Studio source:
+   the tree checker reports no invariant violation and no token outside the
+   own-token table; every rewrite computed from the tree - the
+   preprocessor's decisions written out, every operator parenthesized, every
+   statement wrapped in `begin`/`end`, the unit reprinted from its tree
+   alone, and all of them at once - compiles under dcc to a byte-identical
+   `.dcu`; and the structural printer reproduces every unit's tokens modulo
+   a written normalization list, and parses back to the same tree. ✅
+   Reached 2026-09-28 (v0.64.0) on the Studio 37 source, Win64 and Win32,
+   and the self-host, with three exceptions filed as findings: one recovery
+   heuristic reads a line break in valid code (the reprint does not parse
+   back in the token-per-line layout, 10 files), and two spellings the
+   tree takes as one that dcc writes apart in bytes the code does not depend
+   on (3 units). The method, the blind spots and the open findings:
+   `docs/parser-fidelity.md`; held by `tools\fidelity-gate.ps1`.
 
 ## Requirements
 

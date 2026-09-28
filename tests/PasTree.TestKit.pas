@@ -156,6 +156,14 @@ procedure RunSuite(const ASuiteName: string; APP: TPasPreprocessor;
   const ACustom: array of TPasCustomCase; out APassed, AFailed: Integer;
   const AVerdict: TPasTreeVerdict = nil);
 
+{ Applies AVerdict (nothing when nil) to a tree a case built: a failing
+  verdict fails AResult, its text after whatever AResult already said. The
+  STMT/DECL runners call it on every row; a custom case that parses a tree of
+  its own calls it too. }
+procedure ApplyVerdict(var AResult: TPasCheckResult; const ASource: string;
+  const AVerdict: TPasTreeVerdict; const APre: TPasPreprocessed;
+  const ATree: TPasTree; AStatements, AValid: Boolean);
+
 implementation
 
 procedure TPasSuiteCounter.Init;
@@ -301,8 +309,6 @@ begin
     end;
 end;
 
-// A failing verdict fails the row; its text follows whatever the dump
-// comparison already said.
 procedure ApplyVerdict(var AResult: TPasCheckResult; const ASource: string;
   const AVerdict: TPasTreeVerdict; const APre: TPasPreprocessed;
   const ATree: TPasTree; AStatements, AValid: Boolean);

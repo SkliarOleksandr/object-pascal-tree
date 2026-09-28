@@ -2161,6 +2161,12 @@ const
 function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
   TPasCustomCases;
 
+var
+  { The verdict ParserSmoke passes RunSuite for every golden row (the tree
+    checker, T3, T3r), applied to the trees the custom cases above parse
+    themselves as well; nil in every other host. }
+  GCustomTreeVerdict: TPasTreeVerdict;
+
 implementation
 
 function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
@@ -2206,6 +2212,8 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
             LExpected := LExpected + 'Assign(Ident''B'' IntLit''32'')';
           LExpected := LExpected + ')';
           Result := CheckDump(SNIPPET, LExpected, LTree.Dump(0), LDiags, 0);
+          ApplyVerdict(Result, SNIPPET, GCustomTreeVerdict, LPre, LTree,
+            True, Length(LDiags) = 0);
         finally
           LPP.Free;
           LDefines.Free;
@@ -2446,6 +2454,8 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
           Result.Message := Format(
             '  marked: %d (expected 2), wrong text: %d, parse diags: %d',
             [LMarked, LWrongText, Length(LDiags)]) + sLineBreak;
+        ApplyVerdict(Result, SRC, GCustomTreeVerdict, LPre, LTree, False,
+          Length(LDiags) = 0);
       end;
   end;
 
@@ -2503,6 +2513,8 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
             '  package: %s, requires: %s, contains: %s, parse diags: %d',
             [BoolToStr(LPkg, True), BoolToStr(LReq, True),
              BoolToStr(LCon, True), Length(LDiags)]) + sLineBreak;
+        ApplyVerdict(Result, SRC, GCustomTreeVerdict, LPre, LTree, False,
+          Length(LDiags) = 0);
       end;
   end;
 
@@ -2530,6 +2542,8 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
         Result := CheckDump(SRC, 'Program(Ident''Sample'' UsesClause(' +
           'UsesItem(Ident''SysUtils'')) Block(Assign(Ident''X'' ' +
           'IntLit''1'')))', LTree.Dump(0), LDiags, 0);
+        ApplyVerdict(Result, SRC, GCustomTreeVerdict, LPre, LTree, False,
+          Length(LDiags) = 0);
       end;
   end;
 
@@ -2572,6 +2586,8 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
           'Routine''function''(Ident''G''#name Ident''Integer'' ' +
           'RoutineBody(AsmStmt))))',
           LTree.Dump(0), LDiags, 0);
+        ApplyVerdict(Result, SRC, GCustomTreeVerdict, LPre, LTree, False,
+          Length(LDiags) = 0);
       end;
   end;
 
@@ -2594,6 +2610,8 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
         LTree := TPasParser.ParseFile(LPre, LDiags);
         Result := CheckDump(SRC, 'Unit(Ident''U'' InterfaceSec ' +
           'ImplementationSec)', LTree.Dump(0), LDiags, 0);
+        ApplyVerdict(Result, SRC, GCustomTreeVerdict, LPre, LTree, False,
+          Length(LDiags) = 0);
       end;
   end;
 
@@ -2647,6 +2665,8 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
           'RoutineBody(Routine''procedure''(Ident''Inner''#name RoutineBody(' +
           'Block)) Block(ExprStmt(Ident''Inner''))))', LTree.Dump(LOuter),
           LDiags, 0);
+        ApplyVerdict(Result, SRC, GCustomTreeVerdict, LPre, LTree, False,
+          Length(LDiags) = 0);
       end;
   end;
 
@@ -2702,6 +2722,8 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
           'Ident''Integer'')) VarSec''var''(VarDecl(Ident''X''#name ' +
           'Ident''TLocal'')) Block(LabeledStmt(Assign(Ident''X'' ' +
           'Ident''K'')))))', LTree.Dump(LRoutine), LDiags, 0);
+        ApplyVerdict(Result, SRC, GCustomTreeVerdict, LPre, LTree, False,
+          Length(LDiags) = 0);
       end;
   end;
 
@@ -2741,6 +2763,8 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
           'GenericParam(Ident''T'')) Ident''P''#name Params(Param(' +
           'Ident''X''#name Ident''T'')) RoutineBody(Block))))',
           LTree.Dump(0), LDiags, 0);
+        ApplyVerdict(Result, SRC, GCustomTreeVerdict, LPre, LTree, False,
+          Length(LDiags) = 0);
       end;
   end;
 

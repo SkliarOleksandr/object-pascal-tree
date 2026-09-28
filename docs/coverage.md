@@ -18,12 +18,16 @@ The spec keeps exactly one PasTree-facing convention, and it earns its place:
 the `*AST:*` hints, which name the node kind a construct lowers to. Those are
 a vocabulary contract, and `tools/KindsCheck` mechanically cross-checks them.
 
-**Status: as of v0.50.0 (2026-09-25).** A gap is either listed here or it is
+**Status: as of v0.64.1 (2026-09-28).** A gap is either listed here or it is
 not a known gap. When you close one, delete the entry in the same commit.
 
 Not listed here, deliberately: bugs (those are fixed, not documented) and
 error-tolerance decisions (PasTree analyzes broken source on purpose - see the
-README's own section on that).
+README's own section on that). Two neighbours hold the rest: the facts a
+parse keeps only in a token, which a consumer still reads there
+(`docs/tree-contract.md` sec. 4 - a few of them are also entries below, by
+section), and the parser-fidelity findings still open with what the checks
+against dcc cannot see (`docs/parser-fidelity.md`).
 
 ---
 
@@ -38,10 +42,24 @@ README's own section on that).
   `$IFEND` and `$ENDIF` are treated as the same terminator unconditionally,
   and `{$LEGACYIFEND}` is passthrough trivia; the strict pairing check is not
   available even as an opt-in.
+- the predefined set is not quite dcc's (`PasTree.Platforms`): dcc64 37.0
+  also defines `DCC`, `NATIVECODE`, `MANAGED_RECORD`, `WEAKINTFREF`,
+  `WEAKREF` and `WEAK_NATIVEINT` (dcc32 `UNDERSCOREIMPORTNAME` too), and does
+  not define `CPUINTEL`, which PasTree does. A few RTL units take other
+  branches for it (probed over every symbol the Studio source tests).
+- a shipped unit is evaluated under the project's defines, not the ones its
+  own `.dcu` was built with: the Win64 `System.dcu` was built with
+  `CPP_ABI_SUPPORT`, so dcc64 user code sees `CPP_ABI_ADJUST = 24` (and the
+  vmt offsets derived from it) where PasTree evaluates `System.pas` to 0; a
+  `$IF` over such a constant can go the other way.
 
 ### 1.3.3 Include files
 - the `{$I %ENV%}` / `{$I %DATE%}` insertion forms are
   diagnosed (ppUnsupportedInsertion) but no value is injected.
+- an include named inside an include file is looked up beside THAT file
+  first; dcc 37.0 looks beside the main unit, then in the current directory,
+  then on the include path - never beside the file that names it. The two
+  find different files only where both directories hold one of that name.
 
 ### 1.3.5 Compiler-version symbols
 - the VERxxx symbol and CompilerVersion/RTLVersion follow the one
@@ -190,8 +208,8 @@ README's own section on that).
 ## 06-routines.md
 
 ## 6.2 Parameters
-- the const/var/out modifiers leave no AST node on
-parameters, so declaration-to-implementation pairing ignores them - two
+- the const/var modifiers leave no AST node on parameters (`out` is the
+nkParam's Aux), so declaration-to-implementation pairing ignores them - two
 same-arity overloads differing only in modifiers can mis-pair.
 
 ### 6.3.1 The `overload` directive
@@ -209,6 +227,11 @@ same-arity overloads differing only in modifiers can mis-pair.
 - a bare `end` inside a skipped $IFDEF branch of an asm
   body still closes the asm block at the raw-lexing level (the raw lexer
   cannot know the live branch).
+- the other way round: an `asm` in a DEAD branch that no `$ELSE` of its own
+  depth follows (`{$IFDEF X} asm {$ENDIF}`, a real `asm` after it) leaves
+  the lexer in asm mode past the `$ENDIF`, and the live code after it lexes
+  as asm up to the next `end` - parse errors on code dcc compiles. An `$ELSE`
+  of the asm's depth closes the mode (the live two-body shape).
 
 ## 07-strings.md
 
