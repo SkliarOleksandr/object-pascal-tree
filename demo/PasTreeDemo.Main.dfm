@@ -383,6 +383,34 @@ object frmMain: TfrmMain
           ExplicitHeight = 419
         end
       end
+      object tsPrint: TTabSheet
+        Caption = 'AST Print'
+        TabVisible = False
+        object edPrint: TSynEdit
+          Left = 0
+          Top = 0
+          Width = 908
+          Height = 436
+          Align = alClient
+          Font.Charset = DEFAULT_CHARSET
+          Font.Color = clWindowText
+          Font.Height = -13
+          Font.Name = 'Consolas'
+          Font.Style = []
+          Font.Quality = fqClearTypeNatural
+          TabOrder = 0
+          Gutter.Font.Charset = DEFAULT_CHARSET
+          Gutter.Font.Color = clWindowText
+          Gutter.Font.Height = -11
+          Gutter.Font.Name = 'Consolas'
+          Gutter.Font.Style = []
+          Gutter.Font.Quality = fqClearTypeNatural
+          Gutter.Bands = <>
+          IndentGuides.Visible = False
+          IndentGuides.StructureHighlight = False
+          ScrollbarAnnotations = <>
+        end
+      end
       object tsSema: TTabSheet
         Caption = 'Semantics'
         ImageIndex = 1
@@ -486,8 +514,23 @@ object frmMain: TfrmMain
         TabOrder = 0
         OnClick = btnShowASTJsonClick
       end
-      object btnShowSemantics: TButton
+      object btnShowPrint: TButton
         Left = 111
+        Top = 2
+        Width = 101
+        Height = 25
+        Hint =
+          'The unit printed from its tree (expressions and statements regen' +
+          'erated, declarations copied); the T3 / T3r checks in the message' +
+          's'
+        Caption = 'Show AST Print'
+        ParentShowHint = False
+        ShowHint = True
+        TabOrder = 6
+        OnClick = btnShowPrintClick
+      end
+      object btnShowSemantics: TButton
+        Left = 218
         Top = 2
         Width = 106
         Height = 25
@@ -496,7 +539,7 @@ object frmMain: TfrmMain
         OnClick = btnShowSemanticsClick
       end
       object btnShowCoverage: TButton
-        Left = 223
+        Left = 330
         Top = 2
         Width = 106
         Height = 25
@@ -505,7 +548,7 @@ object frmMain: TfrmMain
         OnClick = btnShowCoverageClick
       end
       object btnStop: TButton
-        Left = 335
+        Left = 442
         Top = 2
         Width = 60
         Height = 25

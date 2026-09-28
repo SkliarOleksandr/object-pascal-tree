@@ -29,7 +29,7 @@ uses
   VirtualTrees, VirtualTrees.Types,
   PasTree.Types, PasTree.Platforms, PasTree.SourceManager, PasTree.Preprocessor,
   PasTree.Ast,
-  PasTree.Ast.Json,
+  PasTree.Ast.Json, PasTree.Ast.Check, PasTree.Printer,
   PasTree.Parser, PasTree.Project, PasTree.DProj,
   PasTree.Sema.Diagnostics, PasTree.Sema.Model, PasTree.Sema.Builtins,
   PasTree.Sema.Types, PasTree.Sema.Resolver, PasTree.Sema.Project,
@@ -208,6 +208,8 @@ type
     pgc: TPageControl;
     tsJson: TTabSheet;
     edJson: TSynEdit;
+    tsPrint: TTabSheet;
+    edPrint: TSynEdit;
     tsSema: TTabSheet;
     edSema: TSynEdit;
     tsCoverage: TTabSheet;
@@ -245,6 +247,7 @@ type
     Panel2: TPanel;
     btnShowASTJson: TButton;
     btnShowSemantics: TButton;
+    btnShowPrint: TButton;
     btnShowCoverage: TButton;
     btnStop: TButton;
     lblProgress: TPanel;
@@ -292,6 +295,7 @@ type
     procedure btnParseRtlClick(Sender: TObject);
     procedure btnShowASTJsonClick(Sender: TObject);
     procedure btnShowSemanticsClick(Sender: TObject);
+    procedure btnShowPrintClick(Sender: TObject);
     procedure btnShowCoverageClick(Sender: TObject);
     procedure btnStopClick(Sender: TObject);
     procedure chkShowErrorsClick(Sender: TObject);
@@ -2798,6 +2802,10 @@ begin
   edJson.Font.Name := 'Consolas';
   edJson.UseCodeFolding := True;
 
+  edPrint.ReadOnly := True;
+  edPrint.Gutter.ShowLineNumbers := True;
+  edPrint.Font.Name := 'Consolas';
+
   edSema.ReadOnly := True;
   edSema.Gutter.ShowLineNumbers := True;
   edSema.Font.Name := 'Consolas';
@@ -2806,6 +2814,7 @@ begin
   // btnShowSemanticsClick) and hidden until asked for - TabVisible keeps the
   // page usable as pgc.ActivePage without a header in the strip.
   tsJson.TabVisible := False;
+  tsPrint.TabVisible := False;
   tsSema.TabVisible := False;
 
   vtMessages.NodeDataSize := SizeOf(TPasMsgNodeData);
@@ -3019,6 +3028,105 @@ begin
   pgc.ActivePage := tsJson;
 end;
 
+{ The main unit printed from its tree (PasTree.Printer): expressions and
+  statements regenerated from the node kinds, declarations - for now - copied
+  from their spans, every token where the token it stands for stands in the
+  source, so the print reads line by line beside it (no comments, no
+  directives, keywords in lower case, one `;` between statements). The
+  printer's own checks go to the messages: T3, the print against the parsed
+  tokens, and T3r, the print parsed back in its two canonical layouts. }
+procedure TfrmMain.btnShowPrintClick(Sender: TObject);
+var
+  LModel: TPasSemaModel;
+  LTree: TPasTree;
+  LDiags: TArray<TPasParseDiag>;
+  LItems: TPasPrintItems;
+  LT3: TPasT3Result;
+  LSM: TPasSourceManager;
+  LDefines: TPasDefines;
+  LPP: TPasPreprocessor;
+  LSite, LMsg: string;
+  LIdx: Integer;
+begin
+  if not FindMainModel(LModel) then
+  begin
+    Log('No analysis available yet.');
+    Exit;
+  end;
+  if Length(LModel.Tree.Source.Visible) = 0 then
+  begin
+    Log('AST Print: the main unit''s tokens are released - analyze it again.');
+    Exit;
+  end;
+  // A fresh parse of the model's own token layer - the same tree, and its
+  // diagnostics say whether it is a tree of valid code, which is what the
+  // printer and its checks are for.
+  LTree := TPasParser.ParseFile(LModel.Tree.Source, LDiags);
+  LItems := PrintNode(LTree, 0);
+  CompareT3(LTree, 0, LT3);
+  edPrint.Highlighter := FSynPasHL;
+  edPrint.Text := RenderItems(LTree, LItems, plSource, LT3.ItemAt);
+  tsPrint.TabVisible := True;
+  pgc.ActivePage := tsPrint;
+
+  if Length(LDiags) > 0 then
+    Log(Format('AST Print: the parse reported %d diagnostics - the print ' +
+      'and its checks are meant for valid code.', [Length(LDiags)]));
+  Log(Format('AST Print T3: %d tokens, %d printed, %d matched (%d copied ' +
+    'from a declaration''s span), %d filed losses, %d defects.',
+    [LT3.Original, LT3.Printed, LT3.Matched, LT3.Spans, LT3.Losses,
+     LT3.Defects]));
+  for LIdx := 0 to High(LT3.Sites) do
+  begin
+    LSite := VisSiteText(LTree.Source, LT3.Sites[LIdx].Vis);
+    if LT3.Sites[LIdx].Finding <> '' then
+      Log(Format('  %s: loss %s: %s', [LSite, LT3.Sites[LIdx].Finding,
+        LT3.Sites[LIdx].Msg]))
+    else
+      Log(Format('  %s: defect: %s', [LSite, LT3.Sites[LIdx].Msg]));
+  end;
+  if (Length(LDiags) > 0) or (LT3.Losses > 0) then
+  begin
+    Log('AST Print T3r: not tried (not valid code, or a filed loss makes ' +
+      'the print another program).');
+    Exit;
+  end;
+  // The print has no directives: a preprocessor with no defines reads it.
+  LSM := TPasSourceManager.Create([]);
+  LDefines := TPasDefines.Create([]);
+  LPP := TPasPreprocessor.Create(LSM, LDefines);
+  try
+    if CheckT3r(LTree,
+      function(const AText: string; out ABack: TPasTree; out ADiags,
+        ADiagVis: Integer; out AFirstDiag: string): Boolean
+      var
+        LPre: TPasPreprocessed;
+        LBackDiags: TArray<TPasParseDiag>;
+      begin
+        LPre := LPP.ProcessText('print.pas', AText);
+        ABack := TPasParser.ParseFile(LPre, LBackDiags);
+        ADiags := Length(LBackDiags);
+        ADiagVis := -1;
+        AFirstDiag := '';
+        if ADiags > 0 then
+        begin
+          ADiagVis := LBackDiags[0].VisIndex;
+          AFirstDiag := LBackDiags[0].Msg;
+        end;
+        Result := True;
+      end, LMsg) then
+      Log('AST Print T3r: both canonical layouts parse back to the same ' +
+        'tree.')
+    else
+      for LSite in LMsg.Split([sLineBreak]) do
+        Log('AST Print T3r: ' + Trim(LSite));
+  finally
+    LPP.Free;
+    LDefines.Free;
+    LSM.Free;
+  end;
+end;
+
 procedure TfrmMain.btnShowSemanticsClick(Sender: TObject);
 var
   LModel: TPasSemaModel;
@@ -3140,6 +3248,7 @@ begin
   // A NEW project starts with a clean slate: no carried-over AST/Semantics
   // dump from whatever was open before.
   tsJson.TabVisible := False;
+  tsPrint.TabVisible := False;
   tsSema.TabVisible := False;
   LFile := AProjectFile;
   LExt := LowerCase(TPath.GetExtension(LFile));

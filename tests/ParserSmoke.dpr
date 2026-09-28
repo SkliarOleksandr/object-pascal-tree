@@ -11,7 +11,9 @@ program ParserSmoke;
   (PasTree.Ast.Check): the invariants I1-I4 and I6, I5 (the own-token table)
   and I8 when the row parses clean, and I7 - a second parse must build the
   same arena, and for a DECL row the interface-only parse must be a prefix of
-  the full one. A violation fails the row, whatever its dump says.
+  the full one. A clean row is also printed from its tree (PasTree.Printer):
+  T3, the print against the row's tokens, and T3r, the print parsed back in
+  two layouts. A violation fails the row, whatever its dump says.
   BuildOwnTokenCases holds the table itself to account: it parses, and I5
   fails on trees built by hand to break it.
 }
@@ -31,10 +33,57 @@ uses
   PasTree.Ast in '..\source\PasTree.Ast.pas',
   PasTree.Ast.Check in '..\source\PasTree.Ast.Check.pas',
   PasTree.Parser in '..\source\PasTree.Parser.pas',
+  PasTree.Printer in '..\source\PasTree.Printer.pas',
   PasTree.TestKit in 'PasTree.TestKit.pas',
   PasTree.Tests.Parser in 'PasTree.Tests.Parser.pas',
   PasTree.Tests.Roundtrip in 'PasTree.Tests.Roundtrip.pas',
   PasTree.Tests.Preprocessor in 'PasTree.Tests.Preprocessor.pas';
+
+var
+  // The preprocessor the rows are parsed with - T3r parses a print back with
+  // it.
+  GVerdictPP: TPasPreprocessor;
+
+// T3 and T3r (PasTree.Printer) over a clean row: the structural print matches
+// the row's tokens but for a filed loss and, when nothing is lost, parses back
+// in both layouts to the same tree. '' when both hold.
+function PrintVerdict(const ATree: TPasTree; AStatements: Boolean): string;
+var
+  LT3: TPasT3Result;
+  LIdx: Integer;
+  LMsg: string;
+begin
+  Result := '';
+  if not CompareT3(ATree, 0, LT3) then
+    for LIdx := 0 to High(LT3.Sites) do
+      if LT3.Sites[LIdx].Finding = '' then
+        Result := Result + '    ' +
+          VisSiteText(ATree.Source, LT3.Sites[LIdx].Vis) + ': T3: ' +
+          LT3.Sites[LIdx].Msg + sLineBreak;
+  if (LT3.Losses = 0) and not CheckT3r(ATree,
+    function(const AText: string; out ABack: TPasTree; out ADiags,
+      ADiagVis: Integer; out AFirstDiag: string): Boolean
+    var
+      LPre: TPasPreprocessed;
+      LDiags: TArray<TPasParseDiag>;
+    begin
+      LPre := GVerdictPP.ProcessText('print.pas', AText);
+      if AStatements then
+        ABack := TPasParser.ParseStatements(LPre, LDiags)
+      else
+        ABack := TPasParser.ParseFile(LPre, LDiags);
+      ADiags := Length(LDiags);
+      ADiagVis := -1;
+      AFirstDiag := '';
+      if ADiags > 0 then
+      begin
+        ADiagVis := LDiags[0].VisIndex;
+        AFirstDiag := LDiags[0].Msg;
+      end;
+      Result := True;
+    end, LMsg) then
+    Result := Result + '    T3r: ' + LMsg + sLineBreak;
+end;
 
 function TreeVerdict(const APre: TPasPreprocessed; const ATree: TPasTree;
   AStatements, AValid: Boolean): string;
@@ -59,6 +108,8 @@ begin
     TStringSplitOptions.ExcludeEmpty);
   for LIdx := 0 to High(LLines) do
     Result := Result + '    ' + LLines[LIdx] + sLineBreak;
+  if AValid then
+    Result := Result + PrintVerdict(ATree, AStatements);
 end;
 
 type
@@ -376,6 +427,7 @@ begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN64']);
   GPP := TPasPreprocessor.Create(GSM, GDefines);
+  GVerdictPP := GPP;
   try
     RunSuite('ParserSmoke', GPP, STMT_CASES, DECL_CASES,
       BuildCustomCases(GPP, GSM) + BuildRoundtripCases +

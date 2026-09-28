@@ -33,6 +33,8 @@ uses
   PasTree.Platforms in '..\source\PasTree.Platforms.pas',
   PasTree.Ast in '..\source\PasTree.Ast.pas',
   PasTree.Ast.Json in '..\source\PasTree.Ast.Json.pas',
+  PasTree.Ast.Check in '..\source\PasTree.Ast.Check.pas',
+  PasTree.Printer in '..\source\PasTree.Printer.pas',
   PasTree.Parser in '..\source\PasTree.Parser.pas',
   PasTree.Project in '..\source\PasTree.Project.pas',
   PasTree.DProj in '..\source\PasTree.DProj.pas',

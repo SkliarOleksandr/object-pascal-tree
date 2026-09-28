@@ -29,7 +29,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..124] of TPasCaseRow = (
+  STMT_CASES: array[0..127] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -276,6 +276,19 @@ const
        'IntLit''2'') Assign(Ident''X'' IntLit''1'')) CaseSel(CaseLabels(' +
        'Range(IntLit''3'' IntLit''5'')) Assign(Ident''X'' IntLit''2'')) ' +
        'Block(Assign(Ident''X'' IntLit''3''))))'; ExpectDiags: 0),
+    // The `;` after the last selector is what gives the else to the case: 
+    // without it the else is the if's (dcc64 37.0 probed, as parsed here).
+    // The printer writes one after every selector for that reason.
+    (Section: '5.3.2'; Name: 'case else after an if, with the ;';
+     Source: 'case K of 1: if A then X := 1; else X := 2 end;';
+     Expected: 'Block(CaseStmt(Ident''K'' CaseSel(CaseLabels(IntLit''1'') ' +
+       'IfStmt(Ident''A'' Assign(Ident''X'' IntLit''1''))) ' +
+       'Block(Assign(Ident''X'' IntLit''2''))))'; ExpectDiags: 0),
+    (Section: '5.3.2'; Name: 'the if''s else inside a case, without the ;';
+     Source: 'case K of 1: if A then X := 1 else X := 2 end;';
+     Expected: 'Block(CaseStmt(Ident''K'' CaseSel(CaseLabels(IntLit''1'') ' +
+       'IfStmt(Ident''A'' Assign(Ident''X'' IntLit''1'') ' +
+       'Assign(Ident''X'' IntLit''2'')))))'; ExpectDiags: 0),
 
     // ---- 5.4.1 inline if ----
     (Section: '5.4.1'; Name: 'inline if';
@@ -360,6 +373,13 @@ const
      Expected: 'Block(TryStmt(Block(ExprStmt(Ident''P'')) ExceptPart(' +
        'ExceptOn(Ident''E'' Ident''EFoo'' ExprStmt(Call(Ident''Log'' ' +
        'Ident''E''))) Block(RaiseStmt))))'; ExpectDiags: 0),
+    // The same for the except part's else after a handler's if.
+    (Section: '18.1.2'; Name: 'except else after a handler''s if';
+     Source: 'try P except on E: EFoo do if A then B; else C end;';
+     Expected: 'Block(TryStmt(Block(ExprStmt(Ident''P'')) ExceptPart(' +
+       'ExceptOn(Ident''E'' Ident''EFoo'' IfStmt(Ident''A'' ' +
+       'ExprStmt(Ident''B''))) Block(ExprStmt(Ident''C'')))))';
+     ExpectDiags: 0),
     (Section: '18.3.1'; Name: 'raise at'; Source: 'raise E at Addr;';
      Expected: 'Block(RaiseStmt(Ident''E'' Ident''Addr''))'; ExpectDiags: 0),
 

@@ -156,6 +156,8 @@
         <DCCReference Include="..\source\PasTree.Platforms.pas"/>
         <DCCReference Include="..\source\PasTree.Ast.pas"/>
         <DCCReference Include="..\source\PasTree.Ast.Json.pas"/>
+        <DCCReference Include="..\source\PasTree.Ast.Check.pas"/>
+        <DCCReference Include="..\source\PasTree.Printer.pas"/>
         <DCCReference Include="..\source\PasTree.Parser.pas"/>
         <DCCReference Include="..\source\PasTree.Project.pas"/>
         <DCCReference Include="..\source\PasTree.DProj.pas"/>
