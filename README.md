@@ -1628,6 +1628,31 @@ Still open, roughly in the order we're tackling it:
   and parses back to the same tree in both layouts but where one recovery
   heuristic reads a line break in valid code (`case` alone on its line in a
   variant record). The contract it follows is `docs/tree-contract.md`.
+- **A real formatter for Delphi code, built on the structural printer.** The
+  printer regenerates a unit from its tree, but lays it out only for
+  checking - one token per line, all on one line, or on the original's lines.
+  A formatter is the same regeneration with a LAYOUT of its own: indentation
+  by nesting, line breaks and wrapping by construct, spacing around operators
+  and punctuation, alignment where a style asks for it, keyword and
+  identifier case, `begin` placement - as a configurable style, with the
+  options a user of the IDE's own formatter expects. What it needs beyond
+  what exists:
+  - declaration templates (the printer copies declarations from their spans
+    today - parser-fidelity step S9);
+  - trivia: comments re-attached to the nodes they belong to (a doc comment
+    to its declaration, a trailing comment to its line, a comment between
+    statements to the one after it), and conditional directives with the
+    inactive code between them kept as written - a formatter must not lose a
+    branch the current defines skip, so regions it cannot parse are copied,
+    and a unit whose directives cut across the tree is formatted around them
+    or left alone;
+  - include files formatted as themselves, not flattened into the includer;
+  - idempotence (formatting formatted code changes nothing) and a range mode
+    (format a selection, an edit) for the editor and the LSP server.
+  The safety net comes for free: a formatter changes only layout, so its
+  output must compile to a byte-identical `.dcu` - the compile-compare
+  harness (`tools\fidelity.ps1`) proves every formatted unit, and T3r proves
+  it parses back to the same tree.
 - **Follow a package's `requires` closure to the required package's search
   paths.** Small, and it is the whole of the last honest `F1027` we still
   report: a `.dpk` whose own `DCC_UnitSearchPath` is one non-recursive
