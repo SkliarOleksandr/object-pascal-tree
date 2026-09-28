@@ -61,12 +61,14 @@ unit PasTree.Sema.Dfm;
   descendants, across modules, and into its hosts' inline blocks (measured
   in RAD Studio 13, pastree-lsp local/DFM-PLAN.md, spike run 5).
 
-  WHAT IS NOT BOUND YET, AND IS REFUSED RATHER THAN SKIPPED. Property NAMES
-  (`Caption = ...`, `Font.Name`) and enum VALUES bind through a property's
-  type, which this unit does not resolve yet. Find References simply lists
-  nothing for them; a RENAME of a published property or of an enum value
-  that a form file may spell is refused whole - a partial rename would be
-  exactly the silent break this unit exists to prevent.
+  WHAT IS NOT BOUND YET, AND IS REFUSED RATHER THAN SKIPPED. A property NAME
+  set directly on an object (`Caption = ...`) is found for a reference
+  search - the object's class has the property, a bare redeclaration taken
+  for the one it republishes (fskProperty) - but a sub-property (`Font.Name`),
+  an item's property and enum VALUES bind through a property's type, which
+  this unit does not resolve yet. A RENAME of a published property or of an
+  enum value that a form file may spell is refused whole - a partial rename
+  would be exactly the silent break this unit exists to prevent.
 }
 
 interface
