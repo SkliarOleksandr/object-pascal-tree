@@ -776,7 +776,6 @@ type
       ANameNode: Integer): TSemaXType;
     function TypeSlotByNameX(AMid, ANode: Integer): TSemaXType;
     function IsGenericTypeSym(AMid, ASym: Integer): Boolean;
-    function ClassRefTargetX(const AX: TSemaXType): TSemaXType;
     function IsDynArrayTypeX(const AX: TSemaXType): Boolean;
     function ResolveTypeExprNested(AId, ANode: Integer;
       ADepth: Integer = 0): TSemaXType;
@@ -999,6 +998,9 @@ type
     // AX with plain alias links followed to the defining declaration (public
     // for the navigator's static-type comparisons; see the implementation).
     function CanonTypeX(const AX: TSemaXType): TSemaXType;
+    // T for a `class of T`, through alias links; XNil for anything else
+    // (public for a host that answers about the class a metaclass names).
+    function ClassRefTargetX(const AX: TSemaXType): TSemaXType;
     { The property REDECLARATION chain (`property Items;` republishing an
       inherited property), for the navigator. PropertyInAncestorsX is the
       link - see its implementation comment for the dcc-probed rules;
