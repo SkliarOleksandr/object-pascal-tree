@@ -10079,6 +10079,61 @@ var
     SetCtxAt(N, LCtx);
   end;
 
+  { The instantiation frame a bare routine name N, bound to (AMid, ASym), is
+    called in - the lookup that name gets in dcc's order: the targets of the
+    `with` statements around it, innermost first and right to left (their
+    types are walked already: a with's targets are children before its
+    body), then the enclosing struct. NIL_INST unless that lookup finds the
+    routine it is bound to (an overload of it: the same scope), so a binding
+    this walk did not make keeps no frame it did not earn. }
+  function BareRoutineFrame(N, AMid, ASym: Integer): Integer;
+  var
+    LCur, LParent, LLast, LTarget, LFMid, LFSym, LFCtx, LStruct: Integer;
+    LTargets: TArray<Integer>;
+    LTX: TSemaXType;
+  begin
+    Result := NIL_INST;
+    LCur := N;
+    LParent := LM.Tree.Nodes[LCur].Parent;
+    while LParent <> NIL_NODE do
+    begin
+      if LM.Tree.Nodes[LParent].Kind = nkWithStmt then
+      begin
+        LTargets := nil;
+        LLast := LM.Tree.Nodes[LParent].FirstChild;
+        while (LLast <> NIL_NODE) and
+              (LM.Tree.Nodes[LLast].NextSibling <> NIL_NODE) do
+        begin
+          LTargets := LTargets + [LLast];
+          LLast := LM.Tree.Nodes[LLast].NextSibling;
+        end;
+        if LCur = LLast then
+          for var LIdx := High(LTargets) downto 0 do
+          begin
+            LTarget := LTargets[LIdx];
+            LTX := XAt(LTarget);
+            if XValid(LTX) and FindMemberX(AId, LTX, PasNodeKey(LM.Tree, N),
+               LFMid, LFSym, LFCtx) then
+            begin
+              // The target has the name: it is the one the name means.
+              if (LFMid = AMid) and (FModels[LFMid].Symbols[LFSym].Scope =
+                 FModels[AMid].Symbols[ASym].Scope) then
+                Result := LFCtx;
+              Exit;
+            end;
+          end;
+      end;
+      LCur := LParent;
+      LParent := LM.Tree.Nodes[LCur].Parent;
+    end;
+    LStruct := StructSymOfNode(LM, N);
+    if (LStruct <> NIL_SYM) and FindMemberX(AId, XPlain(AId, LStruct),
+       PasNodeKey(LM.Tree, N), LFMid, LFSym, LFCtx) and (LFMid = AMid) and
+       (FModels[LFMid].Symbols[LFSym].Scope = FModels[AMid].Symbols[ASym].Scope)
+    then
+      Result := LFCtx;
+  end;
+
   // The type a member access yields: the member's declared type (routines:
   // result type; constructors: the class constructed - see CtorResultX - so
   // `TDerived.Create`, parsed as a plain member when argless, types as
@@ -10459,8 +10514,33 @@ var
           // sites, same suite) - OpenX looks through the arguments.
           if (not XValid(XAt(N))) or OpenX(XAt(N)) or
              ((XAt(N).Inst = NIL_INST) and NestedInGenericX(XAt(N))) then
+          begin
             if LM.ExprTypeX.TryGetValue(N, LBX) and XValid(LBX) then
               SetXAt(N, LBX);
+            // A bare CALL of such a routine is typed once more at its nkCall,
+            // from the routine's declared type closed over the callee's frame
+            // (CtxAt) - and a bare name had none, so `GetRecord(0).Code` in a
+            // `class(TItemList<ICoded>)` descendant, or in `with L do` over
+            // one, typed as the open T and reported Code undeclared (or left
+            // it unbound), while `Self.GetRecord(0).Code` - a member access,
+            // which carries the frame - compiled clean. dcc compiles all of
+            // them (pastree-mcp field report FR.2). The frame is the one the
+            // name's own lookup finds (BareRoutineFrame), whichever pass bound
+            // it: RefMap for a same-unit ancestor, ExtRefMap for another's.
+            if CtxAt(N) = NIL_INST then
+            begin
+              var LBMid := AId;
+              var LBSym := RefAt(N);
+              if (LBSym = NIL_SYM) and ExtOf(N, LExt) then
+              begin
+                LBMid := LExt.UnitId;
+                LBSym := LExt.Sym;
+              end;
+              if (LBSym <> NIL_SYM) and
+                 (FModels[LBMid].Symbols[LBSym].Kind = skRoutine) then
+                SetCtxAt(N, BareRoutineFrame(N, LBMid, LBSym));
+            end;
+          end;
           // The frame a re-pointing above found the member in - an inherited
           // head, or a parameterless overload reached through a generic
           // ancestor - closes the declared type the way a member access

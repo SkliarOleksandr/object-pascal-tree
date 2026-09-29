@@ -4301,6 +4301,137 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { The same frame for a bare CALL: `GetRecord(0).Code` in a method of a
+    `class(TItemList<ICoded>)` descendant, GetRecord declared `: T` on the
+    generic ancestor (which redeclares its non-generic parent's). The name was
+    closed over the frame, the call node was not - it retyped from the open T
+    and reported Code undeclared, where `Self.GetRecord(0).Code` compiled clean
+    (dcc32 37.0 compiles every form below; pastree-mcp's field report FR.2, a
+    record-list family). Cross-unit ancestor, two generic levels, an empty
+    `()`, a same-unit generic ancestor, and a `with` - over the class's own
+    list and over ANOTHER instantiation of the ancestor, whose frame, not the
+    enclosing class's, types the call. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_genanccall');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'GCBase.pas'),
+    'unit GCBase;'#10'interface'#10 +
+    'type'#10 +
+    '  IItem = interface'#10 +
+    '    function GetId: Integer;'#10 +
+    '  end;'#10 +
+    '  TItemList = class'#10 +
+    '  protected'#10 +
+    '    function GetRecord(AIndex: Integer): IItem;'#10 +
+    '  end;'#10 +
+    '  TItemList<T: IItem> = class(TItemList)'#10 +
+    '  public'#10 +
+    '    function GetRecord(AIndex: Integer): T;'#10 +
+    '    function First: T;'#10 +
+    '  end;'#10 +
+    '  TTag = class'#10 +
+    '  end;'#10 +
+    '  TItemList<T: IItem; TL: class> = class(TItemList<T>)'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TItemList.GetRecord(AIndex: Integer): IItem;'#10 +
+    'begin'#10 +
+    '  Result := nil;'#10 +
+    'end;'#10 +
+    'function TItemList<T>.GetRecord(AIndex: Integer): T;'#10 +
+    'begin'#10 +
+    '  Result := Default(T);'#10 +
+    'end;'#10 +
+    'function TItemList<T>.First: T;'#10 +
+    'begin'#10 +
+    '  Result := Default(T);'#10 +
+    'end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'GCUse.pas'),
+    'unit GCUse;'#10'interface'#10'uses GCBase;'#10 +
+    'type'#10 +
+    '  ICoded = interface(IItem)'#10 +
+    '    function GetCode: string;'#10 +
+    '    property Code: string read GetCode;'#10 +
+    '  end;'#10 +
+    '  INamed = interface(IItem)'#10 +
+    '    function GetName: string;'#10 +
+    '    property Name: string read GetName;'#10 +
+    '  end;'#10 +
+    '  TCodedList = class(TItemList<ICoded>)'#10 +
+    '    function FirstCode: string;'#10 +
+    '    function EmptyCode: string;'#10 +
+    '    function OtherName(AOther: TItemList<INamed>): string;'#10 +
+    '  end;'#10 +
+    '  TCodedPairList = class(TItemList<ICoded, TTag>)'#10 +
+    '    function PairCode: string;'#10 +
+    '  end;'#10 +
+    '  TLocalList<T: IItem> = class'#10 +
+    '    function GetItem(AIndex: Integer): T;'#10 +
+    '  end;'#10 +
+    '  TLocalCoded = class(TLocalList<ICoded>)'#10 +
+    '    function LocalCode: string;'#10 +
+    '  end;'#10 +
+    'function WithCode(AList: TCodedList): string;'#10 +
+    'function LocalWith(AList: TLocalCoded): string;'#10 +
+    'implementation'#10 +
+    'function TCodedList.FirstCode: string;'#10 +
+    'begin'#10 +
+    '  Result := GetRecord(0).Code;'#10 +
+    'end;'#10 +
+    'function TCodedList.EmptyCode: string;'#10 +
+    'begin'#10 +
+    '  Result := First().Code;'#10 +
+    'end;'#10 +
+    'function TCodedList.OtherName(AOther: TItemList<INamed>): string;'#10 +
+    'begin'#10 +
+    '  with AOther do'#10 +
+    '    Result := GetRecord(0).Name;'#10 +
+    'end;'#10 +
+    'function WithCode(AList: TCodedList): string;'#10 +
+    'begin'#10 +
+    '  with AList do'#10 +
+    '    Result := GetRecord(0).Code;'#10 +
+    'end;'#10 +
+    'function TCodedPairList.PairCode: string;'#10 +
+    'begin'#10 +
+    '  Result := GetRecord(1).Code;'#10 +
+    'end;'#10 +
+    'function TLocalList<T>.GetItem(AIndex: Integer): T;'#10 +
+    'begin'#10 +
+    '  Result := Default(T);'#10 +
+    'end;'#10 +
+    'function TLocalCoded.LocalCode: string;'#10 +
+    'begin'#10 +
+    '  Result := GetItem(0).Code;'#10 +
+    'end;'#10 +
+    'function LocalWith(AList: TLocalCoded): string;'#10 +
+    'begin'#10 +
+    '  with AList do'#10 +
+    '    Result := GetItem(0).Code;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeDirectory(LDir);
+    var LGC := ModelByName('gcuse');
+    Ok('genanccall: GCUse loaded', Assigned(LGC));
+    Ok('genanccall: a member of a bare call''s generic-ancestor result resolves',
+      DiagCount(LGC, 'E2003') = 0);
+    Ok('genanccall: the call binds the generic ancestor''s GetRecord',
+      CrossRefTo(LGC, 'GetRecord', 'GetRecord'));
+    Ok('genanccall: all six Code uses bind to ICoded.Code, the `with` ones too',
+      LocalRefCount(LGC, 'Code') = 6);
+    Ok('genanccall: `with` over another instantiation takes its frame, not ' +
+      'the class''s', LocalRefCount(LGC, 'Name') = 1);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   { ReportVisibility - the enforcement half of 11.2.1, also opt-in. Every rule
     below is dcc32 37.0-probed, and the SILENT ones carry the weight: `private`
     is visible to the whole declaring UNIT (the friend rule), so enforcing it
