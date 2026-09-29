@@ -136,8 +136,9 @@ const
       'first token only (csAfterEnd)',
     'N6 insignificant tokens (class insig of the own-token table) are ' +
       'dropped: the `()` of an attribute without arguments, `[A()]` = `[A]`',
-    'N7 a unit''s `begin ... end.` opens the same section as ' +
-      '`initialization`: its `begin` reads as `initialization`',
+    'N7 retired (F30): a unit''s `begin ... end.` and `initialization ... ' +
+      'end.` give other .dcu line records, so the head word of nkInitSec is ' +
+      'a contract read, printed as written',
     'N8 attribute groups: `][` inside one nkAttrGroup reads as `,` - the ' +
       'tree keeps one group, `[A][B]` = `[A, B]`',
     'N9 `class(TBase);` - a class, object or interface type that stops at ' +
@@ -1835,8 +1836,9 @@ begin
       end;
     nkInitSec:
       begin
-        // N7: a unit's `begin` opens the same section.
-        Kw('initialization', ANode);
+        // `initialization` or a unit's legacy `begin`, as written: one
+        // section, but not one .dcu (F30).
+        Head(ANode);
         Statements(ANode);
       end;
     nkFinalSec:
@@ -2419,12 +2421,6 @@ begin
       Inc(AResult.Normalized);                                       // N2
       AddO(LVis, '>', 1);
       AddO(LVis, '=', 2);
-    end
-    else if (LOwner >= 0) and (ATree.Nodes[LOwner].Kind = nkInitSec) and
-       (LTok = tkBegin) then
-    begin
-      Inc(AResult.Normalized);                                       // N7
-      AddO(LVis, 'initialization', 0);
     end
     else if (LRule >= 0) and (GRuleCls[LRule] = ocInsignificant) then
       Inc(AResult.Normalized)                                        // N6

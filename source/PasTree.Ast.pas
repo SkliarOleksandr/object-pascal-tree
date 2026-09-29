@@ -108,7 +108,8 @@ type
     nkUsesItem,       //   name [+ 'in' path string]
     nkInterfaceSec,
     nkImplementationSec,
-    nkInitSec, nkFinalSec,
+    nkInitSec,        // head word at FirstToken: initialization / begin
+    nkFinalSec,
     nkExportsClause,  // 1.1.3: items
     nkExportsItem,
 
@@ -757,7 +758,8 @@ begin
         if nfNegated in Nodes[AIndex].Flags then
           Result := Result + '#strict';
       end;
-    nkConstSec, nkPropSpec:
+    // nkInitSec: `initialization` or a unit's legacy `begin` (F30).
+    nkConstSec, nkPropSpec, nkInitSec:
       Result := Result + '''' + LowerCase(NodeText(AIndex)) + '''';
     nkDirective:
       begin

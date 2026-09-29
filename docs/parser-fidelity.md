@@ -169,7 +169,7 @@ As of 2026-09-28 (v0.64.2):
   `.dcu` but for the findings below and dcc's nondeterminism;
 - `t3` and `t3x`: the same over the self-host, the Studio units on both
   platforms and one third-party library - the reprint from the tree is the
-  same program everywhere, and the same `.dcu` but for F30.
+  same program everywhere, and the same `.dcu`.
 
 The dangling `else`, a case's `else`, every statement extent, operator
 precedence and associativity - including `is`, the inline `if`, a unary
@@ -188,8 +188,6 @@ minus before a member call - agree with dcc everywhere they were met.
 | F23 | the source manager | an include inside an include is looked up beside the including file; dcc looks beside the main unit |
 | F25 | the oracle's input | a shipped RTL unit built with a define no project has: its constants (the vmt offsets on Win64) evaluate otherwise |
 | F26 | the lexer | an `asm` in a dead branch no `$ELSE` of its own depth follows keeps BASM mode past the `$ENDIF` |
-| F30 | the tree | a unit's `begin` vs `initialization`: one program, different `.dcu` line records |
-
 Fixed on the way, each by its own reviewed change: a subrange bound that
 swallowed an initializer's `=` (F6, silent on a variable), directives of a
 procedural type or a routine header that left no node (F1, F2, F10, F11,
@@ -202,7 +200,10 @@ rules that read a line break inside a variant part (F28 - `case` NEWLINE
 parse errors on valid code; T3r's token-per-line print found them) and
 where a procedural type's `;` stands (F29 - `procedure stdcall` and
 `procedure; stdcall` are one type, not one `.dcu`; the directive after the
-`;` has Aux 1 now).
+`;` has Aux 1 now) and which word opens a unit's initialization part (F30 -
+a legacy `begin` and `initialization` are one section, not one `.dcu`; the
+head word is a contract read now, and a `begin` followed by `finalization`
+is a parse error, as it is dcc's).
 
 ## 5. The gate
 

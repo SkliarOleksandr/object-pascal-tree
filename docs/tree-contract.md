@@ -65,7 +65,7 @@ type reference" is an nkIdent, nkMember or nkTypeArgs.
 | nkUsesClause | `uses c0, ... ;` - in a package `requires` (Aux 1) or `contains` |
 | nkUsesItem | `c0 [in c1]` |
 | nkInterfaceSec, nkImplementationSec | `interface` / `implementation` [uses] declarations |
-| nkInitSec, nkFinalSec | `initialization` / `finalization` statements, `;` between |
+| nkInitSec, nkFinalSec | `initialization` (or a unit's legacy `begin`, see 3) / `finalization` statements, `;` between |
 | nkExportsClause | `exports c0, ... ;` - see 4 for its items |
 | nkTypeSec | `type` then each nkTypeDecl followed by `;` |
 | nkConstSec | the head word (see 3), each nkConstDecl followed by `;` |
@@ -123,8 +123,9 @@ A few facts live in one token by design, read by a documented rule:
   `constructor`, `destructor`, `operator`), nkMethodResolution, nkDirective,
   nkPropSpec, nkConstSec (`const` / `resourcestring`), nkVarSec (`var` /
   `threadvar`; a `class var` run and a struct body's var section have none -
-  Aux 1 marks the former) and a childless nkConstraint (`class`, `record`,
-  `constructor`);
+  Aux 1 marks the former), nkInitSec (`initialization` / a unit's legacy
+  `begin`: one section, but other `.dcu` line records - F30) and a
+  childless nkConstraint (`class`, `record`, `constructor`);
 - the OPERATOR of nkUnaryOp and nkBinaryOp: the token its Aux names. One
   exception: `V.AsType<T>=5` lexes `>=` as one token that is both the `>`
   closing the type arguments and the `=` operator - the type arguments then
@@ -191,7 +192,6 @@ original onto it (`PRINT_NORMALIZATION` in `PasTree.Printer`):
   as `>` and `=`;
 - `[A][B]` and `[A, B]` (one nkAttrGroup), `[A()]` and `[A]`;
 - `class(TBase);` and `class(TBase) end;`;
-- a unit's `begin` for `initialization`;
 - a procedural type's directives written before or after its `of object`
   (`procedure stdcall of object`): the printer writes them after it. Where
   the `;` of `procedure; stdcall` stands the tree keeps (the directive after
@@ -202,10 +202,9 @@ Same program for dcc, the reprint through it says (T3x) - but not always the
 same `.dcu`: dcc writes two of these apart in bytes the code does not
 depend on. A list's last `;` before an `end` on the next line gives the
 statement's end another line (the reprint keeps such `;`s where they
-stand); a unit's `begin` and `initialization` give the section other line
-records under `$D+ $L+` - the tree does not keep that one yet (F30).
-`docs/dcu-reader.md` has the probes, and the one for `procedure stdcall`
-and `procedure; stdcall`, which the tree now keeps apart.
+stand). `docs/dcu-reader.md` has the probes, and the ones for `procedure
+stdcall` and `procedure; stdcall` (F29) and for a unit's `begin` and
+`initialization` (F30), which the tree now keeps apart.
 
 ## 7. How it is checked
 

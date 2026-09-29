@@ -3848,6 +3848,7 @@ class function TPasParser.ParseFile(const ASource: TPasPreprocessed;
 var
   LP: TPasParser;
   LRoot, LSec: Integer;
+  LIsBegin: Boolean;
 begin
   LP := Default(TPasParser);
   LP.FSrc := ASource;
@@ -3890,10 +3891,15 @@ begin
           if LP.CurKind in [tkInitialization, tkBegin] then
           begin
             LSec := LP.FB.AddNode(nkInitSec, NIL_NODE, LP.FPos);
+            LIsBegin := LP.CurKind = tkBegin;
             LP.Next;
             LP.ParseBlockUntil(LSec, [tkFinalization, tkEnd]);
             LP.FB.SetLast(LSec, LP.FPos - 1);
             LP.FB.Adopt(LRoot, LSec);
+            // A legacy `begin` has no finalization part (dcc: E2029 'END'
+            // expected); the section is still read, as written.
+            if LIsBegin and (LP.CurKind = tkFinalization) then
+              LP.Error('"end" expected, found "finalization"');
           end;
           if LP.CurKind = tkFinalization then
           begin

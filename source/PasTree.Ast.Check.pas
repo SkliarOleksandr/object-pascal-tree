@@ -318,7 +318,7 @@ const
     procedural type, of a routine header before its `;` and of an anonymous
     method is an nkDirective child, and the initializer after a procedural
     type's directives is its declaration's.) }
-  OWN_RULE_TEXT: array[0..234] of string = (
+  OWN_RULE_TEXT: array[0..233] of string = (
     // ---- leaves: the token is the node's own text ----
     'Ident | <ident> @words @keywords | once | leaf | the name as written; ' +
       'a reserved word only after a dot, as an operator name or as the ' +
@@ -456,9 +456,9 @@ const
     'ImplementationSec | implementation | head once | derived | the kind',
     'ImplementationSec | class | - | derived | before a class method ' +
       'implementation, whose Routine has Aux 1',
-    'InitSec | initialization | head opt | derived | the kind',
-    'InitSec | begin | head opt | insig | a unit''s `begin ... end.` opens ' +
-      'the same section (normalization list)',
+    'InitSec | initialization begin | head once | contract | the head word: ' +
+      'a unit''s legacy `begin ... end.` opens the same section, but gives ' +
+      'other .dcu line records (F30)',
     'InitSec | ; | - | derived | between the statements',
     'FinalSec | finalization | head once | derived | the kind',
     'FinalSec | ; | - | derived | between the statements',

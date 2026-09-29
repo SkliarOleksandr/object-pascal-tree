@@ -2682,6 +2682,37 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
       end;
   end;
 
+  { 1.1.2 (F30): the head word of a unit's initialization part, as written -
+    a legacy `begin ... end.` and `initialization ... end.` are one section
+    for the program but give other .dcu line records (dcc64/dcc32 37.0), so
+    the printer writes the word the source has (T3 through the verdict, no
+    normalization). A `begin` takes no finalization part: dcc's E2029, one
+    diagnostic here, the section still read. }
+  function InitSecCase(const AName, ABody, AExpected: string;
+    ADiags: Integer): TPasCustomCase;
+  begin
+    Result.Section := '1.1.2';
+    Result.Name := AName;
+    Result.Run :=
+      function: TPasCheckResult
+      var
+        LSrc: string;
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+      begin
+        LSrc := 'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+          ABody + 'end.'#13#10;
+        LPre := GPP.ProcessText('u.pas', LSrc);
+        LTree := TPasParser.ParseFile(LPre, LDiags);
+        Result := CheckDump(LSrc, 'Unit(Ident''U'' InterfaceSec ' +
+          'ImplementationSec ' + AExpected + ')', LTree.Dump(0), LDiags,
+          ADiags);
+        ApplyVerdict(Result, LSrc, GCustomTreeVerdict, LPre, LTree, False,
+          Length(LDiags) = 0);
+      end;
+  end;
+
   { 1.1.2: the UNIT file's own top-level shape -- name, interface and
     implementation sections both present as children of the root. }
   function UnitFileCase: TPasCustomCase;
@@ -2863,7 +2894,20 @@ var
   LPlatform: TPasPlatform;
 begin
   Result := [];
-  Result := Result + [ProgramFileCase, UnitFileCase, DeadAsmBranchCase,
+  Result := Result + [ProgramFileCase, UnitFileCase,
+    InitSecCase('F30: a unit''s legacy begin, as written',
+      'begin'#13#10'  X := 1;'#13#10,
+      'InitSec''begin''(Assign(Ident''X'' IntLit''1''))', 0),
+    InitSecCase('F30: initialization and finalization',
+      'initialization'#13#10'  X := 1;'#13#10'finalization'#13#10 +
+      '  X := 2;'#13#10,
+      'InitSec''initialization''(Assign(Ident''X'' IntLit''1'')) ' +
+      'FinalSec(Assign(Ident''X'' IntLit''2''))', 0),
+    InitSecCase('F30: a legacy begin takes no finalization (E2029)',
+      'begin'#13#10'  X := 1;'#13#10'finalization'#13#10'  X := 2;'#13#10,
+      'InitSec''begin''(Assign(Ident''X'' IntLit''1'')) ' +
+      'FinalSec(Assign(Ident''X'' IntLit''2''))', 1),
+    DeadAsmBranchCase,
     NestedRoutineCase,
     FullBlockCase, RoutineNamesCase];
   for LPlatform := Low(TPasPlatform) to High(TPasPlatform) do

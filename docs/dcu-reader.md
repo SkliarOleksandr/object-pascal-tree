@@ -413,7 +413,9 @@ packages, a large application and Win32 (2026-09-26/27, dcc64 and dcc32
   tree keeps where the `;` stands (F29). And a unit's `begin ... end.` and
   `initialization ... end.` compile to the same code but different line
   records under `$D+ $L+` (identical under `-$D- -$L-`), an empty section
-  too (F30). The dump shows neither: only the raw bytes differ.
+  too, and on one line with its statements as well; the case of the word
+  and its column do not matter. The tree keeps which word it was (F30).
+  The dump shows neither: only the raw bytes differ.
 
 ## Known gaps, for a future session
 
