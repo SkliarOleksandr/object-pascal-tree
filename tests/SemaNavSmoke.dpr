@@ -429,6 +429,54 @@ const
     'end;'#10 +                                           // 14
     'end.'#10;                                            // 15
 
+  { A `[...]` argument (IsBracketToScalar): a set, an open array or a dynamic
+    array, never a string - so `M(1, 'x', ['a'])` is the open-array overload,
+    declared second. It tied with the string one, which has defaults for the
+    rest, and the first declared won (pastree-mcp's task pilot, F6.2). dcc32
+    37.0 probed for each call below. }
+  UNIT_CTORSEL =
+    'unit NavCtor;'#10 +                                  // 1
+    'interface'#10 +                                      // 2
+    'type'#10 +                                           // 3
+    '  TK = (k1, k2);'#10 +                               // 4
+    '  TKs = set of TK;'#10 +                             // 5
+    'procedure M(A: Integer; const S: string = ''''; const Id: string = ''''); overload;'#10 + // 6
+    'procedure M(A: Integer; const S: string; const L: array of string); overload;'#10 + // 7
+    'procedure N(A: Integer; const Id: string = ''''); overload;'#10 + // 8
+    'procedure N(A: Integer; const Ks: TKs); overload;'#10 + // 9
+    'procedure Local;'#10 +                               // 10
+    'implementation'#10 +                                 // 11
+    'procedure M(A: Integer; const S: string; const Id: string); begin end;'#10 + // 12
+    'procedure M(A: Integer; const S: string; const L: array of string); begin end;'#10 + // 13
+    'procedure N(A: Integer; const Id: string); begin end;'#10 + // 14
+    'procedure N(A: Integer; const Ks: TKs); begin end;'#10 + // 15
+    'procedure Local;'#10 +                               // 16
+    'begin'#10 +                                          // 17
+    '  M(1, ''x'', [''a'']);'#10 +                        // 18 M col 3 -> 7
+    '  M(1, ''x'', []);'#10 +                             // 19 -> 7
+    '  M(1, ''x'');'#10 +                                 // 20 -> 6
+    '  N(1, [k1]);'#10 +                                  // 21 N col 3 -> 9
+    '  N(1, []);'#10 +                                    // 22 -> 9
+    '  N(1, ''y'');'#10 +                                 // 23 -> 8
+    'end;'#10 +                                           // 24
+    'end.'#10;                                            // 25
+
+  UNIT_CTORSELUSE =
+    'unit NavCtorUse;'#10 +                               // 1
+    'interface'#10 +                                      // 2
+    'uses NavCtor;'#10 +                                  // 3
+    'procedure Remote;'#10 +                              // 4
+    'implementation'#10 +                                 // 5
+    'procedure Remote;'#10 +                              // 6
+    'var S: string;'#10 +                                 // 7
+    'begin'#10 +                                          // 8
+    '  M(1, S, [S]);'#10 +                                // 9  M col 3 -> 7
+    '  M(1, S, S);'#10 +                                  // 10 -> 6
+    '  N(1, [k2]);'#10 +                                  // 11 N col 3 -> 9
+    '  N(1, S);'#10 +                                     // 12 -> 8
+    'end;'#10 +                                           // 13
+    'end.'#10;                                            // 14
+
   // Find Destructions and a form's Release (UNIT_FORMS / UNIT_RLS): the VCL
   // form's Release frees the form; a `Release` of any other class does not -
   // one not derived from a form, or a form class declaring its own.
@@ -3583,6 +3631,66 @@ begin
         HasHitAt(GNav.FindReferences(LOT, LOS), 'NavArg.pas', 20, 8) and
         HasHitAt(GNav.FindReferences(LOT, LOS), 'NavArgUse.pas', 9, 8) and
         not HasHitAt(GNav.FindReferences(LOT, LOS), 'NavArgUse.pas', 10, 8));
+    finally
+      GNav.Free;
+    end;
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- A `[...]` argument's overload (UNIT_CTORSEL / UNIT_CTORSELUSE). ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_nav_ctorsel');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), UNIT_SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavCtor.pas'), UNIT_CTORSEL);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavCtorUse.pas'), UNIT_CTORSELUSE);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    GNav := TPasNavigator.Create(GProj);
+    try
+      var LCtor := GNav.ModelIdOf(TPath.Combine(LDir, 'NavCtor.pas'));
+      var LCtorUse := GNav.ModelIdOf(TPath.Combine(LDir, 'NavCtorUse.pas'));
+      Ok('ctor: both models found', (LCtor >= 0) and (LCtorUse >= 0));
+      var LCT, LCS: Integer;
+      var LCN: string;
+      var LCHit: TPasRefHit;
+      var LCBound: TFunc<Integer, Integer, Integer, Integer> :=
+        function(AMid, ALine, ACol: Integer): Integer
+        begin
+          Result := 0;
+          if GNav.SymbolAt(AMid, ALine, ACol, LCT, LCS, LCN) and
+             GNav.DeclHit(LCT, LCS, LCHit) then
+            Result := LCHit.Line;
+        end;
+      Ok('ctor: [''a''] picks the open-array overload, not the string one '
+        + 'declared first - same unit', LCBound(LCtor, 18, 3) = 7);
+      Ok('ctor: [] picks the open-array overload', LCBound(LCtor, 19, 3) = 7);
+      Ok('ctor: two arguments stay the string overload',
+        LCBound(LCtor, 20, 3) = 6);
+      Ok('ctor: [k1] picks the set overload', LCBound(LCtor, 21, 3) = 9);
+      Ok('ctor: [] picks the set overload over a string',
+        LCBound(LCtor, 22, 3) = 9);
+      Ok('ctor: a string literal stays the string overload',
+        LCBound(LCtor, 23, 3) = 8);
+      Ok('ctor: [S] from another unit picks the open-array overload',
+        LCBound(LCtorUse, 9, 3) = 7);
+      Ok('ctor: a string variable from another unit stays the string one',
+        LCBound(LCtorUse, 10, 3) = 6);
+      Ok('ctor: [k2] from another unit picks the set overload',
+        LCBound(LCtorUse, 11, 3) = 9);
+      Ok('ctor: a string from another unit stays the string overload of N',
+        LCBound(LCtorUse, 12, 3) = 8);
+      Ok('ctor: the open-array overload''s references are its three calls',
+        GNav.SymbolAt(LCtor, 7, 11, LCT, LCS, LCN) and
+        HasHitAt(GNav.FindReferences(LCT, LCS), 'NavCtor.pas', 18, 3) and
+        HasHitAt(GNav.FindReferences(LCT, LCS), 'NavCtor.pas', 19, 3) and
+        HasHitAt(GNav.FindReferences(LCT, LCS), 'NavCtorUse.pas', 9, 3) and
+        not HasHitAt(GNav.FindReferences(LCT, LCS), 'NavCtor.pas', 20, 3));
     finally
       GNav.Free;
     end;

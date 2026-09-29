@@ -121,6 +121,20 @@ type
 function IsOneCharLiteral(const AText: string): Boolean;
 function IsScalarToReference(ADst, ASrc: TSemaTypeCat): Boolean;
 
+{ A `[...]` argument (nkSetCtor: a set constructor, an open array constructor
+  or a dynamic array constant, B.9) is a set or an array and nothing else: a
+  parameter of these categories cannot take it, so the candidate is rejected
+  rather than scored nothing. `M(1, 'x', ['a'])` tied `M(A: Integer; const S:
+  string = ''; const Id: string = '')` with `M(A: Integer; const S: string;
+  const L: array of string)` - the bracket scored neither - and the first
+  declared won: the second's calls were the first's references and the second
+  read "none found" (pastree-mcp's task pilot on the client group, F6.2).
+  dcc32 37.0 probed: `[...]` and `[]` pick the open array, the set or the
+  dynamic array overload in either declaration order, and a string parameter
+  alone is E2010. A record (an Implicit operator) and a Variant are left out,
+  as is anything unknown. }
+function IsBracketToScalar(ADst: TSemaTypeCat): Boolean;
+
 implementation
 
 uses
@@ -183,6 +197,12 @@ function IsScalarToReference(ADst, ASrc: TSemaTypeCat): Boolean;
 begin
   Result := (ASrc in [tcInteger, tcFloat, tcBoolean, tcChar, tcString]) and
     (ADst in [tcClass, tcInterface, tcClassOf]);
+end;
+
+function IsBracketToScalar(ADst: TSemaTypeCat): Boolean;
+begin
+  Result := ADst in [tcInteger, tcFloat, tcBoolean, tcChar, tcString,
+    tcPointer, tcNil, tcEnum, tcClass, tcInterface, tcProc, tcClassOf, tcFile];
 end;
 
 class procedure TPasSemaTyper.Check(AModel: TPasSemaModel;
@@ -974,6 +994,11 @@ begin
   begin
     LAt := M.ExprType[LArg];
     LPt := M.Symbols[AParams[LIdx]].TypeSym;
+    // A `[...]` has no type of its own here; what it cannot be passed to
+    // rejects (IsBracketToScalar).
+    if (Kind(LArg) = nkSetCtor) and (LPt <> NIL_SYM) and
+       IsBracketToScalar(CatOf(LPt)) then
+      Exit(-1);
     if (LAt <> NIL_SYM) and (LPt <> NIL_SYM) then
       // A one-character literal is typed `string` here but is a Char
       // constant (see IsOneCharLiteral).

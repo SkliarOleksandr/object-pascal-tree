@@ -9463,6 +9463,12 @@ var
       if (LM.Tree.Nodes[LCore].Kind = nkAnonMethod) and XValid(LParX) and
          (XCatOf(LParX) = tcProc) and not LiteralFits(LCore, LParX) then
         Exit(-1);
+      // A `[...]` against a parameter it cannot be passed to - a string, a
+      // scalar, a class (IsBracketToScalar): provable at the node too.
+      if (LM.Tree.Nodes[LCore].Kind = nkSetCtor) and XValid(LParX) and
+         (FModels[LParX.UnitId].Symbols[LParX.Sym].Kind <> skGenericParam) and
+         IsBracketToScalar(XCatOf(CanonTypeX(LParX))) then
+        Exit(-1);
       if XValid(LArgX) and XValid(LParX) then
         // A one-character literal is a Char constant (IsOneCharLiteral).
         if (LM.Tree.Nodes[LCore].Kind = nkStrLit) and

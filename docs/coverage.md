@@ -224,7 +224,12 @@ same-arity overloads differing only in modifiers can mis-pair.
   parameter above the string one (both passes type literals `string`). A
   distinct alias (`TId = type Integer`) is still only "assignable" from its
   base, so it wins over an overload the argument fits no better, not over
-  an exact one.
+  an exact one. A `[...]` argument (set, open array or dynamic array
+  constructor) rejects a parameter it cannot be passed to - a string, a
+  scalar, a pointer, an enum, a class, an interface, a class reference, a
+  procedural type - so it picks the open-array, set or dynamic-array overload
+  in either declaration order (dcc32 37.0 probed); a record or Variant
+  parameter is still only scored.
 - a bare routine name in a value position - a member qualifier or an inline
   initializer - means the parameterless overload (6.6.1); the same rule is
   NOT applied in other value positions (an argument, an assignment's right
