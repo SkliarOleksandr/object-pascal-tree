@@ -4126,6 +4126,85 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { F20: NativeInt / NativeUInt are WEAK aliases (dcc 37.0 defines
+    WEAK_NATIVEINT everywhere, and System.SysUtils then has no
+    TNativeIntHelper): a helper for the integer of the target's size is
+    theirs, and theirs is that integer's. dcc32 and dcc64 37.0 probed with the
+    fixture's own shape: on Win32 `N.Tag32` and `C.TagU` compile, `N.Tag64` is
+    E2003 and `Q.TagU` E2018 (no helper for UInt64 at all); on Win64 the other
+    way round. PasTree reports both as an unresolved member, E2003. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_weaknative');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'WNHelp.pas'),
+    'unit WNHelp;'#10'interface'#10 +
+    'type'#10 +
+    '  TI32Help = record helper for Integer'#10 +
+    '    function Tag32: Integer;'#10 +
+    '  end;'#10 +
+    '  TI64Help = record helper for Int64'#10 +
+    '    function Tag64: Integer;'#10 +
+    '  end;'#10 +
+    '  TNUHelp = record helper for NativeUInt'#10 +
+    '    function TagU: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TI32Help.Tag32: Integer;'#10'begin Result := 32; end;'#10 +
+    'function TI64Help.Tag64: Integer;'#10'begin Result := 64; end;'#10 +
+    'function TNUHelp.TagU: Integer;'#10'begin Result := 0; end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'WNUse.pas'),
+    'unit WNUse;'#10'interface'#10'uses WNHelp;'#10 +
+    'procedure P;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var'#10 +
+    '  N: NativeInt;'#10 +
+    '  C: Cardinal;'#10 +
+    '  Q: UInt64;'#10 +
+    '  R: Integer;'#10 +
+    'begin'#10 +
+    '  R := N.Tag32;'#10 +
+    '  R := N.Tag64;'#10 +
+    '  R := C.TagU;'#10 +
+    '  R := Q.TagU;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  for var LWN64 := False to True do
+  begin
+    var LTag, LOwn, LOther: string;
+    if LWN64 then
+    begin
+      GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+      LTag := 'weaknative Win64: ';
+      LOwn := 'Tag64';
+      LOther := 'Tag32';
+    end
+    else
+    begin
+      GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+      LTag := 'weaknative Win32: ';
+      LOwn := 'Tag32';
+      LOther := 'Tag64';
+    end;
+    try
+      GProj.ReportUnresolvedMembers := True;
+      GProj.AnalyzeDirectory(LDir);
+      var LWN := ModelByName('wnuse');
+      Ok(LTag + 'the helper of the integer of its size is a NativeInt''s',
+        CrossRefTo(LWN, LOwn, LOwn) and not CrossRefTo(LWN, LOther, LOther));
+      Ok(LTag + 'a NativeUInt helper is that integer''s',
+        CrossRefTo(LWN, 'TagU', 'TagU'));
+      Ok(LTag + 'the other size''s are E2003 (N.' + LOther +
+        ', the other TagU)', DiagCount(LWN, 'E2003') = 2);
+    finally
+      GProj.Free;
+    end;
+  end;
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+
   { 16.2.1: a generic METHOD's constraints live on its own declaration, and the
     body repeats a bare `<T>` - the same rule as a generic TYPE's, one level in.
     System.Rtti's `GetNamedObject<T: TRttiNamedObject>` is the shape; its body

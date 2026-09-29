@@ -7471,8 +7471,10 @@ begin
     //
     // Every name in the ALIAS GROUP, because the seeds are distinct symbols
     // for one type: a helper for Cardinal must answer for a `LongWord` value
-    // too, and dcc says so (see PasBuiltinAliasGroup).
-    for var LAlias in PasBuiltinAliasGroup(AReg.TargetName) do
+    // too, and dcc says so (see PasBuiltinAliasGroup) - and one for Integer a
+    // NativeInt value's on a 32-bit target.
+    for var LAlias in PasBuiltinAliasGroup(AReg.TargetName,
+      FInfo.PointerBytes) do
     begin
       LBSym := FModels[AMid].Resolve(FModels[AMid].InterfaceScope, LAlias);
       if LBSym <> NIL_SYM then

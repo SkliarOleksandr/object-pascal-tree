@@ -18,7 +18,8 @@ unit PasTree.Tests.Parser;
 interface
 
 uses
-  System.SysUtils, System.IOUtils,
+  System.SysUtils, System.IOUtils, System.Generics.Collections,
+  System.Generics.Defaults,
   PasTree.Types,
   PasTree.Lexer,
   PasTree.SourceManager,
@@ -2312,6 +2313,80 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
       end;
   end;
 
+  { F20: the predefined set of a platform is the one its dcc 37.0 defines -
+    AExpected is that compiler's answer over 1056 symbols (every one the
+    Studio source tests plus the documented ones), in any order. CPUINTEL,
+    ANDROID32ARM and a macOS UNDERSCOREIMPORTNAME were PasTree's and are no
+    compiler's. }
+  function PredefinedCase(APlatform: TPasPlatform;
+    const AExpected: string): TPasCustomCase;
+  begin
+    Result.Section := '1.3.2';
+    Result.Name := 'F20: dcc''s predefined set, ' + PlatformInfo(APlatform).Name;
+    Result.Run :=
+      function: TPasCheckResult
+      var
+        LDefines: TPasDefines;
+        LWant, LGot: TArray<string>;
+      begin
+        LDefines := CreatePlatformDefines(APlatform);
+        try
+          LGot := LDefines.Names;
+        finally
+          LDefines.Free;
+        end;
+        LWant := AExpected.Split([' ']);
+        TArray.Sort<string>(LWant, TStringComparer.Ordinal);
+        TArray.Sort<string>(LGot, TStringComparer.Ordinal);
+        Result.Passed := string.Join(' ', LWant) = string.Join(' ', LGot);
+        if Result.Passed then
+          Result.Message := ''
+        else
+          Result.Message := '  expected: ' + string.Join(' ', LWant) +
+            sLineBreak + '  actual:   ' + string.Join(' ', LGot) + sLineBreak;
+      end;
+  end;
+
+  { F20: the switch start state is dcc's - $IFOPT over A..Z with no config
+    gives A C D G H I L N O P V X Y on every dcc 37.0 target (N+ was off). }
+  function SwitchStartCase: TPasCustomCase;
+  begin
+    Result.Section := '1.3.2';
+    Result.Name := 'F20: dcc''s switch start state';
+    Result.Run :=
+      function: TPasCheckResult
+      var
+        LPP: TPasPreprocessor;
+        LDefines: TPasDefines;
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+        LSrc, LExpected: string;
+        LCh: Char;
+      begin
+        LSrc := '';
+        LExpected := '';
+        for LCh := 'A' to 'Z' do
+        begin
+          LSrc := LSrc + '{$IFOPT ' + LCh + '+}' + LCh + ' := 1;{$ENDIF}';
+          if Pos(LCh, 'ACDGHILNOPVXY') > 0 then
+            LExpected := LExpected + ' Assign(Ident''' + LCh +
+              ''' IntLit''1'')';
+        end;
+        LExpected := 'Block(' + Trim(LExpected) + ')';
+        LDefines := CreatePlatformDefines(pfWin64);
+        LPP := TPasPreprocessor.Create(GSM, LDefines, 37.0);
+        try
+          LPre := LPP.ProcessText('test.pas', LSrc);
+          LTree := TPasParser.ParseStatements(LPre, LDiags);
+          Result := CheckDump(LSrc, LExpected, LTree.Dump(0), LDiags, 0);
+        finally
+          LPP.Free;
+          LDefines.Free;
+        end;
+      end;
+  end;
+
   { An include that lives in ANOTHER directory and DEFINES a symbol,
     guarding a declaration. A utility library unit's shape exactly: it
     includes common.inc, which sits in source/include rather than beside the
@@ -3006,6 +3081,39 @@ begin
     FullBlockCase, RoutineNamesCase];
   for LPlatform := Low(TPasPlatform) to High(TPasPlatform) do
     Result := Result + [PlatformCase(LPlatform)];
+  Result := Result + [
+    PredefinedCase(pfWin32, 'ASSEMBLER CONDITIONALEXPRESSIONS CPU32BITS ' +
+      'CPU386 CPUX86 DCC MANAGED_RECORD MSWINDOWS NATIVECODE ' +
+      'UNDERSCOREIMPORTNAME UNICODE VER370 WEAKINTFREF WEAKREF ' +
+      'WEAK_NATIVEINT WIN32'),
+    PredefinedCase(pfWin64, 'ASSEMBLER CONDITIONALEXPRESSIONS CPU64BITS ' +
+      'CPUX64 DCC MANAGED_RECORD MSWINDOWS NATIVECODE UNICODE VER370 ' +
+      'WEAKINTFREF WEAKREF WEAK_NATIVEINT WIN64'),
+    PredefinedCase(pfMacOS64, 'CONDITIONALEXPRESSIONS CPU64BITS CPUX64 DCC ' +
+      'EXTERNALLINKER LLVM MACOS MACOS64 MANAGED_RECORD NATIVECODE OSX ' +
+      'OSX64 PIC POSIX POSIX64 UNICODE VER370 WEAKINTFREF WEAKREF ' +
+      'WEAK_NATIVEINT'),
+    PredefinedCase(pfMacOSArm64, 'CONDITIONALEXPRESSIONS CPU64BITS CPUARM ' +
+      'CPUARM64 DCC EXTERNALLINKER LLVM MACOS MACOS64 MANAGED_RECORD ' +
+      'NATIVECODE OSX OSX64 PIC POSIX POSIX64 UNICODE VER370 WEAKINTFREF ' +
+      'WEAKREF WEAK_NATIVEINT'),
+    PredefinedCase(pfAndroid32, 'ANDROID ANDROID32 CONDITIONALEXPRESSIONS ' +
+      'CPU32BITS CPUARM CPUARM32 DCC EXTERNALLINKER LLVM MANAGED_RECORD ' +
+      'NATIVECODE PIC POSIX POSIX32 UNICODE VER370 WEAKINTFREF WEAKREF ' +
+      'WEAK_NATIVEINT'),
+    PredefinedCase(pfAndroid64, 'ANDROID ANDROID64 CONDITIONALEXPRESSIONS ' +
+      'CPU64BITS CPUARM CPUARM64 DCC EXTERNALLINKER LLVM MANAGED_RECORD ' +
+      'NATIVECODE PIC POSIX POSIX64 UNICODE VER370 WEAKINTFREF WEAKREF ' +
+      'WEAK_NATIVEINT'),
+    PredefinedCase(pfIOSDevice64, 'CONDITIONALEXPRESSIONS CPU64BITS CPUARM ' +
+      'CPUARM64 DCC EXTERNALLINKER IOS IOS64 LLVM MACOS MACOS64 ' +
+      'MANAGED_RECORD NATIVECODE PIC POSIX POSIX64 UNICODE VER370 ' +
+      'WEAKINTFREF WEAKREF WEAK_NATIVEINT'),
+    PredefinedCase(pfIOSSimArm64, 'CONDITIONALEXPRESSIONS CPU64BITS CPUARM ' +
+      'CPUARM64 DCC EXTERNALLINKER IOS IOS64 IOSSIMULATOR LLVM MACOS ' +
+      'MACOS64 MANAGED_RECORD NATIVECODE PIC POSIX POSIX64 UNICODE VER370 ' +
+      'WEAKINTFREF WEAKREF WEAK_NATIVEINT'),
+    SwitchStartCase];
   Result := Result + [IncludeContextCase,
     AsmModeCase('F26: a dead asm does not open BASM mode',
       'function R: Cardinal; {$ifdef NEVER} asm {$endif}'#13#10 +

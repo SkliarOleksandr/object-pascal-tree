@@ -7,17 +7,27 @@ unit PasTree.Platforms;
   conditional symbols and (b) the type sizes the $IF evaluator needs
   (SizeOf(Pointer), SizeOf(Extended)).
 
-  The list covers the Delphi 13.x target platforms; symbols follow the
-  official "Predefined Conditionals" documentation. Version symbols
-  (VER370, CONDITIONALEXPRESSIONS, UNICODE) are common to all.
+  The list covers the Delphi 13.x target platforms. The sets are what the
+  shipping compilers define, not what the "Predefined Conditionals"
+  documentation lists: every installed dcc 37.0 (dcc32, dcc64, dccosx64,
+  dccosxarm64, dccaarm, dccaarm64, dcciosarm64, dcciossimarm64) was run
+  with --no-config over a unit testing 1056 symbols - every one the Studio
+  source tests plus the documented ones - and the lists below are its
+  answers. The documentation is wrong in both directions: no target
+  defines CPUINTEL (Win32, Win64, macOS Intel), Android 32 defines
+  ANDROID32 (not ANDROID32ARM), the macOS targets define OSX and OSX64
+  (the Arm one too) and not UNDERSCOREIMPORTNAME, which only dcc32 does,
+  and every non-Windows target defines LLVM.
 
   The intended long-term source of the platform is the project's .dproj
   (Platform/ActiveConfig); until project parsing lands, callers choose a
   preset explicitly. Win32 is the default in the tools as the most common
   target in the wild.
 
-  NB (verify): WinArm64 (13.1, Arm64EC) symbol set is asserted from release
-  coverage, not yet from a shipping compiler run.
+  NB (verify): no compiler for WinArm64 (13.1, Arm64EC) or Linux64 is
+  installed here. WinArm64's set is asserted from release coverage;
+  Linux64's follows the probed LLVM targets (LLVM, no CPUINTEL - as
+  dccosx64, the other Intel LLVM target).
 }
 
 interface
@@ -56,10 +66,13 @@ type
   end;
 
 const
-  { Symbols shared by every target and every compiler version. The version
-    symbol (VER370, VER350, ...) is derived from the compiler version below. }
-  COMMON_DEFINES: array[0..1] of string =
-    ('CONDITIONALEXPRESSIONS', 'UNICODE');
+  { Symbols every dcc 37.0 target defines (probed on all eight installed
+    compilers). The version symbol (VER370, VER350, ...) is derived from the
+    compiler version below; an older compiler's set is not modelled
+    (MANAGED_RECORD, for one, is 10.4's). }
+  COMMON_DEFINES: array[0..7] of string =
+    ('CONDITIONALEXPRESSIONS', 'UNICODE', 'DCC', 'NATIVECODE',
+     'MANAGED_RECORD', 'WEAKREF', 'WEAKINTFREF', 'WEAK_NATIVEINT');
   { The compiler the analyzer emulates when the host names none: dcc 37.0
     (RAD Studio 13), the compiler every probe in this repository was run on.
     Also the value of CompilerVersion/RTLVersion in $IF expressions. }
@@ -194,7 +207,7 @@ begin
       begin
         Result.Name := 'Win32';
         Result.Defines := ['MSWINDOWS', 'WIN32', 'CPU386', 'CPUX86',
-          'CPU32BITS', 'CPUINTEL', 'ASSEMBLER'];
+          'CPU32BITS', 'ASSEMBLER', 'UNDERSCOREIMPORTNAME'];
         Result.PointerBytes := 4;
         Result.ExtendedBytes := 10;
         Result.IsWindows := True;
@@ -204,7 +217,7 @@ begin
       begin
         Result.Name := 'Win64';
         Result.Defines := ['MSWINDOWS', 'WIN64', 'CPUX64', 'CPU64BITS',
-          'CPUINTEL', 'ASSEMBLER'];
+          'ASSEMBLER'];
         Result.IsWindows := True;
       end;
     pfWinArm64:
@@ -219,17 +232,16 @@ begin
     pfMacOS64:
       begin
         Result.Name := 'OSX64';
-        Result.Defines := ['MACOS', 'MACOS64', 'POSIX', 'POSIX64', 'CPUX64',
-          'CPU64BITS', 'CPUINTEL', 'EXTERNALLINKER', 'PIC',
-          'UNDERSCOREIMPORTNAME'];
+        Result.Defines := ['MACOS', 'MACOS64', 'OSX', 'OSX64', 'POSIX',
+          'POSIX64', 'CPUX64', 'CPU64BITS', 'EXTERNALLINKER', 'LLVM', 'PIC'];
         Result.IsPosix := True;
       end;
     pfMacOSArm64:
       begin
         Result.Name := 'OSXARM64';
-        Result.Defines := ['MACOS', 'MACOS64', 'POSIX', 'POSIX64', 'CPUARM',
-          'CPUARM64', 'CPU64BITS', 'EXTERNALLINKER', 'PIC',
-          'UNDERSCOREIMPORTNAME'];
+        Result.Defines := ['MACOS', 'MACOS64', 'OSX', 'OSX64', 'POSIX',
+          'POSIX64', 'CPUARM', 'CPUARM64', 'CPU64BITS', 'EXTERNALLINKER',
+          'LLVM', 'PIC'];
         Result.IsPosix := True;
       end;
     pfIOSDevice64:
@@ -238,7 +250,7 @@ begin
         // iOS defines MACOS as well (per official docs).
         Result.Defines := ['IOS', 'IOS64', 'MACOS', 'MACOS64', 'POSIX',
           'POSIX64', 'CPUARM', 'CPUARM64', 'CPU64BITS', 'EXTERNALLINKER',
-          'PIC', 'UNDERSCOREIMPORTNAME'];
+          'LLVM', 'PIC'];
         Result.IsPosix := True;
       end;
     pfIOSSimArm64:
@@ -246,14 +258,14 @@ begin
         Result.Name := 'iOSSimARM64';
         Result.Defines := ['IOS', 'IOS64', 'IOSSIMULATOR', 'MACOS',
           'MACOS64', 'POSIX', 'POSIX64', 'CPUARM', 'CPUARM64', 'CPU64BITS',
-          'EXTERNALLINKER', 'PIC', 'UNDERSCOREIMPORTNAME'];
+          'EXTERNALLINKER', 'LLVM', 'PIC'];
         Result.IsPosix := True;
       end;
     pfAndroid32:
       begin
         Result.Name := 'Android';
-        Result.Defines := ['ANDROID', 'ANDROID32ARM', 'POSIX', 'POSIX32',
-          'CPUARM', 'CPUARM32', 'CPU32BITS', 'EXTERNALLINKER', 'PIC'];
+        Result.Defines := ['ANDROID', 'ANDROID32', 'POSIX', 'POSIX32',
+          'CPUARM', 'CPUARM32', 'CPU32BITS', 'EXTERNALLINKER', 'LLVM', 'PIC'];
         Result.PointerBytes := 4;
         Result.IsPosix := True;
         Result.Is64Bit := False;
@@ -262,14 +274,14 @@ begin
       begin
         Result.Name := 'Android64';
         Result.Defines := ['ANDROID', 'ANDROID64', 'POSIX', 'POSIX64',
-          'CPUARM', 'CPUARM64', 'CPU64BITS', 'EXTERNALLINKER', 'PIC'];
+          'CPUARM', 'CPUARM64', 'CPU64BITS', 'EXTERNALLINKER', 'LLVM', 'PIC'];
         Result.IsPosix := True;
       end;
     pfLinux64:
       begin
         Result.Name := 'Linux64';
         Result.Defines := ['LINUX', 'LINUX64', 'POSIX', 'POSIX64', 'CPUX64',
-          'CPU64BITS', 'CPUINTEL', 'EXTERNALLINKER', 'PIC'];
+          'CPU64BITS', 'EXTERNALLINKER', 'LLVM', 'PIC'];
         Result.IsPosix := True;
       end;
   end;

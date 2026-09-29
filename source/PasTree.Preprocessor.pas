@@ -891,8 +891,9 @@ procedure TPasPreprocessor.ResetSwitches;
 var
   LCh: Char;
 begin
-  // Reasonable defaults for the switch state (release-ish). Re-applied per
-  // processed file: switch changes are unit-local, like defines.
+  // dcc's start state, the same on every dcc 37.0 target (probed with
+  // $IFOPT over A..Z, no config: A C D G H I L N O P V X Y on). Re-applied
+  // per processed file: switch changes are unit-local, like defines.
   for LCh := 'A' to 'Z' do
     FSwitches[LCh] := False;
   FSwitches['A'] := True;   // field alignment: the default IS {$A8}, so '+'
@@ -902,6 +903,7 @@ begin
   FSwitches['H'] := True;   // long strings
   FSwitches['I'] := True;   // I/O checking
   FSwitches['L'] := True;   // local symbols
+  FSwitches['N'] := True;   // numeric coprocessor (obsolete, still N+)
   FSwitches['O'] := True;   // optimization
   FSwitches['P'] := True;   // open strings
   FSwitches['V'] := True;   // var-string checks

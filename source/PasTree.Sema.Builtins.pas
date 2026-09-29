@@ -70,8 +70,17 @@ function PasBuiltinSignature(const ANameLower: string;
   `Integer` - so this is identity, not assignment compatibility, and the four
   groups below are exactly the ones a helper crosses. The same probe run for
   `Integer`/`LongInt`/`Int32`, `Char`/`WideChar` and `string`/`UnicodeString`;
-  `Word` against the Integer helper is the negative that pins the boundary. }
-function PasBuiltinAliasGroup(const ANameLower: string): TArray<string>;
+  `Word` against the Integer helper is the negative that pins the boundary.
+
+  `NativeInt` and `NativeUInt` join the group of the integer of their size
+  (APointerBytes): dcc 37.0 defines WEAK_NATIVEINT on every target - a weak
+  alias - and System.SysUtils then declares no TNativeIntHelper, so
+  `N.ToString` of a NativeInt is TIntegerHelper's on dcc32 and TInt64Helper's
+  on dcc64 (`N.Size` 4 and 8). Both ways: a helper for Integer is a
+  NativeInt's on dcc32, a helper for NativeUInt a Cardinal's there and a
+  UInt64's on dcc64 (probed, local/fidelity/x-f20/probes/helper). }
+function PasBuiltinAliasGroup(const ANameLower: string;
+  APointerBytes: Integer): TArray<string>;
 
 type
   { How a value-returning intrinsic's RESULT type is decided (4.11). Every
@@ -149,7 +158,8 @@ uses
   System.Generics.Collections,
   PasTree.Ast;
 
-function PasBuiltinAliasGroup(const ANameLower: string): TArray<string>;
+function PasBuiltinAliasGroup(const ANameLower: string;
+  APointerBytes: Integer): TArray<string>;
 const
   // Only the SEEDED names need to be here: a real declaration like System.pas's
   // `UInt32 = Cardinal` is an alias the type walk already follows.
@@ -158,9 +168,19 @@ const
     ['cardinal', 'longword'],
     ['char', 'widechar'],
     ['string', 'unicodestring']);
+  // The weak native aliases by the target's pointer size, looked up first:
+  // on a 32-bit target they extend the first two groups above.
+  CNative: array[Boolean, 0..1] of TArray<string> = (
+    (['integer', 'longint', 'nativeint'],
+     ['cardinal', 'longword', 'nativeuint']),
+    (['int64', 'nativeint'], ['uint64', 'nativeuint']));
 var
   LIdx, LName: Integer;
 begin
+  for LIdx := 0 to 1 do
+    for LName := 0 to High(CNative[APointerBytes = 8][LIdx]) do
+      if CNative[APointerBytes = 8][LIdx][LName] = ANameLower then
+        Exit(CNative[APointerBytes = 8][LIdx]);
   for LIdx := 0 to High(CGroups) do
     for LName := 0 to High(CGroups[LIdx]) do
       if CGroups[LIdx][LName] = ANameLower then

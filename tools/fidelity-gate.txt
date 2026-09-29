@@ -24,6 +24,7 @@ studio * FMX.ZOrder.Win.pas BASE-FAIL a generic cycle with FMX.Presentation.Win:
 # fails on it (Vcl.Skia under -$O-, and once System.Variants under t0f). A
 # variation rare enough to slip past the harness's recompiles reads as DIFF:
 studio t1,t2,t3x Vcl.ControlList.pas OK|DIFF|NONDET one byte of a method-resolution entry differs in about 1 of 10 compiles of the original alone
+studio t1,t2,t3x Vcl.Skia.pas OK|DIFF|NONDET under -$O- the original alone gives two .dcu in five compiles and the rewrite five - no two equal, so no recompile can match them (2026-09-29, t2, base 521436e the same)
 
 # The files of the tree stage that do not parse clean under Win64.
 studio parse rtl\posix\Posix.SysSocket.pas FAIL a POSIX-only unit read under the Win64 defines: dcc never compiles it there

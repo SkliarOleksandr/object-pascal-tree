@@ -183,7 +183,6 @@ minus before a member call - agree with dcc everywhere they were met.
 | F5 | the DCU reader | a routine's nested routines listed under its anonymous method's body; only the dump's nesting |
 | F7 | the parser | an attribute group after a var or const section, before a routine, is parsed and not adopted - the routine loses its attributes |
 | F8 | the parser, error mode | the root stops where a broken parse stopped, the rest of the file in no node |
-| F20 | the preprocessor's input | the predefined conditional set is not dcc's (`DCC`, `NATIVECODE`, the `WEAK*` family are missing, `CPUINTEL` is extra) |
 | F22 | the preprocessor | a conditional crossing an include boundary is accepted; dcc refuses it (invalid code only) |
 | F23 | the source manager | an include inside an include is looked up beside the including file; dcc looks beside the main unit |
 | F25 | the oracle's input | a shipped RTL unit built with a define no project has: its constants (the vmt offsets on Win64) evaluate otherwise |
@@ -206,7 +205,11 @@ head word is a contract read now, and a `begin` followed by `finalization`
 is a parse error, as it is dcc's) and where an asm body ends (F26 - the
 lexer guessed it before any branch was decided, and a dead `asm` lexed the
 live code after it as asm; the preprocessor now checks every token's mode
-and lexes again where the guess was wrong).
+and lexes again where the guess was wrong) and the predefined conditional
+set (F20 - `DCC`, `NATIVECODE`, the `WEAK*` family were missing, `CPUINTEL`
+extra; the sets are now what every installed dcc 37.0 answers, the switch
+start state has `N+`, and NativeInt's helper is the one of the integer of
+its size).
 
 ## 5. The gate
 

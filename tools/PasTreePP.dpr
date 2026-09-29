@@ -22,7 +22,8 @@ uses
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
   PasTree.Dcu in '..\source\PasTree.Dcu.pas',
   PasTree.Dcu.Source in '..\source\PasTree.Dcu.Source.pas',
-  PasTree.Preprocessor in '..\source\PasTree.Preprocessor.pas';
+  PasTree.Preprocessor in '..\source\PasTree.Preprocessor.pas',
+  PasTree.Platforms in '..\source\PasTree.Platforms.pas';
 
 var
   GRoot: string;
@@ -70,11 +71,7 @@ begin
 
     GIssueFiles := TStringList.Create;
     GSM := TPasSourceManager.Create([]);
-    GDefines := TPasDefines.Create([
-      'MSWINDOWS', 'WIN64', 'CPUX64', 'CPU64BITS', 'CPUINTEL',
-      'VER370', 'CONDITIONALEXPRESSIONS', 'UNICODE', 'ASSEMBLER',
-      'NATIVECODE', 'UNDERSCOREIMPORTNAME'
-    ]);
+    GDefines := CreatePlatformDefines(pfWin64);
     GPP := TPasPreprocessor.Create(GSM, GDefines, 37.0);
     try
       GSM.BuildIncludeIndex(GRoot);

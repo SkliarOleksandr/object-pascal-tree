@@ -135,9 +135,6 @@ $corpora.Add([pscustomobject]@{ Name = 'self'; Stages = $modes
   Args = @{ List = $selfList; Base = $true } })
 
 $ns = 'Winapi;System.Win;Data.Win;Datasnap.Win;Web.Win;Soap.Win;Xml.Win;Vcl;Vcl.Imaging;Vcl.Touch;Vcl.Samples;Vcl.Shell;System;Xml;Data;Datasnap;Web;Soap'
-# What dcc64 predefines and PasTree.Platforms does not yet (the preprocessor's
-# define set, handed to PasTreeXform only - dcc has them anyway).
-$dcc64Defs = @('DCC', 'NATIVECODE', 'MANAGED_RECORD', 'WEAKINTFREF', 'WEAKREF', 'WEAK_NATIVEINT')
 if ($Studio -ne 'none') {
   $lib = Join-Path $Bds 'lib\win64\release'
   $src = Join-Path $Bds 'source'
@@ -162,7 +159,7 @@ if ($Studio -ne 'none') {
   @($files | Where-Object { Test-Path -LiteralPath (Join-Path $lib ([IO.Path]::GetFileNameWithoutExtension($_) + '.dcu')) } |
     Sort-Object) | Set-Content -LiteralPath $studioList
   $corpora.Add([pscustomobject]@{ Name = 'studio'; Stages = $modes
-    Args = @{ List = $studioList; Namespaces = $ns; Oracle = $true; XformDefine = $dcc64Defs } })
+    Args = @{ List = $studioList; Namespaces = $ns; Oracle = $true } })
 }
 
 if ($Extra.Count -eq 0) {

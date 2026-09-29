@@ -42,11 +42,12 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   `$IFEND` and `$ENDIF` are treated as the same terminator unconditionally,
   and `{$LEGACYIFEND}` is passthrough trivia; the strict pairing check is not
   available even as an opt-in.
-- the predefined set is not quite dcc's (`PasTree.Platforms`): dcc64 37.0
-  also defines `DCC`, `NATIVECODE`, `MANAGED_RECORD`, `WEAKINTFREF`,
-  `WEAKREF` and `WEAK_NATIVEINT` (dcc32 `UNDERSCOREIMPORTNAME` too), and does
-  not define `CPUINTEL`, which PasTree does. A few RTL units take other
-  branches for it (probed over every symbol the Studio source tests).
+- the predefined sets (`PasTree.Platforms`) are the installed dcc 37.0
+  compilers' answers for eight targets; Linux64's and WinArm64's are not
+  probed (no compiler installed): Linux64 follows the other LLVM targets,
+  WinArm64 the release notes. They are 37.0's for every compiler version a
+  project names - an older version's set (no `MANAGED_RECORD` before 10.4)
+  is not modelled.
 - a shipped unit is evaluated under the project's defines, not the ones its
   own `.dcu` was built with: the Win64 `System.dcu` was built with
   `CPP_ABI_SUPPORT`, so dcc64 user code sees `CPP_ABI_ADJUST = 24` (and the
