@@ -62,11 +62,12 @@ unit PasTree.Sema.Dfm;
   in RAD Studio 13, pastree-lsp local/DFM-PLAN.md, spike run 5).
 
   WHAT IS NOT BOUND YET, AND IS REFUSED RATHER THAN SKIPPED. A property NAME
-  set directly on an object (`Caption = ...`) is found for a reference
-  search - the object's class has the property, a bare redeclaration taken
-  for the one it republishes (fskProperty) - but a sub-property (`Font.Name`),
-  an item's property and enum VALUES bind through a property's type, which
-  this unit does not resolve yet. A RENAME of a published property or of an
+  is found for a reference search (fskProperty) in the class TReader looks
+  it up in - the object's for `Caption = ...`, the property type's for a
+  sub-property (`Font.Name`), the item class of the collection for an item's
+  property (PropHolder) - a bare redeclaration taken for the one it
+  republishes. Enum VALUES bind through a property's type, which this unit
+  does not resolve for values yet. A RENAME of a published property or of an
   enum value that a form file may spell is refused whole - a partial rename
   would be exactly the silent break this unit exists to prevent.
 }
@@ -128,6 +129,11 @@ type
     PropName: string;
     IsBinary: Boolean;      // positions are the converted text's
     IsUtf8: Boolean;        // the file can hold a non-ASCII name
+    // An fskProperty line that MAY set the property: the class it is read
+    // in, or a link of its path, is a declared type without it, the class
+    // read chosen at run time (PropHolder's ADeclared, AOpen) - so it may as
+    // well set some other class's property of the name.
+    Unsure: Boolean;
   end;
 
   { Where a symbol lives in the project's form files, for a host whose forms
@@ -265,6 +271,14 @@ type
     function CreatedIn(const AClass: TSemaXType; const ANameLower: string;
       out AObjClass: TSemaXType): Boolean;
     function ReachedByName(AEntry: TFormEntry; AIdent: Integer): Boolean;
+    function PropClassOf(AMid: Integer; const AClass: TSemaXType;
+      const ANameLower: string; out AFound: Boolean): TSemaXType;
+    function PropHolder(AEntry: TFormEntry; AProp, ASeg: Integer;
+      out ADeclared, AOpen: Boolean): TSemaXType;
+    function ItemClassOf(AEntry: TFormEntry; AColl: Integer;
+      out AOpen: Boolean): TSemaXType;
+    function ClassNamedBeside(AEntry: TFormEntry;
+      AProp, ASeg: Integer): TSemaXType;
   public
     { ALibraryPaths as TPasNavigator keeps them (full, lower case, trailing
       delimiter): a form file under one of them is never read - a library's
@@ -1151,6 +1165,172 @@ begin
     ((InnerLookupRoot(AEntry, LId.Obj) > 0) and From(RootClassOf(AEntry)));
 end;
 
+// The declared type of AClass's property ANameLower (a bare redeclaration
+// followed to the one that writes it) - `Font` -> TFont; XNil when AClass
+// has no property of that name (AFound False) or it is not class-typed.
+function TPasFormBinder.PropClassOf(AMid: Integer; const AClass: TSemaXType;
+  const ANameLower: string; out AFound: Boolean): TSemaXType;
+var
+  LPMid, LPSym, LCtx: Integer;
+begin
+  Result := XNil;
+  AFound := XValid(AClass) and FProj.FindMemberX(AMid, AClass, ANameLower,
+    LPMid, LPSym, LCtx) and (LPMid >= 0) and (LPSym <> NIL_SYM) and
+    (FProj.Model(LPMid).Symbols[LPSym].Kind = skProperty);
+  if AFound then
+    Result := FProj.CanonTypeX(FProj.SymDeclTypeX(LPMid, LPSym));
+end;
+
+{ The class TReader looks segment ASeg of property AProp up in: the object's
+  class for a property set on the object itself, then through each segment
+  before ASeg to the class-typed property's type (`Font.Name`: TFont), and
+  for a property inside a collection item the item class its collection
+  holds (ItemClassOf). XNil where a link does not resolve.
+
+  ADeclared says the class is a DECLARED type (a property's, an item's)
+  rather than the one the instance read has: that may be a descendant - a
+  collection created with an item subclass, a property object whose class
+  another property chooses - whose own properties the line sets too. A
+  sibling line naming the class (`PropertiesClassName = 'TcxCurrencyEdit
+  Properties'` beside `Properties.DisplayFormat`, the DevExpress editors'
+  convention: its setter creates that class) settles it: that class, not
+  declared. AOpen says a link before ASeg was a declared type WITHOUT a
+  property of that segment's name: the class the rest of the path is read in
+  is chosen at run time (TActionClientItem.CommandProperties is a
+  TCommandProperties, its CommandStyle makes it a TTextProperties or a
+  TMenuProperties, each with a Font), so the result is XNil and nothing is
+  known. }
+function TPasFormBinder.PropHolder(AEntry: TFormEntry; AProp, ASeg: Integer;
+  out ADeclared, AOpen: Boolean): TSemaXType;
+var
+  LDoc: TPasDfmDoc;
+  LSeg: Integer;
+  LFound: Boolean;
+  LNamed: TSemaXType;
+begin
+  Result := XNil;
+  AOpen := False;
+  ADeclared := False;
+  LDoc := DocOf(AEntry);
+  if (AProp < 0) or (AProp > High(LDoc.Props)) then
+    Exit;
+  ADeclared := LDoc.Props[AProp].Owner >= 0;
+  if ADeclared then
+    Result := ItemClassOf(AEntry, LDoc.Props[AProp].Owner, AOpen)
+  else
+    Result := ObjClassOf(AEntry, LDoc.Props[AProp].Obj);
+  for LSeg := 0 to ASeg - 1 do
+  begin
+    if not XValid(Result) then
+      Exit;
+    // A miss in the object's own class is a form that fails to load, not an
+    // open link.
+    Result := PropClassOf(AEntry.Mid, Result,
+      LowerCase(LDoc.IdentText(LDoc.Props[AProp].FirstIdent + LSeg)), LFound);
+    if not LFound and ADeclared then
+      AOpen := True;
+    ADeclared := True;
+    LNamed := ClassNamedBeside(AEntry, AProp, LSeg);
+    if XValid(LNamed) and XValid(Result) and
+       FProj.XDescendsFrom(LNamed, Result) then
+    begin
+      Result := LNamed;
+      ADeclared := False;
+    end;
+  end;
+end;
+
+{ The class a sibling line names for segment ASeg of property AProp: on the
+  same object (and collection item), the path up to ASeg with `ClassName`
+  appended to its last segment, a string - `PropertiesClassName =
+  'TcxCurrencyEditProperties'` for `Properties.DisplayFormat`. Looked up as
+  the form's unit sees it (the designer adds the class's unit to its uses);
+  XNil when there is no such line or the name does not resolve. }
+function TPasFormBinder.ClassNamedBeside(AEntry: TFormEntry;
+  AProp, ASeg: Integer): TSemaXType;
+var
+  LDoc: TPasDfmDoc;
+  LP: TPasDfmProp;
+  LQ, LDir, LS, LFrom, LTo: Integer;
+  LMatch: Boolean;
+  LLine, LName: string;
+begin
+  Result := XNil;
+  LDoc := DocOf(AEntry);
+  LP := LDoc.Props[AProp];
+  LName := LowerCase(LDoc.IdentText(LP.FirstIdent + ASeg)) + 'classname';
+  // An object's properties are read before its children, so its lines are
+  // contiguous but for its collection items: walk out from AProp both ways
+  // while the object is the same.
+  for LDir := -1 to 1 do
+  begin
+    if LDir = 0 then
+      Continue;
+    LQ := AProp + LDir;
+    while (LQ >= 0) and (LQ <= High(LDoc.Props)) and
+          (LDoc.Props[LQ].Obj = LP.Obj) do
+    begin
+      if (LDoc.Props[LQ].Owner = LP.Owner) and (LDoc.Props[LQ].Item = LP.Item)
+         and (LDoc.Props[LQ].SegCount = ASeg + 1) and
+         (LDoc.Props[LQ].StrOffset >= 0) and SameText(LDoc.IdentText(
+         LDoc.Props[LQ].FirstIdent + ASeg), LName) then
+      begin
+        LMatch := True;
+        for LS := 0 to ASeg - 1 do
+          if not SameText(LDoc.IdentText(LDoc.Props[LQ].FirstIdent + LS),
+             LDoc.IdentText(LP.FirstIdent + LS)) then
+            LMatch := False;
+        if LMatch then
+        begin
+          // The value is one plain literal (StrOffset): the text between
+          // its quotes on that line.
+          LLine := LDoc.LineText(LDoc.LineOf(LDoc.Props[LQ].StrOffset));
+          LFrom := LDoc.ColOf(LDoc.Props[LQ].StrOffset);
+          if (LFrom < 1) or (LFrom > Length(LLine)) or
+             (LLine[LFrom] <> '''') then
+            Exit;
+          LTo := LFrom + 1;
+          while (LTo <= Length(LLine)) and (LLine[LTo] <> '''') do
+            Inc(LTo);
+          Exit(TypeInUnit(AEntry.Mid,
+            LowerCase(Copy(LLine, LFrom + 1, LTo - LFrom - 1))));
+        end;
+      end;
+      Inc(LQ, LDir);
+    end;
+  end;
+end;
+
+{ The item class of the collection property AColl's value (`Panels = <`):
+  the type of its collection class's `default` array property, which a
+  collection written for one item class declares with that class
+  (TStatusPanels.Items: TStatusPanel, TActionClients.ActionClients:
+  TActionClientItem), else of TCollection's `Items`, TCollectionItem - whose
+  descendants' properties are then taken as PropHolder's ADeclared says.
+  AOpen as PropHolder's, for the collection's own path. }
+function TPasFormBinder.ItemClassOf(AEntry: TFormEntry; AColl: Integer;
+  out AOpen: Boolean): TSemaXType;
+var
+  LDoc: TPasDfmDoc;
+  LLast: Integer;
+  LDeclared, LFound: Boolean;
+  LHolder, LOwner: TSemaXType;
+  LPMid, LPSym: Integer;
+begin
+  LDoc := DocOf(AEntry);
+  LLast := LDoc.Props[AColl].SegCount - 1;
+  LHolder := PropHolder(AEntry, AColl, LLast, LDeclared, AOpen);
+  Result := PropClassOf(AEntry.Mid, LHolder,
+    LowerCase(LDoc.IdentText(LDoc.Props[AColl].FirstIdent + LLast)), LFound);
+  if not LFound and XValid(LHolder) and LDeclared then
+    AOpen := True;
+  if XValid(Result) and FProj.DefaultArrayPropX(Result, LPMid, LPSym,
+     LOwner) then
+    Result := FProj.CanonTypeX(FProj.SymDeclTypeX(LPMid, LPSym))
+  else
+    Result := PropClassOf(AEntry.Mid, Result, 'items', LFound);
+end;
+
 function TPasFormBinder.EntryOf(const APath: string): TFormEntry;
 var
   LEntry: TFormEntry;
@@ -1174,6 +1354,8 @@ var
   LId: TPasDfmIdent;
   LIsMethod: Boolean;
   LVia: TPasFormSiteVia;
+  LDeclared, LOpen: Boolean;
+  LSite: TPasFormSite;
 
   function Where: string;
   begin
@@ -1304,20 +1486,43 @@ begin
             // redeclaration taken for the property it republishes, as
             // FindReferences takes it. TReader sets it by name: rename or
             // remove the property and the form fails to load, after a clean
-            // compile. A sub-property (`Font.Name`) and an item's property
-            // are not bound yet (their object's class is not the one read).
-            if not ARename and (LId.Role = dirPropName) and (LId.Seg = 0) and
-               not LId.InItem then
+            // compile. A sub-property (`Font.Name`) is looked up in the
+            // class of the property before it, an item's property in the
+            // item class of its collection (PropHolder). Where that class is
+            // a declared type and has no property of the name at all, the
+            // instance read may be a descendant's, and so may the class a
+            // link before it is read in (AOpen): the line is kept as one
+            // that MAY set it (Unsure) - left out, it is a silent miss; a
+            // namesake elsewhere gets it too.
+            if not ARename and (LId.Role = dirPropName) then
             begin
-              LClass := ObjClassOf(LEntry, LId.Obj);
-              if XValid(LClass) and FProj.FindMemberX(LEntry.Mid, LClass,
-                 LNameLower, LTMid, LTSym, LCtx) and (LTMid >= 0) and
-                 (LTSym <> NIL_SYM) and
-                 (FProj.Model(LTMid).Symbols[LTSym].Kind = skProperty) and
-                 (FProj.Model(LTMid).Symbols[LTSym].Visibility in [svDefault,
-                 svPublished]) and SameProperty(LTMid, LTSym, ATMid, ASym) then
-                LList.Add(SiteOf(LEntry, LIdx, fskProperty,
-                  HeaderVia(LEntry, LId.Obj)));
+              LClass := PropHolder(LEntry, LId.Prop, LId.Seg, LDeclared,
+                LOpen);
+              LSite := SiteOf(LEntry, LIdx, fskProperty,
+                HeaderVia(LEntry, LId.Obj));
+              LSite.Unsure := True;
+              if not XValid(LClass) then
+              begin
+                if LOpen and (FProj.Model(ATMid).Symbols[ASym].Visibility in
+                   [svDefault, svPublished]) then
+                  LList.Add(LSite);
+                Continue;
+              end;
+              if FProj.FindMemberX(LEntry.Mid, LClass, LNameLower, LTMid,
+                 LTSym, LCtx) and (LTMid >= 0) and (LTSym <> NIL_SYM) then
+              begin
+                if (FProj.Model(LTMid).Symbols[LTSym].Kind = skProperty) and
+                   (FProj.Model(LTMid).Symbols[LTSym].Visibility in
+                   [svDefault, svPublished]) and
+                   SameProperty(LTMid, LTSym, ATMid, ASym) then
+                  LList.Add(SiteOf(LEntry, LIdx, fskProperty,
+                    HeaderVia(LEntry, LId.Obj)));
+              end
+              else if LDeclared and not SameType(LClass, LOwner) and
+                FProj.XDescendsFrom(LOwner, LClass) and
+                (FProj.Model(ATMid).Symbols[ASym].Visibility in [svDefault,
+                svPublished]) then
+                LList.Add(LSite);
             end
             // A rename: refused where a form file may set it - for a published
             // property, as before properties of any visibility were searched.
@@ -1326,14 +1531,15 @@ begin
               svPublished]) then
             begin
               // Excluded only when it is certainly some OTHER class's
-              // property: a direct property of an object whose class is
-              // known and is not the owner or a descendant of it.
-              if (LId.Seg = 0) and not LId.InItem then
-              begin
-                LClass := ObjClassOf(LEntry, LId.Obj);
-                if XValid(LClass) and not FProj.XDescendsFrom(LClass, LOwner) then
-                  Continue;
-              end;
+              // property: the class the segment is looked up in is known
+              // and is not the owner or a descendant of it - nor, for a
+              // declared type, an ancestor, whose instance may be the
+              // owner's (PropHolder).
+              LClass := PropHolder(LEntry, LId.Prop, LId.Seg, LDeclared,
+                LOpen);
+              if XValid(LClass) and not FProj.XDescendsFrom(LClass, LOwner) and
+                 not (LDeclared and FProj.XDescendsFrom(LOwner, LClass)) then
+                Continue;
               AError := Format('%s sets a property named "%s", and renaming ' +
                 'a published property in form files is not supported yet - ' +
                 'rename refused, nothing planned.', [Where,

@@ -612,6 +612,98 @@ const
     '  end' + CRLF +                                             // 4
     'end' + CRLF;                                                // 5
 
+  // Properties set THROUGH a property: a sub-property (`Style.Accent`), an
+  // item's property (the collection's default property names the item class,
+  // whatever it is called - TActionClients.ActionClients), a property only a
+  // descendant item class has (the collection may be created with it), a
+  // namesake of that one on an unrelated class, and a path through a link
+  // its declared type does not have (`Style.Deep`).
+  UNIT_SUB =
+    'unit FixSub;'#10 +                                          // 1
+    'interface'#10 +                                             // 2
+    'uses FixVcl;'#10 +                                          // 3
+    'type'#10 +                                                  // 4
+    '  TSubStyle = class(TPersistent)'#10 +                      // 5
+    '  private'#10 +                                             // 6
+    '    FAccent: Integer;'#10 +                                 // 7
+    '  published'#10 +                                           // 8
+    '    property Accent: Integer read FAccent write FAccent;'#10 + // 9  col 14
+    '  end;'#10 +                                                // 10
+    '  TSubItem = class(TPersistent)'#10 +                       // 11
+    '  private'#10 +                                             // 12
+    '    FWeight: Integer;'#10 +                                 // 13
+    '  published'#10 +                                           // 14
+    '    property Weight: Integer read FWeight write FWeight;'#10 + // 15 col 14
+    '  end;'#10 +                                                // 16
+    '  TSubItemEx = class(TSubItem)'#10 +                        // 17
+    '  private'#10 +                                             // 18
+    '    FTone: Integer;'#10 +                                   // 19
+    '  published'#10 +                                           // 20
+    '    property Tone: Integer read FTone write FTone;'#10 +    // 21 col 14
+    '  end;'#10 +                                                // 22
+    '  TSubItems = class(TPersistent)'#10 +                      // 23
+    '  public'#10 +                                              // 24
+    '    function GetItem(AIndex: Integer): TSubItem;'#10 +      // 25
+    '    property Entries[AIndex: Integer]: TSubItem read GetItem; default;'#10 + // 26
+    '  end;'#10 +                                                // 27
+    '  TSubOther = class(TPersistent)'#10 +                      // 28
+    '  private'#10 +                                             // 29
+    '    FTone: Integer;'#10 +                                   // 30
+    '  published'#10 +                                           // 31
+    '    property Tone: Integer read FTone write FTone;'#10 +    // 32 col 14
+    '  end;'#10 +                                                // 33
+    '  TSubPanel = class(TWinControl)'#10 +                      // 34
+    '  private'#10 +                                             // 35
+    '    FStyle: TSubStyle;'#10 +                                // 36
+    '    FTags: TSubItems;'#10 +                                 // 37
+    '    FOther: TSubOther;'#10 +                                // 38
+    '  published'#10 +                                           // 39
+    '    property Style: TSubStyle read FStyle;'#10 +            // 40 col 14
+    '    property Tags: TSubItems read FTags;'#10 +              // 41
+    '    property Other: TSubOther read FOther;'#10 +            // 42
+    '  end;'#10 +                                                // 43
+    '  TFixSubForm = class(TForm)'#10 +                          // 44
+    '    Panel1: TSubPanel;'#10 +                                // 45
+    '  end;'#10 +                                                // 46
+    '  TSubStyleEx = class(TSubStyle)'#10 +                      // 47
+    '  private'#10 +                                             // 48
+    '    FGlow: Integer;'#10 +                                   // 49
+    '  published'#10 +                                           // 50
+    '    property Glow: Integer read FGlow write FGlow;'#10 +    // 51 col 14
+    '  end;'#10 +                                                // 52
+    '  TSubCell = class(TWinControl)'#10 +                       // 53
+    '  private'#10 +                                             // 54
+    '    FStyle: TSubStyle;'#10 +                                // 55
+    '    FStyleName: string;'#10 +                               // 56
+    '  published'#10 +                                           // 57
+    '    property Style: TSubStyle read FStyle;'#10 +            // 58
+    '    property StyleClassName: string read FStyleName write FStyleName;'#10 + // 59
+    '  end;'#10 +                                                // 60
+    'implementation'#10 +                                        // 61
+    '{$R *.dfm}'#10 +                                            // 62
+    'function TSubItems.GetItem(AIndex: Integer): TSubItem; begin Result := nil; end;'#10 + // 63
+    'end.'#10;                                                   // 64
+
+  DFM_SUB =
+    'object FixSubForm: TFixSubForm' + CRLF +                    // 1
+    '  object Panel1: TSubPanel' + CRLF +                        // 2
+    '    Style.Accent = 2' + CRLF +                              // 3  Style col 5, Accent col 11
+    '    Other.Tone = 1' + CRLF +                                // 4  Tone col 11
+    '    Tags = <' + CRLF +                                      // 5
+    '      item' + CRLF +                                        // 6
+    '        Weight = 3' + CRLF +                                // 7  col 9
+    '      end' + CRLF +                                         // 8
+    '      item' + CRLF +                                        // 9
+    '        Tone = 4' + CRLF +                                  // 10 col 9
+    '      end>' + CRLF +                                        // 11
+    '    Style.Deep.Accent = 5' + CRLF +                         // 12 Accent col 16
+    '  end' + CRLF +                                             // 13
+    '  object Cell1: TSubCell' + CRLF +                          // 14
+    '    StyleClassName = ''TSubStyleEx''' + CRLF +              // 15
+    '    Style.Glow = 1' + CRLF +                                // 16 Glow col 11
+    '  end' + CRLF +                                             // 17
+    'end' + CRLF;                                                // 18
+
 var
   GCounter: TPasSuiteCounter;
   GProj: TPasSemaProject;
@@ -661,6 +753,18 @@ begin
        SameText(LSite.ObjectName, AObject) then
       Exit(True);
   Result := False;
+end;
+
+// The site at ALine, ACol (any file); an empty one when there is none.
+function SiteAt(const ASites: TArray<TPasFormSite>;
+  ALine, ACol: Integer): TPasFormSite;
+var
+  LSite: TPasFormSite;
+begin
+  for LSite in ASites do
+    if (LSite.Line = ALine) and (LSite.Col = ACol) then
+      Exit(LSite);
+  Result := Default(TPasFormSite);
 end;
 
 function Plan(const AFile: string; ALine, ACol: Integer; const ANewName: string;
@@ -1313,6 +1417,37 @@ begin
     + 'item''s', not HasSite(LSites, 'FixData.dfm', 4, 5, fskProperty,
     'Action1') and not HasSite(LSites, 'FixColl.dfm', 13, 9, fskProperty,
     'Grid'));
+
+  // Through a property: looked up in the class TReader looks it up in.
+  LSites := Sites('FixSub.pas', 9, 14);
+  Ok('prop: a sub-property, in its property''s class', (Length(LSites) = 2)
+    and HasSite(LSites, 'FixSub.dfm', 3, 11, fskProperty, 'Panel1') and
+    not SiteAt(LSites, 3, 11).Unsure);
+  // TSubStyle has no Deep: a descendant chosen at run time may - kept, as
+  // a line that may set it.
+  Ok('prop: ...and one behind a class chosen at run time, unsure',
+    HasSite(LSites, 'FixSub.dfm', 12, 16, fskProperty, 'Panel1') and
+    SiteAt(LSites, 12, 16).Unsure);
+  LSites := Sites('FixSub.pas', 40, 14);
+  Ok('prop: ...and the property it is set through', (Length(LSites) = 2) and
+    HasSite(LSites, 'FixSub.dfm', 3, 5, fskProperty, 'Panel1') and
+    HasSite(LSites, 'FixSub.dfm', 12, 5, fskProperty, 'Panel1'));
+  LSites := Sites('FixSub.pas', 15, 14);
+  Ok('prop: an item''s property, in the item class of its collection',
+    (Length(LSites) = 1) and HasSite(LSites, 'FixSub.dfm', 7, 9, fskProperty,
+    'Panel1'));
+  LSites := Sites('FixSub.pas', 21, 14);
+  Ok('prop: a descendant item class''s own property, the item may be one',
+    (Length(LSites) = 1) and HasSite(LSites, 'FixSub.dfm', 10, 9,
+    fskProperty, 'Panel1') and SiteAt(LSites, 10, 9).Unsure);
+  LSites := Sites('FixSub.pas', 51, 14);
+  Ok('prop: a descendant''s property where a sibling line names the class',
+    (Length(LSites) = 1) and HasSite(LSites, 'FixSub.dfm', 16, 11,
+    fskProperty, 'Cell1') and not SiteAt(LSites, 16, 11).Unsure);
+  LSites := Sites('FixSub.pas', 32, 14);
+  Ok('prop: ...and not its namesake on an unrelated class, set elsewhere',
+    (Length(LSites) = 1) and HasSite(LSites, 'FixSub.dfm', 4, 11,
+    fskProperty, 'Panel1'));
 end;
 
 procedure DockChecks;
@@ -1457,6 +1592,8 @@ begin
   TFile.WriteAllText(FilePath('FixDock.dfm'), DFM_DOCK, TEncoding.ASCII);
   TFile.WriteAllText(FilePath('FixColl.pas'), UNIT_COLL);
   TFile.WriteAllText(FilePath('FixColl.dfm'), DFM_COLL, TEncoding.ASCII);
+  TFile.WriteAllText(FilePath('FixSub.pas'), UNIT_SUB);
+  TFile.WriteAllText(FilePath('FixSub.dfm'), DFM_SUB, TEncoding.ASCII);
 
   GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
   try

@@ -610,8 +610,6 @@ type
     function PointeeOfDeclX(AId, ABaseNode: Integer): TSemaXType;
     function IsDefaultArrayProp(AMid, ASym: Integer): Boolean;
     function PropertyHasParams(AMid, ASym: Integer): Boolean;
-    function DefaultArrayPropX(const AX: TSemaXType;
-      out AMid, ASym: Integer; out AOwner: TSemaXType): Boolean;
     function RoutineHasParams(AMid, ASym: Integer): Boolean;
     function RoutineRequiresArgs(AMid, ASym: Integer): Boolean;
     function IsGenericRoutine(AMid, ASym: Integer): Boolean;
@@ -1001,6 +999,12 @@ type
     // T for a `class of T`, through alias links; XNil for anything else
     // (public for a host that answers about the class a metaclass names).
     function ClassRefTargetX(const AX: TSemaXType): TSemaXType;
+    // The `default` array property AX has - its own or the nearest
+    // ancestor's - and the type declaring it (public for the form binder:
+    // a collection's item class is its default property's type,
+    // TActionClients.ActionClients[]: TActionClientItem).
+    function DefaultArrayPropX(const AX: TSemaXType;
+      out AMid, ASym: Integer; out AOwner: TSemaXType): Boolean;
     { The property REDECLARATION chain (`property Items;` republishing an
       inherited property), for the navigator. PropertyInAncestorsX is the
       link - see its implementation comment for the dcc-probed rules;
