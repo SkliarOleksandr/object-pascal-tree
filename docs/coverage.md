@@ -236,14 +236,13 @@ same-arity overloads differing only in modifiers can mis-pair.
   side), where the first-declared overload still wins.
 
 ## 6.10 Inline assembly (`asm … end`)
-- a bare `end` inside a skipped $IFDEF branch of an asm
-  body still closes the asm block at the raw-lexing level (the raw lexer
-  cannot know the live branch).
-- the other way round: an `asm` in a DEAD branch that no `$ELSE` of its own
-  depth follows (`{$IFDEF X} asm {$ENDIF}`, a real `asm` after it) leaves
-  the lexer in asm mode past the `$ENDIF`, and the live code after it lexes
-  as asm up to the next `end` - parse errors on code dcc compiles. An `$ELSE`
-  of the asm's depth closes the mode (the live two-body shape).
+- where an asm body ends is decided by the preprocessor, which knows the
+  live branches (F26): only live text switches the mode, dead text is
+  scanned as Pascal even inside an asm body, and the mode runs on through
+  an include, as dcc does. `TPasLexer.Tokenize` used on its own - no
+  preprocessor, as `ParseExpressionText` and a highlighter without a model
+  use it - still guesses: an `asm` opened in a conditional branch is closed
+  by that branch's `$ELSE`, and a dead `asm` or `end` switches the mode.
 
 ## 07-strings.md
 

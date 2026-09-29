@@ -2402,6 +2402,100 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
       end;
   end;
 
+  { 6.10 (F26): where an asm body ends is the preprocessor's to say - only
+    live text switches BASM mode, dead text is scanned as Pascal even inside
+    an asm body, and the mode runs on through an include (dcc32 37.0,
+    probed). ASource goes between a unit's `implementation` and `end.`;
+    AInclude, when not empty, is written beside it as inc.inc. AAsm is the
+    visible text from the first `asm` through the `end` closing it, each
+    token lexed in BASM mode bracketed; ADiags counts the parser's, the
+    preprocessor's and the lexer's diagnostics in live text together. }
+  function AsmModeCase(const AName, ASource, AInclude, AAsm: string;
+    ADiags: Integer): TPasCustomCase;
+  begin
+    Result.Section := '6.10';
+    Result.Name := AName;
+    Result.Run :=
+      function: TPasCheckResult
+      var
+        LDir, LUnitPath, LSrc, LAsm, LText: string;
+        LSM: TPasSourceManager;
+        LDefines: TPasDefines;
+        LPP: TPasPreprocessor;
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+        LIdx, LFile, LCount: Integer;
+        LTok: TPasToken;
+        LIn: Boolean;
+      begin
+        LSrc := 'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+          ASource + 'end.'#13#10;
+        LDir := TPath.Combine(TPath.GetTempPath, 'pastree_asmmode');
+        if TDirectory.Exists(LDir) then
+          TDirectory.Delete(LDir, True);
+        TDirectory.CreateDirectory(LDir);
+        LSM := nil;
+        LDefines := nil;
+        LPP := nil;
+        try
+          if AInclude <> '' then
+            TFile.WriteAllText(TPath.Combine(LDir, 'inc.inc'), AInclude);
+          LUnitPath := TPath.Combine(LDir, 'U.pas');
+          LSM := TPasSourceManager.Create([]);
+          LDefines := CreatePlatformDefines(pfWin32);
+          LPP := TPasPreprocessor.Create(LSM, LDefines);
+          LPre := LPP.ProcessText(LUnitPath, LSrc);
+          LTree := TPasParser.ParseFile(LPre, LDiags);
+          LCount := Length(LDiags) + Length(LPre.Diagnostics);
+          for LFile := 0 to High(LPre.Files) do
+            for LIdx := 0 to High(LPre.Files[LFile].Diagnostics) do
+              if not LPre.IsSkipped(LFile,
+                   LPre.Files[LFile].Diagnostics[LIdx].Start) then
+                Inc(LCount);
+          LAsm := '';
+          LIn := False;
+          for LIdx := 0 to High(LPre.Visible) do
+          begin
+            LTok := LPre.VisibleToken(LIdx);
+            if LTok.Kind = tkEndOfFile then
+              Break;
+            if LTok.Kind = tkAsm then
+              LIn := True;
+            if not LIn then
+              Continue;
+            LText := LPre.VisibleText(LIdx);
+            if tfAsm in LTok.Flags then
+              LText := '[' + LText + ']';
+            if LAsm <> '' then
+              LAsm := LAsm + ' ';
+            LAsm := LAsm + LText;
+            if (LTok.Kind = tkEnd) and (tfAsm in LTok.Flags) then
+              Break;
+          end;
+          Result.Passed := (LAsm = AAsm) and (LCount = ADiags);
+          if Result.Passed then
+            Result.Message := ''
+          else
+            Result.Message := Format('  asm:         expected %s%s' +
+              '               actual   %s%s' +
+              '  diagnostics: expected %d, actual %d (parse %d, ' +
+              'preprocessor %d)', [AAsm, sLineBreak, LAsm, sLineBreak,
+              ADiags, LCount, Length(LDiags), Length(LPre.Diagnostics)]) +
+              sLineBreak;
+          if Result.Passed and (ADiags = 0) then
+            ApplyVerdict(Result, LSrc, GCustomTreeVerdict, LPre, LTree,
+              False, True);
+        finally
+          LPP.Free;
+          LDefines.Free;
+          LSM.Free;
+          if TDirectory.Exists(LDir) then
+            TDirectory.Delete(LDir, True);
+        end;
+      end;
+  end;
+
   { Lexer-level check: the LINES on which ASource produces ACode, as a
     comma-separated list, so a case reads the way dcc's own output does. }
   function LexDiagLinesCase(const AName, ASource: string;
@@ -2912,7 +3006,57 @@ begin
     FullBlockCase, RoutineNamesCase];
   for LPlatform := Low(TPasPlatform) to High(TPasPlatform) do
     Result := Result + [PlatformCase(LPlatform)];
-  Result := Result + [IncludeContextCase];
+  Result := Result + [IncludeContextCase,
+    AsmModeCase('F26: a dead asm does not open BASM mode',
+      'function R: Cardinal; {$ifdef NEVER} asm {$endif}'#13#10 +
+      'asm'#13#10'  mov eax, 1'#13#10'end;'#13#10, '',
+      'asm [mov] [eax,] [1] [end]', 0),
+    AsmModeCase('F26: a dead end does not close it',
+      'function R: Cardinal;'#13#10'asm'#13#10'  mov eax, 1'#13#10 +
+      '  {$ifdef NEVER} end; begin {$endif}'#13#10'  mov eax, 2'#13#10 +
+      'end;'#13#10, '',
+      'asm [mov] [eax,] [1] [mov] [eax,] [2] [end]', 0),
+    AsmModeCase('F26: two asm heads, one live',
+      'function R: Cardinal;'#13#10 +
+      '{$ifdef NEVER} asm {$else} asm {$endif}'#13#10'  mov eax, 1'#13#10 +
+      'end;'#13#10, '',
+      'asm [mov] [eax,] [1] [end]', 0),
+    AsmModeCase('F26: a live asm, a dead Pascal alternative',
+      'procedure P;'#13#10'{$ifndef NEVER}'#13#10'asm'#13#10 +
+      '  mov eax, 1'#13#10'{$else}'#13#10'begin'#13#10 +
+      '  if True then begin end;'#13#10'{$endif}'#13#10'end;'#13#10, '',
+      'asm [mov] [eax,] [1] [end]', 0),
+    AsmModeCase('F26: a dead asm, a live Pascal alternative',
+      'procedure P;'#13#10'{$ifdef NEVER}'#13#10'asm'#13#10 +
+      '  mov eax, 1'#13#10'{$else}'#13#10'begin'#13#10 +
+      '  if True then begin end;'#13#10'{$endif}'#13#10'end;'#13#10, '',
+      '', 0),
+    AsmModeCase('F26: an include inside an asm body is BASM text',
+      'function R: Cardinal;'#13#10'asm'#13#10'  {$I inc.inc}'#13#10 +
+      'end;'#13#10,
+      '  cmp al, "''"'#13#10'  mov eax, 1'#13#10,
+      'asm [cmp] [al,] ["''"] [mov] [eax,] [1] [end]', 0),
+    AsmModeCase('F26: an end in an include closes the includer''s body',
+      'function R: Cardinal;'#13#10'asm'#13#10'  {$I inc.inc}'#13#10 +
+      'end;'#13#10,
+      '  mov eax, 1'#13#10'end;'#13#10'function S: Cardinal;'#13#10 +
+      'begin'#13#10'  Result := 2;'#13#10,
+      'asm [mov] [eax,] [1] [end]', 0),
+    // dcc: E2280 for both - dead text is scanned as Pascal, and the `{` of
+    // `"{"` opens a comment that swallows the $endif. Here: the
+    // preprocessor's unterminated conditional, the unterminated asm body (in
+    // the first) and the parser's errors on a unit whose rest is dead.
+    AsmModeCase('F26: dead text in a live asm body is scanned as Pascal',
+      'function R: Cardinal;'#13#10'asm'#13#10'  mov eax, 1'#13#10 +
+      '  {$ifdef NEVER} cmp al, "{" {$endif}'#13#10'  mov eax, 2'#13#10 +
+      'end;'#13#10'}'#13#10, '',
+      'asm [mov] [eax,] [1]', 6),
+    AsmModeCase('F26: a dead asm body is scanned as Pascal',
+      '{$ifdef NEVER}'#13#10'function Q: Cardinal;'#13#10'asm'#13#10 +
+      '  cmp al, "{"'#13#10'end;'#13#10'{$endif}'#13#10 +
+      'function R: Cardinal;'#13#10'begin'#13#10'  Result := 1;'#13#10 +
+      'end;'#13#10, '',
+      '', 3)];
   AddMultilineIndentCases(Result);
   Result := Result + [OutParamAuxCase, PackageHeadTokensCase];
 end;

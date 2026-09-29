@@ -187,7 +187,7 @@ minus before a member call - agree with dcc everywhere they were met.
 | F22 | the preprocessor | a conditional crossing an include boundary is accepted; dcc refuses it (invalid code only) |
 | F23 | the source manager | an include inside an include is looked up beside the including file; dcc looks beside the main unit |
 | F25 | the oracle's input | a shipped RTL unit built with a define no project has: its constants (the vmt offsets on Win64) evaluate otherwise |
-| F26 | the lexer | an `asm` in a dead branch no `$ELSE` of its own depth follows keeps BASM mode past the `$ENDIF` |
+
 Fixed on the way, each by its own reviewed change: a subrange bound that
 swallowed an initializer's `=` (F6, silent on a variable), directives of a
 procedural type or a routine header that left no node (F1, F2, F10, F11,
@@ -203,7 +203,10 @@ where a procedural type's `;` stands (F29 - `procedure stdcall` and
 `;` has Aux 1 now) and which word opens a unit's initialization part (F30 -
 a legacy `begin` and `initialization` are one section, not one `.dcu`; the
 head word is a contract read now, and a `begin` followed by `finalization`
-is a parse error, as it is dcc's).
+is a parse error, as it is dcc's) and where an asm body ends (F26 - the
+lexer guessed it before any branch was decided, and a dead `asm` lexed the
+live code after it as asm; the preprocessor now checks every token's mode
+and lexes again where the guess was wrong).
 
 ## 5. The gate
 

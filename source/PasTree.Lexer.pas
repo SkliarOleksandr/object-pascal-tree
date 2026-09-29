@@ -12,13 +12,15 @@ unit PasTree.Lexer;
     always tkIdentifier (B.3).
   - asm...end switches to BASM mode (spec 6.10): body text is emitted as
     opaque tkAsmChunk tokens, BUT comments and directives inside asm are
-    still lexed normally so conditional compilation keeps working. An
-    `asm` opened inside a conditional branch is closed by that branch's
-    `$ELSE`/`$ELSEIF` (NoteDirective): the alternative branch is Pascal
-    text sharing the routine's `end`, and without this it lexed as asm
-    chunks even when the asm branch was dead.
-    Known limitation: a bare `end` inside a skipped $IFDEF branch of an
-    asm body would close the asm block at the raw-lexing level.
+    still lexed normally so conditional compilation keeps working. Where
+    an asm body ends depends on which branches are live, and Tokenize
+    cannot know: it guesses - an `asm` opened inside a conditional branch
+    is closed by that branch's `$ELSE`/`$ELSEIF` (NoteDirective), the
+    alternative branch being Pascal text sharing the routine's `end` - and
+    the preprocessor, which does know, checks every token's mode (tfAsm)
+    and lexes the rest of the file again through Resume/Step where the
+    guess was wrong (F26; see TPasPreprocessor.ProcessFile for dcc's
+    rules).
   - Caret control chars (spec B.6.2): `^` + a LETTER stays tkCaret +
     tkIdentifier (`^M` and the pointer type `^TFoo` are the same two
     tokens; only the parser knows expression from type position). `^` +
@@ -52,6 +54,8 @@ type
     // NoteDirective for what the pair is for.
     FCondDepth: Integer;
     FAsmCondDepth: Integer;
+    // Kept by Resume for Finish: the line table of the stream it continues.
+    FLineStarts: TArray<Integer>;
     procedure NoteDirective(ANameStart: Integer);
     procedure Emit(AKind: TPasTokenKind; AStart: Integer;
       AFlags: TPasTokenFlags = []);
@@ -74,9 +78,28 @@ type
     procedure LexIdentOrKeyword(AAmpersand: Boolean);
     procedure LexAsmToken;
     procedure LexPunctuation;
+    procedure LexOne;
     procedure Run;
   public
     class function Tokenize(const ASource: string): TPasTokenStream; static;
+    { Pull lexing, for a caller that knows which text is live - the
+      preprocessor (F26): Tokenize has to guess where an `asm` body ends
+      before any branch is decided. Resume continues AStream at its token
+      AIndex: the tokens before it are kept (the caret rule reads them
+      back), and so are the diagnostics that start before it. Each Step lexes
+      what starts at the current position - one token, or an asm chunk and
+      the `end` closing it - in BASM mode when AInAsm, as Pascal otherwise,
+      and appends it; Count and Token read what is there. Finish adds the
+      EOF sentinel (and, with AUnterminatedAsm, the diagnostic for an asm
+      block the file ends in) and returns the stream: new arrays, AStream's
+      are never written, so a stream shared by several includers stays
+      intact. }
+    procedure Resume(const AStream: TPasTokenStream; AIndex: Integer);
+    function AtEnd: Boolean; inline;
+    procedure Step(AInAsm: Boolean);
+    function Count: Integer; inline;
+    function Token(AIndex: Integer): TPasToken; inline;
+    function Finish(AUnterminatedAsm: Boolean): TPasTokenStream;
   end;
 
 implementation
@@ -149,6 +172,69 @@ begin
   Result.LineStarts := BuildLineStarts(LLexer.FSource);
 end;
 
+procedure TPasLexer.Resume(const AStream: TPasTokenStream; AIndex: Integer);
+var
+  LFrom, LIdx: Integer;
+begin
+  Self := Default(TPasLexer);
+  FSource := AStream.Source;
+  FLen := Length(FSource);
+  if FLen > 0 then
+    FBase := PChar(FSource)
+  else
+    FBase := nil;
+  FLineStarts := AStream.LineStarts;
+  LFrom := AStream.Tokens[AIndex].Start;
+  FPos := LFrom;
+  // Room for the tokens kept and about as many again as the rest had.
+  SetLength(FTokens, Length(AStream.Tokens) + 16);
+  for LIdx := 0 to AIndex - 1 do
+    FTokens[LIdx] := AStream.Tokens[LIdx];
+  FTokenCount := AIndex;
+  for LIdx := 0 to High(AStream.Diagnostics) do
+    if AStream.Diagnostics[LIdx].Start < LFrom then
+      Diag(AStream.Diagnostics[LIdx].Code, AStream.Diagnostics[LIdx].Start,
+        AStream.Diagnostics[LIdx].Len);
+end;
+
+function TPasLexer.AtEnd: Boolean;
+begin
+  Result := FPos >= FLen;
+end;
+
+procedure TPasLexer.Step(AInAsm: Boolean);
+begin
+  // The caller's mode, whatever the last token left: a dead `asm` must not
+  // open BASM mode, a dead `end` must not close it (NoteDirective's $ELSE
+  // rule is Tokenize's guess, overruled here as well).
+  FInAsm := AInAsm;
+  LexOne;
+end;
+
+function TPasLexer.Count: Integer;
+begin
+  Result := FTokenCount;
+end;
+
+function TPasLexer.Token(AIndex: Integer): TPasToken;
+begin
+  Result := FTokens[AIndex];
+end;
+
+function TPasLexer.Finish(AUnterminatedAsm: Boolean): TPasTokenStream;
+begin
+  FInAsm := False;
+  if AUnterminatedAsm then
+    Diag(dcUnterminatedAsm, FPos, 0);
+  Emit(tkEndOfFile, FPos);
+  Result.Source := FSource;
+  TPasArrayTrim.Exact<TPasToken>(FTokens, FTokenCount);
+  Result.Tokens := FTokens;
+  SetLength(FDiags, FDiagCount);
+  Result.Diagnostics := FDiags;
+  Result.LineStarts := FLineStarts;
+end;
+
 function TPasLexer.CharAt(AIndex: Integer): Char;
 begin
   if (AIndex >= 0) and (AIndex < FLen) then
@@ -176,7 +262,10 @@ begin
   if FTokenCount = Length(FTokens) then
     SetLength(FTokens, (Length(FTokens) * 3) div 2 + 16);
   FTokens[FTokenCount].Kind := AKind;
-  FTokens[FTokenCount].Flags := AFlags;
+  if FInAsm then
+    FTokens[FTokenCount].Flags := AFlags + [tfAsm]
+  else
+    FTokens[FTokenCount].Flags := AFlags;
   FTokens[FTokenCount].Start := AStart;
   FTokens[FTokenCount].Len := FPos - AStart;
   Inc(FTokenCount);
@@ -241,67 +330,9 @@ begin
 end;
 
 procedure TPasLexer.Run;
-var
-  LCh: Char;
-  LStart: Integer;
 begin
   while FPos < FLen do
-  begin
-    if FInAsm then
-    begin
-      LexAsmToken;
-      Continue;
-    end;
-    LCh := FBase[FPos];
-    if IsWhitespace(LCh) then
-      LexWhitespace
-    else if IsIdentStart(LCh) then
-      LexIdentOrKeyword(False)
-    else if IsDigit(LCh) then
-      LexNumber
-    else
-      case LCh of
-        '''': LexString;
-        '{': LexBraceCommentOrDirective;
-        '(': LexParenOrCommentOrLegacyBracket;
-        '/':
-          if CharAt(FPos + 1) = '/' then
-            LexLineComment
-          else
-            LexPunctuation;
-        '#': LexControlChar;
-        '$': LexHexNumber;
-        '%': LexBinNumber;
-        '&':
-          // One '&' escapes (B.3), and any FURTHER '&'s belong to the name:
-          // `&&op_Equality` names `&op_Equality`, which is a different member
-          // from `op_Equality` - dcc32 37.0 accepts both in one record, and
-          // rejects `&op_Equality` beside `op_Equality` as a redeclaration, so
-          // exactly one leading '&' is the escape. a third-party library's TValue declares
-          // its comparison operators this way and the stray-'&' token that used
-          // to come out here derailed the whole class body (5 false E2004).
-          if IsIdentStart(CharAt(FPos + 1)) or
-             ((CharAt(FPos + 1) = '&') and IsIdentRun(FPos + 1)) then
-            LexIdentOrKeyword(True)
-          else if IsDigit(CharAt(FPos + 1)) then
-          begin
-            // Undocumented but accepted by dcc: & before a numeric literal
-            // (e.g. `&1` in System.Beacon.pas). Verified against dcc64 37.0.
-            LStart := FPos;
-            Inc(FPos);
-            LexNumber(LStart, [tfAmpersand]);
-          end
-          else
-          begin
-            LStart := FPos;
-            Inc(FPos);
-            Emit(tkUnknown, LStart);
-            Diag(dcInvalidAmpersand, LStart, 1);
-          end;
-      else
-        LexPunctuation;
-      end;
-  end;
+    LexOne;
   // The file ended while still inside an `asm` block. Reported HERE and not
   // in LexAsmToken, where the test used to sit: that one needed FPos = LStart
   // with FPos >= FLen at once, and the chunk loop always consumes at least
@@ -314,6 +345,69 @@ begin
   end;
   // Zero-length EOF sentinel.
   Emit(tkEndOfFile, FPos);
+end;
+
+// What starts at FPos, in the current mode: one token, or (BASM) an asm
+// chunk and the `end` that closes it.
+procedure TPasLexer.LexOne;
+var
+  LCh: Char;
+  LStart: Integer;
+begin
+  if FInAsm then
+  begin
+    LexAsmToken;
+    Exit;
+  end;
+  LCh := FBase[FPos];
+  if IsWhitespace(LCh) then
+    LexWhitespace
+  else if IsIdentStart(LCh) then
+    LexIdentOrKeyword(False)
+  else if IsDigit(LCh) then
+    LexNumber
+  else
+    case LCh of
+      '''': LexString;
+      '{': LexBraceCommentOrDirective;
+      '(': LexParenOrCommentOrLegacyBracket;
+      '/':
+        if CharAt(FPos + 1) = '/' then
+          LexLineComment
+        else
+          LexPunctuation;
+      '#': LexControlChar;
+      '$': LexHexNumber;
+      '%': LexBinNumber;
+      '&':
+        // One '&' escapes (B.3), and any FURTHER '&'s belong to the name:
+        // `&&op_Equality` names `&op_Equality`, which is a different member
+        // from `op_Equality` - dcc32 37.0 accepts both in one record, and
+        // rejects `&op_Equality` beside `op_Equality` as a redeclaration, so
+        // exactly one leading '&' is the escape. a third-party library's TValue declares
+        // its comparison operators this way and the stray-'&' token that used
+        // to come out here derailed the whole class body (5 false E2004).
+        if IsIdentStart(CharAt(FPos + 1)) or
+           ((CharAt(FPos + 1) = '&') and IsIdentRun(FPos + 1)) then
+          LexIdentOrKeyword(True)
+        else if IsDigit(CharAt(FPos + 1)) then
+        begin
+          // Undocumented but accepted by dcc: & before a numeric literal
+          // (e.g. `&1` in System.Beacon.pas). Verified against dcc64 37.0.
+          LStart := FPos;
+          Inc(FPos);
+          LexNumber(LStart, [tfAmpersand]);
+        end
+        else
+        begin
+          LStart := FPos;
+          Inc(FPos);
+          Emit(tkUnknown, LStart);
+          Diag(dcInvalidAmpersand, LStart, 1);
+        end;
+    else
+      LexPunctuation;
+    end;
 end;
 
 procedure TPasLexer.LexWhitespace;

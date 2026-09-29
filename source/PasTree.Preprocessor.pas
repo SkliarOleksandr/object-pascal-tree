@@ -364,6 +364,9 @@ type
     FSwitchStack: TStack<TPasOptState>;
     FFileNames: TList<string>;
     FFiles: TList<TPasTokenStream>;
+    // Inside a live asm body: the lexing mode ProcessFile wants for live
+    // text, across include boundaries (F26).
+    FLiveAsm: Boolean;
     FVisible: TList<TPasVisibleToken>;
     FSkipped: TObjectList<TList<TPasSkippedRegion>>;
     FDiags: TList<TPasPPDiagnostic>;
@@ -1031,6 +1034,7 @@ begin
   FIncludeRefs.Clear;
   FRttiState := Default(TPasRttiState);   // Mode = rmInherit, the dcc default
   FVarPropSetter := False;                // dcc default: OFF (13.1.6)
+  FLiveAsm := False;
 
   LStream := TPasLexer.Tokenize(ASource);
   // Visible tokens <= the main file's raw tokens (trivia and skipped regions
@@ -1072,18 +1076,59 @@ begin
     Result.Skipped[LIdx] := FSkipped[LIdx].ToArray;
 end;
 
+// Where an asm body ends is the preprocessor's to say (F26; dcc32 37.0,
+// probes of 2026-09-29): only LIVE text switches the mode - a live `asm`
+// opens BASM mode, a live `end` in it closes it, a dead `asm` or a dead
+// `end` does neither - and dead text is always scanned as Pascal, inside an
+// asm body too (a dead `cmp al, "{"` there opens a comment that swallows
+// the $ENDIF after it, dcc's E2280). The mode runs on through include
+// boundaries: an include inside an asm body is BASM text, and an `end` in
+// it closes the body. The file's stream came from TPasLexer.Tokenize, which
+// had to guess; each token's mode (tfAsm) is checked against the one these
+// rules want, and from the first that disagrees the rest of the file is
+// lexed again, token by token, in the mode wanted at each step - into a
+// stream of this unit's own (an include's stream is shared).
 procedure TPasPreprocessor.ProcessFile(AFileId: Integer);
 var
   LTokens: TArray<TPasToken>;
+  LTok: TPasToken;
   LIdx: Integer;
   LVis: TPasVisibleToken;
   LSkipStart: Integer;
+  LLexer: TPasLexer;
+  LPull, LWantAsm: Boolean;
 begin
   LTokens := FFiles[AFileId].Tokens;
   LSkipStart := -1;
-  for LIdx := 0 to High(LTokens) do
+  LPull := False;
+  LIdx := 0;
+  while True do
   begin
-    case LTokens[LIdx].Kind of
+    LWantAsm := FLiveAsm and Active;
+    if LPull then
+    begin
+      if LIdx = LLexer.Count then
+      begin
+        if LLexer.AtEnd then
+          Break;
+        LLexer.Step(LWantAsm);
+      end;
+      LTok := LLexer.Token(LIdx);
+    end
+    else
+    begin
+      if LIdx > High(LTokens) then
+        Break;
+      LTok := LTokens[LIdx];
+      if (LTok.Kind <> tkEndOfFile) and ((tfAsm in LTok.Flags) <> LWantAsm)
+      then
+      begin
+        LLexer.Resume(FFiles[AFileId], LIdx);
+        LPull := True;
+        Continue;
+      end;
+    end;
+    case LTok.Kind of
       tkDirective:
         begin
           // Close a pending skipped region before the directive; the
@@ -1091,29 +1136,39 @@ begin
           // the one that reactivates output).
           if LSkipStart >= 0 then
           begin
-            MarkSkipped(AFileId, LSkipStart, LTokens[LIdx].Start);
+            MarkSkipped(AFileId, LSkipStart, LTok.Start);
             LSkipStart := -1;
           end;
-          HandleDirective(AFileId, LTokens[LIdx]);
+          HandleDirective(AFileId, LTok);
           if not Active then
-            LSkipStart := LTokens[LIdx].EndPos;
+            LSkipStart := LTok.EndPos;
         end;
       tkEndOfFile:
         ; // handled by Process for the main file
     else
       if Active then
       begin
-        if not IsTrivia(LTokens[LIdx].Kind) then
+        if not IsTrivia(LTok.Kind) then
         begin
           LVis.FileId := AFileId;
           LVis.TokenIndex := LIdx;
           FVisible.Add(LVis);
+          if FLiveAsm then
+            FLiveAsm := LTok.Kind <> tkEnd
+          else
+            FLiveAsm := LTok.Kind = tkAsm;
         end;
       end
       else if LSkipStart < 0 then
-        LSkipStart := LTokens[LIdx].Start;
+        LSkipStart := LTok.Start;
     end;
+    Inc(LIdx);
   end;
+  // The main file ends here once its includes are done: an asm body still
+  // open is unterminated. An include may end inside one (the includer
+  // closes it).
+  if LPull then
+    FFiles[AFileId] := LLexer.Finish((AFileId = 0) and FLiveAsm);
   if LSkipStart >= 0 then
     MarkSkipped(AFileId, LSkipStart, Length(FFiles[AFileId].Source));
 end;

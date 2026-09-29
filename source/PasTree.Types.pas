@@ -65,7 +65,9 @@ type
     tfBinary,          // integer/control literal with % prefix
     tfHasSeparator,    // numeric literal contains a digit separator _
     tfLegacyBracket,   // (. or .) written instead of [ or ]
-    tfUnterminated     // string/comment/directive hit EOL/EOF before closing
+    tfUnterminated,    // string/comment/directive hit EOL/EOF before closing
+    tfAsm              // lexed in BASM mode: an asm body's chunk, trivia or
+                       // string, and the `end` closing it
   );
   TPasTokenFlags = set of TPasTokenFlag;
 
