@@ -1623,8 +1623,8 @@ Still open, roughly in the order we're tackling it:
     a compile error or a binary difference.
   Started 2026-09-28 (v0.61.0): `PasTree.Printer` prints expressions and
   statements from the tree alone, and since v0.63.0 declarations too - the
-  whole unit, with the tokens the tree does not hold yet (`packed`, a
-  parameter's `var`/`const`, ...) read in place and counted as losses. Over
+  whole unit, with the tokens the tree does not hold yet (a parameter's
+  `var`/`const`, ...) read in place and counted as losses. Over
   the Studio source, both flat RTL corpora and the third-party trees (~90M
   tokens) the print misses or misplaces no token, and parses back to the
   same tree in both layouts but where one recovery heuristic reads a line

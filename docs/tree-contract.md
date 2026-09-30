@@ -78,13 +78,13 @@ type reference" is an nkIdent, nkMember or nkTypeArgs.
 | nkAggregateField | `c0 : c1` |
 | nkSubrange | `c0 .. c1` |
 | nkEnumType, nkEnumValue | `( c0, ... )`; `c0 [= c1]` |
-| nkArrayType | `array [` index types `, ... ] of` element - no brackets without index types; Aux 1: `of const`, every child an index type |
-| nkSetType, nkFileType, nkPointerType, nkStringType | `set of c0`; `file [of c0]`; `^c0`; `string[c0]` |
-| nkClassOf | `class of c0`; Aux 1: `type of c0`, `type of interface` without a child |
+| nkArrayType | [`packed` - nfPacked, see 5] `array [` index types `, ... ] of` element - no brackets without index types; Aux 1: `of const`, every child an index type |
+| nkSetType, nkFileType, nkPointerType, nkStringType | [`packed` - nfPacked, see 5] `set of c0`; [`packed`] `file [of c0]`; `^c0`; `string[c0]` |
+| nkClassOf | [`packed` - nfPacked, see 5] `class of c0`; Aux 1: `type of c0`, `type of interface` without a child |
 | nkProcType | [`reference to` - Aux 2, see 5] `procedure` / `function` (a result-type child present), [nkParams], [`:` result type], [`of object` - Aux 1], nkDirective... - a `;` before the one whose Aux is 1 (`procedure; stdcall`) |
-| nkClassType | `class` [(ancestors: the leading type references)] members `end` [hints]; Aux 1: the forward `class` alone |
-| nkRecordType | `record` members `end` [`align` the first non-member child] [hints] |
-| nkObjectType | `object` [(ancestor)] members `end` [hints] |
+| nkClassType | [`packed` - nfPacked, see 5] `class` [(ancestors: the leading type references)] members `end` [hints]; Aux 1: the forward `class` alone |
+| nkRecordType | [`packed` - nfPacked, see 5] `record` members `end` [`align` the first non-member child] [hints] |
+| nkObjectType | [`packed` - nfPacked, see 5] `object` [(ancestor)] members `end` [hints] |
 | nkInterfaceType | `interface`, `dispinterface` when Aux bit 1 is set, [(ancestor)] [nkGuid] members `end` [hints]; Aux bit 2: forward, the head alone |
 | nkHelperType | `class helper` (`record helper` when Aux is 1) [(ancestor)] `for` the last leading type reference, members `end` [hints] |
 | nkGuid | `[ c0 ]` - see 4 for a literal |
@@ -146,7 +146,6 @@ same program, and T3 counts the losses per finding.
 
 | Finding | Not in the tree |
 |---|---|
-| F3 | `packed` |
 | F4 | `class abstract`, `class sealed` |
 | F9 | `class threadvar` (reads as `class var`) |
 | F12 | the message of a routine's `deprecated 'msg'` |
@@ -166,6 +165,9 @@ same program, and T3 counts the losses per finding.
   section is the struct's token.
 - `reference to` lies outside its nkProcType's span (Aux 2): the enclosing
   type declaration's tokens.
+- `packed` lies outside the span of the type it packs (nfPacked): the
+  token of that type's parent - a declaration, or the array or file
+  whose element it is.
 - An empty node owns no token: nkEmptyStmt and nkMissing stand BEFORE their
   FirstToken, and a node whose LastToken is FirstToken - 1 holds nothing.
 - A root ends on the token after its final `end.` - the end sentinel, or

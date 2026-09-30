@@ -776,7 +776,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..217] of TPasCaseRow = (
+  DECL_CASES: array[0..220] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1261,8 +1261,43 @@ const
     // ---- 9.1.2 packed records ----
     (Section: '9.1.2'; Name: 'packed record';
      Source: 'type TR = packed record X: Byte; end;';
-     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(VarDecl(' +
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType#packed(VarDecl(' +
        'Ident''X''#name Ident''Byte''))))'; ExpectDiags: 0),
+    // F3: nfPacked on every type dcc64 37.0 lets `packed` pack (probed:
+    // x-f3 P01-P37) - the word stands outside the type's span.
+    (Section: '9.1.2'; Name: 'F3: packed array, set, file, class, object';
+     Source: 'type A = packed array of Byte; S = packed set of Byte; ' +
+       'F = packed file of TR; U = packed file; C = packed class(TObject) ' +
+       'end; O = packed object end; M = packed class of TObject; ' +
+       'W = packed class;';
+     Expected: 'TypeSec(TypeDecl(Ident''A'' ArrayType#packed(Ident''Byte'')) ' +
+       'TypeDecl(Ident''S'' SetType#packed(Ident''Byte'')) ' +
+       'TypeDecl(Ident''F'' FileType#packed(Ident''TR'')) ' +
+       'TypeDecl(Ident''U'' FileType#packed) ' +
+       'TypeDecl(Ident''C'' ClassType#packed(Ident''TObject'')) ' +
+       'TypeDecl(Ident''O'' ObjectType#packed) ' +
+       'TypeDecl(Ident''M'' ClassOf#packed(Ident''TObject'')) ' +
+       'TypeDecl(Ident''W'' ClassType#forward#packed))';
+     ExpectDiags: 0),
+    (Section: '9.1.2'; Name: 'F3: packed as an element, a field, a local';
+     Source: 'type A = array of packed record X: Byte; end; ' +
+       'F = file of packed record end; R = record G: packed array[0..1] of ' +
+       'Byte; end;'#13#10'const C: packed array[0..0] of Byte = (1);';
+     Expected: 'TypeSec(TypeDecl(Ident''A'' ArrayType(RecordType#packed(VarDecl(' +
+       'Ident''X''#name Ident''Byte'')))) TypeDecl(Ident''F'' ' +
+       'FileType(RecordType#packed)) TypeDecl(Ident''R'' RecordType(VarDecl(' +
+       'Ident''G''#name ArrayType#packed(Subrange(IntLit''0'' IntLit''1'') ' +
+       'Ident''Byte''))))) ConstSec''const''(ConstDecl(Ident''C'' ' +
+       'ArrayType#packed(Subrange(IntLit''0'' IntLit''0'') Ident''Byte'') ' +
+       'Paren(IntLit''1'')))';
+     ExpectDiags: 0),
+    (Section: '9.1.2'; Name: 'F3: packed where dcc refuses it (E2006)';
+     Source: 'type A = packed Integer; B = packed packed record end; ' +
+       'C = packed interface end; D = packed 0..3;';
+     Expected: 'TypeSec(TypeDecl(Ident''A'' Ident''Integer'') TypeDecl(Ident''B'' ' +
+       'RecordType#packed) TypeDecl(Ident''C'' InterfaceType) ' +
+       'TypeDecl(Ident''D'' Subrange(IntLit''0'' IntLit''3'')))';
+     ExpectDiags: 4),
 
     // ---- 9.1.3 variant records (the `case` part) ----
     (Section: '9.1.3'; Name: 'variant record';
@@ -1936,12 +1971,12 @@ const
     // compiles both), and `packed array[0..1] of 0..31 = (3, 4)` is E2029.
     (Section: '2.2.5'; Name: 'packed array element: the upper bound takes =';
      Source: 'var V: packed array[0..1] of False..1 = 1;';
-     Expected: 'VarSec''var''(VarDecl(Ident''V''#name ArrayType(Subrange(' +
+     Expected: 'VarSec''var''(VarDecl(Ident''V''#name ArrayType#packed(Subrange(' +
        'IntLit''0'' IntLit''1'') Subrange(Ident''False'' BinaryOp''=''(' +
        'IntLit''1'' IntLit''1'')))))'; ExpectDiags: 0),
     (Section: '2.2.5'; Name: 'packed set: the upper bound takes =';
      Source: 'var V: packed set of False..1 = 1;';
-     Expected: 'VarSec''var''(VarDecl(Ident''V''#name SetType(Subrange(' +
+     Expected: 'VarSec''var''(VarDecl(Ident''V''#name SetType#packed(Subrange(' +
        'Ident''False'' BinaryOp''=''(IntLit''1'' IntLit''1'')))))';
      ExpectDiags: 0),
     (Section: '2.2.5'; Name: 'class constant: = ends the upper bound';
@@ -2103,7 +2138,7 @@ const
     (Section: '8.1'; Name: 'F2: under packed too';
      Source: 'var A: packed array[0..1] of procedure; stdcall;';
      Expected: 'VarSec''var''(VarDecl(Ident''A''#name ' +
-       'ArrayType(Subrange(IntLit''0'' IntLit''1'') ' +
+       'ArrayType#packed(Subrange(IntLit''0'' IntLit''1'') ' +
        'ProcType(Directive''stdcall''#semi))))';
      ExpectDiags: 0),
     (Section: '9.1.1'; Name: 'F2: the last field''s run before the end';
@@ -2275,7 +2310,7 @@ const
      ExpectDiags: 0),
     (Section: '9.1'; Name: 'S9: a record''s alignment and hint after end';
      Source: 'type TR = packed record X: Integer end align 16 platform;';
-     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(VarDecl(' +
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType#packed(VarDecl(' +
        'Ident''X''#name Ident''Integer'') IntLit''16'' Directive''platform'')))';
      ExpectDiags: 0),
     (Section: '1.1.3'; Name: 'S9: exports with index, name and resident';

@@ -1889,7 +1889,7 @@ end;
 function TPasParser.ParseTypeExpr: Integer;
 var
   LNode, LExpr, LStart: Integer;
-  LEqEnds, LProcTail: Boolean;
+  LEqEnds, LProcTail, LDouble: Boolean;
 begin
   if not EnterGuard then
   begin
@@ -1918,9 +1918,22 @@ begin
   case CurKind of
     tkPacked:
       begin
-        Next; // packing recorded implicitly by the token span
+        // F3: `packed` stands before the type it packs, outside that type's
+        // span - the enclosing node's token - and nfPacked on the type says
+        // it was written. dcc64 37.0 takes it before a record, an array, a
+        // set, a file, a class (a forward one and `class of` too) and an
+        // object; before anything else, and before a second `packed`, it
+        // is E2006.
+        Next;
+        LDouble := CurKind = tkPacked;
         FProcTail := LProcTail;
-        Exit(ParseTypeExpr);   // FEqEndsBound stays off under `packed` - see above
+        LNode := ParseTypeExpr;   // FEqEndsBound stays off under `packed` - see above
+        if not LDouble and (FB.Kind(LNode) in [nkRecordType, nkArrayType,
+           nkSetType, nkFileType, nkClassType, nkObjectType, nkClassOf]) then
+          FB.AddFlag(LNode, nfPacked)
+        else if FB.Kind(LNode) <> nkError then
+          Error('PACKED not allowed here');
+        Exit(LNode);
       end;
     tkArray:
       Exit(ParseArrayType(LEqEnds, LProcTail));
@@ -2765,6 +2778,10 @@ begin
     if CurKind = tkColon then
     begin
       Next;
+      // A parameter's type is a name, `array of` or `string` for dcc:
+      // `packed` there is E2029 (probed, x-f3 P20).
+      if CurKind = tkPacked then
+        Error('identifier expected, found "packed"');
       FB.Adopt(LParam, ParseTypeExpr);
       if CurKind = tkEqual then
       begin

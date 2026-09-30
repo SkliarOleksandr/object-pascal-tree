@@ -2759,11 +2759,8 @@ begin
   AAlign := 1;
   LM := FModels[AMid];
   LCap := LM.Tree.Source.AlignAt(LM.Tree.Nodes[ADefNode].FirstToken);
-  // `packed record` - the parser consumes the keyword without a node of its
-  // own, so the token in front of the definition is what says so.
-  if (LM.Tree.Nodes[ADefNode].FirstToken > 0) and
-     SameText(LM.Tree.Source.VisibleText(
-       LM.Tree.Nodes[ADefNode].FirstToken - 1), 'packed') then
+  // `packed record` / `packed object` (nfPacked).
+  if nfPacked in LM.Tree.Nodes[ADefNode].Flags then
     LCap := 1;
   // An old-style `object` starts where its ANCESTOR's storage ended and
   // inherits its alignment; a record always starts at zero.

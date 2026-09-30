@@ -179,7 +179,7 @@ minus before a member call - agree with dcc everywhere they were met.
 
 | Id | Where | What |
 |---|---|---|
-| F3, F4, F9, F12-F18 | the tree | tokens only they hold - the losses of `docs/tree-contract.md` sec. 4; each is read in place and counted, none changes a grouping |
+| F4, F9, F12-F18 | the tree | tokens only they hold - the losses of `docs/tree-contract.md` sec. 4; each is read in place and counted, none changes a grouping |
 | F5 | the DCU reader | a routine's nested routines listed under its anonymous method's body; only the dump's nesting |
 | F8 | the parser, error mode | the root stops where a broken parse stopped, the rest of the file in no node |
 | F22 | the preprocessor | a conditional crossing an include boundary is accepted; dcc refuses it (invalid code only) |
@@ -218,7 +218,12 @@ an attribute group after a section stands (F7 - `var X: Integer; [A] procedure
 Foo;` parsed the group and dropped it, after a `const` too, and a type
 section kept it; the section now ends before a group no declaration of it
 follows, and the group stands beside the member after it, as dcc hangs it
-there - across a visibility word too).
+there - across a visibility word too) and `packed` (F3 - the word left
+no mark, and a record's layout read the token before it; nfPacked is on
+the record, array, set, file, class, class-of or object type it packs, the
+word outside the type's span as `reference to` is, and `packed` where dcc
+refuses it - before a type name, a subrange, `string`, an interface, in a
+parameter's type - is a parse error).
 
 ## 5. The gate
 

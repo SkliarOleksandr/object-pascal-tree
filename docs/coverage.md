@@ -262,13 +262,6 @@ same-arity overloads differing only in modifiers can mis-pair.
   innermost element type regardless of how many indices were written
   (documented shortcut).
 
-## 09-records.md
-
-### 9.1.2 `packed` records & alignment
-- `packed` is consumed with no AST representation (no
-  node, flag, or Aux) - consumers must re-scan tokens to detect it; the same
-  applies to packed arrays.
-
 ## 11-classes.md
 
 ### 11.2.1 `private` / `protected` / `public` / `published` (+ `strict`)

@@ -204,7 +204,13 @@ type
     // short after a dot (`procedure TFoo.` while typing) ends in an nkMissing
     // segment that carries it too: the segments before it are qualifiers,
     // and there is no name.
-    nfName
+    nfName,
+    // `packed` was written before this type (9.1.2): on an nkRecordType,
+    // nkArrayType, nkSetType, nkFileType, nkClassType, nkObjectType or
+    // nkClassOf - the types dcc lets it pack. The word stands right before
+    // the type's span and is the enclosing node's token, as `reference to`
+    // is before a procedural type.
+    nfPacked
   );
   TPasNodeFlags = set of TPasNodeFlag;
 
@@ -839,6 +845,8 @@ begin
   // where it does not belong must show in the dump, not hide.
   if nfName in Nodes[AIndex].Flags then
     Result := Result + '#name';
+  if nfPacked in Nodes[AIndex].Flags then
+    Result := Result + '#packed';
   LChildren := '';
   LChild := Nodes[AIndex].FirstChild;
   while LChild <> NIL_NODE do

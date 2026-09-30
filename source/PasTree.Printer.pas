@@ -16,8 +16,8 @@ unit PasTree.Printer;
   templates, the items marked pcSpan. Valid code has none.
 
   What the tree does not hold - the filed LOSSES of the own-token table
-  (`packed`, a parameter's `var` / `const`, `class sealed`, a numeric label,
-  ...) - the printer reads from the token that holds it, at its place among
+  (a parameter's `var` / `const`, `class sealed`, a numeric label, ...) -
+  the printer reads from the token that holds it, at its place among
   the node's children, and marks it pcLoss. So the print is the same
   program, T3r can judge every file, and the loss list is exactly the set of
   pcLoss items: T3 counts them per finding and reports a filed loss the
@@ -910,7 +910,8 @@ begin
 end;
 
 { [attributes] Name [generic params] = [type] Type [hints]; Aux 1 is the
-  distinct alias `= type X`. `packed` is a filed loss before the type (F3). }
+  distinct alias `= type X`. `packed` before the type is the type's to print
+  (nfPacked, Emit). }
 procedure TPrinter.TypeDecl(ANode: Integer);
 var
   LChild: Integer;
@@ -1500,6 +1501,10 @@ begin
     if C1 <> NIL_NODE then
       C2 := T.Nodes[C1].NextSibling;
   end;
+  // F3: `packed` before the type is its parent's token, like `reference
+  // to` (see ProcType).
+  if nfPacked in T.Nodes[ANode].Flags then
+    Kw('packed', T.Nodes[ANode].Parent);
   case LKind of
     nkMissing, nkEmptyStmt:
       ;

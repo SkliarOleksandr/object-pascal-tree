@@ -96,6 +96,9 @@ var
     // `P: T = C` serialize alike, as the dump's `#name` says.
     if nfName in ATree.Nodes[AIndex].Flags then
       LSB.Append(',"name":true');
+    // `packed` before the type (nfPacked), a token outside its span.
+    if nfPacked in ATree.Nodes[AIndex].Flags then
+      LSB.Append(',"packed":true');
     if ATree.Nodes[AIndex].Aux <> NIL_NODE then
       if not (LKind in [nkUnaryOp, nkBinaryOp]) then
         LSB.AppendFormat(',"aux":%d', [ATree.Nodes[AIndex].Aux]);

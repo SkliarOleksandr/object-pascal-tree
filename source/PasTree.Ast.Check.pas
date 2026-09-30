@@ -309,12 +309,13 @@ const
     set brings in. Two rules claiming one cell alike is a table error.
 
     The finding numbers are the plan's (local/PARSER-FIDELITY-PLAN.md, a
-    working paper): F3 packed, F4 class abstract/sealed, F9 class threadvar,
+    working paper): F4 class abstract/sealed, F9 class threadvar,
     F12 a routine's deprecated message, F13 the external clause, F14 the
     exports clause, F15 the GUID literal, F16 numeric labels, F17 program
     parameters, F18 parameter modes. (F19, where a name list ends, is derived
     since the names carry nfName - I6 checks the flag against the
-    separators. F1, F2, F10 and F11 are gone too: every directive of a
+    separators; F3's `packed` since the type carries nfPacked. F1, F2, F10
+    and F11 are gone too: every directive of a
     procedural type, of a routine header before its `;` and of an anonymous
     method is an nkDirective child, and the initializer after a procedural
     type's directives is its declaration's.) }
@@ -491,8 +492,9 @@ const
       'outside its span',
     'TypeDecl | to | opt | derived | the ProcType child''s Aux 2; outside ' +
       'its span',
-    'TypeDecl VarDecl ConstDecl ArrayType | packed | opt | loss:F3 | ' +
-      '`packed` is skipped (coverage.md 9.1.2)',
+    'TypeDecl VarDecl ConstDecl ArrayType FileType InlineVar InlineConst | ' +
+      'packed | opt | derived | the type child''s nfPacked; outside its ' +
+      'span (F3)',
     'ConstDecl | : | opt | derived | two children after the name: the type ' +
       'and the value',
     'ConstDecl | = | once | derived | the kind',
@@ -1660,6 +1662,22 @@ var
         '%s carries nfNegated', [KName(ANode)]));
     if LBadTok[ANode] then
       Exit;
+    // nfPacked (F3): on a type dcc lets `packed` pack, with the word right
+    // before the type's span, its parent's token.
+    if nfPacked in ATree.Nodes[ANode].Flags then
+      if not (Kind(ANode) in [nkRecordType, nkArrayType, nkSetType,
+         nkFileType, nkClassType, nkObjectType, nkClassOf]) then
+        AReport.Add(ccFlags, ANode, Site(ANode), Format(
+          '%s carries nfPacked', [KName(ANode)]))
+      else if (LLo[ANode] = 0) or (TokKind(LLo[ANode] - 1) <> tkPacked) then
+        AReport.Add(ccFlags, ANode, Site(ANode), Format(
+          '%s is marked packed, and no `packed` stands before it',
+          [KName(ANode)]))
+      else if (LState[ANode] = ST_TREE) and
+              (LOwner[LLo[ANode] - 1] <> ATree.Nodes[ANode].Parent) then
+        AReport.Add(ccFlags, ANode, Site(ANode), Format(
+          'the `packed` before %s is not its parent''s token',
+          [KName(ANode)]));
     LKids := LKidCount[ANode];
     LFirstKid := NIL_NODE;
     LSecondKid := NIL_NODE;
