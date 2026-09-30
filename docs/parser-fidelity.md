@@ -181,7 +181,6 @@ minus before a member call - agree with dcc everywhere they were met.
 |---|---|---|
 | F3, F4, F9, F12-F18 | the tree | tokens only they hold - the losses of `docs/tree-contract.md` sec. 4; each is read in place and counted, none changes a grouping |
 | F5 | the DCU reader | a routine's nested routines listed under its anonymous method's body; only the dump's nesting |
-| F7 | the parser | an attribute group after a var or const section, before a routine, is parsed and not adopted - the routine loses its attributes |
 | F8 | the parser, error mode | the root stops where a broken parse stopped, the rest of the file in no node |
 | F22 | the preprocessor | a conditional crossing an include boundary is accepted; dcc refuses it (invalid code only) |
 
@@ -214,7 +213,12 @@ which declaration a `$IF` over a constant's value reads (F25 - the first
 pass's model, where a guard the second pass flips still held the unit's own
 fallback: `CPP_ABI_ADJUST = 0` instead of System's 24 on Win64; now the own
 declaration above the directive in the decided stream, else the import's -
-filed first as a vendor build define, which it was not).
+filed first as a vendor build define, which it was not) and where
+an attribute group after a section stands (F7 - `var X: Integer; [A] procedure
+Foo;` parsed the group and dropped it, after a `const` too, and a type
+section kept it; the section now ends before a group no declaration of it
+follows, and the group stands beside the member after it, as dcc hangs it
+there - across a visibility word too).
 
 ## 5. The gate
 

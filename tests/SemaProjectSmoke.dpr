@@ -5094,6 +5094,20 @@ begin
     'uses UnitAttrLib;'#10 +
     'type'#10'  [TLibAttr]'#10'  TFooCross = class end;'#10 +
     'implementation'#10'end.'#10);
+  // Parser fidelity F7: a group after a var or const section is the
+  // routine's; it was parsed and dropped, so nothing checked it. dcc64 37.0
+  // gives both E2010s (probed: x-f7 E8.pas).
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitAttrF7.pas'),
+    'unit UnitAttrF7;'#10'interface'#10 +
+    'type'#10'  TNotAnAttr7 = class end;'#10 +
+    'var'#10'  GX: Integer;'#10 +
+    '[TNotAnAttr7]'#10'procedure AfterVar;'#10 +
+    'const'#10'  GC = 1;'#10 +
+    '[TNotAnAttr7]'#10'procedure AfterConst;'#10 +
+    'implementation'#10 +
+    'procedure AfterVar; begin end;'#10 +
+    'procedure AfterConst; begin end;'#10 +
+    'end.'#10);
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
     GProj.AnalyzeDirectory(LDir);
@@ -5111,6 +5125,10 @@ begin
     Ok('19.3.1: cross-unit -- a descendant declared in ANOTHER unit is not '
       + 'flagged either',
       Assigned(LUse) and (DiagCount(LUse, 'E2010') = 0));
+    var LF7 := ModelByName('unitattrf7');
+    Ok('19.3.2 (F7): a group after a var / const section is checked as the '
+      + 'routine''s - both E2010s, as dcc',
+      Assigned(LF7) and (DiagCount(LF7, 'E2010') = 2));
     // 19.3.3: a COMPILER-RECOGNIZED attribute is exempt from the ancestry
     // check, and the fixture makes that non-vacuous the way the real world
     // did -- a class literally named `Unsafe` that is NOT a TCustomAttribute

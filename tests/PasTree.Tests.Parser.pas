@@ -776,7 +776,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..211] of TPasCaseRow = (
+  DECL_CASES: array[0..217] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -2218,6 +2218,48 @@ const
      Source: 'type [A][B(1)] T = Integer;';
      Expected: 'TypeSec(TypeDecl(AttrGroup(Attribute(Ident''A'') ' +
        'Attribute(Ident''B'' IntLit''1'')) Ident''T'' Ident''Integer''))';
+     ExpectDiags: 0),
+    // F7: a group after a section that no declaration of the section
+    // follows is the next member's - dcc64 37.0 hangs it on the routine or
+    // property after it, across a visibility word too (RTTI-probed). It was
+    // parsed and dropped (var, const) or kept inside the type section.
+    (Section: '19.3.2'; Name: 'F7: a group after a var section';
+     Source: 'var X: Integer;'#13#10'[A] procedure Foo;';
+     Expected: 'VarSec''var''(VarDecl(Ident''X''#name Ident''Integer'')) ' +
+       'AttrGroup(Attribute(Ident''A'')) Routine''procedure''(Ident''Foo''#name)';
+     ExpectDiags: 0),
+    (Section: '19.3.2'; Name: 'F7: a group after a const section';
+     Source: 'const C = 1;'#13#10'[A] [B(1)] procedure Foo;';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''C'' IntLit''1'')) ' +
+       'AttrGroup(Attribute(Ident''A'') Attribute(Ident''B'' IntLit''1'')) ' +
+       'Routine''procedure''(Ident''Foo''#name)';
+     ExpectDiags: 0),
+    (Section: '19.3.2'; Name: 'F7: a group after a type section';
+     Source: 'type T = Integer;'#13#10'[A] function Foo: T;';
+     Expected: 'TypeSec(TypeDecl(Ident''T'' Ident''Integer'')) ' +
+       'AttrGroup(Attribute(Ident''A'')) ' +
+       'Routine''function''(Ident''Foo''#name Ident''T'')';
+     ExpectDiags: 0),
+    (Section: '19.3.2'; Name: 'F7: after a class var, across a visibility';
+     Source: 'type TC = class class var F: Integer; [A] public ' +
+       'procedure M; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(VarSec#class(VarDecl(' +
+       'Ident''F''#name Ident''Integer'')) AttrGroup(Attribute(Ident''A'')) ' +
+       'Visibility''public'' Routine''procedure''(Ident''M''#name))))';
+     ExpectDiags: 0),
+    (Section: '19.3.2'; Name: 'F7: after a nested const, before a property';
+     Source: 'type TC = class const C = 1; [A([1, 2])] property P: ' +
+       'Integer read F; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(ConstSec''const''(ConstDecl(' +
+       'Ident''C'' IntLit''1'')) AttrGroup(Attribute(Ident''A'' SetCtor(' +
+       'IntLit''1'' IntLit''2''))) PropertyDecl(Ident''P'' Ident''Integer'' ' +
+       'PropSpec''read''(Ident''F'')))))';
+     ExpectDiags: 0),
+    (Section: '19.3.2'; Name: 'F7: a group before a name stays the name''s';
+     Source: 'var X: Integer; [A] Y: Integer;';
+     Expected: 'VarSec''var''(VarDecl(Ident''X''#name Ident''Integer'') ' +
+       'VarDecl(AttrGroup(Attribute(Ident''A'')) Ident''Y''#name ' +
+       'Ident''Integer''))';
      ExpectDiags: 0),
     (Section: '11.1.1'; Name: 'S9: a class that stops at its ancestors';
      Source: 'type TC = class(TObject); TD = class(TC, IInterface);';

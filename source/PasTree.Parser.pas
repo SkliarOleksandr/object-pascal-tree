@@ -195,6 +195,14 @@ type
     function IsHintWord(AVisIndex: Integer): Boolean;
     function IsCallConvStarter(AVisIndex: Integer): Boolean;
     function IsVisibilityWord: Boolean;
+    { Do the attribute groups at the cursor annotate a declaration of the
+      section being read - is a name, not a visibility word, what follows
+      them? A group ahead of anything else belongs to the member after it
+      (a routine, a property, another section - dcc64 37.0 carries it across
+      a visibility word too), which the enclosing declaration list reads as
+      its own sibling, so the section must end BEFORE the group. Looks ahead
+      only: the cursor does not move. }
+    function AttrsAnnotateDecl: Boolean;
     { Error recovery inside a type / const / var section.
 
       A declaration that stops short - `ttt` alone on a line while the author
@@ -3001,6 +3009,26 @@ begin
   Result := False;
 end;
 
+function TPasParser.AttrsAnnotateDecl: Boolean;
+var
+  LSave, LDepth: Integer;
+begin
+  LSave := FPos;
+  while CurKind = tkLBracket do
+  begin
+    LDepth := 0;
+    repeat
+      case CurKind of
+        tkLBracket: Inc(LDepth);
+        tkRBracket: Dec(LDepth);
+      end;
+      Next;
+    until (LDepth = 0) or (CurKind = tkEndOfFile);
+  end;
+  Result := (CurKind = tkIdentifier) and not IsVisibilityWord;
+  FPos := LSave;
+end;
+
 // A CONTEXT keyword (reference / operator / ...) is lexed as an identifier,
 // not a reserved word, so nothing colors it as a keyword. Emit a standalone
 // nkDirective over the current single token purely so the editor highlighter
@@ -3454,6 +3482,10 @@ begin
   begin
     if IsVisibilityWord then
       Break;
+    // A group before something that is no declaration of this section is
+    // the next member's (F7): the section ends before it.
+    if (CurKind = tkLBracket) and not AttrsAnnotateDecl then
+      Break;
     LAttrs := ParseAttrGroups;
     if CurKind <> tkIdentifier then
     begin
@@ -3541,9 +3573,17 @@ begin
   begin
     if IsVisibilityWord then
       Break;
+    // See ParseTypeSection: a group that annotates no declaration here is
+    // the next member's.
+    if (CurKind = tkLBracket) and not AttrsAnnotateDecl then
+      Break;
     LAttrs := ParseAttrGroups;
     if CurKind <> tkIdentifier then
+    begin
+      if LAttrs <> NIL_NODE then
+        FB.Adopt(Result, LAttrs);
       Break;
+    end;
     LDecl := FB.AddNode(nkConstDecl, NIL_NODE, FPos);
     if LAttrs <> NIL_NODE then
       FB.Adopt(LDecl, LAttrs);
@@ -3630,9 +3670,17 @@ begin
   begin
     if IsVisibilityWord then
       Break;
+    // See ParseTypeSection: a group that annotates no declaration here is
+    // the next member's.
+    if (CurKind = tkLBracket) and not AttrsAnnotateDecl then
+      Break;
     LAttrs := ParseAttrGroups;
     if CurKind <> tkIdentifier then
+    begin
+      if LAttrs <> NIL_NODE then
+        FB.Adopt(Result, LAttrs);
       Break;
+    end;
     LDecl := FB.AddNode(nkVarDecl, NIL_NODE, FPos);
     if LAttrs <> NIL_NODE then
       FB.Adopt(LDecl, LAttrs);
