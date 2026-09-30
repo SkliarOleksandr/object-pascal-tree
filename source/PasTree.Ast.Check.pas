@@ -309,16 +309,16 @@ const
     set brings in. Two rules claiming one cell alike is a table error.
 
     The finding numbers are the plan's (local/PARSER-FIDELITY-PLAN.md, a
-    working paper): F4 class abstract/sealed, F9 class threadvar,
-    F12 a routine's deprecated message, F13 the external clause, F14 the
-    exports clause, F15 the GUID literal, F16 numeric labels, F17 program
-    parameters, F18 parameter modes. (F19, where a name list ends, is derived
-    since the names carry nfName - I6 checks the flag against the
-    separators; F3's `packed` since the type carries nfPacked. F1, F2, F10
-    and F11 are gone too: every directive of a
-    procedural type, of a routine header before its `;` and of an anonymous
-    method is an nkDirective child, and the initializer after a procedural
-    type's directives is its declaration's.) }
+    working paper): F9 class threadvar, F12 a routine's deprecated message,
+    F13 the external clause, F14 the exports clause, F15 the GUID literal,
+    F16 numeric labels, F17 program parameters, F18 parameter modes. (F19,
+    where a name list ends, is derived since the names carry nfName - I6
+    checks the flag against the separators; F3's `packed` since the type
+    carries nfPacked, F4's class modifiers since the class carries
+    nfAbstract / nfSealed. F1, F2, F10 and F11 are gone too: every directive
+    of a procedural type, of a routine header before its `;` and of an
+    anonymous method is an nkDirective child, and the initializer after a
+    procedural type's directives is its declaration's.) }
   OWN_RULE_TEXT: array[0..233] of string = (
     // ---- leaves: the token is the node's own text ----
     'Ident | <ident> @words @keywords | once | leaf | the name as written; ' +
@@ -554,8 +554,8 @@ const
     'ClassType ObjectType InterfaceType | end | opt | derived | absent in a ' +
       'forward declaration (Aux); a class with no member may also stop at ' +
       'its ancestors, `class(TBase);` - no mark (normalization list)',
-    'ClassType | abstract sealed | - | loss:F4 | `class abstract` and ' +
-      '`class sealed` are skipped',
+    'ClassType ObjectType | abstract sealed | - | derived | nfAbstract, ' +
+      'nfSealed: right after the head word; a repeat is one (N12) (F4)',
     'ClassType RecordType HelperType | var | - | derived | the head of a ' +
       'VarSec child, outside its span: var (Aux nil) or class var (Aux 1) ' +
       '(F9)',
@@ -1646,8 +1646,9 @@ var
   // I6 for one node.
   procedure CheckAux(ANode: Integer);
   var
-    LAux, LKids, LFirstKid, LSecondKid: Integer;
+    LAux, LKids, LFirstKid, LSecondKid, LVis: Integer;
     LOpKind: TPasTokenKind;
+    LAbstract, LSealed: Boolean;
   begin
     LAux := ATree.Nodes[ANode].Aux;
     if not AuxInDomain(Kind(ANode), LAux) then
@@ -1678,6 +1679,31 @@ var
         AReport.Add(ccFlags, ANode, Site(ANode), Format(
           'the `packed` before %s is not its parent''s token',
           [KName(ANode)]));
+    // nfAbstract / nfSealed (F4): on a class or an object type, each set
+    // exactly when its word stands in the run right after the head word.
+    if ([nfAbstract, nfSealed] * ATree.Nodes[ANode].Flags <> []) and
+       not (Kind(ANode) in [nkClassType, nkObjectType]) then
+      AReport.Add(ccFlags, ANode, Site(ANode), Format(
+        '%s carries nfAbstract or nfSealed', [KName(ANode)]))
+    else if Kind(ANode) in [nkClassType, nkObjectType] then
+    begin
+      LAbstract := False;
+      LSealed := False;
+      LVis := LLo[ANode] + 1;
+      while (LVis <= LHi[ANode]) and WordAt(LVis, ['abstract', 'sealed']) do
+      begin
+        if WordAt(LVis, ['abstract']) then
+          LAbstract := True
+        else
+          LSealed := True;
+        Inc(LVis);
+      end;
+      if (LAbstract <> (nfAbstract in ATree.Nodes[ANode].Flags)) or
+         (LSealed <> (nfSealed in ATree.Nodes[ANode].Flags)) then
+        AReport.Add(ccFlags, ANode, Site(ANode), Format(
+          '%s: nfAbstract / nfSealed disagree with the words after its head',
+          [KName(ANode)]));
+    end;
     LKids := LKidCount[ANode];
     LFirstKid := NIL_NODE;
     LSecondKid := NIL_NODE;

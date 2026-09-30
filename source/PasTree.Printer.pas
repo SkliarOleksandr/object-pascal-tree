@@ -16,8 +16,8 @@ unit PasTree.Printer;
   templates, the items marked pcSpan. Valid code has none.
 
   What the tree does not hold - the filed LOSSES of the own-token table
-  (a parameter's `var` / `const`, `class sealed`, a numeric label, ...) -
-  the printer reads from the token that holds it, at its place among
+  (a parameter's `var` / `const`, a numeric label, ...) - the
+  printer reads from the token that holds it, at its place among
   the node's children, and marks it pcLoss. So the print is the same
   program, T3r can judge every file, and the loss list is exactly the set of
   pcLoss items: T3 counts them per finding and reports a filed loss the
@@ -45,7 +45,8 @@ unit PasTree.Printer;
     after `reference to`, which takes no `;`);
   - no `;` after a record constant's last field value;
   - one bracket pair per attribute group, `[A, B]`, and no `()` after an
-    attribute without arguments.
+    attribute without arguments;
+  - a class modifier once, `class abstract abstract` as `class abstract`.
   The comparison maps the ORIGINAL onto the same form - PRINT_NORMALIZATION,
   one entry per rule with its reason - and does nothing else.
 
@@ -115,7 +116,7 @@ type
 const
   { What T3 does to the ORIGINAL stream before comparing, and why each is
     allowed. The printer writes the canonical form directly. }
-  PRINT_NORMALIZATION: array[0..10] of string = (
+  PRINT_NORMALIZATION: array[0..11] of string = (
     'N1 list separators: every `;` a statement or declaration list owns ' +
       '(nkBlock, nkCaseStmt, nkExceptPart, nkInitSec, nkFinalSec; nkClassType, ' +
       'nkRecordType, nkObjectType, nkHelperType, nkInterfaceType, ' +
@@ -150,7 +151,10 @@ const
       'first of them',
     'N11 a record constant''s last field value may be followed by a `;` ' +
       'before its `)`, `(X: 1; Y: 2;)` (dcc64 37.0 compiles it): an ' +
-      'nkAggregate''s `;` right before its `)` is dropped'
+      'nkAggregate''s `;` right before its `)` is dropped',
+    'N12 a class or object modifier written twice in a row, `class abstract ' +
+      'abstract` (dcc64 37.0 compiles it, to the .dcu of `class abstract`), ' +
+      'is one: the repeat is dropped (F4)'
   );
 
 { The kinds the printer has a template for: every kind but nkError and the
@@ -1132,12 +1136,12 @@ begin
 end;
 
 { class / record / object / interface / helper:
-    class [abstract | sealed: F4] [(ancestors)] members end [hints]
+    class [abstract] [sealed] [(ancestors)] members end [hints]
     record members end [align X] [hints]
-    object [(ancestor)] members end [hints]
+    object [abstract] [sealed] [(ancestor)] members end [hints]
     interface | dispinterface [(ancestor)] [GUID] members end [hints]
     class | record helper [(ancestor)] for T members end [hints]
-  A forward declaration (Aux) is the head word alone. }
+  A forward declaration (Aux) is the head word alone, with its modifiers. }
 procedure TPrinter.StructType(ANode: Integer);
 var
   LKind: TPasNodeKind;
@@ -1160,15 +1164,15 @@ begin
       Kw('class', ANode);
     Kw('helper', ANode);
   end;
+  // `class abstract` / `class sealed` (F4) follow the head word - a forward
+  // declaration's too, `class abstract;`.
+  if nfAbstract in T.Nodes[ANode].Flags then
+    Kw('abstract', ANode);
+  if nfSealed in T.Nodes[ANode].Flags then
+    Kw('sealed', ANode);
   if ((LKind = nkClassType) and (T.Nodes[ANode].Aux = 1)) or
      ((LKind = nkInterfaceType) and (T.Nodes[ANode].Aux and 2 <> 0)) then
     Exit;
-  // `class sealed` / `class abstract` (F4) follow the head word.
-  LLast := T.Nodes[ANode].FirstToken + 1;
-  while (LLast <= T.Nodes[ANode].LastToken) and
-        (Own.Owner[LLast] = ANode) and IsLossRule(Own.Rule[LLast]) do
-    Inc(LLast);
-  Losses(ANode, LLast);
   LChild := T.Nodes[ANode].FirstChild;
   // The leading type references: the ancestors; a helper's last one is its
   // target.
@@ -2434,6 +2438,16 @@ begin
        (LOwn.Owner[LVis + 1] = LOwner) and
        (ATree.Source.VisibleToken(LVis + 1).Kind = tkRParen) then
       Inc(AResult.Normalized)                                        // N11
+    else if (LOwner >= 0) and
+       (ATree.Nodes[LOwner].Kind in [nkClassType, nkObjectType]) and
+       (LTok = tkIdentifier) and (LVis > 0) and
+       (LOwn.Owner[LVis - 1] = LOwner) and
+       (ATree.Source.VisibleToken(LVis - 1).Kind = tkIdentifier) and
+       SameText(ATree.Source.VisibleText(LVis), ATree.Source.VisibleText(
+         LVis - 1)) and
+       (SameText(ATree.Source.VisibleText(LVis), 'abstract') or
+        SameText(ATree.Source.VisibleText(LVis), 'sealed')) then
+      Inc(AResult.Normalized)                                        // N12
     else if (LOwner >= 0) and (ATree.Nodes[LOwner].Kind = nkAttrGroup) and
        (LTok = tkRBracket) and (LVis < LLast) and
        (LOwn.Owner[LVis + 1] = LOwner) and

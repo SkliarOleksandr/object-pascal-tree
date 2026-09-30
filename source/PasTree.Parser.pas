@@ -2245,7 +2245,7 @@ end;
 function TPasParser.ParseClassLike(AHeadKind: TPasTokenKind): Integer;
 var
   LKind: TPasNodeKind;
-  LIsHelper: Boolean;
+  LIsHelper, LAbstract, LSealed: Boolean;
 begin
   case AHeadKind of
     tkRecord: LKind := nkRecordType;
@@ -2262,13 +2262,36 @@ begin
   if AHeadKind = tkDispinterface then
     FB.SetAux(Result, 1);
   Next; // head keyword
-  // class abstract / class sealed (context keywords, lexed as identifiers)
-  while IsWord('abstract') or IsWord('sealed') do
-  begin
-    MarkContextKeyword;   // color 'abstract' / 'sealed'
-    Next;
-  end;
+  // F4: `class abstract` / `class sealed` (context keywords, lexed as
+  // identifiers), nfAbstract / nfSealed. dcc64 37.0 reads them after
+  // `class` and `object` only, right after the head word and whatever
+  // follows (`class` NEWLINE `abstract: Integer` is E2029 there, not a
+  // field), a repeat allowed; after `record` or `interface` the word is a
+  // member's name - `record abstract: Integer; end` compiles.
+  LAbstract := False;
+  LSealed := False;
+  if LKind in [nkClassType, nkObjectType] then
+    while IsWord('abstract') or IsWord('sealed') do
+    begin
+      if IsWord('abstract') then
+        LAbstract := True
+      else
+        LSealed := True;
+      MarkContextKeyword;   // color 'abstract' / 'sealed'
+      Next;
+    end;
   LIsHelper := IsWord('helper');
+  if LIsHelper and (LAbstract or LSealed) then
+    Error('"helper" expected right after "class"')
+  else
+  begin
+    if LAbstract and LSealed then
+      Error('ABSTRACT and SEALED cannot be used together');   // dcc: E2383
+    if LAbstract then
+      FB.AddFlag(Result, nfAbstract);
+    if LSealed then
+      FB.AddFlag(Result, nfSealed);
+  end;
   if LIsHelper then
   begin
     FB.SetKind(Result, nkHelperType);

@@ -326,7 +326,7 @@ begin
   Writeln(Format('T3: %d original tokens, %d normalized (%s); %d printed ' +
     'items, %d matched (%d copied from a span, %d read as a filed loss), ' +
     '%d defects in %d files',
-    [GTotals.Original, GTotals.Normalized, 'N1-N11', GTotals.Printed,
+    [GTotals.Original, GTotals.Normalized, 'N1-N12', GTotals.Printed,
      GTotals.Matched, GTotals.Spans, GTotals.Losses, GTotals.Defects,
      GTotals.T3Files]));
   LKeys := GLosses.Keys.ToArray;

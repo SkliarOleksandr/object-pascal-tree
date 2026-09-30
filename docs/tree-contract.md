@@ -82,9 +82,9 @@ type reference" is an nkIdent, nkMember or nkTypeArgs.
 | nkSetType, nkFileType, nkPointerType, nkStringType | [`packed` - nfPacked, see 5] `set of c0`; [`packed`] `file [of c0]`; `^c0`; `string[c0]` |
 | nkClassOf | [`packed` - nfPacked, see 5] `class of c0`; Aux 1: `type of c0`, `type of interface` without a child |
 | nkProcType | [`reference to` - Aux 2, see 5] `procedure` / `function` (a result-type child present), [nkParams], [`:` result type], [`of object` - Aux 1], nkDirective... - a `;` before the one whose Aux is 1 (`procedure; stdcall`) |
-| nkClassType | [`packed` - nfPacked, see 5] `class` [(ancestors: the leading type references)] members `end` [hints]; Aux 1: the forward `class` alone |
+| nkClassType | [`packed` - nfPacked, see 5] `class` [`abstract` - nfAbstract] [`sealed` - nfSealed] [(ancestors: the leading type references)] members `end` [hints]; Aux 1: the forward `class` alone |
 | nkRecordType | [`packed` - nfPacked, see 5] `record` members `end` [`align` the first non-member child] [hints] |
-| nkObjectType | [`packed` - nfPacked, see 5] `object` [(ancestor)] members `end` [hints] |
+| nkObjectType | [`packed` - nfPacked, see 5] `object` [`abstract` - nfAbstract] [`sealed` - nfSealed] [(ancestor)] members `end` [hints] |
 | nkInterfaceType | `interface`, `dispinterface` when Aux bit 1 is set, [(ancestor)] [nkGuid] members `end` [hints]; Aux bit 2: forward, the head alone |
 | nkHelperType | `class helper` (`record helper` when Aux is 1) [(ancestor)] `for` the last leading type reference, members `end` [hints] |
 | nkGuid | `[ c0 ]` - see 4 for a literal |
@@ -146,7 +146,6 @@ same program, and T3 counts the losses per finding.
 
 | Finding | Not in the tree |
 |---|---|
-| F4 | `class abstract`, `class sealed` |
 | F9 | `class threadvar` (reads as `class var`) |
 | F12 | the message of a routine's `deprecated 'msg'` |
 | F13 | inside `external`: which child is the library, the name, the index; `delayed` |
@@ -199,6 +198,8 @@ original onto it (`PRINT_NORMALIZATION` in `PasTree.Printer`):
   the `;` of `procedure; stdcall` stands the tree keeps (the directive after
   it has Aux 1, F29) - one program either way, but not one `.dcu`;
 - a record constant's `;` after its last field value, `(X: 1; Y: 2;)`.
+- `class abstract abstract` and `class abstract` (a repeated class or object
+  modifier; the `.dcu` is the same).
 
 Same program for dcc, the reprint through it says (T3x) - but not always the
 same `.dcu`: dcc writes two of these apart in bytes the code does not

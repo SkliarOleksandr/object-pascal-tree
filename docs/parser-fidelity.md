@@ -56,7 +56,7 @@ about the tree; everything below is about the tree.
   A template per kind prints the unit from the tree alone: keywords and
   punctuation from the kinds, text only from leaves and the contract reads,
   a filed loss read where it stands and counted. **T3** compares the print
-  with the parsed tokens under a written normalization list (N1-N11,
+  with the parsed tokens under a written normalization list (N1-N12,
   `PRINT_NORMALIZATION`): a token missed or misplaced is a defect. **T3r**
   renders the print one token per line and all on one line, parses both
   back and compares the trees, fingerprint for fingerprint.
@@ -179,7 +179,7 @@ minus before a member call - agree with dcc everywhere they were met.
 
 | Id | Where | What |
 |---|---|---|
-| F4, F9, F12-F18 | the tree | tokens only they hold - the losses of `docs/tree-contract.md` sec. 4; each is read in place and counted, none changes a grouping |
+| F9, F12-F18 | the tree | tokens only they hold - the losses of `docs/tree-contract.md` sec. 4; each is read in place and counted, none changes a grouping |
 | F5 | the DCU reader | a routine's nested routines listed under its anonymous method's body; only the dump's nesting |
 | F8 | the parser, error mode | the root stops where a broken parse stopped, the rest of the file in no node |
 | F22 | the preprocessor | a conditional crossing an include boundary is accepted; dcc refuses it (invalid code only) |
@@ -223,7 +223,11 @@ no mark, and a record's layout read the token before it; nfPacked is on
 the record, array, set, file, class, class-of or object type it packs, the
 word outside the type's span as `reference to` is, and `packed` where dcc
 refuses it - before a type name, a subrange, `string`, an interface, in a
-parameter's type - is a parse error).
+parameter's type - is a parse error) and `class abstract` / `class
+sealed` (F4 - the words left no mark, and after `record` a field named
+`abstract` or `sealed` was eaten as one - parse errors on valid code;
+nfAbstract / nfSealed are on the class or object type, the words read
+after `class` and `object` only, as dcc reads them).
 
 ## 5. The gate
 

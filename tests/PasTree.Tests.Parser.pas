@@ -776,7 +776,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..220] of TPasCaseRow = (
+  DECL_CASES: array[0..223] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1467,9 +1467,42 @@ const
     (Section: '12.2.5'; Name: 'sealed class and final method';
      Source: 'type TC = class sealed'#13#10 +
        '    procedure P; virtual; final;'#13#10'  end;';
-     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(' +
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType#sealed(' +
        'Routine''procedure''(Ident''P''#name Directive''virtual'' ' +
        'Directive''final''))))'; ExpectDiags: 0),
+    // F4: nfAbstract / nfSealed, dcc64 37.0 probed (x-f4 Q01-Q49): after
+    // `class` and `object`, right after the head word, a forward
+    // declaration and one stopping at its ancestors too, a repeat is one.
+    (Section: '12.2.5'; Name: 'F4: class and object modifiers';
+     Source: 'type A = class abstract(TObject) end; B = class sealed; ' +
+       'C = class abstract abstract end; D = object sealed end; ' +
+       'E = packed class abstract end; F = class sealed(TObject);';
+     Expected: 'TypeSec(TypeDecl(Ident''A'' ClassType#abstract(Ident''TObject'')) ' +
+       'TypeDecl(Ident''B'' ClassType#forward#sealed) ' +
+       'TypeDecl(Ident''C'' ClassType#abstract) ' +
+       'TypeDecl(Ident''D'' ObjectType#sealed) ' +
+       'TypeDecl(Ident''E'' ClassType#packed#abstract) ' +
+       'TypeDecl(Ident''F'' ClassType#sealed(Ident''TObject'')))';
+     ExpectDiags: 0),
+    // After `record` the word is a field's name (dcc64 compiles it); after
+    // the ancestors a class's field may be named so too.
+    (Section: '12.2.5'; Name: 'F4: abstract and sealed as member names';
+     Source: 'type R = record abstract: Integer; sealed: Byte; end; ' +
+       'C = class abstract(TObject) abstract: Integer; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''R'' RecordType(VarDecl(Ident''abstract''#name ' +
+       'Ident''Integer'') VarDecl(Ident''sealed''#name Ident''Byte''))) ' +
+       'TypeDecl(Ident''C'' ClassType#abstract(Ident''TObject'' VarDecl(' +
+       'Ident''abstract''#name Ident''Integer''))))';
+     ExpectDiags: 0),
+    // E2383 both; a helper takes no modifier; `record sealed end` is a
+    // field with no type, as dcc reads it.
+    (Section: '12.2.5'; Name: 'F4: modifiers dcc refuses';
+     Source: 'type A = class abstract sealed end; ' +
+       'B = class sealed helper for TObject end; C = record sealed end;';
+     Expected: 'TypeSec(TypeDecl(Ident''A'' ClassType#abstract#sealed) ' +
+       'TypeDecl(Ident''B'' HelperType(Ident''TObject'')) ' +
+       'TypeDecl(Ident''C'' RecordType(VarDecl(Ident''sealed''#name))))';
+     ExpectDiags: 3),
 
     // ---- 12.3.1 message methods ----
     (Section: '12.3.1'; Name: 'message method';

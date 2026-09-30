@@ -210,7 +210,12 @@ type
     // nkClassOf - the types dcc lets it pack. The word stands right before
     // the type's span and is the enclosing node's token, as `reference to`
     // is before a procedural type.
-    nfPacked
+    nfPacked,
+    // `class abstract` / `class sealed` (12.2.5): on an nkClassType or
+    // nkObjectType, the words right after its head word - a repeat is one
+    // (printer N12). Both together are E2383, a parse diagnostic.
+    nfAbstract,
+    nfSealed
   );
   TPasNodeFlags = set of TPasNodeFlag;
 
@@ -847,6 +852,10 @@ begin
     Result := Result + '#name';
   if nfPacked in Nodes[AIndex].Flags then
     Result := Result + '#packed';
+  if nfAbstract in Nodes[AIndex].Flags then
+    Result := Result + '#abstract';
+  if nfSealed in Nodes[AIndex].Flags then
+    Result := Result + '#sealed';
   LChildren := '';
   LChild := Nodes[AIndex].FirstChild;
   while LChild <> NIL_NODE do
