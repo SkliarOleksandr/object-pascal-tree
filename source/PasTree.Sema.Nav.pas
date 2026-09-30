@@ -465,7 +465,7 @@ type
     procedure CollectReferencesOf(ATMid, ASym: Integer;
       AHits: TList<TPasRefHit>; AAssignOnly: Boolean = False);
     procedure CollectReferencesOfAll(const ASyms: TArray<TPasExtRef>;
-      AHits: TList<TPasRefHit>);
+      AHits: TList<TPasRefHit>; AAssignOnly: Boolean = False);
     // Find Assignments.
     function IsAssignTarget(LM: TPasSemaModel; ANode: Integer): Boolean;
     function PropertyIsWritable(AMid, ASym: Integer): Boolean;
@@ -2058,7 +2058,7 @@ end;
 // same two maps, the same rules, each symbol's own-model RefMap read in its
 // declaring model only.
 procedure TPasNavigator.CollectReferencesOfAll(const ASyms: TArray<TPasExtRef>;
-  AHits: TList<TPasRefHit>);
+  AHits: TList<TPasRefHit>; AAssignOnly: Boolean);
 var
   LWanted: TDictionary<Int64, Boolean>;
   LOwn: TDictionary<Integer, Boolean>;   // declaring models
@@ -2090,12 +2090,14 @@ begin
         begin
           LSym := LM.RefMap[LNode];
           if (LSym <> NIL_SYM) and LWanted.ContainsKey(Key(LMi, LSym)) and
+             (not AAssignOnly or IsAssignTarget(LM, LNode)) and
              not IsDeclSelfName(LM, LSym, LNode) and
              FProj.EnsureHydrated(LMi) and HitFromNode(LM, LNode, LHit) then
             AHits.Add(LHit);
         end;
       for LPair in LM.ExtRefMap do
         if LWanted.ContainsKey(Key(LPair.Value.UnitId, LPair.Value.Sym)) and
+           (not AAssignOnly or IsAssignTarget(LM, LPair.Key)) and
            FProj.EnsureHydrated(LMi) and HitFromNode(LM, LPair.Key, LHit) then
           AHits.Add(LHit);
     end;
@@ -2228,20 +2230,19 @@ function TPasNavigator.FindAssignments(ATMid, ASym: Integer): TArray<TPasRefHit>
 var
   LHits: TList<TPasRefHit>;
   LChain: TArray<TPasExtRef>;
-  LIdx: Integer;
 begin
   LHits := TList<TPasRefHit>.Create;
   try
     // The property redeclaration chain is one property - see FindReferences.
     // Unlike there, the other links' declaration names are NOT rows: a
-    // declaration is not an assignment.
+    // declaration is not an assignment. One pass over the closure for the
+    // whole chain, as there: a scan per link took 8 s for a VCL property
+    // republished across a 4,000-unit group (pastree-mcp F6.1).
     LChain := PropertyChain(ATMid, ASym);
     if Length(LChain) <= 1 then
       CollectReferencesOf(ATMid, ASym, LHits, {AAssignOnly} True)
     else
-      for LIdx := 0 to High(LChain) do
-        CollectReferencesOf(LChain[LIdx].UnitId, LChain[LIdx].Sym, LHits,
-          {AAssignOnly} True);
+      CollectReferencesOfAll(LChain, LHits, {AAssignOnly} True);
     Result := LHits.ToArray;
   finally
     LHits.Free;

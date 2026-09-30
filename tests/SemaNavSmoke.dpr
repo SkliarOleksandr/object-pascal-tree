@@ -1176,7 +1176,23 @@ const
     '  published'#10 +                         // 78
     '    property Items;'#10 +                 // 79 Items col 14
     '  end;'#10 +                              // 80
-    'implementation'#10 +                      // 81
+    // A WRITABLE property republished twice, for FindAssignments over a
+    // chain: one pass for all the links, the rows the per-link union gave.
+    '  TCustomVal = class'#10 +                // 81
+    '  private'#10 +                           // 82
+    '    FVal: Integer;'#10 +                  // 83
+    '  public'#10 +                            // 84
+    '    property Val: Integer read FVal write FVal;'#10 + // 85 Val col 14
+    '  end;'#10 +                              // 86
+    '  TVal = class(TCustomVal)'#10 +          // 87
+    '  published'#10 +                         // 88
+    '    property Val;'#10 +                   // 89 Val col 14
+    '  end;'#10 +                              // 90
+    '  TMoreVal = class(TVal)'#10 +            // 91
+    '  published'#10 +                         // 92
+    '    property Val;'#10 +                   // 93 Val col 14
+    '  end;'#10 +                              // 94
+    'implementation'#10 +                      // 95
     'function TPeriodHelper.Text: string;'#10 + // 68
     'begin'#10 +                               // 69
     '  Result := '''';'#10 +                   // 70
@@ -1247,7 +1263,17 @@ const
     '  GF.Description := '''';'#10 +           // 34 Description col 6
     '  F(True).Description := '''';'#10 +      // 35 Description col 12
     'end;'#10 +                                // 36
-    'end.'#10;                                 // 37
+    // Writes bound to each link of NavPromo's Val chain, and a read.
+    'procedure SetVals(A: TVal; B: TMoreVal; C: TCustomVal);'#10 + // 37
+    'var'#10 +                                 // 38
+    '  I: Integer;'#10 +                       // 39
+    'begin'#10 +                               // 40
+    '  A.Val := 1;'#10 +                       // 41 Val col 5
+    '  B.Val := 2;'#10 +                       // 42 Val col 5
+    '  C.Val := 3;'#10 +                       // 43 Val col 5
+    '  I := B.Val;'#10 +                       // 44 Val col 10
+    'end;'#10 +                                // 45
+    'end.'#10;                                 // 46
 
   UNIT_B =
     'unit NavB;'#10 +                          // 1
@@ -3363,7 +3389,7 @@ begin
       // is NESTED in the generic ancestor - `Table[0]` peeled to the open
       // TValue without it (see the nkIdent case in CrossType).
       GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavPromo.pas'));
-      CheckNav('generic frame: nested array type off inherited member', 103, 12,
+      CheckNav('generic frame: nested array type off inherited member', 117, 12,
         'Description', 'NavPromo.pas', 6, 5);
       // ---- Property redeclaration chains (UNIT_PROMO's Items) ----
       // TCustomProps.Items: TItems (17) is republished bare by TProps (21)
@@ -3444,6 +3470,29 @@ begin
         HasEdit(LEdits, 'NavPromo.pas', 17, 14,
           '    property Elems: TItems read FItems;', 13, 18) and
         HasEdit(LEdits, 'NavPromo.pas', 69, 14, '    property Elems;', 13, 18));
+
+      // Find Assignments over a chain: every write bound to any link (TVal's
+      // 41, TMoreVal's 42, the root's 43), not the read (44) nor a link's
+      // declaration - from the root and from a link alike. One pass over the
+      // closure since pastree-mcp F6.1; the rows are the per-link union's.
+      Ok('SymbolAt: TCustomVal.Val',
+        GNav.SymbolAt(LMidPromo, 85, 14, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Val'));
+      LHits := GNav.FindAssignments(LRTMid, LRSym);
+      Ok('FindAssignments: property chain from the root - a write per link',
+        (Length(LHits) = 3) and HasHitAt(LHits, 'NavF.pas', 41, 5) and
+        HasHitAt(LHits, 'NavF.pas', 42, 5) and HasHitAt(LHits, 'NavF.pas', 43, 5));
+      Ok('FindAssignments: property chain - no read, no declaration',
+        not HasHitAt(LHits, 'NavF.pas', 44, 10) and
+        not HasHitAt(LHits, 'NavPromo.pas', 89, 14) and
+        not HasHitAt(LHits, 'NavPromo.pas', 93, 14));
+      Ok('SymbolAt: TMoreVal.Val (the last link)',
+        GNav.SymbolAt(LMidPromo, 93, 14, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Val'));
+      LHits := GNav.FindAssignments(LRTMid, LRSym);
+      Ok('FindAssignments: property chain from a link - the same 3 writes',
+        (Length(LHits) = 3) and HasHitAt(LHits, 'NavF.pas', 41, 5) and
+        HasHitAt(LHits, 'NavF.pas', 43, 5));
 
       // Go to declaration ON a bare redeclaration climbs ONE link: the
       // promotion's name goes to the root's, TMoreProps' to TProps', and
