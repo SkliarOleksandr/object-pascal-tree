@@ -1490,8 +1490,10 @@ begin
   LRef.IncludedFileId := -1;
   LRef.VisIndex := FVisible.Count;
   LRefIdx := FIncludeRefs.Add(LRef);
-  if not FSourceManager.ResolveInclude(FFileNames[AFileId], AArg, LResolved)
-  then
+  // Looked up beside the MAIN file (id 0), whichever file names it - dcc's
+  // rule; the naming file is only the manager's last-resort tolerance.
+  if not FSourceManager.ResolveInclude(FFileNames[0], FFileNames[AFileId],
+    AArg, LResolved) then
   begin
     Diag(ppIncludeNotFound, AFileId, AToken.Start, AToken.Len, AArg);
     Exit;

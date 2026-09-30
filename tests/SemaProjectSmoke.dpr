@@ -8097,22 +8097,24 @@ begin
       not LSM.ResolveUnit('UMemo', '', TPath.Combine(LDir, 'b\User.pas'),
         LRes));
 
-    // Includes: keyed by the including DIRECTORY, so a second includer there
-    // shares the answer; a miss lasts until the analysis caches are released.
+    // Includes: keyed by the unit's and the includer's DIRECTORY, so a second
+    // unit there shares the answer; a miss lasts until the analysis caches
+    // are released.
+    var LUserA := TPath.Combine(LDir, 'a\User.pas');
+    var LOtherA := TPath.Combine(LDir, 'a\Other.pas');
+    var LUserB := TPath.Combine(LDir, 'b\User.pas');
     Ok('memo: a missing include is not found',
-      not LSM.ResolveInclude(TPath.Combine(LDir, 'a\User.pas'), 'memo.inc',
-        LRes));
+      not LSM.ResolveInclude(LUserA, LUserA, 'memo.inc', LRes));
     TFile.WriteAllText(TPath.Combine(LDir, 'a\memo.inc'), '');
     LSM.ReleaseAnalysisCaches;
     Ok('memo: the include is found once the caches are released',
-      LSM.ResolveInclude(TPath.Combine(LDir, 'a\User.pas'), 'memo.inc', LRes) and
+      LSM.ResolveInclude(LUserA, LUserA, 'memo.inc', LRes) and
       SameText(LRes, TPath.Combine(LDir, 'a\memo.inc')));
     Ok('memo: another includer of the directory finds it (quoted argument)',
-      LSM.ResolveInclude(TPath.Combine(LDir, 'a\Other.pas'), '''memo.inc''',
-        LRes) and SameText(LRes, TPath.Combine(LDir, 'a\memo.inc')));
+      LSM.ResolveInclude(LOtherA, LOtherA, '''memo.inc''', LRes) and
+      SameText(LRes, TPath.Combine(LDir, 'a\memo.inc')));
     Ok('memo: an includer elsewhere does not',
-      not LSM.ResolveInclude(TPath.Combine(LDir, 'b\User.pas'), 'memo.inc',
-        LRes));
+      not LSM.ResolveInclude(LUserB, LUserB, 'memo.inc', LRes));
   finally
     LSM.Free;
     if TDirectory.Exists(LDir) then

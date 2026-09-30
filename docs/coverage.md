@@ -57,10 +57,13 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 ### 1.3.3 Include files
 - the `{$I %ENV%}` / `{$I %DATE%}` insertion forms are
   diagnosed (ppUnsupportedInsertion) but no value is injected.
-- an include named inside an include file is looked up beside THAT file
-  first; dcc 37.0 looks beside the main unit, then in the current directory,
-  then on the include path - never beside the file that names it. The two
-  find different files only where both directories hold one of that name.
+- an include is looked up as dcc 37.0 does (beside the unit, the project
+  directory, the search paths) and then, where dcc finds nothing (F1026),
+  beside the include file that names it - a tolerance: it never picks
+  another file than dcc's, but accepts a layout dcc refuses. The project
+  directory stands for dcc's current directory, and the search paths for
+  its `-I` (the IDE passes one path to both `-U` and `-I`); a project that
+  sets a separate include path is read with its unit path.
 
 ### 1.3.5 Compiler-version symbols
 - the VERxxx symbol and CompilerVersion/RTLVersion follow the one

@@ -2387,6 +2387,103 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
       end;
   end;
 
+  { F23: where an include is looked for - dcc 37.0's order, probed on dcc32
+    and dcc64 (an elimination loop: every candidate directory holds the file,
+    each run deletes the one taken). lib\U.pas includes inc\outer.inc,
+    outer.inc includes inner.inc: dcc takes inner.inc beside the UNIT,
+    then from the current directory (the project directory here), then from
+    -I (the search path), and never from lib\inc beside outer.inc - PasTree
+    takes that one last, a tolerance where dcc says F1026. The first-level
+    include (AFirst) follows the same order. }
+  function IncludeOrderCase(AFirst: Boolean): TPasCustomCase;
+  begin
+    Result.Section := '1.3.3';
+    if AFirst then
+      Result.Name := 'F23: an include named by the unit, dcc''s order'
+    else
+      Result.Name := 'F23: an include named by an include, dcc''s order';
+    Result.Run :=
+      function: TPasCheckResult
+      var
+        LDir, LTarget, LUnit, LGot, LWant: string;
+        LCands: TArray<string>;
+        LSM: TPasSourceManager;
+        LDefines: TPasDefines;
+        LPP: TPasPreprocessor;
+        LPre: TPasPreprocessed;
+      begin
+        LDir := TPath.Combine(TPath.GetTempPath, 'pastree_incorder');
+        if TDirectory.Exists(LDir) then
+          TDirectory.Delete(LDir, True);
+        TDirectory.CreateDirectory(TPath.Combine(LDir, 'lib\inc'));
+        TDirectory.CreateDirectory(TPath.Combine(LDir, 'proj'));
+        TDirectory.CreateDirectory(TPath.Combine(LDir, 'idir'));
+        LUnit := TPath.Combine(LDir, 'lib\U.pas');
+        TFile.WriteAllText(LUnit, 'unit U;'#10'interface'#10 +
+          '{$I inc\outer.inc}'#10'implementation'#10'end.'#10);
+        if AFirst then
+        begin
+          LTarget := 'inc\outer.inc';
+          LCands := ['lib', 'proj', 'idir'];
+          LWant := 'lib proj idir none';
+        end
+        else
+        begin
+          LTarget := 'inner.inc';
+          TFile.WriteAllText(TPath.Combine(LDir, 'lib\inc\outer.inc'),
+            '{$I inner.inc}'#10);
+          LCands := ['lib', 'lib\inc', 'proj', 'idir'];
+          LWant := 'lib proj idir lib\inc none';
+        end;
+        for var LC in LCands do
+        begin
+          var LPath := TPath.Combine(TPath.Combine(LDir, LC), LTarget);
+          TDirectory.CreateDirectory(TPath.GetDirectoryName(LPath));
+          TFile.WriteAllText(LPath, 'const From_' +
+            StringReplace(LC, '\', '_', [rfReplaceAll]) + ' = 1;'#10);
+        end;
+        LGot := '';
+        try
+          // The elimination loop: take one, delete it, again.
+          for var LRound := 0 to Length(LCands) do
+          begin
+            var LHit := 'none';
+            LSM := TPasSourceManager.Create([TPath.Combine(LDir, 'idir')]);
+            LSM.SetProjectDir(TPath.Combine(LDir, 'proj'));
+            LDefines := CreatePlatformDefines(pfWin64);
+            LPP := TPasPreprocessor.Create(LSM, LDefines);
+            try
+              LPre := LPP.Process(LUnit);
+              for var LI := 0 to High(LPre.Visible) do
+                if LPre.VisibleText(LI).StartsWith('From_') then
+                begin
+                  LHit := StringReplace(Copy(LPre.VisibleText(LI), 6, MaxInt),
+                    '_', '\', [rfReplaceAll]);
+                  Break;
+                end;
+            finally
+              LPP.Free;
+              LDefines.Free;
+              LSM.Free;
+            end;
+            LGot := Trim(LGot + ' ' + LHit);
+            if LHit = 'none' then
+              Break;
+            TFile.Delete(TPath.Combine(TPath.Combine(LDir, LHit), LTarget));
+          end;
+        finally
+          if TDirectory.Exists(LDir) then
+            TDirectory.Delete(LDir, True);
+        end;
+        Result.Passed := LGot = LWant;
+        if Result.Passed then
+          Result.Message := ''
+        else
+          Result.Message := '  expected: ' + LWant + sLineBreak +
+            '  actual:   ' + LGot + sLineBreak;
+      end;
+  end;
+
   { An include that lives in ANOTHER directory and DEFINES a symbol,
     guarding a declaration. A utility library unit's shape exactly: it
     includes common.inc, which sits in source/include rather than beside the
@@ -2399,9 +2496,9 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
     line its own navigation had just jumped to. With the search path
     supplied, the region is live.
 
-    The file NAME matters too: an include is resolved relative to the
-    including file, so preprocessing real content under a placeholder name
-    loses even an include sitting right beside it. }
+    The file NAME matters too: an include is resolved relative to the unit,
+    so preprocessing real content under a placeholder name loses even an
+    include sitting right beside it. }
   function IncludeContextCase: TPasCustomCase;
   begin
     Result.Section := '1.3.3';
@@ -3115,6 +3212,7 @@ begin
       'WEAKINTFREF WEAKREF WEAK_NATIVEINT'),
     SwitchStartCase];
   Result := Result + [IncludeContextCase,
+    IncludeOrderCase(True), IncludeOrderCase(False),
     AsmModeCase('F26: a dead asm does not open BASM mode',
       'function R: Cardinal; {$ifdef NEVER} asm {$endif}'#13#10 +
       'asm'#13#10'  mov eax, 1'#13#10'end;'#13#10, '',

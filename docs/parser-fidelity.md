@@ -184,7 +184,6 @@ minus before a member call - agree with dcc everywhere they were met.
 | F7 | the parser | an attribute group after a var or const section, before a routine, is parsed and not adopted - the routine loses its attributes |
 | F8 | the parser, error mode | the root stops where a broken parse stopped, the rest of the file in no node |
 | F22 | the preprocessor | a conditional crossing an include boundary is accepted; dcc refuses it (invalid code only) |
-| F23 | the source manager | an include inside an include is looked up beside the including file; dcc looks beside the main unit |
 | F25 | the oracle's input | a shipped RTL unit built with a define no project has: its constants (the vmt offsets on Win64) evaluate otherwise |
 
 Fixed on the way, each by its own reviewed change: a subrange bound that
@@ -209,7 +208,9 @@ and lexes again where the guess was wrong) and the predefined conditional
 set (F20 - `DCC`, `NATIVECODE`, the `WEAK*` family were missing, `CPUINTEL`
 extra; the sets are now what every installed dcc 37.0 answers, the switch
 start state has `N+`, and NativeInt's helper is the one of the integer of
-its size).
+its size) and where an include is looked for (F23 - beside the including
+file first, where dcc looks beside the unit, then the current directory,
+then `-I`; the naming file's directory is now a last-resort tolerance).
 
 ## 5. The gate
 

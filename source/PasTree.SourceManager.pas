@@ -142,12 +142,13 @@ type
     // split off and lower-cased once per importer instead of once per probe.
     FMemoFrom: string;
     FMemoFromIndex: TDictionary<string, string>;
-    // (including path up to its last separator + #0 + include argument, both
-    // as spelled) -> resolved path, '' for not found. ResolveInclude probes
-    // the file system (TFile.Exists per candidate) and runs for every include
-    // of every includer. Same lifetime as FIncludeStreams and guarded by the same
-    // FIncludeLock - it runs on the parse workers - so a later analysis on
-    // this manager sees a file created in between, as before.
+    // (unit path and including path, each up to its last separator, + the
+    // include argument, #0 between, all as spelled) -> resolved path, '' for
+    // not found. ResolveInclude probes the file system (TFile.Exists per
+    // candidate) and runs for every include of every includer. Same lifetime
+    // as FIncludeStreams and guarded by the same FIncludeLock - it runs on
+    // the parse workers - so a later analysis on this manager sees a file
+    // created in between, as before; SetProjectDir drops it too.
     FIncludeMemo: TDictionary<string, string>;
     function TryFile(const ADir, AName: string; out AResolved: string): Boolean;
     function DirIndex(const ADir: string): TDictionary<string, string>;
@@ -155,7 +156,7 @@ type
     function BuildUnitMemo(const AKey: string): TUnitMemo;
     function FromDirIndex(const AFromFile: string): TDictionary<string, string>;
     procedure ForgetUnitResolution;
-    function ResolveIncludeIn(const AIncludingFile, AName: string;
+    function ResolveIncludeIn(const AUnitFile, AIncludingFile, AName: string;
       out AResolved: string): Boolean;
     function FindDcuFile(const AUnitName: string; out AResolved: string): Boolean;
     function DcuText(const APath: string): string;
@@ -241,9 +242,12 @@ type
       resolver (corpus runs without real project search paths). The first
       occurrence of an ambiguous name wins. }
     procedure BuildIncludeIndex(const ARoot: string);
-    { Resolves an include argument (possibly quoted) against the directory
-      of the including file, then the search paths, then the index. }
-    function ResolveInclude(const AIncludingFile, AName: string;
+    { Resolves an include argument (possibly quoted) as dcc does: beside
+      AUnitFile - the unit (or program) being compiled, whichever file names
+      the include - then the project directory, then the search paths; then,
+      as a tolerance where dcc finds nothing, beside AIncludingFile; then the
+      index. See ResolveIncludeIn. }
+    function ResolveInclude(const AUnitFile, AIncludingFile, AName: string;
       out AResolved: string): Boolean;
     { Indexes every *.pas/*.dpr under ARoot by basename, for unit-name
       resolution when there are no real search paths (project-dir fallback). }
@@ -427,6 +431,13 @@ begin
   else
     FProjectDir := ExcludeTrailingPathDelimiter(TPath.GetFullPath(ADir));
   ForgetUnitResolution;
+  // An include is looked up in the project directory as well.
+  TMonitor.Enter(FIncludeLock);
+  try
+    FreeAndNil(FIncludeMemo);
+  finally
+    TMonitor.Exit(FIncludeLock);
+  end;
 end;
 
 function TPasSourceManager.ProjectDir: string;
@@ -1245,19 +1256,20 @@ begin
   end;
 end;
 
-function TPasSourceManager.ResolveInclude(const AIncludingFile, AName: string;
-  out AResolved: string): Boolean;
+function TPasSourceManager.ResolveInclude(const AUnitFile, AIncludingFile,
+  AName: string; out AResolved: string): Boolean;
 var
   LKey: string;
 begin
-  // The answer depends on the including file's DIRECTORY only, so every unit
-  // of a directory shares one entry per include (see FIncludeMemo). The key
-  // is the including path up to its last separator - equal prefixes give
-  // equal directories whatever TPath.GetDirectoryName makes of them, and
-  // unlike it this cannot raise - kept as spelled, since the resolved path
-  // carries the spelling of both.
-  LKey := Copy(AIncludingFile, 1, LastDelimiter('\/:', AIncludingFile)) +
-    #0 + AName;
+  // The answer depends on the two files' DIRECTORIES only, so every unit of
+  // a directory shares one entry per include (see FIncludeMemo). The key
+  // holds each path up to its last separator - equal prefixes give equal
+  // directories whatever TPath.GetDirectoryName makes of them, and unlike it
+  // this cannot raise - kept as spelled, since the resolved path carries the
+  // spelling of both.
+  LKey := Copy(AUnitFile, 1, LastDelimiter('\/:', AUnitFile)) + #0 +
+    Copy(AIncludingFile, 1, LastDelimiter('\/:', AIncludingFile)) + #0 +
+    AName;
   TMonitor.Enter(FIncludeLock);
   try
     if (FIncludeMemo <> nil) and FIncludeMemo.TryGetValue(LKey, AResolved) then
@@ -1268,7 +1280,7 @@ begin
   // Probe OUTSIDE the lock (file-system calls); two workers racing to the
   // same key compute the same answer. A raise (an unusable including path)
   // leaves no entry behind, so it raises again next time, as it always did.
-  Result := ResolveIncludeIn(AIncludingFile, AName, AResolved);
+  Result := ResolveIncludeIn(AUnitFile, AIncludingFile, AName, AResolved);
   TMonitor.Enter(FIncludeLock);
   try
     if FIncludeMemo = nil then
@@ -1280,10 +1292,37 @@ begin
 end;
 
 // ResolveInclude's probing proper, unmemoized.
-function TPasSourceManager.ResolveIncludeIn(const AIncludingFile, AName: string;
-  out AResolved: string): Boolean;
+//
+// dcc 37.0's order, probed (dcc32 and dcc64, an include named by the unit and
+// one named by an include, plain and with a subdirectory): beside the UNIT
+// being compiled, then the current directory, then -I, then the project
+// file's directory - and never beside the include file that names it, nor on
+// -U alone. PasTree's search paths are the IDE's -I (the IDE passes the one
+// search path to -U, -I, -O and -R), the project directory stands for dcc's
+// current directory (an IDE build runs in it; the .dpr's own place after -I
+// is then the same directory). Beside the naming include comes last, a
+// tolerance only: it finds a file where dcc says F1026, never another file
+// than dcc's.
+function TPasSourceManager.ResolveIncludeIn(const AUnitFile, AIncludingFile,
+  AName: string; out AResolved: string): Boolean;
 var
-  LName, LCandidate, LDir: string;
+  LName, LCandidate, LDir, LUnitDir, LIncDir: string;
+
+  function TryDir(const ADir: string): Boolean;
+  var
+    LPath: string;
+  begin
+    Result := False;
+    if ADir = '' then
+      Exit;
+    LPath := TPath.Combine(ADir, LName);
+    if TFile.Exists(LPath) then
+    begin
+      AResolved := TPath.GetFullPath(LPath);
+      Result := True;
+    end;
+  end;
+
 begin
   AResolved := '';
   LName := Trim(AName);
@@ -1293,30 +1332,26 @@ begin
   if LName = '' then
     Exit(False);
 
-  // 1. Relative to the including file.
-  LDir := TPath.GetDirectoryName(AIncludingFile);
-  if LDir <> '' then
-  begin
-    LCandidate := TPath.Combine(LDir, LName);
-    if TFile.Exists(LCandidate) then
-    begin
-      AResolved := TPath.GetFullPath(LCandidate);
-      Exit(True);
-    end;
-  end;
+  // 1. Beside the unit.
+  LUnitDir := TPath.GetDirectoryName(AUnitFile);
+  if TryDir(LUnitDir) then
+    Exit(True);
 
-  // 2. Search paths.
+  // 2. The project directory (dcc's current directory).
+  if TryDir(FProjectDir) then
+    Exit(True);
+
+  // 3. Search paths.
   for LDir in FSearchPaths do
-  begin
-    LCandidate := TPath.Combine(LDir, LName);
-    if TFile.Exists(LCandidate) then
-    begin
-      AResolved := TPath.GetFullPath(LCandidate);
+    if TryDir(LDir) then
       Exit(True);
-    end;
-  end;
 
-  // 3. Basename index (corpus fallback).
+  // 4. Beside the include that names it - where dcc finds nothing.
+  LIncDir := TPath.GetDirectoryName(AIncludingFile);
+  if not SameText(LIncDir, LUnitDir) and TryDir(LIncDir) then
+    Exit(True);
+
+  // 5. Basename index (corpus fallback).
   if (FIncludeIndex <> nil) and
      FIncludeIndex.TryGetValue(LowerCase(TPath.GetFileName(LName)), LCandidate)
   then
