@@ -1052,7 +1052,7 @@ const
   // OldNavF only via a unit ALIAS (OldNavF=NavF).
   UNIT_MAIN =
     'program NavMain;'#10 +                    // 1
-    'uses NavB, NavE, OldNavF, Deep.NavX;'#10 + // 2  NavE col 12, OldNavF col
+    'uses NavB, NavE, OldNavF, Deep.NavX, NavDpB;'#10 + // 2  NavE col 12, OldNavF col
                                                 //    18, Deep col 27
     '{$DEFINE NAVMAINDEF}'#10 +                // 3  NAVMAINDEF col 10
     '{$IFDEF NAVMAINDEF}'#10 +                 // 4  NAVMAINDEF col 9
@@ -1329,6 +1329,64 @@ const
     class with fields, methods, properties; a generic record; a distinct
     alias; plain and typed constants; a two-name var; a declaration from an
     include; bodies in the implementation), each on a known line. }
+  { A default array property used without its name (13.1.4): `C[0] := C[1]`
+    in its own unit, and in another one a read with a member after it, a
+    write, one through a descendant, two through an array first (`[0][1]` as
+    two nodes, `[2, 3]` as one) and the explicit `L.Cells[4]`. Columns are of
+    the `[`, the hit of an implicit use. }
+  UNIT_DPA =
+    'unit NavDpA;'#10 +                                          // 1
+    'interface'#10 +                                             // 2
+    'type'#10 +                                                  // 3
+    '  TCell = class'#10 +                                       // 4
+    '  public'#10 +                                              // 5
+    '    Text: string;'#10 +                                     // 6
+    '  end;'#10 +                                                // 7
+    '  TCells = class'#10 +                                      // 8
+    '  private'#10 +                                             // 9
+    '    function GetCell(I: Integer): TCell;'#10 +              // 10
+    '    procedure SetCell(I: Integer; ACell: TCell);'#10 +      // 11
+    '  public'#10 +                                              // 12
+    '    property Cells[I: Integer]: TCell read GetCell write SetCell; default;'#10 + // 13 Cells col 14
+    '  end;'#10 +                                                // 14
+    '  TMoreCells = class(TCells)'#10 +                          // 15
+    '  end;'#10 +                                                // 16
+    '  TGrid = class'#10 +                                       // 17
+    '  public'#10 +                                              // 18
+    '    Rows: array of TCells;'#10 +                            // 19
+    '  end;'#10 +                                                // 20
+    'procedure Local(C: TCells);'#10 +                           // 21
+    'implementation'#10 +                                        // 22
+    'function TCells.GetCell(I: Integer): TCell;'#10 +           // 23
+    'begin'#10 +                                                 // 24
+    '  Result := nil;'#10 +                                      // 25
+    'end;'#10 +                                                  // 26
+    'procedure TCells.SetCell(I: Integer; ACell: TCell);'#10 +   // 27
+    'begin'#10 +                                                 // 28
+    'end;'#10 +                                                  // 29
+    'procedure Local(C: TCells);'#10 +                           // 30
+    'begin'#10 +                                                 // 31
+    '  C[0] := C[1];'#10 +                                       // 32 [ col 4 write, col 12 read
+    'end;'#10 +                                                  // 33
+    'end.'#10;                                                   // 34
+  UNIT_DPB =
+    'unit NavDpB;'#10 +                                          // 1
+    'interface'#10 +                                             // 2
+    'uses NavDpA;'#10 +                                          // 3
+    'procedure Use(L: TCells; M: TMoreCells; G: TGrid);'#10 +    // 4
+    'implementation'#10 +                                        // 5
+    'procedure Use(L: TCells; M: TMoreCells; G: TGrid);'#10 +    // 6
+    'var'#10 +                                                   // 7
+    '  S: string;'#10 +                                          // 8
+    'begin'#10 +                                                 // 9
+    '  S := L[0].Text;'#10 +                                     // 10 [ col 9 read
+    '  L[1] := nil;'#10 +                                        // 11 [ col 4 write
+    '  M[2] := L[3];'#10 +                                       // 12 [ col 4 write, col 12 read
+    '  G.Rows[0][1].Text := S;'#10 +                             // 13 [ col 12 read (col 9 the array)
+    '  S := G.Rows[2, 3].Text;'#10 +                             // 14 [ col 14 read
+    '  L.Cells[4] := nil;'#10 +                                  // 15 Cells col 5, written
+    'end;'#10 +                                                  // 16
+    'end.'#10;                                                   // 17
   UNIT_OUT =
     'unit NavOut;'#10 +                                          // 1
     'interface'#10 +                                             // 2
@@ -1484,6 +1542,20 @@ begin
   for LIdx := 0 to High(AHits) do
     if SameText(TPath.GetFileName(AHits[LIdx].FilePath), AFile) then
       Inc(Result);
+end;
+
+// The hit at (file, line, col) is there and written without the name (a
+// default array property's `[`) - or, AImplicit False, with it.
+function HasImplicitAt(const AHits: TArray<TPasRefHit>; const AFile: string;
+  ALine, ACol: Integer; AImplicit: Boolean): Boolean;
+var
+  LIdx: Integer;
+begin
+  Result := False;
+  for LIdx := 0 to High(AHits) do
+    if SameText(TPath.GetFileName(AHits[LIdx].FilePath), AFile) and
+       (AHits[LIdx].Line = ALine) and (AHits[LIdx].Col = ACol) then
+      Exit(AHits[LIdx].Implicit = AImplicit);
 end;
 
 function HasHitAt(const AHits: TArray<TPasRefHit>; const AFile: string;
@@ -1729,6 +1801,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDef.pas'), UNIT_DEF);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDef.inc'), INC_DEF);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOut.pas'), UNIT_OUT);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavDpA.pas'), UNIT_DPA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavDpB.pas'), UNIT_DPB);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOut.inc'), INC_OUT);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
@@ -3493,6 +3567,45 @@ begin
       Ok('FindAssignments: property chain from a link - the same 3 writes',
         (Length(LHits) = 3) and HasHitAt(LHits, 'NavF.pas', 41, 5) and
         HasHitAt(LHits, 'NavF.pas', 43, 5));
+
+      // ---- A default array property used without its name (NavDpA/B) ----
+      // `L[I]` is TCells.Cells[I]: a use keyed on the brackets (CrossType),
+      // the hit its `[`, Implicit. Before, no search found any of the eight.
+      var LMidDpA := GNav.ModelIdOf(TPath.Combine(LDir, 'NavDpA.pas'));
+      Ok('NavDpA model found', LMidDpA >= 0);
+      Ok('SymbolAt: TCells.Cells (a default array property)',
+        GNav.SymbolAt(LMidDpA, 13, 14, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Cells'));
+      LHits := GNav.FindReferences(LRTMid, LRSym);
+      Ok('FindReferences: default property - 8 uses through brackets + 1 by name',
+        Length(LHits) = 9);
+      Ok('FindReferences: default property - its own unit, write and read',
+        HasImplicitAt(LHits, 'NavDpA.pas', 32, 4, True) and
+        HasImplicitAt(LHits, 'NavDpA.pas', 32, 12, True));
+      Ok('FindReferences: default property - another unit, a member after it',
+        HasImplicitAt(LHits, 'NavDpB.pas', 10, 9, True) and
+        HasImplicitAt(LHits, 'NavDpB.pas', 11, 4, True));
+      Ok('FindReferences: default property - through a descendant',
+        HasImplicitAt(LHits, 'NavDpB.pas', 12, 4, True) and
+        HasImplicitAt(LHits, 'NavDpB.pas', 12, 12, True));
+      Ok('FindReferences: default property - after an array, two nodes or one',
+        HasImplicitAt(LHits, 'NavDpB.pas', 13, 12, True) and
+        not HasHitAt(LHits, 'NavDpB.pas', 13, 9) and
+        HasImplicitAt(LHits, 'NavDpB.pas', 14, 14, True));
+      Ok('FindReferences: default property - the name written is not implicit',
+        HasImplicitAt(LHits, 'NavDpB.pas', 15, 5, False));
+      // A write is the brackets assigned; `L[0].Text` and `[0][1].Text` read.
+      LHits := GNav.FindAssignments(LRTMid, LRSym);
+      Ok('FindAssignments: default property - the 3 bracket writes + 1 by name',
+        (Length(LHits) = 4) and HasHitAt(LHits, 'NavDpA.pas', 32, 4) and
+        HasHitAt(LHits, 'NavDpB.pas', 11, 4) and
+        HasHitAt(LHits, 'NavDpB.pas', 12, 4) and
+        HasHitAt(LHits, 'NavDpB.pas', 15, 5));
+      // Nothing to rewrite where no name is written.
+      Ok('PlanRename: default property - the declaration and the one name',
+        GNav.PlanRename(LRTMid, LRSym, 'Items', {out} LEdits, {out} LErr) and
+        (Length(LEdits) = 2) and
+        HasEdit(LEdits, 'NavDpB.pas', 15, 5, '  L.Items[4] := nil;', 4, 9));
 
       // Go to declaration ON a bare redeclaration climbs ONE link: the
       // promotion's name goes to the root's, TMoreProps' to TProps', and

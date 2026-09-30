@@ -69,6 +69,13 @@ type
     Line, Col: Integer;      // 1-based, for NavigateTo
     Snippet: string;
     HiFrom, HiTo: Integer;   // 0-based offsets into Snippet to highlight
+    // A use written WITHOUT the name: `L[I]` through a default array
+    // property (13.1.4). The hit is the `[`; a rename has nothing to rewrite
+    // there, and a read or write is the brackets' own (IsAssignTarget).
+    Implicit: Boolean;
+    // Implicit only: that nkIndex node, in the model FilePath is the main
+    // file of - what a host classifies the use by. Unset otherwise.
+    IndexNode: Integer;
   end;
 
   // One mention of a conditional symbol (FindDefineReferences): the row plus
@@ -1857,9 +1864,15 @@ var
   LTS: TPasTokenStream;
 begin
   Result := False;
+  // A map key on an nkIndex is a default array property used through the
+  // brackets (CrossType): the hit is the `[` itself, its FirstToken - the
+  // leftmost leaf would be the base, `FList` of `FList.Obj[I]`.
+  AHit.Implicit := LM.Tree.Nodes[ANode].Kind = nkIndex;
+  AHit.IndexNode := ANode;
   LFirst := ANode;
-  while LM.Tree.Nodes[LFirst].FirstChild <> NIL_NODE do
-    LFirst := LM.Tree.Nodes[LFirst].FirstChild;
+  if not AHit.Implicit then
+    while LM.Tree.Nodes[LFirst].FirstChild <> NIL_NODE do
+      LFirst := LM.Tree.Nodes[LFirst].FirstChild;
   LVisTok := LM.Tree.Nodes[LFirst].FirstToken;
   if (LVisTok < 0) or (LVisTok > High(LM.Tree.Source.Visible)) then
     Exit;
@@ -1985,6 +1998,7 @@ begin
         LHit.Snippet := LSite.Snippet;
         LHit.HiFrom := LSite.HiFrom;
         LHit.HiTo := LSite.HiTo;
+        LHit.Implicit := False;
         LHits.Add(LHit);
       end;
     Result := LHits.ToArray;
@@ -2122,6 +2136,15 @@ begin
   Result := False;
   if (ANode < 0) or (ANode > High(LM.Tree.Nodes)) then
     Exit;
+  // The brackets of an implicit default-property use (HitFromNode) run its
+  // setter only when they are what is assigned: in `L[I][J] := V` the inner
+  // `L[I]` is read, whatever the climb below says of a name inside it.
+  if LM.Tree.Nodes[ANode].Kind = nkIndex then
+  begin
+    LParent := LM.Tree.Nodes[ANode].Parent;
+    Exit((LParent <> NIL_NODE) and (LM.Tree.Nodes[LParent].Kind = nkAssign) and
+      (LM.Tree.Nodes[LParent].FirstChild = ANode));
+  end;
   LCur := ANode;
   // Bounded: a designator nests as deep as it is written, never further.
   while True do
@@ -2672,6 +2695,7 @@ begin
   AHit.Snippet := LTS.LineText(AHit.Line);
   AHit.HiFrom := AHit.Col - 1;
   AHit.HiTo := AHit.HiFrom + ARef.Len;
+  AHit.Implicit := False;
 end;
 
 function TPasNavigator.DefineAt(AMid, ALine, ACol: Integer;
@@ -2854,6 +2878,7 @@ begin
   Result.Hit.Snippet := AName;
   Result.Hit.HiFrom := 0;
   Result.Hit.HiTo := Length(AName);
+  Result.Hit.Implicit := False;
 end;
 
 procedure TPasNavigator.SortAndCollapseSites(
@@ -5755,6 +5780,7 @@ begin
   AHit.Snippet := LTS.LineText(AHit.Line);
   AHit.HiFrom := AHit.Col - 1;
   AHit.HiTo := LColTo - 1;
+  AHit.Implicit := False;
   Result := AHit.HiTo > AHit.HiFrom;
 end;
 
@@ -6006,6 +6032,9 @@ var
     LHits := FindReferences(AMid, ASymbol, True);
     for LI := 0 to High(LHits) do
     begin
+      // `L[I]` writes no name: nothing to rename there.
+      if LHits[LI].Implicit then
+        Continue;
       LEdit.FilePath := LHits[LI].FilePath;
       LEdit.Line := LHits[LI].Line;
       LEdit.Col := LHits[LI].Col;

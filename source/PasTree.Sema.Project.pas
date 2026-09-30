@@ -634,9 +634,12 @@ type
     { The type of `Base[i1, .., iN]` - ACount index levels peeled off the
       base's type (or, when that type is an inline array on the base's own
       declaration, off that node). See the implementation for why ElementX,
-      which peels to the INNERMOST element regardless of count, is not it. }
+      which peels to the INNERMOST element regardless of count, is not it.
+      APropMid/APropSym: the default array property the brackets went
+      through - the first, when levels pass several - or NIL_SYM: `L[I]`
+      over a class is a use of it written without its name. }
     function IndexResultX(AId, ABaseNode: Integer; const ABaseX: TSemaXType;
-      ACount: Integer): TSemaXType;
+      ACount: Integer; out APropMid, APropSym: Integer): TSemaXType;
     function BuiltinX(AMid: Integer; const ANameLower: string): TSemaXType;
     function IsIntrinsicRoutine(AMid, ASym: Integer;
       out AShape: TPasIntrinsicResult): Boolean;
@@ -10426,7 +10429,7 @@ var
   procedure Walk(N: Integer);
   var
     LChild, LBase, LName, LSym, LMemMid, LMemSym, LCtx: Integer;
-    LBestMid, LBestSym, LMemCtx: Integer;
+    LBestMid, LBestSym, LMemCtx, LIdxMid, LIdxSym: Integer;
     LAmbiguous: Boolean;
     LExt: TPasExtRef;
     LBX: TSemaXType;
@@ -11045,7 +11048,25 @@ var
                 Inc(LMemCtx);
                 LChild := LM.Tree.Nodes[LChild].NextSibling;
               end;
-              SetXAt(N, IndexResultX(AId, LBase, LBX, LMemCtx));
+              SetXAt(N, IndexResultX(AId, LBase, LBX, LMemCtx, LIdxMid,
+                LIdxSym));
+              // The default array property the brackets went through: a use
+              // of it with no name written (`L[I]` reads L.Items[I]), keyed
+              // on the nkIndex node itself - Find References, callers of its
+              // getter and setter, and a rename's reach all ask for it, and
+              // the navigator tells such a key from a name (TPasRefHit.
+              // Implicit). Nothing else keys a map on a non-identifier node.
+              if LIdxSym <> NIL_SYM then
+              begin
+                if LIdxMid = AId then
+                  SetRefAt(N, LIdxSym)
+                else
+                begin
+                  LExt.UnitId := LIdxMid;
+                  LExt.Sym := LIdxSym;
+                  LNewExt.AddOrSetValue(N, LExt);
+                end;
+              end;
               // Nothing from the base's TYPE: the element is read off the
               // base's declaration NODE instead. Two shapes need it - a type
               // that could not be named at all, an inline `array[..] of T` on
@@ -12452,7 +12473,8 @@ end;
   stops INSIDE an inline nesting - that row type is anonymous and has no
   symbol to answer with; typing it wrongly is what this replaces. }
 function TPasSemaProject.IndexResultX(AId, ABaseNode: Integer;
-  const ABaseX: TSemaXType; ACount: Integer): TSemaXType;
+  const ABaseX: TSemaXType; ACount: Integer; out APropMid,
+  APropSym: Integer): TSemaXType;
 var
   LRemaining: Integer;
 
@@ -12525,6 +12547,8 @@ var
   LMid, LSym, LDef, LDepth: Integer;
 begin
   Result := XNil;
+  APropMid := NIL_SYM;
+  APropSym := NIL_SYM;
   if ACount <= 0 then
     Exit;
   LRemaining := ACount;
@@ -12587,6 +12611,11 @@ begin
           // its parameters are all consumed here as one.
           if not DefaultArrayPropX(LCur, LMid, LSym, LOwner) then
             Exit(XNil);
+          if APropSym = NIL_SYM then
+          begin
+            APropMid := LMid;
+            APropSym := LSym;
+          end;
           Dec(LRemaining);
           LCur := SubstX(SymDeclTypeX(LMid, LSym), LOwner.Inst, 0);
         end;

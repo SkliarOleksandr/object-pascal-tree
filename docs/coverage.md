@@ -295,6 +295,15 @@ same-arity overloads differing only in modifiers can mis-pair.
   accessors are resolved as names only. Default array properties are not
   typed on the completion overlay path.
 
+### 13.1.4 Default array properties
+- `L[I]` is a use of L's default array property with no name written: bound
+  by CrossType, keyed on the nkIndex node (a Find References hit at the `[`,
+  `Implicit`). The property is the first one `DefaultArrayPropX` meets up
+  the ancestors - two default properties overloaded by index type are not
+  told apart - and when the brackets pass several levels (`A[I, J]` over an
+  array of a class), the first property passed. A class helper's default
+  property is not consulted.
+
 ## 14-interfaces.md
 
 ### 14.2.1 Classes implementing interfaces
