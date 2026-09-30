@@ -225,7 +225,7 @@ function BuildPreprocessorCases(APP: TPasPreprocessor): TPasCustomCases;
         try
           LPP.OnSymbol :=
             function(AQuery: TPasSymbolQuery; const AName: string;
-              out AValue: TPasSymbolValue): Boolean
+              const APos: TPasCondPos; out AValue: TPasSymbolValue): Boolean
             begin
               AValue := Default(TPasSymbolValue);
               AValue.Num := 1;

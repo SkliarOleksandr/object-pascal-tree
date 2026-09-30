@@ -174,6 +174,13 @@ type
     VisIndex: Integer;
   end;
 
+  // Where a `$IF` directive stands, for an oracle that answers by position
+  // (TPasDeclaredQuery, TPasCondSymbolQuery).
+  TPasCondPos = record
+    FileName: string;    // as the preprocessed unit's FileNames spells it
+    Offset: Integer;     // the directive's offset in that file
+  end;
+
   // What an oracle hands back for a symbol question. A constant is not always
   // a number: the version-guard idiom compares STRINGS -- Indy's
   // `$IF gsIdVersion >= '10.5.5'` -- and a numeric-only answer has to refuse
@@ -195,9 +202,15 @@ type
   { Answers symbol questions from a `$IF` expression - the widened sibling of
     TPasDeclaredQuery, same three-state contract: the RESULT says whether the
     oracle could answer at all, AValue is the answer when it could. Nil on the
-    first pass; TPasSemaProject.SymbolQueryFor supplies it on the second. }
+    first pass; TPasSemaProject.SymbolQueryFor supplies it on the second.
+
+    APos says where the directive stands, as for TPasDeclaredQuery: dcc
+    reads the asking unit's own constants and types by position. FileName
+    '' when there is no directive to place (a question asked again after
+    the pass); the oracle then answers position-free. }
   TPasCondSymbolQuery = reference to function(AQuery: TPasSymbolQuery;
-    const AName: string; out AValue: TPasSymbolValue): Boolean;
+    const AName: string; const APos: TPasCondPos;
+    out AValue: TPasSymbolValue): Boolean;
 
   TPasPreprocessed = record
   public
@@ -288,12 +301,7 @@ type
     APos says where the directive stands. dcc answers the asking unit's OWN
     names by position - declared above the directive and in scope there -
     so an oracle that answers those needs it; one that answers only from
-    outside the unit ignores it. }
-  TPasCondPos = record
-    FileName: string;    // as the preprocessed unit's FileNames spells it
-    Offset: Integer;     // the directive's offset in that file
-  end;
-
+    outside the unit ignores it (TPasCondPos). }
   TPasDeclaredQuery = reference to function(const AName: string;
     const APos: TPasCondPos; out ADeclared: Boolean): Boolean;
 

@@ -160,6 +160,16 @@ type
     Answer: Boolean;
   end;
 
+  // The same for a symbol question (a const value, SizeOf, Length): which of
+  // the unit's own declarations answered it - its file and offset, '' and -1
+  // when none did and the imports answered (see RunDeclaredPass).
+  TPasOwnSymAnswer = record
+    NameLower: string;
+    Pos: TPasCondPos;
+    DeclFile: string;
+    DeclOffset: Integer;
+  end;
+
   TPasSemaProject = class
   private
     FPlatform: TPasPlatform;
@@ -397,6 +407,10 @@ type
       ALog: TList<TPasOwnAnswer> = nil): TPasDeclaredQuery;
     function OwnDeclaredBefore(AM: TPasSemaModel; const ANameLower: string;
       const APos: TPasCondPos): Boolean;
+    function OwnSymbolAt(AM: TPasSemaModel; const ANameLower: string;
+      const APos: TPasCondPos; out ASym: Integer): Boolean;
+    function OwnSymbolSite(AM: TPasSemaModel; const ANameLower: string;
+      const APos: TPasCondPos; out AFile: string; out AOffset: Integer): Boolean;
     procedure RunDeclaredPass(ACount: Integer);
     procedure InjectGuessedIfDiags(ACount: Integer);
     procedure InjectGuessedIfDiagsOne(AId: Integer);
@@ -760,7 +774,8 @@ type
       const ASubst: TPasSubst; out ABytes: Double;
       out AAlign: Integer): Boolean;
     function OracleLength(AMid, ASym: Integer; out ALen: Double): Boolean;
-    function SymbolQueryFor(AId: Integer): TPasCondSymbolQuery;
+    function SymbolQueryFor(AId: Integer;
+      ALog: TList<TPasOwnSymAnswer> = nil): TPasCondSymbolQuery;
     function DeclaredWithinX(AMid, ASym, AOwnerMid, AOwnerSym: Integer): Boolean;
     // Is AX a type declared inside a GENERIC struct (so its definition may be
     // written in that struct's open parameters)? See the nkIdent case in
@@ -2240,6 +2255,46 @@ end;
 function TPasSemaProject.OwnDeclaredBefore(AM: TPasSemaModel;
   const ANameLower: string; const APos: TPasCondPos): Boolean;
 var
+  LSym: Integer;
+begin
+  // The unit's own name: its header stands above every directive.
+  if (AM <> nil) and (AM.UnitNameLower <> '') and
+     (ANameLower = AM.UnitNameLower) then
+    Exit(True);
+  Result := OwnSymbolAt(AM, ANameLower, APos, LSym) and (LSym <> NIL_SYM);
+end;
+
+{ The site of the declaration OwnSymbolAt finds - the file and offset of its
+  first token - for RunDeclaredPass's check that a round's own-name answer
+  still stands in the model it produced. False where the position cannot be
+  placed; AFile '' and AOffset -1 where it can and no own declaration
+  answers. }
+function TPasSemaProject.OwnSymbolSite(AM: TPasSemaModel;
+  const ANameLower: string; const APos: TPasCondPos; out AFile: string;
+  out AOffset: Integer): Boolean;
+var
+  LSym, LTok: Integer;
+begin
+  AFile := '';
+  AOffset := -1;
+  Result := OwnSymbolAt(AM, ANameLower, APos, LSym);
+  if not Result or (LSym = NIL_SYM) or
+     (AM.Symbols[LSym].DeclNode = NIL_NODE) then
+    Exit;
+  LTok := AM.Tree.Nodes[AM.Symbols[LSym].DeclNode].FirstToken;
+  if (LTok < 0) or (LTok > High(AM.Tree.Source.Visible)) then
+    Exit;
+  AFile := AM.Tree.Source.FileNames[AM.Tree.Source.Visible[LTok].FileId];
+  AOffset := AM.Tree.Source.Files[AM.Tree.Source.Visible[LTok].FileId].Tokens[
+    AM.Tree.Source.Visible[LTok].TokenIndex].Start;
+end;
+
+{ OwnDeclaredBefore's positional lookup, with the symbol found: the result
+  says whether the position could be placed at all, ASym is the declaration
+  above the directive and in scope there (NIL_SYM for none). }
+function TPasSemaProject.OwnSymbolAt(AM: TPasSemaModel;
+  const ANameLower: string; const APos: TPasCondPos; out ASym: Integer): Boolean;
+var
   LM: TPasSemaModel;
   LFile, LIdx, LVis, LLastOfFile, LNode, LChild, LScope, LSym, LDecl: Integer;
   LDeeper: Boolean;
@@ -2247,12 +2302,12 @@ var
   // A type completed BELOW whose forward declaration (`TFoo = class;`)
   // stands above: the completion moved DeclNode to itself, the forward's
   // name still maps to the symbol.
-  function ForwardAbove(ASym: Integer): Boolean;
+  function ForwardAbove(ACand: Integer): Boolean;
   var
     LN, LName: Integer;
   begin
     Result := False;
-    if LM.Symbols[ASym].Kind <> skType then
+    if LM.Symbols[ACand].Kind <> skType then
       Exit;
     for LN := 0 to High(LM.Tree.Nodes) do
       if LM.Tree.Nodes[LN].Kind = nkTypeDecl then
@@ -2262,7 +2317,7 @@ var
               (LM.Tree.Nodes[LName].Kind = nkAttrGroup) do
           LName := LM.Tree.Nodes[LName].NextSibling;
         if (LName <> NIL_NODE) and (LName <= High(LM.RefMap)) and
-           (LM.RefMap[LName] = ASym) and
+           (LM.RefMap[LName] = ACand) and
            (LM.Tree.Nodes[LName].FirstToken < LVis) then
           Exit(True);
       end;
@@ -2270,13 +2325,11 @@ var
 
 begin
   Result := False;
+  ASym := NIL_SYM;
   LM := AM;
   if (LM = nil) or (LM.NodeScope = nil) or (APos.FileName = '') or
      (Length(LM.Tree.Nodes) = 0) then
     Exit;
-  // The unit's own name: its header stands above every directive.
-  if (LM.UnitNameLower <> '') and (ANameLower = LM.UnitNameLower) then
-    Exit(True);
   LFile := -1;
   for LIdx := 0 to High(LM.Tree.Source.FileNames) do
     if SameText(LM.Tree.Source.FileNames[LIdx], APos.FileName) then
@@ -2332,6 +2385,7 @@ begin
       LScope := LM.NodeScope[LNode];
     LNode := LM.Tree.Nodes[LNode].Parent;
   end;
+  Result := True;
   // Out through the scopes, each declaration checked for its position.
   while LScope <> NIL_SCOPE do
   begin
@@ -2344,7 +2398,10 @@ begin
         // No node: compiler-provided, declared everywhere.
         if (LDecl = NIL_NODE) or ((LDecl <= High(LM.Tree.Nodes)) and
            (LM.Tree.Nodes[LDecl].FirstToken < LVis)) or ForwardAbove(LSym) then
-          Exit(True);
+        begin
+          ASym := LSym;
+          Exit;
+        end;
       end;
       LSym := LM.Symbols[LSym].NextOverload;
     end;
@@ -2359,13 +2416,14 @@ end;
   (the value exists whichever branch the $IF takes), and same-unit
   declarations are exactly what the measured RTL sites reference
   (System.VarUtils' Generic* consts, System.Classes' TValueType, System.pas'
-  RegisteredTypeInfoTable). Two documented approximations, both inherited
-  from the pass's one-round design: declarations are read from the
-  FIRST-pass model (a value whose own declaration sits inside a branch the
-  second pass flips would be stale for that round), and position is not
-  checked (dcc answers a $IF only from declarations ABOVE it; a $IF
-  referencing a constant declared BELOW reads here as declared - code that
-  fragile hits dcc's undeclared-abort quirk anyway and exists in no corpus).
+  RegisteredTypeInfoTable). The own names answer by position as dcc reads
+  them (SymbolQueryFor: the declaration above the directive and in scope
+  there, else the imports), from the unit's REGISTERED model - the first
+  pass's in the first iteration of RunDeclaredPass, whose branches may be
+  the ones re-decided; the iterations re-run a unit until the own
+  declarations that answered are the ones its new model has there. A
+  question with no directive to place (asked again after the pass) and a
+  dotted name read the whole own scope first, then the imports.
 
   Everything is three-state and proof-or-refuse: an initializer that does not
   fold to a clean number/bool, an enum with explicit values, a record with
@@ -2451,7 +2509,7 @@ begin
   LCtx.ExtendedBytes := FInfo.ExtendedBytes;
   LCtx.OnSymbol :=
     function(AQuery: TPasSymbolQuery; const AName: string;
-      out AV: TPasSymbolValue): Boolean
+      const APos: TPasCondPos; out AV: TPasSymbolValue): Boolean
     var
       LRMid, LRSym: Integer;
     begin
@@ -3136,7 +3194,7 @@ begin
   LCtx.ExtendedBytes := FInfo.ExtendedBytes;
   LCtx.OnSymbol :=
     function(AQuery: TPasSymbolQuery; const AName: string;
-      out AV: TPasSymbolValue): Boolean
+      const APos: TPasCondPos; out AV: TPasSymbolValue): Boolean
     var
       LRMid, LRSym: Integer;
     begin
@@ -3658,7 +3716,7 @@ begin
   LCtx.ExtendedBytes := FInfo.ExtendedBytes;
   LCtx.OnSymbol :=
     function(AQuery: TPasSymbolQuery; const AName: string;
-      out AV: TPasSymbolValue): Boolean
+      const APos: TPasCondPos; out AV: TPasSymbolValue): Boolean
     var
       LRMid, LRSym: Integer;
     begin
@@ -3676,20 +3734,51 @@ begin
   Result := True;
 end;
 
-function TPasSemaProject.SymbolQueryFor(AId: Integer): TPasCondSymbolQuery;
+{ ALog, when given, collects which own declaration answered each placed
+  question (RunDeclaredPass checks them against the model the pass produced). }
+function TPasSemaProject.SymbolQueryFor(AId: Integer;
+  ALog: TList<TPasOwnSymAnswer>): TPasCondSymbolQuery;
 begin
   Result :=
     function(AQuery: TPasSymbolQuery; const AName: string;
-      out AValue: TPasSymbolValue): Boolean
+      const APos: TPasCondPos; out AValue: TPasSymbolValue): Boolean
     var
       LMid, LSym: Integer;
+      LLower: string;
+      LFound: Boolean;
+      LAnswer: TPasOwnSymAnswer;
     begin
       Result := False;
       AValue := Default(TPasSymbolValue);
-      // Qualified names resolve too - dcc evaluates a `$IF Unit.Const > 1`
-      // guard for real, so refusing the dot invented a residual guess where
-      // the compiler had a plain answer (see OracleQualified).
-      if not OracleQualified(AId, AName, LMid, LSym) then
+      LLower := LowerCase(AName);
+      // A plain name at a placed directive: the unit's own declarations
+      // answer by position, as dcc reads them (OwnSymbolAt) - the one above
+      // the directive and in scope there, else the imports, never the unit's
+      // own declaration below it or in a branch this pass does not take.
+      // Otherwise - a dotted name, a question with no directive to place -
+      // the whole own scope first, then the imports (OracleQualified).
+      if not AName.Contains('.') and
+         OwnSymbolAt(FModels[AId], LLower, APos, LSym) then
+      begin
+        LMid := AId;
+        LFound := LSym <> NIL_SYM;
+        if ALog <> nil then
+        begin
+          LAnswer.NameLower := LLower;
+          LAnswer.Pos := APos;
+          OwnSymbolSite(FModels[AId], LLower, APos, LAnswer.DeclFile,
+            LAnswer.DeclOffset);
+          ALog.Add(LAnswer);
+        end;
+        if not LFound then
+          LFound := ResolveRealDecl(AId, LLower, LMid, LSym) and (LMid <> AId);
+      end
+      else
+        // Qualified names resolve too - dcc evaluates a `$IF Unit.Const > 1`
+        // guard for real, so refusing the dot invented a residual guess where
+        // the compiler had a plain answer (see OracleQualified).
+        LFound := OracleQualified(AId, AName, LMid, LSym);
+      if not LFound then
       begin
         // "Exists nowhere" is a stronger claim than "I could not resolve it",
         // and CondEval copies dcc's abort verdict from it - so only make it
@@ -3719,10 +3808,12 @@ end;
   only window where it is safe: the imports it must consult have models, while
   nothing yet holds a (unit, symbol) reference INTO the models being replaced.
 
-  ONE round, by design. A re-decided unit can in principle change its own
-  interface, which would change the answer for a unit that imports it; chasing
-  that to a fixpoint would mean re-parsing on every round for a shape nobody
-  writes (the guards ask about RTL names, not about each other). Units the new
+  No fixpoint ACROSS units, by design. A re-decided unit can in principle
+  change its own interface, which would change the answer for a unit that
+  imports it; chasing that would mean re-parsing on every round for a shape
+  nobody writes (the guards ask about RTL names, not about each other). A
+  unit's answers from its OWN declarations are settled, though: Declared by
+  the rounds inside each worker, symbol values by the iterations. Units the new
   branch newly imports ARE loaded, though - otherwise the unit would end up
   with an unresolved `uses`, which gates its diagnostics entirely. }
 procedure TPasSemaProject.RunDeclaredPass(ACount: Integer);
@@ -3739,6 +3830,11 @@ var
   LPos: TPasCondPos;
   LAnswer, LIsCand: Boolean;
   LNum: TPasSymbolValue;
+  LIter, LSiteOff: Integer;
+  LNext: TArray<Integer>;
+  LSymLogs: TArray<TArray<TPasOwnSymAnswer>>;
+  LSymAns: TPasOwnSymAnswer;
+  LSite: string;
 begin
   // Candidates are not "asked a question" but "would get a DIFFERENT answer".
   // The first pass answered every Declared() False, so a unit whose names all
@@ -3783,7 +3879,8 @@ begin
         // is what lets CondEval apply dcc's abort rules instead of leaving the
         // first pass's False guess standing - a different verdict, not a
         // byte-identical one.
-        if LSymQuery(LUnsym.Query, LUnsym.Name, LNum) or LNum.NoSymbol then
+        if LSymQuery(LUnsym.Query, LUnsym.Name, Default(TPasCondPos), LNum) or
+           LNum.NoSymbol then
         begin
           LIsCand := True;
           Break;
@@ -3792,108 +3889,150 @@ begin
     if LIsCand then
       LCand := LCand + [LIdx];
   end;
-  if LCand = nil then
-    Exit;
-  // Ask first, in PARALLEL and without touching anything: a worker reads other
-  // models' frozen interface scopes and writes only its own slot.
-  SetLength(LDone, Length(LCand));
-  ForEachIndex(High(LCand), 'declared-pass',
-    procedure(AIndex: Integer)
-    var
-      LPP: TPasPreprocessor;
-      LDiags: TArray<TPasParseDiag>;
-      LLog: TList<TPasOwnAnswer>;
-      LBase, LNew: TPasSemaModel;
-      LRound, LA: Integer;
-      LStable: Boolean;
-    begin
-      LDone[AIndex] := nil;
-      LBase := nil;
-      LPP := RentPP;
-      LLog := TList<TPasOwnAnswer>.Create;
-      try
+  // Iterations, until the unit's own declarations that answered a SYMBOL
+  // question (a const value, SizeOf, Length) are the ones the model the pass
+  // produced has there. A symbol question is answered from the unit's
+  // REGISTERED model - its values and layouts are read by unit id - which in
+  // the first iteration is the first pass's, whose branches are the ones
+  // being re-decided: spring4d's Spring.VirtualClass declares its own
+  // `CPP_ABI_ADJUST = 0` under `not Declared(CPP_ABI_ADJUST)`, which the
+  // first pass guessed False; this pass answers the guard True (System
+  // declares it) and drops that declaration, but `CPP_ABI_ADJUST > 0` below
+  // still read the dropped 0 instead of System's 24 on Win64. The next
+  // iteration answers from the committed model. Rare, so a unit is re-run
+  // only when an answer moved.
+  for LIter := 1 to 3 do
+  begin
+    if LCand = nil then
+      Break;
+    // Ask first, in PARALLEL and without touching anything: a worker reads other
+    // models' frozen interface scopes and writes only its own slot.
+    LDone := nil;
+    SetLength(LDone, Length(LCand));
+    LSymLogs := nil;
+    SetLength(LSymLogs, Length(LCand));
+    ForEachIndex(High(LCand), 'declared-pass',
+      procedure(AIndex: Integer)
+      var
+        LPP: TPasPreprocessor;
+        LDiags: TArray<TPasParseDiag>;
+        LLog: TList<TPasOwnAnswer>;
+        LSymLog: TList<TPasOwnSymAnswer>;
+        LBase, LNew: TPasSemaModel;
+        LRound, LA: Integer;
+        LStable: Boolean;
+      begin
+        LDone[AIndex] := nil;
+        LBase := nil;
+        LPP := RentPP;
+        LLog := TList<TPasOwnAnswer>.Create;
+        LSymLog := TList<TPasOwnSymAnswer>.Create;
         try
-          // Rounds, until the unit's own-name answers agree with the stream
-          // they produced. The first answers from the first-pass model; an
-          // earlier guard that this pass flips can add or remove a
-          // declaration a later guard asks about (FMX.Skia.Canvas: a record
-          // declared under `not Declared(RTLVersion132)`, which the first
-          // pass guessed True and the imports answer False, is what a later
-          // `Declared(<that record>)` guard reads), so each further round
-          // answers from the previous one's model. Decisions settle top down
-          // - a guard reads only declarations above it - so a round or two.
-          for LRound := 1 to 4 do
-          begin
-            LLog.Clear;
-            LPP.OnDeclared := DeclaredQueryFor(LCand[AIndex], LBase, LLog);
-            LPP.OnSymbol := SymbolQueryFor(LCand[AIndex]);
-            LNew := TPasSemaResolver.Analyze(
-              TPasParser.ParseFile(LPP.Process(FFiles[LCand[AIndex]]), LDiags),
-              False, FPlatform);
-            LNew.AddParseDiags(LDiags);
-            LStable := True;
-            for LA := 0 to LLog.Count - 1 do
-              if OwnDeclaredBefore(LNew, LLog[LA].NameLower, LLog[LA].Pos) <>
-                 LLog[LA].Answer then
-              begin
-                LStable := False;
+          try
+            // Rounds, until the unit's own-name answers agree with the stream
+            // they produced. The first answers from the first-pass model; an
+            // earlier guard that this pass flips can add or remove a
+            // declaration a later guard asks about (FMX.Skia.Canvas: a record
+            // declared under `not Declared(RTLVersion132)`, which the first
+            // pass guessed True and the imports answer False, is what a later
+            // `Declared(<that record>)` guard reads), so each further round
+            // answers from the previous one's model. Decisions settle top down
+            // - a guard reads only declarations above it - so a round or two.
+            for LRound := 1 to 4 do
+            begin
+              LLog.Clear;
+              LSymLog.Clear;
+              LPP.OnDeclared := DeclaredQueryFor(LCand[AIndex], LBase, LLog);
+              LPP.OnSymbol := SymbolQueryFor(LCand[AIndex], LSymLog);
+              LNew := TPasSemaResolver.Analyze(
+                TPasParser.ParseFile(LPP.Process(FFiles[LCand[AIndex]]), LDiags),
+                False, FPlatform);
+              LNew.AddParseDiags(LDiags);
+              LStable := True;
+              for LA := 0 to LLog.Count - 1 do
+                if OwnDeclaredBefore(LNew, LLog[LA].NameLower, LLog[LA].Pos) <>
+                   LLog[LA].Answer then
+                begin
+                  LStable := False;
+                  Break;
+                end;
+              LBase.Free;   // the previous round's model; nil on the first
+              LBase := LNew;
+              if LStable then
                 Break;
-              end;
-            LBase.Free;   // the previous round's model; nil on the first
-            LBase := LNew;
-            if LStable then
-              Break;
+            end;
+            LDone[AIndex] := LBase;
+            LSymLogs[AIndex] := LSymLog.ToArray;
+            LBase := nil;
+          except
+            // Keep the first-pass model. A unit that parsed once and throws now
+            // is a defect, but the wrong branch is still better than no unit at
+            // all - an unloadable unit gates every importer.
+            on Exception do
+            begin
+              LBase.Free;
+              LDone[AIndex] := nil;
+            end;
           end;
-          LDone[AIndex] := LBase;
-          LBase := nil;
-        except
-          // Keep the first-pass model. A unit that parsed once and throws now
-          // is a defect, but the wrong branch is still better than no unit at
-          // all - an unloadable unit gates every importer.
-          on Exception do
-          begin
-            LBase.Free;
-            LDone[AIndex] := nil;
-          end;
+        finally
+          LSymLog.Free;
+          LLog.Free;
+          ReturnPP(LPP);
         end;
-      finally
-        LLog.Free;
-        ReturnPP(LPP);
+      end,
+      // This pass walks a CANDIDATE list, so the body index is not a unit id.
+      function(AIndex: Integer): Integer
+      begin
+        Result := LCand[AIndex];
+      end);
+    // Then commit, sequentially. FModels OWNS its items, so the assignment is
+    // what frees the first-pass model - freeing it here as well is a double free.
+    for LIdx := 0 to High(LCand) do
+      if LDone[LIdx] <> nil then
+      begin
+        // An oracle-built stream cannot be reproduced from cold - mark it so
+        // text demotion skips this model (see TPasSemaModel.OracleStream).
+        LDone[LIdx].OracleStream := True;
+        // The questions of BOTH passes: the first pass's are what the oracle
+        // answered (no longer unresolved in LDone), the second's are what still
+        // nobody could - either kind may decide a branch. A later iteration
+        // replaces a model this pass built, which holds them already.
+        if FModels[LCand[LIdx]].OracleStream then
+          LDone[LIdx].OracleNames := FModels[LCand[LIdx]].OracleNames +
+            OracleNamesOf(LDone[LIdx])
+        else
+          LDone[LIdx].OracleNames := OracleNamesOf(FModels[LCand[LIdx]]) +
+            OracleNamesOf(LDone[LIdx]);
+        FModels[LCand[LIdx]] := LDone[LIdx];
       end;
-    end,
-    // This pass walks a CANDIDATE list, so the body index is not a unit id.
-    function(AIndex: Integer): Integer
-    begin
-      Result := LCand[AIndex];
-    end);
-  // Then commit, sequentially. FModels OWNS its items, so the assignment is
-  // what frees the first-pass model - freeing it here as well is a double free.
-  for LIdx := 0 to High(LCand) do
-    if LDone[LIdx] <> nil then
-    begin
-      // An oracle-built stream cannot be reproduced from cold - mark it so
-      // text demotion skips this model (see TPasSemaModel.OracleStream).
-      LDone[LIdx].OracleStream := True;
-      // The questions of BOTH passes: the first pass's are what the oracle
-      // answered (no longer unresolved in LDone), the second's are what still
-      // nobody could - either kind may decide a branch.
-      LDone[LIdx].OracleNames := OracleNamesOf(FModels[LCand[LIdx]]) +
-        OracleNamesOf(LDone[LIdx]);
-      FModels[LCand[LIdx]] := LDone[LIdx];
-    end;
-  LPaths := nil;
-  for LIdx := 0 to High(LCand) do
-    if LDone[LIdx] <> nil then
-      for LU := 0 to High(FModels[LCand[LIdx]].UsesList) do
-        if FSM.ResolveUnit(FModels[LCand[LIdx]].UsesList[LU].NameFull,
-             FModels[LCand[LIdx]].UsesList[LU].InPath, FFiles[LCand[LIdx]],
-             LPath) and not FByPath.ContainsKey(LowerCase(LPath)) then
-          LPaths := LPaths + [LPath];
-  if LPaths <> nil then
-    LoadFilesParallel(LPaths);
-  for LIdx := 0 to High(LCand) do
-    if LDone[LIdx] <> nil then
-      ResolveUses(LCand[LIdx]);
+    LPaths := nil;
+    for LIdx := 0 to High(LCand) do
+      if LDone[LIdx] <> nil then
+        for LU := 0 to High(FModels[LCand[LIdx]].UsesList) do
+          if FSM.ResolveUnit(FModels[LCand[LIdx]].UsesList[LU].NameFull,
+               FModels[LCand[LIdx]].UsesList[LU].InPath, FFiles[LCand[LIdx]],
+               LPath) and not FByPath.ContainsKey(LowerCase(LPath)) then
+            LPaths := LPaths + [LPath];
+    if LPaths <> nil then
+      LoadFilesParallel(LPaths);
+    for LIdx := 0 to High(LCand) do
+      if LDone[LIdx] <> nil then
+        ResolveUses(LCand[LIdx]);
+    // The units whose own answers moved: again, from the model just committed.
+    LNext := nil;
+    for LIdx := 0 to High(LCand) do
+      if LDone[LIdx] <> nil then
+        for LSymAns in LSymLogs[LIdx] do
+          if not OwnSymbolSite(FModels[LCand[LIdx]], LSymAns.NameLower,
+               LSymAns.Pos, LSite, LSiteOff) or
+             not SameText(LSite, LSymAns.DeclFile) or
+             (LSiteOff <> LSymAns.DeclOffset) then
+          begin
+            LNext := LNext + [LCand[LIdx]];
+            Break;
+          end;
+    LCand := LNext;
+  end;
 end;
 
 { One PPENC per file that had to be RECOVERED to be read - see
@@ -4029,7 +4168,7 @@ begin
           end
           else if not LSymQuery(
             LM.Tree.Source.Diagnostics[LDIdx].Unanswered[LQIdx].Query,
-            LName, LNum) then
+            LName, Default(TPasCondPos), LNum) then
             case LM.Tree.Source.Diagnostics[LDIdx].Unanswered[LQIdx].Query of
               sqSizeOfType: LOpen := LOpen + ['SizeOf(' + LName + ')'];
               sqLengthOf: LOpen := LOpen + ['Length(' + LName + ')'];

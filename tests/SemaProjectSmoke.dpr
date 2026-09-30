@@ -1080,6 +1080,26 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { A `$IF` over a constant's VALUE reads the declaration the second pass
+    keeps (plan finding F25; spring4d's Spring.VirtualClass shape): the first
+    pass guesses `Declared(VAdjust)` False and declares its own 0, the second
+    answers it True (the import declares 24) and drops the 0 - and the value
+    guard below must read the import's 24, not the dropped 0. An own
+    constant above still answers. dcc32/dcc64 37.0 compile it with
+    SawImported and SawOwnAbove, no SawDropped. }
+  UNIT_DCLVBASE =
+    'unit UnitDclVBase;'#10'interface'#10'const'#10'  VAdjust = 24;'#10 +
+    'implementation'#10'end.'#10;
+
+  UNIT_DCLVAL =
+    'unit UnitDclVal;'#10'interface'#10'uses UnitDclVBase;'#10 +
+    '{$IF not Declared(VAdjust)}'#10'const VAdjust = 0;'#10'{$IFEND}'#10 +
+    '{$IF VAdjust > 0} const SawImported = 1; {$IFEND}'#10 +
+    '{$IF VAdjust = 0} const SawDropped = 1; {$IFEND}'#10 +
+    'const OwnAbove = 3;'#10 +
+    '{$IF OwnAbove = 3} const SawOwnAbove = 1; {$IFEND}'#10 +
+    'implementation'#10'end.'#10;
+
   { A NESTED type of a generic, returned by one of its own members: the frame
     has to travel WITH the type, because that type has no arguments of its own
     yet its definition is written in the enclosing generic's parameters.
@@ -2718,6 +2738,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitDclBase.pas'), UNIT_DCLBASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitDclUse.pas'), UNIT_DCLUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitDclPos.pas'), UNIT_DCLPOS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitDclVBase.pas'), UNIT_DCLVBASE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitDclVal.pas'), UNIT_DCLVAL);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNGBase.pas'), UNIT_NGBASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitNGUse.pas'), UNIT_NGUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitWX.pas'), UNIT_WX);
@@ -3412,6 +3434,17 @@ begin
       Assigned(LDP) and (SymCountOf(LDP, 'tposworkaround', skType) = 0));
     Ok('declared-pos: ...and a later guard reads the stream it produced',
       Assigned(LDP) and (SymCountOf(LDP, 'sawworkaround', skConst) = 0));
+
+    // ...and a value guard reads the declaration the second pass kept.
+    var LDV := ModelByName('unitdclval');
+    Ok('declared-val: UnitDclVal loaded', Assigned(LDV));
+    Ok('declared-val: the own fallback is dropped',
+      Assigned(LDV) and (SymCountOf(LDV, 'vadjust', skConst) = 0));
+    Ok('declared-val: the value guard reads the import''s constant',
+      Assigned(LDV) and (SymCountOf(LDV, 'sawimported', skConst) = 1) and
+      (SymCountOf(LDV, 'sawdropped', skConst) = 0));
+    Ok('declared-val: an own constant above still answers',
+      Assigned(LDV) and (SymCountOf(LDV, 'sawownabove', skConst) = 1));
 
     // A NESTED type of a generic carries the frame it was reached through.
     var LNG := ModelByName('unitnguse');

@@ -49,10 +49,9 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   project names - an older version's set (no `MANAGED_RECORD` before 10.4)
   is not modelled.
 - a shipped unit is evaluated under the project's defines, not the ones its
-  own `.dcu` was built with: the Win64 `System.dcu` was built with
-  `CPP_ABI_SUPPORT`, so dcc64 user code sees `CPP_ABI_ADJUST = 24` (and the
-  vmt offsets derived from it) where PasTree evaluates `System.pas` to 0; a
-  `$IF` over such a constant can go the other way.
+  own `.dcu` was built with. No corpus shows a difference: the one case that
+  looked like it (`CPP_ABI_ADJUST`, 24 on Win64) is defined by System.pas
+  itself, and PasTree's wrong value there was a stale read, fixed (F25).
 
 ### 1.3.3 Include files
 - the `{$I %ENV%}` / `{$I %DATE%}` insertion forms are

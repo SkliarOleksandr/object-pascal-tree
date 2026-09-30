@@ -184,7 +184,6 @@ minus before a member call - agree with dcc everywhere they were met.
 | F7 | the parser | an attribute group after a var or const section, before a routine, is parsed and not adopted - the routine loses its attributes |
 | F8 | the parser, error mode | the root stops where a broken parse stopped, the rest of the file in no node |
 | F22 | the preprocessor | a conditional crossing an include boundary is accepted; dcc refuses it (invalid code only) |
-| F25 | the oracle's input | a shipped RTL unit built with a define no project has: its constants (the vmt offsets on Win64) evaluate otherwise |
 
 Fixed on the way, each by its own reviewed change: a subrange bound that
 swallowed an initializer's `=` (F6, silent on a variable), directives of a
@@ -210,7 +209,12 @@ extra; the sets are now what every installed dcc 37.0 answers, the switch
 start state has `N+`, and NativeInt's helper is the one of the integer of
 its size) and where an include is looked for (F23 - beside the including
 file first, where dcc looks beside the unit, then the current directory,
-then `-I`; the naming file's directory is now a last-resort tolerance).
+then `-I`; the naming file's directory is now a last-resort tolerance) and
+which declaration a `$IF` over a constant's value reads (F25 - the first
+pass's model, where a guard the second pass flips still held the unit's own
+fallback: `CPP_ABI_ADJUST = 0` instead of System's 24 on Win64; now the own
+declaration above the directive in the decided stream, else the import's -
+filed first as a vendor build define, which it was not).
 
 ## 5. The gate
 

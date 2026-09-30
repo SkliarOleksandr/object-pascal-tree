@@ -574,7 +574,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     LAns := Default(TPasSymbolValue);
     if Assigned(ACtx.OnSymbol) then
     begin
-      if ACtx.OnSymbol(AQuery, AName, LAns) then
+      if ACtx.OnSymbol(AQuery, AName, ACtx.DirPos, LAns) then
       begin
         if not LAns.IsStr then
           Exit(MkNum(LAns.Num));
