@@ -1331,8 +1331,10 @@ const
     include; bodies in the implementation), each on a known line. }
   { A default array property used without its name (13.1.4): `C[0] := C[1]`
     in its own unit, and in another one a read with a member after it, a
-    write, one through a descendant, two through an array first (`[0][1]` as
-    two nodes, `[2, 3]` as one) and the explicit `L.Cells[4]`. Columns are of
+    write, one through a descendant, one after an array's own bracket
+    (`[0][1]`), a `with` target and the explicit `L.Cells[4]`. (`G.Rows[2, 3]`,
+    a comma list carried from the array into the property, is dcc's E2016 -
+    object-pascal-spec 13.1.4.) Columns are of
     the `[`, the hit of an implicit use. }
   UNIT_DPA =
     'unit NavDpA;'#10 +                                          // 1
@@ -1383,7 +1385,7 @@ const
     '  L[1] := nil;'#10 +                                        // 11 [ col 4 write
     '  M[2] := L[3];'#10 +                                       // 12 [ col 4 write, col 12 read
     '  G.Rows[0][1].Text := S;'#10 +                             // 13 [ col 12 read (col 9 the array)
-    '  S := G.Rows[2, 3].Text;'#10 +                             // 14 [ col 14 read
+    '  with L[4] do S := Text;'#10 +                             // 14 [ col 9 read, Text col 21
     '  L.Cells[4] := nil;'#10 +                                  // 15 Cells col 5, written
     'end;'#10 +                                                  // 16
     'end.'#10;                                                   // 17
@@ -3614,10 +3616,10 @@ begin
       Ok('FindReferences: default property - through a descendant',
         HasImplicitAt(LHits, 'NavDpB.pas', 12, 4, True) and
         HasImplicitAt(LHits, 'NavDpB.pas', 12, 12, True));
-      Ok('FindReferences: default property - after an array, two nodes or one',
+      Ok('FindReferences: default property - after an array, and a with target',
         HasImplicitAt(LHits, 'NavDpB.pas', 13, 12, True) and
         not HasHitAt(LHits, 'NavDpB.pas', 13, 9) and
-        HasImplicitAt(LHits, 'NavDpB.pas', 14, 14, True));
+        HasImplicitAt(LHits, 'NavDpB.pas', 14, 9, True));
       Ok('FindReferences: default property - the name written is not implicit',
         HasImplicitAt(LHits, 'NavDpB.pas', 15, 5, False) and
         HasImplicitAt(LHits, 'NavDpC.pas', 19, 21, False));
@@ -3633,6 +3635,10 @@ begin
         GNav.PlanRename(LRTMid, LRSym, 'Items', {out} LEdits, {out} LErr) and
         (Length(LEdits) = 3) and
         HasEdit(LEdits, 'NavDpB.pas', 15, 5, '  L.Items[4] := nil;', 4, 9));
+      // The with target's element: `Text` in the body is the TCell's.
+      GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavDpB.pas'));
+      CheckNav('default property as a with target: a name in its body',
+        14, 21, 'Text', 'NavDpA.pas', 6, 5);
       // Two parameters, two index expressions, one level: `S[1, 2]` is a
       // TCells. The brackets were typed one level too deep - through TCells'
       // own default property, to TCell - and `.Cells` stayed unbound.

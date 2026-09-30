@@ -637,8 +637,10 @@ type
       declaration, off that node). See the implementation for why ElementX,
       which peels to the INNERMOST element regardless of count, is not it.
       APropMid/APropSym: the default array property the brackets went
-      through - the first, when levels pass several - or NIL_SYM: `L[I]`
-      over a class is a use of it written without its name. }
+      through, or NIL_SYM: `L[I]` over a class is a use of it written
+      without its name. (A comma list read on from an array into a default
+      property, `A[0, 1]` over `array of TCells`, is dcc's E2016; typed here
+      leniently, through the property.) }
     function IndexResultX(AId, ABaseNode: Integer; const ABaseX: TSemaXType;
       ACount: Integer; out APropMid, APropSym: Integer): TSemaXType;
     function BuiltinX(AMid: Integer; const ANameLower: string): TSemaXType;

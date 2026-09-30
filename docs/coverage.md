@@ -300,9 +300,10 @@ same-arity overloads differing only in modifiers can mis-pair.
   by CrossType, keyed on the nkIndex node (a Find References hit at the `[`,
   `Implicit`). The property is the first one `DefaultArrayPropX` meets up
   the ancestors - two default properties overloaded by index type are not
-  told apart - and when the brackets pass several levels (`A[I, J]` over an
-  array of a class), the first property passed. A class helper's default
-  property is not consulted.
+  told apart. A class helper's default property is not consulted. A comma
+  list carried from an array into a default property (`A[0, 1]` over
+  `array of TCells`) is dcc's E2016 (object-pascal-spec 13.1.4); PasTree
+  types and binds it leniently, through the property.
 
 ## 14-interfaces.md
 
