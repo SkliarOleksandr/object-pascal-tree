@@ -44,6 +44,8 @@ uses
   PasTree.Sema.Types in '..\source\PasTree.Sema.Types.pas',
   PasTree.Sema.Resolver in '..\source\PasTree.Sema.Resolver.pas',
   PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
+  PasTree.Dfm in '..\source\PasTree.Dfm.pas',
+  PasTree.Sema.Dfm in '..\source\PasTree.Sema.Dfm.pas',
   PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas',
   PasTree.Outline in '..\source\PasTree.Outline.pas',
   PasTree.Sema.Complete in '..\source\PasTree.Sema.Complete.pas',
