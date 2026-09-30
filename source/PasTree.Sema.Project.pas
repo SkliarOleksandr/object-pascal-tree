@@ -624,6 +624,7 @@ type
     function PointeeOfDeclX(AId, ABaseNode: Integer): TSemaXType;
     function IsDefaultArrayProp(AMid, ASym: Integer): Boolean;
     function PropertyHasParams(AMid, ASym: Integer): Boolean;
+    function PropertyParamCount(AMid, ASym: Integer): Integer;
     function RoutineHasParams(AMid, ASym: Integer): Boolean;
     function RoutineRequiresArgs(AMid, ASym: Integer): Boolean;
     function IsGenericRoutine(AMid, ASym: Integer): Boolean;
@@ -12606,9 +12607,12 @@ begin
         begin
           // `L[I]` over a default array property: the property's type, closed
           // over the frame the property was found in (TObjectList<TAttr>'s,
-          // two hops above `Items: T` - see DefaultArrayPropX). One level:
-          // a multi-parameter default property is written with commas, and
-          // its parameters are all consumed here as one.
+          // two hops above `Items: T` - see DefaultArrayPropX). One level of
+          // brackets, as many index expressions as it has parameters:
+          // `S[C, R]` over `Cells[ACol, ARow]` is one Cells, and taking one
+          // expression peeled the next off the property's own type - to Char
+          // off a string, to the element of a type with a default property of
+          // its own.
           if not DefaultArrayPropX(LCur, LMid, LSym, LOwner) then
             Exit(XNil);
           if APropSym = NIL_SYM then
@@ -12616,7 +12620,8 @@ begin
             APropMid := LMid;
             APropSym := LSym;
           end;
-          Dec(LRemaining);
+          Dec(LRemaining, EnsureRange(PropertyParamCount(LMid, LSym), 1,
+            LRemaining));
           LCur := SubstX(SymDeclTypeX(LMid, LSym), LOwner.Inst, 0);
         end;
     else
@@ -12676,6 +12681,59 @@ begin
     if LM.Tree.Nodes[LChild].Kind = nkParams then
       Exit(True);
     LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+{ How many index parameters a property declares - `Cells[ACol, ARow:
+  Integer]` two, the names counted as a routine's are (their nfName flag, an
+  attribute group skipped) - asked, like PropertyHasParams, of the declaration
+  a bare redeclaration republishes. 0 for none. Node kinds and flags only:
+  it runs on a demoted model. }
+function TPasSemaProject.PropertyParamCount(AMid, ASym: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LDecl, LChild, LParam, LName, LDepth, LPrevMid, LPrevSym: Integer;
+begin
+  Result := 0;
+  LM := FModels[AMid];
+  if (ASym = NIL_SYM) or (LM.Symbols[ASym].Kind <> skProperty) then
+    Exit;
+  for LDepth := 1 to 32 do
+  begin
+    if LM.Symbols[ASym].TypeNode <> NIL_NODE then
+      Break;
+    if not PropertyRedeclPrev(AMid, ASym, LPrevMid, LPrevSym) then
+      Break;
+    AMid := LPrevMid;
+    ASym := LPrevSym;
+    LM := FModels[AMid];
+  end;
+  LDecl := LM.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LDecl := LM.Tree.Nodes[LDecl].Parent;
+  if (LDecl = NIL_NODE) or (LM.Tree.Nodes[LDecl].Kind <> nkPropertyDecl) then
+    Exit;
+  LChild := LM.Tree.Nodes[LDecl].FirstChild;
+  while (LChild <> NIL_NODE) and (LM.Tree.Nodes[LChild].Kind <> nkParams) do
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  if LChild = NIL_NODE then
+    Exit;
+  LParam := LM.Tree.Nodes[LChild].FirstChild;
+  while LParam <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LParam].Kind = nkParam then
+    begin
+      LName := LM.Tree.Nodes[LParam].FirstChild;
+      while LName <> NIL_NODE do
+      begin
+        if (LM.Tree.Nodes[LName].Kind = nkIdent) and
+           (nfName in LM.Tree.Nodes[LName].Flags) then
+          Inc(Result);
+        LName := LM.Tree.Nodes[LName].NextSibling;
+      end;
+    end;
+    LParam := LM.Tree.Nodes[LParam].NextSibling;
   end;
 end;
 

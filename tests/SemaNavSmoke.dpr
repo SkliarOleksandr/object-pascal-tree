@@ -1372,7 +1372,7 @@ const
   UNIT_DPB =
     'unit NavDpB;'#10 +                                          // 1
     'interface'#10 +                                             // 2
-    'uses NavDpA;'#10 +                                          // 3
+    'uses NavDpA, NavDpC;'#10 +                                  // 3
     'procedure Use(L: TCells; M: TMoreCells; G: TGrid);'#10 +    // 4
     'implementation'#10 +                                        // 5
     'procedure Use(L: TCells; M: TMoreCells; G: TGrid);'#10 +    // 6
@@ -1387,6 +1387,31 @@ const
     '  L.Cells[4] := nil;'#10 +                                  // 15 Cells col 5, written
     'end;'#10 +                                                  // 16
     'end.'#10;                                                   // 17
+  // A default property of TWO parameters whose type has a default property
+  // of its own: `S[1, 2]` consumes both and is a TCells - not a level
+  // peeled further, to TCell - so `.Cells` binds.
+  UNIT_DPC =
+    'unit NavDpC;'#10 +                                          // 1
+    'interface'#10 +                                             // 2
+    'uses NavDpA;'#10 +                                          // 3
+    'type'#10 +                                                  // 4
+    '  TSheet = class'#10 +                                      // 5
+    '  private'#10 +                                             // 6
+    '    function GetAt(C, R: Integer): TCells;'#10 +            // 7
+    '  public'#10 +                                              // 8
+    '    property At[C, R: Integer]: TCells read GetAt; default;'#10 + // 9 At col 14
+    '  end;'#10 +                                                // 10
+    'function SheetText(S: TSheet): string;'#10 +                // 11
+    'implementation'#10 +                                        // 12
+    'function TSheet.GetAt(C, R: Integer): TCells;'#10 +         // 13
+    'begin'#10 +                                                 // 14
+    '  Result := nil;'#10 +                                      // 15
+    'end;'#10 +                                                  // 16
+    'function SheetText(S: TSheet): string;'#10 +                // 17
+    'begin'#10 +                                                 // 18
+    '  Result := S[1, 2].Cells[0].Text;'#10 +                    // 19 [ col 14, Cells col 21
+    'end;'#10 +                                                  // 20
+    'end.'#10;                                                   // 21
   UNIT_OUT =
     'unit NavOut;'#10 +                                          // 1
     'interface'#10 +                                             // 2
@@ -1803,6 +1828,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOut.pas'), UNIT_OUT);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDpA.pas'), UNIT_DPA);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDpB.pas'), UNIT_DPB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavDpC.pas'), UNIT_DPC);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOut.inc'), INC_OUT);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
@@ -3577,8 +3603,8 @@ begin
         GNav.SymbolAt(LMidDpA, 13, 14, {out} LRTMid, {out} LRSym,
           {out} LRName) and SameText(LRName, 'Cells'));
       LHits := GNav.FindReferences(LRTMid, LRSym);
-      Ok('FindReferences: default property - 8 uses through brackets + 1 by name',
-        Length(LHits) = 9);
+      Ok('FindReferences: default property - 8 uses through brackets + 2 by name',
+        Length(LHits) = 10);
       Ok('FindReferences: default property - its own unit, write and read',
         HasImplicitAt(LHits, 'NavDpA.pas', 32, 4, True) and
         HasImplicitAt(LHits, 'NavDpA.pas', 32, 12, True));
@@ -3593,7 +3619,8 @@ begin
         not HasHitAt(LHits, 'NavDpB.pas', 13, 9) and
         HasImplicitAt(LHits, 'NavDpB.pas', 14, 14, True));
       Ok('FindReferences: default property - the name written is not implicit',
-        HasImplicitAt(LHits, 'NavDpB.pas', 15, 5, False));
+        HasImplicitAt(LHits, 'NavDpB.pas', 15, 5, False) and
+        HasImplicitAt(LHits, 'NavDpC.pas', 19, 21, False));
       // A write is the brackets assigned; `L[0].Text` and `[0][1].Text` read.
       LHits := GNav.FindAssignments(LRTMid, LRSym);
       Ok('FindAssignments: default property - the 3 bracket writes + 1 by name',
@@ -3602,10 +3629,23 @@ begin
         HasHitAt(LHits, 'NavDpB.pas', 12, 4) and
         HasHitAt(LHits, 'NavDpB.pas', 15, 5));
       // Nothing to rewrite where no name is written.
-      Ok('PlanRename: default property - the declaration and the one name',
+      Ok('PlanRename: default property - the declaration and the two names',
         GNav.PlanRename(LRTMid, LRSym, 'Items', {out} LEdits, {out} LErr) and
-        (Length(LEdits) = 2) and
+        (Length(LEdits) = 3) and
         HasEdit(LEdits, 'NavDpB.pas', 15, 5, '  L.Items[4] := nil;', 4, 9));
+      // Two parameters, two index expressions, one level: `S[1, 2]` is a
+      // TCells. The brackets were typed one level too deep - through TCells'
+      // own default property, to TCell - and `.Cells` stayed unbound.
+      GMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavDpC.pas'));
+      Ok('NavDpC model found', GMidB >= 0);
+      CheckNav('default property of two parameters: the member after it',
+        19, 21, 'Cells', 'NavDpA.pas', 13, 14);
+      Ok('SymbolAt: TSheet.At',
+        GNav.SymbolAt(GMidB, 9, 14, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'At'));
+      LHits := GNav.FindReferences(LRTMid, LRSym);
+      Ok('FindReferences: default property of two parameters - its brackets',
+        (Length(LHits) = 1) and HasImplicitAt(LHits, 'NavDpC.pas', 19, 14, True));
 
       // Go to declaration ON a bare redeclaration climbs ONE link: the
       // promotion's name goes to the root's, TMoreProps' to TProps', and
