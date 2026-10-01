@@ -211,9 +211,10 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 ## 06-routines.md
 
 ## 6.2 Parameters
-- the const/var modifiers leave no AST node on parameters (`out` is the
-nkParam's Aux), so declaration-to-implementation pairing ignores them - two
-same-arity overloads differing only in modifiers can mis-pair.
+- the tree carries a parameter's mode (nfVar / nfConst / nfOut on the
+nkParam, v0.81.0), but declaration-to-implementation pairing still ignores
+it - two same-arity overloads differing only in their modifiers can
+mis-pair.
 
 ### 6.3.1 The `overload` directive
 - overload resolution is a conservative

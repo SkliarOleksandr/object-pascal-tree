@@ -91,7 +91,7 @@ type reference" is an nkIdent, nkMember or nkTypeArgs.
 | nkVisibility | [`strict` - nfNegated] the word Aux 1..5 names: private, protected, public, published, automated |
 | nkRoutine | the head word (see 3), the name segments (nfName) each with its [nkGenericParams], `.` between, [nkParams], [`:` result type] `;`, each nkDirective followed by `;`, [nkRoutineBody `;`] |
 | nkParams | `( c0; ... )` - `[ ... ]` for a property's index parameters |
-| nkParam | [attributes] (mode: see 4) [`out` - Aux] names (nfName; attributes may stand between them) [`:` type [`=` default]] |
+| nkParam | [attributes] [the mode - nfVar / nfConst / nfOut, see 5] [attributes] names (nfName; attributes may stand between them) [`:` type [`=` default]] |
 | nkDirective | the word (see 3), then its children - its values; Aux 1 only in an nkProcType, see there |
 | nkPropertyDecl | `property` name [nkParams] [`:` type] specifiers [hints] `;` [the trailing `default;`] |
 | nkPropSpec | the word (see 3), its values `, ...`; `default` with no value is the trailing `default;` of an array property and owns its `;` |
@@ -151,7 +151,6 @@ same program, and T3 counts the losses per finding.
 | F15 | an interface GUID written as a string literal |
 | F16 | a numeric label: `goto 10`, `10: S`, `label 10` |
 | F17 | program parameters, `program X(Input, Output);` |
-| F18 | a parameter's `var` / `const` mode (`out` is Aux) |
 
 ## 5. Span quirks
 
@@ -163,6 +162,11 @@ same program, and T3 counts the losses per finding.
   a bare one is E2029).
 - `reference to` lies outside its nkProcType's span (Aux 2): the enclosing
   type declaration's tokens.
+- A parameter's mode (nfVar / nfConst / nfOut) stands at the parameter's
+  left edge, unless a leading attribute group starts there - `const [Ref] X`
+  and `[A] const X` are both dcc's, and only the group's own span tells the
+  two apart. `out` is a directive word and a legal parameter NAME: a
+  parameter whose first name is `out` and that carries no flag is one.
 - `packed` lies outside the span of the type it packs (nfPacked): the
   token of that type's parent - a declaration, or the array or file
   whose element it is.

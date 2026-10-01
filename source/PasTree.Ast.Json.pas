@@ -107,6 +107,13 @@ var
     // `class threadvar` (nfThreadvar).
     if nfThreadvar in ATree.Nodes[AIndex].Flags then
       LSB.Append(',"threadvar":true');
+    // A parameter's mode (nfVar, nfConst, nfOut).
+    if nfVar in ATree.Nodes[AIndex].Flags then
+      LSB.Append(',"var":true');
+    if nfConst in ATree.Nodes[AIndex].Flags then
+      LSB.Append(',"const":true');
+    if nfOut in ATree.Nodes[AIndex].Flags then
+      LSB.Append(',"out":true');
     if ATree.Nodes[AIndex].Aux <> NIL_NODE then
       if not (LKind in [nkUnaryOp, nkBinaryOp]) then
         LSB.AppendFormat(',"aux":%d', [ATree.Nodes[AIndex].Aux]);

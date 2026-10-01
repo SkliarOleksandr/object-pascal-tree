@@ -154,11 +154,9 @@ type
                       // directives... (before the header's `;` and after
                       // it, alike), [body]
     nkParams,
-    // 6.2. Aux = the visible-token index of an `out` modifier, -1 otherwise.
-    // `var` and `const` need no such mark: they are reserved words and a lexer
-    // already knows them, while `out` is a context-sensitive directive word
-    // (B.4.2) - legal as an identifier elsewhere - so the only thing that can
-    // prove this one MEANS the modifier is the parser, here.
+    // 6.2. The mode is nfVar / nfConst / nfOut (see there); `out` is a
+    // context-sensitive directive word (B.4.2) - legal as a parameter name -
+    // so only the parser can prove that one MEANS the modifier.
     nkParam,
     nkDirective,      // routine directive (+ optional args as children);
                       // Aux = 1 on a procedural type's first directive
@@ -220,7 +218,16 @@ type
     // word `threadvar` stands right before the section's span, the
     // enclosing node's token, as `var` does. A bare `threadvar` in a body
     // is E2029 (a parse diagnostic) and is marked all the same.
-    nfThreadvar
+    nfThreadvar,
+    // A parameter's mode (6.2): on an nkParam, the `var`, `const` or `out`
+    // before its names. The word stands at the parameter's left edge, or
+    // right after a leading attribute group that starts there (`[A] const X`
+    // and `const [Ref] X` are both dcc's). At most one of the three - dcc
+    // refuses a second (E2029 / E2067) - and `out`, a directive word, is a
+    // legal parameter NAME, so only the parser can tell the two apart.
+    nfVar,
+    nfConst,
+    nfOut
   );
   TPasNodeFlags = set of TPasNodeFlag;
 
@@ -838,9 +845,6 @@ begin
     nkInlineVar, nkInlineConst:
       if Nodes[AIndex].Aux = 1 then
         Result := Result + '#init';
-    nkParam:
-      if Nodes[AIndex].Aux >= 0 then
-        Result := Result + '#out';
     // 19.3.3: which compiler-recognized attribute this is, if any -- see
     // the ama* constants and PasAttrMagicAux.
     nkAttribute:
@@ -863,6 +867,12 @@ begin
     Result := Result + '#sealed';
   if nfThreadvar in Nodes[AIndex].Flags then
     Result := Result + '#threadvar';
+  if nfVar in Nodes[AIndex].Flags then
+    Result := Result + '#var';
+  if nfConst in Nodes[AIndex].Flags then
+    Result := Result + '#const';
+  if nfOut in Nodes[AIndex].Flags then
+    Result := Result + '#out';
   LChildren := '';
   LChild := Nodes[AIndex].FirstChild;
   while LChild <> NIL_NODE do

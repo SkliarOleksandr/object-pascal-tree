@@ -776,7 +776,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..226] of TPasCaseRow = (
+  DECL_CASES: array[0..229] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1072,7 +1072,7 @@ const
     (Section: '6.2.7'; Name: 'untyped var parameter';
      Source: 'procedure P(var X);';
      Expected: 'Routine''procedure''(Ident''P''#name ' +
-       'Params(Param(Ident''X''#name)))';
+       'Params(Param#var(Ident''X''#name)))';
      ExpectDiags: 0),
 
     // ---- 6.7.1 external, never exercised at all (varargs alone was) ----
@@ -1194,9 +1194,43 @@ const
        'out D: Integer);';
      Expected: 'Routine''procedure''(Ident''P''#name ' +
        'Params(Param(Ident''A''#name ' +
-       'Ident''Integer'') Param(Ident''B''#name Ident''Integer'') ' +
-       'Param(Ident''C''#name Ident''Integer'') Param#out(Ident''D''#name ' +
-       'Ident''Integer'')))'; ExpectDiags: 0),
+       'Ident''Integer'') Param#var(Ident''B''#name Ident''Integer'') ' +
+       'Param#const(Ident''C''#name Ident''Integer'') Param#out(' +
+       'Ident''D''#name Ident''Integer'')))'; ExpectDiags: 0),
+    // F18: the mode word is nfVar / nfConst / nfOut, and it stands where dcc
+    // wrote it - an attribute group may come before it or after it
+    // (dcc64 37.0 probed, x-f18 S01-S28: every mode typed and untyped, in a
+    // routine, a procedural type and a property''s index list; two modes
+    // together are E2029 / E2067).
+    (Section: '6.2.1'; Name: 'F18: modes around the attribute groups';
+     Source: 'procedure P(const [Ref] A: Integer; [Ref] var B: Integer; ' +
+       'out [Ref] C: Integer; const D, E: Byte; var F);';
+     Expected: 'Routine''procedure''(Ident''P''#name Params(' +
+       'Param#const(AttrGroup(Attribute#ref(Ident''Ref'')) ' +
+       'Ident''A''#name Ident''Integer'') Param#var(AttrGroup(' +
+       'Attribute#ref(Ident''Ref'')) Ident''B''#name Ident''Integer'') ' +
+       'Param#out(AttrGroup(Attribute#ref(Ident''Ref'')) Ident''C''#name ' +
+       'Ident''Integer'') Param#const(Ident''D''#name Ident''E''#name ' +
+       'Ident''Byte'') Param#var(Ident''F''#name)))'; ExpectDiags: 0),
+    // A parameter NAMED `out` carries no mode (dcc takes the word as the
+    // name, S10); `out out: Integer` is the mode and the name (S09).
+    (Section: '6.2.1'; Name: 'F18: out as a parameter name';
+     Source: 'procedure P(out: Integer); procedure Q(out out: Integer);';
+     Expected: 'Routine''procedure''(Ident''P''#name Params(Param(' +
+       'Ident''out''#name Ident''Integer''))) ' +
+       'Routine''procedure''(Ident''Q''#name Params(Param#out(' +
+       'Ident''out''#name Ident''Integer'')))'; ExpectDiags: 0),
+    // In a property''s index list and in a procedural type, the same
+    // (S16-S18, S21).
+    (Section: '6.2.1'; Name: 'F18: modes in an index list and a proc type';
+     Source: 'type TP = procedure(var A: Integer; const B: Integer); ' +
+       'TC = class property Q[const I: Integer]: Integer read GetQ; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TP'' ProcType(Params(' +
+       'Param#var(Ident''A''#name Ident''Integer'') Param#const(' +
+       'Ident''B''#name Ident''Integer'')))) TypeDecl(Ident''TC'' ' +
+       'ClassType(PropertyDecl(Ident''Q'' Params(Param#const(' +
+       'Ident''I''#name Ident''Integer'')) Ident''Integer'' ' +
+       'PropSpec''read''(Ident''GetQ'')))))'; ExpectDiags: 0),
 
     // ---- 6.2.5 default (optional) parameters ----
     (Section: '6.2.5'; Name: 'default parameter value';
@@ -1209,8 +1243,8 @@ const
     (Section: '6.2.6'; Name: 'open array and array of const parameters';
      Source: 'procedure P(const A: array of Integer; const B: array of const);';
      Expected: 'Routine''procedure''(Ident''P''#name ' +
-       'Params(Param(Ident''A''#name ' +
-       'ArrayType(Ident''Integer'')) Param(Ident''B''#name ' +
+       'Params(Param#const(Ident''A''#name ' +
+       'ArrayType(Ident''Integer'')) Param#const(Ident''B''#name ' +
        'ArrayType#ofconst)))';
      ExpectDiags: 0),
 
@@ -1511,7 +1545,7 @@ const
        '  end;';
      Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(' +
        'Routine''procedure''(Ident''WMPaint''#name ' +
-       'Params(Param(Ident''Msg''#name ' +
+       'Params(Param#var(Ident''Msg''#name ' +
        'Ident''TMessage'')) Directive''message''(Ident''WM_PAINT'')))))';
      ExpectDiags: 0),
 
@@ -1679,12 +1713,13 @@ const
     (Section: '6.2.2'; Name: 'a lone var parameter';
      Source: 'procedure P(var A: Integer);';
      Expected: 'Routine''procedure''(Ident''P''#name ' +
-       'Params(Param(Ident''A''#name ' +
+       'Params(Param#var(Ident''A''#name ' +
        'Ident''Integer'')))'; ExpectDiags: 0),
     (Section: '6.2.3'; Name: 'const [Ref] parameter';
      Source: 'procedure P(const [Ref] A: Integer);';
-     Expected: 'Routine''procedure''(Ident''P''#name Params(Param(AttrGroup(' +
-       'Attribute#ref(Ident''Ref'')) Ident''A''#name Ident''Integer'')))';
+     Expected: 'Routine''procedure''(Ident''P''#name Params(Param#const(' +
+       'AttrGroup(Attribute#ref(Ident''Ref'')) Ident''A''#name ' +
+       'Ident''Integer'')))';
      ExpectDiags: 0),
     (Section: '6.2.4'; Name: 'a lone out parameter';
      Source: 'procedure P(out A: Integer);';
@@ -1720,11 +1755,12 @@ const
      Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(' +
        'Routine''operator''#class(Ident''Initialize''#name Params(Param#out(' +
        'Ident''Dest''#name Ident''TR''))) Routine''operator''#class(' +
-       'Ident''Finalize''#name Params(Param(Ident''Dest''#name ' +
+       'Ident''Finalize''#name Params(Param#var(Ident''Dest''#name ' +
        'Ident''TR''))) ' +
-       'Routine''operator''#class(Ident''Assign''#name Params(Param(' +
-       'Ident''Dest''#name Ident''TR'') Param(AttrGroup(Attribute#ref(' +
-       'Ident''Ref'')) Ident''Src''#name Ident''TR''))))))'; ExpectDiags: 0),
+       'Routine''operator''#class(Ident''Assign''#name Params(Param#var(' +
+       'Ident''Dest''#name Ident''TR'') Param#const(AttrGroup(' +
+       'Attribute#ref(Ident''Ref'')) Ident''Src''#name ' +
+       'Ident''TR''))))))'; ExpectDiags: 0),
 
     // ---- 9.4.2 (13.0) the PARAMETERLESS Initialize/Finalize: before 13.0
     // the explicit `(var X: T)` parameter was REQUIRED, from 13.0 it is
@@ -2085,11 +2121,11 @@ const
        'Ident''C''))'; ExpectDiags: 0),
     (Section: '6.2.7'; Name: 'F19: two untyped const parameters';
      Source: 'procedure Q(const A, B);';
-     Expected: 'Routine''procedure''(Ident''Q''#name Params(Param(' +
+     Expected: 'Routine''procedure''(Ident''Q''#name Params(Param#const(' +
        'Ident''A''#name Ident''B''#name)))'; ExpectDiags: 0),
     (Section: '6.2.3'; Name: 'F19: one typed const parameter';
      Source: 'procedure Q(const A: B);';
-     Expected: 'Routine''procedure''(Ident''Q''#name Params(Param(' +
+     Expected: 'Routine''procedure''(Ident''Q''#name Params(Param#const(' +
        'Ident''A''#name Ident''B'')))'; ExpectDiags: 0),
     (Section: '6.2.1'; Name: 'F19: two parameters and a type';
      Source: 'procedure Q(A, T: X);';
@@ -2102,7 +2138,7 @@ const
     // Attribute groups between the names stay unmarked.
     (Section: '6.2.3'; Name: 'F19: attributes between the names';
      Source: 'procedure Q(const [Ref] A, [Ref] B: TGUID);';
-     Expected: 'Routine''procedure''(Ident''Q''#name Params(Param(' +
+     Expected: 'Routine''procedure''(Ident''Q''#name Params(Param#const(' +
        'AttrGroup(Attribute#ref(Ident''Ref'')) Ident''A''#name ' +
        'AttrGroup(Attribute#ref(Ident''Ref'')) Ident''B''#name ' +
        'Ident''TGUID'')))'; ExpectDiags: 0),
@@ -2932,11 +2968,13 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
         LWrongText := 0;
         for LIdx := 0 to High(LTree.Nodes) do
           if (LTree.Nodes[LIdx].Kind = nkParam) and
-             (LTree.Nodes[LIdx].Aux >= 0) then
+             (nfOut in LTree.Nodes[LIdx].Flags) then
           begin
             Inc(LMarked);
-            if not SameText(LPre.VisibleText(LTree.Nodes[LIdx].Aux), 'out')
-            then
+            // The word the flag stands for is at the parameter's left edge
+            // here - no attribute group comes before it.
+            if not SameText(
+                 LPre.VisibleText(LTree.Nodes[LIdx].FirstToken), 'out') then
               Inc(LWrongText);
           end;
         // Two `out` parameters across P1 and P2; P3 has none and P4's `out`

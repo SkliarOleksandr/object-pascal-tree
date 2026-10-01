@@ -246,12 +246,13 @@ begin
           N(nkExprStmt, 4, 4, 1), N(nkIdent, 4, 4, 3)]), 1, 0,
           'IfStmt owning two then');
       end),
-    // The parser's own tree: a parameter's `const` is F18, counted.
+    // The parser's own tree: the `name` of an `external` clause is F13,
+    // counted (a parameter's `const` was this case until F18 was fixed).
     OwnCase('a loss is counted, not a violation',
       function: TPasCheckResult
       begin
-        Result := LossCase(APP, 'procedure P(const A: Integer);', 'F18', 1,
-          'const');
+        Result := LossCase(APP,
+          'procedure P; external ''lib.dll'' name ''X'';', 'F13', 1, 'name');
       end),
     // F1, F2 and F10 are no loss any more: the directives are nkDirective
     // children, the `;` before a procedural type's run is its own token,

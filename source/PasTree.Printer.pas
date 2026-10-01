@@ -209,8 +209,8 @@ function CompareT3(const ATree: TPasTree; ARoot: Integer;
   out AResult: TPasT3Result; AMaxSites: Integer = 20): Boolean;
 
 { One line per reachable node, preorder, indented by depth: the kind, its
-  flags, its Aux (an operator's by the operator's text, a parameter's `out`
-  by the word - never a token index) and the texts of its own tokens that
+  flags (those that are facts: a word the tree keeps only there), its Aux
+  (an operator's by the operator's text - never a token index) and the texts of its own tokens that
   are facts - a leaf's, a contract read's, a filed loss's, and every own
   token of a kind without a template; regenerated tokens do not count. Two
   trees of one program in two layouts fingerprint alike. ANodes[i] is the
@@ -1296,13 +1296,39 @@ begin
     Kw(')', ANode);
 end;
 
-{ [attributes] [var | const: F18] [out] names (nfName, each may carry
-  attributes) [: Type [= default]]. `out` is Aux's. }
+{ [attributes] [the mode] [attributes] names (nfName, each may carry
+  attributes) [: Type [= default]]. The mode (nfVar / nfConst / nfOut) is
+  written where dcc wrote it: at the parameter's left edge, unless a leading
+  attribute group starts there - `const [Ref] X` and `[A] const X` are both
+  dcc's, and only the group's own span tells the two apart. }
 procedure TPrinter.Param(ANode: Integer);
 var
   LChild, LLastName: Integer;
   LSeenName, LPrevName: Boolean;
+  LMode: string;
+
+  // The mode word, once, before the first child that starts past the
+  // parameter's left edge (or at the end, when no child does).
+  procedure ModeBefore(AChild: Integer);
+  begin
+    if LMode = '' then
+      Exit;
+    if (AChild <> NIL_NODE) and not IsEmptyNode(T, AChild) and
+       (Left(AChild) <= T.Nodes[ANode].FirstToken) then
+      Exit;
+    Kw(LMode, ANode);
+    LMode := '';
+  end;
+
 begin
+  if nfVar in T.Nodes[ANode].Flags then
+    LMode := 'var'
+  else if nfConst in T.Nodes[ANode].Flags then
+    LMode := 'const'
+  else if nfOut in T.Nodes[ANode].Flags then
+    LMode := 'out'
+  else
+    LMode := '';
   LLastName := NIL_NODE;
   LChild := T.Nodes[ANode].FirstChild;
   while LChild <> NIL_NODE do
@@ -1318,13 +1344,7 @@ begin
   begin
     if LPrevName then
       Kw(',', ANode);
-    if (nfName in T.Nodes[LChild].Flags) and not LSeenName then
-    begin
-      if not IsEmptyNode(T, LChild) then
-        Losses(ANode, Left(LChild));
-      if T.Nodes[ANode].Aux >= 0 then
-        Kw('out', ANode);
-    end;
+    ModeBefore(LChild);
     Child(ANode, LChild);
     LPrevName := nfName in T.Nodes[LChild].Flags;
     LSeenName := LSeenName or LPrevName;
@@ -1335,6 +1355,8 @@ begin
     end;
     LChild := Next(LChild);
   end;
+  // Error mode only: a parameter with no name child never reached ModeBefore.
+  ModeBefore(NIL_NODE);
   if LChild <> NIL_NODE then
   begin
     Kw(':', ANode);
@@ -2586,6 +2608,22 @@ begin
       LLine := LLine + '#name';
     if nfError in ATree.Nodes[LNode].Flags then
       LLine := LLine + '#error';
+    // The flags that ARE facts of the program: a word the tree keeps only
+    // here, so a print that drops or swaps one must not fingerprint alike.
+    if nfPacked in ATree.Nodes[LNode].Flags then
+      LLine := LLine + '#packed';
+    if nfAbstract in ATree.Nodes[LNode].Flags then
+      LLine := LLine + '#abstract';
+    if nfSealed in ATree.Nodes[LNode].Flags then
+      LLine := LLine + '#sealed';
+    if nfThreadvar in ATree.Nodes[LNode].Flags then
+      LLine := LLine + '#threadvar';
+    if nfVar in ATree.Nodes[LNode].Flags then
+      LLine := LLine + '#var';
+    if nfConst in ATree.Nodes[LNode].Flags then
+      LLine := LLine + '#const';
+    if nfOut in ATree.Nodes[LNode].Flags then
+      LLine := LLine + '#out';
     case LKind of
       nkUnaryOp, nkBinaryOp:
         if IsFusedGreaterEqual(ATree, LNode) then
@@ -2593,9 +2631,6 @@ begin
         else
           LLine := LLine + ' op=' +
             LowerCase(ATree.Source.VisibleText(ATree.Nodes[LNode].Aux));
-      nkParam:
-        if ATree.Nodes[LNode].Aux >= 0 then
-          LLine := LLine + ' out';
     else
       LLine := LLine + ' aux=' + IntToStr(ATree.Nodes[LNode].Aux);
     end;

@@ -2771,6 +2771,12 @@ begin
       FB.Adopt(LParam, LAttrs);
     if CurKind in [tkVar, tkConst] then
     begin
+      // F18: the mode is a flag on the parameter - the word itself stands at
+      // its left edge, or right after a leading attribute group.
+      if CurKind = tkVar then
+        FB.AddFlag(LParam, nfVar)
+      else
+        FB.AddFlag(LParam, nfConst);
       Next;
       LAttrs := ParseAttrGroups; // const [Ref] X (6.2.3)
       if LAttrs <> NIL_NODE then
@@ -2785,10 +2791,13 @@ begin
       // modifier is followed by the name (or by an attribute group, as
       // `const [Ref] X` is), a name by ':' or ',' or ')'.
       //
-      // Recorded rather than just consumed, because a highlighter cannot colour
-      // a directive word from the token alone - see nkParam's Aux.
-      FB.SetAux(LParam, FPos);
+      // Marked rather than just consumed, because a highlighter cannot colour
+      // a directive word from the token alone - see nfOut.
+      FB.AddFlag(LParam, nfOut);
       Next;
+      LAttrs := ParseAttrGroups; // out [Ref] X, as `const [Ref] X` (dcc-probed)
+      if LAttrs <> NIL_NODE then
+        FB.Adopt(LParam, LAttrs);
     end;
     if CurKind = tkIdentifier then
     begin

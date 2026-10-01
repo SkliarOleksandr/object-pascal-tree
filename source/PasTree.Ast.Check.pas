@@ -319,7 +319,7 @@ const
     of a procedural type, of a routine header before its `;` and of an
     anonymous method is an nkDirective child, and the initializer after a
     procedural type's directives is its declaration's.) }
-  OWN_RULE_TEXT: array[0..231] of string = (
+  OWN_RULE_TEXT: array[0..230] of string = (
     // ---- leaves: the token is the node's own text ----
     'Ident | <ident> @words @keywords | once | leaf | the name as written; ' +
       'a reserved word only after a dot, as an operator name or as the ' +
@@ -595,9 +595,8 @@ const
     'Param | , | - | derived | between the names (nfName)',
     'Param | : | opt | derived | before the type: a child after the names',
     'Param | = | opt | derived | before the default value',
-    'Param | const var | opt | loss:F18 | the mode has no mark; only out has ' +
-      'one, in Aux (coverage.md 6.2)',
-    'Param | out | opt | derived | Aux names it',
+    'Param | const var out | opt | derived | nfVar, nfConst, nfOut: the mode ' +
+      'word, at the left edge or right after a leading attribute group (F18)',
     'Directive | @routine | head once | contract | the directive word',
     'Directive | name index dependency delayed , | - | loss:F13 | inside ' +
       'external: nothing says which child is the library, the name or the ' +
@@ -1641,9 +1640,10 @@ var
   // I6 for one node.
   procedure CheckAux(ANode: Integer);
   var
-    LAux, LKids, LFirstKid, LSecondKid, LVis: Integer;
+    LAux, LKids, LFirstKid, LSecondKid, LVis, LKid: Integer;
     LOpKind: TPasTokenKind;
     LAbstract, LSealed: Boolean;
+    LMode, LWant: TPasNodeFlags;
   begin
     LAux := ATree.Nodes[ANode].Aux;
     if not AuxInDomain(Kind(ANode), LAux) then
@@ -1698,6 +1698,41 @@ var
         AReport.Add(ccFlags, ANode, Site(ANode), Format(
           '%s: nfAbstract / nfSealed disagree with the words after its head',
           [KName(ANode)]));
+    end;
+    // nfVar / nfConst / nfOut (F18): a parameter's mode word stands at its
+    // left edge, or right after a leading attribute group that starts there
+    // (`const [Ref] X` and `[A] const X` are both dcc's). A parameter NAMED
+    // `out` carries no flag - the word is its first name child.
+    LMode := [nfVar, nfConst, nfOut] * ATree.Nodes[ANode].Flags;
+    if (LMode <> []) and (Kind(ANode) <> nkParam) then
+      AReport.Add(ccFlags, ANode, Site(ANode), Format(
+        '%s carries a parameter mode', [KName(ANode)]))
+    else if Kind(ANode) = nkParam then
+    begin
+      LVis := LLo[ANode];
+      LKid := ATree.Nodes[ANode].FirstChild;
+      while (LKid <> NIL_NODE) and (Kind(LKid) = nkAttrGroup) and
+            not LEmpty[LKid] and (LLo[LKid] = LVis) do
+      begin
+        LVis := LHi[LKid] + 1;
+        LKid := ATree.Nodes[LKid].NextSibling;
+      end;
+      LWant := [];
+      if (LVis <= LHi[ANode]) and
+         not ((LKid <> NIL_NODE) and (nfName in ATree.Nodes[LKid].Flags) and
+              not LEmpty[LKid] and (LLo[LKid] = LVis)) then
+        // `var` and `const` are reserved words (a kind), `out` a directive
+        // word (a text).
+        if TokKind(LVis) = tkVar then
+          LWant := [nfVar]
+        else if TokKind(LVis) = tkConst then
+          LWant := [nfConst]
+        else if WordAt(LVis, ['out']) then
+          LWant := [nfOut];
+      if LMode <> LWant then
+        AReport.Add(ccFlags, ANode, Site(ANode),
+          'the parameter''s mode flags disagree with the word before its ' +
+          'names');
     end;
     // nfThreadvar (F9): on the var section of a struct body, exactly when
     // `threadvar` stands right before its span.
@@ -1768,15 +1803,6 @@ var
               'UnaryOp operator at %s is not before its operand at %s',
               [At(LAux), At(LLo[LFirstKid])]));
         end;
-      nkParam:
-        if LAux <> NIL_NODE then
-          if (LAux < LLo[ANode]) or (LAux > LHi[ANode]) or
-             not WordAt(LAux, ['out']) then
-            AReport.Add(ccAux, ANode, Site(ANode), Format(
-              'Param Aux %d names no `out` inside the parameter', [LAux]))
-          else if (LState[ANode] = ST_TREE) and (LOwner[LAux] <> ANode) then
-            AReport.Add(ccAux, ANode, Site(ANode),
-              'Param Aux names an `out` a child of the parameter owns');
       nkVisibility:
         if (nfNegated in ATree.Nodes[ANode].Flags) and
            not (WordAt(LLo[ANode], ['strict']) and (LAux in [1, 2])) then
