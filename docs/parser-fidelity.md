@@ -179,7 +179,7 @@ minus before a member call - agree with dcc everywhere they were met.
 
 | Id | Where | What |
 |---|---|---|
-| F13-F17 | the tree | tokens only they hold - the losses of `docs/tree-contract.md` sec. 4; each is read in place and counted, none changes a grouping |
+| F13, F14, F16, F17 | the tree | tokens only they hold - the losses of `docs/tree-contract.md` sec. 4; each is read in place and counted, none changes a grouping |
 | F5 | the DCU reader | a routine's nested routines listed under its anonymous method's body; only the dump's nesting |
 | F8 | the parser, error mode | the root stops where a broken parse stopped, the rest of the file in no node |
 | F22 | the preprocessor | a conditional crossing an include boundary is accepted; dcc refuses it (invalid code only) |
@@ -235,7 +235,9 @@ child of the directive, as a declaration hint's always was) and a
 parameter's `var` / `const` / `out` mode (F18, the largest loss by count:
 nfVar / nfConst / nfOut on the parameter, the word written where dcc wrote
 it - before or after a leading attribute group, as the group's own span
-says).
+says). An interface's GUID clause (F15) is one constant expression, its
+child - a literal had no leaf, and a concatenation or a parenthesized
+constant there, both dcc's, gave parse errors.
 
 ## 5. The gate
 

@@ -301,6 +301,15 @@ mis-pair.
 
 ## 14-interfaces.md
 
+### 14.1.1 The GUID clause
+- whether the first bracket after `interface` is the GUID or the first
+  member's attribute group is dcc's call by the expression's TYPE (a
+  string or TGUID constant is the GUID, an attribute class an attribute);
+  PasTree decides by syntax: a bracket that starts with a string or `(`,
+  or an identifier followed by `]` or `+`, is the GUID - so `[TAttr]`
+  reads as a GUID and `[Unit.SID]` as an attribute. The names in a GUID
+  expression are not resolved (no reference to `SID_IFoo` is recorded).
+
 ### 14.2.1 Classes implementing interfaces
 - heritage walks (member lookup, descent checks) follow
   only the FIRST heritage entry - a class's implemented interfaces (second

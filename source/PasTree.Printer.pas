@@ -2006,8 +2006,6 @@ begin
       begin
         Kw('[', ANode);
         Child(ANode, C0);
-        // A GUID written as a literal has no leaf (F15).
-        Losses(ANode, T.Nodes[ANode].LastToken + 1);
         Kw(']', ANode);
       end;
 

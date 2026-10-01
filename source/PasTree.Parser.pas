@@ -2341,21 +2341,27 @@ begin
     FB.SetLast(Result, FPos - 1);
     Exit;
   end;
-  // Interface GUID (14.1.1). The clause may also be a NAMED CONSTANT -
-  // `interface [SID_IFoo]`, dcc64-valid - which used to parse as an attribute
-  // group, losing the GUID and inventing an attribute. An identifier followed
-  // by `]` is that form; anything else stays an attribute group.
+  // Interface GUID (14.1.1): ONE constant expression of a string or TGUID
+  // type, in the first bracket after the head and the ancestor - dcc64 37.0
+  // compiles a literal, a named or qualified constant, a typed TGUID one, a
+  // concatenation and a parenthesized expression there (x-f15 G01-G14); a
+  // second expression is E2029. Whether `[X]` IS the GUID is dcc's call by
+  // X's type: a string or GUID constant is, an attribute class is the first
+  // member's attribute group (x-f15 R1). Syntax alone decides it here - a
+  // bracket that starts with a string or a `(`, or an identifier followed by
+  // `]` or `+`, is the GUID; anything else stays an attribute group (so
+  // `[Unit.SID]` reads as an attribute, and `[TAttr]` as a GUID).
   if (AHeadKind in [tkInterface, tkDispinterface]) and
      (CurKind = tkLBracket) and
-     ((PeekKind(1) = tkStringLiteral) or
-      ((PeekKind(1) = tkIdentifier) and (PeekKind(2) = tkRBracket))) then
+     ((PeekKind(1) in [tkStringLiteral, tkLParen]) or
+      ((PeekKind(1) = tkIdentifier) and
+       (PeekKind(2) in [tkRBracket, tkPlus]))) then
   begin
     var LGuid := FB.AddNode(nkGuid, NIL_NODE, FPos);
     FB.Adopt(Result, LGuid);
     Next;   // '['
-    if CurKind = tkIdentifier then
-      FB.Adopt(LGuid, FB.AddNode(nkIdent, NIL_NODE, FPos));
-    Next;   // the literal or the constant name
+    // F15: the expression is the clause's child - a literal's nkStrLit too.
+    FB.Adopt(LGuid, ParseExpression);
     Expect(tkRBracket, '"]"');
     // The SPAN covers the whole clause, brackets included - SetLast was
     // simply never called, so the node ended at its own '['.

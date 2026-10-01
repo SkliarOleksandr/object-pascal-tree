@@ -776,7 +776,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..229] of TPasCaseRow = (
+  DECL_CASES: array[0..230] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -983,7 +983,8 @@ const
      Source: 'type'#13#10'  ID = dispinterface'#13#10 +
        '    [''{11111111-2222-3333-4444-555555555555}'']'#13#10 +
        '    procedure P;'#13#10'  end;';
-     Expected: 'TypeSec(TypeDecl(Ident''ID'' InterfaceType#disp(Guid ' +
+     Expected: 'TypeSec(TypeDecl(Ident''ID'' InterfaceType#disp(Guid(' +
+       'StrLit''''{11111111-2222-3333-4444-555555555555}'''') ' +
        'Routine''procedure''(Ident''P''#name))))'; ExpectDiags: 0),
     (Section: '14.1.1'; Name: 'interface is not a dispinterface';
      Source: 'type IFoo = interface procedure P; end;';
@@ -1979,6 +1980,20 @@ const
      Source: 'type IFoo = interface [SID_IFoo] end;';
      Expected: 'TypeSec(TypeDecl(Ident''IFoo'' InterfaceType(' +
        'Guid(Ident''SID_IFoo''))))'; ExpectDiags: 0),
+    // F15: the GUID clause is ONE constant expression (dcc64 37.0, x-f15
+    // G01-G14): a literal is an nkStrLit child, a concatenation, a
+    // parenthesized constant and `S + ''` are dcc's too - they were parse
+    // errors.
+    (Section: '14.1.1'; Name: 'F15: GUID clause expressions';
+     Source: 'type A = interface [''{8D9F4E6A-1B2C-4D3E-9F80-112233445566}''] ' +
+       'end; B = interface [''{8D9F4E6A-1B2C-4D3E-'' + ' +
+       '''9F80-112233445566}''] end; C = interface [(S)] end; ' +
+       'D = dispinterface [S + ''''] end;';
+     Expected: 'TypeSec(TypeDecl(Ident''A'' InterfaceType(Guid(StrLit''''{8D9F4E6A-1B2C-4D3E-9F80-112233445566}''''))) ' +
+       'TypeDecl(Ident''B'' InterfaceType(Guid(BinaryOp''+''(StrLit''''{8D9F4E6A-1B2C-4D3E-'''' ' +
+       'StrLit''''9F80-112233445566}'''')))) TypeDecl(Ident''C'' InterfaceType(Guid(' +
+       'Paren(Ident''S'')))) TypeDecl(Ident''D'' InterfaceType#disp(Guid(' +
+       'BinaryOp''+''(Ident''S'' StrLit'''''''')))))'; ExpectDiags: 0),
     // 2.2.5: an IDENT-headed subrange bound may carry arithmetic. Only
     // selector continuations were allowed after an identifier head, so both
     // of these - dcc64-valid - were hard parse errors.

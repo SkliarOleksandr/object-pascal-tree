@@ -87,7 +87,7 @@ type reference" is an nkIdent, nkMember or nkTypeArgs.
 | nkObjectType | [`packed` - nfPacked, see 5] `object` [`abstract` - nfAbstract] [`sealed` - nfSealed] [(ancestor)] members `end` [hints] |
 | nkInterfaceType | `interface`, `dispinterface` when Aux bit 1 is set, [(ancestor)] [nkGuid] members `end` [hints]; Aux bit 2: forward, the head alone |
 | nkHelperType | `class helper` (`record helper` when Aux is 1) [(ancestor)] `for` the last leading type reference, members `end` [hints] |
-| nkGuid | `[ c0 ]` - see 4 for a literal |
+| nkGuid | `[ c0 ]` - c0 the GUID's constant expression: a literal, a constant, a concatenation |
 | nkVisibility | [`strict` - nfNegated] the word Aux 1..5 names: private, protected, public, published, automated |
 | nkRoutine | the head word (see 3), the name segments (nfName) each with its [nkGenericParams], `.` between, [nkParams], [`:` result type] `;`, each nkDirective followed by `;`, [nkRoutineBody `;`] |
 | nkParams | `( c0; ... )` - `[ ... ]` for a property's index parameters |
@@ -148,7 +148,6 @@ same program, and T3 counts the losses per finding.
 |---|---|
 | F13 | inside `external`: which child is the library, the name, the index; `delayed` |
 | F14 | in `exports`: which child is the index and which the name; `resident` |
-| F15 | an interface GUID written as a string literal |
 | F16 | a numeric label: `goto 10`, `10: S`, `label 10` |
 | F17 | program parameters, `program X(Input, Output);` |
 

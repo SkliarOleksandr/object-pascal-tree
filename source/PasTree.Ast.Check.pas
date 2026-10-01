@@ -309,17 +309,19 @@ const
     set brings in. Two rules claiming one cell alike is a table error.
 
     The finding numbers are the plan's (local/PARSER-FIDELITY-PLAN.md, a
-    working paper): F13 the external clause, F14 the exports clause, F15 the
-    GUID literal, F16 numeric labels, F17 program parameters, F18 parameter
-    modes. (F19, where a name list ends, is derived since the names carry
-    nfName - I6 checks the flag against the separators; F3's `packed` since
-    the type carries nfPacked, F4's class modifiers since the class carries
-    nfAbstract / nfSealed, F9's `class threadvar` since the section carries
-    nfThreadvar, F12's message since it is an nkStrLit child. F1, F2, F10 and F11 are gone too: every directive
+    working paper): F13 the external clause, F14 the exports clause, F16
+    numeric labels, F17 program parameters. (F19, where a name list ends, is
+    derived since the names carry nfName - I6 checks the flag against the
+    separators; F3's `packed` since the type carries nfPacked, F4's class
+    modifiers since the class carries nfAbstract / nfSealed, F9's `class
+    threadvar` since the section carries nfThreadvar, F12's message and
+    F15's GUID literal since each is a child, F18's parameter modes since
+    the parameter carries nfVar / nfConst / nfOut. F1, F2, F10 and F11 are
+    gone too: every directive
     of a procedural type, of a routine header before its `;` and of an
     anonymous method is an nkDirective child, and the initializer after a
     procedural type's directives is its declaration's.) }
-  OWN_RULE_TEXT: array[0..230] of string = (
+  OWN_RULE_TEXT: array[0..229] of string = (
     // ---- leaves: the token is the node's own text ----
     'Ident | <ident> @words @keywords | once | leaf | the name as written; ' +
       'a reserved word only after a dot, as an operator name or as the ' +
@@ -571,8 +573,6 @@ const
     'HelperType | for | once | derived | the kind',
     'Guid | [ | head once | derived | the kind',
     'Guid | ] | once | derived | the kind',
-    'Guid | <str> | opt | loss:F15 | a GUID written as a literal has no ' +
-      'leaf; a named constant has an nkIdent',
 
     // ---- members and routines ----
     'Visibility | private protected public published automated | once | ' +
