@@ -181,7 +181,11 @@ var
   LReport: TPasCheckReport;
   LRule, LTally, LFirst: Integer;
 begin
-  LPre := APP.ProcessText('test.pas', DeclCaseText(ADecl));
+  // A whole program (F17's finding lives in the head), else a declaration.
+  if ADecl.StartsWith('program ') then
+    LPre := APP.ProcessText('test.pas', ADecl)
+  else
+    LPre := APP.ProcessText('test.pas', DeclCaseText(ADecl));
   LTree := TPasParser.ParseFile(LPre, LDiags);
   LReport.Init;
   CheckTree(LTree, Length(LDiags) = 0, LReport);
@@ -246,13 +250,13 @@ begin
           N(nkExprStmt, 4, 4, 1), N(nkIdent, 4, 4, 3)]), 1, 0,
           'IfStmt owning two then');
       end),
-    // The parser's own tree: the `name` of an `external` clause is F13,
+    // The parser's own tree: the `program` parameters are F17,
     // counted (a parameter's `const` was this case until F18 was fixed).
     OwnCase('a loss is counted, not a violation',
       function: TPasCheckResult
       begin
         Result := LossCase(APP,
-          'procedure P; external ''lib.dll'' name ''X'';', 'F13', 1, 'name');
+          'program P(Input); begin end.', 'F17', 3, '(');
       end),
     // F1, F2 and F10 are no loss any more: the directives are nkDirective
     // children, the `;` before a procedural type's run is its own token,

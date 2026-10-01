@@ -227,7 +227,23 @@ type
     // legal parameter NAME, so only the parser can tell the two apart.
     nfVar,
     nfConst,
-    nfOut
+    nfOut,
+    // The clauses of an `external` directive (6.7.1), on the children of its
+    // nkDirective: the child after `name`, after `index`, and each one of a
+    // `dependency` list (the word, or a `,`, stands right before it). The
+    // library is the child that carries none of them - the first one, right
+    // after `external`. `delayed` has no child: nfDelayed is on the
+    // nkDirective itself, the word standing in the clause outside every
+    // child's span. dcc takes each clause once, in any order (E1030 for a
+    // repeat) - a repeat is a parse diagnostic and is flagged all the same.
+    nfExtName,
+    nfExtIndex,
+    nfExtDependency,
+    nfDelayed,
+    // The same for an `exports` item (1.1.3): nfExtIndex and nfExtName on the
+    // value after `index` / `name`, nfResident on the nkExportsItem for the
+    // trailing `resident`. dcc takes them in that order only, each once.
+    nfResident
   );
   TPasNodeFlags = set of TPasNodeFlag;
 
@@ -873,6 +889,16 @@ begin
     Result := Result + '#const';
   if nfOut in Nodes[AIndex].Flags then
     Result := Result + '#out';
+  if nfExtName in Nodes[AIndex].Flags then
+    Result := Result + '#extname';
+  if nfExtIndex in Nodes[AIndex].Flags then
+    Result := Result + '#extindex';
+  if nfExtDependency in Nodes[AIndex].Flags then
+    Result := Result + '#extdependency';
+  if nfDelayed in Nodes[AIndex].Flags then
+    Result := Result + '#delayed';
+  if nfResident in Nodes[AIndex].Flags then
+    Result := Result + '#resident';
   LChildren := '';
   LChild := Nodes[AIndex].FirstChild;
   while LChild <> NIL_NODE do

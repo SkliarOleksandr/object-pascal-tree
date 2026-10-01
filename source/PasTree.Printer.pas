@@ -456,6 +456,8 @@ type
     function RoutineName(ANode, AChild: Integer): Integer;
     procedure Params(ANode: Integer);
     procedure Param(ANode: Integer);
+    procedure Directive(ANode: Integer);
+    function ExternalDelayedAt(ANode: Integer): Integer;
     procedure PropertyDecl(ANode: Integer);
     procedure PropSpec(ANode: Integer);
     procedure VariantPart(ANode: Integer);
@@ -881,32 +883,11 @@ begin
   Kw(';', ANode);
 end;
 
-// `label` labels `;` - a name label is a child, a numeric one a filed loss
-// (F16): both in their order, commas between.
+// `label` labels `;` - each label a name or a number (F16), commas between.
 procedure TPrinter.LabelSec(ANode: Integer);
-var
-  LChild, LLoss: Integer;
-  LFirst: Boolean;
 begin
   Kw('label', ANode);
-  LChild := T.Nodes[ANode].FirstChild;
-  LFirst := True;
-  while True do
-  begin
-    LLoss := NextLoss(ANode);
-    if (LChild = NIL_NODE) and (LLoss < 0) then
-      Break;
-    if not LFirst then
-      Kw(',', ANode);
-    LFirst := False;
-    if (LChild <> NIL_NODE) and ((LLoss < 0) or (Left(LChild) < LLoss)) then
-    begin
-      Emit(LChild);
-      LChild := Next(LChild);
-    end
-    else
-      Losses(ANode, LLoss + 1);
-  end;
+  ListFrom(T.Nodes[ANode].FirstChild, ',', ANode);
   Kw(';', ANode);
 end;
 
@@ -1370,6 +1351,72 @@ begin
   end;
 end;
 
+{ The visible index of the `delayed` word in an `external` directive's
+  clause, outside every value's span; -1 when there is none (nfDelayed). }
+function TPrinter.ExternalDelayedAt(ANode: Integer): Integer;
+var
+  LVis, LChild: Integer;
+begin
+  Result := -1;
+  LVis := Left(ANode) + 1;
+  LChild := T.Nodes[ANode].FirstChild;
+  while LVis <= T.Nodes[ANode].LastToken do
+  begin
+    while (LChild <> NIL_NODE) and (IsEmptyNode(T, LChild) or
+          (T.Nodes[LChild].LastToken < LVis)) do
+      LChild := Next(LChild);
+    if (LChild <> NIL_NODE) and (Left(LChild) <= LVis) then
+      LVis := T.Nodes[LChild].LastToken + 1
+    else
+    begin
+      if (T.Source.VisibleToken(LVis).Kind = tkIdentifier) and
+         SameText(T.Source.VisibleText(LVis), 'delayed') then
+        Exit(LVis);
+      Inc(LVis);
+    end;
+  end;
+end;
+
+{ The head word, then its values. An `external` directive writes the word
+  of each clause before its value (nfExtName `name`, nfExtIndex `index`,
+  nfExtDependency `dependency` and a `,` between the list's values) and
+  `delayed` (nfDelayed) where it stood among them - F13. }
+procedure TPrinter.Directive(ANode: Integer);
+var
+  LChild, LDelayed: Integer;
+  LPrevDep: Boolean;
+begin
+  Head(ANode);
+  LDelayed := -1;
+  if nfDelayed in T.Nodes[ANode].Flags then
+    LDelayed := ExternalDelayedAt(ANode);
+  LPrevDep := False;
+  LChild := T.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if (LDelayed >= 0) and not IsEmptyNode(T, LChild) and
+       (LDelayed < Left(LChild)) then
+    begin
+      Kw('delayed', ANode);
+      LDelayed := -1;
+    end;
+    if nfExtName in T.Nodes[LChild].Flags then
+      Kw('name', ANode)
+    else if nfExtIndex in T.Nodes[LChild].Flags then
+      Kw('index', ANode)
+    else if nfExtDependency in T.Nodes[LChild].Flags then
+      if LPrevDep then
+        Kw(',', ANode)
+      else
+        Kw('dependency', ANode);
+    LPrevDep := nfExtDependency in T.Nodes[LChild].Flags;
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
+  if LDelayed >= 0 then
+    Kw('delayed', ANode);
+end;
+
 { property Name [index params] [: Type] specifiers [hints]; [default;]
   [hints;] - the head `class` is the list owner's (Aux 1). A specifier
   `default` with no value is always the trailing one, which owns its `;`
@@ -1752,27 +1799,15 @@ begin
     nkGotoStmt:
       begin
         Kw('goto', ANode);
-        // A numeric label has no node (F16): the loss read at the end.
         if C0 <> NIL_NODE then
           Emit(C0);
       end;
     nkLabeledStmt:
-      // Two children: the label's name and the statement; one: a numeric
-      // label, which has no node (F16) - read before the `:`.
-      if C1 <> NIL_NODE then
+      // The label (a name or a number, F16), `:`, the statement.
       begin
         Emit(C0);
         Kw(':', ANode);
         Emit(C1);
-      end
-      else
-      begin
-        if (C0 <> NIL_NODE) and not IsEmptyNode(T, C0) then
-          Losses(ANode, Left(C0))
-        else
-          Losses(ANode, T.Nodes[ANode].LastToken + 1);
-        Kw(':', ANode);
-        Emit(C0);
       end;
     nkTryStmt:
       begin
@@ -1881,15 +1916,21 @@ begin
         Kw(';', ANode);
       end;
     nkExportsItem:
-      // Name [params], then its `index` / `name` clauses and `resident` -
-      // which of the values is which is a filed loss (F14), read in place.
+      // Name [params], then `index` and `name` before the values that carry
+      // nfExtIndex / nfExtName, and `resident` (nfResident) last - F14.
       begin
         LChild := C0;
         while LChild <> NIL_NODE do
         begin
+          if nfExtIndex in T.Nodes[LChild].Flags then
+            Kw('index', ANode)
+          else if nfExtName in T.Nodes[LChild].Flags then
+            Kw('name', ANode);
           Child(ANode, LChild);
           LChild := Next(LChild);
         end;
+        if nfResident in T.Nodes[ANode].Flags then
+          Kw('resident', ANode);
       end;
 
     // ---- declaration sections ----
@@ -2025,17 +2066,7 @@ begin
     nkParam:
       Param(ANode);
     nkDirective:
-      // The word, then its values - which value of `external` is the
-      // library, the name or the index is a filed loss (F13): read in place.
-      begin
-        Head(ANode);
-        LChild := C0;
-        while LChild <> NIL_NODE do
-        begin
-          Child(ANode, LChild);
-          LChild := Next(LChild);
-        end;
-      end;
+      Directive(ANode);
     nkPropertyDecl:
       PropertyDecl(ANode);
     nkPropSpec:
@@ -2622,6 +2653,16 @@ begin
       LLine := LLine + '#const';
     if nfOut in ATree.Nodes[LNode].Flags then
       LLine := LLine + '#out';
+    if nfExtName in ATree.Nodes[LNode].Flags then
+      LLine := LLine + '#extname';
+    if nfExtIndex in ATree.Nodes[LNode].Flags then
+      LLine := LLine + '#extindex';
+    if nfExtDependency in ATree.Nodes[LNode].Flags then
+      LLine := LLine + '#extdependency';
+    if nfDelayed in ATree.Nodes[LNode].Flags then
+      LLine := LLine + '#delayed';
+    if nfResident in ATree.Nodes[LNode].Flags then
+      LLine := LLine + '#resident';
     case LKind of
       nkUnaryOp, nkBinaryOp:
         if IsFusedGreaterEqual(ATree, LNode) then

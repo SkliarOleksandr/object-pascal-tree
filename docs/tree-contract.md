@@ -46,7 +46,7 @@ the flags mean. The expression and statement kinds read as follows (`c0`,
 | nkWhileStmt | `while c0 do c1` |
 | nkRepeatStmt | `repeat c0 until c1` |
 | nkWithStmt | `with c0, ... do` last child |
-| nkGotoStmt, nkLabeledStmt | `goto c0`; `c0 : c1` - see 4 for numeric labels |
+| nkGotoStmt, nkLabeledStmt | `goto c0`; `c0 : c1` - the label c0 is an nkIdent, or an nkIntLit for a numeric one (a name label is bound by the resolver, a numeric one is not) |
 | nkTryStmt | `try c0` then nkFinallyPart (`finally c0`) or nkExceptPart (`except` handlers or a catch-all block), `end` |
 | nkExceptOn | `on [c0 :] type do statement` - three children: the name first |
 | nkRaiseStmt | `raise [c0 [at c1]]` |
@@ -66,11 +66,12 @@ type reference" is an nkIdent, nkMember or nkTypeArgs.
 | nkUsesItem | `c0 [in c1]` |
 | nkInterfaceSec, nkImplementationSec | `interface` / `implementation` [uses] declarations |
 | nkInitSec, nkFinalSec | `initialization` (or a unit's legacy `begin`, see 3) / `finalization` statements, `;` between |
-| nkExportsClause | `exports c0, ... ;` - see 4 for its items |
+| nkExportsClause | `exports c0, ... ;` |
+| nkExportsItem | the name (qualified), [nkParams], [`index` value - nfExtIndex], [`name` value - nfExtName], [`resident` - nfResident on the item]; dcc takes them in that order, each once (E2029 otherwise: a parse diagnostic here, flagged all the same) |
 | nkTypeSec | `type` then each nkTypeDecl followed by `;` |
 | nkConstSec | the head word (see 3), each nkConstDecl followed by `;` |
 | nkVarSec | the head word (see 3) - in a struct body `var`, or `threadvar` (nfThreadvar, see 5) - each nkVarDecl followed by `;` |
-| nkLabelSec | `label` labels `, ... ;` - see 4 for numeric labels |
+| nkLabelSec | `label` labels `, ... ;` - each an nkIdent or an nkIntLit |
 | nkTypeDecl | [attributes] name [nkGenericParams] `=` [`type` when Aux is 1] type [hints] |
 | nkConstDecl | [attributes] name [`: type` - two children after the name before the hints] `=` value [hints] |
 | nkVarDecl | [attributes] names (nfName) `:` type, then in their order hints and the initializer - `= value`, or `absolute X` when Aux is 1; also a field |
@@ -92,7 +93,7 @@ type reference" is an nkIdent, nkMember or nkTypeArgs.
 | nkRoutine | the head word (see 3), the name segments (nfName) each with its [nkGenericParams], `.` between, [nkParams], [`:` result type] `;`, each nkDirective followed by `;`, [nkRoutineBody `;`] |
 | nkParams | `( c0; ... )` - `[ ... ]` for a property's index parameters |
 | nkParam | [attributes] [the mode - nfVar / nfConst / nfOut, see 5] [attributes] names (nfName; attributes may stand between them) [`:` type [`=` default]] |
-| nkDirective | the word (see 3), then its children - its values; Aux 1 only in an nkProcType, see there |
+| nkDirective | the word (see 3), then its children - its values; Aux 1 only in an nkProcType, see there. `external`: [the library] and each clause's value after its word - `name` (nfExtName), `index` (nfExtIndex), `dependency` then a `,`-separated list (nfExtDependency) - and `delayed` (nfDelayed on the directive) anywhere among them; see 5 |
 | nkPropertyDecl | `property` name [nkParams] [`:` type] specifiers [hints] `;` [the trailing `default;`] |
 | nkPropSpec | the word (see 3), its values `, ...`; `default` with no value is the trailing `default;` of an array property and owns its `;` |
 | nkMethodResolution | the head word, the segments `.` between, `=` the last child `;` |
@@ -146,9 +147,6 @@ same program, and T3 counts the losses per finding.
 
 | Finding | Not in the tree |
 |---|---|
-| F13 | inside `external`: which child is the library, the name, the index; `delayed` |
-| F14 | in `exports`: which child is the index and which the name; `resident` |
-| F16 | a numeric label: `goto 10`, `10: S`, `label 10` |
 | F17 | program parameters, `program X(Input, Output);` |
 
 ## 5. Span quirks
@@ -166,6 +164,20 @@ same program, and T3 counts the losses per finding.
   and `[A] const X` are both dcc's, and only the group's own span tells the
   two apart. `out` is a directive word and a legal parameter NAME: a
   parameter whose first name is `out` and that carries no flag is one.
+- An `external` directive's clause words - `name`, `index`, `dependency`, the `,`
+  of a dependency list - stand right before their value, outside its span;
+  the value carries the clause's flag. The library, the first value, right
+  after `external`, carries none (`external index 3` is a library named
+  `index` and a stray `3`: a word that ends the value before it is that
+  value's own). `delayed` has no value: nfDelayed is on the directive, the
+  word standing in the clause outside every value's span, in any place
+  among the clauses. dcc takes each clause once (E1030 for a repeat - a
+  parse diagnostic here, flagged all the same); `dependency` is accepted on
+  the non-Windows compilers and `delayed` on the Windows ones, and PasTree
+  takes both.
+- An `exports` item's `index` and `name` stand right before their value, outside
+  its span, the value carrying nfExtIndex / nfExtName; `resident` is the
+  item's last token, nfResident on the item.
 - `packed` lies outside the span of the type it packs (nfPacked): the
   token of that type's parent - a declaration, or the array or file
   whose element it is.

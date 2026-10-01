@@ -114,6 +114,18 @@ var
       LSB.Append(',"const":true');
     if nfOut in ATree.Nodes[AIndex].Flags then
       LSB.Append(',"out":true');
+    // An external directive's clauses (nfExtName, nfExtIndex,
+    // nfExtDependency on the values, nfDelayed on the directive).
+    if nfExtName in ATree.Nodes[AIndex].Flags then
+      LSB.Append(',"extname":true');
+    if nfExtIndex in ATree.Nodes[AIndex].Flags then
+      LSB.Append(',"extindex":true');
+    if nfExtDependency in ATree.Nodes[AIndex].Flags then
+      LSB.Append(',"extdependency":true');
+    if nfDelayed in ATree.Nodes[AIndex].Flags then
+      LSB.Append(',"delayed":true');
+    if nfResident in ATree.Nodes[AIndex].Flags then
+      LSB.Append(',"resident":true');
     if ATree.Nodes[AIndex].Aux <> NIL_NODE then
       if not (LKind in [nkUnaryOp, nkBinaryOp]) then
         LSB.AppendFormat(',"aux":%d', [ATree.Nodes[AIndex].Aux]);

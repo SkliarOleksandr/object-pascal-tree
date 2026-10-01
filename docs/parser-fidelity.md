@@ -179,7 +179,7 @@ minus before a member call - agree with dcc everywhere they were met.
 
 | Id | Where | What |
 |---|---|---|
-| F13, F14, F16, F17 | the tree | tokens only they hold - the losses of `docs/tree-contract.md` sec. 4; each is read in place and counted, none changes a grouping |
+| F17 | the tree | tokens only they hold - the losses of `docs/tree-contract.md` sec. 4; each is read in place and counted, none changes a grouping |
 | F5 | the DCU reader | a routine's nested routines listed under its anonymous method's body; only the dump's nesting |
 | F8 | the parser, error mode | the root stops where a broken parse stopped, the rest of the file in no node |
 | F22 | the preprocessor | a conditional crossing an include boundary is accepted; dcc refuses it (invalid code only) |

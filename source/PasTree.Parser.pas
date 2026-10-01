@@ -1619,15 +1619,18 @@ begin
         Next;
         // 5.6.4: an IDENTIFIER label is a reference to a `label`-section
         // declaration, so it gets a node the resolver can bind. A numeric
-        // label declares no name at all - it stays a bare token, exactly as
-        // the numeric form of nkLabeledStmt below does.
+        // label declares no name - it is an nkIntLit leaf (F16), which the
+        // resolver does not bind.
         if CurKind = tkIdentifier then
         begin
           FB.Adopt(LNode, FB.AddNode(nkIdent, NIL_NODE, FPos));
           Next;
         end
         else if CurKind = tkIntLiteral then
-          Next
+        begin
+          FB.Adopt(LNode, FB.AddNode(nkIntLit, NIL_NODE, FPos));
+          Next;
+        end
         else
           Error('label expected');
         FB.SetLast(LNode, FPos - 1);
@@ -1686,6 +1689,7 @@ begin
       if PeekKind(1) = tkColon then
       begin
         LNode := FB.AddNode(nkLabeledStmt, NIL_NODE, FPos);
+        FB.Adopt(LNode, FB.AddNode(nkIntLit, NIL_NODE, FPos));   // F16
         Next;
         Next;
         FB.Adopt(LNode, ParseStatement);
@@ -3112,10 +3116,19 @@ begin
   FB.AddNode(nkDirective, NIL_NODE, FPos);   // FirstToken = LastToken = FPos
 end;
 
+const
+  // What ends an `external` clause: its `;`, or the start of the next
+  // declaration or section (a missing `;` is tolerated, see below).
+  EXTERNAL_END = [tkSemicolon, tkEndOfFile, tkFunction, tkProcedure,
+    tkConstructor, tkDestructor, tkClass, tkType, tkVar, tkConst,
+    tkThreadvar, tkLabel, tkExports, tkBegin, tkEnd, tkImplementation,
+    tkInitialization, tkFinalization];
+
 function TPasParser.ParseRoutineDirectives(ARoutine: Integer): Boolean;
 var
-  LDir: Integer;
+  LDir, LValue: Integer;
   LIsExternal, LIsForward, LIsAbstract: Boolean;
+  LHaveName, LHaveIndex, LHaveDep, LHaveDelayed: Boolean;
 begin
   // 6.x: `; directive`* - returns True when the routine has no body.
   LIsExternal := False;
@@ -3129,32 +3142,70 @@ begin
       LIsExternal := True;
       Next;
       // external [lib] [name expr | index expr | dependency e,e | delayed]
+      // dcc reads the first expression as the LIBRARY unless it is `name`:
+      // `external index 3` and `external delayed` name an undeclared
+      // identifier (E2003, dcc64 37.0, x-f13 E24 / E25). The clauses follow
+      // in any order, each once (a repeat is E1030).
+      // F13: each clause's value carries its clause flag - the word, or the
+      // `,` of a dependency list, stands right before it - and `delayed`
+      // (no value) is nfDelayed on the directive.
       // The clause stops at ';' OR at anything that starts the next
       // declaration - dcc tolerates a missing terminator:
       // `function F; external shell32 name 'X'` + newline + `function ...`
       // (user corpus, verified against dcc64).
-      while not (CurKind in [tkSemicolon, tkEndOfFile, tkFunction,
-        tkProcedure, tkConstructor, tkDestructor, tkClass, tkType, tkVar,
-        tkConst, tkThreadvar, tkLabel, tkExports, tkBegin, tkEnd,
-        tkImplementation, tkInitialization, tkFinalization]) do
+      if not (CurKind in EXTERNAL_END) and not IsWord('name') then
+        FB.Adopt(LDir, ParseExpression);
+      LHaveName := False;
+      LHaveIndex := False;
+      LHaveDep := False;
+      LHaveDelayed := False;
+      while not (CurKind in EXTERNAL_END) do
       begin
-        if IsWord('name') or IsWord('index') then
+        if IsWord('name') then
         begin
+          if LHaveName then
+            Error('duplicate `name` in an external clause');
+          LHaveName := True;
           Next;
-          FB.Adopt(LDir, ParseExpression);
+          LValue := ParseExpression;
+          FB.AddFlag(LValue, nfExtName);
+          FB.Adopt(LDir, LValue);
+        end
+        else if IsWord('index') then
+        begin
+          if LHaveIndex then
+            Error('duplicate `index` in an external clause');
+          LHaveIndex := True;
+          Next;
+          LValue := ParseExpression;
+          FB.AddFlag(LValue, nfExtIndex);
+          FB.Adopt(LDir, LValue);
         end
         else if IsWord('dependency') then
         begin
+          if LHaveDep then
+            Error('duplicate `dependency` in an external clause');
+          LHaveDep := True;
           Next;
-          FB.Adopt(LDir, ParseExpression);
+          LValue := ParseExpression;
+          FB.AddFlag(LValue, nfExtDependency);
+          FB.Adopt(LDir, LValue);
           while CurKind = tkComma do
           begin
             Next;
-            FB.Adopt(LDir, ParseExpression);
+            LValue := ParseExpression;
+            FB.AddFlag(LValue, nfExtDependency);
+            FB.Adopt(LDir, LValue);
           end;
         end
         else if IsWord('delayed') then
-          Next
+        begin
+          if LHaveDelayed then
+            Error('duplicate `delayed` in an external clause');
+          LHaveDelayed := True;
+          FB.AddFlag(LDir, nfDelayed);
+          Next;
+        end
         else
           FB.Adopt(LDir, ParseExpression);
       end;
@@ -3826,7 +3877,7 @@ end;
 
 function TPasParser.ParseExportsClause: Integer;
 var
-  LItem: Integer;
+  LItem, LValue, LStage: Integer;
 begin
   // 1.1.3: exports Name [(params)] [index e] [name e] [resident], ...;
   Result := FB.AddNode(nkExportsClause, NIL_NODE, FPos);
@@ -3836,13 +3887,43 @@ begin
     FB.Adopt(LItem, ParseQualifiedName);
     if CurKind = tkLParen then
       FB.Adopt(LItem, ParseParamList(tkRParen));
-    while IsWord('index') or IsWord('name') do
+    // F14: dcc takes `index`, then `name`, then `resident`, each once and in
+    // that order only (E2029 otherwise, x-f14 X05 X08 X10-X13). A value
+    // carries nfExtIndex / nfExtName - the word stands right before it -
+    // and `resident` (no value) is nfResident on the item. Out of order or
+    // repeated is a parse diagnostic, flagged all the same.
+    LStage := 0;
+    while IsWord('index') or IsWord('name') or IsWord('resident') do
     begin
-      Next;
-      FB.Adopt(LItem, ParseExpression);
+      if IsWord('index') then
+      begin
+        if LStage > 0 then
+          Error('`index` must come first and once in an exports item');
+        LStage := 1;
+        Next;
+        LValue := ParseExpression;
+        FB.AddFlag(LValue, nfExtIndex);
+        FB.Adopt(LItem, LValue);
+      end
+      else if IsWord('name') then
+      begin
+        if LStage > 1 then
+          Error('`name` must come once, before `resident`, in an exports item');
+        LStage := 2;
+        Next;
+        LValue := ParseExpression;
+        FB.AddFlag(LValue, nfExtName);
+        FB.Adopt(LItem, LValue);
+      end
+      else
+      begin
+        if LStage > 2 then
+          Error('`resident` twice in an exports item');
+        LStage := 3;
+        FB.AddFlag(LItem, nfResident);
+        Next;
+      end;
     end;
-    if IsWord('resident') then
-      Next;
     FB.SetLast(LItem, FPos - 1);
     FB.Adopt(Result, LItem);
     if CurKind = tkComma then
@@ -3914,9 +3995,11 @@ begin
             // 5.6.4: each identifier label DECLARES a name in the enclosing
             // routine's scope - emit a node so the resolver can declare it
             // (skLabel) and the `Foo:` / `goto Foo` references bind to it.
-            // Numeric labels declare no name; they stay bare tokens.
+            // Numeric labels declare no name: an nkIntLit leaf (F16).
             if CurKind = tkIdentifier then
-              FB.Adopt(LNode, FB.AddNode(nkIdent, NIL_NODE, FPos));
+              FB.Adopt(LNode, FB.AddNode(nkIdent, NIL_NODE, FPos))
+            else
+              FB.Adopt(LNode, FB.AddNode(nkIntLit, NIL_NODE, FPos));
             Next;
             if CurKind = tkComma then
               Next;

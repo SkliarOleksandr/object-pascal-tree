@@ -30,7 +30,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..127] of TPasCaseRow = (
+  STMT_CASES: array[0..128] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -323,7 +323,8 @@ const
     // it gets its own Ident node the resolver can bind (without it the
     // labeled statement's name was the only node, and it resolved to
     // nothing: false E2003 on System.Generics.Defaults). A NUMERIC label
-    // declares no name at all and stays a bare token in both positions.
+    // declares no name: an IntLit leaf in every position (F16), which the
+    // resolver does not bind.
     (Section: '5.6.4'; Name: 'goto ident label'; Source: 'goto Done;';
      Expected: 'Block(GotoStmt(Ident''Done''))'; ExpectDiags: 0),
     (Section: '5.6.4'; Name: 'labeled stmt + goto';
@@ -332,7 +333,13 @@ const
        'GotoStmt(Ident''Again''))'; ExpectDiags: 0),
     (Section: '5.6.4'; Name: 'numeric label declares no ident node';
      Source: '1: goto 2;';
-     Expected: 'Block(LabeledStmt(GotoStmt))'; ExpectDiags: 0),
+     Expected: 'Block(LabeledStmt(IntLit''1'' GotoStmt(IntLit''2'')))';
+     ExpectDiags: 0),
+    // dcc64 37.0 (x-f16 L04): a hex label is a label; `010` is not `10`.
+    (Section: '5.6.4'; Name: 'a hex label';
+     Source: '$A: goto $A;';
+     Expected: 'Block(LabeledStmt(IntLit''$A'' GotoStmt(IntLit''$A'')))';
+     ExpectDiags: 0),
 
     // ---- 5.7 with ----
     (Section: '5.7'; Name: 'with'; Source: 'with A, B do X := 1;';
@@ -776,7 +783,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..230] of TPasCaseRow = (
+  DECL_CASES: array[0..238] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1077,6 +1084,9 @@ const
      ExpectDiags: 0),
 
     // ---- 6.7.1 external, never exercised at all (varargs alone was) ----
+    // F13: each value carries its clause (#extname, #extindex,
+    // #extdependency), the library none; `delayed` is #delayed on the
+    // directive.
     (Section: '6.7.1'; Name: 'external plain';
      Source: 'procedure P; external ''user32.dll'';';
      Expected: 'Routine''procedure''(Ident''P''#name Directive''external''(' +
@@ -1084,18 +1094,48 @@ const
     (Section: '6.7.1'; Name: 'external name';
      Source: 'procedure P; external ''user32.dll'' name ''RealP'';';
      Expected: 'Routine''procedure''(Ident''P''#name Directive''external''(' +
-       'StrLit''''user32.dll'''' StrLit''''RealP''''))'; ExpectDiags: 0),
+       'StrLit''''user32.dll'''' StrLit''''RealP''''#extname))'; ExpectDiags: 0),
     (Section: '6.7.1'; Name: 'external index';
      Source: 'function F: Integer; external ''k32.dll'' index 5;';
      Expected: 'Routine''function''(Ident''F''#name Ident''Integer'' ' +
-       'Directive''external''(StrLit''''k32.dll'''' IntLit''5''))';
+       'Directive''external''(StrLit''''k32.dll'''' IntLit''5''#extindex))';
      ExpectDiags: 0),
     (Section: '6.7.1'; Name: 'external delayed';
      Source: 'procedure P; external ''x.dll'' delayed;';
-     // `delayed` is consumed but adopts no child of its own -- only name/
-     // index/dependency arguments become children (ParseRoutineDirectives).
+     Expected: 'Routine''procedure''(Ident''P''#name ' +
+       'Directive''external''#delayed(StrLit''''x.dll''''))'; ExpectDiags: 0),
+    // dcc takes the clauses in any order (x-f13 E05 E08 E19 E20 E27).
+    (Section: '6.7.1'; Name: 'external clauses in any order';
+     Source: 'procedure P; external ''k'' index 3 delayed name ''Q'';';
+     Expected: 'Routine''procedure''(Ident''P''#name ' +
+       'Directive''external''#delayed(StrLit''''k'''' IntLit''3''#extindex ' +
+       'StrLit''''Q''''#extname))'; ExpectDiags: 0),
+    // `dependency` is the non-Windows clause: values after the word and
+    // after each `,` (x-f13 E11 E13 on the Android and macOS compilers).
+    (Section: '6.7.1'; Name: 'external dependency list';
+     Source: 'procedure P; external ''k'' dependency ''a'', ''b'' name ''Q'';';
      Expected: 'Routine''procedure''(Ident''P''#name Directive''external''(' +
-       'StrLit''''x.dll''''))'; ExpectDiags: 0),
+       'StrLit''''k'''' StrLit''''a''''#extdependency ' +
+       'StrLit''''b''''#extdependency StrLit''''Q''''#extname))';
+     ExpectDiags: 0),
+    // `name` right after `external` opens the clause: there is no library
+    // (E10); `index` and `delayed` there are the library's expression,
+    // dcc's E2003 undeclared identifier, not a clause (x-f13 E24 E25).
+    (Section: '6.7.1'; Name: 'external with no library';
+     Source: 'procedure P; external name ''Q'';';
+     Expected: 'Routine''procedure''(Ident''P''#name Directive''external''(' +
+       'StrLit''''Q''''#extname))'; ExpectDiags: 0),
+    (Section: '6.7.1'; Name: 'external: a first index is the library';
+     Source: 'procedure P; external index 3;';
+     Expected: 'Routine''procedure''(Ident''P''#name Directive''external''(' +
+       'Ident''index'' IntLit''3''))'; ExpectDiags: 0),
+    // A repeated clause is dcc's E1030: one parse diagnostic each, both
+    // values flagged all the same (x-f13 E16 E17 E18).
+    (Section: '6.7.1'; Name: 'external: a repeated clause';
+     Source: 'procedure P; external ''k'' name ''Q'' name ''R'';';
+     Expected: 'Routine''procedure''(Ident''P''#name Directive''external''(' +
+       'StrLit''''k'''' StrLit''''Q''''#extname StrLit''''R''''#extname))';
+     ExpectDiags: 1),
 
     // ---- 14.3.2 [weak]/[unsafe] on an interface-typed field: an attribute
     // group in member position -- pin the CURRENT shape, since the parser
@@ -2425,12 +2465,36 @@ const
      Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType#packed(VarDecl(' +
        'Ident''X''#name Ident''Integer'') IntLit''16'' Directive''platform'')))';
      ExpectDiags: 0),
+    // F14: #extindex / #extname on the values, #resident on the item.
     (Section: '1.1.3'; Name: 'S9: exports with index, name and resident';
      Source: 'procedure P; exports P index 3 name ''Q'' resident, P;';
      Expected: 'Routine''procedure''(Ident''P''#name) ExportsClause(' +
-       'ExportsItem(Ident''P'' IntLit''3'' StrLit''''Q'''') ' +
-       'ExportsItem(Ident''P''))';
-     ExpectDiags: 0)
+       'ExportsItem#resident(Ident''P'' IntLit''3''#extindex ' +
+       'StrLit''''Q''''#extname) ExportsItem(Ident''P''))';
+     ExpectDiags: 0),
+    (Section: '1.1.3'; Name: 'exports: a name only, an overload by its parameters';
+     Source: 'procedure P(A: Integer); overload; exports P(A: Integer) ' +
+       'name ''Q'', P resident;';
+     Expected: 'Routine''procedure''(Ident''P''#name Params(Param(' +
+       'Ident''A''#name Ident''Integer'')) Directive''overload'') ' +
+       'ExportsClause(ExportsItem(Ident''P'' Params(Param(Ident''A''#name ' +
+       'Ident''Integer'')) StrLit''''Q''''#extname) ' +
+       'ExportsItem#resident(Ident''P''))';
+     ExpectDiags: 0),
+    // dcc takes index, name, resident in that order, each once (E2029
+    // otherwise, x-f14 X05 X08 X10-X13): one parse diagnostic, flagged
+    // all the same.
+    (Section: '1.1.3'; Name: 'exports: name before index is refused';
+     Source: 'procedure P; exports P name ''Q'' index 3;';
+     Expected: 'Routine''procedure''(Ident''P''#name) ExportsClause(' +
+       'ExportsItem(Ident''P'' StrLit''''Q''''#extname ' +
+       'IntLit''3''#extindex))';
+     ExpectDiags: 1),
+    (Section: '1.1.3'; Name: 'exports: resident twice is refused';
+     Source: 'procedure P; exports P resident resident;';
+     Expected: 'Routine''procedure''(Ident''P''#name) ExportsClause(' +
+       'ExportsItem#resident(Ident''P''))';
+     ExpectDiags: 1)
   );
 
 { Builds every case that is not a plain dump comparison: the platform matrix
@@ -3296,10 +3360,10 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
           Exit;
         end;
         Result := CheckDump(SRC, 'Routine''procedure''(Ident''P''#name ' +
-          'RoutineBody(LabelSec ConstSec''const''(ConstDecl(Ident''K'' ' +
+          'RoutineBody(LabelSec(IntLit''1'') ConstSec''const''(ConstDecl(Ident''K'' ' +
           'IntLit''1'')) TypeSec(TypeDecl(Ident''TLocal'' ' +
           'Ident''Integer'')) VarSec''var''(VarDecl(Ident''X''#name ' +
-          'Ident''TLocal'')) Block(LabeledStmt(Assign(Ident''X'' ' +
+          'Ident''TLocal'')) Block(LabeledStmt(IntLit''1'' Assign(Ident''X'' ' +
           'Ident''K'')))))', LTree.Dump(LRoutine), LDiags, 0);
         ApplyVerdict(Result, SRC, GCustomTreeVerdict, LPre, LTree, False,
           Length(LDiags) = 0);

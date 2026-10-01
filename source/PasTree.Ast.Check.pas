@@ -309,19 +309,21 @@ const
     set brings in. Two rules claiming one cell alike is a table error.
 
     The finding numbers are the plan's (local/PARSER-FIDELITY-PLAN.md, a
-    working paper): F13 the external clause, F14 the exports clause, F16
-    numeric labels, F17 program parameters. (F19, where a name list ends, is
+    working paper): F17 program parameters. (F19, where a name list ends, is
     derived since the names carry nfName - I6 checks the flag against the
     separators; F3's `packed` since the type carries nfPacked, F4's class
     modifiers since the class carries nfAbstract / nfSealed, F9's `class
     threadvar` since the section carries nfThreadvar, F12's message and
     F15's GUID literal since each is a child, F18's parameter modes since
-    the parameter carries nfVar / nfConst / nfOut. F1, F2, F10 and F11 are
+    the parameter carries nfVar / nfConst / nfOut, F16's numeric labels (an nkIntLit child), F13's external clauses
+    since each value carries nfExtName / nfExtIndex / nfExtDependency and the
+    directive nfDelayed. F14's exports clauses likewise (nfExtIndex / nfExtName
+    on the values, nfResident on the item). F1, F2, F10 and F11 are
     gone too: every directive
     of a procedural type, of a routine header before its `;` and of an
     anonymous method is an nkDirective child, and the initializer after a
     procedural type's directives is its declaration's.) }
-  OWN_RULE_TEXT: array[0..229] of string = (
+  OWN_RULE_TEXT: array[0..226] of string = (
     // ---- leaves: the token is the node's own text ----
     'Ident | <ident> @words @keywords | once | leaf | the name as written; ' +
       'a reserved word only after a dot, as an operator name or as the ' +
@@ -409,9 +411,7 @@ const
     'WithStmt | , | - | derived | between the targets',
     'WithStmt | do | once | derived | the kind',
     'GotoStmt | goto | head once | derived | the kind',
-    'GotoStmt | <int> | opt | loss:F16 | a numeric label has no node',
     'LabeledStmt | : | once | derived | the kind',
-    'LabeledStmt | <int> | head opt | loss:F16 | a numeric label has no node',
     'TryStmt | try | head once | derived | the kind',
     'TryStmt | end | once | derived | the kind',
     'ExceptPart | except | head once | derived | the kind',
@@ -468,9 +468,9 @@ const
     'ExportsClause | exports | head once | derived | the kind',
     'ExportsClause | , | - | derived | between the items',
     'ExportsClause | ; | once | derived | the kind',
-    'ExportsItem | name index | - | loss:F14 | the children do not say which ' +
-      'expression is the name and which the index',
-    'ExportsItem | resident | opt | loss:F14 | skipped',
+    'ExportsItem | name index | - | derived | nfExtName, nfExtIndex on the ' +
+      'value after the word (F14)',
+    'ExportsItem | resident | opt | derived | nfResident on the item (F14)',
 
     // ---- declaration sections ----
     'TypeSec | type | head once | derived | the kind',
@@ -484,7 +484,6 @@ const
     'LabelSec | label | head once | derived | the kind',
     'LabelSec | , | - | derived | between the labels',
     'LabelSec | ; | once | derived | the kind',
-    'LabelSec | <int> | - | loss:F16 | a numeric label has no node',
     'TypeDecl | = | opt | derived | the kind; a fused >= stands for it after ' +
       'generic parameters',
     'TypeDecl | >= | opt | insig | a fused >=: the > closing the generic ' +
@@ -598,9 +597,10 @@ const
     'Param | const var out | opt | derived | nfVar, nfConst, nfOut: the mode ' +
       'word, at the left edge or right after a leading attribute group (F18)',
     'Directive | @routine | head once | contract | the directive word',
-    'Directive | name index dependency delayed , | - | loss:F13 | inside ' +
-      'external: nothing says which child is the library, the name or the ' +
-      'index; delayed is skipped',
+    'Directive | name index dependency delayed , | - | derived | inside ' +
+      'external: nfExtName, nfExtIndex, nfExtDependency on the value after ' +
+      'the word (or the `,` of a dependency list), nfDelayed on the ' +
+      'directive (F13)',
     'PropertyDecl | property | head once | derived | the kind; a `class` ' +
       'before it is the parent''s token (Aux 1)',
     'PropertyDecl | : | opt | derived | before the type, which a ' +
@@ -1642,8 +1642,9 @@ var
   var
     LAux, LKids, LFirstKid, LSecondKid, LVis, LKid: Integer;
     LOpKind: TPasTokenKind;
-    LAbstract, LSealed: Boolean;
+    LAbstract, LSealed, LExtParent, LFound: Boolean;
     LMode, LWant: TPasNodeFlags;
+    LParent, LPrev: Integer;
   begin
     LAux := ATree.Nodes[ANode].Aux;
     if not AuxInDomain(Kind(ANode), LAux) then
@@ -1746,6 +1747,103 @@ var
         AReport.Add(ccFlags, ANode, Site(ANode),
           'a var section is marked threadvar, and no `threadvar` stands ' +
           'before it');
+    // The clauses of an `external` directive (F13). A value carries the
+    // flag of the clause word standing right before it - `name`, `index`,
+    // `dependency`, or the `,` of a dependency list - and the library, right
+    // after `external`, none; nfDelayed is on the directive exactly when the
+    // word `delayed` stands in its clause outside every value's span.
+    LParent := ATree.Nodes[ANode].Parent;
+    LExtParent := (LParent <> NIL_NODE) and not LEmpty[LParent] and
+      (((Kind(LParent) = nkDirective) and WordAt(LLo[LParent], ['external'])) or
+       (Kind(LParent) = nkExportsItem));
+    LMode := [nfExtName, nfExtIndex, nfExtDependency] *
+      ATree.Nodes[ANode].Flags;
+    if not LExtParent then
+    begin
+      if LMode <> [] then
+        AReport.Add(ccFlags, ANode, Site(ANode), Format(
+          '%s carries an external clause flag outside an external directive',
+          [KName(ANode)]));
+    end
+    else if not LEmpty[ANode] then
+    begin
+      // A word that ends the value before this one is that value's own
+      // (`external index 3`: the library is the identifier `index`).
+      LKid := ATree.Nodes[LParent].FirstChild;
+      LPrev := NIL_NODE;
+      while (LKid <> NIL_NODE) and (LKid <> ANode) do
+      begin
+        if not LEmpty[LKid] then
+          LPrev := LKid;
+        LKid := ATree.Nodes[LKid].NextSibling;
+      end;
+      LWant := [];
+      if (LLo[ANode] > 0) and ((LPrev = NIL_NODE) or
+         (LHi[LPrev] < LLo[ANode] - 1)) then
+        if (TokKind(LLo[ANode] - 1) = tkComma) and
+           (Kind(LParent) = nkDirective) then
+          LWant := [nfExtDependency]
+        else if WordAt(LLo[ANode] - 1, ['name']) then
+          LWant := [nfExtName]
+        else if WordAt(LLo[ANode] - 1, ['index']) then
+          LWant := [nfExtIndex]
+        else if (Kind(LParent) = nkDirective) and
+                WordAt(LLo[ANode] - 1, ['dependency']) then
+          LWant := [nfExtDependency];
+      if LMode <> LWant then
+        AReport.Add(ccFlags, ANode, Site(ANode),
+          'the external clause flags disagree with the word before the value');
+    end;
+    // nfDelayed (an external directive) and nfResident (an exports item):
+    // exactly when the word stands in the node's clause outside every
+    // value's span.
+    if (LEmpty[ANode]) or not (((Kind(ANode) = nkDirective) and
+       WordAt(LLo[ANode], ['external'])) or (Kind(ANode) = nkExportsItem)) then
+    begin
+      if [nfDelayed, nfResident] * ATree.Nodes[ANode].Flags <> [] then
+        AReport.Add(ccFlags, ANode, Site(ANode), Format(
+          '%s carries nfDelayed or nfResident', [KName(ANode)]));
+    end
+    else
+    begin
+      LFound := False;
+      LVis := LLo[ANode] + 1;
+      LKid := ATree.Nodes[ANode].FirstChild;
+      while LVis <= LHi[ANode] do
+      begin
+        while (LKid <> NIL_NODE) and (LEmpty[LKid] or (LHi[LKid] < LVis)) do
+          LKid := ATree.Nodes[LKid].NextSibling;
+        if (LKid <> NIL_NODE) and (LLo[LKid] <= LVis) then
+          LVis := LHi[LKid] + 1
+        else
+        begin
+          if (Kind(ANode) = nkDirective) and WordAt(LVis, ['delayed']) or
+             (Kind(ANode) = nkExportsItem) and WordAt(LVis, ['resident']) then
+            LFound := True;
+          Inc(LVis);
+        end;
+      end;
+      if Kind(ANode) = nkDirective then
+      begin
+        if LFound <> (nfDelayed in ATree.Nodes[ANode].Flags) then
+          AReport.Add(ccFlags, ANode, Site(ANode),
+            'nfDelayed disagrees with the word `delayed` in the external ' +
+            'clause');
+        if nfResident in ATree.Nodes[ANode].Flags then
+          AReport.Add(ccFlags, ANode, Site(ANode),
+            'a directive carries nfResident');
+      end
+      else
+      begin
+        if LFound <> (nfResident in ATree.Nodes[ANode].Flags) then
+          AReport.Add(ccFlags, ANode, Site(ANode),
+            'nfResident disagrees with the word `resident` in the exports ' +
+            'item');
+        if nfDelayed in ATree.Nodes[ANode].Flags then
+          AReport.Add(ccFlags, ANode, Site(ANode),
+            'an exports item carries nfDelayed');
+      end;
+    end;
     LKids := LKidCount[ANode];
     LFirstKid := NIL_NODE;
     LSecondKid := NIL_NODE;
