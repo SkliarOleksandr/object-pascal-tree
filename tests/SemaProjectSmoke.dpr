@@ -1347,6 +1347,42 @@ const
     'end;'#10 +
     'end.'#10;
 
+  { 1.2.3 - a DOTTED `uses` entry declares no single identifier: its last
+    segment is not in scope (dcc64 37.0, probed 2026-10-01: with `uses Ns.Log`,
+    `Log('a')` calls the unit's routine Log; with `uses Ns.Other`, `Other.F` is
+    E2003). PasTree bound the unit under that segment, so every bare call of a
+    routine named like the unit's last segment resolved to the uses item - a
+    server's `Log(...)`, 40 calls over 5 units, had no references at all. }
+  UNIT_DLOG =
+    'unit UnitDot.Log;'#10'interface'#10 +
+    'procedure Log(const S: string);'#10 +
+    'function Tail: Integer;'#10 +
+    'implementation'#10 +
+    'procedure Log(const S: string);'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'function Tail: Integer;'#10 +
+    'begin'#10 +
+    '  Result := 1;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  UNIT_DLOGUSE =
+    'unit UnitDLogUse;'#10'interface'#10 +
+    'uses UnitDot.Log;'#10 +
+    'procedure Run;'#10 +
+    'implementation'#10 +
+    'procedure Run;'#10 +
+    'var'#10 +
+    '  X: Integer;'#10 +
+    'begin'#10 +
+    '  Log(''a'');'#10 +                  // the routine, not the unit
+    '  Log(''b'');'#10 +
+    '  UnitDot.Log.Log(''c'');'#10 +      // fully qualified: still the unit
+    '  X := UnitDot.Log.Tail;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   { 6.4 - an overload declared ONLY in the IMPLEMENTATION section joins the
     interface section's set for the same unit. The two are separate symbols in
     separate scopes, deliberately: chaining them would export an
@@ -2716,6 +2752,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitPfx.Hdr.pas'), UNIT_HDR);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitHdrBase.pas'), UNIT_HDRBASE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitHdrUse.pas'), UNIT_HDRUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitDot.Log.pas'), UNIT_DLOG);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitDLogUse.pas'), UNIT_DLOGUSE);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitImplOvl.pas'), UNIT_IMPLOVL);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArPlain.pas'), UNIT_ARPLAIN);
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitArGen.pas'), UNIT_ARGEN);
@@ -3289,6 +3327,15 @@ begin
     Ok('unitref-shadow: no diags at all', Length(LHdr.Diags) = 0);
     Ok('unitref-shadow: the with target opens over the inherited property',
       CrossRefTo(LHdr, 'NextVisible', 'NextVisible'));
+
+    // A dotted uses entry's last segment is no name in scope.
+    var LDl := ModelByName('unitdloguse');
+    Ok('dotted-leaf: UnitDLogUse loaded', Assigned(LDl));
+    Ok('dotted-leaf: no diags at all', Length(LDl.Diags) = 0);
+    Ok('dotted-leaf: both bare Log calls and the qualified one reach the routine',
+      CrossRefCountInUnit(LDl, 'Log', 'Log', 'unitdot.log') = 3);
+    Ok('dotted-leaf: the fully qualified Tail still reaches the unit',
+      CrossRefTo(LDl, 'Tail', 'Tail'));
 
     // Same rule, both candidates coming from USED units.
     var LAru := ModelByName('unitaruses');

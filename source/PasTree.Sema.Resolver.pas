@@ -1573,15 +1573,50 @@ begin
     Exit;
 
   // Register the unit ref once (a unit may appear in both uses sections).
-  LSym := FModel.FindLocal(AScope, NodeKey(LLeaf));
-  if LSym = NIL_SYM then
+  //
+  // 1.2.3: the name a `uses` entry brings into scope is the name as WRITTEN
+  // there. An undotted one (`uses Log`, `-NS`-resolved to Ns.Log or not) is
+  // an identifier in scope: it hides a used unit's routine `Log` - `Log('a')`
+  // is E2029, `Log.Tail` qualifies. A dotted one (`uses Ns.Log`) is no
+  // single identifier: its last segment is not declared - `Log('a')` calls
+  // the routine, `Log.Tail` is E2035, `Other.F` with `uses Ns.Other` E2003
+  // (dcc64 37.0, probed 2026-10-01). Bound under its leaf, it captured every
+  // bare `Log(...)` call of a unit using `PasMcp.Log`, which then had no
+  // references at all. So a dotted entry's symbol is in the scope's order
+  // (the uses list, navigation, completion's enumeration) but not bound by
+  // name; `Ns.Log.X` reaches the unit through UnitNameOf's full-name match.
+  if KindOf(LNameNode) = nkMember then
   begin
-    LSym := DeclareSym(AScope, skUnitRef, LLeaf);
-    FModel.Symbols[LSym].Flags :=
-      FModel.Symbols[LSym].Flags + [sfExternalUnresolved];
+    LSym := NIL_SYM;
+    for var LIdx := 0 to FUsesCount - 1 do
+      if SameText(FModel.UsesList[LIdx].NameFull,
+           QualifiedNameText(LNameNode)) then
+      begin
+        LSym := FModel.UsesList[LIdx].Sym;
+        Break;
+      end;
+    if LSym = NIL_SYM then
+    begin
+      LSym := FModel.AddSymbol(AScope, skUnitRef, LLeaf, LLeaf,
+        NodeKey(LLeaf));
+      FModel.AddToOrder(AScope, LSym);
+      FModel.Symbols[LSym].Flags :=
+        FModel.Symbols[LSym].Flags + [sfExternalUnresolved];
+    end;
+    MarkDeclName(LLeaf, LSym);
   end
   else
-    MarkDeclName(LLeaf, LSym);
+  begin
+    LSym := FModel.FindLocal(AScope, NodeKey(LLeaf));
+    if LSym = NIL_SYM then
+    begin
+      LSym := DeclareSym(AScope, skUnitRef, LLeaf);
+      FModel.Symbols[LSym].Flags :=
+        FModel.Symbols[LSym].Flags + [sfExternalUnresolved];
+    end
+    else
+      MarkDeclName(LLeaf, LSym);
+  end;
 
   // Optional `in 'path'`.
   LIn := '';

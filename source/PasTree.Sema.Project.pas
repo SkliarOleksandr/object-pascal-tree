@@ -4973,19 +4973,16 @@ begin
     end;
   end;
   // The by-name index UnitNameOf reads - see the field. TryAdd in ascending
-  // order keeps the FIRST entry for a name, full name and leaf alike, which
-  // is exactly what the scan's early exit returned.
+  // order keeps the FIRST entry for a name, which is exactly what the scan's
+  // early exit returned.
   LModel.UsesByName.Clear;
   LModel.UsesIndexed := True;
   for LIdx := 0 to High(LModel.UsesList) do
   begin
     LUid := LModel.UsesList[LIdx].UnitId;
-    if LUid < 0 then
-      Continue;
-    LPath := LowerCase(LModel.UsesList[LIdx].NameFull);
-    LModel.UsesByName.TryAdd(LPath, LUid);
-    LModel.UsesByName.TryAdd(
-      Copy(LPath, LastDelimiter('.', LPath) + 1, MaxInt), LUid);
+    if LUid >= 0 then
+      LModel.UsesByName.TryAdd(LowerCase(LModel.UsesList[LIdx].NameFull),
+        LUid);
   end;
 end;
 
@@ -5454,9 +5451,11 @@ begin
 end;
 
 // The model id ANode's qualified text names as a UNIT - literally 'System'
-// (the implicit unit; see EnsureSystemUnit), or a match (full dotted name OR
-// bare leaf, either is legal in real dcc) against AId's OWN `uses` list.
-// -1 when the text doesn't name any unit reachable from AId. This is what
+// (the implicit unit; see EnsureSystemUnit), or a match against AId's OWN
+// `uses` list by the name as WRITTEN there. Not by a dotted name's last
+// segment: with `uses System.SysUtils`, `SysUtils.IntToStr` is E2003 in dcc
+// (and with `uses B.C` resolved by `-NS A`, `A.B.C.T` is E2003 too - only the
+// written name qualifies; dcc64 37.0, probed 2026-10-01). -1 when the text doesn't name any unit reachable from AId. This is what
 // lets `System.sLineBreak` / `System.SysUtils.TBytes` resolve even though
 // neither `System` nor a `System.SysUtils`-as-a-whole ever gets a skUnitRef
 // symbol anywhere (System is implicit; SysUtils here is a sub-expression of
@@ -5464,8 +5463,8 @@ end;
 function TPasSemaProject.UnitNameOf(AId, ANode: Integer): Integer;
 var
   LM: TPasSemaModel;
-  LText, LLeaf: string;
-  LIdx, LDot: Integer;
+  LText: string;
+  LIdx: Integer;
 begin
   Result := -1;
   LM := FModels[AId];
@@ -5509,22 +5508,14 @@ begin
   // the same answer for a model that never went through it.
   if LM.UsesIndexed then
   begin
-    LLeaf := LowerCase(LText);
-    if not LM.UsesByName.TryGet(SemaKey(LLeaf), Result) then
+    if not LM.UsesByName.TryGet(SemaKey(LowerCase(LText)), Result) then
       Result := -1;
     Exit;
   end;
   for LIdx := 0 to High(LM.UsesList) do
-  begin
-    if LM.UsesList[LIdx].UnitId < 0 then
-      Continue;
-    if SameText(LM.UsesList[LIdx].NameFull, LText) then
+    if (LM.UsesList[LIdx].UnitId >= 0) and
+       SameText(LM.UsesList[LIdx].NameFull, LText) then
       Exit(LM.UsesList[LIdx].UnitId);
-    LDot := LastDelimiter('.', LM.UsesList[LIdx].NameFull);
-    LLeaf := Copy(LM.UsesList[LIdx].NameFull, LDot + 1, MaxInt);
-    if SameText(LLeaf, LText) then
-      Exit(LM.UsesList[LIdx].UnitId);
-  end;
 end;
 
 // ANode (an identifier that failed ALL normal local resolution - callers
@@ -14521,9 +14512,10 @@ begin
       // this scan and the inherited pass can bind one of these.
       //
       // A UNIT-REFERENCE binding joins them: a bare unit name is never a value,
-      // and an inherited member outranks it. A dotted `uses` registers the unit
-      // under its LAST segment, so that segment used bare in a class which also
-      // has a member of that name binds to the unit. Cheap where the same trick
+      // and an inherited member outranks it. An undotted `uses Header` binds
+      // the name, so `Header` used bare in a class which also has a member of
+      // that name binds to the unit (a dotted entry binds no name since
+      // 0.85.1 - CollectUsesItem). Cheap where the same trick
       // for BUILTIN bindings was not -- unit refs are bounded by the uses
       // clause, while every Integer and Length is builtin-bound, and queueing
       // those measured +3.6%.
@@ -14759,8 +14751,9 @@ begin
           Break;
         end;
     // The namespace-token exemption runs AFTER the member walk, not before it:
-    // an inherited MEMBER outranks a unit name. `uses SomeLib.Header`
-    // registers the unit under its LAST segment, so in a class that also has a
+    // an inherited MEMBER outranks a unit name. `uses Header` (and, until
+    // 0.85.1, a dotted `uses SomeLib.Header` too) names the unit, so in a
+    // class that also has a
     // `Header` property the qualifier test says "this is a namespace token" and
     // skipped the very node that had a member to find - leaving `Header.Columns`
     // typed as nothing and its whole with body undeclared. Tested first, it also
@@ -14972,8 +14965,10 @@ begin
       LNameLower := FWithWorkNames[AId][LWIdx];
       // A name that READS as a unit qualifier is still a with member first.
       // `with Column do ... with Footers.Add do` in a unit that uses
-      // `EhLib.Grid.Footers`: QualifierUnitAt is a TEXT match against the used
-      // units' last segments, so `Footers` there was skipped as that unit's
+      // `EhLib.Grid.Footers`: QualifierUnitAt was a TEXT match against the used
+      // units' last segments too (written names only since 0.85.1, which is
+      // dcc's rule - the order below still matters for an undotted `uses
+      // Footers`), so `Footers` there was skipped as that unit's
       // name, the inner target never typed, and AggregateFunction was a false
       // E2003 (a grid library's column dialog, 2 sites; the probe beside the
       // real units confirmed `with C.Footers.Add do` worked and only the bare

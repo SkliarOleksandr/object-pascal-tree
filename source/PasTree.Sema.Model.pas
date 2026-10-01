@@ -463,9 +463,10 @@ type
     SymTypeX: TPasIntMap<TSemaXType>;            // symbol -> declared type
     ExprTypeX: TPasIntMap<TSemaXType>;           // node -> expression type
     UsesList: TArray<TPasUsesRef>;
-    { Lower-cased `uses` names -> UnitId, both the full dotted name and its
-      last segment, first entry wins - the same answer the ascending scan of
-      UsesList gives. Built by the project driver's ResolveUses once the ids
+    { Lower-cased `uses` names -> UnitId, each as WRITTEN in the clause -
+      never a dotted name's last segment, which dcc does not declare (see
+      CollectUsesItem) - first entry wins, the same answer the ascending scan
+      of UsesList gives. Built by the project driver's ResolveUses once the ids
       are assigned (UsesIndexed False until then, and in a standalone
       per-unit analysis); the scan it replaces ran per namespace-qualifier
       probe and, on a main form unit with hundreds of `uses`, cost more than

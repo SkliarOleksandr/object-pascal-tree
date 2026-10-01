@@ -587,7 +587,9 @@ stage totals:
   - a walk over the unit's several hundred `uses` entries per name, 6952
   probes, 1142 ms - and `UnitNameOf`, which rebuilt the leaf of every `uses`
   name per namespace-qualifier probe (235 ms). Now `ResolveUses` indexes the
-  clause once (`UsesByName`, full name and leaf, first entry wins) and the
+  clause once (`UsesByName`, first entry wins - full name and leaf then; the
+  names as written since 0.85.1, a dotted name's leaf being no name dcc
+  declares) and the
   body passes go through a per-model memo of `FindInUses` answers
   (`FindInUsesMemo`, misses included) that lives from `PrepareDeclWork` to
   the end of the run.
