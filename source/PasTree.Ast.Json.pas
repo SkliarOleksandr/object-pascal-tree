@@ -104,6 +104,9 @@ var
       LSB.Append(',"abstract":true');
     if nfSealed in ATree.Nodes[AIndex].Flags then
       LSB.Append(',"sealed":true');
+    // `class threadvar` (nfThreadvar).
+    if nfThreadvar in ATree.Nodes[AIndex].Flags then
+      LSB.Append(',"threadvar":true');
     if ATree.Nodes[AIndex].Aux <> NIL_NODE then
       if not (LKind in [nkUnaryOp, nkBinaryOp]) then
         LSB.AppendFormat(',"aux":%d', [ATree.Nodes[AIndex].Aux]);

@@ -309,17 +309,17 @@ const
     set brings in. Two rules claiming one cell alike is a table error.
 
     The finding numbers are the plan's (local/PARSER-FIDELITY-PLAN.md, a
-    working paper): F9 class threadvar, F12 a routine's deprecated message,
-    F13 the external clause, F14 the exports clause, F15 the GUID literal,
-    F16 numeric labels, F17 program parameters, F18 parameter modes. (F19,
-    where a name list ends, is derived since the names carry nfName - I6
-    checks the flag against the separators; F3's `packed` since the type
-    carries nfPacked, F4's class modifiers since the class carries
-    nfAbstract / nfSealed. F1, F2, F10 and F11 are gone too: every directive
+    working paper): F13 the external clause, F14 the exports clause, F15 the
+    GUID literal, F16 numeric labels, F17 program parameters, F18 parameter
+    modes. (F19, where a name list ends, is derived since the names carry
+    nfName - I6 checks the flag against the separators; F3's `packed` since
+    the type carries nfPacked, F4's class modifiers since the class carries
+    nfAbstract / nfSealed, F9's `class threadvar` since the section carries
+    nfThreadvar, F12's message since it is an nkStrLit child. F1, F2, F10 and F11 are gone too: every directive
     of a procedural type, of a routine header before its `;` and of an
     anonymous method is an nkDirective child, and the initializer after a
     procedural type's directives is its declaration's.) }
-  OWN_RULE_TEXT: array[0..233] of string = (
+  OWN_RULE_TEXT: array[0..231] of string = (
     // ---- leaves: the token is the node's own text ----
     'Ident | <ident> @words @keywords | once | leaf | the name as written; ' +
       'a reserved word only after a dot, as an operator name or as the ' +
@@ -556,11 +556,9 @@ const
       'its ancestors, `class(TBase);` - no mark (normalization list)',
     'ClassType ObjectType | abstract sealed | - | derived | nfAbstract, ' +
       'nfSealed: right after the head word; a repeat is one (N12) (F4)',
-    'ClassType RecordType HelperType | var | - | derived | the head of a ' +
-      'VarSec child, outside its span: var (Aux nil) or class var (Aux 1) ' +
-      '(F9)',
-    'ClassType RecordType | threadvar | - | loss:F9 | `class threadvar` ' +
-      'reads as `class var`',
+    'ClassType RecordType HelperType ObjectType | var threadvar | - | ' +
+      'derived | the head of a VarSec child, outside its span: var (Aux nil) ' +
+      'or class var (Aux 1); nfThreadvar says threadvar (F9)',
     'RecordType | record | head once | derived | the kind',
     'RecordType HelperType | end | once | derived | the kind',
     'RecordType | align | opt | derived | a trailing expression child, ' +
@@ -604,9 +602,6 @@ const
     'Directive | name index dependency delayed , | - | loss:F13 | inside ' +
       'external: nothing says which child is the library, the name or the ' +
       'index; delayed is skipped',
-    'Directive | <str> | opt | loss:F12 | the message of a routine''s ' +
-      '`deprecated ''msg''` has no node (a declaration hint''s has an ' +
-      'nkStrLit)',
     'PropertyDecl | property | head once | derived | the kind; a `class` ' +
       'before it is the parent''s token (Aux 1)',
     'PropertyDecl | : | opt | derived | before the type, which a ' +
@@ -1704,6 +1699,18 @@ var
           '%s: nfAbstract / nfSealed disagree with the words after its head',
           [KName(ANode)]));
     end;
+    // nfThreadvar (F9): on the var section of a struct body, exactly when
+    // `threadvar` stands right before its span.
+    if nfThreadvar in ATree.Nodes[ANode].Flags then
+      if (Kind(ANode) <> nkVarSec) or (ATree.Nodes[ANode].Parent = NIL_NODE) or
+         not (Kind(ATree.Nodes[ANode].Parent) in [nkClassType, nkRecordType,
+         nkObjectType, nkHelperType]) then
+        AReport.Add(ccFlags, ANode, Site(ANode), Format(
+          '%s carries nfThreadvar', [KName(ANode)]))
+      else if (LLo[ANode] = 0) or (TokKind(LLo[ANode] - 1) <> tkThreadvar) then
+        AReport.Add(ccFlags, ANode, Site(ANode),
+          'a var section is marked threadvar, and no `threadvar` stands ' +
+          'before it');
     LKids := LKidCount[ANode];
     LFirstKid := NIL_NODE;
     LSecondKid := NIL_NODE;

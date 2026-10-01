@@ -69,7 +69,7 @@ type reference" is an nkIdent, nkMember or nkTypeArgs.
 | nkExportsClause | `exports c0, ... ;` - see 4 for its items |
 | nkTypeSec | `type` then each nkTypeDecl followed by `;` |
 | nkConstSec | the head word (see 3), each nkConstDecl followed by `;` |
-| nkVarSec | the head word (see 3), each nkVarDecl followed by `;` |
+| nkVarSec | the head word (see 3) - in a struct body `var`, or `threadvar` (nfThreadvar, see 5) - each nkVarDecl followed by `;` |
 | nkLabelSec | `label` labels `, ... ;` - see 4 for numeric labels |
 | nkTypeDecl | [attributes] name [nkGenericParams] `=` [`type` when Aux is 1] type [hints] |
 | nkConstDecl | [attributes] name [`: type` - two children after the name before the hints] `=` value [hints] |
@@ -146,8 +146,6 @@ same program, and T3 counts the losses per finding.
 
 | Finding | Not in the tree |
 |---|---|
-| F9 | `class threadvar` (reads as `class var`) |
-| F12 | the message of a routine's `deprecated 'msg'` |
 | F13 | inside `external`: which child is the library, the name, the index; `delayed` |
 | F14 | in `exports`: which child is the index and which the name; `resident` |
 | F15 | an interface GUID written as a string literal |
@@ -161,7 +159,8 @@ same program, and T3 counts the losses per finding.
 - `class` before a member routine, property or `class var` is the enclosing
   type's token - or, before a class method's implementation, the section's
   or program's; the member has Aux 1. The `var` of a struct body's var
-  section is the struct's token.
+  section is the struct's token; so is its `threadvar` (`class threadvar`; nfThreadvar is on the section -
+  a bare one is E2029).
 - `reference to` lies outside its nkProcType's span (Aux 2): the enclosing
   type declaration's tokens.
 - `packed` lies outside the span of the type it packs (nfPacked): the

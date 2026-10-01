@@ -784,13 +784,12 @@ end;
 { A declaration list from AChild up to (not including) AStop: a section's,
   a routine body's, a unit's, a struct body's or a variant's. A member with
   Aux 1 is a `class` one, and the `class` is the list owner's token; so is a
-  struct body's var section's head, `var` - or `threadvar`, a filed loss
-  (F9). A field is followed by a separator. }
+  struct body's var section's head, `var` or `threadvar` (nfThreadvar). A
+  field is followed by a separator. }
 procedure TPrinter.Decls(ANode, AChild, AStop: Integer);
 var
   LKind: TPasNodeKind;
   LStruct, LFields: Boolean;
-  LBefore: Integer;
 begin
   LStruct := Kind(ANode) in STRUCT_KINDS;
   LFields := LStruct or (Kind(ANode) = nkVariantBranch);
@@ -802,10 +801,8 @@ begin
       Kw('class', ANode);
     if LStruct and (LKind = nkVarSec) then
     begin
-      LBefore := Left(AChild) - 1;
-      if (LBefore >= 0) and (Own.Owner[LBefore] = ANode) and
-         IsLossRule(Own.Rule[LBefore]) then
-        Losses(ANode, LBefore + 1)
+      if nfThreadvar in T.Nodes[AChild].Flags then
+        Kw('threadvar', ANode)
       else
         Kw('var', ANode);
     end;
@@ -2009,8 +2006,7 @@ begin
       Param(ANode);
     nkDirective:
       // The word, then its values - which value of `external` is the
-      // library, the name or the index is a filed loss (F13), and so is the
-      // message of a routine's `deprecated` (F12): read in place.
+      // library, the name or the index is a filed loss (F13): read in place.
       begin
         Head(ANode);
         LChild := C0;

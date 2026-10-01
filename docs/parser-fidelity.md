@@ -179,7 +179,7 @@ minus before a member call - agree with dcc everywhere they were met.
 
 | Id | Where | What |
 |---|---|---|
-| F9, F12-F18 | the tree | tokens only they hold - the losses of `docs/tree-contract.md` sec. 4; each is read in place and counted, none changes a grouping |
+| F13-F18 | the tree | tokens only they hold - the losses of `docs/tree-contract.md` sec. 4; each is read in place and counted, none changes a grouping |
 | F5 | the DCU reader | a routine's nested routines listed under its anonymous method's body; only the dump's nesting |
 | F8 | the parser, error mode | the root stops where a broken parse stopped, the rest of the file in no node |
 | F22 | the preprocessor | a conditional crossing an include boundary is accepted; dcc refuses it (invalid code only) |
@@ -227,7 +227,11 @@ parameter's type - is a parse error) and `class abstract` / `class
 sealed` (F4 - the words left no mark, and after `record` a field named
 `abstract` or `sealed` was eaten as one - parse errors on valid code;
 nfAbstract / nfSealed are on the class or object type, the words read
-after `class` and `object` only, as dcc reads them).
+after `class` and `object` only, as dcc reads them), `class threadvar` (F9 -
+it read as `class var`; nfThreadvar is on the struct body's var section,
+the word outside its span as `var` is; a bare `threadvar` in a body is
+E2029) and the message of a routine's `deprecated 'msg'` (F12 - an nkStrLit
+child of the directive, as a declaration hint's always was).
 
 ## 5. The gate
 

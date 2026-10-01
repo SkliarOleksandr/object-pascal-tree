@@ -776,7 +776,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..223] of TPasCaseRow = (
+  DECL_CASES: array[0..226] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1787,6 +1787,34 @@ const
        '    class var Count: Integer;'#13#10'  end;';
      Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(VarSec#class(' +
        'VarDecl(Ident''Count''#name Ident''Integer'')))))'; ExpectDiags: 0),
+    // F9: nfThreadvar on the section, dcc64 37.0 probed (x-f9 R01-R12):
+    // `class threadvar` in a class, a record and a helper (a run goes on
+    // like a `class var` one); a bare `threadvar` in a body is E2029.
+    (Section: '15.1.2'; Name: 'F9: class threadvar';
+     Source: 'type TC = class class threadvar X, Y: Integer; ' +
+       'public class threadvar W: Byte; class var Z: Byte; end; ' +
+       'TR = record class threadvar A: Integer; B: Byte; end; ' +
+       'TH = class helper for TObject class threadvar V: Integer; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(VarSec#class#threadvar(' +
+       'VarDecl(Ident''X''#name Ident''Y''#name Ident''Integer'')) ' +
+       'Visibility''public'' VarSec#class#threadvar(VarDecl(Ident''W''#name ' +
+       'Ident''Byte'')) VarSec#class(VarDecl(Ident''Z''#name Ident''Byte'')))) ' +
+       'TypeDecl(Ident''TR'' RecordType(VarSec#class#threadvar(' +
+       'VarDecl(Ident''A''#name Ident''Integer'') VarDecl(Ident''B''#name ' +
+       'Ident''Byte'')))) TypeDecl(Ident''TH'' HelperType(Ident''TObject'' ' +
+       'VarSec#class#threadvar(VarDecl(Ident''V''#name Ident''Integer'')))))';
+     ExpectDiags: 0),
+    (Section: '15.1.2'; Name: 'F9: a bare threadvar in a body is refused';
+     Source: 'type TC = class threadvar X: Integer; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(VarSec''x''#threadvar(' +
+       'VarDecl(Ident''X''#name Ident''Integer'')))))';
+     ExpectDiags: 1),
+    // F12: a routine's `deprecated 'msg'` keeps the message as an nkStrLit.
+    (Section: '2.5.2'; Name: 'F12: routine deprecated with message';
+     Source: 'procedure P; deprecated ''use Q''; stdcall;';
+     Expected: 'Routine''procedure''(Ident''P''#name Directive''deprecated''(' +
+       'StrLit''''use Q'''') Directive''stdcall'')';
+     ExpectDiags: 0),
     (Section: '15.1.3'; Name: 'class property';
      Source: 'type TC = class'#13#10 +
        '    class property X: Integer read FX write FX;'#13#10'  end;';

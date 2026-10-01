@@ -2377,7 +2377,7 @@ end;
 procedure TPasParser.ParseMemberList(AOwner: Integer);
 var
   LVis, LNode: Integer;
-  LStrict: Boolean;
+  LStrict, LIsThreadvar: Boolean;
 
   // Slice-based: this test runs for EVERY member of every class body, and the
   // old string-typed version paid a VisibleText copy per call.
@@ -2441,9 +2441,13 @@ begin
               end;
             tkThreadvar:
               begin
+                // F9: the word stays outside the section's span, nfThreadvar
+                // says it was `threadvar` and not `var`.
                 Next;
                 Next;
-                FB.Adopt(AOwner, ParseVarSection(True));
+                LNode := ParseVarSection(True);
+                FB.AddFlag(LNode, nfThreadvar);
+                FB.Adopt(AOwner, LNode);
               end;
             tkProcedure, tkFunction, tkConstructor, tkDestructor:
               begin
@@ -2479,8 +2483,17 @@ begin
         FB.Adopt(AOwner, ParseConstSection);
       tkVar, tkThreadvar:
         begin
-          Next; // section marker inside a class body
-          FB.Adopt(AOwner, ParseVarSection(False, True));
+          // A section marker inside a class body. dcc64 37.0: a bare
+          // `threadvar` is E2029 here (only `class threadvar` is a member);
+          // the section is still read, and marked, so the tree keeps the word.
+          LIsThreadvar := CurKind = tkThreadvar;
+          if LIsThreadvar then
+            Error('"end" expected');
+          Next;
+          LNode := ParseVarSection(False, True);
+          if LIsThreadvar then
+            FB.AddFlag(LNode, nfThreadvar);
+          FB.Adopt(AOwner, LNode);
         end;
       tkCase:
         ParseVariantPart(AOwner);
@@ -3139,8 +3152,12 @@ begin
     else if IsWord('deprecated') then
     begin
       Next;
+      // F12: the message is an nkStrLit child, as a declaration hint's is.
       if CurKind = tkStringLiteral then
+      begin
+        FB.Adopt(LDir, FB.AddNode(nkStrLit, NIL_NODE, FPos));
         Next;
+      end;
     end
     else
     begin

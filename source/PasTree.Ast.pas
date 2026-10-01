@@ -215,7 +215,12 @@ type
     // nkObjectType, the words right after its head word - a repeat is one
     // (printer N12). Both together are E2383, a parse diagnostic.
     nfAbstract,
-    nfSealed
+    nfSealed,
+    // `class threadvar` (15.x): on the nkVarSec of a struct body - the head
+    // word `threadvar` stands right before the section's span, the
+    // enclosing node's token, as `var` does. A bare `threadvar` in a body
+    // is E2029 (a parse diagnostic) and is marked all the same.
+    nfThreadvar
   );
   TPasNodeFlags = set of TPasNodeFlag;
 
@@ -856,6 +861,8 @@ begin
     Result := Result + '#abstract';
   if nfSealed in Nodes[AIndex].Flags then
     Result := Result + '#sealed';
+  if nfThreadvar in Nodes[AIndex].Flags then
+    Result := Result + '#threadvar';
   LChildren := '';
   LChild := Nodes[AIndex].FirstChild;
   while LChild <> NIL_NODE do
