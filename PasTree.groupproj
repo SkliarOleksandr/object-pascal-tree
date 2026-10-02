@@ -1,0 +1,48 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+    <PropertyGroup>
+        <ProjectGuid>{6B1F3C2A-8E47-4D59-A0C3-5F2E9D7B4A61}</ProjectGuid>
+    </PropertyGroup>
+    <ItemGroup>
+        <Projects Include="demo\PasTreeDemo.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="tests\SemaNavSmoke.dproj">
+            <Dependencies/>
+        </Projects>
+    </ItemGroup>
+    <ProjectExtensions>
+        <Borland.Personality>Default.Personality.12</Borland.Personality>
+        <Borland.ProjectType/>
+        <BorlandProject>
+            <Default.Personality/>
+        </BorlandProject>
+    </ProjectExtensions>
+    <Target Name="PasTreeDemo">
+        <MSBuild Projects="demo\PasTreeDemo.dproj"/>
+    </Target>
+    <Target Name="PasTreeDemo:Clean">
+        <MSBuild Projects="demo\PasTreeDemo.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="PasTreeDemo:Make">
+        <MSBuild Projects="demo\PasTreeDemo.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="SemaNavSmoke">
+        <MSBuild Projects="tests\SemaNavSmoke.dproj"/>
+    </Target>
+    <Target Name="SemaNavSmoke:Clean">
+        <MSBuild Projects="tests\SemaNavSmoke.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="SemaNavSmoke:Make">
+        <MSBuild Projects="tests\SemaNavSmoke.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="Build">
+        <CallTarget Targets="PasTreeDemo;SemaNavSmoke"/>
+    </Target>
+    <Target Name="Clean">
+        <CallTarget Targets="PasTreeDemo:Clean;SemaNavSmoke:Clean"/>
+    </Target>
+    <Target Name="Make">
+        <CallTarget Targets="PasTreeDemo:Make;SemaNavSmoke:Make"/>
+    </Target>
+    <Import Project="$(BDS)\Bin\CodeGear.Group.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Group.Targets')"/>
+</Project>

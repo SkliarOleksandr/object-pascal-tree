@@ -13,6 +13,7 @@
 *.dpk text eol=crlf
 *.inc text eol=crlf
 *.dproj text eol=crlf
+*.groupproj text eol=crlf
 *.dfm text eol=crlf
 
 # Batch files: cmd.exe is the one interpreter here that can genuinely misparse

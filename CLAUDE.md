@@ -98,6 +98,28 @@ closed project or third-party products - that is what `local/` is for.
   both the `.dpr` and the `.dproj`, or a green `build.bat` hides a broken IDE
   build.
 
+## Reading Pascal code: pastree-mcp first, after `status`
+
+**Find a declaration, its callers, its references or a routine's text with
+the pastree MCP tools** (`find`, `definition`, `source`, `references`,
+`callers`, `outline`) before grep and before reading a file at a guessed
+offset. `PasTree.Sema.Project.pas` alone is over 16,000 lines: a session
+that navigated it by grep and 200-line windows read thousands of lines the
+tools answer in one row each, and grep cannot tell two same-named functions
+in two units apart (`IsAttributeTypeRef` is both the resolver's and the
+project's).
+
+**Start with `status`, and check that the index holds `source\`** - its
+member is `PasTree.groupproj` and the unit count is in the hundreds. A
+server pointed at another project answers "no declaration matches" for
+every PasTree name, without an error: that is what a stray `.mcp.json` with
+`--project ...\pastree-mcp.dproj` did for a whole session (2026-10-02). The
+server is registered once for the user (`claude mcp add --scope user`, no
+`--project`) and finds `PasTree.groupproj` at the repository root from any
+subdirectory; keep this repository free of an `.mcp.json` that overrides
+it. Grep stays the tool for text that is not a declaration - a comment, a
+diagnostic message, a `.dfm`, the docs.
+
 ## Two habits that pay for themselves here
 
 **Start from the spec.** The language spec in `../object-pascal-spec` is
