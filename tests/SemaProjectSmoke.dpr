@@ -5164,9 +5164,35 @@ begin
     '    [(TObject)] [(Undeclared1)] [-Undeclared2, ''x'' + Undeclared3]'#10 +
     '    [1..2] procedure P;'#10'  end;'#10 +
     'implementation'#10'procedure TC.P; begin end;'#10'end.'#10);
+  // F33: where dcc says W1074 instead of E2003 - a name that starts with an
+  // undeclared identifier, the arguments of one naming no type (a constant,
+  // a function); an attribute class's arguments stay E2003. (A unit
+  // qualifier's missing member, `[System.Undeclared]`, is E2003 for dcc and
+  // missed here, as `System.Undeclared` is anywhere - F34.) dcc64 37.0,
+  // x-f33 U01-U26.
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitAttrF33.pas'),
+    'unit UnitAttrF33;'#10'interface'#10 +
+    'type'#10'  TA33 = class(TCustomAttribute) end;'#10 +
+    'const'#10'  C = 5;'#10 +
+    'function F(X: Integer): Integer;'#10 +
+    'type'#10'  TC = class'#10 +
+    '    [Undeclared1] [Undeclared2(Undeclared3)] [Undeclared4.X]'#10 +
+    '    [C(Undeclared5)] [F(Undeclared6)] procedure P;'#10 +
+    '    [TA33(Undeclared7)] procedure Q;'#10 +
+    '  end;'#10 +
+    '[Undeclared9] procedure R;'#10 +
+    'implementation'#10 +
+    'function F(X: Integer): Integer; begin Result := X; end;'#10 +
+    'procedure TC.P; begin end;'#10'procedure TC.Q; begin end;'#10 +
+    'procedure R; begin end;'#10'end.'#10);
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
     GProj.AnalyzeDirectory(LDir);
+    var LF33 := ModelByName('unitattrf33');
+    Ok('19.3.2 (F33): no E2003 where dcc says W1074 - an undeclared name, ' +
+      'the arguments of a constant or a function',
+      Assigned(LF33) and (DiagCount(LF33, 'E2003') = 1) and
+      DiagHasText(LF33, 'E2003', 'Undeclared7'));
     var LAnc := ModelByName('unitattranc');
     Ok('19.3.1: a real TCustomAttribute descendant is NOT flagged',
       not DiagHasText(LAnc, 'E2010', 'TGoodAttr'));

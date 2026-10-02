@@ -351,9 +351,10 @@ mis-pair.
   and `[C (]` compile - and PasTree reads an expression there, so token runs
   that are no expression are parse errors. `[C < 1]` reads as type arguments.
 - a name attribute that names no attribute class is W1074 for dcc and
-  dropped, its arguments unchecked; here an undeclared one - `[Undeclared]`,
-  `[Undeclared(1)]` - is E2003, and a constant or a function (`[C]`,
-  `[F(1)]`) resolves as an ordinary name, silently.
+  dropped; PasTree reports no warning. As dcc, it gives no E2003 for a name
+  that starts with an undeclared identifier nor in the arguments of one
+  naming no type (`[C(Undeclared)]`); a unit qualifier's missing member
+  (`[System.Undeclared]`, E2003 for dcc) is missed, as it is everywhere.
 
 ## 20-memory-management.md
 

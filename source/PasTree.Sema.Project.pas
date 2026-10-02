@@ -702,6 +702,7 @@ type
       ANode: Integer; const ANameLower: string; var AUnit, ASym: Integer);
     function IsAttributeTypeRef(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function IsMagicAttributeRef(AModel: TPasSemaModel; ANode: Integer): Boolean;
+    function SilentAttributeRef(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function IgnoredResolutionTarget(AModel: TPasSemaModel; ANode: Integer;
       AId: Integer): Boolean;
     function UsesUnitOf(AId, ASym: Integer): Integer;
@@ -5378,6 +5379,64 @@ begin
     (AModel.Tree.Nodes[AModel.Tree.Nodes[ANode].Parent].Aux <> amaNone);
 end;
 
+{ 19.3.2 (F33, dcc64 37.0 probed, x-f33 U01-U26): the places in an attribute
+  where dcc reports no undeclared identifier. An attribute whose name STARTS
+  with an undeclared identifier - `[Undeclared]`, `[Undeclared.X]`,
+  `[SysUtils.Undeclared]` under `uses System.SysUtils`, `[Undeclared(1)]` -
+  is W1074 "Unknown custom attribute" and dropped, its arguments unchecked
+  (`[Undeclared(Undeclared2)]` compiles); so are the arguments of one naming
+  no type - a constant, a variable, a function: `[C(Undeclared)]`,
+  `[F(Undeclared)]`. An attribute naming a type has its arguments checked
+  (`[TA(Undeclared)]` is E2003), and a qualifier that IS a unit is looked
+  into (`[System.Undeclared]`, `[ThisUnit.Undeclared]` are E2003): neither is
+  silent. True for ANode, an E2003 candidate, in a silent place. }
+function TPasSemaProject.SilentAttributeRef(AModel: TPasSemaModel;
+  ANode: Integer): Boolean;
+var
+  LNode, LParent, LName, LHead, LSym: Integer;
+  LExt: TPasExtRef;
+  LKind: TSemaSymbolKind;
+begin
+  Result := False;
+  LNode := ANode;
+  LParent := AModel.Tree.Nodes[LNode].Parent;
+  while (LParent <> NIL_NODE) and
+        (AModel.Tree.Nodes[LParent].Kind <> nkAttribute) do
+  begin
+    LNode := LParent;
+    LParent := AModel.Tree.Nodes[LNode].Parent;
+  end;
+  if LParent = NIL_NODE then
+    Exit;
+  // An expression attribute (F32) is never resolved; nothing to judge.
+  if not PasAttrIsName(AModel.Tree, LParent) then
+    Exit(True);
+  LName := AModel.Tree.Nodes[LParent].FirstChild;
+  if LNode = LName then
+  begin
+    // In the name: its first segment only.
+    LHead := LName;
+    while AModel.Tree.Nodes[LHead].Kind in [nkMember, nkTypeArgs] do
+      LHead := AModel.Tree.Nodes[LHead].FirstChild;
+    Exit(ANode = LHead);
+  end;
+  // An argument: silent unless the name is a type.
+  if AModel.Tree.Nodes[LName].Kind = nkTypeArgs then
+    LName := AModel.Tree.Nodes[LName].FirstChild;
+  if AModel.Tree.Nodes[LName].Kind = nkMember then
+    LName := AModel.Tree.Nodes[AModel.Tree.Nodes[LName].FirstChild].NextSibling;
+  if LName = NIL_NODE then
+    Exit(True);
+  LSym := AModel.RefMap[LName];
+  if LSym <> NIL_SYM then
+    LKind := AModel.Symbols[LSym].Kind
+  else if AModel.ExtRefMap.TryGetValue(LName, LExt) then
+    LKind := FModels[LExt.UnitId].Symbols[LExt.Sym].Kind
+  else
+    Exit(True);
+  Result := not (LKind in [skType, skBuiltinType, skGenericParam]);
+end;
+
 // The local symbol a designator head resolved to (reads RefMap only).
 function TPasSemaProject.LocalHead(AModel: TPasSemaModel;
   ANode: Integer): Integer;
@@ -5739,6 +5798,9 @@ begin
   // false positive. Gated here rather than at the call sites because several
   // passes reach this verdict; CheckAttributes exempts the same set.
   if IsMagicAttributeRef(AModel, ANode) then
+    Exit;
+  // Where dcc says W1074 instead - see SilentAttributeRef.
+  if SilentAttributeRef(AModel, ANode) then
     Exit;
   // The class-method name of a method resolution clause that dcc silently
   // IGNORES - see IgnoredResolutionTarget. Two rows in a third-party layout
