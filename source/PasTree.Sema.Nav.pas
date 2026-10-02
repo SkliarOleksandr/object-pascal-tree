@@ -653,11 +653,20 @@ type
       name to its file name). This API never touches files, so a host either
       renames it or tells the user; either way it must not be left silent.
 
+      A `uses` item with an `in '...'` path (a program's, a package's) gets a
+      second edit on the file name inside the quotes, its directory kept: the
+      path names the file the host is obliged to rename, and left alone it is
+      F2613 at the next build - and, in the IDE, the project's own entry for
+      the unit pointing at nothing. Every edit's Snippet is its line after
+      ALL the edits on it, the path's included.
+
       Refuses (False, AError set, no edits) on an invalid name - each dotted
       segment must be an identifier and not a reserved word - on the
       unchanged name, and on a `uses` item whose WRITTEN text is neither the
       unit's full name nor its bare leaf (a `-A` alias, or a spelling this
-      code has no rule for). That last one is a refusal rather than a skip
+      code has no rule for), and on an `in '...'` path whose file name is not
+      the unit's file (a spelling this code has no rule for either). That
+      last pair is a refusal rather than a skip
       on purpose: a rename that silently leaves one `uses` clause pointing
       at a name that no longer exists produces a build break, which is the
       one outcome worse than doing nothing. The same all-or-nothing rule
@@ -5856,8 +5865,9 @@ var
   LList: TList<TPasRenameEdit>;
   LEdit: TPasRenameEdit;
   LHit: TPasRefHit;
-  LMi, LIdx, LHeader: Integer;
-  LOldFull, LOldLeaf, LNewLeaf, LWritten, LText: string;
+  LMi, LIdx, LHeader, LStr, LRun, LDelta: Integer;
+  LOldFull, LOldLeaf, LNewLeaf, LWritten, LText, LOldFile, LNewFile,
+    LLiteral, LLine: string;
 
   procedure AddHit(const AHitRec: TPasRefHit; const AText: string;
     AIsDecl: Boolean);
@@ -5879,6 +5889,51 @@ var
     LEdit.HiFrom := AHitRec.HiFrom;
     LEdit.HiTo := AHitRec.HiFrom + Length(AText);
     LList.Add(LEdit);
+  end;
+
+  // The line as it read before AEdit: its preview minus its own replacement.
+  function OriginalLine(const AEdit: TPasRenameEdit): string;
+  begin
+    Result := Copy(AEdit.Snippet, 1, AEdit.HiFrom) + AEdit.OldText +
+      Copy(AEdit.Snippet, AEdit.HiTo + 1, MaxInt);
+  end;
+
+  // The `in '...'` literal after a `uses` item's name, if any: its file name
+  // becomes the new one, its directory stays (a unit rename moves no file).
+  // False only for a literal this code cannot read as the unit's file.
+  function AddInPath(AModel: TPasSemaModel; ANameNode: Integer): Boolean;
+  var
+    LLit: TPasRefHit;
+    LInner: string;
+  begin
+    Result := True;
+    LStr := AModel.Tree.Nodes[ANameNode].NextSibling;
+    if (LStr = NIL_NODE) or (AModel.Tree.Nodes[LStr].Kind <> nkStrLit) then
+      Exit;
+    Result := False;
+    if not UnitNameHit(AModel, LStr, {out} LLit) then
+      Exit;
+    LLiteral := Copy(LLit.Snippet, LLit.HiFrom + 1, LLit.HiTo - LLit.HiFrom);
+    if (Length(LLiteral) < 2) or (LLiteral[1] <> '''') or
+       (LLiteral[Length(LLiteral)] <> '''') then
+      Exit;
+    LInner := Copy(LLiteral, 2, Length(LLiteral) - 2);
+    if LInner.Contains('''') or
+       not SameText(TPath.GetFileName(LInner), LOldFile) then
+      Exit;
+    LEdit := Default(TPasRenameEdit);
+    LEdit.FilePath := LLit.FilePath;
+    LEdit.Line := LLit.Line;
+    LEdit.Col := LLit.Col + 1 + Length(LInner) - Length(LOldFile);
+    LEdit.Len := Length(LOldFile);
+    LEdit.OldText := Copy(LLit.Snippet, LEdit.Col, LEdit.Len);
+    LEdit.NewText := LNewFile;
+    LEdit.HiFrom := LEdit.Col - 1;
+    LEdit.HiTo := LEdit.HiFrom + Length(LNewFile);
+    LEdit.Snippet := Copy(LLit.Snippet, 1, LEdit.HiFrom) + LNewFile +
+      Copy(LLit.Snippet, LEdit.Col + LEdit.Len, MaxInt);
+    LList.Add(LEdit);
+    Result := True;
   end;
 
 begin
@@ -5920,6 +5975,8 @@ begin
   LNewLeaf := ANewName;
   if LNewLeaf.Contains('.') then
     LNewLeaf := LNewLeaf.Substring(LNewLeaf.LastDelimiter('.') + 1);
+  LOldFile := TPath.GetFileName(FProj.ModelFile(ATargetMid));
+  LNewFile := ANewName + '.pas';
 
   LList := TList<TPasRenameEdit>.Create;
   try
@@ -5966,6 +6023,13 @@ begin
           Exit;
         end;
         AddHit(LHit, LText, False);
+        if not AddInPath(LM, LM.UsesList[LIdx].NameNode) then
+        begin
+          AError := Format('%s line %d names this unit''s file by a path ' +
+            'not read as %s - rename refused, nothing planned.',
+            [TPath.GetFileName(LHit.FilePath), LHit.Line, LOldFile]);
+          Exit;
+        end;
       end;
     end;
     AEdits := LList.ToArray;
@@ -5982,6 +6046,34 @@ begin
       if Result = 0 then
         Result := A.Col - B.Col;
     end));
+  // A line with several edits - a name and its `in` path, two `uses` items -
+  // gets one preview with all of them, left to right, each writing its own
+  // NewText (TPasRenameEdit.Snippet's contract).
+  LIdx := 0;
+  while LIdx <= High(AEdits) do
+  begin
+    LRun := LIdx;
+    while (LRun < High(AEdits)) and (AEdits[LRun + 1].Line = AEdits[LIdx].Line)
+      and SameText(AEdits[LRun + 1].FilePath, AEdits[LIdx].FilePath) do
+      Inc(LRun);
+    if LRun > LIdx then
+    begin
+      LLine := OriginalLine(AEdits[LIdx]);
+      LDelta := 0;
+      for LMi := LIdx to LRun do
+      begin
+        LLine := Copy(LLine, 1, AEdits[LMi].Col - 1 + LDelta) +
+          AEdits[LMi].NewText +
+          Copy(LLine, AEdits[LMi].Col + AEdits[LMi].Len + LDelta, MaxInt);
+        AEdits[LMi].HiFrom := AEdits[LMi].Col - 1 + LDelta;
+        AEdits[LMi].HiTo := AEdits[LMi].HiFrom + Length(AEdits[LMi].NewText);
+        Inc(LDelta, Length(AEdits[LMi].NewText) - AEdits[LMi].Len);
+      end;
+      for LMi := LIdx to LRun do
+        AEdits[LMi].Snippet := LLine;
+    end;
+    LIdx := LRun + 1;
+  end;
   // Every file the plan would rewrite must be writable and the user's own -
   // one blocked file refuses the whole rename (see RenameBlockReason).
   for LIdx := 0 to High(AEdits) do

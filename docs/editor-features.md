@@ -175,6 +175,7 @@ identifier class does here:
 | 8 | A compiler builtin (`Integer`, `Length`, `True`) | nothing - refused outright | OK (by design, 3.1) |
 | 9 | A UNIT, from its own header name or from any `uses` item (any segment) | the header + every `uses` item project-wide, whole dotted spans | OK (3.8) |
 | 10 | The FILE a renamed unit lives in | not renamed - the required name is HANDED BACK to the host | OK (by design, 3.8) |
+| 10a | A program's or package's `X in '..\dir\X.pas'` naming that file | the file name inside the quotes, its directory kept; the line's preview carries both its edits | OK (0.87.0 - before, the path kept the old file name: F2613 once the host renamed the file, and in the IDE the project's entry for the unit named nothing; pastree-lsp patched it from the plan's line text) |
 | 11 | A `uses` item spelled as a `-A` unit ALIAS | nothing - the whole unit rename is refused, named in the error | OK (by design, 3.8) |
 | 12 | Anything declared in a LIBRARY source (RTL/VCL/third-party) | nothing - refused whole, naming the file | OK (by design, 3.9) |
 | 13 | A property REDECLARED bare in descendants (`property Items;` promoting visibility, changing accessors or streaming specifiers - no type written), from any link | every declaration of the chain + every use bound to any of them; Find References shows the same set (the other links' declaration names are hits). A redeclaration WITH a type is a NEW property hiding the inherited one (dcc-probed 2026-09-09) - it and everything below it stay out | OK (0.21.0) |

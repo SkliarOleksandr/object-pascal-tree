@@ -684,6 +684,26 @@ const
     'end;'#10 +                                               // 46
     'end.'#10;                                                // 47
 
+  { Unit rename through a program's `in '...'` paths: NavInU's path keeps its
+    directory (`.\`), and line 3 holds two items, so the preview of each edit
+    on it must carry both the name's and the path's replacement. }
+  UNIT_INU =
+    'unit NavInU;'#10 +
+    'interface'#10 +
+    'implementation'#10 +
+    'end.'#10;
+  UNIT_INV =
+    'unit NavInV;'#10 +
+    'interface'#10 +
+    'implementation'#10 +
+    'end.'#10;
+  PROG_INP =
+    'program NavInP;'#10 +                                       // 1
+    'uses'#10 +                                                  // 2
+    '  NavInU in ''.\NavInU.pas'', NavInV in ''NavInV.pas'';'#10 + // 3
+    'begin'#10 +                                                 // 4
+    'end.'#10;                                                   // 5
+
   { Conditional-symbol fixtures (DefineAt / FindDefineReferences /
     GotoDefine). NAVFOO is defined on line 2, so the $IFNDEF branch (lines
     10-12) is DEAD - its $DEFINE NAVBAR is recorded but inactive - which in
@@ -2651,6 +2671,51 @@ begin
       Ok('PlanUnitRename: unchanged name refused',
         not GNav.PlanUnitRename(LMidRen, 'Namespace.NavD', {out} LEdits,
           {out} LFileName, {out} LErr));
+      // A program's `in '...'` path names the file the rename obliges the
+      // host to rename: its file name is an edit too, its directory kept,
+      // and both edits on line 3 share one preview. A directory and project
+      // of its own: a program here would be the main module of the one
+      // above, whose define checks rely on there being none.
+      var LInDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_nav_in');
+      if TDirectory.Exists(LInDir) then
+        TDirectory.Delete(LInDir, True);
+      TDirectory.CreateDirectory(LInDir);
+      TFile.WriteAllText(TPath.Combine(LInDir, 'System.pas'), UNIT_SYS);
+      TFile.WriteAllText(TPath.Combine(LInDir, 'NavInU.pas'), UNIT_INU);
+      TFile.WriteAllText(TPath.Combine(LInDir, 'NavInV.pas'), UNIT_INV);
+      TFile.WriteAllText(TPath.Combine(LInDir, 'NavInP.dpr'), PROG_INP);
+      var LInProj := TPasSemaProject.Create(pfWin32, [LInDir], []);
+      try
+        LInProj.AnalyzeDirectory(LInDir);
+        var LInNav := TPasNavigator.Create(LInProj);
+        try
+          LMidRen := LInNav.ModelIdOf(TPath.Combine(LInDir, 'NavInU.pas'));
+          Ok('PlanUnitRename: NavInU -> Lib.NavIn2 - header, uses item, '
+            + 'in path',
+            LInNav.PlanUnitRename(LMidRen, 'Lib.NavIn2', {out} LEdits,
+              {out} LFileName, {out} LErr) and (Length(LEdits) = 3) and
+            HasEdit(LEdits, 'NavInU.pas', 1, 6, 'unit Lib.NavIn2;', 5, 15) and
+            HasEdit(LEdits, 'NavInP.dpr', 3, 3,
+              '  Lib.NavIn2 in ''.\Lib.NavIn2.pas'', NavInV in ''NavInV.pas'';',
+              2, 12) and
+            HasEdit(LEdits, 'NavInP.dpr', 3, 16,
+              '  Lib.NavIn2 in ''.\Lib.NavIn2.pas'', NavInV in ''NavInV.pas'';',
+              19, 33) and
+            (LFileName = 'Lib.NavIn2.pas'));
+          LMidRen := LInNav.ModelIdOf(TPath.Combine(LInDir, 'NavInV.pas'));
+          Ok('PlanUnitRename: NavInV - the second item''s path, the first left',
+            LInNav.PlanUnitRename(LMidRen, 'NavW', {out} LEdits,
+              {out} LFileName, {out} LErr) and (Length(LEdits) = 3) and
+            HasEdit(LEdits, 'NavInP.dpr', 3, 29,
+              '  NavInU in ''.\NavInU.pas'', NavW in ''NavW.pas'';', 28, 32) and
+            HasEdit(LEdits, 'NavInP.dpr', 3, 40,
+              '  NavInU in ''.\NavInU.pas'', NavW in ''NavW.pas'';', 37, 45));
+        finally
+          LInNav.Free;
+        end;
+      finally
+        LInProj.Free;
+      end;
 
       // ---- Builtins are never renameable ----
       // A compiler-seeded name is the COMPILER's: PlanRename must refuse one
