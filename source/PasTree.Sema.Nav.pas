@@ -159,6 +159,40 @@ type
     Role: TPasFormRole;
   end;
 
+  { Why a method PlanRename renames with the one asked for (its "family" -
+    see RenameFamily). Each is a tie by NAME that dcc enforces or that a
+    rename would silently cut, never a mere namesake:
+    - rfwVirtual: the same VMT (or message-table) slot - the method that
+      introduced it and every `override` below; renaming one alone is E2137
+      at each override, or at the renamed one.
+    - rfwInterface: an interface method the class method implements, or an
+      implementation of an interface method in the family (a class listing
+      the interface or one extending it, its own method or an ancestor's);
+      renaming one side alone is E2291 at the class.
+    - rfwInherited: a descendant's method of the same name that HIDES a
+      family member (no slot shared) and calls it with a bare `inherited;` -
+      which names nothing and binds by the current method's name, so after a
+      rename of the hidden one alone it compiles and silently calls nothing
+      (or a grandparent's namesake). }
+  TPasRenameFamilyWhy = (rfwVirtual, rfwInterface, rfwInherited);
+
+const
+  // How each tie reads in a sentence ("..., which this rename must take
+  // along (the same virtual method), ...").
+  RENAME_FAMILY_WHY: array[TPasRenameFamilyWhy] of string = (
+    'the same virtual method', 'the same interface method',
+    'tied to it by a bare inherited');
+
+type
+
+  TPasRenameFamilyMember = record
+    Why: TPasRenameFamilyWhy;
+    TypeName: string;        // the declaring type, original spelling
+    Name: string;            // the method's own spelling
+    Hit: TPasRefHit;         // its declaration
+    UnitId, Sym: Integer;
+  end;
+
   { What makes one row of a Find Overrides result the answer it is - the
     DIRECTIVE that ties it to the same VMT (or message-table) slot, never a
     name match on its own:
@@ -469,6 +503,11 @@ type
     function OvPropertyNamed(AMid, AStructSym: Integer;
       const ANameLower: string): Integer;
     function PropertyChain(ATMid, ASym: Integer): TArray<TPasExtRef>;
+    // A method rename's family (see PlanRename and RenameFamily).
+    function RenameFamily(ATMid, ASym: Integer;
+      out AMembers: TArray<TPasRenameFamilyMember>;
+      out AError: string): Boolean;
+    function HasBareInherited(AMid, ASym: Integer): Boolean;
     procedure CollectReferencesOf(ATMid, ASym: Integer;
       AHits: TList<TPasRefHit>; AAssignOnly: Boolean = False);
     procedure CollectReferencesOfAll(const ASyms: TArray<TPasExtRef>;
@@ -565,6 +604,19 @@ type
       and keeps its name: a handler is bound by name wherever it is linked,
       so not renaming it never breaks anything.
 
+      A METHOD's rename takes its family with it (RenameFamily,
+      TPasRenameFamilyWhy): the methods of its VMT slot, the interface
+      methods it implements and their implementations, and a descendant's
+      hiding namesake that calls it by a bare `inherited;` - each with its
+      own uses and form lines, all under the new name. AFamily lists them.
+      The family is matched by NAME, as FindOverrides and
+      FindImplementations match, so a rename is refused whole where that
+      would guess: an overloaded name in the family (overrides and
+      implementations pair by signature), a slot whose root overrides a
+      method this analysis has no source for. A family member in a library
+      or read-only file refuses it as any edit there does (RenameBlockReason)
+      - an override of a library method keeps the library's name.
+
       What this does NOT do: it does not check whether the new name COLLIDES
       with something already visible at each edit site (Object Pascal
       scoping makes that a full re-resolution question, not a lookup) -
@@ -579,6 +631,11 @@ type
       out AEdits: TArray<TPasRenameEdit>;
       out ACarried: TArray<TPasCarriedRename>; out AError: string): Boolean;
       overload;
+    function PlanRename(ATMid, ASym: Integer; const ANewName: string;
+      out AEdits: TArray<TPasRenameEdit>;
+      out ACarried: TArray<TPasCarriedRename>;
+      out AFamily: TArray<TPasRenameFamilyMember>;
+      out AError: string): Boolean; overload;
     { Where (ATMid, ASym) lives in the project's form files - see
       TPasFormRole. For a host that must know which form's live designer owns
       a symbol before renaming it. }
@@ -5941,6 +5998,443 @@ begin
 
 end;
 
+{ Whether the method (AMid, ASym)'s body calls a bare `inherited` - the word
+  followed by no name (`inherited;`, `inherited end`, `if X then inherited
+  else`), which binds by the CURRENT method's name (12.1.2). False for a
+  method with no body here (abstract, external, an interface's). }
+function TPasNavigator.HasBareInherited(AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LDecl, LRoutine, LImpl, LFrom, LTo: Integer;
+begin
+  Result := False;
+  if not FProj.EnsureHydrated(AMid) then
+    Exit;
+  LM := FProj.Model(AMid);
+  LDecl := LM.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LRoutine := RTEnclosingRoutine(LM, LDecl);
+  if LRoutine = NIL_NODE then
+    Exit;
+  LImpl := RoutinePeerNode(AMid, LRoutine);
+  if LImpl = NIL_NODE then
+    Exit;
+  LFrom := LM.Tree.NodeLeftmostVis(LImpl);
+  LTo := LM.Tree.Nodes[LImpl].LastToken;
+  if (LFrom < 0) or (LTo > High(LM.Tree.Source.Visible)) then
+    Exit;
+  for var LVis := LFrom to LTo - 1 do
+    if (LM.Tree.Source.VisibleToken(LVis).Kind = tkInherited) and
+       (LM.Tree.Source.VisibleToken(LVis + 1).Kind <> tkIdentifier) then
+      Exit(True);
+end;
+
+{ The methods a rename of the method (ATMid, ASym) must take along - see
+  TPasRenameFamilyWhy for the three ties, and PlanRename for what happens to
+  them. A worklist over methods of ONE name: each member found is searched in
+  turn, so a hiding namesake that is itself a virtual root brings its own
+  overrides, an implementation brings the other implementations of its
+  interface method. False with AError for the refusals PlanRename names (an
+  overloaded name somewhere in the family, a slot whose root overrides a
+  method with no source here). True and no members for anything that is no
+  method of a class, object or interface.
+
+  The edges are the reverse-heritage index FindOverrides and
+  FindImplementations build, built once here for every hop. Unlike
+  FindImplementations a class listing an interface that EXTENDS the one in
+  the family is reached too: dcc carries the base interface's methods into
+  it, and its method is that method's implementation. }
+function TPasNavigator.RenameFamily(ATMid, ASym: Integer;
+  out AMembers: TArray<TPasRenameFamilyMember>;
+  out AError: string): Boolean;
+var
+  LIndex: TDictionary<string, TArray<TOvEdge>>;
+  // class -> the interfaces it lists; interface -> the one it extends
+  LListed: TDictionary<string, TArray<TPasExtRef>>;
+  LParent: TDictionary<string, TPasExtRef>;
+  LIn: TDictionary<string, Boolean>;
+  LWork: TQueue<TPasExtRef>;
+  LList: TList<TPasRenameFamilyMember>;
+  LName, LShown: string;
+  LCur, LRef: TPasExtRef;
+  LT, LRMid, LRoot, LOMid, LOStruct: Integer;
+  LSyms, LImpl, LChain: TArray<Integer>;
+  LIfaces: TArray<TPasExtRef>;
+  LEdges: TArray<TOvEdge>;
+  LDirs: TPasOvDirs;
+  LAnc: TSemaXType;
+  LParts: TArray<string>;
+  LRootHit: TPasRefHit;
+
+  function Key(AMid, ASym: Integer): string;
+  begin
+    Result := Format('%d:%d', [AMid, ASym]);
+  end;
+
+  function Ref(AMid, ASym: Integer): TPasExtRef;
+  begin
+    Result.UnitId := AMid;
+    Result.Sym := ASym;
+  end;
+
+  // The class, object or interface type a method is declared in.
+  function StructOf(AMid, ASym: Integer): Integer;
+  var
+    LM: TPasSemaModel;
+    LScope: Integer;
+  begin
+    Result := NIL_SYM;
+    LM := FProj.Model(AMid);
+    if (ASym < 0) or (ASym >= LM.SymCount) or
+       (LM.Symbols[ASym].Kind <> skRoutine) then
+      Exit;
+    LScope := LM.Symbols[ASym].Scope;
+    if (LScope >= 0) and (LScope < LM.Scopes.Count) and
+       (LM.Scopes[LScope].Kind = sckStruct) then
+      Result := LM.Scopes[LScope].StructSym;
+  end;
+
+  function TypeNameOf(AMid, AStruct: Integer): string;
+  begin
+    Result := FProj.Model(AMid).Symbols[AStruct].Name;
+  end;
+
+  function DirsOf(AMid, ASym: Integer): TPasOvDirs;
+  var
+    LM: TPasSemaModel;
+  begin
+    Result := [];
+    if not FProj.EnsureHydrated(AMid) then
+      Exit;
+    LM := FProj.Model(AMid);
+    if LM.Symbols[ASym].DeclNode <> NIL_NODE then
+      Result := OvDirsOf(AMid, RTEnclosingRoutine(LM,
+        LM.Symbols[ASym].DeclNode));
+  end;
+
+  // False, with the refusal, for an overloaded name at one type of the
+  // family: its members pair by signature there, which a name cannot tell.
+  function Single(AMid, AStruct: Integer;
+    const ASyms: TArray<Integer>): Boolean;
+  begin
+    Result := Length(ASyms) <= 1;
+    if not Result then
+      AError := Format('%s.%s is overloaded, and a rename of %s must take ' +
+        'along the methods tied to it by name (overrides, interface ' +
+        'implementations, a bare inherited) - which pair by signature, ' +
+        'not checked here; rename refused, nothing planned.',
+        [TypeNameOf(AMid, AStruct), LShown, LShown]);
+  end;
+
+  function Holds(const ASyms: TArray<Integer>; ASym: Integer): Boolean;
+  begin
+    Result := False;
+    for var LS in ASyms do
+      if LS = ASym then
+        Exit(True);
+  end;
+
+  procedure Add(AMid, ASym: Integer; AWhy: TPasRenameFamilyWhy);
+  var
+    LMem: TPasRenameFamilyMember;
+    LStr: Integer;
+  begin
+    if not LIn.TryAdd(Key(AMid, ASym), True) then
+      Exit;
+    LWork.Enqueue(Ref(AMid, ASym));
+    LMem := Default(TPasRenameFamilyMember);
+    LMem.Why := AWhy;
+    LStr := StructOf(AMid, ASym);
+    if LStr <> NIL_SYM then
+      LMem.TypeName := TypeNameOf(AMid, LStr);
+    LMem.Name := FProj.Model(AMid).Symbols[ASym].Name;
+    LMem.UnitId := AMid;
+    LMem.Sym := ASym;
+    DeclHit(AMid, ASym, LMem.Hit);
+    LList.Add(LMem);
+  end;
+
+  // A type and every type below it along one kind of edge: an ancestor edge
+  // between classes, an extends edge between interfaces.
+  function Below(AMid, AStruct: Integer; AInterfaces,
+    AWithSelf: Boolean): TArray<TPasExtRef>;
+  var
+    LQ: TQueue<TPasExtRef>;
+    LSeen: TDictionary<string, Boolean>;
+    LC: TPasExtRef;
+    LKids: TArray<TOvEdge>;
+    LOk: Boolean;
+  begin
+    Result := nil;
+    if AWithSelf then
+      Result := [Ref(AMid, AStruct)];
+    LQ := TQueue<TPasExtRef>.Create;
+    LSeen := TDictionary<string, Boolean>.Create;
+    try
+      LQ.Enqueue(Ref(AMid, AStruct));
+      LSeen.Add(Key(AMid, AStruct), True);
+      while LQ.Count > 0 do
+      begin
+        LC := LQ.Dequeue;
+        if not LIndex.TryGetValue(Key(LC.UnitId, LC.Sym), LKids) then
+          Continue;
+        for var LE in LKids do
+        begin
+          if not LE.IsFirst then
+            Continue;
+          if AInterfaces then
+            LOk := OvInterfaceDefNode(LE.UnitId, LE.Sym) <> NIL_NODE
+          else
+            LOk := OvClassDefNode(LE.UnitId, LE.Sym) <> NIL_NODE;
+          if LOk and LSeen.TryAdd(Key(LE.UnitId, LE.Sym), True) then
+          begin
+            Result := Result + [Ref(LE.UnitId, LE.Sym)];
+            LQ.Enqueue(Ref(LE.UnitId, LE.Sym));
+          end;
+        end;
+      end;
+    finally
+      LSeen.Free;
+      LQ.Free;
+    end;
+  end;
+
+  // An interface and the ones it extends, up.
+  function Up(const AIface: TPasExtRef): TArray<TPasExtRef>;
+  var
+    LC: TPasExtRef;
+  begin
+    Result := [AIface];
+    LC := AIface;
+    for var LDepth := 1 to 32 do
+    begin
+      if not LParent.TryGetValue(Key(LC.UnitId, LC.Sym), LC) then
+        Break;
+      Result := Result + [LC];
+    end;
+  end;
+
+  // The methods of the name a class runs: its own, else the nearest
+  // ancestor's, as FindImplementations climbs. AOMid/AOStruct: the type
+  // declaring them.
+  function Nearest(AMid, AStruct: Integer;
+    out AOMid, AOStruct: Integer): TArray<Integer>;
+  var
+    LX: TSemaXType;
+  begin
+    AOMid := AMid;
+    AOStruct := AStruct;
+    Result := OvMethodsNamed(AMid, AStruct, LName);
+    LX := XPlain(AMid, AStruct);
+    for var LDepth := 1 to 32 do
+    begin
+      if Length(Result) > 0 then
+        Exit;
+      LX := FProj.AncestorOfX(LX);
+      if not XValid(LX) or (OvClassDefNode(LX.UnitId, LX.Sym) = NIL_NODE) then
+        Exit;
+      AOMid := LX.UnitId;
+      AOStruct := LX.Sym;
+      Result := OvMethodsNamed(AOMid, AOStruct, LName);
+    end;
+  end;
+
+begin
+  Result := False;
+  AMembers := nil;
+  AError := '';
+  LT := StructOf(ATMid, ASym);
+  if (LT = NIL_SYM) or ((OvClassDefNode(ATMid, LT) = NIL_NODE) and
+     (OvInterfaceDefNode(ATMid, LT) = NIL_NODE)) then
+    Exit(True);
+  LName := FProj.Model(ATMid).Symbols[ASym].NameLower;
+  LShown := FProj.Model(ATMid).Symbols[ASym].Name;
+
+  LIndex := TDictionary<string, TArray<TOvEdge>>.Create;
+  LListed := TDictionary<string, TArray<TPasExtRef>>.Create;
+  LParent := TDictionary<string, TPasExtRef>.Create;
+  LIn := TDictionary<string, Boolean>.Create;
+  LWork := TQueue<TPasExtRef>.Create;
+  LList := TList<TPasRenameFamilyMember>.Create;
+  try
+    OvBuildTypeEdges(LIndex);
+    // The forward direction of the edges into an interface: who lists it,
+    // and what it extends.
+    for var LPair in LIndex do
+    begin
+      LParts := LPair.Key.Split([':']);
+      LRef := Ref(StrToInt(LParts[0]), StrToInt(LParts[1]));
+      if OvInterfaceDefNode(LRef.UnitId, LRef.Sym) = NIL_NODE then
+        Continue;
+      for var LE in LPair.Value do
+        if OvClassDefNode(LE.UnitId, LE.Sym) <> NIL_NODE then
+        begin
+          if LListed.TryGetValue(Key(LE.UnitId, LE.Sym), LIfaces) then
+            LListed[Key(LE.UnitId, LE.Sym)] := LIfaces + [LRef]
+          else
+            LListed.Add(Key(LE.UnitId, LE.Sym), [LRef]);
+        end
+        else if LE.IsFirst and
+                (OvInterfaceDefNode(LE.UnitId, LE.Sym) <> NIL_NODE) then
+          LParent.AddOrSetValue(Key(LE.UnitId, LE.Sym), LRef);
+    end;
+
+    LIn.Add(Key(ATMid, ASym), True);
+    LWork.Enqueue(Ref(ATMid, ASym));
+    while LWork.Count > 0 do
+    begin
+      LCur := LWork.Dequeue;
+      LT := StructOf(LCur.UnitId, LCur.Sym);
+      if LT = NIL_SYM then
+        Continue;
+      if OvClassDefNode(LCur.UnitId, LT) <> NIL_NODE then
+      begin
+        // 1. The VMT slot, from the method that introduced it down.
+        if DirsOf(LCur.UnitId, LCur.Sym) *
+           [odVirtual, odDynamic, odOverride, odMessage] <> [] then
+        begin
+          if not Single(LCur.UnitId, LT, OvMethodsNamed(LCur.UnitId, LT,
+             LName)) then
+            Exit;
+          LRMid := LCur.UnitId;
+          LRoot := LT;
+          OvClimbToRoot(LRMid, LRoot, LName);
+          if OvDirsNamed(LRMid, LRoot, LName, LDirs) and
+             (odOverride in LDirs) then
+          begin
+            AError := Format('%s.%s overrides a method declared where this ' +
+              'analysis has no source (a compiled unit) - its name is not ' +
+              'this rename''s to change; rename refused, nothing planned.',
+              [TypeNameOf(LRMid, LRoot), LShown]);
+            Exit;
+          end;
+          // A slot a library introduced: said as that, before its whole
+          // chain is searched - `Destroy` would otherwise answer with some
+          // overloaded namesake far down the RTL.
+          LSyms := OvMethodsNamed(LRMid, LRoot, LName);
+          if ((LRMid <> LCur.UnitId) or (LRoot <> LT)) and
+             (Length(LSyms) > 0) and DeclHit(LRMid, LSyms[0], LRootHit) and
+             (RenameBlockReason(LRootHit.FilePath) <> '') then
+          begin
+            AError := Format('%s.%s overrides %s.%s, which a rename of it ' +
+              'must take along - and cannot: %s', [TypeNameOf(LCur.UnitId,
+              LT), LShown, TypeNameOf(LRMid, LRoot), LShown,
+              RenameBlockReason(LRootHit.FilePath)]);
+            Exit;
+          end;
+          for var LC in Below(LRMid, LRoot, False, True) do
+          begin
+            LSyms := OvMethodsNamed(LC.UnitId, LC.Sym, LName);
+            LChain := nil;
+            for var LS in LSyms do
+              if ((LC.UnitId = LRMid) and (LC.Sym = LRoot)) or
+                 (DirsOf(LC.UnitId, LS) * [odOverride, odMessage] <> []) then
+                LChain := LChain + [LS];
+            if Length(LChain) = 0 then
+              Continue;
+            if not Single(LC.UnitId, LC.Sym, LChain) then
+              Exit;
+            Add(LC.UnitId, LChain[0], rfwVirtual);
+          end;
+        end;
+        // 2. The interface methods it implements - for its own class, or for
+        // a descendant that lists the interface and inherits the method.
+        for var LC in Below(LCur.UnitId, LT, False, True) do
+          if LListed.TryGetValue(Key(LC.UnitId, LC.Sym), LIfaces) then
+            for var LI in LIfaces do
+              for var LJ in Up(LI) do
+              begin
+                LSyms := OvMethodsNamed(LJ.UnitId, LJ.Sym, LName);
+                if Length(LSyms) = 0 then
+                  Continue;
+                LImpl := Nearest(LC.UnitId, LC.Sym, LOMid, LOStruct);
+                if (LOMid <> LCur.UnitId) or not Holds(LImpl, LCur.Sym) then
+                  Continue;
+                if not Single(LJ.UnitId, LJ.Sym, LSyms) or
+                   not Single(LOMid, LOStruct, LImpl) then
+                  Exit;
+                Add(LJ.UnitId, LSyms[0], rfwInterface);
+              end;
+        // 3. A descendant's hiding namesake whose bare `inherited` reaches
+        // it: what that inherited calls is the nearest ancestor's method.
+        for var LC in Below(LCur.UnitId, LT, False, False) do
+        begin
+          LSyms := OvMethodsNamed(LC.UnitId, LC.Sym, LName);
+          if Length(LSyms) = 0 then
+            Continue;
+          LAnc := FProj.AncestorOfX(XPlain(LC.UnitId, LC.Sym));
+          if not XValid(LAnc) or
+             (OvClassDefNode(LAnc.UnitId, LAnc.Sym) = NIL_NODE) then
+            Continue;
+          LImpl := Nearest(LAnc.UnitId, LAnc.Sym, LOMid, LOStruct);
+          if (LOMid <> LCur.UnitId) or (LOStruct <> LT) or
+             not Holds(LImpl, LCur.Sym) then
+            Continue;
+          for var LS in LSyms do
+            if not LIn.ContainsKey(Key(LC.UnitId, LS)) and
+               HasBareInherited(LC.UnitId, LS) then
+            begin
+              if not Single(LC.UnitId, LC.Sym, LSyms) or
+                 not Single(LOMid, LOStruct, LImpl) then
+                Exit;
+              Add(LC.UnitId, LS, rfwInherited);
+            end;
+        end;
+        // 4. The other way: this one calls a bare `inherited`, and what that
+        // reaches must keep its name too.
+        if HasBareInherited(LCur.UnitId, LCur.Sym) then
+        begin
+          LAnc := FProj.AncestorOfX(XPlain(LCur.UnitId, LT));
+          if XValid(LAnc) and
+             (OvClassDefNode(LAnc.UnitId, LAnc.Sym) <> NIL_NODE) then
+          begin
+            LImpl := Nearest(LAnc.UnitId, LAnc.Sym, LOMid, LOStruct);
+            if (Length(LImpl) > 0) and
+               not LIn.ContainsKey(Key(LOMid, LImpl[0])) then
+            begin
+              if not Single(LOMid, LOStruct, LImpl) or not Single(LCur.UnitId,
+                 LT, OvMethodsNamed(LCur.UnitId, LT, LName)) then
+                Exit;
+              Add(LOMid, LImpl[0], rfwInherited);
+            end;
+          end;
+        end;
+      end
+      else if OvInterfaceDefNode(LCur.UnitId, LT) <> NIL_NODE then
+      begin
+        // An interface method: what every class listing it - or an
+        // interface extending it - runs for the name.
+        if not Single(LCur.UnitId, LT, OvMethodsNamed(LCur.UnitId, LT,
+           LName)) then
+          Exit;
+        for var LJ in Below(LCur.UnitId, LT, True, True) do
+          if LIndex.TryGetValue(Key(LJ.UnitId, LJ.Sym), LEdges) then
+            for var LE in LEdges do
+            begin
+              if OvClassDefNode(LE.UnitId, LE.Sym) = NIL_NODE then
+                Continue;
+              LImpl := Nearest(LE.UnitId, LE.Sym, LOMid, LOStruct);
+              if Length(LImpl) = 0 then
+                Continue;
+              if not Single(LOMid, LOStruct, LImpl) then
+                Exit;
+              Add(LOMid, LImpl[0], rfwInterface);
+            end;
+      end;
+    end;
+    AMembers := LList.ToArray;
+    Result := True;
+  finally
+    LList.Free;
+    LWork.Free;
+    LIn.Free;
+    LParent.Free;
+    LListed.Free;
+    LIndex.Free;
+  end;
+end;
+
 { Decl + every use, turned into edits with a per-line preview. The preview is
   built per (file, line) GROUP rather than per edit, because two hits on one
   line each move the other: applying them left to right shifts every later
@@ -5960,7 +6454,20 @@ function TPasNavigator.PlanRename(ATMid, ASym: Integer;
   const ANewName: string; out AEdits: TArray<TPasRenameEdit>;
   out ACarried: TArray<TPasCarriedRename>; out AError: string): Boolean;
 var
+  LFamily: TArray<TPasRenameFamilyMember>;
+begin
+  Result := PlanRename(ATMid, ASym, ANewName, AEdits, ACarried, LFamily,
+    AError);
+end;
+
+function TPasNavigator.PlanRename(ATMid, ASym: Integer;
+  const ANewName: string; out AEdits: TArray<TPasRenameEdit>;
+  out ACarried: TArray<TPasCarriedRename>;
+  out AFamily: TArray<TPasRenameFamilyMember>; out AError: string): Boolean;
+var
   LDecl: TPasRefHit;
+  LFamSites: TArray<TArray<TPasFormSite>>;
+  LTogether: TArray<TPasExtRef>;
   LList: TList<TPasRenameEdit>;
   LArr: TArray<TPasRenameEdit>;
   LIdx, LStart, LRun, LDelta, LPeer: Integer;
@@ -6049,10 +6556,66 @@ var
     end;
   end;
 
+  procedure AddHitEdit(AList: TList<TPasRenameEdit>; const AHit: TPasRefHit;
+    const ANewText: string);
+  var
+    LEdit: TPasRenameEdit;
+  begin
+    if AHit.Implicit then
+      Exit;
+    LEdit := Default(TPasRenameEdit);
+    LEdit.NewText := ANewText;
+    LEdit.FilePath := AHit.FilePath;
+    LEdit.Line := AHit.Line;
+    LEdit.Col := AHit.Col;
+    LEdit.Len := AHit.HiTo - AHit.HiFrom;
+    LEdit.OldText := Copy(AHit.Snippet, AHit.HiFrom + 1, LEdit.Len);
+    LEdit.Snippet := AHit.Snippet;
+    LEdit.HiFrom := AHit.HiFrom;
+    LEdit.HiTo := AHit.HiTo;
+    AList.Add(LEdit);
+  end;
+
+  // The family's declarations, implementation headers and uses - the uses
+  // in ONE pass over the closure for all of them (CollectReferencesOfAll):
+  // a slot overridden by 243 classes was 243 passes and 10 s on the client
+  // group. Members are methods, so no property chain and no type qualifiers
+  // to add, which is all FindReferences does beyond the scan.
+  procedure AddFamilyEdits(AList: TList<TPasRenameEdit>;
+    const ANewText: string);
+  var
+    LRefs: TArray<TPasExtRef>;
+    LHits: TList<TPasRefHit>;
+    LHit: TPasRefHit;
+    LNode: Integer;
+  begin
+    SetLength(LRefs, Length(AFamily));
+    for var LI := 0 to High(AFamily) do
+    begin
+      LRefs[LI].UnitId := AFamily[LI].UnitId;
+      LRefs[LI].Sym := AFamily[LI].Sym;
+      if DeclHit(AFamily[LI].UnitId, AFamily[LI].Sym, LHit) then
+        AddHitEdit(AList, LHit, ANewText);
+      LNode := PeerRoutineNameNode(AFamily[LI].UnitId, AFamily[LI].Sym);
+      if (LNode <> NIL_NODE) and FProj.EnsureHydrated(AFamily[LI].UnitId) and
+         HitFromNode(FProj.Model(AFamily[LI].UnitId), LNode, LHit) then
+        AddHitEdit(AList, LHit, ANewText);
+    end;
+    LHits := TList<TPasRefHit>.Create;
+    try
+      CollectReferencesOfAll(LRefs, LHits);
+      for LHit in LHits do
+        AddHitEdit(AList, LHit, ANewText);
+    finally
+      LHits.Free;
+    end;
+  end;
+
 begin
   Result := False;
   AEdits := nil;
   ACarried := nil;
+  AFamily := nil;
   AError := '';
   if (ATMid < 0) or (ASym = NIL_SYM) then
   begin
@@ -6092,9 +6655,22 @@ begin
   // must keep spelling the parameter the same way.
   LPeer := PeerDeclSym(ATMid, ASym);
 
+  // A method's family first: the form lines of one member are no refusal
+  // for another renamed with it (SitesOf's ATogether).
+  if not RenameFamily(ATMid, ASym, AFamily, AError) then
+    Exit;
+  SetLength(LTogether, 1);
+  LTogether[0].UnitId := ATMid;
+  LTogether[0].Sym := ASym;
+  for LIdx := 0 to High(AFamily) do
+  begin
+    SetLength(LTogether, Length(LTogether) + 1);
+    LTogether[High(LTogether)].UnitId := AFamily[LIdx].UnitId;
+    LTogether[High(LTogether)].Sym := AFamily[LIdx].Sym;
+  end;
   // The form files that name it - with their own refusals, which decide
   // before anything is planned (see the declaration's comment).
-  LSites := FormBinder.SitesOf(ATMid, ASym, True, AError);
+  LSites := FormBinder.SitesOf(ATMid, ASym, True, LTogether, AError);
   if AError <> '' then
     Exit;
   AError := FormBinder.RenameRefusal(ATMid, ASym, ANewName, LSites);
@@ -6102,10 +6678,45 @@ begin
     Exit;
   // What a component's rename carries along (the declaration's comment).
   FormBinder.CarriedBy(ATMid, ASym, ANewName, LSites, LHandlers, LCaptions);
+  // Each family member with the form files that name it and their refusals
+  // - a member must follow, so one refused refuses the whole rename (a
+  // carried handler is skipped instead: it need not follow).
+  SetLength(LFamSites, Length(AFamily));
+  for LIdx := 0 to High(AFamily) do
+  begin
+    // A member in a library or read-only file, said as the tie it is - the
+    // edit gate below would name only the file.
+    AError := RenameBlockReason(AFamily[LIdx].Hit.FilePath);
+    if AError <> '' then
+    begin
+      AError := Format('%s.%s, which this rename must take along (%s), ' +
+        'cannot be renamed: %s', [AFamily[LIdx].TypeName,
+        AFamily[LIdx].Name, RENAME_FAMILY_WHY[AFamily[LIdx].Why], AError]);
+      AFamily := nil;
+      Exit;
+    end;
+    LFamSites[LIdx] := FormBinder.SitesOf(AFamily[LIdx].UnitId,
+      AFamily[LIdx].Sym, True, LTogether, AError);
+    if AError = '' then
+      AError := FormBinder.RenameRefusal(AFamily[LIdx].UnitId,
+        AFamily[LIdx].Sym, ANewName, LFamSites[LIdx]);
+    if AError <> '' then
+    begin
+      AError := Format('%s.%s, which this rename must take along (%s), ' +
+        'cannot be renamed: %s', [AFamily[LIdx].TypeName, AFamily[LIdx].Name,
+        RENAME_FAMILY_WHY[AFamily[LIdx].Why], AError]);
+      AFamily := nil;
+      Exit;
+    end;
+  end;
 
   LList := TList<TPasRenameEdit>.Create;
   try
     AddSymEdits(LList, ATMid, ASym, True, ANewName);
+    if Length(AFamily) > 0 then
+      AddFamilyEdits(LList, ANewName);
+    for LIdx := 0 to High(AFamily) do
+      AddFormEdits(LList, LFamSites[LIdx], ANewName);
     if (LPeer <> NIL_SYM) and (LPeer <> ASym) then
       AddSymEdits(LList, ATMid, LPeer, False, ANewName);
     AddFormEdits(LList, LSites, ANewName);

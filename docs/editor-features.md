@@ -183,6 +183,7 @@ identifier class does here:
 | 13a | A component, handler or class a FORM FILE names (`object X: TC`, `OnClick = X`, `FocusControl = X`, `DataModule1.X`) | the form-file sites too, bound by TReader's rules | OK (0.59.0 - 3.9a) |
 | 13b | A component whose handlers are named after it (`Button1Click` on Button1's OnClick), or whose caption reads its name | the handlers renamed with it everywhere, the caption follows - as the form designer does | OK (0.59.0 - 3.9a) |
 | 13c | A published property or an enum value a form file spells; a binary form file | nothing - refused whole, naming the file and line | OK (by design, 3.9a) |
+| 13e | A METHOD tied to others by name: a virtual slot, an interface method and its implementations, a hiding namesake calling it by a bare `inherited;` - from any of them | the whole family, each with its uses and form lines, listed in `AFamily`; refused whole for an overloaded name in the family, a slot whose root has no source, a member in a library | OK (0.86.0 - 3.9b) |
 | 14 | Name-collision detection at an edit site | - | GAP (deliberate - see 3.5; form-file collisions ARE checked, 3.9a) |
 | 15 | Identifier inside an opened `$I` include file | - | GAP (`IdentAt` is main-file-only, same limit go-to-declaration has) |
 
@@ -360,6 +361,42 @@ identifier class does here:
       when the form loads), a component path nothing answers. An inherited
       form lists its own file only; its ancestor's form is `FormRoleOf` of
       the ancestor class.
+
+3.9b **A method's FAMILY** (0.86.0 - `RenameFamily`, `TPasRenameFamilyWhy`,
+    the `AFamily` overload of `PlanRename`). Three ties by name make a
+    rename of one method alone code that breaks, so the plan takes the
+    others with it, each with its uses, implementation header and form
+    lines, under the same new name:
+    - the VMT slot (`rfwVirtual`): the method that introduced it and every
+      `override` below - from any of them. One renamed alone is E2137.
+    - an interface method and what implements it (`rfwInterface`): the
+      class method the name finds from a class listing the interface or one
+      EXTENDING it (dcc carries the base's methods into the extension, which
+      Find Implementations does not walk), and from a class method, the
+      interface methods it implements for its own class or a descendant
+      listing one. One renamed alone is E2291.
+    - a descendant's HIDING namesake that calls it by a bare `inherited;`
+      (`rfwInherited`), both ways. That `inherited` names nothing and binds
+      by the current method's name (12.1.2): with one of the two renamed it
+      still compiles and calls nothing, or a grandparent's namesake - the
+      one break no build reports. The client group's settings frames had
+      it: a base frame's change handler, redeclared in a descendant frame
+      that saves its parameters and calls `inherited;`, bound by name in
+      both frames' form files (39 lines in 6 files, where a rename of the
+      base alone planned 15 and silently stopped the descendant's controls
+      reaching the base's handler).
+    A worklist over methods of one name: each member is searched in turn.
+    The ancestor's form line that binds a descendant's redeclaration and the
+    ancestor's own method at once - a refusal for a rename of either alone
+    (3.9a) - is a site of both when both are renamed (`SitesOf`'s
+    `ATogether`). Refused whole, since the ties are matched by name as Find
+    Overrides and Find Implementations match them: an overloaded name at any
+    type of the family (they pair by signature), a slot whose root overrides
+    a method this analysis has no source for, a member in a library or
+    read-only file (an override of `TObject.Destroy` keeps the library's
+    name) - each refusal names the member and its tie. Not reached: a
+    method resolution clause (`procedure IBar.Baz = MyBaz;`), a delegated
+    implementation (`implements`) - as in §5.
 
 
 ## 3.10 Demo menu: one `Find All` submenu

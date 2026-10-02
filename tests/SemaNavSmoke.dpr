@@ -628,6 +628,62 @@ const
     'end;'#10 +                                 // 16
     'end.'#10;                                  // 11
 
+  { A method rename's FAMILY (PlanRename / RenameFamily): the methods tied to
+    one by name that a rename of it alone would break - E2137 at an override
+    of a renamed virtual, E2291 at a class implementing a renamed interface
+    method (TFamOther lists IFamChild, which carries IFamBase.Run), and
+    TFamMid.Tick, which hides TFamBase.Tick and calls it by a bare
+    `inherited;` that compiles and calls nothing once only one is renamed.
+    TFamOvl.Go is a virtual overload: the family pairs by name, so refused. }
+  UNIT_FAM =
+    'unit NavFam;'#10 +                                       // 1
+    'interface'#10 +                                          // 2
+    'type'#10 +                                               // 3
+    '  IFamBase = interface'#10 +                             // 4
+    '    procedure Run;'#10 +                                 // 5  Run col 15
+    '  end;'#10 +                                             // 6
+    '  IFamChild = interface(IFamBase)'#10 +                  // 7
+    '  end;'#10 +                                             // 8
+    '  TFamBase = class(TObject, IFamBase)'#10 +              // 9
+    '  public'#10 +                                           // 10
+    '    procedure Run; virtual;'#10 +                        // 11 Run col 15
+    '    procedure Tick;'#10 +                                // 12 Tick col 15
+    '  end;'#10 +                                             // 13
+    '  TFamMid = class(TFamBase)'#10 +                        // 14
+    '  public'#10 +                                           // 15
+    '    procedure Run; override;'#10 +                       // 16 Run col 15
+    '    procedure Tick;'#10 +                                // 17 Tick col 15
+    '  end;'#10 +                                             // 18
+    '  TFamLeaf = class(TFamMid)'#10 +                        // 19
+    '  public'#10 +                                           // 20
+    '    procedure Run; override;'#10 +                       // 21 Run col 15
+    '  end;'#10 +                                             // 22
+    '  TFamOther = class(TObject, IFamChild)'#10 +            // 23
+    '  public'#10 +                                           // 24
+    '    procedure Run;'#10 +                                 // 25 Run col 15
+    '  end;'#10 +                                             // 26
+    '  TFamOvl = class'#10 +                                  // 27
+    '  public'#10 +                                           // 28
+    '    procedure Go; overload; virtual;'#10 +               // 29 Go col 15
+    '    procedure Go(A: Integer); overload; virtual;'#10 +   // 30
+    '  end;'#10 +                                             // 31
+    'implementation'#10 +                                     // 32
+    'procedure TFamBase.Run; begin end;'#10 +                 // 33 Run col 20
+    'procedure TFamBase.Tick; begin end;'#10 +                // 34 Tick col 20
+    'procedure TFamMid.Run; begin inherited; end;'#10 +       // 35 Run col 19
+    'procedure TFamMid.Tick; begin inherited; end;'#10 +      // 36 Tick col 19
+    'procedure TFamLeaf.Run; begin inherited Run; end;'#10 +  // 37 col 20, 41
+    'procedure TFamOther.Run; begin end;'#10 +                // 38 Run col 21
+    'procedure TFamOvl.Go; begin end;'#10 +                   // 39
+    'procedure TFamOvl.Go(A: Integer); begin end;'#10 +       // 40
+    'procedure UseFam(const I: IFamBase; B: TFamBase);'#10 +  // 41
+    'begin'#10 +                                              // 42
+    '  I.Run;'#10 +                                           // 43 Run col 5
+    '  B.Run;'#10 +                                           // 44 Run col 5
+    '  B.Tick;'#10 +                                          // 45 Tick col 5
+    'end;'#10 +                                               // 46
+    'end.'#10;                                                // 47
+
   { Conditional-symbol fixtures (DefineAt / FindDefineReferences /
     GotoDefine). NAVFOO is defined on line 2, so the $IFNDEF branch (lines
     10-12) is DEAD - its $DEFINE NAVBAR is recorded but inactive - which in
@@ -1788,7 +1844,9 @@ var
   LHits: TArray<TPasRefHit>;
   LDeclHit: TPasRefHit;
   LEdits: TArray<TPasRenameEdit>;
-  LMidRen, LIdx: Integer;
+  LCarried: TArray<TPasCarriedRename>;
+  LFamily: TArray<TPasRenameFamilyMember>;
+  LMidRen, LMidFam, LIdx: Integer;
   LErr, LFileName: string;
   LDefMid, LRaw: Integer;
   LDefRefs: TArray<TPasDefineRef>;
@@ -1825,6 +1883,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavCD.pas'), UNIT_CD);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRen.pas'), UNIT_REN);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRenP.pas'), UNIT_RENP);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavFam.pas'), UNIT_FAM);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDef.pas'), UNIT_DEF);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDef.inc'), INC_DEF);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOut.pas'), UNIT_OUT);
@@ -2681,6 +2740,76 @@ begin
         (Length(LEdits) = 0));
       Ok('PlanRename: unchanged name refused',
         not GNav.PlanRename(LRTMid, LRSym, 'Twice', {out} LEdits, {out} LErr));
+
+      // ---- A method rename's family (UNIT_FAM) ----
+      LMidFam := GNav.ModelIdOf(TPath.Combine(LDir, 'NavFam.pas'));
+      Ok('NavFam model found', LMidFam >= 0);
+      // From the interface method: the class implementing it (and so its
+      // virtual chain) and the class listing the EXTENDING interface.
+      Ok('family: SymbolAt IFamBase.Run',
+        GNav.SymbolAt(LMidFam, 5, 15, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'Run'));
+      Ok('family: IFamBase.Run -> Exec, 4 methods taken along',
+        GNav.PlanRename(LRTMid, LRSym, 'Exec', {out} LEdits, {out} LCarried,
+          {out} LFamily, {out} LErr) and (Length(LFamily) = 4));
+      Ok('family: every declaration and implementation header',
+        HasEdit(LEdits, 'NavFam.pas', 5, 15, '    procedure Exec;', 14, 18) and
+        HasEdit(LEdits, 'NavFam.pas', 11, 15, '    procedure Exec; virtual;',
+          14, 18) and
+        HasEdit(LEdits, 'NavFam.pas', 16, 15, '    procedure Exec; override;',
+          14, 18) and
+        HasEdit(LEdits, 'NavFam.pas', 21, 15, '    procedure Exec; override;',
+          14, 18) and
+        HasEdit(LEdits, 'NavFam.pas', 25, 15, '    procedure Exec;', 14, 18) and
+        HasEdit(LEdits, 'NavFam.pas', 33, 20,
+          'procedure TFamBase.Exec; begin end;', 19, 23) and
+        HasEdit(LEdits, 'NavFam.pas', 38, 21,
+          'procedure TFamOther.Exec; begin end;', 20, 24));
+      Ok('family: a named inherited and the calls through either type',
+        HasEdit(LEdits, 'NavFam.pas', 37, 41,
+          'procedure TFamLeaf.Exec; begin inherited Exec; end;', 41, 45) and
+        HasEdit(LEdits, 'NavFam.pas', 43, 5, '  I.Exec;', 4, 8) and
+        HasEdit(LEdits, 'NavFam.pas', 44, 5, '  B.Exec;', 4, 8));
+      Ok('family: tagged by tie',
+        (LFamily[0].Why in [rfwVirtual, rfwInterface]) and
+        (Length(LCarried) = 0));
+      // From the bottom of the chain: the same family, the interface method
+      // included.
+      GNav.SymbolAt(LMidFam, 21, 15, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('family: TFamLeaf.Run reaches the interface method too',
+        GNav.PlanRename(LRTMid, LRSym, 'Exec', {out} LEdits, {out} LCarried,
+          {out} LFamily, {out} LErr) and (Length(LFamily) = 4) and
+        HasEdit(LEdits, 'NavFam.pas', 5, 15, '    procedure Exec;', 14, 18));
+      // A hiding namesake that calls a bare `inherited;` follows - both ways.
+      GNav.SymbolAt(LMidFam, 12, 15, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('family: TFamBase.Tick takes TFamMid.Tick (bare inherited)',
+        GNav.PlanRename(LRTMid, LRSym, 'Beat', {out} LEdits, {out} LCarried,
+          {out} LFamily, {out} LErr) and (Length(LFamily) = 1) and
+        (LFamily[0].Why = rfwInherited) and
+        SameText(LFamily[0].TypeName, 'TFamMid') and
+        HasEdit(LEdits, 'NavFam.pas', 36, 19,
+          'procedure TFamMid.Beat; begin inherited; end;', 18, 22) and
+        HasEdit(LEdits, 'NavFam.pas', 45, 5, '  B.Beat;', 4, 8));
+      GNav.SymbolAt(LMidFam, 17, 15, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('family: TFamMid.Tick takes the TFamBase.Tick it calls',
+        GNav.PlanRename(LRTMid, LRSym, 'Beat', {out} LEdits, {out} LCarried,
+          {out} LFamily, {out} LErr) and (Length(LFamily) = 1) and
+        SameText(LFamily[0].TypeName, 'TFamBase') and
+        HasEdit(LEdits, 'NavFam.pas', 12, 15, '    procedure Beat;', 14, 18));
+      // A virtual overload: refused whole, nothing planned.
+      GNav.SymbolAt(LMidFam, 29, 15, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('family: an overloaded virtual is refused',
+        not GNav.PlanRename(LRTMid, LRSym, 'Walk', {out} LEdits,
+          {out} LCarried, {out} LFamily, {out} LErr) and
+        (Length(LEdits) = 0) and (Pos('overloaded', LErr) > 0));
+      // The empty case: a method nothing is tied to has no family.
+      Ok('family: SymbolAt TRP.Take',
+        GNav.SymbolAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavRenP.pas')), 5,
+          15, {out} LRTMid, {out} LRSym, {out} LRName) and
+        SameText(LRName, 'Take'));
+      Ok('family: a method with no ties - none',
+        GNav.PlanRename(LRTMid, LRSym, 'Grab', {out} LEdits, {out} LCarried,
+          {out} LFamily, {out} LErr) and (Length(LFamily) = 0));
 
       // REGRESSION: a bare call to an inherited, non-overloaded method in
       // the SAME unit must be counted ONCE, not twice (see UNIT_RQ / the

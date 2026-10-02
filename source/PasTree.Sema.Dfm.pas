@@ -296,7 +296,15 @@ type
       bind yet (a published property, an enum value - see the unit header).
       A reference search passes False and gets what could be bound. }
     function SitesOf(ATMid, ASym: Integer; ARename: Boolean;
-      out AError: string): TArray<TPasFormSite>;
+      out AError: string): TArray<TPasFormSite>; overload;
+    { The same, for one method of a rename that takes several under one new
+      name (PlanRename's family, ATogether): an ancestor's form line that
+      binds a descendant's redeclaration and the ancestor's own method at
+      once is no refusal when that ancestor method is in ATogether - the
+      line is rewritten and binds both again - but a site of this one too. }
+    function SitesOf(ATMid, ASym: Integer; ARename: Boolean;
+      const ATogether: TArray<TPasExtRef>;
+      out AError: string): TArray<TPasFormSite>; overload;
     { The form-file refusals of a rename to ANewName, '' when there are none:
       a binary form file among ASites (positions of converted text cannot be
       edited in place), a non-ASCII name for a file without a UTF-8 BOM, and
@@ -1343,6 +1351,13 @@ end;
 
 function TPasFormBinder.SitesOf(ATMid, ASym: Integer; ARename: Boolean;
   out AError: string): TArray<TPasFormSite>;
+begin
+  Result := SitesOf(ATMid, ASym, ARename, nil, AError);
+end;
+
+function TPasFormBinder.SitesOf(ATMid, ASym: Integer; ARename: Boolean;
+  const ATogether: TArray<TPasExtRef>;
+  out AError: string): TArray<TPasFormSite>;
 var
   LShape: TSymShape;
   LOwner, LSelf, LClass: TSemaXType;
@@ -1361,6 +1376,23 @@ var
   begin
     Result := Format('%s line %d', [TPath.GetFileName(LEntry.Path),
       LDoc.LineOf(LId.Offset)]);
+  end;
+
+  // Whether the method that line binds for its own form's class is renamed
+  // with this one.
+  function BoundRenamedWith: Boolean;
+  var
+    LBMid, LBSym: Integer;
+    LBIsMethod: Boolean;
+    LBVia: TPasFormSiteVia;
+  begin
+    Result := False;
+    if not ValueTarget(LEntry, LIdx, LBMid, LBSym, LBIsMethod, LBVia) or
+       not LBIsMethod then
+      Exit;
+    for var LR in ATogether do
+      if (LR.UnitId = LBMid) and (LR.Sym = LBSym) then
+        Exit(True);
   end;
 
 begin
@@ -1446,7 +1478,7 @@ begin
                 MethodIn(ATMid, LOwner, LNameLower, LTMid, LTSym) and
                 (LTMid = ATMid) and (LTSym = ASym) then
               begin
-                if ARename then
+                if ARename and not BoundRenamedWith then
                 begin
                   AError := Format('%s binds "%s" by name in an ancestor''s ' +
                     'form, for %s as well as for the ancestor''s own forms - ' +
