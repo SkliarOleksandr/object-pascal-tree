@@ -66,6 +66,12 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   directory stands for dcc's current directory, and the search paths for
   its `-I` (the IDE passes one path to both `-U` and `-I`); a project that
   sets a separate include path is read with its unit path.
+- a conditional that crosses an include boundary - opened in an include
+  and closed by its includer, or an include's `$ELSE`/`$ELSEIF`/`$ENDIF`
+  on the includer's conditional - is refused by dcc 37.0 (E2280, or a
+  garbled includer) and diagnosed here (ppUnterminatedConditional at the
+  include, ppCrossIncludeConditional), but read as one stack: the tokens
+  follow what the author evidently meant, not dcc's recovery.
 
 ### 1.3.5 Compiler-version symbols
 - the VERxxx symbol and CompilerVersion/RTLVersion follow the one

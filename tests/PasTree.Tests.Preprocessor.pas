@@ -29,7 +29,7 @@ function BuildPreprocessorCases(APP: TPasPreprocessor): TPasCustomCases;
 implementation
 
 uses
-  System.SysUtils;
+  System.SysUtils, System.IOUtils;
 
 // 19.2.1 ({$RTTI}): renders TPasRttiState the way CheckDump expects a
 // golden string -- mode plus each category's set, `-` when the category
@@ -313,8 +313,122 @@ function BuildPreprocessorCases(APP: TPasPreprocessor): TPasCustomCases;
       end;
   end;
 
+  { F22: a conditional that crosses an include boundary. dcc 37.0 refuses
+    every such shape (probes local\fidelity\x-f22: E2280 at the include that
+    opens one and leaves it open, E2280 or a garbled includer for an
+    include's $ELSE/$ENDIF on the includer's conditional). PasTree keeps the
+    shared stack - the tokens follow the author's intent - and says where it
+    crossed. AMain is the unit text, AIncA/AIncB the files a.inc/b.inc
+    beside it; AExpected the diagnostics as `code@file` in order (the
+    PasTreeXform names), AVisible the visible tokens. ON is defined. }
+  function CrossIncludeCase(const AName, AMain, AIncA, AIncB, AExpected,
+    AVisible: string): TPasCustomCase;
+  begin
+    Result.Section := '1.3.3';
+    Result.Name := AName;
+    Result.Run :=
+      function: TPasCheckResult
+      const
+        CODES: array[TPasPPDiagCode] of string = ('unbalanced-else',
+          'unbalanced-endif', 'unterminated-conditional',
+          'include-not-found', 'include-cycle', 'include-too-deep',
+          'if-unreadable', 'if-guessed', 'unsupported-insertion',
+          'popopt-without-pushopt', 'cross-include-conditional');
+      var
+        LDir: string;
+        LSM: TPasSourceManager;
+        LDefines: TPasDefines;
+        LPP: TPasPreprocessor;
+        LPre: TPasPreprocessed;
+        LIdx: Integer;
+        LDiags, LVis: string;
+      begin
+        LDir := TPath.Combine(TPath.GetTempPath, 'pastree_f22');
+        if TDirectory.Exists(LDir) then
+          TDirectory.Delete(LDir, True);
+        TDirectory.CreateDirectory(LDir);
+        LSM := nil;
+        LDefines := nil;
+        LPP := nil;
+        try
+          if AIncA <> '' then
+            TFile.WriteAllText(TPath.Combine(LDir, 'a.inc'), AIncA);
+          if AIncB <> '' then
+            TFile.WriteAllText(TPath.Combine(LDir, 'b.inc'), AIncB);
+          LSM := TPasSourceManager.Create([]);
+          LDefines := TPasDefines.Create(['ON']);
+          LPP := TPasPreprocessor.Create(LSM, LDefines);
+          LPre := LPP.ProcessText(TPath.Combine(LDir, 'U.pas'), AMain);
+          LDiags := '';
+          for LIdx := 0 to High(LPre.Diagnostics) do
+          begin
+            if LDiags <> '' then
+              LDiags := LDiags + ',';
+            LDiags := LDiags + CODES[LPre.Diagnostics[LIdx].Code] + '@' +
+              ExtractFileName(LPre.FileNames[LPre.Diagnostics[LIdx].FileId]);
+          end;
+          LVis := '';
+          for LIdx := 0 to High(LPre.Visible) - 1 do
+          begin
+            if LVis <> '' then
+              LVis := LVis + ' ';
+            LVis := LVis + LPre.VisibleText(LIdx);
+          end;
+          Result.Passed := (LDiags = AExpected) and (LVis = AVisible);
+          if Result.Passed then
+            Result.Message := ''
+          else
+            Result.Message := Format('  diagnostics: expected [%s], got ' +
+              '[%s]%s  visible:     expected [%s], got [%s]%s',
+              [AExpected, LDiags, sLineBreak, AVisible, LVis, sLineBreak]);
+        finally
+          LPP.Free;
+          LDefines.Free;
+          LSM.Free;
+          if TDirectory.Exists(LDir) then
+            TDirectory.Delete(LDir, True);
+        end;
+      end;
+  end;
+
 begin
   Result := [
+    // ---- 1.3.3 / F22: a conditional across an include boundary ----
+    CrossIncludeCase('an include opening a conditional its includer closes',
+      'A {$I a.inc} B {$ENDIF} C', '{$IFDEF ON} X', '',
+      'unterminated-conditional@a.inc', 'A X B C'),
+    CrossIncludeCase('...a dead one: the includer''s text stays dead',
+      'A {$I a.inc} B {$ENDIF} C', '{$IFDEF OFF} X', '',
+      'unterminated-conditional@a.inc', 'A C'),
+    CrossIncludeCase('an include closing its includer''s conditional',
+      'A {$IFDEF ON} {$I a.inc} B', 'X {$ENDIF}', '',
+      'cross-include-conditional@a.inc', 'A X B'),
+    CrossIncludeCase('an include''s $ELSE on its includer''s conditional',
+      'A {$IFDEF ON} {$I a.inc} B {$ENDIF} C', 'X {$ELSE} Y', '',
+      'cross-include-conditional@a.inc', 'A X C'),
+    CrossIncludeCase('...and its $ELSEIF',
+      'A {$IF True} {$I a.inc} B {$IFEND} C', 'X {$ELSEIF True} Y', '',
+      'cross-include-conditional@a.inc', 'A X C'),
+    CrossIncludeCase('an include''s own conditional is no crossing',
+      'A {$I a.inc} B', '{$IFDEF ON} X {$ELSE} Y {$ENDIF}', '', '', 'A X B'),
+    CrossIncludeCase('one include opening, the next closing',
+      'A {$I a.inc} {$I b.inc} B', '{$IFDEF ON} X', 'Y {$ENDIF}',
+      'unterminated-conditional@a.inc,cross-include-conditional@b.inc',
+      'A X Y B'),
+    CrossIncludeCase('left open to the end: said once, at the include',
+      'A {$I a.inc} B', '{$IFDEF ON} X', '',
+      'unterminated-conditional@a.inc', 'A X B'),
+    CrossIncludeCase('the unit''s own unterminated conditional, as before',
+      'A {$IFDEF ON} B', '', '', 'unterminated-conditional@U.pas', 'A B'),
+    CrossIncludeCase('after closing the includer''s, an include''s own ' +
+      'conditional is its own',
+      'A {$IFDEF ON} {$I a.inc} B',
+      '{$ENDIF} {$IFDEF OFF} X {$ELSE} Y {$ENDIF}', '',
+      'cross-include-conditional@a.inc', 'A Y B'),
+    CrossIncludeCase('an include nested in one: said at the inner file',
+      'A {$I a.inc} B', '{$I b.inc} X {$ENDIF}', '{$IFDEF ON} Y',
+      'unterminated-conditional@b.inc', 'A Y X B'),
+
     // ---- 1.3.1: a switch directive sets/clears a single-letter option,
     // alone and combined with another switch on the same directive line
     // (`{$R+,O-}`, the shape ApplySwitches exists for) ----

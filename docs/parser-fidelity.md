@@ -181,7 +181,6 @@ minus before a member call - agree with dcc everywhere they were met.
 |---|---|---|
 | F5 | the DCU reader | a routine's nested routines listed under its anonymous method's body; only the dump's nesting |
 | F8 | the parser, error mode | the root stops where a broken parse stopped, the rest of the file in no node |
-| F22 | the preprocessor | a conditional crossing an include boundary is accepted; dcc refuses it (invalid code only) |
 
 Fixed on the way, each by its own reviewed change: a subrange bound that
 swallowed an initializer's `=` (F6, silent on a variable), directives of a
@@ -240,6 +239,12 @@ constant there, both dcc's, gave parse errors. A program's parameters (F17,
 the last loss) are an nkProgramParams of names. An attribute (F32) is a name
 with its arguments or any one expression - `['abc']`, `[1 + 2]`, `[C + 1]`,
 `[(TA)]`, which dcc compiles and drops (W1074); they were parse errors.
+A conditional crossing an include boundary (F22, invalid code only) was
+accepted in silence, and the preprocessor's own comment called that dcc's
+rule; dcc refuses every such shape - an include that opens one and leaves it
+open is E2280 there, an include's `$ELSE` or `$ENDIF` on its includer's
+conditional is E2280 or a garbled includer. The tokens still follow the
+shared stack, and each crossing is a diagnostic where it happens.
 
 ## 5. The gate
 

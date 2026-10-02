@@ -14,8 +14,12 @@ unit PasTree.Preprocessor;
     $PUSHOPT / $POPOPT stack; $IFOPT reads it;
   - records skipped (inactive) regions per file so raw-lexer diagnostics
     inside them can be suppressed;
-  - conditional state deliberately spans include boundaries, matching the
-    compiler (an .inc may open a conditional the includer closes).
+  - conditional state spans include boundaries, as a tolerance: dcc 37.0
+    refuses a conditional that crosses one (opened in an include and closed
+    by the includer: E2280 at the include; an include's $ELSE/$ENDIF acting
+    on the includer's conditional: E2280 or a garbled includer), so each
+    crossing is diagnosed where it happens and the tokens follow the
+    author's evident intent (F22).
 
   The visible stream is an array of (FileId, TokenIndex) pairs referencing
   the retained raw streams - full fidelity is preserved underneath.
@@ -50,7 +54,9 @@ type
                               // the flagship case) - "treated as False" was
                               // never the whole story. Informational.
     ppUnsupportedInsertion,   // {$I %VAR%}
-    ppPopWithoutPush
+    ppPopWithoutPush,
+    ppCrossIncludeConditional // an include's $ELSE/$ELSEIF/$ENDIF/$IFEND
+                              // on a conditional its includer opened
   );
 
   TPasSymbolQuery = (sqConstValue, sqSizeOfType, sqLengthOf, sqDeclared);
@@ -379,11 +385,17 @@ type
     FSkipped: TObjectList<TList<TPasSkippedRegion>>;
     FDiags: TList<TPasPPDiagnostic>;
     FIncludePathStack: TList<string>;
-    // Conditional stack - shared across include boundaries by design.
+    // Conditional stack - shared across include boundaries (a tolerance,
+    // diagnosed: see the unit header). FCondOpener holds each entry's
+    // opening directive (FileId, Start, Len); FCondBase is the depth at
+    // which the file being processed began - an entry below it is its
+    // includer's.
     FCondParentActive: TList<Boolean>;
     FCondAnyTaken: TList<Boolean>;
     FCondThisActive: TList<Boolean>;
     FCondSeenElse: TList<Boolean>;
+    FCondOpener: TList<TPasIncludeRef>;
+    FCondBase: Integer;
     FCompilerVersion: Double;
     FPointerBytes: Integer;
     FExtendedBytes: Integer;
@@ -403,6 +415,9 @@ type
     procedure HandleDirective(AFileId: Integer; const AToken: TPasToken);
     procedure HandleInclude(AFileId: Integer; const AToken: TPasToken;
       const AArg: string);
+    procedure AddCondOpener(AFileId: Integer; const AToken: TPasToken);
+    procedure CheckCrossInclude(AFileId: Integer; const AToken: TPasToken;
+      ATop: Integer);
     procedure ResetSwitches;
     procedure ApplySwitches(const ABody: string);
     procedure ApplyLongSwitch(const AName, AArg: string);
@@ -479,7 +494,9 @@ const
     'Cannot evaluate $IF expression',
     '$IF needs semantic info (unknown leaves guessed False)',
     'Insertion form {$I %...%} is not supported',
-    '$POPOPT without $PUSHOPT'
+    '$POPOPT without $PUSHOPT',
+    'Conditional directive acts on a conditional opened outside this ' +
+      'include file'
   );
 
 implementation
@@ -872,6 +889,7 @@ begin
   FCondAnyTaken := TList<Boolean>.Create;
   FCondThisActive := TList<Boolean>.Create;
   FCondSeenElse := TList<Boolean>.Create;
+  FCondOpener := TList<TPasIncludeRef>.Create;
   ResetSwitches;
 end;
 
@@ -922,6 +940,7 @@ end;
 destructor TPasPreprocessor.Destroy;
 begin
   FDefines.Free;   // the per-run clone; FBaseDefines is caller-owned
+  FCondOpener.Free;
   FCondSeenElse.Free;
   FCondThisActive.Free;
   FCondAnyTaken.Free;
@@ -1033,6 +1052,8 @@ begin
   FCondAnyTaken.Clear;
   FCondThisActive.Clear;
   FCondSeenElse.Clear;
+  FCondOpener.Clear;
+  FCondBase := 0;
   FSwitchStack.Clear;
   FScopedEnums := False;         // dcc default; unit-local like the switches
   FScopedEnumsEvents.Clear;
@@ -1061,8 +1082,13 @@ begin
     FIncludePathStack.Clear;
   end;
 
-  if FCondThisActive.Count > 0 then
-    Diag(ppUnterminatedConditional, 0, Length(LStream.Source), 0);
+  // An entry an include opened was diagnosed at that include's end.
+  for LIdx := 0 to FCondOpener.Count - 1 do
+    if FCondOpener[LIdx].FileId = 0 then
+    begin
+      Diag(ppUnterminatedConditional, 0, Length(LStream.Source), 0);
+      Break;
+    end;
 
   // Terminate the visible stream with the main file's EOF sentinel.
   LEof.FileId := 0;
@@ -1307,6 +1333,7 @@ begin
     FCondAnyTaken.Add(LTaken);
     FCondThisActive.Add(LTaken);
     FCondSeenElse.Add(False);
+    AddCondOpener(AFileId, AToken);
   end
   else if LKind = pdIfndef then
   begin
@@ -1318,6 +1345,7 @@ begin
     FCondAnyTaken.Add(LTaken);
     FCondThisActive.Add(LTaken);
     FCondSeenElse.Add(False);
+    AddCondOpener(AFileId, AToken);
   end
   else if LKind = pdIf then
   begin
@@ -1329,6 +1357,7 @@ begin
     FCondAnyTaken.Add(LTaken);
     FCondThisActive.Add(LTaken);
     FCondSeenElse.Add(False);
+    AddCondOpener(AFileId, AToken);
   end
   else if LKind = pdIfopt then
   begin
@@ -1346,10 +1375,12 @@ begin
     FCondAnyTaken.Add(LTaken);
     FCondThisActive.Add(LTaken);
     FCondSeenElse.Add(False);
+    AddCondOpener(AFileId, AToken);
   end
   else if LKind = pdElseif then
   begin
     LTop := FCondThisActive.Count - 1;
+    CheckCrossInclude(AFileId, AToken, LTop);
     if LTop < 0 then
       Diag(ppUnbalancedElse, AFileId, AToken.Start, AToken.Len)
     else if FCondSeenElse[LTop] then
@@ -1368,6 +1399,7 @@ begin
   else if LKind = pdElse then
   begin
     LTop := FCondThisActive.Count - 1;
+    CheckCrossInclude(AFileId, AToken, LTop);
     if LTop < 0 then
       Diag(ppUnbalancedElse, AFileId, AToken.Start, AToken.Len)
     else
@@ -1386,6 +1418,7 @@ begin
   else if LKind = pdEndif then
   begin
     LTop := FCondThisActive.Count - 1;
+    CheckCrossInclude(AFileId, AToken, LTop);
     if LTop < 0 then
       Diag(ppUnbalancedEndif, AFileId, AToken.Start, AToken.Len)
     else
@@ -1394,6 +1427,9 @@ begin
       FCondAnyTaken.Delete(LTop);
       FCondThisActive.Delete(LTop);
       FCondSeenElse.Delete(LTop);
+      FCondOpener.Delete(LTop);
+      if LTop < FCondBase then
+        FCondBase := LTop;
     end;
   end
   // $DEFINE/$UNDEF are RECORDED whether active or not (a search must show a
@@ -1482,7 +1518,7 @@ procedure TPasPreprocessor.HandleInclude(AFileId: Integer;
   const AToken: TPasToken; const AArg: string);
 var
   LResolved, LKey: string;
-  LNewId, LRefIdx: Integer;
+  LNewId, LRefIdx, LBase, LIdx: Integer;
   LStream: TPasTokenStream;
   LRef: TPasIncludeRef;
 begin
@@ -1531,12 +1567,46 @@ begin
   LRef.IncludedFileId := LNewId;
   FIncludeRefs[LRefIdx] := LRef;
 
+  LBase := FCondBase;
+  FCondBase := FCondThisActive.Count;
   FIncludePathStack.Add(LKey);
   try
     ProcessFile(LNewId);
   finally
     FIncludePathStack.Delete(FIncludePathStack.Count - 1);
   end;
+  // A conditional the include opened and left open: dcc's E2280, at the
+  // include (F22). It stays open here and the includer may close it.
+  for LIdx := 0 to FCondOpener.Count - 1 do
+    if FCondOpener[LIdx].FileId = LNewId then
+      Diag(ppUnterminatedConditional, LNewId, FCondOpener[LIdx].Start,
+        FCondOpener[LIdx].Len);
+  if LBase < FCondThisActive.Count then
+    FCondBase := LBase
+  else
+    FCondBase := FCondThisActive.Count;
+end;
+
+procedure TPasPreprocessor.AddCondOpener(AFileId: Integer;
+  const AToken: TPasToken);
+var
+  LOpener: TPasIncludeRef;
+begin
+  LOpener := Default(TPasIncludeRef);
+  LOpener.FileId := AFileId;
+  LOpener.Start := AToken.Start;
+  LOpener.Len := AToken.Len;
+  FCondOpener.Add(LOpener);
+end;
+
+// An $ELSE/$ELSEIF/$ENDIF/$IFEND whose conditional (ATop) the includer of
+// this file opened: dcc 37.0 never pairs a directive across an include
+// boundary (F22). Acted on all the same - the tolerance of the unit header.
+procedure TPasPreprocessor.CheckCrossInclude(AFileId: Integer;
+  const AToken: TPasToken; ATop: Integer);
+begin
+  if (ATop >= 0) and (ATop < FCondBase) then
+    Diag(ppCrossIncludeConditional, AFileId, AToken.Start, AToken.Len);
 end;
 
 procedure TPasPreprocessor.ApplySwitches(const ABody: string);
