@@ -831,7 +831,7 @@ begin
 end;
 
 { unit Name [hints]; sections end.
-  program Name [params: F17]; [uses] declarations [begin ...] end.
+  program Name [(params)]; [uses] declarations [begin ...] end.
   package Name; requires/contains clauses end. }
 procedure TPrinter.UnitLike(ANode: Integer);
 var
@@ -855,10 +855,11 @@ begin
       LChild := Next(LChild);
     end;
   // A program's parameters (F17) stand before the `;`.
-  if LChild <> NIL_NODE then
-    Losses(ANode, Left(LChild))
-  else
-    Losses(ANode, T.Nodes[ANode].LastToken);
+  if (LChild <> NIL_NODE) and (Kind(LChild) = nkProgramParams) then
+  begin
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
   Kw(';', ANode);
   Decls(ANode, LChild, NIL_NODE);
   Kw('end', ANode);
@@ -1878,6 +1879,12 @@ begin
       UnitLike(ANode);
     nkUsesClause:
       UsesClause(ANode);
+    nkProgramParams:
+      begin
+        Kw('(', ANode);
+        ListFrom(C0, ',', ANode);
+        Kw(')', ANode);
+      end;
     nkUsesItem:
       begin
         Child(ANode, C0);

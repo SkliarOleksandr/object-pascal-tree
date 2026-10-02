@@ -60,7 +60,8 @@ type reference" is an nkIdent, nkMember or nkTypeArgs.
 | Kind | Reads as |
 |---|---|
 | nkUnit | `unit c0` [hints: nkDirective...] `;` interface, implementation, [initialization], [finalization] `end.` |
-| nkProgram, nkLibrary | `program` / `library c0` (parameters: see 4) `;` [uses] declarations [main nkBlock] `end.` |
+| nkProgram, nkLibrary | `program` / `library c0` [nkProgramParams] `;` [uses] declarations [main nkBlock] `end.` |
+| nkProgramParams | `( c0, ... )` - each a name that declares and refers to nothing; a library's is a parse error |
 | nkPackage | `package c0 ;` its requires / contains clauses `end.` |
 | nkUsesClause | `uses c0, ... ;` - in a package `requires` (Aux 1) or `contains` |
 | nkUsesItem | `c0 [in c1]` |
@@ -101,7 +102,7 @@ type reference" is an nkIdent, nkMember or nkTypeArgs.
 | nkVariantBranch | labels `, ... : (` fields - each nkVarDecl followed by `;` - [nkVariantPart] `)` |
 | nkGenericParams, nkGenericParam | `< c0; ... >`; names `, ...` [`:` nkConstraint `, ...`] |
 | nkConstraint | its child, or its head word (see 3) |
-| nkAttrGroup, nkAttribute | `[ c0, ... ]`; `c0 [( args, ... )]` |
+| nkAttrGroup, nkAttribute | `[ c0, ... ]`; `c0 [( args, ... )]` when c0 is a type reference, else c0 alone - any one expression, which dcc drops (W1074) |
 | nkRoutineBody | local declarations, then the nkBlock (`begin ... end`) or the nkAsmStmt |
 
 A member with Aux 1 - a routine, a property, a struct body's var section -
@@ -139,15 +140,13 @@ fact was missing from the tree and belongs in section 4 until it is added.
 
 ## 4. What the tree does not hold yet
 
-Each is a token only it holds, filed under its finding in the own-token table
-(class `loss`). A consumer that needs one reads the token, and knows it does -
+Nothing known: the last filed loss, a program's parameters (F17), is an
+nkProgramParams since v0.88.0. A finding of the kind - a token only it holds
+- is filed under its finding in the own-token table (class `loss`) until the
+tree holds it. A consumer that needs one reads the token, and knows it does -
 the printer does exactly that: it reads each such token where it stands
 among its node's children and marks the item as a loss, so its print is the
 same program, and T3 counts the losses per finding.
-
-| Finding | Not in the tree |
-|---|---|
-| F17 | program parameters, `program X(Input, Output);` |
 
 ## 5. Span quirks
 

@@ -212,8 +212,8 @@ end;
 
 { I5 must be able to fail, and the table must hold: the table parses; trees
   built by hand, over real tokens, break it on purpose - a token no rule
-  covers, a once-token owned twice - and the checker says so; a loss is
-  counted, not reported. }
+  covers, a once-token owned twice - and the checker says so; a fixed
+  finding counts no loss. }
 function BuildOwnTokenCases(APP: TPasPreprocessor): TPasCustomCases;
 begin
   Result := [
@@ -250,13 +250,15 @@ begin
           N(nkExprStmt, 4, 4, 1), N(nkIdent, 4, 4, 3)]), 1, 0,
           'IfStmt owning two then');
       end),
-    // The parser's own tree: the `program` parameters are F17,
-    // counted (a parameter's `const` was this case until F18 was fixed).
-    OwnCase('a loss is counted, not a violation',
+    // F17, the last filed loss, is no loss any more: the `program`
+    // parameters are an nkProgramParams - every token covered, none counted.
+    // No loss row is left for a counted case (this one counted F17's 3
+    // tokens until the fix, a parameter's `const` before F18).
+    OwnCase('F17: program parameters are nodes',
       function: TPasCheckResult
       begin
         Result := LossCase(APP,
-          'program P(Input); begin end.', 'F17', 3, '(');
+          'program P(Input, Output); begin end.', 'F17', 0, '');
       end),
     // F1, F2 and F10 are no loss any more: the directives are nkDirective
     // children, the `;` before a procedural type's run is its own token,

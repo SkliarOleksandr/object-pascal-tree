@@ -2480,8 +2480,9 @@ begin
   while (LPrev <> NIL_NODE) and
         (FModel.Tree.Nodes[LPrev].Kind in [nkIdent, nkMember]) do
     LPrev := FModel.Tree.Nodes[LPrev].Parent;
+  // So are a program's parameters (F17), names no scope has.
   if (LPrev <> NIL_NODE) and (FModel.Tree.Nodes[LPrev].Kind in
-    [nkUnit, nkProgram, nkLibrary, nkPackage]) then
+    [nkUnit, nkProgram, nkLibrary, nkPackage, nkProgramParams]) then
     Exit(ccNone);
   if (AInfo.DotBase <> NIL_NODE) or (AInfo.Kind = ckAfterDot) then
     Exit(ccMember);

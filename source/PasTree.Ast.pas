@@ -170,16 +170,26 @@ type
     nkGenericParam,
     nkConstraint,     // class/record/constructor/typeref
     nkAttrGroup,      // 19.3.2: [Attr(args), ...]
-    nkAttribute,      // 19.3.2; Aux (19.3.3) = amaNone/amaRef/amaVolatile/
+    nkAttribute,      // 19.3.2: name, [args] - or ONE expression of another
+                      // kind, which dcc drops (F32, see PasAttrIsName);
+                      // Aux (19.3.3) = amaNone/amaRef/amaVolatile/
                       // amaWeak/amaUnsafe, set by the parser -- see the
                       // ama* constants above
 
     nkRoutineBody,    // local decl sections + compound/asm block
     // Appended, not inserted: existing ordinals stay stable (see nkAnonParams).
-    nkNamedArg        // OLE-automation named argument `Name := Expr` in a call
+    nkNamedArg,       // OLE-automation named argument `Name := Expr` in a call
                       // argument list (4.10.1): name = child 0, value = child 1.
                       // The NAME is a dispatch parameter name, NOT a reference -
                       // nothing resolves it.
+    nkProgramParams   // 1.1.1: `program X(Input, Output);` - the legacy
+                      // parameter list after a program's name, one nkIdent
+                      // per name (F17). dcc takes plain identifiers only, at
+                      // least one, and they declare nothing and refer to
+                      // nothing (`program X(Foo); begin Foo := 1 end.` is
+                      // E2003, `program X(A, A);` compiles): nothing resolves
+                      // them. A `library` takes none (E2029, a parse
+                      // diagnostic; read all the same).
   );
 
   TPasNodeFlag = (
@@ -376,6 +386,13 @@ type
     yet (ParseAttrGroups, right after reading the identifier). }
   function PasAttrMagicAux(const ANameLower: string): Integer;
 
+  { The two forms of an nkAttribute (19.3.2, F32): a NAME - the first child
+    an nkIdent, nkMember or nkTypeArgs, the arguments after it - or ONE
+    expression of any other kind, `['abc']`, `[1 + 2]`, `[C + 1]`, `[(TA)]`,
+    which dcc drops with W1074 "Unknown custom attribute", looking up no name
+    in it. True for the first. }
+  function PasAttrIsName(const ATree: TPasTree; AAttr: Integer): Boolean;
+
 implementation
 
 uses
@@ -396,6 +413,15 @@ begin
     Result := amaAlign
   else
     Result := amaNone;
+end;
+
+function PasAttrIsName(const ATree: TPasTree; AAttr: Integer): Boolean;
+var
+  LName: Integer;
+begin
+  LName := ATree.Nodes[AAttr].FirstChild;
+  Result := (LName <> NIL_NODE) and
+    (ATree.Nodes[LName].Kind in [nkIdent, nkMember, nkTypeArgs]);
 end;
 
 { TPasTree }

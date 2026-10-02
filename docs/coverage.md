@@ -33,10 +33,6 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 
 ## 01-program-structure.md
 
-### 1.1.1 The program file
-- the legacy `(Input, Output)` parameter list's tokens
-  are skipped opaquely; no AST nodes are produced for them.
-
 ### 1.3.2 Conditional compilation
 - strict IFEND-vs-ENDIF pairing is not implemented -
   `$IFEND` and `$ENDIF` are treated as the same terminator unconditionally,
@@ -345,6 +341,19 @@ mis-pair.
 - no contextual signature inference for anonymous method
   literals; `Result` is typed only when the result type is written
   explicitly.
+
+## 19-rtti-attributes.md
+
+### 19.3.2 Applying attributes
+- an attribute is a name with its arguments or ONE expression (the
+  expression form dcc drops with W1074). dcc is wider still: after a name
+  that is no attribute class it skips tokens up to the `,` or `]` - `[C + + ]`
+  and `[C (]` compile - and PasTree reads an expression there, so token runs
+  that are no expression are parse errors. `[C < 1]` reads as type arguments.
+- a name attribute that names no attribute class is W1074 for dcc and
+  dropped, its arguments unchecked; here an undeclared one - `[Undeclared]`,
+  `[Undeclared(1)]` - is E2003, and a constant or a function (`[C]`,
+  `[F(1)]`) resolves as an ordinary name, silently.
 
 ## 20-memory-management.md
 

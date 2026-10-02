@@ -6874,6 +6874,10 @@ begin
     // magic-attribute name reused as an ordinary class collide exactly here.
     if LM.Tree.Nodes[LNode].Aux <> amaNone then
       Continue;
+    // An expression attribute (`[(TObject)]`) is W1074 and dropped, never
+    // E2010 (F32).
+    if not PasAttrIsName(LM.Tree, LNode) then
+      Continue;
     LRef := LM.Tree.Nodes[LNode].FirstChild;
     if LRef = NIL_NODE then
       Continue;

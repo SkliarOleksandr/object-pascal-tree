@@ -783,7 +783,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..238] of TPasCaseRow = (
+  DECL_CASES: array[0..239] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -2406,6 +2406,26 @@ const
      Expected: 'TypeSec(TypeDecl(AttrGroup(Attribute(Ident''A'') ' +
        'Attribute(Ident''B'' IntLit''1'')) Ident''T'' Ident''Integer''))';
      ExpectDiags: 0),
+    // F32 (dcc64 37.0, x-f32 B01-B60): dcc takes ANY expression as an
+    // attribute and drops it (W1074) - a literal, an operator, parentheses,
+    // a range, and a name that is no attribute class followed by more. One
+    // expression child; the name form keeps its shape, beside them too.
+    (Section: '19.3.2'; Name: 'F32: an attribute may be any expression';
+     Source: 'type TC = class [''abc''] procedure P; [1 + 2, C + 1] ' +
+       'procedure Q; [(TA)][-X, 1..2] procedure R; [TA(1), F(1) * 2, ' +
+       'C.X] procedure S; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(AttrGroup(Attribute(' +
+       'StrLit''''abc'''')) Routine''procedure''(Ident''P''#name) ' +
+       'AttrGroup(Attribute(BinaryOp''+''(IntLit''1'' IntLit''2'')) ' +
+       'Attribute(BinaryOp''+''(Ident''C'' IntLit''1''))) ' +
+       'Routine''procedure''(Ident''Q''#name) AttrGroup(Attribute(' +
+       'Paren(Ident''TA'')) Attribute(UnaryOp''-''(Ident''X'')) ' +
+       'Attribute(Range(IntLit''1'' IntLit''2''))) ' +
+       'Routine''procedure''(Ident''R''#name) AttrGroup(Attribute(' +
+       'Ident''TA'' IntLit''1'') Attribute(BinaryOp''*''(Call(Ident''F'' ' +
+       'IntLit''1'') IntLit''2'')) Attribute(Member(Ident''C'' ' +
+       'Ident''X''))) Routine''procedure''(Ident''S''#name))))';
+     ExpectDiags: 0),
     // F7: a group after a section that no declaration of the section
     // follows is the next member's - dcc64 37.0 hangs it on the routine or
     // property after it, across a visibility word too (RTTI-probed). It was
@@ -3159,6 +3179,30 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
       end;
   end;
 
+  { 1.1.1, F17 (dcc64 37.0, x-f17 P01-P21): a program's legacy parameters
+    are an nkProgramParams of plain names - any names, a repeat, an escaped
+    keyword, a comment between them; a `library` takes none (E2029, one
+    diagnostic, the list read all the same). }
+  function ProgramParamsCase(const AName, ASrc, AExpected: string;
+    ADiags: Integer): TPasCustomCase;
+  begin
+    Result.Section := '1.1.1';
+    Result.Name := AName;
+    Result.Run :=
+      function: TPasCheckResult
+      var
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+      begin
+        LPre := GPP.ProcessText('sample.dpr', ASrc);
+        LTree := TPasParser.ParseFile(LPre, LDiags);
+        Result := CheckDump(ASrc, AExpected, LTree.Dump(0), LDiags, ADiags);
+        ApplyVerdict(Result, ASrc, GCustomTreeVerdict, LPre, LTree, False,
+          Length(LDiags) = 0);
+      end;
+  end;
+
   { 6.10 + 1.3: an `asm` in a DEAD conditional branch must not leave the
     lexer in BASM mode for the live Pascal branch that shares the routine's
     `end` - the two-body routine shape of a fast-code library (an $IF on
@@ -3416,6 +3460,20 @@ var
 begin
   Result := [];
   Result := Result + [ProgramFileCase, UnitFileCase,
+    ProgramParamsCase('F17: program parameters are names',
+      'program Sample(Input, Output, Foo, Foo, &begin { c });'#13#10 +
+      'uses SysUtils;'#13#10'begin'#13#10'end.'#13#10,
+      'Program(Ident''Sample'' ProgramParams(Ident''Input'' ' +
+      'Ident''Output'' Ident''Foo'' Ident''Foo'' Ident''&begin'') ' +
+      'UsesClause(UsesItem(Ident''SysUtils'')) Block)', 0),
+    ProgramParamsCase('F17: a library takes none, read all the same',
+      'library Sample(A);'#13#10'begin'#13#10'end.'#13#10,
+      'Library(Ident''Sample'' ProgramParams(Ident''A'') Block)', 1),
+    ProgramParamsCase('F17: an empty list, then the program goes on',
+      'program Sample();'#13#10'var X: Integer;'#13#10'begin'#13#10 +
+      'end.'#13#10,
+      'Program(Ident''Sample'' ProgramParams VarSec''var''(' +
+      'VarDecl(Ident''X''#name Ident''Integer'')) Block)', 1),
     InitSecCase('F30: a unit''s legacy begin, as written',
       'begin'#13#10'  X := 1;'#13#10,
       'InitSec''begin''(Assign(Ident''X'' IntLit''1''))', 0),

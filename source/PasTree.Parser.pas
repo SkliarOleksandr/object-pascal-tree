@@ -159,6 +159,8 @@ type
     function AddName: Integer;
     function ParseQualifiedName: Integer;
     function ParseUsesClause: Integer;
+    function ParseProgramParams(ALibrary: Boolean): Integer;
+    function AttrIsName: Boolean;
     function ParseAttrGroups: Integer;
     procedure ParseHintsOpt(ANode: Integer);
     function ParseTypeExpr: Integer;
@@ -1803,9 +1805,91 @@ begin
   FB.SetLast(Result, FPos - 1);
 end;
 
+{ 1.1.1 (F17, dcc64 37.0 probed): the legacy parameter list of a program,
+  `program X(Input, Output);` - plain identifiers, at least one, commas
+  between (`()`, a number, a dotted name, `begin`, a typed `Input: Text` are
+  E2029; `&begin` is a name). They declare nothing and refer to nothing, so
+  each is a bare nkIdent no pass resolves. dcc gives a `library` none
+  (E2029 "';' expected"): one parse diagnostic, the list read all the same. }
+function TPasParser.ParseProgramParams(ALibrary: Boolean): Integer;
+begin
+  Result := FB.AddNode(nkProgramParams, NIL_NODE, FPos);
+  if ALibrary then
+    Error('";" expected');
+  Next; // (
+  while True do
+  begin
+    if CurKind <> tkIdentifier then
+    begin
+      Error('identifier expected');
+      Break;
+    end;
+    FB.Adopt(Result, FB.AddNode(nkIdent, NIL_NODE, FPos));
+    Next;
+    if CurKind = tkComma then
+      Next
+    else
+    begin
+      if CurKind <> tkRParen then
+        Error('"," or ")" expected');
+      Break;
+    end;
+  end;
+  // Recovery as before the list was read: on to the `)`, but no further
+  // than the header's `;`.
+  while not (CurKind in [tkRParen, tkSemicolon, tkEndOfFile]) do
+    Next;
+  if CurKind = tkRParen then
+    Next;
+  FB.SetLast(Result, FPos - 1);
+end;
+
+{ 19.3.2 (F32, dcc64 37.0 probed): whether the attribute at the cursor is
+  written as a name. dcc takes ANY expression as an attribute - `['abc']`,
+  `[1 + 2]`, `[-X]`, `[(TA)]`, `[1..2]`, `[inherited]`, and a name that is no
+  attribute class followed by more, `[C + 1]`, `[F(1) * 2]` - and drops it
+  with W1074, looking up no name in it (`[(Undeclared)]` compiles); an
+  attribute class allows its name and arguments only (`[TA + 1]` is E2029).
+  So the choice is syntactic: a name, dotted, its `(...)` arguments, then a
+  token that does not go on with an expression - else the attribute is one
+  expression. A `<` after the name is read as type arguments, as before (dcc
+  refuses those, E2029, and `[C < 1]` with them). Pure lookahead. }
+function TPasParser.AttrIsName: Boolean;
+const
+  EXPR_GOES_ON = [tkPlus, tkMinus, tkStar, tkSlash, tkEqual, tkNotEqual,
+    tkGreater, tkLessEqual, tkGreaterEqual, tkLParen, tkLBracket, tkDot,
+    tkDotDot, tkCaret, tkAnd, tkAs, tkDiv, tkIn, tkIs, tkMod, tkOr, tkShl,
+    tkShr, tkXor];
+var
+  LOff, LDepth: Integer;
+begin
+  if not (CurKind in [tkIdentifier, tkString, tkFile]) then
+    Exit(False);
+  LOff := 1;
+  while (PeekKind(LOff) = tkDot) and
+        (PeekKind(LOff + 1) in [tkIdentifier, tkString, tkFile]) do
+    Inc(LOff, 2);
+  if PeekKind(LOff) = tkLParen then
+  begin
+    LDepth := 0;
+    repeat
+      case PeekKind(LOff) of
+        tkLParen, tkLBracket:
+          Inc(LDepth);
+        tkRParen, tkRBracket:
+          Dec(LDepth);
+        tkSemicolon, tkEndOfFile:
+          Exit(True); // cut short: the name form reports it, as before
+      end;
+      Inc(LOff);
+    until LDepth <= 0;
+  end;
+  Result := not (PeekKind(LOff) in EXPR_GOES_ON);
+end;
+
 function TPasParser.ParseAttrGroups: Integer;
 var
-  LAttr: Integer;
+  LAttr, LExpr, LRange: Integer;
   LNameLower: string;
 begin
   // 19.3.2: one node collecting all adjacent [ ... ] groups.
@@ -1818,17 +1902,36 @@ begin
     while (CurKind <> tkRBracket) and (CurKind <> tkEndOfFile) do
     begin
       LAttr := FB.AddNode(nkAttribute, NIL_NODE, FPos);
-      // 19.3.3: captured BEFORE ParseTypeRef consumes it -- simple-name
-      // only (none of the compiler-recognized names is ever realistically
-      // written dotted-qualified, so a qualified spelling just misses the
-      // tag rather than mis-tagging something else).
-      LNameLower := '';
-      if CurKind = tkIdentifier then
-        LNameLower := LowerCase(CurText);
-      FB.Adopt(LAttr, ParseTypeRef);
-      if CurKind = tkLParen then
-        ParseArgList(LAttr);
-      FB.SetAux(LAttr, PasAttrMagicAux(LNameLower));
+      if AttrIsName then
+      begin
+        // 19.3.3: captured BEFORE ParseTypeRef consumes it -- simple-name
+        // only (none of the compiler-recognized names is ever realistically
+        // written dotted-qualified, so a qualified spelling just misses the
+        // tag rather than mis-tagging something else).
+        LNameLower := '';
+        if CurKind = tkIdentifier then
+          LNameLower := LowerCase(CurText);
+        FB.Adopt(LAttr, ParseTypeRef);
+        if CurKind = tkLParen then
+          ParseArgList(LAttr);
+        FB.SetAux(LAttr, PasAttrMagicAux(LNameLower));
+      end
+      else
+      begin
+        // F32: one expression, a range too (`[1..2]` compiles).
+        LExpr := ParseExpression;
+        if CurKind = tkDotDot then
+        begin
+          LRange := FB.AddNode(nkRange, NIL_NODE, FPos);
+          FB.Adopt(LRange, LExpr);
+          Next;
+          FB.Adopt(LRange, ParseExpression);
+          FB.SetLast(LRange, FPos - 1);
+          LExpr := LRange;
+        end;
+        FB.Adopt(LAttr, LExpr);
+        FB.SetAux(LAttr, amaNone);
+      end;
       FB.SetLast(LAttr, FPos - 1);
       FB.Adopt(Result, LAttr);
       if CurKind = tkComma then
@@ -4125,12 +4228,8 @@ begin
         LP.Next;
         LP.FB.Adopt(LRoot, LP.ParseQualifiedName);
         if LP.CurKind = tkLParen then
-        begin
-          // Legacy program parameters: program X(Input, Output);
-          while not (LP.CurKind in [tkRParen, tkEndOfFile]) do
-            LP.Next;
-          LP.Expect(tkRParen, '")"');
-        end;
+          LP.FB.Adopt(LRoot,
+            LP.ParseProgramParams(LP.FB.Kind(LRoot) = nkLibrary));
         LP.Expect(tkSemicolon, '";"');
         if LP.CurKind = tkUses then
           LP.FB.Adopt(LRoot, LP.ParseUsesClause);

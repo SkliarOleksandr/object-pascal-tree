@@ -2359,6 +2359,20 @@ begin
         Collect(NextSib(FirstChild(ANode)), AScope);
       end;
 
+    nkAttribute:
+      // An attribute that is not a name - `['abc']`, `[C + 1]`, `[(TA)]` - is
+      // dcc's W1074, dropped with no name in it looked up (`[(Undeclared)]`
+      // compiles, F32): left unvisited, as nkNamedArg's name is.
+      if PasAttrIsName(FTree, ANode) then
+      begin
+        LChild := FirstChild(ANode);
+        while LChild <> NIL_NODE do
+        begin
+          Collect(LChild, AScope);
+          LChild := NextSib(LChild);
+        end;
+      end;
+
   else
     begin
       LChild := FirstChild(ANode);
@@ -3743,6 +3757,8 @@ begin
             Collect(LChild, FImpl);
             FInFinalization := False;
           end;
+        nkProgramParams:
+          ; // F17: names that declare nothing and refer to nothing (1.1.1)
       else
         Collect(LChild, FImpl);   // uses / decls / init / block
       end;

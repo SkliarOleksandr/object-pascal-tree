@@ -309,21 +309,23 @@ const
     set brings in. Two rules claiming one cell alike is a table error.
 
     The finding numbers are the plan's (local/PARSER-FIDELITY-PLAN.md, a
-    working paper): F17 program parameters. (F19, where a name list ends, is
-    derived since the names carry nfName - I6 checks the flag against the
-    separators; F3's `packed` since the type carries nfPacked, F4's class
-    modifiers since the class carries nfAbstract / nfSealed, F9's `class
-    threadvar` since the section carries nfThreadvar, F12's message and
-    F15's GUID literal since each is a child, F18's parameter modes since
-    the parameter carries nfVar / nfConst / nfOut, F16's numeric labels (an nkIntLit child), F13's external clauses
-    since each value carries nfExtName / nfExtIndex / nfExtDependency and the
-    directive nfDelayed. F14's exports clauses likewise (nfExtIndex / nfExtName
-    on the values, nfResident on the item). F1, F2, F10 and F11 are
-    gone too: every directive
-    of a procedural type, of a routine header before its `;` and of an
-    anonymous method is an nkDirective child, and the initializer after a
-    procedural type's directives is its declaration's.) }
-  OWN_RULE_TEXT: array[0..226] of string = (
+    working paper). No loss is filed: the last one, F17's program
+    parameters, is an nkProgramParams child. Each earlier one became a fact
+    of the tree - F19, where a name list ends, since the names carry nfName
+    (I6 checks the flag against the separators); F3's `packed` since the
+    type carries nfPacked, F4's class modifiers since the class carries
+    nfAbstract / nfSealed, F9's `class threadvar` since the section carries
+    nfThreadvar, F12's message, F15's GUID literal and F16's numeric labels
+    since each is a child, F18's parameter modes since the parameter carries
+    nfVar / nfConst / nfOut, F13's external clauses since each value carries
+    nfExtName / nfExtIndex / nfExtDependency and the directive nfDelayed,
+    F14's exports clauses likewise (nfExtIndex / nfExtName on the values,
+    nfResident on the item); F1, F2, F10 and F11 since every directive of a
+    procedural type, of a routine header before its `;` and of an anonymous
+    method is an nkDirective child, and the initializer after a procedural
+    type's directives is its declaration's. A new finding of the kind is
+    filed here as a `loss:F<n>` row, until the tree holds it. }
+  OWN_RULE_TEXT: array[0..228] of string = (
     // ---- leaves: the token is the node's own text ----
     'Ident | <ident> @words @keywords | once | leaf | the name as written; ' +
       'a reserved word only after a dot, as an operator name or as the ' +
@@ -446,8 +448,9 @@ const
       'root span ends on',
     'Program Library | class | - | derived | before a class method ' +
       'implementation, whose Routine has Aux 1',
-    'Program Library | ( ) , <ident> | - | loss:F17 | program parameters, ' +
-      '`program X(Input, Output);`, are skipped (coverage.md 1.1.1)',
+    'ProgramParams | ( | head once | derived | the kind',
+    'ProgramParams | ) | once | derived | the kind',
+    'ProgramParams | , | - | derived | between the names',
     '* | @any | when:afterend | insig | text after the final end.: dcc ' +
       'ignores it; the root ends on its first token',
     'UsesClause | uses requires contains | head once | derived | uses ' +

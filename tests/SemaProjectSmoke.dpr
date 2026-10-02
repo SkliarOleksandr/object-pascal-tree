@@ -5155,6 +5155,15 @@ begin
     'procedure AfterVar; begin end;'#10 +
     'procedure AfterConst; begin end;'#10 +
     'end.'#10);
+  // Parser fidelity F32: an attribute that is not a name is dcc's W1074,
+  // dropped with no name in it looked up - `[(TObject)]` is no E2010 and
+  // `[(Undeclared)]` no E2003 (dcc64 37.0, x-f32 A03, B44-B46).
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitAttrF32.pas'),
+    'unit UnitAttrF32;'#10'interface'#10 +
+    'type'#10'  TC = class'#10 +
+    '    [(TObject)] [(Undeclared1)] [-Undeclared2, ''x'' + Undeclared3]'#10 +
+    '    [1..2] procedure P;'#10'  end;'#10 +
+    'implementation'#10'procedure TC.P; begin end;'#10'end.'#10);
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
     GProj.AnalyzeDirectory(LDir);
@@ -5176,6 +5185,11 @@ begin
     Ok('19.3.2 (F7): a group after a var / const section is checked as the '
       + 'routine''s - both E2010s, as dcc',
       Assigned(LF7) and (DiagCount(LF7, 'E2010') = 2));
+    var LF32 := ModelByName('unitattrf32');
+    Ok('19.3.2 (F32): an expression attribute is neither checked nor '
+      + 'resolved - no E2010, no E2003, no parse error',
+      Assigned(LF32) and (DiagCount(LF32, 'E2010') = 0) and
+      (DiagCount(LF32, 'E2003') = 0) and (Length(LF32.Diags) = 0));
     // 19.3.3: a COMPILER-RECOGNIZED attribute is exempt from the ancestry
     // check, and the fixture makes that non-vacuous the way the real world
     // did -- a class literally named `Unsafe` that is NOT a TCustomAttribute

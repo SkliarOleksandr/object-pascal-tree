@@ -1691,6 +1691,10 @@ begin
     'unit NS.Sub.U; interface var Sub: Integer; implementation end.', 0);
   Expect('silent: a dotted program',
     'program NS.P; var P: Integer; begin end.', 0);
+  // F17 (dcc64 37.0, x-f17 P08 P13 P15): a program's parameters declare
+  // nothing - its own name among them, then a global of theirs.
+  Expect('silent: a program''s parameters',
+    'program P(Input, G, P); var G, Input: Integer; begin end.', 0);
   Expect('silent: an inline var of the finalization section',
     'unit U; interface implementation initialization finalization ' +
     'var U := 1; if U = 0 then ; end.', 0);
