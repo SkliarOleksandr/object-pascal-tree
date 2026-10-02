@@ -385,10 +385,11 @@ $opNames = @{
 # Site routine vs dump routine, both reduced to the source spelling: no
 # generic parameter lists (`TFoo<T>`) or arity marks (`TFoo`1`), no unit
 # prefix of an instantiation (`{Unit}TFoo<System.Integer>.Get`), operators
-# by their Delphi name, and no anonymous-method frame: the reader hangs a
-# routine's nested routines under an anonymous-method body that precedes it
-# in the file (`TFoo.M$ActRec.$0$Body.Inner` is TFoo.M's Inner - plan
-# section 11), and the body itself belongs to the routine it is written in.
+# by their Delphi name, and no anonymous-method frame: the body belongs to
+# the routine it is written in, and so does a routine nested in the body
+# (`TFoo.M$ActRec.$0$Body.Inner` is written in TFoo.M). On Win32 the
+# reader also still hangs a routine's own nested routines under such a body
+# when the body's record precedes it (F5: only Win64 names the owner).
 function Norm-Name([string] $Name) {
   $n = $Name -replace '^\{[^}]*\}', ''
   while ($n -match '<[^<>]*>') { $n = $n -replace '<[^<>]*>', '' }

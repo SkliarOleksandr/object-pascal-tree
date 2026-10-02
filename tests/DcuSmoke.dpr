@@ -128,7 +128,7 @@ const
     'procedure TCircle.Draw; begin inherited; end;',
     'procedure TCircle.Reset; begin end;',
     'function TBox<T>.Get: T; begin Result := FItem; end;');
-  FIXTURE_TAIL: array[0..7] of string = (
+  FIXTURE_TAIL: array[0..10] of string = (
     'procedure TBox<T>.Put(const AItem: T); begin FItem := AItem; end;',
     'procedure TShapeHelper.Ext; begin end;',
     'class operator TVec.Add(const A, B: TVec): TVec;',
@@ -136,6 +136,11 @@ const
     'function Sum(const A: array of Integer): Integer; begin Result := Length(A); end;',
     'procedure Log(const S: string; Level: Integer); begin end;',
     'procedure Log(const S: string; const Args: array of const); begin end;',
+    // F5: a nested routine beside an anonymous method, whose body record
+    // dcc writes between Nest's embedded list and Nest.
+    'procedure Nest(X: Integer);',
+    '  procedure Inner; begin end;',
+    'var P: TCallback; begin Inner; P := procedure(A: Integer) begin X := A; end; end;',
     'end.');
 
   USER_UNIT: array[0..29] of string = (
@@ -307,6 +312,19 @@ begin
   end;
 end;
 
+// Whether the routine AOwner of the unit's main list has ANested among its
+// embedded declarations.
+function NestedUnder(AUnit: TPasDcuUnit; const AOwner, ANested: string): Boolean;
+begin
+  Result := False;
+  for var LDecl in AUnit.Decls do
+    if (LDecl.Kind = dkRoutine) and (LDecl.Name = AOwner) and
+       (LDecl.Embedded <> nil) then
+      for var LItem in LDecl.Embedded do
+        if (LItem.Kind = dkRoutine) and (LItem.Name = ANested) then
+          Exit(True);
+end;
+
 procedure CheckReaderAndPrinter(const ADcuPath: string; APlatform: TPasDcuPlatform;
   const ATag: string);
 var
@@ -405,6 +423,13 @@ begin
       (LSrc.Contains('procedure Log(const S: string; Level: Integer = 3); overload;') or LSrc.Contains('procedure Log(const S: UnicodeString; Level: Integer = 3); overload;')));
     Ok(ATag + ': array of const',
       (LSrc.Contains('procedure Log(const S: string; const Args: array of const); overload;') or LSrc.Contains('procedure Log(const S: UnicodeString; const Args: array of const); overload;')));
+    // F5: each nested routine under its own routine, not under the
+    // anonymous method's body read before it - from the `$pdata$` names,
+    // which only Win64 has.
+    if APlatform = dcuWin64 then
+      Ok(ATag + ': a nested routine hangs under its owner, not an anonymous ' +
+        'method body', NestedUnder(LUnit, 'Nest', 'Inner') and
+        not NestedUnder(LUnit, 'Nest$ActRec.$0$Body', 'Inner'));
     Ok(ATag + ': implementation part is empty',
       LSrc.Contains(#13#10'implementation'#13#10#13#10'end.'));
     Ok(ATag + ': the generated source parses without a syntax diagnostic',

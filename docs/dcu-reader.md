@@ -444,18 +444,23 @@ is even possible, differs by kind.
   whole RTL sweep but is inference, not extraction - a generic never
   self-instantiated and never referencing its own parameter in a
   recoverable position would print wrong names.
-- **Nested routines of a routine that holds an anonymous method hang under
-  the wrong owner.** `ReadDeclList` gives an embedded list (`$6A`..`$6B`) to
-  the next procedure record, and there dcc writes the anonymous method's
-  body (`TFoo.M$ActRec.$0$Body`) between the list and `TFoo.M` itself - so
-  `M`'s `Inner` is read as the body's. The file does say whose it is: the
-  `$pdata$` names are mangled with the true owner (`...4TFoo1MEiiiE5Inner...`),
-  and the owner's address slot is numbered before the body's (the `-trace`
-  shows the body's record ADD `#78`, then `TFoo.M`'s FILL `#77`). Only the
-  nesting in
-  `PasTreeDcu -dump` is affected - the interface text never prints a nested
-  routine - and `tools\fidelity.ps1` names such a routine `TFoo.M.Inner`
-  regardless. Found 2026-09-25.
+- **On Win32, nested routines of a routine that holds an anonymous method
+  hang under the wrong owner.** `ReadDeclList` gives an embedded list
+  (`$6A`..`$6B`) to the next procedure record, and there dcc writes the
+  anonymous method's body (`TFoo.M$ActRec.$0$Body`) between the list and
+  `TFoo.M` itself; one list may also hold both `M`'s nested routines and
+  the body's own. On Win64 the reader puts each one back
+  (`ReattachEmbedded`): the `$pdata$` constant of a nested routine is
+  mangled as a local of its owner (`$pdata$_ZZN3A014TFoo1MEiE5InnerPv` -
+  `Inner` of `A01::TFoo::M(int)`), the owner's own is `$pdata$_Z` + that
+  owner part, and each points, by its first image-relative fixup, at its
+  routine's slot - overloads and nesting depth included. Win32 has no
+  `$pdata$`, and the slot numbers are no substitute (a routine's second
+  nested routine can take a slot after its owner's), so there the nesting
+  stays as read; so do a list's local types and constants on both. Only
+  `PasTreeDcu -dump` shows it - the interface text never prints a nested
+  routine - and `tools\fidelity.ps1` drops the body from a routine's name.
+  Found 2026-09-25, fixed for Win64 2026-10-02 (F5).
 
 **2. Not in the file; no read can recover it.**
 

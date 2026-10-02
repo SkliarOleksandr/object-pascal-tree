@@ -594,6 +594,7 @@ type
     // skipped tables
     procedure ReadFixups;
     procedure AssignDataRanges;
+    procedure ReattachEmbedded;
     procedure SkipCodeLines;
     procedure SkipLineRanges;
     procedure SkipStrucScope;
@@ -2400,6 +2401,105 @@ begin
   end;
 end;
 
+// F5: an embedded list ($6A..$6B) belongs to the procedure record after it
+// (ReadDeclList), but dcc writes an anonymous method's body record
+// (`TFoo.M$ActRec.$0$Body`) between the list of the routine holding it and
+// that routine - so `M`'s nested routines were read as the body's, and one
+// list can hold both (the body's own nested routine after `M`'s). On Win64
+// the file names each routine's true owner: the `$pdata$` constant of a
+// nested routine is mangled as a local of its owner,
+// `$pdata$_ZZ<owner>E<len><name>Pv`, the owner's own as `$pdata$_Z<owner>`,
+// and each points (its first image-relative fixup) at its routine's slot.
+// A nested routine whose named owner is another routine moves to that
+// routine's embedded list, ahead of what it had. Win32 has no `$pdata$`: its
+// nesting stays as read, and so do a list's types and constants - only a
+// routine says whose it is.
+procedure TPasDcuReader.ReattachEmbedded;
+var
+  LBySlot: TDictionary<Integer, string>;
+  LByName: TDictionary<string, Integer>;
+  // One move per nested routine read under the wrong routine.
+  LItems, LFroms: TList<TPasDcuDecl>;
+  LOwners: TList<Integer>;
+  LDecl, LOwner: TPasDcuDecl;
+  LFix, LIdx, LAt: Integer;
+  LName: string;
+
+  procedure Scan(ARoutine: TPasDcuDecl);
+  var
+    LJ, LSlot: Integer;
+    LE: TPasDcuDecl;
+    LN, LSuffix: string;
+  begin
+    if ARoutine.Embedded = nil then
+      Exit;
+    for LJ := 0 to ARoutine.Embedded.Count - 1 do
+    begin
+      LE := ARoutine.Embedded[LJ];
+      if LE.Kind <> dkRoutine then
+        Continue;
+      Scan(LE);
+      LSuffix := 'E' + IntToStr(Length(LE.Name)) + LE.Name + 'Pv';
+      if not LBySlot.TryGetValue(LE.Slot, LN) or
+         not LN.StartsWith('_ZZ') or not LN.EndsWith(LSuffix) then
+        Continue;
+      LN := '_Z' + Copy(LN, 4, Length(LN) - 3 - Length(LSuffix));
+      if LByName.TryGetValue(LN, LSlot) and (LSlot <> ARoutine.Slot) then
+      begin
+        LItems.Add(LE);
+        LFroms.Add(ARoutine);
+        LOwners.Add(LSlot);
+      end;
+    end;
+  end;
+
+begin
+  LBySlot := TDictionary<Integer, string>.Create;
+  LByName := TDictionary<string, Integer>.Create;
+  LItems := TList<TPasDcuDecl>.Create;
+  LFroms := TList<TPasDcuDecl>.Create;
+  LOwners := TList<Integer>.Create;
+  try
+    for LDecl in FUnit.Decls do
+      if (LDecl.Kind = dkTypedConst) and LDecl.Name.StartsWith('$pdata$_Z') and
+         (LDecl.DataSize > 0) then
+      begin
+        LFix := FUnit.PointerFixupAt(LDecl.DataOffset);
+        if LFix < 0 then
+          Continue;
+        LName := Copy(LDecl.Name, 8, MaxInt);
+        LBySlot.AddOrSetValue(FUnit.Fixups[LFix].Slot, LName);
+        LByName.AddOrSetValue(LName, FUnit.Fixups[LFix].Slot);
+      end;
+    if LBySlot.Count = 0 then
+      Exit;
+    for LDecl in FUnit.Decls do
+      if LDecl.Kind = dkRoutine then
+        Scan(LDecl);
+    // In file order, each owner's moved routines ahead of its own list.
+    LAt := 0;
+    for LIdx := 0 to LItems.Count - 1 do
+    begin
+      LOwner := FUnit.AddrAt(LOwners[LIdx]);
+      if (LOwner = nil) or (LOwner.Kind <> dkRoutine) then
+        Continue;
+      if (LIdx = 0) or (LOwners[LIdx - 1] <> LOwners[LIdx]) then
+        LAt := 0;
+      LFroms[LIdx].Embedded.Remove(LItems[LIdx]);
+      if LOwner.Embedded = nil then
+        LOwner.Embedded := TList<TPasDcuDecl>.Create;
+      LOwner.Embedded.Insert(LAt, LItems[LIdx]);
+      Inc(LAt);
+    end;
+  finally
+    LOwners.Free;
+    LFroms.Free;
+    LItems.Free;
+    LByName.Free;
+    LBySlot.Free;
+  end;
+end;
+
 procedure TPasDcuReader.SkipCodeLines;
 var
   LCount, LIdx: Integer;
@@ -2819,6 +2919,7 @@ begin
   if not (FDataBlockSeen and FFixupsSeen) then
     Error('Unknown record ended the declaration list');
   AssignDataRanges;
+  ReattachEmbedded;
 end;
 
 end.

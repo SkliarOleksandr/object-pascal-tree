@@ -177,9 +177,10 @@ minus before a member call - agree with dcc everywhere they were met.
 
 ### Findings still open
 
-| Id | Where | What |
-|---|---|---|
-| F5 | the DCU reader | a routine's nested routines listed under its anonymous method's body; only the dump's nesting |
+None. One is fixed for Win64 only: the DCU reader hung a routine's nested
+routines under an anonymous method's body written just before it (F5);
+Win64's `$pdata$` names say each one's owner and the reader follows them,
+while Win32's file says nothing of it (docs/dcu-reader.md, known gaps).
 
 Fixed on the way, each by its own reviewed change: a subrange bound that
 swallowed an initializer's `=` (F6, silent on a variable), directives of a
