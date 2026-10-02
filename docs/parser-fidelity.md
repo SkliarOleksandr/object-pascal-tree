@@ -180,7 +180,6 @@ minus before a member call - agree with dcc everywhere they were met.
 | Id | Where | What |
 |---|---|---|
 | F5 | the DCU reader | a routine's nested routines listed under its anonymous method's body; only the dump's nesting |
-| F8 | the parser, error mode | the root stops where a broken parse stopped, the rest of the file in no node |
 
 Fixed on the way, each by its own reviewed change: a subrange bound that
 swallowed an initializer's `=` (F6, silent on a variable), directives of a
@@ -245,6 +244,14 @@ rule; dcc refuses every such shape - an include that opens one and leaves it
 open is E2280 there, an include's `$ELSE` or `$ENDIF` on its includer's
 conditional is E2280 or a garbled includer. The tokens still follow the
 shared stack, and each crossing is a diagnostic where it happens.
+In a broken file the root stopped where the parse stopped (F8): one extra
+`end;` in a routine body, or a construct broken above it, closed the module
+there, and every declaration after it was in no node - no symbol, no
+outline, no navigation for the rest of the file. An `end` with no `.` after
+it and text behind it is now said as before (`"." expected`) and the section
+goes on; whatever a parse still leaves before the end of the file is one
+error node, so the root spans the file. Text after a real `end.` is dcc's to
+ignore and stays as it was.
 
 ## 5. The gate
 

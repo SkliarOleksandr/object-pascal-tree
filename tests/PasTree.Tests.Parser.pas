@@ -3455,11 +3455,86 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
       end;
   end;
 
+  { F8, error mode: an `end` with no `.` after it and text behind it is a
+    stray one - said once (`"." expected`, as before), and the section goes
+    on; whatever a parse leaves before the end of the file is one nkError
+    child, so the root always spans the file. AInterfaceOnly: the same text
+    in interface-only mode, which stops on purpose and must add nothing. }
+  function StrayEndCase(const AName, ASrc, AExpected: string;
+    ADiags: Integer; AInterfaceOnly: Boolean = False): TPasCustomCase;
+  begin
+    Result.Section := '1.1.2';
+    Result.Name := AName;
+    Result.Run :=
+      function: TPasCheckResult
+      var
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+      begin
+        LPre := GPP.ProcessText('u.pas', ASrc);
+        LTree := TPasParser.ParseFile(LPre, LDiags, AInterfaceOnly);
+        Result := CheckDump(ASrc, AExpected, LTree.Dump(0), LDiags, ADiags);
+        if Result.Passed and
+           not (AInterfaceOnly and (LTree.Nodes[0].Kind = nkUnit)) and
+           (LTree.Nodes[0].LastToken <> High(LPre.Visible)) then
+        begin
+          Result.Passed := False;
+          Result.Message := Format('  the root ends at token %d of %d',
+            [LTree.Nodes[0].LastToken, High(LPre.Visible)]) + sLineBreak;
+        end;
+      end;
+  end;
+
 var
   LPlatform: TPasPlatform;
 begin
   Result := [];
-  Result := Result + [ProgramFileCase, UnitFileCase,
+  Result := Result + [
+    StrayEndCase('F8: an extra end between routines - the next is read',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+      'procedure P;'#13#10'begin'#13#10'end;'#13#10'end;'#13#10 +
+      'procedure Q;'#13#10'begin'#13#10'end;'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec ImplementationSec(' +
+      'Routine''procedure''(Ident''P''#name RoutineBody(Block)) ' +
+      'Routine''procedure''(Ident''Q''#name RoutineBody(Block))))', 1),
+    StrayEndCase('F8: ...right before the unit''s end.',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+      'procedure P;'#13#10'begin'#13#10'end;'#13#10'end;'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec ImplementationSec(' +
+      'Routine''procedure''(Ident''P''#name RoutineBody(Block))))', 1),
+    StrayEndCase('F8: ...and before initialization',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+      'end;'#13#10'initialization'#13#10'  A := 1;'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec ImplementationSec ' +
+      'InitSec''initialization''(Assign(Ident''A'' IntLit''1'')))', 1),
+    StrayEndCase('F8: an extra end in initialization',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+      'initialization'#13#10'  A := 1;'#13#10'end;'#13#10'  B := 2;'#13#10 +
+      'finalization'#13#10'  C := 3;'#13#10'end;'#13#10'  D := 4;'#13#10 +
+      'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec ImplementationSec ' +
+      'InitSec''initialization''(Assign(Ident''A'' IntLit''1'') Assign(Ident''B'' ' +
+      'IntLit''2'')) FinalSec(Assign(Ident''C'' IntLit''3'') ' +
+      'Assign(Ident''D'' IntLit''4'')))', 2),
+    StrayEndCase('F8: an extra end in a program''s declarations and block',
+      'program P;'#13#10'procedure A;'#13#10'begin'#13#10'end;'#13#10 +
+      'end;'#13#10'procedure B;'#13#10'begin'#13#10'end;'#13#10 +
+      'begin'#13#10'  A;'#13#10'end;'#13#10'  B;'#13#10'end.'#13#10,
+      'Program(Ident''P'' Routine''procedure''(Ident''A''#name ' +
+      'RoutineBody(Block)) Routine''procedure''(Ident''B''#name ' +
+      'RoutineBody(Block)) Block(ExprStmt(Ident''A'') ExprStmt(Ident''B'')))', 2),
+    StrayEndCase('F8: `end;` at the end of the file - the rest is an Error',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10'end;'#13#10,
+      'Unit(Ident''U'' InterfaceSec ImplementationSec Error)', 1),
+    StrayEndCase('F8: no header - the Error root spans the file',
+      'procedure P;'#13#10'begin'#13#10'end;'#13#10, 'Error', 1),
+    StrayEndCase('F8: ...anything but a unit ignores it',
+      'procedure P;'#13#10'begin'#13#10'end;'#13#10, 'Error', 1, True),
+    StrayEndCase('F8: interface-only mode adds nothing',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10'end;'#13#10,
+      'Unit(Ident''U'' InterfaceSec)', 0, True),
+    ProgramFileCase, UnitFileCase,
     ProgramParamsCase('F17: program parameters are names',
       'program Sample(Input, Output, Foo, Foo, &begin { c });'#13#10 +
       'uses SysUtils;'#13#10'begin'#13#10'end.'#13#10,

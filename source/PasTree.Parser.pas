@@ -93,6 +93,7 @@ type
     function CurText: string;
     procedure Next;
     function Expect(AKind: TPasTokenKind; const AWhat: string): Boolean;
+    function SkipStrayEnd: Boolean;
     { Consumes a generic-parameter/argument list's closing '>'. The lexer has
       no grammar context, so `T, TT >=` (no space before `=`, a `class(...)`
       or another '=' right after) lexes as ONE tkGreaterEqual token - the same
@@ -379,6 +380,31 @@ begin
     Next
   else
     Error(AWhat + ' expected');
+end;
+
+// F8: an `end` where the module's `end.` belongs, with no `.` after it and
+// text behind it, is a stray one - an extra `end;` in a routine body, or a
+// construct broken above it. dcc stops there (`"." expected`); an editor's
+// parse says the same and goes on with the section, instead of leaving the
+// rest of the file in no node. `end;` or `end` at the end of the file is
+// left to the caller's Expect.
+function TPasParser.SkipStrayEnd: Boolean;
+var
+  LAfter: Integer;
+begin
+  Result := False;
+  if (CurKind <> tkEnd) or (PeekKind(1) = tkDot) then
+    Exit;
+  LAfter := 1;
+  if PeekKind(1) = tkSemicolon then
+    LAfter := 2;
+  if PeekKind(LAfter) = tkEndOfFile then
+    Exit;
+  Next;
+  Error('"." expected');
+  if CurKind = tkSemicolon then
+    Next;
+  Result := True;
 end;
 
 function TPasParser.IsWord(const AWord: string): Boolean;
@@ -4189,8 +4215,10 @@ begin
           LP.Expect(tkImplementation, '"implementation"');
           if LP.CurKind = tkUses then
             LP.FB.Adopt(LSec, LP.ParseUsesClause);
-          LP.ParseDeclSections(LSec, True,
-            [tkInitialization, tkFinalization, tkBegin, tkEnd]);
+          repeat
+            LP.ParseDeclSections(LSec, True,
+              [tkInitialization, tkFinalization, tkBegin, tkEnd]);
+          until not LP.SkipStrayEnd;
           LP.FB.SetLast(LSec, LP.FPos - 1);
           LP.FB.Adopt(LRoot, LSec);
           // initialization / finalization (or legacy begin-as-init)
@@ -4199,7 +4227,9 @@ begin
             LSec := LP.FB.AddNode(nkInitSec, NIL_NODE, LP.FPos);
             LIsBegin := LP.CurKind = tkBegin;
             LP.Next;
-            LP.ParseBlockUntil(LSec, [tkFinalization, tkEnd]);
+            repeat
+              LP.ParseBlockUntil(LSec, [tkFinalization, tkEnd]);
+            until not LP.SkipStrayEnd;
             LP.FB.SetLast(LSec, LP.FPos - 1);
             LP.FB.Adopt(LRoot, LSec);
             // A legacy `begin` has no finalization part (dcc: E2029 'END'
@@ -4211,7 +4241,9 @@ begin
           begin
             LSec := LP.FB.AddNode(nkFinalSec, NIL_NODE, LP.FPos);
             LP.Next;
-            LP.ParseBlockUntil(LSec, [tkEnd]);
+            repeat
+              LP.ParseBlockUntil(LSec, [tkEnd]);
+            until not LP.SkipStrayEnd;
             LP.FB.SetLast(LSec, LP.FPos - 1);
             LP.FB.Adopt(LRoot, LSec);
           end;
@@ -4235,12 +4267,16 @@ begin
           LP.FB.Adopt(LRoot, LP.ParseUsesClause);
         // A library may end with a bare `end.` - no main begin-block
         // (DUnit's testXpgenLib.dpr: exports ...; end.)
-        LP.ParseDeclSections(LRoot, True, [tkBegin, tkEnd]);
+        repeat
+          LP.ParseDeclSections(LRoot, True, [tkBegin, tkEnd]);
+        until not LP.SkipStrayEnd;
         if LP.CurKind = tkBegin then
         begin
           LSec := LP.FB.AddNode(nkBlock, NIL_NODE, LP.FPos);
           LP.Next;
-          LP.ParseBlockUntil(LSec, [tkEnd]);
+          repeat
+            LP.ParseBlockUntil(LSec, [tkEnd]);
+          until not LP.SkipStrayEnd;
           LP.FB.SetLast(LSec, LP.FPos - 1);
           LP.FB.Adopt(LRoot, LSec);
         end;
@@ -4299,6 +4335,26 @@ begin
       LP.Error('unit, program, library or package expected');
       LRoot := LP.FB.AddNode(nkError, NIL_NODE, 0);
     end;
+  end;
+  // F8: the root spans the file. A parse that stopped short of the
+  // module's `end.` - no header, a clause cut short, an `end` with text
+  // after it - leaves the rest to one nkError child (the root's own tokens
+  // when the root is the error). Text after a real `end.` is dcc's to
+  // ignore and stays as it was: the root takes its first token only.
+  // A unit's interface-only parse stops on purpose (anything else ignores
+  // the flag, and must: the two parses are then one tree).
+  if not (AInterfaceOnly and (LP.FB.Kind(LRoot) = nkUnit)) and
+     (LP.FPos < LP.FLast) and not ((LP.FPos >= 2) and
+     (LP.FSrc.VisibleToken(LP.FPos - 1).Kind = tkDot) and
+     (LP.FSrc.VisibleToken(LP.FPos - 2).Kind = tkEnd)) then
+  begin
+    if LP.FB.Kind(LRoot) <> nkError then
+    begin
+      LSec := LP.FB.AddNode(nkError, NIL_NODE, LP.FPos);
+      LP.FB.SetLast(LSec, LP.FLast - 1);
+      LP.FB.Adopt(LRoot, LSec);
+    end;
+    LP.FPos := LP.FLast;
   end;
   LP.FB.SetLast(LRoot, LP.FPos);
   SetLength(LP.FDiags, LP.FDiagCount);
