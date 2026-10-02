@@ -612,6 +612,8 @@ type
     // implementation-section import cannot propagate a change further.)
     function UsesIsInterface(AId, AUseIdx: Integer): Boolean;
     procedure CrossResolve(AId: Integer);
+    procedure ReportMissingUnitMember(AId: Integer; AModel: TPasSemaModel;
+      AMember, AName, AUid: Integer);
     procedure CheckVisibility(AId, ANameNode, AMemMid, AMemSym: Integer);
     function StructEncloses(AMid, AOuter, AInner: Integer): Boolean;
     procedure RunVisibilityPass(AId: Integer);
@@ -11434,6 +11436,79 @@ begin
   end;
 end;
 
+{ 1.2.3 (F34, dcc64 37.0 probed, x-f34 Q01-Q32): a unit qualifier's missing
+  member is E2003 on the member - `System.Missing`, `ThisUnit.Missing`,
+  `System.SysUtils.Missing`, a type `System.TMissing`, an ancestor, a call -
+  and CrossResolve, which looks it up in the unit's interface, used to give up
+  silently. What a qualifier reaches besides the interface: every intrinsic
+  (`System.Length`, `System.SizeOf`, `System.Write`, `System.Exit`,
+  `System.Integer` all compile), and for the unit itself its implementation
+  too (`ThisUnit.ImplVar` compiles). Not reported where the verdict is not
+  ours yet: a node with no scope (a `uses` item, the unit's own name, an
+  expression attribute), a closure with an unresolved `uses`, a with body - a
+  name that reads as a unit qualifier there is a with member first, which
+  only the with pass decides - and a method body or a type declaration, where
+  an inherited member does the same. }
+procedure TPasSemaProject.ReportMissingUnitMember(AId: Integer;
+  AModel: TPasSemaModel; AMember, AName, AUid: Integer);
+var
+  LKey: TSemaKey;
+  LVis: TPasVisibleToken;
+  LScope, LUp, LMatch: Integer;
+begin
+  if not AModel.AllUsesResolved then
+    Exit;
+  if (AName >= Length(AModel.NodeScope)) or
+     (AModel.NodeScope[AName] = NIL_SCOPE) then
+    Exit;
+  // A segment inside a longer unit qualifier: `Types` in `System.Types.TSize`,
+  // `Generics` in `System.Generics.Collections.TList` - the chain's longest
+  // unit prefix covers AMember.
+  if QualifierUnitAt(AId, AMember, LMatch) >= 0 then
+  begin
+    LUp := AMember;
+    while LUp <> NIL_NODE do
+    begin
+      if LUp = LMatch then
+        Exit;
+      LUp := AModel.Tree.Nodes[LUp].Parent;
+      if (LUp <> NIL_NODE) and (AModel.Tree.Nodes[LUp].Kind <> nkMember) then
+        Break;
+    end;
+  end;
+  // A reserved word after the dot is a keyword type: `System.string`,
+  // `System.file` (B.11).
+  LVis := AModel.Tree.Source.Visible[AModel.Tree.Nodes[AName].FirstToken];
+  if AModel.Tree.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex].Kind <>
+     tkIdentifier then
+    Exit;
+  LKey := PasNodeKey(AModel.Tree, AName);
+  if FSeedModel.Resolve(FSeedScope, LKey) <> NIL_SYM then
+    Exit;
+  // The unit itself: the scope chain of the use, which holds its
+  // implementation's declarations.
+  LScope := AModel.NodeScope[AMember];
+  if (AUid = AId) and (LScope <> NIL_SCOPE) and
+     (AModel.Resolve(LScope, LKey) <> NIL_SYM) then
+    Exit;
+  LUp := AModel.Tree.Nodes[AMember].Parent;
+  while LUp <> NIL_NODE do
+  begin
+    if AModel.Tree.Nodes[LUp].Kind = nkWithStmt then
+      Exit;
+    LUp := AModel.Tree.Nodes[LUp].Parent;
+  end;
+  // Likewise in a method body or a type declaration: an inherited member
+  // shadows a unit name (`Printers.Count` in a descendant of a class with a
+  // `Printers` property, under `uses Printers`), and inherited members are
+  // bound only after this pass - by FindMemberX, which reads other models'
+  // maps. Not judged there.
+  if (StructSymOfNode(AModel, AMember) <> NIL_SYM) or
+     (DeclStructsOfNode(AModel, AMember) <> nil) then
+    Exit;
+  EmitE2003(AModel, AName, AId);
+end;
+
 procedure TPasSemaProject.CrossResolve(AId: Integer);
 var
   LModel: TPasSemaModel;
@@ -11483,7 +11558,9 @@ begin
               begin
                 LExt.UnitId := LUid; LExt.Sym := LSym;
                 LModel.ExtRefMap.Add(LName, LExt);
-              end;
+              end
+              else
+                ReportMissingUnitMember(AId, LModel, LNode, LName, LUid);
             end;
           end
           else if LHead = NIL_SYM then
@@ -11520,7 +11597,9 @@ begin
               begin
                 LExt.UnitId := LUid; LExt.Sym := LSym;
                 LModel.ExtRefMap.Add(LName, LExt);
-              end;
+              end
+              else
+                ReportMissingUnitMember(AId, LModel, LNode, LName, LUid);
             end;
           end;
         end;

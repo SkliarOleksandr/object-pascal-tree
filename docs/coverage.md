@@ -33,6 +33,13 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 
 ## 01-program-structure.md
 
+### 1.2.3 Qualified name resolution
+- a unit qualifier's missing member (`System.Missing`, `ThisUnit.Missing`) is
+  E2003 except inside a `with` body, a method body or a type declaration: a
+  name that reads as a unit qualifier there may be a with member or an
+  inherited member, which only later passes decide, so the verdict is not
+  given. dcc reports those too.
+
 ### 1.3.2 Conditional compilation
 - strict IFEND-vs-ENDIF pairing is not implemented -
   `$IFEND` and `$ENDIF` are treated as the same terminator unconditionally,
@@ -353,8 +360,8 @@ mis-pair.
 - a name attribute that names no attribute class is W1074 for dcc and
   dropped; PasTree reports no warning. As dcc, it gives no E2003 for a name
   that starts with an undeclared identifier nor in the arguments of one
-  naming no type (`[C(Undeclared)]`); a unit qualifier's missing member
-  (`[System.Undeclared]`, E2003 for dcc) is missed, as it is everywhere.
+  naming no type (`[C(Undeclared)]`); a unit qualifier's missing member is
+  E2003 (`[System.Undeclared]`), within the limits of 1.2.3.
 
 ## 20-memory-management.md
 

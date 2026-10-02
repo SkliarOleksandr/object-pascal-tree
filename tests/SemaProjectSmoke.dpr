@@ -5166,10 +5166,9 @@ begin
     'implementation'#10'procedure TC.P; begin end;'#10'end.'#10);
   // F33: where dcc says W1074 instead of E2003 - a name that starts with an
   // undeclared identifier, the arguments of one naming no type (a constant,
-  // a function); an attribute class's arguments stay E2003. (A unit
-  // qualifier's missing member, `[System.Undeclared]`, is E2003 for dcc and
-  // missed here, as `System.Undeclared` is anywhere - F34.) dcc64 37.0,
-  // x-f33 U01-U26.
+  // a function); an attribute class's arguments stay E2003 (and a unit
+  // qualifier's missing member, `[System.Undeclared]` - F34 below). dcc64
+  // 37.0, x-f33 U01-U26.
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitAttrF33.pas'),
     'unit UnitAttrF33;'#10'interface'#10 +
     'type'#10'  TA33 = class(TCustomAttribute) end;'#10 +
@@ -5227,6 +5226,53 @@ begin
     Ok('19.3.3: [unsafe] is exempt even when a non-attribute class named '
       + 'Unsafe is in scope -- dcc matches magic attributes by name, not by '
       + 'lookup', not DiagHasText(LAnc, 'E2010', 'Unsafe'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- F34 (1.2.3): a unit qualifier's missing member is E2003 on the
+  // member (dcc64 37.0, x-f34 Q01-Q32) - a used unit, System, the unit
+  // itself, a type position. Not reported: what the qualifier does reach
+  // besides the interface (an intrinsic through System, the unit's own
+  // implementation), a `uses` item, and a qualifier an inherited member
+  // shadows in a method (`LibQ.Count` below, LibQ a property of the
+  // ancestor). ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_unitqual');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10'  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'LibQ.pas'),
+    'unit LibQ;'#10'interface'#10'var'#10'  X: Integer;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UseQ.pas'),
+    'unit UseQ;'#10'interface'#10'uses LibQ;'#10 +
+    'type'#10'  TCnt = class Count: Integer; end;'#10 +
+    '  TB = class FL: TCnt; property LibQ: TCnt read FL; end;'#10 +
+    '  TD = class(TB) procedure M; end;'#10 +
+    'var'#10'  V: System.TMissing4;'#10 +
+    'implementation'#10 +
+    'var'#10'  ImplVar: Integer;'#10 +
+    'procedure TD.M; var I: Integer; begin I := LibQ.Count; end;'#10 +
+    'procedure R;'#10'var I: Integer; S: string;'#10'begin'#10 +
+    '  I := LibQ.X; I := LibQ.Missing1; I := System.Missing2;'#10 +
+    '  I := UseQ.ImplVar; I := UseQ.Missing3; I := System.Length(S);'#10 +
+    'end;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    var LUseQ := ModelByName('useq');
+    Ok('1.2.3 (F34): a unit qualifier''s missing member is E2003, the ' +
+      'members it does reach and a shadowed qualifier are not',
+      Assigned(LUseQ) and (DiagCount(LUseQ, 'E2003') = 4) and
+      DiagHasText(LUseQ, 'E2003', '''Missing1''') and
+      DiagHasText(LUseQ, 'E2003', '''Missing2''') and
+      DiagHasText(LUseQ, 'E2003', '''Missing3''') and
+      DiagHasText(LUseQ, 'E2003', '''TMissing4'''));
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then
