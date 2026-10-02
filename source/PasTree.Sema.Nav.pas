@@ -503,14 +503,8 @@ type
     function OvPropertyNamed(AMid, AStructSym: Integer;
       const ANameLower: string): Integer;
     function PropertyChain(ATMid, ASym: Integer): TArray<TPasExtRef>;
-    // A method rename's family (see PlanRename and RenameFamily).
-    function RenameFamily(ATMid, ASym: Integer;
-      out AMembers: TArray<TPasRenameFamilyMember>;
-      out AError: string): Boolean;
     function HasBareInherited(AMid, ASym: Integer): Boolean;
     procedure CollectReferencesOf(ATMid, ASym: Integer;
-      AHits: TList<TPasRefHit>; AAssignOnly: Boolean = False);
-    procedure CollectReferencesOfAll(const ASyms: TArray<TPasExtRef>;
       AHits: TList<TPasRefHit>; AAssignOnly: Boolean = False);
     // Find Assignments.
     function IsAssignTarget(LM: TPasSemaModel; ANode: Integer): Boolean;
@@ -904,6 +898,23 @@ type
       rule FindReferences follows). Gate the command on MethodAt, not on
       "the cursor is on an identifier". }
     function FindOverrides(ATMid, ASym: Integer): TArray<TPasOverrideHit>;
+    { The methods tied to method (ATMid, ASym) by name - its VMT slot, the
+      interface methods it implements and their implementations, a hiding
+      namesake reaching it by a bare `inherited;` (TPasRenameFamilyWhy) -
+      without the method itself. What a rename takes along (PlanRename), and
+      what a signature change must change with it: every tie is one dcc
+      checks by the parameter list too. False with AError where the ties
+      cannot be told by name: an overloaded name at a type of the family, a
+      slot whose root has no source here, or one a library introduced. }
+    function RenameFamily(ATMid, ASym: Integer;
+      out AMembers: TArray<TPasRenameFamilyMember>;
+      out AError: string): Boolean;
+    // The references of several symbols - FindReferences' scan, no
+    // implementation headers, form files or property chains - in one pass
+    // over the models, unsorted: a family of a few hundred methods searched
+    // one by one is that many passes.
+    procedure CollectReferencesOfAll(const ASyms: TArray<TPasExtRef>;
+      AHits: TList<TPasRefHit>; AAssignOnly: Boolean = False);
     { Find Implementations, part one: the cursor is on an INTERFACE method -
       the counterpart of MethodAt, and the Enabled test for that command.
       ATMid/ASym come back as the interface's own method symbol.
