@@ -337,24 +337,68 @@ uses entry seen from the interface, a unit the unit does not use - is wrong
 whatever dcc says: it is reported (`INVISIBLE`, each listed in sites.txt),
 not compiled. A name PasTree bound to nothing is counted (`UNBOUND`).
 
-What `tq` cannot see: the overload chosen INSIDE one unit's set and the unit
-of a set merged across units; a virtual or interface member's declaring type
-(the call goes through the slot); locals, parameters, `Result`, labels and
-generic parameters, which have no qualified form; members in a `with` body,
-in a class method, of an outer type, and the selector after a dot - the next
-step's (`TOwner(A).B`).
+Mode `tm` judges the MEMBERS the same way: every member reached after a dot
+is written through a hard cast to the type PasTree says declares it -
+`Owner(Base).Name`, `Owner(P^).Name` for a pointer the original dereferences
+implicitly; a default array property is spelled, `Owner(Base).Items[I]`; a
+name in a `with` body that a target's member answers is written through
+that target, `Owner(Target).Name`. dcc then looks the name up in the owner,
+so a member of another type - a descendant's namesake hiding it, the other
+target of two - changes the code or stops the compile. `tqm` runs both
+halves, `tms` is the member half's selftest: in each routine one member cast
+to the nearest ancestor declaring another field or routine of that name.
+The rules, each from a probe:
 
-As of 2026-10-02 (v0.90.0): the self-host 29/29 on Win64 and Win32 (37 438
-names rewritten); the 310 units of the Studio's Windows RTL package 304 on
-both platforms (about 363 000 names), the rest one unit that does not
-compile standalone, four units holding resolver findings and one
-(System.Threading) whose rewrite fails only as a whole, not yet
-localized; `tqs` over the
-same units 30 planted names in 11 units, each seen and localized alone. The
-findings (plan F35-F41): an interface name bound through an implementation
-uses entry; a reference through a type alias bound to the alias's target in
-a unit not used; dcc's choice between two aliases of one type not
-reproduced; a private member of another unit's ancestor taken for a bare
-name; an inherited member losing to a unit-level routine of the same name;
-the names of interface GUID clauses never bound; `Flush` missing from the
-builtins.
+- a cast naming a type the unit has not named yet adds an import record to
+  the `.dcu`, and one naming it earlier than the unit did reorders them -
+  the code unchanged. So every cast's type of another unit is named first,
+  by a preamble (a procedure whose locals name them) before the top-level
+  declaration holding the cast, in the ORIGINAL's compile as in every
+  rewrite's: the original side of `tm` is the rewrite with no site;
+- a class variable or method spelled through another type name imports that
+  type's class reference: a type base is left as written; so is a class
+  reference base (no named metaclass of the owner to cast to);
+- a record returned by a call takes no hard cast (a property read through a
+  getter does); a protected or private member of another unit's type does
+  not survive the cast to it (reached through a descendant the unit
+  declares, or from a method of one, it is legal; through the owner, E2362);
+- a cast in a generic's or an inline routine's body changes the stored body,
+  and so does a cast to an ancestor of a member that such a body reads
+  anywhere in the unit: neither is written;
+- in a unit whose text turns optimization on, a cast of a base that is no
+  plain name defeats dcc's reuse of the loaded value: only plain bases;
+- a `with` target is written only when it is a parameter, a local variable
+  or `Self`: a field or a global the `with` reads once into a temporary, the
+  spelling at every name.
+
+And one more for `tq`: a bare `Default(X)` in a nested type whose outer type
+has a member `Default` is the intrinsic only if the unit wrote a bare
+`Default(...)` before it - qualifying the earlier ones turns it into the
+member (dcc's lookup keeps a history; System.Threading). `Default` is left
+as written.
+
+What the rung cannot see: the overload chosen INSIDE one unit's set and the
+unit of a set merged across units; a virtual or interface member's
+declaring type (the call goes through the slot); the declaring type when it
+is higher than the one PasTree chose (the cast to a descendant still finds
+the ancestor's member); locals, parameters, `Result`, labels and generic
+parameters, which have no qualified form; members of generic types (the
+cast would need the instantiation), of helpers, after a type or a class
+reference, in stored bodies; members in a class method and of an outer type
+reached bare.
+
+As of 2026-10-03 (v0.91.0), `tqm` over the self-host is 29/29 on Win64 and
+Win32 (51 601 names rewritten, 14 163 more than `tq` alone); `tm` over the 310
+units of the Studio's Windows RTL package 308 on both platforms (12 117
+members), the rest the unit that does not compile standalone and one
+resolver finding; `tqm` 305, the four others the `tq` findings of before;
+`tms` 18 planted members in 12 units, each seen and localized alone. The
+findings `tm` added (plan F42-F46): the probe typing a member's base as an
+open generic parameter (`for var P in IntMap` over a nested alias of a
+generic record, WinRT statics) - 38 bindings PasTree's own typing
+contradicts, listed, not compiled; a member of `TThreadList<T>` bound in the
+non-generic `TThreadList`; `M^^` through an anonymous pointer to a pointer
+typed one dereference short; and 123 selectors PasTree binds to nothing -
+an element through a pointer to an array, a record field of a record field,
+a helper's member on a string element, an operator's result, a parameter of
+a nested record type.

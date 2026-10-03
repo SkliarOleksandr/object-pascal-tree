@@ -108,7 +108,26 @@ program PasTreeXform;
         across units (excluded-overload), a position with no qualified
         spelling (excluded-position); a name PasTree bound to nothing
         (unbound, each listed in sites.txt). The selector after a dot is
-        not judged here.
+        tm's.
+    tm  the resolver's MEMBERS judged (plan S15): every member reached
+        after a dot written through a hard cast to the type PasTree says
+        declares it - `Owner(Base).Name`, `Owner(P^).Name` for a pointer
+        dereferenced implicitly; a default array property spelled -
+        `Owner(Base).Items[I]`; a name in a with body bound to a target's
+        member written through that target - `Owner(Target).Name`. A
+        member of another type (a descendant's namesake hiding it, the
+        other target of two) changes the code or stops the compile. A
+        preamble names every cast's type of another unit first, in the
+        original's compile too (see TMPreamble). Not written, counted (see
+        TTMExcl): type and unit bases, class references, helpers, generic
+        or hidden owners, stored bodies, record call results, protected
+        members of another unit, members a stored body reads, untyped
+        bases; a member PasTree's own typing contradicts is listed
+        (mismatch).
+    tqm tq and tm together.
+    tms tm's selftest: in each routine ONE member cast to the nearest
+        ancestor declaring another field or routine of that name (see
+        TMWrongOwner) - which must DIFF or stop the compile.
     tqs tq's selftest (plan S14): in each routine ONE unit-level name
         written with a WRONG qualifier dcc accepts - another used unit's,
         or System's, variable or routine of that name (see
@@ -116,12 +135,14 @@ program PasTreeXform;
         compile to another .dcu or not at all.
 
   Usage:
-    PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2|t3|t3x|tq|tqs -out:<dir> [-p:<platform>]
+    PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2|t3|t3x|tq|tqs|tm|tqm|tms -out:<dir> [-p:<platform>]
                  [-D:X;Y]... [-Undef:X;Y]... [-I:<dir>[;<dir>]]...
                  [-sites:<ids>]
   -sites (ts, t1, t2, t3, t3x): only the sites with these ids take their edit - a
   comma list of ids and ranges, `1-40,57`; the ids are those of the full
   run, so sites.txt means the same in every run over the same unit.
+  `-sites:none` applies no site at all: tm's original side, its preamble
+  alone.
   -Undef takes names out of the define set after the platform's and -D's -
   with -D, a way to try another predefined set without rebuilding.
   -oracle: when a $IF of the unit asked what a bare preprocessor cannot
@@ -207,11 +228,47 @@ uses
   PasTree.Version in '..\source\PasTree.Version.pas';
 
 type
-  TXformMode = (xmT0, xmTS, xmT0F, xmT1, xmT2, xmT3, xmT3X, xmTQ, xmTQS);
+  TXformMode = (xmT0, xmTS, xmT0F, xmT1, xmT2, xmT3, xmT3X, xmTQ, xmTQS, xmTM,
+    xmTQM, xmTMS);
 
 const
   cModeNames: array[TXformMode] of string = ('t0', 'ts', 't0f', 't1', 't2',
-    't3', 't3x', 'tq', 'tqs');
+    't3', 't3x', 'tq', 'tqs', 'tm', 'tqm', 'tms');
+  // The modes that judge the resolver over the project analysis (S13-S15).
+  cQModes = [xmTQ, xmTQS, xmTM, xmTQM, xmTMS];
+type
+  // tm: why a member is left as written (the `excluded-<name>` of the sites
+  // line): a selector outside every body; one after a unit name, already
+  // qualified; after a type name (a class var or method spelled through
+  // another type imports that type's class reference, Q67); after a class
+  // reference (no named metaclass of the owner to cast to); a helper's
+  // member (no cast reaches it); an owner that is generic, declared inside a
+  // routine or anonymous, or a nested type another unit hides; a record
+  // returned by a call (E2089 on the cast, Q69); a base PasTree could not
+  // type; an owner in a unit no name at the site comes from; in a stored
+  // body (a generic's or an inline routine's: the cast changes the stored
+  // tree, Q81, Q82, Q84); a cast's first segment hidden at the site; an own
+  // owner declared further down; a with target that is no parameter,
+  // local variable or Self (a field or a global the with reads once into a
+  // temporary, the spelling again each time - System.Win.Registry);
+  // a position with no cast spelling (after `inherited`); a protected or
+  // private member of another unit's type (reached through a descendant
+  // the unit declares, or from a method of one: through the owner it is
+  // E2362); a member a stored body of the unit also reads (a cast to an
+  // ancestor before it changes that body's stored flags, probes P02, P03);
+  // in a unit whose text turns optimization on, a base that is no plain
+  // name (the cast defeats dcc's reuse of the loaded element, P04).
+  TTMExcl = (tmeOutside, tmeQualified, tmeTypeBase, tmeClassRef, tmeHelper,
+    tmeGeneric, tmeLocalType, tmeHidden, tmeRValue, tmeUntyped, tmeUnseen,
+    tmeStored, tmeShadowed, tmeForward, tmeWithTarget, tmePosition,
+    tmeProtected, tmeStoredUse, tmeOptimized);
+
+const
+  cTMExclNames: array[TTMExcl] of string = ('outside', 'qualified',
+    'typebase', 'classref', 'helper', 'generic', 'localtype', 'hidden',
+    'rvalue', 'untyped', 'unseen', 'caststored', 'castshadowed',
+    'castforward', 'withtarget', 'castposition', 'protected', 'storeduse',
+    'optimized');
   // t3: a print slot's replacement sorts after every insertion at its offset
   // - a `(` or a `begin` that opens there, an `end` closing before it.
   cSlotOrder = 100;
@@ -315,6 +372,28 @@ var
   // tqs: the mode, and the routines that already took their planted site.
   GQSelftest: Boolean;
   GQPlanted: TDictionary<string, Boolean>;
+  // tq, tm: which halves run - unit-level names and Self (tq, tqs, tqm),
+  // members reached after a dot, through a default array property or a with
+  // target (tm, tms, tqm); tms: the member half's selftest.
+  GQUnits, GQMembers, GQMemberSelftest: Boolean;
+  // tm: the probe every base expression is typed through, the members left
+  // as written by why (see TTMExcl), the bindings PasTree's own typing
+  // contradicts (each listed in sites.txt). A selector PasTree bound to
+  // nothing counts with tq's unbound names.
+  GQProbe: TPasXProbe;
+  GMExcl: array[TTMExcl] of Integer;
+  GMMismatch: Integer;
+  GMMismatchList: TStringList;
+  // tm: the type of every cast, of another unit, in first-use order - the
+  // preamble that imports them ahead of the unit's own code (see
+  // TMPreamble).
+  GMPreamble: TStringList;
+  // tm: the preamble's declarations by the top-level declaration they go
+  // before (see TMAnchor), the unit's text turns optimization on, and every
+  // member a stored body reads (model id shl 32 or symbol).
+  GMAnchors: TDictionary<Integer, string>;
+  GMOptimized: Boolean;
+  GMStoredUse: TDictionary<Int64, Boolean>;
 
 function VisOffset(AVis: Integer; out AFileId: Integer): Integer;
 var
@@ -1116,6 +1195,901 @@ begin
   end;
 end;
 
+function IsStoredBody(ARoutine: Integer): Boolean; forward;
+procedure CollectInlineNames(ANode: Integer); forward;
+
+{ tm: the node defining type symbol ASym of model AMid - the struct, alias
+  or other type expression after the name (TPasSemaProject.TypeDefNodeIn,
+  which is private, read the same way). NIL_NODE for anything else. }
+function TMTypeDef(AMid, ASym: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LName, LParent: Integer;
+begin
+  Result := NIL_NODE;
+  LM := GQProject.Model(AMid);
+  if LM.Symbols[ASym].Kind <> skType then
+    Exit;
+  LName := LM.Symbols[ASym].DeclNode;
+  if LName = NIL_NODE then
+    Exit;
+  if LM.Tree.Nodes[LName].Kind in [nkRecordType, nkClassType, nkInterfaceType,
+     nkObjectType, nkHelperType] then
+    Exit(LName);
+  LParent := LM.Tree.Nodes[LName].Parent;
+  if (LParent = NIL_NODE) or (LM.Tree.Nodes[LParent].Kind <> nkTypeDecl) then
+    Exit;
+  Result := LM.Tree.Nodes[LName].NextSibling;
+  while (Result <> NIL_NODE) and
+        (LM.Tree.Nodes[Result].Kind = nkGenericParams) do
+    Result := LM.Tree.Nodes[Result].NextSibling;
+end;
+
+{ tm: the spelling that names type ASym of model AMid from any unit that
+  sees it - `<unit.full.name>.TName`, a nested type through its outer
+  types, `unit.TOuter.TInner`. '' with AWhy when there is none a cast can
+  use: a generic type (the cast would need its arguments), one declared in
+  a routine or anonymous, a nested type of another unit declared outside its
+  public sections. }
+function TMTypeSpelling(AMid, ASym: Integer; out AWhy: TTMExcl): string;
+var
+  LU: TPasSemaModel;
+  LScope: Integer;
+begin
+  Result := '';
+  AWhy := tmeLocalType;
+  LU := GQProject.Model(AMid);
+  if (ASym = NIL_SYM) or (LU.Symbols[ASym].Kind <> skType) or
+     (LU.Symbols[ASym].DeclNode = NIL_NODE) or
+     (GQProject.Model(AMid).Tree.Nodes[LU.Symbols[ASym].DeclNode].Kind <>
+      nkIdent) then
+    Exit;
+  if sfGeneric in LU.Symbols[ASym].Flags then
+  begin
+    AWhy := tmeGeneric;
+    Exit;
+  end;
+  LScope := LU.Symbols[ASym].Scope;
+  if LScope = NIL_SCOPE then
+    Exit;
+  case LU.Scopes[LScope].Kind of
+    sckUnit, sckImplementation:
+      if LU.UnitNameLower <> '' then
+        Result := LU.UnitNameLower + '.' + LU.Symbols[ASym].Name;
+    sckStruct:
+      begin
+        if (AMid <> GQMid) and (LU.Symbols[ASym].Visibility in
+           [svStrictPrivate, svPrivate, svStrictProtected, svProtected]) then
+        begin
+          AWhy := tmeHidden;
+          Exit;
+        end;
+        Result := TMTypeSpelling(AMid, LU.Scopes[LScope].StructSym, AWhy);
+        if Result <> '' then
+          Result := Result + '.' + LU.Symbols[ASym].Name;
+      end;
+  end;
+end;
+
+{ tm: the type that declares member ASym of model AMid - the struct whose
+  member scope holds it. False for anything that is no struct's member. }
+function TMOwner(AMid, ASym: Integer; out AOwner: TSemaXType): Boolean;
+var
+  LU: TPasSemaModel;
+  LScope: Integer;
+begin
+  Result := False;
+  AOwner := XNil;
+  LU := GQProject.Model(AMid);
+  LScope := LU.Symbols[ASym].Scope;
+  if (LScope = NIL_SCOPE) or (LU.Scopes[LScope].Kind <> sckStruct) or
+     (LU.Scopes[LScope].StructSym = NIL_SYM) then
+    Exit;
+  AOwner := XPlain(AMid, LU.Scopes[LScope].StructSym);
+  Result := True;
+end;
+
+{ tm: the category of type AX through its alias links - a class, a pointer,
+  a class reference... - tcUnknown when there is no type. }
+function TMCategory(const AX: TSemaXType): TSemaTypeCat;
+var
+  LX: TSemaXType;
+begin
+  Result := tcUnknown;
+  if not XValid(AX) then
+    Exit;
+  LX := GQProject.CanonTypeX(AX);
+  if XValid(LX) then
+    Result := GQProject.Model(LX.UnitId).Symbols[LX.Sym].TypeCat;
+end;
+
+{ tm: is AOwner AX itself or one of its ancestors - a class's, an
+  interface's - through alias links? An instantiation frame is not compared:
+  the owner is the declaration. }
+function TMDescends(const AX, AOwner: TSemaXType): Boolean;
+var
+  LCur: TSemaXType;
+  LDepth: Integer;
+begin
+  Result := False;
+  LCur := AX;
+  for LDepth := 1 to 48 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LCur := GQProject.CanonTypeX(LCur);
+    if (LCur.UnitId = AOwner.UnitId) and (LCur.Sym = AOwner.Sym) then
+      Exit(True);
+    LCur := GQProject.AncestorOfX(LCur);
+  end;
+end;
+
+{ tm: is ANode, a base expression, a unit name or a prefix of one written
+  as a qualifier - `SysUtils`, `System.SysUtils`? }
+function TMUnitChain(ANode: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LText, LName: string;
+  LIdx: Integer;
+
+  function Prefix(const AUnit: string): Boolean;
+  begin
+    Result := SameText(AUnit, LText) or AUnit.StartsWith(LText + '.', True);
+  end;
+
+  function Chain(N: Integer): string;
+  begin
+    case GTree.Nodes[N].Kind of
+      nkIdent:
+        Result := GTree.NodeText(N).TrimLeft(['&']);
+      nkMember:
+        if (GTree.Nodes[N].FirstChild <> NIL_NODE) and
+           (GTree.Nodes[GTree.Nodes[N].FirstChild].NextSibling <> NIL_NODE) and
+           (GTree.Nodes[GTree.Nodes[GTree.Nodes[N].FirstChild].NextSibling].
+             Kind = nkIdent) then
+        begin
+          Result := Chain(GTree.Nodes[N].FirstChild);
+          if Result <> '' then
+            Result := Result + '.' + GTree.NodeText(
+              GTree.Nodes[GTree.Nodes[N].FirstChild].NextSibling).TrimLeft(['&']);
+        end
+        else
+          Result := '';
+    else
+      Result := '';
+    end;
+  end;
+
+begin
+  Result := False;
+  LText := Chain(ANode);
+  if LText = '' then
+    Exit;
+  LM := GQProject.Model(GQMid);
+  if Prefix(LM.UnitNameLower) or Prefix('system') or Prefix('sysinit') then
+    Exit(True);
+  for LIdx := 0 to High(LM.UsesList) do
+  begin
+    LName := LM.UsesList[LIdx].NameFull;
+    if Prefix(LName) then
+      Exit(True);
+  end;
+end;
+
+procedure TMExclude(AWhy: TTMExcl);
+begin
+  Inc(GMExcl[AWhy]);
+end;
+
+procedure TMMismatch(ANode: Integer; const AWhat, ARoutine: string);
+begin
+  Inc(GMMismatch);
+  GMMismatchList.Add(SpanText(GTree.Nodes[ANode].FirstToken,
+    GTree.Nodes[ANode].FirstToken) + #9 + GTree.NodeText(ANode) + #9 +
+    ARoutine + #9 + AWhat);
+end;
+
+{ tm: may member (AMid, ASym) be reached through a cast to its owner at
+  all? Not a protected or private member of another unit's type, and not
+  one a stored body of the unit reads (see TTMExcl). Counts the refusal. }
+function TMMemberCastable(AMid, ASym: Integer): Boolean;
+begin
+  Result := False;
+  if (AMid <> GQMid) and (GQProject.Model(AMid).Symbols[ASym].Visibility in
+     [svStrictPrivate, svPrivate, svStrictProtected, svProtected]) then
+  begin
+    TMExclude(tmeProtected);
+    Exit;
+  end;
+  if GMStoredUse.ContainsKey((Int64(AMid) shl 32) or Cardinal(ASym)) then
+  begin
+    TMExclude(tmeStoredUse);
+    Exit;
+  end;
+  Result := True;
+end;
+
+{ tm: GMStoredUse - every member a stored body (a generic's, an inline
+  routine's) of the subtree at ANode reads: the binding of each identifier
+  and default-property index node there that names a struct's member. }
+procedure TMCollectStored(ANode: Integer; AStored: Boolean);
+var
+  LChild, LMid, LSym, LScope: Integer;
+  LM: TPasSemaModel;
+  LExt: TPasExtRef;
+begin
+  if (GTree.Nodes[ANode].Kind = nkRoutine) and IsStoredBody(ANode) then
+    AStored := True;
+  if AStored and (GTree.Nodes[ANode].Kind in [nkIdent, nkIndex]) then
+  begin
+    LM := GQProject.Model(GQMid);
+    LMid := GQMid;
+    LSym := LM.RefMap[ANode];
+    if (LSym = NIL_SYM) and LM.ExtRefMap.TryGetValue(ANode, LExt) then
+    begin
+      LMid := LExt.UnitId;
+      LSym := LExt.Sym;
+    end;
+    if LSym <> NIL_SYM then
+    begin
+      LScope := GQProject.Model(LMid).Symbols[LSym].Scope;
+      if (LScope <> NIL_SCOPE) and
+         (GQProject.Model(LMid).Scopes[LScope].Kind = sckStruct) then
+        GMStoredUse.AddOrSetValue((Int64(LMid) shl 32) or Cardinal(LSym), True);
+    end;
+  end;
+  LChild := GTree.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    TMCollectStored(LChild, AStored);
+    LChild := GTree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+{ tm: may a cast to AOwner (spelled ASpelling) stand at ANode? The owner's
+  unit must be one a name there can come from, an own owner declared
+  already, the spelling's first segment not hidden there. Counts the
+  refusal. }
+function TMCastAllowed(ANode: Integer; const AOwner: TSemaXType;
+  const ASpelling: string): Boolean;
+var
+  LU: TPasSemaModel;
+begin
+  Result := False;
+  if not TQUnitVisible(ANode, AOwner.UnitId, False) then
+  begin
+    TMExclude(tmeUnseen);
+    Exit;
+  end;
+  LU := GQProject.Model(AOwner.UnitId);
+  if (AOwner.UnitId = GQMid) and
+     (GTree.Nodes[LU.Symbols[AOwner.Sym].DeclNode].FirstToken >
+      GTree.Nodes[ANode].FirstToken) then
+  begin
+    TMExclude(tmeForward);
+    Exit;
+  end;
+  if TQShadowed(ANode, ASpelling) then
+  begin
+    TMExclude(tmeShadowed);
+    Exit;
+  end;
+  Result := True;
+end;
+
+{ tm: the top-level declaration holding ANode, where its preamble goes (see
+  TMPreamble): the child of the implementation section (of a program's
+  root) it lies in, an attribute group before it included; for the
+  finalization section the initialization section - nothing may stand
+  between the two. }
+function TMAnchor(ANode: Integer): Integer;
+var
+  LParent, LPrev, LChild: Integer;
+begin
+  Result := ANode;
+  LParent := GTree.Nodes[Result].Parent;
+  while (LParent <> NIL_NODE) and not (GTree.Nodes[LParent].Kind in
+        [nkImplementationSec, nkUnit, nkProgram, nkLibrary]) do
+  begin
+    Result := LParent;
+    LParent := GTree.Nodes[Result].Parent;
+  end;
+  if LParent = NIL_NODE then
+    Exit;
+  LPrev := NIL_NODE;
+  LChild := GTree.Nodes[LParent].FirstChild;
+  while (LChild <> NIL_NODE) and (LChild <> Result) do
+  begin
+    if (GTree.Nodes[Result].Kind = nkFinalSec) and
+       (GTree.Nodes[LChild].Kind = nkInitSec) then
+      Exit(LChild);
+    LPrev := LChild;
+    LChild := GTree.Nodes[LChild].NextSibling;
+  end;
+  if (LPrev <> NIL_NODE) and (GTree.Nodes[LPrev].Kind = nkAttrGroup) then
+    Result := LPrev;
+end;
+
+{ tm: a cast at ANode names type ASpelling of unit AOwnerMid - the
+  preamble names it first, before ANode's top-level declaration, unless an
+  earlier preamble did or the type is the unit's own. }
+procedure TMNeedType(ANode: Integer; const ASpelling: string;
+  AOwnerMid: Integer);
+var
+  LAnchor: Integer;
+  LText: string;
+begin
+  if (AOwnerMid = GQMid) or (GMPreamble.IndexOf(ASpelling) >= 0) then
+    Exit;
+  GMPreamble.Add(ASpelling);
+  LAnchor := TMAnchor(ANode);
+  if not GMAnchors.TryGetValue(LAnchor, LText) then
+    LText := '';
+  GMAnchors.AddOrSetValue(LAnchor, LText + Format(' V%d: %s;',
+    [GMPreamble.Count, ASpelling]));
+end;
+
+{ tm: a site casting the base expression ABase to ASpelling -
+  `<ASpelling>(Base)` - with `^` inside the cast for a pointer the original
+  dereferences implicitly, and ATail after it (a default property's name).
+  The opening sorts before every other insertion at its token, an outer
+  cast (the longer base) first. The type joins the preamble when it is
+  another unit's. Dropped and counted when the base spans two files or lies
+  in a file included twice. }
+procedure AddCastSite(const AKind, ASpelling: string; ABase: Integer;
+  ADeref: Boolean; const ATail, AOps, ARoutine: string; AOwnerMid: Integer);
+var
+  LFirst, LLast, LFileA, LFileB: Integer;
+  LSite: TSite;
+begin
+  LFirst := GTree.NodeLeftmostVis(ABase);
+  LLast := GTree.Nodes[ABase].LastToken;
+  VisOffset(LFirst, LFileA);
+  VisOffset(LLast, LFileB);
+  if (LFileA <> LFileB) or GIncludedTwice[LFileA] then
+  begin
+    Inc(GDropped);
+    Exit;
+  end;
+  LSite := Default(TSite);
+  LSite.Kind := AKind;
+  LSite.Ops := AOps;
+  LSite.Span := SpanText(LFirst, LLast);
+  LSite.Routine := ARoutine;
+  LSite.Edit := ASpelling + '()' + ATail;
+  LSite.OpenVis := LFirst;
+  LSite.CloseVis := LLast;
+  LSite.OpenText := ASpelling + '(';
+  LSite.OpenOrder := -1 - LLast;
+  if ADeref then
+    LSite.CloseText := '^)' + ATail
+  else
+    LSite.CloseText := ')' + ATail;
+  LSite.CloseOrder := 0;
+  GSites.Add(LSite);
+  TMNeedType(ABase, ASpelling, AOwnerMid);
+end;
+
+{ tms: a WRONG owner for member (AMid, ASym) of AOwner - the nearest
+  ancestor of AOwner declaring a field or routine of that name that is
+  another entity: not one an `override` of the member continues (one VMT
+  slot, one code). '' when there is none, or none a cast can spell. }
+function TMWrongOwner(ANode, AMid, ASym: Integer;
+  const AOwner: TSemaXType; out AWrong: TSemaXType): string;
+var
+  LU: TPasSemaModel;
+  LAnc: TSemaXType;
+  LMid, LSym, LCtx, LChild, LDecl: Integer;
+  LWhy: TTMExcl;
+begin
+  Result := '';
+  AWrong := XNil;
+  LU := GQProject.Model(AMid);
+  if not (LU.Symbols[ASym].Kind in [skField, skRoutine]) then
+    Exit;
+  // An override shares its ancestor's slot.
+  LDecl := LU.Symbols[ASym].DeclNode;
+  if (LDecl <> NIL_NODE) and (LU.Tree.Nodes[LDecl].Parent <> NIL_NODE) and
+     (LU.Tree.Nodes[LU.Tree.Nodes[LDecl].Parent].Kind = nkRoutine) then
+  begin
+    LChild := LU.Tree.Nodes[LU.Tree.Nodes[LDecl].Parent].FirstChild;
+    while LChild <> NIL_NODE do
+    begin
+      if (LU.Tree.Nodes[LChild].Kind = nkDirective) and
+         SameText(LU.Tree.NodeText(LChild), 'override') then
+        Exit;
+      LChild := LU.Tree.Nodes[LChild].NextSibling;
+    end;
+  end;
+  LAnc := GQProject.AncestorOfX(AOwner);
+  if not XValid(LAnc) then
+    Exit;
+  if not GQProject.FindMemberX(GQMid, LAnc, LU.Symbols[ASym].NameLower, LMid,
+     LSym, LCtx) then
+    Exit;
+  if (LMid = AMid) and (LSym = ASym) then
+    Exit;
+  if GQProject.Model(LMid).Symbols[LSym].Kind <> LU.Symbols[ASym].Kind then
+    Exit;
+  // One dcc would accept: not another unit's hidden member (E2362).
+  if (LMid <> GQMid) and (GQProject.Model(LMid).Symbols[LSym].Visibility in
+     [svStrictPrivate, svPrivate, svStrictProtected, svProtected]) then
+    Exit;
+  if not TMOwner(LMid, LSym, AWrong) then
+    Exit;
+  Result := TMTypeSpelling(AWrong.UnitId, AWrong.Sym, LWhy);
+  if (Result <> '') and (not TQUnitVisible(ANode, AWrong.UnitId, False) or
+     TQShadowed(ANode, Result)) then
+    Result := '';
+end;
+
+{ tm: the member, bound to (AMid, ASym), reached through base expression
+  ABase - the selector of `Base.Name`, or a default array property's
+  `Base[I]` (ATail `.Name`). The site casts the base to the type PasTree
+  says declares the member (plan S15): dcc then looks the name up there, so
+  a member of another type - a descendant's namesake hiding it (Q13, Q78),
+  another field of the same name - changes the code or stops the compile.
+  Whatever the cast cannot say is counted (TTMExcl), and a binding PasTree's
+  own typing of the base contradicts is listed. }
+procedure TMMember(ASite, ABase, AMid, ASym: Integer; const ATail,
+  AKind, ARoutine: string; AStored: Boolean);
+var
+  LU: TPasSemaModel;
+  LOwner, LBX, LWrong: TSemaXType;
+  LSpelling: string;
+  LWhy: TTMExcl;
+  LDeref: Boolean;
+  LBMid, LBSym, LDef: Integer;
+begin
+  LU := GQProject.Model(AMid);
+  if not TMOwner(AMid, ASym, LOwner) then
+  begin
+    TMExclude(tmeLocalType);
+    Exit;
+  end;
+  // The base names a type or a unit, not a value.
+  if TMUnitChain(ABase) then
+  begin
+    TMExclude(tmeQualified);
+    Exit;
+  end;
+  if GTree.Nodes[ABase].Kind = nkInherited then
+  begin
+    TMExclude(tmePosition);
+    Exit;
+  end;
+  if GQProject.DesignatorSymX(GQMid, ABase, LBMid, LBSym) then
+    case GQProject.Model(LBMid).Symbols[LBSym].Kind of
+      skType, skBuiltinType:
+        if not (GTree.Nodes[ABase].Kind in [nkCall, nkIndex, nkDeref]) then
+        begin
+          TMExclude(tmeTypeBase);
+          Exit;
+        end;
+      skUnitRef:
+        begin
+          TMExclude(tmeQualified);
+          Exit;
+        end;
+    end
+  else
+  begin
+    LBMid := NIL_SYM;
+    LBSym := NIL_SYM;
+  end;
+  if AStored then
+  begin
+    TMExclude(tmeStored);
+    Exit;
+  end;
+  LDef := TMTypeDef(LOwner.UnitId, LOwner.Sym);
+  if (LDef <> NIL_NODE) and
+     (GQProject.Model(LOwner.UnitId).Tree.Nodes[LDef].Kind = nkHelperType) then
+  begin
+    TMExclude(tmeHelper);
+    Exit;
+  end;
+  LSpelling := TMTypeSpelling(LOwner.UnitId, LOwner.Sym, LWhy);
+  if LSpelling = '' then
+  begin
+    TMExclude(LWhy);
+    Exit;
+  end;
+  LBX := GQProject.WithTargetTypeX(GQMid, ABase, GQProbe);
+  if not XValid(LBX) then
+  begin
+    TMExclude(tmeUntyped);
+    Exit;
+  end;
+  LDeref := False;
+  case TMCategory(LBX) of
+    tcPointer:
+      begin
+        LBX := GQProject.PointeeX(GQProject.CanonTypeX(LBX));
+        LDeref := True;
+        if not XValid(LBX) then
+        begin
+          TMExclude(tmeUntyped);
+          Exit;
+        end;
+      end;
+    tcClassOf:
+      begin
+        TMExclude(tmeClassRef);
+        Exit;
+      end;
+  end;
+  if not TMDescends(LBX, LOwner) then
+  begin
+    TMMismatch(ASite, 'base ' + GQProject.XTypeText(LBX) + ' is no ' +
+      LSpelling, ARoutine);
+    Exit;
+  end;
+  // A record returned by a call takes no hard cast (E2089, Q69 - a generic
+  // method's too, `V.AsType<TRec>.F`); a variable, a field, an element, a
+  // property read through a getter does (Q70).
+  if not LDeref and (TMCategory(LOwner) = tcRecord) and
+     (not (GTree.Nodes[ABase].Kind in [nkIdent, nkMember, nkIndex, nkDeref]) or
+      (LBSym = NIL_SYM) or
+      (GQProject.Model(LBMid).Symbols[LBSym].Kind = skRoutine)) then
+  begin
+    TMExclude(tmeRValue);
+    Exit;
+  end;
+  if not TMMemberCastable(AMid, ASym) then
+    Exit;
+  if GMOptimized and (GTree.Nodes[ABase].Kind <> nkIdent) then
+  begin
+    TMExclude(tmeOptimized);
+    Exit;
+  end;
+  if not TMCastAllowed(ABase, LOwner, LSpelling) then
+    Exit;
+  if GQMemberSelftest then
+  begin
+    if GQPlanted.ContainsKey(ARoutine) then
+      Exit;
+    LSpelling := TMWrongOwner(ABase, AMid, ASym, LOwner, LWrong);
+    if LSpelling <> '' then
+    begin
+      GQPlanted.Add(ARoutine, True);
+      AddCastSite('planted', LSpelling, ABase, LDeref, ATail,
+        LU.Symbols[ASym].Name, ARoutine, LWrong.UnitId);
+    end;
+    Exit;
+  end;
+  AddCastSite(AKind, LSpelling, ABase, LDeref, ATail, LU.Symbols[ASym].Name,
+    ARoutine, LOwner.UnitId);
+end;
+
+{ tm: the binding of identifier (or, for a default array property, index)
+  node ANode - RefMap or ExtRefMap. }
+function TMBinding(ANode: Integer; out AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LExt: TPasExtRef;
+begin
+  LM := GQProject.Model(GQMid);
+  AMid := GQMid;
+  ASym := LM.RefMap[ANode];
+  if ASym <> NIL_SYM then
+    Exit(True);
+  Result := LM.ExtRefMap.TryGetValue(ANode, LExt);
+  if Result then
+  begin
+    AMid := LExt.UnitId;
+    ASym := LExt.Sym;
+  end;
+end;
+
+{ tm: the selector ANode of `Base.Name`. }
+procedure TMSelector(ANode: Integer; const ARoutine: string; AInBody,
+  AStored: Boolean);
+var
+  LMid, LSym, LScope, LBase: Integer;
+  LU: TPasSemaModel;
+begin
+  LBase := GTree.Nodes[GTree.Nodes[ANode].Parent].FirstChild;
+  if not TMBinding(ANode, LMid, LSym) then
+  begin
+    // A segment of a dotted unit name is no symbol's.
+    if TMUnitChain(GTree.Nodes[ANode].Parent) then
+      Exit;
+    if not AInBody then
+    begin
+      TMExclude(tmeOutside);
+      Exit;
+    end;
+    // A dynamic array type's `Create` is compiler magic - no declaration
+    // (`TBytes.Create`, `TArray<TGUID>.Create`).
+    if (GTree.Nodes[LBase].Kind = nkTypeArgs) or
+       (GQProject.DesignatorSymX(GQMid, LBase, LMid, LSym) and
+        (GQProject.Model(LMid).Symbols[LSym].Kind in [skType, skBuiltinType])) then
+    begin
+      TMExclude(tmeTypeBase);
+      Exit;
+    end;
+    Inc(GQUnbound);
+    GQUnboundList.Add(SpanText(GTree.Nodes[ANode].FirstToken,
+      GTree.Nodes[ANode].FirstToken) + #9 + GTree.NodeText(ANode) + #9 +
+      ARoutine + #9 + 'selector');
+    Exit;
+  end;
+  if not AInBody then
+  begin
+    TMExclude(tmeOutside);
+    Exit;
+  end;
+  LU := GQProject.Model(LMid);
+  LScope := LU.Symbols[LSym].Scope;
+  if LScope = NIL_SCOPE then
+  begin
+    TMExclude(tmeQualified);
+    Exit;
+  end;
+  case LU.Scopes[LScope].Kind of
+    sckStruct:
+      TMMember(ANode, LBase, LMid, LSym, '', 'member', ARoutine, AStored);
+    sckEnum:
+      TMExclude(tmeTypeBase);
+  else
+    TMExclude(tmeQualified);
+  end;
+end;
+
+{ tm: `Base[I]` - when PasTree read it through a default array property
+  (keyed on the nkIndex node, see TPasSemaProject.CrossType), the site
+  writes the property: `Owner(Base).Items[I]`. }
+procedure TMIndex(ANode: Integer; const ARoutine: string; AInBody,
+  AStored: Boolean);
+var
+  LMid, LSym: Integer;
+begin
+  if not TMBinding(ANode, LMid, LSym) then
+    Exit;
+  if GQProject.Model(LMid).Symbols[LSym].Kind <> skProperty then
+    Exit;
+  if not AInBody then
+  begin
+    TMExclude(tmeOutside);
+    Exit;
+  end;
+  TMMember(ANode, GTree.Nodes[ANode].FirstChild, LMid, LSym,
+    '.' + GQProject.Model(LMid).Symbols[LSym].Name, 'default', ARoutine,
+    AStored);
+end;
+
+{ tm: does a target of a with around ANode, open there, have a member named
+  ANameLower? Climbs as dcc looks: the innermost with first, its targets
+  from the last to the first; a target sees only the targets before it.
+  ATarget is the target that has it, AMid/ASym the member it found, AX the
+  target's type. AUncertain: a target on the way PasTree could not type - it
+  may have the name. }
+function TMWithMember(ANode: Integer; const ANameLower: string;
+  out ATarget, AMid, ASym: Integer; out AX: TSemaXType;
+  out AUncertain: Boolean): Boolean;
+var
+  LCur, LParent, LChild, LLast, LFrom, LIdx, LCtx: Integer;
+  LTargets: TArray<Integer>;
+begin
+  Result := False;
+  ATarget := NIL_NODE;
+  AX := XNil;
+  AUncertain := False;
+  LCur := ANode;
+  LParent := GTree.Nodes[LCur].Parent;
+  while LParent <> NIL_NODE do
+  begin
+    if GTree.Nodes[LParent].Kind = nkWithStmt then
+    begin
+      LTargets := nil;
+      LChild := GTree.Nodes[LParent].FirstChild;
+      LLast := LChild;
+      while (LLast <> NIL_NODE) and (GTree.Nodes[LLast].NextSibling <> NIL_NODE) do
+        LLast := GTree.Nodes[LLast].NextSibling;
+      while (LChild <> NIL_NODE) and (LChild <> LLast) do
+      begin
+        LTargets := LTargets + [LChild];
+        LChild := GTree.Nodes[LChild].NextSibling;
+      end;
+      LFrom := -1;
+      if LCur = LLast then
+        LFrom := High(LTargets)
+      else
+        for LIdx := 0 to High(LTargets) do
+          if LTargets[LIdx] = LCur then
+          begin
+            LFrom := LIdx - 1;
+            Break;
+          end;
+      for LIdx := LFrom downto 0 do
+      begin
+        AX := GQProject.WithTargetTypeX(GQMid, LTargets[LIdx], GQProbe);
+        if not XValid(AX) then
+          AUncertain := True;
+        if XValid(AX) and GQProject.FindMemberX(GQMid, AX, ANameLower, AMid,
+           ASym, LCtx) then
+        begin
+          ATarget := LTargets[LIdx];
+          Exit(True);
+        end;
+      end;
+    end;
+    LCur := LParent;
+    LParent := GTree.Nodes[LCur].Parent;
+  end;
+end;
+
+{ tm: identifier ANode, bound to member (AMid, ASym), in the body of a with.
+  When a target there has a member of its name, the name is that target's -
+  dcc's rule, and PasTree's own (FindInEnclosingWith) - and the site writes
+  the target and the owner before it: `Owner(Target).Name` (Q74; the wrong
+  target of two, Q75, DIFFs). The target must be a plain variable, Self or
+  a parameter whose name means the same inside the body. False when no
+  target has the name: the member is Self's, or none of the with's. A
+  target PasTree could not type counts the name excluded-with. }
+function TMWithName(ANode, AMid, ASym: Integer; const ARoutine: string;
+  AStored: Boolean): Boolean;
+var
+  LU: TPasSemaModel;
+  LTarget, LFMid, LFSym, LTMid, LTSym, LDef: Integer;
+  LX, LOwner, LDummy: TSemaXType;
+  LSpelling, LText: string;
+  LWhy: TTMExcl;
+  LDeref, LUncertain: Boolean;
+  LSite: TSite;
+  LFile: Integer;
+begin
+  LU := GQProject.Model(AMid);
+  if not TMWithMember(ANode, LU.Symbols[ASym].NameLower, LTarget, LFMid,
+     LFSym, LX, LUncertain) then
+  begin
+    // A target PasTree could not type may have the name: neither the
+    // target's nor Self's, then.
+    if LUncertain then
+    begin
+      Inc(GQWith);
+      Exit(True);
+    end;
+    Exit(False);
+  end;
+  Result := True;
+  if (LFMid <> AMid) or (LFSym <> ASym) then
+  begin
+    TMMismatch(ANode, 'the with target has ' +
+      GQProject.Model(LFMid).Symbols[LFSym].Name + ' of another type',
+      ARoutine);
+    Exit;
+  end;
+  if AStored then
+  begin
+    TMExclude(tmeStored);
+    Exit;
+  end;
+  // A parameter, a local variable or Self: the with evaluates its target
+  // once, the spelling at every name - a call or a getter would run twice,
+  // and a field or a global the with reads into a temporary is read again
+  // (System.Win.Registry, `with FRegIniFile do`: another code).
+  LText := '';
+  if GTree.Nodes[LTarget].Kind = nkIdent then
+  begin
+    LText := GTree.NodeText(LTarget);
+    if not SameText(LText, 'Self') then
+      if not GQProject.DesignatorSymX(GQMid, LTarget, LTMid, LTSym) or
+         (LTMid <> GQMid) or
+         not ((GQProject.Model(LTMid).Symbols[LTSym].Kind = skParam) or
+              ((GQProject.Model(LTMid).Symbols[LTSym].Kind = skVar) and
+               (GQProject.Model(LTMid).Symbols[LTSym].Scope <> NIL_SCOPE) and
+               (GQProject.Model(LTMid).Scopes[GQProject.Model(LTMid).
+                 Symbols[LTSym].Scope].Kind in [sckRoutine, sckBlock]))) then
+        LText := '';
+  end;
+  // The target's name must mean the target inside the body too.
+  if (LText <> '') and TMWithMember(ANode, LowerCase(LText.TrimLeft(['&'])),
+     LTMid, LFMid, LFSym, LDummy, LUncertain) or LUncertain then
+    LText := '';
+  if LText = '' then
+  begin
+    TMExclude(tmeWithTarget);
+    Exit;
+  end;
+  if not TMOwner(AMid, ASym, LOwner) then
+  begin
+    TMExclude(tmeLocalType);
+    Exit;
+  end;
+  LDef := TMTypeDef(LOwner.UnitId, LOwner.Sym);
+  if (LDef <> NIL_NODE) and
+     (GQProject.Model(LOwner.UnitId).Tree.Nodes[LDef].Kind = nkHelperType) then
+  begin
+    TMExclude(tmeHelper);
+    Exit;
+  end;
+  LSpelling := TMTypeSpelling(LOwner.UnitId, LOwner.Sym, LWhy);
+  if LSpelling = '' then
+  begin
+    TMExclude(LWhy);
+    Exit;
+  end;
+  LDeref := False;
+  case TMCategory(LX) of
+    tcPointer:
+      begin
+        LX := GQProject.PointeeX(GQProject.CanonTypeX(LX));
+        LDeref := True;
+      end;
+    tcClassOf:
+      begin
+        TMExclude(tmeClassRef);
+        Exit;
+      end;
+  end;
+  if not TMDescends(LX, LOwner) then
+  begin
+    TMMismatch(ANode, 'with target ' + GQProject.XTypeText(LX) + ' is no ' +
+      LSpelling, ARoutine);
+    Exit;
+  end;
+  if not TMMemberCastable(AMid, ASym) then
+    Exit;
+  if not TMCastAllowed(ANode, LOwner, LSpelling) then
+    Exit;
+  if GQMemberSelftest then
+    Exit;
+  VisOffset(GTree.Nodes[ANode].FirstToken, LFile);
+  if GIncludedTwice[LFile] then
+  begin
+    Inc(GDropped);
+    Exit;
+  end;
+  LSite := Default(TSite);
+  LSite.Kind := 'with';
+  LSite.Ops := GTree.NodeText(ANode);
+  LSite.Span := SpanText(GTree.Nodes[ANode].FirstToken,
+    GTree.Nodes[ANode].FirstToken);
+  LSite.Routine := ARoutine;
+  if LDeref then
+    LSite.OpenText := LSpelling + '(' + LText + '^).'
+  else
+    LSite.OpenText := LSpelling + '(' + LText + ').';
+  LSite.Edit := LSite.OpenText;
+  LSite.OpenVis := GTree.Nodes[ANode].FirstToken;
+  LSite.CloseVis := LSite.OpenVis;
+  LSite.OpenOrder := 0;
+  GSites.Add(LSite);
+  TMNeedType(ANode, LSpelling, LOwner.UnitId);
+end;
+
+{ tm: the preamble - before each top-level declaration of the
+  implementation (a routine, the initialization section) that holds a cast
+  naming a type of another unit the unit's preamble has not named yet, a
+  procedure whose locals name those types, on that declaration's first line,
+  into the original's compile as into every rewrite's (PasTreeXform
+  -sites:none). dcc records an imported type where the unit first names
+  it: a cast naming a type the unit did not name before adds an import
+  record (Q79: `TBaseM`, the code unchanged), and one naming it earlier
+  than the unit did reorders them. Named first, in both, they are one list
+  (Q65-Q79 SAME with it). One preamble per declaration, not one for the
+  unit: a line holds 1023 characters (F2069, System.Classes). }
+procedure TMPreamble;
+var
+  LPair: TPair<Integer, string>;
+  LIdx, LTok: Integer;
+begin
+  LIdx := 0;
+  for LPair in GMAnchors do
+  begin
+    Inc(LIdx);
+    // A class method's `class` lies before its node.
+    LTok := GTree.NodeLeftmostVis(LPair.Key);
+    if (LTok > 0) and (GPre.VisibleToken(LTok - 1).Kind = PasTree.Types.tkClass) then
+      Dec(LTok);
+    AddEdit(LTok, False, 0,
+      Format('procedure PasTreeTmImports%d; var%s begin end; ',
+        [LIdx, LPair.Value]));
+  end;
+end;
+
 { tq: a site that writes AQualifier before the identifier ANode. Dropped
   and counted in a file included twice. }
 procedure AddQualifySite(const AKind, AQualifier: string; ANode: Integer;
@@ -1152,7 +2126,7 @@ end;
   `<Unit>.Name`; a member of the method's own type in its body `Self.Name`.
   Every name left as written is counted by why (see the GQ counters). }
 procedure TQIdent(ANode: Integer; const ARoutine: string; AInBody,
-  AStored: Boolean; AInWith: Integer);
+  AStored, ACastStored: Boolean; AInWith: Integer);
 var
   LParent, LIndex, LTMid, LSym, LScope, LMeth, LOwner: Integer;
   LM, LTM: TPasSemaModel;
@@ -1177,10 +2151,13 @@ begin
       LSym := GTree.Nodes[LSym].NextSibling;
     end;
   end;
-  // The selector after a dot is bound by the type before it (S15's).
+  // The selector after a dot is bound by the type before it: tm's.
   if (LPk = nkMember) and (LIndex = 1) then
   begin
-    Inc(GQSelector);
+    if GQMembers then
+      TMSelector(ANode, ARoutine, AInBody, ACastStored)
+    else
+      Inc(GQSelector);
     Exit;
   end;
   // A declared name.
@@ -1230,6 +2207,8 @@ begin
       // A unit name's segment written as a qualifier is no symbol's.
       if TQUnitSegment(ANode) then
         Exit;
+      if not GQUnits then
+        Exit;
       Inc(GQUnbound);
       GQUnboundList.Add(SpanText(GTree.Nodes[ANode].FirstToken,
         GTree.Nodes[ANode].FirstToken) + #9 + GTree.NodeText(ANode) + #9 +
@@ -1271,6 +2250,8 @@ begin
   case LTM.Scopes[LScope].Kind of
     sckSystem, sckUnit, sckImplementation:
       begin
+        if not GQUnits then
+          Exit;
         // An old-style function result: the function's own name assigned to.
         if (LTM.Symbols[LSym].Kind = skRoutine) and (LPk = nkAssign) and
            (LIndex = 0) then
@@ -1279,8 +2260,14 @@ begin
           Exit;
         end;
         // `Slice` is compiler magic only as written: `System.Slice(A, N)` is
-        // E2193 (S14, System.Classes).
-        if SameText(LTM.Symbols[LSym].Name, 'Slice') and
+        // E2193 (S14, System.Classes). A bare `Default(...)` is a use dcc's
+        // later lookups depend on: in a nested type whose outer type has a
+        // member `Default`, a bare `Default(X)` is the intrinsic only after
+        // the unit wrote one before (S15, System.Threading 3514; probes
+        // s15\probes D01-D04) - qualifying the earlier ones turns it into the
+        // member, E2066.
+        if (SameText(LTM.Symbols[LSym].Name, 'Slice') or
+            SameText(LTM.Symbols[LSym].Name, 'Default')) and
            ((LTM.Scopes[LScope].Kind = sckSystem) or (LTMid = GQSystemMid)) then
         begin
           Inc(GQPosition);
@@ -1344,6 +2331,12 @@ begin
       end;
     sckStruct:
       begin
+        // A with target's member: tm's.
+        if GQMembers and AInBody and (AInWith > 0) and
+           TMWithName(ANode, LTMid, LSym, ARoutine, ACastStored) then
+          Exit;
+        if not GQUnits then
+          Exit;
         if not AInBody or
            not (LTM.Symbols[LSym].Kind in [skField, skVar, skRoutine,
              skProperty]) then
@@ -1351,7 +2344,8 @@ begin
           Inc(GQMember);
           Exit;
         end;
-        if AInWith > 0 then
+        // In a with body, unless tm found no target with the name.
+        if (AInWith > 0) and not GQMembers then
         begin
           Inc(GQWith);
           Exit;
@@ -1404,9 +2398,10 @@ end;
   in T1Walk; AInBody - inside a routine body or an initialization or
   finalization section, where a member reached bare is Self's; AInWith - the
   with statements around the node, whose targets' members a bare name may
-  be. }
+  be; AStored - in a generic's body (tq's Self rule), ACastStored - in a
+  generic's or an inline routine's (tm's cast rule). }
 procedure TQWalk(ANode: Integer; const ARoutine: string; AInBody,
-  AStored: Boolean; AInWith: Integer);
+  AStored, ACastStored: Boolean; AInWith: Integer);
 var
   LChild, LIndex: Integer;
   LRoutine: string;
@@ -1421,6 +2416,7 @@ begin
         if ARoutine <> '' then
           LRoutine := ARoutine + '.' + LRoutine;
         AStored := AStored or TQGenericBody(ANode);
+        ACastStored := ACastStored or AStored or IsStoredBody(ANode);
       end;
     nkRoutineBody:
       AInBody := True;
@@ -1435,7 +2431,10 @@ begin
         AInBody := True;
       end;
     nkIdent:
-      TQIdent(ANode, ARoutine, AInBody, AStored, AInWith);
+      TQIdent(ANode, ARoutine, AInBody, AStored, ACastStored, AInWith);
+    nkIndex:
+      if GQMembers then
+        TMIndex(ANode, ARoutine, AInBody, ACastStored);
     nkWithStmt:
       begin
         // `with A, B do S`: B is read in A's scope, S in both.
@@ -1443,7 +2442,8 @@ begin
         LChild := GTree.Nodes[ANode].FirstChild;
         while LChild <> NIL_NODE do
         begin
-          TQWalk(LChild, LRoutine, AInBody, AStored, AInWith + Ord(LIndex > 0));
+          TQWalk(LChild, LRoutine, AInBody, AStored, ACastStored,
+            AInWith + Ord(LIndex > 0));
           Inc(LIndex);
           LChild := GTree.Nodes[LChild].NextSibling;
         end;
@@ -1453,7 +2453,7 @@ begin
   LChild := GTree.Nodes[ANode].FirstChild;
   while LChild <> NIL_NODE do
   begin
-    TQWalk(LChild, LRoutine, AInBody, AStored, AInWith);
+    TQWalk(LChild, LRoutine, AInBody, AStored, ACastStored, AInWith);
     LChild := GTree.Nodes[LChild].NextSibling;
   end;
 end;
@@ -1841,6 +2841,9 @@ type
 var
   // -sites: the ids (1-based) whose edits are applied; empty = all.
   GSiteRanges: TList<TSiteRange>;
+  // -sites:none - no site at all: what tm's original side compiles, its
+  // preamble alone (see TMPreamble).
+  GNoSites: Boolean;
 
 procedure ParseSiteList(const AText: string);
 var
@@ -1848,6 +2851,11 @@ var
   LDash: Integer;
   LRange: TSiteRange;
 begin
+  if SameText(Trim(AText), 'none') then
+  begin
+    GNoSites := True;
+    Exit;
+  end;
   for LPart in AText.Split([',']) do
   begin
     if Trim(LPart) = '' then
@@ -1873,6 +2881,8 @@ function SiteSelected(AId: Integer): Boolean;
 var
   LRange: TSiteRange;
 begin
+  if GNoSites then
+    Exit(False);
   if GSiteRanges.Count = 0 then
     Exit(True);
   for LRange in GSiteRanges do
@@ -1948,6 +2958,7 @@ end;
 { Whether directive token AText turns on a switch of ALetters, from the
   family whose records keep source lines: D (DEBUGINFO), L (LOCALSYMBOLS),
   Y (REFERENCEINFO; YD and DEFINITIONINFO turn it on for definitions) -
+  and, for tm, O (OPTIMIZATION, see TMMember) -
   `$D+`, `$O-,Y+`, `$YD`, `$DEFINITIONINFO ON` (braces left out here: a
   directive in a brace comment ends it). `$L file.obj` and `$D text` are
   other directives. }
@@ -1959,11 +2970,14 @@ begin
   LWord := DirectiveWord(AText, LStart);
   LBody := UpperCase(DirectiveTrail(AText));
   if (LWord = 'DEBUGINFO') or (LWord = 'LOCALSYMBOLS') or
-     (LWord = 'REFERENCEINFO') or (LWord = 'DEFINITIONINFO') then
+     (LWord = 'REFERENCEINFO') or (LWord = 'DEFINITIONINFO') or
+     (LWord = 'OPTIMIZATION') then
   begin
     if not (LBody.StartsWith('ON') and
             ((Length(LBody) = 2) or not CharInSet(LBody[3], ['A'..'Z']))) then
       Exit(False);
+    if LWord[1] = 'O' then
+      Exit(CharInSet('O', ALetters));
     if LWord[1] = 'R' then
       Exit(CharInSet('Y', ALetters))
     else if LWord[1] = 'D' then
@@ -3124,6 +4138,7 @@ var
   GArg, GFile, GOut, GRoot, GPath, GLine: string;
   GMode: TXformMode;
   GPlatform: TPasPlatform;
+  GExcl: TTMExcl;
   GInfo: TPasPlatformInfo;
   GIncDirs, GDefNames, GUndefNames, GSearch: TList<string>;
   GOracle, GOracleUsed: Boolean;
@@ -3211,6 +4226,9 @@ begin
         else if GArg = 't3x' then GMode := xmT3X
         else if GArg = 'tq' then GMode := xmTQ
         else if GArg = 'tqs' then GMode := xmTQS
+        else if GArg = 'tm' then GMode := xmTM
+        else if GArg = 'tqm' then GMode := xmTQM
+        else if GArg = 'tms' then GMode := xmTMS
         else raise Exception.Create('unknown mode: ' + GArg);
       end
       else if GArg.StartsWith('-Undef:', True) then
@@ -3245,7 +4263,7 @@ begin
     end;
     if (GFile = '') or (GOut = '') then
     begin
-      Writeln(ErrOutput, 'Usage: PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2|t3|t3x|tq|tqs ' +
+      Writeln(ErrOutput, 'Usage: PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2|t3|t3x|tq|tqs|tm|tqm|tms ' +
         '-out:<dir> [-p:<platform>] [-D:X;Y]... [-Undef:X;Y]... ' +
         '[-I:<dir>[;<dir>]]... [-oracle [-S:<dir>[;<dir>]]...] ' +
         '[-sites:<ids>]');
@@ -3272,6 +4290,13 @@ begin
     GQPlanted := TDictionary<string, Boolean>.Create;
     GQInvisibleList := TStringList.Create;
     GQSelftest := GMode = xmTQS;
+    GQMemberSelftest := GMode = xmTMS;
+    GQUnits := GMode in [xmTQ, xmTQS, xmTQM];
+    GQMembers := GMode in [xmTM, xmTQM, xmTMS];
+    GMMismatchList := TStringList.Create;
+    GMPreamble := TStringList.Create;
+    GMAnchors := TDictionary<Integer, string>.Create;
+    GMStoredUse := TDictionary<Int64, Boolean>.Create;
     GWritten := TDictionary<string, Boolean>.Create;
     GSitesText := TStringList.Create;
     GFileLines := TStringList.Create;
@@ -3293,7 +4318,7 @@ begin
       if GOracle and (GUndefNames.Count > 0) then
         raise Exception.Create('-Undef cannot reach a project analysis: ' +
           'use -oracle without it');
-      if GMode in [xmTQ, xmTQS] then
+      if GMode in cQModes then
       begin
         // tq judges the bindings of the project analysis itself: its model
         // of the unit, the tree that model was built on and the stream it
@@ -3311,6 +4336,7 @@ begin
           raise Exception.Create('the project analysis kept no scopes of ' +
             'the unit');
         GPre := GQProject.Model(GQMid).Tree.Source;
+        GQProbe := TPasXProbe.Create;
         if not SameText(NoSlash(GPre.FileNames[0]), NoSlash(GFile)) then
           raise Exception.CreateFmt('the project analyzed %s',
             [GPre.FileNames[0]]);
@@ -3344,12 +4370,12 @@ begin
 
       GDiags := nil;
       GApplied := 0;
-      if GMode in [xmTS, xmT1, xmT2, xmT3, xmT3X, xmTQ, xmTQS] then
+      if GMode in [xmTS, xmT1, xmT2, xmT3, xmT3X] + cQModes then
       begin
         GTree := TPasParser.ParseFile(GPre, GDiags);
         // tq: the parse above counts the diagnostics; the sites are the
         // analysis's own nodes.
-        if GMode in [xmTQ, xmTQS] then
+        if GMode in cQModes then
           GTree := GQProject.Model(GQMid).Tree;
         for GIdx := 0 to High(GDiags) do
           if GDiags[GIdx].VisIndex <= High(GPre.Visible) then
@@ -3381,7 +4407,7 @@ begin
             end;
           xmT3:
             T3Walk;
-          xmTQ, xmTQS:
+          xmTQ, xmTQS, xmTM, xmTQM, xmTMS:
             begin
               GQImplTok := MaxInt;
               GJdx := GTree.Nodes[0].FirstChild;
@@ -3398,7 +4424,15 @@ begin
                   GQSystemMid := GIdx
                 else if GQProject.Model(GIdx).UnitNameLower = 'sysinit' then
                   GQSysInitMid := GIdx;
-              TQWalk(0, '', False, False, 0);
+              if GQMembers then
+              begin
+                CollectInlineNames(0);
+                TMCollectStored(0, False);
+                GMOptimized := LinesKept(['O']);
+              end;
+              TQWalk(0, '', False, False, False, 0);
+              if GQMembers then
+                TMPreamble;
             end;
         else
           // t3x: the print, then t1's parentheses and t2's blocks over it -
@@ -3540,7 +4574,7 @@ begin
         'preprocessor')]));
       if GMode in [xmT3, xmT3X] then
         GSitesText.Add('# print ' + GPrintStats);
-      if GMode in [xmTQ, xmTQS] then
+      if GMode in cQModes then
       begin
         GSitesText.Add(Format('# names locals=%d  excluded-member=%d  ' +
           'excluded-with=%d  excluded-static=%d  excluded-nested=%d  ' +
@@ -3553,6 +4587,17 @@ begin
           GSitesText.Add('# unbound' + #9 + GLine);
         for GLine in GQInvisibleList do
           GSitesText.Add('# invisible' + #9 + GLine);
+        if GQMembers then
+        begin
+          GLine := '# members mismatch=' + IntToStr(GMMismatch);
+          for GExcl := Low(TTMExcl) to High(TTMExcl) do
+            GLine := GLine + Format('  excluded-%s=%d',
+              [cTMExclNames[GExcl], GMExcl[GExcl]]);
+          GSitesText.Add(GLine);
+          GSitesText.Add('# preamble' + #9 + GMPreamble.CommaText);
+          for GLine in GMMismatchList do
+            GSitesText.Add('# mismatch' + #9 + GLine);
+        end;
       end;
       GSitesText.Add('# ' + GFile);
       GSitesText.Add('# id' + #9 + 'kind' + #9 + 'ops' + #9 + 'span' + #9 +
@@ -3599,7 +4644,7 @@ begin
         GLine := GLine + ' excluded-init ' + IntToStr(GExcludedInit);
       if GExcludedPrint > 0 then
         GLine := GLine + ' excluded-print ' + IntToStr(GExcludedPrint);
-      if GMode in [xmTQ, xmTQS] then
+      if GMode in cQModes then
       begin
         if GQMember > 0 then
           GLine := GLine + ' excluded-member ' + IntToStr(GQMember);
@@ -3626,11 +4671,20 @@ begin
           GLine := GLine + ' unbound ' + IntToStr(GQUnbound);
         if GQInvisible > 0 then
           GLine := GLine + ' invisible ' + IntToStr(GQInvisible);
+        if GQMembers then
+        begin
+          for GExcl := Low(TTMExcl) to High(TTMExcl) do
+            if GMExcl[GExcl] > 0 then
+              GLine := GLine + ' excluded-' + cTMExclNames[GExcl] + ' ' +
+                IntToStr(GMExcl[GExcl]);
+          if GMMismatch > 0 then
+            GLine := GLine + ' mismatch ' + IntToStr(GMMismatch);
+        end;
       end;
-      if GMode in [xmTS, xmT1, xmT2, xmT3, xmT3X, xmTQ, xmTQS] then
+      if GMode in [xmTS, xmT1, xmT2, xmT3, xmT3X] + cQModes then
         GLine := GLine + ' applied ' + IntToStr(GApplied);
       Writeln('sites ', GLine);
-      if GMode in [xmTS, xmT1, xmT2, xmT3, xmT3X, xmTQ, xmTQS] then
+      if GMode in [xmTS, xmT1, xmT2, xmT3, xmT3X] + cQModes then
         Writeln('parse ', Length(GDiags));
       if GMode in [xmT3, xmT3X] then
         Writeln('print ', GPrintStats);
@@ -3647,6 +4701,11 @@ begin
       GQUnboundList.Free;
       GQPlanted.Free;
       GQInvisibleList.Free;
+      GMMismatchList.Free;
+      GMPreamble.Free;
+      GMAnchors.Free;
+      GMStoredUse.Free;
+      GQProbe.Free;
       GQProject.Free;
       GPrintCase.Free;
       GInlineNames.Free;
