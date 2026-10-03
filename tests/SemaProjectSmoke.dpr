@@ -7951,6 +7951,29 @@ begin
       CrossRefTo(ModelByName('shbar'), 'Patched', 'Patched'));
   finally
     GProj.Free;
+  end;
+
+  // (4) the program's in-path and the host's pin both name a file that does
+  // not exist. dcc compiles the ShFoo the search path finds (probed on dcc32
+  // 37.0; F1026 on the in-path only when there is none). Kept, the pin
+  // answered with the missing file and the program and ShBar said F1027.
+  TFile.WriteAllText(TPath.Combine(LDir, 'proj\ShApp.dpr'),
+    'program ShApp;'#10'uses ShBar, ShFoo in ''gone\ShFoo.pas'';'#10 +
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [TPath.Combine(LDir, 'lib')], []);
+  try
+    GProj.PinUnitFile(TPath.Combine(LDir, 'proj\gone\ShFoo.pas'));
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'proj\ShApp.dpr'));
+    Ok('shadow/missing pin: ShFoo resolves to the search path''s copy',
+      (MidByName('shfoo') >= 0) and
+      SameText(GProj.ModelFile(MidByName('shfoo')),
+        TPath.Combine(LDir, 'lib\ShFoo.pas')));
+    Ok('shadow/missing pin: no F1027 in the program or the importer',
+      (MidByName('shapp') >= 0) and (MidByName('shbar') >= 0) and
+      (DiagCount(ModelByName('shapp'), 'F1027') = 0) and
+      (DiagCount(ModelByName('shbar'), 'F1027') = 0));
+  finally
+    GProj.Free;
     if TDirectory.Exists(LDir) then
       TDirectory.Delete(LDir, True);
   end;

@@ -1958,6 +1958,36 @@ Still open, roughly in the order we're tackling it:
 - **Formatter** - reformat source to a configurable style, off the same AST
   the highlighter and navigation already use rather than a separate
   regex-based pass.
+- **PasTree's own diagnostics, beside dcc's.** Today every diagnostic is one
+  dcc would give (its code, its wording), so what dcc accepts in silence is
+  not reported at all - and some of it is a mistake waiting to bite. The case
+  that prompted this (2026-10-03): a real application's server project names
+  a unit `in` a file that does not exist, in its `.dpr` and as a
+  `DCCReference` in its `.dproj`. dcc does not complain - it compiles the unit
+  of that name the search path finds (probed on dcc32 37.0; F1026 on the
+  in-path only when there is none) - so the build is green while the project
+  file points at a file that is gone, and which copy is compiled depends on
+  the search path order. PasTree now resolves it the same way (a pin to a
+  missing file is dropped, 0.91.1), and with that it, too, says nothing.
+  What is wanted: a code range of our own that cannot be mistaken for dcc's
+  (e.g. `PT1xxx`), each a warning or a hint with the severity carried on the
+  diagnostic, never an error - dcc's verdict on whether the code compiles
+  stays the only error source. Candidates, each something the resolver
+  already knows at the point it decides:
+  - an `in 'path'` (or a host-pinned project file) that does not exist, with
+    the file actually used: "X: 'gone\X.pas' does not exist, the search
+    path's lib\X.pas is compiled";
+  - an `in 'path'` whose file declares a different unit name than the item;
+  - a unit the project file list (`.dproj`) and the program's `uses` disagree
+    on - listed in one, absent from the other, or at two different paths;
+  - a unit found in two places on the search path, the later copy shadowed
+    (which copy wins is decided by path order alone, and a reordered search
+    path silently swaps the code compiled).
+  Hosts then show them as they show the rest (the LSP server's
+  `publishDiagnostics` carries a severity already; pastree-mcp's `status`
+  and `diagnostics`), and the definition of done's "zero false positives"
+  holds for them as for dcc's codes - each needs its probe that dcc really
+  does what the message says.
 - **Error Insight** (live diagnostics, à la Embarcadero's own IDE feature) -
   today's diagnostics are error-only (`E20xx`) and shown as a flat list after
   a full analysis run; this extends it to a live, severity-classified feed

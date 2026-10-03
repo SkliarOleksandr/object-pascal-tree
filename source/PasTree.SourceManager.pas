@@ -118,6 +118,9 @@ type
     // two different Foos and analyzed everything foreign against the wrong
     // one. Filled by ResolveUnit itself (an in-path resolving) and by PinUnit.
     FPinned: TDictionary<string, string>;
+    // The pins ResolveUnit has seen exist (lower name), so each is checked
+    // on disk once, not on every import of it.
+    FPinnedSeen: TDictionary<string, Boolean>;
     // The project's own directory - dcc's implicit "current directory",
     // searched BEFORE every -U path. A patched copy dropped beside the .dpr
     // is found there by the IDE without any search-path entry; it must be
@@ -177,7 +180,10 @@ type
       lookup (see FPinned). What a program's `in 'path'` clause does in dcc;
       a host hands the project file's own unit list through here. The FIRST
       pin for a name wins - a later, different location is dcc's "unit found
-      in two places", and the program's word stays authoritative. }
+      in two places", and the program's word stays authoritative. A pin to a
+      file that does not exist (on disk or as a buffer) when the unit is
+      resolved is dropped, and the unit is looked up as if never pinned: dcc
+      takes a `uses X in 'gone\X.pas'` from the search path. }
     procedure PinUnit(const AUnitName, APath: string);
     { The project directory - searched before the search paths, as dcc's
       implicit current directory is (see FProjectDir). The analysis drivers
@@ -352,6 +358,7 @@ begin
   FSearchIndex.Free;
   FAliases.Free;
   FPinned.Free;
+  FPinnedSeen.Free;
   FBuffers.Free;
   FIncludeIndex.Free;
   FUnitIndex.Free;
@@ -708,6 +715,7 @@ end;
 procedure TPasSourceManager.ForgetUnitResolution;
 begin
   FreeAndNil(FUnitMemo);
+  FreeAndNil(FPinnedSeen);
 end;
 
 function TPasSourceManager.FromDirIndex(const AFromFile: string):
@@ -851,8 +859,26 @@ begin
   // in-path or the project file's unit list - beats every lookup below, the
   // referring unit's own in-path included: dcc reports a unit found in two
   // places rather than resolving it twice, and the program's word wins.
+  // A pin to a missing file is dropped: dcc, given `uses X in 'gone\X.pas'`
+  // (or a .dproj listing that file), compiles the X the search path finds,
+  // and only when there is none says F1026 'gone\X.pas'. Kept, it answered
+  // here with a file LoadFile cannot read, and every importer of a unit the
+  // build compiles fine reported F1027. Checked at resolution rather than in
+  // PinUnit: a host pins before it hands over its buffers.
   if (FPinned <> nil) and FPinned.TryGetValue(LKey, AResolved) then
-    Exit(True);
+  begin
+    if FPinnedSeen = nil then
+      FPinnedSeen := TDictionary<string, Boolean>.Create;
+    if FPinnedSeen.ContainsKey(LKey) then
+      Exit(True);
+    if SourceExists(AResolved) then
+    begin
+      FPinnedSeen.Add(LKey, True);
+      Exit(True);
+    end;
+    FPinned.Remove(LKey);
+    AResolved := '';
+  end;
 
   // 1. Explicit `in 'path'`. Whatever it resolves to is pinned for the whole
   // project: the next importer of this unit, however it spells the lookup,
