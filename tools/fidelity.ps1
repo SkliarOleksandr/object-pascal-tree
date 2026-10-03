@@ -57,6 +57,19 @@
   t3x adds t1's parentheses and t2's blocks over the print, under t2's
   switches: the plan's final gate. The localizer as for t1 over their sites.
 
+  Mode tq judges the RESOLVER's bindings (plan S12-S13): every name PasTree
+  bound written so that dcc can only read it as the declaration PasTree
+  chose - a unit-level one as <Unit>.Name, a member of the method's own type
+  as Self.Name (see PasTreeXform). It takes PasTree's project analysis of
+  the unit over -OraclePath (the Studio source trees when none is given) and
+  t2's switches; a name dcc binds elsewhere changes the code or stops the
+  compile, and the localizer names it as for t1. UNBOUND on a line counts
+  the names PasTree did not bind at all (listed in sites.txt). Mode tqs is
+  its selftest, as ts is t1's: in each routine ONE name written with a WRONG
+  qualifier dcc accepts - another used unit's variable or routine of that
+  name - which must DIFF or stop the compile, and -Localize must name each
+  such site alone; a unit with no candidate takes no site.
+
   Rules the compiles follow (both sides alike):
   - dcc by FULL path (the one on PATH may be another version), -$O- (dead
     store elimination hides wrong trees) - but t0f takes dcc's defaults, the
@@ -88,7 +101,7 @@
 #>
 param(
   [Parameter(Mandatory = $true)] [string] $List,
-  [Parameter(Mandatory = $true)] [ValidateSet('t0', 'ts', 't0f', 't1', 't2', 't3', 't3x')] [string] $Mode,
+  [Parameter(Mandatory = $true)] [ValidateSet('t0', 'ts', 't0f', 't1', 't2', 't3', 't3x', 'tq', 'tqs')] [string] $Mode,
   [Parameter(Mandatory = $true)] [string] $Out,
   [string] $Platform = 'Win64',
   [string] $Bds = 'C:\Program Files (x86)\Embarcadero\Studio\37.0',
@@ -152,9 +165,12 @@ if ($Mode -eq 't0f' -and -not $PSBoundParameters.ContainsKey('Switches') -and $W
 # recorded on the `else` line, with `begin inherited end` on its own; -$D-
 # and -$L- leave that record in place, -$Y- removes it (probed on a VCL
 # unit, dcc64 37.0; no Studio unit tests $IFOPT Y).
-if ($Mode -in @('t1', 't2', 't3x') -and -not $PSBoundParameters.ContainsKey('Switches') -and $Worker -eq '') {
+# tq qualifies names (Self.X, a hard cast to a member's type): under dcc's
+# defaults the `$93` symbol-reference record differs, and -$Y- alone leaves
+# the casts' lines (plan S12, probes Q04, Q05, Q12) - t2's set.
+if ($Mode -in @('t1', 't2', 't3x', 'tq', 'tqs') -and -not $PSBoundParameters.ContainsKey('Switches') -and $Worker -eq '') {
   $Switches = @('-$O-', '-$D-', '-$L-')
-  if ($Mode -in @('t2', 't3x')) { $Switches += '-$Y-' }
+  if ($Mode -in @('t2', 't3x', 'tq', 'tqs')) { $Switches += '-$Y-' }
 }
 # t3 - the print in place, every token on its line, nothing added - takes
 # dcc's own defaults like t0f: line tables and symbol info on, the strictest
@@ -179,8 +195,10 @@ if ($Worker -ne '') {
   $Localize = [bool]$p.Localize; $NoLocalize = [bool]$p.NoLocalize; $LocalizeBudget = [int]$p.LocalizeBudget
   $Sites = "$($p.Sites)"
 }
-$doLocalize = (-not $NoLocalize) -and ($Mode -in @('t1', 't2', 't3', 't3x') -or ($Mode -eq 'ts' -and $Localize))
-if ($Oracle -and $OraclePath.Count -eq 0) {
+# ts and tqs are selftests: every planted site is wrong by construction.
+$selfMode = $Mode -in @('ts', 'tqs')
+$doLocalize = (-not $NoLocalize) -and ($Mode -in @('t1', 't2', 't3', 't3x', 'tq') -or ($selfMode -and $Localize))
+if (($Oracle -or $Mode -in @('tq', 'tqs')) -and $OraclePath.Count -eq 0) {
   # What PasTreeSemaProject -proj adds (StudioSearchPaths there).
   $OraclePath = @('source\rtl\sys', 'source\rtl\common', 'source\rtl\win',
     'source\rtl\win\winrt', 'source\rtl\net', 'source\databinding\engine',
@@ -420,6 +438,7 @@ function Xform-Args([string] $u, [string] $XfOut, [string] $SiteList = '') {
   if ($XformUndefine.Count -gt 0) { $xa += ('-Undef:' + ($XformUndefine -join ';')) }
   if ($IncludePath.Count -gt 0) { $xa += ('-I:' + ($IncludePath -join ';')) }
   if ($Oracle) { $xa += @('-oracle', ('-S:' + ($OraclePath -join ';')), "-NS:$Namespaces") }
+  elseif ($Mode -in @('tq', 'tqs')) { $xa += @(('-S:' + ($OraclePath -join ';')), "-NS:$Namespaces") }
   if ($SiteList -ne '') { $xa += "-sites:$SiteList" }
   elseif ($Sites -ne '') { $xa += "-sites:$Sites" }
   return ,$xa
@@ -532,7 +551,7 @@ function Invoke-UnitSafe([string] $u, [string] $work) {
 function Invoke-Unit([string] $u, [string] $work) {
   $r = [ordered]@{ Outcome = ''; Line = ''; WithSites = 0; Diff = 0; Sites = 0
     Named = 0; Broken = 0; Guessed = 0; Unreadable = 0; CopyIncomplete = 0; ProjectStream = 0
-    AllSites = 0; Excluded = 0; Dropped = 0; ParseDiags = 0; Culprits = 0; Localized = 0
+    AllSites = 0; Excluded = 0; Dropped = 0; ParseDiags = 0; Culprits = 0; Localized = 0; Unbound = 0; Invisible = 0
     Compiles = 0 }
   $leaf = Split-Path $u -Leaf
   $stem = [IO.Path]::GetFileNameWithoutExtension($u)
@@ -575,7 +594,7 @@ function Invoke-Unit([string] $u, [string] $work) {
     if ($x.Out -match '(?m)^flatten .*stream=project') { $parts += 'project stream'; $r.ProjectStream = 1 }
     if ($parts.Count -gt 0) { $note = '  [' + ($parts -join '; ') + ']' }
   }
-  if ($Mode -in @('t1', 't2', 't3', 't3x')) {
+  if ($Mode -in @('t1', 't2', 't3', 't3x', 'tq', 'tqs')) {
     # The site counts: every operator (t1) or statement (t2) the tree holds,
     # the ones a rule leaves unwrapped (excluded-*) and the ones in no
     # single file; t3's are the print's changed spellings, one per node.
@@ -594,6 +613,16 @@ function Invoke-Unit([string] $u, [string] $work) {
       $parts += "$($m.Groups[1].Value) $($m.Groups[2].Value)"
     }
     if ($r.Dropped -gt 0) { $parts += "dropped $($r.Dropped)" }
+    $ub = [regex]::Match($sl.Groups[2].Value, 'unbound (\d+)')
+    if ($ub.Success -and [int]$ub.Groups[1].Value -gt 0) {
+      $r.Unbound = [int]$ub.Groups[1].Value; $parts += "UNBOUND $($r.Unbound)"
+    }
+    # tq: names bound to a unit no name there can come from - wrong whatever
+    # dcc says (PasTreeXform lists them in sites.txt), not compiled.
+    $iv = [regex]::Match($sl.Groups[2].Value, 'invisible (\d+)')
+    if ($iv.Success -and [int]$iv.Groups[1].Value -gt 0) {
+      $r.Invisible = [int]$iv.Groups[1].Value; $parts += "INVISIBLE $($r.Invisible)"
+    }
     if ($r.ParseDiags -gt 0) { $parts += "PARSE DIAGNOSTICS $($r.ParseDiags)" }
     if ($r.ProjectStream -gt 0) { $parts += 'project stream' }
     $note = '  [' + ($parts -join '; ') + ']'
@@ -643,9 +672,23 @@ function Invoke-Unit([string] $u, [string] $work) {
       $r.Broken = 1
       if ($sites.Count -gt 0) { $r.WithSites = 1; $r.Sites = $sites.Count }
     }
+    if ($Mode -eq 'tqs') {
+      # A planted wrong qualification may name a declaration of another
+      # type: dcc refusing it SEES it. Every one must still be localized.
+      if ($sites.Count -gt 0) {
+        $r.WithSites = 1; $r.Diff = 1; $r.Sites = $sites.Count; $r.Named = $sites.Count
+      } else {
+        $r.Broken = 1
+      }
+    }
     if ($doLocalize -and $sites.Count -gt 0) {
       $loc = Find-Culprits $u $work $sites.Count 'fail' $a $argMap
       $r.Culprits = @($loc.Culprits).Count; $r.Compiles = $loc.Compiles
+      if ($Mode -eq 'tqs') {
+        $ids = @($loc.Culprits | Where-Object { $_.Range -eq "$($_.Id)" } | ForEach-Object { [int]$_.Id })
+        $r.Localized = @($sites | Where-Object { $ids -contains [int]$_.Id }).Count
+        if ($r.Localized -lt $sites.Count) { $r.Broken = 1 }
+      }
       $r.Line += '  ' + (Report-Culprits $loc $sites $work)
     }
     return [pscustomobject]$r
@@ -653,7 +696,7 @@ function Invoke-Unit([string] $u, [string] $work) {
 
   if (Same-Dcu $a $b $argMap) {
     $r.Outcome = 'OK'; $r.Line = "OK  $leaf$note"
-    if ($Mode -eq 'ts' -and $sites.Count -gt 0) {
+    if ($selfMode -and $sites.Count -gt 0) {
       # A planted error the comparator did not see.
       $r.WithSites = 1; $r.Sites = $sites.Count; $r.Broken = 1
       $r.Line = "OK  $leaf  SELFTEST-MISS: $($sites.Count) site(s), .dcu identical"
@@ -702,13 +745,16 @@ function Invoke-Unit([string] $u, [string] $work) {
   if ($cmp.Other.Count -gt 0) { $what += "  +data: " + (& $cap $cmp.Other) }
   if ($cmp.Routines.Count -eq 0 -and $cmp.Other.Count -eq 0) { $what = '<no dump difference - raw bytes only>' }
   $r.Line = "DIFF  $leaf  $what$note"
-  if ($Mode -eq 'ts') {
+  if ($selfMode) {
     $named = 0
     $miss = @()
     $diffNames = @($cmp.Routines | ForEach-Object { Norm-Name $_ })
     $siteNames = @($sites | ForEach-Object { Norm-Name $_.Routine })
     foreach ($s in $sites) {
-      if ($diffNames -contains (Norm-Name $s.Routine)) { $named++ } else { $miss += $s.Routine }
+      # A site in no routine (tqs: a typed constant's value, a declaration)
+      # is named by a difference outside every routine.
+      if ($diffNames -contains (Norm-Name $s.Routine) -or
+          ($s.Routine -eq '' -and $cmp.Other.Count -gt 0)) { $named++ } else { $miss += $s.Routine }
     }
     # Differing routines no site explains - an inlined caller, say. Shown,
     # not failed: the selftest asks whether the planted errors are SEEN.
@@ -728,7 +774,7 @@ function Invoke-Unit([string] $u, [string] $work) {
   if ($doLocalize -and $sites.Count -gt 0) {
     $loc = Find-Culprits $u $work $sites.Count 'diff' $a $argMap
     $r.Culprits = @($loc.Culprits).Count; $r.Compiles = $loc.Compiles
-    if ($Mode -eq 'ts') {
+    if ($selfMode) {
       # Every planted site is wrong by construction: the localizer must find
       # each one ALONE, or it cannot be trusted with a real DIFF.
       $ids = @($loc.Culprits | Where-Object { $_.Range -eq "$($_.Id)" } | ForEach-Object { [int]$_.Id })
@@ -854,7 +900,7 @@ foreach ($k in $counts.Keys) { $guess[$k] = @(0, 0) }
 $copyIncomplete = 0
 $projectStream = 0
 $unreadable = 0
-$t1 = [ordered]@{ Sites = 0; Excluded = 0; Dropped = 0; ParseUnits = 0; Culprits = 0; Compiles = 0 }
+$t1 = [ordered]@{ Sites = 0; Excluded = 0; Dropped = 0; ParseUnits = 0; Culprits = 0; Compiles = 0; Unbound = 0; UnboundUnits = 0; Invisible = 0; InvisibleUnits = 0 }
 $localized = 0
 foreach ($o in $outcomes) {
   $results.Add($o.Line)
@@ -864,6 +910,8 @@ foreach ($o in $outcomes) {
   $t1.Sites += [int]$o.AllSites; $t1.Excluded += [int]$o.Excluded; $t1.Dropped += [int]$o.Dropped
   if ([int]$o.ParseDiags -gt 0) { $t1.ParseUnits++ }
   $t1.Culprits += [int]$o.Culprits; $t1.Compiles += [int]$o.Compiles
+  $t1.Unbound += [int]$o.Unbound; if ([int]$o.Unbound -gt 0) { $t1.UnboundUnits++ }
+  $t1.Invisible += [int]$o.Invisible; if ([int]$o.Invisible -gt 0) { $t1.InvisibleUnits++ }
   $localized += [int]$o.Localized
   if ($o.Guessed -gt 0) { $guess[$o.Outcome] = @(($guess[$o.Outcome][0] + 1), ($guess[$o.Outcome][1] + $o.Guessed)) }
   $copyIncomplete += $o.CopyIncomplete
@@ -890,10 +938,14 @@ if ($Mode -in @('t3', 't3x')) {
   $summary.Add(("{4}: sites={0} excluded (t1, t2 rules; print slots in an include used twice)={1} dropped={2} units with parse diagnostics={3}" -f
     $t1.Sites, $t1.Excluded, $t1.Dropped, $t1.ParseUnits, $Mode))
 }
+if ($Mode -in @('tq', 'tqs')) {
+  $summary.Add(("{0}: sites={1} excluded (members outside reach, with, class methods, outer types, generic bodies, hidden qualifiers, merged overloads, positions)={2} dropped={3} unbound names={4} in {5} units, names bound to an invisible unit={6} in {7} units, units with parse diagnostics={8}" -f
+    $Mode, $t1.Sites, $t1.Excluded, $t1.Dropped, $t1.Unbound, $t1.UnboundUnits, $t1.Invisible, $t1.InvisibleUnits, $t1.ParseUnits))
+}
 if ($doLocalize) {
   $summary.Add(("localizer: culprits={0} variant compiles={1}" -f $t1.Culprits, $t1.Compiles))
 }
-if ($Mode -eq 'ts') {
+if ($selfMode) {
   $summary.Add(("selftest: units with sites={0} diff={1} sites={2} named={3} broken={4}" -f
     $selftest.UnitsWithSites, $selftest.UnitsDiff, $selftest.Sites, $selftest.Named, $selftest.Broken))
   if ($doLocalize) { $summary.Add("selftest: sites localized alone=$localized of $($selftest.Sites)") }

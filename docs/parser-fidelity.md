@@ -177,7 +177,7 @@ minus before a member call - agree with dcc everywhere they were met.
 
 ### Findings still open
 
-None. One is fixed for Win64 only: the DCU reader hung a routine's nested
+None of the parser's - the resolver's are in section 6. One is fixed for Win64 only: the DCU reader hung a routine's nested
 routines under an anonymous method's body written just before it (F5);
 Win64's `$pdata$` names say each one's owner and the reader follows them,
 while Win32's file says nothing of it (docs/dcu-reader.md, known gaps).
@@ -295,3 +295,66 @@ exception taken off the
 list failed `t3` on exactly that unit. A tree stage alone would have missed
 most of it: the misparse prints and reparses the same wherever the file
 still parses.
+
+## 6. The second rung: the resolver through the same harness
+
+The tree being dcc's, the same harness judges what the analysis BINDS. Mode
+`tq` writes every name PasTree bound so that dcc can only read it as the
+declaration PasTree chose - a unit-level declaration of any unit, System's
+builtins and the unit's own included, as `<unit.full.name>.Name`; a field,
+method or property of the method's own type, reached bare in its body, as
+`Self.Name` - and the unit compiles to the original's `.dcu` exactly when
+every rewritten binding is dcc's. A wrong unit, a member taken for a
+unit-level name, an inherited member missed: the code changes or the compile
+stops, and the localizer names the name. `tqs` is its selftest, as `ts` is
+`t1`'s: in each routine one name qualified with another visible unit's
+variable or routine of that name, which must be seen and localized alone.
+
+`tq` takes PasTree's project analysis of the unit (the Studio source trees,
+or `-OraclePath`) and edits that analysis's own tree; it compiles under
+`t2`'s switches. The rules it follows, each from a probe:
+
+- `Self.X` and a qualified name in a stored body change only the `$93`
+  symbol-reference record under dcc's defaults: `-$Y-` (with `t2`'s
+  `-$O- -$D- -$L-`);
+- in a generic's body `Self.X` after a call of a method changes one flag
+  byte of the stored body and its checksum - no code, but another `.dcu`:
+  no `Self.` there;
+- an overload set dcc merges across units records every unit's routine it
+  looked at as an import, used or not, and a builtin System also declares
+  (`Flush`) is another routine when qualified: such a name is not written;
+- a qualifier whose first segment a name of the unit hides (a field named
+  like the unit) does not resolve; nor does a qualified name of the unit's
+  own declared further down (`PFoo = ^TFoo`);
+- `Slice`, the head of what follows `inherited`, a procedural field standing
+  as a statement (`FProc;`), an old-style function result, a property's
+  specifiers, a method resolution clause, an exports item, a directive's
+  arguments, an attribute's name, a record constant's field name have no
+  qualified spelling and are left as written.
+
+A binding to a unit no name at the site can come from - an implementation
+uses entry seen from the interface, a unit the unit does not use - is wrong
+whatever dcc says: it is reported (`INVISIBLE`, each listed in sites.txt),
+not compiled. A name PasTree bound to nothing is counted (`UNBOUND`).
+
+What `tq` cannot see: the overload chosen INSIDE one unit's set and the unit
+of a set merged across units; a virtual or interface member's declaring type
+(the call goes through the slot); locals, parameters, `Result`, labels and
+generic parameters, which have no qualified form; members in a `with` body,
+in a class method, of an outer type, and the selector after a dot - the next
+step's (`TOwner(A).B`).
+
+As of 2026-10-02 (v0.90.0): the self-host 29/29 on Win64 and Win32 (37 438
+names rewritten); the 310 units of the Studio's Windows RTL package 304 on
+both platforms (about 363 000 names), the rest one unit that does not
+compile standalone, four units holding resolver findings and one
+(System.Threading) whose rewrite fails only as a whole, not yet
+localized; `tqs` over the
+same units 30 planted names in 11 units, each seen and localized alone. The
+findings (plan F35-F41): an interface name bound through an implementation
+uses entry; a reference through a type alias bound to the alias's target in
+a unit not used; dcc's choice between two aliases of one type not
+reproduced; a private member of another unit's ancestor taken for a bare
+name; an inherited member losing to a unit-level routine of the same name;
+the names of interface GUID clauses never bound; `Flush` missing from the
+builtins.

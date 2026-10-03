@@ -89,9 +89,34 @@ program PasTreeXform;
         final gate: the unit printed from its tree alone, fully
         parenthesized and fully blocked, compiled by dcc to the same .dcu.
         t3's sites first, then t1's, then t2's; both under t2's line rule.
+    tq  the RESOLVER judged (plan S12-S13, the second rung): every name the
+        project analysis bound written so that dcc can only read it as the
+        declaration PasTree chose - a unit-level declaration of any unit,
+        System's builtins and the unit's own included, as
+        `<unit.full.name>.Name`; a field, method or property of the method's
+        own type, reached bare in its body, as `Self.Name`. A correct
+        binding leaves the .dcu identical under t2's switches; a name dcc
+        binds elsewhere changes the code or stops the compile. Always takes
+        the project analysis (-S, -NS as -oracle) and edits ITS tree. Not
+        written, counted (see TQIdent): locals - variables, parameters,
+        Result, Self, generic parameters, labels - which have no qualified
+        form; a member outside a body or a constant or type member
+        (excluded-member), in a with body (excluded-with), in a class method
+        (excluded-static), of an outer type (excluded-nested), Self in a
+        generic's body (excluded-stored); a qualifier a name of the unit
+        hides (excluded-shadowed), a routine of an overload set merged
+        across units (excluded-overload), a position with no qualified
+        spelling (excluded-position); a name PasTree bound to nothing
+        (unbound, each listed in sites.txt). The selector after a dot is
+        not judged here.
+    tqs tq's selftest (plan S14): in each routine ONE unit-level name
+        written with a WRONG qualifier dcc accepts - another used unit's,
+        or System's, variable or routine of that name (see
+        TQWrongQualifier) - and nothing else. A unit with such a site must
+        compile to another .dcu or not at all.
 
   Usage:
-    PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2|t3|t3x -out:<dir> [-p:<platform>]
+    PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2|t3|t3x|tq|tqs -out:<dir> [-p:<platform>]
                  [-D:X;Y]... [-Undef:X;Y]... [-I:<dir>[;<dir>]]...
                  [-sites:<ids>]
   -sites (ts, t1, t2, t3, t3x): only the sites with these ids take their edit - a
@@ -182,11 +207,11 @@ uses
   PasTree.Version in '..\source\PasTree.Version.pas';
 
 type
-  TXformMode = (xmT0, xmTS, xmT0F, xmT1, xmT2, xmT3, xmT3X);
+  TXformMode = (xmT0, xmTS, xmT0F, xmT1, xmT2, xmT3, xmT3X, xmTQ, xmTQS);
 
 const
   cModeNames: array[TXformMode] of string = ('t0', 'ts', 't0f', 't1', 't2',
-    't3', 't3x');
+    't3', 't3x', 'tq', 'tqs');
   // t3: a print slot's replacement sorts after every insertion at its offset
   // - a `(` or a `begin` that opens there, an `end` closing before it.
   cSlotOrder = 100;
@@ -265,6 +290,31 @@ var
   // spelling -> the one it replaced, quotes off - the .dcu records each
   // inclusion under its name as written, so the driver maps them back.
   GArgMap: TDictionary<string, string>;
+  // tq: the project analysis whose bindings are judged, the unit's model in
+  // it, and the names left as written, by why: a local (a variable,
+  // parameter, Result, Self, generic parameter, label of a routine), a
+  // member outside a body or of a kind Self cannot reach, in a with body
+  // (S15), in a class method, of an outer type, a qualifier hidden by a name
+  // of the unit's (Q11), a routine of an overload set merged across units
+  // (see TQOverloadMerged), Self in a generic's body (see TQGenericBody),
+  // a position with no qualified spelling, a name
+  // PasTree did not bind (each listed in sites.txt), the selector after a
+  // dot (S15's).
+  GQProject: TPasSemaProject;
+  GQMid: Integer;
+  GQExt: TPasExtRef;
+  GQLocal, GQMember, GQWith, GQStatic, GQNested, GQShadowed, GQPosition,
+    GQUnbound, GQSelector, GQOverload, GQStored, GQForward, GQInvisible: Integer;
+  GQUnboundList: TStringList;
+  // tq: bindings to a unit no name at the site can come from (see
+  // TQUnitVisible) - wrong whatever dcc says, listed in sites.txt.
+  GQInvisibleList: TStringList;
+  // tq: the first token of the implementation section (MaxInt when there is
+  // none) and the models of System and SysInit, -1 when not analyzed.
+  GQImplTok, GQSystemMid, GQSysInitMid: Integer;
+  // tqs: the mode, and the routines that already took their planted site.
+  GQSelftest: Boolean;
+  GQPlanted: TDictionary<string, Boolean>;
 
 function VisOffset(AVis: Integer; out AFileId: Integer): Integer;
 var
@@ -787,6 +837,623 @@ begin
   while LChild <> NIL_NODE do
   begin
     T1Walk(LChild, LRoutine, ATypeStart);
+    LChild := GTree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+{ tq: the scope in effect at ANode in the unit's model - the nearest
+  scope-owning ancestor's (NodeScope is stamped on the nodes that open one). }
+function TQScopeAt(ANode: Integer): Integer;
+var
+  LM: TPasSemaModel;
+begin
+  LM := GQProject.Model(GQMid);
+  Result := NIL_SCOPE;
+  while ANode <> NIL_NODE do
+  begin
+    if ANode <= High(LM.NodeScope) then
+    begin
+      Result := LM.NodeScope[ANode];
+      if Result <> NIL_SCOPE then
+        Exit;
+    end;
+    ANode := GTree.Nodes[ANode].Parent;
+  end;
+end;
+
+{ tq: is the qualifier's first segment, at ANode, a name the unit itself
+  declares or binds - a field named like the unit hides it there, and the
+  qualified spelling stops the compile (plan S12, Q11: E2018). Only the
+  unit's own scopes are asked: the names an ancestor or a with target of
+  another unit brings in are not seen here (a hit there shows as
+  XFORM-FAIL, and is a harness rule to add). }
+function TQShadowed(ANode: Integer; const AQualifier: string): Boolean;
+var
+  LM: TPasSemaModel;
+  LFirst: string;
+  LSym, LDot: Integer;
+begin
+  LM := GQProject.Model(GQMid);
+  LFirst := LowerCase(AQualifier);
+  LDot := Pos('.', LFirst);
+  if LDot > 0 then
+    LFirst := Copy(LFirst, 1, LDot - 1);
+  LSym := LM.ResolveAt(TQScopeAt(ANode), LFirst,
+    GTree.Nodes[ANode].FirstToken);
+  Result := (LSym <> NIL_SYM) and (LM.Symbols[LSym].Kind <> skUnitRef);
+end;
+
+{ tq: the method whose body holds the scope AScope - the nearest routine
+  scope a struct is stamped on (a method implementation's: TFoo in
+  TFoo.Bar), through nested routines and anonymous methods, whose Self is
+  the method's. NIL_SCOPE outside every method. }
+function TQMethodScope(AScope: Integer): Integer;
+var
+  LM: TPasSemaModel;
+begin
+  LM := GQProject.Model(GQMid);
+  Result := AScope;
+  while Result <> NIL_SCOPE do
+  begin
+    if (LM.Scopes[Result].Kind = sckRoutine) and
+       (LM.Scopes[Result].StructSym <> NIL_SYM) then
+      Exit;
+    Result := LM.Scopes[Result].Parent;
+  end;
+end;
+
+{ tq: the units whose interface a bare name at ANode can come from, in
+  dcc's search order: the unit itself, its uses entries from the last to
+  the first - an implementation uses entry only inside the implementation -
+  then SysInit and System, which every unit uses without naming them. An
+  entry the analysis did not resolve is left out. }
+function TQVisibleUnits(ANode: Integer): TArray<Integer>;
+var
+  LM: TPasSemaModel;
+  LIdx, LId: Integer;
+begin
+  LM := GQProject.Model(GQMid);
+  Result := [GQMid];
+  for LIdx := High(LM.UsesList) downto 0 do
+  begin
+    if (LM.UsesList[LIdx].NameNode <> NIL_NODE) and
+       (GTree.Nodes[LM.UsesList[LIdx].NameNode].FirstToken > GQImplTok) and
+       (GTree.Nodes[ANode].FirstToken < GQImplTok) then
+      Continue;
+    LId := LM.UsesList[LIdx].UnitId;
+    if (LId >= 0) and (LId <> GQMid) then
+      Result := Result + [LId];
+  end;
+  if GQSysInitMid >= 0 then
+    Result := Result + [GQSysInitMid];
+  if GQSystemMid >= 0 then
+    Result := Result + [GQSystemMid];
+end;
+
+{ tq: the symbol named like ANode that unit AMid declares where an importer
+  - or, for the unit itself, the unit's own code - finds it: its interface,
+  and for the unit itself its implementation too. NIL_SYM when none. }
+function TQUnitDecl(AMid: Integer; const AName: string): Integer;
+var
+  LU: TPasSemaModel;
+  LIdx: Integer;
+begin
+  Result := NIL_SYM;
+  LU := GQProject.Model(AMid);
+  if LU.InterfaceScope <> NIL_SCOPE then
+    Result := LU.FindLocal(LU.InterfaceScope, AName);
+  if (Result = NIL_SYM) and (AMid = GQMid) then
+    for LIdx := 0 to LU.Scopes.Count - 1 do
+      if LU.Scopes[LIdx].Kind = sckImplementation then
+      begin
+        Result := LU.FindLocal(LIdx, AName);
+        Break;
+      end;
+end;
+
+{ tq: the unit whose declaration a bound name names - System for one of
+  the builtins every model seeds (ASystem), else ATMid. -1 when System is
+  no model of the analysis. }
+function TQChosenUnit(ATMid: Integer; ASystem: Boolean): Integer;
+begin
+  if ASystem then
+    Result := GQSystemMid
+  else
+    Result := ATMid;
+end;
+
+{ tq: does another unit visible at ANode declare a routine named like it?
+  Then the name is one of an overload set dcc merges across units (plan
+  S12, Q09) and the qualified spelling does not keep the .dcu: dcc records
+  every unit's routine it LOOKED at as an import, used or not - in
+  PasTree.Dcu.Source `IfThen(B, 2, 1)` is System.Math's and the original
+  imports System.StrUtils' IfThen too; in System.AnsiStrings its own
+  FormatBuf and AnsiUpperCase merge with System.SysUtils'. The qualified
+  spelling looks at one unit, so the import record differs, or the call
+  takes another overload of the set. Not judged: which unit of a merged set
+  a call takes (the count says how often that is left). }
+function TQOverloadMerged(ANode, ATMid: Integer; ASystem: Boolean): Boolean;
+var
+  LName: string;
+  LChosen, LId, LSym: Integer;
+begin
+  Result := False;
+  LName := LowerCase(GTree.NodeText(ANode).TrimLeft(['&']));
+  LChosen := TQChosenUnit(ATMid, ASystem);
+  // A builtin System.pas also DECLARES: bare `Flush(Output)` is the
+  // intrinsic, with its I/O check, `System.Flush(Output)` the function
+  // declared there, without one - another call, whichever of the two PasTree
+  // took (S14, System.SysUtils.ShowException: the function).
+  if (ASystem or (ATMid = GQSystemMid)) and (GQSystemMid >= 0) then
+  begin
+    LSym := TQUnitDecl(GQSystemMid, LName);
+    if (LSym <> NIL_SYM) and
+       (GQProject.Model(GQSystemMid).Symbols[LSym].Kind = skRoutine) and
+       not (sfBuiltin in GQProject.Model(GQSystemMid).Symbols[LSym].Flags) and
+       (GQProject.Model(GQMid).SystemScope <> NIL_SCOPE) then
+    begin
+      LSym := GQProject.Model(GQMid).FindLocal(
+        GQProject.Model(GQMid).SystemScope, LName);
+      if (LSym <> NIL_SYM) and
+         (sfBuiltin in GQProject.Model(GQMid).Symbols[LSym].Flags) then
+        Exit(True);
+    end;
+  end;
+  for LId in TQVisibleUnits(ANode) do
+  begin
+    if LId = LChosen then
+      Continue;
+    LSym := TQUnitDecl(LId, LName);
+    if (LSym <> NIL_SYM) and
+       (GQProject.Model(LId).Symbols[LSym].Kind = skRoutine) and
+       not (sfBuiltin in GQProject.Model(LId).Symbols[LSym].Flags) then
+      Exit(True);
+  end;
+end;
+
+{ tq: is ATMid (ASystem: System) one of the units a name at ANode can come
+  from at all? A binding to any other unit is wrong whatever dcc says - an
+  interface name bound through an implementation uses entry, a declaration
+  of a unit the unit does not use - and the qualified spelling would only
+  stop the compile (E2003 on the qualifier). Such a binding is reported, not
+  written (see TQIdent). }
+function TQUnitVisible(ANode, ATMid: Integer; ASystem: Boolean): Boolean;
+var
+  LChosen, LId: Integer;
+begin
+  if ASystem then
+    Exit(True);
+  LChosen := TQChosenUnit(ATMid, ASystem);
+  for LId in TQVisibleUnits(ANode) do
+    if LId = LChosen then
+      Exit(True);
+  Result := False;
+end;
+
+{ tq: is ARoutine's body one dcc stores as a GENERIC's - its name has
+  generic parameters at any level (`TG<T>.M`, `TFoo.M<T>`)? `Self.F` after a
+  call of a method there changes one flag byte of the stored body and its
+  checksum - in the method's own body, and in an inline method's, in the
+  body of the method that expands it (plan S13, probes Q43 and Q46 DIFF for
+  a record and a class, Q44, Q45, Q47 SAME for a plain and an inline
+  method of a plain type; Q40 for the inline case; dcc64 and dcc32 37.0):
+  no code, but no identical .dcu either. }
+function TQGenericBody(ARoutine: Integer): Boolean;
+var
+  LChild: Integer;
+begin
+  Result := False;
+  LChild := GTree.Nodes[ARoutine].FirstChild;
+  while (LChild <> NIL_NODE) and
+        (GTree.Nodes[LChild].Kind in [nkIdent, nkGenericParams, nkTypeArgs]) do
+  begin
+    if GTree.Nodes[LChild].Kind <> nkIdent then
+      Exit(True);
+    LChild := GTree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+{ tqs: a WRONG qualifier for ANode, bound by PasTree to a declaration of
+  unit ATMid (ASystem: one of System's): another unit visible there whose
+  interface declares a variable or a routine of that name, a distinct
+  entity dcc would accept the spelling of. Not a type or a constant: an
+  alias or an equal value would compile to the same .dcu, and the selftest
+  would blame the comparator for a site that is not wrong. '' when there is
+  none. }
+function TQWrongQualifier(ANode, ATMid: Integer; ASystem: Boolean): string;
+var
+  LU: TPasSemaModel;
+  LName: string;
+  LChosen, LId, LSym: Integer;
+begin
+  Result := '';
+  LName := LowerCase(GTree.NodeText(ANode).TrimLeft(['&']));
+  LChosen := TQChosenUnit(ATMid, ASystem);
+  for LId in TQVisibleUnits(ANode) do
+  begin
+    if (LId = LChosen) or (LId = GQMid) then
+      Continue;
+    LU := GQProject.Model(LId);
+    LSym := TQUnitDecl(LId, LName);
+    if (LSym <> NIL_SYM) and (LU.Symbols[LSym].Kind in [skVar, skRoutine]) and
+       not (sfBuiltin in LU.Symbols[LSym].Flags) and
+       not TQShadowed(ANode, LU.UnitNameLower) then
+      Exit(LU.UnitNameLower + '.');
+  end;
+end;
+
+{ tq: is ANode the first segment of a unit name written as a qualifier -
+  the base of a member access, spelling a prefix of the unit's own name,
+  System's or a used unit's? Only some of those are bound to a uses entry;
+  the unit's own name and System are no symbol at all. }
+function TQUnitSegment(ANode: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LText, LName: string;
+  LIdx: Integer;
+
+  function Prefix(const AUnit: string): Boolean;
+  begin
+    Result := SameText(AUnit, LText) or
+      AUnit.StartsWith(LText + '.', True);
+  end;
+
+begin
+  Result := False;
+  if (GTree.Nodes[ANode].Parent = NIL_NODE) or
+     (GTree.Nodes[GTree.Nodes[ANode].Parent].Kind <> nkMember) or
+     (GTree.Nodes[GTree.Nodes[ANode].Parent].FirstChild <> ANode) then
+    Exit;
+  LM := GQProject.Model(GQMid);
+  LText := GTree.NodeText(ANode).TrimLeft(['&']);
+  if Prefix(LM.UnitNameLower) or Prefix('system') then
+    Exit(True);
+  for LIdx := 0 to High(LM.UsesList) do
+  begin
+    LName := LM.UsesList[LIdx].NameFull;
+    if Prefix(LName) then
+      Exit(True);
+  end;
+end;
+
+{ tq: a site that writes AQualifier before the identifier ANode. Dropped
+  and counted in a file included twice. }
+procedure AddQualifySite(const AKind, AQualifier: string; ANode: Integer;
+  const ARoutine: string);
+var
+  LVis, LFile: Integer;
+  LSite: TSite;
+begin
+  LVis := GTree.Nodes[ANode].FirstToken;
+  VisOffset(LVis, LFile);
+  if GIncludedTwice[LFile] then
+  begin
+    Inc(GDropped);
+    Exit;
+  end;
+  LSite := Default(TSite);
+  LSite.Kind := AKind;
+  LSite.Ops := GTree.NodeText(ANode);
+  LSite.Span := SpanText(LVis, LVis);
+  LSite.Routine := ARoutine;
+  LSite.Edit := AQualifier;
+  LSite.OpenVis := LVis;
+  LSite.CloseVis := LVis;
+  LSite.OpenText := AQualifier;
+  LSite.CloseText := '';
+  LSite.OpenOrder := 0;
+  GSites.Add(LSite);
+end;
+
+{ tq: one identifier. A name that is a reference PasTree bound - in any
+  position where a qualified spelling means the same declaration - takes the
+  spelling that can only mean the declaration PasTree chose (plan S12-S13):
+  a unit-level declaration of any unit, System's builtins included,
+  `<Unit>.Name`; a member of the method's own type in its body `Self.Name`.
+  Every name left as written is counted by why (see the GQ counters). }
+procedure TQIdent(ANode: Integer; const ARoutine: string; AInBody,
+  AStored: Boolean; AInWith: Integer);
+var
+  LParent, LIndex, LTMid, LSym, LScope, LMeth, LOwner: Integer;
+  LM, LTM: TPasSemaModel;
+  LPk: TPasNodeKind;
+  LQual: string;
+begin
+  if nfName in GTree.Nodes[ANode].Flags then
+    Exit;
+  // A keyword spelled as a type (`string`) has no qualified form.
+  if GPre.VisibleToken(GTree.Nodes[ANode].FirstToken).Kind <> tkIdentifier then
+    Exit;
+  LParent := GTree.Nodes[ANode].Parent;
+  LIndex := 0;
+  LPk := nkError;
+  if LParent <> NIL_NODE then
+  begin
+    LPk := GTree.Nodes[LParent].Kind;
+    LSym := GTree.Nodes[LParent].FirstChild;
+    while (LSym <> NIL_NODE) and (LSym <> ANode) do
+    begin
+      Inc(LIndex);
+      LSym := GTree.Nodes[LSym].NextSibling;
+    end;
+  end;
+  // The selector after a dot is bound by the type before it (S15's).
+  if (LPk = nkMember) and (LIndex = 1) then
+  begin
+    Inc(GQSelector);
+    Exit;
+  end;
+  // A declared name.
+  if (LIndex = 0) and (LPk in [nkTypeDecl, nkConstDecl, nkEnumValue,
+     nkPropertyDecl, nkGenericParam, nkUnit, nkProgram, nkLibrary, nkPackage,
+     nkUsesItem]) then
+    Exit;
+  // Positions with no qualified spelling: a property's specifiers, a method
+  // resolution clause, an exports item, a directive's arguments, a label,
+  // a program parameter, an attribute's name, a record constant's field
+  // name, a named argument, the name after `inherited`.
+  if (LPk in [nkPropSpec, nkMethodResolution, nkExportsItem, nkDirective,
+     nkGotoStmt, nkLabeledStmt, nkLabelSec, nkProgramParams, nkInherited,
+     nkUsesItem]) or
+     ((LIndex = 0) and (LPk in [nkAttribute, nkAggregateField, nkNamedArg])) then
+  begin
+    Inc(GQPosition);
+    Exit;
+  end;
+  // The head of what follows `inherited`, `inherited Create(X)`: the
+  // name is looked up in the ancestor, and `inherited Self.Create` is no
+  // spelling at all.
+  LSym := ANode;
+  while (GTree.Nodes[LSym].Parent <> NIL_NODE) and
+        (GTree.Nodes[GTree.Nodes[LSym].Parent].Kind in [nkCall, nkIndex,
+          nkMember]) and
+        (GTree.Nodes[GTree.Nodes[LSym].Parent].FirstChild = LSym) do
+    LSym := GTree.Nodes[LSym].Parent;
+  if (GTree.Nodes[LSym].Parent <> NIL_NODE) and
+     (GTree.Nodes[GTree.Nodes[LSym].Parent].Kind = nkInherited) then
+  begin
+    Inc(GQPosition);
+    Exit;
+  end;
+  if SameText(GTree.NodeText(ANode), 'Self') then
+  begin
+    Inc(GQLocal);
+    Exit;
+  end;
+  LM := GQProject.Model(GQMid);
+  LTMid := GQMid;
+  LSym := LM.RefMap[ANode];
+  if LSym = NIL_SYM then
+  begin
+    if not LM.ExtRefMap.TryGetValue(ANode, GQExt) then
+    begin
+      // A unit name's segment written as a qualifier is no symbol's.
+      if TQUnitSegment(ANode) then
+        Exit;
+      Inc(GQUnbound);
+      GQUnboundList.Add(SpanText(GTree.Nodes[ANode].FirstToken,
+        GTree.Nodes[ANode].FirstToken) + #9 + GTree.NodeText(ANode) + #9 +
+        ARoutine);
+      Exit;
+    end;
+    LTMid := GQExt.UnitId;
+    LSym := GQExt.Sym;
+  end;
+  LTM := GQProject.Model(LTMid);
+  if (LTMid = GQMid) and (LTM.Symbols[LSym].DeclNode = ANode) then
+    Exit;
+  case LTM.Symbols[LSym].Kind of
+    skUnitRef, skKeyword:
+      Exit;
+    skLabel, skParam, skGenericParam:
+      begin
+        Inc(GQLocal);
+        Exit;
+      end;
+  end;
+  LScope := LTM.Symbols[LSym].Scope;
+  if LScope = NIL_SCOPE then
+  begin
+    Inc(GQLocal);
+    Exit;
+  end;
+  // An unscoped enum's value is declared in the enum's own scope, whose
+  // parent is where the type is declared.
+  if LTM.Scopes[LScope].Kind = sckEnum then
+  begin
+    LScope := LTM.Scopes[LScope].Parent;
+    if (LScope = NIL_SCOPE) or (LTM.Scopes[LScope].Kind = sckStruct) then
+    begin
+      Inc(GQMember);
+      Exit;
+    end;
+  end;
+  case LTM.Scopes[LScope].Kind of
+    sckSystem, sckUnit, sckImplementation:
+      begin
+        // An old-style function result: the function's own name assigned to.
+        if (LTM.Symbols[LSym].Kind = skRoutine) and (LPk = nkAssign) and
+           (LIndex = 0) then
+        begin
+          Inc(GQPosition);
+          Exit;
+        end;
+        // `Slice` is compiler magic only as written: `System.Slice(A, N)` is
+        // E2193 (S14, System.Classes).
+        if SameText(LTM.Symbols[LSym].Name, 'Slice') and
+           ((LTM.Scopes[LScope].Kind = sckSystem) or (LTMid = GQSystemMid)) then
+        begin
+          Inc(GQPosition);
+          Exit;
+        end;
+        if LTM.Scopes[LScope].Kind = sckSystem then
+          LQual := 'System'
+        else
+          LQual := LTM.UnitNameLower;
+        if LQual = '' then
+        begin
+          Inc(GQUnbound);
+          Exit;
+        end;
+        if not TQUnitVisible(ANode, LTMid,
+           LTM.Scopes[LScope].Kind = sckSystem) then
+        begin
+          Inc(GQInvisible);
+          GQInvisibleList.Add(SpanText(GTree.Nodes[ANode].FirstToken,
+            GTree.Nodes[ANode].FirstToken) + #9 + GTree.NodeText(ANode) + #9 +
+            ARoutine + #9 + LQual);
+          Exit;
+        end;
+        // A declaration of the unit's own further down - a pointer type's
+        // target, `PFoo = ^TFoo`, a forward-declared class's full
+        // declaration: the qualified name must be declared already (E2003).
+        if (LTMid = GQMid) and (LTM.Symbols[LSym].DeclNode <> NIL_NODE) and
+           (GTree.Nodes[LTM.Symbols[LSym].DeclNode].FirstToken >
+            GTree.Nodes[ANode].FirstToken) then
+        begin
+          Inc(GQForward);
+          Exit;
+        end;
+        if TQShadowed(ANode, LQual) then
+        begin
+          Inc(GQShadowed);
+          Exit;
+        end;
+        if (LTM.Symbols[LSym].Kind = skRoutine) and
+           TQOverloadMerged(ANode, LTMid,
+             LTM.Scopes[LScope].Kind = sckSystem) then
+        begin
+          Inc(GQOverload);
+          Exit;
+        end;
+        if GQSelftest then
+        begin
+          // The selftest: one wrong qualifier per routine, where there is one.
+          if GQPlanted.ContainsKey(ARoutine) then
+            Exit;
+          LQual := TQWrongQualifier(ANode, LTMid,
+            LTM.Scopes[LScope].Kind = sckSystem);
+          if LQual <> '' then
+          begin
+            GQPlanted.Add(ARoutine, True);
+            AddQualifySite('planted', LQual, ANode, ARoutine);
+          end;
+          Exit;
+        end;
+        AddQualifySite('unit', LQual + '.', ANode, ARoutine);
+      end;
+    sckStruct:
+      begin
+        if not AInBody or
+           not (LTM.Symbols[LSym].Kind in [skField, skVar, skRoutine,
+             skProperty]) then
+        begin
+          Inc(GQMember);
+          Exit;
+        end;
+        if AInWith > 0 then
+        begin
+          Inc(GQWith);
+          Exit;
+        end;
+        LMeth := TQMethodScope(TQScopeAt(ANode));
+        if LMeth = NIL_SCOPE then
+        begin
+          Inc(GQMember);
+          Exit;
+        end;
+        // A class method's Self is its class, and a static one has none -
+        // only its declaration says which (S15 takes them).
+        if GTree.Nodes[LM.Scopes[LMeth].OwnerNode].Aux = 1 then
+        begin
+          Inc(GQStatic);
+          Exit;
+        end;
+        // A nested type's method reaches its outer types' members bare too,
+        // and those are no member of Self.
+        LOwner := LM.Scopes[LMeth].StructSym;
+        if (LM.Symbols[LOwner].Scope = NIL_SCOPE) or
+           (LM.Scopes[LM.Symbols[LOwner].Scope].Kind = sckStruct) then
+        begin
+          Inc(GQNested);
+          Exit;
+        end;
+        if AStored then
+        begin
+          Inc(GQStored);
+          Exit;
+        end;
+        // A field of a procedural type standing as a statement calls it -
+        // `FProc;` - and `Self.FProc;` of a `reference to` type is E2014
+        // "statement expected" (S14, System.Threading).
+        if (LTM.Symbols[LSym].Kind in [skField, skVar, skProperty]) and
+           (LPk = nkExprStmt) then
+        begin
+          Inc(GQPosition);
+          Exit;
+        end;
+        if not GQSelftest then
+          AddQualifySite('self', 'Self.', ANode, ARoutine);
+      end;
+  else
+    Inc(GQLocal);
+  end;
+end;
+
+{ tq: every identifier of the subtree at ANode, in pre-order. ARoutine as
+  in T1Walk; AInBody - inside a routine body or an initialization or
+  finalization section, where a member reached bare is Self's; AInWith - the
+  with statements around the node, whose targets' members a bare name may
+  be. }
+procedure TQWalk(ANode: Integer; const ARoutine: string; AInBody,
+  AStored: Boolean; AInWith: Integer);
+var
+  LChild, LIndex: Integer;
+  LRoutine: string;
+begin
+  LRoutine := ARoutine;
+  case GTree.Nodes[ANode].Kind of
+    nkAsmStmt:
+      Exit;
+    nkRoutine:
+      begin
+        LRoutine := RoutineName(ANode);
+        if ARoutine <> '' then
+          LRoutine := ARoutine + '.' + LRoutine;
+        AStored := AStored or TQGenericBody(ANode);
+      end;
+    nkRoutineBody:
+      AInBody := True;
+    nkInitSec:
+      begin
+        LRoutine := GUnitName;
+        AInBody := True;
+      end;
+    nkFinalSec:
+      begin
+        LRoutine := 'Finalization';
+        AInBody := True;
+      end;
+    nkIdent:
+      TQIdent(ANode, ARoutine, AInBody, AStored, AInWith);
+    nkWithStmt:
+      begin
+        // `with A, B do S`: B is read in A's scope, S in both.
+        LIndex := 0;
+        LChild := GTree.Nodes[ANode].FirstChild;
+        while LChild <> NIL_NODE do
+        begin
+          TQWalk(LChild, LRoutine, AInBody, AStored, AInWith + Ord(LIndex > 0));
+          Inc(LIndex);
+          LChild := GTree.Nodes[LChild].NextSibling;
+        end;
+        Exit;
+      end;
+  end;
+  LChild := GTree.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    TQWalk(LChild, LRoutine, AInBody, AStored, AInWith);
     LChild := GTree.Nodes[LChild].NextSibling;
   end;
 end;
@@ -2542,6 +3209,8 @@ begin
         else if GArg = 't2' then GMode := xmT2
         else if GArg = 't3' then GMode := xmT3
         else if GArg = 't3x' then GMode := xmT3X
+        else if GArg = 'tq' then GMode := xmTQ
+        else if GArg = 'tqs' then GMode := xmTQS
         else raise Exception.Create('unknown mode: ' + GArg);
       end
       else if GArg.StartsWith('-Undef:', True) then
@@ -2576,7 +3245,7 @@ begin
     end;
     if (GFile = '') or (GOut = '') then
     begin
-      Writeln(ErrOutput, 'Usage: PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2|t3|t3x ' +
+      Writeln(ErrOutput, 'Usage: PasTreeXform <unit.pas> -mode:t0|ts|t0f|t1|t2|t3|t3x|tq|tqs ' +
         '-out:<dir> [-p:<platform>] [-D:X;Y]... [-Undef:X;Y]... ' +
         '[-I:<dir>[;<dir>]]... [-oracle [-S:<dir>[;<dir>]]...] ' +
         '[-sites:<ids>]');
@@ -2599,6 +3268,10 @@ begin
     GArgMap := TDictionary<string, string>.Create;
     GInlineNames := TDictionary<string, Boolean>.Create;
     GInitStarts := TDictionary<Integer, Boolean>.Create;
+    GQUnboundList := TStringList.Create;
+    GQPlanted := TDictionary<string, Boolean>.Create;
+    GQInvisibleList := TStringList.Create;
+    GQSelftest := GMode = xmTQS;
     GWritten := TDictionary<string, Boolean>.Create;
     GSitesText := TStringList.Create;
     GFileLines := TStringList.Create;
@@ -2620,7 +3293,30 @@ begin
       if GOracle and (GUndefNames.Count > 0) then
         raise Exception.Create('-Undef cannot reach a project analysis: ' +
           'use -oracle without it');
-      if GOracle and OracleCouldMatter(GPre) then
+      if GMode in [xmTQ, xmTQS] then
+      begin
+        // tq judges the bindings of the project analysis itself: its model
+        // of the unit, the tree that model was built on and the stream it
+        // was built from - the oracle's, whatever the unit's $IFs ask.
+        GQProject := TPasSemaProject.Create(GPlatform,
+          GSearch.ToArray + GIncDirs.ToArray, GDefNames.ToArray);
+        GQProject.SetNamespaces(ProjectNamespaces);
+        GQMid := GQProject.AnalyzeProject(GFile);
+        if (GQMid < 0) or
+           (Length(GQProject.Model(GQMid).Tree.Source.Files) = 0) then
+          raise Exception.Create('the project analysis kept no ' +
+            'preprocessed text of the unit');
+        if GQProject.Model(GQMid).Demoted or
+           (GQProject.Model(GQMid).NodeScope = nil) then
+          raise Exception.Create('the project analysis kept no scopes of ' +
+            'the unit');
+        GPre := GQProject.Model(GQMid).Tree.Source;
+        if not SameText(NoSlash(GPre.FileNames[0]), NoSlash(GFile)) then
+          raise Exception.CreateFmt('the project analyzed %s',
+            [GPre.FileNames[0]]);
+        GOracleUsed := True;
+      end
+      else if GOracle and OracleCouldMatter(GPre) then
       begin
         // The stream PasTree really analyzes: the project's first pass
         // (compiler-provided names answered) and its second, the oracle's.
@@ -2648,9 +3344,13 @@ begin
 
       GDiags := nil;
       GApplied := 0;
-      if GMode in [xmTS, xmT1, xmT2, xmT3, xmT3X] then
+      if GMode in [xmTS, xmT1, xmT2, xmT3, xmT3X, xmTQ, xmTQS] then
       begin
         GTree := TPasParser.ParseFile(GPre, GDiags);
+        // tq: the parse above counts the diagnostics; the sites are the
+        // analysis's own nodes.
+        if GMode in [xmTQ, xmTQS] then
+          GTree := GQProject.Model(GQMid).Tree;
         for GIdx := 0 to High(GDiags) do
           if GDiags[GIdx].VisIndex <= High(GPre.Visible) then
           begin
@@ -2681,6 +3381,25 @@ begin
             end;
           xmT3:
             T3Walk;
+          xmTQ, xmTQS:
+            begin
+              GQImplTok := MaxInt;
+              GJdx := GTree.Nodes[0].FirstChild;
+              while GJdx <> NIL_NODE do
+              begin
+                if GTree.Nodes[GJdx].Kind = nkImplementationSec then
+                  GQImplTok := GTree.Nodes[GJdx].FirstToken;
+                GJdx := GTree.Nodes[GJdx].NextSibling;
+              end;
+              GQSystemMid := -1;
+              GQSysInitMid := -1;
+              for GIdx := 0 to GQProject.ModelCount - 1 do
+                if GQProject.Model(GIdx).UnitNameLower = 'system' then
+                  GQSystemMid := GIdx
+                else if GQProject.Model(GIdx).UnitNameLower = 'sysinit' then
+                  GQSysInitMid := GIdx;
+              TQWalk(0, '', False, False, 0);
+            end;
         else
           // t3x: the print, then t1's parentheses and t2's blocks over it -
           // their sites after its own, under t2's line rule for both.
@@ -2821,6 +3540,20 @@ begin
         'preprocessor')]));
       if GMode in [xmT3, xmT3X] then
         GSitesText.Add('# print ' + GPrintStats);
+      if GMode in [xmTQ, xmTQS] then
+      begin
+        GSitesText.Add(Format('# names locals=%d  excluded-member=%d  ' +
+          'excluded-with=%d  excluded-static=%d  excluded-nested=%d  ' +
+          'excluded-shadowed=%d  excluded-overload=%d  excluded-stored=%d  ' +
+          'excluded-forward=%d  excluded-position=%d  unbound=%d  ' +
+          'invisible=%d  selectors=%d', [GQLocal, GQMember, GQWith, GQStatic,
+          GQNested, GQShadowed, GQOverload, GQStored, GQForward, GQPosition,
+          GQUnbound, GQInvisible, GQSelector]));
+        for GLine in GQUnboundList do
+          GSitesText.Add('# unbound' + #9 + GLine);
+        for GLine in GQInvisibleList do
+          GSitesText.Add('# invisible' + #9 + GLine);
+      end;
       GSitesText.Add('# ' + GFile);
       GSitesText.Add('# id' + #9 + 'kind' + #9 + 'ops' + #9 + 'span' + #9 +
         'routine' + #9 + 'edit' + #9 + 'applied');
@@ -2866,10 +3599,38 @@ begin
         GLine := GLine + ' excluded-init ' + IntToStr(GExcludedInit);
       if GExcludedPrint > 0 then
         GLine := GLine + ' excluded-print ' + IntToStr(GExcludedPrint);
-      if GMode in [xmTS, xmT1, xmT2, xmT3, xmT3X] then
+      if GMode in [xmTQ, xmTQS] then
+      begin
+        if GQMember > 0 then
+          GLine := GLine + ' excluded-member ' + IntToStr(GQMember);
+        if GQWith > 0 then
+          GLine := GLine + ' excluded-with ' + IntToStr(GQWith);
+        if GQStatic > 0 then
+          GLine := GLine + ' excluded-static ' + IntToStr(GQStatic);
+        if GQNested > 0 then
+          GLine := GLine + ' excluded-nested ' + IntToStr(GQNested);
+        if GQShadowed > 0 then
+          GLine := GLine + ' excluded-shadowed ' + IntToStr(GQShadowed);
+        if GQOverload > 0 then
+          GLine := GLine + ' excluded-overload ' + IntToStr(GQOverload);
+        if GQForward > 0 then
+          GLine := GLine + ' excluded-forward ' + IntToStr(GQForward);
+        if GQStored > 0 then
+          GLine := GLine + ' excluded-stored ' + IntToStr(GQStored);
+        if GQPosition > 0 then
+          GLine := GLine + ' excluded-position ' + IntToStr(GQPosition);
+        // Locals have no qualified form at all: said, not added to the
+        // excluded total the driver sums.
+        GLine := GLine + ' locals ' + IntToStr(GQLocal);
+        if GQUnbound > 0 then
+          GLine := GLine + ' unbound ' + IntToStr(GQUnbound);
+        if GQInvisible > 0 then
+          GLine := GLine + ' invisible ' + IntToStr(GQInvisible);
+      end;
+      if GMode in [xmTS, xmT1, xmT2, xmT3, xmT3X, xmTQ, xmTQS] then
         GLine := GLine + ' applied ' + IntToStr(GApplied);
       Writeln('sites ', GLine);
-      if GMode in [xmTS, xmT1, xmT2, xmT3, xmT3X] then
+      if GMode in [xmTS, xmT1, xmT2, xmT3, xmT3X, xmTQ, xmTQS] then
         Writeln('parse ', Length(GDiags));
       if GMode in [xmT3, xmT3X] then
         Writeln('print ', GPrintStats);
@@ -2883,6 +3644,10 @@ begin
       end;
     finally
       GInitStarts.Free;
+      GQUnboundList.Free;
+      GQPlanted.Free;
+      GQInvisibleList.Free;
+      GQProject.Free;
       GPrintCase.Free;
       GInlineNames.Free;
       GArgMap.Free;
