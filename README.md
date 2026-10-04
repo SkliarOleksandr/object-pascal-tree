@@ -1637,7 +1637,14 @@ Still open, roughly in the order we're tackling it:
   6): unit-level names and a method's own members are judged by dcc over the
   self-host and the Studio RTL, and since v0.91.0 the members reached after
   a dot, through a default array property or a `with` target as well
-  (`tm`); the wide run and a gate stage are the next step.
+  (`tm`); since v0.92.0 the rung is a gate stage (`tqm`, its selftests
+  `tqs` and `tms`, with floors for the names it cannot judge) and has run
+  over every Studio rtl/vcl/fmx unit and four third-party libraries. What
+  it found is the resolver's work list (`docs/parser-fidelity.md` sec. 6):
+  a member's visibility from another unit ignored, an inherited member
+  missed for a unit-level name, two standard procedures System also
+  declares, a `with` body falling past Self's members, a nested ancestor
+  of the same name, a string helper's `Length`.
 - **A real formatter for Delphi code, built on the structural printer.** The
   printer regenerates a unit from its tree, but lays it out only for
   checking - one token per line, all on one line, or on the original's lines.

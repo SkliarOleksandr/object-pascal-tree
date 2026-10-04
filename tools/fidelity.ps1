@@ -215,10 +215,13 @@ if ($Worker -ne '') {
 $selfMode = $Mode -in @('ts', 'tqs', 'tms')
 $doLocalize = (-not $NoLocalize) -and ($Mode -in @('t1', 't2', 't3', 't3x', 'tq', 'tm', 'tqm') -or ($selfMode -and $Localize))
 if (($Oracle -or $Mode -in $qModes) -and $OraclePath.Count -eq 0) {
-  # What PasTreeSemaProject -proj adds (StudioSearchPaths there).
+  # What PasTreeSemaProject -proj adds (StudioSearchPaths there), and
+  # source\data: without it Data.DB stays unresolved, and so does every
+  # member a dataset descendant inherits (S16: a corpus's datasets bound
+  # their own `Close` to System's).
   $OraclePath = @('source\rtl\sys', 'source\rtl\common', 'source\rtl\win',
     'source\rtl\win\winrt', 'source\rtl\net', 'source\databinding\engine',
-    'source\xml', 'source\vcl', 'source\fmx') | ForEach-Object { Join-Path $Bds $_ } |
+    'source\data', 'source\xml', 'source\vcl', 'source\fmx') | ForEach-Object { Join-Path $Bds $_ } |
     Where-Object { Test-Path -LiteralPath $_ }
 }
 
@@ -398,22 +401,45 @@ function Compare-Dumps([string] $A, [string] $B) {
   }
   # A call that only takes another target changes no byte of the routine,
   # only its fixup's slot (tms: `Strings.Remove` cast to an ancestor's
-  # Remove): a differing fixup names the routine whose data holds it - when
-  # no data differs, so that both dumps lay the data out alike.
-  if ($routines.Count -gt 0 -or $other.Count -gt 0) { return [pscustomobject]@{ Routines = $routines; Other = $other } }
+  # Remove): a differing fixup names the routine whose data holds it. The
+  # fixups are compared routine by routine, at offsets relative to the
+  # routine's data, so another routine's data growing elsewhere in the unit
+  # does not hide it (S16: Vcl.Menus' TPopupMenu.Create beside a Destroy
+  # whose data changed).
   $fa = Read-Fixups $A
   $fb = Read-Fixups $B
-  foreach ($off in $fa.Fixups.Keys) {
-    if ($fb.Fixups.Contains($off) -and $fa.Fixups[$off] -eq $fb.Fixups[$off]) { continue }
-    $at = [Convert]::ToInt32($off, 16)
-    foreach ($r in $fa.Ranges) {
-      if ($at -ge $r.Lo -and $at -lt $r.Hi) {
-        if (-not $routines.Contains($r.Name)) { $routines.Add($r.Name) }
-        break
-      }
-    }
+  $pa = Fixups-ByRoutine $fa
+  $pb = Fixups-ByRoutine $fb
+  foreach ($k in $pa.Keys) {
+    if (-not $pb.Contains($k) -or $pa[$k] -eq $pb[$k]) { continue }
+    $name = $k -replace '#\d+$', ''
+    if (-not $routines.Contains($name)) { $routines.Add($name) }
   }
   [pscustomobject]@{ Routines = $routines; Other = $other }
+}
+
+# Read-Fixups' result as routine (name#n, the n-th of that name) -> its
+# fixups at offsets relative to the routine's data, one string.
+function Fixups-ByRoutine($F) {
+  $by = [ordered]@{}
+  $seen = @{}
+  $offs = @($F.Fixups.Keys | ForEach-Object { [pscustomobject]@{ At = [Convert]::ToInt32($_, 16); Text = $F.Fixups[$_] } } |
+    Sort-Object At)
+  # Ranges in data order, swept once beside the sorted fixups.
+  $i = 0
+  foreach ($r in @($F.Ranges | Sort-Object Lo)) {
+    $n = 0; if ($seen.ContainsKey($r.Name)) { $n = $seen[$r.Name] + 1 }
+    $seen[$r.Name] = $n
+    $sb = New-Object System.Text.StringBuilder
+    while ($i -lt $offs.Count -and $offs[$i].At -lt $r.Lo) { $i++ }
+    $j = $i
+    while ($j -lt $offs.Count -and $offs[$j].At -lt $r.Hi) {
+      [void]$sb.Append(('{0:X} {1};' -f ($offs[$j].At - $r.Lo), $offs[$j].Text))
+      $j++
+    }
+    $by["$($r.Name)#$n"] = $sb.ToString()
+  }
+  return $by
 }
 
 # A dump's fixups, offset (hex) -> line, and the data range of each top-level
@@ -424,9 +450,22 @@ function Read-Fixups([string] $Path) {
   $inFix = $false
   $reR = [regex]'^routine ''(?<name>[^'']*)''.* data@(?<off>[0-9A-F]+)\[(?<len>\d+)\]='
   $reF = [regex]'^  @(?<off>[0-9A-F]+) (?<rest>.*)$'
+  # A fixup names its target by declaration index: an import or a cast's
+  # type added by the rewrite renumbers them all, so the index is read back
+  # as the declaration's name (`'Name' #idx`, an import's `decl=#idx`); an
+  # index the dump names nowhere (an anonymous record) reads as `?`, so a
+  # renumbering does not name every routine (S16: Vcl.Grids, LongMulDiv).
+  $reD = [regex]'''(?<name>[^'']*)'' #(?<idx>[0-9A-F]+)\b'
+  $reI = [regex]'import ''(?<name>[^'']*)''.* decl=#(?<idx>[0-9A-F]+)\b'
+  $reS = [regex]'slot=#(?<idx>[0-9A-F]+)'
+  $decl = @{}
   foreach ($line in [IO.File]::ReadLines($Path)) {
     if ($line.StartsWith('--- fixups')) { $inFix = $true; continue }
     if (-not $inFix) {
+      foreach ($re in @($reD, $reI)) {
+        $d = $re.Match($line)
+        if ($d.Success -and -not $decl.ContainsKey($d.Groups['idx'].Value)) { $decl[$d.Groups['idx'].Value] = $d.Groups['name'].Value }
+      }
       $m = $reR.Match($line)
       if ($m.Success) {
         $lo = [Convert]::ToInt32($m.Groups['off'].Value, 16)
@@ -435,7 +474,10 @@ function Read-Fixups([string] $Path) {
       continue
     }
     $f = $reF.Match($line)
-    if ($f.Success) { $fix[$f.Groups['off'].Value] = $f.Groups['rest'].Value }
+    if ($f.Success) {
+      $fix[$f.Groups['off'].Value] = $reS.Replace($f.Groups['rest'].Value, {
+          param($s) if ($decl.ContainsKey($s.Groups['idx'].Value)) { "slot='" + $decl[$s.Groups['idx'].Value] + "'" } else { 'slot=?' } })
+    }
   }
   [pscustomobject]@{ Fixups = $fix; Ranges = $ranges }
 }
@@ -835,7 +877,11 @@ function Invoke-Unit([string] $u, [string] $work) {
     $extra = @($cmp.Routines | Where-Object { $siteNames -notcontains (Norm-Name $_) })
     if ($sites.Count -gt 0) {
       $r.WithSites = 1; $r.Diff = 1; $r.Sites = $sites.Count; $r.Named = $named
-      if ($named -lt $sites.Count) { $r.Broken = 1 }
+      # With the localizer on, it is the judge: a site it finds alone is
+      # seen even when the dump cannot say where (a call taking another
+      # import of the same name changes only an import record the dump does
+      # not decode - plan F47; S16 tms FMX.Objects, Vcl.AppEvnts).
+      if ($named -lt $sites.Count -and -not $doLocalize) { $r.Broken = 1 }
     } else {
       $r.Broken = 1   # a DIFF with no edit at all: the copy is not a copy
     }

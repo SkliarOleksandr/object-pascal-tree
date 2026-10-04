@@ -267,9 +267,19 @@ It builds the four tools (Win64, range and overflow checks on), runs the
 comparator's selftest over the self-host, the tree checker and the printer
 over the golden rows, the repository's own sources and the Studio source,
 then `t0f`, `t1`, `t2`, `t3` and `t3x` over the self-host, the units of the
-Studio's Windows RTL package and every extra corpus. About six minutes on
-twelve workers;
+Studio's Windows RTL package and every extra corpus, and the resolver's rung
+(section 6): `tqm` over the self-host and the Studio units, its selftests
+`tqs` and `tms` over the Studio units (an extra corpus takes them on
+request). About six minutes on twelve workers for the tree's stages, as
+many again for the rung's;
 `-Studio all` takes every rtl/vcl/fmx unit, `-Stage` a subset.
+
+The rung's names it cannot judge - bound to nothing, to a unit no name at
+the site can come from, or a member whose base PasTree types against its own
+binding - are counted, and each count is a FLOOR in the expectations
+(`@unbound`, `@invisible`, `@mismatch`; the Studio's per unit list,
+`studio-rtl` or `studio-all`): a resolver change that raises one is a
+regression no `.dcu` shows, one that lowers it asks for the floor to follow.
 
 Every outcome other than OK that is known today is an EXPECTATION with its
 reason (`tools\fidelity-gate.txt`; an extra corpus's in its own file): a unit
@@ -301,7 +311,11 @@ still parses.
 The tree being dcc's, the same harness judges what the analysis BINDS. Mode
 `tq` writes every name PasTree bound so that dcc can only read it as the
 declaration PasTree chose - a unit-level declaration of any unit, System's
-builtins and the unit's own included, as `<unit.full.name>.Name`; a field,
+builtins and the unit's own included, as `<Unit>.Name` with the unit
+spelled as its uses entry writes it (under `uses Windows`, resolved to
+Winapi.Windows through the unit scope names, `Winapi.Windows.X` does not
+compile: dcc finds a qualifier's first segment among the names the uses
+clauses write, and System); a field,
 method or property of the method's own type, reached bare in its body, as
 `Self.Name` - and the unit compiles to the original's `.dcu` exactly when
 every rewritten binding is dcc's. A wrong unit, a member taken for a
@@ -316,18 +330,30 @@ or `-OraclePath`) and edits that analysis's own tree; it compiles under
 
 - `Self.X` and a qualified name in a stored body change only the `$93`
   symbol-reference record under dcc's defaults: `-$Y-` (with `t2`'s
-  `-$O- -$D- -$L-`);
+  `-$O- -$D- -$L-`); a unit whose own text turns `DEFINITIONINFO` or
+  `REFERENCEINFO` on overrides it, and takes unit qualifiers outside
+  stored bodies only - no `Self.`, no cast; with `REFERENCEINFO` itself on
+  (`$Y+`, not `$YD`) every reference is recorded and a unit qualifier
+  changes the record as well (`System.Byte` for `Byte`): none at all;
 - in a generic's body `Self.X` after a call of a method changes one flag
   byte of the stored body and its checksum - no code, but another `.dcu`:
   no `Self.` there;
 - an overload set dcc merges across units records every unit's routine it
-  looked at as an import, used or not, and a builtin System also declares
+  looked at as an import, used or not - and behind a routine marked
+  `overload` every declaration of the name it meets, of any kind (spec
+  6.3.1) - and a builtin System also declares
   (`Flush`) is another routine when qualified: such a name is not written;
-- a qualifier whose first segment a name of the unit hides (a field named
-  like the unit) does not resolve; nor does a qualified name of the unit's
-  own declared further down (`PFoo = ^TFoo`);
+- a qualifier whose first segment a name in scope hides does not resolve
+  (spec 1.2.3) - a field named like the unit, a member of an ancestor of
+  another unit, a `with` target's member, even a member named like the head
+  of a dotted uses entry - and in a method of a class whose ancestry leaves
+  what PasTree can read (a form descending from a type of a unit present
+  as a `.dcu` only), any head may be such a member: no qualifier there;
+  nor does a qualified name of the unit's own declared further down
+  (`PFoo = ^TFoo`);
 - `Slice`, the head of what follows `inherited`, a procedural field standing
-  as a statement (`FProc;`), an old-style function result, a property's
+  as a statement (`FProc;`), a function's own name in its body (its
+  old-style result, `F[I] := C` included, or a recursive call), a property's
   specifiers, a method resolution clause, an exports item, a directive's
   arguments, an attribute's name, a record constant's field name have no
   qualified spelling and are left as written.
@@ -357,7 +383,13 @@ The rules, each from a probe:
   rewrite's: the original side of `tm` is the rewrite with no site;
 - a class variable or method spelled through another type name imports that
   type's class reference: a type base is left as written; so is a class
-  reference base (no named metaclass of the owner to cast to);
+  reference base (no named metaclass of the owner to cast to), `Self` in a
+  class method among them - `TFoo(Self).Create` would call the
+  constructor on an instance;
+- on Win32, a write through a cast of an enclosing routine's variable from
+  a nested routine, after another reference to one, moves dcc32's frame
+  slots - the same code over another frame (dcc64 keeps the layout): no
+  cast of such a base on Win32;
 - a record returned by a call takes no hard cast (a property read through a
   getter does); a protected or private member of another unit's type does
   not survive the cast to it (reached through a descendant the unit
@@ -402,3 +434,24 @@ typed one dereference short; and 123 selectors PasTree binds to nothing -
 an element through a pointer to an array, a record field of a record field,
 a helper's member on a string element, an operator's result, a parameter of
 a nested record type.
+
+As of 2026-10-04 (v0.92.0) the rung has run wide. `tqm` over the self-host
+is 29/29 on Win64 (51 477 names) and Win32 (50 880); over all 661 Studio
+rtl/vcl/fmx units 641 OK (1 039 708 names), the five that do not compile
+standalone, one NONDET and 14 resolver findings; `tqs` there plants 64
+names in 19 units and `tms` 151 members in 44, every one seen and localized
+alone. Over third-party libraries built into bases of their own: spring4d
+134/148 (the rest 11 units that do not compile standalone and three
+findings), Alcinoe 57/60, mORMot 57/60 on Win64 and 59/62 on Win32,
+cnwizards 397/400. The rules above that came from these runs: a qualifier
+spelled as the uses entry writes it, a head hidden by a with target's or an
+ancestor's member or by an ancestry PasTree cannot read, `$Y+` against
+`$YD`, a function's own name, `Self` of a class method, the Win32 frame.
+The resolver findings (plan F37-F50, each a gate expectation): a member's
+visibility from another unit ignored - a private method of a VCL ancestor
+taken for a bare name dcc finds in a unit (F38); an inherited member missed
+for a unit-level or System name (F40); `Flush` and `ChDir`, standard
+procedures System also declares (F41); a name in a `with` body falling past
+Self's inherited members to a System type (F49); a nested class whose
+ancestor is a same-named nested class reaching the outer type's members
+(F48); a string helper's method binding `Length` to Self's type (F50).

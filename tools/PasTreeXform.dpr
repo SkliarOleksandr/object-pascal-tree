@@ -261,14 +261,14 @@ type
   TTMExcl = (tmeOutside, tmeQualified, tmeTypeBase, tmeClassRef, tmeHelper,
     tmeGeneric, tmeLocalType, tmeHidden, tmeRValue, tmeUntyped, tmeUnseen,
     tmeStored, tmeShadowed, tmeForward, tmeWithTarget, tmePosition,
-    tmeProtected, tmeStoredUse, tmeOptimized);
+    tmeProtected, tmeStoredUse, tmeOptimized, tmeSymInfo, tmeUpLevel);
 
 const
   cTMExclNames: array[TTMExcl] of string = ('outside', 'qualified',
     'typebase', 'classref', 'helper', 'generic', 'localtype', 'hidden',
     'rvalue', 'untyped', 'unseen', 'caststored', 'castshadowed',
     'castforward', 'withtarget', 'castposition', 'protected', 'storeduse',
-    'optimized');
+    'optimized', 'castsyminfo', 'uplevel');
   // t3: a print slot's replacement sorts after every insertion at its offset
   // - a `(` or a `begin` that opens there, an `end` closing before it.
   cSlotOrder = 100;
@@ -361,7 +361,23 @@ var
   GQMid: Integer;
   GQExt: TPasExtRef;
   GQLocal, GQMember, GQWith, GQStatic, GQNested, GQShadowed, GQPosition,
-    GQUnbound, GQSelector, GQOverload, GQStored, GQForward, GQInvisible: Integer;
+    GQUnbound, GQSelector, GQOverload, GQStored, GQForward, GQInvisible,
+    GQSymInfo: Integer;
+  // tq, tm: the unit's own text turns DEFINITIONINFO / REFERENCEINFO on
+  // ($Y+, $YD), overriding the harness's -$Y-. The symbol-reference record
+  // ($93) then records `Self.X`, a hard cast and a qualified name in a stored
+  // body (plan S12, Q04, Q05, Q12 under the defaults; S16, a third-party
+  // include turning DEFINITIONINFO on: every such unit DIFFed in raw bytes
+  // only). Such a unit takes unit qualifiers outside stored bodies alone
+  // (Q01: SAME under the defaults) - the whole unit, whatever the
+  // directive's position, as LinesKept.
+  GQSymInfoOn: Boolean;
+  // REFERENCEINFO itself on (`$Y+`, not `$YD`): every reference is recorded,
+  // and a unit qualifier changes the record too (S16 probes, scratch g1-g8:
+  // `System.Byte` for `Byte` under `$Y+`) - no unit qualifier at all.
+  GQRefInfoOn: Boolean;
+  // Win32: see TMUpLevel.
+  GQWin32: Boolean;
   GQUnboundList: TStringList;
   // tq: bindings to a unit no name at the site can come from (see
   // TQUnitVisible) - wrong whatever dcc says, listed in sites.txt.
@@ -810,7 +826,7 @@ function EndsOnLineOfNext(ANode: Integer): Boolean; forward;
   AnsiChar = 'abc' + 'def'` compiles, `= ('abc' + 'def')` is E2010
   'AnsiChar' and 'string', in each of the four positions; `(1 + 2)` for an
   Integer, a string, a set or a Byte element compiles (plan S7, probes
-  init-paren; mORMot's char tables). A parse cannot tell a structured type
+  init-paren; a third-party library's char tables). A parse cannot tell a structured type
   from a scalar one behind a name, so every such value start is recorded;
   an untyped constant's value takes the parentheses (no aggregate there). }
 procedure CollectInitStarts(ANode: Integer);
@@ -942,15 +958,68 @@ end;
 
 { tq: is the qualifier's first segment, at ANode, a name the unit itself
   declares or binds - a field named like the unit hides it there, and the
-  qualified spelling stops the compile (plan S12, Q11: E2018). Only the
-  unit's own scopes are asked: the names an ancestor or a with target of
-  another unit brings in are not seen here (a hit there shows as
-  XFORM-FAIL, and is a harness rule to add). }
+  qualified spelling stops the compile (plan S12, Q11: E2018). The unit's
+  own scopes are asked, then the members of every open with target and of
+  the method's own type, ancestors of other units included: in a logging
+  library's `with TLog.Family do Level := LOG_ALL`, the family class's
+  method `Logger` hides the unit Logger, and `logger.LOG_ALL` is E2003
+  (spec 1.2.3 and 5.7; S16 probes N06-N09: E2018 for an inherited member, a
+  with target's, a field named like a dotted entry's head). A with target
+  PasTree cannot type counts as hiding it. }
+function TMWithMember(ANode: Integer; const ANameLower: string;
+  out ATarget, AMid, ASym: Integer; out AX: TSemaXType;
+  out AUncertain: Boolean): Boolean; forward;
+function TQMethodScope(AScope: Integer): Integer; forward;
+
+{ tq: does AX's ancestry leave what PasTree can see - a class or interface
+  whose chain stops short of System, its heritage naming a type of a unit
+  read from a .dcu alone (cnwizards' forms descend from the IDE's
+  TDockableForm, DockForm of designide)? Any name can then be a member there
+  (`Controls`, TWinControl's array property, hid unit Controls: E2029), so
+  the method's Self counts as hiding every qualifier head. }
+function TQAncestryOpen(const AX: TSemaXType): Boolean;
+var
+  LCur, LNext: TSemaXType;
+  LDepth: Integer;
+begin
+  Result := False;
+  LCur := GQProject.CanonTypeX(AX);
+  for LDepth := 1 to 48 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LNext := GQProject.AncestorOfX(LCur);
+    if not XValid(LNext) then
+      Exit((LCur.UnitId <> GQSystemMid) and (GQProject.Model(LCur.UnitId).
+        Symbols[LCur.Sym].TypeCat in [tcClass, tcInterface]));
+    LCur := GQProject.CanonTypeX(LNext);
+  end;
+end;
+
+{ tq: is ANameLower the name of the routine ARoutine (`TFoo.Bar`, a nested
+  routine `TFoo.Bar.Inner`) or of one enclosing it? A function's own name in
+  its body is its old-style result as an assignment's target - `F := X`,
+  `F[I] := C` (cnwizards DCU_Out's ShortString function) - and a recursive
+  call elsewhere: qualified, `Unit.F[I] :=` calls it (E2035) and
+  `Self.Root :=` in `function TURI.Root` is E2064 (S16, mORMot). Neither is
+  written, whatever its position. }
+function TQOwnRoutine(const ARoutine, ANameLower: string): Boolean;
+var
+  LPart: string;
+begin
+  Result := False;
+  for LPart in ARoutine.Split(['.']) do
+    if SameText(LPart, ANameLower) then
+      Exit(True);
+end;
+
 function TQShadowed(ANode: Integer; const AQualifier: string): Boolean;
 var
   LM: TPasSemaModel;
   LFirst: string;
-  LSym, LDot: Integer;
+  LSym, LDot, LTarget, LMid, LCtx, LMeth: Integer;
+  LX: TSemaXType;
+  LUncertain: Boolean;
 begin
   LM := GQProject.Model(GQMid);
   LFirst := LowerCase(AQualifier);
@@ -960,6 +1029,20 @@ begin
   LSym := LM.ResolveAt(TQScopeAt(ANode), LFirst,
     GTree.Nodes[ANode].FirstToken);
   Result := (LSym <> NIL_SYM) and (LM.Symbols[LSym].Kind <> skUnitRef);
+  if Result then
+    Exit;
+  if TMWithMember(ANode, LFirst, LTarget, LMid, LSym, LX, LUncertain) or
+     LUncertain then
+    Exit(True);
+  LMeth := TQMethodScope(TQScopeAt(ANode));
+  if (LMeth <> NIL_SCOPE) and (LM.Scopes[LMeth].StructSym <> NIL_SYM) then
+  begin
+    LX.UnitId := GQMid;
+    LX.Sym := LM.Scopes[LMeth].StructSym;
+    LX.Inst := NIL_INST;
+    Result := GQProject.FindMemberX(GQMid, LX, LFirst, LMid, LSym, LCtx) or
+      TQAncestryOpen(LX);
+  end;
 end;
 
 { tq: the method whose body holds the scope AScope - the nearest routine
@@ -1009,6 +1092,34 @@ begin
     Result := Result + [GQSystemMid];
 end;
 
+{ tq: the qualifier that names unit AMid in this unit's code - the unit's
+  own name, `system` / `sysinit`, else its uses entry AS WRITTEN. dcc finds
+  a qualifier's first segment among the names written in the uses clauses
+  (and System): under `uses Windows` (Winapi.Windows through -NS),
+  `Winapi.Windows.X` is E2003 on `Winapi`, `Windows.X` is the same .dcu
+  (spec 1.2.3; S16 probes N01-N05: `System.Classes.X` under `uses Classes`
+  compiles only because its first segment is System). The full name when
+  no entry names the unit (a binding TQUnitVisible then refuses). }
+function TQUnitSpelling(AMid: Integer): string;
+var
+  LM: TPasSemaModel;
+  LIdx: Integer;
+begin
+  if AMid = GQSystemMid then
+    Exit('system');
+  if AMid = GQSysInitMid then
+    Exit('sysinit');
+  if AMid <> GQMid then
+  begin
+    LM := GQProject.Model(GQMid);
+    for LIdx := 0 to High(LM.UsesList) do
+      if (LM.UsesList[LIdx].UnitId = AMid) and
+         (LM.UsesList[LIdx].NameFull <> '') then
+        Exit(LowerCase(LM.UsesList[LIdx].NameFull));
+  end;
+  Result := GQProject.Model(AMid).UnitNameLower;
+end;
+
 { tq: the symbol named like ANode that unit AMid declares where an importer
   - or, for the unit itself, the unit's own code - finds it: its interface,
   and for the unit itself its implementation too. NIL_SYM when none. }
@@ -1051,10 +1162,42 @@ end;
   spelling looks at one unit, so the import record differs, or the call
   takes another overload of the set. Not judged: which unit of a merged set
   a call takes (the count says how often that is left). }
+{ tq: is routine ASym of model AMid one of an overload set - more than one
+  routine of the name, or a declaration carrying `overload` (the model sets
+  sfOverload only on a chain's later links). }
+function TQMarkedOverload(AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LNode, LChild: Integer;
+begin
+  LM := GQProject.Model(AMid);
+  if LM.Symbols[ASym].Kind <> skRoutine then
+    Exit(False);
+  if LM.Symbols[ASym].NextOverload <> NIL_SYM then
+    Exit(True);
+  Result := False;
+  LNode := LM.Symbols[ASym].DeclNode;
+  if LNode = NIL_NODE then
+    Exit;
+  if LM.Tree.Nodes[LNode].Kind = nkIdent then
+    LNode := LM.Tree.Nodes[LNode].Parent;
+  if LNode = NIL_NODE then
+    Exit;
+  LChild := LM.Tree.Nodes[LNode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if (LM.Tree.Nodes[LChild].Kind = nkDirective) and
+       SameText(LM.Tree.NodeText(LChild), 'overload') then
+      Exit(True);
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
 function TQOverloadMerged(ANode, ATMid: Integer; ASystem: Boolean): Boolean;
 var
   LName: string;
   LChosen, LId, LSym: Integer;
+  LOverload: Boolean;
 begin
   Result := False;
   LName := LowerCase(GTree.NodeText(ANode).TrimLeft(['&']));
@@ -1078,13 +1221,26 @@ begin
         Exit(True);
     end;
   end;
+  // A routine marked `overload` makes dcc search on through the other units,
+  // and it imports whatever declaration of the name it meets there, of any
+  // kind: a library unit calls its own overloaded `Lock`, a unit it uses
+  // declares a record `Lock`, and the bare call imports the record (spec
+  // 6.3.1; S16 probes O01-O05: O01 a type, O05 an unchosen overload of
+  // another unit DIFF, O02 without `overload` SAME).
+  LOverload := False;
+  if LChosen >= 0 then
+  begin
+    LSym := TQUnitDecl(LChosen, LName);
+    LOverload := (LSym <> NIL_SYM) and TQMarkedOverload(LChosen, LSym);
+  end;
   for LId in TQVisibleUnits(ANode) do
   begin
     if LId = LChosen then
       Continue;
     LSym := TQUnitDecl(LId, LName);
     if (LSym <> NIL_SYM) and
-       (GQProject.Model(LId).Symbols[LSym].Kind = skRoutine) and
+       (LOverload or
+        (GQProject.Model(LId).Symbols[LSym].Kind = skRoutine)) and
        not (sfBuiltin in GQProject.Model(LId).Symbols[LSym].Flags) then
       Exit(True);
   end;
@@ -1156,8 +1312,8 @@ begin
     LSym := TQUnitDecl(LId, LName);
     if (LSym <> NIL_SYM) and (LU.Symbols[LSym].Kind in [skVar, skRoutine]) and
        not (sfBuiltin in LU.Symbols[LSym].Flags) and
-       not TQShadowed(ANode, LU.UnitNameLower) then
-      Exit(LU.UnitNameLower + '.');
+       not TQShadowed(ANode, TQUnitSpelling(LId)) then
+      Exit(TQUnitSpelling(LId) + '.');
   end;
 end;
 
@@ -1255,7 +1411,7 @@ begin
   case LU.Scopes[LScope].Kind of
     sckUnit, sckImplementation:
       if LU.UnitNameLower <> '' then
-        Result := LU.UnitNameLower + '.' + LU.Symbols[ASym].Name;
+        Result := TQUnitSpelling(AMid) + '.' + LU.Symbols[ASym].Name;
     sckStruct:
       begin
         if (AMid <> GQMid) and (LU.Symbols[ASym].Visibility in
@@ -1542,6 +1698,11 @@ var
   LFirst, LLast, LFileA, LFileB: Integer;
   LSite: TSite;
 begin
+  if GQSymInfoOn then
+  begin
+    TMExclude(tmeSymInfo);
+    Exit;
+  end;
   LFirst := GTree.NodeLeftmostVis(ABase);
   LLast := GTree.Nodes[ABase].LastToken;
   VisOffset(LFirst, LFileA);
@@ -1601,6 +1762,13 @@ begin
       LChild := LU.Tree.Nodes[LChild].NextSibling;
     end;
   end;
+  // A routine marked overload: the call may land in an ancestor's overload,
+  // and the planted owner be the right one (S16: Vcl.WinXCtrls
+  // `FButtonImages.Draw(C, X, Y, I, E)` is TCustomImageList's, PasTree took
+  // TVirtualImageList's `Draw(..., Name: String)` - the blind spot of a
+  // declaring type above the chosen one). No plant there.
+  if TQMarkedOverload(AMid, ASym) then
+    Exit;
   LAnc := GQProject.AncestorOfX(AOwner);
   if not XValid(LAnc) then
     Exit;
@@ -1631,6 +1799,53 @@ end;
   another field of the same name - changes the code or stops the compile.
   Whatever the cast cannot say is counted (TTMExcl), and a binding PasTree's
   own typing of the base contradicts is listed. }
+{ tm: is ABase a bare `Self` in a class method (its routine node's Aux 1,
+  as tq's static rule reads it), through nested routines? }
+function TMClassSelf(ABase: Integer): Boolean;
+var
+  LMeth: Integer;
+begin
+  Result := False;
+  if (GTree.Nodes[ABase].Kind <> nkIdent) or
+     not SameText(GTree.NodeText(ABase), 'self') then
+    Exit;
+  LMeth := TQMethodScope(TQScopeAt(ABase));
+  Result := (LMeth <> NIL_SCOPE) and
+    (GTree.Nodes[GQProject.Model(GQMid).Scopes[LMeth].OwnerNode].Aux = 1);
+end;
+
+{ tm, Win32 only: is ABase a plain variable or parameter of an ENCLOSING
+  routine, reached from a nested one (or the outer method's Self)? dcc32
+  lays out the frame slots of such variables by their references, and a
+  write through a cast of one after another up-level reference moves the
+  slots - the same code over another frame (S16 probes m5/m6; mORMot
+  SynCrtSock `integer(ClientSock.fCompressAcceptHeader) := 0` in the nested
+  SendResponse). dcc64 keeps the layout. }
+function TMUpLevel(ABase: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LScope, LRoutine, LSym: Integer;
+begin
+  Result := False;
+  if not GQWin32 or (GTree.Nodes[ABase].Kind <> nkIdent) then
+    Exit;
+  LM := GQProject.Model(GQMid);
+  LScope := TQScopeAt(ABase);
+  LRoutine := LScope;
+  while (LRoutine <> NIL_SCOPE) and (LM.Scopes[LRoutine].Kind <> sckRoutine) do
+    LRoutine := LM.Scopes[LRoutine].Parent;
+  if LRoutine = NIL_SCOPE then
+    Exit;
+  if SameText(GTree.NodeText(ABase), 'self') then
+    Exit(LM.Scopes[LRoutine].StructSym = NIL_SYM);
+  LSym := LM.ResolveAt(LScope, LowerCase(GTree.NodeText(ABase)),
+    GTree.Nodes[ABase].FirstToken);
+  Result := (LSym <> NIL_SYM) and (LM.Symbols[LSym].Kind in [skVar, skParam]) and
+    (LM.Symbols[LSym].Scope <> NIL_SCOPE) and
+    (LM.Scopes[LM.Symbols[LSym].Scope].Kind = sckRoutine) and
+    (LM.Symbols[LSym].Scope <> LRoutine);
+end;
+
 procedure TMMember(ASite, ABase, AMid, ASym: Integer; const ATail,
   AKind, ARoutine: string; AStored: Boolean);
 var
@@ -1639,7 +1854,7 @@ var
   LSpelling: string;
   LWhy: TTMExcl;
   LDeref: Boolean;
-  LBMid, LBSym, LDef: Integer;
+  LBMid, LBSym, LDef, LHead: Integer;
 begin
   LU := GQProject.Model(AMid);
   if not TMOwner(AMid, ASym, LOwner) then
@@ -1654,6 +1869,21 @@ begin
     Exit;
   end;
   if GTree.Nodes[ABase].Kind = nkInherited then
+  begin
+    TMExclude(tmePosition);
+    Exit;
+  end;
+  // A base at the head of what follows `inherited` - `inherited
+  // Padding.PaddingRect(R)` (FMX.Forms): `inherited TBounds(Padding).X` is
+  // no designator (E2003 on the cast's unit), as tq leaves the head itself.
+  LHead := ABase;
+  while (GTree.Nodes[LHead].Parent <> NIL_NODE) and
+        (GTree.Nodes[GTree.Nodes[LHead].Parent].Kind in [nkCall, nkIndex,
+          nkMember]) and
+        (GTree.Nodes[GTree.Nodes[LHead].Parent].FirstChild = LHead) do
+    LHead := GTree.Nodes[LHead].Parent;
+  if (GTree.Nodes[LHead].Parent <> NIL_NODE) and
+     (GTree.Nodes[GTree.Nodes[LHead].Parent].Kind = nkInherited) then
   begin
     TMExclude(tmePosition);
     Exit;
@@ -1693,6 +1923,19 @@ begin
   if LSpelling = '' then
   begin
     TMExclude(LWhy);
+    Exit;
+  end;
+  // `Self` in a class method is the class: `TFoo(Self).Create(...)` would
+  // call the constructor on an instance (mORMot's `raise self.Create(...)`
+  // in a class procedure: another code). PasTree types it as the class.
+  if TMClassSelf(ABase) then
+  begin
+    TMExclude(tmeClassRef);
+    Exit;
+  end;
+  if TMUpLevel(ABase) then
+  begin
+    TMExclude(tmeUpLevel);
     Exit;
   end;
   LBX := GQProject.WithTargetTypeX(GQMid, ABase, GQProbe);
@@ -2276,7 +2519,7 @@ begin
         if LTM.Scopes[LScope].Kind = sckSystem then
           LQual := 'System'
         else
-          LQual := LTM.UnitNameLower;
+          LQual := TQUnitSpelling(LTMid);
         if LQual = '' then
         begin
           Inc(GQUnbound);
@@ -2304,6 +2547,17 @@ begin
         if TQShadowed(ANode, LQual) then
         begin
           Inc(GQShadowed);
+          Exit;
+        end;
+        if GQSymInfoOn and (AStored or GQRefInfoOn) then
+        begin
+          Inc(GQSymInfo);
+          Exit;
+        end;
+        if (LTM.Symbols[LSym].Kind = skRoutine) and
+           TQOwnRoutine(ARoutine, LTM.Symbols[LSym].NameLower) then
+        begin
+          Inc(GQPosition);
           Exit;
         end;
         if (LTM.Symbols[LSym].Kind = skRoutine) and
@@ -2375,6 +2629,21 @@ begin
         if AStored then
         begin
           Inc(GQStored);
+          Exit;
+        end;
+        if GQSymInfoOn then
+        begin
+          Inc(GQSymInfo);
+          Exit;
+        end;
+        // An old-style function result in a method: `Root := X` in the body
+        // of `function TURI.Root` is the result; `Self.Root := X` is E2064
+        // (S16, a third-party record method); `Root[I] := X` alike.
+        if (LTM.Symbols[LSym].Kind = skRoutine) and (((LPk = nkAssign) and
+           (LIndex = 0)) or TQOwnRoutine(ARoutine,
+           LTM.Symbols[LSym].NameLower)) then
+        begin
+          Inc(GQPosition);
           Exit;
         end;
         // A field of a procedural type standing as a statement calls it -
@@ -2958,7 +3227,8 @@ end;
 { Whether directive token AText turns on a switch of ALetters, from the
   family whose records keep source lines: D (DEBUGINFO), L (LOCALSYMBOLS),
   Y (REFERENCEINFO; YD and DEFINITIONINFO turn it on for definitions) -
-  and, for tm, O (OPTIMIZATION, see TMMember) -
+  and, for tm, O (OPTIMIZATION, see TMMember); lower-case r asks for
+  REFERENCEINFO itself, `$Y+`, not `$YD` (see GQRefInfoOn) -
   `$D+`, `$O-,Y+`, `$YD`, `$DEFINITIONINFO ON` (braces left out here: a
   directive in a brace comment ends it). `$L file.obj` and `$D text` are
   other directives. }
@@ -2979,7 +3249,7 @@ begin
     if LWord[1] = 'O' then
       Exit(CharInSet('O', ALetters));
     if LWord[1] = 'R' then
-      Exit(CharInSet('Y', ALetters))
+      Exit(CharInSet('Y', ALetters) or CharInSet('r', ALetters))
     else if LWord[1] = 'D' then
       if LWord = 'DEBUGINFO' then
         Exit(CharInSet('D', ALetters))
@@ -3001,7 +3271,8 @@ begin
       Exit;
     if CharInSet(LBody[LIdx + 1], ['+', '-']) then
     begin
-      if (LBody[LIdx + 1] = '+') and CharInSet(LBody[LIdx], ALetters) then
+      if (LBody[LIdx + 1] = '+') and (CharInSet(LBody[LIdx], ALetters) or
+         ((LBody[LIdx] = 'Y') and CharInSet('r', ALetters))) then
         Exit(True);
     end
     else if (LBody[LIdx] = 'Y') and (LBody[LIdx + 1] = 'D') then
@@ -4430,6 +4701,9 @@ begin
                 TMCollectStored(0, False);
                 GMOptimized := LinesKept(['O']);
               end;
+              GQSymInfoOn := LinesKept(['Y']);
+              GQRefInfoOn := LinesKept(['r']);
+              GQWin32 := GPlatform = pfWin32;
               TQWalk(0, '', False, False, False, 0);
               if GQMembers then
                 TMPreamble;
@@ -4662,6 +4936,8 @@ begin
           GLine := GLine + ' excluded-forward ' + IntToStr(GQForward);
         if GQStored > 0 then
           GLine := GLine + ' excluded-stored ' + IntToStr(GQStored);
+        if GQSymInfo > 0 then
+          GLine := GLine + ' excluded-syminfo ' + IntToStr(GQSymInfo);
         if GQPosition > 0 then
           GLine := GLine + ' excluded-position ' + IntToStr(GQPosition);
         // Locals have no qualified form at all: said, not added to the

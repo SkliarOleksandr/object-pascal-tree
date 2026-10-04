@@ -22,6 +22,17 @@
               the compile-compare harness (fidelity.ps1) over the self-host,
               the Studio units and every extra corpus: each unit's rewrite
               must compile to the original's .dcu
+    tqm       the resolver's rung over the self-host and the Studio units:
+              every name PasTree bound written as the declaration it chose
+              (`Unit.X`, `Self.X`, `TOwner(Base).X`) must compile to the
+              original's .dcu; the counts of names it leaves unbound, binds
+              to a unit not visible there, or types against its binding are
+              floors (lines `@unbound`, `@invisible`, `@mismatch`; the
+              Studio's as corpus `studio-rtl` or `studio-all`): above
+              one fails, below one says lower it
+    tqs tms   the rung's selftests over the Studio units: one wrong unit
+              (tqs) or wrong owner type (tms) planted per routine, each to
+              be seen and localized alone
 
   A harness stage judges each unit against the EXPECTATIONS - the outcomes
   known and explained today (tools\fidelity-gate.txt for the self-host and
@@ -41,7 +52,8 @@
   An extra corpus is a .ps1 file returning a hashtable:
     Name      the corpus's name in the report
     Args      fidelity.ps1's parameters for it (List, UnitPath, Oracle, ...)
-    Stages    optional, the harness stages to run (default t0f t1 t2 t3 t3x)
+    Stages    optional, the harness stages to run (default t0f t1 t2 t3 t3x;
+              tqm tqs tms on request)
     Expected  lines in the expectations format without the corpus column
   -Extra names such files; without it every *.ps1 in <repo>\local\gate\ is
   one (a working copy's own corpora - their paths never enter the
@@ -58,7 +70,7 @@
 param(
   [ValidateSet('rtl', 'all', 'none')] [string] $Studio = 'rtl',
   [string[]] $Extra = @(),
-  [ValidateSet('build', 'selftest', 'tree', 't0f', 't1', 't2', 't3', 't3x')] [string[]] $Stage = @(),
+  [ValidateSet('build', 'selftest', 'tree', 't0f', 't1', 't2', 't3', 't3x', 'tqm', 'tqs', 'tms')] [string[]] $Stage = @(),
   [string] $Out = '',
   [string] $Bds = 'C:\Program Files (x86)\Embarcadero\Studio\37.0',
   [int] $Jobs = 0,
@@ -73,10 +85,14 @@ $bin = Join-Path $tools 'out64'
 if ($Out -eq '') { $Out = Join-Path $repo 'out\fidelity-gate' }
 $Out = [IO.Path]::GetFullPath($Out)
 if ($Jobs -le 0) { $Jobs = [Math]::Max(1, [Environment]::ProcessorCount - 2) }
-$allStages = @('build', 'selftest', 'tree', 't0f', 't1', 't2', 't3', 't3x')
+$allStages = @('build', 'selftest', 'tree', 't0f', 't1', 't2', 't3', 't3x', 'tqm', 'tqs', 'tms')
 if ($Stage.Count -eq 0) { $Stage = $allStages }
 if ($NoBuild) { $Stage = @($Stage | Where-Object { $_ -ne 'build' }) }
 $modes = @('t0f', 't1', 't2', 't3', 't3x')
+# The resolver's rung (docs/parser-fidelity.md sec. 6): tqm judged like the
+# tree's modes, tqs and tms - selftests - by fidelity.ps1's own verdict.
+$rungModes = @('tqm', 'tqs', 'tms')
+$rungSelftests = @('tqs', 'tms')
 if (Test-Path -LiteralPath $Out) { Remove-Item -LiteralPath $Out -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 $started = Get-Date
@@ -131,7 +147,9 @@ $corpora = New-Object System.Collections.Generic.List[object]
 $selfList = Join-Path $Out 'units-self.txt'
 Get-ChildItem -LiteralPath (Join-Path $repo 'source') -Filter '*.pas' | Sort-Object Name |
   ForEach-Object { $_.FullName } | Set-Content -LiteralPath $selfList
-$corpora.Add([pscustomobject]@{ Name = 'self'; Stages = $modes
+# The self-host has no tqs candidate (the merged-overload rule took its
+# only one) and one tms candidate: its selftests are the Studio units'.
+$corpora.Add([pscustomobject]@{ Name = 'self'; Stages = $modes + @('tqm')
   Args = @{ List = $selfList; Base = $true } })
 
 $ns = 'Winapi;System.Win;Data.Win;Datasnap.Win;Web.Win;Soap.Win;Xml.Win;Vcl;Vcl.Imaging;Vcl.Touch;Vcl.Samples;Vcl.Shell;System;Xml;Data;Datasnap;Web;Soap'
@@ -158,7 +176,7 @@ if ($Studio -ne 'none') {
   $studioList = Join-Path $Out 'units-studio.txt'
   @($files | Where-Object { Test-Path -LiteralPath (Join-Path $lib ([IO.Path]::GetFileNameWithoutExtension($_) + '.dcu')) } |
     Sort-Object) | Set-Content -LiteralPath $studioList
-  $corpora.Add([pscustomobject]@{ Name = 'studio'; Stages = $modes
+  $corpora.Add([pscustomobject]@{ Name = 'studio'; Stages = $modes + $rungModes
     Args = @{ List = $studioList; Namespaces = $ns; Oracle = $true } })
 }
 
@@ -317,13 +335,17 @@ if ($Stage -contains 'tree') {
 # ---------------------------------------------------------------------------
 # t0f t1 t2 t3 t3x
 
-foreach ($m in $modes) {
+foreach ($m in ($modes + $rungModes)) {
   if ($Stage -notcontains $m) { continue }
   foreach ($c in $corpora) {
     if ($c.Stages -notcontains $m) { continue }
     $dir = Join-Path $Out "$m-$($c.Name)"
     $a = $c.Args.Clone()
     if (-not $a.ContainsKey('Jobs')) { $a['Jobs'] = $Jobs }
+    # Every planted site must be localized alone, and a unit can hold one per
+    # routine - Vcl.ComCtrls' TListColumn plants ~60 that each stop the
+    # compile: the localizer's default 64 compiles do not reach them all.
+    if ($rungSelftests -contains $m) { $a['Localize'] = $true; $a['LocalizeBudget'] = 512 }
     & $harness -Mode $m -Out $dir -Tools $bin @a *> "$dir.log"
     $resultsFile = Join-Path $dir 'results.txt'
     if (-not (Test-Path -LiteralPath $resultsFile)) {
@@ -357,13 +379,49 @@ foreach ($m in $modes) {
       }
     }
     $sum = (($counts.Keys | ForEach-Object { "$($counts[$_]) $_" }) -join ', ')
-    $line = "$($m.PadRight(9)) $($c.Name)  $sum; $asExpected as expected, $($nondet.Count) not judged, $($bad.Count) not"
+    if ($rungSelftests -contains $m) {
+      # Every planted site is wrong: a unit with one must DIFF (or fail to
+      # compile), and the localizer name it alone - fidelity.ps1's verdict.
+      $s = @(Get-Content -LiteralPath (Join-Path $dir 'summary.txt'))
+      $loc = @($s | Where-Object { $_ -like 'selftest: sites localized alone=*' })
+      $ok = ($s[-1] -eq 'PASS')
+      if ($ok -and $loc.Count -eq 1 -and $loc[0] -match '=(\d+) of (\d+)$') { $ok = ($Matches[1] -eq $Matches[2]) }
+      $line = "$($m.PadRight(9)) $($c.Name)  $(($s | Where-Object { $_ -like 'selftest: units*' }) -join ''); $($loc -join '')"
+      if ($ok) { Say "$line  PASS" } else { Fail "$line  FAIL ($dir)" }
+      continue
+    }
+    $line ="$($m.PadRight(9)) $($c.Name)  $sum; $asExpected as expected, $($nondet.Count) not judged, $($bad.Count) not"
     if ($bad.Count -eq 0) { Say "$line  PASS" } else {
       Fail "$line  FAIL ($dir)"
       foreach ($b in $bad) { Say "            $b" }
     }
     foreach ($b in $nondet) { Say "            not judged: $b" }
     foreach ($b in $fixed) { Say "            now OK (drop the expectation): $b" }
+    if ($rungModes -contains $m) {
+      # The rung's measures: names it could not judge because PasTree bound
+      # them to nothing, to a unit not visible at the name, or typed a
+      # member's base against its own binding. Each is a floor - a resolver
+      # change that raises one is a regression no .dcu shows.
+      $s = (Get-Content -LiteralPath (Join-Path $dir 'summary.txt')) -join ' '
+      $measures = [ordered]@{
+        '@unbound' = 'unbound names=(\d+)'
+        '@invisible' = 'bound to an invisible unit=(\d+)'
+        '@mismatch' = 'typing contradicts=(\d+)'
+      }
+      foreach ($k in $measures.Keys) {
+        if ($s -notmatch $measures[$k]) { continue }
+        $n = [int]$Matches[1]
+        # The Studio's floors depend on its unit list: `studio-rtl` or
+        # `studio-all` in the expectations.
+        $mc = $c.Name
+        if ($mc -eq 'studio') { $mc = "studio-$Studio" }
+        $x = Find-Expectation $mc $m $k
+        $floor = 0
+        if ($null -ne $x) { $x.Used = $true; $floor = [int]$x.Outcomes[0] }
+        if ($n -gt $floor) { Fail "            $k $n above the floor $floor  FAIL" }
+        elseif ($n -lt $floor) { Say "            $k $n below the floor $floor (lower it)" }
+      }
+    }
   }
 }
 
