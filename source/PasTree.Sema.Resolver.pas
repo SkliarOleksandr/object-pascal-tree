@@ -2664,6 +2664,40 @@ begin
         if (FModel.RefMap[ANode] <> NIL_SYM) and IsHeritageRef(ANode) and
            DeclaredAfter(FModel.RefMap[ANode], ANode) then
           FModel.RefMap[ANode] := NIL_SYM;
+        // A name in a parameter list - a parameter's type, a default - is not
+        // one of the list's parameters: dcc looks it up outside the routine.
+        // `var AuthenticateSoapResponse: authenticateSoapResponse` (a SOAP
+        // client's generated style) bound the type to the parameter itself,
+        // so the unit declaring the type was not used in the interface, and a
+        // `uses` check said it could move to the implementation - moved, dcc
+        // said E2003 on the header. Tested by token range against the list
+        // the parameter is declared in, so a parameter's use in a body pays
+        // one kind test. Not found here, the cross-unit pass binds it.
+        if (FModel.RefMap[ANode] <> NIL_SYM) and
+           (FModel.Symbols[FModel.RefMap[ANode]].Kind = skParam) then
+        begin
+          var LDecl := FModel.Symbols[FModel.RefMap[ANode]].DeclNode;
+          var LList := NIL_NODE;
+          if LDecl <> NIL_NODE then
+            LList := FTree.Nodes[LDecl].Parent;
+          if (LList <> NIL_NODE) and (KindOf(LList) = nkParam) then
+            LList := FTree.Nodes[LList].Parent
+          else
+            LList := NIL_NODE;
+          if (LList <> NIL_NODE) and (KindOf(LList) = nkParams) and
+             (FTree.Nodes[ANode].FirstToken >= FTree.Nodes[LList].FirstToken) and
+             (FTree.Nodes[ANode].FirstToken <= FTree.Nodes[LList].LastToken) then
+          begin
+            var LOuter := FModel.Symbols[FModel.RefMap[ANode]].Scope;
+            if LOuter <> NIL_SCOPE then
+              LOuter := FModel.Scopes[LOuter].Parent;
+            if LOuter <> NIL_SCOPE then
+              FModel.RefMap[ANode] := FModel.ResolveAt(LOuter, LKey,
+                FTree.Nodes[ANode].FirstToken)
+            else
+              FModel.RefMap[ANode] := NIL_SYM;
+          end;
+        end;
         if (FModel.RefMap[ANode] = NIL_SYM) and IsAttributeTypeRef(ANode) then
           FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],
             NodeNameLower(ANode) + 'attribute', FTree.Nodes[ANode].FirstToken);

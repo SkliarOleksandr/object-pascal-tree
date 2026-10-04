@@ -2159,6 +2159,40 @@ end;
   declared - past every type enclosing it - and clash there with any name,
   before or after, and with another enum's values. Every source below was
   compiled with dcc64 37.0 on 2026-09-27 and every count is dcc's own. }
+{ A name in a parameter list is looked up outside the routine: the type of
+  `var TResp: TResp` is the type, not the parameter (a SOAP client's
+  generated methods are written so, and dcc64 37.0 compiles them); in the
+  body the name is the parameter. }
+procedure TestParamNamedLikeType;
+
+  function KindAt(AOccurrence: Integer): string;
+  var
+    LSym: Integer;
+  begin
+    LSym := NthIdentSym('TResp', AOccurrence);
+    if LSym = NIL_SYM then
+      Exit('unbound');
+    case GModel.Symbols[LSym].Kind of
+      skType: Result := 'type';
+      skParam: Result := 'param';
+    else
+      Result := 'other';
+    end;
+  end;
+
+begin
+  // Occurrences: 0 the type, 1 a parameter, 2 its type, 3 and 4 the same in
+  // the implementation header, 5 the body's use.
+  Analyze('unit U; interface type TResp = class end; TC = class ' +
+    'procedure P(var TResp: TResp); end; implementation ' +
+    'procedure TC.P(var TResp: TResp); begin TResp := nil; end; end.');
+  Ok('paramtype: the declaration''s type is the type', KindAt(2) = 'type');
+  Ok('paramtype: the implementation header''s type is the type',
+    KindAt(4) = 'type');
+  Ok('paramtype: the body''s name is the parameter', KindAt(5) = 'param');
+  GModel.Free;
+end;
+
 procedure TestEnumValueNames;
 
   procedure Expect(const AName, ASource: string; ACount: Integer);
@@ -2440,6 +2474,8 @@ begin
   TestInterfaceNames;
   // 8g. directives are nodes: the initializer after them resolves
   TestProcDirectives;
+  // 8h. a parameter list's names are not its parameters
+  TestParamNamedLikeType;
 
   // 9. call fitting no local overload stays untyped (no bogus E2010)
   Analyze(SRC_NOFIT);
