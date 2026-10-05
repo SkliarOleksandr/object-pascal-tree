@@ -466,7 +466,6 @@ type
       out AHit: TPasRefHit): Boolean;
     function UnitNameOfModel(AUid: Integer): string;
     procedure SetLibraryPaths(const AValue: TArray<string>);
-    function IsUnderLibraryPath(const APath: string): Boolean;
     function RoutineBodyEntry(AMid: Integer; LM: TPasSemaModel;
       AImplNode: Integer; out ATarget: TPasNavTarget): Boolean;
     // Find Overrides / Find Implementations (see FindOverrides and
@@ -679,6 +678,15 @@ type
       normalized rather than as assigned. }
     property LibraryPaths: TArray<string> read FLibraryPaths
       write SetLibraryPaths;
+    // Whether APath lies under a LibraryPaths tree: somebody else's source,
+    // not the project's own - what a project-wide check leaves out.
+    function IsUnderLibraryPath(const APath: string): Boolean;
+    // The routine node holding routine ASym's body - its implementation, or
+    // its declaration when that is where the body is - or NIL_NODE (external,
+    // abstract, not found). Model AMid is hydrated on the way: the pairing
+    // reads the headers' names.
+    function RoutineImplNode(AMid, ASym: Integer): Integer;
+    property Project: TPasSemaProject read FProj;
     { Why APath may not be rewritten, as host-displayable text, or '' when it
       may. Two reasons, both about the FILE rather than the symbol: it lives
       under a LibraryPaths tree (renaming an RTL/VCL identifier would mean
@@ -5560,6 +5568,30 @@ end;
   implementation while the declaration said `function Bar(...)` - E2037, the
   same breakage the parameter case produces. So the peer header's name is
   looked up structurally and added as an edit position. }
+function TPasNavigator.RoutineImplNode(AMid, ASym: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LRoutine: Integer;
+begin
+  Result := NIL_NODE;
+  if (AMid < 0) or (AMid >= FProj.ModelCount) or
+     not FProj.EnsureHydrated(AMid) then
+    Exit;
+  LM := FProj.Model(AMid);
+  if (ASym < 0) or (ASym >= LM.SymCount) or
+     (LM.Symbols[ASym].Kind <> skRoutine) or
+     (LM.Symbols[ASym].DeclNode = NIL_NODE) then
+    Exit;
+  LRoutine := RTEnclosingRoutine(LM, LM.Symbols[ASym].DeclNode);
+  if LRoutine = NIL_NODE then
+    Exit;
+  if RTFindChildKind(LM, LRoutine, nkRoutineBody) = NIL_NODE then
+    LRoutine := RoutinePeerNode(AMid, LRoutine);
+  if (LRoutine <> NIL_NODE) and
+     (RTFindChildKind(LM, LRoutine, nkRoutineBody) <> NIL_NODE) then
+    Result := LRoutine;
+end;
+
 function TPasNavigator.PeerRoutineNameNode(AMid, ASym: Integer): Integer;
 var
   LM: TPasSemaModel;

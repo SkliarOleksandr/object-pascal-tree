@@ -29,6 +29,7 @@ uses
   PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas',
   PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
   PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas',
+  PasTree.Sema.Lint in '..\source\PasTree.Sema.Lint.pas',
   PasTree.Outline in '..\source\PasTree.Outline.pas',
   PasTree.TestKit in 'PasTree.TestKit.pas';
 
@@ -1550,6 +1551,301 @@ end;
 procedure Ok(const AName: string; ACond: Boolean);
 begin
   GCounter.Ok(AName, ACond);
+end;
+
+// FindUnreferencedUnits with a program: RefMain lists five units and calls
+// one. RefOnlyDpr is listed by the program alone, RefInit too (and has
+// initialization code - a doubt), RefChainTop too, and RefChainLow only by
+// RefChainTop, which uses it - all four drop. RefShared, also listed by
+// RefChainTop, stays: RefUsed, which the program uses, uses it. Rows come by
+// unit name, not by path (RefOnlyDpr sits in a\, ahead of the rest by path);
+// RefInit's listers come sorted too (RefChainTop.pas before RefMain.dpr,
+// the program's model first in the analysis).
+procedure TestUnreferencedUnits;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LUnits: TArray<TPasUnreferencedUnit>;
+  LMids: TArray<Integer>;
+
+  procedure WriteUnit(const AName, AUses, AIntf, AImpl: string);
+  begin
+    TFile.WriteAllText(TPath.Combine(LDir, AName + '.pas'),
+      'unit ' + AName + ';'#13#10'interface'#13#10 + AUses + AIntf +
+      'implementation'#13#10 + AImpl + 'end.'#13#10);
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_unreferenced');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'RefMain.dpr'),
+    'program RefMain;'#13#10 +
+    'uses RefUsed, RefOnlyDpr in ''a\RefOnlyDpr.pas'', RefInit, RefChainTop,' +
+    ' RefShared;'#13#10 +
+    'begin'#13#10'  Used;'#13#10'end.'#13#10);
+  WriteUnit('RefUsed', 'uses RefShared;'#13#10, 'procedure Used;'#13#10,
+    'procedure Used; begin Shared; end;'#13#10);
+  WriteUnit('RefShared', '', 'procedure Shared;'#13#10,
+    'procedure Shared; begin end;'#13#10);
+  TDirectory.CreateDirectory(TPath.Combine(LDir, 'a'));
+  TFile.WriteAllText(TPath.Combine(LDir, 'a\RefOnlyDpr.pas'),
+    'unit RefOnlyDpr;'#13#10'interface'#13#10'procedure OnlyDpr;'#13#10 +
+    'implementation'#13#10'procedure OnlyDpr; begin end;'#13#10'end.'#13#10);
+  WriteUnit('RefInit', '', 'procedure InitP;'#13#10,
+    'var G: Integer;'#13#10'procedure InitP; begin end;'#13#10 +
+    'initialization'#13#10'  G := 1;'#13#10);
+  WriteUnit('RefChainTop', 'uses RefChainLow, RefShared, RefInit;'#13#10,
+    'procedure Top;'#13#10,
+    'procedure Top; begin LowP; Shared; end;'#13#10);
+  WriteUnit('RefChainLow', '', 'procedure LowP;'#13#10,
+    'procedure LowP; begin end;'#13#10);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LNav := nil;
+  try
+    Ok('unreferenced: RefMain analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'RefMain.dpr')) >= 0);
+    LNav := TPasNavigator.Create(LProj);
+    LMids := nil;
+    for var LMid := 0 to LProj.ModelCount - 1 do
+      LMids := LMids + [LMid];
+    LUnits := FindUnreferencedUnits(LNav, LMids);
+    Ok('unreferenced: four units', Length(LUnits) = 4);
+    Ok('unreferenced: RefChainLow, listed by RefChainTop, itself dropped',
+      (Length(LUnits) = 4) and SameText(LUnits[0].UnitName, 'RefChainLow') and
+      (Length(LUnits[0].ListedBy) = 1) and SameText(LUnits[0].ListedBy[0],
+      'RefChainTop.pas (itself unreferenced)'));
+    Ok('unreferenced: RefChainTop, listed by the program unused',
+      (Length(LUnits) = 4) and SameText(LUnits[1].UnitName, 'RefChainTop') and
+      (Length(LUnits[1].ListedBy) = 1) and SameText(LUnits[1].ListedBy[0],
+      'RefMain.dpr (no name of it used)') and (LUnits[1].Doubts = nil));
+    Ok('unreferenced: RefInit, its initialization a doubt',
+      (Length(LUnits) = 4) and SameText(LUnits[2].UnitName, 'RefInit') and
+      (Length(LUnits[2].Doubts) = 1));
+    Ok('unreferenced: RefInit''s listers sorted by name',
+      (Length(LUnits) = 4) and (Length(LUnits[2].ListedBy) = 2) and
+      SameText(LUnits[2].ListedBy[0], 'RefChainTop.pas (no name of it used)')
+      and SameText(LUnits[2].ListedBy[1], 'RefMain.dpr (no name of it used)'));
+    Ok('unreferenced: RefOnlyDpr last by name though first by path',
+      (Length(LUnits) = 4) and SameText(LUnits[3].UnitName, 'RefOnlyDpr') and
+      SameText(ExtractFileName(ExtractFileDir(LUnits[3].Hit.FilePath)), 'a'));
+  finally
+    LNav.Free;
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+// FindUnusedUses (PasTree.Sema.Lint): LintUse lists eight units. Used: a
+// type in the interface (LintLib), an enum value (LintEnum), a qualifier
+// (LintQual), an interface entry used in the implementation (LintImpl), a
+// class the unit's form file names (LintForm). Unused: LintInit (with
+// initialization code - a doubt), LintDead (named only in a branch not
+// compiled - a doubt), LintNever (implementation uses, no doubt).
+procedure TestUnusedUses;
+const
+  LINT_USE =
+    'unit LintUse;'#13#10 +
+    'interface'#13#10 +
+    'uses LintLib, LintInit, LintEnum, LintQual, LintImpl, LintDead, LintForm;'#13#10 +
+    'var V: TLibThing;'#13#10 +
+    'implementation'#13#10 +
+    'uses LintNever;'#13#10 +
+    'procedure P;'#13#10 +
+    'var E: Integer;'#13#10 +
+    'begin'#13#10 +
+    '  E := Ord(leTwo);'#13#10 +
+    '  LintQual.QualProc;'#13#10 +
+    '  ImplProc;'#13#10 +
+    '  {$IFDEF NEVER_DEFINED} DeadProc; {$ENDIF}'#13#10 +
+    'end;'#13#10 +
+    'end.'#13#10;
+  LINT_DFM =
+    'object LintFrm: TLintFrm'#13#10 +
+    '  object Panel1: TLintPanel'#13#10 +
+    '  end'#13#10 +
+    'end'#13#10;
+  LINT_INL =
+    'unit LintInl;'#13#10 +
+    'interface'#13#10 +
+    'implementation'#13#10 +
+    'uses LintInlX, LintInlY, LintInlW, LintInlP, LintInlT, LintInlE, LintInlQ;'#13#10 +
+    'procedure P;'#13#10 +
+    'var H: THolder; I: Integer;'#13#10 +
+    'begin'#13#10 +
+    '  H := nil;'#13#10 +
+    '  I := InlRoutine + InlImplUses + H.Val + InlImplicit + InlEnum;'#13#10 +
+    'end;'#13#10 +
+    'end.'#13#10;
+  // InlRoutine needs LintInlY (a routine in its body), InlImplUses LintInlW
+  // (the implementation `uses`), Val LintInlP (its inline getter's body),
+  // InlImplicit LintInlT (GetT's result type, no name of it in the body).
+  LINT_INLX =
+    'unit LintInlX;'#13#10 +
+    'interface'#13#10 +
+    'uses LintInlY, LintInlT, LintInlE;'#13#10 +
+    'type'#13#10 +
+    '  THolder = class'#13#10 +
+    '  private'#13#10 +
+    '    function GetVal: Integer; inline;'#13#10 +
+    '  public'#13#10 +
+    '    property Val: Integer read GetVal;'#13#10 +
+    '  end;'#13#10 +
+    'function GetT: TT;'#13#10 +
+    'function InlRoutine: Integer; inline;'#13#10 +
+    'function InlImplUses: Integer; inline;'#13#10 +
+    'function InlImplicit: Integer; inline;'#13#10 +
+    'function InlEnum: Integer; inline;'#13#10 +
+    'implementation'#13#10 +
+    'uses LintInlW, LintInlP;'#13#10 +
+    'function THolder.GetVal: Integer; begin Result := GP; end;'#13#10 +
+    'function GetT: TT; begin Result := nil; end;'#13#10 +
+    'function InlRoutine: Integer; begin Result := GY; end;'#13#10 +
+    'function InlImplUses: Integer; begin Result := GW; end;'#13#10 +
+    'function InlImplicit: Integer; var O: TObject; begin O := GetT; ' +
+      'Result := 0; end;'#13#10 +
+    'function InlEnum: Integer; begin Result := Ord(eyB); end;'#13#10 +
+    'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LRows: TArray<TPasUnusedUse>;
+  LUnits: TArray<TPasUnreferencedUnit>;
+  LMids: TArray<Integer>;
+
+  procedure WriteUnit(const AName, AIntf, AImpl: string);
+  begin
+    TFile.WriteAllText(TPath.Combine(LDir, AName + '.pas'),
+      'unit ' + AName + ';'#13#10'interface'#13#10 + AIntf +
+      'implementation'#13#10 + AImpl + 'end.'#13#10);
+  end;
+
+  function RowIs(AIdx: Integer; const AName: string; ALine, ACol: Integer;
+    ADoubt: Boolean): Boolean;
+  begin
+    Result := (AIdx <= High(LRows)) and SameText(LRows[AIdx].UnitName, AName)
+      and (LRows[AIdx].Hit.Line = ALine) and (LRows[AIdx].Hit.Col = ACol) and
+      (Copy(LRows[AIdx].Hit.Snippet, LRows[AIdx].Hit.HiFrom + 1,
+        LRows[AIdx].Hit.HiTo - LRows[AIdx].Hit.HiFrom) = AName) and
+      ((Length(LRows[AIdx].Doubts) > 0) = ADoubt);
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_unused_uses');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'LintUse.pas'), LINT_USE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'LintUse.dfm'), LINT_DFM);
+  WriteUnit('LintLib', 'type TLibThing = class end;'#13#10, '');
+  WriteUnit('LintInit', 'procedure InitProc;'#13#10,
+    'var G: Integer;'#13#10'procedure InitProc; begin end;'#13#10 +
+    'initialization'#13#10'  G := 1;'#13#10);
+  WriteUnit('LintEnum', 'type TLE = (leOne, leTwo);'#13#10, '');
+  WriteUnit('LintQual', 'procedure QualProc;'#13#10,
+    'procedure QualProc; begin end;'#13#10);
+  WriteUnit('LintImpl', 'procedure ImplProc;'#13#10,
+    'procedure ImplProc; begin end;'#13#10);
+  WriteUnit('LintDead', 'procedure DeadProc;'#13#10,
+    'procedure DeadProc; begin end;'#13#10);
+  WriteUnit('LintForm', 'type TLintPanel = class end;'#13#10, '');
+  WriteUnit('LintNever', 'procedure NeverProc;'#13#10,
+    'procedure NeverProc; begin end;'#13#10);
+  // Ahead of every other file by path (a\), behind them by name.
+  TDirectory.CreateDirectory(TPath.Combine(LDir, 'a'));
+  TFile.WriteAllText(TPath.Combine(LDir, 'a\ZLint.pas'),
+    'unit ZLint;'#13#10'interface'#13#10'implementation'#13#10 +
+    'uses LintNever;'#13#10'end.'#13#10);
+  // Inline expansion: LintInl names nothing of LintInlY/W/P/T, but the
+  // inline routines it calls need them (dcc64 37.0 says H2443 without each,
+  // local/probe-inline); LintInlE is named only by an enum value, which
+  // folds, and LintInlQ by nothing.
+  TFile.WriteAllText(TPath.Combine(LDir, 'LintInl.pas'), LINT_INL);
+  TFile.WriteAllText(TPath.Combine(LDir, 'LintInlX.pas'), LINT_INLX);
+  WriteUnit('LintInlY', 'function GY: Integer;'#13#10,
+    'function GY: Integer; begin Result := 1; end;'#13#10);
+  WriteUnit('LintInlW', 'function GW: Integer;'#13#10,
+    'function GW: Integer; begin Result := 2; end;'#13#10);
+  WriteUnit('LintInlP', 'function GP: Integer;'#13#10,
+    'function GP: Integer; begin Result := 3; end;'#13#10);
+  WriteUnit('LintInlT', 'type TT = class end;'#13#10, '');
+  WriteUnit('LintInlE', 'type TEnY = (eyA, eyB);'#13#10, '');
+  WriteUnit('LintInlQ', 'procedure GQ;'#13#10,
+    'procedure GQ; begin end;'#13#10);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LNav := nil;
+  try
+    LProj.AnalyzeDirectory(LDir);
+    LNav := TPasNavigator.Create(LProj);
+    LRows := FindUnusedUses(LNav,
+      [LProj.ModelIdOf(TPath.Combine(LDir, 'LintUse.pas'))]);
+    // By the unused unit's name, not by position: LintDead is written after
+    // LintInit on line 3.
+    Ok('unused uses: three entries', Length(LRows) = 3);
+    Ok('unused uses: LintDead, a dead branch naming it a doubt',
+      RowIs(0, 'LintDead', 3, 55, True));
+    Ok('unused uses: LintInit, its initialization a doubt',
+      RowIs(1, 'LintInit', 3, 15, True));
+    Ok('unused uses: LintNever in the implementation, no doubt',
+      RowIs(2, 'LintNever', 6, 6, False) and not LRows[2].InInterface);
+    LRows := FindUnusedUses(LNav,
+      [LProj.ModelIdOf(TPath.Combine(LDir, 'LintInl.pas'))]);
+    Ok('unused uses: inline - two entries', Length(LRows) = 2);
+    Ok('unused uses: inline - an enum value folds, LintInlE unused',
+      RowIs(0, 'LintInlE', 4, 56, False));
+    Ok('unused uses: inline - LintInlQ unused',
+      RowIs(1, 'LintInlQ', 4, 66, False));
+    // Every unit: the three, the two and a\ZLint's one. LintInlX names every
+    // unit it lists (LintInlE by the enum value in its own body). By file
+    // name: LintInl.pas, LintUse.pas, then ZLint.pas, first by path.
+    LMids := nil;
+    for var LMid := 0 to LProj.ModelCount - 1 do
+      LMids := LMids + [LMid];
+    LRows := FindUnusedUses(LNav, LMids);
+    Ok('unused uses: the whole analysis - the same six', Length(LRows) = 6);
+    Ok('unused uses: the whole analysis - by file name, then unit name',
+      (Length(LRows) = 6) and
+      SameText(ExtractFileName(LRows[0].Hit.FilePath), 'LintInl.pas') and
+      SameText(LRows[0].UnitName, 'LintInlE') and
+      SameText(LRows[1].UnitName, 'LintInlQ') and
+      SameText(ExtractFileName(LRows[2].Hit.FilePath), 'LintUse.pas') and
+      SameText(LRows[2].UnitName, 'LintDead') and
+      SameText(LRows[4].UnitName, 'LintNever') and
+      SameText(ExtractFileName(LRows[5].Hit.FilePath), 'ZLint.pas'));
+    // No program: the units no other unit lists and uses - the three top
+    // units, and three listed only by entries unused there. LintDead's
+    // entry has a doubt, so it stands; LintInlE is used by LintInlX.
+    LUnits := FindUnreferencedUnits(LNav, LMids);
+    Ok('unreferenced, no program: six units', Length(LUnits) = 6);
+    Ok('unreferenced, no program: which', (Length(LUnits) = 6) and
+      SameText(LUnits[0].UnitName, 'LintInit') and
+      SameText(LUnits[1].UnitName, 'LintInl') and
+      SameText(LUnits[2].UnitName, 'LintInlQ') and
+      SameText(LUnits[3].UnitName, 'LintNever') and
+      SameText(LUnits[4].UnitName, 'LintUse') and
+      SameText(LUnits[5].UnitName, 'ZLint'));
+    Ok('unreferenced, no program: LintInit - its initialization a doubt, ' +
+      'LintUse lists it unused', (Length(LUnits) = 6) and
+      (LUnits[0].Doubts <> nil) and (Length(LUnits[0].ListedBy) = 1) and
+      SameText(LUnits[0].ListedBy[0], 'LintUse.pas (no name of it used)') and
+      (LUnits[0].Hit.Line = 1) and (LUnits[0].Hit.Col = 6));
+    Ok('unreferenced, no program: LintNever - two listers, by name',
+      (Length(LUnits) = 6) and (Length(LUnits[3].ListedBy) = 2) and
+      SameText(LUnits[3].ListedBy[0], 'LintUse.pas (no name of it used)') and
+      SameText(LUnits[3].ListedBy[1], 'ZLint.pas (no name of it used)'));
+    Ok('unreferenced, no program: LintUse - nothing lists it',
+      (Length(LUnits) = 6) and (LUnits[4].ListedBy = nil) and
+      (LUnits[4].Doubts = nil));
+  finally
+    LNav.Free;
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
 end;
 
 function DiagCount(AModel: TPasSemaModel; const ACode: string): Integer;
@@ -4250,6 +4546,8 @@ begin
     if TDirectory.Exists(LDir) then
       TDirectory.Delete(LDir, True);
   end;
+  TestUnusedUses;
+  TestUnreferencedUnits;
 
   if GCounter.Finish('SemaNavSmoke') then
     ExitCode := 1;

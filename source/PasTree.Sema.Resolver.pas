@@ -4185,17 +4185,37 @@ begin
     case FModel.Symbols[LSym].Kind of
       skRoutine:
         begin
-          if FModel.Symbols[LSym].MemberScope = NIL_SCOPE then
+          if FModel.Symbols[LSym].MemberScope <> NIL_SCOPE then
+          begin
+            LNode := FModel.Scopes[FModel.Symbols[LSym].MemberScope].OwnerNode;
+            LChild := FirstChild(LNode);
+            while LChild <> NIL_NODE do
+            begin
+              if (KindOf(LChild) = nkDirective) and
+                 FTree.NodeTextEquals(LChild, 'varargs') then
+              begin
+                FModel.Symbols[LSym].Flags :=
+                  FModel.Symbols[LSym].Flags + [sfVarArgs];
+                Break;
+              end;
+              LChild := NextSib(LChild);
+            end;
+          end;
+          // `inline` is written on the declaration (the routine node holding
+          // the symbol's name); a parameterless routine has no member scope.
+          LNode := FModel.Symbols[LSym].DeclNode;
+          while (LNode <> NIL_NODE) and (KindOf(LNode) <> nkRoutine) do
+            LNode := FTree.Nodes[LNode].Parent;
+          if LNode = NIL_NODE then
             Continue;
-          LNode := FModel.Scopes[FModel.Symbols[LSym].MemberScope].OwnerNode;
           LChild := FirstChild(LNode);
           while LChild <> NIL_NODE do
           begin
             if (KindOf(LChild) = nkDirective) and
-               FTree.NodeTextEquals(LChild, 'varargs') then
+               FTree.NodeTextEquals(LChild, 'inline') then
             begin
               FModel.Symbols[LSym].Flags :=
-                FModel.Symbols[LSym].Flags + [sfVarArgs];
+                FModel.Symbols[LSym].Flags + [sfInline];
               Break;
             end;
             LChild := NextSib(LChild);

@@ -170,6 +170,7 @@
         <DCCReference Include="..\source\PasTree.Dfm.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Dfm.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Nav.pas"/>
+        <DCCReference Include="..\source\PasTree.Sema.Lint.pas"/>
         <DCCReference Include="..\source\PasTree.Outline.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Complete.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Dump.pas"/>

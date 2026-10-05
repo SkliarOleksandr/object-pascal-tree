@@ -695,6 +695,30 @@ object frmMain: TfrmMain
       OnExecute = FindDefinesAtActionExecute
       OnUpdate = FindDefinesAtActionUpdate
     end
+    object FindUnusedUnitsAction: TAction
+      Caption = 'Unused Units'
+      Hint =
+        'The units in this unit'#39's uses clauses none of whose names it u' +
+        'ses'
+      OnExecute = FindUnusedUnitsActionExecute
+      OnUpdate = FindUnusedUnitsActionUpdate
+    end
+    object FindProjectUnusedUnitsAction: TAction
+      Caption = 'Unused Units in the Project'
+      Hint =
+        'The units in the uses clauses of every project unit (library sou' +
+        'rces left out) that the unit does not use'
+      OnExecute = FindProjectUnusedUnitsActionExecute
+      OnUpdate = FindProjectUnusedUnitsActionUpdate
+    end
+    object FindUnreferencedUnitsAction: TAction
+      Caption = 'Units Nobody Uses'
+      Hint =
+        'The project units the program would no longer take in once every' +
+        ' unused uses entry is gone - the .dpr'#39's own list included'
+      OnExecute = FindUnreferencedUnitsActionExecute
+      OnUpdate = FindProjectUnusedUnitsActionUpdate
+    end
     object RenameAction: TAction
       Caption = 'Rename...'
       Hint = 
@@ -757,6 +781,18 @@ object frmMain: TfrmMain
       end
       object FindDefinesAt1: TMenuItem
         Action = FindDefinesAtAction
+      end
+      object FindUnusedSep1: TMenuItem
+        Caption = '-'
+      end
+      object FindUnusedUnits1: TMenuItem
+        Action = FindUnusedUnitsAction
+      end
+      object FindProjectUnusedUnits1: TMenuItem
+        Action = FindProjectUnusedUnitsAction
+      end
+      object FindUnreferencedUnits1: TMenuItem
+        Action = FindUnreferencedUnitsAction
       end
     end
     object Rename1: TMenuItem

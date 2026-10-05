@@ -47,6 +47,7 @@ uses
   PasTree.Dfm in '..\source\PasTree.Dfm.pas',
   PasTree.Sema.Dfm in '..\source\PasTree.Sema.Dfm.pas',
   PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas',
+  PasTree.Sema.Lint in '..\source\PasTree.Sema.Lint.pas',
   PasTree.Outline in '..\source\PasTree.Outline.pas',
   PasTree.Sema.Complete in '..\source\PasTree.Sema.Complete.pas',
   PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas',

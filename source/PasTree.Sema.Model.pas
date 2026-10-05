@@ -57,9 +57,14 @@ type
   // ask them of a symbol in whatever unit declares it, and a text-demoted
   // declaring model has no directive text left to read (stage A1 of the
   // memory census found both answering "no" there).
+  // sfInline (a routine whose declaration carries `inline`) is stamped with
+  // them, for a cross-model reader too: an unused-`uses` check asks it of
+  // every routine a unit calls (PasTree.Sema.Lint - a unit the body of an
+  // inline routine needs is one its callers must list, or dcc does not
+  // expand the call, H2443).
   TSemaSymbolFlag = (sfBuiltin, sfExternalUnresolved, sfStrict, sfOverload,
     sfClassMember, sfForward, sfHasBody, sfHasDefault, sfGeneric, sfVarArgs,
-    sfDefaultArrayProp);
+    sfDefaultArrayProp, sfInline);
   TSemaSymbolFlags = set of TSemaSymbolFlag;
 
   // A reference resolved to a symbol in another unit's model.

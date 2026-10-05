@@ -1932,6 +1932,16 @@ Still open, roughly in the order we're tackling it:
   (positioned on the code that actually runs, credited to the class that took
   the interface on). A method resolution clause and a delegated
   `implements` property are honest gaps - see `docs/editor-features.md` §5.
+- ~~**Unused Units**~~ - DONE (`PasTree.Sema.Lint.FindUnusedUses`, 0.93.0):
+  the `uses` entries none of whose names a unit uses, for the unit in the
+  editor or every project unit - pastree-mcp's `lint unused-uses` rule over
+  one analysis, with what may make a removal wrong (an initialization the
+  program would lose, a dead branch naming the unit) said on the row. A
+  unit an inline routine the unit calls needs counts as used: without it
+  dcc does not expand the call (H2443). And `FindUnreferencedUnits`: the
+  project units nobody uses - what the program would no longer take in once
+  every unused entry is gone, the `.dpr`'s own list included. See
+  `docs/editor-features.md` §12.
 - **Show Defines** - for the identifier/position under the cursor, list
   every preprocessor define ACTIVE there (module where `$DEFINE`d / project-
   or platform-level, line, the define name), in its own results window,

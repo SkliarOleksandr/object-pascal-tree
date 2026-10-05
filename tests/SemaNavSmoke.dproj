@@ -160,6 +160,7 @@
         <DCCReference Include="..\source\PasTree.Sema.Dump.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Project.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Nav.pas"/>
+        <DCCReference Include="..\source\PasTree.Sema.Lint.pas"/>
         <DCCReference Include="PasTree.TestKit.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>

@@ -79,7 +79,8 @@ uses
   PasTree.Sema.Resolver in '..\source\PasTree.Sema.Resolver.pas',
   PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas',
   PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
-  PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas';
+  PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas',
+  PasTree.Sema.Lint in '..\source\PasTree.Sema.Lint.pas';
 
 type
   TCount = record
@@ -105,6 +106,7 @@ var
   GDemote: Boolean;    // -demote: stage 2 on top (DemoteClosedUnits)
   GRehydrate: Boolean; // -rehydrate: after -demote, EnsureHydrated EVERY model
   GOutline: Boolean;   // -outline: TPasNavigator.ProjectOutline over the .dproj files, row count + first rows (the Go To project tab, headless)
+  GUnused: Boolean;    // -unused: FindUnusedUses over the .dproj files, every row (Find All > Unused Units in the Project, headless)
   GDefines: Boolean;   // -defines: dump the ROOT model's DefineRefs and probe
                        // DefineAt/GotoDefine on each (the headless twin of
                        // Find References on a conditional symbol)
@@ -631,6 +633,36 @@ begin
           LONav.Free;
         end;
       end;
+      if GUnused then
+      begin
+        // Find All > Unused Units in the Project, headless: the .dproj's
+        // files that have a model, every row with its doubts.
+        var LUMids: TArray<Integer> := nil;
+        for var LUF in LD.Files do
+          if GProj.ModelIdOf(LUF) >= 0 then
+            LUMids := LUMids + [GProj.ModelIdOf(LUF)];
+        var LUNav := TPasNavigator.Create(GProj);
+        var LURows: TArray<TPasUnusedUse>;
+        var LUUnits: TArray<TPasUnreferencedUnit>;
+        try
+          LURows := FindUnusedUses(LUNav, LUMids);
+          LUUnits := FindUnreferencedUnits(LUNav, LUMids);
+        finally
+          LUNav.Free;
+        end;
+        Writeln(ErrOutput, Format('  unreferenced: %d unit(s)',
+          [Length(LUUnits)]));
+        for var LUU in LUUnits do
+          Writeln(ErrOutput, Format('    %s <- %s%s', [LUU.Hit.FilePath,
+            string.Join(', ', LUU.ListedBy), IfThen(LUU.Doubts <> nil,
+            '; but ' + string.Join('; ', LUU.Doubts), '')]));
+        Writeln(ErrOutput, Format('  unused: %d `uses` entries in %d unit(s)',
+          [Length(LURows), Length(LUMids)]));
+        for var LUR in LURows do
+          Writeln(ErrOutput, Format('    %s:%d:%d %s%s', [LUR.Hit.FilePath,
+            LUR.Hit.Line, LUR.Hit.Col, LUR.UnitName, IfThen(LUR.Doubts <> nil,
+            '; but ' + string.Join('; ', LUR.Doubts), '')]));
+      end;
       if LTotalLines > 0 then
         Writeln(ErrOutput, Format(
           '  source: %s lines, %.1f MB, %s file(s) - %s lines/s',
@@ -733,6 +765,8 @@ begin
         GRehydrate := True
       else if SameText(ParamStr(GIdx), '-outline') then
         GOutline := True
+      else if SameText(ParamStr(GIdx), '-unused') then
+        GUnused := True
       else if SameText(ParamStr(GIdx), '-defines') then
         GDefines := True
       else if ParamStr(GIdx).StartsWith('-p:', True) then

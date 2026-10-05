@@ -33,7 +33,8 @@ uses
   PasTree.Parser, PasTree.Project, PasTree.DProj,
   PasTree.Sema.Diagnostics, PasTree.Sema.Model, PasTree.Sema.Builtins,
   PasTree.Sema.Types, PasTree.Sema.Resolver, PasTree.Sema.Project,
-  PasTree.Sema.Nav, PasTree.Sema.Async, PasTree.Sema.Complete,
+  PasTree.Sema.Nav, PasTree.Sema.Lint, PasTree.Sema.Async,
+  PasTree.Sema.Complete,
   PasTree.Sema.Dump, PasTree.Version, VirtualTrees.BaseAncestorVCL, VirtualTrees.BaseTree, VirtualTrees.AncestorVCL, SynEditCodeFolding,
   PasTreeDemo.Highlighter, PasTreeDemo.Settings, PasTreeDemo.NavHistory,
   PasTreeDemo.Includes, PasTreeDemo.UnitList, PasTreeDemo.UnitPicker,
@@ -143,7 +144,7 @@ type
 
   TSearchTabKind = (stkRefs, stkRename, stkOverrides, stkImpls,
     stkDescendants, stkAssigns, stkCreations, stkDestructions,
-    stkDefines, stkDefinesAt);
+    stkDefines, stkDefinesAt, stkUnused, stkUnusedProject, stkUnreferenced);
 
   TFindRefTab = class(TTabSheet)
   public
@@ -156,7 +157,9 @@ type
     // actually gets compared, SymMid being meaningless there; SymSym = -3 is
     // the same for a CONDITIONAL-SYMBOL search (FNav.DefineAt); SymSym = -4
     // and -5 are the two cursor-free define pages (Find All Defines /
-    // Defines at cursor), one page each, told apart by Kind.
+    // Defines at cursor), one page each, told apart by Kind; SymSym = -6 is
+    // an Unused Units page (SymMid the unit's model, -1 for the project's),
+    // SymSym = -7 the Units Nobody Uses page.
     SymMid, SymSym: Integer;
     SymBuiltinName: string;
     { WHICH question this page answers about (SymMid, SymSym). Six answers
@@ -285,6 +288,13 @@ type
     FindDefines1: TMenuItem;
     FindDefinesAtAction: TAction;
     FindDefinesAt1: TMenuItem;
+    FindUnusedSep1: TMenuItem;
+    FindUnusedUnitsAction: TAction;
+    FindUnusedUnits1: TMenuItem;
+    FindProjectUnusedUnitsAction: TAction;
+    FindProjectUnusedUnits1: TMenuItem;
+    FindUnreferencedUnitsAction: TAction;
+    FindUnreferencedUnits1: TMenuItem;
     FindAll1: TMenuItem;
     RenameAction: TAction;
     Rename1: TMenuItem;
@@ -360,6 +370,11 @@ type
     procedure FindDefinesActionExecute(Sender: TObject);
     procedure FindDefinesAtActionUpdate(Sender: TObject);
     procedure FindDefinesAtActionExecute(Sender: TObject);
+    procedure FindUnusedUnitsActionUpdate(Sender: TObject);
+    procedure FindUnusedUnitsActionExecute(Sender: TObject);
+    procedure FindProjectUnusedUnitsActionUpdate(Sender: TObject);
+    procedure FindProjectUnusedUnitsActionExecute(Sender: TObject);
+    procedure FindUnreferencedUnitsActionExecute(Sender: TObject);
     procedure RenameActionUpdate(Sender: TObject);
     procedure RenameActionExecute(Sender: TObject);
     procedure pgcBottomMouseDown(Sender: TObject; Button: TMouseButton;
@@ -1777,6 +1792,151 @@ begin
   PopulateFindRefTab(LTab, Format('Defines at %s:%d (%d)',
     [TPath.GetFileName(LFilePath), LLine, Length(LHits)]), LHits, False,
     Default(TPasRefHit), LPrefixes, nil, True);
+  pgcBottom.ActivePage := LTab;
+end;
+
+{ Find All > Unused Units / Unused Units in the Project: the `uses` entries
+  none of whose names the unit uses (PasTree.Sema.Lint, the rule pastree-mcp's
+  `lint unused-uses` applies). The first checks the unit in the editor, the
+  second every unit of the analysis outside LibraryPaths. A row is the entry
+  in its `uses` line; what may make the removal wrong (an initialization the
+  program would lose, a name bound to nothing, a branch not compiled here) is
+  appended to it after "<- but". One page each, keyed by the unit's model id
+  (the unit page) or -6 (the project page). }
+
+function UnusedUsesHits(const ARows: TArray<TPasUnusedUse>;
+  out AFileCount: Integer): TArray<TPasRefHit>;
+var
+  LIdx: Integer;
+begin
+  SetLength(Result, Length(ARows));
+  AFileCount := 0;
+  for LIdx := 0 to High(ARows) do
+  begin
+    Result[LIdx] := ARows[LIdx].Hit;
+    // Appended after the highlighted name: HiFrom/HiTo stay valid.
+    if Length(ARows[LIdx].Doubts) > 0 then
+      Result[LIdx].Snippet := TrimRight(Result[LIdx].Snippet) +
+        '   <- but ' + string.Join('; ', ARows[LIdx].Doubts);
+    if (LIdx = 0) or
+       not SameText(ARows[LIdx].Hit.FilePath, ARows[LIdx - 1].Hit.FilePath)
+    then
+      Inc(AFileCount);
+  end;
+end;
+
+procedure TfrmMain.FindUnusedUnitsActionUpdate(Sender: TObject);
+var
+  LLine, LCol: Integer;
+  LFilePath: string;
+  LEditor: TSynEdit;
+begin
+  TAction(Sender).Enabled := Assigned(FNav) and
+    ActiveEditorPos(LFilePath, LEditor, LLine, LCol) and
+    (FNav.ModelIdOf(LFilePath) >= 0);
+end;
+
+procedure TfrmMain.FindUnusedUnitsActionExecute(Sender: TObject);
+var
+  LLine, LCol, LMid, LFiles: Integer;
+  LFilePath: string;
+  LEditor: TSynEdit;
+  LRows: TArray<TPasUnusedUse>;
+  LTab: TFindRefTab;
+begin
+  if not Assigned(FNav) or
+     not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
+    Exit;
+  LMid := FNav.ModelIdOf(LFilePath);
+  if LMid < 0 then
+    Exit;
+  LRows := FindUnusedUses(FNav, [LMid]);
+  LTab := SearchTabFor(LMid, -6, stkUnused);
+  PopulateFindRefTab(LTab, Format('Unused units in %s (%d)',
+    [TPath.GetFileName(LFilePath), Length(LRows)]),
+    UnusedUsesHits(LRows, LFiles), False, Default(TPasRefHit));
+  pgcBottom.ActivePage := LTab;
+end;
+
+procedure TfrmMain.FindProjectUnusedUnitsActionUpdate(Sender: TObject);
+begin
+  TAction(Sender).Enabled := Assigned(FNav);
+end;
+
+procedure TfrmMain.FindProjectUnusedUnitsActionExecute(Sender: TObject);
+var
+  LMid, LFiles: Integer;
+  LMids: TArray<Integer>;
+  LRows: TArray<TPasUnusedUse>;
+  LHits: TArray<TPasRefHit>;
+  LTab: TFindRefTab;
+begin
+  if not Assigned(FNav) then
+    Exit;
+  LMids := nil;
+  for LMid := 0 to FSemaProject.ModelCount - 1 do
+    if not FNav.IsUnderLibraryPath(FSemaProject.ModelFile(LMid)) then
+      LMids := LMids + [LMid];
+  Screen.Cursor := crHourGlass;
+  try
+    LRows := FindUnusedUses(FNav, LMids);
+  finally
+    Screen.Cursor := crDefault;
+  end;
+  LHits := UnusedUsesHits(LRows, LFiles);
+  LTab := SearchTabFor(-1, -6, stkUnusedProject);
+  PopulateFindRefTab(LTab, Format('Unused units in the project (%d in %d ' +
+    'units)', [Length(LRows), LFiles]), LHits, False, Default(TPasRefHit));
+  pgcBottom.ActivePage := LTab;
+end;
+
+{ Find All > Units Nobody Uses: the project units (outside LibraryPaths) the
+  program would no longer take in once every unused `uses` entry is gone -
+  the .dpr's own list included, since the IDE writes every unit of a project
+  there (FindUnreferencedUnits). A row is the unit's header, who still lists
+  it appended after "<- listed by", a unit with initialization code flagged
+  after "but". One page, key -7. }
+procedure TfrmMain.FindUnreferencedUnitsActionExecute(Sender: TObject);
+var
+  LMid: Integer;
+  LMids: TArray<Integer>;
+  LRows: TArray<TPasUnreferencedUnit>;
+  LHits: TArray<TPasRefHit>;
+  LPrefixes: TArray<string>;
+  LTab: TFindRefTab;
+begin
+  if not Assigned(FNav) then
+    Exit;
+  LMids := nil;
+  for LMid := 0 to FSemaProject.ModelCount - 1 do
+    if not FNav.IsUnderLibraryPath(FSemaProject.ModelFile(LMid)) then
+      LMids := LMids + [LMid];
+  Screen.Cursor := crHourGlass;
+  try
+    LRows := FindUnreferencedUnits(FNav, LMids);
+  finally
+    Screen.Cursor := crDefault;
+  end;
+  SetLength(LHits, Length(LRows));
+  for LMid := 0 to High(LRows) do
+  begin
+    LHits[LMid] := LRows[LMid].Hit;
+    // Appended after the highlighted name: HiFrom/HiTo stay valid.
+    LHits[LMid].Snippet := TrimRight(LHits[LMid].Snippet);
+    if LRows[LMid].ListedBy <> nil then
+      LHits[LMid].Snippet := LHits[LMid].Snippet + '   <- listed by ' +
+        string.Join(', ', LRows[LMid].ListedBy);
+    if LRows[LMid].Doubts <> nil then
+      LHits[LMid].Snippet := LHits[LMid].Snippet + '; but ' +
+        string.Join('; ', LRows[LMid].Doubts);
+  end;
+  // Flat: one row per unit, its file in front.
+  SetLength(LPrefixes, Length(LRows));
+  for LMid := 0 to High(LRows) do
+    LPrefixes[LMid] := TPath.GetFileName(LRows[LMid].Hit.FilePath) + ': ';
+  LTab := SearchTabFor(-1, -7, stkUnreferenced);
+  PopulateFindRefTab(LTab, Format('Units nobody uses (%d)', [Length(LRows)]),
+    LHits, False, Default(TPasRefHit), LPrefixes, nil, True);
   pgcBottom.ActivePage := LTab;
 end;
 

@@ -417,6 +417,9 @@ rest in the order this document describes them:
 - a separator, then the two cursor-free define inventories (§10):
   `Find All > Defines` (`FindDefines`) and `Find All > Defines at cursor`
   (`DefinesAt`) - always enabled, no identity at the caret
+- a separator, then the three `uses` checks (§12): `Find All > Unused Units`
+  (the unit in the editor), `Find All > Unused Units in the Project` (every
+  unit outside `LibraryPaths`) and `Find All > Units Nobody Uses` (§12.1)
 
 `Implementations` and `Descendants` have no modifier and one answer each:
 Descendants the whole transitive tree, Implementations the classes that
@@ -433,7 +436,8 @@ Refactor items the same way) so the submenu's shape never shifts with the
 caret. Every command opens its own results page: `TFindRefTab.Kind`
 (`stkRefs`, `stkRename`, `stkOverrides`, `stkImpls`, `stkDescendants`,
 `stkAssigns`, `stkCreations`, `stkDestructions`, `stkDefines`,
-`stkDefinesAt`) is part of the page identity, so a repeated search refreshes
+`stkDefinesAt`, `stkUnused`, `stkUnusedProject`, `stkUnreferenced`) is part
+of the page identity, so a repeated search refreshes
 its own page and eight answers about one symbol never overwrite each other.
 
 ## 4. Find Overrides (`TPasNavigator.MethodAt`/`FindOverrides` + demo wiring)
@@ -993,3 +997,106 @@ search), filtered by the query the client sends, each row a
 resolve it only for the rows returned (the protocol caps the result, so a
 few hundred `DeclHit` calls, not one per declaration), and the
 `containerName` is `Owner` or, when empty, `UnitName`.
+
+## 12. Unused Units (`PasTree.Sema.Lint.FindUnusedUses` + demo wiring)
+
+Status: IMPLEMENTED (PasTree 0.93.0) - `FindUnusedUses(ANav, AMids)` and
+the `TPasUnusedUse` row in `source/PasTree.Sema.Lint.pas`, wired into the
+demo as `Find All > Unused Units` (the unit in the editor) and `Find All >
+Unused Units in the Project` (every model whose file is not under the
+navigator's `LibraryPaths`, now public as `IsUnderLibraryPath`),
+regression-covered by `tests/SemaNavSmoke.dpr` (`TestUnusedUses`), and
+headless as `tools/PasTreeSemaProject <x.dproj> -dproj -unused`.
+
+The rule is pastree-mcp's `lint unused-uses`, ported to one analysis: an
+entry of a unit's `uses` none of whose names the unit uses. A name counts
+for the unit listing it when dcc needs that unit in scope to bind it - a
+unit-level declaration of its interface, an enum value, a helper's member.
+A member reached through a value or a type (`List.Add`, `TFoo.Create`) does
+not: dcc finds members wherever the type came from. Also counted: the
+qualifier of `Unit.Name`; a class or a component link the unit's form file
+(`.dfm`/`.fmx`) names; a name bound through an alias of another unit, or a
+name of the interface bound to a unit of the implementation `uses` - every
+listed unit declaring that name is credited. A program, a library or a
+package is not checked (its `uses` is its contents), nor an entry whose
+unit did not resolve.
+
+A unit an inline routine needs is used too. dcc expands a call of a routine
+marked `inline` only when the CALLER's `uses` names every unit the routine
+needs - otherwise the call compiles as a plain one and dcc says `H2443
+Inline function 'X' has not been expanded because unit 'Y' is not specified
+in USES list`: no error, but the code changes, so removing `Y` is not free
+(the demo's own `System.UITypes`, which `MessageDlg`'s expansion needs, was
+the case that showed it). Probed on dcc64 37.0, what the routine needs is
+every unit of a symbol its declaration or body binds - a routine, a
+variable, a typed or a string constant, a type, a member reached through a
+value (`GetY.V`), its implementation `uses` alike - plus the units of those
+symbols' declared types (`O := GetY` needs the unit of GetY's result type,
+though the body names nothing of it), plus what an inline routine it calls
+needs (nested expansion), a property read through an inline getter
+included. An enum value, an ordinal constant, `SizeOf` and a cast of a
+constant fold into the code and need nothing; the check leaves out only
+the enum value and keeps the rest, so it errs toward keeping a unit, never
+toward calling a needed one unused. The unit must be named by the caller
+itself: one its `uses` reaches through another unit does not do. The
+routine's flag is `sfInline`, stamped in Phase 1 like `sfVarArgs` (a
+library model is usually text-demoted when asked); the body is found by
+`TPasNavigator.RoutineImplNode`, which hydrates the declaring model - only
+for a unit with an entry still unused, and once per routine.
+
+What the index cannot decide is said on the row (`Doubts`), never decided:
+
+- a name bound to nothing that the listed unit declares;
+- a branch not compiled in this configuration naming the unit or a name of
+  it (the demo analyzes one configuration; pastree-mcp weighs every
+  analysis of a group);
+- a routine called here that the listed unit declares too - dcc picks among
+  the overloads of every unit in scope, and PasTree's pick may not be its;
+- the initialization, finalization or resource the removal leaves out of
+  the program: the units the program no longer reaches once the edge is
+  gone (a unit can be in `uses` only for what its initialization
+  registers). With no program in the analysis, the listed unit's own
+  initialization alone is said.
+
+The demo shows the rows in the grouped Find-References shape, one per entry,
+the unit name highlighted in its `uses` line, a doubt appended after
+`<- but`. The rows come sorted by the listing file's name (its path
+breaking a tie, so one file's rows stay one group), then by the unused
+unit's name. On this repository's demo project it gave the same rows as
+pastree-mcp's `lint unused-uses` before the inline rule, and the same less
+`System.UITypes` after it; pastree-mcp's rule does not know inline
+expansion yet (it can call `FindUnusedUses`, or port `InlineDeps`).
+
+### 12.1 Units Nobody Uses (`FindUnreferencedUnits`)
+
+The unit-level question the entry-level one leads to: which project units
+the build would no longer take in once every unused `uses` entry is gone.
+The program's own `uses` is judged too (the IDE writes every unit of a
+project into the `.dpr`, so "the program lists it" says nothing): an entry
+there is a use only when the program's code names something of the unit -
+`Application.CreateForm(TfrmMain, ...)` does. Every unused entry with no
+doubt is taken out of the uses graph (an entry with one - a dead branch
+naming the unit, a name bound to nothing - stays, the safe side), and what
+the program no longer reaches from its root is the answer: a unit used only
+by another such unit drops with it (a chain). A package is not judged (its
+`contains` is never optional). With no program in the analysis (a
+directory of units) there is nothing to reach from, and the answer is the
+literal one: the units no other unit lists and uses, not repeated - else
+every unit under a top one would drop with it.
+
+A row is the unit's header, who still lists it, by file name with its
+extension (`Project.dpr (no name of it used)`, `Old.pas (itself
+unreferenced)`) and, for a unit with initialization or
+finalization code or a resource, the doubt that it may be listed for what
+that registers - such a unit is in no one's `uses` for its names. Rows come
+sorted by unit name (case-insensitive, the path breaking a tie), the
+listers in each row by file name. The demo shows it as a flat page, the
+file in front of each row. On this
+repository's demo project the answer is empty.
+
+### pastree-lsp hand-off
+
+A diagnostic per row (hint severity, `DiagnosticTag.Unnecessary` greys the
+entry out) or a code action "remove unused unit" - the row's range is the
+entry's name; a row with `Doubts` should not offer the quick fix, or offer
+it with the doubt in its title.
