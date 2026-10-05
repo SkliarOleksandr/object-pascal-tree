@@ -2692,6 +2692,155 @@ begin
   GCounter.Ok(AName, ACond);
 end;
 
+{ A routine or type of a USED unit named like a compiler intrinsic hides the
+  intrinsic: units in `uses` are searched before System (dcc64 37.0 runs
+  ULow.Low for a bare `Low;`, probes in local/probe-inline/lowprobe). PasTree
+  bound every such name to the seed - Phase 1 finds it in the unit's own
+  System scope and CrossResolve never looked further - so the unit counted
+  unused, navigation went nowhere and the typing was the intrinsic's. The
+  last `uses` entry wins between two units; a member (`R.Low`, a with
+  target's `Low`) outranks both, in a method body too. }
+procedure TestUsesShadowsIntrinsic;
+const
+  ULOW =
+    'unit ULow;'#13#10'interface'#13#10'procedure Low;'#13#10 +
+    'implementation'#13#10'procedure Low; begin end;'#13#10'end.'#13#10;
+  UMANY =
+    'unit UMany;'#13#10'interface'#13#10 +
+    'type'#13#10 +
+    '  TRec = record Low: Integer; end;'#13#10 +
+    '  Text = Integer;'#13#10 +
+    'function High(A: Integer): Integer;'#13#10 +
+    'function Length: Integer;'#13#10 +
+    'procedure Inc(var A: Integer);'#13#10 +
+    'function SizeOf: Integer;'#13#10 +
+    'implementation'#13#10 +
+    'function High(A: Integer): Integer; begin Result := A; end;'#13#10 +
+    'function Length: Integer; begin Result := 7; end;'#13#10 +
+    'procedure Inc(var A: Integer); begin end;'#13#10 +
+    'function SizeOf: Integer; begin Result := 3; end;'#13#10 +
+    'end.'#13#10;
+  UFIRST =
+    'unit UFirst;'#13#10'interface'#13#10'function Odd(A: Integer): Boolean;' +
+    #13#10'implementation'#13#10 +
+    'function Odd(A: Integer): Boolean; begin Result := True; end;'#13#10 +
+    'end.'#13#10;
+  USECOND =
+    'unit USecond;'#13#10'interface'#13#10'function Odd(A: Integer): Boolean;' +
+    #13#10'implementation'#13#10 +
+    'function Odd(A: Integer): Boolean; begin Result := False; end;'#13#10 +
+    'end.'#13#10;
+  PMANY =
+    'program PMany;'#13#10 +                                  // 1
+    'uses UFirst, USecond, ULow, UMany;'#13#10 +              // 2
+    'type'#13#10 +                                            // 3
+    '  TObj = class'#13#10 +                                  // 4
+    '    procedure M;'#13#10 +                                // 5
+    '  end;'#13#10 +                                          // 6
+    '  TWithLow = class'#13#10 +                              // 7
+    '    function Low: Integer;'#13#10 +                      // 8
+    '  end;'#13#10 +                                          // 9
+    'procedure TObj.M;'#13#10 +                               // 10
+    'begin'#13#10 +                                           // 11
+    '  Low;'#13#10 +                                          // 12
+    '  if Length > 0 then;'#13#10 +                           // 13
+    'end;'#13#10 +                                            // 14
+    'function TWithLow.Low: Integer; begin Result := 9; end;'#13#10 + // 15
+    'var'#13#10 +                                             // 16
+    '  I: Integer;'#13#10 +                                   // 17
+    '  R: TRec;'#13#10 +                                      // 18
+    '  T: Text;'#13#10 +                                      // 19
+    '  W: TWithLow;'#13#10 +                                  // 20
+    'begin'#13#10 +                                           // 21
+    '  Low();'#13#10 +                                        // 22
+    '  I := High(4) + SizeOf;'#13#10 +                        // 23
+    '  Inc(I);'#13#10 +                                       // 24
+    '  R.Low := 2;'#13#10 +                                   // 25
+    '  T := 5;'#13#10 +                                       // 26
+    '  if Odd(1) then;'#13#10 +                               // 27
+    '  W := nil;'#13#10 +                                     // 28
+    '  with W do'#13#10 +                                     // 29
+    '    I := Low;'#13#10 +                                   // 30
+    '  I := System.High(I) - Ord(''a'');'#13#10 +             // 31
+    'end.'#13#10;                                             // 32
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LM: TPasSemaModel;
+  LMid: Integer;
+
+  // What the identifier at (ALine, ACol) of PMany binds to: the declaring
+  // unit's file name for a cross-unit binding, 'here' for one in PMany,
+  // 'builtin' for a seed, '' for nothing.
+  function BoundAt(ALine, ACol: Integer): string;
+  var
+    LFile: string;
+    LLine, LCol: Integer;
+    LExt: TPasExtRef;
+  begin
+    Result := '?';
+    for var LNode := 0 to High(LM.Tree.Nodes) do
+    begin
+      if (LM.Tree.Nodes[LNode].Kind <> nkIdent) or
+         not LProj.NodeSite(LMid, LNode, LFile, LLine, LCol) or
+         (LLine <> ALine) or (LCol <> ACol) then
+        Continue;
+      if LM.ExtRefMap.TryGetValue(LNode, LExt) then
+        Exit(ChangeFileExt(ExtractFileName(LProj.ModelFile(LExt.UnitId)), ''));
+      if LM.RefMap[LNode] = NIL_SYM then
+        Exit('');
+      if sfBuiltin in LM.Symbols[LM.RefMap[LNode]].Flags then
+        Exit('builtin');
+      Exit('here');
+    end;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_shadow_intrinsic');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ULow.pas'), ULOW);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UMany.pas'), UMANY);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UFirst.pas'), UFIRST);
+  TFile.WriteAllText(TPath.Combine(LDir, 'USecond.pas'), USECOND);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PMany.dpr'), PMANY);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    LMid := LProj.AnalyzeProject(TPath.Combine(LDir, 'PMany.dpr'));
+    Ok('shadow-intrinsic: PMany analyzed', LMid >= 0);
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    Ok('shadow-intrinsic: ULow lists Low as shadowing a seed',
+      (Length(LProj.Model(LProj.ModelIdOf(TPath.Combine(LDir,
+        'ULow.pas'))).BuiltinShadows) = 1));
+    Ok('shadow-intrinsic: bare `Low()` -> ULow', BoundAt(22, 3) = 'ULow');
+    Ok('shadow-intrinsic: High(4) -> UMany', BoundAt(23, 8) = 'UMany');
+    Ok('shadow-intrinsic: SizeOf -> UMany', BoundAt(23, 18) = 'UMany');
+    Ok('shadow-intrinsic: Inc(I) -> UMany', BoundAt(24, 3) = 'UMany');
+    Ok('shadow-intrinsic: a type, `T: Text` -> UMany', BoundAt(19, 6) = 'UMany');
+    Ok('shadow-intrinsic: the last uses entry wins, Odd -> USecond',
+      BoundAt(27, 6) = 'USecond');
+    Ok('shadow-intrinsic: in a method body, bare `Low;` -> ULow',
+      BoundAt(12, 3) = 'ULow');
+    Ok('shadow-intrinsic: in a method body, Length -> UMany',
+      BoundAt(13, 6) = 'UMany');
+    Ok('shadow-intrinsic: a member, R.Low, stays the field (UMany''s TRec)',
+      BoundAt(25, 5) = 'UMany');
+    Ok('shadow-intrinsic: a with target''s member Low outranks ULow',
+      BoundAt(30, 10) = 'here');
+    Ok('shadow-intrinsic: a name nobody shadows stays the seed, Ord',
+      BoundAt(31, 25) = 'builtin');
+    Ok('shadow-intrinsic: System.High is still the intrinsic',
+      BoundAt(31, 15) <> 'UMany');
+  finally
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 var
   LDir: string;
   LA, LB, LC, LD, LE, LOvl: TPasSemaModel;
@@ -8327,6 +8476,8 @@ begin
     if TDirectory.Exists(LDir) then
       TDirectory.Delete(LDir, True);
   end;
+
+  TestUsesShadowsIntrinsic;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;

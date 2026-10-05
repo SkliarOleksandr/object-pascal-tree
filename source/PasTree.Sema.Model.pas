@@ -446,6 +446,14 @@ type
     // JOINS it: answering "is this name compiler-provided?" must NOT also see
     // the unit's own declarations.
     SystemScope: Integer;
+    // The compiler-provided names this unit's interface declares itself,
+    // lower case (`procedure Low;`), set at the end of Phase 1. An importer
+    // binds such a name to this unit's declaration, not to the seed: a used
+    // unit is searched before System (dcc64 37.0 calls ULow.Low for a bare
+    // `Low` - and `function Length(A: TObject): Integer; overload;` hides the
+    // intrinsic altogether, `Length('abc')` is E2250). Almost always empty,
+    // which is what lets the importer's check cost nothing.
+    BuiltinShadows: TArray<string>;
     NodeScope: TArray<Integer>;     // node index -> scope in effect; NIL_SCOPE
     ExprType: TArray<Integer>;      // node index -> type symbol; NIL_SYM = untyped
     ExtRefMap: TPasIntMap<TPasExtRef>;           // node -> external symbol

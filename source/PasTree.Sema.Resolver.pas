@@ -186,6 +186,7 @@ type
     procedure CheckBareRaises;
     procedure CheckSlicePositions;
     procedure StampRetainedFlags;
+    procedure CollectBuiltinShadows;
     procedure Run;
   public
     { ASkipTyper skips the final expression type-check (Phase 3a) - for
@@ -4148,6 +4149,33 @@ end;
   when its declaration has both an index list and a `default` specifier.
   Runs right after collection: MemberScope is assigned there and nowhere
   after, and no symbol is added once Phase 1 has collected. }
+{ TPasSemaModel.BuiltinShadows: the interface's unit-level names and enum
+  values that a compiler seed also carries. Runs after collection (every
+  interface symbol is there) and before helper scopes are joined (nothing of
+  another unit is). The interface scope joins the System seed scope, so the
+  seeds themselves are filtered out by their flag. }
+procedure TPasSemaResolver.CollectBuiltinShadows;
+var
+  LNames: TArray<string>;
+begin
+  LNames := nil;
+  FModel.EnumScopeDeep(FIntf,
+    procedure(ASym, AScope: Integer)
+    begin
+      if (sfBuiltin in FModel.Symbols[ASym].Flags) or
+         (FModel.Symbols[ASym].Kind = skUnitRef) or
+         not (FModel.Scopes[AScope].Kind in [sckUnit, sckEnum]) then
+        Exit;
+      if FModel.FindLocal(FSys, FModel.Symbols[ASym].NameLower) = NIL_SYM then
+        Exit;
+      for var LName in LNames do
+        if LName = FModel.Symbols[ASym].NameLower then
+          Exit;
+      LNames := LNames + [FModel.Symbols[ASym].NameLower];
+    end);
+  FModel.BuiltinShadows := LNames;
+end;
+
 procedure TPasSemaResolver.StampRetainedFlags;
 var
   LSym, LNode, LChild: Integer;
@@ -4210,6 +4238,7 @@ begin
   FModel.InterfaceScope := FIntf;
   CollectRoot(0);
   StampRetainedFlags; // needs every symbol and param scope - see its header
+  CollectBuiltinShadows; // every interface symbol - see its header
   JoinHelperScopes;   // must precede Resolve - see its own header
   ResolveNode(0);
   BindTypes;

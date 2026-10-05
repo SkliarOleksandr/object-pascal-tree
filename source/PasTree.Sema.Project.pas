@@ -1065,6 +1065,17 @@ type
     // order CrossResolve itself uses: uses (last-wins) -> System -> SysInit.
     function FindInUses(AId: Integer; const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
+    { A compiler-provided name that a used unit declares itself (its
+      BuiltinShadows): that declaration, last `uses` entry first, for a node
+      Phase 1 bound to the seed. A used unit is searched before System, so
+      the unit's declaration is what dcc binds. False - the seed binding
+      stands - when no used unit shadows ANameLower, which a cheap test of
+      AShadows (UsesBuiltinShadows) settles for nearly every name.
+      FindInUses is no substitute: every interface scope joins its own copy
+      of the seeds, so it answers with the last unit's seed. }
+    function UsesBuiltinShadows(AId: Integer): TArray<string>;
+    function FindShadowOfBuiltin(AId: Integer; const AShadows: TArray<string>;
+      const ANameLower: string; out AUnit, ASym: Integer): Boolean;
     { FindInUses through the model's memo slot (FUsesMemo). For the body
       passes ONLY, and only with AId = the model the calling worker owns:
       the slot is created and written without a lock. Valid for one run's
@@ -5027,6 +5038,58 @@ begin
     end;
   end;
   Result := False;
+end;
+
+function TPasSemaProject.UsesBuiltinShadows(AId: Integer): TArray<string>;
+var
+  LModel: TPasSemaModel;
+  LUid: Integer;
+begin
+  Result := nil;
+  LModel := FModels[AId];
+  for var LIdx := 0 to High(LModel.UsesList) do
+  begin
+    LUid := LModel.UsesList[LIdx].UnitId;
+    if (LUid >= 0) and (LUid <> AId) then
+      Result := Result + FModels[LUid].BuiltinShadows;
+  end;
+end;
+
+function TPasSemaProject.FindShadowOfBuiltin(AId: Integer;
+  const AShadows: TArray<string>; const ANameLower: string;
+  out AUnit, ASym: Integer): Boolean;
+var
+  LModel, LUsed: TPasSemaModel;
+  LUid, LSym: Integer;
+  LShadowed: Boolean;
+begin
+  Result := False;
+  LShadowed := False;
+  for var LName in AShadows do
+    if LName = ANameLower then
+    begin
+      LShadowed := True;
+      Break;
+    end;
+  if not LShadowed then
+    Exit;
+  LModel := FModels[AId];
+  for var LIdx := High(LModel.UsesList) downto 0 do
+  begin
+    LUid := LModel.UsesList[LIdx].UnitId;
+    if (LUid < 0) or (LUid = AId) then
+      Continue;
+    LUsed := FModels[LUid];
+    if LUsed.InterfaceScope = NIL_SCOPE then
+      Continue;
+    LSym := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
+    if (LSym <> NIL_SYM) and not (sfBuiltin in LUsed.Symbols[LSym].Flags) then
+    begin
+      AUnit := LUid;
+      ASym := LSym;
+      Exit(True);
+    end;
+  end;
 end;
 
 function TPasSemaProject.FindInUsesMemo(AId: Integer; const ANameLower: string;
@@ -11516,8 +11579,10 @@ var
   LExt: TPasExtRef;
   LNameLower: string;
   LKey: TSemaKey;
+  LShadows: TArray<string>;
 begin
   LModel := FModels[AId];
+  LShadows := UsesBuiltinShadows(AId);
   for LNode := 0 to High(LModel.RefMap) do
   begin
     case LModel.Tree.Nodes[LNode].Kind of
@@ -11609,6 +11674,32 @@ begin
           if LModel.ExtRefMap.ContainsKey(LNode) then
             Continue;
           LSym := LModel.RefMap[LNode];
+          // Bound to a compiler seed that a used unit declares itself: the
+          // unit's declaration, searched before System (BuiltinShadows). In a
+          // method body an inherited member outranks both, so there the
+          // inherited pass decides (EnsureCrossWork queues seed-bound names in
+          // a struct); a with body's target members still override this in
+          // the with pass, which revisits every name it holds.
+          // A member name after a dot is its base's to resolve (CrossType
+          // drops a seed binding there itself).
+          if (LShadows <> nil) and (LSym <> NIL_SYM) and
+             (sfBuiltin in LModel.Symbols[LSym].Flags) and
+             not ((LModel.Tree.Nodes[LNode].Parent <> NIL_NODE) and
+               (LModel.Tree.Nodes[LModel.Tree.Nodes[LNode].Parent].Kind =
+                nkMember) and
+               (LModel.Tree.Nodes[LModel.Tree.Nodes[LNode].Parent].FirstChild
+                <> LNode)) then
+          begin
+            if (StructSymOfNode(LModel, LNode) = NIL_SYM) and
+               FindShadowOfBuiltin(AId, LShadows,
+                 LModel.Tree.NodeNameLower(LNode), LUid, LMatchNode) then
+            begin
+              LModel.RefMap[LNode] := NIL_SYM;
+              LExt.UnitId := LUid; LExt.Sym := LMatchNode;
+              LModel.ExtRefMap.Add(LNode, LExt);
+              Continue;
+            end;
+          end;
           if LSym <> NIL_SYM then
           begin
             // Bound SAME-unit, and normally that is the end of it - except
@@ -14840,9 +14931,11 @@ var
   LNameLower: string;
   LMiss: TDictionary<Int64, Byte>;
   LKey: Int64;
+  LShadows: TArray<string>;
 begin
   APending := nil;
   LModel := FModels[AId];
+  LShadows := UsesBuiltinShadows(AId);
   EnsureCrossWork(AId);
   // Pre-size to the work list (each entry pends at most once), truncate at
   // the end - the same idiom EnsureCrossWork itself uses; the old `+ [x]`
@@ -14945,11 +15038,27 @@ begin
         APending[LPendCount] := LPend;
         Inc(LPendCount);
       end
+      // No member: a seed a used unit declares itself is that unit's
+      // declaration (BuiltinShadows), the uses being searched before System.
+      else if (sfBuiltin in LModel.Symbols[LBound].Flags) and
+              FindShadowOfBuiltin(AId, LShadows, LNameLower, LUid, LSym) then
+      begin
+        LPend.Node := LNode;
+        LPend.Ext.UnitId := LUid;
+        LPend.Ext.Sym := LSym;
+        LPend.X := XNil;
+        APending[LPendCount] := LPend;
+        Inc(LPendCount);
+      end
       else
         LMiss.AddOrSetValue(LKey, 0);
       Continue;
     end;
+    // A shadowed seed's name ahead of FindInUses, which would answer with a
+    // used unit's copy of the seed (a node rebound here earlier and met
+    // again unbound in a later run).
     if LFound or
+       FindShadowOfBuiltin(AId, LShadows, LNameLower, LUid, LSym) or
        FindInUsesMemo(AId, LNameLower, LUid, LSym) or
        FindInSystemUnit(LNameLower, LUid, LSym) or
        FindInSysInitUnit(LNameLower, LUid, LSym) then
