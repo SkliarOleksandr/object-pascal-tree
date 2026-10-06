@@ -298,10 +298,41 @@ const
     'function TExtGen<T>.Get: T;'#10'begin'#10'end;'#10 +
     'procedure ExtProc;'#10'begin'#10'end;'#10 +
     'end.'#10;
+  // Helpers for builtins, kept apart so that a member of a string or a Char
+  // means one of these. The Char helper has no Substring: a Char-typed base
+  // that finds Substring was typed as a string.
+  EXTH_UNIT =
+    'unit exth;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TStrH = record helper for string'#10 +
+    '    function Substring(A, B: Integer): string;'#10 +
+    '  end;'#10 +
+    '  TChH = record helper for Char'#10 +
+    '    function Twice(A: Integer): string;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TStrH.Substring(A, B: Integer): string;'#10'begin'#10'end;'#10 +
+    'function TChH.Twice(A: Integer): string;'#10'begin'#10'end;'#10 +
+    'end.'#10;
+  // Untyped constants have no written type: theirs is the initializer's.
+  HELPER_HEAD =                     // the case line is 13
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses exth;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'const'#10 +
+    '  CStr = ''MORE-STUFF'';'#10 +
+    '  CChar = ''x'';'#10 +
+    '  CSum = ''AB'' + ''CD'';'#10 +
+    '  CTyped: string = ''abc'';'#10 +
+    'var S: string;'#10 +
+    'begin'#10;
   PROJ_HEAD =                       // lines 1..21; the case line is 22
     'unit mainu;'#10 +
     'interface'#10 +
-    'uses exta;'#10 +
+    'uses exta, exth;'#10 +
     'type'#10 +
     '  TMy = class(TBase)'#10 +
     '  public'#10 +
@@ -482,6 +513,7 @@ begin
   // this one in a uses clause (the analyzed closure cannot).
   TFile.WriteAllText(TPath.Combine(GDir, 'Unused.Extb.pas'),
     'unit Unused.Extb;'#10'interface'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(GDir, 'exth.pas'), EXTH_UNIT);
   TFile.WriteAllText(TPath.Combine(GDir, 'mainu.pas'),
     PROJ_HEAD + PROJ_TAIL);
   GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
@@ -897,6 +929,33 @@ begin
   CallCase(PROJ_HEAD + '  B.Over(Integer(|'#10 + PROJ_TAIL);
   GCounter.Ok('a cast steps out to the call',
     GHit and (TargetsNamed('Over') = 2));
+
+  // A helper method on an UNTYPED constant or a literal. The constant has no
+  // type node, so the overlay typed it as nothing and `CStr.Substring(` had no
+  // target - signature help empty, Annotate arguments "the callee did not
+  // resolve" - while Ctrl+click, through the analysis, went to Substring.
+  // The helpers are active because the analyzed mainu (PROJ_HEAD) uses exth.
+  CallCase(HELPER_HEAD + '  S := CStr.Substring(|'#10 + PROJ_TAIL);
+  GCounter.Ok('untyped string constant: the string helper''s method',
+    GHit and (TargetsNamed('Substring') = 1));
+  CallCase(HELPER_HEAD + '  S := CChar.Twice(|'#10 + PROJ_TAIL);
+  GCounter.Ok('untyped one-char constant: the Char helper''s method',
+    GHit and (TargetsNamed('Twice') = 1));
+  CallCase(HELPER_HEAD + '  S := CChar.Substring(|'#10 + PROJ_TAIL);
+  GCounter.Ok('untyped one-char constant is a Char, not a string',
+    GHit and (Length(GCall.Targets) = 0));
+  CallCase(HELPER_HEAD + '  S := CSum.Substring(|'#10 + PROJ_TAIL);
+  GCounter.Ok('untyped constant of a string sum: the string helper',
+    GHit and (TargetsNamed('Substring') = 1));
+  CallCase(HELPER_HEAD + '  S := ''lit''.Substring(|'#10 + PROJ_TAIL);
+  GCounter.Ok('a string literal base: the string helper',
+    GHit and (TargetsNamed('Substring') = 1));
+  CallCase(HELPER_HEAD + '  S := CTyped.Substring(|'#10 + PROJ_TAIL);
+  GCounter.Ok('typed constant (worked before): the string helper',
+    GHit and (TargetsNamed('Substring') = 1));
+  ProjCase(HELPER_HEAD + '  CStr.|'#10 + PROJ_TAIL);
+  GCounter.Ok('CStr.| lists the string helper''s method',
+    GHit and Has('Substring'));
 
   // Refusals: no call, and a DECLARATION's parameter list.
   CallCase(PROJ_HEAD + '  |'#10 + PROJ_TAIL);

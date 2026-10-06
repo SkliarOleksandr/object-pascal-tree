@@ -922,19 +922,23 @@ begin
         else
         begin
           // `var X := expr` - an inline var with an inferred type: the
-          // initializer is the last child of the nkInlineVar (3.1.3).
+          // initializer is the last child of the nkInlineVar (3.1.3). A true
+          // constant with no type (`C = 'abc'`, 3.2.1) has the same shape,
+          // and its type is its initializer's: `C.Substring(` binds through
+          // the string helper only once C types as a string.
           LDecl := FModel.Symbols[ASym].DeclNode;
           if (LDecl <> NIL_NODE) and
              (FModel.Tree.Nodes[LDecl].Parent <> NIL_NODE) and
              (FModel.Tree.Nodes[FModel.Tree.Nodes[LDecl].Parent].Kind
-               in [nkInlineVar, nkInlineConst]) then
+               in [nkInlineVar, nkInlineConst, nkConstDecl]) then
           begin
             LInit := FModel.Tree.Nodes[
               FModel.Tree.Nodes[LDecl].Parent].FirstChild;
             while (LInit <> NIL_NODE) and
                   (FModel.Tree.Nodes[LInit].NextSibling <> NIL_NODE) do
               LInit := FModel.Tree.Nodes[LInit].NextSibling;
-            if (LInit <> NIL_NODE) and (LInit <> LDecl) then
+            if (LInit <> NIL_NODE) and (LInit <> LDecl) and
+               (FModel.Tree.Nodes[LInit].Kind <> nkAttrGroup) then
             begin
               Result := DesignatorType(LInit, ADepth + 1);
               Result.IsTypeRef := False;
@@ -1128,6 +1132,25 @@ begin
     nkParen:
       Result := DesignatorType(FModel.Tree.Nodes[ANode].FirstChild,
         ADepth + 1);
+    nkIntLit, nkRealLit, nkStrLit, nkCaretChar:
+      // A literal - `'abc'.Substring(`, or the initializer of an untyped
+      // constant - types as dcc types it: `'x'` is a Char, `'xy'` a string,
+      // which decides the helper (TCharHelper or TStringHelper).
+      if FProj <> nil then
+      begin
+        LKey := FProj.LiteralTypeName(FModel.Tree, ANode, False);
+        if (LKey <> '') and BridgeName(LKey, LMid, LSym) then
+          Result.X := XPlain(LMid, LSym);
+      end;
+    nkUnaryOp, nkBinaryOp:
+      // `C = 'AB' + 'CD'`, `-1`: the intra-unit typer's answer, which is
+      // category-level (a sum of Chars is a string, any integer Integer) -
+      // right for choosing a helper, which is all this is asked for.
+      if FModel.ExprType[ANode] <> NIL_SYM then
+      begin
+        Result := TypeOfOverlaySym(FModel.ExprType[ANode], ADepth + 1);
+        Result.IsTypeRef := False;
+      end;
     nkIdent:
       begin
         LSym := FModel.RefMap[ANode];

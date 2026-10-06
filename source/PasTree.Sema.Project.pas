@@ -1017,6 +1017,12 @@ type
     { The single answer to "what type is this member?" - see the implementation
       for why a bare property redeclaration makes it necessary. }
     function SymDeclTypeX(AMid, ASym: Integer): TSemaXType;
+    { The builtin type name ('char', 'string', 'integer', 'currency', ...)
+      dcc gives literal ANode of ATree where a type is inferred from it - the
+      rules LiteralTypeX documents, over any tree: completion asks it about
+      an overlay, which is no model of this project. '' when unreadable. }
+    function LiteralTypeName(const ATree: TPasTree; ANode: Integer;
+      ANegated: Boolean): string;
     // AX with plain alias links followed to the defining declaration (public
     // for the navigator's static-type comparisons; see the implementation).
     function CanonTypeX(const AX: TSemaXType): TSemaXType;
@@ -13919,25 +13925,38 @@ end;
     and `#$1F600` (a surrogate pair). The parser joins adjacent pieces into
     one node, so the count runs over every token of the node.
   ANegated says a `-` stands in front (see IsSignedLiteral); XNil for a
-  literal this cannot read exactly, which every caller treats as "no type". }
+  literal this cannot read exactly, which every caller treats as "no type".
+  The rules themselves are LiteralTypeName's, which reads any tree - the
+  overlay completion types `C.` on (`const C = 'abc'`) is not a model here. }
 function TPasSemaProject.LiteralTypeX(AMid, ANode: Integer;
   ANegated: Boolean): TSemaXType;
 var
-  LM: TPasSemaModel;
+  LName: string;
+begin
+  Result := XNil;
+  if ANode = NIL_NODE then
+    Exit;
+  LName := LiteralTypeName(FModels[AMid].Tree, ANode, ANegated);
+  if LName <> '' then
+    Result := BuiltinX(AMid, LName);
+end;
+
+function TPasSemaProject.LiteralTypeName(const ATree: TPasTree; ANode: Integer;
+  ANegated: Boolean): string;
+var
   LTxt: string;
   LTok, LIdx, LUnits, LFrac: Integer;
   LU: UInt64;
   LHasExp, LInFrac, LSkipLetter: Boolean;
   LVal: Extended;
 begin
-  Result := XNil;
+  Result := '';
   if ANode = NIL_NODE then
     Exit;
-  LM := FModels[AMid];
-  case LM.Tree.Nodes[ANode].Kind of
+  case ATree.Nodes[ANode].Kind of
     nkIntLit:
       begin
-        LTxt := StringReplace(LM.Tree.NodeText(ANode), '_', '',
+        LTxt := StringReplace(ATree.NodeText(ANode), '_', '',
           [rfReplaceAll]);
         if LTxt = '' then
           Exit;
@@ -13957,27 +13976,27 @@ begin
         if ANegated then
         begin
           if LU <= UInt64(High(Integer)) + 1 then
-            Result := BuiltinX(AMid, 'integer')
+            Result := 'integer'
           else if LU <= UInt64(High(Int64)) + 1 then
-            Result := BuiltinX(AMid, 'int64');
+            Result := 'int64';
           // Beyond that dcc rejects the literal; nothing to infer.
         end
         else if LU <= UInt64(High(Integer)) then
-          Result := BuiltinX(AMid, 'integer')
+          Result := 'integer'
         else if LU <= UInt64(High(Cardinal)) then
-          Result := BuiltinX(AMid, 'cardinal')
+          Result := 'cardinal'
         else if LU <= UInt64(High(Int64)) then
-          Result := BuiltinX(AMid, 'int64')
+          Result := 'int64'
         else
-          Result := BuiltinX(AMid, 'uint64');
+          Result := 'uint64';
       end;
 
     nkRealLit:
       begin
-        Result := BuiltinX(AMid, 'extended');
+        Result := 'extended';
         if not PlatformInfo(FPlatform).Is64Bit then
           Exit;
-        LTxt := StringReplace(LM.Tree.NodeText(ANode), '_', '',
+        LTxt := StringReplace(ATree.NodeText(ANode), '_', '',
           [rfReplaceAll]);
         LHasExp := False;
         LInFrac := False;
@@ -14004,28 +14023,28 @@ begin
           Exit;
         if Abs(LVal) > 922337203685477.5807 then
           Exit;
-        Result := BuiltinX(AMid, 'currency');
+        Result := 'currency';
       end;
 
     nkCaretChar:
-      Result := BuiltinX(AMid, 'char');
+      Result := 'char';
 
     nkStrLit:
       begin
         // Count UTF-16 units over every visible token of the node.
         LUnits := 0;
         LSkipLetter := False;
-        for LTok := LM.Tree.Nodes[ANode].FirstToken to
-            LM.Tree.Nodes[ANode].LastToken do
+        for LTok := ATree.Nodes[ANode].FirstToken to
+            ATree.Nodes[ANode].LastToken do
         begin
-          if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
+          if (LTok < 0) or (LTok > High(ATree.Source.Visible)) then
             Exit;
           if LSkipLetter then
           begin
             LSkipLetter := False;
             Continue;
           end;
-          LTxt := LM.Tree.Source.VisibleText(LTok);
+          LTxt := ATree.Source.VisibleText(LTok);
           if LTxt = '' then
             Exit;
           if LTxt[1] = '^' then
@@ -14071,9 +14090,9 @@ begin
             Break;
         end;
         if LUnits = 1 then
-          Result := BuiltinX(AMid, 'char')
+          Result := 'char'
         else
-          Result := BuiltinX(AMid, 'string');
+          Result := 'string';
       end;
   end;
 end;
