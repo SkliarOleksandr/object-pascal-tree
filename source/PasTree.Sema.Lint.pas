@@ -9,8 +9,9 @@ unit PasTree.Sema.Lint;
   `TFoo.Create`) does not: dcc finds members wherever the type came from, and
   the type named is the use. So do the qualifier of `Unit.Name`, the unit's
   form file naming a class or a module the listed unit declares - or an
-  ANCESTOR of a component class it names, whose unit the IDE's designer
-  puts back into `uses` on the next save (0.93.3), a name bound
+  ANCESTOR of a component class it names, or a component of a form it
+  inherits - each a unit the IDE's designer puts back into `uses` on the
+  next save (0.93.3, 0.93.4; DesignerUnits), a name bound
   through an alias of another unit (`TModalResult` of Vcl.Controls is
   System.UITypes'), a name of the interface PasTree bound to a unit of the
   implementation `uses`, and a unit an inline routine the unit calls needs
@@ -170,6 +171,9 @@ type
       AUnits: TDictionary<Integer, Boolean>);
     function InlineAccessors(AMid, ASym: Integer): TArray<Int64>;
     function InlineDeps(AMid, ASym: Integer): TArray<Integer>;
+    function ClassTypeIn(AMid: Integer; const ANameLower: string): TSemaXType;
+    function DesignerUnits(AMid: Integer; const AFormFile: string;
+      const AClasses: TArray<string>): TDictionary<Integer, Boolean>;
     // AEdges: record the unused entries no doubt holds back as FDeadEdges
     // instead of rows - a program's too (its `uses` lists units the build
     // takes in, what FindUnreferencedUnits weighs).
@@ -1123,6 +1127,111 @@ begin
   FInline[LKey] := Result;
 end;
 
+// The class type ANameLower names in unit AMid - its own interface first,
+// then its `uses` (a form file names classes the way the unit sees them);
+// XNil when it names none.
+function TUsesLint.ClassTypeIn(AMid: Integer;
+  const ANameLower: string): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LSym, LRMid, LRSym: Integer;
+begin
+  Result := XNil;
+  LM := FProj.Model(AMid);
+  if LM.InterfaceScope <> NIL_SCOPE then
+  begin
+    LSym := LM.Resolve(LM.InterfaceScope, ANameLower);
+    if (LSym <> NIL_SYM) and (LM.Symbols[LSym].Kind = skType) then
+      Exit(XPlain(AMid, LSym));
+  end;
+  if FProj.ResolveRealDecl(AMid, ANameLower, LRMid, LRSym) and
+     (FProj.Model(LRMid).Symbols[LRSym].Kind = skType) then
+    Result := XPlain(LRMid, LRSym);
+end;
+
+{ The units the IDE's designer puts back into `uses` when it saves the form
+  of unit AMid (AFormFile, whose class names are AClasses): the unit of
+  every class each component descends from, and of every component of every
+  form it inherits - though dcc needs none of them. Vcl.ImgList and
+  System.ImageList for a TImageList, System.Actions for a TActionList,
+  Vcl.ToolWin for a TToolBar; and for a form inheriting one that holds a
+  component, that component's unit and its ancestors' too, although the
+  form's own file does not name it (a descendant's file holds only what it
+  changes). Removing one changes nothing a save does not undo, and the
+  undoing rewrites the clause under whoever removed it: on a client's main
+  form ten of the seventeen entries removed came back on the first save
+  (0.93.3), and on a dialog three units of components on its third
+  ancestor form did (0.93.4).
+
+  Each class is bound in the unit whose form file names it, then climbed
+  (AncestorOfX). A class on the way that is the ROOT of a form file of its
+  own unit - an ancestor form, a frame - adds that file's classes, bound in
+  that unit; each form file is read once. }
+function TUsesLint.DesignerUnits(AMid: Integer; const AFormFile: string;
+  const AClasses: TArray<string>): TDictionary<Integer, Boolean>;
+var
+  LQueue: TList<TPair<Integer, string>>;
+  LSeen: TDictionary<string, Boolean>;
+  LX: TSemaXType;
+  LAt, LDepth: Integer;
+  LFile: string;
+  LDoc: IPasDfmDoc;
+  LRoot: Boolean;
+begin
+  Result := TDictionary<Integer, Boolean>.Create;
+  LQueue := TList<TPair<Integer, string>>.Create;
+  LSeen := TDictionary<string, Boolean>.Create;
+  try
+    LSeen.Add(LowerCase(AFormFile), True);
+    for var LClass in AClasses do
+      LQueue.Add(TPair<Integer, string>.Create(AMid, LClass));
+    LAt := 0;
+    while LAt < LQueue.Count do
+    begin
+      LX := ClassTypeIn(LQueue[LAt].Key, LQueue[LAt].Value);
+      Inc(LAt);
+      LDepth := 0;
+      while XValid(LX) and (LDepth < 64) do
+      begin
+        Result.AddOrSetValue(LX.UnitId, True);
+        for var LExt in ['.dfm', '.fmx'] do
+        begin
+          LFile := ChangeFileExt(FProj.ModelFile(LX.UnitId), LExt);
+          if LSeen.ContainsKey(LowerCase(LFile)) or not FileExists(LFile) then
+            Continue;
+          LDoc := PasDfmLoad(LFile);
+          if (LDoc = nil) or (LDoc.Doc.Error <> '') then
+            Continue;
+          // The file's first class is its root object's: only a form file
+          // whose root IS this class holds components this form inherits.
+          LRoot := False;
+          for var LI := 0 to High(LDoc.Doc.Idents) do
+            if LDoc.Doc.Idents[LI].Role = dirClassName then
+            begin
+              LRoot := SameText(LDoc.Doc.IdentText(LI),
+                FProj.Model(LX.UnitId).Symbols[LX.Sym].Name);
+              Break;
+            end;
+          if not LRoot then
+            Continue;
+          LSeen.Add(LowerCase(LFile), True);
+          for var LI := 0 to High(LDoc.Doc.Idents) do
+            if LDoc.Doc.Idents[LI].Role = dirClassName then
+              LQueue.Add(TPair<Integer, string>.Create(LX.UnitId,
+                LowerCase(LDoc.Doc.IdentText(LI))));
+        end;
+        if not FProj.EnsureHydrated(LX.UnitId) then
+          Break;
+        LX := FProj.AncestorOfX(LX);
+        Inc(LDepth);
+      end;
+    end;
+  finally
+    LSeen.Free;
+    LQueue.Free;
+  end;
+end;
+
 procedure TUsesLint.CheckUnit(AMid: Integer; AEdges: Boolean);
 var
   LM: TPasSemaModel;
@@ -1145,8 +1254,7 @@ var
   LKeys: TArray<Int64>;
   LRow: TPasUnusedUse;
   LFormClasses: TArray<string>;   // the class names the form file streams
-  LX: TSemaXType;
-  LAncMid, LAncSym, LDepth: Integer;
+  LDesign: TDictionary<Integer, Boolean>;
 
   procedure MarkUse(AIdx: Integer);
   var
@@ -1292,37 +1400,18 @@ begin
               Break;
             end;
         end;
-    // The units of a form class's ANCESTORS. Saving a form, the IDE's
-    // designer puts back into `uses` the unit of every class each component
-    // descends from - Vcl.ImgList and System.ImageList for a TImageList,
-    // System.Actions for a TActionList, Vcl.ToolWin for a TToolBar - though
-    // dcc needs none of them. Removing one changes nothing a save does not
-    // undo, and the undoing rewrites the clause under whoever removed it
-    // (a client's main form, 2026-10-06: ten of the seventeen entries
-    // removed came back on the first save). Climbed from the class the unit
-    // binds the name to - its own form class first, then its `uses`.
-    for var LClass in LFormClasses do
+    // What the IDE's designer puts back into `uses` on the next save - see
+    // DesignerUnits.
+    if LFormClasses <> nil then
     begin
-      LX := XNil;
-      if (LM.InterfaceScope <> NIL_SCOPE) then
-      begin
-        LSym := LM.Resolve(LM.InterfaceScope, LClass);
-        if (LSym <> NIL_SYM) and (LM.Symbols[LSym].Kind = skType) then
-          LX := XPlain(AMid, LSym);
-      end;
-      if not XValid(LX) and
-         FProj.ResolveRealDecl(AMid, LClass, LAncMid, LAncSym) and
-         (FProj.Model(LAncMid).Symbols[LAncSym].Kind = skType) then
-        LX := XPlain(LAncMid, LAncSym);
-      LDepth := 0;
-      while XValid(LX) and (LDepth < 64) do
-      begin
-        if LByUnit.TryGetValue(LX.UnitId, LE) then
-          MarkUse(LE);
-        if not FProj.EnsureHydrated(LX.UnitId) then
-          Break;
-        LX := FProj.AncestorOfX(LX);
-        Inc(LDepth);
+      LDesign := DesignerUnits(AMid, LFormFile, LFormClasses);
+      try
+        for LE := 0 to LEntries.Count - 1 do
+          if not LEntries[LE].Used and
+             LDesign.ContainsKey(LEntries[LE].UnitId) then
+            MarkUse(LE);
+      finally
+        LDesign.Free;
       end;
     end;
     // A unit the expansion of an inline routine called here needs - read or

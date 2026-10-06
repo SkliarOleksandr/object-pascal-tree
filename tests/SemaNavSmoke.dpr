@@ -1844,6 +1844,22 @@ begin
   WriteUnit('LintAnc2', 'type TLintAncRoot = class end;'#13#10, '');
   WriteUnit('LintNever', 'procedure NeverProc;'#13#10,
     'procedure NeverProc; begin end;'#13#10);
+  // An inherited form: TLintStore is a component of the BASE form only
+  // (LintBaseF.dfm); LintInh's own form file names none of it, yet the
+  // designer puts LintStoreU and LintStoreB (its ancestor's) back into
+  // LintInh's `uses` on save (0.93.4).
+  WriteUnit('LintStoreB', 'type TLintStoreBase = class end;'#13#10, '');
+  WriteUnit('LintStoreU', 'uses LintStoreB;'#13#10 +
+    'type TLintStore = class(TLintStoreBase) end;'#13#10, '');
+  WriteUnit('LintBaseF', 'uses LintStoreU;'#13#10 +
+    'type TLintBaseFrm = class Store: TLintStore; end;'#13#10, '');
+  TFile.WriteAllText(TPath.Combine(LDir, 'LintBaseF.dfm'),
+    'object LintBaseFrm: TLintBaseFrm'#13#10'  object Store: TLintStore'#13#10 +
+    '  end'#13#10'end'#13#10);
+  WriteUnit('LintInh', 'uses LintBaseF, LintStoreU, LintStoreB;'#13#10 +
+    'type TLintInhFrm = class(TLintBaseFrm) end;'#13#10, '');
+  TFile.WriteAllText(TPath.Combine(LDir, 'LintInh.dfm'),
+    'inherited LintInhFrm: TLintInhFrm'#13#10'end'#13#10);
   // Ahead of every other file by path (a\), behind them by name.
   TDirectory.CreateDirectory(TPath.Combine(LDir, 'a'));
   TFile.WriteAllText(TPath.Combine(LDir, 'a\ZLint.pas'),
@@ -1888,6 +1904,10 @@ begin
       RowIs(0, 'LintInlE', 4, 56, False));
     Ok('unused uses: inline - LintInlQ unused',
       RowIs(1, 'LintInlQ', 4, 66, False));
+    LRows := FindUnusedUses(LNav,
+      [LProj.ModelIdOf(TPath.Combine(LDir, 'LintInh.pas'))]);
+    Ok('unused uses: the units of a component of an inherited form are used',
+      Length(LRows) = 0);
     // Every unit: the three, the two and a\ZLint's one. LintInlX names every
     // unit it lists (LintInlE by the enum value in its own body). By file
     // name: LintInl.pas, LintUse.pas, then ZLint.pas, first by path.
@@ -1905,30 +1925,32 @@ begin
       SameText(LRows[2].UnitName, 'LintDead') and
       SameText(LRows[4].UnitName, 'LintNever') and
       SameText(ExtractFileName(LRows[5].Hit.FilePath), 'ZLint.pas'));
-    // No program: the units no other unit lists and uses - the three top
-    // units, and three listed only by entries unused there. LintDead's
-    // entry has a doubt, so it stands; LintInlE is used by LintInlX.
+    // No program: the units no other unit lists and uses - the four top
+    // units (LintInh among them), and three listed only by entries unused
+    // there. LintDead's entry has a doubt, so it stands; LintInlE is used
+    // by LintInlX.
     LUnits := FindUnreferencedUnits(LNav, LMids);
-    Ok('unreferenced, no program: six units', Length(LUnits) = 6);
-    Ok('unreferenced, no program: which', (Length(LUnits) = 6) and
-      SameText(LUnits[0].UnitName, 'LintInit') and
-      SameText(LUnits[1].UnitName, 'LintInl') and
-      SameText(LUnits[2].UnitName, 'LintInlQ') and
-      SameText(LUnits[3].UnitName, 'LintNever') and
-      SameText(LUnits[4].UnitName, 'LintUse') and
-      SameText(LUnits[5].UnitName, 'ZLint'));
+    Ok('unreferenced, no program: seven units', Length(LUnits) = 7);
+    Ok('unreferenced, no program: which', (Length(LUnits) = 7) and
+      SameText(LUnits[0].UnitName, 'LintInh') and
+      SameText(LUnits[1].UnitName, 'LintInit') and
+      SameText(LUnits[2].UnitName, 'LintInl') and
+      SameText(LUnits[3].UnitName, 'LintInlQ') and
+      SameText(LUnits[4].UnitName, 'LintNever') and
+      SameText(LUnits[5].UnitName, 'LintUse') and
+      SameText(LUnits[6].UnitName, 'ZLint'));
     Ok('unreferenced, no program: LintInit - its initialization a doubt, ' +
-      'LintUse lists it unused', (Length(LUnits) = 6) and
-      (LUnits[0].Doubts <> nil) and (Length(LUnits[0].ListedBy) = 1) and
-      SameText(LUnits[0].ListedBy[0], 'LintUse.pas (no name of it used)') and
-      (LUnits[0].Hit.Line = 1) and (LUnits[0].Hit.Col = 6));
+      'LintUse lists it unused', (Length(LUnits) = 7) and
+      (LUnits[1].Doubts <> nil) and (Length(LUnits[1].ListedBy) = 1) and
+      SameText(LUnits[1].ListedBy[0], 'LintUse.pas (no name of it used)') and
+      (LUnits[1].Hit.Line = 1) and (LUnits[1].Hit.Col = 6));
     Ok('unreferenced, no program: LintNever - two listers, by name',
-      (Length(LUnits) = 6) and (Length(LUnits[3].ListedBy) = 2) and
-      SameText(LUnits[3].ListedBy[0], 'LintUse.pas (no name of it used)') and
-      SameText(LUnits[3].ListedBy[1], 'ZLint.pas (no name of it used)'));
+      (Length(LUnits) = 7) and (Length(LUnits[4].ListedBy) = 2) and
+      SameText(LUnits[4].ListedBy[0], 'LintUse.pas (no name of it used)') and
+      SameText(LUnits[4].ListedBy[1], 'ZLint.pas (no name of it used)'));
     Ok('unreferenced, no program: LintUse - nothing lists it',
-      (Length(LUnits) = 6) and (LUnits[4].ListedBy = nil) and
-      (LUnits[4].Doubts = nil));
+      (Length(LUnits) = 7) and (LUnits[5].ListedBy = nil) and
+      (LUnits[5].Doubts = nil));
   finally
     LNav.Free;
     LProj.Free;
