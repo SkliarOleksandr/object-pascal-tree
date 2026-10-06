@@ -615,6 +615,9 @@ type
     procedure ReportMissingUnitMember(AId: Integer; AModel: TPasSemaModel;
       AMember, AName, AUid: Integer);
     procedure CheckVisibility(AId, ANameNode, AMemMid, AMemSym: Integer);
+    function MemberHiddenAt(AId, AHere, AMemMid, AMemSym: Integer): Boolean;
+    function FindVisibleMemberX(AId, AHere: Integer; const ABase: TSemaXType;
+      const ANameLower: string; out AMemMid, AMemSym, ACtx: Integer): Boolean;
     function StructEncloses(AMid, AOuter, AInner: Integer): Boolean;
     procedure RunVisibilityPass(AId: Integer);
     function InPropertySpecifier(AModel: TPasSemaModel; ANode: Integer): Boolean;
@@ -11939,6 +11942,79 @@ begin
   end;
 end;
 
+{ True when the member AMemSym (of model AMemMid) cannot be seen from code
+  inside the type AHere of model AId - CheckVisibility's rule, as a question:
+  a private member outside its own unit, a strict private one outside the
+  type declaring it and the types nested in it. }
+function TPasSemaProject.MemberHiddenAt(AId, AHere, AMemMid,
+  AMemSym: Integer): Boolean;
+var
+  LMemM: TPasSemaModel;
+  LVis: TSemaVisibility;
+  LOwner: Integer;
+begin
+  Result := False;
+  LMemM := FModels[AMemMid];
+  LVis := LMemM.Symbols[AMemSym].Visibility;
+  if not (LVis in [svPrivate, svStrictPrivate]) or
+     (LMemM.Symbols[AMemSym].Scope = NIL_SCOPE) then
+    Exit;
+  LOwner := LMemM.Scopes[LMemM.Symbols[AMemSym].Scope].StructSym;
+  if LOwner = NIL_SYM then
+    Exit;
+  if LVis = svPrivate then
+    Result := AMemMid <> AId
+  else
+    Result := not ((AMemMid = AId) and StructEncloses(AId, LOwner, AHere));
+end;
+
+{ FindMemberX for a bare name in a method of AHere (model AId): a member the
+  method cannot see is passed over and the walk goes on from the ancestor of
+  the type declaring it, as dcc's lookup does (F38). dcc64 37.0 probes,
+  `x-f38\probe`: a descendant in another unit calling bare `Foo` where the
+  direct ancestor's `Foo` is private runs the grandancestor's public `Foo`,
+  and with no other member of the name, the unit's routine; a strict private
+  member is passed over in a descendant of the same unit too. }
+function TPasSemaProject.FindVisibleMemberX(AId, AHere: Integer;
+  const ABase: TSemaXType; const ANameLower: string; out AMemMid, AMemSym,
+  ACtx: Integer): Boolean;
+var
+  LBase, LOwnerX: TSemaXType;
+  LOwner: Integer;
+begin
+  LBase := ABase;
+  for var LDepth := 1 to 32 do
+  begin
+    if not FindMemberX(AId, LBase, ANameLower, AMemMid, AMemSym, ACtx) then
+      Exit(False);
+    if not MemberHiddenAt(AId, AHere, AMemMid, AMemSym) then
+      Exit(True);
+    // An overload set is passed over only when none of it can be seen:
+    // TThread's `Synchronize` leads with a private overload, and a thread's
+    // `Synchronize(PrintChart)` calls the protected one. The set's head is
+    // what is returned, as for any set: the call's arguments choose in it.
+    var LAlt := FModels[AMemMid].Symbols[AMemSym].NextOverload;
+    while LAlt <> NIL_SYM do
+    begin
+      if not MemberHiddenAt(AId, AHere, AMemMid, LAlt) then
+        Exit(True);
+      LAlt := FModels[AMemMid].Symbols[LAlt].NextOverload;
+    end;
+    LOwner :=FModels[AMemMid].Scopes[
+      FModels[AMemMid].Symbols[AMemSym].Scope].StructSym;
+    LOwnerX.UnitId := AMemMid;
+    LOwnerX.Sym := LOwner;
+    LOwnerX.Inst := ACtx;
+    LBase := SubstX(AncestorOfX(LOwnerX), ACtx, 0);
+    if not XValid(LBase) then
+      Break;
+  end;
+  AMemMid := NIL_SYM;
+  AMemSym := NIL_SYM;
+  ACtx := NIL_INST;
+  Result := False;
+end;
+
 { Is AInner the same type as AOuter, or one NESTED inside it (at any depth)?
 
   A nested type's symbol is declared into the enclosing type's member scope, so
@@ -14999,10 +15075,14 @@ begin
     // Innermost enclosing struct's ancestry, then the OUTER segments of a
     // qualified method name (see OuterStructsOfNode), then the ordinary
     // uses/System fallbacks - dcc's own precedence order.
-    LFound := FindMemberX(AId, XPlain(AId, LStruct), LNameLower, LUid, LSym, LCtx);
+    // A member the method cannot see - an ancestor's private one of another
+    // unit - is passed over (FindVisibleMemberX, F38).
+    LFound := FindVisibleMemberX(AId, LStruct, XPlain(AId, LStruct),
+      LNameLower, LUid, LSym, LCtx);
     if not LFound then
       for var LOuter in OuterStructsOfNode(LModel, LNode, LStruct) do
-        if FindMemberX(AId, XPlain(AId, LOuter), LNameLower, LUid, LSym, LCtx) then
+        if FindVisibleMemberX(AId, LStruct, XPlain(AId, LOuter), LNameLower,
+             LUid, LSym, LCtx) then
         begin
           LFound := True;
           Break;

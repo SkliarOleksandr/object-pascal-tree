@@ -33,13 +33,8 @@ studio parse rtl\posix\Posix.SysSocket.pas FAIL a POSIX-only unit read under the
 # whose rewrite does not compile to the original's .dcu (docs/parser-fidelity.md sec. 6).
 studio tqm System.Classes.pas DIFF|XFORM-FAIL F40: an inherited member reached bare loses to a unit-level declaration (WriteError in TBufferedFileStream.SyncBuffer, ToString in TStreamReader.TBufferedData)
 studio tqm System.Rtti.pas DIFF F37: PByte and DWORD bound to System.Types, dcc imports them from Winapi.Windows (raw bytes, the import record only)
-studio tqm System.SyncObjs.pas XFORM-FAIL F38: FreeAndNil bound to another unit's private class procedure of an ancestor (E2361 on Self.FreeAndNil)
 studio tqm System.SysUtils.pas DIFF|XFORM-FAIL F41 (Flush is the standard procedure, not System's declared function) and F45 (M^^ typed one dereference short)
 studio tqm FMX.MaskEdit.Types.pas XFORM-FAIL F50: bare Length in a string helper's method bound to Self's type, dcc System.Length
-studio tqm Vcl.ComCtrls.pas XFORM-FAIL F38: Insert bound to TWinControl's private Insert (E2361)
-studio tqm Vcl.NumberBox.pas XFORM-FAIL F38: Insert bound to TWinControl's private Insert (E2361)
-studio tqm Vcl.ExtCtrls.pas XFORM-FAIL F38: SetCursor bound to TControl's private SetCursor (E2361)
-studio tqm Vcl.Grids.pas XFORM-FAIL F38: SetCursor bound to TControl's private SetCursor (E2361)
 studio tqm Vcl.FileCtrl.pas DIFF F41: ChDir is the standard procedure, System.ChDir the declared one
 studio tqm Vcl.ImgList.pas XFORM-FAIL F40: Images in TChangeLink bound to a unit-level name, not the inherited TImageLink property (E2441)
 studio tqm Vcl.StyleAPI.pas XFORM-FAIL F40: SysColors in TSeStyle methods bound to a unit-level name (E2018)
@@ -49,7 +44,7 @@ studio tqm Vcl.StdCtrls.pas XFORM-FAIL F49: Text in a with body bound to System'
 # unit not visible at the name, members whose base PasTree's typing contradicts.
 self tqm @unbound 0 every name of the self-host bound
 self tqm @invisible 0 none
-self tqm @mismatch 6 F43: SelectConsumers' for-in over a nested alias of a generic record
+self tqm @mismatch 22 F43: for-in over a nested alias of a generic record - SelectConsumers (6) and, since 0.93.0, TUsesLint.CheckUnit (16)
 studio-rtl tqm @unbound 719 F39 (GUID clause constants), F46 (selectors bound to nothing)
 studio-rtl tqm @invisible 93 F35, F36
 studio-rtl tqm @mismatch 38 F43, F44

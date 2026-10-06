@@ -2841,6 +2841,167 @@ begin
   end;
 end;
 
+{ A member a method cannot see is passed over by the bare-name lookup, which
+  goes on up the ancestry and then to the unit (F38 of the parser-fidelity
+  plan). PasTree took an ancestor's private member of another unit -
+  `FreeAndNil(FEvent)` in a System.SyncObjs class went to TMultiWaitEvent's
+  private class procedure. dcc64 37.0 runs the fixture as: TB (unit PB) -
+  TA0.Foo past TA's private Foo, PB's own Baz past TA's private Baz; TAs (unit
+  PA, TA's own unit) - TA.Foo and TA.Baz (the friend rule), PA's Qux past
+  TA's strict private Qux; TB's `Sync('x')` - TA's protected Sync(string), in
+  a set whose first overload is private (TThread.Synchronize's shape). }
+procedure TestInheritedVisibility;
+const
+  UPA0 =
+    'unit PA0;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TA0 = class'#13#10 +
+    '  public'#13#10 +
+    '    procedure Foo;'#13#10 +
+    '    procedure Bar;'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    'procedure TA0.Foo; begin Writeln(''TA0.Foo''); end;'#13#10 +
+    'procedure TA0.Bar; begin Writeln(''TA0.Bar''); end;'#13#10 +
+    'end.'#13#10;
+  UPA =
+    'unit PA;'#13#10 +
+    'interface'#13#10 +
+    'uses PA0;'#13#10 +
+    'type'#13#10 +
+    '  TA = class(TA0)'#13#10 +
+    '  private'#13#10 +
+    '    procedure Foo;'#13#10 +
+    '    procedure Baz;'#13#10 +
+    '    procedure Sync(A: Integer); overload;'#13#10 +
+    '  strict private'#13#10 +
+    '    procedure Qux;'#13#10 +
+    '  protected'#13#10 +
+    '    procedure Sync(const S: string); overload;'#13#10 +
+    '  end;'#13#10 +
+    '  TAs = class(TA)'#13#10 +
+    '    procedure Run;'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    'procedure TA.Foo; begin Writeln(''TA.Foo''); end;'#13#10 +
+    'procedure TA.Baz; begin Writeln(''TA.Baz''); end;'#13#10 +
+    'procedure TA.Qux; begin Writeln(''TA.Qux''); end;'#13#10 +
+    'procedure TA.Sync(A: Integer); begin Writeln(''TA.Sync(Integer)''); end;'#13#10 +
+    'procedure TA.Sync(const S: string); begin Writeln(''TA.Sync(string)''); end;'#13#10 +
+    'procedure Qux; begin Writeln(''unit PA Qux''); end;'#13#10 +
+    'procedure TAs.Run;'#13#10 +
+    'begin'#13#10 +
+    '  Foo;'#13#10 +
+    '  Baz;'#13#10 +
+    '  Qux;'#13#10 +
+    'end;'#13#10 +
+    'end.'#13#10;
+  UPB =
+    'unit PB;'#13#10 +
+    'interface'#13#10 +
+    'uses PA;'#13#10 +
+    'type'#13#10 +
+    '  TB = class(TA)'#13#10 +
+    '    procedure Run;'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    'procedure Baz; begin Writeln(''unit PB Baz''); end;'#13#10 +
+    'procedure TB.Run;'#13#10 +
+    'begin'#13#10 +
+    '  Foo;'#13#10 +
+    '  Baz;'#13#10 +
+    '  Sync(''x'');'#13#10 +
+    'end;'#13#10 +
+    'end.'#13#10;
+  UPP =
+    'program PP;'#13#10'uses PA0, PA, PB;'#13#10'begin'#13#10'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+
+  // The declaration the identifier at (ALine, ACol) of AFile binds to:
+  // `Unit.Owner.Name` for a member, `Unit.Name` for a unit-level one.
+  function BoundAt(const AFile: string; ALine, ACol: Integer): string;
+  var
+    LFile: string;
+    LLine, LCol, LSym, LMid, LToId: Integer;
+    LExt: TPasExtRef;
+    LM, LTo: TPasSemaModel;
+  begin
+    Result := '?';
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, AFile));
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    for var LNode := 0 to High(LM.Tree.Nodes) do
+    begin
+      if (LM.Tree.Nodes[LNode].Kind <> nkIdent) or
+         not LProj.NodeSite(LMid, LNode, LFile, LLine, LCol) or
+         (LLine <> ALine) or (LCol <> ACol) then
+        Continue;
+      if LM.ExtRefMap.TryGetValue(LNode, LExt) then
+      begin
+        LToId := LExt.UnitId;
+        LSym := LExt.Sym;
+      end
+      else
+      begin
+        LToId := LMid;
+        LSym := LM.RefMap[LNode];
+      end;
+      if LSym = NIL_SYM then
+        Exit('');
+      LTo := LProj.Model(LToId);
+      Result := ChangeFileExt(ExtractFileName(LProj.ModelFile(LToId)), '') + '.';
+      var LScope := LTo.Symbols[LSym].Scope;
+      if (LScope <> NIL_SCOPE) and (LTo.Scopes[LScope].Kind = sckStruct) and
+         (LTo.Scopes[LScope].StructSym <> NIL_SYM) then
+        Result := Result + LTo.Symbols[LTo.Scopes[LScope].StructSym].Name + '.';
+      Exit(Result + LTo.Symbols[LSym].Name);
+    end;
+  end;
+
+  function DiagCount(const AFile: string): Integer;
+  begin
+    Result := Length(LProj.Model(LProj.ModelIdOf(
+      TPath.Combine(LDir, AFile))).Diags);
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_inh_visibility');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PA0.pas'), UPA0);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PA.pas'), UPA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PB.pas'), UPB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PP.dpr'), UPP);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    Ok('inh-visibility: PP analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'PP.dpr')) >= 0);
+    Ok('inh-visibility: another unit, Foo -> TA0.Foo past TA''s private Foo',
+      BoundAt('PB.pas', 12, 3) = 'PA0.TA0.Foo');
+    Ok('inh-visibility: another unit, Baz -> the unit''s Baz past TA''s private',
+      BoundAt('PB.pas', 13, 3) = 'PB.Baz');
+    Ok('inh-visibility: an overload set led by a private overload is seen, Sync',
+      BoundAt('PB.pas', 14, 3) = 'PA.TA.Sync');
+    Ok('inh-visibility: no diagnostics in PB', DiagCount('PB.pas') = 0);
+    Ok('inh-visibility: same unit, private Foo -> TA.Foo',
+      BoundAt('PA.pas', 27, 3) = 'PA.TA.Foo');
+    Ok('inh-visibility: same unit, private Baz -> TA.Baz',
+      BoundAt('PA.pas', 28, 3) = 'PA.TA.Baz');
+    Ok('inh-visibility: same unit, strict private Qux -> the unit''s Qux',
+      BoundAt('PA.pas', 29, 3) = 'PA.Qux');
+    Ok('inh-visibility: no diagnostics in PA', DiagCount('PA.pas') = 0);
+  finally
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 var
   LDir: string;
   LA, LB, LC, LD, LE, LOvl: TPasSemaModel;
@@ -8478,6 +8639,7 @@ begin
   end;
 
   TestUsesShadowsIntrinsic;
+  TestInheritedVisibility;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;
