@@ -1094,6 +1094,33 @@ listers in each row by file name. The demo shows it as a flat page, the
 file in front of each row. On this
 repository's demo project the answer is empty.
 
+### 12.2 `loHideGlobalInit`
+
+Both functions take `AOptions: TPasLintOptions` (default `[]`, the answers
+above). With `loHideGlobalInit` a unit whose initialization reaches OUTSIDE
+itself is not offered at all - a host that removes rows (pastree-lsp's
+Remove) should not be handed one, and a doubt is too easy to click past:
+
+- "outside" is a binding, in the `initialization` section or in the body
+  of any routine of the unit it calls (to any depth), to a routine or a
+  variable at another unit's unit level, or to a member of another unit's
+  type named through the type - a class method, class var or class property
+  (`RegisterClass(...)`, `Application.Title := ...`,
+  `TPicture.RegisterFileFormat(...)`; no symbol flag marks `class`, so the
+  qualifier being a type is the test); a constructor (`FList :=
+  TList.Create`), a type, a constant, or a member reached through the unit's
+  own variable (`FList.Add`) keeps to the unit;
+- FindUnusedUses leaves out an entry naming such a unit - even when the
+  program still reaches it another way, since it is listed for what it
+  registers - and an entry whose removal would take one out of the program
+  (a unit only it brings in);
+- FindUnreferencedUnits treats such a unit as kept - the entries naming it
+  are not dead edges, and a unit nobody uses that is the only path to one is
+  kept too - and what a kept unit really uses stays reached with it.
+
+Without a program in the analysis only the listed unit's own initialization
+is judged. SemaNavSmoke: TestLintGlobalInit.
+
 ### pastree-lsp hand-off
 
 A diagnostic per row (hint severity, `DiagnosticTag.Unnecessary` greys the

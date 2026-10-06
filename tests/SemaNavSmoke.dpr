@@ -1639,6 +1639,88 @@ begin
   end;
 end;
 
+// loHideGlobalInit (PasTree.Sema.Lint): GUser lists four units it does not
+// use, the program lists GUser. GGlobal's initialization calls a routine of
+// GHelper, GIndirect's calls a routine of its own that does, GClassReg's a
+// class method of GHelper's class through the class name (`TReg.Add(TMine)`,
+// a registration) - all reach outside; GLocal's only creates an object of
+// GHelper's class into its own variable and frees it - a constructor, and
+// a method through a variable, stay inside. Without the option every one is a
+// row; with it only GLocal is, and a unit kept for its initialization keeps
+// GUser and GHelper in the program.
+procedure TestLintGlobalInit;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LMids: TArray<Integer>;
+  LUses: TArray<TPasUnusedUse>;
+  LUnits: TArray<TPasUnreferencedUnit>;
+
+  procedure WriteUnit(const AName, AIntf, AImpl: string);
+  begin
+    TFile.WriteAllText(TPath.Combine(LDir, AName + '.pas'),
+      'unit ' + AName + ';'#13#10'interface'#13#10 + AIntf +
+      'implementation'#13#10 + AImpl + 'end.'#13#10);
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_globalinit');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'GMain.dpr'),
+    'program GMain;'#13#10'uses GUser, GGlobal;'#13#10'begin'#13#10'end.'#13#10);
+  WriteUnit('GUser', 'uses GGlobal, GIndirect, GLocal, GClassReg;'#13#10, '');
+  WriteUnit('GHelper', 'type THelperObj = class end;'#13#10 +
+    'TReg = class class procedure Add(C: TClass); end;'#13#10 +
+    'procedure Reg;'#13#10, 'procedure Reg; begin end;'#13#10 +
+    'class procedure TReg.Add(C: TClass); begin end;'#13#10);
+  WriteUnit('GClassReg', '', 'uses GHelper;'#13#10 +
+    'type TMine = class end;'#13#10 +
+    'initialization'#13#10'  TReg.Add(TMine);'#13#10);
+  WriteUnit('GGlobal', '', 'uses GHelper;'#13#10 +
+    'initialization'#13#10'  Reg;'#13#10);
+  WriteUnit('GIndirect', '', 'uses GHelper;'#13#10 +
+    'procedure Go; begin Reg; end;'#13#10 +
+    'initialization'#13#10'  Go;'#13#10);
+  WriteUnit('GLocal', '', 'uses GHelper;'#13#10 +
+    'var O: THelperObj;'#13#10 +
+    'initialization'#13#10'  O := THelperObj.Create;'#13#10'  O.Free;'#13#10);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LNav := nil;
+  try
+    Ok('global init: GMain analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'GMain.dpr')) >= 0);
+    LNav := TPasNavigator.Create(LProj);
+    LUses := FindUnusedUses(LNav, [LProj.ModelIdOf(TPath.Combine(LDir,
+      'GUser.pas'))]);
+    Ok('global init: without the option, all four entries',
+      Length(LUses) = 4);
+    LUses := FindUnusedUses(LNav, [LProj.ModelIdOf(TPath.Combine(LDir,
+      'GUser.pas'))], [loHideGlobalInit]);
+    // GGlobal is hidden although GMain reaches it without GUser.
+    Ok('global init: with it, GLocal alone - the call through its own ' +
+      'routine counts, a constructor does not, another path does not matter',
+      (Length(LUses) = 1) and SameText(LUses[0].UnitName, 'GLocal'));
+    LMids := nil;
+    for var LMid := 0 to LProj.ModelCount - 1 do
+      LMids := LMids + [LMid];
+    LUnits := FindUnreferencedUnits(LNav, LMids);
+    Ok('global init: without the option, six units nobody uses',
+      Length(LUnits) = 6);
+    LUnits := FindUnreferencedUnits(LNav, LMids, [loHideGlobalInit]);
+    Ok('global init: with it, GLocal alone - GUser and GHelper stay with ' +
+      'the units kept for their initialization',
+      (Length(LUnits) = 1) and SameText(LUnits[0].UnitName, 'GLocal'));
+  finally
+    LNav.Free;
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // FindUnusedUses (PasTree.Sema.Lint): LintUse lists eight units. Used: a
 // type in the interface (LintLib), an enum value (LintEnum), a qualifier
 // (LintQual), an interface entry used in the implementation (LintImpl), a
@@ -4548,6 +4630,7 @@ begin
   end;
   TestUnusedUses;
   TestUnreferencedUnits;
+  TestLintGlobalInit;
 
   if GCounter.Finish('SemaNavSmoke') then
     ExitCode := 1;

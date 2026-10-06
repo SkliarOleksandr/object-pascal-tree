@@ -44,6 +44,23 @@ type
     Doubts: TArray<string>;
   end;
 
+  { loHideGlobalInit: leave out what a removal would cost a unit's
+    initialization that reaches OUTSIDE the unit - an unused entry naming
+    such a unit (even one the program reaches another way), or whose
+    removal leaves one out of the program, a unit nobody uses that
+    has one (or is the only path to one). "Outside" is a routine or a
+    variable of another unit, or a member of one's type named through the
+    type (`RegisterClass`, `Application.Title := ...`,
+    `TPicture.RegisterFileFormat`, `TProviders.Register(...)`), named in the
+    initialization or in a routine of the unit it calls; a constructor, a
+    type, a constant or a member reached through the unit's own variable
+    (`FList := TList.Create`, `FList.Add`) stays inside. Such a unit is in
+    `uses` for what it registers, which no index of names can see, so a host
+    acting on the rows (removing them) is better off not offered it at all.
+    Without the option those rows come with a doubt, as before. }
+  TPasLintOption = (loHideGlobalInit);
+  TPasLintOptions = set of TPasLintOption;
+
   TPasUnreferencedUnit = record
     Hit: TPasRefHit;          // the unit's name in its own header
     UnitName: string;
@@ -61,17 +78,21 @@ type
 // Without a program in the analysis (a directory), the units no other unit
 // lists and uses. A unit with initialization or
 // finalization code or a resource carries a doubt: it may be listed for
-// what that registers. Sorted by unit name (ListedBy too).
+// what that registers. Sorted by unit name (ListedBy too). AOptions: see
+// TPasLintOption.
 function FindUnreferencedUnits(ANav: TPasNavigator;
-  const AMids: TArray<Integer>): TArray<TPasUnreferencedUnit>;
+  const AMids: TArray<Integer>;
+  AOptions: TPasLintOptions = []): TArray<TPasUnreferencedUnit>;
 
 // The unused `uses` entries of the units AMids of ANav's project, sorted by
 // the listing file's name (its path breaking a tie), then by the unused
 // unit's name. A program, a library or a package is skipped: its
 // `uses` is its contents. An entry whose unit did not resolve is not judged.
 // The navigator pairs an inline routine's declaration with its body.
+// AOptions: see TPasLintOption.
 function FindUnusedUses(ANav: TPasNavigator;
-  const AMids: TArray<Integer>): TArray<TPasUnusedUse>;
+  const AMids: TArray<Integer>;
+  AOptions: TPasLintOptions = []): TArray<TPasUnusedUse>;
 
 implementation
 
@@ -127,7 +148,11 @@ type
     FRoots: TArray<Integer>;
     FRows: TList<TPasUnusedUse>;
     FDeadEdges: TDictionary<Int64, Boolean>;   // From shl 32 or Target
+    FOptions: TPasLintOptions;
+    FGlobalInit: TDictionary<Integer, Boolean>;
     procedure BuildGraph;
+    function GlobalInit(AMid: Integer): Boolean;
+    function DropsGlobalInit(AFrom, ATo: Integer): Boolean;
     function ReachOf(ARoot, ASkipFrom, ASkipTo: Integer): TArray<Boolean>;
     function FullReach(ARoot: Integer): TArray<Boolean>;
     function EffectsFrom(AStart: Integer;
@@ -396,6 +421,7 @@ begin
   FReach := TDictionary<Integer, TArray<Boolean>>.Create;
   FRows := TList<TPasUnusedUse>.Create;
   FDeadEdges := TDictionary<Int64, Boolean>.Create;
+  FGlobalInit := TDictionary<Integer, Boolean>.Create;
   for var LMid := 0 to FProj.ModelCount - 1 do
   begin
     LM := FProj.Model(LMid);
@@ -408,6 +434,7 @@ end;
 
 destructor TUsesLint.Destroy;
 begin
+  FGlobalInit.Free;
   FAccessors.Free;
   FInline.Free;
   FDeadEdges.Free;
@@ -670,6 +697,152 @@ begin
   if LUnits <> nil then
     Result := Format('removing it leaves %s out of %s', [NamedList(LUnits,
       MAX_NAMED), NamedList(LPrograms, MAX_NAMED)]);
+end;
+
+// Whether AMid's initialization reaches outside the unit - see
+// TPasLintOption. The section's subtree is walked, and the body of every
+// routine of the unit it calls, to any depth; a binding to another unit
+// decides by what it binds to.
+function TUsesLint.GlobalInit(AMid: Integer): Boolean;
+var
+  LM, UM: TPasSemaModel;
+  LSec, LNode, LChild, LScope, LBody: Integer;
+  LStack: TList<Integer>;
+  LSeen: TDictionary<Integer, Boolean>;   // own routine symbols walked
+  LExt: TPasExtRef;
+  LSym: Integer;
+
+  // Whether ANode is the member name of `Q.Name` with Q a TYPE (`TReg.Add`,
+  // `Unit.TReg.Add`) - a class member, reached without an object; a member
+  // reached through a variable (`FList.Add`) is not.
+  function TypeQualified(ANode: Integer): Boolean;
+  var
+    LP, LQ, LC: Integer;
+    LQExt: TPasExtRef;
+  begin
+    Result := False;
+    LP := LM.Tree.Nodes[ANode].Parent;
+    if (LP = NIL_NODE) or (LM.Tree.Nodes[LP].Kind <> nkMember) or
+       (LM.Tree.Nodes[LP].FirstChild = ANode) then
+      Exit;
+    LQ := LM.Tree.Nodes[LP].FirstChild;
+    // A qualified qualifier: its last segment.
+    while (LQ <> NIL_NODE) and (LM.Tree.Nodes[LQ].Kind = nkMember) do
+    begin
+      LC := LM.Tree.Nodes[LQ].FirstChild;
+      while (LC <> NIL_NODE) and (LM.Tree.Nodes[LC].NextSibling <> NIL_NODE) do
+        LC := LM.Tree.Nodes[LC].NextSibling;
+      LQ := LC;
+    end;
+    if LQ = NIL_NODE then
+      Exit;
+    if LM.ExtRefMap.TryGetValue(LQ, LQExt) then
+      Result := (LQExt.UnitId >= 0) and (LQExt.UnitId < FProj.ModelCount) and
+        (LQExt.Sym >= 0) and (LQExt.Sym < FProj.Model(LQExt.UnitId).SymCount) and
+        (FProj.Model(LQExt.UnitId).Symbols[LQExt.Sym].Kind = skType)
+    else if (LQ <= High(LM.RefMap)) and (LM.RefMap[LQ] <> NIL_SYM) and
+       (LM.RefMap[LQ] < LM.SymCount) then
+      Result := LM.Symbols[LM.RefMap[LQ]].Kind = skType;
+  end;
+
+  // A binding of ANode to another unit that acts on that unit's state.
+  function Outside(ANode: Integer; const AExt: TPasExtRef): Boolean;
+  begin
+    Result := False;
+    if (AExt.UnitId < 0) or (AExt.UnitId >= FProj.ModelCount) or
+       (AExt.UnitId = AMid) then
+      Exit;
+    UM := FProj.Model(AExt.UnitId);
+    if (AExt.Sym < 0) or (AExt.Sym >= UM.SymCount) then
+      Exit;
+    LScope := UM.Symbols[AExt.Sym].Scope;
+    if (LScope < 0) or (LScope >= UM.Scopes.Count) then
+      Exit;
+    case UM.Scopes[LScope].Kind of
+      sckUnit:
+        Result := UM.Symbols[AExt.Sym].Kind in [skVar, skRoutine];
+      // A class method, class var or class property: by the type's name.
+      // (No symbol flag says `class` - sfClassMember is never set.)
+      sckStruct:
+        Result := (UM.Symbols[AExt.Sym].Kind in [skVar, skField, skRoutine,
+          skProperty]) and
+          not FProj.IsConstructorSym(AExt.UnitId, AExt.Sym) and
+          TypeQualified(ANode);
+    end;
+  end;
+
+begin
+  if FGlobalInit.TryGetValue(AMid, Result) then
+    Exit;
+  Result := False;
+  // Nodes and both maps only, as LinkEffect and AddNodeUnits: a
+  // text-demoted model answers without hydrating (RoutineImplNode hydrates
+  // what it pairs).
+  LM := FProj.Model(AMid);
+  LSec := ModuleChild(LM, nkInitSec);
+  if (LSec <> NIL_NODE) and HasStatements(LM, LSec) then
+  begin
+    LStack := TList<Integer>.Create;
+    LSeen := TDictionary<Integer, Boolean>.Create;
+    try
+      LStack.Add(LSec);
+      while (LStack.Count > 0) and not Result do
+      begin
+        LNode := LStack.Last;
+        LStack.Delete(LStack.Count - 1);
+        if LM.ExtRefMap.TryGetValue(LNode, LExt) then
+          Result := Outside(LNode, LExt)
+        else if LNode <= High(LM.RefMap) then
+        begin
+          // A routine of this unit: its body runs too.
+          LSym := LM.RefMap[LNode];
+          if (LSym <> NIL_SYM) and (LSym < LM.SymCount) and
+             (LM.Symbols[LSym].Kind = skRoutine) and
+             not LSeen.ContainsKey(LSym) then
+          begin
+            LSeen.Add(LSym, True);
+            LBody := FNav.RoutineImplNode(AMid, LSym);
+            if LBody <> NIL_NODE then
+              LStack.Add(LBody);
+          end;
+        end;
+        LChild := LM.Tree.Nodes[LNode].FirstChild;
+        while LChild <> NIL_NODE do
+        begin
+          LStack.Add(LChild);
+          LChild := LM.Tree.Nodes[LChild].NextSibling;
+        end;
+      end;
+    finally
+      LSeen.Free;
+      LStack.Free;
+    end;
+  end;
+  FGlobalInit.Add(AMid, Result);
+end;
+
+// Whether removing AFrom's entry for ATo leaves a unit with a global
+// initialization out of a program - ATo itself, or one only it brought in.
+// With no program in the analysis, ATo's own.
+function TUsesLint.DropsGlobalInit(AFrom, ATo: Integer): Boolean;
+var
+  LFull, LLess: TArray<Boolean>;
+begin
+  if FRoots = nil then
+    Exit(GlobalInit(ATo));
+  for var LRoot in FRoots do
+  begin
+    LFull := FullReach(LRoot);
+    if not LFull[AFrom] then
+      Continue;
+    LLess := ReachOf(LRoot, AFrom, ATo);
+    if LLess = nil then
+      Continue;
+    for var LMid := 0 to High(LFull) do
+      if LFull[LMid] and not LLess[LMid] and GlobalInit(LMid) then
+        Exit(True);
+  end;
+  Result := False;
 end;
 
 // What the program reaches through the edges FDeadEdges leaves.
@@ -1206,7 +1379,11 @@ begin
     if AEdges then
     begin
       for LEntry in LEntries do
-        if not LEntry.Used and (LEntry.Doubts = nil) then
+        // A unit with a global initialization stays reached: the program
+        // keeps it for what it registers, and so keeps what it lists.
+        if not LEntry.Used and (LEntry.Doubts = nil) and
+           not ((loHideGlobalInit in FOptions) and
+           GlobalInit(LEntry.UnitId)) then
           FDeadEdges.AddOrSetValue((Int64(AMid) shl 32) or
             Cardinal(LEntry.UnitId), True);
       Exit;
@@ -1214,6 +1391,12 @@ begin
     for LEntry in LEntries do
     begin
       if LEntry.Used or not EntryHit(LM, LEntry.NameNode, LRow.Hit) then
+        Continue;
+      // The entry's own unit whether or not the program still reaches it
+      // another way: it is in this `uses` for what it registers.
+      if (loHideGlobalInit in FOptions) and
+         (GlobalInit(LEntry.UnitId) or
+         DropsGlobalInit(AMid, LEntry.UnitId)) then
         Continue;
       LRow.UnitName := LEntry.Name;
       LRow.InInterface := LEntry.InInterface;
@@ -1234,7 +1417,42 @@ begin
 end;
 
 function FindUnreferencedUnits(ANav: TPasNavigator;
-  const AMids: TArray<Integer>): TArray<TPasUnreferencedUnit>;
+  const AMids: TArray<Integer>;
+  AOptions: TPasLintOptions): TArray<TPasUnreferencedUnit>;
+
+  // Whether AMid, or a unit only it brings into the program (not live),
+  // has a global initialization.
+  function BringsGlobalInit(ALint: TUsesLint; AMid: Integer;
+    const ALive: TArray<Boolean>): Boolean;
+  var
+    LSeen: TArray<Boolean>;
+    LQueue: TList<Integer>;
+    LAt, LU: Integer;
+  begin
+    Result := False;
+    SetLength(LSeen, Length(ALive));
+    LQueue := TList<Integer>.Create;
+    try
+      LSeen[AMid] := True;
+      LQueue.Add(AMid);
+      LAt := 0;
+      while (LAt < LQueue.Count) and not Result do
+      begin
+        LU := LQueue[LAt];
+        Result := ALint.GlobalInit(LU);
+        for var LE := ALint.FStart[LU] to ALint.FStart[LU + 1] - 1 do
+          if not ALive[ALint.FEdges[LE]] and not LSeen[ALint.FEdges[LE]] then
+          begin
+            LSeen[ALint.FEdges[LE]] := True;
+            LQueue.Add(ALint.FEdges[LE]);
+          end;
+        Inc(LAt);
+      end;
+    finally
+      LQueue.Free;
+    end;
+  end;
+
 var
   LLint: TUsesLint;
   LLive: TArray<Boolean>;
@@ -1243,17 +1461,57 @@ var
   LM: TPasSemaModel;
   LMod, LName: Integer;
   LProj: TPasSemaProject;
+  LSeeds: TArray<Integer>;
+  LQueue: TList<Integer>;
+  LAt, LU: Integer;
 begin
   LProj := ANav.Project;
   LLint := TUsesLint.Create(ANav);
   LRows := TList<TPasUnreferencedUnit>.Create;
   try
+    LLint.FOptions := AOptions;
     for var LRoot in LLint.FRoots do
       LLint.CheckUnit(LRoot, True);
     for var LMid in AMids do
       if (LMid >= 0) and (LMid < LProj.ModelCount) then
         LLint.CheckUnit(LMid, True);
     LLive := LLint.LiveUnits;
+    // A unit kept for its global initialization - its own, or one only it
+    // brings in - is not reported, and it keeps what it really uses: the
+    // seeds first (against the live set as computed), then their reach over
+    // the edges that are not dead.
+    if loHideGlobalInit in AOptions then
+    begin
+      LSeeds := nil;
+      for var LMid in AMids do
+        if (LMid >= 0) and (LMid < LProj.ModelCount) and not LLive[LMid] and
+           BringsGlobalInit(LLint, LMid, LLive) then
+          LSeeds := LSeeds + [LMid];
+      LQueue := TList<Integer>.Create;
+      try
+        for var LMid in LSeeds do
+        begin
+          LLive[LMid] := True;
+          LQueue.Add(LMid);
+        end;
+        LAt := 0;
+        while LAt < LQueue.Count do
+        begin
+          LU := LQueue[LAt];
+          for var LE := LLint.FStart[LU] to LLint.FStart[LU + 1] - 1 do
+            if not LLive[LLint.FEdges[LE]] and
+               not LLint.FDeadEdges.ContainsKey((Int64(LU) shl 32) or
+               Cardinal(LLint.FEdges[LE])) then
+            begin
+              LLive[LLint.FEdges[LE]] := True;
+              LQueue.Add(LLint.FEdges[LE]);
+            end;
+          Inc(LAt);
+        end;
+      finally
+        LQueue.Free;
+      end;
+    end;
     for var LMid in AMids do
     begin
       if (LMid < 0) or (LMid >= LProj.ModelCount) or LLive[LMid] or
@@ -1305,12 +1563,14 @@ begin
 end;
 
 function FindUnusedUses(ANav: TPasNavigator;
-  const AMids: TArray<Integer>): TArray<TPasUnusedUse>;
+  const AMids: TArray<Integer>;
+  AOptions: TPasLintOptions): TArray<TPasUnusedUse>;
 var
   LLint: TUsesLint;
 begin
   LLint := TUsesLint.Create(ANav);
   try
+    LLint.FOptions := AOptions;
     for var LMid in AMids do
       if (LMid >= 0) and (LMid < ANav.Project.ModelCount) then
         LLint.CheckUnit(LMid);
