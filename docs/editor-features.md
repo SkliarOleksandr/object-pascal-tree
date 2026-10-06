@@ -1015,9 +1015,12 @@ unit-level declaration of its interface, an enum value, a helper's member.
 A member reached through a value or a type (`List.Add`, `TFoo.Create`) does
 not: dcc finds members wherever the type came from. Also counted: the
 qualifier of `Unit.Name`; a class or a component link the unit's form file
-(`.dfm`/`.fmx`) names; a name bound through an alias of another unit, or a
-name of the interface bound to a unit of the implementation `uses` - every
-listed unit declaring that name is credited. A program, a library or a
+(`.dfm`/`.fmx`) names, and the unit of every ANCESTOR of such a class
+(0.93.3: dcc needs none of them, but the IDE's designer puts each back into
+`uses` when it saves the form - System.ImageList for a TImageList,
+System.Actions for a TActionList); a name bound through an alias of another
+unit, or a name of the interface bound to a unit of the implementation
+`uses` - every listed unit declaring that name is credited. A program, a library or a
 package is not checked (its `uses` is its contents), nor an entry whose
 unit did not resolve.
 

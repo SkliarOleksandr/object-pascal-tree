@@ -1721,10 +1721,12 @@ begin
   end;
 end;
 
-// FindUnusedUses (PasTree.Sema.Lint): LintUse lists eight units. Used: a
+// FindUnusedUses (PasTree.Sema.Lint): LintUse lists ten units. Used: a
 // type in the interface (LintLib), an enum value (LintEnum), a qualifier
 // (LintQual), an interface entry used in the implementation (LintImpl), a
-// class the unit's form file names (LintForm). Unused: LintInit (with
+// class the unit's form file names (LintForm), the units of that class's
+// ancestors (LintAnc, LintAnc2 - the IDE puts them back on save, 0.93.3;
+// without it both are rows and the count is five). Unused: LintInit (with
 // initialization code - a doubt), LintDead (named only in a branch not
 // compiled - a doubt), LintNever (implementation uses, no doubt).
 procedure TestUnusedUses;
@@ -1732,7 +1734,8 @@ const
   LINT_USE =
     'unit LintUse;'#13#10 +
     'interface'#13#10 +
-    'uses LintLib, LintInit, LintEnum, LintQual, LintImpl, LintDead, LintForm;'#13#10 +
+    'uses LintLib, LintInit, LintEnum, LintQual, LintImpl, LintDead, LintForm, '#13#10 +
+    '  LintAnc, LintAnc2;'#13#10 +
     'var V: TLibThing;'#13#10 +
     'implementation'#13#10 +
     'uses LintNever;'#13#10 +
@@ -1834,7 +1837,11 @@ begin
     'procedure ImplProc; begin end;'#13#10);
   WriteUnit('LintDead', 'procedure DeadProc;'#13#10,
     'procedure DeadProc; begin end;'#13#10);
-  WriteUnit('LintForm', 'type TLintPanel = class end;'#13#10, '');
+  WriteUnit('LintForm', 'uses LintAnc;'#13#10 +
+    'type TLintPanel = class(TLintAncBase) end;'#13#10, '');
+  WriteUnit('LintAnc', 'uses LintAnc2;'#13#10 +
+    'type TLintAncBase = class(TLintAncRoot) end;'#13#10, '');
+  WriteUnit('LintAnc2', 'type TLintAncRoot = class end;'#13#10, '');
   WriteUnit('LintNever', 'procedure NeverProc;'#13#10,
     'procedure NeverProc; begin end;'#13#10);
   // Ahead of every other file by path (a\), behind them by name.
@@ -1873,7 +1880,7 @@ begin
     Ok('unused uses: LintInit, its initialization a doubt',
       RowIs(1, 'LintInit', 3, 15, True));
     Ok('unused uses: LintNever in the implementation, no doubt',
-      RowIs(2, 'LintNever', 6, 6, False) and not LRows[2].InInterface);
+      RowIs(2, 'LintNever', 7, 6, False) and not LRows[2].InInterface);
     LRows := FindUnusedUses(LNav,
       [LProj.ModelIdOf(TPath.Combine(LDir, 'LintInl.pas'))]);
     Ok('unused uses: inline - two entries', Length(LRows) = 2);

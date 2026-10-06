@@ -8,7 +8,9 @@ unit PasTree.Sema.Lint;
   helper's member. A member reached through a value or a type (`List.Add`,
   `TFoo.Create`) does not: dcc finds members wherever the type came from, and
   the type named is the use. So do the qualifier of `Unit.Name`, the unit's
-  form file naming a class or a module the listed unit declares, a name bound
+  form file naming a class or a module the listed unit declares - or an
+  ANCESTOR of a component class it names, whose unit the IDE's designer
+  puts back into `uses` on the next save (0.93.3), a name bound
   through an alias of another unit (`TModalResult` of Vcl.Controls is
   System.UITypes'), a name of the interface PasTree bound to a unit of the
   implementation `uses`, and a unit an inline routine the unit calls needs
@@ -1142,6 +1144,9 @@ var
   LExtM: TPasSemaModel;
   LKeys: TArray<Int64>;
   LRow: TPasUnusedUse;
+  LFormClasses: TArray<string>;   // the class names the form file streams
+  LX: TSemaXType;
+  LAncMid, LAncSym, LDepth: Integer;
 
   procedure MarkUse(AIdx: Integer);
   var
@@ -1188,6 +1193,7 @@ begin
   LSkipped := nil;
   LOverCalls := nil;
   LFormWords := nil;
+  LFormClasses := nil;
   try
     for var LU in LM.UsesList do
     begin
@@ -1263,12 +1269,16 @@ begin
         LFormFile := ChangeFileExt(LFile, LExt);
         LFormWords := TDictionary<string, Integer>.Create;
         for var LI := 0 to High(LDoc.Doc.Idents) do
+        begin
+          if LDoc.Doc.Idents[LI].Role = dirClassName then
+            LFormClasses := LFormClasses + [LowerCase(LDoc.Doc.IdentText(LI))];
           if (LDoc.Doc.Idents[LI].Role = dirClassName) or
              ((LDoc.Doc.Idents[LI].Role = dirValue) and
              (LDoc.Doc.Idents[LI].Seg = 0) and
              (LDoc.Doc.Idents[LI].SegCount > 1)) then
             LFormWords.TryAdd(LowerCase(LDoc.Doc.IdentText(LI)),
               LDoc.Doc.LineOf(LDoc.Doc.Idents[LI].Offset));
+        end;
       end;
     if LFormWords <> nil then
       for LE := 0 to LEntries.Count - 1 do
@@ -1282,6 +1292,39 @@ begin
               Break;
             end;
         end;
+    // The units of a form class's ANCESTORS. Saving a form, the IDE's
+    // designer puts back into `uses` the unit of every class each component
+    // descends from - Vcl.ImgList and System.ImageList for a TImageList,
+    // System.Actions for a TActionList, Vcl.ToolWin for a TToolBar - though
+    // dcc needs none of them. Removing one changes nothing a save does not
+    // undo, and the undoing rewrites the clause under whoever removed it
+    // (a client's main form, 2026-10-06: ten of the seventeen entries
+    // removed came back on the first save). Climbed from the class the unit
+    // binds the name to - its own form class first, then its `uses`.
+    for var LClass in LFormClasses do
+    begin
+      LX := XNil;
+      if (LM.InterfaceScope <> NIL_SCOPE) then
+      begin
+        LSym := LM.Resolve(LM.InterfaceScope, LClass);
+        if (LSym <> NIL_SYM) and (LM.Symbols[LSym].Kind = skType) then
+          LX := XPlain(AMid, LSym);
+      end;
+      if not XValid(LX) and
+         FProj.ResolveRealDecl(AMid, LClass, LAncMid, LAncSym) and
+         (FProj.Model(LAncMid).Symbols[LAncSym].Kind = skType) then
+        LX := XPlain(LAncMid, LAncSym);
+      LDepth := 0;
+      while XValid(LX) and (LDepth < 64) do
+      begin
+        if LByUnit.TryGetValue(LX.UnitId, LE) then
+          MarkUse(LE);
+        if not FProj.EnsureHydrated(LX.UnitId) then
+          Break;
+        LX := FProj.AncestorOfX(LX);
+        Inc(LDepth);
+      end;
+    end;
     // A unit the expansion of an inline routine called here needs - read or
     // written through a property too. Asked only while an entry is left: a
     // body's pairing hydrates the model declaring it.
