@@ -3002,6 +3002,178 @@ begin
   end;
 end;
 
+{ An inherited member reached bare in a method body outranks a unit-level
+  declaration of the method's own unit, and a nested class's inherited member
+  outranks its outer type's (F40 of the parser-fidelity plan). Phase 1 joins
+  only the type's OWN members into the body's scope, so `WriteError;` in a
+  TStream descendant went to System.Classes' implementation routine of that
+  name. dcc64 37.0 compiles the fixture only with the members: `Kind = 0`
+  against the unit's string constant is E2010, `Padding := 'inner'` against
+  the outer type's Integer field too; an `overload` on the inherited member
+  does not reach the unit's `Pick(A: Integer)` (`Pick(5)` is E2250). }
+procedure TestInheritedBeatsUnitLevel;
+const
+  UINHBASE =
+    'unit UInhBase;'#13#10 +
+    'interface'#13#10 +
+    'type'#13#10 +
+    '  TXBase = class'#13#10 +
+    '  protected'#13#10 +
+    '    FAes: Integer;'#13#10 +
+    '    procedure SaveAs; virtual;'#13#10 +
+    '    function Pick(A: Boolean): string; overload;'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    'procedure TXBase.SaveAs; begin end;'#13#10 +
+    'function TXBase.Pick(A: Boolean): string; begin Result := ''b''; end;'#13#10 +
+    'end.'#13#10;
+  UINHUSE =
+    'unit UInhUse;'#13#10 +
+    'interface'#13#10 +
+    'uses UInhBase;'#13#10 +
+    'type'#13#10 +
+    '  TBase = class'#13#10 +
+    '  protected'#13#10 +
+    '    procedure WriteError; virtual;'#13#10 +
+    '    function Kind: Integer;'#13#10 +
+    '  end;'#13#10 +
+    '  TDer = class(TBase)'#13#10 +
+    '  public'#13#10 +
+    '    procedure Run;'#13#10 +
+    '  end;'#13#10 +
+    '  TXDer = class(TXBase)'#13#10 +
+    '  public'#13#10 +
+    '    procedure Run;'#13#10 +
+    '  end;'#13#10 +
+    '  TIBase = class'#13#10 +
+    '  public'#13#10 +
+    '    Padding: string;'#13#10 +
+    '  end;'#13#10 +
+    '  TOuter = class'#13#10 +
+    '  public'#13#10 +
+    '    Padding: Integer;'#13#10 +
+    '    class var Width: Integer;'#13#10 +
+    '    type'#13#10 +
+    '      TInner = class(TIBase)'#13#10 +
+    '        procedure Go;'#13#10 +
+    '      end;'#13#10 +
+    '  end;'#13#10 +
+    'const'#13#10 +
+    '  Kind = ''unit Kind'';'#13#10 +
+    'implementation'#13#10 +
+    'procedure WriteError; begin end;'#13#10 +
+    'procedure SaveAs; overload; begin end;'#13#10 +
+    'procedure SaveAs(I: Integer); overload; begin end;'#13#10 +
+    'function FAes: Integer; begin Result := 1; end;'#13#10 +
+    'function Pick(A: Integer): string; overload; begin Result := ''i''; end;'#13#10 +
+    'procedure Lone; begin end;'#13#10 +
+    'procedure TBase.WriteError; begin end;'#13#10 +
+    'function TBase.Kind: Integer; begin Result := 0; end;'#13#10 +
+    'procedure TDer.Run;'#13#10 +
+    'begin'#13#10 +
+    '  WriteError;'#13#10 +
+    '  if Kind = 0 then Lone;'#13#10 +
+    'end;'#13#10 +
+    'procedure TXDer.Run;'#13#10 +
+    'begin'#13#10 +
+    '  SaveAs;'#13#10 +
+    '  if FAes = 0 then Pick(True);'#13#10 +
+    'end;'#13#10 +
+    'procedure TOuter.TInner.Go;'#13#10 +
+    'begin'#13#10 +
+    '  Padding := ''inner'';'#13#10 +
+    '  Width := 2;'#13#10 +
+    'end;'#13#10 +
+    'end.'#13#10;
+  PINH =
+    'program PInh;'#13#10'uses UInhBase, UInhUse;'#13#10'begin'#13#10'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LM: TPasSemaModel;
+  LMid: Integer;
+
+  // The declaration the identifier at (ALine, ACol) of UInhUse binds to:
+  // `Unit.Owner.Name` for a member, `Unit.Name` for a unit-level one.
+  function BoundAt(ALine, ACol: Integer): string;
+  var
+    LFile: string;
+    LLine, LCol, LSym: Integer;
+    LExt: TPasExtRef;
+    LTo: TPasSemaModel;
+    LToId: Integer;
+  begin
+    Result := '?';
+    for var LNode := 0 to High(LM.Tree.Nodes) do
+    begin
+      if (LM.Tree.Nodes[LNode].Kind <> nkIdent) or
+         not LProj.NodeSite(LMid, LNode, LFile, LLine, LCol) or
+         (LLine <> ALine) or (LCol <> ACol) then
+        Continue;
+      if LM.ExtRefMap.TryGetValue(LNode, LExt) then
+      begin
+        LToId := LExt.UnitId;
+        LTo := LProj.Model(LToId);
+        LSym := LExt.Sym;
+      end
+      else
+      begin
+        LToId := LMid;
+        LTo := LM;
+        LSym := LM.RefMap[LNode];
+      end;
+      if LSym = NIL_SYM then
+        Exit('');
+      Result := ChangeFileExt(ExtractFileName(LProj.ModelFile(LToId)), '') + '.';
+      var LScope := LTo.Symbols[LSym].Scope;
+      if (LScope <> NIL_SCOPE) and (LTo.Scopes[LScope].Kind = sckStruct) and
+         (LTo.Scopes[LScope].StructSym <> NIL_SYM) then
+        Result := Result + LTo.Symbols[LTo.Scopes[LScope].StructSym].Name + '.';
+      Exit(Result + LTo.Symbols[LSym].Name);
+    end;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_inh_unit_level');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UInhBase.pas'), UINHBASE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UInhUse.pas'), UINHUSE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PInh.dpr'), PINH);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    Ok('inh-unit-level: PInh analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'PInh.dpr')) >= 0);
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'UInhUse.pas'));
+    Ok('inh-unit-level: UInhUse loaded', LMid >= 0);
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    Ok('inh-unit-level: WriteError -> TBase.WriteError, not the unit routine',
+      BoundAt(44, 3) = 'UInhUse.TBase.WriteError');
+    Ok('inh-unit-level: Kind -> TBase.Kind, not the unit constant',
+      BoundAt(45, 6) = 'UInhUse.TBase.Kind');
+    Ok('inh-unit-level: a name no ancestor declares stays the unit''s, Lone',
+      BoundAt(45, 20) = 'UInhUse.Lone');
+    Ok('inh-unit-level: SaveAs -> the other unit''s TXBase.SaveAs',
+      BoundAt(49, 3) = 'UInhBase.TXBase.SaveAs');
+    Ok('inh-unit-level: a field, FAes -> TXBase.FAes, not the unit function',
+      BoundAt(50, 6) = 'UInhBase.TXBase.FAes');
+    Ok('inh-unit-level: an overloaded member, Pick -> TXBase.Pick',
+      BoundAt(50, 20) = 'UInhBase.TXBase.Pick');
+    Ok('inh-unit-level: nested, Padding -> the ancestor''s TIBase.Padding',
+      BoundAt(54, 3) = 'UInhUse.TIBase.Padding');
+    Ok('inh-unit-level: nested, an outer member no ancestor has, Width',
+      BoundAt(55, 3) = 'UInhUse.TOuter.Width');
+    Ok('inh-unit-level: no diagnostics', Length(LM.Diags) = 0);
+  finally
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 var
   LDir: string;
   LA, LB, LC, LD, LE, LOvl: TPasSemaModel;
@@ -8640,6 +8812,7 @@ begin
 
   TestUsesShadowsIntrinsic;
   TestInheritedVisibility;
+  TestInheritedBeatsUnitLevel;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;

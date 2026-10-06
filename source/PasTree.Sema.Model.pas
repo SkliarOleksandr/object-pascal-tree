@@ -503,6 +503,13 @@ type
     // any type derived from it is unreliable - which is why the typer stays
     // quiet over these nodes (see InUnopenedWithBody / TPasSemaTyper.Diag).
     WithUnopened: TArray<Integer>;
+    // The expressions (an assignment, or the outermost expression of a
+    // statement) the typer withheld a diagnostic over because a name in them
+    // is BoundPastStruct: the project's inherited pass may move that name
+    // to an ancestor's member, and the type derived from the guess is then
+    // wrong. Re-typed with WithUnopened's bodies (TPasSemaTyper.
+    // RecheckWithBodies) once the pass has committed.
+    PastStructRecheck: TArray<Integer>;
     { Keyword constraint node (`class`, `record`, `constructor` in a generic
       parameter list - an nkConstraint with no child) -> Ord of its token
       kind, filled by Phase 1. CheckConstraints reads the DECLARING model's
@@ -656,6 +663,17 @@ type
       the last-child test. WithUnopened is empty for the overwhelming
       majority of units, so this costs one length check on the hot path. }
     function InUnopenedWithBody(ANode: Integer): Boolean;
+    { True when ANode, an identifier in a METHOD body, is bound to a
+      declaration dcc reaches only after the method's own type and its
+      ancestors: a unit-level declaration of this unit (either section, an
+      enum value joined there) or a member of an outer type of a nested
+      method's qualifier. Phase 1 joins the type's own members into the
+      body's scope but none of its ancestors' - those may live in other units,
+      the project's inherited pass is what walks them - so such a binding is
+      right only when no ancestor declares the name (F40: `WriteError;` in a
+      TStream descendant went to System.Classes' implementation routine of
+      that name). }
+    function BoundPastStruct(ANode: Integer): Boolean;
     { Frees the maps nothing reads after analysis for a unit the host is not
       EDITING: ExprType (a nodes-sized array), ExprTypeX and WithUnopened.
       Navigation reads none of them (grep-verified in MEMORY-AUDIT sec. 6.4-4 and
@@ -2073,6 +2091,7 @@ var
 begin
   ExprType := nil;
   WithUnopened := nil;
+  PastStructRecheck := nil;
   ExprTypeX.Clear;
   // NodeScope joins the released set - but its one post-analysis consumer
   // (the anonymous-struct branch, see AnonStructSyms) gets a snapshot first.
@@ -2280,6 +2299,49 @@ begin
   DemotedHeads := nil;
   DemotedVisCount := 0;
   Result := True;
+end;
+
+function TPasSemaModel.BoundPastStruct(ANode: Integer): Boolean;
+var
+  LSym, LScope, LOwner, LIdx: Integer;
+begin
+  Result := False;
+  if (ANode = NIL_NODE) or (ANode > High(RefMap)) or
+     (ANode > High(NodeScope)) then
+    Exit;
+  LSym := RefMap[ANode];
+  if (LSym = NIL_SYM) or (Symbols[LSym].Scope = NIL_SCOPE) then
+    Exit;
+  LOwner := NIL_SYM;
+  case Scopes[Symbols[LSym].Scope].Kind of
+    sckUnit, sckImplementation, sckEnum: ;
+    sckStruct:
+      begin
+        LOwner := Scopes[Symbols[LSym].Scope].StructSym;
+        if LOwner = NIL_SYM then
+          Exit;
+      end;
+  else
+    Exit;
+  end;
+  // The method body's routine scope: the first scope up the chain carrying
+  // the qualifier's type (a type DECLARATION's own scope carries it too -
+  // not a body, not this rule).
+  LScope := NodeScope[ANode];
+  while (LScope <> NIL_SCOPE) and (Scopes[LScope].StructSym = NIL_SYM) do
+    LScope := Scopes[LScope].Parent;
+  if (LScope = NIL_SCOPE) or (Scopes[LScope].Kind = sckStruct) then
+    Exit;
+  if LOwner = NIL_SYM then
+    Exit(True);
+  // A member: past the type only when it is an OUTER segment's - one of the
+  // struct scopes CollectRoutine joined, other than the innermost's own.
+  if LOwner = Scopes[LScope].StructSym then
+    Exit;
+  for LIdx := 0 to High(Scopes[LScope].Additional) do
+    if (Scopes[Scopes[LScope].Additional[LIdx]].Kind = sckStruct) and
+       (Scopes[Scopes[LScope].Additional[LIdx]].StructSym = LOwner) then
+      Exit(True);
 end;
 
 function TPasSemaModel.InUnopenedWithBody(ANode: Integer): Boolean;

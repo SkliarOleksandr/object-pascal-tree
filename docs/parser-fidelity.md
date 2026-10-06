@@ -450,8 +450,8 @@ ancestor's member or by an ancestry PasTree cannot read, `$Y+` against
 The resolver findings (plan F37-F50, each a gate expectation): a member's
 visibility from another unit ignored - a private method of a VCL ancestor
 taken for a bare name dcc finds in a unit (F38, fixed in 0.93.5); an
-inherited member missed for a unit-level or System name (F40); `Flush` and
-`ChDir`, standard procedures System also declares (F41); a name in a `with`
-body falling past Self's inherited members to a System type (F49); a nested
-class whose ancestor is a same-named nested class reaching the outer type's
-members (F48); a string helper's method binding `Length` to Self's type (F50).
+inherited member missed for a unit-level or System name (F40, fixed in
+0.93.6); `Flush` and `ChDir`, standard procedures System also declares
+(F41); a name in a `with` body falling past Self's inherited members to a
+System type (F49); a nested class whose ancestor is a same-named nested
+class reaching the outer type's members (F48); a string helper's method binding `Length` to Self's type (F50).

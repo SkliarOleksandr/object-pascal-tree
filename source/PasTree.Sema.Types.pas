@@ -78,10 +78,16 @@ type
     function InterfaceCounterpart(AHead: Integer): Integer;
     function IsTypeNameOperand(N: Integer): Boolean;
     procedure CheckAssign(N: Integer);
+    procedure CheckCondition(AStmt: Integer);
+    function ExprRoot(N: Integer): Integer;
+    function HoldsPastStructName(ARoot: Integer): Boolean;
     function TypeNode(N: Integer): Integer;
     procedure Prepare;
     procedure Run;
   private
+    // Set while the walks Diag may withhold for PastStructRecheck run (the
+    // TypeNode walk and the condition check - what a recheck re-runs).
+    FPastWithhold: Boolean;
     // RECHECK mode (see RecheckWithBodies): the with-body suppression in Diag
     // is off, and an ident this model no longer binds (RefMap cleared by the
     // project's commit, ExtRefMap holding the cross-unit member) is typed
@@ -524,9 +530,19 @@ end;
   says nothing. `Diag` additionally withholds anything inside an unresolved
   `with` body, where a binding - and so a type - is only a guess. }
 procedure TPasSemaTyper.CheckConditionTypes;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to High(T.Nodes) do
+    CheckCondition(LIdx);
+end;
+
+// One statement's part of CheckConditionTypes - a recheck re-runs it for the
+// condition it re-typed (see RecheckWithBodies).
+procedure TPasSemaTyper.CheckCondition(AStmt: Integer);
 const
   // Not Boolean and not "we do not know". tcRecord, tcVariant and tcProc are
-  // absent deliberately - see the header.
+  // absent deliberately - see CheckConditionTypes' header.
   CNotBoolean = [tcInteger, tcFloat, tcChar, tcString, tcEnum, tcSet, tcArray,
     tcClass, tcInterface, tcClassOf, tcPointer, tcFile];
   // Not ordinal and not "we do not know". Variant is legal HERE; a record is
@@ -534,30 +550,27 @@ const
   CNotSelector = [tcFloat, tcString, tcPointer, tcSet, tcArray, tcRecord,
     tcClass, tcInterface, tcClassOf, tcFile];
 var
-  LIdx, LCond: Integer;
+  LCond: Integer;
 begin
-  for LIdx := 0 to High(T.Nodes) do
-  begin
-    LCond := NIL_NODE;
-    case Kind(LIdx) of
-      nkIfStmt, nkWhileStmt:
-        LCond := Child(LIdx);
-      nkRepeatStmt:
-        // body block, then the `until` expression.
-        if Child(LIdx) <> NIL_NODE then
-          LCond := Sib(Child(LIdx));
-      nkCaseStmt:
-        begin
-          LCond := Child(LIdx);
-          if (LCond <> NIL_NODE) and (CatOf(M.ExprType[LCond]) in CNotSelector)
-          then
-            Diag('E2001', SE2001_OrdinalTypeRequired, LCond);
-          Continue;
-        end;
-    end;
-    if (LCond <> NIL_NODE) and (CatOf(M.ExprType[LCond]) in CNotBoolean) then
-      Diag('E2012', SE2012_MustBeBoolean, LCond);
+  LCond := NIL_NODE;
+  case Kind(AStmt) of
+    nkIfStmt, nkWhileStmt:
+      LCond := Child(AStmt);
+    nkRepeatStmt:
+      // body block, then the `until` expression.
+      if Child(AStmt) <> NIL_NODE then
+        LCond := Sib(Child(AStmt));
+    nkCaseStmt:
+      begin
+        LCond := Child(AStmt);
+        if (LCond <> NIL_NODE) and (CatOf(M.ExprType[LCond]) in CNotSelector)
+        then
+          Diag('E2001', SE2001_OrdinalTypeRequired, LCond);
+        Exit;
+      end;
   end;
+  if (LCond <> NIL_NODE) and (CatOf(M.ExprType[LCond]) in CNotBoolean) then
+    Diag('E2012', SE2012_MustBeBoolean, LCond);
 end;
 
 { The ordinal value of a LITERAL bound, and only of a literal: a decimal or `$`
@@ -1579,6 +1592,29 @@ begin
   // against the right binding.
   if not FRecheck and M.InUnopenedWithBody(ANode) then
     Exit;
+  // The same for a name of a method body Phase 1 bound PAST the method's
+  // type (TPasSemaModel.BoundPastStruct): an inherited member of that name,
+  // which the project's inherited pass may find, outranks it - `Padding :=
+  // 'inner'` in a nested class's method read an outer Integer field where
+  // the ancestor's string field was meant (F40). The whole expression is
+  // withheld and re-typed once the pass has committed.
+  if FPastWithhold and not FRecheck then
+  begin
+    var LRoot := ExprRoot(ANode);
+    if HoldsPastStructName(LRoot) then
+    begin
+      var LSeen := False;
+      for var LHeld in M.PastStructRecheck do
+        if LHeld = LRoot then
+        begin
+          LSeen := True;
+          Break;
+        end;
+      if not LSeen then
+        M.PastStructRecheck := M.PastStructRecheck + [LRoot];
+      Exit;
+    end;
+  end;
   LFile := 0; LLine := 0; LCol := 0;
   LTok := T.Nodes[ANode].FirstToken;
   if (LTok >= 0) and (LTok <= High(T.Source.Visible)) then
@@ -1589,6 +1625,59 @@ begin
       T.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start, LLine, LCol);
   end;
   M.AddDiag(MakeDiag(ACode, AMsg, ANode, LFile, LLine, LCol));
+end;
+
+// The node a recheck re-types for a diagnostic at N: the outermost
+// expression N belongs to, or the assignment / expression statement holding
+// it - TypeNode over that runs every check the walk ran over N.
+function TPasSemaTyper.ExprRoot(N: Integer): Integer;
+var
+  LParent: Integer;
+begin
+  Result := N;
+  while True do
+  begin
+    LParent := T.Nodes[Result].Parent;
+    if LParent = NIL_NODE then
+      Exit;
+    case Kind(LParent) of
+      nkIdent..nkInherited:
+        Result := LParent;
+      nkAssign, nkExprStmt:
+        Exit(LParent);
+    else
+      Exit;
+    end;
+  end;
+end;
+
+// True when an identifier under ARoot is TPasSemaModel.BoundPastStruct.
+// Asked only for a diagnostic about to be emitted - rare by construction.
+function TPasSemaTyper.HoldsPastStructName(ARoot: Integer): Boolean;
+var
+  LStack: TArray<Integer>;
+  LTop, LNode, LChild: Integer;
+begin
+  Result := False;
+  SetLength(LStack, 16);
+  LStack[0] := ARoot;
+  LTop := 1;
+  while LTop > 0 do
+  begin
+    Dec(LTop);
+    LNode := LStack[LTop];
+    if (Kind(LNode) = nkIdent) and M.BoundPastStruct(LNode) then
+      Exit(True);
+    LChild := Child(LNode);
+    while LChild <> NIL_NODE do
+    begin
+      if LTop > High(LStack) then
+        SetLength(LStack, 2 * Length(LStack));
+      LStack[LTop] := LChild;
+      Inc(LTop);
+      LChild := Sib(LChild);
+    end;
+  end;
 end;
 
 // Conservative: only reject definite scalar mismatches.
@@ -1721,14 +1810,36 @@ end;
   its diagnostics twice. TypeNode's own bottom-up walk is what re-runs, so the
   checks that ride on it (CheckAssign) are what this recovers; the whole-tree
   sweeps (CheckConditionTypes, CheckOrdinalTypePositions, CheckSetCardinality)
-  are not re-run - they would re-report everything OUTSIDE the bodies too. }
+  are not re-run - they would re-report everything OUTSIDE the bodies too.
+
+  Then the expressions held for a name bound past a method's type
+  (PastStructRecheck - see Diag), each with its own condition check. }
 class procedure TPasSemaTyper.RecheckWithBodies(AModel: TPasSemaModel;
   APlatform: TPasPlatform; const AExtTypeOf: TSemaExtTypeFunc);
 var
   LT: TPasSemaTyper;
-  LIdx, LWith, LBody: Integer;
+  LIdx, LWith, LBody, LRoot, LStmt, LCond: Integer;
+
+  // An expression inside another one held too (in an anonymous method's
+  // body): typing the outer one types it, and twice would report twice.
+  function HeldUnder(ANode: Integer): Boolean;
+  var
+    LUp: Integer;
+  begin
+    LUp := AModel.Tree.Nodes[ANode].Parent;
+    while LUp <> NIL_NODE do
+    begin
+      for var LHeld in AModel.PastStructRecheck do
+        if LHeld = LUp then
+          Exit(True);
+      LUp := AModel.Tree.Nodes[LUp].Parent;
+    end;
+    Result := False;
+  end;
+
 begin
-  if Length(AModel.WithUnopened) = 0 then
+  if (Length(AModel.WithUnopened) = 0) and
+     (Length(AModel.PastStructRecheck) = 0) then
     Exit;
   LT := TPasSemaTyper.Create;
   try
@@ -1750,6 +1861,33 @@ begin
         LBody := AModel.Tree.Nodes[LBody].NextSibling;
       if LBody <> NIL_NODE then
         LT.TypeNode(LBody);
+    end;
+    // The expressions Diag withheld over a name bound past a method's type
+    // (PastStructRecheck), now typed against what the inherited pass
+    // committed; a condition gets its condition check again too. One inside
+    // an unopened with body was never withheld for this - the with rule
+    // came first - and is re-typed with that body above.
+    for LIdx := 0 to High(AModel.PastStructRecheck) do
+    begin
+      LRoot := AModel.PastStructRecheck[LIdx];
+      if (LRoot < 0) or (LRoot > High(AModel.Tree.Nodes)) or
+         HeldUnder(LRoot) then
+        Continue;
+      LT.TypeNode(LRoot);
+      LStmt := AModel.Tree.Nodes[LRoot].Parent;
+      if LStmt = NIL_NODE then
+        Continue;
+      LCond := NIL_NODE;
+      case AModel.Tree.Nodes[LStmt].Kind of
+        nkIfStmt, nkWhileStmt, nkCaseStmt:
+          LCond := AModel.Tree.Nodes[LStmt].FirstChild;
+        nkRepeatStmt:
+          if AModel.Tree.Nodes[LStmt].FirstChild <> NIL_NODE then
+            LCond := AModel.Tree.Nodes[
+              AModel.Tree.Nodes[LStmt].FirstChild].NextSibling;
+      end;
+      if LCond = LRoot then
+        LT.CheckCondition(LStmt);
     end;
   finally
     LT.Free;
@@ -1787,8 +1925,10 @@ begin
   Prepare;
   CheckOrdinalTypePositions;   // needs CategorizeTypes - see its own header
   CheckSetCardinality;         // needs RefMap only - see its own header
+  FPastWithhold := True;       // what RecheckWithBodies re-runs - see Diag
   TypeNode(0);
   CheckConditionTypes;         // needs ExprType - see its own header
+  FPastWithhold := False;
 end;
 
 end.

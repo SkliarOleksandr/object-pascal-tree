@@ -14837,7 +14837,8 @@ begin
             ((LM.RefMap[LNode] <> NIL_SYM) and
              ((LM.Symbols[LM.RefMap[LNode]].Kind = skUnitRef) or
               ((sfBuiltin in LM.Symbols[LM.RefMap[LNode]].Flags) and
-               (StructSymOfNode(LM, LNode) <> NIL_SYM)))) then
+               (StructSymOfNode(LM, LNode) <> NIL_SYM)) or
+              LM.BoundPastStruct(LNode))) then
     begin
       // Safe to bake in here: CrossResolve has finished, and nothing between
       // this scan and the inherited pass can bind one of these.
@@ -14850,6 +14851,10 @@ begin
       // for BUILTIN bindings was not -- unit refs are bounded by the uses
       // clause, while every Integer and Length is builtin-bound, and queueing
       // those measured +3.6%.
+      //
+      // So does a binding Phase 1 found PAST the method's type - a unit-level
+      // declaration of this unit, an outer type's member (BoundPastStruct):
+      // the type's ancestors come first and Phase 1 never walked them (F40).
       LKey := PasNodeKey(LM.Tree, LNode);
       if SemaKeyEquals('result', LKey) or SemaKeyEquals('self', LKey) then
         Continue;
@@ -15111,7 +15116,21 @@ begin
     //   in that same body is `E2007`, so the member wins in a TYPE position
     //   too. FMX's canvases are full of the first form (`TTextLayout.Text`),
     //   and binding the seed there is a WRONG binding, not a missing one: it
-    //   sends ctrl+click to nothing and types the expression as a file.
+    //   sends ctrl+click to nothing and types the expression as a file;
+    // - a declaration of this unit Phase 1 found PAST the method's type
+    //   (TPasSemaModel.BoundPastStruct: unit level, or an outer type's
+    //   member) - its walk never saw the ancestors, which come first (F40).
+    //   An `overload` on the inherited member does not take the search on to
+    //   the unit's routines of the name: dcc64 37.0 says E2250 for `Pick(5)`
+    //   against an inherited `Pick(A: Boolean); overload` beside a unit-level
+    //   `Pick(A: Integer); overload`, the ancestor in the same unit or not.
+    //   The walk meeting Phase 1's own answer (an outer member no ancestor of
+    //   the inner type declares) leaves it as it is.
+    if LFound and (LBound <> NIL_SYM) and (LUid = AId) and (LSym = LBound) then
+    begin
+      LMiss.AddOrSetValue(LKey, 0);
+      Continue;
+    end;
     if LBound <> NIL_SYM then
     begin
       if LFound then
@@ -15535,9 +15554,11 @@ end;
 
 { The with-body diagnostics the intra-unit typer WITHHELD (TPasSemaTyper.Diag
   over a WithUnopened body), decided now that the with pass has committed the
-  bindings it was waiting for. Per model, in parallel: the recheck writes only
-  its own model's Diags/ExprType and reads other models' Symbols, which are
-  frozen by now.
+  bindings it was waiting for - and those over an expression naming something
+  Phase 1 bound past a method's type (PastStructRecheck), which the inherited
+  pass, committed before it, may have moved to an ancestor's member. Per
+  model, in parallel: the recheck writes only its own model's Diags/ExprType
+  and reads other models' Symbols, which are frozen by now.
 
   The intra-unit typer knows this model's symbols only, so an ident the commit
   moved to ExtRefMap would read as "unknown type" and every check over it would
@@ -15557,7 +15578,8 @@ begin
     begin
       LMid := AIds[AIdx];
       LM := FModels[LMid];
-      if Length(LM.WithUnopened) = 0 then
+      if (Length(LM.WithUnopened) = 0) and
+         (Length(LM.PastStructRecheck) = 0) then
         Exit;
       TPasSemaTyper.RecheckWithBodies(LM, FPlatform,
         function(ANode: Integer): Integer

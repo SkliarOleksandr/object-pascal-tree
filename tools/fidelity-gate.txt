@@ -31,14 +31,12 @@ studio parse rtl\posix\Posix.SysSocket.pas FAIL a POSIX-only unit read under the
 
 # The resolver's rung (tqm): resolver findings of the plan, each a unit
 # whose rewrite does not compile to the original's .dcu (docs/parser-fidelity.md sec. 6).
-studio tqm System.Classes.pas DIFF|XFORM-FAIL F40: an inherited member reached bare loses to a unit-level declaration (WriteError in TBufferedFileStream.SyncBuffer, ToString in TStreamReader.TBufferedData)
 studio tqm System.Rtti.pas DIFF F37: PByte and DWORD bound to System.Types, dcc imports them from Winapi.Windows (raw bytes, the import record only)
 studio tqm System.SysUtils.pas DIFF|XFORM-FAIL F41 (Flush is the standard procedure, not System's declared function) and F45 (M^^ typed one dereference short)
 studio tqm FMX.MaskEdit.Types.pas XFORM-FAIL F50: bare Length in a string helper's method bound to Self's type, dcc System.Length
 studio tqm Vcl.FileCtrl.pas DIFF F41: ChDir is the standard procedure, System.ChDir the declared one
-studio tqm Vcl.ImgList.pas XFORM-FAIL F40: Images in TChangeLink bound to a unit-level name, not the inherited TImageLink property (E2441)
-studio tqm Vcl.StyleAPI.pas XFORM-FAIL F40: SysColors in TSeStyle methods bound to a unit-level name (E2018)
-studio tqm Vcl.Samples.DirOutln.pas XFORM-FAIL F40 (Insert bound to System.Insert, not TCustomOutline's) and F41 (ChDir)
+studio tqm Vcl.StyleAPI.pas XFORM-FAIL F49: SysColors in a with body of TSeStyle.TabDrawItem bound to the unit-level array, not the inherited SysColors property (E1012)
+studio tqm Vcl.Samples.DirOutln.pas XFORM-FAIL F49 (Insert in a with body bound to System.Insert, not TCustomOutline's) and F41 (ChDir)
 studio tqm Vcl.StdCtrls.pas XFORM-FAIL F49: Text in a with body bound to System's type Text, not TControl.Text
 # The rung's floors (see fidelity-gate.ps1 tqm): names bound to nothing, to a
 # unit not visible at the name, members whose base PasTree's typing contradicts.
@@ -48,6 +46,6 @@ self tqm @mismatch 22 F43: for-in over a nested alias of a generic record - Sele
 studio-rtl tqm @unbound 719 F39 (GUID clause constants), F46 (selectors bound to nothing)
 studio-rtl tqm @invisible 93 F35, F36
 studio-rtl tqm @mismatch 38 F43, F44
-studio-all tqm @unbound 1001 F39 (GUID clause constants), F46 (selectors bound to nothing)
+studio-all tqm @unbound 1000 F39 (GUID clause constants), F46 (selectors bound to nothing)
 studio-all tqm @invisible 1469 F35, F36 (interface names through implementation uses, aliases bound to their target's unit)
 studio-all tqm @mismatch 100 F43, F44
