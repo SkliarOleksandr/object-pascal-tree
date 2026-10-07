@@ -1081,10 +1081,13 @@ type
       stands - when no used unit shadows ANameLower, which a cheap test of
       AShadows (UsesBuiltinShadows) settles for nearly every name.
       FindInUses is no substitute: every interface scope joins its own copy
-      of the seeds, so it answers with the last unit's seed. }
+      of the seeds, so it answers with the last unit's seed. A TYPE of
+      another generic arity than the reference ANode is written with is no
+      shadow (16.1.2): a bare `Pointer` passes over a `Pointer<T>`. }
     function UsesBuiltinShadows(AId: Integer): TArray<string>;
     function FindShadowOfBuiltin(AId: Integer; const AShadows: TArray<string>;
-      const ANameLower: string; out AUnit, ASym: Integer): Boolean;
+      const ANameLower: string; ANode: Integer;
+      out AUnit, ASym: Integer): Boolean;
     { FindInUses through the model's memo slot (FUsesMemo). For the body
       passes ONLY, and only with AId = the model the calling worker owns:
       the slot is created and written without a lock. Valid for one run's
@@ -5065,11 +5068,11 @@ begin
 end;
 
 function TPasSemaProject.FindShadowOfBuiltin(AId: Integer;
-  const AShadows: TArray<string>; const ANameLower: string;
+  const AShadows: TArray<string>; const ANameLower: string; ANode: Integer;
   out AUnit, ASym: Integer): Boolean;
 var
   LModel, LUsed: TPasSemaModel;
-  LUid, LSym: Integer;
+  LUid, LSym, LWant: Integer;
   LShadowed: Boolean;
 begin
   Result := False;
@@ -5083,6 +5086,11 @@ begin
   if not LShadowed then
     Exit;
   LModel := FModels[AId];
+  // Arity is part of a type's identity (16.1.2): spring4d's `Pointer<T>` is
+  // no shadow of a bare `Pointer`, which goes on to the next unit and then
+  // to the seed, while `Pointer<Integer>` is the generic. Only a type has an
+  // arity; any other declaration answers a bare reference alone.
+  LWant := WrittenArityOfRef(LModel, ANode);
   for var LIdx := High(LModel.UsesList) downto 0 do
   begin
     LUid := LModel.UsesList[LIdx].UnitId;
@@ -5092,6 +5100,12 @@ begin
     if LUsed.InterfaceScope = NIL_SCOPE then
       Continue;
     LSym := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
+    if LSym = NIL_SYM then
+      Continue;
+    if LUsed.Symbols[LSym].Kind = skType then
+      LSym := TypeOfArityInChain(LUid, LSym, LWant)
+    else if LWant <> 0 then
+      LSym := NIL_SYM;
     if (LSym <> NIL_SYM) and not (sfBuiltin in LUsed.Symbols[LSym].Flags) then
     begin
       AUnit := LUid;
@@ -11701,7 +11715,8 @@ begin
           begin
             if (StructSymOfNode(LModel, LNode) = NIL_SYM) and
                FindShadowOfBuiltin(AId, LShadows,
-                 LModel.Tree.NodeNameLower(LNode), LUid, LMatchNode) then
+                 LModel.Tree.NodeNameLower(LNode), LNode, LUid,
+                 LMatchNode) then
             begin
               LModel.RefMap[LNode] := NIL_SYM;
               LExt.UnitId := LUid; LExt.Sym := LMatchNode;
@@ -15066,9 +15081,12 @@ begin
     // to): two integers, so no string is built and nothing is allocated, which
     // is the whole difference from the memo this file's history records at
     // +16%. Per worker, and one worker owns one model, so no lock either.
+    // Not for the head of `Name<...>`: the shadow search matches the written
+    // ARITY (FindShadowOfBuiltin), so a bare `Pointer`'s miss says nothing of
+    // a `Pointer<Integer>` in the same type (F51). LKey -1 = not memoized.
     LBound := LModel.RefMap[LNode];
-    LKey := 0;
-    if LBound <> NIL_SYM then
+    LKey := -1;
+    if (LBound <> NIL_SYM) and (WrittenArityOfRef(LModel, LNode) = 0) then
     begin
       LKey := (Int64(LStruct) shl 32) or Cardinal(LBound);
       if LMiss.ContainsKey(LKey) then
@@ -15128,7 +15146,8 @@ begin
     //   the inner type declares) leaves it as it is.
     if LFound and (LBound <> NIL_SYM) and (LUid = AId) and (LSym = LBound) then
     begin
-      LMiss.AddOrSetValue(LKey, 0);
+      if LKey >= 0 then
+        LMiss.AddOrSetValue(LKey, 0);
       Continue;
     end;
     if LBound <> NIL_SYM then
@@ -15159,7 +15178,8 @@ begin
       // No member: a seed a used unit declares itself is that unit's
       // declaration (BuiltinShadows), the uses being searched before System.
       else if (sfBuiltin in LModel.Symbols[LBound].Flags) and
-              FindShadowOfBuiltin(AId, LShadows, LNameLower, LUid, LSym) then
+              FindShadowOfBuiltin(AId, LShadows, LNameLower, LNode,
+                LUid, LSym) then
       begin
         LPend.Node := LNode;
         LPend.Ext.UnitId := LUid;
@@ -15168,7 +15188,7 @@ begin
         APending[LPendCount] := LPend;
         Inc(LPendCount);
       end
-      else
+      else if LKey >= 0 then
         LMiss.AddOrSetValue(LKey, 0);
       Continue;
     end;
@@ -15176,7 +15196,7 @@ begin
     // used unit's copy of the seed (a node rebound here earlier and met
     // again unbound in a later run).
     if LFound or
-       FindShadowOfBuiltin(AId, LShadows, LNameLower, LUid, LSym) or
+       FindShadowOfBuiltin(AId, LShadows, LNameLower, LNode, LUid, LSym) or
        FindInUsesMemo(AId, LNameLower, LUid, LSym) or
        FindInSystemUnit(LNameLower, LUid, LSym) or
        FindInSysInitUnit(LNameLower, LUid, LSym) then

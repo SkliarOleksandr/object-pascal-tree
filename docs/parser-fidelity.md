@@ -459,4 +459,7 @@ inherited member missed for a unit-level or System name (F40, fixed in
 `with` body falling past Self's inherited members to a System type (F49); a
 nested class whose ancestor is a same-named nested class reaching the outer
 type's members (F48); a string helper's method binding `Length` to Self's
-type (F50).
+type (F50). And one regression the rung caught: a bare `Pointer` bound to a
+used unit's generic `Pointer<T>` (F51, from 0.92.1's search of the used
+units for a declaration hiding a predefined name, which ignored arity; fixed
+in 0.93.8).

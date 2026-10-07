@@ -2841,6 +2841,118 @@ begin
   end;
 end;
 
+{ A used unit's GENERIC type is no shadow of a bare seed name: arity is part
+  of a type's identity (16.1.2), so a bare `Pointer` passes over spring4d's
+  `Pointer<T>` - to an earlier unit's plain `Pointer`, else to the seed -
+  while `Pointer<Byte>` is the generic (F51 of the parser-fidelity plan; the
+  v0.92.1 shadow search took the generic for both). dcc64 37.0 compiles and
+  runs the fixture so (local x-f51). In a method body the inherited pass
+  remembers a miss per (type, binding): `Pointer<Integer>` after a bare
+  `Pointer` in the same method must not inherit the bare one's miss. }
+procedure TestShadowArity;
+const
+  UGEN =
+    'unit UGen;'#13#10'interface'#13#10'type'#13#10 +
+    '  Pointer<T> = record V: T; end;'#13#10 +
+    '  Integer<T> = record W: T; end;'#13#10 +
+    'implementation'#13#10'end.'#13#10;
+  UPLAIN =
+    'unit UPlain;'#13#10'interface'#13#10'type'#13#10 +
+    '  Cardinal = Integer;'#13#10 +
+    'implementation'#13#10'end.'#13#10;
+  UCARD =
+    'unit UCard;'#13#10'interface'#13#10'type'#13#10 +
+    '  Cardinal<T> = record C: T; end;'#13#10 +
+    'implementation'#13#10'end.'#13#10;
+  PGEN =
+    'program PGen;'#13#10 +                                   // 1
+    'uses UPlain, UGen, UCard;'#13#10 +                       // 2
+    'type'#13#10 +                                            // 3
+    '  TFoo = class'#13#10 +                                  // 4
+    '    procedure M;'#13#10 +                                // 5
+    '  end;'#13#10 +                                          // 6
+    'procedure TFoo.M;'#13#10 +                               // 7
+    'var'#13#10 +                                             // 8
+    '  P: Pointer;'#13#10 +                                   // 9
+    '  Q: Pointer<Integer>;'#13#10 +                          // 10
+    'begin'#13#10 +                                           // 11
+    '  P := @Q;'#13#10 +                                      // 12
+    'end;'#13#10 +                                            // 13
+    'var'#13#10 +                                             // 14
+    '  P: Pointer;'#13#10 +                                   // 15
+    '  Q: Pointer<Integer>;'#13#10 +                          // 16
+    '  J: Integer<Byte>;'#13#10 +                             // 17
+    '  C: Cardinal;'#13#10 +                                  // 18
+    '  D: Cardinal<Byte>;'#13#10 +                            // 19
+    'begin'#13#10 +                                           // 20
+    '  P := @Q;'#13#10 +                                      // 21
+    '  C := 5;'#13#10 +                                       // 22
+    'end.'#13#10;                                             // 23
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LM: TPasSemaModel;
+  LMid: Integer;
+
+  // As TestUsesShadowsIntrinsic's BoundAt.
+  function BoundAt(ALine, ACol: Integer): string;
+  var
+    LFile: string;
+    LLine, LCol: Integer;
+    LExt: TPasExtRef;
+  begin
+    Result := '?';
+    for var LNode := 0 to High(LM.Tree.Nodes) do
+    begin
+      if (LM.Tree.Nodes[LNode].Kind <> nkIdent) or
+         not LProj.NodeSite(LMid, LNode, LFile, LLine, LCol) or
+         (LLine <> ALine) or (LCol <> ACol) then
+        Continue;
+      if LM.ExtRefMap.TryGetValue(LNode, LExt) then
+        Exit(ChangeFileExt(ExtractFileName(LProj.ModelFile(LExt.UnitId)), ''));
+      if LM.RefMap[LNode] = NIL_SYM then
+        Exit('');
+      if sfBuiltin in LM.Symbols[LM.RefMap[LNode]].Flags then
+        Exit('builtin');
+      Exit('here');
+    end;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_shadow_arity');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UGen.pas'), UGEN);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UPlain.pas'), UPLAIN);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UCard.pas'), UCARD);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PGen.dpr'), PGEN);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    LMid := LProj.AnalyzeProject(TPath.Combine(LDir, 'PGen.dpr'));
+    Ok('shadow-arity: PGen analyzed', LMid >= 0);
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    Ok('shadow-arity: bare `Pointer` stays the seed', BoundAt(15, 6) = 'builtin');
+    Ok('shadow-arity: `Pointer<Integer>` -> UGen', BoundAt(16, 6) = 'UGen');
+    Ok('shadow-arity: its argument `Integer` stays the seed',
+      BoundAt(16, 14) = 'builtin');
+    Ok('shadow-arity: `Integer<Byte>` -> UGen', BoundAt(17, 6) = 'UGen');
+    Ok('shadow-arity: bare `Cardinal` passes UCard''s generic to UPlain',
+      BoundAt(18, 6) = 'UPlain');
+    Ok('shadow-arity: `Cardinal<Byte>` -> UCard', BoundAt(19, 6) = 'UCard');
+    Ok('shadow-arity: in a method, bare `Pointer` stays the seed',
+      BoundAt(9, 6) = 'builtin');
+    Ok('shadow-arity: in a method, `Pointer<Integer>` after it -> UGen',
+      BoundAt(10, 6) = 'UGen');
+  finally
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { A member a method cannot see is passed over by the bare-name lookup, which
   goes on up the ancestry and then to the unit (F38 of the parser-fidelity
   plan). PasTree took an ancestor's private member of another unit -
@@ -8811,6 +8923,7 @@ begin
   end;
 
   TestUsesShadowsIntrinsic;
+  TestShadowArity;
   TestInheritedVisibility;
   TestInheritedBeatsUnitLevel;
 
