@@ -3286,6 +3286,192 @@ begin
   end;
 end;
 
+{ In a `with` body of a method, a name no with target has is Self's member -
+  inherited, of another unit - before a unit-level declaration of the
+  method's unit, a compiler seed or a used unit's shadow of one (F49 of the
+  parser-fidelity plan). The with pass let Phase 1's binding stand, and the
+  inherited pass skips with bodies: `S := Text;` inside `with FCanvas do` in
+  a TEdit descendant was System's file type, not TControl.Text. dcc64 37.0
+  runs the fixture (local x-f49) and prints `ax 8`: Text, Insert and Kind are
+  TCtl's in every with - a target of another unit (unopened in Phase 1) or of
+  this one - and Odd is WA's. }
+procedure TestWithBodySelfMember;
+const
+  UWA =
+    'unit WA;'#13#10 +                                    // 1
+    'interface'#13#10 +                                   // 2
+    'type'#13#10 +                                        // 3
+    '  TCtl = class'#13#10 +                              // 4
+    '  private'#13#10 +                                   // 5
+    '    FText: string;'#13#10 +                          // 6
+    '  protected'#13#10 +                                 // 7
+    '    procedure Insert(const S: string);'#13#10 +      // 8
+    '  public'#13#10 +                                    // 9
+    '    Kind: Integer;'#13#10 +                          // 10
+    '    property Text: string read FText'#13#10 +        // 11
+    '      write FText;'#13#10 +                          // 12
+    '  end;'#13#10 +                                      // 13
+    '  TCanv = class'#13#10 +                             // 14
+    '    Pen: Integer;'#13#10 +                           // 15
+    '  end;'#13#10 +                                      // 16
+    'function Odd(A: Integer): Boolean;'#13#10 +          // 17
+    'implementation'#13#10 +                              // 18
+    'function Odd(A: Integer): Boolean;'#13#10 +          // 19
+    'begin'#13#10 +                                       // 20
+    '  Result := True;'#13#10 +                           // 21
+    'end;'#13#10 +                                        // 22
+    'procedure TCtl.Insert(const S: string);'#13#10 +     // 23
+    'begin'#13#10 +                                       // 24
+    '  FText := FText + S;'#13#10 +                       // 25
+    'end;'#13#10 +                                        // 26
+    'end.'#13#10;                                         // 27
+  UWB =
+    'unit WB;'#13#10 +                                    // 1
+    'interface'#13#10 +                                   // 2
+    'uses WA;'#13#10 +                                    // 3
+    'type'#13#10 +                                        // 4
+    '  TLocalCanv = class'#13#10 +                        // 5
+    '    Brush: Integer;'#13#10 +                         // 6
+    '  end;'#13#10 +                                      // 7
+    '  TEd = class(TCtl)'#13#10 +                         // 8
+    '    FCanvas: TCanv;'#13#10 +                         // 9
+    '    FLocal: TLocalCanv;'#13#10 +                     // 10
+    '    procedure P1;'#13#10 +                           // 11
+    '    procedure P2;'#13#10 +                           // 12
+    '    procedure P3;'#13#10 +                           // 13
+    '  end;'#13#10 +                                      // 14
+    'const'#13#10 +                                       // 15
+    '  Kind = ''unit-level'';'#13#10 +                    // 16
+    'procedure Insert(A: Integer; B: string);'#13#10 +    // 17
+    'implementation'#13#10 +                              // 18
+    'procedure Insert(A: Integer; B: string);'#13#10 +    // 19
+    'begin'#13#10 +                                       // 20
+    'end;'#13#10 +                                        // 21
+    'procedure TEd.P1;'#13#10 +                           // 22
+    'var'#13#10 +                                         // 23
+    '  S: string;'#13#10 +                                // 24
+    'begin'#13#10 +                                       // 25
+    '  with FCanvas do'#13#10 +                           // 26
+    '  begin'#13#10 +                                     // 27
+    '    Pen := 1;'#13#10 +                               // 28
+    '    S := Text;'#13#10 +                              // 29
+    '    Insert(''x'');'#13#10 +                          // 30
+    '  end;'#13#10 +                                      // 31
+    'end;'#13#10 +                                        // 32
+    'procedure TEd.P2;'#13#10 +                           // 33
+    'var'#13#10 +                                         // 34
+    '  S: string;'#13#10 +                                // 35
+    'begin'#13#10 +                                       // 36
+    '  with FLocal do'#13#10 +                            // 37
+    '  begin'#13#10 +                                     // 38
+    '    Brush := 1;'#13#10 +                             // 39
+    '    S := Text;'#13#10 +                              // 40
+    '    Kind := 5;'#13#10 +                              // 41
+    '  end;'#13#10 +                                      // 42
+    'end;'#13#10 +                                        // 43
+    'procedure TEd.P3;'#13#10 +                           // 44
+    'begin'#13#10 +                                       // 45
+    '  with FCanvas do'#13#10 +                           // 46
+    '  begin'#13#10 +                                     // 47
+    '    Kind := 7;'#13#10 +                              // 48
+    '    if Odd(2) then'#13#10 +                          // 49
+    '      Kind := 8;'#13#10 +                            // 50
+    '  end;'#13#10 +                                      // 51
+    'end;'#13#10 +                                        // 52
+    'end.'#13#10;                                         // 53
+  PW =
+    'program PW;'#13#10 +
+    'uses WA, WB;'#13#10 +
+    'begin'#13#10 +
+    '  TEd.Create.P1;'#13#10 +
+    'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LM: TPasSemaModel;
+  LMid: Integer;
+
+  // The declaration the identifier at (ALine, ACol) of WB binds to, as
+  // TestInheritedBeatsUnitLevel's BoundAt names it.
+  function BoundAt(ALine, ACol: Integer): string;
+  var
+    LFile: string;
+    LLine, LCol, LSym: Integer;
+    LExt: TPasExtRef;
+    LTo: TPasSemaModel;
+    LToId: Integer;
+  begin
+    Result := '?';
+    for var LNode := 0 to High(LM.Tree.Nodes) do
+    begin
+      if (LM.Tree.Nodes[LNode].Kind <> nkIdent) or
+         not LProj.NodeSite(LMid, LNode, LFile, LLine, LCol) or
+         (LLine <> ALine) or (LCol <> ACol) then
+        Continue;
+      if LM.ExtRefMap.TryGetValue(LNode, LExt) then
+      begin
+        LToId := LExt.UnitId;
+        LTo := LProj.Model(LToId);
+        LSym := LExt.Sym;
+      end
+      else
+      begin
+        LToId := LMid;
+        LTo := LM;
+        LSym := LM.RefMap[LNode];
+      end;
+      if LSym = NIL_SYM then
+        Exit('');
+      if sfBuiltin in LTo.Symbols[LSym].Flags then
+        Exit('builtin');
+      Result := ChangeFileExt(ExtractFileName(LProj.ModelFile(LToId)), '') + '.';
+      var LScope := LTo.Symbols[LSym].Scope;
+      if (LScope <> NIL_SCOPE) and (LTo.Scopes[LScope].Kind = sckStruct) and
+         (LTo.Scopes[LScope].StructSym <> NIL_SYM) then
+        Result := Result + LTo.Symbols[LTo.Scopes[LScope].StructSym].Name + '.';
+      Exit(Result + LTo.Symbols[LSym].Name);
+    end;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_with_self_member');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'WA.pas'), UWA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'WB.pas'), UWB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PW.dpr'), PW);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    Ok('with-self-member: PW analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'PW.dpr')) >= 0);
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'WB.pas'));
+    Ok('with-self-member: WB loaded', LMid >= 0);
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    Ok('with-self-member: other-unit target, Pen is the target''s',
+      BoundAt(28, 5) = 'WA.TCanv.Pen');
+    Ok('with-self-member: other-unit target, Text -> TCtl.Text, not the seed',
+      BoundAt(29, 10) = 'WA.TCtl.Text');
+    Ok('with-self-member: Insert -> TCtl.Insert, not the unit routine',
+      BoundAt(30, 5) = 'WA.TCtl.Insert');
+    Ok('with-self-member: same-unit target, Text -> TCtl.Text',
+      BoundAt(40, 10) = 'WA.TCtl.Text');
+    Ok('with-self-member: same-unit target, Kind -> TCtl.Kind, not the const',
+      BoundAt(41, 5) = 'WA.TCtl.Kind');
+    Ok('with-self-member: other-unit target, Kind -> TCtl.Kind',
+      BoundAt(48, 5) = 'WA.TCtl.Kind');
+    Ok('with-self-member: a used unit''s shadow of a seed, Odd -> WA',
+      BoundAt(49, 8) = 'WA.Odd');
+    Ok('with-self-member: no diagnostics', Length(LM.Diags) = 0);
+  finally
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 var
   LDir: string;
   LA, LB, LC, LD, LE, LOvl: TPasSemaModel;
@@ -8926,6 +9112,7 @@ begin
   TestShadowArity;
   TestInheritedVisibility;
   TestInheritedBeatsUnitLevel;
+  TestWithBodySelfMember;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;

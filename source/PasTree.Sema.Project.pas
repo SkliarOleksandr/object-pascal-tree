@@ -618,6 +618,8 @@ type
     function MemberHiddenAt(AId, AHere, AMemMid, AMemSym: Integer): Boolean;
     function FindVisibleMemberX(AId, AHere: Integer; const ABase: TSemaXType;
       const ANameLower: string; out AMemMid, AMemSym, ACtx: Integer): Boolean;
+    function FindSelfMemberX(AId, ANode, AStruct: Integer;
+      const ANameLower: string; out AMemMid, AMemSym, ACtx: Integer): Boolean;
     function StructEncloses(AMid, AOuter, AInner: Integer): Boolean;
     procedure RunVisibilityPass(AId: Integer);
     function InPropertySpecifier(AModel: TPasSemaModel; ANode: Integer): Boolean;
@@ -12030,6 +12032,23 @@ begin
   Result := False;
 end;
 
+{ A bare name ANode in a method body of AStruct, as a member: the type's
+  ancestry, then the OUTER segments of a qualified method name
+  (OuterStructsOfNode) - dcc's order ahead of the uses and System. Members
+  the method cannot see are passed over (FindVisibleMemberX). The inherited
+  pass asks it, and the with pass for a name no with target has (F49). }
+function TPasSemaProject.FindSelfMemberX(AId, ANode, AStruct: Integer;
+  const ANameLower: string; out AMemMid, AMemSym, ACtx: Integer): Boolean;
+begin
+  Result := FindVisibleMemberX(AId, AStruct, XPlain(AId, AStruct),
+    ANameLower, AMemMid, AMemSym, ACtx);
+  if not Result then
+    for var LOuter in OuterStructsOfNode(FModels[AId], ANode, AStruct) do
+      if FindVisibleMemberX(AId, AStruct, XPlain(AId, LOuter), ANameLower,
+           AMemMid, AMemSym, ACtx) then
+        Exit(True);
+end;
+
 { Is AInner the same type as AOuter, or one NESTED inside it (at any depth)?
 
   A nested type's symbol is declared into the enclosing type's member scope, so
@@ -15100,16 +15119,8 @@ begin
     // uses/System fallbacks - dcc's own precedence order.
     // A member the method cannot see - an ancestor's private one of another
     // unit - is passed over (FindVisibleMemberX, F38).
-    LFound := FindVisibleMemberX(AId, LStruct, XPlain(AId, LStruct),
-      LNameLower, LUid, LSym, LCtx);
-    if not LFound then
-      for var LOuter in OuterStructsOfNode(LModel, LNode, LStruct) do
-        if FindVisibleMemberX(AId, LStruct, XPlain(AId, LOuter), LNameLower,
-             LUid, LSym, LCtx) then
-        begin
-          LFound := True;
-          Break;
-        end;
+    LFound := FindSelfMemberX(AId, LNode, LStruct, LNameLower, LUid, LSym,
+      LCtx);
     // The namespace-token exemption runs AFTER the member walk, not before it:
     // an inherited MEMBER outranks a unit name. `uses Header` (and, until
     // 0.85.1, a dotted `uses SomeLib.Header` too) names the unit, so in a
@@ -15294,9 +15305,10 @@ var
   LPendCount, LUnresCount: Integer;
   LPend: TPasInhPending;
   LNameLower: string;
-  LBound, LFromMember, LUnitQual: Boolean;
+  LBound, LFromMember, LUnitQual, LRetry: Boolean;
   LMemX: TSemaXType;
   LCurExt: TPasExtRef;
+  LShadows: TArray<string>;
   // One typing session for every target this round asks about: the same
   // target is typed once per NAME in its body, and a round's bindings are
   // frozen (committed after every worker is done), so the memo is exact for
@@ -15308,6 +15320,9 @@ begin
   AUnresolved := nil;
   LModel := FModels[AId];
   EnsureCrossWork(AId);
+  LShadows := nil;
+  if FWithWork[AId] <> nil then
+    LShadows := UsesBuiltinShadows(AId);
   LProbe := nil;
   try
     // Pre-size + truncate, same as CrossResolveInherited - this one repeats per
@@ -15341,7 +15356,21 @@ begin
       // target after the first is resolved INSIDE the ones before it, and a target
       // member outranks everything else in scope, so an earlier best-effort
       // binding must be OVERRIDDEN rather than gap-filled.
-      if LBound and not LModel.InUnopenedWithBody(LNode) and
+      // A third kind is revisited: in a METHOD body, a name Phase 1 bound to
+      // what the inherited pass would revisit outside a with (EnsureCrossWork)
+      // - a seed, a unit reference, a declaration found past the method's
+      // type (BoundPastStruct). A with body is no part of that pass, and a
+      // name no target has is Self's member before any of them (F49):
+      // `with FCanvas do S := Text` in a TEdit descendant is TControl.Text,
+      // not System's file type. Such a node is in RefMap only until a round
+      // commits it, so the retry ends.
+      LStruct := StructSymOfNode(LModel, LNode);
+      LRetry := (LStruct <> NIL_SYM) and
+        (LModel.RefMap[LNode] <> NIL_SYM) and
+        ((LModel.Symbols[LModel.RefMap[LNode]].Kind = skUnitRef) or
+         (sfBuiltin in LModel.Symbols[LModel.RefMap[LNode]].Flags) or
+         LModel.BoundPastStruct(LNode));
+      if LBound and not LRetry and not LModel.InUnopenedWithBody(LNode) and
          not InsideLaterWithTarget(LModel, LNode) then
         Continue;
       // Never re-point a DECLARATION's own name node: MarkDeclName records
@@ -15377,7 +15406,6 @@ begin
       // dcc's order here: the `with` scope is opened INSIDE the enclosing body,
       // so its members shadow the enclosing method's own; then used units, then
       // the implicit System/SysInit units; E2003 only after every one misses.
-      LStruct := StructSymOfNode(LModel, LNode);
       if LProbe = nil then
         LProbe := TPasXProbe.Create;
       if FindInEnclosingWith(AId, LNode, LNameLower, LUid, LSym, LMemX,
@@ -15401,6 +15429,33 @@ begin
         APending[LPendCount] := LPend;
         Inc(LPendCount);
       end
+      else if LRetry and not LUnitQual then
+      begin
+        // No with member: Self's, as the inherited pass decides outside a
+        // with - its member, the walk meeting Phase 1's own answer leaving
+        // it, else a used unit's declaration of a seed's name.
+        if FindSelfMemberX(AId, LNode, LStruct, LNameLower, LUid, LSym,
+             LCtx) then
+        begin
+          if (LUid = AId) and (LModel.RefMap[LNode] = LSym) then
+            Continue;
+          if LCtx <> NIL_INST then
+            LPend.X := SubstX(SymDeclTypeX(LUid, LSym), LCtx, 0)
+          else
+            LPend.X := XNil;
+        end
+        else if (sfBuiltin in LModel.Symbols[LModel.RefMap[LNode]].Flags) and
+                FindShadowOfBuiltin(AId, LShadows, LNameLower, LNode,
+                  LUid, LSym) then
+          LPend.X := XNil
+        else
+          Continue;
+        LPend.Node := LNode;
+        LPend.Ext.UnitId := LUid;
+        LPend.Ext.Sym := LSym;
+        APending[LPendCount] := LPend;
+        Inc(LPendCount);
+      end
       else if LUnitQual or LBound or (LNameLower = 'self') then
         // No with member by that name: the unit-qualifier reading, or Phase 1's
         // binding, stands. `Self` is the one name that is legitimately UNBOUND
@@ -15417,7 +15472,7 @@ begin
         // uses/System fallbacks are last-uses-wins and blind to ARITY, which is
         // part of a type's identity (16.1.2). See FixCrossArity.
         LFromMember := (LStruct <> NIL_SYM) and
-          FindMemberX(AId, XPlain(AId, LStruct), LNameLower, LUid, LSym, LCtx);
+          FindSelfMemberX(AId, LNode, LStruct, LNameLower, LUid, LSym, LCtx);
         if LFromMember or
            FindInUsesMemo(AId, LNameLower, LUid, LSym) or
            FindInSystemUnit(LNameLower, LUid, LSym) or

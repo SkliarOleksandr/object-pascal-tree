@@ -34,9 +34,7 @@ studio parse rtl\posix\Posix.SysSocket.pas FAIL a POSIX-only unit read under the
 studio tqm System.Rtti.pas DIFF F37: PByte and DWORD bound to System.Types, dcc imports them from Winapi.Windows (raw bytes, the import record only)
 studio tqm System.SysUtils.pas XFORM-FAIL F45: M^^ typed one dereference short
 studio tqm FMX.MaskEdit.Types.pas XFORM-FAIL F50: bare Length in a string helper's method bound to Self's type, dcc System.Length
-studio tqm Vcl.StyleAPI.pas XFORM-FAIL F49: SysColors in a with body of TSeStyle.TabDrawItem bound to the unit-level array, not the inherited SysColors property (E1012)
-studio tqm Vcl.Samples.DirOutln.pas XFORM-FAIL F49: Insert in a with body bound to System.Insert, not TCustomOutline's
-studio tqm Vcl.StdCtrls.pas XFORM-FAIL F49: Text in a with body bound to System's type Text, not TControl.Text
+studio tqm Vcl.StdCtrls.pas XFORM-FAIL F42: StyleServices in TScrollBarStyleHook.TScrollWindow.WMPaint is Vcl.Themes' function only because the unit wrote it bare before; with the earlier calls qualified dcc takes the outer type's inherited instance method (E2124)
 # The rung's floors (see fidelity-gate.ps1 tqm): names bound to nothing, to a
 # unit not visible at the name, members whose base PasTree's typing contradicts.
 self tqm @unbound 0 every name of the self-host bound
