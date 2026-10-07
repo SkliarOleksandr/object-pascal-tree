@@ -439,7 +439,10 @@ const
   // of a `[...]` collection, every one a dcc64 37.0 probe (ForInElementX's
   // ShapeElementX): Chars, a Char/string mix (string), a range (a SET
   // constructor - AnsiChar), an enum, `+` either way round, and a mix dcc
-  // types as an anonymous subrange, refused.
+  // types as an anonymous subrange, refused. Then an inline var initialized
+  // by a dynamic-array concatenation (OperatorResultX): the array operand's
+  // own type - TArray<string>, or the named TFiNames - and two constructors,
+  // which dcc types as an anonymous array, refused.
   UNIT_XFI =
     'unit XFI;'#10'interface'#10 +
     'type'#10 +
@@ -458,13 +461,14 @@ const
     '    function GetEnumerator: TFiEnum<T>;'#10 +
     '  end;'#10 +
     '  TFiColor = (fcRed, fcBlue);'#10 +
+    '  TFiNames = array of string;'#10 +
     'implementation'#10 +
     'constructor TFiBase.Create; begin end;'#10 +
     'function TFiEnum<T>.GetCurrent: T; begin Result := Default(T); end;'#10 +
     'function TFiEnum<T>.MoveNext: Boolean; begin Result := False; end;'#10 +
     'function TFiList<T>.GetEnumerator: TFiEnum<T>; begin Result := nil; end;'#10 +
     'procedure InferAll(const ADir: string; const APaths: TArray<string>;'#10 +
-    '  AList: TFiList<TFiItem>; B: Byte; W: Word);'#10 +
+    '  AList: TFiList<TFiItem>; B: Byte; W: Word; const ANames: TFiNames);'#10 +
     'begin'#10 +
     '  var ICtor := TFiItem.Create;'#10 +
     '  for var IPath in APaths do ;'#10 +
@@ -478,6 +482,11 @@ const
     '  for var IJoinedR in APaths + [ADir] do ;'#10 +
     '  for var IBoth in (APaths + APaths) do ;'#10 +
     '  for var IOrdMix in [B, W] do ;'#10 +
+    '  var ICat := APaths + APaths;'#10 +
+    '  var ICatCtor := [ADir] + APaths;'#10 +
+    '  var ICatCtorR := APaths + ([ADir]);'#10 +
+    '  var ICatNamed := ANames + [ADir];'#10 +
+    '  var ICatTwoCtors := [ADir] + [ADir];'#10 +
     'end;'#10 +
     'end.'#10;
 
@@ -2049,6 +2058,16 @@ begin
       DeclTypeOf(LE, 'iboth'), 'string');
     Eq('5.5.2: for-in over `[B, W]` (dcc: an anonymous subrange): no type',
       DeclTypeOf(LE, 'iordmix'), '?');
+    Eq('4.2.1: `APaths + APaths` is TArray<string>',
+      DeclTypeOf(LE, 'icat'), 'TArray<string>');
+    Eq('4.2.1: `[ADir] + APaths` is TArray<string>',
+      DeclTypeOf(LE, 'icatctor'), 'TArray<string>');
+    Eq('4.2.1: `APaths + ([ADir])` is TArray<string>',
+      DeclTypeOf(LE, 'icatctorr'), 'TArray<string>');
+    Eq('4.2.1: `ANames + [ADir]` is the named array type',
+      DeclTypeOf(LE, 'icatnamed'), 'TFiNames');
+    Eq('4.2.1: `[ADir] + [ADir]` (dcc: an anonymous array): no type',
+      DeclTypeOf(LE, 'icattwoctors'), '?');
 
     // ---- 3.1.3 inline var/const inference ----
     LE := ModelByName('xiv');

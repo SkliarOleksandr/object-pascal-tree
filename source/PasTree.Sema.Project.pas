@@ -13979,6 +13979,11 @@ end;
   - strings: string when either side is string or Char, AnsiString for
     AnsiString with AnsiString or AnsiChar;
   - a pointer plus or minus an integer keeps the pointer's type;
+  - a dynamic array joined by `+` to one of its own type or to an array
+    constructor is that array type - `APaths + APaths`, `[ADir] + APaths`
+    and `APaths + [ADir]` are TArray<string>, `ANames + [ADir]` the named
+    `TNames = array of string`; two different array types are E2010 and two
+    constructors (`[ADir] + [ADir]`) an anonymous type, both left untyped;
   - a comparison, `in` and `is` are Boolean whatever they compare.
   Anything else answers XNil: an operand of unknown type, a record or class
   operand (an overloaded operator's result is the operator's, 4.12), a
@@ -14062,6 +14067,20 @@ var
     Result := IntFloor(LL);
   end;
 
+  // Is operand AIdx (0 left, 1 right) of AOpNode an array constructor
+  // `[...]`, parentheses aside? It has no type of its own to compare.
+  function OperandIsCtor(AIdx: Integer): Boolean;
+  var
+    LN: Integer;
+  begin
+    LN := LM.Tree.Nodes[AOpNode].FirstChild;
+    if (AIdx = 1) and (LN <> NIL_NODE) then
+      LN := LM.Tree.Nodes[LN].NextSibling;
+    while (LN <> NIL_NODE) and (LM.Tree.Nodes[LN].Kind = nkParen) do
+      LN := LM.Tree.Nodes[LN].FirstChild;
+    Result := (LN <> NIL_NODE) and (LM.Tree.Nodes[LN].Kind = nkSetCtor);
+  end;
+
 begin
   Result := XNil;
   if (AMid < 0) or (AOpNode = NIL_NODE) then
@@ -14122,6 +14141,13 @@ begin
       else if (LcL = tcPointer) and (LcR = tcInteger) then
         Result := LL
       else if (LcL = tcInteger) and (LcR = tcPointer) then
+        Result := LR
+      // Dynamic-array concatenation is the array operand's own type: both
+      // operands of one type, or one of them an array constructor.
+      else if (LcL = tcArray) and IsDynArrayTypeX(LL) and
+              (XSameType(LL, LR) or OperandIsCtor(1)) then
+        Result := LL
+      else if (LcR = tcArray) and IsDynArrayTypeX(LR) and OperandIsCtor(0) then
         Result := LR;
     tkMinus, tkStar:
       if (LcL in [tcInteger, tcFloat]) and (LcR in [tcInteger, tcFloat]) then
