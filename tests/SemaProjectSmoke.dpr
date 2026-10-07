@@ -3472,6 +3472,181 @@ begin
   end;
 end;
 
+{ In a method of a NESTED type the outer type's members - its own and its
+  ancestors' - come after the unit's own declarations made so far, and
+  before the used units and System (F52 of the parser-fidelity plan; spec
+  3.3.2, step 5). PasTree joined the outer type's scope ahead of the unit:
+  `KO` in TOuter.TInner.M was TOuter's `KO = 3` beside the unit's
+  `KO = 30`. dcc64 37.0 runs the fixture (local x-f52\fixture) as
+  `60 10 30 50 4 8 7 2 9`: CO, CB, KO and the implementation's Late are the
+  unit's, a type in the method's `var` the unit's TX declared after TOuter;
+  KA is TOuter's (the unit declares it only below the method), UsedF and
+  MaxInt TOuter's over the used unit's and System's, AncOnly TOuter's
+  ancestor's. }
+procedure TestNestedOuterAfterUnit;
+const
+  UNB =
+    'unit NB;'#13#10 +                                    // 1
+    'interface'#13#10 +                                   // 2
+    'type'#13#10 +                                        // 3
+    '  TBase = class'#13#10 +                             // 4
+    '    class function CB: Integer;'#13#10 +             // 5
+    '    class function AncOnly: Integer;'#13#10 +        // 6
+    '  end;'#13#10 +                                      // 7
+    'function UsedF: Integer;'#13#10 +                    // 8
+    'implementation'#13#10 +                              // 9
+    'class function TBase.CB: Integer;' +
+    ' begin Result := 1; end;'#13#10 +                    // 10
+    'class function TBase.AncOnly: Integer;' +
+    ' begin Result := 2; end;'#13#10 +                    // 11
+    'function UsedF: Integer; begin Result := 100; end;'#13#10 + // 12
+    'end.'#13#10;                                         // 13
+  UNO =
+    'unit NO;'#13#10 +                                    // 1
+    'interface'#13#10 +                                   // 2
+    'uses NB;'#13#10 +                                    // 3
+    'type'#13#10 +                                        // 4
+    '  TOuter = class(TBase)'#13#10 +                     // 5
+    '  public'#13#10 +                                    // 6
+    '    const KO = 3;'#13#10 +                           // 7
+    '    const KA = 4;'#13#10 +                           // 8
+    '    const MaxInt = 7;'#13#10 +                       // 9
+    '    const Late = 5;'#13#10 +                         // 10
+    '    class function CO: Integer;'#13#10 +             // 11
+    '    class function UsedF: Integer;'#13#10 +          // 12
+    '    type'#13#10 +                                    // 13
+    '      TX = string;'#13#10 +                          // 14
+    '      TInner = class'#13#10 +                        // 15
+    '        procedure M;'#13#10 +                        // 16
+    '      end;'#13#10 +                                  // 17
+    '  end;'#13#10 +                                      // 18
+    '  TX = Integer;'#13#10 +                             // 19
+    'function CO: Integer;'#13#10 +                       // 20
+    'function CB: Integer;'#13#10 +                       // 21
+    'const KO = 30;'#13#10 +                              // 22
+    'var G: array[1..9] of Integer;'#13#10 +              // 23
+    'implementation'#13#10 +                              // 24
+    'const Late = 50;'#13#10 +                            // 25
+    'class function TOuter.CO: Integer;' +
+    ' begin Result := 6; end;'#13#10 +                    // 26
+    'class function TOuter.UsedF: Integer;' +
+    ' begin Result := 8; end;'#13#10 +                    // 27
+    'function CO: Integer; begin Result := 60; end;'#13#10 + // 28
+    'function CB: Integer; begin Result := 10; end;'#13#10 + // 29
+    'procedure TOuter.TInner.M;'#13#10 +                  // 30
+    'var'#13#10 +                                         // 31
+    '  L: TX;'#13#10 +                                    // 32
+    'begin'#13#10 +                                       // 33
+    '  G[1] := CO;'#13#10 +                               // 34
+    '  G[2] := CB;'#13#10 +                               // 35
+    '  G[3] := KO;'#13#10 +                               // 36
+    '  G[4] := Late;'#13#10 +                             // 37
+    '  G[5] := KA;'#13#10 +                               // 38
+    '  G[6] := UsedF;'#13#10 +                            // 39
+    '  G[7] := MaxInt;'#13#10 +                           // 40
+    '  G[8] := AncOnly;'#13#10 +                          // 41
+    '  L := 9;'#13#10 +                                   // 42
+    '  G[9] := L;'#13#10 +                                // 43
+    'end;'#13#10 +                                        // 44
+    'const KA = 40;'#13#10 +                              // 45
+    'end.'#13#10;                                         // 46
+  PN =
+    'program PN;'#13#10 +
+    'uses NO;'#13#10 +
+    'begin'#13#10 +
+    '  TOuter.TInner.Create.M;'#13#10 +
+    'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LM: TPasSemaModel;
+  LMid: Integer;
+
+  // The declaration the identifier at (ALine, ACol) of NO binds to, as
+  // TestInheritedBeatsUnitLevel's BoundAt names it.
+  function BoundAt(ALine, ACol: Integer): string;
+  var
+    LFile: string;
+    LLine, LCol, LSym: Integer;
+    LExt: TPasExtRef;
+    LTo: TPasSemaModel;
+    LToId: Integer;
+  begin
+    Result := '?';
+    for var LNode := 0 to High(LM.Tree.Nodes) do
+    begin
+      if (LM.Tree.Nodes[LNode].Kind <> nkIdent) or
+         not LProj.NodeSite(LMid, LNode, LFile, LLine, LCol) or
+         (LLine <> ALine) or (LCol <> ACol) then
+        Continue;
+      if LM.ExtRefMap.TryGetValue(LNode, LExt) then
+      begin
+        LToId := LExt.UnitId;
+        LTo := LProj.Model(LToId);
+        LSym := LExt.Sym;
+      end
+      else
+      begin
+        LToId := LMid;
+        LTo := LM;
+        LSym := LM.RefMap[LNode];
+      end;
+      if LSym = NIL_SYM then
+        Exit('');
+      if sfBuiltin in LTo.Symbols[LSym].Flags then
+        Exit('builtin');
+      Result := ChangeFileExt(ExtractFileName(LProj.ModelFile(LToId)), '') + '.';
+      var LScope := LTo.Symbols[LSym].Scope;
+      if (LScope <> NIL_SCOPE) and (LTo.Scopes[LScope].Kind = sckStruct) and
+         (LTo.Scopes[LScope].StructSym <> NIL_SYM) then
+        Result := Result + LTo.Symbols[LTo.Scopes[LScope].StructSym].Name + '.';
+      Exit(Result + LTo.Symbols[LSym].Name);
+    end;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_nested_outer_unit');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NB.pas'), UNB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NO.pas'), UNO);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PN.dpr'), PN);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    Ok('nested-outer: PN analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'PN.dpr')) >= 0);
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'NO.pas'));
+    Ok('nested-outer: NO loaded', LMid >= 0);
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    Ok('nested-outer: var L: TX -> the unit''s TX above the method',
+      BoundAt(32, 6) = 'NO.TX');
+    Ok('nested-outer: CO -> the unit''s routine over TOuter.CO',
+      BoundAt(34, 11) = 'NO.CO');
+    Ok('nested-outer: CB -> the unit''s routine over the outer ancestor''s',
+      BoundAt(35, 11) = 'NO.CB');
+    Ok('nested-outer: KO -> the unit''s constant over TOuter.KO',
+      BoundAt(36, 11) = 'NO.KO');
+    Ok('nested-outer: Late -> the implementation''s constant',
+      BoundAt(37, 11) = 'NO.Late');
+    Ok('nested-outer: KA -> TOuter.KA, the unit''s is declared below',
+      BoundAt(38, 11) = 'NO.TOuter.KA');
+    Ok('nested-outer: UsedF -> TOuter''s over the used unit''s',
+      BoundAt(39, 11) = 'NO.TOuter.UsedF');
+    Ok('nested-outer: MaxInt -> TOuter''s over System''s',
+      BoundAt(40, 11) = 'NO.TOuter.MaxInt');
+    Ok('nested-outer: AncOnly -> the outer type''s ancestor''s',
+      BoundAt(41, 11) = 'NB.TBase.AncOnly');
+    Ok('nested-outer: no diagnostics', Length(LM.Diags) = 0);
+  finally
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 var
   LDir: string;
   LA, LB, LC, LD, LE, LOvl: TPasSemaModel;
@@ -9113,6 +9288,7 @@ begin
   TestInheritedVisibility;
   TestInheritedBeatsUnitLevel;
   TestWithBodySelfMember;
+  TestNestedOuterAfterUnit;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;

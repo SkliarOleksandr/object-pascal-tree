@@ -464,4 +464,10 @@ the outer type's members (F48); a string helper's method binding `Length` to
 Self's type (F50). And one regression the rung caught: a bare `Pointer` bound
 to a used unit's generic `Pointer<T>` (F51, from 0.92.1's search of the used
 units for a declaration hiding a predefined name, which ignored arity; fixed
-in 0.93.8).
+in 0.93.8). Probing the shapes the rung met turned up more of the same
+family: in a nested type's method the outer type's members come only after
+the unit's own declarations made so far (F52, fixed in 0.93.10); in a
+type's DECLARATION its own members rank after them too and its ancestors'
+are out of reach (F53), and a unit type declared above a generic hides the
+generic's same-named parameter (F54). The language spec's sec. 3.3.2 has
+the whole order.

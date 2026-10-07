@@ -657,6 +657,17 @@ type
     function FindByArityDeep(AScope: Integer; const ANameLower: string;
       AWantGeneric: Boolean): Integer;
     function DeclaredAfter(ASym, AAtToken: Integer): Boolean;
+    { True when ASym, found through AScope (a method body's routine scope),
+      is a member of an OUTER type of the method's qualifier: a struct scope
+      joined into AScope other than the innermost type's own. }
+    function IsOuterStructHit(AScope, ASym: Integer): Boolean;
+    { A declaration of this unit itself named AKey and declared before
+      AAtToken - unit level of either section, or an enum value joined there;
+      not a compiler seed, not a `uses` entry's name - searched from AScope
+      out. In a nested type's method it outranks the outer types' members
+      (spec 3.3.2, step 5; F52); NIL_SYM when there is none. }
+    function UnitDeclBefore(AScope: Integer; const AKey: TSemaKey;
+      AAtToken: Integer): Integer;
     { True when ANode sits in the BODY of a `with` listed in WithUnopened -
       see that field. An identifier inside a with's own TARGET expression is
       NOT in its scope (the target is evaluated in the enclosing one), hence
@@ -2048,7 +2059,7 @@ end;
 function TPasSemaModel.ResolveAt(AScope: Integer; const AKey: TSemaKey;
   AAtToken: Integer): Integer;
 var
-  LCur: Integer;
+  LCur, LUnit: Integer;
 begin
   LCur := AScope;
   while LCur <> NIL_SCOPE do
@@ -2058,7 +2069,19 @@ begin
     begin
       if (AAtToken < 0) or (Scopes[LCur].Kind <> sckBlock) or
          not DeclaredAfter(Result, AAtToken) then
+      begin
+        // An outer type's member of a nested method comes after the unit's
+        // own declarations made so far (F52): `KO` in TOuter.TInner.M is the
+        // unit's `KO = 30` over TOuter's `KO = 3` - unless the unit declares
+        // it only below the method.
+        if (AAtToken >= 0) and IsOuterStructHit(LCur, Result) then
+        begin
+          LUnit := UnitDeclBefore(Scopes[LCur].Parent, AKey, AAtToken);
+          if LUnit <> NIL_SYM then
+            Exit(LUnit);
+        end;
         Exit;
+      end;
       // Declared BELOW the reference: not in scope yet, so keep walking
       // outward. Without this the inline declaration captured references
       // above it - a WRONG binding rather than a missing one, so it cost no
@@ -2083,6 +2106,49 @@ begin
   if (LDecl = NIL_NODE) or (LDecl > High(Tree.Nodes)) then
     Exit;
   Result := Tree.Nodes[LDecl].FirstToken > AAtToken;
+end;
+
+function TPasSemaModel.IsOuterStructHit(AScope, ASym: Integer): Boolean;
+var
+  LOwner, LJoin: Integer;
+begin
+  Result := False;
+  if (Scopes[AScope].StructSym = NIL_SYM) or
+     (Scopes[AScope].Kind = sckStruct) or (ASym = NIL_SYM) or
+     (Symbols[ASym].Scope = NIL_SCOPE) or
+     (Scopes[Symbols[ASym].Scope].Kind <> sckStruct) then
+    Exit;
+  LOwner := Scopes[Symbols[ASym].Scope].StructSym;
+  if (LOwner = NIL_SYM) or (LOwner = Scopes[AScope].StructSym) then
+    Exit;
+  for LJoin in Scopes[AScope].Additional do
+    if (Scopes[LJoin].Kind = sckStruct) and
+       (Scopes[LJoin].StructSym = LOwner) then
+      Exit(True);
+end;
+
+function TPasSemaModel.UnitDeclBefore(AScope: Integer; const AKey: TSemaKey;
+  AAtToken: Integer): Integer;
+var
+  LCur: Integer;
+begin
+  LCur := AScope;
+  while LCur <> NIL_SCOPE do
+  begin
+    if Scopes[LCur].Kind in [sckUnit, sckImplementation] then
+    begin
+      Result := FindLocalDeep(LCur, AKey, 0);
+      if (Result <> NIL_SYM) and
+         not (sfBuiltin in Symbols[Result].Flags) and
+         (Symbols[Result].Kind <> skUnitRef) and
+         (Symbols[Result].Scope <> NIL_SCOPE) and
+         (Scopes[Symbols[Result].Scope].Kind <> sckSystem) and
+         not DeclaredAfter(Result, AAtToken) then
+        Exit;
+    end;
+    LCur := Scopes[LCur].Parent;
+  end;
+  Result := NIL_SYM;
 end;
 
 procedure TPasSemaModel.ReleaseTransientMaps;

@@ -12036,14 +12036,31 @@ end;
   ancestry, then the OUTER segments of a qualified method name
   (OuterStructsOfNode) - dcc's order ahead of the uses and System. Members
   the method cannot see are passed over (FindVisibleMemberX). The inherited
-  pass asks it, and the with pass for a name no with target has (F49). }
+  pass asks it, and the with pass for a name no with target has (F49).
+  The outer segments rank after the unit's own declarations made so far
+  (spec 3.3.2, step 5; F52): when Phase 1 bound ANode to one, it stands -
+  False - and an outer type's ancestor's member does not displace it. }
 function TPasSemaProject.FindSelfMemberX(AId, ANode, AStruct: Integer;
   const ANameLower: string; out AMemMid, AMemSym, ACtx: Integer): Boolean;
+var
+  LModel: TPasSemaModel;
+  LBound: Integer;
 begin
   Result := FindVisibleMemberX(AId, AStruct, XPlain(AId, AStruct),
     ANameLower, AMemMid, AMemSym, ACtx);
-  if not Result then
-    for var LOuter in OuterStructsOfNode(FModels[AId], ANode, AStruct) do
+  if Result then
+    Exit;
+  LModel := FModels[AId];
+  LBound := LModel.RefMap[ANode];
+  if (LBound <> NIL_SYM) and
+     not (sfBuiltin in LModel.Symbols[LBound].Flags) and
+     (LModel.Symbols[LBound].Kind <> skUnitRef) and
+     (LModel.Symbols[LBound].Scope <> NIL_SCOPE) and
+     (LModel.Scopes[LModel.Symbols[LBound].Scope].Kind in
+       [sckUnit, sckImplementation, sckEnum]) and
+     not LModel.DeclaredAfter(LBound, LModel.Tree.Nodes[ANode].FirstToken) then
+    Exit;
+  for var LOuter in OuterStructsOfNode(LModel, ANode, AStruct) do
       if FindVisibleMemberX(AId, AStruct, XPlain(AId, LOuter), ANameLower,
            AMemMid, AMemSym, ACtx) then
         Exit(True);
