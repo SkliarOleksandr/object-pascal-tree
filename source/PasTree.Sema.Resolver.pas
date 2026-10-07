@@ -101,6 +101,10 @@ type
     function IsBareTypeUse(ANode: Integer): Boolean;
     function IsHeritageRef(ANode: Integer): Boolean;
     function DeclaredAfter(ASym, ANode: Integer): Boolean;
+    function IsTypeParamSym(ASym: Integer): Boolean;
+    function InAccessorSpecifier(ANode: Integer): Boolean;
+    function RanksAfterUnit(ANode, ASym: Integer): Boolean;
+    function UnitDeclFirst(ANode: Integer; const AKey: TSemaKey): Integer;
     function EnumJoinTarget(AScope: Integer): Integer;
     procedure NotePendingAggregate(ATypeNode: Integer);
     function SepKindAfter(ANode: Integer): TPasTokenKind;
@@ -391,6 +395,156 @@ begin
   if LDecl = NIL_NODE then
     Exit;
   Result := FTree.Nodes[LDecl].FirstToken > FTree.Nodes[ANode].FirstToken;
+end;
+
+{ A TYPE's type parameter - `T` of `TGen<T>`, in the type's declaration or
+  in a method implementation's qualifier `TGen<T>.M` - as opposed to a
+  generic METHOD's own (`M<U>`), which shares the implementation's scope.
+  ident -> nkGenericParam -> nkGenericParams; in a routine header the
+  parameters are a qualifier's when another name segment follows them. }
+function TPasSemaResolver.IsTypeParamSym(ASym: Integer): Boolean;
+var
+  LScope, LDecl, LParams, LNext: Integer;
+begin
+  Result := False;
+  if (ASym = NIL_SYM) or
+     (FModel.Symbols[ASym].Kind <> skGenericParam) then
+    Exit;
+  LScope := FModel.Symbols[ASym].Scope;
+  if (LScope = NIL_SCOPE) or
+     (FModel.Scopes[LScope].Kind <> sckGenericParams) then
+    Exit;
+  if KindOf(FModel.Scopes[LScope].OwnerNode) <> nkRoutine then
+    Exit(True);
+  LDecl := FModel.Symbols[ASym].DeclNode;
+  if (LDecl = NIL_NODE) or (FTree.Nodes[LDecl].Parent = NIL_NODE) then
+    Exit;
+  LParams := FTree.Nodes[FTree.Nodes[LDecl].Parent].Parent;
+  if (LParams = NIL_NODE) or (KindOf(LParams) <> nkGenericParams) then
+    Exit;
+  LNext := NextSib(LParams);
+  Result := (LNext <> NIL_NODE) and IsDeclName(LNext);
+end;
+
+{ ANode inside a property's ACCESSOR specifier - read, write, stored,
+  implements: a MEMBER lookup, where the type's own members and its
+  ancestors' come first (dcc64 37.0, local x-f53 P6: `property P: Integer
+  read F` takes the field `F` past a unit variable `F` declared above the
+  type). Not `index` or `default`, whose values are constant expressions
+  read like the rest of the declaration (P9, P10: `index KX` and `default
+  KX` are the unit's `KX = 10` above the type, not its own `KX = 1`). A method
+  resolution clause (`function IFoo.M = GetPrice;`) is a member lookup
+  too. }
+function TPasSemaResolver.InAccessorSpecifier(ANode: Integer): Boolean;
+var
+  LCur, LTok: Integer;
+begin
+  Result := False;
+  LCur := ANode;
+  while LCur <> NIL_NODE do
+  begin
+    case KindOf(LCur) of
+      nkPropSpec:
+        begin
+          LTok := FTree.Nodes[LCur].FirstToken;
+          Exit(not FTree.Source.VisibleTextEquals(LTok, 'index') and
+            not FTree.Source.VisibleTextEquals(LTok, 'default') and
+            not FTree.Source.VisibleTextEquals(LTok, 'dispid'));
+        end;
+      nkMethodResolution:
+        Exit(True);
+      nkPropertyDecl, nkRoutine, nkClassType, nkRecordType, nkInterfaceType,
+      nkObjectType, nkHelperType:
+        Exit(False);
+    end;
+    LCur := FTree.Nodes[LCur].Parent;
+  end;
+end;
+
+{ True when ASym, the declaration ANode was bound to by the scope walk, is
+  one dcc ranks AFTER the unit's own declarations made above ANode - so a
+  unit-level declaration of the name there wins (spec 3.3.2, step 5 and
+  "Outside a routine body"; dcc64 37.0 probes, local x-f52 and x-f53):
+  - a GENERIC TYPE's own type parameter, anywhere - in the type's
+    declaration and in its method bodies: a unit-level `T = Int64` above
+    `TGen<T>` makes `F: T` and a body's `var L: T` Int64s for TGen<Word>
+    (F54). Not a generic METHOD's own parameter: `M<U>` keeps its `U`;
+  - a member of the type being declared, or of a type it is nested in, in
+    that DECLARATION - a field's type, a constant's value, a method's
+    parameter, default and result types, a property's type: with a unit
+    `TX = Int64` above TOuter, its `F: TX` is an Int64 although TOuter
+    declares `TX = Byte` (F53). Not in a property's specifier, a member
+    lookup; only for a type declared at unit level (a routine's local type
+    was not probed);
+  - the same heading repeated on a method's implementation (`procedure
+    TOuter.P(A: TX)`) - a unit `TX` declared between TOuter and the
+    implementation makes it differ from the declaration, E2037 (F53);
+  - in a method of a NESTED type, an outer type's member, body and heading
+    (F52).
+  The type's own members still come first in a method BODY (step 3). }
+function TPasSemaResolver.RanksAfterUnit(ANode, ASym: Integer): Boolean;
+var
+  LSymScope, LScope, LUp: Integer;
+begin
+  Result := False;
+  LSymScope := FModel.Symbols[ASym].Scope;
+  if LSymScope = NIL_SCOPE then
+    Exit;
+  case FModel.Scopes[LSymScope].Kind of
+    sckGenericParams:
+      Exit(IsTypeParamSym(ASym));
+    sckStruct:
+      if FModel.Scopes[LSymScope].StructSym = NIL_SYM then
+        Exit;
+  else
+    Exit;
+  end;
+  LScope := FNodeScope[ANode];
+  while (LScope <> NIL_SCOPE) and
+        (FModel.Scopes[LScope].StructSym = NIL_SYM) do
+    LScope := FModel.Scopes[LScope].Parent;
+  if LScope = NIL_SCOPE then
+    Exit;
+  if FModel.Scopes[LScope].Kind = sckStruct then
+  begin
+    // A type's declaration: of a unit-level type, nested or not.
+    LUp := LScope;
+    while (LUp <> NIL_SCOPE) and
+          (FModel.Scopes[LUp].Kind in [sckStruct, sckGenericParams]) do
+      LUp := FModel.Scopes[LUp].Parent;
+    Result := (LUp <> NIL_SCOPE) and
+      (FModel.Scopes[LUp].Kind in [sckUnit, sckImplementation]) and
+      not InAccessorSpecifier(ANode);
+  end
+  else if FModel.IsOuterStructHit(LScope, ASym) then
+    Result := True
+  else
+    Result := (FModel.Scopes[LSymScope].StructSym =
+      FModel.Scopes[LScope].StructSym) and FModel.InMethodHeading(ANode, LScope);
+end;
+
+{ The unit's own declaration of AKey made above ANode
+  (TPasSemaModel.UnitDeclBefore) - of the generic arity ANode is written
+  with when it is a type (16.1.2: a bare `TEnumerator` in TList<T> passes
+  over the unit's `TEnumerator<T>`). NIL_SYM when there is none. }
+function TPasSemaResolver.UnitDeclFirst(ANode: Integer;
+  const AKey: TSemaKey): Integer;
+var
+  LWant: Integer;
+begin
+  Result := FModel.UnitDeclBefore(FNodeScope[ANode], AKey,
+    FTree.Nodes[ANode].FirstToken);
+  if (Result = NIL_SYM) or (FModel.Symbols[Result].Kind <> skType) then
+    Exit;
+  if IsBareTypeUse(ANode) then
+    LWant := 0
+  else
+    LWant := GenericArityOfParamsNode(FTree.Nodes[ANode].Parent);
+  while (Result <> NIL_SYM) and
+        ((FModel.Symbols[Result].Kind <> skType) or
+         (GenericArityOfSym(Result) <> LWant) or
+         DeclaredAfter(Result, ANode)) do
+    Result := FModel.Symbols[Result].NextOverload;
 end;
 
 // KIND of the visible token immediately after ANode's last token. Every
@@ -2698,6 +2852,15 @@ begin
             else
               FModel.RefMap[ANode] := NIL_SYM;
           end;
+        end;
+        // A member found ahead of the unit's own declarations where dcc ranks
+        // it after them (spec 3.3.2; F52, F53, F54) - see RanksAfterUnit.
+        if (FModel.RefMap[ANode] <> NIL_SYM) and
+           RanksAfterUnit(ANode, FModel.RefMap[ANode]) then
+        begin
+          LHead := UnitDeclFirst(ANode, LKey);
+          if LHead <> NIL_SYM then
+            FModel.RefMap[ANode] := LHead;
         end;
         if (FModel.RefMap[ANode] = NIL_SYM) and IsAttributeTypeRef(ANode) then
           FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],

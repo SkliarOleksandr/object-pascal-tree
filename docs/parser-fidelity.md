@@ -468,6 +468,10 @@ in 0.93.8). Probing the shapes the rung met turned up more of the same
 family: in a nested type's method the outer type's members come only after
 the unit's own declarations made so far (F52, fixed in 0.93.10); in a
 type's DECLARATION its own members rank after them too and its ancestors'
-are out of reach (F53), and a unit type declared above a generic hides the
-generic's same-named parameter (F54). The language spec's sec. 3.3.2 has
-the whole order.
+are out of reach - a used unit's declaration is what such a name means,
+while a type nested in it sees the outer types' ancestry ahead of the used
+units (F53, fixed in 0.93.11, the method's implementation heading alike);
+and a unit type declared above a generic hides the generic's same-named
+parameter, in its declaration and its method bodies, where a generic
+method's own keeps it (F54, fixed in 0.93.11). The language spec's sec.
+3.3.2 has the whole order.

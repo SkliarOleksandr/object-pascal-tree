@@ -661,6 +661,15 @@ type
       is a member of an OUTER type of the method's qualifier: a struct scope
       joined into AScope other than the innermost type's own. }
     function IsOuterStructHit(AScope, ASym: Integer): Boolean;
+    { Is ANode in the HEADING of the method implementation whose routine
+      scope is ARoutineScope - its parameter list, result type, a generic
+      constraint - rather than its body, a directive or an attribute? There
+      the type's own members rank after the unit's declarations made so far,
+      as in the type's declaration (spec 3.3.2; F53). }
+    function InMethodHeading(ANode, ARoutineScope: Integer): Boolean;
+    { The routine scope of the method implementation ANode sits in - its
+      body, its heading, a routine nested in it; NIL_SCOPE elsewhere. }
+    function MethodScopeOf(ANode: Integer): Integer;
     { A declaration of this unit itself named AKey and declared before
       AAtToken - unit level of either section, or an enum value joined there;
       not a compiler seed, not a `uses` entry's name - searched from AScope
@@ -2059,7 +2068,7 @@ end;
 function TPasSemaModel.ResolveAt(AScope: Integer; const AKey: TSemaKey;
   AAtToken: Integer): Integer;
 var
-  LCur, LUnit: Integer;
+  LCur: Integer;
 begin
   LCur := AScope;
   while LCur <> NIL_SCOPE do
@@ -2069,19 +2078,10 @@ begin
     begin
       if (AAtToken < 0) or (Scopes[LCur].Kind <> sckBlock) or
          not DeclaredAfter(Result, AAtToken) then
-      begin
-        // An outer type's member of a nested method comes after the unit's
-        // own declarations made so far (F52): `KO` in TOuter.TInner.M is the
-        // unit's `KO = 30` over TOuter's `KO = 3` - unless the unit declares
-        // it only below the method.
-        if (AAtToken >= 0) and IsOuterStructHit(LCur, Result) then
-        begin
-          LUnit := UnitDeclBefore(Scopes[LCur].Parent, AKey, AAtToken);
-          if LUnit <> NIL_SYM then
-            Exit(LUnit);
-        end;
+        // A hit dcc ranks after the unit's own declarations (an outer type's
+        // member of a nested method, F52, and the rest) is moved by the
+        // resolver - TPasSemaResolver.RanksAfterUnit.
         Exit;
-      end;
       // Declared BELOW the reference: not in scope yet, so keep walking
       // outward. Without this the inline declaration captured references
       // above it - a WRONG binding rather than a missing one, so it cost no
@@ -2106,6 +2106,37 @@ begin
   if (LDecl = NIL_NODE) or (LDecl > High(Tree.Nodes)) then
     Exit;
   Result := Tree.Nodes[LDecl].FirstToken > AAtToken;
+end;
+
+function TPasSemaModel.InMethodHeading(ANode, ARoutineScope: Integer): Boolean;
+var
+  LRoutine, LCur, LParent: Integer;
+begin
+  Result := False;
+  if ARoutineScope = NIL_SCOPE then
+    Exit;
+  LRoutine := Scopes[ARoutineScope].OwnerNode;
+  LCur := ANode;
+  while LCur <> NIL_NODE do
+  begin
+    LParent := Tree.Nodes[LCur].Parent;
+    if LParent = LRoutine then
+      Exit(not (Tree.Nodes[LCur].Kind in
+        [nkRoutineBody, nkDirective, nkAttrGroup]));
+    LCur := LParent;
+  end;
+end;
+
+function TPasSemaModel.MethodScopeOf(ANode: Integer): Integer;
+begin
+  Result := NIL_SCOPE;
+  if (ANode = NIL_NODE) or (ANode > High(NodeScope)) then
+    Exit;
+  Result := NodeScope[ANode];
+  while (Result <> NIL_SCOPE) and (Scopes[Result].StructSym = NIL_SYM) do
+    Result := Scopes[Result].Parent;
+  if (Result <> NIL_SCOPE) and (Scopes[Result].Kind = sckStruct) then
+    Result := NIL_SCOPE;
 end;
 
 function TPasSemaModel.IsOuterStructHit(AScope, ASym: Integer): Boolean;

@@ -1015,6 +1015,13 @@ type
     // the "declared inside" half of a visibility decision.
     function DeclStructsOfNode(AModel: TPasSemaModel;
       ANode: Integer): TArray<Integer>;
+    function DirectInStructDecl(AModel: TPasSemaModel;
+      ANode, AStruct: Integer): Boolean;
+    function InMethodResolution(AModel: TPasSemaModel;
+      ANode: Integer): Boolean;
+    procedure QueueDecl(AId, ANode: Integer);
+    procedure QueueOuterDeclRecheck(AId: Integer; AModel: TPasSemaModel;
+      ANode: Integer);
     // The (model, symbol) a designator node names, when one does.
     function DesignatorSymX(AId, ANode: Integer;
       out AMid, ASym: Integer): Boolean;
@@ -11816,6 +11823,9 @@ begin
             FixCrossArity(AId, LModel, LNode, LNameLower, LUid, LSym);
             LExt.UnitId := LUid; LExt.Sym := LSym;
             LModel.ExtRefMap.Add(LNode, LExt);
+            // In a NESTED type's declaration an outer type's ancestor's member
+            // outranks the used unit's (F53): the decl pass looks again.
+            QueueOuterDeclRecheck(AId, LModel, LNode);
           end
           else if FindInSystemUnit(LNameLower, LUid, LSym) then
           begin
@@ -11826,6 +11836,7 @@ begin
             // that unit's uses declares the name, so BOTH heritage
             // references took this branch and both bound the arity-0
             // interface.
+            QueueOuterDeclRecheck(AId, LModel, LNode);
             FixCrossArity(AId, LModel, LNode, LNameLower, LUid, LSym);
             LExt.UnitId := LUid; LExt.Sym := LSym;
             LModel.ExtRefMap.Add(LNode, LExt);
@@ -11850,12 +11861,7 @@ begin
           // so it waits for the frozen-map pass: queue, don't judge.
           else if DeclStructsOfNode(LModel, LNode) <> nil then
           begin
-            // Count-tracked doubling: `+ [x]` reallocated and re-copied the
-            // array per queued node, per unit with any E2003-shaped decl name.
-            if FDeclWorkCount[AId] = Length(FDeclWork[AId]) then
-              SetLength(FDeclWork[AId], FDeclWorkCount[AId] * 2 + 8);
-            FDeclWork[AId][FDeclWorkCount[AId]] := LNode;
-            Inc(FDeclWorkCount[AId]);
+            QueueDecl(AId, LNode);
           end
           // A COMPILER-RECOGNIZED attribute name (19.3.3) resolves to nothing
           // by design - dcc matches `[Ref]`, `[Align(8)]`, `[weak]` and
@@ -12039,18 +12045,29 @@ end;
   pass asks it, and the with pass for a name no with target has (F49).
   The outer segments rank after the unit's own declarations made so far
   (spec 3.3.2, step 5; F52): when Phase 1 bound ANode to one, it stands -
-  False - and an outer type's ancestor's member does not displace it. }
+  False - and an outer type's ancestor's member does not displace it.
+  In the method's HEADING the type's own members come after the unit's
+  declarations too, and its ancestors' are not visible at all - the
+  heading repeats the declaration's, which sees neither (F53): the walk
+  starts at the outer segments; Phase 1 has decided the own members. }
 function TPasSemaProject.FindSelfMemberX(AId, ANode, AStruct: Integer;
   const ANameLower: string; out AMemMid, AMemSym, ACtx: Integer): Boolean;
 var
   LModel: TPasSemaModel;
   LBound: Integer;
 begin
-  Result := FindVisibleMemberX(AId, AStruct, XPlain(AId, AStruct),
-    ANameLower, AMemMid, AMemSym, ACtx);
-  if Result then
-    Exit;
+  AMemMid := NIL_SYM;
+  AMemSym := NIL_SYM;
+  ACtx := NIL_INST;
   LModel := FModels[AId];
+  Result := False;
+  if not LModel.InMethodHeading(ANode, LModel.MethodScopeOf(ANode)) then
+  begin
+    Result := FindVisibleMemberX(AId, AStruct, XPlain(AId, AStruct),
+      ANameLower, AMemMid, AMemSym, ACtx);
+    if Result then
+      Exit;
+  end;
   LBound := LModel.RefMap[ANode];
   if (LBound <> NIL_SYM) and
      not (sfBuiltin in LModel.Symbols[LBound].Flags) and
@@ -12278,6 +12295,102 @@ begin
       if AModel.Scopes[LScope].Kind <> sckStruct then
         Exit(nil);
       Result := Result + [AModel.Scopes[LScope].StructSym];
+    end;
+    LScope := AModel.Scopes[LScope].Parent;
+  end;
+end;
+
+{ Is ANode written in AStruct's OWN declaration - a member's type, a
+  constant, a method's heading - rather than inside a type nested in it
+  (its members or its heritage clause)? The first structured-type node up
+  the tree is AStruct's. }
+function TPasSemaProject.DirectInStructDecl(AModel: TPasSemaModel;
+  ANode, AStruct: Integer): Boolean;
+var
+  LOwner, LCur: Integer;
+begin
+  Result := False;
+  if (AStruct = NIL_SYM) or
+     (AModel.Symbols[AStruct].MemberScope = NIL_SCOPE) then
+    Exit;
+  LOwner := AModel.Scopes[AModel.Symbols[AStruct].MemberScope].OwnerNode;
+  LCur := AModel.Tree.Nodes[ANode].Parent;
+  while LCur <> NIL_NODE do
+  begin
+    if AModel.Tree.Nodes[LCur].Kind in [nkClassType, nkRecordType,
+       nkInterfaceType, nkObjectType, nkHelperType] then
+      Exit(LCur = LOwner);
+    LCur := AModel.Tree.Nodes[LCur].Parent;
+  end;
+end;
+
+{ ANode inside a method resolution clause of a type's declaration
+  (`function IFoo.GetAmount = GetPrice;`) - whose names are looked up among
+  the type's members, its ancestors' included. }
+function TPasSemaProject.InMethodResolution(AModel: TPasSemaModel;
+  ANode: Integer): Boolean;
+var
+  LCur: Integer;
+begin
+  Result := False;
+  LCur := AModel.Tree.Nodes[ANode].Parent;
+  while LCur <> NIL_NODE do
+  begin
+    case AModel.Tree.Nodes[LCur].Kind of
+      nkMethodResolution:
+        Exit(True);
+      nkRoutine, nkClassType, nkRecordType, nkInterfaceType, nkObjectType,
+      nkHelperType:
+        Exit(False);
+    end;
+    LCur := AModel.Tree.Nodes[LCur].Parent;
+  end;
+end;
+
+{ Queues ANode for the declaration pass (CrossResolveDecl). Count-tracked
+  doubling: `+ [x]` reallocated and re-copied the array per queued node. }
+procedure TPasSemaProject.QueueDecl(AId, ANode: Integer);
+begin
+  if FDeclWorkCount[AId] = Length(FDeclWork[AId]) then
+    SetLength(FDeclWork[AId], FDeclWorkCount[AId] * 2 + 8);
+  FDeclWork[AId][FDeclWorkCount[AId]] := ANode;
+  Inc(FDeclWorkCount[AId]);
+end;
+
+{ ANode, a declaration-site name CrossResolve has just bound to a used
+  unit's or System's declaration, goes to the declaration pass as well when
+  a type ENCLOSING its own one could declare it: in a nested type's
+  declaration the outer types' members - their ancestors' included - rank
+  before the used units (dcc64 37.0, local x-f53 P11: `S: TY` in
+  TDer.TSub is TBase's `TY = Byte` past a used unit's `TY = Int64`; spec
+  3.3.2, 11.4.1). Not for the type's own declaration: its own members were
+  Phase 1's and its ancestors' are not visible there (F53) - so an
+  ordinary class pays one scope climb per such name, and only the names in
+  nested types (and in a nested type's heritage clause) the FindMemberX
+  walk. }
+procedure TPasSemaProject.QueueOuterDeclRecheck(AId: Integer;
+  AModel: TPasSemaModel; ANode: Integer);
+var
+  LScope: Integer;
+  LFirst: Boolean;
+begin
+  if ANode > High(AModel.NodeScope) then
+    Exit;
+  LScope := AModel.NodeScope[ANode];
+  LFirst := True;
+  while LScope <> NIL_SCOPE do
+  begin
+    if AModel.Scopes[LScope].StructSym <> NIL_SYM then
+    begin
+      if AModel.Scopes[LScope].Kind <> sckStruct then
+        Exit;   // a method body: not a declaration site
+      if not LFirst or not DirectInStructDecl(AModel, ANode,
+         AModel.Scopes[LScope].StructSym) then
+      begin
+        QueueDecl(AId, ANode);
+        Exit;
+      end;
+      LFirst := False;
     end;
     LScope := AModel.Scopes[LScope].Parent;
   end;
@@ -14986,6 +15099,8 @@ var
   LPend: TPasInhPending;
   LNameLower: string;
   LFound: Boolean;
+  LBound: Boolean;
+  LCur: TPasExtRef;
 begin
   APending := nil;
   if AId > High(FDeclWork) then
@@ -15001,21 +15116,46 @@ begin
   begin
     LNode := FDeclWork[AId][LWIdx];
     // An earlier ROUND may have bound it - that is what the rounds are for.
-    if (LModel.RefMap[LNode] <> NIL_SYM) or
-       LModel.ExtRefMap.ContainsKey(LNode) then
+    // Bound to a used unit's or System's declaration, it is here because an
+    // outer type's member outranks that (QueueOuterDeclRecheck): a hit
+    // other than the binding is an override, no hit leaves it standing.
+    if LModel.RefMap[LNode] <> NIL_SYM then
       Continue;
+    LBound := LModel.ExtRefMap.TryGetValue(LNode, LCur);
     LNameLower := LModel.Tree.NodeNameLower(LNode);
     LFound := False;
     // Innermost declaration first, matching dcc's precedence - and matching
-    // what the method-body side already does with OuterStructsOfNode.
+    // what the method-body side already does with OuterStructsOfNode. The
+    // type whose own declaration holds the name is passed over: its members
+    // are Phase 1's, and its ANCESTORS' are not visible there at all - dcc64
+    // 37.0 says E2003 for `G: TY` or `const C = KB` in `TDer = class(TBase)`
+    // naming TBase's, and takes a used unit's TY past them (spec 3.3.2;
+    // F53). A type nested in TDer, its heritage clause included, does see
+    // them (11.4.1). Not the target of a method resolution clause
+    // (`function IFoo.M = GetPrice;`): a member lookup, an inherited
+    // method being the usual target.
     for var LStruct in DeclStructsOfNode(LModel, LNode) do
-      if FindMemberX(AId, XPlain(AId, LStruct), LNameLower, LUid, LSym,
-        LCtx) then
+      if (not DirectInStructDecl(LModel, LNode, LStruct) or
+          InMethodResolution(LModel, LNode)) and
+         FindMemberX(AId, XPlain(AId, LStruct), LNameLower, LUid, LSym,
+           LCtx) then
       begin
         LFound := True;
         Break;
       end;
-    if LFound then
+    if LBound then
+    begin
+      if LFound and ((LUid <> LCur.UnitId) or (LSym <> LCur.Sym)) then
+      begin
+        LPend.Node := LNode;
+        LPend.Ext.UnitId := LUid;
+        LPend.Ext.Sym := LSym;
+        LPend.X := XNil;
+        APending[LPendCount] := LPend;
+        Inc(LPendCount);
+      end;
+    end
+    else if LFound then
     begin
       LPend.Node := LNode;
       LPend.Ext.UnitId := LUid;

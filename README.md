@@ -1569,14 +1569,16 @@ Still open, roughly in the order we're tackling it:
   (uses, with, ancestors, enums) is a fallback and stays in `Additional`. It
   was worth ~60 reports on the client project, all in a suite's HTML
   importer, where a helper redeclares `Importer` at a derived type.
-- **Declaration-site precedence: inherited member vs used-unit global.** A name
-  written inside a class DECLARATION is now found in the enclosing classes'
-  ancestries (`CrossResolveDecl`), but only *after* the used units - dcc has it
-  the other way round, so a used unit's global with the same name as an
-  inherited member wins where it should lose. Closing it means deferring EVERY
-  declaration-site name that does not resolve locally - that is every cross-unit
-  type reference in every class in the closure, each through `FindMemberX`.
-  Deliberately not paid for a collision nobody has hit yet.
+- ~~**Declaration-site precedence: inherited member vs used-unit global.**~~
+  **Done in 0.93.11** (F53 of the fidelity plan), and half of it was never a
+  gap: in a class's own declaration its ancestors' members are not visible at
+  all (dcc64 37.0: `E2003`), so the used unit's global IS what the name means.
+  The other half was real - in a NESTED type's declaration the outer types'
+  ancestries come before the used units - and costs no deferral of every
+  declaration-site name: only a name in a nested type that CrossResolve bound
+  to a used unit or System is looked at again by `CrossResolveDecl`
+  (`QueueOuterDeclRecheck`), which overrides it when an outer type's ancestry
+  declares it.
 - ~~**`{$IF Declared(X)}` cannot be answered, and the wrong branch is taken.**~~
   **Done on 2026-07-31.** `Declared()` asks whether an identifier is in scope,
   and the symbol table that knows sits behind the token stream this very

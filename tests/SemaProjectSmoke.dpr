@@ -3647,6 +3647,289 @@ begin
   end;
 end;
 
+{ In a structured type's DECLARATION - a field's type, a constant's value,
+  a method's parameter, default and result types, a property's type and its
+  `index` value, and the heading repeated on the implementation - the
+  type's own members rank after the unit's declarations made so far, and
+  its ancestors' are not visible at all (F53 of the parser-fidelity plan);
+  a generic type's type parameter ranks after the unit's declarations made
+  so far, in the declaration and in the method bodies, a generic method's
+  own does not (F54); a nested type's declaration sees the outer type's
+  ancestors ahead of a used unit (spec 3.3.2, "Outside a routine body";
+  11.4.1). dcc64 37.0 runs the fixture (local x-f53\fixture) as
+  `1 10 8 2 8 10 10 1 8 70 8 8 1 2 8`. }
+procedure TestDeclAfterUnit;
+const
+  UFA =
+    'unit FA;'#13#10 +                                        // 1
+    'interface'#13#10 +                                       // 2
+    'type'#13#10 +                                            // 3
+    '  TBase = class(TInterfacedObject)'#13#10 +              // 4
+    '  public'#13#10 +                                        // 5
+    '    type TY = Byte;'#13#10 +                             // 6
+    '    const KB = 7;'#13#10 +                               // 7
+    '    function GetIt: Integer;'#13#10 +                    // 8
+    '  end;'#13#10 +                                          // 9
+    '  TZ = Int64;'#13#10 +                                   // 10
+    'implementation'#13#10 +                                  // 11
+    'function TBase.GetIt: Integer;' +
+    ' begin Result := 3; end;'#13#10 +                       // 12
+    'end.'#13#10;                                             // 13
+  UFB =
+    'unit FB;'#13#10 +                                        // 1
+    'interface'#13#10 +                                       // 2
+    'type'#13#10 +                                            // 3
+    '  TY = Int64;'#13#10 +                                   // 4
+    'const'#13#10 +                                           // 5
+    '  KB = 70;'#13#10 +                                      // 6
+    'implementation'#13#10 +                                  // 7
+    'end.'#13#10;                                            // 8
+  UFD =
+    'unit FD;'#13#10 +                                        // 1
+    'interface'#13#10 +                                       // 2
+    'uses FB, FA;'#13#10 +                                    // 3
+    'type'#13#10 +                                            // 4
+    '  TX = Int64;'#13#10 +                                   // 5
+    '  T = Int64;'#13#10 +                                    // 6
+    'const'#13#10 +                                           // 7
+    '  KX = 10;'#13#10 +                                      // 8
+    'type'#13#10 +                                            // 9
+    '  TOuter = class(TBase)'#13#10 +                         // 10
+    '  public'#13#10 +                                        // 11
+    '    type'#13#10 +                                        // 12
+    '      TX = Byte;'#13#10 +                                // 13
+    '      TZ = Word;'#13#10 +                                // 14
+    '      TSub = class'#13#10 +                              // 15
+    '        S: TY;'#13#10 +                                  // 16
+    '      end;'#13#10 +                                      // 17
+    '    const'#13#10 +                                       // 18
+    '      KX = 1;'#13#10 +                                   // 19
+    '      C = KX;'#13#10 +                                   // 20
+    '    var'#13#10 +                                         // 21
+    '      F: TX;'#13#10 +                                    // 22
+    '      FZ: TZ;'#13#10 +                                   // 23
+    '      FP: Integer;'#13#10 +                              // 24
+    '    procedure P(A: TX);'#13#10 +                         // 25
+    '    function D(A: Integer = KX): Integer;'#13#10 +       // 26
+    '    function GetPP(I: Integer): Integer;'#13#10 +        // 27
+    '    property PP: Integer index KX read GetPP;'#13#10 +   // 28
+    '    property PR: Integer read FP;'#13#10 +               // 29
+    '    function Sz: Integer;'#13#10 +                       // 30
+    '  end;'#13#10 +                                          // 31
+    '  TDer = class(TBase)'#13#10 +                           // 32
+    '  public'#13#10 +                                        // 33
+    '    G: TY;'#13#10 +                                      // 34
+    '    const CB = KB;'#13#10 +                              // 35
+    '  end;'#13#10 +                                          // 36
+    '  TGen<T> = class'#13#10 +                               // 37
+    '  public'#13#10 +                                        // 38
+    '    F: T;'#13#10 +                                       // 39
+    '    function Sz: Integer;'#13#10 +                       // 40
+    '    function M<U>: Integer;'#13#10 +                     // 41
+    '  end;'#13#10 +                                          // 42
+    '  TGen2<V> = class'#13#10 +                              // 43
+    '  public'#13#10 +                                        // 44
+    '    FV: V;'#13#10 +                                      // 45
+    '    function Sz: Integer;'#13#10 +                       // 46
+    '  end;'#13#10 +                                          // 47
+    '  V = Int64;'#13#10 +                                    // 48
+    'var GP: Integer;'#13#10 +                                // 49
+    'implementation'#13#10 +                                  // 50
+    'procedure TOuter.P(A: TX); begin GP := SizeOf(A); end;'#13#10 + // 51
+    'function TOuter.D(A: Integer): Integer; begin Result := A; end;'#13#10 + // 52
+    'function TOuter.GetPP(I: Integer): Integer; begin Result := I; end;'#13#10 + // 53
+    'function TOuter.Sz: Integer;'#13#10 +                    // 54
+    'var L: TX;'#13#10 +                                      // 55
+    'begin'#13#10 +                                           // 56
+    '  Result := SizeOf(L);'#13#10 +                          // 57
+    'end;'#13#10 +                                            // 58
+    'function TGen<T>.Sz: Integer;'#13#10 +                   // 59
+    'var L: T;'#13#10 +                                       // 60
+    'begin'#13#10 +                                           // 61
+    '  Result := SizeOf(L);'#13#10 +                          // 62
+    'end;'#13#10 +                                            // 63
+    'function TGen<T>.M<U>: Integer;'#13#10 +                 // 64
+    'var L: U;'#13#10 +                                       // 65
+    'begin'#13#10 +                                           // 66
+    '  Result := SizeOf(L);'#13#10 +                          // 67
+    'end;'#13#10 +                                            // 68
+    'function TGen2<V>.Sz: Integer;'#13#10 +                  // 69
+    'var L: V;'#13#10 +                                       // 70
+    'begin'#13#10 +                                           // 71
+    '  Result := SizeOf(L);'#13#10 +                          // 72
+    'end;'#13#10 +                                            // 73
+    'end.'#13#10;                                            // 74
+  // dcc64: E2003 at H's TY and C's KB - TBase's are out of reach (P7).
+  UFE =
+    'unit FE;'#13#10 +                                        // 1
+    'interface'#13#10 +                                       // 2
+    'uses FA;'#13#10 +                                        // 3
+    'type'#13#10 +                                            // 4
+    '  TDer = class(TBase)'#13#10 +                           // 5
+    '  public'#13#10 +                                        // 6
+    '    H: TY;'#13#10 +                                      // 7
+    '    const C = KB;'#13#10 +                               // 8
+    '    type TSub = class S: TY; end;'#13#10 +               // 9
+    '  end;'#13#10 +                                          // 10
+    'implementation'#13#10 +                                  // 11
+    'end.'#13#10;                                             // 12
+  // A method resolution clause names a member, an inherited one included
+  // (dcc64: x-f53ixture PE prints 3).
+  UFF =
+    'unit FF;'#13#10 +                                        // 1
+    'interface'#13#10 +                                       // 2
+    'uses FA;'#13#10 +                                        // 3
+    'type'#13#10 +                                            // 4
+    '  IGet = interface function Get: Integer; end;'#13#10 +  // 5
+    '  TDer = class(TBase, IGet)'#13#10 +                     // 6
+    '  public'#13#10 +                                        // 7
+    '    function IGet.Get = GetIt;'#13#10 +                  // 8
+    '  end;'#13#10 +                                          // 9
+    'implementation'#13#10 +                                  // 10
+    'end.'#13#10;                                             // 11
+  PD =
+    'program PD;'#13#10 +
+    'uses FD, FE, FF;'#13#10 +
+    'begin'#13#10 +
+    '  TOuter.Create.Sz;'#13#10 +
+    'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LM: TPasSemaModel;
+  LMid: Integer;
+
+  // The declaration the identifier at (ALine, ACol) of FD binds to, as
+  // TestNestedOuterAfterUnit's BoundAt names it; a type parameter is
+  // `param:` and its name.
+  function BoundAt(ALine, ACol: Integer): string;
+  var
+    LFile: string;
+    LLine, LCol, LSym: Integer;
+    LExt: TPasExtRef;
+    LTo: TPasSemaModel;
+    LToId: Integer;
+  begin
+    Result := '?';
+    for var LNode := 0 to High(LM.Tree.Nodes) do
+    begin
+      if (LM.Tree.Nodes[LNode].Kind <> nkIdent) or
+         not LProj.NodeSite(LMid, LNode, LFile, LLine, LCol) or
+         (LLine <> ALine) or (LCol <> ACol) then
+        Continue;
+      if LM.ExtRefMap.TryGetValue(LNode, LExt) then
+      begin
+        LToId := LExt.UnitId;
+        LTo := LProj.Model(LToId);
+        LSym := LExt.Sym;
+      end
+      else
+      begin
+        LToId := LMid;
+        LTo := LM;
+        LSym := LM.RefMap[LNode];
+      end;
+      if LSym = NIL_SYM then
+        Exit('');
+      if sfBuiltin in LTo.Symbols[LSym].Flags then
+        Exit('builtin');
+      if LTo.Symbols[LSym].Kind = skGenericParam then
+        Exit('param:' + LTo.Symbols[LSym].Name);
+      Result := ChangeFileExt(ExtractFileName(LProj.ModelFile(LToId)), '') + '.';
+      var LScope := LTo.Symbols[LSym].Scope;
+      if (LScope <> NIL_SCOPE) and (LTo.Scopes[LScope].Kind = sckStruct) and
+         (LTo.Scopes[LScope].StructSym <> NIL_SYM) then
+        Result := Result + LTo.Symbols[LTo.Scopes[LScope].StructSym].Name + '.';
+      Exit(Result + LTo.Symbols[LSym].Name);
+    end;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_decl_after_unit');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'FA.pas'), UFA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'FB.pas'), UFB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'FD.pas'), UFD);
+  TFile.WriteAllText(TPath.Combine(LDir, 'FE.pas'), UFE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'FF.pas'), UFF);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PD.dpr'), PD);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    Ok('decl-after-unit: PD analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'PD.dpr')) >= 0);
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'FD.pas'));
+    Ok('decl-after-unit: FD loaded', LMid >= 0);
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    Ok('decl-after-unit: nested S: TY -> the outer type''s ancestor''s, past FB',
+      BoundAt(16, 12) = 'FA.TBase.TY');
+    Ok('decl-after-unit: C = KX -> the unit''s KX over TOuter.KX',
+      BoundAt(20, 11) = 'FD.KX');
+    Ok('decl-after-unit: F: TX -> the unit''s TX over TOuter.TX',
+      BoundAt(22, 10) = 'FD.TX');
+    Ok('decl-after-unit: FZ: TZ -> TOuter.TZ over the used unit''s',
+      BoundAt(23, 11) = 'FD.TOuter.TZ');
+    Ok('decl-after-unit: P(A: TX) declaration -> the unit''s TX',
+      BoundAt(25, 20) = 'FD.TX');
+    Ok('decl-after-unit: default value KX -> the unit''s KX',
+      BoundAt(26, 29) = 'FD.KX');
+    Ok('decl-after-unit: property index KX -> the unit''s KX',
+      BoundAt(28, 32) = 'FD.KX');
+    Ok('decl-after-unit: property read GetPP -> the member',
+      BoundAt(28, 40) = 'FD.TOuter.GetPP');
+    Ok('decl-after-unit: property read FP -> the member',
+      BoundAt(29, 31) = 'FD.TOuter.FP');
+    Ok('decl-after-unit: G: TY in TDer -> FB''s, the ancestor''s is not visible',
+      BoundAt(34, 8) = 'FB.TY');
+    Ok('decl-after-unit: const CB = KB in TDer -> FB''s',
+      BoundAt(35, 16) = 'FB.KB');
+    Ok('decl-after-unit: F: T in TGen<T> -> the unit''s T above',
+      BoundAt(39, 8) = 'FD.T');
+    Ok('decl-after-unit: FV: V in TGen2<V> -> the parameter, unit V is below',
+      BoundAt(45, 9) = 'param:V');
+    Ok('decl-after-unit: TOuter.P(A: TX) heading -> the unit''s TX',
+      BoundAt(51, 23) = 'FD.TX');
+    Ok('decl-after-unit: body var L: TX -> TOuter.TX',
+      BoundAt(55, 8) = 'FD.TOuter.TX');
+    Ok('decl-after-unit: TGen<T>.Sz var L: T -> the unit''s T',
+      BoundAt(60, 8) = 'FD.T');
+    Ok('decl-after-unit: generic method''s own U stays the parameter',
+      BoundAt(65, 8) = 'param:U');
+    Ok('decl-after-unit: TGen2<V>.Sz var L: V -> the unit''s V above the body',
+      BoundAt(70, 8) = 'FD.V');
+    Ok('decl-after-unit: no diagnostics', Length(LM.Diags) = 0);
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'FE.pas'));
+    Ok('decl-after-unit: FE loaded', LMid >= 0);
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    Ok('decl-after-unit: H: TY in TDer -> nothing, TBase.TY is out of reach',
+      BoundAt(7, 8) = '');
+    Ok('decl-after-unit: const C = KB in TDer -> nothing',
+      BoundAt(8, 15) = '');
+    Ok('decl-after-unit: TDer.TSub''s S: TY -> TBase.TY',
+      BoundAt(9, 26) = 'FA.TBase.TY');
+    Ok('decl-after-unit: FE has E2003 at H and C, as dcc',
+      (Length(LM.Diags) = 2) and (LM.Diags[0].Code = 'E2003') and
+      (LM.Diags[1].Code = 'E2003'));
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'FF.pas'));
+    Ok('decl-after-unit: FF loaded', LMid >= 0);
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    Ok('decl-after-unit: IGet.Get = GetIt -> the inherited TBase.GetIt',
+      BoundAt(8, 25) = 'FA.TBase.GetIt');
+    Ok('decl-after-unit: FF has no diagnostics', Length(LM.Diags) = 0);
+  finally
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 var
   LDir: string;
   LA, LB, LC, LD, LE, LOvl: TPasSemaModel;
@@ -9289,6 +9572,7 @@ begin
   TestInheritedBeatsUnitLevel;
   TestWithBodySelfMember;
   TestNestedOuterAfterUnit;
+  TestDeclAfterUnit;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;

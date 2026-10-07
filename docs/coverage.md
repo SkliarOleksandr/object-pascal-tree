@@ -280,11 +280,6 @@ mis-pair.
   and the descendant bare-name case are not enforced, and ordinary name
   lookup never filters by visibility.
 
-### 11.4.1 Nested type/const declarations
-- for declaration-site names, a used unit's global still
-  outranks an inherited member - dcc has it the other way; recorded as a
-  known divergence.
-
 ## 12-inheritance-polymorphism.md
 
 ### 12.1.2 `inherited`
