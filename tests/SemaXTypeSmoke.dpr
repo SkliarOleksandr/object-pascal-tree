@@ -430,6 +430,57 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // The declarations a hover shows with no written type (pastree-lsp's
+  // DemoHoverInfer, 2026-10-07), asserted through DeclTypeX - what the hover
+  // reads. A constructor inherited from the ancestor (the TObject.Create
+  // shape), a TArray<string> parameter, an open array constructor joined to
+  // one (`for var LPath in [LDir] + FLastSearchPaths` in the demo), an array
+  // literal, and a generic list's enumerator. Beside them the element rules
+  // of a `[...]` collection, every one a dcc64 37.0 probe (ForInElementX's
+  // ShapeElementX): Chars, a Char/string mix (string), a range (a SET
+  // constructor - AnsiChar), an enum, `+` either way round, and a mix dcc
+  // types as an anonymous subrange, refused.
+  UNIT_XFI =
+    'unit XFI;'#10'interface'#10 +
+    'type'#10 +
+    '  TFiBase = class'#10 +
+    '    constructor Create;'#10 +
+    '  end;'#10 +
+    '  TFiItem = class(TFiBase)'#10 +
+    '    Name: string;'#10 +
+    '  end;'#10 +
+    '  TFiEnum<T> = class'#10 +
+    '    function GetCurrent: T;'#10 +
+    '    function MoveNext: Boolean;'#10 +
+    '    property Current: T read GetCurrent;'#10 +
+    '  end;'#10 +
+    '  TFiList<T> = class'#10 +
+    '    function GetEnumerator: TFiEnum<T>;'#10 +
+    '  end;'#10 +
+    '  TFiColor = (fcRed, fcBlue);'#10 +
+    'implementation'#10 +
+    'constructor TFiBase.Create; begin end;'#10 +
+    'function TFiEnum<T>.GetCurrent: T; begin Result := Default(T); end;'#10 +
+    'function TFiEnum<T>.MoveNext: Boolean; begin Result := False; end;'#10 +
+    'function TFiList<T>.GetEnumerator: TFiEnum<T>; begin Result := nil; end;'#10 +
+    'procedure InferAll(const ADir: string; const APaths: TArray<string>;'#10 +
+    '  AList: TFiList<TFiItem>; B: Byte; W: Word);'#10 +
+    'begin'#10 +
+    '  var ICtor := TFiItem.Create;'#10 +
+    '  for var IPath in APaths do ;'#10 +
+    '  for var IJoined in [ADir] + APaths do ;'#10 +
+    '  for var ILiteral in [''.pas'', ''.inc''] do ;'#10 +
+    '  for var IItem in AList do ;'#10 +
+    '  for var IChars in [''a'', ''b''] do ;'#10 +
+    '  for var IMixed in [''a'', ''bc''] do ;'#10 +
+    '  for var IRange in [''a''..''c''] do ;'#10 +
+    '  for var IEnum in [fcRed, fcBlue] do ;'#10 +
+    '  for var IJoinedR in APaths + [ADir] do ;'#10 +
+    '  for var IBoth in (APaths + APaths) do ;'#10 +
+    '  for var IOrdMix in [B, W] do ;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // 3.1.3 / 3.2.1 inference fixtures. XJ declares the overload shapes the
   // inference must decide rather than guess (a parameterless overload beside
   // one with parameters, a same-arity pair with DIFFERENT result types, a
@@ -1267,6 +1318,26 @@ begin
     end;
 end;
 
+// The type DeclTypeX gives the variable named ANameLower in AModel - what a
+// hover on its declaration shows; '?' when there is none.
+function DeclTypeOf(AModel: TPasSemaModel; const ANameLower: string): string;
+var
+  LX: TSemaXType;
+begin
+  Result := '?';
+  for var LId := 0 to GProj.ModelCount - 1 do
+    if GProj.Model(LId) = AModel then
+      for var LSym := 0 to AModel.SymCount - 1 do
+        if (AModel.Symbols[LSym].Kind = skVar) and
+           (AModel.Symbols[LSym].NameLower = ANameLower) then
+        begin
+          LX := GProj.DeclTypeX(LId, LSym);
+          if XValid(LX) then
+            Exit(GProj.XTypeText(LX));
+          Exit;
+        end;
+end;
+
 // The unit name of the overload CrossType selected for the call spelled
 // AExpr ('?' when no CallTargetX was recorded) - the future overload-precise
 // navigation jump reads the same map.
@@ -1624,6 +1695,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NQ1.pas'), UNIT_NQ1);
   TFile.WriteAllText(TPath.Combine(LDir, 'NQ2.pas'), UNIT_NQ2);
   TFile.WriteAllText(TPath.Combine(LDir, 'XF.pas'), UNIT_XF);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XFI.pas'), UNIT_XFI);
   TFile.WriteAllText(TPath.Combine(LDir, 'XJV.pas'), UNIT_XJV);
   TFile.WriteAllText(TPath.Combine(LDir, 'XIV.pas'), UNIT_XIV);
   TFile.WriteAllText(TPath.Combine(LDir, 'XEV.pas'), UNIT_XEV);
@@ -1689,8 +1761,11 @@ begin
     // (2026-08-14): the shared System.pas fixture now declares `TArray<T> =
     // array of T;` for real, so `TArray<TSpotDirect>` in UNIT_OV genuinely
     // instantiates - the seeded stub had no generic parameter list to
-    // instantiate against at all.
-    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '24');
+    // instantiate against at all. 29 since XFI: TArray<string>,
+    // TFiList<TFiItem> and the TFiEnum<TFiItem> its GetEnumerator returns,
+    // plus the open TFiEnum<T> twice (the interface/implementation T symbols,
+    // as TBox<T> above).
+    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '29');
 
     // ---- Cross-unit overload selection by ARGUMENT TYPES ----
     LV := ModelByName('xv');
@@ -1945,6 +2020,35 @@ begin
       XTypeOf(LE, 'LCol'), 'TColor');
     Eq('for-in over a named dynamic array: the element type',
       XTypeOf(LE, 'LNm'), 'string');
+
+    // ---- declarations with no written type, as a hover reads them ----
+    LE := ModelByName('xfi');
+    Ok('XFI loaded', Assigned(LE));
+    Ok('XFI: no diags at all', Length(LE.Diags) = 0);
+    Eq('3.1.3: a constructor inherited from the ancestor types as the class',
+      DeclTypeOf(LE, 'ictor'), 'TFiItem');
+    Eq('5.5.2: for-in over a TArray<string> parameter: string',
+      DeclTypeOf(LE, 'ipath'), 'string');
+    Eq('5.5.2: for-in over `[ADir] + APaths`: string',
+      DeclTypeOf(LE, 'ijoined'), 'string');
+    Eq('5.5.2: for-in over a string array literal: string',
+      DeclTypeOf(LE, 'iliteral'), 'string');
+    Eq('5.5.2: for-in over a generic list: its enumerator''s Current',
+      DeclTypeOf(LE, 'iitem'), 'TFiItem');
+    Eq('5.5.2: for-in over `[''a'', ''b'']`: Char',
+      DeclTypeOf(LE, 'ichars'), 'Char');
+    Eq('5.5.2: for-in over a Char/string mix: string',
+      DeclTypeOf(LE, 'imixed'), 'string');
+    Eq('5.5.2: for-in over a range (a set constructor): AnsiChar',
+      DeclTypeOf(LE, 'irange'), 'AnsiChar');
+    Eq('5.5.2: for-in over an enum value list: the enum',
+      DeclTypeOf(LE, 'ienum'), 'TFiColor');
+    Eq('5.5.2: for-in over `APaths + [ADir]`: string',
+      DeclTypeOf(LE, 'ijoinedr'), 'string');
+    Eq('5.5.2: for-in over `(APaths + APaths)`: string',
+      DeclTypeOf(LE, 'iboth'), 'string');
+    Eq('5.5.2: for-in over `[B, W]` (dcc: an anonymous subrange): no type',
+      DeclTypeOf(LE, 'iordmix'), '?');
 
     // ---- 3.1.3 inline var/const inference ----
     LE := ModelByName('xiv');

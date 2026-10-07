@@ -14632,6 +14632,96 @@ const
       Result := XPlain(AMid, LSym);
   end;
 
+  { A collection with no type of its own to classify, read off its SHAPE:
+    - `[a, b]` with no range is an open array constructor (B.9), and its
+      element is what its elements type as - all one type, or a mix of Char
+      and string, which is string (dcc64 37.0: `['a', 'bc']` and `['bc',
+      'a']` walk strings, `['.pas', '.inc']` strings, `['a', 'b']` Chars,
+      `[1, 2]` Integers, `[AList]` the list's class). Elements of other
+      differing types are refused: dcc makes `[B, W]` over a Byte and a Word
+      an anonymous subrange and `[1, 3000000000]` Int64, neither of which
+      this reproduces;
+    - a range anywhere makes it a SET constructor, whose base type is what
+      the loop walks: `['a'..'c']` is AnsiChar (a set of Char is a set of
+      AnsiChar), `[cRed..cBlue]` the enum; any other base (an integer range
+      is a set of an anonymous subrange) is refused;
+    - `X + Y`, `X - Y`, `X * Y`: an array concatenation (`[LDir] + APaths`,
+      `APaths + APaths` - a TArray<string> plus anything walks strings), a
+      set union/difference/intersection or a string concatenation; every one
+      walks the element of either operand, so the left one's when it has
+      one, else the right one's;
+    - parentheses are transparent.
+    Before this, all of these had no element type at all - `for var LPath in
+    [LDir] + FLastSearchPaths` showed no type in a hover (2026-10-07). }
+  function ShapeElementX(ANode: Integer): TSemaXType;
+  var
+    LTm: TPasSemaModel;
+    LKid, LBound: Integer;
+    LElem: TSemaXType;
+    LHasRange: Boolean;
+    LCatR, LCatE: TSemaTypeCat;
+  begin
+    Result := XNil;
+    LTm := FModels[AMid];
+    case LTm.Tree.Nodes[ANode].Kind of
+      nkParen:
+        if LTm.Tree.Nodes[ANode].FirstChild <> NIL_NODE then
+          Result := ForInElementX(AMid, LTm.Tree.Nodes[ANode].FirstChild, XNil);
+      nkBinaryOp:
+        begin
+          if not (LTm.Tree.Source.VisibleToken(LTm.Tree.Nodes[ANode].Aux).Kind
+               in [tkPlus, tkMinus, tkStar]) then
+            Exit;
+          LKid := LTm.Tree.Nodes[ANode].FirstChild;
+          if LKid = NIL_NODE then
+            Exit;
+          Result := ForInElementX(AMid, LKid, XNil);
+          if not XValid(Result) and
+             (LTm.Tree.Nodes[LKid].NextSibling <> NIL_NODE) then
+            Result := ForInElementX(AMid, LTm.Tree.Nodes[LKid].NextSibling,
+              XNil);
+        end;
+      nkSetCtor:
+        begin
+          LHasRange := False;
+          LKid := LTm.Tree.Nodes[ANode].FirstChild;
+          while LKid <> NIL_NODE do
+          begin
+            LBound := LKid;
+            if LTm.Tree.Nodes[LKid].Kind = nkRange then
+            begin
+              LHasRange := True;
+              LBound := LTm.Tree.Nodes[LKid].FirstChild;
+            end;
+            LElem := UntypedInitTypeX(AMid, LBound, {AFollowForeign} True);
+            if not XValid(LElem) then
+              Exit(XNil);
+            if not XValid(Result) then
+              Result := LElem
+            else if not XSameType(Result, LElem) then
+            begin
+              LCatR := XCatOf(Result);
+              LCatE := XCatOf(LElem);
+              if (LCatR = tcChar) and (LCatE = tcString) then
+                Result := LElem
+              else if not ((LCatR = tcString) and (LCatE = tcChar)) then
+                Exit(XNil);
+            end;
+            LKid := LTm.Tree.Nodes[LKid].NextSibling;
+          end;
+          if LHasRange and XValid(Result) then
+            case XCatOf(Result) of
+              tcChar:
+                Result := BuiltinX(AMid, 'ansichar');
+              tcEnum:
+                ;
+            else
+              Result := XNil;
+            end;
+        end;
+    end;
+  end;
+
 var
   LCur, LEnum: TSemaXType;
   LM: TPasSemaModel;
@@ -14657,7 +14747,12 @@ begin
   if not XValid(LCur) then
     LCur := WithTargetTypeX(AMid, ACollNode);
   if not XValid(LCur) then
-    Exit(ElementX(AMid, ACollNode));
+  begin
+    Result := ShapeElementX(ACollNode);
+    if not XValid(Result) then
+      Result := ElementX(AMid, ACollNode);
+    Exit;
+  end;
   for LDepth := 1 to 32 do
   begin
     if not XValid(LCur) then
