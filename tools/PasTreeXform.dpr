@@ -2508,9 +2508,17 @@ begin
         // member `Default`, a bare `Default(X)` is the intrinsic only after
         // the unit wrote one before (S15, System.Threading 3514; probes
         // s15\probes D01-D04) - qualifying the earlier ones turns it into the
-        // member, E2066.
+        // member, E2066. `Flush`, `ChDir`, `MkDir`, `RmDir` are System
+        // routines a bare call of which dcc follows with the $I+ I/O check,
+        // as it does a file intrinsic's - `System.Flush(T)` has none: the
+        // same routine, another code (F41; spec B.4 note, probed on dcc64
+        // 37.0: SAME under $I-).
         if (SameText(LTM.Symbols[LSym].Name, 'Slice') or
-            SameText(LTM.Symbols[LSym].Name, 'Default')) and
+            SameText(LTM.Symbols[LSym].Name, 'Default') or
+            SameText(LTM.Symbols[LSym].Name, 'Flush') or
+            SameText(LTM.Symbols[LSym].Name, 'ChDir') or
+            SameText(LTM.Symbols[LSym].Name, 'MkDir') or
+            SameText(LTM.Symbols[LSym].Name, 'RmDir')) and
            ((LTM.Scopes[LScope].Kind = sckSystem) or (LTMid = GQSystemMid)) then
         begin
           Inc(GQPosition);
