@@ -722,7 +722,14 @@ type
       (sfBuiltin-flagged bindings only) that this stays a resolved-identity
       search, not the text search the rest of this file avoids. }
     function BuiltinNameAt(AMid, ALine, ACol: Integer;
-      out AName: string): Boolean;
+      out AName: string): Boolean; overload;
+    { The same, with the seeded symbol it binds to - in AMid for a bare name,
+      in System's model for a `System.Byte` that bound through its
+      qualifier - for a host that describes the builtin (its kind, its
+      range). A `System.X` whose qualifier bound nothing is AMid's own seed
+      of X. }
+    function BuiltinNameAt(AMid, ALine, ACol: Integer; out AName: string;
+      out ATMid, ASym: Integer): Boolean; overload;
     // Every reference bound to a compiler-seeded builtin named AName, across
     // every loaded model.
     function FindBuiltinReferences(const AName: string): TArray<TPasRefHit>;
@@ -748,6 +755,19 @@ type
       were clickable. }
     function DefineSpanAt(AMid, ALine, ACol: Integer;
       out AStart, ALen: Integer): Boolean;
+    { The cursor sits on a name of a `$IF`/`$ELSEIF` expression of the
+      model's main file that is NOT a conditional symbol - `CompilerVersion`,
+      `RTLVersion`, a unit constant, a `Declared(X)` argument (TPasIfNameRef).
+      AStart/ALen: its span, offsets into the main-file text as DefineSpanAt's.
+      ATMid/ASym: the declaration the name denotes as the unit's own code
+      would see it - its own unit-level declarations (interface, then
+      implementation), then its uses and System (ResolveRealDecl), then the
+      compiler-seeded name of its System scope (`CompilerVersion`, which
+      nothing declares: ATMid = AMid and ASym an sfBuiltin symbol). ASym =
+      NIL_SYM when nothing is called that. True whenever the caret is on such
+      a name, resolved or not. }
+    function IfNameAt(AMid, ALine, ACol: Integer; out AName: string;
+      out AStart, ALen, ATMid, ASym: Integer): Boolean;
     { Every mention of the conditional symbol AName across every loaded model
       (case-insensitive, as dcc compares them), sorted by file/line/col. The
       `$DEFINE`/`$UNDEF` sites are IN the list - each is a reference, and a
@@ -2681,25 +2701,56 @@ end;
 function TPasNavigator.BuiltinNameAt(AMid, ALine, ACol: Integer;
   out AName: string): Boolean;
 var
+  LTMid, LSym: Integer;
+begin
+  Result := BuiltinNameAt(AMid, ALine, ACol, AName, LTMid, LSym);
+end;
+
+function TPasNavigator.BuiltinNameAt(AMid, ALine, ACol: Integer;
+  out AName: string; out ATMid, ASym: Integer): Boolean;
+var
   LIdent: TPasNavIdent;
   LM: TPasSemaModel;
-  LSym, LFbMid, LFbSym: Integer;
+  LFbMid, LFbSym, LParent, LQual: Integer;
 begin
   Result := False;
+  ATMid := -1;
+  ASym := NIL_SYM;
   if not IdentAt(AMid, ALine, ACol, LIdent) then
     Exit;
   LM := FProj.Model(AMid);
-  LSym := LM.RefMap[LIdent.Node];
-  if (LSym = NIL_SYM) or not (sfBuiltin in LM.Symbols[LSym].Flags) then
+  // A same-model binding, or a cross-model one: `System.Byte` binds through
+  // the qualifier to System's own seed (pastree-lsp, 2026-10-07: RefMap
+  // alone missed it, and the hover answered nothing while F12 worked).
+  if not ResolveSymbolAt(AMid, LIdent.Node, ATMid, ASym) then
+  begin
+    // Unbound - a `System.X` whose qualifier names no loaded unit. The
+    // member name of a `System.` qualifier is the model's own seed.
+    ATMid := -1;
+    ASym := NIL_SYM;
+    LParent := LM.Tree.Nodes[LIdent.Node].Parent;
+    if (LParent = NIL_NODE) or (LM.Tree.Nodes[LParent].Kind <> nkMember) or
+       (LM.SystemScope = NIL_SCOPE) then
+      Exit;
+    LQual := LM.Tree.Nodes[LParent].FirstChild;
+    if (LQual = LIdent.Node) or (LM.Tree.Nodes[LQual].Kind <> nkIdent) or
+       not LM.Tree.NodeTextEquals(LQual, 'System') then
+      Exit;
+    ASym := LM.Resolve(LM.SystemScope, LM.Tree.NodeNameLower(LIdent.Node));
+    if ASym = NIL_SYM then
+      Exit;
+    ATMid := AMid;
+  end;
+  if not (sfBuiltin in FProj.Model(ATMid).Symbols[ASym].Flags) then
     Exit;
   // A builtin that DOES have a real declaration reachable somewhere is
   // SymbolAt's job (its own ResolveRealDecl redirect gives a precise
   // (unit, symbol) identity) -- this name-based fallback is only for the
   // ones that genuinely have none.
-  if FProj.ResolveRealDecl(AMid, LM.Symbols[LSym].NameLower, LFbMid, LFbSym)
-  then
+  if FProj.ResolveRealDecl(AMid, FProj.Model(ATMid).Symbols[ASym].NameLower,
+       LFbMid, LFbSym) then
     Exit;
-  AName := LM.Symbols[LSym].Name;
+  AName := FProj.Model(ATMid).Symbols[ASym].Name;
   Result := True;
 end;
 
@@ -2830,6 +2881,74 @@ begin
   begin
     AStart := FProj.Model(AMid).Tree.Source.DefineRefs[LIdx].Start;
     ALen := FProj.Model(AMid).Tree.Source.DefineRefs[LIdx].Len;
+  end;
+end;
+
+function TPasNavigator.IfNameAt(AMid, ALine, ACol: Integer; out AName: string;
+  out AStart, ALen, ATMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LTS: TPasTokenStream;
+  LOffset, LIdx, LScope, LS: Integer;
+  LLower: string;
+  LKind: TSemaScopeKind;
+begin
+  Result := False;
+  AName := '';
+  AStart := 0;
+  ALen := 0;
+  ATMid := -1;
+  ASym := NIL_SYM;
+  if (AMid < 0) or (AMid >= FProj.ModelCount) or
+     not FProj.EnsureHydrated(AMid) then
+    Exit;
+  LM := FProj.Model(AMid);
+  LTS := LM.Tree.Source.Files[0];
+  if (ALine < 1) or (ALine - 1 > High(LTS.LineStarts)) or (ACol < 1) then
+    Exit;
+  LOffset := LTS.LineStarts[ALine - 1] + (ACol - 1);
+  for LIdx := 0 to High(LM.Tree.Source.IfNameRefs) do
+    with LM.Tree.Source.IfNameRefs[LIdx] do
+      // End inclusive, as DefineRefIndexAt.
+      if (FileId = 0) and (LOffset >= Start) and (LOffset <= Start + Len) then
+      begin
+        AName := Name;
+        AStart := Start;
+        ALen := Len;
+        Result := True;
+        Break;
+      end;
+  if not Result then
+    Exit;
+  LLower := LowerCase(AName);
+  // The unit's own declarations: its unit scope, then its implementation
+  // scope. A hit there that is a seed (the unit scope joins System) is not
+  // the unit's - it is the last resort below.
+  for LKind in [sckUnit, sckImplementation] do
+    for LScope := 0 to LM.Scopes.Count - 1 do
+      if LM.Scopes[LScope].Kind = LKind then
+      begin
+        LS := LM.Resolve(LScope, LLower);
+        if (LS <> NIL_SYM) and (LM.Symbols[LS].DeclNode <> NIL_NODE) then
+        begin
+          ATMid := AMid;
+          ASym := LS;
+          Exit;
+        end;
+        Break;
+      end;
+  if FProj.ResolveRealDecl(AMid, LLower, ATMid, ASym) then
+    Exit;
+  ATMid := -1;
+  ASym := NIL_SYM;
+  if LM.SystemScope <> NIL_SCOPE then
+  begin
+    LS := LM.Resolve(LM.SystemScope, LLower);
+    if LS <> NIL_SYM then
+    begin
+      ATMid := AMid;
+      ASym := LS;
+    end;
   end;
 end;
 

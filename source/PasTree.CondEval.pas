@@ -114,6 +114,13 @@ type
     // of the tree, not a by-product of evaluation, which short-circuits.
     // EvalCondText fills it; EvalCondNode never touches it.
     DefinedSpans: TArray<TPasCondSpan>;
+    // Every OTHER name the expression contains - `CompilerVersion`,
+    // `RTLVersion`, a unit constant, a `Declared(X)` or `SizeOf(T)` argument -
+    // source order, what a hover or a jump on that name reads. Neither a
+    // callee (`Defined`, `SizeOf`) nor a Defined() argument (a conditional
+    // symbol, DefinedSpans'); of a dotted `System.CompilerVersion` only the
+    // last segment. Filled by EvalCondText alongside DefinedSpans.
+    NameSpans: TArray<TPasCondSpan>;
   end;
 
 { Evaluates the expression rooted at ANode. Never raises; anything it cannot
@@ -981,6 +988,68 @@ begin
   end;
 end;
 
+// Appends the span of every name under ANode that is neither a callee nor a
+// Defined() argument - see TPasCondContext.NameSpans. A dotted name gives its
+// last segment (nkMember: qualifier first, the member name last). Source
+// order, as CollectDefinedSpans.
+procedure CollectNameSpans(const ATree: TPasTree; ANode: Integer;
+  var ASpans: TArray<TPasCondSpan>);
+var
+  LChild, LTok, LCallee: Integer;
+  LSpan: TPasCondSpan;
+begin
+  if ANode = NIL_NODE then
+    Exit;
+  case ATree.Nodes[ANode].Kind of
+    nkIdent:
+      begin
+        LTok := ATree.Nodes[ANode].FirstToken;
+        if (LTok >= 0) and (LTok <= High(ATree.Source.Visible)) then
+        begin
+          LSpan.Start := ATree.Source.VisibleToken(LTok).Start;
+          LSpan.Len := ATree.Source.VisibleToken(LTok).Len;
+          ASpans := ASpans + [LSpan];
+        end;
+        Exit;
+      end;
+    nkMember:
+      begin
+        // The qualifier (a unit name, mostly) is skipped; the name is the
+        // last child.
+        LChild := ATree.Nodes[ANode].FirstChild;
+        while (LChild <> NIL_NODE) and
+              (ATree.Nodes[LChild].NextSibling <> NIL_NODE) do
+          LChild := ATree.Nodes[LChild].NextSibling;
+        if (LChild <> NIL_NODE) and (ATree.Nodes[LChild].Kind = nkIdent) then
+          CollectNameSpans(ATree, LChild, ASpans);
+        Exit;
+      end;
+    nkCall:
+      begin
+        LCallee := ATree.Nodes[ANode].FirstChild;
+        if LCallee = NIL_NODE then
+          Exit;
+        // Defined(X): X is a conditional symbol, DefinedSpans' row.
+        if (ATree.Nodes[LCallee].Kind = nkIdent) and
+           ATree.NodeTextEquals(LCallee, 'Defined') then
+          Exit;
+        LChild := ATree.Nodes[LCallee].NextSibling;   // the arguments
+        while LChild <> NIL_NODE do
+        begin
+          CollectNameSpans(ATree, LChild, ASpans);
+          LChild := ATree.Nodes[LChild].NextSibling;
+        end;
+        Exit;
+      end;
+  end;
+  LChild := ATree.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    CollectNameSpans(ATree, LChild, ASpans);
+    LChild := ATree.Nodes[LChild].NextSibling;
+  end;
+end;
+
 function EvalCondText(const AExpr: string; var ACtx: TPasCondContext;
   out ABadExpr: Boolean): TPasCondValue;
 var
@@ -992,6 +1061,8 @@ begin
   ABadExpr := Length(LDiags) > 0;
   ACtx.DefinedSpans := nil;
   CollectDefinedSpans(LTree, LRoot, ACtx.DefinedSpans);
+  ACtx.NameSpans := nil;
+  CollectNameSpans(LTree, LRoot, ACtx.NameSpans);
   Result := EvalCondNode(LTree, LRoot, ACtx);
   if ABadExpr then
     Result := MkBool(False);

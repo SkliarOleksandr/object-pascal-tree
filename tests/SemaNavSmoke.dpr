@@ -738,6 +738,24 @@ const
     '{$DEFINE NAVINC}'#10 +                                // 2
     '{$ENDIF}'#10;                                         // 3
 
+  // The other names of a $IF expression (TPasIfNameRef / IfNameAt), and a
+  // `System.`-qualified intrinsic (BuiltinNameAt's cross-model binding).
+  UNIT_IFN =
+    'unit NavIfn;'#10 +                                    // 1
+    'interface'#10 +                                       // 2
+    'const LEVEL = 3;'#10 +                                // 3  LEVEL col 7
+    '{$IF LEVEL > 2}'#10 +                                 // 4  LEVEL col 6
+    'const C = 1;'#10 +                                    // 5
+    '{$IFEND}'#10 +                                        // 6
+    '{$IF CompilerVersion > 20}'#10 +                      // 7  col 6
+    'const D = 1;'#10 +                                    // 8
+    '{$IFEND}'#10 +                                        // 9
+    '{$IF Defined(NAVX) and (System.MaxInt > 0)}'#10 +     // 10 NAVX col 14, MaxInt col 32
+    '{$IFEND}'#10 +                                        // 11
+    'type TQ = System.Byte;'#10 +                          // 12 Byte col 18
+    'implementation'#10 +                                  // 13
+    'end.'#10;                                             // 14
+
   // Line/col layout matters: the checks below address exact positions.
   UNIT_A =
     'unit NavA;'#10 +                          // 1
@@ -2313,6 +2331,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavFam.pas'), UNIT_FAM);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDef.pas'), UNIT_DEF);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDef.inc'), INC_DEF);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavIfn.pas'), UNIT_IFN);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOut.pas'), UNIT_OUT);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDpA.pas'), UNIT_DPA);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDpB.pas'), UNIT_DPB);
@@ -2793,6 +2812,38 @@ begin
         (LRName = 'NAVBAR'));
       Ok('DefineAt: an ordinary identifier declines (const A, line 6)',
         not GNav.DefineAt(LDefMid, 6, 7, {out} LRName, {out} LRaw));
+
+      // ---- IfNameAt: the other names of a $IF expression. Fixture NavIfn.
+      var LIfnMid := GNav.ModelIdOf(TPath.Combine(LDir, 'NavIfn.pas'));
+      var LIfStart, LIfLen, LIfMid, LIfSym: Integer;
+      Ok('NavIfn model found', LIfnMid >= 0);
+      // LEVEL, CompilerVersion, MaxInt - not Defined's NAVX (a conditional
+      // symbol, DefineRefs'), not the callee, not the `System` qualifier.
+      Ok('IfNameRefs: three names recorded',
+        Length(GProj.Model(LIfnMid).Tree.Source.IfNameRefs) = 3);
+      Ok('IfNameAt: a unit constant resolves to its declaration',
+        GNav.IfNameAt(LIfnMid, 4, 6, LRName, LIfStart, LIfLen, LIfMid, LIfSym)
+        and (LRName = 'LEVEL') and (LIfLen = 5) and (LIfMid = LIfnMid) and
+        (LIfSym <> NIL_SYM) and
+        (GProj.Model(LIfMid).Symbols[LIfSym].DeclNode <> NIL_NODE));
+      Ok('IfNameAt: CompilerVersion is the seed (no declaration anywhere)',
+        GNav.IfNameAt(LIfnMid, 7, 6, LRName, LIfStart, LIfLen, LIfMid, LIfSym)
+        and (LIfSym <> NIL_SYM) and
+        (sfBuiltin in GProj.Model(LIfMid).Symbols[LIfSym].Flags));
+      Ok('IfNameAt: a Defined() argument is DefineAt''s, not this',
+        not GNav.IfNameAt(LIfnMid, 10, 14, LRName, LIfStart, LIfLen, LIfMid,
+          LIfSym));
+      Ok('IfNameAt: the name of a qualified System.MaxInt',
+        GNav.IfNameAt(LIfnMid, 10, 32, LRName, LIfStart, LIfLen, LIfMid, LIfSym)
+        and (LRName = 'MaxInt'));
+      Ok('IfNameAt: declines in code',
+        not GNav.IfNameAt(LIfnMid, 3, 7, LRName, LIfStart, LIfLen, LIfMid,
+          LIfSym));
+      // BuiltinNameAt on a `System.`-qualified intrinsic type, with its seed.
+      Ok('BuiltinNameAt: System.Byte, on Byte',
+        GNav.BuiltinNameAt(LIfnMid, 12, 18, LRName, LIfMid, LIfSym) and
+        SameText(LRName, 'Byte') and
+        (sfBuiltin in GProj.Model(LIfMid).Symbols[LIfSym].Flags));
 
       // FindDefineReferences: case-insensitive, include rows included,
       // $DEFINE/$UNDEF rows included, kinds and activity carried.

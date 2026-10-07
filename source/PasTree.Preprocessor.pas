@@ -161,6 +161,22 @@ type
     Name: string;
   end;
 
+  // One mention of a name that is NOT a conditional symbol inside a `$IF` /
+  // `$ELSEIF` expression - `CompilerVersion` of `{$IF CompilerVersion < 31}`,
+  // a unit constant, the argument of `Declared(X)` or `SizeOf(T)` - so a hover
+  // or a jump on it has something to find (pastree-lsp, 2026-10-07: neither
+  // answered there). Recorded for active and dead directives alike, like
+  // TPasDefineRef, and in the same coordinates: Start/Len span the name as
+  // written in Files[FileId].Source. Resolution is the reader's - the name is
+  // looked up as the unit's code would see it (TPasNavigator.IfNameAt).
+  TPasIfNameRef = record
+    FileId: Integer;
+    Start: Integer;
+    Len: Integer;
+    Active: Boolean;
+    Name: string;
+  end;
+
   // One `{$I file}` / `{$INCLUDE file}` directive SITE, in the includer's file
   // coordinates - what a Go To list shows as an `include` row and what a jump
   // to "where is this file pulled in" lands on. Recorded whether or not the
@@ -252,6 +268,9 @@ type
     // Every `{$I}`/`{$INCLUDE}` directive site, processing order - see
     // TPasIncludeRef. Retained across DemoteText for the same reason.
     IncludeRefs: TArray<TPasIncludeRef>;
+    // Every other name a `$IF`/`$ELSEIF` expression mentions - see
+    // TPasIfNameRef. Retained across DemoteText too.
+    IfNameRefs: TArray<TPasIfNameRef>;
     function VisibleToken(AIndex: Integer): TPasToken;
     function VisibleText(AIndex: Integer): string;
     { SameText(VisibleText(AIndex), AWord) without materializing the text -
@@ -375,6 +394,7 @@ type
     FDefineRefs: TList<TPasDefineRef>;
     FDefineNames: TPasSpellingPool;   // DefineRefs' Name, across runs
     FIncludeRefs: TList<TPasIncludeRef>;
+    FIfNameRefs: TList<TPasIfNameRef>;
     FSwitchStack: TStack<TPasOptState>;
     FFileNames: TList<string>;
     FFiles: TList<TPasTokenStream>;
@@ -876,6 +896,7 @@ begin
   FAlignEvents := TList<TPasAlignEvent>.Create;
   FDefineRefs := TList<TPasDefineRef>.Create;
   FIncludeRefs := TList<TPasIncludeRef>.Create;
+  FIfNameRefs := TList<TPasIfNameRef>.Create;
   FFileNames := TList<string>.Create;
   FFiles := TList<TPasTokenStream>.Create;
   FVisible := TList<TPasVisibleToken>.Create;
@@ -959,6 +980,7 @@ begin
   FAlignEvents.Free;
   FDefineRefs.Free;
   FIncludeRefs.Free;
+  FIfNameRefs.Free;
   FSwitchStack.Free;
   inherited;
 end;
@@ -1063,6 +1085,7 @@ begin
   FAlignEvents.Clear;
   FDefineRefs.Clear;
   FIncludeRefs.Clear;
+  FIfNameRefs.Clear;
   FRttiState := Default(TPasRttiState);   // Mode = rmInherit, the dcc default
   FVarPropSetter := False;                // dcc default: OFF (13.1.6)
   FLiveAsm := False;
@@ -1107,6 +1130,7 @@ begin
   Result.AlignEvents := FAlignEvents.ToArray;
   Result.DefineRefs := FDefineRefs.ToArray;
   Result.IncludeRefs := FIncludeRefs.ToArray;
+  Result.IfNameRefs := FIfNameRefs.ToArray;
   SetLength(Result.Skipped, FSkipped.Count);
   for LIdx := 0 to FSkipped.Count - 1 do
     Result.Skipped[LIdx] := FSkipped[LIdx].ToArray;
@@ -1966,6 +1990,7 @@ var
   LSym: TPasUnresolvedSymbol;
   LIdx: Integer;
   LRef: TPasDefineRef;
+  LNameRef: TPasIfNameRef;
   LAsk: TPasDeclaredAsk;
 begin
   LCtx := Default(TPasCondContext);
@@ -1991,6 +2016,18 @@ begin
     LRef.Kind := drDefined;
     LRef.Active := AActive;
     FDefineRefs.Add(LRef);
+  end;
+  // And every other name it mentions (CompilerVersion, a constant), for a
+  // hover or a jump on it - see TPasIfNameRef.
+  for LIdx := 0 to High(LCtx.NameSpans) do
+  begin
+    LNameRef.FileId := AFileId;
+    LNameRef.Start := AExprStart + LCtx.NameSpans[LIdx].Start;
+    LNameRef.Len := LCtx.NameSpans[LIdx].Len;
+    LNameRef.Name := FDefineNames.Intern(
+      PChar(Pointer(AExpr)) + LCtx.NameSpans[LIdx].Start, LNameRef.Len);
+    LNameRef.Active := AActive;
+    FIfNameRefs.Add(LNameRef);
   end;
   // Unanswered Declared() names and symbol questions feed the second pass
   // (RunDeclaredPass) - but only when they could still CHANGE anything: a
