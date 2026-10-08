@@ -471,7 +471,10 @@ pointee of M's own declaration read for `M^` as a base (F45, fixed in
 implementation `uses` entry - `PByte` in System.Hash's interface to
 System.Types, the WinRT aliases of System.Win.ShareContract to
 Winapi.CommonTypes past the interface's own Winapi.ApplicationModel.DataTransfer
-(F35, F36, fixed in 0.93.20); the member after `TThreadList<IInterface>.` looked up in
+(F35, F36, fixed in 0.93.20); a member already bound typed in its base's
+frame when an alias or a generic ancestor declares it - `LPair.Value` over
+TPasIntMap<V>'s `TSlot = TPair<Integer, V>`, WinRT's `TFooImport.Statics`
+- left as the open parameter (F43, fixed in 0.93.21); the member after `TThreadList<IInterface>.` looked up in
 the unit's own plain `TThreadList` the head was first bound to, once the head
 itself had moved to the used unit's generic (F44, fixed in 0.93.15). And one
 regression the rung caught: a bare `Pointer` bound

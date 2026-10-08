@@ -518,6 +518,66 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // F43 of the parser-fidelity plan: a for-in over a generic class whose
+  // enumerator's Current is a NESTED ALIAS of another generic instantiated
+  // over the class's parameter (TPasIntMap<V>'s `TSlot = TPair<Integer, V>`).
+  // The element's member `Value` was typed as the open V, not the argument.
+  UNIT_XGP =
+    'unit XGP;'#10'interface'#10'type'#10 +
+    '  TGePair<K, V> = record'#10 +
+    '    Key: K;'#10 +
+    '    Value: V;'#10 +
+    '  end;'#10 +
+    'implementation'#10'end.'#10;
+  UNIT_XGE =
+    'unit XGE;'#10'interface'#10 +
+    'uses XGP;'#10 +
+    'type'#10 +
+    '  TGeMap<V> = class'#10 +
+    '  public type'#10 +
+    '    TSlot = TGePair<Integer, V>;'#10 +
+    '    TEnumerator = record'#10 +
+    '      FMap: TGeMap<V>;'#10 +
+    '      function MoveNext: Boolean;'#10 +
+    '      function GetCurrent: TSlot;'#10 +
+    '      property Current: TSlot read GetCurrent;'#10 +
+    '    end;'#10 +
+    '  public'#10 +
+    '    function GetEnumerator: TEnumerator;'#10 +
+    '    function First: TSlot;'#10 +
+    '  end;'#10 +
+    '  TGeRec = record X: Integer; end;'#10 +
+    '  TGeImport<S> = class'#10 +
+    '    class var FS: S;'#10 +
+    '    class property Statics: S read FS;'#10 +
+    '  end;'#10 +
+    '  TGeRecImport = class(TGeImport<TGeRec>) end;'#10 +
+    '  TGeHolder = class'#10 +
+    '    Map: TGeMap<TGeRec>;'#10 +
+    '  end;'#10 +
+    'procedure Run(M: TGeMap<TGeRec>; H: TGeHolder);'#10 +
+    'implementation'#10 +
+    'function TGeMap<V>.TEnumerator.MoveNext: Boolean; begin Result := False; end;'#10 +
+    'function TGeMap<V>.TEnumerator.GetCurrent: TSlot; begin Result := Default(TSlot); end;'#10 +
+    'function TGeMap<V>.GetEnumerator: TEnumerator; begin Result.FMap := Self; end;'#10 +
+    'function TGeMap<V>.First: TSlot; begin Result := Default(TSlot); end;'#10 +
+    'procedure Run(M: TGeMap<TGeRec>; H: TGeHolder);'#10 +
+    'begin'#10 +
+    '  var GeFirst := M.First.Value;'#10 +
+    '  for var GePair in M do'#10 +
+    '  begin'#10 +
+    '    var GeVal := GePair.Value;'#10 +
+    '    var GeKey := GePair.Key;'#10 +
+    '  end;'#10 +
+    '  for var GeHPair in H.Map do'#10 +
+    '  begin'#10 +
+    '    var GeHx := GeHPair.Value.X;'#10 +
+    '    with GeHPair.Value do GeHx := X;'#10 +
+    '  end;'#10 +
+    '  var GeSx := TGeRecImport.Statics.X;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // 3.1.3 / 3.2.1 inference fixtures. XJ declares the overload shapes the
   // inference must decide rather than guess (a parameterless overload beside
   // one with parameters, a same-arity pair with DIFFERENT result types, a
@@ -1375,6 +1435,31 @@ begin
         end;
 end;
 
+// WithTargetTypeX of the expression spelled AExpr through a probe session,
+// as the resolver's rung (PasTreeXform tm) asks it; '?' when untyped.
+function ProbeTypeOf(AModel: TPasSemaModel; const AExpr: string): string;
+var
+  LX: TSemaXType;
+begin
+  Result := '?';
+  for var LId := 0 to GProj.ModelCount - 1 do
+    if GProj.Model(LId) = AModel then
+      for var LNode := 0 to High(AModel.RefMap) do
+        if (AModel.Tree.Nodes[LNode].Kind in [nkIdent, nkMember, nkCall,
+            nkTypeArgs]) and (SpanText(AModel, LNode) = AExpr) then
+        begin
+          var LProbe := TPasXProbe.Create;
+          try
+            LX := GProj.WithTargetTypeX(LId, LNode, LProbe);
+          finally
+            LProbe.Free;
+          end;
+          if XValid(LX) then
+            Exit(GProj.XTypeText(LX));
+          Exit;
+        end;
+end;
+
 // The unit name of the overload CrossType selected for the call spelled
 // AExpr ('?' when no CallTargetX was recorded) - the future overload-precise
 // navigation jump reads the same map.
@@ -1734,6 +1819,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XF.pas'), UNIT_XF);
   TFile.WriteAllText(TPath.Combine(LDir, 'XFI.pas'), UNIT_XFI);
   TFile.WriteAllText(TPath.Combine(LDir, 'XPD.pas'), UNIT_XPD);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XGP.pas'), UNIT_XGP);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XGE.pas'), UNIT_XGE);
   TFile.WriteAllText(TPath.Combine(LDir, 'XJV.pas'), UNIT_XJV);
   TFile.WriteAllText(TPath.Combine(LDir, 'XIV.pas'), UNIT_XIV);
   TFile.WriteAllText(TPath.Combine(LDir, 'XEV.pas'), UNIT_XEV);
@@ -1802,8 +1889,10 @@ begin
     // instantiate against at all. 29 since XFI: TArray<string>,
     // TFiList<TFiItem> and the TFiEnum<TFiItem> its GetEnumerator returns,
     // plus the open TFiEnum<T> twice (the interface/implementation T symbols,
-    // as TBox<T> above).
-    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '29');
+    // as TBox<T> above). 33 since XGE: TGeMap<TGeRec>, the open TGeMap<V> of
+    // the enumerator's field, and TGePair<Integer, V> / TGePair<Integer,
+    // TGeRec> behind the nested TSlot alias; 34 with TGeImport<TGeRec>.
+    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '34');
 
     // ---- Cross-unit overload selection by ARGUMENT TYPES ----
     LV := ModelByName('xv');
@@ -2108,6 +2197,28 @@ begin
     Eq('F45: `Q^^.Tag` is the field''s type', DeclTypeOf(LE, 'pdtag'),
       'TPdTag');
     Eq('F45: `(Q^)^.Next` too', DeclTypeOf(LE, 'pdnext'), 'PPdRec');
+
+    // ---- F43: a nested alias of a generic over the class's parameter ----
+    LE := ModelByName('xge');
+    Ok('XGE loaded', Assigned(LE));
+    Ok('XGE: no diags at all', Length(LE.Diags) = 0);
+    Eq('F43: `M.First.Value` is the argument', DeclTypeOf(LE, 'gefirst'),
+      'TGeRec');
+    Eq('F43: the for-in element''s Value is the argument',
+      DeclTypeOf(LE, 'geval'), 'TGeRec');
+    Eq('F43: ...and its Key the alias''s own Integer',
+      DeclTypeOf(LE, 'gekey'), 'Integer');
+    Eq('F43: through a field''s map, the element''s Value''s member',
+      DeclTypeOf(LE, 'gehx'), 'Integer');
+    Eq('F43: the element''s Value as an expression',
+      XTypeOf(LE, 'GeHPair.Value'), 'TGeRec');
+    Eq('F43: ...and through a probe, as the rung asks it',
+      ProbeTypeOf(LE, 'GeHPair.Value'), 'TGeRec');
+    Eq('F43: `GePair.Value` through a probe', ProbeTypeOf(LE, 'GePair.Value'),
+      'TGeRec');
+    Eq('F43: a generic ancestor''s class property through a probe',
+      ProbeTypeOf(LE, 'TGeRecImport.Statics'), 'TGeRec');
+    Eq('F43: ...and its member', DeclTypeOf(LE, 'gesx'), 'Integer');
 
     // ---- 3.1.3 inline var/const inference ----
     LE := ModelByName('xiv');

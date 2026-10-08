@@ -10555,6 +10555,45 @@ var
       Result := LFCtx;
   end;
 
+  { The frame a member ALREADY BOUND to (AMid, ASym) is typed in, on a base of
+    type ABX: ABX's own frame when the member is declared in ABX's own type,
+    else the frame the member walk reaches it in. ABX.Inst is the frame of
+    ABX's declaration only, and an alias or an ancestor names another generic
+    over it: `TSlot = TPair<Integer, V>` nested in TPasIntMap<V> - `Value`,
+    TPair's V, is not TPasIntMap's V (F43: a probe after the pass, where
+    `LPair.Value` is bound, typed it as the open V; the pass itself, finding
+    the member unbound, had the walk's frame). The same for a plain base
+    whose generic ANCESTOR declares the member: WinRT's `TFooImport.Statics`,
+    `class property Statics: S` of TWinRTGenericImportS<S>, typed as S. Asked
+    only for a member declared outside the base's own type whose declared
+    type is an open type parameter - what a wrong frame leaves open. }
+  function BoundMemberCtx(AMid, ASym: Integer; const ABX: TSemaXType;
+    AName, ACtx: Integer): Integer;
+  var
+    LScope, LFMid, LFSym, LFCtx: Integer;
+    LDecl: TSemaXType;
+  begin
+    Result := ACtx;
+    if not XValid(ABX) or (ACtx <> ABX.Inst) then
+      Exit;
+    LScope := FModels[AMid].Symbols[ASym].Scope;
+    if (LScope = NIL_SCOPE) or
+       ((AMid = ABX.UnitId) and
+        (FModels[AMid].Scopes[LScope].StructSym = ABX.Sym)) then
+      Exit;
+    if not (FModels[AMid].Symbols[ASym].Kind in [skRoutine, skVar, skField,
+       skProperty, skConst]) then
+      Exit;
+    LDecl := DeclTypeX(AMid, ASym);
+    if not XValid(LDecl) or
+       (FModels[LDecl.UnitId].Symbols[LDecl.Sym].Kind <> skGenericParam) then
+      Exit;
+    if FindMemberX(AId, ABX, PasNodeKey(LM.Tree, AName), LFMid, LFSym,
+         LFCtx) and (LFMid = AMid) and
+       (FModels[LFMid].Symbols[LFSym].Scope = LScope) then
+      Result := LFCtx;
+  end;
+
   // The type a member access yields: the member's declared type (routines:
   // result type; constructors: the class constructed - see CtorResultX - so
   // `TDerived.Create`, parsed as a plain member when argless, types as
@@ -11028,6 +11067,7 @@ var
             PreferParamlessMember(N, LName, LBX, LSym, LMemCtx);
           if LSym <> NIL_SYM then
           begin
+            LMemCtx := BoundMemberCtx(AId, LSym, LBX, LName, LMemCtx);
             SetXAt(N, MemberTypeX(AId, LSym, LMemCtx, LBX));
             SetCtxAt(N, LMemCtx);
           end
@@ -11035,6 +11075,8 @@ var
                   not (sfBuiltin in
                        FModels[LExt.UnitId].Symbols[LExt.Sym].Flags) then
           begin
+            LMemCtx := BoundMemberCtx(LExt.UnitId, LExt.Sym, LBX, LName,
+              LMemCtx);
             SetXAt(N, MemberTypeX(LExt.UnitId, LExt.Sym, LMemCtx, LBX));
             SetCtxAt(N, LMemCtx);
           end
