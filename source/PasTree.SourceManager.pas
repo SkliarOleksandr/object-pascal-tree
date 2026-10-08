@@ -169,6 +169,17 @@ type
   public
     constructor Create(const ASearchPaths: TArray<string>);
     destructor Destroy; override;
+    { Builds the search-path index now, on the calling thread. The index is
+      otherwise built lazily by the first unit resolution that needs it, with
+      a TParallel.For over the search paths - which deadlocks when that first
+      resolution runs while every pool thread is busy (the project's load
+      engine occupies the whole pinned pool, see
+      TPasSemaProject.ConfigureThreadPool). TPasSemaProject calls this at
+      every Analyze* entry, on the driver, before any engine starts. Built
+      once per manager; later calls return at once. }
+    procedure PrepareIndexes;
+    { True once PrepareIndexes (or a resolution) built the index. }
+    function IndexesReady: Boolean;
     { Unit-scope namespaces (dcc -NS / DCC_Namespace), tried IN ORDER as
       prefixes when an unqualified unit name has no file of its own:
       `uses Generics.Collections` -> System.Generics.Collections.pas. }
@@ -558,6 +569,16 @@ begin
         FUnitIndex.Add(LKey, LFile);
     end;
   end;
+end;
+
+procedure TPasSourceManager.PrepareIndexes;
+begin
+  EnsureSearchIndex;
+end;
+
+function TPasSourceManager.IndexesReady: Boolean;
+begin
+  Result := FSearchIndex <> nil;
 end;
 
 // One candidate unit name (as-spelled) against the referring dir, then the

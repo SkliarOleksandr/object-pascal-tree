@@ -1174,16 +1174,22 @@ type
       contract mirrors FindLocalDeep's. }
     procedure EnumMembersX(AFromMid: Integer; const ABase: TSemaXType;
       const AOnMember: TPasMemberEnumProc; ADepth: Integer = 0);
+    { Width of the default thread pool for every parallel pass, pinned once per
+      process. 0 = logical-core width (CPUCount), which is where measurement
+      puts the optimum; letting the pool grow costs ~30% of total analysis
+      time. A width below 2 is taken as 2. Call BEFORE the first
+      TPasSemaProject is created to override; later calls and calls after the
+      first are ignored. See the implementation for the numbers and for why a
+      library is touching the process-wide pool at all.
+      THE CONTRACT this sets: every Analyze* forks onto this pool and joins on
+      its caller, and the pinned pool never grows past its width to rescue a
+      task that waits on another - so Analyze* must be called from a thread
+      outside the pool (a TThread, or TPasAsyncSession). From a pool task it
+      raises EInvalidOperation instead of risking a permanent hang. }
+    class procedure ConfigureThreadPool(AWorkers: Integer);
     { Per-stage wall-clock of the LAST AnalyzeProject/AnalyzeDirectory/
       AnalyzeStaged run ('stage=ms;...') - for perf logging in hosts and
       probes. Empty for AnalyzeFile. }
-    { Width of the default thread pool for every parallel pass, pinned once per
-      process. 0 = physical-core width, which is where measurement puts the
-      optimum; letting the pool grow costs ~30% of total analysis time. Call
-      BEFORE the first TPasSemaProject is created to override; later calls and
-      calls after the first are ignored. See the implementation for the numbers
-      and for why a library is touching the process-wide pool at all. }
-    class procedure ConfigureThreadPool(AWorkers: Integer);
     function StageTimings: string;
     { Units that could not be parsed at all, as 'file: EClass: message'.
       A unit in here is treated as unresolvable, so its importers report F1027 -
@@ -1301,16 +1307,21 @@ type
       (msFullReady, revealing implementation-only dependencies), then a
       finalizer runs the cross passes (msCrossReady). APriority names files to
       front-load (the open editor module + its direct uses) so they reach
-      readiness first. ACancelled is polled between modules/waves - on True the
-      call returns early leaving whatever completed published (partial but
-      consistent). AOnProgress reports a growing done/total after each step.
-      Returns the model id of ARoots[0], or -1.
+      readiness first. ACancelled is polled between modules and waves by the
+      driver AND inside the passes, by every pool worker, concurrently - it
+      must be thread-safe and cheap (an interlocked flag read, as
+      TPasAsyncSession passes; never UI state or a closure over mutable
+      locals). On True the call returns early leaving whatever completed
+      published (partial but consistent). AOnProgress reports a growing
+      done/total after each step, on the calling thread. Returns the model id
+      of ARoots[0], or -1.
 
       The FINAL state (models + diagnostics + cross-refs) is equivalent to
       AnalyzeProject over the same closure; the interface wave is a transient
-      early-usability optimization. This method carries no threads of its own
-      - TPasAsyncSession runs it on a background thread; a caller using it
-      directly (tests, headless) gets a deterministic staged build. }
+      early-usability optimization. Like every Analyze*, it must not be called
+      from a thread-pool task (see ConfigureThreadPool) - TPasAsyncSession
+      runs it on a TThread of its own; a caller using it directly (tests,
+      headless) gets a deterministic staged build. }
     function AnalyzeStaged(const ARoots, APriority: TArray<string>;
       const ACancelled: TFunc<Boolean> = nil;
       const AOnProgress: TProc<TPasStagedProgress> = nil): Integer;
@@ -1385,6 +1396,11 @@ type
     procedure BaseDefineNames(out AProject, APlatform: TArray<string>);
   private
     procedure GuardNotReleased(const AEntry: string);
+    { The pool contract every Analyze* entry checks before any work: the
+      caller is not a default-pool task (EInvalidOperation otherwise - see
+      ConfigureThreadPool), and the search index is built here, on the
+      driver, not lazily inside the load engine. }
+    procedure EnterAnalysis(const AEntry: string);
   end;
 
 { TSemaXType value helpers, promoted with the query surface above: the null
@@ -1585,7 +1601,10 @@ begin
   GPoolConfigured := True;
   LWant := AWorkers;
   if LWant <= 0 then
-    LWant := Max(2, CPUCount);
+    LWant := CPUCount;
+  // A width of 1 leaves no thread for the load engine's tasks besides the
+  // pass that waits on them.
+  LWant := Max(2, LWant);
   // Min first: Max refuses anything below the current Min.
   TThreadPool.Default.SetMinWorkerThreads(LWant);
   TThreadPool.Default.SetMaxWorkerThreads(LWant);
@@ -1600,7 +1619,10 @@ begin
   // measured to prevent. The trade: past-Max injection is also the pool's
   // deadlock escape for tasks that BLOCK on other queued tasks, so no task
   // scheduled on the default pool may wait on another queued task. The
-  // analyzer's passes never do (fork-join only, joins on the caller).
+  // analyzer's passes are fork-join and join on their caller, which is
+  // therefore never a pool task: every Analyze* entry refuses one
+  // (EnterAnalysis), and builds the search index - itself a TParallel.For -
+  // on the caller before the load engine takes the whole pool.
   // The switch exists from Delphi 12 (RTLVersion 36 - spelled so because the
   // CompilerVersion PROPERTY above shadows the intrinsic in $IF). 11.x has no
   // such property and always inflates the pool on blocked workers; the same
@@ -4646,9 +4668,12 @@ end;
   the whole pinned pool for the duration (see ConfigureThreadPool - with
   past-Max injection off that inner For would execute on the driver alone).
   The workers overlap their own I/O with each other's CPU instead. For the
-  same reason the FIRST FSM.ResolveUnit of a run must happen before the
-  engine starts - it lazily builds the search index with a TParallel.&For of
-  its own; every driver's EnsureSystemUnit satisfies this.
+  same reason the search index must exist before the engine starts - a
+  resolution builds it lazily with a TParallel.&For of its own. It was left to
+  each driver's EnsureSystemUnit, which a project pinning both System.pas and
+  SysInit.pas never resolves through the index (a permanent hang, audit
+  A2-38); EnterAnalysis now builds it, and the engine refuses to start
+  without it.
 
   Cancellation: the driver stops committing between items and workers stop
   taking; in-flight parses finish, their results are freed uncommitted, and
@@ -4733,6 +4758,12 @@ var
   end;
 
 begin
+  // The workers below take the whole pinned pool: an index built lazily in
+  // here would run its TParallel.For with no thread to run on. EnterAnalysis
+  // builds it; a future caller that skipped that fails loudly, not hangs.
+  if not FSM.IndexesReady then
+    raise EInvalidOperation.Create('RunLoadEngine: the search index must ' +
+      'be built before the engine starts (EnterAnalysis)');
   Result := True;
   LQueue := TList<TPasLoadItem>.Create;
   LResults := TDictionary<Integer, TPasLoadRes>.Create;
@@ -16583,6 +16614,7 @@ var
   LPath: string;
 begin
   GuardNotReleased('AnalyzeFile');
+  EnterAnalysis('AnalyzeFile');
   DefaultProjectDirFrom(AMainFile);
   // The donor is consumed by exactly THIS run, cancelled/failed exits
   // included: after the build the host frees it, and the only post-build
@@ -18314,6 +18346,7 @@ begin
   // deserves a refusal it can log, not an exception per keystroke.
   if FTransientReleased then
     Exit(Refuse('released-maps'));
+  EnterAnalysis('AnalyzeModuleOnly');
   // No `Result := False` here: every exit below goes through Refuse (which
   // returns False and records why) or sets Result explicitly.
   FStageTimings := '';
@@ -18785,6 +18818,24 @@ begin
       'analyze into a fresh TPasSemaProject instead', [AEntry]);
 end;
 
+procedure TPasSemaProject.EnterAnalysis(const AEntry: string);
+begin
+  // Every pass forks onto the pinned default pool and joins on the caller.
+  // With past-Max injection off (ConfigureThreadPool), a caller that is
+  // itself a pool task waits on tasks no thread may be left to run - once
+  // every pool thread is such a caller, for good. Refused instead of hung.
+  if TTask.CurrentTask <> nil then
+    raise EInvalidOperation.CreateFmt(
+      '%s: called from a thread-pool task; analysis forks onto the default ' +
+      'pool and joins on its caller, so it must run on a thread outside the ' +
+      'pool (a TThread, or TPasAsyncSession)', [AEntry]);
+  // Before EnsureSystemUnit and the load engine: building it is a
+  // TParallel.For, which inside the engine finds no free pool thread. It
+  // used to be built as a side effect of the first ResolveUnit, which a
+  // project pinning System.pas and SysInit.pas never made on the driver.
+  FSM.PrepareIndexes;
+end;
+
 function TPasSemaProject.StageTimings: string;
 begin
   Result := FStageTimings;
@@ -18809,6 +18860,7 @@ var
 
 begin
   GuardNotReleased('AnalyzeProject');
+  EnterAnalysis('AnalyzeProject');
   DefaultProjectDirFrom(AMainFile);
   FStageTimings := '';
   LSW := TStopwatch.StartNew;
@@ -18900,6 +18952,7 @@ var
 
 begin
   GuardNotReleased('AnalyzeDirectory');
+  EnterAnalysis('AnalyzeDirectory');
   FStageTimings := '';
   LSW := TStopwatch.StartNew;
   try   // donor lifetime - see AnalyzeFile
@@ -19039,6 +19092,7 @@ var
 
 begin
   GuardNotReleased('AnalyzeStaged');
+  EnterAnalysis('AnalyzeStaged');
   // One root is a project's main file (the LSP host with a configured
   // project); several are open documents, which have no project directory.
   if Length(ARoots) = 1 then

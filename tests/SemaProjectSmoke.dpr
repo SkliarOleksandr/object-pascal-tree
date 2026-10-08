@@ -11,6 +11,8 @@ uses
   System.Classes,
   System.IOUtils,
   System.Generics.Collections,
+  System.SyncObjs,
+  System.Threading,
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
@@ -4261,6 +4263,116 @@ end;
   ancestors ahead of a used unit (spec 3.3.2, "Outside a routine body";
   11.4.1). dcc64 37.0 runs the fixture (local x-f53\fixture) as
   `1 10 8 2 8 10 10 1 8 70 8 8 1 2 8`. }
+// The thread-pool contract (audit B02). ConfigureThreadPool pins the default
+// pool and turns off its past-Max injection, so no pool task may wait on
+// another queued one. Two ways analysis broke that and hung for good:
+//  - pinning BOTH System.pas and SysInit.pas skipped the search-index build
+//    the driver used to do as a side effect, and the first ResolveUnit inside
+//    the load engine ran the index's own TParallel.For with every pool thread
+//    taken by an engine worker;
+//  - an Analyze* called from a pool task joins on tasks the pool cannot run
+//    once every thread is such a caller. It is refused loudly instead.
+// Each run waits at most 30 s: a hang is a FAIL here, not a stuck suite.
+procedure TestPoolContract;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LDone: TEvent;
+  LMid: Integer;
+  LRaised: string;
+  LFinished: Boolean;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_pool_contract');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'uses SysInit;'#10 +
+    'type TObject = class end;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SysInit.pas'),
+    'unit SysInit;'#10'interface'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PoolLib.pas'),
+    'unit PoolLib;'#10'interface'#10'const K = 1;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PoolMain.pas'),
+    'unit PoolMain;'#10'interface'#10'uses PoolLib;'#10 +
+    'const M = K;'#10'implementation'#10'end.'#10);
+
+  // Both pins, the staged driver on a plain thread - TPasAsyncSession's shape.
+  LMid := -1;
+  LDone := TEvent.Create(nil, True, False, '');
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  LProj.PinUnitFile(TPath.Combine(LDir, 'System.pas'));
+  LProj.PinUnitFile(TPath.Combine(LDir, 'SysInit.pas'));
+  TThread.CreateAnonymousThread(
+    procedure
+    begin
+      try
+        LProj.AnalyzeStaged([TPath.Combine(LDir, 'PoolMain.pas')], nil);
+        LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'PoolLib.pas'));
+      finally
+        LDone.SetEvent;
+      end;
+    end).Start;
+  LFinished := LDone.WaitFor(30000) = wrSignaled;
+  Ok('pool: AnalyzeStaged with System and SysInit both pinned finishes',
+    LFinished);
+  Ok('pool: and loads the closure', LFinished and (LMid >= 0));
+  if not LFinished then
+    Exit;   // a hung driver still holds both: leave them, report the rest
+  LProj.Free;
+  LDone.Free;
+
+  // An Analyze* from a default-pool task: refused with EInvalidOperation.
+  LRaised := '';
+  LDone := TEvent.Create(nil, True, False, '');
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  TTask.Run(
+    procedure
+    begin
+      try
+        try
+          LProj.AnalyzeProject(TPath.Combine(LDir, 'PoolMain.pas'));
+        except
+          on E: Exception do
+            LRaised := E.ClassName;
+        end;
+      finally
+        LDone.SetEvent;
+      end;
+    end);
+  LFinished := LDone.WaitFor(30000) = wrSignaled;
+  Ok('pool: AnalyzeProject from a pool task is refused (' + LRaised + ')',
+    LFinished and (LRaised = 'EInvalidOperation'));
+  if not LFinished then
+    Exit;
+  LProj.Free;
+  LDone.Free;
+
+  // The refusal is the only change: the same call from a plain thread runs.
+  LMid := -1;
+  LDone := TEvent.Create(nil, True, False, '');
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  TThread.CreateAnonymousThread(
+    procedure
+    begin
+      try
+        LProj.AnalyzeProject(TPath.Combine(LDir, 'PoolMain.pas'));
+        LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'PoolLib.pas'));
+      finally
+        LDone.SetEvent;
+      end;
+    end).Start;
+  LFinished := LDone.WaitFor(30000) = wrSignaled;
+  Ok('pool: AnalyzeProject from a plain thread runs', LFinished and
+    (LMid >= 0));
+  if not LFinished then
+    Exit;
+  LProj.Free;
+  LDone.Free;
+  TDirectory.Delete(LDir, True);
+end;
+
 procedure TestDeclAfterUnit;
 const
   UFA =
@@ -10181,6 +10293,7 @@ begin
   TestWithBodySelfMember;
   TestNestedOuterAfterUnit;
   TestDeclAfterUnit;
+  TestPoolContract;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;

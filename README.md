@@ -117,25 +117,36 @@ closure fans out across cores instead of being processed one file at a time:
   path. The few structures that genuinely need a lock (e.g. the shared
   generic-instance cache) are guarded explicitly; everything else relies on
   "workers only read, one thread commits."
-- **Cold-start I/O is a separate pool from CPU-bound parsing.** A first
+- **Cold-start I/O is a separate phase from CPU-bound parsing.** A first
   analysis run pays for antivirus scan-on-first-touch and MFT lookups per
   file, which is a latency problem, not a throughput one - so file prefetch
-  and the search-path index build use a deep-queue I/O pool (many reads in
-  flight) that hands back raw bytes only, while decoding to text and parsing
-  stays on the per-core CPU pool. Both pools are the shared default
-  `TParallel` pool (machine-sized, already warm) rather than a private
-  thread pool - an earlier custom pool caused `SetMaxWorkerThreads` to
-  silently no-op below the machine's core count on higher-core machines.
+  and the search-path index build run as their own phase that hands back raw
+  bytes only, while decoding to text and parsing come after. The gain is the
+  separation, not any queue depth: both phases run on the one shared default
+  `TParallel` pool (already warm) rather than a private thread pool - an
+  earlier custom pool caused `SetMaxWorkerThreads` to silently no-op below
+  the machine's core count on higher-core machines. The staged driver
+  (`AnalyzeStaged`) does not prefetch: its load engine's workers overlap
+  their own I/O with each other's CPU.
 - A `SingleThreaded` switch runs every stage on the calling thread instead,
   for baseline timing comparisons and debugging - results are identical
   either way, since the parallel stages are pure per unit.
 - **The thread pool's width is pinned** (`TPasSemaProject.ConfigureThreadPool`,
-  physical-core width by default). Left to grow, `TThreadPool` adds workers when
+  logical-core width, `CPUCount`, by default; never below 2). Left to grow,
+  `TThreadPool` adds workers when
   it believes they are blocked - and it cannot tell blocking from the memory
   manager *spinning* on allocation contention, which every one of these passes
   produces in quantity. Measured, it added threads until the same work cost an
   order of magnitude more CPU **and** more wall time (2643 ms vs 1853 ms, ~20.5 s
   of CPU vs ~5.8 s). Wider is not faster here.
+- **So analysis must be called from a thread outside that pool.** A pool
+  pinned at its width does not add a thread to rescue a task that waits on
+  another queued task, and every pass forks onto the pool and joins on its
+  caller. Call `Analyze*` from the main thread, a `TThread`, or through
+  `TPasAsyncSession` (which owns a `TThread`); from a `TTask` or a
+  `TParallel.For` body it raises `EInvalidOperation` instead of hanging once
+  every pool thread is such a caller. The cancel predicate an `Analyze*`
+  takes is called by the pool workers, concurrently: it must be thread-safe.
 
 ### The one line every host must set
 
