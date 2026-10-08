@@ -1319,8 +1319,9 @@ end;
 
 { tq: is ANode the first segment of a unit name written as a qualifier -
   the base of a member access, spelling a prefix of the unit's own name,
-  System's or a used unit's? Only some of those are bound to a uses entry;
-  the unit's own name and System are no symbol at all. }
+  System's, SysInit's or a used unit's? Only some of those are bound to a
+  uses entry; the unit's own name and the two implicit units are no symbol
+  at all (`SysInit.HInstance`, Vcl.Dialogs). }
 function TQUnitSegment(ANode: Integer): Boolean;
 var
   LM: TPasSemaModel;
@@ -1341,7 +1342,7 @@ begin
     Exit;
   LM := GQProject.Model(GQMid);
   LText := GTree.NodeText(ANode).TrimLeft(['&']);
-  if Prefix(LM.UnitNameLower) or Prefix('system') then
+  if Prefix(LM.UnitNameLower) or Prefix('system') or Prefix('sysinit') then
     Exit(True);
   for LIdx := 0 to High(LM.UsesList) do
   begin

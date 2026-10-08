@@ -410,7 +410,9 @@ member (dcc's lookup keeps a history; System.Threading). `Default` is left
 as written. So are `Flush`, `ChDir`, `MkDir` and `RmDir`: System declares
 them, but a bare call gets the `{$I+}` I/O check dcc gives a file
 intrinsic, and `System.Flush(T)` none - the same routine, another code
-(spec B.4; first filed as a resolver finding, F41).
+(spec B.4; first filed as a resolver finding, F41). A qualifier spelling
+SysInit, like one spelling System or the unit's own name, is no symbol's
+(`SysInit.HInstance`, Vcl.Dialogs): not an unbound name (0.93.28).
 
 What the rung cannot see: the overload chosen INSIDE one unit's set and the
 unit of a set merged across units; a virtual or interface member's
@@ -483,7 +485,8 @@ typed as its `class operator`'s result in 0.93.25; an array of such a nested
 type and a member through an inline `^T` in 0.93.26; a character pointer's
 Char (`FormatPtr^.IsNumber`) and an implementation routine qualified with
 the unit's own name in 0.93.27); the member after
-`TThreadList<IInterface>.` looked up in the unit's own plain `TThreadList` the head was first bound to, once the head
+`TThreadList<IInterface>.` looked up in the unit's own plain `TThreadList`
+the head was first bound to, once the head
 itself had moved to the used unit's generic (F44, fixed in 0.93.15). And one
 regression the rung caught: a bare `Pointer` bound
 to a used unit's generic `Pointer<T>` (F51, from 0.92.1's search of the used
