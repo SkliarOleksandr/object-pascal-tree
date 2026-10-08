@@ -536,6 +536,11 @@ const
     '      Valid: Boolean;'#10 +
     '    end;'#10 +
     '  end;'#10 +
+    '  TNaList<T> = class'#10 +
+    '  public type'#10 +
+    '    TArr = array[0..9] of T;'#10 +
+    '    PArr = ^TArr;'#10 +
+    '  end;'#10 +
     'implementation'#10'end.'#10;
   UNIT_XNB =
     'unit XNB;'#10'interface'#10'uses XNA;'#10 +
@@ -549,12 +554,14 @@ const
     'procedure TNaHolder.Run(const P: TNaOuter.TNaRec);'#10 +
     'var'#10 +
     '  L: TNaOuter.TNaRec;'#10 +
+    '  LP: TNaList<TNaOuter.TNaRec>.PArr;'#10 +
     'begin'#10 +
     '  L.X := 1;'#10 +
     '  var NaLocal := L.X;'#10 +
     '  var NaParam := P.X;'#10 +
     '  var NaField := FRec.X;'#10 +
     '  var NaValid := FCls.Valid;'#10 +
+    '  var NaElem := LP^[0].X;'#10 +
     'end;'#10 +
     'end.'#10;
 
@@ -1933,8 +1940,9 @@ begin
     // plus the open TFiEnum<T> twice (the interface/implementation T symbols,
     // as TBox<T> above). 33 since XGE: TGeMap<TGeRec>, the open TGeMap<V> of
     // the enumerator's field, and TGePair<Integer, V> / TGePair<Integer,
-    // TGeRec> behind the nested TSlot alias; 34 with TGeImport<TGeRec>.
-    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '34');
+    // TGeRec> behind the nested TSlot alias; 34 with TGeImport<TGeRec>;
+    // 35 with XNB's TNaList<TNaRec>.
+    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '35');
 
     // ---- Cross-unit overload selection by ARGUMENT TYPES ----
     LV := ModelByName('xv');
@@ -2250,6 +2258,8 @@ begin
     Eq('F46: a class-typed field''s member', DeclTypeOf(LE, 'navalid'),
       'Boolean');
     Eq('F46: through a probe', ProbeTypeOf(LE, 'FCls.Valid'), 'Boolean');
+    Eq('F46: a generic instance''s nested type keeps its frame',
+      DeclTypeOf(LE, 'naelem'), 'Integer');
 
     // ---- F43: a nested alias of a generic over the class's parameter ----
     LE := ModelByName('xge');

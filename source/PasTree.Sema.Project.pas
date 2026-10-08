@@ -7750,14 +7750,21 @@ begin
     begin
       LFound := LQM.FindLocalDeep(LScope, LNameLower);
       if (LFound <> NIL_SYM) and (LQM.Symbols[LFound].Kind = skType) then
-        Exit(XPlain(LQ.UnitId, LFound));
+      begin
+        // In the qualifier's frame: `TList<THeapItem>.ParrayofT` (System.Rtti)
+        // points at an array of THeapItem, not of an open T - whose element's
+        // members were then undeclared.
+        Result := XPlain(LQ.UnitId, LFound);
+        Result.Inst := LQ.Inst;
+        Exit;
+      end;
     end;
     LDef := TypeDefNodeOf(LQ.UnitId, LQ.Sym);
     if LDef = NIL_NODE then
       Exit;
     case LQM.Tree.Nodes[LDef].Kind of
       nkIdent, nkMember, nkTypeArgs:
-        LQ := ResolveTypeExpr(LQ.UnitId, LDef);   // alias link
+        LQ := SubstX(ResolveTypeExpr(LQ.UnitId, LDef), LQ.Inst, 0);   // alias link
       nkClassType, nkInterfaceType, nkRecordType, nkObjectType:
         begin
           // Up to the qualifier's ANCESTOR and ask again. The heritage clause is
@@ -7773,7 +7780,8 @@ begin
             LChild := LQM.Tree.Nodes[LChild].NextSibling;
           if LChild = NIL_NODE then
             Exit;
-          LQ := ResolveTypeExprNested(LQ.UnitId, LChild, ADepth + 1);
+          LQ := SubstX(ResolveTypeExprNested(LQ.UnitId, LChild, ADepth + 1),
+            LQ.Inst, 0);
         end;
     else
       Exit;
