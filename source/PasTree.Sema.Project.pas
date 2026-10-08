@@ -705,6 +705,7 @@ type
       ANode: Integer): Integer;
     function TypeOfArityInChain(AMid, ASym, AArity: Integer): Integer;
     function IsTypeDeclName(AModel: TPasSemaModel; ANode: Integer): Boolean;
+    procedure DropMembersOfHead(AModel: TPasSemaModel; AHead: Integer);
     procedure FixCrossArity(AId: Integer; AModel: TPasSemaModel;
       ANode: Integer; const ANameLower: string; var AUnit, ASym: Integer);
     function IsAttributeTypeRef(AModel: TPasSemaModel; ANode: Integer): Boolean;
@@ -5282,6 +5283,47 @@ begin
       ASym := LSym;
       Result := True;
     end;
+  end;
+end;
+
+{ Unbinds the same-unit bindings of the member names a designator's head
+  qualifies - `Create` in `TFoo<T>.Create`, every later segment of a longer
+  chain - once the head has been re-bound to another type: each was looked up
+  in the type the head no longer names, and the type pass binds a member name
+  left unbound through its base. A cross-unit binding is not the head's
+  local type's and stays. }
+procedure TPasSemaProject.DropMembersOfHead(AModel: TPasSemaModel;
+  AHead: Integer);
+var
+  LCur, LUp, LName: Integer;
+begin
+  LCur := AHead;
+  LUp := AModel.Tree.Nodes[LCur].Parent;
+  // A qualified head (`TOuter.TInner<T>`) is the name child of its nkMember.
+  if (LUp <> NIL_NODE) and (AModel.Tree.Nodes[LUp].Kind = nkMember) and
+     (AModel.Tree.Nodes[LUp].FirstChild <> LCur) then
+  begin
+    LCur := LUp;
+    LUp := AModel.Tree.Nodes[LCur].Parent;
+  end;
+  if (LUp <> NIL_NODE) and (AModel.Tree.Nodes[LUp].Kind = nkTypeArgs) and
+     (AModel.Tree.Nodes[LUp].FirstChild = LCur) then
+  begin
+    LCur := LUp;
+    LUp := AModel.Tree.Nodes[LCur].Parent;
+  end;
+  while (LUp <> NIL_NODE) and (AModel.Tree.Nodes[LUp].Kind = nkMember) and
+        (AModel.Tree.Nodes[LUp].FirstChild = LCur) do
+  begin
+    LName := AModel.Tree.Nodes[LCur].NextSibling;
+    while LName <> NIL_NODE do
+    begin
+      if AModel.Tree.Nodes[LName].Kind = nkIdent then
+        AModel.RefMap[LName] := NIL_SYM;
+      LName := AModel.Tree.Nodes[LName].NextSibling;
+    end;
+    LCur := LUp;
+    LUp := AModel.Tree.Nodes[LCur].Parent;
   end;
 end;
 
@@ -11769,6 +11811,11 @@ begin
               LModel.RefMap[LNode] := NIL_SYM;
               LExt.UnitId := LUid; LExt.Sym := LSym;
               LModel.ExtRefMap.Add(LNode, LExt);
+              // The member after it was looked up in the local type Phase 1
+              // bound the head to (F44: `TThreadList<IInterface>.Create` in
+              // System.Classes went to its own plain TThreadList.Create):
+              // unbound, it is typed through the new head by the type pass.
+              DropMembersOfHead(LModel, LNode);
             end;
             Continue;   // no right-arity import: the local binding stands
           end;

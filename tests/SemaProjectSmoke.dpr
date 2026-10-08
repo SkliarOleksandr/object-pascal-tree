@@ -2953,6 +2953,116 @@ begin
   end;
 end;
 
+{ `TTL<Integer>.Create` in a unit that declares a plain TTL of its own and
+  uses a unit declaring TTL<T>: the head is the generic (arity is part of the
+  identity, 16.1.2), and so is the member after the dot - PasTree looked the
+  member up in the unit's plain TTL (F44 of the parser-fidelity plan;
+  System.Classes' `TThreadList<IInterface>.Create` went to its own
+  non-generic TThreadList.Create). dcc64 37.0 runs the fixture (local x-f44)
+  as `2 1 20 10`: the generic's Create and Tag, the plain type's. }
+procedure TestGenericMemberArity;
+const
+  UGEN =
+    'unit UGen;'#13#10'interface'#13#10'type'#13#10 +
+    '  TTL<T> = class'#13#10 +
+    '    K: Integer;'#13#10 +
+    '    constructor Create;'#13#10 +
+    '    class function Tag: Integer;'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    'constructor TTL<T>.Create; begin K := 2; end;'#13#10 +
+    'class function TTL<T>.Tag: Integer; begin Result := 20; end;'#13#10 +
+    'end.'#13#10;
+  UOWN =
+    'unit UOwn;'#13#10 +                                      // 1
+    'interface'#13#10 +                                       // 2
+    'uses UGen;'#13#10 +                                      // 3
+    'type'#13#10 +                                            // 4
+    '  TTL = class'#13#10 +                                   // 5
+    '    K: Integer;'#13#10 +                                 // 6
+    '    constructor Create;'#13#10 +                         // 7
+    '    class function Tag: Integer;'#13#10 +                // 8
+    '  end;'#13#10 +                                          // 9
+    'implementation'#13#10 +                                  // 10
+    'constructor TTL.Create; begin K := 1; end;'#13#10 +      // 11
+    'class function TTL.Tag: Integer; begin Result := 10; end;'#13#10 + // 12
+    'procedure Run;'#13#10 +                                  // 13
+    'var'#13#10 +                                             // 14
+    '  A: TTL<Integer>;'#13#10 +                              // 15
+    '  B: TTL;'#13#10 +                                       // 16
+    '  I: Integer;'#13#10 +                                   // 17
+    'begin'#13#10 +                                           // 18
+    '  A := TTL<Integer>.Create;'#13#10 +                     // 19
+    '  B := TTL.Create;'#13#10 +                              // 20
+    '  I := TTL<Byte>.Tag + TTL.Tag + A.Tag;'#13#10 +         // 21
+    'end;'#13#10 +                                            // 22
+    'end.'#13#10;                                             // 23
+  PGM =
+    'program PGm;'#13#10'uses UOwn;'#13#10'begin'#13#10'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LM: TPasSemaModel;
+  LMid: Integer;
+
+  // As TestShadowArity's BoundAt.
+  function BoundAt(ALine, ACol: Integer): string;
+  var
+    LFile: string;
+    LLine, LCol: Integer;
+    LExt: TPasExtRef;
+  begin
+    Result := '?';
+    for var LNode := 0 to High(LM.Tree.Nodes) do
+    begin
+      if (LM.Tree.Nodes[LNode].Kind <> nkIdent) or
+         not LProj.NodeSite(LMid, LNode, LFile, LLine, LCol) or
+         (LLine <> ALine) or (LCol <> ACol) then
+        Continue;
+      if LM.ExtRefMap.TryGetValue(LNode, LExt) then
+        Exit(ChangeFileExt(ExtractFileName(LProj.ModelFile(LExt.UnitId)), ''));
+      if LM.RefMap[LNode] = NIL_SYM then
+        Exit('');
+      if sfBuiltin in LM.Symbols[LM.RefMap[LNode]].Flags then
+        Exit('builtin');
+      Exit('here');
+    end;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_generic_member_arity');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UGen.pas'), UGEN);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UOwn.pas'), UOWN);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PGm.dpr'), PGM);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    Ok('generic-member-arity: PGm analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'PGm.dpr')) >= 0);
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'UOwn.pas'));
+    Ok('generic-member-arity: UOwn has a model', LMid >= 0);
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    Ok('generic-member-arity: `A: TTL<Integer>` -> UGen', BoundAt(15, 6) = 'UGen');
+    Ok('generic-member-arity: `B: TTL` -> here', BoundAt(16, 6) = 'here');
+    Ok('generic-member-arity: head of `TTL<Integer>.Create` -> UGen',
+      BoundAt(19, 8) = 'UGen');
+    Ok('generic-member-arity: `TTL<Integer>.Create` -> UGen',
+      BoundAt(19, 21) = 'UGen');
+    Ok('generic-member-arity: `TTL.Create` -> here', BoundAt(20, 12) = 'here');
+    Ok('generic-member-arity: `TTL<Byte>.Tag` -> UGen', BoundAt(21, 18) = 'UGen');
+    Ok('generic-member-arity: `TTL.Tag` -> here', BoundAt(21, 28) = 'here');
+    Ok('generic-member-arity: `A.Tag` -> UGen', BoundAt(21, 36) = 'UGen');
+  finally
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { A member a method cannot see is passed over by the bare-name lookup, which
   goes on up the ancestry and then to the unit (F38 of the parser-fidelity
   plan). PasTree took an ancestor's private member of another unit -
@@ -9568,6 +9678,7 @@ begin
 
   TestUsesShadowsIntrinsic;
   TestShadowArity;
+  TestGenericMemberArity;
   TestInheritedVisibility;
   TestInheritedBeatsUnitLevel;
   TestWithBodySelfMember;
