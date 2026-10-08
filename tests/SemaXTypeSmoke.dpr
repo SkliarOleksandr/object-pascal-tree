@@ -756,6 +756,68 @@ const
     '  var HbTag := Self.Tag;'#10 +
     'end;'#10 +
     'end.'#10;
+  // F42: dcc's lookup HISTORY. In a nested type's method a bare name its
+  // outer type's ancestor declares is that member - unless the unit wrote
+  // the name bare BEFORE, outside such a method, meaning a used unit's
+  // routine or an intrinsic; then it is that (Vcl.StdCtrls' StyleServices,
+  // System.Threading's Default). dcc64-run: local/fidelity/x-f42/probe.
+  UNIT_XLA =
+    'unit XLA;'#10'interface'#10 +
+    'function LaCS: Word;'#10 +
+    'type'#10 +
+    '  TLaBase = class'#10 +
+    '    class function LaCS: Byte;'#10 +
+    '    class function Length(const A: string): Byte;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function LaCS: Word; begin Result := 1000; end;'#10 +
+    'class function TLaBase.LaCS: Byte; begin Result := 7; end;'#10 +
+    'class function TLaBase.Length(const A: string): Byte;'#10 +
+    'begin Result := 7; end;'#10 +
+    'end.'#10;
+  UNIT_XLB =
+    'unit XLB;'#10'interface'#10'uses XLA;'#10'type'#10 +
+    '  TLbOuter = class(TLaBase)'#10 +
+    '  type'#10 +
+    '    TLbInner = class'#10 +
+    '      procedure M;'#10 +
+    '      procedure N;'#10 +
+    '    end;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TLbOuter.TLbInner.N;'#10 +
+    'begin'#10 +
+    '  var LbLenBefore := Length(''abc'');'#10 +
+    'end;'#10 +
+    'procedure Early;'#10 +
+    'begin'#10 +
+    '  LaCS;'#10 +
+    '  if Length(''ab'') = 0 then ;'#10 +
+    'end;'#10 +
+    'procedure TLbOuter.TLbInner.M;'#10 +
+    'begin'#10 +
+    '  var LbHist := LaCS;'#10 +
+    '  var LbLen := Length(''abc'');'#10 +
+    'end;'#10 +
+    'end.'#10;
+  UNIT_XLC =
+    'unit XLC;'#10'interface'#10'uses XLA;'#10'type'#10 +
+    '  TLcOuter = class(TLaBase)'#10 +
+    '  type'#10 +
+    '    TLcInner = class'#10 +
+    '      procedure M;'#10 +
+    '    end;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TLcOuter.TLcInner.M;'#10 +
+    'begin'#10 +
+    '  var LcNoHist := LaCS;'#10 +
+    'end;'#10 +
+    'procedure Late;'#10 +
+    'begin'#10 +
+    '  LaCS;'#10 +
+    'end;'#10 +
+    'end.'#10;
   UNIT_XOB =
     'unit XOB;'#10'interface'#10'uses XOA;'#10 +
     'procedure OpRun(const A, B: TOpVec; const F: Single;'#10 +
@@ -2086,6 +2148,9 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XGR.pas'), UNIT_XGR);
   TFile.WriteAllText(TPath.Combine(LDir, 'XHA.pas'), UNIT_XHA);
   TFile.WriteAllText(TPath.Combine(LDir, 'XHB.pas'), UNIT_XHB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XLA.pas'), UNIT_XLA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XLB.pas'), UNIT_XLB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XLC.pas'), UNIT_XLC);
   TFile.WriteAllText(TPath.Combine(LDir, 'XGP.pas'), UNIT_XGP);
   TFile.WriteAllText(TPath.Combine(LDir, 'XGE.pas'), UNIT_XGE);
   TFile.WriteAllText(TPath.Combine(LDir, 'XJV.pas'), UNIT_XJV);
@@ -2561,6 +2626,22 @@ begin
     Eq('F56: `var HbSelf := Self` is the extended class',
       DeclTypeOf(LE, 'hbself'), 'THaList');
     Eq('F56: `Self.Tag` in a record helper', DeclTypeOf(LE, 'hbtag'), 'Byte');
+
+    // ---- F42: dcc's lookup history in a nested type's method ----
+    LE := ModelByName('xlb');
+    Ok('XLB loaded', Assigned(LE));
+    Ok('XLB: no diags at all', Length(LE.Diags) = 0);
+    Eq('F42: an earlier bare `LaCS` makes it the used unit''s routine',
+      DeclTypeOf(LE, 'lbhist'), 'Word');
+    Eq('F42: an earlier bare `Length` makes it the intrinsic',
+      DeclTypeOf(LE, 'lblen'), 'Integer');
+    Eq('F42: before that use it is the outer ancestor''s class function',
+      DeclTypeOf(LE, 'lblenbefore'), 'Byte');
+    LE := ModelByName('xlc');
+    Ok('XLC loaded', Assigned(LE));
+    Ok('XLC: no diags at all', Length(LE.Diags) = 0);
+    Eq('F42: with the bare use only AFTER, the outer ancestor''s member',
+      DeclTypeOf(LE, 'lcnohist'), 'Byte');
 
     // ---- F43: a nested alias of a generic over the class's parameter ----
     LE := ModelByName('xge');

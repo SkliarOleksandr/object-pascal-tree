@@ -403,11 +403,15 @@ The rules, each from a probe:
   or `Self`: a field or a global the `with` reads once into a temporary, the
   spelling at every name.
 
-And one more for `tq`: a bare `Default(X)` in a nested type whose outer type
-has a member `Default` is the intrinsic only if the unit wrote a bare
-`Default(...)` before it - qualifying the earlier ones turns it into the
-member (dcc's lookup keeps a history; System.Threading). `Default` is left
-as written. So are `Flush`, `ChDir`, `MkDir` and `RmDir`: System declares
+And one more for `tq`: in a method of a nested type, a bare name its outer
+type has as a member is that member unless the unit wrote the name bare
+BEFORE, meaning a used unit's declaration or an intrinsic - dcc's lookup
+keeps a history (spec 3.3.2, step 5): `Default(X)` in System.Threading,
+`StyleServices` in Vcl.StdCtrls' TScrollBarStyleHook.TScrollWindow.WMPaint.
+Qualifying the earlier uses turns the later one into the member (E2066,
+E2124), so every earlier bare use of such a name is left as written (F42,
+0.93.32; PasTree models the history since then too). So are `Flush`, `ChDir`,
+`MkDir` and `RmDir`: System declares
 them, but a bare call gets the `{$I+}` I/O check dcc gives a file
 intrinsic, and `System.Flush(T)` none - the same routine, another code
 (spec B.4; first filed as a resolver finding, F41). A qualifier spelling

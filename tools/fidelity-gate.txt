@@ -32,7 +32,6 @@ studio parse rtl\posix\Posix.SysSocket.pas FAIL a POSIX-only unit read under the
 # The resolver's rung (tqm): resolver findings of the plan, each a unit
 # whose rewrite does not compile to the original's .dcu (docs/parser-fidelity.md sec. 6).
 studio tqm System.Rtti.pas DIFF F37: PByte and DWORD bound to System.Types, dcc imports them from Winapi.Windows (raw bytes, the import record only)
-studio tqm Vcl.StdCtrls.pas XFORM-FAIL F42: StyleServices in TScrollBarStyleHook.TScrollWindow.WMPaint is Vcl.Themes' function only because the unit wrote it bare before; with the earlier calls qualified dcc takes the outer type's inherited instance method (E2124)
 # The rung's floors (see fidelity-gate.ps1 tqm): names bound to nothing, to a
 # unit not visible at the name, members whose base PasTree's typing contradicts.
 self tqm @unbound 0 every name of the self-host bound

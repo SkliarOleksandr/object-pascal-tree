@@ -625,6 +625,8 @@ type
     function InPropertySpecifier(AModel: TPasSemaModel; ANode: Integer): Boolean;
     function OuterStructsOfNode(AModel: TPasSemaModel;
       ANode, AInnermost: Integer): TArray<Integer>;
+    function EarlierBareUseX(AId, ANode: Integer;
+      const ANameLower: string): Boolean;
     // `with` over a target whose TYPE lives in another unit (ch.05 sec. 5.7) -
     // see FindInEnclosingWith.
     function AllParamsDefaulted(AMid, AParams: Integer): Boolean;
@@ -12333,7 +12335,71 @@ begin
   for var LOuter in OuterStructsOfNode(LModel, ANode, AStruct) do
       if FindVisibleMemberX(AId, AStruct, XPlain(AId, LOuter), ANameLower,
            AMemMid, AMemSym, ACtx) then
+      begin
+        // dcc's lookup HISTORY (spec 3.3.2, step 5; F42): the unit wrote
+        // the name bare BEFORE, outside a nested type's methods, where it
+        // meant a used unit's declaration or an intrinsic - then it means
+        // that here too, past the outer type's member.
+        if EarlierBareUseX(AId, ANode, ANameLower) then
+        begin
+          AMemMid := NIL_SYM;
+          AMemSym := NIL_SYM;
+          ACtx := NIL_INST;
+          Exit(False);
+        end;
         Exit(True);
+      end;
+end;
+
+{ Has unit AId written ANameLower as a BARE name before ANode - not after a
+  dot, not in a method of a nested type - bound to another unit's
+  non-member declaration or to a compiler seed? Vcl.StdCtrls calls
+  `StyleServices(Self)` bare long before TScrollBarStyleHook.TScrollWindow
+  .WMPaint, and so WMPaint's bare `StyleServices` is Vcl.Themes' function,
+  not the instance method its outer type inherits from TStyleHook - E2124
+  otherwise (dcc64 37.0, probes local/fidelity/x-f42: a class method of the
+  outer type's ancestor loses to a used unit's routine, and to the Length
+  intrinsic, only after such an earlier use). Asked only when an outer type
+  has the member, so its whole-tree scan is off the ordinary path. }
+function TPasSemaProject.EarlierBareUseX(AId, ANode: Integer;
+  const ANameLower: string): Boolean;
+var
+  LModel: TPasSemaModel;
+  LN, LParent, LSym, LStruct, LBefore: Integer;
+  LExt: TPasExtRef;
+begin
+  Result := False;
+  LModel := FModels[AId];
+  LBefore := LModel.Tree.Nodes[ANode].FirstToken;
+  for LN := 0 to Min(High(LModel.Tree.Nodes), High(LModel.RefMap)) do
+  begin
+    if (LModel.Tree.Nodes[LN].Kind <> nkIdent) or
+       (LModel.Tree.Nodes[LN].FirstToken >= LBefore) or
+       (LModel.Tree.NodeNameLower(LN) <> ANameLower) then
+      Continue;
+    LParent := LModel.Tree.Nodes[LN].Parent;
+    if (LParent <> NIL_NODE) and
+       (LModel.Tree.Nodes[LParent].Kind = nkMember) and
+       (LModel.Tree.Nodes[LParent].FirstChild <> LN) then
+      Continue;   // a selector, `UO.SS` - qualified uses change nothing
+    LStruct := StructSymOfNode(LModel, LN);
+    if (LStruct <> NIL_SYM) and
+       (Length(OuterStructsOfNode(LModel, LN, LStruct)) > 0) then
+      Continue;   // in a nested type's method itself
+    LSym := LModel.RefMap[LN];
+    if LSym <> NIL_SYM then
+    begin
+      if sfBuiltin in LModel.Symbols[LSym].Flags then
+        Exit(True);
+      Continue;
+    end;
+    if LModel.ExtRefMap.TryGetValue(LN, LExt) and (LExt.UnitId <> AId) and
+       (FModels[LExt.UnitId].Symbols[LExt.Sym].Scope <> NIL_SCOPE) and
+       (FModels[LExt.UnitId].Scopes[
+         FModels[LExt.UnitId].Symbols[LExt.Sym].Scope].Kind in
+         [sckUnit, sckImplementation, sckSystem]) then
+      Exit(True);
+  end;
 end;
 
 { Is AInner the same type as AOuter, or one NESTED inside it (at any depth)?

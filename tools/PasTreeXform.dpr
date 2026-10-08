@@ -397,6 +397,10 @@ var
   // contradicts (each listed in sites.txt). A selector PasTree bound to
   // nothing counts with tq's unbound names.
   GQProbe: TPasXProbe;
+  // tq: name (lower case) -> the last token of a bare use of it in a method
+  // of a NESTED type (TQCollectHistory) - an earlier bare use there is dcc's
+  // lookup history and stays as written (F42).
+  GQHistory: TDictionary<string, Integer>;
   GMExcl: array[TTMExcl] of Integer;
   GMMismatch: Integer;
   GMMismatchList: TStringList;
@@ -1354,6 +1358,101 @@ end;
 
 function IsStoredBody(ARoutine: Integer): Boolean; forward;
 procedure CollectInlineNames(ANode: Integer); forward;
+
+{ tq: GQHistory - every bare name in the body of a method of a NESTED type
+  (`procedure TOuter.TInner.M`) that an OUTER type has as a member, with the
+  last token it is written at. dcc resolves such a name to the outer type's
+  member unless the unit wrote it bare BEFORE, meaning a used unit's
+  declaration or an intrinsic (spec 3.3.2, step 5; F42): Vcl.StdCtrls'
+  `StyleServices(Self)` calls make
+  TScrollBarStyleHook.TScrollWindow.WMPaint's `StyleServices` Vcl.Themes'
+  function, and qualifying them turns WMPaint into an E2124. The earlier
+  bare uses of such a name are left as written - `Default`'s rule (S15)
+  without the list of names. }
+procedure TQCollectHistory(ANode: Integer; const AOuters: TArray<TSemaXType>);
+var
+  LChild, LName, LParent, LOld, LCount, LMid, LSym, LCtx: Integer;
+  LSegs: TArray<Integer>;
+  LOuters: TArray<TSemaXType>;
+  LX: TSemaXType;
+  LM: TPasSemaModel;
+  LKey: string;
+begin
+  LOuters := AOuters;
+  case GTree.Nodes[ANode].Kind of
+    nkRoutine:
+      begin
+        // An implementation's qualified name is a run of flat children
+        // marked nfName; with three or more (`TOuter.TInner.M`) the ones
+        // before the method's own type are its OUTER types.
+        LSegs := nil;
+        LName := GTree.Nodes[ANode].FirstChild;
+        while LName <> NIL_NODE do
+        begin
+          if nfName in GTree.Nodes[LName].Flags then
+            LSegs := LSegs + [LName];
+          LName := GTree.Nodes[LName].NextSibling;
+        end;
+        if Length(LSegs) >= 3 then
+        begin
+          // The segments are declaration names, in no map: the first is
+          // looked up from the routine's own scope, each further one as a
+          // member of the one before.
+          LOuters := nil;
+          LM := GQProject.Model(GQMid);
+          LSym := NIL_SYM;
+          if (ANode <= High(LM.NodeScope)) and
+             (LM.NodeScope[ANode] <> NIL_SCOPE) then
+            LSym := LM.Resolve(LM.NodeScope[ANode],
+              LowerCase(GTree.NodeText(LSegs[0])));
+          if (LSym <> NIL_SYM) and (LM.Symbols[LSym].Kind = skType) then
+          begin
+            LX := XPlain(GQMid, LSym);
+            LOuters := [LX];
+            for LCount := 1 to High(LSegs) - 2 do
+              if GQProject.FindMemberX(GQMid, LX,
+                   LowerCase(GTree.NodeText(LSegs[LCount])), LMid, LSym,
+                   LCtx) and
+                 (GQProject.Model(LMid).Symbols[LSym].Kind = skType) then
+              begin
+                LX := XPlain(LMid, LSym);
+                LOuters := LOuters + [LX];
+              end
+              else
+                Break;
+          end;
+        end;
+      end;
+    nkIdent:
+      if LOuters <> nil then
+      begin
+        LParent := GTree.Nodes[ANode].Parent;
+        if not ((LParent <> NIL_NODE) and
+           (GTree.Nodes[LParent].Kind = nkMember) and
+           (GTree.Nodes[LParent].FirstChild <> ANode)) then
+        begin
+          LKey := LowerCase(GTree.NodeText(ANode).TrimLeft(['&']));
+          // Only a name an outer type has as a member: the only one whose
+          // meaning the history can change.
+          for LCount := 0 to High(LOuters) do
+            if GQProject.FindMemberX(GQMid, LOuters[LCount], LKey, LMid, LSym,
+               LCtx) then
+            begin
+              if not GQHistory.TryGetValue(LKey, LOld) or
+                 (LOld < GTree.Nodes[ANode].FirstToken) then
+                GQHistory.AddOrSetValue(LKey, GTree.Nodes[ANode].FirstToken);
+              Break;
+            end;
+        end;
+      end;
+  end;
+  LChild := GTree.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    TQCollectHistory(LChild, LOuters);
+    LChild := GTree.Nodes[LChild].NextSibling;
+  end;
+end;
 
 { tm: the node defining type symbol ASym of model AMid - the struct, alias
   or other type expression after the name (TPasSemaProject.TypeDefNodeIn,
@@ -2388,7 +2487,7 @@ end;
 procedure TQIdent(ANode: Integer; const ARoutine: string; AInBody,
   AStored, ACastStored: Boolean; AInWith: Integer);
 var
-  LParent, LIndex, LTMid, LSym, LScope, LMeth, LOwner: Integer;
+  LParent, LIndex, LTMid, LSym, LScope, LMeth, LOwner, LOldTok: Integer;
   LM, LTM: TPasSemaModel;
   LPk: TPasNodeKind;
   LQual: string;
@@ -2520,23 +2619,29 @@ begin
           Exit;
         end;
         // `Slice` is compiler magic only as written: `System.Slice(A, N)` is
-        // E2193 (S14, System.Classes). A bare `Default(...)` is a use dcc's
-        // later lookups depend on: in a nested type whose outer type has a
-        // member `Default`, a bare `Default(X)` is the intrinsic only after
-        // the unit wrote one before (S15, System.Threading 3514; probes
-        // s15\probes D01-D04) - qualifying the earlier ones turns it into the
-        // member, E2066. `Flush`, `ChDir`, `MkDir`, `RmDir` are System
+        // E2193 (S14, System.Classes). (A bare `Default(...)` was here too,
+        // S15's System.Threading 3514: dcc's lookup history, now the general
+        // rule below.) `Flush`, `ChDir`, `MkDir`, `RmDir` are System
         // routines a bare call of which dcc follows with the $I+ I/O check,
         // as it does a file intrinsic's - `System.Flush(T)` has none: the
         // same routine, another code (F41; spec B.4 note, probed on dcc64
         // 37.0: SAME under $I-).
         if (SameText(LTM.Symbols[LSym].Name, 'Slice') or
-            SameText(LTM.Symbols[LSym].Name, 'Default') or
             SameText(LTM.Symbols[LSym].Name, 'Flush') or
             SameText(LTM.Symbols[LSym].Name, 'ChDir') or
             SameText(LTM.Symbols[LSym].Name, 'MkDir') or
             SameText(LTM.Symbols[LSym].Name, 'RmDir')) and
            ((LTM.Scopes[LScope].Kind = sckSystem) or (LTMid = GQSystemMid)) then
+        begin
+          Inc(GQPosition);
+          Exit;
+        end;
+        // Another unit's declaration (or System's) written bare BEFORE a
+        // bare use of the name in a nested type's method: dcc's lookup
+        // history, left as written (TQCollectHistory, F42).
+        if ((LTMid <> GQMid) or (LTM.Scopes[LScope].Kind = sckSystem)) and
+           GQHistory.TryGetValue(LTM.Symbols[LSym].NameLower, LOldTok) and
+           (GTree.Nodes[ANode].FirstToken < LOldTok) then
         begin
           Inc(GQPosition);
           Exit;
@@ -4584,6 +4689,7 @@ begin
     GInitStarts := TDictionary<Integer, Boolean>.Create;
     GQUnboundList := TStringList.Create;
     GQPlanted := TDictionary<string, Boolean>.Create;
+    GQHistory := TDictionary<string, Integer>.Create;
     GQInvisibleList := TStringList.Create;
     GQSelftest := GMode = xmTQS;
     GQMemberSelftest := GMode = xmTMS;
@@ -4729,6 +4835,8 @@ begin
               GQSymInfoOn := LinesKept(['Y']);
               GQRefInfoOn := LinesKept(['r']);
               GQWin32 := GPlatform = pfWin32;
+              GQHistory.Clear;
+              TQCollectHistory(0, nil);
               TQWalk(0, '', False, False, False, 0);
               if GQMembers then
                 TMPreamble;
@@ -5001,6 +5109,7 @@ begin
       GInitStarts.Free;
       GQUnboundList.Free;
       GQPlanted.Free;
+      GQHistory.Free;
       GQInvisibleList.Free;
       GMMismatchList.Free;
       GMPreamble.Free;
