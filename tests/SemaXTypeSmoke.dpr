@@ -550,12 +550,24 @@ const
     '    FRec: TNaOuter.TNaRec;'#10 +
     '    procedure Run(const P: TNaOuter.TNaRec);'#10 +
     '  end;'#10 +
+    '  TNaOwn = packed record'#10 +
+    '    Id: Word;'#10 +
+    '  end;'#10 +
     'implementation'#10 +
     'procedure TNaHolder.Run(const P: TNaOuter.TNaRec);'#10 +
     'var'#10 +
     '  L: TNaOuter.TNaRec;'#10 +
     '  LP: TNaList<TNaOuter.TNaRec>.PArr;'#10 +
+    '  LDyn: array of TNaOuter.TNaRec;'#10 +
+    '  LFix: array[0..1] of TNaOuter.TNaRec;'#10 +
+    '  LPtr: ^TNaOuter.TNaRec;'#10 +
+    '  LOwn: ^TNaOwn;'#10 +
     'begin'#10 +
+    '  var NaDyn := LDyn[0].X;'#10 +
+    '  var NaFix := LFix[1].X;'#10 +
+    '  var NaPtr := LPtr.X;'#10 +
+    '  var NaDeref := LPtr^.X;'#10 +
+    '  var NaOwn := LOwn.Id;'#10 +
     '  L.X := 1;'#10 +
     '  var NaLocal := L.X;'#10 +
     '  var NaParam := P.X;'#10 +
@@ -2320,6 +2332,14 @@ begin
     Eq('F46: through a probe', ProbeTypeOf(LE, 'FCls.Valid'), 'Boolean');
     Eq('F46: a generic instance''s nested type keeps its frame',
       DeclTypeOf(LE, 'naelem'), 'Integer');
+    Eq('F46: a dynamic array of the nested type, its element''s member',
+      DeclTypeOf(LE, 'nadyn'), 'Integer');
+    Eq('F46: a static array of it', DeclTypeOf(LE, 'nafix'), 'Integer');
+    Eq('F46: an anonymous pointer to it, dereferenced implicitly',
+      DeclTypeOf(LE, 'naptr'), 'Integer');
+    Eq('F46: ...and explicitly', DeclTypeOf(LE, 'naderef'), 'Integer');
+    Eq('F46: an anonymous pointer to the unit''s own record',
+      DeclTypeOf(LE, 'naown'), 'Word');
 
     // ---- F46: a record operator's result ----
     LE := ModelByName('xob');

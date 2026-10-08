@@ -11043,6 +11043,14 @@ var
              (LM.Tree.Nodes[LName].Kind <> nkIdent) then
             Exit;
           LBX := GetX(LBase);
+          // A member read through an ANONYMOUS pointer written on the base's
+          // own declaration, dereferenced implicitly (10.1): System.Zip's
+          // `pField: ^TExtraField`, then `pField.FieldId`. No pointer type
+          // symbol exists, so the base types to nothing; its pointee is the
+          // record the member is looked up in, as `pField^.FieldId` already
+          // was (nkDeref, PointeeOfDeclX).
+          if not XValid(LBX) then
+            LBX := PointeeOfDeclX(AId, LBase);
           LSym := RefAt(LName);
           // A compiler SEED is never anyone's member, so a member name bound to
           // one is a Phase-1 mistake to be corrected here rather than trusted:
@@ -12797,7 +12805,9 @@ begin
   if (LNode = NIL_NODE) or
      (FModels[LMid].Tree.Nodes[LNode].Kind <> nkPointerType) then
     Exit;
-  Result := ResolveTypeExpr(LMid, FModels[LMid].Tree.Nodes[LNode].FirstChild);
+  // Nested-aware, as SymDeclTypeX: `LPtr: ^TOuter.TInner` of another unit.
+  Result := ResolveTypeExprNested(LMid,
+    FModels[LMid].Tree.Nodes[LNode].FirstChild);
 end;
 
 { The declaring (model, symbol) of a designator's head, across models: what
@@ -13213,7 +13223,7 @@ var
         ANode := LLast;
         Continue;
       end;
-      Exit(SubstX(ResolveTypeExpr(AMid, LLast), AInst, 0));
+      Exit(SubstX(ResolveTypeExprNested(AMid, LLast), AInst, 0));
     end;
   end;
 
@@ -13641,7 +13651,9 @@ function TPasSemaProject.ElementX(AId, ABaseNode: Integer): TSemaXType;
         LChild := FModels[AMid].Tree.Nodes[LChild].NextSibling;
       end;
     end;
-    Result := ResolveTypeExpr(AMid, LLast);
+    // Nested-aware, as SymDeclTypeX: FMX.Layouts' `NewTargets: array of
+    // TAniCalculations.TTarget`, then `NewTargets[0].TargetType` (F46).
+    Result := ResolveTypeExprNested(AMid, LLast);
   end;
 
 var
