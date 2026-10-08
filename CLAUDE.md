@@ -120,12 +120,33 @@ subdirectory; keep this repository free of an `.mcp.json` that overrides
 it. Grep stays the tool for text that is not a declaration - a comment, a
 diagnostic message, a `.dfm`, the docs.
 
-## Two habits that pay for themselves here
+## Every fix goes through the spec first, then back into it
 
-**Start from the spec.** The language spec in `../object-pascal-spec` is
-evidence: read the section before changing parser or resolver behaviour, and
-where spec and code disagree, probe `dcc` rather than trusting either. A green
-corpus is not coverage.
+The language spec in `../object-pascal-spec` is evidence, not scripture. For
+**every** fix to parser, resolver or typer behaviour - and for every harness
+rule built on a `dcc` probe - the order is fixed:
+
+1. **Read** the governing section before touching code or probing. A name
+   lookup of any kind is governed by `03` sec. 3.3.2 (name resolution order).
+2. **Note** what it says and where it is silent or disagrees with the code.
+3. **Probe `dcc`** for the gap or the disagreement - not to rediscover what the
+   spec already states.
+4. **Write the code.**
+5. **Write back** what the probes settled, with the probe's shape as the
+   evidence; a resolution rule goes into 3.3.2 or is linked from it. The spec
+   commit comes before the code commit that cites it.
+
+The same holds for a shape met in the middle of a batch: it is a problem of
+its own and starts at step 1. A green corpus is not coverage.
+
+The reason: fixes coded from a probe re-derived what the spec already stated
+in one line (sec. 13.1.4, 2026-07-29), grew one case per shape where the spec
+had one rule (`with` targets, sec. 5.7, four fixes), and built a harness on a
+rule the spec had contradicted two days earlier (unit qualifiers, sec. 1.2.3,
+S16). Alex had to restate this order four times (last 2026-10-08, when four of
+a batch's six fixes read the spec only to append to it).
+
+## A habit that pays for itself here
 
 **Measure with range checks on.** A flaky measurement is usually an index bug
 reading garbage, not a race - build the checked configuration before believing
