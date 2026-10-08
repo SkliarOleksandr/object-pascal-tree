@@ -2198,6 +2198,22 @@ begin
     Exit(False);
   end;
   Result := True;
+  // One overload set: the member walk stops at the set's HEAD, the binding
+  // names the overload the call chose (`with Stream do ReadBuffer(Level,
+  // SizeOf(Level))` - TStream's ReadBuffer has four). Same name, both
+  // routines, the bound one an overload: no contradiction, and the cast
+  // through the bound overload's owner lets dcc choose again (the rung does
+  // not see the choice inside a set - docs/parser-fidelity.md). F55.
+  if ((LFMid <> AMid) or (LFSym <> ASym)) and
+     (GQProject.Model(LFMid).Symbols[LFSym].Kind = skRoutine) and
+     (LU.Symbols[ASym].Kind = skRoutine) and
+     (sfOverload in LU.Symbols[ASym].Flags) and
+     (GQProject.Model(LFMid).Symbols[LFSym].NameLower =
+      LU.Symbols[ASym].NameLower) then
+  begin
+    LFMid := AMid;
+    LFSym := ASym;
+  end;
   if (LFMid <> AMid) or (LFSym <> ASym) then
   begin
     TMMismatch(ANode, 'the with target has ' +

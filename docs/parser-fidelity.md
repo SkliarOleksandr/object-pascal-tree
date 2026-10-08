@@ -412,7 +412,11 @@ them, but a bare call gets the `{$I+}` I/O check dcc gives a file
 intrinsic, and `System.Flush(T)` none - the same routine, another code
 (spec B.4; first filed as a resolver finding, F41). A qualifier spelling
 SysInit, like one spelling System or the unit's own name, is no symbol's
-(`SysInit.HInstance`, Vcl.Dialogs): not an unbound name (0.93.28).
+(`SysInit.HInstance`, Vcl.Dialogs): not an unbound name (0.93.28). Nor is a
+name in a `with` body bound to one overload of a set the target's member walk
+answers with the head of (`with Stream do ReadBuffer(Level, SizeOf(Level))`,
+TStream's four ReadBuffers): no contradiction - the cast lets dcc choose
+again (F55, 0.93.31).
 
 What the rung cannot see: the overload chosen INSIDE one unit's set and the
 unit of a set merged across units; a virtual or interface member's
@@ -491,7 +495,8 @@ member after `TThreadList<IInterface>.` looked up in the unit's own plain
 itself had moved to the used unit's generic (F44, fixed in 0.93.15); `Self` in
 a helper's method typed as the helper rather than the extended type -
 spring4d's `Self.Names[i]` in its TStringsHelper (F56, fixed in 0.93.30). And
-one regression the rung caught: a bare `Pointer` bound to a used unit's generic `Pointer<T>` (F51, from 0.92.1's search of the used
+one regression the rung caught: a bare `Pointer` bound to a used unit's
+generic `Pointer<T>` (F51, from 0.92.1's search of the used
 units for a declaration hiding a predefined name, which ignored arity; fixed
 in 0.93.8). Probing the shapes the rung met turned up more of the same
 family: in a nested type's method the outer type's members come only after
