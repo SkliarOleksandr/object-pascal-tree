@@ -488,9 +488,10 @@ the unit's own name in 0.93.27; a pointer to a record indexed and a result
 type hidden by a parameter or a local of the same name in 0.93.29); the
 member after `TThreadList<IInterface>.` looked up in the unit's own plain
 `TThreadList` the head was first bound to, once the head
-itself had moved to the used unit's generic (F44, fixed in 0.93.15). And one
-regression the rung caught: a bare `Pointer` bound
-to a used unit's generic `Pointer<T>` (F51, from 0.92.1's search of the used
+itself had moved to the used unit's generic (F44, fixed in 0.93.15); `Self` in
+a helper's method typed as the helper rather than the extended type -
+spring4d's `Self.Names[i]` in its TStringsHelper (F56, fixed in 0.93.30). And
+one regression the rung caught: a bare `Pointer` bound to a used unit's generic `Pointer<T>` (F51, from 0.92.1's search of the used
 units for a declaration hiding a predefined name, which ignored arity; fixed
 in 0.93.8). Probing the shapes the rung met turned up more of the same
 family: in a nested type's method the outer type's members come only after

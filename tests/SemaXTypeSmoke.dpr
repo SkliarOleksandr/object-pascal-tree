@@ -719,6 +719,43 @@ const
     '  var GrLoc := Result.fTag;'#10 +
     'end;'#10 +
     'end.'#10;
+  // F56: in a helper's method Self is a value of the EXTENDED type -
+  // spring4d's TStringsHelper `Self.Names[i]`, TValueHelper `Self.TypeInfo`.
+  // It was typed as the helper.
+  UNIT_XHA =
+    'unit XHA;'#10'interface'#10'type'#10 +
+    '  THaList = class'#10 +
+    '    function GetName(I: Integer): string;'#10 +
+    '    property Names[I: Integer]: string read GetName;'#10 +
+    '  end;'#10 +
+    '  THaRec = record'#10 +
+    '    Tag: Byte;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function THaList.GetName(I: Integer): string; begin Result := ''''; end;'#10 +
+    'end.'#10;
+  UNIT_XHB =
+    'unit XHB;'#10'interface'#10'uses XHA;'#10'type'#10 +
+    '  THbListHelper = class helper for THaList'#10 +
+    '    function Own: Word;'#10 +
+    '    procedure Run;'#10 +
+    '  end;'#10 +
+    '  THbRecHelper = record helper for THaRec'#10 +
+    '    procedure Run;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function THbListHelper.Own: Word; begin Result := 0; end;'#10 +
+    'procedure THbListHelper.Run;'#10 +
+    'begin'#10 +
+    '  var HbName := Self.Names[0];'#10 +
+    '  var HbOwn := Self.Own;'#10 +
+    '  var HbSelf := Self;'#10 +
+    'end;'#10 +
+    'procedure THbRecHelper.Run;'#10 +
+    'begin'#10 +
+    '  var HbTag := Self.Tag;'#10 +
+    'end;'#10 +
+    'end.'#10;
   UNIT_XOB =
     'unit XOB;'#10'interface'#10'uses XOA;'#10 +
     'procedure OpRun(const A, B: TOpVec; const F: Single;'#10 +
@@ -2047,6 +2084,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XCI.pas'), UNIT_XCI);
   TFile.WriteAllText(TPath.Combine(LDir, 'Xq.Own.pas'), UNIT_XQO);
   TFile.WriteAllText(TPath.Combine(LDir, 'XGR.pas'), UNIT_XGR);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XHA.pas'), UNIT_XHA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XHB.pas'), UNIT_XHB);
   TFile.WriteAllText(TPath.Combine(LDir, 'XGP.pas'), UNIT_XGP);
   TFile.WriteAllText(TPath.Combine(LDir, 'XGE.pas'), UNIT_XGE);
   TFile.WriteAllText(TPath.Combine(LDir, 'XJV.pas'), UNIT_XJV);
@@ -2508,6 +2547,20 @@ begin
       'Integer');
     Eq('F46: a local named like the result type does not hide it',
       DeclTypeOf(LE, 'grloc'), 'Integer');
+
+    // ---- F56: Self in a helper's method is the extended type ----
+    LE := ModelByName('xhb');
+    Ok('XHB loaded', Assigned(LE));
+    Ok('XHB: no diags at all', Length(LE.Diags) = 0);
+    Eq('F56: `Self` in a class helper is the extended class',
+      XTypeOf(LE, 'Self.Names'), 'string');
+    Eq('F56: the base `Self` itself, as the rung probes it',
+      ProbeTypeOf(LE, 'Self'), 'THaList');
+    Eq('F56: ...its own member still reached through Self',
+      DeclTypeOf(LE, 'hbown'), 'Word');
+    Eq('F56: `var HbSelf := Self` is the extended class',
+      DeclTypeOf(LE, 'hbself'), 'THaList');
+    Eq('F56: `Self.Tag` in a record helper', DeclTypeOf(LE, 'hbtag'), 'Byte');
 
     // ---- F43: a nested alias of a generic over the class's parameter ----
     LE := ModelByName('xge');

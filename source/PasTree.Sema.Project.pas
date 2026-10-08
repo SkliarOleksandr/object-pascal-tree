@@ -835,6 +835,7 @@ type
     procedure PublishHelper(AMid: Integer; const AReg: TPasHelperReg);
     procedure ClearHelperIdx;
     function HelperAncestorX(AMid, ASym: Integer): TSemaXType;
+    function HelperTargetX(AMid, ASym: Integer): TSemaXType;
     function IsDistinctTypeDef(AMid, ADef: Integer): Boolean;
     function HelperMemberHit(AFromMid: Integer; const ACur: TSemaXType;
       const AKey: TSemaKey; out AMemMid, AMemSym: Integer): Boolean;
@@ -8371,6 +8372,30 @@ begin
   Result := ResolveTypeExprNested(AMid, LFirst);
 end;
 
+{ The EXTENDED type of a `class/record helper for T` declaration - the last of
+  the leading type references (see HelperAncestorX); XNil for any other type. }
+function TPasSemaProject.HelperTargetX(AMid, ASym: Integer): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LDef, LRef, LLast: Integer;
+begin
+  Result := XNil;
+  LM := FModels[AMid];
+  LDef := TypeDefNodeOf(AMid, ASym);
+  if (LDef = NIL_NODE) or (LM.Tree.Nodes[LDef].Kind <> nkHelperType) then
+    Exit;
+  LLast := NIL_NODE;
+  LRef := LM.Tree.Nodes[LDef].FirstChild;
+  while (LRef <> NIL_NODE) and
+        (LM.Tree.Nodes[LRef].Kind in [nkIdent, nkMember, nkTypeArgs]) do
+  begin
+    LLast := LRef;
+    LRef := LM.Tree.Nodes[LRef].NextSibling;
+  end;
+  if LLast <> NIL_NODE then
+    Result := ResolveTypeExprNested(AMid, LLast);
+end;
+
 // Member lookup by name on a type, following type aliases and the first
 // heritage entry (ancestor class / base interface) across models, closing
 // each hop over the current instantiation. ACtx returns the instantiation
@@ -10949,8 +10974,19 @@ var
           else if LM.Tree.NodeTextEquals(N, 'Self') then
           begin
             LSym := StructSymOfNode(LM, N);
+            // In a helper's method Self is a value of the EXTENDED type
+            // (15.3): `Self.Names[i]` in Spring's TStringsHelper is a
+            // TStrings', `Self.TypeInfo` in its TValueHelper a TValue's (F56).
+            // Typed as the helper, the member was read off the helper's own
+            // declaration chain and the probe contradicted the binding.
             if LSym <> NIL_SYM then
-              SetXAt(N, XPlain(AId, LSym));
+            begin
+              LBX := HelperTargetX(AId, LSym);
+              if XValid(LBX) then
+                SetXAt(N, LBX)
+              else
+                SetXAt(N, XPlain(AId, LSym));
+            end;
           end;
           // A bare name reached through a GENERIC ancestor is declared in that
           // ancestor's OPEN parameters - `class property Statics: S` on
