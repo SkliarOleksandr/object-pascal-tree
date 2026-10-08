@@ -37,9 +37,9 @@ studio tqm System.Rtti.pas DIFF F37: PByte and DWORD bound to System.Types, dcc 
 self tqm @unbound 0 every name of the self-host bound
 self tqm @invisible 0 none
 self tqm @mismatch 0 none (F43 fixed in 0.93.21)
-studio-rtl tqm @unbound 45 F46 (selectors bound to nothing: operator results on records, pointers to arrays, ...)
+studio-rtl tqm @unbound 3 F46 rest: System.ObjAuto `ParamInfos^[I]^.Kind` (2, an array of an inline ^PTypeInfo), System.Rtti `pinfo^.TypeInfo` (a procedural variable dereferenced)
 studio-rtl tqm @invisible 0 none (F35, F36 fixed in 0.93.20)
 studio-rtl tqm @mismatch 0 none (F43 fixed in 0.93.21, F44 in 0.93.15)
-studio-all tqm @unbound 166 F46 (selectors bound to nothing: operator results on records, pointers to arrays, ...)
+studio-all tqm @unbound 4 F46 rest: the RTL's 3 and FMX.Grid.Style `inherited.AsExtended`
 studio-all tqm @invisible 0 none (F35, F36 fixed in 0.93.20)
-studio-all tqm @mismatch 31 F55: a with body's member where the with target also has a same-named member of another type (VCL: GetElementDetails, TextRect, Write, ReadBuffer, ...)
+studio-all tqm @mismatch 0 none (F55 harness rule in 0.93.31, F56 fixed in 0.93.30)
