@@ -474,7 +474,12 @@ Winapi.CommonTypes past the interface's own Winapi.ApplicationModel.DataTransfer
 (F35, F36, fixed in 0.93.20); a member already bound typed in its base's
 frame when an alias or a generic ancestor declares it - `LPair.Value` over
 TPasIntMap<V>'s `TSlot = TPair<Integer, V>`, WinRT's `TFooImport.Statics`
-- left as the open parameter (F43, fixed in 0.93.21); the member after `TThreadList<IInterface>.` looked up in
+- left as the open parameter (F43, fixed in 0.93.21); a declaration typed
+with another unit's nested type (`MinTarget: TAniCalculations.TTarget`) typed
+to nothing in the cross-type pass, so the members read through it were bound
+to nothing - the largest shape of the rung's unbound selectors (F46, that
+shape fixed in 0.93.22; operator results, pointers to arrays and others
+remain); the member after `TThreadList<IInterface>.` looked up in
 the unit's own plain `TThreadList` the head was first bound to, once the head
 itself had moved to the used unit's generic (F44, fixed in 0.93.15). And one
 regression the rung caught: a bare `Pointer` bound

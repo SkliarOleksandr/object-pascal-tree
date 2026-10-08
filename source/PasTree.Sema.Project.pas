@@ -12978,7 +12978,12 @@ begin
   LM := FModels[AMid];
   if LM.Symbols[ASym].TypeNode <> NIL_NODE then
   begin
-    Result := ResolveTypeExpr(AMid, LM.Symbols[ASym].TypeNode);
+    // Nested-aware: another unit's `TOuter.TInner` as a declared type has its
+    // last segment bound by CrossType, which runs AFTER BindTypesX has read
+    // this - so FMX.TabControl's `MinTarget: TAniCalculations.TTarget` typed
+    // to nothing in the pass and every member read through it was unbound
+    // (F46). ResolveTypeExprNested is ResolveTypeExpr until that one fails.
+    Result := ResolveTypeExprNested(AMid, LM.Symbols[ASym].TypeNode);
     if XValid(Result) then
       Exit;
     // A declaration's type slot that resolved to NOTHING, in a position where

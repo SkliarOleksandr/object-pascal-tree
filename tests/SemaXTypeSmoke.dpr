@@ -518,6 +518,46 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // F46 of the parser-fidelity plan: a variable, a field or a parameter
+  // declared with a QUALIFIED nested type of another unit - FMX.TabControl's
+  // `MinTarget: TAniCalculations.TTarget`, FMX.Canvas.D2D's `FMetaBrush:
+  // TCanvas.TMetaBrush`, System.Net.HttpClient's `ProxyCredential:
+  // TCredentialsStorage.TCredential`. The members read through such a value
+  // were bound to nothing.
+  UNIT_XNA =
+    'unit XNA;'#10'interface'#10 +
+    'type'#10 +
+    '  TNaOuter = class'#10 +
+    '  public type'#10 +
+    '    TNaRec = record'#10 +
+    '      X: Integer;'#10 +
+    '    end;'#10 +
+    '    TNaCls = class'#10 +
+    '      Valid: Boolean;'#10 +
+    '    end;'#10 +
+    '  end;'#10 +
+    'implementation'#10'end.'#10;
+  UNIT_XNB =
+    'unit XNB;'#10'interface'#10'uses XNA;'#10 +
+    'type'#10 +
+    '  TNaHolder = class'#10 +
+    '    FCls: TNaOuter.TNaCls;'#10 +
+    '    FRec: TNaOuter.TNaRec;'#10 +
+    '    procedure Run(const P: TNaOuter.TNaRec);'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TNaHolder.Run(const P: TNaOuter.TNaRec);'#10 +
+    'var'#10 +
+    '  L: TNaOuter.TNaRec;'#10 +
+    'begin'#10 +
+    '  L.X := 1;'#10 +
+    '  var NaLocal := L.X;'#10 +
+    '  var NaParam := P.X;'#10 +
+    '  var NaField := FRec.X;'#10 +
+    '  var NaValid := FCls.Valid;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // F43 of the parser-fidelity plan: a for-in over a generic class whose
   // enumerator's Current is a NESTED ALIAS of another generic instantiated
   // over the class's parameter (TPasIntMap<V>'s `TSlot = TPair<Integer, V>`).
@@ -1819,6 +1859,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XF.pas'), UNIT_XF);
   TFile.WriteAllText(TPath.Combine(LDir, 'XFI.pas'), UNIT_XFI);
   TFile.WriteAllText(TPath.Combine(LDir, 'XPD.pas'), UNIT_XPD);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XNA.pas'), UNIT_XNA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XNB.pas'), UNIT_XNB);
   TFile.WriteAllText(TPath.Combine(LDir, 'XGP.pas'), UNIT_XGP);
   TFile.WriteAllText(TPath.Combine(LDir, 'XGE.pas'), UNIT_XGE);
   TFile.WriteAllText(TPath.Combine(LDir, 'XJV.pas'), UNIT_XJV);
@@ -2197,6 +2239,17 @@ begin
     Eq('F45: `Q^^.Tag` is the field''s type', DeclTypeOf(LE, 'pdtag'),
       'TPdTag');
     Eq('F45: `(Q^)^.Next` too', DeclTypeOf(LE, 'pdnext'), 'PPdRec');
+
+    // ---- F46: a declaration typed with another unit's nested type ----
+    LE := ModelByName('xnb');
+    Ok('XNB loaded', Assigned(LE));
+    Ok('XNB: no diags at all', Length(LE.Diags) = 0);
+    Eq('F46: a local''s member', DeclTypeOf(LE, 'nalocal'), 'Integer');
+    Eq('F46: a parameter''s member', DeclTypeOf(LE, 'naparam'), 'Integer');
+    Eq('F46: a field''s member', DeclTypeOf(LE, 'nafield'), 'Integer');
+    Eq('F46: a class-typed field''s member', DeclTypeOf(LE, 'navalid'),
+      'Boolean');
+    Eq('F46: through a probe', ProbeTypeOf(LE, 'FCls.Valid'), 'Boolean');
 
     // ---- F43: a nested alias of a generic over the class's parameter ----
     LE := ModelByName('xge');
