@@ -37,10 +37,10 @@ studio tqm Vcl.StdCtrls.pas XFORM-FAIL F42: StyleServices in TScrollBarStyleHook
 # unit not visible at the name, members whose base PasTree's typing contradicts.
 self tqm @unbound 0 every name of the self-host bound
 self tqm @invisible 0 none
-self tqm @mismatch 22 F43: for-in over a nested alias of a generic record - SelectConsumers (6) and, since 0.93.0, TUsesLint.CheckUnit (16)
-studio-rtl tqm @unbound 719 F39 (GUID clause constants), F46 (selectors bound to nothing)
-studio-rtl tqm @invisible 93 F35, F36
-studio-rtl tqm @mismatch 38 F43, F44
-studio-all tqm @unbound 1000 F39 (GUID clause constants), F46 (selectors bound to nothing)
-studio-all tqm @invisible 1469 F35, F36 (interface names through implementation uses, aliases bound to their target's unit)
-studio-all tqm @mismatch 100 F43, F44
+self tqm @mismatch 0 none (F43 fixed in 0.93.21)
+studio-rtl tqm @unbound 45 F46 (selectors bound to nothing: operator results on records, pointers to arrays, ...)
+studio-rtl tqm @invisible 0 none (F35, F36 fixed in 0.93.20)
+studio-rtl tqm @mismatch 0 none (F43 fixed in 0.93.21, F44 in 0.93.15)
+studio-all tqm @unbound 166 F46 (selectors bound to nothing: operator results on records, pointers to arrays, ...)
+studio-all tqm @invisible 0 none (F35, F36 fixed in 0.93.20)
+studio-all tqm @mismatch 31 F55: a with body's member where the with target also has a same-named member of another type (VCL: GetElementDetails, TextRect, Write, ReadBuffer, ...)
