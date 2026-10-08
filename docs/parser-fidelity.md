@@ -460,8 +460,10 @@ inherited member missed for a unit-level or System name (F40, fixed in
 unit-level declaration (F49, fixed in 0.93.9: the with pass asks Self's
 ancestry for a name no target has, as the inherited pass does outside a
 with); a nested class whose ancestor is a same-named nested class reaching
-the outer type's members (F48); a string helper's method binding `Length` to
-Self's type (F50); the member after `TThreadList<IInterface>.` looked up in
+the outer type's members (F48); `Length(Self)` in a helper for a
+`type string` bound to TStringHelper's Length - a distinct type's member walk
+went on into `string` and asked string's helper there (F50, fixed in
+0.93.16); the member after `TThreadList<IInterface>.` looked up in
 the unit's own plain `TThreadList` the head was first bound to, once the head
 itself had moved to the used unit's generic (F44, fixed in 0.93.15). And one
 regression the rung caught: a bare `Pointer` bound

@@ -833,6 +833,7 @@ type
     procedure PublishHelper(AMid: Integer; const AReg: TPasHelperReg);
     procedure ClearHelperIdx;
     function HelperAncestorX(AMid, ASym: Integer): TSemaXType;
+    function IsDistinctTypeDef(AMid, ADef: Integer): Boolean;
     function HelperMemberHit(AFromMid: Integer; const ACur: TSemaXType;
       const AKey: TSemaKey; out AMemMid, AMemSym: Integer): Boolean;
     // Cross-model overload selection (CrossType's call typing):
@@ -8264,6 +8265,19 @@ begin
   end;
 end;
 
+{ ADef, a type's definition node in model AMid, is the `Base` of a
+  `T = type Base` declaration (2 sec. 2.5.1, a distinct type): the parser marks
+  that nkTypeDecl with Aux = 1. }
+function TPasSemaProject.IsDistinctTypeDef(AMid, ADef: Integer): Boolean;
+var
+  LParent: Integer;
+begin
+  LParent := FModels[AMid].Tree.Nodes[ADef].Parent;
+  Result := (LParent <> NIL_NODE) and
+    (FModels[AMid].Tree.Nodes[LParent].Kind = nkTypeDecl) and
+    (FModels[AMid].Tree.Nodes[LParent].Aux = 1);
+end;
+
 { The ANCESTOR helper of a `class helper (X) for T` declaration, XNil when the
   helper names none. The parser adopts the leading run of type references in
   source order, so with two of them the FIRST is the ancestor and the LAST is
@@ -8318,6 +8332,7 @@ var
   LM: TPasSemaModel;
   LScope, LDef, LChild, LDepth, LFound, LRMid, LRSym: Integer;
   LRootName: string;   // the implicit ancestor for a heritage-less struct
+  LDistinct: Boolean;  // a `type Base` hop passed: Base's helpers are not ours
 begin
 {$IFDEF PASTREE_MEMBERSTATS}
   // Top-level calls only - the constraint hop re-enters and would double-count.
@@ -8329,6 +8344,7 @@ begin
   AMemSym := NIL_SYM;
   ACtx := NIL_INST;
   LCur := ABase;
+  LDistinct := False;
   for LDepth := 1 to 32 do
   begin
     if not XValid(LCur) then
@@ -8373,7 +8389,11 @@ begin
     // for TBase applies to a TDerived value once the walk reaches TBase.
     // ACtx deliberately NIL_INST: a helper cannot extend an instantiation,
     // so its members' types never involve the target's parameters.
-    if HelperMemberHit(AFromMid, LCur, AKey, AMemMid, AMemSym) then
+    // Past a `T = type Base` hop the walk reads Base's members, but Base's
+    // helpers are not T's (2.5.1: a distinct type; F50 - TStringHelper.Length
+    // answered for a `TEditMask = type string`, where dcc gives E2018).
+    if not LDistinct and
+       HelperMemberHit(AFromMid, LCur, AKey, AMemMid, AMemSym) then
     begin
       ACtx := NIL_INST;
       Exit(True);
@@ -8440,7 +8460,10 @@ begin
         // .TNotify` then has no definition at all, so `TNotify.Create` had no
         // members to search. Costs nothing on the common path:
         // ResolveTypeExprNested IS ResolveTypeExpr until that one fails.
-        LNext := ResolveTypeExprNested(LCur.UnitId, LDef);   // type alias
+        begin
+          LNext := ResolveTypeExprNested(LCur.UnitId, LDef);   // type alias
+          LDistinct := LDistinct or IsDistinctTypeDef(LCur.UnitId, LDef);
+        end;
       nkPointerType:
         // Implicit dereference in member access: Object Pascal lets `P.Field`
         // stand for `P^.Field` when P is a pointer to a record, and the RTL
@@ -8600,8 +8623,10 @@ var
   LRootName: string;
   LExt: TPasExtRef;
   LEmitMid, LEmitCtx: Integer;
+  LDistinct: Boolean;
 begin
   LCur := ABase;
+  LDistinct := False;
   for LDepth := 1 to 32 do
   begin
     if not XValid(LCur) then
@@ -8625,7 +8650,7 @@ begin
     // (a helper member HIDES the type's own - first-wins dedup needs them
     // first). Mirrors HelperMemberHit, including the builtin-seed
     // canonicalization retry.
-    if (AFromMid >= 0) and (AFromMid <= High(FHelperIdx)) and
+    if not LDistinct and (AFromMid >= 0) and (AFromMid <= High(FHelperIdx)) and
        (FHelperIdx[AFromMid] <> nil) then
     begin
       if not FHelperIdx[AFromMid].TryGetValue(
@@ -8694,7 +8719,10 @@ begin
     end;
     case LM.Tree.Nodes[LDef].Kind of
       nkIdent, nkMember, nkTypeArgs:
-        LNext := ResolveTypeExprNested(LCur.UnitId, LDef);   // type alias
+        begin
+          LNext := ResolveTypeExprNested(LCur.UnitId, LDef);   // type alias
+          LDistinct := LDistinct or IsDistinctTypeDef(LCur.UnitId, LDef);
+        end;
       nkPointerType:
         LNext := PointeeX(LCur);       // implicit deref: P.Field
       nkProcType:

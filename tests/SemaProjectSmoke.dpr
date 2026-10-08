@@ -3063,6 +3063,180 @@ begin
   end;
 end;
 
+{ A `T = type Base` is a distinct type (2.5.1), and Base's helpers are not
+  T's: the member walk goes on into Base's members but asks no helper past
+  that hop (F50 of the parser-fidelity plan: `Length(Self)` in FMX's
+  TEditMaskHelper, a helper for `TEditMask = type string`, went to
+  TStringHelper.Length). dcc64 37.0 (local x-f50): the fixture's helper
+  methods run as `100 2 4 500 5` - the own helper's Length, then
+  System.Length for both `type string`s, the record's own Length; `M.Length`
+  on a `type string` with no helper of its own is E2018. A class helper's
+  method still reaches the ANCESTOR's helper's members (`2 2 2`). }
+procedure TestHelperBareName;
+const
+  USTR =
+    'unit UStr;'#13#10'interface'#13#10'type'#13#10 +
+    '  TStrHelp = record helper for string'#13#10 +
+    '    function Length: Integer;'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    'function TStrHelp.Length: Integer; begin Result := 0; end;'#13#10 +
+    'end.'#13#10;
+  UHLP =
+    'unit UHlp;'#13#10 +                                      // 1
+    'interface'#13#10 +                                       // 2
+    'uses UStr;'#13#10 +                                      // 3
+    'type'#13#10 +                                            // 4
+    '  TMy1 = type string;'#13#10 +                           // 5
+    '  TMy2 = type string;'#13#10 +                           // 6
+    '  TMask = type string;'#13#10 +                          // 7
+    '  TR = record'#13#10 +                                   // 8
+    '    S: string;'#13#10 +                                  // 9
+    '    function Length(const X: TR): Integer;'#13#10 +      // 10
+    '  end;'#13#10 +                                          // 11
+    '  THelpA = record helper for TMy1'#13#10 +               // 12
+    '    function Length(const X: TMy1): Integer;'#13#10 +    // 13
+    '    function A: Integer;'#13#10 +                        // 14
+    '  end;'#13#10 +                                          // 15
+    '  THelpX = record helper for TMy2'#13#10 +               // 16
+    '    function Length(const X: TMy2): Integer;'#13#10 +    // 17
+    '  end;'#13#10 +                                          // 18
+    '  THelpB = record helper for TMy2'#13#10 +               // 19
+    '    function B: Integer;'#13#10 +                        // 20
+    '  end;'#13#10 +                                          // 21
+    '  TRH = record helper for TR'#13#10 +                    // 22
+    '    function E: Integer;'#13#10 +                        // 23
+    '  end;'#13#10 +                                          // 24
+    '  TMaskHelp = record helper for TMask'#13#10 +           // 25
+    '    function G: Integer;'#13#10 +                        // 26
+    '  end;'#13#10 +                                          // 27
+    'implementation'#13#10 +                                  // 28
+    'function TR.Length(const X: TR): Integer; begin Result := 500; end;'#13#10 + // 29
+    'function THelpA.Length(const X: TMy1): Integer; begin Result := 100; end;'#13#10 + // 30
+    'function THelpA.A: Integer; begin Result := Length(Self); end;'#13#10 + // 31
+    'function THelpX.Length(const X: TMy2): Integer; begin Result := 200; end;'#13#10 + // 32
+    'function THelpB.B: Integer; begin Result := Length(Self); end;'#13#10 + // 33
+    'function TRH.E: Integer; begin Result := Length(Self); end;'#13#10 + // 34
+    'function TMaskHelp.G: Integer; begin Result := Length(Self); end;'#13#10 + // 35
+    'procedure Q(M: TMask; const S: string);'#13#10 +         // 36
+    'begin'#13#10 +                                           // 37
+    '  M.Length;'#13#10 +                                     // 38
+    '  S.Length;'#13#10 +                                     // 39
+    'end;'#13#10 +                                            // 40
+    'end.'#13#10;                                             // 41
+  // An ancestor's helper is the descendant's helper's too: dcc runs HD.W's
+  // bare `Z` as HB.Z, past the unit's function Z (x-f50 Q.dpr, `2 2 2`).
+  UCLS =
+    'unit UCls;'#13#10 +                                      // 1
+    'interface'#13#10 +                                       // 2
+    'type'#13#10 +                                            // 3
+    '  TB = class end;'#13#10 +                               // 4
+    '  TD = class(TB) end;'#13#10 +                           // 5
+    '  HB = class helper for TB'#13#10 +                      // 6
+    '    function Z: Integer;'#13#10 +                        // 7
+    '  end;'#13#10 +                                          // 8
+    '  HD = class helper for TD'#13#10 +                      // 9
+    '    function W: Integer;'#13#10 +                        // 10
+    '  end;'#13#10 +                                          // 11
+    'implementation'#13#10 +                                  // 12
+    'function Z: Integer; begin Result := 1; end;'#13#10 +    // 13
+    'function HB.Z: Integer; begin Result := 2; end;'#13#10 + // 14
+    'function HD.W: Integer; begin Result := Z; end;'#13#10 + // 15
+    'end.'#13#10;                                             // 16
+  PGM =
+    'program PHb;'#13#10'uses UHlp, UCls;'#13#10'begin'#13#10'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LM: TPasSemaModel;
+  LMid: Integer;
+
+  // As TestShadowArity's BoundAt; 'here:<owner>' for a member of this unit.
+  function BoundAt(ALine, ACol: Integer): string;
+  var
+    LFile: string;
+    LLine, LCol, LSym: Integer;
+    LExt: TPasExtRef;
+  begin
+    Result := '?';
+    for var LNode := 0 to High(LM.Tree.Nodes) do
+    begin
+      if (LM.Tree.Nodes[LNode].Kind <> nkIdent) or
+         not LProj.NodeSite(LMid, LNode, LFile, LLine, LCol) or
+         (LLine <> ALine) or (LCol <> ACol) then
+        Continue;
+      if LM.ExtRefMap.TryGetValue(LNode, LExt) then
+      begin
+        // The inherited pass binds an own-unit member through ExtRefMap too.
+        if LExt.UnitId <> LMid then
+          Exit(ChangeFileExt(ExtractFileName(LProj.ModelFile(LExt.UnitId)),
+            ''));
+        LSym := LExt.Sym;
+      end
+      else
+        LSym := LM.RefMap[LNode];
+      if LSym = NIL_SYM then
+        Exit('');
+      if sfBuiltin in LM.Symbols[LSym].Flags then
+        Exit('builtin');
+      var LScope := LM.Symbols[LSym].Scope;
+      if (LScope <> NIL_SCOPE) and (LM.Scopes[LScope].Kind = sckStruct) and
+         (LM.Scopes[LScope].StructSym <> NIL_SYM) then
+        Exit('here:' + LM.Symbols[LM.Scopes[LScope].StructSym].Name);
+      Exit('here');
+    end;
+  end;
+
+const
+  // The column of `Length` in `...; begin Result := Length(Self); end;`
+  // after a header of ALen characters.
+  LEN_AFTER = Length(' begin Result := ') + 1;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_helper_bare_name');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UStr.pas'), USTR);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UHlp.pas'), UHLP);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UCls.pas'), UCLS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PHb.dpr'), PGM);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    Ok('helper-bare-name: PHb analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'PHb.dpr')) >= 0);
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'UHlp.pas'));
+    Ok('helper-bare-name: UHlp has a model', LMid >= 0);
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    Ok('helper-bare-name: the own helper''s Length',
+      BoundAt(31, Length('function THelpA.A: Integer;') + LEN_AFTER) =
+      'here:THelpA');
+    Ok('helper-bare-name: a second helper''s Length is not seen',
+      BoundAt(33, Length('function THelpB.B: Integer;') + LEN_AFTER) =
+      'builtin');
+    Ok('helper-bare-name: the record''s own Length',
+      BoundAt(34, Length('function TRH.E: Integer;') + LEN_AFTER) = 'here:TR');
+    Ok('helper-bare-name: another unit''s string helper is not seen',
+      BoundAt(35, Length('function TMaskHelp.G: Integer;') + LEN_AFTER) =
+      'builtin');
+    Ok('helper-bare-name: string''s helper is no `type string`''s',
+      BoundAt(38, 5) = '');
+    Ok('helper-bare-name: ...and still string''s', BoundAt(39, 5) = 'UStr');
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'UCls.pas'));
+    Ok('helper-bare-name: UCls has a model', LMid >= 0);
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    Ok('helper-bare-name: an ancestor''s helper member',
+      BoundAt(15, Length('function HD.W: Integer;') + LEN_AFTER) = 'here:HB');
+  finally
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { A member a method cannot see is passed over by the bare-name lookup, which
   goes on up the ancestry and then to the unit (F38 of the parser-fidelity
   plan). PasTree took an ancestor's private member of another unit -
@@ -9679,6 +9853,7 @@ begin
   TestUsesShadowsIntrinsic;
   TestShadowArity;
   TestGenericMemberArity;
+  TestHelperBareName;
   TestInheritedVisibility;
   TestInheritedBeatsUnitLevel;
   TestWithBodySelfMember;
