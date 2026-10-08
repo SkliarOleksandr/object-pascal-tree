@@ -667,6 +667,8 @@ type
       out ALit: Integer; out ANegated: Boolean): Boolean;
     function OperatorResultX(AMid, AOpNode: Integer;
       const AL, AR: TSemaXType): TSemaXType;
+    function RecordOperatorX(AOp: TPasTokenKind; AUnary: Boolean;
+      const AL, AR: TSemaXType): TSemaXType;
     function UntypedInitTypeX(AMid, ANode: Integer;
       AFollowForeign: Boolean): TSemaXType;
     function InferredDeclTypeX(AMid, ASym: Integer;
@@ -14186,8 +14188,9 @@ end;
     `TNames = array of string`; two different array types are E2010 and two
     constructors (`[ADir] + [ADir]`) an anonymous type, both left untyped;
   - a comparison, `in` and `is` are Boolean whatever they compare.
-  Anything else answers XNil: an operand of unknown type, a record or class
-  operand (an overloaded operator's result is the operator's, 4.12), a
+  - an operator with a record operand is the record's `class operator`
+    (RecordOperatorX).
+  Anything else answers XNil: an operand of unknown type, a class operand, a
   Variant, `AnsiChar + AnsiChar` (an anonymous type in dcc). A true
   constant's OWN dcc type is narrower still - value-sized, `100` a ShortInt
   for helper lookup - and that is not modelled; see docs/coverage.md,
@@ -14299,8 +14302,11 @@ begin
      (LOp in [tkEqual, tkNotEqual, tkLess, tkLessEqual, tkGreater,
       tkGreaterEqual, tkIn, tkIs]) then
     Exit(BuiltinX(AMid, 'boolean'));
-  if (LcL in [tcRecord, tcClass, tcInterface, tcVariant]) or
-     (LcR in [tcRecord, tcClass, tcInterface, tcVariant]) then
+  if (LcL = tcRecord) or (LcR = tcRecord) then
+    Exit(RecordOperatorX(LOp, LM.Tree.Nodes[AOpNode].Kind = nkUnaryOp,
+      LL, LR));
+  if (LcL in [tcClass, tcInterface, tcVariant]) or
+     (LcR in [tcClass, tcInterface, tcVariant]) then
     Exit;
 
   if LM.Tree.Nodes[AOpNode].Kind = nkUnaryOp then
@@ -14369,6 +14375,185 @@ begin
       else if (LcL = tcInteger) and (LcR = tcInteger) then
         Result := WiderNum;
   end;
+end;
+
+{ The type of an operator applied to a record operand (AL, AR canonical; AR
+  XNil for a unary one): the result type of the `class operator` it calls
+  (9.3.1, 4.12). `(B - A).CrossProduct(P1 - A)` (FMX.Types3D, TPoint3D's
+  Subtract), `(LPos * LScale).Round` (TPointF's Multiply): the member after
+  the parentheses was bound to nothing - no navigation, no references.
+
+  The candidates are the operators of the operand types themselves (an
+  operator is not inherited, and a record has no ancestors anyway), named
+  for the token: `+` Add / Positive, `-` Subtract / Negative, `and` both
+  LogicalAnd and BitwiseAnd, ... . Each must take as many parameters as
+  there are operands, and each operand must be able to go to its parameter:
+  the same type scores 2, a scalar assignable to a scalar 1, a record where
+  either side declares an Implicit/Explicit 0 (a conversion may make it
+  fit), anything else rejects the candidate. The best-scoring candidates
+  decide only when they agree on the result type - TPointF's Multiply
+  overloads all give TPointF - so an unknown operand or a real ambiguity
+  leaves the expression untyped rather than guessed. A generic record's
+  operator is read in the operand's instantiation frame. }
+function TPasSemaProject.RecordOperatorX(AOp: TPasTokenKind; AUnary: Boolean;
+  const AL, AR: TSemaXType): TSemaXType;
+var
+  LNames: array[0..1] of string;
+  LBest: Integer;
+  LWin: TSemaXType;
+  LAgreed: Boolean;
+
+  function HasConversion(const AX: TSemaXType): Boolean;
+  var
+    LScope: Integer;
+  begin
+    Result := False;
+    if not XValid(AX) or (XCatOf(AX) <> tcRecord) then
+      Exit;
+    LScope := FModels[AX.UnitId].Symbols[AX.Sym].MemberScope;
+    Result := (LScope <> NIL_SCOPE) and
+      ((FModels[AX.UnitId].FindLocal(LScope, 'implicit') <> NIL_SYM) or
+       (FModels[AX.UnitId].FindLocal(LScope, 'explicit') <> NIL_SYM));
+  end;
+
+  // -1: AArg cannot go to a parameter of type APar.
+  function Fit(const APar, AArg: TSemaXType): Integer;
+  var
+    LP, LA: TSemaXType;
+    LcP, LcA: TSemaTypeCat;
+  begin
+    if not XValid(AArg) or not XValid(APar) then
+      Exit(0);
+    LP := CanonTypeX(APar);
+    LA := CanonTypeX(AArg);
+    if XSameType(LP, LA) then
+      Exit(2);
+    LcP := XCatOf(LP);
+    LcA := XCatOf(LA);
+    if (LcP = tcRecord) or (LcA = tcRecord) then
+    begin
+      if HasConversion(LP) or HasConversion(LA) then
+        Exit(0);
+      Exit(-1);
+    end;
+    if (LcP in [tcUnknown, tcVariant]) or (LcA in [tcUnknown, tcVariant]) then
+      Exit(0);
+    if XAssignableX(LP, LA) then
+      Result := 1
+    else
+      Result := -1;
+  end;
+
+  procedure Consider(const AOwner: TSemaXType);
+  var
+    LOm: TPasSemaModel;
+    LScope, LSym, LScore, LFit, LIdx: Integer;
+    LParams: TArray<Integer>;
+    LRes: TSemaXType;
+    LName: string;
+    LMatch: Boolean;
+  begin
+    if not XValid(AOwner) or (XCatOf(AOwner) <> tcRecord) then
+      Exit;
+    LOm := FModels[AOwner.UnitId];
+    LScope := LOm.Symbols[AOwner.Sym].MemberScope;
+    if LScope = NIL_SCOPE then
+      Exit;
+    // Walked in declaration order, not looked up by name: a member that
+    // shares the operator's name owns the name (9.3.1), the operator is
+    // only in the order list.
+    for LSym in LOm.Scopes[LScope].Symbols do
+    begin
+      if LOm.Symbols[LSym].Kind <> skRoutine then
+        Continue;
+      LMatch := False;
+      for LName in LNames do
+        if (LName <> '') and (LOm.Symbols[LSym].NameLower = LName) then
+          LMatch := True;
+      if not LMatch or (LOm.RoutineHead(LSym) <> rhOperator) then
+        Continue;
+      LParams := XParamSyms(AOwner.UnitId, LSym);
+      if (AUnary and (Length(LParams) <> 1)) or
+         (not AUnary and (Length(LParams) <> 2)) then
+        Continue;
+      LScore := 0;
+      for LIdx := 0 to High(LParams) do
+      begin
+        if LIdx = 0 then
+          LFit := Fit(SubstX(DeclTypeX(AOwner.UnitId, LParams[LIdx]),
+            AOwner.Inst, 0), AL)
+        else
+          LFit := Fit(SubstX(DeclTypeX(AOwner.UnitId, LParams[LIdx]),
+            AOwner.Inst, 0), AR);
+        if LFit < 0 then
+        begin
+          LScore := -1;
+          Break;
+        end;
+        Inc(LScore, LFit);
+      end;
+      if LScore < 0 then
+        Continue;
+      LRes := SubstX(DeclTypeX(AOwner.UnitId, LSym), AOwner.Inst, 0);
+      if LScore > LBest then
+      begin
+        LBest := LScore;
+        LWin := LRes;
+        LAgreed := XValid(LRes);
+      end
+      else if (LScore = LBest) and LAgreed and
+              not XSameType(CanonTypeX(LWin), CanonTypeX(LRes)) then
+        LAgreed := False;
+    end;
+  end;
+
+begin
+  Result := XNil;
+  LNames[0] := '';
+  LNames[1] := '';
+  if AUnary then
+    case AOp of
+      tkMinus: LNames[0] := 'negative';
+      tkPlus: LNames[0] := 'positive';
+      tkNot: LNames[0] := 'logicalnot';
+    end
+  else
+    case AOp of
+      tkPlus: LNames[0] := 'add';
+      tkMinus: LNames[0] := 'subtract';
+      tkStar: LNames[0] := 'multiply';
+      tkSlash: LNames[0] := 'divide';
+      tkDiv: LNames[0] := 'intdivide';
+      tkMod: LNames[0] := 'modulus';
+      tkShl: LNames[0] := 'leftshift';
+      tkShr: LNames[0] := 'rightshift';
+      tkAnd:
+        begin
+          LNames[0] := 'logicaland';
+          LNames[1] := 'bitwiseand';
+        end;
+      tkOr:
+        begin
+          LNames[0] := 'logicalor';
+          LNames[1] := 'bitwiseor';
+        end;
+      tkXor:
+        begin
+          LNames[0] := 'logicalxor';
+          LNames[1] := 'bitwisexor';
+        end;
+    end;
+  if LNames[0] = '' then
+    Exit;
+  LBest := -1;
+  LAgreed := False;
+  Consider(AL);
+  if not AUnary and not XSameType(AL, AR) then
+    Consider(AR);
+  if not LAgreed then
+    Result := XNil
+  else
+    Result := LWin;
 end;
 
 { The type dcc gives a LITERAL where a type is inferred from it (3.1.3, 3.2.1)

@@ -565,6 +565,63 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // F46, the operator shape: a member read off an operator applied to
+  // another unit's record - FMX.Types3D's `(B - A).CrossProduct(P1 - A)`,
+  // FMX.Layouts' `(LViewportPosition * LScale).Round`. The expression's type
+  // is the `class operator`'s result; it was nothing. dcc64-checked
+  // (local/fidelity/x-f46b/probe).
+  UNIT_XOA =
+    'unit XOA;'#10'interface'#10'type'#10 +
+    '  TOpVec = record'#10 +
+    '    X, Y: Single;'#10 +
+    '    function Len: Single;'#10 +
+    '    class operator Add(const A, B: TOpVec): TOpVec;'#10 +
+    '    class operator Subtract(const A, B: TOpVec): TOpVec;'#10 +
+    '    class operator Negative(const A: TOpVec): TOpVec;'#10 +
+    '    class operator Multiply(const A: TOpVec; const F: Single): TOpVec;'#10 +
+    '    class operator Multiply(const F: Single; const A: TOpVec): TOpVec;'#10 +
+    '    class operator Multiply(const A, B: TOpVec): Single;'#10 +
+    '  end;'#10 +
+    '  TOpGen<T> = record'#10 +
+    '    V: T;'#10 +
+    '    class operator Add(const A, B: TOpGen<T>): TOpGen<T>;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TOpVec.Len: Single; begin Result := X + Y; end;'#10 +
+    'class operator TOpVec.Add(const A, B: TOpVec): TOpVec;'#10 +
+    'begin Result := A; end;'#10 +
+    'class operator TOpVec.Subtract(const A, B: TOpVec): TOpVec;'#10 +
+    'begin Result := A; end;'#10 +
+    'class operator TOpVec.Negative(const A: TOpVec): TOpVec;'#10 +
+    'begin Result := A; end;'#10 +
+    'class operator TOpVec.Multiply(const A: TOpVec; const F: Single): TOpVec;'#10 +
+    'begin Result := A; end;'#10 +
+    'class operator TOpVec.Multiply(const F: Single; const A: TOpVec): TOpVec;'#10 +
+    'begin Result := A; end;'#10 +
+    'class operator TOpVec.Multiply(const A, B: TOpVec): Single;'#10 +
+    'begin Result := A.X; end;'#10 +
+    'class operator TOpGen<T>.Add(const A, B: TOpGen<T>): TOpGen<T>;'#10 +
+    'begin Result := A; end;'#10 +
+    'end.'#10;
+  UNIT_XOB =
+    'unit XOB;'#10'interface'#10'uses XOA;'#10 +
+    'procedure OpRun(const A, B: TOpVec; const F: Single;'#10 +
+    '  const G: TOpGen<Integer>);'#10 +
+    'implementation'#10 +
+    'procedure OpRun(const A, B: TOpVec; const F: Single;'#10 +
+    '  const G: TOpGen<Integer>);'#10 +
+    'begin'#10 +
+    '  var OpSub := (A - B).Len;'#10 +
+    '  var OpVec := A + B;'#10 +
+    '  var OpNeg := (-A).X;'#10 +
+    '  var OpScaled := (A * F).Y;'#10 +
+    '  var OpLeft := (F * A).Len;'#10 +
+    '  var OpDot := A * B;'#10 +
+    '  var OpGen := (G + G).V;'#10 +
+    '  var OpChain := ((A - B) * F + A).Len;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // F43 of the parser-fidelity plan: a for-in over a generic class whose
   // enumerator's Current is a NESTED ALIAS of another generic instantiated
   // over the class's parameter (TPasIntMap<V>'s `TSlot = TPair<Integer, V>`).
@@ -1868,6 +1925,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XPD.pas'), UNIT_XPD);
   TFile.WriteAllText(TPath.Combine(LDir, 'XNA.pas'), UNIT_XNA);
   TFile.WriteAllText(TPath.Combine(LDir, 'XNB.pas'), UNIT_XNB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XOA.pas'), UNIT_XOA);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XOB.pas'), UNIT_XOB);
   TFile.WriteAllText(TPath.Combine(LDir, 'XGP.pas'), UNIT_XGP);
   TFile.WriteAllText(TPath.Combine(LDir, 'XGE.pas'), UNIT_XGE);
   TFile.WriteAllText(TPath.Combine(LDir, 'XJV.pas'), UNIT_XJV);
@@ -1941,8 +2000,9 @@ begin
     // as TBox<T> above). 33 since XGE: TGeMap<TGeRec>, the open TGeMap<V> of
     // the enumerator's field, and TGePair<Integer, V> / TGePair<Integer,
     // TGeRec> behind the nested TSlot alias; 34 with TGeImport<TGeRec>;
-    // 35 with XNB's TNaList<TNaRec>.
-    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '35');
+    // 35 with XNB's TNaList<TNaRec>; 38 with XOB's TOpGen<Integer> and the
+    // open TOpGen<T> twice (interface and implementation T, as above).
+    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '38');
 
     // ---- Cross-unit overload selection by ARGUMENT TYPES ----
     LV := ModelByName('xv');
@@ -2260,6 +2320,26 @@ begin
     Eq('F46: through a probe', ProbeTypeOf(LE, 'FCls.Valid'), 'Boolean');
     Eq('F46: a generic instance''s nested type keeps its frame',
       DeclTypeOf(LE, 'naelem'), 'Integer');
+
+    // ---- F46: a record operator's result ----
+    LE := ModelByName('xob');
+    Ok('XOB loaded', Assigned(LE));
+    Ok('XOB: no diags at all', Length(LE.Diags) = 0);
+    Eq('F46: `(A - B).Len` - Subtract''s result', DeclTypeOf(LE, 'opsub'),
+      'Single');
+    Eq('F46: `A + B` infers Add''s result', DeclTypeOf(LE, 'opvec'),
+      'TOpVec');
+    Eq('F46: unary `-A` is Negative''s', DeclTypeOf(LE, 'opneg'), 'Single');
+    Eq('F46: `A * F` picks the (TOpVec, Single) overload',
+      DeclTypeOf(LE, 'opscaled'), 'Single');
+    Eq('F46: `F * A` the (Single, TOpVec) one, from the right operand',
+      DeclTypeOf(LE, 'opleft'), 'Single');
+    Eq('F46: `A * B` the (TOpVec, TOpVec) one, of ANOTHER result',
+      DeclTypeOf(LE, 'opdot'), 'Single');
+    Eq('F46: a generic record''s operator in the operand''s frame',
+      DeclTypeOf(LE, 'opgen'), 'Integer');
+    Eq('F46: operators chained', DeclTypeOf(LE, 'opchain'), 'Single');
+    Eq('F46: through a probe', ProbeTypeOf(LE, '(A-B).Len'), 'Single');
 
     // ---- F43: a nested alias of a generic over the class's parameter ----
     LE := ModelByName('xge');

@@ -478,8 +478,9 @@ TPasIntMap<V>'s `TSlot = TPair<Integer, V>`, WinRT's `TFooImport.Statics`
 with another unit's nested type (`MinTarget: TAniCalculations.TTarget`) typed
 to nothing in the cross-type pass, so the members read through it were bound
 to nothing - the largest shape of the rung's unbound selectors (F46, that
-shape fixed in 0.93.22; operator results, pointers to arrays and others
-remain); the member after `TThreadList<IInterface>.` looked up in
+shape fixed in 0.93.22; an operator applied to a record, `(B - A).Len`,
+typed as its `class operator`'s result in 0.93.25; pointers to arrays and
+others remain); the member after `TThreadList<IInterface>.` looked up in
 the unit's own plain `TThreadList` the head was first bound to, once the head
 itself had moved to the used unit's generic (F44, fixed in 0.93.15). And one
 regression the rung caught: a bare `Pointer` bound
