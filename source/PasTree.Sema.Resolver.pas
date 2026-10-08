@@ -1451,8 +1451,12 @@ begin
       // ancestor / implemented-interface references: resolve in the outer scope
       nkIdent, nkMember, nkTypeArgs:
         Collect(LChild, AOuter);
+      // An interface's GUID clause is one constant expression (14.1.1) whose
+      // names - `[SID_IContextMenu]`, `[UK.SID_K + '']` - are references made
+      // in the declaration, resolved like the heritage's (F39: nothing bound
+      // them, so Find References on such a constant missed every interface).
       nkGuid:
-        ; // no names
+        Collect(LChild, AOuter);
       nkVisibility:
         LVis := VisibilityOf(LChild);
       nkVarDecl:

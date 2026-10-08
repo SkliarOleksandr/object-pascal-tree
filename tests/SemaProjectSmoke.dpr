@@ -3237,6 +3237,105 @@ begin
   end;
 end;
 
+{ The names of an interface's GUID clause are references (F39 of the
+  parser-fidelity plan: `[SID_IContextMenu]` in Winapi.ShlObj was bound to
+  nothing). dcc64 37.0 runs the fixture (local x-f39) with IA's GUID the
+  unit's SID_A, IK's and IQ's UK's SID_K, and TOuter.IN1's the UNIT's SID_A,
+  not TOuter's own constant above it - in a type's declaration its members
+  rank after the unit's declarations made so far (F53). }
+procedure TestGuidClauseNames;
+const
+  UK =
+    'unit UK;'#13#10'interface'#13#10'const'#13#10 +
+    '  SID_K = ''{11111111-0000-0000-0000-000000000001}'';'#13#10 +
+    'implementation'#13#10'end.'#13#10;
+  UG =
+    'unit UG;'#13#10 +                                        // 1
+    'interface'#13#10 +                                       // 2
+    'uses UK;'#13#10 +                                        // 3
+    'const'#13#10 +                                           // 4
+    '  SID_A = ''{22222222-0000-0000-0000-000000000002}'';'#13#10 + // 5
+    'type'#13#10 +                                            // 6
+    '  IA = interface [SID_A] end;'#13#10 +                   // 7
+    '  IK = interface [SID_K] end;'#13#10 +                   // 8
+    '  IQ = interface [UK.SID_K + ''''] end;'#13#10 +         // 9
+    '  TOuter = class'#13#10 +                                // 10
+    '  const SID_A = ''{33333333-0000-0000-0000-000000000003}'';'#13#10 + // 11
+    '  type IN1 = interface [SID_A] end;'#13#10 +             // 12
+    '  end;'#13#10 +                                          // 13
+    'implementation'#13#10 +                                  // 14
+    'end.'#13#10;                                             // 15
+  PGM =
+    'program PGd;'#13#10'uses UG;'#13#10'begin'#13#10'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LM: TPasSemaModel;
+  LMid: Integer;
+
+  // As TestHelperBareName's BoundAt.
+  function BoundAt(ALine, ACol: Integer): string;
+  var
+    LFile: string;
+    LLine, LCol, LSym: Integer;
+    LExt: TPasExtRef;
+  begin
+    Result := '?';
+    for var LNode := 0 to High(LM.Tree.Nodes) do
+    begin
+      if (LM.Tree.Nodes[LNode].Kind <> nkIdent) or
+         not LProj.NodeSite(LMid, LNode, LFile, LLine, LCol) or
+         (LLine <> ALine) or (LCol <> ACol) then
+        Continue;
+      if LM.ExtRefMap.TryGetValue(LNode, LExt) then
+      begin
+        if LExt.UnitId <> LMid then
+          Exit(ChangeFileExt(ExtractFileName(LProj.ModelFile(LExt.UnitId)),
+            ''));
+        LSym := LExt.Sym;
+      end
+      else
+        LSym := LM.RefMap[LNode];
+      if LSym = NIL_SYM then
+        Exit('');
+      var LScope := LM.Symbols[LSym].Scope;
+      if (LScope <> NIL_SCOPE) and (LM.Scopes[LScope].Kind = sckStruct) and
+         (LM.Scopes[LScope].StructSym <> NIL_SYM) then
+        Exit('here:' + LM.Symbols[LM.Scopes[LScope].StructSym].Name);
+      Exit('here');
+    end;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_guid_clause_names');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UK.pas'), UK);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UG.pas'), UG);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PGd.dpr'), PGM);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    Ok('guid-clause: PGd analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'PGd.dpr')) >= 0);
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'UG.pas'));
+    Ok('guid-clause: UG has a model', LMid >= 0);
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    Ok('guid-clause: the unit''s constant', BoundAt(7, 19) = 'here');
+    Ok('guid-clause: a used unit''s constant', BoundAt(8, 19) = 'UK');
+    Ok('guid-clause: a qualified one in an expression', BoundAt(9, 22) = 'UK');
+    Ok('guid-clause: in a nested interface, the unit''s above the outer''s',
+      BoundAt(12, 25) = 'here');
+    Ok('guid-clause: no diagnostics', Length(LM.Diags) = 0);
+  finally
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { A member a method cannot see is passed over by the bare-name lookup, which
   goes on up the ancestry and then to the unit (F38 of the parser-fidelity
   plan). PasTree took an ancestor's private member of another unit -
@@ -9854,6 +9953,7 @@ begin
   TestShadowArity;
   TestGenericMemberArity;
   TestHelperBareName;
+  TestGuidClauseNames;
   TestInheritedVisibility;
   TestInheritedBeatsUnitLevel;
   TestWithBodySelfMember;
