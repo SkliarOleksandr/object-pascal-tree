@@ -467,7 +467,11 @@ went on into `string` and asked string's helper there (F50, fixed in
 0.93.16); `M^^` over `M: ^PResStringModule` typed one dereference short, the
 pointee of M's own declaration read for `M^` as a base (F45, fixed in
 0.93.17); the constant named by an interface's GUID clause bound to nothing
-(F39, fixed in 0.93.18); the member after `TThreadList<IInterface>.` looked up in
+(F39, fixed in 0.93.18); a name in the interface section bound through an
+implementation `uses` entry - `PByte` in System.Hash's interface to
+System.Types, the WinRT aliases of System.Win.ShareContract to
+Winapi.CommonTypes past the interface's own Winapi.ApplicationModel.DataTransfer
+(F35, F36, fixed in 0.93.20); the member after `TThreadList<IInterface>.` looked up in
 the unit's own plain `TThreadList` the head was first bound to, once the head
 itself had moved to the used unit's generic (F44, fixed in 0.93.15). And one
 regression the rung caught: a bare `Pointer` bound

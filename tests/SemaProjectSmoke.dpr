@@ -3455,6 +3455,106 @@ begin
   end;
 end;
 
+{ The implementation's uses are not visible from the interface section (F35
+  of the parser-fidelity plan: `PByte` in System.Hash's interface went to
+  System.Types.PByte, a unit only its implementation uses; dcc takes
+  System's). The same name below `implementation` is the used unit's. }
+procedure TestInterfaceSkipsImplUses;
+const
+  UTY =
+    'unit UTY;'#13#10'interface'#13#10'type'#13#10 +
+    '  PByte = ^Integer;'#13#10 +
+    '  TWord = Integer;'#13#10 +
+    'implementation'#13#10'end.'#13#10;
+  UTW =
+    'unit UTW;'#13#10'interface'#13#10'type'#13#10 +
+    '  TWord = Cardinal;'#13#10 +
+    'implementation'#13#10'end.'#13#10;
+  UH =
+    'unit UH;'#13#10 +                                        // 1
+    'interface'#13#10 +                                       // 2
+    'uses UTW;'#13#10 +                                       // 3
+    'type'#13#10 +                                            // 4
+    '  TH = record'#13#10 +                                   // 5
+    '    P: PByte;'#13#10 +                                   // 6
+    '    W: TWord;'#13#10 +                                   // 7
+    '  end;'#13#10 +                                          // 8
+    'procedure Run(A: PByte);'#13#10 +                        // 9
+    'implementation'#13#10 +                                  // 10
+    'uses UTY;'#13#10 +                                       // 11
+    'procedure Run(A: PByte);'#13#10 +                        // 12
+    'begin'#13#10 +                                           // 13
+    'end;'#13#10 +                                            // 14
+    'var'#13#10 +                                             // 15
+    '  V: PByte;'#13#10 +                                     // 16
+    '  X: TWord;'#13#10 +                                     // 17
+    'end.'#13#10;                                             // 18
+  PGM =
+    'program PIu;'#13#10'uses UH;'#13#10'begin'#13#10'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LM: TPasSemaModel;
+  LMid: Integer;
+
+  // As TestShadowArity's BoundAt.
+  function BoundAt(ALine, ACol: Integer): string;
+  var
+    LFile: string;
+    LLine, LCol: Integer;
+    LExt: TPasExtRef;
+  begin
+    Result := '?';
+    for var LNode := 0 to High(LM.Tree.Nodes) do
+    begin
+      if (LM.Tree.Nodes[LNode].Kind <> nkIdent) or
+         not LProj.NodeSite(LMid, LNode, LFile, LLine, LCol) or
+         (LLine <> ALine) or (LCol <> ACol) then
+        Continue;
+      if LM.ExtRefMap.TryGetValue(LNode, LExt) then
+        Exit(ChangeFileExt(ExtractFileName(LProj.ModelFile(LExt.UnitId)), ''));
+      if LM.RefMap[LNode] = NIL_SYM then
+        Exit('');
+      if sfBuiltin in LM.Symbols[LM.RefMap[LNode]].Flags then
+        Exit('builtin');
+      Exit('here');
+    end;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_intf_impl_uses');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UTY.pas'), UTY);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UTW.pas'), UTW);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UH.pas'), UH);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PIu.dpr'), PGM);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    Ok('intf-impl-uses: PIu analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'PIu.dpr')) >= 0);
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'UH.pas'));
+    Ok('intf-impl-uses: UH has a model', LMid >= 0);
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    Ok('intf-impl-uses: a field''s PByte is not UTY''s',
+      not SameText(BoundAt(6, 8), 'UTY'));
+    Ok('intf-impl-uses: an interface uses entry still answers',
+      BoundAt(7, 8) = 'UTW');
+    Ok('intf-impl-uses: a parameter''s PByte is not UTY''s',
+      not SameText(BoundAt(9, 18), 'UTY'));
+    Ok('intf-impl-uses: below implementation, UTY''s PByte',
+      BoundAt(16, 6) = 'UTY');
+    Ok('intf-impl-uses: below implementation, the later entry''s TWord',
+      BoundAt(17, 6) = 'UTY');
+  finally
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
 
 { A member a method cannot see is passed over by the bare-name lookup, which
   goes on up the ancestry and then to the unit (F38 of the parser-fidelity
@@ -10075,6 +10175,7 @@ begin
   TestHelperBareName;
   TestGuidClauseNames;
   TestNestedSameNamedAncestor;
+  TestInterfaceSkipsImplUses;
   TestInheritedVisibility;
   TestInheritedBeatsUnitLevel;
   TestWithBodySelfMember;

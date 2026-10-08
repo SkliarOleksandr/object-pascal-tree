@@ -1083,8 +1083,18 @@ type
       out AX: TSemaXType; AProbe: TPasXProbe = nil): Boolean;
     // The cross-unit halves of unqualified name resolution, in the priority
     // order CrossResolve itself uses: uses (last-wins) -> System -> SysInit.
+    // AIntfOnly: the interface section's view - the implementation's uses
+    // entries are not visible there (F35).
     function FindInUses(AId: Integer; const ANameLower: string;
-      out AUnit, ASym: Integer): Boolean;
+      out AUnit, ASym: Integer; AIntfOnly: Boolean = False): Boolean;
+    { The UsesList entry AIdx of AModel is in the implementation's `uses`. }
+    function IsImplUsesEntry(AModel: TPasSemaModel; AIdx: Integer): Boolean;
+    { ANode lies in AModel's interface section (not in a program, a package,
+      or below `implementation`). }
+    function InInterfaceSection(AModel: TPasSemaModel; ANode: Integer): Boolean;
+    { An implementation `uses` entry's unit AUid answered a name at ANode, in
+      the interface section, where that entry is not visible (F35). }
+    function ImplUsesHiddenAt(AId, AUid, ANode: Integer): Boolean;
     { A compiler-provided name that a used unit declares itself (its
       BuiltinShadows): that declaration, last `uses` entry first, for a node
       Phase 1 bound to the seed. A used unit is searched before System, so
@@ -5036,7 +5046,7 @@ begin
 end;
 
 function TPasSemaProject.FindInUses(AId: Integer; const ANameLower: string;
-  out AUnit, ASym: Integer): Boolean;
+  out AUnit, ASym: Integer; AIntfOnly: Boolean): Boolean;
 var
   LModel, LUsed: TPasSemaModel;
   LIdx, LUid, LSym: Integer;
@@ -5045,7 +5055,7 @@ begin
   for LIdx := High(LModel.UsesList) downto 0 do
   begin
     LUid := LModel.UsesList[LIdx].UnitId;
-    if LUid < 0 then
+    if (LUid < 0) or (AIntfOnly and IsImplUsesEntry(LModel, LIdx)) then
       Continue;
     LUsed := FModels[LUid];
     if LUsed.InterfaceScope = NIL_SCOPE then
@@ -5102,10 +5112,13 @@ begin
   // to the seed, while `Pointer<Integer>` is the generic. Only a type has an
   // arity; any other declaration answers a bare reference alone.
   LWant := WrittenArityOfRef(LModel, ANode);
+  // The interface section sees its own `uses` only (F35).
+  var LIntf := InInterfaceSection(LModel, ANode);
   for var LIdx := High(LModel.UsesList) downto 0 do
   begin
     LUid := LModel.UsesList[LIdx].UnitId;
-    if (LUid < 0) or (LUid = AId) then
+    if (LUid < 0) or (LUid = AId) or
+       (LIntf and IsImplUsesEntry(LModel, LIdx)) then
       Continue;
     LUsed := FModels[LUid];
     if LUsed.InterfaceScope = NIL_SCOPE then
@@ -5124,6 +5137,46 @@ begin
       Exit(True);
     end;
   end;
+end;
+
+function TPasSemaProject.IsImplUsesEntry(AModel: TPasSemaModel;
+  AIdx: Integer): Boolean;
+var
+  LSym: Integer;
+begin
+  LSym := AModel.UsesList[AIdx].Sym;
+  Result := (LSym <> NIL_SYM) and
+    (AModel.Symbols[LSym].Scope <> NIL_SCOPE) and
+    (AModel.Scopes[AModel.Symbols[LSym].Scope].Kind = sckImplementation);
+end;
+
+function TPasSemaProject.InInterfaceSection(AModel: TPasSemaModel;
+  ANode: Integer): Boolean;
+begin
+  // Climbs the tree, not the scopes: a method body's scope chain runs
+  // through its type's member scope back into the interface's.
+  while ANode <> NIL_NODE do
+  begin
+    case AModel.Tree.Nodes[ANode].Kind of
+      nkInterfaceSec:
+        Exit(True);
+      nkImplementationSec:
+        Exit(False);
+    end;
+    ANode := AModel.Tree.Nodes[ANode].Parent;
+  end;
+  Result := False;
+end;
+
+function TPasSemaProject.ImplUsesHiddenAt(AId, AUid, ANode: Integer): Boolean;
+var
+  LModel: TPasSemaModel;
+begin
+  Result := False;
+  LModel := FModels[AId];
+  for var LIdx := 0 to High(LModel.UsesList) do
+    if LModel.UsesList[LIdx].UnitId = AUid then
+      Exit(IsImplUsesEntry(LModel, LIdx) and InInterfaceSection(LModel, ANode));
 end;
 
 function TPasSemaProject.FindInUsesMemo(AId: Integer; const ANameLower: string;
@@ -11891,7 +11944,14 @@ begin
           if QualifierUnitAt(AId, LNode, LMatchNode) >= 0 then
             Continue;
           LNameLower := SemaKeyText(LKey);
-          if FindInUsesMemo(AId, LNameLower, LUid, LSym) then
+          var LInUses := FindInUsesMemo(AId, LNameLower, LUid, LSym);
+          // The memo answers for the implementation, where every `uses`
+          // entry is visible; the interface section sees its own only (F35:
+          // `PByte` in System.Hash's interface went to System.Types, which
+          // only its implementation uses).
+          if LInUses and ImplUsesHiddenAt(AId, LUid, LNode) then
+            LInUses := FindInUses(AId, LNameLower, LUid, LSym, True);
+          if LInUses then
           begin
             // ARITY is part of a type's identity (16.1.2) and last-uses-wins
             // is blind to it - see FixCrossArity.
