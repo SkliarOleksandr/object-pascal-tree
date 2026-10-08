@@ -484,9 +484,10 @@ shape fixed in 0.93.22; an operator applied to a record, `(B - A).Len`,
 typed as its `class operator`'s result in 0.93.25; an array of such a nested
 type and a member through an inline `^T` in 0.93.26; a character pointer's
 Char (`FormatPtr^.IsNumber`) and an implementation routine qualified with
-the unit's own name in 0.93.27); the member after
-`TThreadList<IInterface>.` looked up in the unit's own plain `TThreadList`
-the head was first bound to, once the head
+the unit's own name in 0.93.27; a pointer to a record indexed and a result
+type hidden by a parameter or a local of the same name in 0.93.29); the
+member after `TThreadList<IInterface>.` looked up in the unit's own plain
+`TThreadList` the head was first bound to, once the head
 itself had moved to the used unit's generic (F44, fixed in 0.93.15). And one
 regression the rung caught: a bare `Pointer` bound
 to a used unit's generic `Pointer<T>` (F51, from 0.92.1's search of the used

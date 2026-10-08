@@ -638,6 +638,8 @@ const
     '{$POINTERMATH ON}'#10 +
     'type'#10 +
     '  PChByte = ^Byte;'#10 +
+    '  TChRec = record Len: Integer; end;'#10 +
+    '  PChRec = ^TChRec;'#10 +
     'procedure ChRun(P: PChar; W: PWideChar; A: PAnsiChar);'#10 +
     'begin'#10 +
     '  var ChP := P^.IsDig;'#10 +
@@ -646,6 +648,7 @@ const
     '  var ChC := P^;'#10 +
     '  var ChI := P[1].IsDig;'#10 +
     '  var ChB := PChByte(A)[1];'#10 +
+    '  var ChRec := PChRec(A)[1].Len;'#10 +
     'end;'#10 +
     'end.'#10;
   // F46: a routine qualified with its OWN unit's dotted name, from a method
@@ -670,6 +673,50 @@ const
     'begin'#10 +
     '  var QoQual := Xq.Own.QoHash(1, 2);'#10 +
     '  var QoV := Xq.Own.QoVer;'#10 +
+    'end;'#10 +
+    'end.'#10;
+  // F46 in spring4d: `Result.fInstance` in a generic record's class operator
+  // or static class function returning the record itself
+  // (Spring.Patterns.Specification, Spring.Mocking's Mock<T>.From).
+  UNIT_XGR =
+    'unit XGR;'#10'interface'#10'type'#10 +
+    '  IGrSpec<T> = interface'#10 +
+    '    function Ok(const A: T): Boolean;'#10 +
+    '  end;'#10 +
+    '  TGrSpec<T> = record'#10 +
+    '  private'#10 +
+    '    fInstance: IGrSpec<T>;'#10 +
+    '    fTag: Integer;'#10 +
+    '  public'#10 +
+    '    class operator Implicit(const tgrspec: IGrSpec<T>): TGrSpec<T>;'#10 +
+    '    class operator Implicit(const S: TGrSpec<T>): IGrSpec<T>;'#10 +
+    '    class function From(const tgrspec: IGrSpec<T>): TGrSpec<T>; static;'#10 +
+    '  end;'#10 +
+    '  TGrBox = record'#10 +
+    '    class function Make<U>(const A: U): TGrSpec<U>; static;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'class operator TGrSpec<T>.Implicit(const tgrspec: IGrSpec<T>): TGrSpec<T>;'#10 +
+    'begin'#10 +
+    '  Result.fInstance := tgrspec;'#10 +
+    '  var GrTag := Result.fTag;'#10 +
+    'end;'#10 +
+    'class operator TGrSpec<T>.Implicit(const S: TGrSpec<T>): IGrSpec<T>;'#10 +
+    'begin'#10 +
+    '  Result := S.fInstance;'#10 +
+    'end;'#10 +
+    'class function TGrSpec<T>.From(const tgrspec: IGrSpec<T>): TGrSpec<T>;'#10 +
+    'begin'#10 +
+    '  Result.fInstance := tgrspec;'#10 +
+    '  var GrFrom := Result.fTag;'#10 +
+    'end;'#10 +
+    'class function TGrBox.Make<U>(const A: U): TGrSpec<U>;'#10 +
+    'var'#10 +
+    '  tgrspec: Integer;'#10 +
+    'begin'#10 +
+    '  tgrspec := 1;'#10 +
+    '  Result.fTag := tgrspec;'#10 +
+    '  var GrLoc := Result.fTag;'#10 +
     'end;'#10 +
     'end.'#10;
   UNIT_XOB =
@@ -1999,6 +2046,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XCH.pas'), UNIT_XCH);
   TFile.WriteAllText(TPath.Combine(LDir, 'XCI.pas'), UNIT_XCI);
   TFile.WriteAllText(TPath.Combine(LDir, 'Xq.Own.pas'), UNIT_XQO);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XGR.pas'), UNIT_XGR);
   TFile.WriteAllText(TPath.Combine(LDir, 'XGP.pas'), UNIT_XGP);
   TFile.WriteAllText(TPath.Combine(LDir, 'XGE.pas'), UNIT_XGE);
   TFile.WriteAllText(TPath.Combine(LDir, 'XJV.pas'), UNIT_XJV);
@@ -2073,8 +2121,11 @@ begin
     // the enumerator's field, and TGePair<Integer, V> / TGePair<Integer,
     // TGeRec> behind the nested TSlot alias; 34 with TGeImport<TGeRec>;
     // 35 with XNB's TNaList<TNaRec>; 38 with XOB's TOpGen<Integer> and the
-    // open TOpGen<T> twice (interface and implementation T, as above).
-    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '38');
+    // open TOpGen<T> twice (interface and implementation T, as above); 48
+    // with XGR, whose open IGrSpec<T> and TGrSpec<T> are written in the
+    // declarations and in each implementation heading (8), and TGrSpec<U>
+    // in TGrBox.Make's two headings.
+    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '48');
 
     // ---- Cross-unit overload selection by ARGUMENT TYPES ----
     LV := ModelByName('xv');
@@ -2435,6 +2486,8 @@ begin
       'Boolean');
     Eq('F46: `PChByte(A)[1]` - a pointer to a scalar indexed',
       DeclTypeOf(LE, 'chb'), 'Byte');
+    Eq('F46: `PChRec(A)[1].Len` - a pointer to a record indexed (spring4d''s ' +
+      '`p[n].len`)', DeclTypeOf(LE, 'chrec'), 'Integer');
 
     // ---- F46: a routine qualified with its own unit's dotted name ----
     LE := ModelByName('xq.own');
@@ -2444,6 +2497,17 @@ begin
       DeclTypeOf(LE, 'qoqual'), 'Word');
     Eq('F46: `Xq.Own.QoVer` the implementation''s constant, past the ' +
       'static method', XTypeOf(LE, 'Xq.Own.QoVer'), 'string');
+
+    // ---- F46: Result of a generic record's operator / static function ----
+    LE := ModelByName('xgr');
+    Ok('XGR loaded', Assigned(LE));
+    Ok('XGR: no diags at all', Length(LE.Diags) = 0);
+    Eq('F46: `Result.fTag` in a class operator returning the record',
+      DeclTypeOf(LE, 'grtag'), 'Integer');
+    Eq('F46: ...in a static class function', DeclTypeOf(LE, 'grfrom'),
+      'Integer');
+    Eq('F46: a local named like the result type does not hide it',
+      DeclTypeOf(LE, 'grloc'), 'Integer');
 
     // ---- F43: a nested alias of a generic over the class's parameter ----
     LE := ModelByName('xge');

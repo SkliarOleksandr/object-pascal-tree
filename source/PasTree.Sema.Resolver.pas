@@ -2832,6 +2832,12 @@ begin
         // said E2003 on the header. Tested by token range against the list
         // the parameter is declared in, so a parameter's use in a body pays
         // one kind test. Not found here, the cross-unit pass binds it.
+        // The RESULT type is outside the list too, so the range runs to the
+        // body: `class operator Implicit(const specification:
+        // ISpecification<T>): Specification<T>` (spring4d) bound the result
+        // type to the parameter, and every `Result.fInstance` in the body was
+        // a member of nothing (F46; dcc64 37.0, `function F(tfoo: Integer):
+        // TFoo` compiles).
         if (FModel.RefMap[ANode] <> NIL_SYM) and
            (FModel.Symbols[FModel.RefMap[ANode]].Kind = skParam) then
         begin
@@ -2843,9 +2849,23 @@ begin
             LList := FTree.Nodes[LList].Parent
           else
             LList := NIL_NODE;
+          var LHeadEnd := -1;
+          if (LList <> NIL_NODE) and (KindOf(LList) = nkParams) then
+          begin
+            LHeadEnd := FTree.Nodes[LList].LastToken;
+            var LRoutine := FTree.Nodes[LList].Parent;
+            if LRoutine <> NIL_NODE then
+            begin
+              var LBody := FindChildKind(LRoutine, nkRoutineBody);
+              if LBody <> NIL_NODE then
+                LHeadEnd := FTree.Nodes[LBody].FirstToken - 1
+              else
+                LHeadEnd := FTree.Nodes[LRoutine].LastToken;
+            end;
+          end;
           if (LList <> NIL_NODE) and (KindOf(LList) = nkParams) and
              (FTree.Nodes[ANode].FirstToken >= FTree.Nodes[LList].FirstToken) and
-             (FTree.Nodes[ANode].FirstToken <= FTree.Nodes[LList].LastToken) then
+             (FTree.Nodes[ANode].FirstToken <= LHeadEnd) then
           begin
             var LOuter := FModel.Symbols[FModel.RefMap[ANode]].Scope;
             if LOuter <> NIL_SCOPE then
@@ -2855,6 +2875,31 @@ begin
                 FTree.Nodes[ANode].FirstToken)
             else
               FModel.RefMap[ANode] := NIL_SYM;
+          end;
+        end;
+        // The routine's LOCALS are no more the heading's than its parameters:
+        // `class function Mock.From<T>(const value: T): Mock<T>` with a local
+        // `mock: TMock` (spring4d's Spring.Mocking) bound the result type to
+        // the variable (F46; dcc64 37.0: a local `tfoo` beside a result type
+        // `TFoo` compiles). Only the routine's own generic parameters are in
+        // reach there. Cheap first: a symbol of the very scope the name is
+        // resolved in, that scope a routine's.
+        if (FModel.RefMap[ANode] <> NIL_SYM) and
+           (FModel.Symbols[FModel.RefMap[ANode]].Kind in
+            [skVar, skConst, skType, skRoutine, skLabel]) and
+           (FModel.Symbols[FModel.RefMap[ANode]].Scope = FNodeScope[ANode]) and
+           (FModel.Scopes[FNodeScope[ANode]].Kind = sckRoutine) then
+        begin
+          var LRoutine := FModel.Scopes[FNodeScope[ANode]].OwnerNode;
+          if (LRoutine <> NIL_NODE) and (KindOf(LRoutine) = nkRoutine) then
+          begin
+            var LBody := FindChildKind(LRoutine, nkRoutineBody);
+            if (LBody <> NIL_NODE) and
+               (FTree.Nodes[ANode].FirstToken < FTree.Nodes[LBody].FirstToken) and
+               (FModel.Scopes[FNodeScope[ANode]].Parent <> NIL_SCOPE) then
+              FModel.RefMap[ANode] := FModel.ResolveAt(
+                FModel.Scopes[FNodeScope[ANode]].Parent, LKey,
+                FTree.Nodes[ANode].FirstToken);
           end;
         end;
         // A member found ahead of the unit's own declarations where dcc ranks

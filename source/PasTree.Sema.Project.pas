@@ -13774,7 +13774,15 @@ begin
           LCur := PointeeX(LCur);
           LViaPointer := True;
         end;
+      nkClassType, nkInterfaceType:
+        Break;   // a default array property may still index it
     else
+      // Reached through a pointer, a record (or any other non-array) is the
+      // element itself: `p[n].len` over Spring's `{$POINTERMATH ON} PSlice =
+      // ^TSlice` is `(p + n)^.len` (4.8, F46). A class keeps the default
+      // array property search below - an object reference indexed.
+      if LViaPointer then
+        Exit(LCur);
       Break;   // not an array - a default array property may still index it
     end;
   end;
