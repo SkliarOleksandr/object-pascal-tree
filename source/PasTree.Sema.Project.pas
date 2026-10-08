@@ -12668,6 +12668,17 @@ var
   LMid, LSym, LNode: Integer;
 begin
   Result := XNil;
+  // The declaration is the NAME's: `M^` in `M^^` is its pointee, not M, so a
+  // dereferenced or indexed base answers nothing here and is typed by the
+  // walk (F45: `M^^.Module` with `M: ^PResStringModule` came out one
+  // dereference short - PResStringModule, M's declared pointee, again).
+  LNode := ABaseNode;
+  while (LNode <> NIL_NODE) and
+        (FModels[AId].Tree.Nodes[LNode].Kind = nkParen) do
+    LNode := FModels[AId].Tree.Nodes[LNode].FirstChild;
+  if (LNode = NIL_NODE) or
+     not (FModels[AId].Tree.Nodes[LNode].Kind in [nkIdent, nkMember]) then
+    Exit;
   if not DesignatorSymX(AId, ABaseNode, LMid, LSym) then
     Exit;
   LNode := FModels[LMid].Symbols[LSym].TypeNode;

@@ -490,6 +490,34 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // F45 of the parser-fidelity plan: a dereference of a dereference. M is an
+  // ANONYMOUS pointer to a named pointer type (System.SysUtils'
+  // ResStringModuleUnloadProc: `M: ^PResStringModule`, then `M^^.Module`);
+  // `M^` is PPdRec and `M^^` the record. Reading the pointee off M's own
+  // declaration for both typed `M^^` as PPdRec again, one dereference short.
+  UNIT_XPD =
+    'unit XPD;'#10'interface'#10 +
+    'type'#10 +
+    '  TPdTag = record V: Integer; end;'#10 +
+    '  PPdRec = ^TPdRec;'#10 +
+    '  TPdRec = record'#10 +
+    '    Tag: TPdTag;'#10 +
+    '    Next: PPdRec;'#10 +
+    '  end;'#10 +
+    'procedure Run(M: Pointer);'#10 +
+    'implementation'#10 +
+    'procedure Run(M: Pointer);'#10 +
+    'var'#10 +
+    '  Q: ^PPdRec;'#10 +
+    'begin'#10 +
+    '  Q := M;'#10 +
+    '  var PdOne := Q^;'#10 +
+    '  var PdTwo := Q^^;'#10 +
+    '  var PdTag := Q^^.Tag;'#10 +
+    '  var PdNext := (Q^)^.Next;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // 3.1.3 / 3.2.1 inference fixtures. XJ declares the overload shapes the
   // inference must decide rather than guess (a parameterless overload beside
   // one with parameters, a same-arity pair with DIFFERENT result types, a
@@ -1705,6 +1733,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NQ2.pas'), UNIT_NQ2);
   TFile.WriteAllText(TPath.Combine(LDir, 'XF.pas'), UNIT_XF);
   TFile.WriteAllText(TPath.Combine(LDir, 'XFI.pas'), UNIT_XFI);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XPD.pas'), UNIT_XPD);
   TFile.WriteAllText(TPath.Combine(LDir, 'XJV.pas'), UNIT_XJV);
   TFile.WriteAllText(TPath.Combine(LDir, 'XIV.pas'), UNIT_XIV);
   TFile.WriteAllText(TPath.Combine(LDir, 'XEV.pas'), UNIT_XEV);
@@ -2068,6 +2097,17 @@ begin
       DeclTypeOf(LE, 'icatnamed'), 'TFiNames');
     Eq('4.2.1: `[ADir] + [ADir]` (dcc: an anonymous array): no type',
       DeclTypeOf(LE, 'icattwoctors'), '?');
+
+    // ---- F45: a dereference of a dereference ----
+    LE := ModelByName('xpd');
+    Ok('XPD loaded', Assigned(LE));
+    Ok('XPD: no diags at all', Length(LE.Diags) = 0);
+    Eq('F45: `Q^` over `Q: ^PPdRec` is PPdRec', DeclTypeOf(LE, 'pdone'),
+      'PPdRec');
+    Eq('F45: `Q^^` is the record', DeclTypeOf(LE, 'pdtwo'), 'TPdRec');
+    Eq('F45: `Q^^.Tag` is the field''s type', DeclTypeOf(LE, 'pdtag'),
+      'TPdTag');
+    Eq('F45: `(Q^)^.Next` too', DeclTypeOf(LE, 'pdnext'), 'PPdRec');
 
     // ---- 3.1.3 inline var/const inference ----
     LE := ModelByName('xiv');
