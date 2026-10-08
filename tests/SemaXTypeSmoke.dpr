@@ -615,6 +615,63 @@ const
     'class operator TOpGen<T>.Add(const A, B: TOpGen<T>): TOpGen<T>;'#10 +
     'begin Result := A; end;'#10 +
     'end.'#10;
+  // F46, the character-pointer shape: a helper's member read off a PChar's
+  // pointee - System.SysUtils' `FormatPtr^.IsNumber`, System.Classes'
+  // `Result^.IsLowSurrogate`. PChar is compiler-provided, so its pointee had
+  // no declaration to be found through.
+  UNIT_XCH =
+    'unit XCH;'#10'interface'#10'type'#10 +
+    '  TChHelper = record helper for Char'#10 +
+    '    function IsDig: Boolean;'#10 +
+    '  end;'#10 +
+    '  TAChHelper = record helper for AnsiChar'#10 +
+    '    function Code: Byte;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TChHelper.IsDig: Boolean; begin Result := True; end;'#10 +
+    'function TAChHelper.Code: Byte; begin Result := 0; end;'#10 +
+    'end.'#10;
+  UNIT_XCI =
+    'unit XCI;'#10'interface'#10'uses XCH;'#10 +
+    'procedure ChRun(P: PChar; W: PWideChar; A: PAnsiChar);'#10 +
+    'implementation'#10 +
+    '{$POINTERMATH ON}'#10 +
+    'type'#10 +
+    '  PChByte = ^Byte;'#10 +
+    'procedure ChRun(P: PChar; W: PWideChar; A: PAnsiChar);'#10 +
+    'begin'#10 +
+    '  var ChP := P^.IsDig;'#10 +
+    '  var ChW := W^.IsDig;'#10 +
+    '  var ChA := A^.Code;'#10 +
+    '  var ChC := P^;'#10 +
+    '  var ChI := P[1].IsDig;'#10 +
+    '  var ChB := PChByte(A)[1];'#10 +
+    'end;'#10 +
+    'end.'#10;
+  // F46: a routine qualified with its OWN unit's dotted name, from a method
+  // of a type that has a same-named member - Vcl.Graphics'
+  // `Vcl.Graphics.GetHashCode(ResData, ResDataSize)` in a TObject descendant,
+  // System.Character's `System.Character.UnicodeDataVersion` in TCharHelper's
+  // class function of that name.
+  UNIT_XQO =
+    'unit Xq.Own;'#10'interface'#10 +
+    'type'#10 +
+    '  TQo = class'#10 +
+    '    function QoHash: Integer;'#10 +
+    '    class function QoVer: Integer; static;'#10 +
+    '    procedure Run;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'const QoVer: string = ''1'';'#10 +
+    'function QoHash(const A, B: Integer): Word; begin Result := A; end;'#10 +
+    'function TQo.QoHash: Integer; begin Result := 0; end;'#10 +
+    'class function TQo.QoVer: Integer; begin Result := 0; end;'#10 +
+    'procedure TQo.Run;'#10 +
+    'begin'#10 +
+    '  var QoQual := Xq.Own.QoHash(1, 2);'#10 +
+    '  var QoV := Xq.Own.QoVer;'#10 +
+    'end;'#10 +
+    'end.'#10;
   UNIT_XOB =
     'unit XOB;'#10'interface'#10'uses XOA;'#10 +
     'procedure OpRun(const A, B: TOpVec; const F: Single;'#10 +
@@ -1939,6 +1996,9 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XNB.pas'), UNIT_XNB);
   TFile.WriteAllText(TPath.Combine(LDir, 'XOA.pas'), UNIT_XOA);
   TFile.WriteAllText(TPath.Combine(LDir, 'XOB.pas'), UNIT_XOB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XCH.pas'), UNIT_XCH);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XCI.pas'), UNIT_XCI);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Xq.Own.pas'), UNIT_XQO);
   TFile.WriteAllText(TPath.Combine(LDir, 'XGP.pas'), UNIT_XGP);
   TFile.WriteAllText(TPath.Combine(LDir, 'XGE.pas'), UNIT_XGE);
   TFile.WriteAllText(TPath.Combine(LDir, 'XJV.pas'), UNIT_XJV);
@@ -2360,6 +2420,30 @@ begin
       DeclTypeOf(LE, 'opgen'), 'Integer');
     Eq('F46: operators chained', DeclTypeOf(LE, 'opchain'), 'Single');
     Eq('F46: through a probe', ProbeTypeOf(LE, '(A-B).Len'), 'Single');
+
+    // ---- F46: a helper's member off a character pointer's pointee ----
+    LE := ModelByName('xci');
+    Ok('XCI loaded', Assigned(LE));
+    Ok('XCI: no diags at all', Length(LE.Diags) = 0);
+    Eq('F46: `P^.IsDig` over a PChar', DeclTypeOf(LE, 'chp'), 'Boolean');
+    Eq('F46: ...over a PWideChar (Char''s alias family)',
+      DeclTypeOf(LE, 'chw'), 'Boolean');
+    Eq('F46: ...an AnsiChar helper over a PAnsiChar', DeclTypeOf(LE, 'cha'),
+      'Byte');
+    Eq('F46: `P^` itself is a Char', DeclTypeOf(LE, 'chc'), 'Char');
+    Eq('F46: `P[1].IsDig` - a PChar indexed', DeclTypeOf(LE, 'chi'),
+      'Boolean');
+    Eq('F46: `PChByte(A)[1]` - a pointer to a scalar indexed',
+      DeclTypeOf(LE, 'chb'), 'Byte');
+
+    // ---- F46: a routine qualified with its own unit's dotted name ----
+    LE := ModelByName('xq.own');
+    Ok('Xq.Own loaded', Assigned(LE));
+    Ok('Xq.Own: no diags at all', Length(LE.Diags) = 0);
+    Eq('F46: `Xq.Own.QoHash(1, 2)` past the method TQo.QoHash',
+      DeclTypeOf(LE, 'qoqual'), 'Word');
+    Eq('F46: `Xq.Own.QoVer` the implementation''s constant, past the ' +
+      'static method', XTypeOf(LE, 'Xq.Own.QoVer'), 'string');
 
     // ---- F43: a nested alias of a generic over the class's parameter ----
     LE := ModelByName('xge');

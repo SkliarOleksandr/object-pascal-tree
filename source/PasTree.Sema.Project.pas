@@ -11856,8 +11856,30 @@ begin
             LUid := UnitNameOf(AId, LBase);
             if LUid >= 0 then
             begin
-              LSym := FModels[LUid].Resolve(FModels[LUid].InterfaceScope,
-                PasNodeKey(LModel.Tree, LName));
+              // Qualified with the unit's OWN name, the implementation's
+              // declarations made so far are in reach too, and a member of
+              // the enclosing type never is: Vcl.Graphics'
+              // `Vcl.Graphics.GetHashCode(ResData, ResDataSize)` in a method
+              // of a TObject descendant, System.Character's
+              // `System.Character.UnicodeDataVersion` in TCharHelper's class
+              // function of that name - both name an implementation
+              // declaration and were bound to nothing (F46).
+              LSym := NIL_SYM;
+              if LUid = AId then
+              begin
+                LMatchNode := LBase;
+                while LModel.Tree.Nodes[LMatchNode].Kind = nkMember do
+                  LMatchNode := LModel.Tree.Nodes[LMatchNode].FirstChild;
+                if (LMatchNode <> NIL_NODE) and
+                   (LMatchNode <= High(LModel.NodeScope)) and
+                   (LModel.NodeScope[LMatchNode] <> NIL_SCOPE) then
+                  LSym := LModel.UnitDeclBefore(LModel.NodeScope[LMatchNode],
+                    PasNodeKey(LModel.Tree, LName),
+                    LModel.Tree.Nodes[LName].FirstToken);
+              end;
+              if LSym = NIL_SYM then
+                LSym := FModels[LUid].Resolve(FModels[LUid].InterfaceScope,
+                  PasNodeKey(LModel.Tree, LName));
               // Arity is part of the identity (16.1.2) for a QUALIFIED name
               // too: `Unit.TFoo` names the plain class and `Unit.TFoo<T>`
               // the generic, and the by-name lookup answers with whichever
@@ -12754,7 +12776,22 @@ begin
       Exit;
     LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
     if LDef = NIL_NODE then
+    begin
+      // The three character pointers are compiler-provided (seeded, no
+      // declaration in System.pas), so their pointee has no node either:
+      // `FormatPtr^.IsNumber` (System.SysUtils), `Result^.IsLowSurrogate`
+      // (System.Classes) read TCharHelper off a PChar's Char (F46).
+      if FModels[LCur.UnitId].Symbols[LCur.Sym].Kind = skBuiltinType then
+        if FModels[LCur.UnitId].Symbols[LCur.Sym].NameLower = 'pchar' then
+          Result := BuiltinX(LCur.UnitId, 'char')
+        else if FModels[LCur.UnitId].Symbols[LCur.Sym].NameLower =
+                'pwidechar' then
+          Result := BuiltinX(LCur.UnitId, 'widechar')
+        else if FModels[LCur.UnitId].Symbols[LCur.Sym].NameLower =
+                'pansichar' then
+          Result := BuiltinX(LCur.UnitId, 'ansichar');
       Exit;
+    end;
     case FModels[LCur.UnitId].Tree.Nodes[LDef].Kind of
       nkPointerType:
         // Closed over the POINTER's own frame: `ParrayofT = ^arrayofT` nested
@@ -13659,7 +13696,9 @@ function TPasSemaProject.ElementX(AId, ABaseNode: Integer): TSemaXType;
 var
   LMid, LSym, LDef, LDepth: Integer;
   LCur, LOwner: TSemaXType;
+  LViaPointer: Boolean;
 begin
+  LViaPointer := False;
   // 1. The base's own declared type node (inline-array case).
   if DesignatorSymX(AId, ABaseNode, LMid, LSym) then
   begin
@@ -13693,7 +13732,7 @@ begin
      (FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE) and
      (FModels[LMid].Tree.Nodes[FModels[LMid].Symbols[LSym].TypeNode].Kind =
       nkPointerType) then
-    LCur := ResolveTypeExpr(LMid,
+    LCur := ResolveTypeExprNested(LMid,
       FModels[LMid].Tree.Nodes[FModels[LMid].Symbols[LSym].TypeNode].FirstChild)
   else
     LCur := WithTargetTypeX(AId, ABaseNode);
@@ -13703,7 +13742,16 @@ begin
       Exit(XNil);
     LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
     if LDef = NIL_NODE then
-      Exit(XNil);
+    begin
+      // A compiler-provided type. Reached through a pointer, it IS the
+      // element: `P[I]` over a pointer to a scalar is `(P + I)^` (4.8);
+      // a character pointer is itself such a pointer with no declaration to
+      // chase, `Result[I].IsLetterOrDigit` over a PChar (System.StrUtils,
+      // F46) - PointeeX answers for those three and nothing else.
+      if LViaPointer then
+        Exit(LCur);
+      Exit(PointeeX(LCur));
+    end;
     case FModels[LCur.UnitId].Tree.Nodes[LDef].Kind of
       nkArrayType:
         // Close the element type over the ARRAY's instantiation frame:
@@ -13722,7 +13770,10 @@ begin
         // Deref and let the loop continue, so pointer -> alias -> array composes
         // instead of needing a case per combination. FindMemberX already applies
         // the same implicit deref for `P.Field`; this is its sibling.
-        LCur := PointeeX(LCur);
+        begin
+          LCur := PointeeX(LCur);
+          LViaPointer := True;
+        end;
     else
       Break;   // not an array - a default array property may still index it
     end;
