@@ -533,6 +533,12 @@ type
       this map is that branch's released-mode answer. Empty until a release;
       scopes are few, so it is tiny. }
     AnonStructSyms: TPasIntMap<Integer>;
+    { The same snapshot for every OTHER scope that carries a StructSym - a
+      method implementation's routine scope, keyed by its owner node: the
+      `Self` context TPasSemaProject.StructSymOfNode answers from NodeScope,
+      which the navigation-time probe and Go To on a bare `inherited` still
+      ask after a release. Empty until a release. }
+    RoutineStructSyms: TPasIntMap<Integer>;
     Demoted: Boolean;
     { True when this model's FINAL token stream came from the declared-pass
       re-preprocess (the per-unit $IF oracle) rather than the plain seeded
@@ -694,15 +700,26 @@ type
       TStream descendant went to System.Classes' implementation routine of
       that name). }
     function BoundPastStruct(ANode: Integer): Boolean;
-    { Frees the maps nothing reads after analysis for a unit the host is not
-      EDITING: ExprType (a nodes-sized array), ExprTypeX and WithUnopened.
-      Navigation reads none of them (grep-verified in MEMORY-AUDIT sec. 6.4-4 and
-      re-verified 2026-08-23); completion reads them for the ACTIVE file only,
-      which the caller keeps. ExprTypeX is emptied, not dropped, so existing
-      TryGetValue readers need no guard. See
+    { Frees the analysis-time maps of a unit the host is not EDITING:
+      ExprType (a nodes-sized array), ExprTypeX, WithUnopened and NodeScope.
+      Navigation still reads them: the cross typer's probe (WithTargetTypeX,
+      which Find Destructions and the with resolution of a click run) reads
+      ExprType and NodeScope of any model. So every such read goes through a
+      guard that answers "untyped" on a released model - IntraType for
+      ExprType; NodeScope's readers check its length and fall back to the
+      snapshots (AnonStructSyms, RoutineStructSyms). ExprTypeX is emptied,
+      not dropped, so existing TryGetValue readers need no guard. A released
+      model's probe answers are therefore the intra-unit types it lost - an
+      answer degrades, it never crashes. Completion reads these maps for the
+      ACTIVE file only, which the caller keeps. See
       TPasSemaProject.ReleaseTransientMaps for the contract - this is not
       called during any analysis. }
     procedure ReleaseTransientMaps;
+    { ExprType[ANode] with the bound the release needs: NIL_SYM for a node
+      past the array - every node of a released model (ExprType = nil). The
+      reader of choice for any ExprType read a navigation-time probe can
+      reach. }
+    function IntraType(ANode: Integer): Integer; inline;
     { The member-scope struct symbol stamped on a struct TYPE node - from
       NodeScope while it lives, from the release-time snapshot afterwards.
       NIL_SYM when the node owns no such scope. }
@@ -2191,7 +2208,8 @@ begin
   PastStructRecheck := nil;
   ExprTypeX.Clear;
   // NodeScope joins the released set - but its one post-analysis consumer
-  // (the anonymous-struct branch, see AnonStructSyms) gets a snapshot first.
+  // (the anonymous-struct branch, see AnonStructSyms) gets a snapshot first,
+  // and so does StructSymOfNode's `Self` context (RoutineStructSyms).
   // Built from the SCOPES (a few hundred) rather than a scan of every node.
   if NodeScope <> nil then
   begin
@@ -2199,13 +2217,24 @@ begin
       if Scopes[LScope].StructSym <> NIL_SYM then
       begin
         LOwner := Scopes[LScope].OwnerNode;
-        if (LOwner <> NIL_NODE) and (LOwner <= High(Tree.Nodes)) and
-           (Tree.Nodes[LOwner].Kind in [nkRecordType, nkClassType,
-             nkInterfaceType, nkObjectType]) then
-          AnonStructSyms.AddOrSetValue(LOwner, Scopes[LScope].StructSym);
+        if (LOwner = NIL_NODE) or (LOwner > High(Tree.Nodes)) then
+          Continue;
+        if Tree.Nodes[LOwner].Kind in [nkRecordType, nkClassType,
+             nkInterfaceType, nkObjectType] then
+          AnonStructSyms.AddOrSetValue(LOwner, Scopes[LScope].StructSym)
+        else
+          RoutineStructSyms.AddOrSetValue(LOwner, Scopes[LScope].StructSym);
       end;
     NodeScope := nil;
   end;
+end;
+
+function TPasSemaModel.IntraType(ANode: Integer): Integer;
+begin
+  if (ANode >= 0) and (ANode <= High(ExprType)) then
+    Result := ExprType[ANode]
+  else
+    Result := NIL_SYM;
 end;
 
 function TPasSemaModel.EnclosingStructSym(ANode: Integer): Integer;

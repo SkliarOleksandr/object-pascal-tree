@@ -566,7 +566,10 @@ var
   LTS: TPasTokenStream;
 begin
   LRefs := FTree.Source.IncludeRefs;
-  if Length(LRefs) = 0 then
+  // A demoted tree (TPasSemaModel.DemoteText) keeps IncludeRefs but has no
+  // text layer: its outline is empty, like every other row of it, and the
+  // empty LineStarts must not be read.
+  if (Length(LRefs) = 0) or (Length(FTree.Source.Visible) = 0) then
     Exit;
   SetLength(FItems, FCount + Length(LRefs));
   SetLength(FKeys, Length(FItems));

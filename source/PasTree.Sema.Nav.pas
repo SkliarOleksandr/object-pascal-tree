@@ -1216,8 +1216,15 @@ begin
 end;
 
 function TPasNavigator.ModelIdOf(const APath: string): Integer;
+var
+  LKey: string;
 begin
-  if FByPath.TryGetValue(LowerCase(TPath.GetFullPath(APath)), Result) then
+  // An empty or invalid path is unknown, not an exception (GetFullPath
+  // raises on both): the contract of TPasSemaProject.ModelIdOf.
+  Result := -1;
+  if not PasFullPathKey(APath, LKey) then
+    Exit;
+  if FByPath.TryGetValue(LKey, Result) then
     Exit;
   // The index is built once, in the constructor, and the project can gain
   // models AFTER that - ResolveDecl's intrinsic fallback reaches
@@ -1226,7 +1233,7 @@ begin
   // runs when a lookup fails, and the project's model list only grows).
   for var LMid := FByPath.Count to FProj.ModelCount - 1 do
     FByPath.AddOrSetValue(LowerCase(FProj.ModelFile(LMid)), LMid);
-  if not FByPath.TryGetValue(LowerCase(TPath.GetFullPath(APath)), Result) then
+  if not FByPath.TryGetValue(LKey, Result) then
     Result := -1;
 end;
 
@@ -1616,6 +1623,11 @@ begin
   ASym := NIL_SYM;
   if (AMid < 0) or (ANode = NIL_NODE) then
     Exit;
+  // The text of AMid's own nodes (a qualifier segment's unit name, the
+  // builtin fallback's name): a host may ask about a model it never opened,
+  // which a release demoted. A failed hydration leaves those answers to
+  // degrade to "none"; the node-driven ones below need no text.
+  FProj.EnsureHydrated(AMid);
   LM := FProj.Model(AMid);
   ATMid := AMid;
   ASym := LM.RefMap[ANode];
@@ -2593,6 +2605,8 @@ begin
   Result := '';
   if (AUid < 0) or (AUid >= FProj.ModelCount) then
     Exit;
+  // NodeSpanText reads the text layer ('' on a demoted model).
+  FProj.EnsureHydrated(AUid);
   Result := FProj.Model(AUid).Tree.NodeSpanText(
     FProj.Model(AUid).Tree.Nodes[0].FirstChild);
 end;
@@ -2692,6 +2706,9 @@ var
 begin
   Result := False;
   if ATargetMid < 0 then
+    Exit;
+  // HitFromNode reads the text layer: hydrate first, like DeclHit.
+  if not FProj.EnsureHydrated(ATargetMid) then
     Exit;
   LM := FProj.Model(ATargetMid);
   LHeader := LM.Tree.Nodes[0].FirstChild;
@@ -4730,11 +4747,36 @@ var
     end;
   end;
 
+  // Is the designator's leftmost name bound to nothing - `Self`, which no
+  // symbol declares? The probe tells such a head by its TEXT, which a demoted
+  // model lost; every other head is typed from the binding maps, which
+  // survive. So only these sites hydrate their model (hydrating every model
+  // with a `.Free` would re-preprocess the whole library).
+  function HeadUnbound(ANode: Integer): Boolean;
+  var
+    LDepth: Integer;
+  begin
+    for LDepth := 1 to 64 do
+    begin
+      if (ANode < 0) or (ANode > High(LM.Tree.Nodes)) then
+        Exit(False);
+      if not (LM.Tree.Nodes[ANode].Kind in [nkMember, nkIndex, nkDeref,
+         nkParen, nkCall, nkTypeArgs]) then
+        Break;
+      ANode := LM.Tree.Nodes[ANode].FirstChild;
+    end;
+    Result := (ANode >= 0) and (ANode <= High(LM.RefMap)) and
+      (LM.Tree.Nodes[ANode].Kind = nkIdent) and
+      (LM.RefMap[ANode] = NIL_SYM) and not LM.ExtRefMap.ContainsKey(ANode);
+  end;
+
   procedure Consider(ANode: Integer);
   begin
     LTarget := ReleasedBy(ANode);
     if LTarget = NIL_NODE then
       Exit;
+    if LM.Demoted and HeadUnbound(LTarget) then
+      FProj.EnsureHydrated(LMi);
     if not DesignatorIsClass(LMi, LTarget, ATMid, ASym) then
       Exit;
     LTarget := DesignatorNameNode(LM, LTarget);

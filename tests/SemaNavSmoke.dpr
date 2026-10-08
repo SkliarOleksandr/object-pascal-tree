@@ -2098,6 +2098,170 @@ begin
       Exit(True);
 end;
 
+// A released and demoted project (DemoteClosedUnits - the documented mode of
+// a host that rebuilds on every edit) still answers navigation: the queries
+// below read analysis-time maps (ExprType, NodeScope) or the text layer of a
+// closed unit, which the release emptied. Each answer must equal the one the
+// same query gave before the release - or, for the probes that crashed,
+// arrive at all. Every check runs on a freshly demoted text layer.
+procedure TestReleasedModels;
+const
+  UNIT_REL =
+    'unit NavRel;'#10 +                                   // 1
+    'interface'#10 +                                      // 2
+    'uses Namespace.NavD;'#10 +                           // 3
+    'type'#10 +                                           // 4
+    '  TOwn = class'#10 +                                 // 5  TOwn col 3
+    '    function GetOwn(I: Integer): TOwn;'#10 +         // 6
+    '    procedure Kill;'#10 +                            // 7
+    '    procedure Ping; virtual;'#10 +                   // 8  Ping col 15
+    '  end;'#10 +                                         // 9
+    '  TSub = class(TOwn)'#10 +                           // 10
+    '    procedure Ping; override;'#10 +                  // 11
+    '  end;'#10 +                                         // 12
+    'implementation'#10 +                                 // 13
+    '{$I NavRel.inc}'#10 +                                // 14
+    'function TOwn.GetOwn(I: Integer): TOwn;'#10 +        // 15
+    'begin'#10 +                                          // 16
+    '  Result := Self;'#10 +                              // 17
+    'end;'#10 +                                           // 18
+    'procedure TOwn.Kill;'#10 +                           // 19
+    'var'#10 +                                            // 20
+    '  L: array of TOwn;'#10 +                            // 21
+    '  I: Integer;'#10 +                                  // 22
+    'begin'#10 +                                          // 23
+    '  GetOwn(1).Free;'#10 +                              // 24
+    '  L[I + 1].Free;'#10 +                               // 25
+    '  TOwn(L[0]).Free;'#10 +                             // 26
+    '  Self.Free;'#10 +                                   // 27
+    '  I := Namespace.NavD.NSD_MARK + REL_INC;'#10 +      // 28 Namespace col 8
+    'end;'#10 +                                           // 29
+    'procedure TOwn.Ping;'#10 +                           // 30
+    'begin'#10 +                                          // 31
+    'end;'#10 +                                           // 32
+    'procedure TSub.Ping;'#10 +                           // 33
+    'begin'#10 +                                          // 34
+    '  inherited;'#10 +                                   // 35 inherited col 3
+    'end;'#10 +                                           // 36
+    'end.'#10;                                            // 37
+  UNIT_RELMAIN =
+    'unit NavRelMain;'#10 +
+    'interface'#10 +
+    'uses NavRel;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+var
+  LDir, LMainPath, LFile: string;
+  LMidRel, LMidNs, LT, LS, LIdx, LLine, LCol, LNsNode: Integer;
+  LName: string;
+  LControl, LHits: TArray<TPasRefHit>;
+  LIdent: TPasNavIdent;
+  LTarget: TPasNavTarget;
+  LHit: TPasRefHit;
+  LSame, LOk: Boolean;
+  LErr: string;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_nav_released');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), UNIT_SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Namespace.NavD.pas'), UNIT_NS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavRel.pas'), UNIT_REL);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavRel.inc'),
+    'const REL_INC = 1;'#10);
+  LMainPath := TPath.Combine(LDir, 'NavRelMain.pas');
+  TFile.WriteAllText(LMainPath, UNIT_RELMAIN);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    GNav := TPasNavigator.Create(GProj);
+    try
+      LMidRel := GNav.ModelIdOf(TPath.Combine(LDir, 'NavRel.pas'));
+      LMidNs := GNav.ModelIdOf(TPath.Combine(LDir, 'Namespace.NavD.pas'));
+      Ok('released: models found', (LMidRel >= 0) and (LMidNs >= 0));
+      // The controls, on the analyzed project.
+      GNav.ClassAt(LMidRel, 5, 3, {out} LT, {out} LS, {out} LName);
+      LControl := GNav.FindDestructions(LT, LS);
+      Ok('released: control - four destructions of TOwn',
+        Length(LControl) = 4);
+      LOk := GNav.IdentAt(LMidRel, 28, 8, {out} LIdent);
+      LNsNode := LIdent.Node;
+      Ok('released: control - the `Namespace` qualifier resolves to its unit',
+        LOk and GNav.ResolveDecl(LMidRel, LNsNode, {out} LTarget) and
+        (LTarget.UnitId = LMidNs));
+
+      GProj.DemoteClosedUnits([LMainPath]);
+      Ok('released: NavRel is demoted', GProj.Model(LMidRel).Demoted);
+
+      // Find Destructions probes each site's designator through the cross
+      // typer, which read the released ExprType array.
+      LHits := nil;
+      try
+        LHits := GNav.FindDestructions(LT, LS);
+        LSame := Length(LHits) = Length(LControl);
+        for LIdx := 0 to High(LControl) do
+          LSame := LSame and HasHitAt(LHits,
+            TPath.GetFileName(LControl[LIdx].FilePath), LControl[LIdx].Line,
+            LControl[LIdx].Col);
+        Ok('released: FindDestructions answers as before the release', LSame);
+      except
+        on E: Exception do
+          Ok('released: FindDestructions raised ' + E.ClassName + ': ' +
+            E.Message, False);
+      end;
+
+      GProj.DemoteText([LMainPath]);
+      LOk := False;
+      try
+        PasModuleOutline(GProj.Model(LMidRel).Tree);
+        LOk := True;
+      except
+        on E: Exception do
+          LErr := E.ClassName + ': ' + E.Message;
+      end;
+      Ok('released: the outline of a demoted unit with an include does not '
+        + 'raise ' + LErr, LOk);
+
+      GProj.DemoteText([LMainPath]);
+      Ok('released: UnitDeclHit on a demoted unit - its header',
+        GNav.UnitDeclHit(LMidRel, {out} LHit) and (LHit.Line = 1) and
+        (LHit.Col = 6));
+
+      GProj.DemoteText([LMainPath]);
+      Ok('released: ResolveDecl of a qualifier segment in a demoted unit',
+        GNav.ResolveDecl(LMidRel, LNsNode, {out} LTarget) and
+        (LTarget.UnitId = LMidNs));
+
+      GProj.DemoteText([LMainPath]);
+      Ok('released: NodeSite of a node in a demoted unit',
+        GProj.NodeSite(LMidRel, LNsNode, {out} LFile, {out} LLine,
+          {out} LCol) and SameText(TPath.GetFileName(LFile), 'NavRel.pas')
+        and (LLine = 28) and (LCol = 8));
+
+      GProj.DemoteText([LMainPath]);
+      Ok('released: Go To on a bare inherited in a released unit',
+        GNav.GotoBareInherited(LMidRel, 35, 3, {out} LTarget) and
+        (LTarget.Line = 8) and (LTarget.Col = 15));
+
+      LOk := True;
+      try
+        LOk := (GNav.ModelIdOf('') = -1) and (GNav.ModelIdOf('a|b') = -1) and
+          (GProj.ModelIdOf('') = -1) and (GProj.ModelIdOf('a|b') = -1);
+      except
+        LOk := False;
+      end;
+      Ok('released: ModelIdOf of an empty or invalid path is -1', LOk);
+    finally
+      GNav.Free;
+    end;
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // The FindDefineReferences row at (file, line, col), with its kind and
 // activity checked too.
 function HasDefHitAt(const AHits: TArray<TPasDefineHit>; const AFile: string;
@@ -4708,6 +4872,7 @@ begin
     if TDirectory.Exists(LDir) then
       TDirectory.Delete(LDir, True);
   end;
+  TestReleasedModels;
   TestUnusedUses;
   TestUnreferencedUnits;
   TestLintGlobalInit;

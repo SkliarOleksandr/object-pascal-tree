@@ -1395,6 +1395,12 @@ function XNil: TSemaXType;
 function XValid(const AX: TSemaXType): Boolean;
 function XPlain(AMid, ASym: Integer): TSemaXType;
 
+{ The key a project and a navigator index a file path by - its lower-cased
+  full path. False for a path TPath.GetFullPath rejects (empty, or holding a
+  character no file name may hold): such a path names no model, and a lookup
+  answers "unknown" rather than raising. }
+function PasFullPathKey(const APath: string; out AKey: string): Boolean;
+
 implementation
 
 uses
@@ -1966,8 +1972,11 @@ begin
 end;
 
 function TPasSemaProject.ModelIdOf(const APath: string): Integer;
+var
+  LKey: string;
 begin
-  if not FByPath.TryGetValue(LowerCase(TPath.GetFullPath(APath)), Result) then
+  if not PasFullPathKey(APath, LKey) or
+     not FByPath.TryGetValue(LKey, Result) then
     Result := -1;
 end;
 
@@ -2005,6 +2014,9 @@ begin
     Exit;
   LM := FModels[AId];
   if (LM = nil) or (ANode < 0) or (ANode > High(LM.Tree.Nodes)) then
+    Exit;
+  // The position is in the text layer, which a demoted model lost.
+  if not EnsureHydrated(AId) then
     Exit;
   LTok := LM.Tree.Nodes[ANode].FirstToken;
   if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
@@ -6478,6 +6490,20 @@ begin
   Result.Inst := NIL_INST;
 end;
 
+function PasFullPathKey(const APath: string; out AKey: string): Boolean;
+begin
+  AKey := '';
+  if APath = '' then
+    Exit(False);
+  try
+    AKey := LowerCase(TPath.GetFullPath(APath));
+    Result := True;
+  except
+    on EArgumentException do
+      Result := False;
+  end;
+end;
+
 // Dedup-registers one generic instantiation; returns its instance-table index.
 // LOCKED (TMonitor on FInstances): the parallel inherited-member pass reaches here through
 // FindMemberX -> ResolveTypeExpr on generic heritage (TList<T> = class(
@@ -9696,8 +9722,8 @@ var
   function GetX(N: Integer): TSemaXType;
   begin
     Result := XAt(N);
-    if not XValid(Result) and (LM.ExprType[N] <> NIL_SYM) then
-      Result := XPlain(AId, LM.ExprType[N]);
+    if not XValid(Result) and (LM.IntraType(N) <> NIL_SYM) then
+      Result := XPlain(AId, LM.IntraType(N));
   end;
 
   // The (mid, sym) a callee designator resolved to (after the member pass
@@ -11497,7 +11523,7 @@ var
             SetXAt(N, ResolveTypeExprNested(AId,
               LM.Tree.Nodes[LBase].NextSibling));
         end
-        else if LM.ExprType[N] = NIL_SYM then
+        else if LM.IntraType(N) = NIL_SYM then
         begin
           LBX := OpX(N);
           if XValid(LBX) then
@@ -11505,7 +11531,7 @@ var
         end;
 
       nkUnaryOp:
-        if LM.ExprType[N] = NIL_SYM then
+        if LM.IntraType(N) = NIL_SYM then
         begin
           LBX := OpX(N);
           if XValid(LBX) then
@@ -12496,9 +12522,34 @@ end;
 function TPasSemaProject.StructSymOfNode(AModel: TPasSemaModel;
   ANode: Integer): Integer;
 var
-  LScope: Integer;
+  LScope, LNode, LSym: Integer;
 begin
   Result := NIL_SYM;
+  if AModel.NodeScope = nil then
+  begin
+    // Released (TPasSemaModel.ReleaseTransientMaps): the same walk over the
+    // release-time snapshots, by the node's ancestry - the scopes carrying a
+    // StructSym are owned by the struct type node or the method's routine
+    // node, both ancestors of every node inside them.
+    // (TryGetValue writes 0, a real symbol, on a miss: hence LSym.)
+    LNode := ANode;
+    while (LNode >= 0) and (LNode <= High(AModel.Tree.Nodes)) do
+    begin
+      if AModel.RoutineStructSyms.TryGetValue(LNode, LSym) then
+        Exit(LSym);
+      if (AModel.Tree.Nodes[LNode].Kind in [nkRecordType, nkClassType,
+           nkInterfaceType, nkObjectType]) and
+         AModel.AnonStructSyms.TryGetValue(LNode, LSym) then
+      begin
+        // In the type DECLARATION: the property-specifier rule below.
+        if InPropertySpecifier(AModel, ANode) then
+          Result := LSym;
+        Exit;
+      end;
+      LNode := AModel.Tree.Nodes[LNode].Parent;
+    end;
+    Exit;
+  end;
   if (ANode > High(AModel.NodeScope)) then
     Exit;
   LScope := AModel.NodeScope[ANode];
@@ -13944,8 +13995,8 @@ function TPasSemaProject.IntrinsicArgX(AMid, AArg: Integer;
 begin
   Result := AX;
   if not XValid(Result) and (AArg <> NIL_NODE) and
-     (FModels[AMid].ExprType[AArg] <> NIL_SYM) then
-    Result := XPlain(AMid, FModels[AMid].ExprType[AArg]);
+     (FModels[AMid].IntraType(AArg) <> NIL_SYM) then
+    Result := XPlain(AMid, FModels[AMid].IntraType(AArg));
 end;
 
 { The widened ordinal type dcc gives Pred/Succ/Low/High/Abs of an integer AX:
@@ -15062,8 +15113,8 @@ begin
         Result := OperatorResultX(AMid, ANode,
           UntypedInitTypeX(AMid, LM.Tree.Nodes[ANode].FirstChild,
             AFollowForeign), XNil);
-        if not XValid(Result) and (LM.ExprType[ANode] <> NIL_SYM) then
-          Result := XPlain(AMid, LM.ExprType[ANode]);
+        if not XValid(Result) and (LM.IntraType(ANode) <> NIL_SYM) then
+          Result := XPlain(AMid, LM.IntraType(ANode));
       end;
     nkBinaryOp:
       begin
@@ -15076,8 +15127,8 @@ begin
             UntypedInitTypeX(AMid, LLit, AFollowForeign),
             UntypedInitTypeX(AMid, LM.Tree.Nodes[LLit].NextSibling,
               AFollowForeign));
-        if not XValid(Result) and (LM.ExprType[ANode] <> NIL_SYM) then
-          Result := XPlain(AMid, LM.ExprType[ANode]);
+        if not XValid(Result) and (LM.IntraType(ANode) <> NIL_SYM) then
+          Result := XPlain(AMid, LM.IntraType(ANode));
       end;
     nkInlineIf:
       begin
