@@ -460,7 +460,8 @@ inherited member missed for a unit-level or System name (F40, fixed in
 unit-level declaration (F49, fixed in 0.93.9: the with pass asks Self's
 ancestry for a name no target has, as the inherited pass does outside a
 with); a nested class whose ancestor is a same-named nested class reaching
-the outer type's members (F48); `Length(Self)` in a helper for a
+the outer type's members (F48, gone by 0.93.18 - the declaration-site order
+of 0.93.10 and 0.93.11 - and pinned by a test in 0.93.19); `Length(Self)` in a helper for a
 `type string` bound to TStringHelper's Length - a distinct type's member walk
 went on into `string` and asked string's helper there (F50, fixed in
 0.93.16); `M^^` over `M: ^PResStringModule` typed one dereference short, the

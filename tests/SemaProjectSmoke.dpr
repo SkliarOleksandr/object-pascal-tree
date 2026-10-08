@@ -3336,6 +3336,126 @@ begin
   end;
 end;
 
+{ A nested class whose ancestor is a same-named nested class of the outer
+  type's ancestor - `TView.TMainContent = class(TItem.TMainContent)` - reaches
+  a bare name through that ancestry before the outer types (F48 of the
+  parser-fidelity plan: Alcinoe's TALDynamicListBox.TView.TMainContent took
+  `Padding` from the outer TALDynamicListBox). dcc64 37.0 runs the fixture
+  (local x-f48) as `2`: TCtl.Padding through TItem.TMainContent, TContent. }
+procedure TestNestedSameNamedAncestor;
+const
+  UBASE =
+    'unit UBase;'#13#10'interface'#13#10'type'#13#10 +
+    '  TOuterBase = class'#13#10 +
+    '    function Padding: Integer;'#13#10 +
+    '  end;'#13#10 +
+    '  TCtl = class'#13#10 +
+    '    function Padding: Integer;'#13#10 +
+    '  end;'#13#10 +
+    'implementation'#13#10 +
+    'function TOuterBase.Padding: Integer; begin Result := 1; end;'#13#10 +
+    'function TCtl.Padding: Integer; begin Result := 2; end;'#13#10 +
+    'end.'#13#10;
+  ULIST =
+    'unit UList;'#13#10 +                                     // 1
+    'interface'#13#10 +                                       // 2
+    'uses UBase;'#13#10 +                                     // 3
+    'type'#13#10 +                                            // 4
+    '  TList = class(TOuterBase)'#13#10 +                     // 5
+    '  public'#13#10 +                                        // 6
+    '    type'#13#10 +                                        // 7
+    '      TView = class;'#13#10 +                            // 8
+    '      TItem = class(TCtl)'#13#10 +                       // 9
+    '      public'#13#10 +                                    // 10
+    '        type'#13#10 +                                    // 11
+    '          TContent = class(TCtl) end;'#13#10 +           // 12
+    '          TMainContent = class(TContent) end;'#13#10 +   // 13
+    '      end;'#13#10 +                                      // 14
+    '      TView = class(TItem)'#13#10 +                      // 15
+    '      public'#13#10 +                                    // 16
+    '        type'#13#10 +                                    // 17
+    '          TMainContent = class(TItem.TMainContent)'#13#10 + // 18
+    '            function Get: Integer;'#13#10 +              // 19
+    '          end;'#13#10 +                                  // 20
+    '      end;'#13#10 +                                      // 21
+    '  end;'#13#10 +                                          // 22
+    'implementation'#13#10 +                                  // 23
+    'function TList.TView.TMainContent.Get: Integer;'#13#10 + // 24
+    'begin'#13#10 +                                           // 25
+    '  Result := Padding;'#13#10 +                            // 26
+    'end;'#13#10 +                                            // 27
+    'end.'#13#10;                                             // 28
+  PGM =
+    'program PNs;'#13#10'uses UList;'#13#10'begin'#13#10'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LM: TPasSemaModel;
+  LMid: Integer;
+
+  // The owner type of what the name at (ALine, ACol) is bound to, '' unbound.
+  function OwnerAt(ALine, ACol: Integer): string;
+  var
+    LFile: string;
+    LLine, LCol, LSym, LUid: Integer;
+    LExt: TPasExtRef;
+  begin
+    Result := '?';
+    for var LNode := 0 to High(LM.Tree.Nodes) do
+    begin
+      if (LM.Tree.Nodes[LNode].Kind <> nkIdent) or
+         not LProj.NodeSite(LMid, LNode, LFile, LLine, LCol) or
+         (LLine <> ALine) or (LCol <> ACol) then
+        Continue;
+      LUid := LMid;
+      if LM.ExtRefMap.TryGetValue(LNode, LExt) then
+      begin
+        LUid := LExt.UnitId;
+        LSym := LExt.Sym;
+      end
+      else
+        LSym := LM.RefMap[LNode];
+      if LSym = NIL_SYM then
+        Exit('');
+      var LIn := LProj.Model(LUid);
+      var LScope := LIn.Symbols[LSym].Scope;
+      if (LScope <> NIL_SCOPE) and (LIn.Scopes[LScope].Kind = sckStruct) and
+         (LIn.Scopes[LScope].StructSym <> NIL_SYM) then
+        Exit(LIn.Symbols[LIn.Scopes[LScope].StructSym].Name);
+      Exit(LIn.Symbols[LSym].Name);
+    end;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_nested_same_named');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UBase.pas'), UBASE);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UList.pas'), ULIST);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PNs.dpr'), PGM);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    Ok('nested-same-named: PNs analyzed',
+      LProj.AnalyzeProject(TPath.Combine(LDir, 'PNs.dpr')) >= 0);
+    LMid := LProj.ModelIdOf(TPath.Combine(LDir, 'UList.pas'));
+    Ok('nested-same-named: UList has a model', LMid >= 0);
+    if LMid < 0 then
+      Exit;
+    LM := LProj.Model(LMid);
+    Ok('nested-same-named: the heritage''s `TMainContent` is TItem''s',
+      OwnerAt(18, 38) = 'TItem');
+    Ok('nested-same-named: bare `Padding` through the ancestry is TCtl''s',
+      OwnerAt(26, 13) = 'TCtl');
+    Ok('nested-same-named: no diagnostics', Length(LM.Diags) = 0);
+  finally
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
+
 { A member a method cannot see is passed over by the bare-name lookup, which
   goes on up the ancestry and then to the unit (F38 of the parser-fidelity
   plan). PasTree took an ancestor's private member of another unit -
@@ -9954,6 +10074,7 @@ begin
   TestGenericMemberArity;
   TestHelperBareName;
   TestGuidClauseNames;
+  TestNestedSameNamedAncestor;
   TestInheritedVisibility;
   TestInheritedBeatsUnitLevel;
   TestWithBodySelfMember;
