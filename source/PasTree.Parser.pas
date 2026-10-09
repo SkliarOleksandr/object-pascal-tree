@@ -1122,14 +1122,23 @@ begin
             LNode := FB.AddNode(nkTypeArgs, NIL_NODE, FPos);
             FB.Adopt(LNode, Result);
             Next;
-            while not AtGenericClose and (CurKind <> tkEndOfFile) do
+            // A guard level per `<`: a type argument recurses here, and in a
+            // type position nothing else bounds the nesting (B1-02).
+            if not EnterGuard then
             begin
-              FB.Adopt(LNode, ParseTypeRef);
-              if CurKind = tkComma then
-                Next
-              else
-                Break;
-            end;
+              FB.Adopt(LNode, FB.AddNode(nkError, NIL_NODE, FPos));
+              Next;
+            end
+            else
+              while not AtGenericClose and (CurKind <> tkEndOfFile) do
+              begin
+                FB.Adopt(LNode, ParseTypeRef);
+                if CurKind = tkComma then
+                  Next
+                else
+                  Break;
+              end;
+            LeaveGuard;
             CloseGeneric('">"');
             FB.SetLast(LNode, FPos - 1);
             Result := LNode;
@@ -3505,6 +3514,16 @@ begin
   // tkEnd in the terminators bounds the damage when a header unexpectedly
   // has no body (misalignment stops at the enclosing end instead of
   // swallowing the rest of the unit).
+  // One guard level per nested routine: ParseRoutine -> ParseRoutineBody ->
+  // ParseDeclSections -> ParseRoutine recurses once per nesting level, and
+  // nothing else on that cycle charges the depth (audit B1-02).
+  if not EnterGuard then
+  begin
+    Result := FB.AddNode(nkError, NIL_NODE, FPos);
+    Next;
+    LeaveGuard;
+    Exit;
+  end;
   Result := FB.AddNode(nkRoutineBody, NIL_NODE, FPos);
   ParseDeclSections(Result, True, [tkBegin, tkAsm, tkEnd]);
   if CurKind = tkAsm then
@@ -3530,6 +3549,7 @@ begin
     Error('"begin" expected (routine ' +
       FSrc.VisibleText(FRoutineNameVis) + ')');
   FB.SetLast(Result, FPos - 1);
+  LeaveGuard;
 end;
 
 function TPasParser.ParseProperty(AClassProp: Boolean): Integer;

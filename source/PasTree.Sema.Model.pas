@@ -437,7 +437,7 @@ type
     FNamePoolOn: Boolean;
     procedure GrowSyms;
     function FindByArityDeepK(AScope: Integer; const AKey: TSemaKey;
-      AWantGeneric: Boolean): Integer;
+      AWantGeneric: Boolean; ADepth: Integer = 0): Integer;
   public
     Tree: TPasTree;                 // referenced, not owned
     Symbols: TArray<TSemaSymbol>;
@@ -1970,7 +1970,7 @@ begin
 end;
 
 function TPasSemaModel.FindByArityDeepK(AScope: Integer;
-  const AKey: TSemaKey; AWantGeneric: Boolean): Integer;
+  const AKey: TSemaKey; AWantGeneric: Boolean; ADepth: Integer): Integer;
 var
   LAdd: TArray<Integer>;
   LIdx, LSym, LDepth: Integer;
@@ -1984,6 +1984,11 @@ var
   end;
 
 begin
+  // FindLocalDeep's depth cap, for the same mutual helper pair (`TH1 =
+  // record helper for TH2; TH2 = record helper for TH1;` mid-edit): the joins
+  // recurse below, and without it that pair overflowed the stack (A2-08).
+  if ADepth > 16 then
+    Exit(NIL_SYM);
   // SHADOWING joins first, exactly as FindLocalDeep orders them: this walk
   // searched a DIFFERENT scope set from the lookup it corrects, so a
   // right-arity candidate reachable only through a helper's shadowing join
@@ -1991,14 +1996,14 @@ begin
   LAdd := Scopes[AScope].Shadowing;
   for LIdx := High(LAdd) downto 0 do
   begin
-    Result := FindByArityDeepK(LAdd[LIdx], AKey, AWantGeneric);
+    Result := FindByArityDeepK(LAdd[LIdx], AKey, AWantGeneric, ADepth + 1);
     if Result <> NIL_SYM then
       Exit;
   end;
   LSym := FindLocal(AScope, AKey);
   // Same name, same scope: types chain through NextOverload like routines do,
-  // so the other arity declared beside this one is found here. Depth-capped for
-  // a malformed chain, like every other walk in this model.
+  // so the other arity declared beside this one is found here. The chain is
+  // capped for a malformed one, the joins by ADepth above.
   LDepth := 0;
   while (LSym <> NIL_SYM) and (LDepth < 32) do
   begin
@@ -2010,7 +2015,7 @@ begin
   LAdd := Scopes[AScope].Additional;
   for LIdx := High(LAdd) downto 0 do
   begin
-    Result := FindByArityDeepK(LAdd[LIdx], AKey, AWantGeneric);
+    Result := FindByArityDeepK(LAdd[LIdx], AKey, AWantGeneric, ADepth + 1);
     if Result <> NIL_SYM then
       Exit;
   end;

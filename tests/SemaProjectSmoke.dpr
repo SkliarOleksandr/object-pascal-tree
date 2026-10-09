@@ -4263,6 +4263,103 @@ end;
   ancestors ahead of a used unit (spec 3.3.2, "Outside a routine body";
   11.4.1). dcc64 37.0 runs the fixture (local x-f53\fixture) as
   `1 10 8 2 8 10 10 1 8 70 8 8 1 2 8`. }
+// Recursion that mid-edit (or merely unusual) code reaches, capped (audit
+// B03). The $IF oracle's Length had no depth and restarted its bounds at 0,
+// so a constant and an array bounded by it overflowed the stack and aborted
+// the analysis (A2-01); the arity-corrected lookup walked a mutual helper
+// pair's joins without FindLocalDeep's cap (A2-08). And the bound context
+// Length evaluates in answers what every other oracle context answers: dcc64
+// 37.0 gives Length 8 for `array[0..SizeOf(TR) - 1]` and for
+// `array[0..Length(VS) - 1]` (local/probe-b03 P1), PasTree guessed both.
+procedure TestOracleDepth;
+var
+  LDir, LRaised: string;
+  LLen, LCyc, LCyc2, LHelp: TPasSemaModel;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_oracle_depth');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OraLen.pas'),
+    'unit OraLen;'#10'interface'#10 +
+    'type TR = record A, B: Integer; end;'#10 +
+    'var'#10 +
+    '  VS: array[0..SizeOf(TR) - 1] of Byte;'#10 +
+    '  VL: array[0..Length(VS) - 1] of Byte;'#10 +
+    // Both guards are True under the first pass's guess (Length unanswered
+    // is 0), so the types appear unless the oracle really answers 8.
+    '{$IF Length(VS) <> 8} type TWrongVS = class end; {$IFEND}'#10 +
+    '{$IF Length(VL) <> 8} type TWrongVL = class end; {$IFEND}'#10 +
+    '{$IF Length(VL) = 8} type TTookVL = class end; {$IFEND}'#10 +
+    'implementation'#10'end.'#10);
+  // Mid-edit: N and A each bounded by the other (dcc: E2003 on A).
+  TFile.WriteAllText(TPath.Combine(LDir, 'OraCyc.pas'),
+    'unit OraCyc;'#10'interface'#10 +
+    'const N = Length(A) + 1;'#10 +
+    'var A: array[0..N] of Byte;'#10 +
+    '{$IF N > 1} type TCyc = class end; {$IFEND}'#10 +
+    'implementation'#10'end.'#10);
+  // Valid: A's bound is OraCycU2's N (the own N is below it), so dcc reads
+  // N = 4 and takes the guard (local/probe-b03 P2). The oracle resolves the
+  // bound's N to the own one regardless of position - a separate gap - and
+  // so ran the same cycle.
+  TFile.WriteAllText(TPath.Combine(LDir, 'OraCycU2.pas'),
+    'unit OraCycU2;'#10'interface'#10'const N = 3;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OraCyc2.pas'),
+    'unit OraCyc2;'#10'interface'#10'uses OraCycU2;'#10 +
+    'var A: array[0..N] of Byte;'#10 +
+    'const N = Length(A);'#10 +
+    '{$IF N > 3} type TCyc2 = class end; {$IFEND}'#10 +
+    'implementation'#10'end.'#10);
+  // Mid-edit: two record helpers for each other (dcc: E2004/E2029). The bare
+  // generic TG sends the resolver's arity retry through the helpers' joins.
+  TFile.WriteAllText(TPath.Combine(LDir, 'CycHelp.pas'),
+    'unit CycHelp;'#10'interface'#10'type'#10 +
+    '  TG<T> = record V: T; end;'#10 +
+    '  TH1 = record helper for TH2 procedure P(A: TG); end;'#10 +
+    '  TH2 = record helper for TH1 procedure Q; end;'#10 +
+    'implementation'#10 +
+    'procedure TH1.P(A: TG); var X: TG; begin end;'#10 +
+    'procedure TH2.Q; begin end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    LRaised := '';
+    try
+      GProj.AnalyzeDirectory(LDir);
+    except
+      on E: Exception do
+        LRaised := E.ClassName + ': ' + E.Message;
+    end;
+    Ok('oracle depth: the analysis completes (' + LRaised + ')',
+      LRaised = '');
+    LLen := ModelByName('oralen');
+    LCyc := ModelByName('oracyc');
+    LCyc2 := ModelByName('oracyc2');
+    LHelp := ModelByName('cychelp');
+    Ok('oracle depth: every unit has a model', (LLen <> nil) and
+      (LCyc <> nil) and (LCyc2 <> nil) and (LHelp <> nil));
+    if LLen <> nil then
+    begin
+      Ok('oracle depth: Length of an array bounded by SizeOf answers 8',
+        SymCountOf(LLen, 'twrongvs', skType) = 0);
+      Ok('oracle depth: Length of an array bounded by Length answers 8',
+        (SymCountOf(LLen, 'twrongvl', skType) = 0) and
+        (SymCountOf(LLen, 'ttookvl', skType) = 1));
+    end;
+    if LHelp <> nil then
+      Ok('oracle depth: the mutual helper pair keeps its methods',
+        SymCountOf(LHelp, 'p', skRoutine) >= 1);
+  finally
+    GProj.Free;
+  end;
+  TDirectory.Delete(LDir, True);
+end;
+
 // The thread-pool contract (audit B02). ConfigureThreadPool pins the default
 // pool and turns off its past-Max injection, so no pool task may wait on
 // another queued one. Two ways analysis broke that and hung for good:
@@ -10293,6 +10390,7 @@ begin
   TestWithBodySelfMember;
   TestNestedOuterAfterUnit;
   TestDeclAfterUnit;
+  TestOracleDepth;
   TestPoolContract;
 
   if GCounter.Finish('SemaProjectSmoke') then

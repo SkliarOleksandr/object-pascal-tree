@@ -24,6 +24,8 @@ program ParserSmoke;
 
 uses
   System.SysUtils,
+  System.StrUtils,
+  System.Classes,
   System.IOUtils,
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
@@ -462,6 +464,100 @@ begin
   ];
 end;
 
+function DepthCase(const AName: string;
+  const ARun: TFunc<TPasCheckResult>): TPasCustomCase;
+begin
+  Result.Section := 'B1-02';
+  Result.Name := AName;
+  Result.Run := ARun;
+end;
+
+// Parses ASource (a whole file) and checks the tree, catching what either
+// raises: on generated nesting the result is diagnostics, never a stack
+// overflow (EnterGuard's promise, audit B1-02).
+function ParsesWithoutRaising(APP: TPasPreprocessor;
+  const ASource: string): TPasCheckResult;
+var
+  LPre: TPasPreprocessed;
+  LDiags: TArray<TPasParseDiag>;
+  LTree: TPasTree;
+  LReport: TPasCheckReport;
+begin
+  Result.Passed := False;
+  Result.Message := '';
+  try
+    LPre := APP.ProcessText('deep.pas', ASource);
+    LTree := TPasParser.ParseFile(LPre, LDiags);
+    LReport.Init;
+    CheckTree(LTree, False, LReport);
+    Result.Passed := True;
+  except
+    on E: Exception do
+      Result.Message := '  raised ' + E.ClassName + ': ' + E.Message;
+  end;
+end;
+
+{ Generated nesting the parser's recursion guard did not cover: a type
+  argument per `<` in a type position, and a routine per nesting level. And
+  outside the parser, the $IF evaluator's operator chain, one recursion per
+  operand. }
+function BuildDepthCases(APP: TPasPreprocessor): TPasCustomCases;
+begin
+  Result := [
+    DepthCase('100,000 nested type arguments parse without raising',
+      function: TPasCheckResult
+      begin
+        Result := ParsesWithoutRaising(APP, 'unit Deep;'#10'interface'#10 +
+          'type X = ' + DupeString('A<', 100000) + 'B' +
+          DupeString('>', 100000) + ';'#10'implementation'#10'end.'#10);
+      end),
+    DepthCase('20,000 nested routines parse without raising',
+      function: TPasCheckResult
+      var
+        LSrc: TStringBuilder;
+        LIdx: Integer;
+      begin
+        LSrc := TStringBuilder.Create;
+        try
+          LSrc.Append('unit Deep;'#10'interface'#10'implementation'#10);
+          for LIdx := 1 to 20000 do
+            LSrc.Append('procedure P').Append(LIdx).Append(';'#10);
+          for LIdx := 1 to 20000 do
+            LSrc.Append('begin end;'#10);
+          LSrc.Append('end.'#10);
+          Result := ParsesWithoutRaising(APP, LSrc.ToString);
+        finally
+          LSrc.Free;
+        end;
+      end),
+    DepthCase('a 5,000-operand $IF chain evaluates exactly',
+      function: TPasCheckResult
+      var
+        LPre: TPasPreprocessed;
+        LIdx: Integer;
+        LTook: Boolean;
+      begin
+        Result.Passed := False;
+        Result.Message := '';
+        try
+          // dcc takes the branch: the sum is exactly 5000.
+          LPre := APP.ProcessText('chain.pas', '{$IF 1' +
+            DupeString(' + 1', 4999) + ' = 5000} Took {$IFEND}'#10);
+          LTook := False;
+          for LIdx := 0 to High(LPre.Visible) do
+            if SameText(LPre.VisibleText(LIdx), 'Took') then
+              LTook := True;
+          Result.Passed := LTook;
+          if not LTook then
+            Result.Message := '  the branch was not taken';
+        except
+          on E: Exception do
+            Result.Message := '  raised ' + E.ClassName + ': ' + E.Message;
+        end;
+      end)
+  ];
+end;
+
 var
   GSM: TPasSourceManager;
   GDefines: TPasDefines;
@@ -477,7 +573,7 @@ begin
     RunSuite('ParserSmoke', GPP, STMT_CASES, DECL_CASES,
       BuildCustomCases(GPP, GSM) + BuildRoundtripCases +
       BuildPreprocessorCases(GPP) + BuildOwnTokenCases(GPP) +
-      BuildNameFlagCases(GPP), GPassed,
+      BuildNameFlagCases(GPP) + BuildDepthCases(GPP), GPassed,
       GFailed, TreeVerdict);
     if GFailed > 0 then
       ExitCode := 1;

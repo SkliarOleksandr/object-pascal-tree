@@ -31,6 +31,7 @@ uses
   PasTree.Platforms,
   PasTree.SourceManager,
   PasTree.Ast,
+  PasTree.CondEval,         // TPasCondContext, in OracleCondCtx's signature
   PasTree.Sema.Model,
   PasTree.Sema.Builtins;
 
@@ -755,8 +756,6 @@ type
       out AMid, ASym: Integer): Boolean;
     function OracleConstVal(AMid, ASym, ADepth: Integer;
       out AValue: TPasSymbolValue): Boolean;
-    function OracleConstNum(AMid, ASym, ADepth: Integer;
-      out ANum: Double): Boolean;
     function OracleQualified(AId: Integer; const AName: string;
       out AMid, ASym: Integer): Boolean;
     function OracleSizeOf(AMid, ASym, ADepth: Integer;
@@ -792,7 +791,18 @@ type
     function OracleGenericLayout(AMid, AArgsNode, ADepth: Integer;
       const ASubst: TPasSubst; out ABytes: Double;
       out AAlign: Integer): Boolean;
-    function OracleLength(AMid, ASym: Integer; out ALen: Double): Boolean;
+    function OracleLength(AMid, ASym, ADepth: Integer;
+      out ALen: Double): Boolean;
+    { One symbol question of a `$IF`-style evaluation the oracle runs itself
+      (a constant's initializer, an array bound, a const expression), answered
+      for the declaration (AMid, ASym) at ADepth: the three query kinds, each
+      callee capped at depth 8. The one table every oracle context uses. }
+    function OracleAnswer(AQuery: TPasSymbolQuery; AMid, ASym, ADepth: Integer;
+      out AV: TPasSymbolValue): Boolean;
+    { The evaluation context of an expression in model AMid at ADepth: the
+      platform facts, and every name it mentions resolved from AMid
+      (OracleQualified) and answered one level deeper (OracleAnswer). }
+    function OracleCondCtx(AMid, ADepth: Integer): TPasCondContext;
     function SymbolQueryFor(AId: Integer;
       ALog: TList<TPasOwnSymAnswer> = nil): TPasCondSymbolQuery;
     function DeclaredWithinX(AMid, ASym, AOwnerMid, AOwnerSym: Integer): Boolean;
@@ -1427,7 +1437,6 @@ uses
   System.Math,
   System.Generics.Defaults,
   PasTree.Parser,
-  PasTree.CondEval,
   PasTree.Sema.Resolver,
   PasTree.Sema.Types,
   PasTree.Sema.Diagnostics;
@@ -2595,36 +2604,13 @@ begin
   end;
   if LInit = NIL_NODE then
     Exit;
-  LCtx := Default(TPasCondContext);
-  LCtx.CompilerVersion := FCompilerVersion;
-  LCtx.PointerBytes := FInfo.PointerBytes;
-  LCtx.ExtendedBytes := FInfo.ExtendedBytes;
-  LCtx.OnSymbol :=
-    function(AQuery: TPasSymbolQuery; const AName: string;
-      const APos: TPasCondPos; out AV: TPasSymbolValue): Boolean
-    var
-      LRMid, LRSym: Integer;
-    begin
-      // All three questions, not just the const one. A constant's initializer
-      // routinely IS a size -- FastMM4's `SmallBlockPoolHeaderSize =
-      // SizeOf(TSmallBlockPoolHeader)` -- and answering only sqConstValue here
-      // meant the type sized fine while every constant derived from it stayed
-      // a residual guess. Depth carries through, so a cyclic const still
-      // terminates on the same cap.
-      AV := Default(TPasSymbolValue);
-      if not OracleQualified(AMid, AName, LRMid, LRSym) then
-        Exit(False);
-      case AQuery of
-        sqConstValue:
-          Result := OracleConstVal(LRMid, LRSym, ADepth + 1, AV);
-        sqSizeOfType:
-          Result := OracleSizeOf(LRMid, LRSym, ADepth + 1, AV.Num);
-        sqLengthOf:
-          Result := OracleLength(LRMid, LRSym, AV.Num);
-      else
-        Result := False;
-      end;
-    end;
+  // All three questions, not just the const one. A constant's initializer
+  // routinely IS a size -- FastMM4's `SmallBlockPoolHeaderSize =
+  // SizeOf(TSmallBlockPoolHeader)` -- and answering only sqConstValue here
+  // meant the type sized fine while every constant derived from it stayed a
+  // residual guess. Depth carries through, so a cyclic const still terminates
+  // on the same cap.
+  LCtx := OracleCondCtx(AMid, ADepth);
   LVal := EvalCondNode(LM.Tree, LInit, LCtx);
   if LVal.Guessed then
     Exit;
@@ -2632,20 +2618,6 @@ begin
   AValue.Str := LVal.Str;
   AValue.Num := CondAsNum(LVal);
   Result := True;
-end;
-
-// The numeric-only face of OracleConstVal, for the callers that need a bound
-// or a size rather than a value (array lengths, enum ranges): a string
-// constant is not an answer there, so it refuses rather than coercing.
-function TPasSemaProject.OracleConstNum(AMid, ASym, ADepth: Integer;
-  out ANum: Double): Boolean;
-var
-  LVal: TPasSymbolValue;
-begin
-  ANum := 0;
-  Result := OracleConstVal(AMid, ASym, ADepth, LVal) and not LVal.IsStr;
-  if Result then
-    ANum := LVal.Num;
 end;
 
 { Resolves a name that MAY be qualified. dcc resolves `Unit.Const` in a `$IF`
@@ -3277,27 +3249,7 @@ begin
   ANum := 0;
   if ADepth > 8 then
     Exit(False);
-  LCtx := Default(TPasCondContext);
-  LCtx.CompilerVersion := FCompilerVersion;
-  LCtx.PointerBytes := FInfo.PointerBytes;
-  LCtx.ExtendedBytes := FInfo.ExtendedBytes;
-  LCtx.OnSymbol :=
-    function(AQuery: TPasSymbolQuery; const AName: string;
-      const APos: TPasCondPos; out AV: TPasSymbolValue): Boolean
-    var
-      LRMid, LRSym: Integer;
-    begin
-      AV := Default(TPasSymbolValue);
-      if not OracleQualified(AMid, AName, LRMid, LRSym) then
-        Exit(False);
-      case AQuery of
-        sqConstValue: Result := OracleConstVal(LRMid, LRSym, ADepth + 1, AV);
-        sqSizeOfType: Result := OracleSizeOf(LRMid, LRSym, ADepth + 1, AV.Num);
-        sqLengthOf: Result := OracleLength(LRMid, LRSym, AV.Num);
-      else
-        Result := False;
-      end;
-    end;
+  LCtx := OracleCondCtx(AMid, ADepth);
   LVal := EvalCondNode(FModels[AMid].Tree, ANode, LCtx);
   if LVal.Guessed then
     Exit(False);
@@ -3753,7 +3705,7 @@ begin
   Result := OracleLayout(LGMid, LGSym, ADepth + 1, LInner, ABytes, AAlign);
 end;
 
-function TPasSemaProject.OracleLength(AMid, ASym: Integer;
+function TPasSemaProject.OracleLength(AMid, ASym, ADepth: Integer;
   out ALen: Double): Boolean;
 var
   LM: TPasSemaModel;
@@ -3763,6 +3715,12 @@ var
 begin
   Result := False;
   ALen := 0;
+  // The cap every oracle hop has. This one had none, and its bounds were
+  // evaluated at depth 0 again, so `const N = Length(A) + 1; var A:
+  // array[0..N] of Byte;` (mid-edit) recursed until the stack overflowed and
+  // aborted the whole analysis (audit A2-01).
+  if ADepth > 8 then
+    Exit;
   LM := FModels[AMid];
   if not (LM.Symbols[ASym].Kind in [skConst, skVar]) then
     Exit;
@@ -3797,23 +3755,11 @@ begin
   LHi := LM.Tree.Nodes[LLo].NextSibling;
   if LHi = NIL_NODE then
     Exit;
-  // Bounds may themselves be constants - evaluate with the same recursive
-  // const context OracleConstNum builds.
-  LCtx := Default(TPasCondContext);
-  LCtx.CompilerVersion := FCompilerVersion;
-  LCtx.PointerBytes := FInfo.PointerBytes;
-  LCtx.ExtendedBytes := FInfo.ExtendedBytes;
-  LCtx.OnSymbol :=
-    function(AQuery: TPasSymbolQuery; const AName: string;
-      const APos: TPasCondPos; out AV: TPasSymbolValue): Boolean
-    var
-      LRMid, LRSym: Integer;
-    begin
-      AV := Default(TPasSymbolValue);
-      Result := (AQuery = sqConstValue) and
-        OracleQualified(AMid, AName, LRMid, LRSym) and
-        OracleConstNum(LRMid, LRSym, 0, AV.Num);
-    end;
+  // Bounds are constant expressions like any other - a constant, a SizeOf, a
+  // Length (`array[0..SizeOf(TR) - 1]`, `array[0..Length(VS) - 1]`: dcc64
+  // 37.0 answers Length of both exactly, local/probe-b03 P1). A string
+  // constant is no bound: the cvNum test below refuses it.
+  LCtx := OracleCondCtx(AMid, ADepth);
   LLoVal := EvalCondNode(LM.Tree, LLo, LCtx);
   LHiVal := EvalCondNode(LM.Tree, LHi, LCtx);
   if LLoVal.Guessed or LHiVal.Guessed or (LLoVal.Kind <> cvNum) or
@@ -3879,11 +3825,38 @@ begin
           not AName.Contains('.');
         Exit;
       end;
-      case AQuery of
-        sqConstValue: Result := OracleConstVal(LMid, LSym, 0, AValue);
-        sqSizeOfType: Result := OracleSizeOf(LMid, LSym, 0, AValue.Num);
-        sqLengthOf: Result := OracleLength(LMid, LSym, AValue.Num);
-      end;
+      Result := OracleAnswer(AQuery, LMid, LSym, 0, AValue);
+    end;
+end;
+
+function TPasSemaProject.OracleAnswer(AQuery: TPasSymbolQuery; AMid, ASym,
+  ADepth: Integer; out AV: TPasSymbolValue): Boolean;
+begin
+  AV := Default(TPasSymbolValue);
+  case AQuery of
+    sqConstValue: Result := OracleConstVal(AMid, ASym, ADepth, AV);
+    sqSizeOfType: Result := OracleSizeOf(AMid, ASym, ADepth, AV.Num);
+    sqLengthOf: Result := OracleLength(AMid, ASym, ADepth, AV.Num);
+  else
+    Result := False;
+  end;
+end;
+
+function TPasSemaProject.OracleCondCtx(AMid, ADepth: Integer): TPasCondContext;
+begin
+  Result := Default(TPasCondContext);
+  Result.CompilerVersion := FCompilerVersion;
+  Result.PointerBytes := FInfo.PointerBytes;
+  Result.ExtendedBytes := FInfo.ExtendedBytes;
+  Result.OnSymbol :=
+    function(AQuery: TPasSymbolQuery; const AName: string;
+      const APos: TPasCondPos; out AV: TPasSymbolValue): Boolean
+    var
+      LRMid, LRSym: Integer;
+    begin
+      AV := Default(TPasSymbolValue);
+      Result := OracleQualified(AMid, AName, LRMid, LRSym) and
+        OracleAnswer(AQuery, LRMid, LRSym, ADepth + 1, AV);
     end;
 end;
 
@@ -3942,6 +3915,11 @@ begin
   for LIdx := 0 to ACount - 1 do
   begin
     LIsCand := False;
+    // One unit's questions, on the driver: an exception there (an oracle
+    // defect, say) used to escape the Analyze* call and abort the whole
+    // build. It is that unit's internal error now, and the unit keeps its
+    // first-pass stream (audit A2-01).
+    try
     // Every ask at its own position: the unit's own names answer by where
     // the guard stands (OwnDeclaredBefore).
     if Length(FModels[LIdx].Tree.Source.DeclaredAsks) > 0 then
@@ -3974,6 +3952,13 @@ begin
           LIsCand := True;
           Break;
         end;
+    end;
+    except
+      on E: Exception do
+      begin
+        NoteInternalError(LIdx, 'declared-candidates', E);
+        LIsCand := False;
+      end;
     end;
     if LIsCand then
       LCand := LCand + [LIdx];

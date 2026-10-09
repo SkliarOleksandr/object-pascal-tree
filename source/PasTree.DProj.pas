@@ -158,7 +158,9 @@ type
   private
     FText: string;
     FPos, FLen: Integer;
+    FDepth: Integer;      // open elements - see ParseElement
     function Cur: Char; inline;
+    function ParseElementBody: TXNode;
     procedure SkipWs;
     function ReadName: string;
     function ReadQuoted: string;
@@ -248,8 +250,26 @@ begin
   Result := ParseElement;
 end;
 
-// FPos must be at the element's opening '<'.
+// FPos must be at the element's opening '<'. Children recurse here, once per
+// nesting level: a document nested deeper than any real .dproj (MSBuild's
+// own are a handful of levels) is refused - the load fails cleanly instead of
+// overflowing the stack (audit B1-02: 50,000 nested elements).
 function TDProjXmlReader.ParseElement: TXNode;
+const
+  MAX_DEPTH = 256;
+begin
+  if FDepth >= MAX_DEPTH then
+    raise EConvertError.CreateFmt(
+      '.dproj: elements nested deeper than %d', [MAX_DEPTH]);
+  Inc(FDepth);
+  try
+    Result := ParseElementBody;
+  finally
+    Dec(FDepth);
+  end;
+end;
+
+function TDProjXmlReader.ParseElementBody: TXNode;
 var
   LAttrName, LText: string;
   LSelfClosed: Boolean;

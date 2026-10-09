@@ -762,29 +762,74 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     Result.Guessed := L.Guessed or R.Guessed;
   end;
 
+  // A binary node evaluable as such: both operands and the operator token.
+  // Anything else evaluates as a guess without looking at its operands.
+  function BinaryShape(ABinNode: Integer;
+    out ALeftNode, ARightNode: Integer): Boolean;
+  begin
+    Result := False;
+    ARightNode := NIL_NODE;
+    ALeftNode := ATree.Nodes[ABinNode].FirstChild;
+    if ALeftNode = NIL_NODE then
+      Exit;
+    ARightNode := ATree.Nodes[ALeftNode].NextSibling;
+    Result := (ARightNode <> NIL_NODE) and (ATree.Nodes[ABinNode].Aux >= 0);
+  end;
+
+  function CombineBinary(ABinNode: Integer;
+    const L, R: TPasCondValue): TPasCondValue; forward;
+
+  // An operator chain is a LEFT spine as deep as it is long (`1 + 1 + ...`,
+  // a generated `$IF`): recursing per operand overflowed the stack at about
+  // 1,560 operands (audit B1-02). The spine is walked down iteratively and
+  // folded back up - the operands are still evaluated left to right, the
+  // order the oracle's questions and recorded unknowns were always in.
   function EvalBinary(ABinNode: Integer): TPasCondValue;
   var
-    LLeftNode, LRightNode: Integer;
+    LSpine: TArray<Integer>;
+    LCount, LIdx, LNode, LLeftNode, LRightNode: Integer;
+    L: TPasCondValue;
+  begin
+    Result := MkGuess;
+    if not BinaryShape(ABinNode, LLeftNode, LRightNode) then
+      Exit;
+    LCount := 0;
+    LNode := ABinNode;
+    while True do
+    begin
+      if LCount = Length(LSpine) then
+        SetLength(LSpine, LCount * 2 + 8);
+      LSpine[LCount] := LNode;
+      Inc(LCount);
+      if (ATree.Nodes[LLeftNode].Kind <> nkBinaryOp) or
+         not BinaryShape(LLeftNode, LNode, LRightNode) then
+        Break;
+      // LNode is now the left child's left operand; step onto the child.
+      LIdx := LNode;
+      LNode := LLeftNode;
+      LLeftNode := LIdx;
+    end;
+    L := EvalCondNode(ATree, LLeftNode, ACtx);
+    for LIdx := LCount - 1 downto 0 do
+    begin
+      BinaryShape(LSpine[LIdx], LNode, LRightNode);
+      L := CombineBinary(LSpine[LIdx], L,
+        EvalCondNode(ATree, LRightNode, ACtx));
+    end;
+    Result := L;
+  end;
+
+  function CombineBinary(ABinNode: Integer;
+    const L, R: TPasCondValue): TPasCondValue;
+  var
     LOp: TPasTokenKind;
-    L, R: TPasCondValue;
     LShift: Integer;
     LLeft, LRight: Int64;   // CondTryTrunc's answers - see there
   begin
     Result := MkGuess;
-    LLeftNode := ATree.Nodes[ABinNode].FirstChild;
-    if LLeftNode = NIL_NODE then
-      Exit;
-    LRightNode := ATree.Nodes[LLeftNode].NextSibling;
-    if LRightNode = NIL_NODE then
-      Exit;
-    if ATree.Nodes[ABinNode].Aux < 0 then
-      Exit;
     // The operator's token KIND - every operator here is a reserved word or
     // punctuation with a dedicated kind, so no text is built to dispatch.
     LOp := ATree.Source.VisibleToken(ATree.Nodes[ABinNode].Aux).Kind;
-
-    L := EvalCondNode(ATree, LLeftNode, ACtx);
-    R := EvalCondNode(ATree, LRightNode, ACtx);
 
     // and/or: a CLEAN side that settles the verdict alone drops the other
     // side's taint - the verdict cannot change no matter what the guessed

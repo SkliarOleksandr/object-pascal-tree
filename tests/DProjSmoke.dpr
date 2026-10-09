@@ -9,6 +9,7 @@ program DProjSmoke;
 
 uses
   System.SysUtils,
+  System.StrUtils,
   System.IOUtils,
   PasTree.Platforms in '..\source\PasTree.Platforms.pas',
   PasTree.DProj in '..\source\PasTree.DProj.pas',
@@ -238,6 +239,29 @@ begin
     end
     else
       Writeln('(skip) demo\PasTreeDemo.dproj not found next to the test exe - real-world check skipped');
+    // ---- 50,000 nested elements: the load fails cleanly (audit B1-02) - the
+    // reader recursed once per level into a stack overflow. ----
+    LPath := TPath.Combine(LDir, 'Deep.dproj');
+    TFile.WriteAllText(LPath, '<Project>' + DupeString('<A>', 50000) +
+      DupeString('</A>', 50000) + '</Project>');
+    LDProj := TPasDProj.Create;
+    try
+      var LLoaded := True;
+      var LRaised := '';
+      // Twice: the first overflow of a thread is survivable (Load catches it),
+      // the second, with the guard page used up, kills the process.
+      try
+        LLoaded := LDProj.Load(LPath);
+        LLoaded := LDProj.Load(LPath) or LLoaded;
+      except
+        on E: Exception do
+          LRaised := E.ClassName;
+      end;
+      Ok('deep: 50,000 nested elements fail the load without raising ' +
+        LRaised, (LRaised = '') and not LLoaded);
+    finally
+      LDProj.Free;
+    end;
   finally
     if TDirectory.Exists(LDir) then
       TDirectory.Delete(LDir, True);
