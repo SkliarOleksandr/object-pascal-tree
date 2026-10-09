@@ -198,8 +198,10 @@ type
     // last-good project, adopted via AdoptParseDonor for exactly ONE Analyze*
     // run and cleared in that run's finally (see FinishDonor) - after the
     // build the host frees the donor, so a dangling reference here must be
-    // impossible, not just unlikely. Frozen while adopted: TryDonorLoad only
-    // READS its dictionaries and models (single-owner contract).
+    // impossible, not just unlikely. TryDonorLoad only READS it: the
+    // dictionaries, frozen while adopted, and each model through one copy
+    // taken under the model's lock (TakeDonorView) - the host's navigation
+    // may rehydrate a demoted donor model meanwhile.
     FDonor: TPasSemaProject;
     FDonorHits: Integer;      // AtomicIncrement - workers count concurrently
     FDonorMisses: Integer;
@@ -411,6 +413,9 @@ type
       text-identical full parse of APath - nil otherwise (normal parse path).
       Counts FDonorHits/FDonorMisses. }
     function TryDonorLoad(const AKey, APath: string): TPasSemaModel;
+    { Does every $I site of the donor stream ASource resolve now as it did
+      when the donor parsed it - the same file, or still none? }
+    function DonorIncludesUnchanged(const ASource: TPasPreprocessed): Boolean;
     function HydrateModels(const AIds: TArray<Integer>): Boolean;
     // Clears FDonor at the end of the one run that consumed it; AReport
     // appends 'donorhits=..;donormiss=..;' to StageTimings first.
@@ -1005,21 +1010,29 @@ type
     { Parse reuse across rebuilds (incremental plan, stage A): adopt ADonor -
       the host's still-alive LAST-GOOD project - as a parse donor for the NEXT
       Analyze* call on this project. For every file whose donor model is a
-      clean full parse of BYTE-IDENTICAL text (main file and every $I include
-      re-read and compared exactly), the pp+lex+parse is skipped: Phase 1 runs
-      over the donor's tree (immutable, structure-shared), producing a model
-      indistinguishable from a fresh parse's. Everything else - edited files,
-      demoted units, oracle-reprocessed streams ($IF Declared), units with
-      parse-time unresolved guards - takes the normal path.
+      full parse of BYTE-IDENTICAL text (main file and every $I include
+      re-read and compared exactly, every $I site resolving to the same file
+      or still to none), the pp+lex+parse is skipped: Phase 1 runs over the
+      donor's tree (immutable, structure-shared), producing a model
+      indistinguishable from a fresh parse's, its parser and lexer
+      diagnostics included. A demoted donor model donates its nodes onto a
+      stream this project preprocesses and checks against the demoted
+      fingerprints. Everything else - edited files, oracle-reprocessed
+      streams ($IF Declared), units with parse-time unresolved guards -
+      takes the normal path.
 
       False = configuration mismatch (platform, extra defines, search paths /
       namespaces / aliases), donor refused; the caller logs and the run
       proceeds donor-less. nil clears a previously adopted donor.
 
       LIFETIME: the adoption is valid for the NEXT Analyze* call only and is
-      consumed by it (cleared in its finally, cancelled exits included); the
-      donor must stay alive until that call returns. Call BEFORE the run;
-      never adopt a project that any other thread still mutates. }
+      consumed by it (cleared in its finally, cancelled exits and refused
+      calls included; AnalyzeModuleOnly consumes it without using it); the
+      donor must stay alive until that call returns. Call BEFORE the run.
+      While it runs the host may read and navigate the donor on its own
+      thread - hydration of a demoted model included (TryRehydrate and
+      DemoteText take the model's lock, the donor path copies under it) - but
+      must not analyze, demote or free the donor or release its maps. }
     function AdoptParseDonor(ADonor: TPasSemaProject): Boolean;
     { Resolves and loads the real `System` unit on demand (memoized; -1 if it
       cannot be found via the configured search paths). EVERY unit implicitly
@@ -2176,6 +2189,7 @@ function TPasSemaProject.TryDonorLoad(const AKey, APath: string): TPasSemaModel;
 var
   LMid, LIdx: Integer;
   LDM: TPasSemaModel;
+  LView: TPasSemaDonorView;
   LText: string;
   LPP: TPasPreprocessor;
   LPre: TPasPreprocessed;
@@ -2192,17 +2206,36 @@ begin
       LDM := FDonor.FModels[LMid];
       // OracleStream = the stream depended on mid-analysis oracle state and
       // is not a pure function of the text (the rehydration work proved it
-      // non-reusable).
-      if LDM.OracleStream or (Length(LDM.Tree.Nodes) = 0) then
+      // non-reusable). Set at the load, never written after it.
+      if LDM.OracleStream then
+        Exit;
+      // Everything else is read from one copy taken under the donor model's
+      // lock, never from the model: the donor may be serving its host's
+      // navigation while this rebuild runs, and navigation on a demoted model
+      // rehydrates it (see TPasSemaDonorView).
+      LView := LDM.TakeDonorView;
+      if Length(LView.Nodes) = 0 then
         Exit;
       // A stream with parse-time UNANSWERED $IF questions was re-decided by
       // RunDeclaredPass against the donor generation's models - not reusable
       // (the README's first-pass oracle exclusion, ~a dozen units on the RTL).
       // Both lists survive DemoteText.
-      if (Length(LDM.Tree.Source.UnresolvedDeclared) > 0) or
-         (Length(LDM.Tree.Source.UnresolvedSymbols) > 0) then
+      if (Length(LView.Source.UnresolvedDeclared) > 0) or
+         (Length(LView.Source.UnresolvedSymbols) > 0) then
         Exit;
-      if LDM.Demoted then
+      if Length(LView.Source.FileNames) <> Length(LView.Source.Files) then
+        Exit;
+      // Text the donor never read: an include it could not find, or one a
+      // file created since would now shadow, is not in FileNames, so the
+      // text compare below cannot see it.
+      if not DonorIncludesUnchanged(LView.Source) then
+        Exit;
+      // Built from the nodes alone - the one part of a model nothing writes
+      // after the parse. Phase 1 MUST re-run: a donated MODEL would carry
+      // ExtRefMap/ExprTypeX/CallTargetX with the OLD generation's unit ids.
+      LTree := Default(TPasTree);
+      LTree.Nodes := LView.Nodes;
+      if LView.Demoted then
       begin
         // The donor's TEXT is gone, its nodes are not - and the nodes are
         // what the parse costs. Every file this run would read must match
@@ -2211,14 +2244,10 @@ begin
         // the unit - the same seed query the donor's own load used, which is
         // why a demoted stream is a first-pass stream - and grafts the
         // donor's nodes onto that stream only if it is identical to the one
-        // they were parsed from. The donor is only READ, never hydrated: it
-        // may be serving navigation while this rebuild runs.
-        if Length(LDM.Tree.Source.FileNames) <>
-           Length(LDM.Tree.Source.Files) then
-          Exit;
-        for LIdx := 0 to High(LDM.Tree.Source.FileNames) do
-          if not LDM.DemotedFileMatches(LIdx,
-               FSM.LoadText(LDM.Tree.Source.FileNames[LIdx])) then
+        // they were parsed from. The donor is never hydrated from here.
+        for LIdx := 0 to High(LView.Source.FileNames) do
+          if not LView.FileMatches(LIdx,
+               FSM.LoadText(LView.Source.FileNames[LIdx])) then
             Exit;
         LPP := RentPP;
         try
@@ -2227,42 +2256,71 @@ begin
         finally
           ReturnPP(LPP);
         end;
-        if not LDM.DemotedStreamMatches(LPre) then
+        if not LView.StreamMatches(LPre) then
           Exit;
-        LTree := LDM.Tree;   // record copy: Nodes shared, Source replaced
         LTree.Source := LPre;
-        Result := TPasSemaResolver.Analyze(LTree, False, FPlatform);
-        Exit;
-      end;
-      // Text validation, main file AND every $I include (FileNames[0] = main,
-      // includes appended at resolution, all paths RESOLVED): exact string
-      // compare against what THIS run would read (LoadText serves editor-
-      // buffer overlays too, so an unsaved edit is an ordinary miss).
-      if Length(LDM.Tree.Source.FileNames) <>
-         Length(LDM.Tree.Source.Files) then
-        Exit;
-      for LIdx := 0 to High(LDM.Tree.Source.FileNames) do
+      end
+      else
       begin
-        LText := FSM.LoadText(LDM.Tree.Source.FileNames[LIdx]);
-        if LText <> LDM.Tree.Source.Files[LIdx].Source then
-          Exit;
+        // Text validation, main file AND every $I include (FileNames[0] =
+        // main, includes appended at resolution, all paths RESOLVED): exact
+        // string compare against what THIS run would read (LoadText serves
+        // editor-buffer overlays too, so an unsaved edit is an ordinary
+        // miss).
+        for LIdx := 0 to High(LView.Source.FileNames) do
+        begin
+          LText := FSM.LoadText(LView.Source.FileNames[LIdx]);
+          if LText <> LView.Source.Files[LIdx].Source then
+            Exit;
+        end;
+        // The donor's token layer, its arrays shared with the donor model -
+        // nothing writes them in place (DemoteText detaches Files first).
+        LTree.Source := LView.Source;
       end;
     except
       // A vanished include (or any read failure) degrades to the normal parse
       // path - which will report it the way it always did - never to an error.
       Exit;
     end;
-    // Hit: Phase 1 over the donor's tree. The tree RECORD is copied, its
-    // arrays shared (immutable by construction - the only post-parse `Tree :=`
-    // is TPasProject's assembly). Phase 1 MUST re-run: a donated MODEL would
-    // carry ExtRefMap/ExprTypeX/CallTargetX with the OLD generation's unit ids.
-    Result := TPasSemaResolver.Analyze(LDM.Tree, False, FPlatform);
+    Result := TPasSemaResolver.Analyze(LTree, False, FPlatform);
+    // The parser's rows: the stream is the donor's, so their VisIndex holds.
+    // The lexer's half is read from the stream by the same call.
+    Result.AddParseDiags(LView.ParseDiags);
   finally
     if Result <> nil then
       AtomicIncrement(FDonorHits)
     else
       AtomicIncrement(FDonorMisses);
   end;
+end;
+
+function TPasSemaProject.DonorIncludesUnchanged(
+  const ASource: TPasPreprocessed): Boolean;
+var
+  LIdx: Integer;
+  LRef: TPasIncludeRef;
+  LFound: Boolean;
+  LResolved: string;
+begin
+  // The resolution HandleInclude made, made again: beside the main file, with
+  // the naming file as the tolerance. A site the donor could not resolve
+  // (Path = '') must still fail - the file created since is a different
+  // parse - and one it did resolve must reach the same file, not one placed
+  // since ahead of it on the include path. An include inside a skipped branch
+  // has no site, and the defines are the config gate's.
+  for LIdx := 0 to High(ASource.IncludeRefs) do
+  begin
+    LRef := ASource.IncludeRefs[LIdx];
+    if (LRef.FileId < 0) or (LRef.FileId > High(ASource.FileNames)) then
+      Exit(False);
+    LFound := FSM.ResolveInclude(ASource.FileNames[0],
+      ASource.FileNames[LRef.FileId], LRef.Arg, LResolved);
+    if LFound <> (LRef.Path <> '') then
+      Exit(False);
+    if LFound and not SameText(LResolved, LRef.Path) then
+      Exit(False);
+  end;
+  Result := True;
 end;
 
 procedure TPasSemaProject.FinishDonor(AReport: Boolean);
@@ -19257,6 +19315,7 @@ var
   LAddModels: TArray<TPasSemaModel>;
   LAddIds: TArray<Integer>;
   LAddNames: string;
+  LHadDonor: Boolean;
 
   // The decision's own stages, appended as `dec=<stage>:<ms>,...;`.
   procedure Lap(const AName: string);
@@ -19273,6 +19332,12 @@ var
   end;
 
 begin
+  // An adopted donor is consumed here as by every Analyze*, but not used: the
+  // take-in's newcomers are a handful of units, and AdoptParseDonor's
+  // contract lets the host free the donor once this call returns - a donor
+  // left adopted would be read, freed, by the next run's load.
+  LHadDonor := FDonor <> nil;
+  FinishDonor({AReport} False);
   // Not the raising guard the other entry points use: the module path is
   // the one Analyze* whose caller has a fallback (the full rebuild), and a
   // host that demoted its project - the demo's synchronous Run Parse did -
@@ -19283,6 +19348,8 @@ begin
   // No `Result := False` here: every exit below goes through Refuse (which
   // returns False and records why) or sets Result explicitly.
   FStageTimings := '';
+  if LHadDonor then
+    FStageTimings := 'donor=unused;';
   LSW := TStopwatch.StartNew;
   LFull := TPath.GetFullPath(APath);
   LKey := LowerCase(LFull);
@@ -19328,7 +19395,8 @@ begin
     if (Length(LNew.Tree.Source.UnresolvedDeclared) > 0) or
        (Length(LNew.Tree.Source.UnresolvedSymbols) > 0) then
       Exit(Refuse('unresolved-if'));
-    FStageTimings := Format('parse=%d;', [LSW.ElapsedMilliseconds]);
+    FStageTimings := FStageTimings +
+      Format('parse=%d;', [LSW.ElapsedMilliseconds]);
     // A NEW `uses` entry - a file the closure never loaded - is TAKEN IN
     // (0.53.0): loaded with every not-yet-loaded unit it pulls in, then
     // registered past the commit point and put through the passes beside
@@ -19759,10 +19827,13 @@ begin
   // itself a pool task waits on tasks no thread may be left to run - once
   // every pool thread is such a caller, for good. Refused instead of hung.
   if TTask.CurrentTask <> nil then
+  begin
+    FDonor := nil;   // a refused call consumes the adoption too
     raise EInvalidOperation.CreateFmt(
       '%s: called from a thread-pool task; analysis forks onto the default ' +
       'pool and joins on its caller, so it must run on a thread outside the ' +
       'pool (a TThread, or TPasAsyncSession)', [AEntry]);
+  end;
   // Before EnsureSystemUnit and the load engine: building it is a
   // TParallel.For, which inside the engine finds no free pool thread. It
   // used to be built as a side effect of the first ResolveUnit, which a

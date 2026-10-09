@@ -414,6 +414,30 @@ type
     property Items[AIdx: Integer]: PSemaScope read GetItem; default;
   end;
 
+  { What the parse-donor path reads of a donor model (TPasSemaProject.
+    TryDonorLoad), copied in one step under the model's lock by
+    TPasSemaModel.TakeDonorView. The donor may be serving its host's
+    navigation while the adopting project loads, and navigation on a demoted
+    model rehydrates it - TryRehydrate swaps Source and clears the Demoted*
+    arrays - so a worker reading those fields one by one could see half of
+    each, or AddRef an array the swap was releasing. The copy holds its own
+    references: whatever the model does next, the view stays whole. }
+  TPasSemaDonorView = record
+    Demoted: Boolean;
+    Nodes: TArray<TPasNode>;
+    { The whole token layer. Demoted: the file names, include sites and
+      unresolved-guard lists are kept, the text and tokens are not. }
+    Source: TPasPreprocessed;
+    VisCount: Integer;
+    FileSizes: TArray<Integer>;
+    TokenCounts: TArray<Integer>;
+    FileHashes: TArray<Cardinal>;
+    ParseDiags: TArray<TPasParseDiag>;
+    // TPasSemaModel.DemotedFileMatches / DemotedStreamMatches over the copy.
+    function FileMatches(AFileIdx: Integer; const AText: string): Boolean;
+    function StreamMatches(const APre: TPasPreprocessed): Boolean;
+  end;
+
   TPasSemaModel = class
   private
     FSymCount: Integer;
@@ -567,6 +591,11 @@ type
       from: a wrong answer where the contract above promises none. }
     DemotedFileHashes: TArray<Cardinal>;  // FNV-1a over Files[i].Source
     DemotedHeads: TArray<Byte>;           // per symbol: Ord(TPasRoutineHead)
+    { The parser's own rows as AddParseDiags received them (VisIndex-based),
+      kept through DemoteText: a parse-donor hit reuses the tree, not the
+      parse, and re-adds them from here - otherwise an unedited unit with a
+      syntax error turned clean on the next rebuild. }
+    ParseDiags: TArray<TPasParseDiag>;
     constructor Create(const ATree: TPasTree);
 
     function SymCount: Integer;
@@ -757,6 +786,11 @@ type
       read for Files[AFileIdx] now) have the demoted file's size and
       fingerprint? False on a model that is not demoted. }
     function DemotedFileMatches(AFileIdx: Integer; const AText: string): Boolean;
+    { The donor path's copy of this model, taken under its lock - see
+      TPasSemaDonorView. DemoteText and TryRehydrate take the same lock (a
+      TMonitor on the model itself) for their writes: the only writers of
+      Tree.Source and the Demoted* fields after the load. }
+    function TakeDonorView: TPasSemaDonorView;
     procedure AddDiag(const ADiag: TSemaDiag);
     { The parser's own diagnostics, folded in as E2029 rows at the token they
       name. Without this a syntax error is INVISIBLE to every host that reads
@@ -2355,81 +2389,142 @@ procedure TPasSemaModel.DemoteText;
 var
   LIdx: Integer;
 begin
-  if Demoted then
-    Exit;
-  // Snapshot the per-row facts completion keeps reading (RoutineHead), then
-  // the stream identity, THEN free - order matters, RoutineHead reads text.
-  SetLength(DemotedHeads, SymCount);
-  for LIdx := 0 to SymCount - 1 do
-    DemotedHeads[LIdx] := Byte(RoutineHead(LIdx));
-  DemotedVisCount := Length(Tree.Source.Visible);
-  SetLength(DemotedFileSizes, Length(Tree.Source.Files));
-  SetLength(DemotedTokenCounts, Length(Tree.Source.Files));
-  SetLength(DemotedFileHashes, Length(Tree.Source.Files));
-  for LIdx := 0 to High(Tree.Source.Files) do
-  begin
-    DemotedFileSizes[LIdx] := Length(Tree.Source.Files[LIdx].Source);
-    DemotedTokenCounts[LIdx] := Length(Tree.Source.Files[LIdx].Tokens);
-    DemotedFileHashes[LIdx] :=
-      SourceFingerprint(Tree.Source.Files[LIdx].Source);
-  end;
-  Demoted := True;   // before the frees: RoutineHead must read the snapshot
-  Tree.Source.Visible := nil;
-  for LIdx := 0 to High(Tree.Source.Files) do
-  begin
-    Tree.Source.Files[LIdx].Source := '';
-    Tree.Source.Files[LIdx].Tokens := nil;
-    Tree.Source.Files[LIdx].LineStarts := nil;
+  TMonitor.Enter(Self);   // a donor reader copies these fields - see TakeDonorView
+  try
+    if Demoted then
+      Exit;
+    // Snapshot the per-row facts completion keeps reading (RoutineHead),
+    // then the stream identity, THEN free - order matters, RoutineHead reads
+    // text.
+    SetLength(DemotedHeads, SymCount);
+    for LIdx := 0 to SymCount - 1 do
+      DemotedHeads[LIdx] := Byte(RoutineHead(LIdx));
+    DemotedVisCount := Length(Tree.Source.Visible);
+    SetLength(DemotedFileSizes, Length(Tree.Source.Files));
+    SetLength(DemotedTokenCounts, Length(Tree.Source.Files));
+    SetLength(DemotedFileHashes, Length(Tree.Source.Files));
+    for LIdx := 0 to High(Tree.Source.Files) do
+    begin
+      DemotedFileSizes[LIdx] := Length(Tree.Source.Files[LIdx].Source);
+      DemotedTokenCounts[LIdx] := Length(Tree.Source.Files[LIdx].Tokens);
+      DemotedFileHashes[LIdx] :=
+        SourceFingerprint(Tree.Source.Files[LIdx].Source);
+    end;
+    Demoted := True;   // before the frees: RoutineHead must read the snapshot
+    Tree.Source.Visible := nil;
+    // Detached before its elements are cleared: a parse-donor hit builds its
+    // model over the donor's tree, so this array may be another project's
+    // live model's too (dynamic arrays are not copy-on-write), and clearing
+    // it in place stripped that model's text behind its back.
+    Tree.Source.Files := Copy(Tree.Source.Files);
+    for LIdx := 0 to High(Tree.Source.Files) do
+    begin
+      Tree.Source.Files[LIdx].Source := '';
+      Tree.Source.Files[LIdx].Tokens := nil;
+      Tree.Source.Files[LIdx].LineStarts := nil;
+    end;
+  finally
+    TMonitor.Exit(Self);
   end;
 end;
 
-function TPasSemaModel.DemotedStreamMatches(
-  const APre: TPasPreprocessed): Boolean;
+// DemotedStreamMatches / DemotedFileMatches over explicit fingerprints, so a
+// TPasSemaDonorView answers from its copy exactly as the model does.
+function FingerprintStreamMatches(const APre: TPasPreprocessed;
+  AVisCount: Integer; const ASizes, ACounts: TArray<Integer>;
+  const AHashes: TArray<Cardinal>): Boolean;
 var
   LIdx: Integer;
 begin
   Result := False;
-  if not Demoted then
+  if Length(APre.Visible) <> AVisCount then
     Exit;
-  if Length(APre.Visible) <> DemotedVisCount then
-    Exit;
-  if Length(APre.Files) <> Length(DemotedTokenCounts) then
-    Exit;
-  if Length(APre.Files) <> Length(DemotedFileHashes) then
+  if (Length(APre.Files) <> Length(ASizes)) or
+     (Length(APre.Files) <> Length(ACounts)) or
+     (Length(APre.Files) <> Length(AHashes)) then
     Exit;
   for LIdx := 0 to High(APre.Files) do
-    if (Length(APre.Files[LIdx].Source) <> DemotedFileSizes[LIdx]) or
-       (Length(APre.Files[LIdx].Tokens) <> DemotedTokenCounts[LIdx]) or
-       (SourceFingerprint(APre.Files[LIdx].Source) <>
-        DemotedFileHashes[LIdx]) then
+    if (Length(APre.Files[LIdx].Source) <> ASizes[LIdx]) or
+       (Length(APre.Files[LIdx].Tokens) <> ACounts[LIdx]) or
+       (SourceFingerprint(APre.Files[LIdx].Source) <> AHashes[LIdx]) then
       Exit;
   Result := True;
+end;
+
+function FingerprintFileMatches(AFileIdx: Integer; const AText: string;
+  const ASizes: TArray<Integer>; const AHashes: TArray<Cardinal>): Boolean;
+begin
+  Result := (AFileIdx >= 0) and (AFileIdx <= High(ASizes)) and
+    (AFileIdx <= High(AHashes)) and (Length(AText) = ASizes[AFileIdx]) and
+    (SourceFingerprint(AText) = AHashes[AFileIdx]);
+end;
+
+function TPasSemaModel.DemotedStreamMatches(
+  const APre: TPasPreprocessed): Boolean;
+begin
+  Result := Demoted and FingerprintStreamMatches(APre, DemotedVisCount,
+    DemotedFileSizes, DemotedTokenCounts, DemotedFileHashes);
 end;
 
 function TPasSemaModel.DemotedFileMatches(AFileIdx: Integer;
   const AText: string): Boolean;
 begin
-  Result := Demoted and (AFileIdx >= 0) and
-    (AFileIdx <= High(DemotedFileSizes)) and
-    (Length(AText) = DemotedFileSizes[AFileIdx]) and
-    (SourceFingerprint(AText) = DemotedFileHashes[AFileIdx]);
+  Result := Demoted and FingerprintFileMatches(AFileIdx, AText,
+    DemotedFileSizes, DemotedFileHashes);
 end;
 
 function TPasSemaModel.TryRehydrate(const APre: TPasPreprocessed): Boolean;
 begin
-  if not Demoted then
-    Exit(True);
-  Result := DemotedStreamMatches(APre);
-  if not Result then
-    Exit;
-  Tree.Source := APre;
-  Demoted := False;
-  DemotedFileSizes := nil;
-  DemotedTokenCounts := nil;
-  DemotedFileHashes := nil;
-  DemotedHeads := nil;
-  DemotedVisCount := 0;
-  Result := True;
+  TMonitor.Enter(Self);   // a donor reader copies these fields - see TakeDonorView
+  try
+    if not Demoted then
+      Exit(True);
+    Result := DemotedStreamMatches(APre);
+    if not Result then
+      Exit;
+    Tree.Source := APre;
+    Demoted := False;
+    DemotedFileSizes := nil;
+    DemotedTokenCounts := nil;
+    DemotedFileHashes := nil;
+    DemotedHeads := nil;
+    DemotedVisCount := 0;
+    Result := True;
+  finally
+    TMonitor.Exit(Self);
+  end;
+end;
+
+function TPasSemaModel.TakeDonorView: TPasSemaDonorView;
+begin
+  TMonitor.Enter(Self);
+  try
+    Result.Demoted := Demoted;
+    Result.Nodes := Tree.Nodes;
+    Result.Source := Tree.Source;
+    Result.VisCount := DemotedVisCount;
+    Result.FileSizes := DemotedFileSizes;
+    Result.TokenCounts := DemotedTokenCounts;
+    Result.FileHashes := DemotedFileHashes;
+    Result.ParseDiags := ParseDiags;
+  finally
+    TMonitor.Exit(Self);
+  end;
+end;
+
+{ TPasSemaDonorView }
+
+function TPasSemaDonorView.FileMatches(AFileIdx: Integer;
+  const AText: string): Boolean;
+begin
+  Result := Demoted and
+    FingerprintFileMatches(AFileIdx, AText, FileSizes, FileHashes);
+end;
+
+function TPasSemaDonorView.StreamMatches(const APre: TPasPreprocessed): Boolean;
+begin
+  Result := Demoted and FingerprintStreamMatches(APre, VisCount, FileSizes,
+    TokenCounts, FileHashes);
 end;
 
 function TPasSemaModel.BoundPastStruct(ANode: Integer): Boolean;
@@ -2521,6 +2616,7 @@ var
   LCode, LMsg: string;
   LVis: TPasVisibleToken;
 begin
+  ParseDiags := ParseDiags + ADiags;   // for a parse-donor hit - see ParseDiags
   for LIdx := 0 to High(ADiags) do
   begin
     LTok := ADiags[LIdx].VisIndex;

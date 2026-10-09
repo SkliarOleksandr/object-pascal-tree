@@ -114,7 +114,10 @@ type
       still-alive last-good project - must outlive this session's build; the
       host's existing free-after-TakeProject-swap order already guarantees
       that. False = configuration mismatch, donor refused (log it; the run
-      proceeds donor-less). }
+      proceeds donor-less). While the session runs the host may keep reading
+      and navigating the donor on its own thread - hydrating its demoted
+      models included, the donor path copies each model under its lock - but
+      must not analyze, demote or free it. }
     function SetParseDonor(ADonor: TPasSemaProject): Boolean;
     { Forwarded to the inner project: True runs the analysis stages
       sequentially (the inner parallelism still runs on THIS worker thread

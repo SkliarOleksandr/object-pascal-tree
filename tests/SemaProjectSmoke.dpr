@@ -4596,6 +4596,297 @@ begin
   TDirectory.Delete(LDir, True);
 end;
 
+// Parse-donor safety (audit B05). A donor hit reuses the donor's TREE, so
+// everything else the donor's parse decided has to come along with it, or
+// the hit has to be refused:
+//  - the parser's and the lexer's rows of an unedited broken unit;
+//  - an include the donor could not find, or one a newer file now shadows;
+// and the donor is shared state while the rebuild reads it: its host's
+// navigation rehydrates a demoted donor model meanwhile, and the new
+// project's DemoteText must not strip the donor's text. The adoption is
+// consumed by every Analyze* - AnalyzeModuleOnly and a refused call too.
+
+// AUnitLower's diagnostics as `code@line:col|...`.
+function DsfSig(AProj: TPasSemaProject; const AUnitLower: string): string;
+var
+  LMid, LDi: Integer;
+begin
+  Result := '';
+  for LMid := 0 to AProj.ModelCount - 1 do
+    if AProj.Model(LMid).UnitNameLower = AUnitLower then
+      for LDi := 0 to High(AProj.Model(LMid).Diags) do
+        Result := Result + AProj.Model(LMid).Diags[LDi].Code + '@' +
+          IntToStr(AProj.Model(LMid).Diags[LDi].Line) + ':' +
+          IntToStr(AProj.Model(LMid).Diags[LDi].Col) + '|';
+end;
+
+// The `donorhits=..;donormiss=..;` part of a run's StageTimings.
+function DsfHits(AProj: TPasSemaProject): string;
+var
+  LAt, LEnd: Integer;
+begin
+  Result := '';
+  LAt := Pos('donorhits=', AProj.StageTimings);
+  if LAt = 0 then
+    Exit;
+  LEnd := Pos('donormiss=', AProj.StageTimings, LAt);
+  if LEnd = 0 then
+    Exit;
+  LEnd := Pos(';', AProj.StageTimings, LEnd);
+  Result := Copy(AProj.StageTimings, LAt, LEnd - LAt + 1);
+end;
+
+procedure TestDonorSafety;
+const
+  cUnits = 80;
+  cRounds = 6;
+var
+  LDir, LInc, LRace, LMain, LSigA, LCtl, LRaised: string;
+  LP1, LP2, LP3, LP4: TPasSemaProject;
+  LMid, LIdx, LK, LRound, LMism, LSwap, LTmp: Integer;
+  LSeed: UInt64;
+  LText: TStringBuilder;
+  LUses: string;
+  LDone: TEvent;
+  LFinished: Boolean;
+  LOrder: TArray<Integer>;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_donor_safety');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  LInc := TPath.Combine(LDir, 'inc');
+  TDirectory.CreateDirectory(LInc);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DsfSyn.pas'),
+    'unit DsfSyn;'#10'interface'#10'implementation'#10 +
+    'procedure P;'#10'var X: Integer;'#10'begin'#10 +
+    '  X := (1 + ;'#10 +       // the parser's row
+    '  X := 2 % 3;'#10 +       // the lexer's row
+    'end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DsfPlain.pas'),
+    'unit DsfPlain;'#10'interface'#10'procedure Q;'#10'implementation'#10 +
+    'procedure Q;'#10'begin'#10'end;'#10'end.'#10);
+  // dsffood.inc does not exist yet; dsfshade.inc is found on the search
+  // path, until one is created beside the unit, which is looked at first.
+  TFile.WriteAllText(TPath.Combine(LDir, 'DsfInc.pas'),
+    'unit DsfInc;'#10'interface'#10'{$I dsffood.inc}'#10 +
+    'const Bar = Foo + 1;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DsfShade.pas'),
+    'unit DsfShade;'#10'interface'#10'{$I dsfshade.inc}'#10 +
+    'const Z = ShNew;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LInc, 'dsfshade.inc'),
+    'const ShOld = 1;'#10);
+
+  LP1 := TPasSemaProject.Create(pfWin32, [LDir, LInc], []);
+  LP2 := nil;
+  LP3 := nil;
+  LP4 := nil;
+  try
+    LP1.AnalyzeDirectory(LDir);
+    LSigA := DsfSig(LP1, 'dsfsyn');
+    Ok('donor safety: the baseline reports the parser''s row (' + LSigA + ')',
+      Pos('E2029@7:', LSigA) > 0);
+    Ok('donor safety: the baseline reports the lexer''s row (' + LSigA + ')',
+      Pos('@8:', LSigA) > 0);
+    Ok('donor safety: the baseline misses the absent include',
+      Pos('E2003@', DsfSig(LP1, 'dsfinc')) > 0);
+    Ok('donor safety: the baseline reads the search path''s include',
+      Pos('E2003@', DsfSig(LP1, 'dsfshade')) > 0);
+
+    TFile.WriteAllText(TPath.Combine(LDir, 'dsffood.inc'),
+      'const Foo = 1;'#10);
+    TFile.WriteAllText(TPath.Combine(LDir, 'dsfshade.inc'),
+      'const ShNew = 1;'#10);
+    LP2 := TPasSemaProject.Create(pfWin32, [LDir, LInc], []);
+    Ok('donor safety: the donor is adopted', LP2.AdoptParseDonor(LP1));
+    LP2.AnalyzeDirectory(LDir);
+    Ok('donor safety: a donor hit keeps the parse diagnostics (' +
+      DsfSig(LP2, 'dsfsyn') + ')', DsfSig(LP2, 'dsfsyn') = LSigA);
+    Ok('donor safety: an include created since is read',
+      DsfSig(LP2, 'dsfinc') = '');
+    Ok('donor safety: an include shadowed since is read',
+      DsfSig(LP2, 'dsfshade') = '');
+    Ok('donor safety: exactly the two include units miss (' + DsfHits(LP2) +
+      ')', DsfHits(LP2) = 'donorhits=2;donormiss=2;');
+
+    // LP2's hits share their file arrays with LP1's models: demoting LP2
+    // must leave LP1's text where it was.
+    LP2.DemoteText([]);
+    LMid := LP1.ModelIdOf(TPath.Combine(LDir, 'DsfSyn.pas'));
+    Ok('donor safety: demoting the adopter leaves the donor''s text',
+      (LMid >= 0) and not LP1.Model(LMid).Demoted and
+      (LP1.Model(LMid).Tree.Source.Files[0].Source <> '') and
+      (Length(LP1.Model(LMid).Tree.Source.Files[0].Tokens) > 0));
+
+    // A demoted donor: the stream is re-made here, the rows come from the
+    // model's ParseDiags.
+    LP3 := TPasSemaProject.Create(pfWin32, [LDir, LInc], []);
+    Ok('donor safety: a demoted donor is adopted', LP3.AdoptParseDonor(LP2));
+    LP3.AnalyzeDirectory(LDir);
+    Ok('donor safety: a demoted donor hit keeps the parse diagnostics (' +
+      DsfSig(LP3, 'dsfsyn') + ')', DsfSig(LP3, 'dsfsyn') = LSigA);
+    Ok('donor safety: every unit hits the demoted donor (' + DsfHits(LP3) +
+      ')', DsfHits(LP3) = 'donorhits=4;donormiss=0;');
+
+    // AnalyzeModuleOnly consumes an adoption (without using it), so the
+    // donor can be freed once it returns.
+    Ok('donor safety: adopted before a module run', LP3.AdoptParseDonor(LP1));
+    LP3.SetBuffer(TPath.Combine(LDir, 'DsfPlain.pas'),
+      'unit DsfPlain;'#10'interface'#10'procedure Q;'#10'implementation'#10 +
+      'procedure Q;'#10'begin'#10'  Q;'#10'end;'#10'end.'#10, 1);
+    Ok('donor safety: the module run is accepted',
+      LP3.AnalyzeModuleOnly(TPath.Combine(LDir, 'DsfPlain.pas')));
+    Ok('donor safety: the module run consumed the adoption (' +
+      LP3.StageTimings + ')', Pos('donor=unused;', LP3.StageTimings) > 0);
+    LP3.SetBuffer(TPath.Combine(LDir, 'DsfPlain.pas'),
+      'unit DsfPlain;'#10'interface'#10'procedure Q;'#10'implementation'#10 +
+      'procedure Q;'#10'begin'#10'  Q; Q;'#10'end;'#10'end.'#10, 2);
+    Ok('donor safety: the next module run is accepted',
+      LP3.AnalyzeModuleOnly(TPath.Combine(LDir, 'DsfPlain.pas')));
+    Ok('donor safety: and has no donor left (' + LP3.StageTimings + ')',
+      Pos('donor=', LP3.StageTimings) = 0);
+
+    // A call refused for its thread consumes the adoption as well.
+    LP4 := TPasSemaProject.Create(pfWin32, [LDir, LInc], []);
+    LP4.AdoptParseDonor(LP1);
+    LRaised := '';
+    LFinished := False;
+    LDone := TEvent.Create(nil, True, False, '');
+    try
+      TTask.Run(
+        procedure
+        begin
+          try
+            try
+              LP4.AnalyzeDirectory(LDir);
+            except
+              on E: Exception do
+                LRaised := E.ClassName;
+            end;
+          finally
+            LDone.SetEvent;
+          end;
+        end);
+      LFinished := LDone.WaitFor(30000) = wrSignaled;
+    finally
+      if LFinished then
+        LDone.Free;
+    end;
+    Ok('donor safety: an Analyze* from a pool task is refused (' + LRaised +
+      ')', LFinished and (LRaised = 'EInvalidOperation'));
+    if LFinished then
+    begin
+      LP4.AnalyzeDirectory(LDir);
+      Ok('donor safety: the refused call consumed the adoption (' +
+        LP4.StageTimings + ')', Pos('donorhits=', LP4.StageTimings) = 0);
+    end;
+  finally
+    LP4.Free;
+    LP3.Free;
+    LP2.Free;
+    LP1.Free;
+  end;
+
+  // The race: Q loads from a demoted donor P on the staged driver's workers
+  // while this thread rehydrates P's models, the way a host's navigation
+  // does. A model hydrated before Q reads it hits through the text compare,
+  // one still demoted through the fingerprints - every round must hit as
+  // often as a control run with no hydration at all. Before the lock a
+  // worker could read a model half-rehydrated (a miss, or worse).
+  LRace := TPath.Combine(LDir, 'race');
+  TDirectory.CreateDirectory(LRace);
+  LUses := '';
+  LText := TStringBuilder.Create;
+  try
+    for LIdx := 1 to cUnits do
+    begin
+      LText.Clear;
+      LText.Append(Format('unit Dsr%.3d;'#10'interface'#10'type TC%.3d = class'#10,
+        [LIdx, LIdx]));
+      for LK := 0 to 39 do
+        LText.Append(Format('  procedure M%d;'#10, [LK]));
+      LText.Append('end;'#10'implementation'#10);
+      for LK := 0 to 39 do
+        LText.Append(Format('procedure TC%.3d.M%d;'#10'var X: Integer;'#10 +
+          'begin'#10'  X := %d * 2 + 1;'#10'  if X > 3 then X := X - 1;'#10 +
+          'end;'#10, [LIdx, LK, LK]));
+      LText.Append('end.'#10);
+      TFile.WriteAllText(TPath.Combine(LRace, Format('Dsr%.3d.pas', [LIdx])),
+        LText.ToString);
+      if LUses <> '' then
+        LUses := LUses + ', ';
+      LUses := LUses + Format('Dsr%.3d', [LIdx]);
+    end;
+  finally
+    LText.Free;
+  end;
+  LMain := TPath.Combine(LRace, 'DsrMain.pas');
+  TFile.WriteAllText(LMain, 'unit DsrMain;'#10'interface'#10'uses ' + LUses +
+    ';'#10'implementation'#10'end.'#10);
+
+  LP1 := TPasSemaProject.Create(pfWin32, [LRace], []);
+  try
+    LP1.AnalyzeStaged([LMain], nil);
+    LP1.DemoteText([]);
+    LP2 := TPasSemaProject.Create(pfWin32, [LRace], []);
+    try
+      LP2.AdoptParseDonor(LP1);
+      LP2.AnalyzeStaged([LMain], nil);
+      LCtl := DsfHits(LP2);
+    finally
+      LP2.Free;
+    end;
+    Ok('donor race: the control run hits every unit (' + LCtl + ')',
+      LCtl = Format('donorhits=%d;donormiss=0;', [cUnits + 1]));
+    SetLength(LOrder, LP1.ModelCount);
+    LSeed := 12345;
+    LMism := 0;
+    for LRound := 1 to cRounds do
+    begin
+      for LIdx := 0 to High(LOrder) do
+        LOrder[LIdx] := LIdx;
+      for LIdx := High(LOrder) downto 1 do
+      begin
+        LSeed := (LSeed * 1103515245 + 12345) mod 2147483648;
+        LSwap := Integer((LSeed shr 8) mod UInt64(LIdx + 1));
+        LTmp := LOrder[LIdx];
+        LOrder[LIdx] := LOrder[LSwap];
+        LOrder[LSwap] := LTmp;
+      end;
+      LP2 := TPasSemaProject.Create(pfWin32, [LRace], []);
+      LDone := TEvent.Create(nil, True, False, '');
+      LP2.AdoptParseDonor(LP1);
+      TThread.CreateAnonymousThread(
+        procedure
+        begin
+          try
+            LP2.AnalyzeStaged([LMain], nil);
+          finally
+            LDone.SetEvent;
+          end;
+        end).Start;
+      for LIdx := 0 to High(LOrder) do
+        LP1.EnsureHydrated(LOrder[LIdx]);
+      LFinished := LDone.WaitFor(60000) = wrSignaled;
+      if not LFinished then
+      begin
+        Ok('donor race: round ' + IntToStr(LRound) + ' finishes', False);
+        LP1 := nil;   // the worker still holds both: leave them
+        Exit;
+      end;
+      if DsfHits(LP2) <> LCtl then
+        Inc(LMism);
+      LDone.Free;
+      LP2.Free;
+      LP1.DemoteText([]);
+    end;
+    Ok('donor race: every round with hydration hits as the control (' +
+      IntToStr(LMism) + ' of ' + IntToStr(cRounds) + ' differ)', LMism = 0);
+  finally
+    LP1.Free;
+  end;
+  TDirectory.Delete(LDir, True);
+end;
+
 // The thread-pool contract (audit B02). ConfigureThreadPool pins the default
 // pool and turns off its past-Max injection, so no pool task may wait on
 // another queued one. Two ways analysis broke that and hung for good:
@@ -10626,6 +10917,7 @@ begin
   TestOracleDepth;
   TestInstanceSize;
   TestOperatorChains;
+  TestDonorSafety;
   TestPoolContract;
 
   if GCounter.Finish('SemaProjectSmoke') then

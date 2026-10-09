@@ -35,12 +35,16 @@ a different project opened   -> ordinary rebuild
 `TPasSemaProject.AdoptParseDonor(ADonor)` - the host offers its still-alive
 last-good project as a source of parse results for the next `Analyze*` call.
 
-For every file whose donor model is a clean full parse of byte-identical text
-(the main file and every `$I` include are re-read and compared exactly), the
+For every file whose donor model is a full parse of byte-identical text (the
+main file and every `$I` include are re-read and compared exactly, and every
+`$I` site resolves to the same file as before - or still to none), the
 preprocessing, lexing and parse are skipped: Phase 1 runs over the donor's
-tree, which is immutable, and the new model shares its arrays. Everything else
-- edited files, oracle-reprocessed streams, units with parse-time unresolved
-`$IF` guards - takes the normal path.
+tree, which is immutable, and the new model shares its arrays. The parser's
+and the lexer's diagnostics are carried over (the model keeps the parser's
+rows for this, through demotion too), so a unit with a syntax error stays
+reported. Everything else - edited files, oracle-reprocessed streams, units
+with parse-time unresolved `$IF` guards, an include created or shadowed since
+the donor's parse - takes the normal path.
 
 A DEMOTED donor model (`DemoteText`, `DemoteClosedUnits`) has no text left
 to compare, but its nodes are what the parse costs. Its files are checked
@@ -48,8 +52,15 @@ against the size and fingerprint `DemoteText` recorded; on a match the
 adopting project preprocesses the unit itself (the same seed query the donor
 used, so a demotable stream is reproducible) and grafts the donor's nodes
 onto that stream if it is identical to the one they were parsed from. The
-donor is only read, never rehydrated - it may be serving navigation while the
-rebuild runs.
+donor is never rehydrated by the rebuild.
+
+The donor may keep serving its host's navigation while the rebuild runs, and
+navigation on a demoted model rehydrates it. So the rebuild's workers never
+read a donor model field by field: each takes one copy of what it needs
+(`TPasSemaModel.TakeDonorView`) under the model's lock, and `TryRehydrate`
+and `DemoteText` - the only writers of a model's text after its load - take
+the same lock. `DemoteText` also detaches the model's file array before
+clearing it, since a donor hit's model shares that array with the donor's.
 
 Why a donor project rather than a standalone cache:
 
@@ -62,8 +73,11 @@ Why a donor project rather than a standalone cache:
   two-generation overlap that already exists.
 
 Contract: the adoption is valid for the NEXT `Analyze*` call only and is
-consumed by it (cleared in its `finally`, cancelled exits included); the donor
-must stay alive until that call returns. `False` = configuration mismatch
+consumed by it (cleared in its `finally`, cancelled and refused calls
+included; `AnalyzeModuleOnly` consumes it without using it); the donor must
+stay alive until that call returns. While it runs the host may read the donor
+and navigate it - hydration included - from its own thread, but must not
+analyze it, free it, demote it or release its maps. `False` = configuration mismatch
 (platform, extra defines, search paths, namespaces, aliases) and the run
 proceeds donor-less. `StageTimings` reports `donorhits=..;donormiss=..;`.
 
