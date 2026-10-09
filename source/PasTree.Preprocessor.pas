@@ -163,10 +163,13 @@ type
 
   // One mention of a name that is NOT a conditional symbol inside a `$IF` /
   // `$ELSEIF` expression - `CompilerVersion` of `{$IF CompilerVersion < 31}`,
-  // a unit constant, the argument of `Declared(X)` or `SizeOf(T)` - so a hover
-  // or a jump on it has something to find (pastree-lsp, 2026-10-07: neither
-  // answered there). Recorded for active and dead directives alike, like
-  // TPasDefineRef, and in the same coordinates: Start/Len span the name as
+  // a unit constant, the argument of `Declared(X)` or `SizeOf(T)`, a callee
+  // (`SizeOf`, `Defined`, `Declared`) - so a hover or a jump on it has
+  // something to find (pastree-lsp, 2026-10-07: neither answered there).
+  // Recorded for active and dead directives alike, like TPasDefineRef - a
+  // `$ELSEIF` after a taken branch and a `$IF` in a skipped region are parsed
+  // for their names without being evaluated (0.94.1; until then neither
+  // recorded anything) - and in the same coordinates: Start/Len span the name as
   // written in Files[FileId].Source. Resolution is the reader's - the name is
   // looked up as the unit's code would see it (TPasNavigator.IfNameAt).
   TPasIfNameRef = record
@@ -451,6 +454,12 @@ type
     // flag those refs carry.
     function EvalIfExpression(const AExpr: string; AFileId, AExprStart: Integer;
       AActive: Boolean; const AToken: TPasToken): Boolean;
+    // An expression that is not evaluated - a `$ELSEIF` after a taken
+    // branch, a `$IF` in a skipped region - still names what it names: its
+    // refs are recorded from a parse alone (Alex, 2026-10-09: no hint on
+    // MACOS in `{$ELSEIF Defined(MACOS)}` after a taken `$IF`).
+    procedure RecordUnevaluatedIf(const AExpr: string; AFileId,
+      AExprStart: Integer; AActive: Boolean);
   public
     { APointerBytes/AExtendedBytes parameterize SizeOf() in $IF expressions
       for the target platform (Win32: 4/10; 64-bit targets: 8/8). }
@@ -1375,8 +1384,13 @@ begin
   begin
     LParent := Active;
     LArg := Arg;
-    LTaken := LParent and
-      EvalIfExpression(LArg, AFileId, LArgStart, LParent, AToken);
+    if LParent then
+      LTaken := EvalIfExpression(LArg, AFileId, LArgStart, LParent, AToken)
+    else
+    begin
+      LTaken := False;
+      RecordUnevaluatedIf(LArg, AFileId, LArgStart, LParent);
+    end;
     FCondParentActive.Add(LParent);
     FCondAnyTaken.Add(LTaken);
     FCondThisActive.Add(LTaken);
@@ -1412,9 +1426,14 @@ begin
     else
     begin
       LArg := Arg;
-      LTaken := FCondParentActive[LTop] and not FCondAnyTaken[LTop] and
-        EvalIfExpression(LArg, AFileId, LArgStart, FCondParentActive[LTop],
-          AToken);
+      if FCondParentActive[LTop] and not FCondAnyTaken[LTop] then
+        LTaken := EvalIfExpression(LArg, AFileId, LArgStart,
+          FCondParentActive[LTop], AToken)
+      else
+      begin
+        LTaken := False;
+        RecordUnevaluatedIf(LArg, AFileId, LArgStart, FCondParentActive[LTop]);
+      end;
       FCondThisActive[LTop] := LTaken;
       if LTaken then
         FCondAnyTaken[LTop] := True;
@@ -1972,6 +1991,51 @@ begin
   FAlignEvents.Add(LEvent);
 end;
 
+// The DefineRefs and IfNameRefs of one `$IF`/`$ELSEIF` expression, from spans
+// relative to its text (CondEval's DefinedSpans / NameSpans). Not a method:
+// TPasCondSpan is CondEval's, which only the implementation may use.
+procedure RecordIfRefs(APre: TPasPreprocessor; const AExpr: string;
+  AFileId, AExprStart: Integer; AActive: Boolean;
+  const ADefined, ANames: TArray<TPasCondSpan>);
+var
+  LIdx: Integer;
+  LRef: TPasDefineRef;
+  LNameRef: TPasIfNameRef;
+begin
+  for LIdx := 0 to High(ADefined) do
+  begin
+    LRef.FileId := AFileId;
+    LRef.Start := AExprStart + ADefined[LIdx].Start;
+    LRef.Len := ADefined[LIdx].Len;
+    LRef.Name := APre.FDefineNames.Intern(
+      PChar(Pointer(AExpr)) + ADefined[LIdx].Start, LRef.Len);
+    LRef.Kind := drDefined;
+    LRef.Active := AActive;
+    APre.FDefineRefs.Add(LRef);
+  end;
+  // CompilerVersion, a constant, a callee - for a hover or a jump on it, see
+  // TPasIfNameRef.
+  for LIdx := 0 to High(ANames) do
+  begin
+    LNameRef.FileId := AFileId;
+    LNameRef.Start := AExprStart + ANames[LIdx].Start;
+    LNameRef.Len := ANames[LIdx].Len;
+    LNameRef.Name := APre.FDefineNames.Intern(
+      PChar(Pointer(AExpr)) + ANames[LIdx].Start, LNameRef.Len);
+    LNameRef.Active := AActive;
+    APre.FIfNameRefs.Add(LNameRef);
+  end;
+end;
+
+procedure TPasPreprocessor.RecordUnevaluatedIf(const AExpr: string; AFileId,
+  AExprStart: Integer; AActive: Boolean);
+var
+  LDefined, LNames: TArray<TPasCondSpan>;
+begin
+  CollectCondSpans(AExpr, LDefined, LNames);
+  RecordIfRefs(Self, AExpr, AFileId, AExprStart, AActive, LDefined, LNames);
+end;
+
 // The `$IF`/`$ELSEIF` expression: parsed by the REAL parser and evaluated by
 // PasTree.CondEval (tri-state; see its unit comment for grammar ownership,
 // Kleene and/or, and the dcc-probed divergence on genuinely undeclared
@@ -1989,8 +2053,6 @@ var
   LName: string;
   LSym: TPasUnresolvedSymbol;
   LIdx: Integer;
-  LRef: TPasDefineRef;
-  LNameRef: TPasIfNameRef;
   LAsk: TPasDeclaredAsk;
 begin
   LCtx := Default(TPasCondContext);
@@ -2005,30 +2067,9 @@ begin
   LValue := EvalCondText(AExpr, LCtx, LBad);
   // Every Defined(X) the expression MENTIONS (a tree walk in CondEval, not
   // the evaluation - `Defined(A) and Defined(B)` short-circuits past B when A
-  // is off, and B is still a reference).
-  for LIdx := 0 to High(LCtx.DefinedSpans) do
-  begin
-    LRef.FileId := AFileId;
-    LRef.Start := AExprStart + LCtx.DefinedSpans[LIdx].Start;
-    LRef.Len := LCtx.DefinedSpans[LIdx].Len;
-    LRef.Name := FDefineNames.Intern(
-      PChar(Pointer(AExpr)) + LCtx.DefinedSpans[LIdx].Start, LRef.Len);
-    LRef.Kind := drDefined;
-    LRef.Active := AActive;
-    FDefineRefs.Add(LRef);
-  end;
-  // And every other name it mentions (CompilerVersion, a constant), for a
-  // hover or a jump on it - see TPasIfNameRef.
-  for LIdx := 0 to High(LCtx.NameSpans) do
-  begin
-    LNameRef.FileId := AFileId;
-    LNameRef.Start := AExprStart + LCtx.NameSpans[LIdx].Start;
-    LNameRef.Len := LCtx.NameSpans[LIdx].Len;
-    LNameRef.Name := FDefineNames.Intern(
-      PChar(Pointer(AExpr)) + LCtx.NameSpans[LIdx].Start, LNameRef.Len);
-    LNameRef.Active := AActive;
-    FIfNameRefs.Add(LNameRef);
-  end;
+  // is off, and B is still a reference), and every other name it mentions.
+  RecordIfRefs(Self, AExpr, AFileId, AExprStart, AActive, LCtx.DefinedSpans,
+    LCtx.NameSpans);
   // Unanswered Declared() names and symbol questions feed the second pass
   // (RunDeclaredPass) - but only when they could still CHANGE anything: a
   // verdict settled by a clean side alone (`False and Declared(X)`) is final

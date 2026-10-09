@@ -115,11 +115,12 @@ type
     // EvalCondText fills it; EvalCondNode never touches it.
     DefinedSpans: TArray<TPasCondSpan>;
     // Every OTHER name the expression contains - `CompilerVersion`,
-    // `RTLVersion`, a unit constant, a `Declared(X)` or `SizeOf(T)` argument -
-    // source order, what a hover or a jump on that name reads. Neither a
-    // callee (`Defined`, `SizeOf`) nor a Defined() argument (a conditional
-    // symbol, DefinedSpans'); of a dotted `System.CompilerVersion` only the
-    // last segment. Filled by EvalCondText alongside DefinedSpans.
+    // `RTLVersion`, a unit constant, a `Declared(X)` or `SizeOf(T)` argument,
+    // a callee (`Defined`, `SizeOf`) - source order, what a hover or a jump
+    // on that name reads. Not a Defined() argument (a conditional symbol,
+    // DefinedSpans'); of a dotted `System.CompilerVersion` only the last
+    // segment. Filled by EvalCondText (and CollectCondSpans) alongside
+    // DefinedSpans.
     NameSpans: TArray<TPasCondSpan>;
   end;
 
@@ -135,6 +136,12 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
   that mentioned a name is still a case a second pass could learn from"). }
 function EvalCondText(const AExpr: string; var ACtx: TPasCondContext;
   out ABadExpr: Boolean): TPasCondValue;
+
+{ DefinedSpans and NameSpans of AExpr without evaluating it - for a `$ELSEIF`
+  after a taken branch and a `$IF` in a skipped region, which are never
+  evaluated and whose names a hover still reads. }
+procedure CollectCondSpans(const AExpr: string;
+  out ADefinedSpans, ANameSpans: TArray<TPasCondSpan>);
 
 { The branch verdict. }
 function CondAsBool(const AValue: TPasCondValue): Boolean;
@@ -1033,10 +1040,10 @@ begin
   end;
 end;
 
-// Appends the span of every name under ANode that is neither a callee nor a
-// Defined() argument - see TPasCondContext.NameSpans. A dotted name gives its
-// last segment (nkMember: qualifier first, the member name last). Source
-// order, as CollectDefinedSpans.
+// Appends the span of every name under ANode that is not a Defined()
+// argument - see TPasCondContext.NameSpans. A dotted name gives its last
+// segment (nkMember: qualifier first, the member name last). Source order, as
+// CollectDefinedSpans.
 procedure CollectNameSpans(const ATree: TPasTree; ANode: Integer;
   var ASpans: TArray<TPasCondSpan>);
 var
@@ -1074,6 +1081,9 @@ begin
         LCallee := ATree.Nodes[ANode].FirstChild;
         if LCallee = NIL_NODE then
           Exit;
+        // The callee is a name too - `SizeOf` is System's, `Defined` and
+        // `Declared` the directive's own (Alex, 2026-10-09: no hint there).
+        CollectNameSpans(ATree, LCallee, ASpans);
         // Defined(X): X is a conditional symbol, DefinedSpans' row.
         if (ATree.Nodes[LCallee].Kind = nkIdent) and
            ATree.NodeTextEquals(LCallee, 'Defined') then
@@ -1111,6 +1121,20 @@ begin
   Result := EvalCondNode(LTree, LRoot, ACtx);
   if ABadExpr then
     Result := MkBool(False);
+end;
+
+procedure CollectCondSpans(const AExpr: string;
+  out ADefinedSpans, ANameSpans: TArray<TPasCondSpan>);
+var
+  LTree: TPasTree;
+  LRoot: Integer;
+  LDiags: TArray<TPasParseDiag>;
+begin
+  LTree := TPasParser.ParseExpressionText(AExpr, LRoot, LDiags);
+  ADefinedSpans := nil;
+  CollectDefinedSpans(LTree, LRoot, ADefinedSpans);
+  ANameSpans := nil;
+  CollectNameSpans(LTree, LRoot, ANameSpans);
 end;
 
 end.

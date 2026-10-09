@@ -753,8 +753,15 @@ const
     '{$IF Defined(NAVX) and (System.MaxInt > 0)}'#10 +     // 10 NAVX col 14, MaxInt col 32
     '{$IFEND}'#10 +                                        // 11
     'type TQ = System.Byte;'#10 +                          // 12 Byte col 18
-    'implementation'#10 +                                  // 13
-    'end.'#10;                                             // 14
+    '{$IF SizeOf(Pointer) = 4}'#10 +                       // 13 SizeOf col 6, Pointer col 13
+    '{$ELSEIF Defined(NAVY) and (LEVEL > 1)}'#10 +         // 14 Defined col 10, NAVY col 18, LEVEL col 29
+    '{$IFEND}'#10 +                                        // 15
+    '{$IFDEF NAVNONE}'#10 +                                // 16
+    '{$IF Defined(NAVZ) or (LEVEL > 0)}'#10 +              // 17 NAVZ col 14, LEVEL col 24 (dead)
+    '{$IFEND}'#10 +                                        // 18
+    '{$ENDIF}'#10 +                                        // 19
+    'implementation'#10 +                                  // 20
+    'end.'#10;                                             // 21
 
   // Line/col layout matters: the checks below address exact positions.
   UNIT_A =
@@ -2981,10 +2988,12 @@ begin
       var LIfnMid := GNav.ModelIdOf(TPath.Combine(LDir, 'NavIfn.pas'));
       var LIfStart, LIfLen, LIfMid, LIfSym: Integer;
       Ok('NavIfn model found', LIfnMid >= 0);
-      // LEVEL, CompilerVersion, MaxInt - not Defined's NAVX (a conditional
-      // symbol, DefineRefs'), not the callee, not the `System` qualifier.
-      Ok('IfNameRefs: three names recorded',
-        Length(GProj.Model(LIfnMid).Tree.Source.IfNameRefs) = 3);
+      // LEVEL, CompilerVersion, Defined + MaxInt, SizeOf + Pointer, the
+      // unevaluated $ELSEIF's Defined + LEVEL, the dead $IF's Defined + LEVEL
+      // - not Defined's NAVX (a conditional symbol, DefineRefs'), not the
+      // `System` qualifier.
+      Ok('IfNameRefs: ten names recorded',
+        Length(GProj.Model(LIfnMid).Tree.Source.IfNameRefs) = 10);
       Ok('IfNameAt: a unit constant resolves to its declaration',
         GNav.IfNameAt(LIfnMid, 4, 6, LRName, LIfStart, LIfLen, LIfMid, LIfSym)
         and (LRName = 'LEVEL') and (LIfLen = 5) and (LIfMid = LIfnMid) and
@@ -3000,6 +3009,28 @@ begin
       Ok('IfNameAt: the name of a qualified System.MaxInt',
         GNav.IfNameAt(LIfnMid, 10, 32, LRName, LIfStart, LIfLen, LIfMid, LIfSym)
         and (LRName = 'MaxInt'));
+      Ok('IfNameAt: the callee Defined is a name',
+        GNav.IfNameAt(LIfnMid, 10, 6, LRName, LIfStart, LIfLen, LIfMid, LIfSym)
+        and (LRName = 'Defined') and (LIfLen = 7));
+      Ok('IfNameAt: the callee SizeOf is the System seed',
+        GNav.IfNameAt(LIfnMid, 13, 6, LRName, LIfStart, LIfLen, LIfMid, LIfSym)
+        and (LRName = 'SizeOf') and (LIfSym <> NIL_SYM) and
+        (sfBuiltin in GProj.Model(LIfMid).Symbols[LIfSym].Flags));
+      Ok('IfNameAt: SizeOf''s argument Pointer',
+        GNav.IfNameAt(LIfnMid, 13, 13, LRName, LIfStart, LIfLen, LIfMid, LIfSym)
+        and (LRName = 'Pointer'));
+      // A $ELSEIF after a taken branch is never evaluated; its names are
+      // still recorded (Alex, 2026-10-09: no hint on MACOS there).
+      Ok('DefineAt: Defined(NAVY) of a $ELSEIF after a taken $IF',
+        GNav.DefineAt(LIfnMid, 14, 18, LRName, LRaw) and (LRName = 'NAVY'));
+      Ok('IfNameAt: LEVEL of a $ELSEIF after a taken $IF',
+        GNav.IfNameAt(LIfnMid, 14, 29, LRName, LIfStart, LIfLen, LIfMid, LIfSym)
+        and (LRName = 'LEVEL') and (LIfSym <> NIL_SYM));
+      Ok('DefineAt: Defined(NAVZ) of a $IF in a dead region',
+        GNav.DefineAt(LIfnMid, 17, 14, LRName, LRaw) and (LRName = 'NAVZ'));
+      Ok('IfNameAt: LEVEL of a $IF in a dead region',
+        GNav.IfNameAt(LIfnMid, 17, 24, LRName, LIfStart, LIfLen, LIfMid, LIfSym)
+        and (LRName = 'LEVEL'));
       Ok('IfNameAt: declines in code',
         not GNav.IfNameAt(LIfnMid, 3, 7, LRName, LIfStart, LIfLen, LIfMid,
           LIfSym));
