@@ -41,10 +41,22 @@ type
   // argument is kept as a (model, type-node) pair rather than a resolved
   // symbol because an argument may be any type expression - `TG<array[0..2]
   // of Byte>` - and the walk already knows how to size a node.
+  PPasSubst = ^TPasSubst;
+  // What a parameter is bound to: an actual's node, or - for TypeSizeOf /
+  // TypeInstanceSize over a generic declaration - no actual at all: one
+  // constrained to a class or an interface is a reference whatever it
+  // becomes, any other is laid out as 0 bytes aligned 1, the minimum.
+  TPasSubstKind = (pskNode, pskOpenRef, pskOpenMin);
   TPasSubstEntry = record
     Name: string;     // lower-case parameter name
     Mid: Integer;     // model the argument node lives in
     Node: Integer;    // the argument's type node
+    Kind: TPasSubstKind;
+    // The bindings Node itself is laid out under - a compound actual over
+    // the enclosing parameters (`TArray<TPair<K, V>>` inside TDictionary<K,
+    // V>). Points at the binding caller's own subst, alive for the whole
+    // depth-first walk below it; nil for an actual that names none.
+    Outer: PPasSubst;
   end;
   TPasSubst = TArray<TPasSubstEntry>;
 
@@ -228,6 +240,13 @@ type
     FSeedModel: TPasSemaModel;
     FSeedScope: Integer;
     FModels: TObjectList<TPasSemaModel>;
+    // Set by TypeSizeOf alone: the oracle's hops into another model
+    // rehydrate it (OracleReadable). Never during an analysis, which runs
+    // before anything is demoted and on many threads.
+    FOracleHydrate: Boolean;
+    // Set by the walk when it laid out a pskOpenMin parameter: the answer is
+    // a minimum. Only TypeSizeOf / TypeInstanceSize bind one, and read it.
+    FOracleMinimum: Boolean;
     FFiles: TList<string>;                 // parallel to FModels (full path)
     // Parallel to FModels: each model's pipeline status. Kept in lockstep by
     // RegisterModel (the only place a model is appended). The synchronous
@@ -760,6 +779,7 @@ type
       out AMid, ASym: Integer): Boolean;
     function OracleSizeOf(AMid, ASym, ADepth: Integer;
       out ABytes: Double): Boolean;
+    function OracleReadable(AMid: Integer): Boolean;
     function OracleLayout(AMid, ASym, ADepth: Integer; const ASubst: TPasSubst;
       out ABytes: Double; out AAlign: Integer): Boolean;
     function OracleFieldLayout(AMid, ATypeNode, ADepth: Integer;
@@ -788,6 +808,25 @@ type
       const ASubst: TPasSubst; out ABytes: Double;
       out AAlign: Integer): Boolean;
     function OracleObjectHasVmt(AMid, ADefNode, ADepth: Integer): Boolean;
+    function OracleDottedName(AMid, ANode: Integer): string;
+    function OracleBindGeneric(AMid, AArgsNode, ADepth: Integer;
+      AOuter: PPasSubst; out AGMid, AGSym: Integer;
+      out AInner: TPasSubst): Boolean;
+    function OracleOpenSubst(AMid, ASym, ADepth: Integer;
+      out ASubst: TPasSubst): Boolean;
+    function OracleEnumOrdinal(AMid, ASym, ADepth: Integer;
+      out ANum: Double): Boolean;
+    function OracleBound(AMid, ANode, ADepth: Integer;
+      out ANum: Double): Boolean;
+    function OracleNestedTypeDef(AMid, ARefNode: Integer;
+      const ANameLower: string): Integer;
+    function OracleGenericDecl(AMid: Integer; const AName: string;
+      out AGMid, AGSym: Integer): Boolean;
+    function OracleTypeDef(AMid, ARefNode, ADepth: Integer;
+      out ADefMid, ADefNode: Integer): Boolean;
+    function OracleClassLayout(AMid, ADefNode, ADepth: Integer;
+      const ASubst: TPasSubst; out ABytes: Double;
+      out AAlign: Integer; AChain: Integer = 0): Boolean;
     function OracleGenericLayout(AMid, AArgsNode, ADepth: Integer;
       const ASubst: TPasSubst; out ABytes: Double;
       out AAlign: Integer): Boolean;
@@ -1231,6 +1270,30 @@ type
       declarations. The hover path's entry: navigation hands out (Mid, Sym)
       pairs, and this is the step from one to its documentation. }
     function SymDocComment(AMid, ASym: Integer): string;
+    { SizeOf of a type symbol (skType or skBuiltinType) on the analyzed
+      platform, as dcc answers it - the `$IF` oracle's layout walk
+      (OracleLayout), so a hover and a `$IF SizeOf(T) = 8` cannot disagree.
+      False where that walk refuses: a shape it does not model, anything not
+      a type. A class or interface type is its reference (one pointer), as
+      SizeOf says. Demoted models the walk reaches are rehydrated first
+      (OracleReadable). Single-consumer like SymDocComment: the host's nav
+      thread, on a finished project.
+      A generic declaration is measured with its parameters open
+      (OracleOpenSubst): AMinimum says the answer is the least any
+      instantiation takes, because a parameter of unknown size is in it. The
+      overload without AMinimum answers exact sizes only. }
+    function TypeSizeOf(AMid, ASym: Integer; out ABytes: Int64): Boolean;
+      overload;
+    function TypeSizeOf(AMid, ASym: Integer; out ABytes: Int64;
+      out AMinimum: Boolean): Boolean; overload;
+    { TObject.InstanceSize of a class type on the analyzed platform, by the
+      rules OracleClassLayout records (dcc-probed). False for anything not a
+      class, and where the walk refuses - a field whose type it cannot lay
+      out. Generic classes and generic ancestors as TypeSizeOf: AMinimum. }
+    function TypeInstanceSize(AMid, ASym: Integer; out ABytes: Int64): Boolean;
+      overload;
+    function TypeInstanceSize(AMid, ASym: Integer; out ABytes: Int64;
+      out AMinimum: Boolean): Boolean; overload;
     { 20.3.1 - is AX one of the compiler-MANAGED types (automatic init/
       finalize/copy: long strings, dynamic arrays, interfaces, Variant,
       `reference to` procedural types, and records that either declare a
@@ -2563,7 +2626,8 @@ begin
   // Then the uses closure and the implicit System unit, the same route every
   // other cross-unit fallback takes (System.Rtti's SizeOf(TMethod) reaches
   // System.pas through here).
-  Result := ResolveRealDecl(AId, ANameLower, AMid, ASym);
+  Result := ResolveRealDecl(AId, ANameLower, AMid, ASym) and
+    OracleReadable(AMid);
 end;
 
 // The recursive const-evaluation context: resolves further plain names in
@@ -2582,11 +2646,30 @@ begin
   if ADepth > 8 then
     Exit;
   LM := FModels[AMid];
+  // An enum value is its ordinal - a subrange bound names one: VCL's
+  // `TBorderStyle = bsNone..bsSingle`.
+  if LM.Symbols[ASym].Kind = skEnumValue then
+  begin
+    Result := OracleEnumOrdinal(AMid, ASym, ADepth, AValue.Num);
+    Exit;
+  end;
   if LM.Symbols[ASym].Kind <> skConst then
     Exit;
   LDecl := LM.Symbols[ASym].DeclNode;
   if LDecl = NIL_NODE then
-    Exit;   // seeded consts (True/False/MaxInt) never reach here
+  begin
+    // The seeded MaxInt/MaxLongint have no declaration to fold - System.pas
+    // declares neither - yet a type bound names them: System.Classes'
+    // `THelpContext = -MaxInt..MaxInt` refused every TControl's layout.
+    // Both are High(Integer) on every platform.
+    if (LM.Symbols[ASym].NameLower = 'maxint') or
+       (LM.Symbols[ASym].NameLower = 'maxlongint') then
+    begin
+      AValue.Num := 2147483647;
+      Result := True;
+    end;
+    Exit;   // True/False never reach here
+  end;
   LParent := LM.Tree.Nodes[LDecl].Parent;
   if (LParent = NIL_NODE) or (LM.Tree.Nodes[LParent].Kind <> nkConstDecl) then
     Exit;
@@ -2683,10 +2766,114 @@ begin
     if ASym <> NIL_SYM then
     begin
       AMid := LUid;
+      Exit(OracleReadable(LUid));
+    end;
+  end;
+  // `System.X`: System is in no unit's `uses` - Winapi.Windows' `THandle =
+  // System.THandle` refused every field typed THandle.
+  if LUnit = 'system' then
+  begin
+    LUid := EnsureSystemUnit;
+    if (LUid >= 0) and (FModels[LUid].InterfaceScope <> NIL_SCOPE) then
+    begin
+      ASym := FModels[LUid].Resolve(FModels[LUid].InterfaceScope, LMember);
+      if ASym <> NIL_SYM then
+      begin
+        AMid := LUid;
+        Exit(OracleReadable(LUid));
+      end;
+    end;
+  end;
+  // `TAlignment.taLeftJustify`: an enum value qualified by its type - VCL's
+  // `TLeftRight = TAlignment.taLeftJustify..TAlignment.taRightJustify`; and
+  // a type or constant declared inside a type - System.Generics.Collections'
+  // `FNotify: TListHelper.TInternalNotifyProc`, which refused TList<T>.
+  var LTMid, LTSym: Integer;
+  if OracleQualified(AId, Copy(AName, 1, LDot), LTMid, LTSym) and
+     (FModels[LTMid].Symbols[LTSym].Kind = skType) and
+     (FModels[LTMid].Symbols[LTSym].MemberScope <> NIL_SCOPE) then
+  begin
+    ASym := FModels[LTMid].Resolve(FModels[LTMid].Symbols[LTSym].MemberScope,
+      LMember);
+    if (ASym <> NIL_SYM) and
+       ((FModels[LTMid].Symbols[ASym].Kind = skEnumValue) or
+        ((FModels[LTMid].Symbols[ASym].Kind in [skType, skConst]) and
+         (FModels[LTMid].Symbols[ASym].Scope =
+          FModels[LTMid].Symbols[LTSym].MemberScope))) then
+    begin
+      AMid := LTMid;
       Exit(True);
     end;
   end;
+  ASym := NIL_SYM;
   Result := False;
+end;
+
+{ The GENERIC type AName names from AMid - arity is part of a type's
+  identity, and OracleQualified answers the first namesake: `TList<T>` in a
+  unit that also sees System.Classes' TList found the non-generic one and
+  refused every field typed `TList<X>`. The asking unit's own scopes, then
+  its imports last-first, then System; a dotted name is left to
+  OracleQualified (the caller checks what it got). }
+function TPasSemaProject.OracleGenericDecl(AMid: Integer;
+  const AName: string; out AGMid, AGSym: Integer): Boolean;
+
+  function IsGenericType(AUid, ASym: Integer): Boolean;
+  begin
+    Result := (ASym <> NIL_SYM) and
+      (FModels[AUid].Symbols[ASym].Kind = skType) and
+      (sfGeneric in FModels[AUid].Symbols[ASym].Flags);
+  end;
+
+var
+  LM: TPasSemaModel;
+  LIdx, LUid, LScope: Integer;
+  LKey: string;
+begin
+  Result := False;
+  AGMid := NIL_SYM;
+  AGSym := NIL_SYM;
+  if Pos('.', AName) > 0 then
+    Exit(OracleQualified(AMid, AName, AGMid, AGSym));
+  LKey := LowerCase(AName);
+  LM := FModels[AMid];
+  // The unit's own declarations: the implementation scope's parent chain
+  // covers the interface, as in OracleResolve.
+  LScope := NIL_SCOPE;
+  for LIdx := 0 to LM.Scopes.Count - 1 do
+    if LM.Scopes[LIdx].Kind = sckImplementation then
+    begin
+      LScope := LIdx;
+      Break;
+    end;
+  if LScope = NIL_SCOPE then
+    LScope := LM.InterfaceScope;
+  if LScope <> NIL_SCOPE then
+  begin
+    AGSym := LM.ResolveByArityAt(LScope, LKey, -1, True);
+    if IsGenericType(AMid, AGSym) then
+    begin
+      AGMid := AMid;
+      Exit(True);
+    end;
+  end;
+  for LIdx := High(LM.UsesList) downto -1 do
+  begin
+    if LIdx >= 0 then
+      LUid := LM.UsesList[LIdx].UnitId
+    else
+      LUid := EnsureSystemUnit;
+    if (LUid < 0) or (FModels[LUid].InterfaceScope = NIL_SCOPE) then
+      Continue;
+    AGSym := FModels[LUid].FindByArityDeep(FModels[LUid].InterfaceScope, LKey,
+      True);
+    if IsGenericType(LUid, AGSym) then
+    begin
+      AGMid := LUid;
+      Exit(OracleReadable(LUid));
+    end;
+  end;
+  AGSym := NIL_SYM;
 end;
 
 function TPasSemaProject.OracleSizeOf(AMid, ASym, ADepth: Integer;
@@ -2695,6 +2882,506 @@ var
   LAlign: Integer;
 begin
   Result := OracleLayout(AMid, ASym, ADepth, nil, ABytes, LAlign);
+end;
+
+{ Whether the oracle may read AMid's text (NodeText, AlignAt). Always during
+  an analysis; under TypeSizeOf a demoted model is rehydrated first - the
+  layout walk hops into library units, which the host demotes after every
+  build. The flag is off while EnsureHydrated re-preprocesses: its own
+  oracle questions must not hydrate further models from inside it. }
+function TPasSemaProject.OracleReadable(AMid: Integer): Boolean;
+begin
+  Result := True;
+  if not FOracleHydrate or not FModels[AMid].Demoted then
+    Exit;
+  FOracleHydrate := False;
+  try
+    Result := EnsureHydrated(AMid);
+  finally
+    FOracleHydrate := True;
+  end;
+end;
+
+function TPasSemaProject.TypeSizeOf(AMid, ASym: Integer;
+  out ABytes: Int64): Boolean;
+var
+  LMinimum: Boolean;
+begin
+  Result := TypeSizeOf(AMid, ASym, ABytes, LMinimum) and not LMinimum;
+end;
+
+function TPasSemaProject.TypeSizeOf(AMid, ASym: Integer; out ABytes: Int64;
+  out AMinimum: Boolean): Boolean;
+var
+  LBytes: Double;
+  LAlign: Integer;
+  LSubst: TPasSubst;
+begin
+  Result := False;
+  ABytes := 0;
+  AMinimum := False;
+  if (AMid < 0) or (AMid >= FModels.Count) or (FModels[AMid] = nil) or
+     (ASym < 0) or (ASym >= FModels[AMid].SymCount) or
+     not (FModels[AMid].Symbols[ASym].Kind in [skType, skBuiltinType]) then
+    Exit;
+  FOracleHydrate := True;
+  FOracleMinimum := False;
+  try
+    if not OracleReadable(AMid) or
+       not OracleOpenSubst(AMid, ASym, 0, LSubst) or
+       not OracleLayout(AMid, ASym, 0, LSubst, LBytes, LAlign) then
+      Exit;
+    AMinimum := FOracleMinimum;
+  finally
+    FOracleHydrate := False;
+    FOracleMinimum := False;
+  end;
+  ABytes := Trunc(LBytes);
+  Result := True;
+end;
+
+function TPasSemaProject.TypeInstanceSize(AMid, ASym: Integer;
+  out ABytes: Int64): Boolean;
+var
+  LMinimum: Boolean;
+begin
+  Result := TypeInstanceSize(AMid, ASym, ABytes, LMinimum) and not LMinimum;
+end;
+
+function TPasSemaProject.TypeInstanceSize(AMid, ASym: Integer;
+  out ABytes: Int64; out AMinimum: Boolean): Boolean;
+var
+  LBytes: Double;
+  LAlign, LDef: Integer;
+  LSubst: TPasSubst;
+begin
+  Result := False;
+  ABytes := 0;
+  AMinimum := False;
+  if (AMid < 0) or (AMid >= FModels.Count) or (FModels[AMid] = nil) or
+     (ASym < 0) or (ASym >= FModels[AMid].SymCount) or
+     (FModels[AMid].Symbols[ASym].Kind <> skType) then
+    Exit;
+  FOracleHydrate := True;
+  FOracleMinimum := False;
+  try
+    if not OracleReadable(AMid) or
+       not OracleOpenSubst(AMid, ASym, 0, LSubst) then
+      Exit;
+    LDef := TypeDefNodeOf(AMid, ASym);
+    if (LDef = NIL_NODE) or
+       (FModels[AMid].Tree.Nodes[LDef].Kind <> nkClassType) or
+       (FModels[AMid].Tree.Nodes[LDef].Aux = 1) or
+       not OracleClassLayout(AMid, LDef, 0, LSubst, LBytes, LAlign) then
+      Exit;
+    AMinimum := FOracleMinimum;
+  finally
+    FOracleHydrate := False;
+    FOracleMinimum := False;
+  end;
+  ABytes := Trunc(LBytes);
+  Result := True;
+end;
+
+{ The bindings a generic declaration is measured under when nothing
+  instantiates it: each parameter OPEN - pskOpenRef when a constraint makes
+  it a reference whatever it becomes (`class`, `constructor` - only a class
+  meets it - or a named class or interface, the only types a constraint can
+  name), pskOpenMin otherwise (none, or `record`), which lays it out as 0
+  bytes aligned 1: the layout only grows with a field, so the result is the
+  least any instantiation takes - exactly what an empty record gives
+  (`TGn<TER>`, dcc-measured). Empty for a type that is not generic; False
+  only for a generic whose parameter list does not read. }
+function TPasSemaProject.OracleOpenSubst(AMid, ASym, ADepth: Integer;
+  out ASubst: TPasSubst): Boolean;
+var
+  LM: TPasSemaModel;
+  LDecl, LParams, LP, LName, LCon: Integer;
+  LKind: TPasSubstKind;
+  LEntry: TPasSubstEntry;
+begin
+  Result := True;
+  ASubst := nil;
+  LM := FModels[AMid];
+  if not (sfGeneric in LM.Symbols[ASym].Flags) then
+    Exit;
+  Result := False;
+  LDecl := LM.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LDecl := LM.Tree.Nodes[LDecl].Parent;
+  if LDecl = NIL_NODE then
+    Exit;
+  LParams := LM.Tree.Nodes[LDecl].FirstChild;
+  while (LParams <> NIL_NODE) and
+        (LM.Tree.Nodes[LParams].Kind <> nkGenericParams) do
+    LParams := LM.Tree.Nodes[LParams].NextSibling;
+  if LParams = NIL_NODE then
+    Exit;
+  LP := LM.Tree.Nodes[LParams].FirstChild;
+  while LP <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LP].Kind = nkGenericParam then
+    begin
+      // The group's constraints decide for every name in it.
+      LKind := pskOpenMin;
+      LCon := LM.Tree.Nodes[LP].FirstChild;
+      while LCon <> NIL_NODE do
+      begin
+        if LM.Tree.Nodes[LCon].Kind = nkConstraint then
+          if LM.Tree.Nodes[LCon].FirstChild <> NIL_NODE then
+            LKind := pskOpenRef   // a named class or interface
+          else if LM.Tree.NodeTextEquals(LCon, 'class') or
+                  LM.Tree.NodeTextEquals(LCon, 'constructor') then
+            LKind := pskOpenRef;
+        LCon := LM.Tree.Nodes[LCon].NextSibling;
+      end;
+      LName := LM.Tree.Nodes[LP].FirstChild;
+      while (LName <> NIL_NODE) and (LM.Tree.Nodes[LName].Kind = nkIdent) do
+      begin
+        LEntry := Default(TPasSubstEntry);
+        LEntry.Name := LM.Tree.NodeNameLower(LName);
+        LEntry.Mid := AMid;
+        LEntry.Node := LName;
+        LEntry.Kind := LKind;
+        ASubst := ASubst + [LEntry];
+        LName := LM.Tree.Nodes[LName].NextSibling;
+      end;
+    end;
+    LP := LM.Tree.Nodes[LP].NextSibling;
+  end;
+  Result := ASubst <> nil;
+end;
+
+{ A type declared INSIDE a class, record or object enclosing ARefNode - its
+  definition node, NIL_NODE when there is none. dcc looks there before the
+  unit's scopes, and the oracle's unit-level lookups never see it:
+  TStringList's `FOverridden: TOverridden`, a type of its own private
+  section, refused TStringList and everything holding one. Read off the tree
+  (a nested generic is left alone), so a demoted model needs no scope. }
+function TPasSemaProject.OracleNestedTypeDef(AMid, ARefNode: Integer;
+  const ANameLower: string): Integer;
+var
+  LM: TPasSemaModel;
+  LOwner, LSec, LDecl, LName: Integer;
+begin
+  Result := NIL_NODE;
+  LM := FModels[AMid];
+  LOwner := LM.Tree.Nodes[ARefNode].Parent;
+  while LOwner <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LOwner].Kind in [nkClassType, nkRecordType,
+       nkObjectType] then
+    begin
+      LSec := LM.Tree.Nodes[LOwner].FirstChild;
+      while LSec <> NIL_NODE do
+      begin
+        if LM.Tree.Nodes[LSec].Kind = nkTypeSec then
+        begin
+          LDecl := LM.Tree.Nodes[LSec].FirstChild;
+          while LDecl <> NIL_NODE do
+          begin
+            LName := LM.Tree.Nodes[LDecl].FirstChild;
+            if (LM.Tree.Nodes[LDecl].Kind = nkTypeDecl) and
+               (LName <> NIL_NODE) and
+               (LM.Tree.Nodes[LName].Kind = nkIdent) and
+               (LM.Tree.NodeNameLower(LName) = ANameLower) then
+            begin
+              Result := LM.Tree.Nodes[LName].NextSibling;
+              if (Result <> NIL_NODE) and
+                 (LM.Tree.Nodes[Result].Kind = nkGenericParams) then
+                Result := NIL_NODE;
+              Exit;
+            end;
+            LDecl := LM.Tree.Nodes[LDecl].NextSibling;
+          end;
+        end;
+        LSec := LM.Tree.Nodes[LSec].NextSibling;
+      end;
+    end;
+    LOwner := LM.Tree.Nodes[LOwner].Parent;
+  end;
+end;
+
+{ A type reference's name as written - `TFoo`, `Winapi.Windows.DWORD` - or ''
+  for anything else. A dotted name is LEFT-nested, one nkMember per dot
+  (`(System.Types).TDuplicates`), so a name of three segments or more has an
+  nkMember inside; walking the children flat refused System.Classes'
+  `TDuplicates = System.Types.TDuplicates` and every record holding one. }
+function TPasSemaProject.OracleDottedName(AMid, ANode: Integer): string;
+var
+  LM: TPasSemaModel;
+  LLeft, LRight: Integer;
+begin
+  Result := '';
+  LM := FModels[AMid];
+  case LM.Tree.Nodes[ANode].Kind of
+    nkIdent:
+      Result := LM.Tree.NodeText(ANode);
+    nkMember:
+      begin
+        LLeft := LM.Tree.Nodes[ANode].FirstChild;
+        if LLeft = NIL_NODE then
+          Exit;
+        LRight := LM.Tree.Nodes[LLeft].NextSibling;
+        if (LRight = NIL_NODE) or (LM.Tree.Nodes[LRight].Kind <> nkIdent) or
+           (LM.Tree.Nodes[LRight].NextSibling <> NIL_NODE) then
+          Exit;
+        Result := OracleDottedName(AMid, LLeft);
+        if Result <> '' then
+          Result := Result + '.' + LM.Tree.NodeText(LRight);
+      end;
+  end;
+end;
+
+{ The definition a heritage entry or an alias names: ARefNode (an nkIdent or
+  a dotted nkMember) resolved from AMid, then through `TA = TB` aliases to
+  the type-expression node that defines it. A generic (nkTypeArgs) or a
+  forward-only declaration refuses. }
+function TPasSemaProject.OracleTypeDef(AMid, ARefNode, ADepth: Integer;
+  out ADefMid, ADefNode: Integer): Boolean;
+var
+  LName: string;
+  LRMid, LRSym: Integer;
+begin
+  Result := False;
+  ADefMid := NIL_SYM;
+  ADefNode := NIL_NODE;
+  if ADepth > 16 then
+    Exit;
+  LName := OracleDottedName(AMid, ARefNode);
+  if (LName = '') or not OracleQualified(AMid, LName, LRMid, LRSym) then
+    Exit;
+  ADefNode := TypeDefNodeOf(LRMid, LRSym);
+  if ADefNode = NIL_NODE then
+    Exit;
+  if FModels[LRMid].Tree.Nodes[ADefNode].Kind in [nkIdent, nkMember] then
+    Exit(OracleTypeDef(LRMid, ADefNode, ADepth + 1, ADefMid, ADefNode));
+  // `TFoo = class;` alone: the body is elsewhere and not what this names.
+  if (FModels[LRMid].Tree.Nodes[ADefNode].Kind = nkClassType) and
+     (FModels[LRMid].Tree.Nodes[ADefNode].Aux = 1) then
+    Exit;
+  ADefMid := LRMid;
+  Result := True;
+end;
+
+{ A class's instance layout - TObject.InstanceSize - every rule measured by
+  compiling classes for Win32 and Win64 and printing InstanceSize and field
+  offsets (dcc 37.0, 2026-10-09; P is the pointer size):
+
+    TObject is 2P: the VMT pointer, then the monitor slot, which is ALWAYS
+    the instance's last pointer (System's hfFieldSize: InstanceSize - P).
+    Own fields start where the ancestor's monitor was - at its InstanceSize
+    - P (a class with no ancestor: at P) - and are placed as a record's are
+    (`$A`, `packed`, class vars and methods take nothing), the alignment
+    carried on from the ancestor and never below P. Their end is rounded up
+    to that alignment: `class(TI64) C: Byte` after an Int64 is 28 on Win32,
+    not 24.
+    Then one P per interface slot the class itself introduces, then the new
+    monitor slot. A listed interface that is an ancestor of another listed
+    one shares its slot (`IFoo, IBar` with IBar = interface(IFoo) is one;
+    IInterface is every interface's ancestor), whatever the order and the
+    methods; one the ancestor class already implements, listed again, gets
+    a new slot (`class(TIntf2, IFoo)` grows by P). An interface the class
+    remaps a method of (`function IFoo.M = X;`) has a slot of its own and
+    shares it with no ancestor: TComponent's `IInterface,
+    IInterfaceComponentReference` is two slots, 68 bytes on Win32.
+
+  A generic ancestor or interface, or a field the record walk refuses,
+  refuses the whole class. }
+function TPasSemaProject.OracleClassLayout(AMid, ADefNode, ADepth: Integer;
+  const ASubst: TPasSubst; out ABytes: Double; out AAlign: Integer;
+  AChain: Integer): Boolean;
+type
+  TDefRef = record
+    Mid, Node: Integer;
+  end;
+var
+  LM: TPasSemaModel;
+  LChild, LIdx, LJdx, LP, LStart, LStartAlign, LSlots, LAncAlign: Integer;
+  LDefMid, LDefNode, LGSym: Integer;
+  LAncBytes, LFields: Double;
+  LIntfs: TArray<TDefRef>;
+  LResolved: TArray<Boolean>;
+  LIInterface: TDefRef;
+  LFirst: Boolean;
+  LAncSubst: TPasSubst;
+
+  // A heritage entry's definition: a plain or dotted name, or a generic
+  // instantiation - whose identity, for the slot rules, is its generic
+  // declaration (two instantiations of one generic listed together refuse
+  // below rather than guess whether they are one interface).
+  function HeritageDef(AFromMid, ANode: Integer; out ADMid,
+    ADNode: Integer): Boolean;
+  var
+    LBase: Integer;
+  begin
+    if FModels[AFromMid].Tree.Nodes[ANode].Kind <> nkTypeArgs then
+      Exit(OracleTypeDef(AFromMid, ANode, ADepth + 1, ADMid, ADNode));
+    Result := False;
+    LBase := FModels[AFromMid].Tree.Nodes[ANode].FirstChild;
+    if (LBase = NIL_NODE) or
+       (FModels[AFromMid].Tree.Nodes[LBase].Kind <> nkIdent) or
+       not OracleGenericDecl(AFromMid, FModels[AFromMid].Tree.NodeText(LBase),
+         ADMid, LGSym) then
+      Exit;
+    ADNode := TypeDefNodeOf(ADMid, LGSym);
+    Result := ADNode <> NIL_NODE;
+  end;
+
+  // AInner's ancestry - its heritage, then IInterface for one with none -
+  // reaches AOuter.
+  function InterfaceDescends(AInner, AOuter: TDefRef): Boolean;
+  var
+    LStep, LBase, LBMid, LBNode: Integer;
+  begin
+    Result := False;
+    for LStep := 0 to 32 do
+    begin
+      // The heritage, when there is one, is the first child (before a GUID).
+      LBase := FModels[AInner.Mid].Tree.Nodes[AInner.Node].FirstChild;
+      if (LBase <> NIL_NODE) and not (FModels[AInner.Mid].Tree.Nodes[LBase]
+        .Kind in [nkIdent, nkMember, nkTypeArgs]) then
+        LBase := NIL_NODE;
+      if LBase = NIL_NODE then
+      begin
+        // No heritage: IInterface's own declaration ends the chain, any
+        // other descends from it.
+        if (AInner.Mid = LIInterface.Mid) and
+           (AInner.Node = LIInterface.Node) then
+          Exit;
+        AInner := LIInterface;
+      end
+      else
+      begin
+        if not HeritageDef(AInner.Mid, LBase, LBMid, LBNode) then
+          Exit;
+        AInner.Mid := LBMid;
+        AInner.Node := LBNode;
+      end;
+      if (AInner.Mid = AOuter.Mid) and (AInner.Node = AOuter.Node) then
+        Exit(True);
+    end;
+  end;
+
+var
+  LRMid, LRSym: Integer;
+begin
+  Result := False;
+  ABytes := 0;
+  AAlign := 1;
+  // The ancestor chain counts on its own (AChain): every level of it lays out
+  // its fields at the depth the class was asked at. Charged to ADepth, a
+  // form - TForm is eight levels above TObject - ran out of depth at
+  // TComponent's fields and no form had an InstanceSize.
+  if (ADepth > 16) or (AChain > 64) then
+    Exit;
+  LM := FModels[AMid];
+  LP := FInfo.PointerBytes;
+  LStart := LP;
+  LStartAlign := LP;
+  LIntfs := nil;
+  LFirst := True;
+  LChild := LM.Tree.Nodes[ADefNode].FirstChild;
+  while (LChild <> NIL_NODE) and
+        (LM.Tree.Nodes[LChild].Kind in [nkIdent, nkMember, nkTypeArgs]) do
+  begin
+    if not HeritageDef(AMid, LChild, LDefMid, LDefNode) then
+      Exit;
+    case FModels[LDefMid].Tree.Nodes[LDefNode].Kind of
+      nkClassType:
+        begin
+          if not LFirst then
+            Exit;
+          // A generic ancestor (`class(TList<T>)`) is laid out with its
+          // parameters bound to the actuals here, under this class's own
+          // bindings.
+          LAncSubst := nil;
+          if (LM.Tree.Nodes[LChild].Kind = nkTypeArgs) and
+             not OracleBindGeneric(AMid, LChild, ADepth + 1, @ASubst, LDefMid,
+               LGSym, LAncSubst) then
+            Exit;
+          if not OracleClassLayout(LDefMid, LDefNode, ADepth, LAncSubst,
+               LAncBytes, LAncAlign, AChain + 1) then
+            Exit;
+          LStart := Trunc(LAncBytes) - LP;
+          LStartAlign := Max(LAncAlign, LP);
+        end;
+      nkInterfaceType:
+        begin
+          for LIdx := 0 to High(LIntfs) do
+            if (LIntfs[LIdx].Mid = LDefMid) and (LIntfs[LIdx].Node = LDefNode) then
+              Exit;
+          SetLength(LIntfs, Length(LIntfs) + 1);
+          LIntfs[High(LIntfs)].Mid := LDefMid;
+          LIntfs[High(LIntfs)].Node := LDefNode;
+        end;
+    else
+      Exit;
+    end;
+    LFirst := False;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+  if not OracleRecordLayout(AMid, ADefNode, ADepth, ASubst, LStart,
+       LStartAlign, LFields, AAlign) then
+    Exit;
+  AAlign := Max(AAlign, LP);
+  // An interface this class remaps a method of (`function IFoo.M = X;`)
+  // keeps a slot of its own, and no ancestor shares it.
+  SetLength(LResolved, Length(LIntfs));
+  LChild := LM.Tree.Nodes[ADefNode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LChild].Kind = nkMethodResolution then
+    begin
+      // Children: the dotted name's segments (nfName), each perhaps followed
+      // by its type arguments (`function IEnumerable<T>.GetEnumerator =`),
+      // then the target.
+      LIdx := LM.Tree.Nodes[LChild].FirstChild;
+      if (LIdx = NIL_NODE) or (LM.Tree.Nodes[LIdx].Kind <> nkIdent) then
+        Exit;
+      LJdx := LM.Tree.Nodes[LIdx].NextSibling;
+      if (LJdx <> NIL_NODE) and
+         (LM.Tree.Nodes[LJdx].Kind = nkGenericParams) then
+      begin
+        if not OracleGenericDecl(AMid, LM.Tree.NodeText(LIdx), LDefMid,
+             LGSym) then
+          Exit;
+        LDefNode := TypeDefNodeOf(LDefMid, LGSym);
+      end
+      else if not OracleTypeDef(AMid, LIdx, ADepth + 1, LDefMid, LDefNode) then
+        Exit;
+      for LJdx := 0 to High(LIntfs) do
+        if (LIntfs[LJdx].Mid = LDefMid) and (LIntfs[LJdx].Node = LDefNode) then
+          LResolved[LJdx] := True;
+    end;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+  // The slots: a listed interface that another listed one, not remapped,
+  // descends from shares that one's slot.
+  LSlots := Length(LIntfs);
+  if LSlots > 1 then
+  begin
+    LIInterface.Mid := NIL_SYM;
+    LIInterface.Node := NIL_NODE;
+    if OracleResolve(AMid, 'iinterface', LRMid, LRSym) then
+    begin
+      LIInterface.Mid := LRMid;
+      LIInterface.Node := TypeDefNodeOf(LRMid, LRSym);
+    end;
+    if LIInterface.Node = NIL_NODE then
+      Exit;
+    for LIdx := 0 to High(LIntfs) do
+      for LJdx := 0 to High(LIntfs) do
+        if (LIdx <> LJdx) and not LResolved[LIdx] and not LResolved[LJdx] and
+           InterfaceDescends(LIntfs[LJdx], LIntfs[LIdx]) then
+        begin
+          Dec(LSlots);
+          Break;
+        end;
+  end;
+  ABytes := LFields + (LSlots + 1) * LP;
+  Result := True;
 end;
 
 { The size AND alignment of a named type. Alignment has to travel with size
@@ -2771,14 +3458,20 @@ var
     LOneSize: Double;
   begin
     // Children: name idents then ONE type node (records carry no
-    // initializers/absolute).
+    // initializers/absolute), then any hint directives - `FHandle: THandle
+    // platform;` (System.Classes' THandleStream) ends in an nkDirective.
+    // An attribute group may sit among the names - `[unsafe] FListObj:
+    // TObject` (TList<T>) - and is no field: counted as one it placed
+    // FListObj twice, 8 bytes over dcc.
     LCount := 0;
     LSub := LM.Tree.Nodes[ADecl].FirstChild;
     if LSub = NIL_NODE then
       Exit(False);
-    while LM.Tree.Nodes[LSub].NextSibling <> NIL_NODE do
+    while (LM.Tree.Nodes[LSub].NextSibling <> NIL_NODE) and
+          (LM.Tree.Nodes[LM.Tree.Nodes[LSub].NextSibling].Kind <> nkDirective) do
     begin
-      Inc(LCount);
+      if LM.Tree.Nodes[LSub].Kind <> nkAttrGroup then
+        Inc(LCount);
       LSub := LM.Tree.Nodes[LSub].NextSibling;
     end;
     if (LCount = 0) or
@@ -2857,7 +3550,10 @@ begin
           if not PlaceFieldsOf(LChild) then
             Exit;
       nkVisibility, nkRoutine, nkPropertyDecl, nkAttrGroup,
-      nkConstSec, nkTypeSec:
+      nkConstSec, nkTypeSec,
+      // A class's `function IFoo.Bar = Baz;` (TComponent's
+      // IInterfaceComponentReference.GetComponent).
+      nkMethodResolution:
         ;   // no instance storage
     else
       Exit;   // anything we do not recognise stays a refusal
@@ -3086,6 +3782,88 @@ begin
     ACount := 0;
 end;
 
+{ The ordinal of an enum value symbol: its position among its type's values,
+  an explicit value honoured and an implicit one continuing from the last -
+  the walk OracleEnumRange does, stopped at the value asked about. }
+function TPasSemaProject.OracleEnumOrdinal(AMid, ASym, ADepth: Integer;
+  out ANum: Double): Boolean;
+var
+  LM: TPasSemaModel;
+  LDecl, LOwn, LEnum, LChild, LName, LValue: Integer;
+  LNext: Double;
+begin
+  Result := False;
+  ANum := 0;
+  if ADepth > 8 then
+    Exit;
+  LM := FModels[AMid];
+  LDecl := LM.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LOwn := LM.Tree.Nodes[LDecl].Parent;
+  if (LOwn = NIL_NODE) or (LM.Tree.Nodes[LOwn].Kind <> nkEnumValue) then
+    Exit;
+  LEnum := LM.Tree.Nodes[LOwn].Parent;
+  if (LEnum = NIL_NODE) or (LM.Tree.Nodes[LEnum].Kind <> nkEnumType) then
+    Exit;
+  LNext := 0;
+  LChild := LM.Tree.Nodes[LEnum].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LChild].Kind <> nkEnumValue then
+      Exit;
+    LName := LM.Tree.Nodes[LChild].FirstChild;
+    if LName = NIL_NODE then
+      Exit;
+    LValue := LM.Tree.Nodes[LName].NextSibling;
+    if LValue <> NIL_NODE then
+      if not OracleConstExpr(AMid, LValue, ADepth + 1, LNext) then
+        Exit;
+    if LChild = LOwn then
+    begin
+      ANum := LNext;
+      Exit(True);
+    end;
+    LNext := LNext + 1;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+{ A subrange bound (OracleFieldLayout's nkSubrange): a constant expression,
+  or `Low(T)` / `High(T)` of an ordinal type - System.UITypes'
+  `TModalResult = Low(Integer)..High(Integer)`, which the `$IF` evaluator
+  does not fold, refused every form's layout. }
+function TPasSemaProject.OracleBound(AMid, ANode, ADepth: Integer;
+  out ANum: Double): Boolean;
+var
+  LM: TPasSemaModel;
+  LCallee, LArg: Integer;
+  LLo, LHi: Double;
+begin
+  Result := OracleConstExpr(AMid, ANode, ADepth, ANum);
+  if Result then
+    Exit;
+  LM := FModels[AMid];
+  if LM.Tree.Nodes[ANode].Kind <> nkCall then
+    Exit;
+  LCallee := LM.Tree.Nodes[ANode].FirstChild;
+  if (LCallee = NIL_NODE) or (LM.Tree.Nodes[LCallee].Kind <> nkIdent) then
+    Exit;
+  LArg := LM.Tree.Nodes[LCallee].NextSibling;
+  if (LArg = NIL_NODE) or (LM.Tree.Nodes[LArg].NextSibling <> NIL_NODE) or
+     (LM.Tree.Nodes[LArg].Kind <> nkIdent) then
+    Exit;
+  if not OracleOrdinalRange(AMid, LArg, ADepth + 1, LLo, LHi) then
+    Exit;
+  if LM.Tree.NodeTextEquals(LCallee, 'Low') then
+    ANum := LLo
+  else if LM.Tree.NodeTextEquals(LCallee, 'High') then
+    ANum := LHi
+  else
+    Exit;
+  Result := True;
+end;
+
 { The ordinal values an enum spans. Explicit values are honoured, and so is
   the rule that an implicit one continues from the last explicit: `(g1,
   g2 = 300)` is 0..300, not 0..1. A negative value is not something dcc
@@ -3195,8 +3973,8 @@ begin
           Exit(False);
         LHi := LM.Tree.Nodes[LLo].NextSibling;
         Result := (LHi <> NIL_NODE) and
-          OracleConstExpr(AMid, LLo, ADepth, ALo) and
-          OracleConstExpr(AMid, LHi, ADepth, AHi);
+          OracleBound(AMid, LLo, ADepth, ALo) and
+          OracleBound(AMid, LHi, ADepth, AHi);
         Exit;
       end;
     nkEnumType:
@@ -3223,10 +4001,45 @@ begin
     AHi := 1;
     Exit(True);
   end;
-  // A named enum or subrange type.
-  if not OracleResolve(AMid, LM.Tree.NodeNameLower(ANode), LMid2, LSym) then
-    Exit(False);
-  LDef := TypeDefNodeOf(LMid2, LSym);
+  // The signed and 32-bit integers, for `Low(Integer)..High(Integer)`
+  // (OracleBound); as a set base or an index they are out of range anyway.
+  if SameText(LName, 'ShortInt') then
+  begin
+    ALo := -128;
+    AHi := 127;
+    Exit(True);
+  end;
+  if SameText(LName, 'SmallInt') then
+  begin
+    ALo := -32768;
+    AHi := 32767;
+    Exit(True);
+  end;
+  if SameText(LName, 'Integer') or SameText(LName, 'LongInt') or
+     SameText(LName, 'Int32') or
+     (SameText(LName, 'NativeInt') and (FInfo.PointerBytes = 4)) then
+  begin
+    ALo := -2147483648.0;
+    AHi := 2147483647;
+    Exit(True);
+  end;
+  if SameText(LName, 'Cardinal') or SameText(LName, 'UInt32') or
+     (SameText(LName, 'NativeUInt') and (FInfo.PointerBytes = 4)) then
+  begin
+    AHi := 4294967295.0;
+    Exit(True);
+  end;
+  // A named enum or subrange type - one nested in the enclosing class or
+  // record first (TStringList's `set of TOverriddenItem`).
+  LDef := OracleNestedTypeDef(AMid, ANode, LM.Tree.NodeNameLower(ANode));
+  if LDef <> NIL_NODE then
+    LMid2 := AMid
+  else
+  begin
+    if not OracleResolve(AMid, LM.Tree.NodeNameLower(ANode), LMid2, LSym) then
+      Exit(False);
+    LDef := TypeDefNodeOf(LMid2, LSym);
+  end;
   if LDef = NIL_NODE then
     Exit(False);
   case FModels[LMid2].Tree.Nodes[LDef].Kind of
@@ -3277,20 +4090,8 @@ function TPasSemaProject.OracleFieldLayout(AMid, ATypeNode, ADepth: Integer;
   // unit. FastMM4 aliases one (TSynchronizationVariable), and refusing the dot
   // stopped the whole record it appears in.
   function DottedText(ANode: Integer): string;
-  var
-    LChild: Integer;
   begin
-    Result := '';
-    LChild := FModels[AMid].Tree.Nodes[ANode].FirstChild;
-    while LChild <> NIL_NODE do
-    begin
-      if FModels[AMid].Tree.Nodes[LChild].Kind <> nkIdent then
-        Exit('');
-      if Result <> '' then
-        Result := Result + '.';
-      Result := Result + FModels[AMid].Tree.NodeText(LChild);
-      LChild := FModels[AMid].Tree.Nodes[LChild].NextSibling;
-    end;
+    Result := OracleDottedName(AMid, ANode);
   end;
 
 var
@@ -3360,8 +4161,8 @@ begin
           Exit(False);
         LHi := LM.Tree.Nodes[LLo].NextSibling;
         if (LHi = NIL_NODE) or
-           not OracleConstExpr(AMid, LLo, ADepth, LNum) or
-           not OracleConstExpr(AMid, LHi, ADepth, LNum2) then
+           not OracleBound(AMid, LLo, ADepth, LNum) or
+           not OracleBound(AMid, LHi, ADepth, LNum2) then
           Exit(False);
         if ((LNum >= 0) and (LNum2 <= 255)) or
            ((LNum >= -128) and (LNum2 <= 127)) then
@@ -3444,8 +4245,35 @@ begin
   // table so a parameter named like one cannot be mistaken for it.
   for var LSIdx := 0 to High(ASubst) do
     if ASubst[LSIdx].Name = LowerCase(LName) then
-      Exit(OracleFieldLayout(ASubst[LSIdx].Mid, ASubst[LSIdx].Node,
-        ADepth + 1, nil, ABytes, AAlign));
+      case ASubst[LSIdx].Kind of
+        pskOpenRef:
+          begin
+            ABytes := FInfo.PointerBytes;
+            AAlign := FInfo.PointerBytes;
+            Exit(True);
+          end;
+        pskOpenMin:
+          begin
+            // Nothing is known of it: the least it can take, said upward.
+            ABytes := 0;
+            AAlign := 1;
+            FOracleMinimum := True;
+            Exit(True);
+          end;
+      else
+        if ASubst[LSIdx].Outer <> nil then
+          Exit(OracleFieldLayout(ASubst[LSIdx].Mid, ASubst[LSIdx].Node,
+            ADepth + 1, ASubst[LSIdx].Outer^, ABytes, AAlign));
+        Exit(OracleFieldLayout(ASubst[LSIdx].Mid, ASubst[LSIdx].Node,
+          ADepth + 1, nil, ABytes, AAlign));
+      end;
+  // A type nested in the enclosing class or record wins over the unit's.
+  if LM.Tree.Nodes[ATypeNode].Kind = nkIdent then
+  begin
+    LRSym := OracleNestedTypeDef(AMid, ATypeNode, LowerCase(LName));
+    if LRSym <> NIL_NODE then
+      Exit(OracleFieldLayout(AMid, LRSym, ADepth + 1, ASubst, ABytes, AAlign));
+  end;
   if PasBuiltinLayout(LName, FInfo.PointerBytes, FInfo.ExtendedBytes,
     ABytes, AAlign) then
     Exit(True);
@@ -3594,6 +4422,28 @@ end;
 function TPasSemaProject.OracleGenericLayout(AMid, AArgsNode, ADepth: Integer;
   const ASubst: TPasSubst; out ABytes: Double;
   out AAlign: Integer): Boolean;
+var
+  LGMid, LGSym: Integer;
+  LInner: TPasSubst;
+begin
+  ABytes := 0;
+  AAlign := 1;
+  // @ASubst: this frame outlives the layout below, which may read it.
+  Result := OracleBindGeneric(AMid, AArgsNode, ADepth, @ASubst, LGMid, LGSym,
+    LInner) and
+    OracleLayout(LGMid, LGSym, ADepth + 1, LInner, ABytes, AAlign);
+end;
+
+{ The binding half of OracleGenericLayout, shared with a generic class
+  ancestor (OracleClassLayout): AArgsNode's generic declaration (AGMid,
+  AGSym) and its parameters bound to the actuals. A bare enclosing parameter
+  is passed through with its binding; a compound actual over enclosing
+  parameters is bound with ASubst as its Outer. }
+function TPasSemaProject.OracleBindGeneric(AMid, AArgsNode, ADepth: Integer;
+  AOuter: PPasSubst; out AGMid, AGSym: Integer;
+  out AInner: TPasSubst): Boolean;
+var
+  LOuter: TPasSubst;
 
   // Does this subtree name any parameter of the enclosing instantiation?
   function MentionsParam(ANode: Integer): Boolean;
@@ -3601,8 +4451,8 @@ function TPasSemaProject.OracleGenericLayout(AMid, AArgsNode, ADepth: Integer;
     LKid: Integer;
   begin
     if FModels[AMid].Tree.Nodes[ANode].Kind = nkIdent then
-      for var LI := 0 to High(ASubst) do
-        if ASubst[LI].Name = FModels[AMid].Tree.NodeNameLower(ANode) then
+      for var LI := 0 to High(LOuter) do
+        if LOuter[LI].Name = FModels[AMid].Tree.NodeNameLower(ANode) then
           Exit(True);
     LKid := FModels[AMid].Tree.Nodes[ANode].FirstChild;
     while LKid <> NIL_NODE do
@@ -3620,8 +4470,13 @@ var
   LInner: TPasSubst;
   LNames: TArray<string>;
 begin
-  ABytes := 0;
-  AAlign := 1;
+  AGMid := NIL_SYM;
+  AGSym := NIL_SYM;
+  AInner := nil;
+  if AOuter <> nil then
+    LOuter := AOuter^
+  else
+    LOuter := nil;
   if ADepth > 8 then
     Exit(False);
   LM := FModels[AMid];
@@ -3630,7 +4485,7 @@ begin
   // appears nowhere measured, so it refuses rather than half-resolving.
   if (LBase = NIL_NODE) or (LM.Tree.Nodes[LBase].Kind <> nkIdent) then
     Exit(False);
-  if not OracleQualified(AMid, LM.Tree.NodeText(LBase), LGMid, LGSym) then
+  if not OracleGenericDecl(AMid, LM.Tree.NodeText(LBase), LGMid, LGSym) then
     Exit(False);
   // The parameter NAMES come from the declaration's <...> list.
   LDecl := FModels[LGMid].Symbols[LGSym].DeclNode;
@@ -3680,31 +4535,33 @@ begin
     if LArg = NIL_NODE then
       Exit(False);
     var LEntry: TPasSubstEntry;
-    LEntry.Name := LNames[LI];
+    LEntry := Default(TPasSubstEntry);
+    LEntry.Mid := AMid;
+    LEntry.Node := LArg;
     if (LM.Tree.Nodes[LArg].Kind = nkIdent) and MentionsParam(LArg) then
     begin
       // The actual IS an enclosing parameter: carry its binding through.
-      for var LJ := 0 to High(ASubst) do
-        if ASubst[LJ].Name = LM.Tree.NodeNameLower(LArg) then
+      for var LJ := 0 to High(LOuter) do
+        if LOuter[LJ].Name = LM.Tree.NodeNameLower(LArg) then
         begin
-          LEntry.Mid := ASubst[LJ].Mid;
-          LEntry.Node := ASubst[LJ].Node;
+          LEntry := LOuter[LJ];
           Break;
         end;
     end
     else if MentionsParam(LArg) then
-      Exit(False)   // a compound actual over an open parameter: refuse
-    else
-    begin
-      LEntry.Mid := AMid;
-      LEntry.Node := LArg;
-    end;
+      // A compound actual over the enclosing parameters: laid out, when it
+      // is, under their bindings.
+      LEntry.Outer := AOuter;
+    LEntry.Name := LNames[LI];
     LInner := LInner + [LEntry];
     LArg := LM.Tree.Nodes[LArg].NextSibling;
   end;
   if LArg <> NIL_NODE then
     Exit(False);   // more actuals than parameters
-  Result := OracleLayout(LGMid, LGSym, ADepth + 1, LInner, ABytes, AAlign);
+  AGMid := LGMid;
+  AGSym := LGSym;
+  AInner := LInner;
+  Result := True;
 end;
 
 function TPasSemaProject.OracleLength(AMid, ASym, ADepth: Integer;

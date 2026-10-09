@@ -4444,6 +4444,158 @@ begin
   TDirectory.Delete(LDir, True);
 end;
 
+{ TypeInstanceSize and TypeSizeOf, Win32 and Win64, against InstanceSize as
+  dcc 37.0 prints it (TB1, TI64, TDesc2 measured as written; the others are
+  the measured rules - interface slots shared down a chain, a remapped
+  interface's own, the monitor slot last - over shapes the layout walk used
+  to refuse: a type nested in the class, a hint after a field's type, a
+  three-segment and a `System.` alias, a generic field type with a
+  non-generic namesake in scope, subrange bounds written as MaxInt,
+  `Low(Integer)`, an enum value and a type-qualified one - TBounds measured
+  as written, 20 / 32, the shapes every VCL control holds - an attribute
+  among a field's names and a type nested in a record, TAttr).
+  Generic declarations measured with their parameters open: `+` is a
+  minimum, each the size of the instantiation with an empty record (TGn,
+  TGd) or exact where a class constraint fixes the parameter (TGc) - all
+  dcc-measured. }
+procedure TestInstanceSize;
+const
+  // Name, Win32, Win64; -1 = no InstanceSize (not a class), `+` a minimum.
+  cWant: array[0..13] of array[0..2] of string = (
+    ('tb1', '12', '24'), ('ti64', '20', '32'), ('tdesc2', '28', '40'),
+    ('trefd', '12', '24'), ('tremap', '16', '32'), ('tmix', '20', '40'),
+    ('tdup', '-1', '-1'), ('ifoo', '-1', '-1'), ('tbounds', '20', '32'),
+    ('tattr', '20', '40'), ('tgc', '16', '32'), ('tgn', '12+', '24+'),
+    ('tgd', '16+', '32+'), ('tc11', '56', '112'));
+var
+  LDir, LWant, LGotText: string;
+  LMid, LSym: Integer;
+  LGot, LSize: Int64;
+  LMin: Boolean;
+  LPlat: TPasPlatform;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_instance_size');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  IInterface = interface end;'#10 +
+    '  THandle = NativeUInt;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Isz.Types.pas'),
+    'unit Isz.Types;'#10'interface'#10'type TDup = (d1, d2, d3);'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IszGen.pas'),
+    'unit IszGen;'#10'interface'#10'type TList<T> = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IszMain.pas'),
+    'unit IszMain;'#10'interface'#10'uses Isz.Types, IszGen;'#10'type'#10 +
+    '  TDup = Isz.Types.TDup;'#10 +
+    '  THnd = System.THandle;'#10 +
+    '  IFoo = interface procedure A; end;'#10 +
+    '  IBar = interface(IFoo) procedure B; end;'#10 +
+    '  TB1 = class B: Byte; end;'#10 +
+    '  TI64 = class B: Byte; Q: Int64; end;'#10 +
+    '  TDesc2 = class(TI64) C: Byte; end;'#10 +
+    '  TRefd = class(TObject, IInterface, IFoo, IBar) end;'#10 +
+    '  TRemap = class(TObject, IInterface, IBar)'#10 +
+    '    procedure IBar.B = Z;'#10 +
+    '    procedure Z;'#10 +
+    '  end;'#10 +
+    '  TAl = (al1, al2, al3);'#10 +
+    '  TLR = TAl.al1..TAl.al2;'#10 +
+    '  TBs = al1..al3;'#10 +
+    '  THelp = -MaxInt..MaxInt;'#10 +
+    '  TMod = Low(Integer)..High(Integer);'#10 +
+    '  TBounds = class FA: TLR; FB: TBs; FC: THelp; FD: TMod; end;'#10 +
+    '  TNest = record type TP = procedure of object; end;'#10 +
+    '  TAttr = class [Unsafe] FA: TObject; FP: TNest.TP; end;'#10 +
+    '  TGc<T: class> = class B: Byte; F: T; end;'#10 +
+    '  TGn<T> = class B: Byte; F: T; C: Byte; end;'#10 +
+    '  TGd<T> = class(TGn<T>) D: Byte; end;'#10 +
+    '  TGr<T: record> = record B: Byte; F: T; end;'#10 +
+    // Twelve levels above TObject, a field behind two aliases on each: the
+    // chain must not use up the field walk's depth (a form is eight levels
+    // deep, and charged to that depth no form had an InstanceSize).
+    '  TZ1 = Byte; TZ2 = TZ1;'#10 +
+    '  TC0 = class F: TZ2; end;'#10 +
+    '  TC1 = class(TC0) F1: TZ2; end;'#10 +
+    '  TC2 = class(TC1) F2: TZ2; end;'#10 +
+    '  TC3 = class(TC2) F3: TZ2; end;'#10 +
+    '  TC4 = class(TC3) F4: TZ2; end;'#10 +
+    '  TC5 = class(TC4) F5: TZ2; end;'#10 +
+    '  TC6 = class(TC5) F6: TZ2; end;'#10 +
+    '  TC7 = class(TC6) F7: TZ2; end;'#10 +
+    '  TC8 = class(TC7) F8: TZ2; end;'#10 +
+    '  TC9 = class(TC8) F9: TZ2; end;'#10 +
+    '  TC10 = class(TC9) FA: TZ2; end;'#10 +
+    '  TC11 = class(TC10) FB: TZ2; end;'#10 +
+    '  TList = class end;'#10 +
+    '  TMix = class'#10 +
+    '  private type'#10 +
+    '    TItem = (i1, i2, i3);'#10 +
+    '    TItems = set of TItem;'#10 +
+    '  private'#10 +
+    '    FItems: TItems;'#10 +
+    '    FDup: TDup;'#10 +
+    '    FH: THnd platform;'#10 +
+    '    FL: TList<Byte>;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TRemap.Z; begin end;'#10 +
+    'end.'#10);
+  for LPlat in [pfWin32, pfWin64] do
+  begin
+    GProj := TPasSemaProject.Create(LPlat, [LDir], []);
+    try
+      GProj.AnalyzeDirectory(LDir);
+      LMid := MidByName('iszmain');
+      Ok('instance size: the unit has a model', LMid >= 0);
+      if LMid < 0 then
+        Continue;
+      for var LRowIdx := 0 to High(cWant) do
+      begin
+        LSym := GProj.Model(LMid).Resolve(GProj.Model(LMid).InterfaceScope,
+          cWant[LRowIdx][0]);
+        if GProj.TypeInstanceSize(LMid, LSym, LGot, LMin) then
+          LGotText := IntToStr(LGot) + Copy('+', 1, Ord(LMin))
+        else
+          LGotText := '-1';
+        if LPlat = pfWin32 then
+          LWant := cWant[LRowIdx][1]
+        else
+          LWant := cWant[LRowIdx][2];
+        Ok(Format('instance size: %s on platform %d is %s (got %s)',
+          [cWant[LRowIdx][0], Ord(LPlat), LWant, LGotText]), LGotText = LWant);
+      end;
+      // The overload without AMinimum answers exact sizes only.
+      LSym := GProj.Model(LMid).Resolve(GProj.Model(LMid).InterfaceScope,
+        'tgn');
+      Ok('instance size: TGn has no exact InstanceSize',
+        not GProj.TypeInstanceSize(LMid, LSym, LGot));
+      LSym := GProj.Model(LMid).Resolve(GProj.Model(LMid).InterfaceScope,
+        'tgr');
+      Ok('instance size: SizeOf(TGr<T: record>) is at least 1',
+        GProj.TypeSizeOf(LMid, LSym, LSize, LMin) and (LSize = 1) and LMin);
+      // SizeOf of a class is its reference; of the three-segment alias, 1.
+      LSym := GProj.Model(LMid).Resolve(GProj.Model(LMid).InterfaceScope,
+        'tmix');
+      Ok('instance size: SizeOf(TMix) is a pointer',
+        GProj.TypeSizeOf(LMid, LSym, LSize) and
+        (LSize = 4 + 4 * Ord(LPlat = pfWin64)));
+      LSym := GProj.Model(LMid).Resolve(GProj.Model(LMid).InterfaceScope,
+        'tdup');
+      Ok('instance size: SizeOf(TDup), a three-segment alias, is 1',
+        GProj.TypeSizeOf(LMid, LSym, LSize) and (LSize = 1));
+    finally
+      GProj.Free;
+    end;
+  end;
+  TDirectory.Delete(LDir, True);
+end;
+
 // The thread-pool contract (audit B02). ConfigureThreadPool pins the default
 // pool and turns off its past-Max injection, so no pool task may wait on
 // another queued one. Two ways analysis broke that and hung for good:
@@ -7730,14 +7882,14 @@ begin
     '  TBigEnum = (beA, beB);'#10 +   // same unit, forced to 4 by the state
     '{$MINENUMSIZE 1}'#10 +
     '  TPair = record A, B: Pointer; end;'#10 +
-    // A generic actual that MENTIONS an open parameter inside a compound is
-    // what the layout walk still refuses; records, arrays, strings, sets,
-    // variants, file types, inline enums, class-var sections, plain generic
-    // instantiations and old-style objects are all computed for real now --
-    // see the layout fixture.
-    '  TGOra<T> = record V: T; end;'#10 +
-    '  TOpenOra<T> = record V: TGOra<TGOra<T>>; end;'#10 +
-    '  TMixedOra = TOpenOra<Integer>;'#10 +
+    // An old-style object whose ancestor is written with its unit is what
+    // the layout walk still refuses (OracleObjectLayout: whether it brings
+    // a VMT is not asked through a dotted name); records, arrays, strings,
+    // sets, variants, file types, inline enums, class-var sections, generic
+    // instantiations and other objects are all computed for real -- see the
+    // layout fixture.
+    '  TOraBase = object A: Byte; end;'#10 +
+    '  TMixedOra = object(UnitOracle.TOraBase) B: Byte; end;'#10 +
     'var'#10 +
     '  GTable: array[0..2] of Integer;'#10 +
     '{$IF KAlias}'#10 +
@@ -7842,10 +7994,9 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'UnitExotic.pas'),
     'unit UnitExotic;'#10'interface'#10 +
     'type'#10 +
-    // A generic actual over an OPEN parameter: the shape the walk refuses.
-    '  TGEx<T> = record V: T; end;'#10 +
-    '  TOpenEx<T> = record V: TGEx<TGEx<T>>; end;'#10 +
-    '  TMixed = TOpenEx<Integer>;'#10 +
+    // An object with a unit-qualified ancestor: the shape the walk refuses.
+    '  TExBase = object A: Byte; end;'#10 +
+    '  TMixed = object(UnitExotic.TExBase) B: Byte; end;'#10 +
     'const'#10 +
     '  KStr = ''text'';'#10 +
     'implementation'#10 +
@@ -8039,10 +8190,9 @@ begin
     '  TO04 = packed object A: Byte; B: Int64; end;'#10 +  // 9
     '  TO05 = object end;'#10 +                            // 0
     '  TO06 = record X: Byte; F: TO02; end;'#10 +          // 24
-    // Still NOT modelled, and the guard is written so that a wrong answer of
-    // any kind declares the type. An actual that IS an enclosing parameter is
-    // carried through (TGD above); one that merely MENTIONS one inside a
-    // compound is refused rather than half-substituted.
+    // An actual that IS an enclosing parameter is carried through (TGD
+    // above); one that MENTIONS one inside a compound is laid out under the
+    // enclosing bindings (TPasSubstEntry.Outer) - refused before 0.94.0.
     '  TOpenG<T> = record V: TGA<TGA<T>>; end;'#10 +
     '  TArrF = TOpenG<Integer>;'#10 +
     '{$IF SizeOf(TR01) = 16}type M01 = class end;{$IFEND}'#10 +
@@ -8127,7 +8277,7 @@ begin
     '{$IF SizeOf(TO04) = 9}type MO04 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TO05) = 0}type MO05 = class end;{$IFEND}'#10 +
     '{$IF SizeOf(TO06) = 24}type MO06 = class end;{$IFEND}'#10 +
-    '{$IF SizeOf(TArrF) <> 0}type MArr = class end;{$IFEND}'#10 +
+    '{$IF SizeOf(TArrF) = 4}type MArr = class end;{$IFEND}'#10 +
     'implementation'#10'end.'#10);
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -8205,11 +8355,10 @@ begin
     Ok('1.3.2 layout: old-style OBJECT types -- ancestor storage, packing, ' +
       'an empty one, and as a field (missing:' + LMissing + ')',
       LMissing = '');
-    Ok('1.3.2 layout: a compound actual over an OPEN parameter still refuses',
-      (SymCountOf(LLay, 'marr', skType) = 0) and
-      DiagHasText(LLay, 'PPIF', 'SizeOf(TArrF)'));
-    Ok('1.3.2 layout: that refusal is the ONLY residual -- everything else in '
-      + 'this fixture sized for real', DiagCount(LLay, 'PPIF') = 1);
+    Ok('1.3.2 layout: a compound actual over an enclosing parameter sizes',
+      SymCountOf(LLay, 'marr', skType) = 1);
+    Ok('1.3.2 layout: no residual -- everything in this fixture sized for '
+      + 'real', DiagCount(LLay, 'PPIF') = 0);
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then
@@ -10475,6 +10624,7 @@ begin
   TestNestedOuterAfterUnit;
   TestDeclAfterUnit;
   TestOracleDepth;
+  TestInstanceSize;
   TestOperatorChains;
   TestPoolContract;
 
