@@ -239,6 +239,9 @@ type
 var
   GCacheLock: TObject;
   GCache: TDictionary<string, TPasDfmCacheEntry>;
+  // Bumped by every PasDfmForget, under GCacheLock: a load that read its file
+  // before a Forget does not cache what it read (see PasDfmLoad).
+  GForgetGen: Int64;
 
 { TNullStream }
 
@@ -908,6 +911,7 @@ var
   LSize, LStamp: Int64;
   LBytes: TBytes;
   LDoc: TPasDfmDoc;
+  LGen: Int64;
 begin
   Result := nil;
   if (APath = '') or not FileStamp(APath, LSize, LStamp) then
@@ -918,6 +922,7 @@ begin
     if GCache.TryGetValue(LKey, LEntry) and (LEntry.Size = LSize) and
        (LEntry.Stamp = LStamp) then
       Exit(LEntry.Doc);
+    LGen := GForgetGen;
   finally
     TMonitor.Exit(GCacheLock);
   end;
@@ -935,11 +940,22 @@ begin
     end;
   end;
   Result := PasDfmParse(APath, LBytes);
-  LEntry.Size := LSize;
-  LEntry.Stamp := LStamp;
-  LEntry.Doc := Result;
+  // The read and the parse ran unlocked, so the cache may have moved since
+  // the lookup. A Forget in between: the file may have been rewritten within
+  // the stamp's resolution (what Forget is for), so what was read is not
+  // cached - it is still this call's answer. Another load of the same file
+  // version in between: its doc stays and is returned, so every caller holds
+  // the same one (a binder that sees a different doc rebuilds its forms).
   TMonitor.Enter(GCacheLock);
   try
+    if GForgetGen <> LGen then
+      Exit;
+    if GCache.TryGetValue(LKey, LEntry) and (LEntry.Size = LSize) and
+       (LEntry.Stamp = LStamp) then
+      Exit(LEntry.Doc);
+    LEntry.Size := LSize;
+    LEntry.Stamp := LStamp;
+    LEntry.Doc := Result;
     GCache.AddOrSetValue(LKey, LEntry);
   finally
     TMonitor.Exit(GCacheLock);
@@ -950,6 +966,7 @@ procedure PasDfmForget(const APath: string);
 begin
   TMonitor.Enter(GCacheLock);
   try
+    Inc(GForgetGen);
     if APath = '' then
       GCache.Clear
     else

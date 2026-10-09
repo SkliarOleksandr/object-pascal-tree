@@ -18,6 +18,7 @@ uses
   System.SysUtils,
   System.Classes,
   System.IOUtils,
+  System.SyncObjs,
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
@@ -1529,6 +1530,77 @@ end;
 { A form file that appears after the binder listed its directory is read -
   the directory's write time moved - and one deleted and brought back, as a
   checkout does, is read again. }
+// Cold loads of one form file racing on several threads (audit B06, B1-26):
+// the cache's lookup and insert are two lock regions with the read and the
+// parse between them, and the later insert used to replace the doc an earlier
+// caller already held - a binder holding it saw a "changed" doc and rebuilt
+// its forms. Every caller must get the one doc that ends up cached.
+type
+  TDfmDocSlots = array of IPasDfmDoc;
+
+// One worker, not started: waits for AStart, loads APath into its own slot.
+function DfmLoadWorker(const APath: string; ASlot: Integer;
+  const ADocs: TDfmDocSlots; AStart: TEvent): TThread;
+begin
+  Result := TThread.CreateAnonymousThread(
+    procedure
+    begin
+      AStart.WaitFor(INFINITE);
+      ADocs[ASlot] := PasDfmLoad(APath);
+    end);
+  Result.FreeOnTerminate := False;
+end;
+
+procedure ConcurrentLoadChecks;
+const
+  cThreads = 8;
+  cRounds = 20;
+var
+  LPath: string;
+  LDocs: TDfmDocSlots;
+  LThreads: array[0..cThreads - 1] of TThread;
+  LStart: TEvent;
+  LIdx, LSame: Integer;
+  LCached: IPasDfmDoc;
+begin
+  LPath := FilePath('FixBase.dfm');
+  SetLength(LDocs, cThreads);
+  for var LRound := 1 to cRounds do
+  begin
+    PasDfmForget(LPath);
+    for LIdx := 0 to cThreads - 1 do
+      LDocs[LIdx] := nil;
+    LStart := TEvent.Create(nil, True, False, '');
+    try
+      for LIdx := 0 to cThreads - 1 do
+      begin
+        LThreads[LIdx] := DfmLoadWorker(LPath, LIdx, LDocs, LStart);
+        LThreads[LIdx].Start;
+      end;
+      LStart.SetEvent;
+      for LIdx := 0 to cThreads - 1 do
+      begin
+        LThreads[LIdx].WaitFor;
+        LThreads[LIdx].Free;
+      end;
+    finally
+      LStart.Free;
+    end;
+    LCached := PasDfmLoad(LPath);
+    LSame := 0;
+    for LIdx := 0 to cThreads - 1 do
+      if (LDocs[LIdx] <> nil) and (LDocs[LIdx] = LCached) then
+        Inc(LSame);
+    if LSame <> cThreads then
+    begin
+      Ok(Format('concurrent load: round %d, %d of %d callers hold the ' +
+        'cached doc', [LRound, LSame, cThreads]), False);
+      Exit;
+    end;
+  end;
+  Ok('concurrent load: every caller holds the cached doc (20 rounds)', True);
+end;
+
 procedure LateChecks;
 var
   LInfo: TPasFormInfo;
@@ -1611,6 +1683,7 @@ begin
       DockChecks;
       PropChecks;
       LateChecks;
+      ConcurrentLoadChecks;
     finally
       GNav.Free;
     end;

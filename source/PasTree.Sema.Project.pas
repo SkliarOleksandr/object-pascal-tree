@@ -308,6 +308,13 @@ type
       caught it as ExtRefMap counts differing between two full runs of the
       same closure (2026-09-07). Merged after the parallel phase. }
     FXNewSymType: TArray<TDictionary<Integer, TSemaXType>>;
+    { And for what CrossType PERSISTS into a model's ExprTypeX at the end of
+      its walk. Another walk does read it: a probe over the model that
+      declares a static array (ArrayBoundTypeX, for Low/High) falls back to
+      that model's ExprTypeX for a bound it cannot type, and a TPasIntMap
+      being grown under a reader indexes a nil or half-built slot array.
+      Committed after the parallel phase, each model by its own worker. }
+    FXNewExprType: TArray<TList<TPair<Integer, TSemaXType>>>;
     { Same treatment for CheckCalls' arity-error re-point, which runs in the
       parallel 'cross-resolve' pass - see RunCallChecksPass. Nil outside it,
       and then the write goes straight to the model. }
@@ -912,6 +919,7 @@ type
       nothing committed - see TPasXProbe and WithTargetTypeX. }
     procedure CrossType(AId: Integer; AProbe: TPasXProbe = nil;
       ARoot: Integer = 0);
+    procedure CommitXNewExprType(AId: Integer);
     procedure RunCrossTypePass(ACount: Integer);
   public
     constructor Create(APlatform: TPasPlatform;
@@ -12669,11 +12677,29 @@ begin
   // instantiation frame (TPasInhPending.X) - this walk has no with-target
   // context, so for exactly those nodes its answer is the OPEN generic
   // parameter, strictly worse.
+  // Under RunCrossTypePass the entries go to its overlay (FXNewExprType):
+  // nothing but the with pass has written this map yet, so the test is the
+  // same one later.
   for LNode := 0 to High(LX) do
     if XValid(LX[LNode]) and ((LM.ExprType[LNode] = NIL_SYM) or
        (LX[LNode].Inst <> NIL_INST) or (LX[LNode].UnitId <> AId)) then
       if not LM.ExprTypeX.ContainsKey(LNode) then
-        LM.ExprTypeX.Add(LNode, LX[LNode]);
+        if (AId <= High(FXNewExprType)) and (FXNewExprType[AId] <> nil) then
+          FXNewExprType[AId].Add(
+            TPair<Integer, TSemaXType>.Create(LNode, LX[LNode]))
+        else
+          LM.ExprTypeX.Add(LNode, LX[LNode]);
+end;
+
+// Commits AId's FXNewExprType overlay into its ExprTypeX - after the parallel
+// cross-type phase, one model per worker (nothing reads ExprTypeX then).
+procedure TPasSemaProject.CommitXNewExprType(AId: Integer);
+var
+  LM: TPasSemaModel;
+begin
+  LM := FModels[AId];
+  for var LPair in FXNewExprType[AId] do
+    LM.ExprTypeX.Add(LPair.Key, LPair.Value);
 end;
 
 { CrossType for every unit, in PARALLEL, with the one shared-write hazard
@@ -12690,7 +12716,9 @@ end;
   So each walk now records into a private overlay, read back through ExtOf so
   the walk still sees its own finds (overload selection within one unit depends
   on that), and the overlays are merged here, sequentially, once every walk has
-  finished. ExprTypeX needs no such treatment: nothing reads another model's.
+  finished. ExprTypeX takes the same treatment (FXNewExprType): a probe over
+  another model reads that model's (ArrayBoundTypeX), so its persisted
+  entries wait for the barrier too, then commit in parallel, one model each.
 
   Instantiate stays locked - measured at 77k calls for the whole 665-unit corpus
   against 126k InstanceRead calls, so ~200k uncontended acquisitions in total;
@@ -12705,15 +12733,21 @@ begin
 {$ENDIF}
   SetLength(FXNewExt, ACount);
   SetLength(FXNewSymType, ACount);
+  SetLength(FXNewExprType, ACount);
   for LIdx := 0 to ACount - 1 do
   begin
     FXNewExt[LIdx] := TDictionary<Integer, TPasExtRef>.Create;
     FXNewSymType[LIdx] := TDictionary<Integer, TSemaXType>.Create;
+    FXNewExprType[LIdx] := TList<TPair<Integer, TSemaXType>>.Create;
   end;
   try
     ForEachIndex(ACount - 1, 'cross-type',      procedure(AIdx: Integer)
       begin
         CrossType(AIdx);
+      end);
+    ForEachIndex(ACount - 1, 'cross-type-commit', procedure(AIdx: Integer)
+      begin
+        CommitXNewExprType(AIdx);
       end);
     for LIdx := 0 to ACount - 1 do
     begin
@@ -12737,9 +12771,11 @@ begin
     begin
       FXNewExt[LIdx].Free;
       FXNewSymType[LIdx].Free;
+      FXNewExprType[LIdx].Free;
     end;
     SetLength(FXNewExt, 0);
     SetLength(FXNewSymType, 0);
+    SetLength(FXNewExprType, 0);
   end;
 end;
 
@@ -16847,6 +16883,7 @@ end;
 procedure TPasSemaProject.CrossResolveDecl(AId: Integer;
   var APending: TArray<TPasInhPending>; AEmit: Boolean);
 var
+  LOut: TArray<TPasInhPending>;   // APending, until the end
   LModel: TPasSemaModel;
   LNode, LUid, LSym, LCtx, LWIdx, LPendCount: Integer;
   LPend: TPasInhPending;
@@ -16863,7 +16900,7 @@ begin
   // the end - the old `+ [x]` re-copied the managed-record array per append,
   // per round (the EnsureCrossWork idiom).
   // FDeclWork carries capacity slack - the filled prefix is FDeclWorkCount.
-  SetLength(APending, FDeclWorkCount[AId]);
+  SetLength(LOut, FDeclWorkCount[AId]);
   LPendCount := 0;
   for LWIdx := 0 to FDeclWorkCount[AId] - 1 do
   begin
@@ -16904,7 +16941,7 @@ begin
         LPend.Ext.UnitId := LUid;
         LPend.Ext.Sym := LSym;
         LPend.X := XNil;
-        APending[LPendCount] := LPend;
+        LOut[LPendCount] := LPend;
         Inc(LPendCount);
       end;
     end
@@ -16914,13 +16951,18 @@ begin
       LPend.Ext.UnitId := LUid;
       LPend.Ext.Sym := LSym;
       LPend.X := XNil;
-      APending[LPendCount] := LPend;
+      LOut[LPendCount] := LPend;
       Inc(LPendCount);
     end
     else if AEmit and LModel.AllUsesResolved then
       EmitE2003(LModel, LNode, AId);   // CrossResolve's verdict, just deferred
   end;
-  SetLength(APending, LPendCount);
+  SetLength(LOut, LPendCount);
+  // Handed over only here: LOut is filled locally because APending is the
+  // caller's slot itself, and on a raise ForEachIndex records a PPINT and
+  // the run goes on - a pre-sized slot would then commit its zeroed tail as
+  // bindings of node 0 (CrossResolveInherited and CrossResolveWith alike).
+  APending := LOut;
 end;
 
 { Parallel compute + sequential commit, iterated: one nested class's heritage
@@ -16967,6 +17009,7 @@ end;
 procedure TPasSemaProject.CrossResolveInherited(AId: Integer;
   var APending: TArray<TPasInhPending>);
 var
+  LOut: TArray<TPasInhPending>;   // APending, until the end
   LModel: TPasSemaModel;
   LNode, LStruct, LUid, LSym, LCtx, LMatchNode, LWIdx, LBound: Integer;
   LPendCount: Integer;
@@ -16984,7 +17027,7 @@ begin
   // Pre-size to the work list (each entry pends at most once), truncate at
   // the end - the same idiom EnsureCrossWork itself uses; the old `+ [x]`
   // re-copied the managed-record array per append, per fixpoint round.
-  SetLength(APending, Length(FInhWork[AId]));
+  SetLength(LOut, Length(FInhWork[AId]));
   LPendCount := 0;
   LMiss := TDictionary<Int64, Byte>.Create;
   try
@@ -17093,7 +17136,7 @@ begin
           LPend.X := SubstX(SymDeclTypeX(LUid, LSym), LCtx, 0)
         else
           LPend.X := XNil;
-        APending[LPendCount] := LPend;
+        LOut[LPendCount] := LPend;
         Inc(LPendCount);
       end
       // No member: a seed a used unit declares itself is that unit's
@@ -17106,7 +17149,7 @@ begin
         LPend.Ext.UnitId := LUid;
         LPend.Ext.Sym := LSym;
         LPend.X := XNil;
-        APending[LPendCount] := LPend;
+        LOut[LPendCount] := LPend;
         Inc(LPendCount);
       end
       else if LKey >= 0 then
@@ -17143,13 +17186,14 @@ begin
         LPend.X := SubstX(SymDeclTypeX(LUid, LSym), LCtx, 0)
       else
         LPend.X := XNil;
-      APending[LPendCount] := LPend;
+      LOut[LPendCount] := LPend;
       Inc(LPendCount);
     end
     else if LModel.AllUsesResolved then
       EmitE2003(LModel, LNode, AId);
     end;
-    SetLength(APending, LPendCount);
+    SetLength(LOut, LPendCount);
+    APending := LOut;   // on success only - see CrossResolveDecl
   finally
     LMiss.Free;
   end;
@@ -17210,6 +17254,8 @@ procedure TPasSemaProject.CrossResolveWith(AId: Integer;
   var APending: TArray<TPasInhPending>; AEmit: Boolean;
   var AUnresolved: TArray<Integer>);
 var
+  LOut: TArray<TPasInhPending>;   // APending, until the end
+  LUnres: TArray<Integer>;
   LModel: TPasSemaModel;
   LNode, LStruct, LUid, LSym, LCtx, LMatchNode, LWIdx: Integer;
   LPendCount, LUnresCount: Integer;
@@ -17237,8 +17283,8 @@ begin
   try
     // Pre-size + truncate, same as CrossResolveInherited - this one repeats per
     // fixpoint round (MAX_ROUNDS=8), so the old per-append copy multiplied.
-    SetLength(APending, Length(FWithWork[AId]));
-    SetLength(AUnresolved, Length(FWithWork[AId]));
+    SetLength(LOut, Length(FWithWork[AId]));
+    SetLength(LUnres, Length(FWithWork[AId]));
     LPendCount := 0;
     LUnresCount := 0;
     // Idents inside a with body, from the one classifying scan. Bound-ness is
@@ -17336,7 +17382,7 @@ begin
         LPend.Ext.UnitId := LUid;
         LPend.Ext.Sym := LSym;
         LPend.X := LMemX;
-        APending[LPendCount] := LPend;
+        LOut[LPendCount] := LPend;
         Inc(LPendCount);
       end
       else if LRetry and not LUnitQual then
@@ -17363,7 +17409,7 @@ begin
         LPend.Node := LNode;
         LPend.Ext.UnitId := LUid;
         LPend.Ext.Sym := LSym;
-        APending[LPendCount] := LPend;
+        LOut[LPendCount] := LPend;
         Inc(LPendCount);
       end
       else if LUnitQual or LBound or (LNameLower = 'self') then
@@ -17394,7 +17440,7 @@ begin
           LPend.Ext.UnitId := LUid;
           LPend.Ext.Sym := LSym;
           LPend.X := XNil;
-          APending[LPendCount] := LPend;
+          LOut[LPendCount] := LPend;
           Inc(LPendCount);
         end
         else if LModel.AllUsesResolved then
@@ -17407,7 +17453,7 @@ begin
             EmitE2003(LModel, LNode, AId)
           else
           begin
-            AUnresolved[LUnresCount] := LNode;
+            LUnres[LUnresCount] := LNode;
             Inc(LUnresCount);
           end;
         end;
@@ -17416,8 +17462,10 @@ begin
   finally
     LProbe.Free;
   end;
-  SetLength(APending, LPendCount);
-  SetLength(AUnresolved, LUnresCount);
+  SetLength(LOut, LPendCount);
+  SetLength(LUnres, LUnresCount);
+  APending := LOut;   // on success only - see CrossResolveDecl
+  AUnresolved := LUnres;
 end;
 
 { Runs to a FIXPOINT, because one round cannot resolve a nested `with` whose
@@ -17595,6 +17643,12 @@ begin
           if LTM.Symbols[LX.Sym].Kind = skBuiltinType then
             Result := BuiltinX(LMid, LTM.Symbols[LX.Sym].NameLower).Sym;
         end);
+    end,
+    // A slot, not a model id, on the module path: the redo set is in no
+    // particular order, and a failure must be noted on the model that raised.
+    function(AIdx: Integer): Integer
+    begin
+      Result := AIds[AIdx];
     end);
 end;
 
@@ -18703,16 +18757,23 @@ begin
   // merge (tombstones included) happens here, after the parallel phase.
   SetLength(FXNewExt, FModels.Count);
   SetLength(FXNewSymType, FModels.Count);
+  SetLength(FXNewExprType, FModels.Count);
   for LId in AIds do
   begin
     FXNewExt[LId] := TDictionary<Integer, TPasExtRef>.Create;
     FXNewSymType[LId] := TDictionary<Integer, TSemaXType>.Create;
+    FXNewExprType[LId] := TList<TPair<Integer, TSemaXType>>.Create;
   end;
   try
     ForEachIndex(High(AIds), 'cross-type',
       procedure(ASlot: Integer)
       begin
         CrossType(AIds[ASlot]);
+      end, LMidOf);
+    ForEachIndex(High(AIds), 'cross-type-commit',
+      procedure(ASlot: Integer)
+      begin
+        CommitXNewExprType(AIds[ASlot]);
       end, LMidOf);
     for LId in AIds do
     begin
@@ -18737,9 +18798,11 @@ begin
     begin
       FXNewExt[LId].Free;
       FXNewSymType[LId].Free;
+      FXNewExprType[LId].Free;
     end;
     SetLength(FXNewExt, 0);
     SetLength(FXNewSymType, 0);
+    SetLength(FXNewExprType, 0);
   end;
   for LId in AIds do
     FModels[LId].TrimDiags;

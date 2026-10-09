@@ -13,6 +13,7 @@ uses
   System.Generics.Collections,
   System.SyncObjs,
   System.Threading,
+  System.Rtti,
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
@@ -4885,6 +4886,42 @@ begin
     LP1.Free;
   end;
   TDirectory.Delete(LDir, True);
+end;
+
+// TPasDefines.Clone and Names leave the dictionary's Keys collection alone
+// (audit B06, B2-10): the RTL creates it lazily, writing a field of the
+// dictionary with no lock, and a base define set is cloned by many
+// preprocessors at once - every losing creation leaked. Read through RTTI:
+// no other observable tells a created collection from none.
+procedure TestDefinesKeysUntouched;
+var
+  LDefs, LClone: TPasDefines;
+  LNames: TArray<string>;
+  LCtx: TRttiContext;
+  LMap: TObject;
+  LKeys: TRttiField;
+begin
+  LDefs := TPasDefines.Create(['MSWINDOWS', 'WIN64', 'ZED']);
+  LClone := nil;
+  LCtx := TRttiContext.Create;
+  try
+    LClone := LDefs.Clone;
+    LNames := LDefs.Names;
+    Ok('defines: the clone holds every name', LClone.IsDefined('MSWINDOWS') and
+      LClone.IsDefined('WIN64') and LClone.IsDefined('ZED') and
+      not LClone.IsDefined('WIN32'));
+    Ok('defines: Names lists every name, sorted',
+      (Length(LNames) = 3) and SameText(LNames[0], 'MSWINDOWS') and
+      SameText(LNames[2], 'ZED'));
+    LMap := LCtx.GetType(TPasDefines).GetField('FMap').GetValue(LDefs).AsObject;
+    LKeys := LCtx.GetType(LMap.ClassType).GetField('FKeyCollection');
+    Ok('defines: Clone and Names never create the Keys collection',
+      (LKeys <> nil) and (LKeys.GetValue(LMap).AsObject = nil));
+  finally
+    LCtx.Free;
+    LClone.Free;
+    LDefs.Free;
+  end;
 end;
 
 // The thread-pool contract (audit B02). ConfigureThreadPool pins the default
@@ -10918,6 +10955,7 @@ begin
   TestInstanceSize;
   TestOperatorChains;
   TestDonorSafety;
+  TestDefinesKeysUntouched;
   TestPoolContract;
 
   if GCounter.Finish('SemaProjectSmoke') then

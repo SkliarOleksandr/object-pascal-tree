@@ -882,21 +882,33 @@ begin
   Result := FMap.ContainsKey(Trim(AName));
 end;
 
+// Names and Clone enumerate the dictionary itself, never FMap.Keys: the RTL
+// creates the Keys collection lazily, writing a field of the dictionary
+// without a lock, and a base define set is cloned by many preprocessors at
+// once (TPasProject.ParseFiles) - each losing creation leaked a collection.
+// The pair enumerator is a fresh object per loop and writes nothing shared.
+
 function TPasDefines.Names: TArray<string>;
+var
+  LIdx: Integer;
 begin
-  Result := FMap.Keys.ToArray;
+  SetLength(Result, FMap.Count);
+  LIdx := 0;
+  for var LPair in FMap do
+  begin
+    Result[LIdx] := LPair.Key;
+    Inc(LIdx);
+  end;
   TArray.Sort<string>(Result, TIStringComparer.Ordinal);
 end;
 
 function TPasDefines.Clone: TPasDefines;
-var
-  LKey: string;
 begin
   // Pre-sized: this runs once per FILE (defines are unit-local), and growing
   // through rehashes cost more than the clone itself.
   Result := TPasDefines.Create(FMap.Count);
-  for LKey in FMap.Keys do
-    Result.FMap.Add(LKey, True);
+  for var LPair in FMap do
+    Result.FMap.Add(LPair.Key, True);
 end;
 
 { TPasPreprocessor ----------------------------------------------------------- }
