@@ -54,6 +54,9 @@ type
     HelperSym: Integer;  // the helper's own skType symbol
   end;
 
+  // Which of the resolver's tree walks WalkOperatorChain stands in for.
+  TPasChainWalk = (cwCollect, cwResolve, cwRepoint, cwUnbind);
+
   TPasSemaResolver = class
   private
     FModel: TPasSemaModel;
@@ -184,6 +187,8 @@ type
     function ElementOfTypeSym(ATypeSym: Integer): Integer;
     procedure RepointScope(ANode, ANewScope: Integer);
     procedure UnbindShadowedByWith(ANode, AWithScope: Integer);
+    procedure WalkOperatorChain(ANode: Integer; AWalk: TPasChainWalk;
+      AScope: Integer);
     procedure ResolveOneWithStmt(AWith: Integer);
     procedure ResolveWithStmts;
     procedure CheckForCounters;
@@ -2098,12 +2103,15 @@ end;
   Collect belongs here too. }
 function TPasSemaResolver.DeclaresInOwnScope(ANode: Integer): Boolean;
 var
-  LChild: Integer;
+  LNode: Integer;
 begin
-  LChild := FirstChild(ANode);
-  while LChild <> NIL_NODE do
+  // A search of the subtree in a loop over the tree's links, not a recursion
+  // per level: a block holding an operator chain of a few thousand terms
+  // overflowed the stack here (audit A1-01). The answer has no order.
+  LNode := FirstChild(ANode);
+  while LNode <> NIL_NODE do
   begin
-    case KindOf(LChild) of
+    case KindOf(LNode) of
       nkInlineVar, nkInlineConst, nkVarDecl, nkConstDecl, nkTypeDecl,
       nkLabelSec, nkUsesClause, nkVariantPart, nkRoutine, nkMethodResolution,
       nkRecordType, nkClassType, nkInterfaceType, nkObjectType, nkHelperType,
@@ -2113,10 +2121,19 @@ begin
       nkBlock, nkForStmt, nkForInStmt, nkExceptOn, nkAnonMethod, nkProcType:
         ;
     else
-      if DeclaresInOwnScope(LChild) then
-        Exit(True);
+      if FirstChild(LNode) <> NIL_NODE then
+      begin
+        LNode := FirstChild(LNode);
+        Continue;
+      end;
     end;
-    LChild := NextSib(LChild);
+    while NextSib(LNode) = NIL_NODE do
+    begin
+      LNode := FTree.Nodes[LNode].Parent;
+      if LNode = ANode then
+        Exit(False);
+    end;
+    LNode := NextSib(LNode);
   end;
   Result := False;
 end;
@@ -2127,6 +2144,11 @@ var
 begin
   if ANode = NIL_NODE then
     Exit;
+  if KindOf(ANode) = nkBinaryOp then
+  begin
+    WalkOperatorChain(ANode, cwCollect, AScope);
+    Exit;
+  end;
   FNodeScope[ANode] := AScope;
 
   case KindOf(ANode) of
@@ -2719,6 +2741,11 @@ begin
     Exit;
 
   case KindOf(ANode) of
+    nkBinaryOp:
+      begin
+        WalkOperatorChain(ANode, cwResolve, NIL_SCOPE);
+        Exit;
+      end;
     nkIdent:
       if not FIsDeclName[ANode] and (FModel.RefMap[ANode] = NIL_SYM) then
       begin
@@ -3744,6 +3771,11 @@ begin
     FModel.Scopes[LOwnScope].Parent := ANewScope;
     Exit;
   end;
+  if KindOf(ANode) = nkBinaryOp then
+  begin
+    WalkOperatorChain(ANode, cwRepoint, ANewScope);
+    Exit;
+  end;
   FNodeScope[ANode] := ANewScope;
   LChild := FirstChild(ANode);
   while LChild <> NIL_NODE do
@@ -3781,6 +3813,11 @@ var
 begin
   if ANode = NIL_NODE then
     Exit;
+  if KindOf(ANode) = nkBinaryOp then
+  begin
+    WalkOperatorChain(ANode, cwUnbind, AWithScope);
+    Exit;
+  end;
   if (KindOf(ANode) = nkIdent) and not FIsDeclName[ANode] and
      (FModel.RefMap[ANode] <> NIL_SYM) then
   begin
@@ -3795,6 +3832,51 @@ begin
   begin
     UnbindShadowedByWith(LChild, AWithScope);
     LChild := NextSib(LChild);
+  end;
+end;
+
+{ An operator chain `A + B + C + ...` is a LEFT spine of nkBinaryOp nodes as
+  deep as the chain is long - the parser's operator loops are iterative, so
+  nothing bounds it, and generated code (a string table, an embedded SQL text)
+  writes thousands of terms. The four walks above recursed once per level, so
+  about 1,900 terms overflowed the stack (audit A1-01). This walks the spine
+  in a loop and recurses only into the operands, in the order the recursion
+  visited them: every operator on the way down (Collect and RepointScope give
+  it the scope there, as their recursion did on entry), then the operands as
+  TPasTree.ChainFirst/ChainNext hand them out. An operator never owns a
+  scope, so RepointScope's stop at a scope owner cannot apply on the spine. }
+procedure TPasSemaResolver.WalkOperatorChain(ANode: Integer;
+  AWalk: TPasChainWalk; AScope: Integer);
+
+  procedure Visit(N: Integer);
+  begin
+    case AWalk of
+      cwCollect: Collect(N, AScope);
+      cwResolve: ResolveNode(N);
+      cwRepoint: RepointScope(N, AScope);
+      cwUnbind: UnbindShadowedByWith(N, AScope);
+    end;
+  end;
+
+var
+  LNode, LOp: Integer;
+begin
+  if AWalk in [cwCollect, cwRepoint] then
+  begin
+    LNode := ANode;
+    while LNode <> NIL_NODE do
+    begin
+      FNodeScope[LNode] := AScope;
+      LNode := FirstChild(LNode);
+      if (LNode <> NIL_NODE) and (KindOf(LNode) <> nkBinaryOp) then
+        LNode := NIL_NODE;
+    end;
+  end;
+  LNode := FTree.ChainFirst(ANode, LOp);
+  while LNode <> NIL_NODE do
+  begin
+    Visit(LNode);
+    LNode := FTree.ChainNext(ANode, LOp, LNode);
   end;
 end;
 
@@ -4101,6 +4183,17 @@ var
               Flag(LArg, AName);
           end;
         end;
+      nkBinaryOp:
+        begin
+          // An operator chain in a loop (TPasTree.ChainFirst, audit A1-01).
+          LChild := FTree.ChainFirst(ANode, LTarget);
+          while LChild <> NIL_NODE do
+          begin
+            Scan(LChild, ACounter, AName);
+            LChild := FTree.ChainNext(ANode, LTarget, LChild);
+          end;
+          Exit;
+        end;
     end;
     LChild := FirstChild(ANode);
     while LChild <> NIL_NODE do
@@ -4194,6 +4287,17 @@ procedure TPasSemaResolver.CheckBareRaises;
               LChild := NextSib(LChild);
             end;
             LPart := NextSib(LPart);
+          end;
+          Exit;
+        end;
+      nkBinaryOp:
+        begin
+          // An operator chain in a loop (TPasTree.ChainFirst, audit A1-01).
+          LChild := FTree.ChainFirst(ANode, LPart);
+          while LChild <> NIL_NODE do
+          begin
+            Walk(LChild, AInHandler);
+            LChild := FTree.ChainNext(ANode, LPart, LChild);
           end;
           Exit;
         end;
@@ -4322,6 +4426,18 @@ procedure TPasSemaResolver.CheckSlicePositions;
       NodePos(LCallee, LFileId, LLine, LCol);
       FModel.AddDiag(MakeDiag('E2193', SE2193_SliceOutsideOpenArray,
         LCallee, LFileId, LLine, LCol));
+    end;
+    if KindOf(ANode) = nkBinaryOp then
+    begin
+      // An operator chain in a loop (TPasTree.ChainFirst, audit A1-01); an
+      // operand is never an argument.
+      LChild := FTree.ChainFirst(ANode, LArgIdx);
+      while LChild <> NIL_NODE do
+      begin
+        Walk(LChild, False);
+        LChild := FTree.ChainNext(ANode, LArgIdx, LChild);
+      end;
+      Exit;
     end;
     LChild := FirstChild(ANode);
     if KindOf(ANode) = nkCall then

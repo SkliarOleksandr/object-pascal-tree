@@ -8,6 +8,8 @@ program PasTreeDemo;
 // itself as an analyzer defect. Every unit added to source\ must be listed
 // here AND in PasTreeDemo.dproj's DCCReference list.
 
+{$MAXSTACKSIZE $01000000}   // 16 MB per thread: README, "The stack every host should reserve"
+
 uses
   Vcl.Forms,
   PasTreeDemo.Main in 'PasTreeDemo.Main.pas' {frmMain},

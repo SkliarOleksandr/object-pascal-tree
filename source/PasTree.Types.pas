@@ -251,10 +251,59 @@ function AllocatedBytes: UInt64;
   above, one decimal either way. }
 function MemoryText(ABytes: UInt64): string;
 
+{ Call first thing in an `except` block that absorbs an analysis failure and
+  lets the thread go on (a load worker, a pass body, a session worker). When
+  the exception in flight is an EStackOverflow it puts the thread's stack
+  guard page back; otherwise it does nothing.
+
+  Windows spends the guard page raising the overflow and does not restore
+  it, so the NEXT overflow on the same thread has nothing to raise it: the
+  process ends there, with no exception and no message (audit A1-01 - one
+  caught overflow per pool worker, then death at the second, 24 copies of a
+  deep unit on 16 cores). The guard goes back one page below the current
+  stack page, where the C runtime's _resetstkoflw puts it: the stack grows
+  through it as through the original, and a later overflow raises again. }
+procedure PasRecoverStackOverflow;
+
 implementation
 
 uses
+  Winapi.Windows,
   System.SysUtils;
+
+procedure PasRecoverStackOverflow;
+var
+  LInfo: TMemoryBasicInformation;
+  LSys: TSystemInfo;
+  LPage, LGuard: NativeUInt;
+  LOld: DWORD;
+begin
+  // By the class, deprecated or not, and never by EExternal's
+  // ExceptionRecord: that record sits in the spent part of the stack, and
+  // reading it there brought the process down.
+  {$WARN SYMBOL_DEPRECATED OFF}
+  if not (ExceptObject is EStackOverflow) then
+    Exit;
+  {$WARN SYMBOL_DEPRECATED ON}
+  GetSystemInfo(LSys);
+  LPage := LSys.dwPageSize;
+  // A local lives on the current stack page; its region's AllocationBase is
+  // the bottom of the thread's stack reservation.
+  if VirtualQuery(@LInfo, LInfo, SizeOf(LInfo)) = 0 then
+    Exit;
+  LGuard := (NativeUInt(@LInfo) and not (LPage - 1)) - LPage;
+  // The last pages of the reservation are the system's own: a guard there
+  // could raise nothing (the stack is spent).
+  if LGuard < NativeUInt(LInfo.AllocationBase) + 4 * LPage then
+    Exit;
+  if VirtualQuery(Pointer(LGuard), LInfo, SizeOf(LInfo)) = 0 then
+    Exit;
+  if LInfo.Protect and PAGE_GUARD <> 0 then
+    Exit;
+  if VirtualAlloc(Pointer(LGuard), LPage, MEM_COMMIT, PAGE_READWRITE) = nil then
+    Exit;
+  VirtualProtect(Pointer(LGuard), LPage, PAGE_READWRITE or PAGE_GUARD, LOld);
+end;
 
 function AllocatedBytes: UInt64;
 var

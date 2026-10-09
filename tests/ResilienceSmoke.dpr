@@ -38,6 +38,7 @@ uses
   PasTree.Sema.Model in '..\source\PasTree.Sema.Model.pas',
   PasTree.Sema.Builtins in '..\source\PasTree.Sema.Builtins.pas',
   PasTree.Sema.Resolver in '..\source\PasTree.Sema.Resolver.pas',
+  PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas',
   PasTree.TestKit in 'PasTree.TestKit.pas';
 
 const
@@ -291,6 +292,87 @@ begin
     end);
 end;
 
+{ Operator chains of ATerms operands (audit A1-01): a left spine of nkBinaryOp
+  as long as the chain, which every Phase-1 walk recursed down one level per
+  operand - about 1,900 terms overflowed the stack. Each shape a walk of its
+  own reaches: a constant (the declaration's Collect), an assignment and an
+  inline var (ResolveNode, the typer), a condition (CheckBareRaises,
+  CheckSlicePositions, the block's DeclaresInOwnScope), a with body
+  (RepointScope, UnbindShadowedByWith), a for body (CheckForCounters). The
+  analysis must not raise, every operand must be bound and every chain typed,
+  and the model must dump. }
+procedure RunChainCase(ATerms: Integer);
+var
+  LSrc: TStringBuilder;
+  LModel: TPasSemaModel;
+  LName, LRaised: string;
+  LIdx, LUnbound, LUntyped, LTop: Integer;
+begin
+  LSrc := TStringBuilder.Create;
+  try
+    LSrc.Append('unit U;'#10'interface'#10 +
+      'type TR = record V: Integer; end;'#10'const S = ''a''');
+    for LIdx := 2 to ATerms do
+      LSrc.Append(#10'  + ''b''');
+    LSrc.Append(';'#10'var A: Integer; R: TR;'#10'implementation'#10 +
+      'procedure P;'#10'var I: Integer;'#10'begin'#10'  A := A');
+    for LIdx := 2 to ATerms do
+      LSrc.Append(' + A');
+    LSrc.Append(';'#10'  if (A > 0)');
+    for LIdx := 2 to ATerms do
+      LSrc.Append(' and (A > 0)');
+    LSrc.Append(' then raise;'#10'  with R do V := V');
+    for LIdx := 2 to ATerms do
+      LSrc.Append(' + V');
+    LSrc.Append(';'#10'  for I := 0 to 1 do'#10'  begin'#10'    var X := A');
+    for LIdx := 2 to ATerms do
+      LSrc.Append(' + A');
+    LSrc.Append(';'#10'  end;'#10'end;'#10'end.'#10);
+    LName := Format('a %d-term operator chain, every shape', [ATerms]);
+    LRaised := '';
+    LModel := nil;
+    try
+      LModel := AnalyzeText(LSrc.ToString);
+      DumpSemaModel(LModel);
+    except
+      on E: Exception do
+        LRaised := E.ClassName + ': ' + E.Message;
+    end;
+  finally
+    LSrc.Free;
+  end;
+  LUnbound := 0;
+  LUntyped := 0;
+  if LModel <> nil then
+  try
+    for LIdx := 0 to High(LModel.Tree.Nodes) do
+      case LModel.Tree.Nodes[LIdx].Kind of
+        nkIdent:
+          if (SameText(LModel.Tree.NodeText(LIdx), 'A') or
+              SameText(LModel.Tree.NodeText(LIdx), 'V')) and
+             (LModel.RefMap[LIdx] = NIL_SYM) then
+            Inc(LUnbound);
+        nkBinaryOp:
+          begin
+            // The top of each chain: its parent is not an operator.
+            LTop := LModel.Tree.Nodes[LIdx].Parent;
+            if (LTop <> NIL_NODE) and
+               (LModel.Tree.Nodes[LTop].Kind <> nkBinaryOp) and
+               (LModel.ExprType[LIdx] = NIL_SYM) then
+              Inc(LUntyped);
+          end;
+      end;
+  finally
+    LModel.Free;
+  end;
+  GCounter.Ok(LName, (LRaised = '') and (LUnbound = 0) and (LUntyped = 0),
+    procedure
+    begin
+      Writeln(Format('  raised: "%s"; %d operands unbound, %d chains untyped',
+        [LRaised, LUnbound, LUntyped]));
+    end);
+end;
+
 var
   LCase: TCase;
 begin
@@ -301,6 +383,8 @@ begin
     GCounter.Init;
     for LCase in CASES do
       RunCase(LCase);
+    RunChainCase(5000);
+    RunChainCase(50000);
     if GCounter.Finish('ResilienceSmoke') then
       ExitCode := 1;
   finally

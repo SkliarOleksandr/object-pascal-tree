@@ -11,6 +11,7 @@ program PasTreePP;
 }
 
 {$APPTYPE CONSOLE}
+{$MAXSTACKSIZE $01000000}   // 16 MB per thread: README, "The stack every host should reserve"
 
 uses
   System.SysUtils,

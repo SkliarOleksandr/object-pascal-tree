@@ -1279,23 +1279,51 @@ end;
 
 function TPasParser.ParseIfStmt: Integer;
 var
-  LNode: Integer;
+  LNode, LCount: Integer;
+  LOpen: TArray<Integer>;
 begin
   // 5.3.1; dangling else binds to the nearest if by recursion order.
-  LNode := FB.AddNode(nkIfStmt, NIL_NODE, FPos);
-  Next;
-  FB.Adopt(LNode, ParseExpression);
-  Expect(tkThen, '"then"');
-  if (CurKind = tkElse) or (CurKind = tkSemicolon) then
-    FB.Adopt(LNode, FB.AddNode(nkEmptyStmt, NIL_NODE, FPos))
-  else
-    FB.Adopt(LNode, ParseStatement);
-  if CurKind = tkElse then
-  begin
+  //
+  // An `else if` chain is parsed in a LOOP, not through ParseStatement: a
+  // generated dispatcher of a thousand arms is flat code, but each arm used
+  // to cost one EnterGuard level, so past about 510 arms the parser reported
+  // its recursion limit on valid code and dropped the rest (audit A1-07).
+  // The tree is the one the recursion built - each `if` after an `else` is
+  // the last child of the one before it, created at the same point and
+  // closed at the same position - only no guard level is charged for it.
+  LOpen := nil;
+  LCount := 0;
+  repeat
+    LNode := FB.AddNode(nkIfStmt, NIL_NODE, FPos);
     Next;
-    FB.Adopt(LNode, ParseStatement);
-  end;
+    FB.Adopt(LNode, ParseExpression);
+    Expect(tkThen, '"then"');
+    if (CurKind = tkElse) or (CurKind = tkSemicolon) then
+      FB.Adopt(LNode, FB.AddNode(nkEmptyStmt, NIL_NODE, FPos))
+    else
+      FB.Adopt(LNode, ParseStatement);
+    if CurKind <> tkElse then
+      Break;
+    Next;
+    if CurKind <> tkIf then
+    begin
+      FB.Adopt(LNode, ParseStatement);
+      Break;
+    end;
+    // `else if`: this if stays open until the chain after it is parsed.
+    if LCount = Length(LOpen) then
+      SetLength(LOpen, LCount * 2 + 8);
+    LOpen[LCount] := LNode;
+    Inc(LCount);
+  until False;
   FB.SetLast(LNode, FPos - 1);
+  while LCount > 0 do
+  begin
+    Dec(LCount);
+    FB.Adopt(LOpen[LCount], LNode);
+    LNode := LOpen[LCount];
+    FB.SetLast(LNode, FPos - 1);
+  end;
   Result := LNode;
 end;
 

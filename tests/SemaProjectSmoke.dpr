@@ -4360,6 +4360,90 @@ begin
   TDirectory.Delete(LDir, True);
 end;
 
+// Depth that is not the source's nesting, through the project's passes
+// (audit A1-01, A1-07): 10,000-term operator chains - a constant typed from
+// its operands (UntypedInitTypeX), an inline var inferred from them (the
+// cross-type walk's OpX), a condition, a with body - and a 1,000-arm
+// `else if` chain whose every arm names an undeclared identifier. Before,
+// Phase 1 overflowed the stack on the chains, the unit was dropped as
+// unloadable and nothing in it was reported; the parser's recursion guard
+// stopped the arms near 510. dcc64 37.0 compiles both shapes.
+procedure TestOperatorChains;
+const
+  TERMS = 10000;
+  ARMS = 1000;
+var
+  LDir, LRaised: string;
+  LSrc: TStringBuilder;
+  LIdx: Integer;
+  LModel: TPasSemaModel;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_operator_chains');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  LSrc := TStringBuilder.Create;
+  try
+    LSrc.Append('unit Chains;'#10'interface'#10 +
+      'type TR = record V: Integer; end;'#10'const S = ''a''');
+    for LIdx := 2 to TERMS do
+      LSrc.Append(#10'  + ''b''');
+    LSrc.Append(';'#10'var A: Integer; R: TR;'#10 +
+      'function F(I: Integer): Integer;'#10'implementation'#10 +
+      'function F(I: Integer): Integer;'#10'begin'#10'  Result := A');
+    for LIdx := 2 to TERMS do
+      LSrc.Append(' + A');
+    LSrc.Append(';'#10'  if (A > 0)');
+    for LIdx := 2 to TERMS do
+      LSrc.Append(' and (A > 0)');
+    LSrc.Append(' then Result := 1;'#10'  with R do Result := V');
+    for LIdx := 2 to TERMS do
+      LSrc.Append(' + V');
+    LSrc.Append(';'#10'  var X := A');
+    for LIdx := 2 to TERMS do
+      LSrc.Append(' + A');
+    LSrc.Append(';'#10'  if I = 0 then Result := X'#10);
+    for LIdx := 1 to ARMS - 1 do
+      LSrc.Append('  else if I = ').Append(LIdx)
+        .Append(' then Result := Undecl').Append(LIdx).Append(#10);
+    LSrc.Append('  ;'#10'end;'#10'end.'#10);
+    TFile.WriteAllText(TPath.Combine(LDir, 'Chains.pas'), LSrc.ToString);
+  finally
+    LSrc.Free;
+  end;
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    LRaised := '';
+    try
+      GProj.AnalyzeDirectory(LDir);
+    except
+      on E: Exception do
+        LRaised := E.ClassName + ': ' + E.Message;
+    end;
+    Ok('operator chains: the analysis completes (' + LRaised + ')',
+      LRaised = '');
+    Ok('operator chains: no unit failed to load (' +
+      string.Join('; ', GProj.LoadFailures) + ')',
+      Length(GProj.LoadFailures) = 0);
+    LModel := ModelByName('chains');
+    Ok('operator chains: the unit has a model', LModel <> nil);
+    if LModel <> nil then
+    begin
+      Ok('operator chains: no pass failed (' +
+        IntToStr(DiagCount(LModel, 'PPINT')) + ')',
+        DiagCount(LModel, 'PPINT') = 0);
+      Ok(Format('operator chains: every else-if arm is reported (%d E2003)',
+        [DiagCount(LModel, 'E2003')]), DiagCount(LModel, 'E2003') = ARMS - 1);
+    end;
+  finally
+    GProj.Free;
+  end;
+  TDirectory.Delete(LDir, True);
+end;
+
 // The thread-pool contract (audit B02). ConfigureThreadPool pins the default
 // pool and turns off its past-Max injection, so no pool task may wait on
 // another queued one. Two ways analysis broke that and hung for good:
@@ -10391,6 +10475,7 @@ begin
   TestNestedOuterAfterUnit;
   TestDeclAfterUnit;
   TestOracleDepth;
+  TestOperatorChains;
   TestPoolContract;
 
   if GCounter.Finish('SemaProjectSmoke') then

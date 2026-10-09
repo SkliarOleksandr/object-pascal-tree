@@ -188,6 +188,33 @@ every CLI driver in `tools/` set it, and the server was simply the one host that
 did not. Building the server with full release flags, for comparison, was worth
 about 2% - inside the noise. One line was the entire difference.
 
+### The stack every host should reserve
+
+```pascal
+{$MAXSTACKSIZE $01000000}   // 16 MB per thread - in the program's .dpr
+```
+
+The pool's workers are created with the stack size in the executable's
+header, so this directive in the host's program file is the only way to give
+them more than the default 1 MB; a library cannot. The walks over a tree are
+recursive, one level per nesting level of the source, and the depth that is
+not the source's nesting - an operator chain `'a' + 'b' + ...` and an
+`else if` chain, both as long as generated code makes them - is walked in
+loops (audit A1-01, A1-07). The reserve is for what is left: a recursion
+nobody has met yet at a depth nobody has written yet. It costs address space
+only; a page is committed when the stack reaches it. Every program in
+`tools\` and the demo sets it.
+
+An overflow that does happen is caught where the analysis absorbs failures -
+a unit's load, a pass body - and reported there as the unit's or the pass's
+failure. Those handlers call `PasRecoverStackOverflow` (`PasTree.Types`),
+because Windows does not restore the guard page it spent raising the
+overflow: the next one on that pool thread would end the process with no
+exception at all. A host with an `except` of its own that catches an
+analysis exception and lets its thread go on should call it too. (Win64. A
+Win32 process may not survive even the first: when the RTL's handler has no
+stack left to run on, the process ends there.)
+
 ### Considered and parked: the Windows heap as memory manager
 
 The RTL memory manager returns a 1.25 MB block pool to the OS only when every

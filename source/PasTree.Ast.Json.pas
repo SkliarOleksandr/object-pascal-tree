@@ -49,10 +49,12 @@ function AstToJson(const ATree: TPasTree; ARootNode: Integer): string;
 var
   LSB: TStringBuilder;
 
-  procedure EmitNode(AIndex: Integer);
+  // A node's object up to its children: closed with `}` when it has none,
+  // left open after `"children":[` when it has some.
+  procedure EmitHead(AIndex: Integer);
   var
     LVis: TPasVisibleToken;
-    LLine, LCol, LChild: Integer;
+    LLine, LCol: Integer;
     LKind: TPasNodeKind;
   begin
     LKind := ATree.Nodes[AIndex].Kind;
@@ -129,20 +131,40 @@ var
     if ATree.Nodes[AIndex].Aux <> NIL_NODE then
       if not (LKind in [nkUnaryOp, nkBinaryOp]) then
         LSB.AppendFormat(',"aux":%d', [ATree.Nodes[AIndex].Aux]);
-    LChild := ATree.Nodes[AIndex].FirstChild;
-    if LChild <> NIL_NODE then
-    begin
-      LSB.Append(',"children":[');
-      while LChild <> NIL_NODE do
+    if ATree.Nodes[AIndex].FirstChild <> NIL_NODE then
+      LSB.Append(',"children":[')
+    else
+      LSB.Append('}');
+  end;
+
+  // The subtree under ARoot, in a loop over the tree's own links rather than
+  // a recursion per level: an operator chain nests one nkBinaryOp per operand,
+  // and a few thousand terms of generated code overflowed the stack here
+  // (audit B1-37). Pre-order, the children of a node closed by `]}` on the
+  // way back up - the output the recursion wrote.
+  procedure EmitTree(ARoot: Integer);
+  var
+    LNode: Integer;
+  begin
+    LNode := ARoot;
+    repeat
+      EmitHead(LNode);
+      if ATree.Nodes[LNode].FirstChild <> NIL_NODE then
       begin
-        EmitNode(LChild);
-        LChild := ATree.Nodes[LChild].NextSibling;
-        if LChild <> NIL_NODE then
-          LSB.Append(',');
+        LNode := ATree.Nodes[LNode].FirstChild;
+        Continue;
       end;
-      LSB.Append(']');
-    end;
-    LSB.Append('}');
+      while (LNode <> ARoot) and
+            (ATree.Nodes[LNode].NextSibling = NIL_NODE) do
+      begin
+        LNode := ATree.Nodes[LNode].Parent;
+        LSB.Append(']}');
+      end;
+      if LNode = ARoot then
+        Break;
+      LSB.Append(',');
+      LNode := ATree.Nodes[LNode].NextSibling;
+    until False;
   end;
 
 var
@@ -158,7 +180,7 @@ begin
       JsonEscape(ATree.Source.FileNames[LIdx], LSB);
     end;
     LSB.Append('],"ast":');
-    EmitNode(ARootNode);
+    EmitTree(ARootNode);
     LSB.Append('}');
     Result := LSB.ToString;
   finally

@@ -1796,6 +1796,8 @@ end;
 procedure TPasSemaProject.NoteInternalError(AMid: Integer; const APass: string;
   E: Exception);
 begin
+  // Called from the `except` block that caught E, whose thread goes on.
+  PasRecoverStackOverflow;
   NoteInternalError(AMid, APass, E.ClassName, E.Message);
 end;
 
@@ -4487,6 +4489,7 @@ begin
         except
           on E: Exception do
           begin
+            PasRecoverStackOverflow;   // the worker goes on to the next unit
             LDone[AIndex] := nil;   // registered as known-bad below
             // Keep WHY. Swallowing this made an internal defect indistinguish-
             // able from a missing file: the unit ended up cached as known-bad,
@@ -4598,6 +4601,7 @@ begin
   except
     on E: Exception do
     begin
+      PasRecoverStackOverflow;   // the worker goes on to the next unit
       Result := nil;
       AErrClass := E.ClassName;
       AErrMsg := E.Message;
@@ -4622,6 +4626,7 @@ begin
   except
     on E: Exception do
     begin
+      PasRecoverStackOverflow;   // the worker goes on to the next unit
       Result := nil;
       AErrClass := E.ClassName;
       AErrMsg := E.Message;
@@ -9517,6 +9522,9 @@ var
   // SymTypeX until the parallel phase is over (see FXNewSymType). The nkIdent
   // case reads this before SymTypeX so a later use in the same walk sees it.
   LNewSymType: TDictionary<Integer, TSemaXType>;
+  // The operator WalkChain is about to finish: its leftmost operand is walked
+  // already, so Walk starts its child loop at the second operand.
+  LSpineSkip: Integer;
 
   // The per-node tables, mode-switched. In the pass they are the arrays; in a
   // probe the probe's dictionaries, where presence in FX also means "walked".
@@ -10701,8 +10709,18 @@ var
     anything else this walk's answer; the walk's own answer for N when the
     operands say nothing. }
   function OpX(N: Integer): TSemaXType;
+
+    // Does OpX recurse into operator N's operands? (the nkBinaryOp case below)
+    function IsChainOp(ANode: Integer): Boolean;
+    begin
+      Result := (ANode <> NIL_NODE) and
+        (LM.Tree.Nodes[ANode].Kind = nkBinaryOp) and
+        (LM.Tree.Nodes[ANode].FirstChild <> NIL_NODE) and
+        not BinaryOpIsAs(AId, ANode);
+    end;
+
   var
-    LLit: Integer;
+    LLit, LNode: Integer;
     LNeg: Boolean;
   begin
     Result := XNil;
@@ -10714,11 +10732,24 @@ var
       nkParen:
         Result := OpX(LM.Tree.Nodes[N].FirstChild);
       nkBinaryOp:
+        if IsChainOp(N) then
         begin
-          LLit := LM.Tree.Nodes[N].FirstChild;
-          if (LLit <> NIL_NODE) and not BinaryOpIsAs(AId, N) then
-            Result := OperatorResultX(AId, N, OpX(LLit),
-              OpX(LM.Tree.Nodes[LLit].NextSibling));
+          // The left operand of an operator chain is the next operator down
+          // the spine: computed in a loop, bottom-up, with the fallback each
+          // level's own OpX call had (audit A1-01, as Walk's chain).
+          LNode := N;
+          while IsChainOp(LM.Tree.Nodes[LNode].FirstChild) do
+            LNode := LM.Tree.Nodes[LNode].FirstChild;
+          Result := OpX(LM.Tree.Nodes[LNode].FirstChild);
+          repeat
+            Result := OperatorResultX(AId, LNode, Result,
+              OpX(LM.Tree.Nodes[LM.Tree.Nodes[LNode].FirstChild].NextSibling));
+            if LNode = N then
+              Break;
+            if not XValid(Result) then
+              Result := GetX(LNode);
+            LNode := LM.Tree.Nodes[LNode].Parent;
+          until False;
         end;
       nkUnaryOp:
         Result := OperatorResultX(AId, N, OpX(LM.Tree.Nodes[N].FirstChild),
@@ -10819,6 +10850,14 @@ var
       SetXAt(LName, LX0);
       LName := LM.Tree.Nodes[LName].NextSibling;
     end;
+  end;
+
+  // Is N the next operator down a chain's left spine for Walk - one a probe
+  // has not walked already (Walk's memo would stop the recursion there)?
+  function IsWalkSpine(N: Integer): Boolean;
+  begin
+    Result := (N <> NIL_NODE) and (LM.Tree.Nodes[N].Kind = nkBinaryOp) and
+      ((LProbe = nil) or not LProbe.FX.ContainsKey(N));
   end;
 
   procedure Walk(N: Integer);
@@ -10928,6 +10967,37 @@ var
     end;
 
     LChild := LM.Tree.Nodes[N].FirstChild;
+    if N = LSpineSkip then
+    begin
+      // Finishing an operator of a chain (below): its leftmost operand is
+      // walked already.
+      LSpineSkip := NIL_NODE;
+      if LChild <> NIL_NODE then
+        LChild := LM.Tree.Nodes[LChild].NextSibling;
+    end
+    else if (LM.Tree.Nodes[N].Kind = nkBinaryOp) and IsWalkSpine(LChild) then
+    begin
+      // An operator chain's left spine is as deep as the chain is long
+      // (audit A1-01, see TPasSemaResolver.WalkOperatorChain): down it in a
+      // loop, the leftmost operand walked, then each operator finished by a
+      // Walk that skips the operand already walked - the recursion's order,
+      // at a constant depth. A probe's memo stops the descent where it would
+      // have stopped the recursion.
+      LBase := N;
+      while IsWalkSpine(LM.Tree.Nodes[LBase].FirstChild) do
+        LBase := LM.Tree.Nodes[LBase].FirstChild;
+      LChild := LM.Tree.Nodes[LBase].FirstChild;
+      if LChild <> NIL_NODE then
+        Walk(LChild);
+      repeat
+        LSpineSkip := LBase;
+        Walk(LBase);
+        if LBase = N then
+          Break;
+        LBase := LM.Tree.Nodes[LBase].Parent;
+      until False;
+      Exit;
+    end;
     while LChild <> NIL_NODE do
     begin
       Walk(LChild);
@@ -11612,6 +11682,7 @@ var
 begin
   LM := FModels[AId];
   LProbe := AProbe;
+  LSpineSkip := NIL_NODE;
   if LProbe <> nil then
   begin
     // A PROBE: the probe's tables in place of the arrays and overlays, the
@@ -15108,7 +15179,7 @@ function TPasSemaProject.UntypedInitTypeX(AMid, ANode: Integer;
   AFollowForeign: Boolean): TSemaXType;
 var
   LM: TPasSemaModel;
-  LLit: Integer;
+  LLit, LNode: Integer;
   LNeg: Boolean;
 begin
   Result := XNil;
@@ -15137,14 +15208,34 @@ begin
         // The operands' own inferred types first: they know what the
         // intra-unit typer cannot - a named constant (no TypeSym), another
         // unit's name, a literal's exact type (`5000000000 + 1` is Int64).
-        LLit := LM.Tree.Nodes[ANode].FirstChild;
+        //
+        // The left operand of a chain `C1 + C2 + ...` is the next operator
+        // down its spine, as deep as the chain is long (audit A1-01): the
+        // spine is computed in a loop, bottom-up, each operator's result
+        // passing through the fallback and the nil filter its own call
+        // applied (the top's filter is the one below the case).
+        LNode := ANode;
+        while (LM.Tree.Nodes[LNode].FirstChild <> NIL_NODE) and
+              (LM.Tree.Nodes[LM.Tree.Nodes[LNode].FirstChild].Kind =
+               nkBinaryOp) do
+          LNode := LM.Tree.Nodes[LNode].FirstChild;
+        LLit := LM.Tree.Nodes[LNode].FirstChild;
         if LLit <> NIL_NODE then
-          Result := OperatorResultX(AMid, ANode,
-            UntypedInitTypeX(AMid, LLit, AFollowForeign),
-            UntypedInitTypeX(AMid, LM.Tree.Nodes[LLit].NextSibling,
-              AFollowForeign));
-        if not XValid(Result) and (LM.IntraType(ANode) <> NIL_SYM) then
-          Result := XPlain(AMid, LM.IntraType(ANode));
+          Result := UntypedInitTypeX(AMid, LLit, AFollowForeign);
+        repeat
+          LLit := LM.Tree.Nodes[LNode].FirstChild;
+          if LLit <> NIL_NODE then
+            Result := OperatorResultX(AMid, LNode, Result,
+              UntypedInitTypeX(AMid, LM.Tree.Nodes[LLit].NextSibling,
+                AFollowForeign));
+          if not XValid(Result) and (LM.IntraType(LNode) <> NIL_SYM) then
+            Result := XPlain(AMid, LM.IntraType(LNode));
+          if LNode = ANode then
+            Break;
+          if XValid(Result) and (XCatOf(Result) = tcNil) then
+            Result := XNil;
+          LNode := LM.Tree.Nodes[LNode].Parent;
+        until False;
       end;
     nkInlineIf:
       begin
@@ -18363,6 +18454,7 @@ begin
     // unfinished property for a day (2026-09-04).
     on E: Exception do
     begin
+      PasRecoverStackOverflow;   // the host's thread lives on
       FreeAndNil(LNew);
       Exit(Refuse('parse-failed(' + E.ClassName + ': ' + E.Message + ')'));
     end;

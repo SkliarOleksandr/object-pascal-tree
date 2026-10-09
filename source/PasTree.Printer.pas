@@ -414,6 +414,8 @@ type
     Own: TOwnership;
     // Per node: the next of its own tokens Losses has not looked at.
     LossPos: TArray<Integer>;
+    // The operator EmitChain is finishing: its left operand is printed.
+    SpineSkip: Integer;
     Items: TPasPrintItems;
     Count: Integer;
     function Kind(ANode: Integer): TPasNodeKind; inline;
@@ -464,6 +466,7 @@ type
     procedure VariantBranch(ANode: Integer);
     procedure GenericParam(ANode: Integer);
     procedure Emit(ANode: Integer);
+    procedure EmitChain(ANode: Integer);
   end;
 
 function TPrinter.Kind(ANode: Integer): TPasNodeKind;
@@ -1553,15 +1556,48 @@ begin
   end;
 end;
 
+{ An operator chain's left spine is as deep as the chain is long (audit A1-01,
+  see TPasSemaResolver.WalkOperatorChain). Printed in a loop: down the spine
+  (each operator's head work as Emit does it on entry), the leftmost operand,
+  then each operator finished by an Emit that resumes after its left operand -
+  the items the recursion added, in its order, at a constant depth. }
+procedure TPrinter.EmitChain(ANode: Integer);
+var
+  LNode: Integer;
+begin
+  LNode := ANode;
+  while (T.Nodes[LNode].FirstChild <> NIL_NODE) and
+        (T.Nodes[T.Nodes[LNode].FirstChild].Kind = nkBinaryOp) do
+  begin
+    LNode := T.Nodes[LNode].FirstChild;
+    if nfPacked in T.Nodes[LNode].Flags then
+      Kw('packed', T.Nodes[LNode].Parent);
+  end;
+  Emit(T.Nodes[LNode].FirstChild);
+  repeat
+    SpineSkip := LNode;
+    Emit(LNode);
+    if LNode = ANode then
+      Break;
+    LNode := T.Nodes[LNode].Parent;
+  until False;
+end;
+
 procedure TPrinter.Emit(ANode: Integer);
 var
   LKind: TPasNodeKind;
   C0, C1, C2, LChild, LOp: Integer;
   LOpKind: TPasTokenKind;
+  LResume: Boolean;
 begin
   // A child a template expects and an error tree lacks.
   if ANode = NIL_NODE then
     Exit;
+  // Finishing an operator of a chain (EmitChain): its head work and its
+  // left operand are done.
+  LResume := ANode = SpineSkip;
+  if LResume then
+    SpineSkip := NIL_NODE;
   LKind := T.Nodes[ANode].Kind;
   C0 := T.Nodes[ANode].FirstChild;
   C1 := NIL_NODE;
@@ -1574,7 +1610,7 @@ begin
   end;
   // F3: `packed` before the type is its parent's token, like `reference
   // to` (see ProcType).
-  if nfPacked in T.Nodes[ANode].Flags then
+  if (nfPacked in T.Nodes[ANode].Flags) and not LResume then
     Kw('packed', T.Nodes[ANode].Parent);
   case LKind of
     nkMissing, nkEmptyStmt:
@@ -1592,7 +1628,14 @@ begin
       end;
     nkBinaryOp:
       begin
-        Emit(C0);
+        if not LResume then
+          if (C0 <> NIL_NODE) and (T.Nodes[C0].Kind = nkBinaryOp) then
+          begin
+            EmitChain(ANode);
+            Exit;
+          end
+          else
+            Emit(C0);
         LOp := T.Nodes[ANode].Aux;
         if IsFusedGreaterEqual(T, ANode) then
           // N2: the `>` is the type arguments' (they print it), this is `=`.
@@ -2139,6 +2182,7 @@ begin
   LP.T := ATree;
   LP.Own := AOwn;
   LP.LossPos := Copy(AOwn.OwnStart);
+  LP.SpineSkip := NIL_NODE;
   LP.Items := nil;
   LP.Count := 0;
   if (ANode >= 0) and (ANode <= High(ATree.Nodes)) then

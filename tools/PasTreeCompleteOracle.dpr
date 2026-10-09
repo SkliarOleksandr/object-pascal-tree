@@ -44,6 +44,7 @@ program PasTreeCompleteOracle;
   against the same closure the demo and the LSP server analyze. }
 
 {$APPTYPE CONSOLE}
+{$MAXSTACKSIZE $01000000}   // 16 MB per thread: README, "The stack every host should reserve"
 
 uses
   System.SysUtils,

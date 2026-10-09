@@ -318,6 +318,29 @@ type
       is not their left edge exist by design (nkMember's is the dot). -1 for
       a bad index or a node with no tokens. }
     function NodeLeftmostVis(AIndex: Integer): Integer;
+    { The operands of an operator chain, for a walk that does nothing at an
+      operator but visit its children. `A + B + C + ...` is a LEFT spine of
+      nkBinaryOp nodes as deep as the chain is long - the parser's operator
+      loops are iterative, and generated code writes thousands of terms - so a
+      walk recursing into every child overflowed the stack (audit A1-01).
+      These step through the spine in a loop and hand out every child of its
+      operators that is not the next operator down, in the order a recursive
+      child walk reached them: the leftmost operand first, then each
+      operator's other operands on the way back up. AOp is the iteration's
+      state - the operator the current operand belongs to:
+
+        LOperand := Tree.ChainFirst(N, LOp);
+        while LOperand <> NIL_NODE do
+        begin
+          Walk(LOperand);
+          LOperand := Tree.ChainNext(N, LOp, LOperand);
+        end;
+
+      ATop is any nkBinaryOp; one with no operator below it yields its own
+      children. The way up follows Parent, which the builder keeps exact. }
+    function ChainFirst(ATop: Integer; out AOp: Integer): Integer;
+    function ChainNext(ATop: Integer; var AOp: Integer;
+      AOperand: Integer): Integer;
     { The LEADING doc-comment block of the declaration ANode belongs to
       (completion plan sec. 8D, Help Insight): the contiguous run of `///` line
       comments immediately above the declaration, in source order, with the
@@ -351,6 +374,8 @@ type
     { Compact S-expression dump for golden tests:
       Kind or Kind'text' or Kind(children...). }
     function Dump(AIndex: Integer): string;
+    // One node of Dump without its children: Kind'text'#flags.
+    function DumpHead(AIndex: Integer): string;
   end;
 
   { Arena builder used by the parser. }
@@ -525,6 +550,35 @@ begin
     Result := Source.VisibleText(Nodes[AIndex].FirstToken)
   else
     Result := '';
+end;
+
+function TPasTree.ChainFirst(ATop: Integer; out AOp: Integer): Integer;
+begin
+  AOp := ATop;
+  while (Nodes[AOp].FirstChild <> NIL_NODE) and
+        (Nodes[Nodes[AOp].FirstChild].Kind = nkBinaryOp) do
+    AOp := Nodes[AOp].FirstChild;
+  Result := Nodes[AOp].FirstChild;
+  if Result = NIL_NODE then
+    Result := ChainNext(ATop, AOp, NIL_NODE);
+end;
+
+function TPasTree.ChainNext(ATop: Integer; var AOp: Integer;
+  AOperand: Integer): Integer;
+begin
+  if AOperand <> NIL_NODE then
+    Result := Nodes[AOperand].NextSibling
+  else
+    Result := NIL_NODE;
+  // Past AOp's last operand: up to the operator above, whose first child is
+  // the one just finished.
+  while Result = NIL_NODE do
+  begin
+    if AOp = ATop then
+      Exit;
+    AOp := Nodes[AOp].Parent;
+    Result := Nodes[Nodes[AOp].FirstChild].NextSibling;
+  end;
 end;
 
 function TPasTree.NodeLeftmostVis(AIndex: Integer): Integer;
@@ -771,10 +825,45 @@ begin
   end;
 end;
 
+{ In a loop over the tree's links rather than a recursion per level, into
+  one builder rather than a string per subtree: an operator chain nests one
+  nkBinaryOp per operand, and a few thousand terms of generated code
+  overflowed the stack here - and copied each subtree's text once per level
+  above it (audit A1-01, as AstToJson). The output is the recursion's. }
 function TPasTree.Dump(AIndex: Integer): string;
 var
-  LChild: Integer;
-  LChildren: string;
+  LSB: TStringBuilder;
+  LNode: Integer;
+begin
+  LSB := TStringBuilder.Create;
+  try
+    LNode := AIndex;
+    repeat
+      LSB.Append(DumpHead(LNode));
+      if Nodes[LNode].FirstChild <> NIL_NODE then
+      begin
+        LSB.Append('(');
+        LNode := Nodes[LNode].FirstChild;
+        Continue;
+      end;
+      while (LNode <> AIndex) and (Nodes[LNode].NextSibling = NIL_NODE) do
+      begin
+        LNode := Nodes[LNode].Parent;
+        LSB.Append(')');
+      end;
+      if LNode = AIndex then
+        Break;
+      LSB.Append(' ');
+      LNode := Nodes[LNode].NextSibling;
+    until False;
+    Result := LSB.ToString;
+  finally
+    LSB.Free;
+  end;
+end;
+
+function TPasTree.DumpHead(AIndex: Integer): string;
+var
   LText: string;
 begin
   Result := KindName(Nodes[AIndex].Kind);
@@ -925,17 +1014,6 @@ begin
     Result := Result + '#delayed';
   if nfResident in Nodes[AIndex].Flags then
     Result := Result + '#resident';
-  LChildren := '';
-  LChild := Nodes[AIndex].FirstChild;
-  while LChild <> NIL_NODE do
-  begin
-    if LChildren <> '' then
-      LChildren := LChildren + ' ';
-    LChildren := LChildren + Dump(LChild);
-    LChild := Nodes[LChild].NextSibling;
-  end;
-  if LChildren <> '' then
-    Result := Result + '(' + LChildren + ')';
 end;
 
 { TPasTreeBuilder }

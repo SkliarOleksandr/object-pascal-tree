@@ -35,6 +35,7 @@ uses
   PasTree.Preprocessor in '..\source\PasTree.Preprocessor.pas',
   PasTree.Platforms in '..\source\PasTree.Platforms.pas',
   PasTree.Ast in '..\source\PasTree.Ast.pas',
+  PasTree.Ast.Json in '..\source\PasTree.Ast.Json.pas',
   PasTree.Ast.Check in '..\source\PasTree.Ast.Check.pas',
   PasTree.Parser in '..\source\PasTree.Parser.pas',
   PasTree.Printer in '..\source\PasTree.Printer.pas',
@@ -558,6 +559,145 @@ begin
   ];
 end;
 
+// Occurrences of ASub in AText (non-overlapping).
+function CountOf(const AText, ASub: string): Integer;
+var
+  LAt: Integer;
+begin
+  Result := 0;
+  LAt := Pos(ASub, AText);
+  while LAt > 0 do
+  begin
+    Inc(Result);
+    LAt := PosEx(ASub, AText, LAt + Length(ASub));
+  end;
+end;
+
+function ChainCase(const ASection, AName: string;
+  const ARun: TFunc<TPasCheckResult>): TPasCustomCase;
+begin
+  Result.Section := ASection;
+  Result.Name := AName;
+  Result.Run := ARun;
+end;
+
+{ Depth that is not the source's nesting: an operator chain is a left spine of
+  nkBinaryOp as long as the chain (audit A1-01, B1-37), an `else if` chain a
+  right spine of ifs (A1-07). Both are flat code that generators write by the
+  thousand; dcc64 37.0 compiles either. }
+function BuildChainCases(APP: TPasPreprocessor): TPasCustomCases;
+begin
+  Result := [
+    ChainCase('A1-07', 'a 1,000-arm else-if chain parses clean, arm in arm',
+      function: TPasCheckResult
+      var
+        LSrc: TStringBuilder;
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+        LIdx, LIfs, LLast, LDepth, LNode: Integer;
+      begin
+        Result.Passed := False;
+        Result.Message := '';
+        LSrc := TStringBuilder.Create;
+        try
+          LSrc.Append('unit Arms;'#10'interface'#10'implementation'#10 +
+            'function F(I: Integer): Integer;'#10'begin'#10 +
+            '  if I = 0 then Result := 0'#10);
+          for LIdx := 1 to 999 do
+            LSrc.Append('  else if I = ').Append(LIdx)
+              .Append(' then Result := ').Append(LIdx).Append(#10);
+          LSrc.Append('  else Result := -1;'#10'end;'#10'end.'#10);
+          try
+            LPre := APP.ProcessText('arms.pas', LSrc.ToString);
+            LTree := TPasParser.ParseFile(LPre, LDiags);
+          except
+            on E: Exception do
+            begin
+              Result.Message := '  raised ' + E.ClassName + ': ' + E.Message;
+              Exit;
+            end;
+          end;
+        finally
+          LSrc.Free;
+        end;
+        // Every arm is an nkIfStmt, each the last child of the one before:
+        // the innermost has the other 999 above it.
+        LIfs := 0;
+        LLast := NIL_NODE;
+        for LIdx := 0 to High(LTree.Nodes) do
+          if LTree.Nodes[LIdx].Kind = nkIfStmt then
+          begin
+            Inc(LIfs);
+            LLast := LIdx;
+          end;
+        LDepth := 0;
+        if LLast <> NIL_NODE then
+        begin
+          LNode := LTree.Nodes[LLast].Parent;
+          while LNode <> NIL_NODE do
+          begin
+            if LTree.Nodes[LNode].Kind = nkIfStmt then
+              Inc(LDepth);
+            LNode := LTree.Nodes[LNode].Parent;
+          end;
+        end;
+        Result.Passed := (Length(LDiags) = 0) and (LIfs = 1000) and
+          (LDepth = 999);
+        if not Result.Passed then
+        begin
+          Result.Message := Format('  %d diagnostics, %d ifs, the last %d deep',
+            [Length(LDiags), LIfs, LDepth]);
+          if Length(LDiags) > 0 then
+            Result.Message := Result.Message + #10'  first: ' +
+              LDiags[0].Msg;
+        end;
+      end),
+    ChainCase('A1-01', 'a 50,000-term operator chain prints, dumps and ' +
+      'serializes',
+      function: TPasCheckResult
+      const
+        TERMS = 50000;
+      var
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+        LT3: TPasT3Result;
+        LDump, LJson: string;
+      begin
+        Result.Passed := False;
+        Result.Message := '';
+        try
+          LPre := APP.ProcessText('chain.pas', 'unit Chain;'#10'interface'#10 +
+            'const S = ''a''' + DupeString(#10'  + ''b''', TERMS - 1) + ';'#10 +
+            'implementation'#10'end.'#10);
+          LTree := TPasParser.ParseFile(LPre, LDiags);
+          // T3: every token of the chain printed back where it stood.
+          if not CompareT3(LTree, 0, LT3) or (LT3.Matched <> LT3.Printed) then
+          begin
+            Result.Message := Format('  T3: %d printed, %d matched, %d defects',
+              [LT3.Printed, LT3.Matched, LT3.Defects]);
+            Exit;
+          end;
+          LDump := LTree.Dump(0);
+          LJson := AstToJson(LTree);
+          // One string leaf per term in each.
+          Result.Passed := (Length(LDiags) = 0) and
+            (CountOf(LDump, 'StrLit''') = TERMS) and
+            (CountOf(LJson, '"kind":"StrLit"') = TERMS);
+          if not Result.Passed then
+            Result.Message := Format(
+              '  %d diagnostics, %d leaves in the dump, %d in the JSON',
+              [Length(LDiags), CountOf(LDump, 'StrLit'''),
+               CountOf(LJson, '"kind":"StrLit"')]);
+        except
+          on E: Exception do
+            Result.Message := '  raised ' + E.ClassName + ': ' + E.Message;
+        end;
+      end)
+  ];
+end;
+
 var
   GSM: TPasSourceManager;
   GDefines: TPasDefines;
@@ -573,7 +713,8 @@ begin
     RunSuite('ParserSmoke', GPP, STMT_CASES, DECL_CASES,
       BuildCustomCases(GPP, GSM) + BuildRoundtripCases +
       BuildPreprocessorCases(GPP) + BuildOwnTokenCases(GPP) +
-      BuildNameFlagCases(GPP) + BuildDepthCases(GPP), GPassed,
+      BuildNameFlagCases(GPP) + BuildDepthCases(GPP) + BuildChainCases(GPP),
+      GPassed,
       GFailed, TreeVerdict);
     if GFailed > 0 then
       ExitCode := 1;

@@ -1756,10 +1756,38 @@ end;
 
 function TPasSemaTyper.TypeNode(N: Integer): Integer;
 var
-  LChild, LThen: Integer;
+  LChild, LThen, LNode: Integer;
 begin
   if N = NIL_NODE then
     Exit(NIL_SYM);
+  // An operator chain's left spine is as deep as the chain is long (audit
+  // A1-01, see TPasSemaResolver.WalkOperatorChain): walked in a loop, the
+  // operands recursively, each operator typed after its operands - the
+  // order the recursion had.
+  if (Kind(N) = nkBinaryOp) and (Child(N) <> NIL_NODE) and
+     (Kind(Child(N)) = nkBinaryOp) then
+  begin
+    LNode := N;
+    while (Child(LNode) <> NIL_NODE) and (Kind(Child(LNode)) = nkBinaryOp) do
+      LNode := Child(LNode);
+    TypeNode(Child(LNode));
+    repeat
+      LChild := Child(LNode);
+      if LChild <> NIL_NODE then
+        LChild := Sib(LChild);
+      while LChild <> NIL_NODE do
+      begin
+        TypeNode(LChild);
+        LChild := Sib(LChild);
+      end;
+      Result := BinaryResult(LNode);
+      M.ExprType[LNode] := Result;
+      if LNode = N then
+        Break;
+      LNode := T.Nodes[LNode].Parent;
+    until False;
+    Exit;
+  end;
   LChild := Child(N);
   while LChild <> NIL_NODE do   // type children first (bottom-up)
   begin
