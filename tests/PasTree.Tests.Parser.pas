@@ -2847,6 +2847,74 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
       end;
   end;
 
+  // TPasPreprocessed.DeadDirectives: the directives that are themselves dead
+  // code - a $DEFINE in a dead branch, a whole nested chain in one, a
+  // one-line $IFDEF/$DEFINE/$ENDIF - and none of a live chain's markers, a
+  // $ELSEIF between two dead branches included. Each directive of the source
+  // is tagged d (dead) or l (live) by a comment after it; the case checks
+  // every one. (Line comments: a brace in a brace comment closes it.)
+  function DeadDirectivesCase: TPasCustomCase;
+  begin
+    Result.Section := '1.3.3';
+    Result.Name := 'dead directives';
+    Result.Run :=
+      function: TPasCheckResult
+      const
+        cSrc =
+          'unit U;'#10 +
+          '{$IFDEF NEVER}'#10 +                  // l
+          '  {$DEFINE A}'#10 +                   // d
+          '  {$IFDEF B} x {$ELSE} y {$ENDIF}'#10 + // d d d
+          '{$ELSEIF Defined(NEVER2)}'#10 +       // l
+          '  {$DEFINE C}'#10 +                   // d
+          '{$ELSE}'#10 +                         // l
+          '  {$DEFINE D}'#10 +                   // l
+          '{$ENDIF}'#10 +                        // l
+          '{$IFDEF NEVER}{$DEFINE E}{$ENDIF}'#10 + // l d l
+          'interface'#10'implementation'#10'end.'#10;
+        cWant = 'lddddldlllldl';
+      var
+        LDefines: TPasDefines;
+        LPP: TPasPreprocessor;
+        LPre: TPasPreprocessed;
+        LGot: string;
+        LTok: TPasToken;
+        LDead: TPasSkippedRegion;
+        LIsDead: Boolean;
+      begin
+        LDefines := CreatePlatformDefines(pfWin64);
+        LPP := TPasPreprocessor.Create(GSM, LDefines, 37.0);
+        try
+          LPre := LPP.ProcessText('test.pas', cSrc);
+          LGot := '';
+          for LTok in LPre.Files[0].Tokens do
+            if LTok.Kind = tkDirective then
+            begin
+              LIsDead := False;
+              for LDead in LPre.DeadDirectives[0] do
+                if (LDead.Start = LTok.Start) and
+                   (LDead.EndPos = LTok.Start + LTok.Len) then
+                  LIsDead := True;
+              if LIsDead then
+                LGot := LGot + 'd'
+              else
+                LGot := LGot + 'l';
+            end;
+          Result.Passed := (LGot = cWant) and
+            (Length(LPre.DeadDirectives[0]) = 6);
+          if Result.Passed then
+            Result.Message := ''
+          else
+            Result.Message := '  expected: ' + cWant + ' (6 recorded)' +
+              sLineBreak + Format('  actual:   %s (%d recorded)',
+                [LGot, Length(LPre.DeadDirectives[0])]) + sLineBreak;
+        finally
+          LPP.Free;
+          LDefines.Free;
+        end;
+      end;
+  end;
+
   { 6.10 (F26): where an asm body ends is the preprocessor's to say - only
     live text switches BASM mode, dead text is scanned as Pascal even inside
     an asm body, and the mode runs on through an include (dcc32 37.0,
@@ -3599,7 +3667,7 @@ begin
       'MACOS64 MANAGED_RECORD NATIVECODE PIC POSIX POSIX64 UNICODE VER370 ' +
       'WEAKINTFREF WEAKREF WEAK_NATIVEINT'),
     SwitchStartCase];
-  Result := Result + [IncludeContextCase,
+  Result := Result + [IncludeContextCase, DeadDirectivesCase,
     IncludeOrderCase(True), IncludeOrderCase(False),
     AsmModeCase('F26: a dead asm does not open BASM mode',
       'function R: Cardinal; {$ifdef NEVER} asm {$endif}'#13#10 +

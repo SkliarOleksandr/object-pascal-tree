@@ -243,6 +243,17 @@ type
     Files: TArray<TPasTokenStream>;
     Visible: TArray<TPasVisibleToken>;
     Skipped: TArray<TArray<TPasSkippedRegion>>;  // per file, sorted
+    // Per file, sorted: every directive that is itself dead code - the
+    // spans Skipped leaves out of a dead branch. Skipped never holds a
+    // directive (each one closes the region, which reopens after it), so a
+    // `{$DEFINE X}` or a nested `{$IFDEF}` inside a dead branch was a hole
+    // in it (pastree-lsp's inactive-code greying, 2026-10-09). A directive
+    // is dead when the state it is read in is: a `$IF`/`$IFDEF`/`$IFNDEF`/
+    // `$IFOPT` or any other directive when the code before it is dead, a
+    // `$ELSEIF`/`$ELSE`/`$ENDIF` when its chain's enclosing state is - so
+    // the markers of a chain in live code are never in it, whichever branch
+    // was taken. Skipped plus this, merged, is everything dcc ignores.
+    DeadDirectives: TArray<TArray<TPasSkippedRegion>>;
     Diagnostics: TArray<TPasPPDiagnostic>;
     // {$SCOPEDENUMS} state changes, ascending by VisIndex; empty for the
     // overwhelming majority of units (the switch defaults to OFF).
@@ -406,6 +417,7 @@ type
     FLiveAsm: Boolean;
     FVisible: TList<TPasVisibleToken>;
     FSkipped: TObjectList<TList<TPasSkippedRegion>>;
+    FDeadDirectives: TObjectList<TList<TPasSkippedRegion>>;
     FDiags: TList<TPasPPDiagnostic>;
     FIncludePathStack: TList<string>;
     // Conditional stack - shared across include boundaries (a tolerance,
@@ -910,6 +922,7 @@ begin
   FFiles := TList<TPasTokenStream>.Create;
   FVisible := TList<TPasVisibleToken>.Create;
   FSkipped := TObjectList<TList<TPasSkippedRegion>>.Create(True);
+  FDeadDirectives := TObjectList<TList<TPasSkippedRegion>>.Create(True);
   FDiags := TList<TPasPPDiagnostic>.Create;
   FIncludePathStack := TList<string>.Create;
   FUnresolvedDeclared := TList<string>.Create;
@@ -980,6 +993,7 @@ begin
   FDeclaredAsks.Free;
   FUnresolvedSymbols.Free;
   FDiags.Free;
+  FDeadDirectives.Free;
   FSkipped.Free;
   FVisible.Free;
   FFiles.Free;
@@ -1074,6 +1088,7 @@ begin
   // would otherwise re-grow the list through ~17 doublings every time.
   FVisible.Count := 0;
   FSkipped.Clear;
+  FDeadDirectives.Clear;
   FDiags.Clear;
   FIncludePathStack.Clear;
   FUnresolvedDeclared.Clear;
@@ -1107,6 +1122,7 @@ begin
   FFileNames.Add(AFileName);
   FFiles.Add(LStream);
   FSkipped.Add(TList<TPasSkippedRegion>.Create);
+  FDeadDirectives.Add(TList<TPasSkippedRegion>.Create);
   FIncludePathStack.Add(LowerCase(AFileName));
   try
     ProcessFile(0);
@@ -1143,6 +1159,9 @@ begin
   SetLength(Result.Skipped, FSkipped.Count);
   for LIdx := 0 to FSkipped.Count - 1 do
     Result.Skipped[LIdx] := FSkipped[LIdx].ToArray;
+  SetLength(Result.DeadDirectives, FDeadDirectives.Count);
+  for LIdx := 0 to FDeadDirectives.Count - 1 do
+    Result.DeadDirectives[LIdx] := FDeadDirectives[LIdx].ToArray;
 end;
 
 // Where an asm body ends is the preprocessor's to say (F26; dcc32 37.0,
@@ -1253,6 +1272,7 @@ var
   LTop: Integer;
   LSwitch: Char;
   LWant: Boolean;
+  LDead: TPasSkippedRegion;
   // File offset of Arg's / SymbolArg's first character, set by each call -
   // the DefineRefs need the name in file coordinates.
   LArgStart, LSymLen: Integer;
@@ -1354,6 +1374,20 @@ begin
          ((LText[LNameLen] >= 'a') and (LText[LNameLen] <= 'z'))) do
     Inc(LNameLen);
   LKind := ClassifyDirective(LText, LNameLen);
+
+  // Is the directive itself dead code? See TPasPreprocessed.DeadDirectives.
+  // Recorded here, before anything below can recurse into an include.
+  LTop := FCondThisActive.Count - 1;
+  if LKind in [pdElseif, pdElse, pdEndif] then
+    LParent := (LTop < 0) or FCondParentActive[LTop]
+  else
+    LParent := Active;
+  if not LParent then
+  begin
+    LDead.Start := AToken.Start;
+    LDead.EndPos := AToken.Start + AToken.Len;
+    FDeadDirectives[AFileId].Add(LDead);
+  end;
 
   // ---- conditionals (always processed, active or not) ----
   if LKind = pdIfdef then
@@ -1606,6 +1640,7 @@ begin
   FFileNames.Add(LResolved);
   FFiles.Add(LStream);
   FSkipped.Add(TList<TPasSkippedRegion>.Create);
+  FDeadDirectives.Add(TList<TPasSkippedRegion>.Create);
   LNewId := FFiles.Count - 1;
   LRef.IncludedFileId := LNewId;
   FIncludeRefs[LRefIdx] := LRef;
