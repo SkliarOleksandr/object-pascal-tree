@@ -242,7 +242,7 @@ type
   // only because it comes with `virtual` and would otherwise look like an
   // undecorated declaration to a reader of this set.
   TPasOvDir = (odVirtual, odDynamic, odOverride, odAbstract, odMessage,
-    odReintroduce);
+    odReintroduce, odOverload);
   TPasOvDirs = set of TPasOvDir;
 
   { One declaration in a method's override chain. Hit is positioned on the
@@ -339,12 +339,13 @@ type
     // What OvStructDefNode will accept - a set literal at each call site, so
     // "a class or an `object`" and "an interface" stay readable there.
     TPasOvStructKinds = set of TPasNodeKind;
-    { One heritage edge, reversed: the class/`object`/interface that NAMED
-      the type this edge is filed under. IsFirst marks the first heritage
-      item as WRITTEN, which is the ancestor for everything except a class
-      whose list starts with an interface (`TFoo = class(IBar)`, ancestor
-      TObject implied) - so a consumer checks the kind of what it landed on
-      rather than trusting the position. }
+    { One heritage edge, reversed: the class/`object`/interface whose
+      heritage reaches the type this edge is filed under. IsFirst marks the
+      ANCESTOR edge - the written first entry or the implicit TObject /
+      IInterface root (FProj.AncestorOfX); the other edges are a class's
+      implements list. The first entry of a class's list is always its
+      ancestor (`class(IBar)` is E2021, spec 12.1.1); a consumer still checks
+      the kind it landed on, which only guards broken source. }
     TOvEdge = record
       UnitId, Sym: Integer;
       IsFirst: Boolean;
@@ -491,7 +492,12 @@ type
     function OvDirsNamed(AMid, AStructSym: Integer;
       const ANameLower: string; out ADirs: TPasOvDirs): Boolean;
     procedure OvClimbToRoot(var AMid, AStructSym: Integer;
-      const ANameLower: string);
+      AMethodSym: Integer; const ANameLower: string);
+    // How one same-named declaration relates to the slot coming from above.
+    function OvLinks(AMid, AStructSym: Integer;
+      const ADirs: TPasOvDirs): Boolean;
+    function OvClosesSlot(AMid, AStructSym: Integer;
+      const ANameLower: string): Boolean;
     procedure OvCollectFrom(AMid, AStructSym: Integer;
       const ANameLower: string; AIsRoot: Boolean;
       AHits: TList<TPasOverrideHit>);
@@ -3483,7 +3489,9 @@ begin
       else if SameText(LText, 'message') then
         Include(Result, odMessage)
       else if SameText(LText, 'reintroduce') then
-        Include(Result, odReintroduce);
+        Include(Result, odReintroduce)
+      else if SameText(LText, 'overload') then
+        Include(Result, odOverload);
     end;
     LChild := LM.Tree.Nodes[LChild].NextSibling;
   end;
@@ -3608,16 +3616,37 @@ end;
   OvStructDefNode - belongs to the class. Followed here to the chain's end
   (CanonTypeX: `type TX = type TBase` is a distinct type and stays itself), so
   the gate and the Find All commands see the class wherever the alias is
-  written. Anything that is not a type alias is left as it came. }
+  written. An alias of an INSTANTIATION (`TIntBase = TBase<Integer>`) is
+  keyed on the generic, exactly as a direct `class(TBase<Integer>)` is -
+  CanonTypeX stops at it, so the alias link is followed through AncestorOfX
+  (audit A2-25). Anything that is not a type alias is left as it came. }
 procedure TPasNavigator.OvUnalias(var AMid, ASym: Integer);
 var
-  LX: TSemaXType;
+  LX, LY: TSemaXType;
+  LDepth: Integer;
+  LM: TPasSemaModel;
 begin
   if (AMid < 0) or (AMid >= FProj.ModelCount) or (ASym = NIL_SYM) or
      (ASym < 0) or (ASym >= FProj.Model(AMid).SymCount) then
     Exit;
   LX := FProj.CanonTypeX(XPlain(AMid, ASym));
-  if XValid(LX) and (LX.Inst = NIL_INST) then
+  for LDepth := 1 to 8 do
+  begin
+    if not XValid(LX) then
+      Exit;
+    // A struct (it owns a member scope) is the end; so is anything that is
+    // not a type. A type with no member scope may be an alias: AncestorOfX
+    // follows only an alias link there (its other arms need a struct).
+    LM := FProj.Model(LX.UnitId);
+    if (LM.Symbols[LX.Sym].Kind <> skType) or
+       (LM.Symbols[LX.Sym].MemberScope >= 0) then
+      Break;
+    LY := FProj.AncestorOfX(XPlain(LX.UnitId, LX.Sym));
+    if not XValid(LY) or ((LY.UnitId = LX.UnitId) and (LY.Sym = LX.Sym)) then
+      Break;
+    LX := FProj.CanonTypeX(XPlain(LY.UnitId, LY.Sym));
+  end;
+  if XValid(LX) then
   begin
     AMid := LX.UnitId;
     ASym := LX.Sym;
@@ -3718,10 +3747,14 @@ end;
   ends: Find Overrides wants ancestor edges between CLASSES, Find
   Implementations wants an interface's own ancestor edges (`IChild =
   interface(IBase)`) plus the non-ancestor edges that are a class's
-  implements list. A class's first heritage item is not always its ancestor -
-  `TFoo = class(IBar)` is legal, ancestor TObject implied - so the slot is
-  recorded as written and each consumer checks the KIND of what it landed on
-  rather than trusting the position.
+  implements list.
+
+  The ANCESTOR edge comes from FProj.AncestorOfX, the step the climb takes
+  too, so the two walks cannot disagree: it gives a bare `class` its implicit
+  TObject and a bare `interface` its IInterface, which no written item names
+  - the most common class there is was missing below TObject, the clicked
+  `Destroy; override;` included (audit A2-23). The written items after the
+  first are the implements list.
 
   Built per call: a search is a user gesture, caching would need an
   invalidation story against incremental reanalysis, and the pass is one
@@ -3730,11 +3763,26 @@ end;
 procedure TPasNavigator.OvBuildTypeEdges(
   AIndex: TDictionary<string, TArray<TOvEdge>>);
 var
-  LMi, LSym, LDef, LItem, LBMid, LBSym, LSlot: Integer;
+  LMi, LSym, LDef, LItem, LBMid, LBSym: Integer;
   LM: TPasSemaModel;
-  LKey: string;
-  LEdges: TArray<TOvEdge>;
-  LEdge: TOvEdge;
+  LAnc: TSemaXType;
+
+  procedure AddEdge(ABMid, ABSym: Integer; AIsFirst: Boolean);
+  var
+    LKey: string;
+    LEdges: TArray<TOvEdge>;
+    LEdge: TOvEdge;
+  begin
+    LKey := Format('%d:%d', [ABMid, ABSym]);
+    LEdge.UnitId := LMi;
+    LEdge.Sym := LSym;
+    LEdge.IsFirst := AIsFirst;
+    if AIndex.TryGetValue(LKey, LEdges) then
+      AIndex[LKey] := LEdges + [LEdge]
+    else
+      AIndex.Add(LKey, [LEdge]);
+  end;
+
 begin
   for LMi := 0 to FProj.ModelCount - 1 do
   begin
@@ -3747,25 +3795,30 @@ begin
         [nkClassType, nkObjectType, nkInterfaceType]);
       if LDef = NIL_NODE then
         Continue;
-      LSlot := 0;
-      LItem := LM.Tree.Nodes[LDef].FirstChild;
-      while LItem <> NIL_NODE do
+      // The ancestor, written or implicit (an `object` has no implicit one).
+      LAnc := FProj.AncestorOfX(XPlain(LMi, LSym));
+      if XValid(LAnc) then
       begin
-        if LM.Tree.Nodes[LItem].Kind in [nkIdent, nkMember, nkTypeArgs] then
-        begin
-          if OvRefOfHeritageItem(LMi, LItem, LBMid, LBSym) then
-          begin
-            LKey := Format('%d:%d', [LBMid, LBSym]);
-            LEdge.UnitId := LMi;
-            LEdge.Sym := LSym;
-            LEdge.IsFirst := LSlot = 0;
-            if AIndex.TryGetValue(LKey, LEdges) then
-              AIndex[LKey] := LEdges + [LEdge]
-            else
-              AIndex.Add(LKey, [LEdge]);
-          end;
-          Inc(LSlot);
-        end;
+        LBMid := LAnc.UnitId;
+        LBSym := LAnc.Sym;
+        OvUnalias(LBMid, LBSym);
+        AddEdge(LBMid, LBSym, True);
+      end
+      // The resolver's own binding of the written entry, when the step
+      // could not type it.
+      else if (PasHeritageRef(LM.Tree, LDef) <> NIL_NODE) and
+        OvRefOfHeritageItem(LMi, PasHeritageRef(LM.Tree, LDef), LBMid,
+          LBSym) then
+        AddEdge(LBMid, LBSym, True);
+      // The rest of the leading run: a class's implements list.
+      LItem := PasHeritageRef(LM.Tree, LDef);
+      if LItem <> NIL_NODE then
+        LItem := LM.Tree.Nodes[LItem].NextSibling;
+      while (LItem <> NIL_NODE) and
+            (LM.Tree.Nodes[LItem].Kind in [nkIdent, nkMember, nkTypeArgs]) do
+      begin
+        if OvRefOfHeritageItem(LMi, LItem, LBMid, LBSym) then
+          AddEdge(LBMid, LBSym, False);
         LItem := LM.Tree.Nodes[LItem].NextSibling;
       end;
     end;
@@ -3835,20 +3888,34 @@ end;
     answer is the topmost class that could be read, and the root row's
     class name says which that was. }
 procedure TPasNavigator.OvClimbToRoot(var AMid, AStructSym: Integer;
-  const ANameLower: string);
+  AMethodSym: Integer; const ANameLower: string);
 const
   CHAIN_DIRS = [odVirtual, odDynamic, odOverride, odMessage];
   STARTS_SLOT = [odVirtual, odDynamic];
 var
   LX: TSemaXType;
-  LDepth: Integer;
+  LDepth, LBMid, LBSym, LDecl: Integer;
   LDirs: TPasOvDirs;
+  LM: TPasSemaModel;
 begin
-  // The clicked class itself: a slot that starts here has nothing above it
-  // to climb to.
-  if not OvDirsNamed(AMid, AStructSym, ANameLower, LDirs) then
+  // The clicked class itself, by the CLICKED declaration's own directives
+  // (spec 12.2.1: decided per overload): a `Foo; overload; virtual;` beside
+  // an overriding `Foo(A: Integer); overload; override;` starts its own
+  // slot, and the sibling's `override` used to carry the climb past it
+  // (audit B3-01). A slot that starts here has nothing above it.
+  LDirs := [];
+  LM := FProj.Model(AMid);
+  if (AMethodSym >= 0) and (AMethodSym < LM.SymCount) and
+     (LM.Symbols[AMethodSym].DeclNode <> NIL_NODE) then
+  begin
+    if not FProj.EnsureHydrated(AMid) then
+      Exit;
+    LDecl := LM.Symbols[AMethodSym].DeclNode;
+    LDirs := OvDirsOf(AMid, RTEnclosingRoutine(LM, LDecl));
+  end
+  else if not OvDirsNamed(AMid, AStructSym, ANameLower, LDirs) then
     Exit;
-  if (LDirs * STARTS_SLOT <> []) and not (odOverride in LDirs) then
+  if (LDirs * STARTS_SLOT <> []) and not OvLinks(AMid, AStructSym, LDirs) then
     Exit;
   LX := XPlain(AMid, AStructSym);
   for LDepth := 1 to 64 do
@@ -3856,6 +3923,12 @@ begin
     LX := FProj.AncestorOfX(LX);
     if not XValid(LX) then
       Exit;
+    // An ancestor spelled through an alias (of an instantiation, too) is
+    // the class the alias names (audit A2-25).
+    LBMid := LX.UnitId;
+    LBSym := LX.Sym;
+    OvUnalias(LBMid, LBSym);
+    LX := XPlain(LBMid, LBSym);
     if OvClassDefNode(LX.UnitId, LX.Sym) = NIL_NODE then
       Exit;
     if not OvDirsNamed(LX.UnitId, LX.Sym, ANameLower, LDirs) then
@@ -3866,8 +3939,65 @@ begin
       Exit;   // undecorated: a hiding declaration, no chain passes through
     AMid := LX.UnitId;
     AStructSym := LX.Sym;
-    if (LDirs * STARTS_SLOT <> []) and not (odOverride in LDirs) then
+    if (LDirs * STARTS_SLOT <> []) and
+       not OvLinks(LX.UnitId, LX.Sym, LDirs) then
       Exit;   // the slot starts here - the root
+  end;
+end;
+
+{ Does a declaration with ADirs in AStructSym CONTINUE the slot it inherits?
+  `override` and `message` do; in an `object` a descendant's `virtual` (or
+  `dynamic`) is the override - `override` is no directive there (spec
+  12.2.1, audit E2-43). Whether an ancestor really declares the slot is the
+  walk's business: this is the declaration's own shape. }
+function TPasNavigator.OvLinks(AMid, AStructSym: Integer;
+  const ADirs: TPasOvDirs): Boolean;
+begin
+  Result := (ADirs * [odOverride, odMessage] <> []) or
+    ((ADirs * [odVirtual, odDynamic] <> []) and
+     (OvStructDefNode(AMid, AStructSym, [nkObjectType]) <> NIL_NODE));
+end;
+
+{ Does the slot coming from above END at AStructSym (spec 12.2.1)? A
+  same-named declaration that neither continues it (OvLinks) nor is an
+  `overload` - which has another parameter list and leaves the inherited
+  slot open (`reintroduce; overload`) - ends it: `virtual` without
+  `override` and `reintroduce; virtual` start a NEW slot, whose overrides
+  are not this one's, and an undecorated or plain `reintroduce`
+  redeclaration hides it (E2170 below). The BFS used to descend through
+  such a class and list the new slot's overrides under the old root (audit
+  A2-24). False when the class does not declare the name, or its text cannot
+  be read back (descend, as before, rather than drop a branch). }
+function TPasNavigator.OvClosesSlot(AMid, AStructSym: Integer;
+  const ANameLower: string): Boolean;
+var
+  LM: TPasSemaModel;
+  LSyms: TArray<Integer>;
+  LIdx, LDecl: Integer;
+  LDirs: TPasOvDirs;
+begin
+  Result := False;
+  LSyms := OvMethodsNamed(AMid, AStructSym, ANameLower);
+  if (Length(LSyms) = 0) or not FProj.EnsureHydrated(AMid) then
+    Exit;
+  LM := FProj.Model(AMid);
+  for LIdx := 0 to High(LSyms) do
+  begin
+    LDecl := LM.Symbols[LSyms[LIdx]].DeclNode;
+    if LDecl = NIL_NODE then
+      Continue;
+    LDecl := RTEnclosingRoutine(LM, LDecl);
+    // A `class constructor` / `class destructor` (Aux 1: the `class` word)
+    // runs once per type and takes no instance slot: Exception's `class
+    // destructor Destroy;` beside its `destructor Destroy; override;` hides
+    // nothing (the RTL is full of the pair).
+    if (LDecl <> NIL_NODE) and (LM.Tree.Nodes[LDecl].Aux = 1) and
+       (LM.RoutineHead(LSyms[LIdx]) in [rhConstructor, rhDestructor]) then
+      Continue;
+    LDirs := OvDirsOf(AMid, LDecl);
+    if OvLinks(AMid, AStructSym, LDirs) or (odOverload in LDirs) then
+      Continue;
+    Exit(True);
   end;
 end;
 
@@ -3904,7 +4034,9 @@ begin
     LDirs := OvDirsOf(AMid, RTEnclosingRoutine(LM, LDeclNode));
     if AIsRoot then
       LOv.Kind := pokRoot
-    else if odOverride in LDirs then
+    // An object's `virtual` below the root is its override (OvLinks).
+    else if (odOverride in LDirs) or
+      (OvLinks(AMid, AStructSym, LDirs) and not (odMessage in LDirs)) then
       LOv.Kind := pokOverride
     else if odMessage in LDirs then
       LOv.Kind := pokMessage
@@ -4038,7 +4170,7 @@ begin
     Exit;
   LNameLower := FProj.Model(ATMid).Symbols[ASym].NameLower;
   LMid := ATMid;
-  OvClimbToRoot(LMid, LStruct, LNameLower);
+  OvClimbToRoot(LMid, LStruct, ASym, LNameLower);
 
   LHits := TList<TPasOverrideHit>.Create;
   LIndex := TDictionary<string, TArray<TOvEdge>>.Create;
@@ -4076,6 +4208,11 @@ begin
         LSeen.Add(LKey, True);
         OvCollectFrom(LKids[LIdx].UnitId, LKids[LIdx].Sym, LNameLower, False,
           LHits);
+        // A class that starts a new slot or hides this one ends the
+        // branch: whatever overrides below it is another chain's
+        // (OvClosesSlot). Its own reintroduce row is still reported.
+        if OvClosesSlot(LKids[LIdx].UnitId, LKids[LIdx].Sym, LNameLower) then
+          Continue;
         LCur.UnitId := LKids[LIdx].UnitId;
         LCur.Sym := LKids[LIdx].Sym;
         LQueue.Enqueue(LCur);
@@ -4190,7 +4327,7 @@ var
   LSeenRow: TDictionary<string, Boolean>;
   LEdges: TArray<TOvEdge>;
   LM: TPasSemaModel;
-  LScope, LIntfSym, LIdx, LDepth: Integer;
+  LScope, LIntfSym, LIdx, LDepth, LBMid, LBSym: Integer;
   LNameLower, LVia: string;
   LX: TSemaXType;
 begin
@@ -4244,6 +4381,13 @@ begin
         for LDepth := 1 to 32 do
         begin
           LX := FProj.AncestorOfX(LX);
+          if XValid(LX) then
+          begin
+            LBMid := LX.UnitId;
+            LBSym := LX.Sym;
+            OvUnalias(LBMid, LBSym);   // an alias-spelled ancestor
+            LX := XPlain(LBMid, LBSym);
+          end;
           if not XValid(LX) or
              (OvClassDefNode(LX.UnitId, LX.Sym) = NIL_NODE) then
             Break;
@@ -6554,7 +6698,7 @@ begin
             Exit;
           LRMid := LCur.UnitId;
           LRoot := LT;
-          OvClimbToRoot(LRMid, LRoot, LName);
+          OvClimbToRoot(LRMid, LRoot, LCur.Sym, LName);
           if OvDirsNamed(LRMid, LRoot, LName, LDirs) and
              (odOverride in LDirs) then
           begin

@@ -491,11 +491,22 @@ Two walks, both over resolved bindings:
    override whose virtual sat a few quiet ancestors up - a form overriding
    its base-form library's `DoSaveState` through intermediate forms that
    never touch it - reported itself as its own root, "1 in 1 units".)
-2. **Down**, over a reverse-heritage index built for that one call from
-   every class's `class(TBase)` reference AS THE RESOLVER BOUND IT
-   (RefMap/ExtRefMap), then breadth-first. The index is the reason this is
-   affordable: the alternative, `XDescendsFrom` per class in the closure,
-   re-walks every ancestor chain in the project.
+2. **Down**, over a reverse-heritage index built for that one call, then
+   breadth-first. Each class's ANCESTOR edge comes from `AncestorOfX` - the
+   step the climb takes, so the two walks agree - which gives a bare `class`
+   its implicit TObject and a bare `interface` its IInterface (until 0.96.2
+   only WRITTEN heritage items made edges, so `Destroy; override;` in a bare
+   class was missing from its own answer); the written items after the first
+   are the implements list. The walk does not descend through a class that
+   ENDS the slot (`OvClosesSlot`): one that redeclares the name `virtual`
+   without `override` or `reintroduce; virtual` starts a new slot whose
+   overrides belong to that chain, and an undecorated redeclaration hides it
+   (E2170 below); an `overload` - another parameter list, `reintroduce;
+   overload` included - leaves it open, and a `class destructor` beside the
+   instance one takes no slot (spec 12.2.1). The clicked declaration is
+   judged by its OWN directives, not its overload siblings'. The index is
+   the reason this is affordable: the alternative, `XDescendsFrom` per class
+   in the closure, re-walks every ancestor chain in the project.
 
 What each declaration shape does:
 
@@ -503,7 +514,9 @@ What each declaration shape does:
 |---|-------------|-----|--------|
 | 1 | The `virtual`/`dynamic` declaration that introduced the slot | `pokRoot`, always first; one row per OVERLOAD the root class declares under that name (`TStream.Read` is six) - the chain is reported by name, not by signature match | OK |
 | 2 | `override`, any depth, any unit of the closure | `pokOverride` | OK |
-| 3 | `reintroduce` (deliberately NOT an override) | `pokReintroduce` - reported because a reader must not mistake it for one | OK |
+| 3 | `reintroduce` (deliberately NOT an override) | `pokReintroduce` - reported because a reader must not mistake it for one; `reintroduce; virtual` and a plain `reintroduce` end the branch below it, `reintroduce; overload` leaves it open | OK (branch rule 0.96.2) |
+| 3a | `virtual`/`dynamic` WITHOUT `override` in a descendant (W1010) | no row: a NEW slot starts there, and the walk does not descend through it - its overrides are that chain's, found from it | OK (0.96.2 - they used to be listed under the old root) |
+| 3b | An `object` hierarchy - a descendant overrides with `virtual`, `override` is no directive there | `pokOverride` for the descendant's `virtual` | OK (0.96.2) |
 | 4 | A `message <expr>` handler in a descendant - implicitly virtual, and dcc rejects `override` on one | `pokMessage`, matched by name + directive | OK |
 | 5 | A same-named method with NONE of those directives (an ordinary hiding declaration, dcc's W1010) | no row, by design - it shares no slot, and it would drown every `Create`/`Destroy` result | OK (by design) |
 | 6 | A `virtual`/`dynamic` method nothing overrides | its own single `pokRoot` row - the honest "nothing overrides this" | OK |
@@ -512,13 +525,14 @@ What each declaration shape does:
 | 8 | A method of a record, an interface, or a plain routine | `MethodAt` declines - the command is not offered | OK (by design) |
 | 9 | An INTERFACE method's implementors (`TFoo = class(TObject, IBar)`) | - | not this search - a separate command, see §5 |
 | 9a | The CLASSES below this method's class (no method question at all) | - | not this search either - Find Descendants, §6 |
-| 10 | A class whose ancestor is written through a type ALIAS (`TB2 = TB;` then `class(TB2)`) | the same chain as through `TB` itself | OK (0.25.2 - the index keys on the type the alias names, `OvUnalias`; VirtualTrees declares every tree over `TVTBaseAncestor = TVTBaseAncestorVcl`) |
+| 10 | A class whose ancestor is written through a type ALIAS (`TB2 = TB;` then `class(TB2)`), an alias of an instantiation too (`TIntBase = TBase<Integer>`) | the same chain as through `TB` itself, in both directions | OK (0.25.2 - the index keys on the type the alias names, `OvUnalias`; VirtualTrees declares every tree over `TVTBaseAncestor = TVTBaseAncestorVcl`. The instantiation alias since 0.96.2: keyed on the generic, and the climb passes it) |
 | 11 | An event handler wired only through a `.dfm` (`OnClick`) | - | not an override at all: it is an assignment to a property, reached by Find References |
 | 12 | A class PROPERTY (`MethodAt` accepts it since 0.21.0) | its redeclaration chain: the declaration that writes the type is `pokRoot`, every bare `property Items;` below it `pokRedeclared`, hierarchy order; a redeclaration WITH a type is a new property - no row, and its branch is closed. A lone root is the honest "declared nowhere else" | OK (0.21.0) |
 
 Measured on the flattened RTL corpus (342 models, 2.5 s to analyze):
-`TObject.Destroy` = 136 rows in 8 ms, `TPersistent.Assign` = 8 rows in 6 ms,
-`TStream.Read` = 23 in 6 ms. The reverse-heritage index is rebuilt per call
+`TObject.Destroy` = 296 rows (136 before 0.96.2, which counted only classes
+writing `class(TObject)`), `TPersistent.Assign` = 8 rows, `TStream.Read` = 17.
+On the frozen client project `TObject.Destroy` went from 1 row to 104. The reverse-heritage index is rebuilt per call
 and is not what costs - so no cache, and no invalidation story to get wrong
 against incremental reanalysis.
 
@@ -592,10 +606,12 @@ Both searches are project-wide by construction (the index sweeps every loaded
 model), and both demo pages put the unit count in the tab caption -
 `Overrides of 'Paint' (5 in 3 units)` - precisely so this question has an
 answer visible without scrolling. Measured cross-unit reach at the time of
-writing: `TObject.Destroy` 136 rows across 49 files of the flattened RTL;
-`TWinControl.CreateParams` 54 rows across 8 files of the VCL; 991 classes in
-that closure, ZERO with an unresolved heritage reference (so no missing
-edges).
+writing: `TObject.Destroy` 296 rows of the flattened RTL;
+`TWinControl.CreateParams` 54 rows across 8 files of the VCL. A heritage
+reference that does not resolve still drops its class from the index - and
+until 0.96.2 so did every class with NO heritage clause, the implicit TObject
+edge being absent: the earlier "no missing edges" was measured on unresolved
+references only.
 
 When a result LOOKS current-file-only, the closure is what to check, not the
 search:
@@ -632,7 +648,8 @@ the direct ancestor each row was reached through.
 | 4 | A type nothing descends from | its single `pdkRoot` row - the honest "no descendants" | OK |
 | 5 | A record, a helper, a non-type | `TypeAt` declines - the command is not offered | OK (by design) |
 | 5a | A type ALIAS of a class or interface (`TVTBaseAncestor = TVTBaseAncestorVcl;`), at its declaration or where it is written | `TypeAt` answers the TYPE the alias names | OK (0.25.2, `OvUnalias`) |
-| 6 | A descendant naming its ancestor through a type ALIAS | a row like any other | OK (0.25.2, see §4 row 10) |
+| 6 | A descendant naming its ancestor through a type ALIAS (of an instantiation too) | a row like any other | OK (0.25.2, the instantiation alias 0.96.2 - see §4 row 10) |
+| 7 | A class or interface with no heritage clause | a row below TObject / IInterface, its implicit ancestor | OK (0.96.2 - missing before) |
 
 Cost note for hosts: `TObject`'s descendants are every class in the closure,
 each row's model rehydrated to position the hit - gate on `TypeAt`, not on

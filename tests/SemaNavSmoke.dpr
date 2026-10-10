@@ -2117,6 +2117,200 @@ end;
 // name on the NEXT line; a column near MaxInt overflowed. A caret right
 // after a name means that name, as it already did for a conditional symbol.
 // A span that leaves its line ends at that line's end.
+{ The reverse-heritage index and the slot rules of Find Overrides (audit
+  B19, spec 12.1.1 and 12.2.1). The index held only WRITTEN heritage items,
+  so a bare `class` had no edge to TObject and a bare `interface` none to
+  IInterface: Find Overrides on `Destroy; override;` in a bare class left out
+  the very class clicked (A2-23). The walk down did not stop at a class
+  starting a new slot (A2-24); an alias of an instantiation cut the chain
+  (A2-25); the clicked overload was judged by its siblings' directives
+  (B3-01); an object's `virtual` override was no link (E2-43). }
+procedure TestOverrideIndex;
+const
+  OV_SYS =
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class'#10'    destructor Destroy; virtual;'#10'  end;'#10 +
+    '  IInterface = interface'#10'  end;'#10 +
+    'implementation'#10'destructor TObject.Destroy; begin end;'#10'end.'#10;
+  OV_UNIT =
+    'unit OvIdx;'#10'interface'#10'type'#10 +
+    '  TX = class destructor Destroy; override; end;'#10 +
+    '  TY = class(TObject) destructor Destroy; override; end;'#10 +
+    '  TZ = class(TX) destructor Destroy; override; end;'#10 +
+    '  TW = class'#10'    class destructor Destroy;'#10 +
+    '    destructor Destroy; override;'#10'  end;'#10 +
+    '  TW2 = class(TW) destructor Destroy; override; end;'#10 +
+    '  IFoo = interface procedure M; end;'#10 +
+    '  IBar = interface(IInterface) procedure M; end;'#10 +
+    '  TA = class procedure Draw; virtual; end;'#10 +
+    '  TB = class(TA) procedure Draw; virtual; end;'#10 +
+    '  TC = class(TB) procedure Draw; override; end;'#10 +
+    '  TF = class(TA) procedure Draw(X: Integer); reintroduce; overload; end;'#10 +
+    '  TG = class(TF) procedure Draw; override; end;'#10 +
+    '  TBaseG<T> = class procedure Paint; virtual; end;'#10 +
+    '  TIntBase = TBaseG<Integer>;'#10 +
+    '  TD1 = class(TBaseG<Integer>) procedure Paint; override; end;'#10 +
+    '  TD2 = class(TIntBase) procedure Paint; override; end;'#10 +
+    '  TP = class procedure Foo(A: Integer); overload; virtual; end;'#10 +
+    '  TQ = class(TP)'#10 +
+    '    procedure Foo(A: Integer); overload; override;'#10 +
+    '    procedure Foo; overload; virtual;'#10'  end;'#10 +
+    '  TR = class(TQ) procedure Foo; overload; override; end;'#10 +
+    '  TO1 = object procedure M; virtual; end;'#10 +
+    '  TO2 = object(TO1) procedure M; virtual; end;'#10 +
+    'implementation'#10'end.'#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LMid, LSys: Integer;
+
+  // The declaration-side method ANth (0-based) named AMeth of type AType.
+  function Meth(AM: Integer; const AType, AMeth: string;
+    ANth: Integer = 0): Integer;
+  var
+    M: TPasSemaModel;
+    S, Sc: Integer;
+  begin
+    M := LProj.Model(AM);
+    for S := 0 to M.SymCount - 1 do
+    begin
+      Sc := M.Symbols[S].Scope;
+      if (M.Symbols[S].Kind = skRoutine) and
+         (M.Symbols[S].NameLower = AMeth) and (Sc >= 0) and
+         (M.Scopes[Sc].Kind = sckStruct) and
+         (M.Symbols[M.Scopes[Sc].StructSym].NameLower = AType) then
+      begin
+        if ANth = 0 then
+          Exit(S);
+        Dec(ANth);
+      end;
+    end;
+    Result := NIL_SYM;
+  end;
+
+  function TypeSym(AM: Integer; const AType: string): Integer;
+  var
+    M: TPasSemaModel;
+  begin
+    M := LProj.Model(AM);
+    for Result := 0 to M.SymCount - 1 do
+      if (M.Symbols[Result].Kind = skType) and
+         (M.Symbols[Result].NameLower = AType) then
+        Exit;
+    Result := NIL_SYM;
+  end;
+
+  // The rows as `Type:kind` sorted, root first: `TA:R TF:I TG:O`.
+  function Rows(AM, ASym: Integer): string;
+  const
+    KIND: array[TPasOverrideKind] of string = ('R', 'O', 'M', 'I', 'D');
+  var
+    L: TArray<string>;
+    LOvs: TArray<TPasOverrideHit>;
+    I, J: Integer;
+    T: string;
+  begin
+    Result := '';
+    LOvs := LNav.FindOverrides(AM, ASym);
+    if LOvs = nil then
+      Exit;
+    SetLength(L, Length(LOvs) - 1);
+    for I := 1 to High(LOvs) do
+      L[I - 1] := LOvs[I].TypeName + ':' + KIND[LOvs[I].Kind];
+    for I := 1 to High(L) do   // insertion sort - a handful of rows
+    begin
+      T := L[I];
+      J := I - 1;
+      while (J >= 0) and (CompareStr(L[J], T) > 0) do
+      begin
+        L[J + 1] := L[J];
+        Dec(J);
+      end;
+      L[J + 1] := T;
+    end;
+    Result := LOvs[0].TypeName + ':' + KIND[LOvs[0].Kind];
+    for I := 0 to High(L) do
+      Result := Result + ' ' + L[I];
+  end;
+
+  function Descends(AM, ASym: Integer; const ANames: array of string):
+    Boolean;
+  var
+    LD: TArray<TPasDescendantHit>;
+    N: string;
+    Found: Boolean;
+  begin
+    LD := LNav.FindDescendants(AM, ASym);
+    for N in ANames do
+    begin
+      Found := False;
+      for var H in LD do
+        if SameText(H.TypeName, N) then
+          Found := True;
+      if not Found then
+        Exit(False);
+    end;
+    Result := True;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_nav_ovidx');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), OV_SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OvIdx.pas'), OV_UNIT);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    LProj.AnalyzeDirectory(LDir);
+    LNav := TPasNavigator.Create(LProj);
+    try
+      LMid := LNav.ModelIdOf(TPath.Combine(LDir, 'OvIdx.pas'));
+      LSys := LNav.ModelIdOf(TPath.Combine(LDir, 'System.pas'));
+      Ok('ovidx: models found', (LMid >= 0) and (LSys >= 0));
+      Ok('ovidx: Destroy in a bare class - the clicked class, its bare ' +
+        'descendant and the explicit sibling, and a class destructor hides no slot [' +
+        Rows(LMid, Meth(LMid, 'tx', 'destroy')) + ']',
+        Rows(LMid, Meth(LMid, 'tx', 'destroy')) =
+        'TObject:R TW2:O TW:O TX:O TY:O TZ:O');
+      Ok('ovidx: ...the same chain from TObject.Destroy',
+        Rows(LSys, Meth(LSys, 'tobject', 'destroy')) =
+        'TObject:R TW2:O TW:O TX:O TY:O TZ:O');
+      Ok('ovidx: TObject''s descendants hold the bare classes',
+        Descends(LSys, TypeSym(LSys, 'tobject'), ['TX', 'TZ', 'TA', 'TY']));
+      Ok('ovidx: IInterface''s descendants hold the bare interface',
+        Descends(LSys, TypeSym(LSys, 'iinterface'), ['IFoo', 'IBar']));
+      Ok('ovidx: a `virtual` new slot ends the branch; `reintroduce; ' +
+        'overload` keeps it open [' + Rows(LMid, Meth(LMid, 'ta', 'draw')) +
+        ']', Rows(LMid, Meth(LMid, 'ta', 'draw')) = 'TA:R TF:I TG:O');
+      Ok('ovidx: ...the override of the new slot climbs to it [' +
+        Rows(LMid, Meth(LMid, 'tc', 'draw')) + ']',
+        Rows(LMid, Meth(LMid, 'tc', 'draw')) = 'TB:R TC:O');
+      Ok('ovidx: an ancestor spelled through an alias of an instantiation [' +
+        Rows(LMid, Meth(LMid, 'tbaseg', 'paint')) + ']',
+        Rows(LMid, Meth(LMid, 'tbaseg', 'paint')) = 'TBaseG:R TD1:O TD2:O');
+      Ok('ovidx: ...and from below it the climb passes the alias [' +
+        Rows(LMid, Meth(LMid, 'td2', 'paint')) + ']',
+        Rows(LMid, Meth(LMid, 'td2', 'paint')) = 'TBaseG:R TD1:O TD2:O');
+      Ok('ovidx: ...a descendant of the generic',
+        Descends(LMid, TypeSym(LMid, 'tbaseg'), ['TD1', 'TD2']));
+      Ok('ovidx: a new virtual overload beside an override is its own ' +
+        'root [' + Rows(LMid, Meth(LMid, 'tq', 'foo', 1)) + ']',
+        Rows(LMid, Meth(LMid, 'tq', 'foo', 1)) = 'TQ:R TQ:R TR:O');
+      Ok('ovidx: an object descendant''s `virtual` is the override [' +
+        Rows(LMid, Meth(LMid, 'to2', 'm')) + ']',
+        (Rows(LMid, Meth(LMid, 'to2', 'm')) = 'TO1:R TO2:O') and
+        (Rows(LMid, Meth(LMid, 'to1', 'm')) = 'TO1:R TO2:O'));
+    finally
+      LNav.Free;
+    end;
+  finally
+    LProj.Free;
+  end;
+  TDirectory.Delete(LDir, True);
+end;
+
 procedure TestCaretEdges;
 const
   UNIT_CARET =
@@ -3798,9 +3992,14 @@ begin
       LOvs2 := GNav.FindOverrides(LRTMid, LRSym);
       Ok('FindOverrides: the climb passes through ancestors that do not '
         + 'declare the name - root is TGapRoot',
-        (Length(LOvs2) >= 2) and (LOvs2[0].Kind = pokRoot) and
+        (Length(LOvs2) = 3) and (LOvs2[0].Kind = pokRoot) and
         SameText(LOvs2[0].TypeName, 'TGapRoot') and (LOvs2[0].Hit.Line = 6)
-        and HasOvAt(LOvs2, 'NavOvrC.pas', 14, pokOverride, 'TGapLeaf'));
+        and HasOvAt(LOvs2, 'NavOvrC.pas', 14, pokOverride, 'TGapLeaf')
+        // TReslot's `reintroduce; virtual` is a row and ENDS the branch:
+        // TReslotKid overrides the new slot, not this one (audit A2-24).
+        and HasOvAt(LOvs2, 'NavOvrC.pas', 18, pokReintroduce, 'TReslot')
+        and not HasOvAt(LOvs2, 'NavOvrC.pas', 22, pokOverride,
+          'TReslotKid'));
       // `reintroduce; virtual;` STARTS a new slot: from its override the
       // climb stops there, and from the reslot itself there is no climb.
       Ok('MethodAt: TReslotKid.Save (overrides a reintroduced slot)',
@@ -5014,6 +5213,7 @@ begin
   end;
   TestReleasedModels;
   TestCaretEdges;
+  TestOverrideIndex;
   TestUnusedUses;
   TestUnreferencedUnits;
   TestLintGlobalInit;
