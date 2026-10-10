@@ -79,7 +79,6 @@ type
     FFuel: Int64;              // decremented in CurKind; trips at 0
     FFuelTripped: Boolean;
     FDepth: Integer;           // recursion depth across Parse* entries
-    FRoutineNameVis: Integer;  // diagnostics: current routine's name token
     // True when the token at FPos is a lexed '>=' being read as its SECOND
     // half only - see CloseGeneric. CurKind then answers tkEqual instead of
     // the real tkGreaterEqual, and the Next() that consumes it advances FPos
@@ -147,6 +146,7 @@ type
     function ParseStatement: Integer;
     function ParseBlockUntil(ABlock: Integer;
       const ATerminators: array of TPasTokenKind): Integer;
+    function ReattachElse(ALast, AElse: Integer): Boolean;
     function AtAny(const AKinds: array of TPasTokenKind): Boolean;
     function ParseIfStmt: Integer;
     function ParseCaseStmt: Integer;
@@ -165,6 +165,7 @@ type
     function ParseAttrGroups: Integer;
     procedure ParseHintsOpt(ANode: Integer);
     function ParseTypeExpr: Integer;
+    function FinishSubrange(ALo: Integer; AEqEnds: Boolean): Integer;
     function ParseEnumType: Integer;
     function ParseArrayType(AEqualEnds, AProcTail: Boolean): Integer;
     function ParseProcTypeExpr(ARefTo, ATail: Boolean): Integer;
@@ -184,7 +185,7 @@ type
     function ParseParamList(AClose: TPasTokenKind): Integer;
     function ParseRoutine(AClassMethod, AAllowBody: Boolean): Integer;
     function ParseRoutineDirectives(ARoutine: Integer): Boolean; // True=no body
-    function ParseRoutineBody: Integer;
+    function ParseRoutineBody(ANameVis: Integer): Integer;
     function ParseProperty(AClassProp: Boolean): Integer;
     function ParseTypeSection(AHeadless: Boolean = False): Integer;
     function ParseConstSection(AHeadless: Boolean = False): Integer;
@@ -196,6 +197,7 @@ type
     function IsDirectiveWord: Boolean; overload;
     function IsDirectiveWord(AVisIndex: Integer): Boolean; overload;
     function IsHintWord(AVisIndex: Integer): Boolean;
+    procedure SkipToModuleHead;
     function IsCallConvStarter(AVisIndex: Integer): Boolean;
     function IsVisibilityWord: Boolean;
     { Do the attribute groups at the cursor annotate a declaration of the
@@ -236,6 +238,7 @@ type
     function AtDeclHead: Boolean; overload;
     function AtDeclHead(const AFollow: array of TPasTokenKind): Boolean; overload;
     function AtSectionBoundary: Boolean;
+    function AtExternalEnd: Boolean;
     { Does the visible token at AVisIndex begin its LINE (only whitespace
       before it since the previous line break)? Recovery-only evidence: some
       unfinished states are token-identical to valid code - `C4:` typed above
@@ -290,6 +293,31 @@ implementation
 uses
   System.SysUtils,
   PasTree.Lexer;
+
+const
+  // The token sets the recovery reads, kept once: three hand-kept copies of
+  // "what starts a statement" had drifted apart (audit B1-04).
+  //
+  // A statement starts with each of these, and ParseStatement consumes at
+  // least the keyword - so a loop that hands one to it makes progress.
+  STMT_STARTERS = [tkVar, tkConst, tkBegin, tkIf, tkFor, tkWhile, tkRepeat,
+    tkCase, tkTry, tkWith, tkRaise, tkGoto, tkAsm, tkInherited];
+  // A statement list ends at each of these: an enclosing construct owns them.
+  BLOCK_ENDERS = [tkEnd, tkElse, tkUntil, tkFinally, tkExcept];
+  // Words no statement list holds: a block that meets one was never closed,
+  // and the section it starts is not the block's to swallow.
+  SECTION_WORDS = [tkImplementation, tkInitialization, tkFinalization];
+  // What a missing operand or type does NOT consume (ParseFactor's
+  // fallback): a keyword that starts or ends a statement, a declaration or a
+  // section, the `;` and the file's end. Where the operand is missing at the
+  // author's cursor, the next token is the block's `end`, a routine's
+  // `begin` or `implementation`, and eating it lost the rest of the unit
+  // (audit A1-02). The caller's loop makes the progress: every word here is
+  // a terminator, a separator or a construct's head somewhere above.
+  FACTOR_KEEPS = STMT_STARTERS - [tkInherited] + BLOCK_ENDERS +
+    SECTION_WORDS + [tkSemicolon, tkEndOfFile, tkType, tkResourcestring,
+    tkThreadvar, tkLabel, tkExports, tkConstructor, tkDestructor, tkClass,
+    tkProperty, tkUses];
 
 { TPasParser - cursor ------------------------------------------------------- }
 
@@ -842,7 +870,7 @@ begin
         // The body is a full routine body: anonymous methods may declare
         // locals - function(...): TValue var fx: Extended; begin ... end
         // (System.Bindings.EvalSys.pas) - and even nested routines.
-        FB.Adopt(LNode, ParseRoutineBody);
+        FB.Adopt(LNode, ParseRoutineBody(NIL_NODE));   // no name: see there
         FB.SetLast(LNode, FPos - 1);
         Exit(LNode);
       end;
@@ -856,7 +884,9 @@ begin
   else
     Error('expression expected, found "' + CurText + '"');
     Result := FB.AddNode(nkError, NIL_NODE, LStart);
-    Next; // always make progress
+    // Progress, unless the token is the next construct's: see FACTOR_KEEPS.
+    if not (CurKind in FACTOR_KEEPS) then
+      Next;
   end;
   finally
     LeaveGuard;
@@ -881,8 +911,12 @@ begin
           // next declaration's head on its own line (`array[1.` typed above
           // `Reserve: ...`): that name is not consumed. A variant branch's
           // label is followed by `: (` (`TKind.` NEWLINE `A: (B: Integer)`,
-          // dcc64 37.0), a field never.
-          if ((CurKind = tkIdentifier) or IsKeyword(CurKind)) and
+          // dcc64 37.0), a field never. Nor a keyword that starts or ends a
+          // construct on the next line (`Obj.` typed above `end;`, the most
+          // common completion state): that is the construct, and taking it
+          // as the member lost the block (audit A1-03).
+          if ((CurKind = tkIdentifier) or (IsKeyword(CurKind) and
+              not ((CurKind in FACTOR_KEEPS) and TokenStartsLine(FPos)))) and
              (not AtLineDeclHead or (FVariantLabels and
               (PeekKind(1) = tkColon) and (PeekKind(2) = tkLParen))) then
           begin
@@ -1055,9 +1089,8 @@ begin
     // the skip so a missing `)` cannot swallow the rest of the block.
     FB.Adopt(ACall, FB.AddNode(nkError, NIL_NODE, FPos));
     LDepth := 0;
-    while not (CurKind in [tkSemicolon, tkEndOfFile, tkEnd, tkElse, tkBegin,
-      tkIf, tkWhile, tkFor, tkRepeat, tkUntil, tkCase, tkTry, tkWith,
-      tkRaise, tkGoto, tkAsm]) do
+    while not (CurKind in STMT_STARTERS - [tkInherited] + BLOCK_ENDERS +
+      SECTION_WORDS + [tkSemicolon, tkEndOfFile]) do
     begin
       case CurKind of
         tkLParen, tkLBracket:
@@ -1239,42 +1272,106 @@ end;
 function TPasParser.ParseBlockUntil(ABlock: Integer;
   const ATerminators: array of TPasTokenKind): Integer;
 var
-  LStmt: Integer;
+  LStmt, LLast: Integer;
+  LAfterSemi: Boolean;
 begin
   Inc(FBlockDepth);
   try
+  LLast := NIL_NODE;
   while True do
   begin
+    LAfterSemi := CurKind = tkSemicolon;
     while CurKind = tkSemicolon do
       Next;
-    if AtAny(ATerminators) or (CurKind = tkEndOfFile) then
+    if AtAny(ATerminators) or (CurKind = tkEndOfFile) or
+       (CurKind in SECTION_WORDS) then
       Break;
+    if CurKind = tkElse then
+    begin
+      // An `else` no enclosing construct of this list owns (it is not a
+      // terminator here): the `;` before it ended the `if`, or there is no
+      // `if` at all. dcc reports E2153 / E2029 and goes on; so does this -
+      // the branch is re-attached to the `if` it was written for, the
+      // nearest one without an `else` along the last statement's trailing
+      // edge (5.3.1's dangling-else rule), or kept as a statement of the
+      // list. Breaking out here, as the list once did, ended the begin..end
+      // and lost the rest of the routine (audit A1-04).
+      if LAfterSemi then
+        Error('";" not allowed before "else"')
+      else
+        Error('"else" without an "if"');
+      Next;
+      LStmt := ParseStatement;
+      if not ReattachElse(LLast, LStmt) then
+      begin
+        FB.Adopt(ABlock, LStmt);
+        LLast := LStmt;
+      end;
+      Continue;
+    end;
     LStmt := ParseStatement;
     FB.Adopt(ABlock, LStmt);
+    LLast := LStmt;
     if CurKind = tkSemicolon then
       Continue;
-    if AtAny(ATerminators) or (CurKind = tkEndOfFile) or (CurKind = tkElse)
-    then
-      Break;
+    if AtAny(ATerminators) or (CurKind = tkEndOfFile) or
+       (CurKind in SECTION_WORDS + [tkElse]) then
+      Continue;   // the loop's head decides
     // Recovery: missing separator - resync to ';' or a terminator.
     Error('";" expected');
     // ...unless the token already STARTS the next statement: then the only
     // thing missing was the ';', and skipping to the next one would throw
     // that whole statement away (`var LB :=` on one line, `var LC := 5;` on
-    // the next - the second declaration vanished, 3.1.3). Every kind listed
-    // makes ParseStatement consume at least its keyword, so the loop
-    // progresses.
-    if CurKind in [tkVar, tkConst, tkBegin, tkIf, tkFor, tkWhile, tkRepeat,
-      tkCase, tkTry, tkWith, tkRaise, tkGoto, tkAsm, tkInherited] then
+    // the next - the second declaration vanished, 3.1.3). Every keyword
+    // listed makes ParseStatement consume at least itself, and an
+    // identifier starts an expression statement that does; so the loop
+    // progresses. An identifier counts on a line of its own: it is the
+    // commonest statement, an assignment or a call, and skipping it lost
+    // its references (audit B1-03); mid-line it is the garbage the resync
+    // is for.
+    if (CurKind in STMT_STARTERS) or
+       ((CurKind = tkIdentifier) and TokenStartsLine(FPos)) then
       Continue;
     while not (AtAny(ATerminators) or
-      (CurKind in [tkSemicolon, tkEndOfFile])) do
+      (CurKind in SECTION_WORDS + [tkSemicolon, tkEndOfFile])) do
       Next;
   end;
   finally
     Dec(FBlockDepth);
   end;
   Result := ABlock;
+end;
+
+{ A stray `else` branch (see ParseBlockUntil) given to the `if` it was
+  written for: the innermost `if` with no `else` along ALast's trailing edge
+  - its then-branch, or the else-branch of an `else if` chain - which is the
+  one 5.3.1's dangling-else rule would have chosen without the `;`. The
+  spans from that `if` up to ALast grow to cover the branch. False when ALast
+  ends in no such `if`. }
+function TPasParser.ReattachElse(ALast, AElse: Integer): Boolean;
+var
+  LNode, LIf: Integer;
+begin
+  LIf := NIL_NODE;
+  LNode := ALast;
+  while (LNode <> NIL_NODE) and (FB.Kind(LNode) = nkIfStmt) do
+  begin
+    if FB.ChildCount(LNode) = 2 then
+      LIf := LNode;
+    LNode := FB.LastChild(LNode);
+  end;
+  if LIf = NIL_NODE then
+    Exit(False);
+  FB.Adopt(LIf, AElse);
+  LNode := LIf;
+  while True do
+  begin
+    FB.SetLast(LNode, FPos - 1);
+    if LNode = ALast then
+      Break;
+    LNode := FB.ParentOf(LNode);
+  end;
+  Result := True;
 end;
 
 function TPasParser.ParseIfStmt: Integer;
@@ -1298,10 +1395,7 @@ begin
     Next;
     FB.Adopt(LNode, ParseExpression);
     Expect(tkThen, '"then"');
-    if (CurKind = tkElse) or (CurKind = tkSemicolon) then
-      FB.Adopt(LNode, FB.AddNode(nkEmptyStmt, NIL_NODE, FPos))
-    else
-      FB.Adopt(LNode, ParseStatement);
+    FB.Adopt(LNode, ParseStatement);   // an empty one at `;` or `else`
     if CurKind <> tkElse then
       Break;
     Next;
@@ -1329,15 +1423,20 @@ end;
 
 function TPasParser.ParseCaseStmt: Integer;
 var
-  LNode, LSel, LLabels, LExpr, LRange, LElse: Integer;
+  LNode, LSel, LLabels, LExpr, LRange, LElse, LArmStart: Integer;
 begin
   // 5.3.2: ordinal selector; labels are const-exprs/ranges.
   LNode := FB.AddNode(nkCaseStmt, NIL_NODE, FPos);
   Next;
   FB.Adopt(LNode, ParseExpression);
   Expect(tkOf, '"of"');
-  while not (CurKind in [tkElse, tkEnd, tkEndOfFile]) do
+  // An arm cannot start at a word that ends a statement list or starts a
+  // section; and an arm that consumed nothing (a missing label before a
+  // keyword the expression does not take, see FACTOR_KEEPS) ends the list
+  // rather than spinning on it.
+  while not (CurKind in BLOCK_ENDERS + SECTION_WORDS + [tkEndOfFile]) do
   begin
+    LArmStart := FPos;
     LSel := FB.AddNode(nkCaseSel, NIL_NODE, FPos);
     LLabels := FB.AddNode(nkCaseLabels, NIL_NODE, FPos);
     FB.Adopt(LSel, LLabels);
@@ -1361,14 +1460,13 @@ begin
     end;
     FB.SetLast(LLabels, FPos - 1);
     Expect(tkColon, '":"');
-    if CurKind in [tkSemicolon, tkElse, tkEnd] then
-      FB.Adopt(LSel, FB.AddNode(nkEmptyStmt, NIL_NODE, FPos))
-    else
-      FB.Adopt(LSel, ParseStatement);
+    FB.Adopt(LSel, ParseStatement);
     FB.SetLast(LSel, FPos - 1);
     FB.Adopt(LNode, LSel);
     while CurKind = tkSemicolon do
       Next;
+    if FPos = LArmStart then
+      Break;
   end;
   if CurKind = tkElse then
   begin
@@ -1441,10 +1539,7 @@ begin
     FB.Adopt(LNode, ParseExpression);
   end;
   Expect(tkDo, '"do"');
-  if CurKind = tkSemicolon then
-    FB.Adopt(LNode, FB.AddNode(nkEmptyStmt, NIL_NODE, FPos))
-  else
-    FB.Adopt(LNode, ParseStatement);
+  FB.Adopt(LNode, ParseStatement);
   FB.SetLast(LNode, FPos - 1);
   Result := LNode;
 end;
@@ -1475,7 +1570,10 @@ begin
   begin
     LPart := FB.AddNode(nkExceptPart, NIL_NODE, FPos);
     Next;
-    if IsWord('on') then
+    // The handler list may be empty before its `else`: `except else S end`
+    // is the catch-all again (18.1.1, dcc64 37.0), so an `else` here opens
+    // the handler form too - not a catch-all list that meets a stray `else`.
+    if IsWord('on') or (CurKind = tkElse) then
     begin
       // 18.1.2: on [name:] Type do stmt; ... [else ...]
       while IsWord('on') do
@@ -1490,10 +1588,7 @@ begin
         end;
         FB.Adopt(LOn, ParseTypeRef);
         Expect(tkDo, '"do"');
-        if CurKind in [tkSemicolon, tkElse, tkEnd] then
-          FB.Adopt(LOn, FB.AddNode(nkEmptyStmt, NIL_NODE, FPos))
-        else
-          FB.Adopt(LOn, ParseStatement);
+        FB.Adopt(LOn, ParseStatement);
         FB.SetLast(LOn, FPos - 1);
         FB.Adopt(LPart, LOn);
         while CurKind = tkSemicolon do
@@ -1583,23 +1678,10 @@ begin
     // after it, nothing else tells `var X: K` from `var X := K`.
     FB.SetAux(Result, 1);
     Next;
-    // Recovery: `var A :=` with the initializer not yet typed, and the NEXT
-    // statement (or the block's end) already on the following line. The
-    // generic ParseFactor fallback consumes one token to guarantee progress,
-    // and here that token IS the next statement's keyword - `var LC := 5;`
-    // lost its `var`, and the block loop's ';' resync then ate the rest of
-    // the line. An error node at the position, nothing consumed: progress is
-    // the block loop's business (see ParseBlockUntil), and every keyword
-    // below starts a statement or ends the block.
-    if CurKind in [tkSemicolon, tkVar, tkConst, tkBegin, tkEnd, tkIf, tkFor,
-      tkWhile, tkRepeat, tkUntil, tkCase, tkTry, tkFinally, tkExcept, tkWith,
-      tkRaise, tkGoto, tkAsm, tkElse, tkEndOfFile] then
-    begin
-      Error('expression expected, found "' + CurText + '"');
-      FB.Adopt(Result, FB.AddNode(nkError, NIL_NODE, FPos));
-    end
-    else
-      FB.Adopt(Result, ParseExpression);
+    // `var A :=` with the initializer not yet typed and the next statement
+    // on the following line: ParseFactor's fallback leaves that statement's
+    // keyword where it is (FACTOR_KEEPS), so `var LC := 5;` keeps its `var`.
+    FB.Adopt(Result, ParseExpression);
   end;
   FB.SetLast(Result, FPos - 1);
 end;
@@ -1638,10 +1720,7 @@ begin
         Next;
         FB.Adopt(LNode, ParseExpression);
         Expect(tkDo, '"do"');
-        if CurKind = tkSemicolon then
-          FB.Adopt(LNode, FB.AddNode(nkEmptyStmt, NIL_NODE, FPos))
-        else
-          FB.Adopt(LNode, ParseStatement);
+        FB.Adopt(LNode, ParseStatement);
         FB.SetLast(LNode, FPos - 1);
         Exit(LNode);
       end;
@@ -1671,10 +1750,7 @@ begin
           FB.Adopt(LNode, ParseExpression);
         end;
         Expect(tkDo, '"do"');
-        if CurKind = tkSemicolon then
-          FB.Adopt(LNode, FB.AddNode(nkEmptyStmt, NIL_NODE, FPos))
-        else
-          FB.Adopt(LNode, ParseStatement);
+        FB.Adopt(LNode, ParseStatement);
         FB.SetLast(LNode, FPos - 1);
         Exit(LNode);
       end;
@@ -1706,8 +1782,7 @@ begin
         // 18.3.1: bare re-raise or raise expr [at addr].
         LNode := FB.AddNode(nkRaiseStmt, NIL_NODE, FPos);
         Next;
-        if not (CurKind in [tkSemicolon, tkEnd, tkElse, tkUntil, tkFinally,
-          tkExcept, tkEndOfFile]) then
+        if not (CurKind in BLOCK_ENDERS + [tkSemicolon, tkEndOfFile]) then
         begin
           FB.Adopt(LNode, ParseExpression);
           if IsWord('at') then
@@ -1838,6 +1913,18 @@ begin
   Result := FB.AddNode(nkUsesClause, NIL_NODE, FPos);
   Next; // uses
   repeat
+    // A list cut short - `uses UB,` with the next section's keyword on the
+    // following line, the state of typing a unit into it: no item. One built
+    // here was named after the keyword (`type`), looked for on the search
+    // path, and its F1027 closed the unit's E2003 gate (audit B2-04).
+    if CurKind <> tkIdentifier then
+    begin
+      Error('name expected');
+      if CurKind = tkSemicolon then
+        Next;   // `uses ;`, `uses A, ;` - the clause's own end
+      FB.SetLast(Result, FPos - 1);
+      Exit;
+    end;
     LItem := FB.AddNode(nkUsesItem, NIL_NODE, FPos);
     FB.Adopt(LItem, ParseQualifiedName);
     if CurKind = tkIn then
@@ -2219,38 +2306,37 @@ begin
           LExpr := ParseExpression;
         end;
         if CurKind = tkDotDot then
-        begin
-          LNode := FB.AddNode(nkSubrange, NIL_NODE, FPos);
-          FB.Adopt(LNode, LExpr);
-          Next;
-          FB.Adopt(LNode, ParseExpression(LEqEnds));
-          FB.SetLast(LNode, FPos - 1);
-          Exit(LNode);
-        end;
+          Exit(FinishSubrange(LExpr, LEqEnds));
         Exit(LExpr);
       end;
   else
     // Constant-expression subrange: -1..1, $FF..$100, Ord(x)..Ord(y)...
     LExpr := ParseExpression;
     if CurKind = tkDotDot then
-    begin
-      LNode := FB.AddNode(nkSubrange, NIL_NODE, FPos);
-      FB.Adopt(LNode, LExpr);
-      Next;
-      // `array[1..` typed above `Reserve: ...`: the upper bound is not there
-      // yet, and that field is not it.
-      if AtLineDeclHead then
-        Error('expression expected')
-      else
-        FB.Adopt(LNode, ParseExpression(LEqEnds));
-      FB.SetLast(LNode, FPos - 1);
-      Exit(LNode);
-    end;
+      Exit(FinishSubrange(LExpr, LEqEnds));
     Result := LExpr;
   end;
   finally
     LeaveGuard;
   end;
+end;
+
+{ At the `..` of a subrange whose lower bound ALo is parsed: the nkSubrange
+  and its upper bound. One tail for the name-headed and the literal-headed
+  bound - the name-headed copy lacked the recovery below, so `array[Lo..`
+  above `Reserve: Integer;` read the field's name as the bound (audit B2-05). }
+function TPasParser.FinishSubrange(ALo: Integer; AEqEnds: Boolean): Integer;
+begin
+  Result := FB.AddNode(nkSubrange, NIL_NODE, FPos);
+  FB.Adopt(Result, ALo);
+  Next;
+  // `array[1..` typed above `Reserve: ...`: the upper bound is not there
+  // yet, and that field is not it.
+  if AtLineDeclHead then
+    Error('expression expected')
+  else
+    FB.Adopt(Result, ParseExpression(AEqEnds));
+  FB.SetLast(Result, FPos - 1);
 end;
 
 function TPasParser.ParseEnumType: Integer;
@@ -2745,6 +2831,17 @@ begin
     FB.Adopt(AOwner, LDecl);
     if CurKind = tkSemicolon then
       Next
+    else if (CurKind = tkIdentifier) and not IsVisibilityWord and
+            (PeekKind(1) <> tkEqual) then
+    begin
+      // The next field with this one's `;` missing: dcc's E1030 (it reads
+      // the name as a hint, 9.1.1). Reported, and the field kept - the run
+      // used to end here silently and the caller read the name as a member
+      // of its own (audit G12b). `Ident =` is the next type declaration
+      // after an unfinished record, not a field.
+      Error('";" expected');
+      Continue;
+    end
     else
       Break;
     if AtAny(ATerminators) then
@@ -3282,13 +3379,18 @@ begin
   FB.AddNode(nkDirective, NIL_NODE, FPos);   // FirstToken = LastToken = FPos
 end;
 
-const
-  // What ends an `external` clause: its `;`, or the start of the next
-  // declaration or section (a missing `;` is tolerated, see below).
-  EXTERNAL_END = [tkSemicolon, tkEndOfFile, tkFunction, tkProcedure,
-    tkConstructor, tkDestructor, tkClass, tkType, tkVar, tkConst,
-    tkThreadvar, tkLabel, tkExports, tkBegin, tkEnd, tkImplementation,
-    tkInitialization, tkFinalization];
+{ What ends an `external` clause: its `;`, or the start of the next
+  declaration or section (a missing `;` is tolerated, 6.5.1) - the parser's
+  own AtSectionBoundary, not a copy of it: the hand-kept set this replaced
+  had drifted, and a `;`-less clause followed by `resourcestring` or a
+  class's `property` swallowed that keyword as an expression (audit B2-02).
+  A `[` is no boundary here: dcc reads it as an index of the clause's last
+  expression. }
+function TPasParser.AtExternalEnd: Boolean;
+begin
+  Result := (CurKind in [tkSemicolon, tkEndOfFile]) or
+    ((CurKind <> tkLBracket) and AtSectionBoundary);
+end;
 
 function TPasParser.ParseRoutineDirectives(ARoutine: Integer): Boolean;
 var
@@ -3319,13 +3421,13 @@ begin
       // declaration - dcc tolerates a missing terminator:
       // `function F; external shell32 name 'X'` + newline + `function ...`
       // (user corpus, verified against dcc64).
-      if not (CurKind in EXTERNAL_END) and not IsWord('name') then
+      if not AtExternalEnd and not IsWord('name') then
         FB.Adopt(LDir, ParseExpression);
       LHaveName := False;
       LHaveIndex := False;
       LHaveDep := False;
       LHaveDelayed := False;
-      while not (CurKind in EXTERNAL_END) do
+      while not AtExternalEnd do
       begin
         if IsWord('name') then
         begin
@@ -3415,7 +3517,7 @@ end;
 
 function TPasParser.ParseRoutine(AClassMethod, AAllowBody: Boolean): Integer;
 var
-  LSeg, LGen, LRes, LProbe: Integer;
+  LSeg, LGen, LRes, LProbe, LNameVis: Integer;
   LIsOperator: Boolean;
 begin
   // 6.1: [class] procedure|function|constructor|destructor|operator
@@ -3426,7 +3528,7 @@ begin
   if LIsOperator then
     MarkContextKeyword; // color 'operator' (lexed as an identifier)
   Next; // routine keyword (or 'operator' identifier)
-  FRoutineNameVis := FPos;
+  LNameVis := FPos;   // the "begin" expected message names it
   // Name: segments with optional generic params (impl headers, 16.3).
   // Operators may be named by reserved words: class operator In(...)
   // (FMX.Graphics.pas).
@@ -3528,13 +3630,13 @@ begin
   if not ParseRoutineDirectives(Result) then
     if AAllowBody then
     begin
-      FB.Adopt(Result, ParseRoutineBody);
+      FB.Adopt(Result, ParseRoutineBody(LNameVis));
       Expect(tkSemicolon, '";"');
     end;
   FB.SetLast(Result, FPos - 1);
 end;
 
-function TPasParser.ParseRoutineBody: Integer;
+function TPasParser.ParseRoutineBody(ANameVis: Integer): Integer;
 var
   LBlock: Integer;
 begin
@@ -3574,8 +3676,13 @@ begin
     FB.Adopt(Result, LBlock);
   end
   else
-    Error('"begin" expected (routine ' +
-      FSrc.VisibleText(FRoutineNameVis) + ')');
+    // ANameVis is the routine's name token, passed in: the field it was
+    // read from was overwritten by a nested routine parsed in between, and
+    // an anonymous method never set it (audit B2-06).
+    if ANameVis = NIL_NODE then
+      Error('"begin" expected (anonymous method)')
+    else
+      Error('"begin" expected (routine ' + FSrc.VisibleText(ANameVis) + ')');
   FB.SetLast(Result, FPos - 1);
   LeaveGuard;
 end;
@@ -3676,7 +3783,7 @@ var
 
   function LooksLikeAggregate: Boolean;
   var
-    LIdx, LDepth, LSteps, LInnerClose: Integer;
+    LIdx, LDepth, LInnerClose: Integer;
     LKind: TPasTokenKind;
     LFirstLParen: Boolean;
   begin
@@ -3686,7 +3793,6 @@ var
     Result := False;
     LIdx := FPos + 1;
     LDepth := 1;
-    LSteps := 0;
     // Does the content open with its own '('? That used to mean "aggregate"
     // outright, which swallowed the very case this function's header names as
     // the one to reject: `((1.0/$10000) / $10000)` is a parenthesised const
@@ -3695,7 +3801,10 @@ var
     // one - is genuinely ambiguous, so that is all that is treated as one.
     LFirstLParen := FSrc.VisibleToken(FPos + 1).Kind = tkLParen;
     LInnerClose := -1;
-    while (LIdx <= FLast) and (LSteps < 4096) do
+    // No step cap: the scan is linear and stops at depth 0 or the file's
+    // end, and a cap read a table whose FIRST element is a long nested
+    // aggregate (a 2048-value row) as an expression (audit B2-01).
+    while LIdx <= FLast do
     begin
       LKind := FSrc.VisibleToken(LIdx).Kind;
       // The empty aggregate `()` closes depth immediately (OleControls).
@@ -3717,7 +3826,6 @@ var
             Exit(True);
       end;
       Inc(LIdx);
-      Inc(LSteps);
     end;
   end;
 
@@ -4222,6 +4330,49 @@ begin
     end;
 end;
 
+{ Junk before the module's header - a character typed on line 1, the text of
+  a header comment whose opening brace was deleted - left a tree with a bare
+  nkError root, and every importer reported its names undeclared (audit
+  A1-05). A bounded scan for the header after it: a head word followed by a
+  (dotted) name and then `;`, `(` (program parameters) or a hint, so a
+  `program` in the prose of a comment is not taken. Found, the junk is one
+  diagnostic and the parse starts at the header; the junk stays the root's
+  own tokens. Not found, the dispatch below reports the file as before. }
+procedure TPasParser.SkipToModuleHead;
+const
+  SCAN_LIMIT = 4096;
+var
+  LIdx, LName, LEnd: Integer;
+  LKind: TPasTokenKind;
+begin
+  if (CurKind in [tkUnit, tkProgram, tkLibrary]) or IsWord('package') then
+    Exit;
+  LEnd := FPos + SCAN_LIMIT;
+  if LEnd > FLast - 1 then
+    LEnd := FLast - 1;
+  for LIdx := FPos + 1 to LEnd do
+  begin
+    LKind := FSrc.VisibleToken(LIdx).Kind;
+    if not ((LKind in [tkUnit, tkProgram, tkLibrary]) or ((LKind = tkIdentifier)
+       and SameText(FSrc.VisibleText(LIdx), 'package'))) then
+      Continue;
+    LName := LIdx + 1;
+    if FSrc.VisibleToken(LName).Kind <> tkIdentifier then
+      Continue;
+    while (LName + 2 <= FLast) and (FSrc.VisibleToken(LName + 1).Kind = tkDot)
+      and (FSrc.VisibleToken(LName + 2).Kind = tkIdentifier) do
+      Inc(LName, 2);
+    if (LName + 1 <= FLast) and
+       ((FSrc.VisibleToken(LName + 1).Kind in [tkSemicolon, tkLParen]) or
+        IsHintWord(LName + 1)) then
+    begin
+      Error('unit, program, library or package expected');
+      FPos := LIdx;
+      Exit;
+    end;
+  end;
+end;
+
 class function TPasParser.ParseFile(const ASource: TPasPreprocessed;
   out ADiags: TArray<TPasParseDiag>;
   AInterfaceOnly: Boolean = False): TPasTree;
@@ -4235,6 +4386,7 @@ begin
   LP.FLast := High(ASource.Visible);
   LP.FFuel := Int64(Length(ASource.Visible)) * 200 + 10000;
   LP.FB.Init(Length(ASource.Visible) div 2 + 64);
+  LP.SkipToModuleHead;
   case LP.CurKind of
     tkUnit:
       begin

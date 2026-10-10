@@ -47,7 +47,7 @@ the flags mean. The expression and statement kinds read as follows (`c0`,
 | nkRepeatStmt | `repeat c0 until c1` |
 | nkWithStmt | `with c0, ... do` last child |
 | nkGotoStmt, nkLabeledStmt | `goto c0`; `c0 : c1` - the label c0 is an nkIdent, or an nkIntLit for a numeric one (a name label is bound by the resolver, a numeric one is not) |
-| nkTryStmt | `try c0` then nkFinallyPart (`finally c0`) or nkExceptPart (`except` handlers or a catch-all block), `end` |
+| nkTryStmt | `try c0` then nkFinallyPart (`finally c0`) or nkExceptPart (`except` handlers, then the `else` block if any, or a catch-all block - `except else S` is that block too, 18.1.1), `end` |
 | nkExceptOn | `on [c0 :] type do statement` - three children: the name first |
 | nkRaiseStmt | `raise [c0 [at c1]]` |
 | nkInlineVar | `var` names (nfName), [`:` type], [`:=` value when Aux is 1] |

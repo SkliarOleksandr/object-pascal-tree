@@ -2253,7 +2253,7 @@ const
      Source: 'type T = reference to procedure; stdcall;';
      Expected: 'TypeSec(TypeDecl(Ident''T'' ProcType#reference) ' +
        'TypeDecl(Ident''stdcall'' Error))';
-     ExpectDiags: 3),
+     ExpectDiags: 2),   // `=` expected, expression expected - the `;` is kept (B14)
     (Section: '3.1.2'; Name: 'F1: the initializer after the run';
      Source: 'var P: procedure; cdecl = nil;';
      Expected: 'VarSec''var''(VarDecl(Ident''P''#name ' +
@@ -2398,7 +2398,7 @@ const
      Source: 'type T = Integer; stdcall;';
      Expected: 'TypeSec(TypeDecl(Ident''T'' Ident''Integer'') ' +
        'TypeDecl(Ident''stdcall'' Error))';
-     ExpectDiags: 3),
+     ExpectDiags: 2),   // `=` expected, expression expected - the `;` is kept (B14)
     // The printer's canonical forms (parser fidelity S9): each spelling below
     // is one tree with the printer's, which T3 maps and T3r parses back.
     (Section: '19.3.2'; Name: 'S9: two bracket groups are one group';
@@ -3554,6 +3554,82 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
       end;
   end;
 
+  // The parse diagnostics of ASrc, joined: must hold AWant and not ARefuse.
+  function DiagTextCase(const AName, ASrc, AWant, ARefuse: string):
+    TPasCustomCase;
+  begin
+    Result.Section := '6.1';
+    Result.Name := AName;
+    Result.Run :=
+      function: TPasCheckResult
+      var
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LText: string;
+      begin
+        LPre := GPP.ProcessText('u.pas', ASrc);
+        TPasParser.ParseFile(LPre, LDiags);
+        LText := '';
+        for var LDiag in LDiags do
+          LText := LText + LDiag.Msg + '; ';
+        Result.Passed := (Pos(AWant, LText) > 0) and
+          ((ARefuse = '') or (Pos(ARefuse, LText) = 0));
+        if Result.Passed then
+          Result.Message := ''
+        else
+          Result.Message := Format('  want "%s", not "%s"; got: %s',
+            [AWant, ARefuse, LText]) + sLineBreak;
+      end;
+  end;
+
+  // B2-01: a typed constant whose FIRST element is an aggregate of AValues
+  // values - longer than the 4096-token scan cap it once had - parses clean.
+  function LongAggregateCase(AValues: Integer): TPasCustomCase;
+  begin
+    Result.Section := '8.1.1';
+    Result.Name := Format('B14 B2-01: a %d-value first row is an aggregate',
+      [AValues]);
+    Result.Run :=
+      function: TPasCheckResult
+      var
+        LSrc: TStringBuilder;
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+      begin
+        LSrc := TStringBuilder.Create;
+        try
+          LSrc.Append(Format('unit U;'#13#10'interface'#13#10 +
+            'const T: array[0..1, 0..%d] of Byte = (', [AValues - 1]));
+          for var LRow := 0 to 1 do
+          begin
+            if LRow > 0 then
+              LSrc.Append(','#13#10);
+            LSrc.Append('(');
+            for var LIdx := 0 to AValues - 1 do
+            begin
+              if LIdx > 0 then
+                LSrc.Append(',');
+              if LIdx mod 64 = 63 then
+                LSrc.Append(#13#10);
+              LSrc.Append(LIdx mod 200);
+            end;
+            LSrc.Append(')');
+          end;
+          LSrc.Append(');'#13#10'implementation'#13#10'end.'#13#10);
+          LPre := GPP.ProcessText('u.pas', LSrc.ToString);
+        finally
+          LSrc.Free;
+        end;
+        TPasParser.ParseFile(LPre, LDiags);
+        Result.Passed := Length(LDiags) = 0;
+        if Result.Passed then
+          Result.Message := ''
+        else
+          Result.Message := Format('  %d diagnostics, first: %s',
+            [Length(LDiags), LDiags[0].Msg]) + sLineBreak;
+      end;
+  end;
+
 var
   LPlatform: TPasPlatform;
 begin
@@ -3599,6 +3675,155 @@ begin
       'procedure P;'#13#10'begin'#13#10'end;'#13#10, 'Error', 1),
     StrayEndCase('F8: ...anything but a unit ignores it',
       'procedure P;'#13#10'begin'#13#10'end;'#13#10, 'Error', 1, True),
+    // Recovery around structural keywords (audit B14). Each is the state of
+    // typing, and what must survive it is the code after the cursor.
+    StrayEndCase('B14 A1-05: junk before the header - the unit is read',
+      'x unit U;'#13#10'interface'#13#10'var V: Integer;'#13#10 +
+      'implementation'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec(VarSec''var''(VarDecl(Ident''V''#n' +
+      'ame Ident''Integer''))) ImplementationSec)', 1),
+    StrayEndCase('B14 A1-05: a header word in prose is not the header',
+      'this program is free software'#13#10'unit U;'#13#10'interface'#13#10 +
+      'implementation'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec ImplementationSec)', 1),
+    StrayEndCase('B14 B2-04: a uses list cut after its comma declares no unit',
+      'unit U;'#13#10'interface'#13#10'uses UB,'#13#10 +
+      'type T = Integer;'#13#10'implementation'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec(UsesClause(UsesItem(Ident''UB'')) ' +
+      'TypeSec(TypeDecl(Ident''T'' Ident''Integer''))) ' +
+      'ImplementationSec)', 1),
+    StrayEndCase('B14 A1-02: a missing operand keeps the implementation',
+      'unit U;'#13#10'interface'#13#10'const C ='#13#10 +
+      'implementation'#13#10'procedure P;'#13#10'begin'#13#10'end;'#13#10 +
+      'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec(ConstSec''const''(ConstDecl(' +
+      'Ident''C'' Error))) ImplementationSec(Routine''procedure''(' +
+      'Ident''P''#name RoutineBody(Block))))', 2),
+    StrayEndCase('B14 A1-02: ...and a routine''s begin',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+      'procedure P;'#13#10'var V: Integer ='#13#10'begin'#13#10 +
+      '  V := 1;'#13#10'end;'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec ' +
+      'ImplementationSec(Routine''procedure''(Ident''P''#name ' +
+      'RoutineBody(VarSec''var''(VarDecl(Ident''V''#name ' +
+      'Ident''Integer'' Error)) Block(Assign(Ident''V'' ' +
+      'IntLit''1''))))))', 2),
+    StrayEndCase('B14 A1-02: ...and the block''s end',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+      'procedure P;'#13#10'begin'#13#10'  X :='#13#10'end;'#13#10 +
+      'procedure Q;'#13#10'begin'#13#10'end;'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec ' +
+      'ImplementationSec(Routine''procedure''(Ident''P''#name ' +
+      'RoutineBody(Block(Assign(Ident''X'' Error)))) ' +
+      'Routine''procedure''(Ident''Q''#name RoutineBody(Block))))', 1),
+    StrayEndCase('B14 A1-03: a trailing dot above end keeps the end',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+      'procedure P;'#13#10'begin'#13#10'  Obj.'#13#10'end;'#13#10 +
+      'procedure Q;'#13#10'begin'#13#10'end;'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec ' +
+      'ImplementationSec(Routine''procedure''(Ident''P''#name ' +
+      'RoutineBody(Block(ExprStmt(Member(Ident''Obj''))))) ' +
+      'Routine''procedure''(Ident''Q''#name RoutineBody(Block))))', 1),
+    StrayEndCase('B14 A1-04: ; before else - the branch is the if''s',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+      'procedure P;'#13#10'begin'#13#10'  if A then B;'#13#10 +
+      '  else C;'#13#10'  D;'#13#10'end;'#13#10 +
+      'procedure Q;'#13#10'begin'#13#10'end;'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec ' +
+      'ImplementationSec(Routine''procedure''(Ident''P''#name ' +
+      'RoutineBody(Block(IfStmt(Ident''A'' ExprStmt(Ident''B'') ' +
+      'ExprStmt(Ident''C'')) ExprStmt(Ident''D'')))) ' +
+      'Routine''procedure''(Ident''Q''#name RoutineBody(Block))))', 1),
+    StrayEndCase('B14 A1-04: ...the innermost if without one',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+      'procedure P;'#13#10'begin'#13#10'  if A then if B then C;'#13#10 +
+      '  else D;'#13#10'end;'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec ' +
+      'ImplementationSec(Routine''procedure''(Ident''P''#name ' +
+      'RoutineBody(Block(IfStmt(Ident''A'' IfStmt(Ident''B'' ' +
+      'ExprStmt(Ident''C'') ExprStmt(Ident''D''))))))))', 1),
+    StrayEndCase('B14 A1-04: ...no if: a statement of the list',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+      'procedure P;'#13#10'begin'#13#10'  B;'#13#10 +
+      '  else C;'#13#10'end;'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec ' +
+      'ImplementationSec(Routine''procedure''(Ident''P''#name ' +
+      'RoutineBody(Block(ExprStmt(Ident''B'') ' +
+      'ExprStmt(Ident''C''))))))', 1),
+    StrayEndCase('B14 G12a: except else is the catch-all',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+      'procedure P;'#13#10'begin'#13#10'  try A; except else B; C; end;'#13#10 +
+      '  try A; except else end;'#13#10'end;'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec ' +
+      'ImplementationSec(Routine''procedure''(Ident''P''#name ' +
+      'RoutineBody(Block(TryStmt(Block(ExprStmt(Ident''A'')) ' +
+      'ExceptPart(Block(ExprStmt(Ident''B'') ExprStmt(Ident''C'')))) ' +
+      'TryStmt(Block(ExprStmt(Ident''A'')) ExceptPart(Block)))))))', 0),
+    StrayEndCase('B14 G12a: a catch-all list takes no else (E2153)',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+      'procedure P;'#13#10'begin'#13#10'  try A; except B; else C; end;'#13#10 +
+      'end;'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec ' +
+      'ImplementationSec(Routine''procedure''(Ident''P''#name ' +
+      'RoutineBody(Block(TryStmt(Block(ExprStmt(Ident''A'')) ' +
+      'ExceptPart(Block(ExprStmt(Ident''B'') ' +
+      'ExprStmt(Ident''C'')))))))))', 1),
+    StrayEndCase('B14 B1-03: a statement missing its ; keeps the next line',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+      'procedure P;'#13#10'begin'#13#10'  X := 1'#13#10'  Y := 2;'#13#10 +
+      'end;'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec ' +
+      'ImplementationSec(Routine''procedure''(Ident''P''#name ' +
+      'RoutineBody(Block(Assign(Ident''X'' IntLit''1'') ' +
+      'Assign(Ident''Y'' IntLit''2''))))))', 1),
+    StrayEndCase('B14 B1-04: a missing ) stops before an inline var',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+      'procedure P;'#13#10'begin'#13#10'  F(1 G'#13#10'  var V := 2;'#13#10 +
+      'end;'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec ' +
+      'ImplementationSec(Routine''procedure''(Ident''P''#name ' +
+      'RoutineBody(Block(ExprStmt(Call(Ident''F'' IntLit''1'' Error)) ' +
+      'InlineVar#init(Ident''V''#name IntLit''2''))))))', 2),
+    StrayEndCase('B14 G12b: a field missing its ; - the next field is kept',
+      'unit U;'#13#10'interface'#13#10'type'#13#10'  TR = record'#13#10 +
+      '    A: Integer'#13#10'    B: Integer;'#13#10'  end;'#13#10 +
+      'implementation'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec(TypeSec(TypeDecl(Ident''TR'' ' +
+      'RecordType(VarDecl(Ident''A''#name Ident''Integer'') ' +
+      'VarDecl(Ident''B''#name Ident''Integer''))))) ' +
+      'ImplementationSec)', 1),
+    StrayEndCase('B14 B2-05: a name-headed subrange cut at .. keeps the field',
+      'unit U;'#13#10'interface'#13#10'type'#13#10'  TR = record'#13#10 +
+      '    A: array[Lo..'#13#10'    Reserve: Integer;'#13#10'  end;'#13#10 +
+      'implementation'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec(TypeSec(TypeDecl(Ident''TR'' ' +
+      'RecordType(VarDecl(Ident''A''#name ' +
+      'ArrayType(Subrange(Ident''Lo'') Error)) ' +
+      'VarDecl(Ident''Reserve''#name Ident''Integer''))))) ' +
+      'ImplementationSec)', 5),
+    StrayEndCase('B14 B2-02: a ;-less external before resourcestring',
+      'unit U;'#13#10'interface'#13#10 +
+      'function GetTick: Cardinal; external ''k'' name ''G'''#13#10 +
+      'resourcestring'#13#10'  S = ''h'';'#13#10 +
+      'implementation'#13#10'end.'#13#10,
+      'Unit(Ident''U'' InterfaceSec(Routine''function''(' +
+      'Ident''GetTick''#name Ident''Cardinal'' ' +
+      'Directive''external''(StrLit''''k'''' ' +
+      'StrLit''''G''''#extname)) ' +
+      'ConstSec''resourcestring''(ConstDecl(Ident''S'' ' +
+      'StrLit''''h''''))) ImplementationSec)', 0),
+    DiagTextCase('B14 B2-06: "begin" expected names its own routine',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+      'procedure Outer;'#13#10'  procedure Inner;'#13#10'  begin'#13#10 +
+      '  end;'#13#10'var X: Integer;'#13#10'  X := 1;'#13#10'end;'#13#10 +
+      'end.'#13#10, '(routine Outer)', '(routine Inner)'),
+    DiagTextCase('B14 B2-06: ...an anonymous method says so',
+      'unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+      'procedure Outer;'#13#10'begin'#13#10 +
+      '  P := procedure var Y: Integer; Y := 1; end;'#13#10'end;'#13#10 +
+      'end.'#13#10, '(anonymous method)', '(routine Outer)'),
+    LongAggregateCase(2048),
+    LongAggregateCase(5000),
     StrayEndCase('F8: interface-only mode adds nothing',
       'unit U;'#13#10'interface'#13#10'implementation'#13#10'end;'#13#10,
       'Unit(Ident''U'' InterfaceSec)', 0, True),

@@ -76,6 +76,7 @@ const
     '    procedure Q;'#10 +
     '  public'#10 +
     '    property X: Integer read FX;'#10 +
+    '    {@CLASSEND}'#10 +
     '  end;'#10 +
     'const'#10 +
     '  C1 = 1;'#10 +
@@ -88,8 +89,14 @@ const
     'procedure GlobalProc(A: Integer);'#10 +
     '{@DECL}'#10 +
     'function GlobalFunc: string;'#10 +
+    '{@INTFEND}'#10 +
     'implementation'#10 +
-    'procedure GlobalProc(A: Integer); begin end;'#10 +
+    'procedure GlobalProc(A: Integer);'#10 +
+    'var G: Integer;'#10 +
+    '{@LOCAL}'#10 +
+    'begin'#10 +
+    '  {@STMT}'#10 +
+    'end;'#10 +
     '{@IMPL}'#10 +
     'function GlobalFunc: string; begin Result := ''''; end;'#10 +
     'procedure TC.Q;'#10 +
@@ -112,7 +119,7 @@ type
   end;
 
 const
-  CASES: array[0..27] of TCase = (
+  CASES: array[0..44] of TCase = (
     (Marker: 'USES'; Snippet: 'System.SysUtils,'),
     (Marker: 'REC'; Snippet: 'Extra: Integer;'),
     (Marker: 'REC'; Snippet: 'F1, F2: array[1..3] of Byte;'),
@@ -149,7 +156,28 @@ const
     (Marker: 'VAR'; Snippet: 'V4, V5: Byte;'),
     (Marker: 'DECL'; Snippet: 'procedure NewProc(A: Integer);'),
     (Marker: 'IMPL'; Snippet: 'procedure ImplProc; begin end;'),
-    (Marker: 'BODY'; Snippet: 'if L > 0 then L := L - 1;')
+    (Marker: 'BODY'; Snippet: 'if L > 0 then L := L - 1;'),
+    // Sites followed by a structural keyword (audit B14): `implementation`, a
+    // class's `end`, a routine's `begin`, a block's `end` with more routines
+    // after it. A keystroke state that leaves an operand or a name missing
+    // there must not take the keyword with it.
+    (Marker: 'INTFEND'; Snippet: 'const CX = C1 + 1;'),
+    (Marker: 'INTFEND'; Snippet: 'var VX: TKind = kA;'),
+    (Marker: 'CLASSEND'; Snippet: 'property Z: Integer read FX write FX;'),
+    (Marker: 'CLASSEND'; Snippet: 'const CZ = 2;'),
+    (Marker: 'LOCAL'; Snippet: 'H: array[0..1] of Integer;'),
+    (Marker: 'LOCAL'; Snippet: 'const K = 3;'),
+    (Marker: 'STMT'; Snippet: 'G := A + 1;'),
+    (Marker: 'STMT'; Snippet: 'if A > 0 then G := 0 else G := 1;'),
+    (Marker: 'STMT'; Snippet: 'try G := 1; except else G := 2; end;'),
+    (Marker: 'STMT'; Snippet: 'case A of 1: G := 2; else G := 3; end;'),
+    (Marker: 'STMT'; Snippet: 'GlobalProc(A + 1);'),
+    (Marker: 'STMT'; Snippet: 'var Z := TC.Create.X;'),
+    (Marker: 'STMT'; Snippet: 'while G < 3 do Inc(G);'),
+    (Marker: 'STMT'; Snippet: 'repeat Inc(G) until G > 3;'),
+    (Marker: 'STMT'; Snippet: 'with TC.Create do Free;'),
+    (Marker: 'STMT'; Snippet: 'G := G.ToString.Length;'),
+    (Marker: 'BODY'; Snippet: 'for var I := 0 to 1 do L := I;')
   );
 
 var
@@ -167,6 +195,11 @@ var
 begin
   LPre := GPP.ProcessText('U.pas', ASource);
   LTree := TPasParser.ParseFile(LPre, LDiags);
+  // The parser's loop guard tripping is a recovery that spun on a token it
+  // did not consume: the rest of the unit was dropped, whatever survived.
+  for var LDiag in LDiags do
+    if Pos('step budget', LDiag.Msg) > 0 then
+      raise Exception.Create('the parser''s loop guard tripped');
   Result := TPasSemaResolver.Analyze(LTree);
 end;
 

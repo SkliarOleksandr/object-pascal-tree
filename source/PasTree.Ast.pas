@@ -399,6 +399,9 @@ type
     procedure Adopt(ANewParent, ANode: Integer);
     function Kind(ANode: Integer): TPasNodeKind;
     function FirstChild(ANode: Integer): Integer;
+    function LastChild(ANode: Integer): Integer;
+    function ParentOf(ANode: Integer): Integer;
+    function ChildCount(ANode: Integer): Integer;
     function Build(const ASource: TPasPreprocessed): TPasTree;
   end;
 
@@ -1134,6 +1137,32 @@ end;
 function TPasTreeBuilder.FirstChild(ANode: Integer): Integer;
 begin
   Result := FNodes[ANode].FirstChild;
+end;
+
+function TPasTreeBuilder.LastChild(ANode: Integer): Integer;
+begin
+  if FNodes[ANode].FirstChild = NIL_NODE then
+    Result := NIL_NODE
+  else
+    Result := FLastChild[ANode];
+end;
+
+function TPasTreeBuilder.ParentOf(ANode: Integer): Integer;
+begin
+  Result := FNodes[ANode].Parent;
+end;
+
+function TPasTreeBuilder.ChildCount(ANode: Integer): Integer;
+var
+  LChild: Integer;
+begin
+  Result := 0;
+  LChild := FNodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    Inc(Result);
+    LChild := FNodes[LChild].NextSibling;
+  end;
 end;
 
 function TPasTreeBuilder.Build(const ASource: TPasPreprocessed): TPasTree;
