@@ -589,11 +589,20 @@ begin
     Exit;
   if (Kind(ANode) = nkUnaryOp) and (OpKind(ANode) = tkMinus) then
   begin
+    // A hex literal above High(Int64) reads as its Int64 bits (B.5.1), so a
+    // negative literal here is one: `-$8000000000000000` is Low(Int64) itself
+    // and anything larger is dcc's E2099, not a value.
     if OrdLiteral(Child(ANode), LNeg) then
-    begin
-      AValue := -LNeg;
-      Result := True;
-    end;
+      if LNeg = Low(Int64) then
+      begin
+        AValue := Low(Int64);
+        Result := True;
+      end
+      else if (LNeg >= 0) or (Kind(Child(ANode)) <> nkIntLit) then
+      begin
+        AValue := -LNeg;
+        Result := True;
+      end;
     Exit;
   end;
   LTxt := Txt(ANode);
@@ -639,7 +648,8 @@ end;
 
   - a named builtin, each answer probed against dcc (both compilers for the two
     platform-sized ones).
-  - a subrange with two LITERAL bounds (`OrdLiteral`, so no folded constants).
+  - a subrange with two LITERAL bounds (`OrdLiteral`, so no folded constants);
+    bounds that fit neither Integer nor Cardinal make it 64-bit, so E2001.
   - an enum whose element values are literals or implicit, tracked in order so
     that `(a = 250, b, c, d, e, f)` is caught as well as an explicit 256. One
     non-literal explicit value abandons the whole enum.
@@ -708,6 +718,13 @@ const
               Exit;
             if not OrdLiteral(Sib(Child(ANode)), LHi) then
               Exit;
+            if LLo > LHi then
+              Exit;   // E2011, not a set's business
+            // Bounds that fit neither Integer nor Cardinal together make a
+            // 64-bit host type, and that is E2001 like `set of Int64`.
+            if not (((LLo >= Low(Integer)) and (LHi <= High(Integer))) or
+              ((LLo >= 0) and (LHi <= High(Cardinal)))) then
+              Exit('E2001');
             if (LLo < 0) or (LHi > 255) then
               Exit('E2028')
             else
@@ -728,7 +745,15 @@ const
                 if LValue = NIL_NODE then
                   Inc(LCur)
                 else if not OrdLiteral(LValue, LCur) then
-                  Exit;   // a named constant or an expression: give up
+                  Exit   // a named constant or an expression: give up
+                else
+                begin
+                  // dcc keeps an explicit value's low 32 bits, signed, and
+                  // says nothing (2 sec. 2.2.4): `(a = $100000005)` IS 5.
+                  LCur := LCur and $FFFFFFFF;
+                  if LCur > High(Integer) then
+                    LCur := LCur - $100000000;
+                end;
                 if (LCur < 0) or (LCur > 255) then
                   Exit('E2028');
               end;

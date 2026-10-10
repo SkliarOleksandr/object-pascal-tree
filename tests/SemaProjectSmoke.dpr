@@ -4900,6 +4900,80 @@ end;
 // brace across lines - dropped its unit, and the importers said F1027 for a
 // unit that exists. Now an in-path is "not found" (the search by name goes
 // on), and an include is not found (dcc's F1026) with its unit analyzed.
+{ Arithmetic corners in Phase 1 and the second preprocessing pass (audit
+  B4-01, B3-11), each of which raised out of a checked build: a set over
+  `-$8000000000000000` negated Low(Int64) and dropped its unit, and a SizeOf
+  over a record of 2 GB or more stored a Trunc past MaxInt into an Integer and
+  ended the whole analysis. No type reaches 2 GB (dcc's E2100), so the oracle
+  refuses those guards and they stay residual; High(Integer) bytes, the
+  largest real type, is still measured. }
+procedure TestArithCorners;
+var
+  LDir, LErr: string;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_arith');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AcNeg.pas'),
+    'unit AcNeg;'#10'interface'#10 +
+    'type'#10 +
+    '  TBig = set of -$8000000000000000..0;'#10 +
+    '  TNegEnum = (ne0 = -$8000000000000000);'#10 +
+    '  TNegSet = set of TNegEnum;'#10 +
+    'var AcQ: TUndeclNeg;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AcSize.pas'),
+    'unit AcSize;'#10'interface'#10 +
+    'type'#10 +
+    '  TTwo = record A: array[0..1073741823] of Byte;'#10 +
+    '    B: array[0..1073741823] of Byte; C: Integer; end;'#10 +
+    '  TWide = record A: array[0..2147483647] of Int64; C: Integer; end;'#10 +
+    '  TVar = record case Integer of 0: (A: array[0..1073741823] of Byte;'#10 +
+    '    B: array[0..1073741823] of Byte; C: Integer); end;'#10 +
+    '  TObjBase = object A: array[0..2147483646] of Byte; end;'#10 +
+    '  TObj = object(TObjBase) B: Integer; end;'#10 +
+    '  TMax = array[0..2147483646] of Byte;'#10 +
+    '{$IF SizeOf(TTwo) > 0}'#10'type TTookTwo = class end;'#10'{$ENDIF}'#10 +
+    '{$IF SizeOf(TWide) > 0}'#10'type TTookWide = class end;'#10'{$ENDIF}'#10 +
+    '{$IF SizeOf(TVar) > 0}'#10'type TTookVar = class end;'#10'{$ENDIF}'#10 +
+    '{$IF SizeOf(TObj) > 0}'#10'type TTookObj = class end;'#10'{$ENDIF}'#10 +
+    '{$IF SizeOf(TMax) = 2147483647}'#10 +
+    'type TTookMax = class end;'#10'{$ENDIF}'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AcApp.dpr'),
+    'program AcApp;'#10'uses AcNeg, AcSize;'#10 +
+    'var Q: TUndeclMain;'#10'begin'#10'end.'#10);
+  LErr := '';
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportGuessedIfs := True;
+    try
+      GProj.AnalyzeProject(TPath.Combine(LDir, 'AcApp.dpr'));
+    except
+      on E: Exception do
+        LErr := E.ClassName + ': ' + E.Message;
+    end;
+    Ok('arith corners: no exception from the analysis', LErr = '');
+    if LErr <> '' then
+      Writeln('  ', LErr);
+    Ok('arith corners: the program is analyzed and reports its own E2003',
+      DiagHasText(ModelByName('acapp'), 'E2003', 'TUndeclMain'));
+    Ok('arith corners: the Low(Int64) set unit is kept, E2001 and its E2003',
+      (DiagCount(ModelByName('acneg'), 'E2001') = 1) and
+      (DiagCount(ModelByName('acneg'), 'E2028') = 0) and
+      DiagHasText(ModelByName('acneg'), 'E2003', 'TUndeclNeg'));
+    Ok('arith corners: SizeOf of a 2 GB record, variant or object is refused',
+      DiagCount(ModelByName('acsize'), 'PPIF') = 4);
+    Ok('arith corners: ...and High(Integer) bytes is measured',
+      SymCountOf(ModelByName('acsize'), 'ttookmax', skType) = 1);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestBadPathText;
 var
   LDir, LErr: string;
@@ -11016,6 +11090,7 @@ begin
   TestDonorSafety;
   TestDefinesKeysUntouched;
   TestBadPathText;
+  TestArithCorners;
   TestPoolContract;
 
   if GCounter.Finish('SemaProjectSmoke') then

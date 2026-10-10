@@ -581,6 +581,100 @@ begin
   Result.Run := ARun;
 end;
 
+{ The checker over trees no parser bug is known to produce, but which it exists
+  to catch (audit B1-32, B1-33): it reports them and returns. }
+function BuildCorruptTreeCases(APP: TPasPreprocessor): TPasCustomCases;
+const
+  CSrc = 'unit U;'#10'interface'#10 +
+    'procedure P; external ''lib'' name ''P'';'#10 +
+    'type TP = procedure; stdcall;'#10 +
+    'implementation'#10'end.'#10;
+begin
+  Result := [
+    ChainCase('B1-32', 'a directive with an out-of-range Parent is I1, not a raise',
+      function: TPasCheckResult
+      var
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+        LReport: TPasCheckReport;
+        LIdx, LHits: Integer;
+      begin
+        Result.Passed := False;
+        Result.Message := '';
+        LTree := TPasParser.ParseFile(APP.ProcessText('u.pas', CSrc), LDiags);
+        LHits := 0;
+        for LIdx := 0 to High(LTree.Nodes) do
+          if LTree.Nodes[LIdx].Kind = nkDirective then
+          begin
+            LTree.Nodes[LIdx].Parent := 99999;
+            Inc(LHits);
+          end;
+        LReport.Init;
+        try
+          CheckTree(LTree, True, LReport);
+          Result.Passed := (LHits >= 2) and (LReport.Counts[ccRange] >= LHits);
+          if not Result.Passed then
+            Result.Message := Format('  %d directives, %d I1 rows',
+              [LHits, LReport.Counts[ccRange]]);
+        except
+          on E: Exception do
+            Result.Message := '  raised ' + E.ClassName + ': ' + E.Message;
+        end;
+      end),
+    ChainCase('B1-33', 'CheckInterfacePrefix returns on a cyclic root child list',
+      function: TPasCheckResult
+      var
+        LDiags: TArray<TPasParseDiag>;
+        LFull, LIntf: TPasTree;
+        LDone: Boolean;
+        LError: string;
+        LThread: TThread;
+        LWait: Integer;
+      begin
+        LFull := TPasParser.ParseFile(APP.ProcessText('u.pas', CSrc), LDiags);
+        LIntf := TPasParser.ParseFile(APP.ProcessText('u.pas', CSrc), LDiags,
+          True);
+        // The root's first child loops onto itself before the interface.
+        LFull.Nodes[LFull.Nodes[0].FirstChild].NextSibling :=
+          LFull.Nodes[0].FirstChild;
+        LDone := False;
+        LError := '';
+        // On a thread: the defect is a hang, and a hang must fail the case
+        // rather than the suite.
+        LThread := TThread.CreateAnonymousThread(
+          procedure
+          var
+            LReport: TPasCheckReport;
+          begin
+            try
+              LReport.Init;
+              CheckInterfacePrefix(LIntf, LFull, LReport);
+            except
+              on E: Exception do
+                LError := E.ClassName + ': ' + E.Message;
+            end;
+            LDone := True;
+          end);
+        LThread.FreeOnTerminate := False;
+        LThread.Start;
+        LWait := 0;
+        while not LDone and (LWait < 10000) do
+        begin
+          Sleep(20);
+          Inc(LWait, 20);
+        end;
+        Result.Passed := LDone and (LError = '');
+        if not LDone then
+          Result.Message := '  still running after 10 s'
+        else
+        begin
+          LThread.Free;
+          if LError <> '' then
+            Result.Message := '  raised ' + LError;
+        end;
+      end)];
+end;
+
 { Depth that is not the source's nesting: an operator chain is a left spine of
   nkBinaryOp as long as the chain (audit A1-01, B1-37), an `else if` chain a
   right spine of ifs (A1-07). Both are flat code that generators write by the
@@ -713,7 +807,8 @@ begin
     RunSuite('ParserSmoke', GPP, STMT_CASES, DECL_CASES,
       BuildCustomCases(GPP, GSM) + BuildRoundtripCases +
       BuildPreprocessorCases(GPP) + BuildOwnTokenCases(GPP) +
-      BuildNameFlagCases(GPP) + BuildDepthCases(GPP) + BuildChainCases(GPP),
+      BuildNameFlagCases(GPP) + BuildDepthCases(GPP) + BuildChainCases(GPP) +
+      BuildCorruptTreeCases(GPP),
       GPassed,
       GFailed, TreeVerdict);
     if GFailed > 0 then

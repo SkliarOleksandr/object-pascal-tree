@@ -3368,7 +3368,8 @@ begin
                LGSym, LAncSubst) then
             Exit;
           if not OracleClassLayout(LDefMid, LDefNode, ADepth, LAncSubst,
-               LAncBytes, LAncAlign, AChain + 1) then
+               LAncBytes, LAncAlign, AChain + 1) or
+             (LAncBytes > High(Integer)) then
             Exit;
           LStart := Trunc(LAncBytes) - LP;
           LStartAlign := Max(LAncAlign, LP);
@@ -3509,6 +3510,25 @@ end;
   a variant part, a class-var section, a field whose type will not resolve -
   REFUSES rather than guessing, which leaves the caller's residual-$IF
   diagnostic standing. }
+{ AOffset + ASize into AOffset, or False when the sum would pass High(Integer):
+  no type reaches 2 GB (09 sec. 9.1.2, dcc's E2100), so a layout that would is
+  refused rather than wrapped - a Trunc stored into an Integer past MaxInt
+  raised ERangeError out of the whole analysis in a checked build. }
+function OracleAdvance(var AOffset: Integer; ASize: Double): Boolean;
+begin
+  Result := (ASize >= 0) and (ASize <= High(Integer) - AOffset);
+  if Result then
+    AOffset := AOffset + Trunc(ASize);
+end;
+
+// AOffset rounded up to a multiple of AAlign, refused past High(Integer).
+function OracleAlignUp(var AOffset: Integer; AAlign: Integer): Boolean;
+begin
+  Result := OracleAdvance(AOffset, AAlign - 1);
+  if Result then
+    AOffset := (AOffset div AAlign) * AAlign;
+end;
+
 function TPasSemaProject.OracleRecordLayout(AMid, ADefNode, ADepth: Integer;
   const ASubst: TPasSubst; AStart, AStartAlign: Integer;
   out ABytes: Double; out AAlign: Integer): Boolean;
@@ -3550,8 +3570,9 @@ var
     // offset is already a multiple of LUse, so the rounding is a no-op.
     for var LN := 1 to LCount do
     begin
-      LOffset := ((LOffset + LUse - 1) div LUse) * LUse;
-      LOffset := LOffset + Trunc(LOneSize);
+      if not OracleAlignUp(LOffset, LUse) or
+         not OracleAdvance(LOffset, LOneSize) then
+        Exit(False);
     end;
     Result := True;
   end;
@@ -3630,7 +3651,9 @@ begin
   // members are class vars, methods or constants is 0 bytes (dcc-probed).
   // Every unrecognised child above exits, so reaching here means the walk
   // really did understand the whole body.
-  ABytes := ((LOffset + LMaxAlign - 1) div LMaxAlign) * LMaxAlign;
+  if not OracleAlignUp(LOffset, LMaxAlign) then
+    Exit;
+  ABytes := LOffset;
   AAlign := LMaxAlign;
   Result := True;
 end;
@@ -3720,15 +3743,17 @@ begin
     if not OracleFieldLayout(AMid, LTagType, ADepth, ASubst, LSize, LOneAlign) then
       Exit;
     LUse := Min(LOneAlign, ACap);
-    AEnd := ((AEnd + LUse - 1) div LUse) * LUse + Trunc(LSize);
+    if not OracleAlignUp(AEnd, LUse) or not OracleAdvance(AEnd, LSize) then
+      Exit;
   end;
 
   LOneAlign := LevelAlignOf;
   if LOneAlign < 0 then
     Exit;
   AAlign := LOneAlign;
-  LBase := ((AEnd + LOneAlign - 1) div LOneAlign) * LOneAlign;
-  AEnd := LBase;
+  if not OracleAlignUp(AEnd, LOneAlign) then
+    Exit;
+  LBase := AEnd;
 
   LBranch := LM.Tree.Nodes[APartNode].FirstChild;
   while LBranch <> NIL_NODE do
@@ -3758,8 +3783,9 @@ begin
               LUse := Min(LOneAlign, ACap);
               for var LN := 1 to LCount do
               begin
-                LPos := ((LPos + LUse - 1) div LUse) * LUse;
-                LPos := LPos + Trunc(LSize);
+                if not OracleAlignUp(LPos, LUse) or
+                   not OracleAdvance(LPos, LSize) then
+                  Exit;
               end;
             end;
           nkVariantPart:
@@ -3830,7 +3856,8 @@ begin
     LChild := LM.Tree.Nodes[LChild].NextSibling;
   end;
   ABytes := LTotal * LElemSize;
-  Result := True;
+  // No type reaches 2 GB (09 sec. 9.1.2): dcc says E2100, so no size.
+  Result := ABytes <= High(Integer);
 end;
 
 { How many values an array INDEX spans: `0..2` is 3, and a bare type name is
@@ -4398,7 +4425,8 @@ begin
      (LM.Tree.Nodes[LChild].Kind in [nkIdent, nkMember, nkTypeArgs]) then
   begin
     if not OracleFieldLayout(AMid, LChild, ADepth + 1, ASubst, LBaseSize,
-         LStartAlign) then
+         LStartAlign) or
+       (LBaseSize > High(Integer)) then
       Exit(False);
     LStart := Trunc(LBaseSize);
     // Whether the ANCESTOR already carries a VMT - asked of its own

@@ -3542,6 +3542,36 @@ begin
     (DiagCount('E2001') = 3) and (DiagCount('E2028') = 0));
   GModel.Free;
 
+  // A subrange of literal bounds is 64-bit, so E2001, when they fit neither
+  // Integer nor Cardinal; a hex bound above High(Int64) is its Int64 bits, and
+  // `-$8000000000000000` is Low(Int64) - negating it raised EIntOverflow out
+  // of Phase 1 in a checked build (audit B4-01). dcc32/dcc64 37.0 per line.
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type'#10 +
+    '  T1 = set of -$8000000000000000..0;'#10 +   // E2001
+    '  T2 = set of 0..$FFFFFFFF;'#10 +             // E2028
+    '  T3 = set of 0..$100000000;'#10 +            // E2001
+    '  T4 = set of -1..$FFFFFFFF;'#10 +            // E2001
+    '  T5 = set of $FFFFFFFFFFFFFFFF..0;'#10 +     // -1..0: E2028
+    '  T6 = set of -$7FFFFFFFFFFFFFFF..0;'#10 +    // E2001
+    '  T7 = set of 0..$8000000000000000;'#10 +     // E2011, not ours
+    '  T8 = set of -2147483648..0;'#10 +           // E2028
+    '  T9 = set of -2147483649..0;'#10 +           // E2001
+    '  TA = set of -$FFFFFFFFFFFFFFFF..0;'#10 +    // E2099, not ours
+    // An explicit enum value keeps its low 32 bits, so these are 0, 5 and
+    // Low(Integer): only the last base is E2028.
+    '  TE = (e0 = -$8000000000000000);'#10 +
+    '  TB = set of TE;'#10 +
+    '  TH = (h0 = $100000005);'#10 +
+    '  TC = set of TH;'#10 +
+    '  TJ = (j0 = $80000000);'#10 +
+    '  TD = set of TJ;'#10 +                       // E2028
+    'implementation'#10'end.'#10);
+  Ok('b4-01: 64-bit literal subranges are E2001, Low(Int64) does not raise',
+    (DiagCount('E2001') = 5) and (DiagCount('E2028') = 4));
+  GModel.Free;
+
   // ---- test-coverage plan step 3 batch 2: resolver-level hard gaps ----
 
   // 17.3.1 variable capture: SRC_ANON (above) already proves an anon method

@@ -1649,6 +1649,12 @@ var
     LMode, LWant: TPasNodeFlags;
     LParent, LPrev: Integer;
   begin
+    // Read once and through LinkOk: an orphan top is checked here too, and
+    // its out-of-range Parent is already reported as I1 - reading through
+    // it raised ERangeError and lost that report.
+    LParent := ATree.Nodes[ANode].Parent;
+    if not LinkOk(LParent) then
+      LParent := NIL_NODE;
     LAux := ATree.Nodes[ANode].Aux;
     if not AuxInDomain(Kind(ANode), LAux) then
       AReport.Add(ccAux, ANode, Site(ANode), Format(
@@ -1741,8 +1747,8 @@ var
     // nfThreadvar (F9): on the var section of a struct body, exactly when
     // `threadvar` stands right before its span.
     if nfThreadvar in ATree.Nodes[ANode].Flags then
-      if (Kind(ANode) <> nkVarSec) or (ATree.Nodes[ANode].Parent = NIL_NODE) or
-         not (Kind(ATree.Nodes[ANode].Parent) in [nkClassType, nkRecordType,
+      if (Kind(ANode) <> nkVarSec) or (LParent = NIL_NODE) or
+         not (Kind(LParent) in [nkClassType, nkRecordType,
          nkObjectType, nkHelperType]) then
         AReport.Add(ccFlags, ANode, Site(ANode), Format(
           '%s carries nfThreadvar', [KName(ANode)]))
@@ -1755,7 +1761,6 @@ var
     // `dependency`, or the `,` of a dependency list - and the library, right
     // after `external`, none; nfDelayed is on the directive exactly when the
     // word `delayed` stands in its clause outside every value's span.
-    LParent := ATree.Nodes[ANode].Parent;
     LExtParent := (LParent <> NIL_NODE) and not LEmpty[LParent] and
       (((Kind(LParent) = nkDirective) and WordAt(LLo[LParent], ['external'])) or
        (Kind(LParent) = nkExportsItem));
@@ -1914,8 +1919,7 @@ var
       // on no other directive, and on that one always - inside the type's
       // span a `;` right before a directive is the type's own.
       nkDirective:
-        if (ATree.Nodes[ANode].Parent = NIL_NODE) or
-           (Kind(ATree.Nodes[ANode].Parent) <> nkProcType) then
+        if (LParent = NIL_NODE) or (Kind(LParent) <> nkProcType) then
         begin
           if LAux = 1 then
             AReport.Add(ccAux, ANode, Site(ANode),
@@ -1923,7 +1927,7 @@ var
         end
         else if (LAux = 1) <>
            ((ATree.Nodes[ANode].FirstToken - 1 >
-             ATree.Nodes[ATree.Nodes[ANode].Parent].FirstToken) and
+             ATree.Nodes[LParent].FirstToken) and
             (TokKind(ATree.Nodes[ANode].FirstToken - 1) = tkSemicolon)) then
           if LAux = 1 then
             AReport.Add(ccAux, ANode, Site(ANode),
@@ -2265,15 +2269,20 @@ end;
   implementation section in B. }
 function FirstDifference(const A, B: TPasTree; ALenient: Boolean): Integer;
 var
-  LIdx, LSec, LChild: Integer;
+  LIdx, LSec, LChild, LPrev: Integer;
   LA, LB: TPasNode;
 begin
   LSec := NIL_NODE;
   if ALenient and (Length(B.Nodes) > 0) then
   begin
+    // Children are created after their parent and in order, so each index
+    // must exceed the last: a stale link that loops back ends the walk
+    // instead of spinning after CheckTree has already reported the cycle.
+    LPrev := 0;
     LChild := B.Nodes[0].FirstChild;
-    while (LChild >= 0) and (LChild <= High(B.Nodes)) do
+    while (LChild > LPrev) and (LChild <= High(B.Nodes)) do
     begin
+      LPrev := LChild;
       if B.Nodes[LChild].Kind = nkInterfaceSec then
       begin
         LSec := LChild;
