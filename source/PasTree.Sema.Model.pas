@@ -798,6 +798,15 @@ type
       and nothing once that was fixed. dcc's nearest code: E2029 is its
       "X expected but Y found". }
     procedure AddParseDiags(const ADiags: TArray<TPasParseDiag>);
+    { What a load path put on AFrom after its Phase 1, for a model built
+      again over AFrom's own tree: the parser's and the lexer's rows (through
+      AddParseDiags, from AFrom.ParseDiags) and the `$IF` oracle's verdict on
+      the stream (OracleStream, OracleNames). The module path's consumer redo
+      re-runs Phase 1 over a consumer's tree and swapped the result in
+      without them: a consumer with a syntax error lost its E2029 rows, and an
+      oracle-decided stream became an ordinary one, so the consumer-oracle
+      refusal stopped guarding it (audit A3-36). }
+    procedure CopyLoadState(AFrom: TPasSemaModel);
     { Cuts Diags back to its filled prefix. The project driver calls this at
       the end of every analysis entry point, BEFORE any consumer enumerates
       Diags with Length/High. }
@@ -2608,6 +2617,13 @@ begin
     SetLength(Diags, FDiagCount * 2 + 8);
   Diags[FDiagCount] := ADiag;
   Inc(FDiagCount);
+end;
+
+procedure TPasSemaModel.CopyLoadState(AFrom: TPasSemaModel);
+begin
+  OracleStream := AFrom.OracleStream;
+  OracleNames := AFrom.OracleNames;
+  AddParseDiags(AFrom.ParseDiags);
 end;
 
 procedure TPasSemaModel.AddParseDiags(const ADiags: TArray<TPasParseDiag>);

@@ -165,12 +165,20 @@ then keeps, out of the reach, only:
 - a model whose tree MENTIONS an added name anywhere - the shadowing test:
   that name may have resolved elsewhere, or nowhere, and may now bind here.
   A token scan with a length filter, no allocation for the bulk of nodes.
+  An added name ending in `attribute` is looked for without the suffix too:
+  `[Foo]` binds `FooAttribute`.
 
 Everyone else in the reach is UNTOUCHED: `RenumberConsumer` follows its
 bindings into the unit through the map and nothing else about it changes -
 its diagnostics included. A helper type among the changed/added/removed
 forces the whole reach, because a helper attaches by TYPE and no name test
-can find who it now affects. The `ModuleRedoLimit` ceiling applies to the
+can find who it now affects; so does a member a consumer reaches by a RULE -
+`GetEnumerator`, `MoveNext`, `Current` (for-in), a default array property, a
+class operator - since no consumer spells it or holds a pair to it. A
+redone consumer keeps what its load put on it after Phase 1: the parser's and
+the lexer's rows and the `$IF` oracle's verdict on its stream
+(`TPasSemaModel.CopyLoadState`), so the consumer-oracle guard below still
+holds for it. The `ModuleRedoLimit` ceiling applies to the
 SELECTED set.
 
 Measured on the same closure, every step verified identical to a full
@@ -243,6 +251,7 @@ from a slow analyzer.
 | `consumer-oracle(<unit>)` | a consumer in the reach has an oracle-built token stream: its `$IF`s may have folded this unit's constants or record sizes, and only a re-preprocess can re-decide them |
 | `instance-unmatched-sym(<name>)` | an instance names a symbol of this unit that the new text no longer declares (a deleted generic, or an overload whose ordinal moved) - see guard 2 |
 | `in-path-changed(<unit>)` | an `in` clause of the edited unit changed or dropped its path, or a new one names another file than the unit's pin: the pin is the project's, every importer of the unit resolves through it, and only a rebuild re-reads every `in` clause |
+| `implicit-unit(<unit>)` | an interface edit of System or SysInit: every model binds into them with no `uses` edge, so the reach cannot be computed (the real RTL refuses earlier, `unresolved-if`) |
 
 ### What the disk did between two runs
 
@@ -425,9 +434,8 @@ The corpus suites only ever prove the full path.
   oracle-decided stream; `instrepoint` - a same-shape interface change with an
   implementation symbol shift; `enumerator`, `current`, `attribute` - a
   dependency reached by a rule (for-in enumerator, default property,
-  attribute suffix) rather than by a spelled name. Every one of them
-  mismatches today under `-module`: these are known gaps of the consumer
-  redo, kept here as the gate for their fix;
+  attribute suffix) rather than by a spelled name. Each was a mismatch under
+  `-module` until 0.95.12 and is the gate for the consumer redo;
 
 - `-script:<file>` replaces the synthetic sampling: one `kind <path>` per
   line, kind = `body`, `intf`, `blank`, `comment`, `const`, `type` (the last

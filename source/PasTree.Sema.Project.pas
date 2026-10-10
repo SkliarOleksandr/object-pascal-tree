@@ -18187,9 +18187,15 @@ function TPasSemaProject.InstancesRepointable(AId: Integer;
   function Mapped(ASym: Integer): Boolean;
   begin
     Result := (ASym >= 0) and (ASym <= High(AMap)) and (AMap[ASym] <> NIL_SYM);
+    // The name only from an index the model holds: the rejected one may be
+    // stale (audit A3-37), and Symbols' capacity runs past SymCount - a
+    // garbage name within it, an access violation beyond.
     if not Result then
-      AWhy := 'instance-unmatched-sym(' +
-        FModels[AId].Symbols[ASym].NameLower + ')';
+      if (ASym >= 0) and (ASym < FModels[AId].SymCount) then
+        AWhy := 'instance-unmatched-sym(' +
+          FModels[AId].Symbols[ASym].NameLower + ')'
+      else
+        AWhy := Format('instance-unmatched-sym(#%d)', [ASym]);
   end;
 
 var
@@ -18911,6 +18917,29 @@ procedure TPasSemaProject.DiffInterface(AOld, ANew: TPasSemaModel;
     Result := (LDef <> NIL_NODE) and (LM.Tree.Nodes[LDef].Kind = nkHelperType);
   end;
 
+  // A member a consumer reaches by a RULE, never by spelling its name: the
+  // for-in enumerator (GetEnumerator, MoveNext, Current - `for X in C` types
+  // X through them), a default array property (`C[I]`), a class operator.
+  // The consumer holds no pair to it and its text does not mention it, so
+  // neither the pair test nor the name test of the selection sees an edit of
+  // one - adding GetEnumerator or changing Current's type left the consumer
+  // typed against the old shape (audit A3-38). Like a helper, it takes the
+  // full reach.
+  function ReachedByRule(LM: TPasSemaModel; ASym: Integer): Boolean;
+  var
+    LScope: Integer;
+  begin
+    LScope := LM.Symbols[ASym].Scope;
+    if (LScope = NIL_SCOPE) or (LM.Scopes[LScope].Kind <> sckStruct) then
+      Exit(False);
+    Result := (sfDefaultArrayProp in LM.Symbols[ASym].Flags) or
+      (LM.Symbols[ASym].NameLower = 'getenumerator') or
+      (LM.Symbols[ASym].NameLower = 'movenext') or
+      (LM.Symbols[ASym].NameLower = 'current') or
+      ((LM.Symbols[ASym].Kind = skRoutine) and
+       (LM.RoutineHead(ASym) = rhOperator));
+  end;
+
   // A class, interface, record or object whose members are symbols in their
   // own right - the shape whose declaration is compared with the members
   // masked out. Records joined in 0.16.1: a field typed into a hub record
@@ -18983,7 +19012,7 @@ var
   LNChanged, LNRemoved, LNAdded: Integer;
   LA, LB: TSemaSymbol;
   LChanged: Boolean;
-  LChangedNames, LRemovedNames, LAddedNames: string;
+  LChangedNames, LRemovedNames, LAddedNames, LStem: string;
 begin
   LChangedNames := '';
   LRemovedNames := '';
@@ -19002,7 +19031,8 @@ begin
       AChanged[LOldIdx] := True;
       Inc(LNRemoved);
       Note(LRemovedNames, AOld.Symbols[LOldIdx].NameLower);
-      AHelpers := AHelpers or IsHelper(AOld, LOldIdx);
+      AHelpers := AHelpers or IsHelper(AOld, LOldIdx) or
+        ReachedByRule(AOld, LOldIdx);
       Continue;
     end;
     LHasPredecessor[LNewIdx] := True;
@@ -19039,7 +19069,8 @@ begin
     begin
       Inc(LNChanged);
       Note(LChangedNames, LA.NameLower);
-      AHelpers := AHelpers or IsHelper(AOld, LOldIdx);
+      AHelpers := AHelpers or IsHelper(AOld, LOldIdx) or
+        ReachedByRule(AOld, LOldIdx);
     end;
   end;
   for LNewIdx := 0 to ANewSymN - 1 do
@@ -19047,7 +19078,8 @@ begin
     begin
       Inc(LNAdded);
       Note(LAddedNames, ANew.Symbols[LNewIdx].NameLower);
-      AHelpers := AHelpers or IsHelper(ANew, LNewIdx);
+      AHelpers := AHelpers or IsHelper(ANew, LNewIdx) or
+        ReachedByRule(ANew, LNewIdx);
       // Not a unit reference: nobody outside can name THIS unit's uses entry,
       // and its leaf (`Classes`, `Windows`) is an identifier half the closure
       // mentions - typing a unit into the uses clause selected 1103 models.
@@ -19056,6 +19088,12 @@ begin
          (ANew.Scopes[ANew.Symbols[LNewIdx].Scope].Kind in
             [sckUnit, sckStruct, sckEnum]) then
         AAdded.AddOrSetValue(ANew.Symbols[LNewIdx].NameLower, 0);
+      // An attribute class is written without its suffix: `[Foo]` binds
+      // FooAttribute, and the name test looks for the text the consumer
+      // wrote (audit A3-38).
+      LStem := ANew.Symbols[LNewIdx].NameLower;
+      if (Length(LStem) > 9) and LStem.EndsWith('attribute') then
+        AAdded.AddOrSetValue(Copy(LStem, 1, Length(LStem) - 9), 0);
     end;
   AAnyChange := (LNChanged > 0) or (LNRemoved > 0) or (LNAdded > 0);
   ACounts := Format('changed=%d;removed=%d;added=%d;names=%s/%s/%s',
@@ -19642,7 +19680,16 @@ begin
       if not LAnyChange then
         LMap := nil
       else
+      begin
         LIntfSame := False;
+        // The identity is exact for the interface prefix only (that is what
+        // IntfPrefixSame checked); the instance repoint below reads the
+        // implementation's symbols too, and an edit that kept the interface's
+        // shape may have shifted those (a debounced batch, a paste). Kept, it
+        // wrote an implementation type argument back with its OLD index -
+        // another symbol, or one past the model (audit A3-37).
+        LMap := MatchSymbols(LOld, LNew);
+      end;
     end
     else
     begin
@@ -19665,6 +19712,14 @@ begin
     end;
     if not LIntfSame then
     begin
+      // Every model binds into System and SysInit with no `uses` edge (the
+      // implicit units, the implicit TObject), so the reach below - built
+      // from `uses` edges - is 1 for them, and an accepted interface edit
+      // left every binding past the edit point off by its shift (audit
+      // B4-38). The real RTL's units refuse earlier (`unresolved-if`); a
+      // hand-written System reaches here.
+      if (LId = FSystemUnitId) or (LId = FSysInitUnitId) then
+        Exit(Refuse('implicit-unit(' + LOld.UnitNameLower + ')'));
       AffectedConsumers(LId, 0, LReach, LRadius);   // no ceiling: the bound
       Lap('reach');
       // A consumer whose token stream came from the `$IF` oracle may have
@@ -19790,8 +19845,13 @@ begin
           LConsOf[AIdx + 1] := TPasSemaResolver.Analyze(
             FModels[LIds[AIdx + 1]].Tree, False, FPlatform);
         end);
+      // What the load put on the old model after its Phase 1 - the parse rows
+      // and the oracle's verdict - goes with it (audit A3-36).
       for LIdx := 1 to High(LIds) do
+      begin
+        LConsOf[LIdx].CopyLoadState(FModels[LIds[LIdx]]);
         FModels[LIds[LIdx]] := LConsOf[LIdx];
+      end;
       LConsOf := nil;
       for LIdx := 0 to High(LIds) do
         if LIds[LIdx] <= High(FWorkBuilt) then

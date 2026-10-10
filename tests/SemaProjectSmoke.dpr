@@ -5243,6 +5243,108 @@ begin
   end;
 end;
 
+{ The module path's consumer redo against a fresh build (audit B16; the
+  differential harness runs the same shapes as -scenario:syntax, oracle,
+  declared, instrepoint, enumerator, current, attribute). A redone consumer
+  keeps its parse rows and its oracle-decided stream (A3-36); a dependency
+  reached by a rule - the for-in enumerator, a default property, an
+  attribute's suffix - selects its consumers (A3-38); an interface edit of a
+  hand-written System refuses (B4-38). }
+procedure TestConsumerRedo;
+var
+  LDir, LApp, LHub: string;
+  LOk: Boolean;
+begin
+  LDir := FreshDir('pastree_sema_redo');
+  LApp := TPath.Combine(LDir, 'RdApp.dpr');
+  LHub := TPath.Combine(LDir, 'RdHub.pas');
+  TFile.WriteAllText(LHub, 'unit RdHub;'#10'interface'#10'type'#10 +
+    '  TItem = class Name: string; end;'#10 +
+    '  TColl = class function Get(I: Integer): TItem; end;'#10 +
+    '  TBaseThing = class end;'#10'const KV = 3;'#10 +
+    'implementation'#10 +
+    'function TColl.Get(I: Integer): TItem; begin Result := nil; end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'RdSyn.pas'),
+    'unit RdSyn;'#10'interface'#10'uses RdHub;'#10'procedure P;'#10 +
+    'implementation'#10'procedure P;'#10'var X: Integer;'#10'begin'#10 +
+    '  X := KV;'#10'  X := (1 + ;'#10'end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'RdCons.pas'),
+    'unit RdCons;'#10'interface'#10'uses RdHub;'#10 +
+    'type'#10'  [Foo]'#10'  TX = class(TBaseThing) end;'#10 +
+    'procedure Q(C: TColl);'#10'implementation'#10 +
+    'procedure Q(C: TColl);'#10'var S: string;'#10'begin'#10 +
+    '  for var X in C do'#10'    S := X.Name;'#10'  S := C[0].Name;'#10 +
+    'end;'#10'end.'#10);
+  TFile.WriteAllText(LApp, 'program RdApp;'#10'uses RdHub, RdSyn, RdCons;'#10 +
+    'begin'#10'end.'#10);
+  const RD_HUB_NEW =
+    'unit RdHub;'#10'interface'#10'type'#10 +
+    '  TItem = class Name: string; end;'#10 +
+    '  TEnum = class'#10'    function MoveNext: Boolean;'#10 +
+    '    function GetCurrent: TItem;'#10 +
+    '    property Current: TItem read GetCurrent;'#10'  end;'#10 +
+    '  TColl = class'#10'    function Get(I: Integer): TItem;'#10 +
+    '    function GetEnumerator: TEnum;'#10 +
+    '    property Items[I: Integer]: TItem read Get; default;'#10'  end;'#10 +
+    '  TBaseThing = class end;'#10 +
+    '  FooAttribute = class(TCustomAttribute) end;'#10 +
+    'const KV = ''abc'';'#10 +
+    'implementation'#10 +
+    'function TEnum.MoveNext: Boolean; begin Result := False; end;'#10 +
+    'function TEnum.GetCurrent: TItem; begin Result := nil; end;'#10 +
+    'function TColl.Get(I: Integer): TItem; begin Result := nil; end;'#10 +
+    'function TColl.GetEnumerator: TEnum; begin Result := nil; end;'#10 +
+    'end.'#10;
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(LApp);
+    var LSynRows := DiagCount(ModelByName('rdsyn'), 'E2029');
+    GProj.SetBuffer(LHub, RD_HUB_NEW, 1);
+    LOk := GProj.AnalyzeModuleOnly(LHub);
+    Ok('redo: the hub edit is a module run [' + GProj.StageTimings + ']', LOk);
+    Ok('redo: a redone consumer keeps its parse rows',
+      (LSynRows > 0) and
+      (DiagCount(ModelByName('rdsyn'), 'E2029') = LSynRows));
+    Ok('redo: the enumerator, the default property and the attribute ' +
+      'reach their consumer [' + GProj.StageTimings + ']',
+      CrossRefTo(ModelByName('rdcons'), 'Name', 'Name') and
+      (Pos('module=1;', GProj.StageTimings) = 0));
+    Ok('redo: the project is the one a fresh build makes',
+      ProjSig(GProj) = FreshSig(LApp, [LDir], [LHub], [RD_HUB_NEW]));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // A hand-written System: an interface edit refuses.
+  LDir := FreshDir('pastree_sema_sysedit');
+  LApp := TPath.Combine(LDir, 'SeApp.dpr');
+  var LSys := TPath.Combine(LDir, 'System.pas');
+  TFile.WriteAllText(LSys, 'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10'const SysA = 1; SysB = 2;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SeU.pas'),
+    'unit SeU;'#10'interface'#10'const U1 = SysA; U2 = SysB;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(LApp, 'program SeApp;'#10'uses SeU;'#10'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(LApp);
+    GProj.SetBuffer(LSys, 'unit System;'#10'interface'#10'type'#10 +
+      '  TObject = class end;'#10'const SysZ = 99; SysA = 1; SysB = 2;'#10 +
+      'implementation'#10'end.'#10, 1);
+    LOk := GProj.AnalyzeModuleOnly(LSys);
+    Ok('redo: an interface edit of System refuses [' + GProj.StageTimings +
+      ']', not LOk and (Pos('implicit-unit(system)', GProj.StageTimings) > 0));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestBadPathText;
 var
   LDir, LErr: string;
@@ -11362,6 +11464,7 @@ begin
   TestArithCorners;
   TestLoadFailures;
   TestSourceManagerRuns;
+  TestConsumerRedo;
   TestPoolContract;
 
   if GCounter.Finish('SemaProjectSmoke') then
