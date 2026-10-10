@@ -350,11 +350,11 @@ type
       IsFirst: Boolean;
     end;
     TNavCache = class
-      // The model snapshot this cache was built from. If the project later
-      // publishes a different snapshot at the same model id (the async
-      // parser's intf->full upgrade, or an edit-reanalysis), CacheOf detects
-      // the mismatch and rebuilds - the cached raw/visible/node indices are
-      // only valid for the exact tree they came from.
+      // The model this cache was built from. A navigator does not survive a
+      // swap of models (see Create: an address can be reused by the next
+      // model, so a pointer compare cannot tell); this is a cheap check that
+      // the model at the id is still the one, kept as a second guard behind
+      // the generation check in CacheOf.
       SourceModel: TPasSemaModel;
       { Identity is not enough on its own: TryRehydrate restores the text
         layer on the SAME model object, so a cache built while the model was
@@ -391,6 +391,9 @@ type
     // The project's form files, bound - created on the first search that can
     // reach one (FormBinder), dropped when LibraryPaths changes.
     FForms: TPasFormBinder;
+    // FProj.ModelGeneration at Create - see Create's lifetime rule.
+    FGeneration: Integer;
+    procedure CheckGeneration;
     function FormBinder: TPasFormBinder;
     function CacheOf(AMid: Integer): TNavCache;
     function TargetFromNode(AMid, ANode: Integer; const AName: string;
@@ -514,6 +517,19 @@ type
     function DesignatorNameNode(LM: TPasSemaModel; ANode: Integer): Integer;
     function DesignatorIsClass(AMid, ANode, ATMid, ASym: Integer): Boolean;
   public
+    { LIFETIME: a navigator serves ONE state of AProject's models. It keeps
+      per-model caches (token and node maps, pairing keys), the form
+      binder's bound classes and the file list, all taken from the models as
+      they were - and AnalyzeModuleOnly replaces the edited model and its
+      redone consumers (freeing the old objects, whose addresses the memory
+      manager may hand to the next ones), may renumber symbols and adds
+      newcomer units. So a host frees its navigator before a module run and
+      creates a new one over the project afterwards, whatever the run's
+      outcome; one kept across a run raises EInvalidOperation on its next
+      lookup (TPasSemaProject.ModelGeneration) rather than serve indices of
+      a tree that is gone (audit A2-20, B2-26). DemoteText, TryRehydrate and
+      the release calls are not such a change: the models stay the same
+      objects, and CacheOf rebuilds what a demotion invalidated. }
     constructor Create(AProject: TPasSemaProject);
     destructor Destroy; override;
     // Model id of an analyzed source file; -1 when the file wasn't analyzed.
@@ -1149,6 +1165,7 @@ implementation
 
 uses
   System.SysUtils,
+  System.Classes,
   System.IOUtils,
   System.Generics.Defaults;
 
@@ -1173,6 +1190,7 @@ var
 begin
   inherited Create;
   FProj := AProject;
+  FGeneration := FProj.ModelGeneration;
   FByPath := TDictionary<string, Integer>.Create;
   FCaches := TObjectDictionary<Integer, TNavCache>.Create([doOwnsValues]);
   for LMid := 0 to FProj.ModelCount - 1 do
@@ -1187,8 +1205,17 @@ begin
   inherited;
 end;
 
+procedure TPasNavigator.CheckGeneration;
+begin
+  if FProj.ModelGeneration <> FGeneration then
+    raise EInvalidOperation.Create('TPasNavigator: the project replaced ' +
+      'models (a module run) after this navigator was created; create a ' +
+      'new navigator over it');
+end;
+
 function TPasNavigator.FormBinder: TPasFormBinder;
 begin
+  CheckGeneration;
   if FForms = nil then
     FForms := TPasFormBinder.Create(FProj, FLibraryPaths);
   Result := FForms;
@@ -1244,14 +1271,15 @@ var
 begin
   // Everything below indexes the TEXT layer, so hydrate first: a cache built
   // over a demoted model is all-empty, and (see BuiltDemoted) permanently so.
+  CheckGeneration;
   FProj.EnsureHydrated(AMid);
   LM := FProj.Model(AMid);
   if FCaches.TryGetValue(AMid, Result) then
   begin
     if (Result.SourceModel = LM) and (Result.BuiltDemoted = LM.Demoted) then
       Exit;
-    // Stale: the project swapped in a new snapshot at this id. Drop the cache
-    // (doOwnsValues frees it) and rebuild against the current model.
+    // Stale: built over the demoted text layer. Drop the cache (doOwnsValues
+    // frees it) and rebuild against the current model.
     FCaches.Remove(AMid);
   end;
   Result := TNavCache.Create;

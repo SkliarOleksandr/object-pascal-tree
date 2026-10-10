@@ -183,6 +183,9 @@ type
     DeclOffset: Integer;
   end;
 
+  // Raised only by TPasSemaProject.InjectModuleFault (tests).
+  EPasInjectedFault = class(Exception);
+
   TPasSemaProject = class
   private
     FPlatform: TPasPlatform;
@@ -301,6 +304,16 @@ type
     FTransientReleased: Boolean;
     // See the NeedsFullRebuild property.
     FNeedsFullRebuild: Boolean;
+    // A full driver (AnalyzeProject, AnalyzeDirectory, AnalyzeStaged,
+    // AnalyzeFile) has started on this project: a project is analyzed ONCE
+    // (audit B4-35), see EnterFullRun.
+    FAnalyzed: Boolean;
+    // See the RunComplete property.
+    FRunComplete: Boolean;
+    // See the ModelGeneration property.
+    FModelGeneration: Integer;
+    // See the InjectModuleFault property.
+    FFaultStage: string;
     { Per-model overlay of the member references CrossType discovers, so the
       parallel walks never mutate a dictionary another walk is reading - see
       RunCrossTypePass. Owned here; merged and freed there. }
@@ -1003,10 +1016,31 @@ type
       this flag is what tells a host that catches broadly that the answer is a
       FULL REBUILD and not a retry over the same project. }
     property NeedsFullRebuild: Boolean read FNeedsFullRebuild;
+    { True once a full driver ran to its end: every pass done, every status
+      final. A driver that raised or was cancelled leaves it False - its
+      models sit at msFullReady with the cross passes half done, which the
+      module path's msFullReady gate cannot tell from a finished run - and
+      AnalyzeModuleOnly then refuses `incomplete-run` (audit B4-33). Such a
+      project may be SHOWN (partial but consistent answers), never edited
+      incrementally nor donated (AdoptParseDonor refuses it). }
+    property RunComplete: Boolean read FRunComplete;
+    { Moves each time AnalyzeModuleOnly reaches its commit point - the point
+      from which model objects are replaced, symbols renumbered and
+      newcomers added. Whatever was built over the models before it (a
+      TPasNavigator, its form binder) is stale after it; the navigator
+      compares this value and refuses to serve. }
+    property ModelGeneration: Integer read FModelGeneration;
+    { TESTS ONLY. AnalyzeModuleOnly raises EPasInjectedFault at the named
+      stage of its next run: 'decide' (before the commit point), 'swap'
+      (right after the edited model is swapped in), 'redo' (inside the
+      consumer redo) or 'passes' (after the module passes). '' (the
+      default) is off. The suites use it to check what a failure leaves. }
+    property InjectModuleFault: string read FFaultStage write FFaultStage;
     { Editor-host buffer override: analysis reads AText for APath instead of
-      the file on disk (for unsaved editor content). Call BEFORE AnalyzeFile/
-      AnalyzeDirectory - LoadFile reads at analysis time. AVersion is the
-      host's version stamp for the document, readable back via BufferVersion
+      the file on disk (for unsaved editor content). Call BEFORE the one full
+      Analyze* (a project is analyzed once; a second full run raises) or
+      before an AnalyzeModuleOnly - LoadFile reads at analysis time.
+      AVersion is the host's version stamp for the document, readable back via BufferVersion
       once the analysis is done - so an async host can tell a result computed
       from the CURRENT text apart from one computed from an older keystroke. }
     procedure SetBuffer(const APath, AText: string; AVersion: Integer = 0);
@@ -1045,8 +1079,10 @@ type
       takes the normal path.
 
       False = configuration mismatch (platform, extra defines, search paths /
-      namespaces / aliases), donor refused; the caller logs and the run
-      proceeds donor-less. nil clears a previously adopted donor.
+      namespaces / aliases), or a donor that is not last-good
+      (NeedsFullRebuild, or not RunComplete): donor refused; the caller logs
+      and the run proceeds donor-less. nil clears a previously adopted
+      donor.
 
       LIFETIME: the adoption is valid for the NEXT Analyze* call only and is
       consumed by it (cleared in its finally, cancelled exits and refused
@@ -1507,6 +1543,13 @@ type
     procedure BaseDefineNames(out AProject, APlatform: TArray<string>);
   private
     procedure GuardNotReleased(const AEntry: string);
+    { The entry of every full driver: GuardNotReleased, the one-shot rule,
+      then EnterAnalysis. A second full Analyze* raises EInvalidOperation:
+      LoadFile serves every registered model from FByPath, so a buffer set
+      in between was never read, and the cross passes appended their
+      diagnostics a second time onto models that still held the first run's
+      (audit B4-35). }
+    procedure EnterFullRun(const AEntry: string);
     { The pool contract every Analyze* entry checks before any work: the
       caller is not a default-pool task (EInvalidOperation otherwise - see
       ConfigureThreadPool), and the search index is built here, on the
@@ -2197,6 +2240,12 @@ begin
     Exit(True);   // explicit clear
   // Config gate: a donor built under ANY other configuration could hand back
   // a tree whose preprocessed stream this project would never produce.
+  // A project a module run left half-committed, or a run left incomplete,
+  // is not a last-good project. Its trees are immutable and would donate
+  // correctly, but the contract is "discard it", and a refusal is what makes
+  // a host that forgot visible in its log (audit B4-31, B1-27).
+  if ADonor.FNeedsFullRebuild or not ADonor.FRunComplete then
+    Exit(False);
   if (ADonor = Self) or (ADonor.FPlatform <> FPlatform) or
      (ADonor.FCompilerVersion <> FCompilerVersion) or
      (Length(ADonor.FExtraDefines) <> Length(FExtraDefines)) then
@@ -17734,8 +17783,7 @@ var
   LPaths: TArray<string>;
   LPath: string;
 begin
-  GuardNotReleased('AnalyzeFile');
-  EnterAnalysis('AnalyzeFile');
+  EnterFullRun('AnalyzeFile');
   DefaultProjectDirFrom(AMainFile);
   // The donor is consumed by exactly THIS run, cancelled/failed exits
   // included: after the build the host frees it, and the only post-build
@@ -17819,6 +17867,7 @@ begin
     ReleaseCrossWork;
     ReleaseUsesMemo;
     TrimPreprocessors;
+    FRunComplete := True;
   finally
     FinishDonor({AReport} False);   // AnalyzeFile carries no StageTimings
   end;
@@ -19500,6 +19549,16 @@ var
     LDecide := LDecide + Format('%s:%d,', [AName, LSW.ElapsedMilliseconds]);
   end;
 
+  // See InjectModuleFault.
+  procedure Fault(const AStage: string);
+  begin
+    if SameText(FFaultStage, AStage) then
+    begin
+      FFaultStage := '';
+      raise EPasInjectedFault.Create('injected module fault: ' + AStage);
+    end;
+  end;
+
   // Every refusal names itself in StageTimings - the fast path's whole value
   // is how OFTEN it fires, so "it fell back" without a reason is unreadable.
   function Refuse(const AReason: string): Boolean;
@@ -19570,6 +19629,16 @@ begin
   // deserves a refusal it can log, not an exception per keystroke.
   if FTransientReleased then
     Exit(Refuse('released-maps'));
+  // A project a module run left half-committed stays that way: every later
+  // edit is a rebuild. A full run that raised or was cancelled left its
+  // models msFullReady with the cross passes half done - the msFullReady
+  // gate below cannot tell, and an accepted edit would redo a handful of
+  // models while every other one kept missing its cross-unit state for as
+  // long as edits were accepted (audit B4-33).
+  if FNeedsFullRebuild then
+    Exit(Refuse('needs-full-rebuild'));
+  if not FRunComplete then
+    Exit(Refuse('incomplete-run'));
   EnterAnalysis('AnalyzeModuleOnly');
   // No `Result := False` here: every exit below goes through Refuse (which
   // returns False and records why) or sets Result explicitly.
@@ -19779,6 +19848,7 @@ begin
         Exit(Refuse(LWhy));
     end;
     Lap('inst');
+    Fault('decide');
     // parse = preprocess + parse + Phase 1 of the edited unit; decide = the
     // guards, the diff and the selection over the reach; commit = the
     // renumbering of the untouched reach and the instance table.
@@ -19786,29 +19856,37 @@ begin
       [LSW.ElapsedMilliseconds, LDecide]);
     LSW := TStopwatch.StartNew;
     FSM.DropSavedPins;   // no refusal past here
-    // Committed: the owning list frees the old model. Nothing outside FModels
-    // holds a model reference across a call (ids, not pointers, are the
-    // currency), and the per-model pass scratch is rebuilt below.
-    FModels[LId] := LNew;
-    LNew := nil;
-    LRepointed := 0;
-    if LInstancesMove then
-      LRepointed := RepointInstances(LId, LMap);
-    // The untouched part of the reach: bindings into this unit follow the
-    // renumbering, nothing else about those models changes.
-    ParallelFor(High(LUntouched),
-      procedure(AIdx: Integer)
-      begin
-        RenumberConsumer(LUntouched[AIdx], LId, LMap, LUntouchedKeys[AIdx]);
-      end);
-    FStageTimings := FStageTimings + Format('commit=%d;', [LSW.ElapsedMilliseconds]);
-    LSW := TStopwatch.StartNew;
-    // PAST THE COMMIT POINT. Everything above is a clean refusal; from here a
-    // failure cannot restore the project (the consumers' cross-unit state is
-    // being thrown away and rebuilt), so it is published as such: the flag
-    // says "full rebuild", the timing string says where it died, and the
-    // exception still propagates to whoever drives the call.
+    // THE COMMIT POINT. Everything above is a clean refusal; from the swap on
+    // a failure cannot restore the project (the old model is freed, the
+    // instance table and the untouched reach are renumbered in place, the
+    // consumers' cross-unit state is thrown away and rebuilt), so it is
+    // published as such: the flag says "full rebuild", the timing string
+    // says where it died, and the exception still propagates to whoever
+    // drives the call. The try opens BEFORE the swap: a failure in the
+    // repoint or the renumbering used to read as an untouched refusal
+    // (audit B4-31).
     try
+      // Committed: the owning list frees the old model. Nothing outside
+      // FModels may hold a model reference across a call - ids, not
+      // pointers, are the currency, and a TPasNavigator is recreated after
+      // every module run - and the per-model pass scratch is rebuilt below.
+      Inc(FModelGeneration);
+      FModels[LId] := LNew;
+      LNew := nil;
+      Fault('swap');
+      LRepointed := 0;
+      if LInstancesMove then
+        LRepointed := RepointInstances(LId, LMap);
+      // The untouched part of the reach: bindings into this unit follow the
+      // renumbering, nothing else about those models changes.
+      ParallelFor(High(LUntouched),
+        procedure(AIdx: Integer)
+        begin
+          RenumberConsumer(LUntouched[AIdx], LId, LMap, LUntouchedKeys[AIdx]);
+        end);
+      FStageTimings := FStageTimings +
+        Format('commit=%d;', [LSW.ElapsedMilliseconds]);
+      LSW := TStopwatch.StartNew;
       // The newcomers join the closure, in discovery order, BEFORE the passes:
       // ResolveUses must find them in FByPath, or it would LoadFile a second
       // copy of each. Their ids follow every existing model's where a rebuild
@@ -19845,12 +19923,14 @@ begin
           LConsOf[AIdx + 1] := TPasSemaResolver.Analyze(
             FModels[LIds[AIdx + 1]].Tree, False, FPlatform);
         end);
+      Fault('redo');
       // What the load put on the old model after its Phase 1 - the parse rows
       // and the oracle's verdict - goes with it (audit A3-36).
       for LIdx := 1 to High(LIds) do
       begin
         LConsOf[LIdx].CopyLoadState(FModels[LIds[LIdx]]);
         FModels[LIds[LIdx]] := LConsOf[LIdx];
+        LConsOf[LIdx] := nil;   // FModels owns it now
       end;
       LConsOf := nil;
       for LIdx := 0 to High(LIds) do
@@ -19860,6 +19940,7 @@ begin
       // redo, but everything from ResolveUses on - like the load engine's
       // units in a rebuild.
       RunModulePasses(LIds + LAddIds, LId, LMap);
+      Fault('passes');
       for LIdx := 0 to High(LIds) do
         SetModuleStatus(LIds[LIdx], msCrossReady);
       for LIdx := 0 to High(LAddIds) do
@@ -19869,6 +19950,10 @@ begin
       begin
         FNeedsFullRebuild := True;
         FStageTimings := 'module=half-committed:' + E.ClassName;
+        // A redo that raised left the consumers it had built unowned: the
+        // swap hands each one over and nils its slot.
+        for LIdx := 0 to High(LConsOf) do
+          LConsOf[LIdx].Free;
         raise;
       end;
     end;
@@ -19898,6 +19983,9 @@ begin
     for LIdx := 0 to High(LAddModels) do
       LAddModels[LIdx].Free;
     LAdded.Free;
+    // An exception before the commit point is a refusal too: the pins go
+    // back as Refuse puts them (a no-op once DropSavedPins ran).
+    FSM.RestorePins;
     TrimPreprocessors;   // see AnalyzeProject
   end;
 end;
@@ -20072,6 +20160,22 @@ begin
       'analyze into a fresh TPasSemaProject instead', [AEntry]);
 end;
 
+procedure TPasSemaProject.EnterFullRun(const AEntry: string);
+begin
+  GuardNotReleased(AEntry);
+  if FAnalyzed then
+  begin
+    FDonor := nil;   // a refused call consumes the adoption too
+    raise EInvalidOperation.CreateFmt(
+      '%s: this project was already analyzed; a TPasSemaProject runs one ' +
+      'full analysis (AnalyzeModuleOnly is the entry that runs again) - ' +
+      'analyze into a fresh project instead', [AEntry]);
+  end;
+  EnterAnalysis(AEntry);
+  // Past the pool guard: a call refused there started no run.
+  FAnalyzed := True;
+end;
+
 procedure TPasSemaProject.EnterAnalysis(const AEntry: string);
 begin
   // Every pass forks onto the pinned default pool and joins on the caller.
@@ -20119,8 +20223,7 @@ var
   end;
 
 begin
-  GuardNotReleased('AnalyzeProject');
-  EnterAnalysis('AnalyzeProject');
+  EnterFullRun('AnalyzeProject');
   DefaultProjectDirFrom(AMainFile);
   FStageTimings := '';
   LSW := TStopwatch.StartNew;
@@ -20191,6 +20294,7 @@ begin
     // a real project) and the include-cache's own stream references.
     FSM.ReleaseAnalysisCaches;
     TrimPreprocessors;
+    FRunComplete := True;
   finally
     FinishDonor({AReport} True);
   end;
@@ -20211,8 +20315,7 @@ var
   end;
 
 begin
-  GuardNotReleased('AnalyzeDirectory');
-  EnterAnalysis('AnalyzeDirectory');
+  EnterFullRun('AnalyzeDirectory');
   FStageTimings := '';
   LSW := TStopwatch.StartNew;
   try   // donor lifetime - see AnalyzeFile
@@ -20294,6 +20397,7 @@ begin
     ReleaseUsesMemo;
     FSM.ReleaseAnalysisCaches;   // see AnalyzeProject
     TrimPreprocessors;
+    FRunComplete := True;
   finally
     FinishDonor({AReport} True);
   end;
@@ -20351,8 +20455,7 @@ var
   end;
 
 begin
-  GuardNotReleased('AnalyzeStaged');
-  EnterAnalysis('AnalyzeStaged');
+  EnterFullRun('AnalyzeStaged');
   // One root is a project's main file (the LSP host with a configured
   // project); several are open documents, which have no project directory.
   if Length(ARoots) = 1 then
@@ -20551,11 +20654,16 @@ begin
     FSM.ReleaseAnalysisCaches;
     TrimPreprocessors;
     StageMark('final');
+    FRunComplete := True;
     Recount;
     Report('done');
 
-    if Length(ARoots) > 0 then
-      FByPath.TryGetValue(LowerCase(TPath.GetFullPath(ARoots[0])), Result);
+    // TryGetValue writes Default(Integer) = 0 - System's id - on a miss, and
+    // a root that does not exist never enters FByPath (audit B4-36).
+    if (Length(ARoots) > 0) and
+       not FByPath.TryGetValue(LowerCase(TPath.GetFullPath(ARoots[0])),
+         Result) then
+      Result := -1;
   finally
     FinishDonor({AReport} True);   // donor lifetime - see AnalyzeFile
     FCancelCheck := nil;

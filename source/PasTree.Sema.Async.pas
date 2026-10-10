@@ -36,6 +36,17 @@ uses
   PasTree.Sema.Project;
 
 type
+  { What a CreateForModule session left its project as - the one value a
+    host branches on after IsDone (see ModuleOutcome).
+    moAccepted     - the fast path ran; the project is updated and current.
+    moRefused      - refused, or failed before the commit point: the project
+                     is untouched. Keep it live and rebuild over it, passing
+                     it as the parse donor.
+    moMustDiscard  - failed past the commit point: the project is
+                     half-updated. Free it (after the navigator over it) and
+                     rebuild from scratch; never show it, never donate it. }
+  TPasModuleOutcome = (moAccepted, moRefused, moMustDiscard);
+
   TPasAsyncSession = class
   private type
     TWorker = class(TThread)
@@ -62,6 +73,9 @@ type
     FModuleAccepted: Boolean;       // written before FDoneFlag, read after
     FModuleRebuild: Boolean;        // same discipline - ModuleNeedsFullRebuild
     procedure RunBody;
+    // Every configuration call: the worker reads what it writes without a
+    // lock (audit B2-45), so "call BEFORE Start" is enforced, not hoped for.
+    procedure CheckNotStarted(const AEntry: string);
   public
     { Creates the session and its (empty) project. Call SetBuffer for any
       unsaved editor content, then Start. ARoots are the closure roots (a
@@ -76,19 +90,24 @@ type
       TPasSemaProject.AnalyzeModuleOnly. Set the edited buffer with SetBuffer
       before Start, exactly like a full session.
 
-      After IsDone, ModuleAccepted says whether the fast path ran. Either way
-      the project comes back through TakeProject UNCHANGED-or-updated and
-      still consistent: on a refusal (interface change, and every other case
-      AnalyzeModuleOnly lists) the host takes it back untouched and starts an
-      ordinary session over it, passing it as the parse donor. No progress is
-      reported - the whole point is that there are no stages to report.
+      After IsDone, ModuleOutcome says what the project is now, and the host
+      branches on it alone:
+        moAccepted    - keep it; recreate the navigator over it.
+        moRefused     - untouched (interface change, and every other case
+                        AnalyzeModuleOnly lists; an exception before its
+                        commit point too, LastError then says which): keep
+                        it live and start an ordinary session over it,
+                        passing it as the parse donor.
+        moMustDiscard - a failure PAST the commit point left it half-updated
+                        (LastError says what): free it and rebuild without a
+                        donor. AdoptParseDonor refuses such a project anyway.
+      No progress is reported - the whole point is that there are no stages
+      to report.
 
-      THE ONE EXCEPTION, and it is why LastError must be checked here too: a
-      failure PAST AnalyzeModuleOnly's commit point leaves the project
-      half-updated. ModuleAccepted is then False without the "untouched"
-      guarantee, LastError is non-empty, and ModuleNeedsFullRebuild says so
-      explicitly. Such a project must be DISCARDED, not reused as the live
-      project or as a parse donor. }
+      A TPasNavigator holds per-model state keyed by the model object, and
+      AnalyzeModuleOnly frees the models it replaces: free the navigator
+      before Start and create a new one over the project TakeProject returns,
+      whatever the outcome (see TPasNavigator). }
     constructor CreateForModule(AProject: TPasSemaProject;
       const APath: string);
     { Cancels the worker, waits for it to drain, then frees the project if it
@@ -101,7 +120,8 @@ type
       it holds NOW - unequal means this result was computed from older text
       and its positions may be stale. }
     procedure SetBuffer(const APath, AText: string; AVersion: Integer = 0);
-    { Configuration forwarded to the project. Call BEFORE Start. }
+    { Configuration forwarded to the project. Call BEFORE Start: this and
+      every other setter of the session raises EInvalidOperation after it. }
     procedure SetNamespaces(const ANamespaces: TArray<string>);
     procedure AddUnitAlias(const AAlias, AReal: string);
     procedure PinUnitFile(const APath: string);
@@ -146,24 +166,27 @@ type
     { A thread-safe snapshot of the latest progress. }
     function Progress: TPasStagedProgress;
     { Non-empty if the worker died on an exception - the host should log it
-      (a silently swallowed background failure looks like a hang). The built
-      project may be partial but is internally consistent (same guarantee as
-      a cancellation). }
+      (a silently swallowed background failure looks like a hang). After a
+      full session the built project may be partial but is internally
+      consistent (same guarantee as a cancellation): it may be shown, but its
+      RunComplete is False, so the module path refuses it (`incomplete-run`)
+      and AdoptParseDonor refuses it as a donor - the next edit rebuilds.
+      After a module session see ModuleOutcome. }
     function LastError: string;
     { After IsDone, transfers project ownership to the caller (the session no
       longer frees it); returns nil if not finished yet or already taken. }
     function TakeProject: TPasSemaProject;
     { The model id of ARoots[0] in the built project (valid once done). }
     function MainResultId: Integer;
-    { CreateForModule sessions only: did the single-module fast path run?
-      Valid once IsDone. False = refused, the project is untouched and the
-      host must rebuild (see CreateForModule). Always False for a normal
-      session. }
+    { CreateForModule sessions only, valid once IsDone: what the project is
+      now - see TPasModuleOutcome and CreateForModule. moRefused for a
+      normal session. }
+    function ModuleOutcome: TPasModuleOutcome;
+    { ModuleOutcome = moAccepted. }
     function ModuleAccepted: Boolean;
-    { CreateForModule sessions only: True when the fast path died after its
-      commit point, so the project this session holds is half-updated and
-      must be thrown away rather than reused (see CreateForModule). Always
-      False for a normal session, and False for an ordinary refusal. }
+    { ModuleOutcome = moMustDiscard: the fast path died after its commit
+      point, and the project is half-updated. False for an ordinary refusal
+      and for a normal session. }
     function ModuleNeedsFullRebuild: Boolean;
   end;
 
@@ -230,51 +253,61 @@ end;
 procedure TPasAsyncSession.SetBuffer(const APath, AText: string;
   AVersion: Integer);
 begin
+  CheckNotStarted('SetBuffer');
   FProject.SetBuffer(APath, AText, AVersion);
 end;
 
 procedure TPasAsyncSession.SetNamespaces(const ANamespaces: TArray<string>);
 begin
+  CheckNotStarted('SetNamespaces');
   FProject.SetNamespaces(ANamespaces);
 end;
 
 procedure TPasAsyncSession.PinUnitFile(const APath: string);
 begin
+  CheckNotStarted('PinUnitFile');
   FProject.PinUnitFile(APath);
 end;
 
 procedure TPasAsyncSession.SetProjectDir(const ADir: string);
 begin
+  CheckNotStarted('SetProjectDir');
   FProject.SetProjectDir(ADir);
 end;
 
 procedure TPasAsyncSession.AddUnitAlias(const AAlias, AReal: string);
 begin
+  CheckNotStarted('AddUnitAlias');
   FProject.AddUnitAlias(AAlias, AReal);
 end;
 
 function TPasAsyncSession.SetParseDonor(ADonor: TPasSemaProject): Boolean;
 begin
+  CheckNotStarted('SetParseDonor');
   Result := FProject.AdoptParseDonor(ADonor);
 end;
 
 procedure TPasAsyncSession.SetSingleThreadedInner(AValue: Boolean);
 begin
+  CheckNotStarted('SetSingleThreadedInner');
   FProject.SingleThreaded := AValue;
 end;
 
 procedure TPasAsyncSession.SetReportUnresolvedMembers(AValue: Boolean);
 begin
+  CheckNotStarted('SetReportUnresolvedMembers');
   FProject.ReportUnresolvedMembers := AValue;
 end;
 
 procedure TPasAsyncSession.SetReportGuessedIfs(AValue: Boolean);
 begin
+  CheckNotStarted('SetReportGuessedIfs');
   FProject.ReportGuessedIfs := AValue;
 end;
 
 procedure TPasAsyncSession.SetReportVisibility(AValue: Boolean);
 begin
+  CheckNotStarted('SetReportVisibility');
   FProject.ReportVisibility := AValue;
 end;
 
@@ -385,6 +418,23 @@ begin
   end
   else
     Result := nil;
+end;
+
+procedure TPasAsyncSession.CheckNotStarted(const AEntry: string);
+begin
+  if FStarted then
+    raise EInvalidOperation.CreateFmt(
+      'TPasAsyncSession.%s: configure the session before Start', [AEntry]);
+end;
+
+function TPasAsyncSession.ModuleOutcome: TPasModuleOutcome;
+begin
+  if FModuleRebuild then
+    Result := moMustDiscard
+  else if FModuleAccepted then
+    Result := moAccepted
+  else
+    Result := moRefused;
 end;
 
 function TPasAsyncSession.ModuleAccepted: Boolean;

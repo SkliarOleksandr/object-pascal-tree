@@ -5250,6 +5250,213 @@ end;
   reached by a rule - the for-in enumerator, a default property, an
   attribute's suffix - selects its consumers (A3-38); an interface edit of a
   hand-written System refuses (B4-38). }
+{ What a host may do with a project after a module run, and how it can tell
+  (audit B17). A failure past AnalyzeModuleOnly's commit point marks the
+  project NeedsFullRebuild - the swap and the renumbering included, which
+  used to sit before the try (B4-31); a failure before it leaves the project
+  as it was. A full run that raised or was cancelled is not RunComplete, and
+  the module path refuses it (B4-33); neither is a donor. A project is
+  analyzed once (B4-35); AnalyzeStaged answers -1 for a missing root (B4-36);
+  a navigator does not outlive a module run (A2-20, B2-26). }
+procedure TestModuleLifecycle;
+const
+  LC_A =
+    'unit LcA;'#10'interface'#10'procedure PA;'#10'implementation'#10 +
+    'procedure PA; begin end;'#10'end.'#10;
+  LC_A_BODY =
+    'unit LcA;'#10'interface'#10'procedure PA;'#10'implementation'#10 +
+    'procedure PA; var I: Integer; begin I := 0; end;'#10'end.'#10;
+  LC_A_INTF =
+    'unit LcA;'#10'interface'#10'procedure PA(X: Integer = 0);'#10 +
+    'implementation'#10'procedure PA(X: Integer); begin end;'#10'end.'#10;
+var
+  LDir, LApp, LUnitA: string;
+  LOk, LRaised: Boolean;
+  LDonee: TPasSemaProject;
+  LNav: TPasNavigator;
+  LT, LS, LGen: Integer;
+  LName, LSig0: string;
+
+  function NewProject: TPasSemaProject;
+  begin
+    Result := TPasSemaProject.Create(pfWin32, [LDir], []);
+    Result.AnalyzeProject(LApp);
+  end;
+
+  // AnalyzeModuleOnly(LUnitA) over AText with a fault at AStage; True when
+  // it raised EPasInjectedFault.
+  function FaultRun(const AText, AStage: string): Boolean;
+  begin
+    GProj.SetBuffer(LUnitA, AText, 1);
+    GProj.InjectModuleFault := AStage;
+    Result := False;
+    try
+      GProj.AnalyzeModuleOnly(LUnitA);
+    except
+      on EPasInjectedFault do
+        Result := True;
+    end;
+  end;
+
+begin
+  LDir := FreshDir('pastree_sema_lifecycle');
+  LApp := TPath.Combine(LDir, 'LcApp.dpr');
+  LUnitA := TPath.Combine(LDir, 'LcA.pas');
+  TFile.WriteAllText(LApp, 'program LcApp;'#10'uses LcA, LcB;'#10 +
+    'begin'#10'  PA;'#10'end.'#10);
+  TFile.WriteAllText(LUnitA, LC_A);
+  TFile.WriteAllText(TPath.Combine(LDir, 'LcB.pas'),
+    'unit LcB;'#10'interface'#10'implementation'#10'uses LcA;'#10 +
+    'initialization'#10'  PA;'#10'end.'#10);
+  LSig0 := FreshSig(LApp, [LDir], [], []);
+
+  // A failure before the commit point is a refusal: nothing moved.
+  GProj := NewProject;
+  try
+    LGen := GProj.ModelGeneration;
+    LRaised := FaultRun(LC_A_INTF, 'decide');
+    Ok('lifecycle: a fault before the commit point propagates', LRaised);
+    Ok('lifecycle: ...no full rebuild asked, the generation kept, the ' +
+      'project as it was', not GProj.NeedsFullRebuild and
+      (GProj.ModelGeneration = LGen) and (ProjSig(GProj) = LSig0));
+    GProj.SetBuffer(LUnitA, LC_A_INTF, 2);
+    LOk := GProj.AnalyzeModuleOnly(LUnitA);
+    Ok('lifecycle: ...and the next edit is accepted [' +
+      GProj.StageTimings + ']', LOk and
+      (ProjSig(GProj) = FreshSig(LApp, [LDir], [LUnitA], [LC_A_INTF])));
+    Ok('lifecycle: an accepted run moves the generation',
+      GProj.ModelGeneration <> LGen);
+  finally
+    FreeAndNil(GProj);
+  end;
+
+  // A failure right after the swap, inside the redo of a consumer, and
+  // after the passes: the project is half-updated whichever it was.
+  for var LStage in ['swap', 'redo', 'passes'] do
+  begin
+    GProj := NewProject;
+    try
+      LRaised := FaultRun(LC_A_INTF, LStage);
+      Ok('lifecycle: a fault at ' + LStage + ' propagates and asks for a ' +
+        'full rebuild [' + GProj.StageTimings + ']',
+        LRaised and GProj.NeedsFullRebuild);
+      GProj.SetBuffer(LUnitA, LC_A_BODY, 3);
+      LOk := GProj.AnalyzeModuleOnly(LUnitA);
+      Ok('lifecycle: ...every later edit is refused (' + LStage + ') [' +
+        GProj.StageTimings + ']', not LOk and
+        (Pos('needs-full-rebuild', GProj.StageTimings) > 0));
+      LDonee := TPasSemaProject.Create(pfWin32, [LDir], []);
+      try
+        Ok('lifecycle: ...and it is no parse donor (' + LStage + ')',
+          not LDonee.AdoptParseDonor(GProj));
+      finally
+        LDonee.Free;
+      end;
+    finally
+      FreeAndNil(GProj);
+    end;
+  end;
+
+  // A full run that did not finish: the models are msFullReady, the cross
+  // passes half done.
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeStaged([LApp], [],
+      function: Boolean
+      begin
+        Result := True;
+      end);
+    Ok('lifecycle: a cancelled staged run is not RunComplete',
+      not GProj.RunComplete);
+    GProj.SetBuffer(LUnitA, LC_A_BODY, 1);
+    LOk := GProj.AnalyzeModuleOnly(LUnitA);
+    Ok('lifecycle: ...the module path refuses it [' + GProj.StageTimings +
+      ']', not LOk and (Pos('incomplete-run', GProj.StageTimings) > 0));
+    LDonee := TPasSemaProject.Create(pfWin32, [LDir], []);
+    try
+      Ok('lifecycle: ...and it is no parse donor',
+        not LDonee.AdoptParseDonor(GProj));
+    finally
+      LDonee.Free;
+    end;
+  finally
+    FreeAndNil(GProj);
+  end;
+
+  // One full analysis per project.
+  GProj := NewProject;
+  try
+    Ok('lifecycle: a finished run is RunComplete', GProj.RunComplete);
+    for var LEntry := 0 to 3 do
+    begin
+      LRaised := False;
+      try
+        case LEntry of
+          0: GProj.AnalyzeProject(LApp);
+          1: GProj.AnalyzeStaged([LApp], []);
+          2: GProj.AnalyzeFile(LApp);
+          3: GProj.AnalyzeDirectory(LDir);
+        end;
+      except
+        on EInvalidOperation do
+          LRaised := True;
+      end;
+      Ok(Format('lifecycle: a second full analysis raises (entry %d)',
+        [LEntry]), LRaised);
+    end;
+    Ok('lifecycle: ...and leaves the diagnostics as they were',
+      ProjSig(GProj) = LSig0);
+  finally
+    FreeAndNil(GProj);
+  end;
+
+  // A root that does not exist is -1, not System's id 0.
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    Ok('lifecycle: AnalyzeStaged answers -1 for a missing root',
+      GProj.AnalyzeStaged([TPath.Combine(LDir, 'Missing.dpr')], []) = -1);
+  finally
+    FreeAndNil(GProj);
+  end;
+
+  // A navigator does not outlive a module run: it refuses instead of serving
+  // the indices of a tree that is gone; a new one answers.
+  GProj := NewProject;
+  try
+    LNav := TPasNavigator.Create(GProj);
+    try
+      Ok('lifecycle: the navigator answers before the module run',
+        LNav.SymbolAt(MidByName('lcapp'), 4, 3, LT, LS, LName) and
+        SameText(LName, 'PA'));
+      GProj.SetBuffer(LUnitA, LC_A_BODY, 1);
+      LOk := GProj.AnalyzeModuleOnly(LUnitA);
+      LRaised := False;
+      try
+        LNav.SymbolAt(MidByName('lcapp'), 4, 3, LT, LS, LName);
+      except
+        on EInvalidOperation do
+          LRaised := True;
+      end;
+      Ok('lifecycle: ...one kept across a module run raises', LOk and
+        LRaised);
+    finally
+      LNav.Free;
+    end;
+    LNav := TPasNavigator.Create(GProj);
+    try
+      Ok('lifecycle: ...a new one answers',
+        LNav.SymbolAt(MidByName('lcapp'), 4, 3, LT, LS, LName) and
+        SameText(LName, 'PA'));
+    finally
+      LNav.Free;
+    end;
+  finally
+    FreeAndNil(GProj);
+  end;
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+end;
+
 procedure TestConsumerRedo;
 var
   LDir, LApp, LHub: string;
@@ -11465,6 +11672,7 @@ begin
   TestLoadFailures;
   TestSourceManagerRuns;
   TestConsumerRedo;
+  TestModuleLifecycle;
   TestPoolContract;
 
   if GCounter.Finish('SemaProjectSmoke') then

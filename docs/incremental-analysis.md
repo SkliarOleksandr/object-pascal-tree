@@ -237,6 +237,8 @@ from a slow analyzer.
 |---|---|
 | `released-maps` | the host called `ReleaseTransientMaps` or `DemoteClosedUnits` on this project; every other `Analyze*` raises on it, the module path refuses so the host can fall back to a fresh project |
 | `unknown-file`, `not-full` | not an analyzed unit of this project |
+| `needs-full-rebuild` | an earlier module run failed past its commit point (`NeedsFullRebuild`): the project is half-updated for good |
+| `incomplete-run` | the full run that built the project raised or was cancelled (`RunComplete` is False): its models sit at `msFullReady` with the cross passes half done, which the `not-full` gate cannot tell from a finished run |
 | `demoted` | the edited unit is text-demoted and its old stream cannot come back: the file changed with no `SetBuffer` before it (see the memory dial below) |
 | `parse-failed` | unparsable now; the closure changed, a rebuild's job |
 | `unresolved-if` | the stream depends on the `$IF` oracle, i.e. on the whole generation's symbol state - never reproducible per module |
@@ -277,22 +279,60 @@ calls `AnalyzeModuleOnly` for it, or rebuilds.
 
 `TPasAsyncSession.CreateForModule(AProject, APath)` takes OWNERSHIP of the
 host's last-good project, runs the call on its worker, and hands the project
-back through `TakeProject` - accepted or refused, it always comes back and is
-always consistent. `ModuleAccepted` says which happened. The buffer goes in
-with `SetBuffer` BEFORE `Start`, exactly like a full session, and no other
-thread may read the project during the call: it mutates models in place.
+back through `TakeProject`. The buffer goes in with `SetBuffer` BEFORE
+`Start`, exactly like a full session - every setter of the session raises
+`EInvalidOperation` after it - and no other thread may read the project
+during the call: it mutates models in place.
+
+`ModuleOutcome` is the one value the host branches on:
+
+- `moAccepted` - the project is updated and current.
+- `moRefused` - a refusal (the table above), or an exception before the
+  commit point (`LastError` says which): the project is untouched. Keep it
+  live and rebuild over it, passing it as the parse donor.
+- `moMustDiscard` - an exception past the commit point (`LastError`): the
+  project is half-updated, `NeedsFullRebuild` is set, every later module
+  call refuses (`needs-full-rebuild`) and `AdoptParseDonor` refuses it.
+  Free it and rebuild cold.
+
+A `TPasNavigator` serves one state of the models: a module run replaces model
+objects (the memory manager may hand a freed one's address to the next),
+renumbers symbols and adds newcomers. Free the navigator before `Start` and
+create a new one over whatever `TakeProject` returns; one kept across a run
+raises `EInvalidOperation` on its next lookup (`ModelGeneration`).
 
 A host's edit path then reads:
 
 ```pascal
+FreeAndNil(FNav);
 LSess := TPasAsyncSession.CreateForModule(FProject, LPath);
 FProject := nil;                       // the session owns it until TakeProject
 LSess.SetBuffer(LPath, LText, LVersion);
 LSess.Start;  ...  LSess.WaitFor;
 FProject := LSess.TakeProject;
-if not LSess.ModuleAccepted then
-  <ordinary rebuild session, with FProject as SetParseDonor>;
+case LSess.ModuleOutcome of
+  moAccepted:
+    FNav := TPasNavigator.Create(FProject);
+  moRefused:
+    begin
+      FNav := TPasNavigator.Create(FProject);
+      <ordinary rebuild session, with FProject as SetParseDonor>;
+    end;
+  moMustDiscard:
+    begin
+      FreeAndNil(FProject);
+      <ordinary rebuild session, no donor>;
+    end;
+end;
 ```
+
+A project is analyzed once: a second `AnalyzeProject`, `AnalyzeDirectory`,
+`AnalyzeStaged` or `AnalyzeFile` on it raises `EInvalidOperation` - it would
+have served the first run's text and appended every diagnostic again.
+`AnalyzeModuleOnly` is the entry that runs again; a rebuild is a fresh
+project. A full session whose `LastError` is set leaves a project that may be
+shown but not edited: its `RunComplete` is False, so the module path refuses
+it (`incomplete-run`) and so does `AdoptParseDonor`.
 
 After an accepted run only the re-analyzed module's diagnostics are new;
 every other module's are untouched, so a host that publishes per-file

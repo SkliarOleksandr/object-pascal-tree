@@ -22,6 +22,7 @@ program AsyncSmoke;
 
 uses
   System.SysUtils,
+  System.Classes,
   System.IOUtils,
   System.Generics.Collections,
   System.Generics.Defaults,
@@ -426,6 +427,53 @@ begin
       end;
     finally
       LSession2.Free;
+    end;
+
+    // ModuleOutcome, the one value a host branches on (audit B17): accepted,
+    // refused with the project untouched, and half-committed. A setter
+    // after Start raises instead of racing the worker (B2-45).
+    var LBodyEdit := StringReplace(LOrig, 'end.',
+      'procedure __Added2; begin end;'#10'end.', []);
+    for var LCase := 0 to 2 do
+    begin
+      var LHost3 := StagedProject(LDir, []);
+      case LCase of
+        1: LHost3.InjectModuleFault := 'decide';
+        2: LHost3.InjectModuleFault := 'swap';
+      end;
+      var LSession3 := TPasAsyncSession.CreateForModule(LHost3, LUnitPath);
+      try
+        LSession3.SetBuffer(LUnitPath, LBodyEdit);
+        LSession3.Start;
+        var LLate := False;
+        try
+          LSession3.SetBuffer(LUnitPath, LOrig);
+        except
+          on EInvalidOperation do
+            LLate := True;
+        end;
+        Ok(Format('module outcome %d: a setter after Start raises', [LCase]),
+          LLate);
+        LSession3.WaitFor;
+        case LCase of
+          0: Ok('module outcome: a body edit is moAccepted',
+               (LSession3.ModuleOutcome = moAccepted) and
+               (LSession3.LastError = ''));
+          1: Ok('module outcome: a fault before the commit point is ' +
+               'moRefused, with LastError',
+               (LSession3.ModuleOutcome = moRefused) and
+               (LSession3.LastError <> '') and
+               not LSession3.ModuleNeedsFullRebuild);
+          2: Ok('module outcome: a fault past the commit point is ' +
+               'moMustDiscard, with LastError',
+               (LSession3.ModuleOutcome = moMustDiscard) and
+               (LSession3.LastError <> '') and
+               LSession3.ModuleNeedsFullRebuild and
+               not LSession3.ModuleAccepted);
+        end;
+      finally
+        LSession3.Free;   // never taken: the session frees the project
+      end;
     end;
   end;
 

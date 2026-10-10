@@ -4667,7 +4667,8 @@ begin
   if chkIncremental.Checked and Assigned(FSemaProject) and
      SameText(FSemaProjectRoot, FMainSource) then
     if not FAsyncSession.SetParseDonor(FSemaProject) then
-      Log('Parse donor refused (configuration changed) - full rebuild.');
+      Log('Parse donor refused (configuration changed, or the last run ' +
+        'did not finish) - full rebuild.');
 
   FAsyncLoud := ALoud;
   FAnalyzeOverhead := '';      // async build reports no wrapper/stage timings
@@ -4792,7 +4793,7 @@ procedure TfrmMain.AsyncTimerTick(Sender: TObject);
 var
   LProgress: TPasStagedProgress;
   LError, LTimings: string;
-  LAccepted: Boolean;
+  LAccepted, LDiscard: Boolean;
 begin
   if not Assigned(FAsyncSession) then
   begin
@@ -4814,12 +4815,17 @@ begin
     FAsyncTimer.Enabled := False;
     FAsyncStart.Stop;
     LError := FAsyncSession.LastError;
-    LAccepted := FAsyncSession.ModuleAccepted;
+    LAccepted := FAsyncSession.ModuleOutcome = moAccepted;
+    LDiscard := FAsyncSession.ModuleOutcome = moMustDiscard;
     FSemaProject := FAsyncSession.TakeProject;   // ours again, either way
     LTimings := '';
     if Assigned(FSemaProject) then
       LTimings := FSemaProject.StageTimings;
     FreeAndNil(FAsyncSession);
+    // Half-updated past the commit point: never shown, never a donor - the
+    // rebuild below starts cold (see TPasModuleOutcome).
+    if LDiscard then
+      FreeAndNil(FSemaProject);
     FAsyncModule := False;
     FAnalyzing := False;
     if Assigned(FSemaProject) then
