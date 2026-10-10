@@ -45,6 +45,12 @@ type
       DirNames: TArray<string>;   // '<candidate>.pas', lower-cased
       Found: Boolean;
       Path: string;
+      // Every candidate spelling probed, lower-cased, in probe order (alias
+      // or as spelled, each unit scope prefix, the leaf), and the index of
+      // the one whose file was found (-1: found by the unit index or a .dcu,
+      // or not found). ResolveUnit checks the pins against them - see there.
+      Candidates: TArray<string>;
+      MatchIdx: Integer;
     end;
   private
     FSearchPaths: TArray<string>;
@@ -53,8 +59,8 @@ type
     FIncludeIndex: TDictionary<string, string>;  // basename -> full path
     FUnitIndex: TDictionary<string, string>;      // *.pas/*.dpr basename -> path
     FBuffers: TDictionary<string, TBufferEntry>;  // full path (lower) -> entry
-    // Unit-file lookup indexes, built LAZILY on the first FindUnitFile call
-    // (a project may never resolve units at all). FSearchIndex maps a .pas
+    // Unit-file lookup indexes, built by PrepareIndexes at every analysis
+    // entry, or lazily by the first resolution. FSearchIndex maps a .pas
     // basename (lower) to its full path across ALL search paths - first path
     // wins, preserving exactly the priority order the un-indexed loop had.
     // FDirIndexes holds the same per single directory, for the referring-
@@ -65,6 +71,24 @@ type
     // 5.5s of a 6.7s real-project analysis before this index, ~0 after.
     FSearchIndex: TDictionary<string, string>;
     FDirIndexes: TObjectDictionary<string, TDictionary<string, string>>;
+    // What the indexes were built from, so a later analysis on this manager
+    // can tell whether the disk moved under them (BeginRun): each search
+    // path's listing (.pas and .dcu) with the directory's last-write time
+    // taken BEFORE it was listed, and the same stamp per FDirIndexes entry.
+    // A directory's last-write time moves when a file is created, deleted
+    // or renamed in it - exactly the events that change a listing.
+    FPathListings: TArray<TArray<string>>;
+    FPathStamps: TArray<TDateTime>;
+    FDirStamps: TDictionary<string, TDateTime>;
+    // The run each listing was last checked in (BeginRun counts the runs,
+    // FRunEpoch): FDirChecked per directory index, FListingsEpoch for the
+    // search paths. FMemoStale: the project directory moved, so FUnitMemo
+    // is dropped at the next ResolveUnit (not inside the memo build that
+    // noticed it).
+    FRunEpoch: Integer;
+    FListingsEpoch: Integer;
+    FDirChecked: TDictionary<string, Integer>;
+    FMemoStale: Boolean;
     // Compiled units on the search paths (a `.dcu` basename, lower, without
     // its extension -> full path; first path wins), built with FSearchIndex.
     // The LAST resort of ResolveUnit: a unit with no .pas anywhere is read
@@ -74,17 +98,22 @@ type
     // ships both is still analyzed from its source.
     FDcuIndex: TDictionary<string, string>;
     // The generated interface text per .dcu path (lower), so a unit's text
-    // is generated once per analysis whatever the number of readers (the
-    // parse workers, a later rehydration). Guarded by FDcuLock.
+    // is generated once whatever the number of readers (the parse workers, a
+    // later rehydration). Kept for the manager's life - a demoted unit
+    // rehydrates from it - and so stamped (FDcuStamps): a .dcu rebuilt during
+    // a session is generated afresh, not served from the old text. Guarded
+    // by FDcuLock.
     FDcuTexts: TDictionary<string, string>;
     // Why a .dcu could not be read (path lower -> message): the F1027 an
     // importer then reports names the real cause instead of "no source".
     FDcuFailures: TDictionary<string, string>;
+    // The file's write time and size when its text or failure was recorded.
+    FDcuStamps: TDictionary<string, string>;
     FDcuLock: TObject;
     // In-memory file-content repository, filled by Prefetch (below): LoadText
-    // serves from here before touching the disk. Same lifetime as this
-    // manager - one analysis run - so no external-change invalidation is
-    // needed (a fresh run re-reads via the OS cache anyway). Holds raw BYTES,
+    // serves from here before touching the disk. One analysis long - dropped
+    // by ReleaseAnalysisCaches and by BeginRun - so no external-change
+    // invalidation is needed (the next run re-reads via the OS cache). Holds raw BYTES,
     // not strings: the I/O workers must stay allocation-light (see Prefetch),
     // so decoding happens on the consumer's (per-core parse worker's) thread.
     FContentCache: TDictionary<string, TBytes>;
@@ -118,8 +147,17 @@ type
     // two different Foos and analyzed everything foreign against the wrong
     // one. Filled by ResolveUnit itself (an in-path resolving) and by PinUnit.
     FPinned: TDictionary<string, string>;
+    // The keys of FPinned an in-path put there during an analysis, as
+    // opposed to a host's PinUnit: the analysis's own, dropped when a full
+    // analysis starts (BeginRun), so an edited `in` clause cannot keep
+    // binding the old file. A host's pins stay until the host changes them.
+    FInPathPins: TDictionary<string, Boolean>;
+    // AnalyzeModuleOnly's snapshot of both (SavePins), put back when it
+    // refuses: a refused run leaves the project as it was.
+    FSavedPins: TDictionary<string, string>;
+    FSavedInPath: TDictionary<string, Boolean>;
     // The pins ResolveUnit has seen exist (lower name), so each is checked
-    // on disk once, not on every import of it.
+    // on disk once per analysis, not on every import of it.
     FPinnedSeen: TDictionary<string, Boolean>;
     // The project's own directory - dcc's implicit "current directory",
     // searched BEFORE every -U path. A patched copy dropped beside the .dpr
@@ -131,10 +169,12 @@ type
     // every importer, in several stages, and an unqualified name walks every
     // -NS prefix before it hits: probing it afresh each time was 17% of all
     // allocations of a client analysis. Everything the memo derives from is
-    // manager-lifetime already (the search, dir and unit indexes, aliases,
+    // manager-lifetime (the search, dir and unit indexes, aliases,
     // namespaces, project dir), so it lives as long; the setters of the
-    // configuration it depends on clear it (ForgetUnitResolution). Pins and
-    // in-paths are answered BEFORE it and never enter it. Buffers
+    // configuration it depends on clear it (ForgetUnitResolution), and so
+    // does BeginRun when a listing the indexes hold moved on disk. Pins and
+    // in-paths are answered outside it and never enter it (a pin is checked
+    // against the memo's candidate spellings, see ResolveUnit). Buffers
     // (SetBuffer) play no part: an overlay cannot make a unit file exist.
     // Driver-thread only, like the rest of ResolveUnit (DirIndex and FPinned
     // are unguarded too): every caller - discovery in the load engine,
@@ -149,9 +189,10 @@ type
     // include argument, #0 between, all as spelled) -> resolved path, '' for
     // not found. ResolveInclude probes the file system (TFile.Exists per
     // candidate) and runs for every include of every includer. Same lifetime
-    // as FIncludeStreams and guarded by the same FIncludeLock - it runs on
-    // the parse workers - so a later analysis on this manager sees a file
-    // created in between, as before; SetProjectDir drops it too.
+    // as FIncludeStreams - one analysis, AnalyzeModuleOnly's included (both
+    // are dropped by BeginRun) - and guarded by the same FIncludeLock (it
+    // runs on the parse workers), so a later analysis on this manager sees
+    // an include created or edited in between; SetProjectDir drops it too.
     FIncludeMemo: TDictionary<string, string>;
     function TryFile(const ADir, AName: string; out AResolved: string): Boolean;
     function DirIndex(const ADir: string): TDictionary<string, string>;
@@ -159,6 +200,10 @@ type
     function BuildUnitMemo(const AKey: string): TUnitMemo;
     function FromDirIndex(const AFromFile: string): TDictionary<string, string>;
     procedure ForgetUnitResolution;
+    procedure MergeSearchIndex;
+    function RefreshListings: Boolean;
+    function PinnedFile(const AKey: string; out AResolved: string): Boolean;
+    procedure PinInPath(const AUnitName, APath: string);
     function ResolveIncludeIn(const AUnitFile, AIncludingFile, AName: string;
       out AResolved: string): Boolean;
     function FindDcuFile(const AUnitName: string; out AResolved: string): Boolean;
@@ -180,6 +225,33 @@ type
     procedure PrepareIndexes;
     { True once PrepareIndexes (or a resolution) built the index. }
     function IndexesReady: Boolean;
+    { Starts an analysis on this manager - TPasSemaProject calls it at every
+      Analyze* entry, AnalyzeModuleOnly's included, on the driver before any
+      engine starts. The manager lives as long as its project, and a module
+      run used to inherit every cache of the run before it (audit A4-18,
+      A4-19): an include edited or created on disk stayed stale or missing,
+      and a unit file created on disk was never found by name. It drops the
+      include streams and memo and the content cache, forgets which pins
+      were seen on disk, and starts a new run count: every listing the
+      indexes were built from is checked against its directory's stamp once
+      in this run - a directory index on its first use, the search paths on
+      the first resolution that misses - and listed again when it moved. AFullRun also drops the pins in-paths added
+      (FInPathPins): a full analysis re-reads every `in` clause, and an
+      edited one must not keep its old file. }
+    procedure BeginRun(AFullRun: Boolean);
+    { AnalyzeModuleOnly's snapshot of the pins, put back by RestorePins when
+      it refuses (a newcomer's in-path may have pinned before the refusal)
+      and dropped by DropSavedPins when it commits. }
+    procedure SavePins;
+    procedure RestorePins;
+    procedure DropSavedPins;
+    { The file an `in 'path'` clause names for a unit written in AFromFile -
+      ResolveUnit's step 1 without its pin: relative to the referring file,
+      the project directory, each search path; a rooted path as is. }
+    function ResolveInPath(const AInPath, AFromFile: string;
+      out AResolved: string): Boolean;
+    { The unit an alias (dcc -A) rewrites AName to, '' when it is none. }
+    function UnitAlias(const AName: string): string;
     { Unit-scope namespaces (dcc -NS / DCC_Namespace), tried IN ORDER as
       prefixes when an unqualified unit name has no file of its own:
       `uses Generics.Collections` -> System.Generics.Collections.pas. }
@@ -269,17 +341,21 @@ type
     { Indexes every *.pas/*.dpr under ARoot by basename, for unit-name
       resolution when there are no real search paths (project-dir fallback). }
     procedure BuildUnitIndex(const ARoot: string);
-    { Resolves a unit name (e.g. 'System.SysUtils') to a .pas file: tries the
-      explicit `in` path first, then <dotted>.pas and <leaf>.pas relative to
-      the referring file, the search paths, and the unit index. }
+    { Resolves a unit name (e.g. 'System.SysUtils') to a file, in this
+      order: a unit the project located (a pin: the program's in-path, the
+      host's PinUnit) under the name as written; the explicit `in` path;
+      then per candidate spelling - the alias or the name as spelled, each
+      unit scope prefix, the leaf - the pins, the project directory and the
+      search paths, the referring directory as a tolerance past dcc; the
+      unit index; a .dcu. See BuildUnitMemo and spec 1.2.2. }
     function ResolveUnit(const AUnitName, AInPath, AFromFile: string;
       out AResolved: string): Boolean;
-    { Every unit NAME the search paths can reach (each *.pas basename, its
-      original spelling, extension dropped) - completion's uses-clause
-      candidate set. Built from the same per-path index ResolveUnit uses
-      (first path wins on a duplicate basename) and cached for this
-      manager's lifetime, i.e. one analysis run - the same staleness the
-      index itself already accepts. }
+    { Every unit NAME a `uses` can reach by its file - the project
+      directory's *.pas, then the search paths' (first one wins on a
+      duplicate basename), each with its original spelling and no
+      extension, then the units the paths hold only compiled - completion's
+      uses-clause candidate set, in ResolveUnit's order. Cached until BeginRun
+      finds a listing moved. }
     function SearchPathUnitNames: TArray<string>;
     { How APath had to be RECOVERED to be read at all, or '' when it decoded
       cleanly. A caller turns this into a diagnostic (PPENC): the text after
@@ -358,6 +434,12 @@ begin
   FUnitMemo.Free;
   FDcuFailures.Free;
   FDcuTexts.Free;
+  FDcuStamps.Free;
+  FDirStamps.Free;
+  FDirChecked.Free;
+  FInPathPins.Free;
+  FSavedPins.Free;
+  FSavedInPath.Free;
   FDcuIndex.Free;
   FDcuLock.Free;
   FRecovered.Free;
@@ -390,19 +472,87 @@ end;
   SEPARATING the I/O phase from the CPU phase, not from any particular
   queue depth. }
 
+function PathTextUsable(const APath: string): Boolean; forward;
+
+// A directory's last-write time, 0 when there is none to read (no such
+// directory, '', access denied): what BeginRun compares to tell a listing
+// that moved.
+function DirStamp(const ADir: string): TDateTime;
+begin
+  Result := 0;
+  if ADir = '' then
+    Exit;
+  try
+    if TDirectory.Exists(ADir) then
+      Result := TDirectory.GetLastWriteTime(ADir);
+  except
+    Result := 0;
+  end;
+end;
+
+// The .pas and .dcu files of one search path, for EnsureSearchIndex.
+function ListSearchPath(const ADir: string): TArray<string>;
+begin
+  Result := nil;
+  try
+    if TDirectory.Exists(ADir) then
+      Result := TDirectory.GetFiles(ADir, TSearchOption.soTopDirectoryOnly,
+        function(const APath: string; const ASearchRec: TSearchRec): Boolean
+        begin
+          Result := HasExt(ASearchRec.Name, '.pas') or
+            HasExt(ASearchRec.Name, '.dcu');
+        end);
+  except
+    Result := nil;   // unreadable: nothing found there, as DirIndex says
+  end;
+end;
+
 // The .pas files of one directory, indexed by lower-cased basename; built on
-// first request, cached. '' and missing dirs yield an empty index.
+// first request, cached until BeginRun sees the directory move. '' and
+// missing dirs yield an empty index.
 function TPasSourceManager.DirIndex(const ADir: string):
   TDictionary<string, string>;
 var
   LKey, LFile: string;
+  LChecked: Integer;
+  LStamp: TDateTime;
 begin
   if FDirIndexes = nil then
     FDirIndexes := TObjectDictionary<string, TDictionary<string, string>>.
       Create([doOwnsValues]);
+  if FDirChecked = nil then
+    FDirChecked := TDictionary<string, Integer>.Create;
   LKey := LowerCase(ADir);
   if FDirIndexes.TryGetValue(LKey, Result) then
-    Exit;
+  begin
+    // Listed by an earlier analysis: its stamp is checked once per run, on
+    // the first use - a referring directory only when a resolution reaches
+    // it, so a keystroke run stats the few it touches, not the hundreds a
+    // closure lists. Moved, it is listed again; the project directory's
+    // move also invalidates the memoized resolutions (see FMemoStale).
+    if not FDirChecked.TryGetValue(LKey, LChecked) or
+       (LChecked = FRunEpoch) then
+      Exit;
+    FDirChecked[LKey] := FRunEpoch;
+    if (FDirStamps <> nil) and FDirStamps.TryGetValue(LKey, LStamp) and
+       (DirStamp(ADir) = LStamp) then
+      Exit;
+    if Result = FMemoFromIndex then
+    begin
+      FMemoFromIndex := nil;
+      FMemoFrom := '';
+    end;
+    FDirIndexes.Remove(LKey);   // owned: freed here
+    if SameText(ExcludeTrailingPathDelimiter(ADir), FProjectDir) then
+      FMemoStale := True;
+    FSearchNamesBuilt := False;
+  end;
+  // The stamp BEFORE the listing: a file created while it is taken moves the
+  // stamp past this one, and the next check lists the directory again.
+  if FDirStamps = nil then
+    FDirStamps := TDictionary<string, TDateTime>.Create;
+  FDirStamps.AddOrSetValue(LKey, DirStamp(ADir));
+  FDirChecked.AddOrSetValue(LKey, FRunEpoch);
   Result := TDictionary<string, string>.Create;
   // The enumeration can RAISE after Exists says yes (an access-denied
   // directory is the ordinary case), and the fresh dictionary is not owned by
@@ -442,6 +592,82 @@ begin
   FPinned.TryAdd(LowerCase(AUnitName), TPath.GetFullPath(APath));
 end;
 
+// An in-path's pin (ResolveUnit step 1): PinUnit's first-wins rule, and the
+// key recorded as the analysis's own when it is new (see FInPathPins).
+procedure TPasSourceManager.PinInPath(const AUnitName, APath: string);
+var
+  LKey: string;
+begin
+  if (AUnitName = '') or (APath = '') then
+    Exit;
+  if FPinned = nil then
+    FPinned := TDictionary<string, string>.Create;
+  LKey := LowerCase(AUnitName);
+  if FPinned.TryAdd(LKey, TPath.GetFullPath(APath)) then
+  begin
+    if FInPathPins = nil then
+      FInPathPins := TDictionary<string, Boolean>.Create;
+    FInPathPins.AddOrSetValue(LKey, True);
+  end;
+end;
+
+// The pinned file of the unit name AKey (lower-cased), when there is one
+// that can be read. A pin to a missing file is dropped: dcc, given
+// `uses X in 'gone\X.pas'` (or a .dproj listing that file), compiles the X
+// the search path finds, and only when there is none says F1026
+// 'gone\X.pas'. Kept, it answered with a file LoadFile cannot read, and
+// every importer of a unit the build compiles fine reported F1027. Checked
+// here rather than in PinUnit: a host pins before it hands over its buffers.
+function TPasSourceManager.PinnedFile(const AKey: string;
+  out AResolved: string): Boolean;
+begin
+  Result := False;
+  if (FPinned = nil) or not FPinned.TryGetValue(AKey, AResolved) then
+    Exit;
+  if FPinnedSeen = nil then
+    FPinnedSeen := TDictionary<string, Boolean>.Create;
+  if FPinnedSeen.ContainsKey(AKey) then
+    Exit(True);
+  if SourceExists(AResolved) then
+  begin
+    FPinnedSeen.Add(AKey, True);
+    Exit(True);
+  end;
+  FPinned.Remove(AKey);
+  if FInPathPins <> nil then
+    FInPathPins.Remove(AKey);
+  AResolved := '';
+end;
+
+function TPasSourceManager.ResolveInPath(const AInPath, AFromFile: string;
+  out AResolved: string): Boolean;
+var
+  LDir: string;
+begin
+  Result := False;
+  if not PathTextUsable(AInPath) then
+    Exit;
+  if TPath.IsPathRooted(AInPath) and SourceExists(AInPath) then
+  begin
+    AResolved := TPath.GetFullPath(AInPath);
+    Exit(True);
+  end;
+  // AFromFile = '' is legal: "resolve by search paths only, no anchor
+  // file" (e.g. TPasSemaProject.EnsureSystemUnit, which has no referring
+  // unit to anchor from). TPath.GetDirectoryName raises on '' instead of
+  // returning '', so this must be guarded explicitly.
+  if AFromFile = '' then
+    LDir := ''
+  else
+    LDir := TPath.GetDirectoryName(AFromFile);
+  if TryFile(LDir, AInPath, AResolved) or
+     TryFile(FProjectDir, AInPath, AResolved) then
+    Exit(True);
+  for LDir in FSearchPaths do
+    if TryFile(LDir, AInPath, AResolved) then
+      Exit(True);
+end;
+
 procedure TPasSourceManager.SetProjectDir(const ADir: string);
 begin
   if ADir = '' then
@@ -469,7 +695,7 @@ var
   LPairs: TArray<string>;
   LPair: TPair<string, string>;
 begin
-  // The project directory is a search path in all but name (FindUnitFile
+  // The project directory is a search path in all but name (BuildUnitMemo
   // probes it first), so it decides resolution exactly as the paths do.
   if AWithProjectDir then
     Result := LowerCase(FProjectDir) + '|'
@@ -599,46 +825,155 @@ begin
   Result := FSearchIndex <> nil;
 end;
 
-// One candidate unit name (as-spelled) against the referring dir, then the
-// search paths - the shared step ResolveUnit runs per candidate spelling.
-// Index-backed (see FSearchIndex): two dictionary lookups, no file syscalls.
+// The search-path indexes (FSearchIndex, FDcuIndex): one listing per path,
+// kept with its stamp (see FPathListings) so BeginRun can re-list only what
+// moved. Index-backed resolution is two dictionary lookups per candidate, no
+// file syscalls.
 procedure TPasSourceManager.EnsureSearchIndex;
 var
-  LFile: string;
   LListings: TArray<TArray<string>>;
-  LIdx: Integer;
+  LStamps: TArray<TDateTime>;
 begin
   if FSearchIndex <> nil then
     Exit;
-  FSearchIndex := TDictionary<string, string>.Create;
-  FDcuIndex := TDictionary<string, string>.Create;
   // Enumerate every search path CONCURRENTLY (a cold directory listing is
   // latency-bound, like a cold file read - see Prefetch) into per-path
-  // slots, then merge SEQUENTIALLY in path order: first path wins, the
-  // same priority the sequential probing loop had. One listing per path
-  // serves both indexes - the .dcu rows are filtered out of it below.
+  // slots; MergeSearchIndex then merges them in path order. One listing per
+  // path serves both indexes.
   SetLength(LListings, Length(FSearchPaths));
+  SetLength(LStamps, Length(FSearchPaths));
   TParallel.&For(0, High(FSearchPaths),
     procedure(AIndex: Integer)
     begin
-      if TDirectory.Exists(FSearchPaths[AIndex]) then
-        LListings[AIndex] := TDirectory.GetFiles(FSearchPaths[AIndex],
-          TSearchOption.soTopDirectoryOnly,
-          function(const APath: string; const ASearchRec: TSearchRec): Boolean
-          begin
-            Result := HasExt(ASearchRec.Name, '.pas') or
-              HasExt(ASearchRec.Name, '.dcu');
-          end)
-      else
-        LListings[AIndex] := nil;
+      LStamps[AIndex] := DirStamp(FSearchPaths[AIndex]);
+      LListings[AIndex] := ListSearchPath(FSearchPaths[AIndex]);
     end);
-  for LIdx := 0 to High(LListings) do
-    for LFile in LListings[LIdx] do
+  FPathListings := LListings;
+  FPathStamps := LStamps;
+  FListingsEpoch := FRunEpoch;   // just listed
+  MergeSearchIndex;
+end;
+
+// FSearchIndex and FDcuIndex from FPathListings, merged SEQUENTIALLY in path
+// order: first path wins, the priority the sequential probing loop had.
+procedure TPasSourceManager.MergeSearchIndex;
+var
+  LFile: string;
+  LIdx: Integer;
+begin
+  FreeAndNil(FSearchIndex);
+  FreeAndNil(FDcuIndex);
+  FSearchIndex := TDictionary<string, string>.Create;
+  FDcuIndex := TDictionary<string, string>.Create;
+  for LIdx := 0 to High(FPathListings) do
+    for LFile in FPathListings[LIdx] do
       if HasExt(LFile, '.dcu') then
         FDcuIndex.TryAdd(
           LowerCase(TPath.GetFileNameWithoutExtension(LFile)), LFile)
       else
         FSearchIndex.TryAdd(LowerCase(TPath.GetFileName(LFile)), LFile);
+end;
+
+// The search paths' and the project directory's stamps against the ones the
+// indexes were listed under, once per run and only when a resolution MISSES
+// (ResolveUnit): a unit file created on disk is a name that did not resolve
+// before, while a hit needs no check - 210 stats on the client closure were
+// a fixed 18 ms on every keystroke run when this ran eagerly. A search path
+// that moved is listed again (sequentially: the driver may hold the pool's
+// threads in an engine). True when anything moved - the memoized
+// resolutions derived from the old listings are then forgotten.
+function TPasSourceManager.RefreshListings: Boolean;
+var
+  LIdx: Integer;
+  LStamp: TDateTime;
+begin
+  Result := False;
+  if FListingsEpoch = FRunEpoch then
+    Exit;
+  FListingsEpoch := FRunEpoch;
+  if FSearchIndex <> nil then
+  begin
+    for LIdx := 0 to High(FSearchPaths) do
+    begin
+      if LIdx > High(FPathStamps) then
+        Break;   // not listed by this manager: EnsureSearchIndex's business
+      LStamp := DirStamp(FSearchPaths[LIdx]);
+      if LStamp = FPathStamps[LIdx] then
+        Continue;
+      FPathStamps[LIdx] := LStamp;
+      FPathListings[LIdx] := ListSearchPath(FSearchPaths[LIdx]);
+      Result := True;
+    end;
+    if Result then
+      MergeSearchIndex;
+  end;
+  if FProjectDir <> '' then
+    DirIndex(FProjectDir);   // checks its stamp, sets FMemoStale on a move
+  Result := Result or FMemoStale;
+end;
+
+procedure TPasSourceManager.BeginRun(AFullRun: Boolean);
+begin
+  FreeAndNil(FContentCache);
+  TMonitor.Enter(FIncludeLock);
+  try
+    FreeAndNil(FIncludeStreams);
+    FreeAndNil(FIncludeMemo);
+  finally
+    TMonitor.Exit(FIncludeLock);
+  end;
+  // Every listing is re-checked lazily against the disk in this run: a
+  // directory index on its first use, the search paths on the first miss
+  // (see DirIndex, RefreshListings).
+  Inc(FRunEpoch);
+  FreeAndNil(FPinnedSeen);
+  if AFullRun and (FInPathPins <> nil) then
+  begin
+    if FPinned <> nil then
+      for var LKey in FInPathPins.Keys do
+        FPinned.Remove(LKey);
+    FInPathPins.Clear;
+  end;
+end;
+
+procedure TPasSourceManager.SavePins;
+begin
+  FreeAndNil(FSavedPins);
+  FreeAndNil(FSavedInPath);
+  if FPinned <> nil then
+    FSavedPins := TDictionary<string, string>.Create(FPinned)
+  else
+    FSavedPins := TDictionary<string, string>.Create;
+  if FInPathPins <> nil then
+    FSavedInPath := TDictionary<string, Boolean>.Create(FInPathPins)
+  else
+    FSavedInPath := TDictionary<string, Boolean>.Create;
+end;
+
+procedure TPasSourceManager.RestorePins;
+begin
+  if FSavedPins = nil then
+    Exit;
+  FPinned.Free;
+  FPinned := FSavedPins;
+  FSavedPins := nil;
+  FInPathPins.Free;
+  FInPathPins := FSavedInPath;
+  FSavedInPath := nil;
+  FreeAndNil(FPinnedSeen);
+end;
+
+procedure TPasSourceManager.DropSavedPins;
+begin
+  FreeAndNil(FSavedPins);
+  FreeAndNil(FSavedInPath);
+end;
+
+function TPasSourceManager.UnitAlias(const AName: string): string;
+begin
+  Result := '';
+  if FAliases <> nil then
+    FAliases.TryGetValue(LowerCase(AName), Result);
 end;
 
 // The .dcu of a unit name, exactly as spelled: no leaf tolerance and no
@@ -668,22 +1003,45 @@ begin
   end;
 end;
 
+// A file's write time and size as one string, '' when it cannot be read:
+// what tells a .dcu rebuilt during a session from the one its text came from.
+function FileStamp(const APath: string): string;
+var
+  LRec: TSearchRec;
+begin
+  Result := '';
+  if FindFirst(APath, faAnyFile, LRec) = 0 then
+  try
+    Result := Format('%.12f/%d', [Double(LRec.TimeStamp), LRec.Size]);
+  finally
+    FindClose(LRec);
+  end;
+end;
+
 // The interface source of a compiled unit, generated once per path and
-// path. A failure is remembered for DcuFailure and re-raised: the caller's
+// stamp. A failure is remembered for DcuFailure and re-raised: the caller's
 // tolerant load path (TPasSemaProject.LoadFile) turns it into the
-// importer's F1027, which then names this message.
+// importer's F1027, which then names this message. Both are kept for the
+// manager's life (a demoted unit rehydrates from the text) under the file's
+// stamp: a .dcu rebuilt since is read again, and its new text or failure
+// replaces the old (audit B4-41).
 function TPasSourceManager.DcuText(const APath: string): string;
 var
-  LKey, LMsg: string;
+  LKey, LMsg, LStamp, LOld: string;
   LUnit: TPasDcuUnit;
 begin
   LKey := LowerCase(TPath.GetFullPath(APath));
+  LStamp := FileStamp(APath);
   TMonitor.Enter(FDcuLock);
   try
-    if (FDcuTexts <> nil) and FDcuTexts.TryGetValue(LKey, Result) then
-      Exit;
-    if (FDcuFailures <> nil) and FDcuFailures.TryGetValue(LKey, LMsg) then
-      raise EPasDcuError.Create(LMsg);
+    if (FDcuStamps <> nil) and FDcuStamps.TryGetValue(LKey, LOld) and
+       (LOld = LStamp) then
+    begin
+      if (FDcuTexts <> nil) and FDcuTexts.TryGetValue(LKey, Result) then
+        Exit;
+      if (FDcuFailures <> nil) and FDcuFailures.TryGetValue(LKey, LMsg) then
+        raise EPasDcuError.Create(LMsg);
+    end;
   finally
     TMonitor.Exit(FDcuLock);
   end;
@@ -703,7 +1061,12 @@ begin
       try
         if FDcuFailures = nil then
           FDcuFailures := TDictionary<string, string>.Create;
+        if FDcuStamps = nil then
+          FDcuStamps := TDictionary<string, string>.Create;
         FDcuFailures.AddOrSetValue(LKey, E.Message);
+        if FDcuTexts <> nil then
+          FDcuTexts.Remove(LKey);
+        FDcuStamps.AddOrSetValue(LKey, LStamp);
       finally
         TMonitor.Exit(FDcuLock);
       end;
@@ -714,8 +1077,18 @@ begin
   try
     if FDcuTexts = nil then
       FDcuTexts := TDictionary<string, string>.Create;
-    if not FDcuTexts.TryAdd(LKey, Result) then
-      Result := FDcuTexts[LKey];
+    if FDcuStamps = nil then
+      FDcuStamps := TDictionary<string, string>.Create;
+    if FDcuStamps.TryGetValue(LKey, LOld) and (LOld = LStamp) and
+       FDcuTexts.TryGetValue(LKey, LMsg) then
+      Result := LMsg   // a racing worker's copy of the same file
+    else
+    begin
+      FDcuTexts.AddOrSetValue(LKey, Result);
+      FDcuStamps.AddOrSetValue(LKey, LStamp);
+      if FDcuFailures <> nil then
+        FDcuFailures.Remove(LKey);
+    end;
   finally
     TMonitor.Exit(FDcuLock);
   end;
@@ -725,13 +1098,32 @@ function TPasSourceManager.SearchPathUnitNames: TArray<string>;
 var
   LPath: string;
   LIdx: Integer;
+  LProject: TDictionary<string, string>;
 begin
   if not FSearchNamesBuilt then
   begin
     FSearchNamesBuilt := True;
     EnsureSearchIndex;
-    SetLength(FSearchNames, FSearchIndex.Count + FDcuIndex.Count);
+    // The project directory first: ResolveUnit probes it before the search
+    // paths, so a unit beside the .dpr that nothing imports yet is one a
+    // `uses` can name (audit B4-40). A basename the paths hold too is listed
+    // once.
+    LProject := nil;
+    if FProjectDir <> '' then
+      LProject := DirIndex(FProjectDir);
+    if LProject <> nil then
+      SetLength(FSearchNames, LProject.Count + FSearchIndex.Count +
+        FDcuIndex.Count)
+    else
+      SetLength(FSearchNames, FSearchIndex.Count + FDcuIndex.Count);
     LIdx := 0;
+    if LProject <> nil then
+      for LPath in LProject.Values do
+        if not FSearchIndex.ContainsKey(LowerCase(TPath.GetFileName(LPath))) then
+        begin
+          FSearchNames[LIdx] := TPath.GetFileNameWithoutExtension(LPath);
+          Inc(LIdx);
+        end;
     // The VALUES carry the original-case filenames; the keys are lowered.
     for LPath in FSearchIndex.Values do
     begin
@@ -809,12 +1201,16 @@ var
     // beside the .dpr beats the Foo.pas on the search path, no path entry
     // needed). The IDE compiles such a copy; this used to resolve the
     // library's.
+    LMemo.Candidates := LMemo.Candidates + [ABase];
     LFile := ABase + '.pas';
     Result := ((FProjectDir <> '') and
         DirIndex(FProjectDir).TryGetValue(LFile, LMemo.Path)) or
       FSearchIndex.TryGetValue(LFile, LMemo.Path);
     if Result then
-      LMemo.Found := True
+    begin
+      LMemo.Found := True;
+      LMemo.MatchIdx := High(LMemo.Candidates);
+    end
     else
       LMemo.DirNames := LMemo.DirNames + [LFile];
   end;
@@ -822,6 +1218,7 @@ var
 begin
   EnsureSearchIndex;
   LMemo := Default(TUnitMemo);
+  LMemo.MatchIdx := -1;
   // 2. Unit alias (dcc -A): a whole-name match rewrites the spelling before
   // any file lookup (WinTypes -> Winapi.Windows), exactly once (dcc does not
   // chain aliases).
@@ -888,78 +1285,75 @@ end;
 function TPasSourceManager.ResolveUnit(const AUnitName, AInPath, AFromFile: string;
   out AResolved: string): Boolean;
 var
-  LDir, LKey, LFile: string;
+  LKey, LFile: string;
   LMemo: TUnitMemo;
   LFrom: TDictionary<string, string>;
+  LLast: Integer;
 begin
   LKey := LowerCase(AUnitName);
 
   // 0. A unit already LOCATED for the project (see FPinned) - the program's
   // in-path or the project file's unit list - beats every lookup below, the
   // referring unit's own in-path included: dcc reports a unit found in two
-  // places rather than resolving it twice, and the program's word wins.
-  // A pin to a missing file is dropped: dcc, given `uses X in 'gone\X.pas'`
-  // (or a .dproj listing that file), compiles the X the search path finds,
-  // and only when there is none says F1026 'gone\X.pas'. Kept, it answered
-  // here with a file LoadFile cannot read, and every importer of a unit the
-  // build compiles fine reported F1027. Checked at resolution rather than in
-  // PinUnit: a host pins before it hands over its buffers.
-  if (FPinned <> nil) and FPinned.TryGetValue(LKey, AResolved) then
-  begin
-    if FPinnedSeen = nil then
-      FPinnedSeen := TDictionary<string, Boolean>.Create;
-    if FPinnedSeen.ContainsKey(LKey) then
-      Exit(True);
-    if SourceExists(AResolved) then
-    begin
-      FPinnedSeen.Add(LKey, True);
-      Exit(True);
-    end;
-    FPinned.Remove(LKey);
-    AResolved := '';
-  end;
+  // places rather than resolving it twice, and the program's word wins. See
+  // PinnedFile for a pin to a missing file.
+  if PinnedFile(LKey, AResolved) then
+    Exit(True);
 
   // 1. Explicit `in 'path'`. Whatever it resolves to is pinned for the whole
-  // project: the next importer of this unit, however it spells the lookup,
-  // gets THIS file.
-  if PathTextUsable(AInPath) then
+  // project: the next importer of this unit gets THIS file, through every
+  // spelling that reaches it - checked per candidate below.
+  if ResolveInPath(AInPath, AFromFile, AResolved) then
   begin
-    if TPath.IsPathRooted(AInPath) and SourceExists(AInPath) then
-    begin
-      AResolved := TPath.GetFullPath(AInPath);
-      PinUnit(AUnitName, AResolved);
-      Exit(True);
-    end;
-    // AFromFile = '' is legal: "resolve by search paths only, no anchor
-    // file" (e.g. TPasSemaProject.EnsureSystemUnit, which has no referring
-    // unit to anchor from). TPath.GetDirectoryName raises on '' instead of
-    // returning '', so this must be guarded explicitly.
-    if AFromFile = '' then
-      LDir := ''
-    else
-      LDir := TPath.GetDirectoryName(AFromFile);
-    if TryFile(LDir, AInPath, AResolved) or
-       TryFile(FProjectDir, AInPath, AResolved) then
-    begin
-      PinUnit(AUnitName, AResolved);
-      Exit(True);
-    end;
-    for LDir in FSearchPaths do
-      if TryFile(LDir, AInPath, AResolved) then
-      begin
-        PinUnit(AUnitName, AResolved);
-        Exit(True);
-      end;
+    PinInPath(AUnitName, AResolved);
+    Exit(True);
   end;
 
   // 2-7. The search proper, answered once per unit name (see TUnitMemo);
-  // only the referring directory's candidates are checked per call.
+  // only the pins and the referring directory's candidates are checked per
+  // call.
+  if FMemoStale then
+  begin
+    FreeAndNil(FUnitMemo);
+    FMemoStale := False;
+  end;
   if FUnitMemo = nil then
     FUnitMemo := TDictionary<string, TUnitMemo>.Create;
   if not FUnitMemo.TryGetValue(LKey, LMemo) then
   begin
     LMemo := BuildUnitMemo(LKey);
     FUnitMemo.Add(LKey, LMemo);
+  end;
+  // A miss may be a file created on disk since the listings were taken -
+  // a unit copied in, checked out, written by an agent (audit A4-18): the
+  // listings are checked once per run, and when one moved every memoized
+  // answer is recomputed from the new ones.
+  if not LMemo.Found and RefreshListings then
+  begin
+    FMemoStale := False;
+    FSearchNamesBuilt := False;
+    FUnitMemo.Clear;
+    LMemo := BuildUnitMemo(LKey);
+    FUnitMemo.Add(LKey, LMemo);
+  end;
+  // A pin answers for every candidate spelling up to the one whose file was
+  // found, in probe order (spec 1.2.2): `uses Forms` under -NS Acme reaches
+  // a pinned Acme.Forms ahead of the library's copy, `uses Foo` reaches it
+  // through an alias, but a Forms.pas of its own on the path is found first.
+  // Kept out of the memo, so a pin added later (a newcomer's in-path) needs
+  // no memo rebuilt. Answered under the name as written only, an importer
+  // that spelled the unit any other way bound the library's copy beside the
+  // pinned one - two models of one unit (audit E4-01).
+  if (FPinned <> nil) and (FPinned.Count > 0) then
+  begin
+    if LMemo.MatchIdx >= 0 then
+      LLast := LMemo.MatchIdx
+    else
+      LLast := High(LMemo.Candidates);
+    for var LIdx := 0 to LLast do
+      if (LMemo.Candidates[LIdx] <> LKey) and
+         PinnedFile(LMemo.Candidates[LIdx], AResolved) then
+        Exit(True);
   end;
   if LMemo.DirNames <> nil then
   begin

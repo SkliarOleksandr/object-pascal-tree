@@ -5043,6 +5043,206 @@ begin
   end;
 end;
 
+// Models whose declared name is ANameLower - two of one unit is the defect.
+function ModelCountByName(const ANameLower: string): Integer;
+begin
+  Result := 0;
+  for var LId := 0 to GProj.ModelCount - 1 do
+    if GProj.Model(LId).UnitNameLower = ANameLower then
+      Inc(Result);
+end;
+
+function FreshDir(const AName: string): string;
+begin
+  Result := TPath.Combine(TPath.GetTempPath, AName);
+  if TDirectory.Exists(Result) then
+    TDirectory.Delete(Result, True);
+  TDirectory.CreateDirectory(Result);
+end;
+
+{ The source manager's state is one analysis long (audit B15). The manager
+  lives as long as its project, and a module run inherited every cache of the
+  run before it: a unit file created on disk after the build was never found
+  by name (A4-18), an include edited on disk was served from the old stream,
+  and an edited `in` clause kept binding the old file (A4-19). And a unit the
+  program pins with `in` is that unit for every spelling that reaches it,
+  checked per candidate in resolution order (E4-01, spec 1.2.2, probed in
+  local/probe-b15). }
+procedure TestSourceManagerRuns;
+var
+  LDir, LApp, LUnitA, LUnitI, LInc: string;
+  LOk: Boolean;
+begin
+  // A unit file created on disk after the build, then imported by name.
+  LDir := FreshDir('pastree_sema_smruns');
+  LApp := TPath.Combine(LDir, 'SrApp.dpr');
+  LUnitA := TPath.Combine(LDir, 'SrA.pas');
+  TFile.WriteAllText(LApp, 'program SrApp;'#10'uses SrA, SrI;'#10 +
+    'begin'#10'  PA;'#10'end.'#10);
+  TFile.WriteAllText(LUnitA, 'unit SrA;'#10'interface'#10'procedure PA;'#10 +
+    'implementation'#10'procedure PA; begin end;'#10'end.'#10);
+  LUnitI := TPath.Combine(LDir, 'SrI.pas');
+  LInc := TPath.Combine(LDir, 'SrInc.inc');
+  TFile.WriteAllText(LInc, 'const XC = 1;'#10);
+  TFile.WriteAllText(LUnitI, 'unit SrI;'#10'interface'#10'{$I SrInc.inc}'#10 +
+    'implementation'#10'end.'#10);
+  const SR_A_USES_B =
+    'unit SrA;'#10'interface'#10'procedure PA;'#10'implementation'#10 +
+    'uses SrB;'#10'procedure PA;'#10'begin'#10'  PB;'#10 +
+    '  Undecl1 := 0;'#10'end;'#10'end.'#10;
+  const SR_I_XC =
+    'unit SrI;'#10'interface'#10'{$I SrInc.inc}'#10'implementation'#10 +
+    'var V: Integer;'#10'initialization'#10'  V := XC;'#10'end.'#10;
+  const SR_I_XD =
+    'unit SrI;'#10'interface'#10'{$I SrInc.inc}'#10'implementation'#10 +
+    'var V: Integer;'#10'initialization'#10'  V := XD;'#10'end.'#10;
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(LApp);
+    TFile.WriteAllText(TPath.Combine(LDir, 'SrB.pas'),
+      'unit SrB;'#10'interface'#10'procedure PB;'#10'implementation'#10 +
+      'procedure PB; begin end;'#10'end.'#10);
+    GProj.SetBuffer(LUnitA, SR_A_USES_B, 1);
+    LOk := GProj.AnalyzeModuleOnly(LUnitA);
+    Ok('sm runs: a unit created on disk after the build is taken in [' +
+      GProj.StageTimings + ']', LOk and (MidByName('srb') >= 0));
+    Ok('sm runs: ...its importer binds it, no F1027, its own E2003 back',
+      (DiagCount(ModelByName('sra'), 'F1027') = 0) and
+      DiagHasText(ModelByName('sra'), 'E2003', 'Undecl1') and
+      CrossRefTo(ModelByName('sra'), 'PB', 'PB'));
+    Ok('sm runs: ...the project is the one a fresh build makes',
+      ProjSig(GProj) = FreshSig(LApp, [LDir], [LUnitA], [SR_A_USES_B]));
+
+    // An include read by one module run, then edited on disk.
+    GProj.SetBuffer(LUnitI, SR_I_XC, 2);
+    LOk := GProj.AnalyzeModuleOnly(LUnitI);
+    Ok('sm runs: the include''s first module run [' + GProj.StageTimings +
+      ']', LOk and (DiagCount(ModelByName('sri'), 'E2003') = 0));
+    TFile.WriteAllText(LInc, 'const XD = 1;'#10);
+    GProj.SetBuffer(LUnitI, SR_I_XD, 3);
+    LOk := GProj.AnalyzeModuleOnly(LUnitI);
+    Ok('sm runs: an include edited on disk is read again [' +
+      GProj.StageTimings + ']', LOk and
+      (DiagCount(ModelByName('sri'), 'E2003') = 0));
+    Ok('sm runs: ...the project is the one a fresh build makes',
+      ProjSig(GProj) = FreshSig(LApp, [LDir], [LUnitA, LUnitI],
+        [SR_A_USES_B, SR_I_XD]));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // An edited `in` clause: refused, and the pins as they were.
+  LDir := FreshDir('pastree_sema_inpath');
+  TDirectory.CreateDirectory(TPath.Combine(LDir, 'sub'));
+  LApp := TPath.Combine(LDir, 'IpApp.dpr');
+  TFile.WriteAllText(TPath.Combine(LDir, 'IpA.pas'),
+    'unit IpA;'#10'interface'#10'procedure F;'#10'implementation'#10 +
+    'procedure F; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'sub\IpA.pas'),
+    'unit IpA;'#10'interface'#10'procedure G;'#10'implementation'#10 +
+    'procedure G; begin end;'#10'end.'#10);
+  TFile.WriteAllText(LApp, 'program IpApp;'#10'uses IpA in ''IpA.pas'';'#10 +
+    'begin'#10'  F;'#10'end.'#10);
+  const IP_APP_SUB =
+    'program IpApp;'#10'uses IpA in ''sub\IpA.pas'';'#10 +
+    'begin'#10'  G;'#10'end.'#10;
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(LApp);
+    GProj.SetBuffer(LApp, IP_APP_SUB, 1);
+    LOk := GProj.AnalyzeModuleOnly(LApp);
+    Ok('sm runs: an edited in-path is refused [' + GProj.StageTimings + ']',
+      not LOk and (Pos('in-path-changed(IpA)', GProj.StageTimings) > 0));
+    Ok('sm runs: ...a fresh build binds the new file',
+      Pos('E2003', FreshSig(LApp, [LDir], [LApp], [IP_APP_SUB])) = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // A pinned unit reached through a scope prefix (P12), a dotted name under
+  // a prefix (P11), an alias (P14); an earlier candidate with a file of its
+  // own wins over a later pinned one (P13).
+  LDir := FreshDir('pastree_sema_pinspell');
+  for var LSub in ['patched', 'lib', 'sub'] do
+    TDirectory.CreateDirectory(TPath.Combine(LDir, LSub));
+  TFile.WriteAllText(TPath.Combine(LDir, 'patched\Acme.Forms.pas'),
+    'unit Acme.Forms;'#10'interface'#10'const PatchedOnly = 1;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'lib\Acme.Forms.pas'),
+    'unit Acme.Forms;'#10'interface'#10'const LibOnly = 2;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'sub\Acme.Foo.Bar.pas'),
+    'unit Acme.Foo.Bar;'#10'interface'#10'const FB = 1;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PsU.pas'),
+    'unit PsU;'#10'interface'#10'uses Forms, Foo.Bar, Fo;'#10 +
+    'const Z = PatchedOnly + FB;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PsApp.dpr'),
+    'program PsApp;'#10 +
+    'uses Acme.Forms in ''patched\Acme.Forms.pas'','#10 +
+    '  Acme.Foo.Bar in ''sub\Acme.Foo.Bar.pas'', PsU;'#10 +
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32,
+    [LDir, TPath.Combine(LDir, 'lib')], []);
+  try
+    GProj.SetNamespaces(['Acme']);
+    GProj.AddUnitAlias('Fo', 'Acme.Forms');
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'PsApp.dpr'));
+    Ok('sm pins: a scope-prefixed, a dotted and an aliased spelling reach ' +
+      'the pinned units - one model each',
+      (ModelCountByName('acme.forms') = 1) and
+      (ModelCountByName('acme.foo.bar') = 1) and
+      (DiagCount(ModelByName('psu'), 'F1027') = 0) and
+      (DiagCount(ModelByName('psu'), 'E2003') = 0));
+  finally
+    GProj.Free;
+  end;
+  TFile.WriteAllText(TPath.Combine(LDir, 'lib\Forms.pas'),
+    'unit Forms;'#10'interface'#10'const AsSpelledOnly = 3;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PsU.pas'),
+    'unit PsU;'#10'interface'#10'uses Forms;'#10 +
+    'const Z = PatchedOnly;'#10'const Y = AsSpelledOnly;'#10 +
+    'implementation'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32,
+    [LDir, TPath.Combine(LDir, 'lib')], []);
+  try
+    GProj.SetNamespaces(['Acme']);
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'PsApp.dpr'));
+    Ok('sm pins: an earlier candidate''s own file wins over a later pin',
+      DiagHasText(ModelByName('psu'), 'E2003', 'PatchedOnly') and
+      not DiagHasText(ModelByName('psu'), 'E2003', 'AsSpelledOnly'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
+  // Completion's uses candidates hold a unit beside the project file that
+  // no search path lists (B4-40).
+  LDir := FreshDir('pastree_sema_beside');
+  TDirectory.CreateDirectory(TPath.Combine(LDir, 'lib'));
+  TFile.WriteAllText(TPath.Combine(LDir, 'BsApp.dpr'),
+    'program BsApp;'#10'begin'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'BesideUnit.pas'),
+    'unit BesideUnit;'#10'interface'#10'implementation'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [TPath.Combine(LDir, 'lib')], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'BsApp.dpr'));
+    var LNames := GProj.SearchPathUnitNames;
+    Ok('sm names: a unit beside the program is a uses candidate',
+      TArray.IndexOf<string>(LNames, 'BesideUnit') >= 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestBadPathText;
 var
   LDir, LErr: string;
@@ -11161,6 +11361,7 @@ begin
   TestBadPathText;
   TestArithCorners;
   TestLoadFailures;
+  TestSourceManagerRuns;
   TestPoolContract;
 
   if GCounter.Finish('SemaProjectSmoke') then

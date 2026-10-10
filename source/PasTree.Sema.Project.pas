@@ -5981,21 +5981,25 @@ begin
     FByUnitName.Add(LName, AId);
 end;
 
-// An already-loaded model whose DECLARED name matches AName (as written or
-// through a unit-scope namespace prefix); -1 when none. See RegisterUnitName.
+// An already-loaded model whose DECLARED name matches AName - through its
+// alias, as written, or through a unit-scope namespace prefix, dotted name or
+// not (1.2.2, as ResolveUnit's candidates); -1 when none. See
+// RegisterUnitName.
 function TPasSemaProject.LoadedUnitByName(const AName: string): Integer;
 var
-  LNS: string;
+  LNS, LName: string;
 begin
   if FByUnitName = nil then
     Exit(-1);
-  if FByUnitName.TryGetValue(LowerCase(AName), Result) then
+  LName := FSM.UnitAlias(AName);
+  if LName = '' then
+    LName := AName;
+  if FByUnitName.TryGetValue(LowerCase(LName), Result) then
     Exit;
-  if Pos('.', AName) = 0 then
-    for LNS in FNamespaces do
-      if (LNS <> '') and
-         FByUnitName.TryGetValue(LowerCase(LNS + '.' + AName), Result) then
-        Exit;
+  for LNS in FNamespaces do
+    if (LNS <> '') and
+       FByUnitName.TryGetValue(LowerCase(LNS + '.' + LName), Result) then
+      Exit;
   Result := -1;
 end;
 
@@ -19463,10 +19467,59 @@ var
   function Refuse(const AReason: string): Boolean;
   begin
     FStageTimings := 'module=refused:' + AReason + ';';
+    // A newcomer's in-path may have pinned already: a refused run leaves the
+    // project as it was (no-op before SavePins).
+    FSM.RestorePins;
     Result := False;
   end;
 
+  // An `in` clause of the edited module that a rebuild would read
+  // differently from the pins this project holds (audit A4-19): an entry
+  // that keeps its name but changes or drops its path, an in-path entry
+  // that is gone, and a new one whose file differs from the unit's pin.
+  // The pin outlives the run - every importer of the unit resolves through
+  // it - so an accepted run bound the old file. '' when there is none.
+  function InPathChange: string;
+  var
+    LOldPaths: TDictionary<string, string>;
+    LSeen: TDictionary<string, Boolean>;
+    LName, LOldPath, LPinned, LNewFile: string;
+    LUse: TPasUsesRef;
+  begin
+    Result := '';
+    LOldPaths := TDictionary<string, string>.Create;
+    LSeen := TDictionary<string, Boolean>.Create;
+    try
+      for LUse in LOld.UsesList do
+        LOldPaths.AddOrSetValue(LowerCase(LUse.NameFull), LUse.InPath);
+      for LUse in LNew.UsesList do
+      begin
+        LName := LowerCase(LUse.NameFull);
+        LSeen.AddOrSetValue(LName, True);
+        if LOldPaths.TryGetValue(LName, LOldPath) then
+        begin
+          if not SameText(LOldPath, LUse.InPath) then
+            Exit(LUse.NameFull);
+        end
+        else if (LUse.InPath <> '') and
+                FSM.ResolveInPath(LUse.InPath, LFull, LNewFile) and
+                FSM.ResolveUnit(LUse.NameFull, '', LFull, LPinned) and
+                not SameText(TPath.GetFullPath(LPinned), LNewFile) and
+                FByPath.ContainsKey(LowerCase(TPath.GetFullPath(LPinned))) then
+          Exit(LUse.NameFull);
+      end;
+      for LUse in LOld.UsesList do
+        if (LUse.InPath <> '') and
+           not LSeen.ContainsKey(LowerCase(LUse.NameFull)) then
+          Exit(LUse.NameFull);
+    finally
+      LSeen.Free;
+      LOldPaths.Free;
+    end;
+  end;
+
 begin
+  FSM.SavePins;   // first: every refusal below puts it back
   // An adopted donor is consumed here as by every Analyze*, but not used: the
   // take-in's newcomers are a handful of units, and AdoptParseDonor's
   // contract lets the host free the donor once this call returns - a donor
@@ -19530,6 +19583,9 @@ begin
     if (Length(LNew.Tree.Source.UnresolvedDeclared) > 0) or
        (Length(LNew.Tree.Source.UnresolvedSymbols) > 0) then
       Exit(Refuse('unresolved-if'));
+    LWhy := InPathChange;
+    if LWhy <> '' then
+      Exit(Refuse('in-path-changed(' + LWhy + ')'));
     FStageTimings := FStageTimings +
       Format('parse=%d;', [LSW.ElapsedMilliseconds]);
     // A NEW `uses` entry - a file the closure never loaded - is TAKEN IN
@@ -19674,6 +19730,7 @@ begin
     FStageTimings := FStageTimings + Format('decide=%d;dec=%s;',
       [LSW.ElapsedMilliseconds, LDecide]);
     LSW := TStopwatch.StartNew;
+    FSM.DropSavedPins;   // no refusal past here
     // Committed: the owning list frees the old model. Nothing outside FModels
     // holds a model reference across a call (ids, not pointers, are the
     // currency), and the per-model pass scratch is rebuilt below.
@@ -19973,6 +20030,9 @@ begin
   // TParallel.For, which inside the engine finds no free pool thread. It
   // used to be built as a side effect of the first ResolveUnit, which a
   // project pinning System.pas and SysInit.pas never made on the driver.
+  // BeginRun first: what the disk changed since the last run on this
+  // manager (a module run's included) is seen before anything resolves.
+  FSM.BeginRun(AEntry <> 'AnalyzeModuleOnly');
   FSM.PrepareIndexes;
 end;
 

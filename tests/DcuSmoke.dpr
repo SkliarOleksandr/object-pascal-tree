@@ -461,6 +461,41 @@ end;
   double free of the embedded list), and a four-byte UIndex of $0FFFFFFF and
   a five-byte one of MaxInt written at every offset (a type index, a slot, a
   count or a length, whichever the reader is at). }
+{ The generated text is kept for the manager's life (a demoted unit
+  rehydrates from it), so it is kept under the file's stamp: a .dcu rebuilt
+  during a session - here overwritten with a foreign header, then put back -
+  is read again each time, not served from the first text (audit B4-41). }
+procedure CheckStamp(const ADcuPath: string);
+var
+  LCopy, LFirst, LAgain, LMsg: string;
+  LSM: TPasSourceManager;
+begin
+  LCopy := TPath.Combine(TPath.GetDirectoryName(ADcuPath), 'Stamped.dcu');
+  TFile.Copy(ADcuPath, LCopy, True);
+  LSM := TPasSourceManager.Create([TPath.GetDirectoryName(ADcuPath)]);
+  try
+    LFirst := LSM.LoadText(LCopy);
+    TFile.WriteAllBytes(LCopy, TBytes.Create($4D, $03, $00, $1B, $10, $00,
+      $00, $00, 0, 0, 0, 0, 0, 0, 0, 0));
+    LMsg := '';
+    try
+      LSM.LoadText(LCopy);
+    except
+      on E: EPasDcuError do
+        LMsg := E.Message;
+    end;
+    Ok('stamp: a .dcu rewritten since is read again, not served from the ' +
+      'first text', (LFirst <> '') and LMsg.Contains('version byte $1B'));
+    TFile.Copy(ADcuPath, LCopy, True);
+    LAgain := LSM.LoadText(LCopy);
+    Ok('stamp: ...and its failure is not kept past the next rebuild',
+      (LAgain = LFirst) and (LSM.DcuFailure(LCopy) = ''));
+  finally
+    LSM.Free;
+    TFile.Delete(LCopy);
+  end;
+end;
+
 procedure CheckCorruption(const ADcuPath, ATag: string);
 const
   CBigIndex: array[0..3] of Byte = ($F7, $FF, $FF, $FF);
@@ -669,6 +704,8 @@ begin
       CheckReaderAndPrinter(TPath.Combine(GLib32, 'DcuFix.dcu'), dcuWin32, 'win32');
     if TFile.Exists(TPath.Combine(GLib64, 'DcuFix.dcu')) then
       CheckReaderAndPrinter(TPath.Combine(GLib64, 'DcuFix.dcu'), dcuWin64, 'win64');
+    if TFile.Exists(TPath.Combine(GLib32, 'DcuFix.dcu')) then
+      CheckStamp(TPath.Combine(GLib32, 'DcuFix.dcu'));
     if TFile.Exists(TPath.Combine(GLib32, 'DcuFix.dcu')) then
       CheckCorruption(TPath.Combine(GLib32, 'DcuFix.dcu'), 'corrupt/win32');
     if TFile.Exists(TPath.Combine(GLib64, 'DcuFix.dcu')) then

@@ -242,6 +242,27 @@ from a slow analyzer.
 | `consumer-demoted` | a text-demoted consumer to redo or to scan could not be rehydrated - its file changed under it (see the memory dial) |
 | `consumer-oracle(<unit>)` | a consumer in the reach has an oracle-built token stream: its `$IF`s may have folded this unit's constants or record sizes, and only a re-preprocess can re-decide them |
 | `instance-unmatched-sym(<name>)` | an instance names a symbol of this unit that the new text no longer declares (a deleted generic, or an overload whose ordinal moved) - see guard 2 |
+| `in-path-changed(<unit>)` | an `in` clause of the edited unit changed or dropped its path, or a new one names another file than the unit's pin: the pin is the project's, every importer of the unit resolves through it, and only a rebuild re-reads every `in` clause |
+
+### What the disk did between two runs
+
+The source manager outlives each run: it is the project's. Every `Analyze*`,
+the module path included, starts with `TPasSourceManager.BeginRun`, which
+drops the include streams and memo and the content cache (an include edited or
+created on disk is read again) and starts a new run count: in this run each
+directory a listing was taken from is checked against its last-write time once
+(a referring directory or the project directory on its first use, the search
+paths on the first unit name that does not resolve) and listed again when it
+moved, the memoized unit resolutions then forgotten. Checked eagerly, the
+client closure's 210 search paths were a fixed 18 ms on every keystroke run. A
+unit file created on disk after the build is therefore found by name by the
+next module run and taken in as a newcomer (2b). A rebuilt `.dcu` is
+regenerated: its generated text is kept under the file's stamp. The pins an
+`in` clause recorded are dropped at the start of every full run; a module run
+that would change one refuses (`in-path-changed`). Left to the host: an edit
+on disk of a unit that is already loaded - the module path compares the edited
+unit's old and new text, and a unit nobody hands it does not change; a watcher
+calls `AnalyzeModuleOnly` for it, or rebuilds.
 
 ### Driving it from a host
 
