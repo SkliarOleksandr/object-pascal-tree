@@ -543,6 +543,7 @@ const
 implementation
 
 uses
+  System.Classes,   // EStreamError: an include that exists and cannot be read
   System.Generics.Defaults,
   PasTree.Lexer,
   // Legal circularity, deliberate: Parser interface-uses THIS unit (for
@@ -1608,6 +1609,7 @@ procedure TPasPreprocessor.HandleInclude(AFileId: Integer;
 var
   LResolved, LKey: string;
   LNewId, LRefIdx, LBase, LIdx: Integer;
+  LFound: Boolean;
   LStream: TPasTokenStream;
   LRef: TPasIncludeRef;
 begin
@@ -1624,9 +1626,20 @@ begin
   LRef.VisIndex := FVisible.Count;
   LRefIdx := FIncludeRefs.Add(LRef);
   // Looked up beside the MAIN file (id 0), whichever file names it - dcc's
-  // rule; the naming file is only the manager's last-resort tolerance.
-  if not FSourceManager.ResolveInclude(FFileNames[0], FFileNames[AFileId],
-    AArg, LResolved) then
+  // rule; the naming file is only the manager's last-resort tolerance. A
+  // name the manager refuses is not found; a file-system raise past that
+  // (a device name that exists and cannot be read) is too - dcc's F1026 at
+  // the directive, never an exception that drops the whole unit.
+  try
+    LFound := FSourceManager.ResolveInclude(FFileNames[0],
+      FFileNames[AFileId], AArg, LResolved);
+  except
+    on EInOutError do
+      LFound := False;
+    on EArgumentException do
+      LFound := False;
+  end;
+  if not LFound then
   begin
     Diag(ppIncludeNotFound, AFileId, AToken.Start, AToken.Len, AArg);
     Exit;
@@ -1648,7 +1661,20 @@ begin
   // Shared across includers (see TPasSourceManager.FIncludeStreams): the
   // stream is includer-independent; the per-includer conditional state only
   // decides which of its tokens land in THIS unit's Visible/Skipped.
-  LStream := FSourceManager.IncludeStream(LResolved);
+  try
+    LStream := FSourceManager.IncludeStream(LResolved);
+  except
+    on E: EInOutError do
+    begin
+      Diag(ppIncludeNotFound, AFileId, AToken.Start, AToken.Len, AArg);
+      Exit;
+    end;
+    on E: EStreamError do
+    begin
+      Diag(ppIncludeNotFound, AFileId, AToken.Start, AToken.Len, AArg);
+      Exit;
+    end;
+  end;
   FFileNames.Add(LResolved);
   FFiles.Add(LStream);
   FSkipped.Add(TList<TPasSkippedRegion>.Create);

@@ -194,6 +194,35 @@ begin
       LDProj.Free;
     end;
 
+    // ---- path entries TPath rejects (audit B08): a quoted search path
+    // pasted by hand, a search path and a DCCReference holding `|`. Load
+    // raised EInOutArgumentException; it loads, the quoted entry is the path
+    // inside its quotes. ----
+    LPath := TPath.Combine(LDir, 'BadPath.dproj');
+    TFile.WriteAllText(LPath, FIXTURE
+      .Replace('..\common;$(DCC_UnitSearchPath)',
+        '"..\common";bad|dir;$(DCC_UnitSearchPath)')
+      .Replace('<DCCReference Include="UnitA.pas"/>',
+        '<DCCReference Include="UnitA.pas"/><DCCReference Include="Un|it.pas"/>'));
+    LDProj := TPasDProj.Create;
+    try
+      var LRaised := '';
+      var LLoaded := False;
+      try
+        LLoaded := LDProj.Load(LPath);
+      except
+        on E: Exception do
+          LRaised := E.ClassName + ': ' + E.Message;
+      end;
+      Ok('bad path: Load does not raise ' + LRaised, LRaised = '');
+      Ok('bad path: ...and loads', LLoaded);
+      Ok('bad path: a quoted search path is the path inside the quotes',
+        LLoaded and Contains(LDProj.SearchPaths, 'common') and
+        not string.Join(';', LDProj.SearchPaths).Contains('"'));
+    finally
+      LDProj.Free;
+    end;
+
     // ---- a COMMENT before the root element (code audit 2026-08-31, finding
     // 3.8). Well-formed XML that Embarcadero never writes but a hand edit can;
     // it used to make ParseDocument return nil, and Load fell back silently to

@@ -745,6 +745,11 @@ var
   LDoc: TPasDfmDoc;
 begin
   LDoc := DocOf(AEntry);
+  // An index the doc does not hold answers the root, as the siblings do
+  // (ObjClassOf, IsInlineObj): the reader keeps it consistent, this is the
+  // second line.
+  if (AObj <= 0) or (AObj > High(LDoc.Objects)) then
+    Exit(0);
   Result := LDoc.Objects[AObj].Parent;
   while (Result > 0) and not IsInlineObj(AEntry, Result) do
     Result := LDoc.Objects[Result].Parent;

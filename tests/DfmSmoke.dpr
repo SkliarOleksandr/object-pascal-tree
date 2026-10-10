@@ -389,6 +389,46 @@ const
     '  end' + CRLF +                                             // 4
     'end' + CRLF;                                                // 5
 
+  // A malformed order modifier after a child's header (B08): the child's
+  // idents are read before it raises, and the object must be in the doc.
+  UNIT_ORDER =
+    'unit FixOrder;'#10 +                                        // 1
+    'interface'#10 +                                             // 2
+    'uses FixVcl;'#10 +                                          // 3
+    'type'#10 +                                                  // 4
+    '  TFixOrderForm = class(TForm)'#10 +                        // 5
+    '    OrderButton: TButton;'#10 +                             // 6  col 5
+    '  end;'#10 +                                                // 7
+    'implementation'#10 +                                        // 8
+    '{$R *.dfm}'#10 +                                            // 9
+    'end.'#10;                                                   // 10
+
+  DFM_ORDER =
+    'object FixOrderForm: TFixOrderForm' + CRLF +                // 1
+    '  object OrderButton: TButton [x]' + CRLF +                 // 2  col 10, 23
+    '  end' + CRLF +                                             // 3
+    'end' + CRLF;                                                // 4
+
+  // A property path cut after its dot: `Font.` then not a name.
+  UNIT_CUT =
+    'unit FixCut;'#10 +                                          // 1
+    'interface'#10 +                                             // 2
+    'uses FixVcl;'#10 +                                          // 3
+    'type'#10 +                                                  // 4
+    '  TFixCutForm = class(TForm)'#10 +                          // 5
+    '    CutButton: TButton;'#10 +                               // 6  col 5
+    '  end;'#10 +                                                // 7
+    'implementation'#10 +                                        // 8
+    '{$R *.dfm}'#10 +                                            // 9
+    'end.'#10;                                                   // 10
+
+  DFM_CUT =
+    'object FixCutForm: TFixCutForm' + CRLF +                    // 1
+    '  object CutButton: TButton' + CRLF +                       // 2  col 10
+    '    Font. = 1' + CRLF +                                     // 3
+    '  end' + CRLF +                                             // 4
+    'end' + CRLF;                                                // 5
+
   // A frame embedded in a host, and the host's descendant and grandchild
   // reopening it as `inherited Pane1` - the frame's block all the same (the
   // component is csInline since the host's `inline` created it). Panel1 is
@@ -931,6 +971,53 @@ begin
   Ok('reader: the form file of a unit',
     SameText(PasDfmFileOfUnit(FilePath('FixBase.pas')), FilePath('FixBase.dfm')) and
     (PasDfmFileOfUnit(FilePath('FixVcl.pas')) = ''));
+end;
+
+// A doc read up to an error names only objects and properties it holds
+// (B08: the header's idents and a cut path's segments were recorded before
+// their object or property was stored), and a search through it answers.
+procedure BrokenChecks;
+
+  function Consistent(const AFile: string): Boolean;
+  var
+    LDoc: IPasDfmDoc;
+    LId: TPasDfmIdent;
+  begin
+    LDoc := PasDfmLoad(FilePath(AFile));
+    Result := (LDoc <> nil) and (LDoc.Doc.Error <> '');
+    if Result then
+      for LId in LDoc.Doc.Idents do
+        if (LId.Obj > High(LDoc.Doc.Objects)) or
+           (LId.Prop > High(LDoc.Doc.Props)) then
+          Result := False;
+  end;
+
+var
+  LSites: TArray<TPasFormSite>;
+  LErr: string;
+begin
+  Ok('broken: an order modifier that fails keeps its object',
+    Consistent('FixOrder.dfm'));
+  Ok('broken: a property path cut after a dot keeps its property',
+    Consistent('FixCut.dfm'));
+  LErr := '';
+  try
+    LSites := Sites('FixOrder.pas', 6, 5);  // OrderButton
+    Ok('broken: the field of the failed header is listed',
+      HasSite(LSites, 'FixOrder.dfm', 2, 10, fskComponent, 'OrderButton'));
+    LSites := Sites('FixVcl.pas', 30, 3);   // TButton
+    Ok('broken: the class of the failed header is listed',
+      HasSite(LSites, 'FixOrder.dfm', 2, 23, fskClass, 'OrderButton'));
+    LSites := Sites('FixCut.pas', 6, 5);    // CutButton
+    Ok('broken: the object holding a cut path is listed',
+      HasSite(LSites, 'FixCut.dfm', 2, 10, fskComponent, 'CutButton'));
+  except
+    on E: Exception do
+      LErr := E.ClassName + ': ' + E.Message;
+  end;
+  Ok('broken: no exception from a search over a broken form', LErr = '');
+  if LErr <> '' then
+    Writeln('  ', LErr);
 end;
 
 procedure SiteChecks;
@@ -1646,6 +1733,10 @@ begin
   WriteBinaryForm(FilePath('FixBin.dfm'), DFM_BIN_TEXT);
   TFile.WriteAllText(FilePath('FixBroken.pas'), UNIT_BROKEN);
   TFile.WriteAllText(FilePath('FixBroken.dfm'), DFM_BROKEN, TEncoding.ASCII);
+  TFile.WriteAllText(FilePath('FixOrder.pas'), UNIT_ORDER);
+  TFile.WriteAllText(FilePath('FixOrder.dfm'), DFM_ORDER, TEncoding.ASCII);
+  TFile.WriteAllText(FilePath('FixCut.pas'), UNIT_CUT);
+  TFile.WriteAllText(FilePath('FixCut.dfm'), DFM_CUT, TEncoding.ASCII);
   TFile.WriteAllText(FilePath('FixCap.pas'), UNIT_CAP);
   TFile.WriteAllText(FilePath('FixCap.dfm'), DFM_CAP, TEncoding.ASCII);
   TFile.WriteAllText(FilePath('FixPane.pas'), UNIT_PANE);
@@ -1674,6 +1765,7 @@ begin
     try
       ReaderChecks;
       SiteChecks;
+      BrokenChecks;
       RenameChecks;
       CarryChecks;
       DescribeChecks;

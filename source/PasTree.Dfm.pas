@@ -364,13 +364,19 @@ begin
       0, 1, False);
     LObj.ClassIdent := AddIdent(FParser.SourcePos, FParser.TokenString,
       dirClassName, LIdx, -1, 0, 1, False);
+    // Stored once its idents are: a raise in what follows (the order
+    // modifier, `[x]` mid-typing) must not leave idents naming an object
+    // the doc never got - a consumer indexed Objects past its end.
+    AddObject(LObj);
     FParser.NextToken;
   end
   else
+  begin
     LObj.ClassIdent := AddIdent(LFirstOffset, LFirst, dirClassName, LIdx, -1,
       0, 1, False);
+    AddObject(LObj);
+  end;
   SkipOrderModifier;
-  AddObject(LObj);
   while not FParser.TokenSymbolIs('END') and
     not FParser.TokenSymbolIs('OBJECT') and
     not FParser.TokenSymbolIs('INHERITED') and
@@ -397,23 +403,26 @@ begin
   LProp.FirstIdent := FIdentCount;
   LProp.SegCount := 0;
   LProp.StrOffset := -1;
+  // Stored before its path is read, and kept consistent after each segment:
+  // a path cut after a dot (`Font.` mid-typing) raises, and the segments
+  // read so far must name a property the doc holds.
+  if FPropCount = Length(FProps) then
+    SetLength(FProps, 64 + 2 * Length(FProps));
+  FProps[LIdx] := LProp;
+  Inc(FPropCount);
   while True do
   begin
     AddIdent(FParser.SourcePos, FParser.TokenString, dirPropName, AObj, LIdx,
-      LProp.SegCount, 0, AInItem);
-    Inc(LProp.SegCount);
+      FProps[LIdx].SegCount, 0, AInItem);
+    Inc(FProps[LIdx].SegCount);
+    for LSeg := LProp.FirstIdent to FIdentCount - 1 do
+      FIdents[LSeg].SegCount := FProps[LIdx].SegCount;
     FParser.NextToken;
     if FParser.Token <> '.' then
       Break;
     FParser.NextToken;
     FParser.CheckToken(toSymbol);
   end;
-  for LSeg := LProp.FirstIdent to FIdentCount - 1 do
-    FIdents[LSeg].SegCount := LProp.SegCount;
-  if FPropCount = Length(FProps) then
-    SetLength(FProps, 64 + 2 * Length(FProps));
-  FProps[LIdx] := LProp;
-  Inc(FPropCount);
   FParser.CheckToken('=');
   FParser.NextToken;
   ReadValue(AObj, LIdx, AInItem, True);

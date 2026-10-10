@@ -4893,6 +4893,65 @@ end;
 // dictionary with no lock, and a base define set is cloned by many
 // preprocessors at once - every losing creation leaked. Read through RTTI:
 // no other observable tells a created collection from none.
+// Source text that names a file no file can have (audit B08): TPath raises
+// on `|`, `<`, `"`, a control character, CR/LF. A uses in-path like that
+// aborted the whole AnalyzeProject (no models at all); an include name like
+// that - a quoted name, a directive still being typed that runs to the next
+// brace across lines - dropped its unit, and the importers said F1027 for a
+// unit that exists. Now an in-path is "not found" (the search by name goes
+// on), and an include is not found (dcc's F1026) with its unit analyzed.
+procedure TestBadPathText;
+var
+  LDir, LErr: string;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_badpath');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PbGood.pas'),
+    'unit PbGood;'#10'interface'#10'procedure GoodHello;'#10 +
+    'implementation'#10'procedure GoodHello; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PbCtl.pas'),
+    'unit PbCtl;'#10'interface'#10'procedure CtlHello;'#10 +
+    'implementation'#10'procedure CtlHello; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PbInc.pas'),
+    'unit PbInc;'#10'interface'#10'procedure IncHello;'#10 +
+    'implementation'#10 +
+    '{$I "defs.inc"}'#10 +
+    '{$I a|b.inc}'#10 +
+    '{$I half'#10'  typed <x>}'#10 +
+    'procedure IncHello; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PbApp.dpr'),
+    'program PbApp;'#10 +
+    'uses PbGood in ''Pb|Good.pas'', PbCtl in ''Pb'#1'Ctl.pas'', PbInc;'#10 +
+    'begin'#10'  GoodHello;'#10'  CtlHello;'#10'  IncHello;'#10'end.'#10);
+  LErr := '';
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    try
+      GProj.AnalyzeProject(TPath.Combine(LDir, 'PbApp.dpr'));
+    except
+      on E: Exception do
+        LErr := E.ClassName + ': ' + E.Message;
+    end;
+    Ok('bad path text: no exception from the analysis', LErr = '');
+    if LErr <> '' then
+      Writeln('  ', LErr);
+    Ok('bad path text: an in-path with `|` or #1 falls back to the search',
+      (MidByName('pbgood') >= 0) and (MidByName('pbctl') >= 0));
+    Ok('bad path text: a unit whose include names cannot be files is analyzed',
+      MidByName('pbinc') >= 0);
+    Ok('bad path text: the program resolves all three',
+      (MidByName('pbapp') >= 0) and
+      (DiagCount(ModelByName('pbapp'), 'F1027') = 0) and
+      (DiagCount(ModelByName('pbapp'), 'E2003') = 0));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestDefinesKeysUntouched;
 var
   LDefs, LClone: TPasDefines;
@@ -10956,6 +11015,7 @@ begin
   TestOperatorChains;
   TestDonorSafety;
   TestDefinesKeysUntouched;
+  TestBadPathText;
   TestPoolContract;
 
   if GCounter.Finish('SemaProjectSmoke') then

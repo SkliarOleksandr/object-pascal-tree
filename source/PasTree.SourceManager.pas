@@ -520,6 +520,24 @@ begin
     Result := -1;
 end;
 
+// True when TPath can be handed APath without raising: not empty, no control
+// character (CR/LF included - an unterminated include directive runs to the
+// next brace, lines and all), nothing HasValidPathChars rejects (`"`, `<`,
+// `>`, `|`, and `*`/`?`, on which IsPathRooted raises too). A uses in-path or
+// an include name is source text: one that fails here names no file, and is
+// "not found" - never an exception that aborts the whole analysis.
+function PathTextUsable(const APath: string): Boolean;
+var
+  LCh: Char;
+begin
+  if APath = '' then
+    Exit(False);
+  for LCh in APath do
+    if LCh < #32 then
+      Exit(False);
+  Result := TPath.HasValidPathChars(APath, False);
+end;
+
 function TPasSourceManager.SourceExists(const APath: string): Boolean;
 begin
   if TFile.Exists(APath) then
@@ -542,7 +560,7 @@ var
   LCandidate: string;
 begin
   Result := False;
-  if (ADir = '') or (AName = '') then
+  if not PathTextUsable(ADir) or not PathTextUsable(AName) then
     Exit;
   LCandidate := TPath.Combine(ADir, AName);
   if SourceExists(LCandidate) then
@@ -904,7 +922,7 @@ begin
   // 1. Explicit `in 'path'`. Whatever it resolves to is pinned for the whole
   // project: the next importer of this unit, however it spells the lookup,
   // gets THIS file.
-  if AInPath <> '' then
+  if PathTextUsable(AInPath) then
   begin
     if TPath.IsPathRooted(AInPath) and SourceExists(AInPath) then
     begin
@@ -1360,7 +1378,7 @@ var
     LPath: string;
   begin
     Result := False;
-    if ADir = '' then
+    if not PathTextUsable(ADir) then
       Exit;
     LPath := TPath.Combine(ADir, LName);
     if TFile.Exists(LPath) then
@@ -1376,8 +1394,8 @@ begin
   if (Length(LName) >= 2) and (LName[1] = '''') and
      (LName[Length(LName)] = '''') then
     LName := Copy(LName, 2, Length(LName) - 2);
-  if LName = '' then
-    Exit(False);
+  if not PathTextUsable(LName) then
+    Exit(False);   // dcc says F1026 for a name no file can have
 
   // 1. Beside the unit.
   LUnitDir := TPath.GetDirectoryName(AUnitFile);

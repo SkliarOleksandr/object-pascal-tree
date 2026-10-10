@@ -644,14 +644,22 @@ end;
 function TPasDProj.ResolvePath(const ARelOrAbs: string): string;
 begin
   Result := ARelOrAbs;
+  // A quoted entry (`"libdir"`, pasted by hand; the IDE's path editor does
+  // not write one) is the path inside the quotes.
+  if (Length(Result) >= 2) and (Result[1] = '"') and
+     (Result[Length(Result)] = '"') then
+    Result := Copy(Result, 2, Length(Result) - 2);
   if Result = '' then
     Exit;
-  if not TPath.IsPathRooted(Result) then
-    Result := TPath.Combine(FDir, Result);
+  // All of it inside the try: IsPathRooted and Combine raise on a character
+  // no path may hold as GetFullPath does, and Load promises False, not an
+  // exception, for a malformed file.
   try
+    if not TPath.IsPathRooted(Result) then
+      Result := TPath.Combine(FDir, Result);
     Result := TPath.GetFullPath(Result);
   except
-    // a stray unresolved macro or malformed segment - keep the combined form
+    // a stray unresolved macro or malformed segment - keep the form reached
   end;
 end;
 
@@ -814,17 +822,24 @@ begin
         for LName in LRawFiles do
         begin
           LVal := ResolvePath(LName);
-          if (LVal <> '') and not TFile.Exists(LVal) and
-             not TPath.IsPathRooted(LName) then
-            for var LDir in FSearchPaths do
-            begin
-              var LTry := TPath.Combine(LDir, LName);
-              if TFile.Exists(LTry) then
+          try
+            if (LVal <> '') and not TFile.Exists(LVal) and
+               not TPath.IsPathRooted(LName) then
+              for var LDir in FSearchPaths do
               begin
-                LVal := LTry;
-                Break;
+                var LTry := TPath.Combine(LDir, LName);
+                if TFile.Exists(LTry) then
+                begin
+                  LVal := LTry;
+                  Break;
+                end;
               end;
-            end;
+          except
+            // A name or search path no file can have: the entry stays as
+            // ResolvePath left it, as for any reference that is not found.
+            on EArgumentException do
+              ;
+          end;
           if (LVal <> '') and not LAllFiles.Contains(LVal) then
             LAllFiles.Add(LVal);
         end;
