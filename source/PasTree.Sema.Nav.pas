@@ -1324,7 +1324,7 @@ function TPasNavigator.IdentAt(AMid, ALine, ACol: Integer;
   out AIdent: TPasNavIdent): Boolean;
 var
   LM: TPasSemaModel;
-  LOffset, LLo, LHi, LMidTok, LRaw, LVis, LNode, LEndCol: Integer;
+  LOffset, LRaw, LVis, LNode, LEndCol: Integer;
   LCache: TNavCache;
   LTS: TPasTokenStream;   // record copy - the arrays inside are shared refs
   LLeaf, LSpanFirstVis, LSpanLastVis, LRawFrom, LRawTo, LEndLine: Integer;
@@ -1339,28 +1339,10 @@ begin
   FProj.EnsureHydrated(AMid);
   LM := FProj.Model(AMid);
   LTS := LM.Tree.Source.Files[0];
-  if (ALine < 1) or (ALine - 1 > High(LTS.LineStarts)) or (ACol < 1) then
+  if not LTS.OffsetOf(ALine, ACol, LOffset) then
     Exit;
-  LOffset := LTS.LineStarts[ALine - 1] + (ACol - 1);
-
-  // Tokens are gapless and sorted by Start: binary-search the covering one.
-  LLo := 0;
-  LHi := High(LTS.Tokens);
-  LRaw := -1;
-  while LLo <= LHi do
-  begin
-    LMidTok := (LLo + LHi) div 2;
-    if LTS.Tokens[LMidTok].Start > LOffset then
-      LHi := LMidTok - 1
-    else if LTS.Tokens[LMidTok].EndPos <= LOffset then
-      LLo := LMidTok + 1
-    else
-    begin
-      LRaw := LMidTok;
-      Break;
-    end;
-  end;
-  if (LRaw < 0) or (LTS.Tokens[LRaw].Kind <> tkIdentifier) then
+  LRaw := LTS.IdentTokenAt(LOffset);
+  if LRaw < 0 then
     Exit;
 
   LCache := CacheOf(AMid);
@@ -1438,9 +1420,10 @@ begin
     AIdent.ColTo := LEndCol
   else
     // The span leaves the line: report it as running to the line's end, which
-    // is what a single-line highlight can express.
-    AIdent.ColTo := AIdent.ColFrom + (LTS.Tokens[LRawTo].EndPos -
-      LTS.Tokens[LRawFrom].Start);
+    // is what a single-line highlight can express (it was the distance
+    // across the break and the next line's indentation).
+    AIdent.ColTo := LTS.LineEndOffset(AIdent.Line) -
+      LTS.LineStarts[AIdent.Line - 1] + 1;
   Result := True;
 end;
 
@@ -1818,7 +1801,7 @@ function TPasNavigator.SymbolAtFile(AMid: Integer; const AFile: string;
   ALine, ACol: Integer; out ATMid, ASym: Integer; out AName: string): Boolean;
 var
   LM: TPasSemaModel;
-  LFileId, LOffset, LLo, LHi, LMidTok, LRaw, LVis, LNode: Integer;
+  LFileId, LOffset, LRaw, LVis, LNode: Integer;
   LTS: TPasTokenStream;
   LFull: string;
 begin
@@ -1840,26 +1823,10 @@ begin
   if (LFileId < 0) or (LFileId > High(LM.Tree.Source.Files)) then
     Exit;
   LTS := LM.Tree.Source.Files[LFileId];
-  if (ALine < 1) or (ALine - 1 > High(LTS.LineStarts)) or (ACol < 1) then
+  if not LTS.OffsetOf(ALine, ACol, LOffset) then
     Exit;
-  LOffset := LTS.LineStarts[ALine - 1] + (ACol - 1);
-  LLo := 0;
-  LHi := High(LTS.Tokens);
-  LRaw := -1;
-  while LLo <= LHi do
-  begin
-    LMidTok := (LLo + LHi) div 2;
-    if LTS.Tokens[LMidTok].Start > LOffset then
-      LHi := LMidTok - 1
-    else if LTS.Tokens[LMidTok].EndPos <= LOffset then
-      LLo := LMidTok + 1
-    else
-    begin
-      LRaw := LMidTok;
-      Break;
-    end;
-  end;
-  if (LRaw < 0) or (LTS.Tokens[LRaw].Kind <> tkIdentifier) then
+  LRaw := LTS.IdentTokenAt(LOffset);
+  if LRaw < 0 then
     Exit;
   // The cache maps the main file's tokens only; an include's are few enough
   // to look up in the visible stream directly.
@@ -2826,9 +2793,8 @@ begin
     Exit;
   LM := FProj.Model(AMid);
   LTS := LM.Tree.Source.Files[0];
-  if (ALine < 1) or (ALine - 1 > High(LTS.LineStarts)) or (ACol < 1) then
+  if not LTS.OffsetOf(ALine, ACol, LOffset) then
     Exit;
-  LOffset := LTS.LineStarts[ALine - 1] + (ACol - 1);
   for LIdx := 0 to High(LM.Tree.Source.DefineRefs) do
     with LM.Tree.Source.DefineRefs[LIdx] do
       // End INCLUSIVE: a caret one past the name (double-click, End key)
@@ -2856,7 +2822,7 @@ function TPasNavigator.DefineAt(AMid, ALine, ACol: Integer;
 var
   LM: TPasSemaModel;
   LTS: TPasTokenStream;
-  LIdx, LLo, LHi, LMidTok, LStart: Integer;
+  LIdx, LStart: Integer;
 begin
   Result := False;
   LIdx := DefineRefIndexAt(AMid, ALine, ACol);
@@ -2868,22 +2834,7 @@ begin
   // The raw token holding the name's offset - the whole directive is one
   // token, so this is the underline range.
   LTS := LM.Tree.Source.Files[0];
-  ARawToken := -1;
-  LLo := 0;
-  LHi := High(LTS.Tokens);
-  while LLo <= LHi do
-  begin
-    LMidTok := (LLo + LHi) div 2;
-    if LTS.Tokens[LMidTok].Start > LStart then
-      LHi := LMidTok - 1
-    else if LTS.Tokens[LMidTok].EndPos <= LStart then
-      LLo := LMidTok + 1
-    else
-    begin
-      ARawToken := LMidTok;
-      Break;
-    end;
-  end;
+  ARawToken := LTS.RawTokenAt(LStart);
   Result := True;
 end;
 
@@ -2921,9 +2872,8 @@ begin
     Exit;
   LM := FProj.Model(AMid);
   LTS := LM.Tree.Source.Files[0];
-  if (ALine < 1) or (ALine - 1 > High(LTS.LineStarts)) or (ACol < 1) then
+  if not LTS.OffsetOf(ALine, ACol, LOffset) then
     Exit;
-  LOffset := LTS.LineStarts[ALine - 1] + (ACol - 1);
   for LIdx := 0 to High(LM.Tree.Source.IfNameRefs) do
     with LM.Tree.Source.IfNameRefs[LIdx] do
       // End inclusive, as DefineRefIndexAt.
@@ -3417,10 +3367,7 @@ begin
     begin
       LM := FProj.Model(AMid);
       LTS := LM.Tree.Source.Files[0];
-      if (ALine >= 1) and (ALine - 1 <= High(LTS.LineStarts)) and (ACol >= 1)
-      then
-        LOffset := LTS.LineStarts[ALine - 1] + (ACol - 1)
-      else
+      if not LTS.OffsetOf(ALine, ACol, LOffset) then
         LOffset := MaxInt;   // past the end: everything the unit defines
       // Processing order: an include's directives (FileId <> 0) sit between
       // the main file's own, so the walk stops at the first MAIN-file
@@ -4865,31 +4812,15 @@ var
   LM: TPasSemaModel;
   LTS: TPasTokenStream;
   LCache: TNavCache;
-  LOffset, LLo, LHi, LMidTok, LRaw: Integer;
+  LOffset, LRaw: Integer;
 begin
   Result := -1;
   FProj.EnsureHydrated(AMid);   // pure text work - see IdentAt
   LM := FProj.Model(AMid);
   LTS := LM.Tree.Source.Files[0];
-  if (ALine < 1) or (ALine - 1 > High(LTS.LineStarts)) or (ACol < 1) then
+  if not LTS.OffsetOf(ALine, ACol, LOffset) then
     Exit;
-  LOffset := LTS.LineStarts[ALine - 1] + (ACol - 1);
-  LLo := 0;
-  LHi := High(LTS.Tokens);
-  LRaw := -1;
-  while LLo <= LHi do
-  begin
-    LMidTok := (LLo + LHi) div 2;
-    if LTS.Tokens[LMidTok].Start > LOffset then
-      LHi := LMidTok - 1
-    else if LTS.Tokens[LMidTok].EndPos <= LOffset then
-      LLo := LMidTok + 1
-    else
-    begin
-      LRaw := LMidTok;
-      Break;
-    end;
-  end;
+  LRaw := LTS.RawTokenAt(LOffset);
   if LRaw < 0 then
     Exit;
   // A position inside a Skipped ($IFDEF'd-out) region has NO visible

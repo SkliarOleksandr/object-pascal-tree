@@ -117,6 +117,25 @@ type
       const AWord: string): Boolean;
     procedure OffsetToLineCol(AOffset: Integer; out ALine, ACol: Integer);
     function LineText(ALine: Integer): string;
+    { The 0-based offset just past the last character of 1-based ALine,
+      before its line break; -1 when ALine is out of range. }
+    function LineEndOffset(ALine: Integer): Integer;
+    { A host position (1-based line and column) as an offset into Source.
+      A column past the end of its line means the line end - SynEdit's
+      virtual space, RAD Studio's cursor beyond EOL, and the LSP rule for an
+      over-long character all say so; it used to run through the line break
+      into the next line. Cannot overflow. False when the line is out of
+      range or ACol < 1. The one copy of this step: navigation and
+      completion both read positions through it. }
+    function OffsetOf(ALine, ACol: Integer; out AOffset: Integer): Boolean;
+    { The token covering AOffset (Start <= AOffset < EndPos; tokens are
+      gapless and sorted), or -1. }
+    function RawTokenAt(AOffset: Integer): Integer;
+    { The identifier token at AOffset: the covering one, else the identifier
+      ending exactly at AOffset - a caret right after a name (`Foo|;`, the
+      End key, a double-click's end) means that name, in every editor and
+      for a conditional symbol here. -1 when neither is an identifier. }
+    function IdentTokenAt(AOffset: Integer): Integer;
   end;
 
 const
@@ -562,6 +581,80 @@ begin
   end;
   ALine := LLo + 1;                          // 1-based line
   ACol := AOffset - LineStarts[LLo] + 1;     // 1-based column
+end;
+
+function TPasTokenStream.LineEndOffset(ALine: Integer): Integer;
+begin
+  if (ALine < 1) or (ALine - 1 > High(LineStarts)) then
+    Exit(-1);
+  if ALine - 1 < High(LineStarts) then
+  begin
+    // LineStarts[ALine] is the first character of the NEXT line, already
+    // past the break: walk back over it (Source is 1-based, so
+    // Source[Result] is the character at offset Result - 1).
+    Result := LineStarts[ALine];
+    while (Result > LineStarts[ALine - 1]) and
+          CharInSet(Source[Result], [#10, #13]) do
+      Dec(Result);
+  end
+  else
+    Result := Length(Source);
+end;
+
+function TPasTokenStream.OffsetOf(ALine, ACol: Integer;
+  out AOffset: Integer): Boolean;
+var
+  LEnd: Integer;
+begin
+  AOffset := 0;
+  LEnd := LineEndOffset(ALine);
+  if (LEnd < 0) or (ACol < 1) then
+    Exit(False);
+  // Compared before adding: a column near MaxInt overflowed the sum.
+  if ACol - 1 > LEnd - LineStarts[ALine - 1] then
+    AOffset := LEnd
+  else
+    AOffset := LineStarts[ALine - 1] + (ACol - 1);
+  Result := True;
+end;
+
+function TPasTokenStream.RawTokenAt(AOffset: Integer): Integer;
+var
+  LLo, LHi, LMid: Integer;
+begin
+  LLo := 0;
+  LHi := High(Tokens);
+  while LLo <= LHi do
+  begin
+    LMid := (LLo + LHi) div 2;
+    if Tokens[LMid].Start > AOffset then
+      LHi := LMid - 1
+    else if Tokens[LMid].EndPos <= AOffset then
+      LLo := LMid + 1
+    else
+      Exit(LMid);
+  end;
+  Result := -1;
+end;
+
+function TPasTokenStream.IdentTokenAt(AOffset: Integer): Integer;
+begin
+  Result := RawTokenAt(AOffset);
+  if (Result >= 0) and (Tokens[Result].Kind = tkIdentifier) then
+    Exit;
+  if Result < 0 then
+  begin
+    // At the end of the source nothing covers the offset (an EOF token is
+    // empty): the last token with text may still end there.
+    Result := High(Tokens);
+    while (Result >= 0) and (Tokens[Result].Len = 0) do
+      Dec(Result);
+  end
+  else
+    Dec(Result);
+  if (Result < 0) or (Tokens[Result].Kind <> tkIdentifier) or
+     (Tokens[Result].EndPos <> AOffset) then
+    Result := -1;
 end;
 
 // The raw text of one 1-based line, trailing CR/LF (whichever break BuildLine

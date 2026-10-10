@@ -98,7 +98,19 @@ comment of the generated text says what it is and what it could not carry.
 Hover highlight span rules: a plain identifier highlights itself; a dotted
 `uses` name or expression QUALIFIER highlights the whole qualifier (all
 segments + dots, never the trailing member); the trailing member of a
-qualified expression highlights only itself.
+qualified expression highlights only itself. A span that leaves its line (a
+dotted `uses` name written over two lines) ends at that line's end - `ColTo`
+is always a column of `Line`.
+
+Caret positions (0.95.5; every navigator entry point and completion read
+them through one `TPasTokenStream.OffsetOf`): a column past the end of its
+line means the line end - SynEdit's virtual space, RAD Studio's cursor
+beyond EOL and the LSP rule for an over-long character all say so - where it
+used to run through the line break onto a name on the next line; a column
+near `MaxInt` is the line end too, never an overflow. A caret right after a
+name, before a space or punctuation (`Foo|;`), means that name
+(`TPasTokenStream.IdentTokenAt`), as it does for a conditional symbol; a
+caret inside a name always takes that name.
 
 ### 2.1 Resolution pipeline (what makes each row work)
 

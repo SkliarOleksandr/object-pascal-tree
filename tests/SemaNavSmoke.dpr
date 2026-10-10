@@ -2111,6 +2111,86 @@ end;
 // closed unit, which the release emptied. Each answer must equal the one the
 // same query gave before the release - or, for the probes that crashed,
 // arrive at all. Every check runs on a freshly demoted text layer.
+// Host positions at the edges (audit B09). A column past the end of its line
+// means the line end - SynEdit's virtual space, RAD Studio's cursor beyond
+// EOL, the LSP rule - where it used to run through the line break onto a
+// name on the NEXT line; a column near MaxInt overflowed. A caret right
+// after a name means that name, as it already did for a conditional symbol.
+// A span that leaves its line ends at that line's end.
+procedure TestCaretEdges;
+const
+  UNIT_CARET =
+    'unit NavCaret;'#10 +                         // 1
+    'interface'#10 +                              // 2
+    'uses'#10 +                                   // 3
+    '  Namespace.'#10 +                           // 4  Namespace col 3, 12 chars
+    '    NavD;'#10 +                              // 5
+    'var'#10 +                                    // 6
+    '  AlphaVar, B: Integer;'#10 +                // 7  `,` col 11
+    'procedure Run;'#10 +                         // 8
+    'implementation'#10 +                         // 9
+    'procedure Run;'#10 +                         // 10 Run col 11, `;` col 14
+    'begin'#10 +                                  // 11
+    '  B := 1;'#10 +                              // 12 9 chars
+    '  AlphaVar := B;'#10 +                       // 13 AlphaVar col 3
+    '  B := AlphaVar'#10 +                        // 14 ends in a name
+    'end;'#10 +                                   // 15
+    'end.'#10;                                    // 16
+var
+  LDir, LErr: string;
+  LMid, LT, LS: Integer;
+  LName: string;
+  LIdent: TPasNavIdent;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_nav_caret');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), UNIT_SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Namespace.NavD.pas'), UNIT_NS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavCaret.pas'), UNIT_CARET);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    GNav := TPasNavigator.Create(GProj);
+    try
+      LMid := GNav.ModelIdOf(TPath.Combine(LDir, 'NavCaret.pas'));
+      Ok('caret: model found', LMid >= 0);
+      Ok('caret: a column past the end of `  B := 1;` is not the next line''s name',
+        not GNav.IdentAt(LMid, 12, 14, LIdent) and
+        not GNav.SymbolAt(LMid, 12, 14, LT, LS, LName));
+      LErr := '';
+      try
+        Ok('caret: a column near MaxInt answers nothing',
+          not GNav.IdentAt(LMid, 12, MaxInt, LIdent) and
+          not GNav.IdentAt(LMid, 12, MaxInt - 3, LIdent));
+      except
+        on E: Exception do
+          LErr := E.ClassName;
+      end;
+      Ok('caret: ...and raises nothing ' + LErr, LErr = '');
+      Ok('caret: past the end of a line that ends in a name is that name',
+        GNav.IdentAt(LMid, 14, 40, LIdent) and (LIdent.Name = 'AlphaVar') and
+        (LIdent.Line = 14));
+      Ok('caret: right after a name, before a space, is that name',
+        GNav.IdentAt(LMid, 13, 11, LIdent) and (LIdent.Name = 'AlphaVar') and
+        (LIdent.Line = 13));
+      Ok('caret: right after a name, before punctuation, is that name',
+        GNav.IdentAt(LMid, 7, 11, LIdent) and (LIdent.Name = 'AlphaVar') and
+        GNav.SymbolAt(LMid, 10, 14, LT, LS, LName) and SameText(LName, 'Run'));
+      Ok('caret: a dotted uses name across lines ends at its first line''s end',
+        GNav.IdentAt(LMid, 4, 3, LIdent) and (LIdent.Line = 4) and
+        (LIdent.ColFrom = 3) and (LIdent.ColTo = 13));
+    finally
+      FreeAndNil(GNav);
+    end;
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestReleasedModels;
 const
   UNIT_REL =
@@ -4904,6 +4984,7 @@ begin
       TDirectory.Delete(LDir, True);
   end;
   TestReleasedModels;
+  TestCaretEdges;
   TestUnusedUses;
   TestUnreferencedUnits;
   TestLintGlobalInit;

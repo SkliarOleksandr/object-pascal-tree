@@ -438,26 +438,10 @@ begin
 end;
 
 // The raw token of Files[0] covering AOffset (Start <= AOffset < EndPos), or
-// -1. Tokens are gapless and sorted by Start - same search IdentAt/VisAt use.
+// -1.
 function TPasCompletion.RawTokenAt(AOffset: Integer): Integer;
-var
-  LTS: TPasTokenStream;
-  LLo, LHi, LMid: Integer;
 begin
-  Result := -1;
-  LTS := FModel.Tree.Source.Files[0];
-  LLo := 0;
-  LHi := High(LTS.Tokens);
-  while LLo <= LHi do
-  begin
-    LMid := (LLo + LHi) div 2;
-    if LTS.Tokens[LMid].Start > AOffset then
-      LHi := LMid - 1
-    else if LTS.Tokens[LMid].EndPos <= AOffset then
-      LLo := LMid + 1
-    else
-      Exit(LMid);
-  end;
+  Result := FModel.Tree.Source.Files[0].RawTokenAt(AOffset);
 end;
 
 // 1-based (line, col) -> character offset into Files[0], clamped to the line
@@ -465,35 +449,10 @@ end;
 // the end"). False when the line itself is out of range.
 function TPasCompletion.CaretOffset(ALine, ACol: Integer;
   out AOffset: Integer): Boolean;
-var
-  LTS: TPasTokenStream;
-  LLineEnd: Integer;
 begin
-  Result := False;
-  AOffset := 0;
-  LTS := FModel.Tree.Source.Files[0];
-  if (ALine < 1) or (ALine - 1 > High(LTS.LineStarts)) or (ACol < 1) then
-    Exit;
-  AOffset := LTS.LineStarts[ALine - 1] + (ACol - 1);
-  // Clamp a caret past the end of its line to the line end (before the line
-  // break, when there is one - landing ON the break is fine too, the trivia
-  // walk-back reads both the same way).
-  // LineStarts[ALine] is the FIRST CHARACTER OF THE NEXT LINE, i.e. already
-  // past the break - clamping there put the caret on the next line, so the
-  // replace span landed at its column 1 and a line ending in an identifier
-  // never classified as ckIdent. Walk back over the break instead.
-  if ALine - 1 < High(LTS.LineStarts) then
-  begin
-    LLineEnd := LTS.LineStarts[ALine];
-    while (LLineEnd > LTS.LineStarts[ALine - 1]) and
-          CharInSet(LTS.Source[LLineEnd], [#10, #13]) do
-      Dec(LLineEnd);
-  end
-  else
-    LLineEnd := Length(LTS.Source);
-  if AOffset > LLineEnd then
-    AOffset := LLineEnd;
-  Result := True;
+  // Clamped to the line end, before its break - landing ON the break is
+  // fine too, the trivia walk-back reads both the same way.
+  Result := FModel.Tree.Source.Files[0].OffsetOf(ALine, ACol, AOffset);
 end;
 
 // Nearest raw token at or before ARaw that has a visible mapping (skips
