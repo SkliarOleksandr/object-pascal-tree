@@ -2181,6 +2181,35 @@ begin
       Ok('caret: a dotted uses name across lines ends at its first line''s end',
         GNav.IdentAt(LMid, 4, 3, LIdent) and (LIdent.Line = 4) and
         (LIdent.ColFrom = 3) and (LIdent.ColTo = 13));
+      // A model id one past the last: the caret entry points tested only
+      // `< 0` and indexed the model list with it (found by PasTreeNavSweep).
+      LErr := '';
+      var LTarget: TPasNavTarget;
+      var LBad := GProj.ModelCount;
+      var LAny := False;
+      try
+        LAny := GNav.IdentAt(LBad, 1, 1, LIdent) or
+          GNav.SymbolAt(LBad, 1, 1, LT, LS, LName) or
+          GNav.SymbolAtFile(LBad, '', 1, 1, LT, LS, LName) or
+          GNav.UnitAt(LBad, 1, 1, LT, LName) or
+          GNav.BuiltinNameAt(LBad, 1, 1, LName) or
+          GNav.MethodAt(LBad, 1, 1, LT, LS, LName) or
+          GNav.InterfaceMethodAt(LBad, 1, 1, LT, LS, LName) or
+          GNav.InterfaceAt(LBad, 1, 1, LT, LS, LName) or
+          GNav.TypeAt(LBad, 1, 1, LT, LS, LName) or
+          GNav.AssignableAt(LBad, 1, 1, LT, LS, LName) or
+          GNav.ClassAt(LBad, 1, 1, LT, LS, LName) or
+          GNav.GotoImplementation(LBad, 1, 1, LTarget) or
+          GNav.GotoDeclaration(LBad, 1, 1, LTarget) or
+          GNav.GotoBareInherited(LBad, 1, 1, LTarget) or
+          GNav.ResolveDecl(LBad, 0, LTarget) or
+          (Length(GNav.SemanticTokens(LBad)) > 0);
+      except
+        on E: Exception do
+          LErr := E.ClassName + ': ' + E.Message;
+      end;
+      Ok('caret: a model id past the last answers nothing and raises ' +
+        'nothing ' + LErr, (LErr = '') and not LAny);
     finally
       FreeAndNil(GNav);
     end;

@@ -112,6 +112,15 @@ name, before a space or punctuation (`Foo|;`), means that name
 (`TPasTokenStream.IdentTokenAt`), as it does for a conditional symbol; a
 caret inside a name always takes that name.
 
+A model id outside `0..ModelCount - 1` answers nothing at every entry point
+(0.95.8; one past the last raised). `tools\PasTreeNavSweep.dpr` is the gate
+for all of this: every public caret entry point of the navigator, completion
+and the form binder, at random and edge carets of a sample of files, with
+what each answer leads to (references, rename plans, overrides, form sites),
+in each state a host leaves a project in - just analyzed, after a random
+buffer edit and `AnalyzeModuleOnly`, `DemoteText`, `ReleaseTransientMaps`,
+`DemoteClosedUnits`. Any exception is a finding; a clean run is exit code 0.
+
 ### 2.1 Resolution pipeline (what makes each row work)
 
 1. **Phase 1** (per-unit): RefMap - rows 1, 7.

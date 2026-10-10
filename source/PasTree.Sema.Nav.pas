@@ -1331,7 +1331,7 @@ var
   LQUid, LMatchNode, LFirst: Integer;
 begin
   Result := False;
-  if AMid < 0 then
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
     Exit;
   // Position -> token is pure text work, so a demoted model must get its text
   // back first: without this the empty LineStarts below read as "position out
@@ -1484,7 +1484,7 @@ var
   LNameNode: Integer;
 begin
   Result := False;
-  if AUid < 0 then
+  if (AUid < 0) or (AUid >= FProj.ModelCount) then
     Exit;
   LNameNode := FProj.Model(AUid).Tree.Nodes[0].FirstChild;
   if TargetFromNode(AUid, LNameNode, AName, ATarget) then
@@ -1604,7 +1604,7 @@ begin
   Result := False;
   ATMid := -1;
   ASym := NIL_SYM;
-  if (AMid < 0) or (ANode = NIL_NODE) then
+  if (AMid < 0) or (AMid >= FProj.ModelCount) or (ANode = NIL_NODE) then
     Exit;
   // The text of AMid's own nodes (a qualifier segment's unit name, the
   // builtin fallback's name): a host may ask about a model it never opened,
@@ -1632,7 +1632,7 @@ var
   LTMid, LSym, LFbMid, LFbSym, LQUid, LMatchNode, LCall: Integer;
 begin
   Result := False;
-  if (AMid < 0) or (ANode = NIL_NODE) then
+  if (AMid < 0) or (AMid >= FProj.ModelCount) or (ANode = NIL_NODE) then
     Exit;
   LM := FProj.Model(AMid);
 
@@ -1806,7 +1806,7 @@ var
   LFull: string;
 begin
   Result := False;
-  if AMid < 0 then
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
     Exit;
   FProj.EnsureHydrated(AMid);
   LM := FProj.Model(AMid);
@@ -1857,7 +1857,7 @@ var
   LRaw, LVis, LNode, LTMid, LSym, LCount: Integer;
 begin
   Result := nil;
-  if AMid < 0 then
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
     Exit;
   LCache := CacheOf(AMid);   // hydrates a demoted model first
   LM := FProj.Model(AMid);
@@ -2522,7 +2522,7 @@ var
   LDeclNode: Integer;
 begin
   Result := False;
-  if ATMid < 0 then
+  if (ATMid < 0) or (ATMid >= FProj.ModelCount) then
     Exit;
   // Hydrate like every other hit producer: on a demoted declaring unit
   // HitFromNode's bounds guards would silently drop the declaration row, and
@@ -2672,7 +2672,7 @@ var
   LHeader: Integer;
 begin
   Result := False;
-  if ATargetMid < 0 then
+  if (ATargetMid < 0) or (ATargetMid >= FProj.ModelCount) then
     Exit;
   // HitFromNode reads the text layer: hydrate first, like DeclHit.
   if not FProj.EnsureHydrated(ATargetMid) then
@@ -5285,7 +5285,7 @@ var
   LIsMethod, LFound: Boolean;
 begin
   Result := False;
-  if AMid < 0 then
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
     Exit;
   LM := FProj.Model(AMid);
   LCache := CacheOf(AMid);
@@ -5350,7 +5350,7 @@ var
   LIsMethod, LFound: Boolean;
 begin
   Result := False;
-  if AMid < 0 then
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
     Exit;
   LM := FProj.Model(AMid);
   LCache := CacheOf(AMid);
@@ -5417,7 +5417,7 @@ var
   LVariadic: Boolean;
 begin
   Result := False;
-  if AMid < 0 then
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
     Exit;
   LM := FProj.Model(AMid);
   LCache := CacheOf(AMid);
@@ -5511,7 +5511,7 @@ var
   LIsImpl, LIsMethod: Boolean;
 begin
   Result := NIL_NODE;
-  if (AMid < 0) or (ARoutine = NIL_NODE) then
+  if (AMid < 0) or (AMid >= FProj.ModelCount) or (ARoutine = NIL_NODE) then
     Exit;
   LM := FProj.Model(AMid);
   LCache := CacheOf(AMid);
@@ -5622,7 +5622,7 @@ var
   LNames, LPeerNames: TArray<Integer>;
 begin
   Result := NIL_SYM;
-  if AMid < 0 then
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
     Exit;
   LM := FProj.Model(AMid);
   if LM.Symbols[ASym].Kind <> skParam then
@@ -5691,7 +5691,7 @@ var
   LQualIdents: TArray<Integer>;
 begin
   Result := NIL_NODE;
-  if AMid < 0 then
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
     Exit;
   LM := FProj.Model(AMid);
   if LM.Symbols[ASym].Kind <> skRoutine then
@@ -5811,7 +5811,7 @@ var
 begin
   Result := False;
   ASym := NIL_SYM;
-  if AMid < 0 then
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
     Exit;
   LM := FProj.Model(AMid);
   LRoutine := LM.Tree.Nodes[ANode].Parent;
@@ -6844,7 +6844,7 @@ begin
   ACarried := nil;
   AFamily := nil;
   AError := '';
-  if (ATMid < 0) or (ASym = NIL_SYM) then
+  if (ATMid < 0) or (ATMid >= FProj.ModelCount) or (ASym = NIL_SYM) then
   begin
     AError := 'No symbol to rename.';
     Exit;
