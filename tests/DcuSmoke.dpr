@@ -439,6 +439,112 @@ begin
   end;
 end;
 
+{$WARN SYMBOL_PLATFORM OFF}
+function HeapInUse: UInt64;
+var
+  LState: TMemoryManagerState;
+  LSmall: TSmallBlockTypeState;
+begin
+  GetMemoryManagerState(LState);
+  Result := LState.TotalAllocatedMediumBlockSize +
+    LState.TotalAllocatedLargeBlockSize;
+  for LSmall in LState.SmallBlockTypeStates do
+    Inc(Result, UInt64(LSmall.AllocatedBlockCount) * LSmall.UseableBlockSize);
+end;
+
+{ A corrupt body behind a valid header (B07): every failure is the reader's
+  own EPasDcuError - no access violation, no double free (EInvalidPointer),
+  no overflow or range error, no multi-gigabyte table grown to an index the
+  file named - and a failed load frees what it built. Three corruptions at
+  every place they can land: each record tag replaced by one no format
+  defines ($FE; inside a routine header with local declarations it was a
+  double free of the embedded list), and a four-byte UIndex of $0FFFFFFF and
+  a five-byte one of MaxInt written at every offset (a type index, a slot, a
+  count or a length, whichever the reader is at). }
+procedure CheckCorruption(const ADcuPath, ATag: string);
+const
+  CBigIndex: array[0..3] of Byte = ($F7, $FF, $FF, $FF);
+  CMaxInt: array[0..4] of Byte = ($0F, $FF, $FF, $FF, $7F);
+var
+  LBytes, LMut: TBytes;
+  LTags: TList<Integer>;
+  LOther: TStringList;
+  LLoads, LRefused, LIdx: Integer;
+  LBefore: UInt64;
+  LStart: Cardinal;
+
+  procedure Try1(const ABytes: TBytes; const AWhat: string);
+  begin
+    Inc(LLoads);
+    try
+      LoadDcuFromBytes(ABytes, ADcuPath).Free;
+    except
+      on E: EPasDcuError do
+        Inc(LRefused);
+      on E: Exception do
+        if LOther.Count < 8 then
+          LOther.Add(Format('%s: %s: %s', [AWhat, E.ClassName, E.Message]));
+    end;
+  end;
+
+  procedure Patch(const APattern: array of Byte; const AWhat: string);
+  var
+    LJ, LPos: Integer;
+  begin
+    for LPos := LTags[0] to Length(LBytes) - Length(APattern) do
+    begin
+      LMut := Copy(LBytes);
+      for LJ := 0 to High(APattern) do
+        LMut[LPos + LJ] := APattern[LJ];
+      Try1(LMut, Format('%s at $%x', [AWhat, LPos]));
+    end;
+  end;
+
+begin
+  LBytes := TFile.ReadAllBytes(ADcuPath);
+  LTags := TList<Integer>.Create;
+  LOther := TStringList.Create;
+  try
+    LoadDcuFromBytes(LBytes, ADcuPath,
+      procedure(const ALine: string)
+      begin
+        // `<offset> <tag>`: one line per record.
+        if (Length(ALine) = 8) and (ALine[1] <> ' ') and (ALine[6] = ' ') then
+          LTags.Add(StrToInt('$' + Copy(ALine, 1, 5)));
+      end).Free;
+    // Past the header and the source-file records: the body.
+    while (LTags.Count > 0) and (LTags[0] < 16) do
+      LTags.Delete(0);
+    LLoads := 0;
+    LRefused := 0;
+    LBefore := HeapInUse;
+    LStart := GetTickCount;
+    for LIdx := 0 to LTags.Count - 1 do
+    begin
+      LMut := Copy(LBytes);
+      LMut[LTags[LIdx]] := $FE;
+      Try1(LMut, Format('unknown tag at $%x', [LTags[LIdx]]));
+    end;
+    Patch(CBigIndex, 'UIndex $0FFFFFFF');
+    Patch(CMaxInt, 'UIndex MaxInt');
+    LMut := nil;
+    Ok(ATag + ': every corrupt body is refused with EPasDcuError',
+      (LOther.Count = 0) and (LRefused > 0));
+    if LOther.Count > 0 then
+      Writeln('  ', LOther.Text.Replace(#13#10, #13#10'  ').TrimRight);
+    Ok(ATag + ': a refused load frees what it built',
+      HeapInUse <= LBefore + 64 * 1024);
+    // A table grown to a named index took seconds and gigabytes per load.
+    Ok(ATag + ': the corrupt loads stay fast',
+      GetTickCount - LStart < Cardinal(LLoads) div 4 + 5000);
+    Writeln(Format('  (%s: %d corrupt loads, %d refused, %d ms)',
+      [ATag, LLoads, LRefused, GetTickCount - LStart]));
+  finally
+    LOther.Free;
+    LTags.Free;
+  end;
+end;
+
 procedure CheckProject(const ALibDir, AProjDir: string; APlatform: TPasPlatform;
   const ATag: string);
 var
@@ -563,6 +669,10 @@ begin
       CheckReaderAndPrinter(TPath.Combine(GLib32, 'DcuFix.dcu'), dcuWin32, 'win32');
     if TFile.Exists(TPath.Combine(GLib64, 'DcuFix.dcu')) then
       CheckReaderAndPrinter(TPath.Combine(GLib64, 'DcuFix.dcu'), dcuWin64, 'win64');
+    if TFile.Exists(TPath.Combine(GLib32, 'DcuFix.dcu')) then
+      CheckCorruption(TPath.Combine(GLib32, 'DcuFix.dcu'), 'corrupt/win32');
+    if TFile.Exists(TPath.Combine(GLib64, 'DcuFix.dcu')) then
+      CheckCorruption(TPath.Combine(GLib64, 'DcuFix.dcu'), 'corrupt/win64');
 
     // The project: the fixture is reachable through its .dcu only.
     TFile.WriteAllText(TPath.Combine(GProjDir, 'DcuUser.pas'), Lines(USER_UNIT) + 'end.'#13#10);

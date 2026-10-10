@@ -109,6 +109,8 @@ type
     // Other units' .dcu files read for the layout of imported types, by
     // lowercase unit name; nil for one that is not beside this file.
     FForeign: TObjectDictionary<string, TPasDcuUnit>;
+    // TypeRef's nesting: a corrupt table can make a type contain itself.
+    FTypeRefDepth: Integer;
     procedure Line(const AText: string);
     procedure Blank;
     function Pad: string;
@@ -128,6 +130,7 @@ type
     function GenericParamNames(AType: TPasDcuType): TArray<string>;
     function GenericHead(const AName: string; AType: TPasDcuType): string;
     function TypeRef(AIdx: Integer): string;
+    function TypeRefText(AIdx: Integer): string;
     function IsVoid(AIdx: Integer): Boolean;
     function AccessorName(ASlot: Integer): string;
     // values
@@ -814,8 +817,26 @@ begin
 end;
 
 // How a type is spelled at a use site: by name when it has one, inline when
-// it is an anonymous definition (`set of Byte`, `^TFoo`, `0..3`).
+// it is an anonymous definition (`set of Byte`, `^TFoo`, `0..3`). A pointer,
+// array or set entry naming itself, directly or around a loop, comes only
+// from a corrupt table; the depth cap turns its endless recursion into one
+// unresolved name.
 function TPasDcuPrinter.TypeRef(AIdx: Integer): string;
+const
+  CMaxTypeRefDepth = 64;
+begin
+  if FTypeRefDepth >= CMaxTypeRefDepth then
+    Exit(Unresolved(Format('type #%d nests deeper than %d (a cycle)',
+      [AIdx, CMaxTypeRefDepth])));
+  Inc(FTypeRefDepth);
+  try
+    Result := TypeRefText(AIdx);
+  finally
+    Dec(FTypeRefDepth);
+  end;
+end;
+
+function TPasDcuPrinter.TypeRefText(AIdx: Integer): string;
 var
   LType, LInst: TPasDcuType;
 begin
@@ -1138,7 +1159,8 @@ begin
   begin
     LElem := ABytes[2] or (ABytes[3] shl 8);
     LLen := PInteger(@ABytes[8])^;
-    if (LElem in [1, 2]) and (LLen >= 0) and (12 + LLen * LElem <= LCount) then
+    if (LElem in [1, 2]) and (LLen >= 0) and
+       (LLen <= (LCount - 12) div LElem) then
     begin
       LStart := 12;
       LCount := LLen * LElem;
@@ -1437,7 +1459,8 @@ begin
   begin
     LElem := FUnit.DataBlock[LStart - 10] or (FUnit.DataBlock[LStart - 9] shl 8);
     LLen := PInteger(@FUnit.DataBlock[LStart - 4])^;
-    if (LElem in [1, 2]) and (LLen >= 0) and (LStart + LLen * LElem <= LLimit) then
+    if (LElem in [1, 2]) and (LLen >= 0) and
+       (LLen <= (LLimit - LStart) div LElem) then
     begin
       AUnicode := LElem = 2;
       LEnd := LStart + LLen * LElem;
@@ -1680,7 +1703,7 @@ begin
           LCount := Integer(LIndex.High - LIndex.Low + 1)
         else
           LCount := LSize div LElemSize;
-        if (LCount <= 0) or (LCount * LElemSize > LSize) then
+        if (LCount <= 0) or (LCount > LSize div LElemSize) then
           Exit;
         LItems := TList<string>.Create;
         try

@@ -520,6 +520,10 @@ type
     procedure Warn(const AFmt: string; const AArgs: array of const);
     // byte-level input
     procedure Need(ASize: Integer);
+    function ReadCount(AMinRow: Integer): Integer;
+    procedure CheckCount(ACount, AMinRow: Integer);
+    procedure CheckIndex(AIdx: Integer);
+    function ReadUtf8(ALen: Integer): string;
     function ReadByte: Byte;
     function ReadWord: Word;
     function ReadULong: Cardinal;
@@ -554,14 +558,18 @@ type
     procedure ReadConstValue(ADecl: TPasDcuDecl);
     procedure ReadDeclList(AKind: TListKind; AOwnerType: TPasDcuType;
       AOwnerRoutine: TPasDcuDecl; AList: TList<TPasDcuDecl>);
+    procedure ReadClosedList(AKind: TListKind; AOwnerType: TPasDcuType;
+      AOwnerRoutine: TPasDcuDecl; AList: TList<TPasDcuDecl>;
+      const AWhat: string; ACloser: Byte = drStop1);
+    function TryReadInfoRecord(AOwnerType: TPasDcuType;
+      AOwnerDecl: TPasDcuDecl): Boolean;
     function NewNamedDecl(AKind: TPasDcuDeclKind; ATag: Byte;
       AWithSlot: Boolean = True): TPasDcuDecl;
     procedure ReadFlagged(ADecl: TPasDcuDecl; ANoInf: Boolean);
     function ReadTypeDecl(AKind: TListKind): TPasDcuDecl;
     function ReadVarDecl(AKind: TPasDcuDeclKind; ATag: Byte): TPasDcuDecl;
     function ReadConstDecl: TPasDcuDecl;
-    function ReadProcDecl(AEmbedded: TList<TPasDcuDecl>; ANoInf: Boolean;
-      AOwnerType: TPasDcuType): TPasDcuDecl;
+    function ReadProcDecl(ANoInf: Boolean; AOwnerType: TPasDcuType): TPasDcuDecl;
     function ReadLocalDecl(AKind: TListKind; ATag: Byte;
       AOwnerType: TPasDcuType): TPasDcuDecl;
     function ReadMethodDecl(AKind: TListKind; ATag: Byte;
@@ -873,10 +881,48 @@ end;
 
 { Byte-level input }
 
+// Written so it cannot overflow (0 <= FPos <= FEnd): `FPos + ASize > FEnd`
+// wrapped for a stored length near MaxInt, and FPos went negative.
 procedure TPasDcuReader.Need(ASize: Integer);
 begin
-  if (ASize < 0) or (FPos + ASize > FEnd) then
+  if (ASize < 0) or (ASize > FEnd - FPos) then
     Error('Read past the end of the file (%d bytes wanted)', [ASize]);
+end;
+
+// A count read from the file, refused unless the rest of the file can hold
+// that many rows of at least AMinRow bytes: a misread count otherwise sized
+// a table of gigabytes, or wrapped a multiplication, before any read failed.
+function TPasDcuReader.ReadCount(AMinRow: Integer): Integer;
+begin
+  Result := ReadUIndex;
+  CheckCount(Result, AMinRow);
+end;
+
+procedure TPasDcuReader.CheckCount(ACount, AMinRow: Integer);
+begin
+  if (ACount < 0) or (ACount > (FEnd - FPos) div AMinRow) then
+    Error('Implausible count %d', [ACount]);
+end;
+
+// A type index or an address slot the file names: every entry of either
+// table is backed by at least one byte of the file, so one beyond the file
+// is a misread - growing the table to it took gigabytes and seconds.
+procedure TPasDcuReader.CheckIndex(AIdx: Integer);
+begin
+  if AIdx > FEnd then
+    Error('Implausible index %d', [AIdx]);
+end;
+
+function TPasDcuReader.ReadUtf8(ALen: Integer): string;
+begin
+  Need(ALen);
+  try
+    Result := TEncoding.UTF8.GetString(FBytes, FPos, ALen);
+  except
+    on EEncodingError do
+      Error('Invalid UTF-8 in a name (%d bytes)', [ALen]);
+  end;
+  Inc(FPos, ALen);
 end;
 
 function TPasDcuReader.ReadByte: Byte;
@@ -931,9 +977,7 @@ begin
   LLen := ReadByte;
   if LLen = $FF then
     LLen := Integer(ReadULong);
-  Need(LLen);
-  Result := TEncoding.UTF8.GetString(FBytes, FPos, LLen);
-  Inc(FPos, LLen);
+  Result := ReadUtf8(LLen);
 end;
 
 function TPasDcuReader.ReadShortName: string;
@@ -941,9 +985,7 @@ var
   LLen: Integer;
 begin
   LLen := ReadByte;
-  Need(LLen);
-  Result := TEncoding.UTF8.GetString(FBytes, FPos, LLen);
-  Inc(FPos, LLen);
+  Result := ReadUtf8(LLen);
 end;
 
 // The variable-length integer every record is built from. The count of low
@@ -1060,9 +1102,7 @@ begin
   LLen := ReadUIndex;
   if (LLen < 0) or (LLen > $100000) then
     Error('Implausible string length %d', [LLen]);
-  Need(LLen);
-  Result := TEncoding.UTF8.GetString(FBytes, FPos, LLen);
-  Inc(FPos, LLen);
+  Result := ReadUtf8(LLen);
 end;
 
 // Delphi 12's strings are `<UIndex len+1> <chars>`, 0 meaning none - a
@@ -1076,9 +1116,7 @@ begin
   if LLen <= 0 then
     Exit('');
   Dec(LLen);
-  Need(LLen);
-  Result := TEncoding.UTF8.GetString(FBytes, FPos, LLen);
-  Inc(FPos, LLen);
+  Result := ReadUtf8(LLen);
 end;
 
 procedure TPasDcuReader.SkipD12Str;
@@ -1163,6 +1201,7 @@ procedure TPasDcuReader.ReserveAddr(ASlot: Integer);
 begin
   if ASlot > FUnit.Addrs.Count then
   begin
+    CheckIndex(ASlot);
     if ASlot <> FUnit.Addrs.Count + 1 then
       Trace('  Reserve #%x..#%x', [FUnit.Addrs.Count + 1, ASlot]);
     while FUnit.Addrs.Count < ASlot do
@@ -1220,6 +1259,7 @@ var
 begin
   if AIdx <= 0 then
     Exit;
+  CheckIndex(AIdx);
   while FUnit.Types.Count < AIdx do
     FUnit.Types.Add(nil);
   LType := FUnit.Types[AIdx - 1];
@@ -1247,18 +1287,25 @@ var
   LPending: TPasDcuType;
   LIdx: Integer;
 begin
-  AType.RttiSize := ReadUIndex;
-  AType.Size := ReadIndex64;
-  AType.AddrSlot := ReadUIndex;
-  AType.Extra := ReadUIndex;
-  LIdx := FTypeDefCount + 1;
-  while FUnit.Types.Count < LIdx do
-    FUnit.Types.Add(nil);
-  LPending := FUnit.Types[LIdx - 1];
+  // AType is the caller's fresh object until the table holds it: a read that
+  // fails before then frees it here.
+  try
+    AType.RttiSize := ReadUIndex;
+    AType.Size := ReadIndex64;
+    AType.AddrSlot := ReadUIndex;
+    AType.Extra := ReadUIndex;
+    LIdx := FTypeDefCount + 1;
+    while FUnit.Types.Count < LIdx do
+      FUnit.Types.Add(nil);
+    LPending := FUnit.Types[LIdx - 1];
+    if (LPending <> nil) and (LPending.Kind <> tkPending) then
+      Error('Type definition #%x overrides an existing one', [LIdx]);
+  except
+    AType.Free;
+    raise;
+  end;
   if LPending <> nil then
   begin
-    if LPending.Kind <> tkPending then
-      Error('Type definition #%x overrides an existing one', [LIdx]);
     AType.Name := LPending.Name;
     AType.DeclSlot := LPending.DeclSlot;
     FUnit.Types[LIdx - 1] := nil;   // the list owns it: replacing frees it
@@ -1350,9 +1397,13 @@ begin
     Error('No source files');
   if LMain = '' then
     LMain := FUnit.SourceFiles[0];
-  // Any separator: the path may carry '/' from a build machine.
+  // Any separator: the path may carry '/' from a build machine. Split by
+  // hand: TPath raises on a character invalid in a path, and the name is
+  // whatever the file holds.
   LMain := LMain.Replace('/', '\');
-  LMain := TPath.GetFileNameWithoutExtension(LMain);
+  LMain := Copy(LMain, LastDelimiter('\:', LMain) + 1, MaxInt);
+  if LastDelimiter('.', LMain) > 1 then
+    LMain := Copy(LMain, 1, LastDelimiter('.', LMain) - 1);
   FUnit.UnitName := LMain;
 end;
 
@@ -1674,7 +1725,7 @@ begin
   LCountA := ReadUIndex;
   ReadUIndex;                    // start line
   ReadUIndex;
-  LCount := ReadUIndex;          // code line count
+  LCount := ReadCount(4);        // code line count
   Skip(LCount * 4);
   for LIdx := 1 to LCountA do
   begin
@@ -1828,14 +1879,13 @@ end;
 // A routine header: code size, result and class, calling convention, an
 // optional generic parameter list, then the parameter list which continues
 // into the locals (the leading arVal/arVar entries are the parameters).
-function TPasDcuReader.ReadProcDecl(AEmbedded: TList<TPasDcuDecl>;
-  ANoInf: Boolean; AOwnerType: TPasDcuType): TPasDcuDecl;
+function TPasDcuReader.ReadProcDecl(ANoInf: Boolean;
+  AOwnerType: TPasDcuType): TPasDcuDecl;
 var
   LName: string;
 begin
   Result := NewNamedDecl(dkRoutine, drProc);
   ReadFlagged(Result, ANoInf);
-  Result.Embedded := AEmbedded;
   Result.Args := TList<TPasDcuDecl>.Create;
   Result.OwnerType := AOwnerType;
   LName := Result.Name;
@@ -1859,9 +1909,8 @@ begin
     try
       Result.GenericParams := TList<TPasDcuDecl>.Create;
       ReadTag;
-      ReadDeclList(lkA6, nil, Result, Result.GenericParams);
-      if FTag <> drStop1 then
-        Error('Generic parameter list of %s not closed', [LName]);
+      ReadClosedList(lkA6, nil, Result, Result.GenericParams,
+        Format('Generic parameter list of %s', [LName]));
     finally
       FInProcTemplate := False;
     end;
@@ -1870,9 +1919,8 @@ begin
   // One list holds the parameters (arVal/arVar rows), the unnamed constants
   // that are their default values, the dkParamDefault rows binding the two,
   // the Result row and the locals; the consumer picks by tag.
-  ReadDeclList(lkArgs, nil, Result, Result.Args);
-  if FTag <> drStop1 then
-    Error('Parameter list of %s not closed', [LName]);
+  ReadClosedList(lkArgs, nil, Result, Result.Args,
+    Format('Parameter list of %s', [LName]));
 end;
 
 // A parameter, local, field, class var, or the base part of a method entry.
@@ -1981,9 +2029,8 @@ begin
   Result.Tag := drA6Info;
   Result.Items := TList<TPasDcuDecl>.Create;
   ReadTag;
-  ReadDeclList(lkA6, nil, AOwnerRoutine, Result.Items);
-  if FTag <> drStop1 then
-    Error('Generic parameter list not closed');
+  ReadClosedList(lkA6, nil, AOwnerRoutine, Result.Items,
+    'Generic parameter list');
 end;
 
 // The A7 record: the type indices of a generic declaration's parameters.
@@ -1996,7 +2043,7 @@ var
   LTable: TArray<Integer>;
 begin
   LHead := ReadUIndex;
-  LCount := ReadUIndex;
+  LCount := ReadCount(1);
   SetLength(LTable, LCount);
   for LIdx := 0 to LCount - 1 do
   begin
@@ -2024,6 +2071,7 @@ begin
   LCount := ReadIndex;
   if LCount <= 0 then
     Exit;
+  CheckCount(LCount, 6);
   SetLength(AType.Interfaces, LCount);
   SetLength(AType.InterfaceMethodCounts, LCount);
   SetLength(AType.InterfaceNames, LCount);
@@ -2051,9 +2099,8 @@ procedure TPasDcuReader.ReadMembers(AType: TPasDcuType; AKind: TListKind);
 begin
   AType.Members := TList<TPasDcuDecl>.Create;
   ReadTag;
-  ReadDeclList(AKind, AType, nil, AType.Members);
-  if FTag <> drStop1 then
-    Error('Member list of %s not closed', [AType.Name]);
+  ReadClosedList(AKind, AType, nil, AType.Members,
+    Format('Member list of %s', [AType.Name]));
 end;
 
 { Type definitions }
@@ -2203,20 +2250,16 @@ begin
     LKind := ReadCallKind;
     if LKind = dcRegister then
     begin
-      case FTag of
-        drA5Info: ;
-        drA7Info: ReadA7(LType, nil);
-        drA8Info: ReadUIndex;
-      end;
+      if not TryReadInfoRecord(LType, nil) then
+        Error('Unexpected tag $%.2x in a procedure type header', [FTag]);
       ReadTag;
     end
     else
       LType.CallKind := LKind;
   end;
   ReadTag;
-  ReadDeclList(lkArgsT, LType, nil, LType.Members);
-  if FTag <> drStop1 then
-    Error('Parameter list of a procedure type not closed');
+  ReadClosedList(lkArgsT, LType, nil, LType.Members,
+    'Parameter list of a procedure type');
 end;
 
 procedure TPasDcuReader.ReadObjDef;
@@ -2312,7 +2355,7 @@ var
 begin
   LType := NewType(tkGenericParam, drTemplateArgDef);
   ReadTypeDefBase(LType);
-  LCount := ReadUIndex;
+  LCount := ReadCount(1);
   SetLength(LType.ParamTable, LCount);
   for LIdx := 0 to LCount - 1 do
     LType.ParamTable[LIdx] := ReadUIndex;
@@ -2328,7 +2371,7 @@ begin
   ReadTypeDefBase(LType);
   ReadByte;
   LType.BaseIdx := ReadUIndex;
-  LCount := ReadUIndex;
+  LCount := ReadCount(1);
   SetLength(LType.GenericArgs, LCount);
   for LIdx := 0 to LCount - 1 do
   begin
@@ -2343,21 +2386,21 @@ end;
 procedure TPasDcuReader.ReadFixups;
 var
   LCount, LIdx: Integer;
-  LOfs: Cardinal;
+  LOfs: Int64;
 begin
   if FFixupsSeen then
     Error('Second fixup table');
   FFixupsSeen := True;
-  LCount := ReadUIndex;
+  LCount := ReadCount(3);       // a delta, a kind byte, a slot
   SetLength(FUnit.Fixups, LCount);
   LOfs := 0;
   for LIdx := 0 to LCount - 1 do
   begin
     Inc(LOfs, Cardinal(ReadUIndex));           // offsets are stored as deltas
-    if LOfs > Cardinal(Length(FUnit.DataBlock)) then
+    if LOfs > Length(FUnit.DataBlock) then
       Error('Fixup offset $%x beyond the data block ($%x)',
         [LOfs, Length(FUnit.DataBlock)]);
-    FUnit.Fixups[LIdx].Offset := LOfs;
+    FUnit.Fixups[LIdx].Offset := Cardinal(LOfs);
     FUnit.Fixups[LIdx].Kind := ReadByte;
     FUnit.Fixups[LIdx].Slot := ReadUIndex;
   end;
@@ -2527,7 +2570,7 @@ procedure TPasDcuReader.SkipStrucScope;
 var
   LCount, LIdx: Integer;
 begin
-  LCount := ReadUIndex;
+  LCount := ReadCount(6);
   for LIdx := 1 to LCount * 6 do
     ReadUIndex;
 end;
@@ -2645,6 +2688,37 @@ end;
   three Studio versions write. An unknown tag ENDS the list (the enclosing
   reader then checks what it was); for the main list that is the final tag. }
 
+// A nested list read to its closer; anything else ending the list - an
+// unknown tag, which ReadDeclList stops at - is an error here rather than a
+// record read from inside another's payload.
+procedure TPasDcuReader.ReadClosedList(AKind: TListKind; AOwnerType: TPasDcuType;
+  AOwnerRoutine: TPasDcuDecl; AList: TList<TPasDcuDecl>; const AWhat: string;
+  ACloser: Byte);
+begin
+  ReadDeclList(AKind, AOwnerType, AOwnerRoutine, AList);
+  if FTag <> ACloser then
+    Error('%s not closed', [AWhat]);
+end;
+
+// The info records that are a payload and nothing else, in the one table
+// both readers of them use (a declaration list and a procedure type's
+// header kept diverging copies); False for any other tag, nothing read.
+function TPasDcuReader.TryReadInfoRecord(AOwnerType: TPasDcuType;
+  AOwnerDecl: TPasDcuDecl): Boolean;
+begin
+  Result := True;
+  case FTag of
+    drA2Info, drA5Info:
+      ;
+    drA7Info:
+      ReadA7(AOwnerType, AOwnerDecl);
+    drA8Info, drA9Info:
+      ReadUIndex;
+  else
+    Result := False;
+  end;
+end;
+
 procedure TPasDcuReader.ReadDeclList(AKind: TListKind; AOwnerType: TPasDcuType;
   AOwnerRoutine: TPasDcuDecl; AList: TList<TPasDcuDecl>);
 var
@@ -2671,13 +2745,18 @@ begin
           LDecl := ReadVarDecl(dkResString, LTag);
         drSysProc:
           begin
-            LDecl := ReadProcDecl(nil, True, AOwnerType);
+            LDecl := ReadProcDecl(True, AOwnerType);
             LDecl.Kind := dkSysRoutine;
             LDecl.Tag := drSysProc;
           end;
         drProc:
           begin
-            LDecl := ReadProcDecl(LEmbedded, False, AOwnerType);
+            // The list goes to the routine only once its header has been
+            // read: attached before, a header that failed left it with two
+            // owners (the routine, already in the unit's FOwned, and the
+            // finally below) - a double free that replaced the error.
+            LDecl := ReadProcDecl(False, AOwnerType);
+            LDecl.Embedded := LEmbedded;
             LEmbedded := nil;    // owned by the routine now
           end;
         drEmbeddedProcStart:
@@ -2691,10 +2770,9 @@ begin
                 LEmbedded := TList<TPasDcuDecl>.Create;
               Inc(FEmbedDepth);
               ReadTag;
-              ReadDeclList(lkEmbedded, nil, AOwnerRoutine, LEmbedded);
+              ReadClosedList(lkEmbedded, nil, AOwnerRoutine, LEmbedded,
+                'Embedded list', drEmbeddedProcEnd);
               Dec(FEmbedDepth);
-              if FTag <> drEmbeddedProcEnd then
-                Error('Embedded list not closed');
             end;
           end;
         drEmbeddedProcEnd:
@@ -2811,7 +2889,8 @@ begin
             ReadUIndex;
             LDecl.Items := TList<TPasDcuDecl>.Create;
             ReadTag;
-            ReadDeclList(lkUnitAddInfo, nil, nil, LDecl.Items);
+            ReadClosedList(lkUnitAddInfo, nil, nil, LDecl.Items,
+              'Unit info list');
           end;
         drConstAddInfo:
           ReadConstAddInfo;
@@ -2828,9 +2907,7 @@ begin
             ReadByte;
             LDecl.Items := TList<TPasDcuDecl>.Create;
             ReadTag;
-            ReadDeclList(lkA6, nil, nil, LDecl.Items);
-            if FTag <> drStop1 then
-              Error('Frame record list not closed');
+            ReadClosedList(lkA6, nil, nil, LDecl.Items, 'Frame record list');
           end;
         drCPPFlags:
           begin ReadByte; ReadUIndex; end;
@@ -2846,8 +2923,6 @@ begin
             for LIdx := 1 to LCount do
               ReadUIndex;
           end;
-        drA2Info, drA5Info:
-          ;
         arCopyDecl:
           begin
             LDecl := FUnit.NewDecl(dkCopy);
@@ -2864,10 +2939,6 @@ begin
           end;
         drA6Info:
           LDecl := ReadA6List(AOwnerRoutine);
-        drA7Info:
-          ReadA7(AOwnerType, AOwnerRoutine);
-        drA8Info, drA9Info:
-          ReadUIndex;
         arAnonymousBlock:
           begin ReadUIndex; ReadUIndex; end;
         drDelayedImpInfo:
@@ -2881,7 +2952,8 @@ begin
         arFinalFlag:
           ReadUIndex;
       else
-        Break;
+        if not TryReadInfoRecord(AOwnerType, AOwnerRoutine) then
+          Break;
       end;
       if LDecl <> nil then
       begin
