@@ -2,8 +2,13 @@ program PasTreeDiffHarness;
 
 { The incremental-reanalysis DIFFERENTIAL HARNESS (stage B's first
   deliverable): runs an edit sequence through the FULL pipeline and through
-  the INCREMENTAL path over the same closure, and compares RefMap, ExtRefMap
-  and diagnostics across the ENTIRE closure after every step. The corpus
+  the INCREMENTAL path over the same closure, and compares RefMap, ExtRefMap,
+  the cross-model typing maps (CallTargetX, SymTypeX, ExprTypeX - a generic
+  instance by what it names, not by its table index) and diagnostics across
+  the ENTIRE closure after every step, and checks that no entry of the
+  incremental side's instance table names a symbol its model does not hold.
+  -members and -visibility turn the opt-in diagnostics on for both sides. The
+  corpus
   suites only ever prove the full path; this is the evidence that the
   incremental path produces the same project, not a plausible-looking one.
 
@@ -46,6 +51,15 @@ program PasTreeDiffHarness;
   (<program dir>\<Name>.pas, importing <uses> if given) and the program's uses
   clause opening with `<Name> in '<Name>.pas'` - the module path TAKES IN such
   a unit (0.53.0), and a fallback on it is counted as unexpected.
+
+  -scenario:<name> replaces both: a small built-in project written to
+  %TEMP%\pastree_diffharness\<name> and its whole-text edit steps, each the
+  trigger shape of an audit item of the module path - syntax, oracle and
+  declared (a selected consumer's parse rows and oracle stream, A3-36),
+  instrepoint (a same-shape interface change with an implementation symbol
+  shift, A3-37), enumerator, current and attribute (dependencies reached by
+  a rule, not a spelled name, A3-38). `-scenario:list` names them; run them
+  with -module.
 
   -selftest inverts the exercise to prove the COMPARATOR can see: the
   incremental side is deliberately fed the PRE-EDIT text of each step's
@@ -96,12 +110,12 @@ uses
 type
   TEditKind = (ekBody, ekIntf, ekBlank, ekComment, ekConst, ekType,
     ekImplVar, ekImplVarTop, ekIntfUses, ekMember, ekParent, ekMidType,
-    ekRecField, ekOverload, ekInsert, ekReplace, ekNewUnit);
+    ekRecField, ekOverload, ekInsert, ekReplace, ekNewUnit, ekText);
   TEditStep = record
     Kind: TEditKind;
     Path: string;    // full path of the unit to edit
     InsLine: Integer;  // ekInsert: 1-based line the text goes BEFORE
-    InsText: string;   // ekInsert: the line to insert, verbatim
+    InsText: string;   // ekInsert: the line to insert; ekText: the new text
     UnitName: string;  // ekNewUnit: the new unit; Path is its program
     UnitUses: string;  // ekNewUnit: its interface uses list, or ''
   end;
@@ -135,6 +149,10 @@ var
   GDemoteScripted: Boolean;   // -demotescripted: the edited files too
   GKeepDirs: TArray<string>;  // -demotekeep:<dir>, lower-cased, trailing '\'
   GKeepFiles: TDictionary<string, Boolean>;  // scripted files + root, lower
+  GMembers: Boolean;          // -members: ReportUnresolvedMembers, both sides
+  GVisibility: Boolean;       // -visibility: ReportVisibility, both sides
+  GScenario: string;          // -scenario:<name>: a built-in fixture + steps
+  GScenarioSteps: TArray<TEditStep>;
 
 { ---- project construction (both sides identical except the donor) -------- }
 
@@ -144,6 +162,8 @@ var
 begin
   Result := TPasSemaProject.Create(GPlatform, GPaths, []);
   Result.SingleThreaded := GSingleThread;
+  Result.ReportUnresolvedMembers := GMembers;
+  Result.ReportVisibility := GVisibility;
   if GRedoLimit <> 0 then
     Result.ModuleRedoLimit := GRedoLimit;
   Result.SetNamespaces(PasDefaultNamespaces(GPlatform));
@@ -632,6 +652,84 @@ begin
   TArray.Sort<string>(Result);   // dictionary order is not deterministic
 end;
 
+// A symbol of AProj rendered generation-independently: its unit's path, its
+// index and its name. An index the model does not hold is printed as such -
+// never read: that is what a stale map entry looks like (A3-37).
+function SymTag(AProj: TPasSemaProject; AUnitId, ASym: Integer): string;
+var
+  LModel: TPasSemaModel;
+begin
+  Result := UnitTag(AProj, AUnitId) + ':' + IntToStr(ASym);
+  if (AUnitId < 0) or (AUnitId >= AProj.ModelCount) then
+    Exit;
+  LModel := AProj.Model(AUnitId);
+  if (ASym >= 0) and (ASym < LModel.SymCount) then
+    Result := Result + '(' + LModel.Symbols[ASym].Name + ')'
+  else
+    Result := Result + '(OUT OF RANGE)';
+end;
+
+// A cross-model type: the type symbol and, for an instantiation, its type
+// arguments by the same rule. The instance-table index itself is a per-run
+// accident of interning order, so only what it names is compared.
+function XTag(AProj: TPasSemaProject; const AX: TSemaXType;
+  ADepth: Integer = 0): string;
+var
+  LArgs: TArray<TSemaXType>;
+begin
+  Result := SymTag(AProj, AX.UnitId, AX.Sym);
+  if AX.Inst = NIL_INST then
+    Exit;
+  if (AX.Inst < 0) or (AX.Inst >= AProj.InstanceCount) then
+    Exit(Result + '<instance ' + IntToStr(AX.Inst) + ' OUT OF RANGE>');
+  if ADepth >= 8 then
+    Exit(Result + '<...>');
+  LArgs := AProj.Instance(AX.Inst).Args;
+  Result := Result + '<';
+  for var LIdx := 0 to High(LArgs) do
+  begin
+    if LIdx > 0 then
+      Result := Result + ', ';
+    Result := Result + XTag(AProj, LArgs[LIdx], ADepth + 1);
+  end;
+  Result := Result + '>';
+end;
+
+// CallTargetX: node -> the chosen routine in any model.
+function CallLines(AProj: TPasSemaProject; AModel: TPasSemaModel):
+  TArray<string>;
+var
+  LCount: Integer;
+begin
+  SetLength(Result, AModel.CallTargetX.Count);
+  LCount := 0;
+  for var LPair in AModel.CallTargetX do
+  begin
+    Result[LCount] := Format('%d>%s', [LPair.Key,
+      SymTag(AProj, LPair.Value.UnitId, LPair.Value.Sym)]);
+    Inc(LCount);
+  end;
+  TArray.Sort<string>(Result);
+end;
+
+// SymTypeX (symbol -> declared type) or ExprTypeX (node -> expression type):
+// the key is intra-model (both sides analyzed identical text), the type is
+// rendered by XTag.
+function XTypeLines(AProj: TPasSemaProject;
+  const AMap: TPasIntMap<TSemaXType>): TArray<string>;
+var
+  LCount: Integer;
+begin
+  SetLength(Result, AMap.Count);
+  LCount := 0;
+  for var LPair in AMap do
+  begin
+    Result[LCount] := Format('%d>%s', [LPair.Key, XTag(AProj, LPair.Value)]);
+    Inc(LCount);
+  end;
+  TArray.Sort<string>(Result);
+end;
+
 var
   GReported: Integer;   // per step; reset in CompareStep
   GReportCap: Integer;  // MAX_REPORTED normally; 1 on a self-test step
@@ -742,11 +840,38 @@ begin
       if LDelta <> '' then
         Mismatch(Format('%s: ExtRefMap %s', [LPair.Key, LDelta]));
 
+      // The cross-model typing maps: a binding can agree while the type a
+      // consumer derived from it is stale (a redone consumer typed against
+      // an old instance, a type left behind by a repoint).
+      LDelta := FirstDelta(CallLines(ATruth, LTM), CallLines(ACand, LCM));
+      if LDelta <> '' then
+        Mismatch(Format('%s: CallTargetX %s', [LPair.Key, LDelta]));
+      LDelta := FirstDelta(XTypeLines(ATruth, LTM.SymTypeX),
+        XTypeLines(ACand, LCM.SymTypeX));
+      if LDelta <> '' then
+        Mismatch(Format('%s: SymTypeX %s', [LPair.Key, LDelta]));
+      LDelta := FirstDelta(XTypeLines(ATruth, LTM.ExprTypeX),
+        XTypeLines(ACand, LCM.ExprTypeX));
+      if LDelta <> '' then
+        Mismatch(Format('%s: ExprTypeX %s', [LPair.Key, LDelta]));
+
       // Diagnostics, full text + position.
       LDelta := FirstDelta(DiagLines(LTM), DiagLines(LCM));
       if LDelta <> '' then
         Mismatch(Format('%s: diags %s', [LPair.Key, LDelta]));
     end;
+    // The instance table is not compared entry by entry (interning order is
+    // a per-run accident and a module run keeps entries a rebuild drops), but
+    // no entry may name a symbol its model does not hold: that is a repoint
+    // that wrote a stale index (A3-37), invisible to every map above when no
+    // node happens to carry that instance.
+    for var LInst := 0 to ACand.InstanceCount - 1 do
+      for var LArg in ACand.Instance(LInst).Args do
+      begin
+        LDelta := XTag(ACand, LArg);
+        if LDelta.Contains('OUT OF RANGE') then
+          Mismatch(Format('instance %d: argument %s', [LInst, LDelta]));
+      end;
   finally
     LTruthMap.Free;
     LCandMap.Free;
@@ -790,6 +915,7 @@ begin
     ekInsert: Result := 'insert';
     ekReplace: Result := 'replace';
     ekNewUnit: Result := 'newunit';
+    ekText: Result := 'text';
   else
     Result := 'type';
   end;
@@ -922,6 +1048,211 @@ begin
   end;
 end;
 
+{ ---- built-in scenarios ---------------------------------------------------- }
+
+{ -scenario:<name> writes a small project into %TEMP%\pastree_diffharness\
+  <name>, makes its program the root and replaces the script with whole-text
+  steps (ekText). Each is the trigger shape of an audit item the module path
+  got wrong - a run with -module is red until that item is fixed, and the
+  gate afterwards. `-scenario:list` prints the names. }
+
+const
+  SCENARIOS: array[0..6] of string = ('syntax', 'oracle', 'declared',
+    'instrepoint', 'enumerator', 'current', 'attribute');
+
+var
+  GScenarioDir: string;
+
+function Lines(const AItems: array of string): string;
+begin
+  Result := string.Join(#13#10, AItems) + #13#10;
+end;
+
+procedure ScenarioFile(const AName, AText: string);
+begin
+  TFile.WriteAllText(TPath.Combine(GScenarioDir, AName), AText);
+end;
+
+procedure ScenarioStep(const AName, AText: string);
+var
+  LStep: TEditStep;
+begin
+  LStep := Default(TEditStep);
+  LStep.Kind := ekText;
+  LStep.Path := TPath.Combine(GScenarioDir, AName);
+  LStep.InsText := AText;
+  GScenarioSteps := GScenarioSteps + [LStep];
+end;
+
+procedure WriteScenario(const AName: string);
+var
+  LKnown: Boolean;
+begin
+  if SameText(AName, 'list') then
+  begin
+    for var LName in SCENARIOS do
+      Writeln(LName);
+    Halt(0);
+  end;
+  LKnown := False;
+  for var LName in SCENARIOS do
+    LKnown := LKnown or SameText(LName, AName);
+  if not LKnown then
+  begin
+    Writeln(ErrOutput, 'unknown scenario: ', AName, ' (-scenario:list)');
+    Halt(2);
+  end;
+  GScenarioDir := TPath.Combine(TPath.Combine(TPath.GetTempPath,
+    'pastree_diffharness'), LowerCase(AName));
+  if TDirectory.Exists(GScenarioDir) then
+    TDirectory.Delete(GScenarioDir, True);
+  TDirectory.CreateDirectory(GScenarioDir);
+  GScenarioSteps := nil;
+
+  // A3-36, the parse half: a consumer with a syntax error in progress is
+  // selected by an interface edit of a unit it uses; its E2029 rows must
+  // survive the redo.
+  if SameText(AName, 'syntax') then
+  begin
+    ScenarioFile('HubS.pas', Lines(['unit HubS;', 'interface',
+      'const KV = 3;', 'implementation', 'end.']));
+    ScenarioFile('ConsS.pas', Lines(['unit ConsS;', 'interface', 'uses HubS;',
+      'procedure P;', 'implementation', 'procedure P;',
+      'var X: Integer;', 'begin', '  X := KV;', '  X := (1 + ;', 'end;',
+      'end.']));
+    ScenarioFile('AppS.dpr', Lines(['program AppS;', 'uses HubS, ConsS;',
+      'begin', 'end.']));
+    ScenarioStep('HubS.pas', Lines(['unit HubS;', 'interface',
+      'const KV = ''abc'';', 'implementation', 'end.']));
+  end
+  // A3-36, the oracle half: a consumer whose stream the conditional oracle
+  // decided is selected (it holds OD), then the name its $IF asks changes.
+  else if SameText(AName, 'oracle') then
+  begin
+    ScenarioFile('UnitOA.pas', Lines(['unit UnitOA;', 'interface',
+      'const OC = 1; OD = 5;', 'implementation', 'end.']));
+    ScenarioFile('UnitOB.pas', Lines(['unit UnitOB;', 'interface',
+      'uses UnitOA;', '{$IF UnitOA.OC = 1}', 'const OnOne = 1;', '{$ELSE}',
+      'const OnOther = 2; OnThird = OnOther + Missing;', '{$IFEND}',
+      'const HoldsOD = OD;',
+      'implementation', 'end.']));
+    ScenarioFile('AppO.dpr', Lines(['program AppO;', 'uses UnitOA, UnitOB;',
+      'begin', 'end.']));
+    ScenarioStep('UnitOA.pas', Lines(['unit UnitOA;', 'interface',
+      'const OC = 1; OD = 6;', 'implementation', 'end.']));
+    ScenarioStep('UnitOA.pas', Lines(['unit UnitOA;', 'interface',
+      'const OC = 2; OD = 6;', 'implementation', 'end.']));
+  end
+  // A3-36, a Declared() guard: the consumer is selected, then the declaration
+  // its guard asks about is removed.
+  else if SameText(AName, 'declared') then
+  begin
+    ScenarioFile('UnitDA.pas', Lines(['unit UnitDA;', 'interface',
+      'type TFoo = class end;', 'const KD = 1;', 'implementation', 'end.']));
+    ScenarioFile('UnitDB.pas', Lines(['unit UnitDB;', 'interface',
+      'uses UnitDA;', '{$IF Declared(TFoo)}', 'const X1 = Undeclared1;',
+      '{$ELSE}', 'const X2 = Undeclared2;', '{$IFEND}', 'const HD = KD;',
+      'implementation', 'end.']));
+    ScenarioFile('AppD.dpr', Lines(['program AppD;', 'uses UnitDA, UnitDB;',
+      'begin', 'end.']));
+    ScenarioStep('UnitDA.pas', Lines(['unit UnitDA;', 'interface',
+      'type TFoo = class end;', 'const KD = 2;', 'implementation', 'end.']));
+    ScenarioStep('UnitDA.pas', Lines(['unit UnitDA;', 'interface',
+      'const KD = 2;', 'implementation', 'end.']));
+  end
+  // A3-37: a same-shape interface change and an implementation symbol shift
+  // in one step, with an instance whose argument is an implementation type;
+  // then a body edit of the same unit.
+  else if SameText(AName, 'instrepoint') then
+  begin
+    ScenarioFile('UnitIA.pas', Lines(['unit UnitIA;', 'interface', 'type',
+      '  TBox<T> = class F: T; end;', 'const C = 1;', 'procedure Q;',
+      'implementation', 'const K1 = 1; K2 = 2; K3 = 3;',
+      'type TLoc = class end;', 'procedure Q;', 'var B: TBox<TLoc>;',
+      'begin', '  B := nil;', 'end;', 'end.']));
+    ScenarioFile('AppI.dpr', Lines(['program AppI;', 'uses UnitIA;',
+      'begin', '  Q;', 'end.']));
+    ScenarioStep('UnitIA.pas', Lines(['unit UnitIA;', 'interface', 'type',
+      '  TBox<T> = class F: T; end;', 'const C = 2;', 'procedure Q;',
+      'implementation', 'type TLoc = class end;', 'procedure Q;',
+      'var B: TBox<TLoc>;', 'begin', '  B := nil;', 'end;', 'end.']));
+    ScenarioStep('UnitIA.pas', Lines(['unit UnitIA;', 'interface', 'type',
+      '  TBox<T> = class F: T; end;', 'const C = 2;', 'procedure Q;',
+      'implementation', 'type TLoc = class end;', 'procedure Q;',
+      'var B: TBox<TLoc>;', 'begin', '  B := nil;', 'end;',
+      'procedure Q2; begin end;', 'end.']));
+  end
+  // A3-38: dependencies reached by a rule, not by a spelled name - an added
+  // GetEnumerator and default property, a changed Current type, an added
+  // attribute class.
+  else if SameText(AName, 'enumerator') or SameText(AName, 'current') then
+  begin
+    var LHubHead: TArray<string> := ['unit HubE;', 'interface', 'type',
+      '  TItem = class Name: string; end;',
+      '  TItem2 = class Name: string; Extra: Integer; end;'];
+    var LEnum1: TArray<string> := ['  TEnum = class', '    function MoveNext: Boolean;',
+      '    function GetCurrent: TItem;',
+      '    property Current: TItem read GetCurrent;', '  end;'];
+    var LEnum2: TArray<string> := ['  TEnum = class', '    function MoveNext: Boolean;',
+      '    function GetCurrent: TItem2;',
+      '    property Current: TItem2 read GetCurrent;', '  end;'];
+    var LCollPlain: TArray<string> := ['  TColl = class',
+      '    function Get(I: Integer): TItem;', '  end;'];
+    var LCollFull: TArray<string> := ['  TColl = class',
+      '    function Get(I: Integer): TItem;',
+      '    function GetEnumerator: TEnum;',
+      '    property Items[I: Integer]: TItem read Get; default;', '  end;'];
+    var LImplPlain: TArray<string> := ['implementation',
+      'function TEnum.MoveNext: Boolean; begin Result := False; end;',
+      'function TEnum.GetCurrent: TItem; begin Result := nil; end;',
+      'function TColl.Get(I: Integer): TItem; begin Result := nil; end;'];
+    var LImplCur2: TArray<string> := ['implementation',
+      'function TEnum.MoveNext: Boolean; begin Result := False; end;',
+      'function TEnum.GetCurrent: TItem2; begin Result := nil; end;',
+      'function TColl.Get(I: Integer): TItem; begin Result := nil; end;'];
+    var LImplEnum: TArray<string> := ['function TColl.GetEnumerator: TEnum; ' +
+      'begin Result := nil; end;'];
+    ScenarioFile('ConsE.pas', Lines(['unit ConsE;', 'interface',
+      'uses HubE;', 'procedure P(C: TColl);', 'implementation',
+      'procedure P(C: TColl);', 'var S: string;', 'begin',
+      '  for var X in C do', '    S := X.Name;', '  S := C[0].Name;', 'end;',
+      'end.']));
+    ScenarioFile('AppE.dpr', Lines(['program AppE;', 'uses HubE, ConsE;',
+      'begin', 'end.']));
+    if SameText(AName, 'enumerator') then
+    begin
+      ScenarioFile('HubE.pas', Lines(LHubHead + LEnum1 + LCollPlain +
+        LImplPlain + ['end.']));
+      ScenarioStep('HubE.pas', Lines(LHubHead + LEnum1 + LCollFull +
+        LImplPlain + LImplEnum + ['end.']));
+    end
+    else
+    begin
+      ScenarioFile('HubE.pas', Lines(LHubHead + LEnum1 + LCollFull +
+        LImplPlain + LImplEnum + ['end.']));
+      ScenarioStep('HubE.pas', Lines(LHubHead + LEnum2 + LCollFull +
+        LImplCur2 + LImplEnum + ['end.']));
+    end;
+  end
+  else if SameText(AName, 'attribute') then
+  begin
+    ScenarioFile('HubA.pas', Lines(['unit HubA;', 'interface', 'type',
+      '  TBaseThing = class end;', 'implementation', 'end.']));
+    ScenarioFile('ConsA.pas', Lines(['unit ConsA;', 'interface',
+      'uses HubA;', 'type', '  [Foo]', '  TX = class(TBaseThing) end;',
+      'implementation', 'end.']));
+    ScenarioFile('AppA.dpr', Lines(['program AppA;', 'uses HubA, ConsA;',
+      'begin', 'end.']));
+    ScenarioStep('HubA.pas', Lines(['unit HubA;', 'interface', 'type',
+      '  TBaseThing = class end;',
+      '  FooAttribute = class(TCustomAttribute) end;', 'implementation',
+      'end.']));
+  end;
+
+  for var LFile in TDirectory.GetFiles(GScenarioDir, '*.dpr') do
+    GRoot := LFile;
+end;
+
 { ---- main ------------------------------------------------------------------ }
 
 var
@@ -969,6 +1300,12 @@ begin
       GModuleMode := True
     else if SameText(ParamStr(GIdx), '-demotetext') then
       GDemoteText := True
+    else if SameText(ParamStr(GIdx), '-members') then
+      GMembers := True
+    else if SameText(ParamStr(GIdx), '-visibility') then
+      GVisibility := True
+    else if ParamStr(GIdx).StartsWith('-scenario:', True) then
+      GScenario := Copy(ParamStr(GIdx), 11, MaxInt)
     else if SameText(ParamStr(GIdx), '-demotescripted') then
       GDemoteScripted := True
     else if ParamStr(GIdx).StartsWith('-demotekeep:', True) then
@@ -978,10 +1315,13 @@ begin
       GPaths := GPaths + [Copy(ParamStr(GIdx), 3, MaxInt)]
     else if GRoot = '' then
       GRoot := TPath.GetFullPath(ParamStr(GIdx));
+  if GScenario <> '' then
+    WriteScenario(GScenario);
   if (GRoot = '') or not TFile.Exists(GRoot) then
   begin
     Writeln(ErrOutput, 'usage: PasTreeDiffHarness <root.dpr> [-p:<platform>] '
-      + '[-L<dir>]... [-samples:<N>] [-script:<file>] [-module] [-selftest] '
+      + '[-L<dir>]... [-samples:<N>] [-script:<file>] [-scenario:<name>] '
+      + '[-module] [-selftest] [-members] [-visibility] '
       + '[-demotetext [-demotescripted] [-demotekeep:<dir>]...]');
     Halt(2);
   end;
@@ -997,7 +1337,9 @@ begin
     [LCand.ModelCount, LSW.ElapsedMilliseconds,
      PlatformInfo(GPlatform).Name]));
 
-  if GScriptFile <> '' then
+  if GScenario <> '' then
+    LSteps := GScenarioSteps
+  else if GScriptFile <> '' then
     LSteps := LoadScript(GScriptFile)
   else
   begin
@@ -1041,6 +1383,11 @@ begin
         LText := TPasSourceManager.LoadFileTolerant(LStep.Path);
       if LStep.Kind = ekNewUnit then
         LOk := ApplyNewUnit(LText, LStep.UnitName, LNew)
+      else if LStep.Kind = ekText then
+      begin
+        LNew := LStep.InsText;
+        LOk := True;
+      end
       else
         LOk := ApplyEdit(LText, LStep.Kind, GIdx, LNew, LStep.InsLine,
           LStep.InsText);
@@ -1138,7 +1485,17 @@ begin
       DemoteForeign(LCand);
     end;
     var LVerdict: string;
-    if GStaleKey <> '' then
+    if (GStaleKey <> '') and (LStep.Kind in [ekBlank, ekComment]) then
+    begin
+      // A blank line or a comment changes no node and no binding: the two
+      // texts analyze alike, so nothing can be required to differ. An
+      // unrelated diagnostic's line would move, but a unit without one
+      // leaves nothing to see.
+      if not LOk then
+        Dec(GFailedSteps);
+      LVerdict := 'SELFTEST n/a (the edit changes no node)';
+    end
+    else if GStaleKey <> '' then
     begin
       // Self-test inversion: an equal compare here means the comparator is
       // BLIND - count it as the failure; a mismatch is the pass.

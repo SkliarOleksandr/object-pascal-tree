@@ -388,9 +388,25 @@ dominates - see the open list.
 ## 4. How it is verified
 
 `tools\PasTreeDiffHarness.dpr` runs an edit sequence through the full pipeline
-AND the incremental path over the same closure and compares RefMap, ExtRefMap
-and diagnostics across the ENTIRE closure after every step. The corpus suites
-only ever prove the full path.
+AND the incremental path over the same closure and compares RefMap, ExtRefMap,
+CallTargetX, SymTypeX, ExprTypeX and diagnostics across the ENTIRE closure
+after every step. A generic instance is compared by what it names (the generic
+and its arguments, each a unit path and symbol), never by its instance-table
+index, which is a per-run accident of interning order; and no entry of the
+incremental side's instance table may name a symbol its model does not hold.
+The corpus suites only ever prove the full path.
+
+- `-members` / `-visibility`: the opt-in diagnostics on both sides, so a
+  stale member binding shows as a diagnostic difference too;
+- `-scenario:<name>`: a small built-in project and its edit steps, the trigger
+  shape of an audit item of the module path (`-scenario:list`): `syntax`,
+  `oracle` and `declared` - a redone consumer keeps its parse rows and its
+  oracle-decided stream; `instrepoint` - a same-shape interface change with an
+  implementation symbol shift; `enumerator`, `current`, `attribute` - a
+  dependency reached by a rule (for-in enumerator, default property,
+  attribute suffix) rather than by a spelled name. Every one of them
+  mismatches today under `-module`: these are known gaps of the consumer
+  redo, kept here as the gate for their fix;
 
 - `-script:<file>` replaces the synthetic sampling: one `kind <path>` per
   line, kind = `body`, `intf`, `blank`, `comment`, `const`, `type` (the last
@@ -416,7 +432,8 @@ only ever prove the full path.
   refusal, exactly as a host must;
 - `-selftest`: the negative control. The incremental side is fed the PRE-edit
   text of each step, and every edit step is REQUIRED to mismatch - a blind
-  comparator would make every green run above worthless;
+  comparator would make every green run above worthless (a `blank` or
+  `comment` step changes no node, so it is n/a there);
 - `-st`: both sides single-threaded, for ruling a concurrency effect in or out;
 - `-demotetext`: the incremental side calls `DemoteText` after every build and
   every accepted step, keeping the scripted files, the root and every unit
