@@ -1526,14 +1526,21 @@ begin
   case FModel.Tree.Nodes[LDef].Kind of
     nkClassType, nkInterfaceType, nkRecordType, nkObjectType, nkHelperType:
       begin
-        LChild := FModel.Tree.Nodes[LDef].FirstChild;
-        while (LChild <> NIL_NODE) and not (FModel.Tree.Nodes[LChild].Kind in
-          [nkIdent, nkMember, nkTypeArgs]) do
-          LChild := FModel.Tree.Nodes[LChild].NextSibling;
+        // A struct's ancestor is its FIRST child when that is a type
+        // reference (PasHeritageRef - never a record's `end align`
+        // operand); a helper's leading run ends with its extended type.
+        if FModel.Tree.Nodes[LDef].Kind = nkHelperType then
+        begin
+          LChild := FModel.Tree.Nodes[LDef].FirstChild;
+          if (LChild <> NIL_NODE) and not (FModel.Tree.Nodes[LChild].Kind in
+             [nkIdent, nkMember, nkTypeArgs]) then
+            LChild := NIL_NODE;
+        end
+        else
+          LChild := PasHeritageRef(FModel.Tree, LDef);
         if LChild <> NIL_NODE then
         begin
-          // A helper's LAST leading ref is its extended type; a struct's
-          // FIRST is its ancestor. For a helper, walk to the last.
+          // For a helper, walk to the last leading ref.
           if FModel.Tree.Nodes[LDef].Kind = nkHelperType then
             while (FModel.Tree.Nodes[LChild].NextSibling <> NIL_NODE) and
                   (FModel.Tree.Nodes[

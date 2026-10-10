@@ -1574,8 +1574,10 @@ begin
               // owner's (PropHolder).
               LClass := PropHolder(LEntry, LId.Prop, LId.Seg, LDeclared,
                 LOpen);
-              if XValid(LClass) and not FProj.XDescendsFrom(LClass, LOwner) and
-                 not (LDeclared and FProj.XDescendsFrom(LOwner, LClass)) then
+              if XValid(LClass) and
+                 (FProj.XDescent(LClass, LOwner) = xdNo) and
+                 not (LDeclared and
+                   (FProj.XDescent(LOwner, LClass) <> xdNo)) then
                 Continue;
               AError := Format('%s sets a property named "%s", and renaming ' +
                 'a published property in form files is not supported yet - ' +
@@ -1654,7 +1656,7 @@ begin
   begin
     LDoc := DocOf(LEntry);
     LRoot := RootClassOf(LEntry);
-    if not XValid(LRoot) or not FProj.XDescendsFrom(LRoot, LOwner) then
+    if not XValid(LRoot) or (FProj.XDescent(LRoot, LOwner) = xdNo) then
       Continue;
     if FProj.FindMemberX(LEntry.Mid, LRoot, LNewLower, LMMid, LMSym, LCtx) and
        (LMMid >= 0) and (LMSym <> NIL_SYM) and

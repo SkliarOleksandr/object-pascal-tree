@@ -5457,6 +5457,138 @@ begin
     TDirectory.Delete(LDir, True);
 end;
 
+{ One heritage step (audit B18). Eight hand-kept copies of "the first
+  heritage entry is the ancestor" had drifted: XDescendsFrom answered "no"
+  for an ancestry it could not follow (a false E2515 / E2010 under a missing
+  ancestor unit, A2-14, A3-08) and resolved a nested `Outer.Inner` ancestor
+  with plain ResolveTypeExpr (A2-15); a constraint named through an alias
+  never matched (A2-16, spec 16.4.1); AncestorOfX and UnknownAncestryX had no
+  `object` arm (A3-12, B3-26, spec 11.5); a record's trailing `end align`
+  operand read as a heritage entry (B3-16, spec 9.1.2). }
+procedure TestHeritageStep;
+var
+  LDir, LApp: string;
+  LApp0, LUnit: TPasSemaModel;
+  LRec: Integer;
+
+  procedure Build(AMembers: Boolean);
+  begin
+    GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+    GProj.ReportUnresolvedMembers := AMembers;
+    GProj.AnalyzeProject(LApp);
+    LApp0 := ModelByName('hsapp');
+    LUnit := ModelByName('hsa');
+  end;
+
+begin
+  LDir := FreshDir('pastree_sema_heritage');
+  LApp := TPath.Combine(LDir, 'HsApp.dpr');
+  // The roots the checks compare against: TObject (E2515) and
+  // TCustomAttribute (E2010).
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  TCustomAttribute = class(TObject) end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HsA.pas'),
+    'unit HsA;'#10'interface'#10'uses HsMissingXyz;'#10'type'#10 +
+    '  TDerivedA = class(TMissingBase) end;'#10 +
+    '  TBaseObjM = object(TMissingObj) end;'#10 +
+    '  TOuter = class'#10'  public type'#10 +
+    '    TBaseAttr = class(TCustomAttribute) end;'#10 +
+    '    TInner = class end;'#10'  end;'#10 +
+    '  TBase = class end;'#10'  TBaseAlias = TBase;'#10 +
+    '  TDerived = class(TBase) end;'#10 +
+    '  TItem = class Foo: Integer; end;'#10 +
+    '  TR1 = record A: Integer; end;'#10'  TR2 = record B: Integer; end;'#10 +
+    '  TO1 = object'#10'    function Val: TR1;'#10 +
+    '    function Get: TR1; overload;'#10'  end;'#10 +
+    '  TO2 = object(TO1)'#10'    function Val: TR2;'#10 +
+    '    function Get(A: Integer): TR2; overload;'#10 +
+    '    procedure M;'#10'  end;'#10 +
+    '  TBaseObj = object'#10'  protected'#10'    FX: TItem;'#10 +
+    '    property X: TItem read FX;'#10'  end;'#10 +
+    '  TDerObj = object(TBaseObj)'#10'  public'#10'    property X;'#10 +
+    '  end;'#10 +
+    'const'#10'  CAl = 16;'#10 +
+    'type'#10'  T03 = record A: Byte; end align CAl;'#10 +
+    'implementation'#10 +
+    'function TO1.Val: TR1; begin Result.A := 1; end;'#10 +
+    'function TO1.Get: TR1; begin Result.A := 2; end;'#10 +
+    'function TO2.Val: TR2; begin Result.B := 3; end;'#10 +
+    'function TO2.Get(A: Integer): TR2; begin Result.B := A; end;'#10 +
+    'procedure TO2.M;'#10'var I: Integer;'#10'begin'#10 +
+    '  I := inherited Val.A;'#10'  with Get do I := A;'#10'end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(LApp,
+    'program HsApp;'#10'uses HsA;'#10'type'#10 +
+    '  TMyAttr = class(TOuter.TBaseAttr) end;'#10 +
+    '  [TMyAttr] TFoo = class end;'#10 +
+    '  [TDerivedA] TFoo2 = class end;'#10 +
+    '  [TBase] TFoo3 = class end;'#10 +
+    '  TMine = class(TOuter.TInner) end;'#10 +
+    '  TP<T: TOuter.TInner> = class end;'#10 +
+    '  TG<T: TBaseAlias> = class end;'#10 +
+    '  TG2<T: TObject> = class end;'#10 +
+    '  TChildObj = object(TBaseObjM)'#10'    procedure M;'#10'  end;'#10 +
+    'procedure TChildObj.M;'#10'begin'#10 +
+    '  InheritedObjField := 1;'#10'end;'#10 +
+    'var'#10'  P1: TP<TMine>;'#10 +
+    '  X: TG<TDerived>;'#10'  Y: TG<TBase>;'#10'  Z: TG<TObject>;'#10 +
+    '  W: TG2<TDerivedA>;'#10 +
+    '  D: TDerObj;'#10'  O: TO2;'#10'  N: Integer;'#10 +
+    'begin'#10 +
+    '  with D.X do N := Foo;'#10 +
+    '  N := D.X.Bogus1;'#10 +
+    '  with O.Get do N := A;'#10 +
+    '  Undecl0 := 0;'#10 +
+    'end.'#10);
+
+  Build(False);
+  try
+    Ok('heritage: the project loads', Assigned(LApp0) and Assigned(LUnit));
+    Ok('heritage: an attribute class under a nested cross-unit ancestor ' +
+      'is no E2010', not DiagHasText(LApp0, 'E2010', 'TMyAttr'));
+    Ok('heritage: an attribute class whose ancestor unit is missing is no ' +
+      'E2010', not DiagHasText(LApp0, 'E2010', 'TDerivedA'));
+    Ok('heritage: ...while a class with a known chain still is',
+      DiagHasText(LApp0, 'E2010', 'TBase'));
+    Ok('heritage: E2515 only for TG<TObject>, naming the class, not the ' +
+      'alias', (DiagCount(LApp0, 'E2515') = 1) and
+      DiagHasText(LApp0, 'E2515', '''TBase''') and
+      not DiagHasText(LApp0, 'E2515', 'TBaseAlias'));
+    Ok('heritage: an object whose ancestor unit is missing reports no ' +
+      'inherited name', not DiagHasText(LApp0, 'E2003', 'InheritedObjField'));
+    Ok('heritage: a bare property redeclared in an object keeps its type ' +
+      '(with D.X do Foo), and an inherited paramless overload opens its ' +
+      'record (with O.Get do A)', not DiagHasText(LApp0, 'E2003', '''Foo''')
+      and not DiagHasText(LApp0, 'E2003', '''A'''));
+    Ok('heritage: ...the control is reported',
+      DiagHasText(LApp0, 'E2003', 'Undecl0'));
+    LRec := NIL_NODE;
+    for var LN := 0 to High(LUnit.Tree.Nodes) do
+      if LUnit.Tree.Nodes[LN].Kind = nkRecordType then
+        LRec := LN;   // the last record: T03
+    Ok('heritage: a record''s `end align CAl` operand is no heritage entry',
+      (LRec <> NIL_NODE) and (PasHeritageRef(LUnit.Tree, LRec) = NIL_NODE) and
+      (LUnit.Tree.Nodes[LUnit.Tree.Nodes[LRec].FirstChild].Kind <> nkIdent));
+  finally
+    FreeAndNil(GProj);
+  end;
+
+  Build(True);
+  try
+    Ok('heritage -members: `inherited Val.A` in an object method types the ' +
+      'ancestor''s Val, and D.X.Bogus1 is reported',
+      not DiagHasText(LUnit, 'E2003', '''A''') and
+      DiagHasText(LApp0, 'E2003', 'Bogus1'));
+  finally
+    FreeAndNil(GProj);
+  end;
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+end;
+
 procedure TestConsumerRedo;
 var
   LDir, LApp, LHub: string;
@@ -11673,6 +11805,7 @@ begin
   TestSourceManagerRuns;
   TestConsumerRedo;
   TestModuleLifecycle;
+  TestHeritageStep;
   TestPoolContract;
 
   if GCounter.Finish('SemaProjectSmoke') then

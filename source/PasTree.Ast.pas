@@ -421,6 +421,17 @@ type
     in it. True for the first. }
   function PasAttrIsName(const ATree: TPasTree; AAttr: Integer): Boolean;
 
+  { The ANCESTOR reference of a class, interface or object definition node:
+    its FIRST child when that is a type reference (nkIdent, nkMember,
+    nkTypeArgs) - the heritage list leads the children and its first entry
+    is the ancestor (docs/tree-contract.md); a class's later entries are the
+    interfaces it implements. NIL_NODE when the type names no ancestor, and
+    always for a record: the only expression a record holds after its
+    members is the `end align N` operand, never a heritage entry (spec
+    9.1.2). A helper's leading run is its own business (ancestor helpers,
+    then the `for` target) and is not read here. }
+  function PasHeritageRef(const ATree: TPasTree; ADef: Integer): Integer;
+
 implementation
 
 uses
@@ -450,6 +461,18 @@ begin
   LName := ATree.Nodes[AAttr].FirstChild;
   Result := (LName <> NIL_NODE) and
     (ATree.Nodes[LName].Kind in [nkIdent, nkMember, nkTypeArgs]);
+end;
+
+function PasHeritageRef(const ATree: TPasTree; ADef: Integer): Integer;
+begin
+  Result := NIL_NODE;
+  if (ADef = NIL_NODE) or not (ATree.Nodes[ADef].Kind in
+     [nkClassType, nkInterfaceType, nkObjectType]) then
+    Exit;
+  Result := ATree.Nodes[ADef].FirstChild;
+  if (Result <> NIL_NODE) and not (ATree.Nodes[Result].Kind in
+     [nkIdent, nkMember, nkTypeArgs]) then
+    Result := NIL_NODE;
 end;
 
 { TPasTree }

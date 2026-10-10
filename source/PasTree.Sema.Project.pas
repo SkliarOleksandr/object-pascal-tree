@@ -186,6 +186,19 @@ type
   // Raised only by TPasSemaProject.InjectModuleFault (tests).
   EPasInjectedFault = class(Exception);
 
+  { One step up a struct's ancestry (TPasSemaProject.HeritageHopX):
+    hhNext - ANext is the ancestor (written or the implicit root);
+    hhNone - the type has no ancestor: a record, an `object` with no
+             heritage (spec 11.5), the root itself;
+    hhBroken - the written ancestor (or the implicit root) does not resolve:
+             the ancestry is UNKNOWN past this point, not absent. }
+  TPasHeritageHop = (hhNext, hhNone, hhBroken);
+
+  { TPasSemaProject.XDescent: does a type descend from another? xdUnknown
+    when the walk met a link it cannot follow (an ancestor's unit missing
+    from the path, a depth cap) - a diagnostic acts on xdNo only. }
+  TPasDescent = (xdYes, xdNo, xdUnknown);
+
   TPasSemaProject = class
   private
     FPlatform: TPasPlatform;
@@ -1154,6 +1167,16 @@ type
     function DesignatorSymX(AId, ANode: Integer;
       out AMid, ASym: Integer): Boolean;
     function AncestorOfX(const AX: TSemaXType): TSemaXType;
+    { The ONE heritage step of a struct definition ADef of (AMid, ASym): the
+      first heritage entry through ResolveTypeExprNested (`Outer.Inner`
+      ancestors, spec 12.1.1), else the implicit root - TObject for a class,
+      IInterface (IDispatch for a dispinterface) for an interface, none for
+      a record or an object (11.5) - with the self-guard that stops the
+      root at itself. ANext is in the descendant's frame (no SubstX). Every
+      ancestry walk takes its hop here: AncestorOfX, FindMemberX,
+      EnumMembersX, UnknownAncestryX, XDescent (audit B18). }
+    function HeritageHopX(AMid, ASym, ADef: Integer;
+      out ANext: TSemaXType): TPasHeritageHop;
     { The single answer to "what type is this member?" - see the implementation
       for why a bare property redeclaration makes it necessary. }
     function SymDeclTypeX(AMid, ASym: Integer): TSemaXType;
@@ -1248,7 +1271,13 @@ type
       out AUnit, ASym: Integer): Boolean;
     function RoutineArity(AMid, ASym: Integer; out AReq, ATot: Integer;
       out AVariadic: Boolean): Boolean;
+    // XDescent = xdYes: for a caller that acts on a proven descent only.
     function XDescendsFrom(const ADesc, ABase: TSemaXType): Boolean;
+    { Is ADesc ABase (canonicalized: a constraint named through an alias is
+      the class, spec 16.4.1) or a descendant of it? xdNo only when the walk
+      reached the end of ADesc's ancestry without meeting it; xdUnknown at a
+      link it cannot follow. A diagnostic acts on xdNo alone. }
+    function XDescent(const ADesc, ABase: TSemaXType): TPasDescent;
     function DeclTypeX(AMid, ASym: Integer): TSemaXType;
     function SubstX(const AX: TSemaXType; AInst, ADepth: Integer): TSemaXType;
     function ResolveTypeExpr(AId, ANode: Integer;
@@ -3656,6 +3685,7 @@ function TPasSemaProject.OracleRecordLayout(AMid, ADefNode, ADepth: Integer;
 var
   LM: TPasSemaModel;
   LChild, LCap, LMaxAlign, LOffset: Integer;
+  LLeading: Boolean;   // still in the leading run of type references
 
   // One `A, B: T;` declaration, placed at LOffset. Shared by the record body
   // and by a plain `var` section inside it, so the two cannot drift.
@@ -3727,12 +3757,22 @@ begin
   // inherits its alignment; a record always starts at zero.
   LOffset := AStart;
   LMaxAlign := AStartAlign;
+  LLeading := True;
   LChild := LM.Tree.Nodes[ADefNode].FirstChild;
   while LChild <> NIL_NODE do
   begin
+    if not (LM.Tree.Nodes[LChild].Kind in [nkIdent, nkMember, nkTypeArgs]) then
+      LLeading := False;
     case LM.Tree.Nodes[LChild].Kind of
       nkIdent, nkMember, nkTypeArgs:
-        ;   // an object's ancestor reference; the caller already placed it
+        // The heritage list, which the caller already placed (an object's
+        // ancestor; a class's ancestor and interfaces) - only the LEADING
+        // run is one. A name after the members is a record's `end align
+        // CAl` operand, which sets the alignment (spec 9.1.2) and is not
+        // modelled: refused like a literal operand, where it used to be
+        // laid out as if the clause were absent (audit B3-16).
+        if not LLeading then
+          Exit;
       nkVarDecl:
         if not PlaceOneDecl(LChild) then
           Exit;
@@ -6935,7 +6975,7 @@ function TPasSemaProject.UnknownAncestryX(const AX: TSemaXType): Boolean;
 var
   LCur, LNext: TSemaXType;
   LM: TPasSemaModel;
-  LDef, LChild, LDepth: Integer;
+  LDef, LDepth: Integer;
 begin
   Result := False;
   LCur := AX;
@@ -6954,19 +6994,15 @@ begin
           if not XValid(LNext) then
             Exit(True);
         end;
-      nkClassType, nkInterfaceType:
-        begin
-          // The heritage clause's FIRST type reference is the ancestor - the
-          // convention AncestorOfX and CollectStruct share. No such child means
-          // an implicit TObject root, which is fully known.
-          LChild := LM.Tree.Nodes[LDef].FirstChild;
-          while (LChild <> NIL_NODE) and not (LM.Tree.Nodes[LChild].Kind in
-            [nkIdent, nkMember, nkTypeArgs]) do
-            LChild := LM.Tree.Nodes[LChild].NextSibling;
-          if LChild = NIL_NODE then
+      // The shared heritage step (HeritageHopX) - an `object` included:
+      // its methods lost every inherited name to a missing ancestor unit
+      // while the class twin was gated (audit B3-26). An implicit root
+      // that resolves is fully known; no ancestor at all is too.
+      nkClassType, nkInterfaceType, nkObjectType:
+        case HeritageHopX(LCur.UnitId, LCur.Sym, LDef, LNext) of
+          hhNone:
             Exit;
-          LNext := ResolveTypeExprNested(LCur.UnitId, LChild);
-          if not XValid(LNext) then
+          hhBroken:
             Exit(True);
         end;
     else
@@ -7027,12 +7063,9 @@ begin
     LClass := AModel.Tree.Nodes[LClass].Parent;
   if LClass = NIL_NODE then
     Exit;
-  // Its heritage clause's FIRST type reference is the ancestor (the
-  // convention AncestorOfX and CollectStruct share).
-  LChild := AModel.Tree.Nodes[LClass].FirstChild;
-  while (LChild <> NIL_NODE) and not (AModel.Tree.Nodes[LChild].Kind in
-    [nkIdent, nkMember, nkTypeArgs]) do
-    LChild := AModel.Tree.Nodes[LChild].NextSibling;
+  // Its heritage clause's FIRST type reference is the ancestor
+  // (PasHeritageRef).
+  LChild := PasHeritageRef(AModel.Tree, LClass);
   if LChild = NIL_NODE then
     Exit;   // implicit TObject: nothing inherited satisfies the method
   LAnc := ResolveTypeExprNested(AId, LChild);
@@ -7974,71 +8007,71 @@ begin
   Result := LM.Tree.NodeNameLower(LName);
 end;
 
-{ Class-inheritance test across models: is ADesc ABase, or a descendant of it?
-  Follows the FIRST heritage entry (the ancestor) and the implicit TObject,
-  the same walk FindMemberX uses, depth-capped for the same reason. }
 function TPasSemaProject.XDescendsFrom(const ADesc,
   ABase: TSemaXType): Boolean;
-var
-  LCur, LNext: TSemaXType;
-  LM: TPasSemaModel;
-  LDef, LChild, LDepth, LRMid, LRSym: Integer;
 begin
-  Result := False;
+  Result := XDescent(ADesc, ABase) = xdYes;
+end;
+
+{ Inheritance test across models: is ADesc ABase, or a descendant of it?
+  The hop is HeritageHopX, the one every ancestry walk takes. Tri-state
+  because both of its diagnostic callers promise to say nothing when unsure
+  (audit A2-14, A3-08): an ancestor whose unit is missing from the path made
+  every class below it "not a TObject" and "not an attribute" - E2515 and
+  E2010 in the user's own code, on top of the F1027. }
+function TPasSemaProject.XDescent(const ADesc,
+  ABase: TSemaXType): TPasDescent;
+var
+  LCur, LNext, LBase: TSemaXType;
+  LM: TPasSemaModel;
+  LDef, LDepth, LRMid, LRSym: Integer;
+begin
+  // The base canonicalized (16.4.1): `T: TBaseAlias` is TBase, and the walk
+  // below never meets the alias symbol (audit A2-16).
+  LBase := CanonTypeX(ABase);
   LCur := ADesc;
   for LDepth := 1 to 32 do
   begin
     if not XValid(LCur) then
-      Exit;
-    if (LCur.UnitId = ABase.UnitId) and (LCur.Sym = ABase.Sym) then
-      Exit(True);
+      Exit(xdUnknown);
+    if (LCur.UnitId = LBase.UnitId) and (LCur.Sym = LBase.Sym) then
+      Exit(xdYes);
     LM := FModels[LCur.UnitId];
     LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
     if LDef = NIL_NODE then
     begin
+      // A seeded stand-in: hop to the real declaration when there is one.
       if ResolveRealDecl(LCur.UnitId, LM.Symbols[LCur.Sym].NameLower,
            LRMid, LRSym) and
          ((LRMid <> LCur.UnitId) or (LRSym <> LCur.Sym)) then
       begin
-        LCur.UnitId := LRMid;
-        LCur.Sym := LRSym;
-        LCur.Inst := NIL_INST;
+        LCur := XPlain(LRMid, LRSym);
         Continue;
       end;
-      Exit;
+      Exit(xdUnknown);
     end;
     case LM.Tree.Nodes[LDef].Kind of
       nkIdent, nkMember, nkTypeArgs:
-        LNext := ResolveTypeExpr(LCur.UnitId, LDef);   // alias
-      nkClassType:
         begin
-          LChild := LM.Tree.Nodes[LDef].FirstChild;
-          while (LChild <> NIL_NODE) and not (LM.Tree.Nodes[LChild].Kind in
-            [nkIdent, nkMember, nkTypeArgs]) do
-            LChild := LM.Tree.Nodes[LChild].NextSibling;
-          if LChild = NIL_NODE then
-          begin
-            // No heritage clause: the implicit TObject (11.1.1).
-            if ResolveRealDecl(LCur.UnitId, 'tobject', LRMid, LRSym) and
-               ((LRMid <> LCur.UnitId) or (LRSym <> LCur.Sym)) then
-            begin
-              LCur.UnitId := LRMid;
-              LCur.Sym := LRSym;
-              LCur.Inst := NIL_INST;
-              Continue;
-            end;
-            Exit;
-          end;
-          LNext := ResolveTypeExpr(LCur.UnitId, LChild);
+          LNext := ResolveTypeExprNested(LCur.UnitId, LDef);   // alias
+          if not XValid(LNext) then
+            Exit(xdUnknown);
+          if (LNext.UnitId = LCur.UnitId) and (LNext.Sym = LCur.Sym) then
+            Exit(xdUnknown);   // self-referential alias
+        end;
+      nkClassType, nkInterfaceType, nkObjectType:
+        case HeritageHopX(LCur.UnitId, LCur.Sym, LDef, LNext) of
+          hhNone:
+            Exit(xdNo);
+          hhBroken:
+            Exit(xdUnknown);
         end;
     else
-      Exit;
+      Exit(xdNo);   // a record, an enumeration, ... - known, and no class
     end;
-    if XValid(LNext) and (LNext.UnitId = LCur.UnitId) and
-       (LNext.Sym = LCur.Sym) then
-      Exit;   // self-referential alias
     LCur := LNext;
   end;
+  Result := xdUnknown;   // the depth cap
 end;
 
 { 16.4.1 - type-parameter constraints, checked at each instantiation site.
@@ -8132,10 +8165,11 @@ begin
             LConX := ResolveTypeExpr(LBase.UnitId,
               FModels[LBase.UnitId].Tree.Nodes[LC].FirstChild);
             if XValid(LConX) and (XCatOf(LConX) = tcClass) and
-               (LCat = tcClass) and not XDescendsFrom(LArgX, LConX) then
+               (LCat = tcClass) and (XDescent(LArgX, LConX) = xdNo) then
+              // dcc names the real class, not an alias (16.4.1).
               EmitAt(LM, LArgNode, 'E2515',
                 Format(SE2515_NotCompatibleWith,
-                  [LParamName, XTypeText(LConX)]));
+                  [LParamName, XTypeText(CanonTypeX(LConX))]));
             Continue;
           end;
           // A keyword constraint: class / record / constructor - reserved
@@ -8241,7 +8275,7 @@ begin
       Continue;
     if XCatOf(LAttrX) <> tcClass then
       Continue;
-    if not XDescendsFrom(LAttrX, LCustomAttrX) then
+    if XDescent(LAttrX, LCustomAttrX) = xdNo then
       EmitAt(LM, LRef, 'E2010', Format(SE2010_IncompatibleTypes,
         [XTypeText(LAttrX), 'TCustomAttribute']));
   end;
@@ -8874,10 +8908,7 @@ begin
           // nested types, so there is nothing there to find.
           if ADepth >= 4 then
             Exit;
-          LChild := LQM.Tree.Nodes[LDef].FirstChild;
-          while (LChild <> NIL_NODE) and not (LQM.Tree.Nodes[LChild].Kind in
-            [nkIdent, nkMember, nkTypeArgs]) do
-            LChild := LQM.Tree.Nodes[LChild].NextSibling;
+          LChild := PasHeritageRef(LQM.Tree, LDef);
           if LChild = NIL_NODE then
             Exit;
           LQ := SubstX(ResolveTypeExprNested(LQ.UnitId, LChild, ADepth + 1),
@@ -9516,7 +9547,6 @@ var
   LCur, LNext: TSemaXType;
   LM: TPasSemaModel;
   LScope, LDef, LChild, LDepth, LFound, LRMid, LRSym: Integer;
-  LRootName: string;   // the implicit ancestor for a heritage-less struct
   LDistinct: Boolean;  // a `type Base` hop passed: Base's helpers are not ours
 begin
 {$IFDEF PASTREE_MEMBERSTATS}
@@ -9686,65 +9716,18 @@ begin
           LM.Tree.Nodes[LDef].FirstChild);
       nkClassType, nkInterfaceType, nkRecordType, nkObjectType:
         begin
-          // Leading nkIdent/nkMember/nkTypeArgs children are the heritage
-          // list; the FIRST is the ancestor (a class's other entries are
+          // The heritage step every ancestry walk shares (HeritageHopX): the
+          // FIRST heritage entry is the ancestor (a class's other entries are
           // implemented interfaces - their members must be implemented in
-          // the class anyway, so they are not followed).
-          LChild := LM.Tree.Nodes[LDef].FirstChild;
-          while (LChild <> NIL_NODE) and not (LM.Tree.Nodes[LChild].Kind in
-            [nkIdent, nkMember, nkTypeArgs]) do
-            LChild := LM.Tree.Nodes[LChild].NextSibling;
-          if LChild = NIL_NODE then
-          begin
-            // No heritage clause - but a CLASS still has an ancestor: the
-            // implicit TObject (11.1.1), whose members are reachable bare
-            // inside the class's own methods (`ClassName`, `Free`,
-            // `InitInstance`). The walk used to stop here, so those were
-            // false E2003s. Routed through ResolveRealDecl, the same helper
-            // the DeclNode-less branch above uses, so it finds the REAL
-            // TObject (System.pas) rather than a compiler-seeded stub.
-            //
-            // An INTERFACE has one too - `IInterface` (14.1.1), or `IDispatch`
-            // for a dispinterface, which descends from IInterface and so
-            // covers strictly more. This was originally left out on the
-            // reasoning quoted for the implemented-interface entries above
-            // ("their members have to be implemented by the class anyway"),
-            // which is true THERE and false here: a value of interface type
-            // reaches QueryInterface/_AddRef/_Release through this hop and
-            // nothing else. dcc compiles `with I do QueryInterface(G, O)` for
-            // a heritage-less `IFoo`; we reported E2003 on it. Found by
-            // auditing the spec against the code, not by the corpora - the RTL
-            // reaches those three through `Supports`/`as`, never by name.
-            //
-            // A record/object type genuinely has no implicit ancestor.
-            // The (LRMid, LRSym) <> (current) guard is what stops TObject or
-            // IInterface itself - which of course have no heritage clause
-            // either - from walking into themselves forever.
-            LRootName := '';
-            case LM.Tree.Nodes[LDef].Kind of
-              nkClassType:
-                LRootName := 'tobject';
-              nkInterfaceType:
-                if LM.Tree.Nodes[LDef].Aux = 1 then
-                  LRootName := 'idispatch'   // dispinterface
-                else
-                  LRootName := 'iinterface';
-            end;
-            if (LRootName <> '') and
-               ResolveRealDecl(LCur.UnitId, LRootName, LRMid, LRSym) and
-               ((LRMid <> LCur.UnitId) or (LRSym <> LCur.Sym)) then
-            begin
-              LCur.UnitId := LRMid;
-              LCur.Sym := LRSym;
-              LCur.Inst := NIL_INST;   // neither root is generic
-              Continue;
-            end;
+          // the class anyway, so they are not followed), through
+          // ResolveTypeExprNested (`TTextSettingsInfo.TCustomTextSettings`,
+          // FMX); none written, the implicit root - TObject's `ClassName`,
+          // `Free` reachable bare in a class's methods, IInterface's
+          // QueryInterface on a heritage-less interface (`with I do
+          // QueryInterface(G, O)` compiles). A record and an `object` have no
+          // root (11.5).
+          if HeritageHopX(LCur.UnitId, LCur.Sym, LDef, LNext) <> hhNext then
             Exit;
-          end;
-          // Nested: the ancestor may be named through its OUTER type
-          // (`TTextSettingsInfo.TCustomTextSettings`, FMX) - nothing binds that
-          // segment this early, and the miss costs the whole ancestry.
-          LNext := ResolveTypeExprNested(LCur.UnitId, LChild);
         end;
       nkHelperType:
         begin
@@ -9917,36 +9900,9 @@ begin
           LM.Tree.Nodes[LDef].FirstChild);
       nkClassType, nkInterfaceType, nkRecordType, nkObjectType:
         begin
-          LChild := LM.Tree.Nodes[LDef].FirstChild;
-          while (LChild <> NIL_NODE) and not (LM.Tree.Nodes[LChild].Kind in
-            [nkIdent, nkMember, nkTypeArgs]) do
-            LChild := LM.Tree.Nodes[LChild].NextSibling;
-          if LChild = NIL_NODE then
-          begin
-            // Heritage-less: the implicit TObject / IInterface / IDispatch
-            // root, exactly as FindMemberX walks it.
-            LRootName := '';
-            case LM.Tree.Nodes[LDef].Kind of
-              nkClassType:
-                LRootName := 'tobject';
-              nkInterfaceType:
-                if LM.Tree.Nodes[LDef].Aux = 1 then
-                  LRootName := 'idispatch'
-                else
-                  LRootName := 'iinterface';
-            end;
-            if (LRootName <> '') and
-               ResolveRealDecl(LCur.UnitId, LRootName, LRMid, LRSym) and
-               ((LRMid <> LCur.UnitId) or (LRSym <> LCur.Sym)) then
-            begin
-              LCur.UnitId := LRMid;
-              LCur.Sym := LRSym;
-              LCur.Inst := NIL_INST;
-              Continue;
-            end;
+          // The heritage step FindMemberX takes (HeritageHopX).
+          if HeritageHopX(LCur.UnitId, LCur.Sym, LDef, LNext) <> hhNext then
             Exit;
-          end;
-          LNext := ResolveTypeExprNested(LCur.UnitId, LChild);
         end;
       nkHelperType:
         begin
@@ -14260,11 +14216,59 @@ end;
   use. Extracted because three callers now climb (XDescendsFrom's own compare
   loop aside): the default-array-property search and the property-redeclaration
   type search below, and it is exactly the kind of step that should exist once. }
+function TPasSemaProject.HeritageHopX(AMid, ASym, ADef: Integer;
+  out ANext: TSemaXType): TPasHeritageHop;
+var
+  LM: TPasSemaModel;
+  LRef, LRMid, LRSym: Integer;
+  LRootName: string;
+begin
+  ANext := XNil;
+  LM := FModels[AMid];
+  LRef := PasHeritageRef(LM.Tree, ADef);
+  if LRef <> NIL_NODE then
+  begin
+    // Nested ancestor (`Outer.Inner`, often of another unit): nothing binds
+    // its last segment this early, and plain ResolveTypeExpr misses it -
+    // XDescendsFrom's own copy did, a false E2010/E2515 (audit A2-15).
+    ANext := ResolveTypeExprNested(AMid, LRef);
+    if XValid(ANext) then
+      Exit(hhNext);
+    Exit(hhBroken);
+  end;
+  // No heritage clause: the IMPLICIT root (TObject for a class, 11.1.1;
+  // IInterface for an interface and IDispatch for a dispinterface, 14.1.1).
+  // A record and an `object` have none (11.5: `O.Free` is E2003). The
+  // self-guard stops TObject and IInterface, heritage-less themselves, at
+  // themselves. Without this hop every climber stopped one class short of
+  // TObject: `TLabService.Create` (a paren-less constructor on a class whose
+  // own `Create(A, B); overload` needs arguments) resolved to TObject.Create
+  // only once someone wrote `= class(TObject)` (harness, 2026-09-07).
+  case LM.Tree.Nodes[ADef].Kind of
+    nkClassType:
+      LRootName := 'tobject';
+    nkInterfaceType:
+      if LM.Tree.Nodes[ADef].Aux and 1 <> 0 then
+        LRootName := 'idispatch'
+      else
+        LRootName := 'iinterface';
+  else
+    Exit(hhNone);
+  end;
+  // No real root (no System.pas on the path - only the seeded stand-in) is
+  // still a KNOWN end: the chain is this type, then the root, which has no
+  // ancestor of its own. And the root reached is its own end.
+  if not ResolveRealDecl(AMid, LRootName, LRMid, LRSym) or
+     ((LRMid = AMid) and (LRSym = ASym)) then
+    Exit(hhNone);
+  ANext := XPlain(LRMid, LRSym);
+  Result := hhNext;
+end;
+
 function TPasSemaProject.AncestorOfX(const AX: TSemaXType): TSemaXType;
 var
   LM: TPasSemaModel;
-  LDef, LChild, LRMid, LRSym: Integer;
-  LRootName: string;
+  LDef: Integer;
 begin
   Result := XNil;
   if not XValid(AX) then
@@ -14276,43 +14280,11 @@ begin
   case LM.Tree.Nodes[LDef].Kind of
     nkIdent, nkMember, nkTypeArgs:
       Result := ResolveTypeExpr(AX.UnitId, LDef);   // alias link
-    nkClassType, nkInterfaceType:
-      begin
-        LChild := LM.Tree.Nodes[LDef].FirstChild;
-        while (LChild <> NIL_NODE) and not (LM.Tree.Nodes[LChild].Kind in
-          [nkIdent, nkMember, nkTypeArgs]) do
-          LChild := LM.Tree.Nodes[LChild].NextSibling;
-        if LChild <> NIL_NODE then
-          // Nested ancestor (`Outer.Inner`) reached the same way FindMemberX's
-          // own heritage hop does - see ResolveTypeExprNested.
-          Result := ResolveTypeExprNested(AX.UnitId, LChild)
-        else
-        begin
-          // No heritage clause: the IMPLICIT root, exactly as FindMemberX's
-          // own walk takes it (TObject for a class, IInterface for an
-          // interface, IDispatch for a dispinterface; a record has none), with
-          // the same self-guard so the root does not become its own ancestor.
-          // Without this hop every AncestorOfX climber - ParamlessOverloadX
-          // first among them - stopped one class short of TObject, and
-          // `TLabService.Create` (a paren-less constructor on a class whose
-          // own `Create(A, B); overload` needs arguments) resolved to
-          // TObject.Create only once someone wrote `= class(TObject)`
-          // explicitly: the differential harness caught the two spellings
-          // giving different bindings (2026-09-07).
-          case LM.Tree.Nodes[LDef].Kind of
-            nkClassType:
-              LRootName := 'tobject';
-          else
-            if LM.Tree.Nodes[LDef].Aux = 1 then
-              LRootName := 'idispatch'
-            else
-              LRootName := 'iinterface';
-          end;
-          if ResolveRealDecl(AX.UnitId, LRootName, LRMid, LRSym) and
-             ((LRMid <> AX.UnitId) or (LRSym <> AX.Sym)) then
-            Result := XPlain(LRMid, LRSym);
-        end;
-      end;
+    // An `object` too (audit A3-12): every climber built on this step -
+    // `inherited Val.A`, ParamlessOverloadX, the property redeclaration
+    // chain - stopped at the first object.
+    nkClassType, nkInterfaceType, nkObjectType:
+      HeritageHopX(AX.UnitId, AX.Sym, LDef, Result);
   end;
   // Compose the frames, exactly as FindMemberX's own walk does one hop at a
   // time: the ancestor reference is written in the DESCENDANT's parameters, so

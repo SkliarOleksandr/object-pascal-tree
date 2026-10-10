@@ -337,6 +337,10 @@ mis-pair.
 - interface constraints and the `constructor` constraint
   are not validated at instantiation sites (class/record/class-type
   constraints are); constraint members are available for lookup.
+- a class-type constraint (and the attribute check of 19.3.2) is reported
+  only when the argument's ancestry is followed to its end: an ancestor
+  that does not resolve - its unit missing from the search path - leaves
+  the argument unchecked, where dcc would know.
 
 ### 16.5.1 Inference for generic methods & inline vars
 - inference handles only the direct shape (the
