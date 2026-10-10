@@ -4974,6 +4974,75 @@ begin
   end;
 end;
 
+{ A unit whose source is on the path but whose load raises - here a file held
+  open exclusively, so the read is EInOutError - is LoadFailures' row on every
+  route, and its importer's F1027 says the source is there and what stopped it
+  instead of "no source on the search path" (audit B3-22, B3-23). }
+procedure TestLoadFailures;
+var
+  LDir, LLocked, LFails: string;
+  LLock: TFileStream;
+  LApp: TPasSemaModel;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_loadfail');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  LLocked := TPath.Combine(LDir, 'LfLocked.pas');
+  TFile.WriteAllText(LLocked,
+    'unit LfLocked;'#10'interface'#10'procedure LockedHello;'#10 +
+    'implementation'#10'procedure LockedHello; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'LfApp.dpr'),
+    'program LfApp;'#10'uses LfLocked;'#10 +
+    'begin'#10'  LockedHello;'#10'end.'#10);
+  LLock := TFileStream.Create(LLocked, fmOpenRead or fmShareExclusive);
+  try
+    // The load engine's route (an import of the main file).
+    GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+    try
+      GProj.AnalyzeProject(TPath.Combine(LDir, 'LfApp.dpr'));
+      LFails := string.Join('; ', GProj.LoadFailures);
+      Ok('load failure: an import that raised is a LoadFailures row (' +
+        LFails + ')', (Length(GProj.LoadFailures) = 1) and
+        LFails.StartsWith('LfLocked.pas: EInOutError: '));
+      LApp := ModelByName('lfapp');
+      Ok('load failure: the importer''s F1027 says the source is there and ' +
+        'names the exception',
+        (DiagCount(LApp, 'F1027') = 1) and
+        DiagHasText(LApp, 'F1027', 'is on the search path but could not ' +
+          'be analyzed: EInOutError') and
+        not DiagHasText(LApp, 'F1027', 'no source on the search path'));
+    finally
+      GProj.Free;
+    end;
+    // LoadFile's route (the main file of AnalyzeFile), which recorded nothing.
+    GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+    try
+      GProj.AnalyzeFile(LLocked);
+      LFails := string.Join('; ', GProj.LoadFailures);
+      Ok('load failure: LoadFile''s route records its row too (' + LFails +
+        ')', (Length(GProj.LoadFailures) = 1) and
+        LFails.StartsWith('LfLocked.pas: EInOutError: '));
+    finally
+      GProj.Free;
+    end;
+  finally
+    LLock.Free;
+  end;
+  // The control: readable, the same project is clean and lists nothing.
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'LfApp.dpr'));
+    Ok('load failure: readable, nothing is listed and nothing reported',
+      (Length(GProj.LoadFailures) = 0) and
+      (DiagCount(ModelByName('lfapp'), 'F1027') = 0));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestBadPathText;
 var
   LDir, LErr: string;
@@ -11091,6 +11160,7 @@ begin
   TestDefinesKeysUntouched;
   TestBadPathText;
   TestArithCorners;
+  TestLoadFailures;
   TestPoolContract;
 
   if GCounter.Finish('SemaProjectSmoke') then

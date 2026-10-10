@@ -265,6 +265,11 @@ type
     FNamespaces: TArray<string>;           // own copy for LoadedUnitByName
     FStageTimings: string;                 // see StageTimings
     FLoadFailures: TArray<string>;         // see LoadFailures
+    // The same failures by lower-cased full path, as 'EClass: message' - what
+    // an importer's F1027 names (LoadFailureOf). Both are written by
+    // NoteLoadFailure only, from any worker, under FLoadFailLock.
+    FLoadFailedPaths: TDictionary<string, string>;
+    FLoadFailLock: TObject;
     { Candidate node lists for the two body passes - see EnsureCrossWork. One
       slot per model; a worker only ever touches its OWN slot. }
     FInhWork: TArray<TArray<Integer>>;
@@ -401,6 +406,16 @@ type
     function RentPP: TPasPreprocessor;
     procedure ReturnPP(APP: TPasPreprocessor);
     procedure TrimPreprocessors;
+    { The one load body: seed the Declared query, preprocess, parse, Phase 1,
+      the parse rows. Raises whatever any step raises, and then owns nothing:
+      a model built before the raise is freed here. ASkipTyper as in Analyze,
+      applied only to a unit (see LoadFilesParallel's worker). }
+    function ParseAnalyze(APP: TPasPreprocessor; const AFull: string;
+      AIntf: Boolean): TPasSemaModel;
+    { Records a unit that could not be loaded: LoadFailures' row and the
+      per-path reason an importer's F1027 names. Any thread. }
+    procedure NoteLoadFailure(const AFull, AClass, AMsg: string);
+    function LoadFailureOf(const AFull: string): string;
     function LoadFile(const APath: string): Integer;
     procedure LoadFilesParallel(const APaths: TArray<string>;
       AInterfaceOnly: Boolean = False);
@@ -1262,10 +1277,12 @@ type
       probes. Empty for AnalyzeFile. }
     function StageTimings: string;
     { Units that could not be parsed at all, as 'file: EClass: message'.
-      A unit in here is treated as unresolvable, so its importers report F1027 -
-      which is why the list must be surfaced: F1027 says "no source on the
-      search path", and for these the source IS there and WE failed on it.
-      Non-empty means an analyzer defect, not a project problem. }
+      A unit in here is treated as unresolvable, so its importers report F1027,
+      with the text that names this row's class and message (the source IS
+      there and loading it raised), whichever route loaded it - the load
+      engine, LoadFilesParallel or LoadFile (the main file, System, SysInit).
+      Non-empty means an analyzer defect, or a file that exists and could not
+      be read; not a missing file. }
     function LoadFailures: TArray<string>;
     function ModelCount: Integer;
     function Model(AId: Integer): TPasSemaModel;
@@ -1750,6 +1767,8 @@ begin
   FFiles := TList<string>.Create;
   FStatus := TList<TPasModuleStatus>.Create;
   FByPath := TDictionary<string, Integer>.Create;
+  FLoadFailedPaths := TDictionary<string, string>.Create;
+  FLoadFailLock := TObject.Create;
   FInstances := TList<TSemaInstance>.Create;
   FInstKeys := TDictionary<TSemaInstance, Integer>.Create(GInstanceComparer);
 {$IFDEF PASTREE_MEMBERSTATS}
@@ -1786,6 +1805,8 @@ begin
   FInstKeys.Free;
   FInstances.Free;
   FByPath.Free;
+  FLoadFailedPaths.Free;
+  FLoadFailLock.Free;
   FInternalLock.Free;
   FFiles.Free;
   FStatus.Free;
@@ -2293,7 +2314,12 @@ begin
     Result := TPasSemaResolver.Analyze(LTree, False, FPlatform);
     // The parser's rows: the stream is the donor's, so their VisIndex holds.
     // The lexer's half is read from the stream by the same call.
-    Result.AddParseDiags(LView.ParseDiags);
+    try
+      Result.AddParseDiags(LView.ParseDiags);
+    except
+      FreeAndNil(Result);
+      raise;
+    end;
   finally
     if Result <> nil then
       AtomicIncrement(FDonorHits)
@@ -2341,12 +2367,60 @@ begin
   FDonor := nil;
 end;
 
+function TPasSemaProject.ParseAnalyze(APP: TPasPreprocessor;
+  const AFull: string; AIntf: Boolean): TPasSemaModel;
+var
+  LDiags: TArray<TPasParseDiag>;
+  LTree: TPasTree;
+begin
+  // The compiler-provided names are answerable already; anything else a
+  // Declared() guard asks is recorded for RunDeclaredPass.
+  APP.OnDeclared := SeedDeclaredQuery();
+  LTree := TPasParser.ParseFile(APP.Process(AFull), LDiags, AIntf);
+  // A model whose parse really did stop at the interface is TRANSIENT
+  // (replaced by the full wave) - skip the expression typer, its
+  // ExprType/E2010/E2015 output dies with the model. NOT keyed on AIntf
+  // alone: a program/library/package ignores the flag, parses fully,
+  // registers msFullReady and is never upgraded - skipping ITS typer would
+  // permanently lose its type diagnostics.
+  Result := TPasSemaResolver.Analyze(LTree,
+    AIntf and (Length(LTree.Nodes) > 0) and (LTree.Nodes[0].Kind = nkUnit),
+    FPlatform);
+  try
+    Result.AddParseDiags(LDiags);
+  except
+    FreeAndNil(Result);
+    raise;
+  end;
+end;
+
+procedure TPasSemaProject.NoteLoadFailure(const AFull, AClass, AMsg: string);
+begin
+  TMonitor.Enter(FLoadFailLock);
+  try
+    FLoadFailures := FLoadFailures +
+      [Format('%s: %s: %s', [TPath.GetFileName(AFull), AClass, AMsg])];
+    FLoadFailedPaths.AddOrSetValue(LowerCase(AFull), AClass + ': ' + AMsg);
+  finally
+    TMonitor.Exit(FLoadFailLock);
+  end;
+end;
+
+function TPasSemaProject.LoadFailureOf(const AFull: string): string;
+begin
+  TMonitor.Enter(FLoadFailLock);
+  try
+    if not FLoadFailedPaths.TryGetValue(LowerCase(TPath.GetFullPath(AFull)),
+         Result) then
+      Result := '';
+  finally
+    TMonitor.Exit(FLoadFailLock);
+  end;
+end;
+
 function TPasSemaProject.LoadFile(const APath: string): Integer;
 var
   LFull, LKey: string;
-  LPre: TPasPreprocessed;
-  LDiags: TArray<TPasParseDiag>;
-  LTree: TPasTree;
   LModel: TPasSemaModel;
 begin
   LFull := TPath.GetFullPath(APath);
@@ -2362,18 +2436,16 @@ begin
     // takes the same known-bad path the normal parse would.
     LModel := TryDonorLoad(LKey, LFull);
     if LModel = nil then
-    begin
-      FPP.OnDeclared := SeedDeclaredQuery();
-      LPre := FPP.Process(LFull);
-      LTree := TPasParser.ParseFile(LPre, LDiags);
-      LModel := TPasSemaResolver.Analyze(LTree, False, FPlatform);
-      LModel.AddParseDiags(LDiags);
-    end;
+      LModel := ParseAnalyze(FPP, LFull, False);
   except
-    on Exception do
+    on E: Exception do
     begin
+      PasRecoverStackOverflow;
       // Tolerate a unit that fails to parse; treat as unresolvable - and
       // remember that, so repeated `uses` of it don't re-parse every time.
+      // Out loud, as LoadFilesParallel's worker does: this is the route of
+      // the main file, System, SysInit and every import ResolveUses meets.
+      NoteLoadFailure(LFull, E.ClassName, E.Message);
       FByPath.Add(LKey, -1);
       Exit(-1);
     end;
@@ -4951,6 +5023,7 @@ begin
       begin
         LDone[AIndex] := nil;
         LBase := nil;
+        LNew := nil;
         LPP := RentPP;
         LLog := TList<TPasOwnAnswer>.Create;
         LSymLog := TList<TPasOwnSymAnswer>.Create;
@@ -4997,6 +5070,10 @@ begin
             // all - an unloadable unit gates every importer.
             on Exception do
             begin
+              // A round that raised after its Analyze left LNew owned by
+              // nothing; once handed on it IS LBase.
+              if LNew <> LBase then
+                LNew.Free;
               LBase.Free;
               LDone[AIndex] := nil;
             end;
@@ -5362,7 +5439,6 @@ var
   LIdx, LDummy, LTodoCount: Integer;
   LFull, LKey: string;
   LStatus: TPasModuleStatus;
-  LFailLock: TObject;   // TMonitor-locked; guards FLoadFailures
 begin
   // Normalize, drop already-loaded/known-bad paths and in-batch duplicates.
   // Pre-sized to the input (survivors <= input), truncated after the loop -
@@ -5392,9 +5468,6 @@ begin
   SetLength(LKeys, LTodoCount);
   if LTodo = nil then
     Exit;
-  LFailLock := TObject.Create;
-  try
-
   // I/O first, CPU second: pull every file into the source manager's memory
   // repository with the deep I/O pool, so the per-core parse workers below
   // never stall on a COLD read (antivirus scan-on-first-touch dominates a
@@ -5406,8 +5479,6 @@ begin
     procedure(AIndex: Integer)
     var
       LPP: TPasPreprocessor;
-      LPre: TPasPreprocessed;
-      LDiags: TArray<TPasParseDiag>;
     begin
       LPP := RentPP;
       try
@@ -5419,24 +5490,7 @@ begin
           if not AInterfaceOnly then
             LDone[AIndex] := TryDonorLoad(LKeys[AIndex], LTodo[AIndex]);
           if LDone[AIndex] = nil then
-          begin
-            // The compiler-provided names are answerable already; anything
-            // else a Declared() guard asks is recorded for RunDeclaredPass.
-            LPP.OnDeclared := SeedDeclaredQuery();
-            LPre := LPP.Process(LTodo[AIndex]);
-            var LTree := TPasParser.ParseFile(LPre, LDiags, AInterfaceOnly);
-            // A model whose parse really did stop at the interface is
-            // TRANSIENT (replaced by the full wave) - skip the expression
-            // typer, its ExprType/E2010/E2015 output dies with the model.
-            // NOT keyed on AInterfaceOnly alone: a program/library/package
-            // ignores the flag, parses fully, registers msFullReady below and
-            // is never upgraded - skipping ITS typer would permanently lose
-            // its type diagnostics.
-            LDone[AIndex] := TPasSemaResolver.Analyze(LTree,
-              {ASkipTyper} AInterfaceOnly and (Length(LTree.Nodes) > 0) and
-              (LTree.Nodes[0].Kind = nkUnit), FPlatform);
-            LDone[AIndex].AddParseDiags(LDiags);
-          end;
+            LDone[AIndex] := ParseAnalyze(LPP, LTodo[AIndex], AInterfaceOnly);
         except
           on E: Exception do
           begin
@@ -5450,14 +5504,7 @@ begin
             // cause (an ERangeError inside Phase 1). Tolerating the failure is
             // still right - one bad unit must not sink an analysis - but it has
             // to be tolerated OUT LOUD.
-            TMonitor.Enter(LFailLock);
-            try
-              FLoadFailures := FLoadFailures +
-                [Format('%s: %s: %s', [TPath.GetFileName(LTodo[AIndex]),
-                  E.ClassName, E.Message])];
-            finally
-              TMonitor.Exit(LFailLock);
-            end;
+            NoteLoadFailure(LTodo[AIndex], E.ClassName, E.Message);
           end;
         end;
       finally
@@ -5490,9 +5537,6 @@ begin
     end
     else
       FByPath.Add(LKeys[LIdx], -1);
-  finally
-    LFailLock.Free;
-  end;
 end;
 
 type
@@ -5518,12 +5562,9 @@ function TPasSemaProject.ComputeLoad(const APath: string; AIntf: Boolean;
   out AErrClass, AErrMsg: string; out AFullDonor: Boolean): TPasSemaModel;
 var
   LPP: TPasPreprocessor;
-  LPre: TPasPreprocessed;
-  LDiags: TArray<TPasParseDiag>;
-  LTree: TPasTree;
 begin
-  // Mirrors LoadFilesParallel's worker body - see the comments there (the
-  // typer skip rule, the tolerate-out-loud contract).
+  // LoadFilesParallel's worker body: ParseAnalyze, and the failure handed to
+  // the driver, which records it (NoteLoadFailure).
   AErrClass := '';
   AErrMsg := '';
   AFullDonor := False;
@@ -5539,13 +5580,7 @@ begin
     end;
     LPP := RentPP;
     try
-      LPP.OnDeclared := SeedDeclaredQuery();
-      LPre := LPP.Process(APath);
-      LTree := TPasParser.ParseFile(LPre, LDiags, AIntf);
-      Result := TPasSemaResolver.Analyze(LTree,
-        {ASkipTyper} AIntf and (Length(LTree.Nodes) > 0) and
-        (LTree.Nodes[0].Kind = nkUnit), FPlatform);
-      Result.AddParseDiags(LDiags);
+      Result := ParseAnalyze(LPP, APath, AIntf);
     finally
       ReturnPP(LPP);
     end;
@@ -5573,7 +5608,12 @@ begin
   try
     Result := TPasSemaResolver.Analyze(
       TPasParser.ParseFile(ASource, LDiags, False), False, FPlatform);
-    Result.AddParseDiags(LDiags);
+    try
+      Result.AddParseDiags(LDiags);
+    except
+      FreeAndNil(Result);
+      raise;
+    end;
   except
     on E: Exception do
     begin
@@ -5864,9 +5904,7 @@ begin
         begin
           FByPath.Add(LItem.Key, -1);
           if LRes.ErrClass <> '' then
-            FLoadFailures := FLoadFailures +
-              [Format('%s: %s: %s', [TPath.GetFileName(LItem.Path),
-                LRes.ErrClass, LRes.ErrMsg])];
+            NoteLoadFailure(LItem.Path, LRes.ErrClass, LRes.ErrMsg);
         end;
       end
       else
@@ -6003,6 +6041,12 @@ begin
         EmitAt(LModel, LModel.UsesList[LIdx].NameNode, 'F1027',
           Format(SF1027_UnitDcuUnreadable, [LModel.UsesList[LIdx].NameFull,
             FSM.DcuFailure(LPath)]))
+      // And one whose source IS there but failed inside PasTree: "no source"
+      // sent the reader after a search path that was never the problem.
+      else if (LPath <> '') and (LoadFailureOf(LPath) <> '') then
+        EmitAt(LModel, LModel.UsesList[LIdx].NameNode, 'F1027',
+          Format(SF1027_UnitAnalysisFailed, [LModel.UsesList[LIdx].NameFull,
+            LoadFailureOf(LPath)]))
       else
         EmitAt(LModel, LModel.UsesList[LIdx].NameNode, 'F1027',
           Format(SF1027_UnitSourceNotFound, [LModel.UsesList[LIdx].NameFull]));

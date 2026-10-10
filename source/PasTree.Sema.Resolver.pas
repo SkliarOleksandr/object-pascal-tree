@@ -245,24 +245,31 @@ begin
     // that safe). Entries a phase has not reached yet read NIL_SCOPE - the
     // same answer they gave before this moved.
     LR.FModel.NodeScope := LR.FNodeScope;
-    LR.FModel.BeginNamePool;
     try
-      LR.Run;
-    finally
-      LR.FModel.EndNamePool;
+      LR.FModel.BeginNamePool;
+      try
+        LR.Run;
+      finally
+        LR.FModel.EndNamePool;
+      end;
+      // Standalone (non-project) consumers enumerate Diags right after this
+      // returns; the project driver re-trims after its own cross passes.
+      LR.FModel.TrimDiags;
+      // UsesList grew with capacity slack (see FUsesCount); every consumer
+      // enumerates it with Length/High, so cut it exact before publishing.
+      SetLength(LR.FModel.UsesList, LR.FUsesCount);
+      // The symbol arena grew by doubling and nothing adds to it after Phase
+      // 1: exact length drops the slack, 54 of 207 MB on the client closure -
+      // through TPasArrayTrim, since a plain SetLength shrink kept most of it.
+      TPasArrayTrim.Exact<TSemaSymbol>(LR.FModel.Symbols, LR.FModel.SymCount);
+      // Likewise the scope array (and nothing adds a scope after Phase 1).
+      LR.FModel.Scopes.Trim;
+    except
+      // Nothing else owns the model yet: a raise out of Phase 1 leaked it
+      // whole, once per analysis of the failing unit in a long-lived host.
+      FreeAndNil(LR.FModel);
+      raise;
     end;
-    // Standalone (non-project) consumers enumerate Diags right after this
-    // returns; the project driver re-trims after its own cross passes.
-    LR.FModel.TrimDiags;
-    // UsesList grew with capacity slack (see FUsesCount); every consumer
-    // enumerates it with Length/High, so cut it exact before publishing.
-    SetLength(LR.FModel.UsesList, LR.FUsesCount);
-    // The symbol arena grew by doubling and nothing adds to it after Phase 1:
-    // exact length drops the slack, 54 of 207 MB on the client closure -
-    // through TPasArrayTrim, since a plain SetLength shrink kept most of it.
-    TPasArrayTrim.Exact<TSemaSymbol>(LR.FModel.Symbols, LR.FModel.SymCount);
-    // Likewise the scope array (and nothing adds a scope after Phase 1).
-    LR.FModel.Scopes.Trim;
     Result := LR.FModel;
   finally
     LR.Free;

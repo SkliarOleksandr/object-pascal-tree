@@ -371,6 +371,20 @@ begin
   end;
 end;
 
+// OUR failures, kept distinct from F1027: the file is present and we broke
+// on it. Silence here once let an internal ERangeError look like a missing
+// unit for a whole day - so every mode prints them, not -dproj alone.
+procedure ReportLoadFailures;
+begin
+  if Length(GProj.LoadFailures) > 0 then
+  begin
+    Writeln(ErrOutput, Format('INTERNAL: %d unit(s) failed to parse - ' +
+      'analyzer defect, not a missing file:', [Length(GProj.LoadFailures)]));
+    for var LFail in GProj.LoadFailures do
+      Writeln(ErrOutput, '    ' + LFail);
+  end;
+end;
+
 procedure RunDProj(const APath: string);
 var
   LD: TPasDProj;
@@ -678,16 +692,7 @@ begin
       Writeln(ErrOutput, Format(
         'diagnostics: %d total - %d in project files, %d in library units',
         [LListed + LOther, LListed, LOther]));
-      // OUR failures, kept distinct from F1027: the file is present and we
-      // broke on it. Silence here once let an internal ERangeError look like a
-      // missing unit for a whole day.
-      if Length(GProj.LoadFailures) > 0 then
-      begin
-        Writeln(ErrOutput, Format('INTERNAL: %d unit(s) failed to parse - ' +
-          'analyzer defect, not a missing file:', [Length(GProj.LoadFailures)]));
-        for var LFail in GProj.LoadFailures do
-          Writeln(ErrOutput, '    ' + LFail);
-      end;
+      ReportLoadFailures;
       ReportHistogram('--- unresolvable `uses` names, by import count ---',
         LMissing, 25, LSites);
       ReportHistogram('--- project files, by identifier/code ---', LInProj, 25);
@@ -851,6 +856,7 @@ begin
       // Per-stage breakdown: without it a slow run says only THAT it is slow.
       if GProj.StageTimings <> '' then
         Writeln(ErrOutput, 'stages: ' + GProj.StageTimings);
+      ReportLoadFailures;
       if GRelease then
       begin
         GProj.ReleaseTransientMaps([GPath]);

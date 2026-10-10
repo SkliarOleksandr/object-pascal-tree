@@ -68,6 +68,13 @@ const
   SF1027_UnitDcuUnreadable =
     'F1027 Unit not found: ''%s'' (no source on the search path; its .dcu ' +
     'could not be read: %s)';
+  // ...and when its SOURCE is on the path but loading it raised (the read, the
+  // parse or Phase 1 - the unit's LoadFailures row, class and message): the
+  // code stays F1027 so the gating of the importer's E2003 is the same, the
+  // text says the file is there and what stopped it.
+  SF1027_UnitAnalysisFailed =
+    'F1027 Unit not found: ''%s'' (its source is on the search path but ' +
+    'could not be analyzed: %s)';
   SE2034_TooManyActualParams  = 'E2034 Too many actual parameters';
   SE2035_NotEnoughActualParams = 'E2035 Not enough actual parameters';
   // A trailing comma in a call (`F(1,)`) with a parameter still due: dcc's
