@@ -2155,6 +2155,141 @@ begin
   GModel.Free;
 end;
 
+{ Which declaration an unqualified implementation header completes (audit
+  B21, spec 6.1.2 and 6.3.1): by parameter modes and types - type identity,
+  through plain aliases - not by count; a header with `overload` that
+  matches none is a new overload; a bare header completes the parameterless
+  or sole declaration; a `forward` in the same scope is completed too; every
+  leading attribute group of a parameter is skipped. Every source but the
+  W one (another unit's alias names, as Winapi.Windows' WinHelp) compiles
+  with dcc64 37.0 (local/probe-b21). }
+procedure TestRoutineLinking;
+
+  function DiagTotal: Integer;
+  begin
+    Result := Length(GModel.Diags);
+  end;
+
+begin
+  // A3-02: an implementation-only overload of the interface's arity.
+  Analyze('unit U; interface function P(A: Integer): Integer; overload; ' +
+    'implementation function P(A: string): string; overload; ' +
+    'begin Result := A + ''!''; end; ' +
+    'function P(A: Integer): Integer; begin Result := A + 1; end; ' +
+    'procedure Q; var S: string; I: Integer; begin S := P(''x''); ' +
+    'I := P(2); end; end.');
+  Ok('linking: an implementation-only overload of the same arity is a ' +
+    'routine of its own', (SymCountOf('p', skRoutine) = 2) and
+    (NthIdentSym('P', 1) <> NthIdentSym('P', 0)) and
+    (NthIdentSym('P', 2) = NthIdentSym('P', 0)));
+  Ok('linking: ...and its calls type by their own overload [' +
+    IntToStr(DiagTotal) + ']', DiagTotal = 0);
+  GModel.Free;
+
+  // Two interface overloads of one arity: each implementation its own.
+  Analyze('unit U; interface function Max(A, B: Integer): Integer; ' +
+    'overload; function Max(A, B: Double): Double; overload; ' +
+    'implementation function Max(A, B: Double): Double; begin Result := A; ' +
+    'end; function Max(A, B: Integer): Integer; begin Result := B; end; ' +
+    'end.');
+  Ok('linking: same-arity overloads complete by type',
+    (SymCountOf('max', skRoutine) = 2) and
+    (NthIdentSym('Max', 2) = NthIdentSym('Max', 1)) and
+    (NthIdentSym('Max', 3) = NthIdentSym('Max', 0)));
+  GModel.Free;
+
+  // A3-03: a bare `overload` header beside an overload with parameters.
+  Analyze('unit U; interface function P(A: Integer): Integer; overload; ' +
+    'implementation function P: string; overload; begin Result := ''x''; ' +
+    'end; function P(A: Integer): Integer; begin Result := A; end; ' +
+    'procedure Q; var S: string; begin S := P; S := S + P(); end; end.');
+  Ok('linking: a bare `overload` header is a new parameterless overload [' +
+    IntToStr(DiagTotal) + ']', (SymCountOf('p', skRoutine) = 2) and
+    (NthIdentSym('P', 1) <> NthIdentSym('P', 0)) and (DiagTotal = 0));
+  GModel.Free;
+
+  // A bare header still completes the sole declaration, parameters and all.
+  Analyze('unit U; interface function T3(A: Integer): Cardinal; ' +
+    'implementation function T3; begin Result := A; end; end.');
+  Ok('linking: a bare header completes the sole declaration',
+    (SymCountOf('t3', skRoutine) = 1) and (DiagTotal = 0));
+  GModel.Free;
+
+  // E3-04: a forward in a program, an implementation section, a routine.
+  Analyze('program P1; procedure B(X: Integer); forward; ' +
+    'procedure A; begin B(1); end; procedure B; var Y: Integer; ' +
+    'begin Y := X; end; begin A; end.');
+  Ok('linking: a program''s forward and its bare completion [' +
+    IntToStr(DiagTotal) + ']', (SymCountOf('b', skRoutine) = 1) and
+    (DiagTotal = 0));
+  GModel.Free;
+  Analyze('unit U; interface implementation ' +
+    'function F(Q: Integer): Integer; forward; ' +
+    'procedure Z; begin F(1); end; function F; begin Result := Q; end; end.');
+  Ok('linking: an implementation section''s forward [' +
+    IntToStr(DiagTotal) + ']', (SymCountOf('f', skRoutine) = 1) and
+    (DiagTotal = 0) and (NthIdentSym('F', 2) = NthIdentSym('F', 0)));
+  GModel.Free;
+  Analyze('unit U; interface implementation procedure O; ' +
+    'procedure N(Z: string); forward; procedure M; begin N(''a''); end; ' +
+    'procedure N; var S: string; begin S := Z; end; begin M; end; end.');
+  Ok('linking: a nested forward [' + IntToStr(DiagTotal) + ']',
+    (SymCountOf('n', skRoutine) = 1) and (DiagTotal = 0));
+  GModel.Free;
+  Analyze('unit U; interface implementation function F: Integer; forward; ' +
+    'function F; begin Result := 1; end; end.');
+  Ok('linking: a bare function completion has its Result [' +
+    IntToStr(DiagTotal) + ']', (SymCountOf('f', skRoutine) = 1) and
+    (DiagTotal = 0) and AllRefsResolved('Result'));
+  GModel.Free;
+  Analyze('unit U; interface implementation ' +
+    'procedure F(A: Integer); overload; forward; ' +
+    'procedure F(A: string); overload; forward; ' +
+    'procedure F(A: string); begin end; procedure F(A: Integer); begin end; ' +
+    'end.');
+  Ok('linking: overloaded forwards complete by type',
+    (SymCountOf('f', skRoutine) = 2) and
+    (NthIdentSym('F', 2) = NthIdentSym('F', 1)) and
+    (NthIdentSym('F', 3) = NthIdentSym('F', 0)));
+  GModel.Free;
+
+  // Type identity through a plain alias; a distinct type is another type.
+  Analyze('unit U; interface type TMyCard = Cardinal; ' +
+    'procedure P(A: Cardinal); overload; procedure P(A: string); overload; ' +
+    'implementation procedure P(A: TMyCard); overload; begin end; ' +
+    'procedure P(A: string); begin end; end.');
+  Ok('linking: a plain alias spells the same type',
+    SymCountOf('p', skRoutine) = 2);
+  GModel.Free;
+  Analyze('unit U; interface type TMyCard = type Cardinal; ' +
+    'procedure P(A: Cardinal); overload; ' +
+    'implementation procedure P(A: TMyCard); overload; begin end; ' +
+    'procedure P(A: Cardinal); begin end; end.');
+  Ok('linking: a distinct type makes a new overload',
+    (SymCountOf('p', skRoutine) = 2) and
+    (NthIdentSym('P', 2) = NthIdentSym('P', 0)));
+  GModel.Free;
+  // A header without `overload` completes one (E2254 otherwise): the best
+  // slot match when a type is spelled through names this unit cannot follow.
+  Analyze('unit U; interface procedure W(A: PChar; D: DWORD_X); overload; ' +
+    'procedure W(const S: string; D: DWORD_X); overload; implementation ' +
+    'procedure W(const S: string; D: ULONG_X); begin end; ' +
+    'procedure W(A: PChar; D: ULONG_X); begin end; end.');
+  Ok('linking: headers without `overload` complete their best match',
+    (SymCountOf('w', skRoutine) = 2) and
+    (NthIdentSym('W', 2) = NthIdentSym('W', 1)) and
+    (NthIdentSym('W', 3) = NthIdentSym('W', 0)));
+  GModel.Free;
+
+  // B4-15: two attribute groups on one parameter.
+  Analyze('unit U; interface function P([Unsafe] const [Ref] A: TObject): ' +
+    'Integer; implementation function P([Unsafe] const [Ref] A: TObject): ' +
+    'Integer; begin Result := 1; end; end.');
+  Ok('linking: a parameter with two attribute groups',
+    SymCountOf('p', skRoutine) = 1);
+  GModel.Free;
+end;
+
 { 2.2.4: an unscoped enum's values are declared where the enum counts as
   declared - past every type enclosing it - and clash there with any name,
   before or after, and with another enum's values. Every source below was
@@ -2468,6 +2603,7 @@ begin
   TestModuleBodyNames;
   // 8d. ...nor one in a routine's body, nor a local
   TestRoutineBodyNames;
+  TestRoutineLinking;
   // 8e. ...and an unscoped enum's values are names where they count
   TestEnumValueNames;
   // 8f. ...and the implementation takes no interface name

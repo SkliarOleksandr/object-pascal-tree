@@ -272,8 +272,11 @@ identifier class does here:
     that header - E2037). Measured on rtlflat: 16,155 headers that had no
     partner now have one (the `external` completions), 244 changed partner
     (every one sampled was a wrong overload before), 23 lost a wrong one.
-    The parameter modifiers (`const`, `var`, `out`) are still not compared
-    (coverage 6.2).
+    The parameter modes (`const`, `var`, `out`) are part of each slot
+    (0.96.4): an implementation repeats them. A `forward` routine and its
+    completion are one symbol since 0.96.4, as an interface routine and its
+    implementation always were (the resolver's CompletionOf), so rows 4 and
+    6 hold for a same-scope `forward` too.
 
 3.5 **Not checked**: whether the new name COLLIDES with something already
     visible at an edit site. Object Pascal scoping makes that a full

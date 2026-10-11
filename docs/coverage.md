@@ -219,13 +219,14 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 
 ## 06-routines.md
 
-## 6.2 Parameters
-- the tree carries a parameter's mode (nfVar / nfConst / nfOut on the
-nkParam, v0.81.0), but declaration-to-implementation pairing still ignores
-it - two same-arity overloads differing only in their modifiers can
-mis-pair.
-
 ### 6.3.1 The `overload` directive
+- which declaration an implementation header completes is decided by
+  parameter modes and type identity as far as the unit itself can follow
+  it (plain aliases declared in the unit). A type named through another
+  unit's alias is compared by name: an `overload` header spelling one so
+  completes the one declaration all of whose other slots match, and
+  stays a routine of its own when two are as likely (the resolver's
+  CompletionOf).
 - overload resolution is a conservative
   arity-plus-assignability score, not formal betterness ranking; ties go to
   the first candidate. A tie between candidates with DIFFERENT result types

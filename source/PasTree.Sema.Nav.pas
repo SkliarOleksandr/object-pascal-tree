@@ -5158,10 +5158,10 @@ end;
 // clicked. Default values are NOT part of the signature - real Object
 // Pascal only allows them on the declaration side, never repeated in the
 // implementation, so comparing them would always mismatch by design.
-// Parameter MODIFIERS (const/var/out) are not distinguished either: the
-// keyword is consumed by the parser without leaving an AST node of its own
-// (see ParseParamList), so there is nothing here to compare it against -
-// an accepted, narrower gap than the arity-only collision this replaces.
+// Parameter MODIFIERS (const/var/out) are part of each slot, as nfVar /
+// nfConst / nfOut on the nkParam: the implementation repeats them (E2037
+// otherwise), as the resolver's own pairing (ParamSlotKeys) reads them.
+// Overloads never differ in them alone (the second declaration is E2037).
 function TPasNavigator.RTParamSignature(LM: TPasSemaModel;
   ANode: Integer): string;
 var
@@ -5193,6 +5193,12 @@ begin
         LTypeText := LowerCase(RTSpanText(LM, LType))
       else
         LTypeText := '?';   // untyped param - rare (`var X` with no type)
+      if nfVar in LM.Tree.Nodes[LParam].Flags then
+        LTypeText := 'var ' + LTypeText
+      else if nfConst in LM.Tree.Nodes[LParam].Flags then
+        LTypeText := 'const ' + LTypeText
+      else if nfOut in LM.Tree.Nodes[LParam].Flags then
+        LTypeText := 'out ' + LTypeText;
       for LI := 1 to LNameCount do
         Result := Result + LTypeText + '|';
     end;

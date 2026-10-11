@@ -89,6 +89,10 @@ type
     // instead of re-copying it per uses entry; Analyze trims before returning.
     FUsesCount: Integer;
     FSkipTyper: Boolean;   // see Analyze
+    // The routine declarations an implementation header has completed, by
+    // symbol (CompletionOf): a declaration is completed once, so a second
+    // header of the name is another overload.
+    FCompleted: TArray<Boolean>;
     // Two consumers: the builtin seed, and one `set of` rule in the typer.
     FPlatform: TPasPlatform;
     // tree helpers
@@ -120,6 +124,12 @@ type
     function CountImplParamNames(ARoutineNode: Integer): Integer;
     function RoutineParamNameCount(ASym: Integer): Integer;
     function BareHeaderTarget(AHead: Integer): Integer;
+    function HasDirective(ARoutineNode: Integer; const AWord: string): Boolean;
+    function SlotTypeKey(ATypeNode, AScope: Integer): string;
+    function ParamSlotKeys(ARoutineNode, AScope: Integer): TArray<string>;
+    function IsCompleted(ASym: Integer): Boolean;
+    function CompletionOf(AHead, ANode, AScope: Integer;
+      AForwardOnly: Boolean): Integer;
     procedure NodePos(ANode: Integer; out AFileId, ALine, ACol: Integer);
     // collect
     procedure MarkDeclName(ANode, ASym: Integer);
@@ -318,10 +328,14 @@ begin
   Result := PasNodeKey(FTree, ANode);
 end;
 
+// Every leading attribute group: a parameter adopts one before its modifier
+// and one after it (`[Unsafe] const [Ref] A`), and skipping only the first
+// left the second in front of the name - a parameter counted with no names,
+// and its routine linked to no declaration (audit B4-15).
 function TPasSemaResolver.SkipAttr(AChild: Integer): Integer;
 begin
   Result := AChild;
-  if (Result <> NIL_NODE) and (KindOf(Result) = nkAttrGroup) then
+  while (Result <> NIL_NODE) and (KindOf(Result) = nkAttrGroup) do
     Result := NextSib(Result);
 end;
 
@@ -668,6 +682,320 @@ begin
       Exit(LCand);
     LCand := FModel.Symbols[LCand].NextOverload;
   end;
+end;
+
+// Whether the routine header ARoutineNode carries the directive AWord.
+function TPasSemaResolver.HasDirective(ARoutineNode: Integer;
+  const AWord: string): Boolean;
+var
+  LChild, LVis: Integer;
+begin
+  LChild := FirstChild(ARoutineNode);
+  while LChild <> NIL_NODE do
+  begin
+    if KindOf(LChild) = nkDirective then
+    begin
+      LVis := FTree.Nodes[LChild].FirstToken;
+      if (LVis >= 0) and (LVis <= High(FTree.Source.Visible)) and
+         FTree.Source.VisibleTextEquals(LVis, AWord) then
+        Exit(True);
+    end;
+    LChild := NextSib(LChild);
+  end;
+  Result := False;
+end;
+
+{ A parameter type's identity for pairing an implementation header with its
+  declaration, as far as this unit can tell it. dcc pairs them by type
+  IDENTITY, not spelling: `P(A: TMyCard)` with `TMyCard = Cardinal`
+  completes `P(A: Cardinal)`, while `TMyCard = type Cardinal` makes it a new
+  overload (dcc64 37.0, local/probe-b21). So a type name is followed through
+  plain aliases (`T = U`, never `T = type U`) to the type it ends at - that
+  type's symbol - and a name this unit cannot resolve (declared in another
+  unit) stays its text, as does any other type expression (`array of T`). }
+function TPasSemaResolver.SlotTypeKey(ATypeNode, AScope: Integer): string;
+var
+  LNode, LScope, LSym, LDecl, LHop, LFirst, LLast, LIdx: Integer;
+begin
+  LNode := ATypeNode;
+  LScope := AScope;
+  Result := '';
+  for LHop := 1 to 16 do
+  begin
+    if KindOf(LNode) <> nkIdent then
+      Break;
+    LSym := FModel.Resolve(LScope, NodeKey(LNode));
+    // A name this unit cannot resolve is declared in another unit: '~' marks
+    // a key that may yet be the same type as another (CompletionOf).
+    if LSym = NIL_SYM then
+    begin
+      Result := '~';
+      Break;
+    end;
+    if FModel.Symbols[LSym].Kind = skBuiltinType then
+      Exit('#' + IntToStr(LSym));
+    if FModel.Symbols[LSym].Kind <> skType then
+      Break;
+    Result := '#' + IntToStr(LSym);
+    // The aliased expression: the nkTypeDecl's child after the name and its
+    // generic parameters (a type symbol keeps no TypeNode).
+    LDecl := FModel.Symbols[LSym].DeclNode;
+    if (LDecl = NIL_NODE) or (KindOf(LDecl) <> nkIdent) or
+       (FTree.Nodes[LDecl].Parent = NIL_NODE) or
+       (KindOf(FTree.Nodes[LDecl].Parent) <> nkTypeDecl) or
+       (FTree.Nodes[FTree.Nodes[LDecl].Parent].Aux = 1) then
+      Exit;
+    LDecl := NextSib(LDecl);
+    while (LDecl <> NIL_NODE) and (KindOf(LDecl) = nkGenericParams) do
+      LDecl := NextSib(LDecl);
+    if (LDecl = NIL_NODE) or (KindOf(LDecl) <> nkIdent) then
+      Exit;
+    LNode := LDecl;
+    LScope := FModel.Symbols[LSym].Scope;
+    Result := '';
+  end;
+  // The text of the type expression the walk stopped at, its visible tokens
+  // with no separators (`array of string` is not `string`).
+  LFirst := FTree.NodeLeftmostVis(LNode);
+  LLast := FTree.Nodes[LNode].LastToken;
+  if (LFirst < 0) or (LLast < LFirst) or
+     (LLast > High(FTree.Source.Visible)) then
+    Exit('?');
+  for LIdx := LFirst to LLast do
+    Result := Result + FTree.Source.VisibleText(LIdx);
+  Result := LowerCase(Result);
+end;
+
+// One key per parameter SLOT of a routine header (`A, B: Integer` is two):
+// the mode (var / const / out: an implementation repeats it or is E2037;
+// overloads never differ in it alone - the second declaration is E2037,
+// dcc64 37.0) and the type's SlotTypeKey, '?' for an untyped parameter,
+// joined by '|'. Nil for no list.
+function TPasSemaResolver.ParamSlotKeys(ARoutineNode,
+  AScope: Integer): TArray<string>;
+var
+  LParams, LParam, LChild, LNames, LI: Integer;
+  LKey: string;
+begin
+  Result := nil;
+  LParams := FindChildKind(ARoutineNode, nkParams);
+  if LParams = NIL_NODE then
+    Exit;
+  LParam := FirstChild(LParams);
+  while LParam <> NIL_NODE do
+  begin
+    if KindOf(LParam) = nkParam then
+    begin
+      LNames := 0;
+      LChild := SkipAttr(FirstChild(LParam));
+      while (LChild <> NIL_NODE) and IsDeclName(LChild) do
+      begin
+        Inc(LNames);
+        LChild := SkipAttr(NextSib(LChild));
+      end;
+      if nfVar in FTree.Nodes[LParam].Flags then
+        LKey := 'var|'
+      else if nfConst in FTree.Nodes[LParam].Flags then
+        LKey := 'const|'
+      else if nfOut in FTree.Nodes[LParam].Flags then
+        LKey := 'out|'
+      else
+        LKey := '|';
+      if LChild <> NIL_NODE then
+        LKey := LKey + SlotTypeKey(LChild, AScope)
+      else
+        LKey := LKey + '?';
+      for LI := 1 to LNames do
+        Result := Result + [LKey];
+    end;
+    LParam := NextSib(LParam);
+  end;
+end;
+
+function TPasSemaResolver.IsCompleted(ASym: Integer): Boolean;
+begin
+  Result := (ASym >= 0) and (ASym <= High(FCompleted)) and FCompleted[ASym];
+end;
+
+{ The declaration the implementation header ANode (in AScope) completes, in
+  the overload chain AHead heads, or NIL_SYM when it completes none and is a
+  routine of its own. AForwardOnly: only a declaration marked `forward` (a
+  same-scope chain); the interface's routines are forward by being there.
+
+  dcc's rule (dcc64 37.0, local/probe-b21; spec 6.1.2, 6.3.1): a header with
+  a parameter list completes the declaration whose parameters have the same
+  modes and identical types (SlotTypeKey); with `overload` and no such
+  declaration it is a NEW overload, which the implementation may add (6.3.1)
+  - without the directive that is E2254, so a header without it always
+  completes one. A header with no list completes the parameterless overload,
+  or a declaration that is not overloaded; beside overloads with parameters
+  only a header carrying `overload` is a new parameterless one. A
+  declaration is completed once (IsCompleted).
+
+  What this unit cannot see: a type declared in another unit is a name with
+  no symbol here ('~' in its key), and System.SysUtils completes
+  `StrLen(const Str: PAnsiChar); overload;` with `StrLen(const Str:
+  MarshaledAString); overload;` - System's alias. So when nothing matches
+  exactly, a declaration whose slots each equal the header's or are such a
+  name on either side may be the one; among several, the one with the most
+  slots alike, leaving out any a later header of the scope matches exactly
+  (`StrLen(const Str: PWideChar)` is completed below it). A header without
+  `overload` takes the best slot match regardless.
+
+  The match used to be by parameter COUNT alone: an implementation-only
+  overload of the interface's arity was swallowed by it (A3-02), a bare
+  `overload` header became the completion of an overload with parameters
+  (A3-03), and a same-scope `forward` was never looked up (E3-04). }
+function TPasSemaResolver.CompletionOf(AHead, ANode, AScope: Integer;
+  AForwardOnly: Boolean): Integer;
+var
+  LCand, LCount, LRoutines, LScore, LBestScore, LI: Integer;
+  LKeys, LCandKeys: TArray<string>;
+  LOverload, LTied: Boolean;
+
+  function Eligible(ASym: Integer): Boolean;
+  begin
+    Result := (FModel.Symbols[ASym].Kind = skRoutine) and
+      (FModel.Symbols[ASym].DeclNode <> NIL_NODE) and
+      (not AForwardOnly or (sfForward in FModel.Symbols[ASym].Flags)) and
+      not IsCompleted(ASym);
+  end;
+
+  function KeysOf(ASym: Integer): TArray<string>;
+  begin
+    Result := ParamSlotKeys(FTree.Nodes[FModel.Symbols[ASym].DeclNode].Parent,
+      FModel.Symbols[ASym].Scope);
+  end;
+
+  function SameKeys(const A, B: TArray<string>): Boolean;
+  var
+    I: Integer;
+  begin
+    Result := Length(A) = Length(B);
+    I := 0;
+    while Result and (I <= High(A)) do
+    begin
+      Result := A[I] = B[I];
+      Inc(I);
+    end;
+  end;
+
+  // One slot of each: the same key, or the same mode and a type on either
+  // side that this unit cannot see.
+  function SlotMayMatch(const A, B: string): Boolean;
+  var
+    LA, LB: Integer;
+  begin
+    if A = B then
+      Exit(True);
+    LA := Pos('|', A);
+    LB := Pos('|', B);
+    Result := (Copy(A, 1, LA) = Copy(B, 1, LB)) and
+      ((Copy(A, LA + 1, 1) = '~') or (Copy(B, LB + 1, 1) = '~'));
+  end;
+
+  // Whether a later unqualified header of the same name in ANode's section
+  // matches ASym's declaration exactly - that header is its completion.
+  function ClaimedLater(ASym: Integer; const ACandKeys: TArray<string>):
+    Boolean;
+  var
+    LNext, LNameNode: Integer;
+  begin
+    Result := False;
+    LNext := NextSib(ANode);
+    while LNext <> NIL_NODE do
+    begin
+      if KindOf(LNext) = nkRoutine then
+      begin
+        LNameNode := SkipAttr(FirstChild(LNext));
+        if (LNameNode <> NIL_NODE) and IsDeclName(LNameNode) and
+           (KindOf(LNameNode) = nkIdent) and
+           ((NextSib(LNameNode) = NIL_NODE) or
+            not IsDeclName(NextSib(LNameNode))) and
+           (NodeNameLower(LNameNode) = NodeNameLower(
+             FModel.Symbols[ASym].DeclNode)) and
+           SameKeys(ParamSlotKeys(LNext, AScope), ACandKeys) then
+          Exit(True);
+      end;
+      LNext := NextSib(LNext);
+    end;
+  end;
+
+begin
+  Result := NIL_SYM;
+  if (AHead = NIL_SYM) or (FModel.Symbols[AHead].Kind <> skRoutine) then
+    Exit;
+  LOverload := HasDirective(ANode, 'overload');
+  LCount := CountImplParamNames(ANode);
+  if LCount < 0 then
+  begin
+    LRoutines := 0;
+    LCand := AHead;
+    while LCand <> NIL_SYM do
+    begin
+      if FModel.Symbols[LCand].Kind = skRoutine then
+        Inc(LRoutines);
+      if Eligible(LCand) and (RoutineParamNameCount(LCand) = 0) then
+        Exit(LCand);
+      LCand := FModel.Symbols[LCand].NextOverload;
+    end;
+    // The sole declaration, parameters and all (6.1.2) - unless the header
+    // says `overload`: a bare header of a declaration with parameters is
+    // E2037 then, so it can only be a new parameterless overload.
+    if (LRoutines = 1) and Eligible(AHead) and not LOverload then
+      Exit(AHead);
+    // Overloads with parameters only: a new parameterless overload when the
+    // header says so; otherwise dcc's E2037 / E2254, and the head is linked
+    // as before.
+    if not LOverload and (not AForwardOnly or Eligible(AHead)) then
+      Result := BareHeaderTarget(AHead);
+    Exit;
+  end;
+  LKeys := ParamSlotKeys(ANode, AScope);
+  LCand := AHead;
+  while LCand <> NIL_SYM do
+  begin
+    if Eligible(LCand) and (RoutineParamNameCount(LCand) = LCount) and
+       SameKeys(KeysOf(LCand), LKeys) then
+      Exit(LCand);
+    LCand := FModel.Symbols[LCand].NextOverload;
+  end;
+  // No exact match: the best slot match - for an `overload` header only
+  // among declarations every slot of which may match.
+  LBestScore := -1;
+  LTied := False;
+  LCand := AHead;
+  while LCand <> NIL_SYM do
+  begin
+    if Eligible(LCand) and (RoutineParamNameCount(LCand) = LCount) then
+    begin
+      LCandKeys := KeysOf(LCand);
+      LScore := 0;
+      for LI := 0 to High(LKeys) do
+        if LI > High(LCandKeys) then
+          LScore := -1
+        else if LScore >= 0 then
+          if LKeys[LI] = LCandKeys[LI] then
+            Inc(LScore)
+          else if LOverload and not SlotMayMatch(LKeys[LI], LCandKeys[LI]) then
+            LScore := -1;
+      if (LScore >= 0) and LOverload and ClaimedLater(LCand, LCandKeys) then
+        LScore := -1;
+      if LScore > LBestScore then
+      begin
+        LBestScore := LScore;
+        Result := LCand;
+        LTied := False;
+      end
+      else if (LScore >= 0) and (LScore = LBestScore) then
+        LTied := True;
+    end;
+    LCand := FModel.Symbols[LCand].NextOverload;
+  end;
+  // Two declarations as likely as each other: an `overload` header is left
+  // a routine of its own rather than given either's identity.
+  if LOverload and LTied then
+    Result := NIL_SYM;
 end;
 
 procedure TPasSemaResolver.NodePos(ANode: Integer;
@@ -1977,40 +2305,30 @@ begin
   end;
   if (LNameNode <> NIL_NODE) and not LQualified then
   begin
-    // An unqualified implementation-section routine that matches an interface
-    // declaration is that declaration's implementation - link to it (by
-    // parameter count for overloads; a routine that omits its param list is a
-    // forward/external completion of the sole interface decl) instead of adding
-    // a phantom symbol. This is essential: e.g. `function X; external;` in the
-    // implementation must NOT create a spurious 0-param X.
+    // An unqualified header that completes an earlier declaration - a
+    // `forward` in this same scope (a program, an implementation section, a
+    // routine's own declarations: 6.1.2), or, in the implementation section,
+    // the interface's routine - is that declaration's implementation: link
+    // to it (CompletionOf: by parameter modes and types, a header with no
+    // list to the parameterless or sole declaration) instead of adding a
+    // phantom symbol. `function X; external ...;` completing the interface's
+    // X must not create a spurious 0-param X. A header that is itself
+    // `forward` is a declaration, and completes nothing.
     var LLink := NIL_SYM;
-    if AScope = FImpl then
+    var LIsForward := HasDirective(ANode, 'forward');
+    if not LIsForward then
     begin
-      var LIntfHead := FModel.FindLocal(FIntf, NodeKey(LNameNode));
-      if (LIntfHead <> NIL_SYM) and
-         (FModel.Symbols[LIntfHead].Kind = skRoutine) then
-      begin
-        var LImplPC := CountImplParamNames(ANode);
-        if LImplPC < 0 then
-          LLink := BareHeaderTarget(LIntfHead)  // params omitted -> completion
-        else
-        begin
-          var LCand := LIntfHead;               // match the overload by arity
-          while LCand <> NIL_SYM do
-          begin
-            if (FModel.Symbols[LCand].Kind = skRoutine) and
-               (RoutineParamNameCount(LCand) = LImplPC) then
-            begin
-              LLink := LCand;
-              Break;
-            end;
-            LCand := FModel.Symbols[LCand].NextOverload;
-          end;
-        end;
-      end;
+      LLink := CompletionOf(FModel.FindLocal(AScope, NodeKey(LNameNode)),
+        ANode, AScope, True);
+      if (LLink = NIL_SYM) and (AScope = FImpl) then
+        LLink := CompletionOf(FModel.FindLocal(FIntf, NodeKey(LNameNode)),
+          ANode, AScope, False);
     end;
     if LLink <> NIL_SYM then
     begin
+      if LLink > High(FCompleted) then
+        SetLength(FCompleted, FModel.SymCount + 64);
+      FCompleted[LLink] := True;
       if FindChildKind(ANode, nkRoutineBody) <> NIL_NODE then
         FModel.Symbols[LLink].Flags := FModel.Symbols[LLink].Flags + [sfHasBody];
       MarkDeclName(LNameNode, LLink);
@@ -2033,6 +2351,9 @@ begin
       // Parameter scope, so the typer can enumerate this routine's params
       // for overload selection / arity checks.
       FModel.Symbols[LRoutineSym].MemberScope := LRoutine;
+      if LIsForward then
+        FModel.Symbols[LRoutineSym].Flags :=
+          FModel.Symbols[LRoutineSym].Flags + [sfForward];
     end;
   end;
 
