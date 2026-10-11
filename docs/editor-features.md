@@ -287,6 +287,16 @@ identifier class does here:
     arrive sorted ascending, so a host applies each file's edits from the
     LAST backwards (or shifts columns by hand).
 
+    The gate is `tools\PasTreeRenameOracle.dpr`: it applies `PlanRename`
+    to a random sample of a real project's symbols (and `PlanUnitRename`
+    to a sample of its units, renaming the file as the plan requires) on a
+    mirror of the project's files, and builds each result with dcc in
+    every configuration the .dproj names; any error beyond the untouched
+    mirror's build is a finding, and a mirror that does not build stops
+    the run. `-selftest` cuts every plan to its first edit, and each of
+    those builds must break - the proof that a site left behind is seen.
+    On the demo (0.96.5): 30 symbols and 3 units, all built.
+
 3.7 **Demo wiring**: ctrl+shift+E, or the editor context menu's
     `Rename...`, on the identifier under the caret (or the start of a selection - the same
     position rule Find References uses). An input dialog pre-filled with the
