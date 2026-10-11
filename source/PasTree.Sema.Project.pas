@@ -794,6 +794,7 @@ type
     function LocalHead(AModel: TPasSemaModel; ANode: Integer): Integer;
     function QualifiedText(AId, ANode: Integer): string;
     function UnitNameOf(AId, ANode: Integer): Integer;
+    function UsesNamed(AM: TPasSemaModel; const AText: string): Integer;
     procedure EmitE2003(AModel: TPasSemaModel; ANode: Integer;
       AId: Integer = -1);
     function UnknownAncestryX(const AX: TSemaXType): Boolean;
@@ -6884,16 +6885,39 @@ begin
     Exit(EnsureSysInitUnit);
   // One lookup where ResolveUses has indexed the clause; the scan below is
   // the same answer for a model that never went through it.
-  if LM.UsesIndexed then
+  Result := UsesNamed(LM, LText);
+  // The one exception to "the written name": System is a unit itself, so a
+  // unit `uses` wrote short and the -NS prefix (or an alias) resolved under
+  // System also qualifies by its real name - with `uses SysUtils`,
+  // `System.SysUtils.IntToStr` compiles, while `uses Forms` under -NS Vcl
+  // leaves `Vcl.Forms.Application` E2003 (dcc64 37.0, spec 1.2.3,
+  // local/probe-b23). Missing it, the qualifier fell back to bare `System`
+  // and every member after it went dark (audit A2-12).
+  if (Result < 0) and LText.StartsWith('system.', True) then
   begin
-    if not LM.UsesByName.TryGet(SemaKey(LowerCase(LText)), Result) then
+    LIdx := UsesNamed(LM, LText.Substring(7));
+    if (LIdx >= 0) and SameText(FModels[LIdx].UnitNameLower, LText) then
+      Result := LIdx;
+  end;
+end;
+
+// The unit AM's `uses` clause names AText - as WRITTEN there - or -1.
+function TPasSemaProject.UsesNamed(AM: TPasSemaModel;
+  const AText: string): Integer;
+var
+  LIdx: Integer;
+begin
+  if AM.UsesIndexed then
+  begin
+    if not AM.UsesByName.TryGet(SemaKey(LowerCase(AText)), Result) then
       Result := -1;
     Exit;
   end;
-  for LIdx := 0 to High(LM.UsesList) do
-    if (LM.UsesList[LIdx].UnitId >= 0) and
-       SameText(LM.UsesList[LIdx].NameFull, LText) then
-      Exit(LM.UsesList[LIdx].UnitId);
+  for LIdx := 0 to High(AM.UsesList) do
+    if (AM.UsesList[LIdx].UnitId >= 0) and
+       SameText(AM.UsesList[LIdx].NameFull, AText) then
+      Exit(AM.UsesList[LIdx].UnitId);
+  Result := -1;
 end;
 
 // ANode (an identifier that failed ALL normal local resolution - callers

@@ -2117,6 +2117,119 @@ end;
 // name on the NEXT line; a column near MaxInt overflowed. A caret right
 // after a name means that name, as it already did for a conditional symbol.
 // A span that leaves its line ends at that line's end.
+{ Unit identity in rename (audit B23): a `uses` item is no symbol to
+  rename (A2-32), a unit rename rewrites the unit's name where code
+  qualifies with it - and not a local that hides it (A2-33) - and a program
+  header's rename asks for no file rename (B3-02). The project compiles with
+  dcc64 37.0 before the rename and after each plan applied. }
+procedure TestUnitIdentity;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LApp, LOvU, LLib, LTMid, LSym: Integer;
+  LName, LErr, LFile: string;
+  LEdits: TArray<TPasRenameEdit>;
+
+  // The edits in AFile as sorted `line:col` pairs.
+  function At(const AFile: string): string;
+  var
+    L: TArray<string>;
+  begin
+    L := nil;
+    for var E in LEdits do
+      if SameText(TPath.GetFileName(E.FilePath), AFile) then
+        L := L + [Format('%d:%d', [E.Line, E.Col])];
+    for var I := 1 to High(L) do   // insertion sort - a handful of rows
+    begin
+      var T := L[I];
+      var J := I - 1;
+      while (J >= 0) and (CompareStr(L[J], T) > 0) do
+      begin
+        L[J + 1] := L[J];
+        Dec(J);
+      end;
+      L[J + 1] := T;
+    end;
+    Result := string.Join(' ', L);
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_nav_unitid');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OvU.pas'),
+    'unit OvU;'#10'interface'#10'procedure Glob(A: Integer);'#10 +
+    'implementation'#10'procedure Glob(A: Integer); begin end;'#10 +
+    'initialization'#10'  OvU.Glob(0);'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Ns.Lib.pas'),
+    'unit Ns.Lib;'#10'interface'#10'procedure Q;'#10 +
+    'implementation'#10'procedure Q; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OvP.dpr'),
+    'program OvP;'#10 +                                   // 1
+    'uses OvU in ''OvU.pas'', Ns.Lib;'#10 +               // 2
+    'procedure X;'#10 +                                   // 3
+    'var OvU: record Glob: Integer; end;'#10 +            // 4
+    'begin'#10 +                                          // 5
+    '  OvU.Glob := 1;'#10 +                               // 6
+    'end;'#10 +                                           // 7
+    'begin'#10 +                                          // 8
+    '  OvU.Glob(1);'#10 +                                 // 9
+    '  Ns.Lib.Q;'#10 +                                    // 10
+    '  X;'#10 +                                           // 11
+    'end.'#10);                                           // 12
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    LProj.AnalyzeProject(TPath.Combine(LDir, 'OvP.dpr'));
+    LNav := TPasNavigator.Create(LProj);
+    try
+      LApp := LNav.ModelIdOf(TPath.Combine(LDir, 'OvP.dpr'));
+      LOvU := LNav.ModelIdOf(TPath.Combine(LDir, 'OvU.pas'));
+      LLib := LNav.ModelIdOf(TPath.Combine(LDir, 'Ns.Lib.pas'));
+      Ok('unitid: models found', (LApp >= 0) and (LOvU >= 0) and (LLib >= 0));
+      // A2-32: a `uses` item is the unit, not a symbol of its own.
+      Ok('unitid: SymbolAt declines a `uses` item',
+        not LNav.SymbolAt(LApp, 2, 6, LTMid, LSym, LName) and
+        not LNav.SymbolAt(LApp, 2, 28, LTMid, LSym, LName));
+      Ok('unitid: ...UnitAt answers there',
+        LNav.UnitAt(LApp, 2, 6, LTMid, LName) and (LTMid = LOvU));
+      LSym := NIL_SYM;
+      for var S := 0 to LProj.Model(LApp).SymCount - 1 do
+        if LProj.Model(LApp).Symbols[S].Kind = skUnitRef then
+          LSym := S;
+      Ok('unitid: PlanRename refuses a `uses` item''s symbol',
+        (LSym <> NIL_SYM) and
+        not LNav.PlanRename(LApp, LSym, 'OvV', LEdits, LErr) and
+        LErr.Contains('PlanUnitRename'));
+      // A2-33: the qualifiers in code, and not the local that hides one.
+      Ok('unitid: PlanUnitRename OvU rewrites the qualifiers [' +
+        At('OvP.dpr') + '] [' + At('OvU.pas') + ']',
+        LNav.PlanUnitRename(LOvU, 'OvV', LEdits, LFile, LErr) and
+        (At('OvP.dpr') = '2:14 2:6 9:3') and (At('OvU.pas') = '1:6 7:3') and
+        (LFile = 'OvV.pas'));
+      Ok('unitid: FindUnitReferences lists the qualifiers',
+        Length(LNav.FindUnitReferences(LOvU)) = 3);
+      Ok('unitid: a dotted unit''s qualifier, whole [' + At('OvP.dpr') + ']',
+        LNav.PlanUnitRename(LLib, 'Ns.Lib2', LEdits, LFile, LErr) and
+        (At('OvP.dpr') = '10:3 2:24'));
+      // B3-02: a program's name ties no file.
+      Ok('unitid: a program''s rename asks for no file rename',
+        LNav.PlanUnitRename(LApp, 'Zed', LEdits, LFile, LErr) and
+        (LFile = '') and (Length(LEdits) = 1));
+    finally
+      LNav.Free;
+    end;
+  finally
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { Declaration <-> implementation pairing (audit B20): an `external`
   completion (a global routine and a method), `T` against `array of T`, an
   implementation-only overload beside a declared one, an abstract overload
@@ -3863,11 +3976,14 @@ begin
       LMidRen := GNav.ModelIdOf(TPath.Combine(LDir, 'Namespace.NavD.pas'));
       Ok('PlanUnitRename: dotted name, whole span in both places',
         GNav.PlanUnitRename(LMidRen, 'Namespace.NavD2', {out} LEdits,
-          {out} LFileName, {out} LErr) and (Length(LEdits) = 2) and
+          {out} LFileName, {out} LErr) and (Length(LEdits) = 3) and
         HasEdit(LEdits, 'Namespace.NavD.pas', 1, 6,
           'unit Namespace.NavD2;', 5, 20) and
         HasEdit(LEdits, 'NavB.pas', 3, 18,
           'uses NavA, NavC, Namespace.NavD2;', 17, 32) and
+        // The qualifier in code too (audit A2-33).
+        HasEdit(LEdits, 'NavB.pas', 16, 8,
+          '  L := Namespace.NavD2.NSD_MARK;', 7, 22) and
         (LFileName = 'Namespace.NavD2.pas'));
       Ok('IsValidUnitRenameName: dotted accepted',
         IsValidUnitRenameName('Namespace.Foo'));
@@ -5472,6 +5588,7 @@ begin
   TestCaretEdges;
   TestOverrideIndex;
   TestRoutinePairs;
+  TestUnitIdentity;
   TestUnusedUses;
   TestUnreferencedUnits;
   TestLintGlobalInit;

@@ -2020,7 +2020,8 @@ begin
   if not ApplyRenameEdits(LEdits, LNewName) then
     Exit;
   ShowRenameTab(LTMid, LSym, LName, LNewName, LEdits);
-  if LIsUnit then
+  // A program's, library's or package's name ties no file (LFileName '').
+  if LIsUnit and (LFileName <> '') then
     // Object Pascal ties a unit's name to its file name, and this demo
     // never writes files - saying so is the only honest end to a unit
     // rename here (PlanUnitRename hands the required name back for exactly

@@ -459,6 +459,7 @@ type
     function PeerDeclSym(AMid, ASym: Integer): Integer;
     function PeerRoutineNameNode(AMid, ASym: Integer): Integer;
     function ImplQualifierNodes(AMid, ASym: Integer): TArray<Integer>;
+    function UnitQualifierNodes(AMi, ATargetMid: Integer): TArray<Integer>;
     function ImplHeaderSym(AMid, ANode: Integer; out ASym: Integer): Boolean;
     function SymbolOfIdentNode(AMid, ANode: Integer;
       out ATMid, ASym: Integer; out AName: string): Boolean;
@@ -663,6 +664,11 @@ type
       compile (`<new name>.pas`, dots included - Object Pascal ties a unit's
       name to its file name). This API never touches files, so a host either
       renames it or tells the user; either way it must not be left silent.
+      '' for a program, library or package: their names tie no file.
+
+      The unit's name where code QUALIFIES with it (`OldUnit.Foo`,
+      `System.Classes.TList`) is rewritten too, by the same spelling rule
+      as the `uses` item (UnitQualifierNodes).
 
       A `uses` item with an `in '...'` path (a program's, a package's) gets a
       second edit on the file name inside the quotes, its directory kept: the
@@ -726,7 +732,8 @@ type
       anything project-wide here. }
     function UnitAt(AMid, ALine, ACol: Integer; out ATargetMid: Integer;
       out AName: string): Boolean;
-    // Every `uses` clause that resolved to ATargetMid, across the project.
+    // Every `uses` clause that resolved to ATargetMid, across the project,
+    // and every place code qualifies a name with it (`OldUnit.Foo`).
     function FindUnitReferences(ATargetMid: Integer): TArray<TPasRefHit>;
     // ATargetMid's own header position - always available (see
     // TargetForUnitId's own comment: every analyzed model has one).
@@ -1811,6 +1818,12 @@ begin
   end;
   if not ResolveSymbolAt(AMid, ANode, ATMid, ASym) then
     Exit;
+  // The same leaf is bound in RefMap to its skUnitRef too (UnitAt reads
+  // that binding): declined here as well, or every `uses` item answered with
+  // a local symbol whose references are none and whose rename rewrote that
+  // one clause (audit A2-32).
+  if FProj.Model(ATMid).Symbols[ASym].Kind = skUnitRef then
+    Exit;
   if (FProj.Model(ATMid).Symbols[ASym].DeclNode = NIL_NODE) and
      not SameText(FProj.Model(ATMid).Symbols[ASym].Name, 'Result') then
   begin
@@ -2647,8 +2660,58 @@ begin
     end;
 end;
 
+{ The nodes of model AMi where code qualifies a name with the unit
+  ATargetMid - `OvU` in `OvU.Glob(1)`, `System.Classes` in `L:
+  System.Classes.TList` - each node's own span being the unit's name as
+  written there (QualifierUnitAt's match, longest first, spec 1.2.3). A
+  qualifier is no use of the unit when its head binds to something else
+  (a local, a member: 1.2.3, the first segment is looked up like any name),
+  so only a head left unbound - or bound to the clause's own skUnitRef -
+  counts, the gate ResolveDecl keeps. The `uses` items and the module's own
+  header are not here: they are names, not qualifiers. Only a model that can
+  name the unit is walked - its own, or one whose `uses` resolved to it. }
+function TPasNavigator.UnitQualifierNodes(AMi,
+  ATargetMid: Integer): TArray<Integer>;
+var
+  LM: TPasSemaModel;
+  LNode, LParent, LMatch, LHead, LSym, LIdx: Integer;
+  LNames: Boolean;
+begin
+  Result := nil;
+  LM := FProj.Model(AMi);
+  LNames := AMi = ATargetMid;
+  for LIdx := 0 to High(LM.UsesList) do
+    if LM.UsesList[LIdx].UnitId = ATargetMid then
+      LNames := True;
+  if not LNames or not FProj.EnsureHydrated(AMi) then
+    Exit;
+  for LNode := 0 to High(LM.Tree.Nodes) do
+  begin
+    if LM.Tree.Nodes[LNode].Kind <> nkMember then
+      Continue;
+    LParent := LM.Tree.Nodes[LNode].Parent;
+    if (LParent <> NIL_NODE) and
+       (LM.Tree.Nodes[LParent].Kind in [nkMember, nkUsesItem]) then
+      Continue;
+    if LNode = LM.Tree.Nodes[0].FirstChild then
+      Continue;
+    if FProj.QualifierUnitAt(AMi, LNode, LMatch) <> ATargetMid then
+      Continue;
+    LHead := LMatch;
+    while LM.Tree.Nodes[LHead].Kind = nkMember do
+      LHead := LM.Tree.Nodes[LHead].FirstChild;
+    if LM.ExtRefMap.ContainsKey(LHead) then
+      Continue;
+    LSym := LM.RefMap[LHead];
+    if (LSym <> NIL_SYM) and (LM.Symbols[LSym].Kind <> skUnitRef) then
+      Continue;
+    Result := Result + [LMatch];
+  end;
+end;
+
 // Every `uses` clause that resolved to ATargetMid, across the project - the
-// unit counterpart of FindReferences. UsesList's own NameNode may be a
+// unit counterpart of FindReferences - and every unit qualifier in code
+// (UnitQualifierNodes). UsesList's own NameNode may be a
 // dotted nkMember chain (CollectUsesItem stores the WHOLE name, not just
 // the leaf, unlike the symbol's own DeclNode) - HitFromNode's own leftmost
 // descent handles that shape directly.
@@ -2673,6 +2736,12 @@ begin
         if (LM.UsesList[LIdx].UnitId = ATargetMid) and
            FProj.EnsureHydrated(LMi) and
            HitFromNode(LM, LM.UsesList[LIdx].NameNode, LHit) then
+          LHits.Add(LHit);
+      // The qualifiers in code: `OldUnit.Foo` was listed nowhere, and a
+      // unit rename built on this list left each one naming a unit that no
+      // longer exists - E2003 (audit A2-33).
+      for var LQ in UnitQualifierNodes(LMi, ATargetMid) do
+        if HitFromNode(LM, LQ, LHit) then
           LHits.Add(LHit);
     end;
     Result := LHits.ToArray;
@@ -6514,6 +6583,41 @@ begin
           Exit;
         end;
       end;
+      // The unit's name qualifying code - `OldUnit.Foo` - by the same
+      // written-spelling rule (audit A2-33: left behind, each was E2003).
+      for var LQ in UnitQualifierNodes(LMi, ATargetMid) do
+      begin
+        if not UnitNameHit(LM, LQ, {out} LHit) then
+        begin
+          AError := Format('A unit qualifier in %s could not be read as ' +
+            'one name - rename refused, nothing planned.',
+            [TPath.GetFileName(FProj.ModelFile(LMi))]);
+          Exit;
+        end;
+        LWritten := Copy(LHit.Snippet, LHit.HiFrom + 1,
+          LHit.HiTo - LHit.HiFrom);
+        // As the `uses` item it follows: a leaf stays a leaf while the
+        // prefix is unchanged, else the item is written in full and so is
+        // the qualifier (a dotted entry qualifies whole, 1.2.3).
+        if SameText(LWritten, LOldFull) then
+          LText := ANewName
+        else if SameText(LWritten, LOldLeaf) then
+        begin
+          if SameText(Copy(LOldFull, 1, Length(LOldFull) - Length(LOldLeaf)),
+             Copy(ANewName, 1, Length(ANewName) - Length(LNewLeaf))) then
+            LText := LNewLeaf
+          else
+            LText := ANewName;
+        end
+        else
+        begin
+          AError := Format('%s line %d qualifies with this unit as "%s", ' +
+            'neither its name nor its leaf - rename refused, nothing planned.',
+            [TPath.GetFileName(LHit.FilePath), LHit.Line, LWritten]);
+          Exit;
+        end;
+        AddHit(LHit, LText, False);
+      end;
     end;
     AEdits := LList.ToArray;
   finally
@@ -6568,7 +6672,14 @@ begin
       Exit;
     end;
   end;
-  ARequiredFileName := ANewName + '.pas';
+  // Only a unit's name is tied to its file (E1038, spec 1.1.2): `program
+  // Zed;` in Q.dpr builds Q.exe, `library Zed;` Q.dll, and `package Zed;`
+  // in Q.dpk builds Q.bpl beside Zed.dcp (dcc64 37.0, local/probe-b23).
+  // Telling a host to rename a .dpr to Zed.pas broke the project (B3-02).
+  if FProj.Model(ATargetMid).Tree.Nodes[0].Kind = nkUnit then
+    ARequiredFileName := ANewName + '.pas'
+  else
+    ARequiredFileName := '';
   Result := True;
 
 end;
@@ -7217,6 +7328,15 @@ begin
   begin
     AError := Format('"%s" is a compiler builtin - it cannot be renamed.',
       [FProj.Model(ATMid).Symbols[ASym].Name]);
+    Exit;
+  end;
+  // A `uses` item's local symbol is one clause's spelling of a unit: the
+  // unit is renamed whole, by PlanUnitRename, or the other clauses, the
+  // header and the file are left naming the old one.
+  if FProj.Model(ATMid).Symbols[ASym].Kind = skUnitRef then
+  begin
+    AError := Format('"%s" names a unit - rename the unit (PlanUnitRename), ' +
+      'not this `uses` item.', [FProj.Model(ATMid).Symbols[ASym].Name]);
     Exit;
   end;
   if not DeclHit(ATMid, ASym, {out} LDecl) then

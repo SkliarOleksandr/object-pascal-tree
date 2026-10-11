@@ -194,7 +194,7 @@ identifier class does here:
 | 6b | A TYPE whose methods are implemented as `procedure TFoo.Bar;` - nested (`TOuter.TInner.Zap`), generic (`TBox<T>.Put`) and record methods included | declaration + every use + its name in every implementation header it qualifies, only the segment that names it | OK (0.56.0 - `ImplQualifierNodes`; the resolver binds no qualifier segment, so until then a class rename left every method implementation spelling the old name: E2003 on each) |
 | 7 | Implicit `Result` | nothing - refused, no declaration site to rename | OK (by design, 3.3) |
 | 8 | A compiler builtin (`Integer`, `Length`, `True`) | nothing - refused outright | OK (by design, 3.1) |
-| 9 | A UNIT, from its own header name or from any `uses` item (any segment) | the header + every `uses` item project-wide, whole dotted spans | OK (3.8) |
+| 9 | A UNIT, from its own header name or from any `uses` item (any segment) | the header + every `uses` item project-wide + every unit qualifier in code, whole dotted spans | OK (3.8) |
 | 10 | The FILE a renamed unit lives in | not renamed - the required name is HANDED BACK to the host | OK (by design, 3.8) |
 | 10a | A program's or package's `X in '..\dir\X.pas'` naming that file | the file name inside the quotes, its directory kept; the line's preview carries both its edits | OK (0.87.0 - before, the path kept the old file name: F2613 once the host renamed the file, and in the IDE the project's entry for the unit named nothing; pastree-lsp patched it from the plan's line text) |
 | 11 | A `uses` item spelled as a `-A` unit ALIAS | nothing - the whole unit rename is refused, named in the error | OK (by design, 3.8) |
@@ -318,8 +318,14 @@ identifier class does here:
     referring units (each gets its own local `skUnitRef`), so the target
     MODEL is the identity - exactly what `FindUnitReferences` already keys
     on. The plan is that unit's own header name (the `IsDecl` row) plus
-    every `uses` item project-wide that resolved to it. Three rules are its
-    own:
+    every `uses` item project-wide that resolved to it, plus every place
+    code QUALIFIES with the unit (`OldUnit.Foo`, `System.Classes.TList` -
+    `UnitQualifierNodes`; not a qualifier whose head a local or a member
+    hides, spec 1.2.3) - left out until 0.96.6, each was an E2003 once the
+    plan was applied, and `FindUnitReferences` lists the same sites. A
+    `uses` item is no SYMBOL to rename: `SymbolAt` declines it (it is
+    `UnitAt`'s) and `PlanRename` refuses its `skUnitRef`, pointing here.
+    Three rules are its own:
 
     - a dotted name is ONE name: the WHOLE written span is replaced, not the
       segment the caret was over (`IsValidUnitRenameName` accepts dots, each
@@ -333,7 +339,9 @@ identifier class does here:
       the one outcome worse than doing nothing.
 
     Object Pascal ties a unit's name to its file name, so the plan also
-    returns `ARequiredFileName` (`<new name>.pas`). It does NOT rename the
+    returns `ARequiredFileName` (`<new name>.pas`) - '' for a program,
+    library or package, whose names tie no file (spec 1.1.2; until 0.96.6
+    a program's rename asked for `<new>.pas`). It does NOT rename the
     file - a host either does it or tells the user, but must not stay
     silent. The demo, which never writes files, says so in a dialog.
 

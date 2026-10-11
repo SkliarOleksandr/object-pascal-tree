@@ -5877,6 +5877,51 @@ begin
   TDirectory.Delete(LDir, True);
 end;
 
+{ A unit `uses` wrote short and the -NS prefix resolved under System also
+  qualifies by its real name - `System.SysUtils.IntToStr` with `uses
+  SysUtils` - while under another prefix only the written name does:
+  `Vcl.Forms.Application` with `uses Forms` is E2003 on `Vcl` (dcc64 37.0,
+  spec 1.2.3, local/probe-b23; audit A2-12). }
+procedure TestSystemQualifiedUnit;
+var
+  LDir: string;
+begin
+  LDir := FreshDir('pastree_sema_sysqual');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.SysUtils.pas'),
+    'unit System.SysUtils;'#10'interface'#10 +
+    'function IntToStr(A: Integer): string;'#10'implementation'#10 +
+    'function IntToStr(A: Integer): string; begin Result := ''''; end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Vcl.Forms.pas'),
+    'unit Vcl.Forms;'#10'interface'#10'var Application: Integer;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SqApp.dpr'),
+    'program SqApp;'#10'uses SysUtils, Forms;'#10 +
+    'var S: string; I: Integer;'#10'begin'#10 +
+    '  S := System.SysUtils.IntToStr(1);'#10 +
+    '  S := SysUtils.IntToStr(2);'#10 +
+    '  I := Vcl.Forms.Application;'#10 +
+    '  I := Forms.Application;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.SetNamespaces(['System', 'Vcl']);
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'SqApp.dpr'));
+    Ok('sysqual: System.SysUtils qualifies beside `uses SysUtils`',
+      CrossRefCountInUnit(ModelByName('sqapp'), 'IntToStr', 'IntToStr',
+        'system.sysutils') = 2);
+    Ok('sysqual: Vcl.Forms does not beside `uses Forms`',
+      CrossRefCountInUnit(ModelByName('sqapp'), 'Application', 'Application',
+        'vcl.forms') = 1);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestDeclAfterUnit;
 const
   UFA =
@@ -11794,6 +11839,7 @@ begin
   TestWithBodySelfMember;
   TestNestedOuterAfterUnit;
   TestDeclAfterUnit;
+  TestSystemQualifiedUnit;
   TestOracleDepth;
   TestInstanceSize;
   TestOperatorChains;
