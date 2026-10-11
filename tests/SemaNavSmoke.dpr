@@ -2117,6 +2117,263 @@ end;
 // name on the NEXT line; a column near MaxInt overflowed. A caret right
 // after a name means that name, as it already did for a conditional symbol.
 // A span that leaves its line ends at that line's end.
+{ Declaration <-> implementation pairing (audit B20): an `external`
+  completion (a global routine and a method), `T` against `array of T`, an
+  implementation-only overload beside a declared one, an abstract overload
+  beside an implemented one, `TBox` and `TBox<T>` in one unit, Explicit
+  overloaded by result alone, a bare completion of a forward. Go To both
+  ways, and the renames that ride on the pairing. The unit compiles with
+  dcc64 37.0 (local/probe-b20/PairU.pas). }
+procedure TestRoutinePairs;
+const
+  PR_SYS =
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class'#10'  end;'#10 +
+    'implementation'#10'end.'#10;
+  PR_UNIT =
+    'unit PairU;'#10 +
+    'interface'#10 +
+    'function Tick(A: Integer): Cardinal; stdcall;'#10 +
+    'procedure Log(const Msg: string); overload;'#10 +
+    'procedure Log(const Msg: array of string); overload;'#10 +
+    'procedure Glob(A: Integer); overload;'#10 +
+    'type'#10 +
+    '  TFoo = class'#10 +
+    '    function Bar(A: Integer): Cardinal; stdcall;'#10 +
+    '    procedure Foo; overload; virtual; abstract;'#10 +
+    '    procedure Foo(A: Integer); overload;'#10 +
+    '  end;'#10 +
+    '  TBox<T> = class'#10 +
+    '    procedure Clear;'#10 +
+    '  end;'#10 +
+    '  TBox = class'#10 +
+    '    procedure Clear;'#10 +
+    '  end;'#10 +
+    '  TBig = record'#10 +
+    '    V: Integer;'#10 +
+    '    class operator Explicit(const A: TBig): Integer;'#10 +
+    '    class operator Explicit(const A: TBig): Cardinal;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function Tick(A: Integer): Cardinal; stdcall; external ''kernel32.dll'' name ''GetTickCount'';'#10 +
+    'function TFoo.Bar(A: Integer): Cardinal; stdcall; external ''kernel32.dll'' name ''GetTickCount'';'#10 +
+    'procedure Log(const Msg: string);'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'procedure Log(const Msg: array of string);'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'procedure Glob(S: string); overload;'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'procedure Glob(A: Integer);'#10 +
+    'begin'#10 +
+    '  Glob(''x'');'#10 +
+    'end;'#10 +
+    'procedure TFoo.Foo(A: Integer);'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'procedure TBox<T>.Clear;'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'procedure TBox.Clear;'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'class operator TBig.Explicit(const A: TBig): Integer;'#10 +
+    'begin'#10 +
+    '  Result := 1;'#10 +
+    'end;'#10 +
+    'class operator TBig.Explicit(const A: TBig): Cardinal;'#10 +
+    'begin'#10 +
+    '  Result := 2;'#10 +
+    'end;'#10 +
+    'procedure Bare(A: Integer); forward;'#10 +
+    'procedure Bare;'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'type'#10 +
+    '  TGenM = class'#10 +
+    '    procedure Gen(A: Integer); overload;'#10 +
+    '    procedure Gen<T>(A: Integer); overload;'#10 +
+    '  end;'#10 +
+    'procedure TGenM.Gen<T>(A: Integer);'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'procedure TGenM.Gen(A: Integer);'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'type'#10 +
+    '  TCC = class'#10 +
+    '    class constructor Create;'#10 +
+    '    constructor Create;'#10 +
+    '  end;'#10 +
+    '  TPtrA = NativeUInt;'#10 +
+    '  TPtrB = NativeUInt;'#10 +
+    'constructor TCC.Create;'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'class constructor TCC.Create;'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'function Help(P: PChar; D: TPtrA): Boolean; overload; forward;'#10 +
+    'function Help(const S: string; D: TPtrA): Boolean; overload; forward;'#10 +
+    'function Help(const S: string; D: TPtrB): Boolean;'#10 +
+    'begin'#10 +
+    '  Result := Help(PChar(S), D);'#10 +
+    'end;'#10 +
+    'function Help(P: PChar; D: TPtrB): Boolean;'#10 +
+    'begin'#10 +
+    '  Result := P <> nil;'#10 +
+    'end;'#10 +
+    'end.'#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LMid: Integer;
+
+  // Go To Implementation (AImpl) or Declaration from ALine:ACol: the target
+  // line, or 0 when there is none.
+  function GoLine(AImpl: Boolean; ALine, ACol: Integer): Integer;
+  var
+    T: TPasNavTarget;
+    R: Boolean;
+  begin
+    if AImpl then
+      R := LNav.GotoImplementation(LMid, ALine, ACol, T)
+    else
+      R := LNav.GotoDeclaration(LMid, ALine, ACol, T);
+    if R then
+      Result := T.Line
+    else
+      Result := 0;
+  end;
+
+  // The edits a rename of the symbol at ALine:ACol plans, as sorted
+  // `line:col` pairs, or `refused`.
+  function RenameAt(ALine, ACol: Integer): string;
+  var
+    LTMid, LSym, I, J: Integer;
+    LName, LErr, T: string;
+    LEdits: TArray<TPasRenameEdit>;
+    L: TArray<string>;
+  begin
+    if not LNav.SymbolAt(LMid, ALine, ACol, LTMid, LSym, LName) then
+      Exit('no symbol');
+    if not LNav.PlanRename(LTMid, LSym, LName + 'X', LEdits, LErr) then
+      Exit('refused');
+    SetLength(L, Length(LEdits));
+    for I := 0 to High(LEdits) do
+      L[I] := Format('%.2d:%.2d', [LEdits[I].Line, LEdits[I].Col]);
+    for I := 1 to High(L) do   // insertion sort - a handful of rows
+    begin
+      T := L[I];
+      J := I - 1;
+      while (J >= 0) and (CompareStr(L[J], T) > 0) do
+      begin
+        L[J + 1] := L[J];
+        Dec(J);
+      end;
+      L[J + 1] := T;
+    end;
+    Result := string.Join(' ', L);
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_nav_pairs');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), PR_SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PairU.pas'), PR_UNIT);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    LProj.AnalyzeDirectory(LDir);
+    LNav := TPasNavigator.Create(LProj);
+    try
+      LMid := LNav.ModelIdOf(TPath.Combine(LDir, 'PairU.pas'));
+      Ok('pairs: model found', LMid >= 0);
+      // `external` completions: a global routine and a method.
+      Ok('pairs: Tick -> its external implementation [' +
+        IntToStr(GoLine(True, 3, 10)) + ']', GoLine(True, 3, 10) = 25);
+      Ok('pairs: ...and back', GoLine(False, 25, 10) = 3);
+      Ok('pairs: TFoo.Bar -> its external implementation',
+        GoLine(True, 9, 14) = 26);
+      Ok('pairs: ...and back from the qualified external header',
+        GoLine(False, 26, 15) = 9);
+      Ok('pairs: renaming Tick edits both headers [' + RenameAt(3, 10) + ']',
+        RenameAt(3, 10) = '03:10 25:10');
+      Ok('pairs: renaming Tick''s A edits both headers [' +
+        RenameAt(3, 15) + ']', RenameAt(3, 15) = '03:15 25:15');
+      Ok('pairs: renaming TFoo.Bar from its external header [' +
+        RenameAt(26, 15) + ']', RenameAt(26, 15) = '09:14 26:15');
+      // `string` against `array of string`.
+      Ok('pairs: Log(string) -> its own body [' +
+        IntToStr(GoLine(True, 4, 11)) + ']', GoLine(True, 4, 11) = 29);
+      Ok('pairs: Log(array of string) -> its own body',
+        GoLine(True, 5, 11) = 32);
+      Ok('pairs: renaming Log(string)''s Msg edits its own pair [' +
+        RenameAt(4, 21) + ']', RenameAt(4, 21) = '04:21 27:21');
+      // An implementation-only overload borrows nobody's declaration.
+      Ok('pairs: Glob(S) has no declaration [' +
+        IntToStr(GoLine(False, 33, 11)) + ']', GoLine(False, 33, 11) = 0);
+      Ok('pairs: Glob(A) -> its own body', GoLine(True, 6, 11) = 38);
+      Ok('pairs: renaming Glob(S)''s S edits its header only [' +
+        RenameAt(33, 16) + ']', RenameAt(33, 16) = '33:16');
+      // An abstract overload has no implementation.
+      Ok('pairs: an abstract Foo has no implementation [' +
+        IntToStr(GoLine(True, 10, 15)) + ']', GoLine(True, 10, 15) = 0);
+      Ok('pairs: Foo(A) -> its own body', GoLine(True, 11, 15) = 42);
+      // TBox and TBox<T>.
+      Ok('pairs: TBox<T>.Clear -> its own body [' +
+        IntToStr(GoLine(True, 14, 15)) + ']', GoLine(True, 14, 15) = 45);
+      Ok('pairs: TBox.Clear -> its own body [' +
+        IntToStr(GoLine(True, 17, 15)) + ']', GoLine(True, 17, 15) = 48);
+      Ok('pairs: back from TBox.Clear', GoLine(False, 46, 16) = 17);
+      Ok('pairs: back from TBox<T>.Clear', GoLine(False, 43, 19) = 14);
+      Ok('pairs: renaming TBox.Clear edits its own implementation [' +
+        RenameAt(17, 15) + ']', RenameAt(17, 15) = '17:15 46:16');
+      // Explicit overloaded by result alone.
+      Ok('pairs: Explicit: Integer -> its own body [' +
+        IntToStr(GoLine(True, 21, 20)) + ']', GoLine(True, 21, 20) = 51);
+      Ok('pairs: Explicit: Cardinal -> its own body [' +
+        IntToStr(GoLine(True, 22, 20)) + ']', GoLine(True, 22, 20) = 55);
+      Ok('pairs: back from Explicit: Cardinal', GoLine(False, 53, 21) = 22);
+      // A bare completion of a forward pairs on the loose key.
+      Ok('pairs: a bare completion of a forward [' +
+        IntToStr(GoLine(True, 57, 11)) + ']', GoLine(True, 57, 11) = 60);
+      Ok('pairs: ...and back', GoLine(False, 58, 11) = 57);
+      // A plain and a generic method with one parameter list.
+      Ok('pairs: Gen -> its own body [' + IntToStr(GoLine(True, 63, 15)) +
+        ']', GoLine(True, 63, 15) = 71);
+      Ok('pairs: Gen<T> -> its own body [' + IntToStr(GoLine(True, 64, 15)) +
+        ']', GoLine(True, 64, 15) = 68);
+      Ok('pairs: back from TGenM.Gen<T>', GoLine(False, 66, 17) = 64);
+      // `class` is part of the pair: a class constructor beside an instance
+      // one with the same empty parameter list.
+      Ok('pairs: class constructor Create -> its own body [' +
+        IntToStr(GoLine(True, 74, 23)) + ']', GoLine(True, 74, 23) = 84);
+      Ok('pairs: constructor Create -> its own body [' +
+        IntToStr(GoLine(True, 75, 17)) + ']', GoLine(True, 75, 17) = 81);
+      Ok('pairs: back from class constructor TCC.Create',
+        GoLine(False, 82, 23) = 74);
+      // Overloads whose implementations spell a parameter type another way:
+      // each pairs with its best slot match.
+      Ok('pairs: Help(PChar) -> its own body [' +
+        IntToStr(GoLine(True, 85, 10)) + ']', GoLine(True, 85, 10) = 93);
+      Ok('pairs: Help(string) -> its own body [' +
+        IntToStr(GoLine(True, 86, 10)) + ']', GoLine(True, 86, 10) = 89);
+      Ok('pairs: back from Help(string)', GoLine(False, 87, 10) = 86);
+    finally
+      LNav.Free;
+    end;
+  finally
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { The reverse-heritage index and the slot rules of Find Overrides (audit
   B19, spec 12.1.1 and 12.2.1). The index held only WRITTEN heritage items,
   so a bare `class` had no edge to TObject and a bare `interface` none to
@@ -5214,6 +5471,7 @@ begin
   TestReleasedModels;
   TestCaretEdges;
   TestOverrideIndex;
+  TestRoutinePairs;
   TestUnusedUses;
   TestUnreferencedUnits;
   TestLintGlobalInit;

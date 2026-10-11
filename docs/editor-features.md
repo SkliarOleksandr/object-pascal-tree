@@ -250,6 +250,31 @@ identifier class does here:
     takes them; a host shows them in a references list only when it asks -
     by default a form's class would list a row per event handler.
 
+    Which two headers are a pair (`EnsureRoutinePairs`, the same pairs Go
+    To Implementation / Declaration jump between): the implementation is
+    the header with a body, a qualified one, or one completed `external`
+    (a DLL import unit's interface routines, a method imported the same
+    way). They pair on the type chain - each segment with its generic
+    arity, so `TBox.Clear` and `TBox<T>.Clear` in one unit stay apart -
+    the name with its own generic arity, and the parameter signature: the
+    full type text of each slot (`string` is not `array of string`), plus
+    the result type for an operator (`Explicit` overloads by result
+    alone), and `class` (a class constructor and an instance one may share
+    a parameter list). An implementation that omits its parameter list
+    pairs on the name alone, and only when it and the declaration are the
+    one pair left unmatched under that name; overloads whose
+    implementations spell a type another way (`DWORD_PTR` declared,
+    `ULONG_PTR` implemented) pair with their best match by slots spelled
+    alike, among headers with as many slots, when the match is mutual and
+    unique. An implementation-only overload, or an abstract overload, has
+    no partner and borrows none (0.96.3; until then each of those shapes
+    paired with another overload's header, and a parameter rename edited
+    that header - E2037). Measured on rtlflat: 16,155 headers that had no
+    partner now have one (the `external` completions), 244 changed partner
+    (every one sampled was a wrong overload before), 23 lost a wrong one.
+    The parameter modifiers (`const`, `var`, `out`) are still not compared
+    (coverage 6.2).
+
 3.5 **Not checked**: whether the new name COLLIDES with something already
     visible at an edit site. Object Pascal scoping makes that a full
     re-resolution question rather than a lookup; the host re-analyzes after

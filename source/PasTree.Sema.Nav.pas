@@ -370,9 +370,9 @@ type
       RoutinesBuilt: Boolean;
       RoutineOfVis: TArray<Integer>;      // visible idx -> innermost enclosing
                                           // nkRoutine node, or NIL_NODE
-      DeclKey, ImplKey: TDictionary<string, Integer>;       // exact arity
-      DeclKeyLoose, ImplKeyLoose: TDictionary<string, Integer>; // arity-blind
-                                                                 // fallback
+      // Each paired routine header -> its counterpart, both ways (a
+      // declaration -> its implementation and back); see EnsureRoutinePairs.
+      RoutinePeer: TDictionary<Integer, Integer>;
       // Reverse of every symbol's OWN DeclNode -- lets SymbolAt answer "Find
       // References" from the DECLARATION site itself (a type's own name, a
       // field, a routine header...), not only from a place that USES it.
@@ -448,14 +448,10 @@ type
     function RTEnclosingRoutine(LM: TPasSemaModel; ANode: Integer): Integer;
     function RTEnclosingTypeChain(LM: TPasSemaModel;
       ADeclNode: Integer): TArray<string>;
-    function RTMethodKey(const AChain: TArray<string>;
-      const AName, ASignature: string): string;
-    function RTMethodKeyLoose(const AChain: TArray<string>;
-      const AName: string): string;
-    function RTRoutineKey(AContainer: Integer;
-      const AName, ASignature: string): string;
-    function RTRoutineKeyLoose(AContainer: Integer; const AName: string):
-      string;
+    function RTGenericArityAfter(LM: TPasSemaModel; ANode: Integer): Integer;
+    function RTIsImplHeader(LM: TPasSemaModel; ARoutine: Integer): Boolean;
+    function RTRoutineKeys(LM: TPasSemaModel; ARoutine: Integer;
+      out AKey, AKeyLoose: string): Boolean;
     procedure EnsureRoutinePairs(AMid: Integer; ACache: TNavCache);
     function RoutinePeerNode(AMid, ARoutine: Integer): Integer;
     function RTParamNames(LM: TPasSemaModel;
@@ -1180,10 +1176,7 @@ uses
 destructor TPasNavigator.TNavCache.Destroy;
 begin
   NodeOfVis.Free;
-  DeclKey.Free;
-  ImplKey.Free;
-  DeclKeyLoose.Free;
-  ImplKeyLoose.Free;
+  RoutinePeer.Free;
   DeclSymOfNode.Free;
   inherited;
 end;
@@ -4963,21 +4956,34 @@ end;
       class) elsewhere in the unit. Matched by the type's own name CHAIN
       (walking the declaration's enclosing nkTypeDecl nodes outward, and
       the implementation's qualifier segments - see RTEnclosingTypeChain/
-      RTSegments) + method name + parameter count.
+      RTSegments), each segment with its generic arity (`TFoo` and
+      `TFoo<T>` are two types, 16.1.2), + method name and its own generic
+      arity + parameter signature.
 
     - A GLOBAL or NESTED routine: an unqualified `forward`-declared header
       (interface section, or directly in the implementation section, or
       inside another routine's local declarations for a nested proc) paired
       with its later same-name implementation in the SAME lexical
       container (the unit itself, or the enclosing routine - see
-      RTEnclosingRoutine) + parameter count.
+      RTEnclosingRoutine) + parameter signature.
 
-  Parameter count (not full type matching) disambiguates overloads - the
-  same arity-only precision the resolver's OWN interface<->impl linking
-  already uses elsewhere in this codebase (CollectRoutine); ties fall back
-  to an arity-blind key (first-registered wins), so the common
-  non-overloaded case still works even if the count comes out wrong for
-  some unanticipated grammar shape. }
+  Which header is the implementation: one with a body, a qualified one, or
+  one completed `external` (6.7.1 - a DLL import unit's interface routines,
+  and a method, are completed that way: no body) - RTIsImplHeader, the one
+  test every site here asks.
+
+  RTRoutineKeys builds both keys once. The exact key carries the parameter
+  signature (the type text of each slot, RTParamSignature) and, for an
+  operator, the result type - Implicit / Explicit overload by result alone
+  (9.3.1). The loose key drops the signature: an implementation may omit
+  its parameter list (6.1.2) or spell a type another way. A loose pair is
+  made only between headers left unpaired by the exact keys: the ONE
+  declaration and the ONE implementation under that key, or, where there
+  are several, a declaration and an implementation with as many slots that
+  are each other's one best match by slots spelled alike. A header with no
+  counterpart of its own (an implementation-only overload, an abstract one)
+  never borrows another overload's partner. `class` is part of both keys
+  (15.1.1). }
 
 function TPasNavigator.VisAt(AMid, ALine, ACol: Integer): Integer;
 var
@@ -5112,23 +5118,22 @@ begin
   Result := ANameNode <> NIL_NODE;
 end;
 
-// Raw source text spanning ANode's own tokens (leftmost descendant's
-// FirstToken - an nkMember's OWN FirstToken is the dot, see PasTree.Ast -
-// through ANode's LastToken), concatenated with no separators. Used to
+// Raw source text spanning ANode's own tokens (its leftmost visible token,
+// NodeLeftmostVis - an nkMember's OWN FirstToken is the dot, see PasTree.Ast
+// - through ANode's LastToken), concatenated with no separators. Used to
 // render a parameter's TYPE EXPRESSION verbatim regardless of shape (a
 // plain `string`/`PChar` ident, or something with its own internal tokens
-// like `TArray<Integer>`), for signature matching below.
+// like `TArray<Integer>`), for signature matching below. The leftmost
+// token, not the deepest first child's: `array of string` has the one child
+// `string`, and starting there made it the same text as a plain `string`.
 function TPasNavigator.RTSpanText(LM: TPasSemaModel; ANode: Integer): string;
 var
-  LFirstNode, LFirst, LLast, LIdx: Integer;
+  LFirst, LLast, LIdx: Integer;
 begin
   Result := '';
   if ANode = NIL_NODE then
     Exit;
-  LFirstNode := ANode;
-  while LM.Tree.Nodes[LFirstNode].FirstChild <> NIL_NODE do
-    LFirstNode := LM.Tree.Nodes[LFirstNode].FirstChild;
-  LFirst := LM.Tree.Nodes[LFirstNode].FirstToken;
+  LFirst := LM.Tree.NodeLeftmostVis(ANode);
   LLast := LM.Tree.Nodes[ANode].LastToken;
   if (LFirst < 0) or (LLast < 0) or (LFirst > LLast) or
      (LLast > High(LM.Tree.Source.Visible)) then
@@ -5140,9 +5145,8 @@ end;
 // Parameter-list SIGNATURE: one lowercased type-text entry per parameter
 // SLOT (`S1, S2: string` contributes "string" TWICE, matching how each
 // name gets its own arity slot), joined with '|'. '' for a parameterless
-// routine or one with no repeated param list at all (a body-less external/
-// forward completion - rare enough here that the loose, signature-blind
-// key covers it).
+// routine or one with no repeated param list at all (an implementation that
+// omits it, 6.1.2 - the loose key's case, see RTRoutineKeys).
 //
 // Replaces a plain parameter COUNT (the first version of this feature):
 // two overloads with the SAME arity but different parameter TYPES - e.g.
@@ -5239,7 +5243,10 @@ begin
     if (LNameNode = NIL_NODE) or (LM.Tree.Nodes[LNameNode].Kind <> nkIdent)
     then
       Break;
-    Result := [LM.Tree.NodeNameLower(LNameNode)] + Result;
+    // With its generic arity: `TFoo` and `TFoo<T>` in one unit are two
+    // types (16.1.2) whose methods must not share a key.
+    Result := [LM.Tree.NodeNameLower(LNameNode) + '`' +
+      IntToStr(RTGenericArityAfter(LM, LNameNode))] + Result;
     LCur := LM.Tree.Nodes[LTypeDecl].Parent;
     // A `type` SECTION nested inside a class body (`type TInner = class ...
     // end; end;`) wraps its nkTypeDecl children in an nkTypeSec - one more
@@ -5250,58 +5257,256 @@ begin
   end;
 end;
 
-function TPasNavigator.RTMethodKey(const AChain: TArray<string>;
-  const AName, ASignature: string): string;
+// The generic arity written right after a name segment: the type
+// parameters of the nkGenericParams siblings that follow ANode (`TFoo<K, V>`
+// is 2, `TFoo<K; V: class>` too), 0 for none. The same count on a type's
+// declaration (its nkTypeDecl) and on a qualifier segment of a method
+// implementation, so the two spell one chain.
+function TPasNavigator.RTGenericArityAfter(LM: TPasSemaModel;
+  ANode: Integer): Integer;
+var
+  LGen, LParam, LP: Integer;
 begin
-  Result := 'M#' + string.Join('.', AChain) + '#' + AName + '#' + ASignature;
+  Result := 0;
+  LGen := LM.Tree.Nodes[ANode].NextSibling;
+  while (LGen <> NIL_NODE) and (LM.Tree.Nodes[LGen].Kind = nkGenericParams) do
+  begin
+    LParam := LM.Tree.Nodes[LGen].FirstChild;
+    while LParam <> NIL_NODE do
+    begin
+      if LM.Tree.Nodes[LParam].Kind = nkGenericParam then
+      begin
+        LP := LM.Tree.Nodes[LParam].FirstChild;
+        while (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkIdent) do
+        begin
+          Inc(Result);
+          LP := LM.Tree.Nodes[LP].NextSibling;
+        end;
+      end;
+      LParam := LM.Tree.Nodes[LParam].NextSibling;
+    end;
+    LGen := LM.Tree.Nodes[LGen].NextSibling;
+  end;
 end;
 
-// Signature-blind fallback key - a DIFFERENT tag ('ML#'), not just AMethodKey
-// called with an empty signature: a genuinely parameterless routine already
-// has signature '', so reusing that as the "don't care" marker would let a
-// 0-arg routine's exact key collide with another routine's loose key.
-function TPasNavigator.RTMethodKeyLoose(const AChain: TArray<string>;
-  const AName: string): string;
+// Whether ARoutine is the IMPLEMENTATION half of a pair: it has a body, or
+// it is qualified (`TFoo.Bar` is always the implementation), or it is
+// completed `external` (6.7.1). The last two need no body: a DLL import
+// unit completes its interface routines `function F(...); stdcall; external
+// 'k.dll' name 'G';`, and a method may be completed the same way (dcc64
+// 37.0, local/probe-b20). Testing the body alone filed those headers as
+// declarations, and nothing paired them.
+function TPasNavigator.RTIsImplHeader(LM: TPasSemaModel;
+  ARoutine: Integer): Boolean;
+var
+  LQualIdents: TArray<Integer>;
+  LNameNode, LChild, LVis: Integer;
 begin
-  Result := 'ML#' + string.Join('.', AChain) + '#' + AName;
+  if RTFindChildKind(LM, ARoutine, nkRoutineBody) <> NIL_NODE then
+    Exit(True);
+  if RTSegments(LM, ARoutine, LQualIdents, LNameNode) and
+     (LQualIdents <> nil) then
+    Exit(True);
+  LChild := LM.Tree.Nodes[ARoutine].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LChild].Kind = nkDirective then
+    begin
+      LVis := LM.Tree.Nodes[LChild].FirstToken;
+      if (LVis >= 0) and (LVis <= High(LM.Tree.Source.Visible)) and
+         LM.Tree.Source.VisibleTextEquals(LVis, 'external') then
+        Exit(True);
+    end;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+  Result := False;
 end;
 
-function TPasNavigator.RTRoutineKey(AContainer: Integer;
-  const AName, ASignature: string): string;
+{ The pairing keys of ARoutine, False when it has no name to key on.
+
+  A method (a qualified header, or one a struct body adopted) is keyed on
+  its type chain - the qualifiers, or the enclosing type declarations, each
+  with its generic arity - and anything else on its lexical container (the
+  enclosing routine, NIL_NODE at unit level), and `class` when the header
+  carries it. Then the name with ITS
+  generic arity (a plain and a generic method may share a name and a
+  parameter list, 16.2), and for the exact key the parameter signature. An
+  operator adds its result type: Implicit / Explicit may overload by result
+  alone (9.3.1), and an operator's implementation always repeats it. A
+  plain function does not - its implementation may omit the result with the
+  parameter list.
+
+  The one place a key is computed: the builder and every lookup used to
+  carry a copy each, and the copies disagreed on what is a method. }
+function TPasNavigator.RTRoutineKeys(LM: TPasSemaModel; ARoutine: Integer;
+  out AKey, AKeyLoose: string): Boolean;
+var
+  LQualIdents: TArray<Integer>;
+  LNameNode, LParent, LIdx, LChild, LVis: Integer;
+  LChain: TArray<string>;
+  LHead, LSig: string;
 begin
-  Result := 'U#' + IntToStr(AContainer) + '#' + AName + '#' + ASignature;
+  AKey := '';
+  AKeyLoose := '';
+  if not RTSegments(LM, ARoutine, LQualIdents, LNameNode) then
+    Exit(False);
+  LParent := LM.Tree.Nodes[ARoutine].Parent;
+  if LQualIdents <> nil then
+  begin
+    SetLength(LChain, Length(LQualIdents));
+    for LIdx := 0 to High(LQualIdents) do
+      LChain[LIdx] := LM.Tree.NodeNameLower(LQualIdents[LIdx]) + '`' +
+        IntToStr(RTGenericArityAfter(LM, LQualIdents[LIdx]));
+    LHead := 'M#' + string.Join('.', LChain);
+  end
+  else if (LParent <> NIL_NODE) and
+          RTIsStructKind(LM.Tree.Nodes[LParent].Kind) then
+    LHead := 'M#' + string.Join('.', RTEnclosingTypeChain(LM, ARoutine))
+  else
+    LHead := 'U#' + IntToStr(RTEnclosingRoutine(LM, ARoutine));
+  // `class` (Aux 1, on both headers): the implementation repeats it or is
+  // E2037 (15.1.1), and TThread's `class constructor Create` stands beside
+  // its `constructor Create` with the same empty parameter list.
+  if LM.Tree.Nodes[ARoutine].Aux = 1 then
+    LHead := LHead + '#class';
+  AKeyLoose := LHead + '#' + LM.Tree.NodeNameLower(LNameNode) + '`' +
+    IntToStr(RTGenericArityAfter(LM, LNameNode));
+  LSig := RTParamSignature(LM, ARoutine);
+  LVis := LM.Tree.Nodes[ARoutine].FirstToken;
+  if (LVis >= 0) and (LVis <= High(LM.Tree.Source.Visible)) and
+     LM.Tree.Source.VisibleTextEquals(LVis, 'operator') then
+  begin
+    // The result type: the first child after the name segments and the
+    // parameter list that is neither a directive nor the body.
+    LChild := LM.Tree.Nodes[LNameNode].NextSibling;
+    while (LChild <> NIL_NODE) and
+          (LM.Tree.Nodes[LChild].Kind in [nkGenericParams, nkParams]) do
+      LChild := LM.Tree.Nodes[LChild].NextSibling;
+    if (LChild <> NIL_NODE) and
+       not (LM.Tree.Nodes[LChild].Kind in [nkDirective, nkRoutineBody]) then
+      LSig := LSig + '>' + LowerCase(RTSpanText(LM, LChild));
+  end;
+  AKey := AKeyLoose + '#' + LSig;
+  Result := True;
 end;
 
-function TPasNavigator.RTRoutineKeyLoose(AContainer: Integer;
-  const AName: string): string;
-begin
-  Result := 'UL#' + IntToStr(AContainer) + '#' + AName;
-end;
-
-// Builds RoutineOfVis + the four Decl/Impl key dictionaries for ACache, once
+// Builds RoutineOfVis and the RoutinePeer pairs for ACache, once
 // (RoutinesBuilt guards re-entry). Two passes over the model's (typically
 // few dozen to low hundreds) nkRoutine nodes: position index first, then
-// the key index.
+// the pairs.
 procedure TPasNavigator.EnsureRoutinePairs(AMid: Integer; ACache: TNavCache);
+const
+  AMBIGUOUS = -2;
 var
   LM: TPasSemaModel;
-  LIdx, LR, LParent: Integer;
-  LRoutineIds: TArray<Integer>;
-  LQualIdents: TArray<Integer>;
-  LNameNode: Integer;
-  LName, LKey, LKeyLoose: string;
-  LChain: TArray<string>;
-  LIsMethod, LHasBody: Boolean;
+  LIdx, LR, LPeer, LDecl, LImpl: Integer;
+  LRoutineIds, LBySource: TArray<Integer>;
+  LKeys, LLoose: TArray<string>;
+  LIsImpl: TArray<Boolean>;
+  LDeclKey, LImplKey, LDeclLoose, LImplLoose: TDictionary<string, Integer>;
+  LGroups: TObjectDictionary<string, TList<Integer>>;
+  LList: TList<Integer>;
   LFrom, LTo: Integer;
+
+  procedure NoteLoose(ADict: TDictionary<string, Integer>; const AKey: string;
+    ANode: Integer);
+  begin
+    if ADict.ContainsKey(AKey) then
+      ADict[AKey] := AMBIGUOUS
+    else
+      ADict.Add(AKey, ANode);
+  end;
+
+  // The parameter slots' type texts of LBySource[AIdx].
+  function SlotsOf(AIdx: Integer): TArray<string>;
+  begin
+    Result := RTParamSignature(LM, LBySource[AIdx]).Split(['|'],
+      TStringSplitOptions.ExcludeEmpty);
+  end;
+
+  // How many slots two same-length slot lists spell alike, -1 when the
+  // lengths differ or there are none.
+  function SlotScore(const A, B: TArray<string>): Integer;
+  var
+    I: Integer;
+  begin
+    if (Length(A) = 0) or (Length(A) <> Length(B)) then
+      Exit(-1);
+    Result := 0;
+    for I := 0 to High(A) do
+      if A[I] = B[I] then
+        Inc(Result);
+  end;
+
+  // The headers of one loose key still unpaired (indices into LBySource):
+  // pair each declaration with the implementation that is its one best
+  // match when it is that implementation's one best match too, until no
+  // pair is added.
+  procedure PairBestSlots(AList: TList<Integer>);
+  var
+    LSlots: TArray<TArray<string>>;
+    LPaired: TArray<Boolean>;
+    I, J: Integer;
+    LAdded: Boolean;
+
+    // The one best unpaired partner of AList[AAt] on the other side, or -1.
+    function BestOf(AAt: Integer): Integer;
+    var
+      M, LS, LTop: Integer;
+      LTied: Boolean;
+    begin
+      Result := -1;
+      LTop := -1;
+      LTied := False;
+      for M := 0 to AList.Count - 1 do
+      begin
+        if LPaired[M] or (LIsImpl[AList[M]] = LIsImpl[AList[AAt]]) then
+          Continue;
+        LS := SlotScore(LSlots[AAt], LSlots[M]);
+        if LS < 0 then
+          Continue;
+        if LS > LTop then
+        begin
+          LTop := LS;
+          Result := M;
+          LTied := False;
+        end
+        else if LS = LTop then
+          LTied := True;
+      end;
+      if LTied then
+        Result := -1;
+    end;
+
+  begin
+    SetLength(LSlots, AList.Count);
+    SetLength(LPaired, AList.Count);
+    for I := 0 to AList.Count - 1 do
+      LSlots[I] := SlotsOf(AList[I]);
+    repeat
+      LAdded := False;
+      for I := 0 to AList.Count - 1 do
+      begin
+        if LPaired[I] or LIsImpl[AList[I]] then
+          Continue;
+        J := BestOf(I);
+        if (J < 0) or (BestOf(J) <> I) then
+          Continue;
+        LPaired[I] := True;
+        LPaired[J] := True;
+        ACache.RoutinePeer.Add(LBySource[AList[I]], LBySource[AList[J]]);
+        ACache.RoutinePeer.Add(LBySource[AList[J]], LBySource[AList[I]]);
+        LAdded := True;
+      end;
+    until not LAdded;
+  end;
+
 begin
   if ACache.RoutinesBuilt then
     Exit;
   ACache.RoutinesBuilt := True;
   LM := FProj.Model(AMid);
-  ACache.DeclKey := TDictionary<string, Integer>.Create;
-  ACache.ImplKey := TDictionary<string, Integer>.Create;
-  ACache.DeclKeyLoose := TDictionary<string, Integer>.Create;
-  ACache.ImplKeyLoose := TDictionary<string, Integer>.Create;
+  ACache.RoutinePeer := TDictionary<Integer, Integer>.Create;
 
   // Count-tracked doubling - `+ [x]` re-copied the array per routine, which
   // is O(routines^2) on every cache build.
@@ -5316,6 +5521,9 @@ begin
       Inc(LRCount);
     end;
   SetLength(LRoutineIds, LRCount);
+  // Node order is source order: the pairs below take the first of two
+  // headers with one key, which must not depend on the span sort.
+  LBySource := Copy(LRoutineIds);
 
   // Position index: widest (outermost) span first, so a later, NARROWER
   // (nested) routine's marking correctly overwrites its outer's - avoids an
@@ -5342,51 +5550,86 @@ begin
       ACache.RoutineOfVis[LIdx] := LR;
   end;
 
-  // Declaration <-> implementation key index.
-  for LR in LRoutineIds do
-  begin
-    if not RTSegments(LM, LR, LQualIdents, LNameNode) then
-      Continue;
-    LName := LM.Tree.NodeNameLower(LNameNode);
-    LParent := LM.Tree.Nodes[LR].Parent;
-    LIsMethod := (LQualIdents <> nil) or
-      ((LParent <> NIL_NODE) and RTIsStructKind(LM.Tree.Nodes[LParent].Kind));
-    LHasBody := RTFindChildKind(LM, LR, nkRoutineBody) <> NIL_NODE;
-    if LIsMethod then
+  // Declaration <-> implementation pairs. Exact keys first; then, among the
+  // headers still unpaired, a loose key that holds exactly one declaration
+  // and one implementation pairs those two.
+  SetLength(LKeys, Length(LBySource));
+  SetLength(LLoose, Length(LBySource));
+  SetLength(LIsImpl, Length(LBySource));
+  LDeclKey := TDictionary<string, Integer>.Create;
+  LImplKey := TDictionary<string, Integer>.Create;
+  LDeclLoose := TDictionary<string, Integer>.Create;
+  LImplLoose := TDictionary<string, Integer>.Create;
+  try
+    for LIdx := 0 to High(LBySource) do
     begin
-      if LQualIdents <> nil then
-      begin
-        // The qualified side is always the implementation.
-        SetLength(LChain, Length(LQualIdents));
-        for LIdx := 0 to High(LQualIdents) do
-          LChain[LIdx] := LM.Tree.NodeNameLower(LQualIdents[LIdx]);
-      end
+      LR := LBySource[LIdx];
+      if not RTRoutineKeys(LM, LR, LKeys[LIdx], LLoose[LIdx]) then
+        Continue;
+      LIsImpl[LIdx] := RTIsImplHeader(LM, LR);
+      if LIsImpl[LIdx] then
+        LImplKey.TryAdd(LKeys[LIdx], LR)
       else
-        // Unqualified but struct-parented: always the class-member decl.
-        LChain := RTEnclosingTypeChain(LM, LR);
-      LKey := RTMethodKey(LChain, LName, RTParamSignature(LM, LR));
-      LKeyLoose := RTMethodKeyLoose(LChain, LName);
-    end
-    else
-    begin
-      LKey := RTRoutineKey(RTEnclosingRoutine(LM, LR), LName,
-        RTParamSignature(LM, LR));
-      LKeyLoose := RTRoutineKeyLoose(RTEnclosingRoutine(LM, LR), LName);
+        LDeclKey.TryAdd(LKeys[LIdx], LR);
     end;
-    if LHasBody then
+    for LIdx := 0 to High(LBySource) do
     begin
-      if not ACache.ImplKey.ContainsKey(LKey) then
-        ACache.ImplKey.Add(LKey, LR);
-      if not ACache.ImplKeyLoose.ContainsKey(LKeyLoose) then
-        ACache.ImplKeyLoose.Add(LKeyLoose, LR);
-    end
-    else
-    begin
-      if not ACache.DeclKey.ContainsKey(LKey) then
-        ACache.DeclKey.Add(LKey, LR);
-      if not ACache.DeclKeyLoose.ContainsKey(LKeyLoose) then
-        ACache.DeclKeyLoose.Add(LKeyLoose, LR);
+      LR := LBySource[LIdx];
+      if (LKeys[LIdx] = '') or LIsImpl[LIdx] or
+         not LDeclKey.TryGetValue(LKeys[LIdx], LDecl) or (LDecl <> LR) or
+         not LImplKey.TryGetValue(LKeys[LIdx], LImpl) then
+        Continue;
+      ACache.RoutinePeer.Add(LR, LImpl);
+      ACache.RoutinePeer.Add(LImpl, LR);
     end;
+    for LIdx := 0 to High(LBySource) do
+    begin
+      LR := LBySource[LIdx];
+      if (LKeys[LIdx] = '') or ACache.RoutinePeer.ContainsKey(LR) then
+        Continue;
+      if LIsImpl[LIdx] then
+        NoteLoose(LImplLoose, LLoose[LIdx], LR)
+      else
+        NoteLoose(LDeclLoose, LLoose[LIdx], LR);
+    end;
+    for var LPair in LDeclLoose do
+      if (LPair.Value <> AMBIGUOUS) and
+         LImplLoose.TryGetValue(LPair.Key, LPeer) and (LPeer <> AMBIGUOUS) then
+      begin
+        ACache.RoutinePeer.Add(LPair.Value, LPeer);
+        ACache.RoutinePeer.Add(LPeer, LPair.Value);
+      end;
+    // What is left: a name whose unpaired headers are more than one a side -
+    // overloads whose implementation spells a type another way than the
+    // declaration (Winapi.Windows' WinHelp: `DWORD_PTR` declared, `ULONG_PTR`
+    // implemented, beside a string overload). Among headers with the same
+    // number of slots, a declaration and an implementation that are each
+    // other's one best match - the most slots spelled alike - are a pair.
+    LGroups := TObjectDictionary<string, TList<Integer>>.Create([doOwnsValues]);
+    try
+      for LIdx := 0 to High(LBySource) do
+      begin
+        LR := LBySource[LIdx];
+        if (LKeys[LIdx] = '') or ACache.RoutinePeer.ContainsKey(LR) then
+          Continue;
+        if not LGroups.TryGetValue(LLoose[LIdx], LList) then
+        begin
+          LList := TList<Integer>.Create;
+          LGroups.Add(LLoose[LIdx], LList);
+        end;
+        LList.Add(LIdx);
+      end;
+      for LList in LGroups.Values do
+        if LList.Count >= 2 then
+          PairBestSlots(LList);
+    finally
+      LGroups.Free;
+    end;
+  finally
+    LDeclKey.Free;
+    LImplKey.Free;
+    LDeclLoose.Free;
+    LImplLoose.Free;
   end;
 end;
 
@@ -5450,11 +5693,9 @@ function TPasNavigator.GotoImplementation(AMid, ALine, ACol: Integer;
 var
   LM: TPasSemaModel;
   LCache: TNavCache;
-  LVis, LDeclNode, LImplNode, LNameNode, LContainer: Integer;
+  LVis, LDeclNode, LImplNode, LNameNode: Integer;
   LQualIdents: TArray<Integer>;
-  LName, LKey, LKeyLoose: string;
-  LChain: TArray<string>;
-  LIsMethod, LFound: Boolean;
+  LFound: Boolean;
 begin
   Result := False;
   if (AMid < 0) or (AMid >= FProj.ModelCount) then
@@ -5468,33 +5709,23 @@ begin
   LDeclNode := LCache.RoutineOfVis[LVis];
   if LDeclNode = NIL_NODE then
     Exit;
-  if RTFindChildKind(LM, LDeclNode, nkRoutineBody) <> NIL_NODE then
+  if RTIsImplHeader(LM, LDeclNode) then
     Exit;   // cursor is already on/in an implementation
   // Mirrors the climb in GotoDeclaration: a routine local to another
   // routine's declaration-only header (rare, but a forward-declared routine
   // could itself nest a further forward declaration) climbs to each
-  // enclosing routine until one has a paired implementation.
+  // enclosing routine until one has a paired implementation - an enclosing
+  // implementation is its own.
   LFound := False;
+  LImplNode := NIL_NODE;
   while (LDeclNode <> NIL_NODE) and
     RTSegments(LM, LDeclNode, LQualIdents, LNameNode) do
   begin
-    LName := LM.Tree.NodeNameLower(LNameNode);
-    LIsMethod := (LM.Tree.Nodes[LDeclNode].Parent <> NIL_NODE) and
-      RTIsStructKind(LM.Tree.Nodes[LM.Tree.Nodes[LDeclNode].Parent].Kind);
-    if LIsMethod then
-    begin
-      LChain := RTEnclosingTypeChain(LM, LDeclNode);
-      LKey := RTMethodKey(LChain, LName, RTParamSignature(LM, LDeclNode));
-      LKeyLoose := RTMethodKeyLoose(LChain, LName);
-    end
-    else
-    begin
-      LContainer := RTEnclosingRoutine(LM, LDeclNode);
-      LKey := RTRoutineKey(LContainer, LName, RTParamSignature(LM, LDeclNode));
-      LKeyLoose := RTRoutineKeyLoose(LContainer, LName);
-    end;
-    if LCache.ImplKey.TryGetValue(LKey, LImplNode) or
-       LCache.ImplKeyLoose.TryGetValue(LKeyLoose, LImplNode) then
+    if RTIsImplHeader(LM, LDeclNode) then
+      LImplNode := LDeclNode
+    else if not LCache.RoutinePeer.TryGetValue(LDeclNode, LImplNode) then
+      LImplNode := NIL_NODE;
+    if LImplNode <> NIL_NODE then
     begin
       LFound := True;
       Break;
@@ -5507,7 +5738,12 @@ begin
   if Result then
     // The DECLARED spelling, which is what TPasNavTarget.Name promises and
     // every other producer delivers - LName is the lowercased lookup key.
-    ATarget.Name := LM.Tree.NodeText(LNameNode);
+    ATarget.Name := LM.Tree.NodeText(LNameNode)
+  else if RTSegments(LM, LImplNode, LQualIdents, LNameNode) then
+    // An implementation with no body - completed `external` - has no body
+    // to enter: its header's name is the place.
+    Result := TargetFromVis(AMid, LM.Tree.Nodes[LNameNode].FirstToken,
+      LM.Tree.NodeText(LNameNode), ATarget);
 end;
 
 function TPasNavigator.GotoDeclaration(AMid, ALine, ACol: Integer;
@@ -5515,11 +5751,9 @@ function TPasNavigator.GotoDeclaration(AMid, ALine, ACol: Integer;
 var
   LM: TPasSemaModel;
   LCache: TNavCache;
-  LVis, LImplNode, LDeclNode, LNameNode, LContainer, LIdx: Integer;
+  LVis, LImplNode, LDeclNode, LNameNode: Integer;
   LQualIdents: TArray<Integer>;
-  LName, LKey, LKeyLoose: string;
-  LChain: TArray<string>;
-  LIsMethod, LFound: Boolean;
+  LFound: Boolean;
 begin
   Result := False;
   if (AMid < 0) or (AMid >= FProj.ModelCount) then
@@ -5533,7 +5767,7 @@ begin
   LImplNode := LCache.RoutineOfVis[LVis];
   if LImplNode = NIL_NODE then
     Exit;
-  if RTFindChildKind(LM, LImplNode, nkRoutineBody) = NIL_NODE then
+  if not RTIsImplHeader(LM, LImplNode) then
     Exit;   // cursor is already on/in a declaration
   // A routine local to another routine's body (e.g. a nested procedure) most
   // often has no forward declaration of its own - climb to each enclosing
@@ -5541,27 +5775,9 @@ begin
   // from the enclosing routine's own header would find. Without this, the
   // shortcut silently does nothing from inside a nested routine.
   LFound := False;
-  while (LImplNode <> NIL_NODE) and
-    RTSegments(LM, LImplNode, LQualIdents, LNameNode) do
+  while LImplNode <> NIL_NODE do
   begin
-    LName := LM.Tree.NodeNameLower(LNameNode);
-    LIsMethod := LQualIdents <> nil;
-    if LIsMethod then
-    begin
-      SetLength(LChain, Length(LQualIdents));
-      for LIdx := 0 to High(LQualIdents) do
-        LChain[LIdx] := LM.Tree.NodeNameLower(LQualIdents[LIdx]);
-      LKey := RTMethodKey(LChain, LName, RTParamSignature(LM, LImplNode));
-      LKeyLoose := RTMethodKeyLoose(LChain, LName);
-    end
-    else
-    begin
-      LContainer := RTEnclosingRoutine(LM, LImplNode);
-      LKey := RTRoutineKey(LContainer, LName, RTParamSignature(LM, LImplNode));
-      LKeyLoose := RTRoutineKeyLoose(LContainer, LName);
-    end;
-    if LCache.DeclKey.TryGetValue(LKey, LDeclNode) or
-       LCache.DeclKeyLoose.TryGetValue(LKeyLoose, LDeclNode) then
+    if LCache.RoutinePeer.TryGetValue(LImplNode, LDeclNode) then
     begin
       LFound := True;
       Break;
@@ -5674,63 +5890,15 @@ end;
   same routine", which is what a rename of a parameter needs. }
 function TPasNavigator.RoutinePeerNode(AMid, ARoutine: Integer): Integer;
 var
-  LM: TPasSemaModel;
   LCache: TNavCache;
-  LNameNode, LContainer, LIdx: Integer;
-  LQualIdents: TArray<Integer>;
-  LName, LKey, LKeyLoose: string;
-  LChain: TArray<string>;
-  LIsImpl, LIsMethod: Boolean;
 begin
   Result := NIL_NODE;
   if (AMid < 0) or (AMid >= FProj.ModelCount) or (ARoutine = NIL_NODE) then
     Exit;
-  LM := FProj.Model(AMid);
   LCache := CacheOf(AMid);
   EnsureRoutinePairs(AMid, LCache);
-  if LM.Tree.Nodes[ARoutine].Kind <> nkRoutine then
-    Exit;
-  LIsImpl := RTFindChildKind(LM, ARoutine, nkRoutineBody) <> NIL_NODE;
-  if not RTSegments(LM, ARoutine, LQualIdents, LNameNode) then
-    Exit;
-  LName := LM.Tree.NodeNameLower(LNameNode);
-  if LIsImpl then
-    // A qualified implementation (TFoo.Bar) is a method's; an unqualified
-    // one completes a `forward` in its own lexical container.
-    LIsMethod := LQualIdents <> nil
-  else
-    // A declaration is a method's when a struct-type body adopted it.
-    LIsMethod := (LM.Tree.Nodes[ARoutine].Parent <> NIL_NODE) and
-      RTIsStructKind(LM.Tree.Nodes[LM.Tree.Nodes[ARoutine].Parent].Kind);
-  if LIsMethod then
-  begin
-    if LIsImpl then
-    begin
-      SetLength(LChain, Length(LQualIdents));
-      for LIdx := 0 to High(LQualIdents) do
-        LChain[LIdx] := LM.Tree.NodeNameLower(LQualIdents[LIdx]);
-    end
-    else
-      LChain := RTEnclosingTypeChain(LM, ARoutine);
-    LKey := RTMethodKey(LChain, LName, RTParamSignature(LM, ARoutine));
-    LKeyLoose := RTMethodKeyLoose(LChain, LName);
-  end
-  else
-  begin
-    LContainer := RTEnclosingRoutine(LM, ARoutine);
-    LKey := RTRoutineKey(LContainer, LName, RTParamSignature(LM, ARoutine));
-    LKeyLoose := RTRoutineKeyLoose(LContainer, LName);
-  end;
-  if LIsImpl then
-  begin
-    if not LCache.DeclKey.TryGetValue(LKey, Result) then
-      if not LCache.DeclKeyLoose.TryGetValue(LKeyLoose, Result) then
-        Result := NIL_NODE;
-  end
-  else
-    if not LCache.ImplKey.TryGetValue(LKey, Result) then
-      if not LCache.ImplKeyLoose.TryGetValue(LKeyLoose, Result) then
-        Result := NIL_NODE;
+  if not LCache.RoutinePeer.TryGetValue(ARoutine, Result) then
+    Result := NIL_NODE;
 end;
 
 // A routine's parameter NAME nodes in source order, flattened across the
@@ -5963,7 +6131,9 @@ end;
 
   The METHOD NAME answers with the method - the DECLARATION's symbol, the
   identity every one of those commands wants, and overload-precise because
-  RoutinePeerNode matches on the parameter signature. The CLASS QUALIFIER
+  RoutinePeerNode pairs on the parameter signature (the signature-blind key
+  only pairs the one declaration and the one implementation left without a
+  partner, see EnsureRoutinePairs). The CLASS QUALIFIER
   answers with the class. Only the LAST qualifier segment does: in
   `TOuter.TInner.M` an earlier one names an enclosing type this does not
   climb to, and answering with TInner for a click on TOuter would be a wrong
@@ -5989,7 +6159,7 @@ begin
   LRoutine := LM.Tree.Nodes[ANode].Parent;
   if (LRoutine = NIL_NODE) or (LM.Tree.Nodes[LRoutine].Kind <> nkRoutine) then
     Exit;
-  if RTFindChildKind(LM, LRoutine, nkRoutineBody) = NIL_NODE then
+  if not RTIsImplHeader(LM, LRoutine) then
     Exit;   // a declaration, not an implementation - nothing to pair with
   if not RTSegments(LM, LRoutine, LQualIdents, LNameNode) then
     Exit;
