@@ -469,6 +469,47 @@ begin
     'Currency');
   GModel.Free;
 
+  // B36: the promotion rules in the unit's typer - a literal adapts to the
+  // other operand, bitwise operators cover, shifts follow the left operand,
+  // signedness, a distinct type computes in its base, Win64 Currency
+  // division (audit A3-31, B4-04..B4-08; local/probe-b36 M1 N1).
+  const PRO =
+    'unit u;'#10'interface'#10 +
+    'type TMyI64 = type Int64;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var B: Byte; Sh: ShortInt; I: Integer; C: Cardinal; I64: Int64;'#10 +
+    '  MI: TMyI64; Cu: Currency;'#10 +
+    '  R01, R02, R03, R04, R05, R06, R07, R08: Variant;'#10 +
+    'begin'#10 +
+    '  R01 := C + 1;'#10 +
+    '  R02 := C shl I;'#10 +
+    '  R03 := B and B;'#10 +
+    '  R04 := -C;'#10 +
+    '  R05 := C + Sh;'#10 +
+    '  R06 := MI + MI;'#10 +
+    '  R07 := Cu / 2;'#10 +
+    '  R08 := Sh and B;'#10 +
+    'end;'#10 +
+    'end.'#10;
+  Analyze(PRO);
+  Eq('4.2.1: Cardinal + 1 is Cardinal', AssignedType('R01'), 'Cardinal');
+  Eq('4.2.1: Cardinal shl Integer is Cardinal', AssignedType('R02'),
+    'Cardinal');
+  Eq('4.2.1: Byte and Byte is Byte', AssignedType('R03'), 'Byte');
+  Eq('4.2.1: -Cardinal is Int64', AssignedType('R04'), 'Int64');
+  Eq('4.2.1: Cardinal + ShortInt is Int64', AssignedType('R05'), 'Int64');
+  Eq('4.2.1: a distinct Int64 + itself is Int64', AssignedType('R06'),
+    'Int64');
+  Eq('4.2.1/Win32: Currency / 2 is Extended', AssignedType('R07'),
+    'Extended');
+  Eq('4.2.1: ShortInt and Byte is SmallInt', AssignedType('R08'), 'SmallInt');
+  GModel.Free;
+  Analyze(PRO, pfWin64);
+  Eq('4.2.1/Win64: Currency / 2 is Currency', AssignedType('R07'),
+    'Currency');
+  GModel.Free;
+
   // A subrange takes its category from a bound that is an enumeration value
   // or a constant too, not only from a literal (audit E3-18): TWork is an
   // enumeration subrange - `if W` is E2012 as in dcc - and TNeg an integer

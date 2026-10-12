@@ -35,17 +35,28 @@ type
     the type is not decided here (two string kinds dcc mixes); oaLeft /
     oaRight: the (canonical) left / right operand's own type. }
   TSemaOpAnswer = (oaNone, oaUntyped, oaBoolean, oaInteger, oaInt64, oaLeft,
-    oaRight, oaExtended, oaCurrency, oaString, oaAnsiString, oaPointer);
+    oaRight, oaExtended, oaCurrency, oaString, oaAnsiString, oaPointer,
+    oaShortInt, oaByte, oaSmallInt, oaWord, oaCardinal, oaUInt64, oaComp);
 
-  { One operand, after its weak aliases are chased to the builtin they name.
-    Rank: that builtin's NumRank (8-bit 1 .. 64-bit 4 for an integer, Single
-    1 .. Extended 3 for a real), 0 for a rankless type - a subrange, a
-    distinct `type X`, a type not bound here. Unsigned32: Cardinal, LongWord,
-    a 32-bit NativeUInt. UniText: string, UnicodeString, Char, WideChar. }
+  { One operand, after its aliases are chased to the builtin they name - a
+    distinct `type X` of a number too, whose storage is its base's (audit
+    A3-32, B4-08). Rank: that builtin's NumRank (8-bit 1 .. 64-bit 4 for an
+    integer, Single 1 .. Extended 3 for a real), 0 for a rankless type - a
+    subrange, a type not bound here. Unsigned: Byte, Word, Cardinal,
+    LongWord, UInt64, NativeUInt. Curr / Comp: a Currency / Comp VALUE (a
+    variable, a typed constant). IntConst: an integer constant of value
+    IntValue (a literal, signed or not, or a true constant naming one) - it
+    adapts to the other operand when it fits (A3-31). RealLit: a real
+    literal or a true constant naming one; CurrLit: one dcc64 reads as
+    Currency (3.1.3); CurrNamed: that constant is a NAME (`KCur + 1` is
+    Currency where `1.5 + 1` is Extended). UniText: string, UnicodeString,
+    Char, WideChar. }
   TSemaOpFacts = record
     Cat: TSemaTypeCat;
     Rank: Byte;
-    Unsigned32, Curr, UniText, AnsiStr, AnsiChr: Boolean;
+    Unsigned, Curr, Comp, IntConst, RealLit, CurrLit, CurrNamed: Boolean;
+    IntValue: Int64;
+    UniText, AnsiStr, AnsiChr: Boolean;
   end;
 
   // The type, as one of THIS model's symbols, of an ident the model itself no
@@ -67,6 +78,7 @@ type
     // What the operator facts (OpFacts) and the intrinsic rules compare a
     // canonical builtin with - ids, not names (audit A4-14).
     NUInt, Cur, Comp, Card, LWord, AChr, WChr, UStr: Integer;
+    Byt, ShInt, Wrd, SmInt, U64: Integer;
     FIs64: Boolean;   // the target's pointer width, read once (audit C2-15)
     function Kind(N: Integer): TPasNodeKind; inline;
     function Child(N: Integer): Integer; inline;
@@ -85,8 +97,10 @@ type
     procedure CheckConditionTypes;
     function OrdLiteral(ANode: Integer; out AValue: Int64): Boolean;
     procedure CheckSetCardinality;
-    function OpFacts(ASym: Integer): TSemaOpFacts;
-    function OpSym(AAns: TSemaOpAnswer; ALeft, ARight: Integer): Integer;
+    function StorageBase(ASym: Integer): Integer;
+    function OpFacts(ASym, ANode: Integer): TSemaOpFacts;
+    function OpSym(AAns: TSemaOpAnswer; ALeft, ARight: Integer;
+      AKeepOwn: Boolean): Integer;
     function TypeOfIdent(N: Integer): Integer;
     function BinaryResult(N: Integer): Integer;
     function UnaryResult(N: Integer): Integer;
@@ -244,17 +258,52 @@ function ScalarEnumMismatch(ADst, ASrc: TSemaTypeCat): Boolean;
   as is anything unknown. }
 function IsBracketToScalar(ADst: TSemaTypeCat): Boolean;
 
-{ The 4.2.1 rule table, both typers' one copy: integers are at least
-  Integer, the higher rank wins, a 32-bit signed / unsigned mix is Int64;
-  real arithmetic is Extended whatever the operands, Currency on a 64-bit
-  target (AIs64) when an operand is Currency; `/` is Extended; `not` keeps
-  an integer operand's type, unary `-` / `+` widen it like a binary
-  operator; a comparison is Boolean. `+` over text: string when either side
-  is UniText, the one type of two equal string operands (ASameType),
-  AnsiString for AnsiString with AnsiChar. Sets and pointer arithmetic keep
-  the set / pointer operand. AUnary: AR is not read. }
+{ The 4.2.1 rule table, both typers' one copy (dcc32 / dcc64 37.0,
+  local/probe-b36 M1 M2 N1):
+  - an integer constant takes the other operand's type when its value fits
+    it (`C + 1`, `C and $FF` over a Cardinal are Cardinal), otherwise its
+    own: ShortInt for -128..127, Byte to 255, SmallInt down to -32768,
+    Integer, Cardinal, Int64 (`C + (-1)` is Int64, `B and 300` Integer);
+  - `+ - * div mod`: at least Integer; a 64-bit operand gives Int64, UInt64
+    when an unsigned one is 64-bit; a 32-bit unsigned operand with a signed
+    one of any width is Int64 (`C + Sh`), with an unsigned one Cardinal;
+  - `and or xor`: the narrowest of ShortInt / Byte / SmallInt / Word /
+    Integer covering both narrow operands (`Sh and B` SmallInt), Cardinal
+    beside any 32-bit unsigned, UInt64 beside a 64-bit unsigned;
+  - `shl shr`: the left operand's type, at least Integer;
+  - unary `-`: at least Integer, Int64 of a Cardinal; `not` keeps its
+    operand's type (the caller keeps a distinct type there);
+  - reals: Extended, except on a 64-bit target (AIs64), where a Currency
+    value operand makes Currency, Comp with integers or Comp makes Comp,
+    two Currency-shaped real constants added or subtracted make Currency (a
+    named one with an integer too), and
+    `/` is Currency for Currency over an integer or a real value, or an
+    integer over Currency, Comp for an integer over Comp;
+  - `+` over text: string when either side is UniText, the one type of two
+    equal string operands (ASameType), AnsiString for AnsiString with
+    AnsiChar. Sets and pointer arithmetic keep the set / pointer operand; a
+    comparison is Boolean. AUnary: AR is not read.
+  A result that is an operand's own shape answers oaLeft / oaRight, so the
+  typer keeps that operand's name (NativeInt, LongWord). }
 function OperatorAnswer(AOp: TPasTokenKind; AUnary: Boolean;
   const AL, AR: TSemaOpFacts; ASameType, AIs64: Boolean): TSemaOpAnswer;
+
+{ The value of integer constant ANode of ATree - a decimal, `$` hex or `%`
+  binary literal with digit separators, under parentheses and signs. False
+  for anything else, and for a literal above High(Int64). }
+function IntLiteralValue(const ATree: TPasTree; ANode: Integer;
+  out AValue: Int64): Boolean;
+
+{ The real literal under ANode's parentheses and signs, NIL_NODE if none. }
+function RealLiteralNode(const ATree: TPasTree; ANode: Integer): Integer;
+
+{ The builtin type name ('char', 'string', 'integer', 'currency', ...) dcc
+  gives literal ANode of ATree where a type is inferred from it (3.1.3,
+  TPasSemaProject.LiteralTypeX documents the rules); AIs64: the target's
+  Extended is Double-sized, so a short real literal is Currency. '' when
+  unreadable. }
+function PasLiteralTypeName(const ATree: TPasTree; ANode: Integer;
+  ANegated, AIs64: Boolean): string;
 
 implementation
 
@@ -478,49 +527,233 @@ end;
 function OperatorAnswer(AOp: TPasTokenKind; AUnary: Boolean;
   const AL, AR: TSemaOpFacts; ASameType, AIs64: Boolean): TSemaOpAnswer;
 
-  // A real result: Extended, or Currency on a 64-bit target when an operand
-  // is one (Currency arithmetic is integral there - see Abs in 4.11.4).
+  // Does AValue fit the integer type of rank ARank / signedness AUns?
+  function Fits(AValue: Int64; ARank: Integer; AUns: Boolean): Boolean;
+  begin
+    case ARank of
+      1:
+        if AUns then
+          Result := (AValue >= 0) and (AValue <= High(Byte))
+        else
+          Result := (AValue >= Low(ShortInt)) and (AValue <= High(ShortInt));
+      2:
+        if AUns then
+          Result := (AValue >= 0) and (AValue <= High(Word))
+        else
+          Result := (AValue >= Low(SmallInt)) and (AValue <= High(SmallInt));
+      3:
+        if AUns then
+          Result := (AValue >= 0) and (AValue <= High(Cardinal))
+        else
+          Result := (AValue >= Low(Integer)) and (AValue <= High(Integer));
+    else
+      Result := not AUns or (AValue >= 0);
+    end;
+  end;
+
+  // The (rank, signedness) integer operand AF computes in beside AOther: a
+  // rankless type is an Integer; a constant takes AOther's shape when its
+  // value fits it, else the shape of its value.
+  procedure Shape(const AF, AOther: TSemaOpFacts; out ARank: Integer;
+    out AUns: Boolean);
+  var
+    LV: Int64;
+  begin
+    ARank := AF.Rank;
+    AUns := AF.Unsigned;
+    if ARank = 0 then
+    begin
+      ARank := 3;
+      AUns := False;
+    end;
+    if not AF.IntConst then
+      Exit;
+    if (AOther.Cat = tcInteger) and not AOther.IntConst then
+    begin
+      Shape(AOther, AF, ARank, AUns);
+      if Fits(AF.IntValue, ARank, AUns) then
+        Exit;
+    end;
+    LV := AF.IntValue;
+    AUns := False;
+    if (LV >= Low(ShortInt)) and (LV <= High(ShortInt)) then
+      ARank := 1
+    else if (LV >= 0) and (LV <= High(Byte)) then
+    begin
+      ARank := 1;
+      AUns := True;
+    end
+    else if (LV >= Low(SmallInt)) and (LV < 0) then
+      ARank := 2
+    else if (LV >= Low(Integer)) and (LV <= High(Integer)) then
+      ARank := 3
+    else if (LV >= 0) and (LV <= High(Cardinal)) then
+    begin
+      ARank := 3;
+      AUns := True;
+    end
+    else
+      ARank := 4;
+  end;
+
+  // The answer naming integer shape (ARank, AUns): an operand's own type
+  // when it has that shape and is no constant, else the builtin.
+  function IntAns(ARank: Integer; AUns: Boolean; ARL, ARR: Integer;
+    ALU, ARU: Boolean): TSemaOpAnswer;
+  begin
+    if not AL.IntConst and (AL.Rank <> 0) and (ARL = ARank) and
+       (ALU = AUns) then
+      Exit(oaLeft);
+    if not AUnary and not AR.IntConst and (AR.Rank <> 0) and
+       (ARR = ARank) and (ARU = AUns) then
+      Exit(oaRight);
+    case ARank of
+      1:
+        if AUns then Result := oaByte else Result := oaShortInt;
+      2:
+        if AUns then Result := oaWord else Result := oaSmallInt;
+      3:
+        if AUns then Result := oaCardinal else Result := oaInteger;
+    else
+      if AUns then Result := oaUInt64 else Result := oaInt64;
+    end;
+  end;
+
+  function IsInt(const AF: TSemaOpFacts): Boolean;
+  begin
+    Result := AF.Cat = tcInteger;
+  end;
+
+  // A real result (audit A3-33, B4-07, B4-09).
   function RealAns: TSemaOpAnswer;
   begin
-    if AIs64 and (AL.Curr or (not AUnary and AR.Curr)) then
+    Result := oaExtended;
+    if not AIs64 then
+      Exit;
+    if AUnary then
+    begin
+      if AL.Curr or AL.CurrLit then
+        Result := oaCurrency
+      else if AL.Comp then
+        Result := oaComp;
+    end
+    else if AOp = tkSlash then
+    begin
+      if AL.Curr and not AR.Curr then
+      begin
+        if IsInt(AR) or ((AR.Cat = tcFloat) and not AR.RealLit) then
+          Result := oaCurrency;
+      end
+      else if AR.Curr and not AL.Curr then
+      begin
+        if IsInt(AL) then
+          Result := oaCurrency;
+      end
+      else if AR.Comp and IsInt(AL) then
+        Result := oaComp;
+    end
+    else if AL.Curr or AR.Curr then
       Result := oaCurrency
-    else
-      Result := oaExtended;
+    else if AL.Comp or AR.Comp then
+    begin
+      if (AL.Comp or IsInt(AL)) and (AR.Comp or IsInt(AR)) then
+        Result := oaComp;
+    end
+    else if AOp in [tkPlus, tkMinus] then
+    begin
+      // Two Currency-shaped constants add as Currency, and so does a NAMED
+      // one with an integer; a literal with an integer is Extended
+      // (local/probe-b36 C2, C3).
+      if (AL.CurrLit and AR.CurrLit) or
+         (AL.CurrLit and AL.CurrNamed and IsInt(AR)) or
+         (AR.CurrLit and AR.CurrNamed and IsInt(AL)) then
+        Result := oaCurrency;
+    end;
   end;
 
-  // An integer operand as the result: a rankless one (subrange, distinct
-  // type) and anything narrower than 32 bits is an Integer.
-  function IntFloor(const AF: TSemaOpFacts; AOwn: TSemaOpAnswer): TSemaOpAnswer;
-  begin
-    if AF.Rank >= 3 then
-      Result := AOwn
-    else
-      Result := oaInteger;
-  end;
-
-  function Wider: TSemaOpAnswer;
+  function Arith: TSemaOpAnswer;
   var
     LRL, LRR: Integer;
+    LLU, LRU: Boolean;
   begin
     if (AL.Cat = tcFloat) or (AR.Cat = tcFloat) then
       Exit(RealAns);
-    // A rankless integer computes as the family's default, Integer.
-    LRL := AL.Rank;
-    if LRL = 0 then
-      LRL := 3;
-    LRR := AR.Rank;
-    if LRR = 0 then
-      LRR := 3;
+    Shape(AL, AR, LRL, LLU);
+    Shape(AR, AL, LRR, LRU);
     if (LRL < 3) and (LRR < 3) then
       Exit(oaInteger);
-    if LRR > LRL then
-      Exit(IntFloor(AR, oaRight));
-    if LRL > LRR then
-      Exit(IntFloor(AL, oaLeft));
-    // Two 32-bit operands of different signedness meet in Int64.
-    if (LRL = 3) and (AL.Unsigned32 <> AR.Unsigned32) then
-      Exit(oaInt64);
-    Result := IntFloor(AL, oaLeft);
+    if (LRL = 4) or (LRR = 4) then
+      Exit(IntAns(4, ((LRL = 4) and LLU) or ((LRR = 4) and LRU), LRL, LRR,
+        LLU, LRU));
+    // A 32-bit unsigned operand beside a signed one meets it in Int64.
+    if LLU <> LRU then
+    begin
+      if ((LRL = 3) and LLU) or ((LRR = 3) and LRU) then
+        Exit(oaInt64);
+      Exit(IntAns(3, False, LRL, LRR, LLU, LRU));
+    end;
+    Result := IntAns(3, LLU, LRL, LRR, LLU, LRU);
+  end;
+
+  function Bitwise: TSemaOpAnswer;
+  const
+    CLo: array[0..4] of Int64 = (Low(ShortInt), 0, Low(SmallInt), 0,
+      Low(Integer));
+    CHi: array[0..4] of Int64 = (High(ShortInt), High(Byte), High(SmallInt),
+      High(Word), High(Integer));
+    CRank: array[0..4] of Integer = (1, 1, 2, 2, 3);
+    CUns: array[0..4] of Boolean = (False, True, False, True, False);
+  var
+    LRL, LRR, LIdx: Integer;
+    LLU, LRU: Boolean;
+    LLo, LHi: Int64;
+
+    procedure Cover(ARank: Integer; AUns: Boolean);
+    var
+      LI: Integer;
+    begin
+      for LI := 0 to 4 do
+        if (CRank[LI] = ARank) and (CUns[LI] = AUns) then
+        begin
+          if CLo[LI] < LLo then
+            LLo := CLo[LI];
+          if CHi[LI] > LHi then
+            LHi := CHi[LI];
+        end;
+    end;
+
+  begin
+    Shape(AL, AR, LRL, LLU);
+    Shape(AR, AL, LRR, LRU);
+    if (LRL = 4) or (LRR = 4) then
+      Exit(IntAns(4, ((LRL = 4) and LLU) or ((LRR = 4) and LRU), LRL, LRR,
+        LLU, LRU));
+    if (LRL = 3) or (LRR = 3) then
+      Exit(IntAns(3, ((LRL = 3) and LLU) or ((LRR = 3) and LRU), LRL, LRR,
+        LLU, LRU));
+    LLo := 0;
+    LHi := 0;
+    Cover(LRL, LLU);
+    Cover(LRR, LRU);
+    for LIdx := 0 to 4 do
+      if (CLo[LIdx] <= LLo) and (CHi[LIdx] >= LHi) then
+        Exit(IntAns(CRank[LIdx], CUns[LIdx], LRL, LRR, LLU, LRU));
+    Result := oaInteger;
+  end;
+
+  // `shl` / `shr` and unary `-` / `+`: the left operand alone decides.
+  function LeftOnly(ANegate: Boolean): TSemaOpAnswer;
+  var
+    LRL: Integer;
+    LLU: Boolean;
+  begin
+    Shape(AL, Default(TSemaOpFacts), LRL, LLU);
+    if LRL < 3 then
+      Result := oaInteger
+    else if ANegate and (LRL = 3) and LLU then
+      Result := oaInt64     // `-C` of a Cardinal (B4-06)
+    else
+      Result := IntAns(LRL, LLU, LRL, 0, LLU, False);
   end;
 
 var
@@ -532,7 +765,7 @@ begin
     case AOp of
       tkMinus, tkPlus:
         case AL.Cat of
-          tcInteger: Result := IntFloor(AL, oaLeft);
+          tcInteger: Result := LeftOnly(AOp = tkMinus);
           tcFloat: Result := RealAns;
         end;
       tkNot:
@@ -552,7 +785,7 @@ begin
   case AOp of
     tkPlus:
       if LNum then
-        Result := Wider
+        Result := Arith
       else if (AL.Cat in [tcChar, tcString]) and
               (AR.Cat in [tcChar, tcString]) then
       begin
@@ -573,7 +806,7 @@ begin
         Result := oaRight;
     tkMinus, tkStar:
       if LNum then
-        Result := Wider
+        Result := Arith
       else if (AL.Cat = tcSet) and (AR.Cat = tcSet) then
         Result := oaLeft
       else if (AOp = tkMinus) and (AL.Cat = tcPointer) and
@@ -581,17 +814,185 @@ begin
         Result := oaLeft;
     tkSlash:
       if LNum then
-        Result := oaExtended;
-    tkDiv, tkMod, tkShl, tkShr:
-      if (AL.Cat = tcInteger) and (AR.Cat = tcInteger) then
-        Result := Wider;
+        Result := RealAns;
+    tkDiv, tkMod:
+      if IsInt(AL) and IsInt(AR) then
+        Result := Arith;
+    tkShl, tkShr:
+      if IsInt(AL) and IsInt(AR) then
+        Result := LeftOnly(False);
     tkAnd, tkOr, tkXor:
       if (AL.Cat = tcBoolean) and (AR.Cat = tcBoolean) then
         Result := oaBoolean
-      else if (AL.Cat = tcInteger) and (AR.Cat = tcInteger) then
-        Result := Wider;
+      else if IsInt(AL) and IsInt(AR) then
+        Result := Bitwise;
   end;
 end;
+
+function IntLiteralValue(const ATree: TPasTree; ANode: Integer;
+  out AValue: Int64): Boolean;
+var
+  LTxt: string;
+  LU: UInt64;
+  LIdx: Integer;
+begin
+  Result := False;
+  AValue := 0;
+  ANode := PeelParens(ATree, ANode);
+  if ANode = NIL_NODE then
+    Exit;
+  if (ATree.Nodes[ANode].Kind = nkUnaryOp) and
+     (ATree.Nodes[ANode].Aux >= 0) and
+     (ATree.Nodes[ANode].Aux <= High(ATree.Source.Visible)) and
+     (ATree.Source.VisibleToken(ATree.Nodes[ANode].Aux).Kind in
+      [tkMinus, tkPlus]) then
+  begin
+    if not IntLiteralValue(ATree, ATree.Nodes[ANode].FirstChild, AValue) then
+      Exit;
+    if ATree.Source.VisibleToken(ATree.Nodes[ANode].Aux).Kind = tkMinus then
+      AValue := -AValue;
+    Exit(True);
+  end;
+  if ATree.Nodes[ANode].Kind <> nkIntLit then
+    Exit;
+  LTxt := StringReplace(ATree.NodeText(ANode), '_', '', [rfReplaceAll]);
+  if LTxt = '' then
+    Exit;
+  if LTxt[1] = '%' then
+  begin
+    LU := 0;
+    for LIdx := 2 to Length(LTxt) do
+    begin
+      if not CharInSet(LTxt[LIdx], ['0', '1']) or
+         (LU > High(UInt64) shr 1) then
+        Exit;
+      LU := (LU shl 1) or UInt64(Ord(LTxt[LIdx]) - Ord('0'));
+    end;
+  end
+  else if not TryStrToUInt64(LTxt, LU) then
+    Exit;
+  if LU > UInt64(High(Int64)) then
+    Exit;
+  AValue := Int64(LU);
+  Result := True;
+end;
+
+function RealLiteralNode(const ATree: TPasTree; ANode: Integer): Integer;
+begin
+  Result := PeelParens(ATree, ANode);
+  while (Result <> NIL_NODE) and (ATree.Nodes[Result].Kind = nkUnaryOp) and
+        (ATree.Nodes[Result].Aux >= 0) and
+        (ATree.Nodes[Result].Aux <= High(ATree.Source.Visible)) and
+        (ATree.Source.VisibleToken(ATree.Nodes[Result].Aux).Kind in
+         [tkMinus, tkPlus]) do
+    Result := PeelParens(ATree, ATree.Nodes[Result].FirstChild);
+  if (Result <> NIL_NODE) and (ATree.Nodes[Result].Kind <> nkRealLit) then
+    Result := NIL_NODE;
+end;
+
+function PasLiteralTypeName(const ATree: TPasTree; ANode: Integer;
+  ANegated, AIs64: Boolean): string;
+var
+  LTxt: string;
+  LIdx, LUnits, LFrac: Integer;
+  LU: UInt64;
+  LHasExp, LInFrac: Boolean;
+  LVal: Extended;
+begin
+  Result := '';
+  if ANode = NIL_NODE then
+    Exit;
+  case ATree.Nodes[ANode].Kind of
+    nkIntLit:
+      begin
+        LTxt := StringReplace(ATree.NodeText(ANode), '_', '',
+          [rfReplaceAll]);
+        if LTxt = '' then
+          Exit;
+        if LTxt[1] = '%' then
+        begin
+          // Binary: TryStrToUInt64 knows `$` but not `%`.
+          LU := 0;
+          for LIdx := 2 to Length(LTxt) do
+          begin
+            if not CharInSet(LTxt[LIdx], ['0', '1']) or (LU > High(UInt64) shr 1) then
+              Exit;
+            LU := (LU shl 1) or UInt64(Ord(LTxt[LIdx]) - Ord('0'));
+          end;
+        end
+        else if not TryStrToUInt64(LTxt, LU) then
+          Exit;
+        if ANegated then
+        begin
+          if LU <= UInt64(High(Integer)) + 1 then
+            Result := 'integer'
+          else if LU <= UInt64(High(Int64)) + 1 then
+            Result := 'int64';
+          // Beyond that dcc rejects the literal; nothing to infer.
+        end
+        else if LU <= UInt64(High(Integer)) then
+          Result := 'integer'
+        else if LU <= UInt64(High(Cardinal)) then
+          Result := 'cardinal'
+        else if LU <= UInt64(High(Int64)) then
+          Result := 'int64'
+        else
+          Result := 'uint64';
+      end;
+
+    nkRealLit:
+      begin
+        Result := 'extended';
+        if not AIs64 then
+          Exit;
+        LTxt := StringReplace(ATree.NodeText(ANode), '_', '',
+          [rfReplaceAll]);
+        LHasExp := False;
+        LInFrac := False;
+        LFrac := 0;
+        for LIdx := 1 to Length(LTxt) do
+          case LTxt[LIdx] of
+            'e', 'E':
+              LHasExp := True;
+            '.':
+              LInFrac := True;
+          else
+            if LInFrac and not LHasExp then
+              Inc(LFrac);
+          end;
+        if LHasExp or (LFrac > 4) then
+          Exit;
+        // Currency's range: |v| <= 922337203685477.5807. The text is decimal
+        // with at most four fractional digits, so an Extended reads it
+        // exactly enough for this comparison (the boundary itself has 19
+        // significant digits, within Extended's 64-bit mantissa on Win32;
+        // on a Double-sized Extended it rounds, and dcc's own comparison is
+        // over the same Double - probed at the boundary both ways).
+        if not TryStrToFloat(LTxt, LVal, TFormatSettings.Invariant) then
+          Exit;
+        if Abs(LVal) > 922337203685477.5807 then
+          Exit;
+        Result := 'currency';
+      end;
+
+    nkCaretChar:
+      Result := 'char';
+
+    nkStrLit:
+      begin
+        // UTF-16 units over every visible token of the node (StrLitUnits,
+        // the one count the scorers read too - audit A4-07).
+        LUnits := StrLitUnits(ATree, ANode);
+        if LUnits < 0 then
+          Exit;   // a multiline string or anything unexpected: not a Char
+        if LUnits = 1 then
+          Result := 'char'
+        else
+          Result := 'string';
+      end;
+  end;
+end;
+
 
 class procedure TPasSemaTyper.Check(AModel: TPasSemaModel;
   APlatform: TPasPlatform = pfWin32);
@@ -1213,43 +1614,97 @@ begin
     end;
 end;
 
-// The operator facts of the operand type ASym: its category, and the rank
-// and identity of the builtin its weak aliases end at (`TBig = Int64` ranks
-// as Int64 - audit A4-14).
-function TPasSemaTyper.OpFacts(ASym: Integer): TSemaOpFacts;
+{ The builtin a NUMBER type ASym is stored as: weak aliases and distinct
+  `type X` links followed (`TMyI64 = type Int64` computes as an Int64 -
+  audit A3-32, B4-08); ASym itself when it ends at no builtin. }
+function TPasSemaTyper.StorageBase(ASym: Integer): Integer;
 var
-  LB: Integer;
+  LDepth, LDef, LNext: Integer;
+begin
+  Result := ASym;
+  for LDepth := 1 to 8 do
+  begin
+    if (Result = NIL_SYM) or (M.Symbols[Result].Kind <> skType) then
+      Exit;
+    LDef := TypeDefNode(Result);
+    if (LDef = NIL_NODE) or not (Kind(LDef) in [nkIdent, nkMember]) then
+      Exit;
+    LNext := Head(LDef);
+    if (LNext = NIL_SYM) or (LNext = Result) then
+      Exit;
+    Result := LNext;
+  end;
+end;
+
+// The operator facts of operand node ANode of type ASym: its category, the
+// rank and identity of the builtin it is stored as (`TBig = Int64` ranks as
+// Int64 - audit A4-14), and whether it is a literal.
+function TPasSemaTyper.OpFacts(ASym, ANode: Integer): TSemaOpFacts;
+var
+  LB, LLit: Integer;
 begin
   Result := Default(TSemaOpFacts);
   Result.Cat := CatOf(ASym);
-  LB := WeakAliasEnd(ASym);
+  case Result.Cat of
+    tcInteger:
+      Result.IntConst := IntLiteralValue(T, ANode, Result.IntValue);
+    tcFloat:
+      begin
+        LLit := RealLiteralNode(T, ANode);
+        Result.RealLit := LLit <> NIL_NODE;
+        Result.CurrLit := Result.RealLit and
+          (PasLiteralTypeName(T, LLit, False, FIs64) = 'currency');
+      end;
+  end;
+  if Result.Cat in [tcInteger, tcFloat] then
+    LB := StorageBase(ASym)
+  else
+    LB := WeakAliasEnd(ASym);
   if (LB = NIL_SYM) or (M.Symbols[LB].Kind <> skBuiltinType) then
     Exit;
   Result.Rank := M.Symbols[LB].NumRank;
-  Result.Unsigned32 := (LB = Card) or (LB = LWord) or
-    ((LB = NUInt) and not FIs64);
-  Result.Curr := LB = Cur;
+  Result.Unsigned := (LB = Byt) or (LB = Wrd) or (LB = Card) or
+    (LB = LWord) or (LB = U64) or (LB = NUInt);
+  Result.Curr := (LB = Cur) and not Result.RealLit;
+  Result.Comp := LB = Comp;
   Result.UniText := (LB = Str) or (LB = UStr) or (LB = Chr) or (LB = WChr);
   Result.AnsiStr := LB = AStr;
   Result.AnsiChr := LB = AChr;
 end;
 
 // The type symbol OperatorAnswer's AAns names for the operands ALeft /
-// ARight; NIL_SYM where it names none.
-function TPasSemaTyper.OpSym(AAns: TSemaOpAnswer;
-  ALeft, ARight: Integer): Integer;
+// ARight - a number operand as the builtin it is stored as, unless AKeepOwn
+// (`not` keeps a distinct type); NIL_SYM where it names none.
+function TPasSemaTyper.OpSym(AAns: TSemaOpAnswer; ALeft, ARight: Integer;
+  AKeepOwn: Boolean): Integer;
+
+  function Own(ASym: Integer): Integer;
+  begin
+    if not AKeepOwn and (CatOf(ASym) in [tcInteger, tcFloat]) then
+      Result := StorageBase(ASym)
+    else
+      Result := WeakAliasEnd(ASym);
+  end;
+
 begin
   case AAns of
     oaBoolean: Result := Bool;
     oaInteger: Result := Int;
     oaInt64: Result := I64;
-    oaLeft: Result := WeakAliasEnd(ALeft);
-    oaRight: Result := WeakAliasEnd(ARight);
+    oaLeft: Result := Own(ALeft);
+    oaRight: Result := Own(ARight);
     oaExtended: Result := Ext;
     oaCurrency: Result := Cur;
     oaString: Result := Str;
     oaAnsiString: Result := AStr;
     oaPointer: Result := Ptr;
+    oaShortInt: Result := ShInt;
+    oaByte: Result := Byt;
+    oaSmallInt: Result := SmInt;
+    oaWord: Result := Wrd;
+    oaCardinal: Result := Card;
+    oaUInt64: Result := U64;
+    oaComp: Result := Comp;
   else
     Result := NIL_SYM;
   end;
@@ -1340,7 +1795,8 @@ begin
     Exit(Bool);
   if IsTypeNameOperand(Child(N)) or IsTypeNameOperand(Sib(Child(N))) then
     Exit;
-  LAns := OperatorAnswer(LOp, False, OpFacts(LL), OpFacts(LR),
+  LAns := OperatorAnswer(LOp, False, OpFacts(LL, Child(N)),
+    OpFacts(LR, Sib(Child(N))),
     WeakAliasEnd(LL) = WeakAliasEnd(LR), FIs64);
   if LAns = oaNone then
   begin
@@ -1348,7 +1804,7 @@ begin
       Diag('E2015', SE2015_OperatorNotApplicable, N);
     Exit;
   end;
-  Result := OpSym(LAns, LL, LR);
+  Result := OpSym(LAns, LL, LR, False);
 end;
 
 function TPasSemaTyper.UnaryResult(N: Integer): Integer;
@@ -1364,7 +1820,8 @@ begin
     Exit(Ptr);
   if (LO = NIL_SYM) or IsTypeNameOperand(Child(N)) then
     Exit;
-  LAns := OperatorAnswer(LOp, True, OpFacts(LO), Default(TSemaOpFacts),
+  LAns := OperatorAnswer(LOp, True, OpFacts(LO, Child(N)),
+    Default(TSemaOpFacts),
     False, FIs64);
   if LAns = oaNone then
   begin
@@ -1373,7 +1830,7 @@ begin
       Diag('E2015', SE2015_OperatorNotApplicable, N);
     Exit;
   end;
-  Result := OpSym(LAns, LO, NIL_SYM);
+  Result := OpSym(LAns, LO, NIL_SYM, LOp = tkNot);
 end;
 
 function TPasSemaTyper.ParamsOf(AScope: Integer): TArray<Integer>;
@@ -2561,7 +3018,8 @@ begin
   I64 := NIL_SYM; NInt := NIL_SYM; AStr := NIL_SYM; SStr := NIL_SYM;
   NUInt := NIL_SYM; Cur := NIL_SYM; Comp := NIL_SYM;
   Card := NIL_SYM; LWord := NIL_SYM; AChr := NIL_SYM; WChr := NIL_SYM;
-  UStr := NIL_SYM;
+  UStr := NIL_SYM; Byt := NIL_SYM; ShInt := NIL_SYM; Wrd := NIL_SYM;
+  SmInt := NIL_SYM; U64 := NIL_SYM;
   FIs64 := PlatformInfo(FPlatform).Is64Bit;
   for LIdx := 0 to M.SymCount - 1 do
     if M.Symbols[LIdx].Kind = skBuiltinType then
@@ -2583,7 +3041,12 @@ begin
       else if M.Symbols[LIdx].NameLower = 'longword' then LWord := LIdx
       else if M.Symbols[LIdx].NameLower = 'ansichar' then AChr := LIdx
       else if M.Symbols[LIdx].NameLower = 'widechar' then WChr := LIdx
-      else if M.Symbols[LIdx].NameLower = 'unicodestring' then UStr := LIdx;
+      else if M.Symbols[LIdx].NameLower = 'unicodestring' then UStr := LIdx
+      else if M.Symbols[LIdx].NameLower = 'byte' then Byt := LIdx
+      else if M.Symbols[LIdx].NameLower = 'shortint' then ShInt := LIdx
+      else if M.Symbols[LIdx].NameLower = 'word' then Wrd := LIdx
+      else if M.Symbols[LIdx].NameLower = 'smallint' then SmInt := LIdx
+      else if M.Symbols[LIdx].NameLower = 'uint64' then U64 := LIdx;
 
   CategorizeTypes;
 end;

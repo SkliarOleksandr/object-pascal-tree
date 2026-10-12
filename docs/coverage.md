@@ -99,9 +99,11 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   category would (no exact match).
 
 ### 2.5.1 Type aliases - weak vs. distinct
-- the parser marks distinctness (Aux=1) but no semantic
-  layer reads the flag - distinct aliases are typed identically to weak
-  aliases, with no assignment-identity distinction.
+- the parser marks distinctness (Aux=1); CanonTypeX and the helper map stop
+  there, and the operator table computes a distinct number in its base's
+  storage (StorageBaseX - `TMyI64 + TMyI64` is Int64, `not MW` keeps
+  TMyW). What is not modelled is assignment identity: a distinct type is
+  assignable wherever its base is.
 
 ### 2.6.1 Identity, compatibility, assignment-compatibility
 - the intra-unit typer implements only category-level
@@ -172,9 +174,14 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   An operand that Phase 1 bound to a TYPE name (an inherited cross-unit
   member named `Word`) types the operator as nothing and is not judged.
 - an arithmetic result over two Bytes or Words is an anonymous subrange of
-  Integer in dcc; PasTree says Integer. `AnsiChar + AnsiChar` (anonymous in
-  dcc) and pointer minus pointer are left untyped; `Cu / Cu` on Win64 is
-  assumed Extended (not probed).
+  Integer in dcc, and so is `B and 300` (dcc's E2010 names both Integer,
+  but its overload resolution then prefers a narrower parameter); PasTree
+  says Integer. A rankless subrange operand computes as an Integer
+  (`Sub and Sub` over `0..9` is ShortInt in dcc). A true constant
+  operand adapts to the other operand by its value only when it is a
+  literal or names one - a folded constant expression (`N + 1` in a
+  constant) is read as its declared shape. `AnsiChar + AnsiChar` and
+  pointer minus pointer are left untyped.
 
 ### 4.9 Type-test & type-cast operators (`is`, `as`)
 - a type name on the right of `is` ends that operand (`O is TFoo and C` is

@@ -33,7 +33,8 @@ uses
   PasTree.Ast,
   PasTree.CondEval,         // TPasCondContext, in OracleCondCtx's signature
   PasTree.Sema.Model,
-  PasTree.Sema.Builtins;
+  PasTree.Sema.Builtins,
+  PasTree.Sema.Types;       // TSemaOpFacts / TSemaOpAnswer, in OpFactsX's signature
 
 type
   // One generic type PARAMETER bound to an actual, for the SizeOf layout walk
@@ -755,6 +756,14 @@ type
       out ALit: Integer; out ANegated: Boolean): Boolean;
     function OperatorResultX(AMid, AOpNode: Integer;
       const AL, AR: TSemaXType): TSemaXType;
+    function StorageBaseX(const AX: TSemaXType): TSemaXType;
+    procedure ConstValueNodeX(AMid, ANode: Integer; out AVMid, AVNode: Integer);
+    function OpFactsX(AMid, ANode: Integer;
+      const AX: TSemaXType): TSemaOpFacts;
+    function OpAnswerX(AMid: Integer; AAns: TSemaOpAnswer;
+      const AL, AR: TSemaXType; AKeepOwn: Boolean): TSemaXType;
+    function ForCounterTypeX(AMid, AFrom, ATo: Integer;
+      const AFromX, AToX: TSemaXType): TSemaXType;
     function RecordOperatorX(AOp: TPasTokenKind; AUnary: Boolean;
       const AL, AR: TSemaXType): TSemaXType;
     function UntypedInitTypeX(AMid, ANode: Integer;
@@ -1682,7 +1691,6 @@ uses
   System.Generics.Defaults,
   PasTree.Parser,
   PasTree.Sema.Resolver,
-  PasTree.Sema.Types,
   PasTree.Sema.Diagnostics;
 
 const
@@ -12654,7 +12662,9 @@ var
     is left alone - its TypeNode is set - and so is one whose initializer
     types as nothing. Cheap by construction: a handful of node reads per
     inline declaration, no lookups unless the initializer is a designator. }
-  procedure InferInlineDecl(ADecl, AInit: Integer);
+  // ATo: a `for var` counter's TO bound, which joins the FROM bound AInit
+  // in its type (ForCounterTypeX).
+  procedure InferInlineDecl(ADecl, AInit: Integer; ATo: Integer = NIL_NODE);
   var
     LName, LSym: Integer;
     LX0: TSemaXType;
@@ -12674,6 +12684,8 @@ var
         LX0 := InferInitX(AInit);
         if not XValid(LX0) then
           Exit;
+        if ATo <> NIL_NODE then
+          LX0 := ForCounterTypeX(AId, AInit, ATo, LX0, InferInitX(ATo));
       end;
       LNewSymType.AddOrSetValue(LSym, LX0);
       SetXAt(LName, LX0);
@@ -12731,8 +12743,10 @@ var
     // turned silent misses into false E2003s on the very next line. Both are
     // now decided rather than guessed (PreferParamlessOverload/-Member for
     // the first, LAmbig for the second), which is what let the case in.
-    // 5.5.1: `for var I := From to To do` - the counter's type is the FROM
-    // bound's (`for var C := 'a' to 'z'` walks Chars). The same detour as
+    // 5.5.1: `for var I := From to To do` - the counter's type is both
+    // bounds' (ForCounterTypeX: `0 to High(DynArr)` is Int64 on Win64), a
+    // Char / enum / Boolean counter the FROM bound's (`for var C := 'a' to
+    // 'z'` walks Chars). The same detour as
     // for-in below, for the same reason: the body is a CHILD of the loop, so
     // a post-order case typed the counter only after every use inside the
     // body had already been walked without it - `for var LPeriod :=
@@ -12748,9 +12762,14 @@ var
       if LBase = NIL_NODE then
         Exit;
       Walk(LBase);
+      LName := LM.Tree.Nodes[LBase].NextSibling;   // the TO bound
+      if LName <> NIL_NODE then
+        Walk(LName);
       if LM.Tree.Nodes[LChild].Kind = nkInlineVar then
-        InferInlineDecl(LChild, LBase);
-      LChild := LM.Tree.Nodes[LBase].NextSibling;   // the TO bound, the body
+        InferInlineDecl(LChild, LBase, LName);
+      if LName = NIL_NODE then
+        Exit;
+      LChild := LM.Tree.Nodes[LName].NextSibling;   // the body
       while LChild <> NIL_NODE do
       begin
         Walk(LChild);
@@ -16434,37 +16453,7 @@ var
   LL, LR: TSemaXType;
   LcL, LcR: TSemaTypeCat;
   LUnary: Boolean;
-
-  function NameIs(const AX: TSemaXType; const ANames: array of string): Boolean;
-  var
-    LName: string;
-  begin
-    Result := False;
-    if not XValid(AX) or
-       (FModels[AX.UnitId].Symbols[AX.Sym].Kind <> skBuiltinType) then
-      Exit;
-    for LName in ANames do
-      if FModels[AX.UnitId].Symbols[AX.Sym].NameLower = LName then
-        Exit(True);
-  end;
-
-  // The operator facts of the canonical operand AX (OperatorAnswer).
-  function Facts(const AX: TSemaXType; ACat: TSemaTypeCat): TSemaOpFacts;
-  begin
-    Result := Default(TSemaOpFacts);
-    Result.Cat := ACat;
-    if not XValid(AX) or
-       (FModels[AX.UnitId].Symbols[AX.Sym].Kind <> skBuiltinType) then
-      Exit;
-    Result.Rank := FModels[AX.UnitId].Symbols[AX.Sym].NumRank;
-    Result.Unsigned32 := NameIs(AX, ['cardinal', 'longword']) or
-      (not FInfo.Is64Bit and NameIs(AX, ['nativeuint']));
-    Result.Curr := NameIs(AX, ['currency']);
-    Result.UniText := NameIs(AX, ['string', 'unicodestring', 'char',
-      'widechar']);
-    Result.AnsiStr := NameIs(AX, ['ansistring']);
-    Result.AnsiChr := NameIs(AX, ['ansichar']);
-  end;
+  LNodeL, LNodeR: Integer;
 
   // Is operand AIdx (0 left, 1 right) of AOpNode an array constructor
   // `[...]`, parentheses aside? It has no type of its own to compare.
@@ -16503,31 +16492,226 @@ begin
   if (LcL in [tcClass, tcInterface, tcVariant]) or
      (LcR in [tcClass, tcInterface, tcVariant]) then
     Exit;
+  LNodeL := LM.Tree.Nodes[AOpNode].FirstChild;
+  LNodeR := NIL_NODE;
+  if not LUnary and (LNodeL <> NIL_NODE) then
+    LNodeR := LM.Tree.Nodes[LNodeL].NextSibling;
 
   // The one 4.2.1 table, shared with the unit's typer (audit A4-15, D2-08).
-  case OperatorAnswer(LOp, LUnary, Facts(LL, LcL), Facts(LR, LcR),
-    not LUnary and XSameType(LL, LR), FInfo.Is64Bit) of
+  Result := OpAnswerX(AMid, OperatorAnswer(LOp, LUnary,
+    OpFactsX(AMid, LNodeL, LL), OpFactsX(AMid, LNodeR, LR),
+    not LUnary and XSameType(LL, LR), FInfo.Is64Bit), LL, LR,
+    LUnary and (LOp = tkNot));
+  // Dynamic-array concatenation is the array operand's own type: both
+  // operands of one type, or one of them an array constructor.
+  if not XValid(Result) and not LUnary and (LOp = tkPlus) then
+    if (LcL = tcArray) and IsDynArrayTypeX(LL) and
+       (XSameType(LL, LR) or OperandIsCtor(1)) then
+      Result := LL
+    else if (LcR = tcArray) and IsDynArrayTypeX(LR) and OperandIsCtor(0) then
+      Result := LR;
+end;
+
+{ The builtin a number type AX is stored as: CanonTypeX's alias walk that
+  also passes a distinct `type X` (`TMyI64 = type Int64` computes as Int64,
+  `HWND = type UINT_PTR` as NativeUInt - audit A3-32, B4-08). AX itself
+  when it ends at no builtin; identity questions keep CanonTypeX. }
+function TPasSemaProject.StorageBaseX(const AX: TSemaXType): TSemaXType;
+var
+  LDef, LDepth: Integer;
+  LNext: TSemaXType;
+begin
+  Result := CanonTypeX(AX);
+  for LDepth := 1 to 8 do
+  begin
+    if not XValid(Result) then
+      Exit;
+    LDef := TypeDefNodeOf(Result.UnitId, Result.Sym);
+    if (LDef = NIL_NODE) or not (FModels[Result.UnitId].Tree.Nodes[LDef].Kind in
+       [nkIdent, nkMember]) then
+      Exit;
+    LNext := CanonTypeX(ResolveTypeExprNested(Result.UnitId, LDef));
+    if not XValid(LNext) or
+       ((LNext.UnitId = Result.UnitId) and (LNext.Sym = Result.Sym)) then
+      Exit;
+    Result := LNext;
+  end;
+end;
+
+{ The value node a constant operand ANode of model AMid stands for: the
+  node itself, parentheses aside, or - through a true constant (no declared
+  type), in this unit or another - that constant's value, followed to depth
+  8. AVMid: the model AVNode is in. }
+procedure TPasSemaProject.ConstValueNodeX(AMid, ANode: Integer;
+  out AVMid, AVNode: Integer);
+var
+  LDepth, LName, LBMid, LBSym, LDecl: Integer;
+  LM: TPasSemaModel;
+  LExt: TPasExtRef;
+begin
+  AVMid := AMid;
+  AVNode := ANode;
+  for LDepth := 1 to 8 do
+  begin
+    LM := FModels[AVMid];
+    AVNode := PeelParens(LM.Tree, AVNode);
+    if (AVNode = NIL_NODE) or
+       not (LM.Tree.Nodes[AVNode].Kind in [nkIdent, nkMember]) then
+      Exit;
+    LName := AVNode;
+    if LM.Tree.Nodes[LName].Kind = nkMember then
+    begin
+      LName := LM.Tree.Nodes[LName].FirstChild;
+      while (LName <> NIL_NODE) and
+            (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
+        LName := LM.Tree.Nodes[LName].NextSibling;
+      if LName = NIL_NODE then
+        Exit;
+    end;
+    if LM.RefMap[LName] <> NIL_SYM then
+    begin
+      LBMid := AVMid;
+      LBSym := LM.RefMap[LName];
+    end
+    else if LM.ExtRefMap.TryGetValue(LName, LExt) then
+    begin
+      LBMid := LExt.UnitId;
+      LBSym := LExt.Sym;
+    end
+    else
+      Exit;
+    LM := FModels[LBMid];
+    if (LM.Symbols[LBSym].Kind <> skConst) or
+       (LM.Symbols[LBSym].TypeSym <> NIL_SYM) or
+       (sfBuiltin in LM.Symbols[LBSym].Flags) then
+      Exit;
+    LDecl := LM.Symbols[LBSym].DeclNode;
+    if (LDecl = NIL_NODE) or (LM.Tree.Nodes[LDecl].Parent = NIL_NODE) or
+       (LM.Tree.Nodes[LM.Tree.Nodes[LDecl].Parent].Kind <> nkConstDecl) or
+       (LM.Tree.Nodes[LDecl].NextSibling = NIL_NODE) then
+      Exit;
+    AVMid := LBMid;
+    AVNode := LM.Tree.Nodes[LDecl].NextSibling;
+  end;
+end;
+
+{ The operator facts (OperatorAnswer) of operand node ANode of model AMid,
+  typed AX: the category, the rank and identity of the builtin it is stored
+  as, and whether it is a constant - an integer one's value, a real literal
+  dcc64 reads as Currency (a Currency-typed literal or true constant is no
+  Currency VALUE: `D * Half` is Extended, audit A3-33). }
+function TPasSemaProject.OpFactsX(AMid, ANode: Integer;
+  const AX: TSemaXType): TSemaOpFacts;
+var
+  LB: TSemaXType;
+  LVMid, LVNode, LLit: Integer;
+  LS: TSemaSymbol;
+
+  function NameIs(const ANames: array of string): Boolean;
+  var
+    LName: string;
+  begin
+    Result := False;
+    for LName in ANames do
+      if LS.NameLower = LName then
+        Exit(True);
+  end;
+
+begin
+  Result := Default(TSemaOpFacts);
+  Result.Cat := XCatOf(AX);
+  if (ANode <> NIL_NODE) and (Result.Cat in [tcInteger, tcFloat]) then
+  begin
+    ConstValueNodeX(AMid, ANode, LVMid, LVNode);
+    if Result.Cat = tcInteger then
+      Result.IntConst := IntLiteralValue(FModels[LVMid].Tree, LVNode,
+        Result.IntValue)
+    else
+    begin
+      LLit := RealLiteralNode(FModels[LVMid].Tree, LVNode);
+      Result.RealLit := LLit <> NIL_NODE;
+      Result.CurrLit := Result.RealLit and
+        (LiteralTypeName(FModels[LVMid].Tree, LLit, False) = 'currency');
+      Result.CurrNamed := Result.CurrLit and
+        (RealLiteralNode(FModels[AMid].Tree, ANode) = NIL_NODE);
+    end;
+  end;
+  if Result.Cat in [tcInteger, tcFloat] then
+    LB := StorageBaseX(AX)
+  else
+    LB := AX;
+  if not XValid(LB) or
+     (FModels[LB.UnitId].Symbols[LB.Sym].Kind <> skBuiltinType) then
+    Exit;
+  LS := FModels[LB.UnitId].Symbols[LB.Sym];
+  Result.Rank := LS.NumRank;
+  Result.Unsigned := NameIs(['byte', 'word', 'cardinal', 'longword', 'uint64',
+    'nativeuint']);
+  Result.Curr := NameIs(['currency']) and not Result.RealLit;
+  Result.Comp := NameIs(['comp']);
+  Result.UniText := NameIs(['string', 'unicodestring', 'char', 'widechar']);
+  Result.AnsiStr := NameIs(['ansistring']);
+  Result.AnsiChr := NameIs(['ansichar']);
+end;
+
+{ The type OperatorAnswer's AAns names for the canonical operands AL / AR of
+  model AMid - a number operand as the builtin it is stored as, unless
+  AKeepOwn (`not` keeps a distinct type); XNil where it names none. }
+function TPasSemaProject.OpAnswerX(AMid: Integer; AAns: TSemaOpAnswer;
+  const AL, AR: TSemaXType; AKeepOwn: Boolean): TSemaXType;
+
+  function Own(const AX: TSemaXType): TSemaXType;
+  begin
+    if not AKeepOwn and (XCatOf(AX) in [tcInteger, tcFloat]) then
+      Result := StorageBaseX(AX)
+    else
+      Result := AX;
+  end;
+
+begin
+  case AAns of
     oaBoolean: Result := BuiltinX(AMid, 'boolean');
     oaInteger: Result := BuiltinX(AMid, 'integer');
     oaInt64: Result := BuiltinX(AMid, 'int64');
-    oaLeft: Result := LL;
-    oaRight: Result := LR;
+    oaLeft: Result := Own(AL);
+    oaRight: Result := Own(AR);
     oaExtended: Result := BuiltinX(AMid, 'extended');
     oaCurrency: Result := BuiltinX(AMid, 'currency');
     oaString: Result := BuiltinX(AMid, 'string');
     oaAnsiString: Result := BuiltinX(AMid, 'ansistring');
     oaPointer: Result := BuiltinX(AMid, 'pointer');
-    oaNone:
-      // Dynamic-array concatenation is the array operand's own type: both
-      // operands of one type, or one of them an array constructor.
-      if not LUnary and (LOp = tkPlus) then
-        if (LcL = tcArray) and IsDynArrayTypeX(LL) and
-           (XSameType(LL, LR) or OperandIsCtor(1)) then
-          Result := LL
-        else if (LcR = tcArray) and IsDynArrayTypeX(LR) and
-                OperandIsCtor(0) then
-          Result := LR;
+    oaShortInt: Result := BuiltinX(AMid, 'shortint');
+    oaByte: Result := BuiltinX(AMid, 'byte');
+    oaSmallInt: Result := BuiltinX(AMid, 'smallint');
+    oaWord: Result := BuiltinX(AMid, 'word');
+    oaCardinal: Result := BuiltinX(AMid, 'cardinal');
+    oaUInt64: Result := BuiltinX(AMid, 'uint64');
+    oaComp: Result := BuiltinX(AMid, 'comp');
+  else
+    Result := XNil;
   end;
+end;
+
+{ The type of an inline `for var` counter from BOTH bounds (5.5.1, dcc64 /
+  dcc32 37.0, local/probe-b36 F1): integer bounds meet as `+` operands do -
+  at least Integer, a constant taking the other bound's type when it fits,
+  a signed / unsigned 32-bit mix Int64 (`0 to High(DynArr)` is Int64 on
+  Win64, `C to C` Cardinal, `C to I` Int64); any other bound gives the FROM
+  bound's type (audit A3-30). }
+function TPasSemaProject.ForCounterTypeX(AMid, AFrom, ATo: Integer;
+  const AFromX, AToX: TSemaXType): TSemaXType;
+var
+  LF, LT: TSemaXType;
+begin
+  LF := CanonTypeX(AFromX);
+  LT := CanonTypeX(AToX);
+  if (XCatOf(LF) <> tcInteger) or (XCatOf(LT) <> tcInteger) then
+    Exit(AFromX);
+  Result := OpAnswerX(AMid, OperatorAnswer(tkPlus, False,
+    OpFactsX(AMid, AFrom, LF), OpFactsX(AMid, ATo, LT), XSameType(LF, LT),
+    FInfo.Is64Bit), LF, LT, False);
+  if not XValid(Result) then
+    Result := AFromX;
 end;
 
 { The type of an operator applied to a record operand (AL, AR canonical; AR
@@ -16748,105 +16932,8 @@ end;
 
 function TPasSemaProject.LiteralTypeName(const ATree: TPasTree; ANode: Integer;
   ANegated: Boolean): string;
-var
-  LTxt: string;
-  LIdx, LUnits, LFrac: Integer;
-  LU: UInt64;
-  LHasExp, LInFrac: Boolean;
-  LVal: Extended;
 begin
-  Result := '';
-  if ANode = NIL_NODE then
-    Exit;
-  case ATree.Nodes[ANode].Kind of
-    nkIntLit:
-      begin
-        LTxt := StringReplace(ATree.NodeText(ANode), '_', '',
-          [rfReplaceAll]);
-        if LTxt = '' then
-          Exit;
-        if LTxt[1] = '%' then
-        begin
-          // Binary: TryStrToUInt64 knows `$` but not `%`.
-          LU := 0;
-          for LIdx := 2 to Length(LTxt) do
-          begin
-            if not CharInSet(LTxt[LIdx], ['0', '1']) or (LU > High(UInt64) shr 1) then
-              Exit;
-            LU := (LU shl 1) or UInt64(Ord(LTxt[LIdx]) - Ord('0'));
-          end;
-        end
-        else if not TryStrToUInt64(LTxt, LU) then
-          Exit;
-        if ANegated then
-        begin
-          if LU <= UInt64(High(Integer)) + 1 then
-            Result := 'integer'
-          else if LU <= UInt64(High(Int64)) + 1 then
-            Result := 'int64';
-          // Beyond that dcc rejects the literal; nothing to infer.
-        end
-        else if LU <= UInt64(High(Integer)) then
-          Result := 'integer'
-        else if LU <= UInt64(High(Cardinal)) then
-          Result := 'cardinal'
-        else if LU <= UInt64(High(Int64)) then
-          Result := 'int64'
-        else
-          Result := 'uint64';
-      end;
-
-    nkRealLit:
-      begin
-        Result := 'extended';
-        if not FInfo.Is64Bit then
-          Exit;
-        LTxt := StringReplace(ATree.NodeText(ANode), '_', '',
-          [rfReplaceAll]);
-        LHasExp := False;
-        LInFrac := False;
-        LFrac := 0;
-        for LIdx := 1 to Length(LTxt) do
-          case LTxt[LIdx] of
-            'e', 'E':
-              LHasExp := True;
-            '.':
-              LInFrac := True;
-          else
-            if LInFrac and not LHasExp then
-              Inc(LFrac);
-          end;
-        if LHasExp or (LFrac > 4) then
-          Exit;
-        // Currency's range: |v| <= 922337203685477.5807. The text is decimal
-        // with at most four fractional digits, so an Extended reads it
-        // exactly enough for this comparison (the boundary itself has 19
-        // significant digits, within Extended's 64-bit mantissa on Win32;
-        // on a Double-sized Extended it rounds, and dcc's own comparison is
-        // over the same Double - probed at the boundary both ways).
-        if not TryStrToFloat(LTxt, LVal, TFormatSettings.Invariant) then
-          Exit;
-        if Abs(LVal) > 922337203685477.5807 then
-          Exit;
-        Result := 'currency';
-      end;
-
-    nkCaretChar:
-      Result := 'char';
-
-    nkStrLit:
-      begin
-        // UTF-16 units over every visible token of the node (StrLitUnits,
-        // the one count the scorers read too - audit A4-07).
-        LUnits := StrLitUnits(ATree, ANode);
-        if LUnits < 0 then
-          Exit;   // a multiline string or anything unexpected: not a Char
-        if LUnits = 1 then
-          Result := 'char'
-        else
-          Result := 'string';
-      end;
-  end;
+  Result := PasLiteralTypeName(ATree, ANode, ANegated, FInfo.Is64Bit);
 end;
 
 { The type of an INITIALIZER expression, read without the Phase-3c tables -

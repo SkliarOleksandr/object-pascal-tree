@@ -1989,6 +1989,51 @@ const
 
   // The 64-bit side of the real rule: Currency constants stay Currency
   // through `+`, `/` is Extended.
+  // B36: expression, its type on Win64, on Win32 (see the fixture).
+  CPROMO: array[0..41] of array[0..2] of string = (
+    ('C + 1', 'Cardinal', 'Cardinal'),
+    ('C and $FF', 'Cardinal', 'Cardinal'),
+    ('C + K', 'Cardinal', 'Cardinal'),
+    ('C + (-1)', 'Int64', 'Int64'),
+    ('C shr 8', 'Cardinal', 'Cardinal'),
+    ('C shl I', 'Cardinal', 'Cardinal'),
+    ('I shl I64', 'Integer', 'Integer'),
+    ('B and B', 'Byte', 'Byte'),
+    ('Sh and B', 'SmallInt', 'SmallInt'),
+    ('W or Sh', 'Integer', 'Integer'),
+    ('B and -1', 'SmallInt', 'SmallInt'),
+    ('C and I', 'Cardinal', 'Cardinal'),
+    ('I64 and U64', 'UInt64', 'UInt64'),
+    ('-C', 'Int64', 'Int64'),
+    ('C + Sh', 'Int64', 'Int64'),
+    ('C + B', 'Cardinal', 'Cardinal'),
+    ('I64 + U64', 'UInt64', 'UInt64'),
+    ('MI64 + MI64', 'Int64', 'Int64'),
+    ('MC + MC', 'Cardinal', 'Cardinal'),
+    ('MI64 + 1', 'Int64', 'Int64'),
+    ('not MW', 'TMyW', 'TMyW'),
+    ('1.5 + 1', 'Extended', 'Extended'),
+    ('D + 1.5', 'Extended', 'Extended'),
+    ('D * Half', 'Extended', 'Extended'),
+    ('KCur * 2', 'Extended', 'Extended'),
+    ('KCur - KI', 'Currency', 'Extended'),
+    ('Cu * 1.5', 'Currency', 'Extended'),
+    ('Cu / 2', 'Currency', 'Extended'),
+    ('I / Cu', 'Currency', 'Extended'),
+    ('Cu / D', 'Currency', 'Extended'),
+    ('D / Cu', 'Extended', 'Extended'),
+    ('Cu / 1.5', 'Extended', 'Extended'),
+    ('Cm + Cm', 'Comp', 'Extended'),
+    ('Cm + I', 'Comp', 'Extended'),
+    ('Cm + D', 'Extended', 'Extended'),
+    ('I / Cm', 'Comp', 'Extended'),
+    ('Cu + Cm', 'Currency', 'Extended'),
+    ('for 0 to High(DA)', 'NativeInt', 'NativeInt'),  // dcc: Int64 / Integer
+    ('for C to I', 'Int64', 'Int64'),
+    ('for B to W', 'Integer', 'Integer'),
+    ('for U64 to 0', 'UInt64', 'UInt64'),
+    ('for 0 to C', 'Cardinal', 'Cardinal'));
+
   UNIT_XKW =
     'unit XKW;'#10'interface'#10 +
     'const'#10 +
@@ -2983,6 +3028,57 @@ begin
     GProj.Free;
     if TDirectory.Exists(LDir) then
       TDirectory.Delete(LDir, True);
+  end;
+
+  // ---- B36: dcc's promotion rules (4.2.1, 5.5.1) for an inferred inline
+  // var and a `for var` counter, both targets - a constant adapts to the
+  // other operand, bitwise operators cover, shifts follow the left operand,
+  // signedness, distinct types compute in their base, the Win64 Currency /
+  // Comp rules (audit A3-30..A3-33, B4-04..B4-09; dcc32 / dcc64 37.0,
+  // local/probe-b36 M1 M2 N1 F1 C2 C3). ----
+  begin
+    var LSrc :=
+      'unit XPR;'#10'interface'#10 +
+      'type TMyI64 = type Int64; TMyC = type Cardinal; TMyW = type Word;'#10 +
+      'const K = 5; KI = 5; KCur = 1.5; Half = 0.5;'#10 +
+      'implementation'#10 +
+      'procedure P;'#10 +
+      'var B: Byte; Sh: ShortInt; W: Word; I: Integer; C: Cardinal;'#10 +
+      '  I64: Int64; U64: UInt64; MI64: TMyI64; MC: TMyC; MW: TMyW;'#10 +
+      '  D: Double; Cu: Currency; Cm: Comp; DA: array of Integer;'#10 +
+      'begin'#10;
+    for var LRow := 0 to High(CPROMO) do
+      if CPROMO[LRow][0].StartsWith('for ') then
+        LSrc := LSrc + Format('  for var P%.2d := %s do ;'#10,
+          [LRow, CPROMO[LRow][0].Substring(4)])
+      else
+        LSrc := LSrc + Format('  var P%.2d := %s;'#10, [LRow, CPROMO[LRow][0]]);
+    LSrc := LSrc + 'end;'#10'end.'#10;
+    for var LPlat in [pfWin64, pfWin32] do
+    begin
+      LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype_promo');
+      if TDirectory.Exists(LDir) then
+        TDirectory.Delete(LDir, True);
+      TDirectory.CreateDirectory(LDir);
+      TFile.WriteAllText(TPath.Combine(LDir, 'XPR.pas'), LSrc);
+      GProj := TPasSemaProject.Create(LPlat, [LDir], []);
+      try
+        GProj.AnalyzeDirectory(LDir);
+        LE := ModelByName('xpr');
+        Ok('XPR loaded', Assigned(LE));
+        for var LRow := 0 to High(CPROMO) do
+          if LPlat = pfWin64 then
+            Eq('4.2.1/Win64: ' + CPROMO[LRow][0],
+              XTypeOf(LE, Format('P%.2d', [LRow])), CPROMO[LRow][1])
+          else
+            Eq('4.2.1/Win32: ' + CPROMO[LRow][0],
+              XTypeOf(LE, Format('P%.2d', [LRow])), CPROMO[LRow][2]);
+      finally
+        GProj.Free;
+        if TDirectory.Exists(LDir) then
+          TDirectory.Delete(LDir, True);
+      end;
+    end;
   end;
 
   // ---- 16.2.1 / 16.5.1: generic method calls with written type arguments ----
