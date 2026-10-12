@@ -160,8 +160,8 @@ function IsScalarToReference(ADst, ASrc: TSemaTypeCat): Boolean;
   a `[...]` (nkSetCtor) rejects what IsBracketToScalar names. A generic
   parameter, a Variant and an unknown category never reject.
 
-  ArgCatRejects - decided on the two categories: IsScalarToReference or
-  ScalarEnumMismatch.
+  ArgCatRejects - decided on the two categories: IsScalarToReference,
+  ScalarEnumMismatch, or an ordinal / float / Char value for an array.
 
   ArgStructRejects - two types already known NOT to be the same type: two
   records, or an array against a record, class or interface, when no side
@@ -348,8 +348,14 @@ end;
 
 function ArgCatRejects(AParCat, AArgCat: TSemaTypeCat): Boolean;
 begin
+  // ...and an ordinal, float or Char value where an array is wanted: no
+  // conversion makes `B[0]` a TBytes, so `Write(B[0], N)` takes TStream's
+  // untyped `Write(const Buffer; Count)` (local/probe-b33 O1: P(1) beside
+  // P(const A: array of Integer) calls P(Double)). A string is left out.
   Result := IsScalarToReference(AParCat, AArgCat) or
-    ScalarEnumMismatch(AParCat, AArgCat);
+    ScalarEnumMismatch(AParCat, AArgCat) or
+    ((AParCat = tcArray) and
+     (AArgCat in [tcInteger, tcFloat, tcBoolean, tcChar, tcEnum]));
 end;
 
 function ArgStructRejects(AParCat, AArgCat: TSemaTypeCat;

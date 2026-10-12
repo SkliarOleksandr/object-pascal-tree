@@ -6392,6 +6392,152 @@ begin
   end;
 end;
 
+{ Which declarations join a call's candidates, and in which frame (audit
+  B33; 6.3.1, dcc64 37.0, local/probe-b33 Q1, C1, T3): a used unit's routine
+  without `overload` is hidden by the nearer one (Foo(1) is VB's Foo(Double),
+  not VA's exact Foo(Integer)); used units' `overload` sets join in search
+  order (G(1) QA's, G(1.5) QB's); an implementation-section overload's call
+  sees the interface set (Pick(1)); a derived `overload` set spans the
+  ancestor's (D.Take(1) is TBaseT's); an inherited overload is typed in the
+  ancestor's frame (G.Get(0) of TBaseG<TFoo> is a TFoo); a paren-less
+  `DD.GetData<TFoo>` finds the ancestor's generic overload behind its plain
+  one; an anonymous literal picks the reference type its parameter types fit;
+  an override set hides nothing (DOv.Foo('s') is TBaseO's, probe-b33 O1); a
+  Byte element rejects a dynamic-array parameter (Wr(BA[0], 1) is the
+  untyped one). On 0.98.4 eight good lines were E2003 and A.Bogus3 silent
+  (A untyped). }
+procedure TestOverloadSets;
+var
+  LDir: string;
+begin
+  LDir := FreshDir('pastree_sema_ovlsets');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OvA.pas'),
+    'unit OvA;'#10'interface'#10'type'#10 +
+    '  TA = record AMem: Integer; end;'#10 +
+    '  TB = record BMem: Integer; end;'#10 +
+    '  TFoo = class F: Integer; end;'#10 +
+    '  TProcI = reference to procedure(X: Integer);'#10 +
+    '  TProcS = reference to procedure(X: string);'#10 +
+    '  TBaseT = class function Take(A: Integer): TA; overload; end;'#10 +
+    '  TDerT = class(TBaseT)'#10 +
+    '    function Take(const S: string): TB; overload;'#10'  end;'#10 +
+    '  TBaseG<T> = class function Get(I: Integer): T; overload; end;'#10 +
+    '  TDerG = class(TBaseG<TFoo>)'#10 +
+    '    function Get(const S: string; X: Integer): TFoo; overload;'#10 +
+    '  end;'#10 +
+    '  TBaseD = class'#10 +
+    '    function GetData: Pointer; overload;'#10 +
+    '    function GetData<T: class>: T; overload;'#10'  end;'#10 +
+    '  TDerD = class(TBaseD)'#10 +
+    '    function GetData(I: Integer): Pointer; overload;'#10'  end;'#10 +
+    '  TBaseO = class'#10 +
+    '    function Foo(X: Integer): TA; overload; virtual;'#10 +
+    '    function Foo(const S: string): TB; overload; virtual;'#10 +
+    '  end;'#10 +
+    '  TDerO = class(TBaseO)'#10 +
+    '    function Foo(X: Integer): TA; override;'#10'  end;'#10 +
+    '  TByteArr = array of Byte;'#10 +
+    '  TArrG<T> = array of T;'#10 +
+    '  TSt = array[0..3] of Byte;'#10 +
+    '  THdr = record X, Y: Integer; end;'#10 +
+    'function Wr(const A: TByteArr; N: Integer): TA; overload;'#10 +
+    'function Wr(const A; N: Integer): TB; overload;'#10 +
+    'function Foo(X: Integer): TA;'#10 +
+    'function Pick(A: Integer): TA; overload;'#10 +
+    'function Lit(P: TProcI): TA; overload;'#10 +
+    'function Lit(P: TProcS): TB; overload;'#10 +
+    'function G(I: Integer): TA; overload;'#10 +
+    'procedure UsePick;'#10 +
+    'implementation'#10 +
+    'function TBaseT.Take(A: Integer): TA; begin end;'#10 +
+    'function TDerT.Take(const S: string): TB; begin end;'#10 +
+    'function TBaseG<T>.Get(I: Integer): T; begin end;'#10 +
+    'function TDerG.Get(const S: string; X: Integer): TFoo;' +
+    ' begin Result := nil; end;'#10 +
+    'function TBaseD.GetData: Pointer; begin Result := nil; end;'#10 +
+    'function TBaseD.GetData<T>: T; begin end;'#10 +
+    'function TDerD.GetData(I: Integer): Pointer; begin Result := nil; end;'#10 +
+    'function Foo(X: Integer): TA; begin end;'#10 +
+    'function Pick(A: Integer): TA; begin end;'#10 +
+    'function Pick(const S: string; B: Integer = 0): TB; overload;' +
+    ' begin end;'#10 +
+    'function Lit(P: TProcI): TA; begin end;'#10 +
+    'function Lit(P: TProcS): TB; begin end;'#10 +
+    'function G(I: Integer): TA; begin end;'#10 +
+    'function TBaseO.Foo(X: Integer): TA; begin end;'#10 +
+    'function TBaseO.Foo(const S: string): TB; begin end;'#10 +
+    'function TDerO.Foo(X: Integer): TA; begin end;'#10 +
+    'function Wr(const A: TByteArr; N: Integer): TA; begin end;'#10 +
+    'function Wr(const A; N: Integer): TB; begin end;'#10 +
+    'procedure UsePick;'#10'var I: Integer;'#10'begin'#10 +
+    '  I := Pick(1).AMem;'#10 +
+    '  I := Pick(''s'').BMem;'#10 +
+    'end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OvB.pas'),
+    'unit OvB;'#10'interface'#10'uses OvA;'#10 +
+    'type TBytesB = TArrG<Byte>;'#10 +
+    'function Wb(const A: TBytesB; N: Integer): TA; overload;'#10 +
+    'function Wb(const A; N: Integer): TB; overload;'#10 +
+    'function Foo(X: Double): TB;'#10 +
+    'function G(D: Double): TB; overload;'#10 +
+    'implementation'#10 +
+    'function Foo(X: Double): TB; begin end;'#10 +
+    'function Wb(const A: TBytesB; N: Integer): TA; begin end;'#10 +
+    'function Wb(const A; N: Integer): TB; begin end;'#10 +
+    'function G(D: Double): TB; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OvC.pas'),
+    'unit OvC;'#10'interface'#10'uses OvA;'#10 +
+    'function G(const S: string): TFoo; overload;'#10 +
+    'implementation'#10 +
+    'function G(const S: string): TFoo; begin Result := nil; end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OvP.dpr'),
+    'program OvP;'#10'uses OvA, OvB, OvC;'#10 +
+    'var I: Integer; D: TDerT; GG: TDerG; DD: TDerD; DOv: TDerO;'#10 +
+    '  BA: TByteArr; BB: TBytesB; SS: TSt; HH: THdr;'#10 +
+    'begin'#10 +
+    '  I := Foo(1).BMem;'#10 +
+    '  I := G(1).AMem;'#10 +
+    '  I := G(1.5).BMem;'#10 +
+    '  I := D.Take(1).AMem;'#10 +
+    '  I := D.Take(''s'').BMem;'#10 +
+    '  I := GG.Get(0).F;'#10 +
+    '  var A := DD.GetData<TFoo>;'#10 +
+    '  I := A.F;'#10 +
+    '  I := A.Bogus3;'#10 +
+    '  I := Lit(procedure(X: string) begin end).BMem;'#10 +
+    '  I := Lit(procedure(X: Integer) begin end).AMem;'#10 +
+    '  I := DOv.Foo(''s'').BMem;'#10 +
+    '  I := Wr(BA[0], 1).BMem;'#10 +
+    '  I := Wr(BA, 1).AMem;'#10 +
+    '  I := Wb(BB[0], 1).BMem;'#10 +
+    '  I := Wb(SS, 4).BMem;'#10 +
+    '  I := Wb(HH, 8).BMem;'#10 +
+    '  I := Wb(BB, 1).AMem;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'OvP.dpr'));
+    Ok('ovlsets: hidden used-unit routine, joined used-unit sets, ancestor' +
+      ' overloads in their frame, the ancestor''s generic overload, the' +
+      ' literal''s parameter types - only A.Bogus3 is E2003 [' +
+      IntToStr(DiagCount(ModelByName('ovp'), 'E2003')) + ']',
+      DiagCount(ModelByName('ovp'), 'E2003') = 1);
+    Ok('ovlsets: a call in the implementation sees the interface overload' +
+      ' - no E2003 in OvA [' +
+      IntToStr(DiagCount(ModelByName('ova'), 'E2003')) + ']',
+      DiagCount(ModelByName('ova'), 'E2003') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestDeclAfterUnit;
 const
   UFA =
@@ -12320,6 +12466,7 @@ begin
   TestBuiltinIdentity;
   TestHelperIdentity;
   TestOneScorer;
+  TestOverloadSets;
   TestOracleDepth;
   TestInstanceSize;
   TestOperatorChains;

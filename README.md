@@ -1548,6 +1548,9 @@ Still open, roughly in the order we're tackling it:
     does - the derived declaration hides. Our "nothing in the type's own chain
     fits, so this means an INHERITED routine" fallback does not read the
     directive, so it accepts the hidden call too. Now in the spec (6 sec. 6.3.1).
+    Since 0.98.5 a derived set saying `overload` or `override` climbs by the
+    6.3.1 rule (SelectCallTarget's ConsiderAncestors); only the "nothing fits"
+    fallback, one ancestor level, still ignores the directive.
 - **Invert the overload chain: `PrevOverload`, nearest-declaration-wins.**
   Today `DeclareSym` keeps the FIRST declaration registered under the name and
   chains later ones forward through `NextOverload`. Object Pascal's rule is the
@@ -1561,7 +1564,8 @@ Still open, roughly in the order we're tackling it:
     (`DeclareSym`'s `skUnitRef` branch). With `PrevOverload` that is just the
     normal path.
   - An implementation-section overload joining the interface set needed the
-    same fix written twice, in `CheckCalls` and in `SelectOverload`, because the
+    same fix written three times, in `CheckCalls`, `SelectOverload` and
+    `SelectCallTarget` (UnitSetHeads, 0.98.5), because the
     two declarations live in different SCOPES and nothing linked them. A prev
     link established at declaration time - looking UP the scope chain, not only
     in the current scope - carries that relation once, and every consumer that

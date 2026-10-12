@@ -4872,18 +4872,25 @@ begin
             LChild := FirstChild(LNode);
             while LChild <> NIL_NODE do
             begin
-              if (KindOf(LChild) = nkDirective) and
-                 FTree.NodeTextEquals(LChild, 'varargs') then
+              if KindOf(LChild) = nkDirective then
               begin
-                FModel.Symbols[LSym].Flags :=
-                  FModel.Symbols[LSym].Flags + [sfVarArgs];
-                Break;
+                if FTree.NodeTextEquals(LChild, 'varargs') then
+                  FModel.Symbols[LSym].Flags :=
+                    FModel.Symbols[LSym].Flags + [sfVarArgs]
+                else if FTree.NodeTextEquals(LChild, 'overload') then
+                  FModel.Symbols[LSym].Flags :=
+                    FModel.Symbols[LSym].Flags + [sfOverloadDirective]
+                else if FTree.NodeTextEquals(LChild, 'override') then
+                  FModel.Symbols[LSym].Flags :=
+                    FModel.Symbols[LSym].Flags + [sfOverrideDirective];
               end;
               LChild := NextSib(LChild);
             end;
           end;
           // `inline` is written on the declaration (the routine node holding
           // the symbol's name); a parameterless routine has no member scope.
+          // `overload` / `override` are read on both, as RoutineSaysOverload
+          // read the first.
           LNode := FModel.Symbols[LSym].DeclNode;
           while (LNode <> NIL_NODE) and (KindOf(LNode) <> nkRoutine) do
             LNode := FTree.Nodes[LNode].Parent;
@@ -4892,12 +4899,17 @@ begin
           LChild := FirstChild(LNode);
           while LChild <> NIL_NODE do
           begin
-            if (KindOf(LChild) = nkDirective) and
-               FTree.NodeTextEquals(LChild, 'inline') then
+            if KindOf(LChild) = nkDirective then
             begin
-              FModel.Symbols[LSym].Flags :=
-                FModel.Symbols[LSym].Flags + [sfInline];
-              Break;
+              if FTree.NodeTextEquals(LChild, 'inline') then
+                FModel.Symbols[LSym].Flags :=
+                  FModel.Symbols[LSym].Flags + [sfInline]
+              else if FTree.NodeTextEquals(LChild, 'overload') then
+                FModel.Symbols[LSym].Flags :=
+                  FModel.Symbols[LSym].Flags + [sfOverloadDirective]
+              else if FTree.NodeTextEquals(LChild, 'override') then
+                FModel.Symbols[LSym].Flags :=
+                  FModel.Symbols[LSym].Flags + [sfOverrideDirective];
             end;
             LChild := NextSib(LChild);
           end;

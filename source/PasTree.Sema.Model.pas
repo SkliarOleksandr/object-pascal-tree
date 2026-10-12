@@ -62,9 +62,17 @@ type
   // every routine a unit calls (PasTree.Sema.Lint - a unit the body of an
   // inline routine needs is one its callers must list, or dcc does not
   // expand the call, H2443).
+  // sfOverloadDirective (the routine's declaration carries `overload`) is
+  // stamped with them: which sets join a call's candidates is decided by the
+  // directive, across used units and ancestors (6.3.1), of whatever unit
+  // declares them. sfOverload means only "chained after another declaration
+  // in this scope". RoutineSaysOverload reads it. sfOverrideDirective
+  // (`override`) with it: an override set never hides the ancestor's
+  // overloads (local/probe-b33 O1: TDer's lone `Foo(X: Integer); override;`
+  // leaves TBase's `Foo(const S: string)` callable through a TDer).
   TSemaSymbolFlag = (sfBuiltin, sfExternalUnresolved, sfStrict, sfOverload,
     sfClassMember, sfForward, sfHasBody, sfHasDefault, sfGeneric, sfVarArgs,
-    sfDefaultArrayProp, sfInline);
+    sfDefaultArrayProp, sfInline, sfOverloadDirective, sfOverrideDirective);
   TSemaSymbolFlags = set of TSemaSymbolFlag;
 
   // A reference resolved to a symbol in another unit's model.
@@ -777,8 +785,8 @@ type
       symbol that is not a routine or has no routine node. }
     function RoutineHead(ASym: Integer): TPasRoutineHead;
     { ASym, a routine, carries `overload` on its declaration or on the header
-      its parameters live under (an implementation may leave it off). False
-      on a demoted model, which keeps no tree to read it from. }
+      its parameters live under (an implementation may leave it off). Read
+      from sfOverloadDirective, so a demoted model answers too. }
     function RoutineSaysOverload(ASym: Integer): Boolean;
     { Stage 2 of the release: snapshots RoutineHead for every routine symbol
       and the stream identity counts, then frees the whole text layer
@@ -2381,35 +2389,13 @@ begin
     Result := NIL_SYM;
 end;
 
+// Stamped in Phase 1 (sfOverloadDirective), so a text-demoted model answers
+// too.
 function TPasSemaModel.RoutineSaysOverload(ASym: Integer): Boolean;
-
-  function OnRoutine(ANode: Integer): Boolean;
-  var
-    LChild: Integer;
-  begin
-    Result := False;
-    while (ANode <> NIL_NODE) and (Tree.Nodes[ANode].Kind <> nkRoutine) do
-      ANode := Tree.Nodes[ANode].Parent;
-    if ANode = NIL_NODE then
-      Exit;
-    LChild := Tree.Nodes[ANode].FirstChild;
-    while LChild <> NIL_NODE do
-    begin
-      if (Tree.Nodes[LChild].Kind = nkDirective) and
-         Tree.NodeTextEquals(LChild, 'overload') then
-        Exit(True);
-      LChild := Tree.Nodes[LChild].NextSibling;
-    end;
-  end;
-
 begin
-  Result := False;
-  if (ASym < 0) or (ASym >= SymCount) or Demoted or
-     (Symbols[ASym].Kind <> skRoutine) then
-    Exit;
-  Result := OnRoutine(Symbols[ASym].DeclNode) or
-    ((Symbols[ASym].MemberScope <> NIL_SCOPE) and
-     OnRoutine(Scopes[Symbols[ASym].MemberScope].OwnerNode));
+  Result := (ASym >= 0) and (ASym < SymCount) and
+    (Symbols[ASym].Kind = skRoutine) and
+    (sfOverloadDirective in Symbols[ASym].Flags);
 end;
 
 function TPasSemaModel.RoutineHead(ASym: Integer): TPasRoutineHead;

@@ -11169,16 +11169,141 @@ var
       Result := XPlain(AId, LM.IntraType(N));
   end;
 
-  // Same-named routine heads from every resolved used unit, System and
-  // SysInit (memoized).
-  function UsesHeads(const ANameLower: string): TArray<TPasExtRef>;
+  // Does the routine set headed by AHead let the search go on - which decides
+  // whether a further set joins a call's candidates (6.3.1)? A member saying
+  // `overload` does, and so does an `override`: overriding is not hiding,
+  // and TMemoryStream's two `Write(const Buffer; ...); override;` leave
+  // TStream's TBytes overloads callable (local/probe-b33 O1). Read from the
+  // stamped flags, so a demoted model answers too. A chain's length says
+  // nothing: two overrides need no `overload`.
+  function ChainSaysOverload(AMid, AHead: Integer): Boolean;
   var
-    LFrom: Integer;
+    LCand: Integer;
   begin
-    if LUsesHeads.TryGetValue(ANameLower, Result) then
+    Result := False;
+    LCand := AHead;
+    while (LCand <> NIL_SYM) and
+          (FModels[AMid].Symbols[LCand].Kind = skRoutine) do
+    begin
+      if FModels[AMid].Symbols[LCand].Flags *
+         [sfOverloadDirective, sfOverrideDirective] <> [] then
+        Exit(True);
+      LCand := FModels[AMid].Symbols[LCand].NextOverload;
+    end;
+  end;
+
+  // The type AOwner (of model AMid) as seen in the frame AFrame - the
+  // instance itself when AFrame instantiates AOwner, so AncestorOfX of a
+  // `TMid<TFoo>` reads its ancestor's arguments; plain otherwise.
+  function FrameOwnerX(AMid, AOwner, AFrame: Integer): TSemaXType;
+  begin
+    Result := XPlain(AMid, AOwner);
+    if AFrame <> NIL_INST then
+    begin
+      var LInst := InstanceRead(AFrame);
+      if (LInst.UnitId = AMid) and (LInst.Sym = AOwner) then
+        Result.Inst := AFrame;
+    end;
+  end;
+
+  { The routine sets a bare unit-level name's call chooses from beside the
+    set it bound to (AHeadMid, AHeadSym), in dcc's search order (3.3.2,
+    6.3.1; local/probe-b33 Q1): the unit's interface set when the head is an
+    implementation-section one (one set, two scopes - audit E3-26); then,
+    while the sets met say `overload`, the used units last to first, System
+    and SysInit. A set met further on joins only when it says `overload`
+    ITSELF, and one that does not ENDS the search (`F(1)` with QC's F(string)
+    overload, QB's plain F(Double), QA's F(Integer) overload, used QA, QB, QC,
+    is E2250: neither QB's nor QA's joins). The search never goes on past a
+    head without the directive (audit A3-20: a used unit's hidden routine
+    that scored higher took the call). Memoized per name for this unit, the
+    head as element 0. }
+  function UnitSetHeads(AHeadMid, AHeadSym: Integer;
+    const ANameLower: string): TArray<TPasExtRef>;
+  var
+    LOverload: Boolean;
+    LIdx, LFrom, LUid, LS, LSysUid, LSysInitUid: Integer;
+
+    procedure Add(AMid, ASym: Integer);
+    var
+      LRef: TPasExtRef;
+    begin
+      LRef.UnitId := AMid;
+      LRef.Sym := ASym;
+      Result := Result + [LRef];
+    end;
+
+    // False = the search ends here.
+    function Meet(AMid, ASym: Integer): Boolean;
+    begin
+      Result := True;
+      if (ASym = NIL_SYM) or (FModels[AMid].Symbols[ASym].Kind <> skRoutine) then
+        Exit;
+      if not ChainSaysOverload(AMid, ASym) then
+        Exit(False);
+      Add(AMid, ASym);
+    end;
+
+  begin
+    if LUsesHeads.TryGetValue(ANameLower, Result) and (Length(Result) > 0) and
+       (Result[0].UnitId = AHeadMid) and (Result[0].Sym = AHeadSym) then
       Exit;
-    Result := BareRoutineHeads(AId, ANameLower, LFrom);
-    LUsesHeads.Add(ANameLower, Result);
+    Result := nil;
+    Add(AHeadMid, AHeadSym);
+    LOverload := ChainSaysOverload(AHeadMid, AHeadSym);
+    if (AHeadMid = AId) and
+       (LM.Scopes[LM.Symbols[AHeadSym].Scope].Kind = sckImplementation) and
+       (LM.InterfaceScope <> NIL_SCOPE) then
+    begin
+      LS := LM.FindLocal(LM.InterfaceScope, ANameLower);
+      if (LS <> NIL_SYM) and (LS <> AHeadSym) and
+         (LM.Symbols[LS].Kind = skRoutine) then
+      begin
+        Add(AId, LS);
+        LOverload := LOverload or ChainSaysOverload(AId, LS);
+      end;
+    end;
+    if LOverload then
+    begin
+      // Where the search goes on from: past the head's unit - the used units
+      // after it in `uses` hold no routine of the name (the head is the last
+      // one's), the ones before it are searched next.
+      LSysUid := EnsureSystemUnit;
+      LSysInitUid := EnsureSysInitUnit;
+      LFrom := High(LM.UsesList);
+      if AHeadMid <> AId then
+      begin
+        LFrom := -1;
+        for LIdx := High(LM.UsesList) downto 0 do
+          if LM.UsesList[LIdx].UnitId = AHeadMid then
+          begin
+            LFrom := LIdx - 1;
+            Break;
+          end;
+      end;
+      for LIdx := LFrom downto 0 do
+      begin
+        LUid := LM.UsesList[LIdx].UnitId;
+        if (LUid < 0) or (LUid = AHeadMid) or (LUid = LSysUid) or
+           (LUid = LSysInitUid) or
+           (FModels[LUid].InterfaceScope = NIL_SCOPE) then
+          Continue;
+        if not Meet(LUid, FModels[LUid].Resolve(FModels[LUid].InterfaceScope,
+           ANameLower)) then
+        begin
+          LOverload := False;
+          Break;
+        end;
+      end;
+      if LOverload and (AHeadMid <> LSysInitUid) then
+      begin
+        if (AHeadMid <> LSysUid) and FindInSystemUnit(ANameLower, LUid, LS) then
+          LOverload := Meet(LUid, LS);
+        if LOverload and FindInSysInitUnit(ANameLower, LUid, LS) then
+          Meet(LUid, LS);
+      end;
+    end;
+    LUsesHeads.AddOrSetValue(ANameLower, Result);
   end;
 
   // Conservative per-candidate match score, mirroring the intra-unit
@@ -11255,6 +11380,95 @@ var
     // Aux 2 - not 1, `of object`, nor 0, a plain procedural type) with the
     // same parameter count and the same procedure/function kind (17.2.1).
     // True whenever a side cannot be read, so an unknown shape never rejects.
+    // The parameter symbols of a signature node, in declaration order (the
+    // scope SigShape counts them in); nil when it cannot be found.
+    function SigParams(AMid, ANode: Integer): TArray<Integer>;
+    var
+      LSM: TPasSemaModel;
+      LScope: Integer;
+      LList: TSemaSymList;
+    begin
+      Result := nil;
+      LSM := FModels[AMid];
+      if (ANode < 0) or (ANode > High(LSM.NodeScope)) then
+        Exit;
+      LScope := LSM.NodeScope[ANode];
+      if (LScope = NIL_SCOPE) or (LScope >= LSM.Scopes.Count) or
+         (LSM.Scopes[LScope].OwnerNode <> ANode) then
+        Exit;
+      LList := LSM.Scopes[LScope].Symbols;
+      for var LI := 0 to LList.Count - 1 do
+        if LSM.Symbols[LList[LI]].Kind = skParam then
+          Result := Result + [LList[LI]];
+    end;
+
+    // Each parameter's type, where both sides read one: a literal
+    // `procedure(X: string)` does not go to `reference to procedure(X:
+    // Integer)`, nor a `procedure(I: Int64)` to TProc<Integer> - the
+    // reference type's arguments applied (17.2.1; audit E3-30: same-arity
+    // reference overloads tied and the first declared won). A side that
+    // cannot be read, or a generic parameter, never rejects.
+    function ParamTypesFit(ALit: Integer; const ARef: TSemaXType;
+      ADef: Integer): Boolean;
+    var
+      LLitP, LRefP: TArray<Integer>;
+      LA, LB: TSemaXType;
+    begin
+      Result := True;
+      LLitP := SigParams(AId, ALit);
+      LRefP := SigParams(ARef.UnitId, ADef);
+      if Length(LLitP) <> Length(LRefP) then
+        Exit;
+      for var LI := 0 to High(LLitP) do
+      begin
+        LA := CanonTypeX(DeclTypeX(AId, LLitP[LI]));
+        LB := CanonTypeX(SubstX(DeclTypeX(ARef.UnitId, LRefP[LI]),
+          ARef.Inst, 0));
+        if XValid(LA) and XValid(LB) and
+           (FModels[LA.UnitId].Symbols[LA.Sym].Kind <> skGenericParam) and
+           (FModels[LB.UnitId].Symbols[LB.Sym].Kind <> skGenericParam) and
+           not XSameType(LA, LB) then
+          Exit(False);
+      end;
+    end;
+
+    // The parameter's category for the rejections. `TBytes = TArray<Byte>`
+    // canonicalizes to no category of its own (an alias of an instantiation
+    // in another unit), so a Byte or a record for it was scored assignable
+    // and `MS.Write(B[0], N)` / `Stream.Write(Header, SizeOf(Header))` took
+    // TStream's TBytes overload over the untyped one: an unknown category is
+    // asked whether it is a dynamic array (IsDynArrayTypeX).
+    function ParCatOf(const APar, ACanonPar: TSemaXType): TSemaTypeCat;
+    begin
+      Result := XCatOf(ACanonPar);
+      if (Result = tcUnknown) and IsDynArrayTypeX(APar) then
+        Result := tcArray;
+    end;
+
+    // Is AX a STATIC array (`array[0..N] of T`, `TByteArray`)? Read off its
+    // declaration after aliases: an nkArrayType with an index child.
+    function IsStaticArrayX(const AX: TSemaXType): Boolean;
+    var
+      LCanon: TSemaXType;
+      LDef, LFirst: Integer;
+      LTree: TPasTree;
+    begin
+      Result := False;
+      LCanon := CanonTypeX(AX);
+      if not XValid(LCanon) or (XCatOf(LCanon) <> tcArray) then
+        Exit;
+      LDef := TypeDefNodeOf(LCanon.UnitId, LCanon.Sym);
+      if LDef = NIL_NODE then
+        Exit;
+      LTree := FModels[LCanon.UnitId].Tree;
+      if (LTree.Nodes[LDef].Kind <> nkArrayType) or
+         (LTree.Nodes[LDef].Aux = 1) then
+        Exit;
+      LFirst := LTree.Nodes[LDef].FirstChild;
+      Result := (LFirst <> NIL_NODE) and
+        (LTree.Nodes[LFirst].NextSibling <> NIL_NODE);
+    end;
+
     function LiteralFits(ALit: Integer; const AX: TSemaXType): Boolean;
     var
       LCanon: TSemaXType;
@@ -11273,7 +11487,8 @@ var
         Exit(False);
       if SigShape(AId, ALit, LLitN, LLitF) and
          SigShape(LCanon.UnitId, LDef, LRefN, LRefF) then
-        Result := (LLitN = LRefN) and (LLitF = LRefF);
+        Result := (LLitN = LRefN) and (LLitF = LRefF) and
+          ParamTypesFit(ALit, LCanon, LDef);
     end;
 
   begin
@@ -11369,6 +11584,9 @@ var
           // already failed.
           var LCanonPar := CanonTypeX(LParX);
           var LCanonArg := CanonTypeX(LArgX);
+          var LParCat: TSemaTypeCat := tcUnknown;
+          if not XSameType(LCanonPar, LCanonArg) then
+            LParCat := ParCatOf(LParX, LCanonPar);
           if XSameType(LCanonPar, LCanonArg) then
             Inc(Result, 2)
           // Two DIFFERENT record types REJECT the candidate, and so does an
@@ -11385,16 +11603,23 @@ var
           // "nothing in the type's own chain fits, so this means an
           // INHERITED routine" fallback do its job. `nil` and untyped
           // arguments never reach here - they are tcNil/tcUnknown.
-          else if ArgStructRejects(XCatOf(LCanonPar), XCatOf(LCanonArg),
+          else if ArgStructRejects(LParCat, XCatOf(LCanonArg),
                   HasConversionOperator(LCanonPar),
                   HasConversionOperator(LCanonArg)) then
+            Exit(-1)
+          // A static array where a dynamic one is wanted: no conversion
+          // (`Image.Read(List^, N)` with List^ a static array takes TStream's
+          // untyped Read, not the TBytes one).
+          else if (LParCat = tcArray) and (XCatOf(LCanonArg) = tcArray) and
+                  IsDynArrayTypeX(LParX) and IsStaticArrayX(LArgX) then
             Exit(-1)
           // A scalar where a class, an interface or a class reference is
           // wanted (IsScalarToReference); an enumeration where another
           // ordinal, a Boolean, a Char or a float is wanted, or the reverse
           // (ScalarEnumMismatch: `Seek(0, soCurrent)` takes Seek(Int64;
-          // TSeekOrigin) over Seek(Longint; Word), local/probe-b31 O3).
-          else if ArgCatRejects(XCatOf(LCanonPar), XCatOf(LCanonArg)) then
+          // TSeekOrigin) over Seek(Longint; Word), local/probe-b31 O3); an
+          // ordinal for an array.
+          else if ArgCatRejects(LParCat, XCatOf(LCanonArg)) then
             Exit(-1)
           else if XAssignableX(LParX, LArgX) then
             Inc(Result, 1);
@@ -11439,7 +11664,7 @@ var
   // filter the selection runs again without it, as it always did: a generic
   // this level cannot see the parameters of must not make a call untyped.
   function SelectCallTarget(ACall, ACalleeNode, AHeadMid, AHeadSym,
-    ACtx: Integer; out ABestMid, ABestSym: Integer;
+    ACtx: Integer; out ABestMid, ABestSym, ABestCtx: Integer;
     out AAmbiguous: Boolean): Boolean;
   var
     LSeen: TArray<TPasExtRef>;   // count-tracked (LSeenCount), capacity slack
@@ -11484,7 +11709,11 @@ var
         (FModels[AMid].Tree.Nodes[LParent].Aux = 1);
     end;
 
-    procedure ConsiderChain(AMid, AHead: Integer);
+    // AFrame: the instantiation frame the chain's parameters are read in -
+    // the callee's for its own chain, the ancestor's for an inherited one
+    // (audit A3-22: `TDerived = class(TBase<TFoo>)` scored and typed
+    // TBase.Get in the descendant's empty frame, so its T stayed open).
+    procedure ConsiderChain(AMid, AHead, AFrame: Integer);
     var
       LCand, LScore, LIdx: Integer;
       LDup: Boolean;
@@ -11525,12 +11754,13 @@ var
           if LTypeQualified and not CallableOnType(AMid, LCand) then
             LScore := -1   // an instance method, reached through the TYPE
           else
-            LScore := ScoreCandidate(ACall, AMid, LCand, ACtx);
+            LScore := ScoreCandidate(ACall, AMid, LCand, AFrame);
           if (LScore >= 0) and (LScore > LBestScore) then
           begin
             LBestScore := LScore;
             ABestMid := AMid;
             ABestSym := LCand;
+            ABestCtx := AFrame;
             AAmbiguous := False;
           end
           else if (LScore >= 0) and (LScore = LBestScore) and
@@ -11541,15 +11771,59 @@ var
       end;
     end;
 
+    { The head's ancestors' sets of the name, nearest first, each in its own
+      frame. AFollow: the 6.3.1 rule - the head says `overload`, so the
+      nearest ancestor's set joins, and the next one while each joined set
+      says `overload` too; a set without it joins and ENDS the walk
+      (local/probe-b33 C1: TC0.Take(string) overload over TB0's plain
+      Take(Integer) over TA0.Take(Double) overload - `C0.Take(1)` calls
+      TB0's, `C0.Take(1.5)` is E2250). Without AFollow: the nearest
+      ancestor's set alone - the "nothing in the own chain fits" fallback. }
+    procedure ConsiderAncestors(AFollow: Boolean);
+    var
+      LOwnerX, LAnc: TSemaXType;
+      LOwner, LAMid, LASym, LACtx, LScope: Integer;
+      LName: string;
+    begin
+      LScope := FModels[AHeadMid].Symbols[AHeadSym].Scope;
+      if LScope = NIL_SCOPE then
+        Exit;
+      LOwner := FModels[AHeadMid].Scopes[LScope].StructSym;
+      if LOwner = NIL_SYM then
+        Exit;
+      LName := FModels[AHeadMid].Symbols[AHeadSym].NameLower;
+      LOwnerX := FrameOwnerX(AHeadMid, LOwner, ACtx);
+      for var LHop := 1 to 64 do
+      begin
+        LAnc := AncestorOfX(LOwnerX);
+        if not XValid(LAnc) or
+           not FindMemberX(AId, LAnc, LName, LAMid, LASym, LACtx) or
+           (FModels[LAMid].Symbols[LASym].Kind <> skRoutine) then
+          Exit;
+        ConsiderChain(LAMid, LASym, LACtx);
+        if not AFollow or not ChainSaysOverload(LAMid, LASym) then
+          Exit;
+        LScope := FModels[LAMid].Symbols[LASym].Scope;
+        if LScope = NIL_SCOPE then
+          Exit;
+        LOwner := FModels[LAMid].Scopes[LScope].StructSym;
+        if LOwner = NIL_SYM then
+          Exit;
+        LOwnerX := FrameOwnerX(LAMid, LOwner, LACtx);
+      end;
+    end;
+
   var
     LHeads: TArray<TPasExtRef>;
     LIdx, LQBase, LQMid, LQSym: Integer;
+    LMethodOverload: Boolean;
   begin
     LSeen := nil;
     LSeenCount := 0;
     LBestScore := -1;
     ABestMid := -1;
     ABestSym := NIL_SYM;
+    ABestCtx := ACtx;
     AAmbiguous := False;
     LTypeArgs := -1;
     if LM.Tree.Nodes[ACalleeNode].Kind = nkTypeArgs then
@@ -11578,21 +11852,32 @@ var
         TargetSym(LQBase, LQMid, LQSym) and
         (FModels[LQMid].Symbols[LQSym].Kind in [skType, skBuiltinType]);
     end;
+    // A method set saying `overload` spans the ancestry (6.3.1, audit E3-27:
+    // a derived `Take(const S: string); overload;` hid TBase's exact
+    // `Take(A: Integer); overload;` whenever its arity fit).
+    LMethodOverload :=
+      (FModels[AHeadMid].Symbols[AHeadSym].Scope <> NIL_SCOPE) and
+      (FModels[AHeadMid].Scopes[FModels[AHeadMid].Symbols[AHeadSym].Scope].
+       StructSym <> NIL_SYM) and ChainSaysOverload(AHeadMid, AHeadSym);
     // Two passes at most: the second, without the type-argument filter, only
     // when the first found nothing (see the comment above the function).
     for var LPass := 0 to 1 do
     begin
-      ConsiderChain(AHeadMid, AHeadSym);
-      // Merge used units' candidates only for a bare unit-level routine name -
-      // methods and nested routines have a closed candidate set (their scope).
+      ConsiderChain(AHeadMid, AHeadSym, ACtx);
+      // A bare unit-level routine name: the sets its search meets (see
+      // UnitSetHeads) - methods and nested routines have a closed candidate
+      // set (their scope, their ancestry).
       if (LM.Tree.Nodes[ACalleeNode].Kind = nkIdent) and
          (FModels[AHeadMid].Scopes[FModels[AHeadMid].Symbols[AHeadSym].Scope].
           Kind in [sckUnit, sckImplementation]) then
       begin
-        LHeads := UsesHeads(LM.Tree.NodeNameLower(ACalleeNode));
-        for LIdx := 0 to High(LHeads) do
-          ConsiderChain(LHeads[LIdx].UnitId, LHeads[LIdx].Sym);
+        LHeads := UnitSetHeads(AHeadMid, AHeadSym,
+          LM.Tree.NodeNameLower(ACalleeNode));
+        for LIdx := 1 to High(LHeads) do
+          ConsiderChain(LHeads[LIdx].UnitId, LHeads[LIdx].Sym, ACtx);
       end;
+      if LMethodOverload then
+        ConsiderAncestors(True)
       // Nothing in the type's OWN chain fits, so the call means an INHERITED
       // routine of that name - `TButton.Create(Self)`, where Vcl.StdCtrls'
       // TButton declares only a parameterless `class constructor Create` and
@@ -11606,22 +11891,8 @@ var
       // FindMemberX from the owner's ANCESTOR, which walks the whole ancestry
       // itself. A class constructor is not callable at all (15 sec. 15.1.5),
       // so this is also what stops the analyzer from believing it is.
-      if (ABestSym = NIL_SYM) and (FModels[AHeadMid].Symbols[AHeadSym].Scope <>
-         NIL_SCOPE) then
-      begin
-        LQBase := FModels[AHeadMid].Scopes[
-          FModels[AHeadMid].Symbols[AHeadSym].Scope].StructSym;
-        if LQBase <> NIL_SYM then
-        begin
-          var LAnc := AncestorOfX(XPlain(AHeadMid, LQBase));
-          var LAMid, LASym, LACtx: Integer;
-          if XValid(LAnc) and FindMemberX(AId, LAnc,
-               FModels[AHeadMid].Symbols[AHeadSym].NameLower,
-               LAMid, LASym, LACtx) and
-             (FModels[LAMid].Symbols[LASym].Kind = skRoutine) then
-            ConsiderChain(LAMid, LASym);
-        end;
-      end;
+      else if ABestSym = NIL_SYM then
+        ConsiderAncestors(False);
       if (ABestSym <> NIL_SYM) or (LTypeArgs < 0) then
         Break;
       LTypeArgs := -1;
@@ -11673,11 +11944,20 @@ var
         Exit;
       if FModels[LMemMid].Symbols[LMemSym].Kind <> skRoutine then
         Exit;
-      if Length(GenericParamIdents(LMemMid, LMemSym)) = LWanted then
+      // The ancestor's whole set, not its head: `GetData: Pointer;
+      // overload;` declared before `GetData<T>: T; overload;` hid the
+      // generic one (audit B3-34).
+      var LCand := LMemSym;
+      while (LCand <> NIL_SYM) and
+            (FModels[LMemMid].Symbols[LCand].Kind = skRoutine) do
       begin
-        AMid := LMemMid;
-        ASym := LMemSym;
-        Exit;
+        if Length(GenericParamIdents(LMemMid, LCand)) = LWanted then
+        begin
+          AMid := LMemMid;
+          ASym := LCand;
+          Exit;
+        end;
+        LCand := FModels[LMemMid].Symbols[LCand].NextOverload;
       end;
     end;
   end;
@@ -12208,7 +12488,7 @@ var
   procedure Walk(N: Integer);
   var
     LChild, LBase, LName, LSym, LMemMid, LMemSym, LCtx: Integer;
-    LBestMid, LBestSym, LMemCtx, LIdxMid, LIdxSym: Integer;
+    LBestMid, LBestSym, LBestCtx, LMemCtx, LIdxMid, LIdxSym: Integer;
     LIMid, LISym, LICtx: Integer;
     LAmbiguous: Boolean;
     LExt: TPasExtRef;
@@ -12734,8 +13014,11 @@ var
                   if LM.Tree.Nodes[LBase].Kind = nkTypeArgs then
                     RetargetToGeneric(LBase, LMemMid, LMemSym);
                   if SelectCallTarget(N, LBase, LMemMid, LMemSym, LCtx,
-                    LBestMid, LBestSym, LAmbiguous) then
+                    LBestMid, LBestSym, LBestCtx, LAmbiguous) then
                   begin
+                    // The winner's own frame: an inherited overload's is its
+                    // ancestor's (audit A3-22).
+                    LCtx := LBestCtx;
                     if LAmbiguous then
                     begin
                       if LAmbig = nil then
