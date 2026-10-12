@@ -127,6 +127,13 @@ type
 function IsOneCharLiteral(const AText: string): Boolean;
 function IsScalarToReference(ADst, ASrc: TSemaTypeCat): Boolean;
 
+{ ScalarEnumMismatch: an enumeration argument for an integer, float,
+  Boolean or Char parameter, or one of those for an enumeration parameter -
+  no implicit conversion either way, so the candidate is rejected (6.3.1;
+  dcc64 37.0, local/probe-b31 O3: `Seek(0, soCurrent)` against
+  Seek(Longint; Word) and Seek(Int64; TSeekOrigin)). }
+function ScalarEnumMismatch(ADst, ASrc: TSemaTypeCat): Boolean;
+
 { A `[...]` argument (nkSetCtor: a set constructor, an open array constructor
   or a dynamic array constant, B.9) is a set or an array and nothing else: a
   parameter of these categories cannot take it, so the candidate is rejected
@@ -203,6 +210,14 @@ function IsScalarToReference(ADst, ASrc: TSemaTypeCat): Boolean;
 begin
   Result := (ASrc in [tcInteger, tcFloat, tcBoolean, tcChar, tcString]) and
     (ADst in [tcClass, tcInterface, tcClassOf]);
+end;
+
+function ScalarEnumMismatch(ADst, ASrc: TSemaTypeCat): Boolean;
+const
+  CScalar = [tcInteger, tcFloat, tcBoolean, tcChar];
+begin
+  Result := ((ASrc = tcEnum) and (ADst in CScalar)) or
+    ((ADst = tcEnum) and (ASrc in CScalar));
 end;
 
 function IsBracketToScalar(ADst: TSemaTypeCat): Boolean;
@@ -1040,10 +1055,22 @@ begin
     if (LAt <> NIL_SYM) and (LPt <> NIL_SYM) then
       // A one-character literal is typed `string` here but is a Char
       // constant (see IsOneCharLiteral).
+      // `Char` fits it best, `AnsiChar` below a string parameter (the
+      // project scorer's rule, local/probe-b31 O2).
       if (Kind(LArg) = nkStrLit) and (CatOf(LPt) = tcChar) and
          IsOneCharLiteral(Txt(LArg)) then
-        Inc(Result, 3)
-      else if LAt = LPt then
+      begin
+        if PasBuiltinIsChar(M, LPt, PlatformInfo(FPlatform).Is64Bit) then
+          Inc(Result, 3)
+        else
+          Inc(Result, 1);
+      end
+      // One type under two seeded names (Integer / LongInt, Char /
+      // WideChar, ...) is an exact match - PasBuiltinCanonSym, the table
+      // the project scorer reads (audit A3-17).
+      else if (LAt = LPt) or
+         (PasBuiltinCanonSym(M, LAt, PlatformInfo(FPlatform).Is64Bit) =
+          PasBuiltinCanonSym(M, LPt, PlatformInfo(FPlatform).Is64Bit)) then
         Inc(Result, 2)
       else if IsScalarToReference(CatOf(LPt), CatOf(LAt)) then
         Exit(-1)

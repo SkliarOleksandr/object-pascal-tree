@@ -232,10 +232,17 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   the first candidate. A tie between candidates with DIFFERENT result types
   is recorded (CrossType's LAmbig) and refuses inline-var inference from the
   call, but the call node itself still carries the first candidate's type.
-  Two corners are decided rather than scored: a scalar argument (integer,
+  A few corners are decided rather than scored: a scalar argument (integer,
   float, Boolean, Char, string) rejects a class, interface or class-reference
-  parameter, and a one-character literal - a Char constant - scores a Char
-  parameter above the string one (both passes type literals `string`). A
+  parameter, an enumeration and another scalar reject each other, and a
+  one-character literal - a Char constant - scores a Char parameter above a
+  string one and a string one above AnsiChar (both passes type literals
+  `string`). One type under two seeded names (Integer / LongInt, Char /
+  WideChar, PChar / PWideChar, a native integer and its sized twin) is an
+  exact match. Other non-assignable scalar pairs (a Boolean argument for a
+  Cardinal parameter) are scored 0, not rejected, and a helper's overloads
+  are not merged with the extended type's own (`TGUID.Create` from
+  TGUIDHelper binds a helper overload, not System's). A
   distinct alias (`TId = type Integer`) is still only "assignable" from its
   base, so it wins over an overload the argument fits no better, not over
   an exact one. A `[...]` argument (set, open array or dynamic array

@@ -7802,6 +7802,28 @@ begin
   LInst.UnitId := ABase.UnitId;
   LInst.Sym := ABase.Sym;
   LInst.Args := AArgs;
+  // A builtin argument is keyed by its alias group's seed in the BASE's
+  // model: seeds are identical in every model, so `TPairR<Integer, Integer>`
+  // written in the callee's unit and in the caller's - or spelled with
+  // LongInt - is one instance, one type (audit A3-21: two indexes, and the
+  // overload taking the pair was rejected as a different record). A copy,
+  // and only when an argument moves: the caller's array is shared.
+  for var LIdx := 0 to High(AArgs) do
+    if XValid(AArgs[LIdx]) and (AArgs[LIdx].Inst = NIL_INST) and
+       (sfBuiltin in FModels[AArgs[LIdx].UnitId].Symbols[
+         AArgs[LIdx].Sym].Flags) then
+    begin
+      var LCanon := PasBuiltinCanonSym(FModels[AArgs[LIdx].UnitId],
+        AArgs[LIdx].Sym, FInfo.Is64Bit);
+      if (AArgs[LIdx].UnitId <> ABase.UnitId) or
+         (AArgs[LIdx].Sym <> LCanon) then
+      begin
+        if Pointer(LInst.Args) = Pointer(AArgs) then
+          LInst.Args := Copy(AArgs);
+        LInst.Args[LIdx].UnitId := ABase.UnitId;
+        LInst.Args[LIdx].Sym := LCanon;
+      end;
+    end;
   TMonitor.Enter(FInstances);
   try
     if FInstKeys.TryGetValue(LInst, Result) then
@@ -10513,12 +10535,27 @@ end;
 // model (SeedSystemScope runs first, deterministically), so two references to
 // the builtin Integer compare equal even when they live in different models -
 // without this, an exact arg/param match across units would never register.
+// And two seeds of one alias group are one type (PasBuiltinCanonSym): an
+// Integer argument is an exact match for a `LongInt` parameter, a Char for a
+// WideChar, a PChar for a PWideChar, a Win64 NativeInt for an Int64 - dcc
+// picks that overload over a merely assignable one in either declaration
+// order (6.3.1, local/probe-b31 O1), where the symbol test tied them and the
+// first declared won: every `CharInSet(C, ...)` and `StrLen(P)` of a Unicode
+// code base bound the AnsiChar / PAnsiChar overload (audit A3-17 = E3-24).
 function TPasSemaProject.XSameType(const A, B: TSemaXType): Boolean;
+var
+  LBuiltinA, LBuiltinB: Boolean;
 begin
-  Result := XValid(A) and XValid(B) and (A.Sym = B.Sym) and
-    (A.Inst = B.Inst) and ((A.UnitId = B.UnitId) or
-    ((sfBuiltin in FModels[A.UnitId].Symbols[A.Sym].Flags) and
-     (sfBuiltin in FModels[B.UnitId].Symbols[B.Sym].Flags)));
+  if not XValid(A) or not XValid(B) or (A.Inst <> B.Inst) then
+    Exit(False);
+  if (A.Sym = B.Sym) and (A.UnitId = B.UnitId) then
+    Exit(True);
+  LBuiltinA := sfBuiltin in FModels[A.UnitId].Symbols[A.Sym].Flags;
+  LBuiltinB := sfBuiltin in FModels[B.UnitId].Symbols[B.Sym].Flags;
+  Result := LBuiltinA and LBuiltinB and
+    ((A.Sym = B.Sym) or
+     (PasBuiltinCanonSym(FModels[A.UnitId], A.Sym, FInfo.Is64Bit) =
+      PasBuiltinCanonSym(FModels[B.UnitId], B.Sym, FInfo.Is64Bit)));
 end;
 
 // Cross-model mirror of TPasSemaTyper.Assignable: conservative, rejects only
@@ -11303,11 +11340,22 @@ var
          IsBracketToScalar(XCatOf(CanonTypeX(LParX))) then
         Exit(-1);
       if XValid(LArgX) and XValid(LParX) then
-        // A one-character literal is a Char constant (IsOneCharLiteral).
+        // A one-character literal is a Char constant (IsOneCharLiteral): a
+        // `Char` parameter fits it best, a string one next (the literal's
+        // own type here), an AnsiChar one least - 'a' takes F(WideChar)
+        // over F(AnsiChar) and F(string) over F(AnsiChar), either order
+        // (local/probe-b31 O2).
         if (LM.Tree.Nodes[LCore].Kind = nkStrLit) and
            (XCatOf(CanonTypeX(LParX)) = tcChar) and
            IsOneCharLiteral(LM.Tree.NodeText(LCore)) then
-          Inc(Result, 3)
+        begin
+          var LCharX := CanonTypeX(LParX);
+          if PasBuiltinIsChar(FModels[LCharX.UnitId], LCharX.Sym,
+             FInfo.Is64Bit) then
+            Inc(Result, 3)
+          else
+            Inc(Result, 1);
+        end
         else if XSameType(LParX, LArgX) then
           Inc(Result, 2)
         else
@@ -11357,6 +11405,14 @@ var
           // A scalar where a class, an interface or a class reference is
           // wanted (IsScalarToReference).
           else if IsScalarToReference(XCatOf(LCanonPar), XCatOf(LCanonArg)) then
+            Exit(-1)
+          // An enumeration where another ordinal, a Boolean, a Char or a
+          // float is wanted, or one of those where an enumeration is: no
+          // implicit conversion exists either way. `Seek(0, soCurrent)` tied
+          // TStream.Seek(Longint; Word) with Seek(Int64; TSeekOrigin) once
+          // the 0 was an exact Longint, and the first declared won; dcc
+          // takes the TSeekOrigin one (local/probe-b31 O3).
+          else if ScalarEnumMismatch(XCatOf(LCanonPar), XCatOf(LCanonArg)) then
             Exit(-1)
           else if XAssignableX(LParX, LArgX) then
             Inc(Result, 1);
@@ -14927,11 +14983,19 @@ begin
     LM := FModels[LCur.UnitId];
     if LM.Symbols[LCur.Sym].Kind = skBuiltinType then
     begin
-      // A string indexes to Char (ch.05: `S[I]`); nothing else builtin does.
+      // A string indexes to its character type (7.2.1: `S[I]`); nothing
+      // else builtin indexes. An AnsiString's - and a ShortString's - is
+      // AnsiChar: `IsLeadChar(S[Index])` on an AnsiString calls the AnsiChar
+      // overload (local/probe-b31 S1), which only the declaration order
+      // picked while the two character types tied (audit B31).
       if XCatOf(LCur) = tcString then
       begin
         Dec(LRemaining);
-        LCur := BuiltinX(AId, 'char');
+        if (LM.Symbols[LCur.Sym].NameLower = 'ansistring') or
+           (LM.Symbols[LCur.Sym].NameLower = 'shortstring') then
+          LCur := BuiltinX(AId, 'ansichar')
+        else
+          LCur := BuiltinX(AId, 'char');
         Continue;
       end;
       Exit(XNil);
@@ -14947,13 +15011,22 @@ begin
     case LM.Tree.Nodes[LDef].Kind of
       nkStringType:
         begin
+          // `string[N]`, a ShortString: AnsiChar (S1).
           Dec(LRemaining);
-          LCur := BuiltinX(AId, 'char');
+          LCur := BuiltinX(AId, 'ansichar');
         end;
       nkArrayType:
         LCur := PeelArrayNode(LCur.UnitId, LDef, LCur.Inst);
       nkIdent, nkMember, nkTypeArgs:
         LCur := SubstX(ResolveTypeExpr(LCur.UnitId, LDef), LCur.Inst, 0);
+      // `RawByteString = type AnsiString($ffff)`, `UTF8String = type
+      // AnsiString(65001)`: the code-page form reads as a call of the string
+      // type's name, and indexes as that string type (S1: AnsiChar).
+      nkCall:
+        if LM.Tree.Nodes[LDef].FirstChild = NIL_NODE then
+          Exit(XNil)
+        else
+          LCur := ResolveTypeExpr(LCur.UnitId, LM.Tree.Nodes[LDef].FirstChild);
       nkClassType, nkRecordType, nkInterfaceType, nkObjectType:
         begin
           // `L[I]` over a default array property: the property's type, closed

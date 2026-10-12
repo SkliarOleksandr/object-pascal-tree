@@ -67,10 +67,15 @@ function PasBuiltinSignature(const ANameLower: string;
 
   dcc32 37.0-probed with a `record helper for Cardinal`: it applies to values
   declared `Cardinal`, `LongWord` and `UInt32` alike, and is `E2671` on an
-  `Integer` - so this is identity, not assignment compatibility, and the four
+  `Integer` - so this is identity, not assignment compatibility, and the five
   groups below are exactly the ones a helper crosses. The same probe run for
   `Integer`/`LongInt`/`Int32`, `Char`/`WideChar` and `string`/`UnicodeString`;
   `Word` against the Integer helper is the negative that pins the boundary.
+  `PChar`/`PWideChar` too: of a helper for each, the later is the active one
+  for both (audit B2-14). Overload resolution takes the same identity - an
+  argument spelled with one name is an EXACT match for a parameter spelled
+  with the other (6.3.1; dcc64 37.0, local/probe-b31 O1) - through
+  PasBuiltinCanonSym.
 
   `NativeInt` and `NativeUInt` join the group of the integer of their size
   (APointerBytes): dcc 37.0 defines WEAK_NATIVEINT on every target - a weak
@@ -81,6 +86,24 @@ function PasBuiltinSignature(const ANameLower: string;
   UInt64's on dcc64 (probed, local/fidelity/x-f20/probes/helper). }
 function PasBuiltinAliasGroup(const ANameLower: string;
   APointerBytes: Integer): TArray<string>;
+
+{ One id per seeded TYPE: the seed index of the first name of ASym's alias
+  group (PasBuiltinAliasGroup on the target's pointer size) - `LongInt`'s is
+  `Integer`'s, `WideChar`'s `Char`'s, a 64-bit `NativeInt`'s `Int64`'s - and
+  ASym itself for every other symbol. AModel's seeds sit at the template's
+  indexes (SeedSystemScope adopts them into an empty arena, which is why
+  XSameType already compares two models' seeds by index); a symbol that is
+  not a seed is answered unchanged. The ONE table both overload scorers, the
+  instance key and XSameType read, so the two typers cannot drift. }
+function PasBuiltinCanonSym(AModel: TPasSemaModel; ASym: Integer;
+  AIs64: Boolean): Integer;
+
+{ Is ASym the seeded `Char` (or `WideChar`) - the type of a one-character
+  literal, which an overload taking `Char` fits better than one taking a
+  string, and one taking `AnsiChar` worse (dcc64 37.0, local/probe-b31 O2:
+  'a' picks WideChar over AnsiChar, string over AnsiChar). }
+function PasBuiltinIsChar(AModel: TPasSemaModel; ASym: Integer;
+  AIs64: Boolean): Boolean;
 
 type
   { How a value-returning intrinsic's RESULT type is decided (4.11). Every
@@ -163,11 +186,12 @@ function PasBuiltinAliasGroup(const ANameLower: string;
 const
   // Only the SEEDED names need to be here: a real declaration like System.pas's
   // `UInt32 = Cardinal` is an alias the type walk already follows.
-  CGroups: array[0..3] of TArray<string> = (
+  CGroups: array[0..4] of TArray<string> = (
     ['integer', 'longint'],
     ['cardinal', 'longword'],
     ['char', 'widechar'],
-    ['string', 'unicodestring']);
+    ['string', 'unicodestring'],
+    ['pchar', 'pwidechar']);
   // The weak native aliases by the target's pointer size, looked up first:
   // on a 32-bit target they extend the first two groups above.
   CNative: array[Boolean, 0..1] of TArray<string> = (
@@ -392,11 +416,31 @@ type
   TSeedTemplate = record
     Syms: TArray<TSemaSymbol>;
     Names: TSemaNames;                     // names + order, immutable after init
+    Canon: TArray<Integer>;                // seed index -> PasBuiltinCanonSym
+    CharSym: Integer;                      // the seeded `Char`
   end;
 
 var
   GSeedTemplates: array[Boolean] of TSeedTemplate;   // by Is64Bit
   GSigIndex: TDictionary<string, Integer>;  // NameLower -> CBuiltinSigs index
+
+function PasBuiltinCanonSym(AModel: TPasSemaModel; ASym: Integer;
+  AIs64: Boolean): Integer;
+begin
+  Result := ASym;
+  if (ASym >= 0) and (ASym <= High(GSeedTemplates[AIs64].Canon)) and
+     (ASym < AModel.SymCount) and
+     (sfBuiltin in AModel.Symbols[ASym].Flags) then
+    Result := GSeedTemplates[AIs64].Canon[ASym];
+end;
+
+function PasBuiltinIsChar(AModel: TPasSemaModel; ASym: Integer;
+  AIs64: Boolean): Boolean;
+begin
+  Result := (ASym >= 0) and (ASym < AModel.SymCount) and
+    (sfBuiltin in AModel.Symbols[ASym].Flags) and
+    (PasBuiltinCanonSym(AModel, ASym, AIs64) = GSeedTemplates[AIs64].CharSym);
+end;
 
 function PasBuiltinSignature(const ANameLower: string;
   out ASig: TPasBuiltinSig): Boolean;
@@ -444,8 +488,9 @@ procedure BuildSeedTemplates;
 var
   LIs64: Boolean;
   LModel: TPasSemaModel;
-  LScope: Integer;
+  LScope, LSym, LHead: Integer;
   LPlat: TPasPlatform;
+  LGroup: TArray<string>;
 begin
   for LIs64 := False to True do
   begin
@@ -462,6 +507,23 @@ begin
       // must never find spare capacity it could write into in place.
       GSeedTemplates[LIs64].Names := LModel.Scopes[LScope].Names;
       GSeedTemplates[LIs64].Names.MakeUnique;
+      // The alias groups' heads, by index.
+      SetLength(GSeedTemplates[LIs64].Canon, LModel.SymCount);
+      for LSym := 0 to LModel.SymCount - 1 do
+      begin
+        GSeedTemplates[LIs64].Canon[LSym] := LSym;
+        if LModel.Symbols[LSym].Kind <> skBuiltinType then
+          Continue;
+        LGroup := PasBuiltinAliasGroup(LModel.Symbols[LSym].NameLower,
+          PlatformInfo(LPlat).PointerBytes);
+        if Length(LGroup) < 2 then
+          Continue;
+        LHead := LModel.FindLocal(LScope, LGroup[0]);
+        if (LHead <> NIL_SYM) and
+           (LModel.Symbols[LHead].Kind = skBuiltinType) then
+          GSeedTemplates[LIs64].Canon[LSym] := LHead;
+      end;
+      GSeedTemplates[LIs64].CharSym := LModel.FindLocal(LScope, 'char');
     finally
       LModel.Free;
     end;

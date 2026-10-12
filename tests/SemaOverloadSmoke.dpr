@@ -170,6 +170,51 @@ const
     '  Foo(1 +, 2);'#10 +      // same
     'end;'#10'end.'#10;
 
+  { One type under two seeded names is an EXACT match (6.3.1, dcc64 37.0,
+    local/probe-b31 O1/O2): the AnsiChar / AnsiString / Int64 / PAnsiChar
+    overload declared FIRST took the tie before, and the call typed TRA. A
+    one-character literal fits Char best, a string next, AnsiChar least. }
+  SRC_IDENT =
+    'unit U;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    'function F(C: AnsiChar): TRA; overload;'#10 +
+    'function F(C: WideChar): TRW; overload;'#10 +
+    'function G(const S: AnsiString): TRA; overload;'#10 +
+    'function G(const S: UnicodeString): TRW; overload;'#10 +
+    'function H(A: Int64): TRA; overload;'#10 +
+    'function H(A: LongInt): TRW; overload;'#10 +
+    'function P(A: PAnsiChar): TRA; overload;'#10 +
+    'function P(A: PWideChar): TRW; overload;'#10 +
+    'function K(C: AnsiChar): TRA; overload;'#10 +
+    'function K(const S: string): TRW; overload;'#10 +
+    'function R(C: WideChar): TRW; overload;'#10 +
+    'function R(C: AnsiChar): TRA; overload;'#10 +
+    'implementation'#10 +
+    'function F(C: AnsiChar): TRA; begin end;'#10 +
+    'function F(C: WideChar): TRW; begin end;'#10 +
+    'function G(const S: AnsiString): TRA; begin end;'#10 +
+    'function G(const S: UnicodeString): TRW; begin end;'#10 +
+    'function H(A: Int64): TRA; begin end;'#10 +
+    'function H(A: LongInt): TRW; begin end;'#10 +
+    'function P(A: PAnsiChar): TRA; begin end;'#10 +
+    'function P(A: PWideChar): TRW; begin end;'#10 +
+    'function K(C: AnsiChar): TRA; begin end;'#10 +
+    'function K(const S: string): TRW; begin end;'#10 +
+    'function R(C: WideChar): TRW; begin end;'#10 +
+    'function R(C: AnsiChar): TRA; begin end;'#10 +
+    'procedure Test;'#10 +
+    'var C: Char; S: string; I: Integer; PC: PChar; X: Integer;'#10 +
+    'begin'#10 +
+    '  X := F(C).W;'#10 +
+    '  X := F(''a'').W;'#10 +
+    '  X := G(S).W;'#10 +
+    '  X := H(I).W;'#10 +
+    '  X := P(PC).W;'#10 +
+    '  X := K(''a'').W;'#10 +
+    '  X := R(''a'').W;'#10 +
+    'end;'#10'end.'#10;
+
 begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN32']);
@@ -214,6 +259,13 @@ begin
   Ok('trailing comma: P(1, 2,) without a default and Q(1, 2, 3,) are E2034 x2',
     DiagCount('E2034') = 2);
   Ok('trailing comma: no E2035 anywhere', DiagCount('E2035') = 0);
+  GModel.Free;
+
+  Analyze(SRC_IDENT);
+  for var LName in ['F', 'G', 'H', 'P', 'K', 'R'] do
+    Ok('builtin identity: ' + LName + ' binds the TRW overload',
+      HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
+  Ok('builtin identity: no E2003', DiagCount('E2003') = 0);
   GModel.Free;
 
   if GCounter.Finish('SemaOverloadSmoke') then

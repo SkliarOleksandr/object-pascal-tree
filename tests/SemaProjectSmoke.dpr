@@ -6147,6 +6147,100 @@ begin
   end;
 end;
 
+// A3-17 = E3-24, B2-14, A3-21: one type under two seeded names is one type -
+// an exact overload match across units (Char / WideChar, Integer / LongInt,
+// string / UnicodeString, a Win64 NativeInt / Int64), a helper for PChar is
+// a PWideChar's, and one instantiation over builtin arguments written in two
+// units is one record (6.3.1, 15.3.3; dcc64 37.0, local/probe-b31 O1, O2).
+procedure TestBuiltinIdentity;
+var
+  LDir: string;
+begin
+  LDir := FreshDir('pastree_sema_builtinid');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    '  RawByteString = type AnsiString($ffff);'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UBi.pas'),
+    'unit UBi;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TPairR<A, B> = record X: A; Y: B; end;'#10 +
+    '  TSO = (soB, soC);'#10 +
+    'function Sk(O: Longint; W: Word): TRA; overload;'#10 +
+    'function Sk(const O: Int64; W: TSO): TRW; overload;'#10 +
+    'function F(C: AnsiChar): TRA; overload;'#10 +
+    'function F(C: WideChar): TRW; overload;'#10 +
+    'function H(A: Int64): TRA; overload;'#10 +
+    'function H(A: LongInt): TRW; overload;'#10 +
+    'function N(A: Integer): TRA; overload;'#10 +
+    'function N(A: Int64): TRW; overload;'#10 +
+    'function Take(I: Integer): TRA; overload;'#10 +
+    'function Take(const P: TPairR<Integer, Integer>): TRW; overload;'#10 +
+    'function S(const X: AnsiString): TRA; overload;'#10 +
+    'function S(const X: UnicodeString): TRW; overload;'#10 +
+    'function IL(C: WideChar): TRA; overload;'#10 +
+    'function IL(C: AnsiChar): TRW; overload;'#10 +
+    'implementation'#10 +
+    'function F(C: AnsiChar): TRA; begin end;'#10 +
+    'function F(C: WideChar): TRW; begin end;'#10 +
+    'function H(A: Int64): TRA; begin end;'#10 +
+    'function H(A: LongInt): TRW; begin end;'#10 +
+    'function N(A: Integer): TRA; begin end;'#10 +
+    'function N(A: Int64): TRW; begin end;'#10 +
+    'function Take(I: Integer): TRA; begin end;'#10 +
+    'function Take(const P: TPairR<Integer, Integer>): TRW; begin end;'#10 +
+    'function S(const X: AnsiString): TRA; begin end;'#10 +
+    'function S(const X: UnicodeString): TRW; begin end;'#10 +
+    'function IL(C: WideChar): TRA; begin end;'#10 +
+    'function IL(C: AnsiChar): TRW; begin end;'#10 +
+    'function Sk(O: Longint; W: Word): TRA; begin end;'#10 +
+    'function Sk(const O: Int64; W: TSO): TRW; begin end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'BiP.dpr'),
+    'program BiP;'#10'uses UBi;'#10'type'#10 +
+    '  TPH = record helper for PWideChar'#10 +
+    '    function PMark: Integer;'#10'  end;'#10 +
+    '  TCH = record helper for PChar'#10 +
+    '    function CMark: Integer;'#10'  end;'#10 +
+    'function TPH.PMark: Integer; begin Result := 0; end;'#10 +
+    'function TCH.CMark: Integer; begin Result := 0; end;'#10 +
+    'var C: Char; I: Integer; NI: NativeInt; St: string; W: PWideChar;'#10 +
+    '  PQ: TPairR<Integer, Integer>; X: Integer;'#10 +
+    '  AS1: AnsiString; SS: ShortString; RB: RawByteString;'#10 +
+    'begin'#10 +
+    '  X := F(C).W;'#10 +
+    '  X := F(''a'').W;'#10 +
+    '  X := H(I).W;'#10 +
+    '  X := N(NI).W;'#10 +
+    '  X := Take(PQ).W;'#10 +
+    '  X := S(St).W;'#10 +
+    '  X := W.CMark;'#10 +
+    '  X := IL(AS1[1]).W;'#10 +
+    '  X := IL(SS[1]).W;'#10 +
+    '  X := IL(RB[1]).W;'#10 +
+    '  X := Sk(0, soC).W;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'BiP.dpr'));
+    Ok('builtinid: every call binds the identical-type overload, the' +
+      ' PChar helper answers a PWideChar - no E2003 [' +
+      IntToStr(DiagCount(ModelByName('bip'), 'E2003')) + ']',
+      DiagCount(ModelByName('bip'), 'E2003') = 0);
+    Ok('builtinid: the ten .W are TRW''s - an AnsiString''s, a' +
+      ' ShortString''s and a RawByteString''s element is AnsiChar, an' +
+      ' enumeration rejects a Word parameter [' +
+      IntToStr(CrossRefCountInUnit(ModelByName('bip'), 'W', 'W', 'ubi')) + ']',
+      CrossRefCountInUnit(ModelByName('bip'), 'W', 'W', 'ubi') = 10);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestDeclAfterUnit;
 const
   UFA =
@@ -11077,11 +11171,15 @@ begin
         if (LInst.UnitId = LGa) and
            (GProj.Model(LGa).Symbols[LInst.Sym].NameLower <> ABoxName) then
           Exit(False);
+        // A builtin argument (TBox<Integer>) is keyed in the base's model
+        // since 0.98.2 (one instance per type, whichever unit wrote it):
+        // a seed, at the same index in every model.
         for var LArg := 0 to High(LInst.Args) do
           if LInst.Args[LArg].UnitId = LGa then
           begin
             var LArgName := GProj.Model(LGa).Symbols[LInst.Args[LArg].Sym].NameLower;
-            if (LArgName <> 'tplain') and (LArgName <> 'tlocal') then
+            if (LArgName <> 'tplain') and (LArgName <> 'tlocal') and
+               (LArgName <> 'integer') then
               Exit(False);
           end;
       end;
@@ -12068,6 +12166,7 @@ begin
   TestSystemOverloadJoins;
   TestAttributeSuffixFirst;
   TestHelperVisibility;
+  TestBuiltinIdentity;
   TestOracleDepth;
   TestInstanceSize;
   TestOperatorChains;

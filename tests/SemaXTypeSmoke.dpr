@@ -2190,11 +2190,9 @@ begin
     // TPairWrap<string,Boolean>, XV's TWrap<Double>. The with-over-generic
     // fixtures add TPool<Integer>, an open TWrap<T> per DISTINCT parameter
     // symbol (TPool's T and TWrap's own T are different types - two
-    // entries), and a second TWrap<Integer>: XR's Integer arg is ITS model's
-    // builtin symbol, not XU's, so the key differs - dedup is per-model for
-    // builtin args by construction (each model seeds its own builtins; see
-    // PasTree.Sema.Builtins). Cross-model canonicalization of builtin args
-    // would shrink this to 8; until then the count documents the behavior.
+    // entries). XR's TWrap<Integer> is XU's one: a builtin argument is keyed
+    // in the base's model since 0.98.2 (Instantiate, audit A3-21) - before,
+    // XR's Integer was its own model's seed and the key differed.
     // The table also holds GENERIC METHOD frames now (Max<Integer>,
     // Max<string>, Wrap<Integer>, Pair<Integer,string>, Take<Integer> -
     // keyed on the ROUTINE symbol, substitution frames only, never types;
@@ -2203,9 +2201,8 @@ begin
     // Two further known-harmless duplications, both from per-symbol identity:
     // an OPEN TBox<T> appears twice because a method's interface declaration
     // and its implementation each declare their own T symbol, so the keys
-    // differ; and TWrap<Integer> appears twice for the builtin-arg reason
-    // above. Neither affects typing - same text, same members - so the count
-    // is documented rather than deduplicated.
+    // differ. It does not affect typing - same text, same members - so the
+    // count is documented rather than deduplicated.
     // 19 since GY: the two calls written `Cast<TThing>` / `Fetch<TThing>` add
     // one EXPLICIT method frame each (ExplicitMethodFrame keys them on the
     // routine symbol, exactly as the inferred ones are). 20 since NS.Test:
@@ -2228,8 +2225,8 @@ begin
     // open TOpGen<T> twice (interface and implementation T, as above); 48
     // with XGR, whose open IGrSpec<T> and TGrSpec<T> are written in the
     // declarations and in each implementation heading (8), and TGrSpec<U>
-    // in TGrBox.Make's two headings.
-    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '48');
+    // in TGrBox.Make's two headings; 47 since 0.98.2 (one TWrap<Integer>).
+    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '47');
 
     // ---- Cross-unit overload selection by ARGUMENT TYPES ----
     LV := ModelByName('xv');
