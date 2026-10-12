@@ -265,6 +265,12 @@ type
     // Set by the walk when it laid out a pskOpenMin parameter: the answer is
     // a minimum. Only TypeSizeOf / TypeInstanceSize bind one, and read it.
     FOracleMinimum: Boolean;
+    // EnsureHydrated's failures so far, and the model of the last one: a
+    // caller that must be all-or-nothing (a rename plan) compares the count
+    // before and after, since every read that skips an unreadable model
+    // answers "no hit there" (audit B2-23).
+    FHydrateFailures: Integer;
+    FLastHydrateFailure: Integer;
     FFiles: TList<string>;                 // parallel to FModels (full path)
     // Parallel to FModels: each model's pipeline status. Kept in lockstep by
     // RegisterModel (the only place a model is appended). The synchronous
@@ -1559,6 +1565,13 @@ type
       from the host's nav/completion thread only, like every other read of a
       finished project. }
     function EnsureHydrated(AMid: Integer): Boolean;
+    { How many EnsureHydrated calls have failed (a demoted model whose file
+      changed on disk or cannot be read), and the model of the last one (-1
+      before any). A read over the closure skips such a model and says
+      nothing; a caller that must not be partial - TPasNavigator.PlanRename
+      - compares the count before and after its work. }
+    property HydrateFailures: Integer read FHydrateFailures;
+    property LastHydrateFailure: Integer read FLastHydrateFailure;
     { True when AName is in the project's BASE define set - the platform's
       predefined symbols plus the ctor's extra defines (.dproj / command
       line) - i.e. defined before any unit's own `$DEFINE` runs. The
@@ -1837,6 +1850,7 @@ begin
   FSeedModel := TPasSemaModel.Create(Default(TPasTree));
   FSeedScope := SeedSystemScope(FSeedModel, APlatform);
   FModels := TObjectList<TPasSemaModel>.Create(True);
+  FLastHydrateFailure := -1;
   FFiles := TList<string>.Create;
   FStatus := TList<TPasModuleStatus>.Create;
   FByPath := TDictionary<string, Integer>.Create;
@@ -20136,12 +20150,19 @@ begin
     except
       // A vanished or unreadable file cannot rehydrate - the demoted model
       // keeps answering everything that needs no text.
+      Inc(FHydrateFailures);
+      FLastHydrateFailure := AMid;
       Exit(False);
     end;
   finally
     ReturnPP(LPP);
   end;
   Result := FModels[AMid].TryRehydrate(LPre);
+  if not Result then
+  begin
+    Inc(FHydrateFailures);
+    FLastHydrateFailure := AMid;
+  end;
 end;
 
 // See ReleaseTransientMaps: the freed arrays are indexed unguarded by the

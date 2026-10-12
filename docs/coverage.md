@@ -312,8 +312,7 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   string or TGUID constant is the GUID, an attribute class an attribute);
   PasTree decides by syntax: a bracket that starts with a string or `(`,
   or an identifier followed by `]` or `+`, is the GUID - so `[TAttr]`
-  reads as a GUID and `[Unit.SID]` as an attribute. The names in a GUID
-  expression are not resolved (no reference to `SID_IFoo` is recorded).
+  reads as a GUID and `[Unit.SID]` as an attribute.
 
 ### 14.2.1 Classes implementing interfaces
 - heritage walks (member lookup, descent checks) follow

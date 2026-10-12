@@ -1,4 +1,4 @@
-﻿program SemaNavSmoke;
+program SemaNavSmoke;
 
 { Go-to-declaration smoke tests: fixture units in a temp dir, then IdentAt +
   ResolveDecl checks - same-unit locals, cross-unit types, cross-unit MEMBER
@@ -684,6 +684,111 @@ const
     '  B.Tick;'#10 +                                          // 45 Tick col 5
     'end;'#10 +                                               // 46
     'end.'#10;                                                // 47
+
+  { The slot a method rename takes (audit B24): TSlB.Draw starts a NEW slot
+    (`virtual` without `override`, spec 12.2.1), so TSlC's override is TSlB's,
+    not TSlA's - dcc compiles TSlA's rename with TSlC taken along, and TSlC
+    silently moves slot (local/probe-b24 S1). TOb2.Hit is TOb1.Hit's override
+    in an `object` (S3: left out, the rename compiles and drops it). TSlInst
+    descends through an alias of an instantiation (A2-25) and its Ping calls
+    TSlGen's by a bare inherited. SID_F is named in a GUID clause (E3-07).
+    dcc64 37.0 compiles the unit (W1010 at TSlB.Draw). }
+  { Names written in a branch the defines leave out (audit G6): Hidden and
+    Use's Loc are, Far is in a unit using NavIfd, Use2's Other is but Use's
+    own Other is not - a local is looked for in its routine alone. }
+  UNIT_IFD =
+    'unit NavIfd;'#10 +                                       // 1
+    'interface'#10 +                                          // 2
+    'procedure Shown;'#10 +                                   // 3
+    'procedure Hidden;'#10 +                                  // 4  col 11
+    'procedure Far;'#10 +                                     // 5  col 11
+    'implementation'#10 +                                     // 6
+    'procedure Shown; begin end;'#10 +                        // 7
+    'procedure Hidden; begin end;'#10 +                       // 8
+    'procedure Far; begin end;'#10 +                          // 9
+    'procedure Use;'#10 +                                     // 10
+    'var'#10 +                                                // 11
+    '  Loc, Other: Integer;'#10 +                             // 12 3, 8
+    'begin'#10 +                                              // 13
+    '  Loc := 1;'#10 +                                        // 14
+    '  Other := 2;'#10 +                                      // 15
+    '  {$IFDEF NAVIFD_NEVER}'#10 +                            // 16
+    '  Hidden;'#10 +                                          // 17
+    '  Loc := 3;'#10 +                                        // 18
+    '  {$ENDIF}'#10 +                                         // 19
+    '  Shown;'#10 +                                           // 20
+    'end;'#10 +                                               // 21
+    'procedure Use2;'#10 +                                    // 22
+    'var'#10 +                                                // 23
+    '  Other: Integer;'#10 +                                  // 24 col 3
+    'begin'#10 +                                              // 25
+    '  Other := 0;'#10 +                                      // 26
+    '  {$IFDEF NAVIFD_NEVER}'#10 +                            // 27
+    '  Other := 1;'#10 +                                      // 28
+    '  {$ENDIF}'#10 +                                         // 29
+    'end;'#10 +                                               // 30
+    'end.'#10;                                                // 31
+  UNIT_IFDU =
+    'unit NavIfdU;'#10 +                                      // 1
+    'interface'#10 +                                          // 2
+    'implementation'#10 +                                     // 3
+    'uses NavIfd;'#10 +                                       // 4
+    'initialization'#10 +                                     // 5
+    '  {$IFDEF NAVIFD_NEVER}'#10 +                            // 6
+    '  NavIfd.Far;'#10 +                                      // 7
+    '  {$ENDIF}'#10 +                                         // 8
+    'end.'#10;                                                // 9
+
+  UNIT_FAM2 =
+    'unit NavFam2;'#10 +                                  // 1
+    'interface'#10 +                                      // 2
+    'type'#10 +                                           // 3
+    '  TSlA = class'#10 +                                 // 4
+    '  public'#10 +                                       // 5
+    '    procedure Draw; virtual;'#10 +                   // 6
+    '  end;'#10 +                                         // 7
+    '  TSlB = class(TSlA)'#10 +                           // 8
+    '  public'#10 +                                       // 9
+    '    procedure Draw; virtual;'#10 +                   // 10
+    '  end;'#10 +                                         // 11
+    '  TSlC = class(TSlB)'#10 +                           // 12
+    '  public'#10 +                                       // 13
+    '    procedure Draw; override;'#10 +                  // 14
+    '  end;'#10 +                                         // 15
+    '  TSlGen<T> = class'#10 +                            // 16
+    '  public'#10 +                                       // 17
+    '    procedure Fire; virtual;'#10 +                   // 18
+    '    procedure Ping;'#10 +                            // 19
+    '  end;'#10 +                                         // 20
+    '  TSlIntBase = TSlGen<Integer>;'#10 +                // 21
+    '  TSlInst = class(TSlIntBase)'#10 +                  // 22
+    '  public'#10 +                                       // 23
+    '    procedure Fire; override;'#10 +                  // 24
+    '    procedure Ping;'#10 +                            // 25
+    '  end;'#10 +                                         // 26
+    '  TOb1 = object'#10 +                                // 27
+    '    procedure Hit; virtual;'#10 +                    // 28
+    '    constructor Init;'#10 +                          // 29
+    '  end;'#10 +                                         // 30
+    '  TOb2 = object(TOb1)'#10 +                          // 31
+    '    procedure Hit; virtual;'#10 +                    // 32
+    '  end;'#10 +                                         // 33
+    'const'#10 +                                          // 34
+    '  SID_F = ''{0F0F0F0F-0000-0000-0000-000000000001}'';'#10 + // 35
+    'type'#10 +                                           // 36
+    '  IFamG = interface [SID_F] end;'#10 +               // 37
+    'implementation'#10 +                                 // 38
+    'procedure TSlA.Draw; begin end;'#10 +                // 39
+    'procedure TSlB.Draw; begin end;'#10 +                // 40
+    'procedure TSlC.Draw; begin end;'#10 +                // 41
+    'procedure TSlGen<T>.Fire; begin end;'#10 +           // 42
+    'procedure TSlGen<T>.Ping; begin end;'#10 +           // 43
+    'procedure TSlInst.Fire; begin end;'#10 +             // 44
+    'procedure TSlInst.Ping; begin inherited; end;'#10 +  // 45
+    'procedure TOb1.Hit; begin end;'#10 +                 // 46
+    'constructor TOb1.Init; begin end;'#10 +              // 47
+    'procedure TOb2.Hit; begin end;'#10 +                 // 48
+    'end.'#10;                                            // 49
 
   { Unit rename through a program's `in '...'` paths: NavInU's path keeps its
     directory (`.\`), and line 3 holds two items, so the preview of each edit
@@ -3048,6 +3153,31 @@ begin
       Exit(True);
 end;
 
+// The lines of AEdits in AFile, ascending and comma-separated: what a plan
+// touches there, compared whole - an edit too many is as wrong as one
+// missing.
+function EditLines(const AEdits: TArray<TPasRenameEdit>;
+  const AFile: string): string;
+var
+  LOn: TArray<Boolean>;
+begin
+  for var LE in AEdits do
+    if SameText(TPath.GetFileName(LE.FilePath), AFile) then
+    begin
+      if LE.Line >= Length(LOn) then
+        SetLength(LOn, LE.Line + 1);
+      LOn[LE.Line] := True;
+    end;
+  Result := '';
+  for var LL := 0 to High(LOn) do
+    if LOn[LL] then
+    begin
+      if Result <> '' then
+        Result := Result + ',';
+      Result := Result + IntToStr(LL);
+    end;
+end;
+
 // One rename edit at an exact position, with the preview line and the
 // highlight span it claims for the NEW name.
 function HasEdit(const AEdits: TArray<TPasRenameEdit>; const AFile: string;
@@ -3173,6 +3303,9 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRen.pas'), UNIT_REN);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRenP.pas'), UNIT_RENP);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavFam.pas'), UNIT_FAM);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavFam2.pas'), UNIT_FAM2);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavIfd.pas'), UNIT_IFD);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavIfdU.pas'), UNIT_IFDU);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDef.pas'), UNIT_DEF);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDef.inc'), INC_DEF);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavIfn.pas'), UNIT_IFN);
@@ -4204,6 +4337,130 @@ begin
       Ok('family: a method with no ties - none',
         GNav.PlanRename(LRTMid, LRSym, 'Grab', {out} LEdits, {out} LCarried,
           {out} LFamily, {out} LErr) and (Length(LFamily) = 0));
+
+      // ---- The slot a family follows (UNIT_FAM2, audit B24) ----
+      LMidFam := GNav.ModelIdOf(TPath.Combine(LDir, 'NavFam2.pas'));
+      Ok('NavFam2 model found', LMidFam >= 0);
+      // TSlB starts a new slot: TSlC's override is not TSlA's to take.
+      GNav.SymbolAt(LMidFam, 6, 15, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('family: TSlA.Draw leaves the new slot below TSlB alone',
+        GNav.PlanRename(LRTMid, LRSym, 'Paint', {out} LEdits, {out} LCarried,
+          {out} LFamily, {out} LErr) and (Length(LFamily) = 0) and
+        (EditLines(LEdits, 'NavFam2.pas') = '6,39'));
+      GNav.SymbolAt(LMidFam, 14, 15, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('family: TSlC.Draw takes TSlB.Draw, the slot it overrides',
+        GNav.PlanRename(LRTMid, LRSym, 'Paint', {out} LEdits, {out} LCarried,
+          {out} LFamily, {out} LErr) and (Length(LFamily) = 1) and
+        SameText(LFamily[0].TypeName, 'TSlB') and
+        (EditLines(LEdits, 'NavFam2.pas') = '10,14,40,41'));
+      // An object's `virtual` below the root is the override.
+      GNav.SymbolAt(LMidFam, 28, 15, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('family: TOb1.Hit takes the object override TOb2.Hit',
+        GNav.PlanRename(LRTMid, LRSym, 'Strike', {out} LEdits,
+          {out} LCarried, {out} LFamily, {out} LErr) and
+        (Length(LFamily) = 1) and SameText(LFamily[0].TypeName, 'TOb2') and
+        (EditLines(LEdits, 'NavFam2.pas') = '28,32,46,48'));
+      GNav.SymbolAt(LMidFam, 32, 15, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('family: TOb2.Hit climbs to TOb1.Hit',
+        GNav.PlanRename(LRTMid, LRSym, 'Strike', {out} LEdits,
+          {out} LCarried, {out} LFamily, {out} LErr) and
+        (Length(LFamily) = 1) and SameText(LFamily[0].TypeName, 'TOb1') and
+        (EditLines(LEdits, 'NavFam2.pas') = '28,32,46,48'));
+      // Through an alias of an instantiation, both ways.
+      GNav.SymbolAt(LMidFam, 18, 15, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('family: TSlGen.Fire takes the override behind the alias',
+        GNav.PlanRename(LRTMid, LRSym, 'Shoot', {out} LEdits,
+          {out} LCarried, {out} LFamily, {out} LErr) and
+        (Length(LFamily) = 1) and
+        (EditLines(LEdits, 'NavFam2.pas') = '18,24,42,44'));
+      GNav.SymbolAt(LMidFam, 25, 15, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('family: TSlInst.Ping takes the TSlGen.Ping its inherited reaches',
+        GNav.PlanRename(LRTMid, LRSym, 'Pong', {out} LEdits,
+          {out} LCarried, {out} LFamily, {out} LErr) and
+        (Length(LFamily) = 1) and (LFamily[0].Why = rfwInherited) and
+        (EditLines(LEdits, 'NavFam2.pas') = '19,25,43,45'));
+      GNav.SymbolAt(LMidFam, 19, 15, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('family: TSlGen.Ping takes TSlInst.Ping behind the alias',
+        GNav.PlanRename(LRTMid, LRSym, 'Pong', {out} LEdits,
+          {out} LCarried, {out} LFamily, {out} LErr) and
+        (Length(LFamily) = 1) and (LFamily[0].Why = rfwInherited) and
+        (EditLines(LEdits, 'NavFam2.pas') = '19,25,43,45'));
+      // A constant named in a GUID clause: the clause is a use (E3-07).
+      GNav.SymbolAt(LMidFam, 35, 3, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('rename: a GUID clause constant is rewritten in the clause',
+        SameText(LRName, 'SID_F') and
+        GNav.PlanRename(LRTMid, LRSym, 'SID_G', {out} LEdits, {out} LErr) and
+        (EditLines(LEdits, 'NavFam2.pas') = '35,37') and
+        HasEdit(LEdits, 'NavFam2.pas', 37, 22,
+          '  IFamG = interface [SID_G] end;', 21, 26));
+
+      // ---- Names in code the defines leave out (UNIT_IFD, audit G6) ----
+      LMidFam := GNav.ModelIdOf(TPath.Combine(LDir, 'NavIfd.pas'));
+      GNav.SymbolAt(LMidFam, 4, 11, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('inactive: Hidden, called in a dead branch, refused',
+        SameText(LRName, 'Hidden') and
+        not GNav.PlanRename(LRTMid, LRSym, 'Hid', {out} LEdits, {out} LErr) and
+        (Length(LEdits) = 0) and (Pos('NavIfd.pas line 17', LErr) > 0));
+      GNav.SymbolAt(LMidFam, 3, 11, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('inactive: Shown, only in live code, renamed',
+        SameText(LRName, 'Shown') and
+        GNav.PlanRename(LRTMid, LRSym, 'Seen', {out} LEdits, {out} LErr) and
+        (EditLines(LEdits, 'NavIfd.pas') = '3,7,20'));
+      GNav.SymbolAt(LMidFam, 5, 11, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('inactive: Far, written in a dead branch of a using unit, refused',
+        SameText(LRName, 'Far') and
+        not GNav.PlanRename(LRTMid, LRSym, 'Near', {out} LEdits, {out} LErr) and
+        (Pos('NavIfdU.pas line 7', LErr) > 0));
+      GNav.SymbolAt(LMidFam, 12, 3, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('inactive: a local written in its routine''s dead branch, refused',
+        SameText(LRName, 'Loc') and
+        not GNav.PlanRename(LRTMid, LRSym, 'Spot', {out} LEdits, {out} LErr) and
+        (Pos('NavIfd.pas line 18', LErr) > 0));
+      GNav.SymbolAt(LMidFam, 12, 8, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('inactive: a local whose namesake is in ANOTHER routine''s dead ' +
+        'branch, renamed',
+        SameText(LRName, 'Other') and
+        GNav.PlanRename(LRTMid, LRSym, 'Rest', {out} LEdits, {out} LErr) and
+        (EditLines(LEdits, 'NavIfd.pas') = '12,15'));
+      GNav.SymbolAt(LMidFam, 24, 3, {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('inactive: ...and that namesake itself refused',
+        SameText(LRName, 'Other') and
+        not GNav.PlanRename(LRTMid, LRSym, 'Rest', {out} LEdits, {out} LErr) and
+        (Pos('NavIfd.pas line 28', LErr) > 0));
+      var LIfdFile: string;
+      Ok('inactive: a unit named in a dead branch - its rename refused',
+        not GNav.PlanUnitRename(LMidFam, 'NavIfdX', {out} LEdits,
+          {out} LIfdFile, {out} LErr) and (Length(LEdits) = 0) and
+        (Pos('NavIfdU.pas line 7', LErr) > 0));
+
+      // ---- A demoted unit changed on disk (audit B2-23) ----
+      // NavB's `var GT: TThing` cannot be read back once NavB.pas changed:
+      // the plans refuse, naming it, instead of leaving it on the old name.
+      // The file restored, the same plans go through (nothing memoized).
+      Ok('stale: SymbolAt TThing',
+        GNav.SymbolAt(LMidA, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName) and
+        SameText(LRName, 'TThing'));
+      var LStaleB := TPath.Combine(LDir, 'NavB.pas');
+      GProj.DemoteText([TPath.Combine(LDir, 'NavA.pas')]);
+      Ok('stale: NavB is demoted',
+        GProj.Model(GNav.ModelIdOf(LStaleB)).Demoted);
+      TFile.WriteAllText(LStaleB, '{ edited }' + UNIT_B);
+      try
+        Ok('stale: PlanRename refused, naming NavB.pas',
+          not GNav.PlanRename(LRTMid, LRSym, 'TItem', {out} LEdits,
+            {out} LErr) and (Length(LEdits) = 0) and
+          (Pos('"NavB.pas" changed on disk', LErr) > 0));
+        var LStaleFile: string;
+        Ok('stale: PlanUnitRename refused, naming NavB.pas',
+          not GNav.PlanUnitRename(LMidA, 'NavAX', {out} LEdits,
+            {out} LStaleFile, {out} LErr) and (Length(LEdits) = 0) and
+          (Pos('"NavB.pas" changed on disk', LErr) > 0));
+      finally
+        TFile.WriteAllText(LStaleB, UNIT_B);
+      end;
+      Ok('stale: restored, PlanRename reaches NavB again',
+        GNav.PlanRename(LRTMid, LRSym, 'TItem', {out} LEdits, {out} LErr) and
+        (EditLines(LEdits, 'NavB.pas') = '4'));
 
       // REGRESSION: a bare call to an inherited, non-overloaded method in
       // the SAME unit must be counted ONCE, not twice (see UNIT_RQ / the

@@ -208,6 +208,9 @@ identifier class does here:
 | 13e | A METHOD tied to others by name: a virtual slot, an interface method and its implementations, a hiding namesake calling it by a bare `inherited;` - from any of them | the whole family, each with its uses and form lines, listed in `AFamily`; refused whole for an overloaded name in the family, a slot whose root has no source, a member in a library | OK (0.86.0 - 3.9b) |
 | 14 | Name-collision detection at an edit site | - | GAP (deliberate - see 3.5; form-file collisions ARE checked, 3.9a) |
 | 15 | Identifier inside an opened `$I` include file | - | GAP (`IdentAt` is main-file-only, same limit go-to-declaration has) |
+| 15a | A name also WRITTEN in a branch a conditional directive leaves out, where the symbol can be seen from | nothing - refused whole, naming the file and line | OK (by design, 0.97.0 - 3.9c; before, the plan went through and broke the build under the other defines) |
+| 15b | A name used in a unit whose file changed on disk since the analysis (a demoted unit that cannot rehydrate) | nothing - refused whole, naming the file | OK (0.97.0 - 3.9c; before, that unit's uses were silently left out) |
+| 15c | A constant named in an interface's GUID clause (`[SID_IFoo]`) | the clause too, as a use | OK |
 
 3.1 **Scope.** Two identities: a symbol (`SymbolAt` -> `PlanRename`) and a
     unit (`UnitAt` -> `PlanUnitRename`, see 3.8). A compiler BUILTIN is
@@ -437,6 +440,14 @@ identifier class does here:
     lines, under the same new name:
     - the VMT slot (`rfwVirtual`): the method that introduced it and every
       `override` below - from any of them. One renamed alone is E2137.
+      The slot is the one Find Overrides walks (§4, 0.97.0): a class that
+      starts a new slot (`virtual` without `override`, `reintroduce;
+      virtual`) or hides the name ends it, so a rename of `TA.Draw` leaves
+      `TC.Draw; override` below `TB.Draw; virtual` alone - taken along, it
+      compiled and silently moved TC to TA's slot; an `object`'s `virtual`
+      below the root is the override and is taken (left out, the rename
+      compiled and the descendant stopped overriding); an ancestor written
+      through an alias of an instantiation is climbed through.
     - an interface method and what implements it (`rfwInterface`): the
       class method the name finds from a class listing the interface or one
       EXTENDING it (dcc carries the base's methods into the extension, which
@@ -465,6 +476,27 @@ identifier class does here:
     name) - each refusal names the member and its tie. Not reached: a
     method resolution clause (`procedure IBar.Baz = MyBaz;`), a delegated
     implementation (`implements`) - as in §5.
+
+3.9c **What a plan cannot read refuses it** (0.97.0). Both rename plans
+    build on searches that skip what they cannot read - right for a list,
+    a partial rename for a plan:
+    - *Code a conditional directive leaves out.* No analysis reads a dead
+      `$IFDEF` branch, and a use left there on the old name compiles under
+      these defines and breaks under the others. If the old name is written
+      there as an IDENTIFIER (comments and strings do not count) where the
+      symbol can be seen from, the plan is refused, naming the file and line
+      (`InactiveUseRefusal`): a routine's local inside its routine, an
+      implementation-section name in its unit, an interface name - a method
+      family's included - in its unit and every unit using it; a unit's name
+      in any unit a rename may write. The token is not resolved, so a
+      same-named identifier in a dead branch refuses as well: nothing here
+      can tell the two apart, and the user can.
+    - *A unit whose file changed on disk since the analysis.* A demoted unit
+      (`DemoteText`) gets its text back by re-preprocessing its file, which
+      must reproduce the analyzed stream; when it does not, its uses give no
+      hit. Any such failure while a plan is built refuses it, naming the
+      file (`TPasSemaProject.HydrateFailures`); the host reanalyzes, and a
+      restored file hydrates again.
 
 
 ## 3.10 Demo menu: one `Find All` submenu

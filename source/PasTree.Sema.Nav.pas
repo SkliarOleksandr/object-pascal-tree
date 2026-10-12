@@ -519,6 +519,15 @@ type
       out AUid, ASym: Integer): Boolean;
     function DesignatorNameNode(LM: TPasSemaModel; ANode: Integer): Integer;
     function DesignatorIsClass(AMid, ANode, ATMid, ASym: Integer): Boolean;
+    // The rename plans' refusal when a model failed to rehydrate since
+    // AFailsBefore (TPasSemaProject.HydrateFailures); '' when none did.
+    function HydrateRefusal(AFailsBefore: Integer): string;
+    // The rename plans' refusal when AName is written as an identifier in
+    // a conditional branch the defines leave out, in one of AMids (only
+    // inside the spans of ASpans' nodes for a model listed there); ''
+    // when it is not.
+    function InactiveUseRefusal(const AMids: TArray<Integer>;
+      const AName: string; const ASpans: TArray<TPasExtRef>): string;
   public
     { LIFETIME: a navigator serves ONE state of AProject's models. It keeps
       per-model caches (token and node maps, pairing keys), the form
@@ -6335,6 +6344,154 @@ begin
   end;
 end;
 
+{ A demoted model whose file changed on disk (or vanished) since the analysis
+  cannot give its text back, and every search over the closure skips it -
+  right for a list, but a rename plan built without it leaves that unit's
+  uses on the old name while promising all or nothing (audit B2-23). Asked
+  with the failure count taken before the plan's work: any failure during it
+  refuses the plan, naming the last file. Not memoized: the host's watcher
+  reanalyzes the file, and a restored file hydrates again. }
+function TPasNavigator.HydrateRefusal(AFailsBefore: Integer): string;
+var
+  LMid: Integer;
+  LName: string;
+begin
+  Result := '';
+  if FProj.HydrateFailures = AFailsBefore then
+    Exit;
+  LMid := FProj.LastHydrateFailure;
+  if (LMid >= 0) and (LMid < FProj.ModelCount) then
+    LName := TPath.GetFileName(FProj.ModelFile(LMid))
+  else
+    LName := 'a unit';
+  Result := Format('"%s" changed on disk since the analysis (or cannot be ' +
+    'read), so its uses cannot be checked - reanalyze it, then rename; ' +
+    'nothing planned.', [LName]);
+end;
+
+{ Code a conditional branch leaves out is read by no analysis, so a rename
+  plan cannot edit what it says there - and an applied plan that left the
+  old name in such a branch compiles under these defines and breaks under
+  the others (E2003 with dcc64 -D of the branch's symbol, or on another
+  platform: audit G6). What can be told is whether the name is WRITTEN
+  there as an identifier: if it is, the plan is refused, naming the line.
+  The token scan sees identifiers only (not comments or strings) and reads
+  no meaning into them - a same-named local in a dead branch refuses too,
+  which is the honest answer when nothing can tell them apart. ASpans (a
+  model and a node, Sym holding the node) limits a model to that node's
+  source - a routine's locals are visible nowhere else. A demoted model is
+  hydrated only when it has a skipped region at all (Skipped survives the
+  demotion); one that cannot be is HydrateRefusal's to report. }
+function TPasNavigator.InactiveUseRefusal(const AMids: TArray<Integer>;
+  const AName: string; const ASpans: TArray<TPasExtRef>): string;
+var
+  LSeen: TDictionary<Integer, Boolean>;
+  LM: TPasSemaModel;
+  LAny, LLimited: Boolean;
+  LText: string;
+  LLo, LHi, LMidT, LTok, LLine, LCol, LSpanFile, LFrom, LTo: Integer;
+
+  // The span of ANode in its file - False when its first and last tokens
+  // are not in one file (an include boundary: that span limits nothing).
+  function SpanOf(AModel: TPasSemaModel; ANode: Integer;
+    out AFile, AFrom, ATo: Integer): Boolean;
+  var
+    LA, LB: TPasVisibleToken;
+    LFirst, LLast: Integer;
+  begin
+    Result := False;
+    if (ANode < 0) or (ANode > High(AModel.Tree.Nodes)) then
+      Exit;
+    LFirst := AModel.Tree.Nodes[ANode].FirstToken;
+    LLast := AModel.Tree.Nodes[ANode].LastToken;
+    if (LFirst < 0) or (LLast < LFirst) or
+       (LLast > High(AModel.Tree.Source.Visible)) then
+      Exit;
+    LA := AModel.Tree.Source.Visible[LFirst];
+    LB := AModel.Tree.Source.Visible[LLast];
+    if LA.FileId <> LB.FileId then
+      Exit;
+    AFile := LA.FileId;
+    AFrom := AModel.Tree.Source.Files[AFile].Tokens[LA.TokenIndex].Start;
+    ATo := AModel.Tree.Source.Files[AFile].Tokens[LB.TokenIndex].EndPos;
+    Result := True;
+  end;
+
+begin
+  Result := '';
+  LSeen := TDictionary<Integer, Boolean>.Create;
+  try
+    for var LMid in AMids do
+    begin
+      if (LMid < 0) or (LMid >= FProj.ModelCount) or
+         not LSeen.TryAdd(LMid, True) then
+        Continue;
+      LM := FProj.Model(LMid);
+      LAny := False;
+      for var LF := 0 to High(LM.Tree.Source.Skipped) do
+        LAny := LAny or (Length(LM.Tree.Source.Skipped[LF]) > 0);
+      if not LAny or not FProj.EnsureHydrated(LMid) then
+        Continue;
+      for var LF := 0 to High(LM.Tree.Source.Skipped) do
+        for var LR in LM.Tree.Source.Skipped[LF] do
+        begin
+          // Inside one of this model's spans, when it has any.
+          LLimited := False;
+          LAny := False;
+          for var LS in ASpans do
+            if LS.UnitId = LMid then
+            begin
+              LLimited := True;
+              if SpanOf(LM, LS.Sym, LSpanFile, LFrom, LTo) and
+                 (LSpanFile = LF) and (LR.Start < LTo) and
+                 (LR.EndPos > LFrom) then
+                LAny := True;
+            end;
+          if LLimited and not LAny then
+            Continue;
+          // The first token at or after the region's start, then each one
+          // inside it.
+          LLo := 0;
+          LHi := Length(LM.Tree.Source.Files[LF].Tokens);
+          while LLo < LHi do
+          begin
+            LMidT := (LLo + LHi) div 2;
+            if LM.Tree.Source.Files[LF].Tokens[LMidT].Start < LR.Start then
+              LLo := LMidT + 1
+            else
+              LHi := LMidT;
+          end;
+          LTok := LLo;
+          while (LTok <= High(LM.Tree.Source.Files[LF].Tokens)) and
+                (LM.Tree.Source.Files[LF].Tokens[LTok].Start < LR.EndPos) do
+          begin
+            if LM.Tree.Source.Files[LF].Tokens[LTok].Kind = tkIdentifier then
+            begin
+              LText := LM.Tree.Source.Files[LF].TokenText(LTok);
+              if LText.StartsWith('&') then
+                LText := Copy(LText, 2, MaxInt);
+              if SameText(LText, AName) then
+              begin
+                LM.Tree.Source.Files[LF].OffsetToLineCol(
+                  LM.Tree.Source.Files[LF].Tokens[LTok].Start, LLine, LCol);
+                Exit(Format('"%s" is written in code a conditional ' +
+                  'directive leaves out - %s line %d - which no analysis ' +
+                  'reads: the plan cannot tell whether it names this ' +
+                  'symbol, and a use left on the old name breaks the build ' +
+                  'under the other defines; rename refused, nothing ' +
+                  'planned.', [AName,
+                  TPath.GetFileName(LM.Tree.Source.FileNames[LF]), LLine]));
+              end;
+            end;
+            Inc(LTok);
+          end;
+        end;
+    end;
+  finally
+    LSeen.Free;
+  end;
+end;
+
 function IsValidRenameName(const AName: string): Boolean;
 var
   LIdx: Integer;
@@ -6417,7 +6574,7 @@ var
   LList: TList<TPasRenameEdit>;
   LEdit: TPasRenameEdit;
   LHit: TPasRefHit;
-  LMi, LIdx, LHeader, LStr, LRun, LDelta: Integer;
+  LMi, LIdx, LHeader, LStr, LRun, LDelta, LFails: Integer;
   LOldFull, LOldLeaf, LNewLeaf, LWritten, LText, LOldFile, LNewFile,
     LLiteral, LLine: string;
 
@@ -6507,12 +6664,15 @@ begin
   // refusals below are about spellings that cannot be read, not about text
   // that is merely put away. Without this, unit rename is unavailable
   // projectwide after any DemoteClosedUnits, with a misleading reason.
+  LFails := FProj.HydrateFailures;
   FProj.EnsureHydrated(ATargetMid);
   LM := FProj.Model(ATargetMid);
   LHeader := LM.Tree.Nodes[0].FirstChild;
   if not UnitNameHit(LM, LHeader, {out} LHit) then
   begin
-    AError := 'This unit has no readable name in its own header.';
+    AError := HydrateRefusal(LFails);
+    if AError = '' then
+      AError := 'This unit has no readable name in its own header.';
     Exit;
   end;
   LOldFull := Copy(LHit.Snippet, LHit.HiFrom + 1, LHit.HiTo - LHit.HiFrom);
@@ -6545,9 +6705,11 @@ begin
         FProj.EnsureHydrated(LMi);
         if not UnitNameHit(LM, LM.UsesList[LIdx].NameNode, {out} LHit) then
         begin
-          AError := Format('A `uses` reference in %s could not be read as ' +
-            'one name - rename refused, nothing planned.',
-            [TPath.GetFileName(FProj.ModelFile(LMi))]);
+          AError := HydrateRefusal(LFails);
+          if AError = '' then
+            AError := Format('A `uses` reference in %s could not be read ' +
+              'as one name - rename refused, nothing planned.',
+              [TPath.GetFileName(FProj.ModelFile(LMi))]);
           Exit;
         end;
         LWritten := Copy(LHit.Snippet, LHit.HiFrom + 1,
@@ -6589,9 +6751,11 @@ begin
       begin
         if not UnitNameHit(LM, LQ, {out} LHit) then
         begin
-          AError := Format('A unit qualifier in %s could not be read as ' +
-            'one name - rename refused, nothing planned.',
-            [TPath.GetFileName(FProj.ModelFile(LMi))]);
+          AError := HydrateRefusal(LFails);
+          if AError = '' then
+            AError := Format('A unit qualifier in %s could not be read ' +
+              'as one name - rename refused, nothing planned.',
+              [TPath.GetFileName(FProj.ModelFile(LMi))]);
           Exit;
         end;
         LWritten := Copy(LHit.Snippet, LHit.HiFrom + 1,
@@ -6680,8 +6844,31 @@ begin
     ARequiredFileName := ANewName + '.pas'
   else
     ARequiredFileName := '';
+  // The name in a branch the defines leave out - a conditional `uses`
+  // item, a qualifier - in any unit a rename may write (audit G6; see
+  // InactiveUseRefusal): only models with a skipped region are looked at,
+  // before the file gate, which stats the file. Then a referring unit whose
+  // text could not be read back gave no edit: its uses would stay on the
+  // old name (HydrateRefusal).
+  var LScan: TArray<Integer> := nil;
+  for LMi := 0 to FProj.ModelCount - 1 do
+    for var LSk in FProj.Model(LMi).Tree.Source.Skipped do
+      if Length(LSk) > 0 then
+      begin
+        if RenameBlockReason(FProj.ModelFile(LMi)) = '' then
+          LScan := LScan + [LMi];
+        Break;
+      end;
+  AError := InactiveUseRefusal(LScan, LOldLeaf, nil);
+  if AError = '' then
+    AError := HydrateRefusal(LFails);
+  if AError <> '' then
+  begin
+    AEdits := nil;
+    ARequiredFileName := '';
+    Exit;
+  end;
   Result := True;
-
 end;
 
 { Whether the method (AMid, ASym)'s body calls a bare `inherited` - the word
@@ -6886,6 +7073,62 @@ var
     end;
   end;
 
+  // The classes of one VMT slot, from its root down, as Find Overrides walks
+  // it: a class that starts a new slot or hides this one is still listed -
+  // a `reintroduce; overload` beside it may continue the slot - but nothing
+  // below it is this slot's (OvClosesSlot, spec 12.2.1). Descending through
+  // it took TC's override of TB's new slot into a rename of TA's method,
+  // and dcc compiles that: TC silently moved to TA's slot (audit B24).
+  function SlotBelow(AMid, AStruct: Integer): TArray<TPasExtRef>;
+  var
+    LQ: TQueue<TPasExtRef>;
+    LSeen: TDictionary<string, Boolean>;
+    LC: TPasExtRef;
+    LKids: TArray<TOvEdge>;
+  begin
+    Result := [Ref(AMid, AStruct)];
+    LQ := TQueue<TPasExtRef>.Create;
+    LSeen := TDictionary<string, Boolean>.Create;
+    try
+      LQ.Enqueue(Ref(AMid, AStruct));
+      LSeen.Add(Key(AMid, AStruct), True);
+      while LQ.Count > 0 do
+      begin
+        LC := LQ.Dequeue;
+        if not LIndex.TryGetValue(Key(LC.UnitId, LC.Sym), LKids) then
+          Continue;
+        for var LE in LKids do
+          if LE.IsFirst and (OvClassDefNode(LE.UnitId, LE.Sym) <> NIL_NODE) and
+             LSeen.TryAdd(Key(LE.UnitId, LE.Sym), True) then
+          begin
+            Result := Result + [Ref(LE.UnitId, LE.Sym)];
+            if not OvClosesSlot(LE.UnitId, LE.Sym, LName) then
+              LQ.Enqueue(Ref(LE.UnitId, LE.Sym));
+          end;
+      end;
+    finally
+      LSeen.Free;
+      LQ.Free;
+    end;
+  end;
+
+  // A class's ancestor class, an alias of an instantiation followed to the
+  // generic it names (audit A2-25): `class(TIntBase)` with `TIntBase =
+  // TBase<Integer>` is TBase's descendant, and the climbs below stopped at
+  // the alias, which declares no method.
+  function AncestorClass(AMid, AStruct: Integer): TSemaXType;
+  var
+    LBMid, LBSym: Integer;
+  begin
+    Result := FProj.AncestorOfX(XPlain(AMid, AStruct));
+    if not XValid(Result) then
+      Exit;
+    LBMid := Result.UnitId;
+    LBSym := Result.Sym;
+    OvUnalias(LBMid, LBSym);
+    Result := XPlain(LBMid, LBSym);
+  end;
+
   // An interface and the ones it extends, up.
   function Up(const AIface: TPasExtRef): TArray<TPasExtRef>;
   var
@@ -6917,7 +7160,7 @@ var
     begin
       if Length(Result) > 0 then
         Exit;
-      LX := FProj.AncestorOfX(LX);
+      LX := AncestorClass(LX.UnitId, LX.Sym);
       if not XValid(LX) or (OvClassDefNode(LX.UnitId, LX.Sym) = NIL_NODE) then
         Exit;
       AOMid := LX.UnitId;
@@ -7009,13 +7252,16 @@ begin
               RenameBlockReason(LRootHit.FilePath)]);
             Exit;
           end;
-          for var LC in Below(LRMid, LRoot, False, True) do
+          for var LC in SlotBelow(LRMid, LRoot) do
           begin
             LSyms := OvMethodsNamed(LC.UnitId, LC.Sym, LName);
             LChain := nil;
+            // OvLinks: an `object`'s `virtual` below the root is its
+            // override (spec 12.2.1) - left out, the rename compiled and
+            // the descendant's method silently stopped overriding.
             for var LS in LSyms do
               if ((LC.UnitId = LRMid) and (LC.Sym = LRoot)) or
-                 (DirsOf(LC.UnitId, LS) * [odOverride, odMessage] <> []) then
+                 OvLinks(LC.UnitId, LC.Sym, DirsOf(LC.UnitId, LS)) then
                 LChain := LChain + [LS];
             if Length(LChain) = 0 then
               Continue;
@@ -7049,7 +7295,7 @@ begin
           LSyms := OvMethodsNamed(LC.UnitId, LC.Sym, LName);
           if Length(LSyms) = 0 then
             Continue;
-          LAnc := FProj.AncestorOfX(XPlain(LC.UnitId, LC.Sym));
+          LAnc := AncestorClass(LC.UnitId, LC.Sym);
           if not XValid(LAnc) or
              (OvClassDefNode(LAnc.UnitId, LAnc.Sym) = NIL_NODE) then
             Continue;
@@ -7071,7 +7317,7 @@ begin
         // reaches must keep its name too.
         if HasBareInherited(LCur.UnitId, LCur.Sym) then
         begin
-          LAnc := FProj.AncestorOfX(XPlain(LCur.UnitId, LT));
+          LAnc := AncestorClass(LCur.UnitId, LT);
           if XValid(LAnc) and
              (OvClassDefNode(LAnc.UnitId, LAnc.Sym) <> NIL_NODE) then
           begin
@@ -7156,13 +7402,60 @@ var
   LTogether: TArray<TPasExtRef>;
   LList: TList<TPasRenameEdit>;
   LArr: TArray<TPasRenameEdit>;
-  LIdx, LStart, LRun, LDelta, LPeer: Integer;
+  LIdx, LStart, LRun, LDelta, LPeer, LFails: Integer;
   LLine: string;
   LSites, LHSites, LCaptions: TArray<TPasFormSite>;
   LHandlers: TArray<TPasCarriedHandler>;
   LHandler: TPasCarriedHandler;
   LCarry: TPasCarriedRename;
   LHError: string;
+  LMids: TArray<Integer>;
+  LSpans: TArray<TPasExtRef>;
+  LVisible, LOwner: Integer;
+
+  function Ref(AMid, ANode: Integer): TPasExtRef;
+  begin
+    Result.UnitId := AMid;
+    Result.Sym := ANode;
+  end;
+
+  // Where (AMid, ASym) can be named from: 0 inside a routine (AOwner its
+  // node), 1 its unit's implementation, 2 the units using its unit too.
+  function VisibleFrom(AMid, ASym: Integer; out AOwner: Integer): Integer;
+  var
+    LM: TPasSemaModel;
+    LScope: Integer;
+  begin
+    Result := 2;
+    AOwner := NIL_NODE;
+    LM := FProj.Model(AMid);
+    if (ASym < 0) or (ASym >= LM.SymCount) then
+      Exit;
+    LScope := LM.Symbols[ASym].Scope;
+    while (LScope >= 0) and (LScope < LM.Scopes.Count) do
+    begin
+      case LM.Scopes[LScope].Kind of
+        sckRoutine:
+          begin
+            AOwner := LM.Scopes[LScope].OwnerNode;
+            Exit(0);
+          end;
+        sckImplementation:
+          Exit(1);
+        sckUnit:
+          Exit(2);
+      end;
+      LScope := LM.Scopes[LScope].Parent;
+    end;
+  end;
+
+  function Listed(const AMids: TArray<Integer>; AMid: Integer): Boolean;
+  begin
+    Result := False;
+    for var LM in AMids do
+      if LM = AMid then
+        Exit(True);
+  end;
 
   // The form sites of one rename, as edits writing ANewText.
   procedure AddFormEdits(AList: TList<TPasRenameEdit>;
@@ -7339,10 +7632,13 @@ begin
       'not this `uses` item.', [FProj.Model(ATMid).Symbols[ASym].Name]);
     Exit;
   end;
+  LFails := FProj.HydrateFailures;
   if not DeclHit(ATMid, ASym, {out} LDecl) then
   begin
-    AError := 'This symbol has no declaration site to rename ' +
-      '(an implicit Result, or a compiler builtin).';
+    AError := HydrateRefusal(LFails);
+    if AError = '' then
+      AError := 'This symbol has no declaration site to rename ' +
+        '(an implicit Result, or a compiler builtin).';
     Exit;
   end;
   // The peer header's own parameter symbol, when there is one (see
@@ -7499,6 +7795,52 @@ begin
       LArr[LRun].Snippet := LLine;
   end;
 
+  // The name written in a branch the defines leave out (audit G6), where
+  // the symbol can be seen from: a routine's local only inside the routine
+  // (and its peer header's), an implementation-section name in its own
+  // unit, an interface name in the units using its unit too. Then a unit
+  // whose text could not be read back gave no hits: the plan is missing its
+  // uses (HydrateRefusal) - asked last, as the scan above hydrates too.
+  LMids := [ATMid];
+  LSpans := nil;
+  LVisible := VisibleFrom(ATMid, ASym, LOwner);
+  if LVisible = 0 then
+  begin
+    LSpans := [Ref(ATMid, LOwner)];
+    if (LPeer <> NIL_SYM) and (VisibleFrom(ATMid, LPeer, LOwner) = 0) then
+      LSpans := LSpans + [Ref(ATMid, LOwner)];
+  end
+  else
+  begin
+    for LIdx := 0 to High(AFamily) do
+    begin
+      LMids := LMids + [AFamily[LIdx].UnitId];
+      if VisibleFrom(AFamily[LIdx].UnitId, AFamily[LIdx].Sym, LOwner) = 2 then
+        LVisible := 2;
+    end;
+    var LDeclaring := LMids;
+    if LVisible = 2 then
+      for LIdx := 0 to FProj.ModelCount - 1 do
+        for var LU in FProj.Model(LIdx).UsesList do
+          if Listed(LDeclaring, LU.UnitId) then
+          begin
+            LMids := LMids + [LIdx];
+            Break;
+          end;
+    for LIdx := 0 to High(LArr) do
+      if LArr[LIdx].FormKind = fskNone then
+        LMids := LMids + [ModelIdOf(LArr[LIdx].FilePath)];
+  end;
+  AError := InactiveUseRefusal(LMids, FProj.Model(ATMid).Symbols[ASym].Name,
+    LSpans);
+  if AError = '' then
+    AError := HydrateRefusal(LFails);
+  if AError <> '' then
+  begin
+    ACarried := nil;
+    AFamily := nil;
+    Exit;
+  end;
   AEdits := LArr;
   Result := True;
 end;
