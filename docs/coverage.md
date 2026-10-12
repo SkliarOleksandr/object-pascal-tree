@@ -293,6 +293,10 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 ### 12.1.2 `inherited`
 - a general `inherited X` expression is not typed
   intra-unit; only with-target usage is modeled.
+- a bare `inherited` in a `message` method is looked up by the method's
+  name; dcc dispatches it by the message id (the ancestor's handler of that
+  id, whatever its name, else DefaultHandler), so Go To on it and its typing
+  as a value can name the wrong method or none.
 
 ## 13-properties-events.md
 

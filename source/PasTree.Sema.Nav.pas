@@ -1191,14 +1191,17 @@ type
     { Cursor on the `inherited` KEYWORD - which IdentAt never sees, it being a
       keyword token and not an identifier node. Two cases, both what the real
       IDE's Ctrl+Click on that word does:
-      - `inherited Foo(...)`: the name is an ordinary nkIdent already bound by
-        CrossResolveInherited (overload included), so this is ResolveDecl on
-        that name, as if the name itself had been clicked.
+      - `inherited Foo(...)`, `inherited Foo.Bar`, `inherited Items[I]`: the
+        name is an ordinary nkIdent already bound by CrossResolveInherited
+        (overload included), so this is ResolveDecl on that name, as if the
+        name itself had been clicked.
       - bare `inherited;` (12.1.2): there is no name node the resolver could
-        have bound, so the target is looked up here - the ancestor's member of
-        the SAME NAME as the method the cursor is in, the overload with the
-        same arity when there are several (a bare inherited passes the
-        current parameters on unchanged).
+        have bound, so the target is TPasSemaProject.BareInheritedTarget's -
+        the ancestor's member of the SAME NAME as the METHOD the cursor is in
+        (a nested routine's own name does not count), the overload with the
+        method's declared arity when there are several (a bare inherited
+        passes the current parameters on unchanged); in a helper's method,
+        the extended type's ancestor's.
       The DECLARATION, like ResolveDecl; the caller applies its own redirect to
       the implementation (PasLsp.Server.HandleDefinition does, for every
       routine target alike). False off the keyword, outside a method, or when
@@ -5921,11 +5924,8 @@ function TPasNavigator.GotoBareInherited(AMid, ALine, ACol: Integer;
 var
   LM, LTM: TPasSemaModel;
   LCache: TNavCache;
-  LVis, LNameVis, LImplNode, LNameNode, LBody, LScopeNode: Integer;
-  LStruct, LMemMid, LMemSym, LCtx, LCand, LArity, LReq, LTot: Integer;
-  LQualIdents: TArray<Integer>;
-  LAnc: TSemaXType;
-  LVariadic: Boolean;
+  LVis, LNameVis, LNameNode, LHead, LParent, LKeyNode: Integer;
+  LMemMid, LMemSym, LCtx: Integer;
 begin
   Result := False;
   if (AMid < 0) or (AMid >= FProj.ModelCount) then
@@ -5945,61 +5945,49 @@ begin
   // bound, overload and all (CallTargetX) - hand it to ResolveDecl exactly as
   // a click on the name would. Only a truly bare `inherited;` needs the
   // lookup below.
+  // The parser hangs the whole selector chain under the nkInherited, so the
+  // name's parent is the nkCall of `inherited DrawItem(1)`, the nkMember of
+  // `inherited Canvas.Brush`, the nkIndex of `inherited Items[I]` - climbed
+  // as IsInheritedHead climbs it (audit A2-21: those forms went to the
+  // ancestor's method named like the ENCLOSING one).
   LNameVis := LVis + 1;
   if (LNameVis <= High(LM.Tree.Source.Visible)) and
      LCache.NodeOfVis.TryGetValue(LNameVis, LNameNode) and
-     (LM.Tree.Nodes[LM.Tree.Nodes[LNameNode].Parent].Kind = nkInherited) then
-    Exit(ResolveDecl(AMid, LNameNode, ATarget));
-
-  // The enclosing method's implementation - RoutineOfVis covers keyword
-  // positions too, unlike IdentAt (same lookup GotoDeclaration uses).
-  EnsureRoutinePairs(AMid, LCache);
-  LImplNode := LCache.RoutineOfVis[LVis];
-  if (LImplNode = NIL_NODE) or
-     not RTSegments(LM, LImplNode, LQualIdents, LNameNode) then
-    Exit;
-  // The block inside the body, not the nkRoutine itself: a routine node is
-  // stamped with the scope it is DECLARED in, its block with the body's own
-  // scope - the one that carries the Self context StructSymOfNode reads.
-  LBody := RTFindChildKind(LM, LImplNode, nkRoutineBody);
-  if LBody = NIL_NODE then
-    Exit;
-  LScopeNode := LM.Tree.Nodes[LBody].FirstChild;
-  if LScopeNode = NIL_NODE then
-    Exit;
-
-  // ResolveInheritedHead's own lookup (PasTree.Sema.Project) - repeated here
-  // because that pass only visits a NAMED head; a bare `inherited` has no
-  // node it could have bound.
-  LStruct := FProj.StructSymOfNode(LM, LScopeNode);
-  if LStruct = NIL_SYM then
-    Exit;
-  LAnc := FProj.AncestorOfX(XPlain(AMid, LStruct));
-  if not XValid(LAnc) or
-     not FProj.FindMemberX(AMid, LAnc, LM.Tree.NodeNameLower(LNameNode),
-       LMemMid, LMemSym, LCtx) then
-    Exit;
-
-  // A bare `inherited` passes the CURRENT method's parameters on unchanged
-  // (12.1.2), so among same-named ancestor overloads the one with that
-  // arity is the one called - FindMemberX answers the chain head, which for
-  // TSynEditPlugin.Create(AOwner) vs Create(AOwner, AHandlers) is the wrong
-  // half of the time. Arity, not full type matching: the same precision the
-  // decl<->impl pairing settles for. Head stays when nothing matches.
-  LTM := FProj.Model(LMemMid);
-  LArity := Length(RTParamNames(LM, LImplNode));
-  LCand := LMemSym;
-  while LCand <> NIL_SYM do
+     (LM.Tree.Nodes[LNameNode].Kind = nkIdent) then
   begin
-    if FProj.RoutineArity(LMemMid, LCand, LReq, LTot, LVariadic) and
-       (LArity >= LReq) and (LArity <= LTot) then
+    LHead := LNameNode;
+    LParent := LM.Tree.Nodes[LHead].Parent;
+    while (LParent <> NIL_NODE) and
+          (LM.Tree.Nodes[LParent].Kind in [nkMember, nkCall, nkIndex]) and
+          (LM.Tree.Nodes[LParent].FirstChild = LHead) do
     begin
-      LMemSym := LCand;
-      Break;
+      LHead := LParent;
+      LParent := LM.Tree.Nodes[LParent].Parent;
     end;
-    LCand := LTM.Symbols[LCand].NextOverload;
+    if (LParent <> NIL_NODE) and
+       (LM.Tree.Nodes[LParent].Kind = nkInherited) and
+       (LM.Tree.Nodes[LParent].FirstChild = LHead) then
+      Exit(ResolveDecl(AMid, LNameNode, ATarget));
   end;
 
+  // A bare `inherited`: the project's lookup (the enclosing METHOD's name
+  // and declared arity, a helper's extended type), shared with the typing
+  // of `inherited.X`. The keyword's own node is the anchor.
+  if not LCache.NodeOfVis.TryGetValue(LVis, LKeyNode) then
+    LKeyNode := NIL_NODE;
+  if LKeyNode = NIL_NODE then
+  begin
+    // No node recorded for the keyword: any node of the enclosing routine
+    // body serves - only its routine ancestry is read.
+    EnsureRoutinePairs(AMid, LCache);
+    LKeyNode := LCache.RoutineOfVis[LVis];
+    if LKeyNode <> NIL_NODE then
+      LKeyNode := RTFindChildKind(LM, LKeyNode, nkRoutineBody);
+  end;
+  if (LKeyNode = NIL_NODE) or
+     not FProj.BareInheritedTarget(AMid, LKeyNode, LMemMid, LMemSym, LCtx) then
+    Exit;
+  LTM := FProj.Model(LMemMid);
   Result := (LTM.Symbols[LMemSym].DeclNode <> NIL_NODE) and
     TargetFromNode(LMemMid, LTM.Symbols[LMemSym].DeclNode,
       LTM.Symbols[LMemSym].Name, ATarget);

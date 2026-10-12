@@ -2786,6 +2786,186 @@ begin
   TDirectory.Delete(LDir, True);
 end;
 
+// B30 (12.1.2; dcc64 37.0, local/probe-b30 I1, I2): what an `inherited`
+// names - the keyword of a named form with selectors, a bare one in a
+// nested routine (the METHOD's name), in an implementation that omits the
+// declared parameters (the declared arity), in a helper's method (the
+// extended type's X for the named form, its ancestor's for the bare one),
+// and a bare one used as a value (`inherited.X`).
+procedure TestInheritedTargets;
+const
+  INH_SYS =
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10;
+  INH_A =
+    'unit InhA;'#10 +                                          // 1
+    'interface'#10 +                                           // 2
+    'type'#10 +                                                // 3
+    '  TR = record X, Y: Integer; end;'#10 +                   // 4
+    '  TBase = class'#10 +                                     // 5
+    '    procedure Fin; virtual;'#10 +                         // 6
+    '    procedure Inner; virtual;'#10 +                       // 7
+    '    procedure Foo; overload;'#10 +                        // 8
+    '    procedure Foo(A: Integer); overload;'#10 +            // 9
+    '    function St: string; virtual;'#10 +                   // 10
+    '    procedure DrawItem(I: Integer);'#10 +                 // 11
+    '    procedure Paint; virtual;'#10 +                       // 12
+    '    function G: TR; virtual;'#10 +                        // 13
+    '  end;'#10 +                                              // 14
+    '  TMid = class(TBase)'#10 +                               // 15
+    '    function St: string; override;'#10 +                  // 16
+    '    function G: TR; override;'#10 +                       // 17
+    '  end;'#10 +                                              // 18
+    'implementation'#10 +                                      // 19
+    'procedure TBase.Fin; begin end;'#10 +
+    'procedure TBase.Inner; begin end;'#10 +
+    'procedure TBase.Foo; begin end;'#10 +
+    'procedure TBase.Foo(A: Integer); begin end;'#10 +
+    'function TBase.St: string; begin end;'#10 +
+    'procedure TBase.DrawItem(I: Integer); begin end;'#10 +
+    'procedure TBase.Paint; begin end;'#10 +
+    'function TBase.G: TR; begin end;'#10 +
+    'function TMid.St: string; begin end;'#10 +
+    'function TMid.G: TR; begin end;'#10 +
+    'end.'#10;
+  INH_B =
+    'unit InhB;'#10 +                                          // 1
+    'interface'#10 +                                           // 2
+    'uses InhA;'#10 +                                          // 3
+    'type'#10 +                                                // 4
+    '  TN = class(TBase)'#10 +                                 // 5
+    '    procedure Fin; override;'#10 +                        // 6
+    '    procedure Paint; override;'#10 +                      // 7
+    '  end;'#10 +                                              // 8
+    '  TDer = class(TBase)'#10 +                               // 9
+    '    procedure Foo(A: Integer);'#10 +                      // 10
+    '  end;'#10 +                                              // 11
+    '  TLow = class(TMid)'#10 +                                // 12
+    '    function G: TR; override;'#10 +                       // 13
+    '  end;'#10 +                                              // 14
+    '  TH0 = class helper for TMid'#10 +                       // 15
+    '    function St: string;'#10 +                            // 16
+    '  end;'#10 +                                              // 17
+    '  TH = class helper(TH0) for TMid'#10 +                   // 18
+    '    function St: string;'#10 +                            // 19
+    '    procedure Fin;'#10 +                                  // 20
+    '  end;'#10 +                                              // 21
+    'implementation'#10 +                                      // 22
+    'procedure TN.Fin;'#10 +                                   // 23
+    '  procedure Inner; begin inherited; end;'#10 +            // 24
+    'begin Inner; end;'#10 +                                   // 25
+    'procedure TN.Paint;'#10 +                                 // 26
+    'begin'#10 +                                               // 27
+    '  inherited DrawItem(1);'#10 +                            // 28
+    '  inherited Paint;'#10 +                                  // 29
+    'end;'#10 +                                                // 30
+    'procedure TDer.Foo;'#10 +                                 // 31
+    'begin'#10 +                                               // 32
+    '  inherited;'#10 +                                        // 33
+    'end;'#10 +                                                // 34
+    'function TLow.G: TR;'#10 +                                // 35
+    'var I: Integer;'#10 +                                     // 36
+    'begin'#10 +                                               // 37
+    '  I := inherited.X;'#10 +                                 // 38
+    '  Result.Y := inherited.Y + I;'#10 +                      // 39
+    'end;'#10 +                                                // 40
+    'function TH0.St: string; begin end;'#10 +                 // 41
+    'function TH.St: string;'#10 +                             // 42
+    'begin'#10 +                                               // 43
+    '  Result := inherited St;'#10 +                           // 44
+    '  Result := inherited;'#10 +                              // 45
+    'end;'#10 +                                                // 46
+    'procedure TH.Fin;'#10 +                                   // 47
+    'begin'#10 +                                               // 48
+    '  inherited;'#10 +                                        // 49
+    'end;'#10 +                                                // 50
+    'end.'#10;                                                 // 51
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LMid: Integer;
+  LLines: TArray<string>;
+
+  // The column of the first AWord on line ALine of INH_B.
+  function ColOf(ALine: Integer; const AWord: string): Integer;
+  begin
+    Result := Pos(AWord, LLines[ALine - 1]);
+  end;
+
+  // `InhA:<line> <name>` of the keyword's target, or '-'.
+  function Kw(ALine: Integer): string;
+  var
+    T: TPasNavTarget;
+  begin
+    if LNav.GotoBareInherited(LMid, ALine, ColOf(ALine, 'inherited'), T) then
+      Result := ChangeFileExt(ExtractFileName(T.FilePath), '') + ':' +
+        IntToStr(T.Line) + ' ' + T.Name
+    else
+      Result := '-';
+  end;
+
+  // The same for the identifier AWord on line ALine.
+  function Id(ALine: Integer; const AWord: string): string;
+  var
+    I: TPasNavIdent;
+    T: TPasNavTarget;
+  begin
+    if LNav.IdentAt(LMid, ALine, ColOf(ALine, AWord), I) and
+       LNav.ResolveDecl(LMid, I.Node, T) then
+      Result := ChangeFileExt(ExtractFileName(T.FilePath), '') + ':' +
+        IntToStr(T.Line) + ' ' + T.Name
+    else
+      Result := '-';
+  end;
+
+begin
+  LLines := string(INH_B).Split([#10]);
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_nav_inherited');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), INH_SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'InhA.pas'), INH_A);
+  TFile.WriteAllText(TPath.Combine(LDir, 'InhB.pas'), INH_B);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    LProj.ReportUnresolvedMembers := True;
+    LProj.AnalyzeDirectory(LDir);
+    LNav := TPasNavigator.Create(LProj);
+    try
+      LMid := LNav.ModelIdOf(TPath.Combine(LDir, 'InhB.pas'));
+      Ok('inherited: model found', LMid >= 0);
+      Ok('inherited: in a nested routine, the METHOD''s name [' + Kw(24) +
+        ']', Kw(24) = 'InhA:6 Fin');
+      Ok('inherited: the keyword of `inherited DrawItem(1)` [' + Kw(28) +
+        ']', Kw(28) = 'InhA:11 DrawItem');
+      Ok('inherited: the keyword of `inherited Paint` [' + Kw(29) + ']',
+        Kw(29) = 'InhA:12 Paint');
+      Ok('inherited: parameters left out of the implementation - the ' +
+        'declared arity [' + Kw(33) + ']', Kw(33) = 'InhA:9 Foo');
+      Ok('inherited: a helper''s named form is the extended type''s, past ' +
+        'the ancestor helper [' + Id(44, 'St') + ']',
+        Id(44, 'St') = 'InhA:16 St');
+      Ok('inherited: a helper''s bare form is the extended type''s ' +
+        'ancestor''s [' + Kw(45) + ']', Kw(45) = 'InhA:10 St');
+      Ok('inherited: ...a procedure too [' + Kw(49) + ']',
+        Kw(49) = 'InhA:6 Fin');
+      Ok('inherited: `inherited.X` is typed [' + Id(38, 'X') + ']',
+        Id(38, 'X') = 'InhA:4 X');
+      Ok('inherited: `inherited.Y` in an expression [' + Id(39, 'Y') + ']',
+        Id(39, 'Y') = 'InhA:4 Y');
+      Ok('inherited: no E2003 in InhB',
+        DiagCount(LProj.Model(LMid), 'E2003') = 0);
+    finally
+      LNav.Free;
+    end;
+  finally
+    LProj.Free;
+  end;
+  TDirectory.Delete(LDir, True);
+end;
+
 procedure TestCaretEdges;
 const
   UNIT_CARET =
@@ -5879,6 +6059,7 @@ begin
   TestReleasedModels;
   TestCaretEdges;
   TestOverrideIndex;
+  TestInheritedTargets;
   TestRoutinePairs;
   TestUnitIdentity;
   TestUnusedUses;

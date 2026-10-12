@@ -1325,12 +1325,31 @@ type
     function FindMemberX(AFromMid: Integer; const ABase: TSemaXType;
       const ANameLower: string;
       out AMemMid, AMemSym: Integer; out ACtx: Integer;
-      ADepth: Integer = 0): Boolean; overload;
+      ADepth: Integer = 0; ANoHelpers: Boolean = False): Boolean; overload;
     // The same by key - PasNodeKey over the member-name node costs no string.
     function FindMemberX(AFromMid: Integer; const ABase: TSemaXType;
       const AKey: TSemaKey;
       out AMemMid, AMemSym: Integer; out ACtx: Integer;
-      ADepth: Integer = 0): Boolean; overload;
+      ADepth: Integer = 0; ANoHelpers: Boolean = False): Boolean; overload;
+    { Where the lookup of an `inherited` in a method of AStruct starts
+      (12.1.2): the ancestor of AStruct - but in a HELPER's method the
+      extended type itself for a named `inherited X`, its ancestor for a bare
+      one, with every helper skipped (ANoHelpers, for FindMemberX): the
+      helper's own members and its ancestor helpers' are never what
+      `inherited` means (dcc64 37.0, local/probe-b30 I1). XNil when there is
+      no ancestor. }
+    function InheritedStartX(AMid, AStruct: Integer; ABare: Boolean;
+      out ANoHelpers: Boolean): TSemaXType;
+    { The method a BARE `inherited` at ANode calls (12.1.2): the ancestor's
+      member named like the enclosing METHOD - a nested routine or an
+      anonymous method inside it changes neither the name nor the arguments
+      (local/probe-b30 I2) - picked among its overloads by the method's
+      DECLARED arity, which an implementation of a non-overloaded method may
+      leave unwritten (`procedure TDer.Foo;` for `Foo(A: Integer)`, I1).
+      GotoBareInherited and the typing of `inherited.X` / `inherited + 1`
+      both read it. False when there is no method or no such member. }
+    function BareInheritedTarget(AMid, ANode: Integer;
+      out AMemMid, AMemSym, ACtx: Integer): Boolean;
     function IsConstructorSym(AMid, ASym: Integer): Boolean;
     function IsClassCtorDtorSym(AMid, ASym: Integer): Boolean;
     function XParamSyms(AMid, ASym: Integer): TArray<Integer>;
@@ -9711,6 +9730,144 @@ begin
     Result := ResolveTypeExprNested(AMid, LLast);
 end;
 
+function TPasSemaProject.InheritedStartX(AMid, AStruct: Integer;
+  ABare: Boolean; out ANoHelpers: Boolean): TSemaXType;
+var
+  LExt: TSemaXType;
+begin
+  ANoHelpers := False;
+  LExt := HelperTargetX(AMid, AStruct);
+  if not XValid(LExt) then
+    Exit(AncestorOfX(XPlain(AMid, AStruct)));
+  // A helper's method: `inherited X` is the extended type's X, declared there
+  // or inherited, and a bare `inherited` the method of the method's name in
+  // the extended type's ANCESTOR - TH.St's `inherited St` runs TMid.St past
+  // TH0.St of the ancestor helper TH0, its bare `inherited` TBase.St.
+  ANoHelpers := True;
+  if ABare then
+    Result := AncestorOfX(LExt)
+  else
+    Result := LExt;
+end;
+
+function TPasSemaProject.BareInheritedTarget(AMid, ANode: Integer;
+  out AMemMid, AMemSym, ACtx: Integer): Boolean;
+var
+  LM, LTM: TPasSemaModel;
+  LNode, LRoutine, LChild, LBody, LStruct, LNameNode, LParam, LName: Integer;
+  LArity, LReq, LTot, LDecl, LScope, LCand: Integer;
+  LParams: Boolean;
+  LVariadic, LNoHelpers: Boolean;
+  LKey: TSemaKey;
+  LStart: TSemaXType;
+begin
+  Result := False;
+  AMemMid := NIL_SYM;
+  AMemSym := NIL_SYM;
+  ACtx := NIL_INST;
+  if (AMid < 0) or (AMid >= FModels.Count) then
+    Exit;
+  LM := FModels[AMid];
+  if (ANode < 0) or (ANode > High(LM.Tree.Nodes)) then
+    Exit;
+  // The OUTERMOST routine with a body around ANode is the method: a method
+  // is never declared inside a routine, so every routine between is a
+  // nested one (or an anonymous method).
+  LRoutine := NIL_NODE;
+  LNode := LM.Tree.Nodes[ANode].Parent;
+  while LNode <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LNode].Kind = nkRoutine then
+      LRoutine := LNode;
+    LNode := LM.Tree.Nodes[LNode].Parent;
+  end;
+  if LRoutine = NIL_NODE then
+    Exit;
+  // Its name - the last of the header's name segments - and its written
+  // parameter count.
+  LBody := NIL_NODE;
+  LNameNode := NIL_NODE;
+  LParams := False;
+  LArity := 0;
+  LChild := LM.Tree.Nodes[LRoutine].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    case LM.Tree.Nodes[LChild].Kind of
+      nkIdent:
+        if (nfName in LM.Tree.Nodes[LChild].Flags) and not LParams then
+          LNameNode := LChild;
+      nkParams:
+        begin
+          LParams := True;
+          LParam := LM.Tree.Nodes[LChild].FirstChild;
+          while LParam <> NIL_NODE do
+          begin
+            if LM.Tree.Nodes[LParam].Kind = nkParam then
+            begin
+              LName := LM.Tree.Nodes[LParam].FirstChild;
+              while LName <> NIL_NODE do
+              begin
+                if (LM.Tree.Nodes[LName].Kind = nkIdent) and
+                   (nfName in LM.Tree.Nodes[LName].Flags) then
+                  Inc(LArity);
+                LName := LM.Tree.Nodes[LName].NextSibling;
+              end;
+            end;
+            LParam := LM.Tree.Nodes[LParam].NextSibling;
+          end;
+        end;
+      nkRoutineBody:
+        LBody := LChild;
+    end;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+  // The block inside the body carries the method scope's Self context; the
+  // routine node itself is stamped with the scope it is declared in.
+  if (LBody = NIL_NODE) or (LNameNode = NIL_NODE) or
+     (LM.Tree.Nodes[LBody].FirstChild = NIL_NODE) then
+    Exit;
+  LStruct := StructSymOfNode(LM, LM.Tree.Nodes[LBody].FirstChild);
+  if LStruct = NIL_SYM then
+    Exit;
+  LKey := PasNodeKey(LM.Tree, LNameNode);
+  // No parameter list written: a non-overloaded method may be implemented
+  // so, and its arguments are still the declaration's (I1: TDer.Foo with
+  // `Foo(A: Integer)` declared calls TBase.Foo(A), not TBase.Foo).
+  if not LParams then
+  begin
+    LScope := LM.Symbols[LStruct].MemberScope;
+    if LScope <> NIL_SCOPE then
+    begin
+      LDecl := LM.FindLocalNoHelpers(LScope, LKey);
+      if (LDecl <> NIL_SYM) and (LM.Symbols[LDecl].NextOverload = NIL_SYM) and
+         RoutineArity(AMid, LDecl, LReq, LTot, LVariadic) then
+        LArity := LTot;
+    end;
+  end;
+  LStart := InheritedStartX(AMid, LStruct, True, LNoHelpers);
+  if not XValid(LStart) or
+     not FindMemberX(AMid, LStart, LKey, AMemMid, AMemSym, ACtx, 0,
+       LNoHelpers) then
+    Exit;
+  // The arguments passed on are the method's own, so among same-named
+  // ancestor overloads the one taking that many is called - arity, not
+  // full type matching, the precision the decl/impl pairing settles for.
+  // The chain head stays when none fits.
+  LTM := FModels[AMemMid];
+  LCand := AMemSym;
+  while LCand <> NIL_SYM do
+  begin
+    if RoutineArity(AMemMid, LCand, LReq, LTot, LVariadic) and
+       (LArity >= LReq) and (LArity <= LTot) then
+    begin
+      AMemSym := LCand;
+      Break;
+    end;
+    LCand := LTM.Symbols[LCand].NextOverload;
+  end;
+  Result := True;
+end;
+
 // Member lookup by name on a type, following type aliases and the first
 // heritage entry (ancestor class / base interface) across models, closing
 // each hop over the current instantiation. ACtx returns the instantiation
@@ -9720,16 +9877,16 @@ end;
 function TPasSemaProject.FindMemberX(AFromMid: Integer;
   const ABase: TSemaXType;
   const ANameLower: string; out AMemMid, AMemSym: Integer;
-  out ACtx: Integer; ADepth: Integer): Boolean;
+  out ACtx: Integer; ADepth: Integer; ANoHelpers: Boolean): Boolean;
 begin
   Result := FindMemberX(AFromMid, ABase, SemaKey(ANameLower), AMemMid,
-    AMemSym, ACtx, ADepth);
+    AMemSym, ACtx, ADepth, ANoHelpers);
 end;
 
 function TPasSemaProject.FindMemberX(AFromMid: Integer;
   const ABase: TSemaXType;
   const AKey: TSemaKey; out AMemMid, AMemSym: Integer;
-  out ACtx: Integer; ADepth: Integer): Boolean;
+  out ACtx: Integer; ADepth: Integer; ANoHelpers: Boolean): Boolean;
 var
   LCur, LNext: TSemaXType;
   LM: TPasSemaModel;
@@ -9746,7 +9903,9 @@ begin
   AMemSym := NIL_SYM;
   ACtx := NIL_INST;
   LCur := ABase;
-  LDistinct := False;
+  // ANoHelpers: no helper answers at any hop - the lookup an `inherited` in a
+  // helper method makes (12.1.2, InheritedStartX), as past a distinct type.
+  LDistinct := ANoHelpers;
   for LDepth := 1 to 32 do
   begin
     if not XValid(LCur) then
@@ -9779,7 +9938,7 @@ begin
         if XValid(LNext) and
            not ((LNext.UnitId = LCur.UnitId) and (LNext.Sym = LCur.Sym)) and
            FindMemberX(AFromMid, LNext, AKey, AMemMid, AMemSym, ACtx,
-             ADepth + 1) then
+             ADepth + 1, ANoHelpers) then
           Exit(True);
       Exit;
     end;
@@ -9950,7 +10109,7 @@ begin
           for var LAncIdx := 0 to High(LRefs) - 1 do
             if FindMemberX(AFromMid,
                  ResolveTypeExpr(LCur.UnitId, LRefs[LAncIdx]), AKey,
-                 AMemMid, AMemSym, ACtx, ADepth + 1) then
+                 AMemMid, AMemSym, ACtx, ADepth + 1, ANoHelpers) then
               Exit(True);
           LNext := ResolveTypeExpr(LCur.UnitId, LRefs[High(LRefs)]);
         end;
@@ -11721,23 +11880,25 @@ var
               (LM.Tree.Nodes[LParent].FirstChild = N);
   end;
 
-  { Re-points an inherited head at the ANCESTOR's member of that name. Leaves
-    the node alone when the enclosing struct has no ancestry, or the ancestry
-    has no such name - the existing binding is then still the best guess. }
+  { Re-points an inherited head at the ANCESTOR's member of that name - in a
+    helper's method the extended type's (InheritedStartX). Leaves the node
+    alone when the enclosing struct has no ancestry, or the ancestry has no
+    such name - the existing binding is then still the best guess. }
   procedure ResolveInheritedHead(N: Integer);
   var
     LStruct, LMemMid, LMemSym, LCtx: Integer;
     LAnc: TSemaXType;
     LExt: TPasExtRef;
+    LNoHelpers: Boolean;
   begin
     LStruct := StructSymOfNode(LM, N);
     if LStruct = NIL_SYM then
       Exit;
-    LAnc := AncestorOfX(XPlain(AId, LStruct));
+    LAnc := InheritedStartX(AId, LStruct, False, LNoHelpers);
     if not XValid(LAnc) then
       Exit;
     if not FindMemberX(AId, LAnc, PasNodeKey(LM.Tree, N),
-         LMemMid, LMemSym, LCtx) then
+         LMemMid, LMemSym, LCtx, 0, LNoHelpers) then
       Exit;
     if LMemMid = AId then
       SetRefAt(N, LMemSym)
@@ -12030,6 +12191,7 @@ var
   var
     LChild, LBase, LName, LSym, LMemMid, LMemSym, LCtx: Integer;
     LBestMid, LBestSym, LMemCtx, LIdxMid, LIdxSym: Integer;
+    LIMid, LISym, LICtx: Integer;
     LAmbiguous: Boolean;
     LExt: TPasExtRef;
     LBX: TSemaXType;
@@ -12797,11 +12959,21 @@ var
       // its chain's. Nothing typed the nkInherited node itself before this,
       // which is why `with inherited Canvas do` (Vcl.ExtCtrls) needed a case
       // of its own in the with-target typer; here it needs one line.
+      // A BARE `inherited` used as a value - `inherited.AsExtended`
+      // (FMX.Grid.Style), `Result := inherited + 1` - is the call of the
+      // method it names (BareInheritedTarget): its result, in its frame.
       nkInherited:
         begin
           LChild := LM.Tree.Nodes[N].FirstChild;
           if LChild <> NIL_NODE then
-            SetXAt(N, GetX(LChild));
+            SetXAt(N, GetX(LChild))
+          else if BareInheritedTarget(AId, N, LIMid, LISym, LICtx) and
+             (FModels[LIMid].Symbols[LISym].Kind = skRoutine) then
+          begin
+            LBX := SubstX(DeclTypeX(LIMid, LISym), LICtx, 0);
+            if XValid(LBX) then
+              SetXAt(N, LBX);
+          end;
         end;
 
       nkInlineIf:
