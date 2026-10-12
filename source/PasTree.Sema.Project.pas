@@ -88,6 +88,13 @@ type
     TargetUnit: Integer;      // NIL_SYM => builtin target, use TargetName
     TargetSym: Integer;
     TargetName: string;       // lower-case; builtin targets only
+    // A helper for a CLOSED instantiation (`class helper for TList<Integer>`)
+    // extends that instantiation only, and helpers for two instantiations of
+    // one generic are both active (15.3.1; dcc64 37.0, local/probe-b29 G1,
+    // G2): keyed by the instance (HelperInstKey), TargetUnit NIL_SYM and
+    // TargetName '' - never under the generic's own symbol, where the later
+    // helper took the earlier one's slot and answered every TList<X>.
+    TargetInst: Integer;      // NIL_INST unless the target is an instantiation
     // Every FURTHER identity of the extended type: the plain-alias chain
     // behind TargetUnit/TargetSym (`Winapi.Windows.TRect = System.Types
     // .TRect`). One type, several symbols, and which one a VALUE carries
@@ -9154,6 +9161,21 @@ end;
 // write simply wins. Writes ONLY FHelperIdx[AMid] - phase B farms one worker
 // per referring model, so this is the own-slot write discipline every
 // parallel pass here follows.
+// The helper index's key of an extended type (AUnit, ASym) - the one layout
+// PublishHelper writes and ActiveHelperOf and UpdateHelperMap read.
+function HelperKey(AUnit, ASym: Integer): Int64; inline;
+begin
+  Result := (Int64(AUnit) shl 32) or Cardinal(ASym);
+end;
+
+// ...and of a closed instantiation: instance indexes are one per type
+// (Instantiate keys builtin arguments canonically) and survive a module run,
+// so the index is the identity; MaxInt is no model id.
+function HelperInstKey(AInst: Integer): Int64; inline;
+begin
+  Result := HelperKey(MaxInt, AInst);
+end;
+
 procedure TPasSemaProject.PublishHelper(AMid: Integer;
   const AReg: TPasHelperReg);
 var
@@ -9166,13 +9188,14 @@ var
       Exit;
     if FHelperIdx[AMid] = nil then
       FHelperIdx[AMid] := TDictionary<Int64, TPasExtRef>.Create;
-    FHelperIdx[AMid].AddOrSetValue(
-      (Int64(AUnit) shl 32) or Cardinal(ASym), LExt);
+    FHelperIdx[AMid].AddOrSetValue(HelperKey(AUnit, ASym), LExt);
   end;
 
 begin
   LExt.UnitId := AReg.HelperMid;
   LExt.Sym := AReg.Sym;
+  if AReg.TargetInst <> NIL_INST then
+    Put(MaxInt, AReg.TargetInst);
     // A concrete type is one identity - but it may ALSO be an alias of a
     // builtin, and then it is that builtin's identity too (`TUInt32Helper =
     // record helper for UInt32` in System.Classes, applied to a value declared
@@ -9280,11 +9303,23 @@ begin
       end;
       if LLast = NIL_NODE then
         Continue;
-      LX := ResolveTypeExpr(AMid, LLast);
+      // Nested-aware: `record helper for TOuter.TInner` written in another
+      // unit than TOuter leaves the nested segment unbound for the plain
+      // resolve, and the helper registered nothing (audit B3-33).
+      LX := ResolveTypeExprNested(AMid, LLast);
       if not XValid(LX) then
         Continue;   // target didn't resolve - nothing to inject
       LReg.Aliases := nil;
-      if FModels[LX.UnitId].Symbols[LX.Sym].Kind = skBuiltinType then
+      LReg.TargetInst := NIL_INST;
+      if LX.Inst <> NIL_INST then
+      begin
+        // A closed instantiation: its instance is its identity (TargetInst).
+        LReg.TargetUnit := NIL_SYM;
+        LReg.TargetSym := NIL_SYM;
+        LReg.TargetName := '';
+        LReg.TargetInst := LX.Inst;
+      end
+      else if FModels[LX.UnitId].Symbols[LX.Sym].Kind = skBuiltinType then
       begin
         LReg.TargetUnit := NIL_SYM;
         LReg.TargetSym := NIL_SYM;
@@ -9305,7 +9340,7 @@ begin
           if LCDef = NIL_NODE then
             Break;
           if not (FModels[LCanon.UnitId].Tree.Nodes[LCDef].Kind in
-             [nkIdent, nkMember]) then
+             [nkIdent, nkMember, nkTypeArgs]) then
             Break;
           // `T = type Base` (2 sec. 2.5.1) declares a DISTINCT type, and a helper
           // for it is NOT a helper for Base. The parser marks the nkTypeDecl
@@ -9320,9 +9355,18 @@ begin
              (FModels[LCanon.UnitId].Tree.Nodes[LCParent].Kind = nkTypeDecl) and
              (FModels[LCanon.UnitId].Tree.Nodes[LCParent].Aux = 1) then
             Break;
-          LCanon := ResolveTypeExpr(LCanon.UnitId, LCDef);
+          // Nested-aware, as CanonTypeX: `TAl = TOuter.TInner` in another
+          // unit than TOuter (B3-33).
+          LCanon := ResolveTypeExprNested(LCanon.UnitId, LCDef);
           if not XValid(LCanon) then
             Break;
+          // `TIntList = TList<Integer>`: the alias ends at an instantiation,
+          // and a TList<Integer> value carries the instance, not the alias.
+          if LCanon.Inst <> NIL_INST then
+          begin
+            LReg.TargetInst := LCanon.Inst;
+            Break;
+          end;
           // Same type, another symbol - index the helper under it too. Only
           // reached for a PLAIN alias: the `type Base` test above has already
           // broken out of the walk for a distinct type.
@@ -9456,7 +9500,7 @@ procedure TPasSemaProject.UpdateHelperMap(const AIds: TArray<Integer>;
         if LExt.Sym = NIL_SYM then
           Continue;   // the helper itself is gone
       end;
-      LNew.AddOrSetValue((Int64(LKeyUnit) shl 32) or Cardinal(LKeySym), LExt);
+      LNew.AddOrSetValue(HelperKey(LKeyUnit, LKeySym), LExt);
     end;
     ADict.Free;
     ADict := LNew;
@@ -9473,6 +9517,7 @@ procedure TPasSemaProject.UpdateHelperMap(const AIds: TArray<Integer>;
       if (A[LIdx].TargetUnit <> B[LIdx].TargetUnit) or
          (A[LIdx].TargetSym <> B[LIdx].TargetSym) or
          (A[LIdx].TargetName <> B[LIdx].TargetName) or
+         (A[LIdx].TargetInst <> B[LIdx].TargetInst) or
          (A[LIdx].HelperMid <> B[LIdx].HelperMid) or
          (A[LIdx].Sym <> B[LIdx].Sym) or
          (A[LIdx].Exported <> B[LIdx].Exported) or
@@ -9609,10 +9654,15 @@ var
 
 begin
   Result := False;
+  // A closed instantiation's own helper first (TPasHelperReg.TargetInst).
+  if (ACur.Inst <> NIL_INST) and (AFromMid >= 0) and
+     (AFromMid <= High(FHelperIdx)) and (FHelperIdx[AFromMid] <> nil) and
+     FHelperIdx[AFromMid].TryGetValue(HelperInstKey(ACur.Inst), AExt) then
+    Exit(True);
   if (AFromMid < 0) or (AFromMid > High(FHelperIdx)) or
      (FHelperIdx[AFromMid] = nil) or
      not FHelperIdx[AFromMid].TryGetValue(
-       (Int64(ACur.UnitId) shl 32) or Cardinal(ACur.Sym), AExt) then
+       HelperKey(ACur.UnitId, ACur.Sym), AExt) then
   begin
     // A BUILTIN type has no single identity: every model SEEDS its own
     // `string`/`Integer`/`Char` symbol (PasTree.Sema.Builtins), so which one a
@@ -9634,7 +9684,7 @@ begin
       LOwn := FModels[AFromMid].Resolve(FModels[AFromMid].SystemScope,
         FModels[ACur.UnitId].Symbols[ACur.Sym].NameLower);
       if (LOwn <> NIL_SYM) and FHelperIdx[AFromMid].TryGetValue(
-           (Int64(AFromMid) shl 32) or Cardinal(LOwn), AExt) then
+           HelperKey(AFromMid, LOwn), AExt) then
         Exit(True);
     end;
     Exit(OwnUnitHelper);
@@ -9670,6 +9720,12 @@ begin
     if LScope = NIL_SCOPE then
       Exit;
     LFound := FModels[LExt.UnitId].FindLocalDeep(LScope, AKey);
+    // A helper's `class constructor` is never what a name means (15.1.5) -
+    // the own-scope walk in FindMemberX and EnumMembersX skip it already;
+    // here it hid the extended class's real `Create` for navigation, Find
+    // References and call typing (audit B3-28, local/probe-b29 C1).
+    while (LFound <> NIL_SYM) and IsClassCtorDtorSym(LExt.UnitId, LFound) do
+      LFound := FModels[LExt.UnitId].Symbols[LFound].NextOverload;
     if LFound <> NIL_SYM then
     begin
       AMemMid := LExt.UnitId;
@@ -9970,8 +10026,10 @@ begin
     // members: a helper member HIDES the type's own of the same name
     // (dcc-verified). Checking per hop also covers descendants - a helper
     // for TBase applies to a TDerived value once the walk reaches TBase.
-    // ACtx deliberately NIL_INST: a helper cannot extend an instantiation,
-    // so its members' types never involve the target's parameters.
+    // ACtx deliberately NIL_INST: a helper extends either a plain type or
+    // one CLOSED instantiation (TPasHelperReg.TargetInst), written with its
+    // arguments, so its members' types never involve the target's
+    // parameters.
     // Past a `T = type Base` hop the walk reads Base's members, but Base's
     // helpers are not T's (2.5.1: a distinct type; F50 - TStringHelper.Length
     // answered for a `TEditMask = type string`, where dcc gives E2018).

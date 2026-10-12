@@ -6241,6 +6241,80 @@ begin
   end;
 end;
 
+// B29 (A3-15, B3-33, B3-28): a helper for a closed instantiation extends
+// that instantiation only, both of two such helpers are active; a helper for
+// an alias of another unit's nested type reaches a value of the nested type;
+// a helper's class constructor is not what `TFoo.Create` means (15.3.1,
+// 15.1.5; dcc64 37.0, local/probe-b29 G1, G2, N1, C1).
+procedure TestHelperIdentity;
+var
+  LDir: string;
+begin
+  LDir := FreshDir('pastree_sema_helperid');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HiGen.pas'),
+    'unit HiGen;'#10'interface'#10'type'#10 +
+    '  TBox<T> = class end;'#10 +
+    '  TFoo = class'#10'    constructor Create(A: Integer);'#10'  end;'#10 +
+    '  TOuter = class'#10'  public type'#10 +
+    '    TInner = record X: Integer; end;'#10'  end;'#10 +
+    'var GR: TOuter.TInner;'#10 +
+    'implementation'#10 +
+    'constructor TFoo.Create(A: Integer); begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HiHlp.pas'),
+    'unit HiHlp;'#10'interface'#10'uses HiGen;'#10'type'#10 +
+    '  THI = class helper for TBox<Integer>'#10 +
+    '    function SumI: Integer;'#10'  end;'#10 +
+    '  THS = class helper for TBox<string>'#10 +
+    '    function JoinS: string;'#10'  end;'#10 +
+    '  TAl = TOuter.TInner;'#10 +
+    '  THelp = record helper for TAl'#10'    procedure Ext;'#10'  end;'#10 +
+    '  TFooHelper = class helper for TFoo'#10 +
+    '    class constructor Create;'#10'    procedure Extra;'#10'  end;'#10 +
+    'implementation'#10 +
+    'function THI.SumI: Integer; begin Result := 1; end;'#10 +
+    'function THS.JoinS: string; begin Result := ''''; end;'#10 +
+    'procedure THelp.Ext; begin end;'#10 +
+    'class constructor TFooHelper.Create; begin end;'#10 +
+    'procedure TFooHelper.Extra; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HiNeg.pas'),
+    'unit HiNeg;'#10'interface'#10'uses HiGen, HiHlp;'#10 +
+    'procedure P;'#10'implementation'#10 +
+    'procedure P;'#10'var LS: TBox<string>; I: Integer;'#10 +
+    'begin'#10'  I := LS.SumI;'#10'end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HiP.dpr'),
+    'program HiP;'#10'uses HiGen, HiHlp, HiNeg;'#10 +
+    'var LI: TBox<Integer>; LS: TBox<string>; I: Integer; S: string;'#10 +
+    '  F: TFoo;'#10 +
+    'begin'#10 +
+    '  I := LI.SumI;'#10 +
+    '  S := LS.JoinS;'#10 +
+    '  GR.Ext;'#10 +
+    '  F := TFoo.Create(1);'#10 +
+    '  F.Extra;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'HiP.dpr'));
+    Ok('helperid: both instantiation helpers, the nested-alias helper and' +
+      ' the helper beside a class constructor answer - no E2003 [' +
+      IntToStr(DiagCount(ModelByName('hip'), 'E2003')) + ']',
+      DiagCount(ModelByName('hip'), 'E2003') = 0);
+    Ok('helperid: TBox<Integer>''s helper is not TBox<string>''s',
+      DiagCount(ModelByName('hineg'), 'E2003') = 1);
+    Ok('helperid: TFoo.Create is TFoo''s constructor, not the helper''s' +
+      ' class constructor',
+      CrossRefCountInUnit(ModelByName('hip'), 'Create', 'Create', 'higen') = 1);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestDeclAfterUnit;
 const
   UFA =
@@ -12167,6 +12241,7 @@ begin
   TestAttributeSuffixFirst;
   TestHelperVisibility;
   TestBuiltinIdentity;
+  TestHelperIdentity;
   TestOracleDepth;
   TestInstanceSize;
   TestOperatorChains;
