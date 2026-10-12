@@ -71,6 +71,27 @@ type
     Text: TSemaTextKind;
   end;
 
+  { What Ord, Pred / Succ and Low / High read of an ordinal argument
+    (4.11.4; OrdAnswer, OrdStepAnswer). Builtin: the NameLower of the
+    builtin it is stored as (aliases and distinct `type X` of a number
+    chased), '' for an enumeration or subrange of its own; Rank that
+    builtin's NumRank. IsConst: a literal, a true constant or an enumeration
+    value - dcc folds Ord / Hi / Lo / Swap of one to Integer. HasRange: Lo..Hi
+    is the ordinal range of the enumeration or subrange type. }
+  TSemaOrdFacts = record
+    Cat: TSemaTypeCat;
+    Builtin: string;
+    Rank: Byte;
+    IsConst, HasRange: Boolean;
+    Lo, Hi: Int64;
+  end;
+
+  { The ordinal value a NAME node of the tree stands for - an enumeration
+    value, a true constant, True / False - for OrdinalNodeValue; each typer
+    supplies its own binding lookup. ADepth guards a cycle of constants. }
+  TSemaOrdNameValue = reference to function(ANode, ADepth: Integer;
+    out AValue: Int64): Boolean;
+
   // The type, as one of THIS model's symbols, of an ident the model itself no
   // longer binds (its binding lives in ExtRefMap) - NIL_SYM when it cannot be
   // named in this model's terms. Supplied by the project for recheck mode.
@@ -121,6 +142,10 @@ type
     function ProcTypeResult(ASym: Integer): Integer;
     function IntrinsicResult(ACall, AHead: Integer): Integer;
     function WidenOrdinal(ASym: Integer): Integer;
+    function OrdNameValue: TSemaOrdNameValue;
+    function IsConstArg(ANode: Integer): Boolean;
+    function OrdFacts(ANode, ASym: Integer): TSemaOrdFacts;
+    function OrdStep(ASym: Integer): Integer;
     function ArrayDefOf(ASym: Integer): Integer;
     function IsDynArrayDef(ADef: Integer): Boolean;
     function ArrayBoundType(ADef: Integer): Integer;
@@ -342,6 +367,39 @@ function RealLiteralNode(const ATree: TPasTree; ANode: Integer): Integer;
   unreadable. }
 function PasLiteralTypeName(const ATree: TPasTree; ANode: Integer;
   ANegated, AIs64: Boolean): string;
+
+{ The ordinal value of constant ANode of ATree: an integer literal under
+  parentheses and signs, a one-character literal ('a', #65, #$41, ^A), or a
+  name AName resolves (an enumeration value, a true constant). False for
+  anything else, and past ADepth 8. }
+function OrdinalNodeValue(const ATree: TPasTree; ANode, ADepth: Integer;
+  const AName: TSemaOrdNameValue; out AValue: Int64): Boolean;
+
+{ The ordinal of enumeration element AElem (an nkEnumValue node of ATree):
+  its explicit value, else one past the previous element's (the first is
+  0). dcc keeps an explicit value's low 32 bits, signed (2.2.4). }
+function EnumElemValue(const ATree: TPasTree; AElem, ADepth: Integer;
+  const AName: TSemaOrdNameValue; out AValue: Int64): Boolean;
+
+{ The ordinal range of type definition ADef of ATree - an nkEnumType (its
+  elements' least and greatest values) or an nkSubrange (its bounds). }
+function OrdinalDefRange(const ATree: TPasTree; ADef: Integer;
+  const AName: TSemaOrdNameValue; out ALo, AHi: Int64): Boolean;
+
+{ Ord's result (4.11.4; dcc32 / dcc64 37.0, local/probe-b38 T64 T32 Q2): a
+  constant argument is Integer; a builtin integer keeps its type (oaLeft)
+  unless 64-bit (Integer); Char / WideChar is Word, AnsiChar Byte; Boolean
+  ShortInt, ByteBool Byte, WordBool Word, LongBool Integer; an enumeration
+  or subrange the narrowest of ShortInt, Byte, SmallInt, Word, Integer,
+  Cardinal holding its range (`0..1000` SmallInt, `0..60000` Word); Integer
+  where the range is not known. }
+function OrdAnswer(const AF: TSemaOrdFacts): TSemaOpAnswer;
+
+{ The integer rule of Pred / Succ / Low / High (4.11.4): a builtin narrower
+  than 32 bits is Integer, a 32- or 64-bit one keeps its type (oaLeft:
+  `Succ(C)` Cardinal, `High(UInt64)` UInt64); a subrange is Integer, Int64
+  when its range is past Integer's. }
+function OrdStepAnswer(const AF: TSemaOrdFacts): TSemaOpAnswer;
 
 implementation
 
@@ -1031,6 +1089,207 @@ begin
     Exit;
   AValue := Int64(LU);
   Result := True;
+end;
+
+function OrdinalNodeValue(const ATree: TPasTree; ANode, ADepth: Integer;
+  const AName: TSemaOrdNameValue; out AValue: Int64): Boolean;
+var
+  LTxt: string;
+begin
+  Result := False;
+  AValue := 0;
+  if ADepth > 8 then
+    Exit;
+  ANode := PeelParens(ATree, ANode);
+  if ANode = NIL_NODE then
+    Exit;
+  case ATree.Nodes[ANode].Kind of
+    nkIntLit, nkUnaryOp:
+      begin
+        Result := IntLiteralValue(ATree, ANode, AValue);
+        // `-K` of a named constant.
+        if not Result and (ATree.Nodes[ANode].Kind = nkUnaryOp) and
+           (ATree.Nodes[ANode].Aux >= 0) and
+           (ATree.Nodes[ANode].Aux <= High(ATree.Source.Visible)) and
+           (ATree.Source.VisibleToken(ATree.Nodes[ANode].Aux).Kind =
+            tkMinus) and
+           OrdinalNodeValue(ATree, ATree.Nodes[ANode].FirstChild, ADepth + 1,
+             AName, AValue) then
+        begin
+          AValue := -AValue;
+          Result := True;
+        end;
+      end;
+    nkStrLit:
+      begin
+        LTxt := ATree.NodeText(ANode);
+        if (Length(LTxt) = 3) and (LTxt[1] = '''') and (LTxt[3] = '''') then
+        begin
+          AValue := Ord(LTxt[2]);
+          Result := True;
+        end
+        else if LTxt = '''''''''' then
+        begin
+          AValue := Ord('''');
+          Result := True;
+        end
+        else if (Length(LTxt) > 1) and (LTxt[1] = '#') and
+                (Pos('#', LTxt, 2) = 0) and (Pos('''', LTxt) = 0) then
+          Result := TryStrToInt64(StringReplace(Copy(LTxt, 2, MaxInt), '_',
+            '', [rfReplaceAll]), AValue);
+      end;
+    nkCaretChar:
+      begin
+        LTxt := ATree.NodeText(ANode);
+        if Length(LTxt) = 2 then
+        begin
+          AValue := Ord(UpCase(LTxt[2])) xor $40;
+          Result := True;
+        end;
+      end;
+    nkIdent, nkMember:
+      Result := Assigned(AName) and AName(ANode, ADepth + 1, AValue);
+  end;
+end;
+
+function EnumElemValue(const ATree: TPasTree; AElem, ADepth: Integer;
+  const AName: TSemaOrdNameValue; out AValue: Int64): Boolean;
+var
+  LCur, LValue: Integer;
+  LNext: Int64;
+begin
+  Result := False;
+  AValue := -1;
+  if (AElem = NIL_NODE) or (ATree.Nodes[AElem].Parent = NIL_NODE) then
+    Exit;
+  LCur := ATree.Nodes[ATree.Nodes[AElem].Parent].FirstChild;
+  while LCur <> NIL_NODE do
+  begin
+    if ATree.Nodes[LCur].Kind = nkEnumValue then
+    begin
+      // nkEnumValue children: the name, then an optional value.
+      LValue := ATree.Nodes[LCur].FirstChild;
+      if LValue <> NIL_NODE then
+        LValue := ATree.Nodes[LValue].NextSibling;
+      if LValue = NIL_NODE then
+        Inc(AValue)
+      else if OrdinalNodeValue(ATree, LValue, ADepth + 1, AName, LNext) then
+      begin
+        AValue := LNext and $FFFFFFFF;
+        if AValue > High(Integer) then
+          AValue := AValue - $100000000;
+      end
+      else
+        Exit;
+    end;
+    if LCur = AElem then
+      Exit(True);
+    LCur := ATree.Nodes[LCur].NextSibling;
+  end;
+end;
+
+function OrdinalDefRange(const ATree: TPasTree; ADef: Integer;
+  const AName: TSemaOrdNameValue; out ALo, AHi: Int64): Boolean;
+var
+  LCur: Integer;
+  LV: Int64;
+  LAny: Boolean;
+begin
+  Result := False;
+  ALo := 0;
+  AHi := 0;
+  if ADef = NIL_NODE then
+    Exit;
+  case ATree.Nodes[ADef].Kind of
+    nkEnumType:
+      begin
+        LAny := False;
+        LCur := ATree.Nodes[ADef].FirstChild;
+        while LCur <> NIL_NODE do
+        begin
+          if ATree.Nodes[LCur].Kind = nkEnumValue then
+          begin
+            if not EnumElemValue(ATree, LCur, 0, AName, LV) then
+              Exit;
+            if not LAny or (LV < ALo) then
+              ALo := LV;
+            if not LAny or (LV > AHi) then
+              AHi := LV;
+            LAny := True;
+          end;
+          LCur := ATree.Nodes[LCur].NextSibling;
+        end;
+        Result := LAny;
+      end;
+    nkSubrange:
+      begin
+        LCur := ATree.Nodes[ADef].FirstChild;
+        Result := (LCur <> NIL_NODE) and
+          OrdinalNodeValue(ATree, LCur, 0, AName, ALo) and
+          (ATree.Nodes[LCur].NextSibling <> NIL_NODE) and
+          OrdinalNodeValue(ATree, ATree.Nodes[LCur].NextSibling, 0, AName,
+            AHi) and (ALo <= AHi);
+      end;
+  end;
+end;
+
+function OrdAnswer(const AF: TSemaOrdFacts): TSemaOpAnswer;
+begin
+  if AF.IsConst then
+    Exit(oaInteger);
+  if AF.Builtin <> '' then
+    case AF.Cat of
+      tcInteger:
+        if AF.Rank = 4 then
+          Exit(oaInteger)
+        else
+          Exit(oaLeft);
+      tcChar:
+        if AF.Builtin = 'ansichar' then
+          Exit(oaByte)
+        else
+          Exit(oaWord);
+      tcBoolean:
+        if AF.Builtin = 'boolean' then
+          Exit(oaShortInt)
+        else if AF.Builtin = 'bytebool' then
+          Exit(oaByte)
+        else if AF.Builtin = 'wordbool' then
+          Exit(oaWord)
+        else
+          Exit(oaInteger);
+    end;
+  if not AF.HasRange then
+    Exit(oaInteger);
+  if (AF.Lo >= -128) and (AF.Hi <= 127) then
+    Result := oaShortInt
+  else if (AF.Lo >= 0) and (AF.Hi <= 255) then
+    Result := oaByte
+  else if (AF.Lo >= -32768) and (AF.Hi <= 32767) then
+    Result := oaSmallInt
+  else if (AF.Lo >= 0) and (AF.Hi <= 65535) then
+    Result := oaWord
+  else if (AF.Lo >= 0) and (AF.Hi > High(Integer)) and
+          (AF.Hi <= High(Cardinal)) then
+    Result := oaCardinal
+  else
+    Result := oaInteger;
+end;
+
+function OrdStepAnswer(const AF: TSemaOrdFacts): TSemaOpAnswer;
+begin
+  if AF.Builtin <> '' then
+  begin
+    if AF.Rank <= 2 then
+      Result := oaInteger
+    else
+      Result := oaLeft;
+  end
+  else if AF.HasRange and
+          ((AF.Lo < Low(Integer)) or (AF.Hi > High(Integer))) then
+    Result := oaInt64
+  else
+    Result := oaInteger;
 end;
 
 function RealLiteralNode(const ATree: TPasTree; ANode: Integer): Integer;
@@ -2593,6 +2852,158 @@ begin
   Result := Int;
 end;
 
+// The ordinal value of a name bound here: an enumeration value of this
+// unit, a true constant (its value, followed), True / False.
+function TPasSemaTyper.OrdNameValue: TSemaOrdNameValue;
+begin
+  Result :=
+    function(ANode, ADepth: Integer; out AValue: Int64): Boolean
+    var
+      LName, LSym, LDecl: Integer;
+    begin
+      Result := False;
+      AValue := 0;
+      LName := ANode;
+      if Kind(LName) = nkMember then
+      begin
+        LName := Child(LName);
+        while (LName <> NIL_NODE) and (Sib(LName) <> NIL_NODE) do
+          LName := Sib(LName);
+      end;
+      if (LName = NIL_NODE) or (Kind(LName) <> nkIdent) then
+        Exit;
+      LSym := M.RefMap[LName];
+      if LSym = NIL_SYM then
+        Exit;
+      LDecl := M.Symbols[LSym].DeclNode;
+      case M.Symbols[LSym].Kind of
+        skEnumValue:
+          Result := (LDecl <> NIL_NODE) and
+            (T.Nodes[LDecl].Parent <> NIL_NODE) and
+            (Kind(T.Nodes[LDecl].Parent) = nkEnumValue) and
+            EnumElemValue(T, T.Nodes[LDecl].Parent, ADepth, OrdNameValue(),
+              AValue);
+        skConst:
+          if sfBuiltin in M.Symbols[LSym].Flags then
+          begin
+            Result := (M.Symbols[LSym].NameLower = 'true') or
+              (M.Symbols[LSym].NameLower = 'false');
+            AValue := Ord(M.Symbols[LSym].NameLower = 'true');
+          end
+          else if (M.Symbols[LSym].TypeNode = NIL_NODE) and
+                  (LDecl <> NIL_NODE) and (T.Nodes[LDecl].Parent <> NIL_NODE)
+                  and (Kind(T.Nodes[LDecl].Parent) = nkConstDecl) then
+            Result := OrdinalNodeValue(T, Sib(LDecl), ADepth, OrdNameValue(),
+              AValue);
+      end;
+    end;
+end;
+
+{ Is argument ANode a constant dcc folds - a literal, a true constant or an
+  enumeration value (Ord / Hi / Lo / Swap of one are Integer, 4.11.4)? A
+  typed constant is a variable here. }
+function TPasSemaTyper.IsConstArg(ANode: Integer): Boolean;
+var
+  LName, LSym: Integer;
+begin
+  Result := False;
+  ANode := PeelParens(T, ANode);
+  if ANode = NIL_NODE then
+    Exit;
+  case Kind(ANode) of
+    nkIntLit, nkRealLit, nkStrLit, nkCaretChar:
+      Result := True;
+    nkUnaryOp:
+      Result := IsConstArg(Child(ANode));
+    nkIdent, nkMember:
+      begin
+        LName := ANode;
+        if Kind(LName) = nkMember then
+        begin
+          LName := Child(LName);
+          while (LName <> NIL_NODE) and (Sib(LName) <> NIL_NODE) do
+            LName := Sib(LName);
+        end;
+        if LName = NIL_NODE then
+          Exit;
+        LSym := M.RefMap[LName];
+        Result := (LSym <> NIL_SYM) and
+          ((M.Symbols[LSym].Kind = skEnumValue) or
+           ((M.Symbols[LSym].Kind = skConst) and
+            (M.Symbols[LSym].TypeNode = NIL_NODE)));
+      end;
+  end;
+end;
+
+// What Ord and the Pred / Succ / Low / High integer rule read of argument
+// ANode (NIL_NODE: a type) of type ASym - TSemaOrdFacts.
+function TPasSemaTyper.OrdFacts(ANode, ASym: Integer): TSemaOrdFacts;
+var
+  LB: Integer;
+begin
+  Result := Default(TSemaOrdFacts);
+  Result.Cat := CatOf(ASym);
+  Result.IsConst := (ANode <> NIL_NODE) and IsConstArg(ANode);
+  if Result.Cat = tcInteger then
+    LB := StorageBase(ASym)
+  else
+    LB := WeakAliasEnd(ASym);
+  if LB = NIL_SYM then
+    Exit;
+  if M.Symbols[LB].Kind = skBuiltinType then
+  begin
+    Result.Builtin := M.Symbols[LB].NameLower;
+    Result.Rank := M.Symbols[LB].NumRank;
+  end
+  else if M.Symbols[LB].Kind = skType then
+    Result.HasRange := OrdinalDefRange(T, TypeDefNode(LB), OrdNameValue(),
+      Result.Lo, Result.Hi);
+end;
+
+{ Pred / Succ / Low / High of an ordinal of type ASym (4.11.4): an integer
+  by OrdStepAnswer; an enumeration, Char or Boolean keeps its type, a
+  subrange of one is its base (`Pred(CS)` of a `'a'..'z'` is Char, of an
+  `e1..e2` the enumeration - local/probe-b38). NIL_SYM for a non-ordinal. }
+function TPasSemaTyper.OrdStep(ASym: Integer): Integer;
+var
+  LB, LDef, LLo, LBound: Integer;
+begin
+  Result := NIL_SYM;
+  case CatOf(ASym) of
+    tcInteger:
+      Result := OpSym(OrdStepAnswer(OrdFacts(NIL_NODE, ASym)), ASym, NIL_SYM,
+        False);
+    tcEnum:
+      begin
+        Result := ASym;
+        LB := WeakAliasEnd(ASym);
+        if (LB = NIL_SYM) or (M.Symbols[LB].Kind <> skType) then
+          Exit;
+        LDef := TypeDefNode(LB);
+        if (LDef = NIL_NODE) or (Kind(LDef) <> nkSubrange) then
+          Exit;
+        LLo := Child(LDef);
+        if (LLo = NIL_NODE) or (Kind(LLo) <> nkIdent) then
+          Exit;
+        LBound := M.RefMap[LLo];
+        if (LBound <> NIL_SYM) and
+           (M.Symbols[LBound].Kind in [skEnumValue, skConst]) and
+           (M.Symbols[LBound].TypeSym <> NIL_SYM) then
+          Result := M.Symbols[LBound].TypeSym;
+      end;
+    tcChar:
+      begin
+        LB := WeakAliasEnd(ASym);
+        if (LB <> NIL_SYM) and (M.Symbols[LB].Kind = skBuiltinType) then
+          Result := LB
+        else
+          Result := Chr;
+      end;
+    tcBoolean:
+      Result := ASym;
+  end;
+end;
+
 { The nkArrayType node type symbol ASym denotes, through plain aliases;
   NIL_NODE for anything else. An ANONYMOUS inline array (`A: array of T`) has
   no type symbol and so answers nothing here - the project level reads the
@@ -2678,10 +3089,7 @@ begin
         LSym := M.RefMap[LIdx];
         if (LSym <> NIL_SYM) and
            (M.Symbols[LSym].Kind in [skType, skBuiltinType]) then
-          case CatOf(LSym) of
-            tcInteger: Exit(WidenOrdinal(LSym));
-            tcEnum, tcChar, tcBoolean: Exit(LSym);
-          end;
+          Exit(OrdStep(LSym));
       end;
   end;
 end;
@@ -2721,11 +3129,22 @@ begin
   // and cross-unit. Only Low/High/Default/SizeOf/TypeInfo take a type; for
   // the others a type argument means "do not know", never "an integer".
   if (LA <> NIL_SYM) and IsTypeNameOperand(LArg) and
-     (LShape in [irLength, irAbs, irSqr, irOrdinal, irSwap, irFirstArg,
-       irConcat]) then
+     (LShape in [irLength, irAbs, irSqr, irOrdinal, irSwap, irOrd,
+       irFirstArg, irConcat]) then
     Exit;
   case LShape of
     irInteger:  Result := Int;
+    irString:   Result := Str;
+    irHiLo:
+      if (LArg <> NIL_NODE) and IsConstArg(LArg) then
+        Result := Int
+      else
+        Result := Wrd;
+    irOrd:
+      if (LArg <> NIL_NODE) and IsConstArg(LArg) then
+        Result := Int
+      else if CatOf(LA) in [tcInteger, tcChar, tcBoolean, tcEnum] then
+        Result := OpSym(OrdAnswer(OrdFacts(LArg, LA)), LA, NIL_SYM, False);
     irInt64:    Result := I64;
     irBoolean:  Result := Bool;
     irChar:     Result := Chr;
@@ -2741,6 +3160,7 @@ begin
       end;
     irAbs:
       case CatOf(LA) of
+        tcVariant: Result := Ext;
         tcInteger: Result := WidenOrdinal(LA);
         tcFloat:
           if FIs64 and ((LAC = Cur) or (LAC = Comp)) then
@@ -2757,17 +3177,13 @@ begin
             Result := LAC
           else
             Result := Int;
-        tcFloat: Result := Ext;
+        tcFloat, tcVariant: Result := Ext;
       end;
     irOrdinal:
-      case CatOf(LA) of
-        tcInteger: Result := WidenOrdinal(LA);
-        tcEnum, tcChar, tcBoolean: Result := LA;
-      end;
+      Result := OrdStep(LA);
     irBounds:
       case CatOf(LA) of
-        tcInteger: Result := WidenOrdinal(LA);
-        tcEnum, tcChar, tcBoolean: Result := LA;
+        tcInteger, tcEnum, tcChar, tcBoolean: Result := OrdStep(LA);
         tcString: Result := Int;
         tcArray:
           begin
@@ -2786,7 +3202,12 @@ begin
           end;
       end;
     irSwap:
-      if (CatOf(LA) = tcInteger) and (LAC <> NIL_SYM) and
+      if (CatOf(LA) = tcInteger) and IsConstArg(LArg) then
+        Result := Int
+      else if (CatOf(LA) = tcInteger) and (LAC <> NIL_SYM) and
+         (M.Symbols[LAC].Kind = skBuiltinType) and (RankOf(LAC) = 1) then
+        Result := SmInt   // `Swap(B)` of a Byte or ShortInt (local/probe-b38)
+      else if (CatOf(LA) = tcInteger) and (LAC <> NIL_SYM) and
          (M.Symbols[LAC].Kind = skBuiltinType) and (RankOf(LAC) in [2, 3]) and
          (LAC <> NInt) and (LAC <> NUInt) then
         Result := LAC

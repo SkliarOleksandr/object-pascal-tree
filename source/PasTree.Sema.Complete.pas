@@ -2971,8 +2971,10 @@ begin
       LT.HasParams := LSig.HasArgs;
       LT.ResultText := LSig.ResultType;
     end;
-    // The seeds have no head token; the curated result says which head fits.
-    if LT.ResultText <> '' then
+    // The seeds have no head token; the table says which head fits - a
+    // function whose result depends on its arguments (High, Copy, Abs) has
+    // no result text but is a function all the same (audit D1-16).
+    if LSig.IsFunction then
       LT.HeadWord := 'function'
     else
       LT.HeadWord := 'procedure';

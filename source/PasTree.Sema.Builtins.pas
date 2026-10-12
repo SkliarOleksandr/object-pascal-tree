@@ -37,12 +37,19 @@ type
     (parameter text, signature help, auto-parenthesis) shows them bare
     without this. These are documentation-style pseudo-signatures FOR HUMANS
     - `(var S; NewLength: NativeInt)` - never input to the typer; where the
-    real signature is type-dependent (High, Abs, ...) the text stays honest
-    about the shape and the result is left blank. }
+    real signature is type-dependent (High, Abs, Ord, ...) the text stays
+    honest about the shape and the result is left blank. The result text is
+    DERIVED from the typer's shape (TPasIntrinsicResult), so the display
+    cannot disagree with what the typers give the call (audit B2-15, D1-16:
+    Hi / Lo showed Byte while the typers said Integer and dcc says Word). }
   TPasBuiltinSig = record
     Params: string;      // '(...)' display text; '' for a parameterless name
     ResultType: string;  // result display text; '' for procedures and
                          // type-dependent results
+    { A value-returning intrinsic, whether its result is fixed or not - the
+      head word `function` against `procedure` (High, Copy, Abs have no
+      fixed result text but are functions). }
+    IsFunction: Boolean;
     { The auto-parenthesis driver, ItemHasParams's builtin answer: True when
       the normal call form takes at least one REQUIRED argument. False both
       for the truly parameterless (Pi, ReturnAddress) and for names whose
@@ -112,21 +119,26 @@ function PasBuiltinIsChar(AModel: TPasSemaModel; ASym: Integer;
   APlatform: TPasPlatform): Boolean;
 
 type
-  { How a value-returning intrinsic's RESULT type is decided (4.11). Every
-    shape below is a dcc 37.0 probe on BOTH compilers (2026-09-07, local/probe/
-    intr: `P := Intrinsic(...)` against a record `P`, the E2010 text names the
-    type), not the documentation, which is silent on most of them. The two
-    typers (PasTree.Sema.Types intra-unit, PasTree.Sema.Project cross-unit)
-    dispatch on this and apply the same rules to their own type descriptors;
-    a name that is not here (a procedure, or Slice) stays untyped. }
+  { How a value-returning intrinsic's RESULT type is decided (4.11.4). Every
+    shape below is a dcc 37.0 probe on BOTH compilers, read through the type
+    dcc USES - the overload a call of the result picks and the type
+    `var X := Intrinsic(...)` infers (local/probe-b38: one overload per
+    builtin type, `F(Ord(AC)).R_Byte`) - not through the E2010 text of a
+    direct assignment, which names Integer for every narrow result (audit
+    A1-14, E1-38: the first table was read that way). A CONSTANT argument -
+    a literal, a true constant, an enumeration value - folds: Ord, Hi, Lo
+    and Swap of one are Integer. The two typers (PasTree.Sema.Types
+    intra-unit, PasTree.Sema.Project cross-unit) dispatch on this and apply
+    the same rules to their own type descriptors; a name that is not here
+    (a procedure, or Slice) stays untyped. }
   TPasIntrinsicResult = (
     irNone,
-    // Fixed type, whatever the arguments: Ord is Integer even of an Int64,
-    // SizeOf/Hi/Lo are Integer, Trunc/Round/MulDivInt64 are Int64 even of a
-    // Single, Chr is Char, Pi is Extended (dcc64 prints it as Double, which
-    // is what Extended IS on a 64-bit target), the address family and
-    // TypeInfo/TypeHandle/TypeOf are the untyped Pointer.
-    irInteger, irInt64, irBoolean, irChar, irExtended, irPointer,
+    // Fixed type, whatever the arguments: SizeOf, FilePos and FileSize are
+    // Integer, Trunc/Round/MulDivInt64 are Int64 even of a Single, Chr is
+    // Char, Pi is Extended (dcc64 prints it as Double, which is what
+    // Extended IS on a 64-bit target), the address family and TypeInfo/
+    // TypeHandle/TypeOf are the untyped Pointer, NameOf is string.
+    irInteger, irInt64, irBoolean, irChar, irExtended, irPointer, irString,
     // Length: Integer, except NativeInt for a DYNAMIC array (Int64 on
     // dcc64, Integer on dcc32 - the one platform-dependent Length).
     irLength,
@@ -134,26 +146,40 @@ type
     // Int64, NativeInt/NativeUInt -> NativeInt); a real is Extended on a
     // 32-bit target, and on a 64-bit one Currency stays Currency and Comp
     // stays Comp (their arithmetic is integral there) while every other
-    // real is Extended. A Variant argument types as nothing.
+    // real is Extended. A Variant is Extended.
     irAbs,
     // Sqr: an integer widens like Abs except that a 32-bit UNSIGNED stays
     // Cardinal and the 64-bit ones keep their signedness (UInt64 -> UInt64,
-    // NativeUInt -> NativeUInt); every real, Currency and Comp included, is
-    // Extended.
+    // NativeUInt -> NativeUInt); every real, Currency and Comp included, and
+    // a Variant are Extended.
     irSqr,
-    // Pred, Succ: an integer widens (Byte/Word/SmallInt/ShortInt/Cardinal
-    // -> Integer, Int64 AND UInt64 -> Int64, NativeInt/NativeUInt ->
-    // NativeInt); an enum, Char, AnsiChar or Boolean keeps its own type.
+    // Pred, Succ: an integer narrower than 32 bits, or an integer subrange,
+    // is Integer; a 32- or 64-bit builtin keeps its type (Cardinal,
+    // UInt64, NativeUInt); an enum, Char, AnsiChar or Boolean keeps its own
+    // type, and a subrange of one is its base type (`Pred(CS)` of a
+    // `'a'..'z'` is Char).
     irOrdinal,
-    // Low, High: an ordinal type or value as irOrdinal; a static array's
-    // INDEX type (widened the same way: `array[Word]` bounds are Integer, an
-    // enum-indexed array's are the enum, a Char-indexed one's are Char); a
-    // dynamic array's Low is Integer and its High NativeInt; any string's
-    // are Integer (High of the long-string TYPE itself is E2198).
+    // Low, High: an ordinal type or value as irOrdinal (`High(Cardinal)`
+    // Cardinal, `High(Byte)` Integer); a static array's INDEX type the same
+    // way (`array[Byte]` bounds are Integer, an enum-indexed array's the
+    // enum, a Char-indexed one's Char); a dynamic array's Low is Integer and
+    // its High NativeInt; any string's are Integer (High of the long-string
+    // TYPE itself is E2198).
     irBounds,
     // Swap: a 16- or 32-bit integer keeps its type (Word, SmallInt, Integer,
-    // Cardinal), everything else - Byte, Int64, a literal - is Integer.
+    // Cardinal), a Byte or ShortInt is SmallInt, an Int64 and a constant
+    // Integer.
     irSwap,
+    // Ord: a 32-bit-or-narrower integer keeps its type (Ord(B) Byte,
+    // Ord(C) Cardinal), a 64-bit one is Integer; Char / WideChar is Word,
+    // AnsiChar Byte; ByteBool Byte, WordBool Word, LongBool Integer; an
+    // enumeration, Boolean or subrange value the narrowest of ShortInt,
+    // Byte, SmallInt, Word, Integer, Cardinal holding its range (Boolean and
+    // `'a'..'z'` ShortInt, `0..200` Byte, `0..1000` SmallInt, `0..60000`
+    // Word); a constant Integer.
+    irOrd,
+    // Hi, Lo: Word, whatever the width; of a constant Integer.
+    irHiLo,
     // The first argument's own type: Copy (a string kind stays that kind, a
     // dynamic array stays that array, a literal is string) and the Atomic*
     // family (Increment/Decrement/Exchange/CmpExchange over an integer or a
@@ -181,9 +207,15 @@ function PasIntrinsicResult(const ANameLower: string): TPasIntrinsicResult;
   a caller can skip typing the arguments of `Ord(X)` or `SizeOf(T)`. }
 function PasIntrinsicReadsArgs(AShape: TPasIntrinsicResult): Boolean; inline;
 
+{ The display text of a FIXED result shape ('Integer', 'Word' for Hi / Lo,
+  'TTypeKind'); '' for an argument-dependent shape and for irNone. What
+  PasBuiltinSignature shows - one source for the display and the typers. }
+function PasIntrinsicResultText(AShape: TPasIntrinsicResult): string;
+
 implementation
 
 uses
+  System.SysUtils,
   System.Generics.Collections,
   PasTree.Ast;
 
@@ -231,201 +263,267 @@ begin
 end;
 
 type
-  TBuiltinSigEntry = record
-    Name: string;        // NameLower key
+  // Where an intrinsic exists: everywhere, on every target but Win32 (the
+  // VarArg family), or on a 64-bit target only (AtomicCmpExchange128).
+  TIntrinsicGate = (igAll, igVarArg, ig64Bit);
+
+  TIntrinsicEntry = record
+    Name: string;        // the seed's spelling; NameLower is the key
     Params: string;
-    ResultType: string;
     HasArgs: Boolean;
+    Shape: TPasIntrinsicResult;
+    Gate: TIntrinsicGate;
   end;
 
 const
-  { One entry per seeded intrinsic ROUTINE below (both the common list and
-    the 64-bit-only tail - the table is signature data, not a resolution
-    surface, so gating it per platform would only create a second list to
-    keep in sync). Shapes follow the documented "Delphi Intrinsic Routines"
-    catalog; optional arguments are shown in [] the way the docs write them. }
-  CBuiltinSigs: array[0..98] of TBuiltinSigEntry = (
-    (Name: 'length'; Params: '(const S: <string|array>)';
-     ResultType: 'Integer'; HasArgs: True),
-    (Name: 'setlength'; Params: '(var S; NewLength: NativeInt)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'setstring'; Params: '(var S: string; Buffer: PChar; Len: Integer)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'high'; Params: '(const X: <type|array|string>)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'low'; Params: '(const X: <type|array|string>)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'ord'; Params: '(const X: <ordinal>)';
-     ResultType: 'Integer'; HasArgs: True),
-    (Name: 'chr'; Params: '(X: Byte)'; ResultType: 'Char'; HasArgs: True),
-    (Name: 'assigned'; Params: '(const P)';
-     ResultType: 'Boolean'; HasArgs: True),
-    (Name: 'inc'; Params: '(var X[; N])'; ResultType: ''; HasArgs: True),
-    (Name: 'dec'; Params: '(var X[; N])'; ResultType: ''; HasArgs: True),
-    (Name: 'sizeof'; Params: '(const X)';
-     ResultType: 'Integer'; HasArgs: True),
-    (Name: 'assert'; Params: '(Condition: Boolean[; Message: string])';
-     ResultType: ''; HasArgs: True),
-    (Name: 'copy'; Params: '(const S[; Index, Count: Integer])';
-     ResultType: ''; HasArgs: True),
-    (Name: 'new'; Params: '(var P: Pointer)'; ResultType: ''; HasArgs: True),
-    (Name: 'dispose'; Params: '(var P: Pointer)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'include'; Params: '(var S: <set>; Element)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'exclude'; Params: '(var S: <set>; Element)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'write'; Params: '([var F: Text;] Args)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'writeln'; Params: '([var F: Text;] Args)';
-     ResultType: ''; HasArgs: False),
-    (Name: 'read'; Params: '([var F: Text;] Args)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'readln'; Params: '([var F: Text;] Args)';
-     ResultType: ''; HasArgs: False),
-    (Name: 'exit'; Params: '([ExitValue])'; ResultType: ''; HasArgs: False),
-    (Name: 'break'; Params: ''; ResultType: ''; HasArgs: False),
-    (Name: 'continue'; Params: ''; ResultType: ''; HasArgs: False),
-    (Name: 'typeinfo'; Params: '(TypeIdent)';
-     ResultType: 'Pointer'; HasArgs: True),
-    (Name: 'delete'; Params: '(var S; Index, Count: Integer)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'insert'; Params: '(const Source; var S; Index: Integer)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'fillchar'; Params: '(var X; Count: NativeInt; Value)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'odd'; Params: '(X: Integer)';
-     ResultType: 'Boolean'; HasArgs: True),
-    (Name: 'pred'; Params: '(const X: <ordinal>)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'succ'; Params: '(const X: <ordinal>)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'default'; Params: '(TypeIdent)'; ResultType: ''; HasArgs: True),
-    (Name: 'trunc'; Params: '(X: Extended)';
-     ResultType: 'Int64'; HasArgs: True),
-    (Name: 'round'; Params: '(X: Extended)';
-     ResultType: 'Int64'; HasArgs: True),
-    (Name: 'abs'; Params: '(X)'; ResultType: ''; HasArgs: True),
-    (Name: 'sqr'; Params: '(X)'; ResultType: ''; HasArgs: True),
-    (Name: 'pi'; Params: ''; ResultType: 'Extended'; HasArgs: False),
-    (Name: 'concat'; Params: '(const S1, S2, ...)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'str'; Params: '(X[: Width[: Decimals]]; var S: string)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'val'; Params: '(const S: string; var V; var Code: Integer)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'swap'; Params: '(X)'; ResultType: ''; HasArgs: True),
-    (Name: 'hi'; Params: '(X)'; ResultType: 'Byte'; HasArgs: True),
-    (Name: 'lo'; Params: '(X)'; ResultType: 'Byte'; HasArgs: True),
-    (Name: 'addr'; Params: '(var X)'; ResultType: 'Pointer'; HasArgs: True),
-    (Name: 'ptr'; Params: '(Address: Integer)';
-     ResultType: 'Pointer'; HasArgs: True),
-    (Name: 'slice'; Params: '(var A: <array>; Count: Integer)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'runerror'; Params: '([ErrorCode: Byte])';
-     ResultType: ''; HasArgs: False),
-    (Name: 'initialize'; Params: '(var V[; Count: NativeInt])';
-     ResultType: ''; HasArgs: True),
-    (Name: 'finalize'; Params: '(var V[; Count: NativeInt])';
-     ResultType: ''; HasArgs: True),
-    (Name: 'gettypekind'; Params: '(TypeIdent)';
-     ResultType: 'TTypeKind'; HasArgs: True),
-    (Name: 'ismanagedtype'; Params: '(TypeIdent)';
-     ResultType: 'Boolean'; HasArgs: True),
-    (Name: 'isconstvalue'; Params: '(const X)';
-     ResultType: 'Boolean'; HasArgs: True),
-    (Name: 'hasweakref'; Params: '(TypeIdent)';
-     ResultType: 'Boolean'; HasArgs: True),
-    (Name: 'typehandle'; Params: '(TypeIdent)';
-     ResultType: 'Pointer'; HasArgs: True),
-    (Name: 'typeof'; Params: '(const X: <object>)';
-     ResultType: 'Pointer'; HasArgs: True),
-    (Name: 'returnaddress'; Params: '';
-     ResultType: 'Pointer'; HasArgs: False),
-    (Name: 'addressofreturnaddress'; Params: '';
-     ResultType: 'Pointer'; HasArgs: False),
-    (Name: 'atomicincrement'; Params: '(var Target[; Increment])';
-     ResultType: ''; HasArgs: True),
-    (Name: 'atomicdecrement'; Params: '(var Target[; Decrement])';
-     ResultType: ''; HasArgs: True),
-    (Name: 'atomicexchange'; Params: '(var Target; Value)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'atomiccmpexchange';
+  { THE intrinsic table - one entry per seeded intrinsic ROUTINE, in seed
+    order; SeedSystemScopeOwn seeds from it (by Gate), the typers read Shape
+    (PasIntrinsicResult) and completion the display columns
+    (PasBuiltinSignature), whose result text is derived from Shape. Three
+    hand-kept lists had drifted apart before (audit B2-15, D1-16: Hi / Lo
+    displayed Byte, FilePos / FileSize / NameOf / AtomicCmpExchange128 showed
+    a result no typer gave). Params follow the documented "Delphi Intrinsic
+    Routines" catalog; optional arguments are shown in [] the way the docs
+    write them. }
+  CIntrinsics: array[0..98] of TIntrinsicEntry = (
+    (Name: 'Length'; Params: '(const S: <string|array>)';
+     HasArgs: True; Shape: irLength; Gate: igAll),
+    (Name: 'SetLength'; Params: '(var S; NewLength: NativeInt)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'SetString'; Params: '(var S: string; Buffer: PChar; Len: Integer)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'High'; Params: '(const X: <type|array|string>)';
+     HasArgs: True; Shape: irBounds; Gate: igAll),
+    (Name: 'Low'; Params: '(const X: <type|array|string>)';
+     HasArgs: True; Shape: irBounds; Gate: igAll),
+    (Name: 'Ord'; Params: '(const X: <ordinal>)';
+     HasArgs: True; Shape: irOrd; Gate: igAll),
+    (Name: 'Chr'; Params: '(X: Byte)';
+     HasArgs: True; Shape: irChar; Gate: igAll),
+    (Name: 'Assigned'; Params: '(const P)';
+     HasArgs: True; Shape: irBoolean; Gate: igAll),
+    (Name: 'Inc'; Params: '(var X[; N])';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Dec'; Params: '(var X[; N])';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'SizeOf'; Params: '(const X)';
+     HasArgs: True; Shape: irInteger; Gate: igAll),
+    (Name: 'Assert'; Params: '(Condition: Boolean[; Message: string])';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Copy'; Params: '(const S[; Index, Count: Integer])';
+     HasArgs: True; Shape: irFirstArg; Gate: igAll),
+    (Name: 'New'; Params: '(var P: Pointer)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Dispose'; Params: '(var P: Pointer)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Include'; Params: '(var S: <set>; Element)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Exclude'; Params: '(var S: <set>; Element)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Write'; Params: '([var F: Text;] Args)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Writeln'; Params: '([var F: Text;] Args)';
+     HasArgs: False; Shape: irNone; Gate: igAll),
+    (Name: 'Read'; Params: '([var F: Text;] Args)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Readln'; Params: '([var F: Text;] Args)';
+     HasArgs: False; Shape: irNone; Gate: igAll),
+    (Name: 'Exit'; Params: '([ExitValue])';
+     HasArgs: False; Shape: irNone; Gate: igAll),
+    (Name: 'Break'; Params: '';
+     HasArgs: False; Shape: irNone; Gate: igAll),
+    (Name: 'Continue'; Params: '';
+     HasArgs: False; Shape: irNone; Gate: igAll),
+    (Name: 'TypeInfo'; Params: '(TypeIdent)';
+     HasArgs: True; Shape: irPointer; Gate: igAll),
+    (Name: 'Delete'; Params: '(var S; Index, Count: Integer)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Insert'; Params: '(const Source; var S; Index: Integer)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'FillChar'; Params: '(var X; Count: NativeInt; Value)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Odd'; Params: '(X: Integer)';
+     HasArgs: True; Shape: irBoolean; Gate: igAll),
+    (Name: 'Pred'; Params: '(const X: <ordinal>)';
+     HasArgs: True; Shape: irOrdinal; Gate: igAll),
+    (Name: 'Succ'; Params: '(const X: <ordinal>)';
+     HasArgs: True; Shape: irOrdinal; Gate: igAll),
+    (Name: 'Default'; Params: '(TypeIdent)';
+     HasArgs: True; Shape: irDefault; Gate: igAll),
+    (Name: 'Trunc'; Params: '(X: Extended)';
+     HasArgs: True; Shape: irInt64; Gate: igAll),
+    (Name: 'Round'; Params: '(X: Extended)';
+     HasArgs: True; Shape: irInt64; Gate: igAll),
+    (Name: 'Abs'; Params: '(X)';
+     HasArgs: True; Shape: irAbs; Gate: igAll),
+    (Name: 'Sqr'; Params: '(X)';
+     HasArgs: True; Shape: irSqr; Gate: igAll),
+    (Name: 'Pi'; Params: '';
+     HasArgs: False; Shape: irExtended; Gate: igAll),
+    (Name: 'Concat'; Params: '(const S1, S2, ...)';
+     HasArgs: True; Shape: irConcat; Gate: igAll),
+    (Name: 'Str'; Params: '(X[: Width[: Decimals]]; var S: string)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Val'; Params: '(const S: string; var V; var Code: Integer)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Swap'; Params: '(X)';
+     HasArgs: True; Shape: irSwap; Gate: igAll),
+    (Name: 'Hi'; Params: '(X)';
+     HasArgs: True; Shape: irHiLo; Gate: igAll),
+    (Name: 'Lo'; Params: '(X)';
+     HasArgs: True; Shape: irHiLo; Gate: igAll),
+    (Name: 'Addr'; Params: '(var X)';
+     HasArgs: True; Shape: irPointer; Gate: igAll),
+    (Name: 'Ptr'; Params: '(Address: Integer)';
+     HasArgs: True; Shape: irPointer; Gate: igAll),
+    (Name: 'Slice'; Params: '(var A: <array>; Count: Integer)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'RunError'; Params: '([ErrorCode: Byte])';
+     HasArgs: False; Shape: irNone; Gate: igAll),
+    (Name: 'Initialize'; Params: '(var V[; Count: NativeInt])';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Finalize'; Params: '(var V[; Count: NativeInt])';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'GetTypeKind'; Params: '(TypeIdent)';
+     HasArgs: True; Shape: irTypeKind; Gate: igAll),
+    (Name: 'IsManagedType'; Params: '(TypeIdent)';
+     HasArgs: True; Shape: irBoolean; Gate: igAll),
+    (Name: 'IsConstValue'; Params: '(const X)';
+     HasArgs: True; Shape: irBoolean; Gate: igAll),
+    (Name: 'HasWeakRef'; Params: '(TypeIdent)';
+     HasArgs: True; Shape: irBoolean; Gate: igAll),
+    (Name: 'TypeHandle'; Params: '(TypeIdent)';
+     HasArgs: True; Shape: irPointer; Gate: igAll),
+    (Name: 'TypeOf'; Params: '(const X: <object>)';
+     HasArgs: True; Shape: irPointer; Gate: igAll),
+    (Name: 'ReturnAddress'; Params: '';
+     HasArgs: False; Shape: irPointer; Gate: igAll),
+    (Name: 'AddressOfReturnAddress'; Params: '';
+     HasArgs: False; Shape: irPointer; Gate: igAll),
+    (Name: 'AtomicIncrement'; Params: '(var Target[; Increment])';
+     HasArgs: True; Shape: irFirstArg; Gate: igAll),
+    (Name: 'AtomicDecrement'; Params: '(var Target[; Decrement])';
+     HasArgs: True; Shape: irFirstArg; Gate: igAll),
+    (Name: 'AtomicExchange'; Params: '(var Target; Value)';
+     HasArgs: True; Shape: irFirstArg; Gate: igAll),
+    (Name: 'AtomicCmpExchange';
      Params: '(var Target; NewValue, Comparand[; out Succeeded: Boolean])';
-     ResultType: ''; HasArgs: True),
-    (Name: 'muldivint64';
+     HasArgs: True; Shape: irFirstArg; Gate: igAll),
+    (Name: 'MulDivInt64';
      Params: '(AValue, AMultiplier, ADivisor: Int64[; out Remainder: Int64])';
-     ResultType: 'Int64'; HasArgs: True),
-    (Name: 'fail'; Params: ''; ResultType: ''; HasArgs: False),
-    (Name: 'memorybarrier'; Params: ''; ResultType: ''; HasArgs: False),
-    (Name: 'halt'; Params: '([ExitCode: Integer])';
-     ResultType: ''; HasArgs: False),
-    (Name: 'getmem'; Params: '(var P: Pointer; Size: NativeInt)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'freemem'; Params: '(var P: Pointer[; Size: NativeInt])';
-     ResultType: ''; HasArgs: True),
-    (Name: 'reallocmem'; Params: '(var P: Pointer; Size: NativeInt)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'assign'; Params: '(var F; FileName: string)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'assignfile'; Params: '(var F; FileName: string)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'reset'; Params: '(var F[; RecSize: Integer])';
-     ResultType: ''; HasArgs: True),
-    (Name: 'rewrite'; Params: '(var F[; RecSize: Integer])';
-     ResultType: ''; HasArgs: True),
-    (Name: 'append'; Params: '(var F: Text)'; ResultType: ''; HasArgs: True),
-    (Name: 'close'; Params: '(var F)'; ResultType: ''; HasArgs: True),
-    (Name: 'closefile'; Params: '(var F)'; ResultType: ''; HasArgs: True),
-    (Name: 'seek'; Params: '(var F; N: Integer)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'eof'; Params: '([var F])'; ResultType: 'Boolean'; HasArgs: False),
-    (Name: 'eoln'; Params: '([var F: Text])';
-     ResultType: 'Boolean'; HasArgs: False),
-    (Name: 'seekeof'; Params: '([var F: Text])';
-     ResultType: 'Boolean'; HasArgs: False),
-    (Name: 'seekeoln'; Params: '([var F: Text])';
-     ResultType: 'Boolean'; HasArgs: False),
-    (Name: 'filepos'; Params: '(var F)';
-     ResultType: 'Integer'; HasArgs: True),
-    (Name: 'filesize'; Params: '(var F)';
-     ResultType: 'Integer'; HasArgs: True),
-    (Name: 'truncate'; Params: '(var F)'; ResultType: ''; HasArgs: True),
-    (Name: 'erase'; Params: '(var F)'; ResultType: ''; HasArgs: True),
-    (Name: 'rename'; Params: '(var F; NewName: string)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'blockread';
+     HasArgs: True; Shape: irInt64; Gate: igAll),
+    (Name: 'Fail'; Params: '';
+     HasArgs: False; Shape: irNone; Gate: igAll),
+    // Sibling of the Atomic* family and equally undeclared: System.pas does not
+    // declare MemoryBarrier anywhere, and a unit with an EMPTY uses clause
+    // resolves it under dcc32 37.0. Found by a third-party library's reflection
+    // unit, which calls it inside a critical section.
+    (Name: 'MemoryBarrier'; Params: '';
+     HasArgs: False; Shape: irNone; Gate: igAll),
+    // Flow. (`Abort` is NOT one of these - it is a real System.SysUtils
+    // routine, so code using it without that unit must still get E2003;
+    // it was previously in this list, wrongly making us accept such code.)
+    (Name: 'Halt'; Params: '([ExitCode: Integer])';
+     HasArgs: False; Shape: irNone; Gate: igAll),
+    // Memory (by-ref). None of these three is declared in System.pas - the
+    // only GetMem/FreeMem/ReallocMem there are FIELDS of the deprecated
+    // TMemoryManager record, which is why a source grep suggests otherwise.
+    (Name: 'GetMem'; Params: '(var P: Pointer; Size: NativeInt)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'FreeMem'; Params: '(var P: Pointer[; Size: NativeInt])';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'ReallocMem'; Params: '(var P: Pointer; Size: NativeInt)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    // Classic file I/O (by-ref file var) - the whole Turbo-era family is
+    // compiler-magic, none of it declared: real dcc resolves every one of
+    // these in a unit with an empty uses clause.
+    (Name: 'Assign'; Params: '(var F; FileName: string)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'AssignFile'; Params: '(var F; FileName: string)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Reset'; Params: '(var F[; RecSize: Integer])';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Rewrite'; Params: '(var F[; RecSize: Integer])';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Append'; Params: '(var F: Text)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Close'; Params: '(var F)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'CloseFile'; Params: '(var F)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Seek'; Params: '(var F; N: Integer)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Eof'; Params: '([var F])';
+     HasArgs: False; Shape: irBoolean; Gate: igAll),
+    (Name: 'Eoln'; Params: '([var F: Text])';
+     HasArgs: False; Shape: irBoolean; Gate: igAll),
+    (Name: 'SeekEof'; Params: '([var F: Text])';
+     HasArgs: False; Shape: irBoolean; Gate: igAll),
+    (Name: 'SeekEoln'; Params: '([var F: Text])';
+     HasArgs: False; Shape: irBoolean; Gate: igAll),
+    (Name: 'FilePos'; Params: '(var F)';
+     HasArgs: True; Shape: irInteger; Gate: igAll),
+    (Name: 'FileSize'; Params: '(var F)';
+     HasArgs: True; Shape: irInteger; Gate: igAll),
+    (Name: 'Truncate'; Params: '(var F)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Erase'; Params: '(var F)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'Rename'; Params: '(var F; NewName: string)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'BlockRead';
      Params: '(var F: File; var Buf; Count: Integer[; var AmtTransferred: Integer])';
-     ResultType: ''; HasArgs: True),
-    (Name: 'blockwrite';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'BlockWrite';
      Params: '(var F: File; var Buf; Count: Integer[; var AmtTransferred: Integer])';
-     ResultType: ''; HasArgs: True),
-    (Name: 'settextbuf'; Params: '(var F: Text; var Buf[; Size: Integer])';
-     ResultType: ''; HasArgs: True),
-    (Name: 'getdir'; Params: '(Drive: Byte; var S: string)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'varclear'; Params: '(var V: Variant)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'varcast';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    // dcc-verified absent from System.pas, unlike its neighbours IOResult,
+    // Flush, SetLineBreakStyle and TextOpen, which are all really declared
+    // there and so must NOT be seeded.
+    (Name: 'SetTextBuf'; Params: '(var F: Text; var Buf[; Size: Integer])';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    // Directory: only GetDir is intrinsic - ChDir/MkDir/RmDir ARE declared
+    // in System.pas (verified), so they must not be seeded here.
+    (Name: 'GetDir'; Params: '(Drive: Byte; var S: string)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    // Variants. Again fields of TVariantManager, not declarations; only
+    // these four resolve bare (VarCastOle/VarCopyNoInd/VarArrayGet/
+    // VarArrayPut do NOT - real dcc E2003s them).
+    (Name: 'VarClear'; Params: '(var V: Variant)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'VarCast';
      Params: '(var Dest: Variant; const Source: Variant; VarType: Integer)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'varcopy'; Params: '(var Dest: Variant; const Source: Variant)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'vararrayredim'; Params: '(var A: Variant; HighBound: Integer)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'nameof'; Params: '(Identifier)';
-     ResultType: 'string'; HasArgs: True),
-    (Name: 'varargstart'; Params: '(var ArgList)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'varargend'; Params: '(var ArgList)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'varargcopy'; Params: '(var Src, Dest)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'vararggetvalue'; Params: '(var ArgList; var Value)';
-     ResultType: ''; HasArgs: True),
-    (Name: 'atomiccmpexchange128';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'VarCopy'; Params: '(var Dest: Variant; const Source: Variant)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    (Name: 'VarArrayRedim'; Params: '(var A: Variant; HighBound: Integer)';
+     HasArgs: True; Shape: irNone; Gate: igAll),
+    // 13.0 (see ch.04 sec. 4.11.1).
+    (Name: 'NameOf'; Params: '(Identifier)';
+     HasArgs: True; Shape: irString; Gate: igAll),
+    // Not on Win32 (Gate igVarArg). The varargs family is the same System.pas
+    // trap as CompilerVersion: its only mention there is four COMMENTED-OUT
+    // signatures, so a source grep says "declared" and dcc says otherwise.
+    // Verified per name with the usual probe (does a unit with an EMPTY uses
+    // clause resolve it?) - dcc64 answers with `E2029 '(' expected`, which
+    // means the name is known and only the call syntax is wrong; a genuinely
+    // undeclared control name answers E2003. dcc32 answers E2003 for each,
+    // dccaarm (Android32) knows them (audit A1-16, which found the false
+    // E2003s inside System.pas on Android32).
+    (Name: 'VarArgStart'; Params: '(var ArgList)';
+     HasArgs: True; Shape: irNone; Gate: igVarArg),
+    (Name: 'VarArgEnd'; Params: '(var ArgList)';
+     HasArgs: True; Shape: irNone; Gate: igVarArg),
+    (Name: 'VarArgCopy'; Params: '(var Src, Dest)';
+     HasArgs: True; Shape: irNone; Gate: igVarArg),
+    (Name: 'VarArgGetValue'; Params: '(var ArgList; var Value)';
+     HasArgs: True; Shape: irNone; Gate: igVarArg),
+    // Sibling of AtomicCmpExchange above, but a SEPARATE name and 64-bit only
+    // (Gate ig64Bit) - the 128-bit compare-and-swap the RTL's lock-free paths
+    // use (dcc32 and dccaarm answer E2003).
+    (Name: 'AtomicCmpExchange128';
      Params: '(var Target; NewValueHigh, NewValueLow: Int64; var Comparand)';
-     ResultType: 'Boolean'; HasArgs: True)
+     HasArgs: True; Shape: irBoolean; Gate: ig64Bit)
   );
 
 type
@@ -445,7 +543,7 @@ type
 
 var
   GSeedTemplates: array[TSeedClass] of TSeedTemplate;
-  GSigIndex: TDictionary<string, Integer>;  // NameLower -> CBuiltinSigs index
+  GSigIndex: TDictionary<string, Integer>;  // NameLower -> CIntrinsics index
 
 function SeedClassOf(APlatform: TPasPlatform): TSeedClass;
 var
@@ -495,12 +593,33 @@ begin
   Result := GSigIndex.TryGetValue(ANameLower, LIdx);
   if Result then
   begin
-    ASig.Params := CBuiltinSigs[LIdx].Params;
-    ASig.ResultType := CBuiltinSigs[LIdx].ResultType;
-    ASig.HasArgs := CBuiltinSigs[LIdx].HasArgs;
+    ASig.Params := CIntrinsics[LIdx].Params;
+    ASig.ResultType := PasIntrinsicResultText(CIntrinsics[LIdx].Shape);
+    ASig.HasArgs := CIntrinsics[LIdx].HasArgs;
+    // Slice is a function with no type of its own: its result exists only
+    // as an open-array argument.
+    ASig.IsFunction := (CIntrinsics[LIdx].Shape <> irNone) or
+      (ANameLower = 'slice');
   end
   else
     ASig := Default(TPasBuiltinSig);
+end;
+
+function PasIntrinsicResultText(AShape: TPasIntrinsicResult): string;
+begin
+  case AShape of
+    irInteger: Result := 'Integer';
+    irInt64: Result := 'Int64';
+    irBoolean: Result := 'Boolean';
+    irChar: Result := 'Char';
+    irExtended: Result := 'Extended';
+    irPointer: Result := 'Pointer';
+    irString: Result := 'string';
+    irHiLo: Result := 'Word';
+    irTypeKind: Result := 'TTypeKind';
+  else
+    Result := '';   // argument-dependent, or a procedure
+  end;
 end;
 
 // The original per-symbol seeding - the template builder runs it once per
@@ -579,7 +698,9 @@ end;
 function SeedSystemScopeOwn(AModel: TPasSemaModel;
   APlatform: TPasPlatform): Integer;
 var
-  LSys, LBool: Integer;
+  LSys, LBool, LInt, LExt: Integer;
+  LInfo: TPasPlatformInfo;
+  LEntry: TIntrinsicEntry;
 
   function T(const AName: string; ACat: TSemaTypeCat; ARank: Byte = 0): Integer;
   begin
@@ -604,7 +725,7 @@ begin
   // Integers (NumRank by width: 8-bit=1 .. 64-bit=4).
   T('Byte', tcInteger, 1); T('ShortInt', tcInteger, 1);
   T('Word', tcInteger, 2); T('SmallInt', tcInteger, 2);
-  T('Cardinal', tcInteger, 3); T('Integer', tcInteger, 3);
+  T('Cardinal', tcInteger, 3); LInt := T('Integer', tcInteger, 3);
   // LongInt / LongWord are 8 bytes on the LP64 targets (audit A1-10).
   if PlatformInfo(APlatform).LongBytes = 8 then
   begin
@@ -634,7 +755,8 @@ begin
     T('NativeInt', tcInteger, 3); T('NativeUInt', tcInteger, 3);
   end;
   // Floats.
-  T('Single', tcFloat, 1); T('Double', tcFloat, 2); T('Extended', tcFloat, 3);
+  T('Single', tcFloat, 1); T('Double', tcFloat, 2);
+  LExt := T('Extended', tcFloat, 3);
   T('Real', tcFloat, 2); T('Currency', tcFloat, 2); T('Comp', tcFloat, 2);
   // REMOVED (2026-08-14): `TDateTime = type Double;` is a real declaration
   // in System.pas (unconditional, not inside any $IFDEF/comment).
@@ -644,6 +766,12 @@ begin
   // source grep says "declared" and dcc says otherwise - the same trap the
   // intrinsic-routine list below documents. 11 false E2003 on one real project.
   T('Real48', tcFloat, 2);
+  // The 10-byte x87 storage type beside Win64's 8-byte Extended - the same
+  // NODEFINE-only trap as Real48 (System.pas names it in `NODEFINE
+  // Extended80` alone), on every target (dcc32, dcc64, dccaarm, dccaarm64,
+  // dccosx64 37.0; local/probe-b38 X80; audit E2-35: six false E2003 in a
+  // component library's storage units).
+  T('Extended80', tcFloat, 3);
   // Booleans.
   LBool := T('Boolean', tcBoolean);
   T('ByteBool', tcBoolean); T('WordBool', tcBoolean); T('LongBool', tcBoolean);
@@ -695,96 +823,38 @@ begin
   K('True', skConst, LBool);
   K('False', skConst, LBool);
   K('nil', skConst, NIL_SYM);
-  K('MaxInt', skConst, NIL_SYM);
-  K('MaxLongint', skConst, NIL_SYM);
+  // MaxInt and MaxLongint are Integer, CompilerVersion Extended (dcc64 prints
+  // Double, what Extended is there) - `S := MaxInt` is E2010, `var X :=
+  // MaxInt; X.Bogus` E2018 (audit E2-38: they had no type, so neither
+  // fired and `MaxInt.ToString` named nothing).
+  K('MaxInt', skConst, LInt);
+  K('MaxLongint', skConst, LInt);
   // System.pas's own `CompilerVersion = 0.0` sits inside a (* ... *) COMMENT
   // ("assigned a value by the compiler when the system unit is compiled") -
   // so, unlike RTLVersion (a real const), nothing declares it and it must be
   // seeded here. A grep-based audit is fooled by that commented-out block;
   // dcc resolves it with no uses clause, which is the check that matters.
-  K('CompilerVersion', skConst, NIL_SYM);
+  K('CompilerVersion', skConst, LExt);
 
-  // Intrinsic routines (result typing deferred) - the documented "Delphi
-  // Intrinsic Routines" set, i.e. spec B.4.3's catalog: compiler-magic names
-  // with NO declaration anywhere, so nothing else can ever resolve them.
-  // Names the RTL DOES declare (Move, Pos, Sqrt, Flush, ChDir/MkDir/RmDir,
-  // Mark/Release, ...) are deliberately NOT here - they resolve through the
-  // real System unit like any other name. The dividing line was verified
-  // per-name against dcc (does a unit with NO uses clause resolve it?) plus
-  // this project's own dump of System.pas's interface scope; grepping the
-  // source alone is not enough, since some names appear only as record
-  // FIELDS (TMemoryManager.GetMem, TVariantManager.VarClear) or inside a
-  // comment (CompilerVersion) and so read as "declared" when they are not.
-  for var LName in ['Length', 'SetLength', 'SetString', 'High', 'Low', 'Ord',
-    'Chr', 'Assigned', 'Inc', 'Dec', 'SizeOf', 'Assert', 'Copy', 'New',
-    'Dispose', 'Include', 'Exclude', 'Write', 'Writeln', 'Read', 'Readln',
-    'Exit', 'Break', 'Continue', 'TypeInfo', 'Delete', 'Insert',
-    'FillChar', 'Odd', 'Pred', 'Succ', 'Default', 'Trunc', 'Round', 'Abs',
-    'Sqr', 'Pi', 'Concat', 'Str', 'Val', 'Swap', 'Hi', 'Lo', 'Addr', 'Ptr',
-    'Slice', 'RunError', 'Initialize', 'Finalize', 'GetTypeKind',
-    'IsManagedType', 'IsConstValue', 'HasWeakRef', 'TypeHandle', 'TypeOf',
-    'ReturnAddress', 'AddressOfReturnAddress', 'AtomicIncrement',
-    'AtomicDecrement', 'AtomicExchange', 'AtomicCmpExchange', 'MulDivInt64',
-    'Fail',
-    // Sibling of the Atomic* family and equally undeclared: System.pas does not
-    // declare MemoryBarrier anywhere, and a unit with an EMPTY uses clause
-    // resolves it under dcc32 37.0. Found by a third-party library's reflection unit,
-    // which calls it inside a critical section.
-    'MemoryBarrier',
-    // Flow. (`Abort` is NOT one of these - it is a real System.SysUtils
-    // routine, so code using it without that unit must still get E2003;
-    // it was previously in this list, wrongly making us accept such code.)
-    'Halt',
-    // Memory (by-ref). None of these three is declared in System.pas - the
-    // only GetMem/FreeMem/ReallocMem there are FIELDS of the deprecated
-    // TMemoryManager record, which is why a source grep suggests otherwise.
-    'GetMem', 'FreeMem', 'ReallocMem',
-    // Classic file I/O (by-ref file var) - the whole Turbo-era family is
-    // compiler-magic, none of it declared: real dcc resolves every one of
-    // these in a unit with an empty uses clause.
-    'Assign', 'AssignFile', 'Reset', 'Rewrite', 'Append', 'Close',
-    'CloseFile', 'Seek', 'Eof', 'Eoln', 'SeekEof', 'SeekEoln', 'FilePos',
-    'FileSize', 'Truncate', 'Erase', 'Rename', 'BlockRead', 'BlockWrite',
-    // dcc-verified absent from System.pas, unlike its neighbours IOResult,
-    // Flush, SetLineBreakStyle and TextOpen, which are all really declared
-    // there and so must NOT be seeded.
-    'SetTextBuf',
-    // Directory: only GetDir is intrinsic - ChDir/MkDir/RmDir ARE declared
-    // in System.pas (verified), so they must not be seeded here.
-    'GetDir',
-    // Variants. Again fields of TVariantManager, not declarations; only
-    // these four resolve bare (VarCastOle/VarCopyNoInd/VarArrayGet/
-    // VarArrayPut do NOT - real dcc E2003s them).
-    'VarClear', 'VarCast', 'VarCopy', 'VarArrayRedim',
-    // 13.0 (see ch.04 sec. 4.11.1).
-    'NameOf'] do
-    K(LName, skRoutine, NIL_SYM);
-
-  // 64-BIT ONLY. The first platform-conditional entries in this seed, and the
-  // condition is not a nicety: dcc32 reports `E2003 Undeclared identifier` for
-  // every one of these while dcc64 accepts them, so seeding them everywhere
-  // would make a Win32 analysis accept code the Win32 compiler rejects.
-  //
-  // The varargs family is the same System.pas trap as CompilerVersion: its
-  // only mention there is four COMMENTED-OUT signatures, so a source grep says
-  // "declared" and dcc says otherwise. Verified per name with the usual probe
-  // (does a unit with an EMPTY uses clause resolve it?) - dcc64 answers with
-  // `E2029 '(' expected`, which means the name is known and only the call
-  // syntax is wrong; a genuinely undeclared control name answers E2003.
-  //
-  // Not 64-bit only after all: dccaarm (Android32) knows the four VarArg
-  // names too (E2029, not E2003), only dcc32 does not - the gate is
-  // TPasPlatformInfo.HasVarArgIntrinsics (audit A1-16, which found the false
-  // E2003s inside System.pas on Android32).
-  if PlatformInfo(APlatform).HasVarArgIntrinsics then
-    for var LName in ['VarArgStart', 'VarArgEnd', 'VarArgCopy',
-      'VarArgGetValue'] do
-      K(LName, skRoutine, NIL_SYM);
-  // Sibling of AtomicCmpExchange above, but a SEPARATE name and 64-bit only
-  // - the 128-bit compare-and-swap the RTL's lock-free paths use (dccaarm
-  // answers E2003).
-  if PlatformInfo(APlatform).Is64Bit then
-    K('AtomicCmpExchange128', skRoutine, NIL_SYM);
+  // Intrinsic routines - the documented "Delphi Intrinsic Routines" set, i.e.
+  // spec B.4.3's catalog, from CIntrinsics: compiler-magic names with NO
+  // declaration anywhere, so nothing else can ever resolve them. Names the
+  // RTL DOES declare (Move, Pos, Sqrt, Flush, ChDir/MkDir/RmDir, Mark/
+  // Release, ...) are deliberately NOT there - they resolve through the real
+  // System unit like any other name. The dividing line was verified per-name
+  // against dcc (does a unit with NO uses clause resolve it?) plus this
+  // project's own dump of System.pas's interface scope; grepping the source
+  // alone is not enough, since some names appear only as record FIELDS
+  // (TMemoryManager.GetMem, TVariantManager.VarClear) or inside a comment
+  // (CompilerVersion) and so read as "declared" when they are not. The
+  // platform-conditional entries are not a nicety: seeding a name dcc32
+  // rejects would make a Win32 analysis accept code its compiler does not.
+  LInfo := PlatformInfo(APlatform);
+  for LEntry in CIntrinsics do
+    if (LEntry.Gate = igAll) or
+       ((LEntry.Gate = igVarArg) and LInfo.HasVarArgIntrinsics) or
+       ((LEntry.Gate = ig64Bit) and LInfo.Is64Bit) then
+      K(LEntry.Name, skRoutine, NIL_SYM);
 
   Result := LSys;
 end;
@@ -793,32 +863,11 @@ var
   GIntrResult: TDictionary<string, TPasIntrinsicResult>;
 
 procedure BuildIntrResult;
-  procedure Put(const ANames: array of string; AShape: TPasIntrinsicResult);
-  begin
-    for var LName in ANames do
-      GIntrResult.Add(LName, AShape);
-  end;
 begin
   GIntrResult := TDictionary<string, TPasIntrinsicResult>.Create(96);
-  Put(['ord', 'sizeof', 'hi', 'lo'], irInteger);
-  Put(['trunc', 'round', 'muldivint64'], irInt64);
-  Put(['assigned', 'odd', 'ismanagedtype', 'isconstvalue', 'hasweakref',
-    'eof', 'eoln', 'seekeof', 'seekeoln'], irBoolean);
-  Put(['chr'], irChar);
-  Put(['pi'], irExtended);
-  Put(['addr', 'ptr', 'returnaddress', 'addressofreturnaddress', 'typeinfo',
-    'typehandle', 'typeof'], irPointer);
-  Put(['length'], irLength);
-  Put(['abs'], irAbs);
-  Put(['sqr'], irSqr);
-  Put(['pred', 'succ'], irOrdinal);
-  Put(['low', 'high'], irBounds);
-  Put(['swap'], irSwap);
-  Put(['copy', 'atomicincrement', 'atomicdecrement', 'atomicexchange',
-    'atomiccmpexchange'], irFirstArg);
-  Put(['concat'], irConcat);
-  Put(['default'], irDefault);
-  Put(['gettypekind'], irTypeKind);
+  for var LEntry in CIntrinsics do
+    if LEntry.Shape <> irNone then
+      GIntrResult.Add(LowerCase(LEntry.Name), LEntry.Shape);
 end;
 
 function PasIntrinsicResult(const ANameLower: string): TPasIntrinsicResult;
@@ -830,16 +879,16 @@ end;
 function PasIntrinsicReadsArgs(AShape: TPasIntrinsicResult): Boolean;
 begin
   Result := AShape in [irLength, irAbs, irSqr, irOrdinal, irBounds, irSwap,
-    irFirstArg, irConcat, irDefault];
+    irOrd, irFirstArg, irConcat, irDefault];
 end;
 
 procedure BuildSigIndex;
 var
   LIdx: Integer;
 begin
-  GSigIndex := TDictionary<string, Integer>.Create(Length(CBuiltinSigs) * 2);
-  for LIdx := 0 to High(CBuiltinSigs) do
-    GSigIndex.Add(CBuiltinSigs[LIdx].Name, LIdx);
+  GSigIndex := TDictionary<string, Integer>.Create(Length(CIntrinsics) * 2);
+  for LIdx := 0 to High(CIntrinsics) do
+    GSigIndex.Add(LowerCase(CIntrinsics[LIdx].Name), LIdx);
 end;
 
 initialization

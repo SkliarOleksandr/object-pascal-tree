@@ -911,6 +911,21 @@ begin
   GCounter.Ok('SetLength(| target params from the seed table',
     GHit and (TargetOf('SetLength').ParamsText =
       '(var S; NewLength: NativeInt)'));
+  GCounter.Ok('SetLength(| is a procedure',
+    GHit and (TargetOf('SetLength').HeadWord = 'procedure'));
+  // The display result is the typers' shape (audit B2-15, D1-16): Hi is
+  // Word (dcc - the table said Byte), High a function with no fixed result.
+  CallCase(PROJ_HEAD + '  Hi(|'#10 + PROJ_TAIL);
+  GCounter.Ok('Hi(| result is Word, a function',
+    GHit and (TargetOf('Hi').ResultText = 'Word') and
+    (TargetOf('Hi').HeadWord = 'function'));
+  CallCase(PROJ_HEAD + '  High(|'#10 + PROJ_TAIL);
+  GCounter.Ok('High(| has no fixed result but is a function',
+    GHit and (TargetOf('High').ResultText = '') and
+    (TargetOf('High').HeadWord = 'function'));
+  CallCase(PROJ_HEAD + '  NameOf(|'#10 + PROJ_TAIL);
+  GCounter.Ok('NameOf(| result is string',
+    GHit and (TargetOf('NameOf').ResultText = 'string'));
 
   // A constructor is a target, with its head word.
   CallCase(PROJ_HEAD + '  TBase.Create(|'#10 + PROJ_TAIL);

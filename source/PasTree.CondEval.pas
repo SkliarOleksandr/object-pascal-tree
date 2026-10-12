@@ -445,6 +445,26 @@ begin
     Exit(True);
   end;
 
+  // Extended80: the 10-byte x87 storage type, aligned to 8 - except on
+  // the targets whose Extended is the 16-byte one, where it IS Extended
+  // (dccosx64 37.0: SizeOf 16, `record A: Byte; E: Extended80 end` 32;
+  // local/probe-b38 X80b). dccosxarm64 aligns its 10 bytes to 16, a fact
+  // TPasBuiltinTarget does not carry (docs/coverage.md 2.3.1).
+  if SameText(AName, 'Extended80') then
+  begin
+    if ATarget.ExtendedBytes = 16 then
+    begin
+      ASize := 16;
+      AAlign := 16;
+    end
+    else
+    begin
+      ASize := 10;
+      AAlign := 8;
+    end;
+    Exit(True);
+  end;
+
   // The legacy 6-byte float: 6 bytes of storage aligned to 8, not to 6 -
   // dcc-probed (`record A: Byte; F: Real48; end` is 16 on both targets), so
   // the scalar rule below would get it wrong.

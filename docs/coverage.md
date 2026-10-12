@@ -106,6 +106,12 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   subrange argument scores against its base type as any other type of its
   category would (no exact match).
 
+### 2.3.1 Real types
+- `Extended80` is sized 10 aligned to 8, or as the 16-byte `Extended` where
+  that is the target's: on OSXARM64 dcc aligns its 10 bytes to 16, a fact
+  the target record does not carry, so a `SizeOf` of a record holding one
+  is short there.
+
 ### 2.5.1 Type aliases - weak vs. distinct
 - the parser marks distinctness (Aux=1); CanonTypeX and the helper map stop
   there, and the operator table computes a distinct number in its base's
@@ -208,15 +214,17 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 
 ### 4.11.4 Result types of the value-returning intrinsics
 - the result rules are implemented in both typers from the spec's probe
-  table, with these edges left out: a named subrange whose bounds exceed
-  32 bits (`1..5000000000`) reads Integer under Low/High/Pred/Succ/Abs where
-  dcc says Int64 (the bounds are not folded); `GetTypeKind` is typed at the
+  table, with these edges left out: `Ord` of an enumeration or subrange
+  reads its range only from literal bounds and values, enumeration values
+  and true constants naming them - a bound or an explicit value that is an
+  expression (`N + 1`, `Ord(X)`) leaves the range unknown and `Ord` Integer;
+  `Abs` of a subrange past 32 bits reads Integer where dcc says Int64;
+  `GetTypeKind` is typed at the
   project level only (System.TTypeKind is a real declaration the intra-unit
   typer cannot see); `Slice` stays untyped (it is legal in one position only,
-  where its type is never read); `Pred` / `Succ` of an enumeration or Char
-  subrange reads the subrange where dcc gives its base type (`Succ(W)` of a
-  `TWork = dMon..dTue` is TDay; `High(W)` is dcc's anonymous
-  "Enumeration", the subrange here - dcc64 37.0, 2026-10-12).
+  where its type is never read); the intra-unit typer gives `Pred` /
+  `Succ` of an enumeration subrange bounded by ANOTHER unit's value the
+  subrange, which the project pass then types as its base.
 - a VALUE-taking intrinsic whose argument resolved to a TYPE NAME (a member
   named `Word` bound to the builtin, the CheckAssign mis-binding case) types
   as nothing rather than as that type.

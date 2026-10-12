@@ -2033,6 +2033,51 @@ const
     ('for B to W', 'Integer', 'Integer'),
     ('for U64 to 0', 'UInt64', 'UInt64'),
     ('for 0 to C', 'Cardinal', 'Cardinal'));
+  // B38: an intrinsic call, its type on Win64, on Win32 - the type dcc USES
+  // (overload choice, inference); the enumeration, subrange and constant
+  // arguments are another unit's (see the fixture). NativeUInt is Cardinal on
+  // Win32 - one type, either name.
+  CINTR: array[0..39] of array[0..2] of string = (
+    ('Ord(AC)', 'Byte', 'Byte'),
+    ('Ord(Ch)', 'Word', 'Word'),
+    ('Ord(C)', 'Cardinal', 'Cardinal'),
+    ('Ord(I64)', 'Integer', 'Integer'),
+    ('Ord(NU)', 'Integer', 'NativeUInt'),
+    ('Ord(Bo)', 'ShortInt', 'ShortInt'),
+    ('Ord(E)', 'ShortInt', 'ShortInt'),
+    ('Ord(SW)', 'Word', 'Word'),
+    ('Ord(S1)', 'SmallInt', 'SmallInt'),
+    ('Ord(CS)', 'ShortInt', 'ShortInt'),
+    ('Ord(KC)', 'Integer', 'Integer'),
+    ('Ord(e1)', 'Integer', 'Integer'),
+    ('Succ(C)', 'Cardinal', 'Cardinal'),
+    ('Succ(B)', 'Integer', 'Integer'),
+    ('Succ(U64)', 'UInt64', 'UInt64'),
+    ('Succ(NU)', 'NativeUInt', 'NativeUInt'),
+    ('Succ(NI)', 'NativeInt', 'NativeInt'),
+    ('Pred(CS)', 'Char', 'Char'),
+    ('Succ(ES)', 'TE', 'TE'),
+    ('High(Cardinal)', 'Cardinal', 'Cardinal'),
+    ('High(NativeUInt)', 'NativeUInt', 'NativeUInt'),
+    ('High(ACS)', 'Char', 'Char'),
+    ('High(AES)', 'TE', 'TE'),
+    ('High(TS1)', 'Integer', 'Integer'),
+    ('Hi(I)', 'Word', 'Word'),
+    ('Lo(C)', 'Word', 'Word'),
+    ('Hi(KI)', 'Integer', 'Integer'),
+    ('Swap(B)', 'SmallInt', 'SmallInt'),
+    ('Swap(W)', 'Word', 'Word'),
+    ('Swap(I64)', 'Integer', 'Integer'),
+    ('Abs(V)', 'Extended', 'Extended'),
+    ('Sqr(V)', 'Extended', 'Extended'),
+    ('Abs(C)', 'Integer', 'Integer'),
+    ('FileSize(F)', 'Integer', 'Integer'),
+    ('NameOf(I)', 'string', 'string'),
+    ('MaxInt', 'Integer', 'Integer'),
+    ('CompilerVersion', 'Extended', 'Extended'),
+    ('Ord(S200)', 'Byte', 'Byte'),
+    ('Ord(SCW)', 'SmallInt', 'SmallInt'),
+    ('Ord(WB)', 'Word', 'Word'));
   // B36b: expression, its type (dcc32 = dcc64) - text joins, Concat, the
   // inline if, a set with a set constructor, the array pseudo-constructor.
   CTEXT: array[0..43] of array[0..1] of string = (
@@ -3120,6 +3165,60 @@ begin
           else
             Eq('4.2.1/Win32: ' + CPROMO[LRow][0],
               XTypeOf(LE, Format('P%.2d', [LRow])), CPROMO[LRow][2]);
+      finally
+        GProj.Free;
+        if TDirectory.Exists(LDir) then
+          TDirectory.Delete(LDir, True);
+      end;
+    end;
+  end;
+
+  // ---- B38: the intrinsic results dcc USES - Ord keeps a narrow width and
+  // reads an enumeration's or subrange's range (from another unit here),
+  // Succ / High keep a 32- or 64-bit builtin, a subrange's Pred is its base,
+  // Hi / Lo are Word, a constant argument folds to Integer, FileSize /
+  // NameOf / MaxInt / CompilerVersion are typed (audit A1-14, E1-38, B2-15,
+  // E2-37..E2-39; dcc32 / dcc64 37.0, local/probe-b38 T64 T32 Q2 C1). ----
+  begin
+    var LSrcA :=
+      'unit XIA;'#10'interface'#10 +
+      'type TE = (e0, e1, e2, e3); TES = e1..e2; TCS = ''a''..''z'';'#10 +
+      '  TSW = 0..60000; TS1 = 0..1000; TS200 = 0..200; TSCW = #0..#$3000;'#10 +
+      '  TACS = array[TCS] of Integer; TAES = array[TES] of Integer;'#10 +
+      'const KC = ''A''; KI = 300;'#10 +
+      'implementation'#10'end.'#10;
+    var LSrc :=
+      'unit XIB;'#10'interface'#10'uses XIA;'#10 +
+      'implementation'#10 +
+      'procedure P;'#10 +
+      'var AC: AnsiChar; Ch: Char; B: Byte; W: Word; C: Cardinal; I: Integer;'#10 +
+      '  I64: Int64; U64: UInt64; NI: NativeInt; NU: NativeUInt; Bo: Boolean;'#10 +
+      '  WB: WordBool; E: TE; ES: TES; CS: TCS; SW: TSW; S1: TS1;'#10 +
+      '  S200: TS200; SCW: TSCW; V: Variant; F: file; ACS: TACS; AES: TAES;'#10 +
+      'begin'#10;
+    for var LRow := 0 to High(CINTR) do
+      LSrc := LSrc + Format('  var P%.2d := %s;'#10, [LRow, CINTR[LRow][0]]);
+    LSrc := LSrc + 'end;'#10'end.'#10;
+    for var LPlat in [pfWin64, pfWin32] do
+    begin
+      LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype_intr');
+      if TDirectory.Exists(LDir) then
+        TDirectory.Delete(LDir, True);
+      TDirectory.CreateDirectory(LDir);
+      TFile.WriteAllText(TPath.Combine(LDir, 'XIA.pas'), LSrcA);
+      TFile.WriteAllText(TPath.Combine(LDir, 'XIB.pas'), LSrc);
+      GProj := TPasSemaProject.Create(LPlat, [LDir], []);
+      try
+        GProj.AnalyzeDirectory(LDir);
+        LE := ModelByName('xib');
+        Ok('XIB loaded', Assigned(LE));
+        for var LRow := 0 to High(CINTR) do
+          if LPlat = pfWin64 then
+            Eq('4.11.4/Win64: ' + CINTR[LRow][0],
+              XTypeOf(LE, Format('P%.2d', [LRow])), CINTR[LRow][1])
+          else
+            Eq('4.11.4/Win32: ' + CINTR[LRow][0],
+              XTypeOf(LE, Format('P%.2d', [LRow])), CINTR[LRow][2]);
       finally
         GProj.Free;
         if TDirectory.Exists(LDir) then

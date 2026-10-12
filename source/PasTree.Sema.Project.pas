@@ -749,6 +749,11 @@ type
     function IntrinsicArgX(AMid, AArg: Integer;
       const AX: TSemaXType): TSemaXType;
     function WidenOrdinalX(AMid: Integer; const AX: TSemaXType): TSemaXType;
+    function OrdNameValueX(AMid: Integer): TSemaOrdNameValue;
+    function IsConstArgX(AMid, ANode: Integer): Boolean;
+    function OrdFactsX(AMid, ANode: Integer;
+      const AX: TSemaXType): TSemaOrdFacts;
+    function OrdStepX(AMid: Integer; const AX: TSemaXType): TSemaXType;
     function ArrayDefOfX(AMid, AArg: Integer; const AX: TSemaXType;
       out ADefMid, ADef: Integer): Boolean;
     function ArrayBoundTypeX(ADefMid, ADef: Integer): TSemaXType;
@@ -16081,6 +16086,150 @@ begin
   Result := BuiltinX(AMid, 'integer');
 end;
 
+{ TPasSemaTyper.OrdNameValue across models: the ordinal value of a name of
+  model AMid - an enumeration value or a true constant of any unit (its
+  value followed in its own model), True / False. }
+function TPasSemaProject.OrdNameValueX(AMid: Integer): TSemaOrdNameValue;
+begin
+  Result :=
+    function(ANode, ADepth: Integer; out AValue: Int64): Boolean
+    var
+      LBMid, LBSym, LDecl: Integer;
+      LS: TSemaSymbol;
+      LT: TPasTree;
+    begin
+      Result := False;
+      AValue := 0;
+      if not DesignatorSymX(AMid, ANode, LBMid, LBSym) then
+        Exit;
+      LS := FModels[LBMid].Symbols[LBSym];
+      LT := FModels[LBMid].Tree;
+      LDecl := LS.DeclNode;
+      case LS.Kind of
+        skEnumValue:
+          Result := (LDecl <> NIL_NODE) and
+            (LT.Nodes[LDecl].Parent <> NIL_NODE) and
+            (LT.Nodes[LT.Nodes[LDecl].Parent].Kind = nkEnumValue) and
+            EnumElemValue(LT, LT.Nodes[LDecl].Parent, ADepth,
+              OrdNameValueX(LBMid), AValue);
+        skConst:
+          if sfBuiltin in LS.Flags then
+          begin
+            Result := (LS.NameLower = 'true') or (LS.NameLower = 'false');
+            AValue := Ord(LS.NameLower = 'true');
+          end
+          else if (LS.TypeNode = NIL_NODE) and (LDecl <> NIL_NODE) and
+                  (LT.Nodes[LDecl].Parent <> NIL_NODE) and
+                  (LT.Nodes[LT.Nodes[LDecl].Parent].Kind = nkConstDecl) then
+            Result := OrdinalNodeValue(LT, LT.Nodes[LDecl].NextSibling,
+              ADepth, OrdNameValueX(LBMid), AValue);
+      end;
+    end;
+end;
+
+{ TPasSemaTyper.IsConstArg across models: argument ANode of model AMid is a
+  literal, a true constant (of any unit) or an enumeration value. }
+function TPasSemaProject.IsConstArgX(AMid, ANode: Integer): Boolean;
+var
+  LBMid, LBSym: Integer;
+  LM: TPasSemaModel;
+begin
+  Result := False;
+  LM := FModels[AMid];
+  ANode := PeelParens(LM.Tree, ANode);
+  if ANode = NIL_NODE then
+    Exit;
+  case LM.Tree.Nodes[ANode].Kind of
+    nkIntLit, nkRealLit, nkStrLit, nkCaretChar:
+      Result := True;
+    nkUnaryOp:
+      Result := IsConstArgX(AMid, LM.Tree.Nodes[ANode].FirstChild);
+    nkIdent, nkMember:
+      Result := DesignatorSymX(AMid, ANode, LBMid, LBSym) and
+        ((FModels[LBMid].Symbols[LBSym].Kind = skEnumValue) or
+         ((FModels[LBMid].Symbols[LBSym].Kind = skConst) and
+          (FModels[LBMid].Symbols[LBSym].TypeNode = NIL_NODE)));
+  end;
+end;
+
+{ TPasSemaTyper.OrdFacts across models: argument ANode of model AMid
+  (NIL_NODE: a type), of type AX. }
+function TPasSemaProject.OrdFactsX(AMid, ANode: Integer;
+  const AX: TSemaXType): TSemaOrdFacts;
+var
+  LB: TSemaXType;
+  LS: TSemaSymbol;
+begin
+  Result := Default(TSemaOrdFacts);
+  Result.Cat := XCatOf(AX);
+  Result.IsConst := (ANode <> NIL_NODE) and IsConstArgX(AMid, ANode);
+  if Result.Cat = tcInteger then
+    LB := StorageBaseX(AX)
+  else
+    LB := CanonTypeX(AX);
+  if not XValid(LB) then
+    Exit;
+  LS := FModels[LB.UnitId].Symbols[LB.Sym];
+  if LS.Kind = skBuiltinType then
+  begin
+    Result.Builtin := LS.NameLower;
+    Result.Rank := LS.NumRank;
+  end
+  else if LS.Kind = skType then
+    Result.HasRange := OrdinalDefRange(FModels[LB.UnitId].Tree,
+      TypeDefNodeOf(LB.UnitId, LB.Sym), OrdNameValueX(LB.UnitId), Result.Lo,
+      Result.Hi);
+end;
+
+{ TPasSemaTyper.OrdStep across models: Pred / Succ / Low / High of an
+  ordinal of type AX - an integer by OrdStepAnswer, an enumeration, Char or
+  Boolean its own type, a subrange of one its base. XNil for a non-ordinal. }
+function TPasSemaProject.OrdStepX(AMid: Integer;
+  const AX: TSemaXType): TSemaXType;
+var
+  LC, LBase: TSemaXType;
+  LDef, LLo: Integer;
+  LS: TSemaSymbol;
+begin
+  Result := XNil;
+  case XCatOf(AX) of
+    tcInteger:
+      Result := OpAnswerX(AMid, OrdStepAnswer(OrdFactsX(AMid, NIL_NODE, AX)),
+        AX, XNil, False);
+    tcEnum:
+      begin
+        Result := AX;
+        LC := CanonTypeX(AX);
+        if not XValid(LC) then
+          Exit;
+        LDef := TypeDefNodeOf(LC.UnitId, LC.Sym);
+        if (LDef = NIL_NODE) or
+           (FModels[LC.UnitId].Tree.Nodes[LDef].Kind <> nkSubrange) then
+          Exit;
+        LLo := FModels[LC.UnitId].Tree.Nodes[LDef].FirstChild;
+        if (LLo = NIL_NODE) or not (FModels[LC.UnitId].Tree.Nodes[LLo].Kind in
+           [nkIdent, nkMember]) then
+          Exit;
+        LBase := WithTargetTypeX(LC.UnitId, LLo);
+        if XCatOf(LBase) = tcEnum then
+          Result := LBase;
+      end;
+    tcChar:
+      begin
+        LC := CanonTypeX(AX);
+        if XValid(LC) then
+        begin
+          LS := FModels[LC.UnitId].Symbols[LC.Sym];
+          if LS.Kind = skBuiltinType then
+            Exit(LC);
+        end;
+        Result := BuiltinX(AMid, 'char');
+      end;
+    tcBoolean:
+      Result := AX;
+  end;
+end;
+
 { The nkArrayType definition behind an intrinsic's array argument AArg of
   type AX: the named type's definition through plain aliases (the same chase
   ElementX runs), or - for an ANONYMOUS inline array (`A: array of T`), which
@@ -16176,10 +16325,7 @@ begin
     nkIdent, nkMember, nkTypeArgs:
       begin
         LX := ResolveTypeExpr(ADefMid, LIdx);
-        case XCatOf(LX) of
-          tcInteger: Exit(WidenOrdinalX(ADefMid, LX));
-          tcEnum, tcChar, tcBoolean: Exit(LX);
-        end;
+        Exit(OrdStepX(ADefMid, LX));
       end;
   end;
 end;
@@ -16246,12 +16392,24 @@ begin
   // Default/SizeOf/TypeInfo take a type; for the others it means "do not
   // know" - `Copy(Word, 1, I)` typed as the integer Word was a false E2010.
   if XValid(LA) and (AShape in [irLength, irAbs, irSqr, irOrdinal, irSwap,
-       irFirstArg, irConcat]) and
+       irOrd, irFirstArg, irConcat]) and
      DesignatorSymX(AMid, LArg, LDefMid, LTSym) and
      (FModels[LDefMid].Symbols[LTSym].Kind in [skType, skBuiltinType]) then
     Exit;
   case AShape of
     irInteger:  Result := BuiltinX(AMid, 'integer');
+    irString:   Result := BuiltinX(AMid, 'string');
+    irHiLo:
+      if (LArg <> NIL_NODE) and IsConstArgX(AMid, LArg) then
+        Result := BuiltinX(AMid, 'integer')
+      else
+        Result := BuiltinX(AMid, 'word');
+    irOrd:
+      if (LArg <> NIL_NODE) and IsConstArgX(AMid, LArg) then
+        Result := BuiltinX(AMid, 'integer')
+      else if XCatOf(LA) in [tcInteger, tcChar, tcBoolean, tcEnum] then
+        Result := OpAnswerX(AMid, OrdAnswer(OrdFactsX(AMid, LArg, LA)), LA,
+          XNil, False);
     irInt64:    Result := BuiltinX(AMid, 'int64');
     irBoolean:  Result := BuiltinX(AMid, 'boolean');
     irChar:     Result := BuiltinX(AMid, 'char');
@@ -16269,6 +16427,7 @@ begin
       end;
     irAbs:
       case XCatOf(LA) of
+        tcVariant: Result := BuiltinX(AMid, 'extended');
         tcInteger: Result := WidenOrdinalX(AMid, LA);
         tcFloat:
           begin
@@ -16294,17 +16453,13 @@ begin
             else
               Result := BuiltinX(AMid, 'integer');
           end;
-        tcFloat: Result := BuiltinX(AMid, 'extended');
+        tcFloat, tcVariant: Result := BuiltinX(AMid, 'extended');
       end;
     irOrdinal:
-      case XCatOf(LA) of
-        tcInteger: Result := WidenOrdinalX(AMid, LA);
-        tcEnum, tcChar, tcBoolean: Result := LA;
-      end;
+      Result := OrdStepX(AMid, LA);
     irBounds:
       case XCatOf(LA) of
-        tcInteger: Result := WidenOrdinalX(AMid, LA);
-        tcEnum, tcChar, tcBoolean: Result := LA;
+        tcInteger, tcEnum, tcChar, tcBoolean: Result := OrdStepX(AMid, LA);
         tcString: Result := BuiltinX(AMid, 'integer');
         tcArray, tcUnknown:
           if ArrayDefOfX(AMid, LArg, LA, LDefMid, LDef) then
@@ -16336,7 +16491,12 @@ begin
       begin
         LC := CanonTypeX(LA);
         LName := CanonName(LA);
-        if (LName <> '') and (LName <> 'nativeint') and
+        if IsConstArgX(AMid, LArg) then
+          Result := BuiltinX(AMid, 'integer')
+        else if (LName <> '') and
+           (FModels[LC.UnitId].Symbols[LC.Sym].NumRank = 1) then
+          Result := BuiltinX(AMid, 'smallint')   // `Swap(B)`, probe-b38
+        else if (LName <> '') and (LName <> 'nativeint') and
            (LName <> 'nativeuint') and
            (FModels[LC.UnitId].Symbols[LC.Sym].NumRank in [2, 3]) then
           Result := LA

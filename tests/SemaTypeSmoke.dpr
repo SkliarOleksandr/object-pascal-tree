@@ -290,14 +290,14 @@ begin
   Eq('4.11: Abs(Currency) is Extended on Win32', AssignedType('R14'),
     'Extended');
   Eq('4.11: Abs(NativeInt) is NativeInt', AssignedType('R15'), 'NativeInt');
-  Eq('4.11: Abs(Variant) is not typed', AssignedType('R16'), '?');
+  Eq('4.11: Abs(Variant) is Extended', AssignedType('R16'), 'Extended');
   Eq('4.11: Sqr(Cardinal) stays Cardinal', AssignedType('R17'), 'Cardinal');
   Eq('4.11: Sqr(UInt64) stays UInt64', AssignedType('R18'), 'UInt64');
   Eq('4.11: Sqr(Currency) is Extended', AssignedType('R19'), 'Extended');
   Eq('4.11: Sqr(SmallInt) widens to Integer', AssignedType('R20'), 'Integer');
   Eq('4.11: Pred(enum) is the enum', AssignedType('R21'), 'TEnum');
   Eq('4.11: Succ(Char) is Char', AssignedType('R22'), 'Char');
-  Eq('4.11: Succ(UInt64) is Int64', AssignedType('R23'), 'Int64');
+  Eq('4.11: Succ(UInt64) is UInt64', AssignedType('R23'), 'UInt64');
   Eq('4.11: Pred(Word) widens to Integer', AssignedType('R24'), 'Integer');
   Eq('4.11: Succ(Boolean) is Boolean', AssignedType('R25'), 'Boolean');
   Eq('4.11: Pred(subrange) is Integer', AssignedType('R26'), 'Integer');
@@ -320,9 +320,9 @@ begin
   Eq('4.11: Low(Int64) is Int64', AssignedType('R38'), 'Int64');
   Eq('4.11: High(AnsiChar value) is AnsiChar', AssignedType('R39'),
     'AnsiChar');
-  Eq('4.11: Hi(Int64) is Integer', AssignedType('R40'), 'Integer');
+  Eq('4.11: Hi(Int64) is Word', AssignedType('R40'), 'Word');
   Eq('4.11: Swap(Word) stays Word', AssignedType('R41'), 'Word');
-  Eq('4.11: Swap(Byte) is Integer', AssignedType('R42'), 'Integer');
+  Eq('4.11: Swap(Byte) is SmallInt', AssignedType('R42'), 'SmallInt');
   Eq('4.11: Addr is Pointer', AssignedType('R43'), 'Pointer');
   Eq('4.11: TypeInfo is Pointer', AssignedType('R44'), 'Pointer');
   Eq('4.11: Default(record) is the record', AssignedType('R45'), 'TRec');
@@ -550,6 +550,92 @@ begin
     'TES');
   Eq('5.4.1: if then nil else Pointer is Pointer', AssignedType('R09'),
     'Pointer');
+  GModel.Free;
+
+  // B38: the intrinsic results dcc USES (overload choice, inference) in the
+  // unit's typer - Ord keeps a narrow width, Succ / High keep a 32-bit
+  // unsigned, Hi / Lo are Word, a constant folds to Integer (audit A1-14,
+  // E1-38, E2-37..E2-39; local/probe-b38 T64 T32).
+  const INTRB38 =
+    'unit u;'#10'interface'#10 +
+    'type TE = (e0, e1, e2, e3); TES = e1..e2; TCS = ''a''..''z'';'#10 +
+    '  TSW = 0..60000; TS1 = 0..1000; TS200 = 0..200;'#10 +
+    '  TACS = array[TCS] of Integer;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var AC: AnsiChar; Ch: Char; B: Byte; C: Cardinal; I: Integer;'#10 +
+    '  I64: Int64; Bo: Boolean; WB: WordBool; E: TE; ES: TES; CS: TCS;'#10 +
+    '  SW: TSW; S1: TS1; S200: TS200; V: Variant; F: file; ACS: TACS;'#10 +
+    '  R01, R02, R03, R04, R05, R06, R07, R08, R09, R10, R11, R12, R13, R14,'#10 +
+    '  R15, R16, R17, R18, R19, R20, R21, R22, R23, R24, R25, R26, R27,'#10 +
+    '  R28, R29: Variant;'#10 +
+    'begin'#10 +
+    '  R01 := Ord(AC);'#10 +
+    '  R02 := Ord(Ch);'#10 +
+    '  R03 := Ord(C);'#10 +
+    '  R04 := Ord(I64);'#10 +
+    '  R05 := Ord(Bo);'#10 +
+    '  R06 := Ord(E);'#10 +
+    '  R07 := Ord(SW);'#10 +
+    '  R08 := Ord(S1);'#10 +
+    '  R09 := Ord(CS);'#10 +
+    '  R10 := Ord(''A'');'#10 +
+    '  R11 := Succ(C);'#10 +
+    '  R12 := Succ(B);'#10 +
+    '  R13 := Pred(CS);'#10 +
+    '  R14 := Succ(ES);'#10 +
+    '  R15 := High(Cardinal);'#10 +
+    '  R16 := High(UInt64);'#10 +
+    '  R17 := High(ACS);'#10 +
+    '  R18 := Hi(I);'#10 +
+    '  R19 := Hi(5);'#10 +
+    '  R20 := Swap(B);'#10 +
+    '  R21 := Abs(V);'#10 +
+    '  R22 := Sqr(V);'#10 +
+    '  R23 := FilePos(F);'#10 +
+    '  R24 := NameOf(I);'#10 +
+    '  R25 := MaxInt;'#10 +
+    '  R26 := Ord(WB);'#10 +
+    '  R27 := Ord(S200);'#10 +
+    '  R28 := Ord(e1);'#10 +
+    '  R29 := CompilerVersion;'#10 +
+    'end;'#10 +
+    'end.'#10;
+  Analyze(INTRB38);
+  Eq('4.11.4: Ord(AnsiChar) is Byte', AssignedType('R01'), 'Byte');
+  Eq('4.11.4: Ord(Char) is Word', AssignedType('R02'), 'Word');
+  Eq('4.11.4: Ord(Cardinal) is Cardinal', AssignedType('R03'), 'Cardinal');
+  Eq('4.11.4: Ord(Int64) is Integer', AssignedType('R04'), 'Integer');
+  Eq('4.11.4: Ord(Boolean) is ShortInt', AssignedType('R05'), 'ShortInt');
+  Eq('4.11.4: Ord of an enumeration is ShortInt', AssignedType('R06'),
+    'ShortInt');
+  Eq('4.11.4: Ord of 0..60000 is Word', AssignedType('R07'), 'Word');
+  Eq('4.11.4: Ord of 0..1000 is SmallInt', AssignedType('R08'), 'SmallInt');
+  Eq('4.11.4: Ord of ''a''..''z'' is ShortInt', AssignedType('R09'),
+    'ShortInt');
+  Eq('4.11.4: Ord of a literal is Integer', AssignedType('R10'), 'Integer');
+  Eq('4.11.4: Succ(Cardinal) is Cardinal', AssignedType('R11'), 'Cardinal');
+  Eq('4.11.4: Succ(Byte) is Integer', AssignedType('R12'), 'Integer');
+  Eq('4.11.4: Pred of a Char subrange is Char', AssignedType('R13'), 'Char');
+  Eq('4.11.4: Succ of an enumeration subrange is the enumeration',
+    AssignedType('R14'), 'TE');
+  Eq('4.11.4: High(Cardinal) is Cardinal', AssignedType('R15'), 'Cardinal');
+  Eq('4.11.4: High(UInt64) is UInt64', AssignedType('R16'), 'UInt64');
+  Eq('4.11.4: High of a Char-subrange-indexed array is Char',
+    AssignedType('R17'), 'Char');
+  Eq('4.11.4: Hi(Integer) is Word', AssignedType('R18'), 'Word');
+  Eq('4.11.4: Hi of a literal is Integer', AssignedType('R19'), 'Integer');
+  Eq('4.11.4: Swap(Byte) is SmallInt', AssignedType('R20'), 'SmallInt');
+  Eq('4.11.4: Abs(Variant) is Extended', AssignedType('R21'), 'Extended');
+  Eq('4.11.4: Sqr(Variant) is Extended', AssignedType('R22'), 'Extended');
+  Eq('4.11.4: FilePos is Integer', AssignedType('R23'), 'Integer');
+  Eq('4.11.4: NameOf is string', AssignedType('R24'), 'string');
+  Eq('B.4.3: MaxInt is Integer', AssignedType('R25'), 'Integer');
+  Eq('4.11.4: Ord(WordBool) is Word', AssignedType('R26'), 'Word');
+  Eq('4.11.4: Ord of 0..200 is Byte', AssignedType('R27'), 'Byte');
+  Eq('4.11.4: Ord of an enumeration value is Integer', AssignedType('R28'),
+    'Integer');
+  Eq('B.4.3: CompilerVersion is Extended', AssignedType('R29'), 'Extended');
   GModel.Free;
 
   // A subrange takes its category from a bound that is an enumeration value
