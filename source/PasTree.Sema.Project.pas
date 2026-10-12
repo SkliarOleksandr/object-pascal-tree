@@ -968,6 +968,7 @@ type
       out AExt: TPasExtRef): Boolean;
     // Cross-model overload selection (CrossType's call typing):
     function XCatOf(const AX: TSemaXType): TSemaTypeCat;
+    function SubrangeCatX(AMid, ASym: Integer): TSemaTypeCat;
     function XSameType(const A, B: TSemaXType): Boolean;
     function XAssignableX(const ADst, ASrc: TSemaXType): Boolean;
     function InferMethodFrame(AMid, ASym: Integer;
@@ -10416,6 +10417,99 @@ begin
   if not XValid(AX) then
     Exit(tcUnknown);
   Result := FModels[AX.UnitId].Symbols[AX.Sym].TypeCat;
+  if (Result = tcUnknown) and
+     (FModels[AX.UnitId].Symbols[AX.Sym].Kind = skType) then
+    Result := SubrangeCatX(AX.UnitId, AX.Sym);
+end;
+
+{ The category of the subrange type ASym of model AMid whose low bound Phase
+  1 could not read because it is bound in another unit - an enumeration
+  value (`TWork = UDays.dMon..dTue`), a constant there (audit E3-18): the
+  bound's binding (RefMap / ExtRefMap) followed as TPasSemaTyper's
+  CatOfSubrangeBound follows a same-unit one, a true constant through its
+  value in its own model. Read, never stored: the cross passes write only
+  their own model. tcUnknown for anything else. }
+function TPasSemaProject.SubrangeCatX(AMid, ASym: Integer): TSemaTypeCat;
+var
+  LM: TPasSemaModel;
+  LNode, LDepth, LName, LBMid, LBSym: Integer;
+  LExt: TPasExtRef;
+begin
+  Result := tcUnknown;
+  LM := FModels[AMid];
+  LNode := LM.Symbols[ASym].DeclNode;
+  if (LNode = NIL_NODE) or (LM.Tree.Nodes[LNode].Parent = NIL_NODE) or
+     (LM.Tree.Nodes[LM.Tree.Nodes[LNode].Parent].Kind <> nkTypeDecl) then
+    Exit;
+  LNode := LM.Tree.Nodes[LNode].NextSibling;
+  while (LNode <> NIL_NODE) and
+        (LM.Tree.Nodes[LNode].Kind = nkGenericParams) do
+    LNode := LM.Tree.Nodes[LNode].NextSibling;
+  if (LNode = NIL_NODE) or (LM.Tree.Nodes[LNode].Kind <> nkSubrange) then
+    Exit;
+  LNode := LM.Tree.Nodes[LNode].FirstChild;
+  for LDepth := 1 to 8 do
+  begin
+    while (LNode <> NIL_NODE) and (LM.Tree.Nodes[LNode].Kind = nkUnaryOp) do
+      LNode := LM.Tree.Nodes[LNode].FirstChild;
+    if LNode = NIL_NODE then
+      Exit;
+    case LM.Tree.Nodes[LNode].Kind of
+      nkIntLit:
+        Exit(tcInteger);
+      nkCaretChar:
+        Exit(tcChar);
+      nkStrLit:
+        if IsOneCharLiteralNode(LM.Tree, LNode) then
+          Exit(tcChar)
+        else
+          Exit;
+      nkIdent, nkMember:
+        begin
+          LName := LNode;
+          if LM.Tree.Nodes[LName].Kind = nkMember then
+          begin
+            LName := LM.Tree.Nodes[LName].FirstChild;
+            while (LName <> NIL_NODE) and
+                  (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
+              LName := LM.Tree.Nodes[LName].NextSibling;
+            if LName = NIL_NODE then
+              Exit;
+          end;
+          if LM.RefMap[LName] <> NIL_SYM then
+          begin
+            LBMid := AMid;
+            LBSym := LM.RefMap[LName];
+          end
+          else if LM.ExtRefMap.TryGetValue(LName, LExt) then
+          begin
+            LBMid := LExt.UnitId;
+            LBSym := LExt.Sym;
+          end
+          else
+            Exit;
+          LM := FModels[LBMid];
+          AMid := LBMid;
+          case LM.Symbols[LBSym].Kind of
+            skEnumValue, skConst:
+              if LM.Symbols[LBSym].TypeSym <> NIL_SYM then
+                Exit(LM.Symbols[LM.Symbols[LBSym].TypeSym].TypeCat)
+              else if LM.Symbols[LBSym].Kind = skEnumValue then
+                Exit;
+          else
+            Exit;
+          end;
+          // A true constant: its value, the name's next sibling.
+          LNode := LM.Symbols[LBSym].DeclNode;
+          if (LNode = NIL_NODE) or (LM.Tree.Nodes[LNode].Parent = NIL_NODE) or
+             (LM.Tree.Nodes[LM.Tree.Nodes[LNode].Parent].Kind <> nkConstDecl) then
+            Exit;
+          LNode := LM.Tree.Nodes[LNode].NextSibling;
+        end;
+    else
+      Exit;
+    end;
+  end;
 end;
 
 // Does the struct definition node ADefNode declare its own `class operator
@@ -16339,18 +16433,7 @@ var
   LOp: TPasTokenKind;
   LL, LR: TSemaXType;
   LcL, LcR: TSemaTypeCat;
-
-  function Rank(const AX: TSemaXType; ACat: TSemaTypeCat): Integer;
-  begin
-    Result := FModels[AX.UnitId].Symbols[AX.Sym].NumRank;
-    // A distinct type (`TMyInt = type Integer`, `TDateTime = type Double`)
-    // or a subrange carries no rank of its own: the family's default.
-    if Result = 0 then
-      if ACat = tcFloat then
-        Result := 2
-      else
-        Result := 3;
-  end;
+  LUnary: Boolean;
 
   function NameIs(const AX: TSemaXType; const ANames: array of string): Boolean;
   var
@@ -16365,47 +16448,22 @@ var
         Exit(True);
   end;
 
-  // A real result: Extended, or Currency on a 64-bit target when an operand
-  // is one (Currency arithmetic is integral there - see Abs in 4.11.4).
-  function RealX: TSemaXType;
+  // The operator facts of the canonical operand AX (OperatorAnswer).
+  function Facts(const AX: TSemaXType; ACat: TSemaTypeCat): TSemaOpFacts;
   begin
-    if PlatformInfo(FPlatform).Is64Bit and
-       (NameIs(LL, ['currency']) or NameIs(LR, ['currency'])) then
-      Result := BuiltinX(AMid, 'currency')
-    else
-      Result := BuiltinX(AMid, 'extended');
-  end;
-
-  // An integer operand as a result: a rankless one (subrange, distinct
-  // type) and anything narrower than 32 bits is an Integer.
-  function IntFloor(const AX: TSemaXType): TSemaXType;
-  begin
-    if FModels[AX.UnitId].Symbols[AX.Sym].NumRank >= 3 then
-      Result := AX
-    else
-      Result := BuiltinX(AMid, 'integer');
-  end;
-
-  function WiderNum: TSemaXType;
-  var
-    LRL, LRR: Integer;
-  begin
-    if (LcL = tcFloat) or (LcR = tcFloat) then
-      Exit(RealX);
-    LRL := Rank(LL, LcL);
-    LRR := Rank(LR, LcR);
-    if (LRL < 3) and (LRR < 3) then
-      Exit(BuiltinX(AMid, 'integer'));
-    if LRR > LRL then
-      Exit(IntFloor(LR));
-    if LRL > LRR then
-      Exit(IntFloor(LL));
-    // Two 32-bit operands of different signedness meet in Int64.
-    if (LRL = 3) and
-       (NameIs(LL, ['cardinal', 'longword', 'nativeuint']) <>
-        NameIs(LR, ['cardinal', 'longword', 'nativeuint'])) then
-      Exit(BuiltinX(AMid, 'int64'));
-    Result := IntFloor(LL);
+    Result := Default(TSemaOpFacts);
+    Result.Cat := ACat;
+    if not XValid(AX) or
+       (FModels[AX.UnitId].Symbols[AX.Sym].Kind <> skBuiltinType) then
+      Exit;
+    Result.Rank := FModels[AX.UnitId].Symbols[AX.Sym].NumRank;
+    Result.Unsigned32 := NameIs(AX, ['cardinal', 'longword']) or
+      (not FInfo.Is64Bit and NameIs(AX, ['nativeuint']));
+    Result.Curr := NameIs(AX, ['currency']);
+    Result.UniText := NameIs(AX, ['string', 'unicodestring', 'char',
+      'widechar']);
+    Result.AnsiStr := NameIs(AX, ['ansistring']);
+    Result.AnsiChr := NameIs(AX, ['ansichar']);
   end;
 
   // Is operand AIdx (0 left, 1 right) of AOpNode an array constructor
@@ -16431,86 +16489,44 @@ begin
      (LM.Tree.Nodes[AOpNode].Aux > High(LM.Tree.Source.Visible)) then
     Exit;
   LOp := LM.Tree.Source.VisibleToken(LM.Tree.Nodes[AOpNode].Aux).Kind;
+  LUnary := LM.Tree.Nodes[AOpNode].Kind = nkUnaryOp;
   LL := CanonTypeX(AL);
   LR := CanonTypeX(AR);
   LcL := XCatOf(LL);
   LcR := XCatOf(LR);
-  if (LM.Tree.Nodes[AOpNode].Kind = nkBinaryOp) and
+  if not LUnary and
      (LOp in [tkEqual, tkNotEqual, tkLess, tkLessEqual, tkGreater,
       tkGreaterEqual, tkIn, tkIs]) then
     Exit(BuiltinX(AMid, 'boolean'));
   if (LcL = tcRecord) or (LcR = tcRecord) then
-    Exit(RecordOperatorX(LOp, LM.Tree.Nodes[AOpNode].Kind = nkUnaryOp,
-      LL, LR));
+    Exit(RecordOperatorX(LOp, LUnary, LL, LR));
   if (LcL in [tcClass, tcInterface, tcVariant]) or
      (LcR in [tcClass, tcInterface, tcVariant]) then
     Exit;
 
-  if LM.Tree.Nodes[AOpNode].Kind = nkUnaryOp then
-  begin
-    case LOp of
-      tkMinus, tkPlus:
-        case LcL of
-          tcInteger: Result := IntFloor(LL);
-          tcFloat: Result := RealX;
-        end;
-      tkNot:
-        case LcL of
-          tcBoolean: Result := BuiltinX(AMid, 'boolean');
-          tcInteger: Result := LL;   // `not B` over a Byte is a Byte
-        end;
-      tkAt:
-        Result := BuiltinX(AMid, 'pointer');
-    end;
-    Exit;
-  end;
-
-  case LOp of
-    tkPlus:
-      if (LcL in [tcInteger, tcFloat]) and (LcR in [tcInteger, tcFloat]) then
-        Result := WiderNum
-      else if (LcL in [tcChar, tcString]) and (LcR in [tcChar, tcString]) then
-      begin
-        if NameIs(LL, ['string', 'unicodestring', 'char', 'widechar']) or
-           NameIs(LR, ['string', 'unicodestring', 'char', 'widechar']) then
-          Result := BuiltinX(AMid, 'string')
-        else if (LcL = tcString) and XSameType(LL, LR) then
-          Result := LL
-        else if (NameIs(LL, ['ansistring']) and NameIs(LR, ['ansichar'])) or
-                (NameIs(LL, ['ansichar']) and NameIs(LR, ['ansistring'])) then
-          Result := BuiltinX(AMid, 'ansistring');
-      end
-      else if (LcL = tcSet) and (LcR = tcSet) then
-        Result := LL
-      else if (LcL = tcPointer) and (LcR = tcInteger) then
-        Result := LL
-      else if (LcL = tcInteger) and (LcR = tcPointer) then
-        Result := LR
+  // The one 4.2.1 table, shared with the unit's typer (audit A4-15, D2-08).
+  case OperatorAnswer(LOp, LUnary, Facts(LL, LcL), Facts(LR, LcR),
+    not LUnary and XSameType(LL, LR), FInfo.Is64Bit) of
+    oaBoolean: Result := BuiltinX(AMid, 'boolean');
+    oaInteger: Result := BuiltinX(AMid, 'integer');
+    oaInt64: Result := BuiltinX(AMid, 'int64');
+    oaLeft: Result := LL;
+    oaRight: Result := LR;
+    oaExtended: Result := BuiltinX(AMid, 'extended');
+    oaCurrency: Result := BuiltinX(AMid, 'currency');
+    oaString: Result := BuiltinX(AMid, 'string');
+    oaAnsiString: Result := BuiltinX(AMid, 'ansistring');
+    oaPointer: Result := BuiltinX(AMid, 'pointer');
+    oaNone:
       // Dynamic-array concatenation is the array operand's own type: both
       // operands of one type, or one of them an array constructor.
-      else if (LcL = tcArray) and IsDynArrayTypeX(LL) and
-              (XSameType(LL, LR) or OperandIsCtor(1)) then
-        Result := LL
-      else if (LcR = tcArray) and IsDynArrayTypeX(LR) and OperandIsCtor(0) then
-        Result := LR;
-    tkMinus, tkStar:
-      if (LcL in [tcInteger, tcFloat]) and (LcR in [tcInteger, tcFloat]) then
-        Result := WiderNum
-      else if (LcL = tcSet) and (LcR = tcSet) then
-        Result := LL
-      else if (LOp = tkMinus) and (LcL = tcPointer) and (LcR = tcInteger) then
-        Result := LL;
-    tkSlash:
-      if (LcL in [tcInteger, tcFloat]) and (LcR in [tcInteger, tcFloat]) then
-        Result := BuiltinX(AMid, 'extended');
-    tkDiv, tkMod, tkShl, tkShr:
-      if (LcL = tcInteger) and (LcR = tcInteger) then
-        Result := WiderNum;
-    tkAnd, tkOr, tkXor:
-      if (LcL = tcBoolean) and (LcR = tcBoolean) then
-        Result := BuiltinX(AMid, 'boolean')
-      else if (LcL = tcInteger) and (LcR = tcInteger) then
-        Result := WiderNum;
+      if not LUnary and (LOp = tkPlus) then
+        if (LcL = tcArray) and IsDynArrayTypeX(LL) and
+           (XSameType(LL, LR) or OperandIsCtor(1)) then
+          Result := LL
+        else if (LcR = tcArray) and IsDynArrayTypeX(LR) and
+                OperandIsCtor(0) then
+          Result := LR;
   end;
 end;
 
@@ -16783,7 +16799,7 @@ begin
     nkRealLit:
       begin
         Result := 'extended';
-        if not PlatformInfo(FPlatform).Is64Bit then
+        if not FInfo.Is64Bit then
           Exit;
         LTxt := StringReplace(ATree.NodeText(ANode), '_', '',
           [rfReplaceAll]);

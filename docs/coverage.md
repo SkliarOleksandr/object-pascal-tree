@@ -90,6 +90,14 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   SCOPEDENUMS on, so its values clash with nothing (CollectEnum). dcc would
   stop at the missing include anyway.
 
+### 2.2.5 Subrange types
+- a subrange's category comes from its LOW bound: a literal, True / False,
+  an enumeration value or a constant (followed to its value), in this unit
+  or another. A bound that is an expression (`Ord(X)..`, `N + 1..`) leaves
+  the type uncategorized, which every check reads as "say nothing", and a
+  subrange argument scores against its base type as any other type of its
+  category would (no exact match).
+
 ### 2.5.1 Type aliases - weak vs. distinct
 - the parser marks distinctness (Aux=1) but no semantic
   layer reads the flag - distinct aliases are typed identically to weak
@@ -157,11 +165,12 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 ## 04-expressions-operators.md
 
 ### 4.2.1 Result type of an operator expression
-- implemented at the project level (OperatorResultX) for the positions the
-  intra-unit typer leaves untyped - an operand that is a true constant or
-  another unit's name - and for every inline-var initializer. Where the
-  intra-unit typer HAS an answer inside a body it stands, and it is the
-  category-level one: `B + B` over Bytes reads Byte there, not Integer.
+- one rule table (OperatorAnswer in PasTree.Sema.Types) serves both typers:
+  the intra-unit one inside a body, OperatorResultX at the project level for
+  the positions the first leaves untyped - an operand that is a true
+  constant or another unit's name - and for every inline-var initializer.
+  An operand that Phase 1 bound to a TYPE name (an inherited cross-unit
+  member named `Word`) types the operator as nothing and is not judged.
 - an arithmetic result over two Bytes or Words is an anonymous subrange of
   Integer in dcc; PasTree says Integer. `AnsiChar + AnsiChar` (anonymous in
   dcc) and pointer minus pointer are left untyped; `Cu / Cu` on Win64 is
@@ -186,7 +195,10 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   dcc says Int64 (the bounds are not folded); `GetTypeKind` is typed at the
   project level only (System.TTypeKind is a real declaration the intra-unit
   typer cannot see); `Slice` stays untyped (it is legal in one position only,
-  where its type is never read).
+  where its type is never read); `Pred` / `Succ` of an enumeration or Char
+  subrange reads the subrange where dcc gives its base type (`Succ(W)` of a
+  `TWork = dMon..dTue` is TDay; `High(W)` is dcc's anonymous
+  "Enumeration", the subrange here - dcc64 37.0, 2026-10-12).
 - a VALUE-taking intrinsic whose argument resolved to a TYPE NAME (a member
   named `Word` bound to the builtin, the CheckAssign mis-binding case) types
   as nothing rather than as that type.

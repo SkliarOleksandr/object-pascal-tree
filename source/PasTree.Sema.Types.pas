@@ -21,6 +21,33 @@ uses
   PasTree.Sema.Model;
 
 type
+  { What dcc types a built-in operator expression as (4.2.1), as a rule over
+    facts rather than over one typer's handles: the unit's typer
+    (BinaryResult / UnaryResult) and the project's (OperatorResultX) each
+    reduce an operand to TSemaOpFacts and map the answer to their own type
+    symbols. The Phase-1 copy had drifted - the wider operand's type, so
+    `B + B` over Bytes was a Byte, `Sg * Sg` a Single and Cardinal + Integer
+    a Cardinal, and an alias of a builtin had no rank (audit A4-15, A4-14,
+    D2-08).
+
+    oaNone: no built-in rule applies (a record, class, Variant or mismatched
+    pair - the typer's own business); oaUntyped: the operator applies but
+    the type is not decided here (two string kinds dcc mixes); oaLeft /
+    oaRight: the (canonical) left / right operand's own type. }
+  TSemaOpAnswer = (oaNone, oaUntyped, oaBoolean, oaInteger, oaInt64, oaLeft,
+    oaRight, oaExtended, oaCurrency, oaString, oaAnsiString, oaPointer);
+
+  { One operand, after its weak aliases are chased to the builtin they name.
+    Rank: that builtin's NumRank (8-bit 1 .. 64-bit 4 for an integer, Single
+    1 .. Extended 3 for a real), 0 for a rankless type - a subrange, a
+    distinct `type X`, a type not bound here. Unsigned32: Cardinal, LongWord,
+    a 32-bit NativeUInt. UniText: string, UnicodeString, Char, WideChar. }
+  TSemaOpFacts = record
+    Cat: TSemaTypeCat;
+    Rank: Byte;
+    Unsigned32, Curr, UniText, AnsiStr, AnsiChr: Boolean;
+  end;
+
   // The type, as one of THIS model's symbols, of an ident the model itself no
   // longer binds (its binding lives in ExtRefMap) - NIL_SYM when it cannot be
   // named in this model's terms. Supplied by the project for recheck mode.
@@ -37,6 +64,10 @@ type
     Int, Ext, Str, Chr, Bool, Ptr, Nul: Integer;   // cached builtin type syms
     // The rest of what the intrinsic result rules (IntrinsicResult) name.
     I64, NInt, AStr, SStr: Integer;
+    // What the operator facts (OpFacts) and the intrinsic rules compare a
+    // canonical builtin with - ids, not names (audit A4-14).
+    NUInt, Cur, Comp, Card, LWord, AChr, WChr, UStr: Integer;
+    FIs64: Boolean;   // the target's pointer width, read once (audit C2-15)
     function Kind(N: Integer): TPasNodeKind; inline;
     function Child(N: Integer): Integer; inline;
     function Sib(N: Integer): Integer; inline;
@@ -54,7 +85,8 @@ type
     procedure CheckConditionTypes;
     function OrdLiteral(ANode: Integer; out AValue: Int64): Boolean;
     procedure CheckSetCardinality;
-    function WiderNum(A, B: Integer): Integer;
+    function OpFacts(ASym: Integer): TSemaOpFacts;
+    function OpSym(AAns: TSemaOpAnswer; ALeft, ARight: Integer): Integer;
     function TypeOfIdent(N: Integer): Integer;
     function BinaryResult(N: Integer): Integer;
     function UnaryResult(N: Integer): Integer;
@@ -211,6 +243,18 @@ function ScalarEnumMismatch(ADst, ASrc: TSemaTypeCat): Boolean;
   alone is E2010. A record (an Implicit operator) and a Variant are left out,
   as is anything unknown. }
 function IsBracketToScalar(ADst: TSemaTypeCat): Boolean;
+
+{ The 4.2.1 rule table, both typers' one copy: integers are at least
+  Integer, the higher rank wins, a 32-bit signed / unsigned mix is Int64;
+  real arithmetic is Extended whatever the operands, Currency on a 64-bit
+  target (AIs64) when an operand is Currency; `/` is Extended; `not` keeps
+  an integer operand's type, unary `-` / `+` widen it like a binary
+  operator; a comparison is Boolean. `+` over text: string when either side
+  is UniText, the one type of two equal string operands (ASameType),
+  AnsiString for AnsiString with AnsiChar. Sets and pointer arithmetic keep
+  the set / pointer operand. AUnary: AR is not read. }
+function OperatorAnswer(AOp: TPasTokenKind; AUnary: Boolean;
+  const AL, AR: TSemaOpFacts; ASameType, AIs64: Boolean): TSemaOpAnswer;
 
 implementation
 
@@ -431,6 +475,124 @@ begin
     tcPointer, tcNil, tcEnum, tcClass, tcInterface, tcProc, tcClassOf, tcFile];
 end;
 
+function OperatorAnswer(AOp: TPasTokenKind; AUnary: Boolean;
+  const AL, AR: TSemaOpFacts; ASameType, AIs64: Boolean): TSemaOpAnswer;
+
+  // A real result: Extended, or Currency on a 64-bit target when an operand
+  // is one (Currency arithmetic is integral there - see Abs in 4.11.4).
+  function RealAns: TSemaOpAnswer;
+  begin
+    if AIs64 and (AL.Curr or (not AUnary and AR.Curr)) then
+      Result := oaCurrency
+    else
+      Result := oaExtended;
+  end;
+
+  // An integer operand as the result: a rankless one (subrange, distinct
+  // type) and anything narrower than 32 bits is an Integer.
+  function IntFloor(const AF: TSemaOpFacts; AOwn: TSemaOpAnswer): TSemaOpAnswer;
+  begin
+    if AF.Rank >= 3 then
+      Result := AOwn
+    else
+      Result := oaInteger;
+  end;
+
+  function Wider: TSemaOpAnswer;
+  var
+    LRL, LRR: Integer;
+  begin
+    if (AL.Cat = tcFloat) or (AR.Cat = tcFloat) then
+      Exit(RealAns);
+    // A rankless integer computes as the family's default, Integer.
+    LRL := AL.Rank;
+    if LRL = 0 then
+      LRL := 3;
+    LRR := AR.Rank;
+    if LRR = 0 then
+      LRR := 3;
+    if (LRL < 3) and (LRR < 3) then
+      Exit(oaInteger);
+    if LRR > LRL then
+      Exit(IntFloor(AR, oaRight));
+    if LRL > LRR then
+      Exit(IntFloor(AL, oaLeft));
+    // Two 32-bit operands of different signedness meet in Int64.
+    if (LRL = 3) and (AL.Unsigned32 <> AR.Unsigned32) then
+      Exit(oaInt64);
+    Result := IntFloor(AL, oaLeft);
+  end;
+
+var
+  LNum: Boolean;
+begin
+  Result := oaNone;
+  if AUnary then
+  begin
+    case AOp of
+      tkMinus, tkPlus:
+        case AL.Cat of
+          tcInteger: Result := IntFloor(AL, oaLeft);
+          tcFloat: Result := RealAns;
+        end;
+      tkNot:
+        case AL.Cat of
+          tcBoolean: Result := oaBoolean;
+          tcInteger: Result := oaLeft;   // `not B` over a Byte is a Byte
+        end;
+      tkAt:
+        Result := oaPointer;
+    end;
+    Exit;
+  end;
+  if AOp in [tkEqual, tkNotEqual, tkLess, tkLessEqual, tkGreater,
+     tkGreaterEqual, tkIn, tkIs] then
+    Exit(oaBoolean);
+  LNum := (AL.Cat in [tcInteger, tcFloat]) and (AR.Cat in [tcInteger, tcFloat]);
+  case AOp of
+    tkPlus:
+      if LNum then
+        Result := Wider
+      else if (AL.Cat in [tcChar, tcString]) and
+              (AR.Cat in [tcChar, tcString]) then
+      begin
+        if AL.UniText or AR.UniText then
+          Result := oaString
+        else if (AL.Cat = tcString) and ASameType then
+          Result := oaLeft
+        else if (AL.AnsiStr and AR.AnsiChr) or (AL.AnsiChr and AR.AnsiStr) then
+          Result := oaAnsiString
+        else
+          Result := oaUntyped;
+      end
+      else if (AL.Cat = tcSet) and (AR.Cat = tcSet) then
+        Result := oaLeft
+      else if (AL.Cat = tcPointer) and (AR.Cat = tcInteger) then
+        Result := oaLeft
+      else if (AL.Cat = tcInteger) and (AR.Cat = tcPointer) then
+        Result := oaRight;
+    tkMinus, tkStar:
+      if LNum then
+        Result := Wider
+      else if (AL.Cat = tcSet) and (AR.Cat = tcSet) then
+        Result := oaLeft
+      else if (AOp = tkMinus) and (AL.Cat = tcPointer) and
+              (AR.Cat = tcInteger) then
+        Result := oaLeft;
+    tkSlash:
+      if LNum then
+        Result := oaExtended;
+    tkDiv, tkMod, tkShl, tkShr:
+      if (AL.Cat = tcInteger) and (AR.Cat = tcInteger) then
+        Result := Wider;
+    tkAnd, tkOr, tkXor:
+      if (AL.Cat = tcBoolean) and (AR.Cat = tcBoolean) then
+        Result := oaBoolean
+      else if (AL.Cat = tcInteger) and (AR.Cat = tcInteger) then
+        Result := Wider;
+  end;
+end;
+
 class procedure TPasSemaTyper.Check(AModel: TPasSemaModel;
   APlatform: TPasPlatform = pfWin32);
 var
@@ -540,35 +702,66 @@ begin
     Result := Sib(Result);
 end;
 
-{ The category a subrange's LOW BOUND establishes - see CatFromNode. Literals
-  only, deliberately: a bound this cannot read exactly is answered tcUnknown,
-  which every check below treats as "say nothing". }
+{ The category a subrange's LOW BOUND establishes - see CatFromNode: a
+  literal, signed or not; True / False; an enumeration value bound here (its
+  enumeration); a same-unit constant, by its declared type or else by its own
+  value, followed the same way (`const N = 5; TNeg = -N..N` is an integer
+  subrange, `TWork = dMon..dTue` an enumeration one - dcc picks P(TDay) for a
+  TWork argument, audit E3-18, local/probe-b35 P1). A bound this cannot read
+  is answered tcUnknown, which every check below treats as "say nothing";
+  the project categorizes a bound bound in another unit (CrossResolve). }
 function TPasSemaTyper.CatOfSubrangeBound(ALo: Integer): TSemaTypeCat;
 var
-  LTxt: string;
+  LDepth, LSym, LVal: Integer;
 begin
   Result := tcUnknown;
-  if ALo = NIL_NODE then
-    Exit;
-  // A signed literal (`-5..5`) is an nkUnaryOp over the literal.
-  if (Kind(ALo) = nkUnaryOp) and (OpKind(ALo) in [tkMinus, tkPlus]) then
-    ALo := Child(ALo);
-  if ALo = NIL_NODE then
-    Exit;
-  case Kind(ALo) of
-    nkIntLit:
-      Result := tcInteger;
-    nkStrLit:
-      begin
-        LTxt := Txt(ALo);
-        if (Length(LTxt) = 3) and (LTxt[1] = '''') and (LTxt[3] = '''') then
-          Result := tcChar;
-      end;
-    nkCaretChar:
-      Result := tcChar;
-    nkIdent:
-      if SameText(Txt(ALo), 'True') or SameText(Txt(ALo), 'False') then
-        Result := tcBoolean;
+  for LDepth := 1 to 8 do
+  begin
+    // A signed bound (`-5..5`, `-N..N`) is an nkUnaryOp over it.
+    while (ALo <> NIL_NODE) and (Kind(ALo) = nkUnaryOp) and
+          (OpKind(ALo) in [tkMinus, tkPlus]) do
+      ALo := Child(ALo);
+    if ALo = NIL_NODE then
+      Exit;
+    case Kind(ALo) of
+      nkIntLit:
+        Exit(tcInteger);
+      nkStrLit:
+        if IsOneCharLiteralNode(T, ALo) then
+          Exit(tcChar)
+        else
+          Exit;
+      nkCaretChar:
+        Exit(tcChar);
+      nkIdent:
+        begin
+          if T.NodeTextEquals(ALo, 'True') or
+             T.NodeTextEquals(ALo, 'False') then
+            Exit(tcBoolean);
+          LSym := M.RefMap[ALo];
+          if LSym = NIL_SYM then
+            Exit;
+          case M.Symbols[LSym].Kind of
+            skEnumValue:
+              Exit(CatOf(M.Symbols[LSym].TypeSym));
+            skConst:
+              begin
+                if M.Symbols[LSym].TypeSym <> NIL_SYM then
+                  Exit(CatOf(M.Symbols[LSym].TypeSym));
+                // A true constant: its value, the name's next sibling.
+                LVal := M.Symbols[LSym].DeclNode;
+                if (LVal = NIL_NODE) or (T.Nodes[LVal].Parent = NIL_NODE) or
+                   (Kind(T.Nodes[LVal].Parent) <> nkConstDecl) then
+                  Exit;
+                ALo := Sib(LVal);
+              end;
+          else
+            Exit;
+          end;
+        end;
+    else
+      Exit;
+    end;
   end;
 end;
 
@@ -783,13 +976,17 @@ begin
     nkCaseStmt:
       begin
         LCond := Child(AStmt);
-        if (LCond <> NIL_NODE) and (CatOf(M.ExprType[LCond]) in CNotSelector)
-        then
+        if (LCond <> NIL_NODE) and not IsTypeNameOperand(LCond) and
+           (CatOf(M.ExprType[LCond]) in CNotSelector) then
           Diag('E2001', SE2001_OrdinalTypeRequired, LCond);
         Exit;
       end;
   end;
-  if (LCond <> NIL_NODE) and (CatOf(M.ExprType[LCond]) in CNotBoolean) then
+  // A condition bound to a TYPE name is the mis-binding CheckAssign
+  // withholds judgement on - an inherited cross-unit member named `Byte`
+  // (`if Byte then`) - not a non-Boolean value (audit A4-13).
+  if (LCond <> NIL_NODE) and not IsTypeNameOperand(LCond) and
+     (CatOf(M.ExprType[LCond]) in CNotBoolean) then
     Diag('E2012', SE2012_MustBeBoolean, LCond);
 end;
 
@@ -831,8 +1028,16 @@ begin
       begin
         // Digit separators are legal in a literal (B.5.1) and carry no value.
         LTxt := StringReplace(LTxt, '_', '', [rfReplaceAll]);
-        if LTxt.StartsWith('$') then
-          Result := TryStrToInt64('$' + LTxt.Substring(1), AValue)
+        if LTxt.StartsWith('%') then
+        begin
+          // Binary (B.5.1): `set of 0..%111111111` is E2028 like 0..511.
+          Result := (Length(LTxt) > 1) and (Length(LTxt) <= 64);
+          for var LCh in LTxt.Substring(1) do
+            if CharInSet(LCh, ['0', '1']) then
+              AValue := (AValue shl 1) or (Ord(LCh) - Ord('0'))
+            else
+              Exit(False);
+        end
         else
           Result := TryStrToInt64(LTxt, AValue);
       end;
@@ -922,7 +1127,7 @@ const
               // The two platform-sized names are 64-bit only where the target
               // is, and dcc's code follows the width, not the spelling.
               if (LName = 'nativeint') or (LName = 'nativeuint') then
-                if PlatformInfo(FPlatform).Is64Bit then
+                if FIs64 then
                   Exit('E2001')
                 else
                   Exit('E2028');
@@ -934,6 +1139,12 @@ const
           end;
         nkSubrange:
           begin
+            // A Char subrange base is reduced to a byte char - W1050 past
+            // 256 values, silence otherwise, never E2028: `set of
+            // 'a'..#$100`, `set of #$410..#$42F` (2.4.1, local/probe-b35
+            // S1; audit A4-12). Only integer bounds are E2028 material.
+            if CatOfSubrangeBound(Child(ANode)) = tcChar then
+              Exit;
             if not OrdLiteral(Child(ANode), LLo) then
               Exit;
             if not OrdLiteral(Sib(Child(ANode)), LHi) then
@@ -1002,17 +1213,46 @@ begin
     end;
 end;
 
-// Wider of two numeric type symbols (float wins over int; higher rank wins).
-function TPasSemaTyper.WiderNum(A, B: Integer): Integer;
+// The operator facts of the operand type ASym: its category, and the rank
+// and identity of the builtin its weak aliases end at (`TBig = Int64` ranks
+// as Int64 - audit A4-14).
+function TPasSemaTyper.OpFacts(ASym: Integer): TSemaOpFacts;
+var
+  LB: Integer;
 begin
-  if (CatOf(A) = tcFloat) and (CatOf(B) <> tcFloat) then
-    Exit(A);
-  if (CatOf(B) = tcFloat) and (CatOf(A) <> tcFloat) then
-    Exit(B);
-  if RankOf(A) >= RankOf(B) then
-    Result := A
+  Result := Default(TSemaOpFacts);
+  Result.Cat := CatOf(ASym);
+  LB := WeakAliasEnd(ASym);
+  if (LB = NIL_SYM) or (M.Symbols[LB].Kind <> skBuiltinType) then
+    Exit;
+  Result.Rank := M.Symbols[LB].NumRank;
+  Result.Unsigned32 := (LB = Card) or (LB = LWord) or
+    ((LB = NUInt) and not FIs64);
+  Result.Curr := LB = Cur;
+  Result.UniText := (LB = Str) or (LB = UStr) or (LB = Chr) or (LB = WChr);
+  Result.AnsiStr := LB = AStr;
+  Result.AnsiChr := LB = AChr;
+end;
+
+// The type symbol OperatorAnswer's AAns names for the operands ALeft /
+// ARight; NIL_SYM where it names none.
+function TPasSemaTyper.OpSym(AAns: TSemaOpAnswer;
+  ALeft, ARight: Integer): Integer;
+begin
+  case AAns of
+    oaBoolean: Result := Bool;
+    oaInteger: Result := Int;
+    oaInt64: Result := I64;
+    oaLeft: Result := WeakAliasEnd(ALeft);
+    oaRight: Result := WeakAliasEnd(ARight);
+    oaExtended: Result := Ext;
+    oaCurrency: Result := Cur;
+    oaString: Result := Str;
+    oaAnsiString: Result := AStr;
+    oaPointer: Result := Ptr;
   else
-    Result := B;
+    Result := NIL_SYM;
+  end;
 end;
 
 // Is N where a bare routine name is a value - a member qualifier, a `with`
@@ -1077,107 +1317,63 @@ begin
   end;
 end;
 
+{ A binary operator's type by the shared 4.2.1 table (OperatorAnswer); E2015
+  only for two scalar operands no rule takes. An operand bound to a TYPE
+  name says nothing - the inherited cross-unit member named `Word` / `Byte`
+  that Phase 1 binds to the seeded type (CheckAssign, audit A4-13). }
 function TPasSemaTyper.BinaryResult(N: Integer): Integer;
+const
+  CScalar = [tcInteger, tcFloat, tcBoolean, tcChar, tcString];
 var
   LL, LR: Integer;
-  LcL, LcR: TSemaTypeCat;
   LOp: TPasTokenKind;
-
-  function BothNum: Boolean;
-  begin
-    Result := (LcL in [tcInteger, tcFloat]) and (LcR in [tcInteger, tcFloat]);
-  end;
-  function BothInt: Boolean;
-  begin
-    Result := (LcL = tcInteger) and (LcR = tcInteger);
-  end;
-  function BothScalar: Boolean;
-  begin
-    Result := (LcL in [tcInteger, tcFloat, tcBoolean, tcChar, tcString]) and
-              (LcR in [tcInteger, tcFloat, tcBoolean, tcChar, tcString]);
-  end;
-  function Bad: Integer;
-  begin
-    if BothScalar then
-      Diag('E2015', SE2015_OperatorNotApplicable, N);
-    Result := NIL_SYM;
-  end;
-
+  LAns: TSemaOpAnswer;
 begin
   LL := M.ExprType[Child(N)];
   LR := M.ExprType[Sib(Child(N))];
   Result := NIL_SYM;
   if (LL = NIL_SYM) or (LR = NIL_SYM) then
     Exit;
-  LcL := CatOf(LL); LcR := CatOf(LR);
   LOp := OpKind(N);
-
-  case LOp of
-    tkEqual, tkNotEqual, tkLess, tkLessEqual, tkGreater, tkGreaterEqual,
-    tkIn, tkIs:
-      Exit(Bool);
-    tkPlus:
-      begin
-        if BothNum then Exit(WiderNum(LL, LR));
-        // char/string concatenation in any combination -> string
-        if (LcL in [tcChar, tcString]) and (LcR in [tcChar, tcString]) then
-          Exit(Str);
-        Exit(Bad);
-      end;
-    tkMinus, tkStar:
-      begin
-        if BothNum then Exit(WiderNum(LL, LR));
-        Exit(Bad);
-      end;
-    tkSlash:
-      begin
-        if BothNum then Exit(Ext);
-        Exit(Bad);
-      end;
-    tkDiv, tkMod, tkShl, tkShr:
-      begin
-        if BothInt then Exit(WiderNum(LL, LR));
-        Exit(Bad);
-      end;
-    tkAnd, tkOr, tkXor:
-      begin
-        if (LcL = tcBoolean) and (LcR = tcBoolean) then Exit(Bool);
-        if BothInt then Exit(WiderNum(LL, LR));
-        Exit(Bad);
-      end;
+  if LOp in [tkEqual, tkNotEqual, tkLess, tkLessEqual, tkGreater,
+     tkGreaterEqual, tkIn, tkIs] then
+    Exit(Bool);
+  if IsTypeNameOperand(Child(N)) or IsTypeNameOperand(Sib(Child(N))) then
+    Exit;
+  LAns := OperatorAnswer(LOp, False, OpFacts(LL), OpFacts(LR),
+    WeakAliasEnd(LL) = WeakAliasEnd(LR), FIs64);
+  if LAns = oaNone then
+  begin
+    if (CatOf(LL) in CScalar) and (CatOf(LR) in CScalar) then
+      Diag('E2015', SE2015_OperatorNotApplicable, N);
+    Exit;
   end;
+  Result := OpSym(LAns, LL, LR);
 end;
 
 function TPasSemaTyper.UnaryResult(N: Integer): Integer;
 var
   LO: Integer;
   LOp: TPasTokenKind;
-  LCat: TSemaTypeCat;
+  LAns: TSemaOpAnswer;
 begin
   LO := M.ExprType[Child(N)];
   Result := NIL_SYM;
   LOp := OpKind(N);
   if LOp = tkAt then
     Exit(Ptr);
-  if LO = NIL_SYM then
+  if (LO = NIL_SYM) or IsTypeNameOperand(Child(N)) then
     Exit;
-  LCat := CatOf(LO);
-  case LOp of
-    tkMinus, tkPlus:
-      begin
-        if LCat in [tcInteger, tcFloat] then Exit(LO);
-        if LCat in [tcBoolean, tcChar, tcString] then
-          Diag('E2015', SE2015_OperatorNotApplicable, N);
-        Exit(NIL_SYM);
-      end;
-    tkNot:
-      begin
-        if LCat in [tcBoolean, tcInteger] then Exit(LO);
-        if LCat in [tcFloat, tcChar, tcString] then
-          Diag('E2015', SE2015_OperatorNotApplicable, N);
-        Exit(NIL_SYM);
-      end;
+  LAns := OperatorAnswer(LOp, True, OpFacts(LO), Default(TSemaOpFacts),
+    False, FIs64);
+  if LAns = oaNone then
+  begin
+    if (LOp in [tkMinus, tkPlus, tkNot]) and
+       (CatOf(LO) in [tcInteger, tcFloat, tcBoolean, tcChar, tcString]) then
+      Diag('E2015', SE2015_OperatorNotApplicable, N);
+    Exit;
   end;
+  Result := OpSym(LAns, LO, NIL_SYM);
 end;
 
 function TPasSemaTyper.ParamsOf(AScope: Integer): TArray<Integer>;
@@ -1347,7 +1543,7 @@ var
   LIs64: Boolean;
 begin
   Result := 0;
-  LIs64 := PlatformInfo(FPlatform).Is64Bit;
+  LIs64 := FIs64;
   LArg := Sib(Child(ACall));
   LIdx := 0;
   while (LArg <> NIL_NODE) and (LIdx <= High(AParams)) do
@@ -1690,10 +1886,11 @@ end;
   is Integer. UInt64 too: `Succ(U64)` is an Int64 under dcc. }
 function TPasSemaTyper.WidenOrdinal(ASym: Integer): Integer;
 begin
+  // An alias of a builtin is that builtin (`TBig = Int64`, audit A4-14).
+  ASym := WeakAliasEnd(ASym);
   if (ASym <> NIL_SYM) and (M.Symbols[ASym].Kind = skBuiltinType) then
   begin
-    if (M.Symbols[ASym].NameLower = 'nativeint') or
-       (M.Symbols[ASym].NameLower = 'nativeuint') then
+    if (ASym = NInt) or (ASym = NUInt) then
       Exit(NInt);
     if RankOf(ASym) = 4 then
       Exit(I64);
@@ -1762,15 +1959,23 @@ begin
           tcChar: Exit(Chr);
           tcBoolean: Exit(Bool);
         end;
-        // `eA..eC` - an enum member's type. A signed literal was categorized
-        // above, so what is left is a bare name.
+        // `eA..eC` - an enum member's type, which is the bound type itself;
+        // only an integer one widens (ArrayBoundTypeX's rule; `High(A)` of
+        // an `array[eA..eC]` is TE, dcc64 - audit A4-16). A signed literal
+        // was categorized above, so what is left is a bare name.
         if (LLo <> NIL_NODE) and (Kind(LLo) = nkIdent) then
         begin
           LSym := M.RefMap[LLo];
           if (LSym <> NIL_SYM) and
              (M.Symbols[LSym].Kind in [skConst, skEnumValue]) and
              (M.Symbols[LSym].TypeSym <> NIL_SYM) then
-            Exit(WidenOrdinal(M.Symbols[LSym].TypeSym));
+          begin
+            LSym := M.Symbols[LSym].TypeSym;
+            case CatOf(LSym) of
+              tcInteger: Exit(WidenOrdinal(LSym));
+              tcEnum, tcChar, tcBoolean: Exit(LSym);
+            end;
+          end;
         end;
       end;
     nkIdent:
@@ -1796,7 +2001,7 @@ end;
 function TPasSemaTyper.IntrinsicResult(ACall, AHead: Integer): Integer;
 var
   LShape: TPasIntrinsicResult;
-  LArg, LA, LDef, LCur: Integer;
+  LArg, LA, LAC, LDef, LCur: Integer;
   LSame: Boolean;
 begin
   Result := NIL_SYM;
@@ -1810,6 +2015,9 @@ begin
   LA := NIL_SYM;
   if (LArg <> NIL_NODE) and PasIntrinsicReadsArgs(LShape) then
     LA := M.ExprType[LArg];
+  // The builtin an alias argument names - the rules below compare that
+  // (`Sqr(X)` of a `TMy = Int64` is Int64, audit A4-14 / D2-08).
+  LAC := WeakAliasEnd(LA);
   // A VALUE-taking intrinsic whose argument resolved to a TYPE NAME is the
   // same mis-binding CheckAssign withholds judgement on: a member named
   // `Word` (`Copy(Word, 1, I)` in a spell checker, where Word is a string
@@ -1839,24 +2047,18 @@ begin
       case CatOf(LA) of
         tcInteger: Result := WidenOrdinal(LA);
         tcFloat:
-          if PlatformInfo(FPlatform).Is64Bit and
-             (M.Symbols[LA].Kind = skBuiltinType) and
-             ((M.Symbols[LA].NameLower = 'currency') or
-              (M.Symbols[LA].NameLower = 'comp')) then
-            Result := LA
+          if FIs64 and ((LAC = Cur) or (LAC = Comp)) then
+            Result := LAC
           else
             Result := Ext;
       end;
     irSqr:
       case CatOf(LA) of
         tcInteger:
-          if (M.Symbols[LA].Kind = skBuiltinType) and
-             ((RankOf(LA) = 4) or
-              (M.Symbols[LA].NameLower = 'cardinal') or
-              (M.Symbols[LA].NameLower = 'longword') or
-              (M.Symbols[LA].NameLower = 'nativeint') or
-              (M.Symbols[LA].NameLower = 'nativeuint')) then
-            Result := LA
+          if (LAC <> NIL_SYM) and (M.Symbols[LAC].Kind = skBuiltinType) and
+             ((RankOf(LAC) = 4) or (LAC = Card) or (LAC = LWord) or
+              (LAC = NInt) or (LAC = NUInt)) then
+            Result := LAC
           else
             Result := Int;
         tcFloat: Result := Ext;
@@ -1888,11 +2090,10 @@ begin
           end;
       end;
     irSwap:
-      if (CatOf(LA) = tcInteger) and (M.Symbols[LA].Kind = skBuiltinType) and
-         (RankOf(LA) in [2, 3]) and
-         (M.Symbols[LA].NameLower <> 'nativeint') and
-         (M.Symbols[LA].NameLower <> 'nativeuint') then
-        Result := LA
+      if (CatOf(LA) = tcInteger) and (LAC <> NIL_SYM) and
+         (M.Symbols[LAC].Kind = skBuiltinType) and (RankOf(LAC) in [2, 3]) and
+         (LAC <> NInt) and (LAC <> NUInt) then
+        Result := LAC
       else if CatOf(LA) = tcInteger then
         Result := Int;
     irFirstArg:
@@ -1918,14 +2119,12 @@ begin
           tcString:
             if not LSame then
               Result := Str
-            else if (M.Symbols[LA].Kind = skBuiltinType) and
-                    (M.Symbols[LA].NameLower = 'shortstring') then
+            else if LAC = SStr then
               Result := AStr
             else
               Result := LA;
           tcChar:
-            if LSame and (M.Symbols[LA].Kind = skBuiltinType) and
-               (M.Symbols[LA].NameLower = 'ansichar') then
+            if LSame and (LAC = AChr) then
               Result := SStr
             else
               Result := Str;
@@ -2360,6 +2559,10 @@ begin
   Int := NIL_SYM; Ext := NIL_SYM; Str := NIL_SYM; Chr := NIL_SYM;
   Bool := NIL_SYM; Ptr := NIL_SYM; Nul := NIL_SYM;
   I64 := NIL_SYM; NInt := NIL_SYM; AStr := NIL_SYM; SStr := NIL_SYM;
+  NUInt := NIL_SYM; Cur := NIL_SYM; Comp := NIL_SYM;
+  Card := NIL_SYM; LWord := NIL_SYM; AChr := NIL_SYM; WChr := NIL_SYM;
+  UStr := NIL_SYM;
+  FIs64 := PlatformInfo(FPlatform).Is64Bit;
   for LIdx := 0 to M.SymCount - 1 do
     if M.Symbols[LIdx].Kind = skBuiltinType then
       if M.Symbols[LIdx].NameLower = 'integer' then Int := LIdx
@@ -2372,7 +2575,15 @@ begin
       else if M.Symbols[LIdx].NameLower = 'int64' then I64 := LIdx
       else if M.Symbols[LIdx].NameLower = 'nativeint' then NInt := LIdx
       else if M.Symbols[LIdx].NameLower = 'ansistring' then AStr := LIdx
-      else if M.Symbols[LIdx].NameLower = 'shortstring' then SStr := LIdx;
+      else if M.Symbols[LIdx].NameLower = 'shortstring' then SStr := LIdx
+      else if M.Symbols[LIdx].NameLower = 'nativeuint' then NUInt := LIdx
+      else if M.Symbols[LIdx].NameLower = 'currency' then Cur := LIdx
+      else if M.Symbols[LIdx].NameLower = 'comp' then Comp := LIdx
+      else if M.Symbols[LIdx].NameLower = 'cardinal' then Card := LIdx
+      else if M.Symbols[LIdx].NameLower = 'longword' then LWord := LIdx
+      else if M.Symbols[LIdx].NameLower = 'ansichar' then AChr := LIdx
+      else if M.Symbols[LIdx].NameLower = 'widechar' then WChr := LIdx
+      else if M.Symbols[LIdx].NameLower = 'unicodestring' then UStr := LIdx;
 
   CategorizeTypes;
 end;

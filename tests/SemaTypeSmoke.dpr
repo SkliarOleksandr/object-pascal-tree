@@ -395,6 +395,113 @@ begin
   Eq('4.9: the test itself is Boolean', BinOpType('is'), 'Boolean');
   GModel.Free;
 
+  // B35: the 4.2.1 operator table, shared with the project typer
+  // (OperatorAnswer) - narrow integers compute in Integer, reals in
+  // Extended, a 32-bit signed / unsigned mix in Int64, `not` keeps the
+  // operand's type; an alias of a builtin is that builtin under the
+  // operators and the intrinsics; an enum-subrange array's bounds are the
+  // enum (audit A4-15, A4-14, A4-16; dcc64 37.0, local/probe-b35 P1).
+  const OPS =
+    'unit u;'#10'interface'#10 +
+    'type'#10 +
+    '  TE = (eA, eB, eC);'#10 +
+    '  TArr = array[eA..eC] of Integer;'#10 +
+    '  TBig = Int64;'#10 +
+    '  TMoney = Currency;'#10 +
+    '  TW = Word;'#10 +
+    '  TMyI = type Integer;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var'#10 +
+    '  B1, B2: Byte; F1, F2: Single; C: Cardinal; I: Integer; B: TBig;'#10 +
+    '  M: TMoney; W: TW; A: TArr; MI: TMyI; AS1, AS2: AnsiString;'#10 +
+    '  R01, R02, R03, R04, R05, R06, R07, R08, R09, R10, R11, R12, R13,'#10 +
+    '  R14, R15, R16, R17, R18: Variant;'#10 +
+    'begin'#10 +
+    '  R01 := B1 + B2;'#10 +
+    '  R02 := F1 * F2;'#10 +
+    '  R03 := C + I;'#10 +
+    '  R04 := -B1;'#10 +
+    '  R05 := not B1;'#10 +
+    '  R06 := B + 1;'#10 +
+    '  R07 := Abs(B);'#10 +
+    '  R08 := Succ(B);'#10 +
+    '  R09 := Sqr(B);'#10 +
+    '  R10 := Swap(W);'#10 +
+    '  R11 := High(A);'#10 +
+    '  R12 := Low(A);'#10 +
+    '  R13 := M * M;'#10 +
+    '  R14 := Abs(M);'#10 +
+    '  R15 := MI + MI;'#10 +
+    '  R16 := AS1 + AS2;'#10 +
+    '  R17 := B1 shl 2;'#10 +
+    '  R18 := -F1;'#10 +
+    'end;'#10 +
+    'end.'#10;
+  Analyze(OPS);
+  Ok('4.2.1: the operator fixture is diagnostic-free',
+    Length(GModel.Diags) = 0);
+  Eq('4.2.1: Byte + Byte is Integer', AssignedType('R01'), 'Integer');
+  Eq('4.2.1: Single * Single is Extended', AssignedType('R02'), 'Extended');
+  Eq('4.2.1: Cardinal + Integer is Int64', AssignedType('R03'), 'Int64');
+  Eq('4.2.1: -Byte is Integer', AssignedType('R04'), 'Integer');
+  Eq('4.2.1: not Byte is Byte', AssignedType('R05'), 'Byte');
+  Eq('4.2.1: an Int64 alias + 1 is Int64', AssignedType('R06'), 'Int64');
+  Eq('4.11: Abs of an Int64 alias is Int64', AssignedType('R07'), 'Int64');
+  Eq('4.11: Succ of an Int64 alias is Int64', AssignedType('R08'), 'Int64');
+  Eq('4.11: Sqr of an Int64 alias is Int64', AssignedType('R09'), 'Int64');
+  Eq('4.11: Swap of a Word alias is Word', AssignedType('R10'), 'Word');
+  Eq('4.11: High(array[eA..eC]) is the enum', AssignedType('R11'), 'TE');
+  Eq('4.11: Low(array[eA..eC]) is the enum', AssignedType('R12'), 'TE');
+  Eq('4.2.1/Win32: Currency * Currency (alias) is Extended',
+    AssignedType('R13'), 'Extended');
+  Eq('4.2.1: a distinct Integer + itself is Integer', AssignedType('R15'),
+    'Integer');
+  Eq('4.2.1: AnsiString + AnsiString is AnsiString', AssignedType('R16'),
+    'AnsiString');
+  Eq('4.2.1: Byte shl 2 is Integer', AssignedType('R17'), 'Integer');
+  Eq('4.2.1: -Single is Extended', AssignedType('R18'), 'Extended');
+  GModel.Free;
+  Analyze(OPS, pfWin64);
+  Eq('4.2.1/Win64: Currency * Currency (alias) is Currency',
+    AssignedType('R13'), 'Currency');
+  Eq('4.11/Win64: Abs of a Currency alias is Currency', AssignedType('R14'),
+    'Currency');
+  GModel.Free;
+
+  // A subrange takes its category from a bound that is an enumeration value
+  // or a constant too, not only from a literal (audit E3-18): TWork is an
+  // enumeration subrange - `if W` is E2012 as in dcc - and TNeg an integer
+  // one. A Char subrange set base is never E2028 (W1050 or silence in dcc,
+  // 2.4.1, audit A4-12); a binary bound is read (`0..%111111111` is 0..511).
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'const N = 5; CE = 4;'#10 +
+    'type'#10 +
+    '  TDay = (dMon, dTue, dWed);'#10 +
+    '  TWork = dMon..dTue;'#10 +
+    '  TNeg = -N..N;'#10 +
+    '  TCyr = #$410..#$42F;'#10 +
+    '  TS1 = set of ''a''..#$100;'#10 +
+    '  TS2 = set of #$410..#$42F;'#10 +
+    '  TS3 = set of TCyr;'#10 +
+    '  TS4 = set of 0..%111111111;'#10 +
+    '  TS5 = set of 0..CE;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var W: TWork; V: TNeg; I: Integer; R1: Variant;'#10 +
+    'begin'#10 +
+    '  if W then I := 1;'#10 +
+    '  R1 := V + 1;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Ok('2.2.5: an enumeration subrange in an if is E2012', DiagCount('E2012') = 1);
+  Eq('2.2.5: a constant-bounded subrange is an integer one',
+    AssignedType('R1'), 'Integer');
+  Ok('2.4.1: only the binary 0..511 base is E2028 [' +
+    IntToStr(DiagCount('E2028')) + ']', DiagCount('E2028') = 1);
+  GModel.Free;
+
   if GCounter.Finish('SemaTypeSmoke') then
     ExitCode := 1;
   GPP.Free;

@@ -6674,6 +6674,128 @@ begin
   end;
 end;
 
+// B35: one operator rule table for both typers (4.2.1) - narrow and alias
+// operands, an enum-subrange array's bounds, a subrange whose bound is
+// another unit's enumeration value or constant, and an inherited cross-unit
+// member named Word / Byte that Phase 1 binds to the builtin type (audit
+// A4-15, A4-14, A4-16, E3-18, A4-13; local/probe-b35 P1, T1, T2).
+procedure TestOperatorTable;
+var
+  LDir: string;
+begin
+  LDir := FreshDir('pastree_sema_optable');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10 +
+    'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OtB.pas'),
+    'unit OtB;'#10'interface'#10 +
+    'const N = 5;'#10 +
+    'type'#10 +
+    '  TDay = (dMon, dTue, dWed);'#10 +
+    '  TBase = class'#10'  private'#10 +
+    '    FW: string; FB: Boolean;'#10'  public'#10 +
+    '    property Word: string read FW write FW;'#10 +
+    '    property Byte: Boolean read FB write FB;'#10'  end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OtD.pas'),
+    'unit OtD;'#10'interface'#10'uses OtB;'#10'type'#10 +
+    '  TWork = dMon..dTue;'#10 +
+    '  TNeg = -N..N;'#10 +
+    '  RDay = record RDay: Integer; end;'#10 +
+    '  RInt = record RInt: Integer; end;'#10 +
+    '  RStr = record RStr: Integer; end;'#10 +
+    '  RI64 = record RI64: Integer; end;'#10 +
+    '  TDer = class(TBase)'#10'    procedure Run;'#10'  end;'#10 +
+    'function P(X: Integer): RInt; overload;'#10 +
+    'function P(X: TDay): RDay; overload;'#10 +
+    'function Q(X: string): RStr; overload;'#10 +
+    'function Q(X: Int64): RI64; overload;'#10 +
+    'implementation'#10 +
+    'function P(X: Integer): RInt; begin end;'#10 +
+    'function P(X: TDay): RDay; begin end;'#10 +
+    'function Q(X: string): RStr; begin end;'#10 +
+    'function Q(X: Int64): RI64; begin end;'#10 +
+    'procedure TDer.Run;'#10 +
+    'var S: string; B: System.Boolean; W: TWork; V: TNeg; K: Integer;'#10 +
+    'begin'#10 +
+    '  S := Word + ''x'';'#10 +
+    '  S := ''y'' + Word;'#10 +
+    '  B := Byte and True;'#10 +
+    '  B := not Byte;'#10 +
+    '  if Byte then S := '''';'#10 +
+    '  if not Byte then S := '''';'#10 +
+    '  K := P(W).RDay;'#10 +
+    '  K := Q(V).RI64;'#10 +
+    'end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OtP.dpr'),
+    'program OtP;'#10'uses OtB, OtD;'#10'type'#10 +
+    '  TE = (eA, eB, eC);'#10 +
+    '  TArr = array[eA..eC] of Integer;'#10 +
+    '  TBig = Int64;'#10 +
+    '  TW = Word;'#10 +
+    '  RByte = record RByte: Integer; end;'#10 +
+    '  RSg = record RSg: Integer; end;'#10 +
+    '  RExt = record RExt: Integer; end;'#10 +
+    '  RTE = record RTE: Integer; end;'#10 +
+    '  RCard = record RCard: Integer; end;'#10 +
+    '  RWord = record RWord: Integer; end;'#10 +
+    'function PB(X: Byte): RByte; overload; begin end;'#10 +
+    'function PB(X: Integer): RInt; overload; begin end;'#10 +
+    'function R(X: Single): RSg; overload; begin end;'#10 +
+    'function R(X: Extended): RExt; overload; begin end;'#10 +
+    'function QI(X: Integer): RInt; overload; begin end;'#10 +
+    'function QI(X: Int64): RI64; overload; begin end;'#10 +
+    'function PE(X: Integer): RInt; overload; begin end;'#10 +
+    'function PE(X: TE): RTE; overload; begin end;'#10 +
+    'function PC(X: Cardinal): RCard; overload; begin end;'#10 +
+    'function PC(X: Int64): RI64; overload; begin end;'#10 +
+    'function PC(X: Integer): RInt; overload; begin end;'#10 +
+    'function PW(X: Word): RWord; overload; begin end;'#10 +
+    'function PW(X: Integer): RInt; overload; begin end;'#10 +
+    'var B1, B2: Byte; F1, F2: Single; B: TBig; A: TArr; C: Cardinal;'#10 +
+    '  I: Integer; TWv: TW; K: Integer;'#10 +
+    'begin'#10 +
+    '  K := PB(B1 + B2).RInt;'#10 +
+    '  K := R(F1 * F2).RExt;'#10 +
+    '  K := QI(Abs(B)).RI64;'#10 +
+    '  K := QI(Succ(B)).RI64;'#10 +
+    '  K := QI(B + 1).RI64;'#10 +
+    '  K := PE(High(A)).RTE;'#10 +
+    '  K := PE(Low(A)).RTE;'#10 +
+    '  K := PC(C + I).RI64;'#10 +
+    '  K := PW(Swap(TWv)).RWord;'#10 +
+    '  K := PB(-B1).RInt;'#10 +
+    '  K := PB(not B1).RByte;'#10 +
+    '  K := QI(Sqr(B)).RI64;'#10 +
+    '  K := PB(B1).Ctl1;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'OtP.dpr'));
+    Ok('optable: narrow, real and alias operands, enum-subrange bounds,' +
+      ' a signed mix - only PB(B1).Ctl1 is E2003 [' +
+      IntToStr(DiagCount(ModelByName('otp'), 'E2003')) + ']',
+      DiagCount(ModelByName('otp'), 'E2003') = 1);
+    Ok('optable: a subrange over another unit''s enumeration value or' +
+      ' constant picks P(TDay) / Q(Int64) [' +
+      IntToStr(DiagCount(ModelByName('otd'), 'E2003')) + ']',
+      DiagCount(ModelByName('otd'), 'E2003') = 0);
+    Ok('optable: an inherited member named Word / Byte is no E2015 /' +
+      ' E2012 / E2010 [' + IntToStr(DiagCount(ModelByName('otd'), 'E2015') +
+      DiagCount(ModelByName('otd'), 'E2012') +
+      DiagCount(ModelByName('otd'), 'E2010')) + ']',
+      DiagCount(ModelByName('otd'), 'E2015') +
+      DiagCount(ModelByName('otd'), 'E2012') +
+      DiagCount(ModelByName('otd'), 'E2010') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestDeclAfterUnit;
 const
   UFA =
@@ -12604,6 +12726,7 @@ begin
   TestOneScorer;
   TestOverloadSets;
   TestValueOverloads;
+  TestOperatorTable;
   TestOracleDepth;
   TestInstanceSize;
   TestOperatorChains;
