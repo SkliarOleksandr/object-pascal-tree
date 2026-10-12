@@ -737,9 +737,25 @@ type
       through, or NIL_SYM: `L[I]` over a class is a use of it written
       without its name. (A comma list read on from an array into a default
       property, `A[0, 1]` over `array of TCells`, is dcc's E2016; typed here
-      leniently, through the property.) }
+      leniently, through the property.) AInsideArray: the count stopped
+      inside an array - an anonymous row (`J[1]` over `array of array of
+      T`), which has no type and must not be guessed. }
     function IndexResultX(AId, ABaseNode: Integer; const ABaseX: TSemaXType;
-      ACount: Integer; out APropMid, APropSym: Integer): TSemaXType;
+      ACount: Integer; out APropMid, APropSym: Integer;
+      out AInsideArray: Boolean): TSemaXType;
+    { The one alias step every type chaser takes: the type alias definition
+      ADef of ACur resolved and closed over ACur's frame - `TItems =
+      TArray<T>` nested in TBox<T>, reached from a TBox<TRec>, is
+      TArray<TRec> (audit A3-25: five copies of the step, three of them
+      dropped the frame). }
+    function AliasStepX(const ACur: TSemaXType; ADef: Integer): TSemaXType;
+    { A plain designator - an nkIdent, or an nkMember whose last segment is
+      the name, parentheses aside - and its declaring symbol: the node whose
+      OWN declaration a type may be read off (an inline array or pointer).
+      An indexed or dereferenced base is not one: its declared type is the
+      root's, not the value's (audit A3-24, B3-36, B3-37). }
+    function PlainDesignatorSymX(AId, ANode: Integer;
+      out AMid, ASym: Integer): Boolean;
     function BuiltinX(AMid: Integer; const ANameLower: string): TSemaXType;
     function IsIntrinsicRoutine(AMid, ASym: Integer;
       out AShape: TPasIntrinsicResult): Boolean;
@@ -7181,7 +7197,7 @@ begin
     case LM.Tree.Nodes[LDef].Kind of
       nkIdent, nkMember, nkTypeArgs:
         begin
-          LNext := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
+          LNext := AliasStepX(LCur, LDef);   // alias link
           if not XValid(LNext) then
             Exit(True);
         end;
@@ -8741,7 +8757,7 @@ begin
         Exit(ResolveTypeExpr(LCur.UnitId,
           FModels[LCur.UnitId].Tree.Nodes[LDef].FirstChild));
       nkIdent, nkMember, nkTypeArgs:
-        LCur := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
+        LCur := AliasStepX(LCur, LDef);   // alias link
     else
       Exit;
     end;
@@ -8791,7 +8807,7 @@ begin
     end;
     case LM.Tree.Nodes[LDef].Kind of
       nkIdent, nkMember, nkTypeArgs:
-        LCur := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
+        LCur := AliasStepX(LCur, LDef);   // alias link
       nkArrayType:
         begin
           if LM.Tree.Nodes[LDef].Aux = 1 then
@@ -12739,6 +12755,8 @@ var
   var
     LChild, LBase, LName, LSym, LMemMid, LMemSym, LCtx: Integer;
     LBestMid, LBestSym, LBestCtx, LMemCtx, LIdxMid, LIdxSym: Integer;
+    LRoot, LTotal, LRootPropMid, LRootPropSym: Integer;
+    LInside: Boolean;
     LIMid, LISym, LICtx: Integer;
     LAmbiguous: Boolean;
     LExt: TPasExtRef;
@@ -13429,7 +13447,38 @@ var
                 LChild := LM.Tree.Nodes[LChild].NextSibling;
               end;
               SetXAt(N, IndexResultX(AId, LBase, LBX, LMemCtx, LIdxMid,
-                LIdxSym));
+                LIdxSym, LInside));
+              // `J[1][2]` over `TJag = array of array of TRec`: the inner
+              // `J[1]` is an anonymous row with no type, so this level read
+              // nothing; `M[i][j]` IS `M[i, j]` (8.1.2), so the chain is
+              // indexed from its root with the levels summed (audit E3-35).
+              if not XValid(XAt(N)) and
+                 (LM.Tree.Nodes[LBase].Kind = nkIndex) then
+              begin
+                LRoot := LBase;
+                LTotal := LMemCtx;
+                while LM.Tree.Nodes[LRoot].Kind = nkIndex do
+                begin
+                  LChild := LM.Tree.Nodes[LM.Tree.Nodes[LRoot].FirstChild].
+                    NextSibling;
+                  while LChild <> NIL_NODE do
+                  begin
+                    Inc(LTotal);
+                    LChild := LM.Tree.Nodes[LChild].NextSibling;
+                  end;
+                  LRoot := LM.Tree.Nodes[LRoot].FirstChild;
+                end;
+                if not IsArrayPropertyDesignator(LRoot) then
+                begin
+                  SetXAt(N, IndexResultX(AId, LRoot, GetX(LRoot), LTotal,
+                    LRootPropMid, LRootPropSym, LInside));
+                  if LIdxSym = NIL_SYM then
+                  begin
+                    LIdxMid := LRootPropMid;
+                    LIdxSym := LRootPropSym;
+                  end;
+                end;
+              end;
               // The default array property the brackets went through: a use
               // of it with no name written (`L[I]` reads L.Items[I]), keyed
               // on the nkIndex node itself - Find References, callers of its
@@ -13461,7 +13510,10 @@ var
               // common target shape in the RTL; the walk had only the
               // untyped-base half, and merging the two typers without this
               // line cost 23 rgbRed/rgbGreen/rgbBlue reports on one corpus.
-              if not XValid(XAt(N)) then
+              // Not where the count stopped inside an array: that row has
+              // no type, and ElementX would peel past it to the innermost
+              // element (`J[1].Fld` bound TRec.Fld, dcc's E2018).
+              if not XValid(XAt(N)) and not LInside then
                 SetXAt(N, ElementX(AId, LBase));
             end;
           end;
@@ -14915,7 +14967,7 @@ begin
       Exit;
     case LM.Tree.Nodes[LDef].Kind of
       nkIdent, nkMember, nkTypeArgs:
-        LCur := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
+        LCur := AliasStepX(LCur, LDef);   // alias link
       nkProcType:
         begin
           LChild := LM.Tree.Nodes[LDef].FirstChild;
@@ -15037,6 +15089,30 @@ end;
   RefMap/ExtRefMap say about the last segment. Needed because a variable's
   declared type NODE is sometimes the only place an array type exists (an
   inline `array[...] of T` resolves to no symbol at all). }
+function TPasSemaProject.PlainDesignatorSymX(AId, ANode: Integer;
+  out AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+begin
+  Result := False;
+  AMid := NIL_SYM;
+  ASym := NIL_SYM;
+  if (AId < 0) or (AId >= FModels.Count) or (ANode = NIL_NODE) then
+    Exit;
+  LM := FModels[AId];
+  ANode := PeelParens(LM.Tree, ANode);
+  if (ANode = NIL_NODE) or
+     not (LM.Tree.Nodes[ANode].Kind in [nkIdent, nkMember]) then
+    Exit;
+  Result := DesignatorSymX(AId, ANode, AMid, ASym);
+end;
+
+function TPasSemaProject.AliasStepX(const ACur: TSemaXType;
+  ADef: Integer): TSemaXType;
+begin
+  Result := SubstX(ResolveTypeExpr(ACur.UnitId, ADef), ACur.Inst, 0);
+end;
+
 function TPasSemaProject.DesignatorSymX(AId, ANode: Integer;
   out AMid, ASym: Integer): Boolean;
 var
@@ -15399,7 +15475,7 @@ end;
   symbol to answer with; typing it wrongly is what this replaces. }
 function TPasSemaProject.IndexResultX(AId, ABaseNode: Integer;
   const ABaseX: TSemaXType; ACount: Integer; out APropMid,
-  APropSym: Integer): TSemaXType;
+  APropSym: Integer; out AInsideArray: Boolean): TSemaXType;
 var
   LRemaining: Integer;
 
@@ -15444,7 +15520,10 @@ var
       end;
       LDims := DimsOf(AMid, ANode);
       if LDims > LRemaining then
+      begin
+        AInsideArray := True;
         Exit;   // stopped inside a multi-dimensional array: an anonymous row
+      end;
       Dec(LRemaining, LDims);
       LLast := NIL_NODE;
       LChild := FModels[AMid].Tree.Nodes[ANode].FirstChild;
@@ -15458,12 +15537,31 @@ var
       if FModels[AMid].Tree.Nodes[LLast].Kind = nkArrayType then
       begin
         if LRemaining = 0 then
+        begin
+          AInsideArray := True;
           Exit;   // the remaining nesting is anonymous
+        end;
         ANode := LLast;
         Continue;
       end;
       Exit(SubstX(ResolveTypeExprNested(AMid, LLast), AInst, 0));
     end;
+  end;
+
+  // Through a pointer to APointee: before `[` the `^` may be omitted over a
+  // pointer to an ARRAY (no level is consumed - `AO[1][0]` over `array of
+  // PObjs`, `PObjs = ^TObjs`, audit B3-36); over anything else `P[I]` is
+  // POINTERMATH's `(P + I)^`, one level, the pointee (4.8; audit E3-36:
+  // `N[1].Value` over `N: ^TNode`). dcc rejects the second without the
+  // directive, so answering it unconditionally makes no valid program wrong.
+  function ThroughPointer(const APointee: TSemaXType): TSemaXType;
+  var
+    LPMid, LPDef: Integer;
+  begin
+    Result := APointee;
+    if XValid(APointee) and
+       not ArrayDefOfX(AId, NIL_NODE, APointee, LPMid, LPDef) then
+      Dec(LRemaining);
   end;
 
 var
@@ -15474,22 +15572,32 @@ begin
   Result := XNil;
   APropMid := NIL_SYM;
   APropSym := NIL_SYM;
+  AInsideArray := False;
   if ACount <= 0 then
     Exit;
   LRemaining := ACount;
   LCur := ABaseX;
   // A base whose declaration carries an inline array (`Inl: array of array of
-  // TRec`, `Fixed: array[0..3, 0..3] of TRec`) has no nameable type - the
-  // member typer answers XNil for it - so the peel starts at its TypeNode.
+  // TRec`, `Fixed: array[0..3, 0..3] of TRec`) or an inline pointer (`N:
+  // ^TNode`) has no nameable type - the member typer answers XNil for it -
+  // so the peel starts at its TypeNode. A PLAIN designator only: the
+  // declared type of `A[1]` is A's, not the element's.
   if not XValid(LCur) then
   begin
-    if not DesignatorSymX(AId, ABaseNode, LMid, LSym) then
+    if not PlainDesignatorSymX(AId, ABaseNode, LMid, LSym) then
       Exit;
     LDef := FModels[LMid].Symbols[LSym].TypeNode;
-    if (LDef = NIL_NODE) or
-       (FModels[LMid].Tree.Nodes[LDef].Kind <> nkArrayType) then
+    if LDef = NIL_NODE then
       Exit;
-    LCur := PeelArrayNode(LMid, LDef, NIL_INST);
+    case FModels[LMid].Tree.Nodes[LDef].Kind of
+      nkArrayType:
+        LCur := PeelArrayNode(LMid, LDef, NIL_INST);
+      nkPointerType:
+        LCur := ThroughPointer(ResolveTypeExprNested(LMid,
+          FModels[LMid].Tree.Nodes[LDef].FirstChild));
+    else
+      Exit;
+    end;
   end;
   for LDepth := 1 to 32 do
   begin
@@ -15526,11 +15634,6 @@ begin
     LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
     if LDef = NIL_NODE then
       Exit(XNil);
-    // A generic declaration's def child follows its parameter list.
-    if LM.Tree.Nodes[LDef].Kind = nkGenericParams then
-      LDef := LM.Tree.Nodes[LDef].NextSibling;
-    if LDef = NIL_NODE then
-      Exit(XNil);
     case LM.Tree.Nodes[LDef].Kind of
       nkStringType:
         begin
@@ -15540,8 +15643,10 @@ begin
         end;
       nkArrayType:
         LCur := PeelArrayNode(LCur.UnitId, LDef, LCur.Inst);
+      nkPointerType:
+        LCur := ThroughPointer(PointeeX(LCur));
       nkIdent, nkMember, nkTypeArgs:
-        LCur := SubstX(ResolveTypeExpr(LCur.UnitId, LDef), LCur.Inst, 0);
+        LCur := AliasStepX(LCur, LDef);
       // `RawByteString = type AnsiString($ffff)`, `UTF8String = type
       // AnsiString(65001)`: the code-page form reads as a call of the string
       // type's name, and indexes as that string type (S1: AnsiChar).
@@ -15936,8 +16041,11 @@ var
   LViaPointer: Boolean;
 begin
   LViaPointer := False;
-  // 1. The base's own declared type node (inline-array case).
-  if DesignatorSymX(AId, ABaseNode, LMid, LSym) then
+  // 1. The base's own declared type node (inline-array case) - a PLAIN
+  // designator's: `AO[1]`'s declared type is AO's, and reading it typed
+  // `AO[1][0]` as AO's element, one level short (audit B3-36, E3-32).
+  LSym := NIL_SYM;
+  if PlainDesignatorSymX(AId, ABaseNode, LMid, LSym) then
   begin
     Result := ElemOf(LMid, FModels[LMid].Symbols[LSym].TypeNode);
     if XValid(Result) then
@@ -15996,7 +16104,7 @@ begin
         // open parameter T and only SubstX turns it into TElementAlias.
         Exit(SubstX(ElemOf(LCur.UnitId, LDef), LCur.Inst, 0));
       nkIdent, nkMember, nkTypeArgs:
-        LCur := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
+        LCur := AliasStepX(LCur, LDef);   // alias link
       nkPointerType:
         // Indexing a POINTER to an array: `ImageData[i]` where
         // `pPixelLine = ^TPixelLine` and `TPixelLine = array[Word] of TRGBQuad`
@@ -16255,9 +16363,83 @@ end;
   has no type symbol - the declaring symbol's own type node. }
 function TPasSemaProject.ArrayDefOfX(AMid, AArg: Integer;
   const AX: TSemaXType; out ADefMid, ADef: Integer): Boolean;
+
+  // The anonymous array definition node ANode denotes: a plain designator's
+  // inline TypeNode, or an indexed one's element row.
+  function InlineArrayDef(ANode: Integer; out ADMid, ADNode: Integer): Boolean;
+  var
+    LM: TPasSemaModel;
+    LMid, LSym, LCount, LChild, LDims, LLast: Integer;
+    LX: TSemaXType;
+  begin
+    Result := False;
+    ADMid := NIL_SYM;
+    ADNode := NIL_NODE;
+    LM := FModels[AMid];
+    ANode := PeelParens(LM.Tree, ANode);
+    if ANode = NIL_NODE then
+      Exit;
+    if LM.Tree.Nodes[ANode].Kind <> nkIndex then
+    begin
+      if PlainDesignatorSymX(AMid, ANode, LMid, LSym) and
+         (FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE) and
+         (FModels[LMid].Tree.Nodes[FModels[LMid].Symbols[LSym].TypeNode].Kind
+          = nkArrayType) then
+      begin
+        ADMid := LMid;
+        ADNode := FModels[LMid].Symbols[LSym].TypeNode;
+        Result := True;
+      end;
+      if not Result then
+      begin
+        // A NAMED array the chain starts from: `High(FTable[Col])` over
+        // `FTable: TTable<TCell>`, `TTable<T> = array of array of T`.
+        LX := WithTargetTypeX(AMid, ANode);
+        Result := XValid(LX) and ArrayDefOfX(AMid, NIL_NODE, LX, ADMid,
+          ADNode);
+      end;
+      Exit;
+    end;
+    if not InlineArrayDef(LM.Tree.Nodes[ANode].FirstChild, ADMid, ADNode) then
+      Exit;
+    LCount := 0;
+    LChild := LM.Tree.Nodes[LM.Tree.Nodes[ANode].FirstChild].NextSibling;
+    while LChild <> NIL_NODE do
+    begin
+      Inc(LCount);
+      LChild := LM.Tree.Nodes[LChild].NextSibling;
+    end;
+    Result := False;
+    while LCount > 0 do
+    begin
+      if (ADNode = NIL_NODE) or
+         (FModels[ADMid].Tree.Nodes[ADNode].Kind <> nkArrayType) or
+         (FModels[ADMid].Tree.Nodes[ADNode].Aux = 1) then
+        Exit;
+      // Dimensions: the children but the element; `array of T` has one.
+      LDims := 0;
+      LLast := NIL_NODE;
+      LChild := FModels[ADMid].Tree.Nodes[ADNode].FirstChild;
+      while LChild <> NIL_NODE do
+      begin
+        Inc(LDims);
+        LLast := LChild;
+        LChild := FModels[ADMid].Tree.Nodes[LChild].NextSibling;
+      end;
+      if LDims > 1 then
+        Dec(LDims);
+      if LDims > LCount then
+        Exit;   // an anonymous row of a multi-dimensional array
+      Dec(LCount, LDims);
+      ADNode := LLast;
+    end;
+    Result := (ADNode <> NIL_NODE) and
+      (FModels[ADMid].Tree.Nodes[ADNode].Kind = nkArrayType);
+  end;
+
 var
   LCur: TSemaXType;
-  LDepth, LMid, LSym: Integer;
+  LDepth: Integer;
 begin
   Result := False;
   ADefMid := NIL_SYM;
@@ -16277,23 +16459,19 @@ begin
           Exit(True);
         end;
       nkIdent, nkMember, nkTypeArgs:
-        LCur := ResolveTypeExpr(LCur.UnitId, ADef);   // alias link
+        LCur := AliasStepX(LCur, ADef);   // alias link
     else
       Break;
     end;
   end;
   ADef := NIL_NODE;
   // The inline-array case: the argument names a declaration whose TypeNode
-  // is the array itself.
-  if (AArg <> NIL_NODE) and DesignatorSymX(AMid, AArg, LMid, LSym) and
-     (FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE) and
-     (FModels[LMid].Tree.Nodes[FModels[LMid].Symbols[LSym].TypeNode].Kind =
-      nkArrayType) then
-  begin
-    ADefMid := LMid;
-    ADef := FModels[LMid].Symbols[LSym].TypeNode;
-    Result := True;
-  end;
+  // is the array itself - or indexes one, `High(M[0])` over `M: array of
+  // array[TE] of Integer` reading the INNER definition: one array level
+  // peeled per index expression (audit B3-37: the outer definition was
+  // read, NativeInt where dcc says TE).
+  if AArg <> NIL_NODE then
+    Result := InlineArrayDef(AArg, ADefMid, ADef);
 end;
 
 { The type of a STATIC array definition's bounds (its first index dimension,
@@ -17605,7 +17783,7 @@ begin
       nkCall:
         LCur := ResolveTypeExpr(LCur.UnitId, LM.Tree.Nodes[LDef].FirstChild);
       nkIdent, nkMember:
-        LCur := ResolveTypeExpr(LCur.UnitId, LDef);
+        LCur := AliasStepX(LCur, LDef);
     else
       Exit;
     end;
@@ -17756,7 +17934,7 @@ begin
       nkArrayType:
         Exit(ElementX(AMid, ACollNode));
       nkIdent, nkMember, nkTypeArgs:
-        LCur := ResolveTypeExpr(LCur.UnitId, LDef);   // alias link
+        LCur := AliasStepX(LCur, LDef);   // alias link
       nkClassType, nkRecordType, nkInterfaceType, nkObjectType:
         begin
           if not FindMemberX(AMid, LCur, 'getenumerator', LMemMid, LMemSym,

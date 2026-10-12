@@ -347,10 +347,12 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 ## 08-arrays.md
 
 ### 8.1.2 Multidimensional static arrays
-- index expressions are untyped by the intra-unit typer
-  (no ExprType case); the project-level element typing descends to the
-  innermost element type regardless of how many indices were written
-  (documented shortcut).
+- index expressions are untyped by the intra-unit typer (no ExprType
+  case); the project level peels one level per index expression, a chain
+  from its root, and leaves an anonymous row (`J[1]` over `array of array
+  of T`) untyped - no E2018 is reported on a member after one. A
+  multi-dimensional row (`High(M[0])` of `array[a, b] of T`) has no bounds
+  type.
 
 ## 11-classes.md
 

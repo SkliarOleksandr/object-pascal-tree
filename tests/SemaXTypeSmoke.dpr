@@ -2108,6 +2108,34 @@ const
     ('for U8', 'AnsiChar'),
     ('for S', 'Char'),
     ('for W', 'Char'));
+  // B40: index, pointer and alias chains - `M[i][j]` summed from the chain
+  // root, a pointer-to-array level, Low / High of an indexed inner array,
+  // a nested generic alias's frame (see the fixture; '?' is no type).
+  CIDX: array[0..23] of array[0..1] of string = (
+    ('A^[1]^', 'TRec'),
+    ('A[1]^', 'TRec'),
+    ('PP^^', 'TRec'),
+    ('IP.Value', 'TRec'),
+    ('J[1][2]', 'TRec'),
+    ('M[1][1]', 'TRec'),
+    ('R2.Sub[1][2]', 'TRec'),
+    ('J[1, 2]', 'TRec'),
+    ('GI[1][2]', 'TRec'),
+    ('J[1]', '?'),
+    ('M[1]', '?'),
+    ('AO[1][0]', 'TObj'),
+    ('AO[1, 0]', 'TObj'),
+    ('AO[1]^[0]', 'TObj'),
+    ('High(MM[0])', 'TE'),
+    ('Low(GG[1])', 'TE'),
+    ('High(TT[0])', 'TE'),
+    ('Length(MM[0])', 'Integer'),
+    ('BX.GetA()', 'TRec'),
+    ('P[1]', 'TRec'),
+    ('N[1].Value', 'TRec'),
+    ('for BX.Items', 'TRec'),
+    ('for BX.L', 'TRec'),
+    ('BX.PA^', 'TRec'));
   // B36b: expression, its type (dcc32 = dcc64) - text joins, Concat, the
   // inline if, a set with a set constructor, the array pseudo-constructor.
   CTEXT: array[0..43] of array[0..1] of string = (
@@ -3296,6 +3324,74 @@ begin
       for var LRow := 0 to High(CSTRE) do
         Eq('7.2.1: ' + CSTRE[LRow][0], XTypeOf(LE, Format('P%.2d', [LRow])),
           CSTRE[LRow][1]);
+    finally
+      GProj.Free;
+      if TDirectory.Exists(LDir) then
+        TDirectory.Delete(LDir, True);
+    end;
+  end;
+
+  // ---- B40: `M[i][j]` is `M[i, j]` (8.1.2) - a chain over a named nested or
+  // multi-dimensional array is indexed from its root, the row between is
+  // anonymous and untyped; a pointer to an array at an inner level is
+  // dereferenced before `[` (`AO[1][0]`), any other typed pointer indexes
+  // to its pointee (POINTERMATH, `N[1]` over `N: ^TNode`); Low / High of
+  // an indexed inner array read THAT array; the alias step keeps the
+  // generic frame (`BX.GetA()`, `for R in BX.L` over TBox<TRec>'s nested
+  // aliases) (audit E3-35, B3-36, E3-36, B3-37, A3-25, A3-24, E3-34;
+  // dcc32 / dcc64 37.0, local/probe-b40 T). ----
+  begin
+    var LSrcA :=
+      'unit XGA;'#10'interface'#10'type'#10 +
+      '  TMyEnum<T> = class function MoveNext: Boolean;'#10 +
+      '    function GetCurrent: T; property Current: T read GetCurrent; end;'#10 +
+      '  TMyList<T> = class function GetEnumerator: TMyEnum<T>; end;'#10 +
+      '  TMyFunc<T> = reference to function: T;'#10 +
+      '  TBox<T> = class public type TItems = array of T;'#10 +
+      '    TGetA = TMyFunc<T>; TL = TMyList<T>; PT = ^T;'#10 +
+      '  public Items: TItems; GetA: TGetA; L: TL; PA: PT; end;'#10 +
+      'implementation'#10 +
+      'function TMyEnum<T>.MoveNext: Boolean; begin Result := False; end;'#10 +
+      'function TMyEnum<T>.GetCurrent: T; begin Result := Default(T); end;'#10 +
+      'function TMyList<T>.GetEnumerator: TMyEnum<T>; begin Result := nil; end;'#10 +
+      'end.'#10;
+    var LSrc :=
+      'unit XGB;'#10'interface'#10'uses XGA;'#10 +
+      'type TRec = record X: Integer; end; PRec = ^TRec;'#10 +
+      '  TPtrArr = array[0..9] of PRec; TNode = record Value: TRec; end;'#10 +
+      '  TJag = array of array of TRec; TM = array[0..1, 0..1] of TRec;'#10 +
+      '  TRec2 = record Sub: TJag; end; TObj = class Name: string; end;'#10 +
+      '  TObjs = array[0..0] of TObj; PObjs = ^TObjs; TE = (e1, e2, e3);'#10 +
+      '  TTab = array of array[TE] of Integer;'#10 +
+      'implementation'#10 +
+      'procedure P_;'#10 +
+      'var A: ^TPtrArr; PP: ^PRec; IP: ^TNode; J: TJag; M: TM; R2: TRec2;'#10 +
+      '  GI: array of array of TRec; AO: array[0..3] of PObjs;'#10 +
+      '  MM: array of array[TE] of Integer;'#10 +
+      '  GG: array[0..3] of array[TE] of Integer; TT: TTab;'#10 +
+      '  P: PRec; N: ^TNode; BX: TBox<TRec>;'#10 +
+      'begin'#10;
+    for var LRow := 0 to High(CIDX) do
+      if CIDX[LRow][0].StartsWith('for ') then
+        LSrc := LSrc + Format('  for var P%.2d in %s do ;'#10,
+          [LRow, CIDX[LRow][0].Substring(4)])
+      else
+        LSrc := LSrc + Format('  var P%.2d := %s;'#10, [LRow, CIDX[LRow][0]]);
+    LSrc := LSrc + 'end;'#10'end.'#10;
+    LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype_idx');
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+    TDirectory.CreateDirectory(LDir);
+    TFile.WriteAllText(TPath.Combine(LDir, 'XGA.pas'), LSrcA);
+    TFile.WriteAllText(TPath.Combine(LDir, 'XGB.pas'), LSrc);
+    GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+    try
+      GProj.AnalyzeDirectory(LDir);
+      LE := ModelByName('xgb');
+      Ok('XGB loaded', Assigned(LE));
+      for var LRow := 0 to High(CIDX) do
+        Eq('8.1.2: ' + CIDX[LRow][0], XTypeOf(LE, Format('P%.2d', [LRow])),
+          CIDX[LRow][1]);
     finally
       GProj.Free;
       if TDirectory.Exists(LDir) then
