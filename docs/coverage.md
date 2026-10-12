@@ -333,6 +333,15 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   not typed intra-unit, and the project-level walk reaches instance members
   through `class of` values without filtering them out.
 
+### 15.3.3 Helper scope-resolution rule
+- the active helper is decided per unit, not per position: a unit's own
+  helper declared below a routine body already applies in it, and with two
+  helpers for one type in a unit the later one applies above it too (dcc
+  counts only the helpers declared before the position).
+- in a `with` over a record of the unit itself whose helper lives in a unit
+  that uses this one, a helper member named like a declaration of the
+  enclosing scope keeps that declaration.
+
 ## 16-generics.md
 
 ### 16.3.1 Generic instantiation syntax

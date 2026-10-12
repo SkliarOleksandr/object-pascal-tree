@@ -3004,22 +3004,37 @@ begin
     // graph stays acyclic.
     if LExtScope = LHelperScope then
       Continue;
-    // Direction 1: T's members now include the helper's, so both a bare
-    // reference from inside T's own methods (which join T's member scope)
-    // and a qualified T.Member (ResolveNode's nkMember, via FindLocalDeep)
-    // find them. LAST helper joined wins the lookup - FindLocalDeep walks
-    // Additional most-recently-added first, which is dcc's own rule when two
-    // helpers for one type are in scope.
-    // SHADOWING, not an ordinary join: a helper member hides the extended
-    // type's own of the same name (15.3.3). That precedence was the long
-    // standing same-unit gap - the cross-unit side (HelperMemberHit, checked
-    // before the type's members at every hop) has always had it right.
-    FModel.JoinScopeShadowing(LExtScope, LHelperScope);
     LExtScopes[LIdx] := LExtScope;
     LAny := True;
   end;
   if not LAny then
     Exit;
+  // Direction 1: T's members now include the helper's, so both a bare
+  // reference from inside T's own methods (which join T's member scope) and
+  // a qualified T.Member (ResolveNode's nkMember, via FindLocalDeep) find
+  // them. ONE helper per type: at most one is active (15.3.3), the one
+  // declared last, and a name it lacks is the type's own - never an earlier
+  // helper's. Joining every helper let `Q.Baz` reach TQH0.Baz beside the
+  // later TQH1 (dcc: TQ.Baz; local/probe-b28 H3).
+  // SHADOWING, not an ordinary join: a helper member hides the extended
+  // type's own of the same name (15.3.3). Only this unit's Phase 1 reads the
+  // join; the project's walks take the active helper from their registry
+  // (TPasSemaModel.FindLocalNoHelpers).
+  for LIdx := 0 to High(FPendingHelpers) do
+  begin
+    if LExtScopes[LIdx] = NIL_SCOPE then
+      Continue;
+    var LLast := True;
+    for var LLater := LIdx + 1 to High(FPendingHelpers) do
+      if LExtScopes[LLater] = LExtScopes[LIdx] then
+      begin
+        LLast := False;
+        Break;
+      end;
+    if LLast then
+      FModel.JoinScopeShadowing(LExtScopes[LIdx],
+        FModel.Symbols[FPendingHelpers[LIdx].HelperSym].MemberScope);
+  end;
   // Direction 2: the helper's own method BODIES see T's members through the
   // implicit Self. Those bodies are separate routine scopes (a method is
   // implemented outside the type), each tagged by CollectRoutine with the

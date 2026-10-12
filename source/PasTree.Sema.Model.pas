@@ -677,6 +677,16 @@ type
       Parent - that is the caller's chain walk, same split as the lookups. }
     procedure EnumScopeDeep(AScope: Integer; const AOnSym: TPasSymEnumProc;
       ADepth: Integer = 0);
+    { FindLocalDeep and EnumScopeDeep without AScope's own Shadowing joins.
+      A struct member scope's are its unit's helpers (JoinHelperScopes),
+      joined for that unit's Phase 1; the project's member walks take the
+      helper active in the REFERRING unit from the registry instead
+      (TPasSemaProject.HelperMemberHit), so the joins must not answer there
+      - an implementation-section helper leaked into every importer, and a
+      helper hidden by a later one stayed reachable (15.3.3, 15.3.4). }
+    function FindLocalNoHelpers(AScope: Integer; const AKey: TSemaKey): Integer;
+    procedure EnumScopeNoHelpers(AScope: Integer;
+      const AOnSym: TPasSymEnumProc);
     // Full lookup: self -> additional (reverse) -> parent -> ...
     function Resolve(AScope: Integer; const ANameLower: string): Integer;
       overload;
@@ -1968,6 +1978,36 @@ begin
       Exit;
   end;
   Result := NIL_SYM;
+end;
+
+function TPasSemaModel.FindLocalNoHelpers(AScope: Integer;
+  const AKey: TSemaKey): Integer;
+var
+  LAdd: TArray<Integer>;
+begin
+  Result := FindLocal(AScope, AKey);
+  if Result <> NIL_SYM then
+    Exit;
+  LAdd := Scopes[AScope].Additional;
+  for var LIdx := High(LAdd) downto 0 do
+  begin
+    Result := FindLocalDeep(LAdd[LIdx], AKey, 1);
+    if Result <> NIL_SYM then
+      Exit;
+  end;
+  Result := NIL_SYM;
+end;
+
+procedure TPasSemaModel.EnumScopeNoHelpers(AScope: Integer;
+  const AOnSym: TPasSymEnumProc);
+var
+  LJoins: TArray<Integer>;
+begin
+  for var LIdx := 0 to Scopes[AScope].Symbols.Count - 1 do
+    AOnSym(Scopes[AScope].Symbols[LIdx], AScope);
+  LJoins := Scopes[AScope].Additional;
+  for var LIdx := High(LJoins) downto 0 do
+    EnumScopeDeep(LJoins[LIdx], AOnSym, 1);
 end;
 
 procedure TPasSemaModel.EnumScopeDeep(AScope: Integer;

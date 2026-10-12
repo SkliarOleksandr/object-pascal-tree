@@ -950,6 +950,15 @@ type
     function IsDistinctTypeDef(AMid, ADef: Integer): Boolean;
     function HelperMemberHit(AFromMid: Integer; const ACur: TSemaXType;
       const AKey: TSemaKey; out AMemMid, AMemSym: Integer): Boolean;
+    { The helper active for ACur's type in the referring unit AFromMid
+      (15.3.3): the registry's (FHelperIdx - its own unit's, then its uses',
+      last wins), else the last interface-section helper the type's OWN unit
+      declares for it, which applies wherever a value of the type is
+      reached, used unit or not (dcc64 37.0, local/probe-b28 H7: `GM.E.IsA`
+      with UT, declaring TE and its helper, not in the uses; FMX.FontGlyphs
+      .Win's `Style.Slant.IsRegular` without FMX.Graphics). }
+    function ActiveHelperOf(AFromMid: Integer; const ACur: TSemaXType;
+      out AExt: TPasExtRef): Boolean;
     // Cross-model overload selection (CrossType's call typing):
     function XCatOf(const AX: TSemaXType): TSemaTypeCat;
     function XSameType(const A, B: TSemaXType): Boolean;
@@ -9533,20 +9542,36 @@ end;
 // reached by the nkHelperType branch of the main walk instead, which only
 // fires when the walk STARTS at a helper (a helper is never another type's
 // heritage).
-function TPasSemaProject.HelperMemberHit(AFromMid: Integer;
-  const ACur: TSemaXType; const AKey: TSemaKey;
-  out AMemMid, AMemSym: Integer): Boolean;
+function TPasSemaProject.ActiveHelperOf(AFromMid: Integer;
+  const ACur: TSemaXType; out AExt: TPasExtRef): Boolean;
 var
-  LExt: TPasExtRef;
-  LScope, LFound, LOwn: Integer;
-  LAnc: TSemaXType;
+  LOwn: Integer;
+
+  // The type's own unit's last exported helper for it. A unit declares a
+  // handful of helpers at most, and most none, so the scan is the cheap
+  // part; it runs only when the registry had no answer.
+  function OwnUnitHelper: Boolean;
+  begin
+    Result := False;
+    if (ACur.UnitId < 0) or (ACur.UnitId > High(FModelHelpers)) then
+      Exit;
+    for var LIdx := High(FModelHelpers[ACur.UnitId]) downto 0 do
+      with FModelHelpers[ACur.UnitId][LIdx] do
+        if Exported and (TargetUnit = ACur.UnitId) and
+           (TargetSym = ACur.Sym) then
+        begin
+          AExt.UnitId := HelperMid;
+          AExt.Sym := Sym;
+          Exit(True);
+        end;
+  end;
+
 begin
   Result := False;
   if (AFromMid < 0) or (AFromMid > High(FHelperIdx)) or
-     (FHelperIdx[AFromMid] = nil) then
-    Exit;
-  if not FHelperIdx[AFromMid].TryGetValue(
-       (Int64(ACur.UnitId) shl 32) or Cardinal(ACur.Sym), LExt) then
+     (FHelperIdx[AFromMid] = nil) or
+     not FHelperIdx[AFromMid].TryGetValue(
+       (Int64(ACur.UnitId) shl 32) or Cardinal(ACur.Sym), AExt) then
   begin
     // A BUILTIN type has no single identity: every model SEEDS its own
     // `string`/`Integer`/`Char` symbol (PasTree.Sema.Builtins), so which one a
@@ -9561,16 +9586,32 @@ begin
     // Both guards keep this off the hot path: the retry costs a name lookup,
     // and it runs only for a builtin that came from ANOTHER model, after the
     // ordinary probe has already missed.
-    if (ACur.UnitId = AFromMid) or
-       (FModels[ACur.UnitId].Symbols[ACur.Sym].Kind <> skBuiltinType) then
-      Exit;
-    LOwn := FModels[AFromMid].Resolve(FModels[AFromMid].SystemScope,
-      FModels[ACur.UnitId].Symbols[ACur.Sym].NameLower);
-    if (LOwn = NIL_SYM) or
-       not FHelperIdx[AFromMid].TryGetValue(
-         (Int64(AFromMid) shl 32) or Cardinal(LOwn), LExt) then
-      Exit;
+    if (AFromMid >= 0) and (AFromMid <= High(FHelperIdx)) and
+       (FHelperIdx[AFromMid] <> nil) and (ACur.UnitId <> AFromMid) and
+       (FModels[ACur.UnitId].Symbols[ACur.Sym].Kind = skBuiltinType) then
+    begin
+      LOwn := FModels[AFromMid].Resolve(FModels[AFromMid].SystemScope,
+        FModels[ACur.UnitId].Symbols[ACur.Sym].NameLower);
+      if (LOwn <> NIL_SYM) and FHelperIdx[AFromMid].TryGetValue(
+           (Int64(AFromMid) shl 32) or Cardinal(LOwn), AExt) then
+        Exit(True);
+    end;
+    Exit(OwnUnitHelper);
   end;
+  Result := True;
+end;
+
+function TPasSemaProject.HelperMemberHit(AFromMid: Integer;
+  const ACur: TSemaXType; const AKey: TSemaKey;
+  out AMemMid, AMemSym: Integer): Boolean;
+var
+  LExt: TPasExtRef;
+  LScope, LFound: Integer;
+  LAnc: TSemaXType;
+begin
+  Result := False;
+  if not ActiveHelperOf(AFromMid, ACur, LExt) then
+    Exit;
   // The active helper, then ITS OWN ANCESTOR helpers: `class helper (X) for T`
   // (15.3) inherits X's members, and since at most one helper is active per
   // type, the derived one is the ONLY way its ancestor's members can still be
@@ -9762,14 +9803,18 @@ begin
     LScope := LM.Symbols[LCur.Sym].MemberScope;
     if LScope <> NIL_SCOPE then
     begin
-      // FindLocalDeep, mirroring ResolveNode's own nkMember lookup: a struct
-      // member scope carries a joined scope only where one was deliberately
-      // injected, and the sole injector is PasTree.Sema.Resolver's
-      // JoinHelperScopes. So this is what lets a helper declared ALONGSIDE
-      // its extended type be seen from any OTHER unit - `M.Twice` in unit B
-      // where both TMatrix and its helper live in unit A. The converse (a
-      // helper in B for a type in A) goes through HelperMemberHit above.
-      LFound := LM.FindLocalDeep(LScope, AKey);
+      // The type's own members, WITHOUT the helper joins JoinHelperScopes
+      // put on its member scope for its own unit's Phase 1: which helper
+      // applies is the referring unit's question, and HelperMemberHit above
+      // answered it from the registry - which holds the declaring unit's
+      // helpers too, so `M.Twice` in unit B, with TMatrix and its helper in
+      // unit A's interface, is the registry's hit. Read through the joins,
+      // an implementation-section helper of A answered every importer
+      // (`F.Info` in UB went to A's private TFooHelper.Info), and a helper
+      // hidden by a later one (15.3.3: one active helper per type) still
+      // answered a name the active one does not declare (local/probe-b28
+      // H3: UH's TRH0.Baz beside the program's own TRH, TQH0 beside TQH1).
+      LFound := LM.FindLocalNoHelpers(LScope, AKey);
       // A `class constructor` is never what a NAME means: it runs once,
       // automatically, and cannot be called (15 sec. 15.1.5). It is registered
       // under its name like any routine, though, so `TRegistry.Create` - with
@@ -9933,7 +9978,7 @@ procedure TPasSemaProject.EnumMembersX(AFromMid: Integer;
 var
   LCur, LNext: TSemaXType;
   LM: TPasSemaModel;
-  LScope, LDef, LChild, LDepth, LRMid, LRSym, LHop, LOwn: Integer;
+  LScope, LDef, LChild, LDepth, LRMid, LRSym, LHop: Integer;
   LRootName: string;
   LExt: TPasExtRef;
   LEmitMid, LEmitCtx: Integer;
@@ -9962,27 +10007,9 @@ begin
       Exit;
     // The active helper chain for this hop's type, before its own members
     // (a helper member HIDES the type's own - first-wins dedup needs them
-    // first). Mirrors HelperMemberHit, including the builtin-seed
-    // canonicalization retry.
-    if not LDistinct and (AFromMid >= 0) and (AFromMid <= High(FHelperIdx)) and
-       (FHelperIdx[AFromMid] <> nil) then
+    // first). The same active helper as HelperMemberHit's (ActiveHelperOf).
+    if not LDistinct and ActiveHelperOf(AFromMid, LCur, LExt) then
     begin
-      if not FHelperIdx[AFromMid].TryGetValue(
-           (Int64(LCur.UnitId) shl 32) or Cardinal(LCur.Sym), LExt) then
-      begin
-        LExt.UnitId := NIL_SYM;
-        if (LCur.UnitId <> AFromMid) and
-           (FModels[LCur.UnitId].Symbols[LCur.Sym].Kind = skBuiltinType) then
-        begin
-          LOwn := FModels[AFromMid].Resolve(FModels[AFromMid].SystemScope,
-            FModels[LCur.UnitId].Symbols[LCur.Sym].NameLower);
-          if (LOwn = NIL_SYM) or
-             not FHelperIdx[AFromMid].TryGetValue(
-               (Int64(AFromMid) shl 32) or Cardinal(LOwn), LExt) then
-            LExt.UnitId := NIL_SYM;
-        end;
-      end;
-      if LExt.UnitId <> NIL_SYM then
         for LHop := 1 to 8 do
         begin
           LScope := FModels[LExt.UnitId].Symbols[LExt.Sym].MemberScope;
@@ -10010,7 +10037,9 @@ begin
     begin
       LEmitMid := LCur.UnitId;
       LEmitCtx := LCur.Inst;
-      LM.EnumScopeDeep(LScope,
+      // Without the helper joins, as FindMemberX: the active helper's
+      // members came from the registry above.
+      LM.EnumScopeNoHelpers(LScope,
         procedure(ASym, AScopeOfSym: Integer)
         begin
           if not IsClassCtorDtorSym(LEmitMid, ASym) then

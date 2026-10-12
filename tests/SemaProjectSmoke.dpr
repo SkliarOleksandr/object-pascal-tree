@@ -6059,6 +6059,94 @@ begin
   end;
 end;
 
+// A3-14, E2-29: which helper applies is the referring unit's question - an
+// implementation-section helper is its unit's own, and of two helpers for
+// one type only the later is active, a name it lacks being the type's own
+// (15.3.3, 15.3.4; dcc64 37.0, local/probe-b28 H3).
+procedure TestHelperVisibility;
+var
+  LDir: string;
+begin
+  LDir := FreshDir('pastree_sema_helpvis');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HvA.pas'),
+    'unit HvA;'#10'interface'#10'type'#10 +
+    '  TR1 = record R1: Integer; end;'#10 +
+    '  TR2 = record R2: Integer; end;'#10 +
+    '  TFoo = class'#10'    function Info: TR1;'#10'  end;'#10 +
+    'implementation'#10'type'#10 +
+    '  TFooHelper = class helper for TFoo'#10 +
+    '    function Info: TR2;'#10'  end;'#10 +
+    'function TFoo.Info: TR1; begin end;'#10 +
+    'function TFooHelper.Info: TR2; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HvB.pas'),
+    'unit HvB;'#10'interface'#10'uses HvA;'#10 +
+    'procedure GoB(F: TFoo);'#10'implementation'#10 +
+    'procedure GoB(F: TFoo);'#10'var K: Integer;'#10'begin'#10 +
+    '  K := F.Info.R1;'#10'end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HvH.pas'),
+    'unit HvH;'#10'interface'#10'type'#10 +
+    '  TSub = record S1: Integer; end;'#10 +
+    '  TOther = record O1: Integer; end;'#10 +
+    '  TR = record'#10'    function Foo: TSub;'#10 +
+    '    function Baz: TSub;'#10'  end;'#10 +
+    '  TRH0 = record helper for TR'#10'    function Baz: TOther;'#10 +
+    '  end;'#10'implementation'#10 +
+    'function TR.Foo: TSub; begin end;'#10 +
+    'function TR.Baz: TSub; begin end;'#10 +
+    'function TRH0.Baz: TOther; begin end;'#10'end.'#10);
+  // The type's own unit's interface helper applies to a value of the type
+  // reached through another unit, its unit not used (local/probe-b28 H7).
+  TFile.WriteAllText(TPath.Combine(LDir, 'HvT.pas'),
+    'unit HvT;'#10'interface'#10'type'#10 +
+    '  TE = (eA, eB);'#10 +
+    '  TEH = record helper for TE'#10'    function IsA: Boolean;'#10 +
+    '  end;'#10'implementation'#10 +
+    'function TEH.IsA: Boolean; begin Result := Self = eA; end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HvM.pas'),
+    'unit HvM;'#10'interface'#10'uses HvT;'#10'var GE: TE;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'HvP.dpr'),
+    'program HvP;'#10'uses HvA, HvB, HvH, HvM;'#10'type'#10 +
+    '  TRH = record helper for TR'#10'    function Foo: TOther;'#10 +
+    '  end;'#10 +
+    '  TQ = record'#10'    function Baz: TSub;'#10'  end;'#10 +
+    '  TQH0 = record helper for TQ'#10'    function Baz: TOther;'#10 +
+    '  end;'#10 +
+    '  TQH1 = record helper for TQ'#10'    function Bar: TOther;'#10 +
+    '  end;'#10 +
+    'function TRH.Foo: TOther; begin end;'#10 +
+    'function TQ.Baz: TSub; begin end;'#10 +
+    'function TQH0.Baz: TOther; begin end;'#10 +
+    'function TQH1.Bar: TOther; begin end;'#10 +
+    'var R: TR; Q: TQ; I: Integer; B: Boolean;'#10'begin'#10 +
+    '  B := GE.IsA;'#10 +
+    '  I := R.Baz.S1;'#10 +
+    '  I := R.Foo.O1;'#10 +
+    '  I := Q.Baz.S1;'#10 +
+    '  I := Q.Bar.O1;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'HvP.dpr'));
+    Ok('helpvis: an implementation-section helper does not answer an' +
+      ' importer', DiagCount(ModelByName('hvb'), 'E2003') = 0);
+    Ok('helpvis: a used unit''s helper hidden by the program''s own, the' +
+      ' earlier of two own helpers, the type''s unit''s helper with that' +
+      ' unit not used - no E2003',
+      DiagCount(ModelByName('hvp'), 'E2003') = 0);
+    Ok('helpvis: R.Baz is TR''s own',
+      CrossRefCountInUnit(ModelByName('hvp'), 'Baz', 'Baz', 'hvh') = 1);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestDeclAfterUnit;
 const
   UFA =
@@ -11979,6 +12067,7 @@ begin
   TestSystemQualifiedUnit;
   TestSystemOverloadJoins;
   TestAttributeSuffixFirst;
+  TestHelperVisibility;
   TestOracleDepth;
   TestInstanceSize;
   TestOperatorChains;
