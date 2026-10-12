@@ -5922,6 +5922,84 @@ begin
   end;
 end;
 
+// A2-17: a bare call's candidates are the used units' routines, then
+// System's and SysInit's (3.3.2 steps 6-7) - an `overload` of a System
+// routine leaves System's own overloads callable (6.3.1). An implicit
+// unit's routine joins only when overloaded itself, and only a set that
+// says `overload` goes on to it.
+procedure TestSystemOverloadJoins;
+var
+  LDir: string;
+
+  function Run(const AProg, ACode: string): Integer;
+  begin
+    GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+    try
+      GProj.AnalyzeProject(TPath.Combine(LDir, AProg + '.dpr'));
+      Result := DiagCount(ModelByName(LowerCase(AProg)), ACode);
+    finally
+      FreeAndNil(GProj);
+    end;
+  end;
+
+begin
+  LDir := FreshDir('pastree_sema_sysov');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'function Pos(const SubStr, Str: string;' +
+    ' Offset: Integer = 1): Integer; overload;'#10 +
+    'function ParamStr(Index: Integer): string;'#10 +
+    'implementation'#10 +
+    'function Pos(const SubStr, Str: string; Offset: Integer): Integer;' +
+    ' begin Result := 0; end;'#10 +
+    'function ParamStr(Index: Integer): string; begin Result := ''''; end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OvU.pas'),
+    'unit OvU;'#10'interface'#10 +
+    'function Pos(C: Char; const S: string; X, Y: Integer): Integer;' +
+    ' overload;'#10'implementation'#10 +
+    'function Pos(C: Char; const S: string; X, Y: Integer): Integer;' +
+    ' begin Result := 0; end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OvN.pas'),
+    'unit OvN;'#10'interface'#10 +
+    'function Pos(C: Char; const S: string; X, Y: Integer): Integer;'#10 +
+    'implementation'#10 +
+    'function Pos(C: Char; const S: string; X, Y: Integer): Integer;' +
+    ' begin Result := 0; end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OvA.dpr'),
+    'program OvA;'#10'uses OvU;'#10'var I: Integer;'#10'begin'#10 +
+    '  I := Pos(''ab'', ''xabc'');'#10 +
+    '  I := Pos(''ab'', ''xabc'', 2);'#10 +
+    '  I := Pos(''a'', ''b'', 1, 2, 3, 4);'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OvB.dpr'),
+    'program OvB;'#10 +
+    'function Pos(C: Char; const S: string; X, Y: Integer): Integer;' +
+    ' overload; begin Result := 0; end;'#10 +
+    'function ParamStr(A, B: Integer): string; overload;' +
+    ' begin Result := ''''; end;'#10 +
+    'function Lone(A, B: Integer): Integer; begin Result := 0; end;'#10 +
+    'var I: Integer; S: string;'#10'begin'#10 +
+    '  I := Pos(''ab'', ''xabc'');'#10 +
+    '  S := ParamStr(1);'#10 +
+    '  I := Lone(1);'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OvC.dpr'),
+    'program OvC;'#10'uses OvN;'#10'var I: Integer;'#10'begin'#10 +
+    '  I := Pos(''ab'', ''xabc'');'#10'end.'#10);
+  try
+    Ok('sysov: a used unit''s overload leaves System''s callable',
+      Run('OvA', 'E2035') = 0);
+    Ok('sysov: a call no overload takes is still E2034',
+      Run('OvA', 'E2034') = 1);
+    Ok('sysov: the program''s own overload, System''s plain routine, a' +
+      ' plain routine - two E2035', Run('OvB', 'E2035') = 2);
+    Ok('sysov: a used unit''s plain routine stops the search',
+      Run('OvC', 'E2035') = 1);
+  finally
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestDeclAfterUnit;
 const
   UFA =
@@ -11840,6 +11918,7 @@ begin
   TestNestedOuterAfterUnit;
   TestDeclAfterUnit;
   TestSystemQualifiedUnit;
+  TestSystemOverloadJoins;
   TestOracleDepth;
   TestInstanceSize;
   TestOperatorChains;

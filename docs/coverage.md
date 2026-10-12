@@ -248,6 +248,13 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   initializer - means the parameterless overload (6.6.1); the same rule is
   NOT applied in other value positions (an argument, an assignment's right
   side), where the first-declared overload still wins.
+- the argument-count check measures a bare call against every used unit's
+  routines of the name whether or not the set found first says `overload`
+  (dcc stops at a set without it, and admits a later routine only when it
+  is overloaded itself - E2250). Only System's and SysInit's routines follow
+  the rule; for a used unit the check stays lenient, so `F(1.5)` beside a
+  plain `F(D: Double)` of a used unit and the unit's own `F(X: Integer);
+  overload;` is not reported.
 
 ## 6.10 Inline assembly (`asm … end`)
 - where an asm body ends is decided by the preprocessor, which knows the

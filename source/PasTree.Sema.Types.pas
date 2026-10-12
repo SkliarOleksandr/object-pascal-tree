@@ -1072,6 +1072,7 @@ begin
   end;
 end;
 
+
 // Pick the best overload for typing/navigation; emit an arg-count diagnostic
 // only when it is unambiguous. Returns the chosen routine's result type.
 { The INTERFACE-section counterpart of an implementation-section routine head,
@@ -1102,8 +1103,9 @@ var
   LAnyFit, LAllHaveParams, LAnyVariadic, LVariadic: Boolean;
   LParams: TArray<Integer>;
   LP, LIfaceHead: Integer;
-  LTrailing: Boolean;
+  LTrailing, LAnyOverload: Boolean;
 begin
+  LAnyOverload := False;
   LArgs := ArgCount(ACall);
   LTrailing := TrailingSlot(ACall);
   LBest := AHead; LBestScore := -1;
@@ -1116,6 +1118,8 @@ begin
   begin
     if M.Symbols[LCand].Kind <> skRoutine then
       Break;
+    if M.RoutineSaysOverload(LCand) then
+      LAnyOverload := True;
     if M.Symbols[LCand].MemberScope = NIL_SCOPE then
       LAllHaveParams := False   // e.g. a builtin - no param info
     else
@@ -1178,9 +1182,14 @@ begin
   //    plain global routines. Probed: a global `Bar` beside an inherited
   //    `TBase.Bar(A: Integer)` used to report a false E2034 on `Bar(1)`,
   //    which dcc compiles.
+  //  - and no candidate says `overload`: the search then goes on past this
+  //    unit into System (6.3.1, 3.3.2 step 7), so a uses-less unit's own
+  //    `Pos(C: Char; const S: string; X, Y: Integer); overload;` leaves
+  //    System's `Pos('ab', 'xabc')` callable (dcc64 37.0, local/probe-b25
+  //    P4). Phase 1 has no System; CheckCalls measures such a set.
   var LGlobal := (M.Scopes[M.Symbols[AHead].Scope].Kind in
     [sckUnit, sckImplementation]) and (Length(M.UsesList) = 0) and
-    (M.EnclosingStructSym(ACall) = NIL_SYM);
+    (M.EnclosingStructSym(ACall) = NIL_SYM) and not LAnyOverload;
 
   // Deterministic arg-count diagnostic (independent of implicit rules).
   // Not on a list the parser cut short (`Foo(1, &4M4)` - ParseArgList adopts

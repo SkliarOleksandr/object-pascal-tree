@@ -1276,6 +1276,21 @@ type
       out AUnit, ASym: Integer): Boolean;
     function FindInSysInitUnit(const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
+    { The two above: ANameLower in the interface of the implicit unit AUid
+      (an EnsureSystemUnit / EnsureSysInitUnit result, < 0 when absent). }
+    function FindInImplicitUnit(AUid: Integer; const ANameLower: string;
+      out AUnit, ASym: Integer): Boolean;
+    { The routine heads named ANameLower that a bare call in AId may merge
+      with (6.3.1, `overload` across units): each resolved used unit's, in
+      `uses` order, then System's and SysInit's - the search order of 3.3.2
+      steps 6 and 7 - where AImplicitFrom is the index the implicit units'
+      start at. An implicit unit's routine is there only when it is
+      overloaded itself: System's plain `ParamStr(Index: Integer)` does not
+      join a unit's `ParamStr(A, B: Integer); overload;` (E2250, dcc64 37.0,
+      local/probe-b25 P6). CheckCalls' sweep and SelectCallTarget's
+      candidates both read it, so the two cannot see different sets. }
+    function BareRoutineHeads(AId: Integer; const ANameLower: string;
+      out AImplicitFrom: Integer): TArray<TPasExtRef>;
     function RoutineArity(AMid, ASym: Integer; out AReq, ATot: Integer;
       out AVariadic: Boolean): Boolean;
     // XDescent = xdYes: for a caller that acts on a proven descent only.
@@ -6638,24 +6653,8 @@ end;
 // AllUsesResolved-gated E2003 still applies exactly as before.
 function TPasSemaProject.FindInSystemUnit(const ANameLower: string;
   out AUnit, ASym: Integer): Boolean;
-var
-  LUid, LSym: Integer;
-  LUsed: TPasSemaModel;
 begin
-  Result := False;
-  LUid := EnsureSystemUnit;
-  if LUid < 0 then
-    Exit;
-  LUsed := FModels[LUid];
-  if LUsed.InterfaceScope = NIL_SCOPE then
-    Exit;
-  LSym := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
-  if LSym <> NIL_SYM then
-  begin
-    AUnit := LUid;
-    ASym := LSym;
-    Result := True;
-  end;
+  Result := FindInImplicitUnit(EnsureSystemUnit, ANameLower, AUnit, ASym);
 end;
 
 // Companion to FindInSystemUnit for the OTHER implicit unit (see
@@ -6663,24 +6662,86 @@ end;
 // CrossResolve, so a miss here changes nothing either.
 function TPasSemaProject.FindInSysInitUnit(const ANameLower: string;
   out AUnit, ASym: Integer): Boolean;
+begin
+  Result := FindInImplicitUnit(EnsureSysInitUnit, ANameLower, AUnit, ASym);
+end;
+
+function TPasSemaProject.FindInImplicitUnit(AUid: Integer;
+  const ANameLower: string; out AUnit, ASym: Integer): Boolean;
 var
-  LUid, LSym: Integer;
+  LSym: Integer;
   LUsed: TPasSemaModel;
 begin
   Result := False;
-  LUid := EnsureSysInitUnit;
-  if LUid < 0 then
+  if AUid < 0 then
     Exit;
-  LUsed := FModels[LUid];
+  LUsed := FModels[AUid];
   if LUsed.InterfaceScope = NIL_SCOPE then
     Exit;
   LSym := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
   if LSym <> NIL_SYM then
   begin
-    AUnit := LUid;
+    AUnit := AUid;
     ASym := LSym;
     Result := True;
   end;
+end;
+
+function TPasSemaProject.BareRoutineHeads(AId: Integer;
+  const ANameLower: string; out AImplicitFrom: Integer): TArray<TPasExtRef>;
+var
+  LModel: TPasSemaModel;
+  LUid, LS: Integer;
+
+  function ImplicitOverload(AMid, ASym: Integer): Boolean;
+  begin
+    Result := (FModels[AMid].Symbols[ASym].Kind = skRoutine) and
+      ((FModels[AMid].Symbols[ASym].NextOverload <> NIL_SYM) or
+       FModels[AMid].Demoted or FModels[AMid].RoutineSaysOverload(ASym));
+  end;
+
+  procedure Add(AMid, ASym: Integer);
+  var
+    LRef: TPasExtRef;
+  begin
+    if (AMid = AId) or (FModels[AMid].Symbols[ASym].Kind <> skRoutine) then
+      Exit;
+    for var LHad in Result do
+      if LHad.UnitId = AMid then
+        Exit;   // a unit named in `uses` and implicit too
+    LRef.UnitId := AMid;
+    LRef.Sym := ASym;
+    Result := Result + [LRef];
+  end;
+
+begin
+  Result := nil;
+  LModel := FModels[AId];
+  for var LIdx := 0 to High(LModel.UsesList) do
+  begin
+    LUid := LModel.UsesList[LIdx].UnitId;
+    if (LUid < 0) or (FModels[LUid].InterfaceScope = NIL_SCOPE) then
+      Continue;
+    LS := FModels[LUid].Resolve(FModels[LUid].InterfaceScope, ANameLower);
+    if LS <> NIL_SYM then
+      Add(LUid, LS);
+  end;
+  // The implicit units close the search (3.3.2 step 7), so a used unit's or
+  // the unit's own `overload` of a System routine merges with System's set:
+  // `Pos(C: Char; const S: string; X, Y: Integer); overload;` beside
+  // System's `Pos(const SubStr, Str: string; Offset: Integer = 1)` leaves
+  // `Pos('ab', 'xabc')` compiling (dcc64 37.0, local/probe-b25 P3, P4).
+  // Without them every call meaning System's overload was a false E2035.
+  // Overloaded = a chain of two or more, which dcc allows only with the
+  // directive, or a single routine saying it; a demoted unit keeps no tree
+  // to read the directive from and joins (more candidates only make the
+  // check more lenient).
+  AImplicitFrom := Length(Result);
+  if FindInSystemUnit(ANameLower, LUid, LS) and ImplicitOverload(LUid, LS) then
+    Add(LUid, LS);
+  if FindInSysInitUnit(ANameLower, LUid, LS) and
+     ImplicitOverload(LUid, LS) then
+    Add(LUid, LS);
 end;
 
 // ANode is an attribute usage's TypeRef (`[Unsafe]` in `[Unsafe] FField:
@@ -7319,12 +7380,17 @@ type
   TSweep = record
     Skip: Boolean;                 // a candidate had no param info -> bail
     Arities: TArray<TCallArity>;
+    // Arities[ImplicitFrom..] are System's and SysInit's, which join only a
+    // set that says `overload` (6.3.1) - Overload: a used unit's does.
+    ImplicitFrom: Integer;
+    Overload: Boolean;
   end;
 var
   LModel: TPasSemaModel;
   LNode, LCallee, LArg, LArgCount, LLocalHead, LUid, LS, LIdx: Integer;
   LMinReq, LMaxTot, LStruct: Integer;
   LAnyFit, LAnyVariadic, LHaveAny, LSkip, LTrailing: Boolean;
+  LNoUses, LAnyOverload: Boolean;
   LName: string;
   LExt: TPasExtRef;
   // The uses-sweep result depends only on the callee NAME (the uses list is
@@ -7350,6 +7416,8 @@ var
     begin
       if FModels[AMid].Symbols[LCand].Kind <> skRoutine then
         Break;
+      if FModels[AMid].RoutineSaysOverload(LCand) then
+        LAnyOverload := True;
       if not RoutineArity(AMid, LCand, LReq, LTot, LVariadic) then
       begin
         LSkip := True;   // a candidate with no param info (builtin) -> bail
@@ -7397,30 +7465,47 @@ var
 
   function SweepFor(const AName: string): TSweep;
   var
-    LI, LUnit, LHead, LCount: Integer;
+    LCount, LFrom: Integer;
+    LHeads: TArray<TPasExtRef>;
   begin
     Result.Skip := False;
     Result.Arities := nil;
+    Result.Overload := False;
+    Result.ImplicitFrom := 0;
     LCount := 0;
-    for LI := 0 to High(LModel.UsesList) do
+    LHeads := BareRoutineHeads(AId, AName, LFrom);
+    for var LIdx := 0 to High(LHeads) do
     begin
-      LUnit := LModel.UsesList[LI].UnitId;
-      if LUnit < 0 then
-        Continue;
-      LHead := FModels[LUnit].Resolve(FModels[LUnit].InterfaceScope, AName);
-      if (LHead <> NIL_SYM) and
-         (FModels[LUnit].Symbols[LHead].Kind = skRoutine) then
-        Gather(LUnit, LHead, Result, LCount);
+      if LIdx = LFrom then
+        Result.ImplicitFrom := LCount;
+      if LIdx < LFrom then
+      begin
+        var LCand := LHeads[LIdx].Sym;
+        while (LCand <> NIL_SYM) and not Result.Overload do
+        begin
+          Result.Overload :=
+            FModels[LHeads[LIdx].UnitId].RoutineSaysOverload(LCand);
+          LCand := FModels[LHeads[LIdx].UnitId].Symbols[LCand].NextOverload;
+        end;
+      end;
+      Gather(LHeads[LIdx].UnitId, LHeads[LIdx].Sym, Result, LCount);
       if Result.Skip then
         Break;
     end;
+    if LFrom >= Length(LHeads) then
+      Result.ImplicitFrom := LCount;
     SetLength(Result.Arities, LCount);
   end;
 
 begin
   LModel := FModels[AId];
-  if (Length(LModel.UsesList) = 0) or not LModel.AllUsesResolved then
+  if not LModel.AllUsesResolved then
     Exit;
+  // A unit with no `uses` still sees System and SysInit. The Phase-1 typer
+  // measures its calls (TPasSemaTyper.SelectOverload) except a set that says
+  // `overload` - that one may merge with System's routines (6.3.1), and is
+  // measured here, against them.
+  LNoUses := Length(LModel.UsesList) = 0;
 
   LSweeps := nil;
   LNamePool.Clear;   // a local record: FCount is not initialized
@@ -7465,6 +7550,7 @@ begin
 
     LMinReq := MaxInt; LMaxTot := -1;
     LAnyFit := False; LAnyVariadic := False; LHaveAny := False; LSkip := False;
+    LAnyOverload := False;
 
     // Local global-routine overloads.
     if (LLocalHead <> NIL_SYM) and (LModel.Symbols[LLocalHead].Kind = skRoutine)
@@ -7490,6 +7576,8 @@ begin
           Consider(AId, LS);
       end;
     end;
+    if LNoUses and not LAnyOverload then
+      Continue;   // Phase 1's call (see LNoUses)
 
     // Same-named routines from every resolved used unit - through the
     // per-name cache (see LSweeps above).
@@ -7509,6 +7597,9 @@ begin
       else
         for LIdx := 0 to High(LSweep.Arities) do
         begin
+          if (LIdx >= LSweep.ImplicitFrom) and not LAnyOverload and
+             not LSweep.Overload then
+            Break;
           LHaveAny := True;
           if LSweep.Arities[LIdx].Variadic then
             LAnyVariadic := True;
@@ -10829,28 +10920,15 @@ var
     end;
   end;
 
-  // Same-named routine heads from every resolved used unit (memoized).
+  // Same-named routine heads from every resolved used unit, System and
+  // SysInit (memoized).
   function UsesHeads(const ANameLower: string): TArray<TPasExtRef>;
   var
-    LIdx, LUid, LS: Integer;
-    LRef: TPasExtRef;
+    LFrom: Integer;
   begin
     if LUsesHeads.TryGetValue(ANameLower, Result) then
       Exit;
-    Result := nil;
-    for LIdx := 0 to High(LM.UsesList) do
-    begin
-      LUid := LM.UsesList[LIdx].UnitId;
-      if LUid < 0 then
-        Continue;
-      LS := FModels[LUid].Resolve(FModels[LUid].InterfaceScope, ANameLower);
-      if (LS <> NIL_SYM) and (FModels[LUid].Symbols[LS].Kind = skRoutine) then
-      begin
-        LRef.UnitId := LUid;
-        LRef.Sym := LS;
-        Result := Result + [LRef];
-      end;
-    end;
+    Result := BareRoutineHeads(AId, ANameLower, LFrom);
     LUsesHeads.Add(ANameLower, Result);
   end;
 

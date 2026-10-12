@@ -766,6 +766,10 @@ type
       on a demoted model, from the snapshot DemoteText took. rhNone for a
       symbol that is not a routine or has no routine node. }
     function RoutineHead(ASym: Integer): TPasRoutineHead;
+    { ASym, a routine, carries `overload` on its declaration or on the header
+      its parameters live under (an implementation may leave it off). False
+      on a demoted model, which keeps no tree to read it from. }
+    function RoutineSaysOverload(ASym: Integer): Boolean;
     { Stage 2 of the release: snapshots RoutineHead for every routine symbol
       and the stream identity counts, then frees the whole text layer
       (Visible + per-file Source/Tokens/LineStarts). See the Demoted field. }
@@ -2335,6 +2339,37 @@ begin
   // TryGetValue writes Default = 0 on a miss, and 0 is a real symbol index.
   else if not AnonStructSyms.TryGetValue(ANode, Result) then
     Result := NIL_SYM;
+end;
+
+function TPasSemaModel.RoutineSaysOverload(ASym: Integer): Boolean;
+
+  function OnRoutine(ANode: Integer): Boolean;
+  var
+    LChild: Integer;
+  begin
+    Result := False;
+    while (ANode <> NIL_NODE) and (Tree.Nodes[ANode].Kind <> nkRoutine) do
+      ANode := Tree.Nodes[ANode].Parent;
+    if ANode = NIL_NODE then
+      Exit;
+    LChild := Tree.Nodes[ANode].FirstChild;
+    while LChild <> NIL_NODE do
+    begin
+      if (Tree.Nodes[LChild].Kind = nkDirective) and
+         Tree.NodeTextEquals(LChild, 'overload') then
+        Exit(True);
+      LChild := Tree.Nodes[LChild].NextSibling;
+    end;
+  end;
+
+begin
+  Result := False;
+  if (ASym < 0) or (ASym >= SymCount) or Demoted or
+     (Symbols[ASym].Kind <> skRoutine) then
+    Exit;
+  Result := OnRoutine(Symbols[ASym].DeclNode) or
+    ((Symbols[ASym].MemberScope <> NIL_SCOPE) and
+     OnRoutine(Scopes[Symbols[ASym].MemberScope].OwnerNode));
 end;
 
 function TPasSemaModel.RoutineHead(ASym: Integer): TPasRoutineHead;
