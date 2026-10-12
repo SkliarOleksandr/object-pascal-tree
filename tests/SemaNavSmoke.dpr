@@ -3178,6 +3178,20 @@ begin
     end;
 end;
 
+// A rename plan's AInactive as `File.pas:line:col` joined by spaces, in the
+// order given.
+function InactiveText(const AInactive: TArray<TPasInactiveUse>): string;
+begin
+  Result := '';
+  for var LU in AInactive do
+  begin
+    if Result <> '' then
+      Result := Result + ' ';
+    Result := Result + Format('%s:%d:%d', [TPath.GetFileName(LU.FilePath),
+      LU.Line, LU.Col]);
+  end;
+end;
+
 // One rename edit at an exact position, with the preview line and the
 // highlight span it claims for the NEW name.
 function HasEdit(const AEdits: TArray<TPasRenameEdit>; const AFile: string;
@@ -4395,43 +4409,64 @@ begin
           '  IFamG = interface [SID_G] end;', 21, 26));
 
       // ---- Names in code the defines leave out (UNIT_IFD, audit G6) ----
+      // The plan of the live uses goes through, and the dead-branch places
+      // are AInactive's - listed, never a refusal (a refusal left the user
+      // the whole rename to do by hand; see PlanRename).
+      var LInact: TArray<TPasInactiveUse>;
       LMidFam := GNav.ModelIdOf(TPath.Combine(LDir, 'NavIfd.pas'));
       GNav.SymbolAt(LMidFam, 4, 11, {out} LRTMid, {out} LRSym, {out} LRName);
-      Ok('inactive: Hidden, called in a dead branch, refused',
+      Ok('inactive: Hidden planned, its dead-branch call listed',
         SameText(LRName, 'Hidden') and
-        not GNav.PlanRename(LRTMid, LRSym, 'Hid', {out} LEdits, {out} LErr) and
-        (Length(LEdits) = 0) and (Pos('NavIfd.pas line 17', LErr) > 0));
+        GNav.PlanRename(LRTMid, LRSym, 'Hid', {out} LEdits, {out} LCarried,
+          {out} LFamily, {out} LInact, {out} LErr) and
+        (EditLines(LEdits, 'NavIfd.pas') = '4,8') and
+        (InactiveText(LInact) = 'NavIfd.pas:17:3') and
+        (Pos('Hidden;', LInact[0].LineText) > 0));
+      Ok('inactive: the overload without AInactive plans the same',
+        GNav.PlanRename(LRTMid, LRSym, 'Hid', {out} LEdits, {out} LErr) and
+        (EditLines(LEdits, 'NavIfd.pas') = '4,8'));
       GNav.SymbolAt(LMidFam, 3, 11, {out} LRTMid, {out} LRSym, {out} LRName);
-      Ok('inactive: Shown, only in live code, renamed',
+      Ok('inactive: Shown, only in live code, nothing listed',
         SameText(LRName, 'Shown') and
-        GNav.PlanRename(LRTMid, LRSym, 'Seen', {out} LEdits, {out} LErr) and
-        (EditLines(LEdits, 'NavIfd.pas') = '3,7,20'));
+        GNav.PlanRename(LRTMid, LRSym, 'Seen', {out} LEdits, {out} LCarried,
+          {out} LFamily, {out} LInact, {out} LErr) and
+        (EditLines(LEdits, 'NavIfd.pas') = '3,7,20') and (Length(LInact) = 0));
       GNav.SymbolAt(LMidFam, 5, 11, {out} LRTMid, {out} LRSym, {out} LRName);
-      Ok('inactive: Far, written in a dead branch of a using unit, refused',
+      Ok('inactive: Far, written in a dead branch of a using unit, listed',
         SameText(LRName, 'Far') and
-        not GNav.PlanRename(LRTMid, LRSym, 'Near', {out} LEdits, {out} LErr) and
-        (Pos('NavIfdU.pas line 7', LErr) > 0));
+        GNav.PlanRename(LRTMid, LRSym, 'Near', {out} LEdits, {out} LCarried,
+          {out} LFamily, {out} LInact, {out} LErr) and
+        (EditLines(LEdits, 'NavIfd.pas') = '5,9') and
+        (EditLines(LEdits, 'NavIfdU.pas') = '') and
+        (InactiveText(LInact) = 'NavIfdU.pas:7:10'));
       GNav.SymbolAt(LMidFam, 12, 3, {out} LRTMid, {out} LRSym, {out} LRName);
-      Ok('inactive: a local written in its routine''s dead branch, refused',
+      Ok('inactive: a local written in its routine''s dead branch, listed',
         SameText(LRName, 'Loc') and
-        not GNav.PlanRename(LRTMid, LRSym, 'Spot', {out} LEdits, {out} LErr) and
-        (Pos('NavIfd.pas line 18', LErr) > 0));
+        GNav.PlanRename(LRTMid, LRSym, 'Spot', {out} LEdits, {out} LCarried,
+          {out} LFamily, {out} LInact, {out} LErr) and
+        (EditLines(LEdits, 'NavIfd.pas') = '12,14') and
+        (InactiveText(LInact) = 'NavIfd.pas:18:3'));
       GNav.SymbolAt(LMidFam, 12, 8, {out} LRTMid, {out} LRSym, {out} LRName);
       Ok('inactive: a local whose namesake is in ANOTHER routine''s dead ' +
-        'branch, renamed',
+        'branch, nothing listed',
         SameText(LRName, 'Other') and
-        GNav.PlanRename(LRTMid, LRSym, 'Rest', {out} LEdits, {out} LErr) and
-        (EditLines(LEdits, 'NavIfd.pas') = '12,15'));
+        GNav.PlanRename(LRTMid, LRSym, 'Rest', {out} LEdits, {out} LCarried,
+          {out} LFamily, {out} LInact, {out} LErr) and
+        (EditLines(LEdits, 'NavIfd.pas') = '12,15') and (Length(LInact) = 0));
       GNav.SymbolAt(LMidFam, 24, 3, {out} LRTMid, {out} LRSym, {out} LRName);
-      Ok('inactive: ...and that namesake itself refused',
+      Ok('inactive: ...and that namesake''s own dead line listed',
         SameText(LRName, 'Other') and
-        not GNav.PlanRename(LRTMid, LRSym, 'Rest', {out} LEdits, {out} LErr) and
-        (Pos('NavIfd.pas line 28', LErr) > 0));
+        GNav.PlanRename(LRTMid, LRSym, 'Rest', {out} LEdits, {out} LCarried,
+          {out} LFamily, {out} LInact, {out} LErr) and
+        (EditLines(LEdits, 'NavIfd.pas') = '24,26') and
+        (InactiveText(LInact) = 'NavIfd.pas:28:3'));
       var LIfdFile: string;
-      Ok('inactive: a unit named in a dead branch - its rename refused',
-        not GNav.PlanUnitRename(LMidFam, 'NavIfdX', {out} LEdits,
-          {out} LIfdFile, {out} LErr) and (Length(LEdits) = 0) and
-        (Pos('NavIfdU.pas line 7', LErr) > 0));
+      Ok('inactive: a unit named in a dead branch - planned, the line listed',
+        GNav.PlanUnitRename(LMidFam, 'NavIfdX', {out} LEdits,
+          {out} LIfdFile, {out} LInact, {out} LErr) and
+        (EditLines(LEdits, 'NavIfd.pas') = '1') and
+        (EditLines(LEdits, 'NavIfdU.pas') = '4') and
+        (InactiveText(LInact) = 'NavIfdU.pas:7:3'));
 
       // ---- A demoted unit changed on disk (audit B2-23) ----
       // NavB's `var GT: TThing` cannot be read back once NavB.pas changed:

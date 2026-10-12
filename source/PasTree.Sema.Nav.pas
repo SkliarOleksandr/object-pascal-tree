@@ -147,6 +147,15 @@ type
     FormProp: string;
   end;
 
+  { A rename's old name written as an identifier in code a conditional
+    directive leaves out (PlanRename's AInactive): not resolved - it may be
+    a namesake - and not edited; the host shows it to be checked by hand. }
+  TPasInactiveUse = record
+    FilePath: string;
+    Line, Col: Integer;      // 1-based, of the identifier
+    LineText: string;        // the line as it reads, for a host's display
+  end;
+
   { A rename PlanRename CARRIED ALONG with the one it was asked for: a
     handler named after a renamed component - Button1Click on Button1's
     OnClick becomes OKButtonClick when Button1 becomes OKButton - which is
@@ -522,12 +531,12 @@ type
     // The rename plans' refusal when a model failed to rehydrate since
     // AFailsBefore (TPasSemaProject.HydrateFailures); '' when none did.
     function HydrateRefusal(AFailsBefore: Integer): string;
-    // The rename plans' refusal when AName is written as an identifier in
-    // a conditional branch the defines leave out, in one of AMids (only
-    // inside the spans of ASpans' nodes for a model listed there); ''
-    // when it is not.
-    function InactiveUseRefusal(const AMids: TArray<Integer>;
-      const AName: string; const ASpans: TArray<TPasExtRef>): string;
+    // Where AName is written as an identifier in a conditional branch the
+    // defines leave out, in one of AMids (only inside the spans of ASpans'
+    // nodes for a model listed there) - the rename plans' AInactive.
+    function InactiveUses(const AMids: TArray<Integer>;
+      const AName: string;
+      const ASpans: TArray<TPasExtRef>): TArray<TPasInactiveUse>;
   public
     { LIFETIME: a navigator serves ONE state of AProject's models. It keeps
       per-model caches (token and node maps, pairing keys), the form
@@ -644,7 +653,25 @@ type
       beyond the form-file collisions above - and it does not touch files: a
       host applies the edits and re-analyzes.
       Renaming a UNIT is not this API either (that is a file rename plus
-      every `uses` clause - see FindUnitReferences). }
+      every `uses` clause - see FindUnitReferences).
+
+      Code a conditional directive leaves out is read by no analysis, so
+      the plan holds no edit there. AInactive lists every place the old
+      name is WRITTEN there as an identifier where the symbol can be seen
+      from (editor-features 3.9c): a use left on the old name compiles under
+      these defines and breaks under the others, so a host shows them for
+      the user to fix by hand. The overloads without AInactive drop the list.
+
+      THEY DO NOT REFUSE THE PLAN - on purpose; do not "fix" this back.
+      0.97.0 (audit G6) refused the whole rename at the first such line,
+      and that helped nobody: the user who asked for a rename still wants
+      it, and a refusal leaves them doing every edit by hand, the live ones
+      included, with one dead line named out of many. The plan of the live
+      uses plus the list of dead lines to check is the most that can be
+      known, and all of it reaches the user (Alex's call, 2026-10-12, after
+      pastree-mcp's rename_plan was turned into a one-line refusal by it).
+      What still refuses is what makes the LIVE plan incomplete - a unit
+      whose text cannot be read back (HydrateRefusal). }
     function PlanRename(ATMid, ASym: Integer; const ANewName: string;
       out AEdits: TArray<TPasRenameEdit>; out AError: string): Boolean;
       overload;
@@ -656,6 +683,12 @@ type
       out AEdits: TArray<TPasRenameEdit>;
       out ACarried: TArray<TPasCarriedRename>;
       out AFamily: TArray<TPasRenameFamilyMember>;
+      out AError: string): Boolean; overload;
+    function PlanRename(ATMid, ASym: Integer; const ANewName: string;
+      out AEdits: TArray<TPasRenameEdit>;
+      out ACarried: TArray<TPasCarriedRename>;
+      out AFamily: TArray<TPasRenameFamilyMember>;
+      out AInactive: TArray<TPasInactiveUse>;
       out AError: string): Boolean; overload;
     { Where (ATMid, ASym) lives in the project's form files - see
       TPasFormRole. For a host that must know which form's live designer owns
@@ -697,10 +730,16 @@ type
       at a name that no longer exists produces a build break, which is the
       one outcome worse than doing nothing. The same all-or-nothing rule
       covers an off-limits file among the ones the plan would rewrite (see
-      RenameBlockReason). }
+      RenameBlockReason). The unit's name written in a branch the defines
+      leave out - a conditional `uses` item, a qualifier - in any unit the
+      plan may write is AInactive's, as for PlanRename. }
     function PlanUnitRename(ATargetMid: Integer; const ANewName: string;
       out AEdits: TArray<TPasRenameEdit>; out ARequiredFileName: string;
-      out AError: string): Boolean;
+      out AError: string): Boolean; overload;
+    function PlanUnitRename(ATargetMid: Integer; const ANewName: string;
+      out AEdits: TArray<TPasRenameEdit>; out ARequiredFileName: string;
+      out AInactive: TArray<TPasInactiveUse>;
+      out AError: string): Boolean; overload;
     { Directories whose sources a rename must never touch - the INSTALLED
       library trees (RTL/VCL/third-party), as absolute paths; a file anywhere
       UNDER one of them is off limits, subdirectories included. Empty by
@@ -6374,18 +6413,24 @@ end;
   old name in such a branch compiles under these defines and breaks under
   the others (E2003 with dcc64 -D of the branch's symbol, or on another
   platform: audit G6). What can be told is whether the name is WRITTEN
-  there as an identifier: if it is, the plan is refused, naming the line.
-  The token scan sees identifiers only (not comments or strings) and reads
-  no meaning into them - a same-named local in a dead branch refuses too,
-  which is the honest answer when nothing can tell them apart. ASpans (a
-  model and a node, Sym holding the node) limits a model to that node's
-  source - a routine's locals are visible nowhere else. A demoted model is
-  hydrated only when it has a skipped region at all (Skipped survives the
-  demotion); one that cannot be is HydrateRefusal's to report. }
-function TPasNavigator.InactiveUseRefusal(const AMids: TArray<Integer>;
-  const AName: string; const ASpans: TArray<TPasExtRef>): string;
+  there as an identifier: every such place is listed for the host to show
+  beside the plan - listed, not refused (see PlanRename: a refusal left the
+  user with the whole rename to do by hand). The token scan sees
+  identifiers only (not comments or strings) and reads no meaning into
+  them - a same-named local in a dead branch is listed too, which is the
+  honest answer when nothing can tell them apart. ASpans (a model and a
+  node, Sym holding the node) limits a model to that node's source - a
+  routine's locals are visible nowhere else. A demoted model is hydrated
+  only when it has a skipped region at all (Skipped survives the
+  demotion); one that cannot be is HydrateRefusal's to report. An include
+  file read by several models is listed once. }
+function TPasNavigator.InactiveUses(const AMids: TArray<Integer>;
+  const AName: string;
+  const ASpans: TArray<TPasExtRef>): TArray<TPasInactiveUse>;
 var
   LSeen: TDictionary<Integer, Boolean>;
+  LPlaces: TDictionary<string, Boolean>;
+  LUse: TPasInactiveUse;
   LM: TPasSemaModel;
   LAny, LLimited: Boolean;
   LText: string;
@@ -6418,9 +6463,11 @@ var
   end;
 
 begin
-  Result := '';
+  Result := nil;
+  LPlaces := nil;
   LSeen := TDictionary<Integer, Boolean>.Create;
   try
+    LPlaces := TDictionary<string, Boolean>.Create;
     for var LMid in AMids do
     begin
       if (LMid < 0) or (LMid >= FProj.ModelCount) or
@@ -6474,13 +6521,15 @@ begin
               begin
                 LM.Tree.Source.Files[LF].OffsetToLineCol(
                   LM.Tree.Source.Files[LF].Tokens[LTok].Start, LLine, LCol);
-                Exit(Format('"%s" is written in code a conditional ' +
-                  'directive leaves out - %s line %d - which no analysis ' +
-                  'reads: the plan cannot tell whether it names this ' +
-                  'symbol, and a use left on the old name breaks the build ' +
-                  'under the other defines; rename refused, nothing ' +
-                  'planned.', [AName,
-                  TPath.GetFileName(LM.Tree.Source.FileNames[LF]), LLine]));
+                LUse.FilePath := LM.Tree.Source.FileNames[LF];
+                LUse.Line := LLine;
+                LUse.Col := LCol;
+                if LPlaces.TryAdd(Format('%s:%d:%d', [LowerCase(LUse.FilePath),
+                   LLine, LCol]), True) then
+                begin
+                  LUse.LineText := LM.Tree.Source.Files[LF].LineText(LLine);
+                  Result := Result + [LUse];
+                end;
               end;
             end;
             Inc(LTok);
@@ -6488,6 +6537,7 @@ begin
         end;
     end;
   finally
+    LPlaces.Free;
     LSeen.Free;
   end;
 end;
@@ -6569,6 +6619,17 @@ end;
 function TPasNavigator.PlanUnitRename(ATargetMid: Integer;
   const ANewName: string; out AEdits: TArray<TPasRenameEdit>;
   out ARequiredFileName: string; out AError: string): Boolean;
+var
+  LInactive: TArray<TPasInactiveUse>;
+begin
+  Result := PlanUnitRename(ATargetMid, ANewName, AEdits, ARequiredFileName,
+    LInactive, AError);
+end;
+
+function TPasNavigator.PlanUnitRename(ATargetMid: Integer;
+  const ANewName: string; out AEdits: TArray<TPasRenameEdit>;
+  out ARequiredFileName: string; out AInactive: TArray<TPasInactiveUse>;
+  out AError: string): Boolean;
 var
   LM: TPasSemaModel;
   LList: TList<TPasRenameEdit>;
@@ -6846,10 +6907,10 @@ begin
     ARequiredFileName := '';
   // The name in a branch the defines leave out - a conditional `uses`
   // item, a qualifier - in any unit a rename may write (audit G6; see
-  // InactiveUseRefusal): only models with a skipped region are looked at,
-  // before the file gate, which stats the file. Then a referring unit whose
-  // text could not be read back gave no edit: its uses would stay on the
-  // old name (HydrateRefusal).
+  // InactiveUses): listed, not refused (PlanRename says why). Only models
+  // with a skipped region are looked at, before the file gate, which stats
+  // the file. Then a referring unit whose text could not be read back gave
+  // no edit: its uses would stay on the old name (HydrateRefusal).
   var LScan: TArray<Integer> := nil;
   for LMi := 0 to FProj.ModelCount - 1 do
     for var LSk in FProj.Model(LMi).Tree.Source.Skipped do
@@ -6859,12 +6920,12 @@ begin
           LScan := LScan + [LMi];
         Break;
       end;
-  AError := InactiveUseRefusal(LScan, LOldLeaf, nil);
-  if AError = '' then
-    AError := HydrateRefusal(LFails);
+  AInactive := InactiveUses(LScan, LOldLeaf, nil);
+  AError := HydrateRefusal(LFails);
   if AError <> '' then
   begin
     AEdits := nil;
+    AInactive := nil;
     ARequiredFileName := '';
     Exit;
   end;
@@ -7397,6 +7458,18 @@ function TPasNavigator.PlanRename(ATMid, ASym: Integer;
   out ACarried: TArray<TPasCarriedRename>;
   out AFamily: TArray<TPasRenameFamilyMember>; out AError: string): Boolean;
 var
+  LInactive: TArray<TPasInactiveUse>;
+begin
+  Result := PlanRename(ATMid, ASym, ANewName, AEdits, ACarried, AFamily,
+    LInactive, AError);
+end;
+
+function TPasNavigator.PlanRename(ATMid, ASym: Integer;
+  const ANewName: string; out AEdits: TArray<TPasRenameEdit>;
+  out ACarried: TArray<TPasCarriedRename>;
+  out AFamily: TArray<TPasRenameFamilyMember>;
+  out AInactive: TArray<TPasInactiveUse>; out AError: string): Boolean;
+var
   LDecl: TPasRefHit;
   LFamSites: TArray<TArray<TPasFormSite>>;
   LTogether: TArray<TPasExtRef>;
@@ -7831,14 +7904,15 @@ begin
       if LArr[LIdx].FormKind = fskNone then
         LMids := LMids + [ModelIdOf(LArr[LIdx].FilePath)];
   end;
-  AError := InactiveUseRefusal(LMids, FProj.Model(ATMid).Symbols[ASym].Name,
+  // Listed beside the plan, never a refusal (see the PlanRename comment).
+  AInactive := InactiveUses(LMids, FProj.Model(ATMid).Symbols[ASym].Name,
     LSpans);
-  if AError = '' then
-    AError := HydrateRefusal(LFails);
+  AError := HydrateRefusal(LFails);
   if AError <> '' then
   begin
     ACarried := nil;
     AFamily := nil;
+    AInactive := nil;
     Exit;
   end;
   AEdits := LArr;

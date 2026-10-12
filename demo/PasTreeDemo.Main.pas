@@ -1977,8 +1977,11 @@ var
   LTMid, LSym: Integer;
   LName, LNewName, LError, LFileName: string;
   LEdits: TArray<TPasRenameEdit>;
+  LCarried: TArray<TPasCarriedRename>;
+  LFamily: TArray<TPasRenameFamilyMember>;
+  LInactive: TArray<TPasInactiveUse>;
   LIsUnit: Boolean;
-  LKind: string;
+  LKind, LDead: string;
 begin
   // A symbol first, a UNIT second (the caret is on a `uses` item or on this
   // file's own header name) - the same two targets Find References offers,
@@ -2003,7 +2006,7 @@ begin
   if LIsUnit then
   begin
     if not FNav.PlanUnitRename(LTMid, LNewName, {out} LEdits,
-      {out} LFileName, {out} LError) then
+      {out} LFileName, {out} LInactive, {out} LError) then
     begin
       if LError <> '' then
         MessageDlg(LError, mtWarning, [mbOK], 0);
@@ -2011,7 +2014,7 @@ begin
     end;
   end
   else if not FNav.PlanRename(LTMid, LSym, LNewName, {out} LEdits,
-    {out} LError) then
+    {out} LCarried, {out} LFamily, {out} LInactive, {out} LError) then
   begin
     if LError <> '' then
       MessageDlg(LError, mtWarning, [mbOK], 0);
@@ -2020,6 +2023,23 @@ begin
   if not ApplyRenameEdits(LEdits, LNewName) then
     Exit;
   ShowRenameTab(LTMid, LSym, LName, LNewName, LEdits);
+  // The old name written in branches these defines leave out: not renamed
+  // (nothing there is analyzed), so said, for the user to fix by hand - the
+  // rename itself is never refused for them (PlanRename says why).
+  if Length(LInactive) > 0 then
+  begin
+    LDead := '';
+    for var LIdx := 0 to Min(High(LInactive), 19) do
+      LDead := LDead + Format(#13#10'%s:%d  %s', [TPath.GetFileName(
+        LInactive[LIdx].FilePath), LInactive[LIdx].Line,
+        Trim(LInactive[LIdx].LineText)]);
+    if Length(LInactive) > 20 then
+      LDead := LDead + Format(#13#10'... %d more', [Length(LInactive) - 20]);
+    MessageDlg(Format('''%s'' is also written in %d place(s) of code a ' +
+      'conditional directive leaves out. They were NOT renamed - check them ' +
+      'by hand, or the build under the other defines breaks:%s',
+      [LName, Length(LInactive), LDead]), mtWarning, [mbOK], 0);
+  end;
   // A program's, library's or package's name ties no file (LFileName '').
   if LIsUnit and (LFileName <> '') then
     // Object Pascal ties a unit's name to its file name, and this demo

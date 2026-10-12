@@ -208,7 +208,7 @@ identifier class does here:
 | 13e | A METHOD tied to others by name: a virtual slot, an interface method and its implementations, a hiding namesake calling it by a bare `inherited;` - from any of them | the whole family, each with its uses and form lines, listed in `AFamily`; refused whole for an overloaded name in the family, a slot whose root has no source, a member in a library | OK (0.86.0 - 3.9b) |
 | 14 | Name-collision detection at an edit site | - | GAP (deliberate - see 3.5; form-file collisions ARE checked, 3.9a) |
 | 15 | Identifier inside an opened `$I` include file | - | GAP (`IdentAt` is main-file-only, same limit go-to-declaration has) |
-| 15a | A name also WRITTEN in a branch a conditional directive leaves out, where the symbol can be seen from | nothing - refused whole, naming the file and line | OK (by design, 0.97.0 - 3.9c; before, the plan went through and broke the build under the other defines) |
+| 15a | A name also WRITTEN in a branch a conditional directive leaves out, where the symbol can be seen from | the plan of the live uses, and every such place in `AInactive` for the host to show (file, line, column, the line) | OK (0.98.0 - 3.9c; 0.97.0 refused the whole plan at the first place, which left the user the rename to do by hand; before 0.97.0 the places were not said at all) |
 | 15b | A name used in a unit whose file changed on disk since the analysis (a demoted unit that cannot rehydrate) | nothing - refused whole, naming the file | OK (0.97.0 - 3.9c; before, that unit's uses were silently left out) |
 | 15c | A constant named in an interface's GUID clause (`[SID_IFoo]`) | the clause too, as a use | OK |
 
@@ -477,20 +477,35 @@ identifier class does here:
     method resolution clause (`procedure IBar.Baz = MyBaz;`), a delegated
     implementation (`implements`) - as in §5.
 
-3.9c **What a plan cannot read refuses it** (0.97.0). Both rename plans
-    build on searches that skip what they cannot read - right for a list,
-    a partial rename for a plan:
-    - *Code a conditional directive leaves out.* No analysis reads a dead
-      `$IFDEF` branch, and a use left there on the old name compiles under
-      these defines and breaks under the others. If the old name is written
-      there as an IDENTIFIER (comments and strings do not count) where the
-      symbol can be seen from, the plan is refused, naming the file and line
-      (`InactiveUseRefusal`): a routine's local inside its routine, an
-      implementation-section name in its unit, an interface name - a method
-      family's included - in its unit and every unit using it; a unit's name
-      in any unit a rename may write. The token is not resolved, so a
-      same-named identifier in a dead branch refuses as well: nothing here
-      can tell the two apart, and the user can.
+3.9c **What a plan cannot read** (0.97.0, the dead-branch half reworked
+    in 0.98.0). Both rename plans build on searches that skip what they
+    cannot read - right for a list, a partial rename for a plan:
+    - *Code a conditional directive leaves out - listed, not refused.* No
+      analysis reads a dead `$IFDEF` branch, and a use left there on the old
+      name compiles under these defines and breaks under the others. Every
+      place the old name is written there as an IDENTIFIER (comments and
+      strings do not count) where the symbol can be seen from is returned
+      beside the plan as `AInactive` (`TPasInactiveUse`: file, line, column,
+      the line's text; `InactiveUses`): a routine's local inside its
+      routine, an implementation-section name in its unit, an interface
+      name - a method family's included - in its unit and every unit using
+      it; a unit's name in any unit a rename may write. The token is not
+      resolved, so a same-named identifier in a dead branch is listed as
+      well: nothing here can tell the two apart, and the user can. The host
+      shows the list for the user to fix by hand (the demo after applying
+      the plan, pastree-mcp's `rename_plan` as its lines to check).
+
+      **Why not a refusal - do not change it back.** 0.97.0 refused the
+      whole plan at the first such place (audit G6). That helped nobody:
+      the user asking for a rename still wants it, and the refusal left
+      them every edit to make by hand - the live ones too, which the plan
+      knows exactly - with one dead line named out of many. pastree-mcp's
+      `rename_plan` became a one-line refusal for any name written in a
+      dead branch anywhere it can be seen, and an agent had nothing to act
+      on. The plan of the live uses plus every dead place to check is the
+      most that can be known, and all of it reaches the user (Alex's call,
+      2026-10-12). A refusal stays for what makes the LIVE plan incomplete
+      - the next case.
     - *A unit whose file changed on disk since the analysis.* A demoted unit
       (`DemoteText`) gets its text back by re-preprocessing its file, which
       must reproduce the analyzed stream; when it does not, its uses give no
