@@ -235,11 +235,19 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   A few corners are decided rather than scored: a scalar argument (integer,
   float, Boolean, Char, string) rejects a class, interface or class-reference
   parameter, an enumeration and another scalar reject each other, and a
-  one-character literal - a Char constant - scores a Char parameter above a
-  string one and a string one above AnsiChar (both passes type literals
-  `string`). One type under two seeded names (Integer / LongInt, Char /
-  WideChar, PChar / PWideChar, a native integer and its sized twin) is an
-  exact match. Other non-assignable scalar pairs (a Boolean argument for a
+  one-character literal - a Char constant, in parentheses and as both
+  branches of an inline `if` too, never the joint `#13#10` - scores a Char
+  parameter above a string one and a string one above AnsiChar (both passes
+  type literals `string`). An anonymous-method literal or a procedure
+  designator rejects a non-procedural parameter, two distinct records (no
+  conversion operator) reject each other, and so do an array and a record,
+  class or interface. One type under two seeded names (Integer / LongInt,
+  Char / WideChar, PChar / PWideChar, a native integer and its sized twin),
+  and a weak alias and its target, are an exact match - the unit pass chases
+  aliases declared in the unit only. A call whose every arity-fitting local
+  candidate is rejected stays untyped in the unit pass. Both scorers share
+  these rules (Sema.Types: ArgShapeRejects, ArgCatRejects, ArgStructRejects,
+  IsCharLiteralExpr, CallArgCount). Other non-assignable scalar pairs (a Boolean argument for a
   Cardinal parameter) are scored 0, not rejected, and a helper's overloads
   are not merged with the extended type's own (`TGUID.Create` from
   TGUIDHelper binds a helper overload, not System's). A

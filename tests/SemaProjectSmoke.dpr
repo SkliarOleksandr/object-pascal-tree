@@ -6315,6 +6315,83 @@ begin
   end;
 end;
 
+{ The cross-unit scorer (ScoreCandidate) and SelectCallTarget, audit B32
+  (6.2.5, 6.3.1; dcc64 37.0, local/probe-b32 T2): a trailing comma's empty
+  slot is no argument (`K(1, 2,)` keeps K, `D.M(1, 2,)` TDer.M, not TBase's
+  three-parameter M); `#13#10` / `'a'#0` are strings; a `TGen<Integer>`
+  qualifier is a TYPE, so the private instance Enter is no candidate; a
+  `DoIt<Integer>` method value rejects the Boolean overload. On 0.98.3 the
+  four good lines were E2003 and `K(1, 2,).Zz` was silent (untyped). }
+procedure TestOneScorer;
+var
+  LDir: string;
+begin
+  LDir := FreshDir('pastree_sema_onescorer');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OsA.pas'),
+    'unit OsA;'#10'interface'#10'type'#10 +
+    '  TA = record F: Integer; end;'#10 +
+    '  TB = record G: Integer; end;'#10 +
+    '  TRA = record AA: Integer; end;'#10 +
+    '  TProcM = procedure of object;'#10 +
+    '  TGen<T> = class'#10'  private'#10 +
+    '    function Enter(Timeout: Cardinal): TA; overload;'#10 +
+    '  public'#10 +
+    '    class function Enter(const AObject: TObject): TB; overload;'#10 +
+    '  end;'#10 +
+    '  TBase = class function M(A, B, C: Integer): TB; end;'#10 +
+    '  TDer = class(TBase) function M(A: Integer; B: Integer = 0): TA; end;'#10 +
+    'function K(A: Integer; B: Integer = 0): TRA;'#10 +
+    'function Take(A: Integer; B: Boolean = False): TA; overload;'#10 +
+    'function Take(P: TProcM): TB; overload;'#10 +
+    'function Pc(C: Char): TA; overload;'#10 +
+    'function Pc(const S: string): TB; overload;'#10 +
+    'implementation'#10 +
+    'function TGen<T>.Enter(Timeout: Cardinal): TA; begin end;'#10 +
+    'class function TGen<T>.Enter(const AObject: TObject): TB; begin end;'#10 +
+    'function TBase.M(A, B, C: Integer): TB; begin end;'#10 +
+    'function TDer.M(A: Integer; B: Integer = 0): TA; begin end;'#10 +
+    'function K(A: Integer; B: Integer = 0): TRA; begin end;'#10 +
+    'function Take(A: Integer; B: Boolean = False): TA; begin end;'#10 +
+    'function Take(P: TProcM): TB; begin end;'#10 +
+    'function Pc(C: Char): TA; begin end;'#10 +
+    'function Pc(const S: string): TB; begin end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OsP.dpr'),
+    'program OsP;'#10'uses OsA;'#10'type'#10 +
+    '  TObj = class'#10'    procedure DoIt<T>;'#10'    procedure Run;'#10 +
+    '  end;'#10 +
+    '  TUser<X: class> = class'#10'    procedure Go(A: X);'#10'  end;'#10 +
+    'var D: TDer; I: Integer;'#10 +
+    'procedure TObj.DoIt<T>; begin end;'#10 +
+    'procedure TObj.Run;'#10'begin'#10 +
+    '  I := Take(DoIt<Integer>).G;'#10'end;'#10 +
+    'procedure TUser<X>.Go(A: X);'#10'begin'#10 +
+    '  I := TGen<Integer>.Enter(A).G;'#10'end;'#10 +
+    'begin'#10 +
+    '  I := K(1, 2,).AA;'#10 +
+    '  I := D.M(1, 2,).F;'#10 +
+    '  I := Pc(#13#10).G;'#10 +
+    '  I := Pc(''a''#0).G;'#10 +
+    '  I := K(1, 2,).Zz;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'OsP.dpr'));
+    Ok('onescorer: trailing comma, #13#10, TGen<X> qualifier, DoIt<T>' +
+      ' value - only K(1, 2,).Zz is E2003 [' +
+      IntToStr(DiagCount(ModelByName('osp'), 'E2003')) + ']',
+      DiagCount(ModelByName('osp'), 'E2003') = 1);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestDeclAfterUnit;
 const
   UFA =
@@ -12242,6 +12319,7 @@ begin
   TestHelperVisibility;
   TestBuiltinIdentity;
   TestHelperIdentity;
+  TestOneScorer;
   TestOracleDepth;
   TestInstanceSize;
   TestOperatorChains;

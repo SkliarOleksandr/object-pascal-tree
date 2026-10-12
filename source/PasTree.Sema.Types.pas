@@ -69,6 +69,9 @@ type
     function ArgCount(ACall: Integer): Integer;
     function ArgListTruncated(ACall: Integer): Boolean;
     function TrailingSlot(ACall: Integer): Boolean;
+    function WeakAliasEnd(ASym: Integer): Integer;
+    function IsProcDesignator(N: Integer): Boolean;
+    function DeclaresConversion(ASym: Integer; AExplicitToo: Boolean): Boolean;
     function ScoreArgs(ACall: Integer; const AParams: TArray<Integer>): Integer;
     function IsVarargs(AScope: Integer): Boolean;
     function SelectOverload(ACall, AHead: Integer): Integer;
@@ -78,6 +81,7 @@ type
     function InterfaceCounterpart(AHead: Integer): Integer;
     function IsTypeNameOperand(N: Integer): Boolean;
     procedure CheckAssign(N: Integer);
+    function CharCompatibleSource(N: Integer): Boolean;
     procedure CheckCondition(AStmt: Integer);
     function ExprRoot(N: Integer): Integer;
     function HoldsPastStructName(ARoot: Integer): Boolean;
@@ -108,13 +112,26 @@ type
   project's cross-unit selection (ScoreCandidate), so one call scores alike
   whichever pass decides it.
 
-  IsOneCharLiteral: AText - a string literal's text - is ONE character: 'x',
-  '''', #65, #$41, ^M. dcc gives such a literal the type Char (B.6.1), and it
-  converts to a string too. Both passes type every literal `string`, so it
-  scored the string overload of `P(C: Char)` / `P(const S: string)` exact and
-  the Char one nothing - and dcc picks the Char one. A Char parameter scores
-  it 3, above the string's exact 2, which leaves every pair without a Char
-  overload as it was (`P(PChar)` / `P(string)` still picks the string one).
+  StrLitUnits: the UTF-16 units of the nkStrLit ANode, counted over EVERY
+  visible token of it - the parser joins `#13#10` and `'a'#0` into one node,
+  whose NodeText is only the first piece (audit A4-07) - and capped at 2;
+  -1 when a piece cannot be read (a multiline string). A caret char is one
+  unit, a `#` code above $FFFF two (a surrogate pair).
+
+  IsOneCharLiteralNode: the literal is ONE character: 'x', '''', #65, #$41,
+  ^M. dcc gives such a literal the type Char (B.6.1), and it converts to a
+  string too. Both passes type every literal `string`, so it scored the
+  string overload of `P(C: Char)` / `P(const S: string)` exact and the Char
+  one nothing - and dcc picks the Char one. A Char parameter scores it 3,
+  above the string's exact 2, which leaves every pair without a Char overload
+  as it was (`P(PChar)` / `P(string)` still picks the string one).
+
+  IsCharLiteralExpr: the same constant written through parentheses or as
+  both branches of an inline `if` - `('x')`, `if B then 'a' else 'b'` (or
+  `^M`): dcc still takes it as a Char (6.3.1, local/probe-b32 P1), where
+  both typers read the parenthesis's or the then-branch's `string` (A4-10).
+
+  PeelParens: ANode with its enclosing parentheses taken off.
 
   IsScalarToReference: an argument of a scalar category (integer, float,
   Boolean, Char, string) cannot be passed to a class, interface or
@@ -124,8 +141,53 @@ type
   `F(const A: IFoo)` with `F(A: TId)` (`TId = type Integer`): the first
   declared won, and its sibling's calls were listed as its references. A
   record parameter is not in the rule: a string constant converts to TGUID. }
-function IsOneCharLiteral(const AText: string): Boolean;
+function StrLitUnits(const ATree: TPasTree; ANode: Integer): Integer;
+function IsOneCharLiteralNode(const ATree: TPasTree; ANode: Integer): Boolean;
+function IsCharLiteralExpr(const ATree: TPasTree; ANode: Integer): Boolean;
+function PeelParens(const ATree: TPasTree; ANode: Integer): Integer;
 function IsScalarToReference(ADst, ASrc: TSemaTypeCat): Boolean;
+
+{ The overload-scoring rejections both scorers apply - what makes a candidate
+  OUT rather than a weak fit (6.3.1). The two passes had diverged (audit
+  A4-08): the project's ScoreCandidate had learned these, the unit's
+  ScoreArgs had not, so one call scored differently by which pass decided it.
+
+  ArgShapeRejects - decided at the argument NODE: an anonymous-method
+  literal or a procedure designator (ACoreKind nkAnonMethod / AIsProcDesig)
+  is a procedural value and nothing else, so a parameter of another category
+  rejects it (`Make(1, procedure begin end)` / `Make(1, Noop)` take the
+  `reference to procedure` overload over `B: Boolean = False`, probe-b32 P1);
+  a `[...]` (nkSetCtor) rejects what IsBracketToScalar names. A generic
+  parameter, a Variant and an unknown category never reject.
+
+  ArgCatRejects - decided on the two categories: IsScalarToReference or
+  ScalarEnumMismatch.
+
+  ArgStructRejects - two types already known NOT to be the same type: two
+  records, or an array against a record, class or interface, when no side
+  that could convert declares an Implicit / Explicit operator (AParConv,
+  AArgConv). }
+function ArgShapeRejects(ACoreKind: TPasNodeKind; AIsProcDesig: Boolean;
+  AParCat: TSemaTypeCat; AParIsGenericParam: Boolean): Boolean;
+function ArgCatRejects(AParCat, AArgCat: TSemaTypeCat): Boolean;
+function ArgStructRejects(AParCat, AArgCat: TSemaTypeCat;
+  AParConv, AArgConv: Boolean): Boolean;
+
+{ The present arguments of the nkCall ACall - its children after the callee,
+  the nkMissing slot a trailing comma leaves (`F(1, 2,)`, ParseArgList) not
+  counted - and whether that slot is there (ATrailing). The one count every
+  arity test reads with TPasSemaTyper.ArityFits (6.2.5; audit B3-32 /
+  D2-15: the project scorer counted the slot as an argument). }
+function CallArgCount(const ATree: TPasTree; ACall: Integer;
+  out ATrailing: Boolean): Integer;
+
+{ Category-level assignability, the one rule of TPasSemaTyper.Assignable and
+  TPasSemaProject.XAssignableX: conservative - only a definite scalar
+  mismatch is False. `nil` goes to the pointer-like categories, and to a
+  record only when the record declares a `class operator Implicit`
+  (ARecordTakesNil): `Q := nil` with Implicit(Value: Pointer) compiles
+  (probe-b32 P1, audit A4-11; the RTL's TResourceValue does it). }
+function CatAssignable(D, S: TSemaTypeCat; ARecordTakesNil: Boolean): Boolean;
 
 { ScalarEnumMismatch: an enumeration argument for an integer, float,
   Boolean or Char parameter, or one of those for an enumeration parameter -
@@ -157,59 +219,194 @@ uses
   PasTree.Sema.Builtins,
   PasTree.Sema.Diagnostics;
 
-function IsOneCharLiteral(const AText: string): Boolean;
+function StrLitUnits(const ATree: TPasTree; ANode: Integer): Integer;
 var
-  LIdx, LLen, LUnits: Integer;
+  LTxt: string;
+  LTok, LIdx: Integer;
+  LU: UInt64;
+  LSkipLetter: Boolean;
 begin
-  LUnits := 0;
-  LIdx := 1;
-  LLen := Length(AText);
-  while LIdx <= LLen do
+  Result := 0;
+  LSkipLetter := False;
+  for LTok := ATree.Nodes[ANode].FirstToken to ATree.Nodes[ANode].LastToken do
   begin
-    case AText[LIdx] of
-      '''':
-        begin
-          Inc(LIdx);
-          while LIdx <= LLen do
-          begin
-            if AText[LIdx] = '''' then
-            begin
-              if (LIdx < LLen) and (AText[LIdx + 1] = '''') then
-                Inc(LIdx)   // a doubled quote: one character
-              else
-                Break;      // the closing quote
-            end;
-            Inc(LUnits);
-            Inc(LIdx);
-          end;
-          Inc(LIdx);        // past the closing quote
-        end;
-      '#':
-        begin
-          Inc(LIdx);
-          while (LIdx <= LLen) and CharInSet(AText[LIdx], ['0'..'9', 'a'..'f',
-             'A'..'F', '$', '%', '_']) do
-            Inc(LIdx);
-          Inc(LUnits);
-        end;
-      '^':
-        begin
-          Inc(LIdx, 2);
-          Inc(LUnits);
-        end;
-    else
-      Exit(False);   // a multiline string, whitespace, anything else
+    if (LTok < 0) or (LTok > High(ATree.Source.Visible)) then
+      Exit(-1);
+    if LSkipLetter then
+    begin
+      LSkipLetter := False;
+      Continue;
     end;
-    if LUnits > 1 then
-      Exit(False);
+    LTxt := ATree.Source.VisibleText(LTok);
+    if LTxt = '' then
+      Exit(-1);
+    if LTxt[1] = '^' then
+    begin
+      // Caret char (B.6.2): `^[` is one token, `^M` is `^` plus a one-letter
+      // identifier token - one unit either way.
+      LSkipLetter := Length(LTxt) = 1;
+      Inc(Result);
+    end
+    else if LTxt[1] = '#' then
+    begin
+      // #nnn / #$hh / #%bbb - one unit unless the value needs a surrogate
+      // pair.
+      LTxt := StringReplace(LTxt, '_', '', [rfReplaceAll]);
+      LTxt := Copy(LTxt, 2, MaxInt);
+      if (LTxt <> '') and (LTxt[1] = '%') then
+        Inc(Result)   // a binary escape is at most 8 bits in practice
+      else if TryStrToUInt64(LTxt, LU) then
+      begin
+        if LU > $FFFF then
+          Inc(Result, 2)
+        else
+          Inc(Result);
+      end
+      else
+        Exit(-1);
+    end
+    else if (Length(LTxt) >= 2) and (LTxt[1] = '''') then
+    begin
+      // Quoted: each character one unit, a doubled quote one unit.
+      LIdx := 2;
+      while LIdx < Length(LTxt) do
+      begin
+        if LTxt[LIdx] = '''' then
+          Inc(LIdx);   // the escape's second quote
+        Inc(Result);
+        Inc(LIdx);
+      end;
+    end
+    else
+      Exit(-1);   // a multiline string or anything unexpected
+    if Result > 1 then
+      Exit(2);
   end;
-  Result := LUnits = 1;
+end;
+
+function IsOneCharLiteralNode(const ATree: TPasTree; ANode: Integer): Boolean;
+begin
+  Result := (ANode <> NIL_NODE) and (ATree.Nodes[ANode].Kind = nkStrLit) and
+    (StrLitUnits(ATree, ANode) = 1);
+end;
+
+function PeelParens(const ATree: TPasTree; ANode: Integer): Integer;
+begin
+  Result := ANode;
+  while (Result <> NIL_NODE) and (ATree.Nodes[Result].Kind = nkParen) and
+        (ATree.Nodes[Result].FirstChild <> NIL_NODE) do
+    Result := ATree.Nodes[Result].FirstChild;
+end;
+
+function IsCharLiteralExpr(const ATree: TPasTree; ANode: Integer): Boolean;
+var
+  LThen, LElse: Integer;
+begin
+  ANode := PeelParens(ATree, ANode);
+  if ANode = NIL_NODE then
+    Exit(False);
+  case ATree.Nodes[ANode].Kind of
+    nkCaretChar:
+      Result := True;
+    nkStrLit:
+      Result := StrLitUnits(ATree, ANode) = 1;
+    nkInlineIf:
+      begin
+        // cond, then, else - each branch a Char constant.
+        LThen := ATree.Nodes[ANode].FirstChild;
+        if LThen <> NIL_NODE then
+          LThen := ATree.Nodes[LThen].NextSibling;
+        if LThen = NIL_NODE then
+          Exit(False);
+        LElse := ATree.Nodes[LThen].NextSibling;
+        Result := (LElse <> NIL_NODE) and IsCharLiteralExpr(ATree, LThen) and
+          IsCharLiteralExpr(ATree, LElse);
+      end;
+  else
+    Result := False;
+  end;
 end;
 
 function IsScalarToReference(ADst, ASrc: TSemaTypeCat): Boolean;
 begin
   Result := (ASrc in [tcInteger, tcFloat, tcBoolean, tcChar, tcString]) and
     (ADst in [tcClass, tcInterface, tcClassOf]);
+end;
+
+function ArgShapeRejects(ACoreKind: TPasNodeKind; AIsProcDesig: Boolean;
+  AParCat: TSemaTypeCat; AParIsGenericParam: Boolean): Boolean;
+begin
+  Result := False;
+  if AParIsGenericParam then
+    Exit;
+  if ((ACoreKind = nkAnonMethod) or AIsProcDesig) and
+     not (AParCat in [tcProc, tcVariant, tcUnknown]) then
+    Exit(True);
+  if (ACoreKind = nkSetCtor) and IsBracketToScalar(AParCat) then
+    Exit(True);
+end;
+
+function ArgCatRejects(AParCat, AArgCat: TSemaTypeCat): Boolean;
+begin
+  Result := IsScalarToReference(AParCat, AArgCat) or
+    ScalarEnumMismatch(AParCat, AArgCat);
+end;
+
+function ArgStructRejects(AParCat, AArgCat: TSemaTypeCat;
+  AParConv, AArgConv: Boolean): Boolean;
+begin
+  // Two DIFFERENT record types: distinct records are not assignable to one
+  // another unless a conversion operator - a member, so it can be looked
+  // for - makes them so.
+  if (AParCat = tcRecord) and (AArgCat = tcRecord) then
+    Exit(not AParConv and not AArgConv);
+  // An array against a record, class or interface, either way round.
+  Result := ((AParCat = tcArray) and
+             (AArgCat in [tcRecord, tcClass, tcInterface]) and not AArgConv) or
+            ((AArgCat = tcArray) and
+             (AParCat in [tcRecord, tcClass, tcInterface]) and not AParConv);
+end;
+
+function CallArgCount(const ATree: TPasTree; ACall: Integer;
+  out ATrailing: Boolean): Integer;
+var
+  LArg: Integer;
+begin
+  Result := 0;
+  ATrailing := False;
+  LArg := ATree.Nodes[ACall].FirstChild;   // the callee
+  if LArg <> NIL_NODE then
+    LArg := ATree.Nodes[LArg].NextSibling;
+  while LArg <> NIL_NODE do
+  begin
+    if ATree.Nodes[LArg].Kind = nkMissing then
+      ATrailing := True
+    else
+      Inc(Result);
+    LArg := ATree.Nodes[LArg].NextSibling;
+  end;
+end;
+
+function CatAssignable(D, S: TSemaTypeCat; ARecordTakesNil: Boolean): Boolean;
+begin
+  if (D = tcUnknown) or (S = tcUnknown) then
+    Exit(True);
+  if S = tcNil then
+    Exit((D in [tcPointer, tcClass, tcInterface, tcProc, tcClassOf, tcVariant,
+      tcArray]) or ((D = tcRecord) and ARecordTakesNil));
+  case D of
+    tcString:  Result := S in [tcString, tcChar];
+    tcInteger: Result := S = tcInteger;
+    tcFloat:   Result := S in [tcFloat, tcInteger];
+    tcBoolean: Result := S = tcBoolean;
+    tcChar:    Result := S = tcChar;
+  else
+    Result := True;   // non-scalar destination -> allow (later phases)
+  end;
+  // Only a scalar source can turn this into a real rejection.
+  if not Result and
+     not (S in [tcInteger, tcFloat, tcBoolean, tcChar, tcString]) then
+    Result := True;
 end;
 
 function ScalarEnumMismatch(ADst, ASrc: TSemaTypeCat): Boolean;
@@ -976,30 +1173,14 @@ end;
 // reports it, and the arity rule changes with it.
 function TPasSemaTyper.ArgCount(ACall: Integer): Integer;
 var
-  LArg: Integer;
+  LTrailing: Boolean;
 begin
-  Result := 0;
-  LArg := Sib(Child(ACall));   // first child is the callee
-  while LArg <> NIL_NODE do
-  begin
-    if Kind(LArg) <> nkMissing then
-      Inc(Result);
-    LArg := Sib(LArg);
-  end;
+  Result := CallArgCount(T, ACall, LTrailing);
 end;
 
 function TPasSemaTyper.TrailingSlot(ACall: Integer): Boolean;
-var
-  LArg: Integer;
 begin
-  Result := False;
-  LArg := Sib(Child(ACall));
-  while LArg <> NIL_NODE do
-  begin
-    if Kind(LArg) = nkMissing then
-      Exit(True);
-    LArg := Sib(LArg);
-  end;
+  CallArgCount(T, ACall, Result);
 end;
 
 // Does a candidate with (AReq, ATot) parameters admit AArgs present arguments?
@@ -1032,50 +1213,131 @@ begin
   end;
 end;
 
+{ The type a WEAK alias chain ends at: `TId = Integer`, `TMyRc = TRc` are
+  their targets' own type (2.5.1), so the scorer compares the ends - an
+  alias argument tied every merely assignable sibling and the first declared
+  won (audit A4-08, probe-b32 P1: `F(I)` takes F(A: TId) beside F(Int64)).
+  Never past a distinct `type X` (nkTypeDecl Aux = 1), never into an
+  instantiation (a `TList<Integer>` is its own type). Same-unit links only,
+  like ArrayDefOf: a cross-unit target is unbound here. }
+function TPasSemaTyper.WeakAliasEnd(ASym: Integer): Integer;
+var
+  LDepth, LDef, LNext: Integer;
+begin
+  Result := ASym;
+  for LDepth := 1 to 8 do
+  begin
+    if (Result = NIL_SYM) or (M.Symbols[Result].Kind <> skType) then
+      Exit;
+    LDef := TypeDefNode(Result);
+    if (LDef = NIL_NODE) or not (Kind(LDef) in [nkIdent, nkMember]) or
+       (T.Nodes[T.Nodes[LDef].Parent].Aux = 1) then
+      Exit;
+    LNext := Head(LDef);
+    if (LNext = NIL_SYM) or (LNext = Result) then
+      Exit;
+    Result := LNext;
+  end;
+end;
+
+// A bare designator naming a PROCEDURE - a routine with no result - is a
+// method value and nothing else (the project's IsProcedureDesignator; Head
+// reads `DoIt<Integer>` through its nkTypeArgs, audit B3-27).
+function TPasSemaTyper.IsProcDesignator(N: Integer): Boolean;
+var
+  LSym: Integer;
+begin
+  Result := False;
+  if not (Kind(N) in [nkIdent, nkMember, nkTypeArgs]) then
+    Exit;
+  LSym := Head(N);
+  // A seeded intrinsic has no TypeNode whatever it returns: `ErrorAt(Byte(X),
+  // ReturnAddress)` is a function call (System.pas), never a method value.
+  Result := (LSym <> NIL_SYM) and (M.Symbols[LSym].Kind = skRoutine) and
+    (M.Symbols[LSym].TypeNode = NIL_NODE) and
+    not (sfBuiltin in M.Symbols[LSym].Flags);
+end;
+
+// Does the record type ASym (through weak aliases) declare `class operator
+// Implicit` (or, AExplicitToo, Explicit)? Only the type's OWN members: an
+// operator is not inherited.
+function TPasSemaTyper.DeclaresConversion(ASym: Integer;
+  AExplicitToo: Boolean): Boolean;
+var
+  LScope: Integer;
+begin
+  Result := False;
+  ASym := WeakAliasEnd(ASym);
+  if ASym = NIL_SYM then
+    Exit;
+  LScope := M.Symbols[ASym].MemberScope;
+  if LScope = NIL_SCOPE then
+    Exit;
+  Result := (M.FindLocal(LScope, 'implicit') <> NIL_SYM) or
+    (AExplicitToo and (M.FindLocal(LScope, 'explicit') <> NIL_SYM));
+end;
+
 // Sum a conservative match score of the call's args against a param list.
 // Takes the params the caller already built (SelectOverload had called
 // ParamsOf twice per fitting candidate - one TArray allocation each).
+// The rules are the project's ScoreCandidate's, through the shared helpers
+// (ArgShapeRejects, ArgCatRejects, ArgStructRejects, IsCharLiteralExpr).
 function TPasSemaTyper.ScoreArgs(ACall: Integer;
   const AParams: TArray<Integer>): Integer;
 var
-  LArg, LIdx, LAt, LPt: Integer;
+  LArg, LCore, LIdx, LAt, LPt, LCAt, LCPt: Integer;
+  LParCat: TSemaTypeCat;
+  LIs64: Boolean;
 begin
   Result := 0;
+  LIs64 := PlatformInfo(FPlatform).Is64Bit;
   LArg := Sib(Child(ACall));
   LIdx := 0;
   while (LArg <> NIL_NODE) and (LIdx <= High(AParams)) do
   begin
+    // The empty slot of a trailing comma is not an argument (CallArgCount).
+    if Kind(LArg) = nkMissing then
+      Break;
+    LCore := PeelParens(T, LArg);
     LAt := M.ExprType[LArg];
     LPt := M.Symbols[AParams[LIdx]].TypeSym;
-    // A `[...]` has no type of its own here; what it cannot be passed to
-    // rejects (IsBracketToScalar).
-    if (Kind(LArg) = nkSetCtor) and (LPt <> NIL_SYM) and
-       IsBracketToScalar(CatOf(LPt)) then
-      Exit(-1);
-    if (LAt <> NIL_SYM) and (LPt <> NIL_SYM) then
-      // A one-character literal is typed `string` here but is a Char
-      // constant (see IsOneCharLiteral).
-      // `Char` fits it best, `AnsiChar` below a string parameter (the
-      // project scorer's rule, local/probe-b31 O2).
-      if (Kind(LArg) = nkStrLit) and (CatOf(LPt) = tcChar) and
-         IsOneCharLiteral(Txt(LArg)) then
+    if LPt <> NIL_SYM then
+    begin
+      LParCat := CatOf(LPt);
+      // An anonymous method, a procedure designator, a `[...]` against a
+      // parameter it cannot be passed to - provable at the node, typed or
+      // not (neither has a type of its own here).
+      if ArgShapeRejects(Kind(LCore), IsProcDesignator(LCore), LParCat,
+         M.Symbols[LPt].Kind = skGenericParam) then
+        Exit(-1);
+      // A one-character literal - through parentheses, or both branches of
+      // an inline `if` - is typed `string` here but is a Char constant:
+      // `Char` fits it best, `AnsiChar` below a string parameter
+      // (local/probe-b31 O2, probe-b32 P1).
+      if (LParCat = tcChar) and IsCharLiteralExpr(T, LCore) then
       begin
-        if PasBuiltinIsChar(M, LPt, PlatformInfo(FPlatform).Is64Bit) then
+        if PasBuiltinIsChar(M, WeakAliasEnd(LPt), LIs64) then
           Inc(Result, 3)
         else
           Inc(Result, 1);
       end
-      // One type under two seeded names (Integer / LongInt, Char /
-      // WideChar, ...) is an exact match - PasBuiltinCanonSym, the table
-      // the project scorer reads (audit A3-17).
-      else if (LAt = LPt) or
-         (PasBuiltinCanonSym(M, LAt, PlatformInfo(FPlatform).Is64Bit) =
-          PasBuiltinCanonSym(M, LPt, PlatformInfo(FPlatform).Is64Bit)) then
-        Inc(Result, 2)
-      else if IsScalarToReference(CatOf(LPt), CatOf(LAt)) then
-        Exit(-1)
-      else if Assignable(LPt, LAt) then
-        Inc(Result, 1);
+      else if LAt <> NIL_SYM then
+      begin
+        // The same type under two names is an exact match: a weak alias
+        // (WeakAliasEnd), one type under two seeded names (Integer /
+        // LongInt, Char / WideChar - PasBuiltinCanonSym, audit A3-17).
+        LCAt := PasBuiltinCanonSym(M, WeakAliasEnd(LAt), LIs64);
+        LCPt := PasBuiltinCanonSym(M, WeakAliasEnd(LPt), LIs64);
+        if (LAt = LPt) or (LCAt = LCPt) then
+          Inc(Result, 2)
+        else if ArgCatRejects(LParCat, CatOf(LAt)) or
+           ArgStructRejects(LParCat, CatOf(LAt),
+             DeclaresConversion(LPt, True), DeclaresConversion(LAt, True)) then
+          Exit(-1)
+        else if Assignable(LPt, LAt) then
+          Inc(Result, 1);
+      end;
+    end;
     LArg := Sib(LArg);
     Inc(LIdx);
   end;
@@ -1185,6 +1447,14 @@ begin
       LIfaceHead := NIL_SYM;
     end;
   end;
+
+  // Every candidate the arity admits was REJECTED by an argument (score -1):
+  // none of them is the callee, whatever the uses clause says - the call is
+  // dcc's E2250, or (with imports) a used unit's overload that fits. Neither
+  // the head nor its result type is the answer (audit A4-09: a local
+  // `Pick(O: TFoo)` typed `Pick(11)` that calls an imported Pick(Integer)).
+  if LAnyFit and (LBestScore < 0) then
+    Exit(NIL_SYM);
 
   M.CallTarget.AddOrSetValue(ACall, LBest);
 
@@ -1741,30 +2011,14 @@ begin
   end;
 end;
 
-// Conservative: only reject definite scalar mismatches.
+// Conservative: only reject definite scalar mismatches (CatAssignable).
 function TPasSemaTyper.Assignable(ADst, ASrc: Integer): Boolean;
 var
   D, S: TSemaTypeCat;
 begin
   D := CatOf(ADst); S := CatOf(ASrc);
-  if (D = tcUnknown) or (S = tcUnknown) then
-    Exit(True);
-  if S = tcNil then
-    Exit(D in [tcPointer, tcClass, tcInterface, tcProc, tcClassOf, tcVariant,
-      tcArray]);
-  case D of
-    tcString:  Result := S in [tcString, tcChar];
-    tcInteger: Result := S = tcInteger;
-    tcFloat:   Result := S in [tcFloat, tcInteger];
-    tcBoolean: Result := S = tcBoolean;
-    tcChar:    Result := S = tcChar;
-  else
-    Result := True;   // non-scalar destination -> allow (later phases)
-  end;
-  // Only a scalar source can turn this into a real rejection.
-  if not Result and
-     not (S in [tcInteger, tcFloat, tcBoolean, tcChar, tcString]) then
-    Result := True;
+  Result := CatAssignable(D, S, (S = tcNil) and (D = tcRecord) and
+    DeclaresConversion(ADst, False));
 end;
 
 // True when N is a bare designator that resolved to a TYPE rather than to a
@@ -1794,8 +2048,12 @@ begin
     Exit;
   if (M.ExprType[LDst] = NIL_SYM) or (M.ExprType[LSrc] = NIL_SYM) then
     Exit;
-  // A string literal is char-compatible (C := 'x'); don't flag it.
-  if (CatOf(M.ExprType[LDst]) = tcChar) and (Kind(LSrc) = nkStrLit) then
+  // A string literal is char-compatible (C := 'x'); don't flag it - nor one
+  // in parentheses, nor an inline `if` whose branches are each such a
+  // literal or a Char (`if B then 'a' else Ch`): the node takes the
+  // then-branch's `string` (audit A4-10, probe-b32 P1). Lenient on purpose:
+  // `C := 'abc'` passes too.
+  if (CatOf(M.ExprType[LDst]) = tcChar) and CharCompatibleSource(LSrc) then
     Exit;
   // An operand that resolved to a TYPE NAME is a mis-binding, not a type
   // mismatch, so this is the wrong diagnostic for it and the numbers say so:
@@ -1810,9 +2068,40 @@ begin
   if IsTypeNameOperand(LDst) or IsTypeNameOperand(LSrc) then
     Exit;
   if not Assignable(M.ExprType[LDst], M.ExprType[LSrc]) then
+  begin
+    // dcc names the nil literal's type `Pointer`; the seed is `_nil`.
+    var LSrcName := M.Symbols[M.ExprType[LSrc]].Name;
+    if CatOf(M.ExprType[LSrc]) = tcNil then
+      LSrcName := 'Pointer';
     Diag('E2010', Format(SE2010_IncompatibleTypes,
-      [M.Symbols[M.ExprType[LDst]].Name, M.Symbols[M.ExprType[LSrc]].Name]),
-      LSrc);
+      [M.Symbols[M.ExprType[LDst]].Name, LSrcName]), LSrc);
+  end;
+end;
+
+function TPasSemaTyper.CharCompatibleSource(N: Integer): Boolean;
+var
+  LThen, LElse: Integer;
+begin
+  N := PeelParens(T, N);
+  if N = NIL_NODE then
+    Exit(False);
+  case Kind(N) of
+    nkStrLit, nkCaretChar:
+      Result := True;
+    nkInlineIf:
+      begin
+        LThen := Child(N);
+        if LThen <> NIL_NODE then
+          LThen := Sib(LThen);
+        if LThen = NIL_NODE then
+          Exit(False);
+        LElse := Sib(LThen);
+        Result := (LElse <> NIL_NODE) and CharCompatibleSource(LThen) and
+          CharCompatibleSource(LElse);
+      end;
+  else
+    Result := CatOf(M.ExprType[N]) = tcChar;
+  end;
 end;
 
 function TPasSemaTyper.TypeNode(N: Integer): Integer;

@@ -10624,23 +10624,18 @@ var
 begin
   D := XCatOf(ADst);
   S := XCatOf(ASrc);
-  if (D = tcUnknown) or (S = tcUnknown) then
-    Exit(True);
-  if S = tcNil then
-    Exit(D in [tcPointer, tcClass, tcInterface, tcProc, tcClassOf, tcVariant,
-      tcArray]);
-  case D of
-    tcString:  Result := S in [tcString, tcChar];
-    tcInteger: Result := S = tcInteger;
-    tcFloat:   Result := S in [tcFloat, tcInteger];
-    tcBoolean: Result := S = tcBoolean;
-    tcChar:    Result := S = tcChar;
-  else
-    Result := True;
+  // The unit typer's rule (CatAssignable); `nil` reaches a record through
+  // its `class operator Implicit` (audit A4-11).
+  if (S = tcNil) and (D = tcRecord) then
+  begin
+    var LRec := CanonTypeX(ADst);
+    var LScope := NIL_SCOPE;
+    if XValid(LRec) then
+      LScope := FModels[LRec.UnitId].Symbols[LRec.Sym].MemberScope;
+    Exit((LScope <> NIL_SCOPE) and
+      (FModels[LRec.UnitId].FindLocal(LScope, 'implicit') <> NIL_SYM));
   end;
-  if not Result and
-     not (S in [tcInteger, tcFloat, tcBoolean, tcChar, tcString]) then
-    Result := True;
+  Result := CatAssignable(D, S, False);
 end;
 
 // A routine's parameter symbols in declaration order (its param scope -
@@ -11072,119 +11067,11 @@ var
     LNewExt.AddOrSetValue(LName, LExt);
   end;
 
-  { Is N a bare designator naming a PROCEDURE - a routine with no result?
-
-    Such an argument is a method VALUE and nothing else. It cannot be the
-    implicit call that lets a procedural argument meet an ordinary parameter
-    (that rule needs a FUNCTION and its result), so it rejects a non-procedural
-    parameter exactly as an anonymous-method literal does. `TThread
-    .Synchronize(nil, DoProvide)` in System.Net.URLClient is the shape: without
-    this, the private `(ASyncRec: PSynchronizeRecord; QueueEvent: Boolean =
-    False; ...)` still ties on arity with the public `(const AThread: TThread;
-    AMethod: TThreadMethod)`.
-
-    A CALL is not a designator - `F(X)` has an nkCall parent - so the test is on
-    the node kind first, and a routine symbol with a TypeNode (a function) is
-    excluded. }
-  function IsProcedureDesignator(N: Integer): Boolean;
-  var
-    LSym, LName: Integer;
-    LExt: TPasExtRef;
-  begin
-    Result := False;
-    if not (LM.Tree.Nodes[N].Kind in [nkIdent, nkMember]) then
-      Exit;
-    LName := N;
-    if LM.Tree.Nodes[N].Kind = nkMember then
-    begin
-      LName := LM.Tree.Nodes[N].FirstChild;
-      while (LName <> NIL_NODE) and
-            (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
-        LName := LM.Tree.Nodes[LName].NextSibling;
-      if LName = NIL_NODE then
-        Exit;
-    end;
-    LSym := RefAt(LName);
-    if LSym <> NIL_SYM then
-      Result := (LM.Symbols[LSym].Kind = skRoutine) and
-                (LM.Symbols[LSym].TypeNode = NIL_NODE)
-    else if ExtOf(LName, LExt) then
-      Result := (FModels[LExt.UnitId].Symbols[LExt.Sym].Kind = skRoutine) and
-                (FModels[LExt.UnitId].Symbols[LExt.Sym].TypeNode = NIL_NODE);
-  end;
-
-  // Does N name an ARRAY PROPERTY (`property Fields[I: Integer]: T`)? Same
-  // last-segment-then-two-maps reading as above; the nkIndex case needs it
-  // because such a property's declared type is already the indexing's result.
-  function IsArrayPropertyDesignator(N: Integer): Boolean;
-  var
-    LSym, LName: Integer;
-    LExt: TPasExtRef;
-  begin
-    Result := False;
-    if not (LM.Tree.Nodes[N].Kind in [nkIdent, nkMember]) then
-      Exit;
-    LName := N;
-    if LM.Tree.Nodes[N].Kind = nkMember then
-    begin
-      LName := LM.Tree.Nodes[N].FirstChild;
-      while (LName <> NIL_NODE) and
-            (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
-        LName := LM.Tree.Nodes[LName].NextSibling;
-      if LName = NIL_NODE then
-        Exit;
-    end;
-    LSym := RefAt(LName);
-    if LSym <> NIL_SYM then
-      Result := (LM.Symbols[LSym].Kind = skProperty) and
-                PropertyHasParams(AId, LSym)
-    else if ExtOf(LName, LExt) then
-      Result := (FModels[LExt.UnitId].Symbols[LExt.Sym].Kind = skProperty) and
-                PropertyHasParams(LExt.UnitId, LExt.Sym);
-  end;
-
-  // Does N name a TYPE rather than a value? Same question SelectCallTarget's
-  // own class-vs-instance test asks, and the same two maps answer it.
-  function IsTypeDesignator(N: Integer): Boolean;
-  var
-    LSym: Integer;
-    LExt: TPasExtRef;
-  begin
-    // `TArray<TGUID>` names a type by construction and binds no symbol of its
-    // own - neither map has anything for the nkTypeArgs node itself.
-    if LM.Tree.Nodes[N].Kind = nkTypeArgs then
-      Exit(True);
-    // A DOTTED name binds on its last segment, never on the nkMember node -
-    // `TObjectAppearance.TDataMembers.Create(...)` (FMX.ListView.Appearances,
-    // where that nested name is an alias of `TArray<TDataMember>`) reads as a
-    // value qualifier without this, and the dynamic-array pseudo-constructor
-    // then does not apply. Same shape SelectCallTarget's own qualifier test
-    // had to learn for `System.TMonitor.Enter`.
-    if LM.Tree.Nodes[N].Kind = nkMember then
-    begin
-      N := LM.Tree.Nodes[N].FirstChild;
-      while (N <> NIL_NODE) and (LM.Tree.Nodes[N].NextSibling <> NIL_NODE) do
-        N := LM.Tree.Nodes[N].NextSibling;
-      if N = NIL_NODE then
-        Exit(False);
-    end;
-    LSym := RefAt(N);
-    if LSym <> NIL_SYM then
-      Exit(LM.Symbols[LSym].Kind in [skType, skBuiltinType]);
-    Result := ExtOf(N, LExt) and
-      (FModels[LExt.UnitId].Symbols[LExt.Sym].Kind in [skType, skBuiltinType]);
-  end;
-
-  // A node's best-known type: this pass's result, else the intra-unit one.
-  function GetX(N: Integer): TSemaXType;
-  begin
-    Result := XAt(N);
-    if not XValid(Result) and (LM.IntraType(N) <> NIL_SYM) then
-      Result := XPlain(AId, LM.IntraType(N));
-  end;
-
-  // The (mid, sym) a callee designator resolved to (after the member pass
-  // below has enriched RefMap/ExtRefMap).
+  // The (mid, sym) a designator resolved to - the last segment of a dotted
+  // name, the head of `Name<...>` - read from both maps (after the member
+  // pass below has enriched RefMap/ExtRefMap). The one primitive the
+  // designator predicates below read (audit D2-13: they were hand copies,
+  // and the copies that missed nkTypeArgs let the wrong overload win).
   function TargetSym(N: Integer; out AMid, ASym: Integer): Boolean;
   var
     LName: Integer;
@@ -11192,6 +11079,7 @@ var
   begin
     Result := False;
     AMid := AId;
+    ASym := NIL_SYM;
     case LM.Tree.Nodes[N].Kind of
       nkIdent:
         LName := N;
@@ -11218,6 +11106,67 @@ var
       ASym := LExt.Sym;
       Exit(True);
     end;
+  end;
+
+  { Is N a bare designator naming a PROCEDURE - a routine with no result?
+
+    Such an argument is a method VALUE and nothing else. It cannot be the
+    implicit call that lets a procedural argument meet an ordinary parameter
+    (that rule needs a FUNCTION and its result), so it rejects a non-procedural
+    parameter exactly as an anonymous-method literal does. `TThread
+    .Synchronize(nil, DoProvide)` in System.Net.URLClient is the shape: without
+    this, the private `(ASyncRec: PSynchronizeRecord; QueueEvent: Boolean =
+    False; ...)` still ties on arity with the public `(const AThread: TThread;
+    AMethod: TThreadMethod)`. `DoIt<Integer>` is one too (B3-27).
+
+    A CALL is not a designator - `F(X)` has an nkCall parent - so TargetSym
+    reads no nkCall, and a routine symbol with a TypeNode (a function) is
+    excluded, as is a seeded intrinsic. }
+  function IsProcedureDesignator(N: Integer): Boolean;
+  var
+    LMid, LSym: Integer;
+  begin
+    Result := TargetSym(N, LMid, LSym) and
+      (FModels[LMid].Symbols[LSym].Kind = skRoutine) and
+      (FModels[LMid].Symbols[LSym].TypeNode = NIL_NODE) and
+      not (sfBuiltin in FModels[LMid].Symbols[LSym].Flags);
+  end;
+
+  // Does N name an ARRAY PROPERTY (`property Fields[I: Integer]: T`)? The
+  // nkIndex case needs it because such a property's declared type is already
+  // the indexing's result.
+  function IsArrayPropertyDesignator(N: Integer): Boolean;
+  var
+    LMid, LSym: Integer;
+  begin
+    Result := TargetSym(N, LMid, LSym) and
+      (FModels[LMid].Symbols[LSym].Kind = skProperty) and
+      PropertyHasParams(LMid, LSym);
+  end;
+
+  // Does N name a TYPE rather than a value? A DOTTED name binds on its last
+  // segment, never on the nkMember node - `TObjectAppearance.TDataMembers
+  // .Create(...)` (FMX.ListView.Appearances, where that nested name is an
+  // alias of `TArray<TDataMember>`) reads as a value qualifier without it,
+  // and the dynamic-array pseudo-constructor then does not apply.
+  function IsTypeDesignator(N: Integer): Boolean;
+  var
+    LMid, LSym: Integer;
+  begin
+    // `TArray<TGUID>` names a type by construction and binds no symbol of its
+    // own - neither map has anything for the nkTypeArgs node itself.
+    if LM.Tree.Nodes[N].Kind = nkTypeArgs then
+      Exit(True);
+    Result := TargetSym(N, LMid, LSym) and
+      (FModels[LMid].Symbols[LSym].Kind in [skType, skBuiltinType]);
+  end;
+
+  // A node's best-known type: this pass's result, else the intra-unit one.
+  function GetX(N: Integer): TSemaXType;
+  begin
+    Result := XAt(N);
+    if not XValid(Result) and (LM.IntraType(N) <> NIL_SYM) then
+      Result := XPlain(AId, LM.IntraType(N));
   end;
 
   // Same-named routine heads from every resolved used unit, System and
@@ -11259,7 +11208,7 @@ var
   var
     LParams: TArray<Integer>;
     LReq, LTot, LIdx, LArg, LArgs, LCore: Integer;
-    LVariadic: Boolean;
+    LVariadic, LTrailing: Boolean;
     LArgX, LParX: TSemaXType;
 
     // The parameter count of a signature node - an nkAnonMethod literal or
@@ -11328,33 +11277,28 @@ var
     end;
 
   begin
-    LArgs := 0;
-    LArg := LM.Tree.Nodes[LM.Tree.Nodes[ACall].FirstChild].NextSibling;
-    while LArg <> NIL_NODE do
-    begin
-      Inc(LArgs);
-      LArg := LM.Tree.Nodes[LArg].NextSibling;
-    end;
+    // Present arguments and the trailing-comma slot, and the one arity rule
+    // (CallArgCount, ArityFits - 6.2.5): the slot is not an argument, so
+    // `F(1, 2,)` fits `F(A: Integer; B: Integer = 0)` (audit B3-32).
+    LArgs := CallArgCount(LM.Tree, ACall, LTrailing);
     if not RoutineArity(AMid, ACand, LReq, LTot, LVariadic) then
       Exit(0);
-    if not (LVariadic or ((LArgs >= LReq) and (LArgs <= LTot))) then
+    if not (LVariadic or TPasSemaTyper.ArityFits(LArgs, LReq, LTot,
+       LTrailing)) then
       Exit(-1);
     Result := 0;
     LParams := XParamSyms(AMid, ACand);
     LArg := LM.Tree.Nodes[LM.Tree.Nodes[ACall].FirstChild].NextSibling;
     LIdx := 0;
-    while (LArg <> NIL_NODE) and (LIdx <= High(LParams)) do
+    while (LArg <> NIL_NODE) and (LIdx <= High(LParams)) and
+          (LM.Tree.Nodes[LArg].Kind <> nkMissing) do
     begin
       LArgX := GetX(LArg);
       LParX := SubstX(DeclTypeX(AMid, LParams[LIdx]), ACtx, 0);
       // The literal tests below look through parentheses: `(procedure begin
       // ... end)` is how a multi-line anonymous argument is often written,
       // and the client group's own instance of the TProc case was exactly that.
-      LCore := LArg;
-      while (LCore <> NIL_NODE) and (LM.Tree.Nodes[LCore].Kind = nkParen) do
-        LCore := LM.Tree.Nodes[LCore].FirstChild;
-      if LCore = NIL_NODE then
-        LCore := LArg;
+      LCore := PeelParens(LM.Tree, LArg);
       // An ANONYMOUS METHOD LITERAL rejects the candidate outright, and it is
       // the only mismatch that does. `TThread.Synchronize(nil, procedure ...
       // end)` fits BOTH the public `(const AThread: TThread; AThreadProc:
@@ -11372,11 +11316,12 @@ var
       // PARAMETERLESS function reference in a value position is CALLED (which
       // is why a tcProc argument in general may legitimately meet a Boolean
       // parameter - see the E2012 entry). A literal cannot be called that way.
-      if XValid(LParX) and
-         not (XCatOf(LParX) in [tcProc, tcVariant, tcUnknown]) and
-         (FModels[LParX.UnitId].Symbols[LParX.Sym].Kind <> skGenericParam) and
-         ((LM.Tree.Nodes[LCore].Kind = nkAnonMethod) or
-          IsProcedureDesignator(LArg)) then
+      // The same holds for a `[...]` against a parameter it cannot be passed
+      // to - a string, a scalar, a class (IsBracketToScalar). ArgShapeRejects
+      // is the rule the unit's ScoreArgs applies too.
+      if XValid(LParX) and ArgShapeRejects(LM.Tree.Nodes[LCore].Kind,
+           IsProcedureDesignator(LCore), XCatOf(CanonTypeX(LParX)),
+           FModels[LParX.UnitId].Symbols[LParX.Sym].Kind = skGenericParam) then
         Exit(-1);
       // The same literal against a procedural parameter it cannot be passed
       // to (LiteralFits): a method pointer, a plain procedural type, or a
@@ -11391,21 +11336,15 @@ var
       if (LM.Tree.Nodes[LCore].Kind = nkAnonMethod) and XValid(LParX) and
          (XCatOf(LParX) = tcProc) and not LiteralFits(LCore, LParX) then
         Exit(-1);
-      // A `[...]` against a parameter it cannot be passed to - a string, a
-      // scalar, a class (IsBracketToScalar): provable at the node too.
-      if (LM.Tree.Nodes[LCore].Kind = nkSetCtor) and XValid(LParX) and
-         (FModels[LParX.UnitId].Symbols[LParX.Sym].Kind <> skGenericParam) and
-         IsBracketToScalar(XCatOf(CanonTypeX(LParX))) then
-        Exit(-1);
       if XValid(LArgX) and XValid(LParX) then
-        // A one-character literal is a Char constant (IsOneCharLiteral): a
-        // `Char` parameter fits it best, a string one next (the literal's
-        // own type here), an AnsiChar one least - 'a' takes F(WideChar)
-        // over F(AnsiChar) and F(string) over F(AnsiChar), either order
-        // (local/probe-b31 O2).
-        if (LM.Tree.Nodes[LCore].Kind = nkStrLit) and
-           (XCatOf(CanonTypeX(LParX)) = tcChar) and
-           IsOneCharLiteral(LM.Tree.NodeText(LCore)) then
+        // A one-character literal is a Char constant (IsCharLiteralExpr -
+        // through parentheses and both branches of an inline `if`, every
+        // piece of `#13#10` counted): a `Char` parameter fits it best, a
+        // string one next (the literal's own type here), an AnsiChar one
+        // least - 'a' takes F(WideChar) over F(AnsiChar) and F(string) over
+        // F(AnsiChar), either order (local/probe-b31 O2, probe-b32 P1).
+        if (XCatOf(CanonTypeX(LParX)) = tcChar) and
+           IsCharLiteralExpr(LM.Tree, LCore) then
         begin
           var LCharX := CanonTypeX(LParX);
           if PasBuiltinIsChar(FModels[LCharX.UnitId], LCharX.Sym,
@@ -11432,45 +11371,30 @@ var
           var LCanonArg := CanonTypeX(LArgX);
           if XSameType(LCanonPar, LCanonArg) then
             Inc(Result, 2)
-          // Two DIFFERENT record types REJECT the candidate. The general
-          // "the types do not fit" rule is still not attempted (see the note
-          // above), but this corner of it is decidable: distinct records are
-          // not assignable to one another, and the one thing that could make
-          // them so - a `class operator Implicit`/`Explicit` on either side -
-          // is a MEMBER, so it can be looked for.
-          else if (XCatOf(LCanonPar) = tcRecord) and
-                  (XCatOf(LCanonArg) = tcRecord) and
-                  not HasConversionOperator(LCanonPar) and
-                  not HasConversionOperator(LCanonArg) then
-            Exit(-1)
-          // An ARRAY parameter against a record/class/interface argument (or
-          // the reverse) is the same kind of decidable mismatch, and it matters
-          // because a binding stops at the FIRST declaration of a name: a
-          // derived interface that declares only the `TArray<T>` overload of a
-          // method and INHERITS the single-item one leaves the array overload
-          // as the only candidate, fitting on arity, typing the call as
-          // `TArray<...>`. Rejecting it is what lets the "nothing in the
-          // type's own chain fits, so this means an INHERITED routine"
-          // fallback do its job. `nil` and untyped arguments never reach here
-          // - they are tcNil/tcUnknown, not these three.
-          else if ((XCatOf(LCanonPar) = tcArray) and
-                   (XCatOf(LCanonArg) in [tcRecord, tcClass, tcInterface]) and
-                   not HasConversionOperator(LCanonArg)) or
-                  ((XCatOf(LCanonArg) = tcArray) and
-                   (XCatOf(LCanonPar) in [tcRecord, tcClass, tcInterface]) and
-                   not HasConversionOperator(LCanonPar)) then
+          // Two DIFFERENT record types REJECT the candidate, and so does an
+          // ARRAY parameter against a record/class/interface argument or the
+          // reverse (ArgStructRejects). The general "the types do not fit"
+          // rule is still not attempted (see the note above), but these
+          // corners are decidable: the one thing that could make them fit -
+          // a `class operator Implicit`/`Explicit` - is a MEMBER, so it can
+          // be looked for. The array one matters because a binding stops at
+          // the FIRST declaration of a name: a derived interface that
+          // declares only the `TArray<T>` overload of a method and INHERITS
+          // the single-item one leaves the array overload as the only
+          // candidate, fitting on arity; rejecting it is what lets the
+          // "nothing in the type's own chain fits, so this means an
+          // INHERITED routine" fallback do its job. `nil` and untyped
+          // arguments never reach here - they are tcNil/tcUnknown.
+          else if ArgStructRejects(XCatOf(LCanonPar), XCatOf(LCanonArg),
+                  HasConversionOperator(LCanonPar),
+                  HasConversionOperator(LCanonArg)) then
             Exit(-1)
           // A scalar where a class, an interface or a class reference is
-          // wanted (IsScalarToReference).
-          else if IsScalarToReference(XCatOf(LCanonPar), XCatOf(LCanonArg)) then
-            Exit(-1)
-          // An enumeration where another ordinal, a Boolean, a Char or a
-          // float is wanted, or one of those where an enumeration is: no
-          // implicit conversion exists either way. `Seek(0, soCurrent)` tied
-          // TStream.Seek(Longint; Word) with Seek(Int64; TSeekOrigin) once
-          // the 0 was an exact Longint, and the first declared won; dcc
-          // takes the TSeekOrigin one (local/probe-b31 O3).
-          else if ScalarEnumMismatch(XCatOf(LCanonPar), XCatOf(LCanonArg)) then
+          // wanted (IsScalarToReference); an enumeration where another
+          // ordinal, a Boolean, a Char or a float is wanted, or the reverse
+          // (ScalarEnumMismatch: `Seek(0, soCurrent)` takes Seek(Int64;
+          // TSeekOrigin) over Seek(Longint; Word), local/probe-b31 O3).
+          else if ArgCatRejects(XCatOf(LCanonPar), XCatOf(LCanonArg)) then
             Exit(-1)
           else if XAssignableX(LParX, LArgX) then
             Inc(Result, 1);
@@ -11619,8 +11543,7 @@ var
 
   var
     LHeads: TArray<TPasExtRef>;
-    LIdx, LQBase, LQSym: Integer;
-    LQExt: TPasExtRef;
+    LIdx, LQBase, LQMid, LQSym: Integer;
   begin
     LSeen := nil;
     LSeenCount := 0;
@@ -11639,40 +11562,21 @@ var
     // argument scores decide nothing whenever the argument's own type is
     // unknown - and the first candidate, the private one, used to win. 150
     // false E2361 on bigflat came from this pair alone.
+    // A qualifier may itself be dotted - `System.TMonitor.Enter(X)` writes the
+    // type as UNIT.TYPE - or an instantiation, `TGen<Integer>.Enter(A)`: the
+    // type is what TargetSym reads, the last segment or the head of `<...>`.
+    // A hand copy of this test that missed the instantiation kept the private
+    // instance `Enter(Timeout: Cardinal)` a candidate (audit B3-27). dcc
+    // itself does not filter - it picks the best and reports E2076 when that
+    // is an instance method - so in code that compiles the filter is exact
+    // (6.3.1, local/probe-b32 P3).
     LTypeQualified := False;
     if LM.Tree.Nodes[ACalleeNode].Kind = nkMember then
     begin
       LQBase := LM.Tree.Nodes[ACalleeNode].FirstChild;
-      // A qualifier may itself be dotted - `System.TMonitor.Enter(X)` writes the
-      // type as UNIT.TYPE, so the base is another nkMember and neither map has
-      // anything for that node. Its LAST segment is the type name, and reading
-      // it is what keeps the class-vs-instance rule working there: without this
-      // the private instance `function Enter(Timeout: Cardinal): Boolean` was a
-      // candidate again, and its arity tied with the public class procedure.
-      // System.Types and Vcl.Controls both spell it that way.
-      if (LQBase <> NIL_NODE) and (LM.Tree.Nodes[LQBase].Kind = nkMember) then
-      begin
-        LQSym := LM.Tree.Nodes[LQBase].FirstChild;
-        while (LQSym <> NIL_NODE) and
-              (LM.Tree.Nodes[LQSym].NextSibling <> NIL_NODE) do
-          LQSym := LM.Tree.Nodes[LQSym].NextSibling;
-        if LQSym <> NIL_NODE then
-          LQBase := LQSym;
-      end;
-      if LQBase <> NIL_NODE then
-      begin
-        LQSym := RefAt(LQBase);
-        if LQSym <> NIL_SYM then
-          LTypeQualified := LM.Symbols[LQSym].Kind in [skType, skBuiltinType]
-        // ExtOf, not the committed map alone - "the two must be read together
-        // everywhere". A qualifier this same walk resolved into the overlay
-        // was invisible here, so it did not read as a TYPE and instance
-        // methods were re-admitted for the class-vs-instance pairs this test
-        // exists to separate.
-        else if ExtOf(LQBase, LQExt) then
-          LTypeQualified := FModels[LQExt.UnitId].Symbols[LQExt.Sym].Kind in
-            [skType, skBuiltinType];
-      end;
+      LTypeQualified := (LQBase <> NIL_NODE) and
+        TargetSym(LQBase, LQMid, LQSym) and
+        (FModels[LQMid].Symbols[LQSym].Kind in [skType, skBuiltinType]);
     end;
     // Two passes at most: the second, without the type-argument filter, only
     // when the first found nothing (see the comment above the function).
@@ -16428,9 +16332,9 @@ function TPasSemaProject.LiteralTypeName(const ATree: TPasTree; ANode: Integer;
   ANegated: Boolean): string;
 var
   LTxt: string;
-  LTok, LIdx, LUnits, LFrac: Integer;
+  LIdx, LUnits, LFrac: Integer;
   LU: UInt64;
-  LHasExp, LInFrac, LSkipLetter: Boolean;
+  LHasExp, LInFrac: Boolean;
   LVal: Extended;
 begin
   Result := '';
@@ -16514,64 +16418,11 @@ begin
 
     nkStrLit:
       begin
-        // Count UTF-16 units over every visible token of the node.
-        LUnits := 0;
-        LSkipLetter := False;
-        for LTok := ATree.Nodes[ANode].FirstToken to
-            ATree.Nodes[ANode].LastToken do
-        begin
-          if (LTok < 0) or (LTok > High(ATree.Source.Visible)) then
-            Exit;
-          if LSkipLetter then
-          begin
-            LSkipLetter := False;
-            Continue;
-          end;
-          LTxt := ATree.Source.VisibleText(LTok);
-          if LTxt = '' then
-            Exit;
-          if LTxt[1] = '^' then
-          begin
-            // Caret char (B.6.2): `^[` is one token, `^M` is `^` plus a
-            // one-letter identifier token - one unit either way.
-            LSkipLetter := Length(LTxt) = 1;
-            Inc(LUnits);
-          end
-          else if LTxt[1] = '#' then
-          begin
-            // #nnn / #$hh / #%bbb - one unit unless the value needs a
-            // surrogate pair.
-            LTxt := StringReplace(LTxt, '_', '', [rfReplaceAll]);
-            LTxt := Copy(LTxt, 2, MaxInt);
-            if (LTxt <> '') and (LTxt[1] = '%') then
-              Inc(LUnits)   // a binary escape is at most 8 bits in practice
-            else if TryStrToUInt64(LTxt, LU) then
-            begin
-              if LU > $FFFF then
-                Inc(LUnits, 2)
-              else
-                Inc(LUnits);
-            end
-            else
-              Exit;
-          end
-          else if (Length(LTxt) >= 2) and (LTxt[1] = '''') then
-          begin
-            // Quoted: each character one unit, a doubled quote one unit.
-            LIdx := 2;
-            while LIdx < Length(LTxt) do
-            begin
-              if (LTxt[LIdx] = '''') then
-                Inc(LIdx);   // the escape's second quote
-              Inc(LUnits);
-              Inc(LIdx);
-            end;
-          end
-          else
-            Exit;   // a multiline string or anything unexpected: not a Char
-          if LUnits > 1 then
-            Break;
-        end;
+        // UTF-16 units over every visible token of the node (StrLitUnits,
+        // the one count the scorers read too - audit A4-07).
+        LUnits := StrLitUnits(ATree, ANode);
+        if LUnits < 0 then
+          Exit;   // a multiline string or anything unexpected: not a Char
         if LUnits = 1 then
           Result := 'char'
         else

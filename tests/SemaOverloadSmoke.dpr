@@ -215,6 +215,89 @@ const
     '  X := R(''a'').W;'#10 +
     'end;'#10'end.'#10;
 
+  { The unit scorer applies the project scorer's rules (audit B32, 6.3.1,
+    dcc64 37.0, local/probe-b32 P1): `#13#10` / `'a'#0` are strings, `('x')`
+    and an inline `if` of two literals are Chars, a weak alias is its target's
+    own type, an anonymous method / a procedure designator rejects a Boolean,
+    two distinct records reject each other. Each TRW overload is dcc's pick;
+    on 0.98.3 every call typed TRA. Pick(11) fits no candidate (a class
+    parameter) and must not take the head's result. }
+  SRC_SCORE =
+    'unit U;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TId = Integer;'#10 +
+    '  TRc = record A: Integer; end;'#10 +
+    '  TPt = record X: Integer; end;'#10 +
+    '  TMyRc = TRc;'#10 +
+    '  TMyInt = Int64;'#10 +
+    '  TMyProc = reference to procedure;'#10 +
+    '  TFoo = class end;'#10 +
+    'function P(C: Char): TRA; overload;'#10 +
+    'function P(const S: string): TRW; overload;'#10 +
+    'function Q(const S: string): TRA; overload;'#10 +
+    'function Q(C: Char): TRW; overload;'#10 +
+    'function F(A: Int64): TRA; overload;'#10 +
+    'function F(A: TId): TRW; overload;'#10 +
+    'function R(const A: TPt): TRA; overload;'#10 +
+    'function R(const A: TRc): TRW; overload;'#10 +
+    'function G(A: Integer): TRA; overload;'#10 +
+    'function G(A: Int64): TRW; overload;'#10 +
+    'function M(A: Integer; B: Boolean = False): TRA; overload;'#10 +
+    'function M(A: Integer; P: TMyProc): TRW; overload;'#10 +
+    'function Pick(O: TFoo): TRA;'#10 +
+    'procedure Noop;'#10 +
+    'implementation'#10 +
+    'function P(C: Char): TRA; begin end;'#10 +
+    'function P(const S: string): TRW; begin end;'#10 +
+    'function Q(const S: string): TRA; begin end;'#10 +
+    'function Q(C: Char): TRW; begin end;'#10 +
+    'function F(A: Int64): TRA; begin end;'#10 +
+    'function F(A: TId): TRW; begin end;'#10 +
+    'function R(const A: TPt): TRA; begin end;'#10 +
+    'function R(const A: TRc): TRW; begin end;'#10 +
+    'function G(A: Integer): TRA; begin end;'#10 +
+    'function G(A: Int64): TRW; begin end;'#10 +
+    'function M(A: Integer; B: Boolean = False): TRA; begin end;'#10 +
+    'function M(A: Integer; P: TMyProc): TRW; begin end;'#10 +
+    'function Pick(O: TFoo): TRA; begin end;'#10 +
+    'procedure Noop; begin end;'#10 +
+    'procedure Test;'#10 +
+    'var X: TRW; I: Integer; RR: TMyRc; MI: TMyInt; B: Boolean;'#10 +
+    'begin'#10 +
+    '  X := P(#13#10);'#10 +
+    '  X := P(''a''#0);'#10 +
+    '  X := Q((''x''));'#10 +
+    '  X := Q(if B then ''a'' else ''b'');'#10 +
+    '  X := F(I);'#10 +
+    '  X := R(RR);'#10 +
+    '  X := G(MI);'#10 +
+    '  X := M(1, procedure begin end);'#10 +
+    '  X := M(1, Noop);'#10 +
+    '  I := Pick(11).A;'#10 +
+    'end;'#10'end.'#10;
+
+  { The Char-literal and nil exemptions of the assignment check (A4-10,
+    A4-11; probe-b32 P1): dcc compiles every line but the last, where an
+    operator-less record takes nil - E2010 naming `Pointer`, not `_nil`. }
+  SRC_ASSIGN =
+    'unit U;'#10'interface'#10'type'#10 +
+    '  TPtrRec = record P: Pointer;'#10 +
+    '    class operator Implicit(Value: Pointer): TPtrRec; end;'#10 +
+    '  TPlain = record P: Pointer; end;'#10 +
+    'implementation'#10 +
+    'class operator TPtrRec.Implicit(Value: Pointer): TPtrRec; begin end;'#10 +
+    'procedure Test;'#10 +
+    'var Ch: Char; B: Boolean; Q: TPtrRec; N: TPlain;'#10 +
+    'begin'#10 +
+    '  Ch := (''x'');'#10 +
+    '  Ch := ((#65));'#10 +
+    '  Ch := if B then ''a'' else ''b'';'#10 +
+    '  Ch := if B then ''a'' else Ch;'#10 +
+    '  Q := nil;'#10 +
+    '  N := nil;'#10 +
+    'end;'#10'end.'#10;
+
 begin
   GSM := TPasSourceManager.Create([]);
   GDefines := TPasDefines.Create(['MSWINDOWS', 'WIN32']);
@@ -266,6 +349,25 @@ begin
     Ok('builtin identity: ' + LName + ' binds the TRW overload',
       HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
   Ok('builtin identity: no E2003', DiagCount('E2003') = 0);
+  GModel.Free;
+
+  Analyze(SRC_SCORE);
+  for var LName in ['P', 'Q', 'F', 'R', 'G', 'M'] do
+    Ok('one scorer: ' + LName + ' binds the TRW overload',
+      HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
+  Ok('one scorer: Pick(11) rejected by its only candidate is untyped',
+    not HasCallTyped('Pick', 'TRA'));
+  Ok('one scorer: no E2010', DiagCount('E2010') = 0);
+  GModel.Free;
+
+  Analyze(SRC_ASSIGN);
+  Ok('char literal in parentheses / inline if, nil to an Implicit record:' +
+    ' only the operator-less record is E2010', DiagCount('E2010') = 1);
+  for var LDiag in GModel.Diags do
+    if LDiag.Code = 'E2010' then
+      Ok('nil is named Pointer in E2010 [' + LDiag.Msg + ']',
+        LDiag.Msg.Contains('''Pointer''') and
+        not LDiag.Msg.Contains('_nil'));
   GModel.Free;
 
   if GCounter.Finish('SemaOverloadSmoke') then
