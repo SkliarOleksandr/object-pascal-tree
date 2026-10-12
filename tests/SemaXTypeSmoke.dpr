@@ -2033,6 +2033,53 @@ const
     ('for B to W', 'Integer', 'Integer'),
     ('for U64 to 0', 'UInt64', 'UInt64'),
     ('for 0 to C', 'Cardinal', 'Cardinal'));
+  // B36b: expression, its type (dcc32 = dcc64) - text joins, Concat, the
+  // inline if, a set with a set constructor, the array pseudo-constructor.
+  CTEXT: array[0..43] of array[0..1] of string = (
+    ('A + ''x''', 'AnsiString'),
+    ('''x'' + A', 'AnsiString'),
+    ('WS + ''x''', 'WideString'),
+    ('WS + A', 'WideString'),
+    ('A + WS', 'WideString'),
+    ('SS + A', 'AnsiString'),
+    ('SS + SS', 'AnsiString'),
+    ('SS + ''x''', 'AnsiString'),
+    ('A + #0', 'AnsiString'),
+    ('U8 + ''x''', 'UTF8String'),
+    ('U8 + A', 'string'),
+    ('RB + A', 'RawByteString'),
+    ('U8 + RB', 'UTF8String'),
+    ('AC + AC', 'ShortString'),
+    ('AC + ''x''', 'string'),
+    ('AC + A', 'AnsiString'),
+    ('S + A', 'string'),
+    ('A + Ch', 'string'),
+    ('Concat(A, ''x'')', 'AnsiString'),
+    ('Concat(WS, A)', 'WideString'),
+    ('Concat(U8, ''x'')', 'UTF8String'),
+    ('Concat(SS, A)', 'AnsiString'),
+    ('Concat(A, U8)', 'string'),
+    ('if Bo then 1 else I64', 'Int64'),
+    ('if Bo then B else W', 'Word'),
+    ('if Bo then B else Sh', 'SmallInt'),
+    ('if Bo then C else I', 'Int64'),
+    ('if Bo then 1 else C', 'Cardinal'),
+    ('if Bo then I64 else U64', 'UInt64'),
+    ('if Bo then ''a'' else ''bc''', 'string'),
+    ('if Bo then Ch else ''x''', 'Char'),
+    ('if Bo then A else ''x''', 'string'),
+    ('if Bo then A else WS', 'WideString'),
+    ('if Bo then Ob2 else Ob1', 'TO1'),
+    ('if Bo then Ob1 else Ob2', 'TO1'),
+    ('if Bo then nil else Ob2', 'TO2'),
+    ('if Bo then Sg else D', 'Extended'),
+    ('if Bo then MI else MI', 'TMyI'),
+    ('if Bo then MW else W', 'Word'),
+    ('if Bo then St else [e1]', 'TES'),
+    ('St + [e1]', 'TES'),
+    ('St - [e1]', 'TES'),
+    ('St * [e1]', 'TES'),
+    ('TBytes.Create(1, 2)', 'TBytes'));
 
   UNIT_XKW =
     'unit XKW;'#10'interface'#10 +
@@ -3078,6 +3125,51 @@ begin
         if TDirectory.Exists(LDir) then
           TDirectory.Delete(LDir, True);
       end;
+    end;
+  end;
+
+  // ---- B36b: text joins take a literal into the other operand's string
+  // type, Concat folds them, an inline `if` unifies its branches, `St +
+  // [e1]` is St's type, `TBytes.Create(...)` the array type (audit A3-34,
+  // E3-19, E3-43, E3-38; local/probe-b36 M2 N1). ----
+  begin
+    var LSrc :=
+      'unit XTX;'#10'interface'#10 +
+      'type'#10 +
+      '  UTF8String = type AnsiString(65001);'#10 +
+      '  RawByteString = type AnsiString($ffff);'#10 +
+      '  TE = (e0, e1, e2); TES = set of TE;'#10 +
+      '  TO1 = class end; TO2 = class(TO1) end;'#10 +
+      '  TMyI = type Integer; TMyW = type Word;'#10 +
+      '  TBytes = array of Byte;'#10 +
+      'implementation'#10 +
+      'procedure P;'#10 +
+      'var A: AnsiString; WS: WideString; SS: ShortString; S: string;'#10 +
+      '  U8: UTF8String; RB: RawByteString; Ch: Char; AC: AnsiChar;'#10 +
+      '  Bo: Boolean; B: Byte; Sh: ShortInt; W: Word; I: Integer;'#10 +
+      '  C: Cardinal; I64: Int64; U64: UInt64; Sg: Single; D: Double;'#10 +
+      '  MI: TMyI; MW: TMyW; Ob1: TO1; Ob2: TO2; St: TES;'#10 +
+      'begin'#10;
+    for var LRow := 0 to High(CTEXT) do
+      LSrc := LSrc + Format('  var T%.2d := %s;'#10, [LRow, CTEXT[LRow][0]]);
+    LSrc := LSrc + 'end;'#10'end.'#10;
+    LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype_text');
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+    TDirectory.CreateDirectory(LDir);
+    TFile.WriteAllText(TPath.Combine(LDir, 'XTX.pas'), LSrc);
+    GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+    try
+      GProj.AnalyzeDirectory(LDir);
+      LE := ModelByName('xtx');
+      Ok('XTX loaded', Assigned(LE));
+      for var LRow := 0 to High(CTEXT) do
+        Eq('4.2.1 / 5.4.1: ' + CTEXT[LRow][0],
+          XTypeOf(LE, Format('T%.2d', [LRow])), CTEXT[LRow][1]);
+    finally
+      GProj.Free;
+      if TDirectory.Exists(LDir) then
+        TDirectory.Delete(LDir, True);
     end;
   end;
 

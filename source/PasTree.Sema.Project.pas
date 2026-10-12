@@ -764,6 +764,8 @@ type
       const AL, AR: TSemaXType; AKeepOwn: Boolean): TSemaXType;
     function ForCounterTypeX(AMid, AFrom, ATo: Integer;
       const AFromX, AToX: TSemaXType): TSemaXType;
+    function InlineIfX(AMid, AThen, AElse: Integer;
+      const AT, AE: TSemaXType): TSemaXType;
     function RecordOperatorX(AOp: TPasTokenKind; AUnary: Boolean;
       const AL, AR: TSemaXType): TSemaXType;
     function UntypedInitTypeX(AMid, ANode: Integer;
@@ -13341,7 +13343,17 @@ var
             // callee is a type designator, so the call is that type - the
             // with-target typer's first reading of every call, kept here for
             // the shapes the member walk above does not reach.
-            if LM.Tree.Nodes[LBase].Kind in [nkIdent, nkMember, nkTypeArgs] then
+            // `TBytes.Create($EF, $BB)`: the dynamic-array pseudo-constructor
+            // is a CALL of the array type (8.2.3; the member case above typed
+            // the paren-less form, which dcc rejects with E2029 - audit E3-38).
+            if (LM.Tree.Nodes[LBase].Kind = nkMember) and
+               XValid(GetX(LBase)) and IsDynArrayTypeX(GetX(LBase)) and
+               (LM.Tree.Nodes[LBase].FirstChild <> NIL_NODE) and
+               LM.Tree.NodeTextEquals(
+                 LM.Tree.Nodes[LM.Tree.Nodes[LBase].FirstChild].NextSibling,
+                 'create') then
+              SetXAt(N, GetX(LBase))
+            else if LM.Tree.Nodes[LBase].Kind in [nkIdent, nkMember, nkTypeArgs] then
               SetXAt(N, ResolveTypeExprNested(AId, LBase));
             // The callee is not a designator at all - `GetFunc(1)(2)`,
             // `Handlers[I](Sender)`: type the expression and call its type.
@@ -13502,7 +13514,15 @@ var
           LChild := LM.Tree.Nodes[N].FirstChild;   // cond, then, else
           if (LChild <> NIL_NODE) and
              (LM.Tree.Nodes[LChild].NextSibling <> NIL_NODE) then
-            SetXAt(N, GetX(LM.Tree.Nodes[LChild].NextSibling));
+          begin
+            LChild := LM.Tree.Nodes[LChild].NextSibling;
+            LBase := LM.Tree.Nodes[LChild].NextSibling;
+            if LBase = NIL_NODE then
+              SetXAt(N, GetX(LChild))
+            else
+              SetXAt(N, InlineIfX(AId, LChild, LBase, GetX(LChild),
+                GetX(LBase)));
+          end;
         end;
 
       // 3.1.3: `var L := Expr;` / `const C = Expr;` in a body, no type
@@ -16166,6 +16186,7 @@ var
   LA, LC: TSemaXType;
   LName: string;
   LSame, LDyn: Boolean;
+  LFacts, LNextF: TSemaOpFacts;
 
   function CanonName(const AX: TSemaXType): string;
   var
@@ -16315,37 +16336,54 @@ begin
       begin
         if not XValid(LA) then
           Exit;
-        // One type throughout, or `string`.
-        LSame := True;
+        if XCatOf(LA) = tcArray then
+        begin
+          // One array type throughout.
+          LSame := True;
+          LIdx := 1;
+          LArg := LM.Tree.Nodes[LArg].NextSibling;
+          while LArg <> NIL_NODE do
+          begin
+            if LIdx < Length(AArgX) then
+              LC := IntrinsicArgX(AMid, LArg, AArgX[LIdx])
+            else
+              LC := IntrinsicArgX(AMid, LArg, XNil);
+            if not XSameType(LC, LA) then
+              LSame := False;
+            Inc(LIdx);
+            LArg := LM.Tree.Nodes[LArg].NextSibling;
+          end;
+          if LSame then
+            Result := LA;
+          Exit;
+        end;
+        // Text: `+` folded left to right (TextJoinAnswer; audit A3-34:
+        // Concat(A, 'x') is AnsiString, Concat(WS, A) WideString).
+        LFacts := OpFactsX(AMid, LArg, CanonTypeX(LA));
+        if not (LFacts.Cat in [tcString, tcChar]) and
+           not (LFacts.Text in [stkLit, stkCharLit]) then
+          Exit;
+        Result := CanonTypeX(LA);
+        if LFacts.Text in [stkLit, stkCharLit] then
+          Result := BuiltinX(AMid, 'string');
         LIdx := 1;
         LArg := LM.Tree.Nodes[LArg].NextSibling;
         while LArg <> NIL_NODE do
         begin
           if LIdx < Length(AArgX) then
-            LC := IntrinsicArgX(AMid, LArg, AArgX[LIdx])
+            LC := CanonTypeX(IntrinsicArgX(AMid, LArg, AArgX[LIdx]))
           else
-            LC := IntrinsicArgX(AMid, LArg, XNil);
-          if not XSameType(LC, LA) then
-            LSame := False;
+            LC := CanonTypeX(IntrinsicArgX(AMid, LArg, XNil));
+          LNextF := OpFactsX(AMid, LArg, LC);
+          Result := OpAnswerX(AMid, TextJoinAnswer(LFacts, LNextF,
+            not (LFacts.Text in [stkLit, stkCharLit]) and
+            not (LNextF.Text in [stkLit, stkCharLit]) and
+            XSameType(Result, LC)), Result, LC, False);
+          if not XValid(Result) then
+            Exit;
+          LFacts := OpFactsX(AMid, NIL_NODE, Result);
           Inc(LIdx);
           LArg := LM.Tree.Nodes[LArg].NextSibling;
-        end;
-        case XCatOf(LA) of
-          tcArray:
-            if LSame then
-              Result := LA;
-          tcString:
-            if not LSame then
-              Result := BuiltinX(AMid, 'string')
-            else if CanonName(LA) = 'shortstring' then
-              Result := BuiltinX(AMid, 'ansistring')
-            else
-              Result := LA;
-          tcChar:
-            if LSame and (CanonName(LA) = 'ansichar') then
-              Result := BuiltinX(AMid, 'shortstring')
-            else
-              Result := BuiltinX(AMid, 'string');
         end;
       end;
     irDefault:
@@ -16620,9 +16658,27 @@ var
 begin
   Result := Default(TSemaOpFacts);
   Result.Cat := XCatOf(AX);
+  if ANode <> NIL_NODE then
+  begin
+    LLit := PeelParens(FModels[AMid].Tree, ANode);
+    Result.SetCtor := (LLit <> NIL_NODE) and
+      (FModels[AMid].Tree.Nodes[LLit].Kind = nkSetCtor);
+    // A text literal - or a true constant naming one - is its own kind
+    // whatever it was typed (A3-34: `A + 'x'` takes A's string type).
+    ConstValueNodeX(AMid, ANode, LVMid, LVNode);
+    if (LVNode <> NIL_NODE) and
+       (FModels[LVMid].Tree.Nodes[LVNode].Kind in [nkStrLit, nkCaretChar]) then
+    begin
+      if (FModels[LVMid].Tree.Nodes[LVNode].Kind = nkCaretChar) or
+         IsOneCharLiteralNode(FModels[LVMid].Tree, LVNode) then
+        Result.Text := stkCharLit
+      else
+        Result.Text := stkLit;
+      Exit;
+    end;
+  end;
   if (ANode <> NIL_NODE) and (Result.Cat in [tcInteger, tcFloat]) then
   begin
-    ConstValueNodeX(AMid, ANode, LVMid, LVNode);
     if Result.Cat = tcInteger then
       Result.IntConst := IntLiteralValue(FModels[LVMid].Tree, LVNode,
         Result.IntValue)
@@ -16636,22 +16692,99 @@ begin
         (RealLiteralNode(FModels[AMid].Tree, ANode) = NIL_NODE);
     end;
   end;
-  if Result.Cat in [tcInteger, tcFloat] then
+  if Result.Cat in [tcInteger, tcFloat, tcString, tcChar] then
     LB := StorageBaseX(AX)
   else
     LB := AX;
-  if not XValid(LB) or
-     (FModels[LB.UnitId].Symbols[LB.Sym].Kind <> skBuiltinType) then
+  if not XValid(LB) then
     Exit;
   LS := FModels[LB.UnitId].Symbols[LB.Sym];
+  if LS.Kind <> skBuiltinType then
+  begin
+    // `string[N]` is a ShortString; `UTF8String = type AnsiString(65001)`
+    // reads as a call of the string type, RawByteString is the $ffff one.
+    if Result.Cat = tcString then
+    begin
+      LLit := TypeDefNodeOf(LB.UnitId, LB.Sym);
+      if LLit <> NIL_NODE then
+        case FModels[LB.UnitId].Tree.Nodes[LLit].Kind of
+          nkStringType:
+            Result.Text := stkShort;
+          nkCall:
+            if LS.NameLower = 'rawbytestring' then
+              Result.Text := stkRaw
+            else
+              Result.Text := stkCodePage;
+        end;
+    end;
+    Exit;
+  end;
   Result.Rank := LS.NumRank;
   Result.Unsigned := NameIs(['byte', 'word', 'cardinal', 'longword', 'uint64',
     'nativeuint']);
   Result.Curr := NameIs(['currency']) and not Result.RealLit;
   Result.Comp := NameIs(['comp']);
-  Result.UniText := NameIs(['string', 'unicodestring', 'char', 'widechar']);
-  Result.AnsiStr := NameIs(['ansistring']);
-  Result.AnsiChr := NameIs(['ansichar']);
+  if Result.Cat in [tcString, tcChar] then
+    if NameIs(['string', 'unicodestring']) then
+      Result.Text := stkUni
+    else if NameIs(['char', 'widechar']) then
+      Result.Text := stkChar
+    else if NameIs(['widestring']) then
+      Result.Text := stkWide
+    else if NameIs(['shortstring']) then
+      Result.Text := stkShort
+    else if NameIs(['ansistring']) then
+      Result.Text := stkAnsi
+    else if NameIs(['ansichar']) then
+      Result.Text := stkAnsiChar;
+end;
+
+{ `if C then L else R` (5.4.1) from its branch nodes AThen / AElse of model
+  AMid, typed AT / AE: `nil` takes the other branch (both: Pointer), a
+  `[...]` the other branch's set type, two classes the one the other
+  descends from, the rest the shared rule (InlineIfAnswer; audit E3-19: the
+  THEN branch's type was the whole's). XNil when a branch is untyped. }
+function TPasSemaProject.InlineIfX(AMid, AThen, AElse: Integer;
+  const AT, AE: TSemaXType): TSemaXType;
+var
+  LT, LE: TSemaXType;
+  LcT, LcE: TSemaTypeCat;
+  LTree: TPasTree;
+begin
+  Result := XNil;
+  LTree := FModels[AMid].Tree;
+  LT := CanonTypeX(AT);
+  LE := CanonTypeX(AE);
+  LcT := XCatOf(LT);
+  LcE := XCatOf(LE);
+  if LcT = tcNil then
+  begin
+    if LcE = tcNil then
+      Exit(BuiltinX(AMid, 'pointer'));
+    Exit(AE);
+  end;
+  if LcE = tcNil then
+    Exit(AT);
+  if (LcT = tcSet) and (AElse <> NIL_NODE) and
+     (LTree.Nodes[PeelParens(LTree, AElse)].Kind = nkSetCtor) then
+    Exit(AT);
+  if (LcE = tcSet) and (AThen <> NIL_NODE) and
+     (LTree.Nodes[PeelParens(LTree, AThen)].Kind = nkSetCtor) then
+    Exit(AE);
+  if not XValid(LT) or not XValid(LE) then
+    Exit;
+  if XSameType(LT, LE) then
+    Exit(AT);
+  if (LcT = tcClass) and (LcE = tcClass) then
+  begin
+    if XDescendsFrom(LT, LE) then
+      Exit(AE);
+    if XDescendsFrom(LE, LT) then
+      Exit(AT);
+    Exit;
+  end;
+  Result := OpAnswerX(AMid, InlineIfAnswer(OpFactsX(AMid, AThen, LT),
+    OpFactsX(AMid, AElse, LE), False, FInfo.Is64Bit), LT, LE, False);
 end;
 
 { The type OperatorAnswer's AAns names for the canonical operands AL / AR of
@@ -16687,6 +16820,8 @@ begin
     oaCardinal: Result := BuiltinX(AMid, 'cardinal');
     oaUInt64: Result := BuiltinX(AMid, 'uint64');
     oaComp: Result := BuiltinX(AMid, 'comp');
+    oaWideString: Result := BuiltinX(AMid, 'widestring');
+    oaShortString: Result := BuiltinX(AMid, 'shortstring');
   else
     Result := XNil;
   end;
@@ -17117,8 +17252,16 @@ begin
       begin
         LLit := LM.Tree.Nodes[ANode].FirstChild;   // cond, then, else
         if (LLit <> NIL_NODE) and (LM.Tree.Nodes[LLit].NextSibling <> NIL_NODE) then
-          Result := UntypedInitTypeX(AMid, LM.Tree.Nodes[LLit].NextSibling,
-            AFollowForeign);
+        begin
+          LLit := LM.Tree.Nodes[LLit].NextSibling;
+          if LM.Tree.Nodes[LLit].NextSibling = NIL_NODE then
+            Result := UntypedInitTypeX(AMid, LLit, AFollowForeign)
+          else
+            Result := InlineIfX(AMid, LLit, LM.Tree.Nodes[LLit].NextSibling,
+              UntypedInitTypeX(AMid, LLit, AFollowForeign),
+              UntypedInitTypeX(AMid, LM.Tree.Nodes[LLit].NextSibling,
+                AFollowForeign));
+        end;
       end;
     nkIdent, nkMember, nkCall, nkIndex, nkDeref, nkTypeArgs, nkInherited:
       // A designator naming a TRUE CONSTANT of another unit has no

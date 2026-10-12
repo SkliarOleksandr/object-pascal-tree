@@ -510,6 +510,48 @@ begin
     'Currency');
   GModel.Free;
 
+  // B36b in the unit's typer: a literal joins the other operand's string
+  // type, Concat folds the join, an inline `if` unifies its branches, `St +
+  // [e1]` keeps St's type (audit A3-34, E3-19, E3-43).
+  const TXT =
+    'unit u;'#10'interface'#10 +
+    'type TE = (e0, e1); TES = set of TE;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var A: AnsiString; WS: WideString; AC: AnsiChar; Ch: Char; Bo: Boolean;'#10 +
+    '  I64: Int64; B: Byte; W: Word; St: TES; P1: Pointer;'#10 +
+    '  R01, R02, R03, R04, R05, R06, R07, R08, R09: Variant;'#10 +
+    'begin'#10 +
+    '  R01 := A + ''x'';'#10 +
+    '  R02 := WS + A;'#10 +
+    '  R03 := AC + AC;'#10 +
+    '  R04 := Concat(A, ''x'');'#10 +
+    '  R05 := if Bo then 1 else I64;'#10 +
+    '  R06 := if Bo then B else W;'#10 +
+    '  R07 := if Bo then Ch else ''x'';'#10 +
+    '  R08 := St + [e1];'#10 +
+    '  R09 := if Bo then nil else P1;'#10 +
+    'end;'#10 +
+    'end.'#10;
+  Analyze(TXT);
+  Eq('4.2.1: AnsiString + literal is AnsiString', AssignedType('R01'),
+    'AnsiString');
+  Eq('4.2.1: WideString + AnsiString is WideString', AssignedType('R02'),
+    'WideString');
+  Eq('4.2.1: AnsiChar + AnsiChar is ShortString', AssignedType('R03'),
+    'ShortString');
+  Eq('4.11: Concat(AnsiString, literal) is AnsiString', AssignedType('R04'),
+    'AnsiString');
+  Eq('5.4.1: if then 1 else Int64 is Int64', AssignedType('R05'), 'Int64');
+  Eq('5.4.1: if then Byte else Word is Word', AssignedType('R06'), 'Word');
+  Eq('5.4.1: if then Char else one-char literal is Char',
+    AssignedType('R07'), 'Char');
+  Eq('4.6: a set plus a set constructor is the set type', AssignedType('R08'),
+    'TES');
+  Eq('5.4.1: if then nil else Pointer is Pointer', AssignedType('R09'),
+    'Pointer');
+  GModel.Free;
+
   // A subrange takes its category from a bound that is an enumeration value
   // or a constant too, not only from a literal (audit E3-18): TWork is an
   // enumeration subrange - `if W` is E2012 as in dcc - and TNeg an integer

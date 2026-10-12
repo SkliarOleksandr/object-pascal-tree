@@ -180,8 +180,11 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   (`Sub and Sub` over `0..9` is ShortInt in dcc). A true constant
   operand adapts to the other operand by its value only when it is a
   literal or names one - a folded constant expression (`N + 1` in a
-  constant) is read as its declared shape. `AnsiChar + AnsiChar` and
-  pointer minus pointer are left untyped.
+  constant) is read as its declared shape. `AnsiChar + AnsiChar` (dcc's
+  anonymous short string) is typed ShortString; pointer minus pointer is
+  left untyped. The intra-unit typer cannot tell a code-page string declared
+  in another unit (UTF8String, RawByteString) from a plain AnsiString-kind
+  type it does not see, so those joins are the project level's.
 
 ### 4.9 Type-test & type-cast operators (`is`, `as`)
 - a type name on the right of `is` ends that operand (`O is TFoo and C` is
@@ -216,6 +219,13 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   operator checks.
 
 ## 05-statements.md
+
+### 5.4.1 Inline `if` expression
+- the branches are unified by the spec's rule in both typers; a pair the
+  rule leaves open - an integer with a real (dcc rejects one order and
+  accepts the other), two classes neither descending from the other, two
+  unrelated string kinds - is untyped, and the intra-unit typer leaves any
+  two different classes to the project, which sees the whole ancestry.
 
 ### 5.5.2 `for … in` (for-in loop)
 - an untyped `for var E in C` element is typed from the collection at the
