@@ -337,6 +337,13 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   generic call-selector path (an nkCall in type position); there is no
   dedicated AST shape for the codepage clause.
 
+### 7.2.1 String indexing
+- an element of a 1-byte string or a PAnsiChar is AnsiChar everywhere; dcc
+  types it so too but, beside an `AnsiString` overload, calls that overload
+  for `F(PA[0])`, `F(S20[1])` of a `string[N]` and `F(Cy[1])` of a code-page
+  string (not for `F(A[1])` or `F(PA^)`) - PasTree binds the AnsiChar one
+  there.
+
 ## 08-arrays.md
 
 ### 8.1.2 Multidimensional static arrays

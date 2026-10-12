@@ -1389,7 +1389,7 @@ end;
 function TPasCompletion.ElementTypeOf(const ABase: TPasComplTypeRef;
   ADepth: Integer): TPasComplTypeRef;
 var
-  LDef, LElem, LMid, LSym: Integer;
+  LDef, LElem: Integer;
   LM: TPasSemaModel;
 begin
   Result := ComplNilRef;
@@ -1412,15 +1412,19 @@ begin
   if (FProj = nil) or not XValid(ABase.X) then
     Exit;
   LM := ProjModel(ABase.X.UnitId, 'ElementTypeOf');
-  // Indexing a STRING yields its Char (7.1) - the seeds have no def node.
-  if (LM.Symbols[ABase.X.Sym].Kind = skBuiltinType) and
-     (LM.Symbols[ABase.X.Sym].TypeCat = tcString) then
+  // Indexing a STRING yields its character type - AnsiChar for the 1-byte
+  // kinds, `string[N]` and the code-page strings included (7.2.1; the
+  // project's StringElementX, audit B3-29: this answered Char for all).
+  Result.X := FProj.StringElementX(ABase.X.UnitId, ABase.X);
+  if XValid(Result.X) then
   begin
-    if BridgeName('char', LMid, LSym) then
-    begin
-      Result.X := XPlain(LMid, LSym);
-      Result.IsTypeRef := False;
-    end;
+    Result.IsTypeRef := False;
+    Exit;
+  end;
+  // A character pointer's element is its character (no declaration node).
+  if LM.Symbols[ABase.X.Sym].Kind = skBuiltinType then
+  begin
+    Result.X := FProj.PointeeX(ABase.X);
     Exit;
   end;
   LDef := ProjectTypeDef(ABase.X);
@@ -1442,9 +1446,6 @@ begin
       end;
     nkPointerType:
       Result.X := FProj.PointeeX(ABase.X);   // P[I] - pointer indexing
-    nkStringType:
-      if BridgeName('char', LMid, LSym) then
-        Result.X := XPlain(LMid, LSym);
     nkIdent, nkMember, nkTypeArgs:
       begin
         // An alias - chase it and index THAT.

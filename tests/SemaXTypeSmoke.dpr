@@ -2078,6 +2078,36 @@ const
     ('Ord(S200)', 'Byte', 'Byte'),
     ('Ord(SCW)', 'SmallInt', 'SmallInt'),
     ('Ord(WB)', 'Word', 'Word'));
+  // B39: a string's and a character pointer's element, a `for var` over a
+  // string, an inline `string[N]` (see the fixture; `for X` walks X).
+  CSTRE: array[0..26] of array[0..1] of string = (
+    ('P^', 'Char'),
+    ('P[0]', 'Char'),
+    ('(P + 1)^', 'Char'),
+    ('PA[0]', 'AnsiChar'),
+    ('AP[0][1]', 'Char'),
+    ('APA[0][1]', 'AnsiChar'),
+    ('P + 1', 'PChar'),
+    ('A[1]', 'AnsiChar'),
+    ('SS[1]', 'AnsiChar'),
+    ('S20[1]', 'AnsiChar'),
+    ('SI20[1]', 'AnsiChar'),
+    ('R[1]', 'AnsiChar'),
+    ('U8[1]', 'AnsiChar'),
+    ('Cy[1]', 'AnsiChar'),
+    ('S[1]', 'Char'),
+    ('W[1]', 'Char'),
+    ('SI20', 'ShortString'),
+    ('O.FS', 'ShortString'),
+    ('O.FS[1]', 'AnsiChar'),
+    ('for A', 'AnsiChar'),
+    ('for SS', 'AnsiChar'),
+    ('for S20', 'AnsiChar'),
+    ('for SI20', 'AnsiChar'),
+    ('for R', 'AnsiChar'),
+    ('for U8', 'AnsiChar'),
+    ('for S', 'Char'),
+    ('for W', 'Char'));
   // B36b: expression, its type (dcc32 = dcc64) - text joins, Concat, the
   // inline if, a set with a set constructor, the array pseudo-constructor.
   CTEXT: array[0..43] of array[0..1] of string = (
@@ -3224,6 +3254,52 @@ begin
         if TDirectory.Exists(LDir) then
           TDirectory.Delete(LDir, True);
       end;
+    end;
+  end;
+
+  // ---- B39: a 1-byte string - AnsiString, ShortString, `string[N]` named or
+  // inline, a code-page `type AnsiString(CP)` - indexes and walks to AnsiChar,
+  // a character pointer indexes to its character on any level (`AP[0][1]`),
+  // an inline `string[N]` is a ShortString (audit A3-26, E3-37, B3-29,
+  // E3-32, E2-36; dcc32 / dcc64 37.0, local/probe-b39 T). ----
+  begin
+    var LSrc :=
+      'unit XSE;'#10'interface'#10 +
+      'type RawByteString = type AnsiString($ffff);'#10 +
+      '  UTF8String = type AnsiString(65001);'#10 +
+      '  TS20 = string[20]; TCy = type AnsiString(1251);'#10 +
+      '  TOb = class FS: string[30]; end;'#10 +
+      'implementation'#10 +
+      'procedure P_;'#10 +
+      'var P: PChar; PA: PAnsiChar; AP: array[0..1] of PChar;'#10 +
+      '  APA: array[0..1] of PAnsiChar; A: AnsiString; SS: ShortString;'#10 +
+      '  S20: TS20; SI20: string[20]; R: RawByteString; U8: UTF8String;'#10 +
+      '  Cy: TCy; S: string; W: WideString; O: TOb;'#10 +
+      'begin'#10;
+    for var LRow := 0 to High(CSTRE) do
+      if CSTRE[LRow][0].StartsWith('for ') then
+        LSrc := LSrc + Format('  for var P%.2d in %s do ;'#10,
+          [LRow, CSTRE[LRow][0].Substring(4)])
+      else
+        LSrc := LSrc + Format('  var P%.2d := %s;'#10, [LRow, CSTRE[LRow][0]]);
+    LSrc := LSrc + 'end;'#10'end.'#10;
+    LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype_stre');
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+    TDirectory.CreateDirectory(LDir);
+    TFile.WriteAllText(TPath.Combine(LDir, 'XSE.pas'), LSrc);
+    GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+    try
+      GProj.AnalyzeDirectory(LDir);
+      LE := ModelByName('xse');
+      Ok('XSE loaded', Assigned(LE));
+      for var LRow := 0 to High(CSTRE) do
+        Eq('7.2.1: ' + CSTRE[LRow][0], XTypeOf(LE, Format('P%.2d', [LRow])),
+          CSTRE[LRow][1]);
+    finally
+      GProj.Free;
+      if TDirectory.Exists(LDir) then
+        TDirectory.Delete(LDir, True);
     end;
   end;
 

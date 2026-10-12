@@ -2256,6 +2256,11 @@ begin
     skVar, skConst, skField, skParam, skRoutine, skProperty, skEnumValue:
       begin
         Result := M.Symbols[LSym].TypeSym;   // value / result / property type
+        // An inline `string[N]` slot names no type symbol: a ShortString
+        // (audit E2-36).
+        if (Result = NIL_SYM) and (M.Symbols[LSym].TypeNode <> NIL_NODE) and
+           (Kind(M.Symbols[LSym].TypeNode) = nkStringType) then
+          Result := SStr;
         // A parameterless intrinsic written bare - `Pi`, `ReturnAddress`,
         // `Eof` - is a call without its parentheses (4.11).
         if (Result = NIL_SYM) and (M.Symbols[LSym].Kind = skRoutine) and

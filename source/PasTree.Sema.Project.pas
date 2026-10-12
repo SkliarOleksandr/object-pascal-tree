@@ -1381,6 +1381,13 @@ type
     function IsClassCtorDtorSym(AMid, ASym: Integer): Boolean;
     function XParamSyms(AMid, ASym: Integer): TArray<Integer>;
     function PointeeX(const AX: TSemaXType): TSemaXType;
+    { The character type a string of type AX indexes and walks to (7.2.1):
+      Char for string, UnicodeString and WideString; AnsiChar for
+      AnsiString, ShortString, OpenString, `string[N]`, a code-page
+      `type AnsiString(CP)` (RawByteString, UTF8String) and a distinct
+      `type AnsiString` - aliases followed. Resolved in AMid (BuiltinX).
+      XNil for anything that is not a string. }
+    function StringElementX(AMid: Integer; const AX: TSemaXType): TSemaXType;
     { The RESULT type of the procedural type AX when its value is called:
       written bare (`ValueFunc.GetValue`) only when no parameter must be
       supplied; with an argument list (ACalled) always. XNil for a procedure
@@ -8945,6 +8952,12 @@ begin
         if LSym <> NIL_SYM then
           Result := XPlain(AId, LSym);
       end;
+    // `string[N]` written inline (`Name: string[30]` in a packed record, a
+    // local, a parameter) is a ShortString; nothing downstream reads the
+    // capacity (audit E2-36: such a declaration was untyped, so an
+    // overloaded call over it took the first declaration).
+    nkStringType:
+      Result := BuiltinX(AId, 'shortstring');
 
     nkTypeArgs:
       begin
@@ -15495,11 +15508,17 @@ begin
       if XCatOf(LCur) = tcString then
       begin
         Dec(LRemaining);
-        if (LM.Symbols[LCur.Sym].NameLower = 'ansistring') or
-           (LM.Symbols[LCur.Sym].NameLower = 'shortstring') then
-          LCur := BuiltinX(AId, 'ansichar')
-        else
-          LCur := BuiltinX(AId, 'char');
+        LCur := StringElementX(AId, LCur);
+        Continue;
+      end;
+      // A character pointer indexes to its character without POINTERMATH
+      // (7.1.6): `AP[0][1]` over an `array of PChar` is a Char - the
+      // node-based ElementX fallback answered the array's PChar (audit
+      // E3-32, local/probe-b39 T).
+      if XCatOf(LCur) = tcPointer then
+      begin
+        Dec(LRemaining);
+        LCur := PointeeX(LCur);
         Continue;
       end;
       Exit(XNil);
@@ -17550,24 +17569,51 @@ end;
   the above works. An enumerator with a `GetCurrent` but no `Current` property
   is not a legal for-in collection (dcc requires the property), so it is not
   looked for. }
+function TPasSemaProject.StringElementX(AMid: Integer;
+  const AX: TSemaXType): TSemaXType;
+var
+  LCur: TSemaXType;
+  LDef, LDepth: Integer;
+  LName: string;
+  LM: TPasSemaModel;
+begin
+  Result := XNil;
+  LCur := AX;
+  for LDepth := 1 to 8 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LM := FModels[LCur.UnitId];
+    if LM.Symbols[LCur.Sym].Kind = skBuiltinType then
+    begin
+      LName := LM.Symbols[LCur.Sym].NameLower;
+      if (LName = 'string') or (LName = 'unicodestring') or
+         (LName = 'widestring') then
+        Result := BuiltinX(AMid, 'char')
+      else if (LName = 'ansistring') or (LName = 'shortstring') or
+              (LName = 'openstring') then
+        Result := BuiltinX(AMid, 'ansichar');
+      Exit;
+    end;
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if LDef = NIL_NODE then
+      Exit;
+    case LM.Tree.Nodes[LDef].Kind of
+      nkStringType:
+        Exit(BuiltinX(AMid, 'ansichar'));
+      // `type AnsiString(CP)` reads as a call of the string type's name.
+      nkCall:
+        LCur := ResolveTypeExpr(LCur.UnitId, LM.Tree.Nodes[LDef].FirstChild);
+      nkIdent, nkMember:
+        LCur := ResolveTypeExpr(LCur.UnitId, LDef);
+    else
+      Exit;
+    end;
+  end;
+end;
+
 function TPasSemaProject.ForInElementX(AMid, ACollNode: Integer;
   const ACollX: TSemaXType): TSemaXType;
-const
-  CStringNames: array[0..5] of string = ('string', 'ansistring', 'widestring',
-    'unicodestring', 'shortstring', 'rawbytestring');
-
-  function CharX: TSemaXType;
-  var
-    LSym: Integer;
-  begin
-    Result := XNil;
-    if FModels[AMid].InterfaceScope = NIL_SCOPE then
-      Exit;
-    LSym := FModels[AMid].Resolve(FModels[AMid].InterfaceScope, 'char');
-    if LSym <> NIL_SYM then
-      Result := XPlain(AMid, LSym);
-  end;
-
   { A collection with no type of its own to classify, read off its SHAPE:
     - `[a, b]` with no range is an open array constructor (B.9), and its
       element is what its elements type as - all one type, or a mix of Char
@@ -17661,7 +17707,7 @@ const
 var
   LCur, LEnum: TSemaXType;
   LM: TPasSemaModel;
-  LDef, LDepth, LIdx, LMemMid, LMemSym, LCtx: Integer;
+  LDef, LDepth, LMemMid, LMemSym, LCtx: Integer;
 begin
   Result := XNil;
   if ACollNode = NIL_NODE then
@@ -17694,19 +17740,16 @@ begin
     if not XValid(LCur) then
       Exit(XNil);
     LM := FModels[LCur.UnitId];
+    // A string walks its character type (StringElementX: AnsiChar for the
+    // 1-byte kinds - audit A3-26, E3-37, B3-29).
     if LM.Symbols[LCur.Sym].Kind = skBuiltinType then
-    begin
-      for LIdx := Low(CStringNames) to High(CStringNames) do
-        if LM.Symbols[LCur.Sym].NameLower = CStringNames[LIdx] then
-          Exit(CharX);
-      Exit(XNil);
-    end;
+      Exit(StringElementX(AMid, LCur));
     LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
     if LDef = NIL_NODE then
       Exit(XNil);
     case LM.Tree.Nodes[LDef].Kind of
-      nkStringType:
-        Exit(CharX);
+      nkStringType, nkCall:
+        Exit(StringElementX(AMid, LCur));
       nkSetType:
         Exit(SubstX(ResolveTypeExpr(LCur.UnitId,
           LM.Tree.Nodes[LDef].FirstChild), LCur.Inst, 0));
