@@ -6000,6 +6000,65 @@ begin
   end;
 end;
 
+// E3-01, E3-03, B3-49: `[X]` means `XAttribute` wherever that is found - a
+// used unit, System - and the bare `X` only when it is found nowhere
+// (19.3.2, dcc64 37.0); a unit-qualified `[U.X]` the same in U.
+procedure TestAttributeSuffixFirst;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_attrsuf');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10'  TObject = class end;'#10 +
+    '  TCustomAttribute = class(TObject) end;'#10 +
+    '  UnsafeAttribute = class(TCustomAttribute) end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UAt.pas'),
+    'unit UAt;'#10'interface'#10'type'#10 +
+    '  SetupAttribute = class(TCustomAttribute) end;'#10 +
+    '  TestAttribute = class(TCustomAttribute)'#10 +
+    '    constructor Create(A: Integer);'#10'  end;'#10 +
+    '  BarAttribute = class(TCustomAttribute)'#10 +
+    '    constructor Create(const S: string);'#10'  end;'#10 +
+    'implementation'#10 +
+    'constructor TestAttribute.Create(A: Integer); begin end;'#10 +
+    'constructor BarAttribute.Create(const S: string); begin end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AtP.dpr'),
+    'program AtP;'#10'uses UAt;'#10'type'#10 +
+    '  Unsafe = class end;'#10 +
+    '  Bar = class(TCustomAttribute)'#10 +
+    '    constructor Create(A, B: Integer);'#10'  end;'#10 +
+    '  TFix = class'#10 +
+    '    [Setup] procedure Setup;'#10 +
+    '    [Unsafe] FX: TObject;'#10 +
+    '  end;'#10 +
+    '  [Bar(''x'')]'#10'  TX = class end;'#10 +
+    '  [UAt.Test(2)]'#10'  TY = class end;'#10 +
+    'constructor Bar.Create(A, B: Integer); begin end;'#10 +
+    'procedure TFix.Setup; begin end;'#10 +
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'AtP.dpr'));
+    LM := ModelByName('atp');
+    Ok('attrsuf: [Setup] is the used unit''s SetupAttribute, not the method',
+      CrossRefCountInUnit(LM, 'Setup', 'SetupAttribute', 'uat') = 1);
+    Ok('attrsuf: [Bar(''x'')] is the used unit''s BarAttribute, not the' +
+      ' local Bar', CrossRefCountInUnit(LM, 'Bar', 'BarAttribute', 'uat') = 1);
+    Ok('attrsuf: [Unsafe] is System''s, not the local class',
+      CrossRefCountInUnit(LM, 'Unsafe', 'UnsafeAttribute', 'system') = 1);
+    Ok('attrsuf: [UAt.Test(2)] is UAt.TestAttribute',
+      CrossRefCountInUnit(LM, 'Test', 'TestAttribute', 'uat') = 1);
+    Ok('attrsuf: no E2003', DiagCount(LM, 'E2003') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestDeclAfterUnit;
 const
   UFA =
@@ -11919,6 +11978,7 @@ begin
   TestDeclAfterUnit;
   TestSystemQualifiedUnit;
   TestSystemOverloadJoins;
+  TestAttributeSuffixFirst;
   TestOracleDepth;
   TestInstanceSize;
   TestOperatorChains;

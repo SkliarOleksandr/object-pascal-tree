@@ -374,6 +374,12 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   that starts with an undeclared identifier nor in the arguments of one
   naming no type (`[C(Undeclared)]`); a unit qualifier's missing member is
   E2003 (`[System.Undeclared]`), within the limits of 1.2.3.
+- `[X]` binds `XAttribute` first, in the unit, the used units and System,
+  as dcc does - except on a parameter of a method's implementation header,
+  where a name the unit does not declare goes to the inherited pass, which
+  looks the bare name up first. An attribute's arguments are not checked
+  against its constructors (dcc's E2010 for `[Bar(1, 2)]` against
+  `Create(const S: string)`).
 
 ## 20-memory-management.md
 

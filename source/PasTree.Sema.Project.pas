@@ -1272,6 +1272,12 @@ type
       state for their duration - and emptied at the next PrepareDeclWork. }
     function FindInUsesMemo(AId: Integer; const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
+    { ANameLower as an unqualified name at ANode sees it in the other units:
+      the used units (FindInUsesMemo - so the same body-pass contract - the
+      interface section through its own clause only, F35), then System,
+      then SysInit (3.3.2 steps 6-7). }
+    function FindCrossUnqualified(AId, ANode: Integer;
+      const ANameLower: string; out AUnit, ASym: Integer): Boolean;
     function FindInSystemUnit(const ANameLower: string;
       out AUnit, ASym: Integer): Boolean;
     function FindInSysInitUnit(const ANameLower: string;
@@ -6374,6 +6380,18 @@ begin
   FUsesMemo[AId].Add(ANameLower, LExt);
 end;
 
+function TPasSemaProject.FindCrossUnqualified(AId, ANode: Integer;
+  const ANameLower: string; out AUnit, ASym: Integer): Boolean;
+begin
+  Result := FindInUsesMemo(AId, ANameLower, AUnit, ASym);
+  if Result and ImplUsesHiddenAt(AId, AUnit, ANode) then
+    Result := FindInUses(AId, ANameLower, AUnit, ASym, True);
+  if not Result then
+    Result := FindInSystemUnit(ANameLower, AUnit, ASym);
+  if not Result then
+    Result := FindInSysInitUnit(ANameLower, AUnit, ASym);
+end;
+
 // The generic ARITY of a type symbol: 0 for a plain type, else its parameter
 // count. The zero case is the cheap flag; only a generic pays the walk.
 function TPasSemaProject.ArityOfTypeSym(AMid, ASym: Integer): Integer;
@@ -6747,12 +6765,10 @@ end;
 // ANode is an attribute usage's TypeRef (`[Unsafe]` in `[Unsafe] FField:
 // TFoo;`) if its parent is the nkAttribute node AND it sits in that node's
 // TypeRef position (FirstChild) rather than among its `(...)` argument
-// expressions. 19.3.1: the `Attribute` suffix may be omitted at the use
-// site (`[Weak]` names `WeakAttribute`) - real dcc tries the bare name
-// first, then retries with the suffix; a name this project resolves plainly
-// (SOME OTHER `TFooAttribute` declared under its own short alias) must not
-// pay the suffix-retry cost or risk resolving to the wrong symbol, so this
-// is only consulted after a normal-name lookup already failed.
+// expressions. 19.3.2: the `Attribute` suffix may be omitted at the use
+// site (`[Weak]` names `WeakAttribute`), and dcc looks the SUFFIXED name up
+// first, through every scope and unit, the bare one only when it is found
+// nowhere (dcc64 37.0, local/probe-b27).
 function TPasSemaProject.IsAttributeTypeRef(AModel: TPasSemaModel;
   ANode: Integer): Boolean;
 var
@@ -6764,9 +6780,13 @@ begin
     (AModel.Tree.Nodes[LParent].FirstChild = ANode);
 end;
 
-// ...and specifically the type ref of a COMPILER-RECOGNIZED one (19.3.3),
-// which resolves to no declaration anywhere and must not be reported as
-// undeclared. The parser tags these at parse time (nkAttribute.Aux).
+// ...and specifically the type ref of a COMPILER-RECOGNIZED one (19.3.3).
+// System declares each (WeakAttribute, UnsafeAttribute, RefAttribute,
+// VolatileAttribute, StoredAttribute, HPPGENAttribute, HFAAttribute,
+// AlignAttribute) and the suffix-first lookup binds them there; dcc reads
+// them by class identity. The name-based exemption stays for an analysis
+// that has no System to bind them to. The parser tags these at parse time
+// (nkAttribute.Aux).
 function TPasSemaProject.IsMagicAttributeRef(AModel: TPasSemaModel;
   ANode: Integer): Boolean;
 begin
@@ -7203,10 +7223,10 @@ var
   LFile, LLine, LCol, LTok, LStruct: Integer;
   LName: string;
 begin
-  // A COMPILER-RECOGNIZED attribute name (19.3.3) resolves to no declaration
-  // anywhere BY DESIGN - dcc matches `[Ref]`, `[Align(8)]`, `[weak]` and
-  // friends by name instead of looking a class up - so "undeclared" is a
-  // false positive. Gated here rather than at the call sites because several
+  // A COMPILER-RECOGNIZED attribute name (19.3.3) - `[Ref]`, `[Align(8)]`,
+  // `[weak]` and friends - is System's declaration, which an analysis without
+  // System cannot bind (see IsMagicAttributeRef), so "undeclared" is a false
+  // positive. Gated here rather than at the call sites because several
   // passes reach this verdict; CheckAttributes exempts the same set.
   if IsMagicAttributeRef(AModel, ANode) then
     Exit;
@@ -8377,19 +8397,16 @@ begin
   begin
     if LM.Tree.Nodes[LNode].Kind <> nkAttribute then
       Continue;
-    // A COMPILER-RECOGNIZED attribute (19.3.3) is exempt: dcc matches
-    // `[weak]`/`[unsafe]`/`[Ref]`/`[Volatile]` specially rather than looking
-    // the name up in scope, so ordinary resolution here means nothing. The
+    // A COMPILER-RECOGNIZED attribute (19.3.3) is exempt: dcc reads
+    // `[weak]`/`[unsafe]`/`[Ref]`/`[Volatile]` by System's class identity,
+    // and an analysis without System has nothing to check them against. The
     // parser already tagged them (nkAttribute.Aux, PasAttrMagicAux).
     //
-    // Not a nicety - this was 3 false E2010 on a real project. A component
-    // suite declares `Unsafe = class // for internal use` (dxCore.pas), so
-    // the bare name in `[unsafe] FField: IPalette;` resolves to THAT class;
-    // 19.3.1's `+Attribute` fallback never fires, because it only fires when
-    // the bare name misses entirely, and System.pas's real
-    // `UnsafeAttribute = class(TCustomAttribute)` is therefore never
-    // consulted. Exact-name-wins (pinned by 19.3.1's own test) and a
-    // magic-attribute name reused as an ordinary class collide exactly here.
+    // It was 3 false E2010 on a real project: a component suite declares
+    // `Unsafe = class // for internal use`, and the bare-name-first lookup
+    // bound `[unsafe] FField: IPalette;` to THAT class. The lookup is
+    // suffix-first now (19.3.2), so System's UnsafeAttribute is what it
+    // binds; the exemption stays for the System-less analysis.
     if LM.Tree.Nodes[LNode].Aux <> amaNone then
       Continue;
     // An expression attribute (`[(TObject)]`) is W1074 and dropped, never
@@ -13094,6 +13111,36 @@ var
   LNameLower: string;
   LKey: TSemaKey;
   LShadows: TArray<string>;
+
+  // AKey in the unit AUid that the qualifier ABase names, for the member
+  // node AName. Qualified with the unit's OWN name, the implementation's
+  // declarations made so far are in reach too, and a member of the
+  // enclosing type never is: Vcl.Graphics' `Vcl.Graphics.GetHashCode(ResData,
+  // ResDataSize)` in a method of a TObject descendant, System.Character's
+  // `System.Character.UnicodeDataVersion` in TCharHelper's class function of
+  // that name - both name an implementation declaration and were bound to
+  // nothing (F46). UsesUnitOf never answers the unit itself.
+  function QualifiedMember(AUid, ABase, AName: Integer;
+    const AKey: TSemaKey): Integer;
+  var
+    LHeadNode: Integer;
+  begin
+    Result := NIL_SYM;
+    if AUid = AId then
+    begin
+      LHeadNode := ABase;
+      while LModel.Tree.Nodes[LHeadNode].Kind = nkMember do
+        LHeadNode := LModel.Tree.Nodes[LHeadNode].FirstChild;
+      if (LHeadNode <> NIL_NODE) and
+         (LHeadNode <= High(LModel.NodeScope)) and
+         (LModel.NodeScope[LHeadNode] <> NIL_SCOPE) then
+        Result := LModel.UnitDeclBefore(LModel.NodeScope[LHeadNode], AKey,
+          LModel.Tree.Nodes[AName].FirstToken);
+    end;
+    if Result = NIL_SYM then
+      Result := FModels[AUid].Resolve(FModels[AUid].InterfaceScope, AKey);
+  end;
+
 begin
   LModel := FModels[AId];
   LShadows := UsesBuiltinShadows(AId);
@@ -13110,98 +13157,54 @@ begin
              LModel.ExtRefMap.ContainsKey(LName) then
             Continue;
           LHead := LocalHead(LModel, LBase);
+          // A head bound to a uses item names that unit. A head resolving
+          // to NOTHING locally (a genuine local or global always wins) may
+          // still be a namespace qualifier never collected as a `uses` item:
+          // the IMPLICIT System unit (`System.sLineBreak`), a multi-segment
+          // prefix naming a used unit though the prefix is no skUnitRef of
+          // its own (`System.SysUtils.TBytes`), or the unit's own name.
+          LUid := -1;
           if (LHead <> NIL_SYM) and
              (LModel.Symbols[LHead].Kind = skUnitRef) then
-          begin
-            LUid := UsesUnitOf(AId, LHead);
-            if LUid >= 0 then
-            begin
-              LSym := FModels[LUid].Resolve(FModels[LUid].InterfaceScope,
-                PasNodeKey(LModel.Tree, LName));
-              // Arity is part of the identity (16.1.2) for a QUALIFIED name
-              // too: `Unit.TFoo` names the plain class and `Unit.TFoo<T>`
-              // the generic, and the by-name lookup answers with whichever
-              // that unit declared first. Within THIS unit's chain only -
-              // the qualifier has already chosen the unit, so unlike
-              // FixCrossArity there is no uses search; a chain with no such
-              // arity keeps the head, which is dcc's error, not ours.
-              if (LSym <> NIL_SYM) and
-                 (FModels[LUid].Symbols[LSym].Kind = skType) then
-              begin
-                LMatchNode := TypeOfArityInChain(LUid, LSym,
-                  WrittenArityOfRef(LModel, LName));
-                if LMatchNode <> NIL_SYM then
-                  LSym := LMatchNode;
-              end;
-              if LSym <> NIL_SYM then
-              begin
-                LExt.UnitId := LUid; LExt.Sym := LSym;
-                LModel.ExtRefMap.Add(LName, LExt);
-              end
-              else
-                ReportMissingUnitMember(AId, LModel, LNode, LName, LUid);
-            end;
-          end
+            LUid := UsesUnitOf(AId, LHead)
           else if LHead = NIL_SYM then
-          begin
-            // LBase resolved to NOTHING locally (never shadowed by a real
-            // declaration - a genuine local/global always wins and is
-            // handled above via LHead <> NIL_SYM): it may still be a
-            // namespace qualifier that was never collected as a `uses` item
-            // at all - the IMPLICIT System unit (`System.sLineBreak`), or a
-            // multi-segment prefix naming a used unit even though the
-            // PREFIX itself (e.g. `System.SysUtils` as a whole) is never
-            // itself a skUnitRef symbol (`System.SysUtils.TBytes`).
             LUid := UnitNameOf(AId, LBase);
-            if LUid >= 0 then
+          if LUid >= 0 then
+          begin
+            // An attribute takes `XAttribute` first in the qualifier's unit
+            // too (19.3.2): `[UAt.Test(2)]` is UAt.TestAttribute - looked
+            // up bare it was a false E2003 (local/probe-b27 A1).
+            LSym := NIL_SYM;
+            if IsAttributeTypeRef(LModel, LNode) then
             begin
-              // Qualified with the unit's OWN name, the implementation's
-              // declarations made so far are in reach too, and a member of
-              // the enclosing type never is: Vcl.Graphics'
-              // `Vcl.Graphics.GetHashCode(ResData, ResDataSize)` in a method
-              // of a TObject descendant, System.Character's
-              // `System.Character.UnicodeDataVersion` in TCharHelper's class
-              // function of that name - both name an implementation
-              // declaration and were bound to nothing (F46).
-              LSym := NIL_SYM;
-              if LUid = AId then
-              begin
-                LMatchNode := LBase;
-                while LModel.Tree.Nodes[LMatchNode].Kind = nkMember do
-                  LMatchNode := LModel.Tree.Nodes[LMatchNode].FirstChild;
-                if (LMatchNode <> NIL_NODE) and
-                   (LMatchNode <= High(LModel.NodeScope)) and
-                   (LModel.NodeScope[LMatchNode] <> NIL_SCOPE) then
-                  LSym := LModel.UnitDeclBefore(LModel.NodeScope[LMatchNode],
-                    PasNodeKey(LModel.Tree, LName),
-                    LModel.Tree.Nodes[LName].FirstToken);
-              end;
-              if LSym = NIL_SYM then
-                LSym := FModels[LUid].Resolve(FModels[LUid].InterfaceScope,
-                  PasNodeKey(LModel.Tree, LName));
-              // Arity is part of the identity (16.1.2) for a QUALIFIED name
-              // too: `Unit.TFoo` names the plain class and `Unit.TFoo<T>`
-              // the generic, and the by-name lookup answers with whichever
-              // that unit declared first. Within THIS unit's chain only -
-              // the qualifier has already chosen the unit, so unlike
-              // FixCrossArity there is no uses search; a chain with no such
-              // arity keeps the head, which is dcc's error, not ours.
-              if (LSym <> NIL_SYM) and
-                 (FModels[LUid].Symbols[LSym].Kind = skType) then
-              begin
-                LMatchNode := TypeOfArityInChain(LUid, LSym,
-                  WrittenArityOfRef(LModel, LName));
-                if LMatchNode <> NIL_SYM then
-                  LSym := LMatchNode;
-              end;
-              if LSym <> NIL_SYM then
-              begin
-                LExt.UnitId := LUid; LExt.Sym := LSym;
-                LModel.ExtRefMap.Add(LName, LExt);
-              end
-              else
-                ReportMissingUnitMember(AId, LModel, LNode, LName, LUid);
+              LNameLower := LModel.Tree.NodeNameLower(LName) + 'attribute';
+              LSym := QualifiedMember(LUid, LBase, LName, SemaKey(LNameLower));
             end;
+            if LSym = NIL_SYM then
+              LSym := QualifiedMember(LUid, LBase, LName,
+                PasNodeKey(LModel.Tree, LName));
+            // Arity is part of the identity (16.1.2) for a QUALIFIED name
+            // too: `Unit.TFoo` names the plain class and `Unit.TFoo<T>`
+            // the generic, and the by-name lookup answers with whichever
+            // that unit declared first. Within THIS unit's chain only -
+            // the qualifier has already chosen the unit, so unlike
+            // FixCrossArity there is no uses search; a chain with no such
+            // arity keeps the head, which is dcc's error, not ours.
+            if (LSym <> NIL_SYM) and
+               (FModels[LUid].Symbols[LSym].Kind = skType) then
+            begin
+              LMatchNode := TypeOfArityInChain(LUid, LSym,
+                WrittenArityOfRef(LModel, LName));
+              if LMatchNode <> NIL_SYM then
+                LSym := LMatchNode;
+            end;
+            if LSym <> NIL_SYM then
+            begin
+              LExt.UnitId := LUid; LExt.Sym := LSym;
+              LModel.ExtRefMap.Add(LName, LExt);
+            end
+            else
+              ReportMissingUnitMember(AId, LModel, LNode, LName, LUid);
           end;
         end;
 
@@ -13236,6 +13239,24 @@ begin
               LModel.ExtRefMap.Add(LNode, LExt);
               Continue;
             end;
+          end;
+          // An attribute's bare name Phase 1 found in this unit is tentative
+          // (19.3.2): a used unit's or System's `XAttribute` comes first -
+          // `[Setup] procedure Setup;` with SetupAttribute in a used unit,
+          // a component suite's `Unsafe = class` beside System's
+          // UnsafeAttribute. A suffixed hit of this unit's own was taken in
+          // Phase 1 and is its name plus the suffix, not the bare name.
+          if (LSym <> NIL_SYM) and IsAttributeTypeRef(LModel, LNode) and
+             (LModel.Symbols[LSym].NameLower =
+              LModel.Tree.NodeNameLower(LNode)) and
+             FindCrossUnqualified(AId, LNode,
+               LModel.Tree.NodeNameLower(LNode) + 'attribute', LUid,
+               LMatchNode) then
+          begin
+            LModel.RefMap[LNode] := NIL_SYM;
+            LExt.UnitId := LUid; LExt.Sym := LMatchNode;
+            LModel.ExtRefMap.Add(LNode, LExt);
+            Continue;
           end;
           if LSym <> NIL_SYM then
           begin
@@ -13325,6 +13346,16 @@ begin
           if QualifierUnitAt(AId, LNode, LMatchNode) >= 0 then
             Continue;
           LNameLower := SemaKeyText(LKey);
+          // 19.3.2: an attribute's suffixed name first, in every unit, the
+          // bare one only when it is nowhere (see the bound case above).
+          if IsAttributeTypeRef(LModel, LNode) and
+             FindCrossUnqualified(AId, LNode, LNameLower + 'attribute', LUid,
+               LSym) then
+          begin
+            LExt.UnitId := LUid; LExt.Sym := LSym;
+            LModel.ExtRefMap.Add(LNode, LExt);
+            Continue;
+          end;
           var LInUses := FindInUsesMemo(AId, LNameLower, LUid, LSym);
           // The memo answers for the implementation, where every `uses`
           // entry is visible; the interface section sees its own only (F35:
@@ -13363,13 +13394,7 @@ begin
             LExt.UnitId := LUid; LExt.Sym := LSym;
             LModel.ExtRefMap.Add(LNode, LExt);
           end
-          else if IsAttributeTypeRef(LModel, LNode) and
-                  (FindInUses(AId, LNameLower + 'attribute', LUid, LSym) or
-                   FindInSystemUnit(LNameLower + 'attribute', LUid, LSym)) then
-          begin
-            LExt.UnitId := LUid; LExt.Sym := LSym;
-            LModel.ExtRefMap.Add(LNode, LExt);
-          end
+
           // Nothing local, nothing in a used unit - but a name written INSIDE a
           // type declaration may still be an INHERITED member of that type or of
           // one it is nested in (11.4.1). That walk is FindMemberX, which reads
@@ -13379,11 +13404,10 @@ begin
           begin
             QueueDecl(AId, LNode);
           end
-          // A COMPILER-RECOGNIZED attribute name (19.3.3) resolves to nothing
-          // by design - dcc matches `[Ref]`, `[Align(8)]`, `[weak]` and
-          // friends by name rather than by looking a class up - so reporting
-          // it undeclared is a false positive. CheckAttributes exempts the
-          // same set for the same reason.
+          // A COMPILER-RECOGNIZED attribute name (19.3.3) unbound here has no
+          // System to bind to (see IsMagicAttributeRef), so reporting it
+          // undeclared is a false positive. CheckAttributes exempts the same
+          // set for the same reason.
           else if LModel.AllUsesResolved and
                   not IsMagicAttributeRef(LModel, LNode) then
             EmitE2003(LModel, LNode, AId);

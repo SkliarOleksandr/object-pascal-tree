@@ -37,7 +37,7 @@ const
   amaWeak = 3;
   amaUnsafe = 4;
   // [Align(n)] - dcc-recognized field alignment (the RTL uses it in
-  // System.Classes and System.Threading); no class declares it either.
+  // System.Classes and System.Threading); System declares AlignAttribute.
   amaAlign = 5;
 
 type
@@ -408,8 +408,8 @@ type
   { nkAttribute.Aux (19.3.3): amaNone/amaRef/amaVolatile/amaWeak/amaUnsafe
     for the attribute name ANameLower (already lower-cased, `Attribute`
     suffix not yet stripped by the caller -- both the bare and suffixed
-    spellings are matched here, the same either-spelling tolerance 19.3.1's
-    own suffix fallback already gives every OTHER attribute). Free function,
+    spellings are matched here, as 19.3.2's suffix lookup gives every OTHER
+    attribute). Free function,
     not a TPasTree method: the parser calls it before any node/tree exists
     yet (ParseAttrGroups, right after reading the identifier). }
   function PasAttrMagicAux(const ANameLower: string): Integer;

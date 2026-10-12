@@ -3768,9 +3768,8 @@ begin
   GModel.Free;
 
   // 19.3.1 attribute declarations: `[Table]` may omit the `Attribute` suffix
-  // that the CLASS itself must carry (IsAttributeTypeRef's fallback, only
-  // tried when the bare name does not already resolve). Nothing had ever
-  // used an attribute whose declaring class name differs from its use site.
+  // that the CLASS itself must carry. Nothing had ever used an attribute
+  // whose declaring class name differs from its use site.
   Analyze(
     'unit u;'#10'interface'#10 +
     'type'#10'  TableAttribute = class end;'#10 +
@@ -3782,18 +3781,18 @@ begin
     RefResolvesTo('Table', 'TableAttribute'));
   GModel.Free;
 
-  // ...and an EXACT match must win over the fallback, not just be tolerated
-  // alongside it -- the gate in IsAttributeTypeRef's caller only fires the
-  // +Attribute lookup when the bare name resolved to NOTHING, so declaring
-  // both must not make `[Table]` ambiguous or prefer the wrong one.
+  // ...and with both declared the SUFFIXED name wins (19.3.2): dcc looks
+  // `TableAttribute` up first and the bare `Table` only when it is found
+  // nowhere (dcc64 37.0: `[Baz('x')]` takes BazAttribute(const S: string)
+  // over Baz(A, B: Integer)). This test pinned the opposite until 0.97.2.
   Analyze(
     'unit u;'#10'interface'#10 +
     'type'#10'  Table = class end;'#10 +
     '  TableAttribute = class end;'#10 +
     '  [Table]'#10'  TFoo = class end;'#10 +
     'implementation'#10'end.'#10);
-  Ok('19.3.1: an exact-name attribute class wins over the suffix fallback',
-    RefResolvesTo('Table', 'Table'));
+  Ok('19.3.2: the suffixed attribute class wins over the bare name',
+    RefResolvesTo('Table', 'TableAttribute'));
   GModel.Free;
 
   // ---- test-coverage plan step 3 batch 7: B.4.3 predefined (compiler-

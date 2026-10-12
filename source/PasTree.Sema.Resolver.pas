@@ -3266,9 +3266,19 @@ begin
           if LHead <> NIL_SYM then
             FModel.RefMap[ANode] := LHead;
         end;
-        if (FModel.RefMap[ANode] = NIL_SYM) and IsAttributeTypeRef(ANode) then
-          FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],
+        // 19.3.2: `[X]` is `XAttribute` wherever that is found, the bare `X`
+        // only when it is found nowhere - a nearer bare name does not win
+        // (DUnitX's `[Setup] procedure Setup;` is SetupAttribute, not the
+        // method; dcc64 37.0, local/probe-b27). Here the unit's own scopes;
+        // a bare hit is tentative, and CrossResolve takes a used unit's or
+        // System's suffixed name over it.
+        if IsAttributeTypeRef(ANode) then
+        begin
+          LHead := FModel.ResolveAt(FNodeScope[ANode],
             NodeNameLower(ANode) + 'attribute', FTree.Nodes[ANode].FirstToken);
+          if LHead <> NIL_SYM then
+            FModel.RefMap[ANode] := LHead;
+        end;
       end;
 
     nkMethodResolution:
