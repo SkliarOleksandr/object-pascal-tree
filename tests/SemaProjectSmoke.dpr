@@ -6538,6 +6538,142 @@ begin
   end;
 end;
 
+// References spelled ARefText bound (RefMap) to a `class operator`.
+function OperatorRefCount(AModel: TPasSemaModel;
+  const ARefText: string): Integer;
+var
+  LSym: Integer;
+begin
+  Result := 0;
+  for var LNode := 0 to High(AModel.RefMap) do
+    if (AModel.Tree.Nodes[LNode].Kind = nkIdent) and
+       SameText(AModel.Tree.NodeText(LNode), ARefText) then
+    begin
+      LSym := AModel.RefMap[LNode];
+      if (LSym <> NIL_SYM) and (AModel.Symbols[LSym].DeclNode <> LNode) and
+         (AModel.RoutineHead(LSym) = rhOperator) then
+        Inc(Result);
+    end;
+end;
+
+{ Names that must not bind, and what a bare name means (audit B34; 6.6.1,
+  9.3.1, 15.1.5, 15.2.1; dcc64 37.0, local/probe-b34 P1, T1): a unit-level
+  overloaded function used bare as a qualifier or a `with` target is its
+  parameterless overload (GetRec, LGet - same unit and another); an
+  all-defaulted overload counts when it is declared second (O1.Get); a
+  paren-less TFoo.Create is never TFoo's private class constructor (in its own
+  unit too - E2361 with -visibility); a paren-less constructor argument is the
+  instance (B.Put / B.One); a class type name is a class reference
+  (Reg(TFoo)); Round / Inc in a record with those class operators are
+  System's. On 0.98.5: seven E2003, E2361 in VkA, five operator bindings. }
+procedure TestValueOverloads;
+var
+  LDir: string;
+begin
+  LDir := FreshDir('pastree_sema_valueovl');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10 +
+    'type TObject = class constructor Create; end;'#10 +
+    'implementation'#10'constructor TObject.Create; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'VkA.pas'),
+    'unit VkA;'#10'interface'#10'type'#10 +
+    '  TR1 = record R1: Integer; end;'#10 +
+    '  TR2 = record R2: Integer; end;'#10 +
+    '  TFoo = class'#10'  strict private'#10 +
+    '    class constructor Create;'#10'  public'#10 +
+    '    Fld: TR1;'#10 +
+    '    constructor Create(A: Integer); overload;'#10'  end;'#10 +
+    '  TFooClass = class of TFoo;'#10 +
+    '  TX1 = class'#10 +
+    '    function Get(A, B: Integer): TR2; overload;'#10 +
+    '    function Get(A: Integer = 1): TR1; overload;'#10'  end;'#10 +
+    '  TBox = class'#10 +
+    '    function Put(A: Integer): TR1; overload;'#10 +
+    '    function Put(A: TFoo): TR2; overload;'#10 +
+    '    function One(A: TFoo): TR2;'#10'  end;'#10 +
+    'function GetRec(I: Integer): TR1; overload;'#10 +
+    'function GetRec: TR2; overload;'#10 +
+    'function Reg(O: TFoo): TR1; overload;'#10 +
+    'function Reg(C: TFooClass): TR2; overload;'#10 +
+    'procedure UseFoo;'#10 +
+    'implementation'#10 +
+    'class constructor TFoo.Create; begin end;'#10 +
+    'constructor TFoo.Create(A: Integer); begin end;'#10 +
+    'function TX1.Get(A, B: Integer): TR2; begin end;'#10 +
+    'function TX1.Get(A: Integer = 1): TR1; begin end;'#10 +
+    'function TBox.Put(A: Integer): TR1; begin end;'#10 +
+    'function TBox.Put(A: TFoo): TR2; begin end;'#10 +
+    'function TBox.One(A: TFoo): TR2; begin end;'#10 +
+    'function GetRec(I: Integer): TR1; begin end;'#10 +
+    'function GetRec: TR2; begin end;'#10 +
+    'function Reg(O: TFoo): TR1; begin end;'#10 +
+    'function Reg(C: TFooClass): TR2; begin end;'#10 +
+    'procedure UseFoo;'#10'var F: TFoo; K: Integer;'#10'begin'#10 +
+    '  F := TFoo.Create;'#10 +
+    '  K := GetRec.R2;'#10 +
+    '  with GetRec do K := R2;'#10 +
+    'end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'VkP.dpr'),
+    'program VkP;'#10'uses VkA;'#10'type'#10 +
+    '  TNum = record'#10'    V: Double;'#10 +
+    '    class operator Round(const A: TNum): TNum;'#10 +
+    '    class operator Inc(const A: TNum): TNum;'#10 +
+    '    function AsInt: Int64;'#10 +
+    '    function Bump: Integer;'#10'  end;'#10 +
+    '  TL1 = record L1: Integer; end;'#10 +
+    '  TL2 = record L2: Integer; end;'#10 +
+    'function LGet(I: Integer): TL1; overload; begin end;'#10 +
+    'function LGet: TL2; overload; begin end;'#10 +
+    'class operator TNum.Round(const A: TNum): TNum; begin end;'#10 +
+    'class operator TNum.Inc(const A: TNum): TNum; begin end;'#10 +
+    'function TNum.AsInt: Int64; begin Result := Round(V); end;'#10 +
+    'function TNum.Bump: Integer; var I: Integer;'#10 +
+    'begin I := 1; Inc(I); Inc(I, 2); Result := I; end;'#10 +
+    'var K: Integer; O1: TX1; B: TBox; F: TFoo;'#10 +
+    'begin'#10 +
+    '  K := GetRec.R2;'#10 +
+    '  with GetRec do K := R2;'#10 +
+    '  K := LGet.L2;'#10 +
+    '  with LGet do K := L2;'#10 +
+    '  K := O1.Get.R1;'#10 +
+    '  with O1.Get do K := R1;'#10 +
+    '  var V := TFoo.Create;'#10 +
+    '  K := V.Fld.R1;'#10 +
+    '  K := B.Put(TFoo.Create).R2;'#10 +
+    '  K := B.One(TFoo.Create).R2;'#10 +
+    '  K := Reg(TFoo).R2;'#10 +
+    '  K := Reg(F).R1;'#10 +
+    '  K := GetRec.Ctl1;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.ReportVisibility := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'VkP.dpr'));
+    Ok('valueovl: parameterless overloads as qualifier / with target, the' +
+      ' all-defaulted one, paren-less constructor arguments, a class' +
+      ' reference argument - only GetRec.Ctl1 is E2003 [' +
+      IntToStr(DiagCount(ModelByName('vkp'), 'E2003')) + ']',
+      DiagCount(ModelByName('vkp'), 'E2003') = 1);
+    Ok('valueovl: the unit''s own GetRec qualifier / with target resolve' +
+      ' [' + IntToStr(DiagCount(ModelByName('vka'), 'E2003')) + ']',
+      DiagCount(ModelByName('vka'), 'E2003') = 0);
+    Ok('valueovl: TFoo.Create is never the private class constructor -' +
+      ' no E2361 [' + IntToStr(DiagCount(ModelByName('vka'), 'E2361') +
+      DiagCount(ModelByName('vkp'), 'E2361')) + ']',
+      DiagCount(ModelByName('vka'), 'E2361') +
+      DiagCount(ModelByName('vkp'), 'E2361') = 0);
+    Ok('valueovl: Round / Inc in TNum''s methods do not bind its class' +
+      ' operators',
+      OperatorRefCount(ModelByName('vkp'), 'Round') +
+      OperatorRefCount(ModelByName('vkp'), 'Inc') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestDeclAfterUnit;
 const
   UFA =
@@ -12467,6 +12603,7 @@ begin
   TestHelperIdentity;
   TestOneScorer;
   TestOverloadSets;
+  TestValueOverloads;
   TestOracleDepth;
   TestInstanceSize;
   TestOperatorChains;

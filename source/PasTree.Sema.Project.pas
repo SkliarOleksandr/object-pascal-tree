@@ -10633,7 +10633,7 @@ begin
     if XValid(LRec) then
       LScope := FModels[LRec.UnitId].Symbols[LRec.Sym].MemberScope;
     Exit((LScope <> NIL_SCOPE) and
-      (FModels[LRec.UnitId].FindLocal(LScope, 'implicit') <> NIL_SYM));
+      (FModels[LRec.UnitId].DeclaresOperator(LScope, 'implicit')));
   end;
   Result := CatAssignable(D, S, False);
 end;
@@ -11121,7 +11121,9 @@ var
 
     A CALL is not a designator - `F(X)` has an nkCall parent - so TargetSym
     reads no nkCall, and a routine symbol with a TypeNode (a function) is
-    excluded, as is a seeded intrinsic. }
+    excluded, as is a seeded intrinsic and a CONSTRUCTOR: it has no TypeNode
+    either, yet List.Add(TFoo.Create) calls it and passes the instance (audit
+    A3-19 - every non-procedural candidate was rejected). }
   function IsProcedureDesignator(N: Integer): Boolean;
   var
     LMid, LSym: Integer;
@@ -11129,7 +11131,8 @@ var
     Result := TargetSym(N, LMid, LSym) and
       (FModels[LMid].Symbols[LSym].Kind = skRoutine) and
       (FModels[LMid].Symbols[LSym].TypeNode = NIL_NODE) and
-      not (sfBuiltin in FModels[LMid].Symbols[LSym].Flags);
+      not (sfBuiltin in FModels[LMid].Symbols[LSym].Flags) and
+      not IsConstructorSym(LMid, LSym);
   end;
 
   // Does N name an ARRAY PROPERTY (`property Fields[I: Integer]: T`)? The
@@ -11325,8 +11328,8 @@ var
     LScope := FModels[AX.UnitId].Symbols[AX.Sym].MemberScope;
     if LScope = NIL_SCOPE then
       Exit;
-    Result := (FModels[AX.UnitId].FindLocal(LScope, 'implicit') <> NIL_SYM) or
-              (FModels[AX.UnitId].FindLocal(LScope, 'explicit') <> NIL_SYM);
+    Result := (FModels[AX.UnitId].DeclaresOperator(LScope, 'implicit')) or
+              (FModels[AX.UnitId].DeclaresOperator(LScope, 'explicit'));
   end;
 
   function ScoreCandidate(ACall, AMid, ACand, ACtx: Integer): Integer;
@@ -11514,6 +11517,51 @@ var
       // ... end)` is how a multi-line anonymous argument is often written,
       // and the client group's own instance of the TProc case was exactly that.
       LCore := PeelParens(LM.Tree, LArg);
+      // A paren-less constructor call through its type, `Reg(TFoo.Create)`,
+      // is the instance it constructs - typed as the nkCall form types it
+      // (audit E3-25: it scored as nothing, and a `class of` overload
+      // declared first won).
+      if (LM.Tree.Nodes[LCore].Kind = nkMember) and
+         (LM.Tree.Nodes[LCore].FirstChild <> NIL_NODE) and
+         IsTypeDesignator(LM.Tree.Nodes[LCore].FirstChild) then
+      begin
+        var LCMid, LCSym: Integer;
+        if TargetSym(LCore, LCMid, LCSym) and IsConstructorSym(LCMid, LCSym) then
+          LArgX := CtorResultX(GetX(LM.Tree.Nodes[LCore].FirstChild));
+      end
+      // A TYPE NAME is a class reference in a value position (15.2.1), not
+      // an instance: `Reg(TFoo)` takes `Reg(C: TFooClass)` over `Reg(O:
+      // TFoo)` in either order (local/probe-b34 P1; audit E3-25 - GetX types
+      // it as the instance, which scored the instance overload exact).
+      else if (LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) and
+              XValid(LArgX) and XValid(LParX) and
+              (XCatOf(CanonTypeX(LArgX)) = tcClass) and
+              IsTypeDesignator(LCore) then
+      begin
+        var LCanonPar := CanonTypeX(LParX);
+        case XCatOf(LCanonPar) of
+          tcClassOf:
+            begin
+              var LTarget := CanonTypeX(ClassRefTargetX(LCanonPar));
+              if XValid(LTarget) and XSameType(LTarget, CanonTypeX(LArgX)) then
+                Inc(Result, 2)
+              else if XValid(LTarget) and
+                      XDescendsFrom(CanonTypeX(LArgX), LTarget) then
+                Inc(Result, 1)
+              else if XValid(LTarget) and
+                      (FModels[LTarget.UnitId].Symbols[LTarget.Sym].Kind <>
+                       skGenericParam) then
+                Exit(-1);
+            end;
+          // A class reference is no instance, record, scalar or interface.
+          tcClass, tcRecord, tcInterface, tcInteger, tcFloat, tcBoolean,
+          tcChar, tcString, tcEnum, tcSet, tcArray:
+            Exit(-1);
+        end;
+        LArg := LM.Tree.Nodes[LArg].NextSibling;
+        Inc(LIdx);
+        Continue;
+      end;
       // An ANONYMOUS METHOD LITERAL rejects the candidate outright, and it is
       // the only mismatch that does. `TThread.Synchronize(nil, procedure ...
       // end)` fits BOTH the public `(const AThread: TThread; AThreadProc:
@@ -12071,6 +12119,16 @@ var
     end;
   end;
 
+  { The positions where a bare routine name is a VALUE and so means its
+    parameterless overload (6.6.1): a qualifier, an inline initializer, a
+    `with` target. One test for the three re-points below (audit D2-16: it was
+    written three times, and one copy once lacked it). }
+  function IsValuePosition(N: Integer): Boolean;
+  begin
+    Result := IsValueQualifier(N) or IsInlineInitializer(N) or
+      IsWithTarget(N);
+  end;
+
   { The member twin of PreferParamlessOverload: N is an nkMember whose name
     LName bound (locally, ALSym, or through the overlay) to a routine that
     TAKES parameters, in a position where the name is a VALUE - a qualifier
@@ -12120,9 +12178,41 @@ var
     A no-op otherwise - including for every ordinary name, which is what keeps
     this off the hot path: the bound symbol must already be a routine with
     parameters before anything is searched. }
+  // The parameterless overload of a unit-level routine set (see
+  // PreferParamlessOverload): no parameters first, every parameter defaulted
+  // next, over every set UnitSetHeads gathers; never a generic routine.
+  function UnitParamlessOverload(AHeadMid, AHeadSym: Integer;
+    out AMid, ASym: Integer): Boolean;
+  var
+    LHeads: TArray<TPasExtRef>;
+    LCand: Integer;
+  begin
+    LHeads := UnitSetHeads(AHeadMid, AHeadSym,
+      FModels[AHeadMid].Symbols[AHeadSym].NameLower);
+    for var LPass := 0 to 1 do
+      for var LH in LHeads do
+      begin
+        LCand := LH.Sym;
+        while (LCand <> NIL_SYM) and
+              (FModels[LH.UnitId].Symbols[LCand].Kind = skRoutine) do
+        begin
+          if (((LPass = 0) and RoutineTakesNoParams(LH.UnitId, LCand)) or
+              ((LPass = 1) and not RoutineRequiresArgs(LH.UnitId, LCand))) and
+             not IsGenericRoutine(LH.UnitId, LCand) then
+          begin
+            AMid := LH.UnitId;
+            ASym := LCand;
+            Exit(True);
+          end;
+          LCand := FModels[LH.UnitId].Symbols[LCand].NextOverload;
+        end;
+      end;
+    Result := False;
+  end;
+
   procedure PreferParamlessOverload(N: Integer);
   var
-    LBMid, LBound, LStruct, LMemMid, LMemSym, LCtx: Integer;
+    LBMid, LBound, LStruct, LMemMid, LMemSym, LCtx, LScope: Integer;
     LExt: TPasExtRef;
   begin
     // Both maps: the binding is as often CROSS-unit, made by the inherited
@@ -12140,16 +12230,36 @@ var
       LBMid := LExt.UnitId;
       LBound := LExt.Sym;
     end;
+    // RoutineRequiresArgs, as the member re-points read it: an all-defaulted
+    // binding is itself called by its name (audit D2-16 - this copy read
+    // "has parameters").
     if (FModels[LBMid].Symbols[LBound].Kind <> skRoutine) or
-       not (RoutineHasParams(LBMid, LBound) or
+       not (RoutineRequiresArgs(LBMid, LBound) or
             IsGenericRoutine(LBMid, LBound)) then
       Exit;
-    LStruct := StructSymOfNode(LM, N);
-    if LStruct = NIL_SYM then
-      Exit;
-    if not ParamlessOverloadX(XPlain(AId, LStruct),
-         FModels[LBMid].Symbols[LBound].NameLower, LMemMid, LMemSym, LCtx) then
-      Exit;
+    LScope := FModels[LBMid].Symbols[LBound].Scope;
+    if (LScope <> NIL_SCOPE) and
+       (FModels[LBMid].Scopes[LScope].Kind in [sckUnit, sckImplementation]) then
+    begin
+      // A UNIT-LEVEL routine: its set is the chain, the interface set beside
+      // an implementation head and the used units' sets the search meets
+      // (UnitSetHeads) - the rule held only for methods before (audit A3-18:
+      // `GetRec.R2` and `with GetRec do` took GetRec(I): TR1 over GetRec:
+      // TR2, local/probe-b34 P1).
+      if not UnitParamlessOverload(LBMid, LBound, LMemMid, LMemSym) then
+        Exit;
+      LCtx := NIL_INST;
+    end
+    else
+    begin
+      LStruct := StructSymOfNode(LM, N);
+      if LStruct = NIL_SYM then
+        Exit;
+      if not ParamlessOverloadX(XPlain(AId, LStruct),
+           FModels[LBMid].Symbols[LBound].NameLower, LMemMid, LMemSym,
+           LCtx) then
+        Exit;
+    end;
     if (LMemMid = LBMid) and (LMemSym = LBound) then
       Exit;
     Repoint(N, LMemMid, LMemSym);
@@ -12657,8 +12767,7 @@ var
           // as Integer and lost the member. Restricted to a qualifier
           // position: as a CALLEE the name is the whole overload set and
           // SelectCallTarget picks from it by arguments.
-          if IsValueQualifier(N) or IsInlineInitializer(N) or
-             IsWithTarget(N) then
+          if IsValuePosition(N) then
             PreferParamlessOverload(N);
           LSym := RefAt(N);
           if LSym <> NIL_SYM then
@@ -12856,8 +12965,7 @@ var
           // (pastree-mcp on the client group, 2026-09-25). The same three
           // positions as the FindMemberX branch below.
           LMemCtx := LBX.Inst;
-          if IsValueQualifier(N) or IsInlineInitializer(N) or IsWithTarget(N)
-          then
+          if IsValuePosition(N) then
             PreferParamlessMember(N, LName, LBX, LSym, LMemCtx);
           if LSym <> NIL_SYM then
           begin
@@ -12884,8 +12992,7 @@ var
             // with `Create(A: Integer)` declared ahead of `Create` is the
             // shape.
             if (FModels[LMemMid].Symbols[LMemSym].Kind = skRoutine) and
-               (IsValueQualifier(N) or IsInlineInitializer(N) or
-                IsWithTarget(N)) and
+               IsValuePosition(N) and
                (RoutineRequiresArgs(LMemMid, LMemSym) or
                 IsGenericRoutine(LMemMid, LMemSym)) and
                ParamlessOverloadX(LBX, LM.Tree.NodeNameLower(LName),
@@ -15503,29 +15610,41 @@ begin
   AMid := -1;
   ASym := NIL_SYM;
   ACtx := NIL_INST;
-  LCur := AX;
-  for LDepth := 1 to 32 do
+  // Two passes over the whole walk: a routine with no parameters first, then
+  // one whose parameters all have defaults - it is called by its name too
+  // (6.6.1; audit E3-29: `Get(A, B)` declared before `Get(A: Integer = 1)`
+  // kept the first). Both in one class is dcc's E2251, so the strict pass
+  // winning is no loss. Never a class constructor or destructor: it is not
+  // callable and never what a name means (15.1.5; audit E3-12 - `var F :=
+  // TFoo.Create` bound TFoo's private `class constructor Create`).
+  for var LPass := 0 to 1 do
   begin
-    if not XValid(LCur) then
-      Exit;
-    LScope := FModels[LCur.UnitId].Symbols[LCur.Sym].MemberScope;
-    if (LScope <> NIL_SCOPE) and
-       (FModels[LCur.UnitId].Scopes[LScope].Symbols.Count > 0) then
-      for LIdx := 0 to FModels[LCur.UnitId].Scopes[LScope].Symbols.Count - 1 do
-      begin
-        LCand := FModels[LCur.UnitId].Scopes[LScope].Symbols[LIdx];
-        if (FModels[LCur.UnitId].Symbols[LCand].Kind = skRoutine) and
-           (FModels[LCur.UnitId].Symbols[LCand].NameLower = ANameLower) and
-           RoutineTakesNoParams(LCur.UnitId, LCand) and
-           not IsGenericRoutine(LCur.UnitId, LCand) then
+    LCur := AX;
+    for LDepth := 1 to 32 do
+    begin
+      if not XValid(LCur) then
+        Break;
+      LScope := FModels[LCur.UnitId].Symbols[LCur.Sym].MemberScope;
+      if (LScope <> NIL_SCOPE) and
+         (FModels[LCur.UnitId].Scopes[LScope].Symbols.Count > 0) then
+        for LIdx := 0 to FModels[LCur.UnitId].Scopes[LScope].Symbols.Count - 1 do
         begin
-          AMid := LCur.UnitId;
-          ASym := LCand;
-          ACtx := LCur.Inst;
-          Exit(True);
+          LCand := FModels[LCur.UnitId].Scopes[LScope].Symbols[LIdx];
+          if (FModels[LCur.UnitId].Symbols[LCand].Kind = skRoutine) and
+             (FModels[LCur.UnitId].Symbols[LCand].NameLower = ANameLower) and
+             (((LPass = 0) and RoutineTakesNoParams(LCur.UnitId, LCand)) or
+              ((LPass = 1) and not RoutineRequiresArgs(LCur.UnitId, LCand))) and
+             not IsGenericRoutine(LCur.UnitId, LCand) and
+             not IsClassCtorDtorSym(LCur.UnitId, LCand) then
+          begin
+            AMid := LCur.UnitId;
+            ASym := LCand;
+            ACtx := LCur.Inst;
+            Exit(True);
+          end;
         end;
-      end;
-    LCur := AncestorOfX(LCur);
+      LCur := AncestorOfX(LCur);
+    end;
   end;
 end;
 
@@ -16430,8 +16549,8 @@ var
       Exit;
     LScope := FModels[AX.UnitId].Symbols[AX.Sym].MemberScope;
     Result := (LScope <> NIL_SCOPE) and
-      ((FModels[AX.UnitId].FindLocal(LScope, 'implicit') <> NIL_SYM) or
-       (FModels[AX.UnitId].FindLocal(LScope, 'explicit') <> NIL_SYM));
+      ((FModels[AX.UnitId].DeclaresOperator(LScope, 'implicit')) or
+       (FModels[AX.UnitId].DeclaresOperator(LScope, 'explicit')));
   end;
 
   // -1: AArg cannot go to a parameter of type APar.

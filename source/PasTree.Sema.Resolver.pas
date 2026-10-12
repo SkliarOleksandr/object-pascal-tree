@@ -1356,7 +1356,16 @@ begin
     ReportRedeclared(ADeclNode);
   LExisting := FModel.FindLocal(AScope, LKey);
   Result := FModel.AddSymbol(AScope, AKind, ADeclNode, ADeclNode, LKey);
-  if LExisting = NIL_SYM then
+  if (AKind = skRoutine) and (FModel.RoutineHead(Result) = rhOperator) then
+    // A `class operator` name is not a member name (9.3.1), and no name ever
+    // means the operator - not a member access (`R.Negative(A)` is E2003)
+    // and not a bare name in the record's own methods either: `Round(V)`,
+    // `Inc(I)` there call System's (local/probe-b34 P1), where binding the
+    // name made them the record's operators (audit A3-05). So the operator
+    // is only in the declaration order, never bound; RecordOperatorX and
+    // TPasSemaModel.DeclaresOperator walk that order.
+    FModel.AddToOrder(AScope, Result)
+  else if LExisting = NIL_SYM then
   begin
     FModel.BindName(AScope, Result);
     // No clash in its own scope, but one beyond it: an inline declaration
@@ -1364,20 +1373,6 @@ begin
     if not LOwnName and (RedeclaresBodyName(AScope, ADeclNode, LKey) or
        RedeclaresOuterName(AScope, AKind, ADeclNode, LKey)) then
       ReportRedeclared(ADeclNode);
-  end
-  else if (FModel.RoutineHead(Result) = rhOperator) <>
-          (FModel.RoutineHead(LExisting) = rhOperator) then
-  begin
-    // A `class operator` name is not a member name (9.3.1): `class operator
-    // Negative` beside `property Negative` (Velthuis.BigIntegers) or a field,
-    // method or constant of that name compiles, and `R.Negative(A)` is E2003
-    // - dcc-probed. So no clash and no overload chain between the two; the
-    // non-operator owns the name, which is what member access reaches, and
-    // the operator stays in declaration order.
-    if FModel.RoutineHead(Result) = rhOperator then
-      FModel.AddToOrder(AScope, Result)
-    else
-      FModel.BindName(AScope, Result);
   end
   else if ((AKind = skRoutine) and
            (FModel.Symbols[LExisting].Kind = skRoutine)) or
@@ -3343,6 +3338,17 @@ begin
           begin
             FModel.RefMap[LName] :=
               FModel.FindLocalDeep(LMemScope, NodeKey(LName));
+            // A class constructor or destructor is never what a name means
+            // (15.1.5): `TFoo.Create` past TFoo's private `class constructor
+            // Create` to the next overload, unbound when none is left so the
+            // project walk climbs to an ancestor's (audit E3-12).
+            var LCc := FModel.RefMap[LName];
+            while (LCc <> NIL_SYM) and
+                  (FModel.Symbols[LCc].Kind = skRoutine) and
+                  (FModel.RoutineHead(LCc) in [rhConstructor, rhDestructor]) and
+                  FModel.IsClassRoutine(LCc) do
+              LCc := FModel.Symbols[LCc].NextOverload;
+            FModel.RefMap[LName] := LCc;
             // `TOuter.TInner<T>` beside a nested `TOuter.TInner`: the member
             // lookup answers with the chain head, and arity is part of the
             // identity (16.1.2). The arguments hang off the nkMember's
@@ -3733,6 +3739,23 @@ end;
 function TPasSemaResolver.WithTargetTypeSym(ANode: Integer): Integer;
 var
   LBase, LName, LHead, LBaseType, LScope: Integer;
+
+  // A routine target is a call without arguments, so an overloaded name means
+  // its parameterless overload (6.6.1): `with GetRec do` with GetRec(I): TR1
+  // declared before GetRec: TR2 opens TR2 (audit A3-18, local/probe-b34 P1).
+  // A record target is never re-typed by the project's with pass, so the
+  // choice has to be right here.
+  function ParamlessTarget(AHead: Integer): Integer;
+  begin
+    Result := AHead;
+    if FModel.Symbols[AHead].Kind = skRoutine then
+    begin
+      Result := FModel.ParamlessOverload(AHead);
+      if Result = NIL_SYM then
+        Result := AHead;
+    end;
+  end;
+
 begin
   Result := NIL_SYM;
   case KindOf(ANode) of
@@ -3766,6 +3789,7 @@ begin
         LHead := FModel.RefMap[ANode];
         if LHead = NIL_SYM then
           Exit;
+        LHead := ParamlessTarget(LHead);
         case FModel.Symbols[LHead].Kind of
           skVar, skConst, skField, skParam, skRoutine, skProperty:
             Result := FModel.Symbols[LHead].TypeSym;
@@ -3801,6 +3825,7 @@ begin
           // header) consistent with what this function already found.
           FModel.RefMap[LName] := LHead;
         end;
+        LHead := ParamlessTarget(LHead);
         case FModel.Symbols[LHead].Kind of
           skVar, skConst, skField, skParam, skRoutine, skProperty:
             Result := FModel.Symbols[LHead].TypeSym;

@@ -71,6 +71,8 @@ type
     function TrailingSlot(ACall: Integer): Boolean;
     function WeakAliasEnd(ASym: Integer): Integer;
     function IsProcDesignator(N: Integer): Boolean;
+    function ClassRefTarget(ASym: Integer): Integer;
+    function IsValuePos(N: Integer): Boolean;
     function DeclaresConversion(ASym: Integer; AExplicitToo: Boolean): Boolean;
     function ScoreArgs(ACall: Integer; const AParams: TArray<Integer>): Integer;
     function IsVarargs(AScope: Integer): Boolean;
@@ -1013,6 +1015,28 @@ begin
     Result := B;
 end;
 
+// Is N where a bare routine name is a value - a member qualifier, a `with`
+// target, an inline initializer (CrossType's IsValuePosition)?
+function TPasSemaTyper.IsValuePos(N: Integer): Boolean;
+var
+  LParent: Integer;
+begin
+  LParent := T.Nodes[N].Parent;
+  if LParent = NIL_NODE then
+    Exit(False);
+  case Kind(LParent) of
+    nkMember:
+      Result := Child(LParent) = N;
+    nkWithStmt:
+      Result := Sib(N) <> NIL_NODE;
+    nkInlineVar, nkInlineConst:
+      Result := (Sib(N) = NIL_NODE) and ((M.RefMap[N] = NIL_SYM) or
+        (M.Symbols[M.RefMap[N]].DeclNode <> N));
+  else
+    Result := False;
+  end;
+end;
+
 function TPasSemaTyper.TypeOfIdent(N: Integer): Integer;
 var
   LSym: Integer;
@@ -1026,6 +1050,15 @@ begin
     if Assigned(FExtTypeOf) then
       Exit(FExtTypeOf(N));
     Exit(NIL_SYM);
+  end;
+  // A bare overloaded routine name where it is a VALUE means the overload
+  // that needs no argument (6.6.1): `GetRec.R2` with GetRec(I): TR1 declared
+  // before GetRec: TR2 (audit A3-18, local/probe-b34 P1).
+  if (M.Symbols[LSym].Kind = skRoutine) and IsValuePos(N) then
+  begin
+    var LParamless := M.ParamlessOverload(LSym);
+    if LParamless <> NIL_SYM then
+      LSym := LParamless;
   end;
   case M.Symbols[LSym].Kind of
     skVar, skConst, skField, skParam, skRoutine, skProperty, skEnumValue:
@@ -1246,6 +1279,22 @@ begin
   end;
 end;
 
+// The class a `class of` type ASym (through weak aliases) refers to;
+// NIL_SYM when it is not one or the target is not bound here.
+function TPasSemaTyper.ClassRefTarget(ASym: Integer): Integer;
+var
+  LDef: Integer;
+begin
+  Result := NIL_SYM;
+  ASym := WeakAliasEnd(ASym);
+  if (ASym = NIL_SYM) or (M.Symbols[ASym].Kind <> skType) then
+    Exit;
+  LDef := TypeDefNode(ASym);
+  if (LDef <> NIL_NODE) and (Kind(LDef) = nkClassOf) and
+     (Child(LDef) <> NIL_NODE) then
+    Result := WeakAliasEnd(Head(Child(LDef)));
+end;
+
 // A bare designator naming a PROCEDURE - a routine with no result - is a
 // method value and nothing else (the project's IsProcedureDesignator; Head
 // reads `DoIt<Integer>` through its nkTypeArgs, audit B3-27).
@@ -1258,10 +1307,12 @@ begin
     Exit;
   LSym := Head(N);
   // A seeded intrinsic has no TypeNode whatever it returns: `ErrorAt(Byte(X),
-  // ReturnAddress)` is a function call (System.pas), never a method value.
+  // ReturnAddress)` is a function call (System.pas), never a method value; a
+  // constructor (no TypeNode either) is called by `Put(TFoo.Create)` (A3-19).
   Result := (LSym <> NIL_SYM) and (M.Symbols[LSym].Kind = skRoutine) and
     (M.Symbols[LSym].TypeNode = NIL_NODE) and
-    not (sfBuiltin in M.Symbols[LSym].Flags);
+    not (sfBuiltin in M.Symbols[LSym].Flags) and
+    (M.RoutineHead(LSym) <> rhConstructor);
 end;
 
 // Does the record type ASym (through weak aliases) declare `class operator
@@ -1279,8 +1330,8 @@ begin
   LScope := M.Symbols[ASym].MemberScope;
   if LScope = NIL_SCOPE then
     Exit;
-  Result := (M.FindLocal(LScope, 'implicit') <> NIL_SYM) or
-    (AExplicitToo and (M.FindLocal(LScope, 'explicit') <> NIL_SYM));
+  Result := (M.DeclaresOperator(LScope, 'implicit')) or
+    (AExplicitToo and (M.DeclaresOperator(LScope, 'explicit')));
 end;
 
 // Sum a conservative match score of the call's args against a param list.
@@ -1310,6 +1361,28 @@ begin
     if LPt <> NIL_SYM then
     begin
       LParCat := CatOf(LPt);
+      // A class TYPE NAME is a class reference (15.2.1), not an instance:
+      // `Reg(TFoo)` takes Reg(C: TFooClass) over Reg(O: TFoo) - the
+      // project scorer's rule (audit E3-25, local/probe-b34 P1). Its own
+      // class's reference scores exact, another's assignable.
+      if (Kind(LCore) in [nkIdent, nkMember]) and (LAt <> NIL_SYM) and
+         (Head(LCore) = LAt) and (M.Symbols[LAt].Kind = skType) and
+         (CatOf(LAt) = tcClass) then
+      begin
+        case LParCat of
+          tcClassOf:
+            if ClassRefTarget(LPt) = WeakAliasEnd(LAt) then
+              Inc(Result, 2)
+            else
+              Inc(Result, 1);
+          tcClass, tcRecord, tcInterface, tcInteger, tcFloat, tcBoolean,
+          tcChar, tcString, tcEnum, tcSet, tcArray:
+            Exit(-1);
+        end;
+        LArg := Sib(LArg);
+        Inc(LIdx);
+        Continue;
+      end;
       // An anonymous method, a procedure designator, a `[...]` against a
       // parameter it cannot be passed to - provable at the node, typed or
       // not (neither has a type of its own here).

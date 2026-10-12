@@ -788,6 +788,21 @@ type
       its parameters live under (an implementation may leave it off). Read
       from sfOverloadDirective, so a demoted model answers too. }
     function RoutineSaysOverload(ASym: Integer): Boolean;
+    { Does the struct scope AScope declare a `class operator` named
+      ANameLower (`implicit`, `explicit`, `round`, ...)? An operator is never
+      bound by name (9.3.1 - TPasSemaResolver.DeclareSym), so it is found by
+      walking the scope's declaration order. }
+    function DeclaresOperator(AScope: Integer;
+      const ANameLower: string): Boolean;
+    { 6.6.1: the overload a bare routine name means where it is a VALUE (a
+      qualifier, a `with` target, an inline initializer) - of AHead's chain,
+      with the interface section's set beside an implementation-section head,
+      the first that takes no parameters, else the first whose parameters all
+      have defaults; never a class constructor or destructor (15.1.5).
+      NIL_SYM when there is none. This model's declarations only. }
+    function ParamlessOverload(AHead: Integer): Integer;
+    // ASym is a `class` routine - its nkRoutine carries Aux = 1 (6.1).
+    function IsClassRoutine(ASym: Integer): Boolean;
     { Stage 2 of the release: snapshots RoutineHead for every routine symbol
       and the stream identity counts, then frees the whole text layer
       (Visible + per-file Source/Tokens/LineStarts). See the Demoted field. }
@@ -2396,6 +2411,93 @@ begin
   Result := (ASym >= 0) and (ASym < SymCount) and
     (Symbols[ASym].Kind = skRoutine) and
     (sfOverloadDirective in Symbols[ASym].Flags);
+end;
+
+function TPasSemaModel.DeclaresOperator(AScope: Integer;
+  const ANameLower: string): Boolean;
+var
+  LList: TSemaSymList;
+  LSym: Integer;
+begin
+  Result := False;
+  if (AScope = NIL_SCOPE) or (AScope >= Scopes.Count) then
+    Exit;
+  LList := Scopes[AScope].Symbols;
+  for var LIdx := 0 to LList.Count - 1 do
+  begin
+    LSym := LList[LIdx];
+    if (Symbols[LSym].Kind = skRoutine) and
+       (Symbols[LSym].NameLower = ANameLower) and
+       (RoutineHead(LSym) = rhOperator) then
+      Exit(True);
+  end;
+end;
+
+function TPasSemaModel.IsClassRoutine(ASym: Integer): Boolean;
+var
+  LRoutine: Integer;
+begin
+  Result := False;
+  if Demoted or (ASym < 0) or (ASym >= SymCount) or
+     (Symbols[ASym].DeclNode = NIL_NODE) then
+    Exit;
+  LRoutine := Tree.Nodes[Symbols[ASym].DeclNode].Parent;
+  Result := (LRoutine <> NIL_NODE) and
+    (Tree.Nodes[LRoutine].Kind = nkRoutine) and (Tree.Nodes[LRoutine].Aux = 1);
+end;
+
+function TPasSemaModel.ParamlessOverload(AHead: Integer): Integer;
+var
+  LHeads: array[0..1] of Integer;
+  LPass, LH, LCand, LP: Integer;
+  LParams, LRequired: Integer;
+  LFits: Boolean;
+begin
+  Result := NIL_SYM;
+  if (AHead < 0) or (AHead >= SymCount) or
+     (Symbols[AHead].Kind <> skRoutine) then
+    Exit;
+  LHeads[0] := AHead;
+  LHeads[1] := NIL_SYM;
+  if (Symbols[AHead].Scope <> NIL_SCOPE) and
+     (Scopes[Symbols[AHead].Scope].Kind = sckImplementation) and
+     (InterfaceScope <> NIL_SCOPE) then
+  begin
+    LHeads[1] := FindLocal(InterfaceScope, Symbols[AHead].NameLower);
+    if (LHeads[1] <> NIL_SYM) and
+       ((LHeads[1] = AHead) or (Symbols[LHeads[1]].Kind <> skRoutine)) then
+      LHeads[1] := NIL_SYM;
+  end;
+  // Pass 0: no parameters; pass 1: every parameter defaulted.
+  for LPass := 0 to 1 do
+    for LH := 0 to 1 do
+    begin
+      LCand := LHeads[LH];
+      while LCand <> NIL_SYM do
+      begin
+        if Symbols[LCand].Kind <> skRoutine then
+          Break;
+        LParams := 0;
+        LRequired := 0;
+        if Symbols[LCand].MemberScope <> NIL_SCOPE then
+          for LP in Scopes[Symbols[LCand].MemberScope].Symbols do
+            if Symbols[LP].Kind = skParam then
+            begin
+              Inc(LParams);
+              if not (sfHasDefault in Symbols[LP].Flags) then
+                Inc(LRequired);
+            end;
+        if LPass = 0 then
+          LFits := LParams = 0
+        else
+          LFits := LRequired = 0;
+        if LFits and not (sfVarArgs in Symbols[LCand].Flags) and
+           not ((RoutineHead(LCand) in [rhConstructor, rhDestructor]) and
+                IsClassRoutine(LCand)) then
+          Exit(LCand);
+        LCand := Symbols[LCand].NextOverload;
+      end;
+    end;
 end;
 
 function TPasSemaModel.RoutineHead(ASym: Integer): TPasRoutineHead;
