@@ -2549,7 +2549,16 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
         SNIPPET =
           '{$IFDEF MSWINDOWS}W := 1;{$ENDIF}' +
           '{$IFDEF POSIX}P := 1;{$ENDIF}' +
-          '{$IF SizeOf(Pointer) = 8}B := 64{$ELSE}B := 32{$ENDIF};';
+          '{$IF SizeOf(Pointer) = 8}B := 64{$ELSE}B := 32{$ENDIF};' +
+          // B37: the target facts SizeOf reads, as each dcc 37.0 answers
+          // (local/probe-b37 S, T): LongInt is 8 bytes on the LP64 targets,
+          // Extended 10 on Win32 and 16 on the Intel 64-bit POSIX ones,
+          // TextFile 730 / 754 bytes.
+          '{$IF SizeOf(LongInt) = 8}L := 8{$ELSE}L := 4{$ENDIF};' +
+          '{$IF SizeOf(Extended) = 16}E := 16{$ELSEIF SizeOf(Extended) = 10}' +
+          'E := 10{$ELSE}E := 8{$ENDIF};' +
+          '{$IF SizeOf(TextFile) = 754}T := 754{$ELSEIF SizeOf(TextFile) = 730}' +
+          'T := 730{$ELSE}T := 0{$ENDIF};';
       var
         LInfo: TPasPlatformInfo;
         LDefines: TPasDefines;
@@ -2562,7 +2571,8 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
         LInfo := PlatformInfo(APlatform);
         LDefines := CreatePlatformDefines(APlatform);
         LPP := TPasPreprocessor.Create(GSM, LDefines, 37.0,
-          LInfo.PointerBytes, LInfo.ExtendedBytes);
+          LInfo.PointerBytes, LInfo.ExtendedBytes, LInfo.LongBytes,
+          LInfo.ExtendedAlign);
         try
           LPre := LPP.ProcessText('test.pas', SNIPPET);
           LTree := TPasParser.ParseStatements(LPre, LDiags);
@@ -2572,9 +2582,25 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
           if LInfo.IsPosix then
             LExpected := LExpected + 'Assign(Ident''P'' IntLit''1'') ';
           if LInfo.PointerBytes = 8 then
-            LExpected := LExpected + 'Assign(Ident''B'' IntLit''64'')'
+            LExpected := LExpected + 'Assign(Ident''B'' IntLit''64'') '
           else
-            LExpected := LExpected + 'Assign(Ident''B'' IntLit''32'')';
+            LExpected := LExpected + 'Assign(Ident''B'' IntLit''32'') ';
+          // The probed answers, written out - not read back from LInfo.
+          if APlatform in [pfMacOS64, pfMacOSArm64, pfIOSDevice64,
+             pfIOSSimArm64, pfAndroid64, pfLinux64] then
+            LExpected := LExpected + 'Assign(Ident''L'' IntLit''8'') '
+          else
+            LExpected := LExpected + 'Assign(Ident''L'' IntLit''4'') ';
+          if APlatform in [pfMacOS64, pfLinux64] then
+            LExpected := LExpected + 'Assign(Ident''E'' IntLit''16'') '
+          else if APlatform = pfWin32 then
+            LExpected := LExpected + 'Assign(Ident''E'' IntLit''10'') '
+          else
+            LExpected := LExpected + 'Assign(Ident''E'' IntLit''8'') ';
+          if APlatform in [pfWin32, pfAndroid32] then
+            LExpected := LExpected + 'Assign(Ident''T'' IntLit''730'')'
+          else
+            LExpected := LExpected + 'Assign(Ident''T'' IntLit''754'')';
           LExpected := LExpected + ')';
           Result := CheckDump(SNIPPET, LExpected, LTree.Dump(0), LDiags, 0);
           ApplyVerdict(Result, SNIPPET, GCustomTreeVerdict, LPre, LTree,

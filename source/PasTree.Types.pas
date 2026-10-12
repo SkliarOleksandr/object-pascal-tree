@@ -17,6 +17,18 @@ unit PasTree.Types;
 interface
 
 type
+  { The target facts the builtin size table (PasTree.CondEval's
+    PasBuiltinLayout) reads - TPasPlatformInfo's (PasTree.Platforms documents
+    each), one record so a new fact is one field rather than another loose
+    parameter on every call (audit A1-10, A1-11). Here because the
+    preprocessor holds one and the CondEval unit uses the preprocessor's. }
+  TPasBuiltinTarget = record
+    PointerBytes: Integer;
+    ExtendedBytes: Integer;
+    ExtendedAlign: Integer;
+    LongBytes: Integer;
+  end;
+
   TPasTokenKind = (
     tkUnknown,
     tkEndOfFile,

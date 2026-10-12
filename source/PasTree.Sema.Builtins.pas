@@ -83,9 +83,15 @@ function PasBuiltinSignature(const ANameLower: string;
   `N.ToString` of a NativeInt is TIntegerHelper's on dcc32 and TInt64Helper's
   on dcc64 (`N.Size` 4 and 8). Both ways: a helper for Integer is a
   NativeInt's on dcc32, a helper for NativeUInt a Cardinal's there and a
-  UInt64's on dcc64 (probed, local/fidelity/x-f20/probes/helper). }
+  UInt64's on dcc64 (probed, local/fidelity/x-f20/probes/helper).
+
+  `LongInt` and `LongWord` join Integer / Cardinal only where they are 4
+  bytes (ALongBytes, TPasPlatformInfo.LongBytes): on the LP64 targets they are
+  8-byte types of their own - not Int64 either (dccaarm64 / dccosx64 37.0:
+  F(LongInt) and F(Int64) are two overloads, a helper for Int64 is no
+  LongInt's; audit A1-10). }
 function PasBuiltinAliasGroup(const ANameLower: string;
-  APointerBytes: Integer): TArray<string>;
+  APointerBytes: Integer; ALongBytes: Integer = 4): TArray<string>;
 
 { One id per seeded TYPE: the seed index of the first name of ASym's alias
   group (PasBuiltinAliasGroup on the target's pointer size) - `LongInt`'s is
@@ -96,14 +102,14 @@ function PasBuiltinAliasGroup(const ANameLower: string;
   not a seed is answered unchanged. The ONE table both overload scorers, the
   instance key and XSameType read, so the two typers cannot drift. }
 function PasBuiltinCanonSym(AModel: TPasSemaModel; ASym: Integer;
-  AIs64: Boolean): Integer;
+  APlatform: TPasPlatform): Integer;
 
 { Is ASym the seeded `Char` (or `WideChar`) - the type of a one-character
   literal, which an overload taking `Char` fits better than one taking a
   string, and one taking `AnsiChar` worse (dcc64 37.0, local/probe-b31 O2:
   'a' picks WideChar over AnsiChar, string over AnsiChar). }
 function PasBuiltinIsChar(AModel: TPasSemaModel; ASym: Integer;
-  AIs64: Boolean): Boolean;
+  APlatform: TPasPlatform): Boolean;
 
 type
   { How a value-returning intrinsic's RESULT type is decided (4.11). Every
@@ -182,7 +188,7 @@ uses
   PasTree.Ast;
 
 function PasBuiltinAliasGroup(const ANameLower: string;
-  APointerBytes: Integer): TArray<string>;
+  APointerBytes: Integer; ALongBytes: Integer): TArray<string>;
 const
   // Only the SEEDED names need to be here: a real declaration like System.pas's
   // `UInt32 = Cardinal` is an alias the type walk already follows.
@@ -201,6 +207,12 @@ const
 var
   LIdx, LName: Integer;
 begin
+  if (ALongBytes = 8) and
+     ((ANameLower = 'longint') or (ANameLower = 'longword')) then
+  begin
+    Result := [ANameLower];
+    Exit;
+  end;
   for LIdx := 0 to 1 do
     for LName := 0 to High(CNative[APointerBytes = 8][LIdx]) do
       if CNative[APointerBytes = 8][LIdx][LName] = ANameLower then
@@ -208,7 +220,13 @@ begin
   for LIdx := 0 to High(CGroups) do
     for LName := 0 to High(CGroups[LIdx]) do
       if CGroups[LIdx][LName] = ANameLower then
-        Exit(CGroups[LIdx]);
+      begin
+        Result := CGroups[LIdx];
+        // On LP64 the 8-byte LongInt / LongWord are no member of the group.
+        if ALongBytes = 8 then
+          Result := [Result[0]];
+        Exit;
+      end;
   Result := [ANameLower];
 end;
 
@@ -411,8 +429,13 @@ const
   );
 
 type
-  // One prebuilt seed per platform bitness (the ONLY platform dependence in
-  // the list below is the Is64Bit intrinsic gate).
+  // One prebuilt seed per platform CLASS - what the list below depends on:
+  // the pointer size (NativeInt's rank, AtomicCmpExchange128), whether the
+  // VarArg intrinsics exist (every target but Win32) and LongInt's width
+  // (8 on the LP64 targets). Win32; Android32; Win64 and WinArm64 (LLP64);
+  // the 64-bit POSIX targets (LP64).
+  TSeedClass = (scWin32, scPosix32, scLLP64, scLP64);
+
   TSeedTemplate = record
     Syms: TArray<TSemaSymbol>;
     Names: TSemaNames;                     // names + order, immutable after init
@@ -421,25 +444,47 @@ type
   end;
 
 var
-  GSeedTemplates: array[Boolean] of TSeedTemplate;   // by Is64Bit
+  GSeedTemplates: array[TSeedClass] of TSeedTemplate;
   GSigIndex: TDictionary<string, Integer>;  // NameLower -> CBuiltinSigs index
 
+function SeedClassOf(APlatform: TPasPlatform): TSeedClass;
+var
+  LInfo: TPasPlatformInfo;
+begin
+  LInfo := PlatformInfo(APlatform);
+  if not LInfo.Is64Bit then
+  begin
+    if LInfo.HasVarArgIntrinsics then
+      Result := scPosix32
+    else
+      Result := scWin32;
+  end
+  else if LInfo.LongBytes = 8 then
+    Result := scLP64
+  else
+    Result := scLLP64;
+end;
+
 function PasBuiltinCanonSym(AModel: TPasSemaModel; ASym: Integer;
-  AIs64: Boolean): Integer;
+  APlatform: TPasPlatform): Integer;
+var
+  LClass: TSeedClass;
 begin
   Result := ASym;
-  if (ASym >= 0) and (ASym <= High(GSeedTemplates[AIs64].Canon)) and
+  LClass := SeedClassOf(APlatform);
+  if (ASym >= 0) and (ASym <= High(GSeedTemplates[LClass].Canon)) and
      (ASym < AModel.SymCount) and
      (sfBuiltin in AModel.Symbols[ASym].Flags) then
-    Result := GSeedTemplates[AIs64].Canon[ASym];
+    Result := GSeedTemplates[LClass].Canon[ASym];
 end;
 
 function PasBuiltinIsChar(AModel: TPasSemaModel; ASym: Integer;
-  AIs64: Boolean): Boolean;
+  APlatform: TPasPlatform): Boolean;
 begin
   Result := (ASym >= 0) and (ASym < AModel.SymCount) and
     (sfBuiltin in AModel.Symbols[ASym].Flags) and
-    (PasBuiltinCanonSym(AModel, ASym, AIs64) = GSeedTemplates[AIs64].CharSym);
+    (PasBuiltinCanonSym(AModel, ASym, APlatform) =
+     GSeedTemplates[SeedClassOf(APlatform)].CharSym);
 end;
 
 function PasBuiltinSignature(const ANameLower: string;
@@ -466,13 +511,13 @@ function SeedSystemScopeOwn(AModel: TPasSemaModel;
 function SeedSystemScope(AModel: TPasSemaModel;
   APlatform: TPasPlatform = pfWin32): Integer;
 var
-  LIs64: Boolean;
+  LClass: TSeedClass;
 begin
-  LIs64 := PlatformInfo(APlatform).Is64Bit;
+  LClass := SeedClassOf(APlatform);
   Result := AModel.AddScope(sckSystem, NIL_SCOPE, NIL_NODE);
-  if AModel.AdoptSeededSymbols(GSeedTemplates[LIs64].Syms, Result) then
+  if AModel.AdoptSeededSymbols(GSeedTemplates[LClass].Syms, Result) then
   begin
-    AModel.Scopes[Result].Names := GSeedTemplates[LIs64].Names;
+    AModel.Scopes[Result].Names := GSeedTemplates[LClass].Names;
     AModel.Scopes[Result].SharedContainers := True;
   end
   else
@@ -485,45 +530,46 @@ begin
 end;
 
 procedure BuildSeedTemplates;
+const
+  // A platform of each class: the template is built from its facts.
+  CClassPlatform: array[TSeedClass] of TPasPlatform = (pfWin32, pfAndroid32,
+    pfWin64, pfAndroid64);
 var
-  LIs64: Boolean;
+  LClass: TSeedClass;
   LModel: TPasSemaModel;
   LScope, LSym, LHead: Integer;
   LPlat: TPasPlatform;
   LGroup: TArray<string>;
 begin
-  for LIs64 := False to True do
+  for LClass := Low(TSeedClass) to High(TSeedClass) do
   begin
-    if LIs64 then
-      LPlat := pfWin64
-    else
-      LPlat := pfWin32;
+    LPlat := CClassPlatform[LClass];
     LModel := TPasSemaModel.Create(Default(TPasTree));
     try
       LScope := SeedSystemScopeOwn(LModel, LPlat);
-      GSeedTemplates[LIs64].Syms := Copy(LModel.Symbols, 0, LModel.SymCount);
+      GSeedTemplates[LClass].Syms := Copy(LModel.Symbols, 0, LModel.SymCount);
       // Take the containers (value types: the arrays are shared by
       // refcount), cut to exact length - an adopting scope shares them and
       // must never find spare capacity it could write into in place.
-      GSeedTemplates[LIs64].Names := LModel.Scopes[LScope].Names;
-      GSeedTemplates[LIs64].Names.MakeUnique;
+      GSeedTemplates[LClass].Names := LModel.Scopes[LScope].Names;
+      GSeedTemplates[LClass].Names.MakeUnique;
       // The alias groups' heads, by index.
-      SetLength(GSeedTemplates[LIs64].Canon, LModel.SymCount);
+      SetLength(GSeedTemplates[LClass].Canon, LModel.SymCount);
       for LSym := 0 to LModel.SymCount - 1 do
       begin
-        GSeedTemplates[LIs64].Canon[LSym] := LSym;
+        GSeedTemplates[LClass].Canon[LSym] := LSym;
         if LModel.Symbols[LSym].Kind <> skBuiltinType then
           Continue;
         LGroup := PasBuiltinAliasGroup(LModel.Symbols[LSym].NameLower,
-          PlatformInfo(LPlat).PointerBytes);
+          PlatformInfo(LPlat).PointerBytes, PlatformInfo(LPlat).LongBytes);
         if Length(LGroup) < 2 then
           Continue;
         LHead := LModel.FindLocal(LScope, LGroup[0]);
         if (LHead <> NIL_SYM) and
            (LModel.Symbols[LHead].Kind = skBuiltinType) then
-          GSeedTemplates[LIs64].Canon[LSym] := LHead;
+          GSeedTemplates[LClass].Canon[LSym] := LHead;
       end;
-      GSeedTemplates[LIs64].CharSym := LModel.FindLocal(LScope, 'char');
+      GSeedTemplates[LClass].CharSym := LModel.FindLocal(LScope, 'char');
     finally
       LModel.Free;
     end;
@@ -559,7 +605,15 @@ begin
   T('Byte', tcInteger, 1); T('ShortInt', tcInteger, 1);
   T('Word', tcInteger, 2); T('SmallInt', tcInteger, 2);
   T('Cardinal', tcInteger, 3); T('Integer', tcInteger, 3);
-  T('LongInt', tcInteger, 3); T('LongWord', tcInteger, 3);
+  // LongInt / LongWord are 8 bytes on the LP64 targets (audit A1-10).
+  if PlatformInfo(APlatform).LongBytes = 8 then
+  begin
+    T('LongInt', tcInteger, 4); T('LongWord', tcInteger, 4);
+  end
+  else
+  begin
+    T('LongInt', tcInteger, 3); T('LongWord', tcInteger, 3);
+  end;
   T('UInt64', tcInteger, 4); T('Int64', tcInteger, 4);
   // CORRECTION (2026-08-14): earlier assumed real declarations -- checked
   // the actual System.pas and there is none. `PNativeInt = ^NativeInt;`
@@ -718,15 +772,19 @@ begin
   // `E2029 '(' expected`, which means the name is known and only the call
   // syntax is wrong; a genuinely undeclared control name answers E2003.
   //
-  // The gate is Is64Bit because that is what the two probes support (Win32 no,
-  // Win64 yes); whether a 32-bit ARM target would agree is untested.
-  if PlatformInfo(APlatform).Is64Bit then
+  // Not 64-bit only after all: dccaarm (Android32) knows the four VarArg
+  // names too (E2029, not E2003), only dcc32 does not - the gate is
+  // TPasPlatformInfo.HasVarArgIntrinsics (audit A1-16, which found the false
+  // E2003s inside System.pas on Android32).
+  if PlatformInfo(APlatform).HasVarArgIntrinsics then
     for var LName in ['VarArgStart', 'VarArgEnd', 'VarArgCopy',
-      'VarArgGetValue',
-      // Sibling of AtomicCmpExchange above, but a SEPARATE name and 64-bit
-      // only - the 128-bit compare-and-swap the RTL's lock-free paths use.
-      'AtomicCmpExchange128'] do
+      'VarArgGetValue'] do
       K(LName, skRoutine, NIL_SYM);
+  // Sibling of AtomicCmpExchange above, but a SEPARATE name and 64-bit only
+  // - the 128-bit compare-and-swap the RTL's lock-free paths use (dccaarm
+  // answers E2003).
+  if PlatformInfo(APlatform).Is64Bit then
+    K('AtomicCmpExchange128', skRoutine, NIL_SYM);
 
   Result := LSys;
 end;

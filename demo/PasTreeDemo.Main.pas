@@ -4129,7 +4129,8 @@ begin
       FComplDefines.Define(LName);
     FComplPP := TPasPreprocessor.Create(FComplSM, FComplDefines,
       FCompilerVersion, PlatformInfo(FPlatform).PointerBytes,
-      PlatformInfo(FPlatform).ExtendedBytes);
+      PlatformInfo(FPlatform).ExtendedBytes, PlatformInfo(FPlatform).LongBytes,
+      PlatformInfo(FPlatform).ExtendedAlign);
   end;
   Result := True;
 end;

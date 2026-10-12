@@ -262,7 +262,7 @@ begin
   LSM := TPasSourceManager.Create([]);
   LDefines := CreatePlatformDefines(APlatform);
   GPP := TPasPreprocessor.Create(LSM, LDefines, 37.0, LInfo.PointerBytes,
-    LInfo.ExtendedBytes);
+    LInfo.ExtendedBytes, LInfo.LongBytes, LInfo.ExtendedAlign);
   try
     LSM.BuildIncludeIndex(ADir);
     AProc();

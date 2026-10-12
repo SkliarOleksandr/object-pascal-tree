@@ -6796,6 +6796,70 @@ begin
   end;
 end;
 
+// B37: the target facts per platform - the VarArg intrinsics on Android32,
+// LongInt / LongWord as 8-byte types of their own on the LP64 targets, the
+// Win64x platform name (audit A1-16, A1-10, B2-07; local/probe-b37 L).
+procedure TestTargetFacts;
+var
+  LDir: string;
+  LPlat: TPasPlatform;
+begin
+  Ok('B2-07: Win64x is the Win64 platform',
+    TryParsePlatformName('Win64x', LPlat) and (LPlat = pfWin64));
+  LDir := FreshDir('pastree_sema_targetfacts');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10 +
+    'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'TfP.dpr'),
+    'program TfP;'#10'type'#10 +
+    '  RA = record A: Integer; end;'#10 +
+    '  RB = record B: Integer; end;'#10 +
+    'function G(X: LongInt): RA; overload; begin end;'#10 +
+    'function G(X: Int64): RB; overload; begin end;'#10 +
+    'function F(X: LongInt): RA; overload; begin end;'#10 +
+    'function F(X: Int64): RB; overload; begin end;'#10 +
+    'procedure V(L: Pointer);'#10'begin'#10 +
+    '  VarArgStart(L);'#10 +
+    '  VarArgEnd(L);'#10 +
+    'end;'#10 +
+    'var Lg: LongInt; I: Integer; I64: Int64; K: Integer;'#10 +
+    'begin'#10 +
+    '  K := G(Lg).A;'#10 +
+    '  K := G(I64).B;'#10 +
+    '  var X := Lg + I;'#10 +
+    '  K := F(X).B;'#10 +
+    'end.'#10);
+  for LPlat in [pfWin32, pfAndroid32, pfMacOS64] do
+  begin
+    GProj := TPasSemaProject.Create(LPlat, [LDir], []);
+    try
+      GProj.ReportUnresolvedMembers := True;
+      GProj.AnalyzeProject(TPath.Combine(LDir, 'TfP.dpr'));
+      case LPlat of
+        pfWin32:
+          // dcc32 knows no VarArg intrinsic, and `Lg + I` is an Integer.
+          Ok('A1-16: Win32 has no VarArgStart / VarArgEnd, F(X) is F(LongInt)' +
+            ' [' + IntToStr(DiagCount(ModelByName('tfp'), 'E2003')) + ']',
+            DiagCount(ModelByName('tfp'), 'E2003') = 3);
+        pfAndroid32:
+          Ok('A1-16: Android32 knows VarArgStart / VarArgEnd [' +
+            IntToStr(DiagCount(ModelByName('tfp'), 'E2003')) + ']',
+            DiagCount(ModelByName('tfp'), 'E2003') = 1);
+        pfMacOS64:
+          Ok('A1-10: on OSX64 LongInt is its own 8-byte type - G(Lg) / G(I64)' +
+            ' pick their own overloads, Lg + I is an Int64 [' +
+            IntToStr(DiagCount(ModelByName('tfp'), 'E2003')) + ']',
+            DiagCount(ModelByName('tfp'), 'E2003') = 0);
+      end;
+    finally
+      GProj.Free;
+    end;
+  end;
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+end;
+
 procedure TestDeclAfterUnit;
 const
   UFA =
@@ -12727,6 +12791,7 @@ begin
   TestOverloadSets;
   TestValueOverloads;
   TestOperatorTable;
+  TestTargetFacts;
   TestOracleDepth;
   TestInstanceSize;
   TestOperatorChains;

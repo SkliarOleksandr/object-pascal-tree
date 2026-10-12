@@ -55,11 +55,26 @@ type
     UnitName: string;
   end;
 
+  { The target's facts, probed on every installed dcc 37.0 compiler
+    (local/probe-b37 S, T, A; audit B37). }
   TPasPlatformInfo = record
     Name: string;             // canonical name, matches .dproj Platform values
     Defines: TArray<string>;  // platform-specific predefined symbols
     PointerBytes: Integer;
-    ExtendedBytes: Integer;   // 10 on Win32-Intel, 8 elsewhere
+    // 10 on Win32, 16 on the Intel 64-bit POSIX targets (OSX64; Linux64 by
+    // Embarcadero's table, not probed), 8 elsewhere.
+    ExtendedBytes: Integer;
+    // Extended's record alignment: 16 where it is 16 bytes (`record A: Byte;
+    // E: Extended end` is 32 on OSX64), 8 elsewhere (24 on Win32).
+    ExtendedAlign: Integer;
+    // LongInt / LongWord: 8 on every 64-bit POSIX target (LP64 - OSX64,
+    // OSXARM64, iOS, Android64, Linux64), 4 on Windows and Android32. There
+    // they are types of their own, not Integer / Cardinal.
+    LongBytes: Integer;
+    // VarArgStart / VarArgEnd / VarArgCopy / VarArgGetValue exist: every
+    // target but Win32 (dccaarm knows them; AtomicCmpExchange128 stays
+    // 64-bit only).
+    HasVarArgIntrinsics: Boolean;
     IsWindows: Boolean;
     IsPosix: Boolean;
     Is64Bit: Boolean;
@@ -127,7 +142,7 @@ function PasDefaultNamespaces(APlatform: TPasPlatform): TArray<string>;
 
     <UnitAliases>Generics.Collections=System.Generics.Collections;
                  Generics.Defaults=System.Generics.Defaults</UnitAliases>
-    <UnitAliases Condition="Win32 Or Win64 Or WinArm64EC Or ...">
+    <UnitAliases Condition="Win32 Or Win64 Or Win64x Or WinNX32 Or ...">
       $(UnitAliases);WinTypes=Winapi.Windows;WinProcs=Winapi.Windows;
       DbiTypes=BDE;DbiProcs=BDE;DbiErrs=BDE</UnitAliases>
 
@@ -195,10 +210,19 @@ begin
   end;
 end;
 
-function PlatformInfo(APlatform: TPasPlatform): TPasPlatformInfo;
+var
+  // Built once (initialization): PlatformInfo is read per expression by the
+  // typers, and building the record each time allocated its Defines array
+  // (audit C1-24).
+  GPlatformInfos: array[TPasPlatform] of TPasPlatformInfo;
+
+function BuildPlatformInfo(APlatform: TPasPlatform): TPasPlatformInfo;
 begin
   Result.PointerBytes := 8;
   Result.ExtendedBytes := 8;
+  Result.ExtendedAlign := 8;
+  Result.LongBytes := 4;
+  Result.HasVarArgIntrinsics := APlatform <> pfWin32;
   Result.IsWindows := False;
   Result.IsPosix := False;
   Result.Is64Bit := True;
@@ -234,6 +258,8 @@ begin
         Result.Name := 'OSX64';
         Result.Defines := ['MACOS', 'MACOS64', 'OSX', 'OSX64', 'POSIX',
           'POSIX64', 'CPUX64', 'CPU64BITS', 'EXTERNALLINKER', 'LLVM', 'PIC'];
+        Result.ExtendedBytes := 16;
+        Result.ExtendedAlign := 16;
         Result.IsPosix := True;
       end;
     pfMacOSArm64:
@@ -282,9 +308,18 @@ begin
         Result.Name := 'Linux64';
         Result.Defines := ['LINUX', 'LINUX64', 'POSIX', 'POSIX64', 'CPUX64',
           'CPU64BITS', 'EXTERNALLINKER', 'LLVM', 'PIC'];
+        Result.ExtendedBytes := 16;
+        Result.ExtendedAlign := 16;
         Result.IsPosix := True;
       end;
   end;
+  if Result.IsPosix and Result.Is64Bit then
+    Result.LongBytes := 8;
+end;
+
+function PlatformInfo(APlatform: TPasPlatform): TPasPlatformInfo;
+begin
+  Result := GPlatformInfos[APlatform];
 end;
 
 function CompilerVersionDefine(ACompilerVersion: Double): string;
@@ -332,6 +367,14 @@ begin
     APlatform := pfAndroid32;
     Exit(True);
   end;
+  // The Win64 Modern platform of Studio 37's targets: the same dcc64, only
+  // its object format differs (CodeGear.Delphi.Targets adds -JF:COFFI for
+  // C++Builder output) - audit B2-07: it was read as Win32.
+  if SameText(AName, 'Win64x') then
+  begin
+    APlatform := pfWin64;
+    Exit(True);
+  end;
   Result := False;
 end;
 
@@ -339,5 +382,12 @@ function PlatformName(APlatform: TPasPlatform): string;
 begin
   Result := PlatformInfo(APlatform).Name;
 end;
+
+var
+  LPlat: TPasPlatform;
+
+initialization
+  for LPlat := Low(TPasPlatform) to High(TPasPlatform) do
+    GPlatformInfos[LPlat] := BuildPlatformInfo(LPlat);
 
 end.

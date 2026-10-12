@@ -432,8 +432,7 @@ type
     FCondOpener: TList<TPasIncludeRef>;
     FCondBase: Integer;
     FCompilerVersion: Double;
-    FPointerBytes: Integer;
-    FExtendedBytes: Integer;
+    FTarget: TPasBuiltinTarget;
     FOnDeclared: TPasDeclaredQuery;
     FOnSymbol: TPasCondSymbolQuery;
     FUnresolvedDeclared: TList<string>;
@@ -473,11 +472,14 @@ type
     procedure RecordUnevaluatedIf(const AExpr: string; AFileId,
       AExprStart: Integer; AActive: Boolean);
   public
-    { APointerBytes/AExtendedBytes parameterize SizeOf() in $IF expressions
-      for the target platform (Win32: 4/10; 64-bit targets: 8/8). }
+    { APointerBytes / AExtendedBytes / ALongBytes / AExtendedAlign
+      parameterize SizeOf() in $IF expressions for the target platform
+      (TPasPlatformInfo's fields of those names: Win32 4 / 10 / 4 / 8, Win64
+      8 / 8 / 4 / 8, OSX64 8 / 16 / 8 / 16). }
     constructor Create(ASourceManager: TPasSourceManager;
       ADefines: TPasDefines; ACompilerVersion: Double = 37.0;
-      APointerBytes: Integer = 8; AExtendedBytes: Integer = 8);
+      APointerBytes: Integer = 8; AExtendedBytes: Integer = 8;
+      ALongBytes: Integer = 4; AExtendedAlign: Integer = 8);
     destructor Destroy; override;
     { Preprocesses a main file loaded via the source manager. The instance
       can be reused for another file afterwards. }
@@ -916,14 +918,15 @@ end;
 
 constructor TPasPreprocessor.Create(ASourceManager: TPasSourceManager;
   ADefines: TPasDefines; ACompilerVersion: Double;
-  APointerBytes: Integer; AExtendedBytes: Integer);
+  APointerBytes: Integer; AExtendedBytes: Integer; ALongBytes: Integer;
+  AExtendedAlign: Integer);
 begin
   inherited Create;
   FSourceManager := ASourceManager;
   FBaseDefines := ADefines;
   FCompilerVersion := ACompilerVersion;
-  FPointerBytes := APointerBytes;
-  FExtendedBytes := AExtendedBytes;
+  FTarget := PasBuiltinTargetOf(APointerBytes, AExtendedBytes, AExtendedAlign,
+    ALongBytes);
   FSwitchStack := TStack<TPasOptState>.Create;
   FScopedEnumsEvents := TList<TPasScopedEnumsEvent>.Create;
   FMinEnumEvents := TList<TPasMinEnumEvent>.Create;
@@ -2135,8 +2138,7 @@ begin
   LCtx.DirPos.Offset := AToken.Start;
   LCtx.OnSymbol := FOnSymbol;
   LCtx.CompilerVersion := FCompilerVersion;
-  LCtx.PointerBytes := FPointerBytes;
-  LCtx.ExtendedBytes := FExtendedBytes;
+  LCtx.Target := FTarget;
   LValue := EvalCondText(AExpr, LCtx, LBad);
   // Every Defined(X) the expression MENTIONS (a tree walk in CondEval, not
   // the evaluation - `Defined(A) and Defined(B)` short-circuits past B when A

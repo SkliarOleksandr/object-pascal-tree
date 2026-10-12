@@ -102,7 +102,8 @@ begin
         LPre: TPasPreprocessed;
       begin
         LPP := TPasPreprocessor.Create(FSourceManager, LBaseDefines, 37.0,
-          LInfo.PointerBytes, LInfo.ExtendedBytes);
+          LInfo.PointerBytes, LInfo.ExtendedBytes, LInfo.LongBytes,
+          LInfo.ExtendedAlign);
         try
           LPre := LPP.Process(AFiles[AIndex]);
           LResults[AIndex].FileName := AFiles[AIndex];

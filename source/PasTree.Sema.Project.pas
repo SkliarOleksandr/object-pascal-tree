@@ -212,6 +212,7 @@ type
     FPlatform: TPasPlatform;
     FCompilerVersion: Double;   // emulated dcc: VERnnn + $IF CompilerVersion
     FInfo: TPasPlatformInfo;
+    FTarget: TPasBuiltinTarget;   // FInfo's size facts, for the builtin table
     FSM: TPasSourceManager;
     FDefines: TPasDefines;
     // The ctor's AExtraDefines verbatim (the defines themselves are folded
@@ -862,6 +863,8 @@ type
       out ABytes: Double; out AAlign: Integer): Boolean;
     function OracleFieldLayout(AMid, ATypeNode, ADepth: Integer;
       const ASubst: TPasSubst; out ABytes: Double;
+      out AAlign: Integer): Boolean;
+    function OracleTextRecLayout(AMid, ADepth: Integer; out ABytes: Double;
       out AAlign: Integer): Boolean;
     function OracleRecordLayout(AMid, ADefNode, ADepth: Integer;
       const ASubst: TPasSubst; AStart, AStartAlign: Integer;
@@ -1906,6 +1909,8 @@ begin
   FInternalLock := TObject.Create;
   FPlatform := APlatform;
   FInfo := PlatformInfo(APlatform);
+  FTarget := PasBuiltinTargetOf(FInfo.PointerBytes, FInfo.ExtendedBytes,
+    FInfo.ExtendedAlign, FInfo.LongBytes);
   FCompilerVersion := ACompilerVersion;
   FSM := TPasSourceManager.Create(ASearchPaths);
   FDefines := CreatePlatformDefines(APlatform, ACompilerVersion);
@@ -3688,9 +3693,21 @@ end;
   record contributes ITS alignment, not its size, and dcc-probed a 9-byte
   `$A1` record nested inside an `$A8` one lands at offset 1, not 8.
 
-  For a builtin the alignment is Min(size, 8): every natural alignment is the
-  type's own size up to 8, and Extended is the one that separates the two
-  (10 bytes on Win32, aligned to 8). }
+  For a builtin the alignment is PasBuiltinLayout's: a scalar's own size,
+  Extended's per target (8 for the 10-byte Win32 one, 16 on OSX64). }
+// `Text` / `TextFile`: System's TTextRec, pointer-aligned as a file variable
+// is (spec 9.2: `record A: Byte; T: TextFile end` is 736 / 768).
+function TPasSemaProject.OracleTextRecLayout(AMid, ADepth: Integer;
+  out ABytes: Double; out AAlign: Integer): Boolean;
+var
+  LRMid, LRSym: Integer;
+begin
+  Result := OracleResolve(AMid, 'ttextrec', LRMid, LRSym) and
+    OracleLayout(LRMid, LRSym, ADepth + 1, nil, ABytes, AAlign);
+  if Result then
+    AAlign := FInfo.PointerBytes;
+end;
+
 function TPasSemaProject.OracleLayout(AMid, ASym, ADepth: Integer;
   const ASubst: TPasSubst; out ABytes: Double; out AAlign: Integer): Boolean;
 var
@@ -3706,10 +3723,12 @@ begin
   case LM.Symbols[ASym].Kind of
     skBuiltinType:
       begin
-        Result := PasBuiltinSizeOf(LM.Symbols[ASym].Name, FInfo.PointerBytes,
-          FInfo.ExtendedBytes, ABytes);
-        if Result then
-          AAlign := Min(Trunc(ABytes), 8);
+        if ((LM.Symbols[ASym].NameLower = 'text') or
+            (LM.Symbols[ASym].NameLower = 'textfile')) and
+           OracleTextRecLayout(AMid, ADepth, ABytes, AAlign) then
+          Exit(True);
+        Result := PasBuiltinLayout(LM.Symbols[ASym].Name, FTarget, ABytes,
+          AAlign);
         Exit;
       end;
     skType: ;   // fall through to the definition walk below
@@ -4610,19 +4629,15 @@ begin
     if LRSym <> NIL_NODE then
       Exit(OracleFieldLayout(AMid, LRSym, ADepth + 1, ASubst, ABytes, AAlign));
   end;
-  if PasBuiltinLayout(LName, FInfo.PointerBytes, FInfo.ExtendedBytes,
-    ABytes, AAlign) then
+  // `Text` is a compiler intrinsic and `TextFile` System's alias for it: both
+  // are that unit's TTextRec - looked up first, for the same reason TFileRec
+  // is (spec 9.2.x: the RTL declares the size the compiler generates); the
+  // table's probed 730 / 754 answers when no System is loaded.
+  if (SameText(LName, 'Text') or SameText(LName, 'TextFile')) and
+     OracleTextRecLayout(AMid, ADepth, ABytes, AAlign) then
     Exit(True);
-  // `Text` is a compiler intrinsic with no size in the table, and `TextFile`
-  // is System's alias for it. Both are that unit's TTextRec - looked up, not
-  // hard-coded, for the same reason TFileRec is.
-  if SameText(LName, 'Text') or SameText(LName, 'TextFile') then
-    if OracleResolve(AMid, 'ttextrec', LRMid, LRSym) and
-       OracleLayout(LRMid, LRSym, ADepth + 1, nil, ABytes, AAlign) then
-    begin
-      AAlign := FInfo.PointerBytes;   // see the nkFileType branch above
-      Exit(True);
-    end;
+  if PasBuiltinLayout(LName, FTarget, ABytes, AAlign) then
+    Exit(True);
   if OracleQualified(AMid, LName, LRMid, LRSym) then
     Exit(OracleLayout(LRMid, LRSym, ADepth + 1, nil, ABytes, AAlign));
   // `System.X` where X is a builtin: System is the implicit unit and is not
@@ -4631,8 +4646,7 @@ begin
   // rather than fall back to a same-named builtin.
   LDot := LName.LastIndexOf('.');
   Result := (LDot >= 0) and SameText(Copy(LName, 1, LDot), 'System') and
-    PasBuiltinLayout(Copy(LName, LDot + 2, MaxInt), FInfo.PointerBytes,
-      FInfo.ExtendedBytes, ABytes, AAlign);
+    PasBuiltinLayout(Copy(LName, LDot + 2, MaxInt), FTarget, ABytes, AAlign);
 end;
 
 { An old-style `object` (11.5). Its fields lay out exactly like a record's,
@@ -5042,8 +5056,7 @@ function TPasSemaProject.OracleCondCtx(AMid, ADepth: Integer): TPasCondContext;
 begin
   Result := Default(TPasCondContext);
   Result.CompilerVersion := FCompilerVersion;
-  Result.PointerBytes := FInfo.PointerBytes;
-  Result.ExtendedBytes := FInfo.ExtendedBytes;
+  Result.Target := FTarget;
   Result.OnSymbol :=
     function(AQuery: TPasSymbolQuery; const AName: string;
       const APos: TPasCondPos; out AV: TPasSymbolValue): Boolean
@@ -5512,7 +5525,8 @@ end;
 function TPasSemaProject.NewPP: TPasPreprocessor;
 begin
   Result := TPasPreprocessor.Create(FSM, FDefines, FCompilerVersion,
-    FInfo.PointerBytes, FInfo.ExtendedBytes);
+    FInfo.PointerBytes, FInfo.ExtendedBytes, FInfo.LongBytes,
+    FInfo.ExtendedAlign);
 end;
 
 function TPasSemaProject.RentPP: TPasPreprocessor;
@@ -7832,7 +7846,7 @@ begin
          AArgs[LIdx].Sym].Flags) then
     begin
       var LCanon := PasBuiltinCanonSym(FModels[AArgs[LIdx].UnitId],
-        AArgs[LIdx].Sym, FInfo.Is64Bit);
+        AArgs[LIdx].Sym, FPlatform);
       if (AArgs[LIdx].UnitId <> ABase.UnitId) or
          (AArgs[LIdx].Sym <> LCanon) then
       begin
@@ -9235,7 +9249,7 @@ begin
     // too, and dcc says so (see PasBuiltinAliasGroup) - and one for Integer a
     // NativeInt value's on a 32-bit target.
     for var LAlias in PasBuiltinAliasGroup(AReg.TargetName,
-      FInfo.PointerBytes) do
+      FInfo.PointerBytes, FInfo.LongBytes) do
     begin
       LBSym := FModels[AMid].Resolve(FModels[AMid].InterfaceScope, LAlias);
       if LBSym <> NIL_SYM then
@@ -10716,8 +10730,8 @@ begin
   LBuiltinB := sfBuiltin in FModels[B.UnitId].Symbols[B.Sym].Flags;
   Result := LBuiltinA and LBuiltinB and
     ((A.Sym = B.Sym) or
-     (PasBuiltinCanonSym(FModels[A.UnitId], A.Sym, FInfo.Is64Bit) =
-      PasBuiltinCanonSym(FModels[B.UnitId], B.Sym, FInfo.Is64Bit)));
+     (PasBuiltinCanonSym(FModels[A.UnitId], A.Sym, FPlatform) =
+      PasBuiltinCanonSym(FModels[B.UnitId], B.Sym, FPlatform)));
 end;
 
 // Cross-model mirror of TPasSemaTyper.Assignable: conservative, rejects only
@@ -11715,7 +11729,7 @@ var
         begin
           var LCharX := CanonTypeX(LParX);
           if PasBuiltinIsChar(FModels[LCharX.UnitId], LCharX.Sym,
-             FInfo.Is64Bit) then
+             FPlatform) then
             Inc(Result, 3)
           else
             Inc(Result, 1);

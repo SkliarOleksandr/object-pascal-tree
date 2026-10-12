@@ -2028,7 +2028,7 @@ const
     ('Cm + D', 'Extended', 'Extended'),
     ('I / Cm', 'Comp', 'Extended'),
     ('Cu + Cm', 'Currency', 'Extended'),
-    ('for 0 to High(DA)', 'NativeInt', 'NativeInt'),  // dcc: Int64 / Integer
+    ('for 0 to High(DA)', 'Int64', 'Integer'),
     ('for C to I', 'Int64', 'Int64'),
     ('for B to W', 'Integer', 'Integer'),
     ('for U64 to 0', 'UInt64', 'UInt64'),

@@ -105,8 +105,7 @@ type
     OnSymbol: TPasCondSymbolQuery;   // nil = nobody can answer const/SizeOf/
                                      // Length questions (the first pass)
     CompilerVersion: Double;         // answers RTLVersion too (equal since XE2)
-    PointerBytes: Integer;
-    ExtendedBytes: Integer;
+    Target: TPasBuiltinTarget;
     // Outputs.
     UnknownDeclared: TArray<string>; // Declared() names nobody answered
     UnknownSymbols: TArray<TPasUnresolvedSymbol>; // ...and symbol questions
@@ -149,15 +148,21 @@ function CondAsNum(const AValue: TPasCondValue): Double;
 
 { SizeOf(X) for the SEEDED builtin types only, parameterized by target.
   Public because the projects symbol oracle sizes record FIELDS with it. }
-function PasBuiltinSizeOf(const AName: string; APointerBytes,
-  AExtendedBytes: Integer; out ASize: Double): Boolean;
+function PasBuiltinSizeOf(const AName: string;
+  const ATarget: TPasBuiltinTarget; out ASize: Double): Boolean;
 
 { The same table, with ALIGNMENT - which is NOT derivable from the size.
   ShortString is 256 bytes aligned to 1, a set is up to 32 bytes aligned to 1,
-  and Extended is 10 bytes aligned to 8 (Win32). Anything that lays out a
-  record must ask this rather than clipping the size to 8. }
-function PasBuiltinLayout(const AName: string; APointerBytes,
-  AExtendedBytes: Integer; out ASize: Double; out AAlign: Integer): Boolean;
+  and Extended is 10 bytes aligned to 8 (Win32), 16 aligned to 16 (OSX64).
+  Anything that lays out a record must ask this rather than clipping the
+  size to 8. }
+function PasBuiltinLayout(const AName: string;
+  const ATarget: TPasBuiltinTarget; out ASize: Double;
+  out AAlign: Integer): Boolean;
+
+{ A target from its four facts (tests and hosts that hold no platform). }
+function PasBuiltinTargetOf(APointerBytes, AExtendedBytes, AExtendedAlign,
+  ALongBytes: Integer): TPasBuiltinTarget;
 
 implementation
 
@@ -354,18 +359,30 @@ begin
   end;
 end;
 
-function PasBuiltinSizeOf(const AName: string; APointerBytes,
-  AExtendedBytes: Integer; out ASize: Double): Boolean;
+function PasBuiltinTargetOf(APointerBytes, AExtendedBytes, AExtendedAlign,
+  ALongBytes: Integer): TPasBuiltinTarget;
+begin
+  Result.PointerBytes := APointerBytes;
+  Result.ExtendedBytes := AExtendedBytes;
+  Result.ExtendedAlign := AExtendedAlign;
+  Result.LongBytes := ALongBytes;
+end;
+
+function PasBuiltinSizeOf(const AName: string;
+  const ATarget: TPasBuiltinTarget; out ASize: Double): Boolean;
 var
   LAlign: Integer;
 begin
-  Result := PasBuiltinLayout(AName, APointerBytes, AExtendedBytes, ASize,
-    LAlign);
+  Result := PasBuiltinLayout(AName, ATarget, ASize, LAlign);
 end;
 
-function PasBuiltinLayout(const AName: string; APointerBytes,
-  AExtendedBytes: Integer; out ASize: Double; out AAlign: Integer): Boolean;
+function PasBuiltinLayout(const AName: string;
+  const ATarget: TPasBuiltinTarget; out ASize: Double;
+  out AAlign: Integer): Boolean;
+var
+  LPointerBytes: Integer;
 begin
+  LPointerBytes := ATarget.PointerBytes;
   // The reference-counted and pointer-like intrinsics: one machine pointer,
   // aligned as one. `string` and friends are reserved words or compiler
   // intrinsics, so nothing in a unit can shadow them with a different size.
@@ -375,8 +392,8 @@ begin
      SameText(AName, 'PChar') or SameText(AName, 'PAnsiChar') or
      SameText(AName, 'PWideChar') then
   begin
-    ASize := APointerBytes;
-    AAlign := APointerBytes;
+    ASize := LPointerBytes;
+    AAlign := LPointerBytes;
     Exit(True);
   end;
   // 256 bytes of storage, but byte-aligned - the case that makes alignment a
@@ -391,11 +408,40 @@ begin
   // BOTH (dcc-probed: `record A: Byte; V: Variant; end` is 24 on Win32).
   if SameText(AName, 'Variant') or SameText(AName, 'OleVariant') then
   begin
-    if APointerBytes = 4 then
+    if LPointerBytes = 4 then
       ASize := 16
     else
       ASize := 24;
     AAlign := 8;
+    Exit(True);
+  end;
+
+  // Text / TextFile is TTextRec: 730 bytes on a 32-bit target, 754 on a
+  // 64-bit one, pointer-aligned (`record A: Byte; T: TextFile end` is 736 /
+  // 768 - dcc32, dcc64, dccaarm, dccaarm64, dccosx64; local/probe-b37 T, A;
+  // audit D1-15: the rows were missing and SizeOf refused).
+  if SameText(AName, 'Text') or SameText(AName, 'TextFile') then
+  begin
+    if LPointerBytes = 4 then
+      ASize := 730
+    else
+      ASize := 754;
+    AAlign := LPointerBytes;
+    Exit(True);
+  end;
+  // Extended has its own alignment: 8 for the 10-byte Win32 one, 16 for the
+  // 16-byte one of the Intel 64-bit POSIX targets (TPasPlatformInfo).
+  if SameText(AName, 'Extended') then
+  begin
+    ASize := ATarget.ExtendedBytes;
+    AAlign := ATarget.ExtendedAlign;
+    Exit(True);
+  end;
+  // LongInt / LongWord are 8 bytes on the LP64 targets.
+  if SameText(AName, 'LongInt') or SameText(AName, 'LongWord') then
+  begin
+    ASize := ATarget.LongBytes;
+    AAlign := ATarget.LongBytes;
     Exit(True);
   end;
 
@@ -418,15 +464,12 @@ begin
   Result := True;
   if SameText(AName, 'Pointer') or SameText(AName, 'NativeInt') or
      SameText(AName, 'NativeUInt') then
-    ASize := APointerBytes
-  else if SameText(AName, 'Extended') then
-    ASize := AExtendedBytes
+    ASize := LPointerBytes
   else if SameText(AName, 'Int64') or SameText(AName, 'UInt64') or
     SameText(AName, 'Double') or SameText(AName, 'Currency') or
     SameText(AName, 'Real') or SameText(AName, 'Comp') then
     ASize := 8
   else if SameText(AName, 'Integer') or SameText(AName, 'Cardinal') or
-    SameText(AName, 'LongInt') or SameText(AName, 'LongWord') or
     SameText(AName, 'Single') or SameText(AName, 'LongBool') then
     ASize := 4
   else if SameText(AName, 'Char') or SameText(AName, 'WideChar') or
@@ -443,8 +486,7 @@ begin
     Result := False;
   end;
   // Every remaining builtin is a scalar, and a scalar aligns to its own size
-  // capped at 8 - Extended (10 bytes on Win32) is the only one where that
-  // clipping does real work.
+  // (Extended, the one that needed a cap, has its row above).
   if Result then
     AAlign := Min(Trunc(ASize), 8)
   else
@@ -489,7 +531,7 @@ end;
   of it. Only the INTEGRAL builtins cast here: they are the ones whose result
   is a number a `$IF` can compare. Truncation is real (a cast to Byte wraps),
   so the folded value matches dcc rather than approximating it. }
-function PasBuiltinCast(const AName: string; APointerBytes: Integer;
+function PasBuiltinCast(const AName: string; const ATarget: TPasBuiltinTarget;
   const AValue: TPasCondValue; out ANum: Double): Boolean;
 var
   LBytes, LBits: Integer;
@@ -517,11 +559,18 @@ begin
     LBytes := 2;
     LSigned := True;
   end
-  else if SameText(AName, 'Cardinal') or SameText(AName, 'LongWord') then
+  else if SameText(AName, 'Cardinal') then
     LBytes := 4
-  else if SameText(AName, 'Integer') or SameText(AName, 'LongInt') then
+  else if SameText(AName, 'LongWord') then
+    LBytes := ATarget.LongBytes
+  else if SameText(AName, 'Integer') then
   begin
     LBytes := 4;
+    LSigned := True;
+  end
+  else if SameText(AName, 'LongInt') then
+  begin
+    LBytes := ATarget.LongBytes;
     LSigned := True;
   end
   else if SameText(AName, 'UInt64') then
@@ -532,10 +581,10 @@ begin
     LSigned := True;
   end
   else if SameText(AName, 'NativeUInt') then
-    LBytes := APointerBytes
+    LBytes := ATarget.PointerBytes
   else if SameText(AName, 'NativeInt') then
   begin
-    LBytes := APointerBytes;
+    LBytes := ATarget.PointerBytes;
     LSigned := True;
   end
   else
@@ -663,8 +712,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     else if SameText(LName, 'SizeOf') then
     begin
       if (ATree.Nodes[LArg].Kind = nkIdent) and
-         PasBuiltinSizeOf(ATree.NodeText(LArg), ACtx.PointerBytes,
-           ACtx.ExtendedBytes, LSize) then
+         PasBuiltinSizeOf(ATree.NodeText(LArg), ACtx.Target, LSize) then
         Result := MkNum(LSize)
       else
       begin
@@ -699,7 +747,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       // clean False where dcc aborts True), which is exactly the hiding of an
       // open question the comment above forbids.
       if CondIsClean(LArgVal) and
-         PasBuiltinCast(LName, ACtx.PointerBytes, LArgVal, LSize) then
+         PasBuiltinCast(LName, ACtx.Target, LArgVal, LSize) then
         Exit(MkNum(LSize));
       // Anything else (Ord(x), a unit function, ...) stays a guess - but the
       // CALLEE is recorded so a reporter can say what it choked on. Without

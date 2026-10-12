@@ -127,7 +127,8 @@ begin
     GDefines := CreatePlatformDefines(GPlatform);
     GPlatInfo := PlatformInfo(GPlatform);
     GPP := TPasPreprocessor.Create(GSM, GDefines, 37.0,
-      GPlatInfo.PointerBytes, GPlatInfo.ExtendedBytes);
+      GPlatInfo.PointerBytes, GPlatInfo.ExtendedBytes, GPlatInfo.LongBytes,
+      GPlatInfo.ExtendedAlign);
     Writeln('Platform: ', GPlatInfo.Name);
     try
       if GParallel then

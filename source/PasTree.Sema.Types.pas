@@ -296,8 +296,8 @@ function IsBracketToScalar(ADst: TSemaTypeCat): Boolean;
     equal string operands (ASameType), AnsiString for AnsiString with
     AnsiChar. Sets and pointer arithmetic keep the set / pointer operand; a
     comparison is Boolean. AUnary: AR is not read.
-  A result that is an operand's own shape answers oaLeft / oaRight, so the
-  typer keeps that operand's name (NativeInt, LongWord). }
+  An integer result names the builtin of its shape, never an operand's own
+  type (`NI + I` is Int64 on Win64). }
 function OperatorAnswer(AOp: TPasTokenKind; AUnary: Boolean;
   const AL, AR: TSemaOpFacts; ASameType, AIs64: Boolean): TSemaOpAnswer;
 
@@ -634,17 +634,12 @@ end;
 function OperatorAnswer(AOp: TPasTokenKind; AUnary: Boolean;
   const AL, AR: TSemaOpFacts; ASameType, AIs64: Boolean): TSemaOpAnswer;
 
-  // The answer naming integer shape (ARank, AUns): an operand's own type
-  // when it has that shape and is no constant, else the builtin.
+  // The builtin of integer shape (ARank, AUns) - never an operand's own
+  // name: dcc says Int64 for `NI + I` on Win64 and for `Lg + I` on the LP64
+  // targets, where LongInt is a type of its own (local/probe-b37 L).
   function IntAns(ARank: Integer; AUns: Boolean; ARL, ARR: Integer;
     ALU, ARU: Boolean): TSemaOpAnswer;
   begin
-    if not AL.IntConst and (AL.Rank <> 0) and (ARL = ARank) and
-       (ALU = AUns) then
-      Exit(oaLeft);
-    if not AUnary and not AR.IntConst and (AR.Rank <> 0) and
-       (ARR = ARank) and (ARU = AUns) then
-      Exit(oaRight);
     case ARank of
       1:
         if AUns then Result := oaByte else Result := oaShortInt;
@@ -978,16 +973,7 @@ begin
     Cover(LRR, LRU);
     for LIdx := 0 to 6 do
       if (CLo[LIdx] <= LLo) and (CHi[LIdx] >= LHi) then
-      begin
-        // An operand of that very shape keeps its name (NativeInt).
-        if not AL.IntConst and (AL.Rank <> 0) and (LRL = CRank[LIdx]) and
-           (LLU = CUns[LIdx]) then
-          Exit(oaLeft);
-        if not AR.IntConst and (AR.Rank <> 0) and (LRR = CRank[LIdx]) and
-           (LRU = CUns[LIdx]) then
-          Exit(oaRight);
         Exit(CAns[LIdx]);
-      end;
     Exit(oaUInt64);
   end;
   if (AL.Cat = tcFloat) and (AR.Cat = tcFloat) then
@@ -1697,6 +1683,12 @@ const
               for LIdx := Low(CFits) to High(CFits) do
                 if LName = CFits[LIdx] then
                   Exit;
+              // A 64-bit ordinal is E2001 by its width: Int64 / UInt64, a
+              // 64-bit NativeInt, and LongInt / LongWord on the LP64 targets
+              // (ranked 4 there - audit A1-10).
+              if (M.Symbols[LSym].TypeCat = tcInteger) and
+                 (M.Symbols[LSym].NumRank = 4) then
+                Exit('E2001');
               for LIdx := Low(CTooMany) to High(CTooMany) do
                 if LName = CTooMany[LIdx] then
                   Exit('E2028');
@@ -2245,10 +2237,8 @@ function TPasSemaTyper.ScoreArgs(ACall: Integer;
 var
   LArg, LCore, LIdx, LAt, LPt, LCAt, LCPt: Integer;
   LParCat: TSemaTypeCat;
-  LIs64: Boolean;
 begin
   Result := 0;
-  LIs64 := FIs64;
   LArg := Sib(Child(ACall));
   LIdx := 0;
   while (LArg <> NIL_NODE) and (LIdx <= High(AParams)) do
@@ -2296,7 +2286,7 @@ begin
       // (local/probe-b31 O2, probe-b32 P1).
       if (LParCat = tcChar) and IsCharLiteralExpr(T, LCore) then
       begin
-        if PasBuiltinIsChar(M, WeakAliasEnd(LPt), LIs64) then
+        if PasBuiltinIsChar(M, WeakAliasEnd(LPt), FPlatform) then
           Inc(Result, 3)
         else
           Inc(Result, 1);
@@ -2306,8 +2296,8 @@ begin
         // The same type under two names is an exact match: a weak alias
         // (WeakAliasEnd), one type under two seeded names (Integer /
         // LongInt, Char / WideChar - PasBuiltinCanonSym, audit A3-17).
-        LCAt := PasBuiltinCanonSym(M, WeakAliasEnd(LAt), LIs64);
-        LCPt := PasBuiltinCanonSym(M, WeakAliasEnd(LPt), LIs64);
+        LCAt := PasBuiltinCanonSym(M, WeakAliasEnd(LAt), FPlatform);
+        LCPt := PasBuiltinCanonSym(M, WeakAliasEnd(LPt), FPlatform);
         if (LAt = LPt) or (LCAt = LCPt) then
           Inc(Result, 2)
         else if ArgCatRejects(LParCat, CatOf(LAt)) or

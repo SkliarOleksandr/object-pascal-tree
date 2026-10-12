@@ -48,7 +48,8 @@ begin
       [TPath.GetDirectoryName(TPath.GetFullPath(ParamStr(1)))]);
     GDefines := CreatePlatformDefines(GPlatform);
     GPP := TPasPreprocessor.Create(GSM, GDefines, 37.0,
-      GInfo.PointerBytes, GInfo.ExtendedBytes);
+      GInfo.PointerBytes, GInfo.ExtendedBytes, GInfo.LongBytes,
+      GInfo.ExtendedAlign);
     try
       GPre := GPP.Process(TPath.GetFullPath(ParamStr(1)));
       GTree := TPasParser.ParseFile(GPre, GDiags);

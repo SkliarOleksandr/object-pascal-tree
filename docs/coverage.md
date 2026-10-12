@@ -81,6 +81,14 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 
 ## 02-fundamental-types.md
 
+### 2.2.1 Integer types
+- on the LP64 targets LongInt / LongWord are seeded as 8-byte types of their
+  own, and sized, cast and ranked so; overload choice has no width
+  preference beyond exact identity, so `F(Lg)` against F(Integer) and
+  F(Int64) - dcc takes F(Int64) - ties, and the first declared wins. The
+  Linux64 facts (LongInt 8, Extended 16 aligned to 16) are Embarcadero's
+  table; no dcclinux64 was installed to probe them.
+
 ### 2.2.4 Enumerated types
 - the layout oracle refuses enums containing negative
   explicit ordinals, so a `$IF SizeOf(...)` over such an enum stays a guess.
