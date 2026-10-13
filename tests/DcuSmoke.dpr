@@ -48,7 +48,7 @@ uses
   PasTree.TestKit in 'PasTree.TestKit.pas';
 
 const
-  FIXTURE: array[0..95] of string = (
+  FIXTURE: array[0..107] of string = (
     'unit DcuFix;',
     'interface',
     'uses System.SysUtils, System.Classes;',
@@ -124,6 +124,19 @@ const
     '    const &End = 7;',
     '    const Other = 8;',
     '  end;',
+    // B54: a field-only generic whose first member names its second
+    // parameter (A1-42), an anonymous method type with a convention
+    // (B1-20), strong and plain aliases (B1-22), a TDate property (B1-23).
+    '  TRevF<TKey, TValue> = record V: TValue; K: TKey; end;',
+    '  TCbStd = reference to function(const P1: Integer): Integer stdcall;',
+    '  TU64 = type UInt64;',
+    '  TPlainD = Double;',
+    '  TDateBox = class(TObject)',
+    '  private',
+    '    FD: TDate;',
+    '  published',
+    '    property D: TDate read FD write FD;',
+    '  end;',
     '  TVec = record',
     '    X, Y: Integer;',
     '    class operator Add(const A, B: TVec): TVec;',
@@ -136,6 +149,10 @@ const
     '  KTypedSet: TColors = [cRed, cBlue];',
     '  KTypedGrid: TGrid = (1, 2, 3, 4);',
     '  KTypedClass: TClass = TCircle;',
+    // B54: an alias of an enumeration's member (B1-21) and a hint after a
+    // value that spells `function` (D1-35).
+    '  cAlias = cGreen;',
+    '  SUsage: string = ''Syntax: function name'' deprecated;',
     'function Sum(const A: array of Integer): Integer;',
     'procedure Log(const S: string; Level: Integer = 3); overload;',
     'procedure Log(const S: string; const Args: array of const); overload;',
@@ -147,7 +164,7 @@ const
     'procedure TCircle.Draw; begin inherited; end;',
     'procedure TCircle.Reset; begin end;',
     'function TBox<T>.Get: T; begin Result := FItem; end;');
-  FIXTURE_TAIL: array[0..10] of string = (
+  FIXTURE_TAIL: array[0..11] of string = (
     'procedure TBox<T>.Put(const AItem: T); begin FItem := AItem; end;',
     'procedure TShapeHelper.Ext; begin end;',
     'class operator TVec.Add(const A, B: TVec): TVec;',
@@ -160,6 +177,8 @@ const
     'procedure Nest(X: Integer);',
     '  procedure Inner; begin end;',
     'var P: TCallback; begin Inner; P := procedure(A: Integer) begin X := A; end; end;',
+    // B54 (B1-21): an implementation-only constant of an interface enum.
+    'const cImpl = cBlue;',
     'end.');
 
   USER_UNIT: array[0..29] of string = (
@@ -385,6 +404,22 @@ begin
     Ok(ATag + ': ordinal constant', LSrc.Contains('KAnswer = 42;'));
     Ok(ATag + ': string constant', LSrc.Contains('KName = ''PasTree'';'));
     Ok(ATag + ': float constant', LSrc.Contains('KPi = 3.25;'));
+    Ok(ATag + ': B54 a field-only generic keeps its parameter order',
+      LSrc.Contains('TRevF<TKey, TValue> = record'));
+    Ok(ATag + ': B54 an anonymous method type takes its convention without `;`',
+      LSrc.Contains('TCbStd = reference to function(const P1: Integer): ' +
+        'Integer stdcall;'));
+    Ok(ATag + ': B54 a strong alias keeps `type`, a plain one does not',
+      LSrc.Contains('TU64 = type UInt64;') and
+      LSrc.Contains('TPlainD = Double;'));
+    Ok(ATag + ': B54 a TDate property declares no default',
+      LSrc.Contains('property D: TDate read FD write FD;'));
+    Ok(ATag + ': B54 an enum member alias is a constant; the implementation''s ' +
+      'is not printed',
+      LSrc.Contains('TColor3 = (cRed, cGreen, cBlue);') and
+      LSrc.Contains('cAlias = cGreen;') and not LSrc.Contains('cImpl'));
+    Ok(ATag + ': B54 a hint after a value spelling `function` is kept',
+      LSrc.Contains('''Syntax: function name'' deprecated;'));
     Ok(ATag + ': B53 unsigned constants print unsigned',
       LSrc.Contains('CBigU = 4294967295;') and
       LSrc.Contains('CU2 = 4000000000;') and

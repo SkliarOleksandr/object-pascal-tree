@@ -126,6 +126,8 @@ type
     function ImportRef(AType: TPasDcuType): string;
     function SystemAlias(const AName: string): string;
     function OwnRef(AType: TPasDcuType): string;
+    procedure EnsureForward(AType: TPasDcuType);
+    function Qualified(AUnitIdx: Integer; const ARaw, AText: string): string;
     function InstRef(AType: TPasDcuType): string;
     function GenericParamNames(AType: TPasDcuType): TArray<string>;
     function GenericHead(const AName: string; AType: TPasDcuType): string;
@@ -177,6 +179,7 @@ type
     function RoutineHead(const AWord, AName: string; AList: TList<TPasDcuDecl>;
       AResultIdx: Integer): string;
     function ProcTypeText(AType: TPasDcuType; const APrefix: string): string;
+    function IsInlineProcTypeText(const ATypeText: string): Boolean;
     procedure PrintMethod(AMember: TPasDcuDecl; AOwner: TPasDcuType);
     procedure PrintProperty(AMember: TPasDcuDecl; AOwner: TPasDcuType);
     procedure PrintDispProperty(AMember: TPasDcuDecl);
@@ -421,7 +424,6 @@ end;
 function TPasDcuPrinter.ImportRef(AType: TPasDcuType): string;
 var
   LRaw: string;
-  LUses: TPasDcuUses;
 begin
   LRaw := AType.ImportName;
   if LRaw = '' then
@@ -441,35 +443,50 @@ begin
   // `string` is a reserved word: System.string is not a spelling.
   if SameText(Result, 'string') then
     Exit('string');
-  LUses := FUnit.UsesOf(AType.UnitIdx);
-  if (LUses <> nil) and NeedsQualifier(LRaw) then
+  Result := Qualified(AType.UnitIdx, LRaw, Result);
+end;
+
+// AText, a type of uses entry AUnitIdx spelled ARaw in the file, with that
+// unit's name in front when the bare name would be ambiguous here.
+function TPasDcuPrinter.Qualified(AUnitIdx: Integer;
+  const ARaw, AText: string): string;
+var
+  LUses: TPasDcuUses;
+begin
+  Result := AText;
+  LUses := FUnit.UsesOf(AUnitIdx);
+  if (LUses <> nil) and NeedsQualifier(ARaw) then
     Result := LUses.Name + '.' + Result;
 end;
 
-// A type of this unit by name; a class or interface that is referenced
-// before its definition gets a forward declaration in the current block.
-function TPasDcuPrinter.OwnRef(AType: TPasDcuType): string;
+// A class or interface of this unit referenced before its definition gets a
+// forward declaration in the current block, its head spelled as the
+// definition's (escaped, with the generic's parameters). A nested type
+// cannot be forward-declared from the outside; its owner's definition
+// carries it and precedes any legal use.
+procedure TPasDcuPrinter.EnsureForward(AType: TPasDcuType);
 var
   LHead: string;
 begin
-  Result := Esc(StripArity(AType.Name));
-  if FDeclared.ContainsKey(AType.Index) or FPrinting.ContainsKey(AType.Index) then
+  if FDeclared.ContainsKey(AType.Index) or FPrinting.ContainsKey(AType.Index) or
+     not (AType.Kind in [tkClass, tkInterface]) or
+     (AType.Name.IndexOf('.') >= 0) then
     Exit;
-  if AType.Kind in [tkClass, tkInterface] then
-  begin
-    // A nested type cannot be forward-declared from the outside; its owner's
-    // definition carries it and precedes any legal use.
-    if AType.Name.IndexOf('.') >= 0 then
-      Exit;
-    LHead := GenericHead(Result, AType);
-    if AType.Kind = tkClass then
-      FForwards.Add(LHead + ' = class;')
-    else if AType.IsDispInterface then
-      FForwards.Add(LHead + ' = dispinterface;')
-    else
-      FForwards.Add(LHead + ' = interface;');
-    FDeclared.Add(AType.Index, True);
-  end;
+  LHead := GenericHead(Esc(StripArity(AType.Name)), AType);
+  if AType.Kind = tkClass then
+    FForwards.Add(LHead + ' = class;')
+  else if AType.IsDispInterface then
+    FForwards.Add(LHead + ' = dispinterface;')
+  else
+    FForwards.Add(LHead + ' = interface;');
+  FDeclared.Add(AType.Index, True);
+end;
+
+// A type of this unit by name (forward-declared when needed).
+function TPasDcuPrinter.OwnRef(AType: TPasDcuType): string;
+begin
+  Result := Esc(StripArity(AType.Name));
+  EnsureForward(AType);
 end;
 
 // `TList<Integer>`: the generic's spelling with its arity replaced by the
@@ -481,7 +498,6 @@ var
   LSegs: TArray<string>;
   LIdx, LTick, LArity, LNext, LJ: Integer;
   LArgs: TArray<string>;
-  LUses: TPasDcuUses;
 begin
   LBase := FUnit.TypeAt(AType.BaseIdx);
   if LBase = nil then
@@ -498,17 +514,7 @@ begin
   else
   begin
     LRaw := LBase.Name;
-    if (LBase.Kind in [tkClass, tkInterface]) and
-       not FDeclared.ContainsKey(LBase.Index) and
-       not FPrinting.ContainsKey(LBase.Index) and (LRaw.IndexOf('.') < 0) then
-    begin
-      // Same forward rule as OwnRef, spelled with the generic's parameters.
-      if LBase.Kind = tkClass then
-        FForwards.Add(GenericHead(StripArity(LRaw), LBase) + ' = class;')
-      else
-        FForwards.Add(GenericHead(StripArity(LRaw), LBase) + ' = interface;');
-      FDeclared.Add(LBase.Index, True);
-    end;
+    EnsureForward(LBase);
   end;
   if LRaw = '' then
     Exit(Unresolved(Format('generic base type #%d has no name', [LBase.Index])));
@@ -541,11 +547,7 @@ begin
   end;
   Result := string.Join('.', LSegs);
   if LBase.Kind = tkImport then
-  begin
-    LUses := FUnit.UsesOf(LBase.UnitIdx);
-    if (LUses <> nil) and NeedsQualifier(LRaw) then
-      Result := LUses.Name + '.' + Result;
-  end;
+    Result := Qualified(LBase.UnitIdx, LRaw, Result);
 end;
 
 // An expanded generic the unit references without an instantiation record
@@ -669,8 +671,10 @@ var
   LArity, LIdx, LTick, LSeg: Integer;
   LInst, LArg: TPasDcuType;
   LAll: Boolean;
-  LFound: TList<string>;
-  LSeen: TDictionary<Integer, Boolean>;
+  // The generic's own tkGenericParam entries the members mention, by type
+  // index; a generic METHOD's own parameters are left out (LOwn).
+  LFound: TList<Integer>;
+  LSeen, LOwn: TDictionary<Integer, Boolean>;
 
   procedure Visit(ATypeIdx: Integer; ADepth: Integer);
   var
@@ -686,8 +690,8 @@ var
     LSeen.Add(ATypeIdx, True);
     case LT.Kind of
       tkGenericParam:
-        if (LT.Name <> '') and (LFound.IndexOf(LT.Name) < 0) then
-          LFound.Add(LT.Name);
+        if (LT.Name <> '') and not LOwn.ContainsKey(ATypeIdx) then
+          LFound.Add(ATypeIdx);
       tkGenericInst:
         for LA in LT.GenericArgs do
           Visit(LA, ADepth + 1);
@@ -720,6 +724,11 @@ var
         dkMethod, dkConstructor, dkDestructor:
           begin
             LR := FUnit.AddrAt(LM.Offset);
+            if (LR <> nil) and (LR.Kind = dkRoutine) and
+               (LR.GenericParams <> nil) then
+              for LA in LR.GenericParams do
+                if LA.Kind = dkType then
+                  LOwn.AddOrSetValue(LA.TypeIdx, True);
             if (LR <> nil) and (LR.Kind = dkRoutine) and (LR.Args <> nil) then
             begin
               Visit(LR.ResultTypeIdx, 1);
@@ -752,8 +761,9 @@ begin
     FGenericNames.Add(AType.Index, Result);
     Exit;
   end;
-  LFound := TList<string>.Create;
+  LFound := TList<Integer>.Create;
   LSeen := TDictionary<Integer, Boolean>.Create;
+  LOwn := TDictionary<Integer, Boolean>.Create;
   try
     // 1. The instantiation of this generic with its own parameters.
     for LInst in FUnit.Types do
@@ -779,17 +789,23 @@ begin
       FGenericNames.Add(AType.Index, Result);
       Exit;
     end;
-    // 2. Parameter types the members mention, in order of first mention.
+    // 2. Parameter types the members mention - in DECLARATION order, which
+    //    is the order of their type-table entries (dcc numbers one generic's
+    //    parameters consecutively), not the order the members mention them
+    //    in: `TRev<TKey, TValue> = record V: TValue; K: TKey; end` printed
+    //    as `TRev<TValue, TKey>` (audit A1-42).
     VisitMembers(AType);
+    LFound.Sort;
     for LIdx := 0 to LArity - 1 do
       if LIdx < LFound.Count then
-        Result[LIdx] := LFound[LIdx]
+        Result[LIdx] := FUnit.TypeAt(LFound[LIdx]).Name
       else if LArity = 1 then
         Result[LIdx] := 'T'
       else
         Result[LIdx] := 'T' + IntToStr(LIdx + 1);
     FGenericNames.Add(AType.Index, Result);
   finally
+    LOwn.Free;
     LSeen.Free;
     LFound.Free;
   end;
@@ -1965,6 +1981,13 @@ begin
     LType := FUnit.TypeAt(LDecl.TypeIdx);
     if (LType = nil) or (LType.Kind <> tkEnum) then
       Continue;
+    // Only the type's own members: they precede its declaration's slot. A
+    // constant of the type after it is an alias (`cxDefault = cxGreen`),
+    // printed as a constant by PrintTopDecl - and not at all when it is the
+    // implementation's (audit B1-21). (A scoped enumeration's members carry
+    // no interface flag: the slot is the test, not IsInterfaceVisible.)
+    if (LType.DeclSlot > 0) and (LDecl.Slot > LType.DeclSlot) then
+      Continue;
     if not FEnumMembers.TryGetValue(LType.Index, LList) then
     begin
       LList := TList<TPasDcuDecl>.Create;
@@ -2160,8 +2183,22 @@ begin
     Result := Result + ': ' + TypeRef(AType.ResultTypeIdx);
   if ((AType.ProcFlags and ptOfObject) <> 0) and (APrefix = '') then
     Result := Result + ' of object';
+  // A procedural type takes its convention after a `;`; an anonymous method
+  // type without one - `reference to function(...): HResult stdcall;` (dcc64
+  // 37.0: E2029 on the `;` form, audit B1-20).
   if AType.CallKind <> dcRegister then
-    Result := Result + ';' + CallKindWord(AType.CallKind).TrimRight([';']);
+    if APrefix = '' then
+      Result := Result + ';' + CallKindWord(AType.CallKind).TrimRight([';'])
+    else
+      Result := Result + CallKindWord(AType.CallKind).TrimRight([';']);
+end;
+
+// A type text that is an inline procedural type: dcc reads a hint
+// directive after it as a calling convention (E1030, probed 2026-09-17).
+function TPasDcuPrinter.IsInlineProcTypeText(const ATypeText: string): Boolean;
+begin
+  Result := ATypeText.StartsWith('procedure') or
+    ATypeText.StartsWith('function');
 end;
 
 procedure TPasDcuPrinter.PrintMethod(AMember: TPasDcuDecl; AOwner: TPasDcuType);
@@ -2374,42 +2411,66 @@ begin
 end;
 
 // Whether a property of this type may carry `default <value>`: an ordinal or
-// a set, by definition here or by an imported name that is not one of the
-// non-ordinal builtins.
+// a set. Decided on the RESOLVED type (audit B1-23): an import is followed
+// into its own unit - TFileName, DOMString, TDate are a string and a float
+// there, and printed `default nil` / `default 0` by a name list. Only an
+// import no unit beside this one describes falls back to that name list.
 function TPasDcuPrinter.DefaultAllowed(AType: TPasDcuType): Boolean;
 const
-  cNonOrdinal: array[0..18] of string = ('string', 'unicodestring',
+  cNonOrdinal: array[0..20] of string = ('string', 'unicodestring',
     'ansistring', 'widestring', 'shortstring', 'rawbytestring', 'pointer',
     'tobject', 'tclass', 'iinterface', 'single', 'double', 'extended',
-    'currency', 'comp', 'real', 'variant', 'olevariant', 'tdatetime');
-var
-  LName: string;
-  LBase: TPasDcuType;
-begin
-  if AType = nil then
-    Exit(False);
-  case AType.Kind of
-    tkRange, tkEnum, tkSet:
-      Exit(True);
-    tkImport:
-      begin
-        LName := LowerCase(AType.ImportName);
-        // Interface (`IFoo`) and pointer (`PFoo`) types by their naming
-        // convention: a capital I or P followed by another capital.
-        Result := (LName <> '') and (IndexStr(LName, cNonOrdinal) < 0) and
-          not ((Length(AType.ImportName) > 1) and
-               CharInSet(AType.ImportName[1], ['I', 'P']) and
-               CharInSet(AType.ImportName[2], ['A'..'Z']));
-        Exit;
-      end;
-    tkGenericInst, tkGenericParam:
-      begin
-        LBase := FUnit.TypeAt(AType.BaseIdx);
-        Exit((LBase <> nil) and (AType.Kind = tkGenericInst) and
-          (LBase.Kind in [tkRange, tkEnum, tkSet]));
-      end;
+    'currency', 'comp', 'real', 'variant', 'olevariant', 'tdatetime',
+    'tdate', 'ttime');
+  cOrdinal: array[0..6] of string = ('boolean', 'bytebool', 'wordbool',
+    'longbool', 'char', 'ansichar', 'widechar');
+
+  function Allowed(AUnit: TPasDcuUnit; AIdx, ADepth: Integer): Boolean;
+  var
+    LType, LBase: TPasDcuType;
+    LName: string;
+    LSize: Integer;
+    LUnsigned: Boolean;
+    LOther: TPasDcuUnit;
+    LOtherIdx: Integer;
+  begin
+    Result := False;
+    LType := AUnit.TypeAt(AIdx);
+    if (LType = nil) or (ADepth > 8) then
+      Exit;
+    case LType.Kind of
+      tkRange, tkEnum, tkSet:
+        Exit(True);
+      tkImport:
+        begin
+          LName := LowerCase(SystemAlias(LType.ImportName));
+          if AUnit.IntegerType(AIdx, LSize, LUnsigned) or
+             (IndexStr(LName, cOrdinal) >= 0) then
+            Exit(True);
+          if IndexStr(LName, cNonOrdinal) >= 0 then
+            Exit(False);
+          LOther := AUnit;
+          LOtherIdx := AIdx;
+          if ResolveImport(LOther, LOtherIdx) then
+            Exit(Allowed(LOther, LOtherIdx, ADepth + 1));
+          // Nothing describes it: interface (`IFoo`) and pointer (`PFoo`)
+          // types by their naming convention, a capital I or P followed by
+          // another capital, are not ordinals.
+          Exit((LName <> '') and
+            not ((Length(LType.ImportName) > 1) and
+                 CharInSet(LType.ImportName[1], ['I', 'P']) and
+                 CharInSet(LType.ImportName[2], ['A'..'Z'])));
+        end;
+      tkGenericInst:
+        begin
+          LBase := AUnit.TypeAt(LType.BaseIdx);
+          Exit((LBase <> nil) and (LBase.Kind in [tkRange, tkEnum, tkSet]));
+        end;
+    end;
   end;
-  Result := False;
+
+begin
+  Result := (AType <> nil) and Allowed(FUnit, AType.Index, 0);
 end;
 
 // A dispinterface property: `property Name[params]: T readonly dispid N;`,
@@ -2879,8 +2940,22 @@ begin
         Blank;
     end
     else if LType.Kind = tkImport then
+    begin
       // `TFoo = type Other.TBar`: an imported definition under a new name.
-      Line(LHead + ' = ' + ImportRef(LType) + ';')
+      // `type` makes an import entry NAMED after the new type (`TU64` for
+      // `TU64 = type UInt64`); a plain alias names the target's entry. The
+      // word keeps it distinct for overloads and helpers (audit B1-22).
+      if SameText(LType.Name, LName) and
+         not SameText(LType.ImportName, LName) then
+        Line(LHead + ' = type ' + ImportRef(LType) + ';')
+      else
+        Line(LHead + ' = ' + ImportRef(LType) + ';');
+    end
+    else if (LType.Kind = tkFloat) and
+       not SameText(DefText(LType), StripArity(LName)) then
+      // A float entry is a builtin's or a `type` alias of one: System's
+      // `TDateTime = type Double`.
+      Line(LHead + ' = type ' + DefText(LType) + Modifiers(ADecl) + ';')
     else
       Line(LHead + ' = ' + DefText(LType) + Modifiers(ADecl) + ';');
     FDeclared.AddOrSetValue(LType.Index, True);
@@ -2920,9 +2995,8 @@ begin
     if (LTarget <> nil) and not IsHidden(LTarget.Name) then
       LText := LText + ' absolute ' + Esc(LTarget.BareName);
   end;
-  // A variable of an inline procedural type cannot carry a hint directive:
-  // dcc reads the word as a calling convention (E1030, probed 2026-09-17).
-  if LTypeText.StartsWith('procedure') or LTypeText.StartsWith('function') then
+  // A variable of an inline procedural type cannot carry a hint directive.
+  if IsInlineProcTypeText(LTypeText) then
     LText := LText + ';'
   else
     LText := LText + Modifiers(ADecl) + ';';
@@ -2935,7 +3009,7 @@ end;
 // else `var X: T;` with the reason - the type stays right either way.
 procedure TPasDcuPrinter.PrintTypedConst(ADecl: TPasDcuDecl);
 var
-  LText, LValue: string;
+  LText, LValue, LTypeText: string;
   LOk: Boolean;
 begin
   if ADecl.DataSize < 0 then
@@ -2955,8 +3029,11 @@ begin
     if LOk then
     begin
       Section(secConst);
-      LText := Esc(ADecl.Name) + ': ' + TypeRef(ADecl.TypeIdx) + ' = ' + LValue;
-      if LText.Contains(': procedure') or LText.Contains(': function') then
+      LTypeText := TypeRef(ADecl.TypeIdx);
+      LText := Esc(ADecl.Name) + ': ' + LTypeText + ' = ' + LValue;
+      // The TYPE decides, not the line: a value may spell `: function`
+      // (audit D1-35).
+      if IsInlineProcTypeText(LTypeText) then
         Line(LText + ';')
       else
         Line(LText + Modifiers(ADecl) + ';');

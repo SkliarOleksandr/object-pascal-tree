@@ -8,9 +8,10 @@ unit PasTree.Dcu;
   This unit reads such a file far enough to know what the unit DECLARES: its
   uses lists, the names it imports from them, every constant, type, variable
   and routine header, every class, record and interface member with its
-  visibility and property accessors. Code, fixups, line tables, debug tables
-  and the string data block are skipped, never interpreted - this is a
-  declaration reader, not a decompiler. The consumer is PasTree.Dcu.Source,
+  visibility and property accessors. Code, line tables and debug tables are
+  skipped, never interpreted - this is a declaration reader, not a
+  decompiler; the data block and its fixup table are kept, for the values of
+  typed constants (AssignDataRanges). The consumer is PasTree.Dcu.Source,
   which prints these declarations as an interface-only unit for the ordinary
   lexer -> parser -> resolver pipeline.
 
@@ -196,7 +197,10 @@ type
     Items: TList<TPasDcuDecl>;
     // the type whose member list this declaration sits in, nil at unit level
     OwnerType: TPasDcuType;
-    // the routine whose parameter/local/embedded list this sits in
+    // The routine whose parameter or local list this sits in. An EMBEDDED
+    // row (a nested routine, a local type) holds the routine of the list it
+    // was read inside - nil at unit level - not the routine it belongs to:
+    // that one holds it in its Embedded list.
     OwnerRoutine: TPasDcuDecl;
     constructor Create;
     destructor Destroy; override;
@@ -394,6 +398,15 @@ implementation
 uses
   System.IOUtils;
 
+// A member's stored flag word, normalized (TPasDcuDecl.LocFlagsX): stored
+// with the `class` bit at $10 and the scope above it, read with the scope at
+// $0E (lfScope) and `class` at $01 (lfClass). One rule for every member
+// reader (audit D1-40).
+function NormalizeMemberFlags(AStored: Integer): Integer; inline;
+begin
+  Result := ((AStored and not $10) shl 1) or ((AStored and $10) shr 4);
+end;
+
 const
   // Record tags. Letters in comments are the byte's ASCII glyph, which is how
   // the public parser refers to them; a tag stream in a trace reads better
@@ -523,11 +536,8 @@ type
     FTrace: TPasDcuTraceProc;
     FNextAddr: Integer;      // > 0: the slot the next declaration must fill (drProcAddInfo)
     FTypeDefCount: Integer;  // definitions read so far = next definition's index - 1
-    FEmbedDepth: Integer;
-    FInProcTemplate: Boolean;
     FDataBlockSeen: Boolean;
     FFixupsSeen: Boolean;
-    FSegCount: Integer;
     FLastAddedType: TPasDcuType;
     procedure Trace(const AFmt: string; const AArgs: array of const);
     procedure Error(const AMsg: string); overload;
@@ -553,6 +563,7 @@ type
     procedure SkipD12Str;                 // <UIndex len+1> <chars>, 0 = none
     function ReadD12Str: string;
     procedure ReadD12TypeRefExtra;
+    procedure SkipD12TypeRefItem(AKind: Integer; const AError: string);
     function ReadBytes(ACount: Integer): TBytes;
     // tables
     function AddAddr(ADecl: TPasDcuDecl): Integer;
@@ -1222,19 +1233,25 @@ end;
 // [payload]` describing the referenced type; kind 6 carries name and unit of
 // a type aliased from another unit, kind 10 a name and an index.
 procedure TPasDcuReader.ReadD12TypeRefExtra;
-var
-  LKind: Integer;
 begin
   if FUnit.VersionByte < $24 then
     Exit;
-  LKind := ReadUIndex;
-  case LKind of
+  SkipD12TypeRefItem(ReadUIndex, 'Unknown type-reference kind %d');
+end;
+
+// One item of the Delphi 12 type-reference kind table - A7, the template
+// call and ConstAddInfo subtag $17 share it (docs/dcu-reader.md); AError
+// names the place, with a %d for the kind (audit D1-37).
+procedure TPasDcuReader.SkipD12TypeRefItem(AKind: Integer;
+  const AError: string);
+begin
+  case AKind of
     0, 4: ;
     1: ReadUIndex;
     6: begin SkipD12Str; SkipD12Str; end;
     10: begin SkipD12Str; ReadUIndex; end;
   else
-    Error('Unknown type-reference kind %d', [LKind]);
+    Error(AError, [AKind]);
   end;
 end;
 
@@ -1691,8 +1708,8 @@ begin
           ReadUIndex;
           LIdx := ReadUIndex;
           // An address index that can point one slot AHEAD of the table in
-          // Delphi 13 (generic method instantiations): reserve it, or every
-          // later index is off by one.
+          // Delphi 12 and later (generic method instantiations): reserve it,
+          // or every later index is off by one.
           if (LIdx > 0) and (FUnit.VersionByte >= $24) then
             ReserveAddr(LIdx);
           ReadUIndex;
@@ -1737,14 +1754,7 @@ begin
           if LSingle then
             LKind := ReadUIndex;
           repeat
-            case LKind of
-              0, 4: ;
-              1: ReadUIndex;
-              6: begin SkipD12Str; SkipD12Str; end;
-              10: begin SkipD12Str; ReadUIndex; end;
-            else
-              Error('Subtag $17: unknown kind %d', [LKind]);
-            end;
+            SkipD12TypeRefItem(LKind, 'Subtag $17: unknown kind %d');
             if LSingle then
               Break;
             LKind := ReadUIndex;
@@ -1996,15 +2006,10 @@ begin
     ReadTag;
   if FTag = drA6Info then
   begin
-    FInProcTemplate := True;
-    try
-      Result.GenericParams := TList<TPasDcuDecl>.Create;
-      ReadTag;
-      ReadClosedList(lkA6, nil, Result, Result.GenericParams,
-        Format('Generic parameter list of %s', [LName]));
-    finally
-      FInProcTemplate := False;
-    end;
+    Result.GenericParams := TList<TPasDcuDecl>.Create;
+    ReadTag;
+    ReadClosedList(lkA6, nil, Result, Result.GenericParams,
+      Format('Generic parameter list of %s', [LName]));
     ReadTag;
   end;
   // One list holds the parameters (arVal/arVar rows), the unnamed constants
@@ -2037,9 +2042,7 @@ begin
   LIsMethod := ATag in [arMethod, arConstr, arDestr];
   Result.LocFlags := ReadUIndex;
   LX := ReadUIndex;
-  // The stored word has the `class` bit at $10 and the scope above it;
-  // normalized so that scope reads at $0E and `class` at $01.
-  Result.LocFlagsX := ((LX and not $10) shl 1) or ((LX and $10) shr 4);
+  Result.LocFlagsX := NormalizeMemberFlags(LX);
   ReadUIndex;                    // B3
   if (AKind in [lkArgs, lkArgsT]) and ((Result.LocFlags and $40) <> 0) then
     ReadULong;                   // seen after a [ref] decorator
@@ -2090,7 +2093,7 @@ begin
   Result.OwnerType := AOwnerType;
   Result.LocFlags := ReadIndex;
   LX := ReadUIndex;
-  Result.LocFlagsX := ((LX and not $10) shl 1) or ((LX and $10) shr 4);
+  Result.LocFlagsX := NormalizeMemberFlags(LX);
   ReadUIndex;                    // X4
   Result.TypeIdx := ReadUIndex;
   Result.Offset := ReadIndex;
@@ -2472,7 +2475,8 @@ begin
   LType.InstFullIdx := ReadUIndex;
 end;
 
-{ Tables read only for their length }
+{ The fixup table (kept: typed-constant values), and the tables read only
+  for their length }
 
 procedure TPasDcuReader.ReadFixups;
 var
@@ -2504,35 +2508,35 @@ end;
 procedure TPasDcuReader.AssignDataRanges;
 var
   LIdx, LStart: Integer;
-  LDecl: TPasDcuDecl;
+
+  // The bytes from the fxStart row AStartRow up to AEndOfs belong to the
+  // declaration it names - the first range claimed wins.
+  procedure Claim(AStartRow, AEndOfs: Integer);
+  var
+    LDecl: TPasDcuDecl;
+  begin
+    LDecl := FUnit.AddrAt(FUnit.Fixups[AStartRow].Slot);
+    if (LDecl <> nil) and (LDecl.DataSize < 0) then
+    begin
+      LDecl.DataOffset := Integer(FUnit.Fixups[AStartRow].Offset);
+      LDecl.DataSize := AEndOfs - LDecl.DataOffset;
+    end;
+  end;
+
 begin
   LStart := -1;
   for LIdx := 0 to High(FUnit.Fixups) do
     if FUnit.Fixups[LIdx].Kind in [fxStart, fxEnd] then
     begin
       if LStart >= 0 then
-      begin
-        LDecl := FUnit.AddrAt(FUnit.Fixups[LStart].Slot);
-        if (LDecl <> nil) and (LDecl.DataSize < 0) then
-        begin
-          LDecl.DataOffset := Integer(FUnit.Fixups[LStart].Offset);
-          LDecl.DataSize := Integer(FUnit.Fixups[LIdx].Offset) - LDecl.DataOffset;
-        end;
-      end;
+        Claim(LStart, Integer(FUnit.Fixups[LIdx].Offset));
       if FUnit.Fixups[LIdx].Kind = fxStart then
         LStart := LIdx
       else
         LStart := -1;
     end;
   if LStart >= 0 then
-  begin
-    LDecl := FUnit.AddrAt(FUnit.Fixups[LStart].Slot);
-    if (LDecl <> nil) and (LDecl.DataSize < 0) then
-    begin
-      LDecl.DataOffset := Integer(FUnit.Fixups[LStart].Offset);
-      LDecl.DataSize := Length(FUnit.DataBlock) - LDecl.DataOffset;
-    end;
-  end;
+    Claim(LStart, Length(FUnit.DataBlock));
 end;
 
 // F5: an embedded list ($6A..$6B) belongs to the procedure record after it
@@ -2731,7 +2735,6 @@ var
   LCount, LIdx: Integer;
 begin
   LCount := ReadUIndex;
-  FSegCount := LCount;
   for LIdx := 1 to LCount do
   begin
     ReadShortName;
@@ -2859,11 +2862,9 @@ begin
               // Local declarations of the routine that follows.
               if LEmbedded = nil then
                 LEmbedded := TList<TPasDcuDecl>.Create;
-              Inc(FEmbedDepth);
               ReadTag;
               ReadClosedList(lkEmbedded, nil, AOwnerRoutine, LEmbedded,
                 'Embedded list', drEmbeddedProcEnd);
-              Dec(FEmbedDepth);
             end;
           end;
         drEmbeddedProcEnd:

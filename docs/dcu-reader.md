@@ -159,8 +159,23 @@ a comment, so its type is right even then. `reintroduce` on a method and
 enumeration scoping is not either. A generic type's parameter names are not
 stored beside it: they are recovered from the unit's own instantiation of
 the type with its parameters, else from the parameter types its members
-mention, else synthesized - members always print the same entries, so header
-and body agree.
+mention - put in declaration order, the order of their type-table entries,
+not the order the members mention them in - else synthesized. Members always
+print the same entries, so header and body agree.
+
+**Aliases and enumerations (2026-10-13, v0.103.5).** `TFoo = type Bar` makes
+an import entry named after the new type (`TU64` for `TU64 = type UInt64`),
+where a plain alias names the target's entry: the printer keeps `type` for
+the first, and for a float entry under another name (System's `TDateTime =
+type Double`). An enumeration's own members precede its declaration's slot;
+a constant of the type after it is an alias printed as a constant
+(`bsCylinder = bsCilinder`), and an implementation-section one is not
+printed. A scoped enumeration's members carry no interface flag, so the slot
+is the test. An anonymous method type takes its calling convention without
+the `;` a procedural type has (`reference to function(...): HRESULT
+stdcall;` - the one parse failure of the RTL sweep before). Whether a
+property may declare `default` is decided on its resolved type: `TFileName`,
+`DOMString`, `TDate` are a string and a float in their own units.
 
 **Values in the data block (added 2026-09-18, v0.38.0).** A typed constant's
 bytes, a string literal's characters and a class's VMT all live in the `$6C`
@@ -456,11 +471,12 @@ is even possible, differs by kind.
 - **Generic parameter names via self-instantiation is a fallback, not a
   read.** The DCU does not link an A6 parameter-list entry to the type
   declaration it belongs to; `GenericParamNames` in
-  `PasTree.Dcu.Source.pas` guesses from the unit's own instantiation of the
-  generic, then from member reference order, then `T1..Tn`. Works on the
-  whole RTL sweep but is inference, not extraction - a generic never
-  self-instantiated and never referencing its own parameter in a
-  recoverable position would print wrong names.
+  `PasTree.Dcu.Source.pas` takes the unit's own instantiation of the
+  generic, then the parameters its members mention ordered by type index
+  (dcc numbers one generic's parameters consecutively, in declaration
+  order), then `T1..Tn`. Works on the whole RTL sweep but is inference, not
+  extraction - a generic never self-instantiated whose members mention only
+  some of its parameters can still print a name in the wrong position.
 - **On Win32, nested routines of a routine that holds an anonymous method
   hang under the wrong owner.** `ReadDeclList` gives an embedded list
   (`$6A`..`$6B`) to the next procedure record, and there dcc writes the
