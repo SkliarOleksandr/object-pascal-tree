@@ -871,6 +871,14 @@ begin
           Result.X := FProj.SymDeclTypeX(FProjMid, ASym);
           if XValid(Result.X) then
             Exit;
+          // An inferred one - a true constant, a resourcestring (always a
+          // string, 3.2.3) - as the analysis recorded it.
+          if FModel.Symbols[ASym].TypeNode = NIL_NODE then
+          begin
+            Result.X := FProj.DeclTypeX(FProjMid, ASym);
+            if XValid(Result.X) then
+              Exit;
+          end;
         end;
         if FModel.Symbols[ASym].TypeNode <> NIL_NODE then
         begin
@@ -891,11 +899,17 @@ begin
              (FModel.Tree.Nodes[FModel.Tree.Nodes[LDecl].Parent].Kind
                in [nkInlineVar, nkInlineConst, nkConstDecl]) then
           begin
-            LInit := FModel.Tree.Nodes[
+            // The last child short of a constant's trailing hints (`C =
+            // 'abc' deprecated;` - nkDirective children).
+            var LCh := FModel.Tree.Nodes[
               FModel.Tree.Nodes[LDecl].Parent].FirstChild;
-            while (LInit <> NIL_NODE) and
-                  (FModel.Tree.Nodes[LInit].NextSibling <> NIL_NODE) do
-              LInit := FModel.Tree.Nodes[LInit].NextSibling;
+            LInit := NIL_NODE;
+            while LCh <> NIL_NODE do
+            begin
+              if FModel.Tree.Nodes[LCh].Kind <> nkDirective then
+                LInit := LCh;
+              LCh := FModel.Tree.Nodes[LCh].NextSibling;
+            end;
             if (LInit <> NIL_NODE) and (LInit <> LDecl) and
                (FModel.Tree.Nodes[LInit].Kind <> nkAttrGroup) then
             begin

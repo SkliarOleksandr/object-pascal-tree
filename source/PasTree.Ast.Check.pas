@@ -1095,8 +1095,8 @@ begin
       Result := (AAux = NIL_NODE) or (AAux = 1) or (AAux = 2);
     nkTypeDecl, nkClassType, nkRecordType, nkObjectType, nkHelperType,
     nkClassOf, nkArrayType, nkRoutine, nkMethodResolution, nkPropertyDecl,
-    nkVarDecl, nkVarSec, nkForStmt, nkUsesClause, nkInlineVar, nkInlineConst,
-    nkDirective:
+    nkVarDecl, nkVarSec, nkConstSec, nkForStmt, nkUsesClause, nkInlineVar,
+    nkInlineConst, nkDirective:
       Result := (AAux = NIL_NODE) or (AAux = 1);
   else
     Result := AAux = NIL_NODE;
@@ -1756,6 +1756,13 @@ var
         AReport.Add(ccFlags, ANode, Site(ANode),
           'a var section is marked threadvar, and no `threadvar` stands ' +
           'before it');
+    // A resourcestring section is Aux 1 (3.2.3): its head word, when it has
+    // one, says so too.
+    if (Kind(ANode) = nkConstSec) and (LLo[ANode] >= 0) and
+       (TokKind(LLo[ANode]) = tkResourcestring) and
+       (ATree.Nodes[ANode].Aux <> 1) then
+      AReport.Add(ccAux, ANode, Site(ANode),
+        'a resourcestring section is not marked Aux 1');
     // The clauses of an `external` directive (F13). A value carries the
     // flag of the clause word standing right before it - `name`, `index`,
     // `dependency`, or the `,` of a dependency list - and the library, right

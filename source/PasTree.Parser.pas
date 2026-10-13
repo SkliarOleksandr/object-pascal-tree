@@ -188,7 +188,8 @@ type
     function ParseRoutineBody(ANameVis: Integer): Integer;
     function ParseProperty(AClassProp: Boolean): Integer;
     function ParseTypeSection(AHeadless: Boolean = False): Integer;
-    function ParseConstSection(AHeadless: Boolean = False): Integer;
+    function ParseConstSection(AHeadless: Boolean = False;
+      AResource: Boolean = False): Integer;
     function ParseVarSection(AClassVar: Boolean;
       AInStruct: Boolean = False): Integer;
     function ParseConstInitializer(AHasType: Boolean): Integer;
@@ -3968,13 +3969,20 @@ begin
   FB.SetLast(Result, FPos - 1);
 end;
 
-function TPasParser.ParseConstSection(AHeadless: Boolean): Integer;
+function TPasParser.ParseConstSection(AHeadless: Boolean;
+  AResource: Boolean): Integer;
 var
   LDecl, LAttrs: Integer;
   LHasType, LHasEq: Boolean;
 begin
   // 3.2: const/resourcestring entries.
   Result := FB.AddNode(nkConstSec, NIL_NODE, FPos);
+  // A resourcestring section is Aux 1 (3.2.3): its entries are strings
+  // whatever their literal - `SComma = ','` is no Char - and the head word
+  // a headless resume lacks, or a demoted model's lost text, cannot say so.
+  if (not AHeadless and (CurKind = tkResourcestring)) or
+     (AHeadless and AResource) then
+    FB.SetAux(Result, 1);
   if not AHeadless then
     Next;
   while (CurKind = tkIdentifier) or (CurKind = tkLBracket) do
@@ -4236,7 +4244,7 @@ begin
         end;
       tkConst, tkResourcestring:
         begin
-          LResume := tkConst;
+          LResume := CurKind;
           FB.Adopt(AParent, ParseConstSection);
         end;
       tkVar, tkThreadvar:
@@ -4256,13 +4264,15 @@ begin
           Error('declaration expected, found "' + CurText + '"');
           if PeekKind(1) in [tkColon, tkComma] then
           begin
-            if LResume = tkConst then
-              FB.Adopt(AParent, ParseConstSection(True))
+            if LResume in [tkConst, tkResourcestring] then
+              FB.Adopt(AParent, ParseConstSection(True,
+                LResume = tkResourcestring))
             else
               FB.Adopt(AParent, ParseVarSection(False));
           end
-          else if LResume = tkConst then
-            FB.Adopt(AParent, ParseConstSection(True))
+          else if LResume in [tkConst, tkResourcestring] then
+            FB.Adopt(AParent, ParseConstSection(True,
+              LResume = tkResourcestring))
           else
             FB.Adopt(AParent, ParseTypeSection(True));
         end

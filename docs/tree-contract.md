@@ -70,7 +70,7 @@ type reference" is an nkIdent, nkMember or nkTypeArgs.
 | nkExportsClause | `exports c0, ... ;` |
 | nkExportsItem | the name (qualified), [nkParams], [`index` value - nfExtIndex], [`name` value - nfExtName], [`resident` - nfResident on the item]; dcc takes them in that order, each once (E2029 otherwise: a parse diagnostic here, flagged all the same) |
 | nkTypeSec | `type` then each nkTypeDecl followed by `;` |
-| nkConstSec | the head word (see 3), each nkConstDecl followed by `;` |
+| nkConstSec | the head word (see 3), each nkConstDecl followed by `;`; Aux 1 marks a `resourcestring` section, a headless resume of one included |
 | nkVarSec | the head word (see 3) - in a struct body `var`, or `threadvar` (nfThreadvar, see 5) - each nkVarDecl followed by `;` |
 | nkLabelSec | `label` labels `, ... ;` - each an nkIdent or an nkIntLit |
 | nkTypeDecl | [attributes] name [nkGenericParams] `=` [`type` when Aux is 1] type [hints] |

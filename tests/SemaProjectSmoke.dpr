@@ -6479,6 +6479,102 @@ begin
   end;
 end;
 
+{ Constant typing, audit B42 (local/probe-b42, dcc64 37.0): a true constant
+  with trailing hints is typed from its initializer, not its last child
+  (A3-28: `CDep = 'abc' deprecated` was untyped, `CDep.Bogus2` silent); a
+  one-character resourcestring is a string (A3-29, 3.2.3: `F(R1)` took
+  F(Char)); `var B := Sender as TBtn` is a TBtn for the with pass
+  (A3-23: `with B do Caption := ...` was E2003 in the default mode); a
+  typeless `property Items; default;` makes the inherited array property
+  the default one (E3-09: `with D[0] do S := Name` was E2003). }
+procedure TestConstTyping;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_consttyping');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CtA.pas'),
+    'unit CtA;'#10'interface'#10'type'#10 +
+    '  TBtn = class Caption: string; end;'#10 +
+    '  TItem = class Name: string; end;'#10 +
+    '  TStrR = class SOnly: Integer; end;'#10 +
+    '  TChrR = class COnly: Integer; end;'#10 +
+    '  TBase = class'#10'  protected'#10 +
+    '    function GetI(I: Integer): TItem;'#10 +
+    '    property Items[I: Integer]: TItem read GetI;'#10'  end;'#10 +
+    '  TDer = class(TBase)'#10'  public'#10 +
+    '    property Items; default;'#10'  end;'#10 +
+    'const'#10 +
+    '  CDep = ''abc'' deprecated;'#10 +
+    '  CPlat = ''xyz'' platform;'#10 +
+    '  CMsg = ''qq'' deprecated ''use other'';'#10 +
+    '  CNum = 5 deprecated ''x'';'#10 +
+    'resourcestring'#10 +
+    '  R1 = ''x'';'#10 +
+    'function F(C: Char): TChrR; overload;'#10 +
+    'function F(const S: string): TStrR; overload;'#10 +
+    'implementation'#10 +
+    'function TBase.GetI(I: Integer): TItem; begin Result := nil; end;'#10 +
+    'function F(C: Char): TChrR; begin Result := nil; end;'#10 +
+    'function F(const S: string): TStrR; begin Result := nil; end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CtP.dpr'),
+    'program CtP;'#10'uses CtA;'#10 +
+    'procedure Go(Sender: TObject; D: TDer);'#10 +
+    'var S: string; I: Integer;'#10 +
+    'begin'#10 +
+    '  I := F(CDep).SOnly;'#10 +
+    '  S := CDep.Bogus2;'#10 +
+    '  S := CPlat.Bogus3;'#10 +
+    '  S := CMsg.Bogus4;'#10 +
+    '  var L := CDep;'#10 +
+    '  L.Bogus5;'#10 +
+    '  I := CNum.Bogus6;'#10 +
+    '  I := F(R1).SOnly;'#10 +
+    '  var V := R1;'#10 +
+    '  I := F(V).SOnly;'#10 +
+    '  var B := Sender as TBtn;'#10 +
+    '  with B do Caption := ''x'';'#10 +
+    '  with D[0] do S := Name;'#10 +
+    '  S := D[0].Bogus7;'#10 +
+    'end;'#10 +
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'CtP.dpr'));
+    LM := ModelByName('ctp');
+    Ok('consttyping: default mode - the `as` inline var and D[0] through the' +
+      ' typeless default redeclaration open their with bodies [' +
+      IntToStr(DiagCount(LM, 'E2003')) + ']', DiagCount(LM, 'E2003') = 0);
+  finally
+    GProj.Free;
+  end;
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'CtP.dpr'));
+    LM := ModelByName('ctp');
+    Ok('consttyping: -members - Bogus2..7 after hinted constants, the' +
+      ' inferred var and D[0] reported; F(R1), F(V), F(CDep) take F(string)' +
+      ' clean [' + IntToStr(DiagCount(LM, 'E2003')) + ']',
+      (DiagCount(LM, 'E2003') = 6) and
+      DiagHasText(LM, 'E2003', 'Bogus2') and
+      DiagHasText(LM, 'E2003', 'Bogus3') and
+      DiagHasText(LM, 'E2003', 'Bogus4') and
+      DiagHasText(LM, 'E2003', 'Bogus5') and
+      DiagHasText(LM, 'E2003', 'Bogus6') and
+      DiagHasText(LM, 'E2003', 'Bogus7'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { The cross-unit scorer (ScoreCandidate) and SelectCallTarget, audit B32
   (6.2.5, 6.3.1; dcc64 37.0, local/probe-b32 T2): a trailing comma's empty
   slot is no argument (`K(1, 2,)` keeps K, `D.M(1, 2,)` TDer.M, not TBase's
@@ -12952,6 +13048,7 @@ begin
   TestBuiltinIdentity;
   TestHelperIdentity;
   TestTypeSlotsAndOwners;
+  TestConstTyping;
   TestOneScorer;
   TestOverloadSets;
   TestValueOverloads;

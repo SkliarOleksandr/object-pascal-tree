@@ -3747,14 +3747,25 @@ var
   LScope, LDepth, LIdx, LSym, LDecl, LChild: Integer;
   LSyms: TSemaSymList;
   LHasParams, LHasDefault: Boolean;
+  LRedecl: string;
 begin
   Result := NIL_SYM;
   LDepth := 0;
+  LRedecl := '';
   while (ATypeSym <> NIL_SYM) and (LDepth < 32) do
   begin
     Inc(LDepth);
     LScope := FModel.Symbols[ATypeSym].MemberScope;
-    if LScope <> NIL_SCOPE then
+    // Past `property Items; default;` (no type of its own): the type is the
+    // redeclared property's, the first typed one of that name up the chain.
+    if (LRedecl <> '') and (LScope <> NIL_SCOPE) then
+    begin
+      LSym := FModel.FindLocal(LScope, LRedecl);
+      if (LSym <> NIL_SYM) and (FModel.Symbols[LSym].Kind = skProperty) and
+         (FModel.Symbols[LSym].TypeNode <> NIL_NODE) then
+        Exit(FModel.Symbols[LSym].TypeSym);
+    end
+    else if LScope <> NIL_SCOPE then
     begin
       // The scope's OWN declaration list, not a scan of every symbol in the
       // unit: this runs per with-target, and a whole-model scan on a shared
@@ -3782,12 +3793,18 @@ begin
             if KindOf(LChild) = nkParams then
               LHasParams := True
             else if (KindOf(LChild) = nkPropSpec) and
-                    FTree.NodeTextEquals(LChild, 'default') then
+                    FTree.NodeTextEquals(LChild, 'default') and
+                    (FirstChild(LChild) = NIL_NODE) then
               LHasDefault := True;
             LChild := NextSib(LChild);
           end;
           if LHasParams and LHasDefault then
             Exit(FModel.Symbols[LSym].TypeSym);
+          if LHasDefault and (FModel.Symbols[LSym].TypeNode = NIL_NODE) then
+          begin
+            LRedecl := FModel.Symbols[LSym].NameLower;
+            Break;
+          end;
         end;
     end;
     ATypeSym := AncestorTypeSym(ATypeSym);
@@ -5013,11 +5030,17 @@ begin
             if KindOf(LChild) = nkParams then
               LHasParams := True
             else if (KindOf(LChild) = nkPropSpec) and
-                    SemaKeyEquals('default', NodeKey(LChild)) then
+                    SemaKeyEquals('default', NodeKey(LChild)) and
+                    (FirstChild(LChild) = NIL_NODE) then
               LHasDefault := True;
             LChild := NextSib(LChild);
           end;
-          if LHasParams and LHasDefault then
+          // The bare `default;` (no value) of an array property - or of a
+          // typeless redeclaration, `property Items; default;`, which makes
+          // the inherited array property the default one from this class
+          // down (dcc64 37.0; audit E3-09). `default 0` is a value spec.
+          if LHasDefault and
+             (LHasParams or (FModel.Symbols[LSym].TypeNode = NIL_NODE)) then
             FModel.Symbols[LSym].Flags :=
               FModel.Symbols[LSym].Flags + [sfDefaultArrayProp];
         end;

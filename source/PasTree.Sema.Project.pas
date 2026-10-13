@@ -16326,9 +16326,10 @@ begin
   // Substituted over the frame of the hop the property was FOUND at, not over
   // LCur's own - see DefaultArrayPropX. For `TAttrList = class(TObjectList
   // <TAttr>)` LCur has no frame at all and the element type would stay `T`.
+  // SymDeclTypeX, not the raw TypeNode: a typeless `property Items;
+  // default;` redeclaration is a default property with no type of its own.
   if XValid(LCur) and DefaultArrayPropX(LCur, LMid, LSym, LOwner) then
-    Exit(SubstX(ResolveTypeExpr(LMid, FModels[LMid].Symbols[LSym].TypeNode),
-      LOwner.Inst, 0));
+    Exit(SubstX(SymDeclTypeX(LMid, LSym), LOwner.Inst, 0));
   Result := XNil;
 end;
 
@@ -17777,6 +17778,18 @@ begin
       end;
     nkBinaryOp:
       begin
+        // `X as T` is a T (12.4.1), as CrossType's walk types it: the
+        // operator table has no `as` row, and `var L := Sender as TBtn; with
+        // L do` opened over nothing (audit A3-23).
+        if BinaryOpIsAs(AMid, ANode) then
+        begin
+          LLit := LM.Tree.Nodes[ANode].FirstChild;
+          if (LLit <> NIL_NODE) and
+             (LM.Tree.Nodes[LLit].NextSibling <> NIL_NODE) then
+            Result := ResolveTypeExprNested(AMid,
+              LM.Tree.Nodes[LLit].NextSibling);
+          Exit;
+        end;
         // The operands' own inferred types first: they know what the
         // intra-unit typer cannot - a named constant (no TypeSym), another
         // unit's name, a literal's exact type (`5000000000 + 1` is Int64).
@@ -17904,16 +17917,32 @@ begin
        (LM.Tree.Nodes[LInit].FirstChild = LParent) then
       Exit(UntypedInitTypeX(AMid, LM.Tree.Nodes[LParent].NextSibling,
         AFollowForeign));
+    // A resourcestring is a string whatever its literal (3.2.3): `SComma =
+    // ','` is no Char (audit A3-29). The section says so (Aux 1).
+    if (LM.Tree.Nodes[LParent].Kind = nkConstDecl) and
+       (LM.Tree.Nodes[LParent].Parent <> NIL_NODE) and
+       (LM.Tree.Nodes[LM.Tree.Nodes[LParent].Parent].Kind = nkConstSec) and
+       (LM.Tree.Nodes[LM.Tree.Nodes[LParent].Parent].Aux = 1) then
+      Exit(BuiltinX(AMid, 'string'));
     // Everything after the names is the initializer, and with no type node
-    // that is exactly the LAST child. Equal to the name itself means there is
-    // no initializer at all (a const's own name is its first ident after any
-    // attribute group; the initializer always follows it).
+    // that is the LAST child short of a section constant's trailing hints
+    // (`C = 'abc' deprecated;` - each hint an nkDirective; audit A3-28).
+    // Equal to the name itself means there is no initializer at all (a
+    // const's own name is its first ident after any attribute group; the
+    // initializer always follows it).
     LInit := LM.Tree.Nodes[LParent].FirstChild;
     if LInit = NIL_NODE then
       Exit;
-    while LM.Tree.Nodes[LInit].NextSibling <> NIL_NODE do
+    var LLast := NIL_NODE;
+    while LInit <> NIL_NODE do
+    begin
+      if LM.Tree.Nodes[LInit].Kind <> nkDirective then
+        LLast := LInit;
       LInit := LM.Tree.Nodes[LInit].NextSibling;
-    if (LInit = LDecl) or (LM.Tree.Nodes[LInit].Kind in [nkAttrGroup]) then
+    end;
+    LInit := LLast;
+    if (LInit = NIL_NODE) or (LInit = LDecl) or
+       (LM.Tree.Nodes[LInit].Kind in [nkAttrGroup]) then
       Exit;
     Result := UntypedInitTypeX(AMid, LInit, AFollowForeign);
   finally

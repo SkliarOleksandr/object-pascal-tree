@@ -114,7 +114,9 @@ type
     nkExportsItem,
 
     // ---- declaration sections (spec ch.02/03/06) ----
-    nkTypeSec, nkConstSec, nkVarSec, nkLabelSec,
+    nkTypeSec,
+    nkConstSec,       // Aux = 1 for a resourcestring section (3.2.3)
+    nkVarSec, nkLabelSec,
     nkTypeDecl,       // name [generic params] = [type-mark] TypeExpr;
                       // Aux = 1 for distinct alias (= type X, 2.5.1)
     nkConstDecl,      // name [: type] = init [hints]
