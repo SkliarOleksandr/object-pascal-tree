@@ -30,7 +30,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..128] of TPasCaseRow = (
+  STMT_CASES: array[0..137] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -688,6 +688,51 @@ const
      Expected: 'Block(Assign(Ident''B'' BinaryOp''>=''(TypeArgs(Member(' +
        'Ident''V'' Ident''AsType'') Ident''Integer'') IntLit''5'')))';
      ExpectDiags: 0),
+    // B55 (dcc64 37.0 probes in local/probe-b55): a generic method call
+    // through a member takes `^ [ + -` after its `>` (E2-02); a top-level
+    // comma before a fused `>=` makes two comparisons, and so does a literal
+    // base (A1-06); a bare head keeps a Variant comparison chain.
+    (Section: '16.3.1'; Name: 'B55 generic method call then deref';
+     Source: 'I := N.GetData<PRec>^.X;';
+     Expected: 'Block(Assign(Ident''I'' ' +
+       'Member(Deref(TypeArgs(Member(Ident''N'' Ident''GetData'') ' +
+       'Ident''PRec'')) Ident''X'')))'; ExpectDiags: 0),
+    (Section: '16.3.1'; Name: 'B55 generic method call plus one';
+     Source: 'I := V.AsType<Integer> + 1;';
+     Expected: 'Block(Assign(Ident''I'' ' +
+       'BinaryOp''+''(TypeArgs(Member(Ident''V'' Ident''AsType'') ' +
+       'Ident''Integer'') IntLit''1'')))'; ExpectDiags: 0),
+    (Section: '16.3.1'; Name: 'B55 generic method call indexed';
+     Source: 'B := W.AsType<TBytes>[0];';
+     Expected: 'Block(Assign(Ident''B'' Index(TypeArgs(Member(Ident''W'' ' +
+       'Ident''AsType'') Ident''TBytes'') IntLit''0'')))'; ExpectDiags: 0),
+    (Section: '16.3.1'; Name: 'B55 comma then fused >= is two comparisons';
+     Source: 'I := F(A < B, C >= D);';
+     Expected: 'Block(Assign(Ident''I'' Call(Ident''F'' ' +
+       'BinaryOp''<''(Ident''A'' Ident''B'') BinaryOp''>=''(Ident''C'' ' +
+       'Ident''D''))))'; ExpectDiags: 0),
+    (Section: '16.3.1'; Name: 'B55 a literal base is never generic';
+     Source: 'I := F(0 < A, B > 1);';
+     Expected: 'Block(Assign(Ident''I'' Call(Ident''F'' ' +
+       'BinaryOp''<''(IntLit''0'' Ident''A'') BinaryOp''>''(Ident''B'' ' +
+       'IntLit''1''))))'; ExpectDiags: 0),
+    (Section: '16.3.1'; Name: 'B55 a bare head keeps a comparison chain';
+     Source: 'B := VA < VB > -VC;';
+     Expected: 'Block(Assign(Ident''B'' ' +
+       'BinaryOp''>''(BinaryOp''<''(Ident''VA'' Ident''VB'') ' +
+       'UnaryOp''-''(Ident''VC''))))'; ExpectDiags: 0),
+    (Section: '5.4.1'; Name: 'B55 inline if as an inline var initializer';
+     Source: 'var Y := if C then 3 else 4;';
+     Expected: 'Block(InlineVar#init(Ident''Y''#name InlineIf(Ident''C'' ' +
+       'IntLit''3'' IntLit''4'')))'; ExpectDiags: 0),
+    (Section: 'B.8'; Name: 'B55 a caret char takes selectors';
+     Source: 'B := ^A.IsLetter;';
+     Expected: 'Block(Assign(Ident''B'' Member(CaretChar''^'' ' +
+       'Ident''IsLetter'')))'; ExpectDiags: 0),
+    (Section: 'B.8'; Name: 'B55 a caret bracket char takes selectors';
+     Source: 'B := ^[.IsControl;';
+     Expected: 'Block(Assign(Ident''B'' Member(CaretChar''^['' ' +
+       'Ident''IsControl'')))'; ExpectDiags: 0),
     // B.5.2: dcc takes an EMPTY fraction - `100.` is a real literal when the
     // dot is followed by nothing that could start another token (a report
     // builder in the client writes `100. - ARightPadding`). `100.e2` stays
@@ -783,7 +828,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..239] of TPasCaseRow = (
+  DECL_CASES: array[0..245] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1017,6 +1062,42 @@ const
        'Ident''IFoo'' MethodResolution(Ident''IFoo''#name Ident''P''#name ' +
        'Ident''MyP''))))'; ExpectDiags: 0),
 
+    // B55: a first field named Helper is no helper (A1-09); the visibility
+    // words are names outside a struct body (A1-08); a reserved word after a
+    // type's dot (E2-05) - and not the next line's field (B1-01). dcc64 37.0
+    // probes in local/probe-b55.
+    (Section: '15.3.1'; Name: 'B55 a first field named Helper';
+     Source: 'type TR = record Helper: Integer; end; ' +
+       'TO2 = object helper: Integer; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' ' +
+       'RecordType(VarDecl(Ident''Helper''#name Ident''Integer''))) ' +
+       'TypeDecl(Ident''TO2'' ' +
+       'ObjectType(VarDecl(Ident''helper''#name Ident''Integer''))))'; ExpectDiags: 0),
+    (Section: '15.3.1'; Name: 'B55 a class whose first field is Helper';
+     Source: 'type TC = class Helper: TObject; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ' +
+       'ClassType(VarDecl(Ident''Helper''#name Ident''TObject''))))'; ExpectDiags: 0),
+    (Section: '11.2.1'; Name: 'B55 visibility words as unit-level names';
+     Source: 'type Strict = Boolean; var Public: Integer; const Private = 2;';
+     Expected: 'TypeSec(TypeDecl(Ident''Strict'' Ident''Boolean'')) ' +
+       'VarSec''var''(VarDecl(Ident''Public''#name Ident''Integer'')) ' +
+       'ConstSec''const''(ConstDecl(Ident''Private'' IntLit''2''))';
+     ExpectDiags: 0),
+    (Section: 'B.8'; Name: 'B55 a reserved-word member in a subrange';
+     Source: 'type TS = TE.In..TE.Mid;';
+     Expected: 'TypeSec(TypeDecl(Ident''TS'' Subrange(Member(Ident''TE'' ' +
+       'Ident''In'') Member(Ident''TE'' Ident''Mid''))))'; ExpectDiags: 0),
+    (Section: 'B.8'; Name: 'B55 a reserved-word member in an array index';
+     Source: 'var A: array[TE.In..TE.Mid] of Integer;';
+     Expected: 'VarSec''var''(VarDecl(Ident''A''#name ArrayType(' +
+       'Subrange(Member(Ident''TE'' Ident''In'') ' +
+       'Member(Ident''TE'' Ident''Mid'')) Ident''Integer'')))';
+     ExpectDiags: 0),
+    (Section: 'B.8'; Name: 'B55 an unfinished dotted type keeps the next field';
+     Source: 'type TR = record A: System.'#10'Reserve: Integer;'#10'end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(' +
+       'VarDecl(Ident''A''#name Member(Ident''System'')) ' +
+       'VarDecl(Ident''Reserve''#name Ident''Integer''))))'; ExpectDiags: 2),
     // ---- 15.3.1 helpers ----
     (Section: '15.3.1'; Name: 'class helper';
      Source: 'type TH = class helper for TObject procedure P; end;';

@@ -74,6 +74,11 @@ type
     // line before `: (` is the label's (`TKind.` NEWLINE `A: (...)`), not the
     // next field's head (see ParseSelectors).
     FVariantLabels: Boolean;
+
+    // How many struct bodies (ParseMemberList) enclose the parser: a
+    // visibility word is a section marker only inside one (IsVisibilityWord,
+    // 11.2.1) - at unit or routine level it is an ordinary name.
+    FStructDepth: Integer;
     FStuckCount: Integer;
     // Watchdogs (see notes on ParseGuard):
     FFuel: Int64;              // decremented in CurKind; trips at 0
@@ -139,7 +144,8 @@ type
     function ParseFactor: Integer;
     function ParseSelectors(ABase: Integer): Integer;
     function ParseTypeRef: Integer;
-    function ScanGenericArgs(AFrom: Integer): Integer;
+    function ScanGenericArgs(AFrom: Integer; ADotted: Boolean): Integer;
+    function AtMemberName: Boolean;
     function MaybeNamedArg(AArg: Integer): Integer;
     function ParseArgList(ACall: Integer): Integer;
     // statements
@@ -762,7 +768,9 @@ begin
           LNode := FB.AddNode(nkCaretChar, NIL_NODE, LStart);
           SkipCaret;
           FB.SetLast(LNode, FPos - 1);
-          Exit(LNode);
+          // A literal heads a designator like any other (B.8): `^A.IsLetter`
+          // (audit E2-08).
+          Exit(ParseSelectors(LNode));
         end;
         Result := FB.AddNode(nkStrLit, NIL_NODE, LStart);
         SkipCaret;
@@ -894,6 +902,25 @@ begin
   end;
 end;
 
+{ The token after a `.` as a member name (B.8): an identifier, `string` or
+  `file`, or any reserved word - member position is unambiguous, so dcc
+  accepts TAnimationType.In (FMX declares `&In`). But not the next
+  declaration's head on its own line (`array[1.` typed above `Reserve: ...`),
+  a variant branch's label excepted - it is followed by `: (` (`TKind.`
+  NEWLINE `A: (B: Integer)`, dcc64 37.0), a field never; nor a keyword that
+  starts or ends a construct on the next line (`Obj.` typed above `end;`, the
+  most common completion state - taking it as the member lost the block,
+  audit A1-03). One test for an expression's and a type's dotted names (audit
+  B1-01). }
+function TPasParser.AtMemberName: Boolean;
+begin
+  Result := ((CurKind in [tkIdentifier, tkString, tkFile]) or
+      (IsKeyword(CurKind) and
+       not ((CurKind in FACTOR_KEEPS) and TokenStartsLine(FPos)))) and
+    (not AtLineDeclHead or (FVariantLabels and
+     (PeekKind(1) = tkColon) and (PeekKind(2) = tkLParen)));
+end;
+
 function TPasParser.ParseSelectors(ABase: Integer): Integer;
 var
   LNode, LChild, LScan: Integer;
@@ -916,10 +943,7 @@ begin
           // construct on the next line (`Obj.` typed above `end;`, the most
           // common completion state): that is the construct, and taking it
           // as the member lost the block (audit A1-03).
-          if ((CurKind = tkIdentifier) or (IsKeyword(CurKind) and
-              not ((CurKind in FACTOR_KEEPS) and TokenStartsLine(FPos)))) and
-             (not AtLineDeclHead or (FVariantLabels and
-              (PeekKind(1) = tkColon) and (PeekKind(2) = tkLParen))) then
+          if AtMemberName then
           begin
             LChild := FB.AddNode(nkIdent, NIL_NODE, FPos);
             Next;
@@ -965,8 +989,14 @@ begin
         end;
       tkLess:
         begin
-          // Generic args vs comparison (16.3): bounded speculative scan.
-          LScan := ScanGenericArgs(FPos);
+          // Generic args vs comparison (16.3.1): bounded speculative scan,
+          // after a NAME only - a bare one or a member, whatever it is a
+          // member of (`FValues[I].AsType<Integer>`); a literal, call, index
+          // or parenthesis right before the `<` is a value, never a generic
+          // (`F(0 < A, B >= 1)`, audit A1-06).
+          if not (FB.Kind(Result) in [nkIdent, nkMember]) then
+            Break;
+          LScan := ScanGenericArgs(FPos, FB.Kind(Result) = nkMember);
           if LScan < 0 then
             Break;
           LNode := FB.AddNode(nkTypeArgs, NIL_NODE, FPos);
@@ -1139,8 +1169,11 @@ begin
             Next;
             // The keyword types qualify like any other System name:
             // `Nullable<System.string>` (a DI library's converter table) and
-            // `System.file` both compile (probed dcc64 35.0, 2026-09-16).
-            if CurKind in [tkIdentifier, tkString, tkFile] then
+            // `System.file` both compile (probed dcc64 35.0, 2026-09-16) -
+            // and any reserved word is a member name here as in an
+            // expression (B.8): `TE.In..TE.Mid`, `array[TE.Begin..TE.Case]`,
+            // `TArray<TC.Type>` (dcc64 37.0, audit E2-05).
+            if AtMemberName then
             begin
               LChild := FB.AddNode(nkIdent, NIL_NODE, FPos);
               Next;
@@ -1189,18 +1222,40 @@ begin
   end;
 end;
 
-function TPasParser.ScanGenericArgs(AFrom: Integer): Integer;
+function TPasParser.ScanGenericArgs(AFrom: Integer; ADotted: Boolean): Integer;
 var
   LIdx, LDepth, LSteps: Integer;
   LKind: TPasTokenKind;
+  LSawComma: Boolean;
+  LOperand: set of TPasTokenKind;
 begin
   // Returns the index just past the matching '>' when the token run from
-  // AFrom looks like a generic argument list AND is followed by '(' or '.'
-  // (expression context, 16.3); -1 otherwise. Pure lookahead, no nodes.
+  // AFrom reads as a generic argument list in an expression (16.3.1); -1
+  // otherwise. Pure lookahead, no nodes.
+  //
+  // dcc decides by what the head NAMES (dcc64 37.0, probed for audit B55):
+  // after a generic routine the list is type arguments whatever follows -
+  // `N.GetData<PRec>^.X`, `V.AsType<Integer> + 1`, `W.AsType<TBytes>[0]` -
+  // and after a value `F(A < B, C >= D)` and `F(A < B, C > (D))` are two
+  // comparisons each. The parser cannot see that, so this is a syntactic
+  // approximation, wrong in both directions at the edges; the two choices
+  // it makes are below.
   Result := -1;
   LIdx := AFrom + 1;
   LDepth := 1;
   LSteps := 0;
+  LSawComma := False;
+  // A follower that could START AN OPERAND reads as a comparison's right
+  // side. After a DOTTED head (`X.Id<...>`, a member - every generic method
+  // call above) `^ [ + -` are generic: the comparison reading would compare
+  // a Boolean with a number, set or pointer. A bare head keeps them as
+  // operands, so a Variant chain `VA < VB > -VC` stays comparisons.
+  LOperand := [tkIdentifier, tkIntLiteral, tkRealLiteral, tkStringLiteral,
+    tkMultilineString, tkControlChar, tkNil, tkNot, tkAt, tkInherited,
+    tkPlus, tkMinus, tkCaret, tkCaretChar, tkLBracket, tkIf, tkProcedure,
+    tkFunction, tkString];
+  if ADotted then
+    LOperand := LOperand - [tkPlus, tkMinus, tkCaret, tkLBracket];
   while (LIdx <= FLast) and (LSteps < 64) do
   begin
     LKind := FSrc.VisibleToken(LIdx).Kind;
@@ -1215,20 +1270,17 @@ begin
             if LIdx < FLast then
             begin
               LKind := FSrc.VisibleToken(LIdx + 1).Kind;
-              // Follower rule (16.3), inverted for safety: accept generic
-              // args unless the next token could START AN OPERAND. If it
-              // cannot (`;` `then` `=` `do` `and` ...), the comparison
-              // reading `(a < X) >  <follower>` would lack a right operand
-              // - a guaranteed syntax error - so accepting generic never
-              // steals a valid comparison. Covers Value.AsType<T>;,
-              // AsType<char> = #0, AsType<Boolean> then, @Proc<T>;.
-              // '(' is genuinely ambiguous and reads as a call, matching
-              // dcc (TList<Integer>.Create-style continuations).
-              if not (LKind in [tkIdentifier, tkIntLiteral, tkRealLiteral,
-                tkStringLiteral, tkMultilineString, tkControlChar, tkNil,
-                tkNot, tkAt, tkInherited, tkPlus, tkMinus, tkCaret,
-                tkCaretChar,
-                tkLBracket, tkIf, tkProcedure, tkFunction, tkString]) then
+              // Accept unless the follower could start an operand (LOperand):
+              // `;` `then` `=` `do` `and` leave the comparison reading
+              // without a right operand. Covers Value.AsType<T>;,
+              // AsType<char> = #0, AsType<Boolean> then, @Proc<T>;. `(` reads
+              // as a call or cast, a top-level comma or not: in an argument
+              // list `F(A < B, C > (D))` is two comparisons for dcc, but the
+              // corpora hold none of those and seven generic calls and casts
+              // of that shape (`source.Aggregate<Integer, string>(5, ...)`,
+              // `IMap<TKey, TValue>(this)`) - a misread either way, the
+              // rarer one kept.
+              if not (LKind in LOperand) then
                 Exit(LIdx + 1);
             end;
             Exit(-1);
@@ -1240,15 +1292,19 @@ begin
           // declaration side: `V.AsType<Integer>=5` lexes the `>=` as one
           // token, and refusing it here made the whole thing read as
           // `(V.AsType < Integer) >= 5` - dcc-valid code, silently parsed as
-          // a comparison, with no diagnostic anywhere. The follower is by
-          // construction `=`, which the rule below already accepts, so the
-          // depth test is the whole check. Consumption is unaffected:
-          // AtGenericClose/CloseGeneric split the token when they get there.
-          if LDepth = 1 then
+          // a comparison. Without a top-level comma the follower is by
+          // construction `=`, which the rule above accepts. With one,
+          // `A < B, C >= D` is two complete comparisons (dcc64 37.0, audit
+          // A1-06). Consumption is unaffected: AtGenericClose/CloseGeneric
+          // split the token when they get there.
+          if (LDepth = 1) and not LSawComma then
             Exit(LIdx + 1);
           Exit(-1);
         end;
-      tkIdentifier, tkDot, tkComma, tkString, tkFile:
+      tkComma:
+        if LDepth = 1 then
+          LSawComma := True;
+      tkIdentifier, tkDot, tkString, tkFile:
         ; // plausible type-list content
     else
       Exit(-1);
@@ -2537,7 +2593,11 @@ begin
       MarkContextKeyword;   // color 'abstract' / 'sealed'
       Next;
     end;
-  LIsHelper := IsWord('helper');
+  // `helper for T` / `helper(TAncestor) for T`, of a class or a record: a
+  // first field named Helper is followed by `:` or `,` (dcc64 37.0, audit
+  // A1-09), and an `object` takes no helper.
+  LIsHelper := IsWord('helper') and (AHeadKind in [tkClass, tkRecord]) and
+    (PeekKind(1) in [tkFor, tkLParen]);
   if LIsHelper and (LAbstract or LSealed) then
     Error('"helper" expected right after "class"')
   else
@@ -2659,6 +2719,8 @@ var
   end;
 
 begin
+  Inc(FStructDepth);
+  try
   while not (CurKind in [tkEnd, tkEndOfFile]) do
   begin
     // Visibility sections (11.2.1), incl. strict and legacy automated.
@@ -2782,6 +2844,9 @@ begin
       Error('member declaration expected, found "' + CurText + '"');
       Next;
     end;
+  end;
+  finally
+    Dec(FStructDepth);
   end;
 end;
 
@@ -3335,7 +3400,10 @@ begin
   // Nested const/type/var sections inside a class body end where the next
   // visibility section starts (11.2.1). &-escaped names don't match (B.3):
   // the slice keeps the '&', so the compare misses exactly as SameText did.
-  if CurKind <> tkIdentifier then
+  // Only inside a struct body: the words are directives, and a unit's or a
+  // routine's `Public: Integer` or `Strict = Boolean` is a declaration (dcc64
+  // 37.0, audit A1-08).
+  if (CurKind <> tkIdentifier) or (FStructDepth = 0) then
     Exit(False);
   FSrc.VisibleSlice(FPos, LText, LLen);
   for LIdx := Low(PasTree.Types.VISIBILITY_WORDS) to

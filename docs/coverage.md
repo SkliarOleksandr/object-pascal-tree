@@ -427,6 +427,12 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 - there is no intra-unit instantiation - members of
   `TList<TFoo>` type as the open generic's members; project-level frames
   exist, but overlay (mid-edit) generic frames stay unsubstituted.
+- `Id<...>` in an expression is told from a comparison by syntax, where dcc
+  decides by what the head names (spec 16.3.1): `F(A < B, C > (D))` - two
+  comparisons for dcc - is read as a generic call or cast with one
+  argument (the corpora hold none of those and several generic calls of
+  that shape), and a Variant chain `VA < VB > -VC` written after a member
+  (`R.VA < ...`) as type arguments.
 
 ### 16.4.1 Type-parameter constraints
 - interface constraints and the `constructor` constraint

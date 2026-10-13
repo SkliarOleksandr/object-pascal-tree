@@ -316,6 +316,14 @@ begin
      (LCh = '(') or ((LCh = '/') and (CharAt(FPos + 1) = '/')) or
      IsIdentStart(LCh) then
     Exit(False);
+  // `N.GetData<PRec>^.X`: a type-argument list's `>` glued to a dereference
+  // (dcc64 37.0 compiles it, audit E2-02). A `^.` character constant right
+  // after a comparison's `>` is never written; `^[` and `^^` there stay
+  // characters.
+  if (LCh = '.') and (FTokenCount > 0) and
+     (FTokens[FTokenCount - 1].Kind = tkGreater) and
+     (FTokens[FTokenCount - 1].Start = FPos - 2) then
+    Exit(False);
   Result := not PrevEndsOperand;
 end;
 

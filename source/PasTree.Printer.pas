@@ -2304,9 +2304,13 @@ begin
       else if LIdx > 0 then
         if AItems[LIdx].Glue then
           LSB.Append(GapText(ATree, AItems[LIdx - 1].Vis, AItems[LIdx].Vis))
-        else if ALayout = plTokenPerLine then
+        else if (ALayout = plTokenPerLine) and (AItems[LIdx - 1].Text <> '.') then
           LSB.Append(sLineBreak)
         else
+          // A member name stays on its dot's line: a structural keyword
+          // starting the line after a `.` is read as that construct, not the
+          // member (`Obj.` typed above `end;`, the parser's recovery, audit
+          // A1-03) - `TState.` NEWLINE `Property` would be misread.
           LSB.Append(' ');
       LSB.Append(AItems[LIdx].Text);
     end;
