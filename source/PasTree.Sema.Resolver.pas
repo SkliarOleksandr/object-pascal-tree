@@ -183,6 +183,7 @@ type
     // structured typed-const/var initializers (3.2.2) - see ResolveAggregates
     // for why this also runs as its own pass, after BindTypes.
     function StructMemberScope(ATypeSym: Integer): Integer;
+    function AliasStructSym(ATypeSym: Integer): Integer;
     procedure ResolveAggregateAgainst(AAggrNode, AStructScope: Integer);
     procedure ResolveAggregates;
     // with (ch.05 sec. 5.7) - see ResolveWithStmts for why this runs as its own
@@ -202,6 +203,7 @@ type
     procedure WalkOperatorChain(ANode: Integer; AWalk: TPasChainWalk;
       AScope: Integer);
     procedure ResolveOneWithStmt(AWith: Integer);
+    procedure BindNestedToWith(ABody, AWithScope: Integer);
     procedure ResolveWithStmts;
     procedure CheckForCounters;
     procedure CheckBareRaises;
@@ -3577,17 +3579,28 @@ end;
 // AncestorTypeSym: real alias chains are shallow; this only guards a
 // malformed/circular one.
 function TPasSemaResolver.StructMemberScope(ATypeSym: Integer): Integer;
+begin
+  Result := AliasStructSym(ATypeSym);
+  if Result <> NIL_SYM then
+    Result := FModel.Symbols[Result].MemberScope
+  else
+    Result := NIL_SCOPE;
+end;
+
+// The symbol at the end of that alias chain that owns the member scope -
+// ATypeSym itself for a struct - or NIL_SYM.
+function TPasSemaResolver.AliasStructSym(ATypeSym: Integer): Integer;
 var
   LSym, LDef, LDepth: Integer;
 begin
-  Result := NIL_SCOPE;
+  Result := NIL_SYM;
   LSym := ATypeSym;
   LDepth := 0;
   while (LSym <> NIL_SYM) and (LDepth < 32) do
   begin
     Inc(LDepth);
     if FModel.Symbols[LSym].MemberScope <> NIL_SCOPE then
-      Exit(FModel.Symbols[LSym].MemberScope);
+      Exit(LSym);
     if FModel.Symbols[LSym].DeclNode = NIL_NODE then
       Exit;
     LDef := NextSib(FModel.Symbols[LSym].DeclNode);
@@ -4034,6 +4047,12 @@ begin
       // nkPropertyDecl handling), so indexing must NOT peel a level there.
       // Hence the fallback to the pass-through.
       begin
+        // An array PROPERTY's brackets yield its declared type, already the
+        // element: ElementTypeOf's step 2 peeled a NAMED array type once
+        // more (`Rows[0]` over `property Rows[I]: TRow`, TRow = array of
+        // TCells, came out TCells; audit A4-05) - IndexResultX's rule.
+        if IsArrayPropDesignator(FirstChild(ANode)) then
+          Exit(WithTargetTypeSym(FirstChild(ANode)));
         Result := ElementTypeOf(FirstChild(ANode));
         // MULTI-INDEX: `with M[I, J] do` is ONE nkIndex with two index
         // children, one level per index (`M[I][J]` is two nodes of one each).
@@ -4313,6 +4332,11 @@ begin
   if ANode = NIL_NODE then
     Exit;
   LOwnScope := FNodeScope[ANode];
+  // A node Collect left scopeless on purpose stays so:
+  // the dispatch name of a named argument (`Ov.Add(Source := X)`, 4.10.1),
+  // an aggregate's field name. Given the with scope, `with R do
+  // Ov.Add(Nonexistent := 1)` resolved the OLE parameter name - a false
+  // E2003, or a binding to a member (audit A4-02).
   if (LOwnScope <> NIL_SCOPE) and
      (FModel.Scopes[LOwnScope].OwnerNode = ANode) then
   begin
@@ -4324,7 +4348,8 @@ begin
     WalkOperatorChain(ANode, cwRepoint, ANewScope);
     Exit;
   end;
-  FNodeScope[ANode] := ANewScope;
+  if LOwnScope <> NIL_SCOPE then
+    FNodeScope[ANode] := ANewScope;
   LChild := FirstChild(ANode);
   while LChild <> NIL_NODE do
   begin
@@ -4370,8 +4395,12 @@ begin
      (FModel.RefMap[ANode] <> NIL_SYM) then
   begin
     LParent := FTree.Nodes[ANode].Parent;
-    if (LParent = NIL_NODE) or (KindOf(LParent) <> nkMember) or
-       (FirstChild(LParent) = ANode) then
+    // A goto's target is a label, never a member (5.6.4): `with R do goto
+    // Done` over a record with a field Done jumps to the label (dcc64 37.0;
+    // audit B4-17).
+    if (LParent = NIL_NODE) or
+       ((KindOf(LParent) <> nkGotoStmt) and
+        ((KindOf(LParent) <> nkMember) or (FirstChild(LParent) = ANode))) then
       if FModel.FindLocalDeep(AWithScope, NodeKey(ANode)) <> NIL_SYM then
         FModel.RefMap[ANode] := NIL_SYM;
   end;
@@ -4489,6 +4518,15 @@ begin
       LAnyUnopened := True;   // type not nameable intra-unit (usually: another unit)
       Continue;
     end;
+    // Through same-unit alias links to the struct (`TAl = TRec`): an alias
+    // has no member scope of its own, and the target stayed unopened in
+    // Phase 1 (audit B4-20).
+    if FModel.Symbols[LTypeSym].MemberScope = NIL_SCOPE then
+    begin
+      var LStructSym := AliasStructSym(LTypeSym);
+      if LStructSym <> NIL_SYM then
+        LTypeSym := LStructSym;
+    end;
     var LChain: TArray<Integer> := nil;
     var LChainDepth := 0;
     var LNext: Integer;
@@ -4535,6 +4573,70 @@ begin
   UnbindShadowedByWith(LBody, LWithScope);
   RepointScope(LBody, LWithScope);
   ResolveNode(LBody);
+  BindNestedToWith(LBody, LWithScope);
+end;
+
+{ A with member outranks a declaration nested INSIDE the body too (5.7): the
+  body's own inline var, a nested block's, an anonymous method's parameter
+  or local, an `on E: T do` variable, a `for var` counter - `with P do begin
+  var X: string := 'a'; X := 5; end` writes P.X (dcc64 37.0). Re-resolution
+  starts at the name's own scope and meets that declaration before the with
+  scope, so a name bound to a symbol declared under the with scope is bound
+  to the member instead (audit E3-06). A with nested in the body runs later
+  and binds its own members over these. A loop over the tree's links: the
+  body may hold an operator chain thousands of terms deep (A1-01). }
+procedure TPasSemaResolver.BindNestedToWith(ABody, AWithScope: Integer);
+var
+  LNode, LParent, LSym, LScope, LMember, LHop: Integer;
+  LInside: Boolean;
+begin
+  LNode := ABody;
+  while LNode <> NIL_NODE do
+  begin
+    if (KindOf(LNode) = nkIdent) and not FIsDeclName[LNode] and
+       (FModel.RefMap[LNode] <> NIL_SYM) and
+       (FNodeScope[LNode] <> NIL_SCOPE) and
+       (FNodeScope[LNode] <> AWithScope) then
+    begin
+      LParent := FTree.Nodes[LNode].Parent;
+      if (LParent <> NIL_NODE) and (KindOf(LParent) <> nkGotoStmt) and
+         ((KindOf(LParent) <> nkMember) or (FirstChild(LParent) = LNode)) then
+      begin
+        LSym := FModel.RefMap[LNode];
+        LScope := FModel.Symbols[LSym].Scope;
+        LInside := False;
+        LHop := 0;
+        while (LScope <> NIL_SCOPE) and (LHop < 256) do
+        begin
+          if LScope = AWithScope then
+          begin
+            LInside := True;
+            Break;
+          end;
+          LScope := FModel.Scopes[LScope].Parent;
+          Inc(LHop);
+        end;
+        // Declared under the with scope, and not one of its members.
+        if LInside and (FModel.Symbols[LSym].Scope <> AWithScope) and
+           (FModel.Scopes[FModel.Symbols[LSym].Scope].Kind <> sckWith) then
+        begin
+          LMember := FModel.FindLocalDeep(AWithScope, NodeKey(LNode));
+          if LMember <> NIL_SYM then
+            FModel.RefMap[LNode] := LMember;
+        end;
+      end;
+    end;
+    if FirstChild(LNode) <> NIL_NODE then
+      LNode := FirstChild(LNode)
+    else
+    begin
+      while (LNode <> ABody) and (NextSib(LNode) = NIL_NODE) do
+        LNode := FTree.Nodes[LNode].Parent;
+      if LNode = ABody then
+        Break;
+      LNode := NextSib(LNode);
+    end;
+  end;
 end;
 
 procedure TPasSemaResolver.ResolveWithStmts;
@@ -4691,6 +4793,11 @@ var
     if LFlagged[ANode] then
       Exit;
     LFlagged[ANode] := True;
+    // In an unopened with body the binding is Phase 1's guess - a target's
+    // member named like the counter outranks it; the typer's recheck decides
+    // there (TPasSemaTyper.CheckCountersIn; audit B4-13).
+    if FModel.InUnopenedWithBody(ANode) then
+      Exit;
     NodePos(ANode, LFileId, LLine, LCol);
     FModel.AddDiag(MakeDiag('E2081',
       Format(SE2081_AssignToForLoopVar, [AName]), ANode, LFileId, LLine, LCol));

@@ -1290,7 +1290,8 @@ type
       AFollowForeign: Boolean = False): TSemaXType;
     function FindInEnclosingWith(AId, ANode: Integer;
       const ANameLower: string; out AUid, ASym: Integer;
-      out AX: TSemaXType; AProbe: TPasXProbe = nil): Boolean;
+      out AX: TSemaXType; out AUntyped: Boolean;
+      AProbe: TPasXProbe = nil): Boolean;
     // The cross-unit halves of unqualified name resolution, in the priority
     // order CrossResolve itself uses: uses (last-wins) -> System -> SysInit.
     // AIntfOnly: the interface section's view - the implementation's uses
@@ -18285,9 +18286,12 @@ end;
 // Only reached for names the intra-unit pass could NOT bind, so a `with`
 // whose targets are a mix of same-unit and cross-unit types keeps working:
 // the same-unit ones are already open, and this fills in the rest.
+//
+// AUntyped: an open target at ANode typed to nothing - its member set is
+// unknown, so a miss proves nothing (the WithUnopened rule; audit A3-07).
 function TPasSemaProject.FindInEnclosingWith(AId, ANode: Integer;
   const ANameLower: string; out AUid, ASym: Integer;
-  out AX: TSemaXType; AProbe: TPasXProbe): Boolean;
+  out AX: TSemaXType; out AUntyped: Boolean; AProbe: TPasXProbe): Boolean;
 var
   LM: TPasSemaModel;
   LCur, LParent, LLast, LChild, LIdx, LCtx, LFrom: Integer;
@@ -18296,6 +18300,7 @@ var
 begin
   Result := False;
   AX := XNil;
+  AUntyped := False;
   LM := FModels[AId];
   LCur := ANode;
   LParent := LM.Tree.Nodes[LCur].Parent;
@@ -18336,6 +18341,8 @@ begin
         for LIdx := LFrom downto 0 do
         begin
           LX := WithTargetTypeX(AId, LTargets[LIdx], AProbe);
+          if not XValid(LX) then
+            AUntyped := True;
           if XValid(LX) and
              FindMemberX(AId, LX, ANameLower, AUid, ASym, LCtx) then
           begin
@@ -18443,6 +18450,9 @@ begin
     LBase := LM.Tree.Nodes[LNode].Parent;
     if (LBase <> NIL_NODE) and (LM.Tree.Nodes[LBase].Kind = nkMember) and
        (LM.Tree.Nodes[LBase].FirstChild <> LNode) then
+      Continue;
+    // A goto's target is a label, never a with member (5.6.4; audit B4-17).
+    if (LBase <> NIL_NODE) and (LM.Tree.Nodes[LBase].Kind = nkGotoStmt) then
       Continue;
     if InsideWithBody(LM, LNode) or InsideLaterWithTarget(LM, LNode) then
     begin
@@ -18968,7 +18978,7 @@ var
   LPendCount, LUnresCount: Integer;
   LPend: TPasInhPending;
   LNameLower: string;
-  LBound, LFromMember, LUnitQual, LRetry: Boolean;
+  LBound, LFromMember, LUnitQual, LRetry, LUntyped: Boolean;
   LMemX: TSemaXType;
   LCurExt: TPasExtRef;
   LShadows: TArray<string>;
@@ -19072,7 +19082,7 @@ begin
       if LProbe = nil then
         LProbe := TPasXProbe.Create;
       if FindInEnclosingWith(AId, LNode, LNameLower, LUid, LSym, LMemX,
-           LProbe) then
+           LUntyped, LProbe) then
       begin
         // Already exactly this symbol - nothing to rewrite. BOTH maps have to be
         // consulted, and missing the second one is what made the fixpoint spin:
@@ -19150,7 +19160,7 @@ begin
           LOut[LPendCount] := LPend;
           Inc(LPendCount);
         end
-        else if LModel.AllUsesResolved then
+        else if LModel.AllUsesResolved and not LUntyped then
         begin
           // Emit-or-record: the converged round's recording IS the emit set -
           // RunWithPass emits from it without paying another full round. AEmit
@@ -19349,6 +19359,24 @@ begin
           LTM := FModels[LX.UnitId];
           if LTM.Symbols[LX.Sym].Kind = skBuiltinType then
             Result := BuiltinX(LMid, LTM.Symbols[LX.Sym].NameLower).Sym;
+        end,
+        // Every target typed: only then did the with pass commit real
+        // bindings (audit B4-23).
+        function(AWith: Integer): Boolean
+        var
+          LTarget, LNext: Integer;
+        begin
+          Result := True;
+          LTarget := LM.Tree.Nodes[AWith].FirstChild;
+          while LTarget <> NIL_NODE do
+          begin
+            LNext := LM.Tree.Nodes[LTarget].NextSibling;
+            if LNext = NIL_NODE then
+              Break;   // the body
+            if not XValid(WithTargetTypeX(LMid, LTarget)) then
+              Exit(False);
+            LTarget := LNext;
+          end;
         end);
     end,
     // A slot, not a model id, on the module path: the redo set is in no

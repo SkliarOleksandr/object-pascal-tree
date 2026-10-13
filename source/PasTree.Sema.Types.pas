@@ -96,6 +96,8 @@ type
   // longer binds (its binding lives in ExtRefMap) - NIL_SYM when it cannot be
   // named in this model's terms. Supplied by the project for recheck mode.
   TSemaExtTypeFunc = reference to function(ANode: Integer): Integer;
+  // Did the project's with pass type every target of with statement AWith?
+  TSemaWithTypedFunc = reference to function(AWith: Integer): Boolean;
 
   TPasSemaTyper = class
   private
@@ -184,6 +186,11 @@ type
     // through the host's callback instead of read as "unknown".
     FRecheck: Boolean;
     FExtTypeOf: TSemaExtTypeFunc;
+    // A recheck's node set: the three whole-tree sweeps visit only these
+    // (nil = every node). See RecheckWithBodies.
+    FSweepOnly: TArray<Boolean>;
+    function SweepKind(AIdx: Integer): TPasNodeKind;
+    procedure CheckCountersIn;
   public
     // Shared with the project pass (CheckCalls): one arity rule, one place.
     class function ArityFits(AArgs, AReq, ATot: Integer;
@@ -191,7 +198,8 @@ type
     class procedure Check(AModel: TPasSemaModel;
       APlatform: TPasPlatform = pfWin32); static;
     class procedure RecheckWithBodies(AModel: TPasSemaModel;
-      APlatform: TPasPlatform; const AExtTypeOf: TSemaExtTypeFunc); static;
+      APlatform: TPasPlatform; const AExtTypeOf: TSemaExtTypeFunc;
+      const ATargetsTyped: TSemaWithTypedFunc = nil); static;
   end;
 
 { Overload scoring rules shared by the unit's typer (ScoreArgs) and the
@@ -1689,7 +1697,7 @@ var
   LIdx, LChild, LLast, LSym, LType: Integer;
 begin
   for LIdx := 0 to High(T.Nodes) do
-    case Kind(LIdx) of
+    case SweepKind(LIdx) of
       nkArrayType:
         begin
           // Children are the index types followed by the element type - except
@@ -1771,7 +1779,8 @@ var
   LIdx: Integer;
 begin
   for LIdx := 0 to High(T.Nodes) do
-    CheckCondition(LIdx);
+    if SweepKind(LIdx) <> nkMissing then
+      CheckCondition(LIdx);
 end;
 
 // One statement's part of CheckConditionTypes - a recheck re-runs it for the
@@ -2033,7 +2042,7 @@ var
   LCode: string;
 begin
   for LIdx := 0 to High(T.Nodes) do
-    if Kind(LIdx) = nkSetType then
+    if SweepKind(LIdx) = nkSetType then
     begin
       LCode := BaseVerdict(Child(LIdx));
       if LCode = 'E2028' then
@@ -3598,10 +3607,12 @@ end;
   Then the expressions held for a name bound past a method's type
   (PastStructRecheck - see Diag), each with its own condition check. }
 class procedure TPasSemaTyper.RecheckWithBodies(AModel: TPasSemaModel;
-  APlatform: TPasPlatform; const AExtTypeOf: TSemaExtTypeFunc);
+  APlatform: TPasPlatform; const AExtTypeOf: TSemaExtTypeFunc;
+  const ATargetsTyped: TSemaWithTypedFunc);
 var
   LT: TPasSemaTyper;
-  LIdx, LWith, LBody, LRoot, LStmt, LCond: Integer;
+  LIdx, LWith, LBody, LRoot, LStmt, LCond, LNode: Integer;
+  LAny: Boolean;
 
   // An expression inside another one held too (in an anonymous method's
   // body): typing the outer one types it, and twice would report twice.
@@ -3632,19 +3643,57 @@ begin
     LT.FRecheck := True;
     LT.FExtTypeOf := AExtTypeOf;
     LT.Prepare;
+    SetLength(LT.FSweepOnly, Length(AModel.Tree.Nodes));
+    LAny := False;
     for LIdx := 0 to High(AModel.WithUnopened) do
     begin
       LWith := AModel.WithUnopened[LIdx];
       if (LWith < 0) or (LWith > High(AModel.Tree.Nodes)) or
          AModel.InUnopenedWithBody(LWith) then
         Continue;
+      // A target the project's with pass could not type either committed
+      // nothing: the body's bindings are still Phase 1's guesses, and the
+      // diagnostics over them stay withheld (audit B4-23).
+      if Assigned(ATargetsTyped) and not ATargetsTyped(LWith) then
+        Continue;
       LBody := AModel.Tree.Nodes[LWith].FirstChild;
       while (LBody <> NIL_NODE) and
             (AModel.Tree.Nodes[LBody].NextSibling <> NIL_NODE) do
         LBody := AModel.Tree.Nodes[LBody].NextSibling;
-      if LBody <> NIL_NODE then
-        LT.TypeNode(LBody);
+      if LBody = NIL_NODE then
+        Continue;
+      LT.TypeNode(LBody);
+      // The body's nodes, for the sweeps below.
+      LNode := LBody;
+      while LNode <> NIL_NODE do
+      begin
+        LT.FSweepOnly[LNode] := True;
+        LAny := True;
+        if AModel.Tree.Nodes[LNode].FirstChild <> NIL_NODE then
+          LNode := AModel.Tree.Nodes[LNode].FirstChild
+        else
+        begin
+          while (LNode <> LBody) and
+                (AModel.Tree.Nodes[LNode].NextSibling = NIL_NODE) do
+            LNode := AModel.Tree.Nodes[LNode].Parent;
+          if LNode = LBody then
+            Break;
+          LNode := AModel.Tree.Nodes[LNode].NextSibling;
+        end;
+      end;
     end;
+    // The whole-tree sweeps and the for-counter check, over the rechecked
+    // bodies only: what Diag withheld there in the first pass - E2012,
+    // E2001, E2032, E2028 (audit E4-03) and the resolver's E2081 (B4-13) -
+    // is decided against the committed bindings, once.
+    if LAny then
+    begin
+      LT.CheckOrdinalTypePositions;
+      LT.CheckSetCardinality;
+      LT.CheckConditionTypes;
+      LT.CheckCountersIn;
+    end;
+    LT.FSweepOnly := nil;
     // The expressions Diag withheld over a name bound past a method's type
     // (PastStructRecheck), now typed against what the inherited pass
     // committed; a condition gets its condition check again too. One inside
@@ -3674,6 +3723,73 @@ begin
     end;
   finally
     LT.Free;
+  end;
+end;
+
+// The kind a whole-tree sweep sees at AIdx: nkMissing - a kind no sweep
+// handles - for a node outside a recheck's set.
+function TPasSemaTyper.SweepKind(AIdx: Integer): TPasNodeKind;
+begin
+  if (FSweepOnly <> nil) and not FSweepOnly[AIdx] then
+    Result := nkMissing
+  else
+    Result := Kind(AIdx);
+end;
+
+{ E2081 in a rechecked with body: a write to an enclosing for loop's counter
+  (`:=`, Inc / Dec), judged on the committed binding. The resolver's
+  CheckForCounters leaves these nodes to the recheck - Phase 1 bound `Tag` in
+  `for Tag := ... do with C do Tag := 7` to the counter where the target's
+  inherited member is meant (audit B4-13). }
+procedure TPasSemaTyper.CheckCountersIn;
+var
+  LIdx, LTarget, LSym, LUp, LFrom, LFirst, LBody, LCounter: Integer;
+begin
+  for LIdx := 0 to High(T.Nodes) do
+  begin
+    if not FSweepOnly[LIdx] then
+      Continue;
+    LTarget := NIL_NODE;
+    case Kind(LIdx) of
+      nkAssign:
+        LTarget := Child(LIdx);
+      nkCall:
+        if (Child(LIdx) <> NIL_NODE) and (Kind(Child(LIdx)) = nkIdent) and
+           (T.NodeTextEquals(Child(LIdx), 'Inc') or
+            T.NodeTextEquals(Child(LIdx), 'Dec')) then
+          LTarget := Sib(Child(LIdx));
+    end;
+    if (LTarget = NIL_NODE) or (Kind(LTarget) <> nkIdent) then
+      Continue;
+    LSym := M.RefMap[LTarget];
+    if LSym = NIL_SYM then
+      Continue;
+    LFrom := LTarget;
+    LUp := T.Nodes[LTarget].Parent;
+    while LUp <> NIL_NODE do
+    begin
+      if Kind(LUp) in [nkForStmt, nkForInStmt] then
+      begin
+        LBody := Child(LUp);
+        while (LBody <> NIL_NODE) and (Sib(LBody) <> NIL_NODE) do
+          LBody := Sib(LBody);
+        LFirst := Child(LUp);
+        LCounter := NIL_SYM;
+        if (LFirst <> NIL_NODE) and (Kind(LFirst) = nkInlineVar) and
+           (Child(LFirst) <> NIL_NODE) then
+          LCounter := M.RefMap[Child(LFirst)]
+        else if (LFirst <> NIL_NODE) and (Kind(LFirst) = nkIdent) then
+          LCounter := M.RefMap[LFirst];
+        if (LFrom = LBody) and (LCounter = LSym) then
+        begin
+          Diag('E2081', Format(SE2081_AssignToForLoopVar,
+            [M.Symbols[LSym].Name]), LTarget);
+          Break;
+        end;
+      end;
+      LFrom := LUp;
+      LUp := T.Nodes[LUp].Parent;
+    end;
   end;
 end;
 

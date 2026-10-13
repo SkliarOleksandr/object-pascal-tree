@@ -6666,6 +6666,76 @@ begin
   end;
 end;
 
+{ The with-body recheck, audit B44 (local/probe-b44, dcc64 37.0): inside a
+  with over a cross-unit target the condition checks are decided after the
+  with pass (E4-03: `if I then` was never reported), E2081 too and against
+  the committed binding (B4-13: `Tag := 7` is the target's inherited Tag,
+  not the counter; a real write to the counter still fires); a body whose
+  target no pass could type stays withheld (B4-23: E2010 over a guess after
+  an F1027). }
+procedure TestWithRecheck;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_withrecheck');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'WrA.pas'),
+    'unit WrA;'#10'interface'#10'type'#10 +
+    '  TRec = record I: Integer; end;'#10 +
+    '  TComp = class Tag: Integer; end;'#10 +
+    'var GR: TRec;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'WrP.dpr'),
+    'program WrP;'#10'uses WrA;'#10 +
+    'type TMyComp = class(TComp) end;'#10 +
+    'procedure Go(C: TMyComp);'#10 +
+    'var Tag, K: Integer;'#10 +
+    'begin'#10 +
+    '  with GR do'#10 +
+    '  begin'#10 +
+    '    if I then ;'#10 +
+    '    while I do ;'#10 +
+    '  end;'#10 +
+    '  for Tag := 0 to 3 do'#10 +
+    '    with C do Tag := 7;'#10 +
+    '  for K := 0 to 3 do'#10 +
+    '    with C do K := 7;'#10 +
+    'end;'#10 +
+    'begin'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'WrQ.dpr'),
+    'program WrQ;'#10'uses WrMissing;'#10 +
+    'var Name: string;'#10 +
+    'begin'#10'  with GetThing do Name := 5;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'WrP.dpr'));
+    LM := ModelByName('wrp');
+    Ok('withrecheck: two E2012 in the body over a cross-unit record, one' +
+      ' E2081 for K and none for the target''s Tag [' +
+      IntToStr(DiagCount(LM, 'E2012')) + ' E2012, ' +
+      IntToStr(DiagCount(LM, 'E2081')) + ' E2081]',
+      (DiagCount(LM, 'E2012') = 2) and (DiagCount(LM, 'E2081') = 1) and
+      DiagHasText(LM, 'E2081', '''K'''));
+  finally
+    GProj.Free;
+  end;
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'WrQ.dpr'));
+    LM := ModelByName('wrq');
+    Ok('withrecheck: an untyped target''s body is not judged after F1027 [' +
+      IntToStr(DiagCount(LM, 'E2010')) + ']', DiagCount(LM, 'E2010') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { The cross-unit scorer (ScoreCandidate) and SelectCallTarget, audit B32
   (6.2.5, 6.3.1; dcc64 37.0, local/probe-b32 T2): a trailing comma's empty
   slot is no argument (`K(1, 2,)` keeps K, `D.M(1, 2,)` TDer.M, not TBase's
@@ -13141,6 +13211,7 @@ begin
   TestTypeSlotsAndOwners;
   TestConstTyping;
   TestBlockScopes;
+  TestWithRecheck;
   TestOneScorer;
   TestOverloadSets;
   TestValueOverloads;

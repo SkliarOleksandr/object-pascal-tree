@@ -96,6 +96,23 @@ begin
     end;
 end;
 
+// References spelled ARefText bound to a symbol of kind AKind (its own
+// declaration excluded).
+function RefKindCount(const ARefText: string; AKind: TSemaSymbolKind): Integer;
+var
+  LNode, LSym: Integer;
+begin
+  Result := 0;
+  for LNode := 0 to High(GModel.RefMap) do
+    if (GTree.Nodes[LNode].Kind = nkIdent) and
+       SameText(GTree.NodeText(LNode), ARefText) then
+    begin
+      LSym := GModel.RefMap[LNode];
+      if (LSym <> NIL_SYM) and (LNode <> GModel.Symbols[LSym].DeclNode) and
+         (GModel.Symbols[LSym].Kind = AKind) then
+        Inc(Result);
+    end;
+end;
 { Describes what the AOccurrence-th reference (0-based, source order) spelled
   ARefText bound to: 'builtin', 'generic', 'type', 'unbound' or 'missing'. For
   the arity rule, where both candidates share a NAME and only the kind and the
@@ -3948,6 +3965,66 @@ begin
   Ok('halfopen: a class over a cross-unit ancestor marks WithUnopened',
     Length(GModel.WithUnopened) = 1);
   GModel.Free;
+  // ---- 5.7, audit B44 (local/probe-b44, dcc64 37.0): the intra-unit with
+  // pass. A target typed by a same-unit ALIAS opens like the struct (B4-20);
+  // a named argument's dispatch name gets no scope from the with (A4-02); a
+  // declaration nested in the body yields to the target member (E3-06); an
+  // array property's brackets are not peeled twice (A4-05); a goto target
+  // is the label (B4-17). ----
+  Analyze('unit U; interface implementation'#10 +
+    'type TRec = record Shared, Only: string; end;'#10 +
+    '  TAl = TRec;'#10 +
+    'procedure Q; var R: TAl; Shared: Integer;'#10 +
+    'begin with R do begin Shared := ''x''; Only := ''y''; end; end;'#10 +
+    'end.');
+  Ok('with B44: a same-unit alias target opens in Phase 1',
+    (Length(GModel.WithUnopened) = 0) and RefResolvesTo('Only', 'Only') and
+    (RefKindCount('Shared', skField) = 1));
+  GModel.Free;
+  Analyze('unit U; interface implementation'#10 +
+    'type TLoc = record A: Integer; end;'#10 +
+    'procedure Q(Ov: OleVariant); var L: TLoc;'#10 +
+    'begin with L do Ov.Add(Nonexistent := 1, A := 2); end;'#10 +
+    'end.');
+  Ok('with B44: a named argument''s name stays unbound in a with body',
+    (RefKindCount('A', skField) = 0) and (DiagCount('E2003') = 0));
+  GModel.Free;
+  Analyze('unit U; interface implementation'#10 +
+    'type TPt = record X: Integer; end;'#10 +
+    'procedure Q(P: TPt);'#10 +
+    'begin with P do begin var X: string := ''a''; X := 5; end; end;'#10 +
+    'end.');
+  Ok('with B44: a body''s own inline var yields to the target member [' +
+    IntToStr(DiagCount('E2010')) + ']',
+    (RefKindCount('X', skField) = 1) and (DiagCount('E2010') = 0));
+  GModel.Free;
+  Analyze('unit U; interface implementation'#10 +
+    'type TCell = record B: Integer; end;'#10 +
+    '  TCells = record B: string;'#10 +
+    '    function GetC(I: Integer): TCell;'#10 +
+    '    property C[I: Integer]: TCell read GetC; default; end;'#10 +
+    '  TRow = array of TCells;'#10 +
+    '  THost = record'#10 +
+    '    function GetRows(I: Integer): TRow;'#10 +
+    '    property Rows[I: Integer]: TRow read GetRows;'#10 +
+    '    procedure Test; end;'#10 +
+    'function TCells.GetC(I: Integer): TCell; begin end;'#10 +
+    'function THost.GetRows(I: Integer): TRow; begin end;'#10 +
+    'procedure THost.Test; begin with Rows[0][1] do B := ''x''; end;'#10 +
+    'end.');
+  Ok('with B44: Rows[0][1] over an array property of a named array type is' +
+    ' its element, TCells [' + IntToStr(DiagCount('E2010')) + ']',
+    DiagCount('E2010') = 0);
+  GModel.Free;
+  Analyze('unit U; interface implementation'#10 +
+    'type TDoneRec = record Done: Integer; end;'#10 +
+    'procedure T1; label Done; var R: TDoneRec;'#10 +
+    'begin with R do goto Done; Done: ; end;'#10 +
+    'end.');
+  Ok('with B44: a goto in a with body jumps to the label, not the field',
+    RefKindCount('Done', skLabel) = 2);
+  GModel.Free;
+
   Analyze('unit U; interface implementation'#10 +
     'type TB = class end; TD = class(TB) end;'#10 +
     'procedure P(C: TD); begin with C do Free; end;'#10 +
