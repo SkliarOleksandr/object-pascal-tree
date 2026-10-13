@@ -431,6 +431,9 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 - interface constraints and the `constructor` constraint
   are not validated at instantiation sites (class/record/class-type
   constraints are); constraint members are available for lookup.
+- an explicitly instantiated generic METHOD (`F.Pick<TObject>(O)`) is checked
+  against the overload the call bound; a call whose overload is not decided
+  is not checked.
 - a class-type constraint (and the attribute check of 19.3.2) is reported
   only when the argument's ancestry is followed to its end: an ancestor
   that does not resolve - its unit missing from the search path - leaves

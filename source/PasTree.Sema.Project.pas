@@ -957,7 +957,7 @@ type
     function OpenX(const AX: TSemaXType; ADepth: Integer = 0): Boolean;
     function PreferNonGeneric(AId, AMid, ASym,
       ANameNode: Integer): TSemaXType;
-    function TypeSlotByNameX(AMid, ANode: Integer): TSemaXType;
+    function TypeSlotByNameX(AMid, ANode, AScope: Integer): TSemaXType;
     function IsGenericTypeSym(AMid, ASym: Integer): Boolean;
     function IsDynArrayTypeX(const AX: TSemaXType): Boolean;
     function ResolveTypeExprNested(AId, ANode: Integer;
@@ -1220,6 +1220,8 @@ type
     function InMethodResolution(AModel: TPasSemaModel;
       ANode: Integer): Boolean;
     procedure QueueDecl(AId, ANode: Integer);
+    function ResolutionMethodHead(AModel: TPasSemaModel;
+      ANode: Integer): Integer;
     procedure QueueOuterDeclRecheck(AId: Integer; AModel: TPasSemaModel;
       ANode: Integer);
     // The (model, symbol) a designator node names, when one does.
@@ -6657,6 +6659,31 @@ var
 begin
   Result := 0;
   LParent := AModel.Tree.Nodes[ANode].Parent;
+  // The interface of a method resolution clause, `IFoo<string, TList<T>>.M =`:
+  // its arguments are a sibling list of type references, not an nkTypeArgs
+  // (audit A4-04).
+  if (LParent <> NIL_NODE) and
+     (AModel.Tree.Nodes[LParent].Kind = nkMethodResolution) then
+  begin
+    LArg := AModel.Tree.Nodes[ANode].NextSibling;
+    if (AModel.Tree.Nodes[LParent].FirstChild <> ANode) or
+       (LArg = NIL_NODE) or
+       (AModel.Tree.Nodes[LArg].Kind <> nkGenericParams) then
+      Exit;
+    var LGroup := AModel.Tree.Nodes[LArg].FirstChild;
+    while LGroup <> NIL_NODE do
+    begin
+      LArg := AModel.Tree.Nodes[LGroup].FirstChild;
+      while LArg <> NIL_NODE do
+      begin
+        if AModel.Tree.Nodes[LArg].Kind <> nkConstraint then
+          Inc(Result);
+        LArg := AModel.Tree.Nodes[LArg].NextSibling;
+      end;
+      LGroup := AModel.Tree.Nodes[LGroup].NextSibling;
+    end;
+    Exit;
+  end;
   // A QUALIFIED head - `Unit.TFoo<T>` / `TOuter.TInner<T>` - is the NAME
   // child of an nkMember that is itself the head of the nkTypeArgs, so the
   // arguments hang one level up. Counting the name as bare would read the
@@ -8040,6 +8067,63 @@ begin
   end;
 end;
 
+{ ARoutineNode's parameter slots as text - per name, its mode and its type's
+  spelling, lowered and without blanks - so a method implementation's header
+  can be told which of the overloads it implements: dcc makes the header
+  repeat modes and types (E2037 otherwise), never the defaults, so the
+  spellings agree. The resolver pairs unqualified headers the same way
+  (ParamSlotKeys); '' for no parameter list. }
+function ParamSlotText(LM: TPasSemaModel; ARoutineNode: Integer): string;
+var
+  LParams, LParam, LChild, LType, LNames, LI: Integer;
+  LSlot: string;
+begin
+  Result := '';
+  if ARoutineNode = NIL_NODE then
+    Exit;
+  LParams := LM.Tree.Nodes[ARoutineNode].FirstChild;
+  while (LParams <> NIL_NODE) and (LM.Tree.Nodes[LParams].Kind <> nkParams) do
+    LParams := LM.Tree.Nodes[LParams].NextSibling;
+  if LParams = NIL_NODE then
+    Exit;
+  LParam := LM.Tree.Nodes[LParams].FirstChild;
+  while LParam <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LParam].Kind = nkParam then
+    begin
+      LNames := 0;
+      LType := NIL_NODE;
+      LChild := LM.Tree.Nodes[LParam].FirstChild;
+      while LChild <> NIL_NODE do
+      begin
+        if nfName in LM.Tree.Nodes[LChild].Flags then
+          Inc(LNames)
+        else if (LM.Tree.Nodes[LChild].Kind <> nkAttrGroup) and
+                (LNames > 0) then
+        begin
+          LType := LChild;
+          Break;
+        end;
+        LChild := LM.Tree.Nodes[LChild].NextSibling;
+      end;
+      if LType <> NIL_NODE then
+        LSlot := LowerCase(LM.Tree.NodeSpanText(LType)).Replace(' ', '')
+          .Replace(#9, '').Replace(#13, '').Replace(#10, '')
+      else
+        LSlot := '?';
+      if nfVar in LM.Tree.Nodes[LParam].Flags then
+        LSlot := 'var ' + LSlot
+      else if nfConst in LM.Tree.Nodes[LParam].Flags then
+        LSlot := 'const ' + LSlot
+      else if nfOut in LM.Tree.Nodes[LParam].Flags then
+        LSlot := 'out ' + LSlot;
+      for LI := 1 to LNames do
+        Result := Result + LSlot + '|';
+    end;
+    LParam := LM.Tree.Nodes[LParam].NextSibling;
+  end;
+end;
+
 { The TYPE a generic parameter is constrained to, or XNil when it has no type
   constraint - `F: IInspectable` answers IInspectable, and `T: class` answers
   TObject, because "a reference type" (16 sec. 16.4.1) means one, and dcc agrees:
@@ -8187,6 +8271,38 @@ begin
   end;
   if LStruct = NIL_SYM then
     Exit;
+  // The owner of a header's list is the segment immediately before it
+  // (16.2.1). When that segment is a qualifier, the list is a TYPE's - and
+  // not necessarily the innermost one: `TDict<K, V>.TEnum.MoveNext` binds V
+  // on TDict, while the routine scope's StructSym is TEnum (audit A2-13).
+  // Climb the enclosing types to the one the segment names.
+  // RoutineNameOfParam answers '' unless group -> list -> nkRoutine holds.
+  var LOwnerName := RoutineNameOfParam(AParam.UnitId, LDecl);
+  var LList := LM.Tree.Nodes[LGroup].Parent;
+  var LHeader := NIL_NODE;
+  if LOwnerName <> '' then
+    LHeader := LM.Tree.Nodes[LList].Parent;
+  // A qualifier is followed by another NAME segment (nfName) - not by the
+  // result type, which is an ident too in `CreateObject<T>: T`.
+  var LOwnerIsType := (LOwnerName <> '') and
+    (LM.Tree.Nodes[LList].NextSibling <> NIL_NODE) and
+    (nfName in LM.Tree.Nodes[LM.Tree.Nodes[LList].NextSibling].Flags);
+  if LOwnerIsType then
+  begin
+    var LOuter := LStruct;
+    for var LHop := 1 to 32 do
+    begin
+      if (LOuter = NIL_SYM) or (LM.Symbols[LOuter].NameLower = LOwnerName) then
+        Break;
+      LScope := LM.Symbols[LOuter].Scope;
+      if LScope = NIL_SCOPE then
+        LOuter := NIL_SYM
+      else
+        LOuter := LM.Scopes[LScope].StructSym;
+    end;
+    if LOuter <> NIL_SYM then
+      LStruct := LOuter;
+  end;
   LIdents := GenericParamIdents(AParam.UnitId, LStruct);
   LCons := GenericParamConstraints(AParam.UnitId, LStruct);
   for LIdx := 0 to High(LIdents) do
@@ -8203,24 +8319,36 @@ begin
   // TRttiType, whose body writes a bare `<T>` and then calls `Obj.HasName`.
   // Find the declaration by NAME in the struct's member scope and read its
   // parameters the same way; GenericParamIdents already reads a routine's.
-  LMethod := LM.FindLocal(LM.Symbols[LStruct].MemberScope,
-    RoutineNameOfParam(AParam.UnitId, LDecl));
-  while LMethod <> NIL_SYM do
+  // Among overloads, the one this header implements - its parameter slots
+  // spelled alike (audit B3-31: the second `Get<T: TOther>(const S: string)`
+  // body took the first overload's `T: TItem`); the first with the name
+  // only when no overload's slots match.
+  if LOwnerIsType then
+    Exit;
+  var LHeadSig := ParamSlotText(LM, LHeader);
+  for var LPass := 0 to 1 do
   begin
-    if LM.Symbols[LMethod].Kind = skRoutine then
+    LMethod := LM.FindLocal(LM.Symbols[LStruct].MemberScope, LOwnerName);
+    while LMethod <> NIL_SYM do
     begin
-      LIdents := GenericParamIdents(AParam.UnitId, LMethod);
-      LCons := GenericParamConstraints(AParam.UnitId, LMethod);
-      for LIdx := 0 to High(LIdents) do
-        if (LIdx <= High(LCons)) and
-           (LM.Tree.NodeNameLower(LIdents[LIdx]) =
-            LM.Symbols[AParam.Sym].NameLower) then
-        begin
-          Result := ConstraintList(LCons[LIdx]);
-          Exit;
-        end;
+      if (LM.Symbols[LMethod].Kind = skRoutine) and
+         (LM.Symbols[LMethod].DeclNode <> NIL_NODE) and
+         ((LPass = 1) or (ParamSlotText(LM,
+           LM.Tree.Nodes[LM.Symbols[LMethod].DeclNode].Parent) = LHeadSig)) then
+      begin
+        LIdents := GenericParamIdents(AParam.UnitId, LMethod);
+        LCons := GenericParamConstraints(AParam.UnitId, LMethod);
+        for LIdx := 0 to High(LIdents) do
+          if (LIdx <= High(LCons)) and
+             (LM.Tree.NodeNameLower(LIdents[LIdx]) =
+              LM.Symbols[AParam.Sym].NameLower) then
+          begin
+            Result := ConstraintList(LCons[LIdx]);
+            Exit;
+          end;
+      end;
+      LMethod := LM.Symbols[LMethod].NextOverload;
     end;
-    LMethod := LM.Symbols[LMethod].NextOverload;
   end;
   Result := nil;
 end;
@@ -8348,6 +8476,9 @@ end;
                    procedural types.
     T: SomeClass   accepts that class and its descendants.
 
+  A generic METHOD's explicit instantiation (`F.Pick<TObject>(O)`) is checked
+  the same way, against the overload the call bound (16.4.1).
+
   Not checked, and each for a stated reason:
     T: SomeInterface  needs the implemented-interface list, including the ones
                       inherited from ancestors - a traversal nothing here does
@@ -8387,6 +8518,17 @@ begin
     // declaration, whose GenericParamIdents is nil - silently skipping every
     // E2511/E2512/E2515 check for that use.
     LBase := RealGenericBase(ResolveTypeExpr(AId, LHead, {ABare} False));
+    // A generic METHOD instantiated explicitly - `F.Pick<TObject>(O)`,
+    // `TCaster.Cast<Integer>(O)` - names a routine, which ResolveTypeExpr
+    // does not answer: its constraints are the bound overload's own, checked
+    // the same way (audit E2-34; dcc64 37.0 reports E2515 / E2511 there).
+    if not XValid(LBase) then
+    begin
+      var LRMid, LRSym: Integer;
+      if DesignatorSymX(AId, LHead, LRMid, LRSym) and
+         (FModels[LRMid].Symbols[LRSym].Kind = skRoutine) then
+        LBase := XPlain(LRMid, LRSym);
+    end;
     if not XValid(LBase) then
       Continue;
     LIdents := GenericParamIdents(LBase.UnitId, LBase.Sym);
@@ -8827,8 +8969,12 @@ begin
   end;
 end;
 
-{ The TYPE named by a declaration's type SLOT, looked up by name: the unit's own
-  interface scope first, then its used units, then the implicit System unit.
+{ The TYPE named by a declaration's type SLOT, looked up by name: the scopes
+  from the declaration's own (AScope) outward, skipping the non-type that hid
+  the name there, then the unit's interface scope, its used units and the
+  implicit System unit. The outward walk is what finds a type declared in the
+  implementation section, a program file or a routine (B.11; audit A3-13:
+  R3.LocParams.Nope3 over a routine-local LocParams went unreported).
 
   Only reached from SymDeclTypeX after the normal resolution of that slot came
   back empty, so it is on the error path and its cost does not matter. It must
@@ -8836,7 +8982,7 @@ end;
   designator a bare type NAME?" (WithTargetTypeX), and answering yes for a VALUE
   that merely shares a name with a type broke 238 previously-clean units when
   tried that way. }
-function TPasSemaProject.TypeSlotByNameX(AMid, ANode: Integer): TSemaXType;
+function TPasSemaProject.TypeSlotByNameX(AMid, ANode, AScope: Integer): TSemaXType;
 var
   LSym, LUid, LFound, LAId: Integer;
   ANameLower: string;
@@ -8848,6 +8994,15 @@ begin
     Exit;
   ANameLower := FModels[AMid].Tree.NodeNameLower(ANode);
   LAId := AMid;
+  var LScope := AScope;
+  while LScope <> NIL_SCOPE do
+  begin
+    LSym := FModels[LAId].FindLocal(LScope, ANameLower);
+    if (LSym <> NIL_SYM) and
+       (FModels[LAId].Symbols[LSym].Kind in [skType, skBuiltinType]) then
+      Exit(XPlain(LAId, LSym));
+    LScope := FModels[LAId].Scopes[LScope].Parent;
+  end;
   LSym := FModels[LAId].Resolve(FModels[LAId].InterfaceScope, ANameLower);
   if (LSym <> NIL_SYM) and
      (FModels[LAId].Symbols[LSym].Kind in [skType, skBuiltinType]) then
@@ -10245,12 +10400,16 @@ begin
           // a stack overflow. HelperMemberHit caps the same graph at 8.
           if ADepth > 8 then
             Exit;
+          // Nested-aware like CollectHelpers and HelperAncestorX: a helper
+          // `for TOuter.TInner` with TOuter in another unit has no binding
+          // for the plain resolve, and the helper's own methods saw none of
+          // TInner's members (audit A3-09).
           for var LAncIdx := 0 to High(LRefs) - 1 do
             if FindMemberX(AFromMid,
-                 ResolveTypeExpr(LCur.UnitId, LRefs[LAncIdx]), AKey,
+                 ResolveTypeExprNested(LCur.UnitId, LRefs[LAncIdx]), AKey,
                  AMemMid, AMemSym, ACtx, ADepth + 1, ANoHelpers) then
               Exit(True);
-          LNext := ResolveTypeExpr(LCur.UnitId, LRefs[High(LRefs)]);
+          LNext := ResolveTypeExprNested(LCur.UnitId, LRefs[High(LRefs)]);
         end;
     else
       Exit;
@@ -10398,9 +10557,9 @@ begin
             Exit;
           for var LAncIdx := 0 to High(LRefs) - 1 do
             EnumMembersX(AFromMid,
-              ResolveTypeExpr(LCur.UnitId, LRefs[LAncIdx]), AOnMember,
+              ResolveTypeExprNested(LCur.UnitId, LRefs[LAncIdx]), AOnMember,
               ADepth + 1);
-          LNext := ResolveTypeExpr(LCur.UnitId, LRefs[High(LRefs)]);
+          LNext := ResolveTypeExprNested(LCur.UnitId, LRefs[High(LRefs)]);
         end;
     else
       Exit;
@@ -14128,6 +14287,15 @@ begin
             end;
             Continue;   // no right-arity import: the local binding stands
           end;
+          // The interface's method in `function IFoo.M = X;`, which Phase 1
+          // binds only for a same-unit interface declaring M itself: the
+          // decl pass looks it up through the interface's ancestry, where
+          // FindMemberX may read other models' maps (audit E3-11).
+          if ResolutionMethodHead(LModel, LNode) <> NIL_NODE then
+          begin
+            QueueDecl(AId, LNode);
+            Continue;
+          end;
           if (LNode > High(LModel.NodeScope)) or
              (LModel.NodeScope[LNode] = NIL_SCOPE) then
             Continue;   // not a reference in a real scope (e.g. uses name)
@@ -14245,6 +14413,27 @@ end;
 // The struct type symbol of the METHOD implementation enclosing ANode, via
 // the scope chain (a local proc inside a method climbs to the method's
 // scope); NIL_SYM when ANode isn't inside any method body.
+{ The head (the interface name) of the method resolution clause whose
+  interface-method segment ANode is - `GetX` in `function IFoo.GetX =
+  DoGetX;` - else NIL_NODE. The segments are flat siblings: the head, maybe
+  its `<...>`, the method, the target last. }
+function TPasSemaProject.ResolutionMethodHead(AModel: TPasSemaModel;
+  ANode: Integer): Integer;
+var
+  LClause: Integer;
+begin
+  Result := NIL_NODE;
+  LClause := AModel.Tree.Nodes[ANode].Parent;
+  if (LClause = NIL_NODE) or
+     (AModel.Tree.Nodes[LClause].Kind <> nkMethodResolution) or
+     (AModel.Tree.Nodes[LClause].FirstChild = ANode) or
+     (AModel.Tree.Nodes[ANode].NextSibling = NIL_NODE) or
+     (AModel.Tree.Nodes[AModel.Tree.Nodes[LClause].FirstChild].Kind <>
+      nkIdent) then
+    Exit;
+  Result := AModel.Tree.Nodes[LClause].FirstChild;
+end;
+
 { Points a callee NAME node at ASym - the node RefMap/ExtRefMap are keyed by,
   which for `A.Create` is the trailing segment and for a bare `Foo` the ident
   itself. AId's own model is written directly; another model's binding goes into
@@ -15330,7 +15519,8 @@ begin
     // database layer). dcc resolves the TYPE there, so look one up by name -
     // only here, where the node is known to be a type slot, and only after the
     // normal path has failed.
-    Exit(TypeSlotByNameX(AMid, LM.Symbols[ASym].TypeNode));
+    Exit(TypeSlotByNameX(AMid, LM.Symbols[ASym].TypeNode,
+      LM.Symbols[ASym].Scope));
   end;
   // No type of its own. Only a property redeclaration is expected here; any
   // other typeless symbol simply has no type and XNil is the right answer.
@@ -18377,6 +18567,31 @@ begin
     LBound := LModel.ExtRefMap.TryGetValue(LNode, LCur);
     LNameLower := LModel.Tree.NodeNameLower(LNode);
     LFound := False;
+    // A method resolution clause's interface method: a member of the
+    // interface its head names, inherited ones included (`IFoo._AddRef`,
+    // an ancestor interface's method) - never a name of the class. dcc
+    // reports a clause naming no such method itself; this pass stays quiet.
+    var LHead := ResolutionMethodHead(LModel, LNode);
+    if LHead <> NIL_NODE then
+    begin
+      var LHeadX := XNil;
+      var LHeadExt: TPasExtRef;
+      if LModel.ExtRefMap.TryGetValue(LHead, LHeadExt) then
+        LHeadX := XPlain(LHeadExt.UnitId, LHeadExt.Sym)
+      else if LModel.RefMap[LHead] <> NIL_SYM then
+        LHeadX := XPlain(AId, LModel.RefMap[LHead]);
+      if not LBound and XValid(LHeadX) and
+         FindMemberX(AId, LHeadX, LNameLower, LUid, LSym, LCtx) then
+      begin
+        LPend.Node := LNode;
+        LPend.Ext.UnitId := LUid;
+        LPend.Ext.Sym := LSym;
+        LPend.X := XNil;
+        LOut[LPendCount] := LPend;
+        Inc(LPendCount);
+      end;
+      Continue;
+    end;
     // Innermost declaration first, matching dcc's precedence - and matching
     // what the method-body side already does with OuterStructsOfNode. The
     // type whose own declaration holds the name is passed over: its members

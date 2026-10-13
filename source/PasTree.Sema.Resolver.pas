@@ -153,6 +153,7 @@ type
       ADeclNode's own token (NodeText), read as a slice. }
     function DeclareSym(AScope: Integer; AKind: TSemaSymbolKind;
       ADeclNode: Integer; AOverloadOnClash: Boolean = False): Integer;
+    function MethodResolutionArity(ANode: Integer): Integer;
     function GenericArityOfParamsNode(ANode: Integer): Integer;
     function GenericArityOfDecl(ATypeDeclNode: Integer): Integer;
     function GenericArityOfSym(ASym: Integer): Integer;
@@ -1499,6 +1500,32 @@ end;
 { Type-parameter count of an nkGenericParams / nkTypeArgs node. For
   nkGenericParams it counts the declared NAMES, so `<T; U: class>` is 2 and
   `<T, U>` is also 2; for nkTypeArgs, the arguments written. }
+{ The argument count of a method resolution clause's `<...>` - `IFoo<string,
+  TList<Integer>>.Get` is 2. The parser reads that list as generic PARAMETERS
+  whose entries are type references (any shape, not only an ident), so
+  GenericArityOfParamsNode's ident count stops at the first nkTypeArgs. }
+function TPasSemaResolver.MethodResolutionArity(ANode: Integer): Integer;
+var
+  LParam, LP: Integer;
+begin
+  Result := 0;
+  LParam := FirstChild(ANode);
+  while LParam <> NIL_NODE do
+  begin
+    if KindOf(LParam) = nkGenericParam then
+    begin
+      LP := FirstChild(LParam);
+      while LP <> NIL_NODE do
+      begin
+        if KindOf(LP) <> nkConstraint then
+          Inc(Result);
+        LP := NextSib(LP);
+      end;
+    end;
+    LParam := NextSib(LParam);
+  end;
+end;
+
 function TPasSemaResolver.GenericArityOfParamsNode(ANode: Integer): Integer;
 var
   LParam, LP: Integer;
@@ -1882,7 +1909,10 @@ end;
 
 // The nearest ancestor of AScope that is NOT itself a struct (class/record/
 // interface/object/helper) member scope - climbing past however many
-// classes/records the point in question is nested inside. A non-scoped
+// classes/records the point in question is nested inside, and past a generic
+// type's parameter scope, which CollectTypeDecl opens between the struct and
+// its section (`TG<T> = class type TE = (geA, geB); end` puts geA in the
+// unit's scope like any nested enum, dcc64 37.0). A non-scoped
 // enum's element names inject as if the enum sat AT THAT SCOPE directly:
 // nesting an enum inside a class only namespaces the TYPE name (`TFoo.
 // TInner`), never the VALUES - dcc-verified: TWO unrelated classes A/B in
@@ -1898,7 +1928,8 @@ end;
 function TPasSemaResolver.EnumJoinTarget(AScope: Integer): Integer;
 begin
   Result := AScope;
-  while (Result <> NIL_SCOPE) and (FModel.Scopes[Result].Kind = sckStruct) do
+  while (Result <> NIL_SCOPE) and
+        (FModel.Scopes[Result].Kind in [sckStruct, sckGenericParams]) do
     Result := FModel.Scopes[Result].Parent;
 end;
 
@@ -1944,11 +1975,8 @@ begin
   if (ATypeSym = NIL_SYM) or
      not FTree.Source.ScopedEnumsAt(FTree.Nodes[ANode].FirstToken) then
   begin
-    FModel.JoinScope(EnumJoinTarget(AOuter), LEnum);
-    LOwnScope := AOuter;
-    while (LOwnScope <> NIL_SCOPE) and
-          (FModel.Scopes[LOwnScope].Kind in [sckStruct, sckGenericParams]) do
-      LOwnScope := FModel.Scopes[LOwnScope].Parent;
+    LOwnScope := EnumJoinTarget(AOuter);
+    FModel.JoinScope(LOwnScope, LEnum);
     // Past an include that did not load, the enum may be scoped after all:
     // that file may switch SCOPEDENUMS on, and read unscoped a scoped enum
     // clashes with every same-named value around it. A component suite's
@@ -3310,6 +3338,31 @@ begin
         for var LI := 0 to High(LSegs) do
           if (LI = 0) or (LI = High(LSegs)) or (Length(LSegs) < 3) then
             ResolveNode(LSegs[LI]);
+        // `function IFoo<Integer>.Get = GetInt;` - the `<...>` is a sibling
+        // list, so the bare-name rule above took the non-generic IFoo beside
+        // IFoo<T>. Arity is part of the identity (16.1.2): the type of the
+        // written argument count (audit A4-04).
+        if (Length(LSegs) >= 2) and (NextSib(LSegs[0]) <> NIL_NODE) and
+           (KindOf(NextSib(LSegs[0])) = nkGenericParams) then
+        begin
+          var LWant := MethodResolutionArity(NextSib(LSegs[0]));
+          var LAlt := FModel.Resolve(FNodeScope[LSegs[0]], NodeKey(LSegs[0]));
+          while LAlt <> NIL_SYM do
+          begin
+            if (FModel.Symbols[LAlt].Kind = skType) and
+               (GenericArityOfSym(LAlt) = LWant) then
+            begin
+              FModel.RefMap[LSegs[0]] := LAlt;
+              Break;
+            end;
+            LAlt := FModel.Symbols[LAlt].NextOverload;
+          end;
+          // None of that arity here: the project's pass binds it across the
+          // uses (FixCrossArity), which a wrong local binding would block.
+          if (FModel.RefMap[LSegs[0]] <> NIL_SYM) and
+             (GenericArityOfSym(FModel.RefMap[LSegs[0]]) <> LWant) then
+            FModel.RefMap[LSegs[0]] := NIL_SYM;
+        end;
         if Length(LSegs) >= 3 then
         begin
           LHead := FModel.RefMap[LSegs[0]];
@@ -3327,7 +3380,12 @@ begin
         LName := NextSib(LBase);
         ResolveNode(LBase);
         LHead := DesignatorHead(LBase);
-        if (LName <> NIL_NODE) and (LHead <> NIL_SYM) then
+        // A routine's MemberScope is its own parameter / local scope
+        // (CollectRoutine), not a member set: `Make.Text` names a member of
+        // Make's RESULT, never Make's parameter Text (6.6.1). Left unbound
+        // here, the project walk types it through the result (audit A4-03).
+        if (LName <> NIL_NODE) and (LHead <> NIL_SYM) and
+           (FModel.Symbols[LHead].Kind <> skRoutine) then
         begin
           LMemScope := FModel.Symbols[LHead].MemberScope;
           // FindLocalDeep, not FindLocal: a struct's member scope carries a

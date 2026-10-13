@@ -6315,6 +6315,170 @@ begin
   end;
 end;
 
+{ Type slots and generic owners, audit B41 (local/probe-b41, dcc64 37.0):
+  an unscoped enum nested in a generic type is a unit-level name (2.2.4: on
+  0.101.1 `geA` / `gaX` were E2003 everywhere but the declaration); a helper
+  for another unit's `TOuter.TInner` sees TInner's members in its own methods
+  (A3-09); a type slot hidden by a same-named member finds a routine-local
+  type (A3-13, B.11); a header's `<V>` takes the constraint of the segment
+  before it (`TDict<K, V>.TEnum.MoveNext`, A2-13) and of the overload it
+  implements (B3-31, 16.2.1); `Make.Text` is the result's member, never
+  Make's parameter (A4-03, 6.6.1); an explicit generic method instantiation
+  is constraint-checked (E2-34, 16.4.1); a method resolution clause binds
+  its interface by arity and its method through the interface's ancestry,
+  across units (A4-04, E3-11, 14.2.2). }
+procedure TestTypeSlotsAndOwners;
+var
+  LDir: string;
+  LBad: Integer;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_typeslots');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  IInterface = interface'#10 +
+    '    function _AddRef: Integer; stdcall;'#10'  end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'TsA.pas'),
+    'unit TsA;'#10'interface'#10'type'#10 +
+    '  TOuter = class'#10'  public type'#10 +
+    '    TInner = class X: Integer; end;'#10'  end;'#10 +
+    '  TG<T> = class'#10'  public type'#10 +
+    '    TE = (geA, geB);'#10'  public'#10 +
+    '    F: (gaX, gaY);'#10'    function Pick: Integer;'#10'  end;'#10 +
+    '  IBase = interface function GetB: Integer; end;'#10 +
+    '  IFoo = interface(IBase) function GetX: Integer; end;'#10 +
+    '  IGen = interface function GetA: Integer; end;'#10 +
+    '  IGen<T> = interface(IGen) function GetT: T; end;'#10 +
+    'implementation'#10 +
+    'function TG<T>.Pick: Integer;'#10 +
+    'begin Result := Ord(geB) + Ord(gaY); end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'TsB.pas'),
+    'unit TsB;'#10'interface'#10'uses TsA;'#10'type'#10 +
+    '  TInnerHelper = class helper for TOuter.TInner'#10 +
+    '    function Twice: Integer;'#10'  end;'#10 +
+    '  TFoo = class(TObject, IFoo, IGen, IGen<Integer>)'#10 +
+    '    function IFoo.GetX = DoGetX;'#10 +
+    '    function IFoo.GetB = DoGetB;'#10 +
+    '    function IFoo._AddRef = MyAddRef;'#10 +
+    '    function IGen<Integer>.GetT = DoGetT;'#10 +
+    '    function DoGetX: Integer;'#10'    function DoGetB: Integer;'#10 +
+    '    function DoGetT: Integer;'#10'    function GetT: Integer;'#10 +
+    '    function MyAddRef: Integer; stdcall;'#10'  end;'#10 +
+    'procedure Run;'#10 +
+    'implementation'#10 +
+    'function TInnerHelper.Twice: Integer; begin Result := X * 2; end;'#10 +
+    'function TFoo.DoGetX: Integer; begin Result := 0; end;'#10 +
+    'function TFoo.DoGetB: Integer; begin Result := 0; end;'#10 +
+    'function TFoo.DoGetT: Integer; begin Result := 0; end;'#10 +
+    'function TFoo.GetT: Integer; begin Result := 0; end;'#10 +
+    'function TFoo.MyAddRef: Integer; begin Result := 0; end;'#10 +
+    'procedure Run;'#10'var I: Integer;'#10 +
+    'begin'#10'  I := Ord(geA) + Ord(gaX);'#10'end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'TsP.dpr'),
+    'program TsP;'#10'uses TsA, TsB;'#10'type'#10 +
+    '  TItem = class Site: Integer; end;'#10 +
+    '  TOther = class procedure OtherM; end;'#10 +
+    '  TDict<K; V: TItem> = class'#10'  public type'#10 +
+    '    TEnum = class function MoveNext(A: V): Boolean; end;'#10'  end;'#10 +
+    '  TFinder = class'#10 +
+    '    function Get<T: TItem>(A: Integer): T; overload;'#10 +
+    '    function Get<T: TOther>(const S: string): T; overload;'#10 +
+    '    function Pick<T: TItem>(A: TObject): T;'#10 +
+    '    function Make2<T: TItem>: T;'#10'  end;'#10 +
+    '  TCaster = class'#10 +
+    '    class function Cast<T: class>(AObject: TObject): T; static;'#10 +
+    '  end;'#10 +
+    '  TL = class Text: string; Count: string; end;'#10 +
+    'procedure TOther.OtherM; begin end;'#10 +
+    'function TDict<K, V>.TEnum.MoveNext(A: V): Boolean;'#10 +
+    'var Loc: V;'#10 +
+    'begin'#10'  Loc := A; Loc.Site := 1; A.Site := 1; Loc.NopeV := 1;'#10 +
+    '  Result := True;'#10'end;'#10 +
+    'function TFinder.Get<T>(A: Integer): T;'#10 +
+    'begin Result := nil; Result.Site := 1; end;'#10 +
+    'function TFinder.Get<T>(const S: string): T;'#10 +
+    'begin Result := nil; Result.OtherM; Result.Site := 1; end;'#10 +
+    'function TFinder.Pick<T>(A: TObject): T; begin Result := nil; end;'#10 +
+    'function TFinder.Make2<T>: T;'#10 +
+    'begin Result := nil; Result.Site := 1; end;'#10 +
+    'class function TCaster.Cast<T>(AObject: TObject): T;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function Make(Text: Integer = 0): TL; begin Result := nil; end;'#10 +
+    'function Current: TL;'#10'var Count: Integer;'#10 +
+    'begin Count := 0; Result := nil; end;'#10 +
+    'procedure Go;'#10'type'#10 +
+    '  LocParams = class Count: Integer; end;'#10 +
+    '  TRec3 = record LocParams: LocParams; end;'#10 +
+    'var R3: TRec3; S: string; F: TFinder; O: TObject; C: TOuter.TInner;'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  R3.LocParams.Count := 1;'#10 +
+    '  R3.LocParams.Nope3 := 1;'#10 +
+    '  S := Make.Text;'#10 +
+    '  S := Current.Count;'#10 +
+    '  S := Make.NopeM;'#10 +
+    '  F.Pick<TObject>(O);'#10 +
+    '  TCaster.Cast<Integer>(O);'#10 +
+    '  F.Pick<TItem>(O);'#10 +
+    '  I := C.Twice;'#10 +
+    '  if geA = geB then;'#10 +
+    'end;'#10 +
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'TsP.dpr'));
+    Ok('typeslots: a generic type''s nested enum values and the helper''s' +
+      ' bare X resolve in their units - no E2003 [' +
+      IntToStr(DiagCount(ModelByName('tsa'), 'E2003')) + '/' +
+      IntToStr(DiagCount(ModelByName('tsb'), 'E2003')) + ']',
+      (DiagCount(ModelByName('tsa'), 'E2003') = 0) and
+      (DiagCount(ModelByName('tsb'), 'E2003') = 0));
+    Ok('typeslots: the program reports NopeV, the TOther overload''s Site,' +
+      ' Nope3 and NopeM and nothing else [' +
+      IntToStr(DiagCount(ModelByName('tsp'), 'E2003')) + ']',
+      (DiagCount(ModelByName('tsp'), 'E2003') = 4) and
+      DiagHasText(ModelByName('tsp'), 'E2003', 'NopeV') and
+      DiagHasText(ModelByName('tsp'), 'E2003', 'Nope3') and
+      DiagHasText(ModelByName('tsp'), 'E2003', 'NopeM') and
+      DiagHasText(ModelByName('tsp'), 'E2003', '''Site'''));
+    Ok('typeslots: Make.Text / Current.Count are the result''s fields - no' +
+      ' E2010 [' + IntToStr(DiagCount(ModelByName('tsp'), 'E2010')) + ']',
+      DiagCount(ModelByName('tsp'), 'E2010') = 0);
+    LM := ModelByName('tsp');
+    LBad := 0;
+    for var LNode := 0 to High(LM.RefMap) do
+      if (LM.Tree.Nodes[LNode].Kind = nkIdent) and
+         (SameText(LM.Tree.NodeText(LNode), 'Text') or
+          SameText(LM.Tree.NodeText(LNode), 'Count')) and
+         (LM.RefMap[LNode] <> NIL_SYM) and
+         (LM.Symbols[LM.RefMap[LNode]].DeclNode <> LNode) and
+         (LM.Symbols[LM.RefMap[LNode]].Kind in [skParam, skVar]) and
+         (LM.Tree.Nodes[LM.Tree.Nodes[LNode].Parent].Kind = nkMember) then
+        Inc(LBad);
+    Ok('typeslots: no member after a routine-valued base binds to the' +
+      ' routine''s parameter or local [' + IntToStr(LBad) + ']', LBad = 0);
+    Ok('typeslots: F.Pick<TObject> is E2515 and TCaster.Cast<Integer> E2511,' +
+      ' F.Pick<TItem> clean',
+      (DiagCount(LM, 'E2515') = 1) and (DiagCount(LM, 'E2511') = 1));
+    LM := ModelByName('tsb');
+    Ok('typeslots: the clauses bind GetX, the inherited GetB and _AddRef' +
+      ' across units',
+      (CrossRefCountInUnit(LM, 'GetX', 'GetX', 'tsa') = 1) and
+      (CrossRefCountInUnit(LM, 'GetB', 'GetB', 'tsa') = 1) and
+      (CrossRefCountInUnit(LM, '_AddRef', '_AddRef', 'system') = 1));
+    Ok('typeslots: `IGen<Integer>.GetT` names the generic IGen and its GetT',
+      (RefCountByGeneric(LM, 'IGen', True) = 2) and
+      (CrossRefCountInUnit(LM, 'GetT', 'GetT', 'tsa') = 1));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { The cross-unit scorer (ScoreCandidate) and SelectCallTarget, audit B32
   (6.2.5, 6.3.1; dcc64 37.0, local/probe-b32 T2): a trailing comma's empty
   slot is no argument (`K(1, 2,)` keeps K, `D.M(1, 2,)` TDer.M, not TBase's
@@ -12787,6 +12951,7 @@ begin
   TestHelperVisibility;
   TestBuiltinIdentity;
   TestHelperIdentity;
+  TestTypeSlotsAndOwners;
   TestOneScorer;
   TestOverloadSets;
   TestValueOverloads;
