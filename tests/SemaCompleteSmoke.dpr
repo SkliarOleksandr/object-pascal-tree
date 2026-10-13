@@ -513,7 +513,12 @@ const
     '  public'#10 +
     '    constructor Create(AItem: Integer);'#10 +
     '  end;'#10 +
+    '  TPlain48 = class'#10 +
+    '  public'#10 +
+    '    procedure PM(A: Integer); virtual;'#10 +
+    '  end;'#10 +
     'implementation'#10 +
+    'procedure TPlain48.PM(A: Integer);'#10'begin'#10'end;'#10 +
     'constructor TCol48.Create(AItem: Integer);'#10'begin'#10'end;'#10 +
     'function TStrH48.Up: string;'#10'begin'#10'end;'#10 +
     'function TChH48.IsUp: Boolean;'#10'begin'#10'end;'#10 +
@@ -533,6 +538,13 @@ const
     '  TBox = class'#10 +
     '  public'#10 +
     '    OwnF: Integer;'#10 +
+    '  end;'#10 +
+    '  TPlain48<T> = class'#10 +
+    '  end;'#10 +
+    '  TUse = class(TPlain48)'#10 +
+    '  public'#10 +
+    '    procedure PM(A: Integer); override;'#10 +
+    '    procedure Go;'#10 +
     '  end;'#10 +
     '  TKid = class(TBase48)'#10 +
     '  public'#10 +
@@ -567,6 +579,7 @@ const
 
 var
   GDir: string;
+  B50_Src: string;
 
 // One B48 overlay case: the list at the marker (a ccMember or a bare-name
 // position) holds AWant and not ANot ('' = no check).
@@ -1335,6 +1348,19 @@ begin
     GHit and Has('Run') and not Has('InitZz') and not Has('DoneZz'));
   GCounter.Ok('B49 a unit''s enum value is a unit symbol',
     Has('eAlpha') and (BucketOf('eAlpha') = cbUnitSym));
+  // ======== audit B50: signature help =========================================
+  // An own function's result type from another unit is typed as the
+  // project types it (the overlay had no TypeSym for it: '').
+  CallCase(StringReplace(PROJ_HEAD, 'procedure TMy.Own;'#10,
+    'function Mk(A: Integer): TBase;'#10'begin'#10'end;'#10 +
+    'procedure TMy.Own;'#10, []) + '  Mk(|'#10 + PROJ_TAIL);
+  GCounter.Ok('B50 an own function''s cross-unit result text',
+    GHit and (TargetsNamed('Mk') = 1) and
+    (TargetOf('Mk').ResultText = 'TBase'),
+    procedure
+    begin
+      Writeln('    result=''', TargetOf('Mk').ResultText, '''');
+    end);
   GProj.Free;
   GProj := nil;
 
@@ -1379,6 +1405,89 @@ begin
     '  R: TRec = (|);'#10'implementation'#10'end.'#10);
   GCounter.Ok('B49 (| in a record constant is a field name',
     GHit and (GCtx = ccRecField) and Has('Alpha'));
+
+  // B50 standalone signature-help cases.
+  B50_Src :=
+    'unit u;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TProc0 = reference to procedure;'#10 +
+    '  TCb = procedure(A: Integer; const S: string);'#10 +
+    '  TFn = function(X: Integer): string;'#10 +
+    '  TB = class'#10 +
+    '    procedure M(A: Integer); overload; virtual;'#10 +
+    '  end;'#10 +
+    '  TD = class(TB)'#10 +
+    '    procedure M(const S: string); overload;'#10 +
+    '    procedure Run;'#10 +
+    '  end;'#10 +
+    'procedure Foo(P: TProc0; I: Integer);'#10 +
+    'procedure Foo8(A: Integer); overload;'#10;
+  for var LOv := 1 to 20 do
+  begin
+    B50_Src := B50_Src + 'procedure Ov(';
+    for var LP := 1 to LOv do
+    begin
+      if LP > 1 then
+        B50_Src := B50_Src + '; ';
+      B50_Src := B50_Src + 'A' + IntToStr(LP) + ': Integer';
+    end;
+    B50_Src := B50_Src + '); overload;'#10;
+  end;
+  B50_Src := B50_Src +
+    'implementation'#10 +
+    'procedure Foo8(const S: string; B: Boolean); overload;'#10 +
+    'begin'#10'end;'#10 +
+    'procedure TD.Run;'#10 +
+    'var'#10 +
+    '  FCb: TCb;'#10 +
+    '  G: TFn;'#10 +
+    '  C: Boolean;'#10 +
+    'begin'#10;
+  CallCase(B50_Src + '  Foo(if C then nil else nil, |3);'#10'end;'#10'end.'#10);
+  GCounter.Ok('B50 after an inline-if argument: Foo, argument 1',
+    GHit and (TargetsNamed('Foo') = 1) and (GCall.ArgIndex = 1));
+  CallCase(B50_Src + '  Foo(procedure begin end, |3);'#10'end;'#10'end.'#10);
+  GCounter.Ok('B50 after an anonymous-method argument: Foo, argument 1',
+    GHit and (TargetsNamed('Foo') = 1) and (GCall.ArgIndex = 1));
+  CallCase(B50_Src + '  Foo(procedure begin Foo8(1); end, |3);'#10'end;'#10 +
+    'end.'#10);
+  GCounter.Ok('B50 an anonymous method with a call inside is one argument',
+    GHit and (TargetsNamed('Foo') = 1) and (GCall.ArgIndex = 1));
+  CallCase(B50_Src + '  Foo(procedure begin |'#10'end;'#10'end.'#10);
+  GCounter.Ok('B50 a caret inside an anonymous method is not Foo''s argument',
+    not GHit or (TargetsNamed('Foo') = 0));
+  CallCase(B50_Src + '  Ov(|'#10'end;'#10'end.'#10);
+  GCounter.Ok('B50 a 20-overload family lists all 20',
+    GHit and (TargetsNamed('Ov') = 20),
+    procedure
+    begin
+      Writeln('    n=', TargetsNamed('Ov'));
+    end);
+  CallCase(B50_Src + '  Foo8(|1)'#10'end;'#10'end.'#10);
+  GCounter.Ok('B50 interface and implementation overloads are one family',
+    GHit and (TargetsNamed('Foo8') = 2));
+  CallCase(B50_Src + '  M(|'#10'end;'#10'end.'#10);
+  GCounter.Ok('B50 an overload family goes on into the ancestor',
+    GHit and (TargetsNamed('M') = 2));
+  CallCase(B50_Src + '  FCb(1, |'#10'end;'#10'end.'#10);
+  GCounter.Ok('B50 a procedural value shows its type''s parameters',
+    GHit and (TargetOf('FCb').ParamsText = '(A: Integer; const S: string)')
+    and TargetOf('FCb').HasParams and (TargetOf('FCb').ResultText = '') and
+    (TargetOf('FCb').HeadWord = 'procedure'),
+    procedure
+    begin
+      Writeln('    params=''', TargetOf('FCb').ParamsText, ''' result=''',
+        TargetOf('FCb').ResultText, ''' head=', TargetOf('FCb').HeadWord);
+    end);
+  CallCase(B50_Src + '  G(|'#10'end;'#10'end.'#10);
+  GCounter.Ok('B50 a function-typed value shows its result',
+    GHit and (TargetOf('G').ResultText = 'string') and
+    (TargetOf('G').HeadWord = 'function'));
+  ProjCase(B50_Src + '  Len|'#10'end;'#10'end.'#10);
+  GCounter.Ok('B50 a builtin row''s head word is function',
+    GHit and Has('Length') and
+    (GComp.ItemHeadWord(ItemNamed('Length')) = 'function'));
 
   // ======== audit B47: overlay type references ===============================
   GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_smoke47');
@@ -1518,6 +1627,24 @@ begin
   GCounter.Ok('B48 ext48.| in a class declaration lists the unit''s types',
     GHit and Has('TRec48') and not Has('ItemF'));
   B48Case('ext48.|', 'ItemF', 'TRec48');
+  // B50: a bare ancestor name beside an own generic of that name is the
+  // used unit's plain class (16.1.2) - `inherited PM(` reaches it; and an
+  // override's signature is listed once.
+  CallCase(StringReplace(B48_HEAD, 'implementation'#10,
+    'implementation'#10'procedure TUse.Go;'#10'begin'#10 +
+    '  inherited PM(|'#10'end;'#10, []) + PROJ_TAIL);
+  GCounter.Ok('B50 inherited PM( beside an own generic TPlain48<T>',
+    GHit and (TargetsNamed('PM') = 1) and (TargetOf('PM').Mid >= 0),
+    procedure
+    begin
+      for var LT in GCall.Targets do
+        Writeln('      ', LT.Name, LT.ParamsText, ' mid=', LT.Mid);
+    end);
+  CallCase(StringReplace(B48_HEAD, 'implementation'#10,
+    'implementation'#10'procedure TUse.Go;'#10'begin'#10 +
+    '  PM(|'#10'end;'#10, []) + PROJ_TAIL);
+  GCounter.Ok('B50 an override and its ancestor''s method are one signature',
+    GHit and (TargetsNamed('PM') = 1));
   // A plain own TBox written with type arguments is the generic one.
   B48Case('GB.BoxF.|', 'ItemF', '');
   GProj.Free;

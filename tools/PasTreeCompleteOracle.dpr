@@ -379,6 +379,7 @@ type
 
 var
   GOverlay: Boolean;
+  GOvlSite: string;              // -site:<file>|<line>|<col> (see there)
   GOvlSM: TPasSourceManager;
   GOvlDefines: TPasDefines;
   GOvlPP: TPasPreprocessor;
@@ -650,6 +651,27 @@ begin
         Inc(GOvlCalls);
         if not LOvl.CallAt(LLine, LCol, LCallO) then
           LCallO.Targets := nil;
+        // -site: the details of one call site as the sweep meets it - a
+        // difference that depends on what earlier units left in the project
+        // (hydration) does not show under -at, which analyzes one request.
+        if (GOvlSite <> '') and SameText(GOvlSite, Format('%s|%d|%d',
+           [ExtractFileName(GProj.ModelFile(AMid)), LLine, LCol])) then
+          Writeln(ErrOutput, Format('SITE %s: reference bound %d/%d %d ' +
+            'targets, overlay node %d bound %d/%d %d targets',
+            [GOvlSite, LCallR.BoundMid, LCallR.BoundSym,
+             Length(LCallR.Targets), LCallO.CallNode, LCallO.BoundMid,
+             LCallO.BoundSym, Length(LCallO.Targets)]));
+        if (GOvlSite <> '') and SameText(GOvlSite, Format('%s|%d|%d',
+           [ExtractFileName(GProj.ModelFile(AMid)), LLine, LCol])) then
+        begin
+          for var LT in LCallR.Targets do
+            Writeln(ErrOutput, Format('SITE   ref %d/%d %s%s:%s %s', [LT.Mid,
+              LT.Sym, LT.Name, LT.ParamsText, LT.ResultText,
+              GProj.ModelFile(Max(LT.Mid, 0))]));
+          for var LT in LCallO.Targets do
+            Writeln(ErrOutput, Format('SITE   ovl %d/%d %s%s:%s', [LT.Mid,
+              LT.Sym, LT.Name, LT.ParamsText, LT.ResultText]));
+        end;
         DiffSets(TargetSet(LCallR), TargetSet(LCallO), LRow.Missing,
           LRow.Extra, LDiffers);
       except
@@ -819,6 +841,8 @@ begin
       GListAll := True
     else if SameText(GArg, '-overlay') then
       GOverlay := True
+    else if GArg.StartsWith('-site:', True) then
+      GOvlSite := Copy(GArg, 7, MaxInt)
     else if GArg.StartsWith('-at:', True) then
       GAtSpec := Copy(GArg, 5, MaxInt)
     else if GArg.StartsWith('-studio:', True) then
