@@ -1545,6 +1545,15 @@ type
       overload;
     function TypeInstanceSize(AMid, ASym: Integer; out ABytes: Int64;
       out AMinimum: Boolean): Boolean; overload;
+    { The INTEGER value of a constant symbol, folded by the `$IF` oracle
+      (OracleConstVal) - the evaluator that already decides `$IF CA > 3` and
+      array bounds, so a hover and a directive cannot disagree: other constants
+      are followed across units, `shl`, `div`, SizeOf, Ord and the rest of the
+      `$IF` grammar fold, and an enum value is its ordinal. False for anything
+      not a skConst / skEnumValue, a string or real value, a value the walk
+      cannot fold, and one beyond 2^53 (the oracle computes in Double, which
+      is exact only that far). Single-consumer like TypeSizeOf. }
+    function ConstOrdinalOf(AMid, ASym: Integer; out AValue: Int64): Boolean;
     { 20.3.1 - is AX one of the compiler-MANAGED types (automatic init/
       finalize/copy: long strings, dynamic arrays, interfaces, Variant,
       `reference to` procedural types, and records that either declare a
@@ -3310,6 +3319,34 @@ begin
     FOracleMinimum := False;
   end;
   ABytes := Trunc(LBytes);
+  Result := True;
+end;
+
+function TPasSemaProject.ConstOrdinalOf(AMid, ASym: Integer;
+  out AValue: Int64): Boolean;
+const
+  cExactLimit = 9007199254740992.0;   // 2^53
+var
+  LValue: TPasSymbolValue;
+begin
+  Result := False;
+  AValue := 0;
+  if (AMid < 0) or (AMid >= FModels.Count) or (FModels[AMid] = nil) or
+     (ASym < 0) or (ASym >= FModels[AMid].SymCount) or
+     not (FModels[AMid].Symbols[ASym].Kind in [skConst, skEnumValue]) then
+    Exit;
+  FOracleHydrate := True;
+  try
+    if not OracleReadable(AMid) or
+       not OracleConstVal(AMid, ASym, 0, LValue) then
+      Exit;
+  finally
+    FOracleHydrate := False;
+  end;
+  if LValue.IsStr or (Abs(LValue.Num) > cExactLimit) or
+     (Frac(LValue.Num) <> 0) then
+    Exit;
+  AValue := Trunc(LValue.Num);
   Result := True;
 end;
 
